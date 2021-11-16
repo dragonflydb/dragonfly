@@ -39,7 +39,7 @@ class RespExpr {
 using RespVec = RespExpr::Vec;
 using RespSpan = absl::Span<const RespExpr>;
 
-inline std::string_view ToAbsl(const absl::Span<uint8_t>& s) {
+inline std::string_view ToSV(const absl::Span<uint8_t>& s) {
   return std::string_view{reinterpret_cast<char*>(s.data()), s.size()};
 }
 

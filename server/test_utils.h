@@ -74,7 +74,7 @@ inline ::testing::PolymorphicMatcher<RespTypeMatcher> ArgType(RespExpr::Type t) 
 }
 
 inline bool operator==(const RespExpr& left, const char* s) {
-  return left.type == RespExpr::STRING && ToAbsl(left.GetBuf()) == s;
+  return left.type == RespExpr::STRING && ToSV(left.GetBuf()) == s;
 }
 
 void PrintTo(const RespExpr::Vec& vec, std::ostream* os);

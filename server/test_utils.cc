@@ -103,7 +103,7 @@ vector<int64_t> ToIntArr(const RespVec& vec) {
   vector<int64_t> res;
   for (auto a : vec) {
     int64_t val;
-    std::string_view s = ToAbsl(a.GetBuf());
+    std::string_view s = ToSV(a.GetBuf());
     CHECK(absl::SimpleAtoi(s, &val)) << s;
     res.push_back(val);
   }

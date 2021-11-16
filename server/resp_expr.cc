@@ -32,14 +32,14 @@ namespace std {
 
 ostream& operator<<(ostream& os, const dfly::RespExpr& e) {
   using dfly::RespExpr;
-  using dfly::ToAbsl;
+  using dfly::ToSV;
 
   switch (e.type) {
     case RespExpr::INT64:
       os << "i" << get<int64_t>(e.u);
       break;
     case RespExpr::STRING:
-      os << "'" << ToAbsl(get<RespExpr::Buffer>(e.u)) << "'";
+      os << "'" << ToSV(e.GetBuf()) << "'";
       break;
     case RespExpr::NIL:
       os << "nil";
@@ -51,7 +51,7 @@ ostream& operator<<(ostream& os, const dfly::RespExpr& e) {
       os << dfly::RespSpan{*get<RespExpr::Vec*>(e.u)};
       break;
     case RespExpr::ERROR:
-      os << "e(" << ToAbsl(get<RespExpr::Buffer>(e.u)) << ")";
+      os << "e(" << ToSV(e.GetBuf()) << ")";
       break;
   }
 

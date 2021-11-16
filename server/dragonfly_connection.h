@@ -6,9 +6,12 @@
 
 #include "util/connection.h"
 
+#include "base/io_buf.h"
+
 namespace dfly {
 
 class Service;
+class RedisParser;
 
 class Connection : public util::Connection {
  public:
@@ -26,13 +29,17 @@ class Connection : public util::Connection {
   void OnShutdown() override;
 
  private:
+  enum ParserStatus { OK, NEED_MORE, ERROR };
+
   void HandleRequests() final;
 
   void InputLoop(util::FiberSocketBase* peer);
-  void DispatchFiber(util::FiberSocketBase* peer);
 
+  ParserStatus ParseRedis(base::IoBuf* buf, util::FiberSocketBase* peer);
+
+  std::unique_ptr<RedisParser> redis_parser_;
   Service* service_;
-
+  unsigned parser_error_ = 0;
   struct Shutdown;
   std::unique_ptr<Shutdown> shutdown_;
 };

@@ -9,6 +9,7 @@
 #include "base/io_buf.h"
 #include "base/logging.h"
 #include "server/main_service.h"
+#include "server/redis_parser.h"
 #include "util/fiber_sched_algo.h"
 
 using namespace util;
@@ -41,6 +42,7 @@ struct Connection::Shutdown {
 
 Connection::Connection(Service* service)
     : service_(service) {
+  redis_parser_.reset(new RedisParser);
 }
 
 Connection::~Connection() {
@@ -84,7 +86,7 @@ void Connection::HandleRequests() {
 
 void Connection::InputLoop(FiberSocketBase* peer) {
   base::IoBuf io_buf{kMinReadSize};
-
+  ParserStatus status = OK;
   std::error_code ec;
 
   do {
@@ -93,13 +95,17 @@ void Connection::InputLoop(FiberSocketBase* peer) {
 
     if (!recv_sz) {
       ec = recv_sz.error();
+      status = OK;
       break;
     }
 
     io_buf.CommitWrite(*recv_sz);
-    ec = peer->Write(io_buf.InputBuffer());
-    if (ec)
+    status = ParseRedis(&io_buf, peer);
+     if (status == NEED_MORE) {
+      status = OK;
+    } else if (status != OK) {
       break;
+    }
   } while (peer->IsOpen());
 
   if (ec && !FiberSocketBase::IsConnClosed(ec)) {
@@ -107,4 +113,37 @@ void Connection::InputLoop(FiberSocketBase* peer) {
   }
 }
 
+auto Connection::ParseRedis(base::IoBuf* io_buf, util::FiberSocketBase* peer) -> ParserStatus {
+  RespVec args;
+  uint32_t consumed = 0;
+
+  RedisParser::Result result = RedisParser::OK;
+  error_code ec;
+  do {
+    result = redis_parser_->Parse(io_buf->InputBuffer(), &consumed, &args);
+
+    if (result == RedisParser::OK && !args.empty()) {
+      RespExpr& first = args.front();
+      if (first.type == RespExpr::STRING) {
+        DVLOG(2) << "Got Args with first token " << ToSV(first.GetBuf());
+      }
+
+      CHECK_EQ(RespExpr::STRING, first.type);  // TODO
+      string_view sv = ToSV(first.GetBuf());
+      if (sv == "PING") {
+        ec = peer->Write(io::Buffer("PONG\r\n"));
+      }
+    }
+    io_buf->ConsumeInput(consumed);
+  } while (RedisParser::OK == result && !ec);
+
+  parser_error_ = result;
+  if (result == RedisParser::OK)
+    return OK;
+
+  if (result == RedisParser::INPUT_PENDING)
+    return NEED_MORE;
+
+  return ERROR;
+}
 }  // namespace dfly
