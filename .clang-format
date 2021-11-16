@@ -1,0 +1,19 @@
+# ---
+# We'll use defaults from the Google style, but with 2 columns indentation.
+BasedOnStyle: Google
+IndentWidth: 2
+ColumnLimit: 100
+---
+Language: Cpp
+AllowShortLoopsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: false
+AllowShortIfStatementsOnASingleLine: false
+AlwaysBreakTemplateDeclarations: false
+ConstructorInitializerAllOnOneLineOrOnePerLine: false
+DerivePointerAlignment: false
+PointerAlignment: Left
+BasedOnStyle: Google
+ColumnLimit: 100
+---
+Language: Proto
+BasedOnStyle: Google
