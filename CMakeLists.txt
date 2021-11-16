@@ -24,3 +24,4 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(async)
 
 add_subdirectory(async)
+add_subdirectory(server)
