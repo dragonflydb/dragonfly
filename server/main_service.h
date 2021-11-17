@@ -6,6 +6,7 @@
 
 #include "base/varz_value.h"
 #include "util/http/http_handler.h"
+#include "server/engine_shard_set.h"
 
 namespace util {
 class AcceptServer;
@@ -26,14 +27,24 @@ class Service {
 
   void Shutdown();
 
+  uint32_t shard_count() const {
+    return shard_set_.size();
+  }
+
+  EngineShardSet& shard_set() {
+    return shard_set_;
+  }
+
   util::ProactorPool& proactor_pool() {
     return pp_;
   }
 
+  void Set(std::string_view key, std::string_view val);
  private:
-  
+
   base::VarzValue::Map GetVarzStats();
 
+  EngineShardSet shard_set_;
   util::ProactorPool& pp_;
 };
 

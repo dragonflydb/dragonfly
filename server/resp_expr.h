@@ -46,6 +46,7 @@ inline std::string_view ToSV(const absl::Span<uint8_t>& s) {
 }  // namespace dfly
 
 namespace std {
+
 ostream& operator<<(ostream& os, const dfly::RespExpr& e);
 ostream& operator<<(ostream& os, dfly::RespSpan rspan);
 

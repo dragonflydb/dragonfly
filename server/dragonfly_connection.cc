@@ -132,6 +132,10 @@ auto Connection::ParseRedis(base::IoBuf* io_buf, util::FiberSocketBase* peer) ->
       string_view sv = ToSV(first.GetBuf());
       if (sv == "PING") {
         ec = peer->Write(io::Buffer("PONG\r\n"));
+      } else if (sv == "SET") {
+        CHECK_EQ(3u, args.size());
+        service_->Set(ToSV(args[1].GetBuf()), ToSV(args[2].GetBuf()));
+        ec = peer->Write(io::Buffer("OK\r\n"));
       }
     }
     io_buf->ConsumeInput(consumed);
