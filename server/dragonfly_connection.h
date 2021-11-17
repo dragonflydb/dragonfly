@@ -12,6 +12,7 @@ namespace dfly {
 
 class Service;
 class RedisParser;
+class ConnectionContext;
 
 class Connection : public util::Connection {
  public:
@@ -35,11 +36,14 @@ class Connection : public util::Connection {
 
   void InputLoop(util::FiberSocketBase* peer);
 
-  ParserStatus ParseRedis(base::IoBuf* buf, util::FiberSocketBase* peer);
+  ParserStatus ParseRedis(base::IoBuf* buf);
 
   std::unique_ptr<RedisParser> redis_parser_;
+  std::unique_ptr<ConnectionContext> cc_;
+
   Service* service_;
   unsigned parser_error_ = 0;
+
   struct Shutdown;
   std::unique_ptr<Shutdown> shutdown_;
 };

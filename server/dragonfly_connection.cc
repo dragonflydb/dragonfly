@@ -10,6 +10,7 @@
 #include "base/logging.h"
 #include "server/main_service.h"
 #include "server/redis_parser.h"
+#include "server/conn_context.h"
 #include "util/fiber_sched_algo.h"
 
 using namespace util;
@@ -79,6 +80,9 @@ void Connection::HandleRequests() {
   CHECK_EQ(0, setsockopt(socket_->native_handle(), SOL_TCP, TCP_NODELAY, &val, sizeof(val)));
 
   FiberSocketBase* peer = socket_.get();
+  cc_.reset(new ConnectionContext(peer, this));
+  cc_->shard_set = &service_->shard_set();
+
   InputLoop(peer);
 
   VLOG(1) << "Closed connection for peer " << socket_->RemoteEndpoint();
@@ -100,7 +104,7 @@ void Connection::InputLoop(FiberSocketBase* peer) {
     }
 
     io_buf.CommitWrite(*recv_sz);
-    status = ParseRedis(&io_buf, peer);
+    status = ParseRedis(&io_buf);
      if (status == NEED_MORE) {
       status = OK;
     } else if (status != OK) {
@@ -113,12 +117,12 @@ void Connection::InputLoop(FiberSocketBase* peer) {
   }
 }
 
-auto Connection::ParseRedis(base::IoBuf* io_buf, util::FiberSocketBase* peer) -> ParserStatus {
+auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
   RespVec args;
   uint32_t consumed = 0;
 
   RedisParser::Result result = RedisParser::OK;
-  error_code ec;
+
   do {
     result = redis_parser_->Parse(io_buf->InputBuffer(), &consumed, &args);
 
@@ -131,15 +135,15 @@ auto Connection::ParseRedis(base::IoBuf* io_buf, util::FiberSocketBase* peer) ->
       CHECK_EQ(RespExpr::STRING, first.type);  // TODO
       string_view sv = ToSV(first.GetBuf());
       if (sv == "PING") {
-        ec = peer->Write(io::Buffer("PONG\r\n"));
+        cc_->SendSimpleString("PONG");
       } else if (sv == "SET") {
         CHECK_EQ(3u, args.size());
         service_->Set(ToSV(args[1].GetBuf()), ToSV(args[2].GetBuf()));
-        ec = peer->Write(io::Buffer("OK\r\n"));
+        cc_->SendOk();
       }
     }
     io_buf->ConsumeInput(consumed);
-  } while (RedisParser::OK == result && !ec);
+  } while (RedisParser::OK == result && !cc_->ec());
 
   parser_error_ = result;
   if (result == RedisParser::OK)
