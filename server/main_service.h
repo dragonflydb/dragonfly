@@ -5,8 +5,9 @@
 #pragma once
 
 #include "base/varz_value.h"
-#include "util/http/http_handler.h"
+#include "server/command_registry.h"
 #include "server/engine_shard_set.h"
+#include "util/http/http_handler.h"
 
 namespace util {
 class AcceptServer;
@@ -27,6 +28,8 @@ class Service {
 
   void Shutdown();
 
+  void DispatchCommand(CmdArgList args, ConnectionContext* cntx);
+
   uint32_t shard_count() const {
     return shard_set_.size();
   }
@@ -39,11 +42,15 @@ class Service {
     return pp_;
   }
 
-  void Set(std::string_view key, std::string_view val);
  private:
+  void Ping(CmdArgList args, ConnectionContext* cntx);
+  void Set(CmdArgList args, ConnectionContext* cntx);
+
+  void RegisterCommands();
 
   base::VarzValue::Map GetVarzStats();
 
+  CommandRegistry registry_;
   EngineShardSet shard_set_;
   util::ProactorPool& pp_;
 };

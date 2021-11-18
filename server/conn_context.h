@@ -10,6 +10,7 @@ namespace dfly {
 
 class Connection;
 class EngineShardSet;
+class CommandId;
 
 class ConnectionContext : public ReplyBuilder {
  public:
@@ -17,6 +18,7 @@ class ConnectionContext : public ReplyBuilder {
   }
 
   // TODO: to introduce proper accessors.
+  const CommandId* cid = nullptr;
   EngineShardSet* shard_set = nullptr;
 
   Connection* owner() { return owner_;}

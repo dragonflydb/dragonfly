@@ -1,7 +1,8 @@
 add_executable(dragonfly dfly_main.cc)
 cxx_link(dragonfly base dragonfly_lib)
 
-add_library(dragonfly_lib db_slice.cc dragonfly_listener.cc dragonfly_connection.cc 
+add_library(dragonfly_lib command_registry.cc db_slice.cc dragonfly_listener.cc
+            dragonfly_connection.cc 
             main_service.cc engine_shard_set.cc 
             redis_parser.cc resp_expr.cc reply_builder.cc)
 

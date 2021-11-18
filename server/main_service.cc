@@ -4,16 +4,35 @@
 
 #include "server/main_service.h"
 
-#include <boost/fiber/operations.hpp>
-#include <filesystem>
+#include <absl/strings/ascii.h>
 #include <xxhash.h>
 
+#include <boost/fiber/operations.hpp>
+#include <filesystem>
+
 #include "base/logging.h"
+#include "server/conn_context.h"
 #include "util/uring/uring_fiber_algo.h"
 #include "util/varz.h"
 
 DEFINE_uint32(port, 6380, "Redis port");
 
+namespace std {
+
+ostream& operator<<(ostream& os, dfly::CmdArgList args) {
+  os << "[";
+  if (!args.empty()) {
+    for (size_t i = 0; i < args.size() - 1; ++i) {
+      os << dfly::ArgS(args, i) << ",";
+    }
+    os << dfly::ArgS(args, args.size() - 1);
+  }
+  os << "]";
+
+  return os;
+}
+
+}  // namespace std
 
 namespace dfly {
 
@@ -27,6 +46,8 @@ namespace this_fiber = ::boost::this_fiber;
 namespace {
 
 DEFINE_VARZ(VarzMapAverage, request_latency_usec);
+DEFINE_VARZ(VarzQps, ping_qps);
+DEFINE_VARZ(VarzQps, set_qps);
 
 std::optional<VarzFunction> engine_varz;
 
@@ -35,11 +56,21 @@ inline ShardId Shard(string_view sv, ShardId shard_num) {
   return hash % shard_num;
 }
 
+inline void ToUpper(const MutableStrSpan* val) {
+  for (auto& c : *val) {
+    c = absl::ascii_toupper(c);
+  }
+}
+
+string WrongNumArgsError(string_view cmd) {
+  return absl::StrCat("wrong number of arguments for '", cmd, "' command");
+}
+
 }  // namespace
 
-Service::Service(ProactorPool* pp)
-    : shard_set_(pp), pp_(*pp) {
+Service::Service(ProactorPool* pp) : shard_set_(pp), pp_(*pp) {
   CHECK(pp);
+  RegisterCommands();
   engine_varz.emplace("engine", [this] { return GetVarzStats(); });
 }
 
@@ -57,38 +88,103 @@ void Service::Init(util::AcceptServer* acceptor) {
   });
 
   request_latency_usec.Init(&pp_);
+  ping_qps.Init(&pp_);
+  set_qps.Init(&pp_);
 }
 
 void Service::Shutdown() {
   engine_varz.reset();
   request_latency_usec.Shutdown();
-
+  ping_qps.Shutdown();
+  set_qps.Shutdown();
   shard_set_.RunBriefInParallel([&](EngineShard*) { EngineShard::DestroyThreadLocal(); });
+}
+
+void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
+  CHECK(!args.empty());
+  DCHECK_NE(0u, shard_set_.size()) << "Init was not called";
+
+  ToUpper(&args[0]);
+
+  VLOG(2) << "Got: " << args;
+
+  string_view cmd_str = ArgS(args, 0);
+  const CommandId* cid = registry_.Find(cmd_str);
+
+  if (cid == nullptr) {
+    return cntx->SendError(absl::StrCat("unknown command `", cmd_str, "`"));
+  }
+
+  if ((cid->arity() > 0 && args.size() != size_t(cid->arity())) ||
+      (cid->arity() < 0 && args.size() < size_t(-cid->arity()))) {
+    return cntx->SendError(WrongNumArgsError(cmd_str));
+  }
+  uint64_t start_usec = ProactorBase::GetMonotonicTimeNs(), end_usec;
+  cntx->cid = cid;
+  cid->Invoke(args, cntx);
+  end_usec = ProactorBase::GetMonotonicTimeNs();
+
+  request_latency_usec.IncBy(cmd_str, (end_usec - start_usec) / 1000);
 }
 
 void Service::RegisterHttp(HttpListenerBase* listener) {
   CHECK_NOTNULL(listener);
 }
 
-void Service::Set(std::string_view key, std::string_view val) {
+void Service::Ping(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() > 2) {
+    return cntx->SendError("wrong number of arguments for 'ping' command");
+  }
+  ping_qps.Inc();
+
+  if (args.size() == 1) {
+    return cntx->SendSimpleString("PONG");
+  }
+  std::string_view arg = ArgS(args, 1);
+  DVLOG(2) << "Ping " << arg;
+
+  return cntx->SendSimpleString(arg);
+}
+
+void Service::Set(CmdArgList args, ConnectionContext* cntx) {
+  set_qps.Inc();
+
+  std::string_view key = ArgS(args, 1);
+  std::string_view val = ArgS(args, 2);
+  VLOG(2) << "Set " << key << " " << val;
+
   ShardId sid = Shard(key, shard_count());
   shard_set_.Await(sid, [&] {
     EngineShard* es = EngineShard::tlocal();
     auto [it, res] = es->db_slice.AddOrFind(0, key);
     it->second = val;
   });
+  cntx->SendOk();
 }
+
 
 VarzValue::Map Service::GetVarzStats() {
   VarzValue::Map res;
 
   atomic_ulong num_keys{0};
-  shard_set_.RunBriefInParallel([&](EngineShard* es) {
-    num_keys += es->db_slice.DbSize(0);
-  });
+  shard_set_.RunBriefInParallel([&](EngineShard* es) { num_keys += es->db_slice.DbSize(0); });
   res.emplace_back("keys", VarzValue::FromInt(num_keys.load()));
 
   return res;
+}
+
+using ServiceFunc = void (Service::*)(CmdArgList args, ConnectionContext* cntx);
+inline CommandId::CmdFunc HandlerFunc(Service* se, ServiceFunc f) {
+  return [=](CmdArgList args, ConnectionContext* cntx) { return (se->*f)(args, cntx); };
+}
+
+#define HFUNC(x) AssignCallback(HandlerFunc(this, &Service::x))
+
+void Service::RegisterCommands() {
+  using CI = CommandId;
+
+  registry_ << CI{"PING", CO::STALE | CO::FAST, -1, 0, 0, 0}.HFUNC(Ping)
+            << CI{"SET", CO::WRITE | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(Set);
 }
 
 }  // namespace dfly

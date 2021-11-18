@@ -11,6 +11,7 @@
 #include "server/main_service.h"
 #include "server/redis_parser.h"
 #include "server/conn_context.h"
+#include "server/command_registry.h"
 #include "util/fiber_sched_algo.h"
 
 using namespace util;
@@ -21,7 +22,33 @@ namespace fibers = boost::fibers;
 namespace dfly {
 namespace {
 
+using CmdArgVec = std::vector<MutableStrSpan>;
 
+void SendProtocolError(RedisParser::Result pres, FiberSocketBase* peer) {
+  string res("-ERR Protocol error: ");
+  if (pres == RedisParser::BAD_BULKLEN) {
+    res.append("invalid bulk length\r\n");
+  } else {
+    CHECK_EQ(RedisParser::BAD_ARRAYLEN, pres);
+    res.append("invalid multibulk length\r\n");
+  }
+
+  auto size_res = peer->Send(::io::Buffer(res));
+  if (!size_res) {
+    LOG(WARNING) << "Error " << size_res.error();
+  }
+}
+
+inline MutableStrSpan ToMSS(absl::Span<uint8_t> span) {
+  return MutableStrSpan{reinterpret_cast<char*>(span.data()), span.size()};
+}
+
+void RespToArgList(const RespVec& src, CmdArgVec* dest) {
+  dest->resize(src.size());
+  for (size_t i = 0; i < src.size(); ++i) {
+    (*dest)[i] = ToMSS(src[i].GetBuf());
+  }
+}
 
 constexpr size_t kMinReadSize = 256;
 
@@ -110,7 +137,25 @@ void Connection::InputLoop(FiberSocketBase* peer) {
     } else if (status != OK) {
       break;
     }
-  } while (peer->IsOpen());
+  } while (peer->IsOpen() && !cc_->ec());
+
+  if (cc_->ec()) {
+    ec = cc_->ec();
+  } else {
+    if (status == ERROR) {
+      VLOG(1) << "Error stats " << status;
+      if (redis_parser_) {
+        SendProtocolError(RedisParser::Result(parser_error_), peer);
+      } else {
+        string_view sv{"CLIENT_ERROR bad command line format\r\n"};
+        auto size_res = peer->Send(::io::Buffer(sv));
+        if (!size_res) {
+          LOG(WARNING) << "Error " << size_res.error();
+          ec = size_res.error();
+        }
+      }
+    }
+  }
 
   if (ec && !FiberSocketBase::IsConnClosed(ec)) {
     LOG(WARNING) << "Socket error " << ec;
@@ -119,6 +164,7 @@ void Connection::InputLoop(FiberSocketBase* peer) {
 
 auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
   RespVec args;
+  CmdArgVec arg_vec;
   uint32_t consumed = 0;
 
   RedisParser::Result result = RedisParser::OK;
@@ -132,15 +178,8 @@ auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
         DVLOG(2) << "Got Args with first token " << ToSV(first.GetBuf());
       }
 
-      CHECK_EQ(RespExpr::STRING, first.type);  // TODO
-      string_view sv = ToSV(first.GetBuf());
-      if (sv == "PING") {
-        cc_->SendSimpleString("PONG");
-      } else if (sv == "SET") {
-        CHECK_EQ(3u, args.size());
-        service_->Set(ToSV(args[1].GetBuf()), ToSV(args[2].GetBuf()));
-        cc_->SendOk();
-      }
+      RespToArgList(args, &arg_vec);
+      service_->DispatchCommand(CmdArgList{arg_vec.data(), arg_vec.size()}, cc_.get());
     }
     io_buf->ConsumeInput(consumed);
   } while (RedisParser::OK == result && !cc_->ec());
@@ -154,4 +193,5 @@ auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
 
   return ERROR;
 }
+
 }  // namespace dfly
