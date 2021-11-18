@@ -12,7 +12,7 @@ set(CMAKE_CXX_STANDARD 17)
 
 # We must define all the required variables from the root cmakefile, otherwise
 # they just disappear.
-set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/async/cmake" ${CMAKE_MODULE_PATH})
+set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/helio/cmake" ${CMAKE_MODULE_PATH})
 option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 
 include(third_party)
@@ -21,7 +21,7 @@ include(internal)
 Message(STATUS "THIRD_PARTY_LIB_DIR ${THIRD_PARTY_LIB_DIR}")
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
-include_directories(async)
+include_directories(helio)
 
-add_subdirectory(async)
+add_subdirectory(helio)
 add_subdirectory(server)
