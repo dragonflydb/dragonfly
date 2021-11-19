@@ -6,6 +6,8 @@
 
 #include "util/listener_interface.h"
 
+typedef struct ssl_ctx_st SSL_CTX;
+
 namespace dfly {
 
 class Service;
@@ -26,6 +28,7 @@ class Listener : public util::ListenerInterface {
   Service* engine_;
 
   std::atomic_uint32_t next_id_{0};
+  SSL_CTX* ctx_ = nullptr;
 };
 
 }  // namespace dfly

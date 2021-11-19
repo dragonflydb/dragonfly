@@ -8,15 +8,17 @@
 
 #include "base/io_buf.h"
 
+typedef struct ssl_ctx_st SSL_CTX;
+
 namespace dfly {
 
-class Service;
-class RedisParser;
 class ConnectionContext;
+class RedisParser;
+class Service;
 
 class Connection : public util::Connection {
  public:
-  Connection(Service* service);
+  Connection(Service* service, SSL_CTX* ctx);
   ~Connection();
 
   using error_code = std::error_code;
@@ -39,9 +41,10 @@ class Connection : public util::Connection {
   ParserStatus ParseRedis(base::IoBuf* buf);
 
   std::unique_ptr<RedisParser> redis_parser_;
+  Service* service_;
+  SSL_CTX* ctx_;
   std::unique_ptr<ConnectionContext> cc_;
 
-  Service* service_;
   unsigned parser_error_ = 0;
 
   struct Shutdown;

@@ -8,11 +8,12 @@
 
 #include "base/io_buf.h"
 #include "base/logging.h"
+#include "server/command_registry.h"
+#include "server/conn_context.h"
 #include "server/main_service.h"
 #include "server/redis_parser.h"
-#include "server/conn_context.h"
-#include "server/command_registry.h"
 #include "util/fiber_sched_algo.h"
+#include "util/tls/tls_socket.h"
 
 using namespace util;
 using namespace std;
@@ -68,8 +69,7 @@ struct Connection::Shutdown {
   }
 };
 
-Connection::Connection(Service* service)
-    : service_(service) {
+Connection::Connection(Service* service, SSL_CTX* ctx) : service_(service), ctx_(ctx) {
   redis_parser_.reset(new RedisParser);
 }
 
@@ -106,7 +106,19 @@ void Connection::HandleRequests() {
   int val = 1;
   CHECK_EQ(0, setsockopt(socket_->native_handle(), SOL_TCP, TCP_NODELAY, &val, sizeof(val)));
 
-  FiberSocketBase* peer = socket_.get();
+  std::unique_ptr<tls::TlsSocket> tls_sock;
+  if (ctx_) {
+    tls_sock.reset(new tls::TlsSocket(socket_.get()));
+    tls_sock->InitSSL(ctx_);
+
+    FiberSocketBase::accept_result aresult = tls_sock->Accept();
+    if (!aresult) {
+      LOG(WARNING) << "Error handshaking " << aresult.error().message();
+      return;
+    }
+    VLOG(1) << "TLS handshake succeeded";
+  }
+  FiberSocketBase* peer = tls_sock ? (FiberSocketBase*)tls_sock.get() : socket_.get();
   cc_.reset(new ConnectionContext(peer, this));
   cc_->shard_set = &service_->shard_set();
 
@@ -132,7 +144,7 @@ void Connection::InputLoop(FiberSocketBase* peer) {
 
     io_buf.CommitWrite(*recv_sz);
     status = ParseRedis(&io_buf);
-     if (status == NEED_MORE) {
+    if (status == NEED_MORE) {
       status = OK;
     } else if (status != OK) {
       break;
