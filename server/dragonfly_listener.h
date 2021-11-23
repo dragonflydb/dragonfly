@@ -5,6 +5,7 @@
 #pragma once
 
 #include "util/listener_interface.h"
+#include "server/dfly_protocol.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
 
@@ -14,7 +15,7 @@ class Service;
 
 class Listener : public util::ListenerInterface {
  public:
-  Listener(Service*);
+  Listener(Protocol protocol, Service*);
   ~Listener();
 
  private:
@@ -28,6 +29,7 @@ class Listener : public util::ListenerInterface {
   Service* engine_;
 
   std::atomic_uint32_t next_id_{0};
+  Protocol protocol_;
   SSL_CTX* ctx_ = nullptr;
 };
 

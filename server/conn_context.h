@@ -14,14 +14,15 @@ class CommandId;
 
 class ConnectionContext : public ReplyBuilder {
  public:
-  ConnectionContext(::io::Sink* stream, Connection* owner) : ReplyBuilder(stream), owner_(owner) {
-  }
+  ConnectionContext(::io::Sink* stream, Connection* owner);
 
   // TODO: to introduce proper accessors.
   const CommandId* cid = nullptr;
   EngineShardSet* shard_set = nullptr;
 
-  Connection* owner() { return owner_;}
+  Connection* owner() {
+    return owner_;
+  }
 
  private:
   Connection* owner_;

@@ -16,6 +16,7 @@
 #include "util/varz.h"
 
 DEFINE_uint32(port, 6380, "Redis port");
+DEFINE_uint32(memcache_port, 0, "Memcached port");
 
 namespace std {
 
@@ -127,6 +128,47 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
   request_latency_usec.IncBy(cmd_str, (end_usec - start_usec) / 1000);
 }
 
+void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
+                         ConnectionContext* cntx) {
+  absl::InlinedVector<MutableStrSpan, 8> args;
+  char cmd_name[16];
+  char set_opt[4] = {0};
+
+  switch (cmd.type) {
+    case MemcacheParser::REPLACE:
+      strcpy(cmd_name, "SET");
+      strcpy(set_opt, "XX");
+      break;
+    case MemcacheParser::SET:
+      strcpy(cmd_name, "SET");
+      break;
+    case MemcacheParser::ADD:
+      strcpy(cmd_name, "SET");
+      strcpy(set_opt, "NX");
+      break;
+    default:
+      cntx->SendMCClientError("bad command line format");
+      return;
+  }
+
+  args.emplace_back(cmd_name, strlen(cmd_name));
+  char* key = const_cast<char*>(cmd.key.data());
+  args.emplace_back(key, cmd.key.size());
+
+  if (MemcacheParser::IsStoreCmd(cmd.type)) {
+    char* v = const_cast<char*>(value.data());
+    args.emplace_back(v, value.size());
+
+    if (set_opt[0]) {
+      args.emplace_back(set_opt, strlen(set_opt));
+    }
+  }
+
+  CmdArgList arg_list{args.data(), args.size()};
+  DispatchCommand(arg_list, cntx);
+}
+
+
 void Service::RegisterHttp(HttpListenerBase* listener) {
   CHECK_NOTNULL(listener);
 }
@@ -138,12 +180,12 @@ void Service::Ping(CmdArgList args, ConnectionContext* cntx) {
   ping_qps.Inc();
 
   if (args.size() == 1) {
-    return cntx->SendSimpleString("PONG");
+    return cntx->SendSimpleRespString("PONG");
   }
   std::string_view arg = ArgS(args, 1);
   DVLOG(2) << "Ping " << arg;
 
-  return cntx->SendSimpleString(arg);
+  return cntx->SendSimpleRespString(arg);
 }
 
 void Service::Set(CmdArgList args, ConnectionContext* cntx) {
@@ -159,7 +201,8 @@ void Service::Set(CmdArgList args, ConnectionContext* cntx) {
     auto [it, res] = es->db_slice.AddOrFind(0, key);
     it->second = val;
   });
-  cntx->SendOk();
+
+  cntx->SendStored();
 }
 
 

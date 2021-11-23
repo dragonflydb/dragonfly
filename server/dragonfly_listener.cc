@@ -81,7 +81,7 @@ static SSL_CTX* CreateSslCntx() {
   return ctx;
 }
 
-Listener::Listener(Service* e) : engine_(e) {
+Listener::Listener(Protocol protocol, Service* e) : engine_(e), protocol_(protocol) {
   if (FLAGS_tls) {
     OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, NULL);
     ctx_ = CreateSslCntx();
@@ -93,7 +93,7 @@ Listener::~Listener() {
 }
 
 util::Connection* Listener::NewConnection(ProactorBase* proactor) {
-  return new Connection{engine_, ctx_};
+  return new Connection{protocol_, engine_, ctx_};
 }
 
 void Listener::PreShutdown() {

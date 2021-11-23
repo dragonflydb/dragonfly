@@ -11,6 +11,7 @@
 
 DEFINE_int32(http_port, 8080, "Http port.");
 DECLARE_uint32(port);
+DECLARE_uint32(memcache_port);
 
 using namespace util;
 
@@ -24,7 +25,11 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor, HttpListener<>* http)
     service.RegisterHttp(http);
   }
 
-  acceptor->AddListener(FLAGS_port, new Listener{&service});
+  acceptor->AddListener(FLAGS_port, new Listener{Protocol::REDIS, &service});
+  if (FLAGS_memcache_port > 0) {
+    acceptor->AddListener(FLAGS_memcache_port, new Listener{Protocol::MEMCACHE, &service});
+  }
+
   acceptor->Run();
   acceptor->Wait();
 

@@ -2,17 +2,16 @@
 // Author: Roman Gershman (romange@gmail.com)
 //
 #include <string_view>
-#include <optional>
 
 #include "io/sync_stream_interface.h"
-
+#include "server/dfly_protocol.h"
 #include "server/op_status.h"
 
 namespace dfly {
 
-class RespSerializer {
+class BaseSerializer {
  public:
-  explicit RespSerializer(::io::Sink* sink);
+  explicit BaseSerializer(::io::Sink* sink);
 
   std::error_code ec() const {
     return ec_;
@@ -23,41 +22,78 @@ class RespSerializer {
       ec_ = std::make_error_code(std::errc::connection_aborted);
   }
 
-  //! Sends a string as is without any formatting. raw should be RESP-encoded.
+  //! Sends a string as is without any formatting. raw should be encoded according to the protocol.
   void SendDirect(std::string_view str);
 
-  ::io::Sink* sink() { return sink_; }
+  ::io::Sink* sink() {
+    return sink_;
+  }
 
- protected:
   void Send(const iovec* v, uint32_t len);
 
-  ::io::Sink* sink_;
-
  private:
+  ::io::Sink* sink_;
   std::error_code ec_;
 };
 
-class ReplyBuilder : public RespSerializer {
+class RespSerializer : public BaseSerializer {
  public:
-  explicit ReplyBuilder(::io::Sink* stream) : RespSerializer(stream) {
+  RespSerializer(::io::Sink* sink) : BaseSerializer(sink) {
   }
+
+  //! See https://redis.io/topics/protocol
+  void SendSimpleString(std::string_view str);
+  void SendNull();
 
   /// aka "$6\r\nfoobar\r\n"
   void SendBulkString(std::string_view str);
+};
 
-  void SendNull();
-
-  void SendOk() {
-    return SendSimpleString("OK");
+class MemcacheSerializer : public BaseSerializer {
+ public:
+  explicit MemcacheSerializer(::io::Sink* sink) : BaseSerializer(sink) {
   }
+
+  void SendStored();
+  void SendError();
+};
+
+class ReplyBuilder {
+ public:
+  ReplyBuilder(Protocol protocol, ::io::Sink* stream);
+
+  void SendStored();
 
   void SendError(std::string_view str);
   void SendError(OpStatus status);
 
-  //! See https://redis.io/topics/protocol
-  void SendSimpleString(std::string_view str);
+  void SendOk() {
+    as_resp()->SendSimpleString("OK");
+  }
 
-private:
+  std::error_code ec() const {
+    return serializer_->ec();
+  }
+
+  void SendMCClientError(std::string_view str);
+
+  void SendSimpleRespString(std::string_view str) {
+    as_resp()->SendSimpleString(str);
+  }
+
+  void SendRespBlob(std::string_view str) {
+    as_resp()->SendDirect(str);
+  }
+ private:
+  RespSerializer* as_resp() {
+    return static_cast<RespSerializer*>(serializer_.get());
+  }
+  MemcacheSerializer* as_mc() {
+    return static_cast<MemcacheSerializer*>(serializer_.get());
+  }
+
+  std::unique_ptr<BaseSerializer> serializer_;
+  Protocol protocol_;
 };
 
 }  // namespace dfly

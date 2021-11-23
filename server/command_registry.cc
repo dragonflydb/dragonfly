@@ -55,7 +55,7 @@ void CommandRegistry::Command(CmdArgList args, ConnectionContext* cntx) {
     StrAppend(&resp, ":", cd.key_arg_step(), "\r\n");
   }
 
-  cntx->SendDirect(resp);
+  cntx->SendRespBlob(resp);
 }
 
 namespace CO {

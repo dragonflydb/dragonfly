@@ -11,6 +11,7 @@
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
+#include "server/memcache_parser.h"
 #include "server/redis_parser.h"
 #include "util/fiber_sched_algo.h"
 #include "util/tls/tls_socket.h"
@@ -69,8 +70,18 @@ struct Connection::Shutdown {
   }
 };
 
-Connection::Connection(Service* service, SSL_CTX* ctx) : service_(service), ctx_(ctx) {
+Connection::Connection(Protocol protocol, Service* service, SSL_CTX* ctx)
+    : service_(service), ctx_(ctx) {
+  protocol_ = protocol;
+
+  switch (protocol) {
+    case Protocol::REDIS:
   redis_parser_.reset(new RedisParser);
+      break;
+    case Protocol::MEMCACHE:
+      memcache_parser_.reset(new MemcacheParser);
+      break;
+  }
 }
 
 Connection::~Connection() {
@@ -143,7 +154,14 @@ void Connection::InputLoop(FiberSocketBase* peer) {
     }
 
     io_buf.CommitWrite(*recv_sz);
+
+    if (redis_parser_)
     status = ParseRedis(&io_buf);
+    else {
+      DCHECK(memcache_parser_);
+      status = ParseMemcache(&io_buf);
+    }
+
     if (status == NEED_MORE) {
       status = OK;
     } else if (status != OK) {
@@ -201,6 +219,46 @@ auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
     return OK;
 
   if (result == RedisParser::INPUT_PENDING)
+    return NEED_MORE;
+
+  return ERROR;
+}
+
+auto Connection::ParseMemcache(base::IoBuf* io_buf) -> ParserStatus {
+  MemcacheParser::Result result = MemcacheParser::OK;
+  uint32_t consumed = 0;
+  MemcacheParser::Command cmd;
+  string_view value;
+  do {
+    string_view str = ToSV(io_buf->InputBuffer());
+    result = memcache_parser_->Parse(str, &consumed, &cmd);
+
+    if (result != MemcacheParser::OK) {
+      io_buf->ConsumeInput(consumed);
+      break;
+    }
+
+    size_t total_len = consumed;
+    if (MemcacheParser::IsStoreCmd(cmd.type)) {
+      total_len += cmd.bytes_len + 2;
+      if (io_buf->InputLen() >= total_len) {
+        value = str.substr(consumed, cmd.bytes_len);
+        // TODO: dispatch.
+      } else {
+        return NEED_MORE;
+      }
+    }
+
+    service_->DispatchMC(cmd, value, cc_.get());
+    io_buf->ConsumeInput(total_len);
+  } while (!cc_->ec());
+
+  parser_error_ = result;
+
+  if (result == MemcacheParser::OK)
+    return OK;
+
+  if (result == MemcacheParser::INPUT_PENDING)
     return NEED_MORE;
 
   return ERROR;

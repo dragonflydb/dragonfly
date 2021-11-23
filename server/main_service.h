@@ -8,6 +8,7 @@
 #include "server/command_registry.h"
 #include "server/engine_shard_set.h"
 #include "util/http/http_handler.h"
+#include "server/memcache_parser.h"
 
 namespace util {
 class AcceptServer;
@@ -29,6 +30,8 @@ class Service {
   void Shutdown();
 
   void DispatchCommand(CmdArgList args, ConnectionContext* cntx);
+  void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
+                  ConnectionContext* cntx);
 
   uint32_t shard_count() const {
     return shard_set_.size();
