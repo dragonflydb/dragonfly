@@ -48,6 +48,7 @@ class Service {
  private:
   void Ping(CmdArgList args, ConnectionContext* cntx);
   void Set(CmdArgList args, ConnectionContext* cntx);
+  void Get(CmdArgList args, ConnectionContext* cntx);
 
   void RegisterCommands();
 

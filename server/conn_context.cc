@@ -12,4 +12,8 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner)
     : ReplyBuilder(owner->protocol(), stream), owner_(owner) {
 }
 
+Protocol ConnectionContext::protocol() const {
+  return owner_->protocol();
+}
+
 }  // namespace dfly

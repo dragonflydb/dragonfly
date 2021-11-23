@@ -56,7 +56,6 @@ void RespSerializer::SendSimpleString(std::string_view str) {
   Send(v, ABSL_ARRAYSIZE(v));
 }
 
-
 void RespSerializer::SendBulkString(std::string_view str) {
   char tmp[absl::numbers_internal::kFastToBufferSize + 3];
   tmp[0] = '$';  // Format length
@@ -97,12 +96,17 @@ void ReplyBuilder::SendStored() {
   }
 }
 
-
 void ReplyBuilder::SendMCClientError(string_view str) {
   DCHECK(protocol_ == Protocol::MEMCACHE);
 
   iovec v[] = {IoVec("CLIENT_ERROR"), IoVec(str), IoVec(kCRLF)};
   serializer_->Send(v, ABSL_ARRAYSIZE(v));
+}
+
+void ReplyBuilder::EndMultilineReply() {
+  if (protocol_ == Protocol::MEMCACHE) {
+    serializer_->SendDirect("END\r\n");
+  }
 }
 
 void ReplyBuilder::SendError(string_view str) {
@@ -131,6 +135,22 @@ void ReplyBuilder::SendError(OpStatus status) {
       LOG(ERROR) << "Unsupported status " << status;
       SendError("Internal error");
       break;
+  }
+}
+
+void ReplyBuilder::SendGetReply(std::string_view key, uint32_t flags, std::string_view value) {
+  if (protocol_ == Protocol::REDIS) {
+    as_resp()->SendBulkString(value);
+  } else {
+    string first = absl::StrCat("VALUE ", key, " ", flags, " ", value.size(), "\r\n");
+    iovec v[] = {IoVec(first), IoVec(value), IoVec(kCRLF)};
+    serializer_->Send(v, ABSL_ARRAYSIZE(v));
+  }
+}
+
+void ReplyBuilder::SendGetNotFound() {
+  if (protocol_ == Protocol::REDIS) {
+    as_resp()->SendNull();
   }
 }
 

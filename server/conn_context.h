@@ -24,6 +24,8 @@ class ConnectionContext : public ReplyBuilder {
     return owner_;
   }
 
+  Protocol protocol() const;
+
  private:
   Connection* owner_;
 };

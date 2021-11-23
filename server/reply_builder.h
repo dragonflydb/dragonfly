@@ -76,6 +76,7 @@ class ReplyBuilder {
   }
 
   void SendMCClientError(std::string_view str);
+  void EndMultilineReply();
 
   void SendSimpleRespString(std::string_view str) {
     as_resp()->SendSimpleString(str);
@@ -84,6 +85,10 @@ class ReplyBuilder {
   void SendRespBlob(std::string_view str) {
     as_resp()->SendDirect(str);
   }
+
+  void SendGetReply(std::string_view key, uint32_t flags, std::string_view value);
+  void SendGetNotFound();
+
  private:
   RespSerializer* as_resp() {
     return static_cast<RespSerializer*>(serializer_.get());

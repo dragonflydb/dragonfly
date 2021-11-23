@@ -146,6 +146,9 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       strcpy(cmd_name, "SET");
       strcpy(set_opt, "NX");
       break;
+    case MemcacheParser::GET:
+      strcpy(cmd_name, "GET");
+      break;
     default:
       cntx->SendMCClientError("bad command line format");
       return;
@@ -167,7 +170,6 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
   CmdArgList arg_list{args.data(), args.size()};
   DispatchCommand(arg_list, cntx);
 }
-
 
 void Service::RegisterHttp(HttpListenerBase* listener) {
   CHECK_NOTNULL(listener);
@@ -191,8 +193,8 @@ void Service::Ping(CmdArgList args, ConnectionContext* cntx) {
 void Service::Set(CmdArgList args, ConnectionContext* cntx) {
   set_qps.Inc();
 
-  std::string_view key = ArgS(args, 1);
-  std::string_view val = ArgS(args, 2);
+  string_view key = ArgS(args, 1);
+  string_view val = ArgS(args, 2);
   VLOG(2) << "Set " << key << " " << val;
 
   ShardId sid = Shard(key, shard_count());
@@ -205,6 +207,29 @@ void Service::Set(CmdArgList args, ConnectionContext* cntx) {
   cntx->SendStored();
 }
 
+void Service::Get(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  ShardId sid = Shard(key, shard_count());
+
+  OpResult<string> opres;
+
+  shard_set_.Await(sid, [&] {
+    EngineShard* es = EngineShard::tlocal();
+    OpResult<DbSlice::MainIterator> res = es->db_slice.Find(0, key);
+    if (res) {
+      opres.value() = res.value()->second;
+    } else {
+      opres = res.status();
+    }
+  });
+
+  if (opres) {
+    cntx->SendGetReply(key, 0, opres.value());
+  } else if (opres.status() == OpStatus::KEY_NOTFOUND) {
+    cntx->SendGetNotFound();
+  }
+  cntx->EndMultilineReply();
+}
 
 VarzValue::Map Service::GetVarzStats() {
   VarzValue::Map res;
@@ -227,7 +252,8 @@ void Service::RegisterCommands() {
   using CI = CommandId;
 
   registry_ << CI{"PING", CO::STALE | CO::FAST, -1, 0, 0, 0}.HFUNC(Ping)
-            << CI{"SET", CO::WRITE | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(Set);
+            << CI{"SET", CO::WRITE | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(Set)
+            << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Get);
 }
 
 }  // namespace dfly
