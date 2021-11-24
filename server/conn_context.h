@@ -5,6 +5,7 @@
 #pragma once
 
 #include "server/reply_builder.h"
+#include "server/common_types.h"
 
 namespace dfly {
 
@@ -25,6 +26,8 @@ class ConnectionContext : public ReplyBuilder {
   }
 
   Protocol protocol() const;
+
+  ConnectionState conn_state;
 
  private:
   Connection* owner_;

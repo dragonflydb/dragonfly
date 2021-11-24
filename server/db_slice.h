@@ -4,9 +4,7 @@
 
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/container/flat_hash_set.h>
-
+#include "server/common_types.h"
 #include "server/op_status.h"
 
 namespace util {
@@ -15,8 +13,6 @@ class ProactorBase;
 
 namespace dfly {
 
-class EngineShard;
-
 class DbSlice {
   struct InternalDbStats {
     // Object memory usage besides hash-table capacity.
@@ -24,12 +20,6 @@ class DbSlice {
   };
 
  public:
-  using MainValue = std::string;
-  using MainTable = absl::flat_hash_map<std::string, MainValue>;
-  using MainIterator = MainTable::iterator;
-  using ShardId = uint16_t;
-  using DbIndex = uint16_t;
-
   DbSlice(uint32_t index, EngineShard* owner);
   ~DbSlice();
 

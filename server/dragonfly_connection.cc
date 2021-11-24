@@ -4,6 +4,8 @@
 
 #include "server/dragonfly_connection.h"
 
+#include <absl/container/flat_hash_map.h>
+
 #include <boost/fiber/operations.hpp>
 
 #include "base/io_buf.h"
@@ -76,7 +78,7 @@ Connection::Connection(Protocol protocol, Service* service, SSL_CTX* ctx)
 
   switch (protocol) {
     case Protocol::REDIS:
-  redis_parser_.reset(new RedisParser);
+      redis_parser_.reset(new RedisParser);
       break;
     case Protocol::MEMCACHE:
       memcache_parser_.reset(new MemcacheParser);
@@ -140,6 +142,8 @@ void Connection::HandleRequests() {
 
 void Connection::InputLoop(FiberSocketBase* peer) {
   base::IoBuf io_buf{kMinReadSize};
+
+  auto dispatch_fb = fibers::fiber(fibers::launch::dispatch, [&] { DispatchFiber(peer); });
   ParserStatus status = OK;
   std::error_code ec;
 
@@ -156,7 +160,7 @@ void Connection::InputLoop(FiberSocketBase* peer) {
     io_buf.CommitWrite(*recv_sz);
 
     if (redis_parser_)
-    status = ParseRedis(&io_buf);
+      status = ParseRedis(&io_buf);
     else {
       DCHECK(memcache_parser_);
       status = ParseMemcache(&io_buf);
@@ -168,6 +172,10 @@ void Connection::InputLoop(FiberSocketBase* peer) {
       break;
     }
   } while (peer->IsOpen() && !cc_->ec());
+
+  cc_->conn_state.mask |= ConnectionState::CONN_CLOSING;  // Signal dispatch to close.
+  evc_.notify();
+  dispatch_fb.join();
 
   if (cc_->ec()) {
     ec = cc_->ec();
@@ -208,8 +216,24 @@ auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
         DVLOG(2) << "Got Args with first token " << ToSV(first.GetBuf());
       }
 
-      RespToArgList(args, &arg_vec);
-      service_->DispatchCommand(CmdArgList{arg_vec.data(), arg_vec.size()}, cc_.get());
+      // An optimization to skip dispatch_q_ if no pipelining is identified.
+      // We use ASYNC_DISPATCH as a lock to avoid out-of-order replies when the
+      // dispatch fiber pulls the last record but is still processing the command and then this
+      // fiber enters the condition below and executes out of order.
+      bool is_sync_dispatch = !cc_->conn_state.IsRunViaDispatch();
+      if (dispatch_q_.empty() && is_sync_dispatch && consumed >= io_buf->InputLen()) {
+        RespToArgList(args, &arg_vec);
+        service_->DispatchCommand(CmdArgList{arg_vec.data(), arg_vec.size()}, cc_.get());
+      } else {
+        // Dispatch via queue to speedup input reading,
+        Request* req = FromArgs(std::move(args));
+        dispatch_q_.emplace_back(req);
+        if (dispatch_q_.size() == 1) {
+          evc_.notify();
+        } else if (dispatch_q_.size() > 10) {
+          this_fiber::yield();
+        }
+      }
     }
     io_buf->ConsumeInput(consumed);
   } while (RedisParser::OK == result && !cc_->ec());
@@ -249,8 +273,15 @@ auto Connection::ParseMemcache(base::IoBuf* io_buf) -> ParserStatus {
       }
     }
 
-    service_->DispatchMC(cmd, value, cc_.get());
-    io_buf->ConsumeInput(total_len);
+    // An optimization to skip dispatch_q_ if no pipelining is identified.
+    // We use ASYNC_DISPATCH as a lock to avoid out-of-order replies when the
+    // dispatch fiber pulls the last record but is still processing the command and then this
+    // fiber enters the condition below and executes out of order.
+    bool is_sync_dispatch = (cc_->conn_state.mask & ConnectionState::ASYNC_DISPATCH) == 0;
+    if (dispatch_q_.empty() && is_sync_dispatch && consumed >= io_buf->InputLen()) {
+      service_->DispatchMC(cmd, value, cc_.get());
+    }
+    io_buf->ConsumeInput(consumed);
   } while (!cc_->ec());
 
   parser_error_ = result;
@@ -262,6 +293,52 @@ auto Connection::ParseMemcache(base::IoBuf* io_buf) -> ParserStatus {
     return NEED_MORE;
 
   return ERROR;
+}
+
+// DispatchFiber handles commands coming from the InputLoop.
+// Thus, InputLoop can quickly read data from the input buffer, parse it and push
+// into the dispatch queue and DispatchFiber will run those commands asynchronously with InputLoop.
+// Note: in some cases, InputLoop may decide to dispatch directly and bypass the DispatchFiber.
+void Connection::DispatchFiber(util::FiberSocketBase* peer) {
+  this_fiber::properties<FiberProps>().set_name("DispatchFiber");
+
+  while (!cc_->ec()) {
+    evc_.await([this] { return cc_->conn_state.IsClosing() || !dispatch_q_.empty(); });
+    if (cc_->conn_state.IsClosing())
+      break;
+
+    std::unique_ptr<Request> req{dispatch_q_.front()};
+    dispatch_q_.pop_front();
+
+    cc_->conn_state.mask |= ConnectionState::ASYNC_DISPATCH;
+    service_->DispatchCommand(CmdArgList{req->args.data(), req->args.size()}, cc_.get());
+    cc_->conn_state.mask &= ~ConnectionState::ASYNC_DISPATCH;
+  }
+
+  cc_->conn_state.mask |= ConnectionState::CONN_CLOSING;
+}
+
+auto Connection::FromArgs(RespVec args) -> Request* {
+  DCHECK(!args.empty());
+  size_t backed_sz = 0;
+  for (const auto& arg : args) {
+    CHECK_EQ(RespExpr::STRING, arg.type);
+    backed_sz += arg.GetBuf().size();
+  }
+  DCHECK(backed_sz);
+
+  Request* req = new Request{args.size(), backed_sz};
+
+  auto* next = req->storage.data();
+  for (size_t i = 0; i < args.size(); ++i) {
+    auto buf = args[i].GetBuf();
+    size_t s = buf.size();
+    memcpy(next, buf.data(), s);
+    req->args[i] = MutableStrSpan(next, s);
+    next += s;
+  }
+
+  return req;
 }
 
 }  // namespace dfly

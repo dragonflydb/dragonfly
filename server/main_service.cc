@@ -18,23 +18,6 @@
 DEFINE_uint32(port, 6380, "Redis port");
 DEFINE_uint32(memcache_port, 0, "Memcached port");
 
-namespace std {
-
-ostream& operator<<(ostream& os, dfly::CmdArgList args) {
-  os << "[";
-  if (!args.empty()) {
-    for (size_t i = 0; i < args.size() - 1; ++i) {
-      os << dfly::ArgS(args, i) << ",";
-    }
-    os << dfly::ArgS(args, args.size() - 1);
-  }
-  os << "]";
-
-  return os;
-}
-
-}  // namespace std
-
 namespace dfly {
 
 using namespace std;
@@ -51,21 +34,6 @@ DEFINE_VARZ(VarzQps, ping_qps);
 DEFINE_VARZ(VarzQps, set_qps);
 
 std::optional<VarzFunction> engine_varz;
-
-inline ShardId Shard(string_view sv, ShardId shard_num) {
-  XXH64_hash_t hash = XXH64(sv.data(), sv.size(), 24061983);
-  return hash % shard_num;
-}
-
-inline void ToUpper(const MutableStrSpan* val) {
-  for (auto& c : *val) {
-    c = absl::ascii_toupper(c);
-  }
-}
-
-string WrongNumArgsError(string_view cmd) {
-  return absl::StrCat("wrong number of arguments for '", cmd, "' command");
-}
 
 }  // namespace
 
@@ -215,7 +183,7 @@ void Service::Get(CmdArgList args, ConnectionContext* cntx) {
 
   shard_set_.Await(sid, [&] {
     EngineShard* es = EngineShard::tlocal();
-    OpResult<DbSlice::MainIterator> res = es->db_slice.Find(0, key);
+    OpResult<MainIterator> res = es->db_slice.Find(0, key);
     if (res) {
       opres.value() = res.value()->second;
     } else {

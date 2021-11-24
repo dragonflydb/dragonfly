@@ -10,6 +10,7 @@
 #include <functional>
 
 #include "base/function2.hpp"
+#include "server/common_types.h"
 
 namespace dfly {
 
@@ -30,9 +31,6 @@ enum CommandOpt : uint32_t {
 const char* OptName(CommandOpt fl);
 
 };  // namespace CO
-
-using MutableStrSpan = absl::Span<char>;
-using CmdArgList = absl::Span<MutableStrSpan>;
 
 class CommandId {
  public:
@@ -142,10 +140,5 @@ class CommandRegistry {
   // Implements COMMAND functionality.
   void Command(CmdArgList args, ConnectionContext* cntx);
 };
-
-inline std::string_view ArgS(CmdArgList args, size_t i) {
-  auto arg = args[i];
-  return std::string_view(arg.data(), arg.size());
-}
 
 }  // namespace dfly
