@@ -1,5 +1,5 @@
-// Copyright 2021, Beeri 15.  All rights reserved.
-// Author: Roman Gershman (romange@gmail.com)
+// Copyright 2021, Roman Gershman.  All rights reserved.
+// See LICENSE for licensing terms.
 //
 
 #pragma once
@@ -34,7 +34,7 @@ const char* OptName(CommandOpt fl);
 
 class CommandId {
  public:
-  using CmdFunc = std::function<void(CmdArgList, ConnectionContext*)>;
+  using Handler = std::function<void(CmdArgList, ConnectionContext*)>;
 
   /**
    * @brief Construct a new Command Id object
@@ -81,13 +81,13 @@ class CommandId {
     return step_key_;
   }
 
-  CommandId& AssignCallback(CmdFunc f) {
-    func_ = std::move(f);
+  CommandId& SetHandler(Handler f) {
+    handler_ = std::move(f);
     return *this;
   }
 
   void Invoke(CmdArgList args, ConnectionContext* cntx) const {
-    func_(std::move(args), cntx);
+    handler_(std::move(args), cntx);
   }
 
   static const char* OptName(CO::CommandOpt fl);
@@ -102,7 +102,7 @@ class CommandId {
   int8_t last_key_;
   int8_t step_key_;
 
-  CmdFunc func_;
+  Handler handler_;
 };
 
 class CommandRegistry {

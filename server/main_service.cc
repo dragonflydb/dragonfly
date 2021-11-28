@@ -1,5 +1,5 @@
-// Copyright 2021, Beeri 15.  All rights reserved.
-// Author: Roman Gershman (romange@gmail.com)
+// Copyright 2021, Roman Gershman.  All rights reserved.
+// See LICENSE for licensing terms.
 //
 
 #include "server/main_service.h"
@@ -210,11 +210,11 @@ VarzValue::Map Service::GetVarzStats() {
 }
 
 using ServiceFunc = void (Service::*)(CmdArgList args, ConnectionContext* cntx);
-inline CommandId::CmdFunc HandlerFunc(Service* se, ServiceFunc f) {
+inline CommandId::Handler HandlerFunc(Service* se, ServiceFunc f) {
   return [=](CmdArgList args, ConnectionContext* cntx) { return (se->*f)(args, cntx); };
 }
 
-#define HFUNC(x) AssignCallback(HandlerFunc(this, &Service::x))
+#define HFUNC(x) SetHandler(HandlerFunc(this, &Service::x))
 
 void Service::RegisterCommands() {
   using CI = CommandId;

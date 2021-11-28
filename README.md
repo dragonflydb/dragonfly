@@ -1,7 +1,7 @@
 # mini-redis
 
 A toy memory store that supports basic commands like `SET` and `GET` for both memcached and redis protocols.
-In addition it supports redis `PING` command.
+In addition, it supports redis `PING` command.
 
 Demo features include:
 1. High throughput reaching to millions of QPS on a single node.

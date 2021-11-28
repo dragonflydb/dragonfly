@@ -1,5 +1,5 @@
-// Copyright 2021, Beeri 15.  All rights reserved.
-// Author: Roman Gershman (romange@gmail.com)
+// Copyright 2021, Roman Gershman.  All rights reserved.
+// See LICENSE for licensing terms.
 //
 #include "server/memcache_parser.h"
 
