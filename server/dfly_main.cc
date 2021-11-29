@@ -52,6 +52,7 @@ int main(int argc, char* argv[]) {
 
   if (FLAGS_http_port >= 0) {
     http_listener = new HttpListener<>;
+    http_listener->enable_metrics();
 
     // Ownership over http_listener is moved to the acceptor.
     uint16_t port = acceptor.AddListener(FLAGS_http_port, http_listener);

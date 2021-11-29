@@ -11,10 +11,11 @@
 #include "server/dragonfly_connection.h"
 #include "util/proactor_pool.h"
 
-using namespace util;
-
 DEFINE_uint32(conn_threads, 0, "Number of threads used for handing server connections");
 DEFINE_bool(tls, false, "");
+DEFINE_bool(conn_use_incoming_cpu, false,
+            "If true uses incoming cpu of a socket in order to distribute"
+            " incoming connections");
 
 CONFIG_string(tls_client_cert_file, "", "", TrueValidator);
 CONFIG_string(tls_client_key_file, "", "", TrueValidator);
@@ -37,6 +38,9 @@ CONFIG_enum(tls_auth_clients, "yes", "", tls_auth_clients_enum, tls_auth_clients
 
 namespace dfly {
 
+using namespace util;
+using namespace std;
+
 // To connect: openssl s_client  -cipher "ADH:@SECLEVEL=0" -state -crlf  -connect 127.0.0.1:6380
 static SSL_CTX* CreateSslCntx() {
   SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
@@ -54,7 +58,7 @@ static SSL_CTX* CreateSslCntx() {
     LOG(WARNING)
         << "tls-client-key-file not set, no keys are loaded and anonymous ciphers are enabled. "
         << "Do not use in production!";
-  } else { // tls_client_key_file is set.
+  } else {  // tls_client_key_file is set.
     CHECK_EQ(1,
              SSL_CTX_use_PrivateKey_file(ctx, FLAGS_tls_client_key_file.c_str(), SSL_FILETYPE_PEM));
 
@@ -104,12 +108,31 @@ void Listener::PostShutdown() {
 
 // We can limit number of threads handling dragonfly connections.
 ProactorBase* Listener::PickConnectionProactor(LinuxSocketBase* sock) {
-  uint32_t id = next_id_.fetch_add(1, std::memory_order_relaxed);
-  uint32_t total = FLAGS_conn_threads;
   util::ProactorPool* pp = pool();
+  uint32_t total = FLAGS_conn_threads;
+  uint32_t id = kuint32max;
 
   if (total == 0 || total > pp->size()) {
     total = pp->size();
+  }
+
+  if (FLAGS_conn_use_incoming_cpu) {
+    int fd = sock->native_handle();
+
+    int cpu;
+    socklen_t len = sizeof(cpu);
+
+    CHECK_EQ(0, getsockopt(fd, SOL_SOCKET, SO_INCOMING_CPU, &cpu, &len));
+    VLOG(1) << "CPU for connection " << fd << " is " << cpu;
+
+    vector<unsigned> ids = pool()->MapCpuToThreads(cpu);
+    if (!ids.empty()) {
+      id = ids.front();
+    }
+  }
+
+  if (id == kuint32max) {
+    id = next_id_.fetch_add(1, std::memory_order_relaxed);
   }
 
   return pp->at(id % total);

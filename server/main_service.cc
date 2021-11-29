@@ -12,6 +12,7 @@
 
 #include "base/logging.h"
 #include "server/conn_context.h"
+#include "util/metrics/metrics.h"
 #include "util/uring/uring_fiber_algo.h"
 #include "util/varz.h"
 
@@ -34,6 +35,7 @@ DEFINE_VARZ(VarzQps, ping_qps);
 DEFINE_VARZ(VarzQps, set_qps);
 
 std::optional<VarzFunction> engine_varz;
+metrics::CounterFamily cmd_req("requests_total", "Number of served redis requests");
 
 }  // namespace
 
@@ -59,6 +61,7 @@ void Service::Init(util::AcceptServer* acceptor) {
   request_latency_usec.Init(&pp_);
   ping_qps.Init(&pp_);
   set_qps.Init(&pp_);
+  cmd_req.Init(&pp_, {"type"});
 }
 
 void Service::Shutdown() {
@@ -66,6 +69,7 @@ void Service::Shutdown() {
   request_latency_usec.Shutdown();
   ping_qps.Shutdown();
   set_qps.Shutdown();
+
   shard_set_.RunBriefInParallel([&](EngineShard*) { EngineShard::DestroyThreadLocal(); });
 }
 
@@ -90,6 +94,7 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
   }
   uint64_t start_usec = ProactorBase::GetMonotonicTimeNs(), end_usec;
   cntx->cid = cid;
+  cmd_req.Inc({cid->name()});
   cid->Invoke(args, cntx);
   end_usec = ProactorBase::GetMonotonicTimeNs();
 
