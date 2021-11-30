@@ -119,11 +119,12 @@ ProactorBase* Listener::PickConnectionProactor(LinuxSocketBase* sock) {
   if (FLAGS_conn_use_incoming_cpu) {
     int fd = sock->native_handle();
 
-    int cpu;
+    int cpu, napi_id;
     socklen_t len = sizeof(cpu);
 
     CHECK_EQ(0, getsockopt(fd, SOL_SOCKET, SO_INCOMING_CPU, &cpu, &len));
-    VLOG(1) << "CPU for connection " << fd << " is " << cpu;
+    CHECK_EQ(0, getsockopt(fd, SOL_SOCKET, SO_INCOMING_NAPI_ID, &napi_id, &len));
+    VLOG(1) << "CPU/NAPI for connection " << fd << " is " << cpu << "/" << napi_id;
 
     vector<unsigned> ids = pool()->MapCpuToThreads(cpu);
     if (!ids.empty()) {

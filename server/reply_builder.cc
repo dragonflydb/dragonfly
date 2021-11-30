@@ -30,7 +30,30 @@ BaseSerializer::BaseSerializer(io::Sink* sink) : sink_(sink) {
 }
 
 void BaseSerializer::Send(const iovec* v, uint32_t len) {
-  error_code ec = sink_->Write(v, len);
+  if (should_batch_) {
+    // TODO: to introduce flushing when too much data is batched.
+    for (unsigned i = 0; i < len; ++i) {
+      std::string_view src((char*)v[i].iov_base, v[i].iov_len);
+      DVLOG(2) << "Appending to stream " << sink_ << " " << src;
+      batch_.append(src.data(), src.size());
+    }
+    return;
+  }
+
+  error_code ec;
+  if (batch_.empty()) {
+    ec = sink_->Write(v, len);
+  } else {
+    DVLOG(1) << "Sending batch to stream " << sink_ << "\n" << batch_;
+
+    iovec tmp[len + 1];
+    tmp[0].iov_base = batch_.data();
+    tmp[0].iov_len = batch_.size();
+    copy(v, v + len, tmp + 1);
+    ec = sink_->Write(tmp, len + 1);
+    batch_.clear();
+  }
+
   if (ec) {
     ec_ = ec;
   }

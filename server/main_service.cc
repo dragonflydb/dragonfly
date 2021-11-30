@@ -65,6 +65,8 @@ void Service::Init(util::AcceptServer* acceptor) {
 }
 
 void Service::Shutdown() {
+  VLOG(1) << "Service::Shutdown";
+
   engine_varz.reset();
   request_latency_usec.Shutdown();
   ping_qps.Shutdown();

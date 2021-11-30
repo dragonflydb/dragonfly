@@ -26,5 +26,3 @@ cd build-opt && ninja midi-redis
 ```
 
 for more options, run `./midi-redis --help`
-
-

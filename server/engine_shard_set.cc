@@ -43,7 +43,7 @@ void EngineShard::DestroyThreadLocal() {
   delete shard_;
   shard_ = nullptr;
 
-  DVLOG(1) << "Shard reset " << index;
+  VLOG(1) << "Shard reset " << index;
 }
 
 void EngineShardSet::Init(uint32_t sz) {

@@ -22,18 +22,24 @@ class BaseSerializer {
       ec_ = std::make_error_code(std::errc::connection_aborted);
   }
 
+  // In order to reduce interrupt rate we allow coalescing responses together using
+  // Batch mode. It is controlled by Connection state machine because it makes sense only
+  // when pipelined requests are arriving.
+  void SetBatchMode(bool batch) {
+    should_batch_ = batch;
+  }
+
   //! Sends a string as is without any formatting. raw should be encoded according to the protocol.
   void SendDirect(std::string_view str);
-
-  ::io::Sink* sink() {
-    return sink_;
-  }
 
   void Send(const iovec* v, uint32_t len);
 
  private:
   ::io::Sink* sink_;
   std::error_code ec_;
+  std::string batch_;
+
+  bool should_batch_ = false;
 };
 
 class RespSerializer : public BaseSerializer {
@@ -88,6 +94,10 @@ class ReplyBuilder {
 
   void SendGetReply(std::string_view key, uint32_t flags, std::string_view value);
   void SendGetNotFound();
+
+  void SetBatchMode(bool mode) {
+    serializer_->SetBatchMode(mode);
+  }
 
  private:
   RespSerializer* as_resp() {

@@ -26,8 +26,6 @@ namespace fibers = boost::fibers;
 namespace dfly {
 namespace {
 
-using CmdArgVec = std::vector<MutableStrSpan>;
-
 void SendProtocolError(RedisParser::Result pres, FiberSocketBase* peer) {
   string res("-ERR Protocol error: ");
   if (pres == RedisParser::BAD_BULKLEN) {
@@ -41,10 +39,6 @@ void SendProtocolError(RedisParser::Result pres, FiberSocketBase* peer) {
   if (!size_res) {
     LOG(WARNING) << "Error " << size_res.error();
   }
-}
-
-inline MutableStrSpan ToMSS(absl::Span<uint8_t> span) {
-  return MutableStrSpan{reinterpret_cast<char*>(span.data()), span.size()};
 }
 
 void RespToArgList(const RespVec& src, CmdArgVec* dest) {
@@ -311,6 +305,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     std::unique_ptr<Request> req{dispatch_q_.front()};
     dispatch_q_.pop_front();
 
+    cc_->SetBatchMode(!dispatch_q_.empty());
     cc_->conn_state.mask |= ConnectionState::ASYNC_DISPATCH;
     service_->DispatchCommand(CmdArgList{req->args.data(), req->args.size()}, cc_.get());
     cc_->conn_state.mask &= ~ConnectionState::ASYNC_DISPATCH;
