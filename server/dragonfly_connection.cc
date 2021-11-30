@@ -118,6 +118,7 @@ void Connection::HandleRequests() {
 
   int val = 1;
   CHECK_EQ(0, setsockopt(socket_->native_handle(), SOL_TCP, TCP_NODELAY, &val, sizeof(val)));
+  auto ep = socket_->RemoteEndpoint();
 
   std::unique_ptr<tls::TlsSocket> tls_sock;
   if (ctx_) {
@@ -137,7 +138,7 @@ void Connection::HandleRequests() {
 
   InputLoop(peer);
 
-  VLOG(1) << "Closed connection for peer " << socket_->RemoteEndpoint();
+  VLOG(1) << "Closed connection for peer " << ep;
 }
 
 void Connection::InputLoop(FiberSocketBase* peer) {
