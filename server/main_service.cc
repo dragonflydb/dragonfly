@@ -12,6 +12,7 @@
 
 #include "base/logging.h"
 #include "server/conn_context.h"
+#include "server/debugcmd.h"
 #include "util/metrics/metrics.h"
 #include "util/uring/uring_fiber_algo.h"
 #include "util/varz.h"
@@ -206,6 +207,14 @@ void Service::Get(CmdArgList args, ConnectionContext* cntx) {
   cntx->EndMultilineReply();
 }
 
+void Service::Debug(CmdArgList args, ConnectionContext* cntx) {
+  ToUpper(&args[1]);
+
+  DebugCmd dbg_cmd{&shard_set_, cntx};
+
+  return dbg_cmd.Run(args);
+}
+
 VarzValue::Map Service::GetVarzStats() {
   VarzValue::Map res;
 
@@ -228,7 +237,8 @@ void Service::RegisterCommands() {
 
   registry_ << CI{"PING", CO::STALE | CO::FAST, -1, 0, 0, 0}.HFUNC(Ping)
             << CI{"SET", CO::WRITE | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(Set)
-            << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Get);
+            << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Get)
+            << CI{"DEBUG", CO::RANDOM | CO::READONLY, -2, 0, 0, 0}.HFUNC(Debug);
 }
 
 }  // namespace dfly

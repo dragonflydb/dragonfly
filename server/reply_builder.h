@@ -99,6 +99,10 @@ class ReplyBuilder {
     serializer_->SetBatchMode(mode);
   }
 
+  // Resp specific.
+  // This one is prefixed with + and with clrf added automatically to each item..
+  void SendSimpleStrArr(const std::string_view* arr, uint32_t count);
+
  private:
   RespSerializer* as_resp() {
     return static_cast<RespSerializer*>(serializer_.get());

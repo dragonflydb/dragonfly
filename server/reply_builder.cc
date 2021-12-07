@@ -177,4 +177,15 @@ void ReplyBuilder::SendGetNotFound() {
   }
 }
 
+void ReplyBuilder::SendSimpleStrArr(const std::string_view* arr, uint32_t count) {
+  CHECK(protocol_ == Protocol::REDIS);
+  string res = absl::StrCat("*", count, kCRLF);
+
+  for (size_t i = 0; i < count; ++i) {
+    StrAppend(&res, "+", arr[i], kCRLF);
+  }
+
+  serializer_->SendDirect(res);
+}
+
 }  // namespace dfly
