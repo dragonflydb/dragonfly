@@ -11,6 +11,7 @@ namespace dfly {
 enum class OpStatus : uint16_t {
   OK,
   KEY_NOTFOUND,
+  SKIPPED,
 };
 
 class OpResultBase {

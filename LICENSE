@@ -1,4 +1,27 @@
-Apache License
+Dragonfly memory store
+Copyright (c) 2021 Roman Gershman
+
+---------------------------------------------------------------------------
+1. GENERAL SOFTWARE LICENSE INFORMATION AND MOTIVATION
+
+You may use, distribute, and modify this code under the terms of the Apache License 2.0 (with the "Commons Clause" [commonsclause.com] - See 2. below). As long as you have no intention of selling the software [as is], you are free to use it under the terms of the Apache License 2.0. To anyone wishing to sell this Commons Clause licensed software, as is, an action that the Commons Clause license prohibits, it appears "proprietary", in the sense that it would be necessary to negotiate a license to do that with the owner of the Commons Clause software.
+
+---------------------------------------------------------------------------
+2. “Commons Clause” License Condition v1.0 (commonsclause.com)
+
+The Software is provided to you by the Licensor under the Apache License, defined below, subject to the following condition.
+
+Without limiting other conditions in the License, the grant of rights under the License will not include, and the License does not grant to you, the right to Sell the Software.
+
+For purposes of the foregoing, “Sell” means practicing any or all of the rights granted to you under the License to provide to third parties, for a fee or other consideration (including without limitation fees for hosting or consulting/support services related to the Software), a product or service whose value derives, entirely or substantially, from the functionality of the Software. Any license notice or attribution required by the License must also include this Commons Clause License Condition notice.
+
+Software:   Dragonfly memory store
+License:    Apache License 2.0
+Licensor:   Roman Gershman
+
+
+---------------------------------------------------------------------------
+3. Apache License
 Version 2.0, January 2004
 http://www.apache.org/licenses/
 

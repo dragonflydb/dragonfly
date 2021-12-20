@@ -41,17 +41,40 @@ void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
 }
 
 auto DbSlice::Find(DbIndex db_index, std::string_view key) const -> OpResult<MainIterator> {
-  DCHECK_LT(db_index, db_arr_.size());
-  DCHECK(db_arr_[db_index].main_table);
+  auto [it, expire_it] = FindExt(db_index, key);
 
-  auto& db = db_arr_[db_index];
-  MainIterator it = db.main_table->find(key);
-
-  if (it == db.main_table->end()) {
+  if (it == MainIterator{})
     return OpStatus::KEY_NOTFOUND;
-  }
 
   return it;
+}
+
+pair<MainIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, std::string_view key) const {
+  DCHECK_LT(db_ind, db_arr_.size());
+  DCHECK(db_arr_[db_ind].main_table);
+
+  auto& db = db_arr_[db_ind];
+  MainIterator it = db.main_table->find(key);
+
+  if (it == MainIterator{}) {
+    return make_pair(it, ExpireIterator{});
+  }
+
+  ExpireIterator expire_it;
+  if (it->second.HasExpire()) {  // check expiry state
+    expire_it = db.expire_table->find(it->first);
+
+    CHECK(expire_it != ExpireIterator{});
+    if (expire_it->second <= now_ms_) {
+      db.expire_table->erase(expire_it);
+
+      db.stats.obj_memory_usage -= (it->first.capacity() + it->second.str.capacity());
+      db.main_table->erase(it);
+      return make_pair(MainIterator{}, ExpireIterator{});
+    }
+  }
+
+  return make_pair(it, expire_it);
 }
 
 auto DbSlice::AddOrFind(DbIndex db_index, std::string_view key) -> pair<MainIterator, bool> {
@@ -80,7 +103,28 @@ void DbSlice::CreateDbRedis(unsigned index) {
   auto& db = db_arr_[index];
   if (!db.main_table) {
     db.main_table.reset(new MainTable);
+    db.expire_table.reset(new ExpireTable);
   }
+}
+
+// Returns true if a state has changed, false otherwise.
+bool DbSlice::Expire(DbIndex db_ind, MainIterator it, uint64_t at) {
+  auto& db = db_arr_[db_ind];
+  if (at == 0 && it->second.HasExpire()) {
+    CHECK_EQ(1u, db.expire_table->erase(it->first));
+    it->second.SetExpire(false);
+
+    return true;
+  }
+
+  if (!it->second.HasExpire() && at) {
+    CHECK(db.expire_table->emplace(it->first, at).second);
+    it->second.SetExpire(true);
+
+    return true;
+  }
+
+  return false;
 }
 
 void DbSlice::AddNew(DbIndex db_ind, std::string_view key, MainValue obj, uint64_t expire_at_ms) {
@@ -95,10 +139,11 @@ bool DbSlice::AddIfNotExist(DbIndex db_ind, std::string_view key, MainValue obj,
   if (!success)
     return false;  // in this case obj won't be moved and will be destroyed during unwinding.
 
-  db.stats.obj_memory_usage += (new_entry->first.capacity() + new_entry->second.capacity());
+  db.stats.obj_memory_usage += (new_entry->first.capacity() + new_entry->second.str.capacity());
 
   if (expire_at_ms) {
-    // TODO
+    new_entry->second.SetExpire(true);
+    CHECK(db.expire_table->emplace(new_entry->first, expire_at_ms).second);
   }
 
   return true;

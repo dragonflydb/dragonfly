@@ -14,6 +14,7 @@
 #include "server/conn_context.h"
 #include "server/debugcmd.h"
 #include "util/metrics/metrics.h"
+#include "server/string_family.h"
 #include "util/uring/uring_fiber_algo.h"
 #include "util/varz.h"
 
@@ -33,7 +34,6 @@ namespace {
 
 DEFINE_VARZ(VarzMapAverage, request_latency_usec);
 DEFINE_VARZ(VarzQps, ping_qps);
-DEFINE_VARZ(VarzQps, set_qps);
 
 std::optional<VarzFunction> engine_varz;
 metrics::CounterFamily cmd_req("requests_total", "Number of served redis requests");
@@ -55,13 +55,13 @@ void Service::Init(util::AcceptServer* acceptor) {
 
   pp_.AwaitOnAll([&](uint32_t index, ProactorBase* pb) {
     if (index < shard_count()) {
-      shard_set_.InitThreadLocal(index);
+      shard_set_.InitThreadLocal(pb);
     }
   });
 
   request_latency_usec.Init(&pp_);
   ping_qps.Init(&pp_);
-  set_qps.Init(&pp_);
+  StringFamily::Init(&pp_);
   cmd_req.Init(&pp_, {"type"});
 }
 
@@ -71,9 +71,9 @@ void Service::Shutdown() {
   engine_varz.reset();
   request_latency_usec.Shutdown();
   ping_qps.Shutdown();
-  set_qps.Shutdown();
+  StringFamily::Shutdown();
 
-  shard_set_.RunBriefInParallel([&](EngineShard*) { EngineShard::DestroyThreadLocal(); });
+  shard_set_.RunBlockingInParallel([&](EngineShard*) { EngineShard::DestroyThreadLocal(); });
 }
 
 void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
@@ -166,47 +166,6 @@ void Service::Ping(CmdArgList args, ConnectionContext* cntx) {
   return cntx->SendSimpleRespString(arg);
 }
 
-void Service::Set(CmdArgList args, ConnectionContext* cntx) {
-  set_qps.Inc();
-
-  string_view key = ArgS(args, 1);
-  string_view val = ArgS(args, 2);
-  VLOG(2) << "Set " << key << " " << val;
-
-  ShardId sid = Shard(key, shard_count());
-  shard_set_.Await(sid, [&] {
-    EngineShard* es = EngineShard::tlocal();
-    auto [it, res] = es->db_slice.AddOrFind(0, key);
-    it->second = val;
-  });
-
-  cntx->SendStored();
-}
-
-void Service::Get(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  ShardId sid = Shard(key, shard_count());
-
-  OpResult<string> opres;
-
-  shard_set_.Await(sid, [&] {
-    EngineShard* es = EngineShard::tlocal();
-    OpResult<MainIterator> res = es->db_slice.Find(0, key);
-    if (res) {
-      opres.value() = res.value()->second;
-    } else {
-      opres = res.status();
-    }
-  });
-
-  if (opres) {
-    cntx->SendGetReply(key, 0, opres.value());
-  } else if (opres.status() == OpStatus::KEY_NOTFOUND) {
-    cntx->SendGetNotFound();
-  }
-  cntx->EndMultilineReply();
-}
-
 void Service::Debug(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[1]);
 
@@ -219,7 +178,7 @@ VarzValue::Map Service::GetVarzStats() {
   VarzValue::Map res;
 
   atomic_ulong num_keys{0};
-  shard_set_.RunBriefInParallel([&](EngineShard* es) { num_keys += es->db_slice.DbSize(0); });
+  shard_set_.RunBriefInParallel([&](EngineShard* es) { num_keys += es->db_slice().DbSize(0); });
   res.emplace_back("keys", VarzValue::FromInt(num_keys.load()));
 
   return res;
@@ -236,9 +195,8 @@ void Service::RegisterCommands() {
   using CI = CommandId;
 
   registry_ << CI{"PING", CO::STALE | CO::FAST, -1, 0, 0, 0}.HFUNC(Ping)
-            << CI{"SET", CO::WRITE | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(Set)
-            << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Get)
             << CI{"DEBUG", CO::RANDOM | CO::READONLY, -2, 0, 0, 0}.HFUNC(Debug);
+  StringFamily::Register(&registry_);
 }
 
 }  // namespace dfly

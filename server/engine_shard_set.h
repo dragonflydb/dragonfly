@@ -4,6 +4,9 @@
 
 #pragma once
 
+
+#include <xxhash.h>
+
 #include "server/db_slice.h"
 #include "util/fibers/fibers_ext.h"
 #include "util/fibers/fiberqueue_threadpool.h"
@@ -11,16 +14,13 @@
 
 namespace dfly {
 
-using ShardId = uint16_t;
-
 class EngineShard {
  public:
-  DbSlice db_slice;
 
   //EngineShard() is private down below.
   ~EngineShard();
 
-  static void InitThreadLocal(ShardId index);
+  static void InitThreadLocal(util::ProactorBase* pb);
   static void DestroyThreadLocal();
 
   static EngineShard* tlocal() {
@@ -28,7 +28,15 @@ class EngineShard {
   }
 
   ShardId shard_id() const {
-    return db_slice.shard_id();
+    return db_slice_.shard_id();
+  }
+
+  DbSlice& db_slice() {
+    return db_slice_;
+  }
+
+  const DbSlice& db_slice() const {
+    return db_slice_;
   }
 
   ::util::fibers_ext::FiberQueue* GetQueue() {
@@ -36,10 +44,13 @@ class EngineShard {
   }
 
  private:
-  EngineShard(ShardId index);
+  EngineShard(util::ProactorBase* pb);
 
   ::util::fibers_ext::FiberQueue queue_;
   ::boost::fibers::fiber fiber_q_;
+
+  DbSlice db_slice_;
+  uint32_t periodic_task_ = 0;
 
   static thread_local EngineShard* shard_;
 };
@@ -58,7 +69,7 @@ class EngineShardSet {
   }
 
   void Init(uint32_t size);
-  void InitThreadLocal(ShardId index);
+  void InitThreadLocal(util::ProactorBase* pb);
 
   template <typename F> auto Await(ShardId sid, F&& f) {
     return shard_queue_[sid]->Await(std::forward<F>(f));
@@ -70,6 +81,7 @@ class EngineShardSet {
   }
 
   template <typename U> void RunBriefInParallel(U&& func);
+  template <typename U> void RunBlockingInParallel(U&& func);
 
  private:
   util::ProactorPool* pp_;
@@ -93,6 +105,24 @@ template <typename U> void EngineShardSet::RunBriefInParallel(U&& func) {
     });
   }
   bc.Wait();
+}
+
+template <typename U> void EngineShardSet::RunBlockingInParallel(U&& func) {
+  util::fibers_ext::BlockingCounter bc{size()};
+
+  for (uint32_t i = 0; i < size(); ++i) {
+    util::ProactorBase* dest = pp_->at(i);
+    dest->AsyncFiber([f = std::forward<U>(func), bc]() mutable {
+      f(EngineShard::tlocal());
+      bc.Dec();
+    });
+  }
+  bc.Wait();
+}
+
+template <typename View> inline ShardId Shard(const View& v, ShardId shard_num) {
+  XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
+  return hash % shard_num;
 }
 
 }  // namespace dfly

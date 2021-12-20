@@ -1,11 +1,11 @@
-add_executable(midi-redis dfly_main.cc)
-cxx_link(midi-redis base dragonfly_lib)
+add_executable(dragonfly dfly_main.cc)
+cxx_link(dragonfly base dragonfly_lib)
 
-add_library(dragonfly_lib command_registry.cc common_types.cc config_flags.cc 
+add_library(dragonfly_lib command_registry.cc common.cc config_flags.cc
             conn_context.cc db_slice.cc debugcmd.cc dragonfly_listener.cc
-            dragonfly_connection.cc engine_shard_set.cc 
-            main_service.cc memcache_parser.cc 
-            redis_parser.cc resp_expr.cc reply_builder.cc)
+            dragonfly_connection.cc engine_shard_set.cc
+            main_service.cc memcache_parser.cc
+            redis_parser.cc resp_expr.cc reply_builder.cc string_family.cc)
 
 cxx_link(dragonfly_lib uring_fiber_lib
          fibers_ext strings_lib http_server_lib tls_lib)

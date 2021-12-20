@@ -103,6 +103,10 @@ class ReplyBuilder {
   // This one is prefixed with + and with clrf added automatically to each item..
   void SendSimpleStrArr(const std::string_view* arr, uint32_t count);
 
+  void SendNull() {
+    as_resp()->SendNull();
+  }
+
  private:
   RespSerializer* as_resp() {
     return static_cast<RespSerializer*>(serializer_.get());

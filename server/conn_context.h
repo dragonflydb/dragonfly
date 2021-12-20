@@ -13,6 +13,23 @@ class Connection;
 class EngineShardSet;
 class CommandId;
 
+struct ConnectionState {
+  enum Mask : uint32_t {
+    ASYNC_DISPATCH = 1,  // whether a command is handled via async dispatch.
+    CONN_CLOSING = 2,    // could be because of unrecoverable error or planned action.
+  };
+
+  uint32_t mask = 0;  // A bitmask of Mask values.
+
+  bool IsClosing() const {
+    return mask & CONN_CLOSING;
+  }
+
+  bool IsRunViaDispatch() const {
+    return mask & ASYNC_DISPATCH;
+  }
+};
+
 class ConnectionContext : public ReplyBuilder {
  public:
   ConnectionContext(::io::Sink* stream, Connection* owner);

@@ -1,7 +1,6 @@
-# midi-redis
+# Dragonfly
 
-A toy memory store that supports basic commands like `SET` and `GET` for both memcached and redis protocols.
-In addition, it supports redis `PING` command.
+A toy memory store that supports basic commands like `SET` and `GET` for both memcached and redis protocols. In addition, it supports redis `PING` command.
 
 Demo features include:
 1. High throughput reaching millions of QPS on a single node.
@@ -13,16 +12,16 @@ I've tested the build on Ubuntu 21.04+.
 
 
 ```
-git clone --recursive https://github.com/romange/midi-redis
-cd midi-redis && ./helio/blaze.sh -release
-cd build-opt && ninja midi-redis
+git clone --recursive https://github.com/romange/dragonfly
+cd dragonfly && ./helio/blaze.sh -release
+cd build-opt && ninja dragonfly
 
 ```
 
 ## Running
 
 ```
-./midi-redis --logtostderr
+./dragonfly --logtostderr
 ```
 
-for more options, run `./midi-redis --help`
+for more options, run `./dragonfly --help`

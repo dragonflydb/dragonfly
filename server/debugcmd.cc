@@ -7,22 +7,26 @@
 
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
+#include "server/error.h"
+#include "server/string_family.h"
 
 namespace dfly {
 
 using namespace boost;
 using namespace std;
 
-static const char kUintErr[] = "value is out of range, must be positive";
-
 struct PopulateBatch {
+  DbIndex dbid;
   uint64_t index[32];
   uint64_t sz = 0;
+
+  PopulateBatch(DbIndex id) : dbid(id) {
+  }
 };
 
-void DoPopulateBatch(std::string_view prefix, size_t val_size, const PopulateBatch& ps) {
-  EngineShard* es = EngineShard::tlocal();
-  DbSlice& db_slice = es->db_slice;
+void DoPopulateBatch(std::string_view prefix, size_t val_size,
+                     const SetCmd::SetParams& params, const PopulateBatch& ps) {
+  SetCmd sg(&EngineShard::tlocal()->db_slice());
 
   for (unsigned i = 0; i < ps.sz; ++i) {
     string key = absl::StrCat(prefix, ":", ps.index[i]);
@@ -31,10 +35,7 @@ void DoPopulateBatch(std::string_view prefix, size_t val_size, const PopulateBat
     if (val.size() < val_size) {
       val.resize(val_size, 'x');
     }
-    auto [it, res] = db_slice.AddOrFind(0, key);
-    if (res) {
-      it->second = std::move(val);
-    }
+    sg.Set(params, key, val);
   }
 }
 
@@ -98,11 +99,12 @@ void DebugCmd::Populate(CmdArgList args) {
   }
   ranges.emplace_back(from, total_count - from);
 
-  auto distribute_cb = [this, val_size, prefix](
-                           uint64_t from, uint64_t len) {
+  auto distribute_cb = [this, val_size, prefix](uint64_t from, uint64_t len) {
     string key = absl::StrCat(prefix, ":");
     size_t prefsize = key.size();
-    std::vector<PopulateBatch> ps(ess_->size(), PopulateBatch{});
+    DbIndex db_indx = 0;  // TODO
+    std::vector<PopulateBatch> ps(ess_->size(), PopulateBatch{db_indx});
+    SetCmd::SetParams params{db_indx};
 
     for (uint64_t i = from; i < from + len; ++i) {
       absl::StrAppend(&key, i);
@@ -113,7 +115,7 @@ void DebugCmd::Populate(CmdArgList args) {
       pops.index[pops.sz++] = i;
       if (pops.sz == 32) {
         ess_->Add(sid, [=, p = pops] {
-          DoPopulateBatch(prefix, val_size, p);
+          DoPopulateBatch(prefix, val_size, params, p);
           if (i % 100 == 0) {
             this_fiber::yield();
           }
@@ -125,7 +127,9 @@ void DebugCmd::Populate(CmdArgList args) {
     }
 
     ess_->RunBriefInParallel(
-        [&](EngineShard* shard) { DoPopulateBatch(prefix, val_size, ps[shard->shard_id()]); });
+        [&](EngineShard* shard) {
+          DoPopulateBatch(prefix, val_size, params, ps[shard->shard_id()]);
+        });
   };
   vector<fibers::fiber> fb_arr(ranges.size());
   for (size_t i = 0; i < ranges.size(); ++i) {
