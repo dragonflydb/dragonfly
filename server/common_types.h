@@ -12,9 +12,17 @@
 
 namespace dfly {
 
+enum class Protocol : uint8_t {
+  MEMCACHE = 1,
+  REDIS = 2
+};
+
 using DbIndex = uint16_t;
 using ShardId = uint16_t;
+using TxId = uint64_t;
+using TxClock = uint64_t;
 
+using ArgSlice = absl::Span<const std::string_view>;
 using MutableStrSpan = absl::Span<char>;
 using CmdArgList = absl::Span<MutableStrSpan>;
 using CmdArgVec = std::vector<MutableStrSpan>;
@@ -23,7 +31,14 @@ constexpr DbIndex kInvalidDbId = DbIndex(-1);
 constexpr ShardId kInvalidSid = ShardId(-1);
 
 class CommandId;
+class Transaction;
 class EngineShard;
+
+struct KeyLockArgs {
+  DbIndex db_index;
+  ArgSlice args;
+  unsigned key_step;
+};
 
 inline std::string_view ArgS(CmdArgList args, size_t i) {
   auto arg = args[i];

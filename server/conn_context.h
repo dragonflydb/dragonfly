@@ -4,8 +4,8 @@
 
 #pragma once
 
-#include "server/reply_builder.h"
 #include "server/common_types.h"
+#include "server/reply_builder.h"
 
 namespace dfly {
 
@@ -35,6 +35,7 @@ class ConnectionContext : public ReplyBuilder {
   ConnectionContext(::io::Sink* stream, Connection* owner);
 
   // TODO: to introduce proper accessors.
+  Transaction* transaction = nullptr;
   const CommandId* cid = nullptr;
   EngineShardSet* shard_set = nullptr;
 

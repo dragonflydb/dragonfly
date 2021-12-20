@@ -5,7 +5,7 @@
 #pragma once
 
 #include "server/common_types.h"
-#include "server/op_status.h"
+#include "core/op_status.h"
 #include "server/table.h"
 
 namespace util {

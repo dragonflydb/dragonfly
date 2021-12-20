@@ -3,9 +3,9 @@
 //
 #include <string_view>
 
+#include "core/op_status.h"
 #include "io/sync_stream_interface.h"
-#include "server/dfly_protocol.h"
-#include "server/op_status.h"
+#include "server/common_types.h"
 
 namespace dfly {
 

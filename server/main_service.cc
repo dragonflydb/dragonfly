@@ -13,8 +13,9 @@
 #include "base/logging.h"
 #include "server/conn_context.h"
 #include "server/debugcmd.h"
-#include "util/metrics/metrics.h"
+#include "server/error.h"
 #include "server/string_family.h"
+#include "util/metrics/metrics.h"
 #include "util/uring/uring_fiber_algo.h"
 #include "util/varz.h"
 

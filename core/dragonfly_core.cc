@@ -2,9 +2,9 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/resp_expr.h"
-
 #include "base/logging.h"
+#include "core/intent_lock.h"
+#include "core/resp_expr.h"
 
 namespace dfly {
 
@@ -26,10 +26,25 @@ const char* RespExpr::TypeName(Type t) {
   ABSL_INTERNAL_UNREACHABLE;
 }
 
+const char* IntentLock::ModeName(Mode m) {
+  switch (m) {
+    case IntentLock::SHARED:
+      return "SHARED";
+    case IntentLock::EXCLUSIVE:
+      return "EXCLUSIVE";
+  }
+  ABSL_INTERNAL_UNREACHABLE;
+}
+
+void IntentLock::VerifyDebug() {
+  constexpr uint32_t kMsb = 1ULL << (sizeof(cnt_[0]) * 8 - 1);
+  DCHECK_EQ(0u, cnt_[0] & kMsb);
+  DCHECK_EQ(0u, cnt_[1] & kMsb);
+}
+
 }  // namespace dfly
 
 namespace std {
-
 ostream& operator<<(ostream& os, const dfly::RespExpr& e) {
   using dfly::RespExpr;
   using dfly::ToSV;
@@ -39,7 +54,7 @@ ostream& operator<<(ostream& os, const dfly::RespExpr& e) {
       os << "i" << get<int64_t>(e.u);
       break;
     case RespExpr::STRING:
-      os << "'" << ToSV(e.GetBuf()) << "'";
+      os << "'" << ToSV(get<RespExpr::Buffer>(e.u)) << "'";
       break;
     case RespExpr::NIL:
       os << "nil";
@@ -51,7 +66,7 @@ ostream& operator<<(ostream& os, const dfly::RespExpr& e) {
       os << dfly::RespSpan{*get<RespExpr::Vec*>(e.u)};
       break;
     case RespExpr::ERROR:
-      os << "e(" << ToSV(e.GetBuf()) << ")";
+      os << "e(" << ToSV(get<RespExpr::Buffer>(e.u)) << ")";
       break;
   }
 

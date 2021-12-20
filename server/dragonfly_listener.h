@@ -5,7 +5,7 @@
 #pragma once
 
 #include "util/listener_interface.h"
-#include "server/dfly_protocol.h"
+#include "server/common_types.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
 

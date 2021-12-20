@@ -9,9 +9,8 @@
 #include <deque>
 
 #include "base/io_buf.h"
+#include "core/resp_expr.h"
 #include "server/common_types.h"
-#include "server/dfly_protocol.h"
-#include "server/resp_expr.h"
 #include "util/connection.h"
 #include "util/fibers/event_count.h"
 

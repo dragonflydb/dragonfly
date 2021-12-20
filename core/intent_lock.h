@@ -1,0 +1,54 @@
+// Copyright 2021, Roman Gershman.  All rights reserved.
+// See LICENSE for licensing terms.
+//
+#include <assert.h>
+
+#pragma once
+
+namespace dfly {
+
+// SHARED - can be acquired multiple times as long as other intents are absent.
+// EXCLUSIVE - is acquired only if it's the only lock recorded.
+// BLOCKED_READY - can not be acquired - it's recorded for intent purposes.
+// Transactions at the head of tx-queue are considered to be the ones that acquired the lock
+class IntentLock {
+ public:
+  enum Mode { SHARED = 0, EXCLUSIVE = 1 };
+
+  // Returns true if lock was acquired. In any case, the intent is recorded.
+  bool Acquire(Mode m) {
+    ++cnt_[m];
+
+    if (cnt_[1 ^ int(m)])
+      return false;
+    return m == SHARED || cnt_[EXCLUSIVE] == 1;
+  }
+
+  bool Check(Mode m) const {
+    unsigned s = cnt_[EXCLUSIVE];
+    if (s)
+      return false;
+
+    return (m == SHARED) ? true : IsFree();
+  }
+
+  void Release(Mode m, unsigned val = 1) {
+    assert(cnt_[m] >= val);
+
+    cnt_[m] -= val;
+    // return cnt_[m] == 0 ? cnt_[1 ^ int(m)] : 0;
+  }
+
+  bool IsFree() const {
+    return (cnt_[0] | cnt_[1]) == 0;
+  }
+
+  static const char* ModeName(Mode m);
+
+  void VerifyDebug();
+
+ private:
+  unsigned cnt_[2] = {0, 0};
+};
+
+}  // namespace dfly
