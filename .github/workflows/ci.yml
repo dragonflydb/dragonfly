@@ -1,0 +1,45 @@
+name: ci-tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
+  BUILD_TYPE: Debug
+
+jobs:
+  build:
+    # The CMake configure and build commands are platform agnostic and should work equally
+    # well on Windows or Mac.  You can convert this to a matrix build if you need
+    # cross-platform coverage.
+    # See: https://docs.github.com/en/free-pro-team@latest/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Install dependencies
+      run: |
+          uname -a
+          sudo apt update
+          sudo apt install -y autoconf-archive bison libunwind-dev libfl-dev ninja-build libtool curl gcc-10 g++-10
+          sudo apt install -y libboost-all-dev libxml2-dev zip 
+          cmake --version
+    - name: Configure CMake
+      # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
+      # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
+      run: |
+          cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -GNinja
+          cd ${{github.workspace}}/build           
+      env:
+        CC: gcc-10
+        CXX: g++-10
+
+    - name: Build & Test
+      working-directory: ${{github.workspace}}/build
+      run: |          
+          ninja core/all server/all
+          CTEST_OUTPUT_ON_FAILURE=1 ninja core/test server/test
