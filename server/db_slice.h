@@ -4,8 +4,12 @@
 
 #pragma once
 
-#include "server/common_types.h"
+#include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
+
+#include "core/intent_lock.h"
 #include "core/op_status.h"
+#include "server/common_types.h"
 #include "server/table.h"
 
 namespace util {
@@ -43,7 +47,6 @@ class DbSlice {
   // Returns (value, expire) dict entries if key exists, null if it does not exist or has expired.
   std::pair<MainIterator, ExpireIterator> FindExt(DbIndex db_ind, std::string_view key) const;
 
-
   // Return .second=true if insertion ocurred, false if we return the existing key.
   std::pair<MainIterator, bool> AddOrFind(DbIndex db_ind, std::string_view key);
 
@@ -61,22 +64,31 @@ class DbSlice {
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);
 
-  ShardId shard_id() const { return shard_id_;}
+  ShardId shard_id() const {
+    return shard_id_;
+  }
+
+  bool Acquire(IntentLock::Mode m, const KeyLockArgs& lock_args);
+
+  void Release(IntentLock::Mode m, const KeyLockArgs& lock_args);
+  void Release(IntentLock::Mode m, DbIndex db_index, std::string_view key, unsigned count);
+
+  // Returns true if all keys can be locked under m. Does not lock them though.
+  bool CheckLock(IntentLock::Mode m, const KeyLockArgs& lock_args) const;
 
   size_t db_array_size() const {
     return db_arr_.size();
   }
 
   bool IsDbValid(DbIndex id) const {
-    return bool(db_arr_[id].main_table);
+    return id < db_arr_.size() && bool(db_arr_[id]);
   }
 
   // Returns existing keys count in the db.
   size_t DbSize(DbIndex db_ind) const;
 
  private:
-
-  void CreateDbRedis(unsigned index);
+  void CreateDb(DbIndex index);
 
   ShardId shard_id_;
 
@@ -84,14 +96,20 @@ class DbSlice {
 
   uint64_t now_ms_ = 0;  // Used for expire logic, represents a real clock.
 
-  struct DbRedis {
-    std::unique_ptr<MainTable> main_table;
-    std::unique_ptr<ExpireTable> expire_table;
+  using LockTable = absl::flat_hash_map<std::string, IntentLock>;
+
+  struct DbWrapper {
+    MainTable main_table;
+    ExpireTable expire_table;
+    LockTable lock_table;
 
     mutable InternalDbStats stats;
   };
 
-  std::vector<DbRedis> db_arr_;
+  std::vector<std::unique_ptr<DbWrapper>> db_arr_;
+
+  // Used in temporary computations in Acquire/Release.
+  absl::flat_hash_set<std::string_view> uniq_keys_;
 };
 
 }  // namespace dfly

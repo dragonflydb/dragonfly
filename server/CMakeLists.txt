@@ -5,7 +5,7 @@ add_library(dragonfly_lib command_registry.cc common.cc config_flags.cc
             conn_context.cc db_slice.cc debugcmd.cc dragonfly_listener.cc
             dragonfly_connection.cc engine_shard_set.cc
             main_service.cc memcache_parser.cc
-            redis_parser.cc reply_builder.cc string_family.cc)
+            redis_parser.cc reply_builder.cc string_family.cc transaction.cc)
 
 cxx_link(dragonfly_lib dfly_core uring_fiber_lib
          fibers_ext strings_lib http_server_lib tls_lib)

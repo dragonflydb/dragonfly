@@ -15,6 +15,7 @@
 #include "server/debugcmd.h"
 #include "server/error.h"
 #include "server/string_family.h"
+#include "server/transaction.h"
 #include "util/metrics/metrics.h"
 #include "util/uring/uring_fiber_algo.h"
 #include "util/varz.h"
@@ -27,7 +28,7 @@ namespace dfly {
 using namespace std;
 using namespace util;
 using base::VarzValue;
-
+using ::boost::intrusive_ptr;
 namespace fibers = ::boost::fibers;
 namespace this_fiber = ::boost::this_fiber;
 
@@ -96,7 +97,23 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
       (cid->arity() < 0 && args.size() < size_t(-cid->arity()))) {
     return cntx->SendError(WrongNumArgsError(cmd_str));
   }
+
   uint64_t start_usec = ProactorBase::GetMonotonicTimeNs(), end_usec;
+
+  // Create command transaction
+  intrusive_ptr<Transaction> dist_trans;
+
+  if (cid->first_key_pos() > 0) {
+    dist_trans.reset(new Transaction{cid, &shard_set_});
+    cntx->transaction = dist_trans.get();
+
+    if (cid->first_key_pos() > 0) {
+      dist_trans->InitByArgs(args);
+    }
+  } else {
+    cntx->transaction = nullptr;
+  }
+
   cntx->cid = cid;
   cmd_req.Inc({cid->name()});
   cid->Invoke(args, cntx);

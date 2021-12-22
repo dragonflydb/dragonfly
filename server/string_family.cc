@@ -11,6 +11,7 @@
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/transaction.h"
 #include "util/varz.h"
 
 namespace dfly {
@@ -115,13 +116,14 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  ShardId sid = Shard(key, cntx->shard_set->size());
-  OpResult<void> result = cntx->shard_set->Await(sid, [&] {
-    EngineShard* es = EngineShard::tlocal();
-    SetCmd cmd(&es->db_slice());
+  DCHECK(cntx->transaction);
 
-    return cmd.Set(sparams, key, value);
-  });
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    SetCmd sg(&shard->db_slice());
+    auto status = sg.Set(sparams, key, value).status();
+    return status;
+  };
+  OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
 
   if (result == OpStatus::OK) {
     return cntx->SendStored();
@@ -135,23 +137,23 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   get_qps.Inc();
 
   std::string_view key = ArgS(args, 1);
-  ShardId sid = Shard(key, cntx->shard_set->size());
 
-  OpResult<string> result = cntx->shard_set->Await(sid, [&] {
-    EngineShard* es = EngineShard::tlocal();
-    OpResult<MainIterator> opres_it = es->db_slice().Find(0, key);
-    OpResult<string> res;
-    if (opres_it) {
-      res = opres_it.value()->second.str;
-    } else {
-      res = opres_it.status();
-    }
-    return res;
-  });
+  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<string> {
+    OpResult<MainIterator> it_res = shard->db_slice().Find(0, key);
+    if (!it_res.ok())
+      return it_res.status();
+
+    string val = it_res.value()->second.str;
+
+    return val;
+  };
+
+  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
+  Transaction* trans = cntx->transaction;
+  OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    DVLOG(1) << "GET "
-             << ": " << key << " " << result.value();
+    DVLOG(1) << "GET " << trans->DebugId() << ": " << key << " " << result.value();
     cntx->SendGetReply(key, 0, result.value());
   } else {
     DVLOG(1) << "GET " << key << " nil";
@@ -169,7 +171,7 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
 
   ShardId sid = Shard(key, cntx->shard_set->size());
   OpResult<void> result = cntx->shard_set->Await(sid, [&] {
-    EngineShard* es = EngineShard::tlocal();
+  EngineShard* es = EngineShard::tlocal();
     SetCmd cmd(&es->db_slice());
 
     return cmd.Set(sparams, key, value);
