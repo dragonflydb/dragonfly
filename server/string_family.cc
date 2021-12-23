@@ -189,6 +189,96 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
   return cntx->SendNull();
 }
 
+void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
+  DCHECK_GT(args.size(), 1U);
+
+  Transaction* transaction = cntx->transaction;
+  unsigned shard_count = transaction->shard_set()->size();
+  std::vector<MGetResponse> mget_resp(shard_count);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    ShardId sid = shard->shard_id();
+    mget_resp[sid] = OpMGet(t, shard);
+    return OpStatus::OK;
+  };
+
+  // MGet requires locking as well. For example, if coordinator A applied W(x) and then W(y)
+  // it necessarily means that whoever observed y, must observe x.
+  // Without locking, mget x y could read stale x but latest y.
+  OpStatus result = transaction->ScheduleSingleHop(std::move(cb));
+  CHECK_EQ(OpStatus::OK, result);
+
+  // reorder the responses back according to the order of their corresponding keys.
+  vector<std::optional<std::string_view>> res(args.size() - 1);
+  for (ShardId sid = 0; sid < shard_count; ++sid) {
+    if (!transaction->IsActive(sid))
+      continue;
+    auto& values = mget_resp[sid];
+    ArgSlice slice = transaction->ShardArgsInShard(sid);
+    DCHECK(!slice.empty());
+    DCHECK_EQ(slice.size(), values.size());
+    for (size_t j = 0; j < slice.size(); ++j) {
+      uint32_t indx = transaction->ReverseArgIndex(sid, j);
+      res[indx] = values[j];
+    }
+  }
+
+  return cntx->SendMGetResponse(res.data(), res.size());
+}
+
+void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
+  Transaction* transaction = cntx->transaction;
+
+  if (VLOG_IS_ON(2)) {
+    string str;
+    for (size_t i = 1; i < args.size(); ++i) {
+      absl::StrAppend(&str, " ", ArgS(args, i));
+    }
+    LOG(INFO) << "MSET/" << transaction->unique_shard_cnt() << str;
+  }
+
+  OpStatus status = transaction->ScheduleSingleHop(&OpMSet);
+  CHECK_EQ(OpStatus::OK, status);
+
+  DVLOG(2) << "MSet run  " << transaction->DebugId();
+
+  return cntx->SendOk();
+}
+
+
+auto StringFamily::OpMGet(const Transaction* t, EngineShard* shard) -> MGetResponse {
+  auto args = t->ShardArgsInShard(shard->shard_id());
+  DCHECK(!args.empty());
+
+  MGetResponse response(args.size());
+
+  auto& db_slice = shard->db_slice();
+  for (size_t i = 0; i < args.size(); ++i) {
+    OpResult<MainIterator> de_res = db_slice.Find(0, args[i]);
+    if (de_res.ok()) {
+      response[i] = de_res.value()->second.str;
+    }
+  }
+
+  return response;
+}
+
+OpStatus StringFamily::OpMSet(const Transaction* t, EngineShard* es) {
+  ArgSlice largs = t->ShardArgsInShard(es->shard_id());
+  CHECK(!largs.empty() && largs.size() % 2 == 0);
+
+  SetCmd::SetParams params{0};
+  SetCmd sg(&es->db_slice());
+  for (size_t i = 0; i < largs.size(); i += 2) {
+    DVLOG(1) << "MSet " << largs[i] << ":" << largs[i + 1];
+    auto res = sg.Set(params, largs[i], largs[i + 1]);
+    CHECK(res.ok()) << res << " " << largs[i];  // TODO - handle OOM etc.
+  }
+
+  return OpStatus::OK;
+}
+
+
 void StringFamily::Init(util::ProactorPool* pp) {
   set_qps.Init(pp);
   get_qps.Init(pp);
@@ -204,7 +294,9 @@ void StringFamily::Shutdown() {
 void StringFamily::Register(CommandRegistry* registry) {
   *registry << CI{"SET", CO::WRITE | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(Set)
             << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Get)
-            << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(GetSet);
+            << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(GetSet)
+            << CI{"MGET", CO::READONLY | CO::FAST, -2, 1, -1, 1}.HFUNC(MGet)
+            << CI{"MSET", CO::WRITE | CO::DENYOOM, -3, 1, -1, 2}.HFUNC(MSet);
 }
 
 }  // namespace dfly

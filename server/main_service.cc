@@ -98,6 +98,10 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(WrongNumArgsError(cmd_str));
   }
 
+  if (cid->key_arg_step() == 2 && (args.size() % 2) == 0) {
+    return cntx->SendError(WrongNumArgsError(cmd_str));
+  }
+
   uint64_t start_usec = ProactorBase::GetMonotonicTimeNs(), end_usec;
 
   // Create command transaction
@@ -171,7 +175,7 @@ void Service::RegisterHttp(HttpListenerBase* listener) {
 
 void Service::Ping(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 2) {
-    return cntx->SendError("wrong number of arguments for 'ping' command");
+    return cntx->SendError(WrongNumArgsError("PING"));
   }
   ping_qps.Inc();
 

@@ -89,7 +89,7 @@ void Transaction::InitByArgs(CmdArgList args) {
   }
 
   CHECK(cid_->key_arg_step() == 1 || cid_->key_arg_step() == 2);
-  CHECK(cid_->key_arg_step() == 1 || (args.size() % 2) == 1);
+  DCHECK(cid_->key_arg_step() == 1 || (args.size() % 2) == 1);
 
   // Reuse thread-local temporary storage. Since this code is non-preemptive we can use it here.
   auto& shard_index = tmp_space.shard_cache;

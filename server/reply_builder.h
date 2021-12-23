@@ -1,6 +1,7 @@
 // Copyright 2021, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
+#include <optional>
 #include <string_view>
 
 #include "core/op_status.h"
@@ -12,6 +13,8 @@ namespace dfly {
 class BaseSerializer {
  public:
   explicit BaseSerializer(::io::Sink* sink);
+  virtual ~BaseSerializer() {
+  }
 
   std::error_code ec() const {
     return ec_;
@@ -106,6 +109,9 @@ class ReplyBuilder {
   void SendNull() {
     as_resp()->SendNull();
   }
+
+  using StrOrNil = std::optional<std::string_view>;
+  void SendMGetResponse(const StrOrNil* arr, uint32_t count);
 
  private:
   RespSerializer* as_resp() {

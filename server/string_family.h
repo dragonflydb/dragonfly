@@ -4,15 +4,14 @@
 
 #pragma once
 
-#include "server/engine_shard_set.h"
 #include "server/common_types.h"
+#include "server/engine_shard_set.h"
 #include "util/proactor_pool.h"
 
 namespace dfly {
 
 class ConnectionContext;
 class CommandRegistry;
-
 
 class SetCmd {
   DbSlice* db_slice_;
@@ -30,7 +29,7 @@ class SetCmd {
     // Relative value based on now. 0 means no expiration.
     uint64_t expire_after_ms = 0;
     mutable std::optional<std::string>* prev_val = nullptr;  // GETSET option
-    bool keep_expire = false;         // KEEPTTL - TODO: to implement it.
+    bool keep_expire = false;                                // KEEPTTL - TODO: to implement it.
 
     explicit SetParams(DbIndex dib) : db_index(dib) {
     }
@@ -54,6 +53,14 @@ class StringFamily {
   static void Set(CmdArgList args, ConnectionContext* cntx);
   static void Get(CmdArgList args, ConnectionContext* cntx);
   static void GetSet(CmdArgList args, ConnectionContext* cntx);
+  static void MGet(CmdArgList args, ConnectionContext* cntx);
+  static void MSet(CmdArgList args, ConnectionContext* cntx);
+
+  using MGetResponse = std::vector<std::optional<std::string>>;
+
+  static MGetResponse OpMGet(const Transaction* t, EngineShard* shard);
+
+  static OpStatus OpMSet(const Transaction* t, EngineShard* es);
 };
 
 }  // namespace dfly

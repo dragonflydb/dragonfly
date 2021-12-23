@@ -177,6 +177,20 @@ void ReplyBuilder::SendGetNotFound() {
   }
 }
 
+void ReplyBuilder::SendMGetResponse(const StrOrNil* arr, uint32_t count) {
+  string res = absl::StrCat("*", count, kCRLF);
+  for (size_t i = 0; i < count; ++i) {
+    if (arr[i]) {
+      StrAppend(&res, "$", arr[i]->size(), kCRLF);
+      res.append(*arr[i]).append(kCRLF);
+    } else {
+      res.append("$-1\r\n");
+    }
+  }
+
+  as_resp()->SendDirect(res);
+}
+
 void ReplyBuilder::SendSimpleStrArr(const std::string_view* arr, uint32_t count) {
   CHECK(protocol_ == Protocol::REDIS);
   string res = absl::StrCat("*", count, kCRLF);
