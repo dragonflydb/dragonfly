@@ -40,6 +40,11 @@ struct KeyLockArgs {
   unsigned key_step;
 };
 
+struct OpArgs {
+  EngineShard* shard;
+  DbIndex db_ind;
+};
+
 inline std::string_view ArgS(CmdArgList args, size_t i) {
   auto arg = args[i];
   return std::string_view(arg.data(), arg.size());

@@ -98,6 +98,9 @@ class ReplyBuilder {
   void SendGetReply(std::string_view key, uint32_t flags, std::string_view value);
   void SendGetNotFound();
 
+  using StrOrNil = std::optional<std::string_view>;
+  void SendMGetResponse(const StrOrNil* arr, uint32_t count);
+
   void SetBatchMode(bool mode) {
     serializer_->SetBatchMode(mode);
   }
@@ -110,8 +113,11 @@ class ReplyBuilder {
     as_resp()->SendNull();
   }
 
-  using StrOrNil = std::optional<std::string_view>;
-  void SendMGetResponse(const StrOrNil* arr, uint32_t count);
+  void SendLong(long val);
+
+  void SendBulkString(std::string_view str) {
+    as_resp()->SendBulkString(str);
+  }
 
  private:
   RespSerializer* as_resp() {

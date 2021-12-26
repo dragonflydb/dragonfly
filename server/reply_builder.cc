@@ -177,6 +177,11 @@ void ReplyBuilder::SendGetNotFound() {
   }
 }
 
+void ReplyBuilder::SendLong(long num) {
+  string str = absl::StrCat(":", num, kCRLF);
+  as_resp()->SendDirect(str);
+}
+
 void ReplyBuilder::SendMGetResponse(const StrOrNil* arr, uint32_t count) {
   string res = absl::StrCat("*", count, kCRLF);
   for (size_t i = 0; i < count; ++i) {

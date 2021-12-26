@@ -80,7 +80,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   std::string_view value = ArgS(args, 2);
   VLOG(2) << "Set " << key << " " << value;
 
-  SetCmd::SetParams sparams{0};  // TODO: db_index.
+  SetCmd::SetParams sparams{cntx->db_index()};  // TODO: db_index.
   int64_t int_arg;
 
   for (size_t i = 3; i < args.size(); ++i) {
@@ -139,7 +139,7 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   std::string_view key = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<string> {
-    OpResult<MainIterator> it_res = shard->db_slice().Find(0, key);
+    OpResult<MainIterator> it_res = shard->db_slice().Find(cntx->db_index(), key);
     if (!it_res.ok())
       return it_res.status();
 
@@ -166,12 +166,12 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
   std::string_view value = ArgS(args, 2);
   std::optional<string> prev_val;
 
-  SetCmd::SetParams sparams{0};
+  SetCmd::SetParams sparams{cntx->db_index()};
   sparams.prev_val = &prev_val;
 
   ShardId sid = Shard(key, cntx->shard_set->size());
   OpResult<void> result = cntx->shard_set->Await(sid, [&] {
-  EngineShard* es = EngineShard::tlocal();
+    EngineShard* es = EngineShard::tlocal();
     SetCmd cmd(&es->db_slice());
 
     return cmd.Set(sparams, key, value);
@@ -245,7 +245,6 @@ void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
   return cntx->SendOk();
 }
 
-
 auto StringFamily::OpMGet(const Transaction* t, EngineShard* shard) -> MGetResponse {
   auto args = t->ShardArgsInShard(shard->shard_id());
   DCHECK(!args.empty());
@@ -277,7 +276,6 @@ OpStatus StringFamily::OpMSet(const Transaction* t, EngineShard* es) {
 
   return OpStatus::OK;
 }
-
 
 void StringFamily::Init(util::ProactorPool* pp) {
   set_qps.Init(pp);

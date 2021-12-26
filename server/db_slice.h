@@ -64,6 +64,8 @@ class DbSlice {
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);
 
+  bool Del(DbIndex db_ind, const MainIterator& it);
+
   ShardId shard_id() const {
     return shard_id_;
   }

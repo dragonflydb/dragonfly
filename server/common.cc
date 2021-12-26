@@ -21,6 +21,8 @@ string WrongNumArgsError(std::string_view cmd) {
 const char kSyntaxErr[] = "syntax error";
 const char kInvalidIntErr[] = "value is not an integer or out of range";
 const char kUintErr[] = "value is out of range, must be positive";
+const char kDbIndOutOfRangeErr[] = "DB index is out of range";
+const char kInvalidDbIndErr[] = "invalid DB index";
 
 }  // namespace dfly
 

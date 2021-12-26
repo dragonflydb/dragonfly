@@ -111,12 +111,7 @@ class CommandRegistry {
  public:
   CommandRegistry();
 
-  CommandRegistry& operator<<(CommandId cmd) {
-    const char* k = cmd.name();
-    cmd_map_.emplace(k, std::move(cmd));
-
-    return *this;
-  }
+  CommandRegistry& operator<<(CommandId cmd);
 
   const CommandId* Find(std::string_view cmd) const {
     auto it = cmd_map_.find(cmd);

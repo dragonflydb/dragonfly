@@ -14,6 +14,7 @@
 #include "server/conn_context.h"
 #include "server/debugcmd.h"
 #include "server/error.h"
+#include "server/generic_family.h"
 #include "server/string_family.h"
 #include "server/transaction.h"
 #include "util/metrics/metrics.h"
@@ -64,6 +65,7 @@ void Service::Init(util::AcceptServer* acceptor) {
   request_latency_usec.Init(&pp_);
   ping_qps.Init(&pp_);
   StringFamily::Init(&pp_);
+  GenericFamily::Init(&pp_);
   cmd_req.Init(&pp_, {"type"});
 }
 
@@ -74,7 +76,7 @@ void Service::Shutdown() {
   request_latency_usec.Shutdown();
   ping_qps.Shutdown();
   StringFamily::Shutdown();
-
+  GenericFamily::Shutdown();
   shard_set_.RunBlockingInParallel([&](EngineShard*) { EngineShard::DestroyThreadLocal(); });
 }
 
@@ -173,21 +175,6 @@ void Service::RegisterHttp(HttpListenerBase* listener) {
   CHECK_NOTNULL(listener);
 }
 
-void Service::Ping(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() > 2) {
-    return cntx->SendError(WrongNumArgsError("PING"));
-  }
-  ping_qps.Inc();
-
-  if (args.size() == 1) {
-    return cntx->SendSimpleRespString("PONG");
-  }
-  std::string_view arg = ArgS(args, 1);
-  DVLOG(2) << "Ping " << arg;
-
-  return cntx->SendSimpleRespString(arg);
-}
-
 void Service::Debug(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[1]);
 
@@ -216,9 +203,10 @@ inline CommandId::Handler HandlerFunc(Service* se, ServiceFunc f) {
 void Service::RegisterCommands() {
   using CI = CommandId;
 
-  registry_ << CI{"PING", CO::STALE | CO::FAST, -1, 0, 0, 0}.HFUNC(Ping)
-            << CI{"DEBUG", CO::RANDOM | CO::READONLY, -2, 0, 0, 0}.HFUNC(Debug);
+  registry_ << CI{"DEBUG", CO::RANDOM | CO::READONLY, -2, 0, 0, 0}.HFUNC(Debug);
+
   StringFamily::Register(&registry_);
+  GenericFamily::Register(&registry_);
 }
 
 }  // namespace dfly

@@ -86,14 +86,13 @@ class Transaction {
     if (sid >= dist_.shard_data.size())
       sid = 0;
     // We use acquire so that no reordering will move before this load.
-    return arm_count_.load(std::memory_order_acquire) > 0 &&
+    return run_count_.load(std::memory_order_acquire) > 0 &&
            dist_.shard_data[sid].local_mask & ARMED;
   }
 
   // Called from engine set shard threads.
   uint16_t GetLocalMask(ShardId sid) const {
-    sid = TranslateSidInShard(sid);
-    return dist_.shard_data[sid].local_mask;
+    return dist_.shard_data[SidToId(sid)].local_mask;
   }
 
   uint32_t GetStateMask() const {
@@ -138,6 +137,10 @@ class Transaction {
 
   const char* Name() const;
 
+  DbIndex db_index() const {
+    return db_index_;  // TODO: support multiple db indexes.
+  }
+
   uint32_t unique_shard_cnt() const {
     return unique_shard_cnt_;
   }
@@ -150,7 +153,7 @@ class Transaction {
   bool RunInShard(ShardId sid);
 
  private:
-  ShardId TranslateSidInShard(ShardId sid) const {
+  unsigned SidToId(ShardId sid) const {
     return sid < dist_.shard_data.size() ? sid : 0;
   }
 
@@ -159,7 +162,7 @@ class Transaction {
   void ExecuteAsync(bool concluding_cb);
 
   // Optimized version of RunInShard for single shard uncontended cases.
-  void RunQuickSingle();
+  void RunQuickie();
 
   //! Returns true if transaction run out-of-order during the scheduling phase.
   bool ScheduleUniqueShard(EngineShard* shard);
@@ -177,18 +180,16 @@ class Transaction {
   //! Runs in the shard thread.
   KeyLockArgs GetLockArgs(ShardId sid) const;
 
-  void WaitArm() {
-    arm_ec_.await([this] { return 0 == this->arm_count_.load(std::memory_order_relaxed); });
+  void WaitForShardCallbacks() {
+    run_ec_.await([this] { return 0 == run_count_.load(std::memory_order_relaxed); });
   }
 
-  uint32_t Disarm() {
-    // We use release so that no stores will be reordered after.
-    uint32_t res = arm_count_.fetch_sub(1, std::memory_order_release);
-    arm_ec_.notify();
-    return res;
-  }
+  // Returns the previous value of arm count.
+  uint32_t DecreaseRunCnt();
 
-  uint32_t use_count() const { return use_count_.load(std::memory_order_relaxed); }
+  uint32_t use_count() const {
+    return use_count_.load(std::memory_order_relaxed);
+  }
 
   struct PerShardData {
     uint32_t arg_start = 0;  // Indices into args_ array.
@@ -235,13 +236,14 @@ class Transaction {
   EngineShardSet* ess_;
   TxId txid_{0};
 
-  std::atomic_uint32_t use_count_{0}, arm_count_{0};
+  std::atomic_uint32_t use_count_{0}, run_count_{0};
 
   // unique_shard_cnt_ and unique_shard_id_ is accessed only by coordinator thread.
   uint32_t unique_shard_cnt_{0};  // number of unique shards span by args_
   ShardId unique_shard_id_{kInvalidSid};
 
   // Written by coordination thread but may be read by Shard threads.
+  // A mask of State values. Mostly used for debugging and for invariant checks.
   std::atomic<uint16_t> state_mask_{0};
 
   DbIndex db_index_ = 0;
@@ -253,7 +255,7 @@ class Transaction {
 
   Dist dist_;
 
-  util::fibers_ext::EventCount arm_ec_;
+  util::fibers_ext::EventCount run_ec_;
 
   //! Stores arguments of the transaction (i.e. keys + values) ordered by shards.
   absl::InlinedVector<std::string_view, 4> args_;

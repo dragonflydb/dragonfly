@@ -183,7 +183,7 @@ bool Transaction::RunInShard(ShardId sid) {
 
   DVLOG(1) << "RunInShard: " << DebugId() << " sid:" << sid;
 
-  sid = TranslateSidInShard(sid);
+  sid = SidToId(sid);
   auto& sd = dist_.shard_data[sid];
   DCHECK(sd.local_mask & ARMED);
   sd.local_mask &= ~ARMED;
@@ -212,7 +212,7 @@ bool Transaction::RunInShard(ShardId sid) {
 
   // This shard should own a reference for transaction as well as coordinator thread.
   DCHECK_GT(use_count(), 1u);
-  CHECK_GE(Disarm(), 1u);
+  CHECK_GE(DecreaseRunCnt(), 1u);
 
   // must be computed before intrusive_ptr_release call.
   if (concluding) {
@@ -298,7 +298,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     DCHECK_EQ(1u, dist_.shard_data.size());
 
     dist_.shard_data[0].local_mask |= ARMED;
-    arm_count_.fetch_add(1, memory_order_release);  // Decreases in RunLocal.
+    run_count_.fetch_add(1, memory_order_release);  // Decreases in RunLocal.
     auto schedule_cb = [&] { return ScheduleUniqueShard(EngineShard::tlocal()); };
     run_eager = ess_->Await(unique_shard_id_, std::move(schedule_cb));  // serves as a barrier.
     (void)run_eager;
@@ -308,7 +308,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   }
 
   DVLOG(1) << "Before DoneWait " << DebugId() << " " << args_.front();
-  WaitArm();
+  WaitForShardCallbacks();
   DVLOG(1) << "After DoneWait";
 
   cb_ = nullptr;
@@ -324,7 +324,7 @@ void Transaction::Execute(RunnableType cb, bool conclude) {
   ExecuteAsync(conclude);
 
   DVLOG(1) << "Wait on " << DebugId();
-  WaitArm();
+  WaitForShardCallbacks();
   DVLOG(1) << "Wait on " << DebugId() << " completed";
   cb_ = nullptr;
   dist_.out_of_order.store(false, memory_order_relaxed);
@@ -349,7 +349,7 @@ void Transaction::ExecuteAsync(bool concluding_cb) {
   use_count_.fetch_add(unique_shard_cnt_, memory_order_relaxed);
 
   if (unique_shard_cnt_ == 1) {
-    dist_.shard_data[TranslateSidInShard(unique_shard_id_)].local_mask |= ARMED;
+    dist_.shard_data[SidToId(unique_shard_id_)].local_mask |= ARMED;
   } else {
     for (ShardId i = 0; i < dist_.shard_data.size(); ++i) {
       auto& sd = dist_.shard_data[i];
@@ -364,7 +364,7 @@ void Transaction::ExecuteAsync(bool concluding_cb) {
   // with a write operation after a release fence. Specifically no writes below will be reordered
   // upwards. Important, because it protects non-threadsafe local_mask from being accessed by
   // IsArmedInShard in other threads.
-  arm_count_.fetch_add(unique_shard_cnt_, memory_order_acq_rel);
+  run_count_.fetch_add(unique_shard_cnt_, memory_order_acq_rel);
 
   auto cb = [this] {
     EngineShard* shard = EngineShard::tlocal();
@@ -390,7 +390,7 @@ void Transaction::ExecuteAsync(bool concluding_cb) {
   }
 }
 
-void Transaction::RunQuickSingle() {
+void Transaction::RunQuickie() {
   DCHECK_EQ(1u, dist_.shard_data.size());
   DCHECK_EQ(0u, txid_);
 
@@ -405,7 +405,7 @@ void Transaction::RunQuickSingle() {
 
   sd.local_mask &= ~ARMED;
   cb_ = nullptr;  // We can do it because only a single shard runs the callback.
-  CHECK_GE(Disarm(), 1u);
+  CHECK_GE(DecreaseRunCnt(), 1u);
 }
 
 const char* Transaction::Name() const {
@@ -437,7 +437,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   // Fast path - for uncontended keys, just run the callback.
   // That applies for single key operations like set, get, lpush etc.
   if (shard->db_slice().CheckLock(mode, lock_args)) {
-    RunQuickSingle();  // TODO: for journal - this can become multi-shard
+    RunQuickie();  // TODO: for journal - this can become multi-shard
                        // transaction on replica.
     return true;
   }
@@ -473,7 +473,7 @@ pair<bool, bool> Transaction::ScheduleInShard(EngineShard* shard) {
   IntentLock::Mode mode = Mode();
 
   bool lock_granted = false;
-  ShardId sid = TranslateSidInShard(shard->shard_id());
+  ShardId sid = SidToId(shard->shard_id());
 
   auto& sd = dist_.shard_data[sid];
 
@@ -520,7 +520,7 @@ pair<bool, bool> Transaction::ScheduleInShard(EngineShard* shard) {
 }
 
 bool Transaction::CancelInShard(EngineShard* shard) {
-  ShardId sid = TranslateSidInShard(shard->shard_id());
+  ShardId sid = SidToId(shard->shard_id());
   auto& sd = dist_.shard_data[sid];
 
   auto pos = sd.pq_pos;
@@ -564,6 +564,14 @@ size_t Transaction::ReverseArgIndex(ShardId shard_id, size_t arg_index) const {
     return arg_index;
 
   return dist_.reverse_index[dist_.shard_data[shard_id].arg_start + arg_index];
+}
+
+inline uint32_t Transaction::DecreaseRunCnt() {
+  // We use release so that no stores will be reordered after.
+  uint32_t res = run_count_.fetch_sub(1, std::memory_order_release);
+  if (res == 1)
+    run_ec_.notify();
+  return res;
 }
 
 }  // namespace dfly

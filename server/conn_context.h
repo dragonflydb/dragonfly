@@ -14,6 +14,8 @@ class EngineShardSet;
 class CommandId;
 
 struct ConnectionState {
+  DbIndex db_index = 0;
+
   enum Mask : uint32_t {
     ASYNC_DISPATCH = 1,  // whether a command is handled via async dispatch.
     CONN_CLOSING = 2,    // could be because of unrecoverable error or planned action.
@@ -44,6 +46,10 @@ class ConnectionContext : public ReplyBuilder {
   }
 
   Protocol protocol() const;
+
+  DbIndex db_index() const {
+    return conn_state.db_index;
+  }
 
   ConnectionState conn_state;
 

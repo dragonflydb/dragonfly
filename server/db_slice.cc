@@ -106,6 +106,22 @@ void DbSlice::CreateDb(DbIndex index) {
   }
 }
 
+bool DbSlice::Del(DbIndex db_ind, const MainIterator& it) {
+  auto& db = db_arr_[db_ind];
+  if (it == MainIterator{}) {
+    return false;
+  }
+
+  if (it->second.HasExpire()) {
+    CHECK_EQ(1u, db->expire_table.erase(it->first));
+  }
+
+  db->stats.obj_memory_usage -= (it->first.capacity() + it->second.str.capacity());
+  db->main_table.erase(it);
+
+  return true;
+}
+
 // Returns true if a state has changed, false otherwise.
 bool DbSlice::Expire(DbIndex db_ind, MainIterator it, uint64_t at) {
   auto& db = db_arr_[db_ind];

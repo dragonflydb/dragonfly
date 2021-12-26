@@ -60,6 +60,13 @@ void CommandRegistry::Command(CmdArgList args, ConnectionContext* cntx) {
   cntx->SendRespBlob(resp);
 }
 
+CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
+  string_view k = cmd.name();
+  CHECK(cmd_map_.emplace(k, std::move(cmd)).second) << k;
+
+  return *this;
+}
+
 namespace CO {
 
 const char* OptName(CO::CommandOpt fl) {
