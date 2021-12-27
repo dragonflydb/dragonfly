@@ -25,4 +25,5 @@ include_directories(helio)
 
 add_subdirectory(helio)
 add_subdirectory(core)
+add_subdirectory(redis)
 add_subdirectory(server)
