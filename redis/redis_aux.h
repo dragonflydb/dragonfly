@@ -35,10 +35,8 @@
 int htNeedsResize(dict *dict);  // moved from server.cc
 
 /* Hash table types */
-extern dictType dbDictType;
 extern dictType zsetDictType;
 extern dictType setDictType;
-extern dictType keyPtrDictType;
 extern dictType hashDictType;
 
 /* To improve the quality of the LRU approximation we take a set of keys
@@ -63,10 +61,6 @@ struct evictionPoolEntry {
 uint64_t dictSdsHash(const void *key);
 int dictSdsKeyCompare(dict *privdata, const void *key1, const void *key2);
 void dictSdsDestructor(dict *privdata, void *val);
-int getMaxmemoryState(size_t *total, size_t *logical, size_t *tofree, float *level);
-
-void evictionPoolPopulate(int dbid, dict *sampledict, dict *keydict, struct evictionPoolEntry *pool);
-int overMaxmemoryAfterAlloc(size_t moremem);
 size_t sdsZmallocSize(sds s) ;
 
 typedef struct ServerStub {

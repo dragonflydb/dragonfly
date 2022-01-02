@@ -10,6 +10,8 @@ namespace dfly {
 
 struct MainValue {
   std::string str;
+  void* robj = nullptr;
+  uint8_t obj_type = 0;
 
   MainValue() = default;
   MainValue(std::string_view s) : str(s) {
@@ -21,6 +23,10 @@ struct MainValue {
 
   void SetExpire(bool b) {
     has_expire_ = b;
+  }
+
+  unsigned ObjType() const {
+    return obj_type;
   }
 
  private:

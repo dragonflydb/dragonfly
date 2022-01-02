@@ -32,11 +32,14 @@ EngineShard::EngineShard(util::ProactorBase* pb)
     // absl::GetCurrentTimeNanos() returns current time since the Unix Epoch.
     shard->db_slice().UpdateExpireClock(absl::GetCurrentTimeNanos() / 1000000);
   });
+
+  tmp_str = sdsempty();
 }
 
 EngineShard::~EngineShard() {
   queue_.Shutdown();
   fiber_q_.join();
+  sdsfree(tmp_str);
   if (periodic_task_) {
     ProactorBase::me()->CancelPeriodic(periodic_task_);
   }

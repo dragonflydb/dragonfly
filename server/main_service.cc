@@ -15,6 +15,7 @@
 #include "server/debugcmd.h"
 #include "server/error.h"
 #include "server/generic_family.h"
+#include "server/list_family.h"
 #include "server/string_family.h"
 #include "server/transaction.h"
 #include "util/metrics/metrics.h"
@@ -207,6 +208,7 @@ void Service::RegisterCommands() {
 
   StringFamily::Register(&registry_);
   GenericFamily::Register(&registry_);
+  ListFamily::Register(&registry_);
 }
 
 }  // namespace dfly

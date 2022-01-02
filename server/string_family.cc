@@ -4,6 +4,10 @@
 
 #include "server/string_family.h"
 
+extern "C" {
+#include "redis/object.h"
+}
+
 #include <absl/container/inlined_vector.h>
 
 #include "base/logging.h"
@@ -46,6 +50,8 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
       return OpStatus::SKIPPED;
 
     if (params.prev_val) {
+      if (it->second.ObjType() != OBJ_STRING)
+        return OpStatus::WRONG_TYPE;
       params.prev_val->emplace(it->second.str);
     }
 
@@ -68,7 +74,12 @@ OpResult<void> SetCmd::SetExisting(DbIndex db_ind, std::string_view value, uint6
     db_slice_->Expire(db_ind, dest, expire_at_ms);
   }
 
+  if (dest->second.robj) {
+    decrRefCountVoid(dest->second.robj);
+    dest->second.robj = nullptr;
+  }
   dest->second = value;
+  dest->second.obj_type = OBJ_STRING;
 
   return OpStatus::OK;
 }
@@ -139,7 +150,7 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   std::string_view key = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<string> {
-    OpResult<MainIterator> it_res = shard->db_slice().Find(cntx->db_index(), key);
+    OpResult<MainIterator> it_res = shard->db_slice().Find(cntx->db_index(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 
@@ -156,8 +167,14 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
     DVLOG(1) << "GET " << trans->DebugId() << ": " << key << " " << result.value();
     cntx->SendGetReply(key, 0, result.value());
   } else {
-    DVLOG(1) << "GET " << key << " nil";
-    cntx->SendGetNotFound();
+    switch (result.status()) {
+      case OpStatus::WRONG_TYPE:
+        cntx->SendError(kWrongTypeErr);
+        break;
+      default:
+        DVLOG(1) << "GET " << key << " nil";
+        cntx->SendGetNotFound();
+    }
   }
 }
 
@@ -253,9 +270,9 @@ auto StringFamily::OpMGet(const Transaction* t, EngineShard* shard) -> MGetRespo
 
   auto& db_slice = shard->db_slice();
   for (size_t i = 0; i < args.size(); ++i) {
-    OpResult<MainIterator> de_res = db_slice.Find(0, args[i]);
-    if (de_res.ok()) {
-      response[i] = de_res.value()->second.str;
+    OpResult<MainIterator> it_res = db_slice.Find(t->db_index(), args[i], OBJ_STRING);
+    if (it_res.ok()) {
+      response[i] = it_res.value()->second.str;
     }
   }
 
@@ -266,7 +283,7 @@ OpStatus StringFamily::OpMSet(const Transaction* t, EngineShard* es) {
   ArgSlice largs = t->ShardArgsInShard(es->shard_id());
   CHECK(!largs.empty() && largs.size() % 2 == 0);
 
-  SetCmd::SetParams params{0};
+  SetCmd::SetParams params{t->db_index()};
   SetCmd sg(&es->db_slice());
   for (size_t i = 0; i < largs.size(); i += 2) {
     DVLOG(1) << "MSet " << largs[i] << ":" << largs[i + 1];

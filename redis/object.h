@@ -6,8 +6,6 @@
 #include "dict.h"
 #include "sds.h"
 #include "quicklist.h"
-#include "util.h"
-
 
 /* The actual Redis Object */
 #define OBJ_STRING 0U    /* String object. */

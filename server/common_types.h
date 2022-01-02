@@ -12,6 +12,8 @@
 
 namespace dfly {
 
+enum class ListDir : uint8_t { LEFT, RIGHT };
+
 enum class Protocol : uint8_t {
   MEMCACHE = 1,
   REDIS = 2

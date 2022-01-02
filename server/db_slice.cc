@@ -42,7 +42,7 @@ void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
   db->main_table.reserve(key_size);
 }
 
-auto DbSlice::Find(DbIndex db_index, std::string_view key) const -> OpResult<MainIterator> {
+auto DbSlice::Find(DbIndex db_index, std::string_view key, unsigned obj_type) const -> OpResult<MainIterator> {
   auto [it, expire_it] = FindExt(db_index, key);
 
   if (it == MainIterator{})

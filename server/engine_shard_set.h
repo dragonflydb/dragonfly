@@ -4,6 +4,10 @@
 
 #pragma once
 
+extern "C" {
+  #include "redis/sds.h"
+}
+
 #include <xxhash.h>
 
 #include "core/tx_queue.h"
@@ -57,6 +61,8 @@ class EngineShard {
   TxQueue::Iterator InsertTxQ(Transaction* trans) {
     return txq_.Insert(trans);
   }
+
+  sds tmp_str;
 
  private:
   EngineShard(util::ProactorBase* pb);

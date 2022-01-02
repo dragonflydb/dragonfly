@@ -1,6 +1,7 @@
 #include "redis_aux.h"
 
 #include <string.h>
+#include <unistd.h>
 
 #include "crc64.h"
 #include "object.h"
@@ -78,20 +79,6 @@ size_t sdsZmallocSize(sds s) {
   return zmalloc_size(sh);
 }
 
-/* Return 1 if currently we allow dict to expand. Dict may allocate huge
- * memory to contain hash buckets when dict expands, that may lead redis
- * rejects user's requests or evicts some keys, we can stop dict to expand
- * provisionally if used memory will be over maxmemory after dict expands,
- * but to guarantee the performance of redis, we still allow dict to expand
- * if dict load factor exceeds HASHTABLE_MAX_LOAD_FACTOR. */
-static int dictExpandAllowed(size_t moreMem, double usedRatio) {
-  if (usedRatio <= HASHTABLE_MAX_LOAD_FACTOR) {
-    return !overMaxmemoryAfterAlloc(moreMem);
-  } else {
-    return 1;
-  }
-}
-
 /* Set dictionary type. Keys are SDS strings, values are not used. */
 dictType setDictType = {
     dictSdsHash,       /* hash function */
@@ -110,41 +97,6 @@ dictType zsetDictType = {
     NULL,              /* val dup */
     dictSdsKeyCompare, /* key compare */
     NULL,              /* Note: SDS string shared & freed by skiplist */
-    NULL,              /* val destructor */
-    NULL               /* allow to expand */
-};
-
-static void dictObjectDestructor(dict* privdata, void* val) {
-  DICT_NOTUSED(privdata);
-
-  if (val == NULL)
-    return; /* Lazy freeing will set value to NULL. */
-  decrRefCount(val);
-}
-
-/* Db->dict, keys are sds strings, vals are Redis objects. */
-dictType dbDictType = {
-    dictSdsHash,          /* hash function */
-    NULL,                 /* key dup */
-    NULL,                 /* val dup */
-    dictSdsKeyCompare,    /* key compare */
-    dictSdsDestructor,    /* key destructor */
-    dictObjectDestructor, /* val destructor */
-    dictExpandAllowed     /* allow to expand */
-};
-
-/* Db->expires */
-/* Db->expires stores keys that are contained in redis_dict_.
-   Which means that uniqueness of the strings is guaranteed through uniqueness of the pointers
-   Therefore, it's enough to compare and hash keys by their addresses without reading the contents
-   of the key
-*/
-dictType keyPtrDictType = {
-    dictPtrHash,       /* hash function */
-    NULL,              /* key dup */
-    NULL,              /* val dup */
-    dictPtrKeyCompare, /* key compare */
-    NULL,              /* key destructor */
     NULL,              /* val destructor */
     NULL               /* allow to expand */
 };

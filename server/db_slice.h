@@ -42,7 +42,7 @@ class DbSlice {
     return now_ms_;
   }
 
-  OpResult<MainIterator> Find(DbIndex db_index, std::string_view key) const;
+  OpResult<MainIterator> Find(DbIndex db_index, std::string_view key, unsigned obj_type) const;
 
   // Returns (value, expire) dict entries if key exists, null if it does not exist or has expired.
   std::pair<MainIterator, ExpireIterator> FindExt(DbIndex db_ind, std::string_view key) const;
