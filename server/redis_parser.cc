@@ -96,6 +96,9 @@ void RedisParser::InitStart(uint8_t prefix_b, RespExpr::Vec* res) {
 
   switch (prefix_b) {
     case '$':
+    case ':':
+    case '+':
+    case '-':
       state_ = PARSE_ARG_S;
       parse_stack_.emplace_back(1, cached_expr_);  // expression of length 1.
       break;
@@ -241,12 +244,10 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> Result {
       LOG(ERROR) << "Unexpected result " << res;
   }
 
-  // Already parsed array expression somewhere. Server should accept only single-level expressions.
-  if (!parse_stack_.empty())
+  if (parse_stack_.size() > 0 && server_mode_)
     return BAD_STRING;
 
-  // Similarly if our cached expr is not empty.
-  if (!cached_expr_->empty())
+  if (parse_stack_.size() == 0 && !cached_expr_->empty())
     return BAD_STRING;
 
   if (len <= 0) {
@@ -263,7 +264,15 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> Result {
   }
 
   parse_stack_.emplace_back(len, cached_expr_);
-  DCHECK(cached_expr_->empty());
+  if (!cached_expr_->empty()) {
+    DCHECK(!server_mode_);
+    cached_expr_->emplace_back(RespExpr::ARRAY);
+    stash_.emplace_back(new RespExpr::Vec());
+    RespExpr::Vec* arr = stash_.back().get();
+    arr->reserve(len);
+    cached_expr_->back().u = arr;
+    cached_expr_ = arr;
+  }
   state_ = PARSE_ARG_S;
 
   return OK;
@@ -301,7 +310,47 @@ auto RedisParser::ParseArg(Buffer str) -> Result {
     return OK;
   }
 
-  return BAD_BULKLEN;
+  if (server_mode_) {
+    return BAD_BULKLEN;
+  }
+
+  if (c == '*') {
+    return ConsumeArrayLen(str);
+  }
+
+  char* s = reinterpret_cast<char*>(str.data() + 1);
+  char* eol = reinterpret_cast<char*>(memchr(s, '\n', str.size() - 1));
+
+  if (c == '+' || c == '-') {  // Simple string or error.
+    DCHECK(!server_mode_);
+    if (!eol) {
+      return str.size() < 256 ? INPUT_PENDING : BAD_STRING;
+    }
+    if (eol[-1] != '\r')
+      return BAD_STRING;
+
+    cached_expr_->emplace_back(c == '+' ? RespExpr::STRING : RespExpr::ERROR);
+    cached_expr_->back().u = Buffer{reinterpret_cast<uint8_t*>(s), size_t((eol - 1) - s)};
+  } else if (c == ':') {
+    DCHECK(!server_mode_);
+    if (!eol) {
+      return str.size() < 32 ? INPUT_PENDING : BAD_INT;
+    }
+    int64_t ival;
+    std::string_view tok{s, size_t((eol - s) - 1)};
+
+    if (eol[-1] != '\r' || !absl::SimpleAtoi(tok, &ival))
+      return BAD_INT;
+
+    cached_expr_->emplace_back(RespExpr::INT64);
+    cached_expr_->back().u = ival;
+  } else {
+    return BAD_STRING;
+  }
+
+  last_consumed_ = (eol - s) + 2;
+  state_ = FINISH_ARG_S;
+  return OK;
 }
 
 auto RedisParser::ConsumeBulk(Buffer str) -> Result {

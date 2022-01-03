@@ -25,7 +25,7 @@ class RedisParser {
   };
   using Buffer = RespExpr::Buffer;
 
-  explicit RedisParser() {
+  explicit RedisParser(bool server_mode = true) : server_mode_(server_mode) {
   }
 
   /**
@@ -42,6 +42,14 @@ class RedisParser {
    */
 
   Result Parse(Buffer str, uint32_t* consumed, RespVec* res);
+
+  void SetClientMode() {
+    server_mode_ = false;
+  }
+
+  size_t parselen_hint() const {
+    return bulk_len_;
+  }
 
   size_t stash_size() const { return stash_.size(); }
   const std::vector<std::unique_ptr<RespVec>>& stash() const { return stash_;}
@@ -86,6 +94,7 @@ class RedisParser {
   std::vector<BlobPtr> buf_stash_;
   RespVec* cached_expr_ = nullptr;
   bool is_broken_token_ = false;
+  bool server_mode_ = true;
 };
 
 }  // namespace dfly

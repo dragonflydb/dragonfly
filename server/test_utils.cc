@@ -183,13 +183,6 @@ RespVec BaseFamilyTest::Run(initializer_list<std::string_view> list) {
   last_cmd_dbg_info_ = context.last_command_debug;
 
   RespVec vec = conn->ParseResp();
-  if (vec.size() == 1) {
-    auto buf = vec.front().GetBuf();
-    if (!buf.empty() && buf[0] == '+') {
-      buf.remove_prefix(1);
-      std::get<RespExpr::Buffer>(vec.front().u) = buf;
-    }
-  }
 
   return vec;
 }
@@ -230,7 +223,7 @@ RespVec BaseFamilyTest::TestConn::ParseResp() {
   auto buf = RespExpr::buffer(&s);
   uint32_t consumed = 0;
 
-  parser.reset(new RedisParser);
+  parser.reset(new RedisParser{false});  // Client mode.
   RespVec res;
   RedisParser::Result st = parser->Parse(buf, &consumed, &res);
   CHECK_EQ(RedisParser::OK, st);
