@@ -7,6 +7,7 @@
 #include <absl/strings/match.h>
 
 #include "base/logging.h"
+#include "server/dragonfly_connection.h"
 #include "util/uring/uring_pool.h"
 
 namespace dfly {
@@ -29,7 +30,7 @@ bool RespMatcher::MatchAndExplain(const RespExpr& e, MatchResultListener* listen
       *listener << "Actual does not contain '" << exp_str_ << "'";
       return false;
     }
-    if (type_ == RespExpr::STRING  && exp_str_ != actual) {
+    if (type_ == RespExpr::STRING && exp_str_ != actual) {
       *listener << "\nActual string: " << actual;
       return false;
     }
@@ -109,6 +110,156 @@ vector<int64_t> ToIntArr(const RespVec& vec) {
   }
 
   return res;
+}
+
+BaseFamilyTest::TestConn::TestConn()
+    : dummy_conn(new Connection(Protocol::REDIS, nullptr, nullptr)),
+      cmd_cntx(&sink, dummy_conn.get()) {
+}
+
+BaseFamilyTest::TestConn::~TestConn() {
+}
+
+BaseFamilyTest::BaseFamilyTest() {
+}
+
+BaseFamilyTest::~BaseFamilyTest() {
+}
+
+void BaseFamilyTest::SetUp() {
+  pp_.reset(new uring::UringPool(16, num_threads_));
+  pp_->Run();
+  service_.reset(new Service{pp_.get()});
+
+  Service::InitOpts opts;
+  opts.disable_time_update = true;
+  service_->Init(nullptr, opts);
+  ess_ = &service_->shard_set();
+
+  const TestInfo* const test_info = UnitTest::GetInstance()->current_test_info();
+  LOG(INFO) << "Starting " << test_info->name();
+}
+
+void BaseFamilyTest::TearDown() {
+  service_->Shutdown();
+  service_.reset();
+  pp_->Stop();
+
+  const TestInfo* const test_info = UnitTest::GetInstance()->current_test_info();
+  LOG(INFO) << "Finishing " << test_info->name();
+}
+
+// ts is ms
+void BaseFamilyTest::UpdateTime(uint64_t ms) {
+  auto cb = [ms](EngineShard* s) { s->db_slice().UpdateExpireClock(ms); };
+  ess_->RunBriefInParallel(cb);
+}
+
+RespVec BaseFamilyTest::Run(initializer_list<std::string_view> list) {
+  if (!ProactorBase::IsProactorThread()) {
+    return pp_->at(0)->AwaitBlocking([&] { return this->Run(list); });
+  }
+
+  mu_.lock();
+  string id = GetId();
+  auto [it, inserted] = connections_.emplace(id, nullptr);
+
+  if (inserted) {
+    it->second.reset(new TestConn);
+  } else {
+    it->second->sink.Clear();
+  }
+  TestConn* conn = it->second.get();
+  mu_.unlock();
+
+  CmdArgVec args = conn->Args(list);
+  CmdArgList cmd_arg_list{args.data(), args.size()};
+  auto& context = conn->cmd_cntx;
+  context.shard_set = ess_;
+
+  service_->DispatchCommand(cmd_arg_list, &context);
+
+  unique_lock lk(mu_);
+  last_cmd_dbg_info_ = context.last_command_debug;
+
+  RespVec vec = conn->ParseResp();
+  if (vec.size() == 1) {
+    auto buf = vec.front().GetBuf();
+    if (!buf.empty() && buf[0] == '+') {
+      buf.remove_prefix(1);
+      std::get<RespExpr::Buffer>(vec.front().u) = buf;
+    }
+  }
+
+  return vec;
+}
+
+int64_t BaseFamilyTest::CheckedInt(std::initializer_list<std::string_view> list) {
+  RespVec resp = Run(list);
+  CHECK_EQ(1u, resp.size());
+  if (resp.front().type == RespExpr::INT64) {
+    return get<int64_t>(resp.front().u);
+  }
+  if (resp.front().type == RespExpr::NIL) {
+    return INT64_MIN;
+  }
+  CHECK_EQ(RespExpr::STRING, int(resp.front().type));
+  string_view sv = ToSV(resp.front().GetBuf());
+  int64_t res;
+  CHECK(absl::SimpleAtoi(sv, &res)) << "|" << sv << "|";
+  return res;
+}
+
+CmdArgVec BaseFamilyTest::TestConn::Args(std::initializer_list<std::string_view> list) {
+  CHECK_NE(0u, list.size());
+
+  CmdArgVec res;
+  for (auto v : list) {
+    tmp_str_vec.emplace_back(new string{v});
+    auto& s = *tmp_str_vec.back();
+
+    res.emplace_back(s.data(), s.size());
+  }
+
+  return res;
+}
+
+RespVec BaseFamilyTest::TestConn::ParseResp() {
+  tmp_str_vec.emplace_back(new string{sink.str()});
+  auto& s = *tmp_str_vec.back();
+  auto buf = RespExpr::buffer(&s);
+  uint32_t consumed = 0;
+
+  parser.reset(new RedisParser);
+  RespVec res;
+  RedisParser::Result st = parser->Parse(buf, &consumed, &res);
+  CHECK_EQ(RedisParser::OK, st);
+
+  return res;
+}
+
+bool BaseFamilyTest::IsLocked(DbIndex db_index, std::string_view key) const {
+  ShardId sid = Shard(key, ess_->size());
+  KeyLockArgs args;
+  args.db_index = db_index;
+  args.args = ArgSlice{&key, 1};
+  args.key_step = 1;
+  bool is_open = pp_->at(sid)->AwaitBrief(
+      [args] { return EngineShard::tlocal()->db_slice().CheckLock(IntentLock::EXCLUSIVE, args); });
+  return !is_open;
+}
+
+string BaseFamilyTest::GetId() const {
+  int32 id = ProactorBase::GetIndex();
+  CHECK_GE(id, 0);
+  return absl::StrCat("IO", id);
+}
+
+ConnectionContext::DebugInfo BaseFamilyTest::GetDebugInfo(const std::string& id) const {
+  auto it = connections_.find(id);
+  CHECK(it != connections_.end());
+
+  return it->second->cmd_cntx.last_command_debug;
 }
 
 }  // namespace dfly

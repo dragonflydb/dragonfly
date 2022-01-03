@@ -19,19 +19,22 @@ namespace fibers = ::boost::fibers;
 thread_local EngineShard* EngineShard::shard_ = nullptr;
 constexpr size_t kQueueLen = 64;
 
-EngineShard::EngineShard(util::ProactorBase* pb)
-    : queue_(kQueueLen), txq_([](const Transaction* t) { return t->txid(); }), db_slice_(pb->GetIndex(), this) {
+EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time)
+    : queue_(kQueueLen), txq_([](const Transaction* t) { return t->txid(); }),
+      db_slice_(pb->GetIndex(), this) {
   fiber_q_ = fibers::fiber([this, index = pb->GetIndex()] {
     this_fiber::properties<FiberProps>().set_name(absl::StrCat("shard_queue", index));
     queue_.Run();
   });
 
-  periodic_task_ = pb->AddPeriodic(1, [] {
-    auto* shard = EngineShard::tlocal();
-    DCHECK(shard);
-    // absl::GetCurrentTimeNanos() returns current time since the Unix Epoch.
-    shard->db_slice().UpdateExpireClock(absl::GetCurrentTimeNanos() / 1000000);
-  });
+  if (update_db_time) {
+    periodic_task_ = pb->AddPeriodic(1, [] {
+      auto* shard = EngineShard::tlocal();
+      DCHECK(shard);
+      // absl::GetCurrentTimeNanos() returns current time since the Unix Epoch.
+      shard->db_slice().UpdateExpireClock(absl::GetCurrentTimeNanos() / 1000000);
+    });
+  }
 
   tmp_str = sdsempty();
 }
@@ -45,9 +48,9 @@ EngineShard::~EngineShard() {
   }
 }
 
-void EngineShard::InitThreadLocal(ProactorBase* pb) {
+void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
   CHECK(shard_ == nullptr) << pb->GetIndex();
-  shard_ = new EngineShard(pb);
+  shard_ = new EngineShard(pb, update_db_time);
 }
 
 void EngineShard::DestroyThreadLocal() {
@@ -61,33 +64,29 @@ void EngineShard::DestroyThreadLocal() {
   VLOG(1) << "Shard reset " << index;
 }
 
-
-void EngineShard::RunContinuationTransaction() {
-  auto sid = shard_id();
-
-  if (continuation_trans_->IsArmedInShard(sid)) {
-    bool to_keep = continuation_trans_->RunInShard(sid);
-    DVLOG(1) << "RunContTransaction " << continuation_trans_->DebugId() << " keep: " << to_keep;
-    if (!to_keep) {
-      continuation_trans_ = nullptr;
-    }
-  }
-}
-
 // Is called by Transaction::ExecuteAsync in order to run transaction tasks.
 // Only runs in its own thread.
-void EngineShard::Execute(Transaction* trans) {
+void EngineShard::PollExecution(Transaction* trans) {
+  DVLOG(1) << "PollExecution " << (trans ? trans->DebugId() : "");
   ShardId sid = shard_id();
 
   if (continuation_trans_) {
     if (trans == continuation_trans_)
       trans = nullptr;
-    RunContinuationTransaction();
 
-    // Once we start executing transaction we do not continue until it's finished.
-    // This preserves atomicity property of multi-hop transactions.
-    if (continuation_trans_)
+    if (continuation_trans_->IsArmedInShard(sid)) {
+      bool to_keep = continuation_trans_->RunInShard(this);
+      DVLOG(1) << "RunContTrans: " << continuation_trans_->DebugId() << " keep: " << to_keep;
+      if (!to_keep) {
+        continuation_trans_ = nullptr;
+      }
+    }
+
+    if (continuation_trans_) {
+      // Once we start executing transaction we do not continue until it's finished.
+      // This preserves atomicity property of multi-hop transactions.
       return;
+    }
   }
 
   DCHECK(!continuation_trans_);
@@ -98,6 +97,8 @@ void EngineShard::Execute(Transaction* trans) {
     auto val = txq_.Front();
     head = absl::get<Transaction*>(val);
 
+    // The fact that Tx is in the queue, already means that coordinator fiber will not progress,
+    // hence here it's enough to test for run_count and check local_mask.
     bool is_armed = head->IsArmedInShard(sid);
     if (!is_armed)
       break;
@@ -112,16 +113,18 @@ void EngineShard::Execute(Transaction* trans) {
       trans = nullptr;
     TxId txid = head->txid();
 
-    // Could be equal to ts in case the same transaction had few hops.
-    DCHECK_LE(committed_txid_, txid);
+    DCHECK_LT(committed_txid_, txid);
 
-    // We update committed_ts_ before calling Run() to avoid cases where a late transaction might
-    // try to push back this one.
+    // We update committed_txid_ before calling RunInShard() to avoid cases where
+    // a transaction stalls the execution with IO while another fiber queries this shard for
+    // committed_txid_ (for example during the scheduling).
     committed_txid_ = txid;
     if (VLOG_IS_ON(2)) {
       dbg_id = head->DebugId();
     }
-    bool keep = head->RunInShard(sid);
+    bool keep = head->RunInShard(this);
+    DCHECK(head == absl::get<Transaction*>(txq_.Front()));
+
     // We should not access head from this point since RunInShard callback decrements refcount.
     DLOG_IF(INFO, !dbg_id.empty()) << "RunHead " << dbg_id << ", keep " << keep;
     txq_.PopFront();
@@ -135,13 +138,12 @@ void EngineShard::Execute(Transaction* trans) {
   if (!trans)
     return;
 
-  if (txq_.Empty())
-    return;
+  uint16_t local_mask = trans->GetLocalMask(sid);
 
   // If trans is out of order, i.e. locks keys that previous transactions have not locked.
   // It may be that there are other transactions that touch those keys but they necessary ordered
   // after trans in the queue, hence it's safe to run trans out of order.
-  if (trans->IsOutOfOrder() && trans->IsArmedInShard(sid)) {
+  if (local_mask & Transaction::OUT_OF_ORDER) {
     DCHECK(trans != head);
 
     dbg_id.clear();
@@ -151,7 +153,7 @@ void EngineShard::Execute(Transaction* trans) {
       dbg_id = trans->DebugId();
     }
 
-    bool keep = trans->RunInShard(sid);  // resets TxQueuePos, this is why we get it before.
+    bool keep = trans->RunInShard(this);  // resets TxQueuePos, this is why we get it before.
     DLOG_IF(INFO, !dbg_id.empty()) << "Eager run " << sid << ", " << dbg_id << ", keep " << keep;
 
     // Should be enforced via Schedule(). TODO: to remove the check once the code is mature.
@@ -166,10 +168,10 @@ void EngineShardSet::Init(uint32_t sz) {
   shard_queue_.resize(sz);
 }
 
-void EngineShardSet::InitThreadLocal(ProactorBase* pb) {
-  EngineShard::InitThreadLocal(pb);
+void EngineShardSet::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
+  EngineShard::InitThreadLocal(pb, update_db_time);
   EngineShard* es = EngineShard::tlocal();
-  shard_queue_[es->shard_id()] = es->GetQueue();
+  shard_queue_[es->shard_id()] = es->GetFiberQueue();
 }
 
 }  // namespace dfly

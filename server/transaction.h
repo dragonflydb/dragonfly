@@ -7,15 +7,15 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/container/inlined_vector.h>
-#include <string_view>
-#include <variant>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <string_view>
+#include <variant>
 #include <vector>
 
 #include "core/intent_lock.h"
-#include "core/tx_queue.h"
 #include "core/op_status.h"
+#include "core/tx_queue.h"
 #include "server/common_types.h"
 #include "server/table.h"
 #include "util/fibers/fibers_ext.h"
@@ -32,7 +32,7 @@ class Transaction {
 
   ~Transaction();
 
-    // Transactions are reference counted.
+  // Transactions are reference counted.
   friend void intrusive_ptr_add_ref(Transaction* trans) noexcept {
     trans->use_count_.fetch_add(1, std::memory_order_relaxed);
   }
@@ -49,8 +49,9 @@ class Transaction {
   using time_point = ::std::chrono::steady_clock::time_point;
 
   enum LocalState : uint8_t {
-    ARMED = 1,        // Transaction was armed with the callback
-    KEYS_ACQUIRED = 0x20,
+    ARMED = 1,  // Transaction was armed with the callback
+    OUT_OF_ORDER = 2,
+    KEYS_ACQUIRED = 4,
   };
 
   enum State : uint8_t {
@@ -61,7 +62,7 @@ class Transaction {
 
   Transaction(const CommandId* cid, EngineShardSet* ess);
 
-  void InitByArgs(CmdArgList args);
+  void InitByArgs(DbIndex index, CmdArgList args);
 
   std::string DebugId() const;
 
@@ -77,35 +78,30 @@ class Transaction {
   //! Runs from the coordinator thread.
   bool IsActive(ShardId shard_id) const {
     return unique_shard_cnt_ == 1 ? unique_shard_id_ == shard_id
-                                  : dist_.shard_data[shard_id].arg_count > 0;
+                                  : shard_data_[shard_id].arg_count > 0;
   }
 
   //! Returns true if the transaction is armed for execution on this sid (used to avoid
   //! duplicate runs). Supports local transactions under multi as well.
   bool IsArmedInShard(ShardId sid) const {
-    if (sid >= dist_.shard_data.size())
+    if (sid >= shard_data_.size())
       sid = 0;
     // We use acquire so that no reordering will move before this load.
-    return run_count_.load(std::memory_order_acquire) > 0 &&
-           dist_.shard_data[sid].local_mask & ARMED;
+    return run_count_.load(std::memory_order_acquire) > 0 && shard_data_[sid].local_mask & ARMED;
   }
 
   // Called from engine set shard threads.
   uint16_t GetLocalMask(ShardId sid) const {
-    return dist_.shard_data[SidToId(sid)].local_mask;
+    return shard_data_[SidToId(sid)].local_mask;
   }
 
   uint32_t GetStateMask() const {
     return state_mask_.load(std::memory_order_relaxed);
   }
 
-  bool IsOutOfOrder() const {
-    return dist_.out_of_order.load(std::memory_order_relaxed);
-  }
-
   // Relevant only when unique_shards_ > 1.
   uint32_t TxQueuePos(ShardId sid) const {
-    return dist_.shard_data[sid].pq_pos;
+    return shard_data_[sid].pq_pos;
   }
 
   // if conclude is true, removes the transaction from the pending queue.
@@ -145,16 +141,17 @@ class Transaction {
     return unique_shard_cnt_;
   }
 
-  EngineShardSet* shard_set() { return ess_; }
-
+  EngineShardSet* shard_set() {
+    return ess_;
+  }
 
   // Called by EngineShard when performing Execute over the tx queue.
   // Returns true if transaction should be kept in the queue.
-  bool RunInShard(ShardId sid);
+  bool RunInShard(EngineShard* shard);
 
  private:
   unsigned SidToId(ShardId sid) const {
-    return sid < dist_.shard_data.size() ? sid : 0;
+    return sid < shard_data_.size() ? sid : 0;
   }
 
   void ScheduleInternal(bool single_hop);
@@ -182,9 +179,13 @@ class Transaction {
 
   void WaitForShardCallbacks() {
     run_ec_.await([this] { return 0 == run_count_.load(std::memory_order_relaxed); });
+
+    // store operations below can not be ordered above the fence
+    std::atomic_thread_fence(std::memory_order_release);
+    seqlock_.fetch_add(1, std::memory_order_relaxed);
   }
 
-  // Returns the previous value of arm count.
+  // Returns the previous value of run count.
   uint32_t DecreaseRunCnt();
 
   uint32_t use_count() const {
@@ -208,59 +209,54 @@ class Transaction {
   };
   enum { kPerShardSize = sizeof(PerShardData) };
 
-  struct Dist {
-    // shard_data spans all the shards in ess_.
-    // I wish we could use a dense array of size [0..uniq_shards] but since
-    // multiple threads access this array to synchronize between themselves using
-    // PerShardData.state, it can be tricky. The complication comes from multi_ transactions where
-    // scheduled transaction is accessed between operations as well.
-    absl::InlinedVector<PerShardData, 4> shard_data;  // length = shard_count
-
-    // Reverse argument mapping. Allows to reconstruct responses according to the original order of
-    // keys.
-    std::vector<uint32_t> reverse_index;
-
-    // NOTE: to move to bitmask if it grows.
-    // Written by coordinator thread, read by shard threads but not concurrently.
-    // Says whether the current callback function is concluding for this operation.
-    bool is_concluding_cb{true};
-
-    // out_of_order true - transaction can execute before other scheduled transactions,
-    // not necessary according to its queue order.
-    std::atomic_bool out_of_order{false};
+  struct LockCnt {
+    unsigned cnt[2] = {0, 0};
   };
 
-  enum { kDistSize = sizeof(Dist) };
+  util::fibers_ext::EventCount blocking_ec_;  // used to wake blocking transactions.
+  util::fibers_ext::EventCount run_ec_;
+
+  // shard_data spans all the shards in ess_.
+  // I wish we could use a dense array of size [0..uniq_shards] but since
+  // multiple threads access this array to synchronize between themselves using
+  // PerShardData.state, it can be tricky. The complication comes from multi_ transactions where
+  // scheduled transaction is accessed between operations as well.
+  absl::InlinedVector<PerShardData, 4> shard_data_;  // length = shard_count
+
+  //! Stores arguments of the transaction (i.e. keys + values) partitioned by shards.
+  absl::InlinedVector<std::string_view, 4> args_;
+
+  // Reverse argument mapping. Allows to reconstruct responses according to the original order of
+  // keys.
+  std::vector<uint32_t> reverse_index_;
+
+  RunnableType cb_;
 
   const CommandId* cid_;
   EngineShardSet* ess_;
   TxId txid_{0};
 
-  std::atomic_uint32_t use_count_{0}, run_count_{0};
+  std::atomic_uint32_t use_count_{0}, run_count_{0}, seqlock_{0};
 
   // unique_shard_cnt_ and unique_shard_id_ is accessed only by coordinator thread.
   uint32_t unique_shard_cnt_{0};  // number of unique shards span by args_
-  ShardId unique_shard_id_{kInvalidSid};
+
+  uint32_t trans_options_ = 0;
 
   // Written by coordination thread but may be read by Shard threads.
   // A mask of State values. Mostly used for debugging and for invariant checks.
   std::atomic<uint16_t> state_mask_{0};
+  ShardId unique_shard_id_{kInvalidSid};
 
   DbIndex db_index_ = 0;
 
   // For single-hop transactions with unique_shards_ == 1, hence no data-race.
   OpStatus local_result_ = OpStatus::OK;
-  uint32_t trans_options_ = 0;
-  uint32_t num_keys_ = 0;
 
-  Dist dist_;
-
-  util::fibers_ext::EventCount run_ec_;
-
-  //! Stores arguments of the transaction (i.e. keys + values) ordered by shards.
-  absl::InlinedVector<std::string_view, 4> args_;
-
-  RunnableType cb_;
+  // NOTE: to move to bitmask if it grows.
+  // Written by coordinator thread, read by shard threads but not concurrently.
+  // Says whether the current callback function is concluding for this operation.
+  bool is_concluding_cb_{true};
 
   struct PerShardCache {
     std::vector<std::string_view> args;

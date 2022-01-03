@@ -20,12 +20,19 @@ class Service {
  public:
   using error_code = std::error_code;
 
+  struct InitOpts {
+    bool disable_time_update;
+
+    InitOpts() : disable_time_update{false} {
+    }
+  };
+
   explicit Service(util::ProactorPool* pp);
   ~Service();
 
   void RegisterHttp(util::HttpListenerBase* listener);
 
-  void Init(util::AcceptServer* acceptor);
+  void Init(util::AcceptServer* acceptor, const InitOpts& opts = InitOpts{});
 
   void Shutdown();
 

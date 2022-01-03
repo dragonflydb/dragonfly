@@ -4,6 +4,10 @@
 
 #include "server/main_service.h"
 
+extern "C" {
+  #include "redis/redis_aux.h"
+}
+
 #include <absl/strings/ascii.h>
 #include <xxhash.h>
 
@@ -42,24 +46,32 @@ DEFINE_VARZ(VarzQps, ping_qps);
 std::optional<VarzFunction> engine_varz;
 metrics::CounterFamily cmd_req("requests_total", "Number of served redis requests");
 
+constexpr size_t kMaxThreadSize = 1024;
+
 }  // namespace
 
 Service::Service(ProactorPool* pp) : shard_set_(pp), pp_(*pp) {
   CHECK(pp);
+
+  // We support less than 1024 threads.
+  CHECK_LT(pp->size(), kMaxThreadSize);
   RegisterCommands();
+
   engine_varz.emplace("engine", [this] { return GetVarzStats(); });
 }
 
 Service::~Service() {
 }
 
-void Service::Init(util::AcceptServer* acceptor) {
+void Service::Init(util::AcceptServer* acceptor, const InitOpts& opts) {
+  InitRedisTables();
+
   uint32_t shard_num = pp_.size() > 1 ? pp_.size() - 1 : pp_.size();
   shard_set_.Init(shard_num);
 
   pp_.AwaitOnAll([&](uint32_t index, ProactorBase* pb) {
     if (index < shard_count()) {
-      shard_set_.InitThreadLocal(pb);
+      shard_set_.InitThreadLocal(pb, !opts.disable_time_update);
     }
   });
 
@@ -78,6 +90,7 @@ void Service::Shutdown() {
   ping_qps.Shutdown();
   StringFamily::Shutdown();
   GenericFamily::Shutdown();
+  cmd_req.Shutdown();
   shard_set_.RunBlockingInParallel([&](EngineShard*) { EngineShard::DestroyThreadLocal(); });
 }
 
@@ -115,7 +128,8 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
     cntx->transaction = dist_trans.get();
 
     if (cid->first_key_pos() > 0) {
-      dist_trans->InitByArgs(args);
+      dist_trans->InitByArgs(cntx->conn_state.db_index, args);
+      cntx->last_command_debug.shards_count = cntx->transaction->unique_shard_cnt();
     }
   } else {
     cntx->transaction = nullptr;
@@ -127,6 +141,9 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
   end_usec = ProactorBase::GetMonotonicTimeNs();
 
   request_latency_usec.IncBy(cmd_str, (end_usec - start_usec) / 1000);
+  if (dist_trans) {
+    cntx->last_command_debug.clock = dist_trans->txid();
+  }
 }
 
 void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,

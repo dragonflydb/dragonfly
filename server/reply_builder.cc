@@ -151,9 +151,6 @@ void ReplyBuilder::SendError(OpStatus status) {
     case OpStatus::OK:
       SendOk();
       break;
-    case OpStatus::KEY_NOTFOUND:
-      SendError("no such key");
-      break;
     default:
       LOG(ERROR) << "Unsupported status " << status;
       SendError("Internal error");

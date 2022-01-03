@@ -7,6 +7,8 @@
 #include <gmock/gmock.h>
 
 #include "io/io.h"
+#include "server/conn_context.h"
+#include "server/main_service.h"
 #include "server/redis_parser.h"
 #include "util/proactor_pool.h"
 
@@ -82,5 +84,57 @@ void PrintTo(const RespExpr::Vec& vec, std::ostream* os);
 MATCHER_P(RespEq, val, "") {
   return ::testing::ExplainMatchResult(::testing::ElementsAre(StrArg(val)), arg, result_listener);
 }
+
+std::vector<int64_t> ToIntArr(const RespVec& vec);
+
+class BaseFamilyTest : public ::testing::Test {
+ protected:
+  BaseFamilyTest();
+  ~BaseFamilyTest();
+
+  void SetUp() override;
+  void TearDown() override;
+
+ protected:
+  RespVec Run(std::initializer_list<std::string_view> list);
+  int64_t CheckedInt(std::initializer_list<std::string_view> list);
+
+  bool IsLocked(DbIndex db_index, std::string_view key) const;
+  ConnectionContext::DebugInfo GetDebugInfo(const std::string& id) const;
+
+  ConnectionContext::DebugInfo GetDebugInfo() const {
+    return GetDebugInfo("IO0");
+  }
+
+  // ts is ms
+  void UpdateTime(uint64_t ms);
+  std::string GetId() const;
+
+  std::unique_ptr<util::ProactorPool> pp_;
+  std::unique_ptr<Service> service_;
+  EngineShardSet* ess_ = nullptr;
+  unsigned num_threads_ = 3;
+
+  struct TestConn {
+    io::StringSink sink;
+    std::unique_ptr<Connection> dummy_conn;
+
+    ConnectionContext cmd_cntx;
+    std::vector<std::unique_ptr<std::string>> tmp_str_vec;
+
+    std::unique_ptr<RedisParser> parser;
+
+    TestConn();
+    ~TestConn();
+
+    CmdArgVec Args(std::initializer_list<std::string_view> list);
+
+    RespVec ParseResp();
+  };
+
+  absl::flat_hash_map<std::string, std::unique_ptr<TestConn>> connections_;
+  ::boost::fibers::mutex mu_;
+  ConnectionContext::DebugInfo last_cmd_dbg_info_;
+};
 
 }  // namespace dfly

@@ -23,7 +23,10 @@ class EngineShard {
   // EngineShard() is private down below.
   ~EngineShard();
 
-  static void InitThreadLocal(util::ProactorBase* pb);
+  // Sets up a new EngineShard in the thread.
+  // If update_db_time is true, initializes periodic time update for its db_slice.
+  static void InitThreadLocal(util::ProactorBase* pb, bool update_db_time);
+
   static void DestroyThreadLocal();
 
   static EngineShard* tlocal() {
@@ -42,12 +45,13 @@ class EngineShard {
     return db_slice_;
   }
 
-  ::util::fibers_ext::FiberQueue* GetQueue() {
+  ::util::fibers_ext::FiberQueue* GetFiberQueue() {
     return &queue_;
   }
 
-  // Executes a transaction. This transaction is pending in the queue.
-  void Execute(Transaction* trans);
+  // Processes TxQueue, blocked transactions or any other execution state related to that
+  // shard. Tries executing the passed transaction if possible (does not guarantee though).
+  void PollExecution(Transaction* trans);
 
   // Returns transaction queue.
   TxQueue* txq() {
@@ -65,9 +69,7 @@ class EngineShard {
   sds tmp_str;
 
  private:
-  EngineShard(util::ProactorBase* pb);
-
-  void RunContinuationTransaction();
+  EngineShard(util::ProactorBase* pb, bool update_db_time);
 
   ::util::fibers_ext::FiberQueue queue_;
   ::boost::fibers::fiber fiber_q_;
@@ -98,22 +100,25 @@ class EngineShardSet {
   }
 
   void Init(uint32_t size);
-  void InitThreadLocal(util::ProactorBase* pb);
+  void InitThreadLocal(util::ProactorBase* pb, bool update_db_time);
 
+  // Uses a shard queue to dispatch. Callback runs in a dedicated fiber.
   template <typename F> auto Await(ShardId sid, F&& f) {
     return shard_queue_[sid]->Await(std::forward<F>(f));
   }
 
+  // Uses a shard queue to dispatch. Callback runs in a dedicated fiber.
   template <typename F> auto Add(ShardId sid, F&& f) {
     assert(sid < shard_queue_.size());
     return shard_queue_[sid]->Add(std::forward<F>(f));
   }
 
-  // Runs a brief function on all shards.
+  // Runs a brief function on all shards. Waits for it to complete.
   template <typename U> void RunBriefInParallel(U&& func) {
     RunBriefInParallel(std::forward<U>(func), [](auto i) { return true; });
   }
 
+  // Runs a brief function on selected shards. Waits for it to complete.
   template <typename U, typename P> void RunBriefInParallel(U&& func, P&& pred);
 
   template <typename U> void RunBlockingInParallel(U&& func);
@@ -145,8 +150,8 @@ template <typename U> void EngineShardSet::RunBlockingInParallel(U&& func) {
 
   for (uint32_t i = 0; i < size(); ++i) {
     util::ProactorBase* dest = pp_->at(i);
-    dest->AsyncFiber([f = std::forward<U>(func), bc]() mutable {
-      f(EngineShard::tlocal());
+    dest->AsyncFiber([func, bc]() mutable {
+      func(EngineShard::tlocal());
       bc.Dec();
     });
   }

@@ -36,6 +36,13 @@ class ConnectionContext : public ReplyBuilder {
  public:
   ConnectionContext(::io::Sink* stream, Connection* owner);
 
+  struct DebugInfo {
+    uint32_t shards_count = 0;
+    TxClock clock = 0;
+  };
+
+  DebugInfo last_command_debug;
+
   // TODO: to introduce proper accessors.
   Transaction* transaction = nullptr;
   const CommandId* cid = nullptr;
