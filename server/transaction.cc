@@ -20,7 +20,7 @@ namespace {
 
 std::atomic_uint64_t op_seq{1};
 
-constexpr size_t kTransSize = sizeof(Transaction);
+[[maybe_unused]] constexpr size_t kTransSize = sizeof(Transaction);
 
 }  // namespace
 
@@ -77,6 +77,7 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   DCHECK_EQ(unique_shard_cnt_, 0u);
 
   db_index_ = index;
+
   if (!cid_->is_multi_key()) {  // Single key optimization.
     auto key = ArgS(args, cid_->first_key_pos());
     args_.push_back(key);
@@ -470,8 +471,6 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
     return true;
   }
 
-  intrusive_ptr_add_ref(this);
-
   // we can do it because only a single thread writes into txid_ and sd.
   txid_ = op_seq.fetch_add(1, std::memory_order_relaxed);
   TxQueue::Iterator it = shard->InsertTxQ(this);
@@ -601,8 +600,12 @@ inline uint32_t Transaction::DecreaseRunCnt() {
   // We use release so that no stores will be reordered after.
   uint32_t res = run_count_.fetch_sub(1, std::memory_order_release);
 
-  if (res == 1)
+  if (res == 1) {
+    // to protect against cases where Transaction is destroyed before run_ec_.notify
+    // finishes running.
+    ::boost::intrusive_ptr guard(this);
     run_ec_.notify();
+  }
   return res;
 }
 

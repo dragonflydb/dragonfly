@@ -84,4 +84,42 @@ TEST_F(GenericFamilyTest, Exists) {
   EXPECT_THAT(resp[0], IntArg(3));
 }
 
+
+TEST_F(GenericFamilyTest, Rename) {
+  RespVec resp = Run({"mset", "x", "0", "b", "1"});
+  ASSERT_THAT(resp, RespEq("OK"));
+  ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
+
+  resp = Run({"rename", "z", "b"});
+  ASSERT_THAT(resp[0], ErrArg("no such key"));
+
+  resp = Run({"rename", "x", "b"});
+  ASSERT_THAT(resp, RespEq("OK"));
+
+  int64_t val = CheckedInt({"get", "x"});
+  ASSERT_EQ(kint64min, val);  // does not exist
+
+  val = CheckedInt({"get", "b"});
+  ASSERT_EQ(0, val);  // it has value of x.
+
+  const char* keys[2] = {"b", "x"};
+  auto ren_fb = pp_->at(0)->LaunchFiber([&] {
+    for (size_t i = 0; i < 200; ++i) {
+      int j = i % 2;
+      auto resp = Run({"rename", keys[j], keys[1 - j]});
+      ASSERT_THAT(resp, RespEq("OK"));
+    }
+  });
+
+  auto exist_fb = pp_->at(2)->LaunchFiber([&] {
+    for (size_t i = 0; i < 300; ++i) {
+      int64_t resp = CheckedInt({"exists", "x", "b"});
+      ASSERT_EQ(1, resp);
+    }
+  });
+
+  ren_fb.join();
+  exist_fb.join();
+}
+
 }  // namespace dfly

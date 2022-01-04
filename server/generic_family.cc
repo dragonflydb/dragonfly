@@ -21,6 +21,95 @@ namespace {
 
 DEFINE_VARZ(VarzQps, ping_qps);
 
+class Renamer {
+ public:
+  Renamer(DbIndex dind, ShardId source_id) : db_indx_(dind), src_sid_(source_id) {
+  }
+
+  // TODO: to implement locking semantics.
+  OpResult<void> FindAndLock(ShardId shard_id, const ArgSlice& args);
+
+  OpResult<void> status() const {
+    return status_;
+  };
+
+  Transaction::RunnableType Finalize(bool skip_exist_dest);
+
+ private:
+  void SwapValues(EngineShard* shard, const ArgSlice& args);
+
+  DbIndex db_indx_;
+  ShardId src_sid_;
+  std::pair<MainIterator, ExpireIterator> find_res_[2];
+
+  uint64_t expire_;
+  MainValue src_val_;
+
+  OpResult<void> status_;
+};
+
+OpResult<void> Renamer::FindAndLock(ShardId shard_id, const ArgSlice& args) {
+  CHECK_EQ(1u, args.size());
+  unsigned indx = (shard_id == src_sid_) ? 0 : 1;
+
+  find_res_[indx] = EngineShard::tlocal()->db_slice().FindExt(db_indx_, args.front());
+
+  return OpStatus::OK;
+};
+
+void Renamer::SwapValues(EngineShard* shard, const ArgSlice& args) {
+  auto& dest = find_res_[1];
+  auto shard_id = shard->shard_id();
+
+  // NOTE: This object juggling between shards won't work if we want to maintain heap per shard
+  // model.
+  if (shard_id == src_sid_) {  // Handle source key.
+    // delete the source entry.
+    CHECK(shard->db_slice().Del(db_indx_, find_res_[0].first));
+    return;
+  }
+
+  // Handle destination
+  MainIterator dest_it = dest.first;
+  if (IsValid(dest_it)) {
+    dest_it->second = std::move(src_val_);  // we just move the source.
+    shard->db_slice().Expire(db_indx_, dest_it, expire_);
+  } else {
+    // we just add the key to destination with the source object.
+    std::string_view key = args.front();  // from key
+    shard->db_slice().AddNew(db_indx_, key, std::move(src_val_), expire_);
+  }
+}
+
+Transaction::RunnableType Renamer::Finalize(bool skip_exist_dest) {
+  const auto& src = find_res_[0];
+  const auto& dest = find_res_[1];
+
+  auto cleanup = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
+
+  if (!IsValid(src.first)) {
+    status_ = OpStatus::KEY_NOTFOUND;
+
+    return cleanup;
+  }
+
+  if (IsValid(dest.first) && skip_exist_dest) {
+    status_ = OpStatus::KEY_EXISTS;
+
+    return cleanup;
+  }
+
+  expire_ = IsValid(src.second) ? src.second->second : 0;
+  src_val_ = std::move(src.first->second);
+
+  // Src key exist and we need to override the destination.
+  return [this](Transaction* t, EngineShard* shard) {
+    this->SwapValues(shard, t->ShardArgsInShard(shard->shard_id()));
+
+    return OpStatus::OK;
+  };
+}
+
 }  // namespace
 
 void GenericFamily::Init(util::ProactorPool* pp) {
@@ -196,8 +285,23 @@ OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool skip_exist_des
     return result;
   }
 
-  // TODO: to finish it
-  return OpStatus::OK;
+  transaction->Schedule();
+  unsigned shard_count = transaction->shard_set()->size();
+  Renamer renamer{transaction->db_index(), Shard(key[0], shard_count)};
+
+  // Phase 1 -> Fetch  keys from both shards.
+  // Phase 2 -> If everything is ok, clone the source object, delete the destination object, and
+  //            set its ptr to cloned one. we also copy the expiration data of the source key.
+  transaction->Execute(
+      [&renamer](Transaction* t, EngineShard* shard) {
+        auto args = t->ShardArgsInShard(shard->shard_id());
+        return renamer.FindAndLock(shard->shard_id(), args).status();
+      },
+      false);
+
+  transaction->Execute(renamer.Finalize(skip_exist_dest), true);
+
+  return renamer.status();
 }
 
 void GenericFamily::Echo(CmdArgList args, ConnectionContext* cntx) {

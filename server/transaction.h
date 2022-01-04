@@ -8,7 +8,6 @@
 #include <absl/container/flat_hash_set.h>
 #include <absl/container/inlined_vector.h>
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <string_view>
 #include <variant>
 #include <vector>
@@ -83,9 +82,11 @@ class Transaction {
 
   //! Returns true if the transaction is armed for execution on this sid (used to avoid
   //! duplicate runs). Supports local transactions under multi as well.
+  //! Can be used in contexts that wait for an event to happen.
   bool IsArmedInShard(ShardId sid) const {
     if (sid >= shard_data_.size())
       sid = 0;
+
     // We use acquire so that no reordering will move before this load.
     return run_count_.load(std::memory_order_acquire) > 0 && shard_data_[sid].local_mask & ARMED;
   }
@@ -102,6 +103,12 @@ class Transaction {
   // Relevant only when unique_shards_ > 1.
   uint32_t TxQueuePos(ShardId sid) const {
     return shard_data_[sid].pq_pos;
+  }
+
+  // Schedules a transaction. Usually used for multi-hop transactions like Rename or BLPOP.
+  // For single hop, use ScheduleSingleHop instead.
+  void Schedule() {
+    ScheduleInternal(false);
   }
 
   // if conclude is true, removes the transaction from the pending queue.
