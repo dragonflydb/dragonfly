@@ -45,7 +45,7 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
   auto [it, expire_it] = db_slice_->FindExt(params.db_index, key);
   uint64_t at_ms = params.expire_after_ms ? params.expire_after_ms + db_slice_->Now() : 0;
 
-  if (it != MainIterator{}) {  // existing
+  if (IsValid(it)) {  // existing
     if (params.how == SET_IF_NOTEXIST)
       return OpStatus::SKIPPED;
 
@@ -68,7 +68,7 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
 
 OpResult<void> SetCmd::SetExisting(DbIndex db_ind, std::string_view value, uint64_t expire_at_ms,
                                    MainIterator dest, ExpireIterator exp_it) {
-  if (exp_it != ExpireIterator{} && expire_at_ms) {
+  if (IsValid(exp_it) && expire_at_ms) {
     exp_it->second = expire_at_ms;
   } else {
     db_slice_->Expire(db_ind, dest, expire_at_ms);

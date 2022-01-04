@@ -7,6 +7,7 @@
 #include <absl/strings/match.h>
 
 #include "base/logging.h"
+#include "base/stl_util.h"
 #include "server/dragonfly_connection.h"
 #include "util/uring/uring_pool.h"
 
@@ -18,7 +19,7 @@ using namespace std;
 
 bool RespMatcher::MatchAndExplain(const RespExpr& e, MatchResultListener* listener) const {
   if (e.type != type_) {
-    *listener << "\nWrong type: " << e.type;
+    *listener << "\nWrong type: " << RespExpr::TypeName(e.type);
     return false;
   }
 
@@ -196,7 +197,7 @@ int64_t BaseFamilyTest::CheckedInt(std::initializer_list<std::string_view> list)
   if (resp.front().type == RespExpr::NIL) {
     return INT64_MIN;
   }
-  CHECK_EQ(RespExpr::STRING, int(resp.front().type));
+  CHECK_EQ(RespExpr::STRING, int(resp.front().type)) << list;
   string_view sv = ToSV(resp.front().GetBuf());
   int64_t res;
   CHECK(absl::SimpleAtoi(sv, &res)) << "|" << sv << "|";

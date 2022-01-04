@@ -7,6 +7,7 @@
 #include <absl/strings/str_cat.h>
 
 #include "base/logging.h"
+#include "server/error.h"
 
 using namespace std;
 using absl::StrAppend;
@@ -150,6 +151,9 @@ void ReplyBuilder::SendError(OpStatus status) {
   switch (status) {
     case OpStatus::OK:
       SendOk();
+      break;
+    case OpStatus::KEY_NOTFOUND:
+      SendError(kKeyNotFoundErr);
       break;
     default:
       LOG(ERROR) << "Unsupported status " << status;

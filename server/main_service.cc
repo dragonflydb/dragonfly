@@ -5,7 +5,7 @@
 #include "server/main_service.h"
 
 extern "C" {
-  #include "redis/redis_aux.h"
+#include "redis/redis_aux.h"
 }
 
 #include <absl/strings/ascii.h>
@@ -201,6 +201,19 @@ void Service::Debug(CmdArgList args, ConnectionContext* cntx) {
   return dbg_cmd.Run(args);
 }
 
+void Service::DbSize(CmdArgList args, ConnectionContext* cntx) {
+  atomic_ulong num_keys{0};
+
+  shard_set_.RunBriefInParallel(
+      [&](EngineShard* shard) {
+        auto db_size = shard->db_slice().DbSize(cntx->conn_state.db_index);
+        num_keys.fetch_add(db_size, memory_order_relaxed);
+      },
+      [](ShardId) { return true; });
+
+  return cntx->SendLong(num_keys.load(memory_order_relaxed));
+}
+
 VarzValue::Map Service::GetVarzStats() {
   VarzValue::Map res;
 
@@ -221,7 +234,8 @@ inline CommandId::Handler HandlerFunc(Service* se, ServiceFunc f) {
 void Service::RegisterCommands() {
   using CI = CommandId;
 
-  registry_ << CI{"DEBUG", CO::RANDOM | CO::READONLY, -2, 0, 0, 0}.HFUNC(Debug);
+  registry_ << CI{"DEBUG", CO::RANDOM | CO::READONLY, -2, 0, 0, 0}.HFUNC(Debug)
+            << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(DbSize);
 
   StringFamily::Register(&registry_);
   GenericFamily::Register(&registry_);

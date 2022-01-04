@@ -10,6 +10,7 @@ namespace dfly {
 
 enum class OpStatus : uint16_t {
   OK,
+  KEY_EXISTS,
   KEY_NOTFOUND,
   SKIPPED,
   WRONG_TYPE,

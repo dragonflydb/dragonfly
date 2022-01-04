@@ -54,6 +54,7 @@ class Service {
 
  private:
   void Debug(CmdArgList args, ConnectionContext* cntx);
+  void DbSize(CmdArgList args, ConnectionContext* cntx);
 
   void RegisterCommands();
 

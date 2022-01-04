@@ -16,4 +16,9 @@ cxx_link(dfly_test_lib dragonfly_lib gtest_main_ext)
 cxx_test(redis_parser_test dfly_test_lib LABELS DFLY)
 cxx_test(list_family_test dfly_test_lib LABELS DFLY)
 cxx_test(string_family_test dfly_test_lib LABELS DFLY)
+cxx_test(generic_family_test dfly_test_lib LABELS DFLY)
 cxx_test(memcache_parser_test dfly_test_lib LABELS DFLY)
+
+add_custom_target(check_dfly DEPENDS COMMAND ctest -L DFLY)
+add_dependencies(check_dfly redis_parser_test list_family_test string_family_test 
+                 generic_family_test memcache_parser_test)

@@ -20,6 +20,7 @@ string WrongNumArgsError(std::string_view cmd) {
 
 const char kSyntaxErr[] = "syntax error";
 const char kWrongTypeErr[] = "-WRONGTYPE Operation against a key holding the wrong kind of value";
+const char kKeyNotFoundErr[] = "no such key";
 const char kInvalidIntErr[] = "value is not an integer or out of range";
 const char kUintErr[] = "value is out of range, must be positive";
 const char kDbIndOutOfRangeErr[] = "DB index is out of range";

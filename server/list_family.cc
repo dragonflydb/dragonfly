@@ -225,7 +225,7 @@ OpResult<uint32_t> ListFamily::OpPush(const OpArgs& op_args, std::string_view ke
 OpResult<string> ListFamily::OpPop(const OpArgs& op_args, string_view key, ListDir dir) {
   auto& db_slice = op_args.shard->db_slice();
   auto [it, expire] = db_slice.FindExt(op_args.db_ind, key);
-  if (it == MainIterator{})
+  if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
 
   OpResult<string> res = ListPop(op_args.db_ind, it->second, dir);

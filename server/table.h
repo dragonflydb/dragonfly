@@ -41,4 +41,12 @@ using ExpireTable = absl::flat_hash_map<std::string, uint64_t>;
 using MainIterator = MainTable::iterator;
 using ExpireIterator = ExpireTable::iterator;
 
+inline bool IsValid(MainIterator it) {
+  return it != MainIterator{};
+}
+
+inline bool IsValid(ExpireIterator it) {
+  return it != ExpireIterator{};
+}
+
 }  // namespace dfly

@@ -45,7 +45,7 @@ void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
 auto DbSlice::Find(DbIndex db_index, std::string_view key, unsigned obj_type) const -> OpResult<MainIterator> {
   auto [it, expire_it] = FindExt(db_index, key);
 
-  if (it == MainIterator{})
+  if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
 
   return it;
@@ -57,7 +57,7 @@ pair<MainIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, std::string_
   auto& db = db_arr_[db_ind];
   MainIterator it = db->main_table.find(key);
 
-  if (it == MainIterator{}) {
+  if (!IsValid(it)) {
     return make_pair(it, ExpireIterator{});
   }
 
@@ -65,7 +65,7 @@ pair<MainIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, std::string_
   if (it->second.HasExpire()) {  // check expiry state
     expire_it = db->expire_table.find(it->first);
 
-    CHECK(expire_it != ExpireIterator{});
+    CHECK(IsValid(expire_it));
     if (expire_it->second <= now_ms_) {
       db->expire_table.erase(expire_it);
 
@@ -108,7 +108,7 @@ void DbSlice::CreateDb(DbIndex index) {
 
 bool DbSlice::Del(DbIndex db_ind, const MainIterator& it) {
   auto& db = db_arr_[db_ind];
-  if (it == MainIterator{}) {
+  if (!IsValid(it)) {
     return false;
   }
 
