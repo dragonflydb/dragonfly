@@ -14,5 +14,6 @@ add_library(dfly_test_lib test_utils.cc)
 cxx_link(dfly_test_lib dragonfly_lib gtest_main_ext)
 
 cxx_test(redis_parser_test dfly_test_lib LABELS DFLY)
+cxx_test(list_family_test dfly_test_lib LABELS DFLY)
 cxx_test(string_family_test dfly_test_lib LABELS DFLY)
 cxx_test(memcache_parser_test dfly_test_lib LABELS DFLY)
