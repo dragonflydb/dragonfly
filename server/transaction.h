@@ -63,6 +63,8 @@ class Transaction {
 
   void InitByArgs(DbIndex index, CmdArgList args);
 
+  void SetExecCmd(const CommandId* cid);
+
   std::string DebugId() const;
 
   // Runs in engine thread
@@ -84,6 +86,7 @@ class Transaction {
   //! duplicate runs). Supports local transactions under multi as well.
   //! Can be used in contexts that wait for an event to happen.
   bool IsArmedInShard(ShardId sid) const {
+    // For multi transactions shard_data_ spans all shards.
     if (sid >= shard_data_.size())
       sid = 0;
 
@@ -98,11 +101,6 @@ class Transaction {
 
   uint32_t GetStateMask() const {
     return state_mask_.load(std::memory_order_relaxed);
-  }
-
-  // Relevant only when unique_shards_ > 1.
-  uint32_t TxQueuePos(ShardId sid) const {
-    return shard_data_[sid].pq_pos;
   }
 
   // Schedules a transaction. Usually used for multi-hop transactions like Rename or BLPOP.
@@ -130,6 +128,8 @@ class Transaction {
     return res;
   }
 
+  void UnlockMulti();
+
   TxId txid() const {
     return txid_;
   }
@@ -147,6 +147,12 @@ class Transaction {
   uint32_t unique_shard_cnt() const {
     return unique_shard_cnt_;
   }
+
+  bool IsMulti() const {
+    return bool(multi_);
+  }
+
+  bool IsGlobal() const;
 
   EngineShardSet* shard_set() {
     return ess_;
@@ -207,6 +213,8 @@ class Transaction {
     // Bitmask of LocalState enums.
     uint16_t local_mask{0};
 
+    // Needed to rollback invalid schedulings or remove OOO transactions from
+    // tx queue.
     uint32_t pq_pos = TxQueue::kEnd;
 
     PerShardData(PerShardData&&) noexcept {
@@ -218,6 +226,10 @@ class Transaction {
 
   struct LockCnt {
     unsigned cnt[2] = {0, 0};
+  };
+
+  struct Multi {
+    absl::flat_hash_map<std::string_view, LockCnt> locks;
   };
 
   util::fibers_ext::EventCount blocking_ec_;  // used to wake blocking transactions.
@@ -238,6 +250,7 @@ class Transaction {
   std::vector<uint32_t> reverse_index_;
 
   RunnableType cb_;
+  std::unique_ptr<Multi> multi_;  // Initialized when the transaction is multi/exec.
 
   const CommandId* cid_;
   EngineShardSet* ess_;

@@ -5,7 +5,7 @@
 #pragma once
 
 extern "C" {
-  #include "redis/sds.h"
+#include "redis/sds.h"
 }
 
 #include <xxhash.h>
@@ -62,9 +62,8 @@ class EngineShard {
     return committed_txid_;
   }
 
-  TxQueue::Iterator InsertTxQ(Transaction* trans) {
-    return txq_.Insert(trans);
-  }
+  // TODO: Awkward interface. I should solve it somehow.
+  void ShutdownMulti(Transaction* multi);
 
   sds tmp_str;
 
@@ -158,7 +157,7 @@ template <typename U> void EngineShardSet::RunBlockingInParallel(U&& func) {
   bc.Wait();
 }
 
-template <typename View> inline ShardId Shard(const View& v, ShardId shard_num) {
+inline ShardId Shard(std::string_view v, ShardId shard_num) {
   XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
   return hash % shard_num;
 }

@@ -26,6 +26,9 @@ enum CommandOpt : uint32_t {
   DENYOOM = 0x10,  // use-memory in redis.
   STALE = 0x20,
   RANDOM = 0x40,
+  ADMIN = 0x80,  // implies NOSCRIPT,
+  NOSCRIPT = 0x100,
+  GLOBAL_TRANS = 0x1000,
 };
 
 const char* OptName(CommandOpt fl);

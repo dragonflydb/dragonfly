@@ -20,6 +20,9 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
                      int8_t last_key, int8_t step)
     : name_(name), opt_mask_(mask), arity_(arity), first_key_(first_key), last_key_(last_key),
       step_key_(step) {
+  if (mask & CO::ADMIN) {
+    opt_mask_ |= CO::NOSCRIPT;
+  }
 }
 
 uint32_t CommandId::OptCount(uint32_t mask) {
@@ -87,8 +90,14 @@ const char* OptName(CO::CommandOpt fl) {
       return "loading";
     case RANDOM:
       return "random";
+    case ADMIN:
+      return "admin";
+    case NOSCRIPT:
+      return "noscript";
+    case GLOBAL_TRANS:
+      return "global-trans";
   }
-  return "";
+  return "unknown";
 }
 
 }  // namespace CO

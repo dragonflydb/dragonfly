@@ -119,6 +119,10 @@ class ReplyBuilder {
     as_resp()->SendBulkString(str);
   }
 
+  void CloseConnection() {
+    serializer_->CloseConnection();
+  }
+
  private:
   RespSerializer* as_resp() {
     return static_cast<RespSerializer*>(serializer_.get());

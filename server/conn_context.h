@@ -11,10 +11,22 @@ namespace dfly {
 
 class Connection;
 class EngineShardSet;
-class CommandId;
+
+struct StoredCmd {
+  const CommandId* descr;
+  std::vector<std::string> cmd;
+
+  StoredCmd(const CommandId* d = nullptr) : descr(d) {
+  }
+};
 
 struct ConnectionState {
   DbIndex db_index = 0;
+
+  enum ExecState { EXEC_INACTIVE, EXEC_COLLECT, EXEC_ERROR };
+
+  ExecState exec_state = EXEC_INACTIVE;
+  std::vector<StoredCmd> exec_body;
 
   enum Mask : uint32_t {
     ASYNC_DISPATCH = 1,  // whether a command is handled via async dispatch.

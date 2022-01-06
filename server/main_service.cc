@@ -8,6 +8,7 @@ extern "C" {
 #include "redis/redis_aux.h"
 }
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/ascii.h>
 #include <xxhash.h>
 
@@ -103,12 +104,20 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
   VLOG(2) << "Got: " << args;
 
   string_view cmd_str = ArgS(args, 0);
+  bool is_trans_cmd = (cmd_str == "EXEC" || cmd_str == "MULTI");
   const CommandId* cid = registry_.Find(cmd_str);
+
+  absl::Cleanup multi_error = [cntx] {
+    if (cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE) {
+      cntx->conn_state.exec_state = ConnectionState::EXEC_ERROR;
+    }
+  };
 
   if (cid == nullptr) {
     return cntx->SendError(absl::StrCat("unknown command `", cmd_str, "`"));
   }
 
+  bool under_multi = cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE && !is_trans_cmd;
   if ((cid->arity() > 0 && args.size() != size_t(cid->arity())) ||
       (cid->arity() < 0 && args.size() < size_t(-cid->arity()))) {
     return cntx->SendError(WrongNumArgsError(cmd_str));
@@ -118,12 +127,31 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(WrongNumArgsError(cmd_str));
   }
 
+  if (under_multi && (cid->opt_mask() & CO::ADMIN)) {
+    cntx->SendError("Can not run admin commands under multi-transactions");
+    return;
+  }
+
+  std::move(multi_error).Cancel();
+
+  if (cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE && !is_trans_cmd) {
+    // TODO: protect against aggregating huge transactions.
+    StoredCmd stored_cmd{cid};
+    stored_cmd.cmd.reserve(args.size());
+    for (size_t i = 0; i < args.size(); ++i) {
+      stored_cmd.cmd.emplace_back(ArgS(args, i));
+    }
+    cntx->conn_state.exec_body.push_back(std::move(stored_cmd));
+
+    return cntx->SendSimpleRespString("QUEUED");
+  }
+
   uint64_t start_usec = ProactorBase::GetMonotonicTimeNs(), end_usec;
 
   // Create command transaction
   intrusive_ptr<Transaction> dist_trans;
 
-  if (cid->first_key_pos() > 0) {
+  if (cid->first_key_pos() > 0 || (cid->opt_mask() & CO::GLOBAL_TRANS)) {
     dist_trans.reset(new Transaction{cid, &shard_set_});
     cntx->transaction = dist_trans.get();
 
@@ -189,6 +217,17 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
   DispatchCommand(arg_list, cntx);
 }
 
+bool Service::IsLocked(DbIndex db_index, std::string_view key) const {
+  ShardId sid = Shard(key, shard_count());
+  KeyLockArgs args;
+  args.db_index = db_index;
+  args.args = ArgSlice{&key, 1};
+  args.key_step = 1;
+  bool is_open = pp_.at(sid)->AwaitBrief(
+      [args] { return EngineShard::tlocal()->db_slice().CheckLock(IntentLock::EXCLUSIVE, args); });
+  return !is_open;
+}
+
 void Service::RegisterHttp(HttpListenerBase* listener) {
   CHECK_NOTNULL(listener);
 }
@@ -214,6 +253,60 @@ void Service::DbSize(CmdArgList args, ConnectionContext* cntx) {
   return cntx->SendLong(num_keys.load(memory_order_relaxed));
 }
 
+void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
+  cntx->SendOk();
+  cntx->CloseConnection();
+}
+
+void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
+  if (cntx->conn_state.exec_state == ConnectionState::EXEC_INACTIVE) {
+    return cntx->SendError("EXEC without MULTI");
+  }
+
+  if (cntx->conn_state.exec_state == ConnectionState::EXEC_ERROR) {
+    cntx->conn_state.exec_state = ConnectionState::EXEC_INACTIVE;
+    cntx->conn_state.exec_body.clear();
+    return cntx->SendError("-EXECABORT Transaction discarded because of previous errors");
+  }
+
+  cntx->SendRespBlob(absl::StrCat("*", cntx->conn_state.exec_body.size(), "\r\n"));
+
+  if (!cntx->ec() && !cntx->conn_state.exec_body.empty()) {
+    CmdArgVec str_list;
+
+    for (auto& scmd : cntx->conn_state.exec_body) {
+      str_list.resize(scmd.cmd.size());
+      for (size_t i = 0; i < scmd.cmd.size(); ++i) {
+        string& s = scmd.cmd[i];
+        str_list[i] = MutableStrSpan{s.data(), s.size()};
+      }
+
+      cntx->transaction->SetExecCmd(scmd.descr);
+      CmdArgList cmd_arg_list{str_list.data(), str_list.size()};
+      cntx->transaction->InitByArgs(cntx->conn_state.db_index, cmd_arg_list);
+      scmd.descr->Invoke(cmd_arg_list, cntx);
+      if (cntx->ec())
+        break;
+    }
+
+    VLOG(1) << "Exec unlocking " << cntx->conn_state.exec_body.size() << " commands";
+    cntx->transaction->UnlockMulti();
+  }
+
+  cntx->conn_state.exec_state = ConnectionState::EXEC_INACTIVE;
+  cntx->conn_state.exec_body.clear();
+  VLOG(1) << "Exec completed";
+}
+
+void Service::Multi(CmdArgList args, ConnectionContext* cntx) {
+  if (cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE) {
+    return cntx->SendError("MULTI calls can not be nested");
+  }
+  cntx->conn_state.exec_state = ConnectionState::EXEC_COLLECT;
+  // TODO: to protect against huge exec transactions.
+  return cntx->SendOk();
+}
+
 VarzValue::Map Service::GetVarzStats() {
   VarzValue::Map res;
 
@@ -234,8 +327,15 @@ inline CommandId::Handler HandlerFunc(Service* se, ServiceFunc f) {
 void Service::RegisterCommands() {
   using CI = CommandId;
 
+  constexpr auto kExecMask =
+      CO::LOADING | CO::NOSCRIPT | CO::GLOBAL_TRANS;
+
   registry_ << CI{"DEBUG", CO::RANDOM | CO::READONLY, -2, 0, 0, 0}.HFUNC(Debug)
-            << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(DbSize);
+            << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(DbSize)
+            << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0}.HFUNC(Quit)
+            << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING | CO::STALE, 1, 0, 0, 0}.HFUNC(
+                   Multi)
+            << CI{"EXEC", kExecMask, 1, 0, 0, 0}.HFUNC(Exec);
 
   StringFamily::Register(&registry_);
   GenericFamily::Register(&registry_);

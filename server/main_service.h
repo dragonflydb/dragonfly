@@ -44,6 +44,9 @@ class Service {
     return shard_set_.size();
   }
 
+  // Used by tests.
+  bool IsLocked(DbIndex db_index, std::string_view key) const;
+
   EngineShardSet& shard_set() {
     return shard_set_;
   }
@@ -55,6 +58,10 @@ class Service {
  private:
   void Debug(CmdArgList args, ConnectionContext* cntx);
   void DbSize(CmdArgList args, ConnectionContext* cntx);
+
+  void Quit(CmdArgList args, ConnectionContext* cntx);
+  void Exec(CmdArgList args, ConnectionContext* cntx);
+  void Multi(CmdArgList args, ConnectionContext* cntx);
 
   void RegisterCommands();
 

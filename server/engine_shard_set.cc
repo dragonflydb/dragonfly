@@ -93,6 +93,7 @@ void EngineShard::PollExecution(Transaction* trans) {
 
   Transaction* head = nullptr;
   string dbg_id;
+
   while (!txq_.Empty()) {
     auto val = txq_.Front();
     head = absl::get<Transaction*>(val);
@@ -122,12 +123,10 @@ void EngineShard::PollExecution(Transaction* trans) {
     if (VLOG_IS_ON(2)) {
       dbg_id = head->DebugId();
     }
-    bool keep = head->RunInShard(this);
-    DCHECK(head == absl::get<Transaction*>(txq_.Front()));
 
+    bool keep = head->RunInShard(this);
     // We should not access head from this point since RunInShard callback decrements refcount.
     DLOG_IF(INFO, !dbg_id.empty()) << "RunHead " << dbg_id << ", keep " << keep;
-    txq_.PopFront();
 
     if (keep) {
       continuation_trans_ = head;
@@ -148,17 +147,21 @@ void EngineShard::PollExecution(Transaction* trans) {
 
     dbg_id.clear();
 
-    uint32_t pos = trans->TxQueuePos(sid);
     if (VLOG_IS_ON(1)) {
       dbg_id = trans->DebugId();
     }
 
-    bool keep = trans->RunInShard(this);  // resets TxQueuePos, this is why we get it before.
+    bool keep = trans->RunInShard(this);
     DLOG_IF(INFO, !dbg_id.empty()) << "Eager run " << sid << ", " << dbg_id << ", keep " << keep;
 
     // Should be enforced via Schedule(). TODO: to remove the check once the code is mature.
     CHECK(!keep) << "multi-hop transactions can not be OOO.";
-    txq_.Remove(pos);
+  }
+}
+
+void EngineShard::ShutdownMulti(Transaction* multi) {
+  if (continuation_trans_ == multi) {
+    continuation_trans_ = nullptr;
   }
 }
 
