@@ -40,7 +40,7 @@ class Renamer {
 
   DbIndex db_indx_;
   ShardId src_sid_;
-  std::pair<MainIterator, ExpireIterator> find_res_[2];
+  pair<MainIterator, ExpireIterator> find_res_[2];
 
   uint64_t expire_;
   MainValue src_val_;
@@ -76,7 +76,7 @@ void Renamer::SwapValues(EngineShard* shard, const ArgSlice& args) {
     shard->db_slice().Expire(db_indx_, dest_it, expire_);
   } else {
     // we just add the key to destination with the source object.
-    std::string_view key = args.front();  // from key
+    string_view key = args.front();  // from key
     shard->db_slice().AddNew(db_indx_, key, std::move(src_val_), expire_);
   }
 }
@@ -152,7 +152,7 @@ void GenericFamily::Ping(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() == 1) {
     return cntx->SendSimpleRespString("PONG");
   } else {
-    std::string_view arg = ArgS(args, 1);
+    string_view arg = ArgS(args, 1);
     DVLOG(2) << "Ping " << arg;
 
     return cntx->SendBulkString(arg);
@@ -180,8 +180,8 @@ void GenericFamily::Exists(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
-  std::string_view sec = ArgS(args, 2);
+  string_view key = ArgS(args, 1);
+  string_view sec = ArgS(args, 2);
   int64_t int_arg;
 
   if (!absl::SimpleAtoi(sec, &int_arg)) {
@@ -194,14 +194,14 @@ void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(OpArgs{shard, t->db_index()}, key, params);
   };
-  OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cntx->transaction->ScheduleSingleHop(move(cb));
 
   cntx->SendLong(status == OpStatus::OK);
 }
 
 void GenericFamily::ExpireAt(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
-  std::string_view sec = ArgS(args, 2);
+  string_view key = ArgS(args, 1);
+  string_view sec = ArgS(args, 2);
   int64_t int_arg;
 
   if (!absl::SimpleAtoi(sec, &int_arg)) {
@@ -231,7 +231,7 @@ void GenericFamily::Pttl(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void GenericFamily::TtlGeneric(CmdArgList args, ConnectionContext* cntx, TimeUnit unit) {
-  std::string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpTtl(t, shard, key); };
   OpResult<uint64_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -251,7 +251,7 @@ void GenericFamily::TtlGeneric(CmdArgList args, ConnectionContext* cntx, TimeUni
 }
 
 void GenericFamily::Select(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 1);
   int64_t index;
   if (!absl::SimpleAtoi(key, &index)) {
     return cntx->SendError(kInvalidDbIndErr);
@@ -272,7 +272,7 @@ void GenericFamily::Select(CmdArgList args, ConnectionContext* cntx) {
 
 OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool skip_exist_dest,
                                             ConnectionContext* cntx) {
-  std::string_view key[2] = {ArgS(args, 1), ArgS(args, 2)};
+  string_view key[2] = {ArgS(args, 1), ArgS(args, 2)};
 
   Transaction* transaction = cntx->transaction;
 
@@ -305,11 +305,11 @@ OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool skip_exist_des
 }
 
 void GenericFamily::Echo(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 1);
   return cntx->SendBulkString(key);
 }
 
-OpStatus GenericFamily::OpExpire(const OpArgs& op_args, std::string_view key,
+OpStatus GenericFamily::OpExpire(const OpArgs& op_args, string_view key,
                                  const ExpireParams& params) {
   auto& db_slice = op_args.shard->db_slice();
   auto [it, expire_it] = db_slice.FindExt(op_args.db_ind, key);
@@ -333,7 +333,7 @@ OpStatus GenericFamily::OpExpire(const OpArgs& op_args, std::string_view key,
   return OpStatus::OK;
 }
 
-OpResult<uint64_t> GenericFamily::OpTtl(Transaction* t, EngineShard* shard, std::string_view key) {
+OpResult<uint64_t> GenericFamily::OpTtl(Transaction* t, EngineShard* shard, string_view key) {
   auto& db_slice = shard->db_slice();
   auto [it, expire] = db_slice.FindExt(t->db_index(), key);
   if (!IsValid(it))
@@ -375,25 +375,37 @@ OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, ArgSlice keys)
   return res;
 }
 
-OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, std::string_view from,
-                                    std::string_view to, bool skip_exists) {
+OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from,
+                                    string_view to, bool skip_exists) {
   auto& db_slice = op_args.shard->db_slice();
   auto [from_it, expire_it] = db_slice.FindExt(op_args.db_ind, from);
   if (!IsValid(from_it))
     return OpStatus::KEY_NOTFOUND;
 
-  auto to_de = db_slice.FindExt(op_args.db_ind, to);
-  if (IsValid(to_de.first)) {
+  auto [to_it, to_expire] = db_slice.FindExt(op_args.db_ind, to);
+  if (IsValid(to_it)) {
     if (skip_exists)
       return OpStatus::KEY_EXISTS;
-
-    CHECK(db_slice.Del(op_args.db_ind, to_de.first));
   }
 
   uint64_t exp_ts = IsValid(expire_it) ? expire_it->second : 0;
-  db_slice.AddNew(op_args.db_ind, to, std::move(from_it->second), exp_ts);
-  CHECK(db_slice.Del(op_args.db_ind, from_it));
+  if (IsValid(to_it)) {
+    to_it->second = std::move(from_it->second);
+    from_it->second.SetExpire(IsValid(expire_it));
 
+    if (IsValid(to_expire)) {
+      to_it->second.SetExpire(true);
+      to_expire->second = exp_ts;
+    } else {
+      to_it->second.SetExpire(false);
+      db_slice.Expire(op_args.db_ind, to_it, exp_ts);
+    }
+  } else {
+    db_slice.AddNew(op_args.db_ind, to, std::move(from_it->second), exp_ts);
+    // Need search again since the container might invalidate the iterators.
+    from_it = db_slice.FindExt(op_args.db_ind, from).first;
+  }
+  CHECK(db_slice.Del(op_args.db_ind, from_it));
   return OpStatus::OK;
 }
 
