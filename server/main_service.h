@@ -9,6 +9,7 @@
 #include "server/engine_shard_set.h"
 #include "util/http/http_handler.h"
 #include "server/memcache_parser.h"
+#include "server/server_family.h"
 
 namespace util {
 class AcceptServer;
@@ -56,12 +57,10 @@ class Service {
   }
 
  private:
-  void Debug(CmdArgList args, ConnectionContext* cntx);
-  void DbSize(CmdArgList args, ConnectionContext* cntx);
 
-  void Quit(CmdArgList args, ConnectionContext* cntx);
+  static void Quit(CmdArgList args, ConnectionContext* cntx);
   void Exec(CmdArgList args, ConnectionContext* cntx);
-  void Multi(CmdArgList args, ConnectionContext* cntx);
+  static void Multi(CmdArgList args, ConnectionContext* cntx);
 
   void RegisterCommands();
 
@@ -70,6 +69,7 @@ class Service {
   CommandRegistry registry_;
   EngineShardSet shard_set_;
   util::ProactorPool& pp_;
+  ServerFamily server_family_;
 };
 
 }  // namespace dfly

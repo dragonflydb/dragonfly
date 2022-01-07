@@ -42,7 +42,7 @@ class DbSlice {
     return now_ms_;
   }
 
-  OpResult<MainIterator> Find(DbIndex db_index, std::string_view key, unsigned obj_type) const;
+  OpResult<MainIterator> Find(DbIndex db_index, std::string_view key, unsigned req_obj_type) const;
 
   // Returns (value, expire) dict entries if key exists, null if it does not exist or has expired.
   std::pair<MainIterator, ExpireIterator> FindExt(DbIndex db_ind, std::string_view key) const;
@@ -65,6 +65,15 @@ class DbSlice {
   void ActivateDb(DbIndex db_ind);
 
   bool Del(DbIndex db_ind, const MainIterator& it);
+
+  constexpr static DbIndex kDbAll = 0xFFFF;
+
+  /**
+   * @brief Flushes the database of index db_ind. If kDbAll is passed then flushes all the
+   * databases.
+   *
+   */
+  size_t FlushDb(DbIndex db_ind);
 
   ShardId shard_id() const {
     return shard_id_;

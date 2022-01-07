@@ -233,12 +233,12 @@ bool Transaction::RunInShard(EngineShard* shard) {
 
   // We make sure that we lock exactly once for each (multi-hop) transaction inside
   // multi-transactions.
-  if (multi_ && ((sd.local_mask & KEYS_ACQUIRED) == 0)) {
-    sd.local_mask |= KEYS_ACQUIRED;
+  if (multi_ && ((sd.local_mask & KEYLOCK_ACQUIRED) == 0)) {
+    sd.local_mask |= KEYLOCK_ACQUIRED;
     shard->db_slice().Acquire(Mode(), GetLockArgs(idx));
   }
 
-  DCHECK(IsGlobal() || (sd.local_mask & KEYS_ACQUIRED));
+  DCHECK(IsGlobal() || (sd.local_mask & KEYLOCK_ACQUIRED));
 
   /*************************************************************************/
   // Actually running the callback.
@@ -270,7 +270,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
     // touching those keys will be ordered via TxQueue. It's necessary because we preserve
     // the atomicity of awaked transactions by halting the TxQueue.
     shard->db_slice().Release(Mode(), largs);
-    sd.local_mask &= ~KEYS_ACQUIRED;
+    sd.local_mask &= ~KEYLOCK_ACQUIRED;
   }
 
   CHECK_GE(DecreaseRunCnt(), 1u);
@@ -280,7 +280,6 @@ bool Transaction::RunInShard(EngineShard* shard) {
 }
 
 void Transaction::ScheduleInternal(bool single_hop) {
-  DCHECK_EQ(0, state_mask_.load(memory_order_acquire) & SCHEDULED);
   DCHECK_EQ(0u, txid_);
 
   bool span_all = IsGlobal();
@@ -288,10 +287,14 @@ void Transaction::ScheduleInternal(bool single_hop) {
 
   uint32_t num_shards;
   std::function<bool(uint32_t)> is_active;
+  IntentLock::Mode mode = Mode();
 
   if (span_all) {
     is_active = [](uint32_t) { return true; };
     num_shards = ess_->size();
+    // Lock shards
+    auto cb = [mode](EngineShard* shard) { shard->shard_lock()->Acquire(mode); };
+    ess_->RunBriefInParallel(std::move(cb));
   } else {
     num_shards = unique_shard_cnt_;
     DCHECK_GT(num_shards, 0u);
@@ -327,7 +330,6 @@ void Transaction::ScheduleInternal(bool single_hop) {
       }
       DVLOG(1) << "Scheduled " << DebugId() << " OutOfOrder: " << out_of_order;
 
-      state_mask_.fetch_or(SCHEDULED, memory_order_release);
       break;
     }
 
@@ -397,14 +399,13 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   DVLOG(1) << "ScheduleSingleHop after Wait " << DebugId();
 
   cb_ = nullptr;
-  state_mask_.fetch_or(AFTERRUN, memory_order_release);
 
   return local_result_;
 }
 
 // Runs in the coordinator fiber.
 void Transaction::UnlockMulti() {
-  VLOG(1) << "Transaction::UnlockMulti";
+  VLOG(1) << "UnlockMulti";
 
   DCHECK(multi_);
   using KeyList = vector<pair<std::string_view, LockCnt>>;
@@ -418,7 +419,10 @@ void Transaction::UnlockMulti() {
     sharded_keys[sid].push_back(k_v);
   }
 
-  auto cb = [&](EngineShard* shard) {
+  auto cb = [&] {
+    EngineShard* shard = EngineShard::tlocal();
+
+    shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
     ShardId sid = shard->shard_id();
     for (const auto& k_v : sharded_keys[sid]) {
       auto release = [&](IntentLock::Mode mode) {
@@ -433,8 +437,7 @@ void Transaction::UnlockMulti() {
     auto& sd = shard_data_[SidToId(shard->shard_id())];
 
     // It does not have to be that all shards in multi transaction execute this tx.
-    // Hence it could stay in the tx queue. We perform the necessary cleanup and remove it from
-    // there.
+    // Hence it could stay in the tx queue. We perform the necessary cleanup and remove it from there.
     if (sd.pq_pos != TxQueue::kEnd) {
       TxQueue* txq = shard->txq();
       DCHECK(!txq->Empty());
@@ -445,11 +448,19 @@ void Transaction::UnlockMulti() {
     }
 
     shard->ShutdownMulti(this);
+    shard->PollExecution(nullptr);
+
+    this->DecreaseRunCnt();
   };
 
-  ess_->RunBriefInParallel(std::move(cb));
+  uint32_t prev = run_count_.fetch_add(shard_data_.size(), memory_order_relaxed);
+  DCHECK_EQ(prev, 0u);
 
-  DCHECK_EQ(1u, use_count());
+  for (ShardId i = 0; i < shard_data_.size(); ++i) {
+    ess_->Add(i, cb);
+  }
+  WaitForShardCallbacks();
+  DCHECK_GE(use_count(), 1u);
 }
 
 // Runs in coordinator thread.
@@ -463,9 +474,6 @@ void Transaction::Execute(RunnableType cb, bool conclude) {
   DVLOG(1) << "Wait on Exec " << DebugId() << " completed";
 
   cb_ = nullptr;
-
-  uint32_t mask = conclude ? AFTERRUN : RUNNING;
-  state_mask_.fetch_or(mask, memory_order_relaxed);
 }
 
 // Runs in coordinator thread.
@@ -547,14 +555,14 @@ void Transaction::ExecuteAsync(bool concluding_cb) {
   }
 }
 
-void Transaction::RunQuickie() {
+void Transaction::RunQuickie(EngineShard* shard) {
   DCHECK(!multi_);
   DCHECK_EQ(1u, shard_data_.size());
   DCHECK_EQ(0u, txid_);
 
-  EngineShard* shard = EngineShard::tlocal();
+  shard->IncQuickRun();
   auto& sd = shard_data_[0];
-  DCHECK_EQ(0, sd.local_mask & KEYS_ACQUIRED);
+  DCHECK_EQ(0, sd.local_mask & (KEYLOCK_ACQUIRED | OUT_OF_ORDER));
 
   DVLOG(1) << "RunQuickSingle " << DebugId() << " " << shard->shard_id() << " " << args_[0];
   CHECK(cb_) << DebugId() << " " << shard->shard_id() << " " << args_[0];
@@ -595,8 +603,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   // Fast path - for uncontended keys, just run the callback.
   // That applies for single key operations like set, get, lpush etc.
   if (shard->db_slice().CheckLock(mode, lock_args)) {
-    RunQuickie();  // TODO: for journal - this can become multi-shard
-                   // transaction on replica.
+    RunQuickie(shard);
     return true;
   }
 
@@ -604,12 +611,11 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   txid_ = op_seq.fetch_add(1, std::memory_order_relaxed);
   sd.pq_pos = shard->txq()->Insert(this);
 
-  DCHECK_EQ(0, sd.local_mask & KEYS_ACQUIRED);
+  DCHECK_EQ(0, sd.local_mask & KEYLOCK_ACQUIRED);
   bool lock_acquired = shard->db_slice().Acquire(mode, lock_args);
-  sd.local_mask |= KEYS_ACQUIRED;
+  sd.local_mask |= KEYLOCK_ACQUIRED;
   DCHECK(!lock_acquired);  // Because CheckLock above failed.
 
-  state_mask_.fetch_or(SCHEDULED, memory_order_release);
   DVLOG(1) << "Rescheduling into TxQueue " << DebugId();
 
   shard->PollExecution(nullptr);
@@ -637,11 +643,13 @@ pair<bool, bool> Transaction::ScheduleInShard(EngineShard* shard) {
   auto& sd = shard_data_[sid];
 
   if (!spans_all) {
+    bool shard_unlocked = shard->shard_lock()->Check(mode);
     lock_args = GetLockArgs(shard->shard_id());
 
+    // we need to acquire the lock unrelated to shard_unlocked since we register into Tx queue.
     // All transactions in the queue must acquire the intent lock.
-    lock_granted = shard->db_slice().Acquire(mode, lock_args);
-    sd.local_mask |= KEYS_ACQUIRED;
+    lock_granted = shard->db_slice().Acquire(mode, lock_args) && shard_unlocked;
+    sd.local_mask |= KEYLOCK_ACQUIRED;
     DVLOG(1) << "Lock granted " << lock_granted << " for trans " << DebugId();
   }
 
@@ -657,9 +665,9 @@ pair<bool, bool> Transaction::ScheduleInShard(EngineShard* shard) {
     // reorder the queue. Currently, this optimization is disabled: barrier_ts < pq->HeadScore().
     bool to_proceed = lock_granted || txq->TailScore() < txid_;
     if (!to_proceed) {
-      if (sd.local_mask & KEYS_ACQUIRED) {  // rollback the lock.
+      if (sd.local_mask & KEYLOCK_ACQUIRED) {  // rollback the lock.
         shard->db_slice().Release(mode, lock_args);
-        sd.local_mask &= ~KEYS_ACQUIRED;
+        sd.local_mask &= ~KEYLOCK_ACQUIRED;
       }
 
       return result;  // false, false
@@ -694,11 +702,11 @@ bool Transaction::CancelInShard(EngineShard* shard) {
   DCHECK(trans == this) << "Pos " << pos << ", pq size " << pq->size() << ", trans " << trans;
   pq->Remove(pos);
 
-  if (sd.local_mask & KEYS_ACQUIRED) {
+  if (sd.local_mask & KEYLOCK_ACQUIRED) {
     auto mode = Mode();
     auto lock_args = GetLockArgs(shard->shard_id());
     shard->db_slice().Release(mode, lock_args);
-    sd.local_mask &= ~KEYS_ACQUIRED;
+    sd.local_mask &= ~KEYLOCK_ACQUIRED;
   }
   return true;
 }

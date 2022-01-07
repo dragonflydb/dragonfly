@@ -122,6 +122,37 @@ bool DbSlice::Del(DbIndex db_ind, const MainIterator& it) {
   return true;
 }
 
+size_t DbSlice::FlushDb(DbIndex db_ind) {
+  auto flush_single = [this](DbIndex id) {
+    auto& db = db_arr_[id];
+
+    CHECK(db);
+
+    size_t removed = db->main_table.size();
+    db->main_table.clear();
+    db->expire_table.clear();
+
+    db->stats.obj_memory_usage = 0;
+
+    return removed;
+  };
+
+  if (db_ind != kDbAll) {
+    CHECK_LT(db_ind, db_arr_.size());
+
+    return flush_single(db_ind);
+  }
+
+  size_t removed = 0;
+  for (size_t i = 0; i < db_arr_.size(); ++i) {
+    if (db_arr_[i]) {
+      removed += flush_single(i);
+    }
+  }
+  return removed;
+}
+
+
 // Returns true if a state has changed, false otherwise.
 bool DbSlice::Expire(DbIndex db_ind, MainIterator it, uint64_t at) {
   auto& db = db_arr_[db_ind];
@@ -142,11 +173,11 @@ bool DbSlice::Expire(DbIndex db_ind, MainIterator it, uint64_t at) {
   return false;
 }
 
-void DbSlice::AddNew(DbIndex db_ind, std::string_view key, MainValue obj, uint64_t expire_at_ms) {
+void DbSlice::AddNew(DbIndex db_ind, string_view key, MainValue obj, uint64_t expire_at_ms) {
   CHECK(AddIfNotExist(db_ind, key, std::move(obj), expire_at_ms));
 }
 
-bool DbSlice::AddIfNotExist(DbIndex db_ind, std::string_view key, MainValue obj,
+bool DbSlice::AddIfNotExist(DbIndex db_ind, string_view key, MainValue obj,
                             uint64_t expire_at_ms) {
   auto& db = db_arr_[db_ind];
 
@@ -220,7 +251,7 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   }
 }
 
-void DbSlice::Release(IntentLock::Mode mode, DbIndex db_index, std::string_view key,
+void DbSlice::Release(IntentLock::Mode mode, DbIndex db_index, string_view key,
                       unsigned count) {
   DVLOG(1) << "Release " << IntentLock::ModeName(mode) << " " << count << " for " << key;
 

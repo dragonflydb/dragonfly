@@ -47,16 +47,10 @@ class Transaction {
   using RunnableType = std::function<OpStatus(Transaction* t, EngineShard*)>;
   using time_point = ::std::chrono::steady_clock::time_point;
 
-  enum LocalState : uint8_t {
-    ARMED = 1,  // Transaction was armed with the callback
+  enum LocalMask : uint16_t {
+    ARMED = 1,        // Transaction was armed with the callback
     OUT_OF_ORDER = 2,
-    KEYS_ACQUIRED = 4,
-  };
-
-  enum State : uint8_t {
-    SCHEDULED = 1,
-    RUNNING = 2,   // For running multi-hop execution callbacks.
-    AFTERRUN = 4,  // Once transaction finished running.
+    KEYLOCK_ACQUIRED = 4,
   };
 
   Transaction(const CommandId* cid, EngineShardSet* ess);
@@ -172,7 +166,7 @@ class Transaction {
   void ExecuteAsync(bool concluding_cb);
 
   // Optimized version of RunInShard for single shard uncontended cases.
-  void RunQuickie();
+  void RunQuickie(EngineShard* shard);
 
   //! Returns true if transaction run out-of-order during the scheduling phase.
   bool ScheduleUniqueShard(EngineShard* shard);

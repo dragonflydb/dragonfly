@@ -20,6 +20,11 @@ namespace dfly {
 
 class EngineShard {
  public:
+  struct Stats {
+    uint64_t ooo_runs = 0;
+    uint64_t quick_runs = 0;
+  };
+
   // EngineShard() is private down below.
   ~EngineShard();
 
@@ -62,9 +67,24 @@ class EngineShard {
     return committed_txid_;
   }
 
+  // Signals whether shard-wide lock is active.
+  // Transactions that conflict with shard locks must subscribe into pending queue.
+  IntentLock* shard_lock() {
+    return &shard_lock_;
+  }
+
   // TODO: Awkward interface. I should solve it somehow.
   void ShutdownMulti(Transaction* multi);
 
+  void IncQuickRun() {
+    stats_.quick_runs++;
+  }
+
+  const Stats& stats() const {
+    return stats_;
+  }
+
+  // for everyone to use for string transformations during atomic cpu sequences.
   sds tmp_str;
 
  private:
@@ -74,12 +94,14 @@ class EngineShard {
   ::boost::fibers::fiber fiber_q_;
 
   TxQueue txq_;
+  DbSlice db_slice_;
+  Stats stats_;
 
   // Logical ts used to order distributed transactions.
   TxId committed_txid_ = 0;
   Transaction* continuation_trans_ = nullptr;
+  IntentLock shard_lock_;
 
-  DbSlice db_slice_;
   uint32_t periodic_task_ = 0;
 
   static thread_local EngineShard* shard_;

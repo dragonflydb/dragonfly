@@ -9,7 +9,6 @@ namespace dfly {
 
 // SHARED - can be acquired multiple times as long as other intents are absent.
 // EXCLUSIVE - is acquired only if it's the only lock recorded.
-// BLOCKED_READY - can not be acquired - it's recorded for intent purposes.
 // Transactions at the head of tx-queue are considered to be the ones that acquired the lock
 class IntentLock {
  public:

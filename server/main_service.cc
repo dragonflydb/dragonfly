@@ -17,7 +17,6 @@ extern "C" {
 
 #include "base/logging.h"
 #include "server/conn_context.h"
-#include "server/debugcmd.h"
 #include "server/error.h"
 #include "server/generic_family.h"
 #include "server/list_family.h"
@@ -51,7 +50,7 @@ constexpr size_t kMaxThreadSize = 1024;
 
 }  // namespace
 
-Service::Service(ProactorPool* pp) : shard_set_(pp), pp_(*pp) {
+Service::Service(ProactorPool* pp) : shard_set_(pp), pp_(*pp), server_family_(this)  {
   CHECK(pp);
 
   // We support less than 1024 threads.
@@ -89,8 +88,12 @@ void Service::Shutdown() {
   engine_varz.reset();
   request_latency_usec.Shutdown();
   ping_qps.Shutdown();
+
+   // to shutdown all the runtime components that depend on EngineShard.
+  server_family_.Shutdown();
   StringFamily::Shutdown();
   GenericFamily::Shutdown();
+
   cmd_req.Shutdown();
   shard_set_.RunBlockingInParallel([&](EngineShard*) { EngineShard::DestroyThreadLocal(); });
 }
@@ -232,27 +235,6 @@ void Service::RegisterHttp(HttpListenerBase* listener) {
   CHECK_NOTNULL(listener);
 }
 
-void Service::Debug(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[1]);
-
-  DebugCmd dbg_cmd{&shard_set_, cntx};
-
-  return dbg_cmd.Run(args);
-}
-
-void Service::DbSize(CmdArgList args, ConnectionContext* cntx) {
-  atomic_ulong num_keys{0};
-
-  shard_set_.RunBriefInParallel(
-      [&](EngineShard* shard) {
-        auto db_size = shard->db_slice().DbSize(cntx->conn_state.db_index);
-        num_keys.fetch_add(db_size, memory_order_relaxed);
-      },
-      [](ShardId) { return true; });
-
-  return cntx->SendLong(num_keys.load(memory_order_relaxed));
-}
-
 void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
   cntx->SendOk();
   cntx->CloseConnection();
@@ -317,12 +299,9 @@ VarzValue::Map Service::GetVarzStats() {
   return res;
 }
 
-using ServiceFunc = void (Service::*)(CmdArgList args, ConnectionContext* cntx);
-inline CommandId::Handler HandlerFunc(Service* se, ServiceFunc f) {
-  return [=](CmdArgList args, ConnectionContext* cntx) { return (se->*f)(args, cntx); };
-}
+using ServiceFunc = void (Service::*)(CmdArgList, ConnectionContext* cntx);
 
-#define HFUNC(x) SetHandler(HandlerFunc(this, &Service::x))
+#define HFUNC(x) SetHandler(&Service::x)
 
 void Service::RegisterCommands() {
   using CI = CommandId;
@@ -330,16 +309,32 @@ void Service::RegisterCommands() {
   constexpr auto kExecMask =
       CO::LOADING | CO::NOSCRIPT | CO::GLOBAL_TRANS;
 
-  registry_ << CI{"DEBUG", CO::RANDOM | CO::READONLY, -2, 0, 0, 0}.HFUNC(Debug)
-            << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(DbSize)
-            << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0}.HFUNC(Quit)
+  auto cb_exec = [this](CmdArgList sp, ConnectionContext* cntx) {
+    this->Exec(std::move(sp), cntx);
+  };
+
+  registry_ << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0}.HFUNC(Quit)
             << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING | CO::STALE, 1, 0, 0, 0}.HFUNC(
                    Multi)
-            << CI{"EXEC", kExecMask, 1, 0, 0, 0}.HFUNC(Exec);
+            << CI{"EXEC", kExecMask, 1, 0, 0, 0}.SetHandler(cb_exec);
 
   StringFamily::Register(&registry_);
   GenericFamily::Register(&registry_);
   ListFamily::Register(&registry_);
+  server_family_.Register(&registry_);
+
+  LOG(INFO) << "Multi-key commands are: ";
+
+  registry_.Traverse([](std::string_view key, const CI& cid) {
+    if (cid.is_multi_key()) {
+      string key_len;
+      if (cid.last_key_pos() < 0)
+        key_len = "unlimited";
+      else
+        key_len = absl::StrCat(cid.last_key_pos() - cid.first_key_pos() + 1);
+      LOG(INFO) << "    " << key << ": with " << key_len << " keys";
+    }
+  });
 }
 
 }  // namespace dfly
