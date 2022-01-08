@@ -142,7 +142,9 @@ API 2.0
 
 
 ## Milestone Nymph
-
+API 2,3,4 without cluster support, without modules and without memory inspection commands.
+Design config support. ~140 commands overall...
 ## Milestone Molt
-
+API 5,6 - without cluster and modules. Streams support. ~80 commands overall.
 ## Milestone Adult
+TBD.
