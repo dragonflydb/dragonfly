@@ -27,3 +27,122 @@ cd build-opt && ninja dragonfly
 ```
 
 for more options, run `./dragonfly --help`
+
+## Milestone Egg 🥚
+
+API 1.0
+- [X] String family
+  - [X] SET
+  - [ ] SETNX
+  - [X] GET
+  - [ ] DECR
+  - [ ] INCR
+  - [ ] DECRBY
+  - [ ] GETSET
+  - [ ] INCRBY
+  - [X] MGET
+  - [X] MSET
+  - [ ] MSETNX
+  - [ ] SUBSTR
+- [ ] Generic family
+  - [X] DEL
+  - [X] ECHO
+  - [X] EXISTS
+  - [X] EXPIRE
+  - [ ] EXPIREAT
+  - [X] Ping
+  - [X] RENAME
+  - [X] RENAMENX
+  - [X] SELECT
+  - [ ] TTL
+  - [ ] TYPE
+  - [ ] SORT
+- [X] Server Family
+  - [X] QUIT
+  - [X] DBSIZE
+  - [ ] BGSAVE
+  - [ ] SAVE
+  - [ ] DBSIZE
+  - [ ] DEBUG
+  - [ ] EXEC
+  - [ ] FLUSHALL
+  - [ ] FLUSHDB
+  - [ ] INFO
+  - [ ] MULTI
+  - [ ] SHUTDOWN
+  - [ ] LASTSAVE
+  - [ ] SLAVEOF/REPLICAOF
+  - [ ] SYNC
+- [ ] Set Family
+  - [ ] SADD
+  - [ ] SCARD
+  - [ ] SDIFF
+  - [ ] SDIFFSTORE
+  - [ ] SINTER
+  - [ ] SINTERSTORE
+  - [ ] SISMEMBER
+  - [ ] SMOVE
+  - [ ] SPOP
+  - [ ] SRANDMEMBER
+  - [ ] SREM
+  - [ ] SMEMBERS
+  - [ ] SUNION
+  - [ ] SUNIONSTORE
+- [X] List Family
+  - [X] LINDEX
+  - [X] LLEN
+  - [X] LPOP
+  - [X] LPUSH
+  - [ ] LRANGE
+  - [ ] LREM
+  - [ ] LSET
+  - [ ] LTRIM
+  - [X] RPOP
+  - [ ] RPOPLPUSH
+  - [X] RPUSH
+- [ ] SortedSet Family
+  - [ ] ZADD
+  - [ ] ZCARD
+  - [ ] ZINCRBY
+  - [ ] ZRANGE
+  - [ ] ZRANGEBYSCORE
+  - [ ] ZREM
+  - [ ] ZREMRANGEBYSCORE
+  - [ ] ZREVRANGE
+  - [ ] ZSCORE
+- [ ] Not sure whether these are required for the initial release.
+  - [ ] AUTH
+  - [ ] BGREWRITEAOF
+  - [ ] KEYS
+  - [ ] MONITOR
+  - [ ] RANDOMKEY
+  - [ ] MOVE
+
+In addition, we want to support efficient expiry (TTL) and cache eviction algorithms.
+We should implement basic memory management support. For Master/Slave replication we should design
+a distributed log format.
+
+API 2.0
+- [ ] List Family
+  - [ ] BLPOP
+  - [ ] BRPOP
+  - [ ] BRPOPLPUSH
+- [ ] PubSub family
+  - [ ] PUBLISH
+  - [ ] PUBSUB
+  - [ ] PUBSUB CHANNELS
+  - [ ] SUBSCRIBE
+  - [ ] UNSUBSCRIBE
+  - [ ] PUNSUBSCRIBE
+  - [ ] PSUBSCRIBE
+- [ ] Server Family
+  - [ ] WATCH
+  - [ ] UNWATCH
+  - [ ] DISCARD
+
+
+## Milestone Nymph
+
+## Milestone Molt
+
+## Milestone Adult
