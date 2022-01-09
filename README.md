@@ -38,7 +38,7 @@ API 1.0
   - [ ] DECR
   - [ ] INCR
   - [ ] DECRBY
-  - [ ] GETSET
+  - [X] GETSET
   - [ ] INCRBY
   - [X] MGET
   - [X] MSET
@@ -49,12 +49,12 @@ API 1.0
   - [X] ECHO
   - [X] EXISTS
   - [X] EXPIRE
-  - [ ] EXPIREAT
+  - [X] EXPIREAT
   - [X] Ping
   - [X] RENAME
   - [X] RENAMENX
   - [X] SELECT
-  - [ ] TTL
+  - [X] TTL
   - [ ] TYPE
   - [ ] SORT
 - [X] Server Family
@@ -62,14 +62,14 @@ API 1.0
   - [X] DBSIZE
   - [ ] BGSAVE
   - [ ] SAVE
-  - [ ] DBSIZE
-  - [ ] DEBUG
-  - [ ] EXEC
+  - [X] DBSIZE
+  - [X] DEBUG
+  - [X] EXEC
   - [ ] FLUSHALL
-  - [ ] FLUSHDB
+  - [X] FLUSHDB
   - [ ] INFO
-  - [ ] MULTI
-  - [ ] SHUTDOWN
+  - [X] MULTI
+  - [X] SHUTDOWN
   - [ ] LASTSAVE
   - [ ] SLAVEOF/REPLICAOF
   - [ ] SYNC
@@ -133,16 +133,21 @@ API 2.0
   - [ ] PUBSUB CHANNELS
   - [ ] SUBSCRIBE
   - [ ] UNSUBSCRIBE
-  - [ ] PUNSUBSCRIBE
-  - [ ] PSUBSCRIBE
 - [ ] Server Family
   - [ ] WATCH
   - [ ] UNWATCH
   - [ ] DISCARD
 
+Commands that I prefer not implement before launch:
+  - [ ] PUNSUBSCRIBE
+  - [ ] PSUBSCRIBE
+And keyspace notifications. For that I would like to deep dive and learn exact use-cases
+for this API.
 
 ## Milestone Nymph
-API 2,3,4 without cluster support, without modules and without memory inspection commands.
+API 2,3,4 without cluster support, without modules, without memory inspection commands.
+Without keyspace notifications.
+
 Design config support. ~140 commands overall...
 ## Milestone Molt
 API 5,6 - without cluster and modules. Streams support. ~80 commands overall.
