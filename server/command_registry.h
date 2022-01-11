@@ -28,6 +28,7 @@ enum CommandOpt : uint32_t {
   RANDOM = 0x40,
   ADMIN = 0x80,  // implies NOSCRIPT,
   NOSCRIPT = 0x100,
+  BLOCKING = 0x200,
   GLOBAL_TRANS = 0x1000,
 };
 

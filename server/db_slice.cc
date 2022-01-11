@@ -4,6 +4,10 @@
 
 #include "server/db_slice.h"
 
+extern "C" {
+#include "redis/object.h"
+}
+
 #include <boost/fiber/fiber.hpp>
 #include <boost/fiber/operations.hpp>
 
@@ -42,11 +46,16 @@ void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
   db->main_table.reserve(key_size);
 }
 
-auto DbSlice::Find(DbIndex db_index, std::string_view key, unsigned obj_type) const -> OpResult<MainIterator> {
+auto DbSlice::Find(DbIndex db_index, std::string_view key, unsigned req_obj_type) const
+    -> OpResult<MainIterator> {
   auto [it, expire_it] = FindExt(db_index, key);
 
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
+
+  if (it->second.ObjType() != req_obj_type) {
+    return OpStatus::WRONG_TYPE;
+  }
 
   return it;
 }
@@ -78,19 +87,58 @@ pair<MainIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, std::string_
   return make_pair(it, expire_it);
 }
 
+OpResult<pair<MainIterator, unsigned>> DbSlice::FindFirst(DbIndex db_index, const ArgSlice& args) {
+  DCHECK(!args.empty());
+
+  for (unsigned i = 0; i < args.size(); ++i) {
+    string_view s = args[i];
+    OpResult<MainIterator> res = Find(db_index, s, OBJ_LIST);
+    if (res)
+      return make_pair(res.value(), i);
+    if (res.status() != OpStatus::KEY_NOTFOUND)
+      return res.status();
+  }
+
+  VLOG(1) << "FindFirst " << args.front() << " not found";
+  return OpStatus::KEY_NOTFOUND;
+}
+
 auto DbSlice::AddOrFind(DbIndex db_index, std::string_view key) -> pair<MainIterator, bool> {
   DCHECK(IsDbValid(db_index));
 
   auto& db = db_arr_[db_index];
 
+  MainIterator existing;
   pair<MainIterator, bool> res = db->main_table.emplace(key, MainValue{});
   if (res.second) {  // new entry
     db->stats.obj_memory_usage += res.first->first.capacity();
 
     return make_pair(res.first, true);
   }
+  existing = res.first;
 
-  return res;
+  DCHECK(IsValid(existing));
+
+  if (existing->second.HasExpire()) {
+    auto expire_it = db->expire_table.find(existing->first);
+    CHECK(IsValid(expire_it));
+
+    if (expire_it->second <= now_ms_) {
+      db->expire_table.erase(expire_it);
+
+      // Keep the entry but free the object.
+      db->stats.obj_memory_usage -= existing->second.str.capacity();
+      existing->second.obj_type = OBJ_STRING;
+      if (existing->second.robj) {
+        decrRefCountVoid(existing->second.robj);
+        existing->second.robj = nullptr;
+      }
+
+      return make_pair(existing, true);
+    }
+  }
+
+  return make_pair(existing, false);
 }
 
 void DbSlice::ActivateDb(DbIndex db_ind) {
@@ -152,7 +200,6 @@ size_t DbSlice::FlushDb(DbIndex db_ind) {
   return removed;
 }
 
-
 // Returns true if a state has changed, false otherwise.
 bool DbSlice::Expire(DbIndex db_ind, MainIterator it, uint64_t at) {
   auto& db = db_arr_[db_ind];
@@ -177,8 +224,7 @@ void DbSlice::AddNew(DbIndex db_ind, string_view key, MainValue obj, uint64_t ex
   CHECK(AddIfNotExist(db_ind, key, std::move(obj), expire_at_ms));
 }
 
-bool DbSlice::AddIfNotExist(DbIndex db_ind, string_view key, MainValue obj,
-                            uint64_t expire_at_ms) {
+bool DbSlice::AddIfNotExist(DbIndex db_ind, string_view key, MainValue obj, uint64_t expire_at_ms) {
   auto& db = db_arr_[db_ind];
 
   auto [new_entry, success] = db->main_table.emplace(key, obj);
@@ -251,8 +297,7 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   }
 }
 
-void DbSlice::Release(IntentLock::Mode mode, DbIndex db_index, string_view key,
-                      unsigned count) {
+void DbSlice::Release(IntentLock::Mode mode, DbIndex db_index, string_view key, unsigned count) {
   DVLOG(1) << "Release " << IntentLock::ModeName(mode) << " " << count << " for " << key;
 
   auto& lt = db_arr_[db_index]->lock_table;

@@ -50,7 +50,7 @@ constexpr size_t kMaxThreadSize = 1024;
 
 }  // namespace
 
-Service::Service(ProactorPool* pp) : shard_set_(pp), pp_(*pp), server_family_(this)  {
+Service::Service(ProactorPool* pp) : shard_set_(pp), pp_(*pp), server_family_(this) {
   CHECK(pp);
 
   // We support less than 1024 threads.
@@ -89,7 +89,7 @@ void Service::Shutdown() {
   request_latency_usec.Shutdown();
   ping_qps.Shutdown();
 
-   // to shutdown all the runtime components that depend on EngineShard.
+  // to shutdown all the runtime components that depend on EngineShard.
   server_family_.Shutdown();
   StringFamily::Shutdown();
   GenericFamily::Shutdown();
@@ -174,7 +174,9 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
   request_latency_usec.IncBy(cmd_str, (end_usec - start_usec) / 1000);
   if (dist_trans) {
     cntx->last_command_debug.clock = dist_trans->txid();
+    cntx->last_command_debug.is_ooo = dist_trans->IsOOO();
   }
+  cntx->transaction = nullptr;
 }
 
 void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
@@ -231,6 +233,17 @@ bool Service::IsLocked(DbIndex db_index, std::string_view key) const {
   return !is_open;
 }
 
+bool Service::IsShardSetLocked() const {
+  std::atomic_uint res{0};
+
+  shard_set_.RunBriefInParallel([&](EngineShard* shard) {
+    bool unlocked = shard->shard_lock()->Check(IntentLock::SHARED);
+    res.fetch_add(!unlocked, memory_order_relaxed);
+  });
+
+  return res.load() != 0;
+}
+
 void Service::RegisterHttp(HttpListenerBase* listener) {
   CHECK_NOTNULL(listener);
 }
@@ -238,6 +251,15 @@ void Service::RegisterHttp(HttpListenerBase* listener) {
 void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
   cntx->SendOk();
   cntx->CloseConnection();
+}
+
+void Service::Multi(CmdArgList args, ConnectionContext* cntx) {
+  if (cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE) {
+    return cntx->SendError("MULTI calls can not be nested");
+  }
+  cntx->conn_state.exec_state = ConnectionState::EXEC_COLLECT;
+  // TODO: to protect against huge exec transactions.
+  return cntx->SendOk();
 }
 
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
@@ -280,15 +302,6 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "Exec completed";
 }
 
-void Service::Multi(CmdArgList args, ConnectionContext* cntx) {
-  if (cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE) {
-    return cntx->SendError("MULTI calls can not be nested");
-  }
-  cntx->conn_state.exec_state = ConnectionState::EXEC_COLLECT;
-  // TODO: to protect against huge exec transactions.
-  return cntx->SendOk();
-}
-
 VarzValue::Map Service::GetVarzStats() {
   VarzValue::Map res;
 
@@ -306,8 +319,7 @@ using ServiceFunc = void (Service::*)(CmdArgList, ConnectionContext* cntx);
 void Service::RegisterCommands() {
   using CI = CommandId;
 
-  constexpr auto kExecMask =
-      CO::LOADING | CO::NOSCRIPT | CO::GLOBAL_TRANS;
+  constexpr auto kExecMask = CO::LOADING | CO::NOSCRIPT | CO::GLOBAL_TRANS;
 
   auto cb_exec = [this](CmdArgList sp, ConnectionContext* cntx) {
     this->Exec(std::move(sp), cntx);

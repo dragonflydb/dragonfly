@@ -94,6 +94,8 @@ const char* OptName(CO::CommandOpt fl) {
       return "admin";
     case NOSCRIPT:
       return "noscript";
+    case BLOCKING:
+      return "blocking";
     case GLOBAL_TRANS:
       return "global-trans";
   }

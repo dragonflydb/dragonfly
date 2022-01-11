@@ -70,8 +70,8 @@ TEST_F(DflyEngineTest, Multi) {
 
   ASSERT_FALSE(service_->IsLocked(0, kKey1));
   ASSERT_FALSE(service_->IsLocked(0, kKey4));
+  ASSERT_FALSE(service_->IsShardSetLocked());
 }
-
 
 TEST_F(DflyEngineTest, MultiEmpty) {
   RespVec resp = Run({"multi"});
@@ -79,6 +79,7 @@ TEST_F(DflyEngineTest, MultiEmpty) {
   resp = Run({"exec"});
 
   ASSERT_THAT(resp[0], ArrLen(0));
+  ASSERT_FALSE(service_->IsShardSetLocked());
 }
 
 TEST_F(DflyEngineTest, MultiSeq) {
@@ -95,6 +96,7 @@ TEST_F(DflyEngineTest, MultiSeq) {
 
   ASSERT_FALSE(service_->IsLocked(0, kKey1));
   ASSERT_FALSE(service_->IsLocked(0, kKey4));
+  ASSERT_FALSE(service_->IsShardSetLocked());
 
   EXPECT_THAT(resp, ElementsAre(StrArg("OK"), StrArg("1"), ArrLen(2)));
   const RespExpr::Vec& arr = *get<RespVec*>(resp[2].u);
@@ -139,6 +141,7 @@ TEST_F(DflyEngineTest, MultiConsistent) {
   fb.join();
   ASSERT_FALSE(service_->IsLocked(0, kKey1));
   ASSERT_FALSE(service_->IsLocked(0, kKey4));
+  ASSERT_FALSE(service_->IsShardSetLocked());
 }
 
 TEST_F(DflyEngineTest, MultiRename) {
@@ -153,6 +156,65 @@ TEST_F(DflyEngineTest, MultiRename) {
   EXPECT_THAT(resp, ElementsAre(StrArg("OK"), StrArg("OK")));
   ASSERT_FALSE(service_->IsLocked(0, kKey1));
   ASSERT_FALSE(service_->IsLocked(0, kKey4));
+  ASSERT_FALSE(service_->IsShardSetLocked());
 }
+
+TEST_F(DflyEngineTest, MultiHop) {
+  Run({"set", kKey1, "1"});
+
+  auto p1_fb = pp_->at(1)->LaunchFiber([&] {
+    for (int i = 0; i < 100; ++i) {
+      auto resp = Run({"rename", kKey1, kKey2});
+      ASSERT_THAT(resp, RespEq("OK"));
+      EXPECT_EQ(2, GetDebugInfo("IO1").shards_count);
+
+      resp = Run({"rename", kKey2, kKey1});
+      ASSERT_THAT(resp, RespEq("OK"));
+    }
+  });
+
+  // mset should be executed either as ooo or via tx-queue because previous transactions
+  // have been unblocked and executed as well. In other words, this mset should never block
+  // on serializability constraints.
+  auto p2_fb = pp_->at(2)->LaunchFiber([&] {
+    for (int i = 0; i < 100; ++i) {
+      Run({"mset", kKey3, "1", kKey4, "2"});
+    }
+  });
+
+  p1_fb.join();
+  p2_fb.join();
+}
+
+TEST_F(DflyEngineTest, FlushDb) {
+  Run({"mset", kKey1, "1", kKey4, "2"});
+  auto resp = Run({"flushdb"});
+  ASSERT_THAT(resp, RespEq("OK"));
+
+  auto fb0 = pp_->at(0)->LaunchFiber([&] {
+    for (unsigned i = 0; i < 100; ++i) {
+      Run({"flushdb"});
+    }
+  });
+
+  pp_->at(1)->AwaitBlocking([&] {
+    for (unsigned i = 0; i < 100; ++i) {
+      Run({"mset", kKey1, "1", kKey4, "2"});
+      auto resp = Run({"exists", kKey1, kKey4});
+      int64_t ival = get<int64_t>(resp[0].u);
+      ASSERT_TRUE(ival == 0 || ival == 2) << i << " " << ival;
+    }
+  });
+
+  fb0.join();
+
+  ASSERT_FALSE(service_->IsLocked(0, kKey1));
+  ASSERT_FALSE(service_->IsLocked(0, kKey4));
+  ASSERT_FALSE(service_->IsShardSetLocked());
+}
+
+// TODO: to test transactions with a single shard since then all transactions become local.
+// To consider having a parameter in dragonfly engine controlling number of shards
+// unconditionally from number of cpus. TO TEST BLPOP under multi for single/multi argument case.
 
 }  // namespace dfly

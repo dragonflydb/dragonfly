@@ -47,6 +47,7 @@ class Service {
 
   // Used by tests.
   bool IsLocked(DbIndex db_index, std::string_view key) const;
+  bool IsShardSetLocked() const;
 
   EngineShardSet& shard_set() {
     return shard_set_;

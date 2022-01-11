@@ -14,6 +14,7 @@ enum class OpStatus : uint16_t {
   KEY_NOTFOUND,
   SKIPPED,
   WRONG_TYPE,
+  TIMED_OUT,
 };
 
 class OpResultBase {

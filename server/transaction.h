@@ -93,10 +93,6 @@ class Transaction {
     return shard_data_[SidToId(sid)].local_mask;
   }
 
-  uint32_t GetStateMask() const {
-    return state_mask_.load(std::memory_order_relaxed);
-  }
-
   // Schedules a transaction. Usually used for multi-hop transactions like Rename or BLPOP.
   // For single hop, use ScheduleSingleHop instead.
   void Schedule() {
@@ -147,6 +143,10 @@ class Transaction {
   }
 
   bool IsGlobal() const;
+
+  bool IsOOO() const {
+    return false;
+  }
 
   EngineShardSet* shard_set() {
     return ess_;
@@ -257,9 +257,6 @@ class Transaction {
 
   uint32_t trans_options_ = 0;
 
-  // Written by coordination thread but may be read by Shard threads.
-  // A mask of State values. Mostly used for debugging and for invariant checks.
-  std::atomic<uint16_t> state_mask_{0};
   ShardId unique_shard_id_{kInvalidSid};
 
   DbIndex db_index_ = 0;

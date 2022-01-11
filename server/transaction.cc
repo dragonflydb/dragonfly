@@ -264,13 +264,18 @@ bool Transaction::RunInShard(EngineShard* shard) {
 
   // If it's a final hop we should release the locks.
   if (should_release) {
-    KeyLockArgs largs = GetLockArgs(idx);
+    if (IsGlobal()) {
+      shard->shard_lock()->Release(Mode());
+    } else {  // not global.
+      KeyLockArgs largs = GetLockArgs(idx);
 
-    // If a transaction has been suspended, we keep the lock so that future transaction
-    // touching those keys will be ordered via TxQueue. It's necessary because we preserve
-    // the atomicity of awaked transactions by halting the TxQueue.
-    shard->db_slice().Release(Mode(), largs);
-    sd.local_mask &= ~KEYLOCK_ACQUIRED;
+      // If a transaction has been suspended, we keep the lock so that future transaction
+      // touching those keys will be ordered via TxQueue. It's necessary because we preserve
+      // the atomicity of awaked transactions by halting the TxQueue.
+      shard->db_slice().Release(Mode(), largs);
+      sd.local_mask &= ~KEYLOCK_ACQUIRED;
+      sd.local_mask &= ~OUT_OF_ORDER;
+    }
   }
 
   CHECK_GE(DecreaseRunCnt(), 1u);
@@ -405,7 +410,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
 
 // Runs in the coordinator fiber.
 void Transaction::UnlockMulti() {
-  VLOG(1) << "UnlockMulti";
+  VLOG(1) << "UnlockMulti " << DebugId();
 
   DCHECK(multi_);
   using KeyList = vector<pair<std::string_view, LockCnt>>;
@@ -437,7 +442,8 @@ void Transaction::UnlockMulti() {
     auto& sd = shard_data_[SidToId(shard->shard_id())];
 
     // It does not have to be that all shards in multi transaction execute this tx.
-    // Hence it could stay in the tx queue. We perform the necessary cleanup and remove it from there.
+    // Hence it could stay in the tx queue. We perform the necessary cleanup and remove it from
+    // there.
     if (sd.pq_pos != TxQueue::kEnd) {
       TxQueue* txq = shard->txq();
       DCHECK(!txq->Empty());
@@ -461,6 +467,8 @@ void Transaction::UnlockMulti() {
   }
   WaitForShardCallbacks();
   DCHECK_GE(use_count(), 1u);
+
+  VLOG(1) << "UnlockMultiEnd " << DebugId();
 }
 
 // Runs in coordinator thread.
@@ -517,21 +525,23 @@ void Transaction::ExecuteAsync(bool concluding_cb) {
   // We verify seq lock has the same generation number. See below for more info.
   auto cb = [seq, this] {
     EngineShard* shard = EngineShard::tlocal();
-    DVLOG(2) << "EngineShard::Exec " << DebugId() << " sid:" << shard->shard_id() << " "
-             << run_count_.load(memory_order_relaxed);
 
     uint16_t local_mask = GetLocalMask(shard->shard_id());
 
     // we use fetch_add with release trick to make sure that local_mask is loaded before
     // we load seq_after. We could gain similar result with "atomic_thread_fence(acquire)"
     uint32_t seq_after = seqlock_.fetch_add(0, memory_order_release);
+    bool should_poll = (seq_after == seq) && (local_mask & ARMED);
+
+    DVLOG(2) << "EngineShard::Exec " << DebugId() << " sid:" << shard->shard_id() << " "
+             << run_count_.load(memory_order_relaxed) << ", should_poll: " << should_poll;
 
     // We verify that this callback is still relevant.
     // If we still have the same sequence number and local_mask is ARMED it means
     // the coordinator thread has not crossed WaitForShardCallbacks barrier.
     // Otherwise, this callback is redundant. We may still call PollExecution but
     // we should not pass this to it since it can be in undefined state for this callback.
-    if (seq_after == seq && (local_mask & ARMED)) {
+    if (should_poll) {
       // shard->PollExecution(this) does not necessarily execute this transaction.
       // Therefore, everything that should be handled during the callback execution
       // should go into RunInShard.
@@ -561,6 +571,7 @@ void Transaction::RunQuickie(EngineShard* shard) {
   DCHECK_EQ(0u, txid_);
 
   shard->IncQuickRun();
+
   auto& sd = shard_data_[0];
   DCHECK_EQ(0, sd.local_mask & (KEYLOCK_ACQUIRED | OUT_OF_ORDER));
 
@@ -734,13 +745,14 @@ size_t Transaction::ReverseArgIndex(ShardId shard_id, size_t arg_index) const {
 }
 
 inline uint32_t Transaction::DecreaseRunCnt() {
+  // to protect against cases where Transaction is destroyed before run_ec_.notify
+  // finishes running. We can not put it inside the (res == 1) block because then it's too late.
+  ::boost::intrusive_ptr guard(this);
+
   // We use release so that no stores will be reordered after.
   uint32_t res = run_count_.fetch_sub(1, std::memory_order_release);
 
   if (res == 1) {
-    // to protect against cases where Transaction is destroyed before run_ec_.notify
-    // finishes running.
-    ::boost::intrusive_ptr guard(this);
     run_ec_.notify();
   }
   return res;

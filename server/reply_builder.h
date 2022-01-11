@@ -108,6 +108,9 @@ class ReplyBuilder {
   // Resp specific.
   // This one is prefixed with + and with clrf added automatically to each item..
   void SendSimpleStrArr(const std::string_view* arr, uint32_t count);
+  void SendNullArray();
+
+  void SendStringArr(absl::Span<const std::string_view> arr);
 
   void SendNull() {
     as_resp()->SendNull();

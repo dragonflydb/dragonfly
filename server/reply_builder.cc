@@ -208,4 +208,18 @@ void ReplyBuilder::SendSimpleStrArr(const std::string_view* arr, uint32_t count)
   serializer_->SendDirect(res);
 }
 
+void ReplyBuilder::SendNullArray() {
+  as_resp()->SendDirect("*-1\r\n");
+}
+
+void ReplyBuilder::SendStringArr(absl::Span<const std::string_view> arr) {
+  string res = absl::StrCat("*", arr.size(), kCRLF);
+
+  for (size_t i = 0; i < arr.size(); ++i) {
+    StrAppend(&res, "$", arr[i].size(), kCRLF);
+    res.append(arr[i]).append(kCRLF);
+  }
+  as_resp()->SendDirect(res);
+}
+
 }  // namespace dfly

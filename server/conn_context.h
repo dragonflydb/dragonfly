@@ -51,6 +51,7 @@ class ConnectionContext : public ReplyBuilder {
   struct DebugInfo {
     uint32_t shards_count = 0;
     TxClock clock = 0;
+    bool is_ooo = false;
   };
 
   DebugInfo last_command_debug;

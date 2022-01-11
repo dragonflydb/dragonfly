@@ -135,12 +135,12 @@ class EngineShardSet {
   }
 
   // Runs a brief function on all shards. Waits for it to complete.
-  template <typename U> void RunBriefInParallel(U&& func) {
+  template <typename U> void RunBriefInParallel(U&& func) const {
     RunBriefInParallel(std::forward<U>(func), [](auto i) { return true; });
   }
 
   // Runs a brief function on selected shards. Waits for it to complete.
-  template <typename U, typename P> void RunBriefInParallel(U&& func, P&& pred);
+  template <typename U, typename P> void RunBriefInParallel(U&& func, P&& pred) const;
 
   template <typename U> void RunBlockingInParallel(U&& func);
 
@@ -149,7 +149,8 @@ class EngineShardSet {
   std::vector<util::fibers_ext::FiberQueue*> shard_queue_;
 };
 
-template <typename U, typename P> void EngineShardSet::RunBriefInParallel(U&& func, P&& pred) {
+template <typename U, typename P>
+void EngineShardSet::RunBriefInParallel(U&& func, P&& pred) const {
   util::fibers_ext::BlockingCounter bc{0};
 
   for (uint32_t i = 0; i < size(); ++i) {

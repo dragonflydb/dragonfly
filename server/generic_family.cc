@@ -26,8 +26,7 @@ class Renamer {
   Renamer(DbIndex dind, ShardId source_id) : db_indx_(dind), src_sid_(source_id) {
   }
 
-  // TODO: to implement locking semantics.
-  OpResult<void> FindAndLock(ShardId shard_id, const ArgSlice& args);
+  OpResult<void> Find(ShardId shard_id, const ArgSlice& args);
 
   OpResult<void> status() const {
     return status_;
@@ -36,75 +35,82 @@ class Renamer {
   Transaction::RunnableType Finalize(bool skip_exist_dest);
 
  private:
-  void SwapValues(EngineShard* shard, const ArgSlice& args);
+  void MoveValues(EngineShard* shard, const ArgSlice& args);
 
   DbIndex db_indx_;
   ShardId src_sid_;
-  pair<MainIterator, ExpireIterator> find_res_[2];
 
-  uint64_t expire_;
-  MainValue src_val_;
+  struct FindResult {
+    string_view key;
+    MainValue val;
+    uint64_t expire_ts;
+    bool found = false;
+  };
+
+  FindResult src_res_, dest_res_;  // index 0 for source, 1 for destination
 
   OpResult<void> status_;
 };
 
-OpResult<void> Renamer::FindAndLock(ShardId shard_id, const ArgSlice& args) {
+OpResult<void> Renamer::Find(ShardId shard_id, const ArgSlice& args) {
   CHECK_EQ(1u, args.size());
-  unsigned indx = (shard_id == src_sid_) ? 0 : 1;
+  FindResult* res = (shard_id == src_sid_) ? &src_res_ : &dest_res_;
 
-  find_res_[indx] = EngineShard::tlocal()->db_slice().FindExt(db_indx_, args.front());
+  res->key = args.front();
+  auto [it, exp_it] = EngineShard::tlocal()->db_slice().FindExt(db_indx_, res->key);
+
+  res->found = IsValid(it);
+  if (IsValid(it)) {
+    res->val = it->second;  // TODO: won't work for robj because we copy pointers.
+    res->expire_ts = IsValid(exp_it) ? exp_it->second : 0;
+  }
 
   return OpStatus::OK;
 };
 
-void Renamer::SwapValues(EngineShard* shard, const ArgSlice& args) {
-  auto& dest = find_res_[1];
+void Renamer::MoveValues(EngineShard* shard, const ArgSlice& args) {
   auto shard_id = shard->shard_id();
 
-  // NOTE: This object juggling between shards won't work if we want to maintain heap per shard
-  // model.
+  // TODO: when we want to maintain heap per shard model this code will require additional
+  // work
   if (shard_id == src_sid_) {  // Handle source key.
     // delete the source entry.
-    CHECK(shard->db_slice().Del(db_indx_, find_res_[0].first));
+    auto it = shard->db_slice().FindExt(db_indx_, src_res_.key).first;
+    CHECK(shard->db_slice().Del(db_indx_, it));
     return;
   }
 
   // Handle destination
-  MainIterator dest_it = dest.first;
+  string_view dest_key = dest_res_.key;
+  MainIterator dest_it = shard->db_slice().FindExt(db_indx_, dest_key).first;
   if (IsValid(dest_it)) {
-    dest_it->second = std::move(src_val_);  // we just move the source.
-    shard->db_slice().Expire(db_indx_, dest_it, expire_);
+    // we just move the source. We won't be able to do it with heap per shard model.
+    dest_it->second = std::move(src_res_.val);
+    shard->db_slice().Expire(db_indx_, dest_it, src_res_.expire_ts);
   } else {
     // we just add the key to destination with the source object.
-    string_view key = args.front();  // from key
-    shard->db_slice().AddNew(db_indx_, key, std::move(src_val_), expire_);
+    shard->db_slice().AddNew(db_indx_, dest_key, src_res_.val, src_res_.expire_ts);
   }
 }
 
 Transaction::RunnableType Renamer::Finalize(bool skip_exist_dest) {
-  const auto& src = find_res_[0];
-  const auto& dest = find_res_[1];
-
   auto cleanup = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
 
-  if (!IsValid(src.first)) {
+  if (!src_res_.found) {
     status_ = OpStatus::KEY_NOTFOUND;
 
     return cleanup;
   }
 
-  if (IsValid(dest.first) && skip_exist_dest) {
+  if (dest_res_.found && skip_exist_dest) {
     status_ = OpStatus::KEY_EXISTS;
 
     return cleanup;
   }
 
-  expire_ = IsValid(src.second) ? src.second->second : 0;
-  src_val_ = std::move(src.first->second);
-
   // Src key exist and we need to override the destination.
   return [this](Transaction* t, EngineShard* shard) {
-    this->SwapValues(shard, t->ShardArgsInShard(shard->shard_id()));
+    this->MoveValues(shard, t->ShardArgsInShard(shard->shard_id()));
 
     return OpStatus::OK;
   };
@@ -295,7 +301,7 @@ OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool skip_exist_des
   transaction->Execute(
       [&renamer](Transaction* t, EngineShard* shard) {
         auto args = t->ShardArgsInShard(shard->shard_id());
-        return renamer.FindAndLock(shard->shard_id(), args).status();
+        return renamer.Find(shard->shard_id(), args).status();
       },
       false);
 
