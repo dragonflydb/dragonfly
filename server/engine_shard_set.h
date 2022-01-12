@@ -8,8 +8,11 @@ extern "C" {
 #include "redis/sds.h"
 }
 
+#include <absl/container/btree_map.h>
+#include <absl/container/flat_hash_map.h>
 #include <xxhash.h>
 
+#include "base/string_view_sso.h"
 #include "core/tx_queue.h"
 #include "server/db_slice.h"
 #include "util/fibers/fiberqueue_threadpool.h"
@@ -73,8 +76,34 @@ class EngineShard {
     return &shard_lock_;
   }
 
+  // Iterates over awakened key candidates in each db and moves verified ones into
+  // global verified_awakened_ array.
+  // Returns true if there are active awakened keys, false otherwise.
+  // It has 2 responsibilities.
+  // 1: to go over potential wakened keys, verify them and activate watch queues.
+  // 2: if t is awaked and finished running - to remove it from the head
+  //    of the queue and notify the next one.
+  //    If t is null then second part is omitted.
+  void ProcessAwakened(Transaction* t);
+
+  // Blocking API
+  // TODO: consider moving all watched functions to
+  // EngineShard with separate per db map.
+  //! AddWatched adds a transaction to the blocking queue.
+  void AddWatched(std::string_view key, Transaction* me);
+  bool RemovedWatched(std::string_view key, Transaction* me);
+  void GCWatched(const KeyLockArgs& lock_args);
+
+  void AwakeWatched(DbIndex db_index, const MainIterator& it);
+
+  bool HasAwakedTransaction() const {
+    return !awakened_transactions_.empty();
+  }
+
   // TODO: Awkward interface. I should solve it somehow.
   void ShutdownMulti(Transaction* multi);
+  void WaitForConvergence(TxId notifyid, Transaction* t);
+  bool HasResultConverged(TxId notifyid) const;
 
   void IncQuickRun() {
     stats_.quick_runs++;
@@ -89,6 +118,29 @@ class EngineShard {
 
  private:
   EngineShard(util::ProactorBase* pb, bool update_db_time);
+
+  struct WatchQueue;
+
+  void OnTxFinish();
+  void NotifyConvergence(Transaction* tx);
+
+  /// Returns the notified transaction,
+  /// or null if all transactions in the queue have expired..
+  Transaction* NotifyWatchQueue(WatchQueue* wq);
+
+  struct WatchTable {
+    absl::flat_hash_map<std::string, std::unique_ptr<WatchQueue>> queue_map;
+
+    // awakened keys that point to blocked entries that can potentially be unblocked.
+    // reference watched keys.
+    absl::flat_hash_set<base::string_view_sso> awakened_keys;
+  };
+
+  absl::flat_hash_map<DbIndex, WatchTable> watch_map_;
+  absl::flat_hash_set<DbIndex> awakened_indices_;
+  absl::flat_hash_set<Transaction*> awakened_transactions_;
+
+  absl::btree_multimap<TxId, Transaction*> waiting_convergence_;
 
   ::util::fibers_ext::FiberQueue queue_;
   ::boost::fibers::fiber fiber_q_;

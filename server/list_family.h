@@ -22,6 +22,7 @@ class ListFamily {
   static void RPush(CmdArgList args, ConnectionContext* cntx);
   static void LPop(CmdArgList args, ConnectionContext* cntx);
   static void RPop(CmdArgList args, ConnectionContext* cntx);
+  static void BLPop(CmdArgList args, ConnectionContext* cntx);
   static void LLen(CmdArgList args, ConnectionContext* cntx);
   static void LIndex(CmdArgList args, ConnectionContext* cntx);
 

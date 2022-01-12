@@ -24,6 +24,72 @@ std::atomic_uint64_t op_seq{1};
 
 }  // namespace
 
+struct Transaction::FindFirstProcessor {
+ public:
+  FindFirstProcessor(TxId notify, unsigned size)
+      : find_res_(size, OpStatus::KEY_NOTFOUND), notify_txid_(notify) {
+  }
+
+  void Find(Transaction* t);
+
+  OpResult<Transaction::FindFirstResult> Process(Transaction* t);
+
+ private:
+  OpStatus RunInShard(Transaction* t, EngineShard* shard);
+
+  // Holds Find results: (iterator to a found key, and its index in the passed arguments).
+  // See DbSlice::FindFirst for more details.
+  // spans all the shards for now.
+  std::vector<OpResult<std::pair<MainIterator, unsigned>>> find_res_;
+  TxId notify_txid_;
+};
+
+void Transaction::FindFirstProcessor::Find(Transaction* t) {
+  VLOG(2) << "FindFirst::Find " << t->DebugId();
+
+  t->Execute([this](auto* t, auto* s) { return RunInShard(t, s); }, false);
+}
+
+OpStatus Transaction::FindFirstProcessor::RunInShard(Transaction* t, EngineShard* shard) {
+  if (notify_txid_ == kuint64max || shard->committed_txid() == notify_txid_) {
+    // TODO: to add timestamp logic that provides consistency guarantees for blocking transactions.
+    auto args = t->ShardArgsInShard(shard->shard_id());
+    find_res_[shard->shard_id()] = shard->db_slice().FindFirst(t->db_index(), args);
+  }
+  return OpStatus::OK;
+}
+
+OpResult<Transaction::FindFirstResult> Transaction::FindFirstProcessor::Process(Transaction* t) {
+  uint32_t min_arg_indx = UINT32_MAX;
+
+  FindFirstResult result;
+  for (size_t sid = 0; sid < find_res_.size(); ++sid) {
+    const auto& fr = find_res_[sid];
+    auto status = fr.status();
+    if (status == OpStatus::KEY_NOTFOUND)
+      continue;
+
+    if (status == OpStatus::WRONG_TYPE) {
+      return status;
+    }
+
+    DCHECK(fr && IsValid(fr->first));
+    const auto& it_pos = fr.value();
+
+    size_t arg_indx = t->ReverseArgIndex(sid, it_pos.second);
+    if (arg_indx < min_arg_indx) {
+      min_arg_indx = arg_indx;
+      result.sid = sid;
+      result.find_res = it_pos.first;
+    }
+  }
+
+  if (result.sid == kInvalidSid) {
+    return OpStatus::KEY_NOTFOUND;
+  }
+  return result;
+}
+
 IntentLock::Mode Transaction::Mode() const {
   return (trans_options_ & CO::READONLY) ? IntentLock::SHARED : IntentLock::EXCLUSIVE;
 }
@@ -164,7 +230,7 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   }
 
   CHECK(next_arg == args_.end());
-  DVLOG(1) << "InitByArgs " << DebugId();
+  DVLOG(1) << "InitByArgs " << DebugId() << " " << args_.front();
 
   if (unique_shard_cnt_ == 1) {
     PerShardData* sd;
@@ -224,18 +290,25 @@ bool Transaction::RunInShard(EngineShard* shard) {
   DCHECK(sd.local_mask & ARMED);
   sd.local_mask &= ~ARMED;
 
+  DCHECK_EQ(sd.local_mask & (SUSPENDED_Q | EXPIRED_Q), 0);
+
+  bool awaked_prerun = (sd.local_mask & AWAKED_Q) != 0;
+
   // For multi we unlock transaction (i.e. its keys) in UnlockMulti() call.
   // Therefore we differentiate between concluding, which says that this specific
   // runnable concludes current operation, and should_release which tells
   // whether we should unlock the keys. should_release is false for multi and
   // equal to concluding otherwise.
-  bool should_release = is_concluding_cb_ && !multi_;
+  bool should_release = (coordinator_state_ & COORD_EXEC_CONCLUDING) && !multi_;
+  IntentLock::Mode mode = Mode();
 
   // We make sure that we lock exactly once for each (multi-hop) transaction inside
   // multi-transactions.
   if (multi_ && ((sd.local_mask & KEYLOCK_ACQUIRED) == 0)) {
+    DCHECK(!awaked_prerun);  // we should not have blocking transaction inside multi block.
+
     sd.local_mask |= KEYLOCK_ACQUIRED;
-    shard->db_slice().Acquire(Mode(), GetLockArgs(idx));
+    shard->db_slice().Acquire(mode, GetLockArgs(idx));
   }
 
   DCHECK(IsGlobal() || (sd.local_mask & KEYLOCK_ACQUIRED));
@@ -264,7 +337,10 @@ bool Transaction::RunInShard(EngineShard* shard) {
 
   // If it's a final hop we should release the locks.
   if (should_release) {
+    bool is_suspended = sd.local_mask & SUSPENDED_Q;
+
     if (IsGlobal()) {
+      DCHECK(!awaked_prerun && !is_suspended);  // Global transactions can not be blocking.
       shard->shard_lock()->Release(Mode());
     } else {  // not global.
       KeyLockArgs largs = GetLockArgs(idx);
@@ -272,9 +348,16 @@ bool Transaction::RunInShard(EngineShard* shard) {
       // If a transaction has been suspended, we keep the lock so that future transaction
       // touching those keys will be ordered via TxQueue. It's necessary because we preserve
       // the atomicity of awaked transactions by halting the TxQueue.
-      shard->db_slice().Release(Mode(), largs);
-      sd.local_mask &= ~KEYLOCK_ACQUIRED;
+      if (!is_suspended) {
+        shard->db_slice().Release(mode, largs);
+        sd.local_mask &= ~KEYLOCK_ACQUIRED;
+      }
       sd.local_mask &= ~OUT_OF_ORDER;
+      // It has 2 responsibilities.
+      // 1: to go over potential wakened keys, verify them and activate watch queues.
+      // 2: if this transaction was notified and finished running - to remove it from the head
+      //    of the queue and notify the next one.
+      shard->ProcessAwakened(awaked_prerun ? this : nullptr);
     }
   }
 
@@ -284,11 +367,43 @@ bool Transaction::RunInShard(EngineShard* shard) {
   return !should_release;  // keep
 }
 
-void Transaction::ScheduleInternal(bool single_hop) {
+void Transaction::RunNoop(EngineShard* shard) {
+  DVLOG(1) << "RunNoop " << DebugId();
+
+  unsigned idx = SidToId(shard->shard_id());
+  auto& sd = shard_data_[idx];
+  DCHECK(sd.local_mask & ARMED);
+  DCHECK(sd.local_mask & KEYLOCK_ACQUIRED);
+  DCHECK(!multi_);
+  DCHECK(!IsGlobal());
+
+  sd.local_mask &= ~ARMED;
+
+  if (unique_shard_cnt_ == 1) {
+    cb_ = nullptr;
+    local_result_ = OpStatus::OK;
+  }
+
+  if (coordinator_state_ & COORD_EXEC_CONCLUDING) {
+    KeyLockArgs largs = GetLockArgs(idx);
+    shard->db_slice().Release(Mode(), largs);
+    sd.local_mask &= ~KEYLOCK_ACQUIRED;
+
+    if (sd.local_mask & SUSPENDED_Q) {
+      sd.local_mask |= EXPIRED_Q;
+      shard->GCWatched(largs);
+    }
+  }
+  // Decrease run count after we update all the data in the transaction object.
+  CHECK_GE(DecreaseRunCnt(), 1u);
+}
+
+void Transaction::ScheduleInternal() {
   DCHECK_EQ(0u, txid_);
+  DCHECK_EQ(0, coordinator_state_ & (COORD_SCHED | COORD_OOO));
 
   bool span_all = IsGlobal();
-  bool out_of_order = false;
+  bool single_hop = (coordinator_state_ & COORD_EXEC_CONCLUDING);
 
   uint32_t num_shards;
   std::function<bool(uint32_t)> is_active;
@@ -297,6 +412,7 @@ void Transaction::ScheduleInternal(bool single_hop) {
   if (span_all) {
     is_active = [](uint32_t) { return true; };
     num_shards = ess_->size();
+
     // Lock shards
     auto cb = [mode](EngineShard* shard) { shard->shard_lock()->Acquire(mode); };
     ess_->RunBriefInParallel(std::move(cb));
@@ -331,10 +447,11 @@ void Transaction::ScheduleInternal(bool single_hop) {
         // OOO can not happen with span-all transactions. We ensure it in ScheduleInShard when we
         // refuse to acquire locks for these transactions..
         DCHECK(!span_all);
-        out_of_order = true;
+        coordinator_state_ |= COORD_OOO;
       }
-      DVLOG(1) << "Scheduled " << DebugId() << " OutOfOrder: " << out_of_order;
-
+      DVLOG(1) << "Scheduled " << DebugId()
+               << " OutOfOrder: " << bool(coordinator_state_ & COORD_OOO);
+      coordinator_state_ |= COORD_SCHED;
       break;
     }
 
@@ -348,7 +465,7 @@ void Transaction::ScheduleInternal(bool single_hop) {
     CHECK_EQ(0u, success.load(memory_order_relaxed));
   }
 
-  if (out_of_order) {
+  if (IsOOO()) {
     for (auto& sd : shard_data_) {
       sd.local_mask |= OUT_OF_ORDER;
     }
@@ -362,6 +479,9 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   DCHECK(!cb_);
 
   cb_ = std::move(cb);
+
+  // single hop -> concluding.
+  coordinator_state_ |= (COORD_EXEC | COORD_EXEC_CONCLUDING);
 
   bool schedule_fast = (unique_shard_cnt_ == 1) && !IsGlobal() && !multi_;
   if (schedule_fast) {  // Single shard (local) optimization.
@@ -395,8 +515,8 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   } else {
     // Transaction spans multiple shards or it's global (like flushdb) or multi.
     if (!multi_)
-      ScheduleInternal(true);
-    ExecuteAsync(true);
+      ScheduleInternal();
+    ExecuteAsync();
   }
 
   DVLOG(1) << "ScheduleSingleHop before Wait " << DebugId() << " " << run_count_.load();
@@ -454,6 +574,9 @@ void Transaction::UnlockMulti() {
     }
 
     shard->ShutdownMulti(this);
+
+    // notify awakened transactions.
+    shard->ProcessAwakened(nullptr);
     shard->PollExecution(nullptr);
 
     this->DecreaseRunCnt();
@@ -474,8 +597,15 @@ void Transaction::UnlockMulti() {
 // Runs in coordinator thread.
 void Transaction::Execute(RunnableType cb, bool conclude) {
   cb_ = std::move(cb);
+  coordinator_state_ |= COORD_EXEC;
 
-  ExecuteAsync(conclude);
+  if (conclude) {
+    coordinator_state_ |= COORD_EXEC_CONCLUDING;
+  } else {
+    coordinator_state_ &= ~COORD_EXEC_CONCLUDING;
+  }
+
+  ExecuteAsync();
 
   DVLOG(1) << "Wait on Exec " << DebugId();
   WaitForShardCallbacks();
@@ -485,10 +615,8 @@ void Transaction::Execute(RunnableType cb, bool conclude) {
 }
 
 // Runs in coordinator thread.
-void Transaction::ExecuteAsync(bool concluding_cb) {
-  DVLOG(1) << "ExecuteAsync " << DebugId() << " concluding " << concluding_cb;
-
-  is_concluding_cb_ = concluding_cb;
+void Transaction::ExecuteAsync() {
+  DVLOG(1) << "ExecuteAsync " << DebugId();
 
   DCHECK_GT(unique_shard_cnt_, 0u);
   DCHECK_GT(use_count_.load(memory_order_relaxed), 0u);
@@ -582,6 +710,52 @@ void Transaction::RunQuickie(EngineShard* shard) {
 
   sd.local_mask &= ~ARMED;
   cb_ = nullptr;  // We can do it because only a single shard runs the callback.
+}
+
+// runs in coordinator thread.
+// Marks the transaction as expired but does not remove it from the waiting queue.
+void Transaction::ExpireBlocking() {
+  DVLOG(1) << "ExpireBlocking " << DebugId();
+  DCHECK(!IsGlobal());
+
+  run_count_.store(unique_shard_cnt_, memory_order_release);
+
+  auto expire_cb = [this] {
+    EngineShard* shard = EngineShard::tlocal();
+
+    auto lock_args = GetLockArgs(shard->shard_id());
+    shard->db_slice().Release(Mode(), lock_args);
+
+    unsigned sd_idx = SidToId(shard->shard_id());
+    auto& sd = shard_data_[sd_idx];
+    sd.local_mask |= EXPIRED_Q;
+    sd.local_mask &= ~KEYLOCK_ACQUIRED;
+
+    // Need to see why I decided to call this.
+    // My guess - probably to trigger the run of stalled transactions in case
+    // this shard concurrently awoke this transaction and stalled the processing
+    // of TxQueue.
+    shard->PollExecution(nullptr);
+
+    CHECK_GE(DecreaseRunCnt(), 1u);
+  };
+
+  if (unique_shard_cnt_ == 1) {
+    DCHECK_LT(unique_shard_id_, ess_->size());
+    ess_->Add(unique_shard_id_, std::move(expire_cb));
+  } else {
+    for (ShardId i = 0; i < shard_data_.size(); ++i) {
+      auto& sd = shard_data_[i];
+      DCHECK_EQ(0, sd.local_mask & ARMED);
+      if (sd.arg_count == 0)
+        continue;
+      ess_->Add(i, expire_cb);
+    }
+  }
+
+  // Wait for all callbacks to conclude.
+  WaitForShardCallbacks();
+  DVLOG(1) << "ExpireBlocking finished " << DebugId();
 }
 
 const char* Transaction::Name() const {
@@ -744,6 +918,123 @@ size_t Transaction::ReverseArgIndex(ShardId shard_id, size_t arg_index) const {
   return reverse_index_[shard_data_[shard_id].arg_start + arg_index];
 }
 
+bool Transaction::WaitOnWatch(const time_point& tp) {
+  // Assumes that transaction is pending and scheduled. TODO: To verify it with state machine.
+  VLOG(2) << "WaitOnWatch Start use_count(" << use_count() << ")";
+  using namespace chrono;
+
+  // wake_txid_.store(kuint64max, std::memory_order_relaxed);
+  Execute([](auto* t, auto* shard) { return t->AddToWatchedShardCb(shard); }, true);
+  coordinator_state_ |= COORD_BLOCKED;
+  bool res = true;  // returns false if timeout occurs.
+
+  auto wake_cb = [this] {
+    return (coordinator_state_ & COORD_CANCELLED) ||
+           notify_txid_.load(memory_order_relaxed) != kuint64max;
+  };
+  cv_status status = cv_status::no_timeout;
+
+  if (tp == time_point::max()) {
+    DVLOG(1) << "WaitOnWatch foreva " << DebugId();
+    blocking_ec_.await(move(wake_cb));
+    DVLOG(1) << "WaitOnWatch AfterWait";
+  } else {
+    DVLOG(1) << "WaitOnWatch TimeWait for "
+             << duration_cast<milliseconds>(tp - time_point::clock::now()).count() << " ms";
+
+    status = blocking_ec_.await_until(move(wake_cb), tp);
+
+    DVLOG(1) << "WaitOnWatch await_until " << int(status);
+  }
+
+  if ((coordinator_state_ & COORD_CANCELLED) || status == cv_status::timeout) {
+    ExpireBlocking();
+    coordinator_state_ &= ~COORD_BLOCKED;
+    return false;
+  }
+
+  // We were notified by a shard, so lets make sure that our notifications converged to a stable
+  // form.
+  if (unique_shard_cnt_ > 1) {
+    run_count_.store(unique_shard_cnt_, memory_order_release);
+    auto converge_cb = [this] {
+      EngineShard* shard = EngineShard::tlocal();
+      auto& sd = shard_data_[shard->shard_id()];
+
+      TxId notify = notify_txid();
+      if ((sd.local_mask & AWAKED_Q) || shard->HasResultConverged(notify)) {
+        CHECK_GE(DecreaseRunCnt(), 1u);
+        return;
+      }
+      shard->WaitForConvergence(notify, this);
+    };
+
+    for (ShardId i = 0; i < shard_data_.size(); ++i) {
+      auto& sd = shard_data_[i];
+      DCHECK_EQ(0, sd.local_mask & ARMED);
+      if (sd.arg_count == 0)
+        continue;
+      ess_->Add(i, converge_cb);
+    }
+
+    // Wait for all callbacks to conclude.
+    WaitForShardCallbacks();
+    DVLOG(1) << "Convergence finished " << DebugId();
+  }
+
+  // Lift blocking mask.
+  coordinator_state_ &= ~COORD_BLOCKED;
+
+  return res;
+}
+
+void Transaction::UnregisterWatch() {
+  auto cb = [](Transaction* t, EngineShard* shard) {
+    t->RemoveFromWatchedShardCb(shard);
+    return OpStatus::OK;
+  };
+  Execute(std::move(cb), true);
+}
+
+// Runs only in the shard thread.
+OpStatus Transaction::AddToWatchedShardCb(EngineShard* shard) {
+  ShardId sid = SidToId(shard->shard_id());
+
+  auto& sd = shard_data_[sid];
+  CHECK_EQ(0, sd.local_mask & SUSPENDED_Q);
+  DCHECK_EQ(0, sd.local_mask & ARMED);
+
+  auto args = ShardArgsInShard(shard->shard_id());
+  for (auto s : args) {
+    shard->AddWatched(s, this);
+  }
+  sd.local_mask |= SUSPENDED_Q;
+
+  return OpStatus::OK;
+}
+
+// Runs only in the shard thread.
+// Quadratic complexity in number of arguments and queue length.
+bool Transaction::RemoveFromWatchedShardCb(EngineShard* shard) {
+  ShardId sid = SidToId(shard->shard_id());
+  auto& sd = shard_data_[sid];
+
+  constexpr uint16_t kQueueMask =
+      -Transaction::SUSPENDED_Q | Transaction::AWAKED_Q | Transaction::EXPIRED_Q;
+
+  if ((sd.local_mask & kQueueMask) == 0)
+    return false;
+
+  sd.local_mask &= kQueueMask;
+
+  // TODO: what if args have keys and values?
+  auto args = ShardArgsInShard(shard->shard_id());
+  for (auto s : args) {
+    shard->RemovedWatched(s, this);
+  }
+  return true;
+}
+
 inline uint32_t Transaction::DecreaseRunCnt() {
   // to protect against cases where Transaction is destroyed before run_ec_.notify
   // finishes running. We can not put it inside the (res == 1) block because then it's too late.
@@ -751,7 +1042,6 @@ inline uint32_t Transaction::DecreaseRunCnt() {
 
   // We use release so that no stores will be reordered after.
   uint32_t res = run_count_.fetch_sub(1, std::memory_order_release);
-
   if (res == 1) {
     run_ec_.notify();
   }
@@ -760,6 +1050,55 @@ inline uint32_t Transaction::DecreaseRunCnt() {
 
 bool Transaction::IsGlobal() const {
   return (trans_options_ & CO::GLOBAL_TRANS) != 0;
+}
+
+// Runs only in the shard thread.
+bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid) {
+  unsigned sd_id = SidToId(sid);
+  auto& sd = shard_data_[sd_id];
+  unsigned local_mask = sd.local_mask;
+  CHECK_NE(0u, local_mask & SUSPENDED_Q);
+  DVLOG(1) << "NotifyBlocked " << DebugId() << ", local_mask: " << local_mask;
+
+  if (local_mask & Transaction::EXPIRED_Q) {
+    return false;
+  }
+
+  if (local_mask & SUSPENDED_Q) {
+    DCHECK_EQ(0u, local_mask & AWAKED_Q);
+
+    sd.local_mask &= ~SUSPENDED_Q;
+    sd.local_mask |= AWAKED_Q;
+
+    TxId notify_id = notify_txid_.load(memory_order_relaxed);
+
+    while (committed_txid < notify_id) {
+      if (notify_txid_.compare_exchange_weak(notify_id, committed_txid, memory_order_relaxed)) {
+        // if we improved notify_txid_ - break.
+        blocking_ec_.notify();  // release barrier.
+        break;
+      }
+    }
+    return true;
+  }
+
+  CHECK(sd.local_mask & AWAKED_Q);
+  return true;
+}
+
+void Transaction::BreakOnClose() {
+  if (coordinator_state_ & COORD_BLOCKED) {
+    coordinator_state_ |= COORD_CANCELLED;
+    blocking_ec_.notify();
+  }
+}
+
+auto Transaction::FindFirst() -> OpResult<FindFirstResult> {
+  FindFirstProcessor processor(notify_txid_.load(memory_order_relaxed), ess_->size());
+
+  processor.Find(this);
+
+  return processor.Process(this);
 }
 
 }  // namespace dfly

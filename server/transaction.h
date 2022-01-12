@@ -51,6 +51,9 @@ class Transaction {
     ARMED = 1,        // Transaction was armed with the callback
     OUT_OF_ORDER = 2,
     KEYLOCK_ACQUIRED = 4,
+    SUSPENDED_Q = 0x10,  // added by the coordination flow (via WaitBlocked()).
+    AWAKED_Q = 0x20,     // awaked by condition (lpush etc)
+    EXPIRED_Q = 0x40,    // timed-out and should be garbage collected from the blocking queue.
   };
 
   Transaction(const CommandId* cid, EngineShardSet* ess);
@@ -96,7 +99,7 @@ class Transaction {
   // Schedules a transaction. Usually used for multi-hop transactions like Rename or BLPOP.
   // For single hop, use ScheduleSingleHop instead.
   void Schedule() {
-    ScheduleInternal(false);
+    ScheduleInternal();
   }
 
   // if conclude is true, removes the transaction from the pending queue.
@@ -138,6 +141,10 @@ class Transaction {
     return unique_shard_cnt_;
   }
 
+  TxId notify_txid() const {
+    return notify_txid_.load(std::memory_order_relaxed);
+  }
+
   bool IsMulti() const {
     return bool(multi_);
   }
@@ -145,25 +152,58 @@ class Transaction {
   bool IsGlobal() const;
 
   bool IsOOO() const {
-    return false;
+    return coordinator_state_ & COORD_OOO;
   }
 
   EngineShardSet* shard_set() {
     return ess_;
   }
 
+  // Registers transaction into watched queue and blocks until a) either notification is received.
+  // or b) tp is reached. If tp is time_point::max() then waits indefinitely.
+  // Expects that the transaction had been scheduled before, and uses Execute(.., true) to register.
+  // Returns false if timeout ocurred, true if was notified by one of the keys.
+  bool WaitOnWatch(const time_point& tp);
+  void UnregisterWatch();
+
+  // Returns true if transaction is awaked, false if it's timed-out and can be removed from the
+  // blocking queue. NotifySuspended may be called from (multiple) shard threads and
+  // with each call potentially improving the minimal wake_txid at which
+  // this transaction has been awaked.
+  bool NotifySuspended(TxId committed_ts, ShardId sid);
+
+  void BreakOnClose();
+
   // Called by EngineShard when performing Execute over the tx queue.
   // Returns true if transaction should be kept in the queue.
   bool RunInShard(EngineShard* shard);
+
+  void RunNoop(EngineShard* shard);
+
+  //! Returns locking arguments needed for DbSlice to Acquire/Release transactional locks.
+  //! Runs in the shard thread.
+  KeyLockArgs GetLockArgs(ShardId sid) const;
+
+  // TODO: iterators do not survive between hops.
+  // It could happen that FindFirst returns a result but then a different transaction
+  // grows the table and invalidates find_res. We should return a key, unfortunately,
+  // and not the iterator.
+  struct FindFirstResult {
+    MainIterator find_res;
+    ShardId sid = kInvalidSid;
+  };
+
+  OpResult<FindFirstResult> FindFirst();
 
  private:
   unsigned SidToId(ShardId sid) const {
     return sid < shard_data_.size() ? sid : 0;
   }
 
-  void ScheduleInternal(bool single_hop);
+  void ScheduleInternal();
 
-  void ExecuteAsync(bool concluding_cb);
+  void ExpireBlocking();
+  void ExecuteAsync();
 
   // Optimized version of RunInShard for single shard uncontended cases.
   void RunQuickie(EngineShard* shard);
@@ -180,9 +220,9 @@ class Transaction {
   // Returns true if operation was cancelled for this shard. Runs in the shard thread.
   bool CancelInShard(EngineShard* shard);
 
-  //! Returns locking arguments needed for DbSlice to Acquire/Release transactional locks.
-  //! Runs in the shard thread.
-  KeyLockArgs GetLockArgs(ShardId sid) const;
+  // Shard callbacks used within Execute calls
+  OpStatus AddToWatchedShardCb(EngineShard* shard);
+  bool RemoveFromWatchedShardCb(EngineShard* shard);
 
   void WaitForShardCallbacks() {
     run_ec_.await([this] { return 0 == run_count_.load(std::memory_order_relaxed); });
@@ -198,6 +238,8 @@ class Transaction {
   uint32_t use_count() const {
     return use_count_.load(std::memory_order_relaxed);
   }
+
+  struct FindFirstProcessor;
 
   struct PerShardData {
     uint32_t arg_start = 0;  // Indices into args_ array.
@@ -249,6 +291,7 @@ class Transaction {
   const CommandId* cid_;
   EngineShardSet* ess_;
   TxId txid_{0};
+  std::atomic<TxId> notify_txid_{kuint64max};
 
   std::atomic_uint32_t use_count_{0}, run_count_{0}, seqlock_{0};
 
@@ -258,16 +301,26 @@ class Transaction {
   uint32_t trans_options_ = 0;
 
   ShardId unique_shard_id_{kInvalidSid};
-
   DbIndex db_index_ = 0;
 
-  // For single-hop transactions with unique_shards_ == 1, hence no data-race.
+  // Used for single-hop transactions with unique_shards_ == 1, hence no data-race.
   OpStatus local_result_ = OpStatus::OK;
 
-  // NOTE: to move to bitmask if it grows.
-  // Written by coordinator thread, read by shard threads but not concurrently.
-  // Says whether the current callback function is concluding for this operation.
-  bool is_concluding_cb_{true};
+  enum CoordinatorState : uint8_t {
+    COORD_SCHED = 1,
+    COORD_EXEC = 2,
+    // We are running the last execution step in multi-hop operation.
+    COORD_EXEC_CONCLUDING = 4,
+    COORD_BLOCKED = 8,
+    COORD_CANCELLED = 0x10,
+    COORD_OOO = 0x20,
+  };
+
+  // Transaction coordinator state, written and read by coordinator thread.
+  // Can be read by shard threads as long as we respect ordering rules, i.e. when
+  // they read this variable the coordinator thread is stalled and can not cause data races.
+  // If COORDINATOR_XXX has been set, it means we passed or crossed stage XXX.
+  uint8_t coordinator_state_ = 0;
 
   struct PerShardCache {
     std::vector<std::string_view> args;

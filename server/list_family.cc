@@ -97,6 +97,101 @@ OpResult<string> ListPop(DbIndex db_ind, const MainValue& mv, ListDir dir) {
   return res;
 }
 
+class BPopper {
+ public:
+  explicit BPopper();
+
+  // Returns WRONG_TYPE, OK.
+  // If OK is returned then use result() to fetch the value.
+  OpStatus Run(Transaction* t, unsigned msec);
+
+  const std::pair<std::string_view, std::string_view> result() const {
+    return std::pair<std::string_view, std::string_view>(key_, value_);
+  }
+
+  bool found() const {
+    return found_;
+  }
+
+ private:
+  OpStatus Pop(Transaction* t, EngineShard* shard);
+
+  bool found_ = false;
+  MainIterator find_it_;
+  ShardId find_sid_ = std::numeric_limits<ShardId>::max();
+
+  std::string key_, value_;
+};
+
+BPopper::BPopper() {
+}
+
+OpStatus BPopper::Run(Transaction* t, unsigned msec) {
+  OpResult<Transaction::FindFirstResult> result;
+  using time_point = Transaction::time_point;
+
+  time_point tp =
+      msec ? chrono::steady_clock::now() + chrono::milliseconds(msec) : time_point::max();
+  bool is_multi = t->IsMulti();
+  if (!is_multi) {
+    t->Schedule();
+  }
+
+  while (true) {
+    result = t->FindFirst();
+
+    if (result)
+      break;
+
+    if (result.status() != OpStatus::KEY_NOTFOUND) {  // Some error occurred.
+      // We could be registered in the queue due to previous iterations.
+      t->UnregisterWatch();
+
+      return result.status();
+    }
+
+    if (is_multi) {
+      auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
+      t->Execute(std::move(cb), true);
+      return OpStatus::TIMED_OUT;
+    }
+
+    if (!t->WaitOnWatch(tp)) {
+      return OpStatus::TIMED_OUT;
+    }
+  }
+
+  DCHECK_EQ(OpStatus::OK, result.status());
+
+  VLOG(1) << "Popping an element";
+  find_sid_ = result->sid;
+  find_it_ = result->find_res;
+  found_ = true;
+
+  auto cb = [this](Transaction* t, EngineShard* shard) { return Pop(t, shard); };
+  t->Execute(std::move(cb), true);
+
+  return OpStatus::OK;
+}
+
+OpStatus BPopper::Pop(Transaction* t, EngineShard* shard) {
+  DCHECK(found());
+
+  if (shard->shard_id() == find_sid_) {
+    key_ = find_it_->first;
+
+    OpResult<string> res = ListPop(t->db_index(), find_it_->second, ListDir::LEFT);
+    CHECK(res.ok());
+    value_ = std::move(res.value());
+
+    quicklist* ql = GetQL(find_it_->second);
+    if (quicklistCount(ql) == 0) {
+      CHECK(shard->db_slice().Del(t->db_index(), find_it_));
+    }
+  }
+  return OpStatus::OK;
+}
+
 }  // namespace
 
 void ListFamily::LPush(CmdArgList args, ConnectionContext* cntx) {
@@ -148,6 +243,42 @@ void ListFamily::LIndex(CmdArgList args, ConnectionContext* cntx) {
   } else {
     cntx->SendNull();
   }
+}
+
+void ListFamily::BLPop(CmdArgList args, ConnectionContext* cntx) {
+  DCHECK_GE(args.size(), 3u);
+
+  float timeout;
+  auto timeout_str = ArgS(args, args.size() - 1);
+  if (!absl::SimpleAtof(timeout_str, &timeout)) {
+    return cntx->SendError("timeout is not a float or out of range");
+  }
+  if (timeout < 0) {
+    return cntx->SendError("timeout is negative");
+  }
+  VLOG(1) << "BLPop start " << timeout;
+
+  Transaction* transaction = cntx->transaction;
+  BPopper popper;
+  OpStatus result = popper.Run(transaction, unsigned(timeout * 1000));
+
+  switch (result) {
+    case OpStatus::WRONG_TYPE:
+      return cntx->SendError(kWrongTypeErr);
+    case OpStatus::OK:
+      break;
+    case OpStatus::TIMED_OUT:
+      return cntx->SendNullArray();
+    default:
+      LOG(FATAL) << "Unexpected error " << result;
+  }
+
+  CHECK(popper.found());
+  VLOG(1) << "BLPop returned ";
+
+  auto res = popper.result();
+  std::string_view str_arr[2] = {res.first, res.second};
+  return cntx->SendStringArr(str_arr);
 }
 
 void ListFamily::PushGeneric(ListDir dir, const CmdArgList& args, ConnectionContext* cntx) {
@@ -219,6 +350,9 @@ OpResult<uint32_t> ListFamily::OpPush(const OpArgs& op_args, std::string_view ke
     quicklistPush(ql, es->tmp_str, sdslen(es->tmp_str), pos);
   }
 
+  if (new_key) {
+    es->AwakeWatched(op_args.db_ind, it);
+  }
   return quicklistCount(ql);
 }
 
@@ -275,6 +409,7 @@ void ListFamily::Register(CommandRegistry* registry) {
             << CI{"LPOP", CO::WRITE | CO::FAST | CO::DENYOOM, 2, 1, 1, 1}.HFUNC(LPop)
             << CI{"RPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(RPush)
             << CI{"RPOP", CO::WRITE | CO::FAST | CO::DENYOOM, 2, 1, 1, 1}.HFUNC(RPop)
+            << CI{"BLPOP", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING, -3, 1, -2, 1}.HFUNC(BLPop)
             << CI{"LLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(LLen)
             << CI{"LINDEX", CO::READONLY, 3, 1, 1, 1}.HFUNC(LIndex);
 }
