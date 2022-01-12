@@ -42,6 +42,9 @@ jobs:
 
     - name: Build & Test
       working-directory: ${{github.workspace}}/build
-      run: |          
+      run: |      
           ninja core/all server/all
-          CTEST_OUTPUT_ON_FAILURE=1 ninja core/test server/test
+          # GLOG_logtostderr=1 ctest -V -R list_family_test
+          GLOG_logtostderr=1 ctest -V -L DFLY
+          GLOG_logtostderr=1 GLOG_vmodule=transaction=1 CTEST_OUTPUT_ON_FAILURE=1 ninja server/test
+          

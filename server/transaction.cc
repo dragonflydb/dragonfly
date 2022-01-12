@@ -565,6 +565,8 @@ void Transaction::UnlockMulti() {
     // Hence it could stay in the tx queue. We perform the necessary cleanup and remove it from
     // there.
     if (sd.pq_pos != TxQueue::kEnd) {
+      DVLOG(1) << "unlockmulti: TxPopFront " << DebugId();
+
       TxQueue* txq = shard->txq();
       DCHECK(!txq->Empty());
       Transaction* trans = absl::get<Transaction*>(txq->Front());
@@ -577,7 +579,7 @@ void Transaction::UnlockMulti() {
 
     // notify awakened transactions.
     shard->ProcessAwakened(nullptr);
-    shard->PollExecution(nullptr);
+    shard->PollExecution("unlockmulti", nullptr);
 
     this->DecreaseRunCnt();
   };
@@ -673,10 +675,10 @@ void Transaction::ExecuteAsync() {
       // shard->PollExecution(this) does not necessarily execute this transaction.
       // Therefore, everything that should be handled during the callback execution
       // should go into RunInShard.
-      shard->PollExecution(this);
+      shard->PollExecution("exec_cb", this);
     }
 
-    DVLOG(2) << "ptr_release " << DebugId() << " " << use_count();
+    DVLOG(2) << "ptr_release " << DebugId() << " " << seq;
     intrusive_ptr_release(this);  // against use_count_.fetch_add above.
   };
 
@@ -735,7 +737,7 @@ void Transaction::ExpireBlocking() {
     // My guess - probably to trigger the run of stalled transactions in case
     // this shard concurrently awoke this transaction and stalled the processing
     // of TxQueue.
-    shard->PollExecution(nullptr);
+    shard->PollExecution("expirecb", nullptr);
 
     CHECK_GE(DecreaseRunCnt(), 1u);
   };
@@ -803,7 +805,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
 
   DVLOG(1) << "Rescheduling into TxQueue " << DebugId();
 
-  shard->PollExecution(nullptr);
+  shard->PollExecution("schedule_unique", nullptr);
 
   return false;
 }

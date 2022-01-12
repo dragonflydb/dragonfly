@@ -59,7 +59,7 @@ class EngineShard {
 
   // Processes TxQueue, blocked transactions or any other execution state related to that
   // shard. Tries executing the passed transaction if possible (does not guarantee though).
-  void PollExecution(Transaction* trans);
+  void PollExecution(const char* context, Transaction* trans);
 
   // Returns transaction queue.
   TxQueue* txq() {
@@ -128,7 +128,8 @@ class EngineShard {
   /// or null if all transactions in the queue have expired..
   Transaction* NotifyWatchQueue(WatchQueue* wq);
 
-  struct WatchTable {
+  // Watch state per db slice.
+  struct DbWatchTable {
     absl::flat_hash_map<std::string, std::unique_ptr<WatchQueue>> queue_map;
 
     // awakened keys that point to blocked entries that can potentially be unblocked.
@@ -136,7 +137,7 @@ class EngineShard {
     absl::flat_hash_set<base::string_view_sso> awakened_keys;
   };
 
-  absl::flat_hash_map<DbIndex, WatchTable> watch_map_;
+  absl::flat_hash_map<DbIndex, DbWatchTable> watched_dbs_;
   absl::flat_hash_set<DbIndex> awakened_indices_;
   absl::flat_hash_set<Transaction*> awakened_transactions_;
 

@@ -31,9 +31,9 @@ class ListFamilyTest : public BaseFamilyTest {
   }
 };
 
-const char* kKey1 = "x";
-const char* kKey2 = "b";
-const char* kKey3 = "c";
+const char kKey1[] = "x";
+const char kKey2[] = "b";
+const char kKey3[] = "c";
 
 TEST_F(ListFamilyTest, Basic) {
   auto resp = Run({"lpush", kKey1, "1"});
