@@ -61,7 +61,7 @@ OpResult<void> Renamer::Find(ShardId shard_id, const ArgSlice& args) {
 
   res->found = IsValid(it);
   if (IsValid(it)) {
-    res->val = it->second;  // TODO: won't work for robj because we copy pointers.
+    res->val = it->second.AsRef();
     res->expire_ts = IsValid(exp_it) ? exp_it->second : 0;
   }
 
@@ -89,7 +89,8 @@ void Renamer::MoveValues(EngineShard* shard, const ArgSlice& args) {
     shard->db_slice().Expire(db_indx_, dest_it, src_res_.expire_ts);
   } else {
     // we just add the key to destination with the source object.
-    shard->db_slice().AddNew(db_indx_, dest_key, src_res_.val, src_res_.expire_ts);
+
+    shard->db_slice().AddNew(db_indx_, dest_key, std::move(src_res_.val), src_res_.expire_ts);
   }
 }
 
@@ -107,6 +108,15 @@ Transaction::RunnableType Renamer::Finalize(bool skip_exist_dest) {
 
     return cleanup;
   }
+
+  DCHECK(src_res_.val.IsRef());
+
+  // We can not copy from the existing value and delete it at the same time.
+  // TODO: if we want to allocate in shard, we must implement CompactObject::Clone.
+  // For now we hack it for strings only.
+  string val;
+  src_res_.val.GetString(&val);
+  src_res_.val.SetString(val);
 
   // Src key exist and we need to override the destination.
   return [this](Transaction* t, EngineShard* shard) {

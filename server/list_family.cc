@@ -60,9 +60,7 @@ using namespace std;
 namespace {
 
 quicklist* GetQL(const MainValue& mv) {
-  DCHECK(mv.robj);
-  robj* o = (robj*)mv.robj;
-  return (quicklist*)o->ptr;
+  return mv.GetQL();
 }
 
 void* listPopSaver(unsigned char* data, size_t sz) {
@@ -334,8 +332,7 @@ OpResult<uint32_t> ListFamily::OpPush(const OpArgs& op_args, std::string_view ke
     robj* o = createQuicklistObject();
     ql = (quicklist*)o->ptr;
     quicklistSetOptions(ql, FLAGS_list_max_listpack_size, FLAGS_list_compress_depth);
-    it->second.robj = o;
-    it->second.obj_type = OBJ_LIST;
+    it->second.ImportRObj(o);
   } else {
     if (it->second.ObjType() != OBJ_LIST)
       return OpStatus::WRONG_TYPE;
