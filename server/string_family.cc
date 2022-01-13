@@ -52,7 +52,10 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
     if (params.prev_val) {
       if (it->second.ObjType() != OBJ_STRING)
         return OpStatus::WRONG_TYPE;
-      params.prev_val->emplace(it->second.str);
+
+      string val;
+      it->second.GetString(&val);
+      params.prev_val->emplace(move(val));
     }
 
     return SetExisting(params.db_index, value, at_ms, it, expire_it);
@@ -61,7 +64,7 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
   if (params.how == SET_IF_EXISTS)
     return OpStatus::SKIPPED;
 
-  db_slice_->AddNew(params.db_index, key, value, at_ms);
+  db_slice_->AddNew(params.db_index, key, MainValue{value}, at_ms);
 
   return OpStatus::OK;
 }
@@ -74,12 +77,7 @@ OpResult<void> SetCmd::SetExisting(DbIndex db_ind, std::string_view value, uint6
     db_slice_->Expire(db_ind, dest, expire_at_ms);
   }
 
-  if (dest->second.robj) {
-    decrRefCountVoid(dest->second.robj);
-    dest->second.robj = nullptr;
-  }
-  dest->second = value;
-  dest->second.obj_type = OBJ_STRING;
+  dest->second.SetString(value);
 
   return OpStatus::OK;
 }
@@ -154,7 +152,8 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
     if (!it_res.ok())
       return it_res.status();
 
-    string val = it_res.value()->second.str;
+    string val;
+    it_res.value()->second.GetString(&val);
 
     return val;
   };
@@ -272,7 +271,7 @@ auto StringFamily::OpMGet(const Transaction* t, EngineShard* shard) -> MGetRespo
   for (size_t i = 0; i < args.size(); ++i) {
     OpResult<MainIterator> it_res = db_slice.Find(t->db_index(), args[i], OBJ_STRING);
     if (it_res.ok()) {
-      response[i] = it_res.value()->second.str;
+      it_res.value()->second.GetString(&response[i].emplace());
     }
   }
 

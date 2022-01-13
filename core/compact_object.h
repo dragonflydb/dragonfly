@@ -54,7 +54,7 @@ class CompactBlob {
 
 static_assert(sizeof(CompactBlob) == 12, "");
 
-// Objects/blobs of upto 4GB size.
+// redis objects or blobs of upto 4GB size.
 struct RobjWrapper {
   size_t MallocUsed() const;
 
@@ -126,6 +126,10 @@ class CompactObj {
     res.mask_ = mask_ | REF_BIT;
 
     return res;
+  }
+
+  bool IsRef() const {
+    return mask_ & REF_BIT;
   }
 
   std::string_view GetSlice(std::string* scratch) const;
@@ -201,10 +205,6 @@ class CompactObj {
 
   bool HasAllocated() const;
 
-  bool IsRef() const {
-    return mask_ & REF_BIT;
-  }
-
   void SetMeta(uint8_t taglen, uint8_t mask = 0) {
     if (HasAllocated()) {
       Free();
@@ -216,6 +216,9 @@ class CompactObj {
   }
 
   // My main data structure. Union of representations.
+  // RobjWrapper is kInlineLen=16 bytes, so we have inline_str for SSO of that size.
+  // In case of int values, we waste 8 bytes. I am assuming it's not the data type
+  // with biggest memory usage.
   union U {
     char inline_str[kInlineLen];
 
@@ -226,6 +229,7 @@ class CompactObj {
     }
   } u_;
 
+  //
   static_assert(sizeof(u_) == 16, "");
 
   mutable uint8_t mask_ = 0;

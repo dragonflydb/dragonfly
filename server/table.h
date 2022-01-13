@@ -1,4 +1,4 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -6,33 +6,11 @@
 
 #include <absl/container/flat_hash_map.h>
 
+#include "core/compact_object.h"
+
 namespace dfly {
 
-struct MainValue {
-  std::string str;
-  void* robj = nullptr;
-  uint8_t obj_type = 0;
-
-  MainValue() = default;
-  MainValue(std::string_view s) : str(s) {
-  }
-
-  bool HasExpire() const {
-    return has_expire_;
-  }
-
-  void SetExpire(bool b) {
-    has_expire_ = b;
-  }
-
-  unsigned ObjType() const {
-    return obj_type;
-  }
-
- private:
-  bool has_expire_ = false;
-};
-
+using MainValue = CompactObj;
 using MainTable = absl::flat_hash_map<std::string, MainValue>;
 using ExpireTable = absl::flat_hash_map<std::string, uint64_t>;
 

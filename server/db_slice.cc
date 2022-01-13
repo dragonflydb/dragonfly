@@ -78,7 +78,7 @@ pair<MainIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, std::string_
     if (expire_it->second <= now_ms_) {
       db->expire_table.erase(expire_it);
 
-      db->stats.obj_memory_usage -= (it->first.capacity() + it->second.str.capacity());
+      db->stats.obj_memory_usage -= (it->first.capacity() + it->second.MallocUsed());
       db->main_table.erase(it);
       return make_pair(MainIterator{}, ExpireIterator{});
     }
@@ -127,12 +127,8 @@ auto DbSlice::AddOrFind(DbIndex db_index, std::string_view key) -> pair<MainIter
       db->expire_table.erase(expire_it);
 
       // Keep the entry but free the object.
-      db->stats.obj_memory_usage -= existing->second.str.capacity();
-      existing->second.obj_type = OBJ_STRING;
-      if (existing->second.robj) {
-        decrRefCountVoid(existing->second.robj);
-        existing->second.robj = nullptr;
-      }
+      db->stats.obj_memory_usage -= existing->second.MallocUsed();
+      existing->second.Reset();
 
       return make_pair(existing, true);
     }
@@ -164,7 +160,7 @@ bool DbSlice::Del(DbIndex db_ind, const MainIterator& it) {
     CHECK_EQ(1u, db->expire_table.erase(it->first));
   }
 
-  db->stats.obj_memory_usage -= (it->first.capacity() + it->second.str.capacity());
+  db->stats.obj_memory_usage -= (it->first.capacity() + it->second.MallocUsed());
   db->main_table.erase(it);
 
   return true;
@@ -225,13 +221,15 @@ void DbSlice::AddNew(DbIndex db_ind, string_view key, MainValue obj, uint64_t ex
 }
 
 bool DbSlice::AddIfNotExist(DbIndex db_ind, string_view key, MainValue obj, uint64_t expire_at_ms) {
+  DCHECK(!obj.IsRef());
+
   auto& db = db_arr_[db_ind];
 
-  auto [new_entry, success] = db->main_table.emplace(key, obj);
+  auto [new_entry, success] = db->main_table.emplace(key, std::move(obj));
   if (!success)
     return false;  // in this case obj won't be moved and will be destroyed during unwinding.
 
-  db->stats.obj_memory_usage += (new_entry->first.capacity() + new_entry->second.str.capacity());
+  db->stats.obj_memory_usage += (new_entry->first.capacity() + new_entry->second.MallocUsed());
 
   if (expire_at_ms) {
     new_entry->second.SetExpire(true);
