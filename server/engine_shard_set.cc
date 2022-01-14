@@ -39,6 +39,15 @@ struct EngineShard::WatchQueue {
   }
 };
 
+bool EngineShard::DbWatchTable::RemoveEntry(WatchQueueMap::iterator it) {
+  DVLOG(1) << "Erasing watchqueue key " << it->first;
+
+  awakened_keys.erase(it->first);
+  queue_map.erase(it);
+
+  return queue_map.empty();
+}
+
 EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time)
     : queue_(kQueueLen), txq_([](const Transaction* t) { return t->txid(); }),
       db_slice_(pb->GetIndex(), this) {
@@ -160,7 +169,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
       }
 
       OnTxFinish();
-    }  // while(!txq_.Empty())
+    }       // while(!txq_.Empty())
   } else {  // if (continuation_trans_ == nullptr && !has_awaked_trans)
     DVLOG(1) << "Skipped TxQueue " << continuation_trans_ << " " << has_awaked_trans;
   }
@@ -222,6 +231,7 @@ Transaction* EngineShard::NotifyWatchQueue(WatchQueue* wq) {
 
 // Processes potentially awakened keys and verifies that these are indeed
 // awakened to eliminate false positives.
+// In addition it, optionally removes completed_t from watch queues.
 void EngineShard::ProcessAwakened(Transaction* completed_t) {
   for (DbIndex index : awakened_indices_) {
     DbWatchTable& wt = watched_dbs_[index];
@@ -247,8 +257,13 @@ void EngineShard::ProcessAwakened(Transaction* completed_t) {
   if (!completed_t)
     return;
 
-  auto& wt = watched_dbs_[completed_t->db_index()];
+  auto dbit = watched_dbs_.find(completed_t->db_index());
+  if (dbit == watched_dbs_.end())
+    return;
+
+  DbWatchTable& wt = dbit->second;
   KeyLockArgs lock_args = completed_t->GetLockArgs(shard_id());
+
   for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
     string_view key = lock_args.args[i];
     auto w_it = wt.queue_map.find(key);
@@ -262,6 +277,7 @@ void EngineShard::ProcessAwakened(Transaction* completed_t) {
 
     auto& queue = wq.items;
     DCHECK(!queue.empty());  // since it's active
+
     if (queue.front().trans == completed_t) {
       queue.pop_front();
 
@@ -275,10 +291,13 @@ void EngineShard::ProcessAwakened(Transaction* completed_t) {
       }
 
       if (queue.empty()) {
-        DVLOG(1) << "Erasing watchqueue key " << key;
-        wt.queue_map.erase(w_it);
+        wt.RemoveEntry(w_it);
       }
     }
+  }
+
+  if (wt.queue_map.empty()) {
+    watched_dbs_.erase(dbit);
   }
   awakened_transactions_.erase(completed_t);
 }
@@ -295,7 +314,10 @@ void EngineShard::AddWatched(string_view key, Transaction* me) {
 
 // Runs in O(N) complexity.
 bool EngineShard::RemovedWatched(string_view key, Transaction* me) {
-  DbWatchTable& wt = watched_dbs_[me->db_index()];
+  auto dbit = watched_dbs_.find(me->db_index());
+  CHECK(dbit != watched_dbs_.end());
+
+  DbWatchTable& wt = dbit->second;
   auto watch_it = wt.queue_map.find(key);
   CHECK(watch_it != wt.queue_map.end());
 
@@ -304,8 +326,9 @@ bool EngineShard::RemovedWatched(string_view key, Transaction* me) {
     if (j->trans == me) {
       wq.items.erase(j);
       if (wq.items.empty()) {
-        DVLOG(1) << "Erasing watchqueue key " << key;
-        wt.queue_map.erase(watch_it);
+        if (wt.RemoveEntry(watch_it)) {
+          watched_dbs_.erase(dbit);
+        }
       }
       return true;
     }
@@ -317,12 +340,16 @@ bool EngineShard::RemovedWatched(string_view key, Transaction* me) {
 }
 
 void EngineShard::GCWatched(const KeyLockArgs& largs) {
-  auto& queue_map = watched_dbs_[largs.db_index].queue_map;
+  auto dbit = watched_dbs_.find(largs.db_index);
+  CHECK(dbit != watched_dbs_.end());
+
+  DbWatchTable& wt = dbit->second;
 
   for (size_t i = 0; i < largs.args.size(); i += largs.key_step) {
     string_view key = largs.args[i];
-    auto watch_it = queue_map.find(key);
-    CHECK(watch_it != queue_map.end());
+    auto watch_it = wt.queue_map.find(key);
+    CHECK(watch_it != wt.queue_map.end());
+
     WatchQueue& wq = *watch_it->second;
     DCHECK(!wq.items.empty());
     do {
@@ -334,25 +361,24 @@ void EngineShard::GCWatched(const KeyLockArgs& largs) {
     } while (!wq.items.empty());
 
     if (wq.items.empty()) {
-      DVLOG(1) << "Erasing watchqueue key " << key;
-      queue_map.erase(watch_it);
+      if (wt.RemoveEntry(watch_it)) {
+        watched_dbs_.erase(dbit);
+        return;
+      }
     }
   }
 }
 
 // Called from commands like lpush.
-void EngineShard::AwakeWatched(DbIndex db_index, const MainIterator& main_it) {
+void EngineShard::AwakeWatched(DbIndex db_index, std::string_view db_key) {
   auto it = watched_dbs_.find(db_index);
   if (it == watched_dbs_.end())
     return;
 
   DbWatchTable& wt = it->second;
-  if (wt.queue_map.empty()) {  /// No blocked transactions.
-    return;
-  }
+  DCHECK(!wt.queue_map.empty());
 
   string tmp;
-  string_view db_key = main_it->first;
   auto wit = wt.queue_map.find(db_key);
 
   if (wit == wt.queue_map.end())

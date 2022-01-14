@@ -94,7 +94,7 @@ class EngineShard {
   bool RemovedWatched(std::string_view key, Transaction* me);
   void GCWatched(const KeyLockArgs& lock_args);
 
-  void AwakeWatched(DbIndex db_index, const MainIterator& it);
+  void AwakeWatched(DbIndex db_index, std::string_view key);
 
   bool HasAwakedTransaction() const {
     return !awakened_transactions_.empty();
@@ -128,13 +128,18 @@ class EngineShard {
   /// or null if all transactions in the queue have expired..
   Transaction* NotifyWatchQueue(WatchQueue* wq);
 
+  using WatchQueueMap = absl::flat_hash_map<std::string, std::unique_ptr<WatchQueue>>;
   // Watch state per db slice.
   struct DbWatchTable {
-    absl::flat_hash_map<std::string, std::unique_ptr<WatchQueue>> queue_map;
+    WatchQueueMap queue_map;
 
-    // awakened keys that point to blocked entries that can potentially be unblocked.
-    // reference watched keys.
+    // awakened keys point to blocked keys that can potentially be unblocked.
+    // they reference key objects in queue_map.
     absl::flat_hash_set<base::string_view_sso> awakened_keys;
+
+
+    // Returns true if queue_map is empty and DbWatchTable can be removed as well.
+    bool RemoveEntry(WatchQueueMap::iterator it);
   };
 
   absl::flat_hash_map<DbIndex, DbWatchTable> watched_dbs_;
