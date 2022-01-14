@@ -348,7 +348,7 @@ OpResult<uint32_t> ListFamily::OpPush(const OpArgs& op_args, std::string_view ke
   }
 
   if (new_key) {
-    es->AwakeWatched(op_args.db_ind, it);
+    es->AwakeWatched(op_args.db_ind, it->first);
   }
   return quicklistCount(ql);
 }

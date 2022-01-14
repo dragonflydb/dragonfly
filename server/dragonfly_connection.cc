@@ -119,7 +119,7 @@ void Connection::HandleRequests() {
     tls_sock.reset(new tls::TlsSocket(socket_.get()));
     tls_sock->InitSSL(ctx_);
 
-    FiberSocketBase::accept_result aresult = tls_sock->Accept();
+    FiberSocketBase::AcceptResult aresult = tls_sock->Accept();
     if (!aresult) {
       LOG(WARNING) << "Error handshaking " << aresult.error().message();
       return;
