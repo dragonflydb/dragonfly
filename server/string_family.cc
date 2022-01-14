@@ -30,6 +30,8 @@ DEFINE_VARZ(VarzQps, get_qps);
 
 }  // namespace
 
+
+
 SetCmd::SetCmd(DbSlice* db_slice) : db_slice_(db_slice) {
 }
 
@@ -89,7 +91,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   std::string_view value = ArgS(args, 2);
   VLOG(2) << "Set " << key << " " << value;
 
-  SetCmd::SetParams sparams{cntx->db_index()};  // TODO: db_index.
+  SetCmd::SetParams sparams{cntx->db_index()};
   int64_t int_arg;
 
   for (size_t i = 3; i < args.size(); ++i) {
@@ -205,6 +207,61 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
   return cntx->SendNull();
 }
 
+void StringFamily::Incr(CmdArgList args, ConnectionContext* cntx) {
+  std::string_view key = ArgS(args, 1);
+  return IncrByGeneric(key, 1, cntx);
+}
+
+void StringFamily::IncrBy(CmdArgList args, ConnectionContext* cntx) {
+  DCHECK_EQ(3u, args.size());
+
+  std::string_view key = ArgS(args, 1);
+  std::string_view sval = ArgS(args, 2);
+  int64_t val;
+
+  if (!absl::SimpleAtoi(sval, &val)) {
+    return cntx->SendError(kInvalidIntErr);
+  }
+  return IncrByGeneric(key, val, cntx);
+}
+
+void StringFamily::Decr(CmdArgList args, ConnectionContext* cntx) {
+  std::string_view key = ArgS(args, 1);
+  return IncrByGeneric(key, -1, cntx);
+}
+
+void StringFamily::DecrBy(CmdArgList args, ConnectionContext* cntx) {
+  std::string_view key = ArgS(args, 1);
+  std::string_view sval = ArgS(args, 2);
+  int64_t val;
+
+  if (!absl::SimpleAtoi(sval, &val)) {
+    return cntx->SendError(kInvalidIntErr);
+  }
+  return IncrByGeneric(key, -val, cntx);
+}
+
+void StringFamily::IncrByGeneric(std::string_view key, int64_t val, ConnectionContext* cntx) {
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    OpResult<int64_t> res = OpIncrBy(OpArgs{shard, t->db_index()}, key, val);
+    return res;
+  };
+
+  OpResult<int64_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+
+  DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
+  switch (result.status()) {
+    case OpStatus::OK:
+      return cntx->SendLong(result.value());
+    case OpStatus::INVALID_VALUE:
+      return cntx->SendError(kInvalidIntErr);
+    case OpStatus::OUT_OF_RANGE:
+      return cntx->SendError("increment or decrement would overflow");
+    default:;
+  }
+  __builtin_unreachable();
+}
+
 void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
   DCHECK_GT(args.size(), 1U);
 
@@ -293,6 +350,41 @@ OpStatus StringFamily::OpMSet(const Transaction* t, EngineShard* es) {
   return OpStatus::OK;
 }
 
+OpResult<int64_t> StringFamily::OpIncrBy(const OpArgs& op_args, std::string_view key,
+                                         int64_t incr) {
+  auto& db_slice = op_args.shard->db_slice();
+  auto [it, expire_it] = db_slice.FindExt(op_args.db_ind, key);
+
+  if (!IsValid(it)) {
+    CompactObj cobj;
+    cobj.SetInt(incr);
+
+    db_slice.AddNew(op_args.db_ind, key, std::move(cobj), 0);
+    return incr;
+  }
+
+  if (it->second.ObjType() != OBJ_STRING) {
+    return OpStatus::WRONG_TYPE;
+  }
+
+  auto opt_prev = it->second.TryGetInt();
+  if (!opt_prev) {
+    return OpStatus::INVALID_VALUE;
+  }
+
+  long long prev = *opt_prev;
+  if ((incr < 0 && prev < 0 && incr < (LLONG_MIN - prev)) ||
+      (incr > 0 && prev > 0 && incr > (LLONG_MAX - prev))) {
+    return OpStatus::OUT_OF_RANGE;
+  }
+
+  int64_t new_val = prev + incr;
+  it->second.SetInt(new_val);
+
+  return new_val;
+}
+
+
 void StringFamily::Init(util::ProactorPool* pp) {
   set_qps.Init(pp);
   get_qps.Init(pp);
@@ -307,6 +399,10 @@ void StringFamily::Shutdown() {
 
 void StringFamily::Register(CommandRegistry* registry) {
   *registry << CI{"SET", CO::WRITE | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(Set)
+            << CI{"INCR", CO::WRITE | CO::DENYOOM | CO::FAST, 2, 1, 1, 1}.HFUNC(Incr)
+            << CI{"DECR", CO::WRITE | CO::DENYOOM | CO::FAST, 2, 1, 1, 1}.HFUNC(Decr)
+            << CI{"INCRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(IncrBy)
+            << CI{"DECRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(DecrBy)
             << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Get)
             << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(GetSet)
             << CI{"MGET", CO::READONLY | CO::FAST, -2, 1, -1, 1}.HFUNC(MGet)

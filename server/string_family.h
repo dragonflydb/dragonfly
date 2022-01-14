@@ -55,12 +55,19 @@ class StringFamily {
   static void GetSet(CmdArgList args, ConnectionContext* cntx);
   static void MGet(CmdArgList args, ConnectionContext* cntx);
   static void MSet(CmdArgList args, ConnectionContext* cntx);
+  static void Incr(CmdArgList args, ConnectionContext* cntx);
+  static void IncrBy(CmdArgList args, ConnectionContext* cntx);
+  static void Decr(CmdArgList args, ConnectionContext* cntx);
+  static void DecrBy(CmdArgList args, ConnectionContext* cntx);
+
+  static void IncrByGeneric(std::string_view key, int64_t val, ConnectionContext* cntx);
 
   using MGetResponse = std::vector<std::optional<std::string>>;
 
   static MGetResponse OpMGet(const Transaction* t, EngineShard* shard);
 
   static OpStatus OpMSet(const Transaction* t, EngineShard* es);
+  static OpResult<int64_t> OpIncrBy(const OpArgs& op_args, std::string_view key, int64_t val);
 };
 
 }  // namespace dfly
