@@ -217,7 +217,7 @@ void EngineShardSet::RunBriefInParallel(U&& func, P&& pred) const {
 
     bc.Add(1);
     util::ProactorBase* dest = pp_->at(i);
-    dest->AsyncBrief([f = std::forward<U>(func), bc]() mutable {
+    dest->DispatchBrief([f = std::forward<U>(func), bc]() mutable {
       f(EngineShard::tlocal());
       bc.Dec();
     });
@@ -230,7 +230,7 @@ template <typename U> void EngineShardSet::RunBlockingInParallel(U&& func) {
 
   for (uint32_t i = 0; i < size(); ++i) {
     util::ProactorBase* dest = pp_->at(i);
-    dest->AsyncFiber([func, bc]() mutable {
+    dest->Dispatch([func, bc]() mutable {
       func(EngineShard::tlocal());
       bc.Dec();
     });
