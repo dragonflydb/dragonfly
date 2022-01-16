@@ -197,7 +197,7 @@ TEST_F(DflyEngineTest, FlushDb) {
     }
   });
 
-  pp_->at(1)->AwaitBlocking([&] {
+  pp_->at(1)->Await([&] {
     for (unsigned i = 0; i < 100; ++i) {
       Run({"mset", kKey1, "1", kKey4, "2"});
       auto resp = Run({"exists", kKey1, kKey4});

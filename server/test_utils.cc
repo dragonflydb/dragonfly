@@ -158,7 +158,7 @@ void BaseFamilyTest::UpdateTime(uint64_t ms) {
 
 RespVec BaseFamilyTest::Run(initializer_list<std::string_view> list) {
   if (!ProactorBase::IsProactorThread()) {
-    return pp_->at(0)->AwaitBlocking([&] { return this->Run(list); });
+    return pp_->at(0)->Await([&] { return this->Run(list); });
   }
 
   mu_.lock();

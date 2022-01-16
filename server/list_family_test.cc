@@ -95,15 +95,15 @@ TEST_F(ListFamilyTest, BLPopBlocking) {
   });
 
   this_fiber::sleep_for(50us);
-  /*auto fb1 = pp_->at(1)->LaunchFiber([&] {
+  auto fb1 = pp_->at(1)->LaunchFiber([&] {
     resp1 = Run({"blpop", "x", "0"});
     LOG(INFO) << "pop1";
-  });*/
+  });
   this_fiber::sleep_for(30us);
-  pp_->at(1)->AwaitBlocking([&] { Run({"lpush", "x", "2", "1"}); });
+  pp_->at(1)->Await([&] { Run({"lpush", "x", "2", "1"}); });
 
   fb0.join();
-  // fb1.join();
+  fb1.join();
 
   // fb0 should start first and be the first transaction blocked. Therefore, it should pop '1'.
   // sometimes order is switched, need to think how to fix it.
@@ -129,7 +129,7 @@ TEST_F(ListFamilyTest, BLPopMultiple) {
     resp0 = Run({"blpop", kKey1, kKey2, "0"});
   });
 
-  pp_->at(1)->AwaitBlocking([&] { Run({"lpush", kKey1, "1", "2", "3"}); });
+  pp_->at(1)->Await([&] { Run({"lpush", kKey1, "1", "2", "3"}); });
   fb1.join();
   EXPECT_THAT(resp0, ElementsAre(StrArg(kKey1), StrArg("3")));
   ASSERT_FALSE(IsLocked(0, kKey1));

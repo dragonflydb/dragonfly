@@ -69,7 +69,7 @@ void Service::Init(util::AcceptServer* acceptor, const InitOpts& opts) {
   uint32_t shard_num = pp_.size() > 1 ? pp_.size() - 1 : pp_.size();
   shard_set_.Init(shard_num);
 
-  pp_.AwaitOnAll([&](uint32_t index, ProactorBase* pb) {
+  pp_.Await([&](uint32_t index, ProactorBase* pb) {
     if (index < shard_count()) {
       shard_set_.InitThreadLocal(pb, !opts.disable_time_update);
     }
