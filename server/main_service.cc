@@ -20,6 +20,7 @@ extern "C" {
 #include "server/error.h"
 #include "server/generic_family.h"
 #include "server/list_family.h"
+#include "server/server_state.h"
 #include "server/string_family.h"
 #include "server/transaction.h"
 #include "util/metrics/metrics.h"
@@ -109,6 +110,8 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
   string_view cmd_str = ArgS(args, 0);
   bool is_trans_cmd = (cmd_str == "EXEC" || cmd_str == "MULTI");
   const CommandId* cid = registry_.Find(cmd_str);
+  ServerState& etl = *ServerState::tlocal();
+  ++etl.connection_stats.command_cnt;
 
   absl::Cleanup multi_error = [cntx] {
     if (cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE) {

@@ -15,6 +15,7 @@
 #include "server/main_service.h"
 #include "server/memcache_parser.h"
 #include "server/redis_parser.h"
+#include "server/server_state.h"
 #include "util/fiber_sched_algo.h"
 #include "util/tls/tls_socket.h"
 
@@ -49,6 +50,7 @@ void RespToArgList(const RespVec& src, CmdArgVec* dest) {
 }
 
 constexpr size_t kMinReadSize = 256;
+constexpr size_t kMaxReadSize = 32_KB;
 
 }  // namespace
 
@@ -85,6 +87,7 @@ Connection::~Connection() {
 
 void Connection::OnShutdown() {
   VLOG(1) << "Connection::OnShutdown";
+
   if (shutdown_) {
     for (const auto& k_v : shutdown_->map) {
       k_v.second();
@@ -112,7 +115,7 @@ void Connection::HandleRequests() {
 
   int val = 1;
   CHECK_EQ(0, setsockopt(socket_->native_handle(), SOL_TCP, TCP_NODELAY, &val, sizeof(val)));
-  auto ep = socket_->RemoteEndpoint();
+  auto remote_ep = socket_->RemoteEndpoint();
 
   std::unique_ptr<tls::TlsSocket> tls_sock;
   if (ctx_) {
@@ -126,25 +129,31 @@ void Connection::HandleRequests() {
     }
     VLOG(1) << "TLS handshake succeeded";
   }
+
   FiberSocketBase* peer = tls_sock ? (FiberSocketBase*)tls_sock.get() : socket_.get();
   cc_.reset(new ConnectionContext(peer, this));
   cc_->shard_set = &service_->shard_set();
 
   InputLoop(peer);
 
-  VLOG(1) << "Closed connection for peer " << ep;
+  VLOG(1) << "Closed connection for peer " << remote_ep;
 }
 
 void Connection::InputLoop(FiberSocketBase* peer) {
   base::IoBuf io_buf{kMinReadSize};
 
   auto dispatch_fb = fibers::fiber(fibers::launch::dispatch, [&] { DispatchFiber(peer); });
+  ConnectionStats* stats = ServerState::tl_connection_stats();
+  stats->num_conns++;
+  stats->read_buf_capacity += io_buf.Capacity();
+
   ParserStatus status = OK;
   std::error_code ec;
 
   do {
     auto buf = io_buf.AppendBuffer();
     ::io::Result<size_t> recv_sz = peer->Recv(buf);
+    ++stats->io_reads_cnt;
 
     if (!recv_sz) {
       ec = recv_sz.error();
@@ -163,6 +172,22 @@ void Connection::InputLoop(FiberSocketBase* peer) {
 
     if (status == NEED_MORE) {
       status = OK;
+
+      size_t capacity = io_buf.Capacity();
+      if (capacity < kMaxReadSize) {
+        size_t parser_hint = redis_parser_->parselen_hint();
+        if (parser_hint > capacity) {
+          io_buf.Reserve(std::min(kMaxReadSize, parser_hint));
+        } else if (buf.size() == *recv_sz && buf.size() > capacity / 2) {
+          // Last io used most of the io_buf to the end.
+          io_buf.Reserve(capacity * 2);  // Valid growth range.
+        }
+
+        if (capacity < io_buf.Capacity()) {
+          VLOG(1) << "Growing io_buf to " << io_buf.Capacity();
+          stats->read_buf_capacity += (io_buf.Capacity() - capacity);
+        }
+      }
     } else if (status != OK) {
       break;
     }
@@ -171,6 +196,8 @@ void Connection::InputLoop(FiberSocketBase* peer) {
   cc_->conn_state.mask |= ConnectionState::CONN_CLOSING;  // Signal dispatch to close.
   evc_.notify();
   dispatch_fb.join();
+
+  stats->read_buf_capacity -= io_buf.Capacity();
 
   if (cc_->ec()) {
     ec = cc_->ec();
@@ -193,6 +220,8 @@ void Connection::InputLoop(FiberSocketBase* peer) {
   if (ec && !FiberSocketBase::IsConnClosed(ec)) {
     LOG(WARNING) << "Socket error " << ec;
   }
+
+  --stats->num_conns;
 }
 
 auto Connection::ParseRedis(base::IoBuf* io_buf) -> ParserStatus {
@@ -297,6 +326,8 @@ auto Connection::ParseMemcache(base::IoBuf* io_buf) -> ParserStatus {
 void Connection::DispatchFiber(util::FiberSocketBase* peer) {
   this_fiber::properties<FiberProps>().set_name("DispatchFiber");
 
+  ConnectionStats* stats = ServerState::tl_connection_stats();
+
   while (!cc_->ec()) {
     evc_.await([this] { return cc_->conn_state.IsClosing() || !dispatch_q_.empty(); });
     if (cc_->conn_state.IsClosing())
@@ -304,6 +335,8 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
     std::unique_ptr<Request> req{dispatch_q_.front()};
     dispatch_q_.pop_front();
+   
+    ++stats->pipelined_cmd_cnt;
 
     cc_->SetBatchMode(!dispatch_q_.empty());
     cc_->conn_state.mask |= ConnectionState::ASYNC_DISPATCH;

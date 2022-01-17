@@ -1,4 +1,4 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -21,6 +21,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/main_service.h"
+#include "server/server_state.h"
 #include "server/transaction.h"
 #include "util/accept_server.h"
 
@@ -118,6 +119,22 @@ void ServerFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
   return dbg_cmd.Run(args);
 }
 
+Metrics ServerFamily::GetMetrics() const {
+  Metrics result;
+
+  fibers::mutex mu;
+
+  auto cb = [&](EngineShard* shard) {
+    lock_guard<fibers::mutex> lk(mu);
+
+    result.conn_stats += *ServerState::tl_connection_stats();
+  };
+
+  ess_.RunBlockingInParallel(std::move(cb));
+
+  return result;
+}
+
 void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   const char kInfo1[] =
       R"(# Server
@@ -130,6 +147,15 @@ tcp_port:)";
 
   string info = absl::StrCat(kInfo1, FLAGS_port, "\n");
 
+  Metrics m = GetMetrics();
+  absl::StrAppend(&info, "\n# Stats\n");
+  absl::StrAppend(&info, "total_commands_processed:", m.conn_stats.command_cnt, "\n");
+  absl::StrAppend(&info, "total_pipelined_commands:", m.conn_stats.pipelined_cmd_cnt, "\n");
+  absl::StrAppend(&info, "total_reads_processed:", m.conn_stats.io_reads_cnt, "\n");
+
+  absl::StrAppend(&info, "\n# Clients\n");
+  absl::StrAppend(&info, "connected_clients:", m.conn_stats.num_conns, "\n");
+  absl::StrAppend(&info, "client_read_buf_capacity:", m.conn_stats.read_buf_capacity, "\n");
   cntx->SendBulkString(info);
 }
 

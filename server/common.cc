@@ -8,11 +8,36 @@
 
 #include "base/logging.h"
 #include "server/error.h"
+#include "server/server_state.h"
 
 namespace dfly {
 
 using std::string;
 
+thread_local ServerState ServerState::state_;
+
+ServerState::ServerState() {
+}
+
+ServerState::~ServerState() {
+}
+
+#define ADD(x) (x) += o.x
+
+ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
+  static_assert(sizeof(ConnectionStats) == 40);
+
+  ADD(num_conns);
+  ADD(num_replicas);
+  ADD(read_buf_capacity);
+  ADD(io_reads_cnt);
+  ADD(pipelined_cmd_cnt);
+  ADD(command_cnt);
+
+  return *this;
+}
+
+#undef ADD
 
 string WrongNumArgsError(std::string_view cmd) {
   return absl::StrCat("wrong number of arguments for '", cmd, "' command");
