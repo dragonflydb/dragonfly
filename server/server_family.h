@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "server/common_types.h"
 #include "server/engine_shard_set.h"
 #include "util/proactor_pool.h"
 
@@ -17,6 +18,10 @@ class ConnectionContext;
 class CommandRegistry;
 class Service;
 
+struct Metrics {
+  ConnectionStats conn_stats;
+};
+
 class ServerFamily {
  public:
   ServerFamily(Service* engine);
@@ -25,6 +30,8 @@ class ServerFamily {
   void Init(util::AcceptServer* acceptor);
   void Register(CommandRegistry* registry);
   void Shutdown();
+
+  Metrics GetMetrics() const;
 
  private:
   uint32_t shard_count() const {

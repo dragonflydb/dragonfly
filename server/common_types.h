@@ -42,10 +42,30 @@ struct KeyLockArgs {
   unsigned key_step;
 };
 
+
+struct ConnectionStats {
+  uint32_t num_conns = 0;
+  uint32_t num_replicas = 0;
+  size_t read_buf_capacity = 0;
+  size_t io_reads_cnt = 0;
+  size_t command_cnt = 0;
+  size_t pipelined_cmd_cnt = 0;
+
+  ConnectionStats& operator+=(const ConnectionStats& o);
+};
+
 struct OpArgs {
   EngineShard* shard;
   DbIndex db_ind;
 };
+
+constexpr inline unsigned long long operator""_MB(unsigned long long x) {
+  return 1024L * 1024L * x;
+}
+
+constexpr inline unsigned long long operator""_KB(unsigned long long x) {
+  return 1024L * x;
+}
 
 inline std::string_view ArgS(CmdArgList args, size_t i) {
   auto arg = args[i];
