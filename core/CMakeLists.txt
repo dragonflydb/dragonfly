@@ -3,3 +3,4 @@ cxx_link(dfly_core base absl::flat_hash_map redis_lib)
 
 cxx_test(dfly_core_test dfly_core LABELS DFLY)
 cxx_test(compact_object_test dfly_core LABELS DFLY)
+cxx_test(dash_test dfly_core LABELS DFLY)
