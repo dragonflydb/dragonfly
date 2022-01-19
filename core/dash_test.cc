@@ -358,10 +358,10 @@ TEST_F(DashTest, Insert) {
   EXPECT_EQ(1, dt_.Erase(0));
   EXPECT_EQ(0, dt_.Erase(0));
   auto it = dt_.begin();
-  ASSERT_TRUE(it.is_valid());
-  auto some_val = *it;
+  ASSERT_FALSE(it.is_done());
+  auto some_val = it->second;
   dt_.Erase(it);
-  ASSERT_FALSE(dt_.Find(some_val).is_valid());
+  ASSERT_TRUE(dt_.Find(some_val).is_done());
 }
 
 TEST_F(DashTest, Traverse) {
@@ -372,9 +372,10 @@ TEST_F(DashTest, Traverse) {
   uint64_t cursor = 0;
   vector<unsigned> nums;
   auto tr_cb = [&](const Dash64::iterator& it) {
-    nums.push_back(it.key());
-    VLOG(1) << it.bucket_id() << " " << it.slot_id() << " " << it.key();
+    nums.push_back(it->first);
+    VLOG(1) << it.bucket_id() << " " << it.slot_id() << " " << it->first;
   };
+
   do {
     cursor = dt_.Traverse(cursor, tr_cb);
   } while (cursor != 0);
@@ -394,11 +395,11 @@ TEST_F(DashTest, Bucket) {
   auto it = dt_.begin();
   auto bucket_it = Dash64::bucket_it(it);
 
-  dt_.TraverseBucket(it, [&](auto i) { s.push_back(i.key()); });
+  dt_.TraverseBucket(it, [&](auto i) { s.push_back(i->first); });
 
   unsigned num_items = 0;
-  while (bucket_it.is_valid()) {
-    ASSERT_TRUE(find(s.begin(), s.end(), bucket_it.key()) != s.end());
+  while (!bucket_it.is_done()) {
+    ASSERT_TRUE(find(s.begin(), s.end(), bucket_it->first) != s.end());
     ++bucket_it;
     ++num_items;
   }
@@ -422,8 +423,8 @@ TEST_F(DashTest, Eviction) {
   Dash64::EvictionCb cb = [this](const Dash64::EvictionCandidates& cand) -> unsigned {
     auto it = cand.iter[0];
     unsigned res = 0;
-    for (; it.is_valid(); ++it) {
-      LOG(INFO) << "Deleting " << it.key();
+    for (; !it.is_done(); ++it) {
+      LOG(INFO) << "Deleting " << it->first;
       dt_.Erase(it);
       ++res;
     }

@@ -93,7 +93,7 @@ template <unsigned NUM_SLOTS> class SlotBitmap {
   };
 
   Unaligned val_[kLen];
-};
+};  // SlotBitmap
 
 template <unsigned NUM_SLOTS, unsigned NUM_STASH_FPS> class BucketBase {
   // We can not allow more than 4 stash fps because we hold stash positions in single byte
@@ -469,6 +469,22 @@ class DashTableBase {
   uint32_t unique_segments_;
   size_t size_ = 0;
 };  // DashTableBase
+
+template <typename _Key, typename _Value> class IteratorPair {
+ public:
+  IteratorPair(_Key& k, _Value& v) : first(k), second(v) {}
+
+  IteratorPair* operator->() {
+    return this;
+  }
+
+  const IteratorPair* operator->() const {
+    return this;
+  }
+
+  _Key& first;
+  _Value& second;
+};
 
 /***********************************************************
  * Implementation section.
