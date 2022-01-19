@@ -90,10 +90,7 @@ class DashTable : public detail::DashTableBase {
 
    public:
     using iterator_category = std::forward_iterator_tag;
-    using value_type = const Value_t;
     using difference_type = std::ptrdiff_t;
-    using reference = value_type&;
-    using pointer = value_type*;
 
     // Copy constructor from iterator to const_iterator.
     template <bool TIsConst = IsConst, bool TIsSingleB,
@@ -133,6 +130,19 @@ class DashTable : public detail::DashTableBase {
       return *this;
     }
 
+    detail::IteratorPair<Key_t, Value_t> operator->() {
+      auto* seg = owner_->segment_[seg_id_];
+      return detail::IteratorPair<Key_t, Value_t>{seg->Key(bucket_id_, slot_id_),
+                                                  seg->Value(bucket_id_, slot_id_)};
+    }
+
+    const detail::IteratorPair<Key_t, Value_t> operator->() const {
+      auto* seg = owner_->segment_[seg_id_];
+      return detail::IteratorPair<Key_t, Value_t>{seg->Key(bucket_id_, slot_id_),
+                                                  seg->Value(bucket_id_, slot_id_)};
+    }
+
+#if 0
     const Key_t& key() const {
       return owner_->segment_[seg_id_]->Key(bucket_id_, slot_id_);
     }
@@ -143,22 +153,22 @@ class DashTable : public detail::DashTableBase {
     Key_t* mutable_key() {
       return &owner_->segment_[seg_id_]->Key(bucket_id_, slot_id_);
     };
-
+#endif
     typename std::conditional<IsConst, const Value_t&, Value_t&>::type value() const {
       return owner_->segment_[seg_id_]->Value(bucket_id_, slot_id_);
     }
 
-    pointer operator->() const {
+    /*pointer operator->() const {
       return std::addressof(value());
     }
 
     reference operator*() const {
       return value();
-    }
+    }*/
 
     // Make it self-contained. Does not need container::end().
-    bool is_valid() const {
-      return owner_ != nullptr;
+    bool is_done() const {
+      return owner_ == nullptr;
     }
 
     friend bool operator==(const Iterator& lhs, const Iterator& rhs) {
@@ -411,11 +421,11 @@ size_t DashTable<_Key, _Value, Policy>::Erase(const Key_t& key) {
 template <typename _Key, typename _Value, typename Policy>
 void DashTable<_Key, _Value, Policy>::Erase(iterator it) {
   auto* target = segment_[it.seg_id_];
-  uint64_t key_hash = DoHash(it.key());
+  uint64_t key_hash = DoHash(it->first);
   SegmentIterator sit{it.bucket_id_, it.slot_id_};
 
-  policy_.DestroyKey(*it.mutable_key());
-  policy_.DestroyValue(it.value());
+  policy_.DestroyKey(it->first);
+  policy_.DestroyValue(it->second);
 
   target->Delete(sit, key_hash);
 }
