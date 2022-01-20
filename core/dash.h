@@ -411,9 +411,11 @@ size_t DashTable<_Key, _Value, Policy>::Erase(const Key_t& key) {
   auto it = target->FindIt(key, key_hash, EqPred());
   if (!it.found())
     return 0;
+
   policy_.DestroyKey(target->Key(it.index, it.slot));
   policy_.DestroyValue(target->Value(it.index, it.slot));
   target->Delete(it, key_hash);
+  --size_;
 
   return 1;
 }
@@ -428,6 +430,7 @@ void DashTable<_Key, _Value, Policy>::Erase(iterator it) {
   policy_.DestroyValue(it->second);
 
   target->Delete(sit, key_hash);
+  --size_;
 }
 
 template <typename _Key, typename _Value, typename Policy>
