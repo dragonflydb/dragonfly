@@ -58,6 +58,7 @@ static_assert(sizeof(CompactBlob) == 12, "");
 struct RobjWrapper {
   size_t MallocUsed() const;
 
+  uint64_t HashCode() const;
   bool Equal(const RobjWrapper& ow) const;
   bool Equal(std::string_view sv) const;
   size_t Size() const;
@@ -140,6 +141,9 @@ class CompactObj {
     return res;
   }
 
+  uint64_t HashCode() const;
+  static uint64_t HashCode(std::string_view str);
+
   bool operator==(const CompactObj& o) const;
 
   bool operator==(std::string_view sl) const;
@@ -216,8 +220,8 @@ class CompactObj {
   }
 
   // My main data structure. Union of representations.
-  // RobjWrapper is kInlineLen=16 bytes, so we have inline_str for SSO of that size.
-  // In case of int values, we waste 8 bytes. I am assuming it's not the data type
+  // RobjWrapper is kInlineLen=16 bytes, so we employ SSO of that size via inline_str.
+  // In case of int values, we waste 8 bytes. I am assuming it's ok and it's not the data type
   // with biggest memory usage.
   union U {
     char inline_str[kInlineLen];

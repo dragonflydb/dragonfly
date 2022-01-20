@@ -5,7 +5,7 @@
 #include "core/compact_object.h"
 
 // #define XXH_INLINE_ALL
-// #include <xxhash.h>
+#include <xxhash.h>
 
 extern "C" {
 #include "redis/object.h"
@@ -21,6 +21,8 @@ namespace dfly {
 using namespace std;
 
 namespace {
+
+constexpr XXH64_hash_t kHashSeed = 24061983;
 
 size_t QlUsedSize(quicklist* ql) {
   size_t res = ql->len * sizeof(quicklistNode) + znallocx(sizeof(quicklist));
@@ -160,6 +162,20 @@ void RobjWrapper::Free(std::pmr::memory_resource* mr) {
   blob.Set(nullptr, 0);
 }
 
+uint64_t RobjWrapper::HashCode() const {
+  switch (type) {
+    case OBJ_STRING:
+      DCHECK_EQ(OBJ_ENCODING_RAW, encoding);
+      {
+        auto str = blob.AsView();
+        return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
+      }
+      break;
+    default:
+      LOG(FATAL) << "Unsupported type for hashcode " << type;
+  }
+}
+
 bool RobjWrapper::Equal(const RobjWrapper& ow) const {
   if (ow.type != type || ow.encoding != encoding)
     return false;
@@ -213,6 +229,27 @@ size_t CompactObj::StrSize() const {
   return 0;
 }
 
+uint64_t CompactObj::HashCode() const {
+  if (IsInline()) {
+    return XXH3_64bits_withSeed(u_.inline_str, taglen_, kHashSeed);
+  }
+
+  switch (taglen_) {
+    case ROBJ_TAG:
+      return u_.r_obj.HashCode();
+    case INT_TAG: {
+      absl::AlphaNum an(u_.ival);
+      return XXH3_64bits_withSeed(an.data(), an.size(), kHashSeed);
+    }
+  }
+  LOG(DFATAL) << "Should not reach " << int(taglen_);
+
+  return 0;
+}
+
+uint64_t CompactObj::HashCode(std::string_view str) {
+  return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
+}
 unsigned CompactObj::ObjType() const {
   if (IsInline() || taglen_ == INT_TAG)
     return OBJ_STRING;
