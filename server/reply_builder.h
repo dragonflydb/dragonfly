@@ -91,10 +91,6 @@ class ReplyBuilder {
     as_resp()->SendSimpleString(str);
   }
 
-  void SendRespBlob(std::string_view str) {
-    as_resp()->SendDirect(str);
-  }
-
   void SendGetReply(std::string_view key, uint32_t flags, std::string_view value);
   void SendGetNotFound();
 
@@ -120,6 +116,10 @@ class ReplyBuilder {
 
   void SendBulkString(std::string_view str) {
     as_resp()->SendBulkString(str);
+  }
+
+  void SendRespBlob(std::string_view str) {
+    as_resp()->SendDirect(str);
   }
 
   void CloseConnection() {

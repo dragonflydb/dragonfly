@@ -59,11 +59,11 @@ class DbSlice {
   bool Expire(DbIndex db_ind, MainIterator main_it, uint64_t at);
 
   // Adds a new entry. Requires: key does not exist in this slice.
-  void AddNew(DbIndex db_ind, std::string_view key, MainValue obj, uint64_t expire_at_ms);
+  void AddNew(DbIndex db_ind, std::string_view key, PrimeValue obj, uint64_t expire_at_ms);
 
   // Adds a new entry if a key does not exists. Returns true if insertion took place,
   // false otherwise. expire_at_ms equal to 0 - means no expiry.
-  bool AddIfNotExist(DbIndex db_ind, std::string_view key, MainValue obj, uint64_t expire_at_ms);
+  bool AddIfNotExist(DbIndex db_ind, std::string_view key, PrimeValue obj, uint64_t expire_at_ms);
 
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);
@@ -114,7 +114,7 @@ class DbSlice {
   using LockTable = absl::flat_hash_map<std::string, IntentLock>;
 
   struct DbWrapper {
-    MainTable main_table;
+    PrimeTable main_table;
     ExpireTable expire_table;
     LockTable lock_table;
 

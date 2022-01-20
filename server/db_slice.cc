@@ -30,6 +30,7 @@ DbSlice::DbSlice(uint32_t index, EngineShard* owner) : shard_id_(index), owner_(
 DbSlice::~DbSlice() {
   // we do not need this code but it's easier to debug in case we encounter
   // memory allocation bugs during delete operations.
+
   for (auto& db : db_arr_) {
     if (!db)
       continue;
@@ -43,10 +44,10 @@ void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
   auto& db = db_arr_[db_ind];
   DCHECK(db);
 
-  db->main_table.reserve(key_size);
+  db->main_table.Reserve(key_size);
 }
 
-auto DbSlice::Find(DbIndex db_index, std::string_view key, unsigned req_obj_type) const
+auto DbSlice::Find(DbIndex db_index, string_view key, unsigned req_obj_type) const
     -> OpResult<MainIterator> {
   auto it = FindExt(db_index, key).first;
 
@@ -60,11 +61,11 @@ auto DbSlice::Find(DbIndex db_index, std::string_view key, unsigned req_obj_type
   return it;
 }
 
-pair<MainIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, std::string_view key) const {
+pair<MainIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, string_view key) const {
   DCHECK(IsDbValid(db_ind));
 
   auto& db = db_arr_[db_ind];
-  MainIterator it = db->main_table.find(key);
+  MainIterator it = db->main_table.Find(key);
 
   if (!IsValid(it)) {
     return make_pair(it, ExpireIterator{});
@@ -72,14 +73,14 @@ pair<MainIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, std::string_
 
   ExpireIterator expire_it;
   if (it->second.HasExpire()) {  // check expiry state
-    expire_it = db->expire_table.Find(CompactObj{it->first});
+    expire_it = db->expire_table.Find(it->first);
 
     CHECK(IsValid(expire_it));
     if (expire_it->second <= now_ms_) {
       db->expire_table.Erase(expire_it);
 
-      db->stats.obj_memory_usage -= (it->first.capacity() + it->second.MallocUsed());
-      db->main_table.erase(it);
+      db->stats.obj_memory_usage -= (it->first.MallocUsed() + it->second.MallocUsed());
+      db->main_table.Erase(it);
       return make_pair(MainIterator{}, ExpireIterator{});
     }
   }
@@ -109,9 +110,10 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) -> pair<MainIterator,
   auto& db = db_arr_[db_index];
 
   MainIterator existing;
-  pair<MainIterator, bool> res = db->main_table.emplace(key, MainValue{});
+  CompactObj co_key{key};
+  pair<MainIterator, bool> res = db->main_table.Insert(std::move(co_key), PrimeValue{});
   if (res.second) {  // new entry
-    db->stats.obj_memory_usage += res.first->first.capacity();
+    db->stats.obj_memory_usage += res.first->first.MallocUsed();
 
     return make_pair(res.first, true);
   }
@@ -120,13 +122,13 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) -> pair<MainIterator,
   DCHECK(IsValid(existing));
 
   if (existing->second.HasExpire()) {
-    auto expire_it = db->expire_table.Find(CompactObj{existing->first});
+    auto expire_it = db->expire_table.Find(existing->first);
     CHECK(IsValid(expire_it));
 
     if (expire_it->second <= now_ms_) {
       db->expire_table.Erase(expire_it);
 
-      // Keep the entry but free the object.
+      // Keep the entry but reset the object.
       db->stats.obj_memory_usage -= existing->second.MallocUsed();
       existing->second.Reset();
 
@@ -157,12 +159,11 @@ bool DbSlice::Del(DbIndex db_ind, const MainIterator& it) {
   }
 
   if (it->second.HasExpire()) {
-    CompactObj cobj{it->first};
-    CHECK_EQ(1u, db->expire_table.Erase(cobj));
+    CHECK_EQ(1u, db->expire_table.Erase(it->first));
   }
 
-  db->stats.obj_memory_usage -= (it->first.capacity() + it->second.MallocUsed());
-  db->main_table.erase(it);
+  db->stats.obj_memory_usage -= (it->first.MallocUsed() + it->second.MallocUsed());
+  db->main_table.Erase(it);
 
   return true;
 }
@@ -174,7 +175,7 @@ size_t DbSlice::FlushDb(DbIndex db_ind) {
     CHECK(db);
 
     size_t removed = db->main_table.size();
-    db->main_table.clear();
+    db->main_table.Clear();
     db->expire_table.Clear();
 
     db->stats.obj_memory_usage = 0;
@@ -201,15 +202,14 @@ size_t DbSlice::FlushDb(DbIndex db_ind) {
 bool DbSlice::Expire(DbIndex db_ind, MainIterator it, uint64_t at) {
   auto& db = db_arr_[db_ind];
   if (at == 0 && it->second.HasExpire()) {
-    CompactObj cobj(it->first);
-    CHECK_EQ(1u, db->expire_table.Erase(cobj));
+    CHECK_EQ(1u, db->expire_table.Erase(it->first));
     it->second.SetExpire(false);
 
     return true;
   }
 
   if (!it->second.HasExpire() && at) {
-    CHECK(db->expire_table.Insert(CompactObj{it->first}, at).second);
+    CHECK(db->expire_table.Insert(it->first.AsRef(), at).second);
     it->second.SetExpire(true);
 
     return true;
@@ -218,25 +218,27 @@ bool DbSlice::Expire(DbIndex db_ind, MainIterator it, uint64_t at) {
   return false;
 }
 
-void DbSlice::AddNew(DbIndex db_ind, string_view key, MainValue obj, uint64_t expire_at_ms) {
+void DbSlice::AddNew(DbIndex db_ind, string_view key, PrimeValue obj, uint64_t expire_at_ms) {
   CHECK(AddIfNotExist(db_ind, key, std::move(obj), expire_at_ms));
 }
 
-bool DbSlice::AddIfNotExist(DbIndex db_ind, string_view key, MainValue obj, uint64_t expire_at_ms) {
+bool DbSlice::AddIfNotExist(DbIndex db_ind, string_view key, PrimeValue obj,
+                            uint64_t expire_at_ms) {
   DCHECK(!obj.IsRef());
 
   auto& db = db_arr_[db_ind];
+  CompactObj co_key{key};
 
-  auto [new_entry, success] = db->main_table.emplace(key, std::move(obj));
+  auto [new_entry, success] = db->main_table.Insert(std::move(co_key), std::move(obj));
   if (!success)
     return false;  // in this case obj won't be moved and will be destroyed during unwinding.
 
-  db->stats.obj_memory_usage += (new_entry->first.capacity() + new_entry->second.MallocUsed());
+  db->stats.obj_memory_usage += (new_entry->first.MallocUsed() + new_entry->second.MallocUsed());
 
   if (expire_at_ms) {
     new_entry->second.SetExpire(true);
 
-    CHECK(db->expire_table.Insert(CompactObj{new_entry->first}, expire_at_ms).second);
+    CHECK(db->expire_table.Insert(new_entry->first.AsRef(), expire_at_ms).second);
   }
 
   return true;
