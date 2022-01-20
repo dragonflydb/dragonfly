@@ -59,6 +59,12 @@ namespace dfly {
 using namespace std;
 namespace {
 
+quicklistEntry QLEntry() {
+  quicklistEntry res{.quicklist = NULL, .node = NULL, .zi = NULL, .value = NULL,
+                     .longval = 0, .sz = 0, .offset = 0};
+  return res;
+}
+
 quicklist* GetQL(const PrimeValue& mv) {
   return mv.GetQL();
 }
@@ -379,7 +385,7 @@ OpResult<string> ListFamily::OpIndex(const OpArgs& op_args, std::string_view key
   if (!res)
     return res.status();
   quicklist* ql = GetQL(res.value()->second);
-  quicklistEntry entry;
+  quicklistEntry entry = QLEntry();
   quicklistIter* iter = quicklistGetIteratorEntryAtIdx(ql, index, &entry);
 
   if (!iter)

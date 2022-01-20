@@ -23,6 +23,7 @@ extern "C" {
 #include "server/main_service.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
+#include "strings/human_readable.h"
 #include "util/accept_server.h"
 
 DECLARE_uint32(port);
@@ -125,8 +126,10 @@ Metrics ServerFamily::GetMetrics() const {
   fibers::mutex mu;
 
   auto cb = [&](EngineShard* shard) {
+    auto local_stats = shard->db_slice().GetStats();
     lock_guard<fibers::mutex> lk(mu);
 
+    result.db += local_stats.db;
     result.conn_stats += *ServerState::tl_connection_stats();
   };
 
@@ -148,6 +151,13 @@ tcp_port:)";
   string info = absl::StrCat(kInfo1, FLAGS_port, "\n");
 
   Metrics m = GetMetrics();
+  absl::StrAppend(&info, "\n# Memory\n");
+  absl::StrAppend(&info, "object_used_memory:", m.db.obj_memory_usage, "\n");
+  absl::StrAppend(&info, "table_used_memory:", m.db.table_mem_usage, "\n");
+  absl::StrAppend(&info, "used_memory_human:",
+                  strings::HumanReadableNumBytes(m.db.table_mem_usage + m.db.obj_memory_usage),
+                  "\n");
+
   absl::StrAppend(&info, "\n# Stats\n");
   absl::StrAppend(&info, "total_commands_processed:", m.conn_stats.command_cnt, "\n");
   absl::StrAppend(&info, "total_pipelined_commands:", m.conn_stats.pipelined_cmd_cnt, "\n");

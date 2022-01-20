@@ -1375,7 +1375,8 @@ void lpRandomPair(unsigned char *lp, unsigned long total_count, listpackEntry *k
 
     /* Generate even numbers, because listpack saved K-V pair */
     int r = (rand() % total_count) * 2;
-    assert((p = lpSeek(lp, r)));
+    p = lpSeek(lp, r);
+    assert(p);
     key->sval = lpGetValue(p, &(key->slen), &(key->lval));
 
     if (!val)

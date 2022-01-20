@@ -355,8 +355,11 @@ TEST_F(DashTest, Insert) {
     Dash64::const_iterator it = dt_.Find(i);
     ASSERT_TRUE(it == dt_.end());
   }
+  EXPECT_EQ(kNumItems, dt_.size());
   EXPECT_EQ(1, dt_.Erase(0));
   EXPECT_EQ(0, dt_.Erase(0));
+  EXPECT_EQ(kNumItems - 1, dt_.size());
+
   auto it = dt_.begin();
   ASSERT_FALSE(it.is_done());
   auto some_val = it->second;

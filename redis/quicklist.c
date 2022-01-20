@@ -36,7 +36,7 @@
 #include "config.h"
 #include "listpack.h"
 #include "util.h" /* for ll2string */
-#include "lzf.h"
+#include "lzfP.h"
 
 
 #ifndef REDIS_STATIC
@@ -224,10 +224,13 @@ REDIS_STATIC int __quicklistCompressNode(quicklistNode *node) {
         return 0;
 
     quicklistLZF *lzf = zmalloc(sizeof(*lzf) + node->sz);
+    
+    // TODO: roman - to move out of stack.
+    LZF_STATE sdata;
 
     /* Cancel if compression fails or doesn't compress small enough */
     if (((lzf->sz = lzf_compress(node->entry, node->sz, lzf->compressed,
-                                 node->sz)) == 0) ||
+                                 node->sz, sdata)) == 0) ||
         lzf->sz + MIN_COMPRESS_IMPROVE >= node->sz) {
         /* lzf_compress aborts/rejects compression if value not compressible. */
         zfree(lzf);

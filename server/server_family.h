@@ -19,6 +19,9 @@ class CommandRegistry;
 class Service;
 
 struct Metrics {
+  DbStats db;
+  SliceEvents events;
+
   ConnectionStats conn_stats;
 };
 

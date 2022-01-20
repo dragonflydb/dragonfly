@@ -22,6 +22,28 @@ using namespace boost;
 using namespace std;
 using namespace util;
 
+#define ADD(x) (x) += o.x
+
+DbStats& DbStats::operator+=(const DbStats& o) {
+  ADD(key_count);
+  ADD(expire_count);
+  ADD(bucket_count);
+  ADD(inline_keys);
+
+  ADD(obj_memory_usage);
+  ADD(table_mem_usage);
+
+  return *this;
+}
+
+SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
+  ADD(evicted_entries);
+
+  return *this;
+}
+
+#undef ADD
+
 DbSlice::DbSlice(uint32_t index, EngineShard* owner) : shard_id_(index), owner_(owner) {
   db_arr_.emplace_back();
   CreateDb(0);
@@ -36,6 +58,25 @@ DbSlice::~DbSlice() {
       continue;
     db.reset();
   }
+}
+
+auto DbSlice::GetStats() const -> Stats {
+  Stats s;
+  s.events = events_;
+
+  for (const auto& db : db_arr_) {
+    if (!db)
+      continue;
+
+    s.db.key_count += db->main_table.size();
+    s.db.bucket_count += db->main_table.bucket_count();
+    s.db.expire_count += db->expire_table.size();
+    s.db.obj_memory_usage += db->stats.obj_memory_usage;
+    s.db.inline_keys += db->stats.inline_keys;
+    s.db.table_mem_usage += (db->main_table.mem_usage() + db->expire_table.mem_usage());
+  }
+
+  return s;
 }
 
 void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {

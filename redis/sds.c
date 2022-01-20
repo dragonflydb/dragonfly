@@ -250,6 +250,7 @@ sds _sdsMakeRoomFor(sds s, size_t addlen, int greedy) {
     len = sdslen(s);
     sh = (char*)s-sdsHdrSize(oldtype);
     reqlen = newlen = (len+addlen);
+    (void)reqlen;
     assert(newlen > len);   /* Catch size_t overflow */
     if (greedy == 1) {
     if (newlen < SDS_MAX_PREALLOC)

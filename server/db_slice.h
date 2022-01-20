@@ -18,18 +18,63 @@ class ProactorBase;
 
 namespace dfly {
 
+struct DbStats {
+  // number of active keys.
+  size_t key_count = 0;
+
+  // number of keys that have expiry deadline.
+  size_t expire_count = 0;
+
+  // number of buckets in dictionary (key capacity)
+  size_t bucket_count = 0;
+
+  // Number of inline keys.
+  size_t inline_keys = 0;
+
+  // Object memory usage besides hash-table capacity.
+  // Applies for any non-inline objects.
+  size_t obj_memory_usage = 0;
+
+  // Memory used by dictionaries.
+  size_t table_mem_usage = 0;
+
+  DbStats& operator+=(const DbStats& o);
+};
+
+struct SliceEvents {
+  // Number of eviction events.
+  uint64_t evicted_entries = 0;
+
+  SliceEvents& operator+=(const SliceEvents& o);
+};
+
+
 class DbSlice {
   struct InternalDbStats {
+    // Number of inline keys.
+    uint64_t inline_keys = 0;
+
     // Object memory usage besides hash-table capacity.
+    // Applies for any non-inline objects.
     size_t obj_memory_usage = 0;
   };
 
+  DbSlice(const DbSlice&) = delete;
+  void operator=(const DbSlice&) = delete;
+
  public:
+  struct Stats {
+    DbStats db;
+    SliceEvents events;
+  };
+
   DbSlice(uint32_t index, EngineShard* owner);
   ~DbSlice();
 
   // Activates `db_ind` database if it does not exist (see ActivateDb below).
   void Reserve(DbIndex db_ind, size_t key_size);
+
+  Stats GetStats() const;
 
   //! UpdateExpireClock updates the expire clock for this db slice.
   //! Must be a wall clock so we could replicate it betweeen machines.
@@ -110,6 +155,8 @@ class DbSlice {
   EngineShard* owner_;
 
   uint64_t now_ms_ = 0;  // Used for expire logic, represents a real clock.
+
+  SliceEvents events_;
 
   using LockTable = absl::flat_hash_map<std::string, IntentLock>;
 
