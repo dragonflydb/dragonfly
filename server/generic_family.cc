@@ -42,7 +42,7 @@ class Renamer {
 
   struct FindResult {
     string_view key;
-    MainValue val;
+    PrimeValue val;
     uint64_t expire_ts;
     bool found = false;
   };

@@ -59,7 +59,7 @@ namespace dfly {
 using namespace std;
 namespace {
 
-quicklist* GetQL(const MainValue& mv) {
+quicklist* GetQL(const PrimeValue& mv) {
   return mv.GetQL();
 }
 
@@ -67,17 +67,11 @@ void* listPopSaver(unsigned char* data, size_t sz) {
   return createStringObject((char*)data, sz);
 }
 
-OpResult<string> ListPop(DbIndex db_ind, const MainValue& mv, ListDir dir) {
-  VLOG(1) << "Pop db_indx " << db_ind;
-
-  if (mv.ObjType() != OBJ_LIST)
-    return OpStatus::WRONG_TYPE;
-
+string ListPop(ListDir dir, quicklist* ql) {
   long long vlong;
   robj* value = NULL;
 
   int ql_where = (dir == ListDir::LEFT) ? QUICKLIST_HEAD : QUICKLIST_TAIL;
-  quicklist* ql = GetQL(mv);
 
   // Empty list automatically removes the key (see below).
   CHECK_EQ(1,
@@ -103,8 +97,8 @@ class BPopper {
   // If OK is returned then use result() to fetch the value.
   OpStatus Run(Transaction* t, unsigned msec);
 
-  const std::pair<std::string_view, std::string_view> result() const {
-    return std::pair<std::string_view, std::string_view>(key_, value_);
+  auto result() const {
+    return make_pair<string_view, string_view>(key_, value_);
   }
 
   bool found() const {
@@ -118,7 +112,8 @@ class BPopper {
   MainIterator find_it_;
   ShardId find_sid_ = std::numeric_limits<ShardId>::max();
 
-  std::string key_, value_;
+  string key_;
+  string value_;
 };
 
 BPopper::BPopper() {
@@ -151,6 +146,7 @@ OpStatus BPopper::Run(Transaction* t, unsigned msec) {
     if (is_multi) {
       auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
       t->Execute(std::move(cb), true);
+
       return OpStatus::TIMED_OUT;
     }
 
@@ -176,13 +172,11 @@ OpStatus BPopper::Pop(Transaction* t, EngineShard* shard) {
   DCHECK(found());
 
   if (shard->shard_id() == find_sid_) {
-    key_ = find_it_->first;
-
-    OpResult<string> res = ListPop(t->db_index(), find_it_->second, ListDir::LEFT);
-    CHECK(res.ok());
-    value_ = std::move(res.value());
+    find_it_->first.GetString(&key_);
 
     quicklist* ql = GetQL(find_it_->second);
+    value_ = ListPop(ListDir::LEFT, ql);
+
     if (quicklistCount(ql) == 0) {
       CHECK(shard->db_slice().Del(t->db_index(), find_it_));
     }
@@ -348,23 +342,24 @@ OpResult<uint32_t> ListFamily::OpPush(const OpArgs& op_args, std::string_view ke
   }
 
   if (new_key) {
-    es->AwakeWatched(op_args.db_ind, it->first);
+    // TODO: to use PrimeKey for watched table.
+    string tmp;
+    string_view key = it->first.GetSlice(&tmp);
+    es->AwakeWatched(op_args.db_ind, key);
   }
   return quicklistCount(ql);
 }
 
 OpResult<string> ListFamily::OpPop(const OpArgs& op_args, string_view key, ListDir dir) {
   auto& db_slice = op_args.shard->db_slice();
-  auto [it, expire] = db_slice.FindExt(op_args.db_ind, key);
-  if (!IsValid(it))
-    return OpStatus::KEY_NOTFOUND;
+  OpResult<MainIterator> it_res = db_slice.Find(op_args.db_ind, key, OBJ_LIST);
+  if (!it_res)
+    return it_res.status();
 
-  OpResult<string> res = ListPop(op_args.db_ind, it->second, dir);
-  if (res) {
-    quicklist* ql = GetQL(it->second);
-    if (quicklistCount(ql) == 0) {
-      CHECK(db_slice.Del(op_args.db_ind, it));
-    }
+  quicklist* ql = GetQL((*it_res)->second);
+  string res = ListPop(dir, ql);
+  if (quicklistCount(ql) == 0) {
+    CHECK(db_slice.Del(op_args.db_ind, *it_res));
   }
   return res;
 }

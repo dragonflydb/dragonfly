@@ -67,6 +67,10 @@ template <typename V> class OpResult : public OpResultBase {
     return &v_;
   }
 
+  const V& operator*() const {
+    return v_;
+  }
+
  private:
   V v_;
 };

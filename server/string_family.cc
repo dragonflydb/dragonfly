@@ -66,7 +66,7 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
   if (params.how == SET_IF_EXISTS)
     return OpStatus::SKIPPED;
 
-  db_slice_->AddNew(params.db_index, key, MainValue{value}, at_ms);
+  db_slice_->AddNew(params.db_index, key, PrimeValue{value}, at_ms);
 
   return OpStatus::OK;
 }
