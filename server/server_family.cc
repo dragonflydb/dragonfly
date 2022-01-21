@@ -169,7 +169,14 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
 
   ec = saver.SaveHeader();
   if (!ec) {
-    ec = saver.SaveEpilog();
+    auto cb = [&saver](Transaction* t, EngineShard* shard) {
+      saver.StartSnapshotInShard(shard);
+      return OpStatus::OK;
+    };
+    cntx->transaction->ScheduleSingleHop(std::move(cb));
+
+    // perform snapshot serialization, block the current fiber until it completes.
+    ec = saver.SaveBody();
   }
 
   if (ec) {

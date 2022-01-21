@@ -58,17 +58,21 @@ class RdbSaver {
   ~RdbSaver();
 
   std::error_code SaveHeader();
-  std::error_code SaveEpilog();
+  std::error_code SaveBody();
+
+  void StartSnapshotInShard(EngineShard* shard);
 
  private:
+  std::error_code SaveEpilog();
+
   std::error_code SaveAux();
   std::error_code SaveAuxFieldStrStr(std::string_view key, std::string_view val);
   std::error_code SaveAuxFieldStrInt(std::string_view key, int64_t val);
 
   EngineShardSet* ess_;
-
   ::io::Sink* sink_;
-  RdbSerializer serializer_;
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace dfly
