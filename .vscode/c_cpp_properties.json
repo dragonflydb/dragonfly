@@ -1,0 +1,15 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${default}"
+            ],
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "${default}",
+            "compileCommands": "${workspaceFolder}/build-dbg/compile_commands.json"
+        }
+    ],
+    "version": 4
+}
