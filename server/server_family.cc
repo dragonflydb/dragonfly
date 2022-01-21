@@ -21,6 +21,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/main_service.h"
+#include "server/rdb_save.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
 #include "strings/human_readable.h"
@@ -152,7 +153,7 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
   fs::path path = dir_path;
   path.append(filename);
   path.concat(absl::StrCat("_", fl_index++));
-  LOG(INFO) << "Saving to " << path;
+  VLOG(1) << "Saving to " << path;
 
   // TODO: use io-uring file instead.
   auto res = uring::OpenWrite(path.generic_string());
@@ -164,7 +165,13 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
   unique_ptr<::io::WriteFile> wf(*res);
   auto start = absl::Now();
 
-  ec = wf->Write(string(1024, 'A'));
+  RdbSaver saver{&ess_, wf.get()};
+
+  ec = saver.SaveHeader();
+  if (!ec) {
+    ec = saver.SaveEpilog();
+  }
+
   if (ec) {
     cntx->SendError(res.error().message());
     return;
