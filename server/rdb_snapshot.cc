@@ -142,34 +142,40 @@ void RdbSnapshot::FiberFunc() {
     physical_list.clear();
 
     // Flush if needed.
-    FlushSfile();
+    FlushSfile(false);
     if (processed_ >= last_yield + 200) {
       this_fiber::yield();
       last_yield = processed_;
 
       // flush in case other fibers (writes commands that pushed previous values) filled the file.
-      FlushSfile();
+      FlushSfile(false);
     }
   } while (cursor > 0);
-  auto ec = rdb_serializer_->FlushMem();
-  CHECK(!ec);
 
-  FlushSfile();
+  FlushSfile(true);
   dest_->StartClosing();
 
   VLOG(1) << "Exit RdbProducer fiber with " << processed_ << " processed";
 }
 
-void RdbSnapshot::FlushSfile() {
-  // Flush the string file if needed.
-  if (!sfile_->val.empty()) {
+bool RdbSnapshot::FlushSfile(bool force) {
+  if (force) {
+    auto ec = rdb_serializer_->FlushMem();
+    CHECK(!ec);
+  }
+
+  if (sfile_->val.empty() || (!force && sfile_->val.size() < 4096))
+    return false;
+
+  if (!force) {
     // Make sure we flush everything from membuffer in order to preserve the atomicity of keyvalue
     // serializations.
     auto ec = rdb_serializer_->FlushMem();
     CHECK(!ec);                           // stringfile always succeeds.
-    string tmp = std::move(sfile_->val);  // important to move before pushing!
-    dest_->Push(std::move(tmp));
   }
+  string tmp = std::move(sfile_->val);  // important to move before pushing!
+  dest_->Push(std::move(tmp));
+  return true;
 }
 
 }  // namespace dfly

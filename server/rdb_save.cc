@@ -285,7 +285,7 @@ error_code RdbSerializer::FlushMem() {
   if (sz == 0)
     return error_code{};
 
-  DVLOG(1) << "Write file " << sz << " bytes";
+  DVLOG(2) << "FlushMem " << sz << " bytes";
 
   // interrupt point.
   RETURN_ON_ERR(sink_->Write(mem_buf_.InputBuffer()));
@@ -403,6 +403,7 @@ error_code RdbSaver::SaveBody() {
       ivec[i].iov_len = vals[i].size();
     }
     RETURN_ON_ERR(sink_->Write(ivec.data(), ivec.size()));
+    num_written += vals.size();
     vals.clear();
   }
 
@@ -421,7 +422,7 @@ void RdbSaver::StartSnapshotInShard(EngineShard* shard) {
   auto pair = shard->db_slice().GetTables(0);
   auto s = make_unique<RdbSnapshot>(pair.first, pair.second, &impl_->channel);
 
-  s->Start(666);  // TODO: to introduce slice versioning.
+  s->Start(shard->db_slice().version());
   impl_->handles[shard->shard_id()] = move(s);
 }
 
