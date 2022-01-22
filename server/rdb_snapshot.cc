@@ -27,13 +27,14 @@ RdbSnapshot::RdbSnapshot(PrimeTable* prime, ExpireTable* et, StringChannel* dest
 RdbSnapshot::~RdbSnapshot() {
 }
 
-void RdbSnapshot::Start() {
+void RdbSnapshot::Start(uint64_t version) {
   DCHECK(!fb_.joinable());
 
   VLOG(1) << "DbSaver::Start";
   sfile_.reset(new io::StringFile);
 
   rdb_serializer_.reset(new RdbSerializer(sfile_.get()));
+  snapshot_version_ = version;
   fb_ = fibers::fiber([this] { FiberFunc(); });
 }
 
@@ -60,19 +61,67 @@ void RdbSnapshot::PhysicalCb(MainIterator it) {
   ++processed_;
 }
 
-// Serializes all the entries with version less than top_version.
+// Serializes all the entries with version less than snapshot_version_.
 void RdbSnapshot::FiberFunc() {
   this_fiber::properties<FiberProps>().set_name("RdbSnapshot");
+  VLOG(1) << "Saving entries with version less than " << snapshot_version_;
 
   uint64_t cursor = 0;
+  uint64_t skipped = 0;
+  bitset<128> physical;
+  vector<MainIterator> physical_list;
 
-  // it's important that cb will run uninterrupted.
-  // so no I/O work inside it.
-  // We flush our string file to disk in the traverse loop below.
-  auto save_cb = [&](const MainIterator& it) {
-    this->PhysicalCb(it);
+  static_assert(physical.size() > PrimeTable::kPhysicalBucketNum);
+
+  // The algorithm is to go over all the buckets and serialize entries that
+  // have version < snapshot_version_. In order to serialize each entry exactly once we update its
+  // version to snapshot_version_ once it has been serialized.
+  // Due to how bucket versions work we can not update individual entries - they may affect their
+  // neighbours in the bucket. Instead we handle serialization at physical bucket granularity.
+  // To further complicate things, Table::Traverse covers a logical bucket that may comprise of
+  // several physical buckets. The reason for this complication is that we need to guarantee
+  // a stable traversal during prime table mutations. PrimeTable::Traverse guarantees an atomic
+  // traversal of a single logical bucket, it also guarantees 100% coverage of all items
+  // that existed when the traversal started and survived until it finished.
+  //
+  // It's important that cb will run atomically so we avoid anu I/O work inside it.
+  // Instead, we flush our string file to disk in the traverse loop below.
+  auto save_cb = [&](MainIterator it) {
+    uint64_t v = it.GetVersion();
+
+    if (v >= snapshot_version_) {
+      // either has been already serialized or added after snapshotting started.
+      DVLOG(2) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << ":" << it.slot_id()
+               << " at " << v;
+      ++skipped;
+      return false;
+    }
+
+    // if we touched that physical bucket - skip it.
+    // If DashTable interface would introduce TraversePhysicalBuckets - where it
+    // goes over each bucket once - we would not need to check for uniqueness here .
+    // But right now we must to make sure we TraverseBucket exactly once for each physical
+    // bucket.
+    if (physical.test(it.bucket_id())) {
+      return false;
+    }
+
+    physical.set(it.bucket_id());
+    physical_list.push_back(it);
+
+    // traverse physical bucket and write into string file.
+    // TODO: I think we can avoid using physical_list by calling here
+    // prime_table_->TraverseBucket(it, version_cb);
+    prime_table_->TraverseBucket(it, [this](auto&& it) { this->PhysicalCb(it); });
 
     return false;
+  };
+
+  auto version_cb = [&](MainIterator it) {
+    DCHECK_LE(it.GetVersion(), snapshot_version_);
+    DVLOG(2) << "Bumping up version " << it.bucket_id() << ":" << it.slot_id();
+
+    it.SetVersion(snapshot_version_);
   };
 
   uint64_t last_yield = 0;
@@ -84,7 +133,13 @@ void RdbSnapshot::FiberFunc() {
     // Therefore we save first, and then update version in one atomic swipe.
     uint64_t next = prime_table_->Traverse(cursor, save_cb);
 
+    // Traverse physical buckets that were touched and update their version.
+    for (auto it : physical_list) {
+      prime_table_->TraverseBucket(it, version_cb);
+    }
     cursor = next;
+    physical.reset();
+    physical_list.clear();
 
     // Flush if needed.
     FlushSfile();
