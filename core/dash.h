@@ -12,6 +12,7 @@ namespace dfly {
 
 struct BasicDashPolicy {
   enum { kSlotNum = 12, kBucketNum = 64, kStashBucketNum = 2 };
+  static constexpr bool kUseVersion = false;
 
   template <typename U> static void DestroyValue(const U&) {
   }
@@ -32,6 +33,7 @@ class DashTable : public detail::DashTableBase {
     static constexpr unsigned NUM_SLOTS = Policy::kSlotNum;
     static constexpr unsigned BUCKET_CNT = Policy::kBucketNum;
     static constexpr unsigned STASH_BUCKET_NUM = Policy::kStashBucketNum;
+    static constexpr bool USE_VERSION = Policy::kUseVersion;
   };
 
   using Base = detail::DashTableBase;
@@ -52,6 +54,7 @@ class DashTable : public detail::DashTableBase {
   static constexpr double kTaxAmount = SegmentType::kTaxSize;
   static constexpr size_t kSegBytes = sizeof(SegmentType);
   static constexpr size_t kSegCapacity = SegmentType::capacity();
+  static constexpr bool kUseVersion = Policy::kUseVersion;
 
   // if IsSingleBucket is true - iterates only over a single bucket.
   template <bool IsConst, bool IsSingleBucket = false> class Iterator {
@@ -150,6 +153,20 @@ class DashTable : public detail::DashTableBase {
     // Make it self-contained. Does not need container::end().
     bool is_done() const {
       return owner_ == nullptr;
+    }
+
+    template <bool B = Policy::kUseVersion> std::enable_if_t<B, uint64_t> GetVersion() const {
+      return owner_->segment_[seg_id_]->GetVersion(bucket_id_, slot_id_);
+    }
+
+    // Returns the minimum version of the physical bucket that this iterator points to.
+    // Note: In an ideal world I would introduce a bucket iterator...
+    template <bool B = Policy::kUseVersion> std::enable_if_t<B, uint64_t> MinVersion() const {
+      return owner_->segment_[seg_id_]->MinVersion(bucket_id_);
+    }
+
+    template <bool B = Policy::kUseVersion> std::enable_if_t<B> SetVersion(uint64_t v) {
+      return owner_->segment_[seg_id_]->SetVersion(bucket_id_, slot_id_, v);
     }
 
     friend bool operator==(const Iterator& lhs, const Iterator& rhs) {

@@ -174,6 +174,7 @@ TEST_F(DashTest, Basic) {
   ASSERT_EQ(1, has_called);
   ASSERT_EQ(0, segment_.TraverseLogicalBucket(cursor, hfun, cb));
   ASSERT_EQ(1, has_called);
+  EXPECT_EQ(0, segment_.GetVersion(0, 0));
 }
 
 TEST_F(DashTest, Segment) {
@@ -347,7 +348,7 @@ TEST_F(DashTest, Insert) {
     Dash64::const_iterator it = dt_.Find(i);
     ASSERT_TRUE(it != dt_.end());
 
-    ASSERT_EQ(it.value(), i);
+    ASSERT_EQ(it->second, i);
     ASSERT_LE(dt_.load_factor(), 1) << i;
   }
 
@@ -355,6 +356,7 @@ TEST_F(DashTest, Insert) {
     Dash64::const_iterator it = dt_.Find(i);
     ASSERT_TRUE(it == dt_.end());
   }
+
   EXPECT_EQ(kNumItems, dt_.size());
   EXPECT_EQ(1, dt_.Erase(0));
   EXPECT_EQ(0, dt_.Erase(0));
@@ -440,6 +442,43 @@ TEST_F(DashTest, Eviction) {
   EXPECT_EQ(bucket_cnt, dt_.bucket_count());
 }
 
+struct VersionPolicy : public BasicDashPolicy {
+  static constexpr bool kUseVersion = true;
+
+  static uint64_t HashFn(int v) {
+    return XXH3_64bits(&v, sizeof(v));
+  }
+};
+
+TEST_F(DashTest, Version) {
+  DashTable<int, int, VersionPolicy> dt;
+  auto [it, inserted] = dt.Insert(1, 1);
+
+  EXPECT_EQ(0, it.GetVersion());
+  it.SetVersion(5);
+  EXPECT_EQ(5, it.GetVersion());
+
+  dt.Clear();
+  constexpr int kNum = 68000;
+  for (int i = 0; i < kNum; ++i) {
+    auto it = dt.Insert(i, 0).first;
+    it.SetVersion(i + 65000);
+    if (i) {
+      auto p = dt.Find(i - 1);
+      ASSERT_GE(p.GetVersion(), i - 1 + 65000) << i;
+    }
+  }
+
+  unsigned items = 0;
+  for (auto it = dt.begin(); it != dt.end(); ++it) {
+    ASSERT_FALSE(it.is_done());
+    ASSERT_GE(it.GetVersion(), it->first + 65000)
+        << it.segment_id() << " " << it.bucket_id() << " " << it.slot_id();
+    ++items;
+  }
+  ASSERT_EQ(kNum, items);
+}
+
 struct A {
   int a = 0;
   unsigned moved = 0;
@@ -484,6 +523,7 @@ TEST_F(DashTest, Moveable) {
 
 struct SdsDashPolicy {
   enum { kSlotNum = 12, kBucketNum = 64, kStashBucketNum = 2 };
+  static constexpr bool kUseVersion = false;
 
   static uint64_t HashFn(sds u) {
     return XXH3_64bits(reinterpret_cast<const uint8_t*>(u), sdslen(u));
