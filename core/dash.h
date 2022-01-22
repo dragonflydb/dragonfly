@@ -42,7 +42,11 @@ class DashTable : public detail::DashTableBase {
   using Key_t = _Key;
   using Value_t = _Value;
 
+  //! Number of "official" buckets that are used to position a key. In other words, does not include
+  //! stash buckets.
   static constexpr unsigned kLogicalBucketNum = Policy::kBucketNum;
+
+  //! Total number of buckets in a segment (including stash).
   static constexpr unsigned kPhysicalBucketNum = SegmentType::kTotalBuckets;
   static constexpr unsigned kBucketSize = Policy::kSlotNum;
   static constexpr double kTaxAmount = SegmentType::kTaxSize;
@@ -142,29 +146,6 @@ class DashTable : public detail::DashTableBase {
                                                   seg->Value(bucket_id_, slot_id_)};
     }
 
-#if 0
-    const Key_t& key() const {
-      return owner_->segment_[seg_id_]->Key(bucket_id_, slot_id_);
-    }
-
-    // Generally we should not expose this method since hash-tables can not allow changing the keys
-    // of their key-value pairs. However, we need it for AddOrFind semantics - so we could implement
-    // without allocations. Use this method with caution - it might break hash-table.
-    Key_t* mutable_key() {
-      return &owner_->segment_[seg_id_]->Key(bucket_id_, slot_id_);
-    };
-#endif
-    typename std::conditional<IsConst, const Value_t&, Value_t&>::type value() const {
-      return owner_->segment_[seg_id_]->Value(bucket_id_, slot_id_);
-    }
-
-    /*pointer operator->() const {
-      return std::addressof(value());
-    }
-
-    reference operator*() const {
-      return value();
-    }*/
 
     // Make it self-contained. Does not need container::end().
     bool is_done() const {

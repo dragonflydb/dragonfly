@@ -48,7 +48,6 @@ struct SliceEvents {
   SliceEvents& operator+=(const SliceEvents& o);
 };
 
-
 class DbSlice {
   struct InternalDbStats {
     // Number of inline keys.
@@ -142,6 +141,11 @@ class DbSlice {
 
   bool IsDbValid(DbIndex id) const {
     return id < db_arr_.size() && bool(db_arr_[id]);
+  }
+
+  std::pair<PrimeTable*, ExpireTable*> GetTables(DbIndex id) {
+    return std::pair<PrimeTable*, ExpireTable*>(&db_arr_[id]->main_table,
+                                                &db_arr_[id]->expire_table);
   }
 
   // Returns existing keys count in the db.
