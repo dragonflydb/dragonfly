@@ -5,6 +5,7 @@
 
 extern "C" {
 #include "redis/lzfP.h"
+#include "redis/object.h"
 }
 
 #include "base/io_buf.h"
@@ -13,7 +14,6 @@ extern "C" {
 namespace dfly {
 class EngineShardSet;
 class EngineShard;
-
 
 class RdbSerializer {
  public:
@@ -30,6 +30,7 @@ class RdbSerializer {
     return WriteRaw(::io::Bytes{&opcode, 1});
   }
 
+  std::error_code SaveKeyVal(std::string_view key, const robj* val, uint64_t expire_ms);
   std::error_code SaveKeyVal(std::string_view key, std::string_view value, uint64_t expire_ms);
   std::error_code WriteRaw(const ::io::Bytes& buf);
   std::error_code SaveString(std::string_view val);
@@ -44,13 +45,15 @@ class RdbSerializer {
 
  private:
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
+  std::error_code SaveObject(const robj* o);
+  std::error_code SaveStringObject(const robj* obj);
+  std::error_code SaveLongLongAsString(int64_t value);
 
   ::io::Sink* sink_ = nullptr;
   std::unique_ptr<LZF_HSLOT[]> lzf_;
   base::IoBuf mem_buf_;
   base::PODArray<uint8_t> tmp_buf_;
 };
-
 
 class RdbSaver {
  public:
@@ -63,6 +66,8 @@ class RdbSaver {
   void StartSnapshotInShard(EngineShard* shard);
 
  private:
+  struct Impl;
+
   std::error_code SaveEpilog();
 
   std::error_code SaveAux();
@@ -71,7 +76,6 @@ class RdbSaver {
 
   EngineShardSet* ess_;
   ::io::Sink* sink_;
-  struct Impl;
   std::unique_ptr<Impl> impl_;
 };
 

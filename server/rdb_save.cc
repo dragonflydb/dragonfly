@@ -15,6 +15,7 @@ extern "C" {
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/rdb_snapshot.h"
 #include "util/fibers/simple_channel.h"
 
 namespace dfly {
@@ -107,12 +108,152 @@ inline unsigned SerializeLen(uint64_t len, uint8_t* buf) {
   return 1 + 8;
 }
 
+uint8_t RdbObjectType(const robj* o) {
+  switch (o->type) {
+    case OBJ_STRING:
+      return RDB_TYPE_STRING;
+    case OBJ_LIST:
+      if (o->encoding == OBJ_ENCODING_QUICKLIST)
+        return RDB_TYPE_LIST_QUICKLIST;
+      LOG(FATAL) << ("Unknown list encoding");
+      break;
+    case OBJ_SET:
+      if (o->encoding == OBJ_ENCODING_INTSET)
+        return RDB_TYPE_SET_INTSET;
+      else if (o->encoding == OBJ_ENCODING_HT)
+        return RDB_TYPE_SET;
+      LOG(FATAL) << ("Unknown set encoding");
+      break;
+    case OBJ_ZSET:
+      if (o->encoding == OBJ_ENCODING_ZIPLIST)
+        return RDB_TYPE_ZSET_ZIPLIST;
+      else if (o->encoding == OBJ_ENCODING_SKIPLIST)
+        return RDB_TYPE_ZSET_2;
+      LOG(FATAL) << ("Unknown sorted set encoding");
+      break;
+    case OBJ_HASH:
+      if (o->encoding == OBJ_ENCODING_ZIPLIST)
+        return RDB_TYPE_HASH_ZIPLIST;
+      else if (o->encoding == OBJ_ENCODING_HT)
+        return RDB_TYPE_HASH;
+      LOG(FATAL) << ("Unknown hash encoding");
+      break;
+    case OBJ_STREAM:
+      return RDB_TYPE_STREAM_LISTPACKS;
+    case OBJ_MODULE:
+      return RDB_TYPE_MODULE_2;
+    default:
+      LOG(FATAL) << ("Unknown object type");
+  }
+  return 0; /* avoid warning */
+}
+
 }  // namespace
 
 RdbSerializer::RdbSerializer(io::Sink* s) : sink_(s), mem_buf_{4_KB}, tmp_buf_(nullptr) {
 }
 
 RdbSerializer::~RdbSerializer() {
+}
+
+error_code RdbSerializer::SaveKeyVal(string_view key, const robj* val, uint64_t expire_ms) {
+  uint8_t buf[16];
+
+  /* Save the expire time */
+  if (expire_ms > 0) {
+    buf[0] = RDB_OPCODE_EXPIRETIME_MS;
+    absl::little_endian::Store64(buf + 1, expire_ms);
+    RETURN_ON_ERR(WriteRaw(Bytes{buf, 9}));
+  }
+
+  uint8_t rdb_type = RdbObjectType(val);
+  RETURN_ON_ERR(WriteOpcode(rdb_type));
+
+  RETURN_ON_ERR(SaveString(key));
+
+  return SaveObject(val);
+}
+
+error_code RdbSerializer::SaveKeyVal(string_view key, string_view value, uint64_t expire_ms) {
+  uint8_t buf[16];
+
+  /* Save the expire time */
+  if (expire_ms > 0) {
+    buf[0] = RDB_OPCODE_EXPIRETIME_MS;
+    absl::little_endian::Store64(buf + 1, expire_ms);
+    RETURN_ON_ERR(WriteRaw(Bytes{buf, 9}));
+  }
+
+  DVLOG(2) << "Saving keyval start " << key;
+
+  RETURN_ON_ERR(WriteOpcode(RDB_TYPE_STRING));
+
+  RETURN_ON_ERR(SaveString(key));
+
+  RETURN_ON_ERR(SaveString(value));
+
+  return error_code{};
+}
+
+error_code RdbSerializer::SaveObject(const robj* o) {
+  if (o->type == OBJ_STRING) {
+    /* Save a string value */
+    return SaveStringObject(o);
+  }
+
+  if (o->type == OBJ_LIST) {
+    /* Save a list value */
+    DCHECK_EQ(OBJ_ENCODING_QUICKLIST, o->encoding);
+    const quicklist* ql = reinterpret_cast<const quicklist*>(o->ptr);
+    quicklistNode* node = ql->head;
+    DVLOG(1) << "Saving list of length " << ql->len;
+    RETURN_ON_ERR(SaveLen(ql->len));
+
+    while (node) {
+      if (quicklistNodeIsCompressed(node)) {
+        void* data;
+        size_t compress_len = quicklistGetLzf(node, &data);
+        RETURN_ON_ERR(
+            SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
+      } else {
+        RETURN_ON_ERR(SaveString(node->entry, node->sz));
+      }
+      node = node->next;
+    }
+    return error_code{};
+  }
+
+  LOG(FATAL) << "Not implemented " << o->type;
+  return error_code{};
+}
+
+error_code RdbSerializer::SaveStringObject(const robj* obj) {
+  /* Avoid to decode the object, then encode it again, if the
+   * object is already integer encoded. */
+  if (obj->encoding == OBJ_ENCODING_INT) {
+    return SaveLongLongAsString(long(obj->ptr));
+  }
+
+  CHECK(sdsEncodedObject(obj));
+  sds s = reinterpret_cast<sds>(obj->ptr);
+
+  return SaveString(std::string_view{s, sdslen(s)});
+}
+
+/* Save a long long value as either an encoded string or a string. */
+error_code RdbSerializer::SaveLongLongAsString(int64_t value) {
+  uint8_t buf[32];
+  unsigned enclen = EncodeInteger(value, buf);
+  if (enclen > 0) {
+    return WriteRaw(Bytes{buf, enclen});
+  }
+
+  /* Encode as string */
+  enclen = ll2string((char*)buf, 32, value);
+  DCHECK_LT(enclen, 32u);
+
+  RETURN_ON_ERR(SaveLen(enclen));
+  return WriteRaw(Bytes{buf, enclen});
 }
 
 // TODO: if buf is large enough, it makes sense to write both mem_buf and buf
@@ -209,16 +350,15 @@ error_code RdbSerializer::SaveLzfBlob(const io::Bytes& src, size_t uncompressed_
   return error_code{};
 }
 
-using StringChannel =
-    ::util::fibers_ext::SimpleChannel<std::string, base::mpmc_bounded_queue<std::string>>;
-
 struct RdbSaver::Impl {
   RdbSerializer serializer;
-  StringChannel channel;
+  RdbSnapshot::StringChannel channel;
+  vector<unique_ptr<RdbSnapshot>> handles;
 
   // We pass K=sz to say how many producers are pushing data in order to maintain
   // correct closing semantics - channel is closing when K producers marked it as closed.
-  Impl(unsigned sz) : channel{128, sz} {}
+  Impl(unsigned sz) : channel{128, sz}, handles(sz) {
+  }
 };
 
 RdbSaver::RdbSaver(EngineShardSet* ess, ::io::Sink* sink) : ess_(ess), sink_(sink) {
@@ -244,6 +384,7 @@ std::error_code RdbSaver::SaveHeader() {
 
 error_code RdbSaver::SaveBody() {
   RETURN_ON_ERR(impl_->serializer.FlushMem());
+  VLOG(1) << "SaveBody";
 
   size_t num_written = 0;
   string val;
@@ -265,6 +406,10 @@ error_code RdbSaver::SaveBody() {
     vals.clear();
   }
 
+  for (auto& ptr : impl_->handles) {
+    ptr->Join();
+  }
+
   VLOG(1) << "Blobs written " << num_written;
 
   RETURN_ON_ERR(SaveEpilog());
@@ -273,9 +418,12 @@ error_code RdbSaver::SaveBody() {
 }
 
 void RdbSaver::StartSnapshotInShard(EngineShard* shard) {
-  LOG(FATAL) << "TBD";
-}
+  auto pair = shard->db_slice().GetTables(0);
+  auto s = make_unique<RdbSnapshot>(pair.first, pair.second, &impl_->channel);
 
+  s->Start();
+  impl_->handles[shard->shard_id()] = move(s);
+}
 
 error_code RdbSaver::SaveAux() {
   static_assert(sizeof(void*) == 8, "");
