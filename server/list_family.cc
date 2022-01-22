@@ -60,8 +60,13 @@ using namespace std;
 namespace {
 
 quicklistEntry QLEntry() {
-  quicklistEntry res{.quicklist = NULL, .node = NULL, .zi = NULL, .value = NULL,
-                     .longval = 0, .sz = 0, .offset = 0};
+  quicklistEntry res{.quicklist = NULL,
+                     .node = NULL,
+                     .zi = NULL,
+                     .value = NULL,
+                     .longval = 0,
+                     .sz = 0,
+                     .offset = 0};
   return res;
 }
 
@@ -336,6 +341,7 @@ OpResult<uint32_t> ListFamily::OpPush(const OpArgs& op_args, std::string_view ke
   } else {
     if (it->second.ObjType() != OBJ_LIST)
       return OpStatus::WRONG_TYPE;
+    es->db_slice().PreUpdate(op_args.db_ind, it);
     ql = GetQL(it->second);
   }
 
@@ -352,7 +358,10 @@ OpResult<uint32_t> ListFamily::OpPush(const OpArgs& op_args, std::string_view ke
     string tmp;
     string_view key = it->first.GetSlice(&tmp);
     es->AwakeWatched(op_args.db_ind, key);
+  } else {
+    es->db_slice().PostUpdate(op_args.db_ind, it);
   }
+
   return quicklistCount(ql);
 }
 
@@ -362,11 +371,17 @@ OpResult<string> ListFamily::OpPop(const OpArgs& op_args, string_view key, ListD
   if (!it_res)
     return it_res.status();
 
-  quicklist* ql = GetQL((*it_res)->second);
+  MainIterator it = *it_res;
+  quicklist* ql = GetQL(it->second);
+  db_slice.PreUpdate(op_args.db_ind, it);
+
   string res = ListPop(dir, ql);
+  db_slice.PostUpdate(op_args.db_ind, it);
+
   if (quicklistCount(ql) == 0) {
-    CHECK(db_slice.Del(op_args.db_ind, *it_res));
+    CHECK(db_slice.Del(op_args.db_ind, it));
   }
+
   return res;
 }
 

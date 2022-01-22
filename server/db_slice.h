@@ -112,7 +112,7 @@ class DbSlice {
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);
 
-  bool Del(DbIndex db_ind, const MainIterator& it);
+  bool Del(DbIndex db_ind, MainIterator it);
 
   constexpr static DbIndex kDbAll = 0xFFFF;
 
@@ -151,15 +151,27 @@ class DbSlice {
   // Returns existing keys count in the db.
   size_t DbSize(DbIndex db_ind) const;
 
+  // Callback functions called upon writing to the existing key.
+  void PreUpdate(DbIndex db_ind, MainIterator it);
+  void PostUpdate(DbIndex db_ind, MainIterator it);
+
+  // Current version of this slice.
+  // We maintain a shared versioning scheme for all databases in the slice.
+  uint64_t version() const { return version_; }
+
  private:
   void CreateDb(DbIndex index);
+
+  uint64_t NextVersion() {
+    return version_++;
+  }
 
   ShardId shard_id_;
 
   EngineShard* owner_;
 
   uint64_t now_ms_ = 0;  // Used for expire logic, represents a real clock.
-
+  uint64_t version_ = 1;  // Used to version entries in the PrimeTable.
   SliceEvents events_;
 
   using LockTable = absl::flat_hash_map<std::string, IntentLock>;

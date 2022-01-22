@@ -78,8 +78,9 @@ OpResult<void> SetCmd::SetExisting(DbIndex db_ind, std::string_view value, uint6
   } else {
     db_slice_->Expire(db_ind, dest, expire_at_ms);
   }
-
+  db_slice_->PreUpdate(db_ind, dest);
   dest->second.SetString(value);
+  db_slice_->PostUpdate(db_ind, dest);
 
   return OpStatus::OK;
 }
@@ -379,8 +380,9 @@ OpResult<int64_t> StringFamily::OpIncrBy(const OpArgs& op_args, std::string_view
   }
 
   int64_t new_val = prev + incr;
+  db_slice.PreUpdate(op_args.db_ind, it);
   it->second.SetInt(new_val);
-
+  db_slice.PostUpdate(op_args.db_ind, it);
   return new_val;
 }
 

@@ -29,7 +29,7 @@ class RdbSnapshot {
 
  private:
   void FiberFunc();
-  void FlushSfile();
+  bool FlushSfile(bool force);
   void PhysicalCb(MainIterator it);
 
   ::boost::fibers::fiber fb_;

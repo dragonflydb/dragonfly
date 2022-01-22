@@ -120,6 +120,7 @@ pair<MainIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, string_view 
     if (expire_it->second <= now_ms_) {
       db->expire_table.Erase(expire_it);
 
+      db->stats.inline_keys -= it->first.IsInline();
       db->stats.obj_memory_usage -= (it->first.MallocUsed() + it->second.MallocUsed());
       db->main_table.Erase(it);
       return make_pair(MainIterator{}, ExpireIterator{});
@@ -150,15 +151,16 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) -> pair<MainIterator,
 
   auto& db = db_arr_[db_index];
 
-  MainIterator existing;
   CompactObj co_key{key};
-  pair<MainIterator, bool> res = db->main_table.Insert(std::move(co_key), PrimeValue{});
-  if (res.second) {  // new entry
-    db->stats.obj_memory_usage += res.first->first.MallocUsed();
+  auto [it, inserted] = db->main_table.Insert(std::move(co_key), PrimeValue{});
+  if (inserted) {  // new entry
+    db->stats.inline_keys += it->first.IsInline();
+    db->stats.obj_memory_usage += it->first.MallocUsed();
+    it.SetVersion(NextVersion());
 
-    return make_pair(res.first, true);
+    return make_pair(it, true);
   }
-  existing = res.first;
+  auto& existing = it;
 
   DCHECK(IsValid(existing));
 
@@ -193,7 +195,7 @@ void DbSlice::CreateDb(DbIndex index) {
   }
 }
 
-bool DbSlice::Del(DbIndex db_ind, const MainIterator& it) {
+bool DbSlice::Del(DbIndex db_ind, MainIterator it) {
   auto& db = db_arr_[db_ind];
   if (!IsValid(it)) {
     return false;
@@ -203,6 +205,7 @@ bool DbSlice::Del(DbIndex db_ind, const MainIterator& it) {
     CHECK_EQ(1u, db->expire_table.Erase(it->first));
   }
 
+  db->stats.inline_keys -= it->first.IsInline();
   db->stats.obj_memory_usage -= (it->first.MallocUsed() + it->second.MallocUsed());
   db->main_table.Erase(it);
 
@@ -218,7 +221,7 @@ size_t DbSlice::FlushDb(DbIndex db_ind) {
     size_t removed = db->main_table.size();
     db->main_table.Clear();
     db->expire_table.Clear();
-
+    db->stats.inline_keys = 0;
     db->stats.obj_memory_usage = 0;
 
     return removed;
@@ -274,6 +277,9 @@ bool DbSlice::AddIfNotExist(DbIndex db_ind, string_view key, PrimeValue obj,
   if (!success)
     return false;  // in this case obj won't be moved and will be destroyed during unwinding.
 
+  new_entry.SetVersion(NextVersion());
+
+  db->stats.inline_keys += new_entry->first.IsInline();
   db->stats.obj_memory_usage += (new_entry->first.MallocUsed() + new_entry->second.MallocUsed());
 
   if (expire_at_ms) {
@@ -365,6 +371,17 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) con
     }
   }
   return true;
+}
+
+void DbSlice::PreUpdate(DbIndex db_ind, MainIterator it) {
+  auto& db = db_arr_[db_ind];
+  db->stats.obj_memory_usage -= it->second.MallocUsed();
+  it.SetVersion(NextVersion());
+}
+
+void DbSlice::PostUpdate(DbIndex db_ind, MainIterator it) {
+  auto& db = db_arr_[db_ind];
+  db->stats.obj_memory_usage += it->second.MallocUsed();
 }
 
 }  // namespace dfly
