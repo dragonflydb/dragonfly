@@ -20,8 +20,12 @@ class RdbSnapshot {
   RdbSnapshot(PrimeTable* prime, ExpireTable* et, StringChannel* dest);
   ~RdbSnapshot();
 
-  void Start();
+  void Start(uint64_t version);
   void Join();
+
+  uint64_t snapshot_version() const {
+    return snapshot_version_;
+  }
 
  private:
   void FiberFunc();
@@ -33,6 +37,8 @@ class RdbSnapshot {
   std::unique_ptr<io::StringFile> sfile_;
   std::unique_ptr<RdbSerializer> rdb_serializer_;
 
+  // version upper bound for entries that should be saved (not included).
+  uint64_t snapshot_version_ = 0;
   PrimeTable* prime_table_;
   StringChannel* dest_;
 

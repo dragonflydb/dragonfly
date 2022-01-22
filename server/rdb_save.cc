@@ -421,7 +421,7 @@ void RdbSaver::StartSnapshotInShard(EngineShard* shard) {
   auto pair = shard->db_slice().GetTables(0);
   auto s = make_unique<RdbSnapshot>(pair.first, pair.second, &impl_->channel);
 
-  s->Start();
+  s->Start(666);  // TODO: to introduce slice versioning.
   impl_->handles[shard->shard_id()] = move(s);
 }
 

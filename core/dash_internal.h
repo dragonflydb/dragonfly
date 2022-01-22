@@ -1164,7 +1164,7 @@ bool Segment<Key, Value, Policy>::TraverseLogicalBucket(uint8_t bid, HashFn&& hf
 
   const Bucket& b = bucket_[bid];
   bool found = false;
-  if (b.GetProbe(false)) {
+  if (b.GetProbe(false)) {  // Check items that this bucket owns.
     b.ForEachSlot([&](SlotId slot, bool probe) {
       if (!probe) {
         found = true;
@@ -1175,6 +1175,7 @@ bool Segment<Key, Value, Policy>::TraverseLogicalBucket(uint8_t bid, HashFn&& hf
 
   uint8_t nid = (bid + 1) % kNumBuckets;
   const Bucket& next = bucket_[nid];
+  // check for probing entries in the next bucket, i.e. those that should reside in b.
   if (next.GetProbe(true)) {
     next.ForEachSlot([&](SlotId slot, bool probe) {
       if (probe) {
@@ -1185,6 +1186,7 @@ bool Segment<Key, Value, Policy>::TraverseLogicalBucket(uint8_t bid, HashFn&& hf
     });
   }
 
+  // Finally go over stash buckets and find those entries that belong to b.
   if (b.HasStash()) {
     // do not bother with overflow fps. Just go over all the stash buckets.
     for (uint8_t j = kNumBuckets; j < kTotalBuckets; ++j) {

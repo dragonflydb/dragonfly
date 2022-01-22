@@ -549,12 +549,17 @@ template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
 uint64_t DashTable<_Key, _Value, Policy>::Traverse(uint64_t cursor, Cb&& cb) {
   unsigned bid = (cursor >> 8) & 0xFF;
+
+  if (bid >= kLogicalBucketNum)  // sanity.
+    return 0;
+
   uint32_t sid = SegmentId(cursor);
   auto hash_fun = [this](const auto& k) { return policy_.HashFn(k); };
 
   bool fetched = false;
 
-  while (!fetched && bid < kLogicalBucketNum) {
+  // We fix bid and go over all segments. Once we reach the end we increase bid and repeat.
+  do {
     SegmentType& s = *segment_[sid];
     auto dt_cb = [&](const SegmentIterator& it) { cb(iterator{this, sid, it.index, it.slot}); };
 
@@ -563,10 +568,13 @@ uint64_t DashTable<_Key, _Value, Policy>::Traverse(uint64_t cursor, Cb&& cb) {
     if (sid >= segment_.size()) {
       sid = 0;
       ++bid;
-    }
-  }
 
-  return bid >= kLogicalBucketNum ? 0 : (uint64_t(sid) << (64 - global_depth_)) | (bid << 8);
+      if (bid >= kLogicalBucketNum)
+        return 0;  // "End of traversal" cursor.
+    }
+  } while (!fetched);
+
+  return (uint64_t(sid) << (64 - global_depth_)) | (bid << 8);
 }
 
 template <typename _Key, typename _Value, typename Policy>
