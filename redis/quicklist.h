@@ -194,10 +194,6 @@ size_t quicklistGetLzf(const quicklistNode *node, void **data);
 void quicklistRepr(unsigned char *ql, int full);
 
 /* bookmarks */
-int quicklistBookmarkCreate(quicklist **ql_ref, const char *name, quicklistNode *node);
-int quicklistBookmarkDelete(quicklist *ql, const char *name);
-quicklistNode *quicklistBookmarkFind(quicklist *ql, const char *name);
-void quicklistBookmarksClear(quicklist *ql);
 int quicklistisSetPackedThreshold(size_t sz);
 
 #ifdef REDIS_TEST

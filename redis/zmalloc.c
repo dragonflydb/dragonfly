@@ -38,9 +38,9 @@
  * for instance to free results obtained by backtrace_symbols(). We need
  * to define this function before including zmalloc.h that may shadow the
  * free implementation if we use jemalloc or another non standard allocator. */
-void zlibc_free(void *ptr) {
+/*void zlibc_free(void *ptr) {
     free(ptr);
-}
+}*/
 
 #include <string.h>
 #include <pthread.h>
@@ -82,12 +82,8 @@ void zlibc_free(void *ptr) {
 #define update_zmalloc_stat_alloc(__n) used_memory_tl += (__n)
 #define update_zmalloc_stat_free(__n)  used_memory_tl -= (__n)
 
-static redisAtomic size_t used_memory_cached = 0;
 __thread ssize_t used_memory_tl = 0;
 
-void set_used_memory_cached(size_t val) {
-  atomicSet(used_memory_cached, val);
-}
 
 
 static void zmalloc_default_oom(size_t size) {
@@ -98,6 +94,9 @@ static void zmalloc_default_oom(size_t size) {
 }
 
 static void (*zmalloc_oom_handler)(size_t) = zmalloc_default_oom;
+
+void init_zmalloc_threadlocal() {
+}
 
 /* Try allocating memory, and return NULL if failed.
  * '*usable' is set to the usable size if non NULL. */
@@ -318,39 +317,6 @@ void zfree(void *ptr) {
     update_zmalloc_stat_free(oldsize+PREFIX_SIZE);
     free(realptr);
 #endif
-}
-
-/* Similar to zfree, '*usable' is set to the usable size being freed. */
-void zfree_usable(void *ptr, size_t *usable) {
-#ifndef HAVE_MALLOC_SIZE
-    void *realptr;
-    size_t oldsize;
-#endif
-
-    if (ptr == NULL) return;
-#ifdef HAVE_MALLOC_SIZE
-    update_zmalloc_stat_free(*usable = zmalloc_size(ptr));
-    free(ptr);
-#else
-    realptr = (char*)ptr-PREFIX_SIZE;
-    *usable = oldsize = *((size_t*)realptr);
-    update_zmalloc_stat_free(oldsize+PREFIX_SIZE);
-    free(realptr);
-#endif
-}
-
-char *zstrdup(const char *s) {
-    size_t l = strlen(s)+1;
-    char *p = zmalloc(l);
-
-    memcpy(p,s,l);
-    return p;
-}
-
-size_t zmalloc_used_memory(void) {
-    size_t um;
-    atomicGet(used_memory_cached,um);
-    return um;
 }
 
 void zmalloc_set_oom_handler(void (*oom_handler)(size_t)) {

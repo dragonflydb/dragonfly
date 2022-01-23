@@ -6,6 +6,7 @@
 
 extern "C" {
  #include "redis/sds.h"
+ #include "redis/zmalloc.h"
 }
 
 #include <absl/strings/str_cat.h>
@@ -37,6 +38,10 @@ MATCHER_P(ArrArg, expected, absl::StrCat(negation ? "is not" : "is", " equal to:
 
 class RedisParserTest : public testing::Test {
  protected:
+  static void SetUpTestCase() {
+    init_zmalloc_threadlocal();
+  }
+
   RedisParser::Result Parse(std::string_view str);
 
   RedisParser parser_;

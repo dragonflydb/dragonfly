@@ -117,9 +117,8 @@ void *zrealloc_usable(void *ptr, size_t size, size_t *usable);
 void *ztrymalloc_usable(size_t size, size_t *usable);
 void *ztrycalloc_usable(size_t size, size_t *usable);
 void *ztryrealloc_usable(void *ptr, size_t size, size_t *usable);
-void zfree_usable(void *ptr, size_t *usable);
-char *zstrdup(const char *s);
-size_t zmalloc_used_memory(void);
+
+// size_t zmalloc_used_memory(void);
 void zmalloc_set_oom_handler(void (*oom_handler)(size_t));
 size_t zmalloc_get_rss(void);
 int zmalloc_get_allocator_info(size_t *allocated, size_t *active, size_t *resident);
@@ -130,7 +129,7 @@ size_t zmalloc_get_smap_bytes_by_field(char *field, long pid);
 size_t zmalloc_get_memory_size(void);
 size_t zmalloc_usable_size(const void* p);
 
-void zlibc_free(void *ptr);
+// roman: void zlibc_free(void *ptr);
 
 #ifdef HAVE_DEFRAG
 void zfree_no_tcache(void *ptr);
@@ -149,7 +148,7 @@ int zmalloc_test(int argc, char **argv, int accurate);
 #endif
 
 extern __thread ssize_t used_memory_tl;
-void set_used_memory_cached(size_t val);
+void init_zmalloc_threadlocal();
 
 #undef __zm_str
 #undef __xstr

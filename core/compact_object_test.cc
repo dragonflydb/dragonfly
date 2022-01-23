@@ -9,6 +9,7 @@
 
 extern "C" {
 #include "redis/object.h"
+#include "redis/zmalloc.h"
 }
 
 namespace dfly {
@@ -25,6 +26,7 @@ void PrintTo(const CompactObj& cobj, std::ostream* os) {
 class CompactObjectTest : public ::testing::Test {
  protected:
   static void SetUpTestCase() {
+    init_zmalloc_threadlocal();
   }
 
   CompactObj cs_;
