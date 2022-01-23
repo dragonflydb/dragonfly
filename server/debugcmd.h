@@ -18,6 +18,7 @@ class DebugCmd {
 
  private:
   void Populate(CmdArgList args);
+  void PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view prefix, unsigned value_len);
 
   EngineShardSet* ess_;
   ConnectionContext* cntx_;
