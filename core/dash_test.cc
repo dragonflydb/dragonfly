@@ -381,7 +381,7 @@ TEST_F(DashTest, Traverse) {
   }
   uint64_t cursor = 0;
   vector<unsigned> nums;
-  auto tr_cb = [&](const Dash64::iterator& it) {
+  auto tr_cb = [&](Dash64::iterator it) {
     nums.push_back(it->first);
     VLOG(1) << it.bucket_id() << " " << it.slot_id() << " " << it->first;
   };

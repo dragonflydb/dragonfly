@@ -533,6 +533,7 @@ class DashTableBase {
   uint32_t unique_segments() const {
     return unique_segments_;
   }
+
   uint32_t depth() const {
     return global_depth_;
   }
