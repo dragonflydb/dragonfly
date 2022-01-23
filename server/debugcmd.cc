@@ -5,15 +5,20 @@
 
 #include <absl/strings/str_cat.h>
 
+#include <boost/fiber/operations.hpp>
+
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/string_family.h"
+#include "util/uring/uring_fiber_algo.h"
 
 namespace dfly {
 
-using namespace boost;
 using namespace std;
+using namespace util;
+namespace this_fiber = ::boost::this_fiber;
+using boost::fibers::fiber;
 
 struct PopulateBatch {
   DbIndex dbid;
@@ -24,8 +29,8 @@ struct PopulateBatch {
   }
 };
 
-void DoPopulateBatch(std::string_view prefix, size_t val_size,
-                     const SetCmd::SetParams& params, const PopulateBatch& ps) {
+void DoPopulateBatch(std::string_view prefix, size_t val_size, const SetCmd::SetParams& params,
+                     const PopulateBatch& ps) {
   SetCmd sg(&EngineShard::tlocal()->db_slice());
 
   for (unsigned i = 0; i < ps.sz; ++i) {
@@ -99,46 +104,51 @@ void DebugCmd::Populate(CmdArgList args) {
   }
   ranges.emplace_back(from, total_count - from);
 
-  auto distribute_cb = [this, val_size, prefix](uint64_t from, uint64_t len) {
-    string key = absl::StrCat(prefix, ":");
-    size_t prefsize = key.size();
-    DbIndex db_indx = 0;  // TODO
-    std::vector<PopulateBatch> ps(ess_->size(), PopulateBatch{db_indx});
-    SetCmd::SetParams params{db_indx};
-
-    for (uint64_t i = from; i < from + len; ++i) {
-      absl::StrAppend(&key, i);
-      ShardId sid = Shard(key, ess_->size());
-      key.resize(prefsize);
-
-      auto& pops = ps[sid];
-      pops.index[pops.sz++] = i;
-      if (pops.sz == 32) {
-        ess_->Add(sid, [=, p = pops] {
-          DoPopulateBatch(prefix, val_size, params, p);
-          if (i % 100 == 0) {
-            this_fiber::yield();
-          }
-        });
-
-        // we capture pops by value so we can override it here.
-        pops.sz = 0;
-      }
-    }
-
-    ess_->RunBriefInParallel(
-        [&](EngineShard* shard) {
-          DoPopulateBatch(prefix, val_size, params, ps[shard->shard_id()]);
-        });
-  };
-  vector<fibers::fiber> fb_arr(ranges.size());
+  vector<fiber> fb_arr(ranges.size());
   for (size_t i = 0; i < ranges.size(); ++i) {
-    fb_arr[i] = ess_->pool()->at(i)->LaunchFiber(distribute_cb, ranges[i].first, ranges[i].second);
+    fb_arr[i] = ess_->pool()->at(i)->LaunchFiber([&] {
+      this->PopulateRangeFiber(ranges[i].first, ranges[i].second, prefix, val_size);
+    });
   }
   for (auto& fb : fb_arr)
     fb.join();
 
   cntx_->SendOk();
+}
+
+void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view prefix,
+                                  unsigned value_len) {
+  this_fiber::properties<FiberProps>().set_name("populate_range");
+
+  string key = absl::StrCat(prefix, ":");
+  size_t prefsize = key.size();
+  DbIndex db_indx = 0;  // TODO
+  std::vector<PopulateBatch> ps(ess_->size(), PopulateBatch{db_indx});
+  SetCmd::SetParams params{db_indx};
+
+  for (uint64_t i = from; i < from + len; ++i) {
+    absl::StrAppend(&key, i);
+    ShardId sid = Shard(key, ess_->size());
+    key.resize(prefsize);
+
+    auto& pops = ps[sid];
+    pops.index[pops.sz++] = i;
+    if (pops.sz == 32) {
+      ess_->Add(sid, [=, p = pops] {
+        DoPopulateBatch(prefix, value_len, params, p);
+        if (i % 50 == 0) {
+          this_fiber::yield();
+        }
+      });
+
+      // we capture pops by value so we can override it here.
+      pops.sz = 0;
+    }
+  }
+
+  ess_->RunBriefInParallel([&](EngineShard* shard) {
+    DoPopulateBatch(prefix, value_len, params, ps[shard->shard_id()]);
+  });
 }
 
 }  // namespace dfly
