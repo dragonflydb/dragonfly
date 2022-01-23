@@ -20,6 +20,7 @@
 extern "C" {
 #include "redis/dict.h"
 #include "redis/sds.h"
+#include "redis/zmalloc.h"
 }
 
 namespace dfly {
@@ -34,7 +35,7 @@ static uint64_t dictSdsHash(const void* key) {
   return dictGenHashFunction((unsigned char*)key, sdslen((char*)key));
 }
 
-static int dictSdsKeyCompare(dict* , const void* key1, const void* key2) {
+static int dictSdsKeyCompare(dict*, const void* key1, const void* key2) {
   int l1, l2;
 
   l1 = sdslen((sds)key1);
@@ -80,6 +81,10 @@ constexpr size_t foo = Segment::kBucketSz;
 
 class DashTest : public testing::Test {
  protected:
+  static void SetUpTestCase() {
+    init_zmalloc_threadlocal();
+  }
+
   DashTest() : segment_(1) {
   }
 
@@ -547,7 +552,6 @@ struct SdsDashPolicy {
     return u2 == std::string_view{u1, sdslen(u1)};
   }
 };
-
 
 TEST_F(DashTest, Sds) {
   DashTable<sds, uint64_t, SdsDashPolicy> dt;

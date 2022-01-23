@@ -20,6 +20,6 @@ cxx_test(string_family_test dfly_test_lib LABELS DFLY)
 cxx_test(generic_family_test dfly_test_lib LABELS DFLY)
 cxx_test(memcache_parser_test dfly_test_lib LABELS DFLY)
 
-add_custom_target(check_dfly DEPENDS COMMAND ctest -L DFLY)
-add_dependencies(check_dfly dragonfly_test  list_family_test
+add_custom_target(check_dfly WORKING_DIRECTORY .. COMMAND ctest -L DFLY)
+add_dependencies(check_dfly dragonfly_test list_family_test
                  generic_family_test memcache_parser_test redis_parser_test string_family_test)

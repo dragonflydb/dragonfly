@@ -8,7 +8,7 @@
  *
  *   * Redistributions of source code must start the above copyright notice,
  *     this quicklist of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above copyright
+ *   * Redistributions inquicklistBookmarksClear binary form must reproduce the above copyright
  *     notice, this quicklist of conditions and the following disclaimer in the
  *     documentation and/or other materials provided with the distribution.
  *   * Neither the name of Redis nor the names of its contributors may be used
@@ -98,9 +98,17 @@ int quicklistisSetPackedThreshold(size_t sz) {
 
 /* Bookmarks forward declarations */
 #define QL_MAX_BM ((1 << QL_BM_BITS)-1)
-quicklistBookmark *_quicklistBookmarkFindByName(quicklist *ql, const char *name);
-quicklistBookmark *_quicklistBookmarkFindByNode(quicklist *ql, quicklistNode *node);
-void _quicklistBookmarkDelete(quicklist *ql, quicklistBookmark *bm);
+
+// static quicklistBookmark *_quicklistBookmarkFindByName(quicklist *ql, const char *name);
+static quicklistBookmark *_quicklistBookmarkFindByNode(quicklist *ql, quicklistNode *node);
+static void _quicklistBookmarkDelete(quicklist *ql, quicklistBookmark *bm);
+
+static void quicklistBookmarksClear(quicklist *ql) {
+    while (ql->bookmark_count)
+        zfree(ql->bookmarks[--ql->bookmark_count].name);
+    /* NOTE: We do not shrink (realloc) the quick list. main use case for this
+     * function is just before releasing the allocation. */
+}
 
 /* Simple way to give quicklistEntry structs default values with one call. */
 #define initEntry(e)                                                           \
@@ -1634,6 +1642,7 @@ void quicklistRepr(unsigned char *ql, int full) {
     }
 }
 
+#if ROMAN_ENABLE 
 /* Create or update a bookmark in the list which will be updated to the next node
  * automatically when the one referenced gets deleted.
  * Returns 1 on success (creation of new bookmark or override of an existing one).
@@ -1679,6 +1688,7 @@ int quicklistBookmarkDelete(quicklist *ql, const char *name) {
     return 1;
 }
 
+
 quicklistBookmark *_quicklistBookmarkFindByName(quicklist *ql, const char *name) {
     unsigned i;
     for (i=0; i<ql->bookmark_count; i++) {
@@ -1688,6 +1698,8 @@ quicklistBookmark *_quicklistBookmarkFindByName(quicklist *ql, const char *name)
     }
     return NULL;
 }
+
+#endif 
 
 quicklistBookmark *_quicklistBookmarkFindByNode(quicklist *ql, quicklistNode *node) {
     unsigned i;
@@ -1706,13 +1718,6 @@ void _quicklistBookmarkDelete(quicklist *ql, quicklistBookmark *bm) {
     memmove(bm, bm+1, (ql->bookmark_count - index)* sizeof(*bm));
     /* NOTE: We do not shrink (realloc) the quicklist yet (to avoid resonance,
      * it may be re-used later (a call to realloc may NOP). */
-}
-
-void quicklistBookmarksClear(quicklist *ql) {
-    while (ql->bookmark_count)
-        zfree(ql->bookmarks[--ql->bookmark_count].name);
-    /* NOTE: We do not shrink (realloc) the quick list. main use case for this
-     * function is just before releasing the allocation. */
 }
 
 /* The rest of this file is test cases and test helpers. */

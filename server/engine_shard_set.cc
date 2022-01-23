@@ -4,6 +4,10 @@
 
 #include "server/engine_shard_set.h"
 
+extern "C" {
+ #include "redis/zmalloc.h"
+}
+
 #include "base/logging.h"
 #include "server/transaction.h"
 #include "util/fiber_sched_algo.h"
@@ -79,6 +83,8 @@ EngineShard::~EngineShard() {
 
 void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
   CHECK(shard_ == nullptr) << pb->GetIndex();
+
+  init_zmalloc_threadlocal();
   shard_ = new EngineShard(pb, update_db_time);
 }
 
