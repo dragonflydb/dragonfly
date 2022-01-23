@@ -283,6 +283,7 @@ class DashTable : public detail::DashTableBase {
   // before returning. Unlike begin/end interface, traverse is more stable during table mutations.
   // It guarantees that if key exists at the beginning of traversal, stays in the table during the
   // traversal, it will eventually reach it even when the table shrinks or grows.
+  // Returns: cursor that is guaranteed to be less than 2^40.
   template <typename Cb> uint64_t Traverse(uint64_t cursor, Cb&& cb);
 
   // Takes an iterator pointing to an entry in a dash bucket and traverses all bucket's entries by
@@ -376,9 +377,13 @@ template <typename _Key, typename _Value, typename Policy>
 template <typename U>
 auto DashTable<_Key, _Value, Policy>::Find(U&& key) const -> const_iterator {
   uint64_t key_hash = DoHash(key);
-  size_t seg_id = SegmentId(key_hash);
+  size_t seg_id = SegmentId(key_hash);  // seg_id takes up global_depth_ high bits.
   const auto* target = segment_[seg_id];
 
+  // Hash structure is like this: [SSUUUUBF], where S is segment id, U - unused,
+  // B - bucket id and F is a fingerprint. Segment id is needed to identify the correct segment.
+  // Once identified, the segment instance uses the lower part of hash to locate the key.
+  // It uses 8 least significant bits for a fingerprint and few more bits for bucket id.
   auto seg_it = target->FindIt(key, key_hash, EqPred());
 
   if (seg_it.found()) {
@@ -548,12 +553,12 @@ void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id) {
 template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
 uint64_t DashTable<_Key, _Value, Policy>::Traverse(uint64_t cursor, Cb&& cb) {
-  unsigned bid = (cursor >> 8) & 0xFF;
+  unsigned bid = cursor & 0xFF;
 
   if (bid >= kLogicalBucketNum)  // sanity.
     return 0;
 
-  uint32_t sid = SegmentId(cursor);
+  uint32_t sid = cursor >> (40 - global_depth_);
   auto hash_fun = [this](const auto& k) { return policy_.HashFn(k); };
 
   bool fetched = false;
@@ -574,7 +579,7 @@ uint64_t DashTable<_Key, _Value, Policy>::Traverse(uint64_t cursor, Cb&& cb) {
     }
   } while (!fetched);
 
-  return (uint64_t(sid) << (64 - global_depth_)) | (bid << 8);
+  return (uint64_t(sid) << (40 - global_depth_)) | bid;
 }
 
 template <typename _Key, typename _Value, typename Policy>
