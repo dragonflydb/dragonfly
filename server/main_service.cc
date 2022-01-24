@@ -54,7 +54,8 @@ constexpr size_t kMaxThreadSize = 1024;
 Service::Service(ProactorPool* pp) : shard_set_(pp), pp_(*pp), server_family_(this) {
   CHECK(pp);
 
-  // We support less than 1024 threads.
+  // We support less than 1024 threads and we support less than 1024 shards.
+  // For example, Scan uses 10 bits in cursor to encode shard id it currently traverses.
   CHECK_LT(pp->size(), kMaxThreadSize);
   RegisterCommands();
 

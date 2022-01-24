@@ -35,11 +35,11 @@ API 1.0
   - [X] SET
   - [ ] SETNX
   - [X] GET
-  - [ ] DECR
-  - [ ] INCR
-  - [ ] DECRBY
+  - [X] DECR
+  - [X] INCR
+  - [X] DECRBY
   - [X] GETSET
-  - [ ] INCRBY
+  - [X] INCRBY
   - [X] MGET
   - [X] MSET
   - [ ] MSETNX
@@ -50,27 +50,27 @@ API 1.0
   - [X] EXISTS
   - [X] EXPIRE
   - [X] EXPIREAT
-  - [X] Ping
+  - [X] PING
   - [X] RENAME
   - [X] RENAMENX
   - [X] SELECT
   - [X] TTL
-  - [ ] TYPE
+  - [X] TYPE
   - [ ] SORT
 - [X] Server Family
   - [X] QUIT
   - [X] DBSIZE
   - [ ] BGSAVE
-  - [ ] SAVE
+  - [X] SAVE
   - [X] DBSIZE
   - [X] DEBUG
   - [X] EXEC
   - [ ] FLUSHALL
   - [X] FLUSHDB
-  - [ ] INFO
+  - [X] INFO
   - [X] MULTI
   - [X] SHUTDOWN
-  - [ ] LASTSAVE
+  - [X] LASTSAVE
   - [ ] SLAVEOF/REPLICAOF
   - [ ] SYNC
 - [ ] Set Family
@@ -124,7 +124,7 @@ a distributed log format.
 
 API 2.0
 - [ ] List Family
-  - [ ] BLPOP
+  - [X] BLPOP
   - [ ] BRPOP
   - [ ] BRPOPLPUSH
 - [ ] PubSub family
@@ -137,16 +137,20 @@ API 2.0
   - [ ] WATCH
   - [ ] UNWATCH
   - [ ] DISCARD
+- [X] Generic Family
+  - [X] SCAN
+
 
 Commands that I prefer not implement before launch:
   - [ ] PUNSUBSCRIBE
   - [ ] PSUBSCRIBE
-And keyspace notifications. For that I would like to deep dive and learn exact use-cases
-for this API.
+
+Also, I would omit keyspace notifications. For that I would like to deep dive and learn
+exact use-cases for this API.
 
 ## Milestone Nymph
 API 2,3,4 without cluster support, without modules, without memory inspection commands.
-Without keyspace notifications.
+Without support for keyspace notifications.
 
 Design config support. ~140 commands overall...
 ## Milestone Molt

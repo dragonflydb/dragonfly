@@ -155,6 +155,10 @@ class DbSlice {
   void PreUpdate(DbIndex db_ind, MainIterator it);
   void PostUpdate(DbIndex db_ind, MainIterator it);
 
+  // Check whether 'it' has not expired. Returns it if it's still valid. Otherwise, erases it
+  // from both tables and return MainIterator{}.
+  std::pair<MainIterator, ExpireIterator> ExpireIfNeeded(DbIndex db_ind, MainIterator it) const;
+
   // Current version of this slice.
   // We maintain a shared versioning scheme for all databases in the slice.
   uint64_t version() const { return version_; }
