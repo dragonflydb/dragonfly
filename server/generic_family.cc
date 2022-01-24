@@ -4,6 +4,10 @@
 
 #include "server/generic_family.h"
 
+extern "C" {
+ #include "redis/object.h"
+}
+
 #include "base/logging.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -126,6 +130,25 @@ Transaction::RunnableType Renamer::Finalize(bool skip_exist_dest) {
   };
 }
 
+const char* ObjTypeName(int type) {
+  switch (type) {
+    case OBJ_STRING:
+      return "string";
+    case OBJ_LIST:
+      return "list";
+    case OBJ_SET:
+      return "set";
+    case OBJ_ZSET:
+      return "zset";
+    case OBJ_HASH:
+      return "hash";
+    case OBJ_STREAM:
+      return "stream";
+    default:
+      LOG(ERROR) << "Unsupported type " << type;
+  }
+  return "invalid";
+};
 }  // namespace
 
 void GenericFamily::Init(util::ProactorPool* pp) {
@@ -285,6 +308,24 @@ void GenericFamily::Select(CmdArgList args, ConnectionContext* cntx) {
   return cntx->SendOk();
 }
 
+void GenericFamily::Type(CmdArgList args, ConnectionContext* cntx) {
+  std::string_view key = ArgS(args, 1);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<int> {
+    auto it = shard->db_slice().FindExt(t->db_index(), key).first;
+    if (!it.is_done()) {
+      return it->second.ObjType();
+    } else {
+      return OpStatus::KEY_NOTFOUND;
+    }
+  };
+  OpResult<int> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (!result) {
+    cntx->SendSimpleRespString("none");
+  } else {
+    cntx->SendSimpleRespString(ObjTypeName(result.value()));
+  }
+}
 
 OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool skip_exist_dest,
                                             ConnectionContext* cntx) {
@@ -324,6 +365,57 @@ void GenericFamily::Echo(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
   return cntx->SendBulkString(key);
 }
+
+void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
+  std::string_view token = ArgS(args, 1);
+  uint64_t cursor = 0;
+  EngineShardSet* ess = cntx->shard_set;
+  unsigned shard_count = ess->size();
+
+  // Dash table returns a cursor with its right byte empty. We will use it
+  // for encoding shard index. For now scan has a limitation of 255 shards.
+  CHECK_LT(shard_count, 1024u);
+
+  if (!absl::SimpleAtoi(token, &cursor)) {
+    return cntx->SendError("invalid cursor");
+  }
+
+  ShardId sid = cursor % 1024;
+  if (sid >= shard_count) {
+    return cntx->SendError("invalid cursor");
+  }
+
+  cursor >>= 10;
+
+  vector<string> keys;
+  do {
+    ess->Await(sid, [&] {
+      OpArgs op_args{EngineShard::tlocal(), cntx->conn_state.db_index};
+      OpScan(op_args, &cursor, &keys);
+    });
+    if (cursor == 0) {
+      ++sid;
+      if (unsigned(sid) == shard_count)
+        break;
+    }
+  } while (keys.size() < 10);
+
+  if (sid < shard_count) {
+    cursor = (cursor << 10) | sid;
+  } else {
+    DCHECK_EQ(0u, cursor);
+  }
+
+  string res("*2\r\n$");
+  string curs_str = absl::StrCat(cursor);
+  absl::StrAppend(&res, curs_str.size(), "\r\n", curs_str, "\r\n*", keys.size(), "\r\n");
+  for (const auto& k : keys) {
+    absl::StrAppend(&res, "$", k.size(), "\r\n", k, "\r\n");
+  }
+
+  return cntx->SendRespBlob(res);
+}
+
 
 OpStatus GenericFamily::OpExpire(const OpArgs& op_args, string_view key,
                                  const ExpireParams& params) {
@@ -425,6 +517,32 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from,
   return OpStatus::OK;
 }
 
+void GenericFamily::OpScan(const OpArgs& op_args, uint64_t* cursor, vector<string>* vec) {
+  auto& db_slice = op_args.shard->db_slice();
+  DCHECK(db_slice.IsDbValid(op_args.db_ind));
+
+  unsigned cnt = 0;
+  auto scan_cb = [&](MainIterator it) {
+    if (it->second.HasExpire()) {
+      it = db_slice.ExpireIfNeeded(op_args.db_ind, it).first;
+    }
+    vec->push_back(it->first.ToString());
+    ++cnt;
+  };
+
+  VLOG(1) << "PrimeTable " << db_slice.shard_id() << "/" << op_args.db_ind
+          << " has " << db_slice.DbSize(op_args.db_ind);
+
+  uint64_t cur = *cursor;
+  auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_ind);
+  do {
+    cur = prime_table->Traverse(cur, scan_cb);
+  } while (cur && cnt < 10);
+
+  VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur;
+  *cursor = cur;
+}
+
 using CI = CommandId;
 
 #define HFUNC(x) SetHandler(&GenericFamily::x)
@@ -439,8 +557,10 @@ void GenericFamily::Register(CommandRegistry* registry) {
             << CI{"EXPIREAT", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(ExpireAt)
             << CI{"RENAME", CO::WRITE, 3, 1, 2, 1}.HFUNC(Rename)
             << CI{"SELECT", kSelectOpts, 2, 0, 0, 0}.HFUNC(Select)
+            << CI{"SCAN", CO::READONLY | CO::FAST, -2, 0, 0, 0}.HFUNC(Scan)
             << CI{"TTL", CO::READONLY | CO::FAST | CO::RANDOM, 2, 1, 1, 1}.HFUNC(Ttl)
-            << CI{"PTTL", CO::READONLY | CO::FAST | CO::RANDOM, 2, 1, 1, 1}.HFUNC(Pttl);
+            << CI{"PTTL", CO::READONLY | CO::FAST | CO::RANDOM, 2, 1, 1, 1}.HFUNC(Pttl)
+            << CI{"TYPE", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Type);
 }
 
 }  // namespace dfly

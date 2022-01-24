@@ -112,22 +112,11 @@ pair<MainIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, string_view 
     return make_pair(it, ExpireIterator{});
   }
 
-  ExpireIterator expire_it;
   if (it->second.HasExpire()) {  // check expiry state
-    expire_it = db->expire_table.Find(it->first);
-
-    CHECK(IsValid(expire_it));
-    if (expire_it->second <= now_ms_) {
-      db->expire_table.Erase(expire_it);
-
-      db->stats.inline_keys -= it->first.IsInline();
-      db->stats.obj_memory_usage -= (it->first.MallocUsed() + it->second.MallocUsed());
-      db->main_table.Erase(it);
-      return make_pair(MainIterator{}, ExpireIterator{});
-    }
+    return ExpireIfNeeded(db_ind, it);
   }
 
-  return make_pair(it, expire_it);
+  return make_pair(it, ExpireIterator{});
 }
 
 OpResult<pair<MainIterator, unsigned>> DbSlice::FindFirst(DbIndex db_index, const ArgSlice& args) {
@@ -382,6 +371,24 @@ void DbSlice::PreUpdate(DbIndex db_ind, MainIterator it) {
 void DbSlice::PostUpdate(DbIndex db_ind, MainIterator it) {
   auto& db = db_arr_[db_ind];
   db->stats.obj_memory_usage += it->second.MallocUsed();
+}
+
+pair<MainIterator, ExpireIterator> DbSlice::ExpireIfNeeded(DbIndex db_ind, MainIterator it) const {
+  DCHECK(it->second.HasExpire());
+  auto& db = db_arr_[db_ind];
+
+  auto expire_it = db->expire_table.Find(it->first);
+
+  CHECK(IsValid(expire_it));
+  if (expire_it->second > now_ms_)
+    return make_pair(it, expire_it);
+
+  db->expire_table.Erase(expire_it);
+
+  db->stats.inline_keys -= it->first.IsInline();
+  db->stats.obj_memory_usage -= (it->first.MallocUsed() + it->second.MallocUsed());
+  db->main_table.Erase(it);
+  return make_pair(MainIterator{}, ExpireIterator{});
 }
 
 }  // namespace dfly
