@@ -163,6 +163,21 @@ class DbSlice {
   // We maintain a shared versioning scheme for all databases in the slice.
   uint64_t version() const { return version_; }
 
+  // ChangeReq - describes the change to the table. If MainIterator is defined then
+  // it's an update on the existing entry, otherwise if string_view is defined then
+  // it's a new key that is going to be added to the table.
+  using ChangeReq = std::variant<MainIterator, std::string_view>;
+
+  using ChangeCallback = std::function<void(DbIndex, const ChangeReq&)>;
+
+  //! Registers the callback to be called for each change.
+  //! Returns the registration id which is also the unique version of the dbslice
+  //! at a time of the call.
+  uint64_t RegisterOnChange(ChangeCallback cb);
+
+  //! Unregisters the callback.
+  void UnregisterOnChange(uint64_t id);
+
  private:
   void CreateDb(DbIndex index);
 
@@ -192,6 +207,8 @@ class DbSlice {
 
   // Used in temporary computations in Acquire/Release.
   absl::flat_hash_set<std::string_view> uniq_keys_;
+
+  std::vector<std::pair<uint64_t, ChangeCallback>> change_cb_;
 };
 
 }  // namespace dfly

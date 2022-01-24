@@ -11,6 +11,7 @@ extern "C" {
 #include <absl/strings/str_cat.h>
 
 #include "base/logging.h"
+#include "server/db_slice.h"
 #include "server/rdb_save.h"
 #include "util/fiber_sched_algo.h"
 #include "util/proactor_base.h"
@@ -30,15 +31,20 @@ SliceSnapshot::SliceSnapshot(PrimeTable* prime, ExpireTable* et, StringChannel* 
 SliceSnapshot::~SliceSnapshot() {
 }
 
-void SliceSnapshot::Start(uint64_t version) {
+void SliceSnapshot::Start(DbSlice* slice) {
   DCHECK(!fb_.joinable());
 
-  VLOG(1) << "DbSaver::Start - saving entries with version less than " << version;
+  snapshot_version_ =
+      slice->RegisterOnChange([this](DbIndex index, const DbSlice::ChangeReq& req) {});
+  VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
   sfile_.reset(new io::StringFile);
 
   rdb_serializer_.reset(new RdbSerializer(sfile_.get()));
-  snapshot_version_ = version;
-  fb_ = fiber([this] { FiberFunc(); });
+
+  fb_ = fiber([slice, this] {
+    FiberFunc();
+    slice->UnregisterOnChange(snapshot_version_);
+  });
 }
 
 void SliceSnapshot::Join() {
