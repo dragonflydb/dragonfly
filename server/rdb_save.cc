@@ -15,7 +15,7 @@ extern "C" {
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
-#include "server/rdb_snapshot.h"
+#include "server/snapshot.h"
 #include "util/fibers/simple_channel.h"
 
 namespace dfly {
@@ -213,8 +213,7 @@ error_code RdbSerializer::SaveObject(const robj* o) {
       if (quicklistNodeIsCompressed(node)) {
         void* data;
         size_t compress_len = quicklistGetLzf(node, &data);
-        RETURN_ON_ERR(
-            SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
+        RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
       } else {
         RETURN_ON_ERR(SaveString(node->entry, node->sz));
       }
@@ -352,12 +351,12 @@ error_code RdbSerializer::SaveLzfBlob(const io::Bytes& src, size_t uncompressed_
 
 struct RdbSaver::Impl {
   RdbSerializer serializer;
-  RdbSnapshot::StringChannel channel;
-  vector<unique_ptr<RdbSnapshot>> handles;
+  SliceSnapshot::StringChannel channel;
+  vector<unique_ptr<SliceSnapshot>> shard_snapshots;
 
   // We pass K=sz to say how many producers are pushing data in order to maintain
   // correct closing semantics - channel is closing when K producers marked it as closed.
-  Impl(unsigned sz) : channel{128, sz}, handles(sz) {
+  Impl(unsigned sz) : channel{128, sz}, shard_snapshots(sz) {
   }
 };
 
@@ -407,7 +406,7 @@ error_code RdbSaver::SaveBody() {
     vals.clear();
   }
 
-  for (auto& ptr : impl_->handles) {
+  for (auto& ptr : impl_->shard_snapshots) {
     ptr->Join();
   }
 
@@ -420,10 +419,10 @@ error_code RdbSaver::SaveBody() {
 
 void RdbSaver::StartSnapshotInShard(EngineShard* shard) {
   auto pair = shard->db_slice().GetTables(0);
-  auto s = make_unique<RdbSnapshot>(pair.first, pair.second, &impl_->channel);
+  auto s = make_unique<SliceSnapshot>(pair.first, pair.second, &impl_->channel);
 
   s->Start(shard->db_slice().version());
-  impl_->handles[shard->shard_id()] = move(s);
+  impl_->shard_snapshots[shard->shard_id()] = move(s);
 }
 
 error_code RdbSaver::SaveAux() {

@@ -364,6 +364,7 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) con
 
 void DbSlice::PreUpdate(DbIndex db_ind, MainIterator it) {
   auto& db = db_arr_[db_ind];
+
   db->stats.obj_memory_usage -= it->second.MallocUsed();
   it.SetVersion(NextVersion());
 }
