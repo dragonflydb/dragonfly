@@ -13,6 +13,7 @@
 namespace dfly {
 
 class RdbSerializer;
+class DbSlice;
 
 class SliceSnapshot {
  public:
@@ -22,7 +23,7 @@ class SliceSnapshot {
   SliceSnapshot(PrimeTable* prime, ExpireTable* et, StringChannel* dest);
   ~SliceSnapshot();
 
-  void Start(uint64_t version);
+  void Start(DbSlice* slice);
   void Join();
 
   uint64_t snapshot_version() const {

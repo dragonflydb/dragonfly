@@ -140,6 +140,21 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) -> pair<MainIterator,
 
   auto& db = db_arr_[db_index];
 
+  // If we have some registered onchange callbacks, we must know in advance whether its Find or Add.
+  if (!change_cb_.empty()) {
+    auto it = FindExt(db_index, key).first;
+    if (IsValid(it)) {
+      return make_pair(it, true);
+    }
+
+    // It's a new entry.
+    for (const auto& ccb : change_cb_) {
+      ccb.second(db_index, ChangeReq{key});
+    }
+  }
+
+  // Fast-path - change_cb_ is empty so we Find or Add using
+  // the insert operation: twice more efficient.
   CompactObj co_key{key};
   auto [it, inserted] = db->main_table.Insert(std::move(co_key), PrimeValue{});
   if (inserted) {  // new entry
@@ -252,6 +267,10 @@ bool DbSlice::Expire(DbIndex db_ind, MainIterator it, uint64_t at) {
 }
 
 void DbSlice::AddNew(DbIndex db_ind, string_view key, PrimeValue obj, uint64_t expire_at_ms) {
+  for (const auto& ccb : change_cb_) {
+    ccb.second(db_ind, ChangeReq{key});
+  }
+
   CHECK(AddIfNotExist(db_ind, key, std::move(obj), expire_at_ms));
 }
 
@@ -364,7 +383,9 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) con
 
 void DbSlice::PreUpdate(DbIndex db_ind, MainIterator it) {
   auto& db = db_arr_[db_ind];
-
+  for (const auto& ccb : change_cb_) {
+    ccb.second(db_ind, ChangeReq{it});
+  }
   db->stats.obj_memory_usage -= it->second.MallocUsed();
   it.SetVersion(NextVersion());
 }
@@ -390,6 +411,23 @@ pair<MainIterator, ExpireIterator> DbSlice::ExpireIfNeeded(DbIndex db_ind, MainI
   db->stats.obj_memory_usage -= (it->first.MallocUsed() + it->second.MallocUsed());
   db->main_table.Erase(it);
   return make_pair(MainIterator{}, ExpireIterator{});
+}
+
+uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
+  uint64_t ver = NextVersion();
+  change_cb_.emplace_back(ver, std::move(cb));
+  return ver;
+}
+
+//! Unregisters the callback.
+void DbSlice::UnregisterOnChange(uint64_t id) {
+  for (auto it = change_cb_.begin(); it != change_cb_.end(); ++it) {
+    if (it->first == id) {
+      change_cb_.erase(it);
+      return;
+    }
+  }
+  LOG(DFATAL) << "Could not find " << id << " to unregister";
 }
 
 }  // namespace dfly
