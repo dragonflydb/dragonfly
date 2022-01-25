@@ -1,4 +1,4 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -14,6 +14,7 @@ extern "C" {
 
 #include "base/string_view_sso.h"
 #include "core/tx_queue.h"
+#include "core/mi_memory_resource.h"
 #include "server/db_slice.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/fibers_ext.h"
@@ -51,6 +52,10 @@ class EngineShard {
 
   const DbSlice& db_slice() const {
     return db_slice_;
+  }
+
+  std::pmr::memory_resource* memory_resource() {
+    return &mi_resource_;
   }
 
   ::util::fibers_ext::FiberQueue* GetFiberQueue() {
@@ -94,7 +99,7 @@ class EngineShard {
   bool RemovedWatched(std::string_view key, Transaction* me);
   void GCWatched(const KeyLockArgs& lock_args);
 
-  void AwakeWatched(DbIndex db_index, std::string_view key);
+  void AwakeWatched(DbIndex db_index, std::string_view db_key);
 
   bool HasAwakedTransaction() const {
     return !awakened_transactions_.empty();
@@ -117,7 +122,7 @@ class EngineShard {
   sds tmp_str;
 
  private:
-  EngineShard(util::ProactorBase* pb, bool update_db_time);
+  EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap);
 
   struct WatchQueue;
 
@@ -129,14 +134,14 @@ class EngineShard {
   Transaction* NotifyWatchQueue(WatchQueue* wq);
 
   using WatchQueueMap = absl::flat_hash_map<std::string, std::unique_ptr<WatchQueue>>;
-  // Watch state per db slice.
+
+  // Watch state per db.
   struct DbWatchTable {
     WatchQueueMap queue_map;
 
     // awakened keys point to blocked keys that can potentially be unblocked.
     // they reference key objects in queue_map.
     absl::flat_hash_set<base::string_view_sso> awakened_keys;
-
 
     // Returns true if queue_map is empty and DbWatchTable can be removed as well.
     bool RemoveEntry(WatchQueueMap::iterator it);
@@ -152,6 +157,7 @@ class EngineShard {
   ::boost::fibers::fiber fiber_q_;
 
   TxQueue txq_;
+  MiMemoryResource mi_resource_;
   DbSlice db_slice_;
   Stats stats_;
 

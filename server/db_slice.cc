@@ -68,12 +68,12 @@ auto DbSlice::GetStats() const -> Stats {
     if (!db)
       continue;
 
-    s.db.key_count += db->main_table.size();
-    s.db.bucket_count += db->main_table.bucket_count();
+    s.db.key_count += db->prime_table.size();
+    s.db.bucket_count += db->prime_table.bucket_count();
     s.db.expire_count += db->expire_table.size();
     s.db.obj_memory_usage += db->stats.obj_memory_usage;
     s.db.inline_keys += db->stats.inline_keys;
-    s.db.table_mem_usage += (db->main_table.mem_usage() + db->expire_table.mem_usage());
+    s.db.table_mem_usage += (db->prime_table.mem_usage() + db->expire_table.mem_usage());
   }
 
   return s;
@@ -85,7 +85,7 @@ void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
   auto& db = db_arr_[db_ind];
   DCHECK(db);
 
-  db->main_table.Reserve(key_size);
+  db->prime_table.Reserve(key_size);
 }
 
 auto DbSlice::Find(DbIndex db_index, string_view key, unsigned req_obj_type) const
@@ -106,7 +106,7 @@ pair<MainIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, string_view 
   DCHECK(IsDbValid(db_ind));
 
   auto& db = db_arr_[db_ind];
-  MainIterator it = db->main_table.Find(key);
+  MainIterator it = db->prime_table.Find(key);
 
   if (!IsValid(it)) {
     return make_pair(it, ExpireIterator{});
@@ -156,7 +156,7 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) -> pair<MainIterator,
   // Fast-path - change_cb_ is empty so we Find or Add using
   // the insert operation: twice more efficient.
   CompactObj co_key{key};
-  auto [it, inserted] = db->main_table.Insert(std::move(co_key), PrimeValue{});
+  auto [it, inserted] = db->prime_table.Insert(std::move(co_key), PrimeValue{});
   if (inserted) {  // new entry
     db->stats.inline_keys += it->first.IsInline();
     db->stats.obj_memory_usage += it->first.MallocUsed();
@@ -195,7 +195,7 @@ void DbSlice::ActivateDb(DbIndex db_ind) {
 void DbSlice::CreateDb(DbIndex index) {
   auto& db = db_arr_[index];
   if (!db) {
-    db.reset(new DbWrapper);
+    db.reset(new DbWrapper{owner_->memory_resource()});
   }
 }
 
@@ -211,7 +211,7 @@ bool DbSlice::Del(DbIndex db_ind, MainIterator it) {
 
   db->stats.inline_keys -= it->first.IsInline();
   db->stats.obj_memory_usage -= (it->first.MallocUsed() + it->second.MallocUsed());
-  db->main_table.Erase(it);
+  db->prime_table.Erase(it);
 
   return true;
 }
@@ -222,8 +222,8 @@ size_t DbSlice::FlushDb(DbIndex db_ind) {
 
     CHECK(db);
 
-    size_t removed = db->main_table.size();
-    db->main_table.Clear();
+    size_t removed = db->prime_table.size();
+    db->prime_table.Clear();
     db->expire_table.Clear();
     db->stats.inline_keys = 0;
     db->stats.obj_memory_usage = 0;
@@ -281,7 +281,7 @@ bool DbSlice::AddIfNotExist(DbIndex db_ind, string_view key, PrimeValue obj,
   auto& db = db_arr_[db_ind];
   CompactObj co_key{key};
 
-  auto [new_entry, success] = db->main_table.Insert(std::move(co_key), std::move(obj));
+  auto [new_entry, success] = db->prime_table.Insert(std::move(co_key), std::move(obj));
   if (!success)
     return false;  // in this case obj won't be moved and will be destroyed during unwinding.
 
@@ -303,7 +303,7 @@ size_t DbSlice::DbSize(DbIndex db_ind) const {
   DCHECK_LT(db_ind, db_array_size());
 
   if (IsDbValid(db_ind)) {
-    return db_arr_[db_ind]->main_table.size();
+    return db_arr_[db_ind]->prime_table.size();
   }
   return 0;
 }
@@ -409,7 +409,7 @@ pair<MainIterator, ExpireIterator> DbSlice::ExpireIfNeeded(DbIndex db_ind, MainI
 
   db->stats.inline_keys -= it->first.IsInline();
   db->stats.obj_memory_usage -= (it->first.MallocUsed() + it->second.MallocUsed());
-  db->main_table.Erase(it);
+  db->prime_table.Erase(it);
   return make_pair(MainIterator{}, ExpireIterator{});
 }
 
