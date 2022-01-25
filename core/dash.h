@@ -298,6 +298,17 @@ class DashTable : public detail::DashTableBase {
     return const_bucket_iterator{it.owner_, it.seg_id_, it.bucket_id_, 0};
   }
 
+  // Capture Version Change. Runs cb(it) on every bucket! (not entry) in the table whose version
+  // would potentially change upon insertion of 'k'.
+  // In practice traversal is limited to a single segment. The operation is read-only and
+  // simulates insertion process. 'cb' must accept const_iterator. Note: the interface a bit hacky
+  // since the iterator may point to non-existing slot. In practice it only can be sent to
+  // TraverseBucket function.
+  // The function returns any bucket that is touched by the insertion flow. In practice, we
+  // could tighten estimates by taking the new version into account.
+  // Not sure how important this is though.
+  template <typename U, typename Cb> void CVCUponInsert(const U& key, Cb&& cb) const;
+
   void Clear();
 
  private:
@@ -347,6 +358,32 @@ DashTable<_Key, _Value, Policy>::~DashTable() {
     pa.deallocate(seg, 1);
     return false;
   });
+}
+
+template <typename _Key, typename _Value, typename Policy>
+template <typename U, typename Cb>
+void DashTable<_Key, _Value, Policy>::CVCUponInsert(const U& key, Cb&& cb) const {
+  uint64_t key_hash = DoHash(key);
+  uint32_t seg_id = SegmentId(key_hash);
+  assert(seg_id < segment_.size());
+  const SegmentType* target = segment_[seg_id];
+
+  uint8_t bids[2];
+  unsigned num_touched = target->CVCOnInsert(key_hash, bids);
+  if (num_touched > 0) {
+    for (unsigned i = 0; i < num_touched; ++i) {
+      cb(const_iterator{this, seg_id, bids[i], 0});
+    }
+    return;
+  }
+
+  static_assert(kPhysicalBucketNum < 0xFF, "");
+
+  // Segment is full, we need to return the whole segment, because it can be split
+  // and its entries can be reshuffled into different buckets.
+  for (uint8_t i = 0; i < kPhysicalBucketNum; ++i) {
+    cb(const_iterator{this, seg_id, i, 0});
+  }
 }
 
 template <typename _Key, typename _Value, typename Policy>
