@@ -33,8 +33,11 @@ class SliceSnapshot {
  private:
   void FiberFunc();
   bool FlushSfile(bool force);
-  void SerializeCb(MainIterator it);
+  void SerializeSingleEntry(MainIterator it);
   bool SaveCb(MainIterator it);
+
+  // Returns number of entries serialized.
+  unsigned SerializePhysicalBucket(PrimeTable* table, PrimeTable::const_iterator it);
 
   ::boost::fibers::fiber fb_;
 
@@ -47,9 +50,10 @@ class SliceSnapshot {
   // version upper bound for entries that should be saved (not included).
   uint64_t snapshot_version_ = 0;
   PrimeTable* prime_table_;
+  DbSlice* db_slice_ = nullptr;
   StringChannel* dest_;
 
-  size_t serialized_ = 0, skipped_ = 0;
+  size_t serialized_ = 0, skipped_ = 0, side_saved_ = 0;
 };
 
 }  // namespace dfly

@@ -33,9 +33,26 @@ SliceSnapshot::~SliceSnapshot() {
 
 void SliceSnapshot::Start(DbSlice* slice) {
   DCHECK(!fb_.joinable());
+  db_slice_ = slice;
 
-  snapshot_version_ =
-      slice->RegisterOnChange([this](DbIndex index, const DbSlice::ChangeReq& req) {});
+  auto on_change = [this, slice](DbIndex db_index, const DbSlice::ChangeReq& req) {
+    PrimeTable* table = slice->GetTables(db_index).first;
+
+    if (const MainIterator* it = get_if<MainIterator>(&req)) {
+      if (it->GetVersion() < snapshot_version_) {
+        side_saved_ += SerializePhysicalBucket(table, *it);
+      }
+    } else {
+      string_view key = get<string_view>(req);
+      table->CVCUponInsert(key, [this, table](PrimeTable::const_iterator it) {
+        if (it.MinVersion() < snapshot_version_) {
+          side_saved_ += SerializePhysicalBucket(table, it);
+        }
+      });
+    }
+  };
+
+  snapshot_version_ = slice->RegisterOnChange(move(on_change));
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
   sfile_.reset(new io::StringFile);
 
@@ -53,7 +70,7 @@ void SliceSnapshot::Join() {
 
 static_assert(sizeof(PrimeTable::const_iterator) == 16);
 
-void SliceSnapshot::SerializeCb(MainIterator it) {
+void SliceSnapshot::SerializeSingleEntry(MainIterator it) {
   error_code ec;
 
   string tmp;
@@ -163,23 +180,28 @@ bool SliceSnapshot::SaveCb(MainIterator it) {
   }
 
   physical_mask_.set(it.bucket_id());
+  SerializePhysicalBucket(prime_table_, it);
 
+  return false;
+}
+
+unsigned SliceSnapshot::SerializePhysicalBucket(PrimeTable* table, PrimeTable::const_iterator it) {
   // Both traversals below execute atomically.
   // traverse physical bucket and write into string file.
-  prime_table_->TraverseBucket(it, [this](auto entry_it) { this->SerializeCb(move(entry_it)); });
+  unsigned result = 0;
+  table->TraverseBucket(it, [&](auto entry_it) {
+    ++result;
+    SerializeSingleEntry(move(entry_it));
+  });
 
-  // Theoretically we could merge version_cb into the traversal above but then would would need
-  // to give up on DCHECK.
-  auto version_cb = [this](MainIterator entry_it) {
+  table->TraverseBucket(it, [this](MainIterator entry_it) {
     DCHECK_LE(entry_it.GetVersion(), snapshot_version_);
     DVLOG(3) << "Bumping up version " << entry_it.bucket_id() << ":" << entry_it.slot_id();
 
     entry_it.SetVersion(snapshot_version_);
-  };
+  });
 
-  prime_table_->TraverseBucket(it, version_cb);
-
-  return false;
+  return result;
 }
 
 }  // namespace dfly
