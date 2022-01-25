@@ -1,11 +1,11 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
 #include "server/engine_shard_set.h"
 
 extern "C" {
- #include "redis/zmalloc.h"
+#include "redis/zmalloc.h"
 }
 
 #include "base/logging.h"
@@ -52,8 +52,8 @@ bool EngineShard::DbWatchTable::RemoveEntry(WatchQueueMap::iterator it) {
   return queue_map.empty();
 }
 
-EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time)
-    : queue_(kQueueLen), txq_([](const Transaction* t) { return t->txid(); }),
+EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap)
+    : queue_(kQueueLen), txq_([](const Transaction* t) { return t->txid(); }), mi_resource_(heap),
       db_slice_(pb->GetIndex(), this) {
   fiber_q_ = fibers::fiber([this, index = pb->GetIndex()] {
     this_fiber::properties<FiberProps>().set_name(absl::StrCat("shard_queue", index));
@@ -85,7 +85,10 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
   CHECK(shard_ == nullptr) << pb->GetIndex();
 
   init_zmalloc_threadlocal();
-  shard_ = new EngineShard(pb, update_db_time);
+
+  mi_heap_t* tlh = mi_heap_get_backing();
+  void* ptr = mi_heap_malloc_aligned(tlh, sizeof(EngineShard), alignof(EngineShard));
+  shard_ = new (ptr) EngineShard(pb, update_db_time, tlh);
 }
 
 void EngineShard::DestroyThreadLocal() {
@@ -93,7 +96,8 @@ void EngineShard::DestroyThreadLocal() {
     return;
 
   uint32_t index = shard_->db_slice_.shard_id();
-  delete shard_;
+  shard_->~EngineShard();
+  mi_free(shard_);
   shard_ = nullptr;
 
   VLOG(1) << "Shard reset " << index;
@@ -237,7 +241,7 @@ Transaction* EngineShard::NotifyWatchQueue(WatchQueue* wq) {
 
 // Processes potentially awakened keys and verifies that these are indeed
 // awakened to eliminate false positives.
-// In addition it, optionally removes completed_t from watch queues.
+// In addition, optionally removes completed_t from the watch queues.
 void EngineShard::ProcessAwakened(Transaction* completed_t) {
   for (DbIndex index : awakened_indices_) {
     DbWatchTable& wt = watched_dbs_[index];
@@ -376,7 +380,7 @@ void EngineShard::GCWatched(const KeyLockArgs& largs) {
 }
 
 // Called from commands like lpush.
-void EngineShard::AwakeWatched(DbIndex db_index, std::string_view db_key) {
+void EngineShard::AwakeWatched(DbIndex db_index, string_view db_key) {
   auto it = watched_dbs_.find(db_index);
   if (it == watched_dbs_.end())
     return;
@@ -384,7 +388,6 @@ void EngineShard::AwakeWatched(DbIndex db_index, std::string_view db_key) {
   DbWatchTable& wt = it->second;
   DCHECK(!wt.queue_map.empty());
 
-  string tmp;
   auto wit = wt.queue_map.find(db_key);
 
   if (wit == wt.queue_map.end())

@@ -144,7 +144,7 @@ class DbSlice {
   }
 
   std::pair<PrimeTable*, ExpireTable*> GetTables(DbIndex id) {
-    return std::pair<PrimeTable*, ExpireTable*>(&db_arr_[id]->main_table,
+    return std::pair<PrimeTable*, ExpireTable*>(&db_arr_[id]->prime_table,
                                                 &db_arr_[id]->expire_table);
   }
 
@@ -196,11 +196,15 @@ class DbSlice {
   using LockTable = absl::flat_hash_map<std::string, IntentLock>;
 
   struct DbWrapper {
-    PrimeTable main_table;
+    PrimeTable prime_table;
     ExpireTable expire_table;
     LockTable lock_table;
 
     mutable InternalDbStats stats;
+
+    explicit DbWrapper(std::pmr::memory_resource* mr)
+    : prime_table(4, detail::PrimeTablePolicy{}, mr) {
+    }
   };
 
   std::vector<std::unique_ptr<DbWrapper>> db_arr_;
