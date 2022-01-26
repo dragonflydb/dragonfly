@@ -87,6 +87,11 @@ void Service::Init(util::AcceptServer* acceptor, const InitOpts& opts) {
 void Service::Shutdown() {
   VLOG(1) << "Service::Shutdown";
 
+  auto [current, switched] = server_family_.global_state()->Next(GlobalState::SHUTTING_DOWN);
+
+  // TODO: to introduce BlockingNext that waits until the state is switched to idle.
+  CHECK(switched) << "TBD " << GlobalState::Name(current);
+
   engine_varz.reset();
   request_latency_usec.Shutdown();
   ping_qps.Shutdown();

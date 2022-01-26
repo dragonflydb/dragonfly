@@ -140,6 +140,16 @@ void ServerFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
 void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
   static unsigned fl_index = 1;
 
+  auto [current, switched] = global_state_.Next(GlobalState::SAVING);
+  if (!switched) {
+    string error = absl::StrCat(GlobalState::Name(current), " - can not save database");
+    return cntx->SendError(error);
+  }
+
+  absl::Cleanup rev_state = [this] {
+    global_state_.Clear();
+  };
+
   fs::path dir_path(FLAGS_dir);
   error_code ec;
 
