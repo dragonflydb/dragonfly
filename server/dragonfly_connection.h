@@ -47,12 +47,15 @@ class Connection : public util::Connection {
 
   void HandleRequests() final;
 
+  //
+  io::Result<bool> CheckForHttpProto(util::FiberSocketBase* peer);
   void InputLoop(util::FiberSocketBase* peer);
   void DispatchFiber(util::FiberSocketBase* peer);
 
-  ParserStatus ParseRedis(base::IoBuf* buf);
-  ParserStatus ParseMemcache(base::IoBuf* buf);
+  ParserStatus ParseRedis();
+  ParserStatus ParseMemcache();
 
+  base::IoBuf io_buf_;
   std::unique_ptr<RedisParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
   Service* service_;
