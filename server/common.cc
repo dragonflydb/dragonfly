@@ -2,12 +2,12 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/common_types.h"
-
 #include <absl/strings/str_cat.h>
 
 #include "base/logging.h"
+#include "server/common_types.h"
 #include "server/error.h"
+#include "server/global_state.h"
 #include "server/server_state.h"
 
 namespace dfly {
@@ -50,6 +50,20 @@ const char kInvalidIntErr[] = "value is not an integer or out of range";
 const char kUintErr[] = "value is out of range, must be positive";
 const char kDbIndOutOfRangeErr[] = "DB index is out of range";
 const char kInvalidDbIndErr[] = "invalid DB index";
+
+const char* GlobalState::Name(S s) {
+  switch (s) {
+    case GlobalState::IDLE:
+      return "IDLE";
+    case GlobalState::LOADING:
+      return "LOADING";
+    case GlobalState::SAVING:
+      return "SAVING";
+    case GlobalState::SHUTTING_DOWN:
+      return "SHUTTING DOWN";
+  }
+  ABSL_INTERNAL_UNREACHABLE;
+}
 
 }  // namespace dfly
 

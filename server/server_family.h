@@ -6,6 +6,7 @@
 
 #include "server/common_types.h"
 #include "server/engine_shard_set.h"
+#include "server/global_state.h"
 #include "util/proactor_pool.h"
 
 namespace util {
@@ -36,6 +37,10 @@ class ServerFamily {
 
   Metrics GetMetrics() const;
 
+  GlobalState* global_state() {
+    return &global_state_;
+  }
+
  private:
   uint32_t shard_count() const {
     return ess_.size();
@@ -56,6 +61,7 @@ class ServerFamily {
 
   util::AcceptServer* acceptor_ = nullptr;
   std::atomic<int64_t> last_save_;  // in seconds.
+  GlobalState global_state_;
 };
 
 }  // namespace dfly
