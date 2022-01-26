@@ -106,8 +106,11 @@ void DebugCmd::Populate(CmdArgList args) {
 
   vector<fiber> fb_arr(ranges.size());
   for (size_t i = 0; i < ranges.size(); ++i) {
-    fb_arr[i] = ess_->pool()->at(i)->LaunchFiber([&] {
-      this->PopulateRangeFiber(ranges[i].first, ranges[i].second, prefix, val_size);
+    auto range = ranges[i];
+
+    // whatever we do, we should not capture i by reference.
+    fb_arr[i] = ess_->pool()->at(i)->LaunchFiber([=] {
+      this->PopulateRangeFiber(range.first, range.second, prefix, val_size);
     });
   }
   for (auto& fb : fb_arr)
@@ -119,10 +122,11 @@ void DebugCmd::Populate(CmdArgList args) {
 void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view prefix,
                                   unsigned value_len) {
   this_fiber::properties<FiberProps>().set_name("populate_range");
+  VLOG(1) << "PopulateRange: " << from << "-" << (from + len - 1);
 
   string key = absl::StrCat(prefix, ":");
   size_t prefsize = key.size();
-  DbIndex db_indx = 0;  // TODO
+  DbIndex db_indx = cntx_->db_index();
   std::vector<PopulateBatch> ps(ess_->size(), PopulateBatch{db_indx});
   SetCmd::SetParams params{db_indx};
 
