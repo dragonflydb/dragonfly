@@ -124,8 +124,10 @@ void Connection::HandleRequests() {
   this_fiber::properties<FiberProps>().set_name("DflyConnection");
 
   int val = 1;
-  CHECK_EQ(0, setsockopt(socket_->native_handle(), SOL_TCP, TCP_NODELAY, &val, sizeof(val)));
-  auto remote_ep = socket_->RemoteEndpoint();
+  LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
+  CHECK_EQ(0, setsockopt(lsb->native_handle(), SOL_TCP, TCP_NODELAY, &val, sizeof(val)));
+
+  auto remote_ep = lsb->RemoteEndpoint();
 
   std::unique_ptr<tls::TlsSocket> tls_sock;
   if (ctx_) {
@@ -141,36 +143,46 @@ void Connection::HandleRequests() {
   }
 
   FiberSocketBase* peer = tls_sock ? (FiberSocketBase*)tls_sock.get() : socket_.get();
-  cc_.reset(new ConnectionContext(peer, this));
-  cc_->shard_set = &service_->shard_set();
+  io::Result<bool> http_res = CheckForHttpProto(peer);
 
-  // TODO: to move this interface to LinuxSocketBase so we won't need to cast.
-  uring::UringSocket* us = static_cast<uring::UringSocket*>(socket_.get());
+  if (http_res) {
+    if (*http_res) {
+      VLOG(1) << "HTTP1.1 identified";
+      HttpConnection http_conn{service_->http_listener()};
+      http_conn.SetSocket(peer);
+      auto ec = http_conn.ParseFromBuffer(io_buf_.InputBuffer());
+      io_buf_.ConsumeInput(io_buf_.InputLen());
+      if (!ec) {
+        http_conn.HandleRequests();
+      }
+      http_conn.ReleaseSocket();
+    } else {
+      cc_.reset(new ConnectionContext(peer, this));
+      cc_->shard_set = &service_->shard_set();
 
-  bool poll_armed = true;
-  uint32_t poll_id = us->PollEvent(POLLERR | POLLHUP, [&](uint32_t mask) {
-    VLOG(1) << "Got event " << mask;
-    cc_->conn_state.mask |= ConnectionState::CONN_CLOSING;
-    if (cc_->transaction) {
-      cc_->transaction->BreakOnClose();
+      // TODO: to move this interface to LinuxSocketBase so we won't need to cast.
+      uring::UringSocket* us = static_cast<uring::UringSocket*>(socket_.get());
+
+      bool poll_armed = true;
+      uint32_t poll_id = us->PollEvent(POLLERR | POLLHUP, [&](uint32_t mask) {
+        VLOG(1) << "Got event " << mask;
+        cc_->conn_state.mask |= ConnectionState::CONN_CLOSING;
+        if (cc_->transaction) {
+          cc_->transaction->BreakOnClose();
+        }
+
+        evc_.notify();  // Notify dispatch fiber.
+        poll_armed = false;
+      });
+
+      InputLoop(peer);
+
+      if (poll_armed) {
+        us->CancelPoll(poll_id);
+      }
     }
-
-    evc_.notify();  // Notify dispatch fiber.
-    poll_armed = false;
-  });
-
-  io::Result<bool> check_res = CheckForHttpProto(peer);
-  if (!check_res)
-    return;
-  if (*check_res) {
-    LOG(INFO) << "HTTP1.1 identified";
   }
 
-  InputLoop(peer);
-
-  if (poll_armed) {
-    us->CancelPoll(poll_id);
-  }
   VLOG(1) << "Closed connection for peer " << remote_ep;
 }
 
@@ -195,6 +207,7 @@ io::Result<bool> Connection::CheckForHttpProto(util::FiberSocketBase* peer) {
     }
     last_len = io_buf_.InputLen();
   } while (last_len < 1024);
+
   return false;
 }
 

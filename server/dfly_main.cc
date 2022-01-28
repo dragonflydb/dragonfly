@@ -3,28 +3,25 @@
 //
 
 #include "base/init.h"
-#include "server/main_service.h"
 #include "server/dragonfly_listener.h"
+#include "server/main_service.h"
 #include "util/accept_server.h"
 #include "util/uring/uring_pool.h"
 #include "util/varz.h"
 
-DEFINE_int32(http_port, 8080, "Http port.");
 DECLARE_uint32(port);
 DECLARE_uint32(memcache_port);
 
 using namespace util;
+using namespace std;
 
 namespace dfly {
 
 void RunEngine(ProactorPool* pool, AcceptServer* acceptor, HttpListener<>* http) {
   Service service(pool);
+
+  service.RegisterHttp(http);
   service.Init(acceptor);
-
-  if (http) {
-    service.RegisterHttp(http);
-  }
-
   acceptor->AddListener(FLAGS_port, new Listener{Protocol::REDIS, &service});
   if (FLAGS_memcache_port > 0) {
     acceptor->AddListener(FLAGS_memcache_port, new Listener{Protocol::MEMCACHE, &service});
@@ -38,7 +35,6 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor, HttpListener<>* http)
 
 }  // namespace dfly
 
-
 int main(int argc, char* argv[]) {
   MainInitGuard guard(&argc, &argv);
 
@@ -48,19 +44,11 @@ int main(int argc, char* argv[]) {
   pp.Run();
 
   AcceptServer acceptor(&pp);
-  HttpListener<>* http_listener = nullptr;
+  unique_ptr<HttpListener<>> http_listener(new HttpListener<>);
 
-  if (FLAGS_http_port >= 0) {
-    http_listener = new HttpListener<>;
-    http_listener->enable_metrics();
+  http_listener->enable_metrics();
 
-    // Ownership over http_listener is moved to the acceptor.
-    uint16_t port = acceptor.AddListener(FLAGS_http_port, http_listener);
-
-    LOG(INFO) << "Started http service on port " << port;
-  }
-
-  dfly::RunEngine(&pp, &acceptor, http_listener);
+  dfly::RunEngine(&pp, &acceptor, http_listener.get());
 
   pp.Stop();
 
