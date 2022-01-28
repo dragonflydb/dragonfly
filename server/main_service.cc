@@ -51,7 +51,7 @@ constexpr size_t kMaxThreadSize = 1024;
 
 }  // namespace
 
-Service::Service(ProactorPool* pp) : shard_set_(pp), pp_(*pp), server_family_(this) {
+Service::Service(ProactorPool* pp) : pp_(*pp), shard_set_(pp), server_family_(this) {
   CHECK(pp);
 
   // We support less than 1024 threads and we support less than 1024 shards.
@@ -255,6 +255,7 @@ bool Service::IsShardSetLocked() const {
 
 void Service::RegisterHttp(HttpListenerBase* listener) {
   CHECK_NOTNULL(listener);
+  http_listener_ = listener;
 }
 
 void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
