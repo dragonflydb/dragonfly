@@ -1,4 +1,4 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -7,9 +7,9 @@
 #include "base/varz_value.h"
 #include "server/command_registry.h"
 #include "server/engine_shard_set.h"
-#include "util/http/http_handler.h"
 #include "server/memcache_parser.h"
 #include "server/server_family.h"
+#include "util/http/http_handler.h"
 
 namespace util {
 class AcceptServer;
@@ -57,16 +57,17 @@ class Service {
     return pp_;
   }
 
-  util::HttpListenerBase* http_listener() { return http_listener_; }
+  util::HttpListenerBase* http_listener() {
+    return http_listener_;
+  }
 
  private:
-
   static void Quit(CmdArgList args, ConnectionContext* cntx);
-  void Exec(CmdArgList args, ConnectionContext* cntx);
   static void Multi(CmdArgList args, ConnectionContext* cntx);
+  void Exec(CmdArgList args, ConnectionContext* cntx);
+
 
   void RegisterCommands();
-
   base::VarzValue::Map GetVarzStats();
 
   util::ProactorPool& pp_;

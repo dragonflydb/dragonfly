@@ -52,8 +52,15 @@ class ServerFamily {
   void FlushAll(CmdArgList args, ConnectionContext* cntx);
   void Save(CmdArgList args, ConnectionContext* cntx);
   void Info(CmdArgList args, ConnectionContext* cntx);
+  void ReplicaOf(CmdArgList args, ConnectionContext* cntx);
+  void Sync(CmdArgList args, ConnectionContext* cntx);
+  void Psync(CmdArgList args, ConnectionContext* cntx);
+
+
   void LastSave(CmdArgList args, ConnectionContext* cntx);
   void _Shutdown(CmdArgList args, ConnectionContext* cntx);
+
+  void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
 
   Service& engine_;
   util::ProactorPool& pp_;

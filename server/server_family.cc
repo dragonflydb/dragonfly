@@ -249,6 +249,8 @@ tcp_port:)";
   absl::StrAppend(&info, "used_memory_human:",
                   strings::HumanReadableNumBytes(m.db.table_mem_usage + m.db.obj_memory_usage),
                   "\n");
+  absl::StrAppend(&info, "num_entries:", m.db.key_count, "\n");
+  absl::StrAppend(&info, "inline_keys:", m.db.inline_keys, "\n");
 
   absl::StrAppend(&info, "\n# Stats\n");
   absl::StrAppend(&info, "total_commands_processed:", m.conn_stats.command_cnt, "\n");
@@ -261,6 +263,33 @@ tcp_port:)";
   cntx->SendBulkString(info);
 }
 
+void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
+  std::string_view host = ArgS(args, 1);
+  std::string_view port_s = ArgS(args, 2);
+
+  if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_s, "one")) {
+    LOG(FATAL) << "TBD";
+
+    return cntx->SendOk();
+  }
+
+  uint32_t port;
+
+  if (!absl::SimpleAtoi(port_s, &port) || port < 1 || port > 65535) {
+    cntx->SendError(kInvalidIntErr);
+    return;
+  }
+
+  cntx->SendOk();
+}
+
+void ServerFamily::Sync(CmdArgList args, ConnectionContext* cntx) {
+  SyncGeneric("", 0, cntx);
+}
+
+void ServerFamily::Psync(CmdArgList args, ConnectionContext* cntx) {
+  SyncGeneric("?", 0, cntx);  // full sync, ignore the request.
+}
 void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
   cntx->SendLong(last_save_.load(memory_order_relaxed));
 }
@@ -270,9 +299,22 @@ void ServerFamily::_Shutdown(CmdArgList args, ConnectionContext* cntx) {
   cntx->SendOk();
 }
 
+void ServerFamily::SyncGeneric(std::string_view repl_master_id, uint64_t offs,
+                               ConnectionContext* cntx) {
+  if (cntx->conn_state.mask & ConnectionState::ASYNC_DISPATCH) {
+    // we can not sync if there are commands following on the socket because our reply to sync is
+    // streaming response.
+    cntx->SendError("Can not sync in pipeline mode");
+    return;
+  }
+
+  // TBD.
+}
+
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ServerFamily::x))
 
 void ServerFamily::Register(CommandRegistry* registry) {
+  constexpr auto kReplicaOpts = CO::ADMIN | CO::STALE | CO::GLOBAL_TRANS;
   *registry << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(DbSize)
             << CI{"DEBUG", CO::RANDOM | CO::READONLY, -2, 0, 0, 0}.HFUNC(Debug)
             << CI{"FLUSHDB", CO::WRITE | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(FlushDb)
@@ -282,7 +324,11 @@ void ServerFamily::Register(CommandRegistry* registry) {
                    LastSave)
             << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Save)
             << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING | CO::STALE, 1, 0, 0, 0}.HFUNC(
-                   _Shutdown);
+                   _Shutdown)
+            << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
+            << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
+            << CI{"SYNC", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Sync)
+            << CI{"PSYNC", CO::ADMIN | CO::GLOBAL_TRANS, 3, 0, 0, 0}.HFUNC(Psync);
 }
 
 }  // namespace dfly
