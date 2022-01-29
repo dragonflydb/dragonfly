@@ -165,7 +165,6 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
   path.concat(absl::StrCat("_", fl_index++));
   VLOG(1) << "Saving to " << path;
 
-  // TODO: use io-uring file instead.
   auto res = uring::OpenWrite(path.generic_string());
   if (!res) {
     cntx->SendError(res.error().message());

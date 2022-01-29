@@ -1,4 +1,4 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 #include "server/debugcmd.h"
@@ -6,12 +6,18 @@
 #include <absl/strings/str_cat.h>
 
 #include <boost/fiber/operations.hpp>
+#include <filesystem>
 
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/rdb_load.h"
 #include "server/string_family.h"
 #include "util/uring/uring_fiber_algo.h"
+#include "util/uring/uring_file.h"
+
+DECLARE_string(dir);
+DECLARE_string(dbfilename);
 
 namespace dfly {
 
@@ -19,6 +25,7 @@ using namespace std;
 using namespace util;
 namespace this_fiber = ::boost::this_fiber;
 using boost::fibers::fiber;
+namespace fs = std::filesystem;
 
 struct PopulateBatch {
   DbIndex dbid;
@@ -52,6 +59,12 @@ void DebugCmd::Run(CmdArgList args) {
   if (subcmd == "HELP") {
     std::string_view help_arr[] = {
         "DEBUG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+        "RELOAD [option ...]",
+        "    Save the RDB on disk (TBD) and reload it back to memory. Valid <option> values:",
+        "    * NOSAVE: the database will be loaded from an existing RDB file.",
+        "    Examples:",
+        "    * DEBUG RELOAD NOSAVE: replace the current database with the contents of an",
+        "      existing RDB file.",
         "POPULATE <count> [<prefix>] [<size>]",
         "    Create <count> string keys named key:<num>. If <prefix> is specified then",
         "    it is used instead of the 'key' prefix.",
@@ -67,9 +80,57 @@ void DebugCmd::Run(CmdArgList args) {
     return Populate(args);
   }
 
+  if (subcmd == "RELOAD") {
+    return Reload(args);
+  }
+
   string reply = absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd,
                               "'. Try DEBUG HELP.");
   return cntx_->SendError(reply);
+}
+
+void DebugCmd::Reload(CmdArgList args) {
+  bool save = true;
+  for (size_t i = 2; i < args.size(); ++i) {
+    ToUpper(&args[i]);
+    std::string_view opt = ArgS(args, i);
+    VLOG(1) << "opt " << opt;
+
+    if (opt == "NOSAVE") {
+      save = false;
+    } else {
+      return cntx_->SendError("DEBUG RELOAD only supports the NOSAVE options.");
+    }
+  }
+  if (save) {
+    return cntx_->SendError("NOSAVE required (TBD).");
+  }
+
+  if (FLAGS_dbfilename.empty()) {
+    return cntx_->SendError("dbfilename is not set");
+  }
+
+  fs::path dir_path(FLAGS_dir);
+  string filename = FLAGS_dbfilename;
+  fs::path path = dir_path;
+  path.append(filename);
+  auto res = uring::OpenRead(path.generic_string());
+
+  if (!res) {
+    cntx_->SendError(res.error().message());
+    return;
+  }
+
+  io::FileSource fs(*res);
+
+  RdbLoader loader;
+  error_code ec = loader.Load(&fs);
+
+  if (ec) {
+    cntx_->SendError(ec.message());
+  } else {
+    cntx_->SendOk();
+  }
 }
 
 void DebugCmd::Populate(CmdArgList args) {
