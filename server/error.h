@@ -5,6 +5,7 @@
 #pragma once
 
 #include <atomic>
+#include <string>
 
 namespace dfly {
 
@@ -26,6 +27,23 @@ extern const char kInvalidDbIndErr[];
     if (ec)              \
       return ec;         \
   } while (0)
-#endif
+
+#endif  // RETURN_ON_ERR
+
+namespace rdb {
+
+enum errc {
+  wrong_signature = 1,
+  bad_version = 2,
+  module_not_supported = 3,
+  duplicate_key = 4,
+  rdb_file_corrupted = 5,
+  bad_checksum = 6,
+  bad_db_index = 7,
+  invalid_rdb_type = 8,
+  invalid_encoding = 9,
+};
+
+}  // namespace rdb
 
 }  // namespace dfly

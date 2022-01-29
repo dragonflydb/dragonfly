@@ -31,6 +31,7 @@ using CmdArgVec = std::vector<MutableStrSpan>;
 
 constexpr DbIndex kInvalidDbId = DbIndex(-1);
 constexpr ShardId kInvalidSid = ShardId(-1);
+constexpr DbIndex kMaxDbId = 1024;  // Reasonable starting point.
 
 class CommandId;
 class Transaction;
