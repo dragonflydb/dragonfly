@@ -22,6 +22,7 @@ extern "C" {
 #include "server/error.h"
 #include "server/main_service.h"
 #include "server/rdb_save.h"
+#include "server/replica.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
 #include "strings/human_readable.h"
@@ -79,6 +80,12 @@ void ServerFamily::Init(util::AcceptServer* acceptor) {
 
 void ServerFamily::Shutdown() {
   VLOG(1) << "ServerFamily::Shutdown";
+  pp_.GetNextProactor()->Await([this] {
+    unique_lock lk(replica_of_mu_);
+    if (replica_) {
+      replica_->Stop();
+    }
+  });
 }
 
 void ServerFamily::DbSize(CmdArgList args, ConnectionContext* cntx) {
@@ -146,9 +153,7 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(error);
   }
 
-  absl::Cleanup rev_state = [this] {
-    global_state_.Clear();
-  };
+  absl::Cleanup rev_state = [this] { global_state_.Clear(); };
 
   fs::path dir_path(FLAGS_dir);
   error_code ec;
@@ -171,6 +176,8 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
+  pp_.Await([](auto*) { ServerState::tlocal()->state = GlobalState::SAVING; });
+
   unique_ptr<::io::WriteFile> wf(*res);
   auto start = absl::Now();
 
@@ -192,6 +199,9 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
     cntx->SendError(res.error().message());
     return;
   }
+
+  pp_.Await([](auto*) { ServerState::tlocal()->state = GlobalState::IDLE; });
+  CHECK_EQ(GlobalState::SAVING, global_state_.Clear());
 
   absl::Duration dur = absl::Now() - start;
   double seconds = double(absl::ToInt64Milliseconds(dur)) / 1000;
@@ -260,6 +270,28 @@ tcp_port:)";
   absl::StrAppend(&info, "\n# Clients\n");
   absl::StrAppend(&info, "connected_clients:", m.conn_stats.num_conns, "\n");
   absl::StrAppend(&info, "client_read_buf_capacity:", m.conn_stats.read_buf_capacity, "\n");
+  absl::StrAppend(&info, "\n# Replication\n");
+
+  ServerState& etl = *ServerState::tlocal();
+
+  if (etl.is_master) {
+    absl::StrAppend(&info, "role:master\n");
+    absl::StrAppend(&info, "connected_slaves:", m.conn_stats.num_replicas, "\n");
+  } else {
+    absl::StrAppend(&info, "role:slave\n");
+
+    // it's safe to access replica_ because replica_ is created before etl.is_master set to false
+    // and cleared after etl.is_master is set to true. And since the code here that checks for
+    // is_master and copies shared_ptr is atomic, it1 should be correct.
+    auto replica_ptr = replica_;
+    Replica::Info rinfo = replica_ptr->GetInfo();
+    absl::StrAppend(&info, "master_host:", rinfo.host, "\n");
+    absl::StrAppend(&info, "master_port:", rinfo.port, "\n");
+    const char* link = rinfo.master_link_established ? "up" : "down";
+    absl::StrAppend(&info, "master_link_status:", link, "\n");
+    absl::StrAppend(&info, "master_last_io_seconds_ago:", rinfo.master_last_io_sec, "\n");
+    absl::StrAppend(&info, "master_sync_in_progress:", rinfo.sync_in_progress, "\n");
+  }
   cntx->SendBulkString(info);
 }
 
@@ -268,7 +300,19 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   std::string_view port_s = ArgS(args, 2);
 
   if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_s, "one")) {
-    LOG(FATAL) << "TBD";
+    // use this lock as critical section to prevent concurrent replicaof commands running.
+    unique_lock lk(replica_of_mu_);
+
+    // Switch to primary mode.
+    if (!ServerState::tlocal()->is_master) {
+      auto repl_ptr = replica_;
+      CHECK(repl_ptr);
+
+
+      pp_.AwaitFiberOnAll([&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = true; });
+      replica_->Stop();
+      replica_.reset();
+    }
 
     return cntx->SendOk();
   }
@@ -280,7 +324,33 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  cntx->SendOk();
+  auto new_replica = make_shared<Replica>(string(host), port, &engine_);
+
+  unique_lock lk(replica_of_mu_);
+  if (replica_) {
+    replica_->Stop();  // NOTE: consider introducing update API flow.
+  }
+
+  replica_.swap(new_replica);
+
+  // Flushing all the data after we marked this instance as replica.
+  Transaction* transaction = cntx->transaction;
+  transaction->Schedule();
+
+  auto cb = [](Transaction* t, EngineShard* shard) {
+    shard->db_slice().FlushDb(DbSlice::kDbAll);
+    return OpStatus::OK;
+  };
+  transaction->Execute(std::move(cb), true);
+
+  // Replica sends response in either case. No need to send response in this function.
+  // It's a bit confusing but simpler.
+  if (!replica_->Run(cntx)) {
+    replica_.reset();
+  }
+  bool is_master = !replica_;
+  pp_.AwaitFiberOnAll(
+      [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
 }
 
 void ServerFamily::Sync(CmdArgList args, ConnectionContext* cntx) {
@@ -302,8 +372,8 @@ void ServerFamily::_Shutdown(CmdArgList args, ConnectionContext* cntx) {
 void ServerFamily::SyncGeneric(std::string_view repl_master_id, uint64_t offs,
                                ConnectionContext* cntx) {
   if (cntx->conn_state.mask & ConnectionState::ASYNC_DISPATCH) {
-    // we can not sync if there are commands following on the socket because our reply to sync is
-    // streaming response.
+    // SYNC is a special command that should not be sent in batch with other commands.
+    // It should be the last command since afterwards the server just dumps the replication data.
     cntx->SendError("Can not sync in pipeline mode");
     return;
   }

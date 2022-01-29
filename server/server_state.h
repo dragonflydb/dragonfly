@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "server/common_types.h"
+#include "server/global_state.h"
 
 namespace dfly {
 
@@ -30,6 +31,9 @@ class ServerState {  // public struct - to allow initialization.
 
   ServerState();
   ~ServerState();
+
+  GlobalState::S state = GlobalState::IDLE;
+  bool is_master = true;
 
   ConnectionStats connection_stats;
 
