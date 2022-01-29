@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include "server/common_types.h"
 #include "server/engine_shard_set.h"
 #include "server/global_state.h"
 #include "util/proactor_pool.h"
@@ -18,6 +17,7 @@ namespace dfly {
 class ConnectionContext;
 class CommandRegistry;
 class Service;
+class Replica;
 
 struct Metrics {
   DbStats db;
@@ -67,6 +67,9 @@ class ServerFamily {
   EngineShardSet& ess_;
 
   util::AcceptServer* acceptor_ = nullptr;
+  ::boost::fibers::mutex replica_of_mu_;
+  std::shared_ptr<Replica> replica_;  // protected by replica_of_mu_
+
   std::atomic<int64_t> last_save_;  // in seconds.
   GlobalState global_state_;
 };

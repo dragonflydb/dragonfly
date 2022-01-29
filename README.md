@@ -65,13 +65,13 @@ API 1.0
   - [X] DBSIZE
   - [X] DEBUG
   - [X] EXEC
-  - [ ] FLUSHALL
+  - [X] FLUSHALL
   - [X] FLUSHDB
   - [X] INFO
   - [X] MULTI
   - [X] SHUTDOWN
   - [X] LASTSAVE
-  - [ ] SLAVEOF/REPLICAOF
+  - [X] SLAVEOF/REPLICAOF
   - [ ] SYNC
 - [ ] Set Family
   - [ ] SADD

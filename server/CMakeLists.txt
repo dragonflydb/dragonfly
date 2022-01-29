@@ -4,7 +4,8 @@ cxx_link(dragonfly base dragonfly_lib)
 add_library(dragonfly_lib command_registry.cc common.cc config_flags.cc
             conn_context.cc db_slice.cc debugcmd.cc dragonfly_listener.cc
             dragonfly_connection.cc engine_shard_set.cc generic_family.cc
-            list_family.cc main_service.cc memcache_parser.cc rdb_load.cc rdb_save.cc snapshot.cc
+            list_family.cc main_service.cc memcache_parser.cc rdb_load.cc rdb_save.cc replica.cc
+            snapshot.cc
             redis_parser.cc reply_builder.cc server_family.cc string_family.cc transaction.cc)
 
 cxx_link(dragonfly_lib dfly_core redis_lib uring_fiber_lib
