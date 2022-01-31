@@ -280,6 +280,11 @@ finish:
 
   stats->read_buf_capacity -= io_buf_.Capacity();
 
+  // Update num_replicas if this was a replica connection.
+  if (cc_->conn_state.mask & ConnectionState::REPL_CONNECTION) {
+    --stats->num_replicas;
+  }
+
   if (cc_->ec()) {
     ec = cc_->ec();
   } else {

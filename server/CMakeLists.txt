@@ -24,4 +24,5 @@ cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/small.rdb LABEL
 
 add_custom_target(check_dfly WORKING_DIRECTORY .. COMMAND ctest -L DFLY)
 add_dependencies(check_dfly dragonfly_test list_family_test
-                 generic_family_test memcache_parser_test redis_parser_test string_family_test)
+                 generic_family_test memcache_parser_test rdb_test 
+                 redis_parser_test string_family_test)

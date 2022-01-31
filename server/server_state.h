@@ -4,10 +4,12 @@
 
 #pragma once
 
+#include <optional>
 #include <vector>
 
 #include "server/common_types.h"
 #include "server/global_state.h"
+#include "core/interpreter.h"
 
 namespace dfly {
 
@@ -32,7 +34,9 @@ class ServerState {  // public struct - to allow initialization.
   ServerState();
   ~ServerState();
 
-  GlobalState::S state = GlobalState::IDLE;
+  void Init();
+  void Shutdown();
+
   bool is_master = true;
 
   ConnectionStats connection_stats;
@@ -49,8 +53,15 @@ class ServerState {  // public struct - to allow initialization.
     return live_transactions_;
   }
 
+  GlobalState::S gstate() const { return gstate_;}
+  void set_gstate(GlobalState::S s) { gstate_ = s; }
+
+  Interpreter& GetInterpreter();
+
  private:
   int64_t live_transactions_ = 0;
+  std::optional<Interpreter> interpreter_;
+  GlobalState::S gstate_ = GlobalState::IDLE;
 
   static thread_local ServerState state_;
 };

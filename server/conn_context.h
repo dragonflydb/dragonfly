@@ -31,6 +31,10 @@ struct ConnectionState {
   enum Mask : uint32_t {
     ASYNC_DISPATCH = 1,  // whether a command is handled via async dispatch.
     CONN_CLOSING = 2,    // could be because of unrecoverable error or planned action.
+
+    // Whether this connection belongs to replica, i.e. a dragonfly slave is connected to this
+    // host (master) via this connection to sync from it.
+    REPL_CONNECTION = 2,
   };
 
   uint32_t mask = 0;  // A bitmask of Mask values.

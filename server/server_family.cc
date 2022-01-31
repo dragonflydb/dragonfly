@@ -63,6 +63,7 @@ error_code CreateDirs(fs::path dir_path) {
   }
   return ec;
 }
+
 }  // namespace
 
 ServerFamily::ServerFamily(Service* engine)
@@ -80,6 +81,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor) {
 
 void ServerFamily::Shutdown() {
   VLOG(1) << "ServerFamily::Shutdown";
+
   pp_.GetNextProactor()->Await([this] {
     unique_lock lk(replica_of_mu_);
     if (replica_) {
@@ -176,7 +178,7 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  pp_.Await([](auto*) { ServerState::tlocal()->state = GlobalState::SAVING; });
+  pp_.Await([](auto*) { ServerState::tlocal()->set_gstate(GlobalState::SAVING); });
 
   unique_ptr<::io::WriteFile> wf(*res);
   auto start = absl::Now();
@@ -200,7 +202,7 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  pp_.Await([](auto*) { ServerState::tlocal()->state = GlobalState::IDLE; });
+  pp_.Await([](auto*) { ServerState::tlocal()->set_gstate(GlobalState::IDLE); });
   CHECK_EQ(GlobalState::SAVING, global_state_.Clear());
 
   absl::Duration dur = absl::Now() - start;
@@ -243,7 +245,7 @@ Metrics ServerFamily::GetMetrics() const {
 void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   const char kInfo1[] =
       R"(# Server
-redis_version:6.2.0
+redis_version:1.9.9
 redis_mode:standalone
 arch_bits:64
 multiplexing_api:iouring
@@ -292,6 +294,9 @@ tcp_port:)";
     absl::StrAppend(&info, "master_last_io_seconds_ago:", rinfo.master_last_io_sec, "\n");
     absl::StrAppend(&info, "master_sync_in_progress:", rinfo.sync_in_progress, "\n");
   }
+  absl::StrAppend(&info, "\n# Keyspace\n");
+  absl::StrAppend(&info, "db0:keys=xxx,expires=yyy,avg_ttl=zzz\n");  // TODO
+
   cntx->SendBulkString(info);
 }
 
@@ -307,7 +312,6 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
     if (!ServerState::tlocal()->is_master) {
       auto repl_ptr = replica_;
       CHECK(repl_ptr);
-
 
       pp_.AwaitFiberOnAll([&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = true; });
       replica_->Stop();
@@ -378,6 +382,8 @@ void ServerFamily::SyncGeneric(std::string_view repl_master_id, uint64_t offs,
     return;
   }
 
+  cntx->conn_state.mask |= ConnectionState::REPL_CONNECTION;
+  ServerState::tl_connection_stats()->num_replicas += 1;
   // TBD.
 }
 

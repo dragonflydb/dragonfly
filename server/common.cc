@@ -7,7 +7,6 @@
 #include "base/logging.h"
 #include "server/common_types.h"
 #include "server/error.h"
-#include "server/global_state.h"
 #include "server/server_state.h"
 
 namespace dfly {
@@ -20,6 +19,23 @@ ServerState::ServerState() {
 }
 
 ServerState::~ServerState() {
+}
+
+void ServerState::Init() {
+  gstate_ = GlobalState::IDLE;
+}
+
+void ServerState::Shutdown() {
+  gstate_ = GlobalState::SHUTTING_DOWN;
+  interpreter_.reset();
+}
+
+Interpreter& ServerState::GetInterpreter() {
+  if (!interpreter_) {
+    interpreter_.emplace();
+  }
+
+  return interpreter_.value();
 }
 
 #define ADD(x) (x) += o.x

@@ -64,6 +64,8 @@ class Service {
  private:
   static void Quit(CmdArgList args, ConnectionContext* cntx);
   static void Multi(CmdArgList args, ConnectionContext* cntx);
+  static void Eval(CmdArgList args, ConnectionContext* cntx);
+
   void Exec(CmdArgList args, ConnectionContext* cntx);
 
 
