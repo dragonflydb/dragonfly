@@ -72,6 +72,8 @@ void Service::Init(util::AcceptServer* acceptor, const InitOpts& opts) {
   shard_set_.Init(shard_num);
 
   pp_.Await([&](uint32_t index, ProactorBase* pb) {
+    ServerState::tlocal()->Init();
+
     if (index < shard_count()) {
       shard_set_.InitThreadLocal(pb, !opts.disable_time_update);
     }
@@ -95,6 +97,8 @@ void Service::Shutdown() {
   engine_varz.reset();
   request_latency_usec.Shutdown();
   ping_qps.Shutdown();
+
+   pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Shutdown(); });
 
   // to shutdown all the runtime components that depend on EngineShard.
   server_family_.Shutdown();
@@ -129,7 +133,20 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(absl::StrCat("unknown command `", cmd_str, "`"));
   }
 
+  if (etl.gstate() == GlobalState::LOADING || etl.gstate() == GlobalState::SHUTTING_DOWN) {
+    string err = absl::StrCat("Can not execute during ", GlobalState::Name(etl.gstate()));
+    cntx->SendError(err);
+    return;
+  }
+
+  bool is_write_cmd = cid->opt_mask() & CO::WRITE;
   bool under_multi = cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE && !is_trans_cmd;
+
+  if (!etl.is_master && is_write_cmd) {
+    cntx->SendError("-READONLY You can't write against a read only replica.");
+    return;
+  }
+
   if ((cid->arity() > 0 && args.size() != size_t(cid->arity())) ||
       (cid->arity() < 0 && args.size() < size_t(-cid->arity()))) {
     return cntx->SendError(WrongNumArgsError(cmd_str));
@@ -272,6 +289,12 @@ void Service::Multi(CmdArgList args, ConnectionContext* cntx) {
   return cntx->SendOk();
 }
 
+void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
+  Interpreter& script = ServerState::tlocal()->GetInterpreter();
+  script.lua();
+  return cntx->SendOk();
+}
+
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   if (cntx->conn_state.exec_state == ConnectionState::EXEC_INACTIVE) {
     return cntx->SendError("EXEC without MULTI");
@@ -315,9 +338,12 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 VarzValue::Map Service::GetVarzStats() {
   VarzValue::Map res;
 
-  atomic_ulong num_keys{0};
-  shard_set_.RunBriefInParallel([&](EngineShard* es) { num_keys += es->db_slice().DbSize(0); });
-  res.emplace_back("keys", VarzValue::FromInt(num_keys.load()));
+  Metrics m = server_family_.GetMetrics();
+
+  res.emplace_back("keys", VarzValue::FromInt(m.db.key_count));
+  res.emplace_back("obj_mem_usage", VarzValue::FromInt(m.db.obj_memory_usage));
+  double load = double(m.db.key_count) / (1 + m.db.bucket_count);
+  res.emplace_back("table_load_factor", VarzValue::FromDouble(load));
 
   return res;
 }
@@ -338,6 +364,7 @@ void Service::RegisterCommands() {
   registry_ << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0}.HFUNC(Quit)
             << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING | CO::STALE, 1, 0, 0, 0}.HFUNC(
                    Multi)
+            << CI{"EVAL", CO::NOSCRIPT, -3, 0, 0, 0}.HFUNC(Eval)
             << CI{"EXEC", kExecMask, 1, 0, 0, 0}.SetHandler(cb_exec);
 
   StringFamily::Register(&registry_);
