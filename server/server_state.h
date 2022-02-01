@@ -4,12 +4,13 @@
 
 #pragma once
 
+#include <boost/fiber/mutex.hpp>
 #include <optional>
 #include <vector>
 
+#include "core/interpreter.h"
 #include "server/common_types.h"
 #include "server/global_state.h"
-#include "core/interpreter.h"
 
 namespace dfly {
 
@@ -17,7 +18,7 @@ namespace dfly {
 // state around engine shards while the former represents coordinator/connection state.
 // There may be threads that handle engine shards but not IO, there may be threads that handle IO
 // but not engine shards and there can be threads that handle both. This class is present only
-// for threads that handle IO and owne coordination fibers.
+// for threads that handle IO and manage incoming connections.
 class ServerState {  // public struct - to allow initialization.
   ServerState(const ServerState&) = delete;
   void operator=(const ServerState&) = delete;
@@ -53,10 +54,19 @@ class ServerState {  // public struct - to allow initialization.
     return live_transactions_;
   }
 
-  GlobalState::S gstate() const { return gstate_;}
-  void set_gstate(GlobalState::S s) { gstate_ = s; }
+  GlobalState::S gstate() const {
+    return gstate_;
+  }
+  void set_gstate(GlobalState::S s) {
+    gstate_ = s;
+  }
 
   Interpreter& GetInterpreter();
+
+  // We have interpreter per thread, not per connection.
+  // Since we might preempt into different fibers when operating on interpreter
+  // we must lock it until we finish using it per request.
+  ::boost::fibers::mutex interpreter_mutex;
 
  private:
   int64_t live_transactions_ = 0;
