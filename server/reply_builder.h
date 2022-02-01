@@ -138,4 +138,12 @@ class ReplyBuilder {
   Protocol protocol_;
 };
 
+class ReqSerializer : public RespSerializer {
+ public:
+  explicit ReqSerializer(::io::Sink* stream) : RespSerializer(stream) {
+  }
+
+  void SendCommand(std::string_view str);
+};
+
 }  // namespace dfly
