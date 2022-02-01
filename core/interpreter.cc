@@ -8,6 +8,7 @@
 #include <openssl/sha.h>
 
 #include <cstring>
+#include <optional>
 
 extern "C" {
 #include <lauxlib.h>
@@ -100,6 +101,20 @@ void ToHex(const uint8_t* src, char* dest) {
   dest[40] = '\0';
 }
 
+string_view TopSv(lua_State* lua) {
+  return string_view{lua_tostring(lua, -1), lua_rawlen(lua, -1)};
+}
+
+optional<int> FetchKey(lua_State* lua, const char* key) {
+  lua_pushstring(lua, key);
+  int type = lua_gettable(lua, -2);
+  if (type == LUA_TNIL) {
+    lua_pop(lua, 1);
+    return nullopt;
+  }
+  return type;
+}
+
 }  // namespace
 
 Interpreter::Interpreter() {
@@ -127,24 +142,7 @@ bool Interpreter::AddFunction(string_view body, string* result) {
   char funcname[43];
   Fingerprint(body, funcname);
 
-  string script = absl::StrCat("function ", funcname, "() \n");
-  absl::StrAppend(&script, body, "\nend");
-
-  int res = luaL_loadbuffer(lua_, script.data(), script.size(), "@user_script");
-  if (res == 0) {
-    res = lua_pcall(lua_, 0, 0, 0);  // run func definition code
-  }
-
-  if (res) {
-    result->assign(lua_tostring(lua_, -1));
-    lua_pop(lua_, 1);  // Remove the error.
-
-    return false;
-  }
-
-  result->assign(funcname);
-
-  return true;
+  return AddInternal(funcname, body, result);
 }
 
 bool Interpreter::RunFunction(const char* f_id, std::string* error) {
@@ -165,6 +163,120 @@ bool Interpreter::RunFunction(const char* f_id, std::string* error) {
     *error = lua_tostring(lua_, -1);
   }
   return err == 0;
+}
+
+bool Interpreter::Execute(string_view body, char f_id[43], string* error) {
+  lua_getglobal(lua_, "__redis__err__handler");
+  Fingerprint(body, f_id);
+
+  int type = lua_getglobal(lua_, f_id);
+  if (type != LUA_TFUNCTION) {
+    lua_pop(lua_, 1);
+    if (!AddInternal(f_id, body, error))
+      return false;
+    type = lua_getglobal(lua_, f_id);
+    CHECK_EQ(type, LUA_TFUNCTION);
+  }
+
+  int err = lua_pcall(lua_, 0, 1, -2);
+  if (err) {
+    *error = lua_tostring(lua_, -1);
+  }
+  return err == 0;
+}
+
+bool Interpreter::AddInternal(const char* f_id, string_view body, string* result) {
+  string script = absl::StrCat("function ", f_id, "() \n");
+  absl::StrAppend(&script, body, "\nend");
+
+  int res = luaL_loadbuffer(lua_, script.data(), script.size(), "@user_script");
+  if (res == 0) {
+    res = lua_pcall(lua_, 0, 0, 0);  // run func definition code
+  }
+
+  if (res) {
+    result->assign(lua_tostring(lua_, -1));
+    lua_pop(lua_, 1);  // Remove the error.
+
+    return false;
+  }
+
+  result->assign(f_id);
+  return true;
+}
+
+bool Interpreter::Serialize(ObjectExplorer* serializer, std::string* error) {
+  // TODO: to get rid of this check or move it to the external function.
+  // It does not make sense to do this check recursively and it complicates the flow
+  // were in the middle of the serialization we could theoretically fail.
+  if (!lua_checkstack(lua_, 4)) {
+    /* Increase the Lua stack if needed to make sure there is enough room
+     * to push 4 elements to the stack. On failure, return error.
+     * Notice that we need, in the worst case, 4 elements because returning a map might
+     * require push 4 elements to the Lua stack.*/
+    error->assign("reached lua stack limit");
+    lua_pop(lua_, 1); /* pop the element from the stack */
+    return false;
+  }
+
+  int t = lua_type(lua_, -1);
+  bool res = true;
+
+  switch (t) {
+    case LUA_TSTRING:
+      serializer->OnString(TopSv(lua_));
+      break;
+    case LUA_TBOOLEAN:
+      serializer->OnBool(lua_toboolean(lua_, -1));
+      break;
+    case LUA_TNUMBER:
+      if (lua_isinteger(lua_, -1)) {
+        serializer->OnInt(lua_tointeger(lua_, -1));
+      } else {
+        serializer->OnDouble(lua_tonumber(lua_, -1));
+      }
+      break;
+    case LUA_TTABLE: {
+      unsigned len = lua_rawlen(lua_, -1);
+      if (len > 0) {  // array
+        serializer->OnArrayStart(len);
+        for (unsigned i = 0; i < len; ++i) {
+          t = lua_rawgeti(lua_, -1, i + 1);    // push table element
+
+          // TODO: we should make sure that we have enough stack space
+          // to traverse each object. This can be done as a dry-run before doing real serialization.
+          // Once we are sure we are safe we can simplify the serialization flow and
+          // remove the error factor.
+          CHECK(Serialize(serializer, error));  // pops the element
+        }
+        serializer->OnArrayEnd();
+      } else {
+        auto fres = FetchKey(lua_, "err");
+        if (fres && *fres == LUA_TSTRING) {
+          serializer->OnError(TopSv(lua_));
+          lua_pop(lua_, 1);
+          break;
+        }
+
+        fres = FetchKey(lua_, "ok");
+        if (fres && *fres == LUA_TSTRING) {
+          serializer->OnStatus(TopSv(lua_));
+          lua_pop(lua_, 1);
+          break;
+        }
+        serializer->OnError("TBD");
+      }
+      break;
+    }
+    case LUA_TNIL:
+      serializer->OnNil();
+      break;
+    default:
+      error->assign(absl::StrCat("Unsupported type ", t));
+  }
+
+  lua_pop(lua_, 1);
+  return res;
 }
 
 }  // namespace dfly

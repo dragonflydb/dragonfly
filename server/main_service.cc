@@ -49,6 +49,51 @@ metrics::CounterFamily cmd_req("requests_total", "Number of served redis request
 
 constexpr size_t kMaxThreadSize = 1024;
 
+class EvalSerializer : public ObjectExplorer {
+ public:
+  EvalSerializer(ReplyBuilder* rb) : rb_(rb) {
+  }
+
+  void OnBool(bool b) final {
+    LOG(FATAL) << "TBD";
+  }
+
+  void OnString(std::string_view str) final {
+    LOG(FATAL) << "TBD";
+  }
+
+  void OnDouble(double d) final {
+    LOG(FATAL) << "TBD";
+  }
+
+  void OnInt(int64_t val) final {
+    rb_->SendLong(val);
+  }
+
+  void OnArrayStart(unsigned len) final {
+    LOG(FATAL) << "TBD";
+  }
+
+  void OnArrayEnd() final {
+    LOG(FATAL) << "TBD";
+  }
+
+  void OnNil() final {
+    LOG(FATAL) << "TBD";
+  }
+
+  void OnStatus(std::string_view str) {
+    LOG(FATAL) << "TBD";
+  }
+
+  void OnError(std::string_view str) {
+    LOG(FATAL) << "TBD";
+  }
+
+ private:
+  ReplyBuilder* rb_;
+};
+
 }  // namespace
 
 Service::Service(ProactorPool* pp) : pp_(*pp), shard_set_(pp), server_family_(this) {
@@ -98,7 +143,7 @@ void Service::Shutdown() {
   request_latency_usec.Shutdown();
   ping_qps.Shutdown();
 
-   pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Shutdown(); });
+  pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Shutdown(); });
 
   // to shutdown all the runtime components that depend on EngineShard.
   server_family_.Shutdown();
@@ -290,9 +335,35 @@ void Service::Multi(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
-  Interpreter& script = ServerState::tlocal()->GetInterpreter();
-  script.lua();
-  return cntx->SendOk();
+  string_view body = ArgS(args, 1);
+  string_view num_keys_str = ArgS(args, 2);
+  int32_t num_keys;
+
+  if (!absl::SimpleAtoi(num_keys_str, &num_keys) || num_keys < 0) {
+    return cntx->SendError(kInvalidIntErr);
+  }
+
+  if (unsigned(num_keys) > args.size() - 3) {
+    return cntx->SendError("Number of keys can't be greater than number of args");
+  }
+
+  ServerState* ss = ServerState::tlocal();
+  lock_guard lk(ss->interpreter_mutex);
+  Interpreter& script = ss->GetInterpreter();
+  string error;
+  char f_id[48];
+  bool success = script.Execute(body, f_id, &error);
+  if (success) {
+    EvalSerializer ser{cntx};
+    string error;
+
+    if (!script.Serialize(&ser, &error)) {
+      cntx->SendError(error);
+    }
+  } else {
+    string resp = absl::StrCat("Error running script (call to ", f_id, "): ", error);
+    return cntx->SendError(resp);
+  }
 }
 
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {

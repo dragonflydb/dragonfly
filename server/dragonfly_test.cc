@@ -213,6 +213,11 @@ TEST_F(DflyEngineTest, FlushDb) {
   ASSERT_FALSE(service_->IsShardSetLocked());
 }
 
+TEST_F(DflyEngineTest, Eval) {
+  auto resp = Run({"eval", "return 42", "0"});
+  EXPECT_THAT(resp[0], IntArg(42));
+}
+
 // TODO: to test transactions with a single shard since then all transactions become local.
 // To consider having a parameter in dragonfly engine controlling number of shards
 // unconditionally from number of cpus. TO TEST BLPOP under multi for single/multi argument case.
