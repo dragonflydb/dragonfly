@@ -217,8 +217,8 @@ TEST_F(DflyEngineTest, Eval) {
   auto resp = Run({"eval", "return 42", "0"});
   EXPECT_THAT(resp[0], IntArg(42));
 
-  // resp = Run({"eval", "return redis.call('get', 'foo')", "0"});
-  // EXPECT_THAT(resp[0], IntArg(42));  // TODO.
+  resp = Run({"eval", "return redis.call('get', 'foo')", "0"});
+  EXPECT_THAT(resp[0], IntArg(42));  // TODO.
 }
 
 // TODO: to test transactions with a single shard since then all transactions become local.
