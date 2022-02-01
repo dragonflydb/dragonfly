@@ -55,15 +55,19 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnBool(bool b) final {
-    LOG(FATAL) << "TBD";
+    if (b) {
+      rb_->SendLong(1);
+    } else {
+      rb_->SendNull();
+    }
   }
 
   void OnString(std::string_view str) final {
-    LOG(FATAL) << "TBD";
+    rb_->SendBulkString(str);
   }
 
   void OnDouble(double d) final {
-    LOG(FATAL) << "TBD";
+    rb_->SendDouble(d);
   }
 
   void OnInt(int64_t val) final {
@@ -79,15 +83,15 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnNil() final {
-    LOG(FATAL) << "TBD";
+    rb_->SendNull();
   }
 
   void OnStatus(std::string_view str) {
-    LOG(FATAL) << "TBD";
+    rb_->SendSimpleRespString(str);
   }
 
   void OnError(std::string_view str) {
-    LOG(FATAL) << "TBD";
+    rb_->SendError(str);
   }
 
  private:

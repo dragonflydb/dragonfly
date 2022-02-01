@@ -183,6 +183,10 @@ void ReplyBuilder::SendLong(long num) {
   as_resp()->SendDirect(str);
 }
 
+void ReplyBuilder::SendDouble(double val) {
+  SendBulkString(absl::StrCat(val));
+}
+
 void ReplyBuilder::SendMGetResponse(const StrOrNil* arr, uint32_t count) {
   string res = absl::StrCat("*", count, kCRLF);
   for (size_t i = 0; i < count; ++i) {

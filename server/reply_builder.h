@@ -113,6 +113,7 @@ class ReplyBuilder {
   }
 
   void SendLong(long val);
+  void SendDouble(double val);
 
   void SendBulkString(std::string_view str) {
     as_resp()->SendBulkString(str);
