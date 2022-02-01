@@ -100,7 +100,7 @@ void ServerFamily::DbSize(CmdArgList args, ConnectionContext* cntx) {
       },
       [](ShardId) { return true; });
 
-  return cntx->SendLong(num_keys.load(memory_order_relaxed));
+  return (*cntx)->SendLong(num_keys.load(memory_order_relaxed));
 }
 
 void ServerFamily::FlushDb(CmdArgList args, ConnectionContext* cntx) {
@@ -115,12 +115,12 @@ void ServerFamily::FlushDb(CmdArgList args, ConnectionContext* cntx) {
       },
       true);
 
-  cntx->SendOk();
+  (*cntx)->SendOk();
 }
 
 void ServerFamily::FlushAll(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 1) {
-    cntx->SendError(kSyntaxErr);
+    (*cntx)->SendError(kSyntaxErr);
     return;
   }
 
@@ -135,7 +135,7 @@ void ServerFamily::FlushAll(CmdArgList args, ConnectionContext* cntx) {
       },
       true);
 
-  cntx->SendOk();
+  (*cntx)->SendOk();
 }
 
 void ServerFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
@@ -152,7 +152,7 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
   auto [current, switched] = global_state_.Next(GlobalState::SAVING);
   if (!switched) {
     string error = absl::StrCat(GlobalState::Name(current), " - can not save database");
-    return cntx->SendError(error);
+    return (*cntx)->SendError(error);
   }
 
   absl::Cleanup rev_state = [this] { global_state_.Clear(); };
@@ -163,7 +163,7 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
   if (!dir_path.empty()) {
     ec = CreateDirs(dir_path);
     if (ec)
-      return cntx->SendError(absl::StrCat("create dir ", ec.message()));
+      return (*cntx)->SendError(absl::StrCat("create dir ", ec.message()));
   }
 
   string filename = FLAGS_dbfilename.empty() ? "dump_save.rdb" : FLAGS_dbfilename;
@@ -174,7 +174,7 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
 
   auto res = uring::OpenWrite(path.generic_string());
   if (!res) {
-    cntx->SendError(res.error().message());
+    (*cntx)->SendError(res.error().message());
     return;
   }
 
@@ -198,7 +198,7 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (ec) {
-    cntx->SendError(res.error().message());
+    (*cntx)->SendError(res.error().message());
     return;
   }
 
@@ -216,10 +216,10 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
     ec = close_ec;
 
   if (ec) {
-    cntx->SendError(ec.message());
+    (*cntx)->SendError(ec.message());
   } else {
     last_save_.store(time(NULL), memory_order_release);
-    cntx->SendOk();
+    (*cntx)->SendOk();
   }
 }
 
@@ -297,7 +297,7 @@ tcp_port:)";
   absl::StrAppend(&info, "\n# Keyspace\n");
   absl::StrAppend(&info, "db0:keys=xxx,expires=yyy,avg_ttl=zzz\n");  // TODO
 
-  cntx->SendBulkString(info);
+  (*cntx)->SendBulkString(info);
 }
 
 void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
@@ -318,13 +318,13 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
       replica_.reset();
     }
 
-    return cntx->SendOk();
+    return (*cntx)->SendOk();
   }
 
   uint32_t port;
 
   if (!absl::SimpleAtoi(port_s, &port) || port < 1 || port > 65535) {
-    cntx->SendError(kInvalidIntErr);
+    (*cntx)->SendError(kInvalidIntErr);
     return;
   }
 
@@ -365,12 +365,12 @@ void ServerFamily::Psync(CmdArgList args, ConnectionContext* cntx) {
   SyncGeneric("?", 0, cntx);  // full sync, ignore the request.
 }
 void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
-  cntx->SendLong(last_save_.load(memory_order_relaxed));
+  (*cntx)->SendLong(last_save_.load(memory_order_relaxed));
 }
 
 void ServerFamily::_Shutdown(CmdArgList args, ConnectionContext* cntx) {
   CHECK_NOTNULL(acceptor_)->Stop();
-  cntx->SendOk();
+  (*cntx)->SendOk();
 }
 
 void ServerFamily::SyncGeneric(std::string_view repl_master_id, uint64_t offs,
@@ -378,7 +378,7 @@ void ServerFamily::SyncGeneric(std::string_view repl_master_id, uint64_t offs,
   if (cntx->conn_state.mask & ConnectionState::ASYNC_DISPATCH) {
     // SYNC is a special command that should not be sent in batch with other commands.
     // It should be the last command since afterwards the server just dumps the replication data.
-    cntx->SendError("Can not sync in pipeline mode");
+    (*cntx)->SendError("Can not sync in pipeline mode");
     return;
   }
 

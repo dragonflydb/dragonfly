@@ -48,7 +48,7 @@ struct ConnectionState {
   }
 };
 
-class ConnectionContext : public ReplyBuilder {
+class ConnectionContext {
  public:
   ConnectionContext(::io::Sink* stream, Connection* owner);
 
@@ -77,8 +77,16 @@ class ConnectionContext : public ReplyBuilder {
 
   ConnectionState conn_state;
 
+  // A convenient proxy for redis interface.
+  RedisReplyBuilder* operator->();
+
+  ReplyBuilderInterface* reply_builder() {
+    return rbuilder_.get();
+  }
+
  private:
   Connection* owner_;
+  std::unique_ptr<ReplyBuilderInterface> rbuilder_;
 };
 
 }  // namespace dfly

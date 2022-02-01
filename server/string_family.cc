@@ -104,14 +104,14 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       bool is_ms = (cur_arg == "PX");
       ++i;
       if (i == args.size()) {
-        cntx->SendError(kSyntaxErr);
+        (*cntx)->SendError(kSyntaxErr);
       }
       std::string_view ex = ArgS(args, i);
       if (!absl::SimpleAtoi(ex, &int_arg)) {
-        return cntx->SendError(kInvalidIntErr);
+        return (*cntx)->SendError(kInvalidIntErr);
       }
       if (int_arg <= 0 || (!is_ms && int_arg >= 500000000)) {
-        return cntx->SendError("invalid expire time in set");
+        return (*cntx)->SendError("invalid expire time in set");
       }
       if (!is_ms) {
         int_arg *= 1000;
@@ -124,7 +124,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
     } else if (cur_arg == "KEEPTTL") {
       sparams.keep_expire = true;
     } else {
-      return cntx->SendError(kSyntaxErr);
+      return (*cntx)->SendError(kSyntaxErr);
     }
   }
 
@@ -138,11 +138,11 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
 
   if (result == OpStatus::OK) {
-    return cntx->SendStored();
+    return (*cntx)->SendStored();
   }
 
   CHECK_EQ(result, OpStatus::SKIPPED);  // in case of NX option
-  return cntx->SendNull();
+  return (*cntx)->SendNull();
 }
 
 void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
@@ -167,15 +167,15 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 
   if (result) {
     DVLOG(1) << "GET " << trans->DebugId() << ": " << key << " " << result.value();
-    cntx->SendGetReply(key, 0, result.value());
+    (*cntx)->SendGetReply(key, 0, result.value());
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
-        cntx->SendError(kWrongTypeErr);
+        (*cntx)->SendError(kWrongTypeErr);
         break;
       default:
         DVLOG(1) << "GET " << key << " nil";
-        cntx->SendGetNotFound();
+        (*cntx)->SendGetNotFound();
     }
   }
 }
@@ -197,15 +197,15 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
   });
 
   if (!result) {
-    cntx->SendError(result.status());
+    (*cntx)->SendError(result.status());
     return;
   }
 
   if (prev_val) {
-    cntx->SendGetReply(key, 0, *prev_val);
+    (*cntx)->SendGetReply(key, 0, *prev_val);
     return;
   }
-  return cntx->SendNull();
+  return (*cntx)->SendNull();
 }
 
 void StringFamily::Incr(CmdArgList args, ConnectionContext* cntx) {
@@ -221,7 +221,7 @@ void StringFamily::IncrBy(CmdArgList args, ConnectionContext* cntx) {
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
-    return cntx->SendError(kInvalidIntErr);
+    return (*cntx)->SendError(kInvalidIntErr);
   }
   return IncrByGeneric(key, val, cntx);
 }
@@ -237,7 +237,7 @@ void StringFamily::DecrBy(CmdArgList args, ConnectionContext* cntx) {
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
-    return cntx->SendError(kInvalidIntErr);
+    return (*cntx)->SendError(kInvalidIntErr);
   }
   return IncrByGeneric(key, -val, cntx);
 }
@@ -253,11 +253,11 @@ void StringFamily::IncrByGeneric(std::string_view key, int64_t val, ConnectionCo
   DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
   switch (result.status()) {
     case OpStatus::OK:
-      return cntx->SendLong(result.value());
+      return (*cntx)->SendLong(result.value());
     case OpStatus::INVALID_VALUE:
-      return cntx->SendError(kInvalidIntErr);
+      return (*cntx)->SendError(kInvalidIntErr);
     case OpStatus::OUT_OF_RANGE:
-      return cntx->SendError("increment or decrement would overflow");
+      return (*cntx)->SendError("increment or decrement would overflow");
     default:;
   }
   __builtin_unreachable();
@@ -297,7 +297,7 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  return cntx->SendMGetResponse(res.data(), res.size());
+  return (*cntx)->SendMGetResponse(res.data(), res.size());
 }
 
 void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
@@ -316,7 +316,7 @@ void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
 
   DVLOG(2) << "MSet run  " << transaction->DebugId();
 
-  return cntx->SendOk();
+  return (*cntx)->SendOk();
 }
 
 auto StringFamily::OpMGet(const Transaction* t, EngineShard* shard) -> MGetResponse {

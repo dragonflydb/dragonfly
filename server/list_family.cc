@@ -220,11 +220,11 @@ void ListFamily::LLen(CmdArgList args, ConnectionContext* cntx) {
   };
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    cntx->SendLong(result.value());
+    (*cntx)->SendLong(result.value());
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    cntx->SendLong(0);
+    (*cntx)->SendLong(0);
   } else {
-    cntx->SendError(result.status());
+    (*cntx)->SendError(result.status());
   }
 }
 
@@ -233,7 +233,7 @@ void ListFamily::LIndex(CmdArgList args, ConnectionContext* cntx) {
   std::string_view index_str = ArgS(args, 2);
   int32_t index;
   if (!absl::SimpleAtoi(index_str, &index)) {
-    cntx->SendError(kInvalidIntErr);
+    (*cntx)->SendError(kInvalidIntErr);
     return;
   }
 
@@ -242,9 +242,9 @@ void ListFamily::LIndex(CmdArgList args, ConnectionContext* cntx) {
   };
   OpResult<string> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    cntx->SendBulkString(result.value());
+    (*cntx)->SendBulkString(result.value());
   } else {
-    cntx->SendNull();
+    (*cntx)->SendNull();
   }
 }
 
@@ -254,10 +254,10 @@ void ListFamily::BLPop(CmdArgList args, ConnectionContext* cntx) {
   float timeout;
   auto timeout_str = ArgS(args, args.size() - 1);
   if (!absl::SimpleAtof(timeout_str, &timeout)) {
-    return cntx->SendError("timeout is not a float or out of range");
+    return (*cntx)->SendError("timeout is not a float or out of range");
   }
   if (timeout < 0) {
-    return cntx->SendError("timeout is negative");
+    return (*cntx)->SendError("timeout is negative");
   }
   VLOG(1) << "BLPop start " << timeout;
 
@@ -267,11 +267,11 @@ void ListFamily::BLPop(CmdArgList args, ConnectionContext* cntx) {
 
   switch (result) {
     case OpStatus::WRONG_TYPE:
-      return cntx->SendError(kWrongTypeErr);
+      return (*cntx)->SendError(kWrongTypeErr);
     case OpStatus::OK:
       break;
     case OpStatus::TIMED_OUT:
-      return cntx->SendNullArray();
+      return (*cntx)->SendNullArray();
     default:
       LOG(FATAL) << "Unexpected error " << result;
   }
@@ -281,7 +281,7 @@ void ListFamily::BLPop(CmdArgList args, ConnectionContext* cntx) {
 
   auto res = popper.result();
   std::string_view str_arr[2] = {res.first, res.second};
-  return cntx->SendStringArr(str_arr);
+  return (*cntx)->SendStringArr(str_arr);
 }
 
 void ListFamily::PushGeneric(ListDir dir, const CmdArgList& args, ConnectionContext* cntx) {
@@ -298,13 +298,13 @@ void ListFamily::PushGeneric(ListDir dir, const CmdArgList& args, ConnectionCont
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   switch (result.status()) {
     case OpStatus::KEY_NOTFOUND:
-      return cntx->SendNull();
+      return (*cntx)->SendNull();
     case OpStatus::WRONG_TYPE:
-      return cntx->SendError(kWrongTypeErr);
+      return (*cntx)->SendError(kWrongTypeErr);
     default:;
   }
 
-  return cntx->SendLong(result.value());
+  return (*cntx)->SendLong(result.value());
 }
 
 void ListFamily::PopGeneric(ListDir dir, const CmdArgList& args, ConnectionContext* cntx) {
@@ -318,13 +318,13 @@ void ListFamily::PopGeneric(ListDir dir, const CmdArgList& args, ConnectionConte
 
   switch (result.status()) {
     case OpStatus::KEY_NOTFOUND:
-      return cntx->SendNull();
+      return (*cntx)->SendNull();
     case OpStatus::WRONG_TYPE:
-      return cntx->SendError(kWrongTypeErr);
+      return (*cntx)->SendError(kWrongTypeErr);
     default:;
   }
 
-  return cntx->SendBulkString(result.value());
+  return (*cntx)->SendBulkString(result.value());
 }
 
 OpResult<uint32_t> ListFamily::OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,

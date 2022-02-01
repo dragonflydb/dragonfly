@@ -219,6 +219,7 @@ void Connection::InputLoop(FiberSocketBase* peer) {
 
   ParserStatus parse_status = OK;
   std::error_code ec;
+  ReplyBuilderInterface* builder = cc_->reply_builder();
 
   if (io_buf_.InputLen() > 0) {
     if (redis_parser_) {
@@ -271,7 +272,7 @@ void Connection::InputLoop(FiberSocketBase* peer) {
     } else if (parse_status != OK) {
       break;
     }
-  } while (peer->IsOpen() && !cc_->ec());
+  } while (peer->IsOpen() && !builder->GetError());
 
 finish:
   cc_->conn_state.mask |= ConnectionState::CONN_CLOSING;  // Signal dispatch to close.
@@ -285,8 +286,8 @@ finish:
     --stats->num_replicas;
   }
 
-  if (cc_->ec()) {
-    ec = cc_->ec();
+  if (builder->GetError()) {
+    ec = builder->GetError();
   } else {
     if (parse_status == ERROR) {
       VLOG(1) << "Error stats " << parse_status;
@@ -316,6 +317,7 @@ auto Connection::ParseRedis() -> ParserStatus {
   uint32_t consumed = 0;
 
   RedisParser::Result result = RedisParser::OK;
+  ReplyBuilderInterface* builder = cc_->reply_builder();
 
   do {
     result = redis_parser_->Parse(io_buf_.InputBuffer(), &consumed, &args);
@@ -346,7 +348,7 @@ auto Connection::ParseRedis() -> ParserStatus {
       }
     }
     io_buf_.ConsumeInput(consumed);
-  } while (RedisParser::OK == result && !cc_->ec());
+  } while (RedisParser::OK == result && !builder->GetError());
 
   parser_error_ = result;
   if (result == RedisParser::OK)
@@ -363,6 +365,8 @@ auto Connection::ParseMemcache() -> ParserStatus {
   uint32_t consumed = 0;
   MemcacheParser::Command cmd;
   string_view value;
+  ReplyBuilderInterface* builder = cc_->reply_builder();
+
   do {
     string_view str = ToSV(io_buf_.InputBuffer());
     result = memcache_parser_->Parse(str, &consumed, &cmd);
@@ -392,7 +396,7 @@ auto Connection::ParseMemcache() -> ParserStatus {
       service_->DispatchMC(cmd, value, cc_.get());
     }
     io_buf_.ConsumeInput(consumed);
-  } while (!cc_->ec());
+  } while (!builder->GetError());
 
   parser_error_ = result;
 
@@ -413,8 +417,9 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
   this_fiber::properties<FiberProps>().set_name("DispatchFiber");
 
   ConnectionStats* stats = ServerState::tl_connection_stats();
+  SinkReplyBuilder* builder = static_cast<SinkReplyBuilder*>(cc_->reply_builder());
 
-  while (!cc_->ec()) {
+  while (!builder->GetError()) {
     evc_.await([this] { return cc_->conn_state.IsClosing() || !dispatch_q_.empty(); });
     if (cc_->conn_state.IsClosing())
       break;
@@ -424,7 +429,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
     ++stats->pipelined_cmd_cnt;
 
-    cc_->SetBatchMode(!dispatch_q_.empty());
+    builder->SetBatchMode(!dispatch_q_.empty());
     cc_->conn_state.mask |= ConnectionState::ASYNC_DISPATCH;
     service_->DispatchCommand(CmdArgList{req->args.data(), req->args.size()}, cc_.get());
     cc_->conn_state.mask &= ~ConnectionState::ASYNC_DISPATCH;

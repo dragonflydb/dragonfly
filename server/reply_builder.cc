@@ -27,10 +27,15 @@ constexpr char kSimplePref[] = "+";
 
 }  // namespace
 
-BaseSerializer::BaseSerializer(io::Sink* sink) : sink_(sink) {
+SinkReplyBuilder::SinkReplyBuilder(::io::Sink* sink) : sink_(sink) {
 }
 
-void BaseSerializer::Send(const iovec* v, uint32_t len) {
+void SinkReplyBuilder::CloseConnection() {
+  if (!ec_)
+    ec_ = std::make_error_code(std::errc::connection_aborted);
+}
+
+void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   if (should_batch_) {
     // TODO: to introduce flushing when too much data is batched.
     for (unsigned i = 0; i < len; ++i) {
@@ -60,13 +65,62 @@ void BaseSerializer::Send(const iovec* v, uint32_t len) {
   }
 }
 
-void BaseSerializer::SendDirect(std::string_view raw) {
+void SinkReplyBuilder::SendDirect(std::string_view raw) {
   iovec v = {IoVec(raw)};
 
   Send(&v, 1);
 }
 
-void RespSerializer::SendNull() {
+MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
+}
+
+void MCReplyBuilder::SendStored() {
+  SendDirect("STORED\r\n");
+}
+
+
+void MCReplyBuilder::SendGetReply(std::string_view key, uint32_t flags, std::string_view value) {
+  string first = absl::StrCat("VALUE ", key, " ", flags, " ", value.size(), "\r\n");
+  iovec v[] = {IoVec(first), IoVec(value), IoVec(kCRLF)};
+  Send(v, ABSL_ARRAYSIZE(v));
+}
+
+
+void MCReplyBuilder::SendError(string_view str) {
+  SendDirect("ERROR\r\n");
+}
+
+void MCReplyBuilder::SendClientError(string_view str) {
+  iovec v[] = {IoVec("CLIENT_ERROR"), IoVec(str), IoVec(kCRLF)};
+  Send(v, ABSL_ARRAYSIZE(v));
+}
+
+RedisReplyBuilder::RedisReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
+}
+
+void RedisReplyBuilder::SendError(string_view str) {
+  if (str[0] == '-') {
+    iovec v[] = {IoVec(str), IoVec(kCRLF)};
+    Send(v, ABSL_ARRAYSIZE(v));
+  } else {
+    iovec v[] = {IoVec(kErrPref), IoVec(str), IoVec(kCRLF)};
+    Send(v, ABSL_ARRAYSIZE(v));
+  }
+}
+
+void RedisReplyBuilder::SendGetReply(std::string_view key, uint32_t flags, std::string_view value) {
+  SendBulkString(value);
+}
+
+void RedisReplyBuilder::SendGetNotFound() {
+  SendNull();
+}
+
+void RedisReplyBuilder::SendStored() {
+  SendSimpleString("OK");
+}
+
+void RedisReplyBuilder::SendNull() {
   constexpr char kNullStr[] = "$-1\r\n";
 
   iovec v[] = {IoVec(kNullStr)};
@@ -74,13 +128,13 @@ void RespSerializer::SendNull() {
   Send(v, ABSL_ARRAYSIZE(v));
 }
 
-void RespSerializer::SendSimpleString(std::string_view str) {
+void RedisReplyBuilder::SendSimpleString(std::string_view str) {
   iovec v[3] = {IoVec(kSimplePref), IoVec(str), IoVec(kCRLF)};
 
   Send(v, ABSL_ARRAYSIZE(v));
 }
 
-void RespSerializer::SendBulkString(std::string_view str) {
+void RedisReplyBuilder::SendBulkString(std::string_view str) {
   char tmp[absl::numbers_internal::kFastToBufferSize + 3];
   tmp[0] = '$';  // Format length
   char* next = absl::numbers_internal::FastIntToBuffer(uint32_t(str.size()), tmp + 1);
@@ -95,59 +149,7 @@ void RespSerializer::SendBulkString(std::string_view str) {
   return Send(v, ABSL_ARRAYSIZE(v));
 }
 
-void MemcacheSerializer::SendStored() {
-  SendDirect("STORED\r\n");
-}
-
-void MemcacheSerializer::SendError() {
-  SendDirect("ERROR\r\n");
-}
-
-ReplyBuilder::ReplyBuilder(Protocol protocol, ::io::Sink* sink) : protocol_(protocol) {
-  if (protocol == Protocol::REDIS) {
-    serializer_.reset(new RespSerializer(sink));
-  } else {
-    DCHECK(protocol == Protocol::MEMCACHE);
-    serializer_.reset(new MemcacheSerializer(sink));
-  }
-}
-
-void ReplyBuilder::SendStored() {
-  if (protocol_ == Protocol::REDIS) {
-    as_resp()->SendSimpleString("OK");
-  } else {
-    as_mc()->SendStored();
-  }
-}
-
-void ReplyBuilder::SendMCClientError(string_view str) {
-  DCHECK(protocol_ == Protocol::MEMCACHE);
-
-  iovec v[] = {IoVec("CLIENT_ERROR"), IoVec(str), IoVec(kCRLF)};
-  serializer_->Send(v, ABSL_ARRAYSIZE(v));
-}
-
-void ReplyBuilder::EndMultilineReply() {
-  if (protocol_ == Protocol::MEMCACHE) {
-    serializer_->SendDirect("END\r\n");
-  }
-}
-
-void ReplyBuilder::SendError(string_view str) {
-  DCHECK(protocol_ == Protocol::REDIS);
-
-  if (str[0] == '-') {
-    iovec v[] = {IoVec(str), IoVec(kCRLF)};
-    serializer_->Send(v, ABSL_ARRAYSIZE(v));
-  } else {
-    iovec v[] = {IoVec(kErrPref), IoVec(str), IoVec(kCRLF)};
-    serializer_->Send(v, ABSL_ARRAYSIZE(v));
-  }
-}
-
-void ReplyBuilder::SendError(OpStatus status) {
-  DCHECK(protocol_ == Protocol::REDIS);
-
+void RedisReplyBuilder::SendError(OpStatus status) {
   switch (status) {
     case OpStatus::OK:
       SendOk();
@@ -162,32 +164,16 @@ void ReplyBuilder::SendError(OpStatus status) {
   }
 }
 
-void ReplyBuilder::SendGetReply(std::string_view key, uint32_t flags, std::string_view value) {
-  if (protocol_ == Protocol::REDIS) {
-    as_resp()->SendBulkString(value);
-  } else {
-    string first = absl::StrCat("VALUE ", key, " ", flags, " ", value.size(), "\r\n");
-    iovec v[] = {IoVec(first), IoVec(value), IoVec(kCRLF)};
-    serializer_->Send(v, ABSL_ARRAYSIZE(v));
-  }
-}
-
-void ReplyBuilder::SendGetNotFound() {
-  if (protocol_ == Protocol::REDIS) {
-    as_resp()->SendNull();
-  }
-}
-
-void ReplyBuilder::SendLong(long num) {
+void RedisReplyBuilder::SendLong(long num) {
   string str = absl::StrCat(":", num, kCRLF);
-  as_resp()->SendDirect(str);
+  SendDirect(str);
 }
 
-void ReplyBuilder::SendDouble(double val) {
+void RedisReplyBuilder::SendDouble(double val) {
   SendBulkString(absl::StrCat(val));
 }
 
-void ReplyBuilder::SendMGetResponse(const StrOrNil* arr, uint32_t count) {
+void RedisReplyBuilder::SendMGetResponse(const StrOrNil* arr, uint32_t count) {
   string res = absl::StrCat("*", count, kCRLF);
   for (size_t i = 0; i < count; ++i) {
     if (arr[i]) {
@@ -198,39 +184,38 @@ void ReplyBuilder::SendMGetResponse(const StrOrNil* arr, uint32_t count) {
     }
   }
 
-  as_resp()->SendDirect(res);
+  SendDirect(res);
 }
 
-void ReplyBuilder::SendSimpleStrArr(const std::string_view* arr, uint32_t count) {
-  CHECK(protocol_ == Protocol::REDIS);
+void RedisReplyBuilder::SendSimpleStrArr(const std::string_view* arr, uint32_t count) {
   string res = absl::StrCat("*", count, kCRLF);
 
   for (size_t i = 0; i < count; ++i) {
     StrAppend(&res, "+", arr[i], kCRLF);
   }
 
-  serializer_->SendDirect(res);
+  SendDirect(res);
 }
 
-void ReplyBuilder::SendNullArray() {
-  as_resp()->SendDirect("*-1\r\n");
+void RedisReplyBuilder::SendNullArray() {
+  SendDirect("*-1\r\n");
 }
 
-void ReplyBuilder::SendStringArr(absl::Span<const std::string_view> arr) {
+void RedisReplyBuilder::SendStringArr(absl::Span<const std::string_view> arr) {
   string res = absl::StrCat("*", arr.size(), kCRLF);
 
   for (size_t i = 0; i < arr.size(); ++i) {
     StrAppend(&res, "$", arr[i].size(), kCRLF);
     res.append(arr[i]).append(kCRLF);
   }
-  as_resp()->SendDirect(res);
+  SendDirect(res);
 }
 
 void ReqSerializer::SendCommand(std::string_view str) {
   VLOG(1) << "SendCommand: " << str;
 
   iovec v[] = {IoVec(str), IoVec(kCRLF)};
-  Send(v, ABSL_ARRAYSIZE(v));
+  ec_ = sink_->Write(v, ABSL_ARRAYSIZE(v));
 }
 
 }  // namespace dfly

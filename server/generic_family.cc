@@ -177,24 +177,24 @@ void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
 
   DVLOG(2) << "Del ts " << transaction->txid();
 
-  cntx->SendLong(result.load(memory_order_release));
+  (*cntx)->SendLong(result.load(memory_order_release));
 }
 
 void GenericFamily::Ping(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 2) {
-    return cntx->SendError("wrong number of arguments for 'ping' command");
+    return (*cntx)->SendError("wrong number of arguments for 'ping' command");
   }
   ping_qps.Inc();
 
   // We synchronously block here until the engine sends us the payload and notifies that
   // the I/O operation has been processed.
   if (args.size() == 1) {
-    return cntx->SendSimpleRespString("PONG");
+    return (*cntx)->SendSimpleString("PONG");
   } else {
     string_view arg = ArgS(args, 1);
     DVLOG(2) << "Ping " << arg;
 
-    return cntx->SendBulkString(arg);
+    return (*cntx)->SendBulkString(arg);
   }
 }
 
@@ -215,7 +215,7 @@ void GenericFamily::Exists(CmdArgList args, ConnectionContext* cntx) {
   OpStatus status = transaction->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, status);
 
-  return cntx->SendLong(result.load(memory_order_release));
+  return (*cntx)->SendLong(result.load(memory_order_release));
 }
 
 void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
@@ -224,7 +224,7 @@ void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
   int64_t int_arg;
 
   if (!absl::SimpleAtoi(sec, &int_arg)) {
-    return cntx->SendError(kInvalidIntErr);
+    return (*cntx)->SendError(kInvalidIntErr);
   }
 
   int_arg = std::max(int_arg, -1L);
@@ -235,7 +235,7 @@ void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
   };
   OpStatus status = cntx->transaction->ScheduleSingleHop(move(cb));
 
-  cntx->SendLong(status == OpStatus::OK);
+  (*cntx)->SendLong(status == OpStatus::OK);
 }
 
 void GenericFamily::ExpireAt(CmdArgList args, ConnectionContext* cntx) {
@@ -244,7 +244,7 @@ void GenericFamily::ExpireAt(CmdArgList args, ConnectionContext* cntx) {
   int64_t int_arg;
 
   if (!absl::SimpleAtoi(sec, &int_arg)) {
-    return cntx->SendError(kInvalidIntErr);
+    return (*cntx)->SendError(kInvalidIntErr);
   }
   int_arg = std::max(int_arg, 0L);
   ExpireParams params{.ts = int_arg, .absolute = true};
@@ -253,12 +253,12 @@ void GenericFamily::ExpireAt(CmdArgList args, ConnectionContext* cntx) {
     return OpExpire(OpArgs{shard, t->db_index()}, key, params);
   };
   OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
-  cntx->SendLong(status == OpStatus::OK);
+  (*cntx)->SendLong(status == OpStatus::OK);
 }
 
 void GenericFamily::Rename(CmdArgList args, ConnectionContext* cntx) {
   OpResult<void> st = RenameGeneric(args, false, cntx);
-  cntx->SendError(st.status());
+  (*cntx)->SendError(st.status());
 }
 
 void GenericFamily::Ttl(CmdArgList args, ConnectionContext* cntx) {
@@ -277,14 +277,14 @@ void GenericFamily::TtlGeneric(CmdArgList args, ConnectionContext* cntx, TimeUni
 
   if (result) {
     long ttl = (unit == TimeUnit::SEC) ? (result.value() + 500) / 1000 : result.value();
-    cntx->SendLong(ttl);
+    (*cntx)->SendLong(ttl);
   } else {
     switch (result.status()) {
       case OpStatus::KEY_NOTFOUND:
-        cntx->SendLong(-1);
+        (*cntx)->SendLong(-1);
         break;
       default:
-        cntx->SendLong(-2);
+        (*cntx)->SendLong(-2);
     }
   }
 }
@@ -293,10 +293,10 @@ void GenericFamily::Select(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
   int64_t index;
   if (!absl::SimpleAtoi(key, &index)) {
-    return cntx->SendError(kInvalidDbIndErr);
+    return (*cntx)->SendError(kInvalidDbIndErr);
   }
   if (index < 0 || index >= FLAGS_dbnum) {
-    return cntx->SendError(kDbIndOutOfRangeErr);
+    return (*cntx)->SendError(kDbIndOutOfRangeErr);
   }
   cntx->conn_state.db_index = index;
   auto cb = [index](EngineShard* shard) {
@@ -305,7 +305,7 @@ void GenericFamily::Select(CmdArgList args, ConnectionContext* cntx) {
   };
   cntx->shard_set->RunBriefInParallel(std::move(cb));
 
-  return cntx->SendOk();
+  return (*cntx)->SendOk();
 }
 
 void GenericFamily::Type(CmdArgList args, ConnectionContext* cntx) {
@@ -321,9 +321,9 @@ void GenericFamily::Type(CmdArgList args, ConnectionContext* cntx) {
   };
   OpResult<int> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (!result) {
-    cntx->SendSimpleRespString("none");
+    (*cntx)->SendSimpleString("none");
   } else {
-    cntx->SendSimpleRespString(ObjTypeName(result.value()));
+    (*cntx)->SendSimpleString(ObjTypeName(result.value()));
   }
 }
 
@@ -363,7 +363,7 @@ OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool skip_exist_des
 
 void GenericFamily::Echo(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
-  return cntx->SendBulkString(key);
+  return (*cntx)->SendBulkString(key);
 }
 
 void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
@@ -377,12 +377,12 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
   CHECK_LT(shard_count, 1024u);
 
   if (!absl::SimpleAtoi(token, &cursor)) {
-    return cntx->SendError("invalid cursor");
+    return (*cntx)->SendError("invalid cursor");
   }
 
   ShardId sid = cursor % 1024;
   if (sid >= shard_count) {
-    return cntx->SendError("invalid cursor");
+    return (*cntx)->SendError("invalid cursor");
   }
 
   cursor >>= 10;
@@ -413,7 +413,7 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
     absl::StrAppend(&res, "$", k.size(), "\r\n", k, "\r\n");
   }
 
-  return cntx->SendRespBlob(res);
+  return (*cntx)->SendRespBlob(res);
 }
 
 

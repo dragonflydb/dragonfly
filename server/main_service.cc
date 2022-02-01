@@ -51,7 +51,7 @@ constexpr size_t kMaxThreadSize = 1024;
 
 class EvalSerializer : public ObjectExplorer {
  public:
-  EvalSerializer(ReplyBuilder* rb) : rb_(rb) {
+  EvalSerializer(RedisReplyBuilder* rb) : rb_(rb) {
   }
 
   void OnBool(bool b) final {
@@ -87,7 +87,7 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnStatus(std::string_view str) {
-    rb_->SendSimpleRespString(str);
+    rb_->SendSimpleString(str);
   }
 
   void OnError(std::string_view str) {
@@ -95,7 +95,7 @@ class EvalSerializer : public ObjectExplorer {
   }
 
  private:
-  ReplyBuilder* rb_;
+  RedisReplyBuilder* rb_;
 };
 
 }  // namespace
@@ -179,12 +179,12 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
   };
 
   if (cid == nullptr) {
-    return cntx->SendError(absl::StrCat("unknown command `", cmd_str, "`"));
+    return (*cntx)->SendError(absl::StrCat("unknown command `", cmd_str, "`"));
   }
 
   if (etl.gstate() == GlobalState::LOADING || etl.gstate() == GlobalState::SHUTTING_DOWN) {
     string err = absl::StrCat("Can not execute during ", GlobalState::Name(etl.gstate()));
-    cntx->SendError(err);
+    (*cntx)->SendError(err);
     return;
   }
 
@@ -192,21 +192,21 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
   bool under_multi = cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE && !is_trans_cmd;
 
   if (!etl.is_master && is_write_cmd) {
-    cntx->SendError("-READONLY You can't write against a read only replica.");
+    (*cntx)->SendError("-READONLY You can't write against a read only replica.");
     return;
   }
 
   if ((cid->arity() > 0 && args.size() != size_t(cid->arity())) ||
       (cid->arity() < 0 && args.size() < size_t(-cid->arity()))) {
-    return cntx->SendError(WrongNumArgsError(cmd_str));
+    return (*cntx)->SendError(WrongNumArgsError(cmd_str));
   }
 
   if (cid->key_arg_step() == 2 && (args.size() % 2) == 0) {
-    return cntx->SendError(WrongNumArgsError(cmd_str));
+    return (*cntx)->SendError(WrongNumArgsError(cmd_str));
   }
 
   if (under_multi && (cid->opt_mask() & CO::ADMIN)) {
-    cntx->SendError("Can not run admin commands under multi-transactions");
+    (*cntx)->SendError("Can not run admin commands under multi-transactions");
     return;
   }
 
@@ -221,7 +221,7 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
     }
     cntx->conn_state.exec_body.push_back(std::move(stored_cmd));
 
-    return cntx->SendSimpleRespString("QUEUED");
+    return (*cntx)->SendSimpleString("QUEUED");
   }
 
   uint64_t start_usec = ProactorBase::GetMonotonicTimeNs(), end_usec;
@@ -259,7 +259,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
   absl::InlinedVector<MutableStrSpan, 8> args;
   char cmd_name[16];
   char set_opt[4] = {0};
-
+  MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
   switch (cmd.type) {
     case MemcacheParser::REPLACE:
       strcpy(cmd_name, "SET");
@@ -276,7 +276,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       strcpy(cmd_name, "GET");
       break;
     default:
-      cntx->SendMCClientError("bad command line format");
+      mc_builder->SendClientError("bad command line format");
       return;
   }
 
@@ -325,17 +325,17 @@ void Service::RegisterHttp(HttpListenerBase* listener) {
 }
 
 void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
-  cntx->SendOk();
-  cntx->CloseConnection();
+  (*cntx)->SendOk();
+  (*cntx)->CloseConnection();
 }
 
 void Service::Multi(CmdArgList args, ConnectionContext* cntx) {
   if (cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE) {
-    return cntx->SendError("MULTI calls can not be nested");
+    return (*cntx)->SendError("MULTI calls can not be nested");
   }
   cntx->conn_state.exec_state = ConnectionState::EXEC_COLLECT;
   // TODO: to protect against huge exec transactions.
-  return cntx->SendOk();
+  return (*cntx)->SendOk();
 }
 
 void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
@@ -344,11 +344,11 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   int32_t num_keys;
 
   if (!absl::SimpleAtoi(num_keys_str, &num_keys) || num_keys < 0) {
-    return cntx->SendError(kInvalidIntErr);
+    return (*cntx)->SendError(kInvalidIntErr);
   }
 
   if (unsigned(num_keys) > args.size() - 3) {
-    return cntx->SendError("Number of keys can't be greater than number of args");
+    return (*cntx)->SendError("Number of keys can't be greater than number of args");
   }
 
   ServerState* ss = ServerState::tlocal();
@@ -358,32 +358,32 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   char f_id[48];
   bool success = script.Execute(body, f_id, &error);
   if (success) {
-    EvalSerializer ser{cntx};
+    EvalSerializer ser{static_cast<RedisReplyBuilder*>(cntx->reply_builder())};
     string error;
 
     if (!script.Serialize(&ser, &error)) {
-      cntx->SendError(error);
+      (*cntx)->SendError(error);
     }
   } else {
     string resp = absl::StrCat("Error running script (call to ", f_id, "): ", error);
-    return cntx->SendError(resp);
+    return (*cntx)->SendError(resp);
   }
 }
 
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   if (cntx->conn_state.exec_state == ConnectionState::EXEC_INACTIVE) {
-    return cntx->SendError("EXEC without MULTI");
+    return (*cntx)->SendError("EXEC without MULTI");
   }
 
   if (cntx->conn_state.exec_state == ConnectionState::EXEC_ERROR) {
     cntx->conn_state.exec_state = ConnectionState::EXEC_INACTIVE;
     cntx->conn_state.exec_body.clear();
-    return cntx->SendError("-EXECABORT Transaction discarded because of previous errors");
+    return (*cntx)->SendError("-EXECABORT Transaction discarded because of previous errors");
   }
 
-  cntx->SendRespBlob(absl::StrCat("*", cntx->conn_state.exec_body.size(), "\r\n"));
+  (*cntx)->SendRespBlob(absl::StrCat("*", cntx->conn_state.exec_body.size(), "\r\n"));
 
-  if (!cntx->ec() && !cntx->conn_state.exec_body.empty()) {
+  if (!(*cntx)->GetError() && !cntx->conn_state.exec_body.empty()) {
     CmdArgVec str_list;
 
     for (auto& scmd : cntx->conn_state.exec_body) {
@@ -397,7 +397,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
       CmdArgList cmd_arg_list{str_list.data(), str_list.size()};
       cntx->transaction->InitByArgs(cntx->conn_state.db_index, cmd_arg_list);
       scmd.descr->Invoke(cmd_arg_list, cntx);
-      if (cntx->ec())
+      if ((*cntx)->GetError())
         break;
     }
 

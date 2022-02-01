@@ -71,7 +71,7 @@ void DebugCmd::Run(CmdArgList args) {
         "HELP",
         "    Prints this help.",
     };
-    return cntx_->SendSimpleStrArr(help_arr, ABSL_ARRAYSIZE(help_arr));
+    return (*cntx_)->SendSimpleStrArr(help_arr, ABSL_ARRAYSIZE(help_arr));
   }
 
   VLOG(1) << "subcmd " << subcmd;
@@ -86,7 +86,7 @@ void DebugCmd::Run(CmdArgList args) {
 
   string reply = absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd,
                               "'. Try DEBUG HELP.");
-  return cntx_->SendError(reply);
+  return (*cntx_)->SendError(reply);
 }
 
 void DebugCmd::Reload(CmdArgList args) {
@@ -99,15 +99,15 @@ void DebugCmd::Reload(CmdArgList args) {
     if (opt == "NOSAVE") {
       save = false;
     } else {
-      return cntx_->SendError("DEBUG RELOAD only supports the NOSAVE options.");
+      return (*cntx_)->SendError("DEBUG RELOAD only supports the NOSAVE options.");
     }
   }
   if (save) {
-    return cntx_->SendError("NOSAVE required (TBD).");
+    return (*cntx_)->SendError("NOSAVE required (TBD).");
   }
 
   if (FLAGS_dbfilename.empty()) {
-    return cntx_->SendError("dbfilename is not set");
+    return (*cntx_)->SendError("dbfilename is not set");
   }
 
   fs::path dir_path(FLAGS_dir);
@@ -117,7 +117,7 @@ void DebugCmd::Reload(CmdArgList args) {
   auto res = uring::OpenRead(path.generic_string());
 
   if (!res) {
-    cntx_->SendError(res.error().message());
+    (*cntx_)->SendError(res.error().message());
     return;
   }
 
@@ -127,21 +127,21 @@ void DebugCmd::Reload(CmdArgList args) {
   error_code ec = loader.Load(&fs);
 
   if (ec) {
-    cntx_->SendError(ec.message());
+    (*cntx_)->SendError(ec.message());
   } else {
-    cntx_->SendOk();
+    (*cntx_)->SendOk();
   }
 }
 
 void DebugCmd::Populate(CmdArgList args) {
   if (args.size() < 3 || args.size() > 5) {
-    return cntx_->SendError(
+    return (*cntx_)->SendError(
         "Unknown subcommand or wrong number of arguments for 'populate'. Try DEBUG HELP.");
   }
 
   uint64_t total_count = 0;
   if (!absl::SimpleAtoi(ArgS(args, 2), &total_count))
-    return cntx_->SendError(kUintErr);
+    return (*cntx_)->SendError(kUintErr);
   std::string_view prefix{"key"};
 
   if (args.size() > 3) {
@@ -151,7 +151,7 @@ void DebugCmd::Populate(CmdArgList args) {
   if (args.size() > 4) {
     std::string_view str = ArgS(args, 4);
     if (!absl::SimpleAtoi(str, &val_size))
-      return cntx_->SendError(kUintErr);
+      return (*cntx_)->SendError(kUintErr);
   }
 
   size_t runners_count = ess_->pool()->size();
@@ -177,7 +177,7 @@ void DebugCmd::Populate(CmdArgList args) {
   for (auto& fb : fb_arr)
     fb.join();
 
-  cntx_->SendOk();
+  (*cntx_)->SendOk();
 }
 
 void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view prefix,
