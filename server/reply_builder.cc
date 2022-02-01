@@ -222,4 +222,11 @@ void ReplyBuilder::SendStringArr(absl::Span<const std::string_view> arr) {
   as_resp()->SendDirect(res);
 }
 
+void ReqSerializer::SendCommand(std::string_view str) {
+  VLOG(1) << "SendCommand: " << str;
+
+  iovec v[] = {IoVec(str), IoVec(kCRLF)};
+  Send(v, ABSL_ARRAYSIZE(v));
+}
+
 }  // namespace dfly

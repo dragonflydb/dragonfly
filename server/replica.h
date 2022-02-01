@@ -59,7 +59,13 @@ class Replica {
     R_SYNC_OK = 8,
   };
 
+  void ConnectFb();
+
+  using ReplHeader = std::variant<std::string, size_t>;
   std::error_code ConnectSocket();
+  std::error_code GreatAndSync();
+  std::error_code ConsumeRedisStream();
+  std::error_code ParseAndExecute(base::IoBuf* io_buf);
 
   Service& service_;
   std::string host_;
@@ -70,9 +76,13 @@ class Replica {
 
   // Where the sock_ is handled.
   util::ProactorBase* sock_thread_ = nullptr;
+  std::unique_ptr<RedisParser> parser_;
 
-  unsigned state_mask_ = 0;
+  // repl_offs - till what offset we've already read from the master.
+  // ack_offs_ last acknowledged offset.
+  size_t repl_offs_ = 0, ack_offs_ = 0;
   uint64_t last_io_time_ = 0;  // in ns, monotonic clock.
+  unsigned state_mask_ = 0;
 };
 
 }  // namespace dfly
