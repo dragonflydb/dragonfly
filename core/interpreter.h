@@ -57,7 +57,13 @@ class Interpreter {
  private:
   bool AddInternal(const char* f_id, std::string_view body, std::string* result);
 
+  int RedisGenericCommand(bool raise_error);
+
+  static int RedisCallCommand(lua_State *lua);
+  static int RedisPCallCommand(lua_State *lua);
+
   lua_State* lua_;
+  unsigned cmd_depth_ = 0;
 };
 
 }  // namespace dfly
