@@ -184,6 +184,57 @@ optional<int> FetchKey(lua_State* lua, const char* key) {
   return type;
 }
 
+int RedisSha1Command(lua_State* lua) {
+  int argc = lua_gettop(lua);
+  if (argc != 1) {
+    lua_pushstring(lua, "wrong number of arguments");
+    return lua_error(lua);
+  }
+
+  size_t len;
+  const char* s = lua_tolstring(lua, 1, &len);
+
+  SHA_CTX ctx;
+  uint8_t buf[20];
+  char digest[41];
+
+  SHA1_Init(&ctx);
+  SHA1_Update(&ctx, s, len);
+  SHA1_Final(buf, &ctx);
+  ToHex(buf, digest);
+
+  lua_pushstring(lua, digest);
+  return 1;
+}
+
+/* Returns a table with a single field 'field' set to the string value
+ * passed as argument. This helper function is handy when returning
+ * a Redis Protocol error or status reply from Lua:
+ *
+ * return redis.error_reply("ERR Some Error")
+ * return redis.status_reply("ERR Some Error")
+ */
+int SingleFieldTable(lua_State* lua, const char* field) {
+  if (lua_gettop(lua) != 1 || lua_type(lua, -1) != LUA_TSTRING) {
+    PushError(lua, "wrong number or type of arguments");
+    return 1;
+  }
+
+  lua_newtable(lua);
+  lua_pushstring(lua, field);
+  lua_pushvalue(lua, -3);
+  lua_settable(lua, -3);
+  return 1;
+}
+
+int RedisErrorReplyCommand(lua_State* lua) {
+  return SingleFieldTable(lua, "err");
+}
+
+int RedisStatusReplyCommand(lua_State* lua) {
+  return SingleFieldTable(lua, "ok");
+}
+
 const char* kInstanceKey = "_INSTANCE";
 
 }  // namespace
@@ -192,6 +243,34 @@ Interpreter::Interpreter() {
   lua_ = luaL_newstate();
   InitLua(lua_);
   SaveOnRegistry(lua_, kInstanceKey, this);
+
+  /* Register the redis commands table and fields */
+  lua_newtable(lua_);
+
+  /* redis.call */
+  lua_pushstring(lua_, "call");
+  lua_pushcfunction(lua_, RedisCallCommand);
+  lua_settable(lua_, -3);
+
+  /* redis.pcall */
+  lua_pushstring(lua_, "pcall");
+  lua_pushcfunction(lua_, RedisPCallCommand);
+  lua_settable(lua_, -3);
+
+  lua_pushstring(lua_, "sha1hex");
+  lua_pushcfunction(lua_, RedisSha1Command);
+  lua_settable(lua_, -3);
+
+  /* redis.error_reply and redis.status_reply */
+  lua_pushstring(lua_, "error_reply");
+  lua_pushcfunction(lua_, RedisErrorReplyCommand);
+  lua_settable(lua_, -3);
+  lua_pushstring(lua_, "status_reply");
+  lua_pushcfunction(lua_, RedisStatusReplyCommand);
+  lua_settable(lua_, -3);
+
+  /* Finally set the table as 'redis' global var. */
+  lua_setglobal(lua_, "redis");
 }
 
 Interpreter::~Interpreter() {
