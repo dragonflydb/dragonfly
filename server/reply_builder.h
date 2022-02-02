@@ -6,7 +6,7 @@
 
 #include "core/op_status.h"
 #include "io/sync_stream_interface.h"
-#include "server/common_types.h"
+// #include "server/common_types.h"
 
 namespace dfly {
 
@@ -16,27 +16,6 @@ class BaseSerializer {
   virtual ~BaseSerializer() {
   }
 
-  std::error_code ec() const {
-    return ec_;
-  }
-
-  void CloseConnection() {
-    if (!ec_)
-      ec_ = std::make_error_code(std::errc::connection_aborted);
-  }
-
-  // In order to reduce interrupt rate we allow coalescing responses together using
-  // Batch mode. It is controlled by Connection state machine because it makes sense only
-  // when pipelined requests are arriving.
-  void SetBatchMode(bool batch) {
-    should_batch_ = batch;
-  }
-
-  //! Sends a string as is without any formatting. raw should be encoded according to the protocol.
-  void SendDirect(std::string_view str);
-
-  void Send(const iovec* v, uint32_t len);
-
  private:
   ::io::Sink* sink_;
   std::error_code ec_;
@@ -45,106 +24,124 @@ class BaseSerializer {
   bool should_batch_ = false;
 };
 
-class RespSerializer : public BaseSerializer {
+class ReplyBuilderInterface {
  public:
-  RespSerializer(::io::Sink* sink) : BaseSerializer(sink) {
+  virtual ~ReplyBuilderInterface() {
   }
 
-  //! See https://redis.io/topics/protocol
-  void SendSimpleString(std::string_view str);
-  void SendNull();
+  // Reply for set commands.
+  virtual void SendStored() = 0;
 
-  /// aka "$6\r\nfoobar\r\n"
-  void SendBulkString(std::string_view str);
+  // Common for both MC and Redis.
+  virtual void SendError(std::string_view str) = 0;
+
+  virtual std::error_code GetError() const = 0;
+
+  virtual void SendGetNotFound() = 0;
+  virtual void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) = 0;
 };
 
-class MemcacheSerializer : public BaseSerializer {
+class SinkReplyBuilder : public ReplyBuilderInterface {
  public:
-  explicit MemcacheSerializer(::io::Sink* sink) : BaseSerializer(sink) {
+  SinkReplyBuilder(const SinkReplyBuilder&) = delete;
+  void operator=(const SinkReplyBuilder&) = delete;
+
+  SinkReplyBuilder(::io::Sink* sink);
+
+  // In order to reduce interrupt rate we allow coalescing responses together using
+  // Batch mode. It is controlled by Connection state machine because it makes sense only
+  // when pipelined requests are arriving.
+  void SetBatchMode(bool batch) {
+    should_batch_ = batch;
   }
 
-  void SendStored();
-  void SendError();
+  // Used for QUIT - > should move to conn_context?
+  void CloseConnection();
+
+  std::error_code GetError() const override {
+    return ec_;
+  }
+
+ protected:
+  //! Sends a string as is without any formatting. raw should be encoded according to the protocol.
+  void SendDirect(std::string_view str);
+
+  void Send(const iovec* v, uint32_t len);
+
+  ::io::Sink* sink_;
+  std::error_code ec_;
+  std::string batch_;
+
+  bool should_batch_ = false;
 };
 
-class ReplyBuilder {
+class MCReplyBuilder : public SinkReplyBuilder {
  public:
-  ReplyBuilder(Protocol protocol, ::io::Sink* stream);
+  MCReplyBuilder(::io::Sink* stream);
 
-  void SendStored();
+  void SendError(std::string_view str) final;
+  void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) final;
 
-  void SendError(std::string_view str);
-  void SendError(OpStatus status);
+  // memcache does not print keys that are not found.
+  void SendGetNotFound() final {
+  }
+
+  void SendStored() final;
+
+  void SendClientError(std::string_view str);
+};
+
+class RedisReplyBuilder : public SinkReplyBuilder {
+ public:
+  RedisReplyBuilder(::io::Sink* stream);
 
   void SendOk() {
-    as_resp()->SendSimpleString("OK");
+    SendSimpleString("OK");
   }
 
-  std::error_code ec() const {
-    return serializer_->ec();
-  }
+  void SendError(std::string_view str) override;
+  void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) override;
+  void SendGetNotFound() override;
+  void SendStored() override;
 
-  void SendMCClientError(std::string_view str);
-  void EndMultilineReply();
-
-  void SendSimpleRespString(std::string_view str) {
-    as_resp()->SendSimpleString(str);
-  }
-
-  void SendGetReply(std::string_view key, uint32_t flags, std::string_view value);
-  void SendGetNotFound();
+  void SendError(OpStatus status);
+  virtual void SendSimpleString(std::string_view str);
 
   using StrOrNil = std::optional<std::string_view>;
-  void SendMGetResponse(const StrOrNil* arr, uint32_t count);
+  virtual void SendMGetResponse(const StrOrNil* arr, uint32_t count);
+  virtual void SendSimpleStrArr(const std::string_view* arr, uint32_t count);
+  virtual void SendNullArray();
 
-  void SetBatchMode(bool mode) {
-    serializer_->SetBatchMode(mode);
-  }
+  virtual void SendStringArr(absl::Span<const std::string_view> arr);
+  virtual void SendNull();
 
-  // Resp specific.
-  // This one is prefixed with + and with clrf added automatically to each item..
-  void SendSimpleStrArr(const std::string_view* arr, uint32_t count);
-  void SendNullArray();
+  virtual void SendLong(long val);
+  virtual void SendDouble(double val);
 
-  void SendStringArr(absl::Span<const std::string_view> arr);
+  virtual void SendBulkString(std::string_view str);
 
-  void SendNull() {
-    as_resp()->SendNull();
-  }
-
-  void SendLong(long val);
-  void SendDouble(double val);
-
-  void SendBulkString(std::string_view str) {
-    as_resp()->SendBulkString(str);
-  }
-
+  // TODO: to get rid of it. We should only send high-level data.
   void SendRespBlob(std::string_view str) {
-    as_resp()->SendDirect(str);
-  }
-
-  void CloseConnection() {
-    serializer_->CloseConnection();
+    SendDirect(str);
   }
 
  private:
-  RespSerializer* as_resp() {
-    return static_cast<RespSerializer*>(serializer_.get());
-  }
-  MemcacheSerializer* as_mc() {
-    return static_cast<MemcacheSerializer*>(serializer_.get());
-  }
-
-  std::unique_ptr<BaseSerializer> serializer_;
-  Protocol protocol_;
 };
 
-class ReqSerializer : public RespSerializer {
+class ReqSerializer {
  public:
-  explicit ReqSerializer(::io::Sink* stream) : RespSerializer(stream) {
+  explicit ReqSerializer(::io::Sink* stream) : sink_(stream) {
   }
 
   void SendCommand(std::string_view str);
+
+  std::error_code ec() const {
+    return ec_;
+  }
+
+ private:
+  ::io::Sink* sink_;
+  std::error_code ec_;
 };
 
 }  // namespace dfly

@@ -60,7 +60,7 @@ void CommandRegistry::Command(CmdArgList args, ConnectionContext* cntx) {
     StrAppend(&resp, ":", cd.key_arg_step(), "\r\n");
   }
 
-  cntx->SendRespBlob(resp);
+  (*cntx)->SendRespBlob(resp);
 }
 
 CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {

@@ -108,14 +108,14 @@ bool Replica::Run(ConnectionContext* cntx) {
 
   error_code ec = ConnectSocket();
   if (ec) {
-    cntx->SendError(absl::StrCat(kConnErr, ec.message()));
+    (*cntx)->SendError(absl::StrCat(kConnErr, ec.message()));
     return false;
   }
 
   state_mask_ = R_ENABLED | R_TCP_CONNECTED;
   last_io_time_ = sock_thread_->GetMonotonicTimeNs();
   sync_fb_ = ::boost::fibers::fiber(&Replica::ConnectFb, this);
-  cntx->SendOk();
+  (*cntx)->SendOk();
 
   return true;
 }
