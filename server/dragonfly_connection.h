@@ -63,7 +63,7 @@ class Connection : public util::Connection {
   std::unique_ptr<ConnectionContext> cc_;
 
   struct Request {
-    absl::FixedArray<MutableStrSpan> args;
+    absl::FixedArray<MutableSlice> args;
     absl::FixedArray<char> storage;
 
     Request(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {

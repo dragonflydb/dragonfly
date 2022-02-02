@@ -16,12 +16,112 @@ extern "C" {
 #include <lualib.h>
 }
 
+#include <absl/strings/str_format.h>
+
 #include "base/logging.h"
 
 namespace dfly {
 using namespace std;
 
 namespace {
+
+class RedisTranslator : public ObjectExplorer {
+ public:
+  RedisTranslator(lua_State* lua) : lua_(lua) {
+  }
+  void OnBool(bool b) final;
+  void OnString(std::string_view str) final;
+  void OnDouble(double d) final;
+  void OnInt(int64_t val) final;
+  void OnArrayStart(unsigned len) final;
+  void OnArrayEnd() final;
+  void OnNil() final;
+  void OnStatus(std::string_view str) final;
+  void OnError(std::string_view str) final;
+
+ private:
+  void ArrayPre() {
+    /*if (!array_index_.empty()) {
+      lua_pushnumber(lua_, array_index_.back());
+      array_index_.back()++;
+    }*/
+  }
+
+  void ArrayPost() {
+    if (!array_index_.empty()) {
+      lua_rawseti(lua_, -2, array_index_.back()++); /* set table at key `i' */
+      // lua_settable(lua_, -3);
+    }
+  }
+
+  vector<unsigned> array_index_;
+  lua_State* lua_;
+};
+
+void RedisTranslator::OnBool(bool b) {
+  CHECK(!b) << "Only false (nil) supported";
+  ArrayPre();
+  lua_pushboolean(lua_, 0);
+  ArrayPost();
+}
+
+void RedisTranslator::OnString(std::string_view str) {
+  ArrayPre();
+  lua_pushlstring(lua_, str.data(), str.size());
+  ArrayPost();
+}
+
+// Doubles are not supported by Redis, however we can support them.
+// Here is the use-case:
+// local foo = redis.call('zscore', 'myzset', 'one')
+// assert(type(foo) == "number")
+void RedisTranslator::OnDouble(double d) {
+  ArrayPre();
+  lua_pushnumber(lua_, d);
+  ArrayPost();
+}
+
+void RedisTranslator::OnInt(int64_t val) {
+  ArrayPre();
+  lua_pushinteger(lua_, val);
+  ArrayPost();
+}
+
+void RedisTranslator::OnNil() {
+  ArrayPre();
+  lua_pushboolean(lua_, 0);
+  ArrayPost();
+}
+
+void RedisTranslator::OnStatus(std::string_view str) {
+  CHECK(array_index_.empty()) << "unexpected status";
+  lua_newtable(lua_);
+  lua_pushstring(lua_, "ok");
+  lua_pushlstring(lua_, str.data(), str.size());
+  lua_settable(lua_, -3);
+}
+
+void RedisTranslator::OnError(std::string_view str) {
+  CHECK(array_index_.empty()) << "unexpected error";
+  lua_newtable(lua_);
+  lua_pushstring(lua_, "err");
+  lua_pushlstring(lua_, str.data(), str.size());
+  lua_settable(lua_, -3);
+}
+
+void RedisTranslator::OnArrayStart(unsigned len) {
+  ArrayPre();
+  lua_newtable(lua_);
+  array_index_.push_back(1);
+}
+
+void RedisTranslator::OnArrayEnd() {
+  CHECK(!array_index_.empty());
+  DCHECK(lua_istable(lua_, -1));
+
+  array_index_.pop_back();
+  ArrayPost();
+}
 
 void RunSafe(lua_State* lua, string_view buf, const char* name) {
   CHECK_EQ(0, luaL_loadbuffer(lua, buf.data(), buf.size(), name));
@@ -388,35 +488,32 @@ bool Interpreter::Serialize(ObjectExplorer* serializer, std::string* error) {
       }
       break;
     case LUA_TTABLE: {
-      unsigned len = lua_rawlen(lua_, -1);
-      if (len > 0) {  // array
-        serializer->OnArrayStart(len);
-        for (unsigned i = 0; i < len; ++i) {
-          t = lua_rawgeti(lua_, -1, i + 1);  // push table element
-
-          // TODO: we should make sure that we have enough stack space
-          // to traverse each object. This can be done as a dry-run before doing real serialization.
-          // Once we are sure we are safe we can simplify the serialization flow and
-          // remove the error factor.
-          CHECK(Serialize(serializer, error));  // pops the element
-        }
-        serializer->OnArrayEnd();
-      } else {
-        auto fres = FetchKey(lua_, "err");
-        if (fres && *fres == LUA_TSTRING) {
-          serializer->OnError(TopSv(lua_));
-          lua_pop(lua_, 1);
-          break;
-        }
-
-        fres = FetchKey(lua_, "ok");
-        if (fres && *fres == LUA_TSTRING) {
-          serializer->OnStatus(TopSv(lua_));
-          lua_pop(lua_, 1);
-          break;
-        }
-        serializer->OnError("TBD");
+      auto fres = FetchKey(lua_, "err");
+      if (fres && *fres == LUA_TSTRING) {
+        serializer->OnError(TopSv(lua_));
+        lua_pop(lua_, 1);
+        break;
       }
+
+      fres = FetchKey(lua_, "ok");
+      if (fres && *fres == LUA_TSTRING) {
+        serializer->OnStatus(TopSv(lua_));
+        lua_pop(lua_, 1);
+        break;
+      }
+
+      unsigned len = lua_rawlen(lua_, -1);
+      serializer->OnArrayStart(len);
+      for (unsigned i = 0; i < len; ++i) {
+        t = lua_rawgeti(lua_, -1, i + 1);  // push table element
+
+        // TODO: we should make sure that we have enough stack space
+        // to traverse each object. This can be done as a dry-run before doing real serialization.
+        // Once we are sure we are safe we can simplify the serialization flow and
+        // remove the error factor.
+        CHECK(Serialize(serializer, error));  // pops the element
+      }
+      serializer->OnArrayEnd();
       break;
     }
     case LUA_TNIL:
@@ -446,6 +543,11 @@ int Interpreter::RedisGenericCommand(bool raise_error) {
     return 1;
   }
 
+  if (!redis_func_) {
+    PushError(lua_, "internal error - redis function not defined");
+    return raise_error ? RaiseError(lua_) : 1;
+  }
+
   cmd_depth_++;
   int argc = lua_gettop(lua_);
 
@@ -457,14 +559,61 @@ int Interpreter::RedisGenericCommand(bool raise_error) {
     return raise_error ? RaiseError(lua_) : 1;
   }
 
-  // TODO: to prepare arguments.
+  size_t blob_len = 0;
+  char tmpbuf[64];
+
+  for (int j = 0; j < argc; j++) {
+    unsigned idx = j + 1;
+    if (lua_isinteger(lua_, idx)) {
+      absl::AlphaNum an(lua_tointeger(lua_, idx));
+      blob_len += an.size();
+    } else if (lua_isnumber(lua_, idx)) {
+      // fmt_len does not include '\0'.
+      int fmt_len = absl::SNPrintF(tmpbuf, sizeof(tmpbuf), "%.17g", lua_tonumber(lua_, idx));
+      CHECK_GT(fmt_len, 0);
+      blob_len += fmt_len;
+    } else if (lua_isstring(lua_, idx)) {
+      blob_len += lua_rawlen(lua_, idx);  // lua_rawlen does not include '\0'.
+    } else {
+      PushError(lua_, "Lua redis() command arguments must be strings or integers");
+      cmd_depth_--;
+      return raise_error ? RaiseError(lua_) : 1;
+    }
+  }
+
+  // backing storage.
+  unique_ptr<char[]> blob(new char[blob_len + 8]);  // 8 safety.
+  vector<absl::Span<char>> cmdargs;
+  char* cur = blob.get();
+  char* end = cur + blob_len;
+
+  for (int j = 0; j < argc; j++) {
+    unsigned idx = j + 1;
+    size_t len;
+    if (lua_isinteger(lua_, idx)) {
+      char* next = absl::numbers_internal::FastIntToBuffer(lua_tointeger(lua_, idx), cur);
+      len = next - cur;
+    } else if (lua_isnumber(lua_, idx)) {
+      int fmt_len = absl::SNPrintF(cur, end - cur, "%.17g", lua_tonumber(lua_, idx));
+      CHECK_GT(fmt_len, 0);
+      len = fmt_len;
+    } else if (lua_isstring(lua_, idx)) {
+      len = lua_rawlen(lua_, idx);
+      memcpy(cur, lua_tostring(lua_, idx), len);  // copy \0 as well.
+    }
+
+    cmdargs.emplace_back(cur, len);
+    cur += len;
+  }
 
   /* Pop all arguments from the stack, we do not need them anymore
    * and this way we guaranty we will have room on the stack for the result. */
   lua_pop(lua_, argc);
+  RedisTranslator translator(lua_);
+  redis_func_(MutSliceSpan{cmdargs}, &translator);
+  DCHECK_EQ(1, lua_gettop(lua_));
 
   cmd_depth_--;
-  lua_pushinteger(lua_, 42);
 
   return 1;
 }

@@ -24,22 +24,18 @@ class TestSerializer : public ObjectExplorer {
 
   void OnBool(bool b) final {
     absl::StrAppend(&res, "bool(", b, ") ");
-    OnItem();
   }
 
   void OnString(std::string_view str) final {
     absl::StrAppend(&res, "str(", str, ") ");
-    OnItem();
   }
 
   void OnDouble(double d) final {
     absl::StrAppend(&res, "d(", d, ") ");
-    OnItem();
   }
 
   void OnInt(int64_t val) final {
     absl::StrAppend(&res, "i(", val, ") ");
-    OnItem();
   }
 
   void OnArrayStart(unsigned len) final {
@@ -64,10 +60,6 @@ class TestSerializer : public ObjectExplorer {
   void OnError(std::string_view str) {
     absl::StrAppend(&res, "err(", str, ") ");
   }
-
- private:
-  void OnItem() {
-  }
 };
 
 class InterpreterTest : public ::testing::Test {
@@ -79,9 +71,9 @@ class InterpreterTest : public ::testing::Test {
     return intptr_.lua();
   }
 
-  void RunInline(string_view buf, const char* name) {
+  void RunInline(string_view buf, const char* name, unsigned num_results = 0) {
     CHECK_EQ(0, luaL_loadbuffer(lua(), buf.data(), buf.size(), name));
-    CHECK_EQ(0, lua_pcall(lua(), 0, 0, 0));
+    CHECK_EQ(0, lua_pcall(lua(), 0, num_results, 0));
   }
 
   bool Serialize(string* err) {
@@ -123,6 +115,30 @@ TEST_F(InterpreterTest, Basic) {
   EXPECT_EQ(43, val1);
   EXPECT_EQ(42, val2);
   EXPECT_EQ(0, lua_gettop(lua()));
+
+  lua_pushstring(lua(), "foo");
+  EXPECT_EQ(3, lua_rawlen(lua(), 1));
+  lua_pop(lua(), 1);
+
+  RunInline("return {nil, 'b'}", "code2", 1);
+  ASSERT_EQ(1, lua_gettop(lua()));
+  LOG(INFO) << lua_typename(lua(), lua_type(lua(), -1));
+
+  ASSERT_TRUE(lua_istable(lua(), -1));
+  ASSERT_EQ(2, lua_rawlen(lua(), -1));
+  lua_len(lua(), -1);
+  ASSERT_EQ(2, lua_tointeger(lua(), -1));
+  lua_pop(lua(), 1);
+
+  lua_pushnil(lua());
+  while (lua_next(lua(), -2)) {
+    /* uses 'key' (at index -2) and 'value' (at index -1) */
+    int kt = lua_type(lua(), -2);
+    int vt = lua_type(lua(), -1);
+    LOG(INFO) << "k/v : " << lua_typename(lua(), kt) << "/" << lua_tonumber(lua(), -2) << " "
+              << lua_typename(lua(), vt);
+    lua_pop(lua(), 1);
+  }
 }
 
 TEST_F(InterpreterTest, Add) {
@@ -162,8 +178,62 @@ TEST_F(InterpreterTest, Execute) {
   EXPECT_TRUE(Execute("return {1, 2, nil, 3}"));
   EXPECT_EQ("[i(1) i(2) nil i(3)]", ser_.res);
 
-  EXPECT_TRUE(Execute("return {1,2,3,'ciao',{1,2}}"));
+  EXPECT_TRUE(Execute("return {1,2,3,'ciao', {1,2}}"));
   EXPECT_EQ("[i(1) i(2) i(3) str(ciao) [i(1) i(2)]]", ser_.res);
+}
+
+TEST_F(InterpreterTest, Call) {
+  auto cb = [](Interpreter::MutSliceSpan span, ObjectExplorer* reply) {
+    CHECK_GE(span.size(), 1u);
+    string_view cmd{span[0].data(), span[0].size()};
+    if (cmd == "string") {
+      reply->OnString("foo");
+    } else if (cmd == "double") {
+      reply->OnDouble(3.1415);
+    } else if (cmd == "int") {
+      reply->OnInt(42);
+    } else if (cmd == "err") {
+      reply->OnError("myerr");
+    } else if (cmd == "status") {
+      reply->OnStatus("mystatus");
+    } else {
+      LOG(FATAL) << "Invalid param";
+    }
+  };
+
+  intptr_.SetRedisFunc(cb);
+  EXPECT_TRUE(Execute("local var = redis.call('string'); return {type(var), var}"));
+  EXPECT_EQ("[str(string) str(foo)]", ser_.res);
+
+  EXPECT_TRUE(Execute("local var = redis.call('double'); return {type(var), var}"));
+  EXPECT_EQ("[str(number) d(3.1415)]", ser_.res);
+
+  EXPECT_TRUE(Execute("local var = redis.call('int'); return {type(var), var}"));
+  EXPECT_EQ("[str(number) i(42)]", ser_.res);
+
+  EXPECT_TRUE(Execute("local var = redis.call('err'); return {type(var), var}"));
+  EXPECT_EQ("[str(table) err(myerr)]", ser_.res);
+
+  EXPECT_TRUE(Execute("local var = redis.call('status'); return {type(var), var}"));
+  EXPECT_EQ("[str(table) status(mystatus)]", ser_.res);
+}
+
+TEST_F(InterpreterTest, CallArray) {
+  auto cb = [](Interpreter::MutSliceSpan span, ObjectExplorer* reply) {
+    reply->OnArrayStart(2);
+    reply->OnArrayStart(1);
+    reply->OnArrayStart(2);
+    reply->OnNil();
+    reply->OnString("s2");
+    reply->OnArrayEnd();
+    reply->OnArrayEnd();
+    reply->OnInt(42);
+    reply->OnArrayEnd();
+  };
+
+  intptr_.SetRedisFunc(cb);
+  EXPECT_TRUE(Execute("local var = redis.call(''); return {type(var), var}"));
+  EXPECT_EQ("[str(table) [[[bool(0) str(s2)]] i(42)]]", ser_.res);
 }
 
 }  // namespace dfly

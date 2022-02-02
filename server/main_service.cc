@@ -98,6 +98,11 @@ class EvalSerializer : public ObjectExplorer {
   RedisReplyBuilder* rb_;
 };
 
+void CallFromScript(CmdArgList args, ObjectExplorer* reply, ConnectionContext* cntx,
+                    Service* service) {
+  reply->OnInt(42);
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp) : pp_(*pp), shard_set_(pp), server_family_(this) {
@@ -256,7 +261,7 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
 
 void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
                          ConnectionContext* cntx) {
-  absl::InlinedVector<MutableStrSpan, 8> args;
+  absl::InlinedVector<MutableSlice, 8> args;
   char cmd_name[16];
   char set_opt[4] = {0};
   MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
@@ -361,6 +366,10 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
     EvalSerializer ser{static_cast<RedisReplyBuilder*>(cntx->reply_builder())};
     string error;
 
+    script.SetRedisFunc([cntx](CmdArgList args, ObjectExplorer* reply) {
+      CallFromScript(args, reply, cntx, nullptr);
+    });
+
     if (!script.Serialize(&ser, &error)) {
       (*cntx)->SendError(error);
     }
@@ -390,7 +399,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
       str_list.resize(scmd.cmd.size());
       for (size_t i = 0; i < scmd.cmd.size(); ++i) {
         string& s = scmd.cmd[i];
-        str_list[i] = MutableStrSpan{s.data(), s.size()};
+        str_list[i] = MutableSlice{s.data(), s.size()};
       }
 
       cntx->transaction->SetExecCmd(scmd.descr);

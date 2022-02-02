@@ -25,9 +25,9 @@ using TxId = uint64_t;
 using TxClock = uint64_t;
 
 using ArgSlice = absl::Span<const std::string_view>;
-using MutableStrSpan = absl::Span<char>;
-using CmdArgList = absl::Span<MutableStrSpan>;
-using CmdArgVec = std::vector<MutableStrSpan>;
+using MutableSlice = absl::Span<char>;
+using CmdArgList = absl::Span<MutableSlice>;
+using CmdArgVec = std::vector<MutableSlice>;
 
 constexpr DbIndex kInvalidDbId = DbIndex(-1);
 constexpr ShardId kInvalidSid = ShardId(-1);
@@ -73,11 +73,11 @@ inline std::string_view ArgS(CmdArgList args, size_t i) {
   return std::string_view(arg.data(), arg.size());
 }
 
-inline MutableStrSpan ToMSS(absl::Span<uint8_t> span) {
-  return MutableStrSpan{reinterpret_cast<char*>(span.data()), span.size()};
+inline MutableSlice ToMSS(absl::Span<uint8_t> span) {
+  return MutableSlice{reinterpret_cast<char*>(span.data()), span.size()};
 }
 
-inline void ToUpper(const MutableStrSpan* val) {
+inline void ToUpper(const MutableSlice* val) {
   for (auto& c : *val) {
     c = absl::ascii_toupper(c);
   }
