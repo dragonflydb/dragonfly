@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include <absl/types/span.h>
+
+#include <functional>
 #include <string_view>
 
 typedef struct lua_State lua_State;
@@ -11,8 +14,9 @@ typedef struct lua_State lua_State;
 namespace dfly {
 
 class ObjectExplorer {
-public:
-  virtual ~ObjectExplorer() {}
+ public:
+  virtual ~ObjectExplorer() {
+  }
 
   virtual void OnBool(bool b) = 0;
   virtual void OnString(std::string_view str) = 0;
@@ -54,16 +58,25 @@ class Interpreter {
   // fp[42] will be set to '\0'.
   static void Fingerprint(std::string_view body, char* fp);
 
+  using MutableSlice = absl::Span<char>;
+  using MutSliceSpan = absl::Span<MutableSlice>;
+  using RedisFunc = std::function<void(MutSliceSpan, ObjectExplorer*)>;
+
+  template<typename U> void SetRedisFunc(U&& u) {
+    redis_func_ = std::forward<U>(u);
+  }
+
  private:
   bool AddInternal(const char* f_id, std::string_view body, std::string* result);
 
   int RedisGenericCommand(bool raise_error);
 
-  static int RedisCallCommand(lua_State *lua);
-  static int RedisPCallCommand(lua_State *lua);
+  static int RedisCallCommand(lua_State* lua);
+  static int RedisPCallCommand(lua_State* lua);
 
   lua_State* lua_;
   unsigned cmd_depth_ = 0;
+  RedisFunc redis_func_;
 };
 
 }  // namespace dfly

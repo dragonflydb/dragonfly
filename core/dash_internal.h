@@ -978,6 +978,7 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
 
       auto it = dest_right->InsertUniq(std::forward<Key_t>(key),
                                        std::forward<Value_t>(Value(i, slot)), hash);
+      (void)it;
       if constexpr (USE_VERSION) {
         // Maintaining consistent versioning.
         dest_right->bucket_[it.index].SetVersion(it.slot, bucket_[i].GetVersion(slot));
@@ -1010,7 +1011,7 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
       invalid_mask |= (1u << slot);
       auto it = dest_right->InsertUniq(std::forward<Key_t>(Key(bid, slot)),
                                        std::forward<Value_t>(Value(bid, slot)), hash);
-
+      (void)it;
       if constexpr (USE_VERSION) {
         // Update the version in the destination bucket.
         dest_right->bucket_[it.index].SetVersion(it.slot, stash.GetVersion(slot));

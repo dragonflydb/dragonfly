@@ -449,7 +449,7 @@ auto Connection::FromArgs(RespVec args) -> Request* {
     auto buf = args[i].GetBuf();
     size_t s = buf.size();
     memcpy(next, buf.data(), s);
-    req->args[i] = MutableStrSpan(next, s);
+    req->args[i] = MutableSlice(next, s);
     next += s;
   }
 

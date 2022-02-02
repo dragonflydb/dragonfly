@@ -68,7 +68,6 @@ class Service {
 
   void Exec(CmdArgList args, ConnectionContext* cntx);
 
-
   void RegisterCommands();
   base::VarzValue::Map GetVarzStats();
 
