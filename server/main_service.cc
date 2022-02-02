@@ -380,19 +380,20 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
+  RedisReplyBuilder* rb = (*cntx).operator->();
+
   if (cntx->conn_state.exec_state == ConnectionState::EXEC_INACTIVE) {
-    return (*cntx)->SendError("EXEC without MULTI");
+    return rb->SendError("EXEC without MULTI");
   }
 
   if (cntx->conn_state.exec_state == ConnectionState::EXEC_ERROR) {
     cntx->conn_state.exec_state = ConnectionState::EXEC_INACTIVE;
     cntx->conn_state.exec_body.clear();
-    return (*cntx)->SendError("-EXECABORT Transaction discarded because of previous errors");
+    return rb->SendError("-EXECABORT Transaction discarded because of previous errors");
   }
 
-  (*cntx)->SendRespBlob(absl::StrCat("*", cntx->conn_state.exec_body.size(), "\r\n"));
-
-  if (!(*cntx)->GetError() && !cntx->conn_state.exec_body.empty()) {
+  rb->StartArray(cntx->conn_state.exec_body.size());
+  if (!cntx->conn_state.exec_body.empty()) {
     CmdArgVec str_list;
 
     for (auto& scmd : cntx->conn_state.exec_body) {
@@ -406,7 +407,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
       CmdArgList cmd_arg_list{str_list.data(), str_list.size()};
       cntx->transaction->InitByArgs(cntx->conn_state.db_index, cmd_arg_list);
       scmd.descr->Invoke(cmd_arg_list, cntx);
-      if ((*cntx)->GetError())
+      if (rb->GetError())
         break;
     }
 

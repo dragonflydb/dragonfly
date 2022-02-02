@@ -38,29 +38,29 @@ CommandRegistry::CommandRegistry() {
 }
 
 void CommandRegistry::Command(CmdArgList args, ConnectionContext* cntx) {
-  size_t sz = cmd_map_.size();
-  string resp = StrCat("*", sz, "\r\n");
+  size_t len = cmd_map_.size();
+
+  (*cntx)->StartArray(len);
 
   for (const auto& val : cmd_map_) {
     const CommandId& cd = val.second;
-    StrAppend(&resp, "*6\r\n$", strlen(cd.name()), "\r\n", cd.name(), "\r\n");
-    StrAppend(&resp, ":", int(cd.arity()), "\r\n");
-    StrAppend(&resp, "*", CommandId::OptCount(cd.opt_mask()), "\r\n");
+    (*cntx)->StartArray(6);
+    (*cntx)->SendSimpleString(cd.name());
+    (*cntx)->SendLong(cd.arity());
+    (*cntx)->StartArray(CommandId::OptCount(cd.opt_mask()));
 
     for (uint32_t i = 0; i < 32; ++i) {
       unsigned obit = (1u << i);
       if (cd.opt_mask() & obit) {
         const char* name = CO::OptName(CO::CommandOpt{obit});
-        StrAppend(&resp, "+", name, "\r\n");
+        (*cntx)->SendSimpleString(name);
       }
     }
 
-    StrAppend(&resp, ":", cd.first_key_pos(), "\r\n");
-    StrAppend(&resp, ":", cd.last_key_pos(), "\r\n");
-    StrAppend(&resp, ":", cd.key_arg_step(), "\r\n");
+    (*cntx)->SendLong(cd.first_key_pos());
+    (*cntx)->SendLong(cd.last_key_pos());
+    (*cntx)->SendLong(cd.key_arg_step());
   }
-
-  (*cntx)->SendRespBlob(resp);
 }
 
 CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
