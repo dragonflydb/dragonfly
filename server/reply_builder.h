@@ -120,10 +120,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
 
   virtual void SendBulkString(std::string_view str);
 
-  // TODO: to get rid of it. We should only send high-level data.
-  void SendRespBlob(std::string_view str) {
-    SendDirect(str);
-  }
+  virtual void StartArray(unsigned len);
 
  private:
 };

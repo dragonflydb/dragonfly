@@ -406,14 +406,13 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
     DCHECK_EQ(0u, cursor);
   }
 
+  (*cntx)->StartArray(2);
   string res("*2\r\n$");
-  string curs_str = absl::StrCat(cursor);
-  absl::StrAppend(&res, curs_str.size(), "\r\n", curs_str, "\r\n*", keys.size(), "\r\n");
+  (*cntx)->SendSimpleString(absl::StrCat(cursor));
+  (*cntx)->StartArray(keys.size());
   for (const auto& k : keys) {
-    absl::StrAppend(&res, "$", k.size(), "\r\n", k, "\r\n");
+    (*cntx)->SendBulkString(k);
   }
-
-  return (*cntx)->SendRespBlob(res);
 }
 
 

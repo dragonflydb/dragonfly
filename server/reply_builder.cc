@@ -78,13 +78,11 @@ void MCReplyBuilder::SendStored() {
   SendDirect("STORED\r\n");
 }
 
-
 void MCReplyBuilder::SendGetReply(std::string_view key, uint32_t flags, std::string_view value) {
   string first = absl::StrCat("VALUE ", key, " ", flags, " ", value.size(), "\r\n");
   iovec v[] = {IoVec(first), IoVec(value), IoVec(kCRLF)};
   Send(v, ABSL_ARRAYSIZE(v));
 }
-
 
 void MCReplyBuilder::SendError(string_view str) {
   SendDirect("ERROR\r\n");
@@ -209,6 +207,10 @@ void RedisReplyBuilder::SendStringArr(absl::Span<const std::string_view> arr) {
     res.append(arr[i]).append(kCRLF);
   }
   SendDirect(res);
+}
+
+void RedisReplyBuilder::StartArray(unsigned len) {
+  SendDirect(absl::StrCat("*", len, kCRLF));
 }
 
 void ReqSerializer::SendCommand(std::string_view str) {
