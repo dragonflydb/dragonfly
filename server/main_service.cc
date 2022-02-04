@@ -98,11 +98,6 @@ class EvalSerializer : public ObjectExplorer {
   RedisReplyBuilder* rb_;
 };
 
-void CallFromScript(CmdArgList args, ObjectExplorer* reply, ConnectionContext* cntx,
-                    Service* service) {
-  reply->OnInt(42);
-}
-
 }  // namespace
 
 Service::Service(ProactorPool* pp) : pp_(*pp), shard_set_(pp), server_family_(this) {
@@ -343,6 +338,10 @@ void Service::Multi(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendOk();
 }
 
+void Service::CallFromScript(CmdArgList args, ObjectExplorer* reply, ConnectionContext* cntx) {
+  reply->OnInt(42);
+}
+
 void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   string_view body = ArgS(args, 1);
   string_view num_keys_str = ArgS(args, 2);
@@ -359,6 +358,12 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   ServerState* ss = ServerState::tlocal();
   lock_guard lk(ss->interpreter_mutex);
   Interpreter& script = ss->GetInterpreter();
+
+  CmdArgList eval_keys = args.subspan(3, num_keys);
+  CmdArgList eval_args = args.subspan(3 + num_keys);
+
+  script.SetGlobalArray("KEYS", eval_keys);
+  script.SetGlobalArray("ARGV", eval_args);
   string error;
   char f_id[48];
   bool success = script.Execute(body, f_id, &error);
@@ -366,8 +371,8 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
     EvalSerializer ser{static_cast<RedisReplyBuilder*>(cntx->reply_builder())};
     string error;
 
-    script.SetRedisFunc([cntx](CmdArgList args, ObjectExplorer* reply) {
-      CallFromScript(args, reply, cntx, nullptr);
+    script.SetRedisFunc([cntx, this](CmdArgList args, ObjectExplorer* reply) {
+      CallFromScript(args, reply, cntx);
     });
 
     if (!script.Serialize(&ser, &error)) {
@@ -436,21 +441,19 @@ VarzValue::Map Service::GetVarzStats() {
 using ServiceFunc = void (Service::*)(CmdArgList, ConnectionContext* cntx);
 
 #define HFUNC(x) SetHandler(&Service::x)
+#define MFUNC(x) SetHandler([this](CmdArgList sp, ConnectionContext* cntx) { \
+         this->x(std::move(sp), cntx); })
 
 void Service::RegisterCommands() {
   using CI = CommandId;
 
   constexpr auto kExecMask = CO::LOADING | CO::NOSCRIPT | CO::GLOBAL_TRANS;
 
-  auto cb_exec = [this](CmdArgList sp, ConnectionContext* cntx) {
-    this->Exec(std::move(sp), cntx);
-  };
-
   registry_ << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0}.HFUNC(Quit)
-            << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING | CO::STALE, 1, 0, 0, 0}.HFUNC(
+            << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(
                    Multi)
-            << CI{"EVAL", CO::NOSCRIPT, -3, 0, 0, 0}.HFUNC(Eval)
-            << CI{"EXEC", kExecMask, 1, 0, 0, 0}.SetHandler(cb_exec);
+            << CI{"EVAL", CO::NOSCRIPT, -3, 0, 0, 0}.MFUNC(Eval)
+            << CI{"EXEC", kExecMask, 1, 0, 0, 0}.MFUNC(Exec);
 
   StringFamily::Register(&registry_);
   GenericFamily::Register(&registry_);

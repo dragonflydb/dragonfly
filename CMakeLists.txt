@@ -18,6 +18,17 @@ option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 include(third_party)
 include(internal)
 
+add_third_party(
+  lua
+  URL https://github.com/lua/lua/archive/refs/tags/v5.4.4.tar.gz
+  PATCH_COMMAND patch -p1 -i "${CMAKE_CURRENT_SOURCE_DIR}/patches/lua-v5.4.4.patch"
+  CONFIGURE_COMMAND echo
+  BUILD_IN_SOURCE 1
+  INSTALL_COMMAND cp <SOURCE_DIR>/liblua.a ${THIRD_PARTY_LIB_DIR}/lua/lib/
+  COMMAND cp <SOURCE_DIR>/lualib.h <SOURCE_DIR>/lua.h <SOURCE_DIR>/lauxlib.h
+          <SOURCE_DIR>/luaconf.h ${THIRD_PARTY_LIB_DIR}/lua/include
+)
+
 Message(STATUS "THIRD_PARTY_LIB_DIR ${THIRD_PARTY_LIB_DIR}")
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})

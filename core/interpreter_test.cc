@@ -84,12 +84,23 @@ class InterpreterTest : public ::testing::Test {
     return res;
   }
 
+  void SetGlobalArray(const char* name, vector<string> vec);
+
   bool Execute(string_view script);
+
 
   Interpreter intptr_;
   TestSerializer ser_;
   string error_;
 };
+
+void InterpreterTest::SetGlobalArray(const char* name, vector<string> vec) {
+  vector<Interpreter::MutableSlice> slices(vec.size());
+  for (size_t i = 0; i < vec.size(); ++i) {
+    slices[i] = Interpreter::MutableSlice{vec[i]};
+  }
+  intptr_.SetGlobalArray(name, Interpreter::MutSliceSpan{slices});
+}
 
 bool InterpreterTest::Execute(string_view script) {
   char buf[48];
@@ -234,6 +245,15 @@ TEST_F(InterpreterTest, CallArray) {
   intptr_.SetRedisFunc(cb);
   EXPECT_TRUE(Execute("local var = redis.call(''); return {type(var), var}"));
   EXPECT_EQ("[str(table) [[[bool(0) str(s2)]] i(42)]]", ser_.res);
+}
+
+TEST_F(InterpreterTest, ArgKeys) {
+  vector<string> vec_arr{};
+  vector<Interpreter::MutableSlice> slices;
+  SetGlobalArray("ARGV", {"foo", "bar"});
+  SetGlobalArray("KEYS", {"key1", "key2"});
+  EXPECT_TRUE(Execute("return {ARGV[1], KEYS[1], KEYS[2]}"));
+  EXPECT_EQ("[str(foo) str(key1) str(key2)]", ser_.res);
 }
 
 }  // namespace dfly

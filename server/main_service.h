@@ -17,6 +17,8 @@ class AcceptServer;
 
 namespace dfly {
 
+class ObjectExplorer;  // for Interpreter
+
 class Service {
  public:
   using error_code = std::error_code;
@@ -64,9 +66,10 @@ class Service {
  private:
   static void Quit(CmdArgList args, ConnectionContext* cntx);
   static void Multi(CmdArgList args, ConnectionContext* cntx);
-  static void Eval(CmdArgList args, ConnectionContext* cntx);
 
+  void Eval(CmdArgList args, ConnectionContext* cntx);
   void Exec(CmdArgList args, ConnectionContext* cntx);
+  void CallFromScript(CmdArgList args, ObjectExplorer* reply, ConnectionContext* cntx);
 
   void RegisterCommands();
   base::VarzValue::Map GetVarzStats();

@@ -1,4 +1,4 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 #include <optional>
@@ -6,7 +6,6 @@
 
 #include "core/op_status.h"
 #include "io/sync_stream_interface.h"
-// #include "server/common_types.h"
 
 namespace dfly {
 

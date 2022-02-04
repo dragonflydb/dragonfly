@@ -407,7 +407,6 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
   }
 
   (*cntx)->StartArray(2);
-  string res("*2\r\n$");
   (*cntx)->SendSimpleString(absl::StrCat(cursor));
   (*cntx)->StartArray(keys.size());
   for (const auto& k : keys) {
@@ -547,10 +546,14 @@ using CI = CommandId;
 #define HFUNC(x) SetHandler(&GenericFamily::x)
 
 void GenericFamily::Register(CommandRegistry* registry) {
-  constexpr auto kSelectOpts = CO::LOADING | CO::FAST | CO::STALE;
+  constexpr auto kSelectOpts = CO::LOADING | CO::FAST;
   *registry << CI{"DEL", CO::WRITE, -2, 1, -1, 1}.HFUNC(Del)
-            << CI{"PING", CO::STALE | CO::FAST, -1, 0, 0, 0}.HFUNC(Ping)
-            << CI{"ECHO", CO::READONLY | CO::FAST, 2, 0, 0, 0}.HFUNC(Echo)
+    /* Redis compaitibility:
+     * We don't allow PING during loading since in Redis PING is used as
+     * failure detection, and a loading server is considered to be
+     * not available. */
+            << CI{"PING", CO::FAST, -1, 0, 0, 0}.HFUNC(Ping)
+            << CI{"ECHO", CO::LOADING | CO::FAST, 2, 0, 0, 0}.HFUNC(Echo)
             << CI{"EXISTS", CO::READONLY | CO::FAST, -2, 1, -1, 1}.HFUNC(Exists)
             << CI{"EXPIRE", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Expire)
             << CI{"EXPIREAT", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(ExpireAt)

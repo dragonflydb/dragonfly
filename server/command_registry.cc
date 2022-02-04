@@ -30,7 +30,7 @@ uint32_t CommandId::OptCount(uint32_t mask) {
 }
 
 CommandRegistry::CommandRegistry() {
-  CommandId cd("COMMAND", CO::RANDOM | CO::LOADING | CO::STALE, 0, 0, 0, 0);
+  CommandId cd("COMMAND", CO::RANDOM | CO::LOADING, 0, 0, 0, 0);
 
   cd.SetHandler([this](const auto& args, auto* cntx) { return Command(args, cntx); });
   const char* nm = cd.name();
@@ -84,8 +84,6 @@ const char* OptName(CO::CommandOpt fl) {
       return "denyoom";
     case FAST:
       return "fast";
-    case STALE:
-      return "stale";
     case LOADING:
       return "loading";
     case RANDOM:

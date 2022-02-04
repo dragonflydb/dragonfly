@@ -390,17 +390,15 @@ void ServerFamily::SyncGeneric(std::string_view repl_master_id, uint64_t offs,
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ServerFamily::x))
 
 void ServerFamily::Register(CommandRegistry* registry) {
-  constexpr auto kReplicaOpts = CO::ADMIN | CO::STALE | CO::GLOBAL_TRANS;
+  constexpr auto kReplicaOpts = CO::ADMIN | CO::GLOBAL_TRANS;
   *registry << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(DbSize)
-            << CI{"DEBUG", CO::RANDOM | CO::READONLY, -2, 0, 0, 0}.HFUNC(Debug)
+            << CI{"DEBUG", CO::RANDOM | CO::ADMIN | CO::LOADING, -2, 0, 0, 0}.HFUNC(Debug)
             << CI{"FLUSHDB", CO::WRITE | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(FlushDb)
             << CI{"FLUSHALL", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, 0}.HFUNC(FlushAll)
-            << CI{"INFO", CO::LOADING | CO::STALE, -1, 0, 0, 0}.HFUNC(Info)
-            << CI{"LASTSAVE", CO::LOADING | CO::STALE | CO::RANDOM | CO::FAST, 1, 0, 0, 0}.HFUNC(
-                   LastSave)
+            << CI{"INFO", CO::LOADING, -1, 0, 0, 0}.HFUNC(Info)
+            << CI{"LASTSAVE", CO::LOADING | CO::RANDOM | CO::FAST, 1, 0, 0, 0}.HFUNC(LastSave)
             << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Save)
-            << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING | CO::STALE, 1, 0, 0, 0}.HFUNC(
-                   _Shutdown)
+            << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0}.HFUNC(_Shutdown)
             << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"SYNC", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Sync)

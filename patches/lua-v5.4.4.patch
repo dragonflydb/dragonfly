@@ -1,0 +1,16 @@
+diff --git a/makefile b/makefile
+index d46e650c..85e6b637 100644
+--- a/makefile
++++ b/makefile
+@@ -66,9 +66,9 @@ LOCAL = $(TESTS) $(CWARNS)
+ 
+ 
+ # enable Linux goodies
+-MYCFLAGS= $(LOCAL) -std=c99 -DLUA_USE_LINUX -DLUA_USE_READLINE
++MYCFLAGS= $(LOCAL) -std=c99 -DLUA_USE_LINUX
+ MYLDFLAGS= $(LOCAL) -Wl,-E
+-MYLIBS= -ldl -lreadline
++MYLIBS= -ldl
+ 
+ 
+ CC= gcc

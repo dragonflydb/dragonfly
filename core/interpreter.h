@@ -31,6 +31,10 @@ class ObjectExplorer {
 
 class Interpreter {
  public:
+  using MutableSlice = absl::Span<char>;
+  using MutSliceSpan = absl::Span<MutableSlice>;
+  using RedisFunc = std::function<void(MutSliceSpan, ObjectExplorer*)>;
+
   Interpreter();
   ~Interpreter();
 
@@ -51,6 +55,8 @@ class Interpreter {
   // Returns: true if the call succeeded, otherwise fills error and returns false.
   bool RunFunction(const char* f_id, std::string* err);
 
+  void SetGlobalArray(const char* name, MutSliceSpan args);
+
   bool Execute(std::string_view body, char f_id[43], std::string* err);
   bool Serialize(ObjectExplorer* serializer, std::string* err);
 
@@ -58,11 +64,7 @@ class Interpreter {
   // fp[42] will be set to '\0'.
   static void Fingerprint(std::string_view body, char* fp);
 
-  using MutableSlice = absl::Span<char>;
-  using MutSliceSpan = absl::Span<MutableSlice>;
-  using RedisFunc = std::function<void(MutSliceSpan, ObjectExplorer*)>;
-
-  template<typename U> void SetRedisFunc(U&& u) {
+  template <typename U> void SetRedisFunc(U&& u) {
     redis_func_ = std::forward<U>(u);
   }
 

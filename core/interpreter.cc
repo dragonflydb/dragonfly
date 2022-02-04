@@ -41,16 +41,11 @@ class RedisTranslator : public ObjectExplorer {
 
  private:
   void ArrayPre() {
-    /*if (!array_index_.empty()) {
-      lua_pushnumber(lua_, array_index_.back());
-      array_index_.back()++;
-    }*/
   }
 
   void ArrayPost() {
     if (!array_index_.empty()) {
       lua_rawseti(lua_, -2, array_index_.back()++); /* set table at key `i' */
-      // lua_settable(lua_, -3);
     }
   }
 
@@ -137,6 +132,30 @@ void Require(lua_State* lua, const char* name, lua_CFunction openf) {
   lua_pop(lua, 1); /* remove lib */
 }
 
+string_view TopSv(lua_State* lua) {
+  return string_view{lua_tostring(lua, -1), lua_rawlen(lua, -1)};
+}
+
+optional<int> FetchKey(lua_State* lua, const char* key) {
+  lua_pushstring(lua, key);
+  int type = lua_gettable(lua, -2);
+  if (type == LUA_TNIL) {
+    lua_pop(lua, 1);
+    return nullopt;
+  }
+  return type;
+}
+
+void SetGlobalArrayInternal(lua_State* lua, const char* name, Interpreter::MutSliceSpan args) {
+  lua_newtable(lua);
+  for (size_t j = 0; j < args.size(); j++) {
+    lua_pushlstring(lua, args[j].data(), args[j].size());
+    lua_rawseti(lua, -2, j + 1);
+  }
+  lua_setglobal(lua, name);
+}
+
+#if 0
 /*
  * Save the give pointer on Lua registry, used to save the Lua context and
  * function context so we can retrieve them from lua_State.
@@ -169,6 +188,7 @@ void* GetFromRegistry(lua_State* lua, const char* name) {
 
   return ptr;
 }
+#endif
 
 /* This function is used in order to push an error on the Lua stack in the
  * format used by redis.pcall to return errors, which is a lua table
@@ -270,20 +290,6 @@ void ToHex(const uint8_t* src, char* dest) {
   dest[40] = '\0';
 }
 
-string_view TopSv(lua_State* lua) {
-  return string_view{lua_tostring(lua, -1), lua_rawlen(lua, -1)};
-}
-
-optional<int> FetchKey(lua_State* lua, const char* key) {
-  lua_pushstring(lua, key);
-  int type = lua_gettable(lua, -2);
-  if (type == LUA_TNIL) {
-    lua_pop(lua, 1);
-    return nullopt;
-  }
-  return type;
-}
-
 int RedisSha1Command(lua_State* lua) {
   int argc = lua_gettop(lua);
   if (argc != 1) {
@@ -335,14 +341,16 @@ int RedisStatusReplyCommand(lua_State* lua) {
   return SingleFieldTable(lua, "ok");
 }
 
-const char* kInstanceKey = "_INSTANCE";
+// const char* kInstanceKey = "_INSTANCE";
 
 }  // namespace
 
 Interpreter::Interpreter() {
   lua_ = luaL_newstate();
   InitLua(lua_);
-  SaveOnRegistry(lua_, kInstanceKey, this);
+  void** ptr = static_cast<void**>(lua_getextraspace(lua_));
+  *ptr = this;
+  // SaveOnRegistry(lua_, kInstanceKey, this);
 
   /* Register the redis commands table and fields */
   lua_newtable(lua_);
@@ -414,6 +422,10 @@ bool Interpreter::RunFunction(const char* f_id, std::string* error) {
     *error = lua_tostring(lua_, -1);
   }
   return err == 0;
+}
+
+void Interpreter::SetGlobalArray(const char* name, MutSliceSpan args) {
+  SetGlobalArrayInternal(lua_, name, args);
 }
 
 bool Interpreter::Execute(string_view body, char f_id[43], string* error) {
@@ -619,13 +631,13 @@ int Interpreter::RedisGenericCommand(bool raise_error) {
 }
 
 int Interpreter::RedisCallCommand(lua_State* lua) {
-  void* me = GetFromRegistry(lua, kInstanceKey);
-  return reinterpret_cast<Interpreter*>(me)->RedisGenericCommand(true);
+  void** ptr = static_cast<void**>(lua_getextraspace(lua));
+  return reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(true);
 }
 
 int Interpreter::RedisPCallCommand(lua_State* lua) {
-  void* me = GetFromRegistry(lua, kInstanceKey);
-  return reinterpret_cast<Interpreter*>(me)->RedisGenericCommand(false);
+  void** ptr = static_cast<void**>(lua_getextraspace(lua));
+  return reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(false);
 }
 
 }  // namespace dfly
