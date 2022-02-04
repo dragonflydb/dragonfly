@@ -385,23 +385,31 @@ Interpreter::~Interpreter() {
   lua_close(lua_);
 }
 
-void Interpreter::Fingerprint(string_view body, char* fp) {
+void Interpreter::FuncSha1(string_view body, char* fp) {
   SHA_CTX ctx;
   uint8_t buf[20];
 
   SHA1_Init(&ctx);
   SHA1_Update(&ctx, body.data(), body.size());
   SHA1_Final(buf, &ctx);
-  fp[0] = 'f';
-  fp[1] = '_';
-  ToHex(buf, fp + 2);
+  ToHex(buf, fp);
 }
 
-bool Interpreter::AddFunction(string_view body, string* result) {
+auto Interpreter::AddFunction(string_view body, string* result) -> AddResult {
   char funcname[43];
-  Fingerprint(body, funcname);
+  FuncSha1(body, funcname + 2);
+  funcname[0] = 'f';
+  funcname[1] = '_';
 
-  return AddInternal(funcname, body, result);
+  int type = lua_getglobal(lua_, funcname);
+  lua_pop(lua_, 1);
+
+  if (type == LUA_TNIL && !AddInternal(funcname, body, result))
+    return COMPILE_ERR;
+
+  result->assign(funcname + 2);
+
+  return type == LUA_TNIL ? OK : ALREADY_EXISTS;
 }
 
 bool Interpreter::RunFunction(const char* f_id, std::string* error) {
@@ -428,27 +436,36 @@ void Interpreter::SetGlobalArray(const char* name, MutSliceSpan args) {
   SetGlobalArrayInternal(lua_, name, args);
 }
 
-bool Interpreter::Execute(string_view body, char f_id[43], string* error) {
+bool Interpreter::Execute(string_view body, char f_id[41], string* error) {
   lua_getglobal(lua_, "__redis__err__handler");
-  Fingerprint(body, f_id);
+  char fname[43];
 
-  int type = lua_getglobal(lua_, f_id);
-  if (type != LUA_TFUNCTION) {
+  fname[0] = 'f';
+  fname[1] = '_';
+  FuncSha1(body, f_id);
+  memcpy(fname + 2, f_id, 41);
+
+  int type = lua_getglobal(lua_, fname);
+  if (type == LUA_TNIL) {
     lua_pop(lua_, 1);
-    if (!AddInternal(f_id, body, error))
+    if (!AddInternal(fname, body, error))
       return false;
-    type = lua_getglobal(lua_, f_id);
+
+    type = lua_getglobal(lua_, fname);
     CHECK_EQ(type, LUA_TFUNCTION);
+  } else if (type != LUA_TFUNCTION) {
+    return false;
   }
 
   int err = lua_pcall(lua_, 0, 1, -2);
   if (err) {
     *error = lua_tostring(lua_, -1);
   }
+
   return err == 0;
 }
 
-bool Interpreter::AddInternal(const char* f_id, string_view body, string* result) {
+bool Interpreter::AddInternal(const char* f_id, string_view body, string* error) {
   string script = absl::StrCat("function ", f_id, "() \n");
   absl::StrAppend(&script, body, "\nend");
 
@@ -458,13 +475,12 @@ bool Interpreter::AddInternal(const char* f_id, string_view body, string* result
   }
 
   if (res) {
-    result->assign(lua_tostring(lua_, -1));
+    error->assign(lua_tostring(lua_, -1));
     lua_pop(lua_, 1);  // Remove the error.
 
     return false;
   }
 
-  result->assign(f_id);
   return true;
 }
 

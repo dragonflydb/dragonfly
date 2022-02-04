@@ -18,6 +18,7 @@ class ConnectionContext;
 class CommandRegistry;
 class Service;
 class Replica;
+class ScriptMgr;
 
 struct Metrics {
   DbStats db;
@@ -50,14 +51,15 @@ class ServerFamily {
   void DbSize(CmdArgList args, ConnectionContext* cntx);
   void FlushDb(CmdArgList args, ConnectionContext* cntx);
   void FlushAll(CmdArgList args, ConnectionContext* cntx);
-  void Save(CmdArgList args, ConnectionContext* cntx);
   void Info(CmdArgList args, ConnectionContext* cntx);
-  void ReplicaOf(CmdArgList args, ConnectionContext* cntx);
-  void Sync(CmdArgList args, ConnectionContext* cntx);
-  void Psync(CmdArgList args, ConnectionContext* cntx);
-
-
   void LastSave(CmdArgList args, ConnectionContext* cntx);
+  void Psync(CmdArgList args, ConnectionContext* cntx);
+  void ReplicaOf(CmdArgList args, ConnectionContext* cntx);
+  void Save(CmdArgList args, ConnectionContext* cntx);
+  void Script(CmdArgList args, ConnectionContext* cntx);
+  void Sync(CmdArgList args, ConnectionContext* cntx);
+
+
   void _Shutdown(CmdArgList args, ConnectionContext* cntx);
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
@@ -69,6 +71,8 @@ class ServerFamily {
   util::AcceptServer* acceptor_ = nullptr;
   ::boost::fibers::mutex replica_of_mu_;
   std::shared_ptr<Replica> replica_;  // protected by replica_of_mu_
+
+  std::unique_ptr<ScriptMgr> script_mgr_;
 
   std::atomic<int64_t> last_save_;  // in seconds.
   GlobalState global_state_;

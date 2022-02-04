@@ -24,6 +24,7 @@ extern "C" {
 #include "server/rdb_save.h"
 #include "server/replica.h"
 #include "server/server_state.h"
+#include "server/script_mgr.h"
 #include "server/transaction.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
@@ -69,6 +70,7 @@ error_code CreateDirs(fs::path dir_path) {
 ServerFamily::ServerFamily(Service* engine)
     : engine_(*engine), pp_(engine->proactor_pool()), ess_(engine->shard_set()) {
   last_save_.store(time(NULL), memory_order_release);
+  script_mgr_.reset(new ScriptMgr(&engine->shard_set()));
 }
 
 ServerFamily::~ServerFamily() {
@@ -357,6 +359,13 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
       [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
 }
 
+void ServerFamily::Script(CmdArgList args, ConnectionContext* cntx) {
+  args.remove_prefix(1);
+  ToUpper(&args.front());
+
+  script_mgr_->Run(std::move(args), cntx);
+}
+
 void ServerFamily::Sync(CmdArgList args, ConnectionContext* cntx) {
   SyncGeneric("", 0, cntx);
 }
@@ -402,7 +411,9 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"SYNC", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Sync)
-            << CI{"PSYNC", CO::ADMIN | CO::GLOBAL_TRANS, 3, 0, 0, 0}.HFUNC(Psync);
+            << CI{"PSYNC", CO::ADMIN | CO::GLOBAL_TRANS, 3, 0, 0, 0}.HFUNC(Psync)
+            << CI{"SCRIPT", CO::NOSCRIPT, -2, 0, 0, 0}.HFUNC(Script)
+            ;
 }
 
 }  // namespace dfly

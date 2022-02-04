@@ -47,9 +47,16 @@ class Interpreter {
     return lua_;
   }
 
+  enum AddResult {
+    OK = 0,
+    ALREADY_EXISTS = 1,
+    COMPILE_ERR = 2,
+  };
+
   // returns false if an error happenned, sets error string into result.
   // otherwise, returns true and sets result to function id.
-  bool AddFunction(std::string_view body, std::string* result);
+  // function id is sha1 of the function body.
+  AddResult AddFunction(std::string_view body, std::string* result);
 
   // Runs already added function f_id returned by a successful call to AddFunction().
   // Returns: true if the call succeeded, otherwise fills error and returns false.
@@ -57,19 +64,21 @@ class Interpreter {
 
   void SetGlobalArray(const char* name, MutSliceSpan args);
 
-  bool Execute(std::string_view body, char f_id[43], std::string* err);
+  bool Execute(std::string_view body, char f_id[41], std::string* err);
   bool Serialize(ObjectExplorer* serializer, std::string* err);
 
-  // fp must point to buffer with at least 43 chars.
-  // fp[42] will be set to '\0'.
-  static void Fingerprint(std::string_view body, char* fp);
+  // fp must point to buffer with at least 41 chars.
+  // fp[40] will be set to '\0'.
+  static void FuncSha1(std::string_view body, char* fp);
 
   template <typename U> void SetRedisFunc(U&& u) {
     redis_func_ = std::forward<U>(u);
   }
 
  private:
-  bool AddInternal(const char* f_id, std::string_view body, std::string* result);
+  // Returns true if function was successfully added,
+  // otherwise returns false and sets the error.
+  bool AddInternal(const char* f_id, std::string_view body, std::string* error);
 
   int RedisGenericCommand(bool raise_error);
 

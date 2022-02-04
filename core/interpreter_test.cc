@@ -155,9 +155,9 @@ TEST_F(InterpreterTest, Basic) {
 TEST_F(InterpreterTest, Add) {
   string res1, res2;
 
-  EXPECT_TRUE(intptr_.AddFunction("return 0", &res1));
+  EXPECT_EQ(Interpreter::OK, intptr_.AddFunction("return 0", &res1));
   EXPECT_EQ(0, lua_gettop(lua()));
-  EXPECT_FALSE(intptr_.AddFunction("foobar", &res2));
+  EXPECT_EQ(Interpreter::COMPILE_ERR, intptr_.AddFunction("foobar", &res2));
   EXPECT_THAT(res2, testing::HasSubstr("syntax error"));
   EXPECT_EQ(0, lua_gettop(lua()));
 }
