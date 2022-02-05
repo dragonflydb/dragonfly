@@ -6,6 +6,7 @@
 
 #include <absl/types/span.h>
 
+#include <boost/fiber/mutex.hpp>
 #include <functional>
 #include <string_view>
 
@@ -48,7 +49,7 @@ class Interpreter {
   }
 
   enum AddResult {
-    OK = 0,
+    ADD_OK = 0,
     ALREADY_EXISTS = 1,
     COMPILE_ERR = 2,
   };
@@ -58,13 +59,22 @@ class Interpreter {
   // function id is sha1 of the function body.
   AddResult AddFunction(std::string_view body, std::string* result);
 
-  // Runs already added function f_id returned by a successful call to AddFunction().
+  bool Exists(std::string_view sha) const;
+
+  enum RunResult {
+    RUN_OK = 0,
+    NOT_EXISTS = 1,
+    RUN_ERR = 2,
+  };
+
+  // Runs already added function sha returned by a successful call to AddFunction().
   // Returns: true if the call succeeded, otherwise fills error and returns false.
-  bool RunFunction(const char* f_id, std::string* err);
+  // sha must be 40 char length.
+  RunResult RunFunction(std::string_view sha, std::string* err);
 
   void SetGlobalArray(const char* name, MutSliceSpan args);
 
-  bool Execute(std::string_view body, char f_id[41], std::string* err);
+  // bool Execute(std::string_view body, char f_id[41], std::string* err);
   bool Serialize(ObjectExplorer* serializer, std::string* err);
 
   // fp must point to buffer with at least 41 chars.
@@ -73,6 +83,15 @@ class Interpreter {
 
   template <typename U> void SetRedisFunc(U&& u) {
     redis_func_ = std::forward<U>(u);
+  }
+
+  // We have interpreter per thread, not per connection.
+  // Since we might preempt into different fibers when operating on interpreter
+  // we must lock it until we finish using it per request.
+  // Only RunFunction with companions require locking since other functions peform atomically
+  // without preemptions.
+  std::lock_guard<::boost::fibers::mutex> Lock() {
+    return std::lock_guard<::boost::fibers::mutex>{mu_};
   }
 
  private:
@@ -88,6 +107,11 @@ class Interpreter {
   lua_State* lua_;
   unsigned cmd_depth_ = 0;
   RedisFunc redis_func_;
+
+  // We have interpreter per thread, not per connection.
+  // Since we might preempt into different fibers when operating on interpreter
+  // we must lock it until we finish using it per request.
+  ::boost::fibers::mutex mu_;
 };
 
 }  // namespace dfly

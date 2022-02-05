@@ -24,7 +24,7 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
     string_view kHelp[] = {
         "SCRIPT <subcommand> [<arg> [value] [opt] ...]",
         "Subcommands are:",
-        "EXISTS <sha1> [<s  ha1> ...]",
+        "EXISTS <sha1> [<sha1> ...]",
         "   Return information about the existence of the scripts in the script cache.",
         "LOAD <script>",
         "   Load a script into the scripts cache without executing it.",
@@ -41,6 +41,7 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
       return (*cntx)->SendError("Refuse to load empty script");
 
     Interpreter& interpreter = ServerState::tlocal()->GetInterpreter();
+    // no need to lock the interpreter since we do not mess the stack.
     string error_or_id;
     Interpreter::AddResult add_result = interpreter.AddFunction(body, &error_or_id);
     if (add_result == Interpreter::ALREADY_EXISTS) {
@@ -50,22 +51,40 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
       return (*cntx)->SendError(error_or_id);
     }
 
-    ScriptKey sha1;
-    CHECK_EQ(sha1.size(), error_or_id.size());
-    memcpy(sha1.data(), error_or_id.data(), sha1.size());
-
-    lock_guard lk(mu_);
-    auto [it, inserted] = db_.emplace(sha1, nullptr);
-    if (inserted) {
-      it->second.reset(new char[body.size() + 1]);
-      memcpy(it->second.get(), body.data(), body.size());
-      it->second[body.size()] = '\0';
-    }
+    InsertFunction(error_or_id, body);
     return (*cntx)->SendBulkString(error_or_id);
   }
 
   cntx->reply_builder()->SendError(absl::StrCat(
       "Unknown subcommand or wrong number of arguments for '", subcmd, "'. Try SCRIPT HELP."));
 }  // namespace dfly
+
+bool ScriptMgr::InsertFunction(std::string_view id, std::string_view body) {
+  ScriptKey key;
+  CHECK_EQ(key.size(), id.size());
+  memcpy(key.data(), id.data(), key.size());
+
+  lock_guard lk(mu_);
+  auto [it, inserted] = db_.emplace(key, nullptr);
+  if (inserted) {
+    it->second.reset(new char[body.size() + 1]);
+    memcpy(it->second.get(), body.data(), body.size());
+    it->second[body.size()] = '\0';
+  }
+  return inserted;
+}
+
+const char* ScriptMgr::Find(std::string_view sha) const {
+  ScriptKey key;
+  CHECK_EQ(key.size(), sha.size());
+  memcpy(key.data(), sha.data(), key.size());
+
+  lock_guard lk(mu_);
+  auto it = db_.find(key);
+  if (it == db_.end())
+    return nullptr;
+
+  return it->second.get();
+}
 
 }  // namespace dfly

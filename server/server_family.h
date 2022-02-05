@@ -42,6 +42,10 @@ class ServerFamily {
     return &global_state_;
   }
 
+  ScriptMgr* script_mgr() {
+    return script_mgr_.get();
+  }
+
  private:
   uint32_t shard_count() const {
     return ess_.size();
@@ -58,7 +62,6 @@ class ServerFamily {
   void Save(CmdArgList args, ConnectionContext* cntx);
   void Script(CmdArgList args, ConnectionContext* cntx);
   void Sync(CmdArgList args, ConnectionContext* cntx);
-
 
   void _Shutdown(CmdArgList args, ConnectionContext* cntx);
 

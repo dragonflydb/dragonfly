@@ -83,6 +83,12 @@ inline void ToUpper(const MutableSlice* val) {
   }
 }
 
+inline void ToLower(const MutableSlice* val) {
+  for (auto& c : *val) {
+    c = absl::ascii_tolower(c);
+  }
+}
+
 }  // namespace dfly
 
 namespace std {

@@ -4,6 +4,7 @@
 
 #include <absl/strings/str_join.h>
 #include <absl/strings/strip.h>
+#include <absl/strings/ascii.h>
 #include <gmock/gmock.h>
 
 #include "base/gtest.h"
@@ -214,11 +215,31 @@ TEST_F(DflyEngineTest, FlushDb) {
 }
 
 TEST_F(DflyEngineTest, Eval) {
-  auto resp = Run({"eval", "return 42", "0"});
-  EXPECT_THAT(resp[0], IntArg(42));
+  auto resp = Run({"eval", "return 43", "0"});
+  EXPECT_THAT(resp[0], IntArg(43));
 
   // resp = Run({"eval", "return redis.call('get', 'foo')", "0"});
   // EXPECT_THAT(resp[0], IntArg(42));  // TODO.
+}
+
+TEST_F(DflyEngineTest, EvalSha) {
+  auto resp = Run({"script", "load", "return 5"});
+  EXPECT_THAT(resp, ElementsAre(ArgType(RespExpr::STRING)));
+
+  string sha{ToSV(resp[0].GetBuf())};
+
+  resp = Run({"evalsha", sha, "0"});
+  EXPECT_THAT(resp[0], IntArg(5));
+
+  resp = Run({"script", "load", " return 5  "});
+  EXPECT_THAT(resp, ElementsAre(StrArg(sha)));
+
+  absl::AsciiStrToUpper(&sha);
+  resp = Run({"evalsha", sha, "0"});
+  EXPECT_THAT(resp[0], IntArg(5));
+
+  resp = Run({"evalsha", "foobar", "0"});
+  EXPECT_THAT(resp[0], ErrArg("No matching"));
 }
 
 // TODO: to test transactions with a single shard since then all transactions become local.

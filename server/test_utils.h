@@ -116,7 +116,7 @@ class BaseFamilyTest : public ::testing::Test {
   unsigned num_threads_ = 3;
 
   struct TestConn {
-    io::StringSink sink;
+    ::io::StringSink sink;
     std::unique_ptr<Connection> dummy_conn;
 
     ConnectionContext cmd_cntx;

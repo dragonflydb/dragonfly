@@ -397,9 +397,10 @@ void Interpreter::FuncSha1(string_view body, char* fp) {
 
 auto Interpreter::AddFunction(string_view body, string* result) -> AddResult {
   char funcname[43];
-  FuncSha1(body, funcname + 2);
   funcname[0] = 'f';
   funcname[1] = '_';
+  FuncSha1(body, funcname + 2);
+  funcname[42] = '\0';
 
   int type = lua_getglobal(lua_, funcname);
   lua_pop(lua_, 1);
@@ -409,17 +410,40 @@ auto Interpreter::AddFunction(string_view body, string* result) -> AddResult {
 
   result->assign(funcname + 2);
 
-  return type == LUA_TNIL ? OK : ALREADY_EXISTS;
+  return type == LUA_TNIL ? ADD_OK : ALREADY_EXISTS;
 }
 
-bool Interpreter::RunFunction(const char* f_id, std::string* error) {
+bool Interpreter::Exists(string_view sha) const {
+  if (sha.size() != 40)
+    return false;
+
+  char fname[43];
+  fname[0] = 'f';
+  fname[1] = '_';
+  fname[42] = '\0';
+  memcpy(fname + 2, sha.data(), 40);
+
+  int type = lua_getglobal(lua_, fname);
+  lua_pop(lua_, 1);
+
+  return type == LUA_TFUNCTION;
+}
+
+auto Interpreter::RunFunction(string_view sha, std::string* error) -> RunResult {
+  DCHECK_EQ(40u, sha.size());
+
   lua_getglobal(lua_, "__redis__err__handler");
-  int type = lua_getglobal(lua_, f_id);
+  char fname[43];
+  fname[0] = 'f';
+  fname[1] = '_';
+  memcpy(fname + 2, sha.data(), 40);
+  fname[42] = '\0';
+
+  int type = lua_getglobal(lua_, fname);
   if (type != LUA_TFUNCTION) {
-    error->assign("function not found");  // TODO: noscripterr.
     lua_pop(lua_, 2);
 
-    return false;
+    return NOT_EXISTS;
   }
 
   /* We have zero arguments and expect
@@ -429,13 +453,15 @@ bool Interpreter::RunFunction(const char* f_id, std::string* error) {
   if (err) {
     *error = lua_tostring(lua_, -1);
   }
-  return err == 0;
+
+  return err == 0 ? RUN_OK : RUN_ERR;
 }
 
 void Interpreter::SetGlobalArray(const char* name, MutSliceSpan args) {
   SetGlobalArrayInternal(lua_, name, args);
 }
 
+/*
 bool Interpreter::Execute(string_view body, char f_id[41], string* error) {
   lua_getglobal(lua_, "__redis__err__handler");
   char fname[43];
@@ -464,6 +490,7 @@ bool Interpreter::Execute(string_view body, char f_id[41], string* error) {
 
   return err == 0;
 }
+*/
 
 bool Interpreter::AddInternal(const char* f_id, string_view body, string* error) {
   string script = absl::StrCat("function ", f_id, "() \n");

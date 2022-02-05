@@ -22,11 +22,14 @@ class ScriptMgr {
 
   void Run(CmdArgList args, ConnectionContext* cntx);
 
+  bool InsertFunction(std::string_view sha,  std::string_view body);
+  const char* Find(std::string_view sha) const;
+
  private:
   EngineShardSet* ess_;
   using ScriptKey = std::array<char, 40>;
   absl::flat_hash_map<ScriptKey, std::unique_ptr<char[]>> db_;
-  ::boost::fibers::mutex mu_;
+  mutable ::boost::fibers::mutex mu_;
 };
 
 }  // namespace dfly

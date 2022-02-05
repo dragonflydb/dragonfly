@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include <boost/fiber/mutex.hpp>
 #include <optional>
 #include <vector>
 
@@ -62,11 +61,6 @@ class ServerState {  // public struct - to allow initialization.
   }
 
   Interpreter& GetInterpreter();
-
-  // We have interpreter per thread, not per connection.
-  // Since we might preempt into different fibers when operating on interpreter
-  // we must lock it until we finish using it per request.
-  ::boost::fibers::mutex interpreter_mutex;
 
  private:
   int64_t live_transactions_ = 0;

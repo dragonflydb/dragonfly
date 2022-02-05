@@ -88,7 +88,6 @@ class InterpreterTest : public ::testing::Test {
 
   bool Execute(string_view script);
 
-
   Interpreter intptr_;
   TestSerializer ser_;
   string error_;
@@ -103,9 +102,18 @@ void InterpreterTest::SetGlobalArray(const char* name, vector<string> vec) {
 }
 
 bool InterpreterTest::Execute(string_view script) {
-  char buf[48];
+  string result;
+  Interpreter::AddResult add_res = intptr_.AddFunction(script, &result);
+  if (add_res == Interpreter::COMPILE_ERR) {
+    error_ = result;
+    return false;
+  }
 
-  return intptr_.Execute(script, buf, &error_) && Serialize(&error_);
+  Interpreter::RunResult run_res = intptr_.RunFunction(result, &error_);
+  if (run_res != Interpreter::RUN_OK) {
+    return false;
+  }
+  return Serialize(&error_);
 }
 
 TEST_F(InterpreterTest, Basic) {
@@ -155,16 +163,17 @@ TEST_F(InterpreterTest, Basic) {
 TEST_F(InterpreterTest, Add) {
   string res1, res2;
 
-  EXPECT_EQ(Interpreter::OK, intptr_.AddFunction("return 0", &res1));
+  EXPECT_EQ(Interpreter::ADD_OK, intptr_.AddFunction("return 0", &res1));
   EXPECT_EQ(0, lua_gettop(lua()));
   EXPECT_EQ(Interpreter::COMPILE_ERR, intptr_.AddFunction("foobar", &res2));
   EXPECT_THAT(res2, testing::HasSubstr("syntax error"));
   EXPECT_EQ(0, lua_gettop(lua()));
+  EXPECT_TRUE(intptr_.Exists(res1));
 }
 
 // Test cases taken from scripting.tcl
 TEST_F(InterpreterTest, Execute) {
-  EXPECT_TRUE(Execute("return 42"));
+  ASSERT_TRUE(Execute("return 42"));
   EXPECT_EQ("i(42)", ser_.res);
 
   EXPECT_TRUE(Execute("return 'hello'"));
@@ -213,7 +222,7 @@ TEST_F(InterpreterTest, Call) {
   };
 
   intptr_.SetRedisFunc(cb);
-  EXPECT_TRUE(Execute("local var = redis.call('string'); return {type(var), var}"));
+  ASSERT_TRUE(Execute("local var = redis.call('string'); return {type(var), var}"));
   EXPECT_EQ("[str(string) str(foo)]", ser_.res);
 
   EXPECT_TRUE(Execute("local var = redis.call('double'); return {type(var), var}"));

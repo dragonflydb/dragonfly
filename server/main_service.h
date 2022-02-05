@@ -17,6 +17,7 @@ class AcceptServer;
 
 namespace dfly {
 
+class Interpreter;
 class ObjectExplorer;  // for Interpreter
 
 class Service {
@@ -68,7 +69,16 @@ class Service {
   static void Multi(CmdArgList args, ConnectionContext* cntx);
 
   void Eval(CmdArgList args, ConnectionContext* cntx);
+  void EvalSha(CmdArgList args, ConnectionContext* cntx);
   void Exec(CmdArgList args, ConnectionContext* cntx);
+
+  struct EvalArgs {
+    std::string_view sha;  // only one of them is defined.
+    CmdArgList keys, args;
+  };
+
+  void EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, ConnectionContext* cntx);
+
   void CallFromScript(CmdArgList args, ObjectExplorer* reply, ConnectionContext* cntx);
 
   void RegisterCommands();

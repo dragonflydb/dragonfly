@@ -20,6 +20,7 @@ extern "C" {
 #include "server/error.h"
 #include "server/generic_family.h"
 #include "server/list_family.h"
+#include "server/script_mgr.h"
 #include "server/server_state.h"
 #include "server/string_family.h"
 #include "server/transaction.h"
@@ -343,7 +344,44 @@ void Service::CallFromScript(CmdArgList args, ObjectExplorer* reply, ConnectionC
 }
 
 void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
+  string_view num_keys_str = ArgS(args, 2);
+  int32_t num_keys;
+
+  if (!absl::SimpleAtoi(num_keys_str, &num_keys) || num_keys < 0) {
+    return (*cntx)->SendError(kInvalidIntErr);
+  }
+
+  if (unsigned(num_keys) > args.size() - 3) {
+    return (*cntx)->SendError("Number of keys can't be greater than number of args");
+  }
   string_view body = ArgS(args, 1);
+  body = absl::StripAsciiWhitespace(body);
+
+  if (body.empty()) {
+    return (*cntx)->SendNull();
+  }
+
+  ServerState* ss = ServerState::tlocal();
+  Interpreter& script = ss->GetInterpreter();
+
+  string result;
+  Interpreter::AddResult add_result = script.AddFunction(body, &result);
+  if (add_result == Interpreter::COMPILE_ERR) {
+    return (*cntx)->SendError(result);
+  }
+
+  if (add_result == Interpreter::ADD_OK) {
+    server_family_.script_mgr()->InsertFunction(result, body);
+  }
+
+  EvalArgs eval_args;
+  eval_args.sha = result;
+  eval_args.keys = args.subspan(3, num_keys);
+  eval_args.args = args.subspan(3 + num_keys);
+  EvalInternal(eval_args, &script, cntx);
+}
+
+void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
   string_view num_keys_str = ArgS(args, 2);
   int32_t num_keys;
 
@@ -355,31 +393,82 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError("Number of keys can't be greater than number of args");
   }
 
+  ToLower(&args[1]);
+
+  string_view sha = ArgS(args, 1);
   ServerState* ss = ServerState::tlocal();
-  lock_guard lk(ss->interpreter_mutex);
   Interpreter& script = ss->GetInterpreter();
+  bool exists = script.Exists(sha);
 
-  CmdArgList eval_keys = args.subspan(3, num_keys);
-  CmdArgList eval_args = args.subspan(3 + num_keys);
+  if (!exists) {
+    const char* body = (sha.size() == 40) ? server_family_.script_mgr()->Find(sha) : nullptr;
 
-  script.SetGlobalArray("KEYS", eval_keys);
-  script.SetGlobalArray("ARGV", eval_args);
+    if (!body) {
+      return (*cntx)->SendError(kScriptNotFound);
+    }
+
+    string res;
+    CHECK_EQ(Interpreter::ADD_OK, script.AddFunction(body, &res));
+    CHECK_EQ(res, sha);
+  }
+
+  EvalArgs ev_args;
+  ev_args.sha = sha;
+  ev_args.keys = args.subspan(3, num_keys);
+  ev_args.args = args.subspan(3 + num_keys);
+
+  EvalInternal(ev_args, &script, cntx);
+}
+
+void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
+                           ConnectionContext* cntx) {
+  DCHECK(!eval_args.sha.empty());
+
+  if (eval_args.sha.size() != 40) {
+    return (*cntx)->SendError(kScriptNotFound);
+  }
+
+  bool exists = interpreter->Exists(eval_args.sha);
+
+  if (!exists) {
+    const char* body = server_family_.script_mgr()->Find(eval_args.sha);
+    if (!body) {
+      return (*cntx)->SendError(kScriptNotFound);
+    }
+
+    string res;
+    CHECK_EQ(Interpreter::ADD_OK, interpreter->AddFunction(body, &res));
+    CHECK_EQ(res, eval_args.sha);
+  }
+
   string error;
-  char f_id[48];
-  bool success = script.Execute(body, f_id, &error);
+
+  auto lk = interpreter->Lock();
+  interpreter->SetGlobalArray("KEYS", eval_args.keys);
+  interpreter->SetGlobalArray("ARGV", eval_args.args);
+  interpreter->SetRedisFunc(
+      [cntx, this](CmdArgList args, ObjectExplorer* reply) { CallFromScript(args, reply, cntx); });
+
+  bool success = false;
+  if (eval_args.sha.empty()) {
+  } else {
+    Interpreter::RunResult result = interpreter->RunFunction(eval_args.sha, &error);
+    if (result == Interpreter::RUN_ERR) {
+      return (*cntx)->SendError(error);
+    }
+    CHECK(result == Interpreter::RUN_OK);
+    success = true;
+  }
+
   if (success) {
     EvalSerializer ser{static_cast<RedisReplyBuilder*>(cntx->reply_builder())};
     string error;
 
-    script.SetRedisFunc([cntx, this](CmdArgList args, ObjectExplorer* reply) {
-      CallFromScript(args, reply, cntx);
-    });
-
-    if (!script.Serialize(&ser, &error)) {
+    if (!interpreter->Serialize(&ser, &error)) {
       (*cntx)->SendError(error);
     }
   } else {
-    string resp = absl::StrCat("Error running script (call to ", f_id, "): ", error);
+    string resp = absl::StrCat("Error running script (call to ", eval_args.sha, "): ", error);
     return (*cntx)->SendError(resp);
   }
 }
@@ -441,8 +530,8 @@ VarzValue::Map Service::GetVarzStats() {
 using ServiceFunc = void (Service::*)(CmdArgList, ConnectionContext* cntx);
 
 #define HFUNC(x) SetHandler(&Service::x)
-#define MFUNC(x) SetHandler([this](CmdArgList sp, ConnectionContext* cntx) { \
-         this->x(std::move(sp), cntx); })
+#define MFUNC(x) \
+  SetHandler([this](CmdArgList sp, ConnectionContext* cntx) { this->x(std::move(sp), cntx); })
 
 void Service::RegisterCommands() {
   using CI = CommandId;
@@ -450,9 +539,9 @@ void Service::RegisterCommands() {
   constexpr auto kExecMask = CO::LOADING | CO::NOSCRIPT | CO::GLOBAL_TRANS;
 
   registry_ << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0}.HFUNC(Quit)
-            << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(
-                   Multi)
+            << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(Multi)
             << CI{"EVAL", CO::NOSCRIPT, -3, 0, 0, 0}.MFUNC(Eval)
+            << CI{"EVALSHA", CO::NOSCRIPT, -3, 0, 0, 0}.MFUNC(EvalSha)
             << CI{"EXEC", kExecMask, 1, 0, 0, 0}.MFUNC(Exec);
 
   StringFamily::Register(&registry_);
