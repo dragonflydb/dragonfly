@@ -67,15 +67,22 @@ class Interpreter {
     RUN_ERR = 2,
   };
 
+  void SetGlobalArray(const char* name, MutSliceSpan args);
+
   // Runs already added function sha returned by a successful call to AddFunction().
   // Returns: true if the call succeeded, otherwise fills error and returns false.
   // sha must be 40 char length.
   RunResult RunFunction(std::string_view sha, std::string* err);
 
-  void SetGlobalArray(const char* name, MutSliceSpan args);
+  // Checks whether the result is safe to serialize.
+  // Should fit 2 conditions:
+  // 1. Be the only value on the stack.
+  // 2. Should have depth of no more than 128.
+  bool IsResultSafe() const;
 
-  // bool Execute(std::string_view body, char f_id[41], std::string* err);
-  bool Serialize(ObjectExplorer* serializer, std::string* err);
+  void SerializeResult(ObjectExplorer* serializer);
+
+  void ResetStack();
 
   // fp must point to buffer with at least 41 chars.
   // fp[40] will be set to '\0'.
@@ -98,6 +105,7 @@ class Interpreter {
   // Returns true if function was successfully added,
   // otherwise returns false and sets the error.
   bool AddInternal(const char* f_id, std::string_view body, std::string* error);
+  bool IsTableSafe() const;
 
   int RedisGenericCommand(bool raise_error);
 

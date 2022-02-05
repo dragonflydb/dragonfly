@@ -76,14 +76,6 @@ class InterpreterTest : public ::testing::Test {
     CHECK_EQ(0, lua_pcall(lua(), 0, num_results, 0));
   }
 
-  bool Serialize(string* err) {
-    ser_.res.clear();
-    bool res = intptr_.Serialize(&ser_, err);
-    if (!ser_.res.empty())
-      ser_.res.pop_back();
-    return res;
-  }
-
   void SetGlobalArray(const char* name, vector<string> vec);
 
   bool Execute(string_view script);
@@ -113,7 +105,12 @@ bool InterpreterTest::Execute(string_view script) {
   if (run_res != Interpreter::RUN_OK) {
     return false;
   }
-  return Serialize(&error_);
+
+  ser_.res.clear();
+  intptr_.SerializeResult(&ser_);
+  ser_.res.pop_back();
+
+  return true;
 }
 
 TEST_F(InterpreterTest, Basic) {
@@ -158,6 +155,33 @@ TEST_F(InterpreterTest, Basic) {
               << lua_typename(lua(), vt);
     lua_pop(lua(), 1);
   }
+}
+
+TEST_F(InterpreterTest, Stack) {
+  RunInline(R"(
+local x = {}
+for i=1,127 do
+   x = {x}
+end
+return x
+)",
+            "code1", 1);
+
+  ASSERT_EQ(1, lua_gettop(lua()));
+  ASSERT_TRUE(intptr_.IsResultSafe());
+  lua_pop(lua(), 1);
+
+  RunInline(R"(
+local x = {}
+for i=1,128 do
+   x = {x}
+end
+return x
+)",
+            "code1", 1);
+
+  ASSERT_EQ(1, lua_gettop(lua()));
+  ASSERT_FALSE(intptr_.IsResultSafe());
 }
 
 TEST_F(InterpreterTest, Add) {

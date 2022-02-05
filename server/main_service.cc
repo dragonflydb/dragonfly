@@ -99,6 +99,14 @@ class EvalSerializer : public ObjectExplorer {
   RedisReplyBuilder* rb_;
 };
 
+bool IsSHA(string_view str) {
+  for (auto c : str) {
+    if (!absl::ascii_isxdigit(c))
+      return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp) : pp_(*pp), shard_set_(pp), server_family_(this) {
@@ -189,7 +197,14 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  bool is_write_cmd = cid->opt_mask() & CO::WRITE;
+  bool under_script = cntx->conn_state.script_info.has_value();
+
+  if (under_script && (cid->opt_mask() & CO::NOSCRIPT)) {
+    return (*cntx)->SendError("This Redis command is not allowed from script");
+  }
+
+  bool is_write_cmd =
+      (cid->opt_mask() & CO::WRITE) || (under_script && cntx->conn_state.script_info->is_write);
   bool under_multi = cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE && !is_trans_cmd;
 
   if (!etl.is_master && is_write_cmd) {
@@ -340,7 +355,8 @@ void Service::Multi(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::CallFromScript(CmdArgList args, ObjectExplorer* reply, ConnectionContext* cntx) {
-  reply->OnInt(42);
+  // reply->OnInt(42);
+  DispatchCommand(std::move(args), cntx);
 }
 
 void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
@@ -402,7 +418,6 @@ void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
 
   if (!exists) {
     const char* body = (sha.size() == 40) ? server_family_.script_mgr()->Find(sha) : nullptr;
-
     if (!body) {
       return (*cntx)->SendError(kScriptNotFound);
     }
@@ -424,7 +439,8 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
                            ConnectionContext* cntx) {
   DCHECK(!eval_args.sha.empty());
 
-  if (eval_args.sha.size() != 40) {
+  // Sanitizing the input to avoid code injection.
+  if (eval_args.sha.size() != 40 || !IsSHA(eval_args.sha)) {
     return (*cntx)->SendError(kScriptNotFound);
   }
 
@@ -443,34 +459,38 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
 
   string error;
 
+  DCHECK(!cntx->conn_state.script_info);  // we should not call eval from the script.
+
+  // TODO: to determine whether the script is RO by scanning all "redis.p?call" calls
+  // and checking whether all invocations consist of RO commands.
+  // we can do it once during script insertion into script mgr.
+  cntx->conn_state.script_info.emplace();
+
   auto lk = interpreter->Lock();
+
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
   interpreter->SetRedisFunc(
       [cntx, this](CmdArgList args, ObjectExplorer* reply) { CallFromScript(args, reply, cntx); });
 
-  bool success = false;
-  if (eval_args.sha.empty()) {
-  } else {
-    Interpreter::RunResult result = interpreter->RunFunction(eval_args.sha, &error);
-    if (result == Interpreter::RUN_ERR) {
-      return (*cntx)->SendError(error);
-    }
-    CHECK(result == Interpreter::RUN_OK);
-    success = true;
-  }
+  Interpreter::RunResult result = interpreter->RunFunction(eval_args.sha, &error);
 
-  if (success) {
-    EvalSerializer ser{static_cast<RedisReplyBuilder*>(cntx->reply_builder())};
-    string error;
+  cntx->conn_state.script_info.reset(); // reset script_info
 
-    if (!interpreter->Serialize(&ser, &error)) {
-      (*cntx)->SendError(error);
-    }
-  } else {
+  if (result == Interpreter::RUN_ERR) {
     string resp = absl::StrCat("Error running script (call to ", eval_args.sha, "): ", error);
     return (*cntx)->SendError(resp);
   }
+  CHECK(result == Interpreter::RUN_OK);
+
+  EvalSerializer ser{static_cast<RedisReplyBuilder*>(cntx->reply_builder())};
+
+  if (!interpreter->IsResultSafe()) {
+    (*cntx)->SendError("reached lua stack limit");
+  } else {
+    interpreter->SerializeResult(&ser);
+  }
+  interpreter->ResetStack();
 }
 
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {

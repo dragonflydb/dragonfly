@@ -34,7 +34,7 @@ struct ConnectionState {
 
     // Whether this connection belongs to replica, i.e. a dragonfly slave is connected to this
     // host (master) via this connection to sync from it.
-    REPL_CONNECTION = 2,
+    REPL_CONNECTION = 4,
   };
 
   uint32_t mask = 0;  // A bitmask of Mask values.
@@ -46,6 +46,12 @@ struct ConnectionState {
   bool IsRunViaDispatch() const {
     return mask & ASYNC_DISPATCH;
   }
+
+  // Lua-script related data.
+  struct Script {
+    bool is_write = true;
+  };
+  std::optional<Script> script_info;
 };
 
 class ConnectionContext {

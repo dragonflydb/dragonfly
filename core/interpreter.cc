@@ -155,40 +155,6 @@ void SetGlobalArrayInternal(lua_State* lua, const char* name, Interpreter::MutSl
   lua_setglobal(lua, name);
 }
 
-#if 0
-/*
- * Save the give pointer on Lua registry, used to save the Lua context and
- * function context so we can retrieve them from lua_State.
- */
-void SaveOnRegistry(lua_State* lua, const char* name, void* ptr) {
-  lua_pushstring(lua, name);
-  if (ptr) {
-    lua_pushlightuserdata(lua, ptr);
-  } else {
-    lua_pushnil(lua);
-  }
-  lua_settable(lua, LUA_REGISTRYINDEX);
-}
-
-/*
- * Get a saved pointer from registry
- */
-void* GetFromRegistry(lua_State* lua, const char* name) {
-  lua_pushstring(lua, name);
-  lua_gettable(lua, LUA_REGISTRYINDEX);
-
-  /* must be light user data */
-  DCHECK(lua_islightuserdata(lua, -1));
-
-  void* ptr = (void*)lua_topointer(lua, -1);
-  DCHECK(ptr);
-
-  /* pops the value */
-  lua_pop(lua, 1);
-
-  return ptr;
-}
-#endif
 
 /* This function is used in order to push an error on the Lua stack in the
  * format used by redis.pcall to return errors, which is a lua table
@@ -379,6 +345,7 @@ Interpreter::Interpreter() {
 
   /* Finally set the table as 'redis' global var. */
   lua_setglobal(lua_, "redis");
+  CHECK(lua_checkstack(lua_, 64));
 }
 
 Interpreter::~Interpreter() {
@@ -461,36 +428,19 @@ void Interpreter::SetGlobalArray(const char* name, MutSliceSpan args) {
   SetGlobalArrayInternal(lua_, name, args);
 }
 
-/*
-bool Interpreter::Execute(string_view body, char f_id[41], string* error) {
-  lua_getglobal(lua_, "__redis__err__handler");
-  char fname[43];
-
-  fname[0] = 'f';
-  fname[1] = '_';
-  FuncSha1(body, f_id);
-  memcpy(fname + 2, f_id, 41);
-
-  int type = lua_getglobal(lua_, fname);
-  if (type == LUA_TNIL) {
-    lua_pop(lua_, 1);
-    if (!AddInternal(fname, body, error))
-      return false;
-
-    type = lua_getglobal(lua_, fname);
-    CHECK_EQ(type, LUA_TFUNCTION);
-  } else if (type != LUA_TFUNCTION) {
+bool Interpreter::IsResultSafe() const {
+  int top = lua_gettop(lua_);
+  if (top >= 128)
     return false;
-  }
 
-  int err = lua_pcall(lua_, 0, 1, -2);
-  if (err) {
-    *error = lua_tostring(lua_, -1);
-  }
+  int t = lua_type(lua_, -1);
+  if (t != LUA_TTABLE)
+    return true;
 
-  return err == 0;
+  bool res = IsTableSafe();
+  lua_settop(lua_, top);
+  return res;
 }
-*/
 
 bool Interpreter::AddInternal(const char* f_id, string_view body, string* error) {
   string script = absl::StrCat("function ", f_id, "() \n");
@@ -511,22 +461,58 @@ bool Interpreter::AddInternal(const char* f_id, string_view body, string* error)
   return true;
 }
 
-bool Interpreter::Serialize(ObjectExplorer* serializer, std::string* error) {
-  // TODO: to get rid of this check or move it to the external function.
-  // It does not make sense to do this check recursively and it complicates the flow
-  // were in the middle of the serialization we could theoretically fail.
-  if (!lua_checkstack(lua_, 4)) {
-    /* Increase the Lua stack if needed to make sure there is enough room
-     * to push 4 elements to the stack. On failure, return error.
-     * Notice that we need, in the worst case, 4 elements because returning a map might
-     * require push 4 elements to the Lua stack.*/
-    error->assign("reached lua stack limit");
-    lua_pop(lua_, 1); /* pop the element from the stack */
-    return false;
+bool Interpreter::IsTableSafe() const {
+  auto fres = FetchKey(lua_, "err");
+  if (fres && *fres == LUA_TSTRING) {
+    return true;
   }
 
+  fres = FetchKey(lua_, "ok");
+  if (fres && *fres == LUA_TSTRING) {
+    return true;
+  }
+
+  vector<pair<unsigned, unsigned>> lens;
+  unsigned len = lua_rawlen(lua_, -1);
+  unsigned i = 0;
+
+  // implement dfs traversal
+  while (true) {
+    while (i < len) {
+      DVLOG(1) << "Stack " << lua_gettop(lua_) << "/" << i << "/" << len;
+      int t = lua_rawgeti(lua_, -1, i + 1);  // push table element
+      if (t == LUA_TTABLE) {
+        if (lens.size() >= 127)  // reached depth 128
+          return false;
+
+        CHECK(lua_checkstack(lua_, 1));
+        lens.emplace_back(i + 1, len);  // save the parent state.
+
+        // reset to iterate on the next table.
+        i = 0;
+        len = lua_rawlen(lua_, -1);
+      } else {
+        lua_pop(lua_, 1); // pop table element
+        ++i;
+      }
+    }
+
+    if (lens.empty())  // exit criteria
+      break;
+
+    // unwind to the state before we went down the stack.
+    tie(i, len) = lens.back();
+    lens.pop_back();
+
+    lua_pop(lua_, 1);
+  };
+  DCHECK_EQ(1, lua_gettop(lua_));
+
+  return true;
+}
+
+void Interpreter::SerializeResult(ObjectExplorer* serializer) {
   int t = lua_type(lua_, -1);
-  bool res = true;
 
   switch (t) {
     case LUA_TSTRING:
@@ -566,7 +552,7 @@ bool Interpreter::Serialize(ObjectExplorer* serializer, std::string* error) {
         // to traverse each object. This can be done as a dry-run before doing real serialization.
         // Once we are sure we are safe we can simplify the serialization flow and
         // remove the error factor.
-        CHECK(Serialize(serializer, error));  // pops the element
+        SerializeResult(serializer);  // pops the element
       }
       serializer->OnArrayEnd();
       break;
@@ -575,11 +561,15 @@ bool Interpreter::Serialize(ObjectExplorer* serializer, std::string* error) {
       serializer->OnNil();
       break;
     default:
-      error->assign(absl::StrCat("Unsupported type ", t));
+      LOG(ERROR) << "Unsupported type " << lua_typename(lua_, t);
+      serializer->OnNil();
   }
 
   lua_pop(lua_, 1);
-  return res;
+}
+
+void Interpreter::ResetStack() {
+  lua_settop(lua_, 0);
 }
 
 // Returns number of results, which is always 1 in this case.
