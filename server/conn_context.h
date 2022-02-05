@@ -90,6 +90,12 @@ class ConnectionContext {
     return rbuilder_.get();
   }
 
+  ReplyBuilderInterface* Inject(ReplyBuilderInterface* new_i) {
+    ReplyBuilderInterface* res = rbuilder_.release();
+    rbuilder_.reset(new_i);
+    return res;
+  }
+
  private:
   Connection* owner_;
   std::unique_ptr<ReplyBuilderInterface> rbuilder_;

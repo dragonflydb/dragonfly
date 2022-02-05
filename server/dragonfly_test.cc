@@ -218,8 +218,11 @@ TEST_F(DflyEngineTest, Eval) {
   auto resp = Run({"eval", "return 43", "0"});
   EXPECT_THAT(resp[0], IntArg(43));
 
-  // resp = Run({"eval", "return redis.call('get', 'foo')", "0"});
-  // EXPECT_THAT(resp[0], IntArg(42));  // TODO.
+  resp = Run({"incrby", "foo", "42"});
+  EXPECT_THAT(resp[0], IntArg(42));
+
+  resp = Run({"eval", "return redis.call('get', 'foo')", "0"});
+  EXPECT_THAT(resp[0], StrArg("42"));
 }
 
 TEST_F(DflyEngineTest, EvalSha) {

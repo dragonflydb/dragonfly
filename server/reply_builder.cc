@@ -36,6 +36,8 @@ void SinkReplyBuilder::CloseConnection() {
 }
 
 void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
+  DCHECK(sink_);
+
   if (should_batch_) {
     // TODO: to introduce flushing when too much data is batched.
     for (unsigned i = 0; i < len; ++i) {
