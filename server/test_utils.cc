@@ -161,8 +161,12 @@ RespVec BaseFamilyTest::Run(initializer_list<std::string_view> list) {
     return pp_->at(0)->Await([&] { return this->Run(list); });
   }
 
-  mu_.lock();
   string id = GetId();
+  return Run(id, list);
+}
+
+RespVec BaseFamilyTest::Run(std::string_view id, std::initializer_list<std::string_view> list) {
+  mu_.lock();
   auto [it, inserted] = connections_.emplace(id, nullptr);
 
   if (inserted) {
@@ -178,7 +182,11 @@ RespVec BaseFamilyTest::Run(initializer_list<std::string_view> list) {
   auto& context = conn->cmd_cntx;
   context.shard_set = ess_;
 
+  DCHECK(context.transaction == nullptr);
+
   service_->DispatchCommand(cmd_arg_list, &context);
+
+  DCHECK(context.transaction == nullptr);
 
   unique_lock lk(mu_);
   last_cmd_dbg_info_ = context.last_command_debug;

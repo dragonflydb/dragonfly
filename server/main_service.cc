@@ -251,6 +251,35 @@ bool IsSHA(string_view str) {
   return true;
 }
 
+bool IsTransactional(const CommandId* cid) {
+  if (cid->first_key_pos() > 0 || (cid->opt_mask() & CO::GLOBAL_TRANS))
+    return true;
+
+  string_view name{cid->name()};
+
+  if (name == "EVAL" || name == "EVALSHA")
+    return true;
+
+  return false;
+}
+
+bool EvalValidator(CmdArgList args, ConnectionContext* cntx) {
+  string_view num_keys_str = ArgS(args, 2);
+  int32_t num_keys;
+
+  if (!absl::SimpleAtoi(num_keys_str, &num_keys) || num_keys < 0) {
+    (*cntx)->SendError(kInvalidIntErr);
+    return false;
+  }
+
+  if (unsigned(num_keys) > args.size() - 3) {
+    (*cntx)->SendError("Number of keys can't be greater than number of args");
+    return false;
+  }
+
+  return true;
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp) : pp_(*pp), shard_set_(pp), server_family_(this) {
@@ -365,9 +394,21 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(WrongNumArgsError(cmd_str));
   }
 
-  if (under_multi && (cid->opt_mask() & CO::ADMIN)) {
-    (*cntx)->SendError("Can not run admin commands under multi-transactions");
+  // Validate more complicated cases with custom validators.
+  if (!cid->Validate(args, cntx)) {
     return;
+  }
+
+  if (under_multi) {
+    if (cid->opt_mask() & CO::ADMIN) {
+      (*cntx)->SendError("Can not run admin commands under transactions");
+      return;
+    }
+
+    if (string_view{cid->name()} == "SELECT") {
+      (*cntx)->SendError("Can not call SELECT within a transaction");
+      return;
+    }
   }
 
   std::move(multi_error).Cancel();
@@ -389,16 +430,18 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
   // Create command transaction
   intrusive_ptr<Transaction> dist_trans;
 
-  if (cid->first_key_pos() > 0 || (cid->opt_mask() & CO::GLOBAL_TRANS)) {
-    dist_trans.reset(new Transaction{cid, &shard_set_});
-    cntx->transaction = dist_trans.get();
+  if (!under_script) {
+    DCHECK(cntx->transaction == nullptr);
 
-    if (cid->first_key_pos() > 0) {
+    if (IsTransactional(cid)) {
+      dist_trans.reset(new Transaction{cid, &shard_set_});
+      cntx->transaction = dist_trans.get();
+
       dist_trans->InitByArgs(cntx->conn_state.db_index, args);
       cntx->last_command_debug.shards_count = cntx->transaction->unique_shard_cnt();
+    } else {
+      cntx->transaction = nullptr;
     }
-  } else {
-    cntx->transaction = nullptr;
   }
 
   cntx->cid = cid;
@@ -411,7 +454,10 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
     cntx->last_command_debug.clock = dist_trans->txid();
     cntx->last_command_debug.is_ooo = dist_trans->IsOOO();
   }
-  cntx->transaction = nullptr;
+
+  if (!under_script) {
+    cntx->transaction = nullptr;
+  }
 }
 
 void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
@@ -508,16 +554,10 @@ void Service::CallFromScript(CmdArgList args, ObjectExplorer* reply, ConnectionC
 }
 
 void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
-  string_view num_keys_str = ArgS(args, 2);
-  int32_t num_keys;
+  uint32_t num_keys;
 
-  if (!absl::SimpleAtoi(num_keys_str, &num_keys) || num_keys < 0) {
-    return (*cntx)->SendError(kInvalidIntErr);
-  }
+  CHECK(absl::SimpleAtoi(ArgS(args, 2), &num_keys));  // we already validated this
 
-  if (unsigned(num_keys) > args.size() - 3) {
-    return (*cntx)->SendError("Number of keys can't be greater than number of args");
-  }
   string_view body = ArgS(args, 1);
   body = absl::StripAsciiWhitespace(body);
 
@@ -547,15 +587,9 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
 
 void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
   string_view num_keys_str = ArgS(args, 2);
-  int32_t num_keys;
+  uint32_t num_keys;
 
-  if (!absl::SimpleAtoi(num_keys_str, &num_keys) || num_keys < 0) {
-    return (*cntx)->SendError(kInvalidIntErr);
-  }
-
-  if (unsigned(num_keys) > args.size() - 3) {
-    return (*cntx)->SendError("Number of keys can't be greater than number of args");
-  }
+  CHECK(absl::SimpleAtoi(num_keys_str, &num_keys));
 
   ToLower(&args[1]);
 
@@ -708,8 +742,8 @@ void Service::RegisterCommands() {
 
   registry_ << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0}.HFUNC(Quit)
             << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(Multi)
-            << CI{"EVAL", CO::NOSCRIPT, -3, 0, 0, 0}.MFUNC(Eval)
-            << CI{"EVALSHA", CO::NOSCRIPT, -3, 0, 0, 0}.MFUNC(EvalSha)
+            << CI{"EVAL", CO::NOSCRIPT, -3, 0, 0, 0}.MFUNC(Eval).SetValidator(&EvalValidator)
+            << CI{"EVALSHA", CO::NOSCRIPT, -3, 0, 0, 0}.MFUNC(EvalSha).SetValidator(&EvalValidator)
             << CI{"EXEC", kExecMask, 1, 0, 0, 0}.MFUNC(Exec);
 
   StringFamily::Register(&registry_);

@@ -38,6 +38,7 @@ const char* OptName(CommandOpt fl);
 class CommandId {
  public:
   using Handler = std::function<void(CmdArgList, ConnectionContext*)>;
+  using ArgValidator = std::function<bool(CmdArgList, ConnectionContext*)>;
 
   /**
    * @brief Construct a new Command Id object
@@ -89,8 +90,19 @@ class CommandId {
     return *this;
   }
 
+  CommandId& SetValidator(ArgValidator f) {
+    validator_ = std::move(f);
+
+    return *this;
+  }
+
   void Invoke(CmdArgList args, ConnectionContext* cntx) const {
     handler_(std::move(args), cntx);
+  }
+
+  // Returns true if validation succeeded.
+  bool Validate(CmdArgList args, ConnectionContext* cntx) const {
+    return !validator_ || validator_(std::move(args), cntx);
   }
 
   static const char* OptName(CO::CommandOpt fl);
@@ -106,6 +118,7 @@ class CommandId {
   int8_t step_key_;
 
   Handler handler_;
+  ArgValidator validator_;
 };
 
 class CommandRegistry {

@@ -100,7 +100,8 @@ TEST_F(ListFamilyTest, BLPopBlocking) {
     LOG(INFO) << "pop1";
   });
   this_fiber::sleep_for(30us);
-  pp_->at(1)->Await([&] { Run({"lpush", "x", "2", "1"}); });
+
+  pp_->at(1)->Await([&] { Run("B1", {"lpush", "x", "2", "1"}); });
 
   fb0.join();
   fb1.join();

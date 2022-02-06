@@ -546,7 +546,8 @@ using CI = CommandId;
 #define HFUNC(x) SetHandler(&GenericFamily::x)
 
 void GenericFamily::Register(CommandRegistry* registry) {
-  constexpr auto kSelectOpts = CO::LOADING | CO::FAST;
+  constexpr auto kSelectOpts = CO::LOADING | CO::FAST | CO::NOSCRIPT;
+
   *registry << CI{"DEL", CO::WRITE, -2, 1, -1, 1}.HFUNC(Del)
     /* Redis compaitibility:
      * We don't allow PING during loading since in Redis PING is used as

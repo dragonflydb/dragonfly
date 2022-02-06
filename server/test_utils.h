@@ -96,7 +96,10 @@ class BaseFamilyTest : public ::testing::Test {
   void TearDown() override;
 
  protected:
+
   RespVec Run(std::initializer_list<std::string_view> list);
+  RespVec Run(std::string_view id, std::initializer_list<std::string_view> list);
+
   int64_t CheckedInt(std::initializer_list<std::string_view> list);
 
   bool IsLocked(DbIndex db_index, std::string_view key) const;

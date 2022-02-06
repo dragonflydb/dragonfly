@@ -4,6 +4,8 @@
 
 #include "server/transaction.h"
 
+#include <absl/strings/match.h>
+
 #include "base/logging.h"
 #include "server/command_registry.h"
 #include "server/db_slice.h"
@@ -21,6 +23,43 @@ namespace {
 std::atomic_uint64_t op_seq{1};
 
 [[maybe_unused]] constexpr size_t kTransSize = sizeof(Transaction);
+
+struct KeyIndex {
+  unsigned start;
+  unsigned end;  // not including
+  unsigned step;
+};
+
+KeyIndex DetermineKeys(const CommandId* cid, const CmdArgList& args) {
+  DCHECK_EQ(0u, cid->opt_mask() & CO::GLOBAL_TRANS);
+
+  KeyIndex key_index;
+
+  if (cid->first_key_pos() > 0) {
+    key_index.start = cid->first_key_pos();
+    int last = cid->last_key_pos();
+    key_index.end = last > 0 ? last + 1 : (int(args.size()) + 1 + last);
+    key_index.step = cid->key_arg_step();
+
+    return key_index;
+  }
+
+  string_view name{cid->name()};
+  if (name == "EVAL" || name == "EVALSHA") {
+    DCHECK_GE(args.size(), 3u);
+    uint32_t num_keys;
+
+    CHECK(absl::SimpleAtoi(ArgS(args, 2), &num_keys));
+    key_index.start = 3;
+    key_index.end = 3 + num_keys;
+    key_index.step = 1;
+
+    return key_index;
+  }
+  LOG(FATAL) << "Not supported";
+
+  return key_index;
+}
 
 }  // namespace
 
@@ -106,18 +145,6 @@ Transaction::Transaction(const CommandId* cid, EngineShardSet* ess) : cid_(cid),
     multi_.reset(new Multi);
   }
   trans_options_ = cid_->opt_mask();
-
-  bool single_key = cid_->first_key_pos() > 0 && !cid_->is_multi_key();
-  if (!multi_ && single_key) {
-    shard_data_.resize(1);  // Single key optimization
-  } else {
-    // Our shard_data is not sparse, so we must allocate for all threads :(
-    shard_data_.resize(ess_->size());
-  }
-
-  if (IsGlobal()) {
-    unique_shard_cnt_ = ess->size();
-  }
 }
 
 Transaction::~Transaction() {
@@ -130,9 +157,9 @@ Transaction::~Transaction() {
  * a. T spans a single shard and its not multi.
  *    unique_shard_id_ is predefined before the schedule() is called.
  *    In that case only a single thread will be scheduled and it will use shard_data[0] just becase
- *    shard_data.size() = 1. Engine thread can access any data because there is schedule barrier
- *    between InitByArgs and RunInShard/IsArmedInShard functions.
- * b. T  spans multiple shards and its not multi
+ *    shard_data.size() = 1. Coordinator thread can access any data because there is a
+ *    schedule barrier between InitByArgs and RunInShard/IsArmedInShard functions.
+ * b. T spans multiple shards and its not multi
  *    In that case multiple threads will be scheduled. Similarly they have a schedule barrier,
  *    and IsArmedInShard can read any variable from shard_data[x].
  * c. Trans spans a single shard and it's multi. shard_data has size of ess_.size.
@@ -145,24 +172,46 @@ Transaction::~Transaction() {
  **/
 
 void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
-  CHECK_GT(args.size(), 1U);
-  CHECK_LT(size_t(cid_->first_key_pos()), args.size());
-  DCHECK_EQ(unique_shard_cnt_, 0u);
-  DCHECK(!IsGlobal()) << "Global transactions do not have keys";
-
   db_index_ = index;
 
-  if (!multi_ && !cid_->is_multi_key()) {  // Single key optimization.
-    auto key = ArgS(args, cid_->first_key_pos());
+  if (IsGlobal()) {
+    unique_shard_cnt_ = ess_->size();
+    shard_data_.resize(unique_shard_cnt_);
+    return;
+  }
+
+  CHECK_GT(args.size(), 1U);  // first entry is the command name.
+  DCHECK_EQ(unique_shard_cnt_, 0u);
+
+  KeyIndex key_index = DetermineKeys(cid_, args);
+
+  if (key_index.start == args.size()) {
+    CHECK(absl::StartsWith(cid_->name(), "EVAL"));
+    return;
+  }
+
+  DCHECK_LT(key_index.start, args.size());
+
+  bool single_key = key_index.start > 0 && !cid_->is_multi_key();
+  if (!multi_ && single_key) {
+    shard_data_.resize(1);  // Single key optimization
+  } else {
+    // Our shard_data is not sparse, so we must allocate for all threads :(
+    shard_data_.resize(ess_->size());
+  }
+
+  if (!multi_ && single_key) {  // Single key optimization.
+    auto key = ArgS(args, key_index.start);
     args_.push_back(key);
 
     unique_shard_cnt_ = 1;
     unique_shard_id_ = Shard(key, ess_->size());
+
     return;
   }
 
-  CHECK(cid_->key_arg_step() == 1 || cid_->key_arg_step() == 2);
-  DCHECK(cid_->key_arg_step() == 1 || (args.size() % 2) == 1);
+  CHECK(key_index.step == 1 || key_index.step == 2);
+  DCHECK(key_index.step == 1 || (args.size() % 2) == 1);
 
   // Reuse thread-local temporary storage. Since this code is non-preemptive we can use it here.
   auto& shard_index = tmp_space.shard_cache;
@@ -171,6 +220,8 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
     v.Clear();
   }
 
+  // TODO: to determine correctly locking mode for transactions, scripts
+  // and regular commands.
   IntentLock::Mode mode = IntentLock::EXCLUSIVE;
   if (multi_) {
     mode = Mode();
@@ -178,10 +229,8 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
     DCHECK_LT(int(mode), 2);
   }
 
-  size_t key_end = cid_->last_key_pos() > 0 ? cid_->last_key_pos() + 1
-                                            : (args.size() + 1 + cid_->last_key_pos());
-  for (size_t i = 1; i < key_end; ++i) {
-    std::string_view key = ArgS(args, i);
+  for (unsigned i = key_index.start; i < key_index.end; ++i) {
+    string_view key = ArgS(args, i);
     uint32_t sid = Shard(key, shard_data_.size());
     shard_index[sid].args.push_back(key);
     shard_index[sid].original_index.push_back(i - 1);
@@ -190,7 +239,7 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
       multi_->locks[key].cnt[int(mode)]++;
     };
 
-    if (cid_->key_arg_step() == 2) {  // value
+    if (key_index.step == 2) {  // value
       ++i;
       auto val = ArgS(args, i);
       shard_index[sid].args.push_back(val);
@@ -198,7 +247,7 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
     }
   }
 
-  args_.resize(key_end - 1);
+  args_.resize(key_index.end - key_index.start);
   reverse_index_.resize(args_.size());
 
   auto next_arg = args_.begin();
@@ -209,7 +258,9 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   for (size_t i = 0; i < shard_data_.size(); ++i) {
     auto& sd = shard_data_[i];
     auto& si = shard_index[i];
+
     CHECK_LT(si.args.size(), 1u << 15);
+
     sd.arg_count = si.args.size();
     sd.arg_start = next_arg - args_.begin();
     sd.local_mask = 0;
