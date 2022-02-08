@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <absl/container/flat_hash_set.h>
+
 #include "server/common_types.h"
 #include "server/reply_builder.h"
 
@@ -50,6 +52,8 @@ struct ConnectionState {
   // Lua-script related data.
   struct Script {
     bool is_write = true;
+
+    absl::flat_hash_set<std::string_view> keys;
   };
   std::optional<Script> script_info;
 };

@@ -37,8 +37,13 @@ const char* OptName(CommandOpt fl);
 
 class CommandId {
  public:
-  using Handler = std::function<void(CmdArgList, ConnectionContext*)>;
-  using ArgValidator = std::function<bool(CmdArgList, ConnectionContext*)>;
+  using Handler =
+      fu2::function_base<true /*owns*/, true /*copyable*/, fu2::capacity_default,
+                         false /* non-throwing*/, false /* strong exceptions guarantees*/,
+                         void(CmdArgList, ConnectionContext*) const>;
+
+  using ArgValidator = fu2::function_base<true, true, fu2::capacity_default, false, false,
+                                          bool(CmdArgList, ConnectionContext*) const>;
 
   /**
    * @brief Construct a new Command Id object
@@ -151,5 +156,9 @@ class CommandRegistry {
   // Implements COMMAND functionality.
   void Command(CmdArgList args, ConnectionContext* cntx);
 };
+
+
+// Given the command and the arguments determines the keys range (index).
+KeyIndex DetermineKeys(const CommandId* cid, const CmdArgList& args);
 
 }  // namespace dfly

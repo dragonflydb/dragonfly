@@ -24,42 +24,6 @@ std::atomic_uint64_t op_seq{1};
 
 [[maybe_unused]] constexpr size_t kTransSize = sizeof(Transaction);
 
-struct KeyIndex {
-  unsigned start;
-  unsigned end;  // not including
-  unsigned step;
-};
-
-KeyIndex DetermineKeys(const CommandId* cid, const CmdArgList& args) {
-  DCHECK_EQ(0u, cid->opt_mask() & CO::GLOBAL_TRANS);
-
-  KeyIndex key_index;
-
-  if (cid->first_key_pos() > 0) {
-    key_index.start = cid->first_key_pos();
-    int last = cid->last_key_pos();
-    key_index.end = last > 0 ? last + 1 : (int(args.size()) + 1 + last);
-    key_index.step = cid->key_arg_step();
-
-    return key_index;
-  }
-
-  string_view name{cid->name()};
-  if (name == "EVAL" || name == "EVALSHA") {
-    DCHECK_GE(args.size(), 3u);
-    uint32_t num_keys;
-
-    CHECK(absl::SimpleAtoi(ArgS(args, 2), &num_keys));
-    key_index.start = 3;
-    key_index.end = 3 + num_keys;
-    key_index.step = 1;
-
-    return key_index;
-  }
-  LOG(FATAL) << "Not supported";
-
-  return key_index;
-}
 
 }  // namespace
 
@@ -130,7 +94,7 @@ OpResult<Transaction::FindFirstResult> Transaction::FindFirstProcessor::Process(
 }
 
 IntentLock::Mode Transaction::Mode() const {
-  return (trans_options_ & CO::READONLY) ? IntentLock::SHARED : IntentLock::EXCLUSIVE;
+  return (cid_->opt_mask() & CO::READONLY) ? IntentLock::SHARED : IntentLock::EXCLUSIVE;
 }
 
 /**
@@ -141,10 +105,15 @@ IntentLock::Mode Transaction::Mode() const {
  * @param cs
  */
 Transaction::Transaction(const CommandId* cid, EngineShardSet* ess) : cid_(cid), ess_(ess) {
-  if (strcmp(cid_->name(), "EXEC") == 0) {
+  string_view cmd_name(cid_->name());
+  if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA") {
     multi_.reset(new Multi);
+    multi_->multi_opts = cid->opt_mask();
+
+    if (cmd_name == "EVAL" || cmd_name == "EVALSHA") {
+      multi_->incremental = false;  // we lock all the keys at once.
+    }
   }
-  trans_options_ = cid_->opt_mask();
 }
 
 Transaction::~Transaction() {
@@ -185,22 +154,19 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
 
   KeyIndex key_index = DetermineKeys(cid_, args);
 
-  if (key_index.start == args.size()) {
+  if (key_index.start == args.size()) {  // eval with 0 keys.
     CHECK(absl::StartsWith(cid_->name(), "EVAL"));
     return;
   }
 
   DCHECK_LT(key_index.start, args.size());
+  DCHECK_GT(key_index.start, 0u);
 
-  bool single_key = key_index.start > 0 && !cid_->is_multi_key();
-  if (!multi_ && single_key) {
+  bool incremental_locking = multi_ && multi_->incremental;
+  bool single_key = !multi_ && (key_index.start + key_index.step) >= key_index.end;
+
+  if (single_key) {
     shard_data_.resize(1);  // Single key optimization
-  } else {
-    // Our shard_data is not sparse, so we must allocate for all threads :(
-    shard_data_.resize(ess_->size());
-  }
-
-  if (!multi_ && single_key) {  // Single key optimization.
     auto key = ArgS(args, key_index.start);
     args_.push_back(key);
 
@@ -210,10 +176,12 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
     return;
   }
 
+  // Our shard_data is not sparse, so we must allocate for all threads :(
+  shard_data_.resize(ess_->size());
   CHECK(key_index.step == 1 || key_index.step == 2);
   DCHECK(key_index.step == 1 || (args.size() % 2) == 1);
 
-  // Reuse thread-local temporary storage. Since this code is non-preemptive we can use it here.
+  // Reuse thread-local temporary storage. Since this code is atomic we can use it here.
   auto& shard_index = tmp_space.shard_cache;
   shard_index.resize(shard_data_.size());
   for (auto& v : shard_index) {
@@ -223,10 +191,12 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   // TODO: to determine correctly locking mode for transactions, scripts
   // and regular commands.
   IntentLock::Mode mode = IntentLock::EXCLUSIVE;
+  bool should_record_locks = false;
   if (multi_) {
     mode = Mode();
     tmp_space.uniq_keys.clear();
     DCHECK_LT(int(mode), 2);
+    should_record_locks = incremental_locking || !multi_->locks_recorded;
   }
 
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
@@ -235,7 +205,7 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
     shard_index[sid].args.push_back(key);
     shard_index[sid].original_index.push_back(i - 1);
 
-    if (multi_ && tmp_space.uniq_keys.insert(key).second) {
+    if (should_record_locks && tmp_space.uniq_keys.insert(key).second) {
       multi_->locks[key].cnt[int(mode)]++;
     };
 
@@ -245,6 +215,10 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
       shard_index[sid].args.push_back(val);
       shard_index[sid].original_index.push_back(i - 1);
     }
+  }
+
+  if (multi_) {
+    multi_->locks_recorded = true;
   }
 
   args_.resize(key_index.end - key_index.start);
@@ -263,7 +237,14 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
 
     sd.arg_count = si.args.size();
     sd.arg_start = next_arg - args_.begin();
-    sd.local_mask = 0;
+
+    // We reset the local_mask for incremental locking to allow locking of arguments
+    // for each operation within the same transaction. For instant locking we lock at
+    // the beginning all the keys so we must preserve the mask to avoid double locking.
+    if (incremental_locking) {
+      sd.local_mask = 0;
+    }
+
     if (!sd.arg_count)
       continue;
 
@@ -297,7 +278,8 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
 
   // Validation.
   for (const auto& sd : shard_data_) {
-    DCHECK_EQ(sd.local_mask, 0u);
+    // sd.local_mask may be non-zero for multi transactions with instant locking.
+    // Specifically EVALs may maintain state between calls.
     DCHECK_EQ(0, sd.local_mask & ARMED);
     if (!multi_) {
       DCHECK_EQ(TxQueue::kEnd, sd.pq_pos);
@@ -309,13 +291,17 @@ void Transaction::SetExecCmd(const CommandId* cid) {
   DCHECK(multi_);
   DCHECK(!cb_);
 
+  // The order is important, we are Schedule() for multi transaction before overriding cid_.
+  // TODO: The flow is ugly. I should introduce a proper interface for Multi transactions
+  // like SetupMulti/TurndownMulti. We already have UnlockMulti that should be part of
+  // TurndownMulti.
+
   if (txid_ == 0) {
     Schedule();
   }
 
   unique_shard_cnt_ = 0;
   cid_ = cid;
-  trans_options_ = cid->opt_mask();
   cb_ = nullptr;
 }
 
@@ -344,6 +330,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
   DCHECK_EQ(sd.local_mask & (SUSPENDED_Q | EXPIRED_Q), 0);
 
   bool awaked_prerun = (sd.local_mask & AWAKED_Q) != 0;
+  bool incremental_lock = multi_ && multi_->incremental;
 
   // For multi we unlock transaction (i.e. its keys) in UnlockMulti() call.
   // Therefore we differentiate between concluding, which says that this specific
@@ -354,8 +341,8 @@ bool Transaction::RunInShard(EngineShard* shard) {
   IntentLock::Mode mode = Mode();
 
   // We make sure that we lock exactly once for each (multi-hop) transaction inside
-  // multi-transactions.
-  if (multi_ && ((sd.local_mask & KEYLOCK_ACQUIRED) == 0)) {
+  // transactions that lock incrementally.
+  if (incremental_lock && ((sd.local_mask & KEYLOCK_ACQUIRED) == 0)) {
     DCHECK(!awaked_prerun);  // we should not have blocking transaction inside multi block.
 
     sd.local_mask |= KEYLOCK_ACQUIRED;
@@ -458,6 +445,11 @@ void Transaction::ScheduleInternal() {
 
   uint32_t num_shards;
   std::function<bool(uint32_t)> is_active;
+
+  // TODO: For multi-transactions we should be able to deduce mode() at run-time based
+  // on the context. For regular multi-transactions we can actually inspect all commands.
+  // For eval-like transactions - we can decided based on the command flavor (EVAL/EVALRO) or
+  // auto-tune based on the static analysis (by identifying commands with hardcoded command names).
   IntentLock::Mode mode = Mode();
 
   if (span_all) {
@@ -534,6 +526,10 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   // single hop -> concluding.
   coordinator_state_ |= (COORD_EXEC | COORD_EXEC_CONCLUDING);
 
+  if (!multi_) {   // for non-multi transactions we schedule exactly once.
+    DCHECK_EQ(0, coordinator_state_ & COORD_SCHED);
+  }
+
   bool schedule_fast = (unique_shard_cnt_ == 1) && !IsGlobal() && !multi_;
   if (schedule_fast) {  // Single shard (local) optimization.
     // We never resize shard_data because that would affect MULTI transaction correctness.
@@ -598,7 +594,10 @@ void Transaction::UnlockMulti() {
   auto cb = [&] {
     EngineShard* shard = EngineShard::tlocal();
 
-    shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
+    if (multi_->multi_opts & CO::GLOBAL_TRANS) {
+      shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
+    }
+
     ShardId sid = shard->shard_id();
     for (const auto& k_v : sharded_keys[sid]) {
       auto release = [&](IntentLock::Mode mode) {
@@ -606,6 +605,7 @@ void Transaction::UnlockMulti() {
           shard->db_slice().Release(mode, this->db_index_, k_v.first, k_v.second.cnt[mode]);
         }
       };
+
       release(IntentLock::SHARED);
       release(IntentLock::EXCLUSIVE);
     }
@@ -1102,7 +1102,7 @@ inline uint32_t Transaction::DecreaseRunCnt() {
 }
 
 bool Transaction::IsGlobal() const {
-  return (trans_options_ & CO::GLOBAL_TRANS) != 0;
+  return (cid_->opt_mask() & CO::GLOBAL_TRANS) != 0;
 }
 
 // Runs only in the shard thread.

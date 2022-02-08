@@ -43,6 +43,12 @@ struct KeyLockArgs {
   unsigned key_step;
 };
 
+// Describes key indices.
+struct KeyIndex {
+  unsigned start;
+  unsigned end;  // does not include this index (open limit).
+  unsigned step; // 1 for commands like mget. 2 for commands like mset.
+};
 
 struct ConnectionStats {
   uint32_t num_conns = 0;

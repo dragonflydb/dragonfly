@@ -335,6 +335,9 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
 }
 
 void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
+  DCHECK(!lock_args.args.empty());
+
+  DVLOG(2) << "Release " << IntentLock::ModeName(mode) << " for " << lock_args.args[0];
   if (lock_args.args.size() == 1) {
     Release(mode, lock_args.db_index, lock_args.args.front(), 1);
   } else {
@@ -351,7 +354,7 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
         }
       }
     }
-    DVLOG(1) << "Release " << IntentLock::ModeName(mode) << " for " << lock_args.args[0];
+
   }
 }
 

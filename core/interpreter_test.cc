@@ -157,6 +157,18 @@ TEST_F(InterpreterTest, Basic) {
   }
 }
 
+TEST_F(InterpreterTest, UnknownFunc) {
+  string_view code(R"(
+    function foo(n)
+      return myunknownfunc(1, n)
+    end)");
+
+  CHECK_EQ(0, luaL_loadbuffer(lua(), code.data(), code.size(), "code1"));
+  CHECK_EQ(0, lua_pcall(lua(), 0, 0, 0));
+  int type = lua_getglobal(lua(), "myunknownfunc");
+  ASSERT_EQ(LUA_TNIL, type);
+}
+
 TEST_F(InterpreterTest, Stack) {
   RunInline(R"(
 local x = {}

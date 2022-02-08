@@ -221,8 +221,22 @@ TEST_F(DflyEngineTest, Eval) {
   resp = Run({"incrby", "foo", "42"});
   EXPECT_THAT(resp[0], IntArg(42));
 
-  // resp = Run({"eval", "return redis.call('get', 'foo')", "0"});
-  // EXPECT_THAT(resp[0], StrArg("42"));
+  resp = Run({"eval", "return redis.call('get', 'foo')", "0"});
+  EXPECT_THAT(resp[0], ErrArg("undeclared"));
+
+  resp = Run({"eval", "return redis.call('get', 'foo')", "1", "bar"});
+  EXPECT_THAT(resp[0], ErrArg("undeclared"));
+
+  ASSERT_FALSE(service_->IsLocked(0, "foo"));
+
+  resp = Run({"eval", "return redis.call('get', 'foo')", "1", "foo"});
+  EXPECT_THAT(resp[0], StrArg("42"));
+
+  resp = Run({"eval", "return redis.call('get', KEYS[1])", "1", "foo"});
+  EXPECT_THAT(resp[0], StrArg("42"));
+
+  ASSERT_FALSE(service_->IsLocked(0, "foo"));
+  ASSERT_FALSE(service_->IsShardSetLocked());
 }
 
 TEST_F(DflyEngineTest, EvalSha) {

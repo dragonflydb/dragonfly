@@ -127,8 +127,7 @@ class Transaction {
     return txid_;
   }
 
-  // TODO: for multi trans_options_ changes with every operation.
-  // Does it mean we lock every key differently during the same transaction?
+  // based on cid_->opt_mask.
   IntentLock::Mode Mode() const;
 
   const char* Name() const;
@@ -266,6 +265,10 @@ class Transaction {
 
   struct Multi {
     absl::flat_hash_map<std::string_view, LockCnt> locks;
+    uint32_t multi_opts = 0;  // options of the parent transaction.
+
+    bool incremental = true;
+    bool locks_recorded = false;
   };
 
   util::fibers_ext::EventCount blocking_ec_;  // used to wake blocking transactions.
@@ -298,8 +301,6 @@ class Transaction {
   // unique_shard_cnt_ and unique_shard_id_ is accessed only by coordinator thread.
   uint32_t unique_shard_cnt_{0};  // number of unique shards span by args_
 
-  uint32_t trans_options_ = 0;
-
   ShardId unique_shard_id_{kInvalidSid};
   DbIndex db_index_ = 0;
 
@@ -309,6 +310,7 @@ class Transaction {
   enum CoordinatorState : uint8_t {
     COORD_SCHED = 1,
     COORD_EXEC = 2,
+
     // We are running the last execution step in multi-hop operation.
     COORD_EXEC_CONCLUDING = 4,
     COORD_BLOCKED = 8,

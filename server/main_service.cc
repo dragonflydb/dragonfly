@@ -430,7 +430,18 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
   // Create command transaction
   intrusive_ptr<Transaction> dist_trans;
 
-  if (!under_script) {
+  if (under_script) {
+    DCHECK(cntx->transaction);
+    KeyIndex key_index = DetermineKeys(cid, args);
+    for (unsigned i = key_index.start; i < key_index.end; ++i) {
+      string_view key = ArgS(args, i);
+      if (!cntx->conn_state.script_info->keys.contains(key)) {
+        return (*cntx)->SendError("script tried accessing undeclared key");
+      }
+    }
+    cntx->transaction->SetExecCmd(cid);
+    cntx->transaction->InitByArgs(cntx->conn_state.db_index, args);
+  } else {
     DCHECK(cntx->transaction == nullptr);
 
     if (IsTransactional(cid)) {
@@ -545,6 +556,7 @@ void Service::Multi(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::CallFromScript(CmdArgList args, ObjectExplorer* reply, ConnectionContext* cntx) {
+  DCHECK(cntx->transaction);
   InterpreterReplier replier(reply);
   ReplyBuilderInterface* orig = cntx->Inject(&replier);
 
@@ -647,6 +659,13 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   // and checking whether all invocations consist of RO commands.
   // we can do it once during script insertion into script mgr.
   cntx->conn_state.script_info.emplace();
+  for (size_t i = 0; i < eval_args.keys.size(); ++i) {
+    cntx->conn_state.script_info->keys.insert(ArgS(eval_args.keys, i));
+  }
+  DCHECK(cntx->transaction);
+
+  if (!eval_args.keys.empty())
+    cntx->transaction->Schedule();
 
   auto lk = interpreter->Lock();
 
@@ -658,6 +677,10 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   Interpreter::RunResult result = interpreter->RunFunction(eval_args.sha, &error);
 
   cntx->conn_state.script_info.reset();  // reset script_info
+
+  // Conclude the transaction.
+  if (!eval_args.keys.empty())
+    cntx->transaction->UnlockMulti();
 
   if (result == Interpreter::RUN_ERR) {
     string resp = absl::StrCat("Error running script (call to ", eval_args.sha, "): ", error);

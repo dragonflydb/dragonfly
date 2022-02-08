@@ -33,6 +33,7 @@ CommandRegistry::CommandRegistry() {
   CommandId cd("COMMAND", CO::RANDOM | CO::LOADING, 0, 0, 0, 0);
 
   cd.SetHandler([this](const auto& args, auto* cntx) { return Command(args, cntx); });
+
   const char* nm = cd.name();
   cmd_map_.emplace(nm, std::move(cd));
 }
@@ -68,6 +69,38 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   CHECK(cmd_map_.emplace(k, std::move(cmd)).second) << k;
 
   return *this;
+}
+
+KeyIndex DetermineKeys(const CommandId* cid, const CmdArgList& args) {
+  DCHECK_EQ(0u, cid->opt_mask() & CO::GLOBAL_TRANS);
+
+  KeyIndex key_index;
+
+  if (cid->first_key_pos() > 0) {
+    key_index.start = cid->first_key_pos();
+    int last = cid->last_key_pos();
+    key_index.end = last > 0 ? last + 1 : (int(args.size()) + 1 + last);
+    key_index.step = cid->key_arg_step();
+
+    return key_index;
+  }
+
+  string_view name{cid->name()};
+  if (name == "EVAL" || name == "EVALSHA") {
+    DCHECK_GE(args.size(), 3u);
+    uint32_t num_keys;
+
+    CHECK(absl::SimpleAtoi(ArgS(args, 2), &num_keys));
+    key_index.start = 3;
+    key_index.end = 3 + num_keys;
+    key_index.step = 1;
+
+    return key_index;
+  }
+
+  LOG(FATAL) << "TBD: Not supported";
+
+  return key_index;
 }
 
 namespace CO {
