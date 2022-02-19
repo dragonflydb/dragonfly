@@ -634,7 +634,7 @@ int Interpreter::RedisGenericCommand(bool raise_error) {
 
   for (int j = 0; j < argc; j++) {
     unsigned idx = j + 1;
-    size_t len;
+    size_t len = 0;
     if (lua_isinteger(lua_, idx)) {
       char* next = absl::numbers_internal::FastIntToBuffer(lua_tointeger(lua_, idx), cur);
       len = next - cur;

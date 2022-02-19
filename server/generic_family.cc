@@ -23,8 +23,6 @@ using namespace std;
 
 namespace {
 
-DEFINE_VARZ(VarzQps, ping_qps);
-
 class Renamer {
  public:
   Renamer(DbIndex dind, ShardId source_id) : db_indx_(dind), src_sid_(source_id) {
@@ -152,11 +150,9 @@ const char* ObjTypeName(int type) {
 }  // namespace
 
 void GenericFamily::Init(util::ProactorPool* pp) {
-  ping_qps.Init(pp);
 }
 
 void GenericFamily::Shutdown() {
-  ping_qps.Shutdown();
 }
 
 void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
@@ -184,7 +180,6 @@ void GenericFamily::Ping(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 2) {
     return (*cntx)->SendError("wrong number of arguments for 'ping' command");
   }
-  ping_qps.Inc();
 
   // We synchronously block here until the engine sends us the payload and notifies that
   // the I/O operation has been processed.

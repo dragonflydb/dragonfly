@@ -23,7 +23,7 @@ jobs:
       image: ghcr.io/${{ github.actor }}/ubuntu-dev:latest
       credentials:
         username: ${{ github.actor }}
-        password: ${{ secrets.GHCR_TOKEN }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
     - uses: actions/checkout@v2
       with:

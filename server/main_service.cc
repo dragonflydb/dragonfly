@@ -43,7 +43,6 @@ namespace this_fiber = ::boost::this_fiber;
 namespace {
 
 DEFINE_VARZ(VarzMapAverage, request_latency_usec);
-DEFINE_VARZ(VarzQps, ping_qps);
 
 std::optional<VarzFunction> engine_varz;
 metrics::CounterFamily cmd_req("requests_total", "Number of served redis requests");
@@ -311,7 +310,6 @@ void Service::Init(util::AcceptServer* acceptor, const InitOpts& opts) {
   });
 
   request_latency_usec.Init(&pp_);
-  ping_qps.Init(&pp_);
   StringFamily::Init(&pp_);
   GenericFamily::Init(&pp_);
   cmd_req.Init(&pp_, {"type"});
@@ -327,7 +325,6 @@ void Service::Shutdown() {
 
   engine_varz.reset();
   request_latency_usec.Shutdown();
-  ping_qps.Shutdown();
 
   pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Shutdown(); });
 
@@ -352,7 +349,8 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
   bool is_trans_cmd = (cmd_str == "EXEC" || cmd_str == "MULTI");
   const CommandId* cid = registry_.Find(cmd_str);
   ServerState& etl = *ServerState::tlocal();
-  ++etl.connection_stats.command_cnt;
+
+  etl.RecordCmd();
 
   absl::Cleanup multi_error = [cntx] {
     if (cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE) {

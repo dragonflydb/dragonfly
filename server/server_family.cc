@@ -7,6 +7,7 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/random/random.h>  // for master_id_ generation.
 #include <absl/strings/match.h>
+#include <malloc.h>
 
 #include <filesystem>
 
@@ -15,6 +16,7 @@ extern "C" {
 }
 
 #include "base/logging.h"
+#include "io/proc_reader.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/debugcmd.h"
@@ -23,8 +25,8 @@ extern "C" {
 #include "server/main_service.h"
 #include "server/rdb_save.h"
 #include "server/replica.h"
-#include "server/server_state.h"
 #include "server/script_mgr.h"
+#include "server/server_state.h"
 #include "server/transaction.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
@@ -40,8 +42,8 @@ namespace dfly {
 using namespace std;
 using namespace util;
 namespace fibers = ::boost::fibers;
-
 namespace fs = std::filesystem;
+using strings::HumanReadableNumBytes;
 
 namespace {
 
@@ -69,7 +71,8 @@ error_code CreateDirs(fs::path dir_path) {
 
 ServerFamily::ServerFamily(Service* engine)
     : engine_(*engine), pp_(engine->proactor_pool()), ess_(engine->shard_set()) {
-  last_save_.store(time(NULL), memory_order_release);
+  start_time_ = time(NULL);
+  last_save_.store(start_time_, memory_order_release);
   script_mgr_.reset(new ScriptMgr(&engine->shard_set()));
 }
 
@@ -230,16 +233,24 @@ Metrics ServerFamily::GetMetrics() const {
 
   fibers::mutex mu;
 
-  auto cb = [&](EngineShard* shard) {
-    auto local_stats = shard->db_slice().GetStats();
+  auto cb = [&](ProactorBase* pb) {
+    EngineShard* shard = EngineShard::tlocal();
+    ServerState* ss = ServerState::tlocal();
+
     lock_guard<fibers::mutex> lk(mu);
 
-    result.db += local_stats.db;
-    result.events += local_stats.events;
-    result.conn_stats += *ServerState::tl_connection_stats();
+    result.conn_stats += ss->connection_stats;
+    result.qps += uint64_t(ss->MovingSum6());
+
+    if (shard) {
+      auto shard_stats = shard->db_slice().GetStats();
+      result.db += shard_stats.db;
+      result.events += shard_stats.events;
+    }
   };
 
-  ess_.RunBlockingInParallel(std::move(cb));
+  pp_.AwaitFiberOnAll(std::move(cb));
+  result.qps /= 6;
 
   return result;
 }
@@ -251,29 +262,53 @@ redis_version:1.9.9
 redis_mode:standalone
 arch_bits:64
 multiplexing_api:iouring
-atomicvar_api:atomic-builtin
 tcp_port:)";
 
   string info = absl::StrCat(kInfo1, FLAGS_port, "\n");
 
+  size_t uptime = time(NULL) - start_time_;
+  absl::StrAppend(&info, "uptime_in_seconds:", uptime, "\n");
+  absl::StrAppend(&info, "uptime_in_days:", uptime / (3600 * 24), "\n");
+
+  auto sdata_res = io::ReadStatusInfo();
+
   Metrics m = GetMetrics();
+
+  // Clients
+  absl::StrAppend(&info, "\n# Clients\n");
+  absl::StrAppend(&info, "connected_clients:", m.conn_stats.num_conns, "\n");
+  absl::StrAppend(&info, "client_read_buf_capacity:", m.conn_stats.read_buf_capacity, "\n");
+  absl::StrAppend(&info, "blocked_clients:", 0, "\n");
+
+  size_t db_size = m.db.table_mem_usage + m.db.obj_memory_usage;
+
   absl::StrAppend(&info, "\n# Memory\n");
+
+  // TODO: should be extracted from mimalloc heaps instead of using table stats.
+  absl::StrAppend(&info, "used_memory:", db_size, "\n");
+  absl::StrAppend(&info, "used_memory_human:", HumanReadableNumBytes(db_size), "\n");
+  if (sdata_res.has_value()) {
+    absl::StrAppend(&info, "used_memory_rss:", sdata_res->vm_rss, "\n");
+    absl::StrAppend(&info, "used_memory_rss_human:", HumanReadableNumBytes(sdata_res->vm_rss),
+                    "\n");
+  } else {
+    LOG(ERROR) << "Error fetching /proc/self/status stats";
+  }
+
+  // TBD: should be the max of all seen used_memory values.
+  absl::StrAppend(&info, "used_memory_peak:", -1, "\n");
   absl::StrAppend(&info, "object_used_memory:", m.db.obj_memory_usage, "\n");
   absl::StrAppend(&info, "table_used_memory:", m.db.table_mem_usage, "\n");
-  absl::StrAppend(&info, "used_memory_human:",
-                  strings::HumanReadableNumBytes(m.db.table_mem_usage + m.db.obj_memory_usage),
-                  "\n");
   absl::StrAppend(&info, "num_entries:", m.db.key_count, "\n");
   absl::StrAppend(&info, "inline_keys:", m.db.inline_keys, "\n");
 
+  // Stats
   absl::StrAppend(&info, "\n# Stats\n");
+  absl::StrAppend(&info, "instantaneous_ops_per_sec:", m.qps, "\n");
   absl::StrAppend(&info, "total_commands_processed:", m.conn_stats.command_cnt, "\n");
   absl::StrAppend(&info, "total_pipelined_commands:", m.conn_stats.pipelined_cmd_cnt, "\n");
   absl::StrAppend(&info, "total_reads_processed:", m.conn_stats.io_reads_cnt, "\n");
 
-  absl::StrAppend(&info, "\n# Clients\n");
-  absl::StrAppend(&info, "connected_clients:", m.conn_stats.num_conns, "\n");
-  absl::StrAppend(&info, "client_read_buf_capacity:", m.conn_stats.read_buf_capacity, "\n");
   absl::StrAppend(&info, "\n# Replication\n");
 
   ServerState& etl = *ServerState::tlocal();
@@ -412,8 +447,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"SYNC", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Sync)
             << CI{"PSYNC", CO::ADMIN | CO::GLOBAL_TRANS, 3, 0, 0, 0}.HFUNC(Psync)
-            << CI{"SCRIPT", CO::NOSCRIPT, -2, 0, 0, 0}.HFUNC(Script)
-            ;
+            << CI{"SCRIPT", CO::NOSCRIPT, -2, 0, 0, 0}.HFUNC(Script);
 }
 
 }  // namespace dfly

@@ -86,10 +86,10 @@ class Service {
 
   util::ProactorPool& pp_;
 
-  CommandRegistry registry_;
   EngineShardSet shard_set_;
-
   ServerFamily server_family_;
+  CommandRegistry registry_;
+
   util::HttpListenerBase* http_listener_ = nullptr;
 };
 

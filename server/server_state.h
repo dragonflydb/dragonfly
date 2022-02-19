@@ -10,6 +10,7 @@
 #include "core/interpreter.h"
 #include "server/common_types.h"
 #include "server/global_state.h"
+#include "util/sliding_counter.h"
 
 namespace dfly {
 
@@ -62,10 +63,22 @@ class ServerState {  // public struct - to allow initialization.
 
   Interpreter& GetInterpreter();
 
+  // Returns sum of all requests in the last 6 seconds
+  // (not including the current one).
+  uint32_t MovingSum6() const { return qps_.SumTail(); }
+
+  void RecordCmd() {
+    ++connection_stats.command_cnt;
+    qps_.Inc();
+  }
+
  private:
   int64_t live_transactions_ = 0;
   std::optional<Interpreter> interpreter_;
   GlobalState::S gstate_ = GlobalState::IDLE;
+
+  using Counter = util::SlidingCounter<7>;
+  Counter qps_;
 
   static thread_local ServerState state_;
 };

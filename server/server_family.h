@@ -24,6 +24,8 @@ struct Metrics {
   DbStats db;
   SliceEvents events;
 
+  size_t qps = 0;
+
   ConnectionStats conn_stats;
 };
 
@@ -79,6 +81,7 @@ class ServerFamily {
 
   std::atomic<int64_t> last_save_;  // in seconds.
   GlobalState global_state_;
+  time_t start_time_ = 0;  // in seconds, epoch time.
 };
 
 }  // namespace dfly
