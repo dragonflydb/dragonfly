@@ -9,20 +9,6 @@
 
 namespace dfly {
 
-class BaseSerializer {
- public:
-  explicit BaseSerializer(::io::Sink* sink);
-  virtual ~BaseSerializer() {
-  }
-
- private:
-  ::io::Sink* sink_;
-  std::error_code ec_;
-  std::string batch_;
-
-  bool should_batch_ = false;
-};
-
 class ReplyBuilderInterface {
  public:
   virtual ~ReplyBuilderInterface() {
@@ -61,15 +47,30 @@ class SinkReplyBuilder : public ReplyBuilderInterface {
     return ec_;
   }
 
+  size_t io_write_cnt() const {
+    return io_write_cnt_;
+  }
+
+  size_t io_write_bytes() const {
+    return io_write_bytes_;
+  }
+
+  void reset_io_stats() {
+    io_write_cnt_ = 0;
+    io_write_bytes_ = 0;
+  }
+
  protected:
   //! Sends a string as is without any formatting. raw should be encoded according to the protocol.
   void SendDirect(std::string_view str);
 
   void Send(const iovec* v, uint32_t len);
 
+  std::string batch_;
   ::io::Sink* sink_;
   std::error_code ec_;
-  std::string batch_;
+  size_t io_write_cnt_ = 0;
+  size_t io_write_bytes_ = 0;
 
   bool should_batch_ = false;
 };

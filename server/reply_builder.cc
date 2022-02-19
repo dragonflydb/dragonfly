@@ -49,10 +49,18 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   }
 
   error_code ec;
+  ++io_write_cnt_;
+
+  for (unsigned i = 0; i < len; ++i) {
+    io_write_bytes_ += v[i].iov_len;
+  }
+
   if (batch_.empty()) {
     ec = sink_->Write(v, len);
   } else {
     DVLOG(1) << "Sending batch to stream " << sink_ << "\n" << batch_;
+
+    io_write_bytes_ += batch_.size();
 
     iovec tmp[len + 1];
     tmp[0].iov_base = batch_.data();

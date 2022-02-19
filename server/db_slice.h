@@ -43,7 +43,8 @@ struct DbStats {
 
 struct SliceEvents {
   // Number of eviction events.
-  uint64_t evicted_entries = 0;
+  size_t evicted_keys = 0;
+  size_t expired_keys = 0;
 
   SliceEvents& operator+=(const SliceEvents& o);
 };
@@ -191,7 +192,7 @@ class DbSlice {
 
   uint64_t now_ms_ = 0;  // Used for expire logic, represents a real clock.
   uint64_t version_ = 1;  // Used to version entries in the PrimeTable.
-  SliceEvents events_;
+  mutable SliceEvents events_;  // we may change this even for const operations.
 
   using LockTable = absl::flat_hash_map<std::string, IntentLock>;
 

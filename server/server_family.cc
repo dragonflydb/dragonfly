@@ -307,7 +307,16 @@ tcp_port:)";
   absl::StrAppend(&info, "instantaneous_ops_per_sec:", m.qps, "\n");
   absl::StrAppend(&info, "total_commands_processed:", m.conn_stats.command_cnt, "\n");
   absl::StrAppend(&info, "total_pipelined_commands:", m.conn_stats.pipelined_cmd_cnt, "\n");
-  absl::StrAppend(&info, "total_reads_processed:", m.conn_stats.io_reads_cnt, "\n");
+  absl::StrAppend(&info, "total_net_input_bytes:", m.conn_stats.io_read_bytes, "\n");
+  absl::StrAppend(&info, "total_net_output_bytes:", m.conn_stats.io_write_bytes, "\n");
+  absl::StrAppend(&info, "instantaneous_input_kbps:", -1, "\n");
+  absl::StrAppend(&info, "instantaneous_output_kbps:", -1, "\n");
+  absl::StrAppend(&info, "rejected_connections:", -1, "\n");
+  absl::StrAppend(&info, "expired_keys:", m.events.expired_keys, "\n");
+  absl::StrAppend(&info, "keyspace_hits:", -1, "\n");
+  absl::StrAppend(&info, "keyspace_misses:", -1, "\n");
+  absl::StrAppend(&info, "total_reads_processed:", m.conn_stats.io_read_cnt, "\n");
+  absl::StrAppend(&info, "total_writes_processed:", m.conn_stats.io_write_cnt, "\n");
 
   absl::StrAppend(&info, "\n# Replication\n");
 

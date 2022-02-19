@@ -7,6 +7,7 @@
 #include <absl/container/fixed_array.h>
 
 #include <deque>
+#include <variant>
 
 #include "base/io_buf.h"
 #include "core/resp_expr.h"
@@ -49,7 +50,10 @@ class Connection : public util::Connection {
 
   //
   io::Result<bool> CheckForHttpProto(util::FiberSocketBase* peer);
-  void InputLoop(util::FiberSocketBase* peer);
+
+  void ConnectionFlow(util::FiberSocketBase* peer);
+  std::variant<std::error_code, ParserStatus> IoLoop(util::FiberSocketBase* peer);
+
   void DispatchFiber(util::FiberSocketBase* peer);
 
   ParserStatus ParseRedis();

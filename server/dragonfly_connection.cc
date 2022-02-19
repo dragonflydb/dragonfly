@@ -175,7 +175,7 @@ void Connection::HandleRequests() {
         poll_armed = false;
       });
 
-      InputLoop(peer);
+      ConnectionFlow(peer);
 
       if (poll_armed) {
         us->CancelPoll(poll_id);
@@ -211,16 +211,16 @@ io::Result<bool> Connection::CheckForHttpProto(util::FiberSocketBase* peer) {
   return false;
 }
 
-void Connection::InputLoop(FiberSocketBase* peer) {
+void Connection::ConnectionFlow(FiberSocketBase* peer) {
   auto dispatch_fb = fibers::fiber(fibers::launch::dispatch, [&] { DispatchFiber(peer); });
   ConnectionStats* stats = ServerState::tl_connection_stats();
   stats->num_conns++;
   stats->read_buf_capacity += io_buf_.Capacity();
 
   ParserStatus parse_status = OK;
-  std::error_code ec;
-  ReplyBuilderInterface* builder = cc_->reply_builder();
 
+  // At the start we read from the socket to determine the HTTP/Memstore protocol.
+  // Therefore we may already have some data in the buffer.
   if (io_buf_.InputLen() > 0) {
     if (redis_parser_) {
       parse_status = ParseRedis();
@@ -228,53 +228,21 @@ void Connection::InputLoop(FiberSocketBase* peer) {
       DCHECK(memcache_parser_);
       parse_status = ParseMemcache();
     }
-    if (parse_status == ERROR)
-      goto finish;
   }
 
-  do {
-    io::MutableBytes append_buf = io_buf_.AppendBuffer();
-    ::io::Result<size_t> recv_sz = peer->Recv(append_buf);
-    ++stats->io_reads_cnt;
+  std::error_code ec;
 
-    if (!recv_sz) {
-      ec = recv_sz.error();
-      parse_status = OK;
-      break;
+  // Main loop.
+  if (parse_status != ERROR) {
+    auto res = IoLoop(peer);
+
+    if (holds_alternative<error_code>(res)) {
+      ec = get<error_code>(res);
+    } else {
+      parse_status = get<ParserStatus>(res);
     }
-    io_buf_.CommitWrite(*recv_sz);
+  }
 
-    if (redis_parser_)
-      parse_status = ParseRedis();
-    else {
-      DCHECK(memcache_parser_);
-      parse_status = ParseMemcache();
-    }
-
-    if (parse_status == NEED_MORE) {
-      parse_status = OK;
-
-      size_t capacity = io_buf_.Capacity();
-      if (capacity < kMaxReadSize) {
-        size_t parser_hint = redis_parser_->parselen_hint();
-        if (parser_hint > capacity) {
-          io_buf_.Reserve(std::min(kMaxReadSize, parser_hint));
-        } else if (append_buf.size() == *recv_sz && append_buf.size() > capacity / 2) {
-          // Last io used most of the io_buf to the end.
-          io_buf_.Reserve(capacity * 2);  // Valid growth range.
-        }
-
-        if (capacity < io_buf_.Capacity()) {
-          VLOG(1) << "Growing io_buf to " << io_buf_.Capacity();
-          stats->read_buf_capacity += (io_buf_.Capacity() - capacity);
-        }
-      }
-    } else if (parse_status != OK) {
-      break;
-    }
-  } while (peer->IsOpen() && !builder->GetError());
-
-finish:
   cc_->conn_state.mask |= ConnectionState::CONN_CLOSING;  // Signal dispatch to close.
   evc_.notify();
   dispatch_fb.join();
@@ -286,20 +254,18 @@ finish:
     --stats->num_replicas;
   }
 
-  if (builder->GetError()) {
-    ec = builder->GetError();
-  } else {
-    if (parse_status == ERROR) {
-      VLOG(1) << "Error stats " << parse_status;
-      if (redis_parser_) {
-        SendProtocolError(RedisParser::Result(parser_error_), peer);
-      } else {
-        string_view sv{"CLIENT_ERROR bad command line format\r\n"};
-        auto size_res = peer->Send(::io::Buffer(sv));
-        if (!size_res) {
-          LOG(WARNING) << "Error " << size_res.error();
-          ec = size_res.error();
-        }
+  // We wait for dispatch_fb to finish writing the previous replies before replying to the last
+  // offending request.
+  if (parse_status == ERROR) {
+    VLOG(1) << "Error stats " << parse_status;
+    if (redis_parser_) {
+      SendProtocolError(RedisParser::Result(parser_error_), peer);
+    } else {
+      string_view sv{"CLIENT_ERROR bad command line format\r\n"};
+      auto size_res = peer->Send(::io::Buffer(sv));
+      if (!size_res) {
+        LOG(WARNING) << "Error " << size_res.error();
+        ec = size_res.error();
       }
     }
   }
@@ -407,6 +373,74 @@ auto Connection::ParseMemcache() -> ParserStatus {
     return NEED_MORE;
 
   return ERROR;
+}
+
+auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, ParserStatus> {
+  SinkReplyBuilder* builder = static_cast<SinkReplyBuilder*>(cc_->reply_builder());
+  ConnectionStats* stats = ServerState::tl_connection_stats();
+  error_code ec;
+  ParserStatus parse_status = OK;
+
+  auto fetch_builder_stats = [&] {
+    stats->io_write_cnt += builder->io_write_cnt();
+    stats->io_write_bytes += builder->io_write_bytes();
+
+    builder->reset_io_stats();
+  };
+
+  do {
+    fetch_builder_stats();
+
+    io::MutableBytes append_buf = io_buf_.AppendBuffer();
+    ::io::Result<size_t> recv_sz = peer->Recv(append_buf);
+
+    if (!recv_sz) {
+      ec = recv_sz.error();
+      parse_status = OK;
+      break;
+    }
+
+    io_buf_.CommitWrite(*recv_sz);
+    stats->io_read_bytes += *recv_sz;
+    ++stats->io_read_cnt;
+
+    if (redis_parser_)
+      parse_status = ParseRedis();
+    else {
+      DCHECK(memcache_parser_);
+      parse_status = ParseMemcache();
+    }
+
+    if (parse_status == NEED_MORE) {
+      parse_status = OK;
+
+      size_t capacity = io_buf_.Capacity();
+      if (capacity < kMaxReadSize) {
+        size_t parser_hint = redis_parser_->parselen_hint();
+        if (parser_hint > capacity) {
+          io_buf_.Reserve(std::min(kMaxReadSize, parser_hint));
+        } else if (append_buf.size() == *recv_sz && append_buf.size() > capacity / 2) {
+          // Last io used most of the io_buf to the end.
+          io_buf_.Reserve(capacity * 2);  // Valid growth range.
+        }
+
+        if (capacity < io_buf_.Capacity()) {
+          VLOG(1) << "Growing io_buf to " << io_buf_.Capacity();
+          stats->read_buf_capacity += (io_buf_.Capacity() - capacity);
+        }
+      }
+    } else if (parse_status != OK) {
+      break;
+    }
+    ec = builder->GetError();
+  } while (peer->IsOpen() && !ec);
+
+  fetch_builder_stats();
+
+  if (ec)
+    return ec;
+
+  return parse_status;
 }
 
 // DispatchFiber handles commands coming from the InputLoop.

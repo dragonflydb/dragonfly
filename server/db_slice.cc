@@ -37,7 +37,10 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  ADD(evicted_entries);
+  static_assert(sizeof(SliceEvents) == 16, "You should update this function with new fields");
+
+  ADD(evicted_keys);
+  ADD(expired_keys);
 
   return *this;
 }
@@ -178,6 +181,7 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) -> pair<MainIterator,
       // Keep the entry but reset the object.
       db->stats.obj_memory_usage -= existing->second.MallocUsed();
       existing->second.Reset();
+      events_.expired_keys++;
 
       return make_pair(existing, true);
     }
@@ -413,6 +417,8 @@ pair<MainIterator, ExpireIterator> DbSlice::ExpireIfNeeded(DbIndex db_ind, MainI
   db->stats.inline_keys -= it->first.IsInline();
   db->stats.obj_memory_usage -= (it->first.MallocUsed() + it->second.MallocUsed());
   db->prime_table.Erase(it);
+  ++events_.expired_keys;
+
   return make_pair(MainIterator{}, ExpireIterator{});
 }
 

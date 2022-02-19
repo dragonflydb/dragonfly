@@ -94,6 +94,7 @@ class ConnectionContext {
     return rbuilder_.get();
   }
 
+  // Allows receiving the output data from the commands called from scripts.
   ReplyBuilderInterface* Inject(ReplyBuilderInterface* new_i) {
     ReplyBuilderInterface* res = rbuilder_.release();
     rbuilder_.reset(new_i);

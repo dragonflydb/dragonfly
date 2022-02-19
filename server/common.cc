@@ -41,12 +41,16 @@ Interpreter& ServerState::GetInterpreter() {
 #define ADD(x) (x) += o.x
 
 ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
-  static_assert(sizeof(ConnectionStats) == 40);
+  // To break this code deliberately if we add/remove a field to this struct.
+  static_assert(sizeof(ConnectionStats) == 64);
 
   ADD(num_conns);
   ADD(num_replicas);
   ADD(read_buf_capacity);
-  ADD(io_reads_cnt);
+  ADD(io_read_cnt);
+  ADD(io_read_bytes);
+  ADD(io_write_cnt);
+  ADD(io_write_bytes);
   ADD(pipelined_cmd_cnt);
   ADD(command_cnt);
 
