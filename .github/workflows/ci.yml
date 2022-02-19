@@ -10,7 +10,6 @@ on:
 env:
   # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
   BUILD_TYPE: Debug
-  CXX: g++-9
 jobs:
   build:
     # The CMake configure and build commands are platform agnostic and should work equally
@@ -18,9 +17,13 @@ jobs:
     # cross-platform coverage.
     # See: https://docs.github.com/en/free-pro-team@latest/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    strategy:
+      matrix:
+        # Test of these containers
+        container: ["ubuntu-dev", "alpine-dev"]
+    timeout-minutes: 30
     container: 
-      image: ghcr.io/${{ github.actor }}/ubuntu-dev:latest
+      image: ghcr.io/${{ github.actor }}/${{ matrix.container }}:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}

@@ -85,7 +85,7 @@ void CompactBlob::MakeRoom(size_t current_cap, size_t desired, std::pmr::memory_
 
 // here we break pmr model since we use non-pmr api of fetching usable size based on pointer.
 size_t CompactBlob::capacity() const {
-  return malloc_usable_size(ptr_);
+  return zmalloc_size(ptr_);
 }
 
 size_t RobjWrapper::MallocUsed() const {
@@ -174,6 +174,7 @@ uint64_t RobjWrapper::HashCode() const {
     default:
       LOG(FATAL) << "Unsupported type for hashcode " << type;
   }
+  return 0;
 }
 
 bool RobjWrapper::Equal(const RobjWrapper& ow) const {
