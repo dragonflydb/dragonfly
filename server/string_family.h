@@ -26,6 +26,7 @@ class SetCmd {
     SetHow how = SET_ALWAYS;
     DbIndex db_index;
 
+    uint32_t memcache_flags = 0;
     // Relative value based on now. 0 means no expiration.
     uint64_t expire_after_ms = 0;
     mutable std::optional<std::string>* prev_val = nullptr;  // GETSET option
@@ -36,10 +37,6 @@ class SetCmd {
   };
 
   OpResult<void> Set(const SetParams& params, std::string_view key, std::string_view value);
-
- private:
-  OpResult<void> SetExisting(DbIndex db_ind, std::string_view value, uint64_t expire_at_ms,
-                             MainIterator dest, ExpireIterator exp_it);
 };
 
 class StringFamily {

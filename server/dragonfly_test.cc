@@ -259,6 +259,27 @@ TEST_F(DflyEngineTest, EvalSha) {
   EXPECT_THAT(resp[0], ErrArg("No matching"));
 }
 
+TEST_F(DflyEngineTest, Memcache) {
+  using MP = MemcacheParser;
+  auto resp = RunMC(MP::SET, "foo", "bar", 1);
+  EXPECT_EQ(resp, "STORED\r\n");
+
+  resp = RunMC(MP::GET, "foo");
+  EXPECT_EQ(resp, "VALUE foo 1 3\r\nbar\r\nEND\r\n");
+
+  resp = RunMC(MP::ADD, "foo", "bar", 1);
+  EXPECT_EQ(resp, "NOT_STORED\r\n");
+
+  resp = RunMC(MP::REPLACE, "foo2", "bar", 1);
+  EXPECT_EQ(resp, "NOT_STORED\r\n");
+
+  resp = RunMC(MP::ADD, "foo2", "bar2", 2);
+  EXPECT_EQ(resp, "STORED\r\n");
+
+  resp = GetMC(MP::GET, {"foo2", "foo"});
+  // EXPECT_EQ(resp, "");
+}
+
 // TODO: to test transactions with a single shard since then all transactions become local.
 // To consider having a parameter in dragonfly engine controlling number of shards
 // unconditionally from number of cpus. TO TEST BLPOP under multi for single/multi argument case.

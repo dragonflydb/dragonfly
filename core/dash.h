@@ -337,7 +337,6 @@ template <typename _Key, typename _Value, typename Policy>
 DashTable<_Key, _Value, Policy>::DashTable(size_t capacity_log, const Policy& policy,
                                            std::pmr::memory_resource* mr)
     : Base(capacity_log), policy_(policy), segment_(mr) {
-  assert(capacity_log > 0u);
   segment_.resize(unique_segments_);
   std::pmr::polymorphic_allocator<SegmentType> pa(mr);
 

@@ -24,6 +24,9 @@ class ReplyBuilderInterface {
 
   virtual void SendGetNotFound() = 0;
   virtual void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) = 0;
+  virtual void SendSetSkipped() = 0;
+
+  virtual void EndMultiLine() {}
 };
 
 class SinkReplyBuilder : public ReplyBuilderInterface {
@@ -88,6 +91,9 @@ class MCReplyBuilder : public SinkReplyBuilder {
 
   void SendStored() final;
 
+  void EndMultiLine() final;
+  void SendSetSkipped() final;
+
   void SendClientError(std::string_view str);
 };
 
@@ -103,6 +109,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) override;
   void SendGetNotFound() override;
   void SendStored() override;
+  void SendSetSkipped() override;
 
   void SendError(OpStatus status);
   virtual void SendSimpleString(std::string_view str);

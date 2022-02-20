@@ -98,9 +98,17 @@ void MCReplyBuilder::SendError(string_view str) {
   SendDirect("ERROR\r\n");
 }
 
+void MCReplyBuilder::EndMultiLine() {
+  SendDirect("END\r\n");
+}
+
 void MCReplyBuilder::SendClientError(string_view str) {
-  iovec v[] = {IoVec("CLIENT_ERROR"), IoVec(str), IoVec(kCRLF)};
+  iovec v[] = {IoVec("CLIENT_ERROR "), IoVec(str), IoVec(kCRLF)};
   Send(v, ABSL_ARRAYSIZE(v));
+}
+
+void MCReplyBuilder::SendSetSkipped() {
+  SendDirect("NOT_STORED\r\n");
 }
 
 RedisReplyBuilder::RedisReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
@@ -126,6 +134,10 @@ void RedisReplyBuilder::SendGetNotFound() {
 
 void RedisReplyBuilder::SendStored() {
   SendSimpleString("OK");
+}
+
+void RedisReplyBuilder::SendSetSkipped() {
+  SendNull();
 }
 
 void RedisReplyBuilder::SendNull() {

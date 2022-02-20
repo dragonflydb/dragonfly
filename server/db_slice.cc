@@ -47,6 +47,12 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
 
 #undef ADD
 
+DbSlice::DbWrapper::DbWrapper(std::pmr::memory_resource* mr)
+    : prime_table(4, detail::PrimeTablePolicy{}, mr),
+      expire_table(0, detail::ExpireTablePolicy{}, mr),
+      mcflag_table(0, detail::ExpireTablePolicy{}, mr) {
+}
+
 DbSlice::DbSlice(uint32_t index, EngineShard* owner) : shard_id_(index), owner_(owner) {
   db_arr_.emplace_back();
   CreateDb(0);
@@ -178,6 +184,10 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) -> pair<MainIterator,
     if (expire_it->second <= now_ms_) {
       db->expire_table.Erase(expire_it);
 
+      if (existing->second.HasFlag()) {
+        db->mcflag_table.Erase(existing->first);
+      }
+
       // Keep the entry but reset the object.
       db->stats.obj_memory_usage -= existing->second.MallocUsed();
       existing->second.Reset();
@@ -213,6 +223,10 @@ bool DbSlice::Del(DbIndex db_ind, MainIterator it) {
     CHECK_EQ(1u, db->expire_table.Erase(it->first));
   }
 
+  if (it->second.HasFlag()) {
+    CHECK_EQ(1u, db->mcflag_table.Erase(it->first));
+  }
+
   db->stats.inline_keys -= it->first.IsInline();
   db->stats.obj_memory_usage -= (it->first.MallocUsed() + it->second.MallocUsed());
   db->prime_table.Erase(it);
@@ -229,6 +243,7 @@ size_t DbSlice::FlushDb(DbIndex db_ind) {
     size_t removed = db->prime_table.size();
     db->prime_table.Clear();
     db->expire_table.Clear();
+    db->mcflag_table.Clear();
     db->stats.inline_keys = 0;
     db->stats.obj_memory_usage = 0;
 
@@ -270,24 +285,47 @@ bool DbSlice::Expire(DbIndex db_ind, MainIterator it, uint64_t at) {
   return false;
 }
 
-void DbSlice::AddNew(DbIndex db_ind, string_view key, PrimeValue obj, uint64_t expire_at_ms) {
+void DbSlice::SetMCFlag(DbIndex db_ind, PrimeKey key, uint32_t flag) {
+  auto& db = *db_arr_[db_ind];
+  if (flag == 0) {
+    db.mcflag_table.Erase(key);
+  } else {
+    auto [it, inserted] = db.mcflag_table.Insert(std::move(key), flag);
+    if (!inserted)
+      it->second = flag;
+  }
+}
+
+uint32_t DbSlice::GetMCFlag(DbIndex db_ind, const PrimeKey& key) const {
+  auto& db = *db_arr_[db_ind];
+  auto it = db.mcflag_table.Find(key);
+  return it.is_done() ? 0 : it->second;
+}
+
+MainIterator DbSlice::AddNew(DbIndex db_ind, string_view key, PrimeValue obj,
+                             uint64_t expire_at_ms) {
   for (const auto& ccb : change_cb_) {
     ccb.second(db_ind, ChangeReq{key});
   }
 
-  CHECK(AddIfNotExist(db_ind, key, std::move(obj), expire_at_ms));
+  auto [res, added] = AddIfNotExist(db_ind, key, std::move(obj), expire_at_ms);
+  CHECK(added);
+
+  return res;
 }
 
-bool DbSlice::AddIfNotExist(DbIndex db_ind, string_view key, PrimeValue obj,
-                            uint64_t expire_at_ms) {
+pair<MainIterator, bool> DbSlice::AddIfNotExist(DbIndex db_ind, string_view key, PrimeValue obj,
+                                                uint64_t expire_at_ms) {
   DCHECK(!obj.IsRef());
 
   auto& db = db_arr_[db_ind];
   CompactObj co_key{key};
 
   auto [new_entry, success] = db->prime_table.Insert(std::move(co_key), std::move(obj));
+
+  // in this case obj won't be moved and will be destroyed during unwinding.
   if (!success)
-    return false;  // in this case obj won't be moved and will be destroyed during unwinding.
+    return make_pair(new_entry, false);
 
   new_entry.SetVersion(NextVersion());
 
@@ -300,7 +338,7 @@ bool DbSlice::AddIfNotExist(DbIndex db_ind, string_view key, PrimeValue obj,
     CHECK(db->expire_table.Insert(new_entry->first.AsRef(), expire_at_ms).second);
   }
 
-  return true;
+  return make_pair(new_entry, true);
 }
 
 size_t DbSlice::DbSize(DbIndex db_ind) const {
@@ -358,7 +396,6 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
         }
       }
     }
-
   }
 }
 

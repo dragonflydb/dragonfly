@@ -9,6 +9,7 @@
 #include "io/io.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
+#include "server/memcache_parser.h"
 #include "server/redis_parser.h"
 #include "util/proactor_pool.h"
 
@@ -19,8 +20,7 @@ class RespMatcher {
   RespMatcher(std::string_view val, RespExpr::Type t = RespExpr::STRING) : type_(t), exp_str_(val) {
   }
 
-  RespMatcher(int64_t val, RespExpr::Type t = RespExpr::INT64)
-      : type_(t), exp_int_(val) {
+  RespMatcher(int64_t val, RespExpr::Type t = RespExpr::INT64) : type_(t), exp_int_(val) {
   }
 
   using is_gtest_matcher = void;
@@ -96,9 +96,31 @@ class BaseFamilyTest : public ::testing::Test {
   void TearDown() override;
 
  protected:
+  struct TestConnWrapper {
+    ::io::StringSink sink;  // holds the response blob
+
+    std::unique_ptr<Connection> dummy_conn;
+
+    ConnectionContext cmd_cntx;
+    std::vector<std::unique_ptr<std::string>> tmp_str_vec;
+
+    std::unique_ptr<RedisParser> parser;
+
+    TestConnWrapper(Protocol proto);
+    ~TestConnWrapper();
+
+    CmdArgVec Args(std::initializer_list<std::string_view> list);
+
+    RespVec ParseResponse();
+  };
 
   RespVec Run(std::initializer_list<std::string_view> list);
   RespVec Run(std::string_view id, std::initializer_list<std::string_view> list);
+
+  std::string RunMC(MemcacheParser::CmdType cmd_type, std::string_view key, std::string_view value,
+                    uint32_t flags = 0, std::chrono::seconds ttl = std::chrono::seconds{});
+  std::string RunMC(MemcacheParser::CmdType cmd_type, std::string_view key = std::string_view{});
+  std::string GetMC(MemcacheParser::CmdType cmd_type, std::initializer_list<std::string_view> list);
 
   int64_t CheckedInt(std::initializer_list<std::string_view> list);
 
@@ -109,6 +131,8 @@ class BaseFamilyTest : public ::testing::Test {
     return GetDebugInfo("IO0");
   }
 
+  TestConnWrapper* AddFindConn(Protocol proto, std::string_view id);
+
   // ts is ms
   void UpdateTime(uint64_t ms);
   std::string GetId() const;
@@ -118,24 +142,7 @@ class BaseFamilyTest : public ::testing::Test {
   EngineShardSet* ess_ = nullptr;
   unsigned num_threads_ = 3;
 
-  struct TestConn {
-    ::io::StringSink sink;
-    std::unique_ptr<Connection> dummy_conn;
-
-    ConnectionContext cmd_cntx;
-    std::vector<std::unique_ptr<std::string>> tmp_str_vec;
-
-    std::unique_ptr<RedisParser> parser;
-
-    TestConn();
-    ~TestConn();
-
-    CmdArgVec Args(std::initializer_list<std::string_view> list);
-
-    RespVec ParseResp();
-  };
-
-  absl::flat_hash_map<std::string, std::unique_ptr<TestConn>> connections_;
+  absl::flat_hash_map<std::string, std::unique_ptr<TestConnWrapper>> connections_;
   ::boost::fibers::mutex mu_;
   ConnectionContext::DebugInfo last_cmd_dbg_info_;
 };

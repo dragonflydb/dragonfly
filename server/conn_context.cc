@@ -25,9 +25,9 @@ Protocol ConnectionContext::protocol() const {
 }
 
 RedisReplyBuilder* ConnectionContext::operator->() {
-  CHECK(Protocol::REDIS == owner_->protocol());
-  RedisReplyBuilder* b = static_cast<RedisReplyBuilder*>(rbuilder_.get());
-  return b;
+  CHECK(Protocol::REDIS == protocol());
+
+  return static_cast<RedisReplyBuilder*>(rbuilder_.get());
 }
 
 }  // namespace dfly

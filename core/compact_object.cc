@@ -290,7 +290,7 @@ void CompactObj::ImportRObj(robj* o) {
 
   u_.r_obj.type = o->type;
   u_.r_obj.encoding = o->encoding;
-  u_.r_obj.lru_unneeded = o->lru;
+  u_.r_obj.unneeded = o->lru;
 
   if (o->type == OBJ_STRING) {
     std::string_view src((char*)o->ptr, sdslen((sds)o->ptr));
@@ -308,7 +308,7 @@ robj* CompactObj::AsRObj() const {
 
   tmp_robj.encoding = u_.r_obj.encoding;
   tmp_robj.type = u_.r_obj.type;
-  tmp_robj.lru = u_.r_obj.lru_unneeded;
+  tmp_robj.lru = u_.r_obj.unneeded;
   tmp_robj.ptr = u_.r_obj.blob.ptr();
 
   return &tmp_robj;

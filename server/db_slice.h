@@ -103,12 +103,17 @@ class DbSlice {
   // Does not change expiry if at != 0 and expiry already exists.
   bool Expire(DbIndex db_ind, MainIterator main_it, uint64_t at);
 
+  void SetMCFlag(DbIndex db_ind, PrimeKey key, uint32_t flag);
+  uint32_t GetMCFlag(DbIndex db_ind, const PrimeKey& key) const;
+
   // Adds a new entry. Requires: key does not exist in this slice.
-  void AddNew(DbIndex db_ind, std::string_view key, PrimeValue obj, uint64_t expire_at_ms);
+  // Returns the iterator to the newly added entry.
+  MainIterator AddNew(DbIndex db_ind, std::string_view key, PrimeValue obj, uint64_t expire_at_ms);
 
   // Adds a new entry if a key does not exists. Returns true if insertion took place,
   // false otherwise. expire_at_ms equal to 0 - means no expiry.
-  bool AddIfNotExist(DbIndex db_ind, std::string_view key, PrimeValue obj, uint64_t expire_at_ms);
+  std::pair<MainIterator, bool> AddIfNotExist(DbIndex db_ind, std::string_view key, PrimeValue obj,
+                                              uint64_t expire_at_ms);
 
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);
@@ -162,7 +167,9 @@ class DbSlice {
 
   // Current version of this slice.
   // We maintain a shared versioning scheme for all databases in the slice.
-  uint64_t version() const { return version_; }
+  uint64_t version() const {
+    return version_;
+  }
 
   // ChangeReq - describes the change to the table. If MainIterator is defined then
   // it's an update on the existing entry, otherwise if string_view is defined then
@@ -190,8 +197,8 @@ class DbSlice {
 
   EngineShard* owner_;
 
-  uint64_t now_ms_ = 0;  // Used for expire logic, represents a real clock.
-  uint64_t version_ = 1;  // Used to version entries in the PrimeTable.
+  uint64_t now_ms_ = 0;         // Used for expire logic, represents a real clock.
+  uint64_t version_ = 1;        // Used to version entries in the PrimeTable.
   mutable SliceEvents events_;  // we may change this even for const operations.
 
   using LockTable = absl::flat_hash_map<std::string, IntentLock>;
@@ -199,13 +206,13 @@ class DbSlice {
   struct DbWrapper {
     PrimeTable prime_table;
     ExpireTable expire_table;
+    DashTable<PrimeKey, uint32_t, detail::ExpireTablePolicy> mcflag_table;
+
     LockTable lock_table;
 
     mutable InternalDbStats stats;
 
-    explicit DbWrapper(std::pmr::memory_resource* mr)
-    : prime_table(4, detail::PrimeTablePolicy{}, mr) {
-    }
+    explicit DbWrapper(std::pmr::memory_resource* mr);
   };
 
   std::vector<std::unique_ptr<DbWrapper>> db_arr_;

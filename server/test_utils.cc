@@ -16,6 +16,7 @@ namespace dfly {
 using namespace testing;
 using namespace util;
 using namespace std;
+using MP = MemcacheParser;
 
 bool RespMatcher::MatchAndExplain(const RespExpr& e, MatchResultListener* listener) const {
   if (e.type != type_) {
@@ -113,12 +114,11 @@ vector<int64_t> ToIntArr(const RespVec& vec) {
   return res;
 }
 
-BaseFamilyTest::TestConn::TestConn()
-    : dummy_conn(new Connection(Protocol::REDIS, nullptr, nullptr)),
-      cmd_cntx(&sink, dummy_conn.get()) {
+BaseFamilyTest::TestConnWrapper::TestConnWrapper(Protocol proto)
+    : dummy_conn(new Connection(proto, nullptr, nullptr)), cmd_cntx(&sink, dummy_conn.get()) {
 }
 
-BaseFamilyTest::TestConn::~TestConn() {
+BaseFamilyTest::TestConnWrapper::~TestConnWrapper() {
 }
 
 BaseFamilyTest::BaseFamilyTest() {
@@ -161,39 +161,101 @@ RespVec BaseFamilyTest::Run(initializer_list<std::string_view> list) {
     return pp_->at(0)->Await([&] { return this->Run(list); });
   }
 
-  string id = GetId();
-  return Run(id, list);
+  return Run(GetId(), list);
 }
 
 RespVec BaseFamilyTest::Run(std::string_view id, std::initializer_list<std::string_view> list) {
-  mu_.lock();
-  auto [it, inserted] = connections_.emplace(id, nullptr);
-
-  if (inserted) {
-    it->second.reset(new TestConn);
-  } else {
-    it->second->sink.Clear();
-  }
-  TestConn* conn = it->second.get();
-  mu_.unlock();
+  TestConnWrapper* conn = AddFindConn(Protocol::REDIS, id);
 
   CmdArgVec args = conn->Args(list);
-  CmdArgList cmd_arg_list{args.data(), args.size()};
+
   auto& context = conn->cmd_cntx;
   context.shard_set = ess_;
 
   DCHECK(context.transaction == nullptr);
 
-  service_->DispatchCommand(cmd_arg_list, &context);
+  service_->DispatchCommand(CmdArgList{args}, &context);
 
   DCHECK(context.transaction == nullptr);
 
   unique_lock lk(mu_);
   last_cmd_dbg_info_ = context.last_command_debug;
 
-  RespVec vec = conn->ParseResp();
+  RespVec vec = conn->ParseResponse();
 
   return vec;
+}
+
+string BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view value,
+                             uint32_t flags, chrono::seconds ttl) {
+  if (!ProactorBase::IsProactorThread()) {
+    return pp_->at(0)->Await([&] { return this->RunMC(cmd_type, key, value, flags, ttl); });
+  }
+
+  MP::Command cmd;
+  cmd.type = cmd_type;
+  cmd.key = key;
+  cmd.flags = flags;
+  cmd.bytes_len = value.size();
+  cmd.expire_ts = ttl.count();
+
+  TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
+
+  auto& context = conn->cmd_cntx;
+  context.shard_set = ess_;
+
+  DCHECK(context.transaction == nullptr);
+
+  service_->DispatchMC(cmd, value, &context);
+
+  DCHECK(context.transaction == nullptr);
+
+  return conn->sink.str();
+}
+
+string BaseFamilyTest::RunMC(MP::CmdType cmd_type, std::string_view key) {
+  if (!ProactorBase::IsProactorThread()) {
+    return pp_->at(0)->Await([&] { return this->RunMC(cmd_type, key); });
+  }
+
+  MP::Command cmd;
+  cmd.type = cmd_type;
+  cmd.key = key;
+  TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
+
+  auto& context = conn->cmd_cntx;
+  context.shard_set = ess_;
+
+  service_->DispatchMC(cmd, string_view{}, &context);
+
+  return conn->sink.str();
+}
+
+string BaseFamilyTest::GetMC(MP::CmdType cmd_type,
+                             std::initializer_list<std::string_view> list) {
+  CHECK_GT(list.size(), 0u);
+  CHECK(base::_in(cmd_type, {MP::GET, MP::GAT, MP::GETS, MP::GATS}));
+
+  if (!ProactorBase::IsProactorThread()) {
+    return pp_->at(0)->Await([&] { return this->GetMC(cmd_type, list); });
+  }
+
+  MP::Command cmd;
+  cmd.type = cmd_type;
+  auto src = list.begin();
+  cmd.key = *src++;
+  for (; src != list.end(); ++src) {
+    cmd.keys_ext.push_back(*src);
+  }
+
+  TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
+
+  auto& context = conn->cmd_cntx;
+  context.shard_set = ess_;
+
+  service_->DispatchMC(cmd, string_view{}, &context);
+
+  return conn->sink.str();
 }
 
 int64_t BaseFamilyTest::CheckedInt(std::initializer_list<std::string_view> list) {
@@ -212,7 +274,7 @@ int64_t BaseFamilyTest::CheckedInt(std::initializer_list<std::string_view> list)
   return res;
 }
 
-CmdArgVec BaseFamilyTest::TestConn::Args(std::initializer_list<std::string_view> list) {
+CmdArgVec BaseFamilyTest::TestConnWrapper::Args(std::initializer_list<std::string_view> list) {
   CHECK_NE(0u, list.size());
 
   CmdArgVec res;
@@ -226,7 +288,7 @@ CmdArgVec BaseFamilyTest::TestConn::Args(std::initializer_list<std::string_view>
   return res;
 }
 
-RespVec BaseFamilyTest::TestConn::ParseResp() {
+RespVec BaseFamilyTest::TestConnWrapper::ParseResponse() {
   tmp_str_vec.emplace_back(new string{sink.str()});
   auto& s = *tmp_str_vec.back();
   auto buf = RespExpr::buffer(&s);
@@ -262,6 +324,19 @@ ConnectionContext::DebugInfo BaseFamilyTest::GetDebugInfo(const std::string& id)
   CHECK(it != connections_.end());
 
   return it->second->cmd_cntx.last_command_debug;
+}
+
+auto BaseFamilyTest::AddFindConn(Protocol proto, std::string_view id) -> TestConnWrapper* {
+  unique_lock lk(mu_);
+
+  auto [it, inserted] = connections_.emplace(id, nullptr);
+
+  if (inserted) {
+    it->second.reset(new TestConnWrapper(proto));
+  } else {
+    it->second->sink.Clear();
+  }
+  return it->second.get();
 }
 
 }  // namespace dfly

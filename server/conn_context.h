@@ -42,6 +42,7 @@ struct ConnectionState {
   };
 
   uint32_t mask = 0;  // A bitmask of Mask values.
+  uint32_t memcache_flag = 0;   // used for memcache set command.
 
   bool IsClosing() const {
     return mask & CONN_CLOSING;

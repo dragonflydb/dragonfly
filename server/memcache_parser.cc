@@ -42,9 +42,6 @@ MemcacheParser::Result ParseStore(const std::string_view* tokens, unsigned num_t
       !absl::SimpleAtoi(tokens[2], &res->bytes_len))
     return MemcacheParser::BAD_INT;
 
-  if (flags > 0xFFFF)
-    return MemcacheParser::BAD_INT;
-
   if (res->type == MemcacheParser::CAS && !absl::SimpleAtoi(tokens[3], &res->cas_unique)) {
     return MemcacheParser::BAD_INT;
   }

@@ -35,15 +35,16 @@ class MemcacheParser {
     DECR = 23,
   };
 
+  // According to https://github.com/memcached/memcached/wiki/Commands#standard-protocol
   struct Command {
     CmdType type = INVALID;
     std::string_view key;
     std::vector<std::string_view> keys_ext;
 
     uint64_t cas_unique = 0;
-    uint32_t expire_ts = 0;
+    uint32_t expire_ts = 0;  // relative time in seconds.
     uint32_t bytes_len = 0;
-    uint16_t flags = 0;
+    uint32_t flags = 0;
     bool no_reply = false;
   };
 

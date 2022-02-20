@@ -499,6 +499,9 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       break;
     case MemcacheParser::GET:
       strcpy(cmd_name, "GET");
+      if (cmd.keys_ext.size() > 0) {
+        return mc_builder->SendClientError("multiple keys are not suported");
+      }
       break;
     default:
       mc_builder->SendClientError("bad command line format");
@@ -516,10 +519,13 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     if (set_opt[0]) {
       args.emplace_back(set_opt, strlen(set_opt));
     }
+    cntx->conn_state.memcache_flag = cmd.flags;
   }
 
-  CmdArgList arg_list{args.data(), args.size()};
-  DispatchCommand(arg_list, cntx);
+  DispatchCommand(CmdArgList{args}, cntx);
+
+  // Reset back.
+  cntx->conn_state.memcache_flag = 0;
 }
 
 bool Service::IsLocked(DbIndex db_index, std::string_view key) const {

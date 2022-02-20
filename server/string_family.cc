@@ -30,8 +30,6 @@ DEFINE_VARZ(VarzQps, get_qps);
 
 }  // namespace
 
-
-
 SetCmd::SetCmd(DbSlice* db_slice) : db_slice_(db_slice) {
 }
 
@@ -60,27 +58,36 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
       params.prev_val->emplace(move(val));
     }
 
-    return SetExisting(params.db_index, value, at_ms, it, expire_it);
+    if (IsValid(expire_it) && at_ms) {
+      expire_it->second = at_ms;
+    } else {
+      db_slice_->Expire(params.db_index, it, at_ms);
+    }
+    db_slice_->PreUpdate(params.db_index, it);
+
+    // Check whether we need to update flags table.
+    bool req_flag_update = (params.memcache_flags != 0) != it->second.HasFlag();
+    if (req_flag_update) {
+      it->second.SetFlag(params.memcache_flags != 0);
+      db_slice_->SetMCFlag(params.db_index, it->first.AsRef(), params.memcache_flags);
+    }
+
+    it->second.SetString(value);
+    db_slice_->PostUpdate(params.db_index, it);
+
+    return OpStatus::OK;
   }
 
+  // New entry
   if (params.how == SET_IF_EXISTS)
     return OpStatus::SKIPPED;
 
-  db_slice_->AddNew(params.db_index, key, PrimeValue{value}, at_ms);
+  PrimeValue tvalue{value};
+  tvalue.SetFlag(params.memcache_flags != 0);
+  it = db_slice_->AddNew(params.db_index, key, std::move(tvalue), at_ms);
 
-  return OpStatus::OK;
-}
-
-OpResult<void> SetCmd::SetExisting(DbIndex db_ind, std::string_view value, uint64_t expire_at_ms,
-                                   MainIterator dest, ExpireIterator exp_it) {
-  if (IsValid(exp_it) && expire_at_ms) {
-    exp_it->second = expire_at_ms;
-  } else {
-    db_slice_->Expire(db_ind, dest, expire_at_ms);
-  }
-  db_slice_->PreUpdate(db_ind, dest);
-  dest->second.SetString(value);
-  db_slice_->PostUpdate(db_ind, dest);
+  if (params.memcache_flags)
+    db_slice_->SetMCFlag(params.db_index, it->first.AsRef(), params.memcache_flags);
 
   return OpStatus::OK;
 }
@@ -93,7 +100,10 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   VLOG(2) << "Set " << key << " " << value;
 
   SetCmd::SetParams sparams{cntx->db_index()};
+  sparams.memcache_flags = cntx->conn_state.memcache_flag;
+
   int64_t int_arg;
+  ReplyBuilderInterface* builder = cntx->reply_builder();
 
   for (size_t i = 3; i < args.size(); ++i) {
     ToUpper(&args[i]);
@@ -104,15 +114,17 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       bool is_ms = (cur_arg == "PX");
       ++i;
       if (i == args.size()) {
-        (*cntx)->SendError(kSyntaxErr);
+        builder->SendError(kSyntaxErr);
       }
+
       std::string_view ex = ArgS(args, i);
       if (!absl::SimpleAtoi(ex, &int_arg)) {
-        return (*cntx)->SendError(kInvalidIntErr);
+        return builder->SendError(kInvalidIntErr);
       }
       if (int_arg <= 0 || (!is_ms && int_arg >= 500000000)) {
-        return (*cntx)->SendError("invalid expire time in set");
+        return builder->SendError("invalid expire time in set");
       }
+
       if (!is_ms) {
         int_arg *= 1000;
       }
@@ -124,7 +136,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
     } else if (cur_arg == "KEEPTTL") {
       sparams.keep_expire = true;
     } else {
-      return (*cntx)->SendError(kSyntaxErr);
+      return builder->SendError(kSyntaxErr);
     }
   }
 
@@ -138,25 +150,30 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
 
   if (result == OpStatus::OK) {
-    return (*cntx)->SendStored();
+    return builder->SendStored();
   }
 
   CHECK_EQ(result, OpStatus::SKIPPED);  // in case of NX option
-  return (*cntx)->SendNull();
+
+  return builder->SendSetSkipped();
 }
 
 void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   get_qps.Inc();
 
   std::string_view key = ArgS(args, 1);
+  uint32_t mc_flag = 0;
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<string> {
-    OpResult<MainIterator> it_res = shard->db_slice().Find(cntx->db_index(), key, OBJ_STRING);
+    OpResult<MainIterator> it_res = shard->db_slice().Find(t->db_index(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 
     string val;
     it_res.value()->second.GetString(&val);
+    if ((*it_res)->second.HasFlag() && cntx->protocol() == Protocol::MEMCACHE) {
+      mc_flag = shard->db_slice().GetMCFlag(t->db_index(), (*it_res)->first);
+    }
 
     return val;
   };
@@ -165,19 +182,22 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   Transaction* trans = cntx->transaction;
   OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
 
+  // This method is being used by both MC and Redis. We should use common interface.
+  ReplyBuilderInterface* builder = cntx->reply_builder();
   if (result) {
     DVLOG(1) << "GET " << trans->DebugId() << ": " << key << " " << result.value();
-    (*cntx)->SendGetReply(key, 0, result.value());
+    builder->SendGetReply(key, mc_flag, result.value());
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
-        (*cntx)->SendError(kWrongTypeErr);
+        builder->SendError(kWrongTypeErr);
         break;
       default:
         DVLOG(1) << "GET " << key << " nil";
-        (*cntx)->SendGetNotFound();
+        builder->SendGetNotFound();
     }
   }
+  builder->EndMultiLine();
 }
 
 void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
@@ -385,7 +405,6 @@ OpResult<int64_t> StringFamily::OpIncrBy(const OpArgs& op_args, std::string_view
   db_slice.PostUpdate(op_args.db_ind, it);
   return new_val;
 }
-
 
 void StringFamily::Init(util::ProactorPool* pp) {
   set_qps.Init(pp);

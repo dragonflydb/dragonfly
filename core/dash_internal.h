@@ -544,7 +544,11 @@ class DashTableBase {
 
  protected:
   uint32_t SegmentId(size_t hash) const {
-    return hash >> (64 - global_depth_);
+    if (global_depth_) {
+      return hash >> (64 - global_depth_);
+    }
+
+    return 0;
   }
 
   uint32_t global_depth_;

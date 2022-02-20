@@ -69,7 +69,7 @@ struct RobjWrapper {
 
   uint32_t type : 4;
   uint32_t encoding : 4;
-  uint32_t lru_unneeded : 24;
+  uint32_t unneeded : 24;
   RobjWrapper() {
   }
 } __attribute__((packed));
@@ -92,6 +92,7 @@ class CompactObj {
   enum MaskBit {
     REF_BIT = 1,
     EXPIRE_BIT = 2,
+    FLAG_BIT = 4,
   };
 
  public:
@@ -168,6 +169,18 @@ class CompactObj {
     }
   }
 
+  bool HasFlag() const {
+    return mask_ & FLAG_BIT;
+  }
+
+  void SetFlag(bool e) {
+    if (e) {
+      mask_ |= FLAG_BIT;
+    } else {
+      mask_ &= ~FLAG_BIT;
+    }
+  }
+
   unsigned Encoding() const;
   unsigned ObjType() const;
   quicklist* GetQL() const;
@@ -236,6 +249,8 @@ class CompactObj {
   //
   static_assert(sizeof(u_) == 16, "");
 
+  // Maybe it's possible to merge those 2 together and gain another byte
+  // but lets postpone it to 2023.
   mutable uint8_t mask_ = 0;
   uint8_t taglen_ = 0;
 };
