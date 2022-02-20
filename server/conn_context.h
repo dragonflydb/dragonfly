@@ -37,6 +37,8 @@ struct ConnectionState {
     // Whether this connection belongs to replica, i.e. a dragonfly slave is connected to this
     // host (master) via this connection to sync from it.
     REPL_CONNECTION = 4,
+    REQ_AUTH = 8,
+    AUTHENTICATED = 0x10,
   };
 
   uint32_t mask = 0;  // A bitmask of Mask values.

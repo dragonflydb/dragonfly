@@ -19,6 +19,7 @@ extern const char kUintErr[];
 extern const char kDbIndOutOfRangeErr[];
 extern const char kInvalidDbIndErr[];
 extern const char kScriptNotFound[];
+extern const char kAuthRejected[];
 
 #ifndef RETURN_ON_ERR
 

@@ -64,6 +64,8 @@ class Service {
     return http_listener_;
   }
 
+  bool IsPassProtected() const;
+
  private:
   static void Quit(CmdArgList args, ConnectionContext* cntx);
   static void Multi(CmdArgList args, ConnectionContext* cntx);

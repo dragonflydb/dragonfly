@@ -160,6 +160,9 @@ void Connection::HandleRequests() {
       cc_.reset(new ConnectionContext(peer, this));
       cc_->shard_set = &service_->shard_set();
 
+      if (service_->IsPassProtected())
+        cc_->conn_state.mask |= ConnectionState::REQ_AUTH;
+
       // TODO: to move this interface to LinuxSocketBase so we won't need to cast.
       uring::UringSocket* us = static_cast<uring::UringSocket*>(socket_.get());
 

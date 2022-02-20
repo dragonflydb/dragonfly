@@ -111,7 +111,7 @@ API 1.0
   - [ ] ZREVRANGE
   - [ ] ZSCORE
 - [ ] Not sure whether these are required for the initial release.
-  - [ ] AUTH
+  - [X] AUTH
   - [ ] BGREWRITEAOF
   - [ ] KEYS
   - [ ] MONITOR
@@ -121,6 +121,13 @@ API 1.0
 In addition, we want to support efficient expiry (TTL) and cache eviction algorithms.
 We should implement basic memory management support. For Master/Slave replication we should design
 a distributed log format.
+
+### Memchache API
+- [X] SET
+- [X] GET
+- [X] REPLACE
+- [X] ADD
+- [ ] STATS
 
 API 2.0
 - [ ] List Family

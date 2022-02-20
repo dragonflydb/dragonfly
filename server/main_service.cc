@@ -30,6 +30,7 @@ extern "C" {
 
 DEFINE_uint32(port, 6380, "Redis port");
 DEFINE_uint32(memcache_port, 0, "Memcached port");
+DECLARE_string(requirepass);
 
 namespace dfly {
 
@@ -368,6 +369,15 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
+  string_view cmd_name{cid->name()};
+
+  if ((cntx->conn_state.mask & (ConnectionState::REQ_AUTH | ConnectionState::AUTHENTICATED)) ==
+      ConnectionState::REQ_AUTH) {
+    if (cmd_name != "AUTH") {
+      return (*cntx)->SendError("-NOAUTH Authentication required.");
+    }
+  }
+
   bool under_script = cntx->conn_state.script_info.has_value();
 
   if (under_script && (cid->opt_mask() & CO::NOSCRIPT)) {
@@ -403,7 +413,7 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
       return;
     }
 
-    if (string_view{cid->name()} == "SELECT") {
+    if (cmd_name == "SELECT") {
       (*cntx)->SendError("Can not call SELECT within a transaction");
       return;
     }
@@ -454,7 +464,7 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
   }
 
   cntx->cid = cid;
-  cmd_req.Inc({cid->name()});
+  cmd_req.Inc({cmd_name});
   cid->Invoke(args, cntx);
   end_usec = ProactorBase::GetMonotonicTimeNs();
 
@@ -532,6 +542,10 @@ bool Service::IsShardSetLocked() const {
   });
 
   return res.load() != 0;
+}
+
+bool Service::IsPassProtected() const {
+  return !FLAGS_requirepass.empty();
 }
 
 void Service::RegisterHttp(HttpListenerBase* listener) {

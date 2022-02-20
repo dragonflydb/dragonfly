@@ -71,6 +71,7 @@ const char kUintErr[] = "value is out of range, must be positive";
 const char kDbIndOutOfRangeErr[] = "DB index is out of range";
 const char kInvalidDbIndErr[] = "invalid DB index";
 const char kScriptNotFound[] = "-NOSCRIPT No matching script. Please use EVAL.";
+const char kAuthRejected[] = "-WRONGPASS invalid username-password pair or user is disabled.";
 
 const char* GlobalState::Name(S s) {
   switch (s) {

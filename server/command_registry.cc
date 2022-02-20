@@ -30,7 +30,7 @@ uint32_t CommandId::OptCount(uint32_t mask) {
 }
 
 CommandRegistry::CommandRegistry() {
-  CommandId cd("COMMAND", CO::RANDOM | CO::LOADING, 0, 0, 0, 0);
+  CommandId cd("COMMAND", CO::RANDOM | CO::LOADING | CO::NOSCRIPT, 0, 0, 0, 0);
 
   cd.SetHandler([this](const auto& args, auto* cntx) { return Command(args, cntx); });
 
