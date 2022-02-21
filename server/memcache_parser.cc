@@ -17,6 +17,7 @@ pair<string_view, MemcacheParser::CmdType> cmd_map[] = {
     {"prepend", MemcacheParser::PREPEND}, {"cas", MemcacheParser::CAS},
     {"get", MemcacheParser::GET},         {"gets", MemcacheParser::GETS},
     {"gat", MemcacheParser::GAT},         {"gats", MemcacheParser::GATS},
+    {"stats", MemcacheParser::STATS},
 };
 
 MemcacheParser::CmdType From(string_view token) {
@@ -29,7 +30,6 @@ MemcacheParser::CmdType From(string_view token) {
 
 MemcacheParser::Result ParseStore(const std::string_view* tokens, unsigned num_tokens,
                                   MemcacheParser::Command* res) {
-
   unsigned opt_pos = 3;
   if (res->type == MemcacheParser::CAS) {
     if (num_tokens <= opt_pos)
@@ -61,7 +61,7 @@ MemcacheParser::Result ParseStore(const std::string_view* tokens, unsigned num_t
 }
 
 MemcacheParser::Result ParseRetrieve(const std::string_view* tokens, unsigned num_tokens,
-                                    MemcacheParser::Command* res) {
+                                     MemcacheParser::Command* res) {
   unsigned key_pos = 0;
   if (res->type == MemcacheParser::GAT || res->type == MemcacheParser::GATS) {
     if (!absl::SimpleAtoi(tokens[0], &res->expire_ts)) {
@@ -70,6 +70,10 @@ MemcacheParser::Result ParseRetrieve(const std::string_view* tokens, unsigned nu
     ++key_pos;
   }
   res->key = tokens[key_pos++];
+
+  if (res->type == MemcacheParser::STATS && key_pos < num_tokens)
+    return MemcacheParser::PARSE_ERROR;
+
   while (key_pos < num_tokens) {
     res->keys_ext.push_back(tokens[key_pos++]);
   }
@@ -79,14 +83,15 @@ MemcacheParser::Result ParseRetrieve(const std::string_view* tokens, unsigned nu
 
 }  // namespace
 
-auto MemcacheParser::Parse(string_view str, uint32_t* consumed, Command* res) -> Result {
+auto MemcacheParser::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
   auto pos = str.find('\n');
   *consumed = 0;
   if (pos == string_view::npos) {
-    // TODO: it's over simplified since we may process gets command that is not limited to
+    // TODO: it's over simplified since we may process GET/GAT command that is not limited to
     // 300 characters.
     return str.size() > 300 ? PARSE_ERROR : INPUT_PENDING;
   }
+
   if (pos == 0 || str[pos - 1] != '\r') {
     return PARSE_ERROR;
   }
@@ -100,6 +105,7 @@ auto MemcacheParser::Parse(string_view str, uint32_t* consumed, Command* res) ->
 
   while (cur < pos && str[cur] == ' ')
     ++cur;
+
   uint32_t s = cur;
   for (; cur < pos; ++cur) {
     if (str[cur] == ' ' || str[cur] == '\r') {
@@ -114,6 +120,7 @@ auto MemcacheParser::Parse(string_view str, uint32_t* consumed, Command* res) ->
       s = cur + 1;
     }
   }
+
   if (num_tokens == 0)
     return PARSE_ERROR;
 
@@ -123,23 +130,28 @@ auto MemcacheParser::Parse(string_view str, uint32_t* consumed, Command* res) ->
     ++cur;
   }
 
-  res->type = From(tokens[0]);
-  if (res->type == INVALID) {
+  cmd->type = From(tokens[0]);
+  if (cmd->type == INVALID) {
     return UNKNOWN_CMD;
   }
 
-  if (res->type <= CAS) {  // Store command
+  if (cmd->type <= CAS) {  // Store command
     if (num_tokens < 5 || tokens[1].size() > 250) {
       return MemcacheParser::PARSE_ERROR;
     }
 
     // memcpy(single_key_, tokens[0].data(), tokens[0].size());  // we copy the key
-    res->key = string_view{tokens[1].data(), tokens[1].size()};
+    cmd->key = string_view{tokens[1].data(), tokens[1].size()};
 
-    return ParseStore(tokens + 2, num_tokens - 2, res);
+    return ParseStore(tokens + 2, num_tokens - 2, cmd);
   }
 
-  return ParseRetrieve(tokens + 1, num_tokens - 1, res);
+  if (num_tokens == 1) {
+    if (cmd->type == MemcacheParser::STATS)
+      return MemcacheParser::OK;
+  }
+
+  return ParseRetrieve(tokens + 1, num_tokens - 1, cmd);
 };
 
 }  // namespace dfly

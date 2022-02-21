@@ -36,4 +36,23 @@ TEST_F(MCParserTest, Basic) {
   EXPECT_EQ(3, cmd_.bytes_len);
 }
 
+TEST_F(MCParserTest, Stats) {
+  MemcacheParser::Result st = parser_.Parse("stats foo\r\n", &consumed_, &cmd_);
+  EXPECT_EQ(MemcacheParser::OK, st);
+  EXPECT_EQ(consumed_, 11);
+  EXPECT_EQ(cmd_.type, MemcacheParser::STATS);
+  EXPECT_EQ("foo", cmd_.key);
+
+  cmd_ = MemcacheParser::Command{};
+  st = parser_.Parse("stats  \r\n", &consumed_, &cmd_);
+  EXPECT_EQ(MemcacheParser::OK, st);
+  EXPECT_EQ(consumed_, 9);
+  EXPECT_EQ(cmd_.type, MemcacheParser::STATS);
+  EXPECT_EQ("", cmd_.key);
+
+  cmd_ = MemcacheParser::Command{};
+  st = parser_.Parse("stats  fpp bar\r\n", &consumed_, &cmd_);
+  EXPECT_EQ(MemcacheParser::PARSE_ERROR, st);
+}
+
 }  // namespace dfly

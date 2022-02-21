@@ -28,6 +28,7 @@ class MemcacheParser {
     GETS = 11,
     GAT = 12,
     GATS = 13,
+    STATS = 14,
 
     // Delete and INCR
     DELETE = 21,
