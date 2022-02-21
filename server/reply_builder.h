@@ -27,7 +27,7 @@ class ReplyBuilderInterface {
   struct ResponseValue {
     std::string_view key;
     std::string value;
-    uint64_t mc_ver  = 0;  // 0 means we do not output it (i.e has not been requested).
+    uint64_t mc_ver = 0;  // 0 means we do not output it (i.e has not been requested).
     uint32_t mc_flag = 0;
   };
 
@@ -72,10 +72,10 @@ class SinkReplyBuilder : public ReplyBuilderInterface {
     io_write_bytes_ = 0;
   }
 
- protected:
   //! Sends a string as is without any formatting. raw should be encoded according to the protocol.
   void SendDirect(std::string_view str);
 
+ protected:
   void Send(const iovec* v, uint32_t len);
 
   std::string batch_;

@@ -8,6 +8,7 @@
 #include <absl/random/random.h>  // for master_id_ generation.
 #include <absl/strings/match.h>
 #include <malloc.h>
+#include <sys/resource.h>
 
 #include <filesystem>
 
@@ -94,6 +95,46 @@ void ServerFamily::Shutdown() {
       replica_->Stop();
     }
   });
+}
+
+void ServerFamily::StatsMC(std::string_view section, ConnectionContext* cntx) {
+  if (!section.empty()) {
+    return cntx->reply_builder()->SendError("");
+  }
+  string info;
+
+#define ADD_LINE(name, val) absl::StrAppend(&info, "STAT " #name " ", val, "\r\n")
+
+  time_t now = time(NULL);
+  size_t uptime = now - start_time_;
+  struct rusage ru;
+  getrusage(RUSAGE_SELF, &ru);
+
+  auto dbl_time = [](const timeval& tv) -> double {
+    return tv.tv_sec + double(tv.tv_usec) / 1000000.0;
+  };
+
+  double utime = dbl_time(ru.ru_utime);
+  double systime = dbl_time(ru.ru_stime);
+
+  Metrics m = GetMetrics();
+
+  ADD_LINE(pid, getpid());
+  ADD_LINE(uptime, uptime);
+  ADD_LINE(time, now);
+  ADD_LINE(version, "1.6.12");
+  ADD_LINE(libevent, "iouring");
+  ADD_LINE(pointer_size, sizeof(void*));
+  ADD_LINE(rusage_user, utime);
+  ADD_LINE(rusage_system, systime);
+  ADD_LINE(max_connections, -1);
+  ADD_LINE(curr_connections, m.conn_stats.num_conns);
+  ADD_LINE(total_connections, -1);
+  ADD_LINE(rejected_connections, -1);
+  absl::StrAppend(&info, "END\r\n");
+
+  MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
+  builder->SendDirect(info);
 }
 
 void ServerFamily::DbSize(CmdArgList args, ConnectionContext* cntx) {

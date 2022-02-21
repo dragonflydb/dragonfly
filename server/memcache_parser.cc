@@ -92,7 +92,7 @@ auto MemcacheParser::Parse(string_view str, uint32_t* consumed, Command* cmd) ->
     return str.size() > 300 ? PARSE_ERROR : INPUT_PENDING;
   }
 
-  if (pos == 0 || str[pos - 1] != '\r') {
+  if (pos == 0) {
     return PARSE_ERROR;
   }
   *consumed = pos + 1;
@@ -107,8 +107,8 @@ auto MemcacheParser::Parse(string_view str, uint32_t* consumed, Command* cmd) ->
     ++cur;
 
   uint32_t s = cur;
-  for (; cur < pos; ++cur) {
-    if (str[cur] == ' ' || str[cur] == '\r') {
+  for (; cur <= pos; ++cur) {
+    if (absl::ascii_isspace(str[cur])) {
       if (cur != s) {
         tokens[num_tokens++] = str.substr(s, cur - s);
         if (num_tokens == ABSL_ARRAYSIZE(tokens)) {

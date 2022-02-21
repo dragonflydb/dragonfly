@@ -48,6 +48,8 @@ class ServerFamily {
     return script_mgr_.get();
   }
 
+  void StatsMC(std::string_view section, ConnectionContext* cntx);
+
  private:
   uint32_t shard_count() const {
     return ess_.size();
