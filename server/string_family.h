@@ -59,9 +59,15 @@ class StringFamily {
 
   static void IncrByGeneric(std::string_view key, int64_t val, ConnectionContext* cntx);
 
-  using MGetResponse = std::vector<std::optional<std::string>>;
+  struct GetResp {
+    std::string value;
+    uint64_t mc_ver  = 0;  // 0 means we do not output it (i.e has not been requested).
+    uint32_t mc_flag = 0;
+  };
 
-  static MGetResponse OpMGet(const Transaction* t, EngineShard* shard);
+  using MGetResponse = std::vector<std::optional<GetResp>>;
+  static MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver,
+                             const Transaction* t, EngineShard* shard);
 
   static OpStatus OpMSet(const Transaction* t, EngineShard* es);
   static OpResult<int64_t> OpIncrBy(const OpArgs& op_args, std::string_view key, int64_t val);

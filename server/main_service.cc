@@ -57,15 +57,14 @@ class InterpreterReplier : public RedisReplyBuilder {
 
   void SendError(std::string_view str) override;
   void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) override;
-  void SendGetNotFound() override;
   void SendStored() override;
 
   void SendSimpleString(std::string_view str) final;
-  void SendMGetResponse(const StrOrNil* arr, uint32_t count) final;
-  void SendSimpleStrArr(const std::string_view* arr, uint32_t count) final;
+  void SendMGetResponse(const OptResp* resp, uint32_t count) final;
+  void SendSimpleStrArr(const string_view* arr, uint32_t count) final;
   void SendNullArray() final;
 
-  void SendStringArr(absl::Span<const std::string_view> arr) final;
+  void SendStringArr(absl::Span<const string_view> arr) final;
   void SendNull() final;
 
   void SendLong(long val) final;
@@ -160,11 +159,6 @@ void InterpreterReplier::SendGetReply(string_view key, uint32_t flags, string_vi
   explr_->OnString(value);
 }
 
-void InterpreterReplier::SendGetNotFound() {
-  DCHECK(array_len_.empty());
-  explr_->OnNil();
-}
-
 void InterpreterReplier::SendStored() {
   DCHECK(array_len_.empty());
   SendSimpleString("OK");
@@ -178,13 +172,13 @@ void InterpreterReplier::SendSimpleString(string_view str) {
   PostItem();
 }
 
-void InterpreterReplier::SendMGetResponse(const StrOrNil* arr, uint32_t count) {
+void InterpreterReplier::SendMGetResponse(const OptResp* resp, uint32_t count) {
   DCHECK(array_len_.empty());
 
   explr_->OnArrayStart(count);
   for (uint32_t i = 0; i < count; ++i) {
-    if (arr[i].has_value()) {
-      explr_->OnString(*arr[i]);
+    if (resp[i].has_value()) {
+      explr_->OnString(resp[i]->value);
     } else {
       explr_->OnNil();
     }
@@ -498,10 +492,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       strcpy(set_opt, "NX");
       break;
     case MemcacheParser::GET:
-      strcpy(cmd_name, "GET");
-      if (cmd.keys_ext.size() > 0) {
-        return mc_builder->SendClientError("multiple keys are not suported");
-      }
+      strcpy(cmd_name, "MGET");
       break;
     default:
       mc_builder->SendClientError("bad command line format");
@@ -520,6 +511,11 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       args.emplace_back(set_opt, strlen(set_opt));
     }
     cntx->conn_state.memcache_flag = cmd.flags;
+  } else {
+    for (auto s : cmd.keys_ext) {
+      char* key = const_cast<char*>(s.data());
+      args.emplace_back(key, s.size());
+    }
   }
 
   DispatchCommand(CmdArgList{args}, cntx);

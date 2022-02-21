@@ -171,10 +171,6 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 
     string val;
     it_res.value()->second.GetString(&val);
-    if ((*it_res)->second.HasFlag() && cntx->protocol() == Protocol::MEMCACHE) {
-      mc_flag = shard->db_slice().GetMCFlag(t->db_index(), (*it_res)->first);
-    }
-
     return val;
   };
 
@@ -182,22 +178,19 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   Transaction* trans = cntx->transaction;
   OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
 
-  // This method is being used by both MC and Redis. We should use common interface.
-  ReplyBuilderInterface* builder = cntx->reply_builder();
   if (result) {
     DVLOG(1) << "GET " << trans->DebugId() << ": " << key << " " << result.value();
-    builder->SendGetReply(key, mc_flag, result.value());
+    (*cntx)->SendGetReply(key, mc_flag, result.value());
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
-        builder->SendError(kWrongTypeErr);
+        (*cntx)->SendError(kWrongTypeErr);
         break;
       default:
         DVLOG(1) << "GET " << key << " nil";
-        builder->SendGetNotFound();
+        (*cntx)->SendNull();
     }
   }
-  builder->EndMultiLine();
 }
 
 void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
@@ -290,9 +283,12 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
   unsigned shard_count = transaction->shard_set()->size();
   std::vector<MGetResponse> mget_resp(shard_count);
 
+  bool fetch_mcflag = cntx->protocol() == Protocol::MEMCACHE;
+  bool fetch_mcver = fetch_mcflag && (cntx->conn_state.mask & ConnectionState::FETCH_CAS_VER);
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
-    mget_resp[sid] = OpMGet(t, shard);
+    mget_resp[sid] = OpMGet(fetch_mcflag, fetch_mcver, t, shard);
     return OpStatus::OK;
   };
 
@@ -303,21 +299,34 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
   CHECK_EQ(OpStatus::OK, result);
 
   // reorder the responses back according to the order of their corresponding keys.
-  vector<std::optional<std::string_view>> res(args.size() - 1);
+  vector<ReplyBuilderInterface::OptResp> res(args.size() - 1);
+
   for (ShardId sid = 0; sid < shard_count; ++sid) {
     if (!transaction->IsActive(sid))
       continue;
-    auto& values = mget_resp[sid];
+
+    MGetResponse& results = mget_resp[sid];
     ArgSlice slice = transaction->ShardArgsInShard(sid);
+
     DCHECK(!slice.empty());
-    DCHECK_EQ(slice.size(), values.size());
+    DCHECK_EQ(slice.size(), results.size());
+
     for (size_t j = 0; j < slice.size(); ++j) {
+      if (!results[j])
+        continue;
+
       uint32_t indx = transaction->ReverseArgIndex(sid, j);
-      res[indx] = values[j];
+
+      auto& dest = res[indx].emplace();
+      auto& src = *results[j];
+      dest.key = ArgS(args, indx + 1);
+      dest.value = std::move(src.value);
+      dest.mc_flag = src.mc_flag;
+      dest.mc_ver = src.mc_ver;
     }
   }
 
-  return (*cntx)->SendMGetResponse(res.data(), res.size());
+  return cntx->reply_builder()->SendMGetResponse(res.data(), res.size());
 }
 
 void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
@@ -339,7 +348,8 @@ void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendOk();
 }
 
-auto StringFamily::OpMGet(const Transaction* t, EngineShard* shard) -> MGetResponse {
+auto StringFamily::OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction* t,
+                          EngineShard* shard) -> MGetResponse {
   auto args = t->ShardArgsInShard(shard->shard_id());
   DCHECK(!args.empty());
 
@@ -348,8 +358,18 @@ auto StringFamily::OpMGet(const Transaction* t, EngineShard* shard) -> MGetRespo
   auto& db_slice = shard->db_slice();
   for (size_t i = 0; i < args.size(); ++i) {
     OpResult<MainIterator> it_res = db_slice.Find(t->db_index(), args[i], OBJ_STRING);
-    if (it_res.ok()) {
-      it_res.value()->second.GetString(&response[i].emplace());
+    if (!it_res)
+      continue;
+
+    const MainIterator& it = *it_res;
+    auto& dest = response[i].emplace();
+
+    it->second.GetString(&dest.value);
+    if (fetch_mcflag) {
+      dest.mc_flag = db_slice.GetMCFlag(t->db_index(), it->first);
+      if (fetch_mcver) {
+        dest.mc_ver = it.GetVersion();
+      }
     }
   }
 

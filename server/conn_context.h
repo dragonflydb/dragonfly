@@ -42,7 +42,15 @@ struct ConnectionState {
   };
 
   uint32_t mask = 0;  // A bitmask of Mask values.
-  uint32_t memcache_flag = 0;   // used for memcache set command.
+
+  enum MCGetMask {
+    FETCH_CAS_VER = 1,
+  };
+
+  // used for memcache set/get commands.
+  // For set op - it's the flag value we are storing along with the value.
+  // For get op - we use it as a mask of MCGetMask values.
+  uint32_t memcache_flag = 0;
 
   bool IsClosing() const {
     return mask & CONN_CLOSING;

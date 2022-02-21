@@ -22,11 +22,20 @@ class ReplyBuilderInterface {
 
   virtual std::error_code GetError() const = 0;
 
-  virtual void SendGetNotFound() = 0;
   virtual void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) = 0;
-  virtual void SendSetSkipped() = 0;
 
-  virtual void EndMultiLine() {}
+  struct ResponseValue {
+    std::string_view key;
+    std::string value;
+    uint64_t mc_ver  = 0;  // 0 means we do not output it (i.e has not been requested).
+    uint32_t mc_flag = 0;
+  };
+
+  using OptResp = std::optional<ResponseValue>;
+
+  virtual void SendMGetResponse(const OptResp* resp, uint32_t count) = 0;
+
+  virtual void SendSetSkipped() = 0;
 };
 
 class SinkReplyBuilder : public ReplyBuilderInterface {
@@ -84,14 +93,10 @@ class MCReplyBuilder : public SinkReplyBuilder {
 
   void SendError(std::string_view str) final;
   void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) final;
-
-  // memcache does not print keys that are not found.
-  void SendGetNotFound() final {
-  }
+  void SendMGetResponse(const OptResp* resp, uint32_t count) final;
 
   void SendStored() final;
 
-  void EndMultiLine() final;
   void SendSetSkipped() final;
 
   void SendClientError(std::string_view str);
@@ -107,15 +112,14 @@ class RedisReplyBuilder : public SinkReplyBuilder {
 
   void SendError(std::string_view str) override;
   void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) override;
-  void SendGetNotFound() override;
+  void SendMGetResponse(const OptResp* resp, uint32_t count) override;
+
   void SendStored() override;
   void SendSetSkipped() override;
 
   void SendError(OpStatus status);
   virtual void SendSimpleString(std::string_view str);
 
-  using StrOrNil = std::optional<std::string_view>;
-  virtual void SendMGetResponse(const StrOrNil* arr, uint32_t count);
   virtual void SendSimpleStrArr(const std::string_view* arr, uint32_t count);
   virtual void SendNullArray();
 

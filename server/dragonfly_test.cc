@@ -261,23 +261,23 @@ TEST_F(DflyEngineTest, EvalSha) {
 
 TEST_F(DflyEngineTest, Memcache) {
   using MP = MemcacheParser;
-  auto resp = RunMC(MP::SET, "foo", "bar", 1);
+  auto resp = RunMC(MP::SET, "key", "bar", 1);
   EXPECT_EQ(resp, "STORED\r\n");
 
-  resp = RunMC(MP::GET, "foo");
-  EXPECT_EQ(resp, "VALUE foo 1 3\r\nbar\r\nEND\r\n");
+  resp = RunMC(MP::GET, "key");
+  EXPECT_EQ(resp, "VALUE key 1 3\r\nbar\r\nEND\r\n");
 
-  resp = RunMC(MP::ADD, "foo", "bar", 1);
+  resp = RunMC(MP::ADD, "key", "bar", 1);
   EXPECT_EQ(resp, "NOT_STORED\r\n");
 
-  resp = RunMC(MP::REPLACE, "foo2", "bar", 1);
+  resp = RunMC(MP::REPLACE, "key2", "bar", 1);
   EXPECT_EQ(resp, "NOT_STORED\r\n");
 
-  resp = RunMC(MP::ADD, "foo2", "bar2", 2);
+  resp = RunMC(MP::ADD, "key2", "bar2", 2);
   EXPECT_EQ(resp, "STORED\r\n");
 
-  resp = GetMC(MP::GET, {"foo2", "foo"});
-  // EXPECT_EQ(resp, "");
+  resp = GetMC(MP::GET, {"key2", "key"});
+  EXPECT_EQ(resp, "VALUE key2 2 4\r\nbar2\r\nVALUE key 1 3\r\nbar\r\nEND\r\n");
 }
 
 // TODO: to test transactions with a single shard since then all transactions become local.

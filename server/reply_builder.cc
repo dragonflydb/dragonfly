@@ -94,12 +94,28 @@ void MCReplyBuilder::SendGetReply(std::string_view key, uint32_t flags, std::str
   Send(v, ABSL_ARRAYSIZE(v));
 }
 
-void MCReplyBuilder::SendError(string_view str) {
-  SendDirect("ERROR\r\n");
+void MCReplyBuilder::SendMGetResponse(const OptResp* resp, uint32_t count) {
+  string header;
+  for (unsigned i = 0; i < count; ++i) {
+    if (resp[i]) {
+      const auto& src = *resp[i];
+      absl::StrAppend(&header, "VALUE ", src.key, " ", src.mc_flag, " ",
+                      src.value.size());
+      if (src.mc_ver) {
+        absl::StrAppend(&header, " ", src.mc_ver);
+      }
+
+      absl::StrAppend(&header, "\r\n");
+      iovec v[] = {IoVec(header), IoVec(src.value), IoVec(kCRLF)};
+      Send(v, ABSL_ARRAYSIZE(v));
+      header.clear();
+    }
+  }
+  SendDirect("END\r\n");
 }
 
-void MCReplyBuilder::EndMultiLine() {
-  SendDirect("END\r\n");
+void MCReplyBuilder::SendError(string_view str) {
+  SendDirect("ERROR\r\n");
 }
 
 void MCReplyBuilder::SendClientError(string_view str) {
@@ -126,10 +142,6 @@ void RedisReplyBuilder::SendError(string_view str) {
 
 void RedisReplyBuilder::SendGetReply(std::string_view key, uint32_t flags, std::string_view value) {
   SendBulkString(value);
-}
-
-void RedisReplyBuilder::SendGetNotFound() {
-  SendNull();
 }
 
 void RedisReplyBuilder::SendStored() {
@@ -193,12 +205,12 @@ void RedisReplyBuilder::SendDouble(double val) {
   SendBulkString(absl::StrCat(val));
 }
 
-void RedisReplyBuilder::SendMGetResponse(const StrOrNil* arr, uint32_t count) {
+void RedisReplyBuilder::SendMGetResponse(const OptResp* resp, uint32_t count) {
   string res = absl::StrCat("*", count, kCRLF);
   for (size_t i = 0; i < count; ++i) {
-    if (arr[i]) {
-      StrAppend(&res, "$", arr[i]->size(), kCRLF);
-      res.append(*arr[i]).append(kCRLF);
+    if (resp[i]) {
+      StrAppend(&res, "$", resp[i]->value.size(), kCRLF);
+      res.append(resp[i]->value).append(kCRLF);
     } else {
       res.append("$-1\r\n");
     }
