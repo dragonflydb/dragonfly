@@ -89,6 +89,8 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
   mi_heap_t* tlh = mi_heap_get_backing();
   void* ptr = mi_heap_malloc_aligned(tlh, sizeof(EngineShard), alignof(EngineShard));
   shard_ = new (ptr) EngineShard(pb, update_db_time, tlh);
+
+  CompactObj::InitThreadLocal(shard_->memory_resource());
 }
 
 void EngineShard::DestroyThreadLocal() {
@@ -99,7 +101,7 @@ void EngineShard::DestroyThreadLocal() {
   shard_->~EngineShard();
   mi_free(shard_);
   shard_ = nullptr;
-
+  CompactObj::InitThreadLocal(nullptr);
   VLOG(1) << "Shard reset " << index;
 }
 

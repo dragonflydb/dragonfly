@@ -321,10 +321,10 @@ pair<MainIterator, bool> DbSlice::AddIfNotExist(DbIndex db_ind, string_view key,
   auto& db = db_arr_[db_ind];
   CompactObj co_key{key};
 
-  auto [new_entry, success] = db->prime_table.Insert(std::move(co_key), std::move(obj));
+  auto [new_entry, inserted] = db->prime_table.Insert(std::move(co_key), std::move(obj));
 
   // in this case obj won't be moved and will be destroyed during unwinding.
-  if (!success)
+  if (!inserted)
     return make_pair(new_entry, false);
 
   new_entry.SetVersion(NextVersion());

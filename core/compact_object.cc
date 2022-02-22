@@ -36,13 +36,16 @@ size_t QlUsedSize(quicklist* ql) {
 
 thread_local robj tmp_robj{
     .type = 0, .encoding = 0, .lru = 0, .refcount = OBJ_STATIC_REFCOUNT, .ptr = nullptr};
+
+thread_local pmr::memory_resource* local_mr = pmr::get_default_resource();
+
 }  // namespace
 
 static_assert(sizeof(CompactObj) == 18);
 
 namespace detail {
 
-CompactBlob::CompactBlob(std::string_view s, pmr::memory_resource* mr)
+CompactBlob::CompactBlob(string_view s, pmr::memory_resource* mr)
     : ptr_(nullptr), sz(s.size()) {
   if (sz) {
     ptr_ = mr->allocate(sz);
@@ -50,7 +53,7 @@ CompactBlob::CompactBlob(std::string_view s, pmr::memory_resource* mr)
   }
 }
 
-void CompactBlob::Assign(std::string_view s, std::pmr::memory_resource* mr) {
+void CompactBlob::Assign(string_view s, pmr::memory_resource* mr) {
   if (s.size() > sz) {
     size_t cur_cap = capacity();
     if (s.size() > cur_cap)
@@ -66,7 +69,7 @@ void CompactBlob::Free(pmr::memory_resource* mr) {
   ptr_ = nullptr;
 }
 
-void CompactBlob::MakeRoom(size_t current_cap, size_t desired, std::pmr::memory_resource* mr) {
+void CompactBlob::MakeRoom(size_t current_cap, size_t desired, pmr::memory_resource* mr) {
   if (current_cap * 2 > desired) {
     if (desired < SDS_MAX_PREALLOC)
       desired *= 2;
@@ -200,6 +203,10 @@ bool RobjWrapper::Equal(std::string_view sv) const {
 
 using namespace std;
 
+void CompactObj::InitThreadLocal(pmr::memory_resource* mr) {
+  local_mr = mr;
+}
+
 CompactObj::~CompactObj() {
   if (HasAllocated()) {
     Free();
@@ -294,7 +301,7 @@ void CompactObj::ImportRObj(robj* o) {
 
   if (o->type == OBJ_STRING) {
     std::string_view src((char*)o->ptr, sdslen((sds)o->ptr));
-    u_.r_obj.blob.Assign(src, pmr::get_default_resource());
+    u_.r_obj.blob.Assign(src, local_mr);
     decrRefCount(o);
   } else {  // Non-string objects we move as is and release Robj wrapper.
     u_.r_obj.blob.Set(o->ptr, 0);
@@ -374,7 +381,7 @@ void CompactObj::SetString(std::string_view str) {
 
   DCHECK(taglen_ == ROBJ_TAG && u_.r_obj.type == OBJ_STRING);
   CHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding);
-  u_.r_obj.blob.Assign(input, pmr::get_default_resource());
+  u_.r_obj.blob.Assign(input, local_mr);
 }
 
 std::string_view CompactObj::GetSlice(std::string* scratch) const {
@@ -429,7 +436,7 @@ void CompactObj::Free() {
   DCHECK(HasAllocated());
 
   if (taglen_ == ROBJ_TAG) {
-    u_.r_obj.Free(pmr::get_default_resource());
+    u_.r_obj.Free(local_mr);
   } else {
     LOG(FATAL) << "Bad compact object type " << int(taglen_);
   }

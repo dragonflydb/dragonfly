@@ -214,6 +214,8 @@ class CompactObj {
     return kInlineLen;
   }
 
+  static void InitThreadLocal(std::pmr::memory_resource* mr);
+
  private:
   bool EqualNonInline(std::string_view sv) const;
 
