@@ -491,12 +491,19 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       strcpy(cmd_name, "SET");
       strcpy(set_opt, "NX");
       break;
+    case MemcacheParser::APPEND:
+      strcpy(cmd_name, "APPEND");
+      break;
+    case MemcacheParser::PREPEND:
+      strcpy(cmd_name, "PREPEND");
+      break;
     case MemcacheParser::GET:
       strcpy(cmd_name, "MGET");
       break;
     case MemcacheParser::STATS:
       server_family_.StatsMC(cmd.key, cntx);
       return;
+
     default:
 
       mc_builder->SendClientError("bad command line format");

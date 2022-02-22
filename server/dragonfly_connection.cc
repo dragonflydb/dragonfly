@@ -334,7 +334,7 @@ auto Connection::ParseMemcache() -> ParserStatus {
   uint32_t consumed = 0;
   MemcacheParser::Command cmd;
   string_view value;
-  ReplyBuilderInterface* builder = cc_->reply_builder();
+  MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(cc_->reply_builder());
 
   do {
     string_view str = ToSV(io_buf_.InputBuffer());
@@ -361,21 +361,25 @@ auto Connection::ParseMemcache() -> ParserStatus {
     // dispatch fiber pulls the last record but is still processing the command and then this
     // fiber enters the condition below and executes out of order.
     bool is_sync_dispatch = (cc_->conn_state.mask & ConnectionState::ASYNC_DISPATCH) == 0;
-    if (dispatch_q_.empty() && is_sync_dispatch && consumed >= io_buf_.InputLen()) {
+    if (dispatch_q_.empty() && is_sync_dispatch) {
       service_->DispatchMC(cmd, value, cc_.get());
     }
-    io_buf_.ConsumeInput(consumed);
+    io_buf_.ConsumeInput(total_len);
   } while (!builder->GetError());
 
   parser_error_ = result;
 
-  if (result == MemcacheParser::OK)
-    return OK;
-
-  if (result == MemcacheParser::INPUT_PENDING)
+  if (result == MemcacheParser::INPUT_PENDING) {
     return NEED_MORE;
+  }
 
-  return ERROR;
+  if (result == MemcacheParser::PARSE_ERROR) {
+    builder->SendError("");  // ERROR.
+  } else if (result != MemcacheParser::OK) {
+    builder->SendClientError("bad command line format");
+  }
+
+  return OK;
 }
 
 auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, ParserStatus> {
@@ -419,7 +423,10 @@ auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, Pars
 
       size_t capacity = io_buf_.Capacity();
       if (capacity < kMaxReadSize) {
-        size_t parser_hint = redis_parser_->parselen_hint();
+        size_t parser_hint = 0;
+        if (redis_parser_)
+          parser_hint = redis_parser_->parselen_hint();  // Could be done for MC as well.
+
         if (parser_hint > capacity) {
           io_buf_.Reserve(std::min(kMaxReadSize, parser_hint));
         } else if (append_buf.size() == *recv_sz && append_buf.size() > capacity / 2) {

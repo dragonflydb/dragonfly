@@ -131,10 +131,16 @@ void ServerFamily::StatsMC(std::string_view section, ConnectionContext* cntx) {
   ADD_LINE(curr_connections, m.conn_stats.num_conns);
   ADD_LINE(total_connections, -1);
   ADD_LINE(rejected_connections, -1);
+  ADD_LINE(bytes_read, m.conn_stats.io_read_bytes);
+  ADD_LINE(bytes_written, m.conn_stats.io_write_bytes);
+  ADD_LINE(limit_maxbytes, -1);
+
   absl::StrAppend(&info, "END\r\n");
 
   MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
   builder->SendDirect(info);
+
+#undef ADD_LINE
 }
 
 void ServerFamily::DbSize(CmdArgList args, ConnectionContext* cntx) {

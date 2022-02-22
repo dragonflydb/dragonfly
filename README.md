@@ -123,11 +123,19 @@ We should implement basic memory management support. For Master/Slave replicatio
 a distributed log format.
 
 ### Memchache API
-- [X] SET
-- [X] GET
-- [X] REPLACE
-- [X] ADD
-- [ ] STATS
+- [X] set
+- [X] get
+- [X] replace
+- [X] add
+- [X] stats (partial)
+- [x] append
+- [x] prepend
+- [ ] delete
+- [ ] flush_all
+- [ ] incr
+- [ ] decr
+- [ ] version
+- [ ] quit
 
 API 2.0
 - [ ] List Family
@@ -146,6 +154,9 @@ API 2.0
   - [ ] DISCARD
 - [X] Generic Family
   - [X] SCAN
+- [X] String Family
+  - [X] APPEND
+  - [X] PREPEND (dragonfly specific)
 
 
 Commands that I prefer not implement before launch:

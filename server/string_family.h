@@ -56,21 +56,32 @@ class StringFamily {
   static void IncrBy(CmdArgList args, ConnectionContext* cntx);
   static void Decr(CmdArgList args, ConnectionContext* cntx);
   static void DecrBy(CmdArgList args, ConnectionContext* cntx);
+  static void Append(CmdArgList args, ConnectionContext* cntx);
+  static void Prepend(CmdArgList args, ConnectionContext* cntx);
 
   static void IncrByGeneric(std::string_view key, int64_t val, ConnectionContext* cntx);
+  static void ExtendGeneric(CmdArgList args, bool prepend, ConnectionContext* cntx);
 
   struct GetResp {
     std::string value;
-    uint64_t mc_ver  = 0;  // 0 means we do not output it (i.e has not been requested).
+    uint64_t mc_ver = 0;  // 0 means we do not output it (i.e has not been requested).
     uint32_t mc_flag = 0;
   };
 
   using MGetResponse = std::vector<std::optional<GetResp>>;
-  static MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver,
-                             const Transaction* t, EngineShard* shard);
+  static MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction* t,
+                             EngineShard* shard);
 
   static OpStatus OpMSet(const Transaction* t, EngineShard* es);
   static OpResult<int64_t> OpIncrBy(const OpArgs& op_args, std::string_view key, int64_t val);
+
+  // Returns the length of the extended string. if prepend is false - appends the val.
+  static OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, std::string_view key,
+                                        std::string_view val, bool prepend);
+
+  // Returns true if was extended, false if the key was not found.
+  static OpResult<bool> ExtendOrSkip(const OpArgs& op_args, std::string_view key,
+                                     std::string_view val, bool prepend);
 };
 
 }  // namespace dfly

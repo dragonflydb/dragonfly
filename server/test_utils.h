@@ -117,10 +117,11 @@ class BaseFamilyTest : public ::testing::Test {
   RespVec Run(std::initializer_list<std::string_view> list);
   RespVec Run(std::string_view id, std::initializer_list<std::string_view> list);
 
-  std::string RunMC(MemcacheParser::CmdType cmd_type, std::string_view key, std::string_view value,
-                    uint32_t flags = 0, std::chrono::seconds ttl = std::chrono::seconds{});
-  std::string RunMC(MemcacheParser::CmdType cmd_type, std::string_view key = std::string_view{});
-  std::string GetMC(MemcacheParser::CmdType cmd_type, std::initializer_list<std::string_view> list);
+  using MCResponse = std::vector<std::string>;
+  MCResponse RunMC(MemcacheParser::CmdType cmd_type, std::string_view key, std::string_view value,
+                   uint32_t flags = 0, std::chrono::seconds ttl = std::chrono::seconds{});
+  MCResponse RunMC(MemcacheParser::CmdType cmd_type, std::string_view key = std::string_view{});
+  MCResponse GetMC(MemcacheParser::CmdType cmd_type, std::initializer_list<std::string_view> list);
 
   int64_t CheckedInt(std::initializer_list<std::string_view> list);
 

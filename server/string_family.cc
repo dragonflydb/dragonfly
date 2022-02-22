@@ -255,6 +255,14 @@ void StringFamily::DecrBy(CmdArgList args, ConnectionContext* cntx) {
   return IncrByGeneric(key, -val, cntx);
 }
 
+void StringFamily::Append(CmdArgList args, ConnectionContext* cntx) {
+  ExtendGeneric(std::move(args), false, cntx);
+}
+
+void StringFamily::Prepend(CmdArgList args, ConnectionContext* cntx) {
+  ExtendGeneric(std::move(args), true, cntx);
+}
+
 void StringFamily::IncrByGeneric(std::string_view key, int64_t val, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     OpResult<int64_t> res = OpIncrBy(OpArgs{shard, t->db_index()}, key, val);
@@ -274,6 +282,36 @@ void StringFamily::IncrByGeneric(std::string_view key, int64_t val, ConnectionCo
     default:;
   }
   __builtin_unreachable();
+}
+
+void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContext* cntx) {
+  std::string_view key = ArgS(args, 1);
+  std::string_view sval = ArgS(args, 2);
+
+  if (cntx->protocol() == Protocol::REDIS) {
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      return ExtendOrSet(OpArgs{shard, t->db_index()}, key, sval, prepend);
+    };
+
+    OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+    if (!result)
+      return (*cntx)->SendError(result.status());
+    else
+      return (*cntx)->SendLong(result.value());
+  }
+  DCHECK(cntx->protocol() == Protocol::MEMCACHE);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return ExtendOrSkip(OpArgs{shard, t->db_index()}, key, sval, prepend);
+  };
+
+  OpResult<bool> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  ReplyBuilderInterface* builder = cntx->reply_builder();
+  if (result.value_or(false)) {
+    return builder->SendStored();
+  }
+
+  builder->SendSetSkipped();
 }
 
 void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
@@ -426,6 +464,55 @@ OpResult<int64_t> StringFamily::OpIncrBy(const OpArgs& op_args, std::string_view
   return new_val;
 }
 
+OpResult<uint32_t> StringFamily::ExtendOrSet(const OpArgs& op_args, std::string_view key,
+                                             std::string_view val, bool prepend) {
+  auto& db_slice = op_args.shard->db_slice();
+  auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
+  if (inserted) {
+    it->second.SetString(val);
+    return val.size();
+  }
+
+  if (it->second.ObjType() != OBJ_STRING)
+    return OpStatus::WRONG_TYPE;
+
+  string tmp, new_val;
+  string_view slice = it->second.GetSlice(&tmp);
+  if (prepend)
+    new_val = absl::StrCat(val, slice);
+  else
+    new_val = absl::StrCat(slice, val);
+
+  db_slice.PreUpdate(op_args.db_ind, it);
+  it->second.SetString(new_val);
+  db_slice.PostUpdate(op_args.db_ind, it);
+
+  return new_val.size();
+}
+
+OpResult<bool> StringFamily::ExtendOrSkip(const OpArgs& op_args, std::string_view key,
+                                          std::string_view val, bool prepend) {
+  auto& db_slice = op_args.shard->db_slice();
+  OpResult<MainIterator> it_res = db_slice.Find(op_args.db_ind, key, OBJ_STRING);
+  if (!it_res) {
+    return false;
+  }
+
+  CompactObj& cobj = (*it_res)->second;
+
+  string tmp, new_val;
+  string_view slice = cobj.GetSlice(&tmp);
+  if (prepend)
+    new_val = absl::StrCat(val, slice);
+  else
+    new_val = absl::StrCat(slice, val);
+
+  db_slice.PreUpdate(op_args.db_ind, *it_res);
+  cobj.SetString(new_val);
+  db_slice.PostUpdate(op_args.db_ind, *it_res);
+
+  return new_val.size();
+}
 void StringFamily::Init(util::ProactorPool* pp) {
   set_qps.Init(pp);
   get_qps.Init(pp);
@@ -440,6 +527,8 @@ void StringFamily::Shutdown() {
 
 void StringFamily::Register(CommandRegistry* registry) {
   *registry << CI{"SET", CO::WRITE | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(Set)
+            << CI{"APPEND", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Append)
+            << CI{"PREPEND", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Prepend)
             << CI{"INCR", CO::WRITE | CO::DENYOOM | CO::FAST, 2, 1, 1, 1}.HFUNC(Incr)
             << CI{"DECR", CO::WRITE | CO::DENYOOM | CO::FAST, 2, 1, 1, 1}.HFUNC(Decr)
             << CI{"INCRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(IncrBy)

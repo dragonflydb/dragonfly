@@ -2,9 +2,9 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/strings/ascii.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/strip.h>
-#include <absl/strings/ascii.h>
 #include <gmock/gmock.h>
 
 #include "base/gtest.h"
@@ -261,23 +261,35 @@ TEST_F(DflyEngineTest, EvalSha) {
 
 TEST_F(DflyEngineTest, Memcache) {
   using MP = MemcacheParser;
+
   auto resp = RunMC(MP::SET, "key", "bar", 1);
-  EXPECT_EQ(resp, "STORED\r\n");
+  EXPECT_THAT(resp, ElementsAre("STORED"));
 
   resp = RunMC(MP::GET, "key");
-  EXPECT_EQ(resp, "VALUE key 1 3\r\nbar\r\nEND\r\n");
+  EXPECT_THAT(resp, ElementsAre("VALUE key 1 3", "bar", "END"));
 
   resp = RunMC(MP::ADD, "key", "bar", 1);
-  EXPECT_EQ(resp, "NOT_STORED\r\n");
+  EXPECT_THAT(resp, ElementsAre("NOT_STORED"));
 
   resp = RunMC(MP::REPLACE, "key2", "bar", 1);
-  EXPECT_EQ(resp, "NOT_STORED\r\n");
+  EXPECT_THAT(resp, ElementsAre("NOT_STORED"));
 
   resp = RunMC(MP::ADD, "key2", "bar2", 2);
-  EXPECT_EQ(resp, "STORED\r\n");
+  EXPECT_THAT(resp, ElementsAre("STORED"));
 
   resp = GetMC(MP::GET, {"key2", "key"});
-  EXPECT_EQ(resp, "VALUE key2 2 4\r\nbar2\r\nVALUE key 1 3\r\nbar\r\nEND\r\n");
+  EXPECT_THAT(resp, ElementsAre("VALUE key2 2 4", "bar2", "VALUE key 1 3", "bar", "END"));
+
+  resp = RunMC(MP::APPEND, "key2", "val2", 0);
+  EXPECT_THAT(resp, ElementsAre("STORED"));
+  resp = RunMC(MP::GET, "key2");
+  EXPECT_THAT(resp, ElementsAre("VALUE key2 2 8", "bar2val2", "END"));
+
+  resp = RunMC(MP::APPEND, "unkn", "val2", 0);
+  EXPECT_THAT(resp, ElementsAre("NOT_STORED"));
+
+  resp = RunMC(MP::GET, "unkn");
+  EXPECT_THAT(resp, ElementsAre("END"));
 }
 
 // TODO: to test transactions with a single shard since then all transactions become local.

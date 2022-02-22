@@ -5,6 +5,7 @@
 #include "server/test_utils.h"
 
 #include <absl/strings/match.h>
+#include <absl/strings/str_split.h>
 
 #include "base/logging.h"
 #include "base/stl_util.h"
@@ -17,6 +18,16 @@ using namespace testing;
 using namespace util;
 using namespace std;
 using MP = MemcacheParser;
+
+static vector<string> SplitLines(const std::string& src) {
+  vector<string> res = absl::StrSplit(src, "\r\n");
+  if (res.back().empty())
+    res.pop_back();
+  for (auto& v : res) {
+    absl::StripAsciiWhitespace(&v);
+  }
+  return res;
+}
 
 bool RespMatcher::MatchAndExplain(const RespExpr& e, MatchResultListener* listener) const {
   if (e.type != type_) {
@@ -186,8 +197,8 @@ RespVec BaseFamilyTest::Run(std::string_view id, std::initializer_list<std::stri
   return vec;
 }
 
-string BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view value,
-                             uint32_t flags, chrono::seconds ttl) {
+auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view value, uint32_t flags,
+                           chrono::seconds ttl) -> MCResponse {
   if (!ProactorBase::IsProactorThread()) {
     return pp_->at(0)->Await([&] { return this->RunMC(cmd_type, key, value, flags, ttl); });
   }
@@ -210,10 +221,10 @@ string BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view 
 
   DCHECK(context.transaction == nullptr);
 
-  return conn->sink.str();
+  return SplitLines(conn->sink.str());
 }
 
-string BaseFamilyTest::RunMC(MP::CmdType cmd_type, std::string_view key) {
+auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, std::string_view key) -> MCResponse {
   if (!ProactorBase::IsProactorThread()) {
     return pp_->at(0)->Await([&] { return this->RunMC(cmd_type, key); });
   }
@@ -228,11 +239,11 @@ string BaseFamilyTest::RunMC(MP::CmdType cmd_type, std::string_view key) {
 
   service_->DispatchMC(cmd, string_view{}, &context);
 
-  return conn->sink.str();
+  return SplitLines(conn->sink.str());
 }
 
-string BaseFamilyTest::GetMC(MP::CmdType cmd_type,
-                             std::initializer_list<std::string_view> list) {
+auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::string_view> list)
+    -> MCResponse {
   CHECK_GT(list.size(), 0u);
   CHECK(base::_in(cmd_type, {MP::GET, MP::GAT, MP::GETS, MP::GATS}));
 
@@ -255,7 +266,7 @@ string BaseFamilyTest::GetMC(MP::CmdType cmd_type,
 
   service_->DispatchMC(cmd, string_view{}, &context);
 
-  return conn->sink.str();
+  return SplitLines(conn->sink.str());
 }
 
 int64_t BaseFamilyTest::CheckedInt(std::initializer_list<std::string_view> list) {
