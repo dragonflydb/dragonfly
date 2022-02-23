@@ -56,7 +56,6 @@ class InterpreterReplier : public RedisReplyBuilder {
   }
 
   void SendError(std::string_view str) override;
-  void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) override;
   void SendStored() override;
 
   void SendSimpleString(std::string_view str) final;
@@ -152,11 +151,6 @@ void InterpreterReplier::PostItem() {
 void InterpreterReplier::SendError(string_view str) {
   DCHECK(array_len_.empty());
   explr_->OnError(str);
-}
-
-void InterpreterReplier::SendGetReply(string_view key, uint32_t flags, string_view value) {
-  DCHECK(array_len_.empty());
-  explr_->OnString(value);
 }
 
 void InterpreterReplier::SendStored() {
@@ -477,19 +471,28 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
                          ConnectionContext* cntx) {
   absl::InlinedVector<MutableSlice, 8> args;
   char cmd_name[16];
-  char set_opt[4] = {0};
+  char store_opt[32] = {0};
+
   MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
   switch (cmd.type) {
     case MemcacheParser::REPLACE:
       strcpy(cmd_name, "SET");
-      strcpy(set_opt, "XX");
+      strcpy(store_opt, "XX");
       break;
     case MemcacheParser::SET:
       strcpy(cmd_name, "SET");
       break;
     case MemcacheParser::ADD:
       strcpy(cmd_name, "SET");
-      strcpy(set_opt, "NX");
+      strcpy(store_opt, "NX");
+      break;
+    case MemcacheParser::INCR:
+      strcpy(cmd_name, "INCRBY");
+      absl::numbers_internal::FastIntToBuffer(cmd.delta, store_opt);
+      break;
+    case MemcacheParser::DECR:
+      strcpy(cmd_name, "DECRBY");
+      absl::numbers_internal::FastIntToBuffer(cmd.delta, store_opt);
       break;
     case MemcacheParser::APPEND:
       strcpy(cmd_name, "APPEND");
@@ -500,32 +503,41 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     case MemcacheParser::GET:
       strcpy(cmd_name, "MGET");
       break;
+    case MemcacheParser::QUIT:
+      strcpy(cmd_name, "QUIT");
+      break;
     case MemcacheParser::STATS:
       server_family_.StatsMC(cmd.key, cntx);
       return;
 
     default:
-
       mc_builder->SendClientError("bad command line format");
       return;
   }
 
   args.emplace_back(cmd_name, strlen(cmd_name));
-  char* key = const_cast<char*>(cmd.key.data());
-  args.emplace_back(key, cmd.key.size());
+
+  if (!cmd.key.empty()) {
+    char* key = const_cast<char*>(cmd.key.data());
+    args.emplace_back(key, cmd.key.size());
+  }
 
   if (MemcacheParser::IsStoreCmd(cmd.type)) {
     char* v = const_cast<char*>(value.data());
     args.emplace_back(v, value.size());
 
-    if (set_opt[0]) {
-      args.emplace_back(set_opt, strlen(set_opt));
+    if (store_opt[0]) {
+      args.emplace_back(store_opt, strlen(store_opt));
     }
     cntx->conn_state.memcache_flag = cmd.flags;
-  } else {
+  } else if (cmd.type < MemcacheParser::QUIT) {  // read commands
     for (auto s : cmd.keys_ext) {
       char* key = const_cast<char*>(s.data());
       args.emplace_back(key, s.size());
+    }
+  } else {  // write commands.
+    if (store_opt[0]) {
+      args.emplace_back(store_opt, strlen(store_opt));
     }
   }
 
@@ -567,8 +579,11 @@ void Service::RegisterHttp(HttpListenerBase* listener) {
 }
 
 void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
-  (*cntx)->SendOk();
-  (*cntx)->CloseConnection();
+  if (cntx->protocol() == Protocol::REDIS)
+    (*cntx)->SendOk();
+
+  SinkReplyBuilder* builder = static_cast<SinkReplyBuilder*>(cntx->reply_builder());
+  builder->CloseConnection();
 }
 
 void Service::Multi(CmdArgList args, ConnectionContext* cntx) {

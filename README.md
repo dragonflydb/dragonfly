@@ -132,10 +132,10 @@ a distributed log format.
 - [x] prepend
 - [ ] delete
 - [ ] flush_all
-- [ ] incr
-- [ ] decr
+- [x] incr
+- [x] decr
 - [ ] version
-- [ ] quit
+- [x] quit
 
 API 2.0
 - [ ] List Family

@@ -392,6 +392,8 @@ auto Connection::ParseMemcache() -> ParserStatus {
 
   if (result == MemcacheParser::PARSE_ERROR) {
     builder->SendError("");  // ERROR.
+  } else if (result == MemcacheParser::BAD_DELTA) {
+    builder->SendClientError("invalid numeric delta argument");
   } else if (result != MemcacheParser::OK) {
     builder->SendClientError("bad command line format");
   }

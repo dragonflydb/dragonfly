@@ -162,7 +162,6 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   get_qps.Inc();
 
   std::string_view key = ArgS(args, 1);
-  uint32_t mc_flag = 0;
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<string> {
     OpResult<MainIterator> it_res = shard->db_slice().Find(t->db_index(), key, OBJ_STRING);
@@ -180,7 +179,7 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 
   if (result) {
     DVLOG(1) << "GET " << trans->DebugId() << ": " << key << " " << result.value();
-    (*cntx)->SendGetReply(key, mc_flag, result.value());
+    (*cntx)->SendBulkString(*result);
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
@@ -215,7 +214,7 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (prev_val) {
-    (*cntx)->SendGetReply(key, 0, *prev_val);
+    (*cntx)->SendBulkString(*prev_val);
     return;
   }
   return (*cntx)->SendNull();
@@ -270,15 +269,18 @@ void StringFamily::IncrByGeneric(std::string_view key, int64_t val, ConnectionCo
   };
 
   OpResult<int64_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  auto* builder = cntx->reply_builder();
 
   DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
   switch (result.status()) {
     case OpStatus::OK:
-      return (*cntx)->SendLong(result.value());
+      return builder->SendLong(result.value());
     case OpStatus::INVALID_VALUE:
-      return (*cntx)->SendError(kInvalidIntErr);
+      return builder->SendError(kInvalidIntErr);
     case OpStatus::OUT_OF_RANGE:
-      return (*cntx)->SendError("increment or decrement would overflow");
+      return builder->SendError("increment or decrement would overflow");
+    case OpStatus::WRONG_TYPE:
+      return builder->SendError(kWrongTypeErr);
     default:;
   }
   __builtin_unreachable();

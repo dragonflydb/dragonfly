@@ -88,10 +88,8 @@ void MCReplyBuilder::SendStored() {
   SendDirect("STORED\r\n");
 }
 
-void MCReplyBuilder::SendGetReply(std::string_view key, uint32_t flags, std::string_view value) {
-  string first = absl::StrCat("VALUE ", key, " ", flags, " ", value.size(), "\r\n");
-  iovec v[] = {IoVec(first), IoVec(value), IoVec(kCRLF)};
-  Send(v, ABSL_ARRAYSIZE(v));
+void MCReplyBuilder::SendLong(long val) {
+  SendDirect(absl::StrCat(val, kCRLF));
 }
 
 void MCReplyBuilder::SendMGetResponse(const OptResp* resp, uint32_t count) {
@@ -138,10 +136,6 @@ void RedisReplyBuilder::SendError(string_view str) {
     iovec v[] = {IoVec(kErrPref), IoVec(str), IoVec(kCRLF)};
     Send(v, ABSL_ARRAYSIZE(v));
   }
-}
-
-void RedisReplyBuilder::SendGetReply(std::string_view key, uint32_t flags, std::string_view value) {
-  SendBulkString(value);
 }
 
 void RedisReplyBuilder::SendStored() {

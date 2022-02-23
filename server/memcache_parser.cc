@@ -1,49 +1,52 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 #include "server/memcache_parser.h"
 
+#include <absl/container/flat_hash_map.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/numbers.h>
 
+#include "base/stl_util.h"
+
 namespace dfly {
 using namespace std;
+using MP = MemcacheParser;
 
 namespace {
 
-pair<string_view, MemcacheParser::CmdType> cmd_map[] = {
-    {"set", MemcacheParser::SET},         {"add", MemcacheParser::ADD},
-    {"replace", MemcacheParser::REPLACE}, {"append", MemcacheParser::APPEND},
-    {"prepend", MemcacheParser::PREPEND}, {"cas", MemcacheParser::CAS},
-    {"get", MemcacheParser::GET},         {"gets", MemcacheParser::GETS},
-    {"gat", MemcacheParser::GAT},         {"gats", MemcacheParser::GATS},
-    {"stats", MemcacheParser::STATS},
-};
+MP::CmdType From(string_view token) {
+  static absl::flat_hash_map<string_view, MP::CmdType> cmd_map{
+      {"set", MP::SET},       {"add", MP::ADD},         {"replace", MP::REPLACE},
+      {"append", MP::APPEND}, {"prepend", MP::PREPEND}, {"cas", MP::CAS},
+      {"get", MP::GET},       {"gets", MP::GETS},       {"gat", MP::GAT},
+      {"gats", MP::GATS},     {"stats", MP::STATS},     {"incr", MP::INCR},
+      {"decr", MP::DECR},     {"delete", MP::DELETE},   {"flush_all", MP::FLUSHALL},
+      {"quit", MP::QUIT},
+  };
 
-MemcacheParser::CmdType From(string_view token) {
-  for (const auto& k_v : cmd_map) {
-    if (token == k_v.first)
-      return k_v.second;
-  }
-  return MemcacheParser::INVALID;
+  auto it = cmd_map.find(token);
+  if (it == cmd_map.end())
+    return MP::INVALID;
+
+  return it->second;
 }
 
-MemcacheParser::Result ParseStore(const std::string_view* tokens, unsigned num_tokens,
-                                  MemcacheParser::Command* res) {
+MP::Result ParseStore(const std::string_view* tokens, unsigned num_tokens, MP::Command* res) {
   unsigned opt_pos = 3;
-  if (res->type == MemcacheParser::CAS) {
+  if (res->type == MP::CAS) {
     if (num_tokens <= opt_pos)
-      return MemcacheParser::PARSE_ERROR;
+      return MP::PARSE_ERROR;
     ++opt_pos;
   }
 
   uint32_t flags;
   if (!absl::SimpleAtoi(tokens[0], &flags) || !absl::SimpleAtoi(tokens[1], &res->expire_ts) ||
       !absl::SimpleAtoi(tokens[2], &res->bytes_len))
-    return MemcacheParser::BAD_INT;
+    return MP::BAD_INT;
 
-  if (res->type == MemcacheParser::CAS && !absl::SimpleAtoi(tokens[3], &res->cas_unique)) {
-    return MemcacheParser::BAD_INT;
+  if (res->type == MP::CAS && !absl::SimpleAtoi(tokens[3], &res->cas_unique)) {
+    return MP::BAD_INT;
   }
 
   res->flags = flags;
@@ -51,39 +54,54 @@ MemcacheParser::Result ParseStore(const std::string_view* tokens, unsigned num_t
     if (tokens[opt_pos] == "noreply") {
       res->no_reply = true;
     } else {
-      return MemcacheParser::PARSE_ERROR;
+      return MP::PARSE_ERROR;
     }
   } else if (num_tokens > opt_pos + 1) {
-    return MemcacheParser::PARSE_ERROR;
+    return MP::PARSE_ERROR;
   }
 
-  return MemcacheParser::OK;
+  return MP::OK;
 }
 
-MemcacheParser::Result ParseRetrieve(const std::string_view* tokens, unsigned num_tokens,
-                                     MemcacheParser::Command* res) {
+MP::Result ParseValueless(const std::string_view* tokens, unsigned num_tokens, MP::Command* res) {
   unsigned key_pos = 0;
-  if (res->type == MemcacheParser::GAT || res->type == MemcacheParser::GATS) {
+  if (res->type == MP::GAT || res->type == MP::GATS) {
     if (!absl::SimpleAtoi(tokens[0], &res->expire_ts)) {
-      return MemcacheParser::BAD_INT;
+      return MP::BAD_INT;
     }
     ++key_pos;
   }
   res->key = tokens[key_pos++];
 
-  if (res->type == MemcacheParser::STATS && key_pos < num_tokens)
-    return MemcacheParser::PARSE_ERROR;
+  if (key_pos < num_tokens && base::_in(res->type, {MP::STATS, MP::FLUSHALL}))
+    return MP::PARSE_ERROR;  // we do not support additional arguments for now.
+
+  if (res->type == MP::INCR || res->type == MP::DECR) {
+    if (key_pos == num_tokens)
+      return MP::PARSE_ERROR;
+
+    if (!absl::SimpleAtoi(tokens[key_pos], &res->delta))
+      return MP::BAD_DELTA;
+    ++key_pos;
+  }
 
   while (key_pos < num_tokens) {
     res->keys_ext.push_back(tokens[key_pos++]);
   }
 
-  return MemcacheParser::OK;
+  if (res->type >= MP::DELETE) {  // write commands
+    if (!res->keys_ext.empty() && res->keys_ext.back() == "noreply") {
+      res->no_reply = true;
+      res->keys_ext.pop_back();
+    }
+  }
+
+  return MP::OK;
 }
 
 }  // namespace
 
-auto MemcacheParser::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
+auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
   auto pos = str.find('\n');
   *consumed = 0;
   if (pos == string_view::npos) {
@@ -137,7 +155,7 @@ auto MemcacheParser::Parse(string_view str, uint32_t* consumed, Command* cmd) ->
 
   if (cmd->type <= CAS) {  // Store command
     if (num_tokens < 5 || tokens[1].size() > 250) {
-      return MemcacheParser::PARSE_ERROR;
+      return MP::PARSE_ERROR;
     }
 
     // memcpy(single_key_, tokens[0].data(), tokens[0].size());  // we copy the key
@@ -147,11 +165,12 @@ auto MemcacheParser::Parse(string_view str, uint32_t* consumed, Command* cmd) ->
   }
 
   if (num_tokens == 1) {
-    if (cmd->type == MemcacheParser::STATS)
-      return MemcacheParser::OK;
+    if (base::_in(cmd->type, {MP::STATS, MP::FLUSHALL, MP::QUIT}))
+      return MP::OK;
+    return MP::PARSE_ERROR;
   }
 
-  return ParseRetrieve(tokens + 1, num_tokens - 1, cmd);
+  return ParseValueless(tokens + 1, num_tokens - 1, cmd);
 };
 
 }  // namespace dfly

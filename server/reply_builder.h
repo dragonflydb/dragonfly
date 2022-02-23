@@ -22,8 +22,6 @@ class ReplyBuilderInterface {
 
   virtual std::error_code GetError() const = 0;
 
-  virtual void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) = 0;
-
   struct ResponseValue {
     std::string_view key;
     std::string value;
@@ -34,6 +32,7 @@ class ReplyBuilderInterface {
   using OptResp = std::optional<ResponseValue>;
 
   virtual void SendMGetResponse(const OptResp* resp, uint32_t count) = 0;
+  virtual void SendLong(long val) = 0;
 
   virtual void SendSetSkipped() = 0;
 };
@@ -92,11 +91,11 @@ class MCReplyBuilder : public SinkReplyBuilder {
   MCReplyBuilder(::io::Sink* stream);
 
   void SendError(std::string_view str) final;
-  void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) final;
+  // void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) final;
   void SendMGetResponse(const OptResp* resp, uint32_t count) final;
 
   void SendStored() final;
-
+  void SendLong(long val) final;
   void SendSetSkipped() final;
 
   void SendClientError(std::string_view str);
@@ -111,10 +110,10 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   }
 
   void SendError(std::string_view str) override;
-  void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) override;
   void SendMGetResponse(const OptResp* resp, uint32_t count) override;
 
   void SendStored() override;
+  void SendLong(long val) override;
   void SendSetSkipped() override;
 
   void SendError(OpStatus status);
@@ -126,7 +125,6 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   virtual void SendStringArr(absl::Span<const std::string_view> arr);
   virtual void SendNull();
 
-  virtual void SendLong(long val);
   virtual void SendDouble(double val);
 
   virtual void SendBulkString(std::string_view str);

@@ -30,10 +30,13 @@ class MemcacheParser {
     GATS = 13,
     STATS = 14,
 
-    // Delete and INCR
+    QUIT = 20,
+
+    // The rest of write commands.
     DELETE = 21,
     INCR = 22,
     DECR = 23,
+    FLUSHALL = 24,
   };
 
   // According to https://github.com/memcached/memcached/wiki/Commands#standard-protocol
@@ -42,7 +45,11 @@ class MemcacheParser {
     std::string_view key;
     std::vector<std::string_view> keys_ext;
 
-    uint64_t cas_unique = 0;
+    union {
+      uint64_t cas_unique = 0;  // for CAS COMMAND
+      uint64_t delta;          // for DECR/INCR commands.
+    };
+
     uint32_t expire_ts = 0;  // relative time in seconds.
     uint32_t bytes_len = 0;
     uint32_t flags = 0;
@@ -55,6 +62,7 @@ class MemcacheParser {
     UNKNOWN_CMD,
     BAD_INT,
     PARSE_ERROR,
+    BAD_DELTA,
   };
 
   static bool IsStoreCmd(CmdType type) {
