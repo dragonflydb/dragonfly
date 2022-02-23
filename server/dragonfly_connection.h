@@ -16,6 +16,7 @@
 #include "util/fibers/event_count.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
+typedef struct mi_heap_s mi_heap_t;
 
 namespace dfly {
 
@@ -66,16 +67,9 @@ class Connection : public util::Connection {
   SSL_CTX* ctx_;
   std::unique_ptr<ConnectionContext> cc_;
 
-  struct Request {
-    absl::FixedArray<MutableSlice> args;
-    absl::FixedArray<char> storage;
+  struct Request;
 
-    Request(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
-    }
-    Request(const Request&) = delete;
-  };
-
-  static Request* FromArgs(RespVec args);
+  static Request* FromArgs(RespVec args, mi_heap_t* heap);
 
   std::deque<Request*> dispatch_q_;  // coordinated via evc_.
   util::fibers_ext::EventCount evc_;
