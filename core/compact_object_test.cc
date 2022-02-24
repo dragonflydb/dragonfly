@@ -60,6 +60,10 @@ TEST_F(CompactObjectTest, NonInline) {
   EXPECT_EQ(18261733907982517826UL, expected_val);
   EXPECT_EQ(expected_val, obj.HashCode());
   EXPECT_EQ(s, obj);
+
+  s.assign(25, 'b');
+  obj.SetString(s);
+  EXPECT_EQ(s, obj);
 }
 
 TEST_F(CompactObjectTest, Int) {
@@ -79,6 +83,19 @@ TEST_F(CompactObjectTest, MediumString) {
   obj.SetString(tmp);
   obj.SetString(tmp);
   obj.Reset();
+}
+
+TEST_F(CompactObjectTest, AsciiUtil) {
+  std::string_view data{"aaaaaabb"};
+  uint8_t buf[32];
+
+  char ascii2[] = "xxxxxxxxxxxxxx";
+  detail::ascii_pack(data.data(), 7, buf);
+  detail::ascii_unpack(buf, 7, ascii2);
+
+  ASSERT_EQ('x', ascii2[7]) << ascii2;
+  std::string_view actual{ascii2, 7};
+  ASSERT_EQ(data.substr(0, 7), actual);
 }
 
 }  // namespace dfly

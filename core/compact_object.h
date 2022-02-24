@@ -76,6 +76,16 @@ struct RobjWrapper {
   }
 } __attribute__((packed));
 
+// unpacks 8->7 encoded blob back to ascii.
+// generally, we can not unpack inplace because ascii (dest) buffer is 8/7 bigger than
+// the source buffer.
+// however, if binary data is positioned on the right of the ascii buffer with empty space on the
+// left than we can unpack inplace.
+void ascii_unpack(const uint8_t* bin, size_t ascii_len, char* ascii);
+
+// packs ascii string (does not verify) into binary form saving 1 bit per byte on average (12.5%).
+void ascii_pack(const char* ascii, size_t len, uint8_t* bin);
+
 }  // namespace detail
 
 class CompactObj {
@@ -95,7 +105,16 @@ class CompactObj {
     REF_BIT = 1,
     EXPIRE_BIT = 2,
     FLAG_BIT = 4,
+
+    // ascii encoding is not an injective function. it compresses 8 bytes to 7 but also 7 to 7.
+    // therefore, in order to know the original length we introduce 2 flags that
+    // correct the length upon decoding. ASCII1_ENC_BIT rounds down the decoded length,
+    // while ASCII2_ENC_BIT rounds it up. See DecodedLen implementation for more info.
+    ASCII1_ENC_BIT = 8,
+    ASCII2_ENC_BIT = 0x10,
   };
+
+  static constexpr uint8_t kEncMask = ASCII1_ENC_BIT | ASCII2_ENC_BIT;
 
  public:
   using PrefixArray = std::vector<std::string_view>;
@@ -216,7 +235,6 @@ class CompactObj {
     return kInlineLen;
   }
 
-
   struct Stats {
     size_t small_string_bytes = 0;
   };
@@ -226,12 +244,16 @@ class CompactObj {
   static void InitThreadLocal(std::pmr::memory_resource* mr);
 
  private:
+  size_t DecodedLen(size_t sz) const;
+
   bool EqualNonInline(std::string_view sv) const;
 
   // Requires: HasAllocated() - true.
   void Free();
 
   bool HasAllocated() const;
+
+  bool CmpEncoded(std::string_view sv) const;
 
   void SetMeta(uint8_t taglen, uint8_t mask = 0) {
     if (HasAllocated()) {
@@ -268,6 +290,9 @@ class CompactObj {
 };
 
 inline bool CompactObj::operator==(std::string_view sv) const {
+  if (mask_ & kEncMask)
+    return CmpEncoded(sv);
+
   if (IsInline()) {
     return std::string_view{u_.inline_str, taglen_} == sv;
   }
