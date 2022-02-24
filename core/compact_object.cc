@@ -34,10 +34,17 @@ size_t QlUsedSize(quicklist* ql) {
   return res;
 }
 
-thread_local robj tmp_robj{
-    .type = 0, .encoding = 0, .lru = 0, .refcount = OBJ_STATIC_REFCOUNT, .ptr = nullptr};
+struct TL {
+  robj tmp_robj{
+      .type = 0, .encoding = 0, .lru = 0, .refcount = OBJ_STATIC_REFCOUNT, .ptr = nullptr};
 
-thread_local pmr::memory_resource* local_mr = pmr::get_default_resource();
+  pmr::memory_resource* local_mr = pmr::get_default_resource();
+  size_t small_str_bytes;
+};
+
+thread_local TL tl;
+
+constexpr bool kUseSmallStrings = true;
 
 }  // namespace
 
@@ -45,8 +52,7 @@ static_assert(sizeof(CompactObj) == 18);
 
 namespace detail {
 
-CompactBlob::CompactBlob(string_view s, pmr::memory_resource* mr)
-    : ptr_(nullptr), sz(s.size()) {
+CompactBlob::CompactBlob(string_view s, pmr::memory_resource* mr) : ptr_(nullptr), sz(s.size()) {
   if (sz) {
     ptr_ = mr->allocate(sz);
     memcpy(ptr_, s.data(), s.size());
@@ -203,8 +209,16 @@ bool RobjWrapper::Equal(std::string_view sv) const {
 
 using namespace std;
 
+auto CompactObj::GetStats() -> Stats {
+  Stats res;
+  res.small_string_bytes = tl.small_str_bytes;
+
+  return res;
+}
+
 void CompactObj::InitThreadLocal(pmr::memory_resource* mr) {
-  local_mr = mr;
+  tl.local_mr = mr;
+  SmallString::InitThreadLocal();
 }
 
 CompactObj::~CompactObj() {
@@ -229,6 +243,10 @@ size_t CompactObj::StrSize() const {
     return taglen_;
   }
 
+  if (taglen_ == SMALL_TAG) {
+    return u_.small_str.size();
+  }
+
   if (taglen_ == ROBJ_TAG) {
     return u_.r_obj.Size();
   }
@@ -243,6 +261,8 @@ uint64_t CompactObj::HashCode() const {
   }
 
   switch (taglen_) {
+    case SMALL_TAG:
+      return u_.small_str.HashCode();
     case ROBJ_TAG:
       return u_.r_obj.HashCode();
     case INT_TAG: {
@@ -259,7 +279,7 @@ uint64_t CompactObj::HashCode(std::string_view str) {
   return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
 }
 unsigned CompactObj::ObjType() const {
-  if (IsInline() || taglen_ == INT_TAG)
+  if (IsInline() || taglen_ == INT_TAG || taglen_ == SMALL_TAG)
     return OBJ_STRING;
 
   if (taglen_ == ROBJ_TAG)
@@ -301,7 +321,7 @@ void CompactObj::ImportRObj(robj* o) {
 
   if (o->type == OBJ_STRING) {
     std::string_view src((char*)o->ptr, sdslen((sds)o->ptr));
-    u_.r_obj.blob.Assign(src, local_mr);
+    u_.r_obj.blob.Assign(src, tl.local_mr);
     decrRefCount(o);
   } else {  // Non-string objects we move as is and release Robj wrapper.
     u_.r_obj.blob.Set(o->ptr, 0);
@@ -313,20 +333,24 @@ void CompactObj::ImportRObj(robj* o) {
 robj* CompactObj::AsRObj() const {
   CHECK_EQ(ROBJ_TAG, taglen_);
 
-  tmp_robj.encoding = u_.r_obj.encoding;
-  tmp_robj.type = u_.r_obj.type;
-  tmp_robj.lru = u_.r_obj.unneeded;
-  tmp_robj.ptr = u_.r_obj.blob.ptr();
+  robj* res = &tl.tmp_robj;
+  res->encoding = u_.r_obj.encoding;
+  res->type = u_.r_obj.type;
+  res->lru = u_.r_obj.unneeded;
+  res->ptr = u_.r_obj.blob.ptr();
 
-  return &tmp_robj;
+  return res;
 }
 
 void CompactObj::SyncRObj() {
   CHECK_EQ(ROBJ_TAG, taglen_);
-  CHECK_EQ(u_.r_obj.type, tmp_robj.type);
 
-  u_.r_obj.encoding = tmp_robj.encoding;
-  u_.r_obj.blob.Set(tmp_robj.ptr, 0);
+  robj* obj = &tl.tmp_robj;
+
+  CHECK_EQ(u_.r_obj.type, obj->type);
+
+  u_.r_obj.encoding = obj->encoding;
+  u_.r_obj.blob.Set(obj->ptr, 0);
 }
 
 void CompactObj::SetInt(int64_t val) {
@@ -373,6 +397,14 @@ void CompactObj::SetString(std::string_view str) {
     return;
   }
 
+  if (kUseSmallStrings && taglen_ == 0 && str.size() < (1 << 15)) {
+    u_.small_str.Reset();
+    SetMeta(SMALL_TAG, 0);
+    u_.small_str.Assign(str);
+    tl.small_str_bytes += u_.small_str.MallocUsed();
+    return;
+  }
+
   if (taglen_ != ROBJ_TAG || u_.r_obj.type != OBJ_STRING) {
     SetMeta(ROBJ_TAG);
     u_.r_obj.type = OBJ_STRING;
@@ -381,7 +413,7 @@ void CompactObj::SetString(std::string_view str) {
 
   DCHECK(taglen_ == ROBJ_TAG && u_.r_obj.type == OBJ_STRING);
   CHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding);
-  u_.r_obj.blob.Assign(input, local_mr);
+  u_.r_obj.blob.Assign(input, tl.local_mr);
 }
 
 std::string_view CompactObj::GetSlice(std::string* scratch) const {
@@ -393,6 +425,11 @@ std::string_view CompactObj::GetSlice(std::string* scratch) const {
     CHECK_EQ(OBJ_STRING, u_.r_obj.type);
     DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding);
     return u_.r_obj.blob.AsView();
+  }
+
+  if (taglen_ == SMALL_TAG) {
+    u_.small_str.Get(scratch);
+    return *scratch;
   }
 
   if (taglen_ == INT_TAG) {
@@ -412,7 +449,7 @@ bool CompactObj::HasAllocated() const {
       (taglen_ == ROBJ_TAG && u_.r_obj.blob.ptr() == nullptr))
     return false;
 
-  DCHECK(taglen_ == ROBJ_TAG);
+  DCHECK(taglen_ == ROBJ_TAG || taglen_ == SMALL_TAG);
   return true;
 }
 
@@ -436,7 +473,10 @@ void CompactObj::Free() {
   DCHECK(HasAllocated());
 
   if (taglen_ == ROBJ_TAG) {
-    u_.r_obj.Free(local_mr);
+    u_.r_obj.Free(tl.local_mr);
+  } else if (taglen_ == SMALL_TAG) {
+    tl.small_str_bytes -= u_.small_str.MallocUsed();
+    u_.small_str.Free();
   } else {
     LOG(FATAL) << "Bad compact object type " << int(taglen_);
   }
@@ -452,6 +492,10 @@ size_t CompactObj::MallocUsed() const {
     return u_.r_obj.MallocUsed();
   }
 
+  if (taglen_ == SMALL_TAG) {
+    return u_.small_str.MallocUsed();
+  }
+
   LOG(FATAL) << "TBD";
   return 0;
 }
@@ -460,19 +504,22 @@ bool CompactObj::operator==(const CompactObj& o) const {
   if (taglen_ == ROBJ_TAG || o.taglen_ == ROBJ_TAG) {
     if (o.taglen_ != taglen_)
       return false;
+
     return u_.r_obj.Equal(o.u_.r_obj);
   }
 
   if (taglen_ != o.taglen_)
     return false;
+
   if (taglen_ == INT_TAG)
     return u_.ival == o.u_.ival;
+
+  if (taglen_ == SMALL_TAG)
+    return u_.small_str.Equal(o.u_.small_str);
+
   DCHECK(IsInline() && o.IsInline());
 
-  if (memcmp(u_.inline_str, o.u_.inline_str, taglen_) != 0)
-    return false;
-
-  return true;
+  return memcmp(u_.inline_str, o.u_.inline_str, taglen_) == 0;
 }
 
 bool CompactObj::EqualNonInline(std::string_view sv) const {
@@ -483,6 +530,8 @@ bool CompactObj::EqualNonInline(std::string_view sv) const {
     }
     case ROBJ_TAG:
       return u_.r_obj.Equal(sv);
+    case SMALL_TAG:
+      return u_.small_str.Equal(sv);
     default:
       break;
   }

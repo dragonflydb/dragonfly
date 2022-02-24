@@ -9,6 +9,8 @@
 #include <memory_resource>
 #include <optional>
 
+#include "core/small_string.h"
+
 typedef struct redisObject robj;
 typedef struct quicklist quicklist;
 
@@ -85,7 +87,7 @@ class CompactObj {
   // 0-16 is reserved for inline lengths of string type.
   enum TagEnum {
     INT_TAG = 17,
-    SMALL_TAG = 18,  // TBD
+    SMALL_TAG = 18,
     ROBJ_TAG = 19,
   };
 
@@ -214,6 +216,13 @@ class CompactObj {
     return kInlineLen;
   }
 
+
+  struct Stats {
+    size_t small_string_bytes = 0;
+  };
+
+  static Stats GetStats();
+
   static void InitThreadLocal(std::pmr::memory_resource* mr);
 
  private:
@@ -241,6 +250,7 @@ class CompactObj {
   union U {
     char inline_str[kInlineLen];
 
+    SmallString small_str;
     detail::RobjWrapper r_obj;
     int64_t ival __attribute__((packed));
 

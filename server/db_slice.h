@@ -38,6 +38,8 @@ struct DbStats {
   // Memory used by dictionaries.
   size_t table_mem_usage = 0;
 
+  size_t small_string_bytes = 0;
+
   DbStats& operator+=(const DbStats& o);
 };
 

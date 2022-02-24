@@ -395,6 +395,7 @@ tcp_port:)";
     absl::StrAppend(&info, "table_used_memory:", m.db.table_mem_usage, "\n");
     absl::StrAppend(&info, "num_entries:", m.db.key_count, "\n");
     absl::StrAppend(&info, "inline_keys:", m.db.inline_keys, "\n");
+    absl::StrAppend(&info, "small_string_bytes:", m.db.small_string_bytes, "\n");
   }
 
   if (should_enter("STATS")) {

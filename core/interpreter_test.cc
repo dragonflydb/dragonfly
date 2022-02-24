@@ -86,11 +86,11 @@ class InterpreterTest : public ::testing::Test {
 };
 
 void InterpreterTest::SetGlobalArray(const char* name, vector<string> vec) {
-  vector<Interpreter::MutableSlice> slices(vec.size());
+  vector<MutableSlice> slices(vec.size());
   for (size_t i = 0; i < vec.size(); ++i) {
-    slices[i] = Interpreter::MutableSlice{vec[i]};
+    slices[i] = MutableSlice{vec[i]};
   }
-  intptr_.SetGlobalArray(name, Interpreter::MutSliceSpan{slices});
+  intptr_.SetGlobalArray(name, MutSliceSpan{slices});
 }
 
 bool InterpreterTest::Execute(string_view script) {
@@ -239,7 +239,7 @@ TEST_F(InterpreterTest, Execute) {
 }
 
 TEST_F(InterpreterTest, Call) {
-  auto cb = [](Interpreter::MutSliceSpan span, ObjectExplorer* reply) {
+  auto cb = [](MutSliceSpan span, ObjectExplorer* reply) {
     CHECK_GE(span.size(), 1u);
     string_view cmd{span[0].data(), span[0].size()};
     if (cmd == "string") {
@@ -275,7 +275,7 @@ TEST_F(InterpreterTest, Call) {
 }
 
 TEST_F(InterpreterTest, CallArray) {
-  auto cb = [](Interpreter::MutSliceSpan span, ObjectExplorer* reply) {
+  auto cb = [](MutSliceSpan span, ObjectExplorer* reply) {
     reply->OnArrayStart(2);
     reply->OnArrayStart(1);
     reply->OnArrayStart(2);
@@ -294,7 +294,7 @@ TEST_F(InterpreterTest, CallArray) {
 
 TEST_F(InterpreterTest, ArgKeys) {
   vector<string> vec_arr{};
-  vector<Interpreter::MutableSlice> slices;
+  vector<MutableSlice> slices;
   SetGlobalArray("ARGV", {"foo", "bar"});
   SetGlobalArray("KEYS", {"key1", "key2"});
   EXPECT_TRUE(Execute("return {ARGV[1], KEYS[1], KEYS[2]}"));

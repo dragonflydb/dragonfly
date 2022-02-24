@@ -25,6 +25,8 @@ using namespace util;
 #define ADD(x) (x) += o.x
 
 DbStats& DbStats::operator+=(const DbStats& o) {
+  static_assert(sizeof(DbStats) == 56);
+
   ADD(key_count);
   ADD(expire_count);
   ADD(bucket_count);
@@ -32,6 +34,7 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 
   ADD(obj_memory_usage);
   ADD(table_mem_usage);
+  ADD(small_string_bytes);
 
   return *this;
 }
@@ -84,6 +87,7 @@ auto DbSlice::GetStats() const -> Stats {
     s.db.inline_keys += db->stats.inline_keys;
     s.db.table_mem_usage += (db->prime_table.mem_usage() + db->expire_table.mem_usage());
   }
+  s.db.small_string_bytes = CompactObj::GetStats().small_string_bytes;
 
   return s;
 }
@@ -318,10 +322,10 @@ pair<MainIterator, bool> DbSlice::AddIfNotExist(DbIndex db_ind, string_view key,
                                                 uint64_t expire_at_ms) {
   DCHECK(!obj.IsRef());
 
-  auto& db = db_arr_[db_ind];
+  auto& db = *db_arr_[db_ind];
   CompactObj co_key{key};
 
-  auto [new_entry, inserted] = db->prime_table.Insert(std::move(co_key), std::move(obj));
+  auto [new_entry, inserted] = db.prime_table.Insert(std::move(co_key), std::move(obj));
 
   // in this case obj won't be moved and will be destroyed during unwinding.
   if (!inserted)
@@ -329,13 +333,13 @@ pair<MainIterator, bool> DbSlice::AddIfNotExist(DbIndex db_ind, string_view key,
 
   new_entry.SetVersion(NextVersion());
 
-  db->stats.inline_keys += new_entry->first.IsInline();
-  db->stats.obj_memory_usage += (new_entry->first.MallocUsed() + new_entry->second.MallocUsed());
+  db.stats.inline_keys += new_entry->first.IsInline();
+  db.stats.obj_memory_usage += (new_entry->first.MallocUsed() + new_entry->second.MallocUsed());
 
   if (expire_at_ms) {
     new_entry->second.SetExpire(true);
 
-    CHECK(db->expire_table.Insert(new_entry->first.AsRef(), expire_at_ms).second);
+    CHECK(db.expire_table.Insert(new_entry->first.AsRef(), expire_at_ms).second);
   }
 
   return make_pair(new_entry, true);

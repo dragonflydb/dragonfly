@@ -27,6 +27,7 @@ class CompactObjectTest : public ::testing::Test {
  protected:
   static void SetUpTestCase() {
     init_zmalloc_threadlocal();
+    CompactObj::InitThreadLocal(pmr::get_default_resource());
   }
 
   CompactObj cs_;
@@ -53,11 +54,12 @@ TEST_F(CompactObjectTest, Basic) {
 
 TEST_F(CompactObjectTest, NonInline) {
   string s(22, 'a');
-  CompactObj a{s};
+  CompactObj obj{s};
   XXH64_hash_t seed = 24061983;
   uint64_t expected_val = XXH3_64bits_withSeed(s.data(), s.size(), seed);
   EXPECT_EQ(18261733907982517826UL, expected_val);
-  EXPECT_EQ(expected_val, a.HashCode());
+  EXPECT_EQ(expected_val, obj.HashCode());
+  EXPECT_EQ(s, obj);
 }
 
 TEST_F(CompactObjectTest, Int) {

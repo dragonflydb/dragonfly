@@ -146,7 +146,7 @@ optional<int> FetchKey(lua_State* lua, const char* key) {
   return type;
 }
 
-void SetGlobalArrayInternal(lua_State* lua, const char* name, Interpreter::MutSliceSpan args) {
+void SetGlobalArrayInternal(lua_State* lua, const char* name, MutSliceSpan args) {
   lua_newtable(lua);
   for (size_t j = 0; j < args.size(); j++) {
     lua_pushlstring(lua, args[j].data(), args[j].size());

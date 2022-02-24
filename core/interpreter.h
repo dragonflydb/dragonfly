@@ -4,11 +4,11 @@
 
 #pragma once
 
-#include <absl/types/span.h>
-
 #include <boost/fiber/mutex.hpp>
 #include <functional>
 #include <string_view>
+
+#include "core/core_types.h"
 
 typedef struct lua_State lua_State;
 
@@ -32,8 +32,6 @@ class ObjectExplorer {
 
 class Interpreter {
  public:
-  using MutableSlice = absl::Span<char>;
-  using MutSliceSpan = absl::Span<MutableSlice>;
   using RedisFunc = std::function<void(MutSliceSpan, ObjectExplorer*)>;
 
   Interpreter();

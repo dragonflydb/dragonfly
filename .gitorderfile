@@ -1,0 +1,11 @@
+*.py
+*.md
+*.in
+*.txt
+*.sh
+*.yml
+*.h
+*.cc
+*.lua
+*.go
+*
