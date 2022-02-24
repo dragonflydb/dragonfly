@@ -471,9 +471,12 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
                          ConnectionContext* cntx) {
   absl::InlinedVector<MutableSlice, 8> args;
   char cmd_name[16];
+  char ttl[16];
   char store_opt[32] = {0};
+  char ttl_op[] = "EX";
 
   MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
+
   switch (cmd.type) {
     case MemcacheParser::REPLACE:
       strcpy(cmd_name, "SET");
@@ -528,6 +531,12 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
 
     if (store_opt[0]) {
       args.emplace_back(store_opt, strlen(store_opt));
+    }
+
+    if (cmd.expire_ts && memcmp(cmd_name, "SET", 3) == 0) {
+      char* next = absl::numbers_internal::FastIntToBuffer(cmd.expire_ts, ttl);
+      args.emplace_back(ttl_op, 2);
+      args.emplace_back(ttl, next - ttl);
     }
     cntx->conn_state.memcache_flag = cmd.flags;
   } else if (cmd.type < MemcacheParser::QUIT) {  // read commands

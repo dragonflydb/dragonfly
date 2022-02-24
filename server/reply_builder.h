@@ -99,6 +99,7 @@ class MCReplyBuilder : public SinkReplyBuilder {
   void SendSetSkipped() final;
 
   void SendClientError(std::string_view str);
+  void SendNotFound();
 };
 
 class RedisReplyBuilder : public SinkReplyBuilder {

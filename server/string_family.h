@@ -73,7 +73,10 @@ class StringFamily {
                              EngineShard* shard);
 
   static OpStatus OpMSet(const Transaction* t, EngineShard* es);
-  static OpResult<int64_t> OpIncrBy(const OpArgs& op_args, std::string_view key, int64_t val);
+
+  // if skip_on_missing - returns KEY_NOTFOUND.
+  static OpResult<int64_t> OpIncrBy(const OpArgs& op_args, std::string_view key, int64_t val,
+                                    bool skip_on_missing);
 
   // Returns the length of the extended string. if prepend is false - appends the val.
   static OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, std::string_view key,

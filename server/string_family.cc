@@ -263,8 +263,10 @@ void StringFamily::Prepend(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StringFamily::IncrByGeneric(std::string_view key, int64_t val, ConnectionContext* cntx) {
+  bool skip_on_missing = cntx->protocol() == Protocol::MEMCACHE;
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpResult<int64_t> res = OpIncrBy(OpArgs{shard, t->db_index()}, key, val);
+    OpResult<int64_t> res = OpIncrBy(OpArgs{shard, t->db_index()}, key, val, skip_on_missing);
     return res;
   };
 
@@ -281,6 +283,8 @@ void StringFamily::IncrByGeneric(std::string_view key, int64_t val, ConnectionCo
       return builder->SendError("increment or decrement would overflow");
     case OpStatus::WRONG_TYPE:
       return builder->SendError(kWrongTypeErr);
+    case OpStatus::KEY_NOTFOUND:  // Relevant only for MC
+      return reinterpret_cast<MCReplyBuilder*>(builder)->SendNotFound();
     default:;
   }
   __builtin_unreachable();
@@ -432,11 +436,14 @@ OpStatus StringFamily::OpMSet(const Transaction* t, EngineShard* es) {
 }
 
 OpResult<int64_t> StringFamily::OpIncrBy(const OpArgs& op_args, std::string_view key,
-                                         int64_t incr) {
+                                         int64_t incr, bool skip_on_missing) {
   auto& db_slice = op_args.shard->db_slice();
   auto [it, expire_it] = db_slice.FindExt(op_args.db_ind, key);
 
   if (!IsValid(it)) {
+    if (skip_on_missing)
+      return OpStatus::KEY_NOTFOUND;
+
     CompactObj cobj;
     cobj.SetInt(incr);
 

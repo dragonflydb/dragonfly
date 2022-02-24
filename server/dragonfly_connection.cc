@@ -82,7 +82,7 @@ struct Connection::Shutdown {
 struct Connection::Request {
   absl::FixedArray<MutableSlice> args;
 
-  // I do not use m_heap_t explicitly but mi_stl_allocator at the end does the same job
+  // I do not use mi_heap_t explicitly but mi_stl_allocator at the end does the same job
   // of using the thread's heap.
   absl::FixedArray<char, 256, mi_stl_allocator<char>> storage;
 

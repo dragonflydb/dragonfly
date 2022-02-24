@@ -125,6 +125,10 @@ void MCReplyBuilder::SendSetSkipped() {
   SendDirect("NOT_STORED\r\n");
 }
 
+void MCReplyBuilder::SendNotFound() {
+  SendDirect("NOT_FOUND\r\n");
+}
+
 RedisReplyBuilder::RedisReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
 }
 
