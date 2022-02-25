@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-from ghcr.io/romange/alpine-dev as builder
+from ghcr.io/romange/ubuntu-dev as builder
 
 WORKDIR /build
 COPY src/  ./src/
@@ -10,21 +10,25 @@ RUN ./helio/blaze.sh -release
 
 WORKDIR build-opt
 RUN ninja dragonfly
+RUN curl -O https://raw.githubusercontent.com/ncopa/su-exec/master/su-exec.c && \
+     gcc -Wall -O2 su-exec.c -o su-exec
 
-FROM alpine:latest
+FROM ubuntu:20.04
 
 LABEL org.opencontainers.image.title Dragonfly
 LABEL org.opencontainers.image.source https://github.com/romange/dragonfly
+ENV DEBIAN_FRONTEND=noninteractive
 
-RUN addgroup -S -g 1000 dfly && adduser -S -G dfly -u 999 dfly
-RUN apk --no-cache add libgcc libstdc++ libunwind boost1.77-fiber \
-    'su-exec>=0.2'
+RUN groupadd -r -g 999 dfly && useradd -r -g dfly -u 999 dfly
+RUN apt update && apt install -y libunwind8 libboost-fiber1.71.0 libssl1.1 && \
+    rm -rf /var/lib/apt/lists/*
 
 RUN mkdir /data && chown dfly:dfly /data
 VOLUME /data
 WORKDIR /data
 COPY tools/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY --from=builder /build/build-opt/dragonfly /usr/local/bin/
+COPY --from=builder /build/build-opt/su-exec /usr/local/bin/
 
 ENTRYPOINT ["entrypoint.sh"]
 

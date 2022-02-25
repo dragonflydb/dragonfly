@@ -25,7 +25,7 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Build alpine-prod
+    - name: Build dragonfly alpine
       uses: docker/build-push-action@v2
       with:
         context: .
@@ -34,3 +34,13 @@ jobs:
         tags: |
           ghcr.io/${{ github.actor }}/dragonfly-alpine:latest
         file: tools/docker/Dockerfile.alpine-prod
+    
+    - name: Build dragonfly ubuntu
+      uses: docker/build-push-action@v2
+      with:
+        context: .
+        platforms: linux/amd64
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: |
+          ghcr.io/${{ github.actor }}/dragonfly-ubuntu:latest
+        file: tools/docker/Dockerfile.ubuntu-prod
