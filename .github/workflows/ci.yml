@@ -57,7 +57,7 @@ jobs:
     - name: Build & Test      
       run: |
           cd ${{github.workspace}}/build
-          ninja core/all server/all
+          ninja src/all
           ccache --show-stats
           # GLOG_logtostderr=1 ctest -V -R list_family_test
           echo Run ctest -V -L DFLY

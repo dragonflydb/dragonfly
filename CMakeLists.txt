@@ -31,10 +31,8 @@ add_third_party(
 
 Message(STATUS "THIRD_PARTY_LIB_DIR ${THIRD_PARTY_LIB_DIR}")
 
-include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+include_directories(src)
 include_directories(helio)
 
 add_subdirectory(helio)
-add_subdirectory(core)
-add_subdirectory(redis)
-add_subdirectory(server)
+add_subdirectory(src)

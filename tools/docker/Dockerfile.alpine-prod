@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1
+from ghcr.io/romange/alpine-dev as builder
+
+WORKDIR /build
+COPY src/  ./src/
+COPY helio/  ./helio/
+COPY patches/  ./patches/
+COPY CMakeLists.txt ./
+RUN ./helio/blaze.sh -release
+
+WORKDIR build-opt
+RUN ninja dragonfly
+
+FROM alpine:latest
+RUN addgroup -S -g 1000 dfly && adduser -S -G dfly -u 999 dfly
+RUN apk --no-cache add libgcc libstdc++ libunwind boost1.77-fiber \
+    'su-exec>=0.2'
+
+RUN mkdir /data && chown dfly:dfly /data
+VOLUME /data
+WORKDIR /data
+COPY tools/docker/alpine-entry.sh /usr/local/bin/entrypoint.sh
+COPY --from=builder /build/build-opt/dragonfly /usr/local/bin/
+
+ENTRYPOINT ["entrypoint.sh"]
+
+EXPOSE 6380
+CMD ["dragonfly"]
