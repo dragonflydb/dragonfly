@@ -1,0 +1,36 @@
+name: docker release
+
+on:
+  workflow_dispatch:
+
+jobs:
+# ===============================================================
+#   Building Dev Images
+# ===============================================================
+  release:
+    runs-on: ubuntu-latest
+    steps:
+    - name: checkout
+      uses: actions/checkout@v2
+      with:
+        submodules: true
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v1
+
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@v1
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build alpine-prod
+      uses: docker/build-push-action@v2
+      with:
+        context: .
+        platforms: linux/amd64
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: |
+          ghcr.io/${{ github.actor }}/dragonfly-alpine:latest
+        file: tools/docker/Dockerfile.alpine-prod
