@@ -31,12 +31,13 @@ class MemcacheParser {
     STATS = 14,
 
     QUIT = 20,
+    VERSION = 21,
 
     // The rest of write commands.
-    DELETE = 21,
-    INCR = 22,
-    DECR = 23,
-    FLUSHALL = 24,
+    DELETE = 31,
+    INCR = 32,
+    DECR = 33,
+    FLUSHALL = 34,
   };
 
   // According to https://github.com/memcached/memcached/wiki/Commands#standard-protocol

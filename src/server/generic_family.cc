@@ -160,6 +160,8 @@ void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "Del " << ArgS(args, 1);
 
   atomic_uint32_t result{0};
+  bool is_mc = cntx->protocol() == Protocol::MEMCACHE;
+
   auto cb = [&result](const Transaction* t, EngineShard* shard) {
     ArgSlice args = t->ShardArgsInShard(shard->shard_id());
     auto res = OpDel(OpArgs{shard, t->db_index()}, args);
@@ -173,7 +175,18 @@ void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
 
   DVLOG(2) << "Del ts " << transaction->txid();
 
-  (*cntx)->SendLong(result.load(memory_order_release));
+  uint32_t del_cnt = result.load(memory_order_relaxed);
+  if (is_mc) {
+    MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
+
+    if (del_cnt == 0) {
+      mc_builder->SendNotFound();
+    } else {
+      mc_builder->SendDirect("DELETED\r\n");
+    }
+  } else {
+    (*cntx)->SendLong(del_cnt);
+  }
 }
 
 void GenericFamily::Ping(CmdArgList args, ConnectionContext* cntx) {

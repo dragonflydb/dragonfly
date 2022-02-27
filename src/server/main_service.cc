@@ -489,6 +489,9 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       strcpy(cmd_name, "SET");
       strcpy(store_opt, "NX");
       break;
+    case MemcacheParser::DELETE:
+      strcpy(cmd_name, "DEL");
+      break;
     case MemcacheParser::INCR:
       strcpy(cmd_name, "INCRBY");
       absl::numbers_internal::FastIntToBuffer(cmd.delta, store_opt);
@@ -512,7 +515,9 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     case MemcacheParser::STATS:
       server_family_.StatsMC(cmd.key, cntx);
       return;
-
+    case MemcacheParser::VERSION:
+      mc_builder->SendDirect(absl::StrCat("VERSION ", gflags::VersionString(), "\r\n"));
+      return;
     default:
       mc_builder->SendClientError("bad command line format");
       return;

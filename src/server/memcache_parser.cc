@@ -22,7 +22,7 @@ MP::CmdType From(string_view token) {
       {"get", MP::GET},       {"gets", MP::GETS},       {"gat", MP::GAT},
       {"gats", MP::GATS},     {"stats", MP::STATS},     {"incr", MP::INCR},
       {"decr", MP::DECR},     {"delete", MP::DELETE},   {"flush_all", MP::FLUSHALL},
-      {"quit", MP::QUIT},
+      {"quit", MP::QUIT},     {"version", MP::VERSION},
   };
 
   auto it = cmd_map.find(token);
@@ -165,7 +165,7 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
   }
 
   if (num_tokens == 1) {
-    if (base::_in(cmd->type, {MP::STATS, MP::FLUSHALL, MP::QUIT}))
+    if (base::_in(cmd->type, {MP::STATS, MP::FLUSHALL, MP::QUIT, MP::VERSION}))
       return MP::OK;
     return MP::PARSE_ERROR;
   }

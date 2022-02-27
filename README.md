@@ -130,11 +130,11 @@ a distributed log format.
 - [X] stats (partial)
 - [x] append
 - [x] prepend
-- [ ] delete
+- [x] delete
 - [ ] flush_all
 - [x] incr
 - [x] decr
-- [ ] version
+- [x] version
 - [x] quit
 
 API 2.0
