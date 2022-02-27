@@ -218,11 +218,11 @@ void DbSlice::CreateDb(DbIndex index) {
 }
 
 bool DbSlice::Del(DbIndex db_ind, MainIterator it) {
-  auto& db = db_arr_[db_ind];
   if (!IsValid(it)) {
     return false;
   }
 
+  auto& db = db_arr_[db_ind];
   if (it->second.HasExpire()) {
     CHECK_EQ(1u, db->expire_table.Erase(it->first));
   }

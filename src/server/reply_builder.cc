@@ -187,6 +187,9 @@ void RedisReplyBuilder::SendError(OpStatus status) {
     case OpStatus::KEY_NOTFOUND:
       SendError(kKeyNotFoundErr);
       break;
+    case OpStatus::WRONG_TYPE:
+      SendError(kWrongTypeErr);
+      break;
     default:
       LOG(ERROR) << "Unsupported status " << status;
       SendError("Internal error");

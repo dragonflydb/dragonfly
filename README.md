@@ -74,20 +74,20 @@ API 1.0
   - [X] SLAVEOF/REPLICAOF
   - [ ] SYNC
 - [ ] Set Family
-  - [ ] SADD
-  - [ ] SCARD
-  - [ ] SDIFF
-  - [ ] SDIFFSTORE
-  - [ ] SINTER
-  - [ ] SINTERSTORE
-  - [ ] SISMEMBER
-  - [ ] SMOVE
-  - [ ] SPOP
+  - [x] SADD
+  - [x] SCARD
+  - [X] SDIFF
+  - [X] SDIFFSTORE
+  - [X] SINTER
+  - [X] SINTERSTORE
+  - [X] SISMEMBER
+  - [X] SMOVE
+  - [X] SPOP
   - [ ] SRANDMEMBER
-  - [ ] SREM
-  - [ ] SMEMBERS
-  - [ ] SUNION
-  - [ ] SUNIONSTORE
+  - [X] SREM
+  - [X] SMEMBERS
+  - [X] SUNION
+  - [X] SUNIONSTORE
 - [X] List Family
   - [X] LINDEX
   - [X] LLEN

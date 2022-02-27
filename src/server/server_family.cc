@@ -350,9 +350,11 @@ multiplexing_api:iouring
 tcp_port:)";
 
   auto should_enter = [&](string_view name) {
-    if (!info.empty())
+    bool res = section.empty() || section == name;
+    if (res && !info.empty())
       info.push_back('\n');
-    return section.empty() || section == name;
+
+    return res;
   };
 
   if (should_enter("SERVER")) {

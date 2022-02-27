@@ -8,6 +8,7 @@
 #include <xxhash.h>
 
 extern "C" {
+#include "redis/intset.h"
 #include "redis/object.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"  // for non-string objects.
@@ -32,6 +33,14 @@ size_t QlUsedSize(quicklist* ql) {
     res += ptr->sz;
     ptr = ptr->next;
   }
+  return res;
+}
+
+// Approximated dictionary size.
+size_t DictMallocSize(dict* d) {
+  size_t res =
+      zmalloc_usable_size(d->ht_table[0]) + zmalloc_usable_size(d->ht_table[1]) + sizeof(dict);
+  res += dictSize(d) * 8;  // approximation.
   return res;
 }
 
@@ -167,6 +176,16 @@ size_t RobjWrapper::MallocUsed() const {
     case OBJ_LIST:
       CHECK_EQ(encoding, OBJ_ENCODING_QUICKLIST);
       return QlUsedSize((quicklist*)ptr);
+    case OBJ_SET:
+      switch (encoding) {
+        case OBJ_ENCODING_HT:
+          return DictMallocSize((dict*)ptr);
+        case OBJ_ENCODING_INTSET:
+          return intsetBlobLen((intset*)ptr);
+        default:
+          LOG(FATAL) << "Unknown set encoding type";
+      }
+      break;
     default:
       LOG(FATAL) << "Not supported " << type;
   }
@@ -206,7 +225,16 @@ void RobjWrapper::Free(std::pmr::memory_resource* mr) {
       break;
 
     case OBJ_SET:
-      LOG(FATAL) << "TBD";
+      switch (encoding) {
+        case OBJ_ENCODING_HT:
+          dictRelease((dict*)ptr);
+          break;
+        case OBJ_ENCODING_INTSET:
+          zfree((void*)ptr);
+          break;
+        default:
+          LOG(FATAL) << "Unknown set encoding type";
+      }
       break;
     case OBJ_ZSET:
       LOG(FATAL) << "TBD";

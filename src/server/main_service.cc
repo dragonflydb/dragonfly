@@ -22,6 +22,7 @@ extern "C" {
 #include "server/list_family.h"
 #include "server/script_mgr.h"
 #include "server/server_state.h"
+#include "server/set_family.h"
 #include "server/string_family.h"
 #include "server/transaction.h"
 #include "util/metrics/metrics.h"
@@ -826,6 +827,8 @@ void Service::RegisterCommands() {
   StringFamily::Register(&registry_);
   GenericFamily::Register(&registry_);
   ListFamily::Register(&registry_);
+  SetFamily::Register(&registry_);
+
   server_family_.Register(&registry_);
 
   LOG(INFO) << "Multi-key commands are: ";
