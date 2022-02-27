@@ -36,6 +36,9 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor, HttpListener<>* http)
 }  // namespace dfly
 
 int main(int argc, char* argv[]) {
+  gflags::SetUsageMessage("dragonfly [FLAGS]");
+  gflags::SetVersionString("v0.2");
+
   MainInitGuard guard(&argc, &argv);
 
   CHECK_GT(FLAGS_port, 0u);

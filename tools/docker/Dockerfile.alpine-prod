@@ -25,6 +25,7 @@ VOLUME /data
 WORKDIR /data
 COPY tools/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY --from=builder /build/build-opt/dragonfly /usr/local/bin/
+RUN dragonfly -version
 
 ENTRYPOINT ["entrypoint.sh"]
 

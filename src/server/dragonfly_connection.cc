@@ -1,4 +1,4 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -21,6 +21,8 @@
 #include "util/fiber_sched_algo.h"
 #include "util/tls/tls_socket.h"
 #include "util/uring/uring_socket.h"
+
+DEFINE_bool(tcp_nodelay, true, "Configures dragonfly connections with socket option TCP_NODELAY");
 
 using namespace util;
 using namespace std;
@@ -137,9 +139,12 @@ void Connection::UnregisterShutdownHook(ShutdownHandle id) {
 void Connection::HandleRequests() {
   this_fiber::properties<FiberProps>().set_name("DflyConnection");
 
-  int val = 1;
   LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
-  CHECK_EQ(0, setsockopt(lsb->native_handle(), SOL_TCP, TCP_NODELAY, &val, sizeof(val)));
+
+  if (FLAGS_tcp_nodelay) {
+    int val = 1;
+    CHECK_EQ(0, setsockopt(lsb->native_handle(), SOL_TCP, TCP_NODELAY, &val, sizeof(val)));
+  }
 
   auto remote_ep = lsb->RemoteEndpoint();
 
