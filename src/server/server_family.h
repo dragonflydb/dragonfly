@@ -25,6 +25,8 @@ struct Metrics {
   SliceEvents events;
 
   size_t qps = 0;
+  size_t heap_used_bytes = 0;
+  size_t heap_comitted_bytes = 0;
 
   ConnectionStats conn_stats;
 };
@@ -64,6 +66,7 @@ class ServerFamily {
   void LastSave(CmdArgList args, ConnectionContext* cntx);
   void Psync(CmdArgList args, ConnectionContext* cntx);
   void ReplicaOf(CmdArgList args, ConnectionContext* cntx);
+  void Role(CmdArgList args, ConnectionContext* cntx);
   void Save(CmdArgList args, ConnectionContext* cntx);
   void Script(CmdArgList args, ConnectionContext* cntx);
   void Sync(CmdArgList args, ConnectionContext* cntx);

@@ -19,6 +19,12 @@ extern "C" {
 #include "base/logging.h"
 #include "base/pod_array.h"
 
+#if defined(__aarch64__)
+#include "base/sse2neon.h"
+#else
+#include <emmintrin.h>
+#endif
+
 namespace dfly {
 using namespace std;
 
@@ -26,22 +32,18 @@ namespace {
 
 constexpr XXH64_hash_t kHashSeed = 24061983;
 
-size_t QlUsedSize(quicklist* ql) {
+// Approximation since does not account for listpacks.
+size_t QlMAllocSize(quicklist* ql) {
   size_t res = ql->len * sizeof(quicklistNode) + znallocx(sizeof(quicklist));
-  quicklistNode* ptr = ql->head;
-  while (ptr) {
-    res += ptr->sz;
-    ptr = ptr->next;
-  }
-  return res;
+  return res + ql->count * 16;  // we account for each member 16 bytes.
 }
 
 // Approximated dictionary size.
 size_t DictMallocSize(dict* d) {
-  size_t res =
-      zmalloc_usable_size(d->ht_table[0]) + zmalloc_usable_size(d->ht_table[1]) + sizeof(dict);
-  res += dictSize(d) * 8;  // approximation.
-  return res;
+  size_t res = zmalloc_usable_size(d->ht_table[0]) + zmalloc_usable_size(d->ht_table[1]) +
+               znallocx(sizeof(dict));
+
+  return res = dictSize(d) * 16;  // approximation.
 }
 
 // Deniel's Lemire function validate_ascii_fast() - under Apache/MIT license.
@@ -175,7 +177,7 @@ size_t RobjWrapper::MallocUsed() const {
       break;
     case OBJ_LIST:
       CHECK_EQ(encoding, OBJ_ENCODING_QUICKLIST);
-      return QlUsedSize((quicklist*)ptr);
+      return QlMAllocSize((quicklist*)ptr);
     case OBJ_SET:
       switch (encoding) {
         case OBJ_ENCODING_HT:

@@ -61,11 +61,15 @@ EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t*
   });
 
   if (update_db_time) {
-    periodic_task_ = pb->AddPeriodic(1, [] {
-      auto* shard = EngineShard::tlocal();
-      DCHECK(shard);
+    constexpr uint32_t kClockCycleMs = 1;
+
+    periodic_task_ = pb->AddPeriodic(kClockCycleMs, [this] {
       // absl::GetCurrentTimeNanos() returns current time since the Unix Epoch.
-      shard->db_slice().UpdateExpireClock(absl::GetCurrentTimeNanos() / 1000000);
+      db_slice().UpdateExpireClock(absl::GetCurrentTimeNanos() / 1000000);
+
+      if (task_iters_++ % 8 == 0) {
+        CacheStats();
+      }
     });
   }
 
@@ -464,6 +468,34 @@ bool EngineShard::HasResultConverged(TxId notifyid) const {
   return txq_.Empty() || committed_txid_ > notifyid ||
          (continuation_trans_ == nullptr &&
           (committed_txid_ == notifyid || txq_.HeadScore() > notifyid));
+}
+
+void EngineShard::CacheStats() {
+  mi_heap_t* tlh = mi_heap_get_backing();
+  struct Sum {
+    size_t used = 0;
+    size_t comitted = 0;
+  } sum;
+
+  auto visit_cb = [](const mi_heap_t* heap, const mi_heap_area_t* area, void* block,
+                     size_t block_size, void* arg) -> bool {
+    DCHECK(!block);
+    Sum* sum = (Sum*)arg;
+
+    // mimalloc mistakenly exports used in blocks instead of bytes.
+    sum->used += block_size * area->used;
+    sum->comitted += area->committed;
+
+    DVLOG(1) << "block_size " << block_size << "/" << area->block_size << ", reserved "
+             << area->reserved << " comitted " << area->committed << " used: " << area->used;
+
+    return true;  // continue iteration
+  };
+
+  mi_heap_visit_blocks(tlh, false /* visit all blocks*/, visit_cb, &sum);
+
+  stats_.heap_used_bytes = sum.used;
+  stats_.heap_comitted_bytes = sum.comitted;
 }
 
 void EngineShardSet::Init(uint32_t sz) {

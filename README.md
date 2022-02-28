@@ -166,6 +166,11 @@ Commands that I prefer not implement before launch:
 Also, I would omit keyspace notifications. For that I would like to deep dive and learn
 exact use-cases for this API.
 
+### Random commands we implemented along the way
+
+ - [X] ROLE (2.8) decorator for for master withour replicas
+ - [X] UNLINK (4.0) decorator for DEL command
+ - [X] BGSAVE
 ## Milestone Nymph
 API 2,3,4 without cluster support, without modules, without memory inspection commands.
 Without support for keyspace notifications.

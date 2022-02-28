@@ -315,9 +315,13 @@ Metrics ServerFamily::GetMetrics() const {
     result.qps += uint64_t(ss->MovingSum6());
 
     if (shard) {
-      auto shard_stats = shard->db_slice().GetStats();
-      result.db += shard_stats.db;
-      result.events += shard_stats.events;
+      auto db_stats = shard->db_slice().GetStats();
+      result.db += db_stats.db;
+      result.events += db_stats.events;
+
+      EngineShard::Stats shard_stats = shard->stats();
+      result.heap_comitted_bytes += shard_stats.heap_comitted_bytes;
+      result.heap_used_bytes += shard_stats.heap_used_bytes;
     }
   };
 
@@ -376,13 +380,12 @@ tcp_port:)";
   }
 
   if (should_enter("MEMORY")) {
-    size_t db_size = m.db.table_mem_usage + m.db.obj_memory_usage;
-
     absl::StrAppend(&info, "# Memory\n");
 
-    // TODO: should be extracted from mimalloc heaps instead of using table stats.
-    absl::StrAppend(&info, "used_memory:", db_size, "\n");
-    absl::StrAppend(&info, "used_memory_human:", HumanReadableNumBytes(db_size), "\n");
+    absl::StrAppend(&info, "used_memory:", m.heap_used_bytes, "\n");
+    absl::StrAppend(&info, "used_memory_human:", HumanReadableNumBytes(m.heap_used_bytes), "\n");
+    absl::StrAppend(&info, "comitted_memory:", m.heap_comitted_bytes, "\n");
+
     if (sdata_res.has_value()) {
       absl::StrAppend(&info, "used_memory_rss:", sdata_res->vm_rss, "\n");
       absl::StrAppend(&info, "used_memory_rss_human:", HumanReadableNumBytes(sdata_res->vm_rss),
@@ -393,7 +396,12 @@ tcp_port:)";
 
     // TBD: should be the max of all seen used_memory values.
     absl::StrAppend(&info, "used_memory_peak:", -1, "\n");
-    absl::StrAppend(&info, "object_used_memory:", m.db.obj_memory_usage, "\n");
+
+    // Blob - all these cases where the key/objects are represented by a single blob allocated on
+    // heap. For example, strings or intsets. members of lists, sets, zsets etc
+    // are not accounted for to avoid complex computations. In some cases, when number of members is
+    // known we approximate their allocations by taking 16 bytes per member.
+    absl::StrAppend(&info, "blob_used_memory:", m.db.obj_memory_usage, "\n");
     absl::StrAppend(&info, "table_used_memory:", m.db.table_mem_usage, "\n");
     absl::StrAppend(&info, "num_entries:", m.db.key_count, "\n");
     absl::StrAppend(&info, "inline_keys:", m.db.inline_keys, "\n");
@@ -507,6 +515,10 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
       [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
 }
 
+void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
+  (*cntx)->SendDirect("*3\r\n$6\r\nmaster\r\n:0\r\n*0\r\n");
+}
+
 void ServerFamily::Script(CmdArgList args, ConnectionContext* cntx) {
   args.remove_prefix(1);
   ToUpper(&args.front());
@@ -549,6 +561,7 @@ void ServerFamily::SyncGeneric(std::string_view repl_master_id, uint64_t offs,
 void ServerFamily::Register(CommandRegistry* registry) {
   constexpr auto kReplicaOpts = CO::ADMIN | CO::GLOBAL_TRANS;
   *registry << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, 0}.HFUNC(Auth)
+            << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Save)
             << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(DbSize)
             << CI{"DEBUG", CO::RANDOM | CO::ADMIN | CO::LOADING, -2, 0, 0, 0}.HFUNC(Debug)
             << CI{"FLUSHDB", CO::WRITE | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(FlushDb)
@@ -559,6 +572,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0}.HFUNC(_Shutdown)
             << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
+            << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, 0}.HFUNC(Role)
             << CI{"SYNC", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Sync)
             << CI{"PSYNC", CO::ADMIN | CO::GLOBAL_TRANS, 3, 0, 0, 0}.HFUNC(Psync)
             << CI{"SCRIPT", CO::NOSCRIPT, -2, 0, 0, 0}.HFUNC(Script);
