@@ -1022,10 +1022,10 @@ unsigned char *zzlFind(unsigned char *lp, sds ele, double *score) {
         sptr = lpNext(lp,eptr);
         serverAssert(sptr != NULL);
 
-            /* Matching element, pull out score. */
-            if (score != NULL) *score = zzlGetScore(sptr);
-            return eptr;
-        }
+        /* Matching element, pull out score. */
+        if (score != NULL) *score = zzlGetScore(sptr);
+        return eptr;
+    }
 
     return NULL;
 }
@@ -1378,10 +1378,10 @@ int zsetAdd(robj *zobj, double score, sds ele, int in_flags, int *out_flags, dou
             {
                 zsetConvert(zobj,OBJ_ENCODING_SKIPLIST);
             } else {
-            zobj->ptr = zzlInsert(zobj->ptr,ele,score);
-            if (newscore) *newscore = score;
-            *out_flags |= ZADD_OUT_ADDED;
-            return 1;
+                zobj->ptr = zzlInsert(zobj->ptr,ele,score);
+                if (newscore) *newscore = score;
+                *out_flags |= ZADD_OUT_ADDED;
+                return 1;
             }
         } else {
             *out_flags |= ZADD_OUT_NOP;
@@ -2552,7 +2552,7 @@ void zunionInterDiffGenericCommand(client *c, robj *dstkey, int numkeysIndex, in
 
     if (setnum < 1) {
         addReplyErrorFormat(c,
-            "at least 1 input key is needed for %s", c->cmd->name);
+            "at least 1 input key is needed for '%s' command", c->cmd->fullname);
         return;
     }
 
@@ -3664,7 +3664,7 @@ void zrangeGenericCommand(zrange_result_handler *handler, int argc_start, int st
             handler->beginResultEmission(handler);
             handler->finalizeResultEmission(handler, 0);
         } else {
-        addReply(c,shared.emptyarray);
+            addReply(c, shared.emptyarray);
         }
         goto cleanup;
     }
@@ -3824,7 +3824,7 @@ void genericZpopCommand(client *c, robj **keyv, int keyc, int where, int emitkey
         if (reply_nil_when_empty) {
             addReplyNullArray(c);
         } else {
-        addReply(c,shared.emptyarray);
+            addReply(c,shared.emptyarray);
         }
         return;
     }
@@ -3917,13 +3917,13 @@ void genericZpopCommand(client *c, robj **keyv, int keyc, int where, int emitkey
         ++result_count;
     } while(--rangelen);
 
-        /* Remove the key, if indeed needed. */
-        if (zsetLength(zobj) == 0) {
+    /* Remove the key, if indeed needed. */
+    if (zsetLength(zobj) == 0) {
         if (deleted) *deleted = 1;
 
-            dbDelete(c->db,key);
-            notifyKeyspaceEvent(NOTIFY_GENERIC,"del",key,c->db->id);
-        }
+        dbDelete(c->db,key);
+        notifyKeyspaceEvent(NOTIFY_GENERIC,"del",key,c->db->id);
+    }
 
     if (c->cmd->proc == zmpopCommand) {
         /* Always replicate it as ZPOP[MIN|MAX] with COUNT option instead of ZMPOP. */
@@ -3998,12 +3998,12 @@ void blockingGenericZpopCommand(client *c, robj **keys, int numkeys, int where,
         /* Empty zset, move to next key. */
         if (llen == 0) continue;
 
-                /* Non empty zset, this is like a normal ZPOP[MIN|MAX]. */
+        /* Non empty zset, this is like a normal ZPOP[MIN|MAX]. */
         genericZpopCommand(c, &key, 1, where, 1, count, use_nested_array, reply_nil_when_empty, NULL);
 
         if (count == -1) {
             /* Replicate it as ZPOP[MIN|MAX] instead of BZPOP[MIN|MAX]. */
-                rewriteClientCommandVector(c,2,
+            rewriteClientCommandVector(c,2,
                                        (where == ZSET_MAX) ? shared.zpopmax : shared.zpopmin,
                                        key);
         } else {
@@ -4015,7 +4015,7 @@ void blockingGenericZpopCommand(client *c, robj **keys, int numkeys, int where,
             decrRefCount(count_obj);
         }
 
-                return;
+        return;
     }
 
     /* If we are not allowed to block the client and the zset is empty the only thing
