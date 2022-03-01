@@ -3,12 +3,15 @@
 //
 #include "core/compact_object.h"
 
+#include <mimalloc.h>
 #include <xxhash.h>
 
 #include "base/gtest.h"
+#include "base/logging.h"
 
 extern "C" {
 #include "redis/object.h"
+#include "redis/redis_aux.h"
 #include "redis/zmalloc.h"
 }
 
@@ -25,18 +28,35 @@ void PrintTo(const CompactObj& cobj, std::ostream* os) {
 
 class CompactObjectTest : public ::testing::Test {
  protected:
-  static void SetUpTestCase() {
+  static void SetUpTestSuite() {
+    InitRedisTables();  // to initialize server struct.
+
     init_zmalloc_threadlocal();
     CompactObj::InitThreadLocal(pmr::get_default_resource());
   }
 
-  CompactObj cs_;
+  static void TearDownTestSuite() {
+    mi_heap_collect(mi_heap_get_backing(), true);
+
+    auto cb_visit = [](const mi_heap_t* heap, const mi_heap_area_t* area, void* block,
+                       size_t block_size, void* arg) {
+      LOG(ERROR) << "Unfreed allocations: block_size " << block_size
+                 << ", allocated: " << area->used * block_size;
+      return true;
+    };
+
+    mi_heap_visit_blocks(mi_heap_get_backing(), false /* do not visit all blocks*/, cb_visit,
+                         nullptr);
+  }
+
+  CompactObj cobj_;
   string tmp_;
 };
 
 TEST_F(CompactObjectTest, Basic) {
   robj* rv = createRawStringObject("foo", 3);
-  cs_.ImportRObj(rv);
+  cobj_.ImportRObj(rv);
+  return;
 
   CompactObj a;
 
@@ -67,22 +87,21 @@ TEST_F(CompactObjectTest, NonInline) {
 }
 
 TEST_F(CompactObjectTest, Int) {
-  cs_.SetString("0");
-  EXPECT_EQ(0, cs_.TryGetInt());
-  EXPECT_EQ(cs_, "0");
-  EXPECT_EQ("0", cs_.GetSlice(&tmp_));
-  EXPECT_EQ(OBJ_STRING, cs_.ObjType());
-  cs_.SetString("42");
-  EXPECT_EQ(8181779779123079347, cs_.HashCode());
-  EXPECT_EQ(OBJ_ENCODING_INT, cs_.Encoding());
+  cobj_.SetString("0");
+  EXPECT_EQ(0, cobj_.TryGetInt());
+  EXPECT_EQ(cobj_, "0");
+  EXPECT_EQ("0", cobj_.GetSlice(&tmp_));
+  EXPECT_EQ(OBJ_STRING, cobj_.ObjType());
+  cobj_.SetString("42");
+  EXPECT_EQ(8181779779123079347, cobj_.HashCode());
+  EXPECT_EQ(OBJ_ENCODING_INT, cobj_.Encoding());
 }
 
 TEST_F(CompactObjectTest, MediumString) {
-  CompactObj obj;
   string tmp(512, 'b');
-  obj.SetString(tmp);
-  obj.SetString(tmp);
-  obj.Reset();
+  cobj_.SetString(tmp);
+  cobj_.SetString(tmp);
+  cobj_.Reset();
 }
 
 TEST_F(CompactObjectTest, AsciiUtil) {
@@ -96,6 +115,51 @@ TEST_F(CompactObjectTest, AsciiUtil) {
   ASSERT_EQ('x', ascii2[7]) << ascii2;
   std::string_view actual{ascii2, 7};
   ASSERT_EQ(data.substr(0, 7), actual);
+}
+
+TEST_F(CompactObjectTest, IntSet) {
+  robj* src = createIntsetObject();
+  cobj_.ImportRObj(src);
+  EXPECT_EQ(OBJ_SET, cobj_.ObjType());
+  EXPECT_EQ(OBJ_ENCODING_INTSET, cobj_.Encoding());
+
+  robj* os = cobj_.AsRObj();
+  EXPECT_EQ(0, setTypeSize(os));
+  sds val1 = sdsnew("10");
+  sds val2 = sdsdup(val1);
+
+  EXPECT_EQ(1, setTypeAdd(os, val1));
+  EXPECT_EQ(0, setTypeAdd(os, val2));
+  EXPECT_EQ(OBJ_ENCODING_INTSET, os->encoding);
+  sdsfree(val1);
+  sdsfree(val2);
+  cobj_.SyncRObj();
+  EXPECT_GT(cobj_.MallocUsed(), 0);
+}
+
+TEST_F(CompactObjectTest, HSet) {
+  robj* src = createHashObject();
+  cobj_.ImportRObj(src);
+
+  EXPECT_EQ(OBJ_HASH, cobj_.ObjType());
+  EXPECT_EQ(OBJ_ENCODING_LISTPACK, cobj_.Encoding());
+
+  robj* os = cobj_.AsRObj();
+
+  sds key1 = sdsnew("key1");
+  sds val1 = sdsnew("val1");
+
+
+  // returns 0 on insert.
+  EXPECT_EQ(0, hashTypeSet(os, key1, val1, HASH_SET_TAKE_FIELD | HASH_SET_TAKE_VALUE));
+  cobj_.SyncRObj();
+}
+
+TEST_F(CompactObjectTest, ZSet) {
+  // unrelated, checking sds static encoding used in zset special strings.
+  char kMinStrData[] = "\110" "minstring";
+  EXPECT_EQ(9, sdslen(kMinStrData + 1));
+
 }
 
 }  // namespace dfly

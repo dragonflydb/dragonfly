@@ -9,6 +9,7 @@
 
 extern "C" {
 #include "redis/intset.h"
+#include "redis/listpack.h"
 #include "redis/object.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"  // for non-string objects.
@@ -242,7 +243,16 @@ void RobjWrapper::Free(std::pmr::memory_resource* mr) {
       LOG(FATAL) << "TBD";
       break;
     case OBJ_HASH:
-      LOG(FATAL) << "Unsupported HASH type";
+      switch (encoding) {
+        case OBJ_ENCODING_HT:
+          dictRelease((dict*)ptr);
+          break;
+        case OBJ_ENCODING_LISTPACK:
+          lpFree((uint8_t*)ptr);
+          break;
+        default:
+          LOG(FATAL) << "Unknown hset encoding type";
+      }
       break;
     case OBJ_MODULE:
       LOG(FATAL) << "Unsupported OBJ_MODULE type";
@@ -520,11 +530,10 @@ robj* CompactObj::AsRObj() const {
 }
 
 void CompactObj::SyncRObj() {
-  CHECK_EQ(ROBJ_TAG, taglen_);
-
   robj* obj = &tl.tmp_robj;
 
-  CHECK_EQ(u_.r_obj.type, obj->type);
+  DCHECK_EQ(ROBJ_TAG, taglen_);
+  DCHECK_EQ(u_.r_obj.type, obj->type);
 
   u_.r_obj.encoding = obj->encoding;
   u_.r_obj.blob.Set(obj->ptr, 0);

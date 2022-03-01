@@ -58,7 +58,6 @@
  * too strict. */
 static void dismissMemory(void* ptr, size_t size_hint) {
 }
-struct sharedObjectsStruct shared;
 
 /* ===================== Creation and parsing of objects ==================== */
 

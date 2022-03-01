@@ -97,7 +97,4 @@ int zslLexValueGteMin(sds value, const zlexrangespec* spec);
 int zslLexValueLteMax(sds value, const zlexrangespec* spec);
 int zsetZiplistValidateIntegrity(unsigned char* zl, size_t size, int deep);
 
-extern size_t zset_max_ziplist_entries;
-extern size_t zset_max_ziplist_value;
-
 #endif

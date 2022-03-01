@@ -72,6 +72,14 @@
  * Skiplist implementation of the low level API
  *----------------------------------------------------------------------------*/
 
+// ROMAN: static representation of sds strings
+static char kMinStrData[] = "\110" "minstring";
+static char kMaxStrData[] = "\110" "minstring";
+
+#define cminstring (kMinStrData + 1)
+#define cmaxstring (kMaxStrData + 1)
+
+
 int zslLexValueGteMin(sds value, const zlexrangespec *spec);
 int zslLexValueLteMax(sds value, const zlexrangespec *spec);
 
@@ -586,12 +594,12 @@ int zslParseLexRangeItem(robj *item, sds *dest, int *ex) {
     case '+':
         if (c[1] != '\0') return C_ERR;
         *ex = 1;
-        *dest = shared.maxstring;
+        *dest = cmaxstring;
         return C_OK;
     case '-':
         if (c[1] != '\0') return C_ERR;
         *ex = 1;
-        *dest = shared.minstring;
+        *dest = cminstring;
         return C_OK;
     case '(':
         *ex = 1;
@@ -609,10 +617,10 @@ int zslParseLexRangeItem(robj *item, sds *dest, int *ex) {
 /* Free a lex range structure, must be called only after zslParseLexRange()
  * populated the structure with success (C_OK returned). */
 void zslFreeLexRange(zlexrangespec *spec) {
-    if (spec->min != shared.minstring &&
-        spec->min != shared.maxstring) sdsfree(spec->min);
-    if (spec->max != shared.minstring &&
-        spec->max != shared.maxstring) sdsfree(spec->max);
+    if (spec->min != cminstring &&
+        spec->min != cmaxstring) sdsfree(spec->min);
+    if (spec->max != cminstring &&
+        spec->max != cmaxstring) sdsfree(spec->max);
 }
 
 /* Populate the lex rangespec according to the objects min and max.
@@ -641,8 +649,8 @@ int zslParseLexRange(robj *min, robj *max, zlexrangespec *spec) {
  * -inf and +inf for strings */
 int sdscmplex(sds a, sds b) {
     if (a == b) return 0;
-    if (a == shared.minstring || b == shared.maxstring) return -1;
-    if (a == shared.maxstring || b == shared.minstring) return 1;
+    if (a == cminstring || b == cmaxstring) return -1;
+    if (a == cmaxstring || b == cminstring) return 1;
     return sdscmp(a,b);
 }
 

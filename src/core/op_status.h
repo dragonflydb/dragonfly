@@ -72,7 +72,7 @@ template <typename V> class OpResult : public OpResultBase {
   }
 
  private:
-  V v_;
+  V v_{};
 };
 
 template <> class OpResult<void> : public OpResultBase {

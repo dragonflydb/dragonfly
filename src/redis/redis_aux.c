@@ -14,6 +14,9 @@ void InitRedisTables() {
   server.page_size = sysconf(_SC_PAGESIZE);
   server.zset_max_listpack_entries = 128;
   server.zset_max_listpack_value = 64;
+  server.set_max_intset_entries = 512;
+  server.hash_max_listpack_entries = 512;
+  server.hash_max_listpack_value = 64;
 }
 
 // These functions are moved here from server.c
@@ -99,4 +102,15 @@ dictType zsetDictType = {
     NULL,              /* Note: SDS string shared & freed by skiplist */
     NULL,              /* val destructor */
     NULL               /* allow to expand */
+};
+
+/* Hash type hash table (note that small hashes are represented with listpacks) */
+dictType hashDictType = {
+    dictSdsHash,                /* hash function */
+    NULL,                       /* key dup */
+    NULL,                       /* val dup */
+    dictSdsKeyCompare,          /* key compare */
+    dictSdsDestructor,          /* key destructor */
+    dictSdsDestructor,          /* val destructor */
+    NULL                        /* allow to expand */
 };

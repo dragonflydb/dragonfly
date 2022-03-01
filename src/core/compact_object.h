@@ -204,6 +204,7 @@ class CompactObj {
 
   unsigned Encoding() const;
   unsigned ObjType() const;
+
   quicklist* GetQL() const;
 
   // Takes ownership over o.
@@ -215,11 +216,12 @@ class CompactObj {
   // Requires: AsRObj() has been called before in the same thread in fiber-atomic section.
   void SyncRObj();
 
+  // For STR object.
   void SetInt(int64_t val);
   std::optional<int64_t> TryGetInt() const;
 
+  // For STR object.
   void SetString(std::string_view str);
-
   void GetString(std::string* res) const;
 
   size_t MallocUsed() const;
