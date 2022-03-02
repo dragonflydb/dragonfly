@@ -128,7 +128,7 @@ class EngineShard {
   }
 
   // for everyone to use for string transformations during atomic cpu sequences.
-  sds tmp_str;
+  sds tmp_str1, tmp_str2;
 
  private:
   EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap);

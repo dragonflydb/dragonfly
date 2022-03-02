@@ -422,7 +422,8 @@ auto StringFamily::OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction
 
 OpStatus StringFamily::OpMSet(const Transaction* t, EngineShard* es) {
   ArgSlice largs = t->ShardArgsInShard(es->shard_id());
-  CHECK(!largs.empty() && largs.size() % 2 == 0);
+
+  DCHECK(!largs.empty() && largs.size() % 2 == 0);
 
   SetCmd::SetParams params{t->db_index()};
   SetCmd sg(&es->db_slice());

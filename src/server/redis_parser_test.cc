@@ -38,7 +38,7 @@ MATCHER_P(ArrArg, expected, absl::StrCat(negation ? "is not" : "is", " equal to:
 
 class RedisParserTest : public testing::Test {
  protected:
-  static void SetUpTestCase() {
+  static void SetUpTestSuite() {
     init_zmalloc_threadlocal();
   }
 

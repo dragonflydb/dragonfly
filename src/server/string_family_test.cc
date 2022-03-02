@@ -95,6 +95,10 @@ TEST_F(StringFamilyTest, Set) {
 }
 
 TEST_F(StringFamilyTest, MGetSet) {
+  Run({"mset", "z", "0"});  // single key
+  auto resp = Run({"mget", "z"});  // single key
+  EXPECT_THAT(resp, RespEq("0"));
+
   Run({"mset", "x", "0", "b", "0"});
 
   ASSERT_EQ(2, GetDebugInfo("IO0").shards_count);

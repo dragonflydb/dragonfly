@@ -31,7 +31,7 @@ class RdbTest : public testing::Test {
     pp_->Stop();
   }
 
-  static void SetUpTestCase() {
+  static void SetUpTestSuite() {
     crc64_init();
     init_zmalloc_threadlocal();
   }

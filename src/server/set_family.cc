@@ -216,8 +216,8 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const ArgS
 
   uint32_t res = 0;
   for (auto val : vals) {
-    es->tmp_str = sdscpylen(es->tmp_str, val.data(), val.size());
-    res += setTypeAdd(o, es->tmp_str);
+    es->tmp_str1 = sdscpylen(es->tmp_str1, val.data(), val.size());
+    res += setTypeAdd(o, es->tmp_str1);
   }
   it->second.SyncRObj();
 
@@ -239,8 +239,8 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, std::string_view key, const ArgS
   robj* o = find_res.value()->second.AsRObj();
 
   for (auto val : vals) {
-    es->tmp_str = sdscpylen(es->tmp_str, val.data(), val.size());
-    res += setTypeRemove(o, es->tmp_str);
+    es->tmp_str1 = sdscpylen(es->tmp_str1, val.data(), val.size());
+    res += setTypeRemove(o, es->tmp_str1);
   }
 
   if (res && setTypeSize(o) == 0) {
@@ -276,8 +276,8 @@ OpStatus Mover::OpFind(Transaction* t, EngineShard* es) {
     OpResult<MainIterator> res = es->db_slice().Find(t->db_index(), k, OBJ_SET);
     if (res && index == 0) {
       CHECK(!res->is_done());
-      es->tmp_str = sdscpylen(es->tmp_str, member_.data(), member_.size());
-      int found_memb = setTypeIsMember(res.value()->second.AsRObj(), es->tmp_str);
+      es->tmp_str1 = sdscpylen(es->tmp_str1, member_.data(), member_.size());
+      int found_memb = setTypeIsMember(res.value()->second.AsRObj(), es->tmp_str1);
       found_[0] = (found_memb == 1);
     } else {
       found_[index] = res.status();
@@ -368,9 +368,9 @@ void SetFamily::SIsMember(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     OpResult<MainIterator> find_res = shard->db_slice().Find(t->db_index(), key, OBJ_SET);
 
-    shard->tmp_str = sdscpylen(shard->tmp_str, val.data(), val.size());
+    shard->tmp_str1 = sdscpylen(shard->tmp_str1, val.data(), val.size());
 
-    int res = setTypeIsMember(find_res.value()->second.AsRObj(), shard->tmp_str);
+    int res = setTypeIsMember(find_res.value()->second.AsRObj(), shard->tmp_str1);
 
     return res == 1 ? OpStatus::OK : OpStatus::INVALID_VALUE;
   };

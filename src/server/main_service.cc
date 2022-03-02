@@ -19,12 +19,14 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/error.h"
 #include "server/generic_family.h"
+#include "server/hset_family.h"
 #include "server/list_family.h"
 #include "server/script_mgr.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
 #include "server/string_family.h"
 #include "server/transaction.h"
+#include "server/zset_family.h"
 #include "util/metrics/metrics.h"
 #include "util/uring/uring_fiber_algo.h"
 #include "util/varz.h"
@@ -828,6 +830,8 @@ void Service::RegisterCommands() {
   GenericFamily::Register(&registry_);
   ListFamily::Register(&registry_);
   SetFamily::Register(&registry_);
+  HSetFamily::Register(&registry_);
+  ZSetFamily::Register(&registry_);
 
   server_family_.Register(&registry_);
 

@@ -13,6 +13,7 @@ extern "C" {
 #include "redis/object.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"  // for non-string objects.
+#include "redis/zset.h"
 }
 
 #include <absl/strings/str_cat.h>
@@ -45,6 +46,60 @@ size_t DictMallocSize(dict* d) {
                znallocx(sizeof(dict));
 
   return res = dictSize(d) * 16;  // approximation.
+}
+
+inline void FreeObjSet(unsigned encoding, void* ptr) {
+  switch (encoding) {
+    case OBJ_ENCODING_HT:
+      dictRelease((dict*)ptr);
+      break;
+    case OBJ_ENCODING_INTSET:
+      zfree((void*)ptr);
+      break;
+    default:
+      LOG(FATAL) << "Unknown set encoding type";
+  }
+}
+
+size_t MallocUsedSet(unsigned encoding, void* ptr) {
+  switch (encoding) {
+    case OBJ_ENCODING_HT:
+      return DictMallocSize((dict*)ptr);
+    case OBJ_ENCODING_INTSET:
+      return intsetBlobLen((intset*)ptr);
+    default:
+      LOG(FATAL) << "Unknown set encoding type " << encoding;
+  }
+}
+
+inline void FreeObjHash(unsigned encoding, void* ptr) {
+  switch (encoding) {
+    case OBJ_ENCODING_HT:
+      dictRelease((dict*)ptr);
+      break;
+    case OBJ_ENCODING_LISTPACK:
+      lpFree((uint8_t*)ptr);
+      break;
+    default:
+      LOG(FATAL) << "Unknown hset encoding type " << encoding;
+  }
+}
+
+inline void FreeObjZset(unsigned encoding, void* ptr) {
+  zset* zs = (zset*)ptr;
+  switch (encoding) {
+    case OBJ_ENCODING_SKIPLIST:
+      zs = (zset*)ptr;
+      dictRelease(zs->dict);
+      zslFree(zs->zsl);
+      zfree(zs);
+      break;
+    case OBJ_ENCODING_LISTPACK:
+      zfree(ptr);
+      break;
+    default:
+      LOG(FATAL) << "Unknown sorted set encoding" << encoding;
+  }
 }
 
 // Deniel's Lemire function validate_ascii_fast() - under Apache/MIT license.
@@ -180,14 +235,7 @@ size_t RobjWrapper::MallocUsed() const {
       CHECK_EQ(encoding, OBJ_ENCODING_QUICKLIST);
       return QlMAllocSize((quicklist*)ptr);
     case OBJ_SET:
-      switch (encoding) {
-        case OBJ_ENCODING_HT:
-          return DictMallocSize((dict*)ptr);
-        case OBJ_ENCODING_INTSET:
-          return intsetBlobLen((intset*)ptr);
-        default:
-          LOG(FATAL) << "Unknown set encoding type";
-      }
+      return MallocUsedSet(encoding, ptr);
       break;
     default:
       LOG(FATAL) << "Not supported " << type;
@@ -216,43 +264,21 @@ void RobjWrapper::Free(std::pmr::memory_resource* mr) {
   switch (type) {
     case OBJ_STRING:
       DVLOG(2) << "Freeing string object";
-      if (encoding == OBJ_ENCODING_RAW) {
-        blob.Free(mr);
-      } else {
-        CHECK_EQ(OBJ_ENCODING_INT, encoding);
-      }
+      DCHECK_EQ(OBJ_ENCODING_RAW, encoding);
+      blob.Free(mr);
       break;
     case OBJ_LIST:
       CHECK_EQ(encoding, OBJ_ENCODING_QUICKLIST);
       quicklistRelease((quicklist*)ptr);
       break;
-
     case OBJ_SET:
-      switch (encoding) {
-        case OBJ_ENCODING_HT:
-          dictRelease((dict*)ptr);
-          break;
-        case OBJ_ENCODING_INTSET:
-          zfree((void*)ptr);
-          break;
-        default:
-          LOG(FATAL) << "Unknown set encoding type";
-      }
+      FreeObjSet(encoding, ptr);
       break;
     case OBJ_ZSET:
-      LOG(FATAL) << "TBD";
+      FreeObjZset(encoding, ptr);
       break;
     case OBJ_HASH:
-      switch (encoding) {
-        case OBJ_ENCODING_HT:
-          dictRelease((dict*)ptr);
-          break;
-        case OBJ_ENCODING_LISTPACK:
-          lpFree((uint8_t*)ptr);
-          break;
-        default:
-          LOG(FATAL) << "Unknown hset encoding type";
-      }
+      FreeObjHash(encoding, ptr);
       break;
     case OBJ_MODULE:
       LOG(FATAL) << "Unsupported OBJ_MODULE type";
@@ -285,6 +311,7 @@ uint64_t RobjWrapper::HashCode() const {
 bool RobjWrapper::Equal(const RobjWrapper& ow) const {
   if (ow.type != type || ow.encoding != encoding)
     return false;
+
   if (type == OBJ_STRING) {
     DCHECK_EQ(OBJ_ENCODING_RAW, encoding);
     return blob.AsView() == ow.blob.AsView();

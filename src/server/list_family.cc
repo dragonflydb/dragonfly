@@ -349,8 +349,8 @@ OpResult<uint32_t> ListFamily::OpPush(const OpArgs& op_args, std::string_view ke
   int pos = (dir == ListDir::LEFT) ? QUICKLIST_HEAD : QUICKLIST_TAIL;
 
   for (auto v : vals) {
-    es->tmp_str = sdscpylen(es->tmp_str, v.data(), v.size());
-    quicklistPush(ql, es->tmp_str, sdslen(es->tmp_str), pos);
+    es->tmp_str1 = sdscpylen(es->tmp_str1, v.data(), v.size());
+    quicklistPush(ql, es->tmp_str1, sdslen(es->tmp_str1), pos);
   }
 
   if (new_key) {

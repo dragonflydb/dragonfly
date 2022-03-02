@@ -73,13 +73,16 @@ EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t*
     });
   }
 
-  tmp_str = sdsempty();
+  tmp_str1 = sdsempty();
+  tmp_str2 = sdsempty();
 }
 
 EngineShard::~EngineShard() {
   queue_.Shutdown();
   fiber_q_.join();
-  sdsfree(tmp_str);
+  sdsfree(tmp_str1);
+  sdsfree(tmp_str2);
+
   if (periodic_task_) {
     ProactorBase::me()->CancelPeriodic(periodic_task_);
   }

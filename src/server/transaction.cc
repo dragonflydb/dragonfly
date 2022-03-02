@@ -151,6 +151,7 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
 
   CHECK_GT(args.size(), 1U);  // first entry is the command name.
   DCHECK_EQ(unique_shard_cnt_, 0u);
+  DCHECK(args_.empty());
 
   KeyIndex key_index = DetermineKeys(cid_, args);
 
@@ -166,9 +167,13 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   bool single_key = !multi_ && (key_index.start + key_index.step) >= key_index.end;
 
   if (single_key) {
+    DCHECK_GT(key_index.step, 0u);
+
     shard_data_.resize(1);  // Single key optimization
-    auto key = ArgS(args, key_index.start);
-    args_.push_back(key);
+    for (unsigned j = key_index.start; j < key_index.start + key_index.step; ++j) {
+      args_.push_back(ArgS(args, j));
+    }
+    string_view key = args_.front();
 
     unique_shard_cnt_ = 1;
     unique_shard_id_ = Shard(key, ess_->size());
