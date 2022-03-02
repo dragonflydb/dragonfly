@@ -7,13 +7,12 @@
 #include <variant>
 
 #include "base/io_buf.h"
-#include "core/resp_expr.h"
+#include "facade/redis_parser.h"
 #include "server/conn_context.h"
 #include "util/fiber_socket_base.h"
 
 namespace dfly {
 
-class RedisParser;
 class Service;
 
 class Replica {
@@ -53,7 +52,7 @@ class Replica {
   // SYNCING means that the initial ack succeeded. It may be optional if we can still load from
   // the journal offset.
   enum State {
-    R_ENABLED = 1,   // Replication mode is enabled. Serves for signaling shutdown.
+    R_ENABLED = 1,  // Replication mode is enabled. Serves for signaling shutdown.
     R_TCP_CONNECTED = 2,
     R_SYNCING = 4,
     R_SYNC_OK = 8,
@@ -76,7 +75,7 @@ class Replica {
 
   // Where the sock_ is handled.
   util::ProactorBase* sock_thread_ = nullptr;
-  std::unique_ptr<RedisParser> parser_;
+  std::unique_ptr<facade::RedisParser> parser_;
 
   // repl_offs - till what offset we've already read from the master.
   // ack_offs_ last acknowledged offset.

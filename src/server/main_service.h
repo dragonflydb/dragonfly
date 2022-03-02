@@ -5,11 +5,10 @@
 #pragma once
 
 #include "base/varz_value.h"
+#include "facade/service_interface.h"
 #include "server/command_registry.h"
 #include "server/engine_shard_set.h"
-#include "server/memcache_parser.h"
 #include "server/server_family.h"
-#include "util/http/http_handler.h"
 
 namespace util {
 class AcceptServer;
@@ -19,8 +18,9 @@ namespace dfly {
 
 class Interpreter;
 class ObjectExplorer;  // for Interpreter
+using facade::MemcacheParser;
 
-class Service {
+class Service : public facade::ServiceInterface {
  public:
   using error_code = std::error_code;
 
@@ -34,15 +34,18 @@ class Service {
   explicit Service(util::ProactorPool* pp);
   ~Service();
 
-  void RegisterHttp(util::HttpListenerBase* listener);
-
   void Init(util::AcceptServer* acceptor, const InitOpts& opts = InitOpts{});
 
   void Shutdown();
 
-  void DispatchCommand(CmdArgList args, ConnectionContext* cntx);
+  void DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) final;
   void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
-                  ConnectionContext* cntx);
+                  facade::ConnectionContext* cntx) final;
+
+  facade::ConnectionContext* CreateContext(util::FiberSocketBase* peer,
+                                           facade::Connection* owner) final;
+
+  facade::ConnectionStats* GetThreadLocalConnectionStats() final;
 
   uint32_t shard_count() const {
     return shard_set_.size();
@@ -58,10 +61,6 @@ class Service {
 
   util::ProactorPool& proactor_pool() {
     return pp_;
-  }
-
-  util::HttpListenerBase* http_listener() {
-    return http_listener_;
   }
 
   bool IsPassProtected() const;
@@ -91,8 +90,6 @@ class Service {
   EngineShardSet shard_set_;
   ServerFamily server_family_;
   CommandRegistry registry_;
-
-  util::HttpListenerBase* http_listener_ = nullptr;
 };
 
 }  // namespace dfly

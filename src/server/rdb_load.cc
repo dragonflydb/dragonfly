@@ -28,6 +28,7 @@ using base::IoBuf;
 using nonstd::make_unexpected;
 using namespace util;
 using rdb::errc;
+using facade::operator""_KB;
 
 class error_category : public std::error_category {
  public:

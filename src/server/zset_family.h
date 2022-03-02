@@ -6,7 +6,7 @@
 
 #include <variant>
 
-#include "core/op_status.h"
+#include "facade/op_status.h"
 #include "server/common_types.h"
 
 namespace dfly {

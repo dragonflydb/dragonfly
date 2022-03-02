@@ -1,4 +1,4 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -23,6 +23,8 @@ namespace dfly {
 namespace {
 
 using namespace std;
+using facade::Protocol;
+using facade::ReplyBuilderInterface;
 
 using CI = CommandId;
 DEFINE_VARZ(VarzQps, set_qps);
@@ -284,7 +286,7 @@ void StringFamily::IncrByGeneric(std::string_view key, int64_t val, ConnectionCo
     case OpStatus::WRONG_TYPE:
       return builder->SendError(kWrongTypeErr);
     case OpStatus::KEY_NOTFOUND:  // Relevant only for MC
-      return reinterpret_cast<MCReplyBuilder*>(builder)->SendNotFound();
+      return reinterpret_cast<facade::MCReplyBuilder*>(builder)->SendNotFound();
     default:;
   }
   __builtin_unreachable();
@@ -327,8 +329,10 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
   unsigned shard_count = transaction->shard_set()->size();
   std::vector<MGetResponse> mget_resp(shard_count);
 
+  ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   bool fetch_mcflag = cntx->protocol() == Protocol::MEMCACHE;
-  bool fetch_mcver = fetch_mcflag && (cntx->conn_state.mask & ConnectionState::FETCH_CAS_VER);
+  bool fetch_mcver =
+      fetch_mcflag && (dfly_cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
@@ -436,8 +440,8 @@ OpStatus StringFamily::OpMSet(const Transaction* t, EngineShard* es) {
   return OpStatus::OK;
 }
 
-OpResult<int64_t> StringFamily::OpIncrBy(const OpArgs& op_args, std::string_view key,
-                                         int64_t incr, bool skip_on_missing) {
+OpResult<int64_t> StringFamily::OpIncrBy(const OpArgs& op_args, std::string_view key, int64_t incr,
+                                         bool skip_on_missing) {
   auto& db_slice = op_args.shard->db_slice();
   auto [it, expire_it] = db_slice.FindExt(op_args.db_ind, key);
 

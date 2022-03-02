@@ -4,13 +4,14 @@
 
 #pragma once
 
-#include "core/op_status.h"
+#include "facade/op_status.h"
 #include "server/common_types.h"
 
 namespace dfly {
 
 class ConnectionContext;
 class CommandRegistry;
+using facade::OpResult;
 
 class HSetFamily {
  public:

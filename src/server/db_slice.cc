@@ -1,4 +1,4 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -21,6 +21,7 @@ namespace dfly {
 using namespace boost;
 using namespace std;
 using namespace util;
+using facade::OpStatus;
 
 #define ADD(x) (x) += o.x
 

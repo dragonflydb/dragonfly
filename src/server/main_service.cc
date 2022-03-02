@@ -16,6 +16,8 @@ extern "C" {
 #include <filesystem>
 
 #include "base/logging.h"
+#include "facade/dragonfly_connection.h"
+#include "facade/error.h"
 #include "server/conn_context.h"
 #include "server/error.h"
 #include "server/generic_family.h"
@@ -43,6 +45,8 @@ using base::VarzValue;
 using ::boost::intrusive_ptr;
 namespace fibers = ::boost::fibers;
 namespace this_fiber = ::boost::this_fiber;
+using facade::MCReplyBuilder;
+using facade::RedisReplyBuilder;
 
 namespace {
 
@@ -259,7 +263,7 @@ bool EvalValidator(CmdArgList args, ConnectionContext* cntx) {
   int32_t num_keys;
 
   if (!absl::SimpleAtoi(num_keys_str, &num_keys) || num_keys < 0) {
-    (*cntx)->SendError(kInvalidIntErr);
+    (*cntx)->SendError(facade::kInvalidIntErr);
     return false;
   }
 
@@ -329,7 +333,7 @@ void Service::Shutdown() {
   shard_set_.RunBlockingInParallel([&](EngineShard*) { EngineShard::DestroyThreadLocal(); });
 }
 
-void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
+void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
   CHECK(!args.empty());
   DCHECK_NE(0u, shard_set_.size()) << "Init was not called";
 
@@ -344,9 +348,10 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
 
   etl.RecordCmd();
 
-  absl::Cleanup multi_error = [cntx] {
-    if (cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE) {
-      cntx->conn_state.exec_state = ConnectionState::EXEC_ERROR;
+  ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
+  absl::Cleanup multi_error = [dfly_cntx] {
+    if (dfly_cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE) {
+      dfly_cntx->conn_state.exec_state = ConnectionState::EXEC_ERROR;
     }
   };
 
@@ -362,22 +367,22 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
 
   string_view cmd_name{cid->name()};
 
-  if ((cntx->conn_state.mask & (ConnectionState::REQ_AUTH | ConnectionState::AUTHENTICATED)) ==
-      ConnectionState::REQ_AUTH) {
+  if (cntx->req_auth && !cntx->authenticated) {
     if (cmd_name != "AUTH") {
       return (*cntx)->SendError("-NOAUTH Authentication required.");
     }
   }
 
-  bool under_script = cntx->conn_state.script_info.has_value();
+  bool under_script = dfly_cntx->conn_state.script_info.has_value();
 
   if (under_script && (cid->opt_mask() & CO::NOSCRIPT)) {
     return (*cntx)->SendError("This Redis command is not allowed from script");
   }
 
-  bool is_write_cmd =
-      (cid->opt_mask() & CO::WRITE) || (under_script && cntx->conn_state.script_info->is_write);
-  bool under_multi = cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE && !is_trans_cmd;
+  bool is_write_cmd = (cid->opt_mask() & CO::WRITE) ||
+                      (under_script && dfly_cntx->conn_state.script_info->is_write);
+  bool under_multi =
+      dfly_cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE && !is_trans_cmd;
 
   if (!etl.is_master && is_write_cmd) {
     (*cntx)->SendError("-READONLY You can't write against a read only replica.");
@@ -386,15 +391,15 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
 
   if ((cid->arity() > 0 && args.size() != size_t(cid->arity())) ||
       (cid->arity() < 0 && args.size() < size_t(-cid->arity()))) {
-    return (*cntx)->SendError(WrongNumArgsError(cmd_str));
+    return (*cntx)->SendError(facade::WrongNumArgsError(cmd_str));
   }
 
   if (cid->key_arg_step() == 2 && (args.size() % 2) == 0) {
-    return (*cntx)->SendError(WrongNumArgsError(cmd_str));
+    return (*cntx)->SendError(facade::WrongNumArgsError(cmd_str));
   }
 
   // Validate more complicated cases with custom validators.
-  if (!cid->Validate(args, cntx)) {
+  if (!cid->Validate(args, dfly_cntx)) {
     return;
   }
 
@@ -412,14 +417,14 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
 
   std::move(multi_error).Cancel();
 
-  if (cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE && !is_trans_cmd) {
+  if (dfly_cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE && !is_trans_cmd) {
     // TODO: protect against aggregating huge transactions.
     StoredCmd stored_cmd{cid};
     stored_cmd.cmd.reserve(args.size());
     for (size_t i = 0; i < args.size(); ++i) {
       stored_cmd.cmd.emplace_back(ArgS(args, i));
     }
-    cntx->conn_state.exec_body.push_back(std::move(stored_cmd));
+    dfly_cntx->conn_state.exec_body.push_back(std::move(stored_cmd));
 
     return (*cntx)->SendSimpleString("QUEUED");
   }
@@ -430,48 +435,48 @@ void Service::DispatchCommand(CmdArgList args, ConnectionContext* cntx) {
   intrusive_ptr<Transaction> dist_trans;
 
   if (under_script) {
-    DCHECK(cntx->transaction);
+    DCHECK(dfly_cntx->transaction);
     KeyIndex key_index = DetermineKeys(cid, args);
     for (unsigned i = key_index.start; i < key_index.end; ++i) {
       string_view key = ArgS(args, i);
-      if (!cntx->conn_state.script_info->keys.contains(key)) {
+      if (!dfly_cntx->conn_state.script_info->keys.contains(key)) {
         return (*cntx)->SendError("script tried accessing undeclared key");
       }
     }
-    cntx->transaction->SetExecCmd(cid);
-    cntx->transaction->InitByArgs(cntx->conn_state.db_index, args);
+    dfly_cntx->transaction->SetExecCmd(cid);
+    dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args);
   } else {
-    DCHECK(cntx->transaction == nullptr);
+    DCHECK(dfly_cntx->transaction == nullptr);
 
     if (IsTransactional(cid)) {
       dist_trans.reset(new Transaction{cid, &shard_set_});
-      cntx->transaction = dist_trans.get();
+      dfly_cntx->transaction = dist_trans.get();
 
-      dist_trans->InitByArgs(cntx->conn_state.db_index, args);
-      cntx->last_command_debug.shards_count = cntx->transaction->unique_shard_cnt();
+      dist_trans->InitByArgs(dfly_cntx->conn_state.db_index, args);
+      dfly_cntx->last_command_debug.shards_count = dfly_cntx->transaction->unique_shard_cnt();
     } else {
-      cntx->transaction = nullptr;
+      dfly_cntx->transaction = nullptr;
     }
   }
 
-  cntx->cid = cid;
+  dfly_cntx->cid = cid;
   cmd_req.Inc({cmd_name});
-  cid->Invoke(args, cntx);
+  cid->Invoke(args, dfly_cntx);
   end_usec = ProactorBase::GetMonotonicTimeNs();
 
   request_latency_usec.IncBy(cmd_str, (end_usec - start_usec) / 1000);
   if (dist_trans) {
-    cntx->last_command_debug.clock = dist_trans->txid();
-    cntx->last_command_debug.is_ooo = dist_trans->IsOOO();
+    dfly_cntx->last_command_debug.clock = dist_trans->txid();
+    dfly_cntx->last_command_debug.is_ooo = dist_trans->IsOOO();
   }
 
   if (!under_script) {
-    cntx->transaction = nullptr;
+    dfly_cntx->transaction = nullptr;
   }
 }
 
 void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
-                         ConnectionContext* cntx) {
+                         facade::ConnectionContext* cntx) {
   absl::InlinedVector<MutableSlice, 8> args;
   char cmd_name[16];
   char ttl[16];
@@ -533,6 +538,8 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     args.emplace_back(key, cmd.key.size());
   }
 
+  ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
+
   if (MemcacheParser::IsStoreCmd(cmd.type)) {
     char* v = const_cast<char*>(value.data());
     args.emplace_back(v, value.size());
@@ -546,7 +553,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       args.emplace_back(ttl_op, 2);
       args.emplace_back(ttl, next - ttl);
     }
-    cntx->conn_state.memcache_flag = cmd.flags;
+    dfly_cntx->conn_state.memcache_flag = cmd.flags;
   } else if (cmd.type < MemcacheParser::QUIT) {  // read commands
     for (auto s : cmd.keys_ext) {
       char* key = const_cast<char*>(s.data());
@@ -561,7 +568,28 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
   DispatchCommand(CmdArgList{args}, cntx);
 
   // Reset back.
-  cntx->conn_state.memcache_flag = 0;
+  dfly_cntx->conn_state.memcache_flag = 0;
+}
+
+facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
+                                                  facade::Connection* owner) {
+  ConnectionContext* res = new ConnectionContext{peer, owner};
+  res->shard_set = &shard_set();
+  res->req_auth = IsPassProtected();
+
+  // a bit of a hack. I set up breaker callback here for the owner.
+  // Should work though it's confusing to have it here.
+  owner->RegisterOnBreak([res](uint32_t) {
+    if (res->transaction) {
+      res->transaction->BreakOnClose();
+    }
+  });
+
+  return res;
+}
+
+facade::ConnectionStats* Service::GetThreadLocalConnectionStats() {
+  return ServerState::tl_connection_stats();
 }
 
 bool Service::IsLocked(DbIndex db_index, std::string_view key) const {
@@ -590,14 +618,10 @@ bool Service::IsPassProtected() const {
   return !FLAGS_requirepass.empty();
 }
 
-void Service::RegisterHttp(HttpListenerBase* listener) {
-  CHECK_NOTNULL(listener);
-  http_listener_ = listener;
-}
-
 void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
-  if (cntx->protocol() == Protocol::REDIS)
+  if (cntx->protocol() == facade::Protocol::REDIS)
     (*cntx)->SendOk();
+  using facade::SinkReplyBuilder;
 
   SinkReplyBuilder* builder = static_cast<SinkReplyBuilder*>(cntx->reply_builder());
   builder->CloseConnection();
@@ -615,7 +639,7 @@ void Service::Multi(CmdArgList args, ConnectionContext* cntx) {
 void Service::CallFromScript(CmdArgList args, ObjectExplorer* reply, ConnectionContext* cntx) {
   DCHECK(cntx->transaction);
   InterpreterReplier replier(reply);
-  ReplyBuilderInterface* orig = cntx->Inject(&replier);
+  facade::ReplyBuilderInterface* orig = cntx->Inject(&replier);
 
   DispatchCommand(std::move(args), cntx);
 
@@ -670,7 +694,7 @@ void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
   if (!exists) {
     const char* body = (sha.size() == 40) ? server_family_.script_mgr()->Find(sha) : nullptr;
     if (!body) {
-      return (*cntx)->SendError(kScriptNotFound);
+      return (*cntx)->SendError(facade::kScriptNotFound);
     }
 
     string res;
@@ -692,7 +716,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
 
   // Sanitizing the input to avoid code injection.
   if (eval_args.sha.size() != 40 || !IsSHA(eval_args.sha)) {
-    return (*cntx)->SendError(kScriptNotFound);
+    return (*cntx)->SendError(facade::kScriptNotFound);
   }
 
   bool exists = interpreter->Exists(eval_args.sha);
@@ -700,7 +724,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   if (!exists) {
     const char* body = server_family_.script_mgr()->Find(eval_args.sha);
     if (!body) {
-      return (*cntx)->SendError(kScriptNotFound);
+      return (*cntx)->SendError(facade::kScriptNotFound);
     }
 
     string res;

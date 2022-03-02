@@ -20,6 +20,7 @@ extern "C" {
 namespace dfly {
 
 using namespace std;
+
 using ResultStringVec = vector<OpResult<vector<string>>>;
 using ResultSetView = OpResult<absl::flat_hash_set<std::string_view>>;
 using SvArray = vector<std::string_view>;

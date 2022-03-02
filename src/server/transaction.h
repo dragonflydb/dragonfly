@@ -13,8 +13,8 @@
 #include <vector>
 
 #include "core/intent_lock.h"
-#include "core/op_status.h"
 #include "core/tx_queue.h"
+#include "facade/op_status.h"
 #include "server/common_types.h"
 #include "server/table.h"
 #include "util/fibers/fibers_ext.h"
@@ -24,6 +24,9 @@ namespace dfly {
 class DbSlice;
 class EngineShardSet;
 class EngineShard;
+
+using facade::OpStatus;
+using facade::OpResult;
 
 class Transaction {
   Transaction(const Transaction&);
@@ -48,7 +51,7 @@ class Transaction {
   using time_point = ::std::chrono::steady_clock::time_point;
 
   enum LocalMask : uint16_t {
-    ARMED = 1,        // Transaction was armed with the callback
+    ARMED = 1,  // Transaction was armed with the callback
     OUT_OF_ORDER = 2,
     KEYLOCK_ACQUIRED = 4,
     SUSPENDED_Q = 0x10,  // added by the coordination flow (via WaitBlocked()).

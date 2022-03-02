@@ -1,4 +1,4 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -20,6 +20,7 @@ DEFINE_uint32(dbnum, 16, "Number of databases");
 
 namespace dfly {
 using namespace std;
+using facade::Protocol;
 
 namespace {
 
@@ -177,6 +178,7 @@ void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
 
   uint32_t del_cnt = result.load(memory_order_relaxed);
   if (is_mc) {
+    using facade::MCReplyBuilder;
     MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
 
     if (del_cnt == 0) {

@@ -5,9 +5,9 @@
 
 #include <absl/container/inlined_vector.h>
 
-#include "core/resp_expr.h"
+#include "facade/resp_expr.h"
 
-namespace dfly {
+namespace facade {
 
 /**
  * @brief Zero-copy (best-effort) parser.
@@ -15,14 +15,7 @@ namespace dfly {
  */
 class RedisParser {
  public:
-  enum Result {
-    OK,
-    INPUT_PENDING,
-    BAD_ARRAYLEN,
-    BAD_BULKLEN,
-    BAD_STRING,
-    BAD_INT
-  };
+  enum Result { OK, INPUT_PENDING, BAD_ARRAYLEN, BAD_BULKLEN, BAD_STRING, BAD_INT };
   using Buffer = RespExpr::Buffer;
 
   explicit RedisParser(bool server_mode = true) : server_mode_(server_mode) {
@@ -51,8 +44,12 @@ class RedisParser {
     return bulk_len_;
   }
 
-  size_t stash_size() const { return stash_.size(); }
-  const std::vector<std::unique_ptr<RespVec>>& stash() const { return stash_;}
+  size_t stash_size() const {
+    return stash_.size();
+  }
+  const std::vector<std::unique_ptr<RespVec>>& stash() const {
+    return stash_;
+  }
 
  private:
   void InitStart(uint8_t prefix_b, RespVec* res);
@@ -97,4 +94,4 @@ class RedisParser {
   bool server_mode_ = true;
 };
 
-}  // namespace dfly
+}  // namespace facade

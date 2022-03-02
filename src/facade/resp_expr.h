@@ -10,7 +10,7 @@
 #include <variant>
 #include <vector>
 
-namespace dfly {
+namespace facade {
 
 class RespExpr {
  public:
@@ -31,7 +31,9 @@ class RespExpr {
     return Buffer{reinterpret_cast<uint8_t*>(s->data()), s->size()};
   }
 
-  Buffer GetBuf() const { return std::get<Buffer>(u); }
+  Buffer GetBuf() const {
+    return std::get<Buffer>(u);
+  }
 
   static const char* TypeName(Type t);
 };
@@ -43,11 +45,11 @@ inline std::string_view ToSV(const absl::Span<uint8_t>& s) {
   return std::string_view{reinterpret_cast<char*>(s.data()), s.size()};
 }
 
-}  // namespace dfly
+}  // namespace facade
 
 namespace std {
 
-ostream& operator<<(ostream& os, const dfly::RespExpr& e);
-ostream& operator<<(ostream& os, dfly::RespSpan rspan);
+ostream& operator<<(ostream& os, const facade::RespExpr& e);
+ostream& operator<<(ostream& os, facade::RespSpan rspan);
 
 }  // namespace std

@@ -8,7 +8,7 @@
 #include <absl/container/flat_hash_set.h>
 
 #include "core/intent_lock.h"
-#include "core/op_status.h"
+#include "facade/op_status.h"
 #include "server/common_types.h"
 #include "server/table.h"
 
@@ -17,6 +17,8 @@ class ProactorBase;
 }
 
 namespace dfly {
+
+using facade::OpResult;
 
 struct DbStats {
   // number of active keys.

@@ -1,4 +1,4 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -6,7 +6,7 @@
 
 #include <ostream>
 
-namespace dfly {
+namespace facade {
 
 enum class OpStatus : uint16_t {
   OK,
@@ -84,16 +84,16 @@ inline bool operator==(OpStatus st, const OpResultBase& ob) {
   return ob.operator==(st);
 }
 
-}  // namespace dfly
+}  // namespace facade
 
 namespace std {
 
-template <typename T> std::ostream& operator<<(std::ostream& os, const dfly::OpResult<T>& res) {
+template <typename T> std::ostream& operator<<(std::ostream& os, const facade::OpResult<T>& res) {
   os << int(res.status());
   return os;
 }
 
-inline std::ostream& operator<<(std::ostream& os, const dfly::OpStatus op) {
+inline std::ostream& operator<<(std::ostream& os, const facade::OpStatus op) {
   os << int(op);
   return os;
 }

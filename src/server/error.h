@@ -7,19 +7,15 @@
 #include <atomic>
 #include <string>
 
+#include "facade/error.h"
+
 namespace dfly {
 
-std::string WrongNumArgsError(std::string_view cmd);
-
-extern const char kSyntaxErr[];
-extern const char kWrongTypeErr[];
-extern const char kKeyNotFoundErr[];
-extern const char kInvalidIntErr[];
-extern const char kUintErr[];
-extern const char kDbIndOutOfRangeErr[];
-extern const char kInvalidDbIndErr[];
-extern const char kScriptNotFound[];
-extern const char kAuthRejected[];
+using facade::kWrongTypeErr;
+using facade::kInvalidIntErr;
+using facade::kSyntaxErr;
+using facade::kInvalidDbIndErr;
+using facade::kDbIndOutOfRangeErr;
 
 #ifndef RETURN_ON_ERR
 

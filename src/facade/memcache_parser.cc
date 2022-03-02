@@ -1,7 +1,7 @@
 // Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
-#include "server/memcache_parser.h"
+#include "facade/memcache_parser.h"
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/ascii.h>
@@ -9,7 +9,7 @@
 
 #include "base/stl_util.h"
 
-namespace dfly {
+namespace facade {
 using namespace std;
 using MP = MemcacheParser;
 

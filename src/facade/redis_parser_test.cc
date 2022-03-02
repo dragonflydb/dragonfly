@@ -2,12 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/redis_parser.h"
-
-extern "C" {
- #include "redis/sds.h"
- #include "redis/zmalloc.h"
-}
+#include "facade/redis_parser.h"
 
 #include <absl/strings/str_cat.h>
 #include <gmock/gmock.h>
@@ -15,11 +10,11 @@ extern "C" {
 #include "absl/strings/str_cat.h"
 #include "base/gtest.h"
 #include "base/logging.h"
-#include "server/test_utils.h"
+#include "facade/facade_test.h"
 
 using namespace testing;
 using namespace std;
-namespace dfly {
+namespace facade {
 
 MATCHER_P(ArrArg, expected, absl::StrCat(negation ? "is not" : "is", " equal to:\n", expected)) {
   if (arg.type != RespExpr::ARRAY) {
@@ -39,7 +34,6 @@ MATCHER_P(ArrArg, expected, absl::StrCat(negation ? "is not" : "is", " equal to:
 class RedisParserTest : public testing::Test {
  protected:
   static void SetUpTestSuite() {
-    init_zmalloc_threadlocal();
   }
 
   RedisParser::Result Parse(std::string_view str);
@@ -91,31 +85,8 @@ TEST_F(RedisParserTest, Inline) {
   EXPECT_EQ(2, consumed_);
 }
 
-TEST_F(RedisParserTest, Sds) {
-  int argc;
-  sds* argv = sdssplitargs("\r\n",&argc);
-  EXPECT_EQ(0, argc);
-  sdsfreesplitres(argv,argc);
-
-  argv = sdssplitargs("\026 \020 \200 \277 \r\n",&argc);
-  EXPECT_EQ(4, argc);
-  EXPECT_STREQ("\026", argv[0]);
-  sdsfreesplitres(argv,argc);
-
-  argv = sdssplitargs(R"(abc "oops\n" )""\r\n",&argc);
-  EXPECT_EQ(2, argc);
-  EXPECT_STREQ("oops\n", argv[1]);
-  sdsfreesplitres(argv,argc);
-
-  argv = sdssplitargs(R"( "abc\xf0" )" "\t'oops\n'  \r\n",&argc);
-  ASSERT_EQ(2, argc);
-  EXPECT_STREQ("abc\xf0", argv[0]);
-  EXPECT_STREQ("oops\n", argv[1]);
-  sdsfreesplitres(argv,argc);
-}
-
 TEST_F(RedisParserTest, InlineEscaping) {
-  LOG(ERROR)  << "TBD: to be compliant with sdssplitargs";  // TODO:
+  LOG(ERROR) << "TBD: to be compliant with sdssplitargs";  // TODO:
 }
 
 TEST_F(RedisParserTest, Multi1) {
@@ -217,4 +188,4 @@ TEST_F(RedisParserTest, LargeBulk) {
   ASSERT_EQ(RedisParser::OK, Parse("\r\n"));
 }
 
-}  // namespace dfly
+}  // namespace facade

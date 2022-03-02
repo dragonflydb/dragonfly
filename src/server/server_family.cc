@@ -46,6 +46,7 @@ using namespace util;
 namespace fibers = ::boost::fibers;
 namespace fs = std::filesystem;
 using strings::HumanReadableNumBytes;
+using facade::MCReplyBuilder;
 
 namespace {
 
@@ -97,7 +98,7 @@ void ServerFamily::Shutdown() {
   });
 }
 
-void ServerFamily::StatsMC(std::string_view section, ConnectionContext* cntx) {
+void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* cntx) {
   if (!section.empty()) {
     return cntx->reply_builder()->SendError("");
   }
@@ -200,7 +201,7 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError("ACL is not supported yet");
   }
 
-  if (!(cntx->conn_state.mask & ConnectionState::REQ_AUTH)) {
+  if (!cntx->req_auth) {
     return (*cntx)->SendError(
         "AUTH <password> called without any password configured for the "
         "default user. Are you sure your configuration is correct?");
@@ -208,10 +209,10 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
 
   string_view pass = ArgS(args, 1);
   if (pass == FLAGS_requirepass) {
-    cntx->conn_state.mask |= ConnectionState::AUTHENTICATED;
+    cntx->authenticated = true;
     (*cntx)->SendOk();
   } else {
-    (*cntx)->SendError(kAuthRejected);
+    (*cntx)->SendError(facade::kAuthRejected);
   }
 }
 
@@ -544,14 +545,14 @@ void ServerFamily::_Shutdown(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::SyncGeneric(std::string_view repl_master_id, uint64_t offs,
                                ConnectionContext* cntx) {
-  if (cntx->conn_state.mask & ConnectionState::ASYNC_DISPATCH) {
+  if (cntx->async_dispatch) {
     // SYNC is a special command that should not be sent in batch with other commands.
     // It should be the last command since afterwards the server just dumps the replication data.
     (*cntx)->SendError("Can not sync in pipeline mode");
     return;
   }
 
-  cntx->conn_state.mask |= ConnectionState::REPL_CONNECTION;
+  cntx->replica_conn = true;
   ServerState::tl_connection_stats()->num_replicas += 1;
   // TBD.
 }

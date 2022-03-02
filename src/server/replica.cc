@@ -14,10 +14,10 @@ extern "C" {
 #include <boost/asio/ip/tcp.hpp>
 
 #include "base/logging.h"
+#include "facade/redis_parser.h"
 #include "server/error.h"
 #include "server/main_service.h"
 #include "server/rdb_load.h"
-#include "server/redis_parser.h"
 #include "util/proactor_base.h"
 
 namespace dfly {
@@ -25,6 +25,7 @@ namespace dfly {
 using namespace std;
 using namespace util;
 using namespace boost::asio;
+using namespace facade;
 namespace this_fiber = ::boost::this_fiber;
 
 namespace {
@@ -73,7 +74,6 @@ error_code Recv(FiberSocketBase* input, base::IoBuf* dest) {
 
   return error_code{};
 }
-
 
 // TODO: to remove usages of this macro and make code crash-less.
 #define CHECK_EC(x)                                                                 \

@@ -24,6 +24,7 @@ using namespace std;
 using base::IoBuf;
 using io::Bytes;
 using nonstd::make_unexpected;
+using facade::operator""_KB;
 
 namespace {
 

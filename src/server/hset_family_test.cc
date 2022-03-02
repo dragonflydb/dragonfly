@@ -7,11 +7,13 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "server/test_utils.h"
+#include "facade/facade_test.h"
 
 using namespace testing;
 using namespace std;
 using namespace util;
 using namespace boost;
+using namespace facade;
 
 namespace dfly {
 

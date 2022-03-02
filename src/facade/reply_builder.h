@@ -4,10 +4,10 @@
 #include <optional>
 #include <string_view>
 
-#include "core/op_status.h"
+#include "facade/op_status.h"
 #include "io/sync_stream_interface.h"
 
-namespace dfly {
+namespace facade {
 
 class ReplyBuilderInterface {
  public:

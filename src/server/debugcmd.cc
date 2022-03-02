@@ -25,6 +25,7 @@ using namespace std;
 using namespace util;
 namespace this_fiber = ::boost::this_fiber;
 using boost::fibers::fiber;
+using facade::kUintErr;
 namespace fs = std::filesystem;
 
 struct PopulateBatch {

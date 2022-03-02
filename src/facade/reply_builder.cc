@@ -1,18 +1,18 @@
 // Copyright 2021, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
-#include "server/reply_builder.h"
+#include "facade/reply_builder.h"
 
 #include <absl/strings/numbers.h>
 #include <absl/strings/str_cat.h>
 
 #include "base/logging.h"
-#include "server/error.h"
+#include "facade/error.h"
 
 using namespace std;
 using absl::StrAppend;
 
-namespace dfly {
+namespace facade {
 
 namespace {
 

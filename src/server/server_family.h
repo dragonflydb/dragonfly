@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "facade/conn_context.h"
+#include "facade/redis_parser.h"
 #include "server/engine_shard_set.h"
 #include "server/global_state.h"
 #include "util/proactor_pool.h"
@@ -28,7 +30,7 @@ struct Metrics {
   size_t heap_used_bytes = 0;
   size_t heap_comitted_bytes = 0;
 
-  ConnectionStats conn_stats;
+  facade::ConnectionStats conn_stats;
 };
 
 class ServerFamily {
@@ -50,7 +52,7 @@ class ServerFamily {
     return script_mgr_.get();
   }
 
-  void StatsMC(std::string_view section, ConnectionContext* cntx);
+  void StatsMC(std::string_view section, facade::ConnectionContext* cntx);
 
  private:
   uint32_t shard_count() const {

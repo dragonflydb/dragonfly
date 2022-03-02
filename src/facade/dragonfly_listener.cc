@@ -1,14 +1,13 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
-#include "server/dragonfly_listener.h"
+#include "facade/dragonfly_listener.h"
 
 #include <openssl/ssl.h>
 
 #include "base/logging.h"
-#include "server/config_flags.h"
-#include "server/dragonfly_connection.h"
+#include "facade/dragonfly_connection.h"
 #include "util/proactor_pool.h"
 
 DEFINE_uint32(conn_threads, 0, "Number of threads used for handing server connections");
@@ -17,16 +16,17 @@ DEFINE_bool(conn_use_incoming_cpu, false,
             "If true uses incoming cpu of a socket in order to distribute"
             " incoming connections");
 
-CONFIG_string(tls_client_cert_file, "", "", TrueValidator);
-CONFIG_string(tls_client_key_file, "", "", TrueValidator);
+DEFINE_string(tls_client_cert_file, "", "cert file for tls connections");
+DEFINE_string(tls_client_key_file, "", "key file for tls connections");
 
+#if 0
 enum TlsClientAuth {
   CL_AUTH_NO = 0,
   CL_AUTH_YES = 1,
   CL_AUTH_OPTIONAL = 2,
 };
 
-dfly::ConfigEnum tls_auth_clients_enum[] = {
+facade::ConfigEnum tls_auth_clients_enum[] = {
     {"no", CL_AUTH_NO},
     {"yes", CL_AUTH_YES},
     {"optional", CL_AUTH_OPTIONAL},
@@ -35,8 +35,9 @@ dfly::ConfigEnum tls_auth_clients_enum[] = {
 static int tls_auth_clients_opt = CL_AUTH_YES;
 
 CONFIG_enum(tls_auth_clients, "yes", "", tls_auth_clients_enum, tls_auth_clients_opt);
+#endif
 
-namespace dfly {
+namespace facade {
 
 using namespace util;
 using namespace std;
@@ -85,11 +86,14 @@ static SSL_CTX* CreateSslCntx() {
   return ctx;
 }
 
-Listener::Listener(Protocol protocol, Service* e) : engine_(e), protocol_(protocol) {
+Listener::Listener(Protocol protocol, ServiceInterface* e) : service_(e), protocol_(protocol) {
   if (FLAGS_tls) {
     OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, NULL);
     ctx_ = CreateSslCntx();
   }
+  http_base_.reset(new HttpListener<>);
+
+  http_base_->enable_metrics();
 }
 
 Listener::~Listener() {
@@ -97,7 +101,7 @@ Listener::~Listener() {
 }
 
 util::Connection* Listener::NewConnection(ProactorBase* proactor) {
-  return new Connection{protocol_, engine_, ctx_};
+  return new Connection{protocol_, http_base_.get(), ctx_, service_};
 }
 
 void Listener::PreShutdown() {
@@ -139,4 +143,4 @@ ProactorBase* Listener::PickConnectionProactor(LinuxSocketBase* sock) {
   return pp->at(id % total);
 }
 
-}  // namespace dfly
+}  // namespace facade

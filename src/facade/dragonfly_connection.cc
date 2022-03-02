@@ -2,7 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/dragonfly_connection.h"
+#include "facade/dragonfly_connection.h"
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/match.h>
@@ -11,13 +11,11 @@
 #include <boost/fiber/operations.hpp>
 
 #include "base/logging.h"
-#include "server/command_registry.h"
-#include "server/conn_context.h"
-#include "server/main_service.h"
-#include "server/memcache_parser.h"
-#include "server/redis_parser.h"
-#include "server/server_state.h"
-#include "server/transaction.h"
+
+#include "facade/conn_context.h"
+#include "facade/memcache_parser.h"
+#include "facade/redis_parser.h"
+#include "facade/service_interface.h"
 #include "util/fiber_sched_algo.h"
 #include "util/tls/tls_socket.h"
 #include "util/uring/uring_socket.h"
@@ -30,7 +28,7 @@ using nonstd::make_unexpected;
 namespace this_fiber = boost::this_fiber;
 namespace fibers = boost::fibers;
 
-namespace dfly {
+namespace facade {
 namespace {
 
 void SendProtocolError(RedisParser::Result pres, FiberSocketBase* peer) {
@@ -94,8 +92,9 @@ struct Connection::Request {
   Request(const Request&) = delete;
 };
 
-Connection::Connection(Protocol protocol, Service* service, SSL_CTX* ctx)
-    : io_buf_{kMinReadSize}, service_(service), ctx_(ctx) {
+Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
+                       ServiceInterface* service)
+    : io_buf_(kMinReadSize), http_listener_(http_listener), ctx_(ctx), service_(service) {
   protocol_ = protocol;
 
   switch (protocol) {
@@ -167,7 +166,7 @@ void Connection::HandleRequests() {
   if (http_res) {
     if (*http_res) {
       VLOG(1) << "HTTP1.1 identified";
-      HttpConnection http_conn{service_->http_listener()};
+      HttpConnection http_conn{http_listener_};
       http_conn.SetSocket(peer);
       auto ec = http_conn.ParseFromBuffer(io_buf_.InputBuffer());
       io_buf_.ConsumeInput(io_buf_.InputLen());
@@ -176,36 +175,37 @@ void Connection::HandleRequests() {
       }
       http_conn.ReleaseSocket();
     } else {
-      cc_.reset(new ConnectionContext(peer, this));
-      cc_->shard_set = &service_->shard_set();
+      cc_.reset(service_->CreateContext(peer, this));
 
-      if (service_->IsPassProtected())
-        cc_->conn_state.mask |= ConnectionState::REQ_AUTH;
-
+      bool should_disarm_poller = false;
       // TODO: to move this interface to LinuxSocketBase so we won't need to cast.
       uring::UringSocket* us = static_cast<uring::UringSocket*>(socket_.get());
+      uint32_t poll_id = 0;
+      if (breaker_cb_) {
+        should_disarm_poller = true;
 
-      bool poll_armed = true;
-      uint32_t poll_id = us->PollEvent(POLLERR | POLLHUP, [&](uint32_t mask) {
-        VLOG(1) << "Got event " << mask;
-        cc_->conn_state.mask |= ConnectionState::CONN_CLOSING;
-        if (cc_->transaction) {
-          cc_->transaction->BreakOnClose();
-        }
-
-        evc_.notify();  // Notify dispatch fiber.
-        poll_armed = false;
-      });
+        poll_id = us->PollEvent(POLLERR | POLLHUP, [&](uint32_t mask) {
+          VLOG(1) << "Got event " << mask;
+          cc_->conn_closing = true;
+          breaker_cb_(mask);
+          evc_.notify();  // Notify dispatch fiber.
+          should_disarm_poller = false;
+        });
+      }
 
       ConnectionFlow(peer);
 
-      if (poll_armed) {
+      if (should_disarm_poller) {
         us->CancelPoll(poll_id);
       }
     }
   }
 
   VLOG(1) << "Closed connection for peer " << remote_ep;
+}
+
+void Connection::RegisterOnBreak(BreakerCb breaker_cb) {
+  breaker_cb_ = breaker_cb;
 }
 
 io::Result<bool> Connection::CheckForHttpProto(util::FiberSocketBase* peer) {
@@ -235,7 +235,7 @@ io::Result<bool> Connection::CheckForHttpProto(util::FiberSocketBase* peer) {
 
 void Connection::ConnectionFlow(FiberSocketBase* peer) {
   auto dispatch_fb = fibers::fiber(fibers::launch::dispatch, [&] { DispatchFiber(peer); });
-  ConnectionStats* stats = ServerState::tl_connection_stats();
+  ConnectionStats* stats = service_->GetThreadLocalConnectionStats();
   stats->num_conns++;
   stats->read_buf_capacity += io_buf_.Capacity();
 
@@ -265,14 +265,14 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
     }
   }
 
-  cc_->conn_state.mask |= ConnectionState::CONN_CLOSING;  // Signal dispatch to close.
+  cc_->conn_closing = true;  // Signal dispatch to close.
   evc_.notify();
   dispatch_fb.join();
 
   stats->read_buf_capacity -= io_buf_.Capacity();
 
   // Update num_replicas if this was a replica connection.
-  if (cc_->conn_state.mask & ConnectionState::REPL_CONNECTION) {
+  if (cc_->replica_conn) {
     --stats->num_replicas;
   }
 
@@ -321,7 +321,7 @@ auto Connection::ParseRedis() -> ParserStatus {
       // We use ASYNC_DISPATCH as a lock to avoid out-of-order replies when the
       // dispatch fiber pulls the last record but is still processing the command and then this
       // fiber enters the condition below and executes out of order.
-      bool is_sync_dispatch = !cc_->conn_state.IsRunViaDispatch();
+      bool is_sync_dispatch = !cc_->async_dispatch;
       if (dispatch_q_.empty() && is_sync_dispatch && consumed >= io_buf_.InputLen()) {
         RespToArgList(args, &arg_vec);
         service_->DispatchCommand(CmdArgList{arg_vec.data(), arg_vec.size()}, cc_.get());
@@ -382,7 +382,7 @@ auto Connection::ParseMemcache() -> ParserStatus {
     // We use ASYNC_DISPATCH as a lock to avoid out-of-order replies when the
     // dispatch fiber pulls the last record but is still processing the command and then this
     // fiber enters the condition below and executes out of order.
-    bool is_sync_dispatch = (cc_->conn_state.mask & ConnectionState::ASYNC_DISPATCH) == 0;
+    bool is_sync_dispatch = !cc_->async_dispatch;
     if (dispatch_q_.empty() && is_sync_dispatch) {
       service_->DispatchMC(cmd, value, cc_.get());
     }
@@ -408,7 +408,7 @@ auto Connection::ParseMemcache() -> ParserStatus {
 
 auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, ParserStatus> {
   SinkReplyBuilder* builder = static_cast<SinkReplyBuilder*>(cc_->reply_builder());
-  ConnectionStats* stats = ServerState::tl_connection_stats();
+  ConnectionStats* stats = service_->GetThreadLocalConnectionStats();
   error_code ec;
   ParserStatus parse_status = OK;
 
@@ -484,12 +484,12 @@ auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, Pars
 void Connection::DispatchFiber(util::FiberSocketBase* peer) {
   this_fiber::properties<FiberProps>().set_name("DispatchFiber");
 
-  ConnectionStats* stats = ServerState::tl_connection_stats();
+  ConnectionStats* stats = service_->GetThreadLocalConnectionStats();
   SinkReplyBuilder* builder = static_cast<SinkReplyBuilder*>(cc_->reply_builder());
 
   while (!builder->GetError()) {
-    evc_.await([this] { return cc_->conn_state.IsClosing() || !dispatch_q_.empty(); });
-    if (cc_->conn_state.IsClosing())
+    evc_.await([this] { return cc_->conn_closing || !dispatch_q_.empty(); });
+    if (cc_->conn_closing)
       break;  // TODO: We have a memory leak with pending requests in the queue.
 
     Request* req = dispatch_q_.front();
@@ -498,14 +498,14 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     ++stats->pipelined_cmd_cnt;
 
     builder->SetBatchMode(!dispatch_q_.empty());
-    cc_->conn_state.mask |= ConnectionState::ASYNC_DISPATCH;
+    cc_->async_dispatch = true;
     service_->DispatchCommand(CmdArgList{req->args.data(), req->args.size()}, cc_.get());
-    cc_->conn_state.mask &= ~ConnectionState::ASYNC_DISPATCH;
+    cc_->async_dispatch = false;
     req->~Request();
     mi_free(req);
   }
 
-  cc_->conn_state.mask |= ConnectionState::CONN_CLOSING;
+  cc_->conn_closing = true;
 }
 
 auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> Request* {
@@ -536,4 +536,4 @@ auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> Request* {
   return req;
 }
 
-}  // namespace dfly
+}  // namespace facade

@@ -4,18 +4,19 @@
 
 #pragma once
 
+#include "facade/facade_types.h"
+#include "util/http/http_handler.h"
 #include "util/listener_interface.h"
-#include "server/common_types.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
 
-namespace dfly {
+namespace facade {
 
-class Service;
+class ServiceInterface;
 
 class Listener : public util::ListenerInterface {
  public:
-  Listener(Protocol protocol, Service*);
+  Listener(Protocol protocol, ServiceInterface*);
   ~Listener();
 
  private:
@@ -26,11 +27,13 @@ class Listener : public util::ListenerInterface {
 
   void PostShutdown();
 
-  Service* engine_;
+  std::unique_ptr<util::HttpListenerBase> http_base_;
+
+  ServiceInterface* service_;
 
   std::atomic_uint32_t next_id_{0};
   Protocol protocol_;
   SSL_CTX* ctx_ = nullptr;
 };
 
-}  // namespace dfly
+}  // namespace facade

@@ -12,6 +12,8 @@ namespace dfly {
 
 class ConnectionContext;
 class CommandRegistry;
+using facade::OpStatus;
+using facade::OpResult;
 
 class SetCmd {
   DbSlice* db_slice_;

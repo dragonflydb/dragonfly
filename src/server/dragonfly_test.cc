@@ -2,6 +2,11 @@
 // See LICENSE for licensing terms.
 //
 
+extern "C" {
+#include "redis/sds.h"
+#include "redis/zmalloc.h"
+}
+
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/strip.h>
@@ -9,9 +14,9 @@
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "facade/facade_test.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
-#include "server/redis_parser.h"
 #include "server/test_utils.h"
 #include "util/uring/uring_pool.h"
 
@@ -43,7 +48,40 @@ class DflyEngineTest : public BaseFamilyTest {
   DflyEngineTest() : BaseFamilyTest() {
     num_threads_ = kPoolThreadCount;
   }
+
+  static void SetUpTestSuite() {
+    init_zmalloc_threadlocal();
+  }
+
 };
+
+// TODO: to implement equivalent parsing in redis parser.
+TEST_F(DflyEngineTest, Sds) {
+  int argc;
+  sds* argv = sdssplitargs("\r\n", &argc);
+  EXPECT_EQ(0, argc);
+  sdsfreesplitres(argv, argc);
+
+  argv = sdssplitargs("\026 \020 \200 \277 \r\n", &argc);
+  EXPECT_EQ(4, argc);
+  EXPECT_STREQ("\026", argv[0]);
+  sdsfreesplitres(argv, argc);
+
+  argv = sdssplitargs(R"(abc "oops\n" )"
+                      "\r\n",
+                      &argc);
+  EXPECT_EQ(2, argc);
+  EXPECT_STREQ("oops\n", argv[1]);
+  sdsfreesplitres(argv, argc);
+
+  argv = sdssplitargs(R"( "abc\xf0" )"
+                      "\t'oops\n'  \r\n",
+                      &argc);
+  ASSERT_EQ(2, argc);
+  EXPECT_STREQ("abc\xf0", argv[0]);
+  EXPECT_STREQ("oops\n", argv[1]);
+  sdsfreesplitres(argv, argc);
+}
 
 TEST_F(DflyEngineTest, Multi) {
   RespVec resp = Run({"multi"});

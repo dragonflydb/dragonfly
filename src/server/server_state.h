@@ -28,7 +28,7 @@ class ServerState {  // public struct - to allow initialization.
     return &state_;
   }
 
-  static ConnectionStats* tl_connection_stats() {
+  static facade::ConnectionStats* tl_connection_stats() {
     return &state_.connection_stats;
   }
 
@@ -40,7 +40,7 @@ class ServerState {  // public struct - to allow initialization.
 
   bool is_master = true;
 
-  ConnectionStats connection_stats;
+  facade::ConnectionStats connection_stats;
 
   void TxCountInc() {
     ++live_transactions_;

@@ -2,30 +2,28 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/memcache_parser.h"
+#include "facade/memcache_parser.h"
 
 #include <gmock/gmock.h>
 
 #include "absl/strings/str_cat.h"
 #include "base/gtest.h"
 #include "base/logging.h"
-#include "server/test_utils.h"
+#include "facade/facade_test.h"
 
 using namespace testing;
 using namespace std;
-namespace dfly {
+
+namespace facade {
 
 class MCParserTest : public testing::Test {
  protected:
-  RedisParser::Result Parse(std::string_view str);
-
   MemcacheParser parser_;
   MemcacheParser::Command cmd_;
   uint32_t consumed_;
 
   unique_ptr<uint8_t[]> stash_;
 };
-
 
 TEST_F(MCParserTest, Basic) {
   MemcacheParser::Result st = parser_.Parse("set a 1 20 3\r\n", &consumed_, &cmd_);
@@ -80,4 +78,4 @@ TEST_F(MCParserTest, Stats) {
   EXPECT_EQ(MemcacheParser::PARSE_ERROR, st);
 }
 
-}  // namespace dfly
+}  // namespace facade

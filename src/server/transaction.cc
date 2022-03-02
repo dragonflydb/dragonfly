@@ -306,6 +306,7 @@ void Transaction::SetExecCmd(const CommandId* cid) {
   }
 
   unique_shard_cnt_ = 0;
+  args_.clear();
   cid_ = cid;
   cb_ = nullptr;
 }

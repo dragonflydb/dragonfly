@@ -10,24 +10,26 @@
 #include <variant>
 
 #include "base/io_buf.h"
-#include "core/resp_expr.h"
-#include "server/common_types.h"
+#include "facade/facade_types.h"
+#include "facade/resp_expr.h"
 #include "util/connection.h"
 #include "util/fibers/event_count.h"
+#include "util/http/http_handler.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
 typedef struct mi_heap_s mi_heap_t;
 
-namespace dfly {
+namespace facade {
 
 class ConnectionContext;
 class RedisParser;
-class Service;
+class ServiceInterface;
 class MemcacheParser;
 
 class Connection : public util::Connection {
  public:
-  Connection(Protocol protocol, Service* service, SSL_CTX* ctx);
+  Connection(Protocol protocol, util::HttpListenerBase* http_listener,
+             SSL_CTX* ctx, ServiceInterface* service);
   ~Connection();
 
   using error_code = std::error_code;
@@ -40,6 +42,9 @@ class Connection : public util::Connection {
   Protocol protocol() const {
     return protocol_;
   }
+
+  using BreakerCb = std::function<void(uint32_t)>;
+  void RegisterOnBreak(BreakerCb breaker_cb);
 
  protected:
   void OnShutdown() override;
@@ -63,8 +68,10 @@ class Connection : public util::Connection {
   base::IoBuf io_buf_;
   std::unique_ptr<RedisParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
-  Service* service_;
+  util::HttpListenerBase* http_listener_;
   SSL_CTX* ctx_;
+  ServiceInterface* service_;
+
   std::unique_ptr<ConnectionContext> cc_;
 
   struct Request;
@@ -77,6 +84,7 @@ class Connection : public util::Connection {
   Protocol protocol_;
   struct Shutdown;
   std::unique_ptr<Shutdown> shutdown_;
+  BreakerCb breaker_cb_;
 };
 
-}  // namespace dfly
+}  // namespace facade

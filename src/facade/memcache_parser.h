@@ -7,7 +7,7 @@
 #include <string_view>
 #include <vector>
 
-namespace dfly {
+namespace facade {
 
 // Memcache parser does not parse value blobs, only the commands.
 // The expectation is that the caller will parse the command and
