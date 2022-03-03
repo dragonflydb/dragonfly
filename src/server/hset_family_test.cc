@@ -21,18 +21,36 @@ class HSetFamilyTest : public BaseFamilyTest {
  protected:
 };
 
-TEST_F(HSetFamilyTest, HSet) {
+TEST_F(HSetFamilyTest, Basic) {
   auto resp = Run({"hset", "x", "a"});
   EXPECT_THAT(resp[0],  ErrArg("wrong number"));
 
   resp = Run({"hset", "x", "a", "b"});
   EXPECT_THAT(resp[0],  IntArg(1));
+  resp = Run({"hlen", "x"});
+  EXPECT_THAT(resp[0],  IntArg(1));
+
+  resp = Run({"hexists", "x", "a"});
+  EXPECT_THAT(resp[0],  IntArg(1));
+
+  resp = Run({"hexists", "x", "b"});
+  EXPECT_THAT(resp[0],  IntArg(0));
+
+  resp = Run({"hexists", "y", "a"});
+  EXPECT_THAT(resp[0],  IntArg(0));
+
   resp = Run({"hset", "x", "a", "b"});
   EXPECT_THAT(resp[0],  IntArg(0));
+
   resp = Run({"hset", "x", "a", "c"});
   EXPECT_THAT(resp[0],  IntArg(0));
+
   resp = Run({"hset", "y", "a", "c", "d", "e"});
   EXPECT_THAT(resp[0],  IntArg(2));
+
+  resp = Run({"hdel", "y", "a", "d"});
+  EXPECT_THAT(resp[0],  IntArg(2));
+
 }
 
 }  // namespace dfly

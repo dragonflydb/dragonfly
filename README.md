@@ -2,12 +2,16 @@
 
 [![ci-tests](https://github.com/romange/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/romange/dragonfly/actions/workflows/ci.yml)
 
-A toy memory store that supports basic commands like `SET` and `GET` for both memcached and redis protocols. In addition, it supports redis `PING` command.
+A novel memory store that supports Redis and Memcached commands.
+For more detailed status of what's implemented - see below.
 
-Demo features include:
+Features include:
 1. High throughput reaching millions of QPS on a single node.
 2. TLS support.
 3. Pipelining mode.
+4. A novel cache design, which does not require specifying eviction policies.
+5. Memory efficiency that can save 20-40% for regular workloads and even more for cache like
+   workloads
 
 ## Building from source
 I've tested the build on Ubuntu 21.04+.
@@ -142,6 +146,15 @@ API 2.0
   - [X] BLPOP
   - [ ] BRPOP
   - [ ] BRPOPLPUSH
+- [X] HashSet Family
+  - [X] HSET
+  - [X] HDEL
+  - [X] HEXISTS
+  - [X] HGET
+  - [X] HLEN
+  - [ ] HINCRBY
+  - [ ] HINCRBYFLOAT
+  - [ ] HGETALL
 - [ ] PubSub family
   - [ ] PUBLISH
   - [ ] PUBSUB

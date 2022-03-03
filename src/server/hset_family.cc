@@ -36,15 +36,81 @@ bool IsGoodForListpack(CmdArgList args, const uint8_t* lp) {
 }  // namespace
 
 void HSetFamily::HDel(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+
+  args.remove_prefix(2);
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpHDel(OpArgs{shard, t->db_index()}, key, args);
+  };
+
+  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (result) {
+    (*cntx)->SendLong(*result);
+  } else {
+    (*cntx)->SendError(result.status());
+  }
 }
 
 void HSetFamily::HLen(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpHLen(OpArgs{shard, t->db_index()}, key);
+  };
+
+  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (result) {
+    (*cntx)->SendLong(*result);
+  } else {
+    (*cntx)->SendError(result.status());
+  }
 }
 
 void HSetFamily::HExists(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view field = ArgS(args, 2);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<int> {
+    auto& db_slice = shard->db_slice();
+    auto it_res = db_slice.Find(t->db_index(), key, OBJ_HASH);
+
+    if (it_res) {
+      robj* hset = (*it_res)->second.AsRObj();
+      shard->tmp_str1 = sdscpylen(shard->tmp_str1, field.data(), field.size());
+
+      return hashTypeExists(hset, shard->tmp_str1);
+    }
+    if (it_res.status() == OpStatus::KEY_NOTFOUND)
+      return 0;
+    return it_res.status();
+  };
+
+  OpResult<int> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (result) {
+    (*cntx)->SendLong(*result);
+  } else {
+    (*cntx)->SendError(result.status());
+  }
 }
 
 void HSetFamily::HGet(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view field = ArgS(args, 1);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpHGet(OpArgs{shard, t->db_index()}, key, field);
+  };
+
+  OpResult<string> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (result) {
+    (*cntx)->SendBulkString(*result);
+  } else {
+    if (result.status() == OpStatus::KEY_NOTFOUND) {
+      (*cntx)->SendNull();
+    } else {
+      (*cntx)->SendError(result.status());
+    }
+  }
 }
 
 void HSetFamily::HIncrBy(CmdArgList args, ConnectionContext* cntx) {
@@ -72,8 +138,8 @@ void HSetFamily::HSetNx(CmdArgList args, ConnectionContext* cntx) {
 void HSetFamily::HStrLen(CmdArgList args, ConnectionContext* cntx) {
 }
 
-OpResult<uint32_t> HSetFamily::OpHSet(const OpArgs& op_args, std::string_view key,
-                                      CmdArgList values, bool skip_if_exists) {
+OpResult<uint32_t> HSetFamily::OpHSet(const OpArgs& op_args, string_view key, CmdArgList values,
+                                      bool skip_if_exists) {
   DCHECK(!values.empty() && 0 == values.size() % 2);
 
   auto& db_slice = op_args.shard->db_slice();
@@ -107,6 +173,93 @@ OpResult<uint32_t> HSetFamily::OpHSet(const OpArgs& op_args, std::string_view ke
   it->second.SyncRObj();
 
   return created;
+}
+
+OpResult<uint32_t> HSetFamily::OpHDel(const OpArgs& op_args, string_view key, CmdArgList values) {
+  DCHECK(!values.empty());
+
+  auto& db_slice = op_args.shard->db_slice();
+  auto it_res = db_slice.Find(op_args.db_ind, key, OBJ_HASH);
+
+  if (!it_res)
+    return it_res.status();
+
+  CompactObj& co = (*it_res)->second;
+  robj* hset = co.AsRObj();
+  unsigned deleted = 0;
+  bool key_remove = false;
+
+  for (auto s : values) {
+    op_args.shard->tmp_str1 = sdscpylen(op_args.shard->tmp_str1, s.data(), s.size());
+
+    if (hashTypeDelete(hset, op_args.shard->tmp_str1)) {
+      ++deleted;
+      if (hashTypeLength(hset) == 0) {
+        key_remove = true;
+        break;
+      }
+    }
+  }
+
+  co.SyncRObj();
+
+  if (key_remove) {
+    db_slice.Del(op_args.db_ind, *it_res);
+  }
+
+  return deleted;
+}
+
+OpResult<uint32_t> HSetFamily::OpHLen(const OpArgs& op_args, string_view key) {
+  auto& db_slice = op_args.shard->db_slice();
+  auto it_res = db_slice.Find(op_args.db_ind, key, OBJ_HASH);
+
+  if (it_res) {
+    robj* hset = (*it_res)->second.AsRObj();
+    return hashTypeLength(hset);
+  }
+  if (it_res.status() == OpStatus::KEY_NOTFOUND)
+    return 0;
+  return it_res.status();
+}
+
+OpResult<string> HSetFamily::OpHGet(const OpArgs& op_args, string_view key, string_view field) {
+  auto& db_slice = op_args.shard->db_slice();
+  auto it_res = db_slice.Find(op_args.db_ind, key, OBJ_HASH);
+  if (!it_res)
+    return it_res.status();
+
+  robj* hset = (*it_res)->second.AsRObj();
+
+  op_args.shard->tmp_str1 = sdscpylen(op_args.shard->tmp_str1, field.data(), field.size());
+
+  if (hset->encoding == OBJ_ENCODING_LISTPACK) {
+    unsigned char* vstr = NULL;
+    unsigned int vlen = UINT_MAX;
+    long long vll = LLONG_MAX;
+
+    int ret = hashTypeGetFromListpack(hset, op_args.shard->tmp_str1, &vstr, &vlen, &vll);
+    if (ret < 0) {
+      return OpStatus::KEY_NOTFOUND;
+    }
+    if (vstr) {
+      const char* src = reinterpret_cast<const char*>(vstr);
+      return string{src, vlen};
+    }
+
+    return absl::StrCat(vll);
+  }
+
+  if (hset->encoding == OBJ_ENCODING_HT) {
+    dictEntry* de = dictFind((dict*)hset->ptr, op_args.shard->tmp_str1);
+    if (!de)
+      return OpStatus::KEY_NOTFOUND;
+
+    sds val = (sds)dictGetVal(de);
+    return string(val, sdslen(val));
+  }
+
+  LOG(FATAL) << "Unknown hash encoding " << hset->encoding;
 }
 
 using CI = CommandId;

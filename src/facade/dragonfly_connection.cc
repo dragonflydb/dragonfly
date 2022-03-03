@@ -198,6 +198,7 @@ void Connection::HandleRequests() {
       if (should_disarm_poller) {
         us->CancelPoll(poll_id);
       }
+      cc_.reset();
     }
   }
 

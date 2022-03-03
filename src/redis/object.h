@@ -100,9 +100,6 @@ robj *createZsetListpackObject(void);
 unsigned long long estimateObjectIdleTime(const robj *o);
 uint8_t LFUDecrAndReturn(time_t epoch_sec, const robj *o);
 void listTypeConvert(robj *subject, int enc);
-void hashTypeConvert(robj *o, int enc);
-unsigned long hashTypeLength(const robj *o);
-int hashZiplistValidateIntegrity(unsigned char *zl, size_t size, int deep);
 int objectSetLRUOrLFU(robj *val, long long lfu_freq, long long lru_idle,
                        long long lru_clock, int lru_multiplier);
 
@@ -190,6 +187,10 @@ sds hashTypeCurrentObjectNewSds(hashTypeIterator *hi, int what);
 robj *hashTypeGetValueObject(robj *o, sds field);
 int hashTypeSet(robj *o, sds field, sds value, int flags);
 robj *hashTypeDup(robj *o);
+int hashTypeGetFromListpack(robj *o, sds field,
+                            unsigned char **vstr,
+                            unsigned int *vlen,
+                            long long *vll);
 
 
 /* Macro used to initialize a Redis object allocated on the stack.

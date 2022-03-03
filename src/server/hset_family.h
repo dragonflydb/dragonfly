@@ -31,6 +31,10 @@ class HSetFamily {
 
   static OpResult<uint32_t> OpHSet(const OpArgs& op_args, std::string_view key, CmdArgList values,
                                    bool skip_if_exists);
+  static OpResult<uint32_t> OpHDel(const OpArgs& op_args, std::string_view key, CmdArgList values);
+  static OpResult<uint32_t> OpHLen(const OpArgs& op_args, std::string_view key);
+  static OpResult<std::string> OpHGet(const OpArgs& op_args, std::string_view key,
+                                      std::string_view field);
 };
 
 }  // namespace dfly

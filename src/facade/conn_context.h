@@ -17,6 +17,10 @@ class ConnectionContext {
  public:
   ConnectionContext(::io::Sink* stream, Connection* owner);
 
+  // We won't have any virtual methods, probably. However, since we allocate derived class,
+  // we need to declare a virtual d-tor so we could delete them inside Connection.
+  virtual ~ConnectionContext() {}
+
   Connection* owner() {
     return owner_;
   }
