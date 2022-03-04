@@ -22,6 +22,8 @@ namespace dfly {
 
 namespace {
 
+constexpr size_t kMaxListPackLen = 1024;
+
 bool IsGoodForListpack(CmdArgList args, const uint8_t* lp) {
   size_t sum = 0;
   for (auto s : args) {
@@ -30,7 +32,39 @@ bool IsGoodForListpack(CmdArgList args, const uint8_t* lp) {
     sum += s.size();
   }
 
-  return lpSafeToAdd(const_cast<uint8_t*>(lp), sum);
+  return lpBytes(const_cast<uint8_t*>(lp)) + sum < kMaxListPackLen;
+}
+
+// returns a new pointer to lp. Returns true if field was inserted or false it it already existed.
+pair<uint8_t*, bool> lpInsertElem(uint8_t* lp, string_view field, string_view val) {
+  uint8_t* vptr;
+
+  uint8_t* fptr = lpFirst(lp);
+  uint8_t* fsrc = (uint8_t*)field.data();
+  uint8_t* vsrc = (uint8_t*)val.data();
+
+  bool updated = false;
+
+  if (fptr) {
+    fptr = lpFind(lp, fptr, fsrc, field.size(), 1);
+    if (fptr) {
+      /* Grab pointer to the value (fptr points to the field) */
+      vptr = lpNext(lp, fptr);
+      updated = true;
+
+      /* Replace value */
+      lp = lpReplace(lp, &vptr, vsrc, val.size());
+    }
+  }
+
+  if (!updated) {
+    /* Push new field/value pair onto the tail of the listpack */
+    // TODO: we should at least allocate once for both elements.
+    lp = lpAppend(lp, fsrc, field.size());
+    lp = lpAppend(lp, vsrc, val.size());
+  }
+
+  return make_pair(lp, !updated);
 }
 
 }  // namespace
@@ -95,7 +129,7 @@ void HSetFamily::HExists(CmdArgList args, ConnectionContext* cntx) {
 
 void HSetFamily::HGet(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
-  string_view field = ArgS(args, 1);
+  string_view field = ArgS(args, 2);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpHGet(OpArgs{shard, t->db_index()}, key, field);
@@ -114,6 +148,24 @@ void HSetFamily::HGet(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void HSetFamily::HIncrBy(CmdArgList args, ConnectionContext* cntx) {
+}
+
+void HSetFamily::HKeys(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpHKeys(OpArgs{shard, t->db_index()}, key);
+  };
+
+  OpResult<vector<string>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (result) {
+    (*cntx)->StartArray(result->size());
+    for (const auto& s : *result) {
+      (*cntx)->SendBulkString(s);
+    }
+  } else {
+    (*cntx)->SendError(result.status());
+  }
 }
 
 void HSetFamily::HSet(CmdArgList args, ConnectionContext* cntx) {
@@ -145,9 +197,13 @@ OpResult<uint32_t> HSetFamily::OpHSet(const OpArgs& op_args, string_view key, Cm
   auto& db_slice = op_args.shard->db_slice();
   const auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
 
+  DbSlice::InternalDbStats* stats = db_slice.MutableStats(op_args.db_ind);
+
   if (inserted) {
     robj* ro = createHashObject();
     it->second.ImportRObj(ro);
+    stats->listpack_blob_cnt++;
+    stats->listpack_bytes += lpBytes((uint8_t*)ro->ptr);
   } else {
     if (it->second.ObjType() != OBJ_HASH)
       return OpStatus::WRONG_TYPE;
@@ -156,19 +212,37 @@ OpResult<uint32_t> HSetFamily::OpHSet(const OpArgs& op_args, string_view key, Cm
   robj* hset = it->second.AsRObj();
   uint8_t* lp = (uint8_t*)hset->ptr;
 
-  if (hset->encoding == OBJ_ENCODING_LISTPACK && !IsGoodForListpack(values, lp)) {
-    hashTypeConvert(hset, OBJ_ENCODING_HT);
+  if (hset->encoding == OBJ_ENCODING_LISTPACK) {
+    stats->listpack_bytes -= lpBytes(lp);
+
+    if (!IsGoodForListpack(values, lp)) {
+      stats->listpack_blob_cnt--;
+      hashTypeConvert(hset, OBJ_ENCODING_HT);
+    }
   }
+
   unsigned created = 0;
 
-  // TODO: we could avoid double copying by reimplementing hashTypeSet with better interface.
-  for (size_t i = 0; i < values.size(); i += 2) {
-    op_args.shard->tmp_str1 =
-        sdscpylen(op_args.shard->tmp_str1, values[i].data(), values[i].size());
-    op_args.shard->tmp_str2 =
-        sdscpylen(op_args.shard->tmp_str2, values[i + 1].data(), values[i + 1].size());
+  if (hset->encoding == OBJ_ENCODING_LISTPACK) {
+    bool inserted;
+    for (size_t i = 0; i < values.size(); i += 2) {
+      tie(lp, inserted) = lpInsertElem(lp, ArgS(values, i), ArgS(values, i + 1));
+      created += inserted;
+    }
+    hset->ptr = lp;
+    stats->listpack_bytes += lpBytes(lp);
+  } else {
+    DCHECK_EQ(OBJ_ENCODING_HT, hset->encoding);
 
-    created += !hashTypeSet(hset, op_args.shard->tmp_str1, op_args.shard->tmp_str2, HASH_SET_COPY);
+    // Dictionary
+    for (size_t i = 0; i < values.size(); i += 2) {
+      sds fs = sdsnewlen(values[i].data(), values[i].size());
+      sds vs = sdsnewlen(values[i + 1].data(), values[i + 1].size());
+
+      // hashTypeSet checks for hash_max_listpack_entries and converts into dictionary
+      // if it goes beyond.
+      created += !hashTypeSet(hset, fs, vs, HASH_SET_TAKE_FIELD | HASH_SET_TAKE_VALUE);
+    }
   }
   it->second.SyncRObj();
 
@@ -188,6 +262,11 @@ OpResult<uint32_t> HSetFamily::OpHDel(const OpArgs& op_args, string_view key, Cm
   robj* hset = co.AsRObj();
   unsigned deleted = 0;
   bool key_remove = false;
+  DbSlice::InternalDbStats* stats = db_slice.MutableStats(op_args.db_ind);
+
+  if (hset->encoding == OBJ_ENCODING_LISTPACK) {
+    stats->listpack_bytes -= lpBytes((uint8_t*)hset->ptr);
+  }
 
   for (auto s : values) {
     op_args.shard->tmp_str1 = sdscpylen(op_args.shard->tmp_str1, s.data(), s.size());
@@ -204,7 +283,12 @@ OpResult<uint32_t> HSetFamily::OpHDel(const OpArgs& op_args, string_view key, Cm
   co.SyncRObj();
 
   if (key_remove) {
+    if (hset->encoding == OBJ_ENCODING_LISTPACK) {
+      stats->listpack_blob_cnt--;
+    }
     db_slice.Del(op_args.db_ind, *it_res);
+  } else if (hset->encoding == OBJ_ENCODING_LISTPACK) {
+    stats->listpack_bytes += lpBytes((uint8_t*)hset->ptr);
   }
 
   return deleted;
@@ -262,6 +346,41 @@ OpResult<string> HSetFamily::OpHGet(const OpArgs& op_args, string_view key, stri
   LOG(FATAL) << "Unknown hash encoding " << hset->encoding;
 }
 
+OpResult<vector<string>> HSetFamily::OpHKeys(const OpArgs& op_args, string_view key) {
+  auto& db_slice = op_args.shard->db_slice();
+  auto it_res = db_slice.Find(op_args.db_ind, key, OBJ_HASH);
+  if (!it_res) {
+    if (it_res.status() == OpStatus::KEY_NOTFOUND)
+      return vector<string>{};
+    return it_res.status();
+  }
+
+  robj* hset = (*it_res)->second.AsRObj();
+  auto* hi = hashTypeInitIterator(hset);
+
+  vector<string> res;
+  if (hset->encoding == OBJ_ENCODING_LISTPACK) {
+    unsigned slen;
+    long long vll;
+    while (hashTypeNext(hi) != C_ERR) {
+      uint8_t* ptr = lpGetValue(hi->fptr, &slen, &vll);
+      if (ptr) {
+        res.emplace_back(reinterpret_cast<char*>(ptr), slen);
+      } else {
+        res.emplace_back(absl::StrCat(vll));
+      }
+    }
+  } else {
+    while (hashTypeNext(hi) != C_ERR) {
+      sds key = (sds)dictGetKey(hi->de);
+      res.emplace_back(key, sdslen(key));
+    }
+  }
+
+  hashTypeReleaseIterator(hi);
+  return res;
+}
+
 using CI = CommandId;
 
 #define HFUNC(x) SetHandler(&HSetFamily::x)
@@ -272,6 +391,7 @@ void HSetFamily::Register(CommandRegistry* registry) {
             << CI{"HEXISTS", CO::FAST | CO::READONLY, 3, 1, 1, 1}.HFUNC(HExists)
             << CI{"HGET", CO::FAST | CO::READONLY, 3, 1, 1, 1}.HFUNC(HGet)
             << CI{"HINCRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1}.HFUNC(HIncrBy)
+            << CI{"HKEYS", CO::READONLY, 2, 1, 1, 1}.HFUNC(HKeys)
             << CI{"HSET", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, 1}.HFUNC(HSet)
             << CI{"HSETNX", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1}.HFUNC(HSetNx)
             << CI{"HSTRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(HStrLen);

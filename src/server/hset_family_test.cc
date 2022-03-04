@@ -4,10 +4,17 @@
 
 #include "server/hset_family.h"
 
+extern "C" {
+#include "redis/listpack.h"
+#include "redis/object.h"
+#include "redis/sds.h"
+#include "redis/zmalloc.h"
+}
+
 #include "base/gtest.h"
 #include "base/logging.h"
-#include "server/test_utils.h"
 #include "facade/facade_test.h"
+#include "server/test_utils.h"
 
 using namespace testing;
 using namespace std;
@@ -19,38 +26,60 @@ namespace dfly {
 
 class HSetFamilyTest : public BaseFamilyTest {
  protected:
+  static void SetUpTestSuite() {
+    init_zmalloc_threadlocal();
+  }
 };
+
+TEST_F(HSetFamilyTest, Hash) {
+  robj* obj = createHashObject();
+  sds field = sdsnew("field");
+  sds val = sdsnew("value");
+  hashTypeSet(obj, field, val, 0);
+  sdsfree(field);
+  sdsfree(val);
+  decrRefCount(obj);
+}
 
 TEST_F(HSetFamilyTest, Basic) {
   auto resp = Run({"hset", "x", "a"});
-  EXPECT_THAT(resp[0],  ErrArg("wrong number"));
+  EXPECT_THAT(resp[0], ErrArg("wrong number"));
 
   resp = Run({"hset", "x", "a", "b"});
-  EXPECT_THAT(resp[0],  IntArg(1));
+  EXPECT_THAT(resp[0], IntArg(1));
   resp = Run({"hlen", "x"});
-  EXPECT_THAT(resp[0],  IntArg(1));
+  EXPECT_THAT(resp[0], IntArg(1));
 
   resp = Run({"hexists", "x", "a"});
-  EXPECT_THAT(resp[0],  IntArg(1));
+  EXPECT_THAT(resp[0], IntArg(1));
 
   resp = Run({"hexists", "x", "b"});
-  EXPECT_THAT(resp[0],  IntArg(0));
+  EXPECT_THAT(resp[0], IntArg(0));
 
   resp = Run({"hexists", "y", "a"});
-  EXPECT_THAT(resp[0],  IntArg(0));
+  EXPECT_THAT(resp[0], IntArg(0));
 
   resp = Run({"hset", "x", "a", "b"});
-  EXPECT_THAT(resp[0],  IntArg(0));
+  EXPECT_THAT(resp[0], IntArg(0));
 
   resp = Run({"hset", "x", "a", "c"});
-  EXPECT_THAT(resp[0],  IntArg(0));
+  EXPECT_THAT(resp[0], IntArg(0));
 
   resp = Run({"hset", "y", "a", "c", "d", "e"});
-  EXPECT_THAT(resp[0],  IntArg(2));
+  EXPECT_THAT(resp[0], IntArg(2));
 
   resp = Run({"hdel", "y", "a", "d"});
-  EXPECT_THAT(resp[0],  IntArg(2));
-
+  EXPECT_THAT(resp[0], IntArg(2));
 }
+
+TEST_F(HSetFamilyTest, HSetLarge) {
+  string val(1024, 'b');
+
+  auto resp = Run({"hset", "x", "a", val});
+  EXPECT_THAT(resp[0], IntArg(1));
+  resp = Run({"hlen", "x"});
+  EXPECT_THAT(resp[0], IntArg(1));
+}
+
 
 }  // namespace dfly

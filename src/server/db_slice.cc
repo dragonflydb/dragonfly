@@ -26,7 +26,7 @@ using facade::OpStatus;
 #define ADD(x) (x) += o.x
 
 DbStats& DbStats::operator+=(const DbStats& o) {
-  static_assert(sizeof(DbStats) == 56);
+  static_assert(sizeof(DbStats) == 72);
 
   ADD(key_count);
   ADD(expire_count);
@@ -36,6 +36,8 @@ DbStats& DbStats::operator+=(const DbStats& o) {
   ADD(obj_memory_usage);
   ADD(table_mem_usage);
   ADD(small_string_bytes);
+  ADD(listpack_blob_cnt);
+  ADD(listpack_bytes);
 
   return *this;
 }
@@ -87,6 +89,8 @@ auto DbSlice::GetStats() const -> Stats {
     s.db.obj_memory_usage += db->stats.obj_memory_usage;
     s.db.inline_keys += db->stats.inline_keys;
     s.db.table_mem_usage += (db->prime_table.mem_usage() + db->expire_table.mem_usage());
+    s.db.listpack_blob_cnt += db->stats.listpack_blob_cnt;
+    s.db.listpack_bytes += db->stats.listpack_bytes;
   }
   s.db.small_string_bytes = CompactObj::GetStats().small_string_bytes;
 
@@ -249,8 +253,7 @@ size_t DbSlice::FlushDb(DbIndex db_ind) {
     db->prime_table.Clear();
     db->expire_table.Clear();
     db->mcflag_table.Clear();
-    db->stats.inline_keys = 0;
-    db->stats.obj_memory_usage = 0;
+    db->stats = InternalDbStats{};
 
     return removed;
   };

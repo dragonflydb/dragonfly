@@ -23,6 +23,7 @@ class HSetFamily {
   static void HExists(CmdArgList args, ConnectionContext* cntx);
   static void HGet(CmdArgList args, ConnectionContext* cntx);
   static void HIncrBy(CmdArgList args, ConnectionContext* cntx);
+  static void HKeys(CmdArgList args, ConnectionContext* cntx);
 
   // hmset is deprecated, we should not implement it unless we have to.
   static void HSet(CmdArgList args, ConnectionContext* cntx);
@@ -35,6 +36,8 @@ class HSetFamily {
   static OpResult<uint32_t> OpHLen(const OpArgs& op_args, std::string_view key);
   static OpResult<std::string> OpHGet(const OpArgs& op_args, std::string_view key,
                                       std::string_view field);
+
+  static OpResult<std::vector<std::string>> OpHKeys(const OpArgs& op_args, std::string_view key);
 };
 
 }  // namespace dfly

@@ -155,6 +155,7 @@ API 2.0
   - [ ] HINCRBY
   - [ ] HINCRBYFLOAT
   - [ ] HGETALL
+  - [X] HKEYS
 - [ ] PubSub family
   - [ ] PUBLISH
   - [ ] PUBSUB

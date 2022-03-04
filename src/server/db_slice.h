@@ -42,6 +42,8 @@ struct DbStats {
 
   size_t small_string_bytes = 0;
 
+  size_t listpack_blob_cnt = 0;
+  size_t listpack_bytes = 0;
   DbStats& operator+=(const DbStats& o);
 };
 
@@ -54,14 +56,6 @@ struct SliceEvents {
 };
 
 class DbSlice {
-  struct InternalDbStats {
-    // Number of inline keys.
-    uint64_t inline_keys = 0;
-
-    // Object memory usage besides hash-table capacity.
-    // Applies for any non-inline objects.
-    size_t obj_memory_usage = 0;
-  };
 
   DbSlice(const DbSlice&) = delete;
   void operator=(const DbSlice&) = delete;
@@ -71,6 +65,18 @@ class DbSlice {
     DbStats db;
     SliceEvents events;
   };
+
+  struct InternalDbStats {
+    // Number of inline keys.
+    uint64_t inline_keys = 0;
+
+    // Object memory usage besides hash-table capacity.
+    // Applies for any non-inline objects.
+    size_t obj_memory_usage = 0;
+    size_t listpack_blob_cnt = 0;
+    size_t listpack_bytes = 0;
+  };
+
 
   DbSlice(uint32_t index, EngineShard* owner);
   ~DbSlice();
@@ -164,6 +170,10 @@ class DbSlice {
   // Callback functions called upon writing to the existing key.
   void PreUpdate(DbIndex db_ind, MainIterator it);
   void PostUpdate(DbIndex db_ind, MainIterator it);
+
+  InternalDbStats* MutableStats(DbIndex db_ind) {
+    return &db_arr_[db_ind]->stats;
+  }
 
   // Check whether 'it' has not expired. Returns it if it's still valid. Otherwise, erases it
   // from both tables and return MainIterator{}.

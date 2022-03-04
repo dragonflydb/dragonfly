@@ -407,6 +407,8 @@ tcp_port:)";
     absl::StrAppend(&info, "num_entries:", m.db.key_count, "\n");
     absl::StrAppend(&info, "inline_keys:", m.db.inline_keys, "\n");
     absl::StrAppend(&info, "small_string_bytes:", m.db.small_string_bytes, "\n");
+    absl::StrAppend(&info, "listpack_blobs:", m.db.listpack_blob_cnt, "\n");
+    absl::StrAppend(&info, "listpack_bytes:", m.db.listpack_bytes, "\n");
   }
 
   if (should_enter("STATS")) {
