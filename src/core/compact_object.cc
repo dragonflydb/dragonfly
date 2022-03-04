@@ -70,6 +70,7 @@ size_t MallocUsedSet(unsigned encoding, void* ptr) {
     default:
       LOG(FATAL) << "Unknown set encoding type " << encoding;
   }
+  return 0;
 }
 
 size_t MallocUsedHSet(unsigned encoding, void* ptr) {
@@ -81,6 +82,7 @@ size_t MallocUsedHSet(unsigned encoding, void* ptr) {
     default:
       LOG(FATAL) << "Unknown set encoding type " << encoding;
   }
+  return 0;
 }
 
 inline void FreeObjHash(unsigned encoding, void* ptr) {
@@ -186,111 +188,61 @@ static_assert(sizeof(CompactObj) == 18);
 
 namespace detail {
 
-CompactBlob::CompactBlob(string_view s, pmr::memory_resource* mr) : ptr_(nullptr), sz(s.size()) {
-  if (sz) {
-    ptr_ = mr->allocate(sz);
-    memcpy(ptr_, s.data(), s.size());
-  }
-}
-
-void CompactBlob::Assign(string_view s, pmr::memory_resource* mr) {
-  if (s.size() > sz) {
-    size_t cur_cap = capacity();
-    if (s.size() > cur_cap)
-      MakeRoom(cur_cap, s.size(), mr);
-  }
-  memcpy(ptr_, s.data(), s.size());
-  sz = s.size();
-}
-
-void CompactBlob::Free(pmr::memory_resource* mr) {
-  mr->deallocate(ptr_, 0);  // we do not keep the allocated size.
-  sz = 0;
-  ptr_ = nullptr;
-}
-
-void CompactBlob::MakeRoom(size_t current_cap, size_t desired, pmr::memory_resource* mr) {
-  if (current_cap * 2 > desired) {
-    if (desired < SDS_MAX_PREALLOC)
-      desired *= 2;
-    else
-      desired += SDS_MAX_PREALLOC;
-  }
-  void* newp = mr->allocate(desired);
-  if (sz) {
-    memcpy(newp, ptr_, sz);
-  }
-  if (current_cap) {
-    mr->deallocate(ptr_, current_cap);
-  }
-  ptr_ = newp;
-}
-
-// here we break pmr model since we use non-pmr api of fetching usable size based on pointer.
-size_t CompactBlob::capacity() const {
-  return zmalloc_size(ptr_);
-}
-
 size_t RobjWrapper::MallocUsed() const {
-  void* ptr = blob.ptr();
-  if (!ptr)
+  if (!inner_obj_)
     return 0;
 
-  switch (type) {
+  switch (type_) {
     case OBJ_STRING:
       DVLOG(2) << "Freeing string object";
-      CHECK_EQ(OBJ_ENCODING_RAW, encoding);
-      return blob.capacity();
-      break;
+      CHECK_EQ(OBJ_ENCODING_RAW, encoding_);
+      return InnerObjMallocUsed();
     case OBJ_LIST:
-      CHECK_EQ(encoding, OBJ_ENCODING_QUICKLIST);
-      return QlMAllocSize((quicklist*)ptr);
+      CHECK_EQ(encoding_, OBJ_ENCODING_QUICKLIST);
+      return QlMAllocSize((quicklist*)inner_obj_);
     case OBJ_SET:
-      return MallocUsedSet(encoding, ptr);
+      return MallocUsedSet(encoding_, inner_obj_);
     case OBJ_HASH:
-      return MallocUsedHSet(encoding, ptr);
+      return MallocUsedHSet(encoding_, inner_obj_);
     default:
-      LOG(FATAL) << "Not supported " << type;
+      LOG(FATAL) << "Not supported " << type_;
   }
 
   return 0;
 }
 
 size_t RobjWrapper::Size() const {
-  switch (type) {
+  switch (type_) {
     case OBJ_STRING:
-      DVLOG(2) << "Freeing string object";
-      DCHECK_EQ(OBJ_ENCODING_RAW, encoding);
-      return blob.size();
-      break;
+      DCHECK_EQ(OBJ_ENCODING_RAW, encoding_);
+      return sz_;
     default:;
   }
   return 0;
 }
 
 void RobjWrapper::Free(std::pmr::memory_resource* mr) {
-  void* ptr = blob.ptr();
-  if (!ptr)
+  if (!inner_obj_)
     return;
 
-  switch (type) {
+  switch (type_) {
     case OBJ_STRING:
       DVLOG(2) << "Freeing string object";
-      DCHECK_EQ(OBJ_ENCODING_RAW, encoding);
-      blob.Free(mr);
+      DCHECK_EQ(OBJ_ENCODING_RAW, encoding_);
+      mr->deallocate(inner_obj_, 0);  // we do not keep the allocated size.
       break;
     case OBJ_LIST:
-      CHECK_EQ(encoding, OBJ_ENCODING_QUICKLIST);
-      quicklistRelease((quicklist*)ptr);
+      CHECK_EQ(encoding_, OBJ_ENCODING_QUICKLIST);
+      quicklistRelease((quicklist*)inner_obj_);
       break;
     case OBJ_SET:
-      FreeObjSet(encoding, ptr);
+      FreeObjSet(encoding_, inner_obj_);
       break;
     case OBJ_ZSET:
-      FreeObjZset(encoding, ptr);
+      FreeObjZset(encoding_, inner_obj_);
       break;
     case OBJ_HASH:
-      FreeObjHash(encoding, ptr);
+      FreeObjHash(encoding_, inner_obj_);
       break;
     case OBJ_MODULE:
       LOG(FATAL) << "Unsupported OBJ_MODULE type";
@@ -302,42 +254,92 @@ void RobjWrapper::Free(std::pmr::memory_resource* mr) {
       LOG(FATAL) << "Unknown object type";
       break;
   }
-  blob.Set(nullptr, 0);
+  Set(nullptr, 0);
 }
 
 uint64_t RobjWrapper::HashCode() const {
-  switch (type) {
+  switch (type_) {
     case OBJ_STRING:
-      DCHECK_EQ(OBJ_ENCODING_RAW, encoding);
+      DCHECK_EQ(OBJ_ENCODING_RAW, encoding());
       {
-        auto str = blob.AsView();
+        auto str = AsView();
         return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
       }
       break;
     default:
-      LOG(FATAL) << "Unsupported type for hashcode " << type;
+      LOG(FATAL) << "Unsupported type for hashcode " << type_;
   }
   return 0;
 }
 
 bool RobjWrapper::Equal(const RobjWrapper& ow) const {
-  if (ow.type != type || ow.encoding != encoding)
+  if (ow.type_ != type_ || ow.encoding_ != encoding_)
     return false;
 
-  if (type == OBJ_STRING) {
-    DCHECK_EQ(OBJ_ENCODING_RAW, encoding);
-    return blob.AsView() == ow.blob.AsView();
+  if (type_ == OBJ_STRING) {
+    DCHECK_EQ(OBJ_ENCODING_RAW, encoding());
+    return AsView() == ow.AsView();
   }
-  LOG(FATAL) << "Unsupported type " << type;
+  LOG(FATAL) << "Unsupported type " << type_;
   return false;
 }
 
-bool RobjWrapper::Equal(std::string_view sv) const {
-  if (type != OBJ_STRING)
+bool RobjWrapper::Equal(string_view sv) const {
+  if (type() != OBJ_STRING)
     return false;
 
-  DCHECK_EQ(OBJ_ENCODING_RAW, encoding);
-  return blob.AsView() == sv;
+  DCHECK_EQ(OBJ_ENCODING_RAW, encoding());
+  return AsView() == sv;
+}
+
+void RobjWrapper::SetString(string_view s, pmr::memory_resource* mr) {
+  type_ = OBJ_STRING;
+  encoding_ = OBJ_ENCODING_RAW;
+
+  if (s.size() > sz_) {
+    size_t cur_cap = InnerObjMallocUsed();
+    if (s.size() > cur_cap) {
+      MakeInnerRoom(cur_cap, s.size(), mr);
+    }
+    memcpy(inner_obj_, s.data(), s.size());
+    sz_ = s.size();
+  }
+}
+
+void RobjWrapper::Init(unsigned type, unsigned encoding, void* inner) {
+  type_ = type;
+  encoding_ = encoding;
+  Set(inner, 0);
+}
+
+inline size_t RobjWrapper::InnerObjMallocUsed() const {
+  return zmalloc_size(inner_obj_);
+}
+
+void RobjWrapper::MakeInnerRoom(size_t current_cap, size_t desired, pmr::memory_resource* mr) {
+  if (current_cap * 2 > desired) {
+    if (desired < SDS_MAX_PREALLOC)
+      desired *= 2;
+    else
+      desired += SDS_MAX_PREALLOC;
+  }
+
+  void* newp = mr->allocate(desired);
+  if (sz_) {
+    memcpy(newp, inner_obj_, sz_);
+  }
+
+  if (current_cap) {
+    mr->deallocate(inner_obj_, current_cap);
+  }
+  inner_obj_ = newp;
+}
+
+quicklist* RobjWrapper::GetQL() const {
+  CHECK_EQ(type(), OBJ_LIST);
+  CHECK_EQ(encoding(), OBJ_ENCODING_QUICKLIST);
+
+  return (quicklist*)inner_obj_;
 }
 
 // len must be at least 16
@@ -501,15 +503,16 @@ uint64_t CompactObj::HashCode() const {
   return 0;
 }
 
-uint64_t CompactObj::HashCode(std::string_view str) {
+uint64_t CompactObj::HashCode(string_view str) {
   return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
 }
+
 unsigned CompactObj::ObjType() const {
   if (IsInline() || taglen_ == INT_TAG || taglen_ == SMALL_TAG)
     return OBJ_STRING;
 
   if (taglen_ == ROBJ_TAG)
-    return u_.r_obj.type;
+    return u_.r_obj.type();
 
   LOG(FATAL) << "TBD " << int(taglen_);
   return 0;
@@ -518,7 +521,7 @@ unsigned CompactObj::ObjType() const {
 unsigned CompactObj::Encoding() const {
   switch (taglen_) {
     case ROBJ_TAG:
-      return u_.r_obj.encoding;
+      return u_.r_obj.encoding();
     case INT_TAG:
       return OBJ_ENCODING_INT;
     default:
@@ -528,10 +531,7 @@ unsigned CompactObj::Encoding() const {
 
 quicklist* CompactObj::GetQL() const {
   CHECK_EQ(taglen_, ROBJ_TAG);
-  CHECK_EQ(u_.r_obj.type, OBJ_LIST);
-  CHECK_EQ(u_.r_obj.encoding, OBJ_ENCODING_QUICKLIST);
-
-  return (quicklist*)u_.r_obj.blob.ptr();
+  return u_.r_obj.GetQL();
 }
 
 // Takes ownership over o.
@@ -541,16 +541,16 @@ void CompactObj::ImportRObj(robj* o) {
 
   SetMeta(ROBJ_TAG);
 
-  u_.r_obj.type = o->type;
-  u_.r_obj.encoding = o->encoding;
-  u_.r_obj.unneeded = o->lru;
+  // u_.r_obj.type = o->type;
+  // u_.r_obj.encoding = o->encoding;
+  // u_.r_obj.unneeded = o->lru;
 
   if (o->type == OBJ_STRING) {
-    std::string_view src((char*)o->ptr, sdslen((sds)o->ptr));
-    u_.r_obj.blob.Assign(src, tl.local_mr);
+    std::string_view src((sds)o->ptr, sdslen((sds)o->ptr));
+    u_.r_obj.SetString(src, tl.local_mr);
     decrRefCount(o);
   } else {  // Non-string objects we move as is and release Robj wrapper.
-    u_.r_obj.blob.Set(o->ptr, 0);
+    u_.r_obj.Init(o->type, o->encoding, o->ptr);
     if (o->refcount == 1)
       zfree(o);
   }
@@ -560,22 +560,27 @@ robj* CompactObj::AsRObj() const {
   CHECK_EQ(ROBJ_TAG, taglen_);
 
   robj* res = &tl.tmp_robj;
-  res->encoding = u_.r_obj.encoding;
-  res->type = u_.r_obj.type;
-  res->lru = u_.r_obj.unneeded;
-  res->ptr = u_.r_obj.blob.ptr();
+  res->encoding = u_.r_obj.encoding();
+  res->type = u_.r_obj.type();
+  res->lru = 0; // u_.r_obj.unneeded;
+  res->ptr = u_.r_obj.inner_obj();
 
   return res;
+}
+
+void CompactObj::InitRobj(unsigned type, unsigned encoding, void* obj) {
+  DCHECK_NE(type, OBJ_STRING);
+  SetMeta(ROBJ_TAG);
+  u_.r_obj.Init(type, encoding, obj);
 }
 
 void CompactObj::SyncRObj() {
   robj* obj = &tl.tmp_robj;
 
   DCHECK_EQ(ROBJ_TAG, taglen_);
-  DCHECK_EQ(u_.r_obj.type, obj->type);
+  DCHECK_EQ(u_.r_obj.type(), obj->type);
 
-  u_.r_obj.encoding = obj->encoding;
-  u_.r_obj.blob.Set(obj->ptr, 0);
+  u_.r_obj.Init(obj->type, obj->encoding, obj->ptr);
 }
 
 void CompactObj::SetInt(int64_t val) {
@@ -655,12 +660,7 @@ void CompactObj::SetString(std::string_view str) {
   }
 
   SetMeta(ROBJ_TAG, mask);
-  u_.r_obj.type = OBJ_STRING;
-  u_.r_obj.encoding = OBJ_ENCODING_RAW;
-
-  DCHECK(taglen_ == ROBJ_TAG && u_.r_obj.type == OBJ_STRING);
-  CHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding);
-  u_.r_obj.blob.Assign(encoded, tl.local_mr);
+  u_.r_obj.SetString(encoded, tl.local_mr);
 }
 
 string_view CompactObj::GetSlice(string* scratch) const {
@@ -691,11 +691,11 @@ string_view CompactObj::GetSlice(string* scratch) const {
 
   if (is_encoded) {
     if (taglen_ == ROBJ_TAG) {
-      CHECK_EQ(OBJ_STRING, u_.r_obj.type);
-      DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding);
-      size_t decoded_len = DecodedLen(u_.r_obj.blob.size());
+      CHECK_EQ(OBJ_STRING, u_.r_obj.type());
+      DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
+      size_t decoded_len = DecodedLen(u_.r_obj.Size());
       scratch->resize(decoded_len);
-      detail::ascii_unpack(to_byte(u_.r_obj.blob.ptr()), decoded_len, scratch->data());
+      detail::ascii_unpack(to_byte(u_.r_obj.inner_obj()), decoded_len, scratch->data());
     } else if (taglen_ == SMALL_TAG) {
       size_t decoded_len = DecodedLen(u_.small_str.size());
       size_t pref_len = decoded_len - u_.small_str.size();
@@ -718,9 +718,9 @@ string_view CompactObj::GetSlice(string* scratch) const {
 
   // no encoding.
   if (taglen_ == ROBJ_TAG) {
-    CHECK_EQ(OBJ_STRING, u_.r_obj.type);
-    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding);
-    return u_.r_obj.blob.AsView();
+    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
+    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
+    return u_.r_obj.AsView();
   }
 
   if (taglen_ == SMALL_TAG) {
@@ -735,7 +735,7 @@ string_view CompactObj::GetSlice(string* scratch) const {
 
 bool CompactObj::HasAllocated() const {
   if (IsRef() || taglen_ == INT_TAG || IsInline() ||
-      (taglen_ == ROBJ_TAG && u_.r_obj.blob.ptr() == nullptr))
+      (taglen_ == ROBJ_TAG && u_.r_obj.inner_obj() == nullptr))
     return false;
 
   DCHECK(taglen_ == ROBJ_TAG || taglen_ == SMALL_TAG);
@@ -846,16 +846,16 @@ bool CompactObj::CmpEncoded(string_view sv) const {
   }
 
   if (taglen_ == ROBJ_TAG) {
-    if (u_.r_obj.type != OBJ_STRING)
+    if (u_.r_obj.type() != OBJ_STRING)
       return false;
 
-    if (u_.r_obj.blob.size() != encode_len)
+    if (u_.r_obj.Size() != encode_len)
       return false;
 
     if (!validate_ascii_fast(sv.data(), sv.size()))
       return false;
 
-    return detail::compare_packed(to_byte(u_.r_obj.blob.ptr()), sv.data(), sv.size());
+    return detail::compare_packed(to_byte(u_.r_obj.inner_obj()), sv.data(), sv.size());
   }
 
   if (taglen_ == SMALL_TAG) {

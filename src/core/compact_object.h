@@ -16,48 +16,16 @@ typedef struct quicklist quicklist;
 
 namespace dfly {
 
+constexpr unsigned kEncodingIntSet = 0;
+constexpr unsigned kEncodingStrMap = 1;  // for set/map encodings of strings
+
 namespace detail {
 
-class CompactBlob {
-  void* ptr_;
-  uint32_t sz;
-
- public:
-  CompactBlob() : ptr_(nullptr), sz(0) {
-  }
-
-  explicit CompactBlob(std::string_view s, std::pmr::memory_resource* mr);
-
-  void Assign(std::string_view s, std::pmr::memory_resource* mr);
-
-  void Set(void* p, uint32_t s) {
-    ptr_ = p;
-    sz = s;
-  }
-
-  void Free(std::pmr::memory_resource* mr);
-
-  size_t size() const {
-    return sz;
-  }
-
-  size_t capacity() const;
-
-  void* ptr() const {
-    return ptr_;
-  }
-
-  std::string_view AsView() const {
-    return std::string_view{reinterpret_cast<char*>(ptr_), sz};
-  }
-
-  void MakeRoom(size_t current_cap, size_t desired, std::pmr::memory_resource* mr);
-} __attribute__((packed));
-
-static_assert(sizeof(CompactBlob) == 12, "");
-
 // redis objects or blobs of upto 4GB size.
-struct RobjWrapper {
+class RobjWrapper {
+ public:
+  RobjWrapper() {
+  }
   size_t MallocUsed() const;
 
   uint64_t HashCode() const;
@@ -66,14 +34,36 @@ struct RobjWrapper {
   size_t Size() const;
   void Free(std::pmr::memory_resource* mr);
 
-  CompactBlob blob;
-  static_assert(sizeof(blob) == 12);
+  void SetString(std::string_view s, std::pmr::memory_resource* mr);
+  void Init(unsigned type, unsigned encoding, void* inner);
 
-  uint32_t type : 4;
-  uint32_t encoding : 4;
-  uint32_t unneeded : 24;
-  RobjWrapper() {
+  unsigned type() const { return type_; }
+  unsigned encoding() const { return encoding_; }
+  quicklist* GetQL() const;
+  void* inner_obj() const { return inner_obj_;}
+
+  std::string_view AsView() const {
+    return std::string_view{reinterpret_cast<char*>(inner_obj_), sz_};
   }
+
+ private:
+  size_t InnerObjMallocUsed() const;
+  void MakeInnerRoom(size_t current_cap, size_t desired, std::pmr::memory_resource* mr);
+
+  void Set(void* p, uint32_t s) {
+    inner_obj_ = p;
+    sz_ = s;
+  }
+
+  void* inner_obj_ = nullptr;
+
+  // semantics depend on the type. For OBJ_STRING it's string length.
+  uint32_t sz_ = 0;
+
+  uint32_t type_ : 4;
+  uint32_t encoding_ : 4;
+  uint32_t unneeded_ : 24;
+
 } __attribute__((packed));
 
 // unpacks 8->7 encoded blob back to ascii.
@@ -211,6 +201,10 @@ class CompactObj {
   void ImportRObj(robj* o);
 
   robj* AsRObj() const;
+
+  // takes ownership over obj.
+  // type should not be OBJ_STRING.
+  void InitRobj(unsigned type, unsigned encoding, void* obj_inner);
 
   // Syncs 'this' instance with the object that was previously returned by AsRObj().
   // Requires: AsRObj() has been called before in the same thread in fiber-atomic section.
