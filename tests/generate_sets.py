@@ -11,11 +11,15 @@ import time
 def fill_set(args, redis: rclient.Redis):
     for j in range(args.num):
         token = uuid.uuid1().hex
+        # print(token)
         key = f'USER_OTP:{token}'
-        otp = ''.join(random.choices(
-            string.ascii_uppercase + string.digits, k=7))
-        redis.execute_command('sadd', key, otp)
-
+        arr = []
+        for i in range(30):
+            otp = ''.join(random.choices(
+                string.ascii_uppercase + string.digits, k=12))
+            arr.append(otp)
+        redis.execute_command('sadd', key, *arr)
+        
 def fill_hset(args, redis):
     for j in range(args.num):
         token = uuid.uuid1().hex

@@ -20,6 +20,7 @@ extern "C" {
 
 #include "base/logging.h"
 #include "base/pod_array.h"
+#include "core/flat_set.h"
 
 #if defined(__aarch64__)
 #include "base/sse2neon.h"
@@ -48,12 +49,16 @@ size_t DictMallocSize(dict* d) {
   return res = dictSize(d) * 16;  // approximation.
 }
 
-inline void FreeObjSet(unsigned encoding, void* ptr) {
+inline void FreeObjSet(unsigned encoding, void* ptr, pmr::memory_resource* mr) {
   switch (encoding) {
-    case OBJ_ENCODING_HT:
-      dictRelease((dict*)ptr);
+    case kEncodingStrMap: {
+      pmr::polymorphic_allocator<FlatSet> pa(mr);
+
+      pa.destroy((FlatSet*)ptr);
+      pa.deallocate((FlatSet*)ptr, 1);
       break;
-    case OBJ_ENCODING_INTSET:
+    }
+    case kEncodingIntSet:
       zfree((void*)ptr);
       break;
     default:
@@ -61,11 +66,30 @@ inline void FreeObjSet(unsigned encoding, void* ptr) {
   }
 }
 
+bool IsMemberSet(unsigned encoding, std::string_view key, void* set) {
+  long long llval;
+
+  switch (encoding) {
+    case kEncodingIntSet: {
+      if (!string2ll(key.data(), key.size(), &llval))
+        return false;
+
+      intset* is = (intset*)set;
+      return intsetFind(is, llval);
+    }
+    case kEncodingStrMap: {
+      const FlatSet* fs = (FlatSet*)set;
+      return fs->Contains(key);
+    }
+    default:
+      LOG(FATAL) << "Unexpected encoding " << encoding;
+  }
+}
 size_t MallocUsedSet(unsigned encoding, void* ptr) {
   switch (encoding) {
-    case OBJ_ENCODING_HT:
-      return DictMallocSize((dict*)ptr);
-    case OBJ_ENCODING_INTSET:
+    case kEncodingStrMap /*OBJ_ENCODING_HT*/:
+      return 0;  // TODO
+    case kEncodingIntSet:
       return intsetBlobLen((intset*)ptr);
     default:
       LOG(FATAL) << "Unknown set encoding type " << encoding;
@@ -216,12 +240,25 @@ size_t RobjWrapper::Size() const {
     case OBJ_STRING:
       DCHECK_EQ(OBJ_ENCODING_RAW, encoding_);
       return sz_;
+    case OBJ_SET:
+      switch (encoding_) {
+        case kEncodingIntSet: {
+          intset* is = (intset*)inner_obj_;
+          return intsetLen(is);
+        }
+        case kEncodingStrMap: {
+          const FlatSet* fs = (FlatSet*)inner_obj_;
+          return fs->Size();
+        }
+        default:
+          LOG(FATAL) << "Unexpected encoding " << encoding_;
+      }
     default:;
   }
   return 0;
 }
 
-void RobjWrapper::Free(std::pmr::memory_resource* mr) {
+void RobjWrapper::Free(pmr::memory_resource* mr) {
   if (!inner_obj_)
     return;
 
@@ -236,7 +273,7 @@ void RobjWrapper::Free(std::pmr::memory_resource* mr) {
       quicklistRelease((quicklist*)inner_obj_);
       break;
     case OBJ_SET:
-      FreeObjSet(encoding_, inner_obj_);
+      FreeObjSet(encoding_, inner_obj_, mr);
       break;
     case OBJ_ZSET:
       FreeObjZset(encoding_, inner_obj_);
@@ -304,6 +341,16 @@ void RobjWrapper::SetString(string_view s, pmr::memory_resource* mr) {
     memcpy(inner_obj_, s.data(), s.size());
     sz_ = s.size();
   }
+}
+
+bool RobjWrapper::IsMember(std::string_view key) const {
+  switch (type_) {
+    case OBJ_SET:
+      return IsMemberSet(encoding_, key, inner_obj_);
+    default:
+      LOG(FATAL) << "Unsupported type " << type_;
+  }
+  return false;
 }
 
 void RobjWrapper::Init(unsigned type, unsigned encoding, void* inner) {
@@ -444,6 +491,8 @@ CompactObj::~CompactObj() {
 }
 
 CompactObj& CompactObj::operator=(CompactObj&& o) noexcept {
+  DCHECK(&o != this);
+
   SetMeta(o.taglen_, o.mask_);  // Frees underlying resources if needed.
   memcpy(&u_, &o.u_, sizeof(u_));
 
@@ -454,7 +503,7 @@ CompactObj& CompactObj::operator=(CompactObj&& o) noexcept {
   return *this;
 }
 
-size_t CompactObj::StrSize() const {
+size_t CompactObj::Size() const {
   if (IsInline()) {
     return taglen_;
   }
@@ -477,8 +526,9 @@ uint64_t CompactObj::HashCode() const {
   if (IsInline()) {
     if (encoded) {
       char buf[kInlineLen * 2];
-      detail::ascii_unpack(to_byte(u_.inline_str), taglen_, buf);
-      return XXH3_64bits_withSeed(buf, DecodedLen(taglen_), kHashSeed);
+      size_t decoded_len = DecodedLen(taglen_);
+      detail::ascii_unpack(to_byte(u_.inline_str), decoded_len, buf);
+      return XXH3_64bits_withSeed(buf, decoded_len, kHashSeed);
     }
     return XXH3_64bits_withSeed(u_.inline_str, taglen_, kHashSeed);
   }
@@ -541,16 +591,21 @@ void CompactObj::ImportRObj(robj* o) {
 
   SetMeta(ROBJ_TAG);
 
-  // u_.r_obj.type = o->type;
-  // u_.r_obj.encoding = o->encoding;
-  // u_.r_obj.unneeded = o->lru;
-
   if (o->type == OBJ_STRING) {
     std::string_view src((sds)o->ptr, sdslen((sds)o->ptr));
     u_.r_obj.SetString(src, tl.local_mr);
     decrRefCount(o);
   } else {  // Non-string objects we move as is and release Robj wrapper.
-    u_.r_obj.Init(o->type, o->encoding, o->ptr);
+    auto type = o->type;
+    auto enc = o->encoding;
+    if (o->type == OBJ_SET) {
+      if (o->encoding == OBJ_ENCODING_INTSET) {
+        enc = kEncodingIntSet;
+      } else {
+        enc = kEncodingStrMap;
+      }
+    }
+    u_.r_obj.Init(type, enc, o->ptr);
     if (o->refcount == 1)
       zfree(o);
   }
@@ -560,9 +615,15 @@ robj* CompactObj::AsRObj() const {
   CHECK_EQ(ROBJ_TAG, taglen_);
 
   robj* res = &tl.tmp_robj;
-  res->encoding = u_.r_obj.encoding();
+  unsigned enc = u_.r_obj.encoding();
   res->type = u_.r_obj.type();
-  res->lru = 0; // u_.r_obj.unneeded;
+
+  if (res->type == OBJ_SET) {
+    DCHECK_EQ(kEncodingIntSet, u_.r_obj.encoding());
+    enc = OBJ_ENCODING_INTSET;
+  }
+  res->encoding = enc;
+  res->lru = 0;  // u_.r_obj.unneeded;
   res->ptr = u_.r_obj.inner_obj();
 
   return res;
@@ -580,7 +641,12 @@ void CompactObj::SyncRObj() {
   DCHECK_EQ(ROBJ_TAG, taglen_);
   DCHECK_EQ(u_.r_obj.type(), obj->type);
 
-  u_.r_obj.Init(obj->type, obj->encoding, obj->ptr);
+  unsigned enc = obj->encoding;
+  if (obj->type == OBJ_SET) {
+    DCHECK_EQ(OBJ_ENCODING_INTSET, enc);
+    enc = kEncodingIntSet;
+  }
+  u_.r_obj.Init(obj->type, enc, obj->ptr);
 }
 
 void CompactObj::SetInt(int64_t val) {
