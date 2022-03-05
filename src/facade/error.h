@@ -20,6 +20,6 @@ extern const char kDbIndOutOfRangeErr[];
 extern const char kInvalidDbIndErr[];
 extern const char kScriptNotFound[];
 extern const char kAuthRejected[];
-
+extern const char kExpiryOutOfRange[];
 
 }  // namespace dfly

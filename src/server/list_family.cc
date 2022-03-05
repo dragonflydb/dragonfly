@@ -32,11 +32,11 @@ extern "C" {
  * but if your use case is unique, adjust the settings as necessary.
  *
  */
-DEFINE_int32(list_max_listpack_size, -2, "Maximum ziplist size, default is 8kb");
+DEFINE_int32(list_max_listpack_size, -2, "Maximum listpack size, default is 8kb");
 
 /**
  * Lists may also be compressed.
- * Compress depth is the number of quicklist ziplist nodes from *each* side of
+ * Compress depth is the number of quicklist listpack nodes from *each* side of
  * the list to *exclude* from compression.  The head and tail of the list
  * are always uncompressed for fast push/pop operations.  Settings are:
  * 0: disable all list compression

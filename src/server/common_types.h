@@ -16,6 +16,8 @@ namespace dfly {
 enum class ListDir : uint8_t { LEFT, RIGHT };
 
 
+constexpr uint64_t kMaxExpireDeadlineSec = (1u << 24) - 1;
+
 using DbIndex = uint16_t;
 using ShardId = uint16_t;
 using TxId = uint64_t;

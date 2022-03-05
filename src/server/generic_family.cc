@@ -5,7 +5,7 @@
 #include "server/generic_family.h"
 
 extern "C" {
- #include "redis/object.h"
+#include "redis/object.h"
 }
 
 #include "base/logging.h"
@@ -21,6 +21,7 @@ DEFINE_uint32(dbnum, 16, "Number of databases");
 namespace dfly {
 using namespace std;
 using facade::Protocol;
+using facade::kExpiryOutOfRange;
 
 namespace {
 
@@ -244,8 +245,11 @@ void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
     return OpExpire(OpArgs{shard, t->db_index()}, key, params);
   };
   OpStatus status = cntx->transaction->ScheduleSingleHop(move(cb));
-
-  (*cntx)->SendLong(status == OpStatus::OK);
+  if (status == OpStatus::OUT_OF_RANGE) {
+    return (*cntx)->SendError(kExpiryOutOfRange);
+  } else {
+    (*cntx)->SendLong(status == OpStatus::OK);
+  }
 }
 
 void GenericFamily::ExpireAt(CmdArgList args, ConnectionContext* cntx) {
@@ -263,7 +267,12 @@ void GenericFamily::ExpireAt(CmdArgList args, ConnectionContext* cntx) {
     return OpExpire(OpArgs{shard, t->db_index()}, key, params);
   };
   OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
-  (*cntx)->SendLong(status == OpStatus::OK);
+
+  if (status == OpStatus::OUT_OF_RANGE) {
+    return (*cntx)->SendError(kExpiryOutOfRange);
+  } else {
+    (*cntx)->SendLong(status == OpStatus::OK);
+  }
 }
 
 void GenericFamily::Rename(CmdArgList args, ConnectionContext* cntx) {
@@ -424,7 +433,6 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
-
 OpStatus GenericFamily::OpExpire(const OpArgs& op_args, string_view key,
                                  const ExpireParams& params) {
   auto& db_slice = op_args.shard->db_slice();
@@ -432,18 +440,20 @@ OpStatus GenericFamily::OpExpire(const OpArgs& op_args, string_view key,
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
 
-  int64_t abs_msec = (params.unit == TimeUnit::SEC) ? params.ts * 1000 : params.ts;
+  int64_t msec = (params.unit == TimeUnit::SEC) ? params.ts * 1000 : params.ts;
+  int64_t now_msec = db_slice.Now();
+  int64_t rel_msec = params.absolute ? msec - now_msec : msec;
 
-  if (!params.absolute) {
-    abs_msec += db_slice.Now();
+  if (rel_msec > int64_t(kMaxExpireDeadlineSec * 1000)) {
+    return OpStatus::OUT_OF_RANGE;
   }
 
-  if (abs_msec <= int64_t(db_slice.Now())) {
+  if (rel_msec <= 0) {
     CHECK(db_slice.Del(op_args.db_ind, it));
   } else if (IsValid(expire_it)) {
-    expire_it->second = abs_msec;
+    expire_it->second = rel_msec + now_msec;
   } else {
-    db_slice.Expire(op_args.db_ind, it, abs_msec);
+    db_slice.Expire(op_args.db_ind, it, rel_msec + now_msec);
   }
 
   return OpStatus::OK;
@@ -491,8 +501,8 @@ OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, ArgSlice keys)
   return res;
 }
 
-OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from,
-                                    string_view to, bool skip_exists) {
+OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from, string_view to,
+                                    bool skip_exists) {
   auto& db_slice = op_args.shard->db_slice();
   auto [from_it, expire_it] = db_slice.FindExt(op_args.db_ind, from);
   if (!IsValid(from_it))
@@ -538,8 +548,8 @@ void GenericFamily::OpScan(const OpArgs& op_args, uint64_t* cursor, vector<strin
     ++cnt;
   };
 
-  VLOG(1) << "PrimeTable " << db_slice.shard_id() << "/" << op_args.db_ind
-          << " has " << db_slice.DbSize(op_args.db_ind);
+  VLOG(1) << "PrimeTable " << db_slice.shard_id() << "/" << op_args.db_ind << " has "
+          << db_slice.DbSize(op_args.db_ind);
 
   uint64_t cur = *cursor;
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_ind);
@@ -559,10 +569,10 @@ void GenericFamily::Register(CommandRegistry* registry) {
   constexpr auto kSelectOpts = CO::LOADING | CO::FAST | CO::NOSCRIPT;
 
   *registry << CI{"DEL", CO::WRITE, -2, 1, -1, 1}.HFUNC(Del)
-    /* Redis compaitibility:
-     * We don't allow PING during loading since in Redis PING is used as
-     * failure detection, and a loading server is considered to be
-     * not available. */
+            /* Redis compaitibility:
+             * We don't allow PING during loading since in Redis PING is used as
+             * failure detection, and a loading server is considered to be
+             * not available. */
             << CI{"PING", CO::FAST, -1, 0, 0, 0}.HFUNC(Ping)
             << CI{"ECHO", CO::LOADING | CO::FAST, 2, 0, 0, 0}.HFUNC(Echo)
             << CI{"EXISTS", CO::READONLY | CO::FAST, -2, 1, -1, 1}.HFUNC(Exists)

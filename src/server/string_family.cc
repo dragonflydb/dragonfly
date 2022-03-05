@@ -123,12 +123,16 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       if (!absl::SimpleAtoi(ex, &int_arg)) {
         return builder->SendError(kInvalidIntErr);
       }
-      if (int_arg <= 0 || (!is_ms && int_arg >= 500000000)) {
-        return builder->SendError("invalid expire time in set");
+
+      if (int_arg <= 0 || (!is_ms && int_arg >= int64_t(kMaxExpireDeadlineSec))) {
+        return builder->SendError(facade::kExpiryOutOfRange);
       }
 
       if (!is_ms) {
         int_arg *= 1000;
+      }
+      if (int_arg >= int64_t(kMaxExpireDeadlineSec * 1000)) {
+        return builder->SendError(facade::kExpiryOutOfRange);
       }
       sparams.expire_after_ms = int_arg;
     } else if (cur_arg == "NX") {

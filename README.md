@@ -194,3 +194,16 @@ Design config support. ~140 commands overall...
 API 5,6 - without cluster and modules. Streams support. ~80 commands overall.
 ## Milestone Adult
 TBD.
+
+
+## Design decisions along the way
+### Expiration deadlines with relative accuracy
+I decided to limit the expiration range to 180 days. Moreover, expiration deadlines
+with millisecond precision (PEXPIRE/PSETEX etc) will be rounded to closest second
+**for deadlines greater than 16777215ms (approximately 280 minutes). In other words,
+expiries of `PEXPIRE key 10010` will expire exactly after 10 seconds and 10ms. However,
+`PEXPIRE key 16777300` will expire after 16777 seconds (i.e. 300ms earlier). Similarly,
+`PEXPIRE key 16777800` will expire after 16778 seconds, i.e. 200ms later.
+
+Such rounding has at most 0.006% error which I hope is acceptable for ranges so big.
+If you it breaks your use-cases - talk to me or open an issue and explain your case.
