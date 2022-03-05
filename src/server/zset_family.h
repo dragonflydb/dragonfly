@@ -26,6 +26,19 @@ class ZSetFamily {
   static void ZRem(CmdArgList args,  ConnectionContext* cntx);
   static void ZScore(CmdArgList args,  ConnectionContext* cntx);
   static void ZRangeByScore(CmdArgList args,  ConnectionContext* cntx);
+
+  struct ZParams {
+    unsigned flags = 0;  // mask of ZADD_IN_ macros.
+    bool ch = false;     // Corresponds to CH option.
+  };
+
+  using ScoredMemberView = std::pair<double, std::string_view>;
+  using ScoredMemberSpan = absl::Span<ScoredMemberView>;
+  template <typename T> using OpResult = facade::OpResult<T>;
+
+  static OpResult<unsigned> OpAdd(const ZParams& zparams, const OpArgs& op_args,
+                                  std::string_view key, const ScoredMemberSpan& members);
+
 };
 
 }  // namespace dfly
