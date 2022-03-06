@@ -104,16 +104,16 @@ API 1.0
   - [X] RPOP
   - [ ] RPOPLPUSH
   - [X] RPUSH
-- [ ] SortedSet Family
-  - [ ] ZADD
-  - [ ] ZCARD
+- [X] SortedSet Family
+  - [X] ZADD
+  - [X] ZCARD
   - [ ] ZINCRBY
   - [ ] ZRANGE
   - [ ] ZRANGEBYSCORE
-  - [ ] ZREM
+  - [X] ZREM
   - [ ] ZREMRANGEBYSCORE
   - [ ] ZREVRANGE
-  - [ ] ZSCORE
+  - [X] ZSCORE
 - [ ] Not sure whether these are required for the initial release.
   - [X] AUTH
   - [ ] BGREWRITEAOF

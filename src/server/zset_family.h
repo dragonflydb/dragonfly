@@ -19,13 +19,13 @@ class ZSetFamily {
   static void Register(CommandRegistry* registry);
 
  private:
-  static void ZCard(CmdArgList args,  ConnectionContext* cntx);
-  static void ZAdd(CmdArgList args,  ConnectionContext* cntx);
-  static void ZIncrBy(CmdArgList args,  ConnectionContext* cntx);
-  static void ZRange(CmdArgList args,  ConnectionContext* cntx);
-  static void ZRem(CmdArgList args,  ConnectionContext* cntx);
-  static void ZScore(CmdArgList args,  ConnectionContext* cntx);
-  static void ZRangeByScore(CmdArgList args,  ConnectionContext* cntx);
+  static void ZCard(CmdArgList args, ConnectionContext* cntx);
+  static void ZAdd(CmdArgList args, ConnectionContext* cntx);
+  static void ZIncrBy(CmdArgList args, ConnectionContext* cntx);
+  static void ZRange(CmdArgList args, ConnectionContext* cntx);
+  static void ZRem(CmdArgList args, ConnectionContext* cntx);
+  static void ZScore(CmdArgList args, ConnectionContext* cntx);
+  static void ZRangeByScore(CmdArgList args, ConnectionContext* cntx);
 
   struct ZParams {
     unsigned flags = 0;  // mask of ZADD_IN_ macros.
@@ -37,8 +37,10 @@ class ZSetFamily {
   template <typename T> using OpResult = facade::OpResult<T>;
 
   static OpResult<unsigned> OpAdd(const ZParams& zparams, const OpArgs& op_args,
-                                  std::string_view key, const ScoredMemberSpan& members);
-
+                                  std::string_view key, ScoredMemberSpan members);
+  static OpResult<unsigned> OpRem(const OpArgs& op_args, std::string_view key, ArgSlice members);
+  static OpResult<double> OpScore(const OpArgs& op_args, std::string_view key,
+                                  std::string_view member);
 };
 
 }  // namespace dfly
