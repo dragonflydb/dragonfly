@@ -89,7 +89,7 @@ TEST_F(StringFamilyTest, Set) {
   ASSERT_THAT(resp, ElementsAre(ErrArg(kInvalidIntErr)));
 
   resp = Run({"set", "foo", "bar", "ex", "-1"});
-  ASSERT_THAT(resp, ElementsAre(ErrArg("invalid expire time in set")));
+  ASSERT_THAT(resp, ElementsAre(ErrArg("out of range")));
 
   resp = Run({"set", "foo", "bar", "ex", "1"});
   ASSERT_THAT(resp, RespEq("OK"));

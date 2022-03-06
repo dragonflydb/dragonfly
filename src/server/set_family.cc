@@ -893,47 +893,45 @@ auto SetFamily::OpPop(const OpArgs& op_args, std::string_view key, unsigned coun
   if (count == 0)
     return result;
 
-#if 0
   MainIterator it = find_res.value();
-  robj* sobj = it->second.AsRObj();
-  auto slen = setTypeSize(sobj);
-
+  size_t slen = it->second.Size();
 
   /* CASE 1:
    * The number of requested elements is greater than or equal to
    * the number of elements inside the set: simply return the whole set. */
   if (count >= slen) {
-    /* We just return the entire set */
-    auto* si = setTypeInitIterator(sobj);
-    sds ele;
-    while ((ele = setTypeNextObject(si)) != NULL) {
-      std::string_view sv{ele, sdslen(ele)};
-      result.emplace_back(sv);
-      sdsfree(ele);
-    }
-
-    setTypeReleaseIterator(si);
-
+    FillSet(it->second, [&result](string s) {
+      result.push_back(move(s));
+    });
     /* Delete the set as it is now empty */
     CHECK(es->db_slice().Del(op_args.db_ind, it));
   } else {
-    sds sdsele;
-    int64_t llele;
+    if (it->second.Encoding() == kEncodingIntSet) {
+      intset* is = (intset*)it->second.RObjPtr();
+      int64_t val = 0;
 
-    while (count--) {
-      /* Emit and remove. */
-      int encoding = setTypeRandomElement(sobj, &sdsele, &llele);
-      if (encoding == OBJ_ENCODING_INTSET) {
-        result.emplace_back(absl::StrCat(llele));
-        sobj->ptr = intsetRemove((intset*)sobj->ptr, llele, NULL);
-      } else {
-        result.emplace_back(std::string_view{sdsele, sdslen(sdsele)});
-        setTypeRemove(sobj, sdsele);
+      // copy last count values.
+      for (uint32_t i = slen - count; i < slen; ++i) {
+        intsetGet(is, i, &val);
+        result.push_back(absl::StrCat(val));
       }
+
+      is = intsetTrimTail(is, count);  // now remove last count items
+      it->second.SetRObjPtr(is);
+    } else {
+      FlatSet* fs = (FlatSet*)it->second.RObjPtr();
+      string str;
+
+      for (uint32_t i = 0; i < count; ++i) {
+        auto it = fs->begin();
+        it->GetString(&str);
+        fs->Erase(it);
+        result.push_back(move(str));
+      }
+
+      it->second.SetRObjPtr(fs);
     }
-    it->second.SyncRObj();
   }
-#endif
   return result;
 }
 

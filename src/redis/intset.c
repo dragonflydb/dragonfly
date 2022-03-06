@@ -252,6 +252,13 @@ intset *intsetRemove(intset *is, int64_t value, int *success) {
     return is;
 }
 
+intset *intsetTrimTail(intset *is, uint32_t tail_len) {
+    uint32_t len = intrev32ifbe(is->length);
+    uint32_t new_len = tail_len >= len ? 0 : len - tail_len;
+    is->length = intrev32ifbe(new_len);
+    return intsetResize(is, new_len);
+}
+
 /* Determine whether a value belongs to this set */
 uint8_t intsetFind(intset *is, int64_t value) {
     uint8_t valenc = _intsetValueEncoding(value);

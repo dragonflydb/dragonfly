@@ -84,5 +84,29 @@ TEST_F(SetFamilyTest, SMove) {
   EXPECT_THAT(resp[0], IntArg(1));
 }
 
+TEST_F(SetFamilyTest, SPop) {
+  auto resp = Run({"sadd", "x", "1", "2", "3"});
+  resp = Run({"spop", "x", "3"});
+  EXPECT_THAT(resp, UnorderedElementsAre("1", "2", "3"));
+  resp = Run({"type", "x"});
+  EXPECT_THAT(resp, RespEq("none"));
+
+  Run({"sadd", "x", "1", "2", "3"});
+  resp = Run({"spop", "x", "2"});
+  EXPECT_THAT(resp, IsSubsetOf({"1", "2", "3"}));
+  EXPECT_EQ(2, resp.size());
+
+  resp = Run({"scard", "x"});
+  EXPECT_THAT(resp[0], IntArg(1));
+
+  Run({"sadd", "y", "a", "b", "c"});
+  resp = Run({"spop", "y", "1"});
+  EXPECT_THAT(resp, IsSubsetOf({"a", "b", "c"}));
+  EXPECT_EQ(1, resp.size());
+
+  resp = Run({"smembers", "y"});
+  EXPECT_THAT(resp, IsSubsetOf({"a", "b", "c"}));
+  EXPECT_EQ(2, resp.size());
+}
 
 }  // namespace dfly
