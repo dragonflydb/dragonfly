@@ -146,6 +146,8 @@ API 2.0
   - [X] BLPOP
   - [ ] BRPOP
   - [ ] BRPOPLPUSH
+- [X] String Family
+  - [X] SETEX
 - [X] HashSet Family
   - [X] HSET
   - [X] HMSET

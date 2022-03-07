@@ -97,8 +97,8 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
 void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   set_qps.Inc();
 
-  std::string_view key = ArgS(args, 1);
-  std::string_view value = ArgS(args, 2);
+  string_view key = ArgS(args, 1);
+  string_view value = ArgS(args, 2);
   VLOG(2) << "Set " << key << " " << value;
 
   SetCmd::SetParams sparams{cntx->db_index()};
@@ -110,7 +110,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   for (size_t i = 3; i < args.size(); ++i) {
     ToUpper(&args[i]);
 
-    std::string_view cur_arg = ArgS(args, i);
+    string_view cur_arg = ArgS(args, i);
 
     if (cur_arg == "EX" || cur_arg == "PX") {
       bool is_ms = (cur_arg == "PX");
@@ -162,6 +162,30 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   CHECK_EQ(result, OpStatus::SKIPPED);  // in case of NX option
 
   return builder->SendSetSkipped();
+}
+
+void StringFamily::SetEx(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view ex = ArgS(args, 2);
+  string_view value = ArgS(args, 3);
+  uint32_t secs;
+
+  if (!absl::SimpleAtoi(ex, &secs)) {
+    return (*cntx)->SendError(kInvalidIntErr);
+  }
+
+  SetCmd::SetParams sparams{cntx->db_index()};
+  sparams.expire_after_ms = uint64_t(secs) * 1000;
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    SetCmd sg(&shard->db_slice());
+    auto status = sg.Set(sparams, key, value).status();
+    return status;
+  };
+
+  OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
+
+  return (*cntx)->SendError(result.status());
 }
 
 void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
@@ -545,6 +569,7 @@ void StringFamily::Shutdown() {
 
 void StringFamily::Register(CommandRegistry* registry) {
   *registry << CI{"SET", CO::WRITE | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(Set)
+            << CI{"SETEX", CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(SetEx)
             << CI{"APPEND", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Append)
             << CI{"PREPEND", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Prepend)
             << CI{"INCR", CO::WRITE | CO::DENYOOM | CO::FAST, 2, 1, 1, 1}.HFUNC(Incr)

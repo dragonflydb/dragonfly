@@ -50,6 +50,7 @@ class StringFamily {
 
  private:
   static void Set(CmdArgList args, ConnectionContext* cntx);
+  static void SetEx(CmdArgList args, ConnectionContext* cntx);
   static void Get(CmdArgList args, ConnectionContext* cntx);
   static void GetSet(CmdArgList args, ConnectionContext* cntx);
   static void MGet(CmdArgList args, ConnectionContext* cntx);
