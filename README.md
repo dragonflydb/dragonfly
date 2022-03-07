@@ -148,13 +148,15 @@ API 2.0
   - [ ] BRPOPLPUSH
 - [X] HashSet Family
   - [X] HSET
+  - [X] HMSET
   - [X] HDEL
   - [X] HEXISTS
   - [X] HGET
+  - [X] HMGET
   - [X] HLEN
   - [ ] HINCRBY
   - [ ] HINCRBYFLOAT
-  - [ ] HGETALL
+  - [X] HGETALL
   - [X] HKEYS
 - [ ] PubSub family
   - [ ] PUBLISH

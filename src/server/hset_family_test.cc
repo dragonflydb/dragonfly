@@ -81,5 +81,21 @@ TEST_F(HSetFamilyTest, HSetLarge) {
   EXPECT_THAT(resp[0], IntArg(1));
 }
 
+TEST_F(HSetFamilyTest, Get) {
+  auto resp = Run({"hset", "x", "a", "1", "b", "2", "c", "3"});
+  EXPECT_THAT(resp[0], IntArg(3));
+
+  resp = Run({"hkeys", "x"});
+  EXPECT_THAT(resp, UnorderedElementsAre("a", "b", "c"));
+
+  resp = Run({"hvals", "x"});
+  EXPECT_THAT(resp, UnorderedElementsAre("1", "2", "3"));
+
+  resp = Run({"hmget", "x", "a", "c", "d"});
+  EXPECT_THAT(resp, ElementsAre("1", "3", ArgType(RespExpr::NIL)));
+
+  resp = Run({"hgetall", "x"});
+  EXPECT_THAT(resp, ElementsAre("a", "1", "b", "2", "c", "3"));
+}
 
 }  // namespace dfly
