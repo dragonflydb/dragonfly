@@ -112,7 +112,7 @@ void MCReplyBuilder::SendMGetResponse(const OptResp* resp, uint32_t count) {
   SendDirect("END\r\n");
 }
 
-void MCReplyBuilder::SendError(string_view str) {
+void MCReplyBuilder::SendError(string_view str, std::string_view type) {
   SendDirect("ERROR\r\n");
 }
 
@@ -132,7 +132,9 @@ void MCReplyBuilder::SendNotFound() {
 RedisReplyBuilder::RedisReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
 }
 
-void RedisReplyBuilder::SendError(string_view str) {
+void RedisReplyBuilder::SendError(string_view str, std::string_view type) {
+  err_count_[type.empty() ? str : type]++;
+
   if (str[0] == '-') {
     iovec v[] = {IoVec(str), IoVec(kCRLF)};
     Send(v, ABSL_ARRAYSIZE(v));

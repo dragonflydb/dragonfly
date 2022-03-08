@@ -20,7 +20,7 @@
 #include "util/tls/tls_socket.h"
 #include "util/uring/uring_socket.h"
 
-DEFINE_bool(tcp_nodelay, true, "Configures dragonfly connections with socket option TCP_NODELAY");
+DEFINE_bool(tcp_nodelay, false, "Configures dragonfly connections with socket option TCP_NODELAY");
 
 using namespace util;
 using namespace std;
@@ -51,6 +51,16 @@ void RespToArgList(const RespVec& src, CmdArgVec* dest) {
   for (size_t i = 0; i < src.size(); ++i) {
     (*dest)[i] = ToMSS(src[i].GetBuf());
   }
+}
+
+void FetchBuilderStats(ConnectionStats* stats, SinkReplyBuilder* builder) {
+  stats->io_write_cnt += builder->io_write_cnt();
+  stats->io_write_bytes += builder->io_write_bytes();
+
+  for (const auto& k_v : builder->err_count()) {
+    stats->err_count[k_v.first] += k_v.second;
+  }
+  builder->reset_io_stats();
 }
 
 // TODO: to implement correct matcher according to HTTP spec
@@ -413,15 +423,8 @@ auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, Pars
   error_code ec;
   ParserStatus parse_status = OK;
 
-  auto fetch_builder_stats = [&] {
-    stats->io_write_cnt += builder->io_write_cnt();
-    stats->io_write_bytes += builder->io_write_bytes();
-
-    builder->reset_io_stats();
-  };
-
   do {
-    fetch_builder_stats();
+    FetchBuilderStats(stats, builder);
 
     io::MutableBytes append_buf = io_buf_.AppendBuffer();
     ::io::Result<size_t> recv_sz = peer->Recv(append_buf);
@@ -470,7 +473,7 @@ auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, Pars
     ec = builder->GetError();
   } while (peer->IsOpen() && !ec);
 
-  fetch_builder_stats();
+  FetchBuilderStats(stats, builder);
 
   if (ec)
     return ec;

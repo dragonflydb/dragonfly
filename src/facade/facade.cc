@@ -17,9 +17,11 @@ using namespace std;
 
 #define ADD(x) (x) += o.x
 
+constexpr size_t kSizeConnStats = sizeof(ConnectionStats);
+
 ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   // To break this code deliberately if we add/remove a field to this struct.
-  static_assert(sizeof(ConnectionStats) == 64);
+  static_assert(kSizeConnStats == 144);
 
   ADD(num_conns);
   ADD(num_replicas);
@@ -30,6 +32,14 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   ADD(io_write_bytes);
   ADD(pipelined_cmd_cnt);
   ADD(command_cnt);
+
+  for (const auto& k_v : o.err_count) {
+    err_count[k_v.first] += k_v.second;
+  }
+
+  for (const auto& k_v : o.cmd_count) {
+    cmd_count[k_v.first] += k_v.second;
+  }
 
   return *this;
 }
@@ -51,6 +61,9 @@ const char kInvalidDbIndErr[] = "invalid DB index";
 const char kScriptNotFound[] = "-NOSCRIPT No matching script. Please use EVAL.";
 const char kAuthRejected[] = "-WRONGPASS invalid username-password pair or user is disabled.";
 const char kExpiryOutOfRange[] = "expiry is out of range";
+
+const char kSyntaxErrType[] = "syntax_error";
+const char kScriptErrType[] = "script_error";
 
 const char* RespExpr::TypeName(Type t) {
   switch (t) {

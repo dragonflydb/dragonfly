@@ -77,8 +77,7 @@ class ServerFamily {
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
 
-  Service& engine_;
-  util::ProactorPool& pp_;
+  Service& service_;
   EngineShardSet& ess_;
 
   util::AcceptServer* acceptor_ = nullptr;

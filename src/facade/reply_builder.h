@@ -1,6 +1,8 @@
 // Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
+#include <absl/container/flat_hash_map.h>
+
 #include <optional>
 #include <string_view>
 
@@ -18,7 +20,7 @@ class ReplyBuilderInterface {
   virtual void SendStored() = 0;
 
   // Common for both MC and Redis.
-  virtual void SendError(std::string_view str) = 0;
+  virtual void SendError(std::string_view str, std::string_view type = std::string_view{}) = 0;
 
   virtual std::error_code GetError() const = 0;
 
@@ -69,6 +71,11 @@ class SinkReplyBuilder : public ReplyBuilderInterface {
   void reset_io_stats() {
     io_write_cnt_ = 0;
     io_write_bytes_ = 0;
+    err_count_.clear();
+  }
+
+  const absl::flat_hash_map<std::string, uint64_t>& err_count() const {
+    return err_count_;
   }
 
   //! Sends a string as is without any formatting. raw should be encoded according to the protocol.
@@ -80,8 +87,10 @@ class SinkReplyBuilder : public ReplyBuilderInterface {
   std::string batch_;
   ::io::Sink* sink_;
   std::error_code ec_;
+
   size_t io_write_cnt_ = 0;
   size_t io_write_bytes_ = 0;
+  absl::flat_hash_map<std::string, uint64_t> err_count_;
 
   bool should_batch_ = false;
 };
@@ -90,7 +99,8 @@ class MCReplyBuilder : public SinkReplyBuilder {
  public:
   MCReplyBuilder(::io::Sink* stream);
 
-  void SendError(std::string_view str) final;
+  void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
+
   // void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) final;
   void SendMGetResponse(const OptResp* resp, uint32_t count) final;
 
@@ -110,7 +120,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
     SendSimpleString("OK");
   }
 
-  void SendError(std::string_view str) override;
+  void SendError(std::string_view str, std::string_view type = std::string_view{}) override;
   void SendMGetResponse(const OptResp* resp, uint32_t count) override;
 
   void SendStored() override;
@@ -151,4 +161,4 @@ class ReqSerializer {
   std::error_code ec_;
 };
 
-}  // namespace dfly
+}  // namespace facade

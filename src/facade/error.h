@@ -23,4 +23,7 @@ extern const char kScriptNotFound[];
 extern const char kAuthRejected[];
 extern const char kExpiryOutOfRange[];
 
+extern const char kSyntaxErrType[];
+extern const char kScriptErrType[];
+
 }  // namespace dfly

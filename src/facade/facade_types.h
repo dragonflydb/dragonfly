@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/types/span.h>
+#include <absl/container/flat_hash_map.h>
 
 namespace facade {
 
@@ -19,6 +20,9 @@ using CmdArgVec = std::vector<MutableSlice>;
 
 
 struct ConnectionStats {
+  absl::flat_hash_map<std::string, uint64_t> err_count;
+  absl::flat_hash_map<std::string, uint64_t> cmd_count;
+
   uint32_t num_conns = 0;
   uint32_t num_replicas = 0;
   size_t read_buf_capacity = 0;

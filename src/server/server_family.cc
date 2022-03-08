@@ -45,8 +45,8 @@ using namespace std;
 using namespace util;
 namespace fibers = ::boost::fibers;
 namespace fs = std::filesystem;
-using strings::HumanReadableNumBytes;
 using facade::MCReplyBuilder;
+using strings::HumanReadableNumBytes;
 
 namespace {
 
@@ -72,11 +72,10 @@ error_code CreateDirs(fs::path dir_path) {
 
 }  // namespace
 
-ServerFamily::ServerFamily(Service* engine)
-    : engine_(*engine), pp_(engine->proactor_pool()), ess_(engine->shard_set()) {
+ServerFamily::ServerFamily(Service* service) : service_(*service), ess_(service->shard_set()) {
   start_time_ = time(NULL);
   last_save_.store(start_time_, memory_order_release);
-  script_mgr_.reset(new ScriptMgr(&engine->shard_set()));
+  script_mgr_.reset(new ScriptMgr(&service->shard_set()));
 }
 
 ServerFamily::~ServerFamily() {
@@ -90,7 +89,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor) {
 void ServerFamily::Shutdown() {
   VLOG(1) << "ServerFamily::Shutdown";
 
-  pp_.GetNextProactor()->Await([this] {
+  service_.proactor_pool().GetNextProactor()->Await([this] {
     unique_lock lk(replica_of_mu_);
     if (replica_) {
       replica_->Stop();
@@ -256,7 +255,8 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  pp_.Await([](auto*) { ServerState::tlocal()->set_gstate(GlobalState::SAVING); });
+  auto& pool = service_.proactor_pool();
+  pool.Await([](auto*) { ServerState::tlocal()->set_gstate(GlobalState::SAVING); });
 
   unique_ptr<::io::WriteFile> wf(*res);
   auto start = absl::Now();
@@ -280,7 +280,7 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  pp_.Await([](auto*) { ServerState::tlocal()->set_gstate(GlobalState::IDLE); });
+  pool.Await([](auto*) { ServerState::tlocal()->set_gstate(GlobalState::IDLE); });
   CHECK_EQ(GlobalState::SAVING, global_state_.Clear());
 
   absl::Duration dur = absl::Now() - start;
@@ -326,7 +326,7 @@ Metrics ServerFamily::GetMetrics() const {
     }
   };
 
-  pp_.AwaitFiberOnAll(std::move(cb));
+  service_.proactor_pool().AwaitFiberOnAll(std::move(cb));
   result.qps /= 6;
 
   return result;
@@ -354,8 +354,8 @@ arch_bits:64
 multiplexing_api:iouring
 tcp_port:)";
 
-  auto should_enter = [&](string_view name) {
-    bool res = section.empty() || section == name;
+  auto should_enter = [&](string_view name, bool hidden = false) {
+    bool res = (!hidden && section.empty()) || section == "ALL" || section == name;
     if (res && !info.empty())
       info.push_back('\n');
 
@@ -404,6 +404,7 @@ tcp_port:)";
     // known we approximate their allocations by taking 16 bytes per member.
     absl::StrAppend(&info, "blob_used_memory:", m.db.obj_memory_usage, "\n");
     absl::StrAppend(&info, "table_used_memory:", m.db.table_mem_usage, "\n");
+    absl::StrAppend(&info, "num_buckets:", m.db.bucket_count, "\n");
     absl::StrAppend(&info, "num_entries:", m.db.key_count, "\n");
     absl::StrAppend(&info, "inline_keys:", m.db.inline_keys, "\n");
     absl::StrAppend(&info, "small_string_bytes:", m.db.small_string_bytes, "\n");
@@ -453,6 +454,26 @@ tcp_port:)";
     }
   }
 
+  if (should_enter("COMMANDSTATS", true)) {
+    absl::StrAppend(&info, "# Commandstats\n");
+    auto unknown_cmd = service_.UknownCmdMap();
+
+    for (const auto& k_v : unknown_cmd) {
+      absl::StrAppend(&info, "unknown_", k_v.first, ":", k_v.second, "\n");
+    }
+
+    for (const auto& k_v : m.conn_stats.cmd_count) {
+      absl::StrAppend(&info, "cmd_", k_v.first, ":", k_v.second, "\n");
+    }
+  }
+
+  if (should_enter("ERRORSTATS", true)) {
+    absl::StrAppend(&info, "# Errorstats\n");
+    for (const auto& k_v : m.conn_stats.err_count) {
+      absl::StrAppend(&info, k_v.first, ":", k_v.second, "\n");
+    }
+  }
+
   if (should_enter("KEYSPACE")) {
     absl::StrAppend(&info, "# Keyspace\n");
     absl::StrAppend(&info, "db0:keys=xxx,expires=yyy,avg_ttl=zzz\n");  // TODO
@@ -464,6 +485,7 @@ tcp_port:)";
 void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   std::string_view host = ArgS(args, 1);
   std::string_view port_s = ArgS(args, 2);
+  auto& pool = service_.proactor_pool();
 
   if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_s, "one")) {
     // use this lock as critical section to prevent concurrent replicaof commands running.
@@ -474,7 +496,8 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
       auto repl_ptr = replica_;
       CHECK(repl_ptr);
 
-      pp_.AwaitFiberOnAll([&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = true; });
+      pool.AwaitFiberOnAll(
+          [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = true; });
       replica_->Stop();
       replica_.reset();
     }
@@ -489,7 +512,7 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  auto new_replica = make_shared<Replica>(string(host), port, &engine_);
+  auto new_replica = make_shared<Replica>(string(host), port, &service_);
 
   unique_lock lk(replica_of_mu_);
   if (replica_) {
@@ -513,8 +536,9 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   if (!replica_->Run(cntx)) {
     replica_.reset();
   }
+
   bool is_master = !replica_;
-  pp_.AwaitFiberOnAll(
+  pool.AwaitFiberOnAll(
       [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
 }
 

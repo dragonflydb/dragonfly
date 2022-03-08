@@ -62,7 +62,7 @@ class InterpreterReplier : public RedisReplyBuilder {
   InterpreterReplier(ObjectExplorer* explr) : RedisReplyBuilder(nullptr), explr_(explr) {
   }
 
-  void SendError(std::string_view str) override;
+  void SendError(std::string_view str, std::string_view type = std::string_view{}) override;
   void SendStored() override;
 
   void SendSimpleString(std::string_view str) final;
@@ -155,7 +155,7 @@ void InterpreterReplier::PostItem() {
   }
 }
 
-void InterpreterReplier::SendError(string_view str) {
+void InterpreterReplier::SendError(string_view str, std::string_view type) {
   DCHECK(array_len_.empty());
   explr_->OnError(str);
 }
@@ -268,7 +268,7 @@ bool EvalValidator(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (unsigned(num_keys) > args.size() - 3) {
-    (*cntx)->SendError("Number of keys can't be greater than number of args");
+    (*cntx)->SendError("Number of keys can't be greater than number of args", kSyntaxErr);
     return false;
   }
 
@@ -356,7 +356,12 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   };
 
   if (cid == nullptr) {
-    return (*cntx)->SendError(absl::StrCat("unknown command `", cmd_str, "`"));
+    (*cntx)->SendError(absl::StrCat("unknown command `", cmd_str, "`"), "unknown_cmd");
+
+    lock_guard lk(stats_mu_);
+    if (unknown_cmds_.size() < 1024)
+      unknown_cmds_[cmd_str]++;
+    return;
   }
 
   if (etl.gstate() == GlobalState::LOADING || etl.gstate() == GlobalState::SHUTTING_DOWN) {
@@ -391,11 +396,11 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   if ((cid->arity() > 0 && args.size() != size_t(cid->arity())) ||
       (cid->arity() < 0 && args.size() < size_t(-cid->arity()))) {
-    return (*cntx)->SendError(facade::WrongNumArgsError(cmd_str));
+    return (*cntx)->SendError(facade::WrongNumArgsError(cmd_str), kSyntaxErr);
   }
 
   if (cid->key_arg_step() == 2 && (args.size() % 2) == 0) {
-    return (*cntx)->SendError(facade::WrongNumArgsError(cmd_str));
+    return (*cntx)->SendError(facade::WrongNumArgsError(cmd_str), kSyntaxErr);
   }
 
   // Validate more complicated cases with custom validators.
@@ -416,6 +421,8 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   }
 
   std::move(multi_error).Cancel();
+
+  etl.connection_stats.cmd_count[cmd_name]++;
 
   if (dfly_cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE && !is_trans_cmd) {
     // TODO: protect against aggregating huge transactions.
@@ -618,6 +625,11 @@ bool Service::IsPassProtected() const {
   return !FLAGS_requirepass.empty();
 }
 
+absl::flat_hash_map<std::string, unsigned> Service::UknownCmdMap() const {
+  lock_guard lk(stats_mu_);
+  return unknown_cmds_;
+}
+
 void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
   if (cntx->protocol() == facade::Protocol::REDIS)
     (*cntx)->SendOk();
@@ -664,7 +676,7 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   string result;
   Interpreter::AddResult add_result = script.AddFunction(body, &result);
   if (add_result == Interpreter::COMPILE_ERR) {
-    return (*cntx)->SendError(result);
+    return (*cntx)->SendError(result, facade::kScriptErrType);
   }
 
   if (add_result == Interpreter::ADD_OK) {
@@ -765,7 +777,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
 
   if (result == Interpreter::RUN_ERR) {
     string resp = absl::StrCat("Error running script (call to ", eval_args.sha, "): ", error);
-    return (*cntx)->SendError(resp);
+    return (*cntx)->SendError(resp, facade::kScriptErrType);
   }
   CHECK(result == Interpreter::RUN_OK);
 

@@ -65,6 +65,8 @@ class Service : public facade::ServiceInterface {
 
   bool IsPassProtected() const;
 
+  absl::flat_hash_map<std::string, unsigned> UknownCmdMap() const;
+
  private:
   static void Quit(CmdArgList args, ConnectionContext* cntx);
   static void Multi(CmdArgList args, ConnectionContext* cntx);
@@ -90,6 +92,9 @@ class Service : public facade::ServiceInterface {
   EngineShardSet shard_set_;
   ServerFamily server_family_;
   CommandRegistry registry_;
+
+  mutable ::boost::fibers::mutex stats_mu_;
+  absl::flat_hash_map<std::string, unsigned> unknown_cmds_;
 };
 
 }  // namespace dfly
