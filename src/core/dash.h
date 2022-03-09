@@ -153,7 +153,6 @@ class DashTable : public detail::DashTableBase {
                                                   seg->Value(bucket_id_, slot_id_)};
     }
 
-
     // Make it self-contained. Does not need container::end().
     bool is_done() const {
       return owner_ == nullptr;
@@ -398,6 +397,43 @@ void DashTable<_Key, _Value, Policy>::Clear() {
 
   IterateUnique(cb);
   size_ = 0;
+
+  // Consider the following case: table with 8 segments overall, 4 unique.
+  // S1, S1, S1, S1, S2, S3, S4, S4
+  /* This corresponds to the tree:
+            R
+          /  \
+        S1   /\
+            /\ S4
+           S2 S3
+     We want to collapse this tree into, say, 2 segment directory.
+     That means we need to keep S1, S2 but delete S3, S4.
+     That means, we need to move representative segments until we reached the desired size
+     and the erase all other unique segments.
+  **********/
+  if (global_depth_ > initial_depth_) {
+    std::pmr::polymorphic_allocator<SegmentType> pa(segment_.get_allocator());
+    size_t dest = 0, src = 0;
+    size_t new_size = (1 << initial_depth_);
+
+    while (src < segment_.size()) {
+      auto* seg = segment_[src];
+      size_t next_src = NextSeg(src);  // must do before because NextSeg is dependent on seg.
+      if (dest < new_size) {
+        seg->set_local_depth(initial_depth_);
+        segment_[dest++] = seg;
+      } else {
+        pa.destroy(seg);
+        pa.deallocate(seg, 1);
+      }
+
+      src = next_src;
+    }
+
+    global_depth_ = initial_depth_;
+    unique_segments_ = new_size;
+    segment_.resize(new_size);
+  }
 }
 
 template <typename _Key, typename _Value, typename Policy>

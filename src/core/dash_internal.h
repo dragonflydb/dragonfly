@@ -382,7 +382,7 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
 
   void Delete(const Iterator& it, Hash_t key_hash);
 
-  void Clear();
+  void Clear();  // clears the segment.
 
   size_t SlowSize() const;
 
@@ -392,6 +392,10 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
 
   size_t local_depth() const {
     return local_depth_;
+  }
+
+  void set_local_depth(uint32_t depth) {
+    local_depth_ = depth;
   }
 
   template <bool B = Policy::USE_VERSION>
@@ -527,7 +531,8 @@ class DashTableBase {
   DashTableBase& operator=(const DashTableBase&) = delete;
 
  public:
-  explicit DashTableBase(uint32_t gd) : global_depth_(gd), unique_segments_(1 << gd) {
+  explicit DashTableBase(uint32_t gd)
+      : initial_depth_(gd), global_depth_(gd), unique_segments_(1 << gd) {
   }
 
   uint32_t unique_segments() const {
@@ -551,6 +556,7 @@ class DashTableBase {
     return 0;
   }
 
+  uint32_t initial_depth_;
   uint32_t global_depth_;
   uint32_t unique_segments_;
   size_t size_ = 0;
@@ -774,7 +780,7 @@ void VersionedBB<NUM_SLOTS, NUM_STASH_FPS>::SetVersion(unsigned slot_id, uint64_
   } else {
     if (nbv > obv) {  // We bump up the high part for the whole bucket and set low parts to 0.
       absl::little_endian::Store64(high_, nbv);  // We put garbage into 2 bytes of low_.
-      low_.fill(0);   // We do not mind because we reset low_ anyway.
+      low_.fill(0);                              // We do not mind because we reset low_ anyway.
     }
     low_[slot_id] = version & 0xFFFF;  // In any case we set slot version to lowest 2 bytes.
   }
