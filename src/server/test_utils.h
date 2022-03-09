@@ -23,6 +23,8 @@ class BaseFamilyTest : public ::testing::Test {
   BaseFamilyTest();
   ~BaseFamilyTest();
 
+  static void SetUpTestSuite();
+
   void SetUp() override;
   void TearDown() override;
 

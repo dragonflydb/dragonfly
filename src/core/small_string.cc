@@ -34,8 +34,8 @@ constexpr XXH64_hash_t kHashSeed = 24061983;  // same as in compact_object.cc
 
 }  // namespace
 
-void SmallString::InitThreadLocal() {
-  SegmentAllocator* ns = new SegmentAllocator(mi_heap_get_backing());
+void SmallString::InitThreadLocal(void * heap) {
+  SegmentAllocator* ns = new SegmentAllocator((mi_heap_t*)heap);
 
   tl.seg_alloc.reset(ns);
   tl.xxh_state.reset(XXH3_createState());

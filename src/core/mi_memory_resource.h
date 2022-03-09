@@ -15,6 +15,8 @@ class MiMemoryResource final : public std::pmr::memory_resource {
   explicit MiMemoryResource(mi_heap_t* heap) : heap_(heap) {
   }
 
+  mi_heap_t* heap() { return heap_;}
+
  private:
   void* do_allocate(std::size_t size, std::size_t align) {
     return mi_heap_malloc_aligned(heap_, size, align);

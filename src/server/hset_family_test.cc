@@ -8,7 +8,6 @@ extern "C" {
 #include "redis/listpack.h"
 #include "redis/object.h"
 #include "redis/sds.h"
-#include "redis/zmalloc.h"
 }
 
 #include "base/gtest.h"
@@ -26,9 +25,6 @@ namespace dfly {
 
 class HSetFamilyTest : public BaseFamilyTest {
  protected:
-  static void SetUpTestSuite() {
-    init_zmalloc_threadlocal();
-  }
 };
 
 TEST_F(HSetFamilyTest, Hash) {

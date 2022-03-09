@@ -4,8 +4,14 @@
 
 #include "server/test_utils.h"
 
+extern "C" {
+#include "redis/zmalloc.h"
+}
+
+
 #include <absl/strings/match.h>
 #include <absl/strings/str_split.h>
+#include <mimalloc.h>
 
 #include "base/logging.h"
 #include "base/stl_util.h"
@@ -52,6 +58,10 @@ BaseFamilyTest::BaseFamilyTest() {
 }
 
 BaseFamilyTest::~BaseFamilyTest() {
+}
+
+void BaseFamilyTest::SetUpTestSuite() {
+  init_zmalloc_threadlocal(mi_heap_get_backing());
 }
 
 void BaseFamilyTest::SetUp() {

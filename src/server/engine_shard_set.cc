@@ -90,14 +90,16 @@ EngineShard::~EngineShard() {
 
 void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
   CHECK(shard_ == nullptr) << pb->GetIndex();
+  CHECK(mi_heap_get_backing() == mi_heap_get_default());
 
-  init_zmalloc_threadlocal();
+  mi_heap_t* tlh = mi_heap_new();
+  init_zmalloc_threadlocal(tlh);
 
-  mi_heap_t* tlh = mi_heap_get_backing();
   void* ptr = mi_heap_malloc_aligned(tlh, sizeof(EngineShard), alignof(EngineShard));
   shard_ = new (ptr) EngineShard(pb, update_db_time, tlh);
 
   CompactObj::InitThreadLocal(shard_->memory_resource());
+  SmallString::InitThreadLocal(tlh);
 }
 
 void EngineShard::DestroyThreadLocal() {
@@ -474,7 +476,7 @@ bool EngineShard::HasResultConverged(TxId notifyid) const {
 }
 
 void EngineShard::CacheStats() {
-  mi_heap_t* tlh = mi_heap_get_backing();
+  mi_heap_t* tlh = mi_resource_.heap();
   struct Sum {
     size_t used = 0;
     size_t comitted = 0;

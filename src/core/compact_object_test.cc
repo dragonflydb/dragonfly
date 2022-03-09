@@ -38,7 +38,9 @@ class CompactObjectTest : public ::testing::Test {
   static void SetUpTestSuite() {
     InitRedisTables();  // to initialize server struct.
 
-    init_zmalloc_threadlocal();
+    auto* tlh = mi_heap_get_backing();
+    init_zmalloc_threadlocal(tlh);
+    SmallString::InitThreadLocal(tlh);
     CompactObj::InitThreadLocal(pmr::get_default_resource());
   }
 

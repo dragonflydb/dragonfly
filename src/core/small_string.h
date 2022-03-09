@@ -18,7 +18,7 @@ class SmallString {
 
  public:
 
-  static void InitThreadLocal();
+  static void InitThreadLocal(void * heap);
 
   void Reset() {
     size_ = 0;

@@ -8,6 +8,8 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include <mimalloc.h>
+
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "io/file.h"
@@ -33,7 +35,7 @@ class RdbTest : public testing::Test {
 
   static void SetUpTestSuite() {
     crc64_init();
-    init_zmalloc_threadlocal();
+    init_zmalloc_threadlocal(mi_heap_get_backing());
   }
 
  protected:

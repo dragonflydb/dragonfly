@@ -112,8 +112,8 @@ int zmalloc_get_allocator_info(size_t* allocated, size_t* active, size_t* reside
   return 1;
 }
 
-void init_zmalloc_threadlocal() {
+void init_zmalloc_threadlocal(void* heap) {
   if (zmalloc_heap)
     return;
-  zmalloc_heap = mi_heap_get_backing();
+  zmalloc_heap = heap;
 }

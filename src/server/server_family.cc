@@ -447,6 +447,7 @@ tcp_port:)";
       Replica::Info rinfo = replica_ptr->GetInfo();
       absl::StrAppend(&info, "master_host:", rinfo.host, "\n");
       absl::StrAppend(&info, "master_port:", rinfo.port, "\n");
+
       const char* link = rinfo.master_link_established ? "up" : "down";
       absl::StrAppend(&info, "master_link_status:", link, "\n");
       absl::StrAppend(&info, "master_last_io_seconds_ago:", rinfo.master_last_io_sec, "\n");

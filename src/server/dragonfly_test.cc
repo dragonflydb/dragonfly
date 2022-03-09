@@ -48,11 +48,6 @@ class DflyEngineTest : public BaseFamilyTest {
   DflyEngineTest() : BaseFamilyTest() {
     num_threads_ = kPoolThreadCount;
   }
-
-  static void SetUpTestSuite() {
-    init_zmalloc_threadlocal();
-  }
-
 };
 
 // TODO: to implement equivalent parsing in redis parser.

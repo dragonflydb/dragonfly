@@ -481,7 +481,6 @@ auto CompactObj::GetStats() -> Stats {
 void CompactObj::InitThreadLocal(pmr::memory_resource* mr) {
   tl.local_mr = mr;
   tl.tmp_buf = base::PODArray<uint8_t>{mr};
-  SmallString::InitThreadLocal();
 }
 
 CompactObj::~CompactObj() {
