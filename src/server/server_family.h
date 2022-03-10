@@ -77,10 +77,12 @@ class ServerFamily {
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
 
+  uint32_t task_10ms_ = 0;
   Service& service_;
   EngineShardSet& ess_;
 
   util::AcceptServer* acceptor_ = nullptr;
+  util::ProactorBase* pb_task_ = nullptr;
   ::boost::fibers::mutex replica_of_mu_;
   std::shared_ptr<Replica> replica_;  // protected by replica_of_mu_
 
@@ -89,6 +91,7 @@ class ServerFamily {
   std::atomic<int64_t> last_save_;  // in seconds.
   GlobalState global_state_;
   time_t start_time_ = 0;  // in seconds, epoch time.
+
 };
 
 }  // namespace dfly

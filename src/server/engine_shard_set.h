@@ -13,8 +13,8 @@ extern "C" {
 #include <xxhash.h>
 
 #include "base/string_view_sso.h"
-#include "core/tx_queue.h"
 #include "core/mi_memory_resource.h"
+#include "core/tx_queue.h"
 #include "server/db_slice.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/fibers_ext.h"
@@ -25,7 +25,7 @@ namespace dfly {
 class EngineShard {
  public:
   struct Stats {
-    uint64_t ooo_runs = 0;  // how many times transactions run as OOO.
+    uint64_t ooo_runs = 0;    // how many times transactions run as OOO.
     uint64_t quick_runs = 0;  //  how many times single shard "RunQuickie" transaction run.
 
     // number of bytes that were allocated by the application (with mi_mallocxxx methods).
@@ -35,7 +35,7 @@ class EngineShard {
 
     // number of bytes comitted by the allocator library (i.e. mmapped into physical memory).
     //
-    size_t heap_comitted_bytes = 0;
+    // size_t heap_comitted_bytes = 0;
   };
 
   // EngineShard() is private down below.
@@ -184,6 +184,16 @@ class EngineShard {
 
 class EngineShardSet {
  public:
+  struct CachedStats {
+    std::atomic_uint64_t used_memory;
+
+    CachedStats() : used_memory(0) {
+    }
+
+    CachedStats(const CachedStats& o) : used_memory(o.used_memory.load()) {
+    }
+  };
+
   explicit EngineShardSet(util::ProactorPool* pp) : pp_(pp) {
   }
 
@@ -197,6 +207,8 @@ class EngineShardSet {
 
   void Init(uint32_t size);
   void InitThreadLocal(util::ProactorBase* pb, bool update_db_time);
+
+  static const std::vector<CachedStats>& GetCachedStats();
 
   // Uses a shard queue to dispatch. Callback runs in a dedicated fiber.
   template <typename F> auto Await(ShardId sid, F&& f) {

@@ -308,6 +308,7 @@ void Service::Init(util::AcceptServer* acceptor, const InitOpts& opts) {
   request_latency_usec.Init(&pp_);
   StringFamily::Init(&pp_);
   GenericFamily::Init(&pp_);
+  server_family_.Init(acceptor);
   cmd_req.Init(&pp_, {"type"});
 }
 
@@ -322,6 +323,7 @@ void Service::Shutdown() {
   engine_varz.reset();
   request_latency_usec.Shutdown();
 
+  // We mark that we are shuttind down.
   pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Shutdown(); });
 
   // to shutdown all the runtime components that depend on EngineShard.
@@ -331,6 +333,9 @@ void Service::Shutdown() {
 
   cmd_req.Shutdown();
   shard_set_.RunBlockingInParallel([&](EngineShard*) { EngineShard::DestroyThreadLocal(); });
+
+  // wait for all the pending callbacks to stop.
+  boost::this_fiber::sleep_for(10ms);
 }
 
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {

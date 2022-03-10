@@ -51,7 +51,6 @@ int main(int argc, char* argv[]) {
   mi_option_enable(mi_option_large_os_pages);
   mi_option_enable(mi_option_show_errors);
   mi_option_set(mi_option_max_warnings, 0);
-
   _mi_options_init();
 
   uring::UringPool pp{1024};

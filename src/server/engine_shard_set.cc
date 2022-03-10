@@ -20,6 +20,12 @@ using namespace util;
 namespace this_fiber = ::boost::this_fiber;
 namespace fibers = ::boost::fibers;
 
+namespace {
+
+vector<EngineShardSet::CachedStats> cached_stats;  // initialized in EngineShardSet::Init
+
+}  // namespace
+
 thread_local EngineShard* EngineShard::shard_ = nullptr;
 constexpr size_t kQueueLen = 64;
 
@@ -107,10 +113,12 @@ void EngineShard::DestroyThreadLocal() {
     return;
 
   uint32_t index = shard_->db_slice_.shard_id();
+  mi_heap_t* tlh = shard_->mi_resource_.heap();
   shard_->~EngineShard();
   mi_free(shard_);
   shard_ = nullptr;
   CompactObj::InitThreadLocal(nullptr);
+  mi_heap_delete(tlh);
   VLOG(1) << "Shard reset " << index;
 }
 
@@ -476,6 +484,7 @@ bool EngineShard::HasResultConverged(TxId notifyid) const {
 }
 
 void EngineShard::CacheStats() {
+#if 0
   mi_heap_t* tlh = mi_resource_.heap();
   struct Sum {
     size_t used = 0;
@@ -493,19 +502,22 @@ void EngineShard::CacheStats() {
 
     DVLOG(1) << "block_size " << block_size << "/" << area->block_size << ", reserved "
              << area->reserved << " comitted " << area->committed << " used: " << area->used;
-
     return true;  // continue iteration
   };
-
-  mi_heap_visit_blocks(tlh, false /* visit all blocks*/, visit_cb, &sum);
-
-  stats_.heap_used_bytes = sum.used;
-  stats_.heap_comitted_bytes = sum.comitted;
+#endif
+  // mi_heap_visit_blocks(tlh, false /* visit all blocks*/, visit_cb, &sum);
+  mi_stats_merge();
+  // stats_.heap_used_bytes = sum.used;
+  stats_.heap_used_bytes =
+      mi_resource_.used() + zmalloc_used_memory_tl + SmallString::UsedThreadLocal();
+  cached_stats[db_slice_.shard_id()].used_memory.store(stats_.heap_used_bytes,
+                                                       memory_order_relaxed);
+  // stats_.heap_comitted_bytes = sum.comitted;
 }
 
 void EngineShardSet::Init(uint32_t sz) {
   CHECK_EQ(0u, size());
-
+  cached_stats.resize(sz);
   shard_queue_.resize(sz);
 }
 
@@ -513,6 +525,10 @@ void EngineShardSet::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
   EngineShard::InitThreadLocal(pb, update_db_time);
   EngineShard* es = EngineShard::tlocal();
   shard_queue_[es->shard_id()] = es->GetFiberQueue();
+}
+
+const vector<EngineShardSet::CachedStats>& EngineShardSet::GetCachedStats() {
+  return cached_stats;
 }
 
 }  // namespace dfly

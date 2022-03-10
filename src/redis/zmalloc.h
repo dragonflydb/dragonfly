@@ -114,6 +114,7 @@ size_t zmalloc_usable_size(const void* p);
 // roman: void zlibc_free(void *ptr);
 
 void init_zmalloc_threadlocal(void* heap);
+extern __thread ssize_t zmalloc_used_memory_tl;
 
 #undef __zm_str
 #undef __xstr

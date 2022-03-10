@@ -7,7 +7,7 @@
 #include "core/dash.h"
 
 #include <absl/container/flat_hash_map.h>
-#include <malloc.h>
+#include <mimalloc.h>
 
 #include <functional>
 #include <set>
@@ -82,7 +82,7 @@ constexpr size_t foo = Segment::kBucketSz;
 class DashTest : public testing::Test {
  protected:
   static void SetUpTestCase() {
-    init_zmalloc_threadlocal();
+    init_zmalloc_threadlocal(mi_heap_get_backing());
   }
 
   DashTest() : segment_(1) {

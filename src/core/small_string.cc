@@ -42,6 +42,10 @@ void SmallString::InitThreadLocal(void * heap) {
   XXH3_64bits_reset_withSeed(tl.xxh_state.get(), kHashSeed);
 }
 
+size_t SmallString::UsedThreadLocal() {
+  return tl.seg_alloc ? tl.seg_alloc->used() : 0;
+}
+
 static_assert(sizeof(SmallString) == 16);
 
 // we should use only for sizes greater than kPrefLen

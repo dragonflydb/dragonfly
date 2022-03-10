@@ -7,7 +7,7 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/random/random.h>  // for master_id_ generation.
 #include <absl/strings/match.h>
-#include <malloc.h>
+#include <mimalloc-types.h>
 #include <sys/resource.h>
 
 #include <filesystem>
@@ -38,6 +38,8 @@ DEFINE_string(dbfilename, "", "the filename to save/load the DB");
 DEFINE_string(requirepass, "", "password for AUTH authentication");
 
 DECLARE_uint32(port);
+
+extern "C" mi_stats_t _mi_stats_main;
 
 namespace dfly {
 
@@ -70,6 +72,8 @@ error_code CreateDirs(fs::path dir_path) {
   return ec;
 }
 
+atomic_uint64_t used_mem_peak(0);
+
 }  // namespace
 
 ServerFamily::ServerFamily(Service* service) : service_(*service), ess_(service->shard_set()) {
@@ -84,12 +88,29 @@ ServerFamily::~ServerFamily() {
 void ServerFamily::Init(util::AcceptServer* acceptor) {
   CHECK(acceptor_ == nullptr);
   acceptor_ = acceptor;
+
+  pb_task_ = ess_.pool()->GetNextProactor();
+  auto cache_cb = [] {
+    uint64_t sum = 0;
+    const auto& stats = EngineShardSet::GetCachedStats();
+    for (const auto& s : stats)
+      sum += s.used_memory.load(memory_order_relaxed);
+
+    // Single writer, so no races.
+    if (sum > used_mem_peak.load(memory_order_relaxed))
+      used_mem_peak.store(sum, memory_order_relaxed);
+  };
+
+  task_10ms_ = pb_task_->AwaitBrief([&] { return pb_task_->AddPeriodic(10, cache_cb); });
 }
 
 void ServerFamily::Shutdown() {
   VLOG(1) << "ServerFamily::Shutdown";
 
-  service_.proactor_pool().GetNextProactor()->Await([this] {
+  pb_task_->Await([this] {
+    pb_task_->CancelPeriodic(task_10ms_);
+    task_10ms_ = 0;
+
     unique_lock lk(replica_of_mu_);
     if (replica_) {
       replica_->Stop();
@@ -321,7 +342,7 @@ Metrics ServerFamily::GetMetrics() const {
       result.events += db_stats.events;
 
       EngineShard::Stats shard_stats = shard->stats();
-      result.heap_comitted_bytes += shard_stats.heap_comitted_bytes;
+      // result.heap_comitted_bytes += shard_stats.heap_comitted_bytes;
       result.heap_used_bytes += shard_stats.heap_used_bytes;
     }
   };
@@ -385,7 +406,7 @@ tcp_port:)";
 
     absl::StrAppend(&info, "used_memory:", m.heap_used_bytes, "\n");
     absl::StrAppend(&info, "used_memory_human:", HumanReadableNumBytes(m.heap_used_bytes), "\n");
-    absl::StrAppend(&info, "comitted_memory:", m.heap_comitted_bytes, "\n");
+    absl::StrAppend(&info, "comitted_memory:", _mi_stats_main.committed.current, "\n");
 
     if (sdata_res.has_value()) {
       absl::StrAppend(&info, "used_memory_rss:", sdata_res->vm_rss, "\n");
@@ -395,13 +416,12 @@ tcp_port:)";
       LOG(ERROR) << "Error fetching /proc/self/status stats";
     }
 
-    // TBD: should be the max of all seen used_memory values.
-    absl::StrAppend(&info, "used_memory_peak:", -1, "\n");
+    absl::StrAppend(&info, "used_memory_peak:", used_mem_peak.load(memory_order_relaxed), "\n");
 
     // Blob - all these cases where the key/objects are represented by a single blob allocated on
     // heap. For example, strings or intsets. members of lists, sets, zsets etc
-    // are not accounted for to avoid complex computations. In some cases, when number of members is
-    // known we approximate their allocations by taking 16 bytes per member.
+    // are not accounted for to avoid complex computations. In some cases, when number of members
+    // is known we approximate their allocations by taking 16 bytes per member.
     absl::StrAppend(&info, "blob_used_memory:", m.db.obj_memory_usage, "\n");
     absl::StrAppend(&info, "table_used_memory:", m.db.table_mem_usage, "\n");
     absl::StrAppend(&info, "num_buckets:", m.db.bucket_count, "\n");
@@ -440,9 +460,9 @@ tcp_port:)";
     } else {
       absl::StrAppend(&info, "role:slave\n");
 
-      // it's safe to access replica_ because replica_ is created before etl.is_master set to false
-      // and cleared after etl.is_master is set to true. And since the code here that checks for
-      // is_master and copies shared_ptr is atomic, it1 should be correct.
+      // it's safe to access replica_ because replica_ is created before etl.is_master set to
+      // false and cleared after etl.is_master is set to true. And since the code here that checks
+      // for is_master and copies shared_ptr is atomic, it1 should be correct.
       auto replica_ptr = replica_;
       Replica::Info rinfo = replica_ptr->GetInfo();
       absl::StrAppend(&info, "master_host:", rinfo.host, "\n");

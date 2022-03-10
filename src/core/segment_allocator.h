@@ -38,12 +38,16 @@ class SegmentAllocator {
   std::pair<Ptr, uint8_t*> Allocate(uint32_t size);
 
   void Free(Ptr ptr) {
-    mi_free(Translate(ptr));
+    void* p = Translate(ptr);
+    used_ -= mi_usable_size(p);
+    mi_free(p);
   }
 
   mi_heap_t* heap() {
     return heap_;
   }
+
+  size_t used() const { return used_; }
 
  private:
   static uint32_t Offset(Ptr p) {
@@ -55,6 +59,7 @@ class SegmentAllocator {
   std::vector<uint8_t*> address_table_;
   absl::flat_hash_map<uint64_t, uint16_t> rev_indx_;
   mi_heap_t* heap_;
+  size_t used_ = 0;
 };
 
 inline auto SegmentAllocator::Allocate(uint32_t size) -> std::pair<Ptr, uint8_t*> {
@@ -69,6 +74,7 @@ inline auto SegmentAllocator::Allocate(uint32_t size) -> std::pair<Ptr, uint8_t*
   }
 
   Ptr res = (((ptr - seg_ptr) / 8) << kSegmentIdBits) | it->second;
+  used_ += mi_good_size(size);
 
   return std::make_pair(res, (uint8_t*)ptr);
 }
