@@ -524,6 +524,9 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     case MemcacheParser::GET:
       strcpy(cmd_name, "MGET");
       break;
+    case MemcacheParser::FLUSHALL:
+      strcpy(cmd_name, "FLUSHDB");
+      break;
     case MemcacheParser::QUIT:
       strcpy(cmd_name, "QUIT");
       break;
@@ -531,7 +534,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       server_family_.StatsMC(cmd.key, cntx);
       return;
     case MemcacheParser::VERSION:
-      mc_builder->SendDirect(absl::StrCat("VERSION ", gflags::VersionString(), "\r\n"));
+      mc_builder->SendSimpleString(absl::StrCat("VERSION ", gflags::VersionString()));
       return;
     default:
       mc_builder->SendClientError("bad command line format");
@@ -635,7 +638,7 @@ void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
     (*cntx)->SendOk();
   using facade::SinkReplyBuilder;
 
-  SinkReplyBuilder* builder = static_cast<SinkReplyBuilder*>(cntx->reply_builder());
+  SinkReplyBuilder* builder = cntx->reply_builder();
   builder->CloseConnection();
 }
 
@@ -651,7 +654,7 @@ void Service::Multi(CmdArgList args, ConnectionContext* cntx) {
 void Service::CallFromScript(CmdArgList args, ObjectExplorer* reply, ConnectionContext* cntx) {
   DCHECK(cntx->transaction);
   InterpreterReplier replier(reply);
-  facade::ReplyBuilderInterface* orig = cntx->Inject(&replier);
+  facade::SinkReplyBuilder* orig = cntx->Inject(&replier);
 
   DispatchCommand(std::move(args), cntx);
 

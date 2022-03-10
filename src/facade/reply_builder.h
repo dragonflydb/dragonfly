@@ -11,40 +11,15 @@
 
 namespace facade {
 
-class ReplyBuilderInterface {
- public:
-  virtual ~ReplyBuilderInterface() {
-  }
-
-  // Reply for set commands.
-  virtual void SendStored() = 0;
-
-  // Common for both MC and Redis.
-  virtual void SendError(std::string_view str, std::string_view type = std::string_view{}) = 0;
-
-  virtual std::error_code GetError() const = 0;
-
-  struct ResponseValue {
-    std::string_view key;
-    std::string value;
-    uint64_t mc_ver = 0;  // 0 means we do not output it (i.e has not been requested).
-    uint32_t mc_flag = 0;
-  };
-
-  using OptResp = std::optional<ResponseValue>;
-
-  virtual void SendMGetResponse(const OptResp* resp, uint32_t count) = 0;
-  virtual void SendLong(long val) = 0;
-
-  virtual void SendSetSkipped() = 0;
-};
-
-class SinkReplyBuilder : public ReplyBuilderInterface {
+class SinkReplyBuilder {
  public:
   SinkReplyBuilder(const SinkReplyBuilder&) = delete;
   void operator=(const SinkReplyBuilder&) = delete;
 
   SinkReplyBuilder(::io::Sink* sink);
+
+  virtual ~SinkReplyBuilder() {
+  }
 
   // In order to reduce interrupt rate we allow coalescing responses together using
   // Batch mode. It is controlled by Connection state machine because it makes sense only
@@ -56,7 +31,7 @@ class SinkReplyBuilder : public ReplyBuilderInterface {
   // Used for QUIT - > should move to conn_context?
   void CloseConnection();
 
-  std::error_code GetError() const override {
+  std::error_code GetError() const {
     return ec_;
   }
 
@@ -80,6 +55,31 @@ class SinkReplyBuilder : public ReplyBuilderInterface {
 
   //! Sends a string as is without any formatting. raw should be encoded according to the protocol.
   void SendDirect(std::string_view str);
+
+  // Common for both MC and Redis.
+  virtual void SendError(std::string_view str, std::string_view type = std::string_view{}) = 0;
+
+  virtual void SendSimpleString(std::string_view str) = 0;
+
+  void SendOk() {
+    SendSimpleString("OK");
+  }
+
+  struct ResponseValue {
+    std::string_view key;
+    std::string value;
+    uint64_t mc_ver = 0;  // 0 means we do not output it (i.e has not been requested).
+    uint32_t mc_flag = 0;
+  };
+
+  using OptResp = std::optional<ResponseValue>;
+
+  virtual void SendMGetResponse(const OptResp* resp, uint32_t count) = 0;
+  virtual void SendLong(long val) = 0;
+
+  // Reply for set commands.
+  virtual void SendStored() = 0;
+  virtual void SendSetSkipped() = 0;
 
  protected:
   void Send(const iovec* v, uint32_t len);
@@ -110,25 +110,21 @@ class MCReplyBuilder : public SinkReplyBuilder {
 
   void SendClientError(std::string_view str);
   void SendNotFound();
+  void SendSimpleString(std::string_view str) final;
 };
 
 class RedisReplyBuilder : public SinkReplyBuilder {
  public:
   RedisReplyBuilder(::io::Sink* stream);
 
-  void SendOk() {
-    SendSimpleString("OK");
-  }
-
   void SendError(std::string_view str, std::string_view type = std::string_view{}) override;
   void SendMGetResponse(const OptResp* resp, uint32_t count) override;
-
+  void SendSimpleString(std::string_view str) override;
   void SendStored() override;
   void SendLong(long val) override;
   void SendSetSkipped() override;
 
   void SendError(OpStatus status);
-  virtual void SendSimpleString(std::string_view str);
 
   virtual void SendSimpleStrArr(const std::string_view* arr, uint32_t count);
   virtual void SendNullArray();

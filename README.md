@@ -135,7 +135,7 @@ a distributed log format.
 - [x] append
 - [x] prepend
 - [x] delete
-- [ ] flush_all
+- [x] flush_all
 - [x] incr
 - [x] decr
 - [x] version

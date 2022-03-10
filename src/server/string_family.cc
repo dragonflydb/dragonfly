@@ -24,7 +24,7 @@ namespace {
 
 using namespace std;
 using facade::Protocol;
-using facade::ReplyBuilderInterface;
+using facade::SinkReplyBuilder;
 
 using CI = CommandId;
 DEFINE_VARZ(VarzQps, set_qps);
@@ -105,7 +105,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   sparams.memcache_flags = cntx->conn_state.memcache_flag;
 
   int64_t int_arg;
-  ReplyBuilderInterface* builder = cntx->reply_builder();
+  SinkReplyBuilder* builder = cntx->reply_builder();
 
   for (size_t i = 3; i < args.size(); ++i) {
     ToUpper(&args[i]);
@@ -342,7 +342,7 @@ void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContex
   };
 
   OpResult<bool> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  ReplyBuilderInterface* builder = cntx->reply_builder();
+  SinkReplyBuilder* builder = cntx->reply_builder();
   if (result.value_or(false)) {
     return builder->SendStored();
   }
@@ -375,7 +375,7 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
   CHECK_EQ(OpStatus::OK, result);
 
   // reorder the responses back according to the order of their corresponding keys.
-  vector<ReplyBuilderInterface::OptResp> res(args.size() - 1);
+  vector<SinkReplyBuilder::OptResp> res(args.size() - 1);
 
   for (ShardId sid = 0; sid < shard_count; ++sid) {
     if (!transaction->IsActive(sid))

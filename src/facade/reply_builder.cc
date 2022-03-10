@@ -84,12 +84,21 @@ void SinkReplyBuilder::SendDirect(std::string_view raw) {
 MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
 }
 
+void MCReplyBuilder::SendSimpleString(std::string_view str) {
+  iovec v[2] = {IoVec(str), IoVec(kCRLF)};
+
+  Send(v, ABSL_ARRAYSIZE(v));
+}
+
+
 void MCReplyBuilder::SendStored() {
-  SendDirect("STORED\r\n");
+  SendSimpleString("STORED");
 }
 
 void MCReplyBuilder::SendLong(long val) {
-  SendDirect(absl::StrCat(val, kCRLF));
+  char buf[32];
+  char* next = absl::numbers_internal::FastIntToBuffer(val, buf);
+  SendSimpleString(string_view(buf, next - buf));
 }
 
 void MCReplyBuilder::SendMGetResponse(const OptResp* resp, uint32_t count) {
@@ -109,11 +118,11 @@ void MCReplyBuilder::SendMGetResponse(const OptResp* resp, uint32_t count) {
       header.clear();
     }
   }
-  SendDirect("END\r\n");
+  SendSimpleString("END");
 }
 
 void MCReplyBuilder::SendError(string_view str, std::string_view type) {
-  SendDirect("ERROR\r\n");
+  SendSimpleString("ERROR");
 }
 
 void MCReplyBuilder::SendClientError(string_view str) {
@@ -122,11 +131,11 @@ void MCReplyBuilder::SendClientError(string_view str) {
 }
 
 void MCReplyBuilder::SendSetSkipped() {
-  SendDirect("NOT_STORED\r\n");
+  SendSimpleString("NOT_STORED");
 }
 
 void MCReplyBuilder::SendNotFound() {
-  SendDirect("NOT_FOUND\r\n");
+  SendSimpleString("NOT_FOUND");
 }
 
 RedisReplyBuilder::RedisReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
@@ -144,6 +153,12 @@ void RedisReplyBuilder::SendError(string_view str, std::string_view type) {
   }
 }
 
+void RedisReplyBuilder::SendSimpleString(std::string_view str) {
+  iovec v[3] = {IoVec(kSimplePref), IoVec(str), IoVec(kCRLF)};
+
+  Send(v, ABSL_ARRAYSIZE(v));
+}
+
 void RedisReplyBuilder::SendStored() {
   SendSimpleString("OK");
 }
@@ -156,12 +171,6 @@ void RedisReplyBuilder::SendNull() {
   constexpr char kNullStr[] = "$-1\r\n";
 
   iovec v[] = {IoVec(kNullStr)};
-
-  Send(v, ABSL_ARRAYSIZE(v));
-}
-
-void RedisReplyBuilder::SendSimpleString(std::string_view str) {
-  iovec v[3] = {IoVec(kSimplePref), IoVec(str), IoVec(kCRLF)};
 
   Send(v, ABSL_ARRAYSIZE(v));
 }

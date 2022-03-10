@@ -185,7 +185,7 @@ void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
     if (del_cnt == 0) {
       mc_builder->SendNotFound();
     } else {
-      mc_builder->SendDirect("DELETED\r\n");
+      mc_builder->SendSimpleString("DELETED");
     }
   } else {
     (*cntx)->SendLong(del_cnt);

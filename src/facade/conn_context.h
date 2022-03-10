@@ -30,13 +30,13 @@ class ConnectionContext {
   // A convenient proxy for redis interface.
   RedisReplyBuilder* operator->();
 
-  ReplyBuilderInterface* reply_builder() {
+  SinkReplyBuilder* reply_builder() {
     return rbuilder_.get();
   }
 
   // Allows receiving the output data from the commands called from scripts.
-  ReplyBuilderInterface* Inject(ReplyBuilderInterface* new_i) {
-    ReplyBuilderInterface* res = rbuilder_.release();
+  SinkReplyBuilder* Inject(SinkReplyBuilder* new_i) {
+    SinkReplyBuilder* res = rbuilder_.release();
     rbuilder_.reset(new_i);
     return res;
   }
@@ -49,7 +49,7 @@ class ConnectionContext {
   bool authenticated: 1;
  private:
   Connection* owner_;
-  std::unique_ptr<ReplyBuilderInterface> rbuilder_;
+  std::unique_ptr<SinkReplyBuilder> rbuilder_;
 };
 
 }  // namespace facade

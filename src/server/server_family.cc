@@ -168,7 +168,7 @@ void ServerFamily::FlushDb(CmdArgList args, ConnectionContext* cntx) {
       },
       true);
 
-  (*cntx)->SendOk();
+  cntx->reply_builder()->SendOk();
 }
 
 void ServerFamily::FlushAll(CmdArgList args, ConnectionContext* cntx) {

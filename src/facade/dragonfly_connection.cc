@@ -316,7 +316,7 @@ auto Connection::ParseRedis() -> ParserStatus {
   uint32_t consumed = 0;
 
   RedisParser::Result result = RedisParser::OK;
-  ReplyBuilderInterface* builder = cc_->reply_builder();
+  SinkReplyBuilder* builder = cc_->reply_builder();
   mi_heap_t* tlh = mi_heap_get_backing();
 
   do {
@@ -418,7 +418,7 @@ auto Connection::ParseMemcache() -> ParserStatus {
 }
 
 auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, ParserStatus> {
-  SinkReplyBuilder* builder = static_cast<SinkReplyBuilder*>(cc_->reply_builder());
+  SinkReplyBuilder* builder = cc_->reply_builder();
   ConnectionStats* stats = service_->GetThreadLocalConnectionStats();
   error_code ec;
   ParserStatus parse_status = OK;
@@ -489,7 +489,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
   this_fiber::properties<FiberProps>().set_name("DispatchFiber");
 
   ConnectionStats* stats = service_->GetThreadLocalConnectionStats();
-  SinkReplyBuilder* builder = static_cast<SinkReplyBuilder*>(cc_->reply_builder());
+  SinkReplyBuilder* builder = cc_->reply_builder();
 
   while (!builder->GetError()) {
     evc_.await([this] { return cc_->conn_closing || !dispatch_q_.empty(); });
