@@ -63,8 +63,12 @@ class SegmentAllocator {
 };
 
 inline auto SegmentAllocator::Allocate(uint32_t size) -> std::pair<Ptr, uint8_t*> {
-  uint64_t ptr = (uint64_t)mi_heap_malloc(heap_, size);
-  uint64_t seg_ptr = ptr & kSegmentAlignMask;
+  void* ptr = mi_heap_malloc(heap_, size);
+  if (!ptr)
+    throw std::bad_alloc{};
+
+  uint64_t iptr = (uint64_t)ptr;
+  uint64_t seg_ptr = iptr & kSegmentAlignMask;
 
   // could be speed up using last used seg_ptr.
   auto [it, inserted] = rev_indx_.emplace(seg_ptr, address_table_.size());
@@ -73,7 +77,7 @@ inline auto SegmentAllocator::Allocate(uint32_t size) -> std::pair<Ptr, uint8_t*
     address_table_.push_back((uint8_t*)seg_ptr);
   }
 
-  Ptr res = (((ptr - seg_ptr) / 8) << kSegmentIdBits) | it->second;
+  Ptr res = (((iptr - seg_ptr) / 8) << kSegmentIdBits) | it->second;
   used_ += mi_good_size(size);
 
   return std::make_pair(res, (uint8_t*)ptr);

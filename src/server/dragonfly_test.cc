@@ -325,6 +325,15 @@ TEST_F(DflyEngineTest, Memcache) {
   EXPECT_THAT(resp, ElementsAre("END"));
 }
 
+TEST_F(DflyEngineTest, LimitMemory) {
+  mi_option_enable(mi_option_limit_os_alloc);
+  string blob(1 << 15, 'a');
+  for (size_t i = 0; i < 1000; ++i) {
+    auto resp = Run({"set", absl::StrCat(blob, i), blob});
+    ASSERT_THAT(resp, RespEq("OK"));
+  }
+}
+
 // TODO: to test transactions with a single shard since then all transactions become local.
 // To consider having a parameter in dragonfly engine controlling number of shards
 // unconditionally from number of cpus. TO TEST BLPOP under multi for single/multi argument case.

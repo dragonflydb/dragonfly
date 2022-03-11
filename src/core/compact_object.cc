@@ -205,7 +205,11 @@ struct TL {
 thread_local TL tl;
 
 constexpr bool kUseSmallStrings = true;
-constexpr bool kUseAsciiEncoding = true;
+
+/// TODO: Ascii encoding becomes slow for large blobs. We should factor it out into a separate
+/// file and implement with SIMD instructions.
+constexpr bool kUseAsciiEncoding = false;
+
 }  // namespace
 
 static_assert(sizeof(CompactObj) == 18);

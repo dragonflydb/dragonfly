@@ -17,6 +17,7 @@ enum class OpStatus : uint16_t {
   OUT_OF_RANGE,
   WRONG_TYPE,
   TIMED_OUT,
+  OUT_OF_MEMORY,
 };
 
 class OpResultBase {

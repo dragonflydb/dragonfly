@@ -24,7 +24,6 @@ std::atomic_uint64_t op_seq{1};
 
 [[maybe_unused]] constexpr size_t kTransSize = sizeof(Transaction);
 
-
 }  // namespace
 
 struct Transaction::FindFirstProcessor {
@@ -359,15 +358,24 @@ bool Transaction::RunInShard(EngineShard* shard) {
 
   /*************************************************************************/
   // Actually running the callback.
-  OpStatus status = cb_(this, shard);
-  /*************************************************************************/
+  try {
+    OpStatus status = cb_(this, shard);
 
-  if (unique_shard_cnt_ == 1) {
-    cb_ = nullptr;  // We can do it because only a single thread runs the callback.
-    local_result_ = status;
-  } else {
-    CHECK_EQ(OpStatus::OK, status);
+    if (unique_shard_cnt_ == 1) {
+      cb_ = nullptr;  // We can do it because only a single thread runs the callback.
+      local_result_ = status;
+    } else {
+      CHECK_EQ(OpStatus::OK, status);
+    }
+  } catch (std::bad_alloc&) {
+    // TODO: to log at most once per sec.
+    LOG_FIRST_N(ERROR, 16) << " out of memory";
+    local_result_ = OpStatus::OUT_OF_MEMORY;
+  } catch (std::exception& e) {
+    LOG(FATAL) << "Unexpected exception " << e.what();
   }
+
+  /*************************************************************************/
 
   // at least the coordinator thread owns the reference.
   DCHECK_GE(use_count(), 1u);
@@ -532,7 +540,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   // single hop -> concluding.
   coordinator_state_ |= (COORD_EXEC | COORD_EXEC_CONCLUDING);
 
-  if (!multi_) {   // for non-multi transactions we schedule exactly once.
+  if (!multi_) {  // for non-multi transactions we schedule exactly once.
     DCHECK_EQ(0, coordinator_state_ & COORD_SCHED);
   }
 
@@ -765,7 +773,15 @@ void Transaction::RunQuickie(EngineShard* shard) {
   DVLOG(1) << "RunQuickSingle " << DebugId() << " " << shard->shard_id() << " " << args_[0];
   CHECK(cb_) << DebugId() << " " << shard->shard_id() << " " << args_[0];
 
-  local_result_ = cb_(this, shard);
+  // Calling the callback in somewhat safe way
+  try {
+    local_result_ = cb_(this, shard);
+  } catch (std::bad_alloc&) {
+    LOG_FIRST_N(ERROR, 16) << " out of memory";
+    local_result_ = OpStatus::OUT_OF_MEMORY;
+  } catch (std::exception& e) {
+    LOG(FATAL) << "Unexpected exception " << e.what();
+  }
 
   sd.local_mask &= ~ARMED;
   cb_ = nullptr;  // We can do it because only a single shard runs the callback.
