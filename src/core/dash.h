@@ -339,6 +339,7 @@ DashTable<_Key, _Value, Policy>::DashTable(size_t capacity_log, const Policy& po
   segment_.resize(unique_segments_);
   std::pmr::polymorphic_allocator<SegmentType> pa(mr);
 
+  // I assume we have enough memory to create the initial table and do not check allocations.
   for (auto& ptr : segment_) {
     ptr = pa.allocate(1);
     pa.construct(ptr, global_depth_);  //   new SegmentType(global_depth_);

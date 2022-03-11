@@ -71,6 +71,39 @@ struct UInt64Policy : public BasicDashPolicy {
   }
 };
 
+class CappedResource final : public std::pmr::memory_resource {
+ public:
+  explicit CappedResource(size_t cap) : cap_(cap) {
+  }
+
+  size_t used() const {
+    return used_;
+  }
+
+ private:
+  void* do_allocate(std::size_t size, std::size_t align) {
+    if (used_ + size > cap_)
+      throw std::bad_alloc{};
+
+    void* res = pmr::get_default_resource()->allocate(size, align);
+    used_ += size;
+
+    return res;
+  }
+
+  void do_deallocate(void* ptr, std::size_t size, std::size_t align) {
+    used_ -= size;
+    pmr::get_default_resource()->deallocate(ptr, size, align);
+  }
+
+  bool do_is_equal(const std::pmr::memory_resource& o) const noexcept {
+    return this == &o;
+  }
+
+  size_t cap_;
+  size_t used_ = 0;
+};
+
 using Segment = detail::Segment<uint64_t, Buf24>;
 using Dash64 = DashTable<uint64_t, uint64_t, UInt64Policy>;
 
@@ -294,6 +327,19 @@ TEST_F(DashTest, Insert2) {
   for (unsigned i = 0; i < 2000; ++i) {
     dt.Insert(i, 0);
   }
+}
+
+TEST_F(DashTest, InsertOOM) {
+  CappedResource resource(1 << 15);
+  Dash64 dt{1, UInt64Policy{}, &resource};
+
+  ASSERT_THROW(
+      {
+        for (size_t i = 0; i < (1 << 14); ++i) {
+          dt.Insert(i, 0);
+        }
+      },
+      std::bad_alloc);
 }
 
 struct Item {

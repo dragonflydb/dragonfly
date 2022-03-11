@@ -22,8 +22,10 @@ class MiMemoryResource final : public std::pmr::memory_resource {
  private:
   void* do_allocate(std::size_t size, std::size_t align) {
     void* res = mi_heap_malloc_aligned(heap_, size, align);
-    if (res)
-      used_ += mi_good_size(size);
+
+    if (!res)
+      throw std::bad_alloc{};
+    used_ += mi_good_size(size);
     return res;
   }
 
