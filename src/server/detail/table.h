@@ -6,6 +6,7 @@
 
 #include "core/compact_object.h"
 #include "core/dash.h"
+#include "core/expire_period.h"
 
 namespace dfly {
 
@@ -45,7 +46,7 @@ struct PrimeTablePolicy {
 };
 
 struct ExpireTablePolicy {
-  enum { kSlotNum = 12, kBucketNum = 64, kStashBucketNum = 2 };
+  enum { kSlotNum = 14, kBucketNum = 56, kStashBucketNum = 4 };
   static constexpr bool kUseVersion = false;
 
   static uint64_t HashFn(const PrimeKey& s) {
@@ -56,7 +57,10 @@ struct ExpireTablePolicy {
     cs.Reset();
   }
 
-  static void DestroyValue(uint64_t) {
+  static void DestroyValue(ExpirePeriod e) {
+  }
+
+  static void DestroyValue(uint32_t val) {
   }
 
   static bool Equal(const PrimeKey& s1, const PrimeKey& s2) {

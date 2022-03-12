@@ -81,6 +81,7 @@ EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t*
 
   tmp_str1 = sdsempty();
   tmp_str2 = sdsempty();
+  db_slice_.UpdateExpireBase(absl::GetCurrentTimeNanos() / 1000000, 0);
 }
 
 EngineShard::~EngineShard() {

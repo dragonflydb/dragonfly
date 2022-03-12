@@ -49,12 +49,10 @@ TEST_F(ListFamilyTest, Expire) {
   auto resp = Run({"lpush", kKey1, "1"});
   EXPECT_THAT(resp[0], IntArg(1));
 
-  constexpr uint64_t kNow = 232279092000;
-  UpdateTime(kNow);
   resp = Run({"expire", kKey1, "1"});
   EXPECT_THAT(resp[0], IntArg(1));
 
-  UpdateTime(kNow + 1000);
+  UpdateTime(expire_now_ + 1000);
   resp = Run({"lpush", kKey1, "1"});
   EXPECT_THAT(resp[0], IntArg(1));
 }

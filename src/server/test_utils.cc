@@ -74,6 +74,13 @@ void BaseFamilyTest::SetUp() {
   service_->Init(nullptr, opts);
   ess_ = &service_->shard_set();
 
+  expire_now_ = absl::GetCurrentTimeNanos() / 1000000;
+  auto cb = [&](EngineShard* s) {
+    s->db_slice().UpdateExpireBase(expire_now_ - 1000, 0);
+    s->db_slice().UpdateExpireClock(expire_now_);
+  };
+  ess_->RunBriefInParallel(cb);
+
   const TestInfo* const test_info = UnitTest::GetInstance()->current_test_info();
   LOG(INFO) << "Starting " << test_info->name();
 }

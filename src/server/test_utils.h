@@ -69,6 +69,7 @@ class BaseFamilyTest : public ::testing::Test {
 
   // ts is ms
   void UpdateTime(uint64_t ms);
+
   std::string GetId() const;
 
   std::unique_ptr<util::ProactorPool> pp_;
@@ -79,6 +80,7 @@ class BaseFamilyTest : public ::testing::Test {
   absl::flat_hash_map<std::string, std::unique_ptr<TestConnWrapper>> connections_;
   ::boost::fibers::mutex mu_;
   ConnectionContext::DebugInfo last_cmd_dbg_info_;
+  uint64_t expire_now_;
 };
 
 }  // namespace dfly

@@ -27,27 +27,27 @@ class GenericFamilyTest : public BaseFamilyTest {
 };
 
 TEST_F(GenericFamilyTest, Expire) {
-  constexpr uint64_t kNow = 1636070340000;
-  UpdateTime(kNow);
-
   Run({"set", "key", "val"});
   auto resp = Run({"expire", "key", "1"});
+
   EXPECT_THAT(resp[0], IntArg(1));
-  UpdateTime(kNow + 1000);
+  UpdateTime(expire_now_ + 1000);
   resp = Run({"get", "key"});
   EXPECT_THAT(resp, ElementsAre(ArgType(RespExpr::NIL)));
 
   Run({"set", "key", "val"});
-  resp = Run({"expireat", "key", absl::StrCat((kNow + 2000) / 1000)});
-  EXPECT_THAT(resp[0], IntArg(1));
-  resp = Run({"expireat", "key", absl::StrCat((kNow + 3000) / 1000)});
+  resp = Run({"pexpireat", "key", absl::StrCat(expire_now_ + 2000)});
   EXPECT_THAT(resp[0], IntArg(1));
 
-  UpdateTime(kNow + 2999);
+  // override
+  resp = Run({"pexpireat", "key", absl::StrCat(expire_now_ + 3000)});
+  EXPECT_THAT(resp[0], IntArg(1));
+
+  UpdateTime(expire_now_ + 2999);
   resp = Run({"get", "key"});
   EXPECT_THAT(resp[0], "val");
 
-  UpdateTime(kNow + 3000);
+  UpdateTime(expire_now_ + 3000);
   resp = Run({"get", "key"});
   EXPECT_THAT(resp[0], ArgType(RespExpr::NIL));
 }

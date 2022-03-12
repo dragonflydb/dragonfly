@@ -54,22 +54,19 @@ TEST_F(StringFamilyTest, Incr) {
 }
 
 TEST_F(StringFamilyTest, Expire) {
-  constexpr uint64_t kNow = 232279092000;
-
-  UpdateTime(kNow);
   ASSERT_THAT(Run({"set", "key", "val", "PX", "20"}), RespEq("OK"));
 
-  UpdateTime(kNow + 10);
+  UpdateTime(expire_now_ + 10);
   EXPECT_THAT(Run({"get", "key"}), RespEq("val"));
 
-  UpdateTime(kNow + 20);
+  UpdateTime(expire_now_ + 20);
 
   EXPECT_THAT(Run({"get", "key"}), ElementsAre(ArgType(RespExpr::NIL)));
 
   ASSERT_THAT(Run({"set", "i", "1", "PX", "10"}), RespEq("OK"));
   ASSERT_THAT(Run({"incr", "i"}), ElementsAre(IntArg(2)));
 
-  UpdateTime(kNow + 30);
+  UpdateTime(expire_now_ + 30);
   ASSERT_THAT(Run({"incr", "i"}), ElementsAre(IntArg(1)));
 }
 

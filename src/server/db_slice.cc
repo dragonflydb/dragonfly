@@ -23,6 +23,15 @@ using namespace std;
 using namespace util;
 using facade::OpStatus;
 
+constexpr auto kPrimeSegmentSize = PrimeTable::kSegBytes;
+constexpr auto kExpireSegmentSize = ExpireTable::kSegBytes;
+
+// mi_malloc good size is 32768 just 48 bytes more.
+static_assert(kPrimeSegmentSize == 32720);
+
+// 20480 is the next goodsize so we are loosing ~300 bytes or 1.5%.
+static_assert(kExpireSegmentSize == 20168);
+
 #define ADD(x) (x) += o.x
 
 DbStats& DbStats::operator+=(const DbStats& o) {
@@ -62,6 +71,7 @@ DbSlice::DbWrapper::DbWrapper(std::pmr::memory_resource* mr)
 DbSlice::DbSlice(uint32_t index, EngineShard* owner) : shard_id_(index), owner_(owner) {
   db_arr_.emplace_back();
   CreateDb(0);
+  expire_base_[0] = expire_base_[1] = 0;
 }
 
 DbSlice::~DbSlice() {
@@ -190,7 +200,11 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) -> pair<MainIterator,
     auto expire_it = db->expire_table.Find(existing->first);
     CHECK(IsValid(expire_it));
 
-    if (expire_it->second <= now_ms_) {
+    // TODO: to implement the incremental update of expiry values using multi-generation
+    // expire_base_ update. Right now we use only index 0.
+    uint32_t delta_ms = now_ms_ - expire_base_[0];
+
+    if (expire_it->second.duration() <= delta_ms) {
       db->expire_table.Erase(expire_it);
 
       if (existing->second.HasFlag()) {
@@ -284,7 +298,9 @@ bool DbSlice::Expire(DbIndex db_ind, MainIterator it, uint64_t at) {
   }
 
   if (!it->second.HasExpire() && at) {
-    CHECK(db->expire_table.Insert(it->first.AsRef(), at).second);
+    uint64_t delta = at - expire_base_[0];  // TODO: employ multigen expire updates.
+
+    CHECK(db->expire_table.Insert(it->first.AsRef(), ExpirePeriod(delta)).second);
     it->second.SetExpire(true);
 
     return true;
@@ -342,8 +358,8 @@ pair<MainIterator, bool> DbSlice::AddIfNotExist(DbIndex db_ind, string_view key,
 
   if (expire_at_ms) {
     new_entry->second.SetExpire(true);
-
-    CHECK(db.expire_table.Insert(new_entry->first.AsRef(), expire_at_ms).second);
+    uint64_t delta = expire_at_ms - expire_base_[0];
+    CHECK(db.expire_table.Insert(new_entry->first.AsRef(), ExpirePeriod(delta)).second);
   }
 
   return make_pair(new_entry, true);
@@ -454,7 +470,11 @@ pair<MainIterator, ExpireIterator> DbSlice::ExpireIfNeeded(DbIndex db_ind, MainI
   auto expire_it = db->expire_table.Find(it->first);
 
   CHECK(IsValid(expire_it));
-  if (expire_it->second > now_ms_)
+
+  // TODO: to employ multi-generation update of expire-base and the underlying values.
+  uint32_t delta_ms = now_ms_ - expire_base_[0];
+
+  if (expire_it->second.duration() > delta_ms)
     return make_pair(it, expire_it);
 
   db->expire_table.Erase(expire_it);

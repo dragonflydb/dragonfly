@@ -5,6 +5,7 @@
 #pragma once
 
 #include "server/detail/table.h"
+#include "core/expire_period.h"
 
 namespace dfly {
 
@@ -12,7 +13,7 @@ using PrimeKey = detail::PrimeKey;
 using PrimeValue = detail::PrimeValue;
 
 using PrimeTable = DashTable<PrimeKey, PrimeValue, detail::PrimeTablePolicy>;
-using ExpireTable = DashTable<PrimeKey, uint64_t, detail::ExpireTablePolicy>;
+using ExpireTable = DashTable<PrimeKey, ExpirePeriod, detail::ExpireTablePolicy>;
 
 /// Iterators are invalidated when new keys are added to the table or some entries are deleted.
 /// Iterators are still valid  if a different entry in the table was mutated.

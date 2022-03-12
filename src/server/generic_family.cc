@@ -20,8 +20,8 @@ DEFINE_uint32(dbnum, 16, "Number of databases");
 
 namespace dfly {
 using namespace std;
-using facade::Protocol;
 using facade::kExpiryOutOfRange;
+using facade::Protocol;
 
 namespace {
 
@@ -61,12 +61,13 @@ OpResult<void> Renamer::Find(ShardId shard_id, const ArgSlice& args) {
   FindResult* res = (shard_id == src_sid_) ? &src_res_ : &dest_res_;
 
   res->key = args.front();
-  auto [it, exp_it] = EngineShard::tlocal()->db_slice().FindExt(db_indx_, res->key);
+  auto& db_slice = EngineShard::tlocal()->db_slice();
+  auto [it, exp_it] = db_slice.FindExt(db_indx_, res->key);
 
   res->found = IsValid(it);
   if (IsValid(it)) {
     res->val = it->second.AsRef();
-    res->expire_ts = IsValid(exp_it) ? exp_it->second : 0;
+    res->expire_ts = IsValid(exp_it) ? db_slice.expire_base() + exp_it->second.duration() : 0;
   }
 
   return OpStatus::OK;
@@ -93,7 +94,6 @@ void Renamer::MoveValues(EngineShard* shard, const ArgSlice& args) {
     shard->db_slice().Expire(db_indx_, dest_it, src_res_.expire_ts);
   } else {
     // we just add the key to destination with the source object.
-
     shard->db_slice().AddNew(db_indx_, dest_key, std::move(src_res_.val), src_res_.expire_ts);
   }
 }
@@ -262,6 +262,29 @@ void GenericFamily::ExpireAt(CmdArgList args, ConnectionContext* cntx) {
   }
   int_arg = std::max(int_arg, 0L);
   ExpireParams params{.ts = int_arg, .absolute = true};
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpExpire(OpArgs{shard, t->db_index()}, key, params);
+  };
+  OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
+
+  if (status == OpStatus::OUT_OF_RANGE) {
+    return (*cntx)->SendError(kExpiryOutOfRange);
+  } else {
+    (*cntx)->SendLong(status == OpStatus::OK);
+  }
+}
+
+void GenericFamily::PexpireAt(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view msec = ArgS(args, 2);
+  int64_t int_arg;
+
+  if (!absl::SimpleAtoi(msec, &int_arg)) {
+    return (*cntx)->SendError(kInvalidIntErr);
+  }
+  int_arg = std::max(int_arg, 0L);
+  ExpireParams params{.ts = int_arg, .absolute = true, .unit = MSEC};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(OpArgs{shard, t->db_index()}, key, params);
@@ -451,7 +474,7 @@ OpStatus GenericFamily::OpExpire(const OpArgs& op_args, string_view key,
   if (rel_msec <= 0) {
     CHECK(db_slice.Del(op_args.db_ind, it));
   } else if (IsValid(expire_it)) {
-    expire_it->second = rel_msec + now_msec;
+    expire_it->second.Set(rel_msec + now_msec - db_slice.expire_base());
   } else {
     db_slice.Expire(op_args.db_ind, it, rel_msec + now_msec);
   }
@@ -468,7 +491,7 @@ OpResult<uint64_t> GenericFamily::OpTtl(Transaction* t, EngineShard* shard, stri
   if (!IsValid(expire))
     return OpStatus::SKIPPED;
 
-  int64_t ttl_ms = expire->second - db_slice.Now();
+  int64_t ttl_ms = db_slice.expire_base() + expire->second.duration() - db_slice.Now();
   DCHECK_GT(ttl_ms, 0);  // Otherwise FindExt would return null.
   return ttl_ms;
 }
@@ -514,20 +537,21 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from, str
       return OpStatus::KEY_EXISTS;
   }
 
-  uint64_t exp_ts = IsValid(expire_it) ? expire_it->second : 0;
+  uint64_t exp_ts = IsValid(expire_it) ? expire_it->second.duration() : 0;
   if (IsValid(to_it)) {
     to_it->second = std::move(from_it->second);
     from_it->second.SetExpire(IsValid(expire_it));
 
     if (IsValid(to_expire)) {
       to_it->second.SetExpire(true);
-      to_expire->second = exp_ts;
+      to_expire->second.Set(exp_ts);
     } else {
       to_it->second.SetExpire(false);
-      db_slice.Expire(op_args.db_ind, to_it, exp_ts);
+      db_slice.Expire(op_args.db_ind, to_it, exp_ts + db_slice.expire_base());
     }
   } else {
-    db_slice.AddNew(op_args.db_ind, to, std::move(from_it->second), exp_ts);
+    db_slice.AddNew(op_args.db_ind, to, std::move(from_it->second),
+                    exp_ts + db_slice.expire_base());
     // Need search again since the container might invalidate the iterators.
     from_it = db_slice.FindExt(op_args.db_ind, from).first;
   }
@@ -578,6 +602,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
             << CI{"EXISTS", CO::READONLY | CO::FAST, -2, 1, -1, 1}.HFUNC(Exists)
             << CI{"EXPIRE", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Expire)
             << CI{"EXPIREAT", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(ExpireAt)
+            << CI{"PEXPIREAT", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(PexpireAt)
             << CI{"RENAME", CO::WRITE, 3, 1, 2, 1}.HFUNC(Rename)
             << CI{"SELECT", kSelectOpts, 2, 0, 0, 0}.HFUNC(Select)
             << CI{"SCAN", CO::READONLY | CO::FAST, -2, 0, 0, 0}.HFUNC(Scan)

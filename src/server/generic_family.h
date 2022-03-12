@@ -42,6 +42,7 @@ class GenericFamily {
   static void Exists(CmdArgList args, ConnectionContext* cntx);
   static void Expire(CmdArgList args, ConnectionContext* cntx);
   static void ExpireAt(CmdArgList args, ConnectionContext* cntx);
+  static void PexpireAt(CmdArgList args, ConnectionContext* cntx);
 
   static void Rename(CmdArgList args, ConnectionContext* cntx);
   static void RenameNx(CmdArgList args, ConnectionContext* cntx);

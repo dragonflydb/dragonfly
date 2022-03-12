@@ -61,7 +61,7 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
     }
 
     if (IsValid(expire_it) && at_ms) {
-      expire_it->second = at_ms;
+      expire_it->second.Set(at_ms - db_slice_->expire_base());
     } else {
       db_slice_->Expire(params.db_index, it, at_ms);
     }

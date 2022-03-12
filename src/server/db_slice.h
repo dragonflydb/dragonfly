@@ -92,6 +92,15 @@ class DbSlice {
     now_ms_ = now_ms;
   }
 
+  void UpdateExpireBase(uint64_t now, unsigned generation) {
+    expire_base_[generation & 1] = now;
+  }
+
+  uint64_t expire_base() const {
+    return expire_base_[0];
+  }
+
+
   // returns wall clock in millis as it has been set via UpdateExpireClock.
   uint64_t Now() const {
     return now_ms_;
@@ -212,6 +221,8 @@ class DbSlice {
   EngineShard* owner_;
 
   uint64_t now_ms_ = 0;         // Used for expire logic, represents a real clock.
+  uint64_t expire_base_[2];    // Used for expire logic, represents a real clock.
+
   uint64_t version_ = 1;        // Used to version entries in the PrimeTable.
   mutable SliceEvents events_;  // we may change this even for const operations.
 
