@@ -208,7 +208,7 @@ constexpr bool kUseSmallStrings = true;
 
 /// TODO: Ascii encoding becomes slow for large blobs. We should factor it out into a separate
 /// file and implement with SIMD instructions.
-constexpr bool kUseAsciiEncoding = false;
+constexpr bool kUseAsciiEncoding = true;
 
 }  // namespace
 
@@ -393,6 +393,9 @@ quicklist* RobjWrapper::GetQL() const {
   return (quicklist*)inner_obj_;
 }
 
+#pragma GCC push_options
+#pragma GCC optimize("Ofast")
+
 // len must be at least 16
 void ascii_pack(const char* ascii, size_t len, uint8_t* bin) {
   unsigned i = 0;
@@ -420,17 +423,14 @@ void ascii_unpack(const uint8_t* bin, size_t ascii_len, char* ascii) {
   uint8_t p = 0;
   unsigned i = 0;
 
-  auto step = [&] {
-    uint8_t src = *bin;  // keep on stack in case we unpack inplace.
-    *ascii++ = (p >> (8 - i)) | ((src << i) & kM);
-    p = src;
-    ++bin;
-  };
-
   while (ascii_len >= 8) {
     for (i = 0; i < 7; ++i) {
-      step();
+      uint8_t src = *bin;  // keep on stack in case we unpack inplace.
+      *ascii++ = (p >> (8 - i)) | ((src << i) & kM);
+      p = src;
+      ++bin;
     }
+
     ascii_len -= 8;
     *ascii++ = p >> 1;
   }
@@ -442,6 +442,8 @@ void ascii_unpack(const uint8_t* bin, size_t ascii_len, char* ascii) {
     ++bin;
   }
 }
+
+#pragma GCC pop_options
 
 // compares packed and unpacked strings. packed must be of length = binpacked_len(ascii_len).
 bool compare_packed(const uint8_t* packed, const char* ascii, size_t ascii_len) {
@@ -811,7 +813,7 @@ bool CompactObj::HasAllocated() const {
   return true;
 }
 
-void CompactObj::GetString(string* res) const {
+void __attribute__((noinline)) CompactObj::GetString(string* res) const {
   string_view slice = GetSlice(res);
   if (res->data() != slice.data()) {
     res->assign(slice);

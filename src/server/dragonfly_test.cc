@@ -327,8 +327,8 @@ TEST_F(DflyEngineTest, Memcache) {
 
 TEST_F(DflyEngineTest, LimitMemory) {
   mi_option_enable(mi_option_limit_os_alloc);
-  string blob(1 << 15, 'a');
-  for (size_t i = 0; i < 1000; ++i) {
+  string blob(128, 'a');
+  for (size_t i = 0; i < 10000; ++i) {
     auto resp = Run({"set", absl::StrCat(blob, i), blob});
     ASSERT_THAT(resp, RespEq("OK"));
   }
