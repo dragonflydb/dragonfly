@@ -72,9 +72,10 @@ error_code CreateDirs(fs::path dir_path) {
   return ec;
 }
 
-atomic_uint64_t used_mem_peak(0);
-
 }  // namespace
+
+atomic_uint64_t used_mem_peak(0);
+atomic_uint64_t used_mem_current(0);
 
 ServerFamily::ServerFamily(Service* service) : service_(*service), ess_(service->shard_set()) {
   start_time_ = time(NULL);
@@ -95,6 +96,8 @@ void ServerFamily::Init(util::AcceptServer* acceptor) {
     const auto& stats = EngineShardSet::GetCachedStats();
     for (const auto& s : stats)
       sum += s.used_memory.load(memory_order_relaxed);
+
+    used_mem_current.store(sum, memory_order_relaxed);
 
     // Single writer, so no races.
     if (sum > used_mem_peak.load(memory_order_relaxed))

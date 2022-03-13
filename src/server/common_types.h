@@ -68,4 +68,6 @@ inline void ToLower(const MutableSlice* val) {
   }
 }
 
+bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes);
+
 }  // namespace dfly

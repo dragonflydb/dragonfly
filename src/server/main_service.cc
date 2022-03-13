@@ -33,9 +33,14 @@ extern "C" {
 #include "util/uring/uring_fiber_algo.h"
 #include "util/varz.h"
 
+// TODO: to move to absl flags and keep legacy flags only for glog library.
+// absl flags allow parsing of custom types and allow specifying which flags appear
+// for helpshort.
 DEFINE_uint32(port, 6380, "Redis port");
 DEFINE_uint32(memcache_port, 0, "Memcached port");
 DECLARE_string(requirepass);
+DEFINE_uint64(maxmemory, 0, "Limit on maximum-memory that is used by the database");
+
 
 namespace dfly {
 

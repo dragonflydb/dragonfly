@@ -5,6 +5,8 @@
 #include <mimalloc.h>
 
 #include "base/init.h"
+#include "base/proc_util.h"
+
 #include "facade/dragonfly_listener.h"
 #include "server/main_service.h"
 #include "util/accept_server.h"
@@ -13,6 +15,8 @@
 
 DECLARE_uint32(port);
 DECLARE_uint32(memcache_port);
+DECLARE_uint64(maxmemory);
+DEFINE_bool(use_large_pages, false, "If true - uses large memory pages for allocations");
 
 using namespace util;
 using namespace std;
@@ -20,7 +24,13 @@ using namespace facade;
 
 namespace dfly {
 
-void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
+bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
+
+  if (FLAGS_maxmemory > 0 && FLAGS_maxmemory < pool->size() * 256_MB ) {
+    LOG(ERROR) << "Max memory is less than 256MB per thread. Exiting...";
+    return false;
+  }
+
   Service service(pool);
 
   service.Init(acceptor);
@@ -34,6 +44,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   acceptor->Wait();
 
   service.Shutdown();
+  return true;
 }
 
 }  // namespace dfly
@@ -48,7 +59,17 @@ int main(int argc, char* argv[]) {
 
   CHECK_GT(FLAGS_port, 0u);
 
-  mi_option_enable(mi_option_large_os_pages);
+  base::sys::KernelVersion kver;
+  base::sys::GetKernelVersion(&kver);
+
+  if (kver.major < 5 || (kver.major == 5 && kver.minor < 11)) {
+    LOG(ERROR) << "Kernel 5.11 or later is supported. Exiting...";
+    return 1;
+  }
+
+  if (FLAGS_use_large_pages) {
+    mi_option_enable(mi_option_large_os_pages);
+  }
   mi_option_enable(mi_option_show_errors);
   mi_option_set(mi_option_max_warnings, 0);
   _mi_options_init();
@@ -58,9 +79,9 @@ int main(int argc, char* argv[]) {
 
   AcceptServer acceptor(&pp);
 
-  dfly::RunEngine(&pp, &acceptor);
+  int res = dfly::RunEngine(&pp, &acceptor) ? 0 : -1;
 
   pp.Stop();
 
-  return 0;
+  return res;
 }

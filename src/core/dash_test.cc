@@ -339,7 +339,7 @@ TEST_F(DashTest, InsertOOM) {
           dt.Insert(i, 0);
         }
       },
-      std::bad_alloc);
+      bad_alloc);
 }
 
 struct Item {
@@ -462,32 +462,53 @@ TEST_F(DashTest, Bucket) {
   EXPECT_EQ(s.size(), num_items);
 }
 
-TEST_F(DashTest, Eviction) {
-  Dash64::EvictionPolicy ev;
-  ev.max_capacity = 1500;
-  size_t i = 0;
-  for (; i < 5000; ++i) {
-    auto [it, res] = dt_.Insert(i, 0, ev);
-    if (!res)
-      break;
-  }
-  ASSERT_LT(i, 5000);
-  EXPECT_LT(dt_.size(), ev.max_capacity);
-  LOG(INFO) << "size is " << dt_.size();
+struct TestEvictionPolicy {
+  static constexpr bool can_evict = true;
+  static constexpr bool can_gc = false;
 
-  unsigned bucket_cnt = dt_.bucket_count();
-  Dash64::EvictionCb cb = [this](const Dash64::EvictionCandidates& cand) -> unsigned {
-    auto it = cand.iter[0];
+  explicit TestEvictionPolicy(unsigned max_cap) : max_capacity(max_cap) {
+  }
+
+  bool CanGrow(const Dash64& tbl) const {
+    return tbl.bucket_count() < max_capacity;
+  }
+
+  unsigned Evict(const Dash64::EvictionBuckets& eb, Dash64* me) const {
+    if (!evict_enabled)
+      return 0;
+
+    auto it = eb.iter[0];
     unsigned res = 0;
     for (; !it.is_done(); ++it) {
       LOG(INFO) << "Deleting " << it->first;
-      dt_.Erase(it);
+      me->Erase(it);
       ++res;
     }
 
     return res;
+  }
+
+  bool evict_enabled = false;
+  unsigned max_capacity;
+};
+
+TEST_F(DashTest, Eviction) {
+  TestEvictionPolicy ev(1500);
+
+  size_t i = 0;
+  auto loop = [&] {
+    for (; i < 5000; ++i) {
+      dt_.Insert(i, 0, ev);
+    }
   };
-  ev.evict_cb = cb;
+
+  ASSERT_THROW(loop(), bad_alloc);
+  ASSERT_LT(i, 5000);
+  EXPECT_LT(dt_.size(), ev.max_capacity);
+  LOG(INFO) << "size is " << dt_.size();
+
+  ev.evict_enabled = true;
+  unsigned bucket_cnt = dt_.bucket_count();
   auto [it, res] = dt_.Insert(i, 0, ev);
   EXPECT_TRUE(res);
   EXPECT_EQ(bucket_cnt, dt_.bucket_count());

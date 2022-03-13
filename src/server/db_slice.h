@@ -96,10 +96,13 @@ class DbSlice {
     expire_base_[generation & 1] = now;
   }
 
+  void SetMaxMemory(size_t max_memory) {
+    max_memory_ = max_memory;
+  }
+
   uint64_t expire_base() const {
     return expire_base_[0];
   }
-
 
   // returns wall clock in millis as it has been set via UpdateExpireClock.
   uint64_t Now() const {
@@ -224,6 +227,7 @@ class DbSlice {
   uint64_t expire_base_[2];    // Used for expire logic, represents a real clock.
 
   uint64_t version_ = 1;        // Used to version entries in the PrimeTable.
+  uint64_t max_memory_ = -1;
   mutable SliceEvents events_;  // we may change this even for const operations.
 
   using LockTable = absl::flat_hash_map<std::string, IntentLock>;

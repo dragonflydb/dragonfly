@@ -201,17 +201,34 @@ class DashTable : public detail::DashTableBase {
   using const_bucket_iterator = Iterator<true, true>;
   using bucket_iterator = Iterator<false, true>;
 
-  struct EvictionCandidates {
+  struct EvictionBuckets {
     bucket_iterator iter[2 + Policy::kStashBucketNum];
-    uint64_t key_hash;  // key_hash of a key that we try to insert.
+    // uint64_t key_hash;  // key_hash of a key that we try to insert.
   };
 
-  // EvictionCb is called when Insertion needs to evict items in a segment to make room for a new
-  // item.
-  using EvictionCb = std::function<unsigned(const EvictionCandidates&)>;
-  struct EvictionPolicy {
-    EvictionCb evict_cb;
-    size_t max_capacity = UINT64_MAX;
+  struct DefaultEvictionPolicy {
+    static constexpr bool can_gc = false;
+    static constexpr bool can_evict = false;
+
+    bool CanGrow(const DashTable&) {
+      return true;
+    }
+
+ /*
+    /// Required interface in case can_gc is true
+    // Returns number of garbage collected items deleted. 0 - means nothing has been
+    // deleted.
+    unsigned GarbageCollect(const EvictionBuckets& eb, DashTable* me) const {
+      return 0;
+    }
+
+    // Required interface in case can_gc is true
+    // returns number of items evicted from the table.
+    // 0 means - nothing has been evicted.
+    unsigned Evict(const EvictionBuckets& eb, DashTable* me) {
+      return 0;
+    }
+*/
   };
 
   DashTable(size_t capacity_log = 1, const Policy& policy = Policy{},
@@ -222,11 +239,11 @@ class DashTable : public detail::DashTableBase {
 
   // false for duplicate, true if inserted.
   template <typename U, typename V> std::pair<iterator, bool> Insert(U&& key, V&& value) {
-    return InsertInternal(std::forward<U>(key), std::forward<V>(value), EvictionPolicy{});
+    return InsertInternal(std::forward<U>(key), std::forward<V>(value), DefaultEvictionPolicy{});
   }
 
-  template <typename U, typename V>
-  std::pair<iterator, bool> Insert(U&& key, V&& value, const EvictionPolicy& ev) {
+  template <typename U, typename V, typename EvictionPolicy>
+  std::pair<iterator, bool> Insert(U&& key, V&& value, EvictionPolicy& ev) {
     return InsertInternal(std::forward<U>(key), std::forward<V>(value), ev);
   }
 
@@ -310,9 +327,12 @@ class DashTable : public detail::DashTableBase {
 
   void Clear();
 
+  uint64_t garbage_collected() const { return garbage_collected_;}
+  uint64_t evicted() const { return evicted_;}
+
  private:
-  template <typename U, typename V>
-  std::pair<iterator, bool> InsertInternal(U&& key, V&& value, const EvictionPolicy& policy);
+  template <typename U, typename V, typename EvictionPolicy>
+  std::pair<iterator, bool> InsertInternal(U&& key, V&& value, EvictionPolicy&& policy);
 
   void IncreaseDepth(unsigned new_depth);
   void Split(uint32_t seg_id);
@@ -330,6 +350,9 @@ class DashTable : public detail::DashTableBase {
 
   Policy policy_;
   std::pmr::vector<SegmentType*> segment_;
+
+  uint64_t garbage_collected_ = 0;
+  uint64_t evicted_ = 0;
 };
 
 template <typename _Key, typename _Value, typename Policy>
@@ -529,8 +552,8 @@ void DashTable<_Key, _Value, Policy>::Reserve(size_t size) {
 }
 
 template <typename _Key, typename _Value, typename Policy>
-template <typename U, typename V>
-auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, const EvictionPolicy& ev)
+template <typename U, typename V, typename EvictionPolicy>
+auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, EvictionPolicy&& ev)
     -> std::pair<iterator, bool> {
   uint64_t key_hash = DoHash(key);
   uint32_t seg_id = SegmentId(key_hash);
@@ -553,28 +576,44 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, const E
       return std::make_pair(iterator{this, seg_id, it.index, it.slot}, false);
     }
 
-    // We need to resize the table but first check if we need to trigger
-    // eviction policy.
-    if (SegmentType::capacity() + bucket_count() > ev.max_capacity) {
-      if (ev.evict_cb) {
-        // Try eviction.
-        uint8_t bid[2];
-        SegmentType::FillProbeArray(key_hash, bid);
-        EvictionCandidates candidates;
+    // try garbage collect or evict.
+    if constexpr (ev.can_evict || ev.can_gc) {
+      // Try eviction.
+      uint8_t bid[2];
+      SegmentType::FillProbeArray(key_hash, bid);
+      EvictionBuckets buckets;
 
-        candidates.key_hash = key_hash;
-        candidates.iter[0] = bucket_iterator{this, seg_id, bid[0], 0};
-        candidates.iter[1] = bucket_iterator{this, seg_id, bid[1], 0};
+      buckets.iter[0] = bucket_iterator{this, seg_id, bid[0], 0};
+      buckets.iter[1] = bucket_iterator{this, seg_id, bid[1], 0};
 
-        for (unsigned i = 0; i < Policy::kStashBucketNum; ++i) {
-          candidates.iter[2 + i] = bucket_iterator{this, seg_id, uint8_t(kLogicalBucketNum + i), 0};
-        }
-        unsigned deleted = ev.evict_cb(candidates);
-        if (deleted) {
-          continue;  // Succeed to evict - retry insertion.
+      for (unsigned i = 0; i < Policy::kStashBucketNum; ++i) {
+        buckets.iter[2 + i] = bucket_iterator{this, seg_id, uint8_t(kLogicalBucketNum + i), 0};
+      }
+
+      // The difference between gc and eviction is that gc can be applied even if
+      // the table can grow since we throw away logically deleted items.
+      // For eviction to be applied we should reach the growth limit.
+      if constexpr (ev.can_gc) {
+        unsigned res = ev.GarbageCollect(buckets, this);
+        garbage_collected_ += res;
+        if (res)
+          continue;
+      }
+
+      // We evict only if our policy says we can not grow
+      if constexpr (ev.can_evict) {
+        bool can_grow = ev.CanGrow(*this);
+        if (!can_grow) {
+          unsigned res = ev.Evict(buckets, this);
+          evicted_ += res;
+          if (res)
+            continue;
         }
       }
-      break;  // stop, we can not grow
+    }
+
+    if (!ev.CanGrow(*this)) {
+      throw std::bad_alloc{};
     }
 
     // Split the segment.
