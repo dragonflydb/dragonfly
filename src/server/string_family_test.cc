@@ -253,9 +253,10 @@ TEST_F(StringFamilyTest, MSetIncr) {
 }
 
 TEST_F(StringFamilyTest, SetEx) {
+  ASSERT_THAT(Run({"setex", "key", "1", "val"}), RespEq("OK"));
   ASSERT_THAT(Run({"setex", "key", "10", "val"}), RespEq("OK"));
-  ASSERT_THAT(Run({"setex", "key", "10", "val"}), RespEq("OK"));
-  ASSERT_THAT(Run({"setex", "key", "10", "val"}), RespEq("OK"));
+  ASSERT_THAT(Run({"ttl", "key"}), ElementsAre(IntArg(10)));
+  ASSERT_THAT(Run({"setex", "key", "0", "val"}), ElementsAre(ErrArg("invalid expire time")));
 }
 
 }  // namespace dfly

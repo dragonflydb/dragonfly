@@ -22,7 +22,7 @@ extern const char kInvalidDbIndErr[];
 extern const char kScriptNotFound[];
 extern const char kAuthRejected[];
 extern const char kExpiryOutOfRange[];
-
+extern const char kInvalidExpireTime[];
 extern const char kSyntaxErrType[];
 extern const char kScriptErrType[];
 

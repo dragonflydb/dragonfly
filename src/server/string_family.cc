@@ -172,10 +172,14 @@ void StringFamily::SetEx(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
   string_view ex = ArgS(args, 2);
   string_view value = ArgS(args, 3);
-  uint32_t secs;
+  int32_t secs;
 
   if (!absl::SimpleAtoi(ex, &secs)) {
     return (*cntx)->SendError(kInvalidIntErr);
+  }
+
+  if (secs < 1) {
+    return (*cntx)->SendError(absl::StrCat(facade::kInvalidExpireTime, " in setex"));
   }
 
   SetCmd::SetParams sparams{cntx->db_index()};

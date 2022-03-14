@@ -61,7 +61,7 @@ const char kInvalidDbIndErr[] = "invalid DB index";
 const char kScriptNotFound[] = "-NOSCRIPT No matching script. Please use EVAL.";
 const char kAuthRejected[] = "-WRONGPASS invalid username-password pair or user is disabled.";
 const char kExpiryOutOfRange[] = "expiry is out of range";
-
+const char kInvalidExpireTime[] = "invalid expire time";
 const char kSyntaxErrType[] = "syntax_error";
 const char kScriptErrType[] = "script_error";
 
