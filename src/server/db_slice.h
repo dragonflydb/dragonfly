@@ -51,6 +51,7 @@ struct SliceEvents {
   // Number of eviction events.
   size_t evicted_keys = 0;
   size_t expired_keys = 0;
+  size_t garbage_collected = 0;
 
   SliceEvents& operator+=(const SliceEvents& o);
 };
@@ -96,8 +97,8 @@ class DbSlice {
     expire_base_[generation & 1] = now;
   }
 
-  void SetMaxMemory(size_t max_memory) {
-    max_memory_ = max_memory;
+  void SetMemoryBudget(int64_t budget) {
+    memory_budget_ = budget;
   }
 
   uint64_t expire_base() const {
@@ -130,10 +131,12 @@ class DbSlice {
 
   // Adds a new entry. Requires: key does not exist in this slice.
   // Returns the iterator to the newly added entry.
+  // throws: bad_alloc is insertion could not happen due to out of memory.
   MainIterator AddNew(DbIndex db_ind, std::string_view key, PrimeValue obj, uint64_t expire_at_ms);
 
   // Adds a new entry if a key does not exists. Returns true if insertion took place,
   // false otherwise. expire_at_ms equal to 0 - means no expiry.
+  // throws: bad_alloc is insertion could not happen due to out of memory.
   std::pair<MainIterator, bool> AddIfNotExist(DbIndex db_ind, std::string_view key, PrimeValue obj,
                                               uint64_t expire_at_ms);
 
@@ -227,7 +230,7 @@ class DbSlice {
   uint64_t expire_base_[2];    // Used for expire logic, represents a real clock.
 
   uint64_t version_ = 1;        // Used to version entries in the PrimeTable.
-  uint64_t max_memory_ = -1;
+  int64_t memory_budget_ = INT64_MAX;
   mutable SliceEvents events_;  // we may change this even for const operations.
 
   using LockTable = absl::flat_hash_map<std::string, IntentLock>;

@@ -23,6 +23,8 @@ using namespace std;
 using namespace util;
 using facade::OpStatus;
 
+namespace {
+
 constexpr auto kPrimeSegmentSize = PrimeTable::kSegBytes;
 constexpr auto kExpireSegmentSize = ExpireTable::kSegBytes;
 
@@ -31,6 +33,57 @@ static_assert(kPrimeSegmentSize == 32720);
 
 // 20480 is the next goodsize so we are loosing ~300 bytes or 1.5%.
 static_assert(kExpireSegmentSize == 20168);
+
+class PrimeEvictionPolicy {
+ public:
+  static constexpr bool can_evict = false;
+  static constexpr bool can_gc = true;
+
+  PrimeEvictionPolicy(DbIndex db_indx, DbSlice* db_slice, int64_t mem_budget)
+      : db_slice_(db_slice), mem_budget_(mem_budget) {
+    db_indx_ = db_indx;
+  }
+
+  void RecordSplit() {
+    mem_budget_ -= PrimeTable::kSegBytes;
+  }
+
+  bool CanGrow(const PrimeTable& tbl) const {
+    return mem_budget_ > int64_t(PrimeTable::kSegBytes);
+  }
+
+  unsigned GarbageCollect(const PrimeTable::EvictionBuckets& eb, PrimeTable* me) {
+    unsigned res = 0;
+    for (unsigned i = 0; i < ABSL_ARRAYSIZE(eb.iter); ++i) {
+      auto it = eb.iter[i];
+      for (; !it.is_done(); ++it) {
+        if (it->second.HasExpire()) {
+          auto [prime_it, exp_it] = db_slice_->ExpireIfNeeded(db_indx_, it);
+          if (prime_it.is_done())
+            ++res;
+        }
+      }
+    }
+
+    gc_count_ += res;
+    return res;
+  }
+
+  int64_t mem_budget() const {
+    return mem_budget_;
+  }
+  unsigned gc_count() const {
+    return gc_count_;
+  }
+
+ private:
+  DbSlice* db_slice_;
+  int64_t mem_budget_;
+  DbIndex db_indx_;
+  unsigned gc_count_ = 0;
+};
+
+}  // namespace
 
 #define ADD(x) (x) += o.x
 
@@ -52,10 +105,11 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 16, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 24, "You should update this function with new fields");
 
   ADD(evicted_keys);
   ADD(expired_keys);
+  ADD(garbage_collected);
 
   return *this;
 }
@@ -181,14 +235,18 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) -> pair<MainIterator,
     }
   }
 
+  PrimeEvictionPolicy evp{db_index, this, int64_t(memory_budget_ - key.size())};
+
   // Fast-path - change_cb_ is empty so we Find or Add using
   // the insert operation: twice more efficient.
   CompactObj co_key{key};
+
   auto [it, inserted] = db->prime_table.Insert(std::move(co_key), PrimeValue{});
   if (inserted) {  // new entry
     db->stats.inline_keys += it->first.IsInline();
     db->stats.obj_memory_usage += it->first.MallocUsed();
     it.SetVersion(NextVersion());
+    memory_budget_ = evp.mem_budget();
 
     return make_pair(it, true);
   }
@@ -289,9 +347,9 @@ size_t DbSlice::FlushDb(DbIndex db_ind) {
 
 // Returns true if a state has changed, false otherwise.
 bool DbSlice::Expire(DbIndex db_ind, MainIterator it, uint64_t at) {
-  auto& db = db_arr_[db_ind];
+  auto& db = *db_arr_[db_ind];
   if (at == 0 && it->second.HasExpire()) {
-    CHECK_EQ(1u, db->expire_table.Erase(it->first));
+    CHECK_EQ(1u, db.expire_table.Erase(it->first));
     it->second.SetExpire(false);
 
     return true;
@@ -300,7 +358,7 @@ bool DbSlice::Expire(DbIndex db_ind, MainIterator it, uint64_t at) {
   if (!it->second.HasExpire() && at) {
     uint64_t delta = at - expire_base_[0];  // TODO: employ multigen expire updates.
 
-    CHECK(db->expire_table.Insert(it->first.AsRef(), ExpirePeriod(delta)).second);
+    CHECK(db.expire_table.Insert(it->first.AsRef(), ExpirePeriod(delta)).second);
     it->second.SetExpire(true);
 
     return true;
@@ -344,13 +402,17 @@ pair<MainIterator, bool> DbSlice::AddIfNotExist(DbIndex db_ind, string_view key,
 
   auto& db = *db_arr_[db_ind];
   CompactObj co_key{key};
+  memory_budget_ -= key.size();
 
-  auto [new_entry, inserted] = db.prime_table.Insert(std::move(co_key), std::move(obj));
+  PrimeEvictionPolicy evp{db_ind, this, memory_budget_};
+  auto [new_entry, inserted] = db.prime_table.Insert(std::move(co_key), std::move(obj), evp);
 
   // in this case obj won't be moved and will be destroyed during unwinding.
   if (!inserted)
     return make_pair(new_entry, false);
 
+  events_.garbage_collected += evp.gc_count();
+  memory_budget_ = evp.mem_budget();
   new_entry.SetVersion(NextVersion());
 
   db.stats.inline_keys += new_entry->first.IsInline();

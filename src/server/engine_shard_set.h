@@ -27,15 +27,6 @@ class EngineShard {
   struct Stats {
     uint64_t ooo_runs = 0;    // how many times transactions run as OOO.
     uint64_t quick_runs = 0;  //  how many times single shard "RunQuickie" transaction run.
-
-    // number of bytes that were allocated by the application (with mi_mallocxxx methods).
-    // should be less than or equal to heap_comitted_bytes.
-    // Cached every few millis.
-    size_t heap_used_bytes = 0;
-
-    // number of bytes comitted by the allocator library (i.e. mmapped into physical memory).
-    //
-    // size_t heap_comitted_bytes = 0;
   };
 
   // EngineShard() is private down below.
@@ -126,6 +117,9 @@ class EngineShard {
   const Stats& stats() const {
     return stats_;
   }
+
+  // Returns used memory for this shard.
+  size_t UsedMemory() const;
 
   // for everyone to use for string transformations during atomic cpu sequences.
   sds tmp_str1, tmp_str2;

@@ -344,9 +344,7 @@ Metrics ServerFamily::GetMetrics() const {
       result.db += db_stats.db;
       result.events += db_stats.events;
 
-      EngineShard::Stats shard_stats = shard->stats();
-      // result.heap_comitted_bytes += shard_stats.heap_comitted_bytes;
-      result.heap_used_bytes += shard_stats.heap_used_bytes;
+      result.heap_used_bytes += shard->UsedMemory();
     }
   };
 
@@ -446,6 +444,7 @@ tcp_port:)";
     absl::StrAppend(&info, "instantaneous_output_kbps:", -1, "\n");
     absl::StrAppend(&info, "rejected_connections:", -1, "\n");
     absl::StrAppend(&info, "expired_keys:", m.events.expired_keys, "\n");
+    absl::StrAppend(&info, "gc_keys:", m.events.garbage_collected, "\n");
     absl::StrAppend(&info, "keyspace_hits:", -1, "\n");
     absl::StrAppend(&info, "keyspace_misses:", -1, "\n");
     absl::StrAppend(&info, "total_reads_processed:", m.conn_stats.io_read_cnt, "\n");

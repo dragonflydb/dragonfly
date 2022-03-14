@@ -42,7 +42,7 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
   DCHECK_LT(params.db_index, db_slice_->db_array_size());
   DCHECK(db_slice_->IsDbValid(params.db_index));
 
-  VLOG(2) << "Set (" << db_slice_->shard_id() << ") ";
+  VLOG(2) << "Set " << key << "(" << db_slice_->shard_id() << ") ";
 
   auto [it, expire_it] = db_slice_->FindExt(params.db_index, key);
   uint64_t at_ms = params.expire_after_ms ? params.expire_after_ms + db_slice_->Now() : 0;
@@ -51,30 +51,35 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
     if (params.how == SET_IF_NOTEXIST)
       return OpStatus::SKIPPED;
 
+    PrimeValue& prime_value = it->second;
     if (params.prev_val) {
-      if (it->second.ObjType() != OBJ_STRING)
+      if (prime_value.ObjType() != OBJ_STRING)
         return OpStatus::WRONG_TYPE;
 
       string val;
-      it->second.GetString(&val);
+      prime_value.GetString(&val);
       params.prev_val->emplace(move(val));
     }
 
     if (IsValid(expire_it) && at_ms) {
       expire_it->second.Set(at_ms - db_slice_->expire_base());
     } else {
-      db_slice_->Expire(params.db_index, it, at_ms);
+      bool changed = db_slice_->Expire(params.db_index, it, at_ms);
+      if (changed && at_ms == 0)  // erased.
+        return OpStatus::OK;
     }
     db_slice_->PreUpdate(params.db_index, it);
 
     // Check whether we need to update flags table.
-    bool req_flag_update = (params.memcache_flags != 0) != it->second.HasFlag();
+    bool req_flag_update = (params.memcache_flags != 0) != prime_value.HasFlag();
     if (req_flag_update) {
-      it->second.SetFlag(params.memcache_flags != 0);
+      prime_value.SetFlag(params.memcache_flags != 0);
       db_slice_->SetMCFlag(params.db_index, it->first.AsRef(), params.memcache_flags);
     }
 
-    it->second.SetString(value);
+    prime_value.SetString(value);   // erases all masks.
+    prime_value.SetExpire(at_ms != 0);  // set expire mask.
+
     db_slice_->PostUpdate(params.db_index, it);
 
     return OpStatus::OK;
@@ -99,7 +104,6 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
 
   string_view key = ArgS(args, 1);
   string_view value = ArgS(args, 2);
-  VLOG(2) << "Set " << key << " " << value;
 
   SetCmd::SetParams sparams{cntx->db_index()};
   sparams.memcache_flags = cntx->conn_state.memcache_flag;
@@ -140,7 +144,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
     } else if (cur_arg == "XX") {
       sparams.how = SetCmd::SET_IF_EXISTS;
     } else if (cur_arg == "KEEPTTL") {
-      sparams.keep_expire = true;
+      sparams.keep_expire = true;  // TODO
     } else {
       return builder->SendError(kSyntaxErr);
     }

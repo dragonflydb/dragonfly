@@ -214,6 +214,7 @@ class DashTable : public detail::DashTableBase {
       return true;
     }
 
+    void RecordSplit() {}
  /*
     /// Required interface in case can_gc is true
     // Returns number of garbage collected items deleted. 0 - means nothing has been
@@ -625,6 +626,7 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
     }
 
     Split(seg_id);
+    ev.RecordSplit();
   }
 
   return std::make_pair(iterator{}, false);

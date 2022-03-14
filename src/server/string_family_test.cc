@@ -252,4 +252,10 @@ TEST_F(StringFamilyTest, MSetIncr) {
   get_fb.join();
 }
 
+TEST_F(StringFamilyTest, SetEx) {
+  ASSERT_THAT(Run({"setex", "key", "10", "val"}), RespEq("OK"));
+  ASSERT_THAT(Run({"setex", "key", "10", "val"}), RespEq("OK"));
+  ASSERT_THAT(Run({"setex", "key", "10", "val"}), RespEq("OK"));
+}
+
 }  // namespace dfly

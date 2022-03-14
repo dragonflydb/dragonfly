@@ -508,12 +508,14 @@ void EngineShard::CacheStats() {
 #endif
   // mi_heap_visit_blocks(tlh, false /* visit all blocks*/, visit_cb, &sum);
   mi_stats_merge();
-  // stats_.heap_used_bytes = sum.used;
-  stats_.heap_used_bytes =
-      mi_resource_.used() + zmalloc_used_memory_tl + SmallString::UsedThreadLocal();
-  cached_stats[db_slice_.shard_id()].used_memory.store(stats_.heap_used_bytes,
+
+  size_t used_mem = UsedMemory();
+  cached_stats[db_slice_.shard_id()].used_memory.store(used_mem,
                                                        memory_order_relaxed);
-  // stats_.heap_comitted_bytes = sum.comitted;
+}
+
+size_t EngineShard::UsedMemory() const {
+  return mi_resource_.used() + zmalloc_used_memory_tl + SmallString::UsedThreadLocal();
 }
 
 void EngineShardSet::Init(uint32_t sz) {

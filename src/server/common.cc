@@ -73,17 +73,23 @@ bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes) {
     // NB: an int64 can only go up to <8 EB.
     case 'E':
       scale <<= 10;  // Fall through...
+      ABSL_FALLTHROUGH_INTENDED;
     case 'P':
       scale <<= 10;
+      ABSL_FALLTHROUGH_INTENDED;
     case 'T':
       scale <<= 10;
+      ABSL_FALLTHROUGH_INTENDED;
     case 'G':
       scale <<= 10;
+      ABSL_FALLTHROUGH_INTENDED;
     case 'M':
       scale <<= 10;
+      ABSL_FALLTHROUGH_INTENDED;
     case 'K':
     case 'k':
       scale <<= 10;
+      ABSL_FALLTHROUGH_INTENDED;
     case 'B':
     case '\0':
       break;  // To here.

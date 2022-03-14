@@ -473,6 +473,8 @@ struct TestEvictionPolicy {
     return tbl.bucket_count() < max_capacity;
   }
 
+  void RecordSplit() {}
+
   unsigned Evict(const Dash64::EvictionBuckets& eb, Dash64* me) const {
     if (!evict_enabled)
       return 0;
