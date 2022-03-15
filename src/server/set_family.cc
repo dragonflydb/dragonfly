@@ -576,7 +576,7 @@ void SetFamily::SPop(CmdArgList args, ConnectionContext* cntx) {
     return OpPop(OpArgs{shard, t->db_index()}, key, count);
   };
 
-  OpResult<StringSet> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
     if (args.size() == 2) {  // SPOP key
       if (result.status() == OpStatus::KEY_NOTFOUND) {
@@ -586,8 +586,7 @@ void SetFamily::SPop(CmdArgList args, ConnectionContext* cntx) {
         (*cntx)->SendBulkString(result.value().front());
       }
     } else {  // SPOP key cnt
-      SvArray vec{result->begin(), result->end()};
-      (*cntx)->SendStringArr(vec);
+      (*cntx)->SendStringArr(*result);
     }
     return;
   }
@@ -678,14 +677,15 @@ void SetFamily::SDiffStore(CmdArgList args, ConnectionContext* cntx) {
 void SetFamily::SMembers(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [](Transaction* t, EngineShard* shard) { return OpInter(t, shard, false); };
 
-  OpResult<StringSet> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
 
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    SvArray arr{result->begin(), result->end()};
+    StringVec& svec = result.value();
+
     if (cntx->conn_state.script_info) {  // sort under script
-      sort(arr.begin(), arr.end());
+      sort(svec.begin(), svec.end());
     }
-    (*cntx)->SendStringArr(arr);
+    (*cntx)->SendStringArr(*result);
   } else {
     (*cntx)->SendError(result.status());
   }
@@ -817,7 +817,7 @@ void SetFamily::SUnionStore(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendLong(result.size());
 }
 
-auto SetFamily::OpUnion(const OpArgs& op_args, const ArgSlice& keys) -> OpResult<StringSet> {
+OpResult<StringVec> SetFamily::OpUnion(const OpArgs& op_args, const ArgSlice& keys) {
   DCHECK(!keys.empty());
   absl::flat_hash_set<string> uniques;
 
@@ -836,7 +836,7 @@ auto SetFamily::OpUnion(const OpArgs& op_args, const ArgSlice& keys) -> OpResult
   return ToVec(std::move(uniques));
 }
 
-auto SetFamily::OpDiff(const Transaction* t, EngineShard* es) -> OpResult<StringSet> {
+OpResult<StringVec> SetFamily::OpDiff(const Transaction* t, EngineShard* es) {
   ArgSlice keys = t->ShardArgsInShard(es->shard_id());
   DCHECK(!keys.empty());
 
@@ -882,14 +882,13 @@ auto SetFamily::OpDiff(const Transaction* t, EngineShard* es) -> OpResult<String
   return ToVec(std::move(uniques));
 }
 
-auto SetFamily::OpPop(const OpArgs& op_args, std::string_view key, unsigned count)
-    -> OpResult<StringSet> {
+OpResult<StringVec> SetFamily::OpPop(const OpArgs& op_args, std::string_view key, unsigned count) {
   auto* es = op_args.shard;
   OpResult<MainIterator> find_res = es->db_slice().Find(op_args.db_ind, key, OBJ_SET);
   if (!find_res)
     return find_res.status();
 
-  StringSet result;
+  StringVec result;
   if (count == 0)
     return result;
 
@@ -935,15 +934,14 @@ auto SetFamily::OpPop(const OpArgs& op_args, std::string_view key, unsigned coun
   return result;
 }
 
-auto SetFamily::OpInter(const Transaction* t, EngineShard* es, bool remove_first)
-    -> OpResult<StringSet> {
+OpResult<StringVec> SetFamily::OpInter(const Transaction* t, EngineShard* es, bool remove_first) {
   ArgSlice keys = t->ShardArgsInShard(es->shard_id());
   if (remove_first) {
     keys.remove_prefix(1);
   }
   DCHECK(!keys.empty());
 
-  StringSet result;
+  StringVec result;
   if (keys.size() == 1) {
     OpResult<MainIterator> find_res = es->db_slice().Find(t->db_index(), keys.front(), OBJ_SET);
     if (!find_res)

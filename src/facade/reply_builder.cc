@@ -255,6 +255,16 @@ void RedisReplyBuilder::SendStringArr(absl::Span<const std::string_view> arr) {
   SendDirect(res);
 }
 
+void RedisReplyBuilder::SendStringArr(absl::Span<const string> arr) {
+  string res = absl::StrCat("*", arr.size(), kCRLF);
+
+  for (size_t i = 0; i < arr.size(); ++i) {
+    StrAppend(&res, "$", arr[i].size(), kCRLF);
+    res.append(arr[i]).append(kCRLF);
+  }
+  SendDirect(res);
+}
+
 void RedisReplyBuilder::StartArray(unsigned len) {
   SendDirect(absl::StrCat("*", len, kCRLF));
 }

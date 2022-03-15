@@ -76,6 +76,7 @@ class InterpreterReplier : public RedisReplyBuilder {
   void SendNullArray() final;
 
   void SendStringArr(absl::Span<const string_view> arr) final;
+  void SendStringArr(absl::Span<const string> arr) final;
   void SendNull() final;
 
   void SendLong(long val) final;
@@ -208,6 +209,15 @@ void InterpreterReplier::SendNullArray() {
 
 void InterpreterReplier::SendStringArr(absl::Span<const string_view> arr) {
   SendSimpleStrArr(arr.data(), arr.size());
+  PostItem();
+}
+
+void InterpreterReplier::SendStringArr(absl::Span<const string> arr) {
+  explr_->OnArrayStart(arr.size());
+  for (uint32_t i = 0; i < arr.size(); ++i) {
+    explr_->OnString(arr[i]);
+  }
+  explr_->OnArrayEnd();
   PostItem();
 }
 

@@ -248,6 +248,92 @@ void ListFamily::LIndex(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void ListFamily::LTrim(CmdArgList args, ConnectionContext* cntx) {
+  std::string_view key = ArgS(args, 1);
+  std::string_view s_str = ArgS(args, 2);
+  std::string_view e_str = ArgS(args, 3);
+  int32_t start, end;
+
+  if (!absl::SimpleAtoi(s_str, &start) || !absl::SimpleAtoi(e_str, &end)) {
+    (*cntx)->SendError(kInvalidIntErr);
+    return;
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpTrim(OpArgs{shard, t->db_index()}, key, start, end);
+  };
+  cntx->transaction->ScheduleSingleHop(std::move(cb));
+  (*cntx)->SendOk();
+}
+
+void ListFamily::LRange(CmdArgList args, ConnectionContext* cntx) {
+  std::string_view key = ArgS(args, 1);
+  std::string_view s_str = ArgS(args, 2);
+  std::string_view e_str = ArgS(args, 3);
+  int32_t start, end;
+
+  if (!absl::SimpleAtoi(s_str, &start) || !absl::SimpleAtoi(e_str, &end)) {
+    (*cntx)->SendError(kInvalidIntErr);
+    return;
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpRange(OpArgs{shard, t->db_index()}, key, start, end);
+  };
+
+  auto res = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (!res && res.status() != OpStatus::KEY_NOTFOUND) {
+    return (*cntx)->SendError(res.status());
+  }
+
+  (*cntx)->SendStringArr(*res);
+}
+
+// lrem key 5 foo, will remove foo elements from the list if exists at most 5 times.
+void ListFamily::LRem(CmdArgList args, ConnectionContext* cntx) {
+  std::string_view key = ArgS(args, 1);
+  std::string_view index_str = ArgS(args, 2);
+  std::string_view elem = ArgS(args, 3);
+  int32_t count;
+
+  if (!absl::SimpleAtoi(index_str, &count)) {
+    (*cntx)->SendError(kInvalidIntErr);
+    return;
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpRem(OpArgs{shard, t->db_index()}, key, elem, count);
+  };
+  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (result) {
+    (*cntx)->SendLong(result.value());
+  } else {
+    (*cntx)->SendLong(0);
+  }
+}
+
+void ListFamily::LSet(CmdArgList args, ConnectionContext* cntx) {
+  std::string_view key = ArgS(args, 1);
+  std::string_view index_str = ArgS(args, 2);
+  std::string_view elem = ArgS(args, 3);
+  int32_t count;
+
+  if (!absl::SimpleAtoi(index_str, &count)) {
+    (*cntx)->SendError(kInvalidIntErr);
+    return;
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpSet(OpArgs{shard, t->db_index()}, key, elem, count);
+  };
+  OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
+  if (result) {
+    (*cntx)->SendOk();
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
+
 void ListFamily::BLPop(CmdArgList args, ConnectionContext* cntx) {
   DCHECK_GE(args.size(), 3u);
 
@@ -401,16 +487,156 @@ OpResult<string> ListFamily::OpIndex(const OpArgs& op_args, std::string_view key
     return res.status();
   quicklist* ql = GetQL(res.value()->second);
   quicklistEntry entry = QLEntry();
-  quicklistIter* iter = quicklistGetIteratorEntryAtIdx(ql, index, &entry);
-
+  quicklistIter* iter = quicklistGetIteratorAtIdx(ql, AL_START_TAIL, index);
   if (!iter)
     return OpStatus::KEY_NOTFOUND;
 
+  quicklistNext(iter, &entry);
+  string str;
+
   if (entry.value) {
-    return string{reinterpret_cast<char*>(entry.value), entry.sz};
+    str.assign(reinterpret_cast<char*>(entry.value), entry.sz);
   } else {
-    return absl::StrCat(entry.longval);
+    str = absl::StrCat(entry.longval);
   }
+  quicklistReleaseIterator(iter);
+
+  return str;
+}
+
+OpResult<uint32_t> ListFamily::OpRem(const OpArgs& op_args, std::string_view key,
+                                     std::string_view elem, long count) {
+  DCHECK(!elem.empty());
+  auto res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_LIST);
+  if (!res)
+    return res.status();
+  quicklist* ql = res.value()->second.GetQL();
+
+  int iter_direction = AL_START_HEAD;
+  long long index = 0;
+  if (count < 0) {
+    count = -count;
+    iter_direction = AL_START_TAIL;
+    index = -1;
+  }
+
+  quicklistIter* qiter = quicklistGetIteratorAtIdx(ql, iter_direction, index);
+  quicklistEntry entry;
+  unsigned removed = 0;
+  const uint8_t* elem_ptr = reinterpret_cast<const uint8_t*>(elem.data());
+  while (quicklistNext(qiter, &entry)) {
+    if (quicklistCompare(&entry, elem_ptr, elem.size())) {
+      quicklistDelEntry(qiter, &entry);
+      removed++;
+      if (count && removed == count)
+        break;
+    }
+  }
+  quicklistReleaseIterator(qiter);
+
+  if (quicklistCount(ql) == 0) {
+    CHECK(op_args.shard->db_slice().Del(op_args.db_ind, res.value()));
+  }
+
+  return removed;
+}
+
+OpStatus ListFamily::OpSet(const OpArgs& op_args, std::string_view key, std::string_view elem,
+                           long index) {
+  DCHECK(!elem.empty());
+  auto res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_LIST);
+  if (!res)
+    return res.status();
+  quicklist* ql = res.value()->second.GetQL();
+
+  int replaced = quicklistReplaceAtIndex(ql, index, elem.data(), elem.size());
+  if (!replaced) {
+    return OpStatus::OUT_OF_RANGE;
+  }
+  return OpStatus::OK;
+}
+
+OpStatus ListFamily::OpTrim(const OpArgs& op_args, std::string_view key, long start, long end) {
+  auto res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_LIST);
+  if (!res)
+    return res.status();
+  quicklist* ql = res.value()->second.GetQL();
+  long llen = quicklistCount(ql);
+
+  /* convert negative indexes */
+  if (start < 0)
+    start = llen + start;
+  if (end < 0)
+    end = llen + end;
+  if (start < 0)
+    start = 0;
+
+  long ltrim, rtrim;
+
+  /* Invariant: start >= 0, so this test will be true when end < 0.
+   * The range is empty when start > end or start >= length. */
+  if (start > end || start >= llen) {
+    /* Out of range start or start > end result in empty list */
+    ltrim = llen;
+    rtrim = 0;
+  } else {
+    if (end >= llen)
+      end = llen - 1;
+    ltrim = start;
+    rtrim = llen - end - 1;
+  }
+  quicklistDelRange(ql, 0, ltrim);
+  quicklistDelRange(ql, -rtrim, rtrim);
+
+  if (quicklistCount(ql) == 0) {
+    CHECK(op_args.shard->db_slice().Del(op_args.db_ind, res.value()));
+  }
+  return OpStatus::OK;
+}
+
+OpResult<StringVec> ListFamily::OpRange(const OpArgs& op_args, std::string_view key, long start,
+                                        long end) {
+  auto res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_LIST);
+  if (!res)
+    return res.status();
+
+  quicklist* ql = res.value()->second.GetQL();
+  long llen = quicklistCount(ql);
+
+  /* convert negative indexes */
+  if (start < 0)
+    start = llen + start;
+  if (end < 0)
+    end = llen + end;
+  if (start < 0)
+    start = 0;
+
+  /* Invariant: start >= 0, so this test will be true when end < 0.
+   * The range is empty when start > end or start >= length. */
+  if (start > end || start >= llen) {
+    /* Out of range start or start > end result in empty list */
+    return StringVec{};
+  }
+
+  if (end >= llen)
+    end = llen - 1;
+
+  unsigned lrange = end - start + 1;
+  quicklistIter* qiter = quicklistGetIteratorAtIdx(ql, AL_START_HEAD, start);
+  quicklistEntry entry = QLEntry();
+  StringVec str_vec;
+
+  unsigned cnt = 0;
+  while (cnt < lrange && quicklistNext(qiter, &entry)) {
+    if (entry.value)
+      str_vec.emplace_back(reinterpret_cast<char*>(entry.value), entry.sz);
+    else
+      str_vec.push_back(absl::StrCat(entry.longval));
+    ++cnt;
+  }
+  quicklistReleaseIterator(qiter);
+
+  return str_vec;
 }
 
 using CI = CommandId;
@@ -424,7 +650,11 @@ void ListFamily::Register(CommandRegistry* registry) {
             << CI{"RPOP", CO::WRITE | CO::FAST | CO::DENYOOM, 2, 1, 1, 1}.HFUNC(RPop)
             << CI{"BLPOP", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING, -3, 1, -2, 1}.HFUNC(BLPop)
             << CI{"LLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(LLen)
-            << CI{"LINDEX", CO::READONLY, 3, 1, 1, 1}.HFUNC(LIndex);
+            << CI{"LINDEX", CO::READONLY, 3, 1, 1, 1}.HFUNC(LIndex)
+            << CI{"LRANGE", CO::READONLY, 4, 1, 1, 1}.HFUNC(LRange)
+            << CI{"LSET", CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(LSet)
+            << CI{"LTRIM", CO::WRITE, 4, 1, 1, 1}.HFUNC(LTrim)
+            << CI{"LREM", CO::WRITE, 4, 1, 1, 1}.HFUNC(LRem);
 }
 
 }  // namespace dfly

@@ -154,6 +154,38 @@ TEST_F(ListFamilyTest, BLPopTimeout) {
   ASSERT_FALSE(service_->IsLocked(0, kKey1));
 }
 
+TEST_F(ListFamilyTest, LRem) {
+  auto resp = Run({"rpush", kKey1, "a", "b", "a", "c"});
+  ASSERT_THAT(resp, ElementsAre(IntArg(4)));
+  resp = Run({"lrem", kKey1, "2", "a"});
+  ASSERT_THAT(resp, ElementsAre(IntArg(2)));
+  ASSERT_THAT(Run({"lrange", kKey1, "0", "1"}), ElementsAre("b", "c"));
+}
+
+TEST_F(ListFamilyTest, LTrim) {
+  Run({"rpush", kKey1, "a", "b", "c", "d"});
+  ASSERT_THAT(Run({"ltrim", kKey1, "-2", "-1"}), RespEq("OK"));
+  ASSERT_THAT(Run({"lrange", kKey1, "0", "1"}), ElementsAre("c", "d"));
+  ASSERT_THAT(Run({"ltrim", kKey1, "0", "0"}), RespEq("OK"));
+  ASSERT_THAT(Run({"lrange", kKey1, "0", "1"}), ElementsAre("c"));
+}
+
+TEST_F(ListFamilyTest, LRange) {
+  auto resp = Run({"lrange", kKey1, "0", "5"});
+  ASSERT_THAT(resp[0], ArrLen(0));
+  Run({"rpush", kKey1, "0", "1", "2"});
+  resp = Run({"lrange", kKey1, "-2", "-1"});
+  ASSERT_THAT(resp, ElementsAre("1", "2"));
+}
+
+TEST_F(ListFamilyTest, Lset) {
+  Run({"rpush", kKey1, "0", "1", "2"});
+  ASSERT_THAT(Run({"lset", kKey1, "0", "bar"}), RespEq("OK"));
+  ASSERT_THAT(Run({"lpop", kKey1}), RespEq("bar"));
+  ASSERT_THAT(Run({"lset", kKey1, "-1", "foo"}), RespEq("OK"));
+  ASSERT_THAT(Run({"rpop", kKey1}), RespEq("foo"));
+}
+
 TEST_F(ListFamilyTest, BLPopSerialize) {
   RespVec blpop_resp;
 

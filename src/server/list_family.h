@@ -27,6 +27,10 @@ class ListFamily {
   static void BLPop(CmdArgList args, ConnectionContext* cntx);
   static void LLen(CmdArgList args, ConnectionContext* cntx);
   static void LIndex(CmdArgList args, ConnectionContext* cntx);
+  static void LTrim(CmdArgList args, ConnectionContext* cntx);
+  static void LRange(CmdArgList args, ConnectionContext* cntx);
+  static void LRem(CmdArgList args, ConnectionContext* cntx);
+  static void LSet(CmdArgList args, ConnectionContext* cntx);
 
   static void PopGeneric(ListDir dir, const CmdArgList& args, ConnectionContext* cntx);
   static void PushGeneric(ListDir dir, const CmdArgList& args, ConnectionContext* cntx);
@@ -36,6 +40,15 @@ class ListFamily {
   static OpResult<std::string> OpPop(const OpArgs& op_args, std::string_view key, ListDir dir);
   static OpResult<uint32_t> OpLen(const OpArgs& op_args, std::string_view key);
   static OpResult<std::string> OpIndex(const OpArgs& op_args, std::string_view key, long index);
+
+  static OpResult<uint32_t> OpRem(const OpArgs& op_args, std::string_view key,
+                                  std::string_view elem, long count);
+  static facade::OpStatus OpSet(const OpArgs& op_args, std::string_view key, std::string_view elem,
+                                long count);
+  static facade::OpStatus OpTrim(const OpArgs& op_args, std::string_view key, long start, long end);
+
+  static OpResult<StringVec> OpRange(const OpArgs& op_args, std::string_view key,
+                                                    long start, long end);
 };
 
 }  // namespace dfly

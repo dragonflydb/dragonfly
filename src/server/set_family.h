@@ -35,14 +35,12 @@ class SetFamily {
   static void SInterStore(CmdArgList args,  ConnectionContext* cntx);
 
 
-  using StringSet = std::vector<std::string>;
-
-  static OpResult<StringSet> OpUnion(const OpArgs& op_args, const ArgSlice& args);
-  static OpResult<StringSet> OpDiff(const Transaction* t, EngineShard* es);
-  static OpResult<StringSet> OpInter(const Transaction* t, EngineShard* es, bool remove_first);
+  static OpResult<StringVec> OpUnion(const OpArgs& op_args, const ArgSlice& args);
+  static OpResult<StringVec> OpDiff(const Transaction* t, EngineShard* es);
+  static OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_first);
 
   // count - how many elements to pop.
-  static OpResult<StringSet> OpPop(const OpArgs& op_args, std::string_view key, unsigned count);
+  static OpResult<StringVec> OpPop(const OpArgs& op_args, std::string_view key, unsigned count);
 
 };
 

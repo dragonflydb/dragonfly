@@ -29,6 +29,7 @@ using facade::CmdArgVec;
 using facade::ArgS;
 
 using ArgSlice = absl::Span<const std::string_view>;
+using StringVec = std::vector<std::string>;
 
 constexpr DbIndex kInvalidDbId = DbIndex(-1);
 constexpr ShardId kInvalidSid = ShardId(-1);

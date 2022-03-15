@@ -97,10 +97,10 @@ API 1.0
   - [X] LLEN
   - [X] LPOP
   - [X] LPUSH
-  - [ ] LRANGE
-  - [ ] LREM
-  - [ ] LSET
-  - [ ] LTRIM
+  - [X] LRANGE
+  - [X] LREM
+  - [X] LSET
+  - [X] LTRIM
   - [X] RPOP
   - [ ] RPOPLPUSH
   - [X] RPUSH

@@ -130,6 +130,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   virtual void SendNullArray();
 
   virtual void SendStringArr(absl::Span<const std::string_view> arr);
+  virtual void SendStringArr(absl::Span<const std::string> arr);
   virtual void SendNull();
 
   virtual void SendDouble(double val);
