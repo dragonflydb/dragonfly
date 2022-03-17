@@ -50,6 +50,8 @@ TEST_F(ZSetFamilyTest, ZRem) {
   EXPECT_THAT(resp[0], IntArg(1));
   resp = Run({"zcard", "x"});
   EXPECT_THAT(resp[0], IntArg(1));
+  EXPECT_THAT(Run({"zrange", "x", "0", "3", "byscore"}), ElementsAre("a"));
+  EXPECT_THAT(Run({"zrange", "x", "(-inf", "(+inf", "byscore"}), ElementsAre("a"));
 }
 
 }  // namespace dfly
