@@ -96,5 +96,6 @@ int zzlLexValueLteMax(unsigned char* p, const zlexrangespec* spec);
 int zslLexValueGteMin(sds value, const zlexrangespec* spec);
 int zslLexValueLteMax(sds value, const zlexrangespec* spec);
 int zsetZiplistValidateIntegrity(unsigned char* zl, size_t size, int deep);
+zskiplistNode* zslGetElementByRank(zskiplist *zsl, unsigned long rank);
 
 #endif

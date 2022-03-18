@@ -27,15 +27,23 @@ class ZSetFamily {
 
   using ScoreInterval = std::pair<Bound, Bound>;
 
+  struct RangeParams {
+    uint32_t offset = 0;
+    uint32_t limit = UINT32_MAX;
+    bool with_scores = false;
+  };
+
   struct ZRangeSpec {
     std::variant<IndexInterval, ScoreInterval> interval;
-    // TODO: handle open/close, inf etc.
+    RangeParams params;
   };
 
   using ScoredMember = std::pair<std::string, double>;
   using ScoredArray = std::vector<ScoredMember>;
 
  private:
+  template <typename T> using OpResult = facade::OpResult<T>;
+
   static void ZCard(CmdArgList args, ConnectionContext* cntx);
   static void ZAdd(CmdArgList args, ConnectionContext* cntx);
   static void ZIncrBy(CmdArgList args, ConnectionContext* cntx);
@@ -44,6 +52,12 @@ class ZSetFamily {
   static void ZScore(CmdArgList args, ConnectionContext* cntx);
   static void ZRangeByScore(CmdArgList args, ConnectionContext* cntx);
 
+  static void ZRangeByScoreInternal(std::string_view key, std::string_view min_s,
+                                    std::string_view max_s, const RangeParams& params,
+                                    ConnectionContext* cntx);
+  static void OutputScoredArrayResult(const OpResult<ScoredArray>& arr, bool with_scores,
+                                      ConnectionContext* cntx);
+
   struct ZParams {
     unsigned flags = 0;  // mask of ZADD_IN_ macros.
     bool ch = false;     // Corresponds to CH option.
@@ -51,7 +65,6 @@ class ZSetFamily {
 
   using ScoredMemberView = std::pair<double, std::string_view>;
   using ScoredMemberSpan = absl::Span<ScoredMemberView>;
-  template <typename T> using OpResult = facade::OpResult<T>;
 
   static OpResult<unsigned> OpAdd(const ZParams& zparams, const OpArgs& op_args,
                                   std::string_view key, ScoredMemberSpan members);
@@ -60,7 +73,6 @@ class ZSetFamily {
                                   std::string_view member);
   static OpResult<ScoredArray> OpRange(const ZRangeSpec& range_spec, const OpArgs& op_args,
                                        std::string_view key);
-
 };
 
 }  // namespace dfly

@@ -108,8 +108,8 @@ API 1.0
   - [X] ZADD
   - [X] ZCARD
   - [ ] ZINCRBY
-  - [ ] ZRANGE
-  - [ ] ZRANGEBYSCORE
+  - [X] ZRANGE
+  - [X] ZRANGEBYSCORE
   - [X] ZREM
   - [ ] ZREMRANGEBYSCORE
   - [ ] ZREVRANGE
