@@ -51,12 +51,16 @@ class ZSetFamily {
   static void ZRem(CmdArgList args, ConnectionContext* cntx);
   static void ZScore(CmdArgList args, ConnectionContext* cntx);
   static void ZRangeByScore(CmdArgList args, ConnectionContext* cntx);
+  static void ZRemRangeByRank(CmdArgList args, ConnectionContext* cntx);
+  static void ZRemRangeByScore(CmdArgList args, ConnectionContext* cntx);
 
   static void ZRangeByScoreInternal(std::string_view key, std::string_view min_s,
                                     std::string_view max_s, const RangeParams& params,
                                     ConnectionContext* cntx);
   static void OutputScoredArrayResult(const OpResult<ScoredArray>& arr, bool with_scores,
                                       ConnectionContext* cntx);
+  static void ZRemRangeGeneric(std::string_view key, const ZRangeSpec& range_spec,
+                               ConnectionContext* cntx);
 
   struct ZParams {
     unsigned flags = 0;  // mask of ZADD_IN_ macros.
@@ -73,6 +77,8 @@ class ZSetFamily {
                                   std::string_view member);
   static OpResult<ScoredArray> OpRange(const ZRangeSpec& range_spec, const OpArgs& op_args,
                                        std::string_view key);
+  static OpResult<unsigned> OpRemRange(const OpArgs& op_args, std::string_view key,
+                                       const ZRangeSpec& spec);
 };
 
 }  // namespace dfly

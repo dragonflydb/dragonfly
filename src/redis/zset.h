@@ -97,5 +97,9 @@ int zslLexValueGteMin(sds value, const zlexrangespec* spec);
 int zslLexValueLteMax(sds value, const zlexrangespec* spec);
 int zsetZiplistValidateIntegrity(unsigned char* zl, size_t size, int deep);
 zskiplistNode* zslGetElementByRank(zskiplist *zsl, unsigned long rank);
+unsigned long zslDeleteRangeByRank(zskiplist *zsl, unsigned int start, unsigned int end,
+                                   dict *dict);
+unsigned long zslDeleteRangeByScore(zskiplist *zsl, const zrangespec *range, dict *dict);
+unsigned char *zzlDeleteRangeByScore(unsigned char *zl, const zrangespec *range, unsigned long *deleted);
 
 #endif

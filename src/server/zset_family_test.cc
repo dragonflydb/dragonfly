@@ -58,6 +58,25 @@ TEST_F(ZSetFamilyTest, ZRem) {
 TEST_F(ZSetFamilyTest, ZRange) {
   Run({"zadd", "x", "1.1", "a", "2.1", "b"});
   EXPECT_THAT(Run({"zrangebyscore", "x", "0", "(1.1"}), ElementsAre(ArrLen(0)));
+  EXPECT_THAT(Run({"zrangebyscore", "x", "-inf", "1.1"}), ElementsAre("a"));
+}
+
+TEST_F(ZSetFamilyTest, ZRemRangeRank) {
+  Run({"zadd", "x", "1.1", "a", "2.1", "b"});
+  EXPECT_THAT(Run({"ZREMRANGEBYRANK", "y", "0", "1"}), ElementsAre(IntArg(0)));
+  EXPECT_THAT(Run({"ZREMRANGEBYRANK", "x", "0", "0"}), ElementsAre(IntArg(1)));
+  EXPECT_THAT(Run({"zrange", "x", "0", "5"}), ElementsAre("b"));
+  EXPECT_THAT(Run({"ZREMRANGEBYRANK", "x", "0", "1"}), ElementsAre(IntArg(1)));
+  EXPECT_THAT(Run({"type", "x"}), ElementsAre("none"));
+}
+
+TEST_F(ZSetFamilyTest, ZRemRangeScore) {
+  Run({"zadd", "x", "1.1", "a", "2.1", "b"});
+  EXPECT_THAT(Run({"ZREMRANGEBYSCORE", "y", "0", "1"}), ElementsAre(IntArg(0)));
+  EXPECT_THAT(Run({"ZREMRANGEBYSCORE", "x", "-inf", "1.1"}), ElementsAre(IntArg(1)));
+  EXPECT_THAT(Run({"zrange", "x", "0", "5"}), ElementsAre("b"));
+  EXPECT_THAT(Run({"ZREMRANGEBYSCORE", "x", "(2.0", "+inf"}), ElementsAre(IntArg(1)));
+  EXPECT_THAT(Run({"type", "x"}), ElementsAre("none"));
 }
 
 }  // namespace dfly

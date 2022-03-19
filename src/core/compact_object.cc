@@ -109,6 +109,21 @@ size_t MallocUsedHSet(unsigned encoding, void* ptr) {
   return 0;
 }
 
+size_t MallocUsedZSet(unsigned encoding, void* ptr) {
+  switch (encoding) {
+    case OBJ_ENCODING_LISTPACK:
+      return lpBytes(reinterpret_cast<uint8_t*>(ptr));
+    case OBJ_ENCODING_SKIPLIST: {
+      zset* zs = (zset*)ptr;
+      return DictMallocSize(zs->dict);
+    }
+    break;
+    default:
+      LOG(FATAL) << "Unknown set encoding type " << encoding;
+  }
+  return 0;
+}
+
 inline void FreeObjHash(unsigned encoding, void* ptr) {
   switch (encoding) {
     case OBJ_ENCODING_HT:
@@ -232,6 +247,9 @@ size_t RobjWrapper::MallocUsed() const {
       return MallocUsedSet(encoding_, inner_obj_);
     case OBJ_HASH:
       return MallocUsedHSet(encoding_, inner_obj_);
+    case OBJ_ZSET:
+      return MallocUsedZSet(encoding_, inner_obj_);
+
     default:
       LOG(FATAL) << "Not supported " << type_;
   }
@@ -265,6 +283,7 @@ size_t RobjWrapper::Size() const {
 void RobjWrapper::Free(pmr::memory_resource* mr) {
   if (!inner_obj_)
     return;
+  DVLOG(1) << "RobjWrapper::Free " << inner_obj_;
 
   switch (type_) {
     case OBJ_STRING:
