@@ -12,7 +12,6 @@ extern "C" {
 }
 
 #include "base/logging.h"
-#include "core/flat_set.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
@@ -29,14 +28,7 @@ using SvArray = vector<std::string_view>;
 
 namespace {
 
-FlatSet* CreateFlatSet(pmr::memory_resource* mr) {
-  pmr::polymorphic_allocator<FlatSet> pa(mr);
-  FlatSet* fs = pa.allocate(1);
-  pa.construct(fs, mr);
-  return fs;
-}
-
-void ConvertTo(intset* src, FlatSet* dest) {
+void ConvertTo(intset* src, dict* dest) {
   int64_t intele;
   char buf[32];
 
@@ -44,7 +36,8 @@ void ConvertTo(intset* src, FlatSet* dest) {
   int ii = 0;
   while (intsetGet(src, ii++, &intele)) {
     char* next = absl::numbers_internal::FastIntToBuffer(intele, buf);
-    dest->Add(string_view{buf, size_t(next - buf)});
+    sds s = sdsnewlen(buf, next - buf);
+    CHECK(dictAddRaw(dest, s, NULL));
   }
 }
 
@@ -94,12 +87,14 @@ pair<unsigned, bool> RemoveSet(ArgSlice vals, CompactObj* set) {
     isempty = (intsetLen(is) == 0);
     set->SetRObjPtr(is);
   } else {
-    FlatSet* fs = (FlatSet*)set->RObjPtr();
-    for (auto val : vals) {
-      removed += fs->Remove(val);
+    dict* d = (dict*)set->RObjPtr();
+    auto* shard = EngineShard::tlocal();
+    for (auto member : vals) {
+      shard->tmp_str1 = sdscpylen(shard->tmp_str1, member.data(), member.size());
+      int result = dictDelete(d, shard->tmp_str1);
+      removed += (result == DICT_OK);
     }
-    isempty = fs->Empty();
-    set->SetRObjPtr(fs);
+    isempty = (dictSize(d) == 0);
   }
   return make_pair(removed, isempty);
 }
@@ -116,12 +111,15 @@ template <typename F> void FillSet(const CompactObj& set, F&& f) {
       f(string{buf, size_t(next - buf)});
     }
   } else {
-    FlatSet* fs = (FlatSet*)set.RObjPtr();
+    dict* ds = (dict*)set.RObjPtr();
     string str;
-    for (const auto& member : *fs) {
-      member.GetString(&str);
+    dictIterator* di = dictGetIterator(ds);
+    dictEntry* de = nullptr;
+    while ((de = dictNext(di))) {
+      str.assign((sds)de->key, sdslen((sds)de->key));
       f(move(str));
     }
+    dictReleaseIterator(di);
   }
 }
 
@@ -269,8 +267,8 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const ArgS
       intset* is = intsetNew();
       co.InitRobj(OBJ_SET, kEncodingIntSet, is);
     } else {
-      FlatSet* fs = CreateFlatSet(op_args.shard->memory_resource());
-      co.InitRobj(OBJ_SET, kEncodingStrMap, fs);
+      dict* ds = dictCreate(&setDictType);
+      co.InitRobj(OBJ_SET, kEncodingStrMap, ds);
     }
   } else {
     // We delibirately check only now because with othewrite=true
@@ -292,11 +290,11 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const ArgS
       res += added;
 
       if (!success) {
-        FlatSet* fs = CreateFlatSet(op_args.shard->memory_resource());
-        ConvertTo(is, fs);
+        dict* ds = dictCreate(&setDictType);
+        ConvertTo(is, ds);
         co.SetRObjPtr(is);
-        co.InitRobj(OBJ_SET, kEncodingStrMap, fs);
-        inner_obj = fs;
+        co.InitRobj(OBJ_SET, kEncodingStrMap, ds);
+        inner_obj = ds;
         break;
       }
     }
@@ -306,9 +304,15 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const ArgS
   }
 
   if (co.Encoding() == kEncodingStrMap) {
-    FlatSet* fs = (FlatSet*)inner_obj;
-    for (auto val : vals) {
-      res += fs->Add(val);
+    dict* ds = (dict*)inner_obj;
+
+    for (auto member : vals) {
+      es->tmp_str1 = sdscpylen(es->tmp_str1, member.data(), member.size());
+      dictEntry* de = dictAddRaw(ds, es->tmp_str1, NULL);
+      if (de) {
+        de->key = sdsdup(es->tmp_str1);
+        ++res;
+      }
     }
   }
 
@@ -362,7 +366,7 @@ OpStatus Mover::OpFind(Transaction* t, EngineShard* es) {
   ArgSlice largs = t->ShardArgsInShard(es->shard_id());
 
   // In case both src and dest are in the same shard, largs size will be 2.
-  DCHECK_LT(largs.size(), 2u);
+  DCHECK_LE(largs.size(), 2u);
 
   for (auto k : largs) {
     unsigned index = (k == src_) ? 0 : 1;
@@ -380,7 +384,7 @@ OpStatus Mover::OpFind(Transaction* t, EngineShard* es) {
 
 OpStatus Mover::OpMutate(Transaction* t, EngineShard* es) {
   ArgSlice largs = t->ShardArgsInShard(es->shard_id());
-  DCHECK_LT(largs.size(), 2u);
+  DCHECK_LE(largs.size(), 2u);
 
   OpArgs op_args{es, t->db_index()};
   for (auto k : largs) {
@@ -899,9 +903,7 @@ OpResult<StringVec> SetFamily::OpPop(const OpArgs& op_args, std::string_view key
    * The number of requested elements is greater than or equal to
    * the number of elements inside the set: simply return the whole set. */
   if (count >= slen) {
-    FillSet(it->second, [&result](string s) {
-      result.push_back(move(s));
-    });
+    FillSet(it->second, [&result](string s) { result.push_back(move(s)); });
     /* Delete the set as it is now empty */
     CHECK(es->db_slice().Del(op_args.db_ind, it));
   } else {
@@ -918,17 +920,16 @@ OpResult<StringVec> SetFamily::OpPop(const OpArgs& op_args, std::string_view key
       is = intsetTrimTail(is, count);  // now remove last count items
       it->second.SetRObjPtr(is);
     } else {
-      FlatSet* fs = (FlatSet*)it->second.RObjPtr();
+      dict* ds = (dict*)it->second.RObjPtr();
       string str;
-
+      dictIterator* di = dictGetSafeIterator(ds);
       for (uint32_t i = 0; i < count; ++i) {
-        auto it = fs->begin();
-        it->GetString(&str);
-        fs->Erase(it);
-        result.push_back(move(str));
+        dictEntry* de = dictNext(di);
+        DCHECK(de);
+        result.emplace_back((sds)de->key, sdslen((sds)de->key));
+        dictDelete(ds, de->key);
       }
-
-      it->second.SetRObjPtr(fs);
+      dictReleaseIterator(di);
     }
   }
   return result;
@@ -947,9 +948,7 @@ OpResult<StringVec> SetFamily::OpInter(const Transaction* t, EngineShard* es, bo
     if (!find_res)
       return find_res.status();
 
-    FillSet(find_res.value()->second, [&result](string s) {
-      result.push_back(move(s));
-    });
+    FillSet(find_res.value()->second, [&result](string s) { result.push_back(move(s)); });
     return result;
   }
 

@@ -20,7 +20,6 @@ extern "C" {
 
 #include "base/logging.h"
 #include "base/pod_array.h"
-#include "core/flat_set.h"
 
 #if defined(__aarch64__)
 #include "base/sse2neon.h"
@@ -52,10 +51,7 @@ size_t DictMallocSize(dict* d) {
 inline void FreeObjSet(unsigned encoding, void* ptr, pmr::memory_resource* mr) {
   switch (encoding) {
     case kEncodingStrMap: {
-      pmr::polymorphic_allocator<FlatSet> pa(mr);
-
-      pa.destroy((FlatSet*)ptr);
-      pa.deallocate((FlatSet*)ptr, 1);
+      dictRelease((dict*)ptr);
       break;
     }
     case kEncodingIntSet:
@@ -64,6 +60,24 @@ inline void FreeObjSet(unsigned encoding, void* ptr, pmr::memory_resource* mr) {
     default:
       LOG(FATAL) << "Unknown set encoding type";
   }
+}
+
+bool dictContains(const dict* d, string_view key) {
+  uint64_t h = dictGenHashFunction(key.data(), key.size());
+
+  for (unsigned table = 0; table <= 1; table++) {
+    uint64_t idx = h & DICTHT_SIZE_MASK(d->ht_size_exp[table]);
+    dictEntry* he = d->ht_table[table][idx];
+    while (he) {
+      sds dkey = (sds)he->key;
+      if (sdslen(dkey) == key.size() && (key.empty() || memcmp(dkey, key.data(), key.size()) == 0))
+        return true;
+      he = he->next;
+    }
+    if (!dictIsRehashing(d))
+      break;
+  }
+  return false;
 }
 
 bool IsMemberSet(unsigned encoding, std::string_view key, void* set) {
@@ -78,13 +92,14 @@ bool IsMemberSet(unsigned encoding, std::string_view key, void* set) {
       return intsetFind(is, llval);
     }
     case kEncodingStrMap: {
-      const FlatSet* fs = (FlatSet*)set;
-      return fs->Contains(key);
+      const dict* ds = (dict*)set;
+      return dictContains(ds, key);
     }
     default:
       LOG(FATAL) << "Unexpected encoding " << encoding;
   }
 }
+
 size_t MallocUsedSet(unsigned encoding, void* ptr) {
   switch (encoding) {
     case kEncodingStrMap /*OBJ_ENCODING_HT*/:
@@ -116,8 +131,7 @@ size_t MallocUsedZSet(unsigned encoding, void* ptr) {
     case OBJ_ENCODING_SKIPLIST: {
       zset* zs = (zset*)ptr;
       return DictMallocSize(zs->dict);
-    }
-    break;
+    } break;
     default:
       LOG(FATAL) << "Unknown set encoding type " << encoding;
   }
@@ -269,8 +283,8 @@ size_t RobjWrapper::Size() const {
           return intsetLen(is);
         }
         case kEncodingStrMap: {
-          const FlatSet* fs = (FlatSet*)inner_obj_;
-          return fs->Size();
+          dict* d = (dict*)inner_obj_;
+          return dictSize(d);
         }
         default:
           LOG(FATAL) << "Unexpected encoding " << encoding_;
@@ -995,6 +1009,10 @@ bool CompactObj::CmpEncoded(string_view sv) const {
 
 size_t CompactObj::DecodedLen(size_t sz) const {
   return ascii_len(sz) - ((mask_ & ASCII1_ENC_BIT) ? 1 : 0);
+}
+
+pmr::memory_resource* CompactObj::memory_resource() {
+  return tl.local_mr;
 }
 
 }  // namespace dfly

@@ -257,6 +257,7 @@ class CompactObj {
   static Stats GetStats();
 
   static void InitThreadLocal(std::pmr::memory_resource* mr);
+  static std::pmr::memory_resource* memory_resource();  // thread-local.
 
  private:
   size_t DecodedLen(size_t sz) const;

@@ -82,6 +82,10 @@ TEST_F(SetFamilyTest, SMove) {
   Run({"sadd", "b", "3", "5", "6", "2"});
   resp = Run({"smove", "a", "b", "1"});
   EXPECT_THAT(resp[0], IntArg(1));
+
+  Run({"sadd", "x", "a", "b", "c"});
+  Run({"sadd", "y", "c"});
+  EXPECT_THAT(Run({"smove", "x", "y", "c"}), ElementsAre(IntArg(1)));
 }
 
 TEST_F(SetFamilyTest, SPop) {
