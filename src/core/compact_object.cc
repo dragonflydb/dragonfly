@@ -62,44 +62,6 @@ inline void FreeObjSet(unsigned encoding, void* ptr, pmr::memory_resource* mr) {
   }
 }
 
-bool dictContains(const dict* d, string_view key) {
-  uint64_t h = dictGenHashFunction(key.data(), key.size());
-
-  for (unsigned table = 0; table <= 1; table++) {
-    uint64_t idx = h & DICTHT_SIZE_MASK(d->ht_size_exp[table]);
-    dictEntry* he = d->ht_table[table][idx];
-    while (he) {
-      sds dkey = (sds)he->key;
-      if (sdslen(dkey) == key.size() && (key.empty() || memcmp(dkey, key.data(), key.size()) == 0))
-        return true;
-      he = he->next;
-    }
-    if (!dictIsRehashing(d))
-      break;
-  }
-  return false;
-}
-
-bool IsMemberSet(unsigned encoding, std::string_view key, void* set) {
-  long long llval;
-
-  switch (encoding) {
-    case kEncodingIntSet: {
-      if (!string2ll(key.data(), key.size(), &llval))
-        return false;
-
-      intset* is = (intset*)set;
-      return intsetFind(is, llval);
-    }
-    case kEncodingStrMap: {
-      const dict* ds = (dict*)set;
-      return dictContains(ds, key);
-    }
-    default:
-      LOG(FATAL) << "Unexpected encoding " << encoding;
-  }
-}
-
 size_t MallocUsedSet(unsigned encoding, void* ptr) {
   switch (encoding) {
     case kEncodingStrMap /*OBJ_ENCODING_HT*/:
@@ -378,16 +340,6 @@ void RobjWrapper::SetString(string_view s, pmr::memory_resource* mr) {
     memcpy(inner_obj_, s.data(), s.size());
     sz_ = s.size();
   }
-}
-
-bool RobjWrapper::IsMember(std::string_view key) const {
-  switch (type_) {
-    case OBJ_SET:
-      return IsMemberSet(encoding_, key, inner_obj_);
-    default:
-      LOG(FATAL) << "Unsupported type " << type_;
-  }
-  return false;
 }
 
 void RobjWrapper::Init(unsigned type, unsigned encoding, void* inner) {

@@ -56,9 +56,6 @@ TEST_F(SetFamilyTest, SUnionStore) {
 }
 
 TEST_F(SetFamilyTest, SDiff) {
-  LOG(ERROR) << "TBD";
-  return;
-
   auto resp = Run({"sadd", "b", "1", "2", "3"});
   Run({"sadd", "c", "10", "11"});
   Run({"set", "a", "foo"});

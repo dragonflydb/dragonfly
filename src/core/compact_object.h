@@ -46,8 +46,6 @@ class RobjWrapper {
     return std::string_view{reinterpret_cast<char*>(inner_obj_), sz_};
   }
 
-  bool IsMember(std::string_view key) const;
-
  private:
   size_t InnerObjMallocUsed() const;
   void MakeInnerRoom(size_t current_cap, size_t desired, std::pmr::memory_resource* mr);
@@ -134,12 +132,6 @@ class CompactObj {
   // For strings - returns the length of the string.
   // For containers - returns number of elements in the container.
   size_t Size() const;
-
-  // Should be called only for container based objects.
-  // Returns true if the container contains this key.
-  bool IsMember(std::string_view key) const {
-    return u_.r_obj.IsMember(key);
-  }
 
   // TODO: We don't use c++ constructs (ctor, dtor, =) in objects of U,
   // because we use memcpy here.

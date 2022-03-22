@@ -111,7 +111,7 @@ API 1.0
   - [X] ZRANGE
   - [X] ZRANGEBYSCORE
   - [X] ZREM
-  - [ ] ZREMRANGEBYSCORE
+  - [X] ZREMRANGEBYSCORE
   - [ ] ZREVRANGE
   - [X] ZSCORE
 - [ ] Not sure whether these are required for the initial release.
