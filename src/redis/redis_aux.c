@@ -14,7 +14,6 @@ void InitRedisTables() {
   server.page_size = sysconf(_SC_PAGESIZE);
   server.zset_max_listpack_entries = 128;
   server.zset_max_listpack_value = 64;
-  server.set_max_intset_entries = 512;
 
   // Present so that redis code compiles. However, we ignore this field and instead check against 
   // listpack total size in hset_family.cc

@@ -146,8 +146,25 @@ API 2.0
   - [X] BLPOP
   - [ ] BRPOP
   - [ ] BRPOPLPUSH
+  - [ ] BLMOVE
+  - [ ] LINSERT
+  - [ ] LPUSHX
+  - [ ] RPUSHX
 - [X] String Family
   - [X] SETEX
+  - [X] APPEND
+  - [X] PREPEND (dragonfly specific)
+  - [ ] BITCOUNT
+  - [ ] BITFIELD
+  - [ ] BITOP
+  - [ ] BITPOS
+  - [ ] GETBIT
+  - [ ] GETRANGE
+  - [ ] INCRBYFLOAT
+  - [ ] PSETEX
+  - [ ] SETBIT
+  - [ ] SETRANGE
+  - [ ] STRLEN
 - [X] HashSet Family
   - [X] HSET
   - [X] HMSET
@@ -160,6 +177,9 @@ API 2.0
   - [ ] HINCRBYFLOAT
   - [X] HGETALL
   - [X] HKEYS
+  - [ ] HSETNX
+  - [ ] HVALS
+  - [ ] HSCAN
 - [ ] PubSub family
   - [ ] PUBLISH
   - [ ] PUBSUB
@@ -170,17 +190,66 @@ API 2.0
   - [ ] WATCH
   - [ ] UNWATCH
   - [ ] DISCARD
+  - [ ] CLIENT KILL/LIST/UNPAUSE/PAUSE/GETNAME/SETNAME/REPLY/TRACKINGINFO
+  - [X] COMMAND
+  - [ ] COMMAND COUNT/GETKEYS/INFO
+  - [ ] CONFIG GET/REWRITE/SET/RESETSTAT
+  - [ ] MIGRATE
+  - [ ] ROLE
+  - [ ] SLOWLOG
+  - [ ] PSYNC
+  - [ ] TIME
+  - [ ] LATENCY...
 - [X] Generic Family
   - [X] SCAN
   - [X] PEXPIREAT
-- [X] String Family
-  - [X] APPEND
-  - [X] PREPEND (dragonfly specific)
-
-
-Commands that I prefer not implement before launch:
-  - [ ] PUNSUBSCRIBE
+  - [ ] PEXPIRE
+  - [ ] DUMP
+  - [X] EVAL
+  - [X] EVALSHA
+  - [ ] OBJECT
+  - [ ] PERSIST
+  - [ ] PTTL
+  - [ ] RESTORE
+  - [X] SCRIPT LOAD
+  - [ ] SCRIPT DEBUG/KILL/FLUSH/EXISTS
+  - [ ] TOUCH
+- [X] Set Family
+  - [X] SSCAN
+  - [X] SMISMEMBER
+- [X] Sorted Set Family
+  - [ ] ZCOUNT
+  - [ ] ZINTERSTORE
+  - [ ] ZLEXCOUNT
+  - [ ] ZRANGEBYLEX
+  - [ ] ZRANK
+  - [ ] ZREMRANGEBYLEX
+  - [ ] ZREMRANGEBYRANK
+  - [ ] ZREVRANGEBYSCORE
+  - [ ] ZREVRANK
+  - [ ] ZUNIONSTORE
+  - [ ] ZSCAN
+- [ ] HYPERLOGLOG Family
+  - [ ] PFADD
+  - [ ] PFCOUNT
+  - [ ] PFMERGE
+- [ ] PUBSUB Family
   - [ ] PSUBSCRIBE
+  - [ ] PUBSUB
+  - [ ] PUBLISH
+  - [ ] PUNSUBSCRIBE
+  - [ ] SUBSCRIBE
+  - [ ] UNSUBSCRIBE
+
+
+Commands that I prefer avoid implementing before launch:
+  - PUNSUBSCRIBE
+  - PSUBSCRIBE
+  - HYPERLOGLOG
+  - SCRIPT DEBUG
+  - OBJECT
+  - DUMP/RESTORE
+  - CLIENT
 
 Also, I would omit keyspace notifications. For that I would like to deep dive and learn
 exact use-cases for this API.

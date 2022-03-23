@@ -33,7 +33,7 @@ class SetFamily {
   static void SMove(CmdArgList args,  ConnectionContext* cntx);
   static void SInter(CmdArgList args,  ConnectionContext* cntx);
   static void SInterStore(CmdArgList args,  ConnectionContext* cntx);
-
+  static void SScan(CmdArgList args,  ConnectionContext* cntx);
 
   static OpResult<StringVec> OpUnion(const OpArgs& op_args, const ArgSlice& args);
   static OpResult<StringVec> OpDiff(const Transaction* t, EngineShard* es);
@@ -41,6 +41,7 @@ class SetFamily {
 
   // count - how many elements to pop.
   static OpResult<StringVec> OpPop(const OpArgs& op_args, std::string_view key, unsigned count);
+  static OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t* cursor);
 
 };
 

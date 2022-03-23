@@ -89,7 +89,7 @@ typedef struct ServerStub {
 
     int rdb_save_incremental_fsync;
     size_t stat_peak_memory;
-    size_t set_max_intset_entries,  hash_max_listpack_entries,
+    size_t hash_max_listpack_entries,
            hash_max_listpack_value;
     size_t zset_max_listpack_entries;
     size_t zset_max_listpack_value;
