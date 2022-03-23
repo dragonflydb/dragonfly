@@ -70,6 +70,8 @@ class Service : public facade::ServiceInterface {
  private:
   static void Quit(CmdArgList args, ConnectionContext* cntx);
   static void Multi(CmdArgList args, ConnectionContext* cntx);
+  static void Publish(CmdArgList args, ConnectionContext* cntx);
+  static void Subscribe(CmdArgList args, ConnectionContext* cntx);
 
   void Eval(CmdArgList args, ConnectionContext* cntx);
   void EvalSha(CmdArgList args, ConnectionContext* cntx);

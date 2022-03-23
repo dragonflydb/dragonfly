@@ -31,6 +31,7 @@ class ZSetFamily {
     uint32_t offset = 0;
     uint32_t limit = UINT32_MAX;
     bool with_scores = false;
+    bool reverse = false;
   };
 
   struct ZRangeSpec {
@@ -53,14 +54,16 @@ class ZSetFamily {
   static void ZRangeByScore(CmdArgList args, ConnectionContext* cntx);
   static void ZRemRangeByRank(CmdArgList args, ConnectionContext* cntx);
   static void ZRemRangeByScore(CmdArgList args, ConnectionContext* cntx);
+  static void ZRevRange(CmdArgList args, ConnectionContext* cntx);
 
   static void ZRangeByScoreInternal(std::string_view key, std::string_view min_s,
                                     std::string_view max_s, const RangeParams& params,
                                     ConnectionContext* cntx);
-  static void OutputScoredArrayResult(const OpResult<ScoredArray>& arr, bool with_scores,
+  static void OutputScoredArrayResult(const OpResult<ScoredArray>& arr, const RangeParams& params,
                                       ConnectionContext* cntx);
   static void ZRemRangeGeneric(std::string_view key, const ZRangeSpec& range_spec,
                                ConnectionContext* cntx);
+  static void ZRangeGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx);
 
   struct ZParams {
     unsigned flags = 0;  // mask of ZADD_IN_ macros.

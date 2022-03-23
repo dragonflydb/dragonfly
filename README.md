@@ -112,7 +112,7 @@ API 1.0
   - [X] ZRANGEBYSCORE
   - [X] ZREM
   - [X] ZREMRANGEBYSCORE
-  - [ ] ZREVRANGE
+  - [X] ZREVRANGE
   - [X] ZSCORE
 - [ ] Not sure whether these are required for the initial release.
   - [X] AUTH
@@ -224,7 +224,7 @@ API 2.0
   - [ ] ZRANGEBYLEX
   - [ ] ZRANK
   - [ ] ZREMRANGEBYLEX
-  - [ ] ZREMRANGEBYRANK
+  - [X] ZREMRANGEBYRANK
   - [ ] ZREVRANGEBYSCORE
   - [ ] ZREVRANK
   - [ ] ZUNIONSTORE

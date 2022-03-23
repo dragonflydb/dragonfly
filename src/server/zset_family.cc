@@ -87,7 +87,7 @@ class IntervalVisitor {
   void ActionRem(const zrangespec& range);         // score
 
   void Next(uint8_t* zl, uint8_t** eptr, uint8_t** sptr) const {
-    if (reverse_) {
+    if (params_.reverse) {
       zzlPrev(zl, eptr, sptr);
     } else {
       zzlNext(zl, eptr, sptr);
@@ -95,7 +95,7 @@ class IntervalVisitor {
   }
 
   bool IsUnder(double score, const zrangespec& spec) const {
-    return reverse_ ? zslValueGteMin(score, &spec) : zslValueLteMax(score, &spec);
+    return params_.reverse ? zslValueGteMin(score, &spec) : zslValueLteMax(score, &spec);
   }
 
   void AddResult(const uint8_t* vstr, unsigned vlen, long long vlon, double score);
@@ -104,7 +104,6 @@ class IntervalVisitor {
   ZSetFamily::RangeParams params_;
   robj* zobj_;
 
-  bool reverse_ = false;
   ZSetFamily::ScoredArray result_;
   unsigned removed_ = 0;
 };
@@ -165,10 +164,11 @@ void IntervalVisitor::ActionRange(unsigned start, unsigned end) {
     long long vlong;
     double score = 0.0;
 
-    if (reverse_)
-      eptr = lpSeek(zl, -2 - (2 * start));
+    if (params_.reverse)
+      eptr = lpSeek(zl, -2 - long(2 * start));
     else
       eptr = lpSeek(zl, 2 * start);
+    DCHECK(eptr);
 
     sptr = lpNext(zl, eptr);
 
@@ -189,7 +189,7 @@ void IntervalVisitor::ActionRange(unsigned start, unsigned end) {
     zskiplistNode* ln;
 
     /* Check if starting point is trivial, before doing log(N) lookup. */
-    if (reverse_) {
+    if (params_.reverse) {
       ln = zsl->tail;
       unsigned long llen = zsetLength(zobj_);
       if (start > 0)
@@ -204,7 +204,7 @@ void IntervalVisitor::ActionRange(unsigned start, unsigned end) {
       DCHECK(ln != NULL);
       sds ele = ln->ele;
       result_.emplace_back(string(ele, sdslen(ele)), ln->score);
-      ln = reverse_ ? ln->backward : ln->level[0].forward;
+      ln = params_.reverse ? ln->backward : ln->level[0].forward;
     }
   } else {
     LOG(FATAL) << "Unknown sorted set encoding" << zobj_->encoding;
@@ -262,7 +262,7 @@ void IntervalVisitor::ExtractListPack(const zrangespec& range) {
   unsigned limit = params_.limit;
 
   /* If reversed, get the last node in range as starting point. */
-  if (reverse_) {
+  if (params_.reverse) {
     eptr = zzlLastInRange(zl, &range);
   } else {
     eptr = zzlFirstInRange(zl, &range);
@@ -306,7 +306,7 @@ void IntervalVisitor::ExtractSkipList(const zrangespec& range) {
   unsigned rangelen = 0;
 
   /* If reversed, get the last node in range as starting point. */
-  if (reverse_) {
+  if (params_.reverse) {
     ln = zslLastInRange(zsl, &range);
   } else {
     ln = zslFirstInRange(zsl, &range);
@@ -315,7 +315,7 @@ void IntervalVisitor::ExtractSkipList(const zrangespec& range) {
   /* If there is an offset, just traverse the number of elements without
    * checking the score because that is done in the next loop. */
   while (ln && offset--) {
-    if (reverse_) {
+    if (params_.reverse) {
       ln = ln->backward;
     } else {
       ln = ln->level[0].forward;
@@ -331,7 +331,7 @@ void IntervalVisitor::ExtractSkipList(const zrangespec& range) {
     result_.emplace_back(string{ln->ele, sdslen(ln->ele)}, ln->score);
 
     /* Move to next node */
-    if (reverse_) {
+    if (params_.reverse) {
       ln = ln->backward;
     } else {
       ln = ln->level[0].forward;
@@ -479,49 +479,11 @@ void ZSetFamily::ZIncrBy(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZRange(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
-  std::string_view min_s = ArgS(args, 2);
-  std::string_view max_s = ArgS(args, 3);
+  ZRangeGeneric(std::move(args), false, cntx);
+}
 
-  bool parse_score = false;
-  RangeParams range_params;
-
-  for (size_t i = 4; i < args.size(); ++i) {
-    ToUpper(&args[i]);
-
-    string_view cur_arg = ArgS(args, i);
-    if (cur_arg == "BYSCORE") {
-      parse_score = true;
-    } else if (cur_arg == "WITHSCORES") {
-      range_params.with_scores = true;
-    } else {
-      return cntx->reply_builder()->SendError(absl::StrCat("unsupported option ", cur_arg));
-    }
-  }
-
-  if (parse_score) {
-    ZRangeByScoreInternal(key, min_s, max_s, range_params, cntx);
-    return;
-  }
-
-  IndexInterval ii;
-
-  if (!absl::SimpleAtoi(min_s, &ii.first) || !absl::SimpleAtoi(max_s, &ii.second)) {
-    (*cntx)->SendError(kInvalidIntErr);
-    return;
-  }
-
-  ZRangeSpec range_spec;
-  range_spec.params = range_params;
-  range_spec.interval = ii;
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpRange(range_spec, op_args, key);
-  };
-
-  OpResult<ScoredArray> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  OutputScoredArrayResult(result, range_params.with_scores, cntx);
+void ZSetFamily::ZRevRange(CmdArgList args, ConnectionContext* cntx) {
+  ZRangeGeneric(std::move(args), true, cntx);
 }
 
 void ZSetFamily::ZRangeByScore(CmdArgList args, ConnectionContext* cntx) {
@@ -635,11 +597,11 @@ void ZSetFamily::ZRangeByScoreInternal(std::string_view key, std::string_view mi
   };
 
   OpResult<ScoredArray> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  OutputScoredArrayResult(result, params.with_scores, cntx);
+  OutputScoredArrayResult(result, params, cntx);
 }
 
-void ZSetFamily::OutputScoredArrayResult(const OpResult<ScoredArray>& result, bool with_scores,
-                                         ConnectionContext* cntx) {
+void ZSetFamily::OutputScoredArrayResult(const OpResult<ScoredArray>& result,
+                                         const RangeParams& params, ConnectionContext* cntx) {
   if (result.status() == OpStatus::WRONG_TYPE) {
     return (*cntx)->SendError(kWrongTypeErr);
   }
@@ -647,11 +609,12 @@ void ZSetFamily::OutputScoredArrayResult(const OpResult<ScoredArray>& result, bo
   LOG_IF(WARNING, !result && result.status() != OpStatus::KEY_NOTFOUND)
       << "Unexpected status " << result.status();
 
-  (*cntx)->StartArray(result->size() * (with_scores ? 2 : 1));
-  for (const auto& p : result.value()) {
+  (*cntx)->StartArray(result->size() * (params.with_scores ? 2 : 1));
+  const ScoredArray& array = result.value();
+  for (const auto& p : array) {
     (*cntx)->SendBulkString(p.first);
 
-    if (with_scores) {
+    if (params.with_scores) {
       (*cntx)->SendDouble(p.second);
     }
   }
@@ -670,6 +633,53 @@ void ZSetFamily::ZRemRangeGeneric(std::string_view key, const ZRangeSpec& range_
   } else {
     (*cntx)->SendLong(*result);
   }
+}
+
+void ZSetFamily::ZRangeGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx) {
+  std::string_view key = ArgS(args, 1);
+  std::string_view min_s = ArgS(args, 2);
+  std::string_view max_s = ArgS(args, 3);
+
+  bool parse_score = false;
+  RangeParams range_params;
+  range_params.reverse = reverse;
+
+  for (size_t i = 4; i < args.size(); ++i) {
+    ToUpper(&args[i]);
+
+    string_view cur_arg = ArgS(args, i);
+    if (!reverse && cur_arg == "BYSCORE") {
+      parse_score = true;
+    } else if (cur_arg == "WITHSCORES") {
+      range_params.with_scores = true;
+    } else {
+      return cntx->reply_builder()->SendError(absl::StrCat("unsupported option ", cur_arg));
+    }
+  }
+
+  if (parse_score) {
+    ZRangeByScoreInternal(key, min_s, max_s, range_params, cntx);
+    return;
+  }
+
+  IndexInterval ii;
+
+  if (!absl::SimpleAtoi(min_s, &ii.first) || !absl::SimpleAtoi(max_s, &ii.second)) {
+    (*cntx)->SendError(kInvalidIntErr);
+    return;
+  }
+
+  ZRangeSpec range_spec;
+  range_spec.params = range_params;
+  range_spec.interval = ii;
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    OpArgs op_args{shard, t->db_index()};
+    return OpRange(range_spec, op_args, key);
+  };
+
+  OpResult<ScoredArray> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OutputScoredArrayResult(result, range_params, cntx);
 }
 
 OpResult<unsigned> ZSetFamily::OpAdd(const ZParams& zparams, const OpArgs& op_args, string_view key,
@@ -798,7 +808,8 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRangeByScore)
             << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZScore)
             << CI{"ZREMRANGEBYRANK", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRemRangeByRank)
-            << CI{"ZREMRANGEBYSCORE", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRemRangeByScore);
+            << CI{"ZREMRANGEBYSCORE", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRemRangeByScore)
+            << CI{"ZREVRANGE", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRevRange);
 }
 
 }  // namespace dfly

@@ -855,6 +855,15 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "Exec completed";
 }
 
+void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
+  (*cntx)->SendLong(0);
+}
+
+void Service::Subscribe(CmdArgList args, ConnectionContext* cntx) {
+  (*cntx)->SendOk();
+}
+
+
 VarzValue::Map Service::GetVarzStats() {
   VarzValue::Map res;
 
@@ -883,7 +892,9 @@ void Service::RegisterCommands() {
             << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(Multi)
             << CI{"EVAL", CO::NOSCRIPT, -3, 0, 0, 0}.MFUNC(Eval).SetValidator(&EvalValidator)
             << CI{"EVALSHA", CO::NOSCRIPT, -3, 0, 0, 0}.MFUNC(EvalSha).SetValidator(&EvalValidator)
-            << CI{"EXEC", kExecMask, 1, 0, 0, 0}.MFUNC(Exec);
+            << CI{"EXEC", kExecMask, 1, 0, 0, 0}.MFUNC(Exec)
+            << CI{"PUBLISH", CO::LOADING| CO::FAST, 3, 0, 0, 0}.HFUNC(Publish)
+            << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.HFUNC(Subscribe);
 
   StringFamily::Register(&registry_);
   GenericFamily::Register(&registry_);

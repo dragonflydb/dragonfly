@@ -94,7 +94,8 @@ struct Connection::Request {
 
   // I do not use mi_heap_t explicitly but mi_stl_allocator at the end does the same job
   // of using the thread's heap.
-  absl::FixedArray<char, 256, mi_stl_allocator<char>> storage;
+  // The capacity is chosen so that we allocate a fully utilized (512 bytes) block.
+  absl::FixedArray<char, 190, mi_stl_allocator<char>> storage;
 
   Request(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
   }
@@ -106,6 +107,9 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
                        ServiceInterface* service)
     : io_buf_(kMinReadSize), http_listener_(http_listener), ctx_(ctx), service_(service) {
   protocol_ = protocol;
+
+  constexpr size_t kReqSz = sizeof(Connection::Request);
+  (void)kReqSz;
 
   switch (protocol) {
     case Protocol::REDIS:
@@ -276,6 +280,7 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
     }
   }
 
+  // After the client disconnected.
   cc_->conn_closing = true;  // Signal dispatch to close.
   evc_.notify();
   dispatch_fb.join();
@@ -494,7 +499,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
   while (!builder->GetError()) {
     evc_.await([this] { return cc_->conn_closing || !dispatch_q_.empty(); });
     if (cc_->conn_closing)
-      break;  // TODO: We have a memory leak with pending requests in the queue.
+      break;
 
     Request* req = dispatch_q_.front();
     dispatch_q_.pop_front();
@@ -510,6 +515,14 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
   }
 
   cc_->conn_closing = true;
+
+  // Clean up leftovers.
+  while (!dispatch_q_.empty()) {
+    Request* req = dispatch_q_.front();
+    dispatch_q_.pop_front();
+    req->~Request();
+    mi_free(req);
+  }
 }
 
 auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> Request* {
