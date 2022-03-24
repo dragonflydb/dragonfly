@@ -15,7 +15,13 @@ Features include:
 
 ## Building from source
 I've tested the build on Ubuntu 21.04+.
+Requires: CMake, Ninja, boost, libunwind8-dev
 
+```
+sudo apt install ninja-build
+sudo apt install libunwind-dev
+sudo apt-get install libboost-all-dev
+```
 
 ```
 git clone --recursive https://github.com/romange/dragonfly
