@@ -154,8 +154,8 @@ API 2.0
   - [ ] BRPOPLPUSH
   - [ ] BLMOVE
   - [ ] LINSERT
-  - [ ] LPUSHX
-  - [ ] RPUSHX
+  - [X] LPUSHX
+  - [X] RPUSHX
 - [X] String Family
   - [X] SETEX
   - [X] APPEND
@@ -165,12 +165,12 @@ API 2.0
   - [ ] BITOP
   - [ ] BITPOS
   - [ ] GETBIT
-  - [ ] GETRANGE
+  - [X] GETRANGE
   - [ ] INCRBYFLOAT
   - [ ] PSETEX
   - [ ] SETBIT
   - [ ] SETRANGE
-  - [ ] STRLEN
+  - [X] STRLEN
 - [X] HashSet Family
   - [X] HSET
   - [X] HMSET
@@ -215,7 +215,7 @@ API 2.0
   - [X] EVALSHA
   - [ ] OBJECT
   - [ ] PERSIST
-  - [ ] PTTL
+  - [X] PTTL
   - [ ] RESTORE
   - [X] SCRIPT LOAD
   - [ ] SCRIPT DEBUG/KILL/FLUSH/EXISTS
