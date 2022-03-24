@@ -11,7 +11,7 @@ jobs:
       attos:
         image: ghcr.io/romange/dragonfly-ubuntu
         ports:
-          - 6380:6379
+          - 6379:6380
         credentials:
           username: ${{ github.actor }}
           password: ${{ secrets.github_token }}
