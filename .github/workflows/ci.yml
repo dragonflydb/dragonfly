@@ -23,9 +23,9 @@ jobs:
         container: ["ubuntu-dev", "alpine-dev"]
     timeout-minutes: 30
     container: 
-      image: ghcr.io/${{ github.actor }}/${{ matrix.container }}:latest
+      image: ghcr.io/${{ github.repository_owner }}/${{ matrix.container }}:latest
       credentials:
-        username: ${{ github.actor }}
+        username: ${{ github.repository_owner }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
     - uses: actions/checkout@v2
