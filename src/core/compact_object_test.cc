@@ -106,12 +106,15 @@ TEST_F(CompactObjectTest, InlineAsciiEncoded) {
 TEST_F(CompactObjectTest, Int) {
   cobj_.SetString("0");
   EXPECT_EQ(0, cobj_.TryGetInt());
+  EXPECT_EQ(1, cobj_.Size());
+
   EXPECT_EQ(cobj_, "0");
   EXPECT_EQ("0", cobj_.GetSlice(&tmp_));
   EXPECT_EQ(OBJ_STRING, cobj_.ObjType());
   cobj_.SetString("42");
   EXPECT_EQ(8181779779123079347, cobj_.HashCode());
   EXPECT_EQ(OBJ_ENCODING_INT, cobj_.Encoding());
+  EXPECT_EQ(2, cobj_.Size());
 }
 
 TEST_F(CompactObjectTest, MediumString) {

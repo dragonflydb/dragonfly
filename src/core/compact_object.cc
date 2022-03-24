@@ -498,12 +498,15 @@ size_t CompactObj::Size() const {
     return taglen_;
   }
 
-  if (taglen_ == SMALL_TAG) {
-    return u_.small_str.size();
-  }
-
-  if (taglen_ == ROBJ_TAG) {
-    return u_.r_obj.Size();
+  switch (taglen_) {
+    case SMALL_TAG:
+      return u_.small_str.size();
+    case INT_TAG: {
+      absl::AlphaNum an(u_.ival);
+      return an.size();
+    }
+    case ROBJ_TAG:
+      return u_.r_obj.Size();
   }
 
   LOG(DFATAL) << "Should not reach " << int(taglen_);

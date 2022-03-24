@@ -77,7 +77,7 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
       db_slice_->SetMCFlag(params.db_index, it->first.AsRef(), params.memcache_flags);
     }
 
-    prime_value.SetString(value);   // erases all masks.
+    prime_value.SetString(value);       // erases all masks.
     prime_value.SetExpire(at_ms != 0);  // set expire mask.
 
     db_slice_->PostUpdate(params.db_index, it);
@@ -432,6 +432,73 @@ void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendOk();
 }
 
+void StringFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<size_t> {
+    OpResult<MainIterator> it_res = shard->db_slice().Find(t->db_index(), key, OBJ_STRING);
+    if (!it_res.ok())
+      return it_res.status();
+
+    return it_res.value()->second.Size();
+  };
+
+  Transaction* trans = cntx->transaction;
+  OpResult<size_t> result = trans->ScheduleSingleHopT(std::move(cb));
+
+  if (result.status() == OpStatus::WRONG_TYPE) {
+    (*cntx)->SendError(result.status());
+  } else {
+    (*cntx)->SendLong(result.value());
+  }
+}
+
+void StringFamily::GetRange(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view from = ArgS(args, 2);
+  string_view to = ArgS(args, 3);
+  int32_t start, end;
+
+  if (!absl::SimpleAtoi(from, &start) || !absl::SimpleAtoi(to, &end)) {
+    return (*cntx)->SendError(kInvalidIntErr);
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<string> {
+    OpResult<MainIterator> it_res = shard->db_slice().Find(t->db_index(), key, OBJ_STRING);
+    if (!it_res.ok())
+      return it_res.status();
+
+    if (start < 0 && end < 0 && start > end) {
+      return OpStatus::OK;
+    }
+    const CompactObj& co = it_res.value()->second;
+    size_t strlen = co.Size();
+    if (start < 0)
+      start = strlen + start;
+    if (end < 0)
+      end = strlen + end;
+    if (start < 0)
+      start = 0;
+    if (end < 0)
+      end = 0;
+    if (size_t(end) >= strlen)
+      end = strlen - 1;
+    string tmp;
+    string_view slice = co.GetSlice(&tmp);
+
+    return string(slice.substr(start, end - start + 1));
+  };
+
+  Transaction* trans = cntx->transaction;
+  OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
+
+  if (result.status() == OpStatus::WRONG_TYPE) {
+    (*cntx)->SendError(result.status());
+  } else {
+    (*cntx)->SendBulkString(result.value());
+  }
+}
+
 auto StringFamily::OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction* t,
                           EngineShard* shard) -> MGetResponse {
   auto args = t->ShardArgsInShard(shard->shard_id());
@@ -587,7 +654,9 @@ void StringFamily::Register(CommandRegistry* registry) {
             << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Get)
             << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(GetSet)
             << CI{"MGET", CO::READONLY | CO::FAST, -2, 1, -1, 1}.HFUNC(MGet)
-            << CI{"MSET", CO::WRITE | CO::DENYOOM, -3, 1, -1, 2}.HFUNC(MSet);
+            << CI{"MSET", CO::WRITE | CO::DENYOOM, -3, 1, -1, 2}.HFUNC(MSet)
+            << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(StrLen)
+            << CI{"GETRANGE", CO::READONLY | CO::FAST, 4, 1, 1, 1}.HFUNC(GetRange);
 }
 
 }  // namespace dfly
