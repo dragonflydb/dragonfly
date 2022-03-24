@@ -7,6 +7,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    services:
+      attos:
+        image: ghcr.io/romange/dragonfly-ubuntu
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.github_token }}
+          
     steps:
       - uses: actions/checkout@v3
         with:
