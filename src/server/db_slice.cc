@@ -18,7 +18,6 @@ extern "C" {
 
 namespace dfly {
 
-using namespace boost;
 using namespace std;
 using namespace util;
 using facade::OpStatus;

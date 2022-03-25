@@ -41,7 +41,6 @@ DEFINE_uint32(memcache_port, 0, "Memcached port");
 DECLARE_string(requirepass);
 DEFINE_uint64(maxmemory, 0, "Limit on maximum-memory that is used by the database");
 
-
 namespace dfly {
 
 using namespace std;
@@ -856,13 +855,100 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
-  (*cntx)->SendLong(0);
+  string_view channel = ArgS(args, 1);
+  string_view message = ArgS(args, 2);
+  ShardId sid = Shard(channel, shard_count());
+
+  auto cb = [&] { return EngineShard::tlocal()->channel_slice().Publish(channel, message); };
+
+  size_t res = shard_set_.Await(sid, std::move(cb));
+  (*cntx)->SendLong(res);
 }
 
 void Service::Subscribe(CmdArgList args, ConnectionContext* cntx) {
-  (*cntx)->SendOk();
+  args.remove_prefix(1);
+  ChangeSubscription(true, std::move(args), cntx);
 }
 
+void Service::Unsubscribe(CmdArgList args, ConnectionContext* cntx) {
+  args.remove_prefix(1);
+  ChangeSubscription(false, std::move(args), cntx);
+}
+
+void Service::ChangeSubscription(bool to_add, CmdArgList args, ConnectionContext* cntx) {
+  std::vector<unsigned> result(args.size(), 0);
+
+  if (to_add || cntx->subscriber) {
+    std::vector<pair<ShardId, string_view>> channels;
+    channels.reserve(args.size());
+
+    if (!cntx->conn_state.subscribe_info) {
+      DCHECK(to_add);
+
+      cntx->conn_state.subscribe_info.reset(new ConnectionState::SubscribeInfo);
+      cntx->subscriber = true;
+    }
+
+    for (size_t i = 0; i < args.size(); ++i) {
+      bool res = false;
+      string_view channel = ArgS(args, i);
+      if (to_add) {
+        res = cntx->conn_state.subscribe_info->channels.emplace(channel).second;
+      } else {
+        res = cntx->conn_state.subscribe_info->channels.erase(channel) > 0;
+      }
+      result[i] = cntx->conn_state.subscribe_info->channels.size();
+      if (res) {
+        ShardId sid = Shard(channel, shard_count());
+        channels.emplace_back(sid, channel);
+      }
+    }
+
+    if (!to_add && cntx->conn_state.subscribe_info->channels.empty()) {
+      cntx->subscriber = false;
+      cntx->conn_state.subscribe_info.reset();
+    }
+
+    sort(channels.begin(), channels.end());
+
+    vector<unsigned> shard_idx(shard_count() + 1, 0);
+    for (const auto& k_v : channels) {
+      shard_idx[k_v.first]++;
+    }
+    unsigned prev = shard_idx[0];
+    shard_idx[0] = 0;
+
+    // compute cumulitive sum, or in other words a beginning index in channels for each shard.
+    for (size_t i = 1; i < shard_idx.size(); ++i) {
+      unsigned cur = shard_idx[i];
+      shard_idx[i] = shard_idx[i - 1] + prev;
+      prev = cur;
+    }
+
+    auto cb = [&](EngineShard* shard) {
+      ChannelSlice& cs = shard->channel_slice();
+      unsigned start = shard_idx[shard->shard_id()];
+      unsigned end = shard_idx[shard->shard_id() + 1];
+
+      DCHECK_LT(start, end);
+      for (unsigned i = start; i < end; ++i) {
+        cs.ChangeSubscription(channels[i].second, to_add, cntx->owner());
+      }
+    };
+
+    shard_set_.RunBriefInParallel(move(cb),
+                                  [&](ShardId sid) { return shard_idx[sid + 1] > shard_idx[sid]; });
+  }
+
+  const char* action[2] = {"unsubscribe", "subscribe"};
+
+  for (size_t i = 0; i < result.size(); ++i) {
+    (*cntx)->StartArray(3);
+    (*cntx)->SendBulkString(action[to_add]);
+    (*cntx)->SendBulkString(ArgS(args, i));
+    (*cntx)->SendLong(result[i]);
+  }
+}
 
 VarzValue::Map Service::GetVarzStats() {
   VarzValue::Map res;
@@ -893,8 +979,9 @@ void Service::RegisterCommands() {
             << CI{"EVAL", CO::NOSCRIPT, -3, 0, 0, 0}.MFUNC(Eval).SetValidator(&EvalValidator)
             << CI{"EVALSHA", CO::NOSCRIPT, -3, 0, 0, 0}.MFUNC(EvalSha).SetValidator(&EvalValidator)
             << CI{"EXEC", kExecMask, 1, 0, 0, 0}.MFUNC(Exec)
-            << CI{"PUBLISH", CO::LOADING| CO::FAST, 3, 0, 0, 0}.HFUNC(Publish)
-            << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.HFUNC(Subscribe);
+            << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, 0}.MFUNC(Publish)
+            << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(Subscribe)
+            << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(Unsubscribe);
 
   StringFamily::Register(&registry_);
   GenericFamily::Register(&registry_);

@@ -45,6 +45,12 @@ struct ConnectionState {
     absl::flat_hash_set<std::string_view> keys;
   };
   std::optional<Script> script_info;
+
+  struct SubscribeInfo {
+    // TODO: to provide unique_strings across service. This will allow us to use string_view here.
+    absl::flat_hash_set<std::string> channels;
+  };
+  std::unique_ptr<SubscribeInfo> subscribe_info;
 };
 
 class ConnectionContext : public facade::ConnectionContext {

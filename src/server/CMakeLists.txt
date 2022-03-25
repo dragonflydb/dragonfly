@@ -1,7 +1,7 @@
 add_executable(dragonfly dfly_main.cc)
 cxx_link(dragonfly base dragonfly_lib)
 
-add_library(dragonfly_lib command_registry.cc common.cc config_flags.cc
+add_library(dragonfly_lib channel_slice.cc command_registry.cc common.cc config_flags.cc
             db_slice.cc debugcmd.cc 
             engine_shard_set.cc generic_family.cc hset_family.cc
             list_family.cc main_service.cc  rdb_load.cc rdb_save.cc replica.cc

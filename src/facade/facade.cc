@@ -98,6 +98,7 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : ow
   req_auth = false;
   replica_conn = false;
   authenticated = false;
+  subscriber = false;
 }
 
 Protocol ConnectionContext::protocol() const {
