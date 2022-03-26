@@ -87,7 +87,9 @@ TEST_F(GenericFamilyTest, Exists) {
 
 
 TEST_F(GenericFamilyTest, Rename) {
-  RespVec resp = Run({"mset", "x", "0", "b", "1"});
+  RespVec resp;
+
+  resp = Run({"mset", "x", "0", "b", "1"});
   ASSERT_THAT(resp, RespEq("OK"));
   ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
 
@@ -102,6 +104,8 @@ TEST_F(GenericFamilyTest, Rename) {
 
   val = CheckedInt({"get", "b"});
   ASSERT_EQ(0, val);  // it has value of x.
+
+  EXPECT_EQ(CheckedInt({"exists", "x", "b"}), 1);
 
   const char* keys[2] = {"b", "x"};
   auto ren_fb = pp_->at(0)->LaunchFiber([&] {
@@ -119,8 +123,9 @@ TEST_F(GenericFamilyTest, Rename) {
     }
   });
 
-  ren_fb.join();
   exist_fb.join();
+  ren_fb.join();
+
 }
 
 }  // namespace dfly

@@ -644,7 +644,7 @@ void CompactObj::SyncRObj() {
 
 void CompactObj::SetInt(int64_t val) {
   if (INT_TAG != taglen_) {
-    SetMeta(INT_TAG);
+    SetMeta(INT_TAG, mask_ & ~kEncMask);
   }
 
   u_.ival = val;
@@ -659,33 +659,30 @@ std::optional<int64_t> CompactObj::TryGetInt() const {
 
 void CompactObj::SetString(std::string_view str) {
   // Trying auto-detection heuristics first.
-  if (str.size() <= 20) {  // TODO: to move OBJ_ENCODING_INT out of ROBJ logic.
+  if (str.size() <= 20) {
     long long ival;
     static_assert(sizeof(long long) == 8);
 
     // We use redis string2ll to be compatible with Redis.
     if (string2ll(str.data(), str.size(), &ival)) {
-      SetMeta(INT_TAG);
+      SetMeta(INT_TAG, mask_ & ~kEncMask);
       u_.ival = ival;
 
       return;
     }
 
     if (str.size() <= kInlineLen) {
-      SetMeta(str.size());
+      SetMeta(str.size(), mask_ & ~kEncMask);
 
       memcpy(u_.inline_str, str.data(), str.size());
       return;
     }
   }
 
-  if (str.size() <= kInlineLen) {
-    SetMeta(str.size(), 0);
-    return;
-  }
+  DCHECK_GT(str.size(), kInlineLen);
 
   string_view encoded = str;
-  uint8_t mask = 0;
+  uint8_t mask = mask_ & ~kEncMask;
   bool is_ascii = kUseAsciiEncoding && validate_ascii_fast(str.data(), str.size());
 
   if (is_ascii) {

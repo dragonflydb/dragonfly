@@ -167,9 +167,9 @@ API 2.0
   - [ ] GETBIT
   - [X] GETRANGE
   - [ ] INCRBYFLOAT
-  - [ ] PSETEX
+  - [X] PSETEX
   - [ ] SETBIT
-  - [ ] SETRANGE
+  - [X] SETRANGE
   - [X] STRLEN
 - [X] HashSet Family
   - [X] HSET

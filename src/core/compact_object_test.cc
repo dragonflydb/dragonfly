@@ -68,17 +68,21 @@ TEST_F(CompactObjectTest, Basic) {
   return;
 
   CompactObj a;
-
+  a.SetExpire(true);
+  a.SetFlag(true);
   a.SetString("val");
   string res;
   a.GetString(&res);
   EXPECT_EQ("val", res);
+  EXPECT_TRUE(a.HasExpire());
+  EXPECT_TRUE(a.HasFlag());
 
   CompactObj b("vala");
   EXPECT_NE(a, b);
 
   CompactObj c = a.AsRef();
   EXPECT_EQ(a, c);
+  EXPECT_TRUE(c.HasExpire());
 }
 
 TEST_F(CompactObjectTest, NonInline) {
@@ -107,14 +111,16 @@ TEST_F(CompactObjectTest, Int) {
   cobj_.SetString("0");
   EXPECT_EQ(0, cobj_.TryGetInt());
   EXPECT_EQ(1, cobj_.Size());
-
   EXPECT_EQ(cobj_, "0");
   EXPECT_EQ("0", cobj_.GetSlice(&tmp_));
   EXPECT_EQ(OBJ_STRING, cobj_.ObjType());
+
+  cobj_.SetExpire(true);
   cobj_.SetString("42");
   EXPECT_EQ(8181779779123079347, cobj_.HashCode());
   EXPECT_EQ(OBJ_ENCODING_INT, cobj_.Encoding());
   EXPECT_EQ(2, cobj_.Size());
+  EXPECT_TRUE(cobj_.HasExpire());
 }
 
 TEST_F(CompactObjectTest, MediumString) {

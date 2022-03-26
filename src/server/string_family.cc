@@ -30,6 +30,8 @@ using CI = CommandId;
 DEFINE_VARZ(VarzQps, set_qps);
 DEFINE_VARZ(VarzQps, get_qps);
 
+constexpr uint32_t kMaxStrLen = 1 << 28;
+
 }  // namespace
 
 SetCmd::SetCmd(DbSlice* db_slice) : db_slice_(db_slice) {
@@ -77,9 +79,7 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
       db_slice_->SetMCFlag(params.db_index, it->first.AsRef(), params.memcache_flags);
     }
 
-    prime_value.SetString(value);       // erases all masks.
-    prime_value.SetExpire(at_ms != 0);  // set expire mask.
-
+    prime_value.SetString(value);
     db_slice_->PostUpdate(params.db_index, it);
 
     return OpStatus::OK;
@@ -169,31 +169,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StringFamily::SetEx(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view ex = ArgS(args, 2);
-  string_view value = ArgS(args, 3);
-  int32_t secs;
-
-  if (!absl::SimpleAtoi(ex, &secs)) {
-    return (*cntx)->SendError(kInvalidIntErr);
-  }
-
-  if (secs < 1) {
-    return (*cntx)->SendError(absl::StrCat(facade::kInvalidExpireTime, " in setex"));
-  }
-
-  SetCmd::SetParams sparams{cntx->db_index()};
-  sparams.expire_after_ms = uint64_t(secs) * 1000;
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    SetCmd sg(&shard->db_slice());
-    auto status = sg.Set(sparams, key, value).status();
-    return status;
-  };
-
-  OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
-
-  return (*cntx)->SendError(result.status());
+  SetExGeneric(true, std::move(args), cntx);
 }
 
 void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
@@ -358,6 +334,38 @@ void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContex
   builder->SendSetSkipped();
 }
 
+void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view ex = ArgS(args, 2);
+  string_view value = ArgS(args, 3);
+  int32_t unit_vals;
+
+  if (!absl::SimpleAtoi(ex, &unit_vals)) {
+    return (*cntx)->SendError(kInvalidIntErr);
+  }
+
+  if (unit_vals < 1) {
+    ToLower(&args[0]);
+    return (*cntx)->SendError(absl::StrCat(facade::kInvalidExpireTime, " in ", ArgS(args, 0)));
+  }
+
+  SetCmd::SetParams sparams{cntx->db_index()};
+  if (seconds)
+    sparams.expire_after_ms = uint64_t(unit_vals) * 1000;
+  else
+    sparams.expire_after_ms = unit_vals;
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    SetCmd sg(&shard->db_slice());
+    auto status = sg.Set(sparams, key, value).status();
+    return status;
+  };
+
+  OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
+
+  return (*cntx)->SendError(result.status());
+}
+
 void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
   DCHECK_GT(args.size(), 1U);
 
@@ -497,6 +505,61 @@ void StringFamily::GetRange(CmdArgList args, ConnectionContext* cntx) {
   } else {
     (*cntx)->SendBulkString(result.value());
   }
+}
+
+void StringFamily::SetRange(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view offset = ArgS(args, 2);
+  string_view value = ArgS(args, 3);
+  int32_t start;
+
+  if (!absl::SimpleAtoi(offset, &start)) {
+    return (*cntx)->SendError(kInvalidIntErr);
+  }
+
+  if (start < 0) {
+    return (*cntx)->SendError("offset is out of range");
+  }
+
+  size_t min_size = start + value.size();
+  if (min_size > kMaxStrLen) {
+    return (*cntx)->SendError("string exceeds maximum allowed size");
+  }
+
+
+  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
+    auto [it, added] = shard->db_slice().AddOrFind(t->db_index(), key);
+    string s;
+    s.reserve(min_size);
+
+    if (added) {
+      s.resize(min_size);
+    } else {
+      if (it->second.ObjType() != OBJ_STRING)
+        return OpStatus::WRONG_TYPE;
+
+      it->second.GetString(&s);
+      if (s.size() < min_size)
+        s.resize(min_size);
+    }
+    s.assign(value, start);
+    it->second.SetString(s);
+
+    return it->second.Size();
+  };
+
+  Transaction* trans = cntx->transaction;
+  OpResult<uint32_t> result = trans->ScheduleSingleHopT(std::move(cb));
+
+  if (result.status() == OpStatus::WRONG_TYPE) {
+    (*cntx)->SendError(result.status());
+  } else {
+    (*cntx)->SendLong(result.value());
+  }
+}
+
+void StringFamily::PSetEx(CmdArgList args, ConnectionContext* cntx) {
+  SetExGeneric(false, std::move(args), cntx);
 }
 
 auto StringFamily::OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction* t,
@@ -645,6 +708,7 @@ void StringFamily::Shutdown() {
 void StringFamily::Register(CommandRegistry* registry) {
   *registry << CI{"SET", CO::WRITE | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(Set)
             << CI{"SETEX", CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(SetEx)
+            << CI{"PSETEX", CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(PSetEx)
             << CI{"APPEND", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Append)
             << CI{"PREPEND", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Prepend)
             << CI{"INCR", CO::WRITE | CO::DENYOOM | CO::FAST, 2, 1, 1, 1}.HFUNC(Incr)
@@ -656,7 +720,8 @@ void StringFamily::Register(CommandRegistry* registry) {
             << CI{"MGET", CO::READONLY | CO::FAST, -2, 1, -1, 1}.HFUNC(MGet)
             << CI{"MSET", CO::WRITE | CO::DENYOOM, -3, 1, -1, 2}.HFUNC(MSet)
             << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(StrLen)
-            << CI{"GETRANGE", CO::READONLY | CO::FAST, 4, 1, 1, 1}.HFUNC(GetRange);
+            << CI{"GETRANGE", CO::READONLY | CO::FAST, 4, 1, 1, 1}.HFUNC(GetRange)
+            << CI{"SETRANGE", CO::FAST, 4, 1, 1, 1}.HFUNC(SetRange);
 }
 
 }  // namespace dfly

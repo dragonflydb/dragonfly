@@ -53,6 +53,12 @@ TEST_F(StringFamilyTest, Incr) {
   ASSERT_THAT(Run({"incrby", "ne", "0"}), ElementsAre(IntArg(0)));
 }
 
+TEST_F(StringFamilyTest, Append) {
+  Run({"setex", "key", "100", "val"});
+  EXPECT_THAT(Run({"append", "key", "bar"}), ElementsAre(IntArg(6)));
+  EXPECT_THAT(Run({"ttl", "key"}), ElementsAre(IntArg(100)));
+}
+
 TEST_F(StringFamilyTest, Expire) {
   ASSERT_THAT(Run({"set", "key", "val", "PX", "20"}), RespEq("OK"));
 

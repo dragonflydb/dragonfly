@@ -117,9 +117,10 @@ Transaction::RunnableType Renamer::Finalize(bool skip_exist_dest) {
 
   // We can not copy from the existing value and delete it at the same time.
   // TODO: if we want to allocate in shard, we must implement CompactObject::Clone.
-  // For now we hack it for strings only.
+  // For now we hack COW for strings.
   string val;
   src_res_.val.GetString(&val);
+  src_res_.val.Reset();
   src_res_.val.SetString(val);
 
   // Src key exist and we need to override the destination.

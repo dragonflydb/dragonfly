@@ -63,9 +63,12 @@ class StringFamily {
   static void Prepend(CmdArgList args, ConnectionContext* cntx);
   static void StrLen(CmdArgList args, ConnectionContext* cntx);
   static void GetRange(CmdArgList args, ConnectionContext* cntx);
+  static void SetRange(CmdArgList args, ConnectionContext* cntx);
+  static void PSetEx(CmdArgList args, ConnectionContext* cntx);
 
   static void IncrByGeneric(std::string_view key, int64_t val, ConnectionContext* cntx);
   static void ExtendGeneric(CmdArgList args, bool prepend, ConnectionContext* cntx);
+  static void SetExGeneric(bool seconds, CmdArgList args, ConnectionContext* cntx);
 
   struct GetResp {
     std::string value;
