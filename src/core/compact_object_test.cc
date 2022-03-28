@@ -97,6 +97,7 @@ TEST_F(CompactObjectTest, NonInline) {
   s.assign(25, 'b');
   obj.SetString(s);
   EXPECT_EQ(s, obj);
+  EXPECT_EQ(s.size(), obj.Size());
 }
 
 TEST_F(CompactObjectTest, InlineAsciiEncoded) {
@@ -104,6 +105,7 @@ TEST_F(CompactObjectTest, InlineAsciiEncoded) {
   uint64_t expected_val = XXH3_64bits_withSeed(s.data(), s.size(), kSeed);
   CompactObj obj{s};
   EXPECT_EQ(expected_val, obj.HashCode());
+  EXPECT_EQ(s.size(), obj.Size());
 }
 
 
@@ -125,8 +127,12 @@ TEST_F(CompactObjectTest, Int) {
 
 TEST_F(CompactObjectTest, MediumString) {
   string tmp(512, 'b');
+
   cobj_.SetString(tmp);
+  EXPECT_EQ(tmp.size(), cobj_.Size());
+
   cobj_.SetString(tmp);
+  EXPECT_EQ(tmp.size(), cobj_.Size());
   cobj_.Reset();
 }
 

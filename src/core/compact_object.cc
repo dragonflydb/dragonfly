@@ -494,23 +494,30 @@ CompactObj& CompactObj::operator=(CompactObj&& o) noexcept {
 }
 
 size_t CompactObj::Size() const {
+  size_t raw_size = 0;
+
   if (IsInline()) {
-    return taglen_;
-  }
+    raw_size = taglen_;
+  } else {
+    switch (taglen_) {
+      case SMALL_TAG:
+        raw_size = u_.small_str.size();
+        break;
+      case INT_TAG: {
+        absl::AlphaNum an(u_.ival);
+        raw_size = an.size();
+        break;
+      }
 
-  switch (taglen_) {
-    case SMALL_TAG:
-      return u_.small_str.size();
-    case INT_TAG: {
-      absl::AlphaNum an(u_.ival);
-      return an.size();
+      case ROBJ_TAG:
+        raw_size = u_.r_obj.Size();
+        break;
+      default:
+      LOG(DFATAL) << "Should not reach " << int(taglen_);
     }
-    case ROBJ_TAG:
-      return u_.r_obj.Size();
   }
-
-  LOG(DFATAL) << "Should not reach " << int(taglen_);
-  return 0;
+  uint8_t encoded = (mask_ & kEncMask);
+  return encoded ? DecodedLen(raw_size) : raw_size;
 }
 
 uint64_t CompactObj::HashCode() const {
