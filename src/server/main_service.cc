@@ -393,7 +393,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   string_view cmd_name{cid->name()};
 
   if (cntx->req_auth && !cntx->authenticated) {
-    if (cmd_name != "AUTH") {
+    if (cmd_name != "AUTH" && cmd_name != "QUIT") {
       return (*cntx)->SendError("-NOAUTH Authentication required.");
     }
   }

@@ -2,10 +2,10 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
 
 #include "base/logging.h"
-
 #include "facade/conn_context.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
@@ -112,16 +112,17 @@ RedisReplyBuilder* ConnectionContext::operator->() {
 
 }  // namespace facade
 
-
 namespace std {
+
+using facade::ArgS;
 
 ostream& operator<<(ostream& os, facade::CmdArgList ras) {
   os << "[";
   if (!ras.empty()) {
     for (size_t i = 0; i < ras.size() - 1; ++i) {
-      os << facade::ArgS(ras, i) << ",";
+      os << absl::CHexEscape(ArgS(ras, i)) << ",";
     }
-    os << facade::ArgS(ras, ras.size() - 1);
+    os << absl::CHexEscape(ArgS(ras, ras.size() - 1));
   }
   os << "]";
 

@@ -1,4 +1,4 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -79,6 +79,14 @@ TEST_F(GenericFamilyTest, Del) {
   del_fb.join();
 }
 
+TEST_F(GenericFamilyTest, TTL) {
+  EXPECT_EQ(-2, CheckedInt({"ttl", "foo"}));
+  EXPECT_EQ(-2, CheckedInt({"pttl", "foo"}));
+  Run({"set", "foo", "bar"});
+  EXPECT_EQ(-1, CheckedInt({"ttl", "foo"}));
+  EXPECT_EQ(-1, CheckedInt({"pttl", "foo"}));
+}
+
 TEST_F(GenericFamilyTest, Exists) {
   Run({"mset", "x", "0", "y", "1"});
   auto resp = Run({"exists", "x", "y", "x"});
@@ -126,6 +134,16 @@ TEST_F(GenericFamilyTest, Rename) {
   exist_fb.join();
   ren_fb.join();
 
+}
+
+TEST_F(GenericFamilyTest, RenameBinary) {
+  const char kKey1[] = "\x01\x02\x03\x04";
+  const char kKey2[] = "\x05\x06\x07\x08";
+
+  Run({"set", kKey1, "bar"});
+  Run({"rename", kKey1, kKey2});
+  EXPECT_THAT(Run({"get", kKey1}), ElementsAre(ArgType(RespExpr::NIL)));
+  EXPECT_THAT(Run({"get", kKey2}), RespEq("bar"));
 }
 
 }  // namespace dfly

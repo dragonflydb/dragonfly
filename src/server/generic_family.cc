@@ -321,14 +321,18 @@ void GenericFamily::TtlGeneric(CmdArgList args, ConnectionContext* cntx, TimeUni
   if (result) {
     long ttl = (unit == TimeUnit::SEC) ? (result.value() + 500) / 1000 : result.value();
     (*cntx)->SendLong(ttl);
-  } else {
-    switch (result.status()) {
-      case OpStatus::KEY_NOTFOUND:
-        (*cntx)->SendLong(-1);
-        break;
-      default:
-        (*cntx)->SendLong(-2);
-    }
+    return;
+  }
+
+  switch (result.status()) {
+    case OpStatus::KEY_NOTFOUND:
+      (*cntx)->SendLong(-2);
+      break;
+    default:
+      LOG_IF(ERROR, result.status() != OpStatus::SKIPPED)
+          << "Unexpected status " << result.status();
+      (*cntx)->SendLong(-1);
+      break;
   }
 }
 
@@ -528,7 +532,7 @@ OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, ArgSlice keys)
 OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from, string_view to,
                                     bool skip_exists) {
   auto& db_slice = op_args.shard->db_slice();
-  auto [from_it, expire_it] = db_slice.FindExt(op_args.db_ind, from);
+  auto [from_it, from_expire] = db_slice.FindExt(op_args.db_ind, from);
   if (!IsValid(from_it))
     return OpStatus::KEY_NOTFOUND;
 
@@ -538,25 +542,32 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from, str
       return OpStatus::KEY_EXISTS;
   }
 
-  uint64_t exp_ts = IsValid(expire_it) ? expire_it->second.duration() : 0;
-  if (IsValid(to_it)) {
-    to_it->second = std::move(from_it->second);
-    from_it->second.SetExpire(IsValid(expire_it));
+  uint64_t exp_ts =
+      IsValid(from_expire) ? db_slice.expire_base() + from_expire->second.duration() : 0;
 
-    if (IsValid(to_expire)) {
-      to_it->second.SetExpire(true);
-      to_expire->second.Set(exp_ts);
-    } else {
-      to_it->second.SetExpire(false);
-      db_slice.Expire(op_args.db_ind, to_it, exp_ts + db_slice.expire_base());
-    }
+  // we keep the value we want to move.
+  PrimeValue from_obj = std::move(from_it->second);
+
+  // Restore the expire flag on 'from'.
+  from_it->second.SetExpire(IsValid(from_expire));
+
+  if (IsValid(to_it)) {
+    to_it->second = std::move(from_obj);
+    to_it->second.SetExpire(IsValid(to_expire));  // keep the expire flag on 'to'.
+
+    // It is guaranteed that Expire() call does not erase the element because then
+    // from_it would be invalid. Therefore, it Expire does not invalidate any iterators and
+    // we can delete via from_it.
+    db_slice.Expire(op_args.db_ind, to_it, exp_ts);
+    CHECK(db_slice.Del(op_args.db_ind, from_it));
   } else {
-    db_slice.AddNew(op_args.db_ind, to, std::move(from_it->second),
-                    exp_ts + db_slice.expire_base());
-    // Need search again since the container might invalidate the iterators.
-    from_it = db_slice.FindExt(op_args.db_ind, from).first;
+    // Here we first delete from_it because AddNew below could invalidate from_it.
+    // On the other hand, AddNew does not rely on the iterators - this is why we keep
+    // the value in `from_obj`.
+    CHECK(db_slice.Del(op_args.db_ind, from_it));
+    db_slice.AddNew(op_args.db_ind, to, std::move(from_obj), exp_ts);
   }
-  CHECK(db_slice.Del(op_args.db_ind, from_it));
+
   return OpStatus::OK;
 }
 
