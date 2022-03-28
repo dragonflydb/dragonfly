@@ -219,7 +219,6 @@ API 2.0
   - [ ] RESTORE
   - [X] SCRIPT LOAD
   - [ ] SCRIPT DEBUG/KILL/FLUSH/EXISTS
-  - [ ] TOUCH
 - [X] Set Family
   - [X] SSCAN
   - [X] SMISMEMBER

@@ -414,10 +414,11 @@ void GenericFamily::Echo(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view token = ArgS(args, 1);
+  string_view token = ArgS(args, 1);
   uint64_t cursor = 0;
   EngineShardSet* ess = cntx->shard_set;
   unsigned shard_count = ess->size();
+  uint32_t limit = 10;
 
   // Dash table returns a cursor with its right byte empty. We will use it
   // for encoding shard index. For now scan has a limitation of 255 shards.
@@ -425,6 +426,29 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
 
   if (!absl::SimpleAtoi(token, &cursor)) {
     return (*cntx)->SendError("invalid cursor");
+  }
+
+  for (unsigned i = 2; i < args.size(); i += 2) {
+    if (i + 1 == args.size()) {
+      return (*cntx)->SendError(kSyntaxErr);
+    }
+
+    ToUpper(&args[i]);
+
+    string_view opt = ArgS(args, i);
+    if (opt == "COUNT") {
+      if (!absl::SimpleAtoi(ArgS(args, i+ 1), &limit)) {
+        return (*cntx)->SendError(kInvalidIntErr);
+      }
+      if (limit == 0)
+        limit = 1;
+      else if (limit > 4096)
+        limit = 4096;
+    } else if (opt == "MATCH" || opt == "TYPE") {
+      return (*cntx)->SendError("Not supported");  // TODO
+    } else {
+      return (*cntx)->SendError(kSyntaxErr);
+    }
   }
 
   ShardId sid = cursor % 1024;
@@ -438,14 +462,14 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
   do {
     ess->Await(sid, [&] {
       OpArgs op_args{EngineShard::tlocal(), cntx->conn_state.db_index};
-      OpScan(op_args, &cursor, &keys);
+      OpScan(op_args, limit, &cursor, &keys);
     });
     if (cursor == 0) {
       ++sid;
       if (unsigned(sid) == shard_count)
         break;
     }
-  } while (keys.size() < 10);
+  } while (keys.size() < limit);
 
   if (sid < shard_count) {
     cursor = (cursor << 10) | sid;
@@ -571,7 +595,8 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from, str
   return OpStatus::OK;
 }
 
-void GenericFamily::OpScan(const OpArgs& op_args, uint64_t* cursor, vector<string>* vec) {
+void GenericFamily::OpScan(const OpArgs& op_args, size_t limit, uint64_t* cursor,
+                           vector<string>* vec) {
   auto& db_slice = op_args.shard->db_slice();
   DCHECK(db_slice.IsDbValid(op_args.db_ind));
 
@@ -591,7 +616,7 @@ void GenericFamily::OpScan(const OpArgs& op_args, uint64_t* cursor, vector<strin
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_ind);
   do {
     cur = prime_table->Traverse(cur, scan_cb);
-  } while (cur && cnt < 10);
+  } while (cur && cnt < limit);
 
   VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur;
   *cursor = cur;

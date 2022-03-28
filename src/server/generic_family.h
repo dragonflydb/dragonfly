@@ -65,7 +65,9 @@ class GenericFamily {
   static OpResult<uint32_t> OpExists(const OpArgs& op_args, ArgSlice keys);
   static OpResult<void> OpRen(const OpArgs& op_args, std::string_view from, std::string_view to,
                               bool skip_exists);
-  static void OpScan(const OpArgs& op_args, uint64_t* cursor, std::vector<std::string>* vec);
+
+  static void OpScan(const OpArgs& op_args, size_t limit, uint64_t* cursor,
+                     std::vector<std::string>* vec);
 };
 
 }  // namespace dfly
