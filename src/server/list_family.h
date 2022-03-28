@@ -40,7 +40,10 @@ class ListFamily {
 
   static OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,
                                    bool skip_notexist, absl::Span<std::string_view> vals);
-  static OpResult<std::string> OpPop(const OpArgs& op_args, std::string_view key, ListDir dir);
+
+  static OpResult<StringVec> OpPop(const OpArgs& op_args, std::string_view key, ListDir dir,
+                                   uint32_t count);
+
   static OpResult<uint32_t> OpLen(const OpArgs& op_args, std::string_view key);
   static OpResult<std::string> OpIndex(const OpArgs& op_args, std::string_view key, long index);
 
