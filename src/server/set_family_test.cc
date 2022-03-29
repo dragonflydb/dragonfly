@@ -63,6 +63,11 @@ TEST_F(SetFamilyTest, SDiff) {
   EXPECT_THAT(resp, UnorderedElementsAre("1", "2", "3"));
   resp = Run({"sdiffstore", "a", "b", "c"});
   EXPECT_THAT(resp[0], IntArg(3));
+
+  Run({"sadd", "bar", "x", "a", "b", "c"});
+  Run({"sadd", "foo", "c"});
+  Run({"sadd", "car", "a", "d"});
+  EXPECT_EQ(2, CheckedInt({"SDIFFSTORE", "tar", "bar", "foo", "car"}));
 }
 
 TEST_F(SetFamilyTest, SInter) {
