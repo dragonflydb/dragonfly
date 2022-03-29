@@ -397,6 +397,8 @@ bool Interpreter::Exists(string_view sha) const {
 }
 
 auto Interpreter::RunFunction(string_view sha, std::string* error) -> RunResult {
+  DVLOG(1) << "RunFunction " << sha << " " << lua_gettop(lua_);
+
   DCHECK_EQ(40u, sha.size());
 
   lua_getglobal(lua_, "__redis__err__handler");
@@ -412,6 +414,8 @@ auto Interpreter::RunFunction(string_view sha, std::string* error) -> RunResult 
 
     return NOT_EXISTS;
   }
+
+  // At this point lua stack has 2 globals.
 
   /* We have zero arguments and expect
    * a single return value. */
@@ -438,7 +442,11 @@ bool Interpreter::IsResultSafe() const {
     return true;
 
   bool res = IsTableSafe();
-  lua_settop(lua_, top);
+
+  // Stack can contain intermediate unwindings that were not clean up.
+  DCHECK_GE(lua_gettop(lua_), top);
+  lua_settop(lua_, top);  // restore to the original setting.
+
   return res;
 }
 
@@ -506,7 +514,6 @@ bool Interpreter::IsTableSafe() const {
 
     lua_pop(lua_, 1);
   };
-  DCHECK_EQ(1, lua_gettop(lua_));
 
   return true;
 }

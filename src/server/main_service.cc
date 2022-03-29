@@ -120,11 +120,10 @@ class EvalSerializer : public ObjectExplorer {
   }
 
   void OnArrayStart(unsigned len) final {
-    LOG(FATAL) << "TBD";
+    rb_->StartArray(len);
   }
 
   void OnArrayEnd() final {
-    LOG(FATAL) << "TBD";
   }
 
   void OnNil() final {
@@ -802,6 +801,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
     string resp = absl::StrCat("Error running script (call to ", eval_args.sha, "): ", error);
     return (*cntx)->SendError(resp, facade::kScriptErrType);
   }
+
   CHECK(result == Interpreter::RUN_OK);
 
   EvalSerializer ser{static_cast<RedisReplyBuilder*>(cntx->reply_builder())};

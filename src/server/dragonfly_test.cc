@@ -248,10 +248,7 @@ TEST_F(DflyEngineTest, FlushDb) {
 }
 
 TEST_F(DflyEngineTest, Eval) {
-  auto resp = Run({"eval", "return 43", "0"});
-  EXPECT_THAT(resp[0], IntArg(43));
-
-  resp = Run({"incrby", "foo", "42"});
+  auto resp = Run({"incrby", "foo", "42"});
   EXPECT_THAT(resp[0], IntArg(42));
 
   resp = Run({"eval", "return redis.call('get', 'foo')", "0"});
@@ -270,6 +267,14 @@ TEST_F(DflyEngineTest, Eval) {
 
   ASSERT_FALSE(service_->IsLocked(0, "foo"));
   ASSERT_FALSE(service_->IsShardSetLocked());
+}
+
+TEST_F(DflyEngineTest, EvalResp) {
+  auto resp = Run({"eval", "return 43", "0"});
+  EXPECT_THAT(resp[0], IntArg(43));
+
+  resp = Run({"eval", "return {5, 'foo', 17.5}", "0"});
+  EXPECT_THAT(resp, ElementsAre(IntArg(5), "foo", "17.5"));
 }
 
 TEST_F(DflyEngineTest, EvalSha) {
