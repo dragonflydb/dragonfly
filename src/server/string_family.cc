@@ -542,7 +542,7 @@ void StringFamily::SetRange(CmdArgList args, ConnectionContext* cntx) {
       if (s.size() < min_size)
         s.resize(min_size);
     }
-    s.assign(value, start);
+    memcpy(s.data() + start, value.data(), value.size());
     it->second.SetString(s);
 
     return it->second.Size();
