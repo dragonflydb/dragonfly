@@ -41,7 +41,6 @@ DEFINE_uint32(memcache_port, 0, "Memcached port");
 DECLARE_string(requirepass);
 DEFINE_uint64(maxmemory, 0, "Limit on maximum-memory that is used by the database");
 
-
 namespace dfly {
 
 using namespace std;
@@ -856,13 +855,64 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
-  (*cntx)->SendLong(0);
+  string_view channel = ArgS(args, 1);
+  string_view message = ArgS(args, 2);
+  ShardId sid = Shard(channel, shard_count());
+
+  auto cb = [&] { return EngineShard::tlocal()->channel_slice().FetchSubscribers(channel); };
+
+  vector<ChannelSlice::Subscriber> res = shard_set_.Await(sid, std::move(cb));
+  atomic_uint32_t published{0};
+
+  if (!res.empty()) {
+    sort(res.begin(), res.end(),
+         [](const auto& left, const auto& right) { return left.thread_id < right.thread_id; });
+
+    vector<unsigned> slices(shard_set_.pool()->size(), UINT_MAX);
+    for (size_t i = 0; i < res.size(); ++i) {
+      if (slices[res[i].thread_id] > i) {
+        slices[res[i].thread_id] = i;
+      }
+    }
+
+    auto cb = [&](unsigned idx, util::ProactorBase*) {
+      unsigned start = slices[idx];
+      for (unsigned i = start; i < res.size(); ++i) {
+        if (res[i].thread_id != idx)
+          break;
+
+        if (!res[i].conn_cntx->conn_closing) {
+          published.fetch_add(1, memory_order_relaxed);
+
+          // TODO: this is wrong because ReplyBuilder does not guarantee atomicity if used
+          // concurrently by multiple fibers.
+          string_view msg_arr[3] = {"message", channel, message};
+          (*res[i].conn_cntx)->SendStringArr(msg_arr);
+        }
+      }
+    };
+
+    shard_set_.pool()->AwaitFiberOnAll(cb);
+  }
+
+  for (auto& s : res) {
+    s.borrow_token.Dec();
+  }
+
+  (*cntx)->SendLong(published.load(memory_order_relaxed));
 }
 
 void Service::Subscribe(CmdArgList args, ConnectionContext* cntx) {
-  (*cntx)->SendOk();
+  args.remove_prefix(1);
+
+  cntx->ChangeSubscription(true /*add*/, true /* reply*/, std::move(args));
 }
 
+void Service::Unsubscribe(CmdArgList args, ConnectionContext* cntx) {
+  args.remove_prefix(1);
+
+  cntx->ChangeSubscription(false, true, std::move(args));
+}
 
 VarzValue::Map Service::GetVarzStats() {
   VarzValue::Map res;
@@ -893,8 +943,9 @@ void Service::RegisterCommands() {
             << CI{"EVAL", CO::NOSCRIPT, -3, 0, 0, 0}.MFUNC(Eval).SetValidator(&EvalValidator)
             << CI{"EVALSHA", CO::NOSCRIPT, -3, 0, 0, 0}.MFUNC(EvalSha).SetValidator(&EvalValidator)
             << CI{"EXEC", kExecMask, 1, 0, 0, 0}.MFUNC(Exec)
-            << CI{"PUBLISH", CO::LOADING| CO::FAST, 3, 0, 0, 0}.HFUNC(Publish)
-            << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.HFUNC(Subscribe);
+            << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, 0}.MFUNC(Publish)
+            << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(Subscribe)
+            << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(Unsubscribe);
 
   StringFamily::Register(&registry_);
   GenericFamily::Register(&registry_);

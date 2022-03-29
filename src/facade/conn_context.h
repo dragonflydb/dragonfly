@@ -47,6 +47,8 @@ class ConnectionContext {
   bool req_auth: 1;
   bool replica_conn: 1;
   bool authenticated: 1;
+
+  virtual void OnClose() {}
  private:
   Connection* owner_;
   std::unique_ptr<SinkReplyBuilder> rbuilder_;

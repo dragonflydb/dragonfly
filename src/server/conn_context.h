@@ -8,6 +8,7 @@
 
 #include "facade/conn_context.h"
 #include "server/common_types.h"
+#include "util/fibers/fibers_ext.h"
 
 namespace dfly {
 
@@ -45,6 +46,17 @@ struct ConnectionState {
     absl::flat_hash_set<std::string_view> keys;
   };
   std::optional<Script> script_info;
+
+  struct SubscribeInfo {
+    // TODO: to provide unique_strings across service. This will allow us to use string_view here.
+    absl::flat_hash_set<std::string> channels;
+
+    util::fibers_ext::BlockingCounter borrow_token;
+
+    SubscribeInfo() : borrow_token(0) {}
+  };
+
+  std::unique_ptr<SubscribeInfo> subscribe_info;
 };
 
 class ConnectionContext : public facade::ConnectionContext {
@@ -52,6 +64,9 @@ class ConnectionContext : public facade::ConnectionContext {
   ConnectionContext(::io::Sink* stream, facade::Connection* owner)
       : facade::ConnectionContext(stream, owner) {
   }
+
+  void OnClose() override;
+
   struct DebugInfo {
     uint32_t shards_count = 0;
     TxClock clock = 0;
@@ -69,6 +84,8 @@ class ConnectionContext : public facade::ConnectionContext {
   DbIndex db_index() const {
     return conn_state.db_index;
   }
+
+  void ChangeSubscription(bool to_add, bool to_reply, CmdArgList args);
 };
 
 }  // namespace dfly
