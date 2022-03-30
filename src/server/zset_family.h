@@ -73,8 +73,15 @@ class ZSetFamily {
   using ScoredMemberView = std::pair<double, std::string_view>;
   using ScoredMemberSpan = absl::Span<ScoredMemberView>;
 
-  static OpResult<unsigned> OpAdd(const ZParams& zparams, const OpArgs& op_args,
-                                  std::string_view key, ScoredMemberSpan members);
+  struct AddResult {
+    double new_score;
+    unsigned num_updated = 0;
+
+    bool is_nan = false;
+  };
+
+  static facade::OpStatus OpAdd(const ZParams& zparams, const OpArgs& op_args, std::string_view key,
+                                ScoredMemberSpan members, AddResult* add_result);
   static OpResult<unsigned> OpRem(const OpArgs& op_args, std::string_view key, ArgSlice members);
   static OpResult<double> OpScore(const OpArgs& op_args, std::string_view key,
                                   std::string_view member);

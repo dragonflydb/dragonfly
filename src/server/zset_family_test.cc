@@ -79,4 +79,15 @@ TEST_F(ZSetFamilyTest, ZRemRangeScore) {
   EXPECT_THAT(Run({"type", "x"}), ElementsAre("none"));
 }
 
+TEST_F(ZSetFamilyTest, IncrBy) {
+  auto resp = Run({"zadd", "key", "xx", "incr", "2.1", "member"});
+  EXPECT_THAT(resp[0], ArgType(RespExpr::NIL));
+
+  resp = Run({"zadd", "key", "nx", "incr", "2.1", "member"});
+  EXPECT_THAT(resp[0], "2.1");
+
+  resp = Run({"zadd", "key", "nx", "incr", "4.9", "member"});
+  EXPECT_THAT(resp[0], ArgType(RespExpr::NIL));
+}
+
 }  // namespace dfly

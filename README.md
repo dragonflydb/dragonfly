@@ -113,7 +113,7 @@ API 1.0
 - [X] SortedSet Family
   - [X] ZADD
   - [X] ZCARD
-  - [ ] ZINCRBY
+  - [X] ZINCRBY
   - [X] ZRANGE
   - [X] ZRANGEBYSCORE
   - [X] ZREM
@@ -187,11 +187,11 @@ API 2.0
   - [ ] HVALS
   - [ ] HSCAN
 - [ ] PubSub family
-  - [ ] PUBLISH
+  - [X] PUBLISH
   - [ ] PUBSUB
   - [ ] PUBSUB CHANNELS
-  - [ ] SUBSCRIBE
-  - [ ] UNSUBSCRIBE
+  - [X] SUBSCRIBE
+  - [X] UNSUBSCRIBE
 - [ ] Server Family
   - [ ] WATCH
   - [ ] UNWATCH
