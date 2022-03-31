@@ -60,6 +60,7 @@ class ServerFamily {
   }
 
   void Auth(CmdArgList args, ConnectionContext* cntx);
+  void Config(CmdArgList args, ConnectionContext* cntx);
   void DbSize(CmdArgList args, ConnectionContext* cntx);
   void Debug(CmdArgList args, ConnectionContext* cntx);
   void FlushDb(CmdArgList args, ConnectionContext* cntx);

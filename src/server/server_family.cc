@@ -239,6 +239,19 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
+  ToUpper(&args[1]);
+  string_view sub_cmd = ArgS(args, 1);
+
+  if (sub_cmd == "SET") {
+    return (*cntx)->SendOk();
+  } else {
+    string err = absl::StrCat("Unknown subcommand or wrong number of arguments for '", sub_cmd,
+                              "'. Try CONFIG HELP.");
+    return (*cntx)->SendError(err, kSyntaxErr);
+  }
+}
+
 void ServerFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[1]);
 
@@ -612,6 +625,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
   constexpr auto kReplicaOpts = CO::ADMIN | CO::GLOBAL_TRANS;
   *registry << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, 0}.HFUNC(Auth)
             << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Save)
+            << CI{"CONFIG", CO::ADMIN, -2, 0, 0, 0}.HFUNC(Config)
             << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(DbSize)
             << CI{"DEBUG", CO::RANDOM | CO::ADMIN | CO::LOADING, -2, 0, 0, 0}.HFUNC(Debug)
             << CI{"FLUSHDB", CO::WRITE | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(FlushDb)
