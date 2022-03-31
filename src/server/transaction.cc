@@ -42,7 +42,7 @@ struct Transaction::FindFirstProcessor {
   // Holds Find results: (iterator to a found key, and its index in the passed arguments).
   // See DbSlice::FindFirst for more details.
   // spans all the shards for now.
-  std::vector<OpResult<std::pair<MainIterator, unsigned>>> find_res_;
+  std::vector<OpResult<std::pair<PrimeIterator, unsigned>>> find_res_;
   TxId notify_txid_;
 };
 

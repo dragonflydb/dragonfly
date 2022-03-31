@@ -33,8 +33,8 @@ class SliceSnapshot {
  private:
   void FiberFunc();
   bool FlushSfile(bool force);
-  void SerializeSingleEntry(MainIterator it);
-  bool SaveCb(MainIterator it);
+  void SerializeSingleEntry(PrimeIterator it);
+  bool SaveCb(PrimeIterator it);
 
   // Returns number of entries serialized.
   unsigned SerializePhysicalBucket(PrimeTable* table, PrimeTable::const_iterator it);

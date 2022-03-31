@@ -6,6 +6,8 @@
 
 #include "facade/op_status.h"
 #include "server/common_types.h"
+#include "server/table.h"
+
 
 namespace util {
 class ProactorPool;
@@ -66,8 +68,11 @@ class GenericFamily {
   static OpResult<void> OpRen(const OpArgs& op_args, std::string_view from, std::string_view to,
                               bool skip_exists);
 
-  static void OpScan(const OpArgs& op_args, size_t limit, uint64_t* cursor,
-                     std::vector<std::string>* vec);
+  static void OpScan(const OpArgs& op_args, std::string_view pattern, std::string_view type_filter,
+                     size_t limit, uint64_t* cursor, StringVec* vec);
+
+  static bool ScanCb(const OpArgs& op_args, PrimeIterator it, std::string_view pattern,
+                     std::string_view type_filter, StringVec* res);
 };
 
 }  // namespace dfly

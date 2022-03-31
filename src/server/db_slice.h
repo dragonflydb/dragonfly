@@ -110,21 +110,21 @@ class DbSlice {
     return now_ms_;
   }
 
-  OpResult<MainIterator> Find(DbIndex db_index, std::string_view key, unsigned req_obj_type) const;
+  OpResult<PrimeIterator> Find(DbIndex db_index, std::string_view key, unsigned req_obj_type) const;
 
   // Returns (value, expire) dict entries if key exists, null if it does not exist or has expired.
-  std::pair<MainIterator, ExpireIterator> FindExt(DbIndex db_ind, std::string_view key) const;
+  std::pair<PrimeIterator, ExpireIterator> FindExt(DbIndex db_ind, std::string_view key) const;
 
   // Returns dictEntry, args-index if found, KEY_NOTFOUND otherwise.
   // If multiple keys are found, returns the first index in the ArgSlice.
-  OpResult<std::pair<MainIterator, unsigned>> FindFirst(DbIndex db_index, const ArgSlice& args);
+  OpResult<std::pair<PrimeIterator, unsigned>> FindFirst(DbIndex db_index, const ArgSlice& args);
 
   // Return .second=true if insertion ocurred, false if we return the existing key.
-  std::pair<MainIterator, bool> AddOrFind(DbIndex db_ind, std::string_view key);
+  std::pair<PrimeIterator, bool> AddOrFind(DbIndex db_ind, std::string_view key);
 
   // Either adds or removes (if at == 0) expiry. Returns true if a change was made.
   // Does not change expiry if at != 0 and expiry already exists.
-  bool Expire(DbIndex db_ind, MainIterator main_it, uint64_t at);
+  bool Expire(DbIndex db_ind, PrimeIterator main_it, uint64_t at);
 
   void SetMCFlag(DbIndex db_ind, PrimeKey key, uint32_t flag);
   uint32_t GetMCFlag(DbIndex db_ind, const PrimeKey& key) const;
@@ -132,18 +132,18 @@ class DbSlice {
   // Adds a new entry. Requires: key does not exist in this slice.
   // Returns the iterator to the newly added entry.
   // throws: bad_alloc is insertion could not happen due to out of memory.
-  MainIterator AddNew(DbIndex db_ind, std::string_view key, PrimeValue obj, uint64_t expire_at_ms);
+  PrimeIterator AddNew(DbIndex db_ind, std::string_view key, PrimeValue obj, uint64_t expire_at_ms);
 
   // Adds a new entry if a key does not exists. Returns true if insertion took place,
   // false otherwise. expire_at_ms equal to 0 - means no expiry.
   // throws: bad_alloc is insertion could not happen due to out of memory.
-  std::pair<MainIterator, bool> AddIfNotExist(DbIndex db_ind, std::string_view key, PrimeValue obj,
+  std::pair<PrimeIterator, bool> AddIfNotExist(DbIndex db_ind, std::string_view key, PrimeValue obj,
                                               uint64_t expire_at_ms);
 
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);
 
-  bool Del(DbIndex db_ind, MainIterator it);
+  bool Del(DbIndex db_ind, PrimeIterator it);
 
   constexpr static DbIndex kDbAll = 0xFFFF;
 
@@ -183,16 +183,16 @@ class DbSlice {
   size_t DbSize(DbIndex db_ind) const;
 
   // Callback functions called upon writing to the existing key.
-  void PreUpdate(DbIndex db_ind, MainIterator it);
-  void PostUpdate(DbIndex db_ind, MainIterator it);
+  void PreUpdate(DbIndex db_ind, PrimeIterator it);
+  void PostUpdate(DbIndex db_ind, PrimeIterator it);
 
   InternalDbStats* MutableStats(DbIndex db_ind) {
     return &db_arr_[db_ind]->stats;
   }
 
   // Check whether 'it' has not expired. Returns it if it's still valid. Otherwise, erases it
-  // from both tables and return MainIterator{}.
-  std::pair<MainIterator, ExpireIterator> ExpireIfNeeded(DbIndex db_ind, MainIterator it) const;
+  // from both tables and return PrimeIterator{}.
+  std::pair<PrimeIterator, ExpireIterator> ExpireIfNeeded(DbIndex db_ind, PrimeIterator it) const;
 
   // Current version of this slice.
   // We maintain a shared versioning scheme for all databases in the slice.
@@ -200,10 +200,10 @@ class DbSlice {
     return version_;
   }
 
-  // ChangeReq - describes the change to the table. If MainIterator is defined then
+  // ChangeReq - describes the change to the table. If PrimeIterator is defined then
   // it's an update on the existing entry, otherwise if string_view is defined then
   // it's a new key that is going to be added to the table.
-  using ChangeReq = std::variant<MainIterator, std::string_view>;
+  using ChangeReq = std::variant<PrimeIterator, std::string_view>;
 
   using ChangeCallback = std::function<void(DbIndex, const ChangeReq&)>;
 

@@ -191,7 +191,7 @@ class Transaction {
   // grows the table and invalidates find_res. We should return a key, unfortunately,
   // and not the iterator.
   struct FindFirstResult {
-    MainIterator find_res;
+    PrimeIterator find_res;
     ShardId sid = kInvalidSid;
   };
 

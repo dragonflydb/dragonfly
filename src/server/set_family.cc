@@ -374,7 +374,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const ArgS
 OpResult<uint32_t> OpRem(const OpArgs& op_args, std::string_view key, const ArgSlice& vals) {
   auto* es = op_args.shard;
   auto& db_slice = es->db_slice();
-  OpResult<MainIterator> find_res = db_slice.Find(op_args.db_ind, key, OBJ_SET);
+  OpResult<PrimeIterator> find_res = db_slice.Find(op_args.db_ind, key, OBJ_SET);
   if (!find_res) {
     return find_res.status();
   }
@@ -420,7 +420,7 @@ OpStatus Mover::OpFind(Transaction* t, EngineShard* es) {
 
   for (auto k : largs) {
     unsigned index = (k == src_) ? 0 : 1;
-    OpResult<MainIterator> res = es->db_slice().Find(t->db_index(), k, OBJ_SET);
+    OpResult<PrimeIterator> res = es->db_slice().Find(t->db_index(), k, OBJ_SET);
     if (res && index == 0) {  // succesful src find.
       DCHECK(!res->is_done());
       const CompactObj& val = res.value()->second;
@@ -522,7 +522,7 @@ void SetFamily::SIsMember(CmdArgList args, ConnectionContext* cntx) {
   std::string_view val = ArgS(args, 2);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpResult<MainIterator> find_res = shard->db_slice().Find(t->db_index(), key, OBJ_SET);
+    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->db_index(), key, OBJ_SET);
 
     if (find_res) {
       SetType st{find_res.value()->second.RObjPtr(), find_res.value()->second.Encoding()};
@@ -587,7 +587,7 @@ void SetFamily::SCard(CmdArgList args, ConnectionContext* cntx) {
   std::string_view key = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
-    OpResult<MainIterator> find_res = shard->db_slice().Find(t->db_index(), key, OBJ_SET);
+    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->db_index(), key, OBJ_SET);
     if (!find_res) {
       return find_res.status();
     }
@@ -902,7 +902,7 @@ OpResult<StringVec> SetFamily::OpUnion(const OpArgs& op_args, ArgSlice keys) {
   absl::flat_hash_set<string> uniques;
 
   for (std::string_view key : keys) {
-    OpResult<MainIterator> find_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_SET);
+    OpResult<PrimeIterator> find_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_SET);
     if (find_res) {
       SetType st{find_res.value()->second.RObjPtr(), find_res.value()->second.Encoding()};
       FillSet(st, [&uniques](string s) { uniques.emplace(move(s)); });
@@ -921,7 +921,7 @@ OpResult<StringVec> SetFamily::OpDiff(const OpArgs& op_args, ArgSlice keys) {
   DCHECK(!keys.empty());
   DVLOG(1) << "OpDiff from " << keys.front();
   EngineShard* es = op_args.shard;
-  OpResult<MainIterator> find_res = es->db_slice().Find(op_args.db_ind, keys.front(), OBJ_SET);
+  OpResult<PrimeIterator> find_res = es->db_slice().Find(op_args.db_ind, keys.front(), OBJ_SET);
 
   if (!find_res) {
     return find_res.status();
@@ -935,7 +935,7 @@ OpResult<StringVec> SetFamily::OpDiff(const OpArgs& op_args, ArgSlice keys) {
   DCHECK(!uniques.empty());  // otherwise the key would not exist.
 
   for (size_t i = 1; i < keys.size(); ++i) {
-    OpResult<MainIterator> diff_res = es->db_slice().Find(op_args.db_ind, keys[i], OBJ_SET);
+    OpResult<PrimeIterator> diff_res = es->db_slice().Find(op_args.db_ind, keys[i], OBJ_SET);
     if (!diff_res) {
       if (diff_res.status() == OpStatus::WRONG_TYPE) {
         return OpStatus::WRONG_TYPE;
@@ -972,7 +972,7 @@ OpResult<StringVec> SetFamily::OpDiff(const OpArgs& op_args, ArgSlice keys) {
 
 OpResult<StringVec> SetFamily::OpPop(const OpArgs& op_args, std::string_view key, unsigned count) {
   auto* es = op_args.shard;
-  OpResult<MainIterator> find_res = es->db_slice().Find(op_args.db_ind, key, OBJ_SET);
+  OpResult<PrimeIterator> find_res = es->db_slice().Find(op_args.db_ind, key, OBJ_SET);
   if (!find_res)
     return find_res.status();
 
@@ -980,7 +980,7 @@ OpResult<StringVec> SetFamily::OpPop(const OpArgs& op_args, std::string_view key
   if (count == 0)
     return result;
 
-  MainIterator it = find_res.value();
+  PrimeIterator it = find_res.value();
   size_t slen = it->second.Size();
   SetType st{it->second.RObjPtr(), it->second.Encoding()};
 
@@ -1029,7 +1029,7 @@ OpResult<StringVec> SetFamily::OpInter(const Transaction* t, EngineShard* es, bo
 
   StringVec result;
   if (keys.size() == 1) {
-    OpResult<MainIterator> find_res = es->db_slice().Find(t->db_index(), keys.front(), OBJ_SET);
+    OpResult<PrimeIterator> find_res = es->db_slice().Find(t->db_index(), keys.front(), OBJ_SET);
     if (!find_res)
       return find_res.status();
 
@@ -1043,7 +1043,7 @@ OpResult<StringVec> SetFamily::OpInter(const Transaction* t, EngineShard* es, bo
   vector<SetType> sets(keys.size());
 
   for (size_t i = 0; i < keys.size(); ++i) {
-    OpResult<MainIterator> find_res = es->db_slice().Find(t->db_index(), keys[i], OBJ_SET);
+    OpResult<PrimeIterator> find_res = es->db_slice().Find(t->db_index(), keys[i], OBJ_SET);
     if (!find_res)
       return find_res.status();
     robj* sobj = find_res.value()->second.AsRObj();
@@ -1101,12 +1101,12 @@ OpResult<StringVec> SetFamily::OpInter(const Transaction* t, EngineShard* es, bo
 
 OpResult<StringVec> SetFamily::OpScan(const OpArgs& op_args, std::string_view key,
                                       uint64_t* cursor) {
-  OpResult<MainIterator> find_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_SET);
+  OpResult<PrimeIterator> find_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_SET);
 
   if (!find_res)
     return find_res.status();
 
-  MainIterator it = find_res.value();
+  PrimeIterator it = find_res.value();
   StringVec res;
   uint32_t count = 10;
 

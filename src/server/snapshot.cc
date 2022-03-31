@@ -38,7 +38,7 @@ void SliceSnapshot::Start(DbSlice* slice) {
   auto on_change = [this, slice](DbIndex db_index, const DbSlice::ChangeReq& req) {
     PrimeTable* table = slice->GetTables(db_index).first;
 
-    if (const MainIterator* it = get_if<MainIterator>(&req)) {
+    if (const PrimeIterator* it = get_if<PrimeIterator>(&req)) {
       if (it->GetVersion() < snapshot_version_) {
         side_saved_ += SerializePhysicalBucket(table, *it);
       }
@@ -70,7 +70,7 @@ void SliceSnapshot::Join() {
 
 static_assert(sizeof(PrimeTable::const_iterator) == 16);
 
-void SliceSnapshot::SerializeSingleEntry(MainIterator it) {
+void SliceSnapshot::SerializeSingleEntry(PrimeIterator it) {
   error_code ec;
 
   string tmp;
@@ -160,7 +160,7 @@ bool SliceSnapshot::FlushSfile(bool force) {
 //
 // It's important that cb will run atomically so we avoid anu I/O work inside it.
 // Instead, we flush our string file to disk in the traverse loop below.
-bool SliceSnapshot::SaveCb(MainIterator it) {
+bool SliceSnapshot::SaveCb(PrimeIterator it) {
   // if we touched that physical bucket - skip it.
   // We must to make sure we TraverseBucket exactly once for each physical bucket.
   // This test is the first one because it's likely to be the fastest one:
@@ -194,7 +194,7 @@ unsigned SliceSnapshot::SerializePhysicalBucket(PrimeTable* table, PrimeTable::c
     SerializeSingleEntry(move(entry_it));
   });
 
-  table->TraverseBucket(it, [this](MainIterator entry_it) {
+  table->TraverseBucket(it, [this](PrimeIterator entry_it) {
     DCHECK_LE(entry_it.GetVersion(), snapshot_version_);
     DVLOG(3) << "Bumping up version " << entry_it.bucket_id() << ":" << entry_it.slot_id();
 

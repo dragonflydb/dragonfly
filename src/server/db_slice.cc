@@ -170,7 +170,7 @@ void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
 }
 
 auto DbSlice::Find(DbIndex db_index, string_view key, unsigned req_obj_type) const
-    -> OpResult<MainIterator> {
+    -> OpResult<PrimeIterator> {
   auto it = FindExt(db_index, key).first;
 
   if (!IsValid(it))
@@ -183,11 +183,11 @@ auto DbSlice::Find(DbIndex db_index, string_view key, unsigned req_obj_type) con
   return it;
 }
 
-pair<MainIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, string_view key) const {
+pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, string_view key) const {
   DCHECK(IsDbValid(db_ind));
 
   auto& db = db_arr_[db_ind];
-  MainIterator it = db->prime_table.Find(key);
+  PrimeIterator it = db->prime_table.Find(key);
 
   if (!IsValid(it)) {
     return make_pair(it, ExpireIterator{});
@@ -200,12 +200,12 @@ pair<MainIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, string_view 
   return make_pair(it, ExpireIterator{});
 }
 
-OpResult<pair<MainIterator, unsigned>> DbSlice::FindFirst(DbIndex db_index, const ArgSlice& args) {
+OpResult<pair<PrimeIterator, unsigned>> DbSlice::FindFirst(DbIndex db_index, const ArgSlice& args) {
   DCHECK(!args.empty());
 
   for (unsigned i = 0; i < args.size(); ++i) {
     string_view s = args[i];
-    OpResult<MainIterator> res = Find(db_index, s, OBJ_LIST);
+    OpResult<PrimeIterator> res = Find(db_index, s, OBJ_LIST);
     if (res)
       return make_pair(res.value(), i);
     if (res.status() != OpStatus::KEY_NOTFOUND)
@@ -216,7 +216,7 @@ OpResult<pair<MainIterator, unsigned>> DbSlice::FindFirst(DbIndex db_index, cons
   return OpStatus::KEY_NOTFOUND;
 }
 
-auto DbSlice::AddOrFind(DbIndex db_index, string_view key) -> pair<MainIterator, bool> {
+auto DbSlice::AddOrFind(DbIndex db_index, string_view key) -> pair<PrimeIterator, bool> {
   DCHECK(IsDbValid(db_index));
 
   auto& db = db_arr_[db_index];
@@ -293,7 +293,7 @@ void DbSlice::CreateDb(DbIndex index) {
   }
 }
 
-bool DbSlice::Del(DbIndex db_ind, MainIterator it) {
+bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
   if (!IsValid(it)) {
     return false;
   }
@@ -345,7 +345,7 @@ size_t DbSlice::FlushDb(DbIndex db_ind) {
 }
 
 // Returns true if a state has changed, false otherwise.
-bool DbSlice::Expire(DbIndex db_ind, MainIterator it, uint64_t at) {
+bool DbSlice::Expire(DbIndex db_ind, PrimeIterator it, uint64_t at) {
   auto& db = *db_arr_[db_ind];
   if (at == 0 && it->second.HasExpire()) {
     CHECK_EQ(1u, db.expire_table.Erase(it->first));
@@ -383,7 +383,7 @@ uint32_t DbSlice::GetMCFlag(DbIndex db_ind, const PrimeKey& key) const {
   return it.is_done() ? 0 : it->second;
 }
 
-MainIterator DbSlice::AddNew(DbIndex db_ind, string_view key, PrimeValue obj,
+PrimeIterator DbSlice::AddNew(DbIndex db_ind, string_view key, PrimeValue obj,
                              uint64_t expire_at_ms) {
   for (const auto& ccb : change_cb_) {
     ccb.second(db_ind, ChangeReq{key});
@@ -395,7 +395,7 @@ MainIterator DbSlice::AddNew(DbIndex db_ind, string_view key, PrimeValue obj,
   return res;
 }
 
-pair<MainIterator, bool> DbSlice::AddIfNotExist(DbIndex db_ind, string_view key, PrimeValue obj,
+pair<PrimeIterator, bool> DbSlice::AddIfNotExist(DbIndex db_ind, string_view key, PrimeValue obj,
                                                 uint64_t expire_at_ms) {
   DCHECK(!obj.IsRef());
 
@@ -510,7 +510,7 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) con
   return true;
 }
 
-void DbSlice::PreUpdate(DbIndex db_ind, MainIterator it) {
+void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
   auto& db = db_arr_[db_ind];
   for (const auto& ccb : change_cb_) {
     ccb.second(db_ind, ChangeReq{it});
@@ -519,12 +519,12 @@ void DbSlice::PreUpdate(DbIndex db_ind, MainIterator it) {
   it.SetVersion(NextVersion());
 }
 
-void DbSlice::PostUpdate(DbIndex db_ind, MainIterator it) {
+void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it) {
   auto& db = db_arr_[db_ind];
   db->stats.obj_memory_usage += it->second.MallocUsed();
 }
 
-pair<MainIterator, ExpireIterator> DbSlice::ExpireIfNeeded(DbIndex db_ind, MainIterator it) const {
+pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(DbIndex db_ind, PrimeIterator it) const {
   DCHECK(it->second.HasExpire());
   auto& db = db_arr_[db_ind];
 
@@ -545,7 +545,7 @@ pair<MainIterator, ExpireIterator> DbSlice::ExpireIfNeeded(DbIndex db_ind, MainI
   db->prime_table.Erase(it);
   ++events_.expired_keys;
 
-  return make_pair(MainIterator{}, ExpireIterator{});
+  return make_pair(PrimeIterator{}, ExpireIterator{});
 }
 
 uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {

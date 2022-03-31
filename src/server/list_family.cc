@@ -120,7 +120,7 @@ class BPopper {
   OpStatus Pop(Transaction* t, EngineShard* shard);
 
   bool found_ = false;
-  MainIterator find_it_;
+  PrimeIterator find_it_;
   ShardId find_sid_ = std::numeric_limits<ShardId>::max();
 
   string key_;
@@ -450,7 +450,7 @@ void ListFamily::PopGeneric(ListDir dir, const CmdArgList& args, ConnectionConte
 OpResult<uint32_t> ListFamily::OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,
                                       bool skip_notexist, absl::Span<std::string_view> vals) {
   EngineShard* es = op_args.shard;
-  MainIterator it;
+  PrimeIterator it;
   bool new_key = false;
 
   if (skip_notexist) {
@@ -498,11 +498,11 @@ OpResult<uint32_t> ListFamily::OpPush(const OpArgs& op_args, std::string_view ke
 OpResult<StringVec> ListFamily::OpPop(const OpArgs& op_args, string_view key, ListDir dir,
                                       uint32_t count) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<MainIterator> it_res = db_slice.Find(op_args.db_ind, key, OBJ_LIST);
+  OpResult<PrimeIterator> it_res = db_slice.Find(op_args.db_ind, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
 
-  MainIterator it = *it_res;
+  PrimeIterator it = *it_res;
   quicklist* ql = GetQL(it->second);
   db_slice.PreUpdate(op_args.db_ind, it);
 

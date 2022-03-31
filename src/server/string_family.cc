@@ -178,7 +178,7 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   std::string_view key = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<string> {
-    OpResult<MainIterator> it_res = shard->db_slice().Find(t->db_index(), key, OBJ_STRING);
+    OpResult<PrimeIterator> it_res = shard->db_slice().Find(t->db_index(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 
@@ -444,7 +444,7 @@ void StringFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<size_t> {
-    OpResult<MainIterator> it_res = shard->db_slice().Find(t->db_index(), key, OBJ_STRING);
+    OpResult<PrimeIterator> it_res = shard->db_slice().Find(t->db_index(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 
@@ -472,7 +472,7 @@ void StringFamily::GetRange(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<string> {
-    OpResult<MainIterator> it_res = shard->db_slice().Find(t->db_index(), key, OBJ_STRING);
+    OpResult<PrimeIterator> it_res = shard->db_slice().Find(t->db_index(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 
@@ -571,11 +571,11 @@ auto StringFamily::OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction
 
   auto& db_slice = shard->db_slice();
   for (size_t i = 0; i < args.size(); ++i) {
-    OpResult<MainIterator> it_res = db_slice.Find(t->db_index(), args[i], OBJ_STRING);
+    OpResult<PrimeIterator> it_res = db_slice.Find(t->db_index(), args[i], OBJ_STRING);
     if (!it_res)
       continue;
 
-    const MainIterator& it = *it_res;
+    const PrimeIterator& it = *it_res;
     auto& dest = response[i].emplace();
 
     it->second.GetString(&dest.value);
@@ -673,7 +673,7 @@ OpResult<uint32_t> StringFamily::ExtendOrSet(const OpArgs& op_args, std::string_
 OpResult<bool> StringFamily::ExtendOrSkip(const OpArgs& op_args, std::string_view key,
                                           std::string_view val, bool prepend) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<MainIterator> it_res = db_slice.Find(op_args.db_ind, key, OBJ_STRING);
+  OpResult<PrimeIterator> it_res = db_slice.Find(op_args.db_ind, key, OBJ_STRING);
   if (!it_res) {
     return false;
   }

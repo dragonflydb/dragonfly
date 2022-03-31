@@ -30,7 +30,7 @@ static const char kNxXxErr[] = "XX and NX options at the same time are not compa
 static const char kScoreNaN[] = "resulting score is not a number (NaN)";
 constexpr unsigned kMaxListPackValue = 64;
 
-OpResult<MainIterator> FindZEntry(unsigned flags, const OpArgs& op_args, string_view key,
+OpResult<PrimeIterator> FindZEntry(unsigned flags, const OpArgs& op_args, string_view key,
                                   size_t member_len) {
   auto& db_slice = op_args.shard->db_slice();
   if (flags & ZADD_IN_XX) {
@@ -377,7 +377,7 @@ void ZSetFamily::ZCard(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
-    OpResult<MainIterator> find_res = shard->db_slice().Find(t->db_index(), key, OBJ_ZSET);
+    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->db_index(), key, OBJ_ZSET);
     if (!find_res) {
       return find_res.status();
     }
@@ -733,7 +733,7 @@ void ZSetFamily::ZRangeGeneric(CmdArgList args, bool reverse, ConnectionContext*
 OpStatus ZSetFamily::OpAdd(const ZParams& zparams, const OpArgs& op_args, string_view key,
                            ScoredMemberSpan members, AddResult* add_result) {
   DCHECK(!members.empty());
-  OpResult<MainIterator> res_it =
+  OpResult<PrimeIterator> res_it =
       FindZEntry(zparams.flags, op_args, key, members.front().second.size());
 
   if (!res_it)
@@ -788,7 +788,7 @@ OpStatus ZSetFamily::OpAdd(const ZParams& zparams, const OpArgs& op_args, string
 }
 
 OpResult<unsigned> ZSetFamily::OpRem(const OpArgs& op_args, string_view key, ArgSlice members) {
-  OpResult<MainIterator> res_it = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_ZSET);
+  OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 
@@ -810,7 +810,7 @@ OpResult<unsigned> ZSetFamily::OpRem(const OpArgs& op_args, string_view key, Arg
 }
 
 OpResult<double> ZSetFamily::OpScore(const OpArgs& op_args, string_view key, string_view member) {
-  OpResult<MainIterator> res_it = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_ZSET);
+  OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 
@@ -827,7 +827,7 @@ OpResult<double> ZSetFamily::OpScore(const OpArgs& op_args, string_view key, str
 
 auto ZSetFamily::OpRange(const ZRangeSpec& range_spec, const OpArgs& op_args, string_view key)
     -> OpResult<ScoredArray> {
-  OpResult<MainIterator> res_it = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_ZSET);
+  OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 
@@ -841,7 +841,7 @@ auto ZSetFamily::OpRange(const ZRangeSpec& range_spec, const OpArgs& op_args, st
 
 OpResult<unsigned> ZSetFamily::OpRemRange(const OpArgs& op_args, string_view key,
                                           const ZRangeSpec& range_spec) {
-  OpResult<MainIterator> res_it = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_ZSET);
+  OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 

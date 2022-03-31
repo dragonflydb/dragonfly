@@ -6,6 +6,7 @@
 
 extern "C" {
 #include "redis/object.h"
+#include "redis/util.h"
 }
 
 #include "base/logging.h"
@@ -87,7 +88,7 @@ void Renamer::MoveValues(EngineShard* shard, const ArgSlice& args) {
 
   // Handle destination
   string_view dest_key = dest_res_.key;
-  MainIterator dest_it = shard->db_slice().FindExt(db_indx_, dest_key).first;
+  PrimeIterator dest_it = shard->db_slice().FindExt(db_indx_, dest_key).first;
   if (IsValid(dest_it)) {
     // we just move the source. We won't be able to do it with heap per shard model.
     dest_it->second = std::move(src_res_.val);
@@ -419,6 +420,7 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
   EngineShardSet* ess = cntx->shard_set;
   unsigned shard_count = ess->size();
   uint32_t limit = 10;
+  string_view pattern, type_filter;
 
   // Dash table returns a cursor with its right byte empty. We will use it
   // for encoding shard index. For now scan has a limitation of 255 shards.
@@ -437,15 +439,20 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
 
     string_view opt = ArgS(args, i);
     if (opt == "COUNT") {
-      if (!absl::SimpleAtoi(ArgS(args, i+ 1), &limit)) {
+      if (!absl::SimpleAtoi(ArgS(args, i + 1), &limit)) {
         return (*cntx)->SendError(kInvalidIntErr);
       }
       if (limit == 0)
         limit = 1;
       else if (limit > 4096)
         limit = 4096;
-    } else if (opt == "MATCH" || opt == "TYPE") {
-      return (*cntx)->SendError("Not supported");  // TODO
+    } else if (opt == "MATCH") {
+      pattern = ArgS(args, i + 1);
+      if (pattern == "*")
+        pattern = string_view{};
+    } else if (opt == "TYPE") {
+      ToLower(&args[i + 1]);
+      type_filter = ArgS(args, i + 1);
     } else {
       return (*cntx)->SendError(kSyntaxErr);
     }
@@ -462,7 +469,7 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
   do {
     ess->Await(sid, [&] {
       OpArgs op_args{EngineShard::tlocal(), cntx->conn_state.db_index};
-      OpScan(op_args, limit, &cursor, &keys);
+      OpScan(op_args, pattern, type_filter, limit, &cursor, &keys);
     });
     if (cursor == 0) {
       ++sid;
@@ -595,19 +602,12 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from, str
   return OpStatus::OK;
 }
 
-void GenericFamily::OpScan(const OpArgs& op_args, size_t limit, uint64_t* cursor,
-                           vector<string>* vec) {
+void GenericFamily::OpScan(const OpArgs& op_args, string_view pattern, string_view type_filter,
+                           size_t limit, uint64_t* cursor, StringVec* vec) {
   auto& db_slice = op_args.shard->db_slice();
   DCHECK(db_slice.IsDbValid(op_args.db_ind));
 
   unsigned cnt = 0;
-  auto scan_cb = [&](MainIterator it) {
-    if (it->second.HasExpire()) {
-      it = db_slice.ExpireIfNeeded(op_args.db_ind, it).first;
-    }
-    vec->push_back(it->first.ToString());
-    ++cnt;
-  };
 
   VLOG(1) << "PrimeTable " << db_slice.shard_id() << "/" << op_args.db_ind << " has "
           << db_slice.DbSize(op_args.db_ind);
@@ -615,11 +615,40 @@ void GenericFamily::OpScan(const OpArgs& op_args, size_t limit, uint64_t* cursor
   uint64_t cur = *cursor;
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_ind);
   do {
-    cur = prime_table->Traverse(cur, scan_cb);
+    cur = prime_table->Traverse(
+        cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, pattern, type_filter, vec); });
   } while (cur && cnt < limit);
 
   VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur;
   *cursor = cur;
+}
+
+bool GenericFamily::ScanCb(const OpArgs& op_args, PrimeIterator it, string_view pattern,
+                           string_view type_filter, StringVec* res) {
+  auto& db_slice = op_args.shard->db_slice();
+  if (it->second.HasExpire()) {
+    it = db_slice.ExpireIfNeeded(op_args.db_ind, it).first;
+  }
+
+  if (!IsValid(it))
+    return false;
+
+  bool matches = type_filter.empty() || ObjTypeName(it->second.ObjType()) == type_filter;
+
+  if (!matches)
+    return false;
+
+  if (pattern.empty()) {
+    res->push_back(it->first.ToString());
+  } else {
+    string str = it->first.ToString();
+    if (stringmatchlen(pattern.data(), pattern.size(), str.data(), str.size(), 0) != 1)
+      return false;
+
+    res->push_back(std::move(str));
+  }
+
+  return true;
 }
 
 using CI = CommandId;
