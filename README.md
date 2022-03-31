@@ -150,7 +150,7 @@ a distributed log format.
 API 2.0
 - [ ] List Family
   - [X] BLPOP
-  - [ ] BRPOP
+  - [X] BRPOP
   - [ ] BRPOPLPUSH
   - [ ] BLMOVE
   - [ ] LINSERT
@@ -192,10 +192,10 @@ API 2.0
   - [ ] PUBSUB CHANNELS
   - [X] SUBSCRIBE
   - [X] UNSUBSCRIBE
-- [ ] Server Family
+- [X] Server Family
   - [ ] WATCH
   - [ ] UNWATCH
-  - [ ] DISCARD
+  - [X] DISCARD
   - [ ] CLIENT KILL/LIST/UNPAUSE/PAUSE/GETNAME/SETNAME/REPLY/TRACKINGINFO
   - [X] COMMAND
   - [ ] COMMAND COUNT/GETKEYS/INFO

@@ -27,6 +27,7 @@ class ListFamily {
   static void LPop(CmdArgList args, ConnectionContext* cntx);
   static void RPop(CmdArgList args, ConnectionContext* cntx);
   static void BLPop(CmdArgList args, ConnectionContext* cntx);
+  static void BRPop(CmdArgList args, ConnectionContext* cntx);
   static void LLen(CmdArgList args, ConnectionContext* cntx);
   static void LIndex(CmdArgList args, ConnectionContext* cntx);
   static void LTrim(CmdArgList args, ConnectionContext* cntx);
@@ -37,6 +38,8 @@ class ListFamily {
   static void PopGeneric(ListDir dir, const CmdArgList& args, ConnectionContext* cntx);
   static void PushGeneric(ListDir dir, bool skip_notexist, CmdArgList args,
                           ConnectionContext* cntx);
+
+  static void BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cntx);
 
   static OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,
                                    bool skip_notexist, absl::Span<std::string_view> vals);

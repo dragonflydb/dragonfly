@@ -71,6 +71,7 @@ class Service : public facade::ServiceInterface {
   static void Quit(CmdArgList args, ConnectionContext* cntx);
   static void Multi(CmdArgList args, ConnectionContext* cntx);
 
+  void Discard(CmdArgList args, ConnectionContext* cntx);
   void Eval(CmdArgList args, ConnectionContext* cntx);
   void EvalSha(CmdArgList args, ConnectionContext* cntx);
   void Exec(CmdArgList args, ConnectionContext* cntx);

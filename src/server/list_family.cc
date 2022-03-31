@@ -102,7 +102,7 @@ string ListPop(ListDir dir, quicklist* ql) {
 
 class BPopper {
  public:
-  explicit BPopper();
+  explicit BPopper(ListDir dir);
 
   // Returns WRONG_TYPE, OK.
   // If OK is returned then use result() to fetch the value.
@@ -119,6 +119,8 @@ class BPopper {
  private:
   OpStatus Pop(Transaction* t, EngineShard* shard);
 
+  ListDir dir_;
+
   bool found_ = false;
   PrimeIterator find_it_;
   ShardId find_sid_ = std::numeric_limits<ShardId>::max();
@@ -127,7 +129,7 @@ class BPopper {
   string value_;
 };
 
-BPopper::BPopper() {
+BPopper::BPopper(ListDir dir) : dir_(dir) {
 }
 
 OpStatus BPopper::Run(Transaction* t, unsigned msec) {
@@ -186,7 +188,7 @@ OpStatus BPopper::Pop(Transaction* t, EngineShard* shard) {
     find_it_->first.GetString(&key_);
 
     quicklist* ql = GetQL(find_it_->second);
-    value_ = ListPop(ListDir::LEFT, ql);
+    value_ = ListPop(dir_, ql);
 
     if (quicklistCount(ql) == 0) {
       CHECK(shard->db_slice().Del(t->db_index(), find_it_));
@@ -343,6 +345,14 @@ void ListFamily::LSet(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ListFamily::BLPop(CmdArgList args, ConnectionContext* cntx) {
+  BPopGeneric(ListDir::LEFT, std::move(args), cntx);
+}
+
+void ListFamily::BRPop(CmdArgList args, ConnectionContext* cntx) {
+  BPopGeneric(ListDir::RIGHT, std::move(args), cntx);
+}
+
+void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cntx) {
   DCHECK_GE(args.size(), 3u);
 
   float timeout;
@@ -356,7 +366,7 @@ void ListFamily::BLPop(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "BLPop start " << timeout;
 
   Transaction* transaction = cntx->transaction;
-  BPopper popper;
+  BPopper popper(dir);
   OpStatus result = popper.Run(transaction, unsigned(timeout * 1000));
 
   switch (result) {
@@ -704,6 +714,7 @@ void ListFamily::Register(CommandRegistry* registry) {
             << CI{"RPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(RPushX)
             << CI{"RPOP", CO::WRITE | CO::FAST | CO::DENYOOM, -2, 1, 1, 1}.HFUNC(RPop)
             << CI{"BLPOP", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING, -3, 1, -2, 1}.HFUNC(BLPop)
+            << CI{"BRPOP", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING, -3, 1, -2, 1}.HFUNC(BRPop)
             << CI{"LLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(LLen)
             << CI{"LINDEX", CO::READONLY, 3, 1, 1, 1}.HFUNC(LIndex)
             << CI{"LRANGE", CO::READONLY, 4, 1, 1, 1}.HFUNC(LRange)

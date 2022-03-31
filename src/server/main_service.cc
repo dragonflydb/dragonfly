@@ -360,7 +360,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   VLOG(2) << "Got: " << args;
 
   string_view cmd_str = ArgS(args, 0);
-  bool is_trans_cmd = (cmd_str == "EXEC" || cmd_str == "MULTI");
+  bool is_trans_cmd = (cmd_str == "EXEC" || cmd_str == "MULTI" || cmd_str == "DISCARD");
   const CommandId* cid = registry_.Find(cmd_str);
   ServerState& etl = *ServerState::tlocal();
 
@@ -813,6 +813,19 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   interpreter->ResetStack();
 }
 
+void Service::Discard(CmdArgList args, ConnectionContext* cntx) {
+  RedisReplyBuilder* rb = (*cntx).operator->();
+
+  if (cntx->conn_state.exec_state == ConnectionState::EXEC_INACTIVE) {
+    return rb->SendError("DISCARD without MULTI");
+  }
+
+  cntx->conn_state.exec_state = ConnectionState::EXEC_INACTIVE;
+  cntx->conn_state.exec_body.clear();
+
+  rb->SendOk();
+}
+
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = (*cntx).operator->();
 
@@ -940,6 +953,7 @@ void Service::RegisterCommands() {
 
   registry_ << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0}.HFUNC(Quit)
             << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(Multi)
+            << CI{"DISCARD", CO::NOSCRIPT | CO::FAST| CO::LOADING, 1, 0, 0, 0}.MFUNC(Discard)
             << CI{"EVAL", CO::NOSCRIPT, -3, 0, 0, 0}.MFUNC(Eval).SetValidator(&EvalValidator)
             << CI{"EVALSHA", CO::NOSCRIPT, -3, 0, 0, 0}.MFUNC(EvalSha).SetValidator(&EvalValidator)
             << CI{"EXEC", kExecMask, 1, 0, 0, 0}.MFUNC(Exec)
