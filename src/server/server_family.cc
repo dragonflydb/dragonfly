@@ -162,7 +162,7 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
   absl::StrAppend(&info, "END\r\n");
 
   MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
-  builder->SendDirect(info);
+  builder->SendRaw(info);
 
 #undef ADD_LINE
 }
@@ -462,6 +462,7 @@ tcp_port:)";
     absl::StrAppend(&info, "keyspace_misses:", -1, "\n");
     absl::StrAppend(&info, "total_reads_processed:", m.conn_stats.io_read_cnt, "\n");
     absl::StrAppend(&info, "total_writes_processed:", m.conn_stats.io_write_cnt, "\n");
+    absl::StrAppend(&info, "async_writes_count:", m.conn_stats.async_writes_cnt, "\n");
   }
 
   if (should_enter("REPLICATION")) {
@@ -579,7 +580,7 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
-  (*cntx)->SendDirect("*3\r\n$6\r\nmaster\r\n:0\r\n*0\r\n");
+  (*cntx)->SendRaw("*3\r\n$6\r\nmaster\r\n:0\r\n*0\r\n");
 }
 
 void ServerFamily::Script(CmdArgList args, ConnectionContext* cntx) {

@@ -23,6 +23,7 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
       DCHECK(to_add);
 
       conn_state.subscribe_info.reset(new ConnectionState::SubscribeInfo);
+      this->force_dispatch = true;
     }
 
     for (size_t i = 0; i < args.size(); ++i) {
@@ -45,6 +46,7 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
 
     if (!to_add && conn_state.subscribe_info->channels.empty()) {
       conn_state.subscribe_info.reset();
+      force_dispatch = false;
     }
 
     sort(channels.begin(), channels.end());

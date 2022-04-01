@@ -192,7 +192,9 @@ API 2.0
   - [ ] PUBSUB CHANNELS
   - [X] SUBSCRIBE
   - [X] UNSUBSCRIBE
-- [X] Server Family
+  - [ ] PSUBSCRIBE
+  - [ ] PUNSUBSCRIBE
+- [ ] Server Family
   - [ ] WATCH
   - [ ] UNWATCH
   - [X] DISCARD
@@ -238,14 +240,6 @@ API 2.0
   - [ ] PFADD
   - [ ] PFCOUNT
   - [ ] PFMERGE
-- [ ] PUBSUB Family
-  - [ ] PSUBSCRIBE
-  - [ ] PUBSUB
-  - [ ] PUBLISH
-  - [ ] PUNSUBSCRIBE
-  - [ ] SUBSCRIBE
-  - [ ] UNSUBSCRIBE
-
 
 Commands that I prefer avoid implementing before launch:
   - PUNSUBSCRIBE

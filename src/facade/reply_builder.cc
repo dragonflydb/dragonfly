@@ -75,10 +75,20 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   }
 }
 
-void SinkReplyBuilder::SendDirect(std::string_view raw) {
+void SinkReplyBuilder::SendRaw(std::string_view raw) {
   iovec v = {IoVec(raw)};
 
   Send(&v, 1);
+}
+
+void SinkReplyBuilder::SendRawVec(absl::Span<const std::string_view> msg_vec) {
+  iovec v[msg_vec.size()];
+
+  for (unsigned i = 0; i < msg_vec.size(); ++i) {
+    v[i].iov_base = const_cast<char*>(msg_vec[i].data());
+    v[i].iov_len = msg_vec[i].size();
+  }
+  Send(v, msg_vec.size());
 }
 
 MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
@@ -210,7 +220,7 @@ void RedisReplyBuilder::SendError(OpStatus status) {
 
 void RedisReplyBuilder::SendLong(long num) {
   string str = absl::StrCat(":", num, kCRLF);
-  SendDirect(str);
+  SendRaw(str);
 }
 
 void RedisReplyBuilder::SendDouble(double val) {
@@ -228,7 +238,7 @@ void RedisReplyBuilder::SendMGetResponse(const OptResp* resp, uint32_t count) {
     }
   }
 
-  SendDirect(res);
+  SendRaw(res);
 }
 
 void RedisReplyBuilder::SendSimpleStrArr(const std::string_view* arr, uint32_t count) {
@@ -238,11 +248,11 @@ void RedisReplyBuilder::SendSimpleStrArr(const std::string_view* arr, uint32_t c
     StrAppend(&res, "+", arr[i], kCRLF);
   }
 
-  SendDirect(res);
+  SendRaw(res);
 }
 
 void RedisReplyBuilder::SendNullArray() {
-  SendDirect("*-1\r\n");
+  SendRaw("*-1\r\n");
 }
 
 void RedisReplyBuilder::SendStringArr(absl::Span<const std::string_view> arr) {
@@ -252,7 +262,7 @@ void RedisReplyBuilder::SendStringArr(absl::Span<const std::string_view> arr) {
     StrAppend(&res, "$", arr[i].size(), kCRLF);
     res.append(arr[i]).append(kCRLF);
   }
-  SendDirect(res);
+  SendRaw(res);
 }
 
 void RedisReplyBuilder::SendStringArr(absl::Span<const string> arr) {
@@ -262,11 +272,11 @@ void RedisReplyBuilder::SendStringArr(absl::Span<const string> arr) {
     StrAppend(&res, "$", arr[i].size(), kCRLF);
     res.append(arr[i]).append(kCRLF);
   }
-  SendDirect(res);
+  SendRaw(res);
 }
 
 void RedisReplyBuilder::StartArray(unsigned len) {
-  SendDirect(absl::StrCat("*", len, kCRLF));
+  SendRaw(absl::StrCat("*", len, kCRLF));
 }
 
 void ReqSerializer::SendCommand(std::string_view str) {

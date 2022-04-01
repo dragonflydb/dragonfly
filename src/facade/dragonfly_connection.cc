@@ -11,7 +11,6 @@
 #include <boost/fiber/operations.hpp>
 
 #include "base/logging.h"
-
 #include "facade/conn_context.h"
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
@@ -73,6 +72,21 @@ bool MatchHttp11Line(string_view line) {
 constexpr size_t kMinReadSize = 256;
 constexpr size_t kMaxReadSize = 32_KB;
 
+struct AsyncMsg {
+  absl::Span<const std::string_view> msg_vec;
+  fibers_ext::BlockingCounter bc;
+
+  AsyncMsg(absl::Span<const std::string_view> vec, fibers_ext::BlockingCounter b)
+      : msg_vec(vec), bc(move(b)) {
+  }
+};
+
+#ifdef ABSL_HAVE_ADDRESS_SANITIZER
+constexpr size_t kReqStorageSize = 88;
+#else
+constexpr size_t kReqStorageSize = 120;
+#endif
+
 }  // namespace
 
 struct Connection::Shutdown {
@@ -89,13 +103,15 @@ struct Connection::Shutdown {
   }
 };
 
+
 struct Connection::Request {
-  absl::FixedArray<MutableSlice> args;
+  absl::FixedArray<MutableSlice, 6> args;
 
   // I do not use mi_heap_t explicitly but mi_stl_allocator at the end does the same job
   // of using the thread's heap.
-  // The capacity is chosen so that we allocate a fully utilized (512 bytes) block.
-  absl::FixedArray<char, 190, mi_stl_allocator<char>> storage;
+  // The capacity is chosen so that we allocate a fully utilized (256 bytes) block.
+  absl::FixedArray<char, kReqStorageSize, mi_stl_allocator<char>> storage;
+  AsyncMsg* async_msg = nullptr;  // allocated and released via mi_malloc.
 
   Request(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
   }
@@ -109,7 +125,8 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   protocol_ = protocol;
 
   constexpr size_t kReqSz = sizeof(Connection::Request);
-  (void)kReqSz;
+  static_assert(kReqSz <= 256 && kReqSz >= 232);
+  // LOG(INFO) << "kReqSz: " << kReqSz;
 
   switch (protocol) {
     case Protocol::REDIS:
@@ -223,7 +240,26 @@ void Connection::RegisterOnBreak(BreakerCb breaker_cb) {
   breaker_cb_ = breaker_cb;
 }
 
-io::Result<bool> Connection::CheckForHttpProto(util::FiberSocketBase* peer) {
+void Connection::SendMsgVecAsync(absl::Span<const std::string_view> msg_vec,
+                                 fibers_ext::BlockingCounter bc) {
+  if (cc_->conn_closing) {
+    bc.Dec();
+    return;
+  }
+
+  void* ptr = mi_malloc(sizeof(AsyncMsg));
+  AsyncMsg* amsg = new (ptr) AsyncMsg(msg_vec, move(bc));
+
+  ptr = mi_malloc(sizeof(Request));
+  Request* req = new (ptr) Request(0, 0);
+  req->async_msg = amsg;
+  dispatch_q_.push_back(req);
+  if (dispatch_q_.size() == 1) {
+    evc_.notify();
+  }
+}
+
+io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
   size_t last_len = 0;
   do {
     auto buf = io_buf_.AppendBuffer();
@@ -338,16 +374,15 @@ auto Connection::ParseRedis() -> ParserStatus {
       // We use ASYNC_DISPATCH as a lock to avoid out-of-order replies when the
       // dispatch fiber pulls the last record but is still processing the command and then this
       // fiber enters the condition below and executes out of order.
-      bool is_sync_dispatch = !cc_->async_dispatch;
+      bool is_sync_dispatch = !cc_->async_dispatch && !cc_->force_dispatch;
       if (dispatch_q_.empty() && is_sync_dispatch && consumed >= io_buf_.InputLen()) {
         RespToArgList(args, &arg_vec);
         service_->DispatchCommand(CmdArgList{arg_vec.data(), arg_vec.size()}, cc_.get());
       } else {
-        // Dispatch via queue to speedup input reading
-        // We could use
+        // Dispatch via queue to speedup input reading.
         Request* req = FromArgs(std::move(args), tlh);
 
-        dispatch_q_.emplace_back(req);
+        dispatch_q_.push_back(req);
         if (dispatch_q_.size() == 1) {
           evc_.notify();
         } else if (dispatch_q_.size() > 10) {
@@ -505,12 +540,21 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     Request* req = dispatch_q_.front();
     dispatch_q_.pop_front();
 
-    ++stats->pipelined_cmd_cnt;
+    if (req->async_msg) {
+      ++stats->async_writes_cnt;
+      builder->SendRawVec(req->async_msg->msg_vec);
+      req->async_msg->bc.Dec();
 
-    builder->SetBatchMode(!dispatch_q_.empty());
-    cc_->async_dispatch = true;
-    service_->DispatchCommand(CmdArgList{req->args.data(), req->args.size()}, cc_.get());
-    cc_->async_dispatch = false;
+      req->async_msg->~AsyncMsg();
+      mi_free(req->async_msg);
+    } else {
+      ++stats->pipelined_cmd_cnt;
+
+      builder->SetBatchMode(!dispatch_q_.empty());
+      cc_->async_dispatch = true;
+      service_->DispatchCommand(CmdArgList{req->args.data(), req->args.size()}, cc_.get());
+      cc_->async_dispatch = false;
+    }
     req->~Request();
     mi_free(req);
   }
@@ -521,6 +565,12 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
   while (!dispatch_q_.empty()) {
     Request* req = dispatch_q_.front();
     dispatch_q_.pop_front();
+
+    if (req->async_msg) {
+      req->async_msg->bc.Dec();
+      req->async_msg->~AsyncMsg();
+      mi_free(req->async_msg);
+    }
     req->~Request();
     mi_free(req);
   }

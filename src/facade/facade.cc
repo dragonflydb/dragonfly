@@ -21,7 +21,7 @@ constexpr size_t kSizeConnStats = sizeof(ConnectionStats);
 
 ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   // To break this code deliberately if we add/remove a field to this struct.
-  static_assert(kSizeConnStats == 144);
+  static_assert(kSizeConnStats == 152);
 
   ADD(num_conns);
   ADD(num_replicas);
@@ -30,8 +30,9 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   ADD(io_read_bytes);
   ADD(io_write_cnt);
   ADD(io_write_bytes);
-  ADD(pipelined_cmd_cnt);
   ADD(command_cnt);
+  ADD(pipelined_cmd_cnt);
+  ADD(async_writes_cnt);
 
   for (const auto& k_v : o.err_count) {
     err_count[k_v.first] += k_v.second;
@@ -98,6 +99,7 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : ow
   req_auth = false;
   replica_conn = false;
   authenticated = false;
+  force_dispatch = false;
 }
 
 Protocol ConnectionContext::protocol() const {

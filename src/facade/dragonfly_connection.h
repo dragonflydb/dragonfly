@@ -13,7 +13,7 @@
 #include "facade/facade_types.h"
 #include "facade/resp_expr.h"
 #include "util/connection.h"
-#include "util/fibers/event_count.h"
+#include "util/fibers/fibers_ext.h"
 #include "util/http/http_handler.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
@@ -28,8 +28,8 @@ class MemcacheParser;
 
 class Connection : public util::Connection {
  public:
-  Connection(Protocol protocol, util::HttpListenerBase* http_listener,
-             SSL_CTX* ctx, ServiceInterface* service);
+  Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
+             ServiceInterface* service);
   ~Connection();
 
   using error_code = std::error_code;
@@ -45,6 +45,12 @@ class Connection : public util::Connection {
 
   using BreakerCb = std::function<void(uint32_t)>;
   void RegisterOnBreak(BreakerCb breaker_cb);
+
+  // This interface is used to pass a raw message directly to the socket via zero-copy interface.
+  // Once the msg is sent "bc" will be decreased so that caller could release the underlying
+  // storage for the message.
+  void SendMsgVecAsync(absl::Span<const std::string_view> msg_vec,
+                       util::fibers_ext::BlockingCounter bc);
 
  protected:
   void OnShutdown() override;
@@ -80,6 +86,7 @@ class Connection : public util::Connection {
 
   std::deque<Request*> dispatch_q_;  // coordinated via evc_.
   util::fibers_ext::EventCount evc_;
+
   unsigned parser_error_ = 0;
   Protocol protocol_;
   struct Shutdown;

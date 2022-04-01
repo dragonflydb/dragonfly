@@ -54,7 +54,8 @@ class SinkReplyBuilder {
   }
 
   //! Sends a string as is without any formatting. raw should be encoded according to the protocol.
-  void SendDirect(std::string_view str);
+  void SendRaw(std::string_view str);
+  void SendRawVec(absl::Span<const std::string_view> msg_vec);
 
   // Common for both MC and Redis.
   virtual void SendError(std::string_view str, std::string_view type = std::string_view{}) = 0;

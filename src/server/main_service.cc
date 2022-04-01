@@ -10,6 +10,7 @@ extern "C" {
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/ascii.h>
+#include <absl/strings/str_format.h>
 #include <xxhash.h>
 
 #include <boost/fiber/operations.hpp>
@@ -874,41 +875,50 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&] { return EngineShard::tlocal()->channel_slice().FetchSubscribers(channel); };
 
-  vector<ChannelSlice::Subscriber> res = shard_set_.Await(sid, std::move(cb));
+  vector<ChannelSlice::Subscriber> subsriber_arr = shard_set_.Await(sid, std::move(cb));
   atomic_uint32_t published{0};
 
-  if (!res.empty()) {
-    sort(res.begin(), res.end(),
+  if (!subsriber_arr.empty()) {
+    sort(subsriber_arr.begin(), subsriber_arr.end(),
          [](const auto& left, const auto& right) { return left.thread_id < right.thread_id; });
 
     vector<unsigned> slices(shard_set_.pool()->size(), UINT_MAX);
-    for (size_t i = 0; i < res.size(); ++i) {
-      if (slices[res[i].thread_id] > i) {
-        slices[res[i].thread_id] = i;
+    for (size_t i = 0; i < subsriber_arr.size(); ++i) {
+      if (slices[subsriber_arr[i].thread_id] > i) {
+        slices[subsriber_arr[i].thread_id] = i;
       }
     }
 
-    auto cb = [&](unsigned idx, util::ProactorBase*) {
+    fibers_ext::BlockingCounter bc(subsriber_arr.size());
+    char prefix[] = "*3\r\n$7\r\nmessage\r\n$";
+    char msg_size[32] = {0};
+    char channel_size[32] = {0};
+    absl::SNPrintF(msg_size, sizeof(msg_size), "%u\r\n", message.size());
+    absl::SNPrintF(channel_size, sizeof(channel_size), "%u\r\n", channel.size());
+
+    string_view msg_arr[] = {prefix, channel_size, channel, "\r\n$", msg_size, message, "\r\n"};
+
+    auto publish_cb = [&, bc](unsigned idx, util::ProactorBase*) mutable {
       unsigned start = slices[idx];
-      for (unsigned i = start; i < res.size(); ++i) {
-        if (res[i].thread_id != idx)
+
+      for (unsigned i = start; i < subsriber_arr.size(); ++i) {
+        if (subsriber_arr[i].thread_id != idx)
           break;
 
-        if (!res[i].conn_cntx->conn_closing) {
-          published.fetch_add(1, memory_order_relaxed);
-
-          // TODO: this is wrong because ReplyBuilder does not guarantee atomicity if used
-          // concurrently by multiple fibers.
-          string_view msg_arr[3] = {"message", channel, message};
-          (*res[i].conn_cntx)->SendStringArr(msg_arr);
-        }
+        published.fetch_add(1, memory_order_relaxed);
+        subsriber_arr[i].conn_cntx->owner()->SendMsgVecAsync(msg_arr, bc);
       }
     };
 
-    shard_set_.pool()->AwaitFiberOnAll(cb);
+    shard_set_.pool()->Await(publish_cb);
+
+    bc.Wait();  // Wait for all the messages to be sent.
   }
 
-  for (auto& s : res) {
+  // If subsriber connections are closing they will wait
+  // for the tokens to be reclaimed in OnClose(). This guarantees that subscribers we gathered
+  // still exist till we finish publishing.
+  for (auto& s : subsriber_arr) {
     s.borrow_token.Dec();
   }
 
