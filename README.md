@@ -52,8 +52,8 @@ API 1.0
   - [X] INCRBY
   - [X] MGET
   - [X] MSET
-  - [ ] MSETNX
-  - [ ] SUBSTR
+  - [X] MSETNX
+  - [X] SUBSTR
 - [ ] Generic family
   - [X] DEL
   - [X] ECHO

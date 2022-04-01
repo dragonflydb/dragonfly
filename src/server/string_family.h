@@ -49,21 +49,24 @@ class StringFamily {
   static void Register(CommandRegistry* registry);
 
  private:
-  static void Set(CmdArgList args, ConnectionContext* cntx);
-  static void SetEx(CmdArgList args, ConnectionContext* cntx);
-  static void Get(CmdArgList args, ConnectionContext* cntx);
-  static void GetSet(CmdArgList args, ConnectionContext* cntx);
-  static void MGet(CmdArgList args, ConnectionContext* cntx);
-  static void MSet(CmdArgList args, ConnectionContext* cntx);
-  static void Incr(CmdArgList args, ConnectionContext* cntx);
-  static void IncrBy(CmdArgList args, ConnectionContext* cntx);
+
+  static void Append(CmdArgList args, ConnectionContext* cntx);
   static void Decr(CmdArgList args, ConnectionContext* cntx);
   static void DecrBy(CmdArgList args, ConnectionContext* cntx);
-  static void Append(CmdArgList args, ConnectionContext* cntx);
-  static void Prepend(CmdArgList args, ConnectionContext* cntx);
-  static void StrLen(CmdArgList args, ConnectionContext* cntx);
+  static void Get(CmdArgList args, ConnectionContext* cntx);
   static void GetRange(CmdArgList args, ConnectionContext* cntx);
+  static void GetSet(CmdArgList args, ConnectionContext* cntx);
+  static void Incr(CmdArgList args, ConnectionContext* cntx);
+  static void IncrBy(CmdArgList args, ConnectionContext* cntx);
+  static void MGet(CmdArgList args, ConnectionContext* cntx);
+  static void MSet(CmdArgList args, ConnectionContext* cntx);
+  static void MSetNx(CmdArgList args, ConnectionContext* cntx);
+
+  static void Set(CmdArgList args, ConnectionContext* cntx);
+  static void SetEx(CmdArgList args, ConnectionContext* cntx);
   static void SetRange(CmdArgList args, ConnectionContext* cntx);
+  static void StrLen(CmdArgList args, ConnectionContext* cntx);
+  static void Prepend(CmdArgList args, ConnectionContext* cntx);
   static void PSetEx(CmdArgList args, ConnectionContext* cntx);
 
   static void IncrByGeneric(std::string_view key, int64_t val, ConnectionContext* cntx);
@@ -80,7 +83,8 @@ class StringFamily {
   static MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction* t,
                              EngineShard* shard);
 
-  static OpStatus OpMSet(const Transaction* t, EngineShard* es);
+  // Returns true if keys were set, false otherwise.
+  static OpStatus OpMSet(const OpArgs& op_args, ArgSlice args);
 
   // if skip_on_missing - returns KEY_NOTFOUND.
   static OpResult<int64_t> OpIncrBy(const OpArgs& op_args, std::string_view key, int64_t val,

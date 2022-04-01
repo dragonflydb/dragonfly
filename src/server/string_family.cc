@@ -432,12 +432,48 @@ void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
     LOG(INFO) << "MSET/" << transaction->unique_shard_cnt() << str;
   }
 
-  OpStatus status = transaction->ScheduleSingleHop(&OpMSet);
-  CHECK_EQ(OpStatus::OK, status);
+  auto cb = [&](Transaction* t, EngineShard* es) {
+    auto args = t->ShardArgsInShard(es->shard_id());
+    return OpMSet(OpArgs{es, t->db_index()}, args);
+  };
 
-  DVLOG(2) << "MSet run  " << transaction->DebugId();
+  transaction->ScheduleSingleHop(std::move(cb));
+  (*cntx)->SendOk();
+}
 
-  return (*cntx)->SendOk();
+void StringFamily::MSetNx(CmdArgList args, ConnectionContext* cntx) {
+  Transaction* transaction = cntx->transaction;
+
+  transaction->Schedule();
+
+  atomic_bool exists{false};
+
+  auto cb = [&](Transaction* t, EngineShard* es) {
+    auto args = t->ShardArgsInShard(es->shard_id());
+    for (size_t i = 0; i < args.size(); i += 2) {
+      auto it = es->db_slice().FindExt(t->db_index(), args[i]).first;
+      if (IsValid(it)) {
+        exists.store(true, memory_order_relaxed);
+        break;
+      }
+    }
+
+    return OpStatus::OK;
+  };
+
+  transaction->Execute(std::move(cb), false);
+  bool to_skip = exists.load(memory_order_relaxed) == true;
+  auto epilog_cb = [&](Transaction* t, EngineShard* es) {
+    if (to_skip)
+      return OpStatus::OK;
+
+    auto args = t->ShardArgsInShard(es->shard_id());
+    return OpMSet(OpArgs{es, t->db_index()}, std::move(args));
+  };
+
+  transaction->Execute(std::move(epilog_cb), true);
+
+  (*cntx)->SendLong(to_skip ? 0 : 1);
 }
 
 void StringFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
@@ -526,7 +562,6 @@ void StringFamily::SetRange(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError("string exceeds maximum allowed size");
   }
 
-
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
     auto [it, added] = shard->db_slice().AddOrFind(t->db_index(), key);
     string s;
@@ -590,17 +625,19 @@ auto StringFamily::OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction
   return response;
 }
 
-OpStatus StringFamily::OpMSet(const Transaction* t, EngineShard* es) {
-  ArgSlice largs = t->ShardArgsInShard(es->shard_id());
+OpStatus StringFamily::OpMSet(const OpArgs& op_args, ArgSlice args) {
+  DCHECK(!args.empty() && args.size() % 2 == 0);
 
-  DCHECK(!largs.empty() && largs.size() % 2 == 0);
+  SetCmd::SetParams params{op_args.db_ind};
+  SetCmd sg(&op_args.shard->db_slice());
 
-  SetCmd::SetParams params{t->db_index()};
-  SetCmd sg(&es->db_slice());
-  for (size_t i = 0; i < largs.size(); i += 2) {
-    DVLOG(1) << "MSet " << largs[i] << ":" << largs[i + 1];
-    auto res = sg.Set(params, largs[i], largs[i + 1]);
-    CHECK(res.ok()) << res << " " << largs[i];  // TODO - handle OOM etc.
+  for (size_t i = 0; i < args.size(); i += 2) {
+    DVLOG(1) << "MSet " << args[i] << ":" << args[i + 1];
+    auto res = sg.Set(params, args[i], args[i + 1]);
+    if (!res) {
+      LOG(ERROR) << "Unexpected error " << res.status();
+      return OpStatus::OK;  // Multi-key operations must return OK.
+    }
   }
 
   return OpStatus::OK;
@@ -719,8 +756,11 @@ void StringFamily::Register(CommandRegistry* registry) {
             << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(GetSet)
             << CI{"MGET", CO::READONLY | CO::FAST, -2, 1, -1, 1}.HFUNC(MGet)
             << CI{"MSET", CO::WRITE | CO::DENYOOM, -3, 1, -1, 2}.HFUNC(MSet)
+            << CI{"MSETNX", CO::WRITE | CO::DENYOOM, -3, 1, -1, 2}.HFUNC(MSetNx)
             << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(StrLen)
             << CI{"GETRANGE", CO::READONLY | CO::FAST, 4, 1, 1, 1}.HFUNC(GetRange)
+            << CI{"SUBSTR", CO::READONLY | CO::FAST, 4, 1, 1, 1}.HFUNC(
+                   GetRange)  // Alias for GetRange
             << CI{"SETRANGE", CO::FAST, 4, 1, 1, 1}.HFUNC(SetRange);
 }
 
