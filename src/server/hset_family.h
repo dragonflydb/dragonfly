@@ -14,6 +14,7 @@ namespace dfly {
 class ConnectionContext;
 class CommandRegistry;
 using facade::OpResult;
+using facade::OpStatus;
 
 class HSetFamily {
  public:
@@ -55,6 +56,11 @@ class HSetFamily {
 
   static OpResult<std::vector<std::string>> OpGetAll(const OpArgs& op_args, std::string_view key,
                                                      uint8_t getall_mask);
+
+  using IncrByParam = std::variant<double, int64_t>;
+  static OpStatus OpIncrBy(const OpArgs& op_args, std::string_view key,
+                           std::string_view field, IncrByParam* param);
+
 };
 
 }  // namespace dfly

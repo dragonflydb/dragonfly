@@ -179,12 +179,12 @@ API 2.0
   - [X] HGET
   - [X] HMGET
   - [X] HLEN
-  - [ ] HINCRBY
+  - [X] HINCRBY
   - [ ] HINCRBYFLOAT
   - [X] HGETALL
   - [X] HKEYS
-  - [ ] HSETNX
-  - [ ] HVALS
+  - [X] HSETNX
+  - [X] HVALS
   - [ ] HSCAN
 - [ ] PubSub family
   - [X] PUBLISH

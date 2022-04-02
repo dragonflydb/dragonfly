@@ -23,8 +23,7 @@ namespace dfly {
 namespace {
 
 using namespace std;
-using facade::Protocol;
-using facade::SinkReplyBuilder;
+using namespace facade;
 
 using CI = CommandId;
 DEFINE_VARZ(VarzQps, set_qps);
@@ -129,14 +128,14 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       }
 
       if (int_arg <= 0 || (!is_ms && int_arg >= int64_t(kMaxExpireDeadlineSec))) {
-        return builder->SendError(facade::kExpiryOutOfRange);
+        return builder->SendError(kExpiryOutOfRange);
       }
 
       if (!is_ms) {
         int_arg *= 1000;
       }
       if (int_arg >= int64_t(kMaxExpireDeadlineSec * 1000)) {
-        return builder->SendError(facade::kExpiryOutOfRange);
+        return builder->SendError(kExpiryOutOfRange);
       }
       sparams.expire_after_ms = int_arg;
     } else if (cur_arg == "NX") {
@@ -290,18 +289,21 @@ void StringFamily::IncrByGeneric(std::string_view key, int64_t val, ConnectionCo
   DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
   switch (result.status()) {
     case OpStatus::OK:
-      return builder->SendLong(result.value());
+      builder->SendLong(result.value());
+      break;
     case OpStatus::INVALID_VALUE:
-      return builder->SendError(kInvalidIntErr);
+      builder->SendError(kInvalidIntErr);
+      break;
     case OpStatus::OUT_OF_RANGE:
-      return builder->SendError("increment or decrement would overflow");
-    case OpStatus::WRONG_TYPE:
-      return builder->SendError(kWrongTypeErr);
+      builder->SendError(kIncrOverflow);
+      break;
     case OpStatus::KEY_NOTFOUND:  // Relevant only for MC
-      return reinterpret_cast<facade::MCReplyBuilder*>(builder)->SendNotFound();
-    default:;
+      reinterpret_cast<MCReplyBuilder*>(builder)->SendNotFound();
+      break;
+    default:
+      reinterpret_cast<RedisReplyBuilder*>(builder)->SendError(result.status());
+      break;
   }
-  __builtin_unreachable();
 }
 
 void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContext* cntx) {
@@ -346,7 +348,7 @@ void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext
 
   if (unit_vals < 1) {
     ToLower(&args[0]);
-    return (*cntx)->SendError(absl::StrCat(facade::kInvalidExpireTime, " in ", ArgS(args, 0)));
+    return (*cntx)->SendError(absl::StrCat(kInvalidExpireTime, " in ", ArgS(args, 0)));
   }
 
   SetCmd::SetParams sparams{cntx->db_index()};

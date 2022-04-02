@@ -17,6 +17,7 @@ extern const char kKeyNotFoundErr[];
 extern const char kInvalidIntErr[];
 extern const char kInvalidFloatErr[];
 extern const char kUintErr[];
+extern const char kIncrOverflow[];
 extern const char kDbIndOutOfRangeErr[];
 extern const char kInvalidDbIndErr[];
 extern const char kScriptNotFound[];

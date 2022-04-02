@@ -256,8 +256,8 @@ void IntervalVisitor::ExtractListPack(const zrangespec& range) {
   uint8_t* zl = (uint8_t*)zobj_->ptr;
   uint8_t *eptr, *sptr;
   uint8_t* vstr;
-  unsigned int vlen;
-  long long vlong;
+  unsigned int vlen = 0;
+  long long vlong = 0;
   unsigned rangelen = 0;
   unsigned offset = params_.offset;
   unsigned limit = params_.limit;

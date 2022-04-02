@@ -57,6 +57,7 @@ const char kKeyNotFoundErr[] = "no such key";
 const char kInvalidIntErr[] = "value is not an integer or out of range";
 const char kInvalidFloatErr[] = "value is not a valid float";
 const char kUintErr[] = "value is out of range, must be positive";
+const char kIncrOverflow[] = "increment or decrement would overflow";
 const char kDbIndOutOfRangeErr[] = "DB index is out of range";
 const char kInvalidDbIndErr[] = "invalid DB index";
 const char kScriptNotFound[] = "-NOSCRIPT No matching script. Please use EVAL.";
