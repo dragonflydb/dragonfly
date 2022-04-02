@@ -4,10 +4,12 @@
 
 #include "server/rdb_save.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
 
 extern "C" {
+#include "redis/intset.h"
 #include "redis/rdb.h"
 #include "redis/util.h"
 }
@@ -116,36 +118,31 @@ uint8_t RdbObjectType(const robj* o) {
     case OBJ_LIST:
       if (o->encoding == OBJ_ENCODING_QUICKLIST)
         return RDB_TYPE_LIST_QUICKLIST;
-      LOG(FATAL) << ("Unknown list encoding");
       break;
     case OBJ_SET:
       if (o->encoding == OBJ_ENCODING_INTSET)
         return RDB_TYPE_SET_INTSET;
       else if (o->encoding == OBJ_ENCODING_HT)
         return RDB_TYPE_SET;
-      LOG(FATAL) << ("Unknown set encoding");
       break;
     case OBJ_ZSET:
-      if (o->encoding == OBJ_ENCODING_ZIPLIST)
-        return RDB_TYPE_ZSET_ZIPLIST;
+      if (o->encoding == OBJ_ENCODING_LISTPACK)
+        return RDB_TYPE_ZSET_LISTPACK;
       else if (o->encoding == OBJ_ENCODING_SKIPLIST)
         return RDB_TYPE_ZSET_2;
-      LOG(FATAL) << ("Unknown sorted set encoding");
       break;
     case OBJ_HASH:
       if (o->encoding == OBJ_ENCODING_ZIPLIST)
         return RDB_TYPE_HASH_ZIPLIST;
       else if (o->encoding == OBJ_ENCODING_HT)
         return RDB_TYPE_HASH;
-      LOG(FATAL) << ("Unknown hash encoding");
       break;
     case OBJ_STREAM:
       return RDB_TYPE_STREAM_LISTPACKS;
     case OBJ_MODULE:
       return RDB_TYPE_MODULE_2;
-    default:
-      LOG(FATAL) << ("Unknown object type");
   }
+  LOG(FATAL) << "Unknown encoding " << o->encoding << " for type " << o->type;
   return 0; /* avoid warning */
 }
 
@@ -169,7 +166,6 @@ error_code RdbSerializer::SaveKeyVal(string_view key, const robj* val, uint64_t 
 
   uint8_t rdb_type = RdbObjectType(val);
   RETURN_ON_ERR(WriteOpcode(rdb_type));
-
   RETURN_ON_ERR(SaveString(key));
 
   return SaveObject(val);
@@ -203,24 +199,11 @@ error_code RdbSerializer::SaveObject(const robj* o) {
   }
 
   if (o->type == OBJ_LIST) {
-    /* Save a list value */
-    DCHECK_EQ(OBJ_ENCODING_QUICKLIST, o->encoding);
-    const quicklist* ql = reinterpret_cast<const quicklist*>(o->ptr);
-    quicklistNode* node = ql->head;
-    DVLOG(1) << "Saving list of length " << ql->len;
-    RETURN_ON_ERR(SaveLen(ql->len));
+    return SaveListObject(o);
+  }
 
-    while (node) {
-      if (quicklistNodeIsCompressed(node)) {
-        void* data;
-        size_t compress_len = quicklistGetLzf(node, &data);
-        RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
-      } else {
-        RETURN_ON_ERR(SaveString(node->entry, node->sz));
-      }
-      node = node->next;
-    }
-    return error_code{};
+  if (o->type == OBJ_SET) {
+    return SaveSetObject(o);
   }
 
   LOG(FATAL) << "Not implemented " << o->type;
@@ -238,6 +221,53 @@ error_code RdbSerializer::SaveStringObject(const robj* obj) {
   sds s = reinterpret_cast<sds>(obj->ptr);
 
   return SaveString(std::string_view{s, sdslen(s)});
+}
+
+error_code RdbSerializer::SaveListObject(const robj* obj) {
+  /* Save a list value */
+  DCHECK_EQ(OBJ_ENCODING_QUICKLIST, obj->encoding);
+  const quicklist* ql = reinterpret_cast<const quicklist*>(obj->ptr);
+  quicklistNode* node = ql->head;
+  DVLOG(1) << "Saving list of length " << ql->len;
+  RETURN_ON_ERR(SaveLen(ql->len));
+
+  while (node) {
+    if (quicklistNodeIsCompressed(node)) {
+      void* data;
+      size_t compress_len = quicklistGetLzf(node, &data);
+      RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
+    } else {
+      RETURN_ON_ERR(SaveString(node->entry, node->sz));
+    }
+    node = node->next;
+  }
+  return error_code{};
+}
+
+error_code RdbSerializer::SaveSetObject(const robj* obj) {
+  if (obj->encoding == OBJ_ENCODING_HT) {
+    dict* set = (dict*)obj->ptr;
+
+    RETURN_ON_ERR(SaveLen(dictSize(set)));
+
+    dictIterator* di = dictGetIterator(set);
+    dictEntry* de;
+    auto key_cleanup = absl::MakeCleanup([di] { dictReleaseIterator(di); });
+
+    while ((de = dictNext(di)) != NULL) {
+      sds ele = (sds)de->key;
+
+      RETURN_ON_ERR(SaveString(string_view{ele, sdslen(ele)}));
+    }
+  } else if (obj->encoding == OBJ_ENCODING_INTSET) {
+    size_t len = intsetBlobLen((intset*)obj->ptr);
+
+    RETURN_ON_ERR(SaveString(string_view{(char*)obj->ptr, len}));
+  } else {
+    LOG(FATAL) << "Unknown set encoding " << obj->encoding;
+  }
+
+  return error_code{};
 }
 
 /* Save a long long value as either an encoded string or a string. */

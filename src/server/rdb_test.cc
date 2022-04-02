@@ -15,6 +15,7 @@ extern "C" {
 #include "io/file.h"
 #include "server/engine_shard_set.h"
 #include "server/rdb_load.h"
+#include "server/test_utils.h"
 #include "util/uring/uring_pool.h"
 
 using namespace testing;
@@ -23,39 +24,15 @@ using namespace util;
 
 namespace dfly {
 
-class RdbTest : public testing::Test {
+class RdbTest : public BaseFamilyTest {
  protected:
-  void SetUp() final;
-
-  void TearDown() final {
-    pp_->AwaitFiberOnAll([](auto*) { EngineShard::DestroyThreadLocal(); });
-    ess_.reset();
-    pp_->Stop();
-  }
-
-  static void SetUpTestSuite() {
-    crc64_init();
-    init_zmalloc_threadlocal(mi_heap_get_backing());
-  }
 
  protected:
   io::FileSource GetSource(string name);
-
-  unique_ptr<ProactorPool> pp_;
-  unique_ptr<EngineShardSet> ess_;
 };
 
 inline const uint8_t* to_byte(const void* s) {
   return reinterpret_cast<const uint8_t*>(s);
-}
-
-void RdbTest::SetUp() {
-  pp_.reset(new uring::UringPool(16, 2));
-  pp_->Run();
-  ess_.reset(new EngineShardSet(pp_.get()));
-  ess_->Init(pp_->size());
-
-  pp_->Await([&](uint32_t index, ProactorBase* pb) { ess_->InitThreadLocal(pb, false); });
 }
 
 io::FileSource RdbTest::GetSource(string name) {
@@ -101,6 +78,14 @@ TEST_F(RdbTest, LoadSmall) {
   RdbLoader loader;
   auto ec = loader.Load(&fs);
   CHECK(!ec);
+}
+
+TEST_F(RdbTest, Save) {
+  Run({"set", "string_key", "val"});
+  Run({"sadd", "set_key1", "val"});
+  Run({"sadd", "set_key2", "1", "2", "3"});
+  Run({"rpush", "list_key", "val"});
+  Run({"save"});
 }
 
 }  // namespace dfly

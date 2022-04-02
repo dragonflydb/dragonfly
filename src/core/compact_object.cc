@@ -619,8 +619,12 @@ robj* CompactObj::AsRObj() const {
   res->type = u_.r_obj.type();
 
   if (res->type == OBJ_SET) {
-    DCHECK_EQ(kEncodingIntSet, u_.r_obj.encoding());
-    enc = OBJ_ENCODING_INTSET;
+    if (kEncodingIntSet == u_.r_obj.encoding()) {
+      enc = OBJ_ENCODING_INTSET;
+    } else {
+      DCHECK_EQ(kEncodingStrMap, u_.r_obj.encoding());
+      enc = OBJ_ENCODING_HT;
+    }
   }
   res->encoding = enc;
   res->lru = 0;  // u_.r_obj.unneeded;
@@ -643,8 +647,12 @@ void CompactObj::SyncRObj() {
 
   unsigned enc = obj->encoding;
   if (obj->type == OBJ_SET) {
-    DCHECK_EQ(OBJ_ENCODING_INTSET, enc);
-    enc = kEncodingIntSet;
+    if (OBJ_ENCODING_INTSET == enc) {
+      enc = kEncodingIntSet;
+    } else {
+      DCHECK_EQ(OBJ_ENCODING_HT, enc);
+      enc = kEncodingStrMap;
+    }
   }
   u_.r_obj.Init(obj->type, enc, obj->ptr);
 }

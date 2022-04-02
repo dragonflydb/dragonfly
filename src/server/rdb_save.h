@@ -47,6 +47,8 @@ class RdbSerializer {
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
   std::error_code SaveObject(const robj* o);
   std::error_code SaveStringObject(const robj* obj);
+  std::error_code SaveListObject(const robj* obj);
+  std::error_code SaveSetObject(const robj* obj);
   std::error_code SaveLongLongAsString(int64_t value);
 
   ::io::Sink* sink_ = nullptr;
