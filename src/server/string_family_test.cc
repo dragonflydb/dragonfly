@@ -265,13 +265,24 @@ TEST_F(StringFamilyTest, SetEx) {
   ASSERT_THAT(Run({"setex", "key", "0", "val"}), ElementsAre(ErrArg("invalid expire time")));
 }
 
-TEST_F(StringFamilyTest, SetRange) {
+TEST_F(StringFamilyTest, Range) {
   Run({"set", "key1", "Hello World"});
   Run({"SETRANGE", "key1", "6", "Earth"});
   EXPECT_THAT(Run({"get", "key1"}), RespEq("Hello Earth"));
 
   Run({"SETRANGE", "key2", "2", "Earth"});
   EXPECT_THAT(Run({"get", "key2"}), RespEq(string_view("\000\000Earth", 7)));
+
+  Run({"SETRANGE", "key3", "0", ""});
+  EXPECT_EQ(0, CheckedInt({"exists", "key3"}));
+
+  Run({"SETRANGE", "key3", "0", "abc"});
+  EXPECT_EQ(1, CheckedInt({"exists", "key3"}));
+
+  Run({"SET", "key3", "123"});
+  EXPECT_THAT(Run({"getrange", "key3", "2", "3"}), RespEq("3"));
+  EXPECT_THAT(Run({"getrange", "key3", "3", "3"}), RespEq(""));
+  EXPECT_THAT(Run({"getrange", "key3", "4", "5"}), RespEq(""));
 }
 
 }  // namespace dfly

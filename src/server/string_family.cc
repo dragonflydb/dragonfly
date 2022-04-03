@@ -519,10 +519,15 @@ void StringFamily::GetRange(CmdArgList args, ConnectionContext* cntx) {
     }
     const CompactObj& co = it_res.value()->second;
     size_t strlen = co.Size();
+
     if (start < 0)
       start = strlen + start;
+    else if (size_t(start) >= strlen)
+      return OpStatus::OK;
+
     if (end < 0)
       end = strlen + end;
+
     if (start < 0)
       start = 0;
     if (end < 0)
@@ -565,7 +570,17 @@ void StringFamily::SetRange(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
+    if (min_size == 0) {
+      auto it_res = shard->db_slice().Find(t->db_index(), key, OBJ_STRING);
+      if (it_res) {
+        return it_res.value()->second.Size();
+      } else {
+        return it_res.status();
+      }
+    }
+
     auto [it, added] = shard->db_slice().AddOrFind(t->db_index(), key);
+
     string s;
     s.reserve(min_size);
 
