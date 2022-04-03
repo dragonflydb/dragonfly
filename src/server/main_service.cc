@@ -937,6 +937,20 @@ void Service::Unsubscribe(CmdArgList args, ConnectionContext* cntx) {
   cntx->ChangeSubscription(false, true, std::move(args));
 }
 
+// Not a real implementation. Serves as a decorator to accept some function commands
+// for testing.
+void Service::Function(CmdArgList args, ConnectionContext* cntx) {
+  ToUpper(&args[1]);
+  string_view sub_cmd = ArgS(args, 1);
+
+  if (sub_cmd == "FLUSH") {
+    return (*cntx)->SendOk();
+  }
+
+  string err = absl::StrCat("Unknown subcommand '", sub_cmd, "'. Try FUNCTION HELP.");
+  return (*cntx)->SendError(err, kSyntaxErr);
+}
+
 VarzValue::Map Service::GetVarzStats() {
   VarzValue::Map res;
 
@@ -963,13 +977,14 @@ void Service::RegisterCommands() {
 
   registry_ << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0}.HFUNC(Quit)
             << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(Multi)
-            << CI{"DISCARD", CO::NOSCRIPT | CO::FAST| CO::LOADING, 1, 0, 0, 0}.MFUNC(Discard)
+            << CI{"DISCARD", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.MFUNC(Discard)
             << CI{"EVAL", CO::NOSCRIPT, -3, 0, 0, 0}.MFUNC(Eval).SetValidator(&EvalValidator)
             << CI{"EVALSHA", CO::NOSCRIPT, -3, 0, 0, 0}.MFUNC(EvalSha).SetValidator(&EvalValidator)
             << CI{"EXEC", kExecMask, 1, 0, 0, 0}.MFUNC(Exec)
             << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, 0}.MFUNC(Publish)
             << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(Subscribe)
-            << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(Unsubscribe);
+            << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(Unsubscribe)
+            << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0}.MFUNC(Function);
 
   StringFamily::Register(&registry_);
   GenericFamily::Register(&registry_);

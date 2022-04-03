@@ -223,7 +223,6 @@ API 2.0
   - [ ] SCRIPT DEBUG/KILL/FLUSH/EXISTS
 - [X] Set Family
   - [X] SSCAN
-  - [X] SMISMEMBER
 - [X] Sorted Set Family
   - [ ] ZCOUNT
   - [ ] ZINTERSTORE
@@ -258,6 +257,7 @@ exact use-cases for this API.
  - [X] ROLE (2.8) decorator for for master withour replicas
  - [X] UNLINK (4.0) decorator for DEL command
  - [X] BGSAVE
+ - [X] FUNCTION FLUSH
 ## Milestone Nymph
 API 2,3,4 without cluster support, without modules, without memory inspection commands.
 Without support for keyspace notifications.

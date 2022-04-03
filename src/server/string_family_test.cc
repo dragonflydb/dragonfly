@@ -267,6 +267,8 @@ TEST_F(StringFamilyTest, SetEx) {
 
 TEST_F(StringFamilyTest, Range) {
   Run({"set", "key1", "Hello World"});
+  EXPECT_THAT(Run({"getrange", "key1", "5", "3"}), RespEq(""));
+
   Run({"SETRANGE", "key1", "6", "Earth"});
   EXPECT_THAT(Run({"get", "key1"}), RespEq("Hello Earth"));
 

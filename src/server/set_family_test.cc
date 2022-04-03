@@ -64,6 +64,9 @@ TEST_F(SetFamilyTest, SDiff) {
   resp = Run({"sdiffstore", "a", "b", "c"});
   EXPECT_THAT(resp[0], IntArg(3));
 
+  Run({"set", "str", "foo"});
+  EXPECT_THAT(Run({"sdiff", "b", "str"}), ElementsAre(ErrArg("WRONGTYPE ")));
+
   Run({"sadd", "bar", "x", "a", "b", "c"});
   Run({"sadd", "foo", "c"});
   Run({"sadd", "car", "a", "d"});

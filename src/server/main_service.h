@@ -78,6 +78,7 @@ class Service : public facade::ServiceInterface {
   void Publish(CmdArgList args, ConnectionContext* cntx);
   void Subscribe(CmdArgList args, ConnectionContext* cntx);
   void Unsubscribe(CmdArgList args, ConnectionContext* cntx);
+  void Function(CmdArgList args, ConnectionContext* cntx);
 
   struct EvalArgs {
     std::string_view sha;  // only one of them is defined.

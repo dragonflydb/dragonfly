@@ -514,26 +514,26 @@ void StringFamily::GetRange(CmdArgList args, ConnectionContext* cntx) {
     if (!it_res.ok())
       return it_res.status();
 
-    if (start < 0 && end < 0 && start > end) {
-      return OpStatus::OK;
-    }
     const CompactObj& co = it_res.value()->second;
     size_t strlen = co.Size();
 
     if (start < 0)
       start = strlen + start;
-    else if (size_t(start) >= strlen)
-      return OpStatus::OK;
-
     if (end < 0)
       end = strlen + end;
+
+    if (strlen == 0 || start > end || size_t(start) >= strlen) {
+      return OpStatus::OK;
+    }
 
     if (start < 0)
       start = 0;
     if (end < 0)
       end = 0;
+
     if (size_t(end) >= strlen)
       end = strlen - 1;
+
     string tmp;
     string_view slice = co.GetSlice(&tmp);
 

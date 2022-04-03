@@ -245,6 +245,11 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
 
   if (sub_cmd == "SET") {
     return (*cntx)->SendOk();
+  } else if (sub_cmd == "GET" && args.size() == 3) {
+    string_view param = ArgS(args, 2);
+    string_view res[2] = {param, "tbd"};
+
+    return (*cntx)->SendStringArr(res);
   } else {
     string err = absl::StrCat("Unknown subcommand or wrong number of arguments for '", sub_cmd,
                               "'. Try CONFIG HELP.");
