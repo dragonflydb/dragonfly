@@ -41,31 +41,19 @@ TEST_F(HSetFamilyTest, Basic) {
   auto resp = Run({"hset", "x", "a"});
   EXPECT_THAT(resp[0], ErrArg("wrong number"));
 
-  resp = Run({"hset", "x", "a", "b"});
-  EXPECT_THAT(resp[0], IntArg(1));
-  resp = Run({"hlen", "x"});
-  EXPECT_THAT(resp[0], IntArg(1));
+  EXPECT_THAT(Run({"HSET", "hs", "key1", "val1", "key2"}), ElementsAre(ErrArg("wrong number")));
 
-  resp = Run({"hexists", "x", "a"});
-  EXPECT_THAT(resp[0], IntArg(1));
+  EXPECT_EQ(1, CheckedInt({"hset", "x", "a", "b"}));
+  EXPECT_EQ(1, CheckedInt({"hlen", "x"}));
 
-  resp = Run({"hexists", "x", "b"});
-  EXPECT_THAT(resp[0], IntArg(0));
+  EXPECT_EQ(1, CheckedInt({"hexists", "x", "a"}));
+  EXPECT_EQ(0, CheckedInt({"hexists", "x", "b"}));
+  EXPECT_EQ(0, CheckedInt({"hexists", "y", "a"}));
 
-  resp = Run({"hexists", "y", "a"});
-  EXPECT_THAT(resp[0], IntArg(0));
-
-  resp = Run({"hset", "x", "a", "b"});
-  EXPECT_THAT(resp[0], IntArg(0));
-
-  resp = Run({"hset", "x", "a", "c"});
-  EXPECT_THAT(resp[0], IntArg(0));
-
-  resp = Run({"hset", "y", "a", "c", "d", "e"});
-  EXPECT_THAT(resp[0], IntArg(2));
-
-  resp = Run({"hdel", "y", "a", "d"});
-  EXPECT_THAT(resp[0], IntArg(2));
+  EXPECT_EQ(0, CheckedInt({"hset", "x", "a", "b"}));
+  EXPECT_EQ(0, CheckedInt({"hset", "x", "a", "c"}));
+  EXPECT_EQ(2, CheckedInt({"hset", "y", "a", "c", "d", "e"}));
+  EXPECT_EQ(2, CheckedInt({"hdel", "y", "a", "d"}));
 }
 
 TEST_F(HSetFamilyTest, HSetLarge) {
@@ -80,6 +68,9 @@ TEST_F(HSetFamilyTest, HSetLarge) {
 TEST_F(HSetFamilyTest, Get) {
   auto resp = Run({"hset", "x", "a", "1", "b", "2", "c", "3"});
   EXPECT_THAT(resp[0], IntArg(3));
+
+  resp = Run({"hmget", "unkwn", "a", "c"});
+  EXPECT_THAT(resp, ElementsAre(ArgType(RespExpr::NIL), ArgType(RespExpr::NIL)));
 
   resp = Run({"hkeys", "x"});
   EXPECT_THAT(resp, UnorderedElementsAre("a", "b", "c"));

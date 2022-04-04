@@ -196,7 +196,7 @@ void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
 
 void GenericFamily::Ping(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 2) {
-    return (*cntx)->SendError("wrong number of arguments for 'ping' command");
+    return (*cntx)->SendError(facade::WrongNumArgsError("ping"), kSyntaxErr);
   }
 
   // We synchronously block here until the engine sends us the payload and notifies that

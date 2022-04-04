@@ -34,8 +34,6 @@ class HSetFamily {
   static void HGetAll(CmdArgList args, ConnectionContext* cntx);
 
   static void HSet(CmdArgList args, ConnectionContext* cntx);
-  static void HMSet(CmdArgList args, ConnectionContext* cntx);
-
   static void HSetNx(CmdArgList args, ConnectionContext* cntx);
   static void HStrLen(CmdArgList args, ConnectionContext* cntx);
 

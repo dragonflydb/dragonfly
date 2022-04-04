@@ -8,11 +8,13 @@
 
 #include "base/logging.h"
 #include "core/interpreter.h"
+#include "facade/error.h"
 #include "server/server_state.h"
 
 namespace dfly {
 
 using namespace std;
+using namespace facade;
 
 ScriptMgr::ScriptMgr(EngineShardSet* ess) : ess_(ess) {
 }
@@ -55,9 +57,10 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendBulkString(error_or_id);
   }
 
-  cntx->reply_builder()->SendError(absl::StrCat(
-      "Unknown subcommand or wrong number of arguments for '", subcmd, "'. Try SCRIPT HELP."));
-}  // namespace dfly
+  string err = absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd,
+                            "'. Try SCRIPT HELP.");
+  cntx->reply_builder()->SendError(err, kSyntaxErr);
+}
 
 bool ScriptMgr::InsertFunction(std::string_view id, std::string_view body) {
   ScriptKey key;

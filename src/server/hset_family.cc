@@ -158,6 +158,11 @@ void HSetFamily::HMGet(CmdArgList args, ConnectionContext* cntx) {
         (*cntx)->SendNull();
       }
     }
+  } else if (result.status() == OpStatus::KEY_NOTFOUND) {
+    (*cntx)->StartArray(args.size());
+    for (unsigned i = 0; i < args.size(); ++i) {
+      (*cntx)->SendNull();
+    }
   } else {
     (*cntx)->SendError(result.status());
   }
@@ -253,6 +258,10 @@ void HSetFamily::HSet(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
 
   args.remove_prefix(2);
+  if (args.size() % 2 != 0) {
+    return (*cntx)->SendError(facade::WrongNumArgsError("hset"), kSyntaxErr);
+  }
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(OpArgs{shard, t->db_index()}, key, args, false);
   };
@@ -263,20 +272,6 @@ void HSetFamily::HSet(CmdArgList args, ConnectionContext* cntx) {
   } else {
     (*cntx)->SendError(result.status());
   }
-}
-
-void HSetFamily::HMSet(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-
-  args.remove_prefix(2);
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(OpArgs{shard, t->db_index()}, key, args, false);
-  };
-
-  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-
-  // Returns "OK", that's all the difference from HSet.
-  (*cntx)->SendError(result.status());
 }
 
 void HSetFamily::HSetNx(CmdArgList args, ConnectionContext* cntx) {
@@ -647,6 +642,7 @@ void HSetFamily::Register(CommandRegistry* registry) {
             << CI{"HGET", CO::FAST | CO::READONLY, 3, 1, 1, 1}.HFUNC(HGet)
             << CI{"HGETALL", CO::FAST | CO::READONLY, 2, 1, 1, 1}.HFUNC(HGetAll)
             << CI{"HMGET", CO::FAST | CO::READONLY, -3, 1, 1, 1}.HFUNC(HMGet)
+            << CI{"HMSET", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, 1}.HFUNC(HSet)
             << CI{"HINCRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1}.HFUNC(HIncrBy)
             << CI{"HKEYS", CO::READONLY, 2, 1, 1, 1}.HFUNC(HKeys)
             << CI{"HVALS", CO::READONLY, 2, 1, 1, 1}.HFUNC(HVals)

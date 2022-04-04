@@ -87,7 +87,7 @@ void DebugCmd::Run(CmdArgList args) {
 
   string reply = absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd,
                               "'. Try DEBUG HELP.");
-  return (*cntx_)->SendError(reply);
+  return (*cntx_)->SendError(reply, kSyntaxErr);
 }
 
 void DebugCmd::Reload(CmdArgList args) {
