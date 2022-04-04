@@ -10,8 +10,11 @@
 
 extern "C" {
 #include "redis/intset.h"
+#include "redis/listpack.h"
+#include "redis/ziplist.h"
 #include "redis/rdb.h"
 #include "redis/util.h"
+#include "redis/zmalloc.h"
 }
 
 #include "base/logging.h"
@@ -132,7 +135,7 @@ uint8_t RdbObjectType(const robj* o) {
         return RDB_TYPE_ZSET_2;
       break;
     case OBJ_HASH:
-      if (o->encoding == OBJ_ENCODING_ZIPLIST)
+      if (o->encoding == OBJ_ENCODING_LISTPACK)
         return RDB_TYPE_HASH_ZIPLIST;
       else if (o->encoding == OBJ_ENCODING_HT)
         return RDB_TYPE_HASH;
@@ -206,6 +209,10 @@ error_code RdbSerializer::SaveObject(const robj* o) {
     return SaveSetObject(o);
   }
 
+  if (o->type == OBJ_HASH) {
+    return SaveHSetObject(o);
+  }
+
   LOG(FATAL) << "Not implemented " << o->type;
   return error_code{};
 }
@@ -252,7 +259,7 @@ error_code RdbSerializer::SaveSetObject(const robj* obj) {
 
     dictIterator* di = dictGetIterator(set);
     dictEntry* de;
-    auto key_cleanup = absl::MakeCleanup([di] { dictReleaseIterator(di); });
+    auto cleanup = absl::MakeCleanup([di] { dictReleaseIterator(di); });
 
     while ((de = dictNext(di)) != NULL) {
       sds ele = (sds)de->key;
@@ -265,6 +272,52 @@ error_code RdbSerializer::SaveSetObject(const robj* obj) {
     RETURN_ON_ERR(SaveString(string_view{(char*)obj->ptr, len}));
   } else {
     LOG(FATAL) << "Unknown set encoding " << obj->encoding;
+  }
+
+  return error_code{};
+}
+
+error_code RdbSerializer::SaveHSetObject(const robj* obj) {
+  DCHECK_EQ(OBJ_HASH, obj->type);
+  if (obj->encoding == OBJ_ENCODING_HT) {
+    dict* set = (dict*)obj->ptr;
+
+    RETURN_ON_ERR(SaveLen(dictSize(set)));
+
+    dictIterator* di = dictGetIterator(set);
+    dictEntry* de;
+    auto cleanup = absl::MakeCleanup([di] { dictReleaseIterator(di); });
+
+    while ((de = dictNext(di)) != NULL) {
+      sds key = (sds)de->key;
+      sds value = (sds)de->v.val;
+
+      RETURN_ON_ERR(SaveString(string_view{key, sdslen(key)}));
+      RETURN_ON_ERR(SaveString(string_view{value, sdslen(value)}));
+    }
+  } else if (obj->encoding == OBJ_ENCODING_LISTPACK) {
+    // convert to ziplist first.
+    uint8_t* lp = (uint8_t*)obj->ptr;
+
+    size_t lplen = lpLength(lp);
+    CHECK(lplen > 0 && lplen % 2 == 0);  // has (key,value) pairs.
+
+    uint8_t* lpfield = lpFirst(lp);
+    uint8_t* zl = ziplistNew();
+    int64_t entry_len;
+    uint8_t* entry;
+    uint8_t buf[32];
+
+    while (lpfield) {
+      entry = lpGet(lpfield, &entry_len, buf);
+      zl = ziplistPush(zl, entry, entry_len, ZIPLIST_TAIL);
+      lpfield = lpNext(lp, lpfield);
+    }
+    size_t ziplen = ziplistBlobLen(zl);
+    auto cleanup = absl::MakeCleanup([zl] { zfree(zl); });
+    RETURN_ON_ERR(SaveString(string_view{reinterpret_cast<char*>(zl), ziplen}));
+  } else {
+    LOG(FATAL) << "Unknown jset encoding " << obj->encoding;
   }
 
   return error_code{};

@@ -38,7 +38,7 @@ cd build-opt && ninja dragonfly
 
 for more options, run `./dragonfly --help`
 
-## Milestone Egg 🥚
+## Milestone - Source Available
 
 API 1.0
 - [X] String family
@@ -128,27 +128,8 @@ API 1.0
   - [ ] RANDOMKEY
   - [ ] MOVE
 
-In addition, we want to support efficient expiry (TTL) and cache eviction algorithms.
-We should implement basic memory management support. For Master/Slave replication we should design
-a distributed log format.
-
-### Memchache API
-- [X] set
-- [X] get
-- [X] replace
-- [X] add
-- [X] stats (partial)
-- [x] append
-- [x] prepend
-- [x] delete
-- [x] flush_all
-- [x] incr
-- [x] decr
-- [x] version
-- [x] quit
-
 API 2.0
-- [ ] List Family
+- [X] List Family
   - [X] BLPOP
   - [X] BRPOP
   - [ ] BRPOPLPUSH
@@ -240,6 +221,26 @@ API 2.0
   - [ ] PFCOUNT
   - [ ] PFMERGE
 
+In addition, we want to support efficient expiry (TTL) and cache eviction algorithms.
+We should implement basic memory management support. For Master/Slave replication we should design
+a distributed log format.
+
+### Memchache API
+- [X] set
+- [X] get
+- [X] replace
+- [X] add
+- [X] stats (partial)
+- [x] append
+- [x] prepend
+- [x] delete
+- [x] flush_all
+- [x] incr
+- [x] decr
+- [x] version
+- [x] quit
+
+
 Commands that I prefer avoid implementing before launch:
   - PUNSUBSCRIBE
   - PSUBSCRIBE
@@ -252,22 +253,19 @@ Commands that I prefer avoid implementing before launch:
 Also, I would omit keyspace notifications. For that I would like to deep dive and learn
 exact use-cases for this API.
 
-### Random commands we implemented along the way
+### Random commands we implemented as decorators along the way
 
  - [X] ROLE (2.8) decorator for for master withour replicas
  - [X] UNLINK (4.0) decorator for DEL command
  - [X] BGSAVE
  - [X] FUNCTION FLUSH
-## Milestone Nymph
-API 2,3,4 without cluster support, without modules, without memory inspection commands.
-Without support for keyspace notifications.
 
-Design config support. ~140 commands overall...
-## Milestone Molt
-API 5,6 - without cluster and modules. Streams support. ~80 commands overall.
-## Milestone Adult
-TBD.
-
+## Milestone Stability
+APIs 3,4,5 without cluster support, without modules, without memory introspection commands.
+Without geo commands and without support for keyspace notifications, without streams.
+Design config support. ~10-20 commands overall...
+Probably implement cluster-API decorators to allow cluster-configured clients to connect to a single
+instance.
 
 ## Design decisions along the way
 ### Expiration deadlines with relative accuracy
@@ -280,3 +278,5 @@ expiries of `PEXPIRE key 10010` will expire exactly after 10 seconds and 10ms. H
 
 Such rounding has at most 0.002% error which I hope is acceptable for large ranges.
 If it breaks your use-cases - talk to me or open an issue and explain your case.
+
+For more detailed differences between this and Redis implementations [see here](doc/differences.md).
