@@ -894,7 +894,9 @@ int getIntFromObjectOrReply(client *c, robj *o, int *target, const char *msg) {
     return C_OK;
 }
 
-char *strEncoding(int encoding) {
+#endif
+
+const char *strEncoding(int encoding) {
     switch(encoding) {
     case OBJ_ENCODING_RAW: return "raw";
     case OBJ_ENCODING_INT: return "int";
@@ -910,7 +912,6 @@ char *strEncoding(int encoding) {
     }
 }
 
-#endif
 
 /* Given an object returns the min number of milliseconds the object was never
  * requested, using an approximated LRU algorithm. */

@@ -1428,9 +1428,9 @@ quicklistIter *quicklistGetIteratorEntryAtIdx(quicklist *quicklist, const long l
 {
     quicklistIter *iter = quicklistGetIteratorAtIdx(quicklist, AL_START_TAIL, idx);
     if (!iter) return NULL;
-    assert(quicklistNext(iter, entry));
+    quicklistNext(iter, entry);
     return iter;
-    }
+}
 
 static void quicklistRotatePlain(quicklist *quicklist) {
     quicklistNode *new_head = quicklist->tail;

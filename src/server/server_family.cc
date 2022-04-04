@@ -265,6 +265,18 @@ void ServerFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
   return dbg_cmd.Run(args);
 }
 
+void ServerFamily::Memory(CmdArgList args, ConnectionContext* cntx) {
+  ToUpper(&args[1]);
+  string_view sub_cmd = ArgS(args, 1);
+  if (sub_cmd == "USAGE") {
+    return (*cntx)->SendLong(1);
+  }
+
+  string err = absl::StrCat("Unknown subcommand or wrong number of arguments for '", sub_cmd,
+                            "'. Try MEMORY HELP.");
+  return (*cntx)->SendError(err, kSyntaxErr);
+}
+
 void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
   static unsigned fl_index = 1;
 
@@ -629,6 +641,8 @@ void ServerFamily::SyncGeneric(std::string_view repl_master_id, uint64_t offs,
 
 void ServerFamily::Register(CommandRegistry* registry) {
   constexpr auto kReplicaOpts = CO::ADMIN | CO::GLOBAL_TRANS;
+  constexpr auto kMemOpts = CO::LOADING | CO::READONLY | CO::FAST | CO::NOSCRIPT;
+
   *registry << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, 0}.HFUNC(Auth)
             << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Save)
             << CI{"CONFIG", CO::ADMIN, -2, 0, 0, 0}.HFUNC(Config)
@@ -638,6 +652,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"FLUSHALL", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, 0}.HFUNC(FlushAll)
             << CI{"INFO", CO::LOADING, -1, 0, 0, 0}.HFUNC(Info)
             << CI{"LASTSAVE", CO::LOADING | CO::RANDOM | CO::FAST, 1, 0, 0, 0}.HFUNC(LastSave)
+            << CI{"MEMORY", kMemOpts, -2, 0, 0, 0}.HFUNC(Memory)
             << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Save)
             << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0}.HFUNC(_Shutdown)
             << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)

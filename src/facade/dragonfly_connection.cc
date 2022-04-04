@@ -332,7 +332,8 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   // We wait for dispatch_fb to finish writing the previous replies before replying to the last
   // offending request.
   if (parse_status == ERROR) {
-    VLOG(1) << "Error stats " << parse_status;
+    VLOG(1) << "Error parser status " << parse_status;
+
     if (redis_parser_) {
       SendProtocolError(RedisParser::Result(parser_error_), peer);
     } else {

@@ -36,6 +36,7 @@ class HSetFamily {
   static void HSet(CmdArgList args, ConnectionContext* cntx);
   static void HSetNx(CmdArgList args, ConnectionContext* cntx);
   static void HStrLen(CmdArgList args, ConnectionContext* cntx);
+  static void HRandField(CmdArgList args, ConnectionContext* cntx);
 
   static void HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t getall_mask);
 

@@ -48,24 +48,35 @@ string LpGetVal(uint8_t* lp_it) {
 }
 
 // returns a new pointer to lp. Returns true if field was inserted or false it it already existed.
-pair<uint8_t*, bool> lpInsertElem(uint8_t* lp, string_view field, string_view val) {
+// skip_exists controls what happens if the field already existed. If skip_exists = true,
+// then val does not override the value and listpack is not changed. Otherwise, the corresponding
+// value is overriden by val.
+pair<uint8_t*, bool> LpInsert(uint8_t* lp, string_view field, string_view val, bool skip_exists) {
   uint8_t* vptr;
 
   uint8_t* fptr = lpFirst(lp);
   uint8_t* fsrc = (uint8_t*)field.data();
-  uint8_t* vsrc = (uint8_t*)val.data();
+
+  // if we vsrc is NULL then lpReplace will delete the element, which is not what we want.
+  // therefore, for an empty val we set it to some other valid address so that lpReplace
+  // will do the right thing and encode empty string instead of deleting the element.
+  uint8_t* vsrc = val.empty() ? lp : (uint8_t*)val.data();
 
   bool updated = false;
 
   if (fptr) {
     fptr = lpFind(lp, fptr, fsrc, field.size(), 1);
     if (fptr) {
+      if (skip_exists) {
+        return make_pair(lp, false);
+      }
       /* Grab pointer to the value (fptr points to the field) */
       vptr = lpNext(lp, fptr);
       updated = true;
 
       /* Replace value */
       lp = lpReplace(lp, &vptr, vsrc, val.size());
+      DCHECK_EQ(0u, lpLength(lp) % 2);
     }
   }
 
@@ -256,14 +267,33 @@ void HSetFamily::HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t g
 
 void HSetFamily::HSet(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
+  ToLower(&args[0]);
 
-  args.remove_prefix(2);
+  string_view cmd = ArgS(args, 0);
+
   if (args.size() % 2 != 0) {
-    return (*cntx)->SendError(facade::WrongNumArgsError("hset"), kSyntaxErr);
+    return (*cntx)->SendError(facade::WrongNumArgsError(cmd), kSyntaxErr);
   }
 
+  args.remove_prefix(2);
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(OpArgs{shard, t->db_index()}, key, args, false);
+  };
+
+  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (result && cmd == "hset") {
+    (*cntx)->SendLong(*result);
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
+
+void HSetFamily::HSetNx(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+
+  args.remove_prefix(2);
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpSet(OpArgs{shard, t->db_index()}, key, args, true);
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -274,12 +304,56 @@ void HSetFamily::HSet(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
-void HSetFamily::HSetNx(CmdArgList args, ConnectionContext* cntx) {
+void HSetFamily::HStrLen(CmdArgList args, ConnectionContext* cntx) {
   LOG(DFATAL) << "TBD";
 }
 
-void HSetFamily::HStrLen(CmdArgList args, ConnectionContext* cntx) {
-  LOG(DFATAL) << "TBD";
+void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
+    auto& db_slice = shard->db_slice();
+    auto it_res = db_slice.Find(t->db_index(), key, OBJ_HASH);
+
+    if (!it_res)
+      return it_res.status();
+
+    const PrimeValue& pv = it_res.value()->second;
+    StringVec str_vec;
+
+    if (pv.Encoding() == OBJ_ENCODING_HT) {
+      dict* this_dict = (dict*)pv.RObjPtr();
+      dictEntry* de = dictGetFairRandomKey(this_dict);
+      sds key = (sds)de->key;
+      str_vec.emplace_back(key, sdslen(key));
+    } else if (pv.Encoding() == OBJ_ENCODING_LISTPACK) {
+      uint8_t* lp = (uint8_t*)pv.RObjPtr();
+      size_t lplen = lpLength(lp);
+      CHECK(lplen > 0 && lplen % 2 == 0);
+
+      size_t hlen = lplen / 2;
+      listpackEntry key;
+
+      lpRandomPair(lp, hlen, &key, NULL);
+      if (key.sval) {
+        str_vec.emplace_back(reinterpret_cast<char*>(key.sval), key.slen);
+      } else {
+        str_vec.emplace_back(absl::StrCat(key.lval));
+      }
+    } else {
+      LOG(ERROR) << "Invalid encoding " << pv.Encoding();
+      return OpStatus::INVALID_VALUE;
+    }
+    return str_vec;
+  };
+
+  OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (result) {
+    CHECK_EQ(1u, result->size());  // TBD: to support count and withvalues.
+    (*cntx)->SendBulkString(result->front());
+  } else {
+    (*cntx)->SendError(result.status());
+  }
 }
 
 OpResult<uint32_t> HSetFamily::OpSet(const OpArgs& op_args, string_view key, CmdArgList values,
@@ -323,22 +397,33 @@ OpResult<uint32_t> HSetFamily::OpSet(const OpArgs& op_args, string_view key, Cmd
   if (lp) {
     bool inserted;
     for (size_t i = 0; i < values.size(); i += 2) {
-      tie(lp, inserted) = lpInsertElem(lp, ArgS(values, i), ArgS(values, i + 1));
+      tie(lp, inserted) = LpInsert(lp, ArgS(values, i), ArgS(values, i + 1), skip_if_exists);
       created += inserted;
     }
     hset->ptr = lp;
     stats->listpack_bytes += lpBytes(lp);
   } else {
     DCHECK_EQ(OBJ_ENCODING_HT, hset->encoding);
+    dict* this_dict = (dict*)hset->ptr;
 
     // Dictionary
     for (size_t i = 0; i < values.size(); i += 2) {
       sds fs = sdsnewlen(values[i].data(), values[i].size());
-      sds vs = sdsnewlen(values[i + 1].data(), values[i + 1].size());
+      dictEntry* existing;
+      dictEntry* de = dictAddRaw(this_dict, fs, &existing);
+      if (de) {
+        ++created;
+      } else {  // already exists
+        sdsfree(fs);
+        if (skip_if_exists)
+          continue;
 
-      // hashTypeSet checks for hash_max_listpack_entries and converts into dictionary
-      // if it goes beyond.
-      created += !hashTypeSet(hset, fs, vs, HASH_SET_TAKE_FIELD | HASH_SET_TAKE_VALUE);
+        de = existing;
+        dictFreeVal(this_dict, existing);
+      }
+
+      sds vs = sdsnewlen(values[i + 1].data(), values[i + 1].size());
+      dictSetVal(this_dict, de, vs);
     }
   }
   it->second.SyncRObj();
@@ -419,6 +504,8 @@ auto HSetFamily::OpMGet(const OpArgs& op_args, std::string_view key, CmdArgList 
     int64_t ele_len;
     string_view key;
     DCHECK(lp_elem);  // empty containers are not allowed.
+    size_t lplen = lpLength(lp);
+    DCHECK(lplen > 0 && lplen % 2 == 0);
 
     // We do single pass on listpack for this operation.
     do {
@@ -449,7 +536,7 @@ auto HSetFamily::OpMGet(const OpArgs& op_args, std::string_view key, CmdArgList 
       dictEntry* de = dictFind(d, op_args.shard->tmp_str1);
       if (de) {
         sds val = (sds)dictGetVal(de);
-        result[i]->assign(val, sdslen(val));
+        result[i].emplace(val, sdslen(val));
       }
     }
   }
@@ -616,7 +703,7 @@ OpStatus HSetFamily::OpIncrBy(const OpArgs& op_args, string_view key, string_vie
       string_view sval{buf, size_t(next - buf)};
       uint8_t* lp = (uint8_t*)hset->ptr;
 
-      lp = lpInsertElem(lp, field, sval).first;
+      lp = LpInsert(lp, field, sval, false).first;
       hset->ptr = lp;
       stats->listpack_bytes += lpBytes(lp);
     } else {
@@ -645,10 +732,13 @@ void HSetFamily::Register(CommandRegistry* registry) {
             << CI{"HMSET", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, 1}.HFUNC(HSet)
             << CI{"HINCRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1}.HFUNC(HIncrBy)
             << CI{"HKEYS", CO::READONLY, 2, 1, 1, 1}.HFUNC(HKeys)
-            << CI{"HVALS", CO::READONLY, 2, 1, 1, 1}.HFUNC(HVals)
+
+            // TODO: add options support
+            << CI{"HRANDFIELD", CO::READONLY, 2, 1, 1, 1}.HFUNC(HRandField)
             << CI{"HSET", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, 1}.HFUNC(HSet)
             << CI{"HSETNX", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1}.HFUNC(HSetNx)
-            << CI{"HSTRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(HStrLen);
+            << CI{"HSTRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(HStrLen)
+            << CI{"HVALS", CO::READONLY, 2, 1, 1, 1}.HFUNC(HVals);
 }
 
 }  // namespace dfly

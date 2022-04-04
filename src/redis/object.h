@@ -192,7 +192,7 @@ int hashTypeGetFromListpack(robj *o, sds field,
                             unsigned char **vstr,
                             unsigned int *vlen,
                             long long *vll);
-
+const char *strEncoding(int encoding);
 
 /* Macro used to initialize a Redis object allocated on the stack.
  * Note that this macro is taken near the structure definition to make sure

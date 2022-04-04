@@ -223,10 +223,14 @@ CmdArgVec BaseFamilyTest::TestConnWrapper::Args(std::initializer_list<std::strin
 
   CmdArgVec res;
   for (auto v : list) {
-    tmp_str_vec.emplace_back(new string{v});
-    auto& s = *tmp_str_vec.back();
+    if (v.empty()) {
+      res.push_back(MutableSlice{});
+    } else {
+      tmp_str_vec.emplace_back(new string{v});
+      auto& s = *tmp_str_vec.back();
 
-    res.emplace_back(s.data(), s.size());
+      res.emplace_back(s.data(), s.size());
+    }
   }
 
   return res;

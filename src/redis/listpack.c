@@ -1381,7 +1381,8 @@ void lpRandomPair(unsigned char *lp, unsigned long total_count, listpackEntry *k
 
     if (!val)
         return;
-    assert((p = lpNext(lp, p)));
+    p = lpNext(lp, p);
+    assert(p);
     val->sval = lpGetValue(p, &(val->slen), &(val->lval));
 }
 
@@ -1420,7 +1421,8 @@ void lpRandomPairs(unsigned char *lp, unsigned int count, listpackEntry *keys, l
     p = lpSeek(lp, lpindex);
     while (p && pickindex < count) {
         key = lpGetValue(p, &klen, &klval);
-        assert((p = lpNext(lp, p)));
+        p = lpNext(lp, p);
+        assert(p);
         value = lpGetValue(p, &vlen, &vlval);
         while (pickindex < count && lpindex == picks[pickindex].index) {
             int storeorder = picks[pickindex].order;
@@ -1463,7 +1465,8 @@ unsigned int lpRandomPairsUnique(unsigned char *lp, unsigned int count, listpack
         if (randomDouble <= threshold) {
             key = lpGetValue(p, &klen, &klval);
             lpSaveValue(key, klen, klval, &keys[picked]);
-            assert((p = lpNext(lp, p)));
+            p = lpNext(lp, p);
+            assert(p);
             if (vals) {
                 key = lpGetValue(p, &klen, &klval);
                 lpSaveValue(key, klen, klval, &vals[picked]);
@@ -1471,7 +1474,8 @@ unsigned int lpRandomPairsUnique(unsigned char *lp, unsigned int count, listpack
             remaining--;
             picked++;
         } else {
-            assert((p = lpNext(lp, p)));
+            p = lpNext(lp, p);
+            assert(p);
         }
         p = lpNext(lp, p);
         index++;

@@ -25,7 +25,7 @@ using namespace std;
 using namespace util;
 namespace this_fiber = ::boost::this_fiber;
 using boost::fibers::fiber;
-using facade::kUintErr;
+using namespace facade;
 namespace fs = std::filesystem;
 
 struct PopulateBatch {
@@ -60,6 +60,8 @@ void DebugCmd::Run(CmdArgList args) {
   if (subcmd == "HELP") {
     std::string_view help_arr[] = {
         "DEBUG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+        "OBJECT <key>",
+        "    Show low-level info about `key` and associated value.",
         "RELOAD [option ...]",
         "    Save the RDB on disk (TBD) and reload it back to memory. Valid <option> values:",
         "    * NOSAVE: the database will be loaded from an existing RDB file.",
@@ -83,6 +85,11 @@ void DebugCmd::Run(CmdArgList args) {
 
   if (subcmd == "RELOAD") {
     return Reload(args);
+  }
+
+  if (subcmd == "OBJECT" && args.size() == 3) {
+    string_view key = ArgS(args, 2);
+    return Inspect(key);
   }
 
   string reply = absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd,
@@ -171,9 +178,8 @@ void DebugCmd::Populate(CmdArgList args) {
     auto range = ranges[i];
 
     // whatever we do, we should not capture i by reference.
-    fb_arr[i] = ess_->pool()->at(i)->LaunchFiber([=] {
-      this->PopulateRangeFiber(range.first, range.second, prefix, val_size);
-    });
+    fb_arr[i] = ess_->pool()->at(i)->LaunchFiber(
+        [=] { this->PopulateRangeFiber(range.first, range.second, prefix, val_size); });
   }
   for (auto& fb : fb_arr)
     fb.join();
@@ -215,6 +221,28 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view 
   ess_->RunBriefInParallel([&](EngineShard* shard) {
     DoPopulateBatch(prefix, value_len, params, ps[shard->shard_id()]);
   });
+}
+
+void DebugCmd::Inspect(string_view key) {
+  ShardId sid = Shard(key, ess_->size());
+  using ObjInfo = pair<unsigned, unsigned>;  // type, encoding.
+
+  auto cb = [&]() -> facade::OpResult<ObjInfo> {
+    auto& db_slice = EngineShard::tlocal()->db_slice();
+    PrimeIterator it = db_slice.FindExt(cntx_->db_index(), key).first;
+    if (IsValid(it)) {
+      return ObjInfo(it->second.ObjType(), it->second.Encoding());
+    }
+    return OpStatus::KEY_NOTFOUND;
+  };
+
+  OpResult<ObjInfo> res = ess_->Await(sid, cb);
+  if (res) {
+    string resp = absl::StrCat("Value encoding:", strEncoding(res->second));
+    (*cntx_)->SendSimpleString(resp);
+  } else {
+    (*cntx_)->SendError(res.status());
+  }
 }
 
 }  // namespace dfly

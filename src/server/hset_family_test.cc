@@ -52,6 +52,8 @@ TEST_F(HSetFamilyTest, Basic) {
 
   EXPECT_EQ(0, CheckedInt({"hset", "x", "a", "b"}));
   EXPECT_EQ(0, CheckedInt({"hset", "x", "a", "c"}));
+  EXPECT_EQ(0, CheckedInt({"hset", "x", "a", ""}));
+
   EXPECT_EQ(2, CheckedInt({"hset", "y", "a", "c", "d", "e"}));
   EXPECT_EQ(2, CheckedInt({"hdel", "y", "a", "d"}));
 }
@@ -83,6 +85,21 @@ TEST_F(HSetFamilyTest, Get) {
 
   resp = Run({"hgetall", "x"});
   EXPECT_THAT(resp, ElementsAre("a", "1", "b", "2", "c", "3"));
+}
+
+TEST_F(HSetFamilyTest, HSetNx) {
+  EXPECT_EQ(1, CheckedInt({"hsetnx", "key", "field", "val"}));
+  EXPECT_THAT(Run({"hget", "key", "field"}), RespEq("val"));
+
+  EXPECT_EQ(0, CheckedInt({"hsetnx", "key", "field", "val2"}));
+  EXPECT_THAT(Run({"hget", "key", "field"}), RespEq("val"));
+
+  EXPECT_EQ(1, CheckedInt({"hsetnx", "key", "field2", "val2"}));
+  EXPECT_THAT(Run({"hget", "key", "field2"}), RespEq("val2"));
+
+  // check dict path
+  EXPECT_EQ(0, CheckedInt({"hsetnx", "key", "field2", string(512, 'a')}));
+  EXPECT_THAT(Run({"hget", "key", "field2"}), RespEq("val2"));
 }
 
 }  // namespace dfly

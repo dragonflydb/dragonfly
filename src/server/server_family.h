@@ -63,6 +63,7 @@ class ServerFamily {
   void Config(CmdArgList args, ConnectionContext* cntx);
   void DbSize(CmdArgList args, ConnectionContext* cntx);
   void Debug(CmdArgList args, ConnectionContext* cntx);
+  void Memory(CmdArgList args, ConnectionContext* cntx);
   void FlushDb(CmdArgList args, ConnectionContext* cntx);
   void FlushAll(CmdArgList args, ConnectionContext* cntx);
   void Info(CmdArgList args, ConnectionContext* cntx);

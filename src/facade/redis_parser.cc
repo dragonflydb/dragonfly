@@ -13,7 +13,7 @@ using namespace std;
 
 namespace {
 
-constexpr int kMaxArrayLen = 1024;
+constexpr int kMaxArrayLen = 8192;
 constexpr int64_t kMaxBulkLen = 64 * (1ul << 20);  // 64MB.
 
 }  // namespace
@@ -237,8 +237,11 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> Result {
     case BAD_INT:
       return BAD_ARRAYLEN;
     case OK:
-      if (len < -1 || len > kMaxArrayLen)
+      if (len < -1 || len > kMaxArrayLen) {
+        VLOG_IF(1, len > kMaxArrayLen) << "Milti bulk len is too big " << len;
+
         return BAD_ARRAYLEN;
+      }
       break;
     default:
       LOG(ERROR) << "Unexpected result " << res;
