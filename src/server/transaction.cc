@@ -405,6 +405,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
         sd.local_mask &= ~KEYLOCK_ACQUIRED;
       }
       sd.local_mask &= ~OUT_OF_ORDER;
+
       // It has 2 responsibilities.
       // 1: to go over potential wakened keys, verify them and activate watch queues.
       // 2: if this transaction was notified and finished running - to remove it from the head

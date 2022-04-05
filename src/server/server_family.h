@@ -67,6 +67,7 @@ class ServerFamily {
   void FlushDb(CmdArgList args, ConnectionContext* cntx);
   void FlushAll(CmdArgList args, ConnectionContext* cntx);
   void Info(CmdArgList args, ConnectionContext* cntx);
+  void Hello(CmdArgList args, ConnectionContext* cntx);
   void LastSave(CmdArgList args, ConnectionContext* cntx);
   void Psync(CmdArgList args, ConnectionContext* cntx);
   void ReplicaOf(CmdArgList args, ConnectionContext* cntx);

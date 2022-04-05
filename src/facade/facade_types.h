@@ -23,8 +23,6 @@ struct ConnectionStats {
   absl::flat_hash_map<std::string, uint64_t> err_count;
   absl::flat_hash_map<std::string, uint64_t> cmd_count;
 
-  uint32_t num_conns = 0;
-  uint32_t num_replicas = 0;
   size_t read_buf_capacity = 0;
   size_t io_read_cnt = 0;
   size_t io_read_bytes = 0;
@@ -35,6 +33,10 @@ struct ConnectionStats {
 
   // Writes count that happenned via SendRawMessageAsync call.
   size_t async_writes_cnt = 0;
+
+  uint32_t num_conns = 0;
+  uint32_t num_replicas = 0;
+  uint32_t num_blocked_clients = 0;
 
   ConnectionStats& operator+=(const ConnectionStats& o);
 };

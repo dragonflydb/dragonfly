@@ -243,4 +243,32 @@ TEST_F(ListFamilyTest, BLPopSerialize) {
   }
 }
 
+TEST_F(ListFamilyTest, WrongTypeDoesNotWake) {
+  RespVec blpop_resp;
+
+  auto pop_fb = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
+    blpop_resp = Run({"blpop", kKey1, "0"});
+  });
+
+  do {
+    this_fiber::sleep_for(30us);
+  } while (!IsLocked(0, kKey1));
+
+  auto p1_fb = pp_->at(1)->LaunchFiber([&] {
+    Run({"multi"});
+    Run({"lpush", kKey1, "A"});
+    Run({"set", kKey1, "foo"});
+
+    auto resp = Run({"exec"});
+    EXPECT_THAT(resp, ElementsAre(IntArg(1), "OK"));
+
+    Run({"del", kKey1});
+    Run({"lpush", kKey1, "B"});
+  });
+
+  p1_fb.join();
+  pop_fb.join();
+  EXPECT_THAT(blpop_resp, ElementsAre(kKey1, "B"));
+}
+
 }  // namespace dfly

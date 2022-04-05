@@ -6,6 +6,7 @@
 
 extern "C" {
 #include "redis/zmalloc.h"
+#include "redis/object.h"
 }
 
 #include "base/logging.h"
@@ -269,12 +270,13 @@ void EngineShard::ProcessAwakened(Transaction* completed_t) {
     for (auto key : wt.awakened_keys) {
       string_view sv_key = static_cast<string_view>(key);
       auto [it, exp_it] = db_slice_.FindExt(index, sv_key);  // Double verify we still got the item.
-      if (!IsValid(it))
+      if (!IsValid(it) || it->second.ObjType() != OBJ_LIST)  // Only LIST is allowed to block.
         continue;
 
       auto w_it = wt.queue_map.find(sv_key);
       CHECK(w_it != wt.queue_map.end());
       DVLOG(1) << "NotifyWatchQueue " << key;
+
       Transaction* t2 = NotifyWatchQueue(w_it->second.get());
       if (t2) {
         awakened_transactions_.insert(t2);

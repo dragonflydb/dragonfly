@@ -15,6 +15,7 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/server_state.h"
 #include "server/transaction.h"
 
 /**
@@ -57,6 +58,8 @@ DEFINE_int32(list_compress_depth, 0, "Compress depth of the list. Default is no 
 namespace dfly {
 
 using namespace std;
+using namespace facade;
+
 namespace {
 
 quicklistEntry QLEntry() {
@@ -143,6 +146,8 @@ OpStatus BPopper::Run(Transaction* t, unsigned msec) {
     t->Schedule();
   }
 
+  auto* stats = ServerState::tl_connection_stats();
+
   while (true) {
     result = t->FindFirst();
 
@@ -152,8 +157,7 @@ OpStatus BPopper::Run(Transaction* t, unsigned msec) {
     if (result.status() != OpStatus::KEY_NOTFOUND) {  // Some error occurred.
       // We could be registered in the queue due to previous iterations.
       t->UnregisterWatch();
-
-      return result.status();
+      break;
     }
 
     if (is_multi) {
@@ -163,12 +167,16 @@ OpStatus BPopper::Run(Transaction* t, unsigned msec) {
       return OpStatus::TIMED_OUT;
     }
 
-    if (!t->WaitOnWatch(tp)) {
+    ++stats->num_blocked_clients;
+    bool wait_succeeded = t->WaitOnWatch(tp);
+    --stats->num_blocked_clients;
+
+    if (!wait_succeeded)
       return OpStatus::TIMED_OUT;
-    }
   }
 
-  DCHECK_EQ(OpStatus::OK, result.status());
+  if (!result)
+    return result.status();
 
   VLOG(1) << "Popping an element";
   find_sid_ = result->sid;
@@ -408,14 +416,16 @@ void ListFamily::PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args,
   return (*cntx)->SendLong(result.value());
 }
 
-void ListFamily::PopGeneric(ListDir dir, const CmdArgList& args, ConnectionContext* cntx) {
+void ListFamily::PopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
   int32_t count = 1;
   bool return_arr = false;
 
   if (args.size() > 2) {
-    if (args.size() > 3)
-      return (*cntx)->SendError(kSyntaxErr);
+    if (args.size() > 3) {
+      ToLower(&args[0]);
+      return (*cntx)->SendError(WrongNumArgsError(ArgS(args, 0)));
+    }
 
     string_view count_s = ArgS(args, 2);
     if (!absl::SimpleAtoi(count_s, &count)) {
@@ -423,7 +433,7 @@ void ListFamily::PopGeneric(ListDir dir, const CmdArgList& args, ConnectionConte
     }
 
     if (count < 0) {
-      return (*cntx)->SendError(facade::kUintErr);
+      return (*cntx)->SendError(kUintErr);
     }
     return_arr = true;
   }

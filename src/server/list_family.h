@@ -35,7 +35,7 @@ class ListFamily {
   static void LRem(CmdArgList args, ConnectionContext* cntx);
   static void LSet(CmdArgList args, ConnectionContext* cntx);
 
-  static void PopGeneric(ListDir dir, const CmdArgList& args, ConnectionContext* cntx);
+  static void PopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cntx);
   static void PushGeneric(ListDir dir, bool skip_notexist, CmdArgList args,
                           ConnectionContext* cntx);
 
