@@ -11,9 +11,9 @@
 extern "C" {
 #include "redis/intset.h"
 #include "redis/listpack.h"
-#include "redis/ziplist.h"
 #include "redis/rdb.h"
 #include "redis/util.h"
+#include "redis/ziplist.h"
 #include "redis/zmalloc.h"
 }
 
@@ -239,12 +239,56 @@ error_code RdbSerializer::SaveListObject(const robj* obj) {
   RETURN_ON_ERR(SaveLen(ql->len));
 
   while (node) {
-    if (quicklistNodeIsCompressed(node)) {
-      void* data;
-      size_t compress_len = quicklistGetLzf(node, &data);
-      RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
+    DVLOG(2) << "QL node (encoding/container/sz): " << node->encoding << "/" << node->container
+             << "/" << node->sz;
+    if (QL_NODE_IS_PLAIN(node)) {
+      if (quicklistNodeIsCompressed(node)) {
+        void* data;
+        size_t compress_len = quicklistGetLzf(node, &data);
+
+        RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
+      } else {
+        RETURN_ON_ERR(SaveString(node->entry, node->sz));
+      }
     } else {
-      RETURN_ON_ERR(SaveString(node->entry, node->sz));
+      // listpack
+      uint8_t* lp = node->entry;
+      uint8_t* decompressed = NULL;
+
+      if (quicklistNodeIsCompressed(node)) {
+        void* data;
+        size_t compress_len = quicklistGetLzf(node, &data);
+        decompressed = (uint8_t*)zmalloc(node->sz);
+
+        if (lzf_decompress(data, compress_len, decompressed, node->sz) == 0) {
+          /* Someone requested decompress, but we can't decompress.  Not good. */
+          zfree(decompressed);
+          return make_error_code(errc::illegal_byte_sequence);
+        }
+        lp = decompressed;
+      }
+
+      // listpack, convert to ziplist first.
+      uint8_t* lpfield = lpFirst(lp);
+      int64_t entry_len;
+      uint8_t* entry;
+      uint8_t buf[32];
+      uint8_t* zl = ziplistNew();
+
+      while (lpfield) {
+        entry = lpGet(lpfield, &entry_len, buf);
+        zl = ziplistPush(zl, entry, entry_len, ZIPLIST_TAIL);
+        lpfield = lpNext(lp, lpfield);
+      }
+      size_t ziplen = ziplistBlobLen(zl);
+
+      auto cleanup = absl::MakeCleanup([=] {
+        zfree(zl);
+        if (decompressed)
+          zfree(decompressed);
+      });
+
+      RETURN_ON_ERR(SaveString(string_view{reinterpret_cast<char*>(zl), ziplen}));
     }
     node = node->next;
   }

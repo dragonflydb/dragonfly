@@ -22,6 +22,9 @@ using namespace testing;
 using namespace std;
 using namespace util;
 
+DECLARE_int32(list_compress_depth);
+DECLARE_int32(list_max_listpack_size);
+
 namespace dfly {
 
 class RdbTest : public BaseFamilyTest {
@@ -81,13 +84,18 @@ TEST_F(RdbTest, LoadSmall) {
 }
 
 TEST_F(RdbTest, Save) {
+  gflags::FlagSaver fs;
+  FLAGS_list_compress_depth = 1;
+  FLAGS_list_max_listpack_size = 1;  // limit listpack to a single element.
+
   Run({"set", "string_key", "val"});
   Run({"sadd", "set_key1", "val1", "val2"});
-  Run({"sadd", "set_key2", "1", "2", "3"});
+  Run({"sadd", "intset_key", "1", "2", "3"});
+  Run({"hset", "small_hset", "field1", "val1", "field2", "val2"});
 
-  // Run({"rpush", "list_key", "val"});  // TODO: invalid encoding when reading by redis 6.
-  // Run({"rpush", "list_key", "val"});
-  Run({"hset", "hset_key", "field1", "val1", "field2", "val2"});
+  Run({"rpush", "list_key1", "val", "val2"});
+  Run({"rpush", "list_key2", "head", string(512, 'a'), string(512, 'b'), "tail"});
+
   Run({"save"});
 }
 

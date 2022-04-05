@@ -81,8 +81,8 @@ typedef struct ServerStub {
 
     int lfu_decay_time;             /* LFU counter decay factor. */
     /* should not be used. Use FLAGS_list_max_ziplist_size and FLAGS_list_compress_depth instead. */
-    int list_compress_depth;
-    int list_max_ziplist_size;
+    // int list_compress_depth;
+    // int list_max_ziplist_size;
 
     unsigned long long maxmemory;   /* Max number of memory bytes to use */
     int maxmemory_policy;           /* Policy for key eviction */

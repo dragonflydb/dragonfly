@@ -231,10 +231,10 @@ REDIS_STATIC int __quicklistCompressNode(quicklistNode *node) {
     if (node->sz < MIN_COMPRESS_BYTES)
         return 0;
 
-    quicklistLZF *lzf = zmalloc(sizeof(*lzf) + node->sz);
-    
-    // TODO: roman - to move out of stack.
-    LZF_STATE sdata;
+    // ROMAN: we allocate LZF_STATE on heap, piggy-backing on the existing allocation.
+    char* uptr = zmalloc(sizeof(quicklistLZF) + node->sz + sizeof(LZF_STATE));
+    quicklistLZF *lzf = (quicklistLZF*)uptr;
+    LZF_HSLOT* sdata = (LZF_HSLOT*)(uptr + sizeof(quicklistLZF) + node->sz);
 
     /* Cancel if compression fails or doesn't compress small enough */
     if (((lzf->sz = lzf_compress(node->entry, node->sz, lzf->compressed,
