@@ -264,6 +264,10 @@ void StringFamily::DecrBy(CmdArgList args, ConnectionContext* cntx) {
   if (!absl::SimpleAtoi(sval, &val)) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
+  if (val == INT64_MIN) {
+    return (*cntx)->SendError(kIncrOverflow);
+  }
+
   return IncrByGeneric(key, -val, cntx);
 }
 
@@ -522,14 +526,14 @@ void StringFamily::GetRange(CmdArgList args, ConnectionContext* cntx) {
     if (end < 0)
       end = strlen + end;
 
-    if (strlen == 0 || start > end || size_t(start) >= strlen) {
-      return OpStatus::OK;
-    }
-
     if (start < 0)
       start = 0;
     if (end < 0)
       end = 0;
+
+    if (strlen == 0 || start > end || size_t(start) >= strlen) {
+      return OpStatus::OK;
+    }
 
     if (size_t(end) >= strlen)
       end = strlen - 1;

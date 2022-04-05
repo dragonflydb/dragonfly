@@ -126,7 +126,7 @@ TEST_F(CompactObjectTest, Int) {
 }
 
 TEST_F(CompactObjectTest, MediumString) {
-  string tmp(512, 'b');
+  string tmp(511, 'b');
 
   cobj_.SetString(tmp);
   EXPECT_EQ(tmp.size(), cobj_.Size());
@@ -134,6 +134,10 @@ TEST_F(CompactObjectTest, MediumString) {
   cobj_.SetString(tmp);
   EXPECT_EQ(tmp.size(), cobj_.Size());
   cobj_.Reset();
+
+  tmp.assign(27463, 'c');
+  cobj_.SetString(tmp);
+  EXPECT_EQ(27463, cobj_.Size());
 }
 
 TEST_F(CompactObjectTest, AsciiUtil) {

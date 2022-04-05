@@ -51,6 +51,7 @@ TEST_F(StringFamilyTest, Incr) {
   ASSERT_THAT(Run({"incrby", "key1", "1"}), ElementsAre(ErrArg("ERR value is not an integer")));
 
   ASSERT_THAT(Run({"incrby", "ne", "0"}), ElementsAre(IntArg(0)));
+  ASSERT_THAT(Run({"decrby", "a", "-9223372036854775808"}), ElementsAre(ErrArg("overflow")));
 }
 
 TEST_F(StringFamilyTest, Append) {
@@ -285,6 +286,10 @@ TEST_F(StringFamilyTest, Range) {
   EXPECT_THAT(Run({"getrange", "key3", "2", "3"}), RespEq("3"));
   EXPECT_THAT(Run({"getrange", "key3", "3", "3"}), RespEq(""));
   EXPECT_THAT(Run({"getrange", "key3", "4", "5"}), RespEq(""));
+
+  Run({"SET", "num", "1234"});
+  EXPECT_THAT(Run({"getrange","num", "3", "5000"}), RespEq("4"));
+  EXPECT_THAT(Run({"getrange","num", "-5000", "10000"}), RespEq("1234"));
 }
 
 }  // namespace dfly

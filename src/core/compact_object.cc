@@ -383,18 +383,20 @@ quicklist* RobjWrapper::GetQL() const {
 
 // len must be at least 16
 void ascii_pack(const char* ascii, size_t len, uint8_t* bin) {
+  const char* end = ascii + len;
+
   unsigned i = 0;
-  while (len >= 8) {
+  while (ascii + 8 <= end) {
     for (i = 0; i < 7; ++i) {
       *bin++ = (ascii[0] >> i) | (ascii[1] << (7 - i));
       ++ascii;
     }
     ++ascii;
-    len -= 8;
   }
 
-  for (i = 0; i < len; ++i) {
-    *bin++ = (ascii[i] >> i) | (ascii[i + 1] << (7 - i));
+  // epilog - we do not pack since we have less than 8 bytes.
+  while (ascii < end) {
+    *bin++ = *ascii++;
   }
 }
 
@@ -420,22 +422,19 @@ void ascii_unpack(const uint8_t* bin, size_t ascii_len, char* ascii) {
     *ascii++ = p >> 1;
   }
 
+  DCHECK_LT(ascii_len, 8u);
   for (i = 0; i < ascii_len; ++i) {
-    uint8_t src = *bin;
-    *ascii++ = (p >> (8 - i)) | ((src << i) & kM);
-    p = src;
-    ++bin;
+    *ascii++ = *bin++;
   }
 }
-
-#pragma GCC pop_options
 
 // compares packed and unpacked strings. packed must be of length = binpacked_len(ascii_len).
 bool compare_packed(const uint8_t* packed, const char* ascii, size_t ascii_len) {
   unsigned i = 0;
   bool res = true;
+  const char* end = ascii + ascii_len;
 
-  while (ascii_len >= 8) {
+  while (ascii + 8 <= end) {
     for (i = 0; i < 7; ++i) {
       uint8_t conv = (ascii[0] >> i) | (ascii[1] << (7 - i));
       res &= (conv == *packed);
@@ -445,18 +444,20 @@ bool compare_packed(const uint8_t* packed, const char* ascii, size_t ascii_len) 
 
     if (!res)
       return false;
+
     ++ascii;
-    ascii_len -= 8;
   }
 
-  for (i = 0; i < ascii_len; ++i) {
-    uint8_t b = (ascii[i] >> i) | (ascii[i + 1] << (7 - i));
-    res &= (b == *packed);
-    ++packed;
+  while (ascii < end) {
+    if (*ascii++ != *packed++) {
+      return false;
+    }
   }
 
-  return res;
+  return true;
 }
+
+#pragma GCC pop_options
 
 }  // namespace detail
 
@@ -513,7 +514,7 @@ size_t CompactObj::Size() const {
         raw_size = u_.r_obj.Size();
         break;
       default:
-      LOG(DFATAL) << "Should not reach " << int(taglen_);
+        LOG(DFATAL) << "Should not reach " << int(taglen_);
     }
   }
   uint8_t encoded = (mask_ & kEncMask);
@@ -703,12 +704,14 @@ void CompactObj::SetString(std::string_view str) {
   if (is_ascii) {
     size_t encode_len = binpacked_len(str.size());
     size_t rev_len = ascii_len(encode_len);
-    CHECK_GE(rev_len, str.size() - 1) << "Bad ascii encoding for len " << str.size();
 
-    if (rev_len == str.size() - 1) {
-      mask |= ASCII1_ENC_BIT;
+    if (rev_len == str.size()) {
+      mask |= ASCII2_ENC_BIT;  // str hits its highest bound.
     } else {
-      mask |= ASCII2_ENC_BIT;
+      CHECK_EQ(str.size(), rev_len - 1)
+        << "Bad ascii encoding for len " << str.size();
+
+      mask |= ASCII1_ENC_BIT;
     }
 
     tl.tmp_buf.resize(encode_len);
