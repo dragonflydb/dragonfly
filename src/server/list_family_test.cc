@@ -271,4 +271,22 @@ TEST_F(ListFamilyTest, WrongTypeDoesNotWake) {
   EXPECT_THAT(blpop_resp, ElementsAre(kKey1, "B"));
 }
 
+TEST_F(ListFamilyTest, BPopSameKeyTwice) {
+  RespVec blpop_resp;
+
+  auto pop_fb = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
+    blpop_resp = Run({"blpop", kKey1, kKey1, "0"});
+  });
+
+  do {
+    this_fiber::sleep_for(30us);
+  } while (!IsLocked(0, kKey1));
+
+  pp_->at(1)->Await([&] {
+    EXPECT_EQ(1, CheckedInt({"lpush", kKey1, "bar"}));
+  });
+  pop_fb.join();
+  EXPECT_THAT(blpop_resp, ElementsAre(kKey1, "bar"));
+}
+
 }  // namespace dfly

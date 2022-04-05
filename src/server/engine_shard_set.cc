@@ -5,8 +5,8 @@
 #include "server/engine_shard_set.h"
 
 extern "C" {
-#include "redis/zmalloc.h"
 #include "redis/object.h"
+#include "redis/zmalloc.h"
 }
 
 #include "base/logging.h"
@@ -311,16 +311,16 @@ void EngineShard::ProcessAwakened(Transaction* completed_t) {
     DCHECK(!queue.empty());  // since it's active
 
     if (queue.front().trans == completed_t) {
-      queue.pop_front();
-
-      while (!queue.empty()) {
+      do {
         const WatchItem& bi = queue.front();
         Transaction* head = bi.trans.get();
 
-        if (head->NotifySuspended(wq.notify_txid, shard_id()))
+        // if a transaction blpops on the same key multiple times it will appear here
+        // here several times as well, hence we check != completed_t.
+        if (head != completed_t && head->NotifySuspended(wq.notify_txid, shard_id()))
           break;
         queue.pop_front();
-      }
+      } while (!queue.empty());
 
       if (queue.empty()) {
         wt.RemoveEntry(w_it);
@@ -512,8 +512,7 @@ void EngineShard::CacheStats() {
   mi_stats_merge();
 
   size_t used_mem = UsedMemory();
-  cached_stats[db_slice_.shard_id()].used_memory.store(used_mem,
-                                                       memory_order_relaxed);
+  cached_stats[db_slice_.shard_id()].used_memory.store(used_mem, memory_order_relaxed);
 }
 
 size_t EngineShard::UsedMemory() const {

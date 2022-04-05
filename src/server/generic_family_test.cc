@@ -23,8 +23,7 @@ using absl::StrCat;
 
 namespace dfly {
 
-class GenericFamilyTest : public BaseFamilyTest {
-};
+class GenericFamilyTest : public BaseFamilyTest {};
 
 TEST_F(GenericFamilyTest, Expire) {
   Run({"set", "key", "val"});
@@ -51,7 +50,6 @@ TEST_F(GenericFamilyTest, Expire) {
   resp = Run({"get", "key"});
   EXPECT_THAT(resp[0], ArgType(RespExpr::NIL));
 }
-
 
 TEST_F(GenericFamilyTest, Del) {
   for (size_t i = 0; i < 1000; ++i) {
@@ -93,11 +91,12 @@ TEST_F(GenericFamilyTest, Exists) {
   EXPECT_THAT(resp[0], IntArg(3));
 }
 
-
 TEST_F(GenericFamilyTest, Rename) {
   RespVec resp;
+  string b_val(32, 'b');
+  string x_val(32, 'x');
 
-  resp = Run({"mset", "x", "0", "b", "1"});
+  resp = Run({"mset", "x", x_val, "b", b_val});
   ASSERT_THAT(resp, RespEq("OK"));
   ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
 
@@ -110,8 +109,7 @@ TEST_F(GenericFamilyTest, Rename) {
   int64_t val = CheckedInt({"get", "x"});
   ASSERT_EQ(kint64min, val);  // does not exist
 
-  val = CheckedInt({"get", "b"});
-  ASSERT_EQ(0, val);  // it has value of x.
+  ASSERT_THAT(Run({"get", "b"}), RespEq(x_val));  // swapped.
 
   EXPECT_EQ(CheckedInt({"exists", "x", "b"}), 1);
 
@@ -133,7 +131,16 @@ TEST_F(GenericFamilyTest, Rename) {
 
   exist_fb.join();
   ren_fb.join();
+}
 
+TEST_F(GenericFamilyTest, RenameNonString) {
+  EXPECT_EQ(1, CheckedInt({"lpush", "x", "elem"}));
+  auto resp = Run({"rename", "x", "b"});
+  ASSERT_THAT(resp, RespEq("OK"));
+  ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
+
+  EXPECT_EQ(0, CheckedInt({"del", "x"}));
+  EXPECT_EQ(1, CheckedInt({"del", "b"}));
 }
 
 TEST_F(GenericFamilyTest, RenameBinary) {
