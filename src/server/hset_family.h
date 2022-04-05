@@ -55,11 +55,12 @@ class HSetFamily {
 
   static OpResult<std::vector<std::string>> OpGetAll(const OpArgs& op_args, std::string_view key,
                                                      uint8_t getall_mask);
+  static OpResult<size_t> OpStrLen(const OpArgs& op_args, std::string_view key,
+                                   std::string_view field);
 
   using IncrByParam = std::variant<double, int64_t>;
-  static OpStatus OpIncrBy(const OpArgs& op_args, std::string_view key,
-                           std::string_view field, IncrByParam* param);
-
+  static OpStatus OpIncrBy(const OpArgs& op_args, std::string_view key, std::string_view field,
+                           IncrByParam* param);
 };
 
 }  // namespace dfly

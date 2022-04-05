@@ -267,6 +267,8 @@ Design config support. ~10-20 commands overall...
 Probably implement cluster-API decorators to allow cluster-configured clients to connect to a single
 instance.
 
+ - [X] HSTRLEN
+
 ## Design decisions along the way
 ### Expiration deadlines with relative accuracy
 I decided to limit the expiration range to 365 days. Moreover, expiration deadlines

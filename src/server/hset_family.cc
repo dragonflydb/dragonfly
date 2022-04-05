@@ -8,6 +8,7 @@ extern "C" {
 #include "redis/listpack.h"
 #include "redis/object.h"
 #include "redis/redis_aux.h"
+#include "redis/util.h"
 }
 
 #include "base/logging.h"
@@ -55,7 +56,7 @@ pair<uint8_t*, bool> LpInsert(uint8_t* lp, string_view field, string_view val, b
   uint8_t* vptr;
 
   uint8_t* fptr = lpFirst(lp);
-  uint8_t* fsrc = (uint8_t*)field.data();
+  uint8_t* fsrc = field.empty() ? lp : (uint8_t*)field.data();
 
   // if we vsrc is NULL then lpReplace will delete the element, which is not what we want.
   // therefore, for an empty val we set it to some other valid address so that lpReplace
@@ -101,7 +102,7 @@ void HSetFamily::HDel(CmdArgList args, ConnectionContext* cntx) {
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  if (result) {
+  if (result || result.status() == OpStatus::KEY_NOTFOUND) {
     (*cntx)->SendLong(*result);
   } else {
     (*cntx)->SendError(result.status());
@@ -305,7 +306,19 @@ void HSetFamily::HSetNx(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void HSetFamily::HStrLen(CmdArgList args, ConnectionContext* cntx) {
-  LOG(DFATAL) << "TBD";
+  string_view key = ArgS(args, 1);
+  string_view field = ArgS(args, 2);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpStrLen(OpArgs{shard, t->db_index()}, key, field);
+  };
+
+  OpResult<size_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (result) {
+    (*cntx)->SendLong(*result);
+  } else {
+    (*cntx)->SendError(result.status());
+  }
 }
 
 void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
@@ -637,6 +650,37 @@ OpResult<vector<string>> HSetFamily::OpGetAll(const OpArgs& op_args, string_view
   return res;
 }
 
+OpResult<size_t> HSetFamily::OpStrLen(const OpArgs& op_args, string_view key, string_view field) {
+  auto& db_slice = op_args.shard->db_slice();
+  auto it_res = db_slice.Find(op_args.db_ind, key, OBJ_HASH);
+
+  if (!it_res) {
+    if (it_res.status() == OpStatus::KEY_NOTFOUND)
+      return 0;
+    return it_res.status();
+  }
+
+  robj* hset = (*it_res)->second.AsRObj();
+  size_t field_len = 0;
+  op_args.shard->tmp_str1 = sdscpylen(op_args.shard->tmp_str1, field.data(), field.size());
+
+  if (hset->encoding == OBJ_ENCODING_LISTPACK) {
+    unsigned char* vstr = NULL;
+    unsigned int vlen = UINT_MAX;
+    long long vll = LLONG_MAX;
+
+    if (hashTypeGetFromListpack(hset, op_args.shard->tmp_str1, &vstr, &vlen, &vll) == 0)
+      field_len = vstr ? vlen : sdigits10(vll);
+
+    return field_len;
+  }
+
+  DCHECK_EQ(hset->encoding, OBJ_ENCODING_HT);
+
+  dictEntry* de = dictFind((dict*)hset->ptr, op_args.shard->tmp_str1);
+  return de ? sdslen((sds)de->v.val) : 0;
+}
+
 OpStatus HSetFamily::OpIncrBy(const OpArgs& op_args, string_view key, string_view field,
                               IncrByParam* param) {
   auto& db_slice = op_args.shard->db_slice();
@@ -681,7 +725,8 @@ OpStatus HSetFamily::OpIncrBy(const OpArgs& op_args, string_view key, string_vie
     LOG(FATAL) << "TBD";
   } else {
     if (exist_res == C_OK && vstr) {
-      if (!absl::SimpleAtoi(string_view{reinterpret_cast<char*>(vstr), vlen}, &old_val)) {
+      const char* exist_val = reinterpret_cast<char*>(vstr);
+      if (!string2ll(exist_val, vlen, &old_val)) {
         stats->listpack_bytes += lpb;
 
         return OpStatus::INVALID_VALUE;

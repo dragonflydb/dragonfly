@@ -56,15 +56,18 @@ TEST_F(HSetFamilyTest, Basic) {
 
   EXPECT_EQ(2, CheckedInt({"hset", "y", "a", "c", "d", "e"}));
   EXPECT_EQ(2, CheckedInt({"hdel", "y", "a", "d"}));
+
+  EXPECT_THAT(Run({"hdel", "nokey", "a"}), ElementsAre(IntArg(0)));
 }
 
-TEST_F(HSetFamilyTest, HSetLarge) {
+TEST_F(HSetFamilyTest, HSet) {
   string val(1024, 'b');
 
-  auto resp = Run({"hset", "x", "a", val});
-  EXPECT_THAT(resp[0], IntArg(1));
-  resp = Run({"hlen", "x"});
-  EXPECT_THAT(resp[0], IntArg(1));
+  EXPECT_EQ(1, CheckedInt({"hset", "large", "a", val}));
+  EXPECT_EQ(1, CheckedInt({"hlen", "large"}));
+  EXPECT_EQ(1024, CheckedInt({"hstrlen", "large", "a"}));
+
+  EXPECT_EQ(1, CheckedInt({"hset", "small", "", "565323349817"}));
 }
 
 TEST_F(HSetFamilyTest, Get) {
@@ -100,6 +103,14 @@ TEST_F(HSetFamilyTest, HSetNx) {
   // check dict path
   EXPECT_EQ(0, CheckedInt({"hsetnx", "key", "field2", string(512, 'a')}));
   EXPECT_THAT(Run({"hget", "key", "field2"}), RespEq("val2"));
+}
+
+TEST_F(HSetFamilyTest, HIncr) {
+  EXPECT_EQ(10, CheckedInt({"hincrby", "key", "field", "10"}));
+
+  Run({"hset", "key", "a", " 1"});
+  auto resp = Run({"hincrby", "key", "a", "10"});
+  EXPECT_THAT(resp[0], ErrArg("hash value is not an integer"));
 }
 
 }  // namespace dfly
