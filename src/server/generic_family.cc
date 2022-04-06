@@ -40,6 +40,9 @@ class Renamer {
   void Finalize(Transaction* t, bool skip_exist_dest);
 
  private:
+  OpStatus MoveSrc(Transaction* t, EngineShard* es);
+  OpStatus UpdateDest(Transaction* t, EngineShard* es);
+
   DbIndex db_indx_;
   ShardId src_sid_;
 
@@ -49,6 +52,9 @@ class Renamer {
     uint64_t expire_ts;
     bool found = false;
   };
+
+  PrimeValue pv_;
+  string str_val_;
 
   FindResult src_res_, dest_res_;  // index 0 for source, 1 for destination
   OpResult<void> status_;
@@ -95,52 +101,66 @@ void Renamer::Finalize(Transaction* t, bool skip_exist_dest) {
 
   DCHECK(src_res_.ref_val.IsRef());
 
-  PrimeValue pv;
-  string str_val;
-
-  auto move_src = [&](Transaction* t, EngineShard* shard) {
-    if (shard->shard_id() == src_sid_) {  // Handle source key.
-      // TODO: to call PreUpdate/PostUpdate.
-      auto it = shard->db_slice().FindExt(db_indx_, src_res_.key).first;
-      CHECK(IsValid(it));
-
-      if (it->second.ObjType() == OBJ_STRING) {
-        it->second.GetString(&str_val);
-      } else {
-        pv = std::move(it->second);
-      }
-      CHECK(shard->db_slice().Del(db_indx_, it));  // delete the entry with empty value in it.
-    }
-    return OpStatus::OK;
-  };
-
-  t->Execute(move(move_src), false);
-
   // Src key exist and we need to override the destination.
-  auto set_dest = [&](Transaction* t, EngineShard* shard) {
-    if (shard->shard_id() != src_sid_) {
-      auto& db_slice = shard->db_slice();
-      string_view dest_key = dest_res_.key;
-      PrimeIterator dest_it = db_slice.FindExt(db_indx_, dest_key).first;
-      if (IsValid(dest_it)) {
-        if (src_res_.ref_val.ObjType() == OBJ_STRING) {
-          dest_it->second.SetString(str_val);
-        } else {
-          dest_it->second = std::move(pv);
-        }
-        db_slice.Expire(db_indx_, dest_it, src_res_.expire_ts);
+  // Alternatively, we could apply an optimistic algorithm and move src at Find step.
+  // We would need to restore the state in case of cleanups.
+  t->Execute([&](Transaction* t, EngineShard* shard) { return MoveSrc(t, shard); }, false);
+  t->Execute([&](Transaction* t, EngineShard* shard) { return UpdateDest(t, shard); }, true);
+}
+
+OpStatus Renamer::MoveSrc(Transaction* t, EngineShard* es) {
+  if (es->shard_id() == src_sid_) {  // Handle source key.
+    // TODO: to call PreUpdate/PostUpdate.
+    auto it = es->db_slice().FindExt(db_indx_, src_res_.key).first;
+    CHECK(IsValid(it));
+
+    // We distinguish because of the SmallString that is pinned to its thread by design,
+    // thus can not be accessed via another thread.
+    // Therefore, we copy it to standard string in its thread.
+    if (it->second.ObjType() == OBJ_STRING) {
+      it->second.GetString(&str_val_);
+    } else {
+      bool has_expire = it->second.HasExpire();
+      pv_ = std::move(it->second);
+      it->second.SetExpire(has_expire);
+    }
+    CHECK(es->db_slice().Del(db_indx_, it));  // delete the entry with empty value in it.
+  }
+
+  return OpStatus::OK;
+}
+
+OpStatus Renamer::UpdateDest(Transaction* t, EngineShard* es) {
+  if (es->shard_id() != src_sid_) {
+    auto& db_slice = es->db_slice();
+    string_view dest_key = dest_res_.key;
+    PrimeIterator dest_it = db_slice.FindExt(db_indx_, dest_key).first;
+    bool is_prior_list = false;
+
+    if (IsValid(dest_it)) {
+      bool has_expire = dest_it->second.HasExpire();
+      is_prior_list = dest_it->second.ObjType() == OBJ_LIST;
+
+      if (src_res_.ref_val.ObjType() == OBJ_STRING) {
+        dest_it->second.SetString(str_val_);
       } else {
-        if (src_res_.ref_val.ObjType() == OBJ_STRING) {
-          db_slice.AddNew(db_indx_, dest_key, PrimeValue{str_val}, src_res_.expire_ts);
-        } else {
-          db_slice.AddNew(db_indx_, dest_key, std::move(pv), src_res_.expire_ts);
-        }
+        dest_it->second = std::move(pv_);
       }
+      dest_it->second.SetExpire(has_expire);  // preserve expire flag.
+      db_slice.Expire(db_indx_, dest_it, src_res_.expire_ts);
+    } else {
+      if (src_res_.ref_val.ObjType() == OBJ_STRING) {
+        pv_.SetString(str_val_);
+      }
+      dest_it = db_slice.AddNew(db_indx_, dest_key, std::move(pv_), src_res_.expire_ts);
     }
 
-    return OpStatus::OK;
-  };
-  t->Execute(move(set_dest), true);
+    if (!is_prior_list && dest_it->second.ObjType() == OBJ_LIST) {
+      es->AwakeWatched(db_indx_, dest_key);
+    }
+  }
+
+  return OpStatus::OK;
 }
 
 const char* ObjTypeName(int type) {
@@ -565,17 +585,20 @@ OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, ArgSlice keys)
   return res;
 }
 
-OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from, string_view to,
+OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key, string_view to_key,
                                     bool skip_exists) {
   auto& db_slice = op_args.shard->db_slice();
-  auto [from_it, from_expire] = db_slice.FindExt(op_args.db_ind, from);
+  auto [from_it, from_expire] = db_slice.FindExt(op_args.db_ind, from_key);
   if (!IsValid(from_it))
     return OpStatus::KEY_NOTFOUND;
 
-  auto [to_it, to_expire] = db_slice.FindExt(op_args.db_ind, to);
+  bool is_prior_list = false;
+  auto [to_it, to_expire] = db_slice.FindExt(op_args.db_ind, to_key);
   if (IsValid(to_it)) {
     if (skip_exists)
       return OpStatus::KEY_EXISTS;
+
+    is_prior_list = (to_it->second.ObjType() == OBJ_LIST);
   }
 
   uint64_t exp_ts =
@@ -584,7 +607,7 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from, str
   // we keep the value we want to move.
   PrimeValue from_obj = std::move(from_it->second);
 
-  // Restore the expire flag on 'from'.
+  // Restore the expire flag on 'from' so we could delete it from expire table.
   from_it->second.SetExpire(IsValid(from_expire));
 
   if (IsValid(to_it)) {
@@ -601,9 +624,12 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from, str
     // On the other hand, AddNew does not rely on the iterators - this is why we keep
     // the value in `from_obj`.
     CHECK(db_slice.Del(op_args.db_ind, from_it));
-    db_slice.AddNew(op_args.db_ind, to, std::move(from_obj), exp_ts);
+    to_it = db_slice.AddNew(op_args.db_ind, to_key, std::move(from_obj), exp_ts);
   }
 
+  if (!is_prior_list && to_it->second.ObjType() == OBJ_LIST) {
+    op_args.shard->AwakeWatched(op_args.db_ind, to_key);
+  }
   return OpStatus::OK;
 }
 

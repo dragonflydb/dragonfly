@@ -674,6 +674,8 @@ std::optional<int64_t> CompactObj::TryGetInt() const {
 }
 
 void CompactObj::SetString(std::string_view str) {
+  uint8_t mask = mask_ & ~kEncMask;
+
   // Trying auto-detection heuristics first.
   if (str.size() <= 20) {
     long long ival;
@@ -681,14 +683,14 @@ void CompactObj::SetString(std::string_view str) {
 
     // We use redis string2ll to be compatible with Redis.
     if (string2ll(str.data(), str.size(), &ival)) {
-      SetMeta(INT_TAG, mask_ & ~kEncMask);
+      SetMeta(INT_TAG, mask);
       u_.ival = ival;
 
       return;
     }
 
     if (str.size() <= kInlineLen) {
-      SetMeta(str.size(), mask_ & ~kEncMask);
+      SetMeta(str.size(), mask);
 
       memcpy(u_.inline_str, str.data(), str.size());
       return;
@@ -698,7 +700,6 @@ void CompactObj::SetString(std::string_view str) {
   DCHECK_GT(str.size(), kInlineLen);
 
   string_view encoded = str;
-  uint8_t mask = mask_ & ~kEncMask;
   bool is_ascii = kUseAsciiEncoding && validate_ascii_fast(str.data(), str.size());
 
   if (is_ascii) {

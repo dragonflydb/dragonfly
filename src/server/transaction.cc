@@ -1074,9 +1074,9 @@ void Transaction::UnregisterWatch() {
 
 // Runs only in the shard thread.
 OpStatus Transaction::AddToWatchedShardCb(EngineShard* shard) {
-  ShardId sid = SidToId(shard->shard_id());
+  ShardId idx = SidToId(shard->shard_id());
 
-  auto& sd = shard_data_[sid];
+  auto& sd = shard_data_[idx];
   CHECK_EQ(0, sd.local_mask & SUSPENDED_Q);
   DCHECK_EQ(0, sd.local_mask & ARMED);
 
@@ -1085,6 +1085,7 @@ OpStatus Transaction::AddToWatchedShardCb(EngineShard* shard) {
     shard->AddWatched(s, this);
   }
   sd.local_mask |= SUSPENDED_Q;
+  DVLOG(1) << "AddWatched " << DebugId() << " local_mask:" << sd.local_mask;
 
   return OpStatus::OK;
 }
@@ -1092,16 +1093,16 @@ OpStatus Transaction::AddToWatchedShardCb(EngineShard* shard) {
 // Runs only in the shard thread.
 // Quadratic complexity in number of arguments and queue length.
 bool Transaction::RemoveFromWatchedShardCb(EngineShard* shard) {
-  ShardId sid = SidToId(shard->shard_id());
-  auto& sd = shard_data_[sid];
+  ShardId idx = SidToId(shard->shard_id());
+  auto& sd = shard_data_[idx];
 
   constexpr uint16_t kQueueMask =
-      -Transaction::SUSPENDED_Q | Transaction::AWAKED_Q | Transaction::EXPIRED_Q;
+      Transaction::SUSPENDED_Q | Transaction::AWAKED_Q | Transaction::EXPIRED_Q;
 
   if ((sd.local_mask & kQueueMask) == 0)
     return false;
 
-  sd.local_mask &= kQueueMask;
+  sd.local_mask &= ~kQueueMask;
 
   // TODO: what if args have keys and values?
   auto args = ShardArgsInShard(shard->shard_id());
@@ -1129,17 +1130,21 @@ bool Transaction::IsGlobal() const {
 }
 
 // Runs only in the shard thread.
+// Returns true if the transcton has changed its state from suspended to awakened,
+// false, otherwise.
 bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid) {
-  unsigned sd_id = SidToId(sid);
-  auto& sd = shard_data_[sd_id];
+  unsigned idx = SidToId(sid);
+  auto& sd = shard_data_[idx];
   unsigned local_mask = sd.local_mask;
-  CHECK_NE(0u, local_mask & SUSPENDED_Q);
-  DVLOG(1) << "NotifyBlocked " << DebugId() << ", local_mask: " << local_mask;
 
   if (local_mask & Transaction::EXPIRED_Q) {
     return false;
   }
 
+  DVLOG(1) << "NotifySuspended " << DebugId() << ", local_mask:" << local_mask;
+
+  // local_mask could be awaked (i.e. not suspended) if the transaction has been
+  // awakened by another key or awakened by the same key multiple times.
   if (local_mask & SUSPENDED_Q) {
     DCHECK_EQ(0u, local_mask & AWAKED_Q);
 
@@ -1159,7 +1164,7 @@ bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid) {
   }
 
   CHECK(sd.local_mask & AWAKED_Q);
-  return true;
+  return false;
 }
 
 void Transaction::BreakOnClose() {

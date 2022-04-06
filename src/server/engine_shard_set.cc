@@ -310,21 +310,22 @@ void EngineShard::ProcessAwakened(Transaction* completed_t) {
     auto& queue = wq.items;
     DCHECK(!queue.empty());  // since it's active
 
-    if (queue.front().trans == completed_t) {
-      do {
-        const WatchItem& bi = queue.front();
-        Transaction* head = bi.trans.get();
+    if (queue.front().trans != completed_t)
+      continue;
 
-        // if a transaction blpops on the same key multiple times it will appear here
-        // here several times as well, hence we check != completed_t.
-        if (head != completed_t && head->NotifySuspended(wq.notify_txid, shard_id()))
-          break;
-        queue.pop_front();
-      } while (!queue.empty());
+    DVLOG(1) << "Wakening next transaction for key " << key;
 
-      if (queue.empty()) {
-        wt.RemoveEntry(w_it);
-      }
+    do {
+      const WatchItem& bi = queue.front();
+      Transaction* head = bi.trans.get();
+
+      if (head->NotifySuspended(wq.notify_txid, shard_id()))
+        break;
+      queue.pop_front();
+    } while (!queue.empty());
+
+    if (queue.empty()) {
+      wt.RemoveEntry(w_it);
     }
   }
 

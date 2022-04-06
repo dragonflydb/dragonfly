@@ -275,7 +275,7 @@ TEST_F(ListFamilyTest, BPopSameKeyTwice) {
   RespVec blpop_resp;
 
   auto pop_fb = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
-    blpop_resp = Run({"blpop", kKey1, kKey1, "0"});
+    blpop_resp = Run({"blpop", kKey1, kKey2, kKey2, kKey1, "0"});
   });
 
   do {
@@ -284,6 +284,42 @@ TEST_F(ListFamilyTest, BPopSameKeyTwice) {
 
   pp_->at(1)->Await([&] {
     EXPECT_EQ(1, CheckedInt({"lpush", kKey1, "bar"}));
+  });
+  pop_fb.join();
+  EXPECT_THAT(blpop_resp, ElementsAre(kKey1, "bar"));
+
+  pop_fb = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
+    blpop_resp = Run({"blpop", kKey1, kKey2, kKey2, kKey1, "0"});
+  });
+
+  do {
+    this_fiber::sleep_for(30us);
+  } while (!IsLocked(0, kKey1));
+
+  pp_->at(1)->Await([&] {
+    EXPECT_EQ(1, CheckedInt({"lpush", kKey2, "bar"}));
+  });
+  pop_fb.join();
+  EXPECT_THAT(blpop_resp, ElementsAre(kKey2, "bar"));
+}
+
+TEST_F(ListFamilyTest, BPopRename) {
+  RespVec blpop_resp;
+
+  Run({"exists", kKey1, kKey2});
+  ASSERT_EQ(2, GetDebugInfo().shards_count);
+
+  auto pop_fb = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
+    blpop_resp = Run({"blpop", kKey1, "0"});
+  });
+
+  do {
+    this_fiber::sleep_for(30us);
+  } while (!IsLocked(0, kKey1));
+
+  pp_->at(1)->Await([&] {
+    EXPECT_EQ(1, CheckedInt({"lpush", "a", "bar"}));
+    Run({"rename", "a", kKey1});
   });
   pop_fb.join();
   EXPECT_THAT(blpop_resp, ElementsAre(kKey1, "bar"));
