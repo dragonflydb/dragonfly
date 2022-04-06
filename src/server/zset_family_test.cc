@@ -40,6 +40,16 @@ TEST_F(ZSetFamilyTest, Add) {
 
   resp = Run({"zcard", "x"});
   EXPECT_THAT(resp[0], IntArg(1));
+
+  EXPECT_THAT(Run({"zadd", "x", "", "a"}), ElementsAre(ErrArg("not a valid float")));
+
+  EXPECT_THAT(Run({"zadd", "ztmp", "xx", "10", "member"}), ElementsAre(IntArg(0)));
+
+  const char kHighPrecision[] = "0.79028573343077946";
+
+  Run({"zadd", "zs", kHighPrecision, "a"});
+  EXPECT_THAT(Run({"zscore", "zs", "a"}), ElementsAre("0.7902857334307795"));
+  EXPECT_EQ(0.79028573343077946, 0.7902857334307795);
 }
 
 TEST_F(ZSetFamilyTest, ZRem) {
@@ -55,10 +65,21 @@ TEST_F(ZSetFamilyTest, ZRem) {
   EXPECT_THAT(Run({"zrange", "x", "(-inf", "(+inf", "byscore"}), ElementsAre("a"));
 }
 
-TEST_F(ZSetFamilyTest, ZRange) {
+TEST_F(ZSetFamilyTest, ZRangeRank) {
   Run({"zadd", "x", "1.1", "a", "2.1", "b"});
   EXPECT_THAT(Run({"zrangebyscore", "x", "0", "(1.1"}), ElementsAre(ArrLen(0)));
   EXPECT_THAT(Run({"zrangebyscore", "x", "-inf", "1.1"}), ElementsAre("a"));
+
+  EXPECT_EQ(2, CheckedInt({"zcount", "x", "1.1", "2.1"}));
+  EXPECT_EQ(1, CheckedInt({"zcount", "x", "(1.1", "2.1"}));
+  EXPECT_EQ(0, CheckedInt({"zcount", "y", "(1.1", "2.1"}));
+
+  EXPECT_EQ(0, CheckedInt({"zrank", "x", "a"}));
+  EXPECT_EQ(1, CheckedInt({"zrank", "x", "b"}));
+  EXPECT_EQ(1, CheckedInt({"zrevrank", "x", "a"}));
+  EXPECT_EQ(0, CheckedInt({"zrevrank", "x", "b"}));
+  EXPECT_THAT(Run({"zrevrank", "x", "c"}), ElementsAre(ArgType(RespExpr::NIL)));
+  EXPECT_THAT(Run({"zrank", "y", "c"}), ElementsAre(ArgType(RespExpr::NIL)));
 }
 
 TEST_F(ZSetFamilyTest, ZRemRangeRank) {

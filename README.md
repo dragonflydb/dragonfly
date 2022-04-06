@@ -205,15 +205,15 @@ API 2.0
 - [X] Set Family
   - [X] SSCAN
 - [X] Sorted Set Family
-  - [ ] ZCOUNT
+  - [X] ZCOUNT
   - [ ] ZINTERSTORE
   - [ ] ZLEXCOUNT
   - [ ] ZRANGEBYLEX
-  - [ ] ZRANK
+  - [X] ZRANK
   - [ ] ZREMRANGEBYLEX
   - [X] ZREMRANGEBYRANK
   - [ ] ZREVRANGEBYSCORE
-  - [ ] ZREVRANK
+  - [X] ZREVRANK
   - [ ] ZUNIONSTORE
   - [ ] ZSCAN
 - [ ] HYPERLOGLOG Family

@@ -7,6 +7,7 @@
 extern "C" {
 #include "redis/listpack.h"
 #include "redis/object.h"
+#include "redis/util.h"
 #include "redis/zset.h"
 }
 
@@ -28,10 +29,22 @@ using CI = CommandId;
 
 static const char kNxXxErr[] = "XX and NX options at the same time are not compatible";
 static const char kScoreNaN[] = "resulting score is not a number (NaN)";
+static const char kRangeErr[] = "min or max is not a float";
+
 constexpr unsigned kMaxListPackValue = 64;
 
+inline zrangespec GetZrangeSpec(const ZSetFamily::ScoreInterval& si) {
+  zrangespec range;
+  range.min = si.first.val;
+  range.max = si.second.val;
+  range.minex = si.first.is_open;
+  range.maxex = si.second.is_open;
+
+  return range;
+}
+
 OpResult<PrimeIterator> FindZEntry(unsigned flags, const OpArgs& op_args, string_view key,
-                                  size_t member_len) {
+                                   size_t member_len) {
   auto& db_slice = op_args.shard->db_slice();
   if (flags & ZADD_IN_XX) {
     return db_slice.Find(op_args.db_ind, key, OBJ_ZSET);
@@ -138,11 +151,7 @@ void IntervalVisitor::operator()(const ZSetFamily::IndexInterval& ii) {
 }
 
 void IntervalVisitor::operator()(const ZSetFamily::ScoreInterval& si) {
-  zrangespec range;
-  range.min = si.first.val;
-  range.max = si.second.val;
-  range.minex = si.first.is_open;
-  range.maxex = si.second.is_open;
+  zrangespec range = GetZrangeSpec(si);
 
   switch (action_) {
     case Action::RANGE:
@@ -158,9 +167,9 @@ void IntervalVisitor::ActionRange(unsigned start, unsigned end) {
   unsigned rangelen = (end - start) + 1;
 
   if (zobj_->encoding == OBJ_ENCODING_LISTPACK) {
-    unsigned char* zl = (uint8_t*)zobj_->ptr;
-    unsigned char *eptr, *sptr;
-    unsigned char* vstr;
+    uint8_t* zl = (uint8_t*)zobj_->ptr;
+    uint8_t *eptr, *sptr;
+    uint8_t* vstr;
     unsigned int vlen;
     long long vlong;
     double score = 0.0;
@@ -349,12 +358,15 @@ void IntervalVisitor::AddResult(const uint8_t* vstr, unsigned vlen, long long vl
 }
 
 bool ParseScore(string_view src, double* score) {
+  if (src.empty())
+    return false;
+
   if (src == "-inf") {
     *score = -HUGE_VAL;
   } else if (src == "+inf") {
     *score = HUGE_VAL;
   } else {
-    return absl::SimpleAtod(src, score);
+    return string2d(src.data(), src.size(), score);
   }
   return true;
 };
@@ -372,27 +384,6 @@ bool ParseBound(string_view src, ZSetFamily::Bound* bound) {
 }
 
 }  // namespace
-
-void ZSetFamily::ZCard(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-
-  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
-    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->db_index(), key, OBJ_ZSET);
-    if (!find_res) {
-      return find_res.status();
-    }
-
-    return zsetLength(find_res.value()->second.AsRObj());
-  };
-
-  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  if (result.status() == OpStatus::WRONG_TYPE) {
-    (*cntx)->SendError(kWrongTypeErr);
-    return;
-  }
-
-  (*cntx)->SendLong(result.value());
-}
 
 void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
@@ -437,7 +428,9 @@ void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  if ((zparams.flags & ZADD_IN_NX) && (zparams.flags & (ZADD_IN_GT | ZADD_IN_LT))) {
+  constexpr auto kRangeOpt = ZADD_IN_GT | ZADD_IN_LT;
+  if (((zparams.flags & ZADD_IN_NX) && (zparams.flags & kRangeOpt)) ||
+      ((zparams.flags & kRangeOpt) == kRangeOpt)) {
     (*cntx)->SendError("GT, LT, and/or NX options at the same time are not compatible");
     return;
   }
@@ -445,7 +438,8 @@ void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
   absl::InlinedVector<ScoredMemberView, 4> members;
   for (; i < args.size(); i += 2) {
     string_view cur_arg = ArgS(args, i);
-    double val;
+    double val = 0;
+
     if (!ParseScore(cur_arg, &val)) {
       return (*cntx)->SendError(kInvalidFloatErr);
     }
@@ -471,18 +465,66 @@ void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
   }
 
   // KEY_NOTFOUND may happen in case of XX flag.
-  if (status == OpStatus::SKIPPED || status == OpStatus::KEY_NOTFOUND) {
-    return (*cntx)->SendNull();
-  }
-
-  if (add_result.is_nan) {
-    return (*cntx)->SendError(kScoreNaN);
-  }
-
-  if (zparams.flags & ZADD_IN_INCR) {
-    (*cntx)->SendDouble(add_result.new_score);
+  if (status == OpStatus::KEY_NOTFOUND) {
+    if (zparams.flags & ZADD_IN_INCR)
+      (*cntx)->SendNull();
+    else
+      (*cntx)->SendLong(0);
+  } else if (status == OpStatus::SKIPPED) {
+    (*cntx)->SendNull();
+  } else if (add_result.is_nan) {
+    (*cntx)->SendError(kScoreNaN);
   } else {
-    (*cntx)->SendLong(add_result.num_updated);
+    if (zparams.flags & ZADD_IN_INCR) {
+      (*cntx)->SendDouble(add_result.new_score);
+    } else {
+      (*cntx)->SendLong(add_result.num_updated);
+    }
+  }
+}
+
+void ZSetFamily::ZCard(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
+    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->db_index(), key, OBJ_ZSET);
+    if (!find_res) {
+      return find_res.status();
+    }
+
+    return zsetLength(find_res.value()->second.AsRObj());
+  };
+
+  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (result.status() == OpStatus::WRONG_TYPE) {
+    (*cntx)->SendError(kWrongTypeErr);
+    return;
+  }
+
+  (*cntx)->SendLong(result.value());
+}
+
+void ZSetFamily::ZCount(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+
+  string_view min_s = ArgS(args, 2);
+  string_view max_s = ArgS(args, 3);
+
+  ScoreInterval si;
+  if (!ParseBound(min_s, &si.first) || !ParseBound(max_s, &si.second)) {
+    return (*cntx)->SendError(kRangeErr);
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    OpArgs op_args{shard, t->db_index()};
+    return OpCount(op_args, key, si);
+  };
+
+  OpResult<unsigned> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (result.status() == OpStatus::WRONG_TYPE) {
+    (*cntx)->SendError(kWrongTypeErr);
+  } else {
+    (*cntx)->SendLong(*result);
   }
 }
 
@@ -531,8 +573,16 @@ void ZSetFamily::ZRange(CmdArgList args, ConnectionContext* cntx) {
   ZRangeGeneric(std::move(args), false, cntx);
 }
 
+void ZSetFamily::ZRank(CmdArgList args, ConnectionContext* cntx) {
+  ZRankGeneric(std::move(args), false, cntx);
+}
+
 void ZSetFamily::ZRevRange(CmdArgList args, ConnectionContext* cntx) {
   ZRangeGeneric(std::move(args), true, cntx);
+}
+
+void ZSetFamily::ZRevRank(CmdArgList args, ConnectionContext* cntx) {
+  ZRankGeneric(std::move(args), true, cntx);
 }
 
 void ZSetFamily::ZRangeByScore(CmdArgList args, ConnectionContext* cntx) {
@@ -578,7 +628,7 @@ void ZSetFamily::ZRemRangeByScore(CmdArgList args, ConnectionContext* cntx) {
 
   ScoreInterval si;
   if (!ParseBound(min_s, &si.first) || !ParseBound(max_s, &si.second)) {
-    return (*cntx)->SendError("min or max is not a float");
+    return (*cntx)->SendError(kRangeErr);
   }
 
   ZRangeSpec range_spec;
@@ -635,7 +685,7 @@ void ZSetFamily::ZRangeByScoreInternal(string_view key, string_view min_s, strin
 
   ScoreInterval si;
   if (!ParseBound(min_s, &si.first) || !ParseBound(max_s, &si.second)) {
-    return (*cntx)->SendError("min or max is not a float");
+    return (*cntx)->SendError(kRangeErr);
   }
   range_spec.interval = si;
 
@@ -728,6 +778,26 @@ void ZSetFamily::ZRangeGeneric(CmdArgList args, bool reverse, ConnectionContext*
 
   OpResult<ScoredArray> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   OutputScoredArrayResult(result, range_params, cntx);
+}
+
+void ZSetFamily::ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view member = ArgS(args, 2);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    OpArgs op_args{shard, t->db_index()};
+
+    return OpRank(op_args, key, member, reverse);
+  };
+
+  OpResult<unsigned> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (result) {
+    (*cntx)->SendLong(*result);
+  } else if (result.status() == OpStatus::KEY_NOTFOUND) {
+    (*cntx)->SendNull();
+  } else {
+    (*cntx)->SendError(result.status());
+  }
 }
 
 OpStatus ZSetFamily::OpAdd(const ZParams& zparams, const OpArgs& op_args, string_view key,
@@ -859,19 +929,108 @@ OpResult<unsigned> ZSetFamily::OpRemRange(const OpArgs& op_args, string_view key
   return iv.removed();
 }
 
+OpResult<unsigned> ZSetFamily::OpRank(const OpArgs& op_args, string_view key, string_view member,
+                                      bool reverse) {
+  OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_ZSET);
+  if (!res_it)
+    return res_it.status();
+
+  robj* zobj = res_it.value()->second.AsRObj();
+  op_args.shard->tmp_str1 = sdscpylen(op_args.shard->tmp_str1, member.data(), member.size());
+
+  long res = zsetRank(zobj, op_args.shard->tmp_str1, reverse);
+  if (res < 0)
+    return OpStatus::KEY_NOTFOUND;
+  return res;
+}
+
+OpResult<unsigned> ZSetFamily::OpCount(const OpArgs& op_args, std::string_view key,
+                                       const ScoreInterval& interval) {
+  OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_ZSET);
+  if (!res_it)
+    return res_it.status();
+
+  robj* zobj = res_it.value()->second.AsRObj();
+  zrangespec range = GetZrangeSpec(interval);
+  unsigned count = 0;
+
+  if (zobj->encoding == OBJ_ENCODING_LISTPACK) {
+    uint8_t* zl = (uint8_t*)zobj->ptr;
+    uint8_t *eptr, *sptr;
+    double score;
+
+    /* Use the first element in range as the starting point */
+    eptr = zzlFirstInRange(zl, &range);
+
+    /* No "first" element */
+    if (eptr == NULL) {
+      return 0;
+    }
+
+    /* First element is in range */
+    sptr = lpNext(zl, eptr);
+    score = zzlGetScore(sptr);
+
+    DCHECK(zslValueLteMax(score, &range));
+
+    /* Iterate over elements in range */
+    while (eptr) {
+      score = zzlGetScore(sptr);
+
+      /* Abort when the node is no longer in range. */
+      if (!zslValueLteMax(score, &range)) {
+        break;
+      } else {
+        count++;
+        zzlNext(zl, &eptr, &sptr);
+      }
+    }
+  } else {
+    CHECK_EQ(unsigned(OBJ_ENCODING_SKIPLIST), zobj->encoding);
+    zset* zs = (zset*)zobj->ptr;
+    zskiplist* zsl = zs->zsl;
+    zskiplistNode* zn;
+    unsigned long rank;
+
+    /* Find first element in range */
+    zn = zslFirstInRange(zsl, &range);
+
+    /* Use rank of first element, if any, to determine preliminary count */
+    if (zn == NULL)
+      return 0;
+
+    rank = zslGetRank(zsl, zn->score, zn->ele);
+    count = (zsl->length - (rank - 1));
+
+    /* Find last element in range */
+    zn = zslLastInRange(zsl, &range);
+
+    /* Use rank of last element, if any, to determine the actual count */
+    if (zn != NULL) {
+      rank = zslGetRank(zsl, zn->score, zn->ele);
+      count -= (zsl->length - rank);
+    }
+  }
+
+  return count;
+}
+
 #define HFUNC(x) SetHandler(&ZSetFamily::x)
 
 void ZSetFamily::Register(CommandRegistry* registry) {
-  *registry << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1, 1}.HFUNC(ZCard)
-            << CI{"ZADD", CO::FAST | CO::WRITE | CO::DENYOOM, -4, 1, 1, 1}.HFUNC(ZAdd)
+  *registry << CI{"ZADD", CO::FAST | CO::WRITE | CO::DENYOOM, -4, 1, 1, 1}.HFUNC(ZAdd)
+            << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1, 1}.HFUNC(ZCard)
+            << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1, 1}.HFUNC(ZCount)
             << CI{"ZINCRBY", CO::FAST | CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(ZIncrBy)
             << CI{"ZREM", CO::FAST | CO::WRITE, -3, 1, 1, 1}.HFUNC(ZRem)
             << CI{"ZRANGE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRange)
+            << CI{"ZRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZRank)
             << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRangeByScore)
             << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZScore)
             << CI{"ZREMRANGEBYRANK", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRemRangeByRank)
             << CI{"ZREMRANGEBYSCORE", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRemRangeByScore)
-            << CI{"ZREVRANGE", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRevRange);
+            << CI{"ZREVRANGE", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRevRange)
+            << CI{"ZREVRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZRevRank);
 }
 
 }  // namespace dfly

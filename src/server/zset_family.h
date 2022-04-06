@@ -45,16 +45,19 @@ class ZSetFamily {
  private:
   template <typename T> using OpResult = facade::OpResult<T>;
 
-  static void ZCard(CmdArgList args, ConnectionContext* cntx);
   static void ZAdd(CmdArgList args, ConnectionContext* cntx);
+  static void ZCard(CmdArgList args, ConnectionContext* cntx);
+  static void ZCount(CmdArgList args, ConnectionContext* cntx);
   static void ZIncrBy(CmdArgList args, ConnectionContext* cntx);
   static void ZRange(CmdArgList args, ConnectionContext* cntx);
+  static void ZRank(CmdArgList args, ConnectionContext* cntx);
   static void ZRem(CmdArgList args, ConnectionContext* cntx);
   static void ZScore(CmdArgList args, ConnectionContext* cntx);
   static void ZRangeByScore(CmdArgList args, ConnectionContext* cntx);
   static void ZRemRangeByRank(CmdArgList args, ConnectionContext* cntx);
   static void ZRemRangeByScore(CmdArgList args, ConnectionContext* cntx);
   static void ZRevRange(CmdArgList args, ConnectionContext* cntx);
+  static void ZRevRank(CmdArgList args, ConnectionContext* cntx);
 
   static void ZRangeByScoreInternal(std::string_view key, std::string_view min_s,
                                     std::string_view max_s, const RangeParams& params,
@@ -64,6 +67,7 @@ class ZSetFamily {
   static void ZRemRangeGeneric(std::string_view key, const ZRangeSpec& range_spec,
                                ConnectionContext* cntx);
   static void ZRangeGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx);
+  static void ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx);
 
   struct ZParams {
     unsigned flags = 0;  // mask of ZADD_IN_ macros.
@@ -89,6 +93,12 @@ class ZSetFamily {
                                        std::string_view key);
   static OpResult<unsigned> OpRemRange(const OpArgs& op_args, std::string_view key,
                                        const ZRangeSpec& spec);
+
+  static OpResult<unsigned> OpRank(const OpArgs& op_args, std::string_view key,
+                                   std::string_view member, bool reverse);
+
+  static OpResult<unsigned> OpCount(const OpArgs& op_args, std::string_view key,
+                                    const ScoreInterval& interval);
 };
 
 }  // namespace dfly

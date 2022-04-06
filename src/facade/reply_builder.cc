@@ -5,12 +5,14 @@
 
 #include <absl/strings/numbers.h>
 #include <absl/strings/str_cat.h>
+#include <double-conversion/double-to-string.h>
 
 #include "base/logging.h"
 #include "facade/error.h"
 
 using namespace std;
 using absl::StrAppend;
+using namespace double_conversion;
 
 namespace facade {
 
@@ -100,7 +102,6 @@ void MCReplyBuilder::SendSimpleString(std::string_view str) {
   Send(v, ABSL_ARRAYSIZE(v));
 }
 
-
 void MCReplyBuilder::SendStored() {
   SendSimpleString("STORED");
 }
@@ -116,8 +117,7 @@ void MCReplyBuilder::SendMGetResponse(const OptResp* resp, uint32_t count) {
   for (unsigned i = 0; i < count; ++i) {
     if (resp[i]) {
       const auto& src = *resp[i];
-      absl::StrAppend(&header, "VALUE ", src.key, " ", src.mc_flag, " ",
-                      src.value.size());
+      absl::StrAppend(&header, "VALUE ", src.key, " ", src.mc_flag, " ", src.value.size());
       if (src.mc_ver) {
         absl::StrAppend(&header, " ", src.mc_ver);
       }
@@ -224,7 +224,11 @@ void RedisReplyBuilder::SendLong(long num) {
 }
 
 void RedisReplyBuilder::SendDouble(double val) {
-  SendBulkString(absl::StrCat(val));
+  char buf[64];
+  StringBuilder sb(buf, sizeof(buf));
+  CHECK(DoubleToStringConverter::EcmaScriptConverter().ToShortest(val, &sb));
+
+  SendBulkString(sb.Finalize());
 }
 
 void RedisReplyBuilder::SendMGetResponse(const OptResp* resp, uint32_t count) {
@@ -286,4 +290,4 @@ void ReqSerializer::SendCommand(std::string_view str) {
   ec_ = sink_->Write(v, ABSL_ARRAYSIZE(v));
 }
 
-}  // namespace dfly
+}  // namespace facade

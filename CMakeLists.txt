@@ -29,6 +29,12 @@ add_third_party(
           <SOURCE_DIR>/luaconf.h ${THIRD_PARTY_LIB_DIR}/lua/include
 )
 
+add_third_party(
+  dconv
+  URL https://github.com/google/double-conversion/archive/refs/tags/v3.2.0.tar.gz
+  LIB libdouble-conversion.a
+)
+
 Message(STATUS "THIRD_PARTY_LIB_DIR ${THIRD_PARTY_LIB_DIR}")
 
 include_directories(src)

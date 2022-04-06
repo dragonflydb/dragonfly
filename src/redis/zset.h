@@ -75,7 +75,7 @@ unsigned long zsetLength(const robj* zobj);
 void zsetConvert(robj* zobj, int encoding);
 void zsetConvertToZiplistIfNeeded(robj* zobj, size_t maxelelen);
 int zsetScore(robj* zobj, sds member, double* score);
-// unsigned long zslGetRank(zskiplist *zsl, double score, sds o);
+unsigned long zslGetRank(zskiplist *zsl, double score, sds ele);
 int zsetAdd(robj* zobj, double score, sds ele, int in_flags, int* out_flags, double* newscore);
 long zsetRank(robj* zobj, sds ele, int reverse);
 int zsetDel(robj* zobj, sds ele);
