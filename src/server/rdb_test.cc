@@ -89,13 +89,18 @@ TEST_F(RdbTest, Save) {
   FLAGS_list_max_listpack_size = 1;  // limit listpack to a single element.
 
   Run({"set", "string_key", "val"});
+  Run({"set", "large_key", string(511, 'L')});
+  Run({"set", "huge_key", string((1 << 17) - 10, 'H')});
+
   Run({"sadd", "set_key1", "val1", "val2"});
   Run({"sadd", "intset_key", "1", "2", "3"});
   Run({"hset", "small_hset", "field1", "val1", "field2", "val2"});
+  Run({"hset", "large_hset", "field1", string(510, 'V'), string(120, 'F'), "val2"});
 
   Run({"rpush", "list_key1", "val", "val2"});
-  Run({"rpush", "list_key2", "head", string(512, 'a'), string(512, 'b'), "tail"});
+  Run({"rpush", "list_key2", "head", string(511, 'a'), string(500, 'b'), "tail"});
 
+  Run({"zadd", "zs1", "1.1", "a", "-1.1", "b"});
   Run({"save"});
 }
 
