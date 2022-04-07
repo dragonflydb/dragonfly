@@ -371,12 +371,6 @@ void RobjWrapper::MakeInnerRoom(size_t current_cap, size_t desired, pmr::memory_
   inner_obj_ = newp;
 }
 
-quicklist* RobjWrapper::GetQL() const {
-  CHECK_EQ(type(), OBJ_LIST);
-  CHECK_EQ(encoding(), OBJ_ENCODING_QUICKLIST);
-
-  return (quicklist*)inner_obj_;
-}
 
 #pragma GCC push_options
 #pragma GCC optimize("Ofast")
@@ -580,11 +574,6 @@ unsigned CompactObj::Encoding() const {
   }
 }
 
-quicklist* CompactObj::GetQL() const {
-  CHECK_EQ(taglen_, ROBJ_TAG);
-  return u_.r_obj.GetQL();
-}
-
 // Takes ownership over o.
 void CompactObj::ImportRObj(robj* o) {
   CHECK(1 == o->refcount || o->refcount == OBJ_STATIC_REFCOUNT);
@@ -620,12 +609,7 @@ robj* CompactObj::AsRObj() const {
   res->type = u_.r_obj.type();
 
   if (res->type == OBJ_SET) {
-    if (kEncodingIntSet == u_.r_obj.encoding()) {
-      enc = OBJ_ENCODING_INTSET;
-    } else {
-      DCHECK_EQ(kEncodingStrMap, u_.r_obj.encoding());
-      enc = OBJ_ENCODING_HT;
-    }
+    LOG(FATAL) << "Should not call AsRObj for sets";
   }
   res->encoding = enc;
   res->lru = 0;  // u_.r_obj.unneeded;
@@ -648,12 +632,13 @@ void CompactObj::SyncRObj() {
 
   unsigned enc = obj->encoding;
   if (obj->type == OBJ_SET) {
-    if (OBJ_ENCODING_INTSET == enc) {
+    LOG(FATAL) << "Should not reach";
+    /*if (OBJ_ENCODING_INTSET == enc) {
       enc = kEncodingIntSet;
     } else {
       DCHECK_EQ(OBJ_ENCODING_HT, enc);
       enc = kEncodingStrMap;
-    }
+    }*/
   }
   u_.r_obj.Init(obj->type, enc, obj->ptr);
 }

@@ -5,7 +5,7 @@
 #pragma once
 
 #include "facade/op_status.h"
-#include "server/common_types.h"
+#include "server/common.h"
 
 namespace dfly {
 

@@ -7,7 +7,7 @@
 #include <absl/container/flat_hash_set.h>
 
 #include "facade/conn_context.h"
-#include "server/common_types.h"
+#include "server/common.h"
 #include "util/fibers/fibers_ext.h"
 
 namespace dfly {

@@ -9,6 +9,7 @@
 
 #include <string_view>
 #include <vector>
+
 #include "facade/facade_types.h"
 
 namespace dfly {
@@ -70,5 +71,9 @@ inline void ToLower(const MutableSlice* val) {
 }
 
 bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes);
+
+// Cached values, updated frequently to represent the correct state of the system.
+extern std::atomic_uint64_t used_mem_peak;
+extern std::atomic_uint64_t used_mem_current;
 
 }  // namespace dfly

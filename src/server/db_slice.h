@@ -1,4 +1,4 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -9,7 +9,7 @@
 
 #include "core/intent_lock.h"
 #include "facade/op_status.h"
-#include "server/common_types.h"
+#include "server/common.h"
 #include "server/table.h"
 
 namespace util {
@@ -101,8 +101,13 @@ class DbSlice {
     memory_budget_ = budget;
   }
 
-  uint64_t expire_base() const {
-    return expire_base_[0];
+  // returns absolute time of the expiration.
+  uint64_t ExpireTime(ExpireIterator it) const {
+    return it.is_done() ? 0 : expire_base_[0] + it->second.duration();
+  }
+
+  ExpirePeriod FromAbsoluteTime(uint64_t time_ms) const {
+    return ExpirePeriod{time_ms - expire_base_[0]};
   }
 
   // returns wall clock in millis as it has been set via UpdateExpireClock.

@@ -15,7 +15,7 @@
 #include "core/intent_lock.h"
 #include "core/tx_queue.h"
 #include "facade/op_status.h"
-#include "server/common_types.h"
+#include "server/common.h"
 #include "server/table.h"
 #include "util/fibers/fibers_ext.h"
 

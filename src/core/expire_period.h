@@ -40,13 +40,13 @@ inline void ExpirePeriod::Set(uint64_t ms) {
 
   if (ms < kBarrier) {
     val_ = ms;
-    precision_ = 0;
+    precision_ = 0;   // ms
     return;
   }
 
   precision_ = 1;
   if (ms < kBarrier << 10) {
-    ms = (ms + 500) / 1000;
+    ms = (ms + 500) / 1000;   // seconds
   }
   val_ = ms >= kBarrier ? kBarrier - 1 : ms;
 }

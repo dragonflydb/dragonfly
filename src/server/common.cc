@@ -1,19 +1,23 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
+
+#include "server/common.h"
 
 #include <absl/strings/str_cat.h>
 
 #include "base/logging.h"
-#include "server/common_types.h"
 #include "server/error.h"
 #include "server/server_state.h"
 
 namespace dfly {
 
-using std::string;
+using namespace std;
 
 thread_local ServerState ServerState::state_;
+
+atomic_uint64_t used_mem_peak(0);
+atomic_uint64_t used_mem_current(0);
 
 ServerState::ServerState() {
 }

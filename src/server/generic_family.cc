@@ -74,7 +74,7 @@ void Renamer::Find(Transaction* t) {
     res->found = IsValid(it);
     if (IsValid(it)) {
       res->ref_val = it->second.AsRef();
-      res->expire_ts = IsValid(exp_it) ? db_slice.expire_base() + exp_it->second.duration() : 0;
+      res->expire_ts = db_slice.ExpireTime(exp_it);
     }
     return OpStatus::OK;
   };
@@ -535,7 +535,7 @@ OpStatus GenericFamily::OpExpire(const OpArgs& op_args, string_view key,
   if (rel_msec <= 0) {
     CHECK(db_slice.Del(op_args.db_ind, it));
   } else if (IsValid(expire_it)) {
-    expire_it->second.Set(rel_msec + now_msec - db_slice.expire_base());
+    expire_it->second = db_slice.FromAbsoluteTime(now_msec + rel_msec);
   } else {
     db_slice.Expire(op_args.db_ind, it, rel_msec + now_msec);
   }
@@ -545,14 +545,14 @@ OpStatus GenericFamily::OpExpire(const OpArgs& op_args, string_view key,
 
 OpResult<uint64_t> GenericFamily::OpTtl(Transaction* t, EngineShard* shard, string_view key) {
   auto& db_slice = shard->db_slice();
-  auto [it, expire] = db_slice.FindExt(t->db_index(), key);
+  auto [it, expire_it] = db_slice.FindExt(t->db_index(), key);
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
 
-  if (!IsValid(expire))
+  if (!IsValid(expire_it))
     return OpStatus::SKIPPED;
 
-  int64_t ttl_ms = db_slice.expire_base() + expire->second.duration() - db_slice.Now();
+  int64_t ttl_ms = db_slice.ExpireTime(expire_it) - db_slice.Now();
   DCHECK_GT(ttl_ms, 0);  // Otherwise FindExt would return null.
   return ttl_ms;
 }
@@ -601,8 +601,7 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     is_prior_list = (to_it->second.ObjType() == OBJ_LIST);
   }
 
-  uint64_t exp_ts =
-      IsValid(from_expire) ? db_slice.expire_base() + from_expire->second.duration() : 0;
+  uint64_t exp_ts = db_slice.ExpireTime(from_expire);
 
   // we keep the value we want to move.
   PrimeValue from_obj = std::move(from_it->second);

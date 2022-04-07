@@ -74,7 +74,7 @@ quicklistEntry QLEntry() {
 }
 
 quicklist* GetQL(const PrimeValue& mv) {
-  return mv.GetQL();
+  return (quicklist*)mv.RObjPtr();
 }
 
 void* listPopSaver(unsigned char* data, size_t sz) {
@@ -583,7 +583,7 @@ OpResult<uint32_t> ListFamily::OpRem(const OpArgs& op_args, std::string_view key
   auto res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_LIST);
   if (!res)
     return res.status();
-  quicklist* ql = res.value()->second.GetQL();
+  quicklist* ql = GetQL(res.value()->second);
 
   int iter_direction = AL_START_HEAD;
   long long index = 0;
@@ -620,7 +620,7 @@ OpStatus ListFamily::OpSet(const OpArgs& op_args, std::string_view key, std::str
   auto res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_LIST);
   if (!res)
     return res.status();
-  quicklist* ql = res.value()->second.GetQL();
+  quicklist* ql = GetQL(res.value()->second);
 
   int replaced = quicklistReplaceAtIndex(ql, index, elem.data(), elem.size());
   if (!replaced) {
@@ -633,7 +633,7 @@ OpStatus ListFamily::OpTrim(const OpArgs& op_args, std::string_view key, long st
   auto res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_LIST);
   if (!res)
     return res.status();
-  quicklist* ql = res.value()->second.GetQL();
+  quicklist* ql = GetQL(res.value()->second);
   long llen = quicklistCount(ql);
 
   /* convert negative indexes */
@@ -673,7 +673,7 @@ OpResult<StringVec> ListFamily::OpRange(const OpArgs& op_args, std::string_view 
   if (!res)
     return res.status();
 
-  quicklist* ql = res.value()->second.GetQL();
+  quicklist* ql = GetQL(res.value()->second);
   long llen = quicklistCount(ql);
 
   /* convert negative indexes */

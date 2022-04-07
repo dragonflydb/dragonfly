@@ -12,7 +12,6 @@
 #include "core/small_string.h"
 
 typedef struct redisObject robj;
-typedef struct quicklist quicklist;
 
 namespace dfly {
 
@@ -39,7 +38,6 @@ class RobjWrapper {
 
   unsigned type() const { return type_; }
   unsigned encoding() const { return encoding_; }
-  quicklist* GetQL() const;
   void* inner_obj() const { return inner_obj_;}
 
   std::string_view AsView() const {
@@ -197,8 +195,6 @@ class CompactObj {
 
   unsigned Encoding() const;
   unsigned ObjType() const;
-
-  quicklist* GetQL() const;
 
   void* RObjPtr() const {
     return u_.r_obj.inner_obj();

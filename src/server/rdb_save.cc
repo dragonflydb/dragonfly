@@ -116,30 +116,30 @@ inline unsigned SerializeLen(uint64_t len, uint8_t* buf) {
   return 1 + 8;
 }
 
-uint8_t RdbObjectType(const robj* o) {
-  switch (o->type) {
+uint8_t RdbObjectType(unsigned type, unsigned encoding) {
+  switch (type) {
     case OBJ_STRING:
       return RDB_TYPE_STRING;
     case OBJ_LIST:
-      if (o->encoding == OBJ_ENCODING_QUICKLIST)
+      if (encoding == OBJ_ENCODING_QUICKLIST)
         return RDB_TYPE_LIST_QUICKLIST;
       break;
     case OBJ_SET:
-      if (o->encoding == OBJ_ENCODING_INTSET)
+      if (encoding == kEncodingIntSet)
         return RDB_TYPE_SET_INTSET;
-      else if (o->encoding == OBJ_ENCODING_HT)
+      else if (encoding == kEncodingStrMap)
         return RDB_TYPE_SET;
       break;
     case OBJ_ZSET:
-      if (o->encoding == OBJ_ENCODING_LISTPACK)
+      if (encoding == OBJ_ENCODING_LISTPACK)
         return RDB_TYPE_ZSET_ZIPLIST;  // we save using the old ziplist encoding.
-      else if (o->encoding == OBJ_ENCODING_SKIPLIST)
+      else if (encoding == OBJ_ENCODING_SKIPLIST)
         return RDB_TYPE_ZSET_2;
       break;
     case OBJ_HASH:
-      if (o->encoding == OBJ_ENCODING_LISTPACK)
+      if (encoding == OBJ_ENCODING_LISTPACK)
         return RDB_TYPE_HASH_ZIPLIST;
-      else if (o->encoding == OBJ_ENCODING_HT)
+      else if (encoding == OBJ_ENCODING_HT)
         return RDB_TYPE_HASH;
       break;
     case OBJ_STREAM:
@@ -147,7 +147,7 @@ uint8_t RdbObjectType(const robj* o) {
     case OBJ_MODULE:
       return RDB_TYPE_MODULE_2;
   }
-  LOG(FATAL) << "Unknown encoding " << o->encoding << " for type " << o->type;
+  LOG(FATAL) << "Unknown encoding " << encoding << " for type " << type;
   return 0; /* avoid warning */
 }
 
@@ -159,7 +159,8 @@ RdbSerializer::RdbSerializer(io::Sink* s) : sink_(s), mem_buf_{4_KB}, tmp_buf_(n
 RdbSerializer::~RdbSerializer() {
 }
 
-error_code RdbSerializer::SaveKeyVal(string_view key, const robj* val, uint64_t expire_ms) {
+// Called by snapshot
+error_code RdbSerializer::SaveEntry(PrimeIterator it, uint64_t expire_ms) {
   uint8_t buf[16];
 
   /* Save the expire time */
@@ -169,71 +170,54 @@ error_code RdbSerializer::SaveKeyVal(string_view key, const robj* val, uint64_t 
     RETURN_ON_ERR(WriteRaw(Bytes{buf, 9}));
   }
 
-  uint8_t rdb_type = RdbObjectType(val);
-  RETURN_ON_ERR(WriteOpcode(rdb_type));
-  RETURN_ON_ERR(SaveString(key));
+  const PrimeKey& pk = it->first;
+  const PrimeValue& pv = it->second;
 
-  return SaveObject(val);
-}
-
-error_code RdbSerializer::SaveKeyVal(string_view key, string_view value, uint64_t expire_ms) {
-  uint8_t buf[16];
-
-  /* Save the expire time */
-  if (expire_ms > 0) {
-    buf[0] = RDB_OPCODE_EXPIRETIME_MS;
-    absl::little_endian::Store64(buf + 1, expire_ms);
-    RETURN_ON_ERR(WriteRaw(Bytes{buf, 9}));
-  }
+  string_view key = pk.GetSlice(&tmp_str_);
+  unsigned obj_type = pv.ObjType();
+  unsigned encoding = pv.Encoding();
+  uint8_t rdb_type = RdbObjectType(obj_type, encoding);
 
   DVLOG(2) << "Saving keyval start " << key;
 
-  RETURN_ON_ERR(WriteOpcode(RDB_TYPE_STRING));
+  ++type_freq_map_[rdb_type];
+  RETURN_ON_ERR(WriteOpcode(rdb_type));
 
   RETURN_ON_ERR(SaveString(key));
 
-  RETURN_ON_ERR(SaveString(value));
+  if (obj_type == OBJ_STRING) {
+    auto opt_int = pv.TryGetInt();
+    if (opt_int) {
+      return SaveLongLongAsString(*opt_int);
+    }
+    return SaveString(pv.GetSlice(&tmp_str_));
+  }
 
-  return error_code{};
+  return SaveObject(pv);
 }
 
-error_code RdbSerializer::SaveObject(const robj* o) {
-  if (o->type == OBJ_STRING) {
-    /* Save a string value */
-    return SaveStringObject(o);
+error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
+  unsigned obj_type = pv.ObjType();
+  CHECK_NE(obj_type, OBJ_STRING);
+
+  if (obj_type == OBJ_LIST) {
+    return SaveListObject(pv.AsRObj());
   }
 
-  if (o->type == OBJ_LIST) {
-    return SaveListObject(o);
+  if (obj_type == OBJ_SET) {
+    return SaveSetObject(pv);
   }
 
-  if (o->type == OBJ_SET) {
-    return SaveSetObject(o);
+  if (obj_type == OBJ_HASH) {
+    return SaveHSetObject(pv.AsRObj());
   }
 
-  if (o->type == OBJ_HASH) {
-    return SaveHSetObject(o);
+  if (obj_type == OBJ_ZSET) {
+    return SaveZSetObject(pv.AsRObj());
   }
 
-  if (o->type == OBJ_ZSET) {
-    return SaveZSetObject(o);
-  }
-
-  LOG(FATAL) << "Not implemented " << o->type;
+  LOG(FATAL) << "Not implemented " << obj_type;
   return error_code{};
-}
-
-error_code RdbSerializer::SaveStringObject(const robj* obj) {
-  /* Avoid to decode the object, then encode it again, if the
-   * object is already integer encoded. */
-  if (obj->encoding == OBJ_ENCODING_INT) {
-    return SaveLongLongAsString(long(obj->ptr));
-  }
-
-  CHECK(sdsEncodedObject(obj));
-  sds s = reinterpret_cast<sds>(obj->ptr);
-
-  return SaveString(std::string_view{s, sdslen(s)});
 }
 
 error_code RdbSerializer::SaveListObject(const robj* obj) {
@@ -285,9 +269,9 @@ error_code RdbSerializer::SaveListObject(const robj* obj) {
   return error_code{};
 }
 
-error_code RdbSerializer::SaveSetObject(const robj* obj) {
-  if (obj->encoding == OBJ_ENCODING_HT) {
-    dict* set = (dict*)obj->ptr;
+error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
+  if (obj.Encoding() == kEncodingStrMap) {
+    dict* set = (dict*)obj.RObjPtr();
 
     RETURN_ON_ERR(SaveLen(dictSize(set)));
 
@@ -300,12 +284,12 @@ error_code RdbSerializer::SaveSetObject(const robj* obj) {
 
       RETURN_ON_ERR(SaveString(string_view{ele, sdslen(ele)}));
     }
-  } else if (obj->encoding == OBJ_ENCODING_INTSET) {
-    size_t len = intsetBlobLen((intset*)obj->ptr);
-
-    RETURN_ON_ERR(SaveString(string_view{(char*)obj->ptr, len}));
   } else {
-    LOG(FATAL) << "Unknown set encoding " << obj->encoding;
+    CHECK_EQ(obj.Encoding(), kEncodingIntSet);
+    intset* is = (intset*)obj.RObjPtr();
+    size_t len = intsetBlobLen(is);
+
+    RETURN_ON_ERR(SaveString(string_view{(char*)is, len}));
   }
 
   return error_code{};
@@ -516,6 +500,7 @@ error_code RdbSerializer::SaveLzfBlob(const io::Bytes& src, size_t uncompressed_
 }
 
 struct RdbSaver::Impl {
+  // used for serializing non-body components in the calling fiber.
   RdbSerializer serializer;
   SliceSnapshot::StringChannel channel;
   vector<unique_ptr<SliceSnapshot>> shard_snapshots;
@@ -547,7 +532,7 @@ std::error_code RdbSaver::SaveHeader() {
   return error_code{};
 }
 
-error_code RdbSaver::SaveBody() {
+error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
   RETURN_ON_ERR(impl_->serializer.FlushMem());
   VLOG(1) << "SaveBody";
 
@@ -580,6 +565,14 @@ error_code RdbSaver::SaveBody() {
 
   RETURN_ON_ERR(SaveEpilog());
 
+  if (freq_map) {
+    freq_map->clear();
+    for (auto& ptr : impl_->shard_snapshots) {
+      const RdbTypeFreqMap& src_map = ptr->serializer()->type_freq_map();
+      for (const auto& k_v : src_map)
+        (*freq_map)[k_v.first] += k_v.second;
+    }
+  }
   return error_code{};
 }
 
@@ -604,7 +597,7 @@ error_code RdbSaver::SaveAux() {
   RETURN_ON_ERR(SaveAuxFieldStrInt("ctime", time(NULL)));
 
   // TODO: to implement used-mem caching.
-  RETURN_ON_ERR(SaveAuxFieldStrInt("used-mem", 666666666));
+  RETURN_ON_ERR(SaveAuxFieldStrInt("used-mem", used_mem_current.load(memory_order_relaxed)));
 
   RETURN_ON_ERR(SaveAuxFieldStrInt("aof-preamble", aof_preamble));
 

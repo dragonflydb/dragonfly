@@ -30,6 +30,7 @@ class SliceSnapshot {
     return snapshot_version_;
   }
 
+  RdbSerializer* serializer() { return rdb_serializer_.get(); }
  private:
   void FiberFunc();
   bool FlushSfile(bool force);
@@ -50,6 +51,7 @@ class SliceSnapshot {
   // version upper bound for entries that should be saved (not included).
   uint64_t snapshot_version_ = 0;
   PrimeTable* prime_table_;
+  ExpireTable* expire_tbl_;
   DbSlice* db_slice_ = nullptr;
   StringChannel* dest_;
 

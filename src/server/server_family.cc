@@ -75,9 +75,6 @@ error_code CreateDirs(fs::path dir_path) {
 
 }  // namespace
 
-atomic_uint64_t used_mem_peak(0);
-atomic_uint64_t used_mem_current(0);
-
 ServerFamily::ServerFamily(Service* service) : service_(*service), ess_(service->shard_set()) {
   start_time_ = time(NULL);
   last_save_.store(start_time_, memory_order_release);
@@ -327,12 +324,14 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
     cntx->transaction->ScheduleSingleHop(std::move(cb));
 
     // perform snapshot serialization, block the current fiber until it completes.
-    ec = saver.SaveBody();
-  }
+    RdbTypeFreqMap freq_map;
+    ec = saver.SaveBody(&freq_map);
 
-  if (ec) {
-    (*cntx)->SendError(res.error().message());
-    return;
+    // TODO: needs protection from reads.
+    last_save_freq_map_.clear();
+    for (const auto& k_v : freq_map) {
+      last_save_freq_map_.push_back(k_v);
+    }
   }
 
   pool.Await([](auto*) { ServerState::tlocal()->set_gstate(GlobalState::IDLE); });

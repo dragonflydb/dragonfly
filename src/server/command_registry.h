@@ -10,7 +10,7 @@
 #include <functional>
 
 #include "base/function2.hpp"
-#include "server/common_types.h"
+#include "server/common.h"
 
 namespace dfly {
 

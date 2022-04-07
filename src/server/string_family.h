@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "server/common_types.h"
+#include "server/common.h"
 #include "server/engine_shard_set.h"
 #include "util/proactor_pool.h"
 

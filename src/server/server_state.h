@@ -1,4 +1,4 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "core/interpreter.h"
-#include "server/common_types.h"
+#include "server/common.h"
 #include "server/global_state.h"
 #include "util/sliding_counter.h"
 

@@ -1,4 +1,4 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -95,6 +95,8 @@ class ServerFamily {
   GlobalState global_state_;
   time_t start_time_ = 0;  // in seconds, epoch time.
 
+  // RDB_TYPE_xxx -> count mapping.
+  std::vector<std::pair<unsigned, size_t>> last_save_freq_map_;
 };
 
 }  // namespace dfly

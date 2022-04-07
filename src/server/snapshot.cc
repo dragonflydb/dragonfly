@@ -25,7 +25,7 @@ namespace this_fiber = ::boost::this_fiber;
 using boost::fibers::fiber;
 
 SliceSnapshot::SliceSnapshot(PrimeTable* prime, ExpireTable* et, StringChannel* dest)
-    : prime_table_(prime), dest_(dest) {
+    : prime_table_(prime), expire_tbl_(et), dest_(dest) {
 }
 
 SliceSnapshot::~SliceSnapshot() {
@@ -71,19 +71,13 @@ void SliceSnapshot::Join() {
 static_assert(sizeof(PrimeTable::const_iterator) == 16);
 
 void SliceSnapshot::SerializeSingleEntry(PrimeIterator it) {
-  error_code ec;
 
-  string tmp;
-
-  auto key = it->first.GetSlice(&tmp);
-
-  // TODO: fetch expire.
-  if (it->second.ObjType() == OBJ_STRING) {
-    ec = rdb_serializer_->SaveKeyVal(key, it->second.ToString(), 0);
-  } else {
-    robj* obj = it->second.AsRObj();
-    ec = rdb_serializer_->SaveKeyVal(key, obj, 0);
+  uint64_t expire_time = 0;
+  if (it->second.HasExpire()) {
+    auto eit = expire_tbl_->Find(it->first);
+    expire_time = db_slice_->ExpireTime(eit);
   }
+  error_code ec = rdb_serializer_->SaveEntry(it, expire_time);
   CHECK(!ec);  // we write to StringFile.
   ++serialized_;
 }

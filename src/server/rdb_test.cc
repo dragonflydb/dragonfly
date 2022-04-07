@@ -101,7 +101,11 @@ TEST_F(RdbTest, Save) {
   Run({"rpush", "list_key2", "head", string(511, 'a'), string(500, 'b'), "tail"});
 
   Run({"zadd", "zs1", "1.1", "a", "-1.1", "b"});
+  Run({"zadd", "zs2", "1.1", string(510, 'a'), "-1.1", string(502, 'b')});
   Run({"save"});
+}
+
+TEST_F(RdbTest, Load) {
 }
 
 }  // namespace dfly

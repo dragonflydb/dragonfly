@@ -9,7 +9,7 @@ extern "C" {
 
 #include "base/io_buf.h"
 #include "io/io.h"
-#include "server/common_types.h"
+#include "server/common.h"
 
 namespace dfly {
 

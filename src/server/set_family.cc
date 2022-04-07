@@ -1046,8 +1046,9 @@ OpResult<StringVec> SetFamily::OpInter(const Transaction* t, EngineShard* es, bo
     OpResult<PrimeIterator> find_res = es->db_slice().Find(t->db_index(), keys[i], OBJ_SET);
     if (!find_res)
       return find_res.status();
-    robj* sobj = find_res.value()->second.AsRObj();
-    sets[i] = make_pair(sobj->ptr, unsigned(sobj->encoding));
+    const PrimeValue& pv = find_res.value()->second;
+    void* ptr = pv.RObjPtr();
+    sets[i] = make_pair(ptr, pv.Encoding());
   }
 
   auto comp = [](const SetType& left, const SetType& right) {
