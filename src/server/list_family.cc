@@ -258,9 +258,12 @@ void ListFamily::LIndex(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpIndex(OpArgs{shard, t->db_index()}, key, index);
   };
+
   OpResult<string> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
     (*cntx)->SendBulkString(result.value());
+  } else if (result.status() == OpStatus::WRONG_TYPE) {
+    (*cntx)->SendError(result.status());
   } else {
     (*cntx)->SendNull();
   }

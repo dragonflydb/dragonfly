@@ -676,8 +676,8 @@ void CompactObj::SetString(std::string_view str) {
 
     if (str.size() <= kInlineLen) {
       SetMeta(str.size(), mask);
-
-      memcpy(u_.inline_str, str.data(), str.size());
+      if (!str.empty())
+        memcpy(u_.inline_str, str.data(), str.size());
       return;
     }
   }

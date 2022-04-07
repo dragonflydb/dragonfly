@@ -12,6 +12,7 @@ extern "C" {
 }
 
 #include "base/logging.h"
+#include "base/stl_util.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
@@ -158,15 +159,22 @@ ResultSetView DiffResultVec(const ResultStringVec& result_vec, ShardId src_shard
 OpResult<SvArray> InterResultVec(const ResultStringVec& result_vec, unsigned required_shard_cnt) {
   absl::flat_hash_map<std::string_view, unsigned> uniques;
 
+  for (const auto& res : result_vec) {
+    if (!res && !base::_in(res.status(), {OpStatus::SKIPPED, OpStatus::KEY_NOTFOUND}))
+      return res.status();
+  }
+
+  for (const auto& res : result_vec) {
+    if (res.status() == OpStatus::KEY_NOTFOUND)
+      return OpStatus::OK;  // empty set.
+  }
+
   bool first = true;
   for (const auto& res : result_vec) {
     if (res.status() == OpStatus::SKIPPED)
-      continue;
-    if (res.status() == OpStatus::KEY_NOTFOUND)
-      return SvArray{};
-    if (!res) {
-      return res.status();
-    }
+        continue;
+
+    DCHECK(res);  // we handled it above.
 
     // I use this awkward 'first' condition instead of table[s]++ deliberately.
     // I do not want to add keys that I know will not stay in the set.
@@ -1042,14 +1050,24 @@ OpResult<StringVec> SetFamily::OpInter(const Transaction* t, EngineShard* es, bo
   // we must copy by value because AsRObj is temporary.
   vector<SetType> sets(keys.size());
 
+  OpStatus status = OpStatus::OK;
+
   for (size_t i = 0; i < keys.size(); ++i) {
     OpResult<PrimeIterator> find_res = es->db_slice().Find(t->db_index(), keys[i], OBJ_SET);
-    if (!find_res)
-      return find_res.status();
+    if (!find_res) {
+      if (status == OpStatus::OK || status == OpStatus::KEY_NOTFOUND ||
+        find_res.status() != OpStatus::KEY_NOTFOUND) {
+        status = find_res.status();
+      }
+      continue;
+    }
     const PrimeValue& pv = find_res.value()->second;
     void* ptr = pv.RObjPtr();
     sets[i] = make_pair(ptr, pv.Encoding());
   }
+
+  if (status != OpStatus::OK)
+    return status;
 
   auto comp = [](const SetType& left, const SetType& right) {
     return SetTypeLen(left) < SetTypeLen(right);

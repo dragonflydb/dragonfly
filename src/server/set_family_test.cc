@@ -80,6 +80,11 @@ TEST_F(SetFamilyTest, SInter) {
   EXPECT_THAT(resp[0], IntArg(2));
   resp = Run({"smembers", "d"});
   EXPECT_THAT(resp, UnorderedElementsAre("3", "2"));
+
+  Run({"set", "y", ""});
+  resp = Run({"sinter", "x", "y"});
+  ASSERT_EQ(1, GetDebugInfo("IO0").shards_count);
+  EXPECT_THAT(resp, ElementsAre(ErrArg("WRONGTYPE Operation against a key")));
 }
 
 TEST_F(SetFamilyTest, SMove) {

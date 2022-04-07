@@ -65,7 +65,6 @@ class CompactObjectTest : public ::testing::Test {
 TEST_F(CompactObjectTest, Basic) {
   robj* rv = createRawStringObject("foo", 3);
   cobj_.ImportRObj(rv);
-  return;
 
   CompactObj a;
   a.SetExpire(true);
@@ -83,6 +82,8 @@ TEST_F(CompactObjectTest, Basic) {
   CompactObj c = a.AsRef();
   EXPECT_EQ(a, c);
   EXPECT_TRUE(c.HasExpire());
+
+  cobj_.SetString(string_view{});
 }
 
 TEST_F(CompactObjectTest, NonInline) {
