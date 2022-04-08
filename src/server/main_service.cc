@@ -37,7 +37,7 @@ extern "C" {
 // TODO: to move to absl flags and keep legacy flags only for glog library.
 // absl flags allow parsing of custom types and allow specifying which flags appear
 // for helpshort.
-DEFINE_uint32(port, 6380, "Redis port");
+DEFINE_uint32(port, 6379, "Redis port");
 DEFINE_uint32(memcache_port, 0, "Memcached port");
 DECLARE_string(requirepass);
 DEFINE_uint64(maxmemory, 0, "Limit on maximum-memory that is used by the database");
@@ -997,18 +997,20 @@ void Service::RegisterCommands() {
 
   server_family_.Register(&registry_);
 
-  LOG(INFO) << "Multi-key commands are: ";
 
-  registry_.Traverse([](std::string_view key, const CI& cid) {
-    if (cid.is_multi_key()) {
-      string key_len;
-      if (cid.last_key_pos() < 0)
-        key_len = "unlimited";
-      else
-        key_len = absl::StrCat(cid.last_key_pos() - cid.first_key_pos() + 1);
-      LOG(INFO) << "    " << key << ": with " << key_len << " keys";
-    }
-  });
+  if (VLOG_IS_ON(1)) {
+    LOG(INFO) << "Multi-key commands are: ";
+    registry_.Traverse([](std::string_view key, const CI& cid) {
+      if (cid.is_multi_key()) {
+        string key_len;
+        if (cid.last_key_pos() < 0)
+          key_len = "unlimited";
+        else
+          key_len = absl::StrCat(cid.last_key_pos() - cid.first_key_pos() + 1);
+        LOG(INFO) << "    " << key << ": with " << key_len << " keys";
+      }
+    });
+  }
 }
 
 }  // namespace dfly

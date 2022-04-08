@@ -103,6 +103,18 @@ void ServerFamily::Init(util::AcceptServer* acceptor) {
   };
 
   task_10ms_ = pb_task_->AwaitBrief([&] { return pb_task_->AddPeriodic(10, cache_cb); });
+
+  fs::path data_path = fs::current_path();
+
+  if (!FLAGS_dir.empty()) {
+    data_path = FLAGS_dir;
+
+    error_code ec;
+
+    data_path = fs::canonical(data_path, ec);
+  }
+
+  LOG(INFO) << "Data directory is " << data_path;
 }
 
 void ServerFamily::Shutdown() {

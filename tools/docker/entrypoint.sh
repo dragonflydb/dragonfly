@@ -2,9 +2,10 @@
 
 set -e
 
-# first arg is `--some-option`
+# first arg is `-some-option`
 if [ "${1#-}" != "$1" ]; then
-	set -- dragonfly "$@"
+    # override arguments by prepending "dragonfly --logtostderr" to them.
+	set -- dragonfly --logtostderr "$@"
 fi
 
 # allow the docker container to be started with `--user`
