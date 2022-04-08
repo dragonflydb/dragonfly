@@ -975,7 +975,6 @@ bool Transaction::CancelInShard(EngineShard* shard) {
 // runs in engine-shard thread.
 ArgSlice Transaction::ShardArgsInShard(ShardId sid) const {
   DCHECK(!args_.empty());
-  DCHECK_NOTNULL(EngineShard::tlocal());
 
   // We can read unique_shard_cnt_  only because ShardArgsInShard is called after IsArmedInShard
   // barrier.

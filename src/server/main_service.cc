@@ -853,7 +853,9 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
       cntx->transaction->SetExecCmd(scmd.descr);
       CmdArgList cmd_arg_list{str_list.data(), str_list.size()};
-      cntx->transaction->InitByArgs(cntx->conn_state.db_index, cmd_arg_list);
+      if (IsTransactional(scmd.descr)) {
+        cntx->transaction->InitByArgs(cntx->conn_state.db_index, cmd_arg_list);
+      }
       scmd.descr->Invoke(cmd_arg_list, cntx);
       if (rb->GetError())
         break;

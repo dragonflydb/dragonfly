@@ -114,6 +114,10 @@ TEST_F(DflyEngineTest, MultiEmpty) {
 
   ASSERT_THAT(resp[0], ArrLen(0));
   ASSERT_FALSE(service_->IsShardSetLocked());
+
+  Run({"multi"});
+  ASSERT_THAT(Run({"ping", "foo"}), RespEq("QUEUED"));
+  EXPECT_THAT(Run({"exec"}), ElementsAre("foo"));
 }
 
 TEST_F(DflyEngineTest, MultiSeq) {
@@ -176,6 +180,12 @@ TEST_F(DflyEngineTest, MultiConsistent) {
   ASSERT_FALSE(service_->IsLocked(0, kKey1));
   ASSERT_FALSE(service_->IsLocked(0, kKey4));
   ASSERT_FALSE(service_->IsShardSetLocked());
+}
+
+TEST_F(DflyEngineTest, MultiWeirdCommands) {
+  Run({"multi"});
+  ASSERT_THAT(Run({"eval", "return 42", "0"}), RespEq("QUEUED"));
+  EXPECT_THAT(Run({"exec"}), ElementsAre(IntArg(42)));
 }
 
 TEST_F(DflyEngineTest, MultiRename) {
