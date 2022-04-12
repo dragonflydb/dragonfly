@@ -53,12 +53,17 @@ class RdbLoader {
   using OpaqueBuf = std::pair<void*, size_t>;
   io::Result<OpaqueBuf> FetchGenericString(int flags);
   io::Result<OpaqueBuf> FetchIntegerObject(int enctype, int flags, size_t* lenptr);
+  io::Result<double> FetchBinaryDouble();
+  io::Result<double> FetchDouble();
 
   ::io::Result<sds> ReadKey();
   ::io::Result<robj*> ReadObj(int rdbtype);
   ::io::Result<robj*> ReadSet();
+  ::io::Result<robj*> ReadIntSet();
   ::io::Result<robj*> ReadHZiplist();
-  ::io::Result<robj*> ReadZSet();
+  ::io::Result<robj*> ReadHSet();
+  ::io::Result<robj*> ReadZSet(int rdbtype);
+  ::io::Result<robj*> ReadZSetZL();
   ::io::Result<robj*> ReadListQuicklist(int rdbtype);
 
   std::error_code EnsureRead(size_t min_sz) {

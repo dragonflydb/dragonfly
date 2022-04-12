@@ -72,7 +72,6 @@ API 1.0
   - [X] DBSIZE
   - [ ] BGSAVE
   - [X] SAVE
-  - [X] DBSIZE
   - [X] DEBUG
   - [X] EXEC
   - [X] FLUSHALL
