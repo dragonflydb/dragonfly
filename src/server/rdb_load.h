@@ -13,9 +13,11 @@ extern "C" {
 
 namespace dfly {
 
+class EngineShardSet;
+
 class RdbLoader {
  public:
-  explicit RdbLoader();
+  explicit RdbLoader(EngineShardSet* ess);
 
   ~RdbLoader();
 
@@ -23,6 +25,15 @@ class RdbLoader {
 
  private:
   using MutableBytes = ::io::MutableBytes;
+  struct ObjSettings;
+
+  struct Item {
+    sds key;
+    robj* val;
+    uint64_t expire_ms;
+  };
+  using ItemsBuf = std::vector<Item>;
+
 
   void ResizeDb(size_t key_num, size_t expire_num);
   std::error_code HandleAux();
@@ -44,7 +55,11 @@ class RdbLoader {
   io::Result<OpaqueBuf> FetchIntegerObject(int enctype, int flags, size_t* lenptr);
 
   ::io::Result<sds> ReadKey();
-  ::io::Result<robj*> ReadObj(int type);
+  ::io::Result<robj*> ReadObj(int rdbtype);
+  ::io::Result<robj*> ReadSet();
+  ::io::Result<robj*> ReadHZiplist();
+  ::io::Result<robj*> ReadZSet();
+  ::io::Result<robj*> ReadListQuicklist(int rdbtype);
 
   std::error_code EnsureRead(size_t min_sz) {
     if (mem_buf_.InputLen() >= min_sz)
@@ -54,10 +69,16 @@ class RdbLoader {
   }
 
   std::error_code EnsureReadInternal(size_t min_sz);
-  std::error_code LoadKeyValPair(int type);
+  std::error_code LoadKeyValPair(int type, ObjSettings* settings);
   std::error_code VerifyChecksum();
+  void FlushShardAsync(ShardId sid);
 
+  static void LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib);
+
+  EngineShardSet& ess_;
   base::IoBuf mem_buf_;
+  std::unique_ptr<ItemsBuf[]> shard_buf_;
+
   ::io::Source* src_ = nullptr;
   size_t bytes_read_ = 0;
   DbIndex cur_db_index_ = 0;

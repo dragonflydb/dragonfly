@@ -116,12 +116,13 @@ void DebugCmd::Reload(CmdArgList args) {
   }
 
   error_code ec;
+  EngineShardSet& ess = sf_.service().shard_set();
 
   if (save) {
     string err_details;
     const CommandId* cid = sf_.service().FindCmd("SAVE");
     CHECK_NOTNULL(cid);
-    intrusive_ptr<Transaction> trans(new Transaction{cid, &sf_.service().shard_set()});
+    intrusive_ptr<Transaction> trans(new Transaction{cid, &ess});
     trans->InitByArgs(0, {});
     ec = sf_.DoSave(trans.get(), &err_details);
     if (ec) {
@@ -130,7 +131,7 @@ void DebugCmd::Reload(CmdArgList args) {
   }
 
   const CommandId* cid = sf_.service().FindCmd("FLUSHALL");
-  intrusive_ptr<Transaction> flush_trans(new Transaction{cid, &sf_.service().shard_set()});
+  intrusive_ptr<Transaction> flush_trans(new Transaction{cid, &ess});
   flush_trans->InitByArgs(0, {});
   ec = sf_.DoFlush(flush_trans.get(), DbSlice::kDbAll);
   if (ec) {
@@ -155,7 +156,7 @@ void DebugCmd::Reload(CmdArgList args) {
 
   io::FileSource fs(*res);
 
-  RdbLoader loader;
+  RdbLoader loader(&ess);
   ec = loader.Load(&fs);
 
   if (ec) {
@@ -204,7 +205,7 @@ void DebugCmd::Populate(CmdArgList args) {
 
     // whatever we do, we should not capture i by reference.
     fb_arr[i] = pp.at(i)->LaunchFiber(
-        [=, this] { this->PopulateRangeFiber(range.first, range.second, prefix, val_size); });
+        [range, prefix, val_size, this] { this->PopulateRangeFiber(range.first, range.second, prefix, val_size); });
   }
   for (auto& fb : fb_arr)
     fb.join();

@@ -54,7 +54,7 @@
  *
  * The length of the previous entry, <prevlen>, is encoded in the following way:
  * If this length is smaller than 254 bytes, it will only consume a single
- * byte representing the length as an unsinged 8 bit integer. When the length
+ * byte representing the length as an unsigned 8 bit integer. When the length
  * is greater than or equal to 254, it will consume 5 bytes. The first byte is
  * set to 254 (FE) to indicate a larger value is following. The remaining 4
  * bytes take the length of the previous entry as value.
@@ -416,10 +416,10 @@ unsigned int zipStoreEntryEncoding(unsigned char *p, unsigned char encoding, uns
             (len) = (((ptr)[0] & 0x3f) << 8) | (ptr)[1];                       \
         } else if ((encoding) == ZIP_STR_32B) {                                \
             (lensize) = 5;                                                     \
-            (len) = ((ptr)[1] << 24) |                                         \
-                    ((ptr)[2] << 16) |                                         \
-                    ((ptr)[3] <<  8) |                                         \
-                    ((ptr)[4]);                                                \
+            (len) = ((uint32_t)(ptr)[1] << 24) |                               \
+                    ((uint32_t)(ptr)[2] << 16) |                               \
+                    ((uint32_t)(ptr)[3] <<  8) |                               \
+                    ((uint32_t)(ptr)[4]);                                      \
         } else {                                                               \
             (lensize) = 0; /* bad encoding, should be covered by a previous */ \
             (len) = 0;     /* ZIP_ASSERT_ENCODING / zipEncodingLenSize, or  */ \
@@ -557,7 +557,7 @@ void zipSaveInteger(unsigned char *p, int64_t value, unsigned char encoding) {
         memcpy(p,&i16,sizeof(i16));
         memrev16ifbe(p);
     } else if (encoding == ZIP_INT_24B) {
-        i32 = value<<8;
+        i32 = ((uint64_t)value)<<8;
         memrev32ifbe(&i32);
         memcpy(p,((uint8_t*)&i32)+1,sizeof(i32)-sizeof(uint8_t));
     } else if (encoding == ZIP_INT_32B) {
@@ -608,7 +608,7 @@ int64_t zipLoadInteger(unsigned char *p, unsigned char encoding) {
 }
 
 /* Fills a struct with all information about an entry.
- * This function is the "unsafe" alternative to the one blow.
+ * This function is the "unsafe" alternative to the one below.
  * Generally, all function that return a pointer to an element in the ziplist
  * will assert that this element is valid, so it can be freely used.
  * Generally functions such ziplistGet assume the input pointer is already
@@ -631,7 +631,7 @@ static inline int zipEntrySafe(unsigned char* zl, size_t zlbytes, unsigned char 
     unsigned char *zllast = zl + zlbytes - ZIPLIST_END_SIZE;
 #define OUT_OF_RANGE(p) (unlikely((p) < zlfirst || (p) > zllast))
 
-    /* If threre's no possibility for the header to reach outside the ziplist,
+    /* If there's no possibility for the header to reach outside the ziplist,
      * take the fast path. (max lensize and prevrawlensize are both 5 bytes) */
     if (p >= zlfirst && p + 10 < zllast) {
         ZIP_DECODE_PREVLEN(p, e->prevrawlensize, e->prevrawlen);
@@ -642,16 +642,16 @@ static inline int zipEntrySafe(unsigned char* zl, size_t zlbytes, unsigned char 
         /* We didn't call ZIP_ASSERT_ENCODING, so we check lensize was set to 0. */
         if (unlikely(e->lensize == 0))
             return 0;
-        /* Make sure the entry doesn't rech outside the edge of the ziplist */
+        /* Make sure the entry doesn't reach outside the edge of the ziplist */
         if (OUT_OF_RANGE(p + e->headersize + e->len))
             return 0;
-        /* Make sure prevlen doesn't rech outside the edge of the ziplist */
+        /* Make sure prevlen doesn't reach outside the edge of the ziplist */
         if (validate_prevlen && OUT_OF_RANGE(p - e->prevrawlen))
             return 0;
         return 1;
     }
 
-    /* Make sure the pointer doesn't rech outside the edge of the ziplist */
+    /* Make sure the pointer doesn't reach outside the edge of the ziplist */
     if (OUT_OF_RANGE(p))
         return 0;
 
@@ -675,11 +675,11 @@ static inline int zipEntrySafe(unsigned char* zl, size_t zlbytes, unsigned char 
     ZIP_DECODE_LENGTH(p + e->prevrawlensize, e->encoding, e->lensize, e->len);
     e->headersize = e->prevrawlensize + e->lensize;
 
-    /* Make sure the entry doesn't rech outside the edge of the ziplist */
+    /* Make sure the entry doesn't reach outside the edge of the ziplist */
     if (OUT_OF_RANGE(p + e->headersize + e->len))
         return 0;
 
-    /* Make sure prevlen doesn't rech outside the edge of the ziplist */
+    /* Make sure prevlen doesn't reach outside the edge of the ziplist */
     if (validate_prevlen && OUT_OF_RANGE(p - e->prevrawlen))
         return 0;
 
@@ -805,7 +805,7 @@ unsigned char *__ziplistCascadeUpdate(unsigned char *zl, unsigned char *p) {
 
     /* Update tail offset after loop. */
     if (tail == zl + prevoffset) {
-        /* When the the last entry we need to update is also the tail, update tail offset
+        /* When the last entry we need to update is also the tail, update tail offset
          * unless this is the only entry that was updated (so the tail offset didn't change). */
         if (extra - delta != 0) {
             ZIPLIST_TAIL_OFFSET(zl) =
@@ -841,7 +841,7 @@ unsigned char *__ziplistCascadeUpdate(unsigned char *zl, unsigned char *p) {
             /* An entry's prevlen can only increment 4 bytes. */
             zipStorePrevEntryLength(p, cur.prevrawlen+delta);
         }
-        /* Foward to previous entry. */
+        /* Forward to previous entry. */
         prevoffset -= cur.prevrawlen;
         cnt--;
     }
@@ -1162,6 +1162,8 @@ unsigned char *ziplistIndex(unsigned char *zl, int index) {
             /* No need for "safe" check: when going backwards, we know the header
              * we're parsing is in the range, we just need to assert (below) that
              * the size we take doesn't cause p to go outside the allocation. */
+            ZIP_DECODE_PREVLENSIZE(p, prevlensize);
+            assert(p + prevlensize < zl + zlbytes - ZIPLIST_END_SIZE);
             ZIP_DECODE_PREVLEN(p, prevlensize, prevlen);
             while (prevlen > 0 && index--) {
                 p -= prevlen;
@@ -1517,6 +1519,7 @@ int ziplistValidateIntegrity(unsigned char *zl, size_t size, int deep,
         return 1;
 
     unsigned int count = 0;
+    unsigned int header_count = intrev16ifbe(ZIPLIST_LENGTH(zl));
     unsigned char *p = ZIPLIST_ENTRY_HEAD(zl);
     unsigned char *prev = NULL;
     size_t prev_raw_size = 0;
@@ -1531,7 +1534,7 @@ int ziplistValidateIntegrity(unsigned char *zl, size_t size, int deep,
             return 0;
 
         /* Optionally let the caller validate the entry too. */
-        if (entry_cb && !entry_cb(p, cb_userdata))
+        if (entry_cb && !entry_cb(p, header_count, cb_userdata))
             return 0;
 
         /* Move to the next entry */
@@ -1550,7 +1553,6 @@ int ziplistValidateIntegrity(unsigned char *zl, size_t size, int deep,
         return 0;
 
     /* Check that the count in the header is correct */
-    unsigned int header_count = intrev16ifbe(ZIPLIST_LENGTH(zl));
     if (header_count != UINT16_MAX && count != header_count)
         return 0;
 
@@ -1624,8 +1626,8 @@ void ziplistRandomPairs(unsigned char *zl, unsigned int count, ziplistEntry *key
     qsort(picks, count, sizeof(rand_pick), uintCompare);
 
     /* fetch the elements form the ziplist into a output array respecting the original order. */
-    unsigned int zipindex = 0, pickindex = 0;
-    p = ziplistIndex(zl, 0);
+    unsigned int zipindex = picks[0].index, pickindex = 0;
+    p = ziplistIndex(zl, zipindex);
     while (ziplistGet(p, &key, &klen, &klval) && pickindex < count) {
         p = ziplistNext(zl, p);
         assert(ziplistGet(p, &value, &vlen, &vlval));

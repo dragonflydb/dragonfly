@@ -7,6 +7,10 @@
 #include "facade/op_status.h"
 #include "server/common.h"
 
+
+typedef struct intset intset;
+typedef struct dict dict;
+
 namespace dfly {
 
 using facade::OpResult;
@@ -18,6 +22,10 @@ class EngineShard;
 class SetFamily {
  public:
   static void Register(CommandRegistry* registry);
+
+  static uint32_t MaxIntsetEntries();
+
+  static void ConvertTo(intset* src, dict* dest);
 
  private:
   static void SAdd(CmdArgList args,  ConnectionContext* cntx);

@@ -786,4 +786,8 @@ void HSetFamily::Register(CommandRegistry* registry) {
             << CI{"HVALS", CO::READONLY, 2, 1, 1, 1}.HFUNC(HVals);
 }
 
+uint32_t HSetFamily::MaxListPackLen() {
+  return kMaxListPackLen;
+}
+
 }  // namespace dfly

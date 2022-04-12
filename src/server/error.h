@@ -40,6 +40,8 @@ enum errc {
   bad_db_index = 7,
   invalid_rdb_type = 8,
   invalid_encoding = 9,
+  empty_key = 10,
+  out_of_memory = 11,
 };
 
 }  // namespace rdb

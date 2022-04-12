@@ -384,7 +384,7 @@ uint32_t DbSlice::GetMCFlag(DbIndex db_ind, const PrimeKey& key) const {
 }
 
 PrimeIterator DbSlice::AddNew(DbIndex db_ind, string_view key, PrimeValue obj,
-                             uint64_t expire_at_ms) {
+                              uint64_t expire_at_ms) {
   for (const auto& ccb : change_cb_) {
     ccb.second(db_ind, ChangeReq{key});
   }
@@ -396,7 +396,8 @@ PrimeIterator DbSlice::AddNew(DbIndex db_ind, string_view key, PrimeValue obj,
 }
 
 pair<PrimeIterator, bool> DbSlice::AddIfNotExist(DbIndex db_ind, string_view key, PrimeValue obj,
-                                                uint64_t expire_at_ms) {
+                                                 uint64_t expire_at_ms) {
+  DCHECK_LT(db_ind, db_arr_.size());
   DCHECK(!obj.IsRef());
 
   auto& db = *db_arr_[db_ind];
@@ -524,7 +525,8 @@ void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it) {
   db->stats.obj_memory_usage += it->second.MallocUsed();
 }
 
-pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(DbIndex db_ind, PrimeIterator it) const {
+pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(DbIndex db_ind,
+                                                            PrimeIterator it) const {
   DCHECK(it->second.HasExpire());
   auto& db = db_arr_[db_ind];
 

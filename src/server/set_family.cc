@@ -31,19 +31,6 @@ namespace {
 
 constexpr uint32_t kMaxIntSetEntries = 256;
 
-void ConvertTo(intset* src, dict* dest) {
-  int64_t intele;
-  char buf[32];
-
-  /* To add the elements we extract integers and create redis objects */
-  int ii = 0;
-  while (intsetGet(src, ii++, &intele)) {
-    char* next = absl::numbers_internal::FastIntToBuffer(intele, buf);
-    sds s = sdsnewlen(buf, next - buf);
-    CHECK(dictAddRaw(dest, s, NULL));
-  }
-}
-
 intset* IntsetAddSafe(string_view val, intset* is, bool* success, bool* added) {
   long long llval;
   *added = false;
@@ -349,9 +336,10 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const ArgS
 
       if (!success) {
         dict* ds = dictCreate(&setDictType);
-        ConvertTo(is, ds);
+        SetFamily::ConvertTo(is, ds);
+
         co.SetRObjPtr(is);
-        co.InitRobj(OBJ_SET, kEncodingStrMap, ds);
+        co.InitRobj(OBJ_SET, kEncodingStrMap, ds);  // 'is' is deleted by co.
         inner_obj = ds;
         break;
       }
@@ -1171,6 +1159,23 @@ void SetFamily::Register(CommandRegistry* registry) {
             << CI{"SUNION", CO::READONLY, -2, 1, -1, 1}.HFUNC(SUnion)
             << CI{"SUNIONSTORE", CO::WRITE | CO::DENYOOM, -3, 1, -1, 1}.HFUNC(SUnionStore)
             << CI{"SSCAN", CO::READONLY | CO::RANDOM, -3, 1, 1, 1}.HFUNC(SScan);
+}
+
+uint32_t SetFamily::MaxIntsetEntries() {
+  return kMaxIntSetEntries;
+}
+
+void SetFamily::ConvertTo(intset* src, dict* dest) {
+  int64_t intele;
+  char buf[32];
+
+  /* To add the elements we extract integers and create redis objects */
+  int ii = 0;
+  while (intsetGet(src, ii++, &intele)) {
+    char* next = absl::numbers_internal::FastIntToBuffer(intele, buf);
+    sds s = sdsnewlen(buf, next - buf);
+    CHECK(dictAddRaw(dest, s, NULL));
+  }
 }
 
 }  // namespace dfly

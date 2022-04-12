@@ -29,7 +29,6 @@ namespace dfly {
 
 class RdbTest : public BaseFamilyTest {
  protected:
-
  protected:
   io::FileSource GetSource(string name);
 };
@@ -71,19 +70,19 @@ TEST_F(RdbTest, Crc) {
 
 TEST_F(RdbTest, LoadEmpty) {
   io::FileSource fs = GetSource("empty.rdb");
-  RdbLoader loader;
+  RdbLoader loader(ess_);
   auto ec = loader.Load(&fs);
   CHECK(!ec);
 }
 
 TEST_F(RdbTest, LoadSmall) {
   io::FileSource fs = GetSource("small.rdb");
-  RdbLoader loader;
+  RdbLoader loader(ess_);
   auto ec = loader.Load(&fs);
   CHECK(!ec);
 }
 
-TEST_F(RdbTest, Save) {
+TEST_F(RdbTest, Reload) {
   gflags::FlagSaver fs;
   FLAGS_list_compress_depth = 1;
   FLAGS_list_max_listpack_size = 1;  // limit listpack to a single element.
@@ -93,24 +92,23 @@ TEST_F(RdbTest, Save) {
   Run({"set", "huge_key", string((1 << 17) - 10, 'H')});
 
   Run({"sadd", "set_key1", "val1", "val2"});
-  Run({"sadd", "intset_key", "1", "2", "3"});
+  // Run({"sadd", "intset_key", "1", "2", "3"});
   Run({"hset", "small_hset", "field1", "val1", "field2", "val2"});
-  Run({"hset", "large_hset", "field1", string(510, 'V'), string(120, 'F'), "val2"});
+  // Run({"hset", "large_hset", "field1", string(510, 'V'), string(120, 'F'), "val2"});
 
   Run({"rpush", "list_key1", "val", "val2"});
   Run({"rpush", "list_key2", "head", string(511, 'a'), string(500, 'b'), "tail"});
 
-  Run({"zadd", "zs1", "1.1", "a", "-1.1", "b"});
-  Run({"zadd", "zs2", "1.1", string(510, 'a'), "-1.1", string(502, 'b')});
-  Run({"save"});
-}
-
-TEST_F(RdbTest, Load) {
-  Run({"set", "string_key", "val"});
-  Run({"set", "large_key", string(511, 'L')});
   // Run({"zadd", "zs1", "1.1", "a", "-1.1", "b"});
+  // Run({"zadd", "zs2", "1.1", string(510, 'a'), "-1.1", string(502, 'b')});
 
   Run({"debug", "reload"});
+
+  EXPECT_EQ(2, CheckedInt({"scard", "set_key1"}));
+  // EXPECT_EQ(3, CheckedInt({"scard", "intset_key"}));
+  EXPECT_EQ(2, CheckedInt({"hlen", "small_hset"}));
+  EXPECT_EQ(4, CheckedInt({"LLEN", "list_key2"}));
 }
+
 
 }  // namespace dfly

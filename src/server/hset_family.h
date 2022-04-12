@@ -19,6 +19,7 @@ using facade::OpStatus;
 class HSetFamily {
  public:
   static void Register(CommandRegistry* registry);
+  static uint32_t MaxListPackLen();
 
  private:
   enum GetAllMode : uint8_t { FIELDS = 1, VALUES = 2 };

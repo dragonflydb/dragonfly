@@ -5,11 +5,13 @@
 #include "server/rdb_load.h"
 
 extern "C" {
-
+#include "redis/intset.h"
+#include "redis/listpack.h"
 #include "redis/lzfP.h" /* LZF compression library */
 #include "redis/rdb.h"
-#include "redis/zmalloc.h"
 #include "redis/util.h"
+#include "redis/ziplist.h"
+#include "redis/zmalloc.h"
 }
 
 #include <absl/cleanup/cleanup.h>
@@ -19,7 +21,12 @@ extern "C" {
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/hset_family.h"
+#include "server/set_family.h"
 #include "strings/human_readable.h"
+
+DECLARE_int32(list_max_listpack_size);
+DECLARE_int32(list_compress_depth);
 
 namespace dfly {
 
@@ -30,6 +37,7 @@ using namespace util;
 using rdb::errc;
 using facade::operator""_KB;
 
+namespace {
 class error_category : public std::error_category {
  public:
   const char* name() const noexcept final {
@@ -63,15 +71,123 @@ error_condition error_category::default_error_condition(int ev) const noexcept {
   return error_condition{ev, *this};
 }
 
-static error_category rdb_category;
+error_category rdb_category;
 
 inline error_code RdbError(int ev) {
   return error_code{ev, rdb_category};
 }
 
+inline auto Unexpected(int ev) {
+  return make_unexpected(RdbError(ev));
+}
+
 static const error_code kOk;
 
-RdbLoader::RdbLoader() : mem_buf_{16_KB} {
+struct ZiplistCbArgs {
+  long count;
+  dict* fields;
+  unsigned char** lp;
+};
+
+/* callback for hashZiplistConvertAndValidateIntegrity.
+ * Check that the ziplist doesn't have duplicate hash field names.
+ * The ziplist element pointed by 'p' will be converted and stored into listpack. */
+int ziplistPairsEntryConvertAndValidate(unsigned char* p, unsigned int head_count, void* userdata) {
+  unsigned char* str;
+  unsigned int slen;
+  long long vll;
+
+  ZiplistCbArgs* data = (ZiplistCbArgs*)userdata;
+
+  if (data->fields == NULL) {
+    data->fields = dictCreate(&hashDictType);
+    dictExpand(data->fields, head_count / 2);
+  }
+
+  if (!ziplistGet(p, &str, &slen, &vll))
+    return 0;
+
+  /* Even records are field names, add to dict and check that's not a dup */
+  if (((data->count) & 1) == 0) {
+    sds field = str ? sdsnewlen(str, slen) : sdsfromlonglong(vll);
+    if (dictAdd(data->fields, field, NULL) != DICT_OK) {
+      /* Duplicate, return an error */
+      sdsfree(field);
+      return 0;
+    }
+  }
+
+  if (str) {
+    *(data->lp) = lpAppend(*(data->lp), (unsigned char*)str, slen);
+  } else {
+    *(data->lp) = lpAppendInteger(*(data->lp), vll);
+  }
+
+  (data->count)++;
+  return 1;
+}
+
+/* callback for ziplistValidateIntegrity.
+ * The ziplist element pointed by 'p' will be converted and stored into listpack. */
+int ziplistEntryConvertAndValidate(unsigned char* p, unsigned int head_count, void* userdata) {
+  unsigned char* str;
+  unsigned int slen;
+  long long vll;
+  unsigned char** lp = (unsigned char**)userdata;
+
+  if (!ziplistGet(p, &str, &slen, &vll))
+    return 0;
+
+  if (str)
+    *lp = lpAppend(*lp, (unsigned char*)str, slen);
+  else
+    *lp = lpAppendInteger(*lp, vll);
+
+  return 1;
+}
+
+/* Validate the integrity of the data structure while converting it to
+ * listpack and storing it at 'lp'.
+ * The function is safe to call on non-validated ziplists, it returns 0
+ * when encounter an integrity validation issue. */
+int ziplistPairsConvertAndValidateIntegrity(unsigned char* zl, size_t size, unsigned char** lp) {
+  /* Keep track of the field names to locate duplicate ones */
+  ZiplistCbArgs data = {0, NULL, lp};
+
+  int ret = ziplistValidateIntegrity(zl, size, 1, ziplistPairsEntryConvertAndValidate, &data);
+
+  /* make sure we have an even number of records. */
+  if (data.count & 1)
+    ret = 0;
+
+  if (data.fields)
+    dictRelease(data.fields);
+  return ret;
+}
+
+}  // namespace
+
+struct RdbLoader::ObjSettings {
+  long long now;           // current epoch time in ms.
+  int64_t expiretime = 0;  // expire epoch time in ms
+
+  bool has_expired = false;
+
+  void Reset() {
+    expiretime = 0;
+    has_expired = false;
+  }
+
+  void SetExpire(int64_t val) {
+    expiretime = val;
+    has_expired = (val <= now);
+  }
+
+  ObjSettings() = default;
+};
+
+RdbLoader::RdbLoader(EngineShardSet* ess) : ess_(*ess), mem_buf_{16_KB} {
+  shard_buf_.reset(new ItemsBuf[ess_.size()]);
 }
 
 RdbLoader::~RdbLoader() {
@@ -131,6 +247,10 @@ error_code RdbLoader::Load(io::Source* src) {
 
   int type;
 
+  /* Key-specific attributes, set by opcodes before the key type. */
+  ObjSettings settings;
+  settings.now = mstime();
+
   while (1) {
     /* Read type. */
     auto expected_type = FetchType();
@@ -140,12 +260,17 @@ error_code RdbLoader::Load(io::Source* src) {
 
     /* Handle special types. */
     if (type == RDB_OPCODE_EXPIRETIME) {
-      LOG(FATAL) << "TBD";
-      continue; /* Read next opcode. */
+      LOG(ERROR) << "opcode RDB_OPCODE_EXPIRETIME not supported";
+
+      return RdbError(errc::invalid_encoding);
     }
 
     if (type == RDB_OPCODE_EXPIRETIME_MS) {
-      LOG(FATAL) << "TBD";
+      int64_t val;
+      /* EXPIRETIME_MS: milliseconds precision expire times introduced
+       * with RDB v3. Like EXPIRETIME but no with more precision. */
+      SET_OR_RETURN(FetchInt<int64_t>(), val);
+      settings.SetExpire(val);
       continue; /* Read next opcode. */
     }
 
@@ -157,7 +282,9 @@ error_code RdbLoader::Load(io::Source* src) {
 
     if (type == RDB_OPCODE_IDLE) {
       /* IDLE: LRU idle time. */
-      LOG(FATAL) << "TBD";
+      uint64_t idle;
+      SET_OR_RETURN(LoadLen(nullptr), idle);  // ignore
+      (void)idle;
       continue; /* Read next opcode. */
     }
 
@@ -174,6 +301,15 @@ error_code RdbLoader::Load(io::Source* src) {
 
       if (dbid > kMaxDbId) {
         return RdbError(errc::bad_db_index);
+      }
+
+      VLOG(1) << "Select DB: " << dbid;
+      for (unsigned i = 0; i < ess_.size(); ++i) {
+        // we should flush pending items before switching dbid.
+        FlushShardAsync(i);
+
+        // Active database if not existed before.
+        ess_.Add(i, [dbid] { EngineShard::tlocal()->db_slice().ActivateDb(dbid); });
       }
 
       cur_db_index_ = dbid;
@@ -203,11 +339,23 @@ error_code RdbLoader::Load(io::Source* src) {
     if (!rdbIsObjectType(type)) {
       return RdbError(errc::invalid_rdb_type);
     }
-    RETURN_ON_ERR(LoadKeyValPair(type));
+
+    RETURN_ON_ERR(LoadKeyValPair(type, &settings));
+    settings.Reset();
   }  // main load loop
 
   /* Verify the checksum if RDB version is >= 5 */
   RETURN_ON_ERR(VerifyChecksum());
+
+  fibers_ext::BlockingCounter bc(ess_.size());
+  for (unsigned i = 0; i < ess_.size(); ++i) {
+    // Flush the remaining items.
+    FlushShardAsync(i);
+
+    // Send sentinel callbacks to ensure that all previous messages have been processed.
+    ess_.Add(i, [bc]() mutable { bc.Dec(); });
+  }
+  bc.Wait();  // wait for sentinels to report.
 
   absl::Duration dur = absl::Now() - start;
   double seconds = double(absl::ToInt64Milliseconds(dur)) / 1000;
@@ -395,6 +543,24 @@ error_code RdbLoader::VerifyChecksum() {
   return kOk;
 }
 
+void RdbLoader::FlushShardAsync(ShardId sid) {
+  auto& out_buf = shard_buf_[sid];
+  if (out_buf.empty())
+    return;
+
+  auto cb = [indx = this->cur_db_index_, vec = std::move(out_buf)] { LoadItemsBuffer(indx, vec); };
+  ess_.Add(sid, std::move(cb));
+}
+
+void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
+  DbSlice& db_slice = EngineShard::tlocal()->db_slice();
+  for (const auto& item : ib) {
+    std::string_view key{item.key, sdslen(item.key)};
+    db_slice.AddIfNotExist(db_ind, key, PrimeValue{item.val}, item.expire_ms);
+    sdsfree(item.key);
+  }
+}
+
 auto RdbLoader::FetchGenericString(int flags) -> io::Result<OpaqueBuf> {
   bool isencoded;
   size_t len;
@@ -419,6 +585,10 @@ auto RdbLoader::FetchGenericString(int flags) -> io::Result<OpaqueBuf> {
   bool sds = (flags & RDB_LOAD_SDS) != 0;
 
   if (plain || sds) {
+    if (plain && len == 0) {
+      return make_pair(nullptr, 0);
+    }
+
     char* buf = plain ? (char*)zmalloc(len) : sdsnewlen(SDS_NOINIT, len);
     error_code ec = FetchBuf(len, buf);
     if (ec) {
@@ -455,7 +625,7 @@ auto RdbLoader::FetchIntegerObject(int enctype, int flags, size_t* lenptr)
   } else if (enctype == RDB_ENC_INT32) {
     SET_OR_UNEXPECT(FetchInt<uint32_t>(), val);
   } else {
-    return make_unexpected(RdbError(errc::invalid_encoding));
+    return Unexpected(errc::invalid_encoding);
   }
 
   if (plain || sds) {
@@ -483,17 +653,235 @@ auto RdbLoader::ReadKey() -> io::Result<sds> {
   return res.get_unexpected();
 }
 
-auto RdbLoader::ReadObj(int rdbtype) -> io::Result<robj*> {
-  if (rdbtype == RDB_TYPE_STRING) {
-    /* Read string value */
-    auto res = FetchGenericString(0);
-    if (!res)
-      return res.get_unexpected();
-    return (robj*)res->first;
+io::Result<robj*> RdbLoader::ReadObj(int rdbtype) {
+  io::Result<robj*> res_obj = nullptr;
+  io::Result<OpaqueBuf> fetch_res;
+
+  switch (rdbtype) {
+    case RDB_TYPE_STRING:
+      /* Read string value */
+      fetch_res = FetchGenericString(RDB_LOAD_NONE);
+      if (!fetch_res)
+        return fetch_res.get_unexpected();
+      res_obj = (robj*)fetch_res->first;
+      break;
+    case RDB_TYPE_SET:
+      res_obj = ReadSet();
+      break;
+    case RDB_TYPE_HASH_ZIPLIST:
+      res_obj = ReadHZiplist();
+      break;
+    case RDB_TYPE_ZSET:
+      res_obj = ReadZSet();
+      break;
+    case RDB_TYPE_LIST_QUICKLIST:
+      res_obj = ReadListQuicklist(rdbtype);
+      break;
+    default:
+      LOG(ERROR) << "Unsupported rdb type " << rdbtype;
+      return Unexpected(errc::invalid_encoding);
   }
 
-  LOG(FATAL) << "TBD " << rdbtype;
+  return res_obj;
+}
+
+io::Result<robj*> RdbLoader::ReadSet() {
+  /* Read Set value */
+  io::Result<uint64_t> io_len = LoadLen(NULL);
+
+  if (!io_len)
+    return make_unexpected(io_len.error());
+
+  size_t len = *io_len;
+  if (len == 0)
+    return Unexpected(errc::empty_key);
+
+  robj* res = nullptr;
+  sds sdsele = nullptr;
+
+  auto cleanup = absl::MakeCleanup([&] {
+    if (sdsele)
+      sdsfree(sdsele);
+    decrRefCount(res);
+  });
+
+  /* Use a regular set when there are too many entries. */
+  if (len > SetFamily::MaxIntsetEntries()) {
+    res = createSetObject();
+    /* It's faster to expand the dict to the right size asap in order
+     * to avoid rehashing */
+    if (len > DICT_HT_INITIAL_SIZE && dictTryExpand((dict*)res->ptr, len) != DICT_OK) {
+      LOG(ERROR) << "OOM in dictTryExpand " << len;
+      return Unexpected(errc::out_of_memory);
+    }
+  } else {
+    res = createIntsetObject();
+  }
+
+  /* Load every single element of the set */
+  for (size_t i = 0; i < len; i++) {
+    long long llval;
+    io::Result<OpaqueBuf> fetch = FetchGenericString(RDB_LOAD_SDS);
+    if (!fetch) {
+      return make_unexpected(fetch.error());
+    }
+    sdsele = (sds)fetch->first;
+
+    if (res->encoding == OBJ_ENCODING_INTSET) {
+      /* Fetch integer value from element. */
+      if (isSdsRepresentableAsLongLong(sdsele, &llval) == C_OK) {
+        uint8_t success;
+        res->ptr = intsetAdd((intset*)res->ptr, llval, &success);
+        if (!success) {
+          LOG(ERROR) << "Duplicate set members detected";
+          return Unexpected(errc::duplicate_key);
+        }
+      } else {
+        dict* ds = dictCreate(&setDictType);
+        if (dictTryExpand((dict*)res->ptr, len) != DICT_OK) {
+          dictRelease(ds);
+          LOG(ERROR) << "OOM in dictTryExpand " << len;
+          return Unexpected(errc::out_of_memory);
+        }
+        SetFamily::ConvertTo((intset*)res->ptr, ds);
+        zfree(res->ptr);
+        res->ptr = ds;
+        res->encoding = OBJ_ENCODING_HT;
+      }
+    }
+
+    /* This will also be called when the set was just converted
+     * to a regular hash table encoded set. */
+    if (res->encoding == OBJ_ENCODING_HT) {
+      if (dictAdd((dict*)res->ptr, sdsele, NULL) != DICT_OK) {
+        LOG(ERROR) << "Duplicate set members detected";
+        return Unexpected(errc::duplicate_key);
+      }
+    } else {
+      sdsfree(sdsele);
+    }
+  }
+
+  std::move(cleanup).Cancel();
+
+  return res;
+}
+
+io::Result<robj*> RdbLoader::ReadHZiplist() {
+  OpaqueBuf fetch;
+  SET_OR_UNEXPECT(FetchGenericString(RDB_LOAD_PLAIN), fetch);
+
+  if (fetch.second == 0) {
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+  DCHECK(fetch.first);
+
+  unsigned char* lp = lpNew(fetch.second);
+  if (!ziplistPairsConvertAndValidateIntegrity((uint8_t*)fetch.first, fetch.second, &lp)) {
+    LOG(ERROR) << "Zset ziplist integrity check failed.";
+    zfree(lp);
+    zfree(fetch.first);
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+
+  zfree(fetch.first);
+
+  if (lpLength(lp) == 0) {
+    lpFree(lp);
+
+    return Unexpected(errc::empty_key);
+  }
+
+  robj* res = createObject(OBJ_HASH, lp);
+  res->encoding = OBJ_ENCODING_LISTPACK;
+
+  if (lpBytes(lp) > HSetFamily::MaxListPackLen())
+    hashTypeConvert(res, OBJ_ENCODING_HT);
+  else
+    res->ptr = lpShrinkToFit((uint8_t*)res->ptr);
+
+  return res;
+}
+
+io::Result<robj*> RdbLoader::ReadZSet() {
+  LOG(FATAL) << "TBD";
   return NULL;
+}
+
+io::Result<robj*> RdbLoader::ReadListQuicklist(int rdbtype) {
+  uint64_t len;
+  SET_OR_UNEXPECT(LoadLen(nullptr), len);
+
+  if (len == 0)
+    return Unexpected(errc::empty_key);
+
+  quicklist* ql = quicklistNew(FLAGS_list_max_listpack_size, FLAGS_list_compress_depth);
+  uint64_t container = QUICKLIST_NODE_CONTAINER_PACKED;
+
+  auto cleanup = absl::Cleanup([&] { quicklistRelease(ql); });
+
+  while (len--) {
+    uint8_t* lp = nullptr;
+
+    if (rdbtype == RDB_TYPE_LIST_QUICKLIST_2) {
+      SET_OR_UNEXPECT(LoadLen(nullptr), container);
+
+      if (container != QUICKLIST_NODE_CONTAINER_PACKED &&
+          container != QUICKLIST_NODE_CONTAINER_PLAIN) {
+        LOG(ERROR) << "Quicklist integrity check failed.";
+        return Unexpected(errc::rdb_file_corrupted);
+      }
+    }
+
+    OpaqueBuf data;
+    SET_OR_UNEXPECT(FetchGenericString(RDB_LOAD_PLAIN), data);
+    if (data.second == 0) {
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+
+    if (container == QUICKLIST_NODE_CONTAINER_PLAIN) {
+      quicklistAppendPlainNode(ql, (uint8_t*)data.first, data.second);
+      continue;
+    }
+
+    if (rdbtype == RDB_TYPE_LIST_QUICKLIST_2) {
+      lp = (uint8_t*)data.first;
+      if (!lpValidateIntegrity(lp, data.second, 0, NULL, NULL)) {
+        LOG(ERROR) << "Listpack integrity check failed.";
+        zfree(lp);
+        return Unexpected(errc::rdb_file_corrupted);
+      }
+    } else {
+      lp = lpNew(data.second);
+      if (!ziplistValidateIntegrity((uint8_t*)data.first, data.second, 1,
+                                    ziplistEntryConvertAndValidate, &lp)) {
+        LOG(ERROR) << "Ziplist integrity check failed.";
+        zfree(data.first);
+        zfree(lp);
+        return Unexpected(errc::rdb_file_corrupted);
+      }
+      zfree(data.first);
+      lp = lpShrinkToFit(lp);
+    }
+
+    /* Silently skip empty ziplists, if we'll end up with empty quicklist we'll fail later. */
+    if (lpLength(lp) == 0) {
+      zfree(lp);
+      continue;
+    }
+    quicklistAppendListpack(ql, lp);
+  }  // while
+
+  if (quicklistCount(ql) == 0) {
+    return Unexpected(errc::empty_key);
+  }
+
+  std::move(cleanup).Cancel();
+
+  robj* res = createObject(OBJ_LIST, ql);
+  res->encoding = OBJ_ENCODING_QUICKLIST;
+
+  return res;
 }
 
 void RdbLoader::ResizeDb(size_t key_num, size_t expire_num) {
@@ -501,7 +889,7 @@ void RdbLoader::ResizeDb(size_t key_num, size_t expire_num) {
   DCHECK_LT(expire_num, 1U << 31);
 }
 
-error_code RdbLoader::LoadKeyValPair(int type) {
+error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   /* Read key */
   sds key;
   robj* val;
@@ -521,11 +909,23 @@ error_code RdbLoader::LoadKeyValPair(int type) {
    * load all the keys as they are, since the log of operations later
    * assume to work in an exact keyspace state. */
   // TODO: check rdbflags&RDBFLAGS_AOF_PREAMBLE logic in rdb.c
-  bool should_expire = false;  // TODO: to implement
+  bool should_expire = settings->has_expired;  // TODO: to implement
   if (should_expire) {
     decrRefCount(val);
   } else {
     std::move(key_cleanup).Cancel();
+
+    std::string_view str_key(key, sdslen(key));
+    ShardId sid = Shard(str_key, ess_.size());
+    uint64_t expire_at_ms = settings->expiretime;
+
+    auto& out_buf = shard_buf_[sid];
+    out_buf.emplace_back(Item{key, val, expire_at_ms});
+
+    constexpr size_t kBufSize = 128;
+    if (out_buf.size() >= kBufSize) {
+      FlushShardAsync(sid);
+    }
 
     // TODO: we should handle the duplicates.
     if (false) {
