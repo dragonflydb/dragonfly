@@ -35,12 +35,14 @@ struct Metrics {
 
 class ServerFamily {
  public:
-  ServerFamily(Service* engine);
+  ServerFamily(Service* service);
   ~ServerFamily();
 
   void Init(util::AcceptServer* acceptor);
   void Register(CommandRegistry* registry);
   void Shutdown();
+
+  Service& service() { return service_;}
 
   Metrics GetMetrics() const;
 
@@ -53,6 +55,11 @@ class ServerFamily {
   }
 
   void StatsMC(std::string_view section, facade::ConnectionContext* cntx);
+
+  std::error_code DoSave(Transaction* transaction, std::string* err_details);
+  std::error_code DoFlush(Transaction* transaction, DbIndex db_ind);
+
+  std::string LastSaveFile() const;
 
  private:
   uint32_t shard_count() const {
@@ -86,12 +93,16 @@ class ServerFamily {
 
   util::AcceptServer* acceptor_ = nullptr;
   util::ProactorBase* pb_task_ = nullptr;
-  ::boost::fibers::mutex replica_of_mu_;
+
+  mutable ::boost::fibers::mutex replicaof_mu_, save_mu_;
   std::shared_ptr<Replica> replica_;  // protected by replica_of_mu_
 
   std::unique_ptr<ScriptMgr> script_mgr_;
 
-  std::atomic<int64_t> last_save_;  // in seconds.
+
+  int64_t last_save_;  // in seconds. protected by save_mu_.
+  std::string last_save_file_;   // protected by save_mu_.
+
   GlobalState global_state_;
   time_t start_time_ = 0;  // in seconds, epoch time.
 

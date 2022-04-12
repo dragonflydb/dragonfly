@@ -375,10 +375,11 @@ DashTable<_Key, _Value, Policy>::~DashTable() {
   Clear();
   auto* resource = segment_.get_allocator().resource();
   std::pmr::polymorphic_allocator<SegmentType> pa(resource);
+  using alloc_traits = std::allocator_traits<decltype(pa)>;
 
   IterateUnique([&](SegmentType* seg) {
-    pa.destroy(seg);
-    pa.deallocate(seg, 1);
+    alloc_traits::destroy(pa, seg);
+    alloc_traits::deallocate(pa, seg, 1);
     return false;
   });
 }
@@ -438,6 +439,8 @@ void DashTable<_Key, _Value, Policy>::Clear() {
   **********/
   if (global_depth_ > initial_depth_) {
     std::pmr::polymorphic_allocator<SegmentType> pa(segment_.get_allocator());
+    using alloc_traits = std::allocator_traits<decltype(pa)>;
+
     size_t dest = 0, src = 0;
     size_t new_size = (1 << initial_depth_);
 
@@ -448,8 +451,8 @@ void DashTable<_Key, _Value, Policy>::Clear() {
         seg->set_local_depth(initial_depth_);
         segment_[dest++] = seg;
       } else {
-        pa.destroy(seg);
-        pa.deallocate(seg, 1);
+        alloc_traits::destroy(pa, seg);
+        alloc_traits::deallocate(pa, seg, 1);
       }
 
       src = next_src;

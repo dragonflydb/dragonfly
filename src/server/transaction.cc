@@ -452,6 +452,7 @@ void Transaction::RunNoop(EngineShard* shard) {
 }
 
 void Transaction::ScheduleInternal() {
+  DCHECK(!shard_data_.empty());
   DCHECK_EQ(0u, txid_);
   DCHECK_EQ(0, coordinator_state_ & (COORD_SCHED | COORD_OOO));
 
@@ -886,6 +887,8 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
 
 // This function should not block since it's run via RunBriefInParallel.
 pair<bool, bool> Transaction::ScheduleInShard(EngineShard* shard) {
+  DCHECK(!shard_data_.empty());
+
   // schedule_success, lock_granted.
   pair<bool, bool> result{false, false};
 

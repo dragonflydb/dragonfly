@@ -67,6 +67,10 @@ class Service : public facade::ServiceInterface {
 
   absl::flat_hash_map<std::string, unsigned> UknownCmdMap() const;
 
+  const CommandId* FindCmd(std::string_view cmd) const {
+    return registry_.Find(cmd);
+  }
+
  private:
   static void Quit(CmdArgList args, ConnectionContext* cntx);
   static void Multi(CmdArgList args, ConnectionContext* cntx);

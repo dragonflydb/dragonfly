@@ -5,7 +5,7 @@
 #include "core/interpreter.h"
 
 #include <absl/strings/str_cat.h>
-#include <openssl/sha.h>
+#include <openssl/evp.h>
 
 #include <cstring>
 #include <optional>
@@ -24,6 +24,16 @@ namespace dfly {
 using namespace std;
 
 namespace {
+
+// EVP_Q_digest is not present in the older versions of OpenSSL.
+int EVPDigest(const void* data, size_t datalen, unsigned char* md, size_t* mdlen) {
+  unsigned int temp = 0;
+  int ret = EVP_Digest(data, datalen, md, &temp, EVP_sha1(), NULL);
+
+  if (mdlen != NULL)
+    *mdlen = temp;
+  return ret;
+}
 
 class RedisTranslator : public ObjectExplorer {
  public:
@@ -155,7 +165,6 @@ void SetGlobalArrayInternal(lua_State* lua, const char* name, MutSliceSpan args)
   lua_setglobal(lua, name);
 }
 
-
 /* This function is used in order to push an error on the Lua stack in the
  * format used by redis.pcall to return errors, which is a lua table
  * with a single "err" field set to the error string. Note that this
@@ -247,6 +256,7 @@ debug = nil
   lua_setglobal(lua, "dofile");
 }
 
+// dest must have at least 41 chars.
 void ToHex(const uint8_t* src, char* dest) {
   const char cset[] = "0123456789abcdef";
   for (size_t j = 0; j < 20; j++) {
@@ -266,16 +276,13 @@ int RedisSha1Command(lua_State* lua) {
   size_t len;
   const char* s = lua_tolstring(lua, 1, &len);
 
-  SHA_CTX ctx;
-  uint8_t buf[20];
-  char digest[41];
+  uint8_t digest[EVP_MAX_MD_SIZE];
+  EVPDigest(s, len, digest, NULL);
 
-  SHA1_Init(&ctx);
-  SHA1_Update(&ctx, s, len);
-  SHA1_Final(buf, &ctx);
-  ToHex(buf, digest);
+  char hex[41];
+  ToHex(digest, hex);
 
-  lua_pushstring(lua, digest);
+  lua_pushstring(lua, hex);
   return 1;
 }
 
@@ -353,13 +360,10 @@ Interpreter::~Interpreter() {
 }
 
 void Interpreter::FuncSha1(string_view body, char* fp) {
-  SHA_CTX ctx;
-  uint8_t buf[20];
+  uint8_t digest[EVP_MAX_MD_SIZE];
+  EVPDigest(body.data(), body.size(), digest, NULL);
 
-  SHA1_Init(&ctx);
-  SHA1_Update(&ctx, body.data(), body.size());
-  SHA1_Final(buf, &ctx);
-  ToHex(buf, fp);
+  ToHex(digest, fp);
 }
 
 auto Interpreter::AddFunction(string_view body, string* result) -> AddResult {
@@ -500,7 +504,7 @@ bool Interpreter::IsTableSafe() const {
         i = 0;
         len = lua_rawlen(lua_, -1);
       } else {
-        lua_pop(lua_, 1); // pop table element
+        lua_pop(lua_, 1);  // pop table element
         ++i;
       }
     }

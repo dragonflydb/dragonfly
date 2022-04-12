@@ -11,8 +11,10 @@
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/main_service.h"
 #include "server/rdb_load.h"
 #include "server/string_family.h"
+#include "server/transaction.h"
 #include "util/uring/uring_fiber_algo.h"
 #include "util/uring/uring_file.h"
 
@@ -24,6 +26,7 @@ namespace dfly {
 using namespace std;
 using namespace util;
 namespace this_fiber = ::boost::this_fiber;
+using boost::intrusive_ptr;
 using boost::fibers::fiber;
 using namespace facade;
 namespace fs = std::filesystem;
@@ -52,7 +55,7 @@ void DoPopulateBatch(std::string_view prefix, size_t val_size, const SetCmd::Set
   }
 }
 
-DebugCmd::DebugCmd(EngineShardSet* ess, ConnectionContext* cntx) : ess_(ess), cntx_(cntx) {
+DebugCmd::DebugCmd(ServerFamily* owner, ConnectionContext* cntx) : sf_(*owner), cntx_(cntx) {
 }
 
 void DebugCmd::Run(CmdArgList args) {
@@ -99,6 +102,7 @@ void DebugCmd::Run(CmdArgList args) {
 
 void DebugCmd::Reload(CmdArgList args) {
   bool save = true;
+
   for (size_t i = 2; i < args.size(); ++i) {
     ToUpper(&args[i]);
     std::string_view opt = ArgS(args, i);
@@ -110,18 +114,38 @@ void DebugCmd::Reload(CmdArgList args) {
       return (*cntx_)->SendError("DEBUG RELOAD only supports the NOSAVE options.");
     }
   }
+
+  error_code ec;
+
   if (save) {
-    return (*cntx_)->SendError("NOSAVE required (TBD).");
+    string err_details;
+    const CommandId* cid = sf_.service().FindCmd("SAVE");
+    CHECK_NOTNULL(cid);
+    intrusive_ptr<Transaction> trans(new Transaction{cid, &sf_.service().shard_set()});
+    trans->InitByArgs(0, {});
+    ec = sf_.DoSave(trans.get(), &err_details);
+    if (ec) {
+      return (*cntx_)->SendError(absl::StrCat(err_details, ec.message()));
+    }
   }
 
-  if (FLAGS_dbfilename.empty()) {
-    return (*cntx_)->SendError("dbfilename is not set");
+  const CommandId* cid = sf_.service().FindCmd("FLUSHALL");
+  intrusive_ptr<Transaction> flush_trans(new Transaction{cid, &sf_.service().shard_set()});
+  flush_trans->InitByArgs(0, {});
+  ec = sf_.DoFlush(flush_trans.get(), DbSlice::kDbAll);
+  if (ec) {
+    LOG(ERROR) << "Error flushing db " << ec.message();
   }
 
-  fs::path dir_path(FLAGS_dir);
-  string filename = FLAGS_dbfilename;
-  fs::path path = dir_path;
-  path.append(filename);
+  string last_save_file = sf_.LastSaveFile();
+  fs::path path(last_save_file);
+
+  if (last_save_file.empty()) {
+    fs::path dir_path(FLAGS_dir);
+    string filename = FLAGS_dbfilename;
+    dir_path.append(filename);
+    path = dir_path;
+  }
   auto res = uring::OpenRead(path.generic_string());
 
   if (!res) {
@@ -132,7 +156,7 @@ void DebugCmd::Reload(CmdArgList args) {
   io::FileSource fs(*res);
 
   RdbLoader loader;
-  error_code ec = loader.Load(&fs);
+  ec = loader.Load(&fs);
 
   if (ec) {
     (*cntx_)->SendError(ec.message());
@@ -162,7 +186,8 @@ void DebugCmd::Populate(CmdArgList args) {
       return (*cntx_)->SendError(kUintErr);
   }
 
-  size_t runners_count = ess_->pool()->size();
+  ProactorPool& pp = sf_.service().proactor_pool();
+  size_t runners_count = pp.size();
   vector<pair<uint64_t, uint64_t>> ranges(runners_count - 1);
   uint64_t batch_size = total_count / runners_count;
   size_t from = 0;
@@ -178,8 +203,8 @@ void DebugCmd::Populate(CmdArgList args) {
     auto range = ranges[i];
 
     // whatever we do, we should not capture i by reference.
-    fb_arr[i] = ess_->pool()->at(i)->LaunchFiber(
-        [=] { this->PopulateRangeFiber(range.first, range.second, prefix, val_size); });
+    fb_arr[i] = pp.at(i)->LaunchFiber(
+        [=, this] { this->PopulateRangeFiber(range.first, range.second, prefix, val_size); });
   }
   for (auto& fb : fb_arr)
     fb.join();
@@ -195,18 +220,19 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view 
   string key = absl::StrCat(prefix, ":");
   size_t prefsize = key.size();
   DbIndex db_indx = cntx_->db_index();
-  std::vector<PopulateBatch> ps(ess_->size(), PopulateBatch{db_indx});
+  EngineShardSet& ess = sf_.service().shard_set();
+  std::vector<PopulateBatch> ps(ess.size(), PopulateBatch{db_indx});
   SetCmd::SetParams params{db_indx};
 
   for (uint64_t i = from; i < from + len; ++i) {
     absl::StrAppend(&key, i);
-    ShardId sid = Shard(key, ess_->size());
+    ShardId sid = Shard(key, ess.size());
     key.resize(prefsize);
 
     auto& pops = ps[sid];
     pops.index[pops.sz++] = i;
     if (pops.sz == 32) {
-      ess_->Add(sid, [=, p = pops] {
+      ess.Add(sid, [=, p = pops] {
         DoPopulateBatch(prefix, value_len, params, p);
         if (i % 50 == 0) {
           this_fiber::yield();
@@ -218,13 +244,14 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view 
     }
   }
 
-  ess_->RunBriefInParallel([&](EngineShard* shard) {
+  ess.RunBriefInParallel([&](EngineShard* shard) {
     DoPopulateBatch(prefix, value_len, params, ps[shard->shard_id()]);
   });
 }
 
 void DebugCmd::Inspect(string_view key) {
-  ShardId sid = Shard(key, ess_->size());
+  EngineShardSet& ess = sf_.service().shard_set();
+  ShardId sid = Shard(key, ess.size());
   using ObjInfo = pair<unsigned, unsigned>;  // type, encoding.
 
   auto cb = [&]() -> facade::OpResult<ObjInfo> {
@@ -236,7 +263,7 @@ void DebugCmd::Inspect(string_view key) {
     return OpStatus::KEY_NOTFOUND;
   };
 
-  OpResult<ObjInfo> res = ess_->Await(sid, cb);
+  OpResult<ObjInfo> res = ess.Await(sid, cb);
   if (res) {
     string resp = absl::StrCat("Value encoding:", strEncoding(res->second));
     (*cntx_)->SendSimpleString(resp);

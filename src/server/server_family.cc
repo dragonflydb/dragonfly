@@ -47,9 +47,9 @@ using namespace std;
 using namespace util;
 namespace fibers = ::boost::fibers;
 namespace fs = std::filesystem;
+using absl::StrCat;
 using facade::MCReplyBuilder;
 using strings::HumanReadableNumBytes;
-using absl::StrCat;
 
 namespace {
 
@@ -77,7 +77,7 @@ error_code CreateDirs(fs::path dir_path) {
 
 ServerFamily::ServerFamily(Service* service) : service_(*service), ess_(service->shard_set()) {
   start_time_ = time(NULL);
-  last_save_.store(start_time_, memory_order_release);
+  last_save_ = start_time_;
   script_mgr_.reset(new ScriptMgr(&service->shard_set()));
 }
 
@@ -124,7 +124,7 @@ void ServerFamily::Shutdown() {
     pb_task_->CancelPeriodic(task_10ms_);
     task_10ms_ = 0;
 
-    unique_lock lk(replica_of_mu_);
+    unique_lock lk(replicaof_mu_);
     if (replica_) {
       replica_->Stop();
     }
@@ -177,6 +177,106 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
 #undef ADD_LINE
 }
 
+error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
+  static unsigned fl_index = 1;
+
+  auto [current, switched] = global_state_.Next(GlobalState::SAVING);
+  if (!switched) {
+    *err_details = StrCat(GlobalState::Name(current), " - can not save database");
+    return make_error_code(errc::operation_in_progress);
+  }
+
+  absl::Cleanup rev_state = [this] { global_state_.Clear(); };
+
+  fs::path dir_path(FLAGS_dir);
+  error_code ec;
+
+  if (!dir_path.empty()) {
+    ec = CreateDirs(dir_path);
+    if (ec) {
+      *err_details = "create-dir ";
+      return ec;
+    }
+  }
+
+  string filename = FLAGS_dbfilename.empty() ? "dump_save.rdb" : FLAGS_dbfilename;
+  fs::path path = dir_path;
+  path.append(filename);
+  path.concat(StrCat("_", fl_index++));
+  VLOG(1) << "Saving to " << path;
+
+  auto res = uring::OpenWrite(path.generic_string());
+  if (!res) {
+    return res.error();
+  }
+
+  auto& pool = service_.proactor_pool();
+  pool.Await([](auto*) { ServerState::tlocal()->set_gstate(GlobalState::SAVING); });
+
+  unique_ptr<::io::WriteFile> wf(*res);
+  auto start = absl::Now();
+
+  RdbSaver saver{&ess_, wf.get()};
+
+  ec = saver.SaveHeader();
+  if (!ec) {
+    auto cb = [&saver](Transaction* t, EngineShard* shard) {
+      saver.StartSnapshotInShard(shard);
+      return OpStatus::OK;
+    };
+    trans->ScheduleSingleHop(std::move(cb));
+
+    // perform snapshot serialization, block the current fiber until it completes.
+    RdbTypeFreqMap freq_map;
+    ec = saver.SaveBody(&freq_map);
+
+    // TODO: needs protection from reads.
+    last_save_freq_map_.clear();
+    for (const auto& k_v : freq_map) {
+      last_save_freq_map_.push_back(k_v);
+    }
+  }
+
+  pool.Await([](auto*) { ServerState::tlocal()->set_gstate(GlobalState::IDLE); });
+  CHECK_EQ(GlobalState::SAVING, global_state_.Clear());
+
+  absl::Duration dur = absl::Now() - start;
+  double seconds = double(absl::ToInt64Milliseconds(dur)) / 1000;
+  LOG(INFO) << "Saving " << path << " finished after "
+            << strings::HumanReadableElapsedTime(seconds);
+
+  auto close_ec = wf->Close();
+
+  if (!ec)
+    ec = close_ec;
+
+  if (!ec) {
+    lock_guard lk(save_mu_);
+    last_save_ = time(NULL);
+    last_save_file_ = path.generic_string();
+  }
+
+  return ec;
+}
+
+error_code ServerFamily::DoFlush(Transaction* transaction, DbIndex db_ind) {
+  transaction->Schedule();  // TODO: to convert to ScheduleSingleHop ?
+
+  transaction->Execute(
+      [db_ind](Transaction* t, EngineShard* shard) {
+        shard->db_slice().FlushDb(db_ind);
+        return OpStatus::OK;
+      },
+      true);
+
+  return error_code{};
+}
+
+string ServerFamily::LastSaveFile() const {
+  lock_guard lk(save_mu_);
+  return last_save_file_;
+}
+
 void ServerFamily::DbSize(CmdArgList args, ConnectionContext* cntx) {
   atomic_ulong num_keys{0};
 
@@ -192,16 +292,7 @@ void ServerFamily::DbSize(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::FlushDb(CmdArgList args, ConnectionContext* cntx) {
   DCHECK(cntx->transaction);
-  Transaction* transaction = cntx->transaction;
-  transaction->Schedule();  // TODO: to convert to ScheduleSingleHop ?
-
-  transaction->Execute(
-      [](Transaction* t, EngineShard* shard) {
-        shard->db_slice().FlushDb(t->db_index());
-        return OpStatus::OK;
-      },
-      true);
-
+  DoFlush(cntx->transaction, cntx->transaction->db_index());
   cntx->reply_builder()->SendOk();
 }
 
@@ -212,16 +303,7 @@ void ServerFamily::FlushAll(CmdArgList args, ConnectionContext* cntx) {
   }
 
   DCHECK(cntx->transaction);
-  Transaction* transaction = cntx->transaction;
-  transaction->Schedule();
-
-  transaction->Execute(
-      [](Transaction* t, EngineShard* shard) {
-        shard->db_slice().FlushDb(DbSlice::kDbAll);
-        return OpStatus::OK;
-      },
-      true);
-
+  DoFlush(cntx->transaction, DbSlice::kDbAll);
   (*cntx)->SendOk();
 }
 
@@ -262,7 +344,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendStringArr(res);
   } else {
     string err = StrCat("Unknown subcommand or wrong number of arguments for '", sub_cmd,
-                              "'. Try CONFIG HELP.");
+                        "'. Try CONFIG HELP.");
     return (*cntx)->SendError(err, kSyntaxErr);
   }
 }
@@ -270,7 +352,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
 void ServerFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[1]);
 
-  DebugCmd dbg_cmd{&ess_, cntx};
+  DebugCmd dbg_cmd{this, cntx};
 
   return dbg_cmd.Run(args);
 }
@@ -283,86 +365,18 @@ void ServerFamily::Memory(CmdArgList args, ConnectionContext* cntx) {
   }
 
   string err = StrCat("Unknown subcommand or wrong number of arguments for '", sub_cmd,
-                            "'. Try MEMORY HELP.");
+                      "'. Try MEMORY HELP.");
   return (*cntx)->SendError(err, kSyntaxErr);
 }
 
 void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
-  static unsigned fl_index = 1;
+  string err_detail;
 
-  auto [current, switched] = global_state_.Next(GlobalState::SAVING);
-  if (!switched) {
-    string error = StrCat(GlobalState::Name(current), " - can not save database");
-    return (*cntx)->SendError(error);
-  }
-
-  absl::Cleanup rev_state = [this] { global_state_.Clear(); };
-
-  fs::path dir_path(FLAGS_dir);
-  error_code ec;
-
-  if (!dir_path.empty()) {
-    ec = CreateDirs(dir_path);
-    if (ec)
-      return (*cntx)->SendError(StrCat("create dir ", ec.message()));
-  }
-
-  string filename = FLAGS_dbfilename.empty() ? "dump_save.rdb" : FLAGS_dbfilename;
-  fs::path path = dir_path;
-  path.append(filename);
-  path.concat(StrCat("_", fl_index++));
-  VLOG(1) << "Saving to " << path;
-
-  auto res = uring::OpenWrite(path.generic_string());
-  if (!res) {
-    (*cntx)->SendError(res.error().message());
-    return;
-  }
-
-  auto& pool = service_.proactor_pool();
-  pool.Await([](auto*) { ServerState::tlocal()->set_gstate(GlobalState::SAVING); });
-
-  unique_ptr<::io::WriteFile> wf(*res);
-  auto start = absl::Now();
-
-  RdbSaver saver{&ess_, wf.get()};
-
-  ec = saver.SaveHeader();
-  if (!ec) {
-    auto cb = [&saver](Transaction* t, EngineShard* shard) {
-      saver.StartSnapshotInShard(shard);
-      return OpStatus::OK;
-    };
-    cntx->transaction->ScheduleSingleHop(std::move(cb));
-
-    // perform snapshot serialization, block the current fiber until it completes.
-    RdbTypeFreqMap freq_map;
-    ec = saver.SaveBody(&freq_map);
-
-    // TODO: needs protection from reads.
-    last_save_freq_map_.clear();
-    for (const auto& k_v : freq_map) {
-      last_save_freq_map_.push_back(k_v);
-    }
-  }
-
-  pool.Await([](auto*) { ServerState::tlocal()->set_gstate(GlobalState::IDLE); });
-  CHECK_EQ(GlobalState::SAVING, global_state_.Clear());
-
-  absl::Duration dur = absl::Now() - start;
-  double seconds = double(absl::ToInt64Milliseconds(dur)) / 1000;
-  LOG(INFO) << "Saving " << path << " finished after "
-            << strings::HumanReadableElapsedTime(seconds);
-
-  auto close_ec = wf->Close();
-
-  if (!ec)
-    ec = close_ec;
+  error_code ec = DoSave(cntx->transaction, &err_detail);
 
   if (ec) {
-    (*cntx)->SendError(ec.message());
+    (*cntx)->SendError(absl::StrCat(err_detail, ec.message()));
   } else {
-    last_save_.store(time(NULL), memory_order_release);
     (*cntx)->SendOk();
   }
 }
@@ -430,7 +444,7 @@ tcp_port:)";
     absl::StrAppend(&info, a1, a2, "\r\n");
   };
 
-  #define ADD_HEADER(x) absl::StrAppend(&info, x "\r\n")
+#define ADD_HEADER(x) absl::StrAppend(&info, x "\r\n")
 
   if (should_enter("SERVER")) {
     append(kInfo1, FLAGS_port);
@@ -566,7 +580,7 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
   if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_s, "one")) {
     // use this lock as critical section to prevent concurrent replicaof commands running.
-    unique_lock lk(replica_of_mu_);
+    unique_lock lk(replicaof_mu_);
 
     // Switch to primary mode.
     if (!ServerState::tlocal()->is_master) {
@@ -591,7 +605,7 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
   auto new_replica = make_shared<Replica>(string(host), port, &service_);
 
-  unique_lock lk(replica_of_mu_);
+  unique_lock lk(replicaof_mu_);
   if (replica_) {
     replica_->Stop();  // NOTE: consider introducing update API flow.
   }
@@ -637,8 +651,10 @@ void ServerFamily::Sync(CmdArgList args, ConnectionContext* cntx) {
 void ServerFamily::Psync(CmdArgList args, ConnectionContext* cntx) {
   SyncGeneric("?", 0, cntx);  // full sync, ignore the request.
 }
+
 void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
-  (*cntx)->SendLong(last_save_.load(memory_order_relaxed));
+  lock_guard lk(save_mu_);
+  (*cntx)->SendLong(last_save_);
 }
 
 void ServerFamily::_Shutdown(CmdArgList args, ConnectionContext* cntx) {

@@ -9,10 +9,11 @@
 namespace dfly {
 
 class EngineShardSet;
+class ServerFamily;
 
 class DebugCmd {
  public:
-  DebugCmd(EngineShardSet* ess, ConnectionContext* cntx);
+  DebugCmd(ServerFamily* owner, ConnectionContext* cntx);
 
   void Run(CmdArgList args);
 
@@ -22,7 +23,7 @@ class DebugCmd {
   void Reload(CmdArgList args);
   void Inspect(std::string_view key);
 
-  EngineShardSet* ess_;
+  ServerFamily& sf_;
   ConnectionContext* cntx_;
 };
 

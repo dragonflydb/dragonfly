@@ -106,6 +106,11 @@ TEST_F(RdbTest, Save) {
 }
 
 TEST_F(RdbTest, Load) {
+  Run({"set", "string_key", "val"});
+  Run({"set", "large_key", string(511, 'L')});
+  // Run({"zadd", "zs1", "1.1", "a", "-1.1", "b"});
+
+  Run({"debug", "reload"});
 }
 
 }  // namespace dfly
