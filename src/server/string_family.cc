@@ -15,6 +15,7 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/io_mgr.h"
 #include "server/transaction.h"
 #include "util/varz.h"
 
@@ -78,6 +79,7 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
       db_slice_->SetMCFlag(params.db_index, it->first.AsRef(), params.memcache_flags);
     }
 
+    // overwrite existing entry.
     prime_value.SetString(value);
     db_slice_->PostUpdate(params.db_index, it);
 
@@ -91,6 +93,26 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
   PrimeValue tvalue{value};
   tvalue.SetFlag(params.memcache_flags != 0);
   it = db_slice_->AddNew(params.db_index, key, std::move(tvalue), at_ms);
+
+  EngineShard* shard = db_slice_->shard_owner();
+  IoMgr* io_mgr = shard->io_mgr();
+
+  if (io_mgr) {  // external storage enabled.
+    ExternalAllocator* ext_alloc = shard->external_allocator();
+    int64_t res = ext_alloc->Malloc(value.size());
+    if (res < 0) {
+      size_t start = io_mgr->Size();
+      io_mgr->GrowAsync(-res, [start, len = -res, ext_alloc](int io_res) {
+        if (io_res == 0) {
+          ext_alloc->AddStorage(start, len);
+        } else {
+          LOG_FIRST_N(ERROR, 10) << "Error enlarging storage " << io_res;
+        }
+      });
+    } else {
+      io_mgr->Write(res, value);
+    }
+  }
 
   if (params.memcache_flags)
     db_slice_->SetMCFlag(params.db_index, it->first.AsRef(), params.memcache_flags);

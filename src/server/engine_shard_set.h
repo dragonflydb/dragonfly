@@ -13,6 +13,7 @@ extern "C" {
 #include <xxhash.h>
 
 #include "base/string_view_sso.h"
+#include "core/external_alloc.h"
 #include "core/mi_memory_resource.h"
 #include "core/tx_queue.h"
 #include "server/channel_slice.h"
@@ -22,6 +23,8 @@ extern "C" {
 #include "util/proactor_pool.h"
 
 namespace dfly {
+
+class IoMgr;
 
 class EngineShard {
  public:
@@ -126,11 +129,22 @@ class EngineShard {
   // Returns used memory for this shard.
   size_t UsedMemory() const;
 
+  ExternalAllocator* external_allocator() {
+    return &ext_alloc_;
+  }
+
+  IoMgr* io_mgr() {
+    return io_mgr_.get();
+  }
+
   // for everyone to use for string transformations during atomic cpu sequences.
   sds tmp_str1, tmp_str2;
 
  private:
   EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap);
+
+  // blocks the calling fiber.
+  void Shutdown();  // called before destructing EngineShard.
 
   struct WatchQueue;
 
@@ -179,6 +193,8 @@ class EngineShard {
 
   uint32_t periodic_task_ = 0;
   uint64_t task_iters_ = 0;
+  std::unique_ptr<IoMgr> io_mgr_;
+  ExternalAllocator ext_alloc_;
 
   static thread_local EngineShard* shard_;
 };

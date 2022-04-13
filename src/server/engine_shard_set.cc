@@ -10,9 +10,12 @@ extern "C" {
 }
 
 #include "base/logging.h"
+#include "server/io_mgr.h"
 #include "server/transaction.h"
 #include "util/fiber_sched_algo.h"
 #include "util/varz.h"
+
+DEFINE_string(backing_prefix, "", "");
 
 namespace dfly {
 
@@ -86,10 +89,17 @@ EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t*
 }
 
 EngineShard::~EngineShard() {
-  queue_.Shutdown();
-  fiber_q_.join();
   sdsfree(tmp_str1);
   sdsfree(tmp_str2);
+}
+
+void EngineShard::Shutdown() {
+  queue_.Shutdown();
+  fiber_q_.join();
+
+  if (io_mgr_) {
+    io_mgr_->Shutdown();
+  }
 
   if (periodic_task_) {
     ProactorBase::me()->CancelPeriodic(periodic_task_);
@@ -108,6 +118,14 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
 
   CompactObj::InitThreadLocal(shard_->memory_resource());
   SmallString::InitThreadLocal(tlh);
+
+  if (!FLAGS_backing_prefix.empty()) {
+    string fn = absl::StrCat(FLAGS_backing_prefix, "-", absl::Dec(pb->GetIndex(), absl::kZeroPad4),
+                             ".back");
+    shard_->io_mgr_.reset(new IoMgr);
+    error_code ec = shard_->io_mgr_->Open(fn);
+    CHECK(!ec) << ec.message();  // TODO
+  }
 }
 
 void EngineShard::DestroyThreadLocal() {
@@ -116,6 +134,9 @@ void EngineShard::DestroyThreadLocal() {
 
   uint32_t index = shard_->db_slice_.shard_id();
   mi_heap_t* tlh = shard_->mi_resource_.heap();
+
+  shard_->Shutdown();
+
   shard_->~EngineShard();
   mi_free(shard_);
   shard_ = nullptr;

@@ -311,7 +311,7 @@ void Service::Init(util::AcceptServer* acceptor, const InitOpts& opts) {
   uint32_t shard_num = pp_.size() > 1 ? pp_.size() - 1 : pp_.size();
   shard_set_.Init(shard_num);
 
-  pp_.Await([&](uint32_t index, ProactorBase* pb) {
+  pp_.AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
     ServerState::tlocal()->Init();
 
     if (index < shard_count()) {

@@ -159,6 +159,10 @@ class DbSlice {
    */
   size_t FlushDb(DbIndex db_ind);
 
+  EngineShard* shard_owner() {
+    return owner_;
+  }
+
   ShardId shard_id() const {
     return shard_id_;
   }

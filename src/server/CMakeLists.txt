@@ -3,7 +3,7 @@ cxx_link(dragonfly base dragonfly_lib)
 
 add_library(dragonfly_lib channel_slice.cc command_registry.cc common.cc config_flags.cc
             conn_context.cc db_slice.cc debugcmd.cc
-            engine_shard_set.cc generic_family.cc hset_family.cc
+            engine_shard_set.cc generic_family.cc hset_family.cc io_mgr.cc
             list_family.cc main_service.cc  rdb_load.cc rdb_save.cc replica.cc
             snapshot.cc script_mgr.cc server_family.cc
             set_family.cc
