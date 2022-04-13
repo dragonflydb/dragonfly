@@ -19,8 +19,8 @@ class ExpirePeriod {
   }
 
   // in milliseconds
-  uint64_t duration() const {
-    return precision_ ? val_ * 1000 : val_;
+  uint64_t duration_ms() const {
+    return precision_ ? uint64_t(val_) * 1000 : val_;
   }
 
   unsigned generation() const {
@@ -30,13 +30,13 @@ class ExpirePeriod {
   void Set(uint64_t ms);
 
  private:
-  uint32_t val_ : 25;
-  uint32_t gen_ : 6;
+  uint32_t val_ : 27;
+  uint32_t gen_ : 4;
   uint32_t precision_ : 1;  // 0 - ms, 1 - sec.
 };
 
 inline void ExpirePeriod::Set(uint64_t ms) {
-  constexpr uint64_t kBarrier = (1ULL << 25);
+  constexpr uint64_t kBarrier = (1ULL << 27);
 
   if (ms < kBarrier) {
     val_ = ms;

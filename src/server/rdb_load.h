@@ -52,7 +52,9 @@ class RdbLoader {
   // flags are RDB_LOAD_XXX masks.
   using OpaqueBuf = std::pair<void*, size_t>;
   io::Result<OpaqueBuf> FetchGenericString(int flags);
+  io::Result<OpaqueBuf> FetchLzfStringObject(int flags);
   io::Result<OpaqueBuf> FetchIntegerObject(int enctype, int flags, size_t* lenptr);
+
   io::Result<double> FetchBinaryDouble();
   io::Result<double> FetchDouble();
 
@@ -82,6 +84,7 @@ class RdbLoader {
 
   EngineShardSet& ess_;
   base::IoBuf mem_buf_;
+  base::PODArray<uint8_t> compr_buf_;
   std::unique_ptr<ItemsBuf[]> shard_buf_;
 
   ::io::Source* src_ = nullptr;

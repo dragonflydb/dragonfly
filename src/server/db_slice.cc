@@ -259,9 +259,9 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) -> pair<PrimeIterator
 
     // TODO: to implement the incremental update of expiry values using multi-generation
     // expire_base_ update. Right now we use only index 0.
-    uint32_t delta_ms = now_ms_ - expire_base_[0];
+    uint64_t delta_ms = now_ms_ - expire_base_[0];
 
-    if (expire_it->second.duration() <= delta_ms) {
+    if (expire_it->second.duration_ms() <= delta_ms) {
       db->expire_table.Erase(expire_it);
 
       if (existing->second.HasFlag()) {
@@ -535,9 +535,9 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(DbIndex db_ind,
   CHECK(IsValid(expire_it));
 
   // TODO: to employ multi-generation update of expire-base and the underlying values.
-  uint32_t delta_ms = now_ms_ - expire_base_[0];
+  uint64_t delta_ms = now_ms_ - expire_base_[0];
 
-  if (expire_it->second.duration() > delta_ms)
+  if (expire_it->second.duration_ms() > delta_ms)
     return make_pair(it, expire_it);
 
   db->expire_table.Erase(expire_it);

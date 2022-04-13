@@ -528,7 +528,7 @@ OpStatus GenericFamily::OpExpire(const OpArgs& op_args, string_view key,
   int64_t now_msec = db_slice.Now();
   int64_t rel_msec = params.absolute ? msec - now_msec : msec;
 
-  if (rel_msec > int64_t(kMaxExpireDeadlineSec * 1000)) {
+  if (rel_msec > kMaxExpireDeadlineSec * 1000) {
     return OpStatus::OUT_OF_RANGE;
   }
 

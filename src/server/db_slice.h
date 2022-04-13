@@ -103,7 +103,7 @@ class DbSlice {
 
   // returns absolute time of the expiration.
   uint64_t ExpireTime(ExpireIterator it) const {
-    return it.is_done() ? 0 : expire_base_[0] + it->second.duration();
+    return it.is_done() ? 0 : expire_base_[0] + it->second.duration_ms();
   }
 
   ExpirePeriod FromAbsoluteTime(uint64_t time_ms) const {

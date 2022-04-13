@@ -270,14 +270,10 @@ instance.
 
 ## Design decisions along the way
 ### Expiration deadlines with relative accuracy
-I decided to limit the expiration range to 365 days. Moreover, expiration deadlines
+Expiration ranges are limited to ~4 years. Moreover, expiration deadlines
 with millisecond precision (PEXPIRE/PSETEX etc) will be rounded to closest second
-**for deadlines greater than 33554431ms (approximately 560 minutes). In other words,
-expiries of `PEXPIRE key 10010` will expire exactly after 10 seconds and 10ms. However,
-`PEXPIRE key 34000300` will expire after 34000 seconds (i.e. 300ms earlier). Similarly,
-`PEXPIRE key 34000800` will expire after 34001 seconds, i.e. 200ms later.
-
-Such rounding has at most 0.002% error which I hope is acceptable for large ranges.
+**for deadlines greater than 134217727ms (approximately 37 hours)**.
+Such rounding has less than 0.001% error which I hope is acceptable for large ranges.
 If it breaks your use-cases - talk to me or open an issue and explain your case.
 
 For more detailed differences between this and Redis implementations [see here](doc/differences.md).

@@ -573,7 +573,7 @@ auto RdbLoader::FetchGenericString(int flags) -> io::Result<OpaqueBuf> {
       case RDB_ENC_INT32:
         return FetchIntegerObject(len, flags, NULL);
       case RDB_ENC_LZF:
-        LOG(FATAL) << "TBD";
+        return FetchLzfStringObject(flags);
       default:
         LOG(FATAL) << "Unknown RDB string encoding type " << len;
     }
@@ -608,6 +608,61 @@ auto RdbLoader::FetchGenericString(int flags) -> io::Result<OpaqueBuf> {
     return make_unexpected(ec);
   }
   return make_pair(o, len);
+}
+
+auto RdbLoader::FetchLzfStringObject(int flags) -> io::Result<OpaqueBuf> {
+  bool zerocopy_decompress = true;
+
+  const uint8_t* cbuf = NULL;
+  char* val = NULL;
+
+  uint64_t clen, len;
+
+  SET_OR_UNEXPECT(LoadLen(NULL), clen);
+  SET_OR_UNEXPECT(LoadLen(NULL), len);
+
+  CHECK_LE(len, 1ULL << 29);
+
+  if (mem_buf_.InputLen() >= clen) {
+    cbuf = mem_buf_.InputBuffer().data();
+  } else {
+    compr_buf_.resize(clen);
+    zerocopy_decompress = false;
+
+    /* Load the compressed representation and uncompress it to target. */
+    error_code ec = FetchBuf(clen, compr_buf_.data());
+    if (ec) {
+      return make_unexpected(ec);
+    }
+    cbuf = compr_buf_.data();
+  }
+
+  bool plain = (flags & RDB_LOAD_PLAIN) != 0;
+  bool sds = (flags & RDB_LOAD_SDS) != 0;
+  DCHECK_EQ(false, plain && sds);
+
+  /* Allocate our target according to the uncompressed size. */
+  if (plain) {
+    val = (char*)zmalloc(len);
+  } else {
+    val = sdsnewlen(SDS_NOINIT, len);
+  }
+
+  if (lzf_decompress(cbuf, clen, val, len) == 0) {
+    LOG(ERROR) << "Invalid LZF compressed string";
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+
+  // FetchBuf consumes the input but if we have not went through that path
+  // we need to consume now.
+  if (zerocopy_decompress)
+    mem_buf_.ConsumeInput(clen);
+
+  if (plain || sds) {
+    return make_pair(val, len);
+  }
+
+  return make_pair(createObject(OBJ_STRING, val), len);
 }
 
 auto RdbLoader::FetchIntegerObject(int enctype, int flags, size_t* lenptr)

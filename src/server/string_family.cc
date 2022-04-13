@@ -127,14 +127,14 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
         return builder->SendError(kInvalidIntErr);
       }
 
-      if (int_arg <= 0 || (!is_ms && int_arg >= int64_t(kMaxExpireDeadlineSec))) {
+      if (int_arg <= 0 || (!is_ms && int_arg >= kMaxExpireDeadlineSec)) {
         return builder->SendError(kExpiryOutOfRange);
       }
 
       if (!is_ms) {
         int_arg *= 1000;
       }
-      if (int_arg >= int64_t(kMaxExpireDeadlineSec * 1000)) {
+      if (int_arg >= kMaxExpireDeadlineSec * 1000) {
         return builder->SendError(kExpiryOutOfRange);
       }
       sparams.expire_after_ms = int_arg;

@@ -12,6 +12,7 @@ extern "C" {
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "facade/facade_test.h"  // needed to find operator== for RespExpr.
 #include "io/file.h"
 #include "server/engine_shard_set.h"
 #include "server/rdb_load.h"
@@ -21,6 +22,7 @@ extern "C" {
 using namespace testing;
 using namespace std;
 using namespace util;
+using namespace facade;
 
 DECLARE_int32(list_compress_depth);
 DECLARE_int32(list_max_listpack_size);
@@ -75,11 +77,21 @@ TEST_F(RdbTest, LoadEmpty) {
   CHECK(!ec);
 }
 
-TEST_F(RdbTest, LoadSmall) {
-  io::FileSource fs = GetSource("small.rdb");
+TEST_F(RdbTest, LoadSmall6) {
+  io::FileSource fs = GetSource("redis6_small.rdb");
   RdbLoader loader(ess_);
   auto ec = loader.Load(&fs);
   CHECK(!ec);
+  auto resp = Run({"scan", "0"});
+  EXPECT_THAT(Array(resp[1]),
+              UnorderedElementsAre("list1", "hset_zl", "list2", "zset_sl", "intset", "set1",
+                                   "zset_zl", "hset_ht", "intkey", "strkey"));
+  resp = Run({"smembers", "intset"});
+  EXPECT_THAT(resp, UnorderedElementsAre("111", "222", "1234", "3333", "4444", "67899", "76554"));
+
+  // TODO: when we implement PEXPIRETIME we will be able to do it directly.
+  int ttl = CheckedInt({"ttl", "set1"});  // should expire at 1747008000.
+  EXPECT_GT(ttl + time(NULL), 1747007000);  // left 1000 seconds margin in case the clock is off.
 }
 
 TEST_F(RdbTest, Reload) {
@@ -112,6 +124,5 @@ TEST_F(RdbTest, Reload) {
   EXPECT_EQ(2, CheckedInt({"ZCARD", "zs1"}));
   EXPECT_EQ(2, CheckedInt({"ZCARD", "zs2"}));
 }
-
 
 }  // namespace dfly
