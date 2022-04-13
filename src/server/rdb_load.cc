@@ -332,7 +332,8 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_MODULE_AUX) {
-      return RdbError(errc::module_not_supported);
+      LOG(ERROR) << "Modules are not supported";
+      return RdbError(errc::feature_not_supported);
     }
 
     if (!rdbIsObjectType(type)) {
@@ -416,7 +417,8 @@ auto RdbLoader::LoadLen(bool* is_encoded) -> io::Result<uint64_t> {
     res = absl::big_endian::Load64(mem_buf_.InputBuffer().data());
     mem_buf_.ConsumeInput(8);
   } else {
-    LOG(FATAL) << "Unknown length encoding " << type << " in rdbLoadLen()";
+    LOG(ERROR) << "Bad length encoding " << type << " in rdbLoadLen()";
+    return Unexpected(errc::rdb_file_corrupted);
   }
 
   return res;
@@ -501,7 +503,8 @@ error_code RdbLoader::HandleAux() {
   } else if (!strcasecmp((char*)auxkey->ptr, "repl-offset")) {
     // TODO
   } else if (!strcasecmp((char*)auxkey->ptr, "lua")) {
-    LOG(FATAL) << "Lua scripts are not supported";
+    LOG(ERROR) << "Lua scripts are not supported";
+    return RdbError(errc::feature_not_supported);
   } else if (!strcasecmp((char*)auxkey->ptr, "redis-ver")) {
     LOG(INFO) << "Loading RDB produced by version " << (char*)auxval->ptr;
   } else if (!strcasecmp((char*)auxkey->ptr, "ctime")) {
@@ -575,7 +578,8 @@ auto RdbLoader::FetchGenericString(int flags) -> io::Result<OpaqueBuf> {
       case RDB_ENC_LZF:
         return FetchLzfStringObject(flags);
       default:
-        LOG(FATAL) << "Unknown RDB string encoding type " << len;
+        LOG(ERROR) << "Unknown RDB string encoding len " << len;
+        return Unexpected(errc::rdb_file_corrupted);
     }
   }
 

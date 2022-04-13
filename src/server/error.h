@@ -33,7 +33,7 @@ namespace rdb {
 enum errc {
   wrong_signature = 1,
   bad_version = 2,
-  module_not_supported = 3,
+  feature_not_supported = 3,
   duplicate_key = 4,
   rdb_file_corrupted = 5,
   bad_checksum = 6,

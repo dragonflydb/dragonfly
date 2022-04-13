@@ -193,7 +193,8 @@ void IntervalVisitor::ActionRange(unsigned start, unsigned end) {
 
       Next(zl, &eptr, &sptr);
     }
-  } else if (zobj_->encoding == OBJ_ENCODING_SKIPLIST) {
+  } else {
+    CHECK_EQ(zobj_->encoding, OBJ_ENCODING_SKIPLIST);
     zset* zs = (zset*)zobj_->ptr;
     zskiplist* zsl = zs->zsl;
     zskiplistNode* ln;
@@ -216,18 +217,15 @@ void IntervalVisitor::ActionRange(unsigned start, unsigned end) {
       result_.emplace_back(string(ele, sdslen(ele)), ln->score);
       ln = params_.reverse ? ln->backward : ln->level[0].forward;
     }
-  } else {
-    LOG(FATAL) << "Unknown sorted set encoding" << zobj_->encoding;
   }
 }
 
 void IntervalVisitor::ActionRange(const zrangespec& range) {
   if (zobj_->encoding == OBJ_ENCODING_LISTPACK) {
     ExtractListPack(range);
-  } else if (zobj_->encoding == OBJ_ENCODING_SKIPLIST) {
-    ExtractSkipList(range);
   } else {
-    LOG(FATAL) << "Unknown sorted set encoding " << zobj_->encoding;
+    CHECK_EQ(zobj_->encoding, OBJ_ENCODING_SKIPLIST);
+    ExtractSkipList(range);
   }
 }
 
@@ -238,11 +236,10 @@ void IntervalVisitor::ActionRem(unsigned start, unsigned end) {
     removed_ = (end - start) + 1;
     zl = lpDeleteRange(zl, 2 * start, 2 * removed_);
     zobj_->ptr = zl;
-  } else if (zobj_->encoding == OBJ_ENCODING_SKIPLIST) {
+  } else {
+    CHECK_EQ(OBJ_ENCODING_SKIPLIST, zobj_->encoding);
     zset* zs = (zset*)zobj_->ptr;
     removed_ = zslDeleteRangeByRank(zs->zsl, start + 1, end + 1, zs->dict);
-  } else {
-    LOG(FATAL) << "Unknown sorted set encoding" << zobj_->encoding;
   }
 }
 
@@ -253,11 +250,10 @@ void IntervalVisitor::ActionRem(const zrangespec& range) {
     zl = zzlDeleteRangeByScore(zl, &range, &deleted);
     zobj_->ptr = zl;
     removed_ = deleted;
-  } else if (zobj_->encoding == OBJ_ENCODING_SKIPLIST) {
+  } else {
+    CHECK_EQ(OBJ_ENCODING_SKIPLIST, zobj_->encoding);
     zset* zs = (zset*)zobj_->ptr;
     removed_ = zslDeleteRangeByScore(zs->zsl, &range, zs->dict);
-  } else {
-    LOG(FATAL) << "Unknown sorted set encoding" << zobj_->encoding;
   }
 }
 

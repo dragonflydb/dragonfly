@@ -66,7 +66,7 @@ class BaseFamilyTest : public ::testing::Test {
   }
 
   TestConnWrapper* AddFindConn(Protocol proto, std::string_view id);
-  static RespVec Array(const RespExpr& expr);
+  static std::vector<std::string> StrArray(const RespExpr& expr);
 
   // ts is ms
   void UpdateTime(uint64_t ms);

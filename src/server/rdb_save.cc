@@ -216,8 +216,8 @@ error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
     return SaveZSetObject(pv.AsRObj());
   }
 
-  LOG(FATAL) << "Not implemented " << obj_type;
-  return error_code{};
+  LOG(ERROR) << "Not implemented " << obj_type;
+  return make_error_code(errc::function_not_supported);
 }
 
 error_code RdbSerializer::SaveListObject(const robj* obj) {

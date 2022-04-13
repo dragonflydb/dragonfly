@@ -153,4 +153,33 @@ TEST_F(GenericFamilyTest, RenameBinary) {
   EXPECT_THAT(Run({"get", kKey2}), RespEq("bar"));
 }
 
+using testing::Each;
+using testing::StartsWith;
+using testing::AnyOf;
+
+TEST_F(GenericFamilyTest, Scan) {
+  for (unsigned i = 0; i < 10; ++i)
+    Run({"set", absl::StrCat("key", i), "bar"});
+
+  for (unsigned i = 0; i < 10; ++i)
+    Run({"set", absl::StrCat("str", i), "bar"});
+
+  for (unsigned i = 0; i < 10; ++i)
+    Run({"sadd", absl::StrCat("set", i), "bar"});
+
+  for (unsigned i = 0; i < 10; ++i)
+    Run({"zadd", absl::StrCat("zset", i), "0", "bar"});
+
+  auto resp = Run({"scan", "0", "count", "20", "type", "string"});
+  EXPECT_EQ(2, resp.size());
+  auto vec = StrArray(resp[1]);
+  EXPECT_GT(vec.size(), 10);
+  EXPECT_THAT(vec, Each(AnyOf(StartsWith("str"), StartsWith("key"))));
+
+  resp = Run({"scan", "0", "count", "20", "match", "zset*"});
+  vec = StrArray(resp[1]);
+  EXPECT_EQ(10, vec.size());
+  EXPECT_THAT(vec, Each(StartsWith("zset")));
+}
+
 }  // namespace dfly

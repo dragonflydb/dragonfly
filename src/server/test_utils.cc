@@ -287,13 +287,18 @@ auto BaseFamilyTest::AddFindConn(Protocol proto, std::string_view id) -> TestCon
   return it->second.get();
 }
 
-RespVec BaseFamilyTest::Array(const RespExpr& expr) {
+vector<string> BaseFamilyTest::StrArray(const RespExpr& expr) {
   CHECK(expr.type == RespExpr::ARRAY || expr.type == RespExpr::NIL_ARRAY);
   if (expr.type == RespExpr::NIL_ARRAY)
-    return RespVec{};
+    return vector<string>{};
 
   const RespVec* src = get<RespVec*>(expr.u);
-  return *src;
+  vector<string> res(src->size());
+  for (size_t i = 0; i < src->size(); ++i) {
+    res[i] = ToSV(src->at(i).GetBuf());
+  }
+  
+  return res;
 }
 
 }  // namespace dfly

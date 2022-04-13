@@ -20,7 +20,7 @@ class RespExpr {
 
   using Vec = std::vector<RespExpr>;
   Type type;
-  bool has_support;  // whether pointers in this item are supported by external storage.
+  bool has_support;  // whether pointers in this item are supported by the external storage.
 
   std::variant<int64_t, Buffer, Vec*> u;
 

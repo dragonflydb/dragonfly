@@ -83,7 +83,7 @@ TEST_F(RdbTest, LoadSmall6) {
   auto ec = loader.Load(&fs);
   CHECK(!ec);
   auto resp = Run({"scan", "0"});
-  EXPECT_THAT(Array(resp[1]),
+  EXPECT_THAT(StrArray(resp[1]),
               UnorderedElementsAre("list1", "hset_zl", "list2", "zset_sl", "intset", "set1",
                                    "zset_zl", "hset_ht", "intkey", "strkey"));
   resp = Run({"smembers", "intset"});
@@ -123,6 +123,13 @@ TEST_F(RdbTest, Reload) {
   EXPECT_EQ(4, CheckedInt({"LLEN", "list_key2"}));
   EXPECT_EQ(2, CheckedInt({"ZCARD", "zs1"}));
   EXPECT_EQ(2, CheckedInt({"ZCARD", "zs2"}));
+}
+
+TEST_F(RdbTest, ReloadTtl) {
+  Run({"set", "key", "val"});
+  Run({"expire", "key", "1000"});
+  Run({"debug", "reload"});
+  EXPECT_LT(990, CheckedInt({"ttl", "key"}));
 }
 
 }  // namespace dfly

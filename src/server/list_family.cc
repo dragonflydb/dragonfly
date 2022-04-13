@@ -380,23 +380,24 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
   BPopper popper(dir);
   OpStatus result = popper.Run(transaction, unsigned(timeout * 1000));
 
+  if (result == OpStatus::OK) {
+    CHECK(popper.found());
+    VLOG(1) << "BLPop returned ";
+
+    auto res = popper.result();
+    std::string_view str_arr[2] = {res.first, res.second};
+    return (*cntx)->SendStringArr(str_arr);
+  }
+
   switch (result) {
     case OpStatus::WRONG_TYPE:
       return (*cntx)->SendError(kWrongTypeErr);
-    case OpStatus::OK:
-      break;
     case OpStatus::TIMED_OUT:
       return (*cntx)->SendNullArray();
     default:
-      LOG(FATAL) << "Unexpected error " << result;
+      LOG(ERROR) << "Unexpected error " << result;
   }
-
-  CHECK(popper.found());
-  VLOG(1) << "BLPop returned ";
-
-  auto res = popper.result();
-  std::string_view str_arr[2] = {res.first, res.second};
-  return (*cntx)->SendStringArr(str_arr);
+  return (*cntx)->SendNullArray();
 }
 
 void ListFamily::PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args,
