@@ -225,6 +225,8 @@ class CompactObj {
   void SetString(std::string_view str);
   void GetString(std::string* res) const;
 
+  // In case this object a single blob, returns number of bytes allocated on heap
+  // for that blob. Otherwise returns 0.
   size_t MallocUsed() const;
 
   // Resets the object to empty state.

@@ -642,15 +642,15 @@ void GenericFamily::OpScan(const OpArgs& op_args, string_view pattern, string_vi
   VLOG(1) << "PrimeTable " << db_slice.shard_id() << "/" << op_args.db_ind << " has "
           << db_slice.DbSize(op_args.db_ind);
 
-  uint64_t cur = *cursor;
+  PrimeTable::cursor cur = *cursor;
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_ind);
   do {
     cur = prime_table->Traverse(
         cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, pattern, type_filter, vec); });
   } while (cur && cnt < limit);
 
-  VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur;
-  *cursor = cur;
+  VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.value();
+  *cursor = cur.value();
 }
 
 bool GenericFamily::ScanCb(const OpArgs& op_args, PrimeIterator it, string_view pattern,

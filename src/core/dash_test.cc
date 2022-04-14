@@ -425,7 +425,8 @@ TEST_F(DashTest, Traverse) {
   for (size_t i = 0; i < kNumItems; ++i) {
     dt_.Insert(i, i);
   }
-  uint64_t cursor = 0;
+
+  Dash64::cursor cursor;
   vector<unsigned> nums;
   auto tr_cb = [&](Dash64::iterator it) {
     nums.push_back(it->first);
@@ -434,7 +435,7 @@ TEST_F(DashTest, Traverse) {
 
   do {
     cursor = dt_.Traverse(cursor, tr_cb);
-  } while (cursor != 0);
+  } while (cursor);
   sort(nums.begin(), nums.end());
   nums.resize(unique(nums.begin(), nums.end()) - nums.begin());
   ASSERT_EQ(kNumItems, nums.size());

@@ -46,7 +46,6 @@ TEST_F(ExternalAllocatorTest, Invariants) {
   std::map<int64_t, size_t> ranges;
 
   int64_t res = 0;
-  size_t sum = 0;
   while (res >= 0) {
     for (unsigned j = 1; j < 5; ++j) {
       size_t sz = 4000 * j;
@@ -55,10 +54,10 @@ TEST_F(ExternalAllocatorTest, Invariants) {
         break;
       auto [it, added] = ranges.emplace(res, sz);
       ASSERT_TRUE(added);
-      sum += sz;
     }
   }
-  EXPECT_GT(sum, kSegSize / 2);
+
+  EXPECT_GT(ext_alloc_.allocated_bytes(), ext_alloc_.capacity() * 0.75);
 
   off_t last = 0;
   for (const auto& k_v : ranges) {

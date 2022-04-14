@@ -45,7 +45,7 @@ size_t DictMallocSize(dict* d) {
   size_t res = zmalloc_usable_size(d->ht_table[0]) + zmalloc_usable_size(d->ht_table[1]) +
                znallocx(sizeof(dict));
 
-  return res = dictSize(d) * 16;  // approximation.
+  return res + dictSize(d) * 16;  // approximation.
 }
 
 inline void FreeObjSet(unsigned encoding, void* ptr, pmr::memory_resource* mr) {
@@ -68,9 +68,9 @@ size_t MallocUsedSet(unsigned encoding, void* ptr) {
       return 0;  // TODO
     case kEncodingIntSet:
       return intsetBlobLen((intset*)ptr);
-    default:
-      LOG(FATAL) << "Unknown set encoding type " << encoding;
   }
+
+  LOG(DFATAL) << "Unknown set encoding type " << encoding;
   return 0;
 }
 
@@ -80,9 +80,8 @@ size_t MallocUsedHSet(unsigned encoding, void* ptr) {
       return lpBytes(reinterpret_cast<uint8_t*>(ptr));
     case OBJ_ENCODING_HT:
       return DictMallocSize((dict*)ptr);
-    default:
-      LOG(FATAL) << "Unknown set encoding type " << encoding;
   }
+  LOG(DFATAL) << "Unknown set encoding type " << encoding;
   return 0;
 }
 
@@ -93,10 +92,9 @@ size_t MallocUsedZSet(unsigned encoding, void* ptr) {
     case OBJ_ENCODING_SKIPLIST: {
       zset* zs = (zset*)ptr;
       return DictMallocSize(zs->dict);
-    } break;
-    default:
-      LOG(FATAL) << "Unknown set encoding type " << encoding;
+    }
   }
+  LOG(DFATAL) << "Unknown set encoding type " << encoding;
   return 0;
 }
 
@@ -217,7 +215,7 @@ size_t RobjWrapper::MallocUsed() const {
       CHECK_EQ(OBJ_ENCODING_RAW, encoding_);
       return InnerObjMallocUsed();
     case OBJ_LIST:
-      CHECK_EQ(encoding_, OBJ_ENCODING_QUICKLIST);
+      DCHECK_EQ(encoding_, OBJ_ENCODING_QUICKLIST);
       return QlMAllocSize((quicklist*)inner_obj_);
     case OBJ_SET:
       return MallocUsedSet(encoding_, inner_obj_);
@@ -370,7 +368,6 @@ void RobjWrapper::MakeInnerRoom(size_t current_cap, size_t desired, pmr::memory_
   }
   inner_obj_ = newp;
 }
-
 
 #pragma GCC push_options
 #pragma GCC optimize("Ofast")
@@ -694,8 +691,7 @@ void CompactObj::SetString(std::string_view str) {
     if (rev_len == str.size()) {
       mask |= ASCII2_ENC_BIT;  // str hits its highest bound.
     } else {
-      CHECK_EQ(str.size(), rev_len - 1)
-        << "Bad ascii encoding for len " << str.size();
+      CHECK_EQ(str.size(), rev_len - 1) << "Bad ascii encoding for len " << str.size();
 
       mask |= ASCII1_ENC_BIT;
     }
@@ -845,7 +841,7 @@ size_t CompactObj::MallocUsed() const {
     return u_.small_str.MallocUsed();
   }
 
-  LOG(FATAL) << "TBD";
+  LOG(DFATAL) << "should not reach";
   return 0;
 }
 

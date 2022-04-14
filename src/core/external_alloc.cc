@@ -265,6 +265,7 @@ int64_t ExternalAllocator::Malloc(size_t sz) {
   size_t pos = page->free_blocks._Find_first();
   page->free_blocks.flip(pos);
   --page->available;
+  allocated_bytes_ += ToBlockSize(page->block_size_bin);
 
   SegmentDescr* seg = ToSegDescr(page);
   return seg->BlockOffset(page, pos);
@@ -298,6 +299,7 @@ void ExternalAllocator::Free(size_t offset, size_t sz) {
   if (page->available == blocks_num) {
     FreePage(page, seg, block_size);
   }
+  allocated_bytes_ -= block_size;
 }
 
 void ExternalAllocator::AddStorage(size_t offset, size_t size) {
@@ -319,6 +321,8 @@ void ExternalAllocator::AddStorage(size_t offset, size_t size) {
   if (next != added_segs_.end()) {
     CHECK_LE(offset + size, next->first);
   }
+
+  capacity_ += size;
 }
 
 size_t ExternalAllocator::GoogSize(size_t sz) {

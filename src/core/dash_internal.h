@@ -532,14 +532,14 @@ class DashTableBase {
 
  public:
   explicit DashTableBase(uint32_t gd)
-      : initial_depth_(gd), global_depth_(gd), unique_segments_(1 << gd) {
+      : unique_segments_(1 << gd), initial_depth_(gd), global_depth_(gd) {
   }
 
   uint32_t unique_segments() const {
     return unique_segments_;
   }
 
-  uint32_t depth() const {
+  uint16_t depth() const {
     return global_depth_;
   }
 
@@ -556,10 +556,10 @@ class DashTableBase {
     return 0;
   }
 
-  uint32_t initial_depth_;
-  uint32_t global_depth_;
-  uint32_t unique_segments_;
   size_t size_ = 0;
+  uint32_t unique_segments_;
+  uint8_t initial_depth_;
+  uint8_t global_depth_;
 };  // DashTableBase
 
 template <typename _Key, typename _Value> class IteratorPair {
@@ -577,6 +577,48 @@ template <typename _Key, typename _Value> class IteratorPair {
 
   _Key& first;
   _Value& second;
+};
+
+// Represents a cursor that points to a bucket in dash table.
+// One major difference with iterator is that the cursor survives dash table resizes and
+// will always point to the most appropriate segment with the same bucket.
+// It uses 40 lsb bits out of 64 assuming that number of segments does not cross 4B.
+// It's a reasonable assumption in shared nothing architecture when we usually have no more than
+// 32GB per CPU. Each segment spawns hundreds of entries so we can not grow segment table
+// to billions.
+class DashCursor {
+ public:
+  DashCursor(uint64_t val = 0) : val_(val) {
+  }
+
+  DashCursor(uint8_t depth, uint32_t seg_id, uint8_t bid)
+      : val_((uint64_t(seg_id) << (40 - depth)) | bid) {
+  }
+
+  uint8_t bucket_id() const {
+    return val_ & 0xFF;
+  }
+
+  // segment_id is padded to the left of 32 bit region:
+  // | segment_id......| bucket_id
+  // 40                8          0
+  // By using depth we take most significant bits of segment_id if depth has decreased
+  // since the cursort was created, or extend the least significant bits with zeros if
+  // depth has increased.
+  uint32_t segment_id(uint8_t depth) {
+    return val_ >> (40 - depth);
+  }
+
+  uint64_t value() const {
+    return val_;
+  }
+
+  explicit operator bool() const {
+    return val_ != 0;
+  }
+
+ private:
+  uint64_t val_;
 };
 
 /***********************************************************

@@ -124,6 +124,7 @@ void DebugCmd::Reload(CmdArgList args) {
     CHECK_NOTNULL(cid);
     intrusive_ptr<Transaction> trans(new Transaction{cid, &ess});
     trans->InitByArgs(0, {});
+    VLOG(1) << "Performing save";
     ec = sf_.DoSave(trans.get(), &err_details);
     if (ec) {
       return (*cntx_)->SendError(absl::StrCat(err_details, ec.message()));
@@ -133,6 +134,7 @@ void DebugCmd::Reload(CmdArgList args) {
   const CommandId* cid = sf_.service().FindCmd("FLUSHALL");
   intrusive_ptr<Transaction> flush_trans(new Transaction{cid, &ess});
   flush_trans->InitByArgs(0, {});
+  VLOG(1) << "Performing flush";
   ec = sf_.DoFlush(flush_trans.get(), DbSlice::kDbAll);
   if (ec) {
     LOG(ERROR) << "Error flushing db " << ec.message();
@@ -154,6 +156,7 @@ void DebugCmd::Reload(CmdArgList args) {
     return;
   }
 
+  VLOG(1) << "Performing load";
   io::FileSource fs(*res);
 
   RdbLoader loader(&ess);

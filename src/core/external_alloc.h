@@ -69,6 +69,14 @@ class ExternalAllocator {
   // No allocation is done.
   static size_t GoogSize(size_t sz);
 
+  size_t capacity() const {
+    return capacity_;
+  }
+
+  size_t allocated_bytes() const {
+    return allocated_bytes_;
+  }
+
  private:
   class SegmentDescr;
   using Page = detail::Page;
@@ -88,6 +96,9 @@ class ExternalAllocator {
   // weird queue to support AddStorage interface. We can not instantiate segment
   // until we know its class and that we know only when a page is demanded.
   absl::btree_map<size_t, size_t> added_segs_;
+
+  size_t capacity_ = 0;  // in bytes.
+  size_t allocated_bytes_ = 0;
 };
 
 }  // namespace dfly

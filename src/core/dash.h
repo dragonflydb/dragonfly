@@ -183,13 +183,21 @@ class DashTable : public detail::DashTableBase {
       return !(lhs == rhs);
     }
 
-    // debug accessors.
+    // Bucket resolution cursor that is safe to use with insertions/removals.
+    // Serves as a hint really to the placement of the original item, i.e. the item
+    // could have moved.
+    detail::DashCursor bucket_cursor() const {
+      return detail::DashCursor(owner_->global_depth_, seg_id_, bucket_id_);
+    }
+
     unsigned bucket_id() const {
       return bucket_id_;
     }
+
     unsigned slot_id() const {
       return slot_id_;
     }
+    
     unsigned segment_id() const {
       return seg_id_;
     }
@@ -200,6 +208,7 @@ class DashTable : public detail::DashTableBase {
 
   using const_bucket_iterator = Iterator<true, true>;
   using bucket_iterator = Iterator<false, true>;
+  using cursor = detail::DashCursor;
 
   struct EvictionBuckets {
     bucket_iterator iter[2 + Policy::kStashBucketNum];
@@ -305,7 +314,7 @@ class DashTable : public detail::DashTableBase {
   // It guarantees that if key exists at the beginning of traversal, stays in the table during the
   // traversal, it will eventually reach it even when the table shrinks or grows.
   // Returns: cursor that is guaranteed to be less than 2^40.
-  template <typename Cb> uint64_t Traverse(uint64_t cursor, Cb&& cb);
+  template <typename Cb> cursor Traverse(cursor curs, Cb&& cb);
 
   // Takes an iterator pointing to an entry in a dash bucket and traverses all bucket's entries by
   // calling cb(iterator) for every non-empty slot. The iteration goes over a physical bucket.
@@ -313,6 +322,10 @@ class DashTable : public detail::DashTableBase {
 
   static const_bucket_iterator bucket_it(const_iterator it) {
     return const_bucket_iterator{it.owner_, it.seg_id_, it.bucket_id_, 0};
+  }
+
+  const_bucket_iterator CursorToBucketIt(cursor c) const {
+    return const_bucket_iterator{this, c.segment_id(global_depth_), c.bucket_id(), 0};
   }
 
   // Capture Version Change. Runs cb(it) on every bucket! (not entry) in the table whose version
@@ -673,13 +686,13 @@ void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id) {
 
 template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
-uint64_t DashTable<_Key, _Value, Policy>::Traverse(uint64_t cursor, Cb&& cb) {
-  unsigned bid = cursor & 0xFF;
-
-  if (bid >= kLogicalBucketNum)  // sanity.
+auto DashTable<_Key, _Value, Policy>::Traverse(cursor curs, Cb&& cb) -> cursor {
+  if (curs.bucket_id() >= kLogicalBucketNum)  // sanity.
     return 0;
 
-  uint32_t sid = cursor >> (40 - global_depth_);
+  uint32_t sid = curs.segment_id(global_depth_);
+  uint8_t bid = curs.bucket_id();
+
   auto hash_fun = [this](const auto& k) { return policy_.HashFn(k); };
 
   bool fetched = false;
@@ -700,7 +713,7 @@ uint64_t DashTable<_Key, _Value, Policy>::Traverse(uint64_t cursor, Cb&& cb) {
     }
   } while (!fetched);
 
-  return (uint64_t(sid) << (40 - global_depth_)) | bid;
+  return cursor{global_depth_, sid, bid};
 }
 
 template <typename _Key, typename _Value, typename Policy>

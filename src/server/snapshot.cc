@@ -71,7 +71,6 @@ void SliceSnapshot::Join() {
 static_assert(sizeof(PrimeTable::const_iterator) == 16);
 
 void SliceSnapshot::SerializeSingleEntry(PrimeIterator it) {
-
   uint64_t expire_time = 0;
   if (it->second.HasExpire()) {
     auto eit = expire_tbl_->Find(it->first);
@@ -86,7 +85,7 @@ void SliceSnapshot::SerializeSingleEntry(PrimeIterator it) {
 void SliceSnapshot::FiberFunc() {
   this_fiber::properties<FiberProps>().set_name(
       absl::StrCat("SliceSnapshot", ProactorBase::GetIndex()));
-  uint64_t cursor = 0;
+  PrimeTable::cursor cursor;
   static_assert(PHYSICAL_LEN > PrimeTable::kPhysicalBucketNum);
 
   uint64_t last_yield = 0;
@@ -94,7 +93,8 @@ void SliceSnapshot::FiberFunc() {
     // Traverse a single logical bucket but do not update its versions.
     // we can not update a version because entries in the same bucket share part of the version.
     // Therefore we save first, and then update version in one atomic swipe.
-    uint64_t next = prime_table_->Traverse(cursor, [this](auto it) { this->SaveCb(move(it)); });
+    PrimeTable::cursor next =
+        prime_table_->Traverse(cursor, [this](auto it) { this->SaveCb(move(it)); });
 
     cursor = next;
     physical_mask_.reset();
@@ -109,7 +109,7 @@ void SliceSnapshot::FiberFunc() {
       // flush in case other fibers (writes commands that pushed previous values) filled the file.
       FlushSfile(false);
     }
-  } while (cursor > 0);
+  } while (cursor);
 
   DVLOG(1) << "after loop " << this_fiber::properties<FiberProps>().name();
   FlushSfile(true);
