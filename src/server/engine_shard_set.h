@@ -137,6 +137,8 @@ class EngineShard {
     return io_mgr_.get();
   }
 
+  void AddItemToUnload(std::string_view blob);
+
   // for everyone to use for string transformations during atomic cpu sequences.
   sds tmp_str1, tmp_str2;
 

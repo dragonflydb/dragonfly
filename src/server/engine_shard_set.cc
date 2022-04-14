@@ -124,7 +124,10 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
                              ".back");
     shard_->io_mgr_.reset(new IoMgr);
     error_code ec = shard_->io_mgr_->Open(fn);
-    CHECK(!ec) << ec.message();  // TODO
+    CHECK(!ec) << ec.message();     // TODO
+    if (shard_->io_mgr_->Size()) {  // Add initial storage.
+      shard_->ext_alloc_.AddStorage(0, shard_->io_mgr_->Size());
+    }
   }
 }
 
@@ -540,6 +543,48 @@ void EngineShard::CacheStats() {
 size_t EngineShard::UsedMemory() const {
   return mi_resource_.used() + zmalloc_used_memory_tl + SmallString::UsedThreadLocal();
 }
+
+void EngineShard::AddItemToUnload(string_view blob) {
+  DCHECK(io_mgr_);
+
+  size_t grow_size = 0;
+  int64_t res = ext_alloc_.Malloc(blob.size());
+  if (res >= 0) {
+    auto cb = [](int res) {};
+    io_mgr_->WriteAsync(res, blob, cb);
+  } else {
+    grow_size = -res;
+  }
+
+  if (grow_size == 0 && ext_alloc_.allocated_bytes() > size_t(ext_alloc_.capacity() * 0.85)) {
+    grow_size = 1ULL << 28;
+  }
+
+  if (grow_size && !io_mgr_->grow_pending()) {
+    size_t start = io_mgr_->Size();
+
+    auto cb = [start, grow_size, this](int io_res) {
+      if (io_res == 0) {
+        ext_alloc_.AddStorage(start, grow_size);
+      } else {
+        LOG_FIRST_N(ERROR, 10) << "Error enlarging storage " << io_res;
+      }
+    };
+    io_mgr_->GrowAsync(grow_size, move(cb));
+  }
+}
+
+/**
+
+
+  _____                _               ____   _                      _  ____         _
+ | ____| _ __    __ _ (_) _ __    ___ / ___| | |__    __ _  _ __  __| |/ ___|   ___ | |_
+ |  _|  | '_ \  / _` || || '_ \  / _ \\___ \ | '_ \  / _` || '__|/ _` |\___ \  / _ \| __|
+ | |___ | | | || (_| || || | | ||  __/ ___) || | | || (_| || |  | (_| | ___) ||  __/| |_
+ |_____||_| |_| \__, ||_||_| |_| \___||____/ |_| |_| \__,_||_|   \__,_||____/  \___| \__|
+                |___/
+
+ */
 
 void EngineShardSet::Init(uint32_t sz) {
   CHECK_EQ(0u, size());

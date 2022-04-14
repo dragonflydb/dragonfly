@@ -98,19 +98,8 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
   IoMgr* io_mgr = shard->io_mgr();
 
   if (io_mgr) {  // external storage enabled.
-    ExternalAllocator* ext_alloc = shard->external_allocator();
-    int64_t res = ext_alloc->Malloc(value.size());
-    if (res < 0) {
-      size_t start = io_mgr->Size();
-      io_mgr->GrowAsync(-res, [start, len = -res, ext_alloc](int io_res) {
-        if (io_res == 0) {
-          ext_alloc->AddStorage(start, len);
-        } else {
-          LOG_FIRST_N(ERROR, 10) << "Error enlarging storage " << io_res;
-        }
-      });
-    } else {
-      io_mgr->Write(res, value);
+    if (value.size() >= 64) {
+      shard->AddItemToUnload(value);
     }
   }
 

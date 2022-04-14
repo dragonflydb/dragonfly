@@ -23,6 +23,8 @@ IoMgr::IoMgr() {
   flags_val = 0;
 }
 
+constexpr size_t kInitialSize = 1UL << 28;  // 256MB
+
 error_code IoMgr::Open(const string& path) {
   CHECK(!backing_file_);
 
@@ -30,7 +32,15 @@ error_code IoMgr::Open(const string& path) {
   if (!res)
     return res.error();
   backing_file_ = move(res.value());
+  Proactor* proactor = (Proactor*)ProactorBase::me();
+  uring::FiberCall fc(proactor);
+  fc->PrepFallocate(backing_file_->fd(), 0, 0, kInitialSize);
+  FiberCall::IoResult io_res = fc.Get();
+  if (io_res < 0) {
+    return error_code{-io_res, system_category()};
+  }
 
+  sz_ = kInitialSize;
   return error_code{};
 }
 
@@ -44,11 +54,12 @@ error_code IoMgr::GrowAsync(size_t len, GrowCb cb) {
   Proactor* proactor = (Proactor*)ProactorBase::me();
 
   uring::SubmitEntry entry = proactor->GetSubmitEntry(
-      [this, cb = move(cb)](Proactor::IoResult res, uint32_t , int64_t arg) {
+      [this, cb = move(cb)](Proactor::IoResult res, uint32_t, int64_t arg) {
         this->flags.grow_progress = 0;
         sz_ += (res == 0 ? arg : 0);
         cb(res);
-      }, len);
+      },
+      len);
 
   entry.PrepFallocate(backing_file_->fd(), 0, sz_, len);
   flags.grow_progress = 1;
@@ -56,16 +67,23 @@ error_code IoMgr::GrowAsync(size_t len, GrowCb cb) {
   return error_code{};
 }
 
-error_code IoMgr::GetBlockAsync(string_view buf, int64_t arg, CbType cb) {
-  /*uring::Proactor* proactor = (uring::Proactor*)ProactorBase::me();
+error_code IoMgr::WriteAsync(size_t offset, string_view blob, WriteCb cb) {
+  DCHECK(!blob.empty());
 
-  auto mgr_cb = [cb = move(cb)](uring::Proactor::IoResult res, uint32_t flags, int64_t payload) {
-    cb(res, 4096);
+  uring::Proactor* proactor = (uring::Proactor*)ProactorBase::me();
+
+  uint8_t* ptr = new uint8_t[blob.size()];
+  memcpy(ptr, blob.data(), blob.size());
+
+  auto ring_cb = [ptr, cb = move(cb)](uring::Proactor::IoResult res, uint32_t flags,
+                                      int64_t payload) {
+    cb(res);
+    delete[] ptr;
   };
 
-  uring::SubmitEntry se = proactor->GetSubmitEntry(move(mgr_cb), 0);
-  se.PrepWrite(backing_file_->fd(), str_.data(), str_.size(), 4096);
-*/
+  uring::SubmitEntry se = proactor->GetSubmitEntry(move(ring_cb), 0);
+  se.PrepWrite(backing_file_->fd(), ptr, blob.size(), offset);
+
   return error_code{};
 }
 

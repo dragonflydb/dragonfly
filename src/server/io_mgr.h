@@ -14,8 +14,7 @@ namespace dfly {
 class IoMgr {
  public:
   // first arg - io result.
-  // second arg - an offset to the buffer in the backing file.
-  using CbType = std::function<void(int, uint64_t)>;
+  using WriteCb = std::function<void(int)>;
 
   // (io_res, )
   using GrowCb = std::function<void(int)>;
@@ -35,11 +34,13 @@ class IoMgr {
     return backing_file_->Write(io::Buffer(blob), offset, 0);
   }
 
-  // Returns error if submission failed. Otherwise - returns the error code
-  // via cb. if no error is returned - buf must live until cb is called.
-  std::error_code GetBlockAsync(std::string_view buf, int64_t arg, CbType cb);
+  // Returns error if submission failed. Otherwise - returns the io result
+  // via cb.
+  std::error_code WriteAsync(size_t offset, std::string_view blob, WriteCb cb);
 
   size_t Size() const { return sz_; }
+
+  bool grow_pending() const { return flags.grow_progress;}
 
  private:
   std::unique_ptr<util::uring::LinuxFile> backing_file_;
