@@ -98,6 +98,8 @@ TEST_F(ZSetFamilyTest, ZRemRangeScore) {
   EXPECT_THAT(Run({"zrange", "x", "0", "5"}), ElementsAre("b"));
   EXPECT_THAT(Run({"ZREMRANGEBYSCORE", "x", "(2.0", "+inf"}), ElementsAre(IntArg(1)));
   EXPECT_THAT(Run({"type", "x"}), ElementsAre("none"));
+  EXPECT_THAT(Run({"zremrangebyscore", "x", "1", "NaN"}),
+              ElementsAre(ErrArg("min or max is not a float")));
 }
 
 TEST_F(ZSetFamilyTest, IncrBy) {

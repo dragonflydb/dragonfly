@@ -21,8 +21,7 @@ DEFINE_uint32(dbnum, 16, "Number of databases");
 
 namespace dfly {
 using namespace std;
-using facade::kExpiryOutOfRange;
-using facade::Protocol;
+using namespace facade;
 
 namespace {
 
@@ -271,18 +270,20 @@ void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
 
+  if (int_arg > kMaxExpireDeadlineSec || int_arg < -kMaxExpireDeadlineSec) {
+    ToLower(&args[0]);
+    return (*cntx)->SendError(InvalidExpireTime(ArgS(args, 0)));
+  }
+
   int_arg = std::max(int_arg, -1L);
   ExpireParams params{.ts = int_arg};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(OpArgs{shard, t->db_index()}, key, params);
   };
+
   OpStatus status = cntx->transaction->ScheduleSingleHop(move(cb));
-  if (status == OpStatus::OUT_OF_RANGE) {
-    return (*cntx)->SendError(kExpiryOutOfRange);
-  } else {
-    (*cntx)->SendLong(status == OpStatus::OK);
-  }
+  (*cntx)->SendLong(status == OpStatus::OK);
 }
 
 void GenericFamily::ExpireAt(CmdArgList args, ConnectionContext* cntx) {
@@ -527,7 +528,6 @@ OpStatus GenericFamily::OpExpire(const OpArgs& op_args, string_view key,
   int64_t msec = (params.unit == TimeUnit::SEC) ? params.ts * 1000 : params.ts;
   int64_t now_msec = db_slice.Now();
   int64_t rel_msec = params.absolute ? msec - now_msec : msec;
-
   if (rel_msec > kMaxExpireDeadlineSec * 1000) {
     return OpStatus::OUT_OF_RANGE;
   }

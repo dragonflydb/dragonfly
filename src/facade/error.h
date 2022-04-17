@@ -10,6 +10,7 @@
 namespace facade {
 
 std::string WrongNumArgsError(std::string_view cmd);
+std::string InvalidExpireTime(std::string_view cmd);
 
 extern const char kSyntaxErr[];
 extern const char kWrongTypeErr[];
@@ -23,8 +24,9 @@ extern const char kInvalidDbIndErr[];
 extern const char kScriptNotFound[];
 extern const char kAuthRejected[];
 extern const char kExpiryOutOfRange[];
-extern const char kInvalidExpireTime[];
 extern const char kSyntaxErrType[];
 extern const char kScriptErrType[];
+extern const char kIndexOutOfRange[];
+
 
 }  // namespace dfly

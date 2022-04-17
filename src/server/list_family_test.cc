@@ -184,6 +184,8 @@ TEST_F(ListFamilyTest, Lset) {
   ASSERT_THAT(Run({"lpop", kKey1}), RespEq("bar"));
   ASSERT_THAT(Run({"lset", kKey1, "-1", "foo"}), RespEq("OK"));
   ASSERT_THAT(Run({"rpop", kKey1}), RespEq("foo"));
+  Run({"rpush", kKey2, "a"});
+  ASSERT_THAT(Run({"lset", kKey2, "1", "foo"}), ElementsAre(ErrArg("index out of range")));
 }
 
 TEST_F(ListFamilyTest, BLPopSerialize) {

@@ -139,14 +139,14 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       }
 
       if (int_arg <= 0 || (!is_ms && int_arg >= kMaxExpireDeadlineSec)) {
-        return builder->SendError(kExpiryOutOfRange);
+        return builder->SendError(InvalidExpireTime("set"));
       }
 
       if (!is_ms) {
         int_arg *= 1000;
       }
       if (int_arg >= kMaxExpireDeadlineSec * 1000) {
-        return builder->SendError(kExpiryOutOfRange);
+        return builder->SendError(InvalidExpireTime("set"));
       }
       sparams.expire_after_ms = int_arg;
     } else if (cur_arg == "NX") {
@@ -363,7 +363,7 @@ void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext
 
   if (unit_vals < 1) {
     ToLower(&args[0]);
-    return (*cntx)->SendError(absl::StrCat(kInvalidExpireTime, " in ", ArgS(args, 0)));
+    return (*cntx)->SendError(InvalidExpireTime(ArgS(args, 0)));
   }
 
   SetCmd::SetParams sparams{cntx->db_index()};

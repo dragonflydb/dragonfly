@@ -211,6 +211,9 @@ void RedisReplyBuilder::SendError(OpStatus status) {
     case OpStatus::WRONG_TYPE:
       SendError(kWrongTypeErr);
       break;
+    case OpStatus::OUT_OF_RANGE:
+      SendError(kIndexOutOfRange);
+      break;
     default:
       LOG(ERROR) << "Unsupported status " << status;
       SendError("Internal error");
