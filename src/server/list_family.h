@@ -30,6 +30,7 @@ class ListFamily {
   static void BRPop(CmdArgList args, ConnectionContext* cntx);
   static void LLen(CmdArgList args, ConnectionContext* cntx);
   static void LIndex(CmdArgList args, ConnectionContext* cntx);
+  static void LInsert(CmdArgList args, ConnectionContext* cntx);
   static void LTrim(CmdArgList args, ConnectionContext* cntx);
   static void LRange(CmdArgList args, ConnectionContext* cntx);
   static void LRem(CmdArgList args, ConnectionContext* cntx);
@@ -49,6 +50,8 @@ class ListFamily {
 
   static OpResult<uint32_t> OpLen(const OpArgs& op_args, std::string_view key);
   static OpResult<std::string> OpIndex(const OpArgs& op_args, std::string_view key, long index);
+  static OpResult<int> OpInsert(const OpArgs& op_args, std::string_view key, std::string_view pivot,
+                                std::string_view elem, int insert_param);
 
   static OpResult<uint32_t> OpRem(const OpArgs& op_args, std::string_view key,
                                   std::string_view elem, long count);

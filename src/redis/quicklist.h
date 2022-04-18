@@ -166,7 +166,7 @@ void quicklistAppendPlainNode(quicklist *quicklist, unsigned char *data, size_t 
 void quicklistInsertAfter(quicklistIter *iter, quicklistEntry *entry,
                           const void *value, const size_t sz);
 void quicklistInsertBefore(quicklistIter *iter, quicklistEntry *entry,
-                           void *value, const size_t sz);
+                           const void *value, const size_t sz);
 void quicklistDelEntry(quicklistIter *iter, quicklistEntry *entry);
 void quicklistReplaceEntry(quicklistIter *iter, quicklistEntry *entry,
                            const void *data, size_t sz);

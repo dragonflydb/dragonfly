@@ -18,6 +18,7 @@ enum class OpStatus : uint16_t {
   WRONG_TYPE,
   TIMED_OUT,
   OUT_OF_MEMORY,
+  INVALID_FLOAT,
 };
 
 class OpResultBase {

@@ -12,8 +12,8 @@ namespace dfly {
 
 class ConnectionContext;
 class CommandRegistry;
-using facade::OpStatus;
 using facade::OpResult;
+using facade::OpStatus;
 
 class SetCmd {
   DbSlice* db_slice_;
@@ -49,7 +49,6 @@ class StringFamily {
   static void Register(CommandRegistry* registry);
 
  private:
-
   static void Append(CmdArgList args, ConnectionContext* cntx);
   static void Decr(CmdArgList args, ConnectionContext* cntx);
   static void DecrBy(CmdArgList args, ConnectionContext* cntx);
@@ -58,6 +57,7 @@ class StringFamily {
   static void GetSet(CmdArgList args, ConnectionContext* cntx);
   static void Incr(CmdArgList args, ConnectionContext* cntx);
   static void IncrBy(CmdArgList args, ConnectionContext* cntx);
+  static void IncrByFloat(CmdArgList args, ConnectionContext* cntx);
   static void MGet(CmdArgList args, ConnectionContext* cntx);
   static void MSet(CmdArgList args, ConnectionContext* cntx);
   static void MSetNx(CmdArgList args, ConnectionContext* cntx);
@@ -89,6 +89,7 @@ class StringFamily {
   // if skip_on_missing - returns KEY_NOTFOUND.
   static OpResult<int64_t> OpIncrBy(const OpArgs& op_args, std::string_view key, int64_t val,
                                     bool skip_on_missing);
+  static OpResult<double> OpIncrFloat(const OpArgs& op_args, std::string_view key, double val);
 
   // Returns the length of the extended string. if prepend is false - appends the val.
   static OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, std::string_view key,

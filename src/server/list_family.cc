@@ -103,6 +103,16 @@ string ListPop(ListDir dir, quicklist* ql) {
   return res;
 }
 
+bool ElemCompare(const quicklistEntry& entry, string_view elem) {
+  if (entry.value) {
+    return entry.sz == elem.size() &&
+           (entry.sz == 0 || memcmp(entry.value, elem.data(), entry.sz) == 0);
+  }
+
+  absl::AlphaNum an(entry.longval);
+  return elem == an.Piece();
+}
+
 class BPopper {
  public:
   explicit BPopper(ListDir dir);
@@ -269,10 +279,39 @@ void ListFamily::LIndex(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+/* LINSERT <key> (BEFORE|AFTER) <pivot> <element> */
+void ListFamily::LInsert(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view param = ArgS(args, 2);
+  string_view pivot = ArgS(args, 3);
+  string_view elem = ArgS(args, 4);
+  int where;
+
+  ToUpper(&args[2]);
+  if (param == "AFTER") {
+    where = LIST_TAIL;
+  } else if (param == "BEFORE") {
+    where = LIST_HEAD;
+  } else {
+    return (*cntx)->SendError(kSyntaxErr);
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpInsert(OpArgs{shard, t->db_index()}, key, pivot, elem, where);
+  };
+
+  OpResult<int> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (result.status() == OpStatus::WRONG_TYPE) {
+    return (*cntx)->SendError(kWrongTypeErr);
+  }
+
+  (*cntx)->SendLong(result.value());
+}
+
 void ListFamily::LTrim(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
-  std::string_view s_str = ArgS(args, 2);
-  std::string_view e_str = ArgS(args, 3);
+  string_view key = ArgS(args, 1);
+  string_view s_str = ArgS(args, 2);
+  string_view e_str = ArgS(args, 3);
   int32_t start, end;
 
   if (!absl::SimpleAtoi(s_str, &start) || !absl::SimpleAtoi(e_str, &end)) {
@@ -581,8 +620,40 @@ OpResult<string> ListFamily::OpIndex(const OpArgs& op_args, std::string_view key
   return str;
 }
 
-OpResult<uint32_t> ListFamily::OpRem(const OpArgs& op_args, std::string_view key,
-                                     std::string_view elem, long count) {
+OpResult<int> ListFamily::OpInsert(const OpArgs& op_args, string_view key, string_view pivot,
+                                   string_view elem, int insert_param) {
+  auto res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_LIST);
+  if (!res)
+    return res.status();
+
+  quicklist* ql = GetQL(res.value()->second);
+  quicklistEntry entry = QLEntry();
+  quicklistIter* qiter = quicklistGetIterator(ql, AL_START_HEAD);
+  bool found = false;
+
+  while (quicklistNext(qiter, &entry)) {
+    if (ElemCompare(entry, pivot)) {
+      if (insert_param == LIST_TAIL) {
+        quicklistInsertAfter(qiter, &entry, elem.data(), elem.size());
+      } else {
+        DCHECK_EQ(LIST_HEAD, insert_param);
+
+        quicklistInsertBefore(qiter, &entry, elem.data(), elem.size());
+      }
+      found = true;
+      break;
+    }
+  }
+
+  quicklistReleaseIterator(qiter);
+  if (found) {
+    return quicklistCount(ql);
+  }
+  return -1;
+}
+
+OpResult<uint32_t> ListFamily::OpRem(const OpArgs& op_args, string_view key, string_view elem,
+                                     long count) {
   DCHECK(!elem.empty());
   auto res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_LIST);
   if (!res)
@@ -618,8 +689,7 @@ OpResult<uint32_t> ListFamily::OpRem(const OpArgs& op_args, std::string_view key
   return removed;
 }
 
-OpStatus ListFamily::OpSet(const OpArgs& op_args, std::string_view key, std::string_view elem,
-                           long index) {
+OpStatus ListFamily::OpSet(const OpArgs& op_args, string_view key, string_view elem, long index) {
   DCHECK(!elem.empty());
   auto res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_LIST);
   if (!res)
@@ -633,7 +703,7 @@ OpStatus ListFamily::OpSet(const OpArgs& op_args, std::string_view key, std::str
   return OpStatus::OK;
 }
 
-OpStatus ListFamily::OpTrim(const OpArgs& op_args, std::string_view key, long start, long end) {
+OpStatus ListFamily::OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
   auto res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_LIST);
   if (!res)
     return res.status();
@@ -731,6 +801,7 @@ void ListFamily::Register(CommandRegistry* registry) {
             << CI{"BRPOP", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING, -3, 1, -2, 1}.HFUNC(BRPop)
             << CI{"LLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(LLen)
             << CI{"LINDEX", CO::READONLY, 3, 1, 1, 1}.HFUNC(LIndex)
+            << CI{"LINSERT", CO::WRITE, 5, 1, 1, 1}.HFUNC(LInsert)
             << CI{"LRANGE", CO::READONLY, 4, 1, 1, 1}.HFUNC(LRange)
             << CI{"LSET", CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(LSet)
             << CI{"LTRIM", CO::WRITE, 4, 1, 1, 1}.HFUNC(LTrim)

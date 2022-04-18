@@ -1074,7 +1074,7 @@ REDIS_STATIC void _quicklistInsert(quicklistIter *iter, quicklistEntry *entry,
 }
 
 void quicklistInsertBefore(quicklistIter *iter, quicklistEntry *entry,
-                           void *value, const size_t sz)
+                           const void *value, const size_t sz)
 {
     _quicklistInsert(iter, entry, value, sz, 0);
 }

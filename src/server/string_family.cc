@@ -9,6 +9,8 @@ extern "C" {
 }
 
 #include <absl/container/inlined_vector.h>
+#include <double-conversion/double-to-string.h>
+#include <double-conversion/string-to-double.h>
 
 #include "base/logging.h"
 #include "server/command_registry.h"
@@ -25,6 +27,7 @@ namespace {
 
 using namespace std;
 using namespace facade;
+using namespace double_conversion;
 
 using CI = CommandId;
 DEFINE_VARZ(VarzQps, set_qps);
@@ -260,6 +263,30 @@ void StringFamily::IncrBy(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
   return IncrByGeneric(key, val, cntx);
+}
+
+void StringFamily::IncrByFloat(CmdArgList args, ConnectionContext* cntx) {
+  std::string_view key = ArgS(args, 1);
+  std::string_view sval = ArgS(args, 2);
+  double val;
+
+  if (!absl::SimpleAtod(sval, &val)) {
+    return (*cntx)->SendError(kInvalidFloatErr);
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpIncrFloat(OpArgs{shard, t->db_index()}, key, val);
+  };
+
+  OpResult<double> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  auto* builder = (RedisReplyBuilder*)cntx->reply_builder();
+
+  DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
+  if (!result) {
+    return (*cntx)->SendError(result.status());
+  }
+
+  builder->SendDouble(result.value());
 }
 
 void StringFamily::Decr(CmdArgList args, ConnectionContext* cntx) {
@@ -713,6 +740,53 @@ OpResult<int64_t> StringFamily::OpIncrBy(const OpArgs& op_args, std::string_view
   return new_val;
 }
 
+OpResult<double> StringFamily::OpIncrFloat(const OpArgs& op_args, std::string_view key,
+                                           double val) {
+  auto& db_slice = op_args.shard->db_slice();
+  auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
+
+  char buf[64];
+  StringBuilder sb(buf, sizeof(buf));
+
+  if (inserted) {
+    CHECK(DoubleToStringConverter::EcmaScriptConverter().ToShortest(val, &sb));
+    char* str = sb.Finalize();
+    it->second.SetString(str);
+
+    return val;
+  }
+
+  if (it->second.ObjType() != OBJ_STRING)
+    return OpStatus::WRONG_TYPE;
+
+  if (it->second.Size() == 0)
+    return OpStatus::INVALID_FLOAT;
+
+  string tmp;
+  string_view slice = it->second.GetSlice(&tmp);
+  double base;
+
+  if (!absl::SimpleAtod(slice, &base)) {
+    return OpStatus::INVALID_FLOAT;
+  }
+  base += val;
+
+  if (isnan(base) || isinf(base)) {
+    return OpStatus::INVALID_FLOAT;
+  }
+
+  if (!DoubleToStringConverter::EcmaScriptConverter().ToShortest(base, &sb)) {
+    return OpStatus::INVALID_FLOAT;
+  }
+
+  char* str = sb.Finalize();
+  db_slice.PreUpdate(op_args.db_ind, it);
+  it->second.SetString(str);
+  db_slice.PostUpdate(op_args.db_ind, it);
+
+  return base;
+}
+
 OpResult<uint32_t> StringFamily::ExtendOrSet(const OpArgs& op_args, std::string_view key,
                                              std::string_view val, bool prepend) {
   auto& db_slice = op_args.shard->db_slice();
@@ -783,6 +857,7 @@ void StringFamily::Register(CommandRegistry* registry) {
             << CI{"INCR", CO::WRITE | CO::DENYOOM | CO::FAST, 2, 1, 1, 1}.HFUNC(Incr)
             << CI{"DECR", CO::WRITE | CO::DENYOOM | CO::FAST, 2, 1, 1, 1}.HFUNC(Decr)
             << CI{"INCRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(IncrBy)
+            << CI{"INCRBYFLOAT", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(IncrByFloat)
             << CI{"DECRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(DecrBy)
             << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Get)
             << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(GetSet)

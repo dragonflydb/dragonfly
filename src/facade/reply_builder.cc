@@ -214,6 +214,9 @@ void RedisReplyBuilder::SendError(OpStatus status) {
     case OpStatus::OUT_OF_RANGE:
       SendError(kIndexOutOfRange);
       break;
+    case OpStatus::INVALID_FLOAT:
+      SendError(kInvalidFloatErr);
+      break;
     default:
       LOG(ERROR) << "Unsupported status " << status;
       SendError("Internal error");

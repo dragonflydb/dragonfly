@@ -133,7 +133,7 @@ API 2.0
   - [X] BRPOP
   - [ ] BRPOPLPUSH
   - [ ] BLMOVE
-  - [ ] LINSERT
+  - [X] LINSERT
   - [X] LPUSHX
   - [X] RPUSHX
 - [X] String Family
@@ -146,7 +146,7 @@ API 2.0
   - [ ] BITPOS
   - [ ] GETBIT
   - [X] GETRANGE
-  - [ ] INCRBYFLOAT
+  - [X] INCRBYFLOAT
   - [X] PSETEX
   - [ ] SETBIT
   - [X] SETRANGE
