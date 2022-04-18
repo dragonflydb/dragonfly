@@ -36,9 +36,15 @@ class RobjWrapper {
   void SetString(std::string_view s, std::pmr::memory_resource* mr);
   void Init(unsigned type, unsigned encoding, void* inner);
 
-  unsigned type() const { return type_; }
-  unsigned encoding() const { return encoding_; }
-  void* inner_obj() const { return inner_obj_;}
+  unsigned type() const {
+    return type_;
+  }
+  unsigned encoding() const {
+    return encoding_;
+  }
+  void* inner_obj() const {
+    return inner_obj_;
+  }
 
   std::string_view AsView() const {
     return std::string_view{reinterpret_cast<char*>(inner_obj_), sz_};
@@ -87,6 +93,7 @@ class CompactObj {
     INT_TAG = 17,
     SMALL_TAG = 18,
     ROBJ_TAG = 19,
+    EXTERNAL_TAG = 20,
   };
 
   enum MaskBit {
@@ -100,6 +107,7 @@ class CompactObj {
     // while ASCII2_ENC_BIT rounds it up. See DecodedLen implementation for more info.
     ASCII1_ENC_BIT = 8,
     ASCII2_ENC_BIT = 0x10,
+    IO_PENDING = 0x20,
   };
 
   static constexpr uint8_t kEncMask = ASCII1_ENC_BIT | ASCII2_ENC_BIT;
@@ -193,6 +201,18 @@ class CompactObj {
     }
   }
 
+  bool HasIoPending() {
+    return mask_ & IO_PENDING;
+  }
+
+  void SetIoPending(bool b) {
+    if (b) {
+      mask_ |= IO_PENDING;
+    } else {
+      mask_ &= ~IO_PENDING;
+    }
+  }
+
   unsigned Encoding() const;
   unsigned ObjType() const;
 
@@ -224,6 +244,15 @@ class CompactObj {
   // For STR object.
   void SetString(std::string_view str);
   void GetString(std::string* res) const;
+
+  // dest must have at least Size() bytes available
+  void GetString(char* dest) const;
+
+  bool IsExternal() const {
+    return taglen_ == EXTERNAL_TAG;
+  }
+  void SetExternal(size_t offset, size_t sz);
+  std::pair<size_t, size_t> GetExternalPtr();
 
   // In case this object a single blob, returns number of bytes allocated on heap
   // for that blob. Otherwise returns 0.
@@ -271,6 +300,12 @@ class CompactObj {
     mask_ = mask;
   }
 
+  struct ExternalPtr {
+    size_t offset;
+    uint32_t size;
+    uint32_t unneeded;
+  } __attribute__((packed));
+
   // My main data structure. Union of representations.
   // RobjWrapper is kInlineLen=16 bytes, so we employ SSO of that size via inline_str.
   // In case of int values, we waste 8 bytes. I am assuming it's ok and it's not the data type
@@ -281,6 +316,7 @@ class CompactObj {
     SmallString small_str;
     detail::RobjWrapper r_obj;
     int64_t ival __attribute__((packed));
+    ExternalPtr ext_ptr;
 
     U() : r_obj() {
     }

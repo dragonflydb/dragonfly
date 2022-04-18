@@ -500,7 +500,9 @@ size_t CompactObj::Size() const {
         raw_size = an.size();
         break;
       }
-
+      case EXTERNAL_TAG:
+        raw_size = u_.ext_ptr.size;
+        break;
       case ROBJ_TAG:
         raw_size = u_.r_obj.Size();
         break;
@@ -540,6 +542,7 @@ uint64_t CompactObj::HashCode() const {
       return XXH3_64bits_withSeed(an.data(), an.size(), kHashSeed);
     }
   }
+  // We need hash only for keys.
   LOG(DFATAL) << "Should not reach " << int(taglen_);
 
   return 0;
@@ -550,7 +553,7 @@ uint64_t CompactObj::HashCode(string_view str) {
 }
 
 unsigned CompactObj::ObjType() const {
-  if (IsInline() || taglen_ == INT_TAG || taglen_ == SMALL_TAG)
+  if (IsInline() || taglen_ == INT_TAG || taglen_ == SMALL_TAG || taglen_ == EXTERNAL_TAG)
     return OBJ_STRING;
 
   if (taglen_ == ROBJ_TAG)
@@ -626,17 +629,9 @@ void CompactObj::SyncRObj() {
 
   DCHECK_EQ(ROBJ_TAG, taglen_);
   DCHECK_EQ(u_.r_obj.type(), obj->type);
+  CHECK_NE(OBJ_SET, obj->type) << "sets should be handled without robj";
 
   unsigned enc = obj->encoding;
-  if (obj->type == OBJ_SET) {
-    LOG(FATAL) << "Should not reach";
-    /*if (OBJ_ENCODING_INTSET == enc) {
-      enc = kEncodingIntSet;
-    } else {
-      DCHECK_EQ(OBJ_ENCODING_HT, enc);
-      enc = kEncodingStrMap;
-    }*/
-  }
   u_.r_obj.Init(obj->type, enc, obj->ptr);
 }
 
@@ -754,17 +749,17 @@ string_view CompactObj::GetSlice(string* scratch) const {
       detail::ascii_unpack(to_byte(u_.r_obj.inner_obj()), decoded_len, scratch->data());
     } else if (taglen_ == SMALL_TAG) {
       size_t decoded_len = DecodedLen(u_.small_str.size());
-      size_t pref_len = decoded_len - u_.small_str.size();
+      size_t space_left = decoded_len - u_.small_str.size();
       scratch->resize(decoded_len);
       string_view slices[2];
 
       unsigned num = u_.small_str.GetV(slices);
       DCHECK_EQ(2u, num);
-      char* next = scratch->data() + pref_len;
+      char* next = scratch->data() + space_left;
       memcpy(next, slices[0].data(), slices[0].size());
       next += slices[0].size();
       memcpy(next, slices[1].data(), slices[1].size());
-      detail::ascii_unpack(reinterpret_cast<uint8_t*>(scratch->data() + pref_len), decoded_len,
+      detail::ascii_unpack(reinterpret_cast<uint8_t*>(scratch->data() + space_left), decoded_len,
                            scratch->data());
     } else {
       LOG(FATAL) << "Unsupported tag " << int(taglen_);
@@ -790,7 +785,7 @@ string_view CompactObj::GetSlice(string* scratch) const {
 }
 
 bool CompactObj::HasAllocated() const {
-  if (IsRef() || taglen_ == INT_TAG || IsInline() ||
+  if (IsRef() || taglen_ == INT_TAG || IsInline() || taglen_ == EXTERNAL_TAG ||
       (taglen_ == ROBJ_TAG && u_.r_obj.inner_obj() == nullptr))
     return false;
 
@@ -803,6 +798,90 @@ void __attribute__((noinline)) CompactObj::GetString(string* res) const {
   if (res->data() != slice.data()) {
     res->assign(slice);
   }
+}
+
+void CompactObj::GetString(char* dest) const {
+  uint8_t is_encoded = mask_ & kEncMask;
+
+  if (IsInline()) {
+    if (is_encoded) {
+      size_t decoded_len = taglen_ + 2;
+
+      // must be this because we either shortened 17 or 18.
+      DCHECK_EQ(is_encoded, ASCII2_ENC_BIT);
+      DCHECK_EQ(decoded_len, ascii_len(taglen_));
+
+      detail::ascii_unpack(to_byte(u_.inline_str), decoded_len, dest);
+    } else {
+      memcpy(dest, u_.inline_str, taglen_);
+    }
+
+    return;
+  }
+
+  if (taglen_ == INT_TAG) {
+    absl::AlphaNum an(u_.ival);
+    memcpy(dest, an.data(), an.size());
+    return;
+  }
+
+  if (is_encoded) {
+    if (taglen_ == ROBJ_TAG) {
+      CHECK_EQ(OBJ_STRING, u_.r_obj.type());
+      DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
+      size_t decoded_len = DecodedLen(u_.r_obj.Size());
+      detail::ascii_unpack(to_byte(u_.r_obj.inner_obj()), decoded_len, dest);
+    } else if (taglen_ == SMALL_TAG) {
+      size_t decoded_len = DecodedLen(u_.small_str.size());
+
+      // we left some space on the left to allow inplace ascii unpacking.
+      size_t space_left = decoded_len - u_.small_str.size();
+      string_view slices[2];
+
+      unsigned num = u_.small_str.GetV(slices);
+      DCHECK_EQ(2u, num);
+      char* next = dest + space_left;
+      memcpy(next, slices[0].data(), slices[0].size());
+      next += slices[0].size();
+      memcpy(next, slices[1].data(), slices[1].size());
+      detail::ascii_unpack(reinterpret_cast<uint8_t*>(dest + space_left), decoded_len, dest);
+    } else {
+      LOG(FATAL) << "Unsupported tag " << int(taglen_);
+    }
+    return;
+  }
+
+  // no encoding.
+  if (taglen_ == ROBJ_TAG) {
+    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
+    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
+    memcpy(dest, u_.r_obj.inner_obj(), u_.r_obj.Size());
+    return;
+  }
+
+  if (taglen_ == SMALL_TAG) {
+    string_view slices[2];
+    unsigned num = u_.small_str.GetV(slices);
+    DCHECK_EQ(2u, num);
+    memcpy(dest, slices[0].data(), slices[0].size());
+    dest += slices[0].size();
+    memcpy(dest, slices[1].data(), slices[1].size());
+    return;
+  }
+
+  LOG(FATAL) << "Bad tag " << int(taglen_);
+}
+
+void CompactObj::SetExternal(size_t offset, size_t sz) {
+  SetMeta(EXTERNAL_TAG, mask_ & ~kEncMask);
+
+  u_.ext_ptr.offset = offset;
+  u_.ext_ptr.size = sz;
+}
+
+std::pair<size_t, size_t> CompactObj::GetExternalPtr() {
+  DCHECK_EQ(EXTERNAL_TAG, taglen_);
+  return pair<size_t, size_t>(size_t(u_.ext_ptr.offset), size_t(u_.ext_ptr.size));
 }
 
 void CompactObj::Reset() {
