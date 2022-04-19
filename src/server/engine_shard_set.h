@@ -24,7 +24,7 @@ extern "C" {
 
 namespace dfly {
 
-class IoMgr;
+class TieredStorage;
 
 class EngineShard {
  public:
@@ -129,15 +129,7 @@ class EngineShard {
   // Returns used memory for this shard.
   size_t UsedMemory() const;
 
-  ExternalAllocator* external_allocator() {
-    return &ext_alloc_;
-  }
-
-  IoMgr* io_mgr() {
-    return io_mgr_.get();
-  }
-
-  void AddItemToUnload(std::string_view blob);
+  TieredStorage* tiered_storage() { return tiered_storage_.get(); }
 
   // for everyone to use for string transformations during atomic cpu sequences.
   sds tmp_str1, tmp_str2;
@@ -195,8 +187,7 @@ class EngineShard {
 
   uint32_t periodic_task_ = 0;
   uint64_t task_iters_ = 0;
-  std::unique_ptr<IoMgr> io_mgr_;
-  ExternalAllocator ext_alloc_;
+  std::unique_ptr<TieredStorage> tiered_storage_;
 
   static thread_local EngineShard* shard_;
 };

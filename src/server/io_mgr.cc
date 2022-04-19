@@ -28,7 +28,8 @@ constexpr size_t kInitialSize = 1UL << 28;  // 256MB
 error_code IoMgr::Open(const string& path) {
   CHECK(!backing_file_);
 
-  auto res = uring::OpenLinux(path, O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0666);
+  const int kFlags = O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC | O_DIRECT;
+  auto res = uring::OpenLinux(path, kFlags, 0666);
   if (!res)
     return res.error();
   backing_file_ = move(res.value());
@@ -89,7 +90,7 @@ error_code IoMgr::WriteAsync(size_t offset, string_view blob, WriteCb cb) {
 
 void IoMgr::Shutdown() {
   while (flags_val) {
-    this_fiber::sleep_for(20us);  // TODO: hacky for now.
+    this_fiber::sleep_for(200us);  // TODO: hacky for now.
   }
 }
 

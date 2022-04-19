@@ -201,7 +201,7 @@ class CompactObj {
     }
   }
 
-  bool HasIoPending() {
+  bool HasIoPending() const {
     return mask_ & IO_PENDING;
   }
 

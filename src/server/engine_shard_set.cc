@@ -10,7 +10,7 @@ extern "C" {
 }
 
 #include "base/logging.h"
-#include "server/io_mgr.h"
+#include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "util/fiber_sched_algo.h"
 #include "util/varz.h"
@@ -97,8 +97,8 @@ void EngineShard::Shutdown() {
   queue_.Shutdown();
   fiber_q_.join();
 
-  if (io_mgr_) {
-    io_mgr_->Shutdown();
+  if (tiered_storage_) {
+    tiered_storage_->Shutdown();
   }
 
   if (periodic_task_) {
@@ -120,14 +120,12 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
   SmallString::InitThreadLocal(tlh);
 
   if (!FLAGS_backing_prefix.empty()) {
-    string fn = absl::StrCat(FLAGS_backing_prefix, "-", absl::Dec(pb->GetIndex(), absl::kZeroPad4),
-                             ".back");
-    shard_->io_mgr_.reset(new IoMgr);
-    error_code ec = shard_->io_mgr_->Open(fn);
-    CHECK(!ec) << ec.message();     // TODO
-    if (shard_->io_mgr_->Size()) {  // Add initial storage.
-      shard_->ext_alloc_.AddStorage(0, shard_->io_mgr_->Size());
-    }
+    string fn =
+        absl::StrCat(FLAGS_backing_prefix, "-", absl::Dec(pb->GetIndex(), absl::kZeroPad4), ".ssd");
+
+    shard_->tiered_storage_.reset(new TieredStorage(&shard_->db_slice_));
+    error_code ec = shard_->tiered_storage_->Open(fn);
+    CHECK(!ec) << ec.message();          // TODO
   }
 }
 
@@ -542,36 +540,6 @@ void EngineShard::CacheStats() {
 
 size_t EngineShard::UsedMemory() const {
   return mi_resource_.used() + zmalloc_used_memory_tl + SmallString::UsedThreadLocal();
-}
-
-void EngineShard::AddItemToUnload(string_view blob) {
-  DCHECK(io_mgr_);
-
-  size_t grow_size = 0;
-  int64_t res = ext_alloc_.Malloc(blob.size());
-  if (res >= 0) {
-    auto cb = [](int res) {};
-    io_mgr_->WriteAsync(res, blob, cb);
-  } else {
-    grow_size = -res;
-  }
-
-  if (grow_size == 0 && ext_alloc_.allocated_bytes() > size_t(ext_alloc_.capacity() * 0.85)) {
-    grow_size = 1ULL << 28;
-  }
-
-  if (grow_size && !io_mgr_->grow_pending()) {
-    size_t start = io_mgr_->Size();
-
-    auto cb = [start, grow_size, this](int io_res) {
-      if (io_res == 0) {
-        ext_alloc_.AddStorage(start, grow_size);
-      } else {
-        LOG_FIRST_N(ERROR, 10) << "Error enlarging storage " << io_res;
-      }
-    };
-    io_mgr_->GrowAsync(grow_size, move(cb));
-  }
 }
 
 /**

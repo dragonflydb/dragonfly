@@ -18,6 +18,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/io_mgr.h"
+#include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "util/varz.h"
 
@@ -98,11 +99,10 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
   it = db_slice_->AddNew(params.db_index, key, std::move(tvalue), at_ms);
 
   EngineShard* shard = db_slice_->shard_owner();
-  IoMgr* io_mgr = shard->io_mgr();
 
-  if (io_mgr) {  // external storage enabled.
+  if (shard->tiered_storage()) {  // external storage enabled.
     if (value.size() >= 64) {
-      shard->AddItemToUnload(value);
+      shard->tiered_storage()->UnloadItem(params.db_index, it);
     }
   }
 
