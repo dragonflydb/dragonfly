@@ -60,6 +60,7 @@ API 1.0
   - [X] EXISTS
   - [X] EXPIRE
   - [X] EXPIREAT
+  - [X] KEYS
   - [X] PING
   - [X] RENAME
   - [X] RENAMENX
@@ -68,6 +69,7 @@ API 1.0
   - [X] TYPE
   - [ ] SORT
 - [X] Server Family
+  - [X] AUTH
   - [X] QUIT
   - [X] DBSIZE
   - [ ] BGSAVE
@@ -120,9 +122,7 @@ API 1.0
   - [X] ZREVRANGE
   - [X] ZSCORE
 - [ ] Not sure whether these are required for the initial release.
-  - [X] AUTH
   - [ ] BGREWRITEAOF
-  - [ ] KEYS
   - [ ] MONITOR
   - [ ] RANDOMKEY
   - [ ] MOVE

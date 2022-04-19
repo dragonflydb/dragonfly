@@ -8,7 +8,6 @@
 #include "server/common.h"
 #include "server/table.h"
 
-
 namespace util {
 class ProactorPool;
 }  // namespace util
@@ -44,6 +43,7 @@ class GenericFamily {
   static void Exists(CmdArgList args, ConnectionContext* cntx);
   static void Expire(CmdArgList args, ConnectionContext* cntx);
   static void ExpireAt(CmdArgList args, ConnectionContext* cntx);
+  static void Keys(CmdArgList args, ConnectionContext* cntx);
   static void PexpireAt(CmdArgList args, ConnectionContext* cntx);
 
   static void Rename(CmdArgList args, ConnectionContext* cntx);
@@ -67,6 +67,10 @@ class GenericFamily {
   static OpResult<uint32_t> OpExists(const OpArgs& op_args, ArgSlice keys);
   static OpResult<void> OpRen(const OpArgs& op_args, std::string_view from, std::string_view to,
                               bool skip_exists);
+
+  static uint64_t ScanGeneric(uint64_t cursor, std::string_view pattern,
+                              std::string_view type_filter, unsigned limit, StringVec* keys,
+                              ConnectionContext* cntx);
 
   static void OpScan(const OpArgs& op_args, std::string_view pattern, std::string_view type_filter,
                      size_t limit, uint64_t* cursor, StringVec* vec);
