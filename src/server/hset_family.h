@@ -33,7 +33,8 @@ class HSetFamily {
   static void HKeys(CmdArgList args, ConnectionContext* cntx);
   static void HVals(CmdArgList args, ConnectionContext* cntx);
   static void HGetAll(CmdArgList args, ConnectionContext* cntx);
-
+  static void HIncrByFloat(CmdArgList args, ConnectionContext* cntx);
+  static void HScan(CmdArgList args, ConnectionContext* cntx);
   static void HSet(CmdArgList args, ConnectionContext* cntx);
   static void HSetNx(CmdArgList args, ConnectionContext* cntx);
   static void HStrLen(CmdArgList args, ConnectionContext* cntx);
@@ -62,6 +63,8 @@ class HSetFamily {
   using IncrByParam = std::variant<double, int64_t>;
   static OpStatus OpIncrBy(const OpArgs& op_args, std::string_view key, std::string_view field,
                            IncrByParam* param);
+
+  static OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t* cursor);
 };
 
 }  // namespace dfly

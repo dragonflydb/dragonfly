@@ -745,7 +745,7 @@ OpResult<double> StringFamily::OpIncrFloat(const OpArgs& op_args, std::string_vi
   auto& db_slice = op_args.shard->db_slice();
   auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
 
-  char buf[64];
+  char buf[128];
   StringBuilder sb(buf, sizeof(buf));
 
   if (inserted) {

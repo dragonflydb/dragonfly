@@ -132,7 +132,6 @@ API 2.0
   - [X] BLPOP
   - [X] BRPOP
   - [ ] BRPOPLPUSH
-  - [ ] BLMOVE
   - [X] LINSERT
   - [X] LPUSHX
   - [X] RPUSHX
@@ -160,12 +159,12 @@ API 2.0
   - [X] HMGET
   - [X] HLEN
   - [X] HINCRBY
-  - [ ] HINCRBYFLOAT
+  - [X] HINCRBYFLOAT
   - [X] HGETALL
   - [X] HKEYS
   - [X] HSETNX
   - [X] HVALS
-  - [ ] HSCAN
+  - [X] HSCAN
 - [ ] PubSub family
   - [X] PUBLISH
   - [ ] PUBSUB
