@@ -69,6 +69,7 @@ TEST_F(ZSetFamilyTest, ZRangeRank) {
   Run({"zadd", "x", "1.1", "a", "2.1", "b"});
   EXPECT_THAT(Run({"zrangebyscore", "x", "0", "(1.1"}), ElementsAre(ArrLen(0)));
   EXPECT_THAT(Run({"zrangebyscore", "x", "-inf", "1.1"}), ElementsAre("a"));
+  EXPECT_THAT(Run({"zrevrangebyscore", "x", "-inf", "+inf"}), ElementsAre("b", "a"));
 
   EXPECT_EQ(2, CheckedInt({"zcount", "x", "1.1", "2.1"}));
   EXPECT_EQ(1, CheckedInt({"zcount", "x", "(1.1", "2.1"}));
@@ -121,6 +122,9 @@ TEST_F(ZSetFamilyTest, ByLex) {
   auto resp = Run({"zrangebylex", "key", "-", "[cool"});
   EXPECT_THAT(resp, ElementsAre("alpha", "bar", "cool"));
   EXPECT_EQ(3, CheckedInt({"ZLEXCOUNT", "key", "(foo", "+"}));
+  EXPECT_EQ(3, CheckedInt({"ZREMRANGEBYLEX", "key", "(foo", "+"}));
+  EXPECT_THAT(Run({"zrangebylex", "key", "[a", "+"}),
+              ElementsAre("alpha", "bar", "cool", "down", "elephant", "foo"));
 }
 
 }  // namespace dfly

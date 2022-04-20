@@ -102,6 +102,10 @@ unsigned long zslDeleteRangeByRank(zskiplist *zsl, unsigned int start, unsigned 
 unsigned long zslDeleteRangeByScore(zskiplist *zsl, const zrangespec *range, dict *dict);
 unsigned char *zzlDeleteRangeByScore(unsigned char *zl, const zrangespec *range, unsigned long *deleted);
 
+unsigned long zslDeleteRangeByLex(zskiplist *zsl, const zlexrangespec *range, dict *dict);
+
+unsigned char *zzlDeleteRangeByLex(unsigned char *zl, const zlexrangespec *range, unsigned long *deleted);
+
 extern sds cmaxstring;
 extern sds cminstring;
 

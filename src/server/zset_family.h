@@ -65,7 +65,9 @@ class ZSetFamily {
   static void ZRangeByScore(CmdArgList args, ConnectionContext* cntx);
   static void ZRemRangeByRank(CmdArgList args, ConnectionContext* cntx);
   static void ZRemRangeByScore(CmdArgList args, ConnectionContext* cntx);
+  static void ZRemRangeByLex(CmdArgList args, ConnectionContext* cntx);
   static void ZRevRange(CmdArgList args, ConnectionContext* cntx);
+  static void ZRevRangeByScore(CmdArgList args, ConnectionContext* cntx);
   static void ZRevRank(CmdArgList args, ConnectionContext* cntx);
 
   static void ZRangeByScoreInternal(std::string_view key, std::string_view min_s,
