@@ -205,8 +205,8 @@ API 2.0
 - [X] Sorted Set Family
   - [X] ZCOUNT
   - [ ] ZINTERSTORE
-  - [ ] ZLEXCOUNT
-  - [ ] ZRANGEBYLEX
+  - [X] ZLEXCOUNT
+  - [X] ZRANGEBYLEX
   - [X] ZRANK
   - [ ] ZREMRANGEBYLEX
   - [X] ZREMRANGEBYRANK

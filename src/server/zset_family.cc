@@ -29,7 +29,8 @@ using CI = CommandId;
 
 static const char kNxXxErr[] = "XX and NX options at the same time are not compatible";
 static const char kScoreNaN[] = "resulting score is not a number (NaN)";
-static const char kRangeErr[] = "min or max is not a float";
+static const char kFloatRangeErr[] = "min or max is not a float";
+static const char kLexRangeErr[] = "min or max not valid string range item";
 
 constexpr unsigned kMaxListPackValue = 64;
 
@@ -39,6 +40,32 @@ inline zrangespec GetZrangeSpec(const ZSetFamily::ScoreInterval& si) {
   range.max = si.second.val;
   range.minex = si.first.is_open;
   range.maxex = si.second.is_open;
+
+  return range;
+}
+
+zlexrangespec GetLexRange(const ZSetFamily::LexInterval& li) {
+  zlexrangespec range;
+  range.minex = 0;
+  range.maxex = 0;
+
+  if (li.first.type == ZSetFamily::LexBound::MINUS_INF) {
+    range.min = cminstring;
+  } else if (li.first.type == ZSetFamily::LexBound::PLUS_INF) {
+    range.min = cmaxstring;
+  } else {
+    range.min = sdsnewlen(li.first.val.data(), li.first.val.size());
+    range.minex = (li.first.type == ZSetFamily::LexBound::OPEN);
+  }
+
+  if (li.second.type == ZSetFamily::LexBound::MINUS_INF) {
+    range.max = cminstring;
+  } else if (li.second.type == ZSetFamily::LexBound::PLUS_INF) {
+    range.max = cmaxstring;
+  } else {
+    range.max = sdsnewlen(li.second.val.data(), li.second.val.size());
+    range.maxex = (li.second.type == ZSetFamily::LexBound::OPEN);
+  }
 
   return range;
 }
@@ -71,7 +98,7 @@ OpResult<PrimeIterator> FindZEntry(unsigned flags, const OpArgs& op_args, string
 
 enum class Action {
   RANGE = 0,
-  REM = 1,
+  REMOVE = 1,
 };
 
 class IntervalVisitor {
@@ -84,6 +111,8 @@ class IntervalVisitor {
 
   void operator()(const ZSetFamily::ScoreInterval& si);
 
+  void operator()(const ZSetFamily::LexInterval& li);
+
   ZSetFamily::ScoredArray PopResult() {
     return std::move(result_);
   }
@@ -95,10 +124,17 @@ class IntervalVisitor {
  private:
   void ExtractListPack(const zrangespec& range);
   void ExtractSkipList(const zrangespec& range);
+
+  void ExtractListPack(const zlexrangespec& range);
+  void ExtractSkipList(const zlexrangespec& range);
+
   void ActionRange(unsigned start, unsigned end);  // rank
   void ActionRange(const zrangespec& range);       // score
-  void ActionRem(unsigned start, unsigned end);    // rank
-  void ActionRem(const zrangespec& range);         // score
+  void ActionRange(const zlexrangespec& range);    // lex
+
+  void ActionRem(unsigned start, unsigned end);  // rank
+  void ActionRem(const zrangespec& range);       // score
+  void ActionRem(const zlexrangespec& range);    // lex
 
   void Next(uint8_t* zl, uint8_t** eptr, uint8_t** sptr) const {
     if (params_.reverse) {
@@ -106,6 +142,10 @@ class IntervalVisitor {
     } else {
       zzlNext(zl, eptr, sptr);
     }
+  }
+
+  zskiplistNode* Next(zskiplistNode* ln) const {
+    return params_.reverse ? ln->backward : ln->level[0].forward;
   }
 
   bool IsUnder(double score, const zrangespec& spec) const {
@@ -140,11 +180,12 @@ void IntervalVisitor::operator()(const ZSetFamily::IndexInterval& ii) {
 
   if (unsigned(end) >= llen)
     end = llen - 1;
+
   switch (action_) {
     case Action::RANGE:
       ActionRange(start, end);
       break;
-    case Action::REM:
+    case Action::REMOVE:
       ActionRem(start, end);
       break;
   }
@@ -157,7 +198,20 @@ void IntervalVisitor::operator()(const ZSetFamily::ScoreInterval& si) {
     case Action::RANGE:
       ActionRange(range);
       break;
-    case Action::REM:
+    case Action::REMOVE:
+      ActionRem(range);
+      break;
+  }
+}
+
+void IntervalVisitor::operator()(const ZSetFamily::LexInterval& li) {
+  zlexrangespec range = GetLexRange(li);
+
+  switch (action_) {
+    case Action::RANGE:
+      ActionRange(range);
+      break;
+    case Action::REMOVE:
       ActionRem(range);
       break;
   }
@@ -215,12 +269,21 @@ void IntervalVisitor::ActionRange(unsigned start, unsigned end) {
       DCHECK(ln != NULL);
       sds ele = ln->ele;
       result_.emplace_back(string(ele, sdslen(ele)), ln->score);
-      ln = params_.reverse ? ln->backward : ln->level[0].forward;
+      ln = Next(ln);
     }
   }
 }
 
 void IntervalVisitor::ActionRange(const zrangespec& range) {
+  if (zobj_->encoding == OBJ_ENCODING_LISTPACK) {
+    ExtractListPack(range);
+  } else {
+    CHECK_EQ(zobj_->encoding, OBJ_ENCODING_SKIPLIST);
+    ExtractSkipList(range);
+  }
+}
+
+void IntervalVisitor::ActionRange(const zlexrangespec& range) {
   if (zobj_->encoding == OBJ_ENCODING_LISTPACK) {
     ExtractListPack(range);
   } else {
@@ -257,13 +320,16 @@ void IntervalVisitor::ActionRem(const zrangespec& range) {
   }
 }
 
+void IntervalVisitor::ActionRem(const zlexrangespec& range) {
+  LOG(FATAL) << "TBD";
+}
+
 void IntervalVisitor::ExtractListPack(const zrangespec& range) {
   uint8_t* zl = (uint8_t*)zobj_->ptr;
   uint8_t *eptr, *sptr;
   uint8_t* vstr;
   unsigned int vlen = 0;
   long long vlong = 0;
-  unsigned rangelen = 0;
   unsigned offset = params_.offset;
   unsigned limit = params_.limit;
 
@@ -297,7 +363,6 @@ void IntervalVisitor::ExtractListPack(const zrangespec& range) {
 
     AddResult(vstr, vlen, vlong, score);
 
-    rangelen++;
     /* Move to next node */
     Next(zl, &eptr, &sptr);
   }
@@ -309,7 +374,6 @@ void IntervalVisitor::ExtractSkipList(const zrangespec& range) {
   zskiplistNode* ln;
   unsigned offset = params_.offset;
   unsigned limit = params_.limit;
-  unsigned rangelen = 0;
 
   /* If reversed, get the last node in range as starting point. */
   if (params_.reverse) {
@@ -321,11 +385,7 @@ void IntervalVisitor::ExtractSkipList(const zrangespec& range) {
   /* If there is an offset, just traverse the number of elements without
    * checking the score because that is done in the next loop. */
   while (ln && offset--) {
-    if (params_.reverse) {
-      ln = ln->backward;
-    } else {
-      ln = ln->level[0].forward;
-    }
+    ln = Next(ln);
   }
 
   while (ln && limit--) {
@@ -333,15 +393,95 @@ void IntervalVisitor::ExtractSkipList(const zrangespec& range) {
     if (!IsUnder(ln->score, range))
       break;
 
-    rangelen++;
     result_.emplace_back(string{ln->ele, sdslen(ln->ele)}, ln->score);
 
     /* Move to next node */
+    ln = Next(ln);
+  }
+}
+
+void IntervalVisitor::ExtractListPack(const zlexrangespec& range) {
+  uint8_t* zl = (uint8_t*)zobj_->ptr;
+  uint8_t *eptr, *sptr;
+  uint8_t* vstr;
+  unsigned int vlen;
+  long long vlong;
+  unsigned offset = params_.offset;
+  unsigned limit = params_.limit;
+
+  /* If reversed, get the last node in range as starting point. */
+  if (params_.reverse) {
+    eptr = zzlLastInLexRange(zl, &range);
+  } else {
+    eptr = zzlFirstInLexRange(zl, &range);
+  }
+
+  /* Get score pointer for the first element. */
+  if (eptr)
+    sptr = lpNext(zl, eptr);
+
+  /* If there is an offset, just traverse the number of elements without
+   * checking the score because that is done in the next loop. */
+  while (eptr && offset--) {
+    Next(zl, &eptr, &sptr);
+  }
+
+  while (eptr && limit--) {
+    double score = 0;
+    if (params_.with_scores) /* don't bother to extract the score if it's gonna be ignored. */
+      score = zzlGetScore(sptr);
+
+    /* Abort when the node is no longer in range. */
     if (params_.reverse) {
-      ln = ln->backward;
+      if (!zzlLexValueGteMin(eptr, &range))
+        break;
     } else {
-      ln = ln->level[0].forward;
+      if (!zzlLexValueLteMax(eptr, &range))
+        break;
     }
+
+    vstr = lpGetValue(eptr, &vlen, &vlong);
+    AddResult(vstr, vlen, vlong, score);
+
+    /* Move to next node */
+    Next(zl, &eptr, &sptr);
+  }
+}
+
+void IntervalVisitor::ExtractSkipList(const zlexrangespec& range) {
+  zset* zs = (zset*)zobj_->ptr;
+  zskiplist* zsl = zs->zsl;
+  zskiplistNode* ln;
+  unsigned offset = params_.offset;
+  unsigned limit = params_.limit;
+
+  /* If reversed, get the last node in range as starting point. */
+  if (params_.reverse) {
+    ln = zslLastInLexRange(zsl, &range);
+  } else {
+    ln = zslFirstInLexRange(zsl, &range);
+  }
+
+  /* If there is an offset, just traverse the number of elements without
+   * checking the score because that is done in the next loop. */
+  while (ln && offset--) {
+    ln = Next(ln);
+  }
+
+  while (ln && limit--) {
+    /* Abort when the node is no longer in range. */
+    if (params_.reverse) {
+      if (!zslLexValueGteMin(ln->ele, &range))
+        break;
+    } else {
+      if (!zslLexValueLteMax(ln->ele, &range))
+        break;
+    }
+
+    result_.emplace_back(string{ln->ele, sdslen(ln->ele)}, ln->score);
+
+    /* Move to next node */
+    ln = Next(ln);
   }
 }
 
@@ -377,6 +517,29 @@ bool ParseBound(string_view src, ZSetFamily::Bound* bound) {
   }
 
   return ParseScore(src, &bound->val);
+}
+
+bool ParseLexBound(string_view src, ZSetFamily::LexBound* bound) {
+  if (src.empty())
+    return false;
+
+  if (src == "+") {
+    bound->type = ZSetFamily::LexBound::PLUS_INF;
+  } else if (src == "-") {
+    bound->type = ZSetFamily::LexBound::MINUS_INF;
+  } else if (src[0] == '(') {
+    bound->type = ZSetFamily::LexBound::OPEN;
+    src.remove_prefix(1);
+    bound->val = src;
+  } else if (src[0] == '[') {
+    bound->type = ZSetFamily::LexBound::CLOSED;
+    src.remove_prefix(1);
+    bound->val = src;
+  } else {
+    return false;
+  }
+
+  return true;
 }
 
 }  // namespace
@@ -508,7 +671,7 @@ void ZSetFamily::ZCount(CmdArgList args, ConnectionContext* cntx) {
 
   ScoreInterval si;
   if (!ParseBound(min_s, &si.first) || !ParseBound(max_s, &si.second)) {
-    return (*cntx)->SendError(kRangeErr);
+    return (*cntx)->SendError(kFloatRangeErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -565,6 +728,30 @@ void ZSetFamily::ZIncrBy(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendDouble(add_result.new_score);
 }
 
+void ZSetFamily::ZLexCount(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+
+  string_view min_s = ArgS(args, 2);
+  string_view max_s = ArgS(args, 3);
+
+  LexInterval li;
+  if (!ParseLexBound(min_s, &li.first) || !ParseLexBound(max_s, &li.second)) {
+    return (*cntx)->SendError(kLexRangeErr);
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    OpArgs op_args{shard, t->db_index()};
+    return OpLexCount(op_args, key, li);
+  };
+
+  OpResult<unsigned> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (result.status() == OpStatus::WRONG_TYPE) {
+    (*cntx)->SendError(kWrongTypeErr);
+  } else {
+    (*cntx)->SendLong(*result);
+  }
+}
+
 void ZSetFamily::ZRange(CmdArgList args, ConnectionContext* cntx) {
   ZRangeGeneric(std::move(args), false, cntx);
 }
@@ -579,6 +766,46 @@ void ZSetFamily::ZRevRange(CmdArgList args, ConnectionContext* cntx) {
 
 void ZSetFamily::ZRevRank(CmdArgList args, ConnectionContext* cntx) {
   ZRankGeneric(std::move(args), true, cntx);
+}
+
+void ZSetFamily::ZRangeByLex(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view min_s = ArgS(args, 2);
+  string_view max_s = ArgS(args, 3);
+  uint32_t offset = 0;
+  uint32_t count = kuint32max;
+
+  if (args.size() > 4) {
+    if (args.size() != 7)
+      return (*cntx)->SendError(kSyntaxErr);
+
+    ToUpper(&args[4]);
+    if (ArgS(args, 4) != "LIMIT")
+      return (*cntx)->SendError(kSyntaxErr);
+    string_view os = ArgS(args, 5);
+    string_view cs = ArgS(args, 6);
+    if (!absl::SimpleAtoi(os, &count) || !absl::SimpleAtoi(cs, &count)) {
+      return (*cntx)->SendError(kInvalidIntErr);
+    }
+  }
+
+  LexInterval li;
+  if (!ParseLexBound(min_s, &li.first) || !ParseLexBound(max_s, &li.second)) {
+    return (*cntx)->SendError(kLexRangeErr);
+  }
+
+  ZRangeSpec range_spec;
+  range_spec.params.offset = offset;
+  range_spec.params.limit = count;
+  range_spec.interval = li;
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    OpArgs op_args{shard, t->db_index()};
+    return OpRange(range_spec, op_args, key);
+  };
+
+  OpResult<ScoredArray> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OutputScoredArrayResult(result, range_spec.params, cntx);
 }
 
 void ZSetFamily::ZRangeByScore(CmdArgList args, ConnectionContext* cntx) {
@@ -624,7 +851,7 @@ void ZSetFamily::ZRemRangeByScore(CmdArgList args, ConnectionContext* cntx) {
 
   ScoreInterval si;
   if (!ParseBound(min_s, &si.first) || !ParseBound(max_s, &si.second)) {
-    return (*cntx)->SendError(kRangeErr);
+    return (*cntx)->SendError(kFloatRangeErr);
   }
 
   ZRangeSpec range_spec;
@@ -681,7 +908,7 @@ void ZSetFamily::ZRangeByScoreInternal(string_view key, string_view min_s, strin
 
   ScoreInterval si;
   if (!ParseBound(min_s, &si.first) || !ParseBound(max_s, &si.second)) {
-    return (*cntx)->SendError(kRangeErr);
+    return (*cntx)->SendError(kFloatRangeErr);
   }
   range_spec.interval = si;
 
@@ -913,7 +1140,7 @@ OpResult<unsigned> ZSetFamily::OpRemRange(const OpArgs& op_args, string_view key
 
   robj* zobj = res_it.value()->second.AsRObj();
 
-  IntervalVisitor iv{Action::REM, range_spec.params, zobj};
+  IntervalVisitor iv{Action::REMOVE, range_spec.params, zobj};
   std::visit(iv, range_spec.interval);
 
   res_it.value()->second.SyncRObj();
@@ -1011,6 +1238,69 @@ OpResult<unsigned> ZSetFamily::OpCount(const OpArgs& op_args, std::string_view k
   return count;
 }
 
+OpResult<unsigned> ZSetFamily::OpLexCount(const OpArgs& op_args, string_view key,
+                                          const ZSetFamily::LexInterval& interval) {
+  OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_ZSET);
+  if (!res_it)
+    return res_it.status();
+
+  robj* zobj = res_it.value()->second.AsRObj();
+  zlexrangespec range = GetLexRange(interval);
+  unsigned count = 0;
+  if (zobj->encoding == OBJ_ENCODING_LISTPACK) {
+    uint8_t* zl = (uint8_t*)zobj->ptr;
+    uint8_t *eptr, *sptr;
+
+    /* Use the first element in range as the starting point */
+    eptr = zzlFirstInLexRange(zl, &range);
+
+    /* No "first" element */
+    if (eptr) {
+      /* First element is in range */
+      sptr = lpNext(zl, eptr);
+      serverAssertWithInfo(c, zobj, zzlLexValueLteMax(eptr, &range));
+
+      /* Iterate over elements in range */
+      while (eptr) {
+        /* Abort when the node is no longer in range. */
+        if (!zzlLexValueLteMax(eptr, &range)) {
+          break;
+        } else {
+          count++;
+          zzlNext(zl, &eptr, &sptr);
+        }
+      }
+    }
+  } else {
+    DCHECK_EQ(OBJ_ENCODING_SKIPLIST, zobj->encoding);
+    zset* zs = (zset*)zobj->ptr;
+    zskiplist* zsl = zs->zsl;
+    zskiplistNode* zn;
+    unsigned long rank;
+
+    /* Find first element in range */
+    zn = zslFirstInLexRange(zsl, &range);
+
+    /* Use rank of first element, if any, to determine preliminary count */
+    if (zn != NULL) {
+      rank = zslGetRank(zsl, zn->score, zn->ele);
+      count = (zsl->length - (rank - 1));
+
+      /* Find last element in range */
+      zn = zslLastInLexRange(zsl, &range);
+
+      /* Use rank of last element, if any, to determine the actual count */
+      if (zn != NULL) {
+        rank = zslGetRank(zsl, zn->score, zn->ele);
+        count -= (zsl->length - rank);
+      }
+    }
+  }
+
+  zslFreeLexRange(&range);
+  return count;
+}
+
 #define HFUNC(x) SetHandler(&ZSetFamily::x)
 
 void ZSetFamily::Register(CommandRegistry* registry) {
@@ -1018,9 +1308,11 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1, 1}.HFUNC(ZCard)
             << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1, 1}.HFUNC(ZCount)
             << CI{"ZINCRBY", CO::FAST | CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(ZIncrBy)
+            << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1, 1}.HFUNC(ZLexCount)
             << CI{"ZREM", CO::FAST | CO::WRITE, -3, 1, 1, 1}.HFUNC(ZRem)
             << CI{"ZRANGE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRange)
             << CI{"ZRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZRank)
+            << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRangeByLex)
             << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRangeByScore)
             << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZScore)
             << CI{"ZREMRANGEBYRANK", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRemRangeByRank)

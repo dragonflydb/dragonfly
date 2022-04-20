@@ -113,4 +113,14 @@ TEST_F(ZSetFamilyTest, IncrBy) {
   EXPECT_THAT(resp[0], ArgType(RespExpr::NIL));
 }
 
+TEST_F(ZSetFamilyTest, ByLex) {
+  Run({
+      "zadd", "key",      "0", "alpha", "0", "bar",   "0", "cool", "0", "down",
+      "0",    "elephant", "0", "foo",   "0", "great", "0", "hill", "0", "omega",
+  });
+  auto resp = Run({"zrangebylex", "key", "-", "[cool"});
+  EXPECT_THAT(resp, ElementsAre("alpha", "bar", "cool"));
+  EXPECT_EQ(3, CheckedInt({"ZLEXCOUNT", "key", "(foo", "+"}));
+}
+
 }  // namespace dfly

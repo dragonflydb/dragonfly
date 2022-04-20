@@ -87,10 +87,10 @@ int zslValueGteMin(double value, const zrangespec* spec);
 int zslValueLteMax(double value, const zrangespec* spec);
 void zslFreeLexRange(zlexrangespec* spec);
 int zslParseLexRange(robj* min, robj* max, zlexrangespec* spec);
-unsigned char* zzlFirstInLexRange(unsigned char* zl, zlexrangespec* range);
-unsigned char* zzlLastInLexRange(unsigned char* zl, zlexrangespec* range);
-zskiplistNode* zslFirstInLexRange(zskiplist* zsl, zlexrangespec* range);
-zskiplistNode* zslLastInLexRange(zskiplist* zsl, zlexrangespec* range);
+unsigned char* zzlFirstInLexRange(unsigned char* zl, const zlexrangespec* range);
+unsigned char* zzlLastInLexRange(unsigned char* zl, const zlexrangespec* range);
+zskiplistNode* zslFirstInLexRange(zskiplist* zsl, const zlexrangespec* range);
+zskiplistNode* zslLastInLexRange(zskiplist* zsl, const zlexrangespec* range);
 int zzlLexValueGteMin(unsigned char* p, const zlexrangespec* spec);
 int zzlLexValueLteMax(unsigned char* p, const zlexrangespec* spec);
 int zslLexValueGteMin(sds value, const zlexrangespec* spec);
@@ -101,5 +101,8 @@ unsigned long zslDeleteRangeByRank(zskiplist *zsl, unsigned int start, unsigned 
                                    dict *dict);
 unsigned long zslDeleteRangeByScore(zskiplist *zsl, const zrangespec *range, dict *dict);
 unsigned char *zzlDeleteRangeByScore(unsigned char *zl, const zrangespec *range, unsigned long *deleted);
+
+extern sds cmaxstring;
+extern sds cminstring;
 
 #endif

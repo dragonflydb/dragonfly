@@ -27,6 +27,13 @@ class ZSetFamily {
 
   using ScoreInterval = std::pair<Bound, Bound>;
 
+  struct LexBound {
+    std::string_view val;
+    enum Type {PLUS_INF, MINUS_INF, OPEN, CLOSED} type = CLOSED;
+  };
+
+  using LexInterval = std::pair<LexBound, LexBound>;
+
   struct RangeParams {
     uint32_t offset = 0;
     uint32_t limit = UINT32_MAX;
@@ -35,7 +42,7 @@ class ZSetFamily {
   };
 
   struct ZRangeSpec {
-    std::variant<IndexInterval, ScoreInterval> interval;
+    std::variant<IndexInterval, ScoreInterval, LexInterval> interval;
     RangeParams params;
   };
 
@@ -49,10 +56,12 @@ class ZSetFamily {
   static void ZCard(CmdArgList args, ConnectionContext* cntx);
   static void ZCount(CmdArgList args, ConnectionContext* cntx);
   static void ZIncrBy(CmdArgList args, ConnectionContext* cntx);
+  static void ZLexCount(CmdArgList args, ConnectionContext* cntx);
   static void ZRange(CmdArgList args, ConnectionContext* cntx);
   static void ZRank(CmdArgList args, ConnectionContext* cntx);
   static void ZRem(CmdArgList args, ConnectionContext* cntx);
   static void ZScore(CmdArgList args, ConnectionContext* cntx);
+  static void ZRangeByLex(CmdArgList args, ConnectionContext* cntx);
   static void ZRangeByScore(CmdArgList args, ConnectionContext* cntx);
   static void ZRemRangeByRank(CmdArgList args, ConnectionContext* cntx);
   static void ZRemRangeByScore(CmdArgList args, ConnectionContext* cntx);
@@ -99,6 +108,10 @@ class ZSetFamily {
 
   static OpResult<unsigned> OpCount(const OpArgs& op_args, std::string_view key,
                                     const ScoreInterval& interval);
+
+  static OpResult<unsigned> OpLexCount(const OpArgs& op_args, std::string_view key,
+                                       const LexInterval& interval);
+
 };
 
 }  // namespace dfly
