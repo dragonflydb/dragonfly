@@ -25,10 +25,12 @@ class TieredStorage {
   void UnloadItem(DbIndex db_index, PrimeIterator it);
 
  private:
+  struct ActiveIoRequest;
 
   // return 0 if everything was sent.
   // if more storage is needed returns requested size in bytes.
   size_t SerializePendingItems();
+  void FinishIoRequest(int io_res, ActiveIoRequest* req);
 
   DbSlice& db_slice_;
   IoMgr io_mgr_;
@@ -38,10 +40,18 @@ class TieredStorage {
   size_t submitted_io_writes_ = 0;
   size_t submitted_io_write_size_ = 0;
 
+   struct Hasher {
+    size_t operator()(const PrimeKey& o) const {
+      return o.HashCode();
+    }
+  };
+
   struct PerDb {
     // map of cursor -> pending size
-    absl::flat_hash_map<uint64_t, size_t> pending_upload_;
+    absl::flat_hash_map<uint64_t, size_t> pending_upload;
+    absl::flat_hash_map<PrimeKey, ActiveIoRequest*, Hasher> active_requests;
   };
+
   std::vector<PerDb*> db_arr_;
 };
 

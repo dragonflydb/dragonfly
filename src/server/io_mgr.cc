@@ -71,19 +71,14 @@ error_code IoMgr::GrowAsync(size_t len, GrowCb cb) {
 error_code IoMgr::WriteAsync(size_t offset, string_view blob, WriteCb cb) {
   DCHECK(!blob.empty());
 
-  uring::Proactor* proactor = (uring::Proactor*)ProactorBase::me();
+  Proactor* proactor = (Proactor*)ProactorBase::me();
 
-  uint8_t* ptr = new uint8_t[blob.size()];
-  memcpy(ptr, blob.data(), blob.size());
-
-  auto ring_cb = [ptr, cb = move(cb)](uring::Proactor::IoResult res, uint32_t flags,
-                                      int64_t payload) {
+  auto ring_cb = [cb = move(cb)](Proactor::IoResult res, uint32_t flags, int64_t payload) {
     cb(res);
-    delete[] ptr;
   };
 
   uring::SubmitEntry se = proactor->GetSubmitEntry(move(ring_cb), 0);
-  se.PrepWrite(backing_file_->fd(), ptr, blob.size(), offset);
+  se.PrepWrite(backing_file_->fd(), blob.data(), blob.size(), offset);
 
   return error_code{};
 }

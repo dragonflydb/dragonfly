@@ -30,12 +30,8 @@ class IoMgr {
   // passing other values will check-fail.
   std::error_code GrowAsync(size_t len, GrowCb cb);
 
-  std::error_code Write(size_t offset, std::string_view blob) {
-    return backing_file_->Write(io::Buffer(blob), offset, 0);
-  }
-
   // Returns error if submission failed. Otherwise - returns the io result
-  // via cb.
+  // via cb. A caller must make sure that the blob exists until cb is called.
   std::error_code WriteAsync(size_t offset, std::string_view blob, WriteCb cb);
 
   size_t Size() const { return sz_; }

@@ -67,7 +67,7 @@ class ExternalAllocator {
   // Similar to mi_good_size, returns the size of the underlying block as if
   // were returned by Malloc. Guaranteed that the result not less than sz.
   // No allocation is done.
-  static size_t GoogSize(size_t sz);
+  static size_t GoodSize(size_t sz);
 
   size_t capacity() const {
     return capacity_;

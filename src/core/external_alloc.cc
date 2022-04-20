@@ -325,7 +325,7 @@ void ExternalAllocator::AddStorage(size_t offset, size_t size) {
   capacity_ += size;
 }
 
-size_t ExternalAllocator::GoogSize(size_t sz) {
+size_t ExternalAllocator::GoodSize(size_t sz) {
   uint8_t bin_idx = ToBinIdx(sz);
   return ToBlockSize(bin_idx);
 }
