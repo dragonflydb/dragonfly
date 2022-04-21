@@ -98,6 +98,9 @@ class StringFamily {
   // Returns true if was extended, false if the key was not found.
   static OpResult<bool> ExtendOrSkip(const OpArgs& op_args, std::string_view key,
                                      std::string_view val, bool prepend);
+
+  static OpResult<std::string> OpGet(const OpArgs& op_args, std::string_view key);
+
 };
 
 }  // namespace dfly

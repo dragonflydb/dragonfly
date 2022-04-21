@@ -10,6 +10,8 @@
 #include "facade/facade_types.h"
 #include "util/uring/proactor.h"
 
+DEFINE_bool(backing_file_direct, false, "If true uses O_DIRECT to open backing files");
+
 namespace dfly {
 
 using namespace std;
@@ -28,7 +30,10 @@ constexpr size_t kInitialSize = 1UL << 28;  // 256MB
 error_code IoMgr::Open(const string& path) {
   CHECK(!backing_file_);
 
-  const int kFlags = O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC | O_DIRECT;
+  int kFlags = O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC;
+  if (FLAGS_backing_file_direct) {
+    kFlags |= O_DIRECT;
+  }
   auto res = uring::OpenLinux(path, kFlags, 0666);
   if (!res)
     return res.error();
@@ -70,6 +75,7 @@ error_code IoMgr::GrowAsync(size_t len, GrowCb cb) {
 
 error_code IoMgr::WriteAsync(size_t offset, string_view blob, WriteCb cb) {
   DCHECK(!blob.empty());
+  VLOG(1) << "WriteAsync " << offset << "/" << blob.size();
 
   Proactor* proactor = (Proactor*)ProactorBase::me();
 
@@ -81,6 +87,11 @@ error_code IoMgr::WriteAsync(size_t offset, string_view blob, WriteCb cb) {
   se.PrepWrite(backing_file_->fd(), blob.data(), blob.size(), offset);
 
   return error_code{};
+}
+
+error_code IoMgr::Read(size_t offset, io::MutableBytes dest) {
+  iovec v{.iov_base = dest.data(), .iov_len = dest.size()};
+  return backing_file_->Read(&v, 1, offset, 0);
 }
 
 void IoMgr::Shutdown() {

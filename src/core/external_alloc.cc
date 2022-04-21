@@ -123,9 +123,13 @@ struct Page {
   uint16_t available;
   uint8_t reserved2[2];
 
-  Page() {
-    memset(&id, 0, sizeof(Page) - offsetof(Page, id));
+  // We can not use c'tor because we use the trick in segment where we allocate more pages
+  // than SegmentDescr declares.
+  void Reset(uint8_t new_id) {
     static_assert(sizeof(Page) == 40);
+
+    memset(&id, 0, sizeof(Page) - offsetof(Page, id));
+    id = new_id;
   }
 
   void Init(PageClass pc, BinIdx bin_id) {
@@ -220,8 +224,9 @@ ExternalAllocator::SegmentDescr::SegmentDescr(PageClass pc, size_t offs, uint16_
 
   if (pc == PageClass::MEDIUM_P)
     page_shift_ = kMediumPageShift;
+
   for (unsigned i = 0; i < capacity; ++i) {
-    pages_[i].id = i;
+    pages_[i].Reset(i);
   }
 }
 
@@ -234,6 +239,8 @@ auto ExternalAllocator::SegmentDescr::FindPageSegment() -> Page* {
     }
   }
 
+  LOG(DFATAL) << "Should not reach here";
+
   return nullptr;
 }
 
@@ -242,6 +249,12 @@ static detail::Page empty_page;
 ExternalAllocator::ExternalAllocator() {
   std::fill(sq_, sq_ + 3, nullptr);
   std::fill(free_pages_, free_pages_ + detail::kNumSizeBins, &empty_page);
+}
+
+ExternalAllocator::~ExternalAllocator() {
+  for (auto* seg : segments_) {
+    mi_free(seg);
+  }
 }
 
 int64_t ExternalAllocator::Malloc(size_t sz) {
@@ -352,6 +365,7 @@ auto ExternalAllocator::FindPage(PageClass pc, size_t* seg_size) -> Page* {
       if (seg->HasFreePages()) {
         return seg->FindPageSegment();
       }
+
       // remove head.
       SegmentDescr* next = seg->next;
       if (next == seg->prev) {
@@ -387,6 +401,7 @@ auto ExternalAllocator::FindPage(PageClass pc, size_t* seg_size) -> Page* {
     sq_[pc] = seg;
     return seg->FindPageSegment();
   }
+
   *seg_size = kSegmentDefaultSize;
   return nullptr;
 }
@@ -421,7 +436,7 @@ void ExternalAllocator::FreePage(Page* page, SegmentDescr* owner, size_t block_s
       sq->prev = owner;
     }
   }
-  ++owner->used_;
+  --owner->used_;
 }
 
 inline auto ExternalAllocator::ToSegDescr(Page* page) -> SegmentDescr* {

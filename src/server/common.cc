@@ -18,6 +18,7 @@ thread_local ServerState ServerState::state_;
 
 atomic_uint64_t used_mem_peak(0);
 atomic_uint64_t used_mem_current(0);
+unsigned kernel_version = 0;
 
 ServerState::ServerState() {
 }

@@ -8,6 +8,8 @@ extern "C" {
 #include "redis/object.h"
 }
 
+#include <mimalloc.h>
+
 #include "base/logging.h"
 #include "server/db_slice.h"
 #include "util/proactor_base.h"
@@ -19,7 +21,8 @@ struct IndexKey {
   DbIndex db_indx;
   PrimeKey key;
 
-  IndexKey() {}
+  IndexKey() {
+  }
 
   // We define here a weird copy constructor because map uses pair<const PrimeKey,..>
   // and "const" prevents moving IndexKey.
@@ -28,7 +31,8 @@ struct IndexKey {
 
   IndexKey(IndexKey&&) = default;
 
-  IndexKey(DbIndex i, PrimeKey k) : db_indx(i), key(std::move(k)) {}
+  IndexKey(DbIndex i, PrimeKey k) : db_indx(i), key(std::move(k)) {
+  }
 
   bool operator==(const IndexKey& ik) const {
     return ik.db_indx == db_indx && ik.key == key;
@@ -48,18 +52,33 @@ struct TieredStorage::ActiveIoRequest {
   char* block_ptr;
 
   // entry -> offset
-  absl::flat_hash_map<IndexKey, size_t, EntryHash> entries;
+  /*absl::flat_hash_map<IndexKey, size_t, EntryHash, std::equal_to<>,
+                      mi_stl_allocator<std::pair<const IndexKey, size_t>>>*/
+  absl::flat_hash_map<IndexKey, size_t, EntryHash, std::equal_to<>> entries;
 
   ActiveIoRequest(size_t sz) {
     DCHECK_EQ(0u, sz % 4096);
-    block_ptr = (char*)aligned_malloc(sz, 4096);
+    block_ptr = (char*)mi_malloc_aligned(sz, 4096);
     DCHECK_EQ(0, intptr_t(block_ptr) % 4096);
   }
 
   ~ActiveIoRequest() {
-    free(block_ptr);
+    mi_free(block_ptr);
   }
 };
+
+void TieredStorage::SendIoRequest(size_t offset, size_t req_size, ActiveIoRequest* req) {
+#if 1
+  // static string tmp(4096, 'x');
+  // string_view sv{tmp};
+  string_view sv{req->block_ptr, req_size};
+
+  auto cb = [this, req](int res) { FinishIoRequest(res, req); };
+  io_mgr_.WriteAsync(offset, sv, move(cb));
+#else
+  FinishIoRequest(0, req);
+#endif
+}
 
 void TieredStorage::FinishIoRequest(int io_res, ActiveIoRequest* req) {
   bool success = true;
@@ -81,8 +100,10 @@ void TieredStorage::FinishIoRequest(int io_res, ActiveIoRequest* req) {
       it->second.SetExternal(k_v.second, item_size);
     }
   }
-
+  --num_active_requests_;
   delete req;
+
+  VLOG_IF(1, num_active_requests_ == 0) << "Finished active requests";
 }
 
 TieredStorage::TieredStorage(DbSlice* db_slice) : db_slice_(*db_slice) {
@@ -107,10 +128,12 @@ void TieredStorage::Shutdown() {
   io_mgr_.Shutdown();
 }
 
-void TieredStorage::UnloadItem(DbIndex db_index, PrimeIterator it) {
+error_code TieredStorage::UnloadItem(DbIndex db_index, PrimeIterator it) {
   CHECK_EQ(OBJ_STRING, it->second.ObjType());
 
   size_t blob_len = it->second.Size();
+  error_code ec;
+
   pending_unload_bytes_ += blob_len;
   if (db_index >= db_arr_.size()) {
     db_arr_.resize(db_index + 1);
@@ -143,8 +166,10 @@ void TieredStorage::UnloadItem(DbIndex db_index, PrimeIterator it) {
       }
     };
 
-    io_mgr_.GrowAsync(grow_size, move(cb));
+    ec = io_mgr_.GrowAsync(grow_size, move(cb));
   }
+
+  return ec;
 }
 
 size_t TieredStorage::SerializePendingItems() {
@@ -201,10 +226,7 @@ size_t TieredStorage::SerializePendingItems() {
             ++submitted_io_writes_;
             submitted_io_write_size_ += open_block_size;
 
-            string_view sv{active_req->block_ptr, open_block_size};
-            auto cb = [this, active_req](int res) { FinishIoRequest(res, active_req); };
-
-            io_mgr_.WriteAsync(file_offset, sv, move(cb));
+            SendIoRequest(file_offset, open_block_size, active_req);
             open_block_size = 0;
           }
 
@@ -217,6 +239,7 @@ size_t TieredStorage::SerializePendingItems() {
           file_offset = res;
           open_block_size = ExternalAllocator::GoodSize(item_size);
           block_offset = 0;
+          ++num_active_requests_;
           active_req = new ActiveIoRequest(open_block_size);
         }
 
@@ -228,20 +251,20 @@ size_t TieredStorage::SerializePendingItems() {
         it->second.SetIoPending(true);
 
         IndexKey key(db_ind, it->first.AsRef());
-        active_req->entries.try_emplace(move(key), file_offset + block_offset);
+        bool added = active_req->entries.emplace(move(key), file_offset + block_offset).second;
+        CHECK(added);
         block_offset += item_size;  // saved into opened block.
         pending_unload_bytes_ -= item_size;
       }
       count = 0;
       db->pending_upload.erase(cursor_val);
     }  // sorted_cursors
-  }    // db_arr
+
+    DCHECK(db->pending_upload.empty());
+  }  // db_arr
 
   if (open_block_size > 0) {
-    auto cb = [this, active_req](int res) { FinishIoRequest(res, active_req); };
-
-    string_view sv{active_req->block_ptr, open_block_size};
-    io_mgr_.WriteAsync(file_offset, sv, move(cb));
+    SendIoRequest(file_offset, open_block_size, active_req);
   }
 
   return 0;

@@ -2,11 +2,11 @@
 // See LICENSE for licensing terms.
 //
 
+// #include <mimalloc-new-delete.h>
 #include <mimalloc.h>
 
 #include "base/init.h"
 #include "base/proc_util.h"
-
 #include "facade/dragonfly_listener.h"
 #include "server/main_service.h"
 #include "util/accept_server.h"
@@ -25,8 +25,7 @@ using namespace facade;
 namespace dfly {
 
 bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
-
-  if (FLAGS_maxmemory > 0 && FLAGS_maxmemory < pool->size() * 256_MB ) {
+  if (FLAGS_maxmemory > 0 && FLAGS_maxmemory < pool->size() * 256_MB) {
     LOG(ERROR) << "Max memory is less than 256MB per thread. Exiting...";
     return false;
   }
@@ -58,6 +57,7 @@ int main(int argc, char* argv[]) {
   MainInitGuard guard(&argc, &argv);
 
   CHECK_GT(FLAGS_port, 0u);
+  mi_stats_reset();
 
   base::sys::KernelVersion kver;
   base::sys::GetKernelVersion(&kver);
@@ -66,12 +66,15 @@ int main(int argc, char* argv[]) {
     LOG(ERROR) << "Kernel 5.11 or later is supported. Exiting...";
     return 1;
   }
+  CHECK_LT(kver.minor, 99u);
+  dfly::kernel_version = kver.major * 100 + kver.minor;
 
   if (FLAGS_use_large_pages) {
     mi_option_enable(mi_option_large_os_pages);
   }
   mi_option_enable(mi_option_show_errors);
   mi_option_set(mi_option_max_warnings, 0);
+
 
   uring::UringPool pp{1024};
   pp.Run();

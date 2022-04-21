@@ -794,10 +794,8 @@ bool CompactObj::HasAllocated() const {
 }
 
 void __attribute__((noinline)) CompactObj::GetString(string* res) const {
-  string_view slice = GetSlice(res);
-  if (res->data() != slice.data()) {
-    res->assign(slice);
-  }
+  res->resize(Size());
+  GetString(res->data());
 }
 
 void CompactObj::GetString(char* dest) const {
@@ -879,7 +877,7 @@ void CompactObj::SetExternal(size_t offset, size_t sz) {
   u_.ext_ptr.size = sz;
 }
 
-std::pair<size_t, size_t> CompactObj::GetExternalPtr() {
+std::pair<size_t, size_t> CompactObj::GetExternalPtr() const {
   DCHECK_EQ(EXTERNAL_TAG, taglen_);
   return pair<size_t, size_t>(size_t(u_.ext_ptr.offset), size_t(u_.ext_ptr.size));
 }

@@ -5,6 +5,7 @@
 #include "core/external_alloc.h"
 
 #include "base/gtest.h"
+#include "base/logging.h"
 
 namespace dfly {
 
@@ -23,6 +24,25 @@ class ExternalAllocatorTest : public ::testing::Test {
 
 constexpr int64_t kSegSize = 1 << 28;
 
+std::map<int64_t, size_t> AllocateFully(ExternalAllocator* alloc) {
+  std::map<int64_t, size_t> ranges;
+
+  int64_t res = 0;
+  while (res >= 0) {
+    for (unsigned j = 1; j < 5; ++j) {
+      size_t sz = 4000 * j;
+      res = alloc->Malloc(sz);
+      if (res < 0)
+        break;
+      auto [it, added] = ranges.emplace(res, sz);
+      VLOG(1) << "res: " << res << " size: " << sz << " added: " << added;
+      CHECK(added);
+    }
+  }
+
+  return ranges;
+}
+
 TEST_F(ExternalAllocatorTest, Basic) {
   int64_t res = ext_alloc_.Malloc(128);
   EXPECT_EQ(-kSegSize, res);
@@ -32,7 +52,7 @@ TEST_F(ExternalAllocatorTest, Basic) {
   EXPECT_EQ(4096, ext_alloc_.Malloc(4096));
   EXPECT_EQ(1048576, ext_alloc_.Malloc(8192));  // another page.
 
-  ext_alloc_.Free(1048576, 8192);  // should return the page to the segment.
+  ext_alloc_.Free(1048576, 8192);                  // should return the page to the segment.
   EXPECT_EQ(1048576, ext_alloc_.Malloc(1 << 14));  // another page.
 
   ext_alloc_.Free(0, 4000);
@@ -43,26 +63,23 @@ TEST_F(ExternalAllocatorTest, Basic) {
 TEST_F(ExternalAllocatorTest, Invariants) {
   ext_alloc_.AddStorage(0, kSegSize);
 
-  std::map<int64_t, size_t> ranges;
-
-  int64_t res = 0;
-  while (res >= 0) {
-    for (unsigned j = 1; j < 5; ++j) {
-      size_t sz = 4000 * j;
-      res = ext_alloc_.Malloc(sz);
-      if (res < 0)
-        break;
-      auto [it, added] = ranges.emplace(res, sz);
-      ASSERT_TRUE(added);
-    }
-  }
-
+  auto ranges = AllocateFully(&ext_alloc_);
   EXPECT_GT(ext_alloc_.allocated_bytes(), ext_alloc_.capacity() * 0.75);
 
   off_t last = 0;
   for (const auto& k_v : ranges) {
     ASSERT_GE(k_v.first, last);
     last = k_v.first + k_v.second;
+  }
+
+  for (const auto& k_v : ranges) {
+    ext_alloc_.Free(k_v.first, k_v.second);
+  }
+  EXPECT_EQ(0, ext_alloc_.allocated_bytes());
+
+  for (const auto& k_v : ranges) {
+    int64_t res = ext_alloc_.Malloc(k_v.second);
+    ASSERT_GE(res, 0);
   }
 }
 

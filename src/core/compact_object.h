@@ -252,7 +252,7 @@ class CompactObj {
     return taglen_ == EXTERNAL_TAG;
   }
   void SetExternal(size_t offset, size_t sz);
-  std::pair<size_t, size_t> GetExternalPtr();
+  std::pair<size_t, size_t> GetExternalPtr() const;
 
   // In case this object a single blob, returns number of bytes allocated on heap
   // for that blob. Otherwise returns 0.

@@ -76,4 +76,8 @@ bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes);
 extern std::atomic_uint64_t used_mem_peak;
 extern std::atomic_uint64_t used_mem_current;
 
+// version 5.11 maps to 511 etc.
+// set upon server start.
+extern unsigned kernel_version;
+
 }  // namespace dfly

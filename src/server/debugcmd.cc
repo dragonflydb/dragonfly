@@ -41,12 +41,12 @@ struct PopulateBatch {
 };
 
 void DoPopulateBatch(std::string_view prefix, size_t val_size, const SetCmd::SetParams& params,
-                     const PopulateBatch& ps) {
+                     const PopulateBatch& batch) {
   SetCmd sg(&EngineShard::tlocal()->db_slice());
 
-  for (unsigned i = 0; i < ps.sz; ++i) {
-    string key = absl::StrCat(prefix, ":", ps.index[i]);
-    string val = absl::StrCat("value:", ps.index[i]);
+  for (unsigned i = 0; i < batch.sz; ++i) {
+    string key = absl::StrCat(prefix, ":", batch.index[i]);
+    string val = absl::StrCat("value:", batch.index[i]);
 
     if (val.size() < val_size) {
       val.resize(val_size, 'x');
@@ -231,24 +231,24 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view 
   for (uint64_t i = from; i < from + len; ++i) {
     absl::StrAppend(&key, i);
     ShardId sid = Shard(key, ess.size());
-    key.resize(prefsize);
+    key.resize(prefsize);  // shrink back
 
-    auto& pops = ps[sid];
-    pops.index[pops.sz++] = i;
-    if (pops.sz == 32) {
-      ess.Add(sid, [=, p = pops] {
-        DoPopulateBatch(prefix, value_len, params, p);
+    auto& shard_batch = ps[sid];
+    shard_batch.index[shard_batch.sz++] = i;
+    if (shard_batch.sz == 32) {
+      ess.Add(sid, [=] {
+        DoPopulateBatch(prefix, value_len, params, shard_batch);
         if (i % 50 == 0) {
           this_fiber::yield();
         }
       });
 
-      // we capture pops by value so we can override it here.
-      pops.sz = 0;
+      // we capture shard_batch by value so we can override it here.
+      shard_batch.sz = 0;
     }
   }
 
-  ess.RunBriefInParallel([&](EngineShard* shard) {
+  ess.RunBlockingInParallel([&](EngineShard* shard) {
     DoPopulateBatch(prefix, value_len, params, ps[shard->shard_id()]);
   });
 }

@@ -50,6 +50,7 @@ class ExternalAllocator {
   static constexpr size_t kExtAlignment = 1ULL << 28;  // 256 MB
 
   ExternalAllocator();
+  ~ExternalAllocator();
 
   // If a negative result - backing storage is required of size=-result. See AddStorage
   // on how to add more storage.

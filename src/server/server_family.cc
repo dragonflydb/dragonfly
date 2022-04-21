@@ -469,6 +469,8 @@ tcp_port:)";
 
     append("used_memory:", m.heap_used_bytes);
     append("used_memory_human:", HumanReadableNumBytes(m.heap_used_bytes));
+    append("used_memory_peak:", used_mem_peak.load(memory_order_relaxed));
+
     append("comitted_memory:", _mi_stats_main.committed.current);
 
     if (sdata_res.has_value()) {
@@ -477,8 +479,6 @@ tcp_port:)";
     } else {
       LOG(ERROR) << "Error fetching /proc/self/status stats";
     }
-
-    append("used_memory_peak:", used_mem_peak.load(memory_order_relaxed));
 
     // Blob - all these cases where the key/objects are represented by a single blob allocated on
     // heap. For example, strings or intsets. members of lists, sets, zsets etc

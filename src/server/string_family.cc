@@ -190,14 +190,8 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 
   std::string_view key = ArgS(args, 1);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<string> {
-    OpResult<PrimeIterator> it_res = shard->db_slice().Find(t->db_index(), key, OBJ_STRING);
-    if (!it_res.ok())
-      return it_res.status();
-
-    string val;
-    it_res.value()->second.GetString(&val);
-    return val;
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpGet(OpArgs{shard, t->db_index()}, key);
   };
 
   DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
@@ -836,6 +830,30 @@ OpResult<bool> StringFamily::ExtendOrSkip(const OpArgs& op_args, std::string_vie
 
   return new_val.size();
 }
+
+OpResult<string> StringFamily::OpGet(const OpArgs& op_args, string_view key) {
+  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_STRING);
+  if (!it_res.ok())
+    return it_res.status();
+
+  const PrimeValue& pv = it_res.value()->second;
+
+  string val;
+  if (pv.IsExternal()) {
+    auto* tiered = op_args.shard->tiered_storage();
+    auto [offset, size] = pv.GetExternalPtr();
+    val.resize(size);
+
+    // TODO: can not work with O_DIRECT
+    error_code ec = tiered->Read(offset, size, val.data());
+    CHECK(!ec) << "TBD: " << ec;
+  } else {
+    it_res.value()->second.GetString(&val);
+  }
+
+  return val;
+}
+
 void StringFamily::Init(util::ProactorPool* pp) {
   set_qps.Init(pp);
   get_qps.Init(pp);

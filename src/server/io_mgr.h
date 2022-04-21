@@ -14,6 +14,7 @@ namespace dfly {
 class IoMgr {
  public:
   // first arg - io result.
+  // using WriteCb = fu2::function_base<true, false, fu2::capacity_default, false, false, void(int)>;
   using WriteCb = std::function<void(int)>;
 
   // (io_res, )
@@ -33,10 +34,15 @@ class IoMgr {
   // Returns error if submission failed. Otherwise - returns the io result
   // via cb. A caller must make sure that the blob exists until cb is called.
   std::error_code WriteAsync(size_t offset, std::string_view blob, WriteCb cb);
+  std::error_code Read(size_t offset, io::MutableBytes dest);
 
-  size_t Size() const { return sz_; }
+  size_t Size() const {
+    return sz_;
+  }
 
-  bool grow_pending() const { return flags.grow_progress;}
+  bool grow_pending() const {
+    return flags.grow_progress;
+  }
 
  private:
   std::unique_ptr<util::uring::LinuxFile> backing_file_;
