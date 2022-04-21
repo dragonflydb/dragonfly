@@ -8,8 +8,8 @@ else()
   set(ZMALLOC_DEPS "")
 endif()
 
-add_library(redis_lib crc64.c crcspeed.c debug.c dict.c endianconv.c intset.c 
-            listpack.c mt19937-64.c object.c lzf_c.c lzf_d.c sds.c sha256.c
+add_library(redis_lib crc64.c crcspeed.c debug.c dict.c intset.c
+            listpack.c mt19937-64.c object.c lzf_c.c lzf_d.c sds.c
             quicklist.c redis_aux.c siphash.c t_hash.c t_zset.c util.c ziplist.c ${ZMALLOC_SRC})
 
 cxx_link(redis_lib  ${ZMALLOC_DEPS})

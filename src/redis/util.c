@@ -42,7 +42,6 @@
 #include <time.h>
 
 #include "util.h"
-#include "sha256.h"
 
 
 /* Glob-style pattern matching. */
@@ -639,6 +638,7 @@ int ld2string(char *buf, size_t len, long double value, ld2string_mode mode) {
     return l;
 }
 
+#ifdef ROMAN_DISABLE_CODE
 /* Get random bytes, attempts to get an initial seed from /dev/urandom and
  * the uses a one way hash function in counter mode to generate a random
  * stream. However if /dev/urandom is not available, a weaker seed is used.
@@ -721,7 +721,7 @@ void getRandomHexChars(char *p, size_t len) {
 }
 
 
-#ifdef ROMAN_DISABLE_CODE
+
 /* Given the filename, return the absolute path as an SDS string, or NULL
  * if it fails for some reason. Note that "filename" may be an absolute path
  * already, this will be detected and handled correctly.
@@ -774,8 +774,6 @@ sds getAbsolutePath(char *filename) {
     return abspath;
 }
 
-#endif 
-
 /*
  * Gets the proper timezone in a more portable fashion
  * i.e timezone variables are linux specific.
@@ -802,6 +800,7 @@ int pathIsBaseName(char *path) {
     return strchr(path,'/') == NULL && strchr(path,'\\') == NULL;
 }
 
+#endif 
 
 /* Return the UNIX time in microseconds */
 long long ustime(void) {

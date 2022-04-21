@@ -9,7 +9,6 @@
 #include <absl/strings/str_format.h>
 
 extern "C" {
-#include "redis/endianconv.h"
 #include "redis/intset.h"
 #include "redis/listpack.h"
 #include "redis/rdb.h"
@@ -378,10 +377,9 @@ error_code RdbSerializer::SaveLongLongAsString(int64_t value) {
  * Return -1 on error, the size of the serialized value on success. */
 error_code RdbSerializer::SaveBinaryDouble(double val) {
   static_assert(sizeof(val) == 8);
+  const uint64_t* src = reinterpret_cast<const uint64_t*>(&val);
   uint8_t buf[8];
-
-  memcpy(buf, &val, sizeof(buf));
-  memrev64ifbe(buf);
+  absl::little_endian::Store64(buf, *src);
 
   return WriteRaw(Bytes{buf, sizeof(buf)});
 }
