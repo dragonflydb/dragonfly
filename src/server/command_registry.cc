@@ -7,11 +7,12 @@
 #include "absl/strings/str_cat.h"
 #include "base/bits.h"
 #include "base/logging.h"
+#include "facade/error.h"
 #include "server/conn_context.h"
 
-using namespace std;
-
 namespace dfly {
+using namespace facade;
+using namespace std;
 
 using absl::StrAppend;
 using absl::StrCat;
@@ -30,7 +31,7 @@ uint32_t CommandId::OptCount(uint32_t mask) {
 }
 
 CommandRegistry::CommandRegistry() {
-  CommandId cd("COMMAND", CO::RANDOM | CO::LOADING | CO::NOSCRIPT, 0, 0, 0, 0);
+  CommandId cd("COMMAND", CO::RANDOM | CO::LOADING | CO::NOSCRIPT, -1, 0, 0, 0);
 
   cd.SetHandler([this](const auto& args, auto* cntx) { return Command(args, cntx); });
 
@@ -39,6 +40,15 @@ CommandRegistry::CommandRegistry() {
 }
 
 void CommandRegistry::Command(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() > 1) {
+    ToUpper(&args[1]);
+    string_view subcmd = ArgS(args, 1);
+    if (subcmd == "COUNT") {
+      return (*cntx)->SendLong(cmd_map_.size());
+    } else {
+      return (*cntx)->SendError(kSyntaxErr, kSyntaxErrType);
+    }
+  }
   size_t len = cmd_map_.size();
 
   (*cntx)->StartArray(len);
