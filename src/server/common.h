@@ -58,6 +58,15 @@ struct OpArgs {
   DbIndex db_ind;
 };
 
+
+struct TieredStats {
+  size_t external_reads = 0;
+  size_t external_writes = 0;
+
+  TieredStats& operator+=(const TieredStats&);
+};
+
+
 inline void ToUpper(const MutableSlice* val) {
   for (auto& c : *val) {
     c = absl::ascii_toupper(c);

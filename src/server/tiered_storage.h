@@ -21,13 +21,15 @@ class TieredStorage {
 
   std::error_code Open(const std::string& path);
 
-  std::error_code Read(size_t offset, size_t len, char* dest) {
-    return io_mgr_.Read(offset, io::MutableBytes{reinterpret_cast<uint8_t*>(dest), len});
-  }
+  std::error_code Read(size_t offset, size_t len, char* dest);
 
   std::error_code UnloadItem(DbIndex db_index, PrimeIterator it);
 
   void Shutdown();
+
+  const TieredStats& stats() const {
+    return stats_;
+  }
 
  private:
   struct ActiveIoRequest;
@@ -37,7 +39,6 @@ class TieredStorage {
   size_t SerializePendingItems();
   void SendIoRequest(size_t offset, size_t req_size, ActiveIoRequest* req);
   void FinishIoRequest(int io_res, ActiveIoRequest* req);
-
 
   DbSlice& db_slice_;
   IoMgr io_mgr_;
@@ -61,6 +62,7 @@ class TieredStorage {
   };
 
   std::vector<PerDb*> db_arr_;
+  TieredStats stats_;
 };
 
 }  // namespace dfly

@@ -75,6 +75,7 @@ void TieredStorage::SendIoRequest(size_t offset, size_t req_size, ActiveIoReques
 
   auto cb = [this, req](int res) { FinishIoRequest(res, req); };
   io_mgr_.WriteAsync(offset, sv, move(cb));
+  ++stats_.external_writes;
 #else
   FinishIoRequest(0, req);
 #endif
@@ -98,6 +99,7 @@ void TieredStorage::FinishIoRequest(int io_res, ActiveIoRequest* req) {
     if (success) {
       size_t item_size = it->second.Size();
       it->second.SetExternal(k_v.second, item_size);
+      ++db_slice_.MutableStats(ikey.db_indx)->external_entries;
     }
   }
   --num_active_requests_;
@@ -122,6 +124,12 @@ error_code TieredStorage::Open(const string& path) {
     }
   }
   return ec;
+}
+
+std::error_code TieredStorage::Read(size_t offset, size_t len, char* dest) {
+  stats_.external_reads++;
+
+  return io_mgr_.Read(offset, io::MutableBytes{reinterpret_cast<uint8_t*>(dest), len});
 }
 
 void TieredStorage::Shutdown() {

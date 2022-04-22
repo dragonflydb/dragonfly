@@ -28,6 +28,7 @@ extern "C" {
 #include "server/replica.h"
 #include "server/script_mgr.h"
 #include "server/server_state.h"
+#include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
@@ -401,6 +402,9 @@ Metrics ServerFamily::GetMetrics() const {
       result.events += db_stats.events;
 
       result.heap_used_bytes += shard->UsedMemory();
+      if (shard->tiered_storage()) {
+        result.tiered_stats += shard->tiered_storage()->stats();
+      }
     }
   };
 
@@ -512,6 +516,13 @@ tcp_port:)";
     append("total_reads_processed:", m.conn_stats.io_read_cnt);
     append("total_writes_processed:", m.conn_stats.io_write_cnt);
     append("async_writes_count:", m.conn_stats.async_writes_cnt);
+  }
+
+  if (should_enter("TIERED", true)) {
+    ADD_HEADER("# TIERED_STORAGE");
+    append("external_entries:", m.db.external_entries);
+    append("external_reads:", m.tiered_stats.external_reads);
+    append("external_writes:", m.tiered_stats.external_writes);
   }
 
   if (should_enter("REPLICATION")) {

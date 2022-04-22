@@ -25,6 +25,7 @@ class ScriptMgr;
 struct Metrics {
   DbStats db;
   SliceEvents events;
+  TieredStats tiered_stats;
 
   size_t qps = 0;
   size_t heap_used_bytes = 0;

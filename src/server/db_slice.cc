@@ -87,7 +87,7 @@ class PrimeEvictionPolicy {
 #define ADD(x) (x) += o.x
 
 DbStats& DbStats::operator+=(const DbStats& o) {
-  static_assert(sizeof(DbStats) == 72);
+  static_assert(sizeof(DbStats) == 80);
 
   ADD(key_count);
   ADD(expire_count);
@@ -99,6 +99,7 @@ DbStats& DbStats::operator+=(const DbStats& o) {
   ADD(small_string_bytes);
   ADD(listpack_blob_cnt);
   ADD(listpack_bytes);
+  ADD(external_entries);
 
   return *this;
 }
@@ -154,6 +155,7 @@ auto DbSlice::GetStats() const -> Stats {
     s.db.table_mem_usage += (db->prime_table.mem_usage() + db->expire_table.mem_usage());
     s.db.listpack_blob_cnt += db->stats.listpack_blob_cnt;
     s.db.listpack_bytes += db->stats.listpack_bytes;
+    s.db.external_entries += db->stats.external_entries;
   }
   s.db.small_string_bytes = CompactObj::GetStats().small_string_bytes;
 
@@ -324,7 +326,7 @@ size_t DbSlice::FlushDb(DbIndex db_ind) {
     db->prime_table.Clear();
     db->expire_table.Clear();
     db->mcflag_table.Clear();
-    db->stats = InternalDbStats{};
+    db->stats = PerDbStats{};
 
     return removed;
   };

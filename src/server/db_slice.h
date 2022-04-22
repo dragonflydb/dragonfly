@@ -44,6 +44,9 @@ struct DbStats {
 
   size_t listpack_blob_cnt = 0;
   size_t listpack_bytes = 0;
+
+  size_t external_entries = 0;
+
   DbStats& operator+=(const DbStats& o);
 };
 
@@ -67,7 +70,7 @@ class DbSlice {
     SliceEvents events;
   };
 
-  struct InternalDbStats {
+  struct PerDbStats {
     // Number of inline keys.
     uint64_t inline_keys = 0;
 
@@ -76,6 +79,7 @@ class DbSlice {
     size_t obj_memory_usage = 0;
     size_t listpack_blob_cnt = 0;
     size_t listpack_bytes = 0;
+    size_t external_entries = 0;
   };
 
 
@@ -195,7 +199,7 @@ class DbSlice {
   void PreUpdate(DbIndex db_ind, PrimeIterator it);
   void PostUpdate(DbIndex db_ind, PrimeIterator it);
 
-  InternalDbStats* MutableStats(DbIndex db_ind) {
+  PerDbStats* MutableStats(DbIndex db_ind) {
     return &db_arr_[db_ind]->stats;
   }
 
@@ -251,7 +255,7 @@ class DbSlice {
 
     LockTable lock_table;
 
-    mutable InternalDbStats stats;
+    mutable PerDbStats stats;
 
     explicit DbWrapper(std::pmr::memory_resource* mr);
   };

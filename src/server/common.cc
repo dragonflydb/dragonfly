@@ -111,4 +111,15 @@ bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes) {
   return true;
 }
 
+#define ADD(x) (x) += o.x
+
+TieredStats& TieredStats::operator+=(const TieredStats& o) {
+  static_assert(sizeof(TieredStats) == 16);
+
+  ADD(external_reads);
+  ADD(external_writes);
+
+  return *this;
+}
+
 }  // namespace dfly

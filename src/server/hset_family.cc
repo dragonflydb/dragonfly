@@ -443,7 +443,7 @@ OpResult<uint32_t> HSetFamily::OpSet(const OpArgs& op_args, string_view key, Cmd
   auto& db_slice = op_args.shard->db_slice();
   const auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
 
-  DbSlice::InternalDbStats* stats = db_slice.MutableStats(op_args.db_ind);
+  DbSlice::PerDbStats* stats = db_slice.MutableStats(op_args.db_ind);
 
   robj* hset = nullptr;
   uint8_t* lp = nullptr;
@@ -524,7 +524,7 @@ OpResult<uint32_t> HSetFamily::OpDel(const OpArgs& op_args, string_view key, Cmd
   robj* hset = co.AsRObj();
   unsigned deleted = 0;
   bool key_remove = false;
-  DbSlice::InternalDbStats* stats = db_slice.MutableStats(op_args.db_ind);
+  DbSlice::PerDbStats* stats = db_slice.MutableStats(op_args.db_ind);
 
   if (hset->encoding == OBJ_ENCODING_LISTPACK) {
     stats->listpack_bytes -= lpBytes((uint8_t*)hset->ptr);
@@ -753,7 +753,7 @@ OpStatus HSetFamily::OpIncrBy(const OpArgs& op_args, string_view key, string_vie
   auto& db_slice = op_args.shard->db_slice();
   const auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
 
-  DbSlice::InternalDbStats* stats = db_slice.MutableStats(op_args.db_ind);
+  DbSlice::PerDbStats* stats = db_slice.MutableStats(op_args.db_ind);
 
   robj* hset = nullptr;
   size_t lpb = 0;
