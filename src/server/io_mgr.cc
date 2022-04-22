@@ -39,13 +39,22 @@ error_code IoMgr::Open(const string& path) {
     return res.error();
   backing_file_ = move(res.value());
   Proactor* proactor = (Proactor*)ProactorBase::me();
-  uring::FiberCall fc(proactor);
-  fc->PrepFallocate(backing_file_->fd(), 0, 0, kInitialSize);
-  FiberCall::IoResult io_res = fc.Get();
-  if (io_res < 0) {
-    return error_code{-io_res, system_category()};
+  {
+    uring::FiberCall fc(proactor);
+    fc->PrepFallocate(backing_file_->fd(), 0, 0, kInitialSize);
+    FiberCall::IoResult io_res = fc.Get();
+    if (io_res < 0) {
+      return error_code{-io_res, system_category()};
+    }
   }
-
+  {
+    uring::FiberCall fc(proactor);
+    fc->PrepFadvise(backing_file_->fd(), 0, 0, POSIX_FADV_RANDOM);
+    FiberCall::IoResult io_res = fc.Get();
+    if (io_res < 0) {
+      return error_code{-io_res, system_category()};
+    }
+  }
   sz_ = kInitialSize;
   return error_code{};
 }

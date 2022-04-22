@@ -14,6 +14,9 @@ extern "C" {
 #include "server/db_slice.h"
 #include "util/proactor_base.h"
 
+DEFINE_uint32(tiered_storage_max_pending_writes, 512,
+              "Maximal number of pending writes per thread");
+
 namespace dfly {
 using namespace std;
 
@@ -73,9 +76,13 @@ void TieredStorage::SendIoRequest(size_t offset, size_t req_size, ActiveIoReques
   // string_view sv{tmp};
   string_view sv{req->block_ptr, req_size};
 
+  active_req_sem_.await(
+      [this] { return num_active_requests_ <= FLAGS_tiered_storage_max_pending_writes; });
+
   auto cb = [this, req](int res) { FinishIoRequest(res, req); };
   io_mgr_.WriteAsync(offset, sv, move(cb));
   ++stats_.external_writes;
+
 #else
   FinishIoRequest(0, req);
 #endif
@@ -102,8 +109,11 @@ void TieredStorage::FinishIoRequest(int io_res, ActiveIoRequest* req) {
       ++db_slice_.MutableStats(ikey.db_indx)->external_entries;
     }
   }
-  --num_active_requests_;
   delete req;
+  --num_active_requests_;
+  if (num_active_requests_ == FLAGS_tiered_storage_max_pending_writes) {
+    active_req_sem_.notifyAll();
+  }
 
   VLOG_IF(1, num_active_requests_ == 0) << "Finished active requests";
 }
@@ -169,6 +179,7 @@ error_code TieredStorage::UnloadItem(DbIndex db_index, PrimeIterator it) {
     auto cb = [start, grow_size, this](int io_res) {
       if (io_res == 0) {
         alloc_.AddStorage(start, grow_size);
+        stats_.storage_capacity += grow_size;
       } else {
         LOG_FIRST_N(ERROR, 10) << "Error enlarging storage " << io_res;
       }

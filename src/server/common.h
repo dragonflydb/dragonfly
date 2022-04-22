@@ -62,6 +62,7 @@ struct OpArgs {
 struct TieredStats {
   size_t external_reads = 0;
   size_t external_writes = 0;
+  size_t storage_capacity = 0;
 
   TieredStats& operator+=(const TieredStats&);
 };

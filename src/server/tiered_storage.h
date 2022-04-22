@@ -10,6 +10,8 @@
 #include "server/io_mgr.h"
 #include "server/table.h"
 
+#include "util/fibers/event_count.h"
+
 namespace dfly {
 
 class DbSlice;
@@ -48,6 +50,7 @@ class TieredStorage {
   size_t submitted_io_writes_ = 0;
   size_t submitted_io_write_size_ = 0;
   uint32_t num_active_requests_ = 0;
+  util::fibers_ext::EventCount active_req_sem_;
 
   struct Hasher {
     size_t operator()(const PrimeKey& o) const {

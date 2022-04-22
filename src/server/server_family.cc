@@ -523,6 +523,7 @@ tcp_port:)";
     append("external_entries:", m.db.external_entries);
     append("external_reads:", m.tiered_stats.external_reads);
     append("external_writes:", m.tiered_stats.external_writes);
+    append("external_capacity:", m.tiered_stats.storage_capacity);
   }
 
   if (should_enter("REPLICATION")) {

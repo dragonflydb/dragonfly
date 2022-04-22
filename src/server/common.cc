@@ -114,10 +114,11 @@ bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes) {
 #define ADD(x) (x) += o.x
 
 TieredStats& TieredStats::operator+=(const TieredStats& o) {
-  static_assert(sizeof(TieredStats) == 16);
+  static_assert(sizeof(TieredStats) == 24);
 
   ADD(external_reads);
   ADD(external_writes);
+  ADD(storage_capacity);
 
   return *this;
 }
