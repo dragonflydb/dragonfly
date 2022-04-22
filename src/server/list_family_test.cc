@@ -38,46 +38,48 @@ const char kKey3[] = "c";
 
 TEST_F(ListFamilyTest, Basic) {
   auto resp = Run({"lpush", kKey1, "1"});
-  EXPECT_THAT(resp[0], IntArg(1));
+  EXPECT_THAT(resp, IntArg(1));
   resp = Run({"lpush", kKey2, "2"});
-  ASSERT_THAT(resp[0], IntArg(1));
+  ASSERT_THAT(resp, IntArg(1));
   resp = Run({"llen", kKey1});
-  ASSERT_THAT(resp[0], IntArg(1));
+  ASSERT_THAT(resp, IntArg(1));
 }
 
 TEST_F(ListFamilyTest, Expire) {
   auto resp = Run({"lpush", kKey1, "1"});
-  EXPECT_THAT(resp[0], IntArg(1));
+  EXPECT_THAT(resp, IntArg(1));
 
   resp = Run({"expire", kKey1, "1"});
-  EXPECT_THAT(resp[0], IntArg(1));
+  EXPECT_THAT(resp, IntArg(1));
 
   UpdateTime(expire_now_ + 1000);
   resp = Run({"lpush", kKey1, "1"});
-  EXPECT_THAT(resp[0], IntArg(1));
+  EXPECT_THAT(resp, IntArg(1));
 }
 
 
 TEST_F(ListFamilyTest, BLPopUnblocking) {
   auto resp = Run({"lpush", kKey1, "1"});
-  EXPECT_THAT(resp[0], IntArg(1));
+  EXPECT_THAT(resp, IntArg(1));
   resp = Run({"lpush", kKey2, "2"});
-  ASSERT_THAT(resp, ElementsAre(IntArg(1)));
+  ASSERT_THAT(resp, IntArg(1));
 
   resp = Run({"blpop", kKey1, kKey2});  // missing "0" delimiter.
-  ASSERT_THAT(resp[0], ErrArg("timeout is not a float"));
+  ASSERT_THAT(resp, ErrArg("timeout is not a float"));
 
   resp = Run({"blpop", kKey1, kKey2, "0"});
   ASSERT_EQ(2, GetDebugInfo().shards_count);
-  EXPECT_THAT(resp, ElementsAre(kKey1, "1"));
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(kKey1, "1"));
 
   resp = Run({"blpop", kKey1, kKey2, "0"});
-  EXPECT_THAT(resp, ElementsAre(kKey2, "2"));
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(kKey2, "2"));
 
   Run({"set", "z", "1"});
 
   resp = Run({"blpop", "z", "0"});
-  ASSERT_THAT(resp[0], ErrArg("WRONGTYPE "));
+  ASSERT_THAT(resp, ErrArg("WRONGTYPE "));
 
   ASSERT_FALSE(IsLocked(0, "x"));
   ASSERT_FALSE(IsLocked(0, "y"));
@@ -85,7 +87,7 @@ TEST_F(ListFamilyTest, BLPopUnblocking) {
 }
 
 TEST_F(ListFamilyTest, BLPopBlocking) {
-  RespVec resp0, resp1;
+  RespExpr resp0, resp1;
 
   // Run the fiber at creation.
   auto fb0 = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
@@ -110,16 +112,16 @@ TEST_F(ListFamilyTest, BLPopBlocking) {
   int64_t epoch0 = GetDebugInfo("IO0").clock;
   int64_t epoch1 = GetDebugInfo("IO1").clock;
   ASSERT_LT(epoch0, epoch1);
-
-  EXPECT_THAT(resp0, ElementsAre("x", "1"));
+  ASSERT_THAT(resp0, ArrLen(2));
+  EXPECT_THAT(resp0.GetVec(), ElementsAre("x", "1"));
   ASSERT_FALSE(IsLocked(0, "x"));
 }
 
 TEST_F(ListFamilyTest, BLPopMultiple) {
-  RespVec resp0, resp1;
+  RespExpr resp0, resp1;
 
   resp0 = Run({"blpop", kKey1, kKey2, "0.01"});  // timeout
-  EXPECT_THAT(resp0, ElementsAre(ArgType(RespExpr::NIL_ARRAY)));
+  EXPECT_THAT(resp0, ArgType(RespExpr::NIL_ARRAY));
   ASSERT_EQ(2, GetDebugInfo().shards_count);
 
   ASSERT_FALSE(IsLocked(0, kKey1));
@@ -131,65 +133,74 @@ TEST_F(ListFamilyTest, BLPopMultiple) {
 
   pp_->at(1)->Await([&] { Run({"lpush", kKey1, "1", "2", "3"}); });
   fb1.join();
-  EXPECT_THAT(resp0, ElementsAre(StrArg(kKey1), StrArg("3")));
+
+  ASSERT_THAT(resp0, ArrLen(2));
+  EXPECT_THAT(resp0.GetVec(), ElementsAre(kKey1, "3"));
   ASSERT_FALSE(IsLocked(0, kKey1));
   ASSERT_FALSE(IsLocked(0, kKey2));
   ess_->RunBriefInParallel([](EngineShard* es) { ASSERT_FALSE(es->HasAwakedTransaction()); });
 }
 
 TEST_F(ListFamilyTest, BLPopTimeout) {
-  RespVec resp = Run({"blpop", kKey1, kKey2, kKey3, "0.01"});
-  EXPECT_THAT(resp[0], ArgType(RespExpr::NIL_ARRAY));
+  RespExpr resp = Run({"blpop", kKey1, kKey2, kKey3, "0.01"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
   EXPECT_EQ(3, GetDebugInfo().shards_count);
   ASSERT_FALSE(service_->IsLocked(0, kKey1));
 
   // Under Multi
   resp = Run({"multi"});
-  ASSERT_THAT(resp, RespEq("OK"));
+  ASSERT_EQ(resp, "OK");
 
   Run({"blpop", kKey1, "0"});
   resp = Run({"exec"});
 
-  EXPECT_THAT(resp, ElementsAre(ArgType(RespExpr::NIL_ARRAY)));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
   ASSERT_FALSE(service_->IsLocked(0, kKey1));
 }
 
 TEST_F(ListFamilyTest, LRem) {
   auto resp = Run({"rpush", kKey1, "a", "b", "a", "c"});
-  ASSERT_THAT(resp, ElementsAre(IntArg(4)));
+  ASSERT_THAT(resp, IntArg(4));
   resp = Run({"lrem", kKey1, "2", "a"});
-  ASSERT_THAT(resp, ElementsAre(IntArg(2)));
-  ASSERT_THAT(Run({"lrange", kKey1, "0", "1"}), ElementsAre("b", "c"));
+  ASSERT_THAT(resp, IntArg(2));
+
+  resp = Run({"lrange", kKey1, "0", "1"});
+  ASSERT_THAT(resp, ArrLen(2));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("b", "c"));
 }
 
 TEST_F(ListFamilyTest, LTrim) {
   Run({"rpush", kKey1, "a", "b", "c", "d"});
-  ASSERT_THAT(Run({"ltrim", kKey1, "-2", "-1"}), RespEq("OK"));
-  ASSERT_THAT(Run({"lrange", kKey1, "0", "1"}), ElementsAre("c", "d"));
-  ASSERT_THAT(Run({"ltrim", kKey1, "0", "0"}), RespEq("OK"));
-  ASSERT_THAT(Run({"lrange", kKey1, "0", "1"}), ElementsAre("c"));
+  ASSERT_EQ(Run({"ltrim", kKey1, "-2", "-1"}), "OK");
+  auto resp = Run({"lrange", kKey1, "0", "1"});
+  ASSERT_THAT(resp, ArrLen(2));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("c", "d"));
+  ASSERT_EQ(Run({"ltrim", kKey1, "0", "0"}), "OK");
+  ASSERT_EQ(Run({"lrange", kKey1, "0", "1"}), "c");
 }
 
 TEST_F(ListFamilyTest, LRange) {
   auto resp = Run({"lrange", kKey1, "0", "5"});
-  ASSERT_THAT(resp[0], ArrLen(0));
+  ASSERT_THAT(resp, ArrLen(0));
   Run({"rpush", kKey1, "0", "1", "2"});
   resp = Run({"lrange", kKey1, "-2", "-1"});
-  ASSERT_THAT(resp, ElementsAre("1", "2"));
+
+  ASSERT_THAT(resp, ArrLen(2));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("1", "2"));
 }
 
 TEST_F(ListFamilyTest, Lset) {
   Run({"rpush", kKey1, "0", "1", "2"});
-  ASSERT_THAT(Run({"lset", kKey1, "0", "bar"}), RespEq("OK"));
-  ASSERT_THAT(Run({"lpop", kKey1}), RespEq("bar"));
-  ASSERT_THAT(Run({"lset", kKey1, "-1", "foo"}), RespEq("OK"));
-  ASSERT_THAT(Run({"rpop", kKey1}), RespEq("foo"));
+  ASSERT_EQ(Run({"lset", kKey1, "0", "bar"}), "OK");
+  ASSERT_EQ(Run({"lpop", kKey1}), "bar");
+  ASSERT_EQ(Run({"lset", kKey1, "-1", "foo"}), "OK");
+  ASSERT_EQ(Run({"rpop", kKey1}), "foo");
   Run({"rpush", kKey2, "a"});
-  ASSERT_THAT(Run({"lset", kKey2, "1", "foo"}), ElementsAre(ErrArg("index out of range")));
+  ASSERT_THAT(Run({"lset", kKey2, "1", "foo"}), ErrArg("index out of range"));
 }
 
 TEST_F(ListFamilyTest, BLPopSerialize) {
-  RespVec blpop_resp;
+  RespExpr blpop_resp;
 
   auto pop_fb = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
     blpop_resp = Run({"blpop", kKey1, kKey2, kKey3, "0"});
@@ -202,11 +213,10 @@ TEST_F(ListFamilyTest, BLPopSerialize) {
   LOG(INFO) << "Starting multi";
 
   TxClock cl1, cl2;
-  unsigned key1_len1 = 0, key1_len2 = 0;
 
   auto p1_fb = pp_->at(1)->LaunchFiber([&] {
     auto resp = Run({"multi"});  // We use multi to assign ts to lpush.
-    ASSERT_THAT(resp, RespEq("OK"));
+    ASSERT_EQ(resp, "OK");
     Run({"lpush", kKey1, "A"});
     resp = Run({"exec"});
 
@@ -214,20 +224,20 @@ TEST_F(ListFamilyTest, BLPopSerialize) {
     // In any case it must be that between 2 invocations of lpush (wrapped in multi)
     // blpop will be triggerred and it will empty the list again. Hence, in any case
     // lpush kKey1 here and below should return 1.
-    EXPECT_THAT(resp, ElementsAre(IntArg(1)));
-    key1_len1 = get<int64_t>(resp[0].u);
+    ASSERT_THAT(resp, IntArg(1));
     cl1 = GetDebugInfo("IO1").clock;
     LOG(INFO) << "push1 ts: " << cl1;
   });
 
   auto p2_fb = pp_->at(2)->LaunchFiber([&] {
     auto resp = Run({"multi"});  // We use multi to assign ts to lpush.
-    ASSERT_THAT(resp, RespEq("OK"));
+    ASSERT_EQ(resp, "OK");
     Run({"lpush", kKey1, "B"});
     Run({"lpush", kKey2, "C"});
     resp = Run({"exec"});
-    EXPECT_THAT(resp, ElementsAre(IntArg(1), IntArg(1)));
-    key1_len2 = get<int64_t>(resp[0].u);
+
+    ASSERT_THAT(resp, ArrLen(2));
+    EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(1), IntArg(1)));
     cl2 = GetDebugInfo("IO2").clock;
     LOG(INFO) << "push2 ts: " << cl2;
   });
@@ -236,17 +246,19 @@ TEST_F(ListFamilyTest, BLPopSerialize) {
   p2_fb.join();
 
   pop_fb.join();
-  EXPECT_THAT(blpop_resp, ElementsAre(StrArg(kKey1), ArgType(RespExpr::STRING)));
+  ASSERT_THAT(blpop_resp, ArrLen(2));
+  auto resp_arr = blpop_resp.GetVec();
+  EXPECT_THAT(resp_arr, ElementsAre(kKey1, ArgType(RespExpr::STRING)));
 
   if (cl2 < cl1) {
-    EXPECT_EQ(blpop_resp[1], "B");
+    EXPECT_EQ(resp_arr[1], "B");
   } else {
-    EXPECT_EQ(blpop_resp[1], "A");
+    EXPECT_EQ(resp_arr[1], "A");
   }
 }
 
 TEST_F(ListFamilyTest, WrongTypeDoesNotWake) {
-  RespVec blpop_resp;
+  RespExpr blpop_resp;
 
   auto pop_fb = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
     blpop_resp = Run({"blpop", kKey1, "0"});
@@ -262,7 +274,7 @@ TEST_F(ListFamilyTest, WrongTypeDoesNotWake) {
     Run({"set", kKey1, "foo"});
 
     auto resp = Run({"exec"});
-    EXPECT_THAT(resp, ElementsAre(IntArg(1), "OK"));
+    EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(1), "OK"));
 
     Run({"del", kKey1});
     Run({"lpush", kKey1, "B"});
@@ -270,11 +282,12 @@ TEST_F(ListFamilyTest, WrongTypeDoesNotWake) {
 
   p1_fb.join();
   pop_fb.join();
-  EXPECT_THAT(blpop_resp, ElementsAre(kKey1, "B"));
+  ASSERT_THAT(blpop_resp, ArrLen(2));
+  EXPECT_THAT(blpop_resp.GetVec(), ElementsAre(kKey1, "B"));
 }
 
 TEST_F(ListFamilyTest, BPopSameKeyTwice) {
-  RespVec blpop_resp;
+  RespExpr blpop_resp;
 
   auto pop_fb = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
     blpop_resp = Run({"blpop", kKey1, kKey2, kKey2, kKey1, "0"});
@@ -288,7 +301,9 @@ TEST_F(ListFamilyTest, BPopSameKeyTwice) {
     EXPECT_EQ(1, CheckedInt({"lpush", kKey1, "bar"}));
   });
   pop_fb.join();
-  EXPECT_THAT(blpop_resp, ElementsAre(kKey1, "bar"));
+
+  ASSERT_THAT(blpop_resp, ArrLen(2));
+  EXPECT_THAT(blpop_resp.GetVec(), ElementsAre(kKey1, "bar"));
 
   pop_fb = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
     blpop_resp = Run({"blpop", kKey1, kKey2, kKey2, kKey1, "0"});
@@ -302,11 +317,13 @@ TEST_F(ListFamilyTest, BPopSameKeyTwice) {
     EXPECT_EQ(1, CheckedInt({"lpush", kKey2, "bar"}));
   });
   pop_fb.join();
-  EXPECT_THAT(blpop_resp, ElementsAre(kKey2, "bar"));
+
+  ASSERT_THAT(blpop_resp, ArrLen(2));
+  EXPECT_THAT(blpop_resp.GetVec(), ElementsAre(kKey2, "bar"));
 }
 
 TEST_F(ListFamilyTest, BPopRename) {
-  RespVec blpop_resp;
+  RespExpr blpop_resp;
 
   Run({"exists", kKey1, kKey2});
   ASSERT_EQ(2, GetDebugInfo().shards_count);
@@ -324,7 +341,9 @@ TEST_F(ListFamilyTest, BPopRename) {
     Run({"rename", "a", kKey1});
   });
   pop_fb.join();
-  EXPECT_THAT(blpop_resp, ElementsAre(kKey1, "bar"));
+
+  ASSERT_THAT(blpop_resp, ArrLen(2));
+  EXPECT_THAT(blpop_resp.GetVec(), ElementsAre(kKey1, "bar"));
 }
 
 }  // namespace dfly

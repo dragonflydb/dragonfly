@@ -1,4 +1,4 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -79,17 +79,18 @@ TEST_F(DflyEngineTest, Sds) {
 }
 
 TEST_F(DflyEngineTest, Multi) {
-  RespVec resp = Run({"multi"});
-  ASSERT_THAT(resp, RespEq("OK"));
+  RespExpr resp = Run({"multi"});
+  ASSERT_EQ(resp, "OK");
 
   resp = Run({"get", kKey1});
-  ASSERT_THAT(resp, RespEq("QUEUED"));
+  ASSERT_EQ(resp, "QUEUED");
 
   resp = Run({"get", kKey4});
-  ASSERT_THAT(resp, RespEq("QUEUED"));
+  ASSERT_EQ(resp, "QUEUED");
 
   resp = Run({"exec"});
-  ASSERT_THAT(resp, ElementsAre(ArgType(RespExpr::NIL), ArgType(RespExpr::NIL)));
+  ASSERT_THAT(resp, ArrLen(2));
+  ASSERT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::NIL), ArgType(RespExpr::NIL)));
 
   atomic_bool tx_empty = true;
 
@@ -100,7 +101,7 @@ TEST_F(DflyEngineTest, Multi) {
   EXPECT_TRUE(tx_empty);
 
   resp = Run({"get", kKey4});
-  ASSERT_THAT(resp, ElementsAre(ArgType(RespExpr::NIL)));
+  ASSERT_THAT(resp, ArgType(RespExpr::NIL));
 
   ASSERT_FALSE(service_->IsLocked(0, kKey1));
   ASSERT_FALSE(service_->IsLocked(0, kKey4));
@@ -108,71 +109,76 @@ TEST_F(DflyEngineTest, Multi) {
 }
 
 TEST_F(DflyEngineTest, MultiEmpty) {
-  RespVec resp = Run({"multi"});
-  ASSERT_THAT(resp, RespEq("OK"));
+  RespExpr resp = Run({"multi"});
+  ASSERT_EQ(resp, "OK");
   resp = Run({"exec"});
 
-  ASSERT_THAT(resp[0], ArrLen(0));
+  ASSERT_THAT(resp, ArrLen(0));
   ASSERT_FALSE(service_->IsShardSetLocked());
 
   Run({"multi"});
-  ASSERT_THAT(Run({"ping", "foo"}), RespEq("QUEUED"));
-  EXPECT_THAT(Run({"exec"}), ElementsAre("foo"));
+  ASSERT_EQ(Run({"ping", "foo"}), "QUEUED");
+  resp = Run({"exec"});
+  // one cell arrays are promoted to respexpr.
+  EXPECT_EQ(resp, "foo");
 }
 
 TEST_F(DflyEngineTest, MultiSeq) {
-  RespVec resp = Run({"multi"});
-  ASSERT_THAT(resp, RespEq("OK"));
+  RespExpr resp = Run({"multi"});
+  ASSERT_EQ(resp, "OK");
 
   resp = Run({"set", kKey1, absl::StrCat(1)});
-  ASSERT_THAT(resp, RespEq("QUEUED"));
+  ASSERT_EQ(resp, "QUEUED");
   resp = Run({"get", kKey1});
-  ASSERT_THAT(resp, RespEq("QUEUED"));
+  ASSERT_EQ(resp, "QUEUED");
   resp = Run({"mget", kKey1, kKey4});
-  ASSERT_THAT(resp, RespEq("QUEUED"));
+  ASSERT_EQ(resp, "QUEUED");
   resp = Run({"exec"});
 
   ASSERT_FALSE(service_->IsLocked(0, kKey1));
   ASSERT_FALSE(service_->IsLocked(0, kKey4));
   ASSERT_FALSE(service_->IsShardSetLocked());
 
-  EXPECT_THAT(resp, ElementsAre(StrArg("OK"), StrArg("1"), ArrLen(2)));
-  const RespExpr::Vec& arr = *get<RespVec*>(resp[2].u);
-  ASSERT_THAT(arr, ElementsAre("1", ArgType(RespExpr::NIL)));
+  ASSERT_THAT(resp, ArrLen(3));
+  const auto& arr = resp.GetVec();
+  EXPECT_THAT(arr, ElementsAre("OK", "1", ArrLen(2)));
+
+  ASSERT_THAT(arr[2].GetVec(), ElementsAre("1", ArgType(RespExpr::NIL)));
 }
 
 TEST_F(DflyEngineTest, MultiConsistent) {
   auto mset_fb = pp_->at(0)->LaunchFiber([&] {
     for (size_t i = 1; i < 10; ++i) {
       string base = StrCat(i * 900);
-      RespVec resp = Run({"mset", kKey1, base, kKey4, base});
-      ASSERT_THAT(resp, RespEq("OK"));
+      RespExpr resp = Run({"mset", kKey1, base, kKey4, base});
+      ASSERT_EQ(resp, "OK");
     }
   });
 
   auto fb = pp_->at(1)->LaunchFiber([&] {
-    RespVec resp = Run({"multi"});
-    ASSERT_THAT(resp, RespEq("OK"));
+    RespExpr resp = Run({"multi"});
+    ASSERT_EQ(resp, "OK");
     this_fiber::sleep_for(1ms);
 
     resp = Run({"get", kKey1});
-    ASSERT_THAT(resp, RespEq("QUEUED"));
+    ASSERT_EQ(resp, "QUEUED");
 
     resp = Run({"get", kKey4});
-    ASSERT_THAT(resp, RespEq("QUEUED"));
+    ASSERT_EQ(resp, "QUEUED");
 
     resp = Run({"mget", kKey4, kKey1});
-    ASSERT_THAT(resp, RespEq("QUEUED"));
+    ASSERT_EQ(resp, "QUEUED");
 
     resp = Run({"exec"});
-
-    EXPECT_THAT(resp, ElementsAre(ArgType(RespExpr::STRING), ArgType(RespExpr::STRING),
-                                  ArgType(RespExpr::ARRAY)));
-    ASSERT_EQ(resp[0].GetBuf(), resp[1].GetBuf());
-    const RespVec& arr = *get<RespVec*>(resp[2].u);
-    EXPECT_THAT(arr, ElementsAre(ArgType(RespExpr::STRING), ArgType(RespExpr::STRING)));
-    EXPECT_EQ(arr[0].GetBuf(), arr[1].GetBuf());
-    EXPECT_EQ(arr[0].GetBuf(), resp[0].GetBuf());
+    ASSERT_THAT(resp, ArrLen(3));
+    const RespVec& resp_arr = resp.GetVec();
+    ASSERT_THAT(resp_arr, ElementsAre(ArgType(RespExpr::STRING), ArgType(RespExpr::STRING),
+                                      ArgType(RespExpr::ARRAY)));
+    ASSERT_EQ(resp_arr[0].GetBuf(), resp_arr[1].GetBuf());
+    const RespVec& sub_arr = resp_arr[2].GetVec();
+    EXPECT_THAT(sub_arr, ElementsAre(ArgType(RespExpr::STRING), ArgType(RespExpr::STRING)));
+    EXPECT_EQ(sub_arr[0].GetBuf(), sub_arr[1].GetBuf());
+    EXPECT_EQ(sub_arr[0].GetBuf(), resp_arr[0].GetBuf());
   });
 
   mset_fb.join();
@@ -184,20 +190,21 @@ TEST_F(DflyEngineTest, MultiConsistent) {
 
 TEST_F(DflyEngineTest, MultiWeirdCommands) {
   Run({"multi"});
-  ASSERT_THAT(Run({"eval", "return 42", "0"}), RespEq("QUEUED"));
-  EXPECT_THAT(Run({"exec"}), ElementsAre(IntArg(42)));
+  ASSERT_EQ(Run({"eval", "return 42", "0"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), IntArg(42));
 }
 
 TEST_F(DflyEngineTest, MultiRename) {
-  RespVec resp = Run({"multi"});
-  ASSERT_THAT(resp, RespEq("OK"));
+  RespExpr resp = Run({"multi"});
+  ASSERT_EQ(resp, "OK");
   Run({"set", kKey1, "1"});
 
   resp = Run({"rename", kKey1, kKey4});
-  ASSERT_THAT(resp, RespEq("QUEUED"));
+  ASSERT_EQ(resp, "QUEUED");
   resp = Run({"exec"});
 
-  EXPECT_THAT(resp, ElementsAre(StrArg("OK"), StrArg("OK")));
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("OK", "OK"));
   ASSERT_FALSE(service_->IsLocked(0, kKey1));
   ASSERT_FALSE(service_->IsLocked(0, kKey4));
   ASSERT_FALSE(service_->IsShardSetLocked());
@@ -209,11 +216,11 @@ TEST_F(DflyEngineTest, MultiHop) {
   auto p1_fb = pp_->at(1)->LaunchFiber([&] {
     for (int i = 0; i < 100; ++i) {
       auto resp = Run({"rename", kKey1, kKey2});
-      ASSERT_THAT(resp, RespEq("OK"));
+      ASSERT_EQ(resp, "OK");
       EXPECT_EQ(2, GetDebugInfo("IO1").shards_count);
 
       resp = Run({"rename", kKey2, kKey1});
-      ASSERT_THAT(resp, RespEq("OK"));
+      ASSERT_EQ(resp, "OK");
     }
   });
 
@@ -233,7 +240,7 @@ TEST_F(DflyEngineTest, MultiHop) {
 TEST_F(DflyEngineTest, FlushDb) {
   Run({"mset", kKey1, "1", kKey4, "2"});
   auto resp = Run({"flushdb"});
-  ASSERT_THAT(resp, RespEq("OK"));
+  ASSERT_EQ(resp, "OK");
 
   auto fb0 = pp_->at(0)->LaunchFiber([&] {
     for (unsigned i = 0; i < 100; ++i) {
@@ -244,8 +251,7 @@ TEST_F(DflyEngineTest, FlushDb) {
   pp_->at(1)->Await([&] {
     for (unsigned i = 0; i < 100; ++i) {
       Run({"mset", kKey1, "1", kKey4, "2"});
-      auto resp = Run({"exists", kKey1, kKey4});
-      int64_t ival = get<int64_t>(resp[0].u);
+      int64_t ival = CheckedInt({"exists", kKey1, kKey4});
       ASSERT_TRUE(ival == 0 || ival == 2) << i << " " << ival;
     }
   });
@@ -259,21 +265,21 @@ TEST_F(DflyEngineTest, FlushDb) {
 
 TEST_F(DflyEngineTest, Eval) {
   auto resp = Run({"incrby", "foo", "42"});
-  EXPECT_THAT(resp[0], IntArg(42));
+  EXPECT_THAT(resp, IntArg(42));
 
   resp = Run({"eval", "return redis.call('get', 'foo')", "0"});
-  EXPECT_THAT(resp[0], ErrArg("undeclared"));
+  EXPECT_THAT(resp, ErrArg("undeclared"));
 
   resp = Run({"eval", "return redis.call('get', 'foo')", "1", "bar"});
-  EXPECT_THAT(resp[0], ErrArg("undeclared"));
+  EXPECT_THAT(resp, ErrArg("undeclared"));
 
   ASSERT_FALSE(service_->IsLocked(0, "foo"));
 
   resp = Run({"eval", "return redis.call('get', 'foo')", "1", "foo"});
-  EXPECT_THAT(resp[0], StrArg("42"));
+  EXPECT_THAT(resp, "42");
 
   resp = Run({"eval", "return redis.call('get', KEYS[1])", "1", "foo"});
-  EXPECT_THAT(resp[0], StrArg("42"));
+  EXPECT_THAT(resp, "42");
 
   ASSERT_FALSE(service_->IsLocked(0, "foo"));
   ASSERT_FALSE(service_->IsShardSetLocked());
@@ -281,30 +287,31 @@ TEST_F(DflyEngineTest, Eval) {
 
 TEST_F(DflyEngineTest, EvalResp) {
   auto resp = Run({"eval", "return 43", "0"});
-  EXPECT_THAT(resp[0], IntArg(43));
+  EXPECT_THAT(resp, IntArg(43));
 
   resp = Run({"eval", "return {5, 'foo', 17.5}", "0"});
-  EXPECT_THAT(resp, ElementsAre(IntArg(5), "foo", "17.5"));
+  ASSERT_THAT(resp, ArrLen(3));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(5), "foo", "17.5"));
 }
 
 TEST_F(DflyEngineTest, EvalSha) {
   auto resp = Run({"script", "load", "return 5"});
-  EXPECT_THAT(resp, ElementsAre(ArgType(RespExpr::STRING)));
+  EXPECT_THAT(resp, ArgType(RespExpr::STRING));
 
-  string sha{ToSV(resp[0].GetBuf())};
+  string sha{ToSV(resp.GetBuf())};
 
   resp = Run({"evalsha", sha, "0"});
-  EXPECT_THAT(resp[0], IntArg(5));
+  EXPECT_THAT(resp, IntArg(5));
 
   resp = Run({"script", "load", " return 5  "});
-  EXPECT_THAT(resp, ElementsAre(StrArg(sha)));
+  EXPECT_EQ(resp, sha);
 
   absl::AsciiStrToUpper(&sha);
   resp = Run({"evalsha", sha, "0"});
-  EXPECT_THAT(resp[0], IntArg(5));
+  EXPECT_THAT(resp, IntArg(5));
 
   resp = Run({"evalsha", "foobar", "0"});
-  EXPECT_THAT(resp[0], ErrArg("No matching"));
+  EXPECT_THAT(resp, ErrArg("No matching"));
 }
 
 TEST_F(DflyEngineTest, Memcache) {
@@ -345,7 +352,7 @@ TEST_F(DflyEngineTest, LimitMemory) {
   string blob(128, 'a');
   for (size_t i = 0; i < 10000; ++i) {
     auto resp = Run({"set", absl::StrCat(blob, i), blob});
-    ASSERT_THAT(resp, RespEq("OK"));
+    ASSERT_EQ(resp, "OK");
   }
 }
 

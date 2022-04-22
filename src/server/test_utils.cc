@@ -34,17 +34,6 @@ static vector<string> SplitLines(const std::string& src) {
   return res;
 }
 
-vector<int64_t> ToIntArr(const RespVec& vec) {
-  vector<int64_t> res;
-  for (auto a : vec) {
-    int64_t val;
-    std::string_view s = ToSV(a.GetBuf());
-    CHECK(absl::SimpleAtoi(s, &val)) << s;
-    res.push_back(val);
-  }
-
-  return res;
-}
 
 BaseFamilyTest::TestConnWrapper::TestConnWrapper(Protocol proto)
     : dummy_conn(new facade::Connection(proto, nullptr, nullptr, nullptr)),
@@ -58,6 +47,8 @@ BaseFamilyTest::BaseFamilyTest() {
 }
 
 BaseFamilyTest::~BaseFamilyTest() {
+  for (auto* v : resp_vec_)
+    delete v;
 }
 
 void BaseFamilyTest::SetUpTestSuite() {
@@ -100,7 +91,7 @@ void BaseFamilyTest::UpdateTime(uint64_t ms) {
   ess_->RunBriefInParallel(cb);
 }
 
-RespVec BaseFamilyTest::Run(initializer_list<std::string_view> list) {
+RespExpr BaseFamilyTest::Run(initializer_list<std::string_view> list) {
   if (!ProactorBase::IsProactorThread()) {
     return pp_->at(0)->Await([&] { return this->Run(list); });
   }
@@ -108,7 +99,7 @@ RespVec BaseFamilyTest::Run(initializer_list<std::string_view> list) {
   return Run(GetId(), list);
 }
 
-RespVec BaseFamilyTest::Run(std::string_view id, std::initializer_list<std::string_view> list) {
+RespExpr BaseFamilyTest::Run(std::string_view id, std::initializer_list<std::string_view> list) {
   TestConnWrapper* conn = AddFindConn(Protocol::REDIS, id);
 
   CmdArgVec args = conn->Args(list);
@@ -126,8 +117,15 @@ RespVec BaseFamilyTest::Run(std::string_view id, std::initializer_list<std::stri
   last_cmd_dbg_info_ = context.last_command_debug;
 
   RespVec vec = conn->ParseResponse();
+  if (vec.size() == 1)
+    return vec.front();
+  RespVec* new_vec = new RespVec(vec);
+  resp_vec_.push_back(new_vec);
+  RespExpr e;
+  e.type = RespExpr::ARRAY;
+  e.u = new_vec;
 
-  return vec;
+  return e;
 }
 
 auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view value, uint32_t flags,
@@ -203,16 +201,16 @@ auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::stri
 }
 
 int64_t BaseFamilyTest::CheckedInt(std::initializer_list<std::string_view> list) {
-  RespVec resp = Run(list);
-  CHECK_EQ(1u, resp.size());
-  if (resp.front().type == RespExpr::INT64) {
-    return get<int64_t>(resp.front().u);
+  RespExpr resp = Run(list);
+  if (resp.type == RespExpr::INT64) {
+    return get<int64_t>(resp.u);
   }
-  if (resp.front().type == RespExpr::NIL) {
+  if (resp.type == RespExpr::NIL) {
     return INT64_MIN;
   }
-  CHECK_EQ(RespExpr::STRING, int(resp.front().type)) << list;
-  string_view sv = ToSV(resp.front().GetBuf());
+
+  CHECK_EQ(RespExpr::STRING, int(resp.type)) << list;
+  string_view sv = ToSV(resp.GetBuf());
   int64_t res;
   CHECK(absl::SimpleAtoi(sv, &res)) << "|" << sv << "|";
   return res;
@@ -297,7 +295,7 @@ vector<string> BaseFamilyTest::StrArray(const RespExpr& expr) {
   for (size_t i = 0; i < src->size(); ++i) {
     res[i] = ToSV(src->at(i).GetBuf());
   }
-  
+
   return res;
 }
 

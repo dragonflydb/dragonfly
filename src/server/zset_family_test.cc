@@ -23,53 +23,56 @@ class ZSetFamilyTest : public BaseFamilyTest {
 
 TEST_F(ZSetFamilyTest, Add) {
   auto resp = Run({"zadd", "x", "1.1", "a"});
-  EXPECT_THAT(resp[0], IntArg(1));
+  EXPECT_THAT(resp, IntArg(1));
 
   resp = Run({"zscore", "x", "a"});
-  EXPECT_THAT(resp[0], StrArg("1.1"));
+  EXPECT_THAT(resp, "1.1");
 
   resp = Run({"zadd", "x", "2", "a"});
-  EXPECT_THAT(resp[0], IntArg(0));
+  EXPECT_THAT(resp, IntArg(0));
   resp = Run({"zscore", "x", "a"});
-  EXPECT_THAT(resp[0], StrArg("2"));
+  EXPECT_THAT(resp, "2");
 
   resp = Run({"zadd", "x", "ch", "3", "a"});
-  EXPECT_THAT(resp[0], IntArg(1));
+  EXPECT_THAT(resp, IntArg(1));
   resp = Run({"zscore", "x", "a"});
-  EXPECT_THAT(resp[0], StrArg("3"));
+  EXPECT_EQ(resp, "3");
 
   resp = Run({"zcard", "x"});
-  EXPECT_THAT(resp[0], IntArg(1));
+  EXPECT_THAT(resp, IntArg(1));
 
-  EXPECT_THAT(Run({"zadd", "x", "", "a"}), ElementsAre(ErrArg("not a valid float")));
+  EXPECT_THAT(Run({"zadd", "x", "", "a"}), ErrArg("not a valid float"));
 
-  EXPECT_THAT(Run({"zadd", "ztmp", "xx", "10", "member"}), ElementsAre(IntArg(0)));
+  EXPECT_THAT(Run({"zadd", "ztmp", "xx", "10", "member"}), IntArg(0));
 
   const char kHighPrecision[] = "0.79028573343077946";
 
   Run({"zadd", "zs", kHighPrecision, "a"});
-  EXPECT_THAT(Run({"zscore", "zs", "a"}), ElementsAre("0.7902857334307795"));
+  EXPECT_EQ(Run({"zscore", "zs", "a"}), "0.7902857334307795");
   EXPECT_EQ(0.79028573343077946, 0.7902857334307795);
 }
 
 TEST_F(ZSetFamilyTest, ZRem) {
   auto resp = Run({"zadd", "x", "1.1", "b", "2.1", "a"});
-  EXPECT_THAT(resp[0], IntArg(2));
+  EXPECT_THAT(resp, IntArg(2));
 
   resp = Run({"zrem", "x", "b", "c"});
-  EXPECT_THAT(resp[0], IntArg(1));
+  EXPECT_THAT(resp, IntArg(1));
 
   resp = Run({"zcard", "x"});
-  EXPECT_THAT(resp[0], IntArg(1));
-  EXPECT_THAT(Run({"zrange", "x", "0", "3", "byscore"}), ElementsAre("a"));
-  EXPECT_THAT(Run({"zrange", "x", "(-inf", "(+inf", "byscore"}), ElementsAre("a"));
+  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_THAT(Run({"zrange", "x", "0", "3", "byscore"}), "a");
+  EXPECT_THAT(Run({"zrange", "x", "(-inf", "(+inf", "byscore"}), "a");
 }
 
 TEST_F(ZSetFamilyTest, ZRangeRank) {
   Run({"zadd", "x", "1.1", "a", "2.1", "b"});
-  EXPECT_THAT(Run({"zrangebyscore", "x", "0", "(1.1"}), ElementsAre(ArrLen(0)));
-  EXPECT_THAT(Run({"zrangebyscore", "x", "-inf", "1.1"}), ElementsAre("a"));
-  EXPECT_THAT(Run({"zrevrangebyscore", "x", "-inf", "+inf"}), ElementsAre("b", "a"));
+  EXPECT_THAT(Run({"zrangebyscore", "x", "0", "(1.1"}), ArrLen(0));
+  EXPECT_THAT(Run({"zrangebyscore", "x", "-inf", "1.1"}), "a");
+
+  auto resp = Run({"zrevrangebyscore", "x", "-inf", "+inf"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("b", "a"));
 
   EXPECT_EQ(2, CheckedInt({"zcount", "x", "1.1", "2.1"}));
   EXPECT_EQ(1, CheckedInt({"zcount", "x", "(1.1", "2.1"}));
@@ -79,39 +82,38 @@ TEST_F(ZSetFamilyTest, ZRangeRank) {
   EXPECT_EQ(1, CheckedInt({"zrank", "x", "b"}));
   EXPECT_EQ(1, CheckedInt({"zrevrank", "x", "a"}));
   EXPECT_EQ(0, CheckedInt({"zrevrank", "x", "b"}));
-  EXPECT_THAT(Run({"zrevrank", "x", "c"}), ElementsAre(ArgType(RespExpr::NIL)));
-  EXPECT_THAT(Run({"zrank", "y", "c"}), ElementsAre(ArgType(RespExpr::NIL)));
+  EXPECT_THAT(Run({"zrevrank", "x", "c"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"zrank", "y", "c"}), ArgType(RespExpr::NIL));
 }
 
 TEST_F(ZSetFamilyTest, ZRemRangeRank) {
   Run({"zadd", "x", "1.1", "a", "2.1", "b"});
-  EXPECT_THAT(Run({"ZREMRANGEBYRANK", "y", "0", "1"}), ElementsAre(IntArg(0)));
-  EXPECT_THAT(Run({"ZREMRANGEBYRANK", "x", "0", "0"}), ElementsAre(IntArg(1)));
-  EXPECT_THAT(Run({"zrange", "x", "0", "5"}), ElementsAre("b"));
-  EXPECT_THAT(Run({"ZREMRANGEBYRANK", "x", "0", "1"}), ElementsAre(IntArg(1)));
-  EXPECT_THAT(Run({"type", "x"}), ElementsAre("none"));
+  EXPECT_THAT(Run({"ZREMRANGEBYRANK", "y", "0", "1"}), IntArg(0));
+  EXPECT_THAT(Run({"ZREMRANGEBYRANK", "x", "0", "0"}), IntArg(1));
+  EXPECT_EQ(Run({"zrange", "x", "0", "5"}), "b");
+  EXPECT_THAT(Run({"ZREMRANGEBYRANK", "x", "0", "1"}), IntArg(1));
+  EXPECT_EQ(Run({"type", "x"}), "none");
 }
 
 TEST_F(ZSetFamilyTest, ZRemRangeScore) {
   Run({"zadd", "x", "1.1", "a", "2.1", "b"});
-  EXPECT_THAT(Run({"ZREMRANGEBYSCORE", "y", "0", "1"}), ElementsAre(IntArg(0)));
-  EXPECT_THAT(Run({"ZREMRANGEBYSCORE", "x", "-inf", "1.1"}), ElementsAre(IntArg(1)));
-  EXPECT_THAT(Run({"zrange", "x", "0", "5"}), ElementsAre("b"));
-  EXPECT_THAT(Run({"ZREMRANGEBYSCORE", "x", "(2.0", "+inf"}), ElementsAre(IntArg(1)));
-  EXPECT_THAT(Run({"type", "x"}), ElementsAre("none"));
-  EXPECT_THAT(Run({"zremrangebyscore", "x", "1", "NaN"}),
-              ElementsAre(ErrArg("min or max is not a float")));
+  EXPECT_THAT(Run({"ZREMRANGEBYSCORE", "y", "0", "1"}), IntArg(0));
+  EXPECT_THAT(Run({"ZREMRANGEBYSCORE", "x", "-inf", "1.1"}), IntArg(1));
+  EXPECT_EQ(Run({"zrange", "x", "0", "5"}), "b");
+  EXPECT_THAT(Run({"ZREMRANGEBYSCORE", "x", "(2.0", "+inf"}), IntArg(1));
+  EXPECT_EQ(Run({"type", "x"}), "none");
+  EXPECT_THAT(Run({"zremrangebyscore", "x", "1", "NaN"}), ErrArg("min or max is not a float"));
 }
 
 TEST_F(ZSetFamilyTest, IncrBy) {
   auto resp = Run({"zadd", "key", "xx", "incr", "2.1", "member"});
-  EXPECT_THAT(resp[0], ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 
   resp = Run({"zadd", "key", "nx", "incr", "2.1", "member"});
-  EXPECT_THAT(resp[0], "2.1");
+  EXPECT_THAT(resp, "2.1");
 
   resp = Run({"zadd", "key", "nx", "incr", "4.9", "member"});
-  EXPECT_THAT(resp[0], ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
 TEST_F(ZSetFamilyTest, ByLex) {
@@ -119,12 +121,17 @@ TEST_F(ZSetFamilyTest, ByLex) {
       "zadd", "key",      "0", "alpha", "0", "bar",   "0", "cool", "0", "down",
       "0",    "elephant", "0", "foo",   "0", "great", "0", "hill", "0", "omega",
   });
+
   auto resp = Run({"zrangebylex", "key", "-", "[cool"});
-  EXPECT_THAT(resp, ElementsAre("alpha", "bar", "cool"));
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("alpha", "bar", "cool"));
+
   EXPECT_EQ(3, CheckedInt({"ZLEXCOUNT", "key", "(foo", "+"}));
   EXPECT_EQ(3, CheckedInt({"ZREMRANGEBYLEX", "key", "(foo", "+"}));
-  EXPECT_THAT(Run({"zrangebylex", "key", "[a", "+"}),
-              ElementsAre("alpha", "bar", "cool", "down", "elephant", "foo"));
+
+  resp = Run({"zrangebylex", "key", "[a", "+"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("alpha", "bar", "cool", "down", "elephant", "foo"));
 }
 
 }  // namespace dfly

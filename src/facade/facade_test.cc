@@ -57,6 +57,9 @@ void RespMatcher::DescribeTo(std::ostream* os) const {
     case RespExpr::INT64:
       *os << exp_str_;
       break;
+    case RespExpr::ARRAY:
+      *os << "array of length " << exp_int_;
+      break;
     default:
       *os << "TBD";
       break;

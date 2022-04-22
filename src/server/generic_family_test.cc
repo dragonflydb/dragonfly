@@ -29,26 +29,26 @@ TEST_F(GenericFamilyTest, Expire) {
   Run({"set", "key", "val"});
   auto resp = Run({"expire", "key", "1"});
 
-  EXPECT_THAT(resp[0], IntArg(1));
+  EXPECT_THAT(resp, IntArg(1));
   UpdateTime(expire_now_ + 1000);
   resp = Run({"get", "key"});
-  EXPECT_THAT(resp, ElementsAre(ArgType(RespExpr::NIL)));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 
   Run({"set", "key", "val"});
   resp = Run({"pexpireat", "key", absl::StrCat(expire_now_ + 2000)});
-  EXPECT_THAT(resp[0], IntArg(1));
+  EXPECT_THAT(resp, IntArg(1));
 
   // override
   resp = Run({"pexpireat", "key", absl::StrCat(expire_now_ + 3000)});
-  EXPECT_THAT(resp[0], IntArg(1));
+  EXPECT_THAT(resp, IntArg(1));
 
   UpdateTime(expire_now_ + 2999);
   resp = Run({"get", "key"});
-  EXPECT_THAT(resp[0], "val");
+  EXPECT_THAT(resp, "val");
 
   UpdateTime(expire_now_ + 3000);
   resp = Run({"get", "key"});
-  EXPECT_THAT(resp[0], ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
 TEST_F(GenericFamilyTest, Del) {
@@ -88,28 +88,28 @@ TEST_F(GenericFamilyTest, TTL) {
 TEST_F(GenericFamilyTest, Exists) {
   Run({"mset", "x", "0", "y", "1"});
   auto resp = Run({"exists", "x", "y", "x"});
-  EXPECT_THAT(resp[0], IntArg(3));
+  EXPECT_THAT(resp, IntArg(3));
 }
 
 TEST_F(GenericFamilyTest, Rename) {
-  RespVec resp;
+  RespExpr resp;
   string b_val(32, 'b');
   string x_val(32, 'x');
 
   resp = Run({"mset", "x", x_val, "b", b_val});
-  ASSERT_THAT(resp, RespEq("OK"));
+  ASSERT_EQ(resp, "OK");
   ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
 
   resp = Run({"rename", "z", "b"});
-  ASSERT_THAT(resp[0], ErrArg("no such key"));
+  ASSERT_THAT(resp, ErrArg("no such key"));
 
   resp = Run({"rename", "x", "b"});
-  ASSERT_THAT(resp, RespEq("OK"));
+  ASSERT_EQ(resp, "OK");
 
   int64_t val = CheckedInt({"get", "x"});
   ASSERT_EQ(kint64min, val);  // does not exist
 
-  ASSERT_THAT(Run({"get", "b"}), RespEq(x_val));  // swapped.
+  ASSERT_EQ(Run({"get", "b"}), x_val);  // swapped.
 
   EXPECT_EQ(CheckedInt({"exists", "x", "b"}), 1);
 
@@ -118,7 +118,7 @@ TEST_F(GenericFamilyTest, Rename) {
     for (size_t i = 0; i < 200; ++i) {
       int j = i % 2;
       auto resp = Run({"rename", keys[j], keys[1 - j]});
-      ASSERT_THAT(resp, RespEq("OK"));
+      ASSERT_EQ(resp, "OK");
     }
   });
 
@@ -136,7 +136,7 @@ TEST_F(GenericFamilyTest, Rename) {
 TEST_F(GenericFamilyTest, RenameNonString) {
   EXPECT_EQ(1, CheckedInt({"lpush", "x", "elem"}));
   auto resp = Run({"rename", "x", "b"});
-  ASSERT_THAT(resp, RespEq("OK"));
+  ASSERT_EQ(resp, "OK");
   ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
 
   EXPECT_EQ(0, CheckedInt({"del", "x"}));
@@ -149,13 +149,13 @@ TEST_F(GenericFamilyTest, RenameBinary) {
 
   Run({"set", kKey1, "bar"});
   Run({"rename", kKey1, kKey2});
-  EXPECT_THAT(Run({"get", kKey1}), ElementsAre(ArgType(RespExpr::NIL)));
-  EXPECT_THAT(Run({"get", kKey2}), RespEq("bar"));
+  EXPECT_THAT(Run({"get", kKey1}), ArgType(RespExpr::NIL));
+  EXPECT_EQ(Run({"get", kKey2}), "bar");
 }
 
+using testing::AnyOf;
 using testing::Each;
 using testing::StartsWith;
-using testing::AnyOf;
 
 TEST_F(GenericFamilyTest, Scan) {
   for (unsigned i = 0; i < 10; ++i)
@@ -171,13 +171,13 @@ TEST_F(GenericFamilyTest, Scan) {
     Run({"zadd", absl::StrCat("zset", i), "0", "bar"});
 
   auto resp = Run({"scan", "0", "count", "20", "type", "string"});
-  EXPECT_EQ(2, resp.size());
-  auto vec = StrArray(resp[1]);
+  EXPECT_THAT(resp, ArrLen(2));
+  auto vec = StrArray(resp.GetVec()[1]);
   EXPECT_GT(vec.size(), 10);
   EXPECT_THAT(vec, Each(AnyOf(StartsWith("str"), StartsWith("key"))));
 
   resp = Run({"scan", "0", "count", "20", "match", "zset*"});
-  vec = StrArray(resp[1]);
+  vec = StrArray(resp.GetVec()[1]);
   EXPECT_EQ(10, vec.size());
   EXPECT_THAT(vec, Each(StartsWith("zset")));
 }

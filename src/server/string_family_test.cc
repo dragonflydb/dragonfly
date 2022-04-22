@@ -26,83 +26,98 @@ class StringFamilyTest : public BaseFamilyTest {
  protected:
 };
 
+vector<int64_t> ToIntArr(const RespExpr& e) {
+  vector<int64_t> res;
+  CHECK_EQ(e.type, RespExpr::ARRAY);
+  const RespVec* vec = get<RespVec*>(e.u);
+  for (auto a : *vec) {
+    int64_t val;
+    std::string_view s = ToSV(a.GetBuf());
+    CHECK(absl::SimpleAtoi(s, &val)) << s;
+    res.push_back(val);
+  }
+
+  return res;
+}
+
+
 TEST_F(StringFamilyTest, SetGet) {
   auto resp = Run({"set", "key", "val"});
 
-  EXPECT_THAT(resp, RespEq("OK"));
-  EXPECT_THAT(Run({"get", "key"}), RespEq("val"));
-  EXPECT_THAT(Run({"set", "key1", "1"}), RespEq("OK"));
-  EXPECT_THAT(Run({"get", "key1"}), RespEq("1"));
-  EXPECT_THAT(Run({"set", "key", "2"}), RespEq("OK"));
-  EXPECT_THAT(Run({"get", "key"}), RespEq("2"));
+  EXPECT_EQ(resp, "OK");
+  EXPECT_EQ(Run({"get", "key"}), "val");
+  EXPECT_EQ(Run({"set", "key1", "1"}), "OK");
+  EXPECT_EQ(Run({"get", "key1"}), "1");
+  EXPECT_EQ(Run({"set", "key", "2"}), "OK");
+  EXPECT_EQ(Run({"get", "key"}), "2");
 }
 
 TEST_F(StringFamilyTest, Incr) {
-  ASSERT_THAT(Run({"set", "key", "0"}), RespEq("OK"));
-  ASSERT_THAT(Run({"incr", "key"}), ElementsAre(IntArg(1)));
+  ASSERT_EQ(Run({"set", "key", "0"}), "OK");
+  ASSERT_THAT(Run({"incr", "key"}), IntArg(1));
 
-  ASSERT_THAT(Run({"set", "key1", "123456789"}), RespEq("OK"));
-  ASSERT_THAT(Run({"incrby", "key1", "0"}), ElementsAre(IntArg(123456789)));
+  ASSERT_EQ(Run({"set", "key1", "123456789"}), "OK");
+  ASSERT_THAT(Run({"incrby", "key1", "0"}), IntArg(123456789));
 
-  ASSERT_THAT(Run({"set", "key1", "-123456789"}), RespEq("OK"));
-  ASSERT_THAT(Run({"incrby", "key1", "0"}), ElementsAre(IntArg(-123456789)));
+  ASSERT_EQ(Run({"set", "key1", "-123456789"}), "OK");
+  ASSERT_THAT(Run({"incrby", "key1", "0"}), IntArg(-123456789));
 
-  ASSERT_THAT(Run({"set", "key1", "   -123  "}), RespEq("OK"));
-  ASSERT_THAT(Run({"incrby", "key1", "1"}), ElementsAre(ErrArg("ERR value is not an integer")));
+  ASSERT_EQ(Run({"set", "key1", "   -123  "}), "OK");
+  ASSERT_THAT(Run({"incrby", "key1", "1"}), ErrArg("ERR value is not an integer"));
 
-  ASSERT_THAT(Run({"incrby", "ne", "0"}), ElementsAre(IntArg(0)));
-  ASSERT_THAT(Run({"decrby", "a", "-9223372036854775808"}), ElementsAre(ErrArg("overflow")));
+  ASSERT_THAT(Run({"incrby", "ne", "0"}), IntArg(0));
+  ASSERT_THAT(Run({"decrby", "a", "-9223372036854775808"}), ErrArg("overflow"));
 }
 
 TEST_F(StringFamilyTest, Append) {
   Run({"setex", "key", "100", "val"});
-  EXPECT_THAT(Run({"append", "key", "bar"}), ElementsAre(IntArg(6)));
-  EXPECT_THAT(Run({"ttl", "key"}), ElementsAre(IntArg(100)));
+  EXPECT_THAT(Run({"append", "key", "bar"}), IntArg(6));
+  EXPECT_THAT(Run({"ttl", "key"}), IntArg(100));
 }
 
 TEST_F(StringFamilyTest, Expire) {
-  ASSERT_THAT(Run({"set", "key", "val", "PX", "20"}), RespEq("OK"));
+  ASSERT_EQ(Run({"set", "key", "val", "PX", "20"}), "OK");
 
   UpdateTime(expire_now_ + 10);
-  EXPECT_THAT(Run({"get", "key"}), RespEq("val"));
+  EXPECT_EQ(Run({"get", "key"}), "val");
 
   UpdateTime(expire_now_ + 20);
 
-  EXPECT_THAT(Run({"get", "key"}), ElementsAre(ArgType(RespExpr::NIL)));
+  EXPECT_THAT(Run({"get", "key"}), ArgType(RespExpr::NIL));
 
-  ASSERT_THAT(Run({"set", "i", "1", "PX", "10"}), RespEq("OK"));
-  ASSERT_THAT(Run({"incr", "i"}), ElementsAre(IntArg(2)));
+  ASSERT_THAT(Run({"set", "i", "1", "PX", "10"}), "OK");
+  ASSERT_THAT(Run({"incr", "i"}), IntArg(2));
 
   UpdateTime(expire_now_ + 30);
-  ASSERT_THAT(Run({"incr", "i"}), ElementsAre(IntArg(1)));
+  ASSERT_THAT(Run({"incr", "i"}), IntArg(1));
 }
 
 TEST_F(StringFamilyTest, Set) {
   auto resp = Run({"set", "foo", "bar", "XX"});
-  EXPECT_THAT(resp, ElementsAre(ArgType(RespExpr::NIL)));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 
   resp = Run({"set", "foo", "bar", "NX"});
-  ASSERT_THAT(resp, RespEq("OK"));
+  ASSERT_THAT(resp, "OK");
   resp = Run({"set", "foo", "bar", "NX"});
-  EXPECT_THAT(resp, ElementsAre(ArgType(RespExpr::NIL)));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 
   resp = Run({"set", "foo", "bar", "xx"});
-  ASSERT_THAT(resp, RespEq("OK"));
+  ASSERT_THAT(resp, "OK");
 
   resp = Run({"set", "foo", "bar", "ex", "abc"});
-  ASSERT_THAT(resp, ElementsAre(ErrArg(kInvalidIntErr)));
+  ASSERT_THAT(resp, ErrArg(kInvalidIntErr));
 
   resp = Run({"set", "foo", "bar", "ex", "-1"});
-  ASSERT_THAT(resp, ElementsAre(ErrArg("invalid expire time")));
+  ASSERT_THAT(resp, ErrArg("invalid expire time"));
 
   resp = Run({"set", "foo", "bar", "ex", "1"});
-  ASSERT_THAT(resp, RespEq("OK"));
+  ASSERT_THAT(resp, "OK");
 }
 
 TEST_F(StringFamilyTest, MGetSet) {
   Run({"mset", "z", "0"});  // single key
   auto resp = Run({"mget", "z"});  // single key
-  EXPECT_THAT(resp, RespEq("0"));
+  EXPECT_THAT(resp, "0");
 
   Run({"mset", "x", "0", "b", "0"});
 
@@ -110,8 +125,8 @@ TEST_F(StringFamilyTest, MGetSet) {
 
   auto mget_fb = pp_->at(0)->LaunchFiber([&] {
     for (size_t i = 0; i < 1000; ++i) {
-      auto resp = Run({"mget", "b", "x"});
-      ASSERT_EQ(2, resp.size());
+      RespExpr resp = Run({"mget", "b", "x"});
+      ASSERT_EQ(RespExpr::ARRAY, resp.type);
       auto ivec = ToIntArr(resp);
 
       ASSERT_GE(ivec[1], ivec[0]);
@@ -147,8 +162,8 @@ TEST_F(StringFamilyTest, MSetGet) {
 
   auto mset_fb = pp_->at(0)->LaunchFiber([&] {
     for (size_t i = 0; i < 1000; ++i) {
-      RespVec resp = Run({"mset", "x", StrCat(i), "b", StrCat(i)});
-      ASSERT_THAT(resp, RespEq("OK")) << i;
+      RespExpr resp = Run({"mset", "x", StrCat(i), "b", StrCat(i)});
+      ASSERT_EQ(resp, "OK") << i;
     }
   });
 
@@ -187,7 +202,7 @@ TEST_F(StringFamilyTest, MSetDel) {
 TEST_F(StringFamilyTest, IntKey) {
   Run({"mset", "1", "1", "-1000", "-1000"});
   auto resp = Run({"get", "1"});
-  ASSERT_THAT(resp, RespEq("1"));
+  ASSERT_THAT(resp, "1");
 }
 
 TEST_F(StringFamilyTest, SingleShard) {
@@ -238,7 +253,7 @@ TEST_F(StringFamilyTest, MSetIncr) {
     for (size_t i = 1; i < 1000; ++i) {
       string base = StrCat(i * 900);
       auto resp = Run({"mset", "b", base, "a", base, "c", base});
-      ASSERT_THAT(resp, RespEq("OK"));
+      ASSERT_EQ(resp, "OK");
     }
   });
 
@@ -260,21 +275,21 @@ TEST_F(StringFamilyTest, MSetIncr) {
 }
 
 TEST_F(StringFamilyTest, SetEx) {
-  ASSERT_THAT(Run({"setex", "key", "1", "val"}), RespEq("OK"));
-  ASSERT_THAT(Run({"setex", "key", "10", "val"}), RespEq("OK"));
-  ASSERT_THAT(Run({"ttl", "key"}), ElementsAre(IntArg(10)));
-  ASSERT_THAT(Run({"setex", "key", "0", "val"}), ElementsAre(ErrArg("invalid expire time")));
+  ASSERT_EQ(Run({"setex", "key", "1", "val"}), "OK");
+  ASSERT_EQ(Run({"setex", "key", "10", "val"}), "OK");
+  ASSERT_THAT(Run({"ttl", "key"}), IntArg(10));
+  ASSERT_THAT(Run({"setex", "key", "0", "val"}), ErrArg("invalid expire time"));
 }
 
 TEST_F(StringFamilyTest, Range) {
   Run({"set", "key1", "Hello World"});
-  EXPECT_THAT(Run({"getrange", "key1", "5", "3"}), RespEq(""));
+  EXPECT_EQ(Run({"getrange", "key1", "5", "3"}), "");
 
   Run({"SETRANGE", "key1", "6", "Earth"});
-  EXPECT_THAT(Run({"get", "key1"}), RespEq("Hello Earth"));
+  EXPECT_EQ(Run({"get", "key1"}), "Hello Earth");
 
   Run({"SETRANGE", "key2", "2", "Earth"});
-  EXPECT_THAT(Run({"get", "key2"}), RespEq(string_view("\000\000Earth", 7)));
+  EXPECT_EQ(Run({"get", "key2"}), string_view("\000\000Earth", 7));
 
   Run({"SETRANGE", "key3", "0", ""});
   EXPECT_EQ(0, CheckedInt({"exists", "key3"}));
@@ -283,13 +298,13 @@ TEST_F(StringFamilyTest, Range) {
   EXPECT_EQ(1, CheckedInt({"exists", "key3"}));
 
   Run({"SET", "key3", "123"});
-  EXPECT_THAT(Run({"getrange", "key3", "2", "3"}), RespEq("3"));
-  EXPECT_THAT(Run({"getrange", "key3", "3", "3"}), RespEq(""));
-  EXPECT_THAT(Run({"getrange", "key3", "4", "5"}), RespEq(""));
+  EXPECT_EQ(Run({"getrange", "key3", "2", "3"}), "3");
+  EXPECT_EQ(Run({"getrange", "key3", "3", "3"}), "");
+  EXPECT_EQ(Run({"getrange", "key3", "4", "5"}), "");
 
   Run({"SET", "num", "1234"});
-  EXPECT_THAT(Run({"getrange","num", "3", "5000"}), RespEq("4"));
-  EXPECT_THAT(Run({"getrange","num", "-5000", "10000"}), RespEq("1234"));
+  EXPECT_EQ(Run({"getrange","num", "3", "5000"}), "4");
+  EXPECT_EQ(Run({"getrange","num", "-5000", "10000"}), "1234");
 }
 
 }  // namespace dfly

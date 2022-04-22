@@ -39,9 +39,9 @@ TEST_F(HSetFamilyTest, Hash) {
 
 TEST_F(HSetFamilyTest, Basic) {
   auto resp = Run({"hset", "x", "a"});
-  EXPECT_THAT(resp[0], ErrArg("wrong number"));
+  EXPECT_THAT(resp, ErrArg("wrong number"));
 
-  EXPECT_THAT(Run({"HSET", "hs", "key1", "val1", "key2"}), ElementsAre(ErrArg("wrong number")));
+  EXPECT_THAT(Run({"HSET", "hs", "key1", "val1", "key2"}), ErrArg("wrong number"));
 
   EXPECT_EQ(1, CheckedInt({"hset", "x", "a", "b"}));
   EXPECT_EQ(1, CheckedInt({"hlen", "x"}));
@@ -57,7 +57,7 @@ TEST_F(HSetFamilyTest, Basic) {
   EXPECT_EQ(2, CheckedInt({"hset", "y", "a", "c", "d", "e"}));
   EXPECT_EQ(2, CheckedInt({"hdel", "y", "a", "d"}));
 
-  EXPECT_THAT(Run({"hdel", "nokey", "a"}), ElementsAre(IntArg(0)));
+  EXPECT_THAT(Run({"hdel", "nokey", "a"}), IntArg(0));
 }
 
 TEST_F(HSetFamilyTest, HSet) {
@@ -72,37 +72,42 @@ TEST_F(HSetFamilyTest, HSet) {
 
 TEST_F(HSetFamilyTest, Get) {
   auto resp = Run({"hset", "x", "a", "1", "b", "2", "c", "3"});
-  EXPECT_THAT(resp[0], IntArg(3));
+  EXPECT_THAT(resp, IntArg(3));
 
   resp = Run({"hmget", "unkwn", "a", "c"});
-  EXPECT_THAT(resp, ElementsAre(ArgType(RespExpr::NIL), ArgType(RespExpr::NIL)));
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::NIL), ArgType(RespExpr::NIL)));
 
   resp = Run({"hkeys", "x"});
-  EXPECT_THAT(resp, UnorderedElementsAre("a", "b", "c"));
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("a", "b", "c"));
 
   resp = Run({"hvals", "x"});
-  EXPECT_THAT(resp, UnorderedElementsAre("1", "2", "3"));
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("1", "2", "3"));
 
   resp = Run({"hmget", "x", "a", "c", "d"});
-  EXPECT_THAT(resp, ElementsAre("1", "3", ArgType(RespExpr::NIL)));
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("1", "3", ArgType(RespExpr::NIL)));
 
   resp = Run({"hgetall", "x"});
-  EXPECT_THAT(resp, ElementsAre("a", "1", "b", "2", "c", "3"));
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "b", "2", "c", "3"));
 }
 
 TEST_F(HSetFamilyTest, HSetNx) {
   EXPECT_EQ(1, CheckedInt({"hsetnx", "key", "field", "val"}));
-  EXPECT_THAT(Run({"hget", "key", "field"}), RespEq("val"));
+  EXPECT_EQ(Run({"hget", "key", "field"}), "val");
 
   EXPECT_EQ(0, CheckedInt({"hsetnx", "key", "field", "val2"}));
-  EXPECT_THAT(Run({"hget", "key", "field"}), RespEq("val"));
+  EXPECT_EQ(Run({"hget", "key", "field"}), "val");
 
   EXPECT_EQ(1, CheckedInt({"hsetnx", "key", "field2", "val2"}));
-  EXPECT_THAT(Run({"hget", "key", "field2"}), RespEq("val2"));
+  EXPECT_EQ(Run({"hget", "key", "field2"}), "val2");
 
   // check dict path
   EXPECT_EQ(0, CheckedInt({"hsetnx", "key", "field2", string(512, 'a')}));
-  EXPECT_THAT(Run({"hget", "key", "field2"}), RespEq("val2"));
+  EXPECT_EQ(Run({"hget", "key", "field2"}), "val2");
 }
 
 TEST_F(HSetFamilyTest, HIncr) {
@@ -110,7 +115,7 @@ TEST_F(HSetFamilyTest, HIncr) {
 
   Run({"hset", "key", "a", " 1"});
   auto resp = Run({"hincrby", "key", "a", "10"});
-  EXPECT_THAT(resp[0], ErrArg("hash value is not an integer"));
+  EXPECT_THAT(resp, ErrArg("hash value is not an integer"));
 }
 
 }  // namespace dfly

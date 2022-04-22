@@ -60,7 +60,7 @@ TEST_F(RedisParserTest, Inline) {
 
   ASSERT_EQ(RedisParser::OK, Parse(kCmd1));
   EXPECT_EQ(strlen(kCmd1), consumed_);
-  EXPECT_THAT(args_, ElementsAre(StrArg("KEY"), StrArg("VAL")));
+  EXPECT_THAT(args_, ElementsAre("KEY", "VAL"));
 
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("KEY"));
   EXPECT_EQ(3, consumed_);
@@ -70,7 +70,7 @@ TEST_F(RedisParserTest, Inline) {
   EXPECT_EQ(4, consumed_);
   ASSERT_EQ(RedisParser::OK, Parse(" \r\n "));
   EXPECT_EQ(3, consumed_);
-  EXPECT_THAT(args_, ElementsAre(StrArg("KEY"), StrArg("FOO"), StrArg("BAR")));
+  EXPECT_THAT(args_, ElementsAre("KEY", "FOO", "BAR"));
 
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse(" 1 2"));
   EXPECT_EQ(4, consumed_);
@@ -78,7 +78,7 @@ TEST_F(RedisParserTest, Inline) {
   EXPECT_EQ(3, consumed_);
   ASSERT_EQ(RedisParser::OK, Parse("\r\n"));
   EXPECT_EQ(2, consumed_);
-  EXPECT_THAT(args_, ElementsAre(StrArg("1"), StrArg("2"), StrArg("45")));
+  EXPECT_THAT(args_, ElementsAre("1", "2", "45"));
 
   // Empty queries return RESP_OK.
   EXPECT_EQ(RedisParser::OK, Parse("\r\n"));
@@ -101,7 +101,7 @@ TEST_F(RedisParserTest, Multi1) {
   ASSERT_EQ(RedisParser::OK, Parse("PING\r\n"));
   EXPECT_EQ(6, consumed_);
   EXPECT_EQ(0, parser_.parselen_hint());
-  EXPECT_THAT(args_, ElementsAre(StrArg("PING")));
+  EXPECT_THAT(args_, ElementsAre("PING"));
 }
 
 TEST_F(RedisParserTest, Multi2) {
@@ -140,7 +140,7 @@ TEST_F(RedisParserTest, ClientMode) {
   EXPECT_THAT(args_, ElementsAre(IntArg(-1)));
 
   ASSERT_EQ(RedisParser::OK, Parse("+OK\r\n"));
-  EXPECT_THAT(args_, RespEq("OK"));
+  EXPECT_EQ(args_[0], "OK");
 
   ASSERT_EQ(RedisParser::OK, Parse("-ERR foo bar\r\n"));
   EXPECT_THAT(args_, ElementsAre(ErrArg("ERR foo")));
@@ -152,8 +152,8 @@ TEST_F(RedisParserTest, Hierarchy) {
   const char* kThirdArg = "*2\r\n$3\r\n100\r\n$3\r\n200\r\n";
   string resp = absl::StrCat("*3\r\n$3\r\n900\r\n$3\r\n800\r\n", kThirdArg);
   ASSERT_EQ(RedisParser::OK, Parse(resp));
-  EXPECT_THAT(args_, ElementsAre(StrArg("900"), StrArg("800"), ArrArg(2)));
-  EXPECT_THAT(*get<RespVec*>(args_[2].u), ElementsAre(StrArg("100"), StrArg("200")));
+  EXPECT_THAT(args_, ElementsAre("900", "800", ArrArg(2)));
+  EXPECT_THAT(*get<RespVec*>(args_[2].u), ElementsAre("100", "200"));
 }
 
 TEST_F(RedisParserTest, InvalidMult1) {

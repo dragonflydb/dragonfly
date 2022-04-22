@@ -83,14 +83,18 @@ TEST_F(RdbTest, LoadSmall6) {
   auto ec = loader.Load(&fs);
   CHECK(!ec);
   auto resp = Run({"scan", "0"});
-  EXPECT_THAT(StrArray(resp[1]),
+
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(StrArray(resp.GetVec()[1]),
               UnorderedElementsAre("list1", "hset_zl", "list2", "zset_sl", "intset", "set1",
                                    "zset_zl", "hset_ht", "intkey", "strkey"));
   resp = Run({"smembers", "intset"});
-  EXPECT_THAT(resp, UnorderedElementsAre("111", "222", "1234", "3333", "4444", "67899", "76554"));
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(),
+              UnorderedElementsAre("111", "222", "1234", "3333", "4444", "67899", "76554"));
 
   // TODO: when we implement PEXPIRETIME we will be able to do it directly.
-  int ttl = CheckedInt({"ttl", "set1"});  // should expire at 1747008000.
+  int ttl = CheckedInt({"ttl", "set1"});    // should expire at 1747008000.
   EXPECT_GT(ttl + time(NULL), 1747007000);  // left 1000 seconds margin in case the clock is off.
 }
 

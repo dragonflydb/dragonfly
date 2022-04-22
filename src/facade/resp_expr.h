@@ -35,6 +35,10 @@ class RespExpr {
     return std::get<Buffer>(u);
   }
 
+  const Vec& GetVec() const {
+    return *std::get<Vec*>(u);
+  }
+
   static const char* TypeName(Type t);
 };
 

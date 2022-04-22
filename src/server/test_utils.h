@@ -16,8 +16,6 @@
 namespace dfly {
 using namespace facade;
 
-std::vector<int64_t> ToIntArr(const RespVec& vec);
-
 class BaseFamilyTest : public ::testing::Test {
  protected:
   BaseFamilyTest();
@@ -47,8 +45,8 @@ class BaseFamilyTest : public ::testing::Test {
     RespVec ParseResponse();
   };
 
-  RespVec Run(std::initializer_list<std::string_view> list);
-  RespVec Run(std::string_view id, std::initializer_list<std::string_view> list);
+  RespExpr Run(std::initializer_list<std::string_view> list);
+  RespExpr Run(std::string_view id, std::initializer_list<std::string_view> list);
 
   using MCResponse = std::vector<std::string>;
   MCResponse RunMC(MemcacheParser::CmdType cmd_type, std::string_view key, std::string_view value,
@@ -82,6 +80,7 @@ class BaseFamilyTest : public ::testing::Test {
   ::boost::fibers::mutex mu_;
   ConnectionContext::DebugInfo last_cmd_dbg_info_;
   uint64_t expire_now_;
+  std::vector<RespVec*> resp_vec_;
 };
 
 }  // namespace dfly
