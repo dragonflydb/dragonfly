@@ -165,7 +165,7 @@ error_code TieredStorage::UnloadItem(DbIndex db_index, PrimeIterator it) {
   db->pending_upload[it.bucket_cursor().value()] += blob_len;
 
   size_t grow_size = 0;
-  if (!io_mgr_.grow_pending() && pending_unload_bytes_ > 4080) {
+  if (!io_mgr_.grow_pending() && pending_unload_bytes_ >= ExternalAllocator::kMinBlockSize) {
     grow_size = SerializePendingItems();
   }
 
@@ -198,7 +198,8 @@ size_t TieredStorage::SerializePendingItems() {
   constexpr size_t kArrLen = 64;
 
   PrimeTable::iterator iters[kArrLen];
-  unsigned count = 0;
+  unsigned iter_count = 0;
+  bool break_early = false;
 
   auto is_good = [](const PrimeValue& pv) {
     return pv.ObjType() == OBJ_STRING && !pv.IsExternal() && pv.Size() >= 64 && !pv.HasIoPending();
@@ -206,8 +207,8 @@ size_t TieredStorage::SerializePendingItems() {
 
   auto tr_cb = [&](PrimeTable::iterator it) {
     if (is_good(it->second)) {
-      CHECK_LT(count, kArrLen);
-      iters[count++] = it;
+      CHECK_LT(iter_count, kArrLen);
+      iters[iter_count++] = it;
     }
   };
 
@@ -234,7 +235,7 @@ size_t TieredStorage::SerializePendingItems() {
       PrimeTable::cursor curs(cursor_val);
       db_slice_.GetTables(db_ind).first->Traverse(curs, tr_cb);
 
-      for (unsigned j = 0; j < count; ++j) {
+      for (unsigned j = 0; j < iter_count; ++j) {
         PrimeIterator it = iters[j];
         size_t item_size = it->second.Size();
         DCHECK_GT(item_size, 0u);
@@ -247,6 +248,11 @@ size_t TieredStorage::SerializePendingItems() {
 
             SendIoRequest(file_offset, open_block_size, active_req);
             open_block_size = 0;
+          }
+
+          if (pending_unload_bytes_ < unsigned(0.8 * ExternalAllocator::kMinBlockSize)) {
+            break_early = true;
+            break;
           }
 
           DCHECK_EQ(0u, open_block_size);
@@ -275,10 +281,12 @@ size_t TieredStorage::SerializePendingItems() {
         block_offset += item_size;  // saved into opened block.
         pending_unload_bytes_ -= item_size;
       }
-      count = 0;
+      iter_count = 0;
       db->pending_upload.erase(cursor_val);
     }  // sorted_cursors
 
+    if (break_early)
+      break;
     DCHECK(db->pending_upload.empty());
   }  // db_arr
 

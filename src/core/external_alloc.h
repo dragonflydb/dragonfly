@@ -11,6 +11,14 @@
 
 namespace dfly {
 
+constexpr inline unsigned long long operator""_MB(unsigned long long x) {
+  return x << 20U;
+}
+
+constexpr inline unsigned long long operator""_KB(unsigned long long x) {
+  return x << 10U;
+}
+
 /**
  *
  * An external allocator inspired by mimalloc. Its goal is to maintain a state machine for
@@ -26,12 +34,11 @@ namespace dfly {
 namespace detail {
 class Page;
 
-constexpr unsigned kLargeSizeBin = 34;
-constexpr unsigned kNumSizeBins = kLargeSizeBin + 1;
+constexpr unsigned kNumFreePages = 29;
 
 /**
- * pages classes can be SMALL, MEDIUM or LARGE. SMALL (1MB) for block sizes upto 128KB.
- * MEDIUM (8MB) for block sizes upto 1MB. LARGE - blocks larger than 1MB.
+ * pages classes can be SMALL, MEDIUM or LARGE. SMALL (2MB) for block sizes upto 256KB.
+ * MEDIUM (16MB) for block sizes 256KB-2MB. Anything else is LARGE.
  *
  */
 enum PageClass : uint8_t {
@@ -48,6 +55,7 @@ class ExternalAllocator {
 
  public:
   static constexpr size_t kExtAlignment = 1ULL << 28;  // 256 MB
+  static constexpr size_t kMinBlockSize = 1 << 13;  // 8KB
 
   ExternalAllocator();
   ~ExternalAllocator();
@@ -78,25 +86,33 @@ class ExternalAllocator {
     return allocated_bytes_;
   }
 
+  // accessors useful for tests.
+  detail::PageClass PageClassFromOffset(size_t offset) const;
+
  private:
   class SegmentDescr;
   using Page = detail::Page;
 
-  Page* FindPage(detail::PageClass sc, size_t* seg_size);
+  // Returns a page if there is a segment of that class.
+  // Returns NULL if no page is found.
+  Page* FindPage(detail::PageClass sc);
+
+  Page* FindLargePage(size_t size, size_t* segment_size);
   SegmentDescr* GetNewSegment(detail::PageClass sc);
   void FreePage(Page* page, SegmentDescr* owner, size_t block_size);
 
   static SegmentDescr* ToSegDescr(Page*);
 
-  SegmentDescr* sq_[3];  // map: PageClass -> free Segment.
-  Page* free_pages_[detail::kNumSizeBins];
+  SegmentDescr* sq_[2];  // map: PageClass -> free Segment.
+  Page* free_pages_[detail::kNumFreePages];
 
   // A segment for each 256MB range. To get a segment id from the offset, shift right by 28.
   std::vector<SegmentDescr*> segments_;
 
   // weird queue to support AddStorage interface. We can not instantiate segment
   // until we know its class and that we know only when a page is demanded.
-  absl::btree_map<size_t, size_t> added_segs_;
+  // sorted map of offset -> size.
+  absl::btree_map<size_t, size_t> segm_intervals_;
 
   size_t capacity_ = 0;  // in bytes.
   size_t allocated_bytes_ = 0;

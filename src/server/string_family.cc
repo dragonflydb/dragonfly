@@ -101,7 +101,7 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
   EngineShard* shard = db_slice_->shard_owner();
 
   if (shard->tiered_storage()) {  // external storage enabled.
-    if (value.size() >= 64) {
+    if (value.size() >= 64 && value.size() < 2_MB) {
       shard->tiered_storage()->UnloadItem(params.db_index, it);
     }
   }

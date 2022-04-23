@@ -4,18 +4,24 @@ import argparse
 import random 
 from array import array
 
+# We print in 64 bit words.
+ALIGN = 1 << 10  # 1KB alignment
+
+
 def main():
     parser = argparse.ArgumentParser(description='')
     parser.add_argument('-n', type=int, dest='num', 
-                        help='number of numbers', default=9)
+                        help='number of quadruplets', default=9)
 
     args = parser.parse_args()
 
-    size = 512
-    print ('{512, ', end=' ')
+    size = 4096
+    print ('{1024, 1024*2, 1024*3, ', end=' ')
+    # print ('{', end=' ')
     for i in range(args.num):
         incr = size // 4
         for j in range(4):
+            assert size % 1024 == 0, size
             print (f'{size}, ', end=' ')
             size += incr
         if i % 2 == 1:
