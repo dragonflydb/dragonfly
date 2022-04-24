@@ -134,4 +134,26 @@ TEST_F(ZSetFamilyTest, ByLex) {
   ASSERT_THAT(resp.GetVec(), ElementsAre("alpha", "bar", "cool", "down", "elephant", "foo"));
 }
 
+TEST_F(ZSetFamilyTest, ZScan) {
+  string prefix(128,'a');
+  for (unsigned i = 0; i < 100; ++i) {
+    Run({"zadd", "key", "1", absl::StrCat(prefix, i)});
+  }
+
+  EXPECT_EQ(100, CheckedInt({"zcard", "key"}));
+  int64_t cursor = 0;
+  size_t scan_len = 0;
+  do {
+    auto resp = Run({"zscan", "key", absl::StrCat(cursor)});
+    ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+    ASSERT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::STRING), ArgType(RespExpr::ARRAY)));
+    string_view token = ToSV(resp.GetVec()[0].GetBuf());
+    ASSERT_TRUE(absl::SimpleAtoi(token, &cursor));
+    auto sub_arr = resp.GetVec()[1].GetVec();
+    scan_len += sub_arr.size();
+  } while (cursor != 0);
+
+  EXPECT_EQ(100 * 2, scan_len);
+}
+
 }  // namespace dfly

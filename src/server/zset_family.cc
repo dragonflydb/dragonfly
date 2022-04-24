@@ -11,6 +11,8 @@ extern "C" {
 #include "redis/zset.h"
 }
 
+#include <double-conversion/double-to-string.h>
+
 #include "base/logging.h"
 #include "facade/error.h"
 #include "server/command_registry.h"
@@ -20,6 +22,7 @@ extern "C" {
 
 namespace dfly {
 
+using namespace double_conversion;
 using namespace std;
 using namespace facade;
 using absl::SimpleAtoi;
@@ -321,7 +324,7 @@ void IntervalVisitor::ActionRem(const zrangespec& range) {
 }
 
 void IntervalVisitor::ActionRem(const zlexrangespec& range) {
-   if (zobj_->encoding == OBJ_ENCODING_LISTPACK) {
+  if (zobj_->encoding == OBJ_ENCODING_LISTPACK) {
     uint8_t* zl = (uint8_t*)zobj_->ptr;
     unsigned long deleted = 0;
     zl = zzlDeleteRangeByLex(zl, &range, &deleted);
@@ -960,6 +963,37 @@ void ZSetFamily::ZScore(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void ZSetFamily::ZScan(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view token = ArgS(args, 2);
+
+  uint64_t cursor = 0;
+
+  if (!absl::SimpleAtoi(token, &cursor)) {
+    return (*cntx)->SendError("invalid cursor");
+  }
+
+  if (args.size() > 3) {
+    return (*cntx)->SendError("scan options are not supported yet");
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpScan(OpArgs{shard, t->db_index()}, key, &cursor);
+  };
+
+  OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (result.status() != OpStatus::WRONG_TYPE) {
+    (*cntx)->StartArray(2);
+    (*cntx)->SendSimpleString(absl::StrCat(cursor));
+    (*cntx)->StartArray(result->size());
+    for (const auto& k : *result) {
+      (*cntx)->SendBulkString(k);
+    }
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
+
 void ZSetFamily::ZRangeByScoreInternal(string_view key, string_view min_s, string_view max_s,
                                        const RangeParams& params, ConnectionContext* cntx) {
   ZRangeSpec range_spec;
@@ -1080,6 +1114,69 @@ void ZSetFamily::ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* 
   } else {
     (*cntx)->SendError(result.status());
   }
+}
+
+OpResult<StringVec> ZSetFamily::OpScan(const OpArgs& op_args, std::string_view key,
+                                       uint64_t* cursor) {
+  OpResult<PrimeIterator> find_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_ZSET);
+
+  if (!find_res)
+    return find_res.status();
+
+  PrimeIterator it = find_res.value();
+  StringVec res;
+  robj* zobj = it->second.AsRObj();
+  char buf[128];
+
+  if (zobj->encoding == OBJ_ENCODING_LISTPACK) {
+    RangeParams params;
+    IntervalVisitor iv{Action::RANGE, params, zobj};
+
+    iv(IndexInterval{0, kuint32max});
+    ScoredArray arr = iv.PopResult();
+    res.resize(arr.size() * 2);
+
+
+    for (size_t i = 0; i < arr.size(); ++i) {
+      StringBuilder sb(buf, sizeof(buf));
+      CHECK(DoubleToStringConverter::EcmaScriptConverter().ToShortest(arr[i].second, &sb));
+
+      res[2 * i] = std::move(arr[i].first);
+      res[2 * i + 1].assign(sb.Finalize());
+    }
+    *cursor = 0;
+  } else {
+    CHECK_EQ(unsigned(OBJ_ENCODING_SKIPLIST), zobj->encoding);
+    uint32_t count = 20;
+    zset* zs = (zset*)zobj->ptr;
+
+    dict* ht = zs->dict;
+    long maxiterations = count * 10;
+
+    struct ScanArgs {
+      char* sbuf;
+      StringVec* res;
+    } sargs = {buf, &res};
+
+    auto scanCb = [](void* privdata, const dictEntry* de) {
+      ScanArgs* sargs = (ScanArgs*)privdata;
+
+      sds key = (sds)de->key;
+      double score = *(double*)dictGetVal(de);
+
+      sargs->res->emplace_back(key, sdslen(key));
+
+      StringBuilder sb(sargs->sbuf, sizeof(buf));
+      CHECK(DoubleToStringConverter::EcmaScriptConverter().ToShortest(score, &sb));
+      sargs->res->emplace_back(sb.Finalize());
+    };
+
+    do {
+      *cursor = dictScan(ht, *cursor, scanCb, NULL, &sargs);
+    } while (*cursor && maxiterations-- && res.size() < count);
+  }
+
+  return res;
 }
 
 OpStatus ZSetFamily::OpAdd(const ZParams& zparams, const OpArgs& op_args, string_view key,
@@ -1379,7 +1476,8 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZREMRANGEBYLEX", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRemRangeByLex)
             << CI{"ZREVRANGE", CO::READONLY, 4, 1, 1, 1}.HFUNC(ZRevRange)
             << CI{"ZREVRANGEBYSCORE", CO::READONLY, 4, 1, 1, 1}.HFUNC(ZRevRangeByScore)
-            << CI{"ZREVRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZRevRank);
+            << CI{"ZREVRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZRevRank)
+            << CI{"ZSCAN", CO::READONLY | CO::RANDOM, -3, 1, 1, 1}.HFUNC(ZScan);
 }
 
 }  // namespace dfly

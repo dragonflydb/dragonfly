@@ -69,6 +69,7 @@ class ZSetFamily {
   static void ZRevRange(CmdArgList args, ConnectionContext* cntx);
   static void ZRevRangeByScore(CmdArgList args, ConnectionContext* cntx);
   static void ZRevRank(CmdArgList args, ConnectionContext* cntx);
+  static void ZScan(CmdArgList args, ConnectionContext* cntx);
 
   static void ZRangeByScoreInternal(std::string_view key, std::string_view min_s,
                                     std::string_view max_s, const RangeParams& params,
@@ -79,6 +80,7 @@ class ZSetFamily {
                                ConnectionContext* cntx);
   static void ZRangeGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx);
   static void ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx);
+  static OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t* cursor);
 
   struct ZParams {
     unsigned flags = 0;  // mask of ZADD_IN_ macros.

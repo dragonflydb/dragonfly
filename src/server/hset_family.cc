@@ -897,6 +897,7 @@ OpResult<StringVec> HSetFamily::OpScan(const OpArgs& op_args, std::string_view k
       res.emplace_back(reinterpret_cast<char*>(elem), size_t(ele_len));
       lp_elem = lpNext(lp, lp_elem);  // switch to value
     } while (lp_elem);
+    *cursor = 0;
   } else {
     dict* ht = (dict*)hset->ptr;
     long maxiterations = count * 10;
