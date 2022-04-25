@@ -70,7 +70,7 @@ TEST_F(ZSetFamilyTest, ZRangeRank) {
   EXPECT_THAT(Run({"zrangebyscore", "x", "0", "(1.1"}), ArrLen(0));
   EXPECT_THAT(Run({"zrangebyscore", "x", "-inf", "1.1"}), "a");
 
-  auto resp = Run({"zrevrangebyscore", "x", "-inf", "+inf"});
+  auto resp = Run({"zrevrangebyscore", "x", "+inf", "-inf"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   ASSERT_THAT(resp.GetVec(), ElementsAre("b", "a"));
 
@@ -134,8 +134,14 @@ TEST_F(ZSetFamilyTest, ByLex) {
   ASSERT_THAT(resp.GetVec(), ElementsAre("alpha", "bar", "cool", "down", "elephant", "foo"));
 }
 
+TEST_F(ZSetFamilyTest, ZRevRange) {
+  Run({"zadd", "key", "-inf", "a", "1", "b", "2", "c"});
+  auto resp = Run({"zrevrangebyscore", "key", "2", "-inf"});
+  EXPECT_THAT(resp, ArrLen(3));
+}
+
 TEST_F(ZSetFamilyTest, ZScan) {
-  string prefix(128,'a');
+  string prefix(128, 'a');
   for (unsigned i = 0; i < 100; ++i) {
     Run({"zadd", "key", "1", absl::StrCat(prefix, i)});
   }

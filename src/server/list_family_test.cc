@@ -57,7 +57,6 @@ TEST_F(ListFamilyTest, Expire) {
   EXPECT_THAT(resp, IntArg(1));
 }
 
-
 TEST_F(ListFamilyTest, BLPopUnblocking) {
   auto resp = Run({"lpush", kKey1, "1"});
   EXPECT_THAT(resp, IntArg(1));
@@ -156,6 +155,20 @@ TEST_F(ListFamilyTest, BLPopTimeout) {
 
   EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
   ASSERT_FALSE(service_->IsLocked(0, kKey1));
+}
+
+TEST_F(ListFamilyTest, BLPopTimeout2) {
+  Run({"BLPOP", "blist1", "blist2", "0.1"});
+  Run({"RPUSH", "blist2", "d"});
+  Run({"RPUSH", "blist2", "hello"});
+  auto resp = Run({"BLPOP", "blist1", "blist2", "1"});
+  ASSERT_THAT(resp, ArrLen(2));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("blist2", "d"));
+
+  Run({"RPUSH", "blist1", "a"});
+  Run({"DEL", "blist2"});
+  Run({"RPUSH", "blist2", "d"});
+  // Run({"BLPOP", "blist1", "blist2", "1"});
 }
 
 TEST_F(ListFamilyTest, LRem) {
@@ -297,9 +310,7 @@ TEST_F(ListFamilyTest, BPopSameKeyTwice) {
     this_fiber::sleep_for(30us);
   } while (!IsLocked(0, kKey1));
 
-  pp_->at(1)->Await([&] {
-    EXPECT_EQ(1, CheckedInt({"lpush", kKey1, "bar"}));
-  });
+  pp_->at(1)->Await([&] { EXPECT_EQ(1, CheckedInt({"lpush", kKey1, "bar"})); });
   pop_fb.join();
 
   ASSERT_THAT(blpop_resp, ArrLen(2));
@@ -313,9 +324,7 @@ TEST_F(ListFamilyTest, BPopSameKeyTwice) {
     this_fiber::sleep_for(30us);
   } while (!IsLocked(0, kKey1));
 
-  pp_->at(1)->Await([&] {
-    EXPECT_EQ(1, CheckedInt({"lpush", kKey2, "bar"}));
-  });
+  pp_->at(1)->Await([&] { EXPECT_EQ(1, CheckedInt({"lpush", kKey2, "bar"})); });
   pop_fb.join();
 
   ASSERT_THAT(blpop_resp, ArrLen(2));

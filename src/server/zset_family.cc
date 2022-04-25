@@ -37,38 +37,43 @@ static const char kLexRangeErr[] = "min or max not valid string range item";
 
 constexpr unsigned kMaxListPackValue = 64;
 
-inline zrangespec GetZrangeSpec(const ZSetFamily::ScoreInterval& si) {
+inline zrangespec GetZrangeSpec(bool reverse, const ZSetFamily::ScoreInterval& si) {
+  auto interval = si;
+  if (reverse)
+    swap(interval.first, interval.second);
+
   zrangespec range;
-  range.min = si.first.val;
-  range.max = si.second.val;
-  range.minex = si.first.is_open;
-  range.maxex = si.second.is_open;
+  range.min = interval.first.val;
+  range.max = interval.second.val;
+  range.minex = interval.first.is_open;
+  range.maxex = interval.second.is_open;
 
   return range;
 }
 
-zlexrangespec GetLexRange(const ZSetFamily::LexInterval& li) {
+sds GetLexStr(const ZSetFamily::LexBound& bound) {
+  if (bound.type == ZSetFamily::LexBound::MINUS_INF)
+    return cminstring;
+
+  if (bound.type == ZSetFamily::LexBound::PLUS_INF)
+    return cmaxstring;
+
+  return sdsnewlen(bound.val.data(), bound.val.size());
+};
+
+zlexrangespec GetLexRange(bool reverse, const ZSetFamily::LexInterval& li) {
+  auto interval = li;
+  if (reverse)
+    swap(interval.first, interval.second);
+
   zlexrangespec range;
   range.minex = 0;
   range.maxex = 0;
 
-  if (li.first.type == ZSetFamily::LexBound::MINUS_INF) {
-    range.min = cminstring;
-  } else if (li.first.type == ZSetFamily::LexBound::PLUS_INF) {
-    range.min = cmaxstring;
-  } else {
-    range.min = sdsnewlen(li.first.val.data(), li.first.val.size());
-    range.minex = (li.first.type == ZSetFamily::LexBound::OPEN);
-  }
-
-  if (li.second.type == ZSetFamily::LexBound::MINUS_INF) {
-    range.max = cminstring;
-  } else if (li.second.type == ZSetFamily::LexBound::PLUS_INF) {
-    range.max = cmaxstring;
-  } else {
-    range.max = sdsnewlen(li.second.val.data(), li.second.val.size());
-    range.maxex = (li.second.type == ZSetFamily::LexBound::OPEN);
-  }
+  range.min = GetLexStr(interval.first);
+  range.max = GetLexStr(interval.second);
+  range.minex = (interval.first.type == ZSetFamily::LexBound::OPEN);
+  range.maxex = (li.second.type == ZSetFamily::LexBound::OPEN);
 
   return range;
 }
@@ -195,7 +200,7 @@ void IntervalVisitor::operator()(const ZSetFamily::IndexInterval& ii) {
 }
 
 void IntervalVisitor::operator()(const ZSetFamily::ScoreInterval& si) {
-  zrangespec range = GetZrangeSpec(si);
+  zrangespec range = GetZrangeSpec(params_.reverse, si);
 
   switch (action_) {
     case Action::RANGE:
@@ -208,7 +213,7 @@ void IntervalVisitor::operator()(const ZSetFamily::ScoreInterval& si) {
 }
 
 void IntervalVisitor::operator()(const ZSetFamily::LexInterval& li) {
-  zlexrangespec range = GetLexRange(li);
+  zlexrangespec range = GetLexRange(params_.reverse, li);
 
   switch (action_) {
     case Action::RANGE:
@@ -218,6 +223,7 @@ void IntervalVisitor::operator()(const ZSetFamily::LexInterval& li) {
       ActionRem(range);
       break;
   }
+  zslFreeLexRange(&range);
 }
 
 void IntervalVisitor::ActionRange(unsigned start, unsigned end) {
@@ -1136,7 +1142,6 @@ OpResult<StringVec> ZSetFamily::OpScan(const OpArgs& op_args, std::string_view k
     ScoredArray arr = iv.PopResult();
     res.resize(arr.size() * 2);
 
-
     for (size_t i = 0; i < arr.size(); ++i) {
       StringBuilder sb(buf, sizeof(buf));
       CHECK(DoubleToStringConverter::EcmaScriptConverter().ToShortest(arr[i].second, &sb));
@@ -1330,7 +1335,7 @@ OpResult<unsigned> ZSetFamily::OpCount(const OpArgs& op_args, std::string_view k
     return res_it.status();
 
   robj* zobj = res_it.value()->second.AsRObj();
-  zrangespec range = GetZrangeSpec(interval);
+  zrangespec range = GetZrangeSpec(false, interval);
   unsigned count = 0;
 
   if (zobj->encoding == OBJ_ENCODING_LISTPACK) {
@@ -1401,7 +1406,7 @@ OpResult<unsigned> ZSetFamily::OpLexCount(const OpArgs& op_args, string_view key
     return res_it.status();
 
   robj* zobj = res_it.value()->second.AsRObj();
-  zlexrangespec range = GetLexRange(interval);
+  zlexrangespec range = GetLexRange(false, interval);
   unsigned count = 0;
   if (zobj->encoding == OBJ_ENCODING_LISTPACK) {
     uint8_t* zl = (uint8_t*)zobj->ptr;
