@@ -9,7 +9,7 @@ extern "C" {
 }
 
 #include <absl/container/inlined_vector.h>
-#include <double-conversion/double-to-string.h>
+
 #include <double-conversion/string-to-double.h>
 
 #include "base/logging.h"
@@ -740,11 +740,9 @@ OpResult<double> StringFamily::OpIncrFloat(const OpArgs& op_args, std::string_vi
   auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
 
   char buf[128];
-  StringBuilder sb(buf, sizeof(buf));
 
   if (inserted) {
-    CHECK(DoubleToStringConverter::EcmaScriptConverter().ToShortest(val, &sb));
-    char* str = sb.Finalize();
+    char* str = RedisReplyBuilder::FormatDouble(val, buf, sizeof(buf));
     it->second.SetString(str);
 
     return val;
@@ -772,11 +770,8 @@ OpResult<double> StringFamily::OpIncrFloat(const OpArgs& op_args, std::string_vi
     return OpStatus::INVALID_FLOAT;
   }
 
-  if (!DoubleToStringConverter::EcmaScriptConverter().ToShortest(base, &sb)) {
-    return OpStatus::INVALID_FLOAT;
-  }
+  char* str = RedisReplyBuilder::FormatDouble(base, buf, sizeof(buf));
 
-  char* str = sb.Finalize();
   db_slice.PreUpdate(op_args.db_ind, it);
   it->second.SetString(str);
   db_slice.PostUpdate(op_args.db_ind, it);

@@ -27,6 +27,11 @@ constexpr char kCRLF[] = "\r\n";
 constexpr char kErrPref[] = "-ERR ";
 constexpr char kSimplePref[] = "+";
 
+constexpr unsigned kConvFlags =
+    DoubleToStringConverter::UNIQUE_ZERO | DoubleToStringConverter::EMIT_POSITIVE_EXPONENT_SIGN;
+
+DoubleToStringConverter dfly_conv(kConvFlags, "inf", "nan", 'e', -6, 21, 6, 0);
+
 }  // namespace
 
 SinkReplyBuilder::SinkReplyBuilder(::io::Sink* sink) : sink_(sink) {
@@ -148,6 +153,13 @@ void MCReplyBuilder::SendNotFound() {
   SendSimpleString("NOT_FOUND");
 }
 
+
+char* RedisReplyBuilder::FormatDouble(double val, char* dest, unsigned dest_len) {
+  StringBuilder sb(dest, dest_len);
+  CHECK(dfly_conv.ToShortest(val, &sb));
+  return sb.Finalize();
+}
+
 RedisReplyBuilder::RedisReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
 }
 
@@ -232,7 +244,7 @@ void RedisReplyBuilder::SendLong(long num) {
 void RedisReplyBuilder::SendDouble(double val) {
   char buf[64];
   StringBuilder sb(buf, sizeof(buf));
-  CHECK(DoubleToStringConverter::EcmaScriptConverter().ToShortest(val, &sb));
+  CHECK(dfly_conv.ToShortest(val, &sb));
 
   SendBulkString(sb.Finalize());
 }

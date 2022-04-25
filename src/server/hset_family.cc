@@ -11,8 +11,6 @@ extern "C" {
 #include "redis/util.h"
 }
 
-#include <double-conversion/double-to-string.h>
-
 #include "base/logging.h"
 #include "facade/error.h"
 #include "server/command_registry.h"
@@ -25,7 +23,6 @@ using namespace std;
 namespace dfly {
 
 using namespace facade;
-using namespace double_conversion;
 
 namespace {
 
@@ -813,9 +810,7 @@ OpStatus HSetFamily::OpIncrBy(const OpArgs& op_args, string_view key, string_vie
     }
 
     char buf[128];
-    StringBuilder sb(buf, sizeof(buf));
-    CHECK(DoubleToStringConverter::EcmaScriptConverter().ToShortest(value, &sb));
-    char* str = sb.Finalize();
+    char* str = RedisReplyBuilder::FormatDouble(value, buf, sizeof(buf));
     string_view sval{str};
 
     if (hset->encoding == OBJ_ENCODING_LISTPACK) {

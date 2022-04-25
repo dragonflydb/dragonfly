@@ -140,6 +140,8 @@ class RedisReplyBuilder : public SinkReplyBuilder {
 
   virtual void StartArray(unsigned len);
 
+  static char* FormatDouble(double val, char* dest, unsigned dest_len);
+
  private:
 };
 

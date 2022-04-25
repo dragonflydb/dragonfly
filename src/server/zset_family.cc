@@ -790,26 +790,10 @@ void ZSetFamily::ZRevRangeByScore(CmdArgList args, ConnectionContext* cntx) {
 
   RangeParams range_params;
   range_params.reverse = true;
+  args.remove_prefix(4);
 
-  for (size_t i = 4; i < args.size(); ++i) {
-    ToUpper(&args[i]);
-
-    string_view cur_arg = ArgS(args, i);
-    if (cur_arg == "WITHSCORES") {
-      range_params.with_scores = true;
-    } else if (cur_arg == "LIMIT") {
-      if (i + 3 != args.size())
-        return (*cntx)->SendError(kSyntaxErr);
-
-      string_view os = ArgS(args, i + 1);
-      string_view cs = ArgS(args, i + 2);
-
-      if (!SimpleAtoi(os, &range_params.offset) || !SimpleAtoi(cs, &range_params.limit))
-        return (*cntx)->SendError(kSyntaxErr);
-      i += 3;
-    } else {
-      return (*cntx)->SendError(absl::StrCat("unsupported option ", cur_arg), kSyntaxErrType);
-    }
+  if (!ParseRangeByScoreParams(args, &range_params)) {
+    return (*cntx)->SendError(kSyntaxErr);
   }
 
   ZRangeByScoreInternal(key, min_s, max_s, range_params, cntx);
@@ -865,16 +849,10 @@ void ZSetFamily::ZRangeByScore(CmdArgList args, ConnectionContext* cntx) {
   string_view max_s = ArgS(args, 3);
 
   RangeParams range_params;
+  args.remove_prefix(4);
 
-  for (size_t i = 4; i < args.size(); ++i) {
-    ToUpper(&args[i]);
-
-    string_view cur_arg = ArgS(args, i);
-    if (cur_arg == "WITHSCORES") {
-      range_params.with_scores = true;
-    } else {
-      return cntx->reply_builder()->SendError(absl::StrCat("unsupported option ", cur_arg));
-    }
+  if (!ParseRangeByScoreParams(args, &range_params)) {
+    return (*cntx)->SendError(kSyntaxErr);
   }
 
   ZRangeByScoreInternal(key, min_s, max_s, range_params, cntx);
@@ -1122,6 +1100,31 @@ void ZSetFamily::ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* 
   }
 }
 
+bool ZSetFamily::ParseRangeByScoreParams(CmdArgList args, RangeParams* params) {
+  for (size_t i = 0; i < args.size(); ++i) {
+    ToUpper(&args[i]);
+
+    string_view cur_arg = ArgS(args, i);
+    if (cur_arg == "WITHSCORES") {
+      params->with_scores = true;
+    } else if (cur_arg == "LIMIT") {
+      if (i + 3 != args.size())
+        return false;
+
+      string_view os = ArgS(args, i + 1);
+      string_view cs = ArgS(args, i + 2);
+
+      if (!SimpleAtoi(os, &params->offset) || !SimpleAtoi(cs, &params->limit))
+        return false;
+      i += 3;
+    } else {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 OpResult<StringVec> ZSetFamily::OpScan(const OpArgs& op_args, std::string_view key,
                                        uint64_t* cursor) {
   OpResult<PrimeIterator> find_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_ZSET);
@@ -1143,11 +1146,10 @@ OpResult<StringVec> ZSetFamily::OpScan(const OpArgs& op_args, std::string_view k
     res.resize(arr.size() * 2);
 
     for (size_t i = 0; i < arr.size(); ++i) {
-      StringBuilder sb(buf, sizeof(buf));
-      CHECK(DoubleToStringConverter::EcmaScriptConverter().ToShortest(arr[i].second, &sb));
+      char* str = RedisReplyBuilder::FormatDouble(arr[i].second, buf, sizeof(buf));
 
       res[2 * i] = std::move(arr[i].first);
-      res[2 * i + 1].assign(sb.Finalize());
+      res[2 * i + 1].assign(str);
     }
     *cursor = 0;
   } else {
@@ -1170,10 +1172,8 @@ OpResult<StringVec> ZSetFamily::OpScan(const OpArgs& op_args, std::string_view k
       double score = *(double*)dictGetVal(de);
 
       sargs->res->emplace_back(key, sdslen(key));
-
-      StringBuilder sb(sargs->sbuf, sizeof(buf));
-      CHECK(DoubleToStringConverter::EcmaScriptConverter().ToShortest(score, &sb));
-      sargs->res->emplace_back(sb.Finalize());
+      char* str = RedisReplyBuilder::FormatDouble(score, sargs->sbuf, sizeof(buf));
+      sargs->res->emplace_back(str);
     };
 
     do {
@@ -1480,7 +1480,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZREMRANGEBYSCORE", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRemRangeByScore)
             << CI{"ZREMRANGEBYLEX", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRemRangeByLex)
             << CI{"ZREVRANGE", CO::READONLY, 4, 1, 1, 1}.HFUNC(ZRevRange)
-            << CI{"ZREVRANGEBYSCORE", CO::READONLY, 4, 1, 1, 1}.HFUNC(ZRevRangeByScore)
+            << CI{"ZREVRANGEBYSCORE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRevRangeByScore)
             << CI{"ZREVRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZRevRank)
             << CI{"ZSCAN", CO::READONLY | CO::RANDOM, -3, 1, 1, 1}.HFUNC(ZScan);
 }

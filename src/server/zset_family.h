@@ -80,6 +80,8 @@ class ZSetFamily {
                                ConnectionContext* cntx);
   static void ZRangeGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx);
   static void ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx);
+  static bool ParseRangeByScoreParams(CmdArgList args, RangeParams* params);
+
   static OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t* cursor);
 
   struct ZParams {
