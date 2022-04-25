@@ -307,4 +307,18 @@ TEST_F(StringFamilyTest, Range) {
   EXPECT_EQ(Run({"getrange","num", "-5000", "10000"}), "1234");
 }
 
+TEST_F(StringFamilyTest, IncrByFloat) {
+  Run({"SET", "nonum", "  11"});
+  auto resp = Run({"INCRBYFLOAT", "nonum", "1.0"});
+  EXPECT_THAT(resp, ErrArg("not a valid float"));
+
+  Run({"SET", "nonum", "11 "});
+  resp = Run({"INCRBYFLOAT", "nonum", "1.0"});
+  EXPECT_THAT(resp, ErrArg("not a valid float"));
+
+  Run({"SET", "num", "2.566"});
+  resp = Run({"INCRBYFLOAT", "num", "1.0"});
+  EXPECT_EQ(resp, "3.566");
+}
+
 }  // namespace dfly

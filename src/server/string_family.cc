@@ -758,11 +758,14 @@ OpResult<double> StringFamily::OpIncrFloat(const OpArgs& op_args, std::string_vi
 
   string tmp;
   string_view slice = it->second.GetSlice(&tmp);
-  double base;
 
-  if (!absl::SimpleAtod(slice, &base)) {
+  StringToDoubleConverter stod(StringToDoubleConverter::NO_FLAGS, 0, 0, NULL, NULL);
+  int processed_digits = 0;
+  double base = stod.StringToDouble(slice.data(), slice.size(), &processed_digits);
+  if (unsigned(processed_digits) != slice.size()) {
     return OpStatus::INVALID_FLOAT;
   }
+
   base += val;
 
   if (isnan(base) || isinf(base)) {
