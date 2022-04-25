@@ -354,6 +354,11 @@ void GenericFamily::Rename(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendError(st.status());
 }
 
+void GenericFamily::RenameNx(CmdArgList args, ConnectionContext* cntx) {
+  OpResult<void> st = RenameGeneric(args, true, cntx);
+  (*cntx)->SendError(st.status());
+}
+
 void GenericFamily::Ttl(CmdArgList args, ConnectionContext* cntx) {
   TtlGeneric(args, cntx, TimeUnit::SEC);
 }
@@ -727,6 +732,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
             << CI{"KEYS", CO::READONLY, 2, 0, 0, 0}.HFUNC(Keys)
             << CI{"PEXPIREAT", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(PexpireAt)
             << CI{"RENAME", CO::WRITE, 3, 1, 2, 1}.HFUNC(Rename)
+            << CI{"RENAMENX", CO::WRITE, 3, 1, 2, 1}.HFUNC(RenameNx)
             << CI{"SELECT", kSelectOpts, 2, 0, 0, 0}.HFUNC(Select)
             << CI{"SCAN", CO::READONLY | CO::FAST, -2, 0, 0, 0}.HFUNC(Scan)
             << CI{"TTL", CO::READONLY | CO::FAST | CO::RANDOM, 2, 1, 1, 1}.HFUNC(Ttl)
