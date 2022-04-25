@@ -20,10 +20,10 @@ jobs:
     strategy:
       matrix:
         # Test of these containers
-        container: ["ubuntu-dev", "alpine-dev"]
+        container: ["ubuntu-dev:20", "alpine-dev:latest"]
     timeout-minutes: 30
     container: 
-      image: ghcr.io/${{ github.repository_owner }}/${{ matrix.container }}:latest
+      image: ghcr.io/${{ github.repository_owner }}/${{ matrix.container }}
       credentials:
         username: ${{ github.repository_owner }}
         password: ${{ secrets.GITHUB_TOKEN }}

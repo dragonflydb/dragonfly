@@ -6,9 +6,11 @@
 #include <mimalloc.h>
 
 #include "base/init.h"
-#include "base/proc_util.h"
+#include "base/proc_util.h"  // for GetKernelVersion
 #include "facade/dragonfly_listener.h"
+#include "io/proc_reader.h"
 #include "server/main_service.h"
+#include "strings/human_readable.h"
 #include "util/accept_server.h"
 #include "util/uring/uring_pool.h"
 #include "util/varz.h"
@@ -17,10 +19,14 @@ DECLARE_uint32(port);
 DECLARE_uint32(memcache_port);
 DECLARE_uint64(maxmemory);
 DEFINE_bool(use_large_pages, false, "If true - uses large memory pages for allocations");
+DEFINE_string(bind, "",
+              "Bind address. If empty - binds on all interfaces. "
+              "It's not advised due to security implications.");
 
 using namespace util;
 using namespace std;
 using namespace facade;
+using strings::HumanReadableNumBytes;
 
 namespace dfly {
 
@@ -33,7 +39,12 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   Service service(pool);
 
   service.Init(acceptor);
-  acceptor->AddListener(FLAGS_port, new Listener{Protocol::REDIS, &service});
+  const char* bind_addr = FLAGS_bind.empty() ? nullptr : FLAGS_bind.c_str();
+
+  error_code ec =
+      acceptor->AddListener(bind_addr, FLAGS_port, new Listener{Protocol::REDIS, &service});
+
+  LOG_IF(FATAL, ec) << "Cound not open port " << FLAGS_port << ", error: " << ec.message();
 
   if (FLAGS_memcache_port > 0) {
     acceptor->AddListener(FLAGS_memcache_port, new Listener{Protocol::MEMCACHE, &service});
@@ -69,12 +80,22 @@ int main(int argc, char* argv[]) {
   CHECK_LT(kver.minor, 99u);
   dfly::kernel_version = kver.major * 100 + kver.minor;
 
+  if (FLAGS_maxmemory == 0) {
+    LOG(INFO) << "maxmemory has not been specified. Deciding myself....";
+
+    io::Result<io::MemInfoData> res = io::ReadMemInfo();
+    size_t available = res->mem_avail;
+    size_t maxmemory = size_t(0.8 * available);
+    LOG(INFO) << "Found " << HumanReadableNumBytes(available)
+              << " available memory. Setting maxmemory to " << HumanReadableNumBytes(maxmemory);
+    FLAGS_maxmemory = maxmemory;
+  }
+
   if (FLAGS_use_large_pages) {
     mi_option_enable(mi_option_large_os_pages);
   }
   mi_option_enable(mi_option_show_errors);
   mi_option_set(mi_option_max_warnings, 0);
-
 
   uring::UringPool pp{1024};
   pp.Run();

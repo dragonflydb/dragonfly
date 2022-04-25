@@ -40,7 +40,9 @@ extern "C" {
 DEFINE_uint32(port, 6379, "Redis port");
 DEFINE_uint32(memcache_port, 0, "Memcached port");
 DECLARE_string(requirepass);
-DEFINE_uint64(maxmemory, 0, "Limit on maximum-memory that is used by the database");
+DEFINE_uint64(maxmemory, 0,
+              "Limit on maximum-memory that is used by the database."
+              "0 - means the program will automatically determine its maximum memory usage");
 
 namespace dfly {
 
@@ -996,7 +998,6 @@ void Service::RegisterCommands() {
   ZSetFamily::Register(&registry_);
 
   server_family_.Register(&registry_);
-
 
   if (VLOG_IS_ON(1)) {
     LOG(INFO) << "Multi-key commands are: ";

@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-from ghcr.io/romange/ubuntu-dev as builder
+from ghcr.io/romange/ubuntu-dev:20 as builder
 
 WORKDIR /build
 COPY src/  ./src/
