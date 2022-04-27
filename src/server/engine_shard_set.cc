@@ -10,6 +10,7 @@ extern "C" {
 }
 
 #include "base/logging.h"
+#include "server/blocking_controller.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "util/fiber_sched_algo.h"
@@ -32,35 +33,6 @@ vector<EngineShardSet::CachedStats> cached_stats;  // initialized in EngineShard
 
 thread_local EngineShard* EngineShard::shard_ = nullptr;
 constexpr size_t kQueueLen = 64;
-
-struct WatchItem {
-  ::boost::intrusive_ptr<Transaction> trans;
-
-  WatchItem(Transaction* t) : trans(t) {
-  }
-};
-
-struct EngineShard::WatchQueue {
-  deque<WatchItem> items;
-  TxId notify_txid = UINT64_MAX;
-
-  // Updated  by both coordinator and shard threads but at different times.
-  enum State { SUSPENDED, ACTIVE } state = SUSPENDED;
-
-  void Suspend() {
-    state = SUSPENDED;
-    notify_txid = UINT64_MAX;
-  }
-};
-
-bool EngineShard::DbWatchTable::RemoveEntry(WatchQueueMap::iterator it) {
-  DVLOG(1) << "Erasing watchqueue key " << it->first;
-
-  awakened_keys.erase(it->first);
-  queue_map.erase(it);
-
-  return queue_map.empty();
-}
 
 EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap)
     : queue_(kQueueLen), txq_([](const Transaction* t) { return t->txid(); }), mi_resource_(heap),
@@ -125,7 +97,7 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
 
     shard_->tiered_storage_.reset(new TieredStorage(&shard_->db_slice_));
     error_code ec = shard_->tiered_storage_->Open(fn);
-    CHECK(!ec) << ec.message();          // TODO
+    CHECK(!ec) << ec.message();  // TODO
   }
 }
 
@@ -171,12 +143,13 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
       DVLOG(1) << "RunContTrans: " << continuation_trans_->DebugId() << " keep: " << to_keep;
       if (!to_keep) {
         continuation_trans_ = nullptr;
-        OnTxFinish();
+        if (blocking_controller_)
+          blocking_controller_->OnTxFinish();
       }
     }
   }
 
-  bool has_awaked_trans = HasAwakedTransaction();
+  bool has_awaked_trans = blocking_controller_ && blocking_controller_->HasAwakedTransaction();
   Transaction* head = nullptr;
   string dbg_id;
 
@@ -188,6 +161,8 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
       // The fact that Tx is in the queue, already means that coordinator fiber will not progress,
       // hence here it's enough to test for run_count and check local_mask.
       bool is_armed = head->IsArmedInShard(sid);
+      DVLOG(2) << "Considering head " << head->DebugId() << " isarmed: " << is_armed;
+
       if (!is_armed)
         break;
 
@@ -213,6 +188,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
       }
 
       bool keep = head->RunInShard(this);
+
       // We should not access head from this point since RunInShard callback decrements refcount.
       DLOG_IF(INFO, !dbg_id.empty()) << "RunHead " << dbg_id << ", keep " << keep;
 
@@ -221,7 +197,8 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
         break;
       }
 
-      OnTxFinish();
+      if (blocking_controller_)
+        blocking_controller_->OnTxFinish();
     }       // while(!txq_.Empty())
   } else {  // if (continuation_trans_ == nullptr && !has_awaked_trans)
     DVLOG(1) << "Skipped TxQueue " << continuation_trans_ << " " << has_awaked_trans;
@@ -230,8 +207,10 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   // For SUSPENDED_Q - if transaction has not been notified, it will still be
   // in the watch queue. We need to unlock an Execute by running a noop.
   if (trans_mask & Transaction::SUSPENDED_Q) {
-    TxId notify_txid = trans->notify_txid();
-    DCHECK(HasResultConverged(notify_txid));
+    // This case happens when some other shard notified the transaction and now it
+    // runs FindFirst on all shards.
+    // TxId notify_txid = trans->notify_txid();
+    // DCHECK(HasResultConverged(notify_txid));
     trans->RunNoop(this);
     return;
   }
@@ -239,7 +218,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   // If trans is out of order, i.e. locks keys that previous transactions have not locked.
   // It may be that there are other transactions that touch those keys but they necessary ordered
   // after trans in the queue, hence it's safe to run trans out of order.
-  if (trans && trans_mask & Transaction::OUT_OF_ORDER) {
+  if (trans && (trans_mask & Transaction::OUT_OF_ORDER)) {
     DCHECK(trans != head);
     DCHECK(!trans->IsMulti());  // multi, global transactions can not be OOO.
     DCHECK(trans_mask & Transaction::ARMED);
@@ -259,239 +238,15 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   }
 }
 
-// Internal function called from ProcessAwakened().
-// Marks the queue as active and notifies the first transaction in the queue.
-Transaction* EngineShard::NotifyWatchQueue(WatchQueue* wq) {
-  wq->state = WatchQueue::ACTIVE;
-
-  auto& q = wq->items;
-  ShardId sid = shard_id();
-
-  do {
-    const WatchItem& wi = q.front();
-    Transaction* head = wi.trans.get();
-
-    if (head->NotifySuspended(committed_txid_, sid)) {
-      wq->notify_txid = committed_txid_;
-      return head;
-    }
-
-    q.pop_front();
-  } while (!q.empty());
-
-  return nullptr;
-}
-
-// Processes potentially awakened keys and verifies that these are indeed
-// awakened to eliminate false positives.
-// In addition, optionally removes completed_t from the watch queues.
-void EngineShard::ProcessAwakened(Transaction* completed_t) {
-  for (DbIndex index : awakened_indices_) {
-    DbWatchTable& wt = watched_dbs_[index];
-
-    for (auto key : wt.awakened_keys) {
-      string_view sv_key = static_cast<string_view>(key);
-      auto [it, exp_it] = db_slice_.FindExt(index, sv_key);  // Double verify we still got the item.
-      if (!IsValid(it) || it->second.ObjType() != OBJ_LIST)  // Only LIST is allowed to block.
-        continue;
-
-      auto w_it = wt.queue_map.find(sv_key);
-      CHECK(w_it != wt.queue_map.end());
-      DVLOG(1) << "NotifyWatchQueue " << key;
-
-      Transaction* t2 = NotifyWatchQueue(w_it->second.get());
-      if (t2) {
-        awakened_transactions_.insert(t2);
-      }
-    }
-    wt.awakened_keys.clear();
-  }
-  awakened_indices_.clear();
-
-  if (!completed_t)
-    return;
-
-  auto dbit = watched_dbs_.find(completed_t->db_index());
-  if (dbit == watched_dbs_.end())
-    return;
-
-  DbWatchTable& wt = dbit->second;
-  KeyLockArgs lock_args = completed_t->GetLockArgs(shard_id());
-
-  for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
-    string_view key = lock_args.args[i];
-    auto w_it = wt.queue_map.find(key);
-
-    if (w_it == wt.queue_map.end() || w_it->second->state != WatchQueue::ACTIVE)
-      continue;
-
-    WatchQueue& wq = *w_it->second;
-
-    DCHECK_LE(wq.notify_txid, committed_txid_);
-
-    auto& queue = wq.items;
-    DCHECK(!queue.empty());  // since it's active
-
-    if (queue.front().trans != completed_t)
-      continue;
-
-    DVLOG(1) << "Wakening next transaction for key " << key;
-
-    do {
-      const WatchItem& bi = queue.front();
-      Transaction* head = bi.trans.get();
-
-      if (head->NotifySuspended(wq.notify_txid, shard_id()))
-        break;
-      queue.pop_front();
-    } while (!queue.empty());
-
-    if (queue.empty()) {
-      wt.RemoveEntry(w_it);
-    }
-  }
-
-  if (wt.queue_map.empty()) {
-    watched_dbs_.erase(dbit);
-  }
-  awakened_transactions_.erase(completed_t);
-}
-
-void EngineShard::AddWatched(string_view key, Transaction* me) {
-  DbWatchTable& wt = watched_dbs_[me->db_index()];
-  auto [res, inserted] = wt.queue_map.emplace(key, nullptr);
-  if (inserted) {
-    res->second.reset(new WatchQueue);
-  }
-
-  res->second->items.emplace_back(me);
-}
-
-// Runs in O(N) complexity.
-bool EngineShard::RemovedWatched(string_view key, Transaction* me) {
-  auto dbit = watched_dbs_.find(me->db_index());
-  CHECK(dbit != watched_dbs_.end());
-
-  DbWatchTable& wt = dbit->second;
-  auto watch_it = wt.queue_map.find(key);
-  CHECK(watch_it != wt.queue_map.end());
-
-  WatchQueue& wq = *watch_it->second;
-  for (auto j = wq.items.begin(); j != wq.items.end(); ++j) {
-    if (j->trans == me) {
-      wq.items.erase(j);
-      if (wq.items.empty()) {
-        if (wt.RemoveEntry(watch_it)) {
-          watched_dbs_.erase(dbit);
-        }
-      }
-      return true;
-    }
-  }
-
-  LOG(FATAL) << "should not happen";
-
-  return false;
-}
-
-void EngineShard::GCWatched(const KeyLockArgs& largs) {
-  auto dbit = watched_dbs_.find(largs.db_index);
-  CHECK(dbit != watched_dbs_.end());
-
-  DbWatchTable& wt = dbit->second;
-
-  for (size_t i = 0; i < largs.args.size(); i += largs.key_step) {
-    string_view key = largs.args[i];
-    auto watch_it = wt.queue_map.find(key);
-    CHECK(watch_it != wt.queue_map.end());
-
-    WatchQueue& wq = *watch_it->second;
-    DCHECK(!wq.items.empty());
-    do {
-      auto local_mask = wq.items.front().trans->GetLocalMask(shard_id());
-      if ((local_mask & Transaction::EXPIRED_Q) == 0) {
-        break;
-      }
-      wq.items.pop_front();
-    } while (!wq.items.empty());
-
-    if (wq.items.empty()) {
-      if (wt.RemoveEntry(watch_it)) {
-        watched_dbs_.erase(dbit);
-        return;
-      }
-    }
-  }
-}
-
-// Called from commands like lpush.
-void EngineShard::AwakeWatched(DbIndex db_index, string_view db_key) {
-  auto it = watched_dbs_.find(db_index);
-  if (it == watched_dbs_.end())
-    return;
-
-  DbWatchTable& wt = it->second;
-  DCHECK(!wt.queue_map.empty());
-
-  auto wit = wt.queue_map.find(db_key);
-
-  if (wit == wt.queue_map.end())
-    return;  /// Similarly, nobody watches this key.
-
-  string_view key = wit->first;
-
-  // Already awakened this key.
-  if (wt.awakened_keys.find(key) != wt.awakened_keys.end())
-    return;
-
-  wt.awakened_keys.insert(wit->first);
-  awakened_indices_.insert(db_index);
-}
-
 void EngineShard::ShutdownMulti(Transaction* multi) {
   if (continuation_trans_ == multi) {
     continuation_trans_ = nullptr;
   }
-  OnTxFinish();
+  if (blocking_controller_)
+    blocking_controller_->OnTxFinish();
 }
 
-void EngineShard::WaitForConvergence(TxId notifyid, Transaction* t) {
-  DVLOG(1) << "ConvergeNotification " << t->DebugId() << " at notify " << notifyid;
-  waiting_convergence_.emplace(notifyid, t);
-}
-
-void EngineShard::OnTxFinish() {
-  DCHECK(continuation_trans_ == nullptr);  // By definition of OnTxFinish.
-
-  if (waiting_convergence_.empty())
-    return;
-
-  if (txq_.Empty()) {
-    for (const auto& k_v : waiting_convergence_) {
-      NotifyConvergence(k_v.second);
-    }
-    waiting_convergence_.clear();
-    return;
-  }
-
-  TxId txq_score = txq_.HeadScore();
-  do {
-    auto tx_waiting = waiting_convergence_.begin();
-
-    // Instead of taking the map key, we use upto date notify_txid
-    // That could meanwhile improve. Not important though.
-    TxId notifyid = tx_waiting->second->notify_txid();
-    if (notifyid > committed_txid_ && txq_score <= tx_waiting->first)
-      break;
-    auto nh = waiting_convergence_.extract(tx_waiting);
-    NotifyConvergence(nh.mapped());
-  } while (!waiting_convergence_.empty());
-}
-
-void EngineShard::NotifyConvergence(Transaction* tx) {
-  LOG(FATAL) << "TBD";
-}
-
+#if 0
 // There are several cases that contain proof of convergence for this shard:
 // 1. txq_ empty - it means that anything that is goonna be scheduled will already be scheduled
 //    with txid > notifyid.
@@ -499,15 +254,35 @@ void EngineShard::NotifyConvergence(Transaction* tx) {
 //    notifyid.
 // 3. committed_txid_ == notifyid, then if a transaction in progress (continuation_trans_ != NULL)
 //    the this transaction can still affect the result, hence we require continuation_trans_ is null
-//    which will point to converged result @notifyid.
-// 4. Finally with committed_txid_ < notifyid and continuation_trans_ == nullptr,
+//    which will point to converged result @notifyid. However, we never awake a transaction
+//    when there is a multi-hop transaction in progress to avoid false positives.
+//    Therefore, continuation_trans_ must always be null when calling this function.
+// 4. Finally with committed_txid_ < notifyid.
 //    we can check if the next in line (HeadScore) is after notifyid in that case we can also
 //    conclude regarding the result convergence for this shard.
+//
 bool EngineShard::HasResultConverged(TxId notifyid) const {
-  return txq_.Empty() || committed_txid_ > notifyid ||
-         (continuation_trans_ == nullptr &&
-          (committed_txid_ == notifyid || txq_.HeadScore() > notifyid));
+  CHECK(continuation_trans_ == nullptr);
+
+  if (committed_txid_ >= notifyid)
+    return true;
+
+  // This could happen if a single lpush (not in transaction) woke multi-shard blpop.
+  DVLOG(1) << "HasResultConverged: cmtxid - " << committed_txid_ << " vs " << notifyid;
+
+  // We must check for txq head - it's not an optimization - we need it for correctness.
+  // If a multi-transaction has been scheduled and it does not have any presence in
+  // this shard (no actual keys) and we won't check for it HasResultConverged will
+  // return false. The blocked transaction will wait for this shard to progress and
+  // will also block other shards from progressing (where it has been notified).
+  // If this multi-transaction has presence in those shards, it won't progress there as well.
+  // Therefore, we will get a deadlock. By checking txid of the head we will avoid this situation:
+  // if the head.txid is after notifyid then this shard obviously converged.
+  // if the head.txid <= notifyid that transaction will be able to progress in other shards.
+  // and we must wait for it to finish.
+  return txq_.Empty() || txq_.HeadScore() > notifyid;
 }
+#endif
 
 void EngineShard::CacheStats() {
 #if 0
@@ -540,6 +315,13 @@ void EngineShard::CacheStats() {
 
 size_t EngineShard::UsedMemory() const {
   return mi_resource_.used() + zmalloc_used_memory_tl + SmallString::UsedThreadLocal();
+}
+
+void EngineShard::AddBlocked(Transaction* trans) {
+  if (!blocking_controller_) {
+    blocking_controller_.reset(new BlockingController(this));
+  }
+  blocking_controller_->AddWatched(trans);
 }
 
 /**

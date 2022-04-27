@@ -13,6 +13,7 @@ extern "C" {
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
+#include "server/blocking_controller.h"
 #include "server/error.h"
 #include "server/transaction.h"
 #include "util/varz.h"
@@ -155,8 +156,8 @@ OpStatus Renamer::UpdateDest(Transaction* t, EngineShard* es) {
       dest_it = db_slice.AddNew(db_indx_, dest_key, std::move(pv_), src_res_.expire_ts);
     }
 
-    if (!is_prior_list && dest_it->second.ObjType() == OBJ_LIST) {
-      es->AwakeWatched(db_indx_, dest_key);
+    if (!is_prior_list && dest_it->second.ObjType() == OBJ_LIST && es->blocking_controller()) {
+      es->blocking_controller()->AwakeWatched(db_indx_, dest_key);
     }
   }
 
@@ -580,7 +581,8 @@ OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, ArgSlice keys)
 
 OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key, string_view to_key,
                                     bool skip_exists) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto* es = op_args.shard;
+  auto& db_slice = es->db_slice();
   auto [from_it, from_expire] = db_slice.FindExt(op_args.db_ind, from_key);
   if (!IsValid(from_it))
     return OpStatus::KEY_NOTFOUND;
@@ -619,8 +621,8 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     to_it = db_slice.AddNew(op_args.db_ind, to_key, std::move(from_obj), exp_ts);
   }
 
-  if (!is_prior_list && to_it->second.ObjType() == OBJ_LIST) {
-    op_args.shard->AwakeWatched(op_args.db_ind, to_key);
+  if (!is_prior_list && to_it->second.ObjType() == OBJ_LIST && es->blocking_controller()) {
+    es->blocking_controller()->AwakeWatched(op_args.db_ind, to_key);
   }
   return OpStatus::OK;
 }

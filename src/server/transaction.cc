@@ -7,6 +7,7 @@
 #include <absl/strings/match.h>
 
 #include "base/logging.h"
+#include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
@@ -410,7 +411,8 @@ bool Transaction::RunInShard(EngineShard* shard) {
       // 1: to go over potential wakened keys, verify them and activate watch queues.
       // 2: if this transaction was notified and finished running - to remove it from the head
       //    of the queue and notify the next one.
-      shard->ProcessAwakened(awaked_prerun ? this : nullptr);
+      if (shard->blocking_controller())
+        shard->blocking_controller()->RunStep(awaked_prerun ? this : nullptr);
     }
   }
 
@@ -444,7 +446,7 @@ void Transaction::RunNoop(EngineShard* shard) {
 
     if (sd.local_mask & SUSPENDED_Q) {
       sd.local_mask |= EXPIRED_Q;
-      shard->GCWatched(largs);
+      shard->blocking_controller()->RemoveWatched(this);
     }
   }
   // Decrease run count after we update all the data in the transaction object.
@@ -517,7 +519,7 @@ void Transaction::ScheduleInternal() {
     DVLOG(1) << "Cancelling " << DebugId();
 
     auto cancel = [&](EngineShard* shard) {
-      success.fetch_sub(CancelInShard(shard), memory_order_relaxed);
+      success.fetch_sub(CancelShardCb(shard), memory_order_relaxed);
     };
 
     ess_->RunBriefInParallel(std::move(cancel), is_active);
@@ -645,7 +647,8 @@ void Transaction::UnlockMulti() {
     shard->ShutdownMulti(this);
 
     // notify awakened transactions.
-    shard->ProcessAwakened(nullptr);
+    if (shard->blocking_controller())
+      shard->blocking_controller()->RunStep(nullptr);
     shard->PollExecution("unlockmulti", nullptr);
 
     this->DecreaseRunCnt();
@@ -665,6 +668,8 @@ void Transaction::UnlockMulti() {
 
 // Runs in coordinator thread.
 void Transaction::Execute(RunnableType cb, bool conclude) {
+  DCHECK(coordinator_state_ & COORD_SCHED);
+
   cb_ = std::move(cb);
   coordinator_state_ |= COORD_EXEC;
 
@@ -730,7 +735,7 @@ void Transaction::ExecuteAsync() {
     uint32_t seq_after = seqlock_.fetch_add(0, memory_order_release);
     bool should_poll = (seq_after == seq) && (local_mask & ARMED);
 
-    DVLOG(2) << "EngineShard::Exec " << DebugId() << " sid:" << shard->shard_id() << " "
+    DVLOG(2) << "PollExecCb " << DebugId() << " sid(" << shard->shard_id() << ") "
              << run_count_.load(memory_order_relaxed) << ", should_poll: " << should_poll;
 
     // We verify that this callback is still relevant.
@@ -790,42 +795,25 @@ void Transaction::RunQuickie(EngineShard* shard) {
 }
 
 // runs in coordinator thread.
-// Marks the transaction as expired but does not remove it from the waiting queue.
+// Marks the transaction as expired and removes it from the waiting queue.
 void Transaction::ExpireBlocking() {
   DVLOG(1) << "ExpireBlocking " << DebugId();
   DCHECK(!IsGlobal());
 
   run_count_.store(unique_shard_cnt_, memory_order_release);
 
-  auto expire_cb = [this] {
-    EngineShard* shard = EngineShard::tlocal();
-
-    auto lock_args = GetLockArgs(shard->shard_id());
-    shard->db_slice().Release(Mode(), lock_args);
-
-    unsigned sd_idx = SidToId(shard->shard_id());
-    auto& sd = shard_data_[sd_idx];
-    sd.local_mask |= EXPIRED_Q;
-    sd.local_mask &= ~KEYLOCK_ACQUIRED;
-
-    // Need to see why I decided to call this.
-    // My guess - probably to trigger the run of stalled transactions in case
-    // this shard concurrently awoke this transaction and stalled the processing
-    // of TxQueue.
-    shard->PollExecution("expirecb", nullptr);
-
-    CHECK_GE(DecreaseRunCnt(), 1u);
-  };
+  auto expire_cb = [this] { ExpireShardCb(EngineShard::tlocal()); };
 
   if (unique_shard_cnt_ == 1) {
     DCHECK_LT(unique_shard_id_, ess_->size());
-    ess_->Add(unique_shard_id_, std::move(expire_cb));
+    ess_->Add(unique_shard_id_, move(expire_cb));
   } else {
     for (ShardId i = 0; i < shard_data_.size(); ++i) {
       auto& sd = shard_data_[i];
       DCHECK_EQ(0, sd.local_mask & ARMED);
       if (sd.arg_count == 0)
         continue;
+
       ess_->Add(i, expire_cb);
     }
   }
@@ -950,7 +938,7 @@ pair<bool, bool> Transaction::ScheduleInShard(EngineShard* shard) {
   return result;
 }
 
-bool Transaction::CancelInShard(EngineShard* shard) {
+bool Transaction::CancelShardCb(EngineShard* shard) {
   ShardId idx = SidToId(shard->shard_id());
   auto& sd = shard_data_[idx];
 
@@ -1001,17 +989,16 @@ bool Transaction::WaitOnWatch(const time_point& tp) {
   VLOG(2) << "WaitOnWatch Start use_count(" << use_count() << ")";
   using namespace chrono;
 
-  // wake_txid_.store(kuint64max, std::memory_order_relaxed);
-  Execute([](auto* t, auto* shard) { return t->AddToWatchedShardCb(shard); }, true);
+  Execute([](Transaction* t, EngineShard* shard) { return t->AddToWatchedShardCb(shard); }, true);
+
   coordinator_state_ |= COORD_BLOCKED;
-  bool res = true;  // returns false if timeout occurs.
 
   auto wake_cb = [this] {
     return (coordinator_state_ & COORD_CANCELLED) ||
            notify_txid_.load(memory_order_relaxed) != kuint64max;
   };
-  cv_status status = cv_status::no_timeout;
 
+  cv_status status = cv_status::no_timeout;
   if (tp == time_point::max()) {
     DVLOG(1) << "WaitOnWatch foreva " << DebugId();
     blocking_ec_.await(move(wake_cb));
@@ -1031,20 +1018,14 @@ bool Transaction::WaitOnWatch(const time_point& tp) {
     return false;
   }
 
+#if 0
   // We were notified by a shard, so lets make sure that our notifications converged to a stable
   // form.
   if (unique_shard_cnt_ > 1) {
     run_count_.store(unique_shard_cnt_, memory_order_release);
-    auto converge_cb = [this] {
-      EngineShard* shard = EngineShard::tlocal();
-      auto& sd = shard_data_[shard->shard_id()];
 
-      TxId notify = notify_txid();
-      if ((sd.local_mask & AWAKED_Q) || shard->HasResultConverged(notify)) {
-        CHECK_GE(DecreaseRunCnt(), 1u);
-        return;
-      }
-      shard->WaitForConvergence(notify, this);
+    auto converge_cb = [this] {
+      this->CheckForConvergence(EngineShard::tlocal());
     };
 
     for (ShardId i = 0; i < shard_data_.size(); ++i) {
@@ -1059,11 +1040,12 @@ bool Transaction::WaitOnWatch(const time_point& tp) {
     WaitForShardCallbacks();
     DVLOG(1) << "Convergence finished " << DebugId();
   }
+#endif
 
   // Lift blocking mask.
   coordinator_state_ &= ~COORD_BLOCKED;
 
-  return res;
+  return true;
 }
 
 void Transaction::UnregisterWatch() {
@@ -1082,10 +1064,7 @@ OpStatus Transaction::AddToWatchedShardCb(EngineShard* shard) {
   CHECK_EQ(0, sd.local_mask & SUSPENDED_Q);
   DCHECK_EQ(0, sd.local_mask & ARMED);
 
-  auto args = ShardArgsInShard(shard->shard_id());
-  for (auto s : args) {
-    shard->AddWatched(s, this);
-  }
+  shard->AddBlocked(this);
   sd.local_mask |= SUSPENDED_Q;
   DVLOG(1) << "AddWatched " << DebugId() << " local_mask:" << sd.local_mask;
 
@@ -1106,13 +1085,52 @@ bool Transaction::RemoveFromWatchedShardCb(EngineShard* shard) {
 
   sd.local_mask &= ~kQueueMask;
 
-  // TODO: what if args have keys and values?
-  auto args = ShardArgsInShard(shard->shard_id());
-  for (auto s : args) {
-    shard->RemovedWatched(s, this);
-  }
+  shard->blocking_controller()->RemoveWatched(this);
+
   return true;
 }
+
+void Transaction::ExpireShardCb(EngineShard* shard) {
+  auto lock_args = GetLockArgs(shard->shard_id());
+  shard->db_slice().Release(Mode(), lock_args);
+
+  unsigned sd_idx = SidToId(shard->shard_id());
+  auto& sd = shard_data_[sd_idx];
+  sd.local_mask |= EXPIRED_Q;
+  sd.local_mask &= ~KEYLOCK_ACQUIRED;
+
+  shard->blocking_controller()->RemoveWatched(this);
+
+  // Need to see why I decided to call this.
+  // My guess - probably to trigger the run of stalled transactions in case
+  // this shard concurrently awoke this transaction and stalled the processing
+  // of TxQueue.
+  shard->PollExecution("expirecb", nullptr);
+
+  CHECK_GE(DecreaseRunCnt(), 1u);
+}
+
+#if 0
+// HasResultConverged has detailed documentation on how convergence is determined.
+void Transaction::CheckForConvergence(EngineShard* shard) {
+  unsigned idx = SidToId(shard->shard_id());
+  auto& sd = shard_data_[idx];
+
+  TxId notify = notify_txid();
+
+  if ((sd.local_mask & AWAKED_Q) || shard->HasResultConverged(notify)) {
+    CHECK_GE(DecreaseRunCnt(), 1u);
+    return;
+  }
+
+  LOG(DFATAL) << "TBD";
+
+  BlockingController* bc = shard->blocking_controller();
+  CHECK(bc);  // must be present because we have watched this shard before.
+
+  bc->RegisterAwaitForConverge(this);
+}
+#endif
 
 inline uint32_t Transaction::DecreaseRunCnt() {
   // to protect against cases where Transaction is destroyed before run_ec_.notify
@@ -1132,7 +1150,7 @@ bool Transaction::IsGlobal() const {
 }
 
 // Runs only in the shard thread.
-// Returns true if the transcton has changed its state from suspended to awakened,
+// Returns true if the transacton has changed its state from suspended to awakened,
 // false, otherwise.
 bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid) {
   unsigned idx = SidToId(sid);

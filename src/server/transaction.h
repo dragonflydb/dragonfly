@@ -220,11 +220,13 @@ class Transaction {
   std::pair<bool, bool> ScheduleInShard(EngineShard* shard);
 
   // Returns true if operation was cancelled for this shard. Runs in the shard thread.
-  bool CancelInShard(EngineShard* shard);
+  bool CancelShardCb(EngineShard* shard);
 
   // Shard callbacks used within Execute calls
   OpStatus AddToWatchedShardCb(EngineShard* shard);
   bool RemoveFromWatchedShardCb(EngineShard* shard);
+  void ExpireShardCb(EngineShard* shard);
+  void CheckForConvergence(EngineShard* shard);
 
   void WaitForShardCallbacks() {
     run_ec_.await([this] { return 0 == run_count_.load(std::memory_order_relaxed); });
@@ -251,7 +253,7 @@ class Transaction {
     // Bitmask of LocalState enums.
     uint16_t local_mask{0};
 
-    // Needed to rollback invalid schedulings or remove OOO transactions from
+    // Needed to rollback inconsistent schedulings or remove OOO transactions from
     // tx queue.
     uint32_t pq_pos = TxQueue::kEnd;
 

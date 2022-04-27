@@ -1,7 +1,8 @@
 add_executable(dragonfly dfly_main.cc)
 cxx_link(dragonfly base dragonfly_lib)
 
-add_library(dragonfly_lib channel_slice.cc command_registry.cc common.cc config_flags.cc
+add_library(dragonfly_lib blocking_controller.cc channel_slice.cc command_registry.cc 
+            common.cc config_flags.cc
             conn_context.cc db_slice.cc debugcmd.cc
             engine_shard_set.cc generic_family.cc hset_family.cc io_mgr.cc
             list_family.cc main_service.cc  rdb_load.cc rdb_save.cc replica.cc
@@ -22,7 +23,7 @@ cxx_test(set_family_test dfly_test_lib LABELS DFLY)
 cxx_test(string_family_test dfly_test_lib LABELS DFLY)
 cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/redis6_small.rdb LABELS DFLY)
 cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
-
+cxx_test(blocking_controller_test dragonfly_lib LABELS DFLY)
 
 add_custom_target(check_dfly WORKING_DIRECTORY .. COMMAND ctest -L DFLY)
 add_dependencies(check_dfly dragonfly_test list_family_test

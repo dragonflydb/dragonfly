@@ -11,6 +11,8 @@ extern "C" {
 #include <absl/strings/numbers.h>
 
 #include "base/logging.h"
+
+#include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
@@ -146,7 +148,6 @@ BPopper::BPopper(ListDir dir) : dir_(dir) {
 }
 
 OpStatus BPopper::Run(Transaction* t, unsigned msec) {
-  OpResult<Transaction::FindFirstResult> result;
   using time_point = Transaction::time_point;
 
   time_point tp =
@@ -158,19 +159,11 @@ OpStatus BPopper::Run(Transaction* t, unsigned msec) {
 
   auto* stats = ServerState::tl_connection_stats();
 
-  while (true) {
-    result = t->FindFirst();
+  OpResult<Transaction::FindFirstResult> result = t->FindFirst();
 
-    if (result)
-      break;
-
-    if (result.status() != OpStatus::KEY_NOTFOUND) {  // Some error occurred.
-      // We could be registered in the queue due to previous iterations.
-      t->UnregisterWatch();
-      break;
-    }
-
+  if (result.status() == OpStatus::KEY_NOTFOUND) {
     if (is_multi) {
+      // close transaction and return.
       auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
       t->Execute(std::move(cb), true);
 
@@ -183,10 +176,14 @@ OpStatus BPopper::Run(Transaction* t, unsigned msec) {
 
     if (!wait_succeeded)
       return OpStatus::TIMED_OUT;
+
+    result = t->FindFirst();  // retry - must find something.
   }
 
-  if (!result)
+  if (!result) {
+    t->UnregisterWatch();
     return result.status();
+  }
 
   VLOG(1) << "Popping an element";
   find_sid_ = result->sid;
@@ -546,11 +543,10 @@ OpResult<uint32_t> ListFamily::OpPush(const OpArgs& op_args, std::string_view ke
     quicklistPush(ql, es->tmp_str1, sdslen(es->tmp_str1), pos);
   }
 
-  if (new_key) {
-    // TODO: to use PrimeKey for watched table.
+  if (new_key && es->blocking_controller()) {
     string tmp;
     string_view key = it->first.GetSlice(&tmp);
-    es->AwakeWatched(op_args.db_ind, key);
+    es->blocking_controller()->AwakeWatched(op_args.db_ind, key);
   } else {
     es->db_slice().PostUpdate(op_args.db_ind, it);
   }

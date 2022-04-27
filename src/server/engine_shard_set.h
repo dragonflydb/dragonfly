@@ -25,6 +25,7 @@ extern "C" {
 namespace dfly {
 
 class TieredStorage;
+class BlockingController;
 
 class EngineShard {
  public:
@@ -89,34 +90,9 @@ class EngineShard {
     return &shard_lock_;
   }
 
-  // Iterates over awakened key candidates in each db and moves verified ones into
-  // global verified_awakened_ array.
-  // Returns true if there are active awakened keys, false otherwise.
-  // It has 2 responsibilities.
-  // 1: to go over potential wakened keys, verify them and activate watch queues.
-  // 2: if t is awaked and finished running - to remove it from the head
-  //    of the queue and notify the next one.
-  //    If t is null then second part is omitted.
-  void ProcessAwakened(Transaction* t);
-
-  // Blocking API
-  // TODO: consider moving all watched functions to
-  // EngineShard with separate per db map.
-  //! AddWatched adds a transaction to the blocking queue.
-  void AddWatched(std::string_view key, Transaction* me);
-  bool RemovedWatched(std::string_view key, Transaction* me);
-  void GCWatched(const KeyLockArgs& lock_args);
-
-  void AwakeWatched(DbIndex db_index, std::string_view db_key);
-
-  bool HasAwakedTransaction() const {
-    return !awakened_transactions_.empty();
-  }
 
   // TODO: Awkward interface. I should solve it somehow.
   void ShutdownMulti(Transaction* multi);
-  void WaitForConvergence(TxId notifyid, Transaction* t);
-  bool HasResultConverged(TxId notifyid) const;
 
   void IncQuickRun() {
     stats_.quick_runs++;
@@ -131,8 +107,31 @@ class EngineShard {
 
   TieredStorage* tiered_storage() { return tiered_storage_.get(); }
 
+  // Adds blocked transaction to the watch-list.
+  void AddBlocked(Transaction* trans);
+
+  BlockingController* blocking_controller() {
+    return blocking_controller_.get();
+  }
+
   // for everyone to use for string transformations during atomic cpu sequences.
   sds tmp_str1, tmp_str2;
+
+#if 0
+  size_t TEST_WatchedDbsLen() const {
+    return watched_dbs_.size();
+  }
+
+  size_t TEST_AwakenIndicesLen() const {
+    return awakened_indices_.size();
+  }
+
+  size_t TEST_AwakenTransLen() const {
+    return awakened_transactions_.size();
+  }
+#endif
+
+  bool HasResultConverged(TxId notifyid) const;
 
  private:
   EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap);
@@ -140,35 +139,9 @@ class EngineShard {
   // blocks the calling fiber.
   void Shutdown();  // called before destructing EngineShard.
 
-  struct WatchQueue;
 
-  void OnTxFinish();
-  void NotifyConvergence(Transaction* tx);
   void CacheStats();
 
-  /// Returns the notified transaction,
-  /// or null if all transactions in the queue have expired..
-  Transaction* NotifyWatchQueue(WatchQueue* wq);
-
-  using WatchQueueMap = absl::flat_hash_map<std::string, std::unique_ptr<WatchQueue>>;
-
-  // Watch state per db.
-  struct DbWatchTable {
-    WatchQueueMap queue_map;
-
-    // awakened keys point to blocked keys that can potentially be unblocked.
-    // they reference key objects in queue_map.
-    absl::flat_hash_set<base::string_view_sso> awakened_keys;
-
-    // Returns true if queue_map is empty and DbWatchTable can be removed as well.
-    bool RemoveEntry(WatchQueueMap::iterator it);
-  };
-
-  absl::flat_hash_map<DbIndex, DbWatchTable> watched_dbs_;
-  absl::flat_hash_set<DbIndex> awakened_indices_;
-  absl::flat_hash_set<Transaction*> awakened_transactions_;
-
-  absl::btree_multimap<TxId, Transaction*> waiting_convergence_;
 
   ::util::fibers_ext::FiberQueue queue_;
   ::boost::fibers::fiber fiber_q_;
@@ -188,6 +161,7 @@ class EngineShard {
   uint32_t periodic_task_ = 0;
   uint64_t task_iters_ = 0;
   std::unique_ptr<TieredStorage> tiered_storage_;
+  std::unique_ptr<BlockingController> blocking_controller_;
 
   static thread_local EngineShard* shard_;
 };
