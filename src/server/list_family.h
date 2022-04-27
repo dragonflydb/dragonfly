@@ -35,6 +35,7 @@ class ListFamily {
   static void LRange(CmdArgList args, ConnectionContext* cntx);
   static void LRem(CmdArgList args, ConnectionContext* cntx);
   static void LSet(CmdArgList args, ConnectionContext* cntx);
+  static void RPopLPush(CmdArgList args, ConnectionContext* cntx);
 
   static void PopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cntx);
   static void PushGeneric(ListDir dir, bool skip_notexist, CmdArgList args,
@@ -61,6 +62,8 @@ class ListFamily {
 
   static OpResult<StringVec> OpRange(const OpArgs& op_args, std::string_view key, long start,
                                      long end);
+
+  static OpResult<std::string> OpRPopLPushSingleKey(const OpArgs& op_args, std::string_view key);
 };
 
 }  // namespace dfly

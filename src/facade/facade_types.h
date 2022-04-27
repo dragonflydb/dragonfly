@@ -20,8 +20,8 @@ using CmdArgVec = std::vector<MutableSlice>;
 
 
 struct ConnectionStats {
-  absl::flat_hash_map<std::string, uint64_t> err_count;
-  absl::flat_hash_map<std::string, uint64_t> cmd_count;
+  absl::flat_hash_map<std::string, uint64_t> err_count_map;
+  absl::flat_hash_map<std::string, uint64_t> cmd_count_map;
 
   size_t read_buf_capacity = 0;
   size_t io_read_cnt = 0;

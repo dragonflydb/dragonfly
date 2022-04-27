@@ -57,7 +57,7 @@ void FetchBuilderStats(ConnectionStats* stats, SinkReplyBuilder* builder) {
   stats->io_write_bytes += builder->io_write_bytes();
 
   for (const auto& k_v : builder->err_count()) {
-    stats->err_count[k_v.first] += k_v.second;
+    stats->err_count_map[k_v.first] += k_v.second;
   }
   builder->reset_io_stats();
 }

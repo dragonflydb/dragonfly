@@ -443,7 +443,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   std::move(multi_error).Cancel();
 
-  etl.connection_stats.cmd_count[cmd_name]++;
+  etl.connection_stats.cmd_count_map[cmd_name]++;
 
   if (dfly_cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE && !is_trans_cmd) {
     // TODO: protect against aggregating huge transactions.

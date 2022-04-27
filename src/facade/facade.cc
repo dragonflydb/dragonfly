@@ -36,12 +36,12 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   ADD(num_replicas);
   ADD(num_blocked_clients);
 
-  for (const auto& k_v : o.err_count) {
-    err_count[k_v.first] += k_v.second;
+  for (const auto& k_v : o.err_count_map) {
+    err_count_map[k_v.first] += k_v.second;
   }
 
-  for (const auto& k_v : o.cmd_count) {
-    cmd_count[k_v.first] += k_v.second;
+  for (const auto& k_v : o.cmd_count_map) {
+    cmd_count_map[k_v.first] += k_v.second;
   }
 
   return *this;

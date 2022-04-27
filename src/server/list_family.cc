@@ -11,7 +11,6 @@ extern "C" {
 #include <absl/strings/numbers.h>
 
 #include "base/logging.h"
-
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -236,6 +235,36 @@ void ListFamily::RPushX(CmdArgList args, ConnectionContext* cntx) {
 
 void ListFamily::RPop(CmdArgList args, ConnectionContext* cntx) {
   return PopGeneric(ListDir::RIGHT, std::move(args), cntx);
+}
+
+void ListFamily::RPopLPush(CmdArgList args, ConnectionContext* cntx) {
+  string_view src = ArgS(args, 1);
+  string_view dest = ArgS(args, 2);
+
+  OpResult<string> result;
+  if (dest == src) {
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      return OpRPopLPushSingleKey(OpArgs{shard, t->db_index()}, src);
+    };
+
+    result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  } else {
+    return (*cntx)->SendError("tbd: not_implemented");
+  }
+
+  if (result) {
+    return (*cntx)->SendBulkString(*result);
+  }
+
+  switch (result.status()) {
+    case OpStatus::KEY_NOTFOUND:
+      (*cntx)->SendNull();
+      break;
+
+    default:
+      (*cntx)->SendError(result.status());
+      break;
+  }
 }
 
 void ListFamily::LLen(CmdArgList args, ConnectionContext* cntx) {
@@ -782,6 +811,20 @@ OpResult<StringVec> ListFamily::OpRange(const OpArgs& op_args, std::string_view 
   return str_vec;
 }
 
+OpResult<string> ListFamily::OpRPopLPushSingleKey(const OpArgs& op_args, std::string_view key) {
+  auto& db_slice = op_args.shard->db_slice();
+  auto it_res = db_slice.Find(op_args.db_ind, key, OBJ_LIST);
+  if (!it_res)
+    return it_res.status();
+
+  PrimeIterator it = *it_res;
+  quicklist* ql = GetQL(it->second);
+  db_slice.PreUpdate(op_args.db_ind, it);
+  string val = ListPop(ListDir::RIGHT, ql);
+  quicklistPushHead(ql, val.data(), val.size());
+  return val;
+}
+
 using CI = CommandId;
 
 #define HFUNC(x) SetHandler(&ListFamily::x)
@@ -793,6 +836,7 @@ void ListFamily::Register(CommandRegistry* registry) {
             << CI{"RPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(RPush)
             << CI{"RPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(RPushX)
             << CI{"RPOP", CO::WRITE | CO::FAST | CO::DENYOOM, -2, 1, 1, 1}.HFUNC(RPop)
+            << CI{"RPOPLPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, 3, 1, 2, 1}.HFUNC(RPopLPush)
             << CI{"BLPOP", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING, -3, 1, -2, 1}.HFUNC(BLPop)
             << CI{"BRPOP", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING, -3, 1, -2, 1}.HFUNC(BRPop)
             << CI{"LLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(LLen)

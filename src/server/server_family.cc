@@ -343,6 +343,15 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
     string_view res[2] = {param, "tbd"};
 
     return (*cntx)->SendStringArr(res);
+  } else if (sub_cmd == "RESETSTAT") {
+    ess_.pool()->Await([](auto*) {
+      auto* stats = ServerState::tl_connection_stats();
+      stats->cmd_count_map.clear();
+      stats->err_count_map.clear();
+      stats->command_cnt = 0;
+      stats->async_writes_cnt = 0;
+    });
+    return (*cntx)->SendOk();
   } else {
     string err = StrCat("Unknown subcommand or wrong number of arguments for '", sub_cmd,
                         "'. Try CONFIG HELP.");
@@ -561,14 +570,14 @@ tcp_port:)";
       append(StrCat("unknown_", k_v.first, ":"), k_v.second);
     }
 
-    for (const auto& k_v : m.conn_stats.cmd_count) {
+    for (const auto& k_v : m.conn_stats.cmd_count_map) {
       append(StrCat("cmd_", k_v.first, ":"), k_v.second);
     }
   }
 
   if (should_enter("ERRORSTATS", true)) {
     ADD_HEADER("# Errorstats");
-    for (const auto& k_v : m.conn_stats.err_count) {
+    for (const auto& k_v : m.conn_stats.err_count_map) {
       append(StrCat(k_v.first, ":"), k_v.second);
     }
   }
