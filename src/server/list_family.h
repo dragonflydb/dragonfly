@@ -43,12 +43,6 @@ class ListFamily {
 
   static void BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cntx);
 
-  static OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,
-                                   bool skip_notexist, absl::Span<std::string_view> vals);
-
-  static OpResult<StringVec> OpPop(const OpArgs& op_args, std::string_view key, ListDir dir,
-                                   uint32_t count);
-
   static OpResult<uint32_t> OpLen(const OpArgs& op_args, std::string_view key);
   static OpResult<std::string> OpIndex(const OpArgs& op_args, std::string_view key, long index);
   static OpResult<int> OpInsert(const OpArgs& op_args, std::string_view key, std::string_view pivot,
@@ -63,8 +57,6 @@ class ListFamily {
   static OpResult<StringVec> OpRange(const OpArgs& op_args, std::string_view key, long start,
                                      long end);
 
-  static OpResult<std::string> OpRPopLPushSingleShard(const OpArgs& op_args, std::string_view src,
-                                                      std::string_view dest);
 };
 
 }  // namespace dfly
