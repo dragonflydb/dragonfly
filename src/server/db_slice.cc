@@ -202,7 +202,7 @@ pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, string_view
   return make_pair(it, ExpireIterator{});
 }
 
-OpResult<pair<PrimeIterator, unsigned>> DbSlice::FindFirst(DbIndex db_index, const ArgSlice& args) {
+OpResult<pair<PrimeIterator, unsigned>> DbSlice::FindFirst(DbIndex db_index, ArgSlice args) {
   DCHECK(!args.empty());
 
   for (unsigned i = 0; i < args.size(); ++i) {

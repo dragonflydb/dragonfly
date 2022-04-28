@@ -63,7 +63,8 @@ class ListFamily {
   static OpResult<StringVec> OpRange(const OpArgs& op_args, std::string_view key, long start,
                                      long end);
 
-  static OpResult<std::string> OpRPopLPushSingleKey(const OpArgs& op_args, std::string_view key);
+  static OpResult<std::string> OpRPopLPushSingleShard(const OpArgs& op_args, std::string_view src,
+                                                      std::string_view dest);
 };
 
 }  // namespace dfly

@@ -124,9 +124,9 @@ class DbSlice {
   // Returns (value, expire) dict entries if key exists, null if it does not exist or has expired.
   std::pair<PrimeIterator, ExpireIterator> FindExt(DbIndex db_ind, std::string_view key) const;
 
-  // Returns dictEntry, args-index if found, KEY_NOTFOUND otherwise.
+  // Returns (iterator, args-index) if found, KEY_NOTFOUND otherwise.
   // If multiple keys are found, returns the first index in the ArgSlice.
-  OpResult<std::pair<PrimeIterator, unsigned>> FindFirst(DbIndex db_index, const ArgSlice& args);
+  OpResult<std::pair<PrimeIterator, unsigned>> FindFirst(DbIndex db_index, ArgSlice args);
 
   // Return .second=true if insertion ocurred, false if we return the existing key.
   std::pair<PrimeIterator, bool> AddOrFind(DbIndex db_ind, std::string_view key);

@@ -186,17 +186,6 @@ class Transaction {
   //! Runs in the shard thread.
   KeyLockArgs GetLockArgs(ShardId sid) const;
 
-  // TODO: iterators do not survive between hops.
-  // It could happen that FindFirst returns a result but then a different transaction
-  // grows the table and invalidates find_res. We should return a key, unfortunately,
-  // and not the iterator.
-  struct FindFirstResult {
-    PrimeIterator find_res;
-    ShardId sid = kInvalidSid;
-  };
-
-  OpResult<FindFirstResult> FindFirst();
-
  private:
   unsigned SidToId(ShardId sid) const {
     return sid < shard_data_.size() ? sid : 0;
@@ -242,8 +231,6 @@ class Transaction {
   uint32_t use_count() const {
     return use_count_.load(std::memory_order_relaxed);
   }
-
-  struct FindFirstProcessor;
 
   struct PerShardData {
     uint32_t arg_start = 0;  // Indices into args_ array.
