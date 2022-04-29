@@ -211,16 +211,6 @@ void BlockingController::AwakeWatched(DbIndex db_index, string_view db_key) {
   }
 }
 
-void BlockingController::RegisterAwaitForConverge(Transaction* t) {
-  TxId notify_id = t->notify_txid();
-
-  DVLOG(1) << "RegisterForConverge " << t->DebugId() << " at notify " << notify_id;
-
-  // t->notify_txid might improve in parallel. it does not matter since convergence
-  // will happen even with stale notify_id.
-  waiting_convergence_.emplace(notify_id, t);
-}
-
 // Internal function called from ProcessAwakened().
 // Marks the queue as active and notifies the first transaction in the queue.
 void BlockingController::NotifyWatchQueue(WatchQueue* wq) {
@@ -244,6 +234,8 @@ void BlockingController::NotifyWatchQueue(WatchQueue* wq) {
     }
   } while (!queue.empty());
 }
+
+#if 0
 
 void BlockingController::OnTxFinish() {
   VLOG(1) << "OnTxFinish [" << owner_->shard_id() << "]";
@@ -276,9 +268,17 @@ void BlockingController::OnTxFinish() {
   } while (!waiting_convergence_.empty());
 }
 
-void BlockingController::NotifyConvergence(Transaction* tx) {
-  LOG(FATAL) << "TBD";
+
+void BlockingController::RegisterAwaitForConverge(Transaction* t) {
+  TxId notify_id = t->notify_txid();
+
+  DVLOG(1) << "RegisterForConverge " << t->DebugId() << " at notify " << notify_id;
+
+  // t->notify_txid might improve in parallel. it does not matter since convergence
+  // will happen even with stale notify_id.
+  waiting_convergence_.emplace(notify_id, t);
 }
+#endif
 
 size_t BlockingController::NumWatched(DbIndex db_indx) const {
   auto it = watched_dbs_.find(db_indx);

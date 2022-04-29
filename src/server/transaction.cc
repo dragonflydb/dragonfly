@@ -543,56 +543,11 @@ void Transaction::UnlockMulti() {
     sharded_keys[sid].push_back(k_v);
   }
 
-  auto cb = [&] {
-    EngineShard* shard = EngineShard::tlocal();
-
-    if (multi_->multi_opts & CO::GLOBAL_TRANS) {
-      shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
-    }
-
-    ShardId sid = shard->shard_id();
-    for (const auto& k_v : sharded_keys[sid]) {
-      auto release = [&](IntentLock::Mode mode) {
-        if (k_v.second.cnt[mode]) {
-          shard->db_slice().Release(mode, this->db_index_, k_v.first, k_v.second.cnt[mode]);
-        }
-      };
-
-      release(IntentLock::SHARED);
-      release(IntentLock::EXCLUSIVE);
-    }
-
-    auto& sd = shard_data_[SidToId(shard->shard_id())];
-
-    // It does not have to be that all shards in multi transaction execute this tx.
-    // Hence it could stay in the tx queue. We perform the necessary cleanup and remove it from
-    // there.
-    if (sd.pq_pos != TxQueue::kEnd) {
-      DVLOG(1) << "unlockmulti: TxPopFront " << DebugId();
-
-      TxQueue* txq = shard->txq();
-      DCHECK(!txq->Empty());
-      Transaction* trans = absl::get<Transaction*>(txq->Front());
-      DCHECK(trans == this);
-      txq->PopFront();
-      sd.pq_pos = TxQueue::kEnd;
-    }
-
-    shard->ShutdownMulti(this);
-
-    // notify awakened transactions.
-    if (shard->blocking_controller())
-      shard->blocking_controller()->RunStep(nullptr);
-    shard->PollExecution("unlockmulti", nullptr);
-
-    this->DecreaseRunCnt();
-  };
-
   uint32_t prev = run_count_.fetch_add(shard_data_.size(), memory_order_relaxed);
   DCHECK_EQ(prev, 0u);
 
   for (ShardId i = 0; i < shard_data_.size(); ++i) {
-    ess_->Add(i, cb);
+    ess_->Add(i, [&] { UnlockMultiShardCb(sharded_keys, EngineShard::tlocal()); });
   }
   WaitForShardCallbacks();
   DCHECK_GE(use_count(), 1u);
@@ -1042,6 +997,49 @@ void Transaction::ExpireShardCb(EngineShard* shard) {
   shard->PollExecution("expirecb", nullptr);
 
   CHECK_GE(DecreaseRunCnt(), 1u);
+}
+
+void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard) {
+  if (multi_->multi_opts & CO::GLOBAL_TRANS) {
+    shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
+  }
+
+  ShardId sid = shard->shard_id();
+  for (const auto& k_v : sharded_keys[sid]) {
+    auto release = [&](IntentLock::Mode mode) {
+      if (k_v.second.cnt[mode]) {
+        shard->db_slice().Release(mode, db_index_, k_v.first, k_v.second.cnt[mode]);
+      }
+    };
+
+    release(IntentLock::SHARED);
+    release(IntentLock::EXCLUSIVE);
+  }
+
+  auto& sd = shard_data_[SidToId(shard->shard_id())];
+
+  // It does not have to be that all shards in multi transaction execute this tx.
+  // Hence it could stay in the tx queue. We perform the necessary cleanup and remove it from
+  // there.
+  if (sd.pq_pos != TxQueue::kEnd) {
+    DVLOG(1) << "unlockmulti: TxPopFront " << DebugId();
+
+    TxQueue* txq = shard->txq();
+    DCHECK(!txq->Empty());
+    Transaction* trans = absl::get<Transaction*>(txq->Front());
+    DCHECK(trans == this);
+    txq->PopFront();
+    sd.pq_pos = TxQueue::kEnd;
+  }
+
+  shard->ShutdownMulti(this);
+
+  // notify awakened transactions.
+  if (shard->blocking_controller())
+    shard->blocking_controller()->RunStep(nullptr);
+  shard->PollExecution("unlockmulti", nullptr);
+
+  this->DecreaseRunCnt();
 }
 
 #if 0

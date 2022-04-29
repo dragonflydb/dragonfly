@@ -44,9 +44,9 @@ class BlockingController {
   // Called from operations that create keys like lpush, rename etc.
   void AwakeWatched(DbIndex db_index, std::string_view db_key);
 
-  void OnTxFinish();
+  // void OnTxFinish();
 
-  void RegisterAwaitForConverge(Transaction* t);
+  // void RegisterAwaitForConverge(Transaction* t);
 
   size_t NumWatched(DbIndex db_indx) const;
 
@@ -60,7 +60,7 @@ class BlockingController {
   /// or null if all transactions in the queue have expired..
   void NotifyWatchQueue(WatchQueue* wq);
 
-  void NotifyConvergence(Transaction* tx);
+  // void NotifyConvergence(Transaction* tx);
 
   EngineShard* owner_;
 
@@ -75,6 +75,6 @@ class BlockingController {
   // could awaken arbitrary number of keys.
   absl::flat_hash_set<Transaction*> awakened_transactions_;
 
-  absl::btree_multimap<TxId, Transaction*> waiting_convergence_;
+  // absl::btree_multimap<TxId, Transaction*> waiting_convergence_;
 };
 }  // namespace dfly

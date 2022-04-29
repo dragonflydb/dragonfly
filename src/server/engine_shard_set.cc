@@ -143,8 +143,6 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
       DVLOG(1) << "RunContTrans: " << continuation_trans_->DebugId() << " keep: " << to_keep;
       if (!to_keep) {
         continuation_trans_ = nullptr;
-        if (blocking_controller_)
-          blocking_controller_->OnTxFinish();
       }
     }
   }
@@ -196,9 +194,6 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
         continuation_trans_ = head;
         break;
       }
-
-      if (blocking_controller_)
-        blocking_controller_->OnTxFinish();
     }       // while(!txq_.Empty())
   } else {  // if (continuation_trans_ == nullptr && !has_awaked_trans)
     DVLOG(1) << "Skipped TxQueue " << continuation_trans_ << " " << has_awaked_trans;
@@ -242,8 +237,6 @@ void EngineShard::ShutdownMulti(Transaction* multi) {
   if (continuation_trans_ == multi) {
     continuation_trans_ = nullptr;
   }
-  if (blocking_controller_)
-    blocking_controller_->OnTxFinish();
 }
 
 #if 0

@@ -187,6 +187,13 @@ class Transaction {
   KeyLockArgs GetLockArgs(ShardId sid) const;
 
  private:
+
+  struct LockCnt {
+    unsigned cnt[2] = {0, 0};
+  };
+
+  using KeyList = std::vector<std::pair<std::string_view, LockCnt>>;
+
   unsigned SidToId(ShardId sid) const {
     return sid < shard_data_.size() ? sid : 0;
   }
@@ -215,7 +222,7 @@ class Transaction {
   OpStatus AddToWatchedShardCb(EngineShard* shard);
   bool RemoveFromWatchedShardCb(EngineShard* shard);
   void ExpireShardCb(EngineShard* shard);
-  void CheckForConvergence(EngineShard* shard);
+  void UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard);
 
   void WaitForShardCallbacks() {
     run_ec_.await([this] { return 0 == run_count_.load(std::memory_order_relaxed); });
@@ -251,9 +258,6 @@ class Transaction {
   };
   enum { kPerShardSize = sizeof(PerShardData) };
 
-  struct LockCnt {
-    unsigned cnt[2] = {0, 0};
-  };
 
   struct Multi {
     absl::flat_hash_map<std::string_view, LockCnt> locks;
