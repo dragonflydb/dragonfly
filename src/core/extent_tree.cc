@@ -66,45 +66,54 @@ optional<pair<size_t, size_t>> ExtentTree::GetRange(size_t len, size_t align) {
   auto it = len_extents_.lower_bound(pair{len, 0});
   if (it == len_extents_.end())
     return nullopt;
+
   size_t amask = align - 1;
-  size_t aligned_start = 0;
+  size_t aligned_start = it->second;
+  size_t extent_end = it->first + it->second;
 
   while (true) {
-    aligned_start = it->second;
-    if ((aligned_start & amask) == 0)
+    if ((aligned_start & amask) == 0)  // aligned
       break;
-    size_t end = it->first + aligned_start;
+
     // round up to the next aligned address
-    aligned_start = align + (aligned_start & (~amask));
-    if (aligned_start + len <= end)
+    aligned_start = (aligned_start + amask) & (~amask);
+
+    if (aligned_start + len <= extent_end)  // check if we still inside the extent
       break;
     ++it;
 
     if (it == len_extents_.end())
       return nullopt;
+
+    aligned_start = it->second;
+    extent_end = it->first + it->second;
   }
 
   DCHECK_GE(aligned_start, it->second);
+
   // if we are here - we found the range starting at aligned_start.
+  // now we need to possibly break the existing extent to several parts or completely
+  // delete it.
   auto eit = extents_.find(it->second);
   DCHECK(eit != extents_.end());
-  size_t end = eit->second;
   size_t range_end = aligned_start + len;
 
   len_extents_.erase(it);
 
-  // we break the interval [eit->first, eit->second] to either 0, 1 or 2 intervals.
-  if (aligned_start > eit->first) {
+  // we break the extent [eit->first, eit->second] to either 0, 1 or 2 intervals.
+  if (aligned_start > eit->first) {  // do we have prefix?
     eit->second = aligned_start;
     len_extents_.emplace(eit->second - eit->first, eit->first);
   } else {
     extents_.erase(eit);
   }
 
-  if (aligned_start + len < end) {
-    extents_.emplace(range_end, end);
-    len_extents_.emplace(end - range_end, range_end);
+  if (range_end < extent_end) {  // do we have suffix?
+    extents_.emplace(range_end, extent_end);
+    len_extents_.emplace(extent_end - range_end, range_end);
   }
+
+  DCHECK_EQ(range_end - aligned_start, len);
 
   return pair{aligned_start, range_end};
 }

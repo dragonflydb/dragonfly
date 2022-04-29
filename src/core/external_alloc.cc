@@ -23,6 +23,11 @@ constexpr inline size_t divup(size_t num, size_t div) {
   return (num + div - 1) / div;
 }
 
+constexpr inline size_t alignup(size_t num, size_t align) {
+  size_t amask = align - 1;
+  return (num + amask) & (~amask);
+}
+
 constexpr inline size_t wsize_from_size(size_t size) {
   return divup(size, sizeof(uintptr_t));
 }
@@ -33,20 +38,23 @@ constexpr size_t kSmallPageShift = 21;
 constexpr size_t kMediumPageShift = 24;
 constexpr size_t kSmallPageSize = 1UL << kSmallPageShift;    // 2MB
 constexpr size_t kMediumPageSize = 1UL << kMediumPageShift;  // 16MB
-constexpr size_t kMediumObjMaxSize = kMediumPageSize / 8;
+
+// we preserve 16:1 ratio, i.e. each page can host at least 16 blocks within its class.
+constexpr size_t kSmallObjMaxSize = kSmallPageSize / 16;
+constexpr size_t kMediumObjMaxSize = kMediumPageSize / 16;
 
 constexpr size_t kSegmentAlignment = 256_MB;
-constexpr size_t kSegmentDefaultSize = 256_MB;
+constexpr size_t kSegmentSize = 256_MB;
 
 constexpr unsigned kNumBins = detail::kNumFreePages;
 constexpr unsigned kLargeSizeBin = kNumBins - 1;
-constexpr unsigned kMaxPagesInSegment = kSegmentDefaultSize / kSmallPageSize;
+constexpr unsigned kMaxPagesInSegment = kSegmentSize / kSmallPageSize;
 constexpr unsigned kSegDescrAlignment = 8_KB;
 
 constexpr size_t kBinWordLens[kNumBins] = {
-    1024,  1024 * 2, 1024 * 3, 4096,   5120,   6144,   7168,   8192,   10240,     12288,
-    14336, 16384,    20480,    24576,  28672,  32768,  40960,  49152,  57344,     65536,
-    81920, 98304,    114688,   131072, 163840, 196608, 229376, 262144, UINT64_MAX};
+    1024,  1024 * 2, 1024 * 3, 4096,  5120,   6144,   7168,      8192,  10240,
+    12288, 14336,    16384,    20480, 24576,  28672,  32768,     40960, 49152,
+    57344, 65536,    81920,    98304, 114688, 131072, UINT64_MAX};
 
 static_assert(kBinWordLens[kLargeSizeBin - 1] * 8 == kMediumObjMaxSize);
 static_assert(kBinWordLens[kLargeSizeBin] == UINT64_MAX);
@@ -81,16 +89,6 @@ static_assert(ToBinIdx(kMinBlockSize * 6) == 5);
 static_assert(ToBinIdx(kMinBlockSize * 6 + 1) == 6);
 static_assert(ToBinIdx(kMinBlockSize * 7) == 6);
 
-// we preserve 8:1 ratio, i.e. each page can host at least 8 blocks within its class.
-PageClass ClassFromSize(size_t size) {
-  if (size <= kSmallPageSize / 8)
-    return PageClass::SMALL_P;
-  if (size <= kMediumPageSize / 8)
-    return PageClass::MEDIUM_P;
-
-  return PageClass::LARGE_P;
-}
-
 size_t ToBlockSize(BinIdx idx) {
   return kBinWordLens[idx] * 8;
 }
@@ -99,9 +97,9 @@ size_t ToBlockSize(BinIdx idx) {
 unsigned NumPagesInSegment(PageClass pc) {
   switch (pc) {
     case PageClass::SMALL_P:
-      return kSegmentDefaultSize >> kSmallPageShift;
+      return kSegmentSize >> kSmallPageShift;
     case PageClass::MEDIUM_P:
-      return kSegmentDefaultSize >> kMediumPageShift;
+      return kSegmentSize >> kMediumPageShift;
       break;
     case PageClass::LARGE_P:
       return 1;
@@ -166,6 +164,15 @@ void Page::Init(PageClass pc, BinIdx bin_id) {
   }
 }
 
+PageClass ClassFromSize(size_t size) {
+  if (size <= kSmallObjMaxSize)
+    return PageClass::SMALL_P;
+  if (size <= kMediumObjMaxSize)
+    return PageClass::MEDIUM_P;
+
+  return PageClass::LARGE_P;
+}
+
 }  // namespace detail
 
 //
@@ -193,32 +200,32 @@ class ExternalAllocator::SegmentDescr {
   explicit SegmentDescr(PageClass pc, size_t offs, uint16_t capacity);
 
   Page* FindPageSegment() {
-    return pi_.FindPageSegment();
+    return page_info_.FindPageSegment();
   }
 
   Page* GetPage(unsigned i) {
-    return pi_.pages + i;
+    return page_info_.pages + i;
   }
 
   size_t BlockOffset(const Page* page, unsigned blockpos) {
-    return offset_ + page->id * (1 << pi_.page_shift) +
+    return offset_ + page->id * (1 << page_info_.page_shift) +
            ToBlockSize(page->block_size_bin) * blockpos;
   }
 
   bool HasFreePages() const {
-    return pi_.capacity > pi_.used;
+    return page_info_.capacity > page_info_.used;
   }
 
   unsigned capacity() const {
-    return pi_.capacity;
+    return page_info_.capacity;
   }
 
   unsigned used() const {
-    return pi_.used;
+    return page_info_.used;
   }
 
   unsigned page_shift() const {
-    return pi_.page_shift;
+    return page_info_.page_shift;
   }
 
   PageClass page_class() const {
@@ -277,18 +284,11 @@ class ExternalAllocator::SegmentDescr {
     }
   };
 
-  struct LargeInfo {
-    size_t seg_size;
-  };
-
-  union {
-    PageInfo pi_;
-    LargeInfo li_;
-  };
+  PageInfo page_info_;
 };
 
-ExternalAllocator::SegmentDescr::SegmentDescr(PageClass pc, size_t offs, uint16_t capacity)
-    : offset_(offs), page_class_(pc), pi_(capacity) {
+ExternalAllocator::SegmentDescr::SegmentDescr(PageClass pc, size_t offs, uint16_t page_capacity)
+    : offset_(offs), page_class_(pc), page_info_(page_capacity) {
   constexpr size_t kDescrSize = sizeof(SegmentDescr);
   (void)kDescrSize;
 
@@ -296,12 +296,12 @@ ExternalAllocator::SegmentDescr::SegmentDescr(PageClass pc, size_t offs, uint16_
   DCHECK(pc != PageClass::LARGE_P);
 
   if (pc == PageClass::MEDIUM_P)
-    pi_.page_shift = kMediumPageShift;
+    page_info_.page_shift = kMediumPageShift;
   else
-    pi_.page_shift = kSmallPageShift;
+    page_info_.page_shift = kSmallPageShift;
 
-  for (unsigned i = 0; i < capacity; ++i) {
-    pi_.pages[i].Reset(i);
+  for (unsigned i = 0; i < page_capacity; ++i) {
+    page_info_.pages[i].Reset(i);
   }
 }
 
@@ -323,20 +323,15 @@ int64_t ExternalAllocator::Malloc(size_t sz) {
   Page* page = free_pages_[bin_idx];
 
   if (page->available == 0) {  // empty page.
-    PageClass pc = ClassFromSize(sz);
+    PageClass pc = detail::ClassFromSize(sz);
 
     if (pc == PageClass::LARGE_P) {
-      size_t req_seg_size = 0;
-      page = FindLargePage(sz, &req_seg_size);
-      if (!page)
-        return -int64_t(req_seg_size);
-    } else {
-      page = FindPage(pc);
-      if (!page)
-        return -int64_t(kSegmentDefaultSize);
-      free_pages_[bin_idx] = page;
+      return LargeMalloc(sz);
     }
-
+    page = FindPage(pc);
+    if (!page)
+      return -int64_t(kSegmentSize);
+    free_pages_[bin_idx] = page;
     page->Init(pc, bin_idx);
   }
 
@@ -381,26 +376,8 @@ void ExternalAllocator::Free(size_t offset, size_t sz) {
   allocated_bytes_ -= block_size;
 }
 
-void ExternalAllocator::AddStorage(size_t offset, size_t size) {
-  CHECK_EQ(256_MB, size);
-  CHECK_EQ(0u, offset % 256_MB);
-
-  size_t idx = offset / 256_MB;
-
-  CHECK_LE(segments_.size(), idx);
-  auto [it, added] = segm_intervals_.emplace(offset, size);
-  CHECK(added);
-  if (it != segm_intervals_.begin()) {
-    auto prev = it;
-    --prev;
-    CHECK_LE(prev->first + prev->second, offset);
-  }
-  auto next = it;
-  ++next;
-  if (next != segm_intervals_.end()) {
-    CHECK_LE(offset + size, next->first);
-  }
-
+void ExternalAllocator::AddStorage(size_t start, size_t size) {
+  extent_tree_.Add(start, size);
   capacity_ += size;
 }
 
@@ -409,17 +386,9 @@ size_t ExternalAllocator::GoodSize(size_t sz) {
   if (bin_idx < kLargeSizeBin)
     return ToBlockSize(bin_idx);
 
-  return divup(sz, 4_KB) * 4_KB;
+  return alignup(sz, 4_KB);
 }
 
-detail::PageClass ExternalAllocator::PageClassFromOffset(size_t offset) const {
-  size_t idx = offset / 256_MB;
-  CHECK_LT(idx, segments_.size());
-  CHECK(segments_[idx]);
-
-  SegmentDescr* seg = segments_[idx];
-  return seg->page_class();
-}
 
 /**
  *
@@ -438,35 +407,35 @@ auto ExternalAllocator::FindPage(PageClass pc) -> Page* {
   DCHECK_NE(pc, PageClass::LARGE_P);
 
   SegmentDescr* seg = sq_[pc];
-  if (seg) {
-    while (true) {
-      if (seg->HasFreePages()) {
-        return seg->FindPageSegment();
-      }
-
-      // remove head.
-      SegmentDescr* next = seg->Detach();
-      sq_[pc] = next;
-      if (next == nullptr) {
-        break;
-      }
-      seg = next;
+  while (seg) {
+    if (seg->HasFreePages()) {
+      return seg->FindPageSegment();
     }
+
+    // remove head.
+    SegmentDescr* next = seg->Detach();
+    sq_[pc] = next;
+    seg = next;
   }
 
-  if (!segm_intervals_.empty()) {
+  // no pages in the existing segments. Lets search in the extent tree.
+  auto op_range = extent_tree_.GetRange(kSegmentSize, kSegmentAlignment);
+  if (op_range) {
+    DCHECK_EQ(0u, op_range->first % kSegmentAlignment);
+
     unsigned num_pages = NumPagesInSegment(pc);
+    size_t seg_idx = op_range->first / kSegmentAlignment;
 
-    auto it = segm_intervals_.begin();
-    size_t seg_idx = it->first / kSegmentAlignment;
-    CHECK_LE(segments_.size(), seg_idx);
+    if (segments_.size() > seg_idx) {
+      DCHECK(segments_[seg_idx] == nullptr);
+    } else {
+      segments_.resize(seg_idx + 1);
+    }
 
-    segments_.resize(seg_idx + 1);
     void* ptr =
         mi_malloc_aligned(sizeof(SegmentDescr) + num_pages * sizeof(Page), kSegDescrAlignment);
-    SegmentDescr* seg = new (ptr) SegmentDescr(pc, it->first, num_pages);
+    SegmentDescr* seg = new (ptr) SegmentDescr(pc, op_range->first, num_pages);
     segments_[seg_idx] = seg;
-    segm_intervals_.erase(it);
 
     DCHECK(sq_[pc] == NULL);
     DCHECK(seg->next == seg->prev && seg == seg->next);
@@ -478,12 +447,15 @@ auto ExternalAllocator::FindPage(PageClass pc) -> Page* {
   return nullptr;
 }
 
-auto ExternalAllocator::FindLargePage(size_t size, size_t* segment_size) -> Page* {
-  LOG(FATAL) << "TBD";
-  // size_t aligned_blocks = divup(size, 4_KB);
-  // size_t offset = GetLargeInterval(aligned_blocks);
-  //
-  return nullptr;
+int64_t ExternalAllocator::LargeMalloc(size_t size) {
+  size_t align_sz = alignup(size, 4_KB);
+  auto op_range = extent_tree_.GetRange(align_sz, 4_KB);
+  if (!op_range) {
+    align_sz = max(align_sz, kSegmentSize);
+    return -int64_t(align_sz);
+  }
+
+  return op_range->first;
 }
 
 void ExternalAllocator::FreePage(Page* page, SegmentDescr* owner, size_t block_size) {
@@ -512,7 +484,7 @@ void ExternalAllocator::FreePage(Page* page, SegmentDescr* owner, size_t block_s
       sq->LinkBefore(owner);
     }
   }
-  --owner->pi_.used;
+  --owner->page_info_.used;
 }
 
 inline auto ExternalAllocator::ToSegDescr(Page* page) -> SegmentDescr* {

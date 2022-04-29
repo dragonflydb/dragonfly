@@ -87,18 +87,32 @@ TEST_F(ExternalAllocatorTest, Invariants) {
 }
 
 TEST_F(ExternalAllocatorTest, Classes) {
+  using detail::ClassFromSize;
+
   ext_alloc_.AddStorage(0, kSegSize);
-  off_t offs1 = ext_alloc_.Malloc(256_KB);
-  EXPECT_EQ(detail::SMALL_P, ext_alloc_.PageClassFromOffset(offs1));
-  off_t offs2 = ext_alloc_.Malloc(256_KB + 1);
+  ASSERT_EQ(detail::SMALL_P, ClassFromSize(128_KB));
+  ASSERT_EQ(detail::MEDIUM_P, ClassFromSize(128_KB + 1));
+  ASSERT_EQ(detail::LARGE_P, ClassFromSize(1_MB + 1));
+
+  off_t offs1 = ext_alloc_.Malloc(128_KB);
+  EXPECT_EQ(offs1, 0);
+
+  off_t offs2 = ext_alloc_.Malloc(128_KB + 1);
   EXPECT_EQ(offs2, -kSegSize);
 
   ext_alloc_.AddStorage(kSegSize, kSegSize);
-  offs2 = ext_alloc_.Malloc(256_KB + 1);
-  EXPECT_EQ(detail::MEDIUM_P, ext_alloc_.PageClassFromOffset(offs2));
-  off_t offs3 = ext_alloc_.Malloc(2_MB);
-  EXPECT_EQ(detail::MEDIUM_P, ext_alloc_.PageClassFromOffset(offs3));
-  EXPECT_EQ(2_MB, ExternalAllocator::GoodSize(2_MB));
+  offs2 = ext_alloc_.Malloc(128_KB + 1);
+  ASSERT_GT(offs2, 0);
+  offs2 = ext_alloc_.Malloc(1_MB);
+  ASSERT_GT(offs2, 0);
+
+  off_t offs3 = ext_alloc_.Malloc(1_MB + 1);
+  ASSERT_LT(offs3, 0);
+  ext_alloc_.AddStorage(kSegSize * 2, kSegSize);
+  offs3 = ext_alloc_.Malloc(1_MB + 1);
+  ASSERT_GT(offs3, 0);
+
+  EXPECT_EQ(1_MB + 4_KB, ExternalAllocator::GoodSize(1_MB + 1));
 }
 
 }  // namespace dfly

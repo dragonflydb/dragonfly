@@ -3,11 +3,12 @@
 //
 #pragma once
 
-#include <absl/container/btree_map.h>
-
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+
+#include "core/extent_tree.h"
+
 
 namespace dfly {
 
@@ -34,18 +35,20 @@ constexpr inline unsigned long long operator""_KB(unsigned long long x) {
 namespace detail {
 class Page;
 
-constexpr unsigned kNumFreePages = 29;
+constexpr unsigned kNumFreePages = 25;
 
 /**
- * pages classes can be SMALL, MEDIUM or LARGE. SMALL (2MB) for block sizes upto 256KB.
- * MEDIUM (16MB) for block sizes 256KB-2MB. Anything else is LARGE.
+ * pages classes can be SMALL, MEDIUM or LARGE. SMALL (2MB) for block sizes upto 128KB.
+ * MEDIUM (16MB) for block sizes 128KB-1MB. Anything else is LARGE.
  *
  */
-enum PageClass : uint8_t {
+enum PageClass : uint16_t {
   SMALL_P = 0,
   MEDIUM_P = 1,
   LARGE_P = 2,
 };
+
+PageClass ClassFromSize(size_t size);
 
 }  // namespace detail
 
@@ -65,13 +68,12 @@ class ExternalAllocator {
   // For results >= 0 Returns offset to the backing storage where we may write the data of
   // size sz.
   int64_t Malloc(size_t sz);
+
   void Free(size_t offset, size_t sz);
 
-  /// Adds backing storage to the allocator.
-  /// offset must be aligned to kExtAlignment boundaries.
-  /// It is expected that storage is added in a linear fashion, without skipping ranges.
-  /// So if [0, 256MB) is added, then next time [256MB, 512MB) is added etc.
-  void AddStorage(size_t offset, size_t size);
+  /// Adds backing storage to the allocator. The range should not overlap with already
+  /// added storage ranges.
+  void AddStorage(size_t start, size_t size);
 
   // Similar to mi_good_size, returns the size of the underlying block as if
   // were returned by Malloc. Guaranteed that the result not less than sz.
@@ -86,9 +88,6 @@ class ExternalAllocator {
     return allocated_bytes_;
   }
 
-  // accessors useful for tests.
-  detail::PageClass PageClassFromOffset(size_t offset) const;
-
  private:
   class SegmentDescr;
   using Page = detail::Page;
@@ -97,7 +96,7 @@ class ExternalAllocator {
   // Returns NULL if no page is found.
   Page* FindPage(detail::PageClass sc);
 
-  Page* FindLargePage(size_t size, size_t* segment_size);
+  int64_t LargeMalloc(size_t size);
   SegmentDescr* GetNewSegment(detail::PageClass sc);
   void FreePage(Page* page, SegmentDescr* owner, size_t block_size);
 
@@ -109,10 +108,7 @@ class ExternalAllocator {
   // A segment for each 256MB range. To get a segment id from the offset, shift right by 28.
   std::vector<SegmentDescr*> segments_;
 
-  // weird queue to support AddStorage interface. We can not instantiate segment
-  // until we know its class and that we know only when a page is demanded.
-  // sorted map of offset -> size.
-  absl::btree_map<size_t, size_t> segm_intervals_;
+  ExtentTree extent_tree_;
 
   size_t capacity_ = 0;  // in bytes.
   size_t allocated_bytes_ = 0;
