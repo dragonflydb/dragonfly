@@ -129,7 +129,14 @@ class DbSlice {
   OpResult<std::pair<PrimeIterator, unsigned>> FindFirst(DbIndex db_index, ArgSlice args);
 
   // Return .second=true if insertion ocurred, false if we return the existing key.
+  // throws: bad_alloc is insertion could not happen due to out of memory.
   std::pair<PrimeIterator, bool> AddOrFind(DbIndex db_ind, std::string_view key);
+
+  // Returns true if insertion took place, false otherwise.
+  // expire_at_ms equal to 0 - means no expiry.
+  // throws: bad_alloc is insertion could not happen due to out of memory.
+  std::pair<PrimeIterator, bool> AddOrFind(DbIndex db_ind, std::string_view key, PrimeValue obj,
+                                           uint64_t expire_at_ms);
 
   // Either adds or removes (if at == 0) expiry. Returns true if a change was made.
   // Does not change expiry if at != 0 and expiry already exists.
@@ -142,12 +149,6 @@ class DbSlice {
   // Returns the iterator to the newly added entry.
   // throws: bad_alloc is insertion could not happen due to out of memory.
   PrimeIterator AddNew(DbIndex db_ind, std::string_view key, PrimeValue obj, uint64_t expire_at_ms);
-
-  // Adds a new entry if a key does not exists. Returns true if insertion took place,
-  // false otherwise. expire_at_ms equal to 0 - means no expiry.
-  // throws: bad_alloc is insertion could not happen due to out of memory.
-  std::pair<PrimeIterator, bool> AddIfNotExist(DbIndex db_ind, std::string_view key, PrimeValue obj,
-                                              uint64_t expire_at_ms);
 
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);

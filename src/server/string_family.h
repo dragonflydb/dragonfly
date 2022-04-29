@@ -16,7 +16,7 @@ using facade::OpResult;
 using facade::OpStatus;
 
 class SetCmd {
-  DbSlice* db_slice_;
+  DbSlice& db_slice_;
 
  public:
   explicit SetCmd(DbSlice* db_slice);
@@ -39,6 +39,10 @@ class SetCmd {
   };
 
   OpResult<void> Set(const SetParams& params, std::string_view key, std::string_view value);
+
+ private:
+  OpStatus SetExisting(const SetParams& params, PrimeIterator it, ExpireIterator e_it,
+                       std::string_view value);
 };
 
 class StringFamily {
@@ -100,7 +104,6 @@ class StringFamily {
                                      std::string_view val, bool prepend);
 
   static OpResult<std::string> OpGet(const OpArgs& op_args, std::string_view key);
-
 };
 
 }  // namespace dfly

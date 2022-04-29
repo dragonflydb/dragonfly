@@ -557,7 +557,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   DbSlice& db_slice = EngineShard::tlocal()->db_slice();
   for (const auto& item : ib) {
     std::string_view key{item.key, sdslen(item.key)};
-    db_slice.AddIfNotExist(db_ind, key, PrimeValue{item.val}, item.expire_ms);
+    db_slice.AddOrFind(db_ind, key, PrimeValue{item.val}, item.expire_ms);
     sdsfree(item.key);
   }
 }

@@ -238,19 +238,23 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) -> pair<PrimeIterator
 
   PrimeEvictionPolicy evp{db_index, this, int64_t(memory_budget_ - key.size())};
 
-  // Fast-path - change_cb_ is empty so we Find or Add using
+  // Fast-path if change_cb_ is empty so we Find or Add using
   // the insert operation: twice more efficient.
   CompactObj co_key{key};
 
-  auto [it, inserted] = db->prime_table.Insert(std::move(co_key), PrimeValue{});
+  auto [it, inserted] = db->prime_table.Insert(std::move(co_key), PrimeValue{}, evp);
   if (inserted) {  // new entry
     db->stats.inline_keys += it->first.IsInline();
     db->stats.obj_memory_usage += it->first.MallocUsed();
+
+    events_.garbage_collected += evp.gc_count();
+
     it.SetVersion(NextVersion());
     memory_budget_ = evp.mem_budget();
 
     return make_pair(it, true);
   }
+
   auto& existing = it;
 
   DCHECK(IsValid(existing));
@@ -391,42 +395,34 @@ PrimeIterator DbSlice::AddNew(DbIndex db_ind, string_view key, PrimeValue obj,
     ccb.second(db_ind, ChangeReq{key});
   }
 
-  auto [res, added] = AddIfNotExist(db_ind, key, std::move(obj), expire_at_ms);
+  auto [res, added] = AddOrFind(db_ind, key, std::move(obj), expire_at_ms);
   CHECK(added);
 
   return res;
 }
 
-pair<PrimeIterator, bool> DbSlice::AddIfNotExist(DbIndex db_ind, string_view key, PrimeValue obj,
-                                                 uint64_t expire_at_ms) {
+pair<PrimeIterator, bool> DbSlice::AddOrFind(DbIndex db_ind, string_view key, PrimeValue obj,
+                                             uint64_t expire_at_ms) {
   DCHECK_LT(db_ind, db_arr_.size());
   DCHECK(!obj.IsRef());
 
+  auto res = AddOrFind(db_ind, key);
+  if (!res.second)  // have not inserted.
+    return res;
+
   auto& db = *db_arr_[db_ind];
-  CompactObj co_key{key};
-  memory_budget_ -= key.size();
+  auto& new_it = res.first;
 
-  PrimeEvictionPolicy evp{db_ind, this, memory_budget_};
-  auto [new_entry, inserted] = db.prime_table.Insert(std::move(co_key), std::move(obj), evp);
-
-  // in this case obj won't be moved and will be destroyed during unwinding.
-  if (!inserted)
-    return make_pair(new_entry, false);
-
-  events_.garbage_collected += evp.gc_count();
-  memory_budget_ = evp.mem_budget();
-  new_entry.SetVersion(NextVersion());
-
-  db.stats.inline_keys += new_entry->first.IsInline();
-  db.stats.obj_memory_usage += (new_entry->first.MallocUsed() + new_entry->second.MallocUsed());
+  db.stats.obj_memory_usage += obj.MallocUsed();
+  new_it->second = std::move(obj);
 
   if (expire_at_ms) {
-    new_entry->second.SetExpire(true);
+    new_it->second.SetExpire(true);
     uint64_t delta = expire_at_ms - expire_base_[0];
-    CHECK(db.expire_table.Insert(new_entry->first.AsRef(), ExpirePeriod(delta)).second);
+    CHECK(db.expire_table.Insert(new_it->first.AsRef(), ExpirePeriod(delta)).second);
   }
 
-  return make_pair(new_entry, true);
+  return res;
 }
 
 size_t DbSlice::DbSize(DbIndex db_ind) const {
