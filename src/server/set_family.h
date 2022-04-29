@@ -43,10 +43,6 @@ class SetFamily {
   static void SInterStore(CmdArgList args,  ConnectionContext* cntx);
   static void SScan(CmdArgList args,  ConnectionContext* cntx);
 
-  static OpResult<StringVec> OpUnion(const OpArgs& op_args, ArgSlice args);
-  static OpResult<StringVec> OpDiff(const OpArgs& op_args, ArgSlice keys);
-  static OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_first);
-
   // count - how many elements to pop.
   static OpResult<StringVec> OpPop(const OpArgs& op_args, std::string_view key, unsigned count);
   static OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t* cursor);
