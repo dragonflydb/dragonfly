@@ -109,7 +109,7 @@ API 1.0
   - [X] LSET
   - [X] LTRIM
   - [X] RPOP
-  - [ ] RPOPLPUSH
+  - [X] RPOPLPUSH
   - [X] RPUSH
 - [X] SortedSet Family
   - [X] ZADD
@@ -214,7 +214,7 @@ API 2.0
   - [X] ZREVRANGEBYSCORE
   - [X] ZREVRANK
   - [ ] ZUNIONSTORE
-  - [ ] ZSCAN
+  - [X] ZSCAN
 - [ ] HYPERLOGLOG Family
   - [ ] PFADD
   - [ ] PFCOUNT
