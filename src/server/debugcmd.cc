@@ -159,7 +159,7 @@ void DebugCmd::Reload(CmdArgList args) {
   VLOG(1) << "Performing load";
   io::FileSource fs(*res);
 
-  RdbLoader loader(&ess);
+  RdbLoader loader(&ess, sf_.script_mgr());
   ec = loader.Load(&fs);
 
   if (ec) {

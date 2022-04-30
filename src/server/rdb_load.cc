@@ -24,6 +24,8 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/hset_family.h"
+#include "server/script_mgr.h"
+#include "server/server_state.h"
 #include "server/set_family.h"
 #include "strings/human_readable.h"
 
@@ -187,7 +189,9 @@ struct RdbLoader::ObjSettings {
   ObjSettings() = default;
 };
 
-RdbLoader::RdbLoader(EngineShardSet* ess) : ess_(*ess), mem_buf_{16_KB} {
+
+RdbLoader::RdbLoader(EngineShardSet* ess, ScriptMgr* script_mgr)
+    : script_mgr_(script_mgr), ess_(*ess), mem_buf_{16_KB} {
   shard_buf_.reset(new ItemsBuf[ess_.size()]);
 }
 
@@ -251,6 +255,7 @@ error_code RdbLoader::Load(io::Source* src) {
   /* Key-specific attributes, set by opcodes before the key type. */
   ObjSettings settings;
   settings.now = mstime();
+  size_t keys_loaded = 0;
 
   while (1) {
     /* Read type. */
@@ -339,6 +344,7 @@ error_code RdbLoader::Load(io::Source* src) {
       return RdbError(errc::invalid_rdb_type);
     }
 
+    ++keys_loaded;
     RETURN_ON_ERR(LoadKeyValPair(type, &settings));
     settings.Reset();
   }  // main load loop
@@ -358,6 +364,7 @@ error_code RdbLoader::Load(io::Source* src) {
 
   absl::Duration dur = absl::Now() - start;
   double seconds = double(absl::ToInt64Milliseconds(dur)) / 1000;
+  LOG(INFO) << "Done loading RDB, keys loaded: " << keys_loaded;
   LOG(INFO) << "Loading finished after " << strings::HumanReadableElapsedTime(seconds);
 
   return kOk;
@@ -490,40 +497,52 @@ error_code RdbLoader::HandleAux() {
   }
 
   auxval = (robj*)exp->first;
-  if (((char*)auxkey->ptr)[0] == '%') {
+  char* auxkey_sds = (sds)auxkey->ptr;
+  char* auxval_sds = (sds)auxval->ptr;
+
+  if (auxkey_sds[0] == '%') {
     /* All the fields with a name staring with '%' are considered
      * information fields and are logged at startup with a log
      * level of NOTICE. */
-    LOG(INFO) << "RDB '" << (char*)auxkey->ptr << "': " << (char*)auxval->ptr;
-  } else if (!strcasecmp((char*)auxkey->ptr, "repl-stream-db")) {
+    LOG(INFO) << "RDB '" << auxkey_sds << "': " << auxval_sds;
+  } else if (!strcasecmp(auxkey_sds, "repl-stream-db")) {
     // TODO
-  } else if (!strcasecmp((char*)auxkey->ptr, "repl-id")) {
+  } else if (!strcasecmp(auxkey_sds, "repl-id")) {
     // TODO
-  } else if (!strcasecmp((char*)auxkey->ptr, "repl-offset")) {
+  } else if (!strcasecmp(auxkey_sds, "repl-offset")) {
     // TODO
-  } else if (!strcasecmp((char*)auxkey->ptr, "lua")) {
-    LOG(ERROR) << "Lua scripts are not supported";
-    return RdbError(errc::feature_not_supported);
-  } else if (!strcasecmp((char*)auxkey->ptr, "redis-ver")) {
-    LOG(INFO) << "Loading RDB produced by version " << (char*)auxval->ptr;
-  } else if (!strcasecmp((char*)auxkey->ptr, "ctime")) {
-    time_t age = time(NULL) - strtol((char*)auxval->ptr, NULL, 10);
+  } else if (!strcasecmp(auxkey_sds, "lua")) {
+    ServerState* ss = ServerState::tlocal();
+    Interpreter& script = ss->GetInterpreter();
+    string_view body{auxval_sds, strlen(auxval_sds)};
+    string result;
+    Interpreter::AddResult add_result = script.AddFunction(body, &result);
+    if (add_result == Interpreter::ADD_OK) {
+      if (script_mgr_)
+        script_mgr_->InsertFunction(result, body);
+    } else if (add_result == Interpreter::COMPILE_ERR) {
+      LOG(ERROR) << "Error when compiling lua scripts";
+    }
+  } else if (!strcasecmp(auxkey_sds, "redis-ver")) {
+    LOG(INFO) << "Loading RDB produced by version " << auxval_sds;
+  } else if (!strcasecmp(auxkey_sds, "ctime")) {
+    time_t age = time(NULL) - strtol(auxval_sds, NULL, 10);
     if (age < 0)
       age = 0;
     LOG(INFO) << "RDB age " << strings::HumanReadableElapsedTime(age);
-  } else if (!strcasecmp((char*)auxkey->ptr, "used-mem")) {
-    long long usedmem = strtoll((char*)auxval->ptr, NULL, 10);
+  } else if (!strcasecmp(auxkey_sds, "used-mem")) {
+    long long usedmem = strtoll(auxval_sds, NULL, 10);
     LOG(INFO) << "RDB memory usage when created " << strings::HumanReadableNumBytes(usedmem);
-  } else if (!strcasecmp((char*)auxkey->ptr, "aof-preamble")) {
-    long long haspreamble = strtoll((char*)auxval->ptr, NULL, 10);
+  } else if (!strcasecmp(auxkey_sds, "aof-preamble")) {
+    long long haspreamble = strtoll(auxval_sds, NULL, 10);
     if (haspreamble)
       LOG(INFO) << "RDB has an AOF tail";
-  } else if (!strcasecmp((char*)auxkey->ptr, "redis-bits")) {
+  } else if (!strcasecmp(auxkey_sds, "redis-bits")) {
     /* Just ignored. */
   } else {
     /* We ignore fields we don't understand, as by AUX field
      * contract. */
-    LOG(WARNING) << "Unrecognized RDB AUX field: '" << (char*)auxkey->ptr << "'";
+    LOG(WARNING) << "Unrecognized RDB AUX field: '" << auxkey_sds << "'";
   }
 
   decrRefCount(auxkey);

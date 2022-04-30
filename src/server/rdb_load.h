@@ -14,10 +14,11 @@ extern "C" {
 namespace dfly {
 
 class EngineShardSet;
+class ScriptMgr;
 
 class RdbLoader {
  public:
-  explicit RdbLoader(EngineShardSet* ess);
+  explicit RdbLoader(EngineShardSet* ess, ScriptMgr* script_mgr);
 
   ~RdbLoader();
 
@@ -82,6 +83,7 @@ class RdbLoader {
 
   static void LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib);
 
+  ScriptMgr* script_mgr_;
   EngineShardSet& ess_;
   base::IoBuf mem_buf_;
   base::PODArray<uint8_t> compr_buf_;

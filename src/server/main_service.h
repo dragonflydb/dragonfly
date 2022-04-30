@@ -23,7 +23,6 @@ using facade::MemcacheParser;
 class Service : public facade::ServiceInterface {
  public:
   using error_code = std::error_code;
-
   struct InitOpts {
     bool disable_time_update;
 
@@ -69,6 +68,10 @@ class Service : public facade::ServiceInterface {
 
   const CommandId* FindCmd(std::string_view cmd) const {
     return registry_.Find(cmd);
+  }
+
+  ScriptMgr* script_mgr() {
+    return server_family_.script_mgr();
   }
 
  private:

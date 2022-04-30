@@ -72,16 +72,17 @@ TEST_F(RdbTest, Crc) {
 
 TEST_F(RdbTest, LoadEmpty) {
   io::FileSource fs = GetSource("empty.rdb");
-  RdbLoader loader(ess_);
+  RdbLoader loader(ess_, NULL);
   auto ec = loader.Load(&fs);
   CHECK(!ec);
 }
 
 TEST_F(RdbTest, LoadSmall6) {
   io::FileSource fs = GetSource("redis6_small.rdb");
-  RdbLoader loader(ess_);
+  RdbLoader loader(ess_, service_->script_mgr());
   auto ec = loader.Load(&fs);
-  CHECK(!ec);
+  ASSERT_FALSE(ec) << ec.message();
+
   auto resp = Run({"scan", "0"});
 
   ASSERT_THAT(resp, ArrLen(2));
@@ -96,6 +97,14 @@ TEST_F(RdbTest, LoadSmall6) {
   // TODO: when we implement PEXPIRETIME we will be able to do it directly.
   int ttl = CheckedInt({"ttl", "set1"});    // should expire at 1747008000.
   EXPECT_GT(ttl + time(NULL), 1747007000);  // left 1000 seconds margin in case the clock is off.
+
+  Run({"select", "1"});
+  ASSERT_EQ(10, CheckedInt({"dbsize"}));
+  ASSERT_EQ(128, CheckedInt({"strlen", "longggggggggggggggkeyyyyyyyyyyyyy:9"}));
+  resp = Run({"script", "exists", "4ca238f611c9d0ae4e9a75a5dbac22aedc379801",
+              "282297a0228f48cd3fc6a55de6316f31422f5d17"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(1), IntArg(1)));
 }
 
 TEST_F(RdbTest, Reload) {
