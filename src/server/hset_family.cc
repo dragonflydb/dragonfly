@@ -455,6 +455,8 @@ OpResult<uint32_t> HSetFamily::OpSet(const OpArgs& op_args, string_view key, Cmd
   } else {
     if (it->second.ObjType() != OBJ_HASH)
       return OpStatus::WRONG_TYPE;
+
+    db_slice.PreUpdate(op_args.db_ind, it);
   }
   hset = it->second.AsRObj();
 
@@ -504,6 +506,7 @@ OpResult<uint32_t> HSetFamily::OpSet(const OpArgs& op_args, string_view key, Cmd
     }
   }
   it->second.SyncRObj();
+  db_slice.PostUpdate(op_args.db_ind, it);
 
   return created;
 }
@@ -517,6 +520,7 @@ OpResult<uint32_t> HSetFamily::OpDel(const OpArgs& op_args, string_view key, Cmd
   if (!it_res)
     return it_res.status();
 
+  db_slice.PreUpdate(op_args.db_ind, *it_res);
   CompactObj& co = (*it_res)->second;
   robj* hset = co.AsRObj();
   unsigned deleted = 0;
@@ -541,6 +545,7 @@ OpResult<uint32_t> HSetFamily::OpDel(const OpArgs& op_args, string_view key, Cmd
 
   co.SyncRObj();
 
+  db_slice.PostUpdate(op_args.db_ind, *it_res);
   if (key_remove) {
     if (hset->encoding == OBJ_ENCODING_LISTPACK) {
       stats->listpack_blob_cnt--;
@@ -764,6 +769,7 @@ OpStatus HSetFamily::OpIncrBy(const OpArgs& op_args, string_view key, string_vie
     if (it->second.ObjType() != OBJ_HASH)
       return OpStatus::WRONG_TYPE;
 
+    db_slice.PreUpdate(op_args.db_ind, it);
     hset = it->second.AsRObj();
 
     if (hset->encoding == OBJ_ENCODING_LISTPACK) {
@@ -860,6 +866,7 @@ OpStatus HSetFamily::OpIncrBy(const OpArgs& op_args, string_view key, string_vie
   }
 
   it->second.SyncRObj();
+  db_slice.PostUpdate(op_args.db_ind, it);
 
   return OpStatus::OK;
 }
