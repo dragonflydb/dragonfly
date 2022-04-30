@@ -35,7 +35,23 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendSimpleStrArr(kHelp, ABSL_ARRAYSIZE(kHelp));
   }
 
-  if (args.size() == 2 && subcmd == "LOAD") {
+  if (subcmd == "EXISTS") {
+    vector<uint8_t> res(args.size() - 1, 0);
+    for (size_t i = 1; i < args.size(); ++i) {
+      string_view sha = ArgS(args, i);
+      if (Find(sha)) {
+        res[i - 1] = 1;
+      }
+    }
+
+    (*cntx)->StartArray(res.size());
+    for (uint8_t v : res) {
+      (*cntx)->SendLong(v);
+    }
+    return;
+  }
+
+  if (subcmd == "LOAD" && args.size() == 2) {
     string_view body = ArgS(args, 1);
     body = absl::StripAsciiWhitespace(body);
 
@@ -54,6 +70,7 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
     }
 
     InsertFunction(error_or_id, body);
+
     return (*cntx)->SendBulkString(error_or_id);
   }
 
@@ -78,8 +95,10 @@ bool ScriptMgr::InsertFunction(std::string_view id, std::string_view body) {
 }
 
 const char* ScriptMgr::Find(std::string_view sha) const {
+  if (sha.size() != 40)
+    return nullptr;
+
   ScriptKey key;
-  CHECK_EQ(key.size(), sha.size());
   memcpy(key.data(), sha.data(), key.size());
 
   lock_guard lk(mu_);

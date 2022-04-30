@@ -23,6 +23,8 @@ class ScriptMgr {
   void Run(CmdArgList args, ConnectionContext* cntx);
 
   bool InsertFunction(std::string_view sha,  std::string_view body);
+
+  // Returns body as null-terminated c-string. NULL if sha is not found.
   const char* Find(std::string_view sha) const;
 
  private:

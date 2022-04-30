@@ -199,8 +199,8 @@ API 2.0
   - [ ] PERSIST
   - [X] PTTL
   - [ ] RESTORE
-  - [X] SCRIPT LOAD
-  - [ ] SCRIPT DEBUG/KILL/FLUSH/EXISTS
+  - [X] SCRIPT LOAD/EXISTS
+  - [ ] SCRIPT DEBUG/KILL/FLUSH
 - [X] Set Family
   - [X] SSCAN
 - [X] Sorted Set Family
