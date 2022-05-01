@@ -21,9 +21,11 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
                      int8_t last_key, int8_t step)
     : name_(name), opt_mask_(mask), arity_(arity), first_key_(first_key), last_key_(last_key),
       step_key_(step) {
-  if (mask & CO::ADMIN) {
+  if (mask & CO::ADMIN)
     opt_mask_ |= CO::NOSCRIPT;
-  }
+
+  if (mask & CO::BLOCKING)
+    opt_mask_ |= CO::REVERSE_MAPPING;
 }
 
 uint32_t CommandId::OptCount(uint32_t mask) {
@@ -81,38 +83,6 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   return *this;
 }
 
-KeyIndex DetermineKeys(const CommandId* cid, const CmdArgList& args) {
-  DCHECK_EQ(0u, cid->opt_mask() & CO::GLOBAL_TRANS);
-
-  KeyIndex key_index;
-
-  if (cid->first_key_pos() > 0) {
-    key_index.start = cid->first_key_pos();
-    int last = cid->last_key_pos();
-    key_index.end = last > 0 ? last + 1 : (int(args.size()) + 1 + last);
-    key_index.step = cid->key_arg_step();
-
-    return key_index;
-  }
-
-  string_view name{cid->name()};
-  if (name == "EVAL" || name == "EVALSHA") {
-    DCHECK_GE(args.size(), 3u);
-    uint32_t num_keys;
-
-    CHECK(absl::SimpleAtoi(ArgS(args, 2), &num_keys));
-    key_index.start = 3;
-    key_index.end = 3 + num_keys;
-    key_index.step = 1;
-
-    return key_index;
-  }
-
-  LOG(FATAL) << "TBD: Not supported";
-
-  return key_index;
-}
-
 namespace CO {
 
 const char* OptName(CO::CommandOpt fl) {
@@ -125,6 +95,8 @@ const char* OptName(CO::CommandOpt fl) {
       return "readonly";
     case DENYOOM:
       return "denyoom";
+    case REVERSE_MAPPING:
+      return "reverse-mapping";
     case FAST:
       return "fast";
     case LOADING:
@@ -139,6 +111,8 @@ const char* OptName(CO::CommandOpt fl) {
       return "blocking";
     case GLOBAL_TRANS:
       return "global-trans";
+    case DESTINATION_KEY:
+      return "dest-key";
   }
   return "unknown";
 }

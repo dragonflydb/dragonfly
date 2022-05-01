@@ -24,11 +24,13 @@ enum CommandOpt : uint32_t {
   WRITE = 4,
   LOADING = 8,
   DENYOOM = 0x10,  // use-memory in redis.
+  REVERSE_MAPPING = 0x20,
   RANDOM = 0x40,
   ADMIN = 0x80,  // implies NOSCRIPT,
   NOSCRIPT = 0x100,
-  BLOCKING = 0x200,
+  BLOCKING = 0x200,  // implies REVERSE_MAPPING
   GLOBAL_TRANS = 0x1000,
+  DESTINATION_KEY = 0x2000,
 };
 
 const char* OptName(CommandOpt fl);
@@ -83,7 +85,7 @@ class CommandId {
   }
 
   bool is_multi_key() const {
-    return last_key_ != first_key_;
+    return (last_key_ != first_key_) || (opt_mask_ & CO::DESTINATION_KEY);
   }
 
   int8_t key_arg_step() const {
@@ -156,9 +158,5 @@ class CommandRegistry {
   // Implements COMMAND functionality.
   void Command(CmdArgList args, ConnectionContext* cntx);
 };
-
-
-// Given the command and the arguments determines the keys range (index).
-KeyIndex DetermineKeys(const CommandId* cid, const CmdArgList& args);
 
 }  // namespace dfly

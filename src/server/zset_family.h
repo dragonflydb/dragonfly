@@ -56,6 +56,7 @@ class ZSetFamily {
   static void ZCard(CmdArgList args, ConnectionContext* cntx);
   static void ZCount(CmdArgList args, ConnectionContext* cntx);
   static void ZIncrBy(CmdArgList args, ConnectionContext* cntx);
+  static void ZInterStore(CmdArgList args, ConnectionContext* cntx);
   static void ZLexCount(CmdArgList args, ConnectionContext* cntx);
   static void ZRange(CmdArgList args, ConnectionContext* cntx);
   static void ZRank(CmdArgList args, ConnectionContext* cntx);
@@ -70,6 +71,7 @@ class ZSetFamily {
   static void ZRevRangeByScore(CmdArgList args, ConnectionContext* cntx);
   static void ZRevRank(CmdArgList args, ConnectionContext* cntx);
   static void ZScan(CmdArgList args, ConnectionContext* cntx);
+  static void ZUnionStore(CmdArgList args, ConnectionContext* cntx);
 
   static void ZRangeByScoreInternal(std::string_view key, std::string_view min_s,
                                     std::string_view max_s, const RangeParams& params,

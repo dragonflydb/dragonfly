@@ -354,6 +354,12 @@ void Service::Shutdown() {
   boost::this_fiber::sleep_for(10ms);
 }
 
+static void MultiSetError(ConnectionContext* cntx) {
+  if (cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE) {
+    cntx->conn_state.exec_state = ConnectionState::EXEC_ERROR;
+  }
+}
+
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
   CHECK(!args.empty());
   DCHECK_NE(0u, shard_set_.size()) << "Init was not called";
@@ -370,11 +376,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   etl.RecordCmd();
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
-  absl::Cleanup multi_error = [dfly_cntx] {
-    if (dfly_cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE) {
-      dfly_cntx->conn_state.exec_state = ConnectionState::EXEC_ERROR;
-    }
-  };
+  absl::Cleanup multi_error([dfly_cntx] { MultiSetError(dfly_cntx); });
 
   if (cid == nullptr) {
     (*cntx)->SendError(absl::StrCat("unknown command `", cmd_str, "`"), "unknown_cmd");
@@ -464,7 +466,11 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   if (under_script) {
     DCHECK(dfly_cntx->transaction);
-    KeyIndex key_index = DetermineKeys(cid, args);
+    OpResult<KeyIndex> key_index_res = DetermineKeys(cid, args);
+    if (!key_index_res)
+      return (*cntx)->SendError(key_index_res.status());
+
+    const auto& key_index = *key_index_res;
     for (unsigned i = key_index.start; i < key_index.end; ++i) {
       string_view key = ArgS(args, i);
       if (!dfly_cntx->conn_state.script_info->keys.contains(key)) {
@@ -472,7 +478,9 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
       }
     }
     dfly_cntx->transaction->SetExecCmd(cid);
-    dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args);
+    OpStatus st = dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args);
+    if (st != OpStatus::OK)
+      return (*cntx)->SendError(st);
   } else {
     DCHECK(dfly_cntx->transaction == nullptr);
 
@@ -480,7 +488,10 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
       dist_trans.reset(new Transaction{cid, &shard_set_});
       dfly_cntx->transaction = dist_trans.get();
 
-      dist_trans->InitByArgs(dfly_cntx->conn_state.db_index, args);
+      OpStatus st = dist_trans->InitByArgs(dfly_cntx->conn_state.db_index, args);
+      if (st != OpStatus::OK)
+        return (*cntx)->SendError(st);
+
       dfly_cntx->last_command_debug.shards_count = dfly_cntx->transaction->unique_shard_cnt();
     } else {
       dfly_cntx->transaction = nullptr;
@@ -856,7 +867,11 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
       cntx->transaction->SetExecCmd(scmd.descr);
       CmdArgList cmd_arg_list{str_list.data(), str_list.size()};
       if (IsTransactional(scmd.descr)) {
-        cntx->transaction->InitByArgs(cntx->conn_state.db_index, cmd_arg_list);
+        OpStatus st = cntx->transaction->InitByArgs(cntx->conn_state.db_index, cmd_arg_list);
+        if (st != OpStatus::OK) {
+          (*cntx)->SendError(st);
+          break;
+        }
       }
       scmd.descr->Invoke(cmd_arg_list, cntx);
       if (rb->GetError())

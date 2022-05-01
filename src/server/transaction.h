@@ -61,7 +61,7 @@ class Transaction {
 
   Transaction(const CommandId* cid, EngineShardSet* ess);
 
-  void InitByArgs(DbIndex index, CmdArgList args);
+  OpStatus InitByArgs(DbIndex index, CmdArgList args);
 
   void SetExecCmd(const CommandId* cid);
 
@@ -341,5 +341,7 @@ class Transaction {
 inline uint16_t trans_id(const Transaction* ptr) {
   return intptr_t(ptr) & 0xFFFF;
 }
+
+OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args);
 
 }  // namespace dfly

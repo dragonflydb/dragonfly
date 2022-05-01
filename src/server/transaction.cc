@@ -74,36 +74,42 @@ Transaction::~Transaction() {
  *
  **/
 
-void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
+OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   db_index_ = index;
 
   if (IsGlobal()) {
     unique_shard_cnt_ = ess_->size();
     shard_data_.resize(unique_shard_cnt_);
-    return;
+    return OpStatus::OK;
   }
 
   CHECK_GT(args.size(), 1U);  // first entry is the command name.
   DCHECK_EQ(unique_shard_cnt_, 0u);
   DCHECK(args_.empty());
 
-  KeyIndex key_index = DetermineKeys(cid_, args);
+  OpResult<KeyIndex> key_index_res = DetermineKeys(cid_, args);
+  if (!key_index_res)
+    return key_index_res.status();
+
+  const auto& key_index = *key_index_res;
 
   if (key_index.start == args.size()) {  // eval with 0 keys.
     CHECK(absl::StartsWith(cid_->name(), "EVAL"));
-    return;
+    return OpStatus::OK;
   }
 
   DCHECK_LT(key_index.start, args.size());
   DCHECK_GT(key_index.start, 0u);
 
   bool incremental_locking = multi_ && multi_->incremental;
-  bool single_key = !multi_ && (key_index.start + key_index.step) >= key_index.end;
+  bool single_key = !multi_ && key_index.HasSingleKey();
 
   if (single_key) {
     DCHECK_GT(key_index.step, 0u);
 
     shard_data_.resize(1);  // Single key optimization
+
+    // even for a single key we may have multiple arguments per key (MSET).
     for (unsigned j = key_index.start; j < key_index.start + key_index.step; ++j) {
       args_.push_back(ArgS(args, j));
     }
@@ -112,7 +118,7 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
     unique_shard_cnt_ = 1;
     unique_shard_id_ = Shard(key, ess_->size());
 
-    return;
+    return OpStatus::OK;
   }
 
   // Our shard_data is not sparse, so we must allocate for all threads :(
@@ -131,6 +137,8 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   // and regular commands.
   IntentLock::Mode mode = IntentLock::EXCLUSIVE;
   bool should_record_locks = false;
+  bool needs_reverse_mapping = cid_->opt_mask() & CO::REVERSE_MAPPING;
+
   if (multi_) {
     mode = Mode();
     tmp_space.uniq_keys.clear();
@@ -138,11 +146,22 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
     should_record_locks = incremental_locking || !multi_->locks_recorded;
   }
 
+  if (key_index.bonus) {  // additional one-of key.
+    DCHECK(key_index.step == 1);
+    DCHECK(!needs_reverse_mapping);
+
+    string_view key = ArgS(args, key_index.bonus);
+    uint32_t sid = Shard(key, shard_data_.size());
+    shard_index[sid].args.push_back(key);
+  }
+
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
     string_view key = ArgS(args, i);
     uint32_t sid = Shard(key, shard_data_.size());
+
     shard_index[sid].args.push_back(key);
-    shard_index[sid].original_index.push_back(i - 1);
+    if (needs_reverse_mapping)
+      shard_index[sid].original_index.push_back(i - 1);
 
     if (should_record_locks && tmp_space.uniq_keys.insert(key).second) {
       multi_->locks[key].cnt[int(mode)]++;
@@ -150,9 +169,11 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
 
     if (key_index.step == 2) {  // value
       ++i;
-      auto val = ArgS(args, i);
+
+      string_view val = ArgS(args, i);
       shard_index[sid].args.push_back(val);
-      shard_index[sid].original_index.push_back(i - 1);
+      if (needs_reverse_mapping)
+        shard_index[sid].original_index.push_back(i - 1);
     }
   }
 
@@ -160,8 +181,11 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
     multi_->locks_recorded = true;
   }
 
-  args_.resize(key_index.end - key_index.start);
-  reverse_index_.resize(args_.size());
+  args_.resize(key_index.num_args());
+
+  // we need reverse index only for blocking commands or commands like MSET.
+  if (needs_reverse_mapping)
+    reverse_index_.resize(args_.size());
 
   auto next_arg = args_.begin();
   auto rev_indx_it = reverse_index_.begin();
@@ -192,11 +216,11 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
     uint32_t orig_indx = 0;
     for (size_t j = 0; j < si.args.size(); ++j) {
       *next_arg = si.args[j];
-      *rev_indx_it = si.original_index[orig_indx];
-
+      if (needs_reverse_mapping) {
+        *rev_indx_it++ = si.original_index[orig_indx];
+      }
       ++next_arg;
       ++orig_indx;
-      ++rev_indx_it;
     }
   }
 
@@ -224,6 +248,8 @@ void Transaction::InitByArgs(DbIndex index, CmdArgList args) {
       DCHECK_EQ(TxQueue::kEnd, sd.pq_pos);
     }
   }
+
+  return OpStatus::OK;
 }
 
 void Transaction::SetExecCmd(const CommandId* cid) {
@@ -1124,6 +1150,55 @@ void Transaction::BreakOnClose() {
     coordinator_state_ |= COORD_CANCELLED;
     blocking_ec_.notify();
   }
+}
+
+
+OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
+  DCHECK_EQ(0u, cid->opt_mask() & CO::GLOBAL_TRANS);
+
+  KeyIndex key_index;
+  int num_custom_keys = -1;
+
+  if (cid->opt_mask() & CO::DESTINATION_KEY) {
+    key_index.bonus = 1;
+    if (args.size() < 3) {
+      return OpStatus::SYNTAX_ERR;
+    }
+    string_view num(ArgS(args, 2));
+    if (!absl::SimpleAtoi(num, &num_custom_keys) || num_custom_keys < 0 ||
+        size_t(num_custom_keys) + 3 > args.size())
+      return OpStatus::INVALID_INT;
+  }
+
+  if (cid->first_key_pos() > 0) {
+    key_index.start = cid->first_key_pos();
+    int last = cid->last_key_pos();
+    if (num_custom_keys >= 0) {
+      key_index.end = key_index.start + num_custom_keys;
+    } else {
+      key_index.end = last > 0 ? last + 1 : (int(args.size()) + 1 + last);
+    }
+    key_index.step = cid->key_arg_step();
+
+    return key_index;
+  }
+
+  string_view name{cid->name()};
+  if (name == "EVAL" || name == "EVALSHA") {
+    DCHECK_GE(args.size(), 3u);
+    uint32_t num_keys;
+
+    CHECK(absl::SimpleAtoi(ArgS(args, 2), &num_keys));
+    key_index.start = 3;
+    key_index.end = 3 + num_keys;
+    key_index.step = 1;
+
+    return key_index;
+  }
+
+  LOG(FATAL) << "TBD: Not supported";
+
+  return key_index;
 }
 
 }  // namespace dfly

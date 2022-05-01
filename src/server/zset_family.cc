@@ -422,10 +422,10 @@ void IntervalVisitor::ExtractSkipList(const zrangespec& range) {
 
 void IntervalVisitor::ExtractListPack(const zlexrangespec& range) {
   uint8_t* zl = (uint8_t*)zobj_->ptr;
-  uint8_t *eptr, *sptr;
-  uint8_t* vstr;
-  unsigned int vlen;
-  long long vlong;
+  uint8_t *eptr, *sptr = nullptr;
+  uint8_t* vstr = nullptr;
+  unsigned int vlen = 0;
+  long long vlong = 0;
   unsigned offset = params_.offset;
   unsigned limit = params_.limit;
 
@@ -748,6 +748,10 @@ void ZSetFamily::ZIncrBy(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendDouble(add_result.new_score);
 }
 
+void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
+
+}
+
 void ZSetFamily::ZLexCount(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
 
@@ -979,6 +983,19 @@ void ZSetFamily::ZScan(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void ZSetFamily::ZUnionStore(CmdArgList args, ConnectionContext* cntx) {
+  auto cb = [&](Transaction* t, EngineShard* es) {
+    auto args = t->ShardArgsInShard(es->shard_id());
+    for (auto x : args) {
+      LOG(INFO) << "arg " << x;
+    }
+    return OpStatus::OK;
+  };
+
+  OpStatus result = cntx->transaction->ScheduleSingleHop(std::move(cb));
+  (*cntx)->SendOk();
+}
+
 void ZSetFamily::ZRangeByScoreInternal(string_view key, string_view min_s, string_view max_s,
                                        const RangeParams& params, ConnectionContext* cntx) {
   ZRangeSpec range_spec;
@@ -1201,7 +1218,7 @@ OpStatus ZSetFamily::OpAdd(const ZParams& zparams, const OpArgs& op_args, string
   unsigned processed = 0;
 
   sds& tmp_str = op_args.shard->tmp_str1;
-  double new_score;
+  double new_score = 0;
   int retflags = 0;
 
   OpStatus res = OpStatus::OK;
@@ -1483,6 +1500,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1, 1}.HFUNC(ZCard)
             << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1, 1}.HFUNC(ZCount)
             << CI{"ZINCRBY", CO::FAST | CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(ZIncrBy)
+            << CI{"ZINTERSTORE", CO::WRITE | CO::DESTINATION_KEY, -4, 1, 1, 1}.HFUNC(ZInterStore)
             << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1, 1}.HFUNC(ZLexCount)
             << CI{"ZREM", CO::FAST | CO::WRITE, -3, 1, 1, 1}.HFUNC(ZRem)
             << CI{"ZRANGE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRange)
@@ -1496,7 +1514,8 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZREVRANGE", CO::READONLY, 4, 1, 1, 1}.HFUNC(ZRevRange)
             << CI{"ZREVRANGEBYSCORE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRevRangeByScore)
             << CI{"ZREVRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZRevRank)
-            << CI{"ZSCAN", CO::READONLY | CO::RANDOM, -3, 1, 1, 1}.HFUNC(ZScan);
+            << CI{"ZSCAN", CO::READONLY | CO::RANDOM, -3, 1, 1, 1}.HFUNC(ZScan)
+            << CI{"ZUNIONSTORE", CO::WRITE | CO::DESTINATION_KEY, -4, 3, 3, 1}.HFUNC(ZUnionStore);
 }
 
 }  // namespace dfly

@@ -68,6 +68,7 @@ class ServerFamily {
   }
 
   void Auth(CmdArgList args, ConnectionContext* cntx);
+  void Client(CmdArgList args, ConnectionContext* cntx);
   void Config(CmdArgList args, ConnectionContext* cntx);
   void DbSize(CmdArgList args, ConnectionContext* cntx);
   void Debug(CmdArgList args, ConnectionContext* cntx);
@@ -77,12 +78,14 @@ class ServerFamily {
   void Info(CmdArgList args, ConnectionContext* cntx);
   void Hello(CmdArgList args, ConnectionContext* cntx);
   void LastSave(CmdArgList args, ConnectionContext* cntx);
+  void Latency(CmdArgList args, ConnectionContext* cntx);
   void Psync(CmdArgList args, ConnectionContext* cntx);
   void ReplicaOf(CmdArgList args, ConnectionContext* cntx);
   void Role(CmdArgList args, ConnectionContext* cntx);
   void Save(CmdArgList args, ConnectionContext* cntx);
   void Script(CmdArgList args, ConnectionContext* cntx);
   void Sync(CmdArgList args, ConnectionContext* cntx);
+
 
   void _Shutdown(CmdArgList args, ConnectionContext* cntx);
 

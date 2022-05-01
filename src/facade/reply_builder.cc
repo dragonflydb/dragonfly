@@ -153,7 +153,6 @@ void MCReplyBuilder::SendNotFound() {
   SendSimpleString("NOT_FOUND");
 }
 
-
 char* RedisReplyBuilder::FormatDouble(double val, char* dest, unsigned dest_len) {
   StringBuilder sb(dest, dest_len);
   CHECK(dfly_conv.ToShortest(val, &sb));
@@ -228,6 +227,12 @@ void RedisReplyBuilder::SendError(OpStatus status) {
       break;
     case OpStatus::INVALID_FLOAT:
       SendError(kInvalidFloatErr);
+      break;
+    case OpStatus::INVALID_INT:
+      SendError(kInvalidIntErr);
+      break;
+    case OpStatus::SYNTAX_ERR:
+      SendError(kSyntaxErr);
       break;
     default:
       LOG(ERROR) << "Unsupported status " << status;

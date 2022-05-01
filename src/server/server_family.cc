@@ -332,6 +332,18 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
+  ToUpper(&args[1]);
+  string_view sub_cmd = ArgS(args, 1);
+
+  if (sub_cmd == "SETNAME") {
+    return (*cntx)->SendOk();
+  }
+
+  LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
+  (*cntx)->SendError(kSyntaxErr);
+}
+
 void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[1]);
   string_view sub_cmd = ArgS(args, 1);
@@ -678,6 +690,18 @@ void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendLong(last_save_);
 }
 
+void ServerFamily::Latency(CmdArgList args, ConnectionContext* cntx) {
+  ToUpper(&args[1]);
+  string_view sub_cmd = ArgS(args, 1);
+
+  if (sub_cmd == "LATEST") {
+    return (*cntx)->StartArray(0);
+  }
+
+  LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
+  (*cntx)->SendError(kSyntaxErr);
+}
+
 void ServerFamily::_Shutdown(CmdArgList args, ConnectionContext* cntx) {
   CHECK_NOTNULL(acceptor_)->Stop();
   (*cntx)->SendOk();
@@ -705,6 +729,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
 
   *registry << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, 0}.HFUNC(Auth)
             << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Save)
+            << CI{"CLIENT", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.HFUNC(Client)
             << CI{"CONFIG", CO::ADMIN, -2, 0, 0, 0}.HFUNC(Config)
             << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(DbSize)
             << CI{"DEBUG", CO::RANDOM | CO::ADMIN | CO::LOADING, -2, 0, 0, 0}.HFUNC(Debug)
@@ -713,6 +738,8 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"INFO", CO::LOADING, -1, 0, 0, 0}.HFUNC(Info)
             << CI{"HELLO", CO::LOADING, -1, 0, 0, 0}.HFUNC(Hello)
             << CI{"LASTSAVE", CO::LOADING | CO::RANDOM | CO::FAST, 1, 0, 0, 0}.HFUNC(LastSave)
+            << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING | CO::RANDOM | CO::FAST, -2, 0, 0, 0}.HFUNC(
+                   Latency)
             << CI{"MEMORY", kMemOpts, -2, 0, 0, 0}.HFUNC(Memory)
             << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Save)
             << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0}.HFUNC(_Shutdown)
