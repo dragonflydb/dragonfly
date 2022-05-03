@@ -7,6 +7,7 @@
 #include <absl/numeric/bits.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <stack>
 #include <type_traits>
 #include <vector>
@@ -23,26 +24,12 @@ using namespace std;
 constexpr size_t kMinSizeShift = 2;
 constexpr size_t kMinSize = 1 << kMinSizeShift;
 constexpr bool kAllowDisplacements = true;
-constexpr bool kFastScan = true;
 
-DenseSet::ChainIterator& DenseSet::ChainIterator::operator++() {
-  if (curr_) {
-    curr_ = curr_->Next();
-  }
-
-  return *this;
+DenseSet::DenseSet(pmr::memory_resource* mr) : entries_(mr) {
 }
 
-DenseSet::ConstChainIterator& DenseSet::ConstChainIterator::operator++() {
-  if (curr_) {
-    curr_ = curr_->Next();
-  }
-
-  return *this;
-}
-
-bool DenseSet::IsEmpty(DenseSet::ChainVectorIterator it) const {
-  return it->IsEmpty();
+DenseSet::~DenseSet() {
+  Clear();
 }
 
 size_t DenseSet::PushFront(DenseSet::ChainVectorIterator it, void* data) {
@@ -64,17 +51,17 @@ size_t DenseSet::PushFront(DenseSet::ChainVectorIterator it, void* data) {
   return ObjectAllocSize(data);
 }
 
-void DenseSet::PushFront(DenseSet::ChainVectorIterator it, DenseSet::DensePtr* ptr) {
+void DenseSet::PushFront(DenseSet::ChainVectorIterator it, DenseSet::DensePtr ptr) {
   if (it->IsEmpty()) {
-    it->SetObject(ptr->GetObject());
-    if (ptr->IsLink()) {
+    it->SetObject(ptr.GetObject());
+    if (ptr.IsLink()) {
       // deallocate the link if it is no longer a link as it is now in an empty list
-      mr()->deallocate(ptr->Raw(), sizeof(DenseLinkKey), alignof(DenseLinkKey));
+      mr()->deallocate(ptr.Raw(), sizeof(DenseLinkKey), alignof(DenseLinkKey));
     }
-  } else if (ptr->IsLink()) {
+  } else if (ptr.IsLink()) {
     // if the pointer is already a link then no allocation needed
-    *ptr->Next() = *it;
-    *it = *ptr;
+    *ptr.Next() = *it;
+    *it = ptr;
   } else {
     // allocate a new link if needed and copy the pointer to the new link
     LinkAllocator la(mr());
@@ -82,104 +69,57 @@ void DenseSet::PushFront(DenseSet::ChainVectorIterator it, DenseSet::DensePtr* p
     la.construct(lk);
 
     lk->next = *it;
-    lk->SetObject(ptr->GetObject());
+    lk->SetObject(ptr.GetObject());
     it->SetLink(lk);
   }
 }
 
-void* DenseSet::PopFront(DenseSet::ChainVectorIterator it) {
-  if (IsEmpty(it)) {
-    return nullptr;
+auto DenseSet::PopPtrFront(DenseSet::ChainVectorIterator it) -> DensePtr {
+  if (it->IsEmpty()) {
+    return DensePtr(nullptr);
   }
 
-  void* ret = it->GetObject();
+  DensePtr front = *it;
 
-  // if this is the last object in this chain just reset the
-  // DensePtr instead of deleting it
+  // if this is an object, then it's also the only record in this chain.
+  // therefore, we should just reset DensePtr.
   if (it->IsObject()) {
     it->Reset();
   } else {
     DCHECK(it->IsLink());
-    // set the current item in the list to the next one & deallocate the link data structure
-    DenseLinkKey* lk = (DenseLinkKey*)it->Raw();
-    *it = lk->next;
+    // this will not return nullptr since it is a Link
+    *it = *it->Next();
+  }
+
+  return front;
+}
+
+void* DenseSet::PopDataFront(DenseSet::ChainVectorIterator it) {
+  DensePtr front = PopPtrFront(it);
+  void* ret = front.GetObject();
+
+  if (front.IsLink()) {
+    DenseLinkKey* lk = (DenseLinkKey*)front.Raw();
     mr()->deallocate(lk, sizeof(DenseLinkKey), alignof(DenseLinkKey));
   }
 
   return ret;
 }
 
-DenseSet::DensePtr* DenseSet::Find(void* needle, DenseSet::ChainVectorIterator list,
-                                   DenseSet::DensePtr** prev_out) {
-  DensePtr* prev = nullptr;
-  ChainIterator it = ChainBegin(list);
-  for (; it != ChainEnd(list); ++it) {
-    if (Equal(*it, needle)) {
-      break;
-    }
-
-    prev = *it;
-  }
-
-  if (!it->IsEmpty() && prev_out != nullptr) {
-    *prev_out = prev;
-  }
-
-  return *it;
-}
-
-DenseSet::ChainIterator DenseSet::Unlink(DenseSet::ChainIterator node,
-                                          DenseSet::ChainIterator prev, DenseSet::DensePtr* out) {
-  DCHECK(out != nullptr);
+auto DenseSet::Unlink(DenseSet::DensePtr* node) -> DensePtr {
+  DensePtr ret = *node;
   if (node->IsObject()) {
-    // this is the only item in the list, reset it and keep the iterator here
-    if (prev == nullptr) {
-      // copy the pointer to the data before a reset
-      *out = **node;
-      node->Reset();
-      return node;
-    } else {
-      DCHECK(prev->IsLink());
-      /*
-        here we can try to pull a sneaky optimization, since the caller
-        may get a LinkKey or an regular object it is responsible for freeing it.
-        Some use cases (i.e Grow) may be able to use a LinkKey without freeing it as they can be
-        inserted into the front of a non-empty chained list. So instead of freeing them here
-        and save some memory management calls
-      */
-      DenseLinkKey* lk = (DenseLinkKey*)prev->Raw();
-      DCHECK(!lk->IsDisplaced());
-
-      // swap the two pointers to the actual data
-      void* lk_tmp = lk->GetObject();
-      lk->SetObject(node->GetObject());
-      node->SetObject(lk_tmp);
-
-      // prev now contains the data unlinked so store this pointer value in the out ptr
-      *out = **prev;
-      // overwrite prev with the data in node which is the end node containing the original
-      // previous value
-      **prev = **node;
-
-      // set the iterator to be the location of the previous value as this now contains
-      // the valid node still in the linked list
-      return prev;
-    }
+    node->Reset();
   } else {
-    DCHECK(node->IsLink());
-    // return the node and replace its spot with the next node in the list
-    DenseLinkKey* lk = (DenseLinkKey*)node->Raw();
-    *out = **node;
-    **node = lk->next;
-    return node;
+    *node = *node->Next();
   }
+
+  return ret;
 }
 
-DenseSet::ChainIterator DenseSet::UnlinkAndFree(DenseSet::ChainIterator node,
-                                                 DenseSet::ChainIterator prev, void** out) {
-  DensePtr unlinked;
-  ChainIterator ret = Unlink(node, prev, &unlinked);
-  *out = unlinked.GetObject();
+void* DenseSet::UnlinkAndFree(DenseSet::DensePtr* node) {
+  DensePtr unlinked = Unlink(node);
+  void* ret = unlinked.GetObject();
 
   if (unlinked.IsLink()) {
     mr()->deallocate(unlinked.Raw(), sizeof(DenseLinkKey), alignof(DenseLinkKey));
@@ -188,24 +128,17 @@ DenseSet::ChainIterator DenseSet::UnlinkAndFree(DenseSet::ChainIterator node,
   return ret;
 }
 
-DenseSet::DenseSet(pmr::memory_resource* mr) : entries_(mr) {
-}
-
 void DenseSet::Clear() {
   for (auto it = entries_.begin(); it != entries_.end(); ++it) {
     while (!it->IsEmpty()) {
-      PopFront(it);
+      PopDataFront(it);
     }
   }
 
   entries_.clear();
 }
 
-DenseSet::~DenseSet() {
-  Clear();
-}
-
-DenseSet::ChainVectorIterator DenseSet::FindEmptyAround(uint32_t bid) {
+auto DenseSet::FindEmptyAround(uint32_t bid) -> ChainVectorIterator {
   if (entries_[bid].IsEmpty()) {
     return entries_.begin() + bid;
   }
@@ -249,27 +182,20 @@ void DenseSet::Grow() {
   ++capacity_log_;
 
   for (long i = prev_size - 1; i >= 0; --i) {
-    ChainIterator prev = ChainEnd(i);
-    ChainIterator curr = ChainBegin(i);
+    DensePtr* curr = &entries_[i];
 
-    while (curr != ChainEnd(i)) {
+    while (curr != nullptr && !curr->IsEmpty()) {
       void* ptr = curr->GetObject();
       uint32_t bid = BucketId(ptr);
 
       if (bid == i) {
         curr->ClearDisplaced();
-        prev = curr;
-        ++curr;
+        curr = curr->Next();
       } else {
-        DensePtr node;
-        curr = Unlink(curr, prev, &node);
-        PushFront(entries_.begin() + bid, &node);
+        DensePtr node = Unlink(curr);
+        PushFront(entries_.begin() + bid, node);
         entries_[bid].ClearDisplaced();
       }
-    }
-
-    if (prev != nullptr) {
-      DCHECK(!prev->IsLink());
     }
   }
 }
@@ -291,7 +217,7 @@ bool DenseSet::AddInternal(void* ptr) {
 
   // if the value is already in the set exit early
   uint32_t bucket_id = BucketId(hc);
-  if (FindAround(ptr, bucket_id).first != ChainEnd(bucket_id)) {
+  if (Find(ptr, bucket_id) != nullptr) {
     return false;
   }
 
@@ -330,91 +256,76 @@ bool DenseSet::AddInternal(void* ptr) {
    * Then unwind the stack of pending displacements until each node is in
    * its correct bucket
    */
-  std::stack<std::pair<DensePtr, ChainVectorIterator>> to_fix_displacements;
-  auto curr = entries_.begin() + bucket_id;
-  while (!curr->IsEmpty() && curr->IsDisplaced()) {
-    DCHECK(!curr->IsLink());
-    DensePtr unlinked;
-    Unlink(ChainBegin(curr), nullptr, &unlinked);
-    --num_used_buckets_;
 
-    // undo the direction shift in a displaced pointer
-    curr -= unlinked.GetDisplacedDirection();
-    to_fix_displacements.push({unlinked, curr});
+  DensePtr to_insert(ptr);
+  while (!entries_[bucket_id].IsEmpty() && entries_[bucket_id].IsDisplaced()) {
+    DensePtr unlinked = PopPtrFront(entries_.begin() + bucket_id);
+
+    PushFront(entries_.begin() + bucket_id, to_insert);
+    to_insert = unlinked;
+    bucket_id -= unlinked.GetDisplacedDirection();
   }
 
-  while (!to_fix_displacements.empty()) {
-    auto [ptr, list] = to_fix_displacements.top();
-    to_fix_displacements.pop();
-
-    if (!list->IsEmpty()) {
-      ++num_chain_entries_;
-    } else {
-      ++num_used_buckets_;
-    }
-
-    PushFront(list, &ptr);
-  }
   if (!entries_[bucket_id].IsEmpty()) {
     ++num_chain_entries_;
   }
 
   ChainVectorIterator list = entries_.begin() + bucket_id;
-  obj_malloc_used_ += PushFront(list, ptr);
+  PushFront(list, to_insert);
+  obj_malloc_used_ += ObjectAllocSize(ptr);
   DCHECK(!entries_[bucket_id].IsDisplaced());
 
   ++size_;
   return true;
 }
 
-std::pair<DenseSet::ChainIterator, DenseSet::ChainIterator> DenseSet::FindAround(void* ptr,
-                                                                                   uint32_t bid) {
+auto DenseSet::Find(const void* ptr, uint32_t bid) const -> const DensePtr* {
   // first look for displaced nodes since this is quicker than iterating a poential long chain
-  if (bid && Equal(&entries_[bid - 1], ptr)) {
-    return {ChainBegin(bid - 1), ChainEnd(bid - 1)};
+  if (bid && Equal(entries_[bid - 1], ptr)) {
+    return &entries_[bid - 1];
   }
 
-  if (bid + 1 < entries_.size() && Equal(&entries_[bid + 1], ptr)) {
-    return {ChainBegin(bid + 1), ChainEnd(bid + 1)};
+  if (bid + 1 < entries_.size() && Equal(entries_[bid + 1], ptr)) {
+    return &entries_[bid + 1];
   }
 
   // if the node is not displaced, search the correct chain
-  ChainIterator prev;
-  for (auto it = ChainBegin(bid); it != ChainEnd(bid); ++it) {
-    if (Equal(*it, ptr)) {
-      return {it, prev};
+  const DensePtr* curr = &entries_[bid];
+  while (curr != nullptr) {
+    if (Equal(*curr, ptr)) {
+      return curr;
     }
 
-    prev = it;
+    curr = curr->Next();
   }
 
   // not in the Set
-  return {ChainEnd(bid), ChainEnd(bid)};
+  return nullptr;
+}
+
+auto DenseSet::Find(const void* ptr) const -> const DensePtr* {
+  return Find(ptr, BucketId(ptr));
+}
+
+auto DenseSet::Find(const void* ptr, uint32_t bid) -> DensePtr* {
+  const DensePtr* ret = const_cast<const DenseSet*>(this)->Find(ptr, bid);
+  return const_cast<DensePtr*>(ret);
+}
+
+auto DenseSet::Find(const void* ptr) -> DensePtr* {
+  const DensePtr* ret = const_cast<const DenseSet*>(this)->Find(ptr);
+  return const_cast<DensePtr*>(ret);
 }
 
 // Same idea as FindAround but provide the const guarantee
 bool DenseSet::ContainsInternal(const void* ptr) const {
   uint32_t bid = BucketId(ptr);
-  if (bid && Equal(&entries_[bid - 1], ptr)) {
-    return true;
-  }
-
-  if (bid + 1 < entries_.size() && Equal(&entries_[bid + 1], ptr)) {
-    return true;
-  }
-
-  for (auto it = ChainConstBegin(bid); it != ChainConstEnd(bid); ++it) {
-    if (Equal(*it, ptr)) {
-      return true;
-    }
-  }
-
-  return false;
+  return Find(ptr, bid) != nullptr;
 }
 
 void* DenseSet::EraseInternal(void* ptr) {
   uint32_t bid = BucketId(ptr);
-  auto [found, prev] = FindAround(ptr, bid);
+  auto found = Find(ptr, bid);
 
   if (found == nullptr) {
     return nullptr;
@@ -428,8 +339,7 @@ void* DenseSet::EraseInternal(void* ptr) {
   }
 
   obj_malloc_used_ -= ObjectAllocSize(ptr);
-  void* ret;
-  (void)UnlinkAndFree(found, prev, &ret);
+  void* ret = UnlinkAndFree(found);
 
   --size_;
   return ret;
@@ -457,8 +367,7 @@ void* DenseSet::PopInternal() {
 
   // unlink the first node in the first non-empty chain
   obj_malloc_used_ -= ObjectAllocSize(bucket_iter->GetObject());
-  void* ret;
-  (void)UnlinkAndFree(&*bucket_iter, nullptr, &ret);
+  void* ret = PopDataFront(bucket_iter);
 
   --size_;
   return ret;
@@ -477,69 +386,31 @@ void* DenseSet::PopInternal() {
  * covered the range [000-111] (all keys in that case).
  * Returns: next cursor or 0 if reached the end of scan.
  * cursor = 0 - initiates a new scan.
- *
- * Therefore for any given Scan cursor x which was run when capacity_log_ was m, if the
- * next Scan is run when capacity_log_ is n the current bucket to check is x << (n - m)
- *
- * When kFastScan is enabled this optimization is used.
- * To be able to make this comparison the cursor must store the capacity_log_ from when
- * Scan is run. To do this the (capacity_log_)th bit is set in the cursor, this will always
- * be the highest bit set since the number of buckets is 2**(capacity_log_) and therefore
- * the greatest index is (2 ** capacity_log_) - 1.
- *
- * When using this optimization the maximum number of buckets is 2 ** 31 instead of 2 ** 32
  */
 
-// Extract the previous capacity_log_ from the cursor
-static inline std::pair<size_t, uint32_t> cursor_to_idx(uint32_t cursor) {
-  DCHECK(cursor != 0);
-  size_t expected_capacity_log = 0;
-  uint32_t expected_capacity_log_bitmask = 1;
-
-  while ((cursor >> expected_capacity_log) != 1) {
-    ++expected_capacity_log;
-    expected_capacity_log_bitmask <<= 1;
-  }
-
-  return {expected_capacity_log, expected_capacity_log_bitmask};
-}
-
 uint32_t DenseSet::Scan(uint32_t cursor, const ItemCb& cb) const {
-  uint32_t entries_idx = 0;
-
-  // if the fast scan optimization is enabled
-  if constexpr (kFastScan) {
-    DCHECK(entries_.size() <= (1ULL << 31));
-    // not a new scan
-    if (cursor != 0) {
-      // extract the previous capacity_log_ and actual bucket index from the cursor
-      auto [cursor_capacity_log, cursor_bitmask] = cursor_to_idx(cursor);
-      entries_idx = cursor & ~cursor_bitmask;
-
-      // Since DenseSet does not currently support shrinking the current log2(capacity)
-      // should never be less than the log2(capacity) of the cursor from a previous Scan run
-      DCHECK(cursor_capacity_log <= capacity_log_);
-
-      // if the capacity has grown significantly use the above described optmization
-      // to skip as many buckets as possible
-      if (cursor_capacity_log < capacity_log_) {
-        entries_idx <<= capacity_log_ - cursor_capacity_log;
-      }
-    }
+  // empty set
+  if (capacity_log_ == 0) {
+    return 0;
   }
 
-  // Shrinkage is not currently supported by the DenseSet type
-  DCHECK(entries_idx < 1ULL << capacity_log_);
+  uint32_t entries_idx = cursor >> (32 - capacity_log_);
 
   // skip empty entries
   while (entries_idx < entries_.size() && entries_[entries_idx].IsEmpty()) {
     ++entries_idx;
   }
 
+  if (entries_idx >= entries_.size()) {
+    return 0;
+  }
+
+  const DensePtr* curr = &entries_[entries_idx];
+
   // when scanning add all entries in a given chain
-  for (ConstChainIterator it = ChainConstBegin(entries_idx); it != ChainConstEnd(entries_idx);
-       ++it) {
-    cb(it->GetObject());
+  while (curr != nullptr && !curr->IsEmpty()) {
+    cb(curr->GetObject());
+    curr = curr->Next();
   }
 
   // move to the next index for the next scan and check if we are done
@@ -548,11 +419,6 @@ uint32_t DenseSet::Scan(uint32_t cursor, const ItemCb& cb) const {
     return 0;
   }
 
-  // encode the current capacity_log_ in the cursor if needed
-  if constexpr (kFastScan) {
-    entries_idx |= 1 << capacity_log_;
-  }
-
-  return entries_idx;
+  return entries_idx << (32 - capacity_log_);
 }
 }  // namespace dfly

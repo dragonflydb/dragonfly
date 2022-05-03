@@ -201,6 +201,8 @@ TEST_F(StringSetTest, ScanGuarantees) {
     }
   };
 
+  EXPECT_EQ(ss_->Scan(0, scan_callback), 0);
+
   for (auto str : not_be_seen) {
     EXPECT_TRUE(ss_->Add(str));
   }
@@ -323,7 +325,7 @@ TEST_F(StringSetTest, XtremeScanGrow) {
 }
 
 TEST_F(StringSetTest, Pop) {
-  constexpr size_t num_items = 8192;
+  constexpr size_t num_items = 8;
   std::unordered_set<std::string> to_insert;
 
   std::mt19937 generator(0);
@@ -341,6 +343,7 @@ TEST_F(StringSetTest, Pop) {
   while (!ss_->Empty()) {
     size_t size = ss_->Size();
     auto str = ss_->Pop();
+    DCHECK(ss_->Size() == to_insert.size() - 1);
     DCHECK(str.has_value());
     DCHECK(to_insert.count(str.value()));
     DCHECK_EQ(ss_->Size(), size - 1);

@@ -30,12 +30,12 @@ size_t StringSet::ObjectAllocSize(const void* s1) const {
 }
 
 bool StringSet::AddRaw(sds s1) {
-  return DenseSet::AddInternal(s1);
+  return AddInternal(s1);
 }
 
 bool StringSet::Add(std::string_view s1) {
   sds newsds = sdsnewlen(s1.data(), s1.size());
-  if (!DenseSet::AddInternal(newsds)) {
+  if (!AddInternal(newsds)) {
     sdsfree(newsds);
     return false;
   }
@@ -44,7 +44,7 @@ bool StringSet::Add(std::string_view s1) {
 }
 
 bool StringSet::EraseRaw(sds s1) {
-  void *ret = DenseSet::EraseInternal(s1);
+  void *ret = EraseInternal(s1);
   if (ret == nullptr) {
     return false;
   } else {
@@ -61,12 +61,12 @@ bool StringSet::Erase(std::string_view s1) {
 }
 
 bool StringSet::ContainsRaw(sds s1) const {
-  return DenseSet::ContainsInternal(s1);
+  return ContainsInternal(s1);
 }
 
 bool StringSet::Contains(std::string_view s1) const {
   sds to_search = sdsnewlen(s1.data(), s1.size());
-  bool ret = DenseSet::ContainsInternal(to_search);
+  bool ret = ContainsInternal(to_search);
   sdsfree(to_search);
   return ret;
 }
@@ -80,7 +80,7 @@ void StringSet::Clear() {
 }
 
 std::optional<std::string> StringSet::Pop() {
-  sds str = (sds)DenseSet::PopInternal();
+  sds str = (sds)PopInternal();
 
   if (str == nullptr) {
     return std::nullopt;
@@ -93,7 +93,7 @@ std::optional<std::string> StringSet::Pop() {
 }
 
 sds StringSet::PopRaw() {
-  return (sds)DenseSet::PopInternal();
+  return (sds)PopInternal();
 }
 
 uint32_t StringSet::Scan(uint32_t cursor, const std::function<void(const sds)>& func) const {

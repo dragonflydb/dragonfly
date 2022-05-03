@@ -25,7 +25,7 @@ To insert an entry a `DenseSet` will take the following steps:
 
 1. Check if the entry already exists in the set, if so return false
 2. If the entry does not exist look for an empty chain at the hash index ± 1, prioritizing the home chain. If an empty entry is found the item will be inserted and return true
-3. If step 2 fails and the growth prerequisites are met, grow the number of chains in the set and repeat step 2
+3. If step 2 fails and the growth prerequisites are met, increase the number of buckets in the table and repeat step 2
 4. If step 3 fails, attempt to insert the entry in the home chain.
     - If the home chain is not occupied by a displaced entry insert the new entry in the front of the list
     - If the home chain is occupied by a displaced entry move the displaced entry to its home chain. This may cause a domino effect if the home chain of the displaced entry is occupied by a second displaced entry, resulting in up to `O(N)` "fixes"

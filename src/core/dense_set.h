@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <iterator>
 #include <memory_resource>
@@ -36,7 +37,8 @@ namespace dfly {
 
 class DenseSet {
  public:
-  bool Reserve(size_t sz);
+  explicit DenseSet(std::pmr::memory_resource* mr = std::pmr::get_default_resource());
+  virtual ~DenseSet();
 
  protected:
   // Virtual functions to be implemented for generic data
@@ -51,6 +53,9 @@ class DenseSet {
   void* PopInternal();
 
  private:
+  DenseSet(const DenseSet&) = delete;
+  DenseSet& operator=(DenseSet&) = delete;
+
   struct DenseLinkKey;
   // we can assume that high 12 bits of user address space
   // can be used for tagging. At most 52 bits of address are reserved for
@@ -65,12 +70,16 @@ class DenseSet {
     explicit DensePtr(void* p = nullptr) : ptr_(p) {
     }
 
+    uint64_t uptr() const {
+      return uint64_t(ptr_);
+    }
+
     bool IsObject() const {
-      return (uintptr_t(ptr_) & kLinkBit) == 0;
+      return (uptr() & kLinkBit) == 0;
     }
 
     bool IsLink() const {
-      return (uintptr_t(ptr_) & kLinkBit) == kLinkBit;
+      return (uptr() & kLinkBit) == kLinkBit;
     }
 
     bool IsEmpty() const {
@@ -78,11 +87,11 @@ class DenseSet {
     }
 
     void* Raw() const {
-      return (void*)(uintptr_t(ptr_) & ~kTagMask);
+      return (void*)(uptr() & ~kTagMask);
     }
 
     bool IsDisplaced() const {
-      return (uintptr_t(ptr_) & kDisplaceBit) == kDisplaceBit;
+      return (uptr() & kDisplaceBit) == kDisplaceBit;
     }
 
     void SetLink(DenseLinkKey* lk) {
@@ -90,20 +99,19 @@ class DenseSet {
     }
 
     void SetDisplaced(int direction) {
-      ptr_ = (void*)(uintptr_t(ptr_) | kDisplaceBit);
+      ptr_ = (void*)(uptr() | kDisplaceBit);
       if (direction == 1) {
-        ptr_ = (void*)(uintptr_t(ptr_) | kDisplaceDirectionBit);
+        ptr_ = (void*)(uptr() | kDisplaceDirectionBit);
       }
     }
 
     void ClearDisplaced() {
-      ptr_ = (void*)(uintptr_t(ptr_) & ~kDisplaceBit);
-      ptr_ = (void*)(uintptr_t(ptr_) & ~kDisplaceDirectionBit);
+      ptr_ = (void*)(uptr() & ~(kDisplaceBit | kDisplaceDirectionBit));
     }
 
     // returns 1 if the displaced node is right of the correct bucket and -1 if it is left
     int GetDisplacedDirection() const {
-      return (uintptr_t(ptr_) & kDisplaceDirectionBit) == kDisplaceDirectionBit ? 1 : -1;
+      return (uptr() & kDisplaceDirectionBit) == kDisplaceDirectionBit ? 1 : -1;
     }
 
     void Reset() {
@@ -111,15 +119,16 @@ class DenseSet {
     }
 
     void* GetObject() const {
-      if (IsObject())
+      if (IsObject()) {
         return Raw();
+      }
       DenseLinkKey* lk = (DenseLinkKey*)Raw();
       return lk->Raw();
     }
 
     // Sets pointer but preserves tagging info
     void SetObject(void* obj) {
-      ptr_ = (void*)((uintptr_t(ptr_) & kTagMask) | (uintptr_t(obj) & ~kTagMask));
+      ptr_ = (void*)((uptr() & kTagMask) | (uintptr_t(obj) & ~kTagMask));
     }
 
     DensePtr* Next() {
@@ -153,12 +162,12 @@ class DenseSet {
   using ChainVectorIterator = std::pmr::vector<DensePtr>::iterator;
   using ChainVectorConstIterator = std::pmr::vector<DensePtr>::const_iterator;
 
-  bool Equal(const DensePtr* dptr, const void* ptr) const {
-    if (dptr->IsEmpty()) {
+  bool Equal(const DensePtr dptr, const void* ptr) const {
+    if (dptr.IsEmpty()) {
       return false;
     }
 
-    return Equal(dptr->GetObject(), ptr);
+    return Equal(dptr.GetObject(), ptr);
   }
 
   std::pmr::memory_resource* mr() {
@@ -173,129 +182,32 @@ class DenseSet {
     return BucketId(Hash(ptr));
   }
 
-  // return a DenseSetList (a.k.a iterator) or end if there is an empty chain found
+  // return a ChainVectorIterator (a.k.a iterator) or end if there is an empty chain found
   ChainVectorIterator FindEmptyAround(uint32_t bid);
   void Grow();
 
   // ============ Pseudo Linked List Functions for interacting with Chains ==================
-  class ChainIterator {
-   public:
-    ChainIterator(DensePtr* curr = nullptr) : curr_(curr) {
-    }
-
-    ChainIterator& operator++();
-
-    DensePtr* operator*() {
-      return curr_;
-    }
-
-    DensePtr* operator->() {
-      return curr_;
-    }
-
-    inline bool IsNull() const noexcept {
-      return curr_ == nullptr || curr_->IsEmpty();
-    }
-
-    bool operator==(const ChainIterator& iter) const {
-      return curr_ == iter.curr_ || (this->IsNull() && iter.IsNull());
-    }
-
-    bool operator!=(const ChainIterator& iter) const {
-      return !(*this == iter);
-    }
-
-   private:
-    // keep track of the previous pointer in the needed case of unlinking / removing
-    DensePtr* curr_;
-  };
-
-  class ConstChainIterator {
-   public:
-    ConstChainIterator(const DensePtr* curr = nullptr) : curr_(curr) {
-    }
-
-    ConstChainIterator& operator++();
-
-    const DensePtr* operator*() const {
-      return curr_;
-    }
-
-    const DensePtr* operator->() const {
-      return curr_;
-    }
-
-    inline bool IsNull() const noexcept {
-      return curr_ == nullptr || curr_->IsEmpty();
-    }
-
-    bool operator==(const ConstChainIterator& iter) const {
-      return curr_ == iter.curr_ || (this->IsNull() && iter.IsNull());
-    }
-
-    bool operator!=(const ConstChainIterator& iter) const {
-      return !(*this == iter);
-    }
-
-   private:
-    const DensePtr* curr_;
-  };
-
-  ChainIterator ChainBegin(ChainVectorIterator it) {
-    return it == entries_.end() || it->IsEmpty() ? ChainIterator(nullptr) : ChainIterator(&(*it));
-  }
-
-  ChainIterator ChainEnd(ChainVectorIterator it) {
-    (void)it;
-    return ChainIterator(nullptr);
-  }
-
-  ChainIterator ChainBegin(size_t idx) {
-    return idx >= entries_.size() ? ChainBegin(entries_.end()) : ChainBegin(entries_.begin() + idx);
-  }
-
-  ChainIterator ChainEnd(size_t idx) {
-    return idx >= entries_.size() ? ChainEnd(entries_.end()) : ChainEnd(entries_.begin() + idx);
-  }
-
-  ConstChainIterator ChainConstBegin(ChainVectorConstIterator it) const {
-    return it >= entries_.cend() || it->IsEmpty() ? ConstChainIterator(nullptr)
-                                                  : ConstChainIterator(&(*it));
-  }
-
-  ConstChainIterator ChainConstBegin(size_t idx) const {
-    return idx == entries_.size() ? ChainConstBegin(entries_.cend())
-                                  : ChainConstBegin(entries_.cbegin() + idx);
-  }
-
-  ConstChainIterator ChainConstEnd(ChainVectorConstIterator it) const {
-    (void)it;
-    return ConstChainIterator(nullptr);
-  }
-
-  ConstChainIterator ChainConstEnd(size_t idx) const {
-    return idx >= entries_.size() ? ChainConstEnd(entries_.cend())
-                                  : ChainConstEnd(entries_.cbegin() + idx);
-  }
-
-  bool IsEmpty(ChainVectorIterator) const;
-
   size_t PushFront(ChainVectorIterator, void*);
-  void PushFront(ChainVectorIterator, DensePtr*);
+  void PushFront(ChainVectorIterator, DensePtr);
 
-  void* PopFront(ChainVectorIterator);
+  void* PopDataFront(ChainVectorIterator);
+  DensePtr PopPtrFront(ChainVectorIterator);
 
-  ChainIterator Unlink(ChainIterator node, ChainIterator prev, DensePtr* unlinked);
+  // Note this function will modify the iterator passed to it
+  // to point to the next node in the chain
+  DensePtr Unlink(DensePtr* node);
 
   // Note this will only free the encapsulaing DenseLinkKey and not
-  // the data it points to, this will be returned
-  ChainIterator UnlinkAndFree(ChainIterator node, ChainIterator prev, void** out);
-
-  DensePtr* Find(void*, ChainVectorIterator, DensePtr** = nullptr);
+  // the data it points to, this will be returned.
+  // This function will modify the iterator passed to it
+  // to point to the next node in the chain
+  void* UnlinkAndFree(DensePtr* node);
 
   // ============ Pseudo Linked List in DenseSet end ==================
-
-  std::pair<ChainIterator, ChainIterator> FindAround(void* ptr, uint32_t bid);
+  const DensePtr* Find(const void* ptr, uint32_t bid) const;
+  const DensePtr* Find(const void* ptr) const;
+  DensePtr* Find(const void* ptr, uint32_t bid);
+  DensePtr* Find(const void* ptr);
 
   std::pmr::vector<DensePtr> entries_;
   size_t obj_malloc_used_ = 0;
@@ -345,28 +257,29 @@ class DenseSet {
 
     iterator(DenseSet* set, ChainVectorIterator begin_list) : set_(set), curr_list_(begin_list) {
       if (begin_list == set->entries_.end()) {
-        curr_bucket_ = set->ChainEnd(set->entries_.end());
+        curr_entry_ = nullptr;
       } else {
-        curr_bucket_ = set->ChainBegin(begin_list);
+        curr_entry_ = &*begin_list;
         // find the first non null entry
-        if (curr_bucket_.IsNull()) {
+        if (curr_entry_ == nullptr || curr_entry_->IsEmpty()) {
           ++(*this);
         }
       }
     }
 
     iterator& operator++() {
-      ++curr_bucket_;
-      while (curr_list_ != set_->entries_.end() && curr_bucket_ == set_->ChainEnd(curr_list_)) {
+      curr_entry_ = curr_entry_->Next();
+      while (curr_list_ != set_->entries_.end() &&
+             (curr_entry_ == nullptr || curr_entry_->IsEmpty())) {
         ++curr_list_;
-        curr_bucket_ = set_->ChainBegin(curr_list_);
+        curr_entry_ = &*curr_list_;
       }
 
       return *this;
     }
 
     friend bool operator==(const iterator& a, const iterator& b) {
-      return a.curr_list_ == b.curr_list_ && a.curr_bucket_ == b.curr_bucket_;
+      return a.curr_list_ == b.curr_list_;
     }
 
     friend bool operator!=(const iterator& a, const iterator& b) {
@@ -374,17 +287,17 @@ class DenseSet {
     }
 
     value_type operator*() {
-      return (value_type)curr_bucket_->GetObject();
+      return (value_type)curr_entry_->GetObject();
     }
 
     value_type operator->() {
-      return (value_type)curr_bucket_->GetObject();
+      return (value_type)curr_entry_->GetObject();
     }
 
    private:
     DenseSet* set_;
     ChainVectorIterator curr_list_;
-    ChainIterator curr_bucket_;
+    DensePtr* curr_entry_;
   };
 
   template <typename T> class const_iterator {
@@ -399,29 +312,29 @@ class DenseSet {
     const_iterator(const DenseSet* set, ChainVectorConstIterator begin_list)
         : set_(set), curr_list_(begin_list) {
       if (begin_list == set->entries_.end()) {
-        curr_bucket_ = set->ChainConstEnd(set->entries_.end());
+        curr_entry_ = nullptr;
       } else {
-        curr_bucket_ = set->ChainConstBegin(begin_list);
+        curr_entry_ = &*begin_list;
         // find the first non null entry
-        if (curr_bucket_.IsNull()) {
+        if (curr_entry_ == nullptr || curr_entry_->IsEmpty()) {
           ++(*this);
         }
       }
     }
 
     const_iterator& operator++() {
-      ++curr_bucket_;
+      curr_entry_ = curr_entry_->Next();
+      curr_entry_ = curr_entry_->Next();
       while (curr_list_ != set_->entries_.end() &&
-             curr_bucket_ == set_->ChainConstEnd(curr_list_)) {
+             (curr_entry_ == nullptr || curr_entry_->IsEmpty())) {
         ++curr_list_;
-        curr_bucket_ = set_->ChainConstBegin(curr_list_);
+        curr_entry_ = &*curr_list_;
       }
-
       return *this;
     }
 
     friend bool operator==(const const_iterator& a, const const_iterator& b) {
-      return a.curr_list_ == b.curr_list_ && a.curr_bucket_ == b.curr_bucket_;
+      return a.curr_list_ == b.curr_list_;
     }
 
     friend bool operator!=(const const_iterator& a, const const_iterator& b) {
@@ -429,17 +342,17 @@ class DenseSet {
     }
 
     value_type operator*() const {
-      return (value_type)curr_bucket_->GetObject();
+      return (value_type)curr_entry_->GetObject();
     }
 
     value_type operator->() const {
-      return (value_type)curr_bucket_->GetObject();
+      return (value_type)curr_entry_->GetObject();
     }
 
    private:
     const DenseSet* set_;
     ChainVectorConstIterator curr_list_;
-    ConstChainIterator curr_bucket_;
+    const DensePtr* curr_entry_;
   };
 
   template <typename T> iterator<T> begin() {
@@ -461,11 +374,7 @@ class DenseSet {
   using ItemCb = std::function<void(const void*)>;
 
   uint32_t Scan(uint32_t cursor, const ItemCb& cb) const;
-
-  DenseSet(const DenseSet&) = delete;
-  explicit DenseSet(std::pmr::memory_resource* mr = std::pmr::get_default_resource());
-  virtual ~DenseSet();
-  DenseSet& operator=(DenseSet&) = delete;
+  bool Reserve(size_t sz);
 };
 
 }  // namespace dfly
