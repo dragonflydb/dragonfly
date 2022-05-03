@@ -50,4 +50,4 @@ jobs:
         push: ${{ github.event_name != 'pull_request' }}
         tags: |
           ghcr.io/${{ github.actor }}/dragonfly-ubuntu:latest
-        file: tools/docker/Dockerfile.ubuntu-prod:20
+        file: tools/docker/Dockerfile.ubuntu-prod
