@@ -20,7 +20,7 @@ LABEL org.opencontainers.image.source https://github.com/romange/dragonfly
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN groupadd -r -g 999 dfly && useradd -r -g dfly -u 999 dfly
-RUN apt update && apt install -y libunwind8 libboost-fiber1.71.0 libssl1.1 && \
+RUN apt update && apt install -y libunwind8 libssl1.1 && \
     rm -rf /var/lib/apt/lists/*
 
 RUN mkdir /data && chown dfly:dfly /data
