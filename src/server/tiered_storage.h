@@ -5,6 +5,8 @@
 
 #include <absl/container/flat_hash_map.h>
 
+#include "base/ring_buffer.h"
+
 #include "core/external_alloc.h"
 #include "server/common.h"
 #include "server/io_mgr.h"
@@ -36,10 +38,11 @@ class TieredStorage {
  private:
   struct ActiveIoRequest;
 
-  // return 0 if everything was sent.
-  // if more storage is needed returns requested size in bytes.
-  size_t SerializePendingItems();
-  void SendIoRequest(size_t offset, size_t req_size, ActiveIoRequest* req);
+  bool ShouldFlush();
+
+  void FlushPending();
+  void InitiateGrow(size_t size);
+  void SendIoRequest(size_t req_size, ActiveIoRequest* req);
   void FinishIoRequest(int io_res, ActiveIoRequest* req);
 
   DbSlice& db_slice_;
@@ -59,12 +62,21 @@ class TieredStorage {
   };
 
   struct PerDb {
-    // map of cursor -> pending size
-    absl::flat_hash_map<uint64_t, size_t> pending_upload;
     absl::flat_hash_map<PrimeKey, ActiveIoRequest*, Hasher> active_requests;
   };
 
   std::vector<PerDb*> db_arr_;
+
+  struct PendingReq {
+    uint64_t cursor;
+    DbIndex db_indx = kInvalidDbId;
+  };
+
+  base::RingBuffer<PendingReq> pending_req_;
+
+  // map of cursor -> pending size
+  // absl::flat_hash_map<uint64_t, size_t> pending_upload;
+
   TieredStats stats_;
 };
 

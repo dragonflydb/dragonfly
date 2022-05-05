@@ -36,7 +36,8 @@ class IoMgr {
   std::error_code WriteAsync(size_t offset, std::string_view blob, WriteCb cb);
   std::error_code Read(size_t offset, io::MutableBytes dest);
 
-  size_t Size() const {
+  // Total file span
+  size_t Span() const {
     return sz_;
   }
 

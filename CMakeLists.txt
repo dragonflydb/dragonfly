@@ -15,7 +15,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/helio/cmake" ${CMAKE_MODULE_PATH})
 option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 
-set(Boost_USE_STATIC_LIBS ON)
 include(third_party)
 include(internal)
 

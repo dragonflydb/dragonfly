@@ -47,6 +47,8 @@ jobs:
       with:
         context: .
         platforms: linux/amd64,linux/arm64
+        build-args: |
+          QEMU_CPU='help'
         push: ${{ github.event_name != 'pull_request' }}
         tags: |
           ghcr.io/${{ github.actor }}/dragonfly-ubuntu:latest

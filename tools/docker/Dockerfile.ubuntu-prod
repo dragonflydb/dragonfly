@@ -6,7 +6,7 @@ COPY src/  ./src/
 COPY helio/  ./helio/
 COPY patches/  ./patches/
 COPY CMakeLists.txt ./
-RUN ./helio/blaze.sh -release
+RUN ./helio/blaze.sh -release -DBoost_USE_STATIC_LIBS=ON
 
 WORKDIR build-opt
 RUN ninja dragonfly

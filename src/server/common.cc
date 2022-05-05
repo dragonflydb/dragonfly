@@ -19,6 +19,7 @@ thread_local ServerState ServerState::state_;
 atomic_uint64_t used_mem_peak(0);
 atomic_uint64_t used_mem_current(0);
 unsigned kernel_version = 0;
+size_t max_memory_limit = 0;
 
 ServerState::ServerState() {
 }
@@ -114,12 +115,12 @@ bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes) {
 #define ADD(x) (x) += o.x
 
 TieredStats& TieredStats::operator+=(const TieredStats& o) {
-  static_assert(sizeof(TieredStats) == 24);
+  static_assert(sizeof(TieredStats) == 32);
 
   ADD(external_reads);
   ADD(external_writes);
   ADD(storage_capacity);
-
+  ADD(storage_reserved);
   return *this;
 }
 

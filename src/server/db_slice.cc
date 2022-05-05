@@ -86,20 +86,32 @@ class PrimeEvictionPolicy {
 
 #define ADD(x) (x) += o.x
 
+PerDbStats& PerDbStats::operator+=(const PerDbStats& o) {
+  constexpr size_t kDbSz = sizeof(PerDbStats);
+  static_assert(kDbSz == 56);
+
+  ADD(inline_keys);
+  ADD(obj_memory_usage);
+  ADD(strval_memory_usage);
+  ADD(listpack_blob_cnt);
+  ADD(listpack_bytes);
+  ADD(external_entries);
+  ADD(external_size);
+
+  return *this;
+}
+
 DbStats& DbStats::operator+=(const DbStats& o) {
-  static_assert(sizeof(DbStats) == 80);
+  constexpr size_t kDbSz = sizeof(DbStats);
+  static_assert(kDbSz == 96);
+
+  PerDbStats::operator+=(o);
 
   ADD(key_count);
   ADD(expire_count);
   ADD(bucket_count);
-  ADD(inline_keys);
-
-  ADD(obj_memory_usage);
   ADD(table_mem_usage);
   ADD(small_string_bytes);
-  ADD(listpack_blob_cnt);
-  ADD(listpack_bytes);
-  ADD(external_entries);
 
   return *this;
 }
@@ -150,12 +162,8 @@ auto DbSlice::GetStats() const -> Stats {
     s.db.key_count += db->prime_table.size();
     s.db.bucket_count += db->prime_table.bucket_count();
     s.db.expire_count += db->expire_table.size();
-    s.db.obj_memory_usage += db->stats.obj_memory_usage;
-    s.db.inline_keys += db->stats.inline_keys;
     s.db.table_mem_usage += (db->prime_table.mem_usage() + db->expire_table.mem_usage());
-    s.db.listpack_blob_cnt += db->stats.listpack_blob_cnt;
-    s.db.listpack_bytes += db->stats.listpack_bytes;
-    s.db.external_entries += db->stats.external_entries;
+    s.db += db->stats;
   }
   s.db.small_string_bytes = CompactObj::GetStats().small_string_bytes;
 
@@ -275,7 +283,11 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) -> pair<PrimeIterator
       }
 
       // Keep the entry but reset the object.
-      db->stats.obj_memory_usage -= existing->second.MallocUsed();
+      size_t value_heap_size = existing->second.MallocUsed();
+      db->stats.obj_memory_usage -= value_heap_size;
+      if (existing->second.ObjType() == OBJ_STRING)
+        db->stats.obj_memory_usage -= value_heap_size;
+
       existing->second.Reset();
       events_.expired_keys++;
 
@@ -313,8 +325,12 @@ bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
     CHECK_EQ(1u, db->mcflag_table.Erase(it->first));
   }
 
+  size_t value_heap_size = it->second.MallocUsed();
   db->stats.inline_keys -= it->first.IsInline();
-  db->stats.obj_memory_usage -= (it->first.MallocUsed() + it->second.MallocUsed());
+  db->stats.obj_memory_usage -= (it->first.MallocUsed() + value_heap_size);
+  if (it->second.ObjType() == OBJ_STRING)
+    db->stats.obj_memory_usage -= value_heap_size;
+
   db->prime_table.Erase(it);
 
   return true;
@@ -413,7 +429,11 @@ pair<PrimeIterator, bool> DbSlice::AddOrFind(DbIndex db_ind, string_view key, Pr
   auto& db = *db_arr_[db_ind];
   auto& new_it = res.first;
 
-  db.stats.obj_memory_usage += obj.MallocUsed();
+  size_t value_heap_size = obj.MallocUsed();
+  db.stats.obj_memory_usage += value_heap_size;
+  if (obj.ObjType() == OBJ_STRING)
+    db.stats.strval_memory_usage += value_heap_size;
+
   new_it->second = std::move(obj);
 
   if (expire_at_ms) {
@@ -514,13 +534,20 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
   for (const auto& ccb : change_cb_) {
     ccb.second(db_ind, ChangeReq{it});
   }
-  db->stats.obj_memory_usage -= it->second.MallocUsed();
+  size_t value_heap_size = it->second.MallocUsed();
+  db->stats.obj_memory_usage -= value_heap_size;
+  if (it->second.ObjType() == OBJ_STRING)
+    db->stats.strval_memory_usage -= value_heap_size;
+
   it.SetVersion(NextVersion());
 }
 
 void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it) {
   auto& db = db_arr_[db_ind];
-  db->stats.obj_memory_usage += it->second.MallocUsed();
+  size_t value_heap_size = it->second.MallocUsed();
+  db->stats.obj_memory_usage += value_heap_size;
+  if (it->second.ObjType() == OBJ_STRING)
+    db->stats.strval_memory_usage += value_heap_size;
 }
 
 pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(DbIndex db_ind,
@@ -541,7 +568,10 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(DbIndex db_ind,
   db->expire_table.Erase(expire_it);
 
   db->stats.inline_keys -= it->first.IsInline();
-  db->stats.obj_memory_usage -= (it->first.MallocUsed() + it->second.MallocUsed());
+  size_t value_heap_size = it->second.MallocUsed();
+  db->stats.obj_memory_usage -= (it->first.MallocUsed() + value_heap_size);
+  if (it->second.ObjType() == OBJ_STRING)
+    db->stats.strval_memory_usage -= value_heap_size;
   db->prime_table.Erase(it);
   ++events_.expired_keys;
 

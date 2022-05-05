@@ -136,7 +136,7 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
   EngineShard* shard = db_slice_.shard_owner();
 
   if (shard->tiered_storage()) {  // external storage enabled.
-    if (value.size() >= 64 && value.size() < 2_MB) {
+    if (value.size() >= 64) {
       shard->tiered_storage()->UnloadItem(params.db_index, it);
     }
   }
@@ -869,7 +869,6 @@ OpResult<string> StringFamily::OpGet(const OpArgs& op_args, string_view key) {
     auto [offset, size] = pv.GetExternalPtr();
     val.resize(size);
 
-    // TODO: can not work with O_DIRECT
     error_code ec = tiered->Read(offset, size, val.data());
     CHECK(!ec) << "TBD: " << ec;
   } else {

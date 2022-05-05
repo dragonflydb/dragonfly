@@ -20,7 +20,23 @@ namespace dfly {
 
 using facade::OpResult;
 
-struct DbStats {
+struct PerDbStats {
+  // Number of inline keys.
+  uint64_t inline_keys = 0;
+
+  // Object memory usage besides hash-table capacity.
+  // Applies for any non-inline objects.
+  size_t obj_memory_usage = 0;
+  size_t strval_memory_usage = 0;
+  size_t listpack_blob_cnt = 0;
+  size_t listpack_bytes = 0;
+  size_t external_entries = 0;
+  size_t external_size = 0;
+
+  PerDbStats& operator+=(const PerDbStats& o);
+};
+
+struct DbStats : public PerDbStats {
   // number of active keys.
   size_t key_count = 0;
 
@@ -30,23 +46,12 @@ struct DbStats {
   // number of buckets in dictionary (key capacity)
   size_t bucket_count = 0;
 
-  // Number of inline keys.
-  size_t inline_keys = 0;
-
-  // Object memory usage besides hash-table capacity.
-  // Applies for any non-inline objects.
-  size_t obj_memory_usage = 0;
-
   // Memory used by dictionaries.
   size_t table_mem_usage = 0;
 
   size_t small_string_bytes = 0;
 
-  size_t listpack_blob_cnt = 0;
-  size_t listpack_bytes = 0;
-
-  size_t external_entries = 0;
-
+  using PerDbStats::operator+=;
   DbStats& operator+=(const DbStats& o);
 };
 
@@ -65,23 +70,12 @@ class DbSlice {
   void operator=(const DbSlice&) = delete;
 
  public:
+  using PerDbStats = ::dfly::PerDbStats;
+
   struct Stats {
     DbStats db;
     SliceEvents events;
   };
-
-  struct PerDbStats {
-    // Number of inline keys.
-    uint64_t inline_keys = 0;
-
-    // Object memory usage besides hash-table capacity.
-    // Applies for any non-inline objects.
-    size_t obj_memory_usage = 0;
-    size_t listpack_blob_cnt = 0;
-    size_t listpack_bytes = 0;
-    size_t external_entries = 0;
-  };
-
 
   DbSlice(uint32_t index, EngineShard* owner);
   ~DbSlice();

@@ -89,7 +89,11 @@ int main(int argc, char* argv[]) {
     LOG(INFO) << "Found " << HumanReadableNumBytes(available)
               << " available memory. Setting maxmemory to " << HumanReadableNumBytes(maxmemory);
     FLAGS_maxmemory = maxmemory;
+  } else {
+    LOG(INFO) << "Max memory limit is: " << HumanReadableNumBytes(FLAGS_maxmemory);
   }
+
+  dfly::max_memory_limit = FLAGS_maxmemory;
 
   if (FLAGS_use_large_pages) {
     mi_option_enable(mi_option_large_os_pages);

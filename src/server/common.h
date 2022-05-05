@@ -75,6 +75,9 @@ struct TieredStats {
   size_t external_writes = 0;
   size_t storage_capacity = 0;
 
+  // how much was reserved by actively stored items.
+  size_t storage_reserved = 0;
+
   TieredStats& operator+=(const TieredStats&);
 };
 
@@ -96,6 +99,7 @@ bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes);
 // Cached values, updated frequently to represent the correct state of the system.
 extern std::atomic_uint64_t used_mem_peak;
 extern std::atomic_uint64_t used_mem_current;
+extern size_t max_memory_limit;
 
 // version 5.11 maps to 511 etc.
 // set upon server start.

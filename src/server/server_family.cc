@@ -515,6 +515,7 @@ tcp_port:)";
     append("num_entries:", m.db.key_count);
     append("inline_keys:", m.db.inline_keys);
     append("small_string_bytes:", m.db.small_string_bytes);
+    append("strval_bytes:", m.db.strval_memory_usage);
     append("listpack_blobs:", m.db.listpack_blob_cnt);
     append("listpack_bytes:", m.db.listpack_bytes);
   }
@@ -540,10 +541,12 @@ tcp_port:)";
   }
 
   if (should_enter("TIERED", true)) {
-    ADD_HEADER("# TIERED_STORAGE");
+    ADD_HEADER("# TIERED");
     append("external_entries:", m.db.external_entries);
+    append("external_bytes:", m.db.external_size);
     append("external_reads:", m.tiered_stats.external_reads);
     append("external_writes:", m.tiered_stats.external_writes);
+    append("external_reserved:", m.tiered_stats.storage_reserved);
     append("external_capacity:", m.tiered_stats.storage_capacity);
   }
 

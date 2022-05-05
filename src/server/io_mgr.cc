@@ -5,6 +5,7 @@
 #include "server/io_mgr.h"
 
 #include <fcntl.h>
+#include <mimalloc.h>
 
 #include "base/logging.h"
 #include "facade/facade_types.h"
@@ -20,6 +21,15 @@ using namespace facade;
 using uring::FiberCall;
 using uring::Proactor;
 namespace this_fiber = ::boost::this_fiber;
+
+namespace {
+
+constexpr inline size_t alignup(size_t num, size_t align) {
+  size_t amask = align - 1;
+  return (num + amask) & (~amask);
+}
+
+}  // namespace
 
 IoMgr::IoMgr() {
   flags_val = 0;
@@ -99,6 +109,27 @@ error_code IoMgr::WriteAsync(size_t offset, string_view blob, WriteCb cb) {
 }
 
 error_code IoMgr::Read(size_t offset, io::MutableBytes dest) {
+  DCHECK(!dest.empty());
+
+  if (FLAGS_backing_file_direct) {
+    size_t read_offs = offset & ~4095ULL;
+    size_t end_range = alignup(offset + dest.size(), 4096);
+    size_t space_needed = end_range - read_offs;
+    DCHECK_EQ(0u, space_needed % 4096);
+
+    uint8_t* space = (uint8_t*)mi_malloc_aligned(space_needed, 4096);
+    iovec v{.iov_base = space, .iov_len = space_needed};
+    error_code ec = backing_file_->Read(&v, 1, read_offs, 0);
+    if (ec) {
+      mi_free(space);
+      return ec;
+    }
+
+    memcpy(dest.data(), space + offset - read_offs, dest.size());
+    mi_free_size_aligned(space, space_needed, 4096);
+    return ec;
+  }
+
   iovec v{.iov_base = dest.data(), .iov_len = dest.size()};
   return backing_file_->Read(&v, 1, offset, 0);
 }
