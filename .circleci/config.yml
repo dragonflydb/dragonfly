@@ -1,0 +1,31 @@
+version: 2.1
+
+machine: true
+
+jobs:
+  build-ubuntu:
+      docker: 
+        - image: ghcr.io/romange/ubuntu-dev:22
+      steps:
+        - checkout
+        - run:
+            name: Set up environment
+            environment:
+              BUILD_TYPE: Debug            
+            command: | 
+              git submodule update --init --recursive
+              cmake -B build -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -GNinja -DCMAKE_CXX_COMPILER_LAUNCHER=ccache              
+        - run:
+            name: Build & Test
+            command: | 
+              cd build && pwd 
+              ninja -j4 src/all
+              ctest -V -L DFLY
+          
+
+        
+# Orchestrate our job run sequence
+workflows:
+  build_and_test:
+    jobs:
+      - build-ubuntu
