@@ -42,7 +42,7 @@ class TieredStorage {
 
   void FlushPending();
   void InitiateGrow(size_t size);
-  void SendIoRequest(size_t req_size, ActiveIoRequest* req);
+  void SendIoRequest(ActiveIoRequest* req);
   void FinishIoRequest(int io_res, ActiveIoRequest* req);
 
   DbSlice& db_slice_;
