@@ -90,6 +90,8 @@ TEST_F(SetFamilyTest, SInter) {
   resp = Run({"sinter", "x", "y"});
   ASSERT_EQ(1, GetDebugInfo("IO0").shards_count);
   EXPECT_THAT(resp, ErrArg("WRONGTYPE Operation against a key"));
+  resp = Run({"sinterstore", "none1", "none2"});
+  EXPECT_THAT(resp, IntArg(0));
 }
 
 TEST_F(SetFamilyTest, SMove) {

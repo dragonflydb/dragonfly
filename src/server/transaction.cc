@@ -103,6 +103,7 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
 
   bool incremental_locking = multi_ && multi_->incremental;
   bool single_key = !multi_ && key_index.HasSingleKey();
+  bool needs_reverse_mapping = cid_->opt_mask() & CO::REVERSE_MAPPING;
 
   if (single_key) {
     DCHECK_GT(key_index.step, 0u);
@@ -118,6 +119,12 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
     unique_shard_cnt_ = 1;
     unique_shard_id_ = Shard(key, ess_->size());
 
+    if (needs_reverse_mapping) {
+      reverse_index_.resize(args_.size());
+      for (unsigned j = 0; j < reverse_index_.size(); ++j) {
+        reverse_index_[j] = j + key_index.start - 1;
+      }
+    }
     return OpStatus::OK;
   }
 
@@ -137,7 +144,6 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   // and regular commands.
   IntentLock::Mode mode = IntentLock::EXCLUSIVE;
   bool should_record_locks = false;
-  bool needs_reverse_mapping = cid_->opt_mask() & CO::REVERSE_MAPPING;
 
   if (multi_) {
     mode = Mode();
@@ -148,11 +154,12 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
 
   if (key_index.bonus) {  // additional one-of key.
     DCHECK(key_index.step == 1);
-    DCHECK(!needs_reverse_mapping);
 
     string_view key = ArgS(args, key_index.bonus);
     uint32_t sid = Shard(key, shard_data_.size());
     shard_index[sid].args.push_back(key);
+    if (needs_reverse_mapping)
+      shard_index[sid].original_index.push_back(key_index.bonus - 1);
   }
 
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
@@ -183,7 +190,7 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
 
   args_.resize(key_index.num_args());
 
-  // we need reverse index only for blocking commands or commands like MSET.
+  // we need reverse index only for some commands (MSET etc).
   if (needs_reverse_mapping)
     reverse_index_.resize(args_.size());
 
@@ -213,19 +220,24 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
 
     ++unique_shard_cnt_;
     unique_shard_id_ = i;
-    uint32_t orig_indx = 0;
     for (size_t j = 0; j < si.args.size(); ++j) {
       *next_arg = si.args[j];
       if (needs_reverse_mapping) {
-        *rev_indx_it++ = si.original_index[orig_indx];
+        *rev_indx_it++ = si.original_index[j];
       }
       ++next_arg;
-      ++orig_indx;
     }
   }
 
   CHECK(next_arg == args_.end());
   DVLOG(1) << "InitByArgs " << DebugId() << " " << args_.front();
+
+  // validation
+  if (needs_reverse_mapping) {
+    for (size_t i = 0; i < args_.size(); ++i) {
+      DCHECK_EQ(args_[i], ArgS(args, 1 + reverse_index_[i]));  // 1 for the commandname.
+    }
+  }
 
   if (unique_shard_cnt_ == 1) {
     PerShardData* sd;
@@ -892,11 +904,14 @@ ArgSlice Transaction::ShardArgsInShard(ShardId sid) const {
   return ArgSlice{args_.data() + sd.arg_start, sd.arg_count};
 }
 
+// from local index back to original arg index skipping the command.
+// i.e. returns (first_key_pos -1) or bigger.
 size_t Transaction::ReverseArgIndex(ShardId shard_id, size_t arg_index) const {
-  if (unique_shard_cnt_ == 1)
-    return arg_index;
+  if (unique_shard_cnt_ == 1)  // mget: 0->0, 1->1. zunionstore has 0->2
+    return reverse_index_[arg_index];
 
-  return reverse_index_[shard_data_[shard_id].arg_start + arg_index];
+  const auto& sd = shard_data_[shard_id];
+  return reverse_index_[sd.arg_start + arg_index];
 }
 
 bool Transaction::WaitOnWatch(const time_point& tp) {
@@ -1164,10 +1179,13 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
     if (args.size() < 3) {
       return OpStatus::SYNTAX_ERR;
     }
+
     string_view num(ArgS(args, 2));
-    if (!absl::SimpleAtoi(num, &num_custom_keys) || num_custom_keys < 0 ||
-        size_t(num_custom_keys) + 3 > args.size())
+    if (!absl::SimpleAtoi(num, &num_custom_keys) || num_custom_keys < 0)
       return OpStatus::INVALID_INT;
+
+    if (size_t(num_custom_keys) + 3 > args.size())
+      return OpStatus::SYNTAX_ERR;
   }
 
   if (cid->first_key_pos() > 0) {

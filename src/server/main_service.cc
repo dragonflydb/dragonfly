@@ -486,12 +486,11 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
     if (IsTransactional(cid)) {
       dist_trans.reset(new Transaction{cid, &shard_set_});
-      dfly_cntx->transaction = dist_trans.get();
-
       OpStatus st = dist_trans->InitByArgs(dfly_cntx->conn_state.db_index, args);
       if (st != OpStatus::OK)
         return (*cntx)->SendError(st);
 
+      dfly_cntx->transaction = dist_trans.get();
       dfly_cntx->last_command_debug.shards_count = dfly_cntx->transaction->unique_shard_cnt();
     } else {
       dfly_cntx->transaction = nullptr;

@@ -167,4 +167,63 @@ TEST_F(ZSetFamilyTest, ZScan) {
   EXPECT_EQ(100 * 2, scan_len);
 }
 
+TEST_F(ZSetFamilyTest, ZUnionStore) {
+  RespExpr resp;
+
+  resp = Run({"zunionstore", "key", "0"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  resp = Run({"zunionstore", "key", "0", "aggregate", "sum"});
+  EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
+  resp = Run({"zunionstore", "key", "-1", "aggregate", "sum"});
+  EXPECT_THAT(resp, ErrArg("out of range"));
+  resp = Run({"zunionstore", "key", "2", "foo", "bar", "weights", "1"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  EXPECT_EQ(2, CheckedInt({"zadd", "z1", "1", "a", "2", "b"}));
+  EXPECT_EQ(2, CheckedInt({"zadd", "z2", "3", "c", "2", "b"}));
+
+  resp = Run({"zunionstore", "key", "2", "z1", "z2"});
+  EXPECT_THAT(resp, IntArg(3));
+  resp = Run({"zrange", "key", "0", "-1", "withscores"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "c", "3", "b", "4"));
+
+  resp = Run({"zunionstore", "z1", "1", "z1"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"zunionstore", "z1", "2", "z1", "z2"});
+  EXPECT_THAT(resp, IntArg(3));
+  resp = Run({"zrange", "z1", "0", "-1", "withscores"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "c", "3", "b", "4"));
+
+  Run({"set", "foo", "bar"});
+  resp = Run({"zunionstore", "foo", "1", "z2"});
+  EXPECT_THAT(resp, IntArg(2));
+  resp = Run({"zrange", "foo", "0", "-1", "withscores"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("b", "2", "c", "3"));
+}
+
+TEST_F(ZSetFamilyTest, ZUnionStoreOpts) {
+  EXPECT_EQ(2, CheckedInt({"zadd", "z1", "1", "a", "2", "b"}));
+  EXPECT_EQ(2, CheckedInt({"zadd", "z2", "3", "c", "2", "b"}));
+  RespExpr resp;
+
+  EXPECT_EQ(3, CheckedInt({"zunionstore", "a", "2", "z1",  "z2", "weights", "1", "3"}));
+  resp = Run({"zrange", "a", "0", "-1", "withscores"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "b", "8", "c", "9"));
+
+  resp = Run({"zunionstore", "a", "2", "z1",  "z2", "weights", "1"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"zunionstore", "z1", "1", "z1",  "weights", "2"});
+  EXPECT_THAT(resp, IntArg(2));
+  resp = Run({"zrange", "z1", "0", "-1", "withscores"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "2", "b", "4"));
+
+  resp = Run({"zunionstore", "max", "2", "z1", "z2", "weights", "1", "0", "aggregate", "max"});
+  ASSERT_THAT(resp, IntArg(3));
+  resp = Run({"zrange", "max", "0", "-1", "withscores"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("c", "0", "a", "2", "b", "4"));
+}
+
 }  // namespace dfly

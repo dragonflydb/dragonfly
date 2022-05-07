@@ -14,6 +14,7 @@ extern "C" {
 #include <double-conversion/double-to-string.h>
 
 #include "base/logging.h"
+#include "base/stl_util.h"
 #include "facade/error.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -78,15 +79,21 @@ zlexrangespec GetLexRange(bool reverse, const ZSetFamily::LexInterval& li) {
   return range;
 }
 
-OpResult<PrimeIterator> FindZEntry(unsigned flags, const OpArgs& op_args, string_view key,
+struct ZParams {
+  unsigned flags = 0;  // mask of ZADD_IN_ macros.
+  bool ch = false;     // Corresponds to CH option.
+  bool override = false;
+};
+
+OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args, string_view key,
                                    size_t member_len) {
   auto& db_slice = op_args.shard->db_slice();
-  if (flags & ZADD_IN_XX) {
+  if (zparams.flags & ZADD_IN_XX) {
     return db_slice.Find(op_args.db_ind, key, OBJ_ZSET);
   }
 
   auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
-  if (inserted) {
+  if (inserted || zparams.override) {
     robj* zobj = nullptr;
 
     if (member_len > kMaxListPackValue) {
@@ -96,12 +103,16 @@ OpResult<PrimeIterator> FindZEntry(unsigned flags, const OpArgs& op_args, string
     }
 
     DVLOG(2) << "Created zset " << zobj->ptr;
+    if (!inserted) {
+      db_slice.PreUpdate(op_args.db_ind, it);
+    }
     it->second.ImportRObj(zobj);
   } else {
     if (it->second.ObjType() != OBJ_ZSET)
       return OpStatus::WRONG_TYPE;
     db_slice.PreUpdate(op_args.db_ind, it);
   }
+
   return it;
 }
 
@@ -562,6 +573,193 @@ bool ParseLexBound(string_view src, ZSetFamily::LexBound* bound) {
   return true;
 }
 
+void SendAtLeastOneKeyError(ConnectionContext* cntx) {
+  string name = cntx->cid->name();
+  absl::AsciiStrToLower(&name);
+  (*cntx)->SendError(absl::StrCat("at least 1 input key is needed for ", name));
+}
+
+enum class AggType : uint8_t { SUM, MIN, MAX };
+using ScoredMap = absl::flat_hash_map<std::string, double>;
+
+ScoredMap FromObject(const CompactObj& co, double weight) {
+  robj* obj = co.AsRObj();
+  ZSetFamily::RangeParams params;
+  params.with_scores = true;
+  IntervalVisitor vis(Action::RANGE, params, obj);
+  vis(ZSetFamily::IndexInterval(0, -1));
+
+  ZSetFamily::ScoredArray arr = vis.PopResult();
+  ScoredMap res;
+  res.reserve(arr.size());
+
+  for (auto& elem : arr) {
+    elem.second *= weight;
+    res.emplace(move(elem));
+  }
+
+  return res;
+}
+
+double Aggregate(double v1, double v2, AggType atype) {
+  switch (atype) {
+    case AggType::SUM:
+      return v1 + v2;
+    case AggType::MAX:
+      return max(v1, v2);
+    case AggType::MIN:
+      return min(v1, v2);
+  }
+  return 0;
+}
+
+// the result is in the destination.
+void UnionScoredMap(ScoredMap* dest, ScoredMap* src, AggType agg_type) {
+  ScoredMap* target = dest;
+  ScoredMap* iter = src;
+
+  if (iter->size() > target->size())
+    swap(target, iter);
+
+  for (const auto& elem : *iter) {
+    auto [it, inserted] = target->emplace(elem);
+    if (!inserted) {
+      it->second = Aggregate(it->second, elem.second, agg_type);
+    }
+  }
+
+  if (target != dest)
+    dest->swap(*src);
+}
+
+OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
+                            const vector<double>& weights, bool store) {
+  ArgSlice keys = t->ShardArgsInShard(shard->shard_id());
+  DVLOG(1) << "shard:" << shard->shard_id() << ", keys " << vector(keys.begin(), keys.end());
+  DCHECK(!keys.empty());
+
+  unsigned start = 0;
+
+  if (keys.front() == dest) {
+    ++start;
+  }
+
+  auto& db_slice = shard->db_slice();
+  vector<pair<PrimeIterator, double>> it_arr(keys.size() - start);
+  if (it_arr.empty())     // could be when only the dest key is hosted in this shard
+    return OpStatus::OK;  // return empty map
+
+  for (unsigned j = start; j < keys.size(); ++j) {
+    auto it_res = db_slice.Find(t->db_index(), keys[j], OBJ_ZSET);
+    if (it_res == OpStatus::WRONG_TYPE)  // TODO: support sets with default score 1.
+      return it_res.status();
+    if (!it_res)
+      continue;
+
+    // first global index is 2 after {destkey, numkeys}
+    unsigned src_indx = j - start;
+    unsigned windex = t->ReverseArgIndex(shard->shard_id(), j) - 2;
+    DCHECK_LT(windex, weights.size());
+    it_arr[src_indx] = {*it_res, weights[windex]};
+  }
+
+  ScoredMap result;
+  for (auto it = it_arr.begin(); it != it_arr.end(); ++it) {
+    if (it->first.is_done())
+      continue;
+
+    ScoredMap sm = FromObject(it->first->second, it->second);
+    if (result.empty())
+      result.swap(sm);
+    else
+      UnionScoredMap(&result, &sm, agg_type);
+  }
+
+  return result;
+}
+
+using ScoredMemberView = std::pair<double, std::string_view>;
+using ScoredMemberSpan = absl::Span<ScoredMemberView>;
+
+struct AddResult {
+  double new_score;
+  unsigned num_updated = 0;
+
+  bool is_nan = false;
+};
+
+OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_view key,
+                          ScoredMemberSpan members) {
+  DCHECK(!members.empty() || zparams.override);
+  auto& db_slice = op_args.shard->db_slice();
+
+  if (zparams.override && members.empty()) {
+    auto it = db_slice.FindExt(op_args.db_ind, key).first;
+    db_slice.Del(op_args.db_ind, it);
+    return OpStatus::OK;
+  }
+
+  OpResult<PrimeIterator> res_it = FindZEntry(zparams, op_args, key, members.front().second.size());
+
+  if (!res_it)
+    return res_it.status();
+
+  robj* zobj = res_it.value()->second.AsRObj();
+
+  unsigned added = 0;
+  unsigned updated = 0;
+  unsigned processed = 0;
+
+  sds& tmp_str = op_args.shard->tmp_str1;
+  double new_score = 0;
+  int retflags = 0;
+
+  OpStatus op_status = OpStatus::OK;
+  AddResult aresult;
+
+  for (size_t j = 0; j < members.size(); j++) {
+    const auto& m = members[j];
+    tmp_str = sdscpylen(tmp_str, m.second.data(), m.second.size());
+
+    int retval = zsetAdd(zobj, m.first, tmp_str, zparams.flags, &retflags, &new_score);
+
+    if (zparams.flags & ZADD_IN_INCR) {
+      if (retval == 0) {
+        CHECK_EQ(1u, members.size());
+
+        aresult.is_nan = true;
+        break;
+      }
+
+      if (retflags & ZADD_OUT_NOP) {
+        op_status = OpStatus::SKIPPED;
+      }
+    }
+
+    if (retflags & ZADD_OUT_ADDED)
+      added++;
+    if (retflags & ZADD_OUT_UPDATED)
+      updated++;
+    if (!(retflags & ZADD_OUT_NOP))
+      processed++;
+  }
+
+  DVLOG(2) << "ZAdd " << zobj->ptr;
+
+  res_it.value()->second.SyncRObj();
+  op_args.shard->db_slice().PostUpdate(op_args.db_ind, *res_it);
+
+  if (zparams.flags & ZADD_IN_INCR) {
+    aresult.new_score = new_score;
+  } else {
+    aresult.num_updated = zparams.ch ? added + updated : added;
+  }
+
+  if (op_status != OpStatus::OK)
+    return op_status;
+  return aresult;
+}
+
 }  // namespace
 
 void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
@@ -631,33 +829,31 @@ void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
   DCHECK(cntx->transaction);
 
   absl::Span memb_sp{members.data(), members.size()};
-  AddResult add_result;
-
-  auto cb = [&](Transaction* t, EngineShard* shard) -> OpStatus {
+  auto cb = [&](Transaction* t, EngineShard* shard) {
     OpArgs op_args{shard, t->db_index()};
-    return OpAdd(zparams, op_args, key, memb_sp, &add_result);
+    return OpAdd(op_args, zparams, key, memb_sp);
   };
 
-  OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
-  if (status == OpStatus::WRONG_TYPE) {
+  OpResult<AddResult> add_result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (add_result.status() == OpStatus::WRONG_TYPE) {
     return (*cntx)->SendError(kWrongTypeErr);
   }
 
   // KEY_NOTFOUND may happen in case of XX flag.
-  if (status == OpStatus::KEY_NOTFOUND) {
+  if (add_result.status() == OpStatus::KEY_NOTFOUND) {
     if (zparams.flags & ZADD_IN_INCR)
       (*cntx)->SendNull();
     else
       (*cntx)->SendLong(0);
-  } else if (status == OpStatus::SKIPPED) {
+  } else if (add_result.status() == OpStatus::SKIPPED) {
     (*cntx)->SendNull();
-  } else if (add_result.is_nan) {
+  } else if (add_result->is_nan) {
     (*cntx)->SendError(kScoreNaN);
   } else {
     if (zparams.flags & ZADD_IN_INCR) {
-      (*cntx)->SendDouble(add_result.new_score);
+      (*cntx)->SendDouble(add_result->new_score);
     } else {
-      (*cntx)->SendLong(add_result.num_updated);
+      (*cntx)->SendLong(add_result->num_updated);
     }
   }
 }
@@ -725,31 +921,28 @@ void ZSetFamily::ZIncrBy(CmdArgList args, ConnectionContext* cntx) {
   ZParams zparams;
   zparams.flags = ZADD_IN_INCR;
 
-  AddResult add_result;
-
-  auto cb = [&](Transaction* t, EngineShard* shard) -> OpStatus {
+  auto cb = [&](Transaction* t, EngineShard* shard) {
     OpArgs op_args{shard, t->db_index()};
-    return OpAdd(zparams, op_args, key, ScoredMemberSpan{&scored_member, 1}, &add_result);
+    return OpAdd(op_args, zparams, key, ScoredMemberSpan{&scored_member, 1});
   };
 
-  OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
-  if (status == OpStatus::WRONG_TYPE) {
+  OpResult<AddResult> add_result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (add_result.status() == OpStatus::WRONG_TYPE) {
     return (*cntx)->SendError(kWrongTypeErr);
   }
 
-  if (status == OpStatus::SKIPPED) {
+  if (add_result.status() == OpStatus::SKIPPED) {
     return (*cntx)->SendNull();
   }
 
-  if (add_result.is_nan) {
+  if (add_result->is_nan) {
     return (*cntx)->SendError(kScoreNaN);
   }
 
-  (*cntx)->SendDouble(add_result.new_score);
+  (*cntx)->SendDouble(add_result->new_score);
 }
 
 void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
-
 }
 
 void ZSetFamily::ZLexCount(CmdArgList args, ConnectionContext* cntx) {
@@ -984,16 +1177,93 @@ void ZSetFamily::ZScan(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZUnionStore(CmdArgList args, ConnectionContext* cntx) {
-  auto cb = [&](Transaction* t, EngineShard* es) {
-    auto args = t->ShardArgsInShard(es->shard_id());
-    for (auto x : args) {
-      LOG(INFO) << "arg " << x;
+  string_view dest_key = ArgS(args, 1);
+  string_view num_str = ArgS(args, 2);
+  uint32_t num_keys;
+  AggType agg_type = AggType::SUM;
+
+  // we parsed the structure before, when transaction has been initialized.
+  CHECK(absl::SimpleAtoi(num_str, &num_keys));
+  if (num_keys == 0) {
+    return SendAtLeastOneKeyError(cntx);
+  }
+
+  DCHECK_GE(args.size(), 3 + num_keys);
+
+  vector<double> weights(num_keys, 1);
+  for (size_t i = 3 + num_keys; i < args.size(); ++i) {
+    ToUpper(&args[i]);
+    string_view arg = ArgS(args, i);
+    if (arg == "WEIGHTS") {
+      if (args.size() <= i + num_keys) {
+        return (*cntx)->SendError(kSyntaxErr);
+      }
+      for (unsigned j = 0; j < num_keys; ++j) {
+        string_view weight = ArgS(args, i + j + 1);
+        if (!absl::SimpleAtod(weight, &weights[j])) {
+          return (*cntx)->SendError("weight value is not a float", kSyntaxErrType);
+        }
+      }
+      i += num_keys;
+    } else if (arg == "AGGREGATE") {
+      if (i + 2 != args.size()) {
+        return (*cntx)->SendError(kSyntaxErr);
+      }
+      ToUpper(&args[i + 1]);
+
+      string_view agg = ArgS(args, i + 1);
+      if (agg == "SUM") {
+        agg_type = AggType::SUM;
+      } else if (agg == "MIN") {
+        agg_type = AggType::MIN;
+      } else if (agg == "MAX") {
+        agg_type = AggType::MAX;
+      } else {
+        return (*cntx)->SendError(kSyntaxErr);
+      }
+      break;
+    } else {
+      return (*cntx)->SendError(kSyntaxErr);
+    }
+  }
+
+  vector<OpResult<ScoredMap>> maps(cntx->shard_set->size());
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    maps[shard->shard_id()] = OpUnion(shard, t, dest_key, agg_type, weights, false);
+    return OpStatus::OK;
+  };
+
+  cntx->transaction->Schedule();
+
+  cntx->transaction->Execute(std::move(cb), false);
+  ScoredMap result;
+
+  for (auto& op_res : maps) {
+    if (!op_res)
+      return (*cntx)->SendError(op_res.status());
+    UnionScoredMap(&result, &op_res.value(), agg_type);
+  }
+  ShardId dest_shard = Shard(dest_key, maps.size());
+  AddResult add_result;
+  vector<ScoredMemberView> smvec;
+  for (const auto& elem : result) {
+    smvec.emplace_back(elem.second, elem.first);
+  }
+
+  auto store_cb = [&](Transaction* t, EngineShard* shard) {
+    if (shard->shard_id() == dest_shard) {
+      ZParams zparams;
+      zparams.override = true;
+      add_result =
+          OpAdd(OpArgs{shard, t->db_index()}, zparams, dest_key, ScoredMemberSpan{smvec}).value();
     }
     return OpStatus::OK;
   };
 
-  OpStatus result = cntx->transaction->ScheduleSingleHop(std::move(cb));
-  (*cntx)->SendOk();
+  cntx->transaction->Execute(std::move(store_cb), true);
+
+  (*cntx)->SendLong(smvec.size());
 }
 
 void ZSetFamily::ZRangeByScoreInternal(string_view key, string_view min_s, string_view max_s,
@@ -1197,68 +1467,6 @@ OpResult<StringVec> ZSetFamily::OpScan(const OpArgs& op_args, std::string_view k
     do {
       *cursor = dictScan(ht, *cursor, scanCb, NULL, &sargs);
     } while (*cursor && maxiterations-- && res.size() < count);
-  }
-
-  return res;
-}
-
-OpStatus ZSetFamily::OpAdd(const ZParams& zparams, const OpArgs& op_args, string_view key,
-                           ScoredMemberSpan members, AddResult* add_result) {
-  DCHECK(!members.empty());
-  OpResult<PrimeIterator> res_it =
-      FindZEntry(zparams.flags, op_args, key, members.front().second.size());
-
-  if (!res_it)
-    return res_it.status();
-
-  robj* zobj = res_it.value()->second.AsRObj();
-
-  unsigned added = 0;
-  unsigned updated = 0;
-  unsigned processed = 0;
-
-  sds& tmp_str = op_args.shard->tmp_str1;
-  double new_score = 0;
-  int retflags = 0;
-
-  OpStatus res = OpStatus::OK;
-
-  for (size_t j = 0; j < members.size(); j++) {
-    const auto& m = members[j];
-    tmp_str = sdscpylen(tmp_str, m.second.data(), m.second.size());
-
-    int retval = zsetAdd(zobj, m.first, tmp_str, zparams.flags, &retflags, &new_score);
-
-    if (zparams.flags & ZADD_IN_INCR) {
-      if (retval == 0) {
-        CHECK_EQ(1u, members.size());
-
-        add_result->is_nan = true;
-        break;
-      }
-
-      if (retflags & ZADD_OUT_NOP) {
-        res = OpStatus::SKIPPED;
-      }
-    }
-
-    if (retflags & ZADD_OUT_ADDED)
-      added++;
-    if (retflags & ZADD_OUT_UPDATED)
-      updated++;
-    if (!(retflags & ZADD_OUT_NOP))
-      processed++;
-  }
-
-  DVLOG(2) << "ZAdd " << zobj->ptr;
-
-  res_it.value()->second.SyncRObj();
-  op_args.shard->db_slice().PostUpdate(op_args.db_ind, *res_it);
-
-  if (zparams.flags & ZADD_IN_INCR) {
-    add_result->new_score = new_score;
-  } else {
-    add_result->num_updated = zparams.ch ? added + updated : added;
   }
 
   return res;
@@ -1496,11 +1704,13 @@ OpResult<unsigned> ZSetFamily::OpLexCount(const OpArgs& op_args, string_view key
 #define HFUNC(x) SetHandler(&ZSetFamily::x)
 
 void ZSetFamily::Register(CommandRegistry* registry) {
+  constexpr uint32_t kUnionMask = CO::WRITE | CO::DESTINATION_KEY | CO::REVERSE_MAPPING;
+
   *registry << CI{"ZADD", CO::FAST | CO::WRITE | CO::DENYOOM, -4, 1, 1, 1}.HFUNC(ZAdd)
             << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1, 1}.HFUNC(ZCard)
             << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1, 1}.HFUNC(ZCount)
             << CI{"ZINCRBY", CO::FAST | CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(ZIncrBy)
-            << CI{"ZINTERSTORE", CO::WRITE | CO::DESTINATION_KEY, -4, 1, 1, 1}.HFUNC(ZInterStore)
+            << CI{"ZINTERSTORE", kUnionMask, -4, 3, 3, 1}.HFUNC(ZInterStore)
             << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1, 1}.HFUNC(ZLexCount)
             << CI{"ZREM", CO::FAST | CO::WRITE, -3, 1, 1, 1}.HFUNC(ZRem)
             << CI{"ZRANGE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRange)
@@ -1515,7 +1725,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZREVRANGEBYSCORE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRevRangeByScore)
             << CI{"ZREVRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZRevRank)
             << CI{"ZSCAN", CO::READONLY | CO::RANDOM, -3, 1, 1, 1}.HFUNC(ZScan)
-            << CI{"ZUNIONSTORE", CO::WRITE | CO::DESTINATION_KEY, -4, 3, 3, 1}.HFUNC(ZUnionStore);
+            << CI{"ZUNIONSTORE", kUnionMask, -4, 3, 3, 1}.HFUNC(ZUnionStore);
 }
 
 }  // namespace dfly

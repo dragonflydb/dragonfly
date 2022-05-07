@@ -70,9 +70,8 @@ class Transaction {
   // Runs in engine thread
   ArgSlice ShardArgsInShard(ShardId sid) const;
 
-  // Maps the index in ShardKeys(shard_id) slice back to the index in the original array passed to
-  // InitByArgs.
-  // Runs in the coordinator thread.
+  // Maps the index in ShardArgsInShard(shard_id) slice back to the index
+  // in the original array passed to InitByArgs.
   size_t ReverseArgIndex(ShardId shard_id, size_t arg_index) const;
 
   //! Returns true if the transaction spans this shard_id.

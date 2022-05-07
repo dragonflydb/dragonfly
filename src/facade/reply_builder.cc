@@ -162,8 +162,14 @@ char* RedisReplyBuilder::FormatDouble(double val, char* dest, unsigned dest_len)
 RedisReplyBuilder::RedisReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
 }
 
-void RedisReplyBuilder::SendError(string_view str, std::string_view type) {
-  err_count_[type.empty() ? str : type]++;
+void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
+  if (err_type.empty()) {
+    err_type = str;
+    if (err_type == kSyntaxErr)
+      err_type = kSyntaxErrType;
+  }
+
+  err_count_[err_type]++;
 
   if (str[0] == '-') {
     iovec v[] = {IoVec(str), IoVec(kCRLF)};
