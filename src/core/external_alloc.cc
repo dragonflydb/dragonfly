@@ -34,9 +34,9 @@ constexpr inline size_t wsize_from_size(size_t size) {
 
 constexpr size_t kMinBlockSize = ExternalAllocator::kMinBlockSize;
 
-constexpr size_t kSmallPageShift = 21;
+constexpr size_t kSmallPageShift = 20;
 constexpr size_t kMediumPageShift = 24;
-constexpr size_t kSmallPageSize = 1UL << kSmallPageShift;    // 2MB
+constexpr size_t kSmallPageSize = 1UL << kSmallPageShift;    // 1MB
 constexpr size_t kMediumPageSize = 1UL << kMediumPageShift;  // 16MB
 
 // we preserve 16:1 ratio, i.e. each page can host at least 16 blocks within its class.
@@ -49,12 +49,12 @@ constexpr size_t kSegmentSize = 256_MB;
 constexpr unsigned kNumBins = detail::kNumFreePages;
 constexpr unsigned kLargeSizeBin = kNumBins - 1;
 constexpr unsigned kMaxPagesInSegment = kSegmentSize / kSmallPageSize;
-constexpr unsigned kSegDescrAlignment = 8_KB;
+constexpr unsigned kSegDescrAlignment = 16_KB;
 
 constexpr size_t kBinWordLens[kNumBins] = {
-    1024,  1024 * 2, 1024 * 3, 4096,  5120,   6144,   7168,      8192,  10240,
-    12288, 14336,    16384,    20480, 24576,  28672,  32768,     40960, 49152,
-    57344, 65536,    81920,    98304, 114688, 131072, UINT64_MAX};
+    512,   512 * 2, 512 * 3, 2048,  2560,  3072,  3584,   4096,   5120,      6144,
+    7168,  8192,    10240,   12288, 14336, 16384, 20480,  24576,  28672,     32768,
+    40960, 49152,   57344,   65536, 81920, 98304, 114688, 131072, UINT64_MAX};
 
 static_assert(kBinWordLens[kLargeSizeBin - 1] * 8 == kMediumObjMaxSize);
 static_assert(kBinWordLens[kLargeSizeBin] == UINT64_MAX);
@@ -77,7 +77,7 @@ constexpr inline BinIdx ToBinIdx(size_t size) {
 
   // find the highest bit
   uint8_t b = 63 - __builtin_clzl(wsize);
-  return (b << 2) + ((wsize >> (b - 2)) & 3) - 44;
+  return (b << 2) + ((wsize >> (b - 2)) & 3) - 40;
 }
 
 static_assert(ToBinIdx(kMinBlockSize) == 0);
@@ -144,7 +144,8 @@ struct Page {
   void Init(PageClass pc, BinIdx bin_id);
 };
 
-static_assert(sizeof(Page) * kMaxPagesInSegment + 128 < kSegDescrAlignment);
+constexpr size_t kSegDescrDataSize = sizeof(Page) * kMaxPagesInSegment + 128;
+static_assert(kSegDescrDataSize < kSegDescrAlignment);
 
 void Page::Init(PageClass pc, BinIdx bin_id) {
   DCHECK_EQ(available, 0);
@@ -388,7 +389,6 @@ size_t ExternalAllocator::GoodSize(size_t sz) {
 
   return alignup(sz, 4_KB);
 }
-
 
 /**
  *

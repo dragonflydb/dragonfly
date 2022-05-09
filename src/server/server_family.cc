@@ -424,7 +424,7 @@ Metrics ServerFamily::GetMetrics() const {
 
       result.heap_used_bytes += shard->UsedMemory();
       if (shard->tiered_storage()) {
-        result.tiered_stats += shard->tiered_storage()->stats();
+        result.tiered_stats += shard->tiered_storage()->GetStats();
       }
     }
   };

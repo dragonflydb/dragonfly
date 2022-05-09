@@ -35,7 +35,7 @@ constexpr inline unsigned long long operator""_KB(unsigned long long x) {
 namespace detail {
 class Page;
 
-constexpr unsigned kNumFreePages = 25;
+constexpr unsigned kNumFreePages = 29;
 
 /**
  * pages classes can be SMALL, MEDIUM or LARGE. SMALL (2MB) for block sizes upto 128KB.
@@ -58,7 +58,7 @@ class ExternalAllocator {
 
  public:
   static constexpr size_t kExtAlignment = 1ULL << 28;  // 256 MB
-  static constexpr size_t kMinBlockSize = 1 << 13;  // 8KB
+  static constexpr size_t kMinBlockSize = 1 << 12;  // 4KB
 
   ExternalAllocator();
   ~ExternalAllocator();

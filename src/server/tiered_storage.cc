@@ -79,16 +79,40 @@ struct TieredStorage::ActiveIoRequest {
   void Serialize(IndexKey ikey, const CompactObj& co);
 };
 
+// we need to support migration of keys to other pages.
+// for that we store hash id of each serialized entry (8 bytes) as a back reference to
+// it in the PrimeTable.
+// Each 4k batch will contain at most 56 entries (56*64 + 56*8 = 4032).
+// we will need 56*8=448 bytes header for hash entries.
+constexpr size_t kHeaderSize = 448;
+
 void TieredStorage::ActiveIoRequest::Serialize(IndexKey ikey, const CompactObj& co) {
   DCHECK(!co.HasIoPending());
 
   size_t item_size = co.Size();
   DCHECK_LE(item_size + batch_offs, batch_size);
+  bool single_item = false;
+  if (batch_offs == 0) {
+    DCHECK_EQ(0u, file_offset % 4096);
+
+    if (item_size < batch_size / 2) {
+      batch_offs = kHeaderSize;
+    } else {
+      single_item = true;
+    }
+  }
   co.GetString(block_ptr + batch_offs);
 
   bool added = entries.emplace(move(ikey), file_offset + batch_offs).second;
   CHECK(added);
-  batch_offs += item_size;  // saved into opened block.
+  if (single_item) {
+    batch_offs = batch_size;
+  } else {
+    uint64_t hc = co.HashCode();
+    unsigned entry_index = entries.size() - 1;
+    absl::little_endian::Store64(block_ptr + entry_index * 8, hc);
+    batch_offs += item_size;  // saved into opened block.
+  }
 }
 
 void TieredStorage::SendIoRequest(ActiveIoRequest* req) {
@@ -116,8 +140,12 @@ void TieredStorage::FinishIoRequest(int io_res, ActiveIoRequest* req) {
     success = false;
   }
 
+  DCHECK_EQ(0u, req->batch_size % 4096);
+
+  uint16_t used_total = 0;
   for (const auto& k_v : req->entries) {
     const IndexKey& ikey = k_v.first;
+    size_t file_offset = k_v.second;
     PrimeTable* pt = db_slice_.GetTables(ikey.db_indx).first;
     PrimeIterator it = pt->Find(ikey.key);
     CHECK(!it.is_done()) << "TBD";
@@ -133,12 +161,20 @@ void TieredStorage::FinishIoRequest(int io_res, ActiveIoRequest* req) {
       stats->obj_memory_usage -= heap_size;
       stats->strval_memory_usage -= heap_size;
 
-      it->second.SetExternal(k_v.second, item_size);
+      it->second.SetExternal(file_offset, item_size);
 
       stats->external_entries += 1;
       stats->external_size += item_size;
+      used_total += item_size;
     }
   }
+
+  if (success && req->entries.size() > 1) {  // multi-item batch
+    CHECK_EQ(req->batch_size, 4096u);
+    MultiBatch mb{used_total};
+    multi_cnt_.emplace(req->file_offset / 4096, mb);
+  }
+
   delete req;
   --num_active_requests_;
   if (num_active_requests_ == FLAGS_tiered_storage_max_pending_writes) {
@@ -161,7 +197,6 @@ error_code TieredStorage::Open(const string& path) {
   if (!ec) {
     if (io_mgr_.Span()) {  // Add initial storage.
       alloc_.AddStorage(0, io_mgr_.Span());
-      stats_.storage_capacity = io_mgr_.Span();
     }
   }
   return ec;
@@ -173,8 +208,37 @@ std::error_code TieredStorage::Read(size_t offset, size_t len, char* dest) {
   return io_mgr_.Read(offset, io::MutableBytes{reinterpret_cast<uint8_t*>(dest), len});
 }
 
+void TieredStorage::Free(DbIndex db_indx, size_t offset, size_t len) {
+  if (offset % 4096 == 0) {
+    alloc_.Free(offset, len);
+  } else {
+    size_t offs_page = offset / 4096;
+    auto it = multi_cnt_.find(offs_page);
+    CHECK(it != multi_cnt_.end());
+    MultiBatch& mb = it->second;
+    CHECK_GE(mb.used, len);
+    mb.used -= len;
+    if (mb.used == 0) {
+      alloc_.Free(offs_page * 4096, ExternalAllocator::kMinBlockSize);
+      multi_cnt_.erase(it);
+    }
+  }
+
+  auto* stats = db_slice_.MutableStats(db_indx);
+  stats->external_entries -= 1;
+  stats->external_size -= len;
+}
+
 void TieredStorage::Shutdown() {
   io_mgr_.Shutdown();
+}
+
+TieredStats TieredStorage::GetStats() const {
+  TieredStats res = stats_;
+  res.storage_capacity = alloc_.capacity();
+  res.storage_reserved = alloc_.allocated_bytes();
+
+  return res;
 }
 
 bool TieredStorage::ShouldFlush() {
@@ -282,9 +346,9 @@ void TieredStorage::FlushPending() {
         }
 
         size_t batch_size = ExternalAllocator::GoodSize(item_size);
-        active_req = new ActiveIoRequest(res, batch_size);
-        stats_.storage_reserved += batch_size;
+        DCHECK_EQ(batch_size, ExternalAllocator::GoodSize(batch_size));
 
+        active_req = new ActiveIoRequest(res, batch_size);
         ++num_active_requests_;
       }
 
@@ -309,7 +373,6 @@ void TieredStorage::InitiateGrow(size_t grow_size) {
   auto cb = [start, grow_size, this](int io_res) {
     if (io_res == 0) {
       alloc_.AddStorage(start, grow_size);
-      stats_.storage_capacity += grow_size;
     } else {
       LOG_FIRST_N(ERROR, 10) << "Error enlarging storage " << io_res;
     }

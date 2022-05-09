@@ -35,6 +35,30 @@ DEFINE_VARZ(VarzQps, get_qps);
 
 constexpr uint32_t kMaxStrLen = 1 << 28;
 
+string GetString(EngineShard* shard, const PrimeValue& pv) {
+  string res;
+  if (pv.IsExternal()) {
+    auto* tiered = shard->tiered_storage();
+    auto [offset, size] = pv.GetExternalPtr();
+    res.resize(size);
+
+    error_code ec = tiered->Read(offset, size, res.data());
+    CHECK(!ec) << "TBD: " << ec;
+  } else {
+    pv.GetString(&res);
+  }
+
+  return res;
+}
+
+string_view GetSlice(EngineShard* shard, const PrimeValue& pv, string* tmp) {
+  if (pv.IsExternal()) {
+    *tmp = GetString(shard, pv);
+    return *tmp;
+  }
+  return pv.GetSlice(tmp);
+}
+
 OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t start,
                               string_view value) {
   auto& db_slice = op_args.shard->db_slice();
@@ -59,7 +83,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
     if (it->second.ObjType() != OBJ_STRING)
       return OpStatus::WRONG_TYPE;
 
-    it->second.GetString(&s);
+    s = GetString(op_args.shard, it->second);
     if (s.size() < range_len)
       s.resize(range_len);
 
@@ -99,7 +123,7 @@ OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t star
     end = strlen - 1;
 
   string tmp;
-  string_view slice = co.GetSlice(&tmp);
+  string_view slice = GetSlice(op_args.shard, co, &tmp);
 
   return string(slice.substr(start, end - start + 1));
 };
@@ -157,8 +181,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
     if (prime_value.ObjType() != OBJ_STRING)
       return OpStatus::WRONG_TYPE;
 
-    string val;
-    prime_value.GetString(&val);
+    string val = GetString(db_slice_.shard_owner(), prime_value);
     params.prev_val->emplace(move(val));
   }
 
@@ -687,7 +710,7 @@ auto StringFamily::OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction
     const PrimeIterator& it = *it_res;
     auto& dest = response[i].emplace();
 
-    it->second.GetString(&dest.value);
+    dest.value = GetString(shard, it->second);
     if (fetch_mcflag) {
       dest.mc_flag = db_slice.GetMCFlag(t->db_index(), it->first);
       if (fetch_mcver) {
@@ -752,6 +775,7 @@ OpResult<int64_t> StringFamily::OpIncrBy(const OpArgs& op_args, std::string_view
   }
 
   int64_t new_val = prev + incr;
+  DCHECK(!it->second.IsExternal());
   db_slice.PreUpdate(op_args.db_ind, it);
   it->second.SetInt(new_val);
   db_slice.PostUpdate(op_args.db_ind, it);
@@ -780,7 +804,7 @@ OpResult<double> StringFamily::OpIncrFloat(const OpArgs& op_args, std::string_vi
     return OpStatus::INVALID_FLOAT;
 
   string tmp;
-  string_view slice = it->second.GetSlice(&tmp);
+  string_view slice = GetSlice(op_args.shard, it->second, &tmp);
 
   StringToDoubleConverter stod(StringToDoubleConverter::NO_FLAGS, 0, 0, NULL, NULL);
   int processed_digits = 0;
@@ -819,7 +843,7 @@ OpResult<uint32_t> StringFamily::ExtendOrSet(const OpArgs& op_args, std::string_
     return OpStatus::WRONG_TYPE;
 
   string tmp, new_val;
-  string_view slice = it->second.GetSlice(&tmp);
+  string_view slice = GetSlice(op_args.shard, it->second, &tmp);
   if (prepend)
     new_val = absl::StrCat(val, slice);
   else
@@ -843,7 +867,7 @@ OpResult<bool> StringFamily::ExtendOrSkip(const OpArgs& op_args, std::string_vie
   CompactObj& cobj = (*it_res)->second;
 
   string tmp, new_val;
-  string_view slice = cobj.GetSlice(&tmp);
+  string_view slice = GetSlice(op_args.shard, cobj, &tmp);
   if (prepend)
     new_val = absl::StrCat(val, slice);
   else
@@ -863,19 +887,7 @@ OpResult<string> StringFamily::OpGet(const OpArgs& op_args, string_view key) {
 
   const PrimeValue& pv = it_res.value()->second;
 
-  string val;
-  if (pv.IsExternal()) {
-    auto* tiered = op_args.shard->tiered_storage();
-    auto [offset, size] = pv.GetExternalPtr();
-    val.resize(size);
-
-    error_code ec = tiered->Read(offset, size, val.data());
-    CHECK(!ec) << "TBD: " << ec;
-  } else {
-    it_res.value()->second.GetString(&val);
-  }
-
-  return val;
+  return GetString(op_args.shard, pv);
 }
 
 void StringFamily::Init(util::ProactorPool* pp) {
@@ -910,7 +922,7 @@ void StringFamily::Register(CommandRegistry* registry) {
             << CI{"GETRANGE", CO::READONLY | CO::FAST, 4, 1, 1, 1}.HFUNC(GetRange)
             << CI{"SUBSTR", CO::READONLY | CO::FAST, 4, 1, 1, 1}.HFUNC(
                    GetRange)  // Alias for GetRange
-            << CI{"SETRANGE", CO::FAST, 4, 1, 1, 1}.HFUNC(SetRange);
+            << CI{"SETRANGE", CO::WRITE | CO::FAST | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(SetRange);
 }
 
 }  // namespace dfly

@@ -50,17 +50,18 @@ TEST_F(ExternalAllocatorTest, Basic) {
   EXPECT_EQ(-kSegSize, res);
 
   ext_alloc_.AddStorage(0, kSegSize);
-  EXPECT_EQ(0, ext_alloc_.Malloc(4000));   //  page0: 1
-  EXPECT_EQ(kMinBlockSize, ext_alloc_.Malloc(4_KB));  // page0: 2
-  size_t offset2 = ext_alloc_.Malloc(8193);   // page1: 1
-  EXPECT_GT(offset2, 1_MB);  // another page.
+  EXPECT_EQ(0, ext_alloc_.Malloc(kMinBlockSize - 96));   //  page0: 1
+  EXPECT_EQ(kMinBlockSize, ext_alloc_.Malloc(kMinBlockSize));  // page0: 2
+  constexpr auto kAnotherLen = kMinBlockSize * 2 - 10;
+  size_t offset2 = ext_alloc_.Malloc(kAnotherLen);   // page1: 1
+  EXPECT_EQ(offset2, 1_MB);  // another page.
 
-  ext_alloc_.Free(offset2, 8193);                // should return the page to the segment.
+  ext_alloc_.Free(offset2, kAnotherLen);                // should return the page to the segment.
   EXPECT_EQ(offset2, ext_alloc_.Malloc(16_KB));  // another page.  page1: 1
 
-  ext_alloc_.Free(0, 4000);   // page0: 1
-  ext_alloc_.Free(kMinBlockSize, 4_KB); // page0: 0
-  EXPECT_EQ(0, ext_alloc_.Malloc(8_KB));  // page0
+  ext_alloc_.Free(0, kMinBlockSize - 96);   // page0: 1
+  ext_alloc_.Free(kMinBlockSize, kMinBlockSize); // page0: 0
+  EXPECT_EQ(0, ext_alloc_.Malloc(kMinBlockSize * 2));  // page0
 }
 
 TEST_F(ExternalAllocatorTest, Invariants) {
@@ -90,18 +91,19 @@ TEST_F(ExternalAllocatorTest, Classes) {
   using detail::ClassFromSize;
 
   ext_alloc_.AddStorage(0, kSegSize);
-  ASSERT_EQ(detail::SMALL_P, ClassFromSize(128_KB));
-  ASSERT_EQ(detail::MEDIUM_P, ClassFromSize(128_KB + 1));
+  constexpr size_t kMaxSmallPage = 64_KB;
+  ASSERT_EQ(detail::SMALL_P, ClassFromSize(kMaxSmallPage));
+  ASSERT_EQ(detail::MEDIUM_P, ClassFromSize(kMaxSmallPage + 1));
   ASSERT_EQ(detail::LARGE_P, ClassFromSize(1_MB + 1));
 
-  off_t offs1 = ext_alloc_.Malloc(128_KB);
+  off_t offs1 = ext_alloc_.Malloc(kMaxSmallPage);
   EXPECT_EQ(offs1, 0);
 
-  off_t offs2 = ext_alloc_.Malloc(128_KB + 1);
+  off_t offs2 = ext_alloc_.Malloc(kMaxSmallPage + 1);
   EXPECT_EQ(offs2, -kSegSize);
 
   ext_alloc_.AddStorage(kSegSize, kSegSize);
-  offs2 = ext_alloc_.Malloc(128_KB + 1);
+  offs2 = ext_alloc_.Malloc(kMaxSmallPage * 2 + 1);
   ASSERT_GT(offs2, 0);
   offs2 = ext_alloc_.Malloc(1_MB);
   ASSERT_GT(offs2, 0);

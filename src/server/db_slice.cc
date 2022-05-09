@@ -13,6 +13,7 @@ extern "C" {
 
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
+#include "server/tiered_storage.h"
 #include "util/fiber_sched_algo.h"
 #include "util/proactor_base.h"
 
@@ -536,8 +537,16 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
   }
   size_t value_heap_size = it->second.MallocUsed();
   db->stats.obj_memory_usage -= value_heap_size;
-  if (it->second.ObjType() == OBJ_STRING)
+
+  if (it->second.ObjType() == OBJ_STRING) {
     db->stats.strval_memory_usage -= value_heap_size;
+    if (it->second.IsExternal()) {
+      TieredStorage* tiered = shard_owner()->tiered_storage();
+      auto [offset, size] = it->second.GetExternalPtr();
+      tiered->Free(db_ind, offset, size);
+      it->second.Reset();
+    }
+  }
 
   it.SetVersion(NextVersion());
 }

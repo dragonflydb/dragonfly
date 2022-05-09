@@ -15,13 +15,13 @@ def main():
 
     args = parser.parse_args()
 
-    size = 4096
-    print ('{1024, 1024*2, 1024*3, ', end=' ')
+    size = 512*4
+    print ('{512, 512*2, 512*3, ', end=' ')
     # print ('{', end=' ')
     for i in range(args.num):
         incr = size // 4
         for j in range(4):
-            assert size % 1024 == 0, size
+            assert size % 512 == 0, size
             print (f'{size}, ', end=' ')
             size += incr
         if i % 2 == 1:

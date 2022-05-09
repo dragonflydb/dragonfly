@@ -28,12 +28,11 @@ class TieredStorage {
   std::error_code Read(size_t offset, size_t len, char* dest);
 
   std::error_code UnloadItem(DbIndex db_index, PrimeIterator it);
+  void Free(DbIndex db_indx, size_t offset, size_t len);
 
   void Shutdown();
 
-  const TieredStats& stats() const {
-    return stats_;
-  }
+  TieredStats GetStats() const;
 
  private:
   struct ActiveIoRequest;
@@ -76,6 +75,19 @@ class TieredStorage {
 
   // map of cursor -> pending size
   // absl::flat_hash_map<uint64_t, size_t> pending_upload;
+
+
+  // multi_cnt_ - counts how many unloaded items exists in the batch at specified page offset.
+  // here multi_cnt_.first is (file_offset in 4k pages) and
+  // multi_cnt_.second is MultiBatch object storing number of allocated records in the batch
+  // and its capacity (/ 4k).
+  struct MultiBatch {
+    uint16_t used;  // number of used bytes
+    uint16_t reserved;  // in 4k pages.
+
+    MultiBatch(uint16_t mem_used) : used(mem_used) {}
+  };
+  absl::flat_hash_map<uint32_t, MultiBatch> multi_cnt_;
 
   TieredStats stats_;
 };

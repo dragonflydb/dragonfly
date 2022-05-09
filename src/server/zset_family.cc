@@ -682,7 +682,7 @@ using ScoredMemberView = std::pair<double, std::string_view>;
 using ScoredMemberSpan = absl::Span<ScoredMemberView>;
 
 struct AddResult {
-  double new_score;
+  double new_score = 0;
   unsigned num_updated = 0;
 
   bool is_nan = false;
