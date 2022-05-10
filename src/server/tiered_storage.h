@@ -43,12 +43,12 @@ class TieredStorage {
   void InitiateGrow(size_t size);
   void SendIoRequest(ActiveIoRequest* req);
   void FinishIoRequest(int io_res, ActiveIoRequest* req);
+  void SetExternal(DbIndex db_index, size_t item_offset, PrimeValue* dest);
 
   DbSlice& db_slice_;
   IoMgr io_mgr_;
   ExternalAllocator alloc_;
 
-  size_t pending_unload_bytes_ = 0;
   size_t submitted_io_writes_ = 0;
   size_t submitted_io_write_size_ = 0;
   uint32_t num_active_requests_ = 0;

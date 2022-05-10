@@ -50,9 +50,12 @@ struct EntryHash {
   }
 };
 
+const size_t kBatchSize = 4096;
+const size_t kPageAlignment = 4096;
+
 struct TieredStorage::ActiveIoRequest {
   size_t file_offset;
-  size_t batch_size;
+
   size_t batch_offs;
   char* block_ptr;
 
@@ -61,11 +64,9 @@ struct TieredStorage::ActiveIoRequest {
                       mi_stl_allocator<std::pair<const IndexKey, size_t>>>*/
   absl::flat_hash_map<IndexKey, size_t, EntryHash, std::equal_to<>> entries;
 
-  ActiveIoRequest(size_t file_offs, size_t sz)
-      : file_offset(file_offs), batch_size(sz), batch_offs(0) {
-    DCHECK_EQ(0u, sz % 4096);
-    block_ptr = (char*)mi_malloc_aligned(sz, 4096);
-    DCHECK_EQ(0, intptr_t(block_ptr) % 4096);
+  explicit ActiveIoRequest(size_t file_offs) : file_offset(file_offs), batch_offs(0) {
+    block_ptr = (char*)mi_malloc_aligned(kBatchSize, kPageAlignment);
+    DCHECK_EQ(0u, intptr_t(block_ptr) % kPageAlignment);
   }
 
   ~ActiveIoRequest() {
@@ -73,7 +74,7 @@ struct TieredStorage::ActiveIoRequest {
   }
 
   bool CanAccomodate(size_t length) const {
-    return batch_offs + length <= batch_size;
+    return batch_offs + length <= kBatchSize;
   }
 
   void Serialize(IndexKey ikey, const CompactObj& co);
@@ -90,12 +91,12 @@ void TieredStorage::ActiveIoRequest::Serialize(IndexKey ikey, const CompactObj& 
   DCHECK(!co.HasIoPending());
 
   size_t item_size = co.Size();
-  DCHECK_LE(item_size + batch_offs, batch_size);
+  DCHECK_LE(item_size + batch_offs, kBatchSize);
   bool single_item = false;
   if (batch_offs == 0) {
     DCHECK_EQ(0u, file_offset % 4096);
 
-    if (item_size < batch_size / 2) {
+    if (item_size < kBatchSize / 2) {
       batch_offs = kHeaderSize;
     } else {
       single_item = true;
@@ -106,82 +107,13 @@ void TieredStorage::ActiveIoRequest::Serialize(IndexKey ikey, const CompactObj& 
   bool added = entries.emplace(move(ikey), file_offset + batch_offs).second;
   CHECK(added);
   if (single_item) {
-    batch_offs = batch_size;
+    batch_offs = kBatchSize;
   } else {
     uint64_t hc = co.HashCode();
     unsigned entry_index = entries.size() - 1;
     absl::little_endian::Store64(block_ptr + entry_index * 8, hc);
     batch_offs += item_size;  // saved into opened block.
   }
-}
-
-void TieredStorage::SendIoRequest(ActiveIoRequest* req) {
-#if 1
-  // static string tmp(4096, 'x');
-  // string_view sv{tmp};
-  string_view sv{req->block_ptr, req->batch_size};
-
-  active_req_sem_.await(
-      [this] { return num_active_requests_ <= FLAGS_tiered_storage_max_pending_writes; });
-
-  auto cb = [this, req](int res) { FinishIoRequest(res, req); };
-  io_mgr_.WriteAsync(req->file_offset, sv, move(cb));
-  ++stats_.external_writes;
-
-#else
-  FinishIoRequest(0, req);
-#endif
-}
-
-void TieredStorage::FinishIoRequest(int io_res, ActiveIoRequest* req) {
-  bool success = true;
-  if (io_res < 0) {
-    LOG(ERROR) << "Error writing into ssd file: " << util::detail::SafeErrorMessage(-io_res);
-    success = false;
-  }
-
-  DCHECK_EQ(0u, req->batch_size % 4096);
-
-  uint16_t used_total = 0;
-  for (const auto& k_v : req->entries) {
-    const IndexKey& ikey = k_v.first;
-    size_t file_offset = k_v.second;
-    PrimeTable* pt = db_slice_.GetTables(ikey.db_indx).first;
-    PrimeIterator it = pt->Find(ikey.key);
-    CHECK(!it.is_done()) << "TBD";
-    CHECK(it->second.HasIoPending());
-
-    it->second.SetIoPending(false);
-    if (success) {
-      auto* stats = db_slice_.MutableStats(ikey.db_indx);
-
-      size_t heap_size = it->second.MallocUsed();
-      size_t item_size = it->second.Size();
-
-      stats->obj_memory_usage -= heap_size;
-      stats->strval_memory_usage -= heap_size;
-
-      it->second.SetExternal(file_offset, item_size);
-
-      stats->external_entries += 1;
-      stats->external_size += item_size;
-      used_total += item_size;
-    }
-  }
-
-  if (success && req->entries.size() > 1) {  // multi-item batch
-    CHECK_EQ(req->batch_size, 4096u);
-    MultiBatch mb{used_total};
-    multi_cnt_.emplace(req->file_offset / 4096, mb);
-  }
-
-  delete req;
-  --num_active_requests_;
-  if (num_active_requests_ == FLAGS_tiered_storage_max_pending_writes) {
-    active_req_sem_.notifyAll();
-  }
-
-  VLOG_IF(1, num_active_requests_ == 0) << "Finished active requests";
 }
 
 TieredStorage::TieredStorage(DbSlice* db_slice) : db_slice_(*db_slice), pending_req_(256) {
@@ -214,12 +146,13 @@ void TieredStorage::Free(DbIndex db_indx, size_t offset, size_t len) {
   } else {
     size_t offs_page = offset / 4096;
     auto it = multi_cnt_.find(offs_page);
-    CHECK(it != multi_cnt_.end());
+    CHECK(it != multi_cnt_.end()) << offs_page;
     MultiBatch& mb = it->second;
     CHECK_GE(mb.used, len);
     mb.used -= len;
     if (mb.used == 0) {
       alloc_.Free(offs_page * 4096, ExternalAllocator::kMinBlockSize);
+      VLOG(1) << "multi_cnt_ erase " << it->first;
       multi_cnt_.erase(it);
     }
   }
@@ -241,6 +174,84 @@ TieredStats TieredStorage::GetStats() const {
   return res;
 }
 
+void TieredStorage::SendIoRequest(ActiveIoRequest* req) {
+#if 1
+  // static string tmp(4096, 'x');
+  // string_view sv{tmp};
+  string_view sv{req->block_ptr, kBatchSize};
+
+  active_req_sem_.await(
+      [this] { return num_active_requests_ <= FLAGS_tiered_storage_max_pending_writes; });
+
+  auto cb = [this, req](int res) { FinishIoRequest(res, req); };
+  ++num_active_requests_;
+  io_mgr_.WriteAsync(req->file_offset, sv, move(cb));
+  ++stats_.external_writes;
+
+#else
+  FinishIoRequest(0, req);
+#endif
+}
+
+void TieredStorage::FinishIoRequest(int io_res, ActiveIoRequest* req) {
+  if (io_res < 0) {
+    LOG(ERROR) << "Error writing into ssd file: " << util::detail::SafeErrorMessage(-io_res);
+    for (const auto& k_v : req->entries) {
+      const IndexKey& ikey = k_v.first;
+      PrimeTable* pt = db_slice_.GetTables(ikey.db_indx).first;
+      PrimeIterator it = pt->Find(ikey.key);
+      CHECK(it->second.HasIoPending());
+      it->second.SetIoPending(false);
+    }
+  } else {
+    uint16_t used_total = 0;
+
+    for (const auto& k_v : req->entries) {
+      const IndexKey& ikey = k_v.first;
+
+      size_t item_offset = k_v.second;
+      CHECK_EQ(item_offset / 4096, req->file_offset / 4096);
+      PrimeTable* pt = db_slice_.GetTables(ikey.db_indx).first;
+      PrimeIterator it = pt->Find(ikey.key);
+      CHECK(!it.is_done()) << "TBD";
+      CHECK(it->second.HasIoPending());
+
+      it->second.SetIoPending(false);
+      size_t item_size = it->second.Size();
+      SetExternal(ikey.db_indx, item_offset, &it->second);
+      used_total += item_size;
+    }
+
+    CHECK_GT(req->entries.size(), 1u);  // multi-item batch
+    MultiBatch mb{used_total};
+    VLOG(1) << "multi_cnt_ emplace " << req->file_offset / 4096;
+    multi_cnt_.emplace(req->file_offset / 4096, mb);
+  }
+
+  delete req;
+  --num_active_requests_;
+  if (num_active_requests_ == FLAGS_tiered_storage_max_pending_writes) {
+    active_req_sem_.notifyAll();
+  }
+
+  VLOG_IF(1, num_active_requests_ == 0) << "Finished active requests";
+}
+
+void TieredStorage::SetExternal(DbIndex db_index, size_t item_offset, PrimeValue* dest) {
+  auto* stats = db_slice_.MutableStats(db_index);
+
+  size_t heap_size = dest->MallocUsed();
+  size_t item_size = dest->Size();
+
+  stats->obj_memory_usage -= heap_size;
+  stats->strval_memory_usage -= heap_size;
+
+  dest->SetExternal(item_offset, item_size);
+
+  stats->external_entries += 1;
+  stats->external_size += item_size;
+}
+
 bool TieredStorage::ShouldFlush() {
   if (num_active_requests_ >= FLAGS_tiered_storage_max_pending_writes)
     return false;
@@ -252,18 +263,12 @@ error_code TieredStorage::UnloadItem(DbIndex db_index, PrimeIterator it) {
   CHECK_EQ(OBJ_STRING, it->second.ObjType());
 
   size_t blob_len = it->second.Size();
+  if (blob_len >= kBatchSize / 2 &&
+      num_active_requests_ < FLAGS_tiered_storage_max_pending_writes) {
+    LOG(FATAL) << "TBD";
+  }
   error_code ec;
 
-  pending_unload_bytes_ += blob_len;
-  /*if (db_index >= db_arr_.size()) {
-    db_arr_.resize(db_index + 1);
-  }
-
-  if (db_arr_[db_index] == nullptr) {
-    db_arr_[db_index] = new PerDb;
-  }*/
-
-  // PerDb* db = db_arr_[db_index];
   pending_req_.EmplaceOrOverride(PendingReq{it.bucket_cursor().value(), db_index});
   // db->pending_upload[it.bucket_cursor().value()] += blob_len;
 
@@ -333,7 +338,7 @@ void TieredStorage::FlushPending() {
         if (active_req) {  // need to close
           // save the block asynchronously.
           ++submitted_io_writes_;
-          submitted_io_write_size_ += active_req->batch_size;
+          submitted_io_write_size_ += kBatchSize;
 
           SendIoRequest(active_req);
           active_req = nullptr;
@@ -348,8 +353,7 @@ void TieredStorage::FlushPending() {
         size_t batch_size = ExternalAllocator::GoodSize(item_size);
         DCHECK_EQ(batch_size, ExternalAllocator::GoodSize(batch_size));
 
-        active_req = new ActiveIoRequest(res, batch_size);
-        ++num_active_requests_;
+        active_req = new ActiveIoRequest(res);
       }
 
       active_req->Serialize(IndexKey{db_ind, it->first.AsRef()}, it->second);
@@ -359,7 +363,20 @@ void TieredStorage::FlushPending() {
   }
 
   if (active_req) {
-    SendIoRequest(active_req);
+    if (active_req->batch_offs >= kBatchSize / 2) {
+      SendIoRequest(active_req);
+    } else {
+      // not enough data to fill the page.
+      // rollback the pending bit.
+      for (auto& k_v : active_req->entries) {
+        const IndexKey& ikey = k_v.first;
+        PrimeTable* pt = db_slice_.GetTables(ikey.db_indx).first;
+        PrimeIterator it = pt->Find(ikey.key);
+        it->second.SetIoPending(false);
+        // TODO: we could enqueue those back to pending_req.
+      }
+      delete active_req;
+    }
   }
 }
 
