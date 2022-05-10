@@ -206,7 +206,7 @@ API 2.0
   - [X] SSCAN
 - [X] Sorted Set Family
   - [X] ZCOUNT
-  - [ ] ZINTERSTORE
+  - [X] ZINTERSTORE
   - [X] ZLEXCOUNT
   - [X] ZRANGEBYLEX
   - [X] ZRANK
@@ -214,7 +214,7 @@ API 2.0
   - [X] ZREMRANGEBYRANK
   - [X] ZREVRANGEBYSCORE
   - [X] ZREVRANK
-  - [ ] ZUNIONSTORE
+  - [X] ZUNIONSTORE
   - [X] ZSCAN
 - [ ] HYPERLOGLOG Family
   - [ ] PFADD

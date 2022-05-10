@@ -208,14 +208,14 @@ TEST_F(ZSetFamilyTest, ZUnionStoreOpts) {
   EXPECT_EQ(2, CheckedInt({"zadd", "z2", "3", "c", "2", "b"}));
   RespExpr resp;
 
-  EXPECT_EQ(3, CheckedInt({"zunionstore", "a", "2", "z1",  "z2", "weights", "1", "3"}));
+  EXPECT_EQ(3, CheckedInt({"zunionstore", "a", "2", "z1", "z2", "weights", "1", "3"}));
   resp = Run({"zrange", "a", "0", "-1", "withscores"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "b", "8", "c", "9"));
 
-  resp = Run({"zunionstore", "a", "2", "z1",  "z2", "weights", "1"});
+  resp = Run({"zunionstore", "a", "2", "z1", "z2", "weights", "1"});
   EXPECT_THAT(resp, ErrArg("syntax error"));
 
-  resp = Run({"zunionstore", "z1", "1", "z1",  "weights", "2"});
+  resp = Run({"zunionstore", "z1", "1", "z1", "weights", "2"});
   EXPECT_THAT(resp, IntArg(2));
   resp = Run({"zrange", "z1", "0", "-1", "withscores"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "2", "b", "4"));
@@ -224,6 +224,16 @@ TEST_F(ZSetFamilyTest, ZUnionStoreOpts) {
   ASSERT_THAT(resp, IntArg(3));
   resp = Run({"zrange", "max", "0", "-1", "withscores"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("c", "0", "a", "2", "b", "4"));
+}
+
+TEST_F(ZSetFamilyTest, ZInterStore) {
+  EXPECT_EQ(2, CheckedInt({"zadd", "z1", "1", "a", "2", "b"}));
+  EXPECT_EQ(2, CheckedInt({"zadd", "z2", "3", "c", "2", "b"}));
+  RespExpr resp;
+
+  EXPECT_EQ(1, CheckedInt({"zinterstore", "a", "2", "z1", "z2"}));
+  resp = Run({"zrange", "a", "0", "-1", "withscores"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("b", "4"));
 }
 
 }  // namespace dfly
