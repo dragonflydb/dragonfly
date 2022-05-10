@@ -34,6 +34,8 @@ DEFINE_VARZ(VarzQps, set_qps);
 DEFINE_VARZ(VarzQps, get_qps);
 
 constexpr uint32_t kMaxStrLen = 1 << 28;
+constexpr uint32_t kMinTieredLen = TieredStorage::kMinBlobLen;
+
 
 string GetString(EngineShard* shard, const PrimeValue& pv) {
   string res;
@@ -160,7 +162,7 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
   EngineShard* shard = db_slice_.shard_owner();
 
   if (shard->tiered_storage()) {  // external storage enabled.
-    if (value.size() >= 64) {
+    if (value.size() >= kMinTieredLen) {
       shard->tiered_storage()->UnloadItem(params.db_index, it);
     }
   }
@@ -205,6 +207,16 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
 
   // overwrite existing entry.
   prime_value.SetString(value);
+
+
+  if (value.size() >= kMinTieredLen) {  // external storage enabled.
+    EngineShard* shard = db_slice_.shard_owner();
+
+    if (shard->tiered_storage()) {
+      shard->tiered_storage()->UnloadItem(params.db_index, it);
+    }
+  }
+
   db_slice_.PostUpdate(params.db_index, it);
 
   return OpStatus::OK;

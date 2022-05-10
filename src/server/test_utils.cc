@@ -62,7 +62,7 @@ void BaseFamilyTest::SetUp() {
 
   Service::InitOpts opts;
   opts.disable_time_update = true;
-  service_->Init(nullptr, opts);
+  service_->Init(nullptr, nullptr, opts);
   ess_ = &service_->shard_set();
 
   expire_now_ = absl::GetCurrentTimeNanos() / 1000000;

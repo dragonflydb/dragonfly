@@ -6,6 +6,7 @@
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/random/random.h>  // for master_id_ generation.
+#include <absl/strings/str_join.h>
 #include <absl/strings/match.h>
 #include <mimalloc-types.h>
 #include <sys/resource.h>
@@ -18,6 +19,7 @@ extern "C" {
 
 #include "base/logging.h"
 #include "io/proc_reader.h"
+#include "facade/dragonfly_connection.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/debugcmd.h"
@@ -74,6 +76,11 @@ error_code CreateDirs(fs::path dir_path) {
   return ec;
 }
 
+string UnknowSubCmd(string_view subcmd, string cmd) {
+  return absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd,
+        "'. Try ", cmd, " HELP.");
+}
+
 }  // namespace
 
 ServerFamily::ServerFamily(Service* service) : service_(*service), ess_(service->shard_set()) {
@@ -85,9 +92,10 @@ ServerFamily::ServerFamily(Service* service) : service_(*service), ess_(service-
 ServerFamily::~ServerFamily() {
 }
 
-void ServerFamily::Init(util::AcceptServer* acceptor) {
+void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_listener) {
   CHECK(acceptor_ == nullptr);
   acceptor_ = acceptor;
+  main_listener_ = main_listener;
 
   pb_task_ = ess_.pool()->GetNextProactor();
   auto cache_cb = [] {
@@ -336,12 +344,27 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[1]);
   string_view sub_cmd = ArgS(args, 1);
 
-  if (sub_cmd == "SETNAME") {
+  if (sub_cmd == "SETNAME" && args.size() == 3) {
+    cntx->owner()->SetName(ArgS(args, 2));
     return (*cntx)->SendOk();
+  } else if (sub_cmd == "LIST") {
+    vector<string> client_info;
+    fibers::mutex mu;
+    auto cb = [&](Connection* conn) {
+      facade::Connection* dcon = static_cast<facade::Connection*>(conn);
+      string info = dcon->GetClientInfo();
+      lock_guard lk(mu);
+      client_info.push_back(move(info));
+    };
+
+    main_listener_->TraverseConnections(cb);
+    string result = absl::StrJoin(move(client_info), "\n");
+    result.append("\n");
+    return (*cntx)->SendBulkString(result);
   }
 
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
-  (*cntx)->SendError(kSyntaxErr);
+  return (*cntx)->SendError(UnknowSubCmd(sub_cmd, "CLIENT"), kSyntaxErr);
 }
 
 void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
@@ -365,9 +388,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
     });
     return (*cntx)->SendOk();
   } else {
-    string err = StrCat("Unknown subcommand or wrong number of arguments for '", sub_cmd,
-                        "'. Try CONFIG HELP.");
-    return (*cntx)->SendError(err, kSyntaxErr);
+    return (*cntx)->SendError(UnknowSubCmd(sub_cmd, "CONFIG"), kSyntaxErr);
   }
 }
 

@@ -50,6 +50,9 @@ class ConnectionContext {
   bool force_dispatch: 1;   // whether we should route all requests to the dispatch fiber.
 
   virtual void OnClose() {}
+
+  std::string GetContextInfo() const { return std::string{}; }
+
  private:
   Connection* owner_;
   std::unique_ptr<SinkReplyBuilder> rbuilder_;

@@ -32,7 +32,6 @@ def fill_hset(args, redis):
 
 
 def main():
-    # Check processor architecture
     parser = argparse.ArgumentParser(description='fill hset entities')
     parser.add_argument(
         '-p', type=int, help='redis port', dest='port', default=6380)

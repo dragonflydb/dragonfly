@@ -103,7 +103,6 @@ struct Connection::Shutdown {
   }
 };
 
-
 struct Connection::Request {
   absl::FixedArray<MutableSlice, 6> args;
 
@@ -122,6 +121,8 @@ struct Connection::Request {
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
                        ServiceInterface* service)
     : io_buf_(kMinReadSize), http_listener_(http_listener), ctx_(ctx), service_(service) {
+  static atomic_uint32_t next_id{1};
+
   protocol_ = protocol;
 
   constexpr size_t kReqSz = sizeof(Connection::Request);
@@ -136,6 +137,12 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
       memcache_parser_.reset(new MemcacheParser);
       break;
   }
+
+  creation_time_ = time(nullptr);
+  last_interaction_ = creation_time_;
+  memset(name_, 0, sizeof(name_));
+  memset(phase_, 0, sizeof(phase_));
+  id_ = next_id.fetch_add(1, memory_order_relaxed);
 }
 
 Connection::~Connection() {
@@ -259,6 +266,24 @@ void Connection::SendMsgVecAsync(absl::Span<const std::string_view> msg_vec,
   }
 }
 
+string Connection::GetClientInfo() const {
+  LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
+
+  string res;
+  auto le = lsb->LocalEndpoint();
+  auto re = lsb->RemoteEndpoint();
+  time_t now = time(nullptr);
+
+  absl::StrAppend(&res, "id=", id_, " addr=", re.address().to_string(), ":", re.port());
+  absl::StrAppend(&res, " laddr=", le.address().to_string(), ":", le.port());
+  absl::StrAppend(&res, " fd=", lsb->native_handle(), " name=", name_);
+  absl::StrAppend(&res, " age=", now - creation_time_, " idle=", now - last_interaction_);
+  absl::StrAppend(&res, " phase=", phase_, " ");
+  absl::StrAppend(&res, cc_->GetContextInfo());
+
+  return res;
+}
+
 io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
   size_t last_len = 0;
   do {
@@ -295,6 +320,7 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   // At the start we read from the socket to determine the HTTP/Memstore protocol.
   // Therefore we may already have some data in the buffer.
   if (io_buf_.InputLen() > 0) {
+    SetPhase("process");
     if (redis_parser_) {
       parse_status = ParseRedis();
     } else {
@@ -379,6 +405,7 @@ auto Connection::ParseRedis() -> ParserStatus {
       if (dispatch_q_.empty() && is_sync_dispatch && consumed >= io_buf_.InputLen()) {
         RespToArgList(args, &arg_vec);
         service_->DispatchCommand(CmdArgList{arg_vec.data(), arg_vec.size()}, cc_.get());
+        last_interaction_ = time(nullptr);
       } else {
         // Dispatch via queue to speedup input reading.
         Request* req = FromArgs(std::move(args), tlh);
@@ -469,7 +496,10 @@ auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, Pars
     FetchBuilderStats(stats, builder);
 
     io::MutableBytes append_buf = io_buf_.AppendBuffer();
+    SetPhase("readsock");
+
     ::io::Result<size_t> recv_sz = peer->Recv(append_buf);
+    last_interaction_ = time(nullptr);
 
     if (!recv_sz) {
       ec = recv_sz.error();
@@ -480,6 +510,7 @@ auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, Pars
     io_buf_.CommitWrite(*recv_sz);
     stats->io_read_bytes += *recv_sz;
     ++stats->io_read_cnt;
+    SetPhase("process");
 
     if (redis_parser_)
       parse_status = ParseRedis();
@@ -554,6 +585,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
       builder->SetBatchMode(!dispatch_q_.empty());
       cc_->async_dispatch = true;
       service_->DispatchCommand(CmdArgList{req->args.data(), req->args.size()}, cc_.get());
+      last_interaction_ = time(nullptr);
       cc_->async_dispatch = false;
     }
     req->~Request();

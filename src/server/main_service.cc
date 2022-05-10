@@ -307,7 +307,8 @@ Service::Service(ProactorPool* pp) : pp_(*pp), shard_set_(pp), server_family_(th
 Service::~Service() {
 }
 
-void Service::Init(util::AcceptServer* acceptor, const InitOpts& opts) {
+void Service::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_interface,
+                   const InitOpts& opts) {
   InitRedisTables();
 
   uint32_t shard_num = pp_.size() > 1 ? pp_.size() - 1 : pp_.size();
@@ -324,7 +325,7 @@ void Service::Init(util::AcceptServer* acceptor, const InitOpts& opts) {
   request_latency_usec.Init(&pp_);
   StringFamily::Init(&pp_);
   GenericFamily::Init(&pp_);
-  server_family_.Init(acceptor);
+  server_family_.Init(acceptor, main_interface);
   cmd_req.Init(&pp_, {"type"});
 }
 

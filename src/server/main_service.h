@@ -33,7 +33,8 @@ class Service : public facade::ServiceInterface {
   explicit Service(util::ProactorPool* pp);
   ~Service();
 
-  void Init(util::AcceptServer* acceptor, const InitOpts& opts = InitOpts{});
+  void Init(util::AcceptServer* acceptor, util::ListenerInterface* main_interface,
+            const InitOpts& opts = InitOpts{});
 
   void Shutdown();
 

@@ -52,6 +52,16 @@ class Connection : public util::Connection {
   void SendMsgVecAsync(absl::Span<const std::string_view> msg_vec,
                        util::fibers_ext::BlockingCounter bc);
 
+  void SetName(std::string_view name) {
+    CopyCharBuf(name, sizeof(name_), name_);
+  }
+
+  void SetPhase(std::string_view phase) {
+    CopyCharBuf(phase, sizeof(phase_), phase_);
+  }
+
+  std::string GetClientInfo() const;
+
  protected:
   void OnShutdown() override;
 
@@ -59,6 +69,13 @@ class Connection : public util::Connection {
   enum ParserStatus { OK, NEED_MORE, ERROR };
 
   void HandleRequests() final;
+
+  static void CopyCharBuf(std::string_view src, unsigned dest_len, char* dest) {
+    src = src.substr(0, dest_len - 1);
+    if (!src.empty())
+      memcpy(dest, src.data(), src.size());
+    dest[src.size()] = '\0';
+  }
 
   //
   io::Result<bool> CheckForHttpProto(util::FiberSocketBase* peer);
@@ -77,6 +94,9 @@ class Connection : public util::Connection {
   util::HttpListenerBase* http_listener_;
   SSL_CTX* ctx_;
   ServiceInterface* service_;
+  time_t creation_time_, last_interaction_;
+  char name_[16];
+  char phase_[16];
 
   std::unique_ptr<ConnectionContext> cc_;
 
@@ -88,7 +108,10 @@ class Connection : public util::Connection {
   util::fibers_ext::EventCount evc_;
 
   unsigned parser_error_ = 0;
+  uint32_t id_;
+
   Protocol protocol_;
+
   struct Shutdown;
   std::unique_ptr<Shutdown> shutdown_;
   BreakerCb breaker_cb_;

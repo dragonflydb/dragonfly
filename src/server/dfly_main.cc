@@ -38,11 +38,15 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
   Service service(pool);
 
-  service.Init(acceptor);
+  Listener* main_listener = new Listener{Protocol::REDIS, &service};
+
+  Service::InitOpts opts;
+  opts.disable_time_update = false;
+  service.Init(acceptor, main_listener, opts);
+
   const char* bind_addr = FLAGS_bind.empty() ? nullptr : FLAGS_bind.c_str();
 
-  error_code ec =
-      acceptor->AddListener(bind_addr, FLAGS_port, new Listener{Protocol::REDIS, &service});
+  error_code ec = acceptor->AddListener(bind_addr, FLAGS_port, main_listener);
 
   LOG_IF(FATAL, ec) << "Cound not open port " << FLAGS_port << ", error: " << ec.message();
 

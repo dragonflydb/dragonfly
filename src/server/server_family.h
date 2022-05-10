@@ -12,6 +12,7 @@
 
 namespace util {
 class AcceptServer;
+class ListenerInterface;
 }  // namespace util
 
 namespace dfly {
@@ -39,7 +40,7 @@ class ServerFamily {
   ServerFamily(Service* service);
   ~ServerFamily();
 
-  void Init(util::AcceptServer* acceptor);
+  void Init(util::AcceptServer* acceptor, util::ListenerInterface* main_listener);
   void Register(CommandRegistry* registry);
   void Shutdown();
 
@@ -96,6 +97,7 @@ class ServerFamily {
   EngineShardSet& ess_;
 
   util::AcceptServer* acceptor_ = nullptr;
+  util::ListenerInterface* main_listener_ = nullptr;
   util::ProactorBase* pb_task_ = nullptr;
 
   mutable ::boost::fibers::mutex replicaof_mu_, save_mu_;
