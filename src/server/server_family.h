@@ -24,13 +24,14 @@ class Replica;
 class ScriptMgr;
 
 struct Metrics {
-  DbStats db;
+  std::vector<DbStats> db;
   SliceEvents events;
   TieredStats tiered_stats;
 
   size_t qps = 0;
   size_t heap_used_bytes = 0;
   size_t heap_comitted_bytes = 0;
+  size_t small_string_bytes = 0;
 
   facade::ConnectionStats conn_stats;
 };

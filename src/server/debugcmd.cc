@@ -30,6 +30,7 @@ using boost::intrusive_ptr;
 using boost::fibers::fiber;
 using namespace facade;
 namespace fs = std::filesystem;
+using absl::StrAppend;
 
 struct PopulateBatch {
   DbIndex dbid;
@@ -38,6 +39,18 @@ struct PopulateBatch {
 
   PopulateBatch(DbIndex id) : dbid(id) {
   }
+};
+
+struct ObjInfo {
+  unsigned encoding;
+  unsigned bucket_id = 0;
+  int64_t ttl = INT64_MAX;
+  bool has_sec_precision = false;
+
+  ObjInfo(unsigned e, unsigned bid) : encoding(e), bucket_id(bid) {
+  }
+
+  ObjInfo() = default;
 };
 
 void DoPopulateBatch(std::string_view prefix, size_t val_size, const SetCmd::SetParams& params,
@@ -207,8 +220,9 @@ void DebugCmd::Populate(CmdArgList args) {
     auto range = ranges[i];
 
     // whatever we do, we should not capture i by reference.
-    fb_arr[i] = pp.at(i)->LaunchFiber(
-        [range, prefix, val_size, this] { this->PopulateRangeFiber(range.first, range.second, prefix, val_size); });
+    fb_arr[i] = pp.at(i)->LaunchFiber([range, prefix, val_size, this] {
+      this->PopulateRangeFiber(range.first, range.second, prefix, val_size);
+    });
   }
   for (auto& fb : fb_arr)
     fb.join();
@@ -229,7 +243,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view 
   SetCmd::SetParams params{db_indx};
 
   for (uint64_t i = from; i < from + len; ++i) {
-    absl::StrAppend(&key, i);
+    StrAppend(&key, i);
     ShardId sid = Shard(key, ess.size());
     key.resize(prefsize);  // shrink back
 
@@ -256,20 +270,37 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view 
 void DebugCmd::Inspect(string_view key) {
   EngineShardSet& ess = sf_.service().shard_set();
   ShardId sid = Shard(key, ess.size());
-  using ObjInfo = pair<unsigned, unsigned>;  // type, encoding.
 
   auto cb = [&]() -> facade::OpResult<ObjInfo> {
     auto& db_slice = EngineShard::tlocal()->db_slice();
-    PrimeIterator it = db_slice.FindExt(cntx_->db_index(), key).first;
-    if (IsValid(it)) {
-      return ObjInfo(it->second.ObjType(), it->second.Encoding());
+    auto [pt, exp_t] = db_slice.GetTables(cntx_->db_index());
+
+    PrimeIterator it = pt->Find(key);
+    if (!IsValid(it)) {
+      return OpStatus::KEY_NOTFOUND;
     }
-    return OpStatus::KEY_NOTFOUND;
+
+    ObjInfo oinfo(it->second.Encoding(), it.bucket_id());
+
+    if (it->second.HasExpire()) {
+      ExpireIterator exp_it = exp_t->Find(it->first);
+      CHECK(!exp_it.is_done());
+
+      time_t exp_time = db_slice.ExpireTime(exp_it);
+      oinfo.ttl = exp_time - db_slice.Now();
+      oinfo.has_sec_precision = exp_it->second.is_second_precision();
+    }
+
+    return oinfo;
   };
 
   OpResult<ObjInfo> res = ess.Await(sid, cb);
   if (res) {
-    string resp = absl::StrCat("Value encoding:", strEncoding(res->second));
+    string resp;
+    StrAppend(&resp, "encoding:", strEncoding(res->encoding), " bucket_id:", res->bucket_id);
+    if (res->ttl != INT64_MAX) {
+      StrAppend(&resp, " ttl:", res->ttl, res->has_sec_precision ? "s" : "ms");
+    }
     (*cntx_)->SendSimpleString(resp);
   } else {
     (*cntx_)->SendError(res.status());

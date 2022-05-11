@@ -974,10 +974,14 @@ VarzValue::Map Service::GetVarzStats() {
   VarzValue::Map res;
 
   Metrics m = server_family_.GetMetrics();
+  DbStats db_stats;
+  for (const auto& s : m.db) {
+    db_stats += s;
+  }
 
-  res.emplace_back("keys", VarzValue::FromInt(m.db.key_count));
-  res.emplace_back("obj_mem_usage", VarzValue::FromInt(m.db.obj_memory_usage));
-  double load = double(m.db.key_count) / (1 + m.db.bucket_count);
+  res.emplace_back("keys", VarzValue::FromInt(db_stats.key_count));
+  res.emplace_back("obj_mem_usage", VarzValue::FromInt(db_stats.obj_memory_usage));
+  double load = double(db_stats.key_count) / (1 + db_stats.bucket_count);
   res.emplace_back("table_load_factor", VarzValue::FromDouble(load));
 
   return res;

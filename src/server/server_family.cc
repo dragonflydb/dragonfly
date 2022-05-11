@@ -6,8 +6,8 @@
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/random/random.h>  // for master_id_ generation.
-#include <absl/strings/str_join.h>
 #include <absl/strings/match.h>
+#include <absl/strings/str_join.h>
 #include <mimalloc-types.h>
 #include <sys/resource.h>
 
@@ -18,8 +18,8 @@ extern "C" {
 }
 
 #include "base/logging.h"
-#include "io/proc_reader.h"
 #include "facade/dragonfly_connection.h"
+#include "io/proc_reader.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/debugcmd.h"
@@ -77,8 +77,8 @@ error_code CreateDirs(fs::path dir_path) {
 }
 
 string UnknowSubCmd(string_view subcmd, string cmd) {
-  return absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd,
-        "'. Try ", cmd, " HELP.");
+  return absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd, "'. Try ",
+                      cmd, " HELP.");
 }
 
 }  // namespace
@@ -424,6 +424,17 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+static void MergeInto(const DbSlice::Stats& src, Metrics* dest) {
+  if (src.db_stats.size() > dest->db.size())
+    dest->db.resize(src.db_stats.size());
+  for (size_t i = 0; i < src.db_stats.size(); ++i) {
+    dest->db[i] += src.db_stats[i];
+  }
+
+  dest->events += src.events;
+  dest->small_string_bytes += src.small_string_bytes;
+}
+
 Metrics ServerFamily::GetMetrics() const {
   Metrics result;
 
@@ -439,9 +450,7 @@ Metrics ServerFamily::GetMetrics() const {
     result.qps += uint64_t(ss->MovingSum6());
 
     if (shard) {
-      auto db_stats = shard->db_slice().GetStats();
-      result.db += db_stats.db;
-      result.events += db_stats.events;
+      MergeInto(shard->db_slice().GetStats(), &result);
 
       result.heap_used_bytes += shard->UsedMemory();
       if (shard->tiered_storage()) {
@@ -487,7 +496,7 @@ tcp_port:)";
   };
 
   auto append = [&info](absl::AlphaNum a1, absl::AlphaNum a2) {
-    absl::StrAppend(&info, a1, a2, "\r\n");
+    absl::StrAppend(&info, a1, ":", a2, "\r\n");
   };
 
 #define ADD_HEADER(x) absl::StrAppend(&info, x "\r\n")
@@ -496,32 +505,37 @@ tcp_port:)";
     append(kInfo1, FLAGS_port);
 
     size_t uptime = time(NULL) - start_time_;
-    append("uptime_in_seconds:", uptime);
-    append("uptime_in_days:", uptime / (3600 * 24));
+    append("uptime_in_seconds", uptime);
+    append("uptime_in_days", uptime / (3600 * 24));
   }
 
   Metrics m = GetMetrics();
   auto sdata_res = io::ReadStatusInfo();
 
+  DbStats total;
+  for (const auto& db_stats : m.db) {
+    total += db_stats;
+  }
+
   if (should_enter("CLIENTS")) {
     ADD_HEADER("# Clients");
-    append("connected_clients:", m.conn_stats.num_conns);
-    append("client_read_buf_capacity:", m.conn_stats.read_buf_capacity);
-    append("blocked_clients:", m.conn_stats.num_blocked_clients);
+    append("connected_clients", m.conn_stats.num_conns);
+    append("client_read_buf_capacity", m.conn_stats.read_buf_capacity);
+    append("blocked_clients", m.conn_stats.num_blocked_clients);
   }
 
   if (should_enter("MEMORY")) {
     ADD_HEADER("# Memory");
 
-    append("used_memory:", m.heap_used_bytes);
-    append("used_memory_human:", HumanReadableNumBytes(m.heap_used_bytes));
-    append("used_memory_peak:", used_mem_peak.load(memory_order_relaxed));
+    append("used_memory", m.heap_used_bytes);
+    append("used_memory_human", HumanReadableNumBytes(m.heap_used_bytes));
+    append("used_memory_peak", used_mem_peak.load(memory_order_relaxed));
 
-    append("comitted_memory:", _mi_stats_main.committed.current);
+    append("comitted_memory", _mi_stats_main.committed.current);
 
     if (sdata_res.has_value()) {
-      append("used_memory_rss:", sdata_res->vm_rss);
-      append("used_memory_rss_human:", HumanReadableNumBytes(sdata_res->vm_rss));
+      append("used_memory_rss", sdata_res->vm_rss);
+      append("used_memory_rss_human", HumanReadableNumBytes(sdata_res->vm_rss));
     } else {
       LOG(ERROR) << "Error fetching /proc/self/status stats";
     }
@@ -530,45 +544,45 @@ tcp_port:)";
     // heap. For example, strings or intsets. members of lists, sets, zsets etc
     // are not accounted for to avoid complex computations. In some cases, when number of members
     // is known we approximate their allocations by taking 16 bytes per member.
-    append("blob_used_memory:", m.db.obj_memory_usage);
-    append("table_used_memory:", m.db.table_mem_usage);
-    append("num_buckets:", m.db.bucket_count);
-    append("num_entries:", m.db.key_count);
-    append("inline_keys:", m.db.inline_keys);
-    append("small_string_bytes:", m.db.small_string_bytes);
-    append("strval_bytes:", m.db.strval_memory_usage);
-    append("listpack_blobs:", m.db.listpack_blob_cnt);
-    append("listpack_bytes:", m.db.listpack_bytes);
+    append("object_used_memory", total.obj_memory_usage);
+    append("table_used_memory", total.table_mem_usage);
+    append("num_buckets", total.bucket_count);
+    append("num_entries", total.key_count);
+    append("inline_keys", total.inline_keys);
+    append("strval_bytes", total.strval_memory_usage);
+    append("listpack_blobs", total.listpack_blob_cnt);
+    append("listpack_bytes", total.listpack_bytes);
+    append("small_string_bytes", m.small_string_bytes);
   }
 
   if (should_enter("STATS")) {
     ADD_HEADER("# Stats");
 
-    append("instantaneous_ops_per_sec:", m.qps);
-    append("total_commands_processed:", m.conn_stats.command_cnt);
-    append("total_pipelined_commands:", m.conn_stats.pipelined_cmd_cnt);
-    append("total_net_input_bytes:", m.conn_stats.io_read_bytes);
-    append("total_net_output_bytes:", m.conn_stats.io_write_bytes);
-    append("instantaneous_input_kbps:", -1);
-    append("instantaneous_output_kbps:", -1);
-    append("rejected_connections:", -1);
-    append("expired_keys:", m.events.expired_keys);
-    append("gc_keys:", m.events.garbage_collected);
-    append("keyspace_hits:", -1);
-    append("keyspace_misses:", -1);
-    append("total_reads_processed:", m.conn_stats.io_read_cnt);
-    append("total_writes_processed:", m.conn_stats.io_write_cnt);
-    append("async_writes_count:", m.conn_stats.async_writes_cnt);
+    append("instantaneous_ops_per_sec", m.qps);
+    append("total_commands_processed", m.conn_stats.command_cnt);
+    append("total_pipelined_commands", m.conn_stats.pipelined_cmd_cnt);
+    append("total_net_input_bytes", m.conn_stats.io_read_bytes);
+    append("total_net_output_bytes", m.conn_stats.io_write_bytes);
+    append("instantaneous_input_kbps", -1);
+    append("instantaneous_output_kbps", -1);
+    append("rejected_connections", -1);
+    append("expired_keys", m.events.expired_keys);
+    append("gc_keys", m.events.garbage_collected);
+    append("keyspace_hits", -1);
+    append("keyspace_misses", -1);
+    append("total_reads_processed", m.conn_stats.io_read_cnt);
+    append("total_writes_processed", m.conn_stats.io_write_cnt);
+    append("async_writes_count", m.conn_stats.async_writes_cnt);
   }
 
   if (should_enter("TIERED", true)) {
     ADD_HEADER("# TIERED");
-    append("external_entries:", m.db.external_entries);
-    append("external_bytes:", m.db.external_size);
-    append("external_reads:", m.tiered_stats.external_reads);
-    append("external_writes:", m.tiered_stats.external_writes);
-    append("external_reserved:", m.tiered_stats.storage_reserved);
-    append("external_capacity:", m.tiered_stats.storage_capacity);
+    append("external_entries", total.external_entries);
+    append("external_bytes", total.external_size);
+    append("external_reads", m.tiered_stats.external_reads);
+    append("external_writes", m.tiered_stats.external_writes);
+    append("external_reserved", m.tiered_stats.storage_reserved);
+    append("external_capacity", m.tiered_stats.storage_capacity);
   }
 
   if (should_enter("REPLICATION")) {
@@ -577,23 +591,23 @@ tcp_port:)";
     ServerState& etl = *ServerState::tlocal();
 
     if (etl.is_master) {
-      append("role:", "master");
-      append("connected_slaves:", m.conn_stats.num_replicas);
+      append("role", "master");
+      append("connected_slaves", m.conn_stats.num_replicas);
     } else {
-      append("role:", "slave");
+      append("role", "slave");
 
       // it's safe to access replica_ because replica_ is created before etl.is_master set to
       // false and cleared after etl.is_master is set to true. And since the code here that checks
       // for is_master and copies shared_ptr is atomic, it1 should be correct.
       auto replica_ptr = replica_;
       Replica::Info rinfo = replica_ptr->GetInfo();
-      append("master_host:", rinfo.host);
-      append("master_port:", rinfo.port);
+      append("master_host", rinfo.host);
+      append("master_port", rinfo.port);
 
       const char* link = rinfo.master_link_established ? "up" : "down";
-      append("master_link_status:", link);
-      append("master_last_io_seconds_ago:", rinfo.master_last_io_sec);
-      append("master_sync_in_progress:", rinfo.sync_in_progress);
+      append("master_link_status", link);
+      append("master_last_io_seconds_ago", rinfo.master_last_io_sec);
+      append("master_sync_in_progress", rinfo.sync_in_progress);
     }
   }
 
@@ -603,24 +617,32 @@ tcp_port:)";
     auto unknown_cmd = service_.UknownCmdMap();
 
     for (const auto& k_v : unknown_cmd) {
-      append(StrCat("unknown_", k_v.first, ":"), k_v.second);
+      append(StrCat("unknown_", k_v.first), k_v.second);
     }
 
     for (const auto& k_v : m.conn_stats.cmd_count_map) {
-      append(StrCat("cmd_", k_v.first, ":"), k_v.second);
+      append(StrCat("cmd_", k_v.first), k_v.second);
     }
   }
 
   if (should_enter("ERRORSTATS", true)) {
     ADD_HEADER("# Errorstats");
     for (const auto& k_v : m.conn_stats.err_count_map) {
-      append(StrCat(k_v.first, ":"), k_v.second);
+      append(k_v.first, k_v.second);
     }
   }
 
   if (should_enter("KEYSPACE")) {
     ADD_HEADER("# Keyspace");
-    append("db0:", "keys=xxx,expires=yyy,avg_ttl=zzz");  // TODO
+    for (size_t i = 0; i < m.db.size(); ++i) {
+      const auto& stats = m.db[i];
+      bool show = (i == 0) || (stats.key_count > 0);
+      if (show) {
+        string val = StrCat("keys=", stats.key_count, ",expires=", stats.expire_count,
+                            ",avg_ttl=todo");  // TODO
+        append(StrCat("db", i), val);
+      }
+    }
   }
 
   (*cntx)->SendBulkString(info);

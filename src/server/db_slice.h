@@ -20,7 +20,7 @@ namespace dfly {
 
 using facade::OpResult;
 
-struct PerDbStats {
+struct InternalDbStats {
   // Number of inline keys.
   uint64_t inline_keys = 0;
 
@@ -33,10 +33,10 @@ struct PerDbStats {
   size_t external_entries = 0;
   size_t external_size = 0;
 
-  PerDbStats& operator+=(const PerDbStats& o);
+  InternalDbStats& operator+=(const InternalDbStats& o);
 };
 
-struct DbStats : public PerDbStats {
+struct DbStats : public InternalDbStats {
   // number of active keys.
   size_t key_count = 0;
 
@@ -49,9 +49,9 @@ struct DbStats : public PerDbStats {
   // Memory used by dictionaries.
   size_t table_mem_usage = 0;
 
-  size_t small_string_bytes = 0;
+  using InternalDbStats::operator+=;
+  using InternalDbStats::operator=;
 
-  using PerDbStats::operator+=;
   DbStats& operator+=(const DbStats& o);
 };
 
@@ -70,11 +70,11 @@ class DbSlice {
   void operator=(const DbSlice&) = delete;
 
  public:
-  using PerDbStats = ::dfly::PerDbStats;
-
   struct Stats {
-    DbStats db;
+    // DbStats db;
+    std::vector<DbStats> db_stats;
     SliceEvents events;
+    size_t small_string_bytes = 0;
   };
 
   DbSlice(uint32_t index, EngineShard* owner);
@@ -100,7 +100,7 @@ class DbSlice {
   }
 
   // returns absolute time of the expiration.
-  uint64_t ExpireTime(ExpireIterator it) const {
+  time_t ExpireTime(ExpireIterator it) const {
     return it.is_done() ? 0 : expire_base_[0] + it->second.duration_ms();
   }
 
@@ -194,7 +194,7 @@ class DbSlice {
   void PreUpdate(DbIndex db_ind, PrimeIterator it);
   void PostUpdate(DbIndex db_ind, PrimeIterator it);
 
-  PerDbStats* MutableStats(DbIndex db_ind) {
+  InternalDbStats* MutableStats(DbIndex db_ind) {
     return &db_arr_[db_ind]->stats;
   }
 
@@ -234,8 +234,8 @@ class DbSlice {
 
   EngineShard* owner_;
 
-  uint64_t now_ms_ = 0;         // Used for expire logic, represents a real clock.
-  uint64_t expire_base_[2];    // Used for expire logic, represents a real clock.
+  time_t now_ms_ = 0;         // Used for expire logic, represents a real clock.
+  time_t expire_base_[2];    // Used for expire logic, represents a real clock.
 
   uint64_t version_ = 1;        // Used to version entries in the PrimeTable.
   int64_t memory_budget_ = INT64_MAX;
@@ -250,7 +250,7 @@ class DbSlice {
 
     LockTable lock_table;
 
-    mutable PerDbStats stats;
+    mutable InternalDbStats stats;
 
     explicit DbWrapper(std::pmr::memory_resource* mr);
   };

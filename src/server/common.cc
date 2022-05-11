@@ -6,6 +6,10 @@
 
 #include <absl/strings/str_cat.h>
 
+extern "C" {
+#include "redis/object.h"
+}
+
 #include "base/logging.h"
 #include "server/error.h"
 #include "server/server_state.h"
@@ -57,6 +61,26 @@ const char* GlobalState::Name(S s) {
   }
   ABSL_INTERNAL_UNREACHABLE;
 }
+
+const char* ObjTypeName(int type) {
+  switch (type) {
+    case OBJ_STRING:
+      return "string";
+    case OBJ_LIST:
+      return "list";
+    case OBJ_SET:
+      return "set";
+    case OBJ_ZSET:
+      return "zset";
+    case OBJ_HASH:
+      return "hash";
+    case OBJ_STREAM:
+      return "stream";
+    default:
+      LOG(ERROR) << "Unsupported type " << type;
+  }
+  return "invalid";
+};
 
 bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes) {
   if (str.empty())

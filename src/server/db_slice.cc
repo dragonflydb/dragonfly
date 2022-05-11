@@ -87,8 +87,8 @@ class PrimeEvictionPolicy {
 
 #define ADD(x) (x) += o.x
 
-PerDbStats& PerDbStats::operator+=(const PerDbStats& o) {
-  constexpr size_t kDbSz = sizeof(PerDbStats);
+InternalDbStats& InternalDbStats::operator+=(const InternalDbStats& o) {
+  constexpr size_t kDbSz = sizeof(InternalDbStats);
   static_assert(kDbSz == 56);
 
   ADD(inline_keys);
@@ -104,15 +104,14 @@ PerDbStats& PerDbStats::operator+=(const PerDbStats& o) {
 
 DbStats& DbStats::operator+=(const DbStats& o) {
   constexpr size_t kDbSz = sizeof(DbStats);
-  static_assert(kDbSz == 96);
+  static_assert(kDbSz == 88);
 
-  PerDbStats::operator+=(o);
+  InternalDbStats::operator+=(o);
 
   ADD(key_count);
   ADD(expire_count);
   ADD(bucket_count);
   ADD(table_mem_usage);
-  ADD(small_string_bytes);
 
   return *this;
 }
@@ -155,18 +154,20 @@ DbSlice::~DbSlice() {
 auto DbSlice::GetStats() const -> Stats {
   Stats s;
   s.events = events_;
+  s.db_stats.resize(db_arr_.size());
 
-  for (const auto& db : db_arr_) {
-    if (!db)
+  for (size_t i = 0; i < db_arr_.size(); ++i) {
+    if (!db_arr_[i])
       continue;
-
-    s.db.key_count += db->prime_table.size();
-    s.db.bucket_count += db->prime_table.bucket_count();
-    s.db.expire_count += db->expire_table.size();
-    s.db.table_mem_usage += (db->prime_table.mem_usage() + db->expire_table.mem_usage());
-    s.db += db->stats;
+    const auto& db_wrap = *db_arr_[i];
+    DbStats& stats = s.db_stats[i];
+    stats = db_wrap.stats;
+    stats.key_count = db_wrap.prime_table.size();
+    stats.bucket_count = db_wrap.prime_table.bucket_count();
+    stats.expire_count = db_wrap.expire_table.size();
+    stats.table_mem_usage = (db_wrap.prime_table.mem_usage() + db_wrap.expire_table.mem_usage());
   }
-  s.db.small_string_bytes = CompactObj::GetStats().small_string_bytes;
+  s.small_string_bytes = CompactObj::GetStats().small_string_bytes;
 
   return s;
 }
@@ -347,7 +348,7 @@ size_t DbSlice::FlushDb(DbIndex db_ind) {
     db->prime_table.Clear();
     db->expire_table.Clear();
     db->mcflag_table.Clear();
-    db->stats = PerDbStats{};
+    db->stats = InternalDbStats{};
 
     return removed;
   };
@@ -569,9 +570,9 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(DbIndex db_ind,
   CHECK(IsValid(expire_it));
 
   // TODO: to employ multi-generation update of expire-base and the underlying values.
-  uint64_t delta_ms = now_ms_ - expire_base_[0];
+  time_t expire_time = ExpireTime(expire_it);
 
-  if (expire_it->second.duration_ms() > delta_ms)
+  if (now_ms_ < expire_time)
     return make_pair(it, expire_it);
 
   db->expire_table.Erase(expire_it);

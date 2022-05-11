@@ -164,25 +164,6 @@ OpStatus Renamer::UpdateDest(Transaction* t, EngineShard* es) {
   return OpStatus::OK;
 }
 
-const char* ObjTypeName(int type) {
-  switch (type) {
-    case OBJ_STRING:
-      return "string";
-    case OBJ_LIST:
-      return "list";
-    case OBJ_SET:
-      return "set";
-    case OBJ_ZSET:
-      return "zset";
-    case OBJ_HASH:
-      return "hash";
-    case OBJ_STREAM:
-      return "stream";
-    default:
-      LOG(ERROR) << "Unsupported type " << type;
-  }
-  return "invalid";
-};
 }  // namespace
 
 void GenericFamily::Init(util::ProactorPool* pp) {

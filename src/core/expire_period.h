@@ -10,6 +10,8 @@ namespace dfly {
 
 class ExpirePeriod {
  public:
+  static constexpr size_t kMaxGenId = 15;
+
   ExpirePeriod() : val_(0), gen_(0), precision_(0) {
     static_assert(sizeof(ExpirePeriod) == 4);
   }
@@ -18,16 +20,22 @@ class ExpirePeriod {
     Set(ms);
   }
 
-  // in milliseconds
+  // alwaws returns milliseconds value.
   uint64_t duration_ms() const {
     return precision_ ? uint64_t(val_) * 1000 : val_;
   }
 
-  unsigned generation() const {
+  // generation id for the base of this duration.
+  // when we update the generation, we need to update the value as well accoring to this
+  // logic:
+  // new_val = (old_val + old_base) - new_base.
+  unsigned generation_id() const {
     return gen_;
   }
 
   void Set(uint64_t ms);
+
+  bool is_second_precision() { return precision_ == 1;}
 
  private:
   uint32_t val_ : 27;
