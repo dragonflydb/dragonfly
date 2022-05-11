@@ -1,6 +1,6 @@
 # Dragonfly
 
-[![ci-tests](https://github.com/romange/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/romange/dragonfly/actions/workflows/ci.yml)
+[![ci-tests](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml)
 
 A novel memory store that supports Redis and Memcached commands.
 For more detailed status of what's implemented - see below.
@@ -13,32 +13,88 @@ Features include:
 5. Memory efficiency that can save 20-40% for regular workloads and even more for cache like
    workloads
 
-## Building from source
-I've tested the build on Ubuntu 21.04+.
-Requires: CMake, Ninja, boost, libunwind8-dev
-
-```
-sudo apt install ninja-build
-sudo apt install libunwind-dev
-sudo apt-get install libboost-all-dev
-```
-
-```
-git clone --recursive https://github.com/romange/dragonfly
-cd dragonfly && ./helio/blaze.sh -release
-cd build-opt && ninja dragonfly
-
-```
-
 ## Running
+dragonfly requires Linux OS version 5.11 or later.
+Ubuntu 20.04.4 or 22.04 fit these requirements.
+
+If built locally just run:
 
 ```
 ./dragonfly --logtostderr
 ```
 
-for more options, run `./dragonfly --help`
+or with docker:
 
-## Milestone - Source Available
+```
+docker pull ghcr.io/dragonflydb/dragonfly-ubuntu:latest && \
+docker tag ghcr.io/dragonflydb/dragonfly-ubuntu:latest dragonfly
+
+docker run --network=host --rm dragonfly
+```
+
+Some systems may require adding `--ulimit memlock=-1` to `docker run` options.
+
+We support redis command arguments where applicable.
+For example, you can run: `docker run --network=host --rm dragonfly --requirepass=foo --bind localhost`.
+
+dragonfly currently supports the following commandline options:
+ * port
+ * bind
+ * requirepass
+ * maxmemory
+ * memcache_port  - to enable memcached compatible API on this port. Disabled by default.
+ * dir - by default, dragonfly docker uses `/data` folder for snapshotting. You can use `-v` docker option to map it to your host folder.
+ * dbfilename
+ * dbnum - maximum number of supported databases for `select`.
+ * keys_output_limit - maximum number of returned keys in `keys` command. Default is 8192.
+   We truncate the output to avoid blowup in memory.
+
+for more options like logs management or tls support, run `dragonfly --help`.
+
+
+## Building from source
+I've tested the build on Ubuntu 20.04+.
+Requires: CMake, Ninja, boost, libunwind8-dev
+
+```
+# to install dependencies
+sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev
+
+git clone --recursive https://github.com/dragonflydb/dragonfly && cd dragonfly
+
+# another way to install dependencies
+./helio/install-dependencies.sh
+
+# Configure the build
+./helio/blaze.sh -release
+
+cd build-opt && ninja dragonfly  # build
+```
+
+## Roadmap and milestones
+
+We are planning to implement most of the APIs 1.x and 2.8 (except the replication) before we release the project to source availability on github. In addition, we will support efficient expiry (TTL) and cache eviction algorithms.
+
+The next milestone afterwards will be implementing `Redis->Dragonfly` and
+`dragonfly<->dragonfly` replication.
+
+For dragonfly-native replication we will design a distributed log format that will support
+order of magnitude higher speeds when replicating.
+
+Commands that I wish to implement after releasing the initial code:
+  - PUNSUBSCRIBE
+  - PSUBSCRIBE
+  - HYPERLOGLOG
+  - SCRIPT DEBUG
+  - OBJECT
+  - DUMP/RESTORE
+  - CLIENT
+
+Their priority will be determined based on the requests from the community.
+Also, I will omit keyspace notifications. For that I would like to deep dive and learn
+exact the exact needs for this API.
+
+### Milestone - "Source Available"
 
 API 1.0
 - [X] String family
@@ -221,11 +277,7 @@ API 2.0
   - [ ] PFCOUNT
   - [ ] PFMERGE
 
-In addition, we want to support efficient expiry (TTL) and cache eviction algorithms.
-We should implement basic memory management support. For Master/Slave replication we should design
-a distributed log format.
-
-### Memchache API
+Memchache API
 - [X] set
 - [X] get
 - [X] replace
@@ -240,27 +292,14 @@ a distributed log format.
 - [x] version
 - [x] quit
 
+Random commands we implemented as decorators along the way:
 
-Commands that I prefer avoid implementing before launch:
-  - PUNSUBSCRIBE
-  - PSUBSCRIBE
-  - HYPERLOGLOG
-  - SCRIPT DEBUG
-  - OBJECT
-  - DUMP/RESTORE
-  - CLIENT
-
-Also, I would omit keyspace notifications. For that I would like to deep dive and learn
-exact use-cases for this API.
-
-### Random commands we implemented as decorators along the way
-
- - [X] ROLE (2.8) decorator for for master withour replicas
+ - [X] ROLE (2.8) decorator for for master without replicas
  - [X] UNLINK (4.0) decorator for DEL command
- - [X] BGSAVE
- - [X] FUNCTION FLUSH
+ - [X] BGSAVE (decorator for save)
+ - [X] FUNCTION FLUSH (does nothing)
 
-## Milestone Stability
+## Milestone "Stability"
 APIs 3,4,5 without cluster support, without modules, without memory introspection commands.
 Without geo commands and without support for keyspace notifications, without streams.
 Design config support. ~10-20 commands overall...
@@ -270,6 +309,7 @@ instance.
  - [X] HSTRLEN
 
 ## Design decisions along the way
+
 ### Expiration deadlines with relative accuracy
 Expiration ranges are limited to ~4 years. Moreover, expiration deadlines
 with millisecond precision (PEXPIRE/PSETEX etc) will be rounded to closest second

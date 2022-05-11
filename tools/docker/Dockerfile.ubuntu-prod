@@ -13,10 +13,11 @@ RUN ninja dragonfly
 RUN curl -O https://raw.githubusercontent.com/ncopa/su-exec/master/su-exec.c && \
      gcc -Wall -O2 su-exec.c -o su-exec
 
+# Now prod image
 FROM ubuntu:20.04
-
+ARG ORG_NAME=dragonflydb
 LABEL org.opencontainers.image.title Dragonfly
-LABEL org.opencontainers.image.source https://github.com/romange/dragonfly
+LABEL org.opencontainers.image.source https://github.com/${ORG_NAME}/dragonfly
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN groupadd -r -g 999 dfly && useradd -r -g dfly -u 999 dfly
