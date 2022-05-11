@@ -19,15 +19,17 @@ Ubuntu 20.04.4 or 22.04 fit these requirements.
 
 If built locally just run:
 
-```
+```bash
+
 ./dragonfly --logtostderr
+
 ```
 
 or with docker:
 
-```
-docker pull ghcr.io/dragonflydb/dragonfly-ubuntu:latest && \
-docker tag ghcr.io/dragonflydb/dragonfly-ubuntu:latest dragonfly
+```bash
+docker pull ghcr.io/dragonflydb/dragonfly:latest && \
+docker tag ghcr.io/dragonflydb/dragonfly:latest dragonfly
 
 docker run --network=host --rm dragonfly
 ```
@@ -38,16 +40,16 @@ We support redis command arguments where applicable.
 For example, you can run: `docker run --network=host --rm dragonfly --requirepass=foo --bind localhost`.
 
 dragonfly currently supports the following commandline options:
- * port
- * bind
- * requirepass
- * maxmemory
- * memcache_port  - to enable memcached compatible API on this port. Disabled by default.
- * dir - by default, dragonfly docker uses `/data` folder for snapshotting. You can use `-v` docker option to map it to your host folder.
- * dbfilename
- * dbnum - maximum number of supported databases for `select`.
- * keys_output_limit - maximum number of returned keys in `keys` command. Default is 8192.
-   We truncate the output to avoid blowup in memory.
+ * `port`
+ * `bind`
+ * `requirepass`
+ * `maxmemory`
+ * `memcache_port`  - to enable memcached compatible API on this port. Disabled by default.
+ * `dir` - by default, dragonfly docker uses `/data` folder for snapshotting. You can use `-v` docker option to map it to your host folder.
+ * `dbfilename`
+ * `dbnum` - maximum number of supported databases for `select`.
+ * `keys_output_limit` - maximum number of returned keys in `keys` command. Default is 8192.
+   We truncate the output to avoid blowup in memory when fetching too many keys.
 
 for more options like logs management or tls support, run `dragonfly --help`.
 
@@ -56,7 +58,7 @@ for more options like logs management or tls support, run `dragonfly --help`.
 I've tested the build on Ubuntu 20.04+.
 Requires: CMake, Ninja, boost, libunwind8-dev
 
-```
+```bash
 # to install dependencies
 sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev
 
@@ -75,11 +77,10 @@ cd build-opt && ninja dragonfly  # build
 
 We are planning to implement most of the APIs 1.x and 2.8 (except the replication) before we release the project to source availability on github. In addition, we will support efficient expiry (TTL) and cache eviction algorithms.
 
-The next milestone afterwards will be implementing `Redis->Dragonfly` and
+The next milestone afterwards will be implementing `redis -> dragonfly` and
 `dragonfly<->dragonfly` replication.
 
-For dragonfly-native replication we will design a distributed log format that will support
-order of magnitude higher speeds when replicating.
+For dragonfly-native replication we are planning to design a distributed log format that will support order of magnitude higher speeds when replicating.
 
 Commands that I wish to implement after releasing the initial code:
   - PUNSUBSCRIBE

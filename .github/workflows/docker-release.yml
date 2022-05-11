@@ -3,6 +3,10 @@ name: docker release
 on:
   workflow_dispatch:
 
+permissions:
+  packages: write
+  contents: read
+
 jobs:
 # ===============================================================
 #   Building Dev Images
@@ -26,7 +30,7 @@ jobs:
       uses: docker/setup-buildx-action@v1
 
     - name: Login to GitHub Container Registry
-      uses: docker/login-action@v1
+      uses: docker/login-action@v2
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
@@ -39,7 +43,7 @@ jobs:
     #     platforms: linux/amd64,linux/arm64
     #     push: ${{ github.event_name != 'pull_request' }}
     #     tags: |
-    #       ghcr.io/${{ github.repository }}/dragonfly:alpine
+    #       ghcr.io/${{ github.repository }}:alpine
     #     file: tools/docker/Dockerfile.alpine-prod
     
     - name: Build dragonfly ubuntu
@@ -47,11 +51,16 @@ jobs:
       with:
         context: .
         platforms: linux/amd64,linux/arm64
+        
+        # Define QEMU settings inside the builder
         build-args: |
-          QEMU_CPU='help'
+          QEMU_CPU=max,pauth-impdef=on  
+
         push: ${{ github.event_name != 'pull_request' }}
         tags: |
-          ghcr.io/${{ github.repository }}/dragonfly:ubuntu
-          ghcr.io/${{ github.repository }}/dragonfly:latest
-          dragonfly
+          ghcr.io/${{ github.repository }}:ubuntu
+          ghcr.io/${{ github.repository }}:latest
+          
         file: tools/docker/Dockerfile.ubuntu-prod
+        cache-from: type=registry,ref=${{ github.repository }}:latest
+        cache-to: type=inline
