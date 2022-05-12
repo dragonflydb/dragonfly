@@ -21,6 +21,8 @@ extern "C" {
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/fibers_ext.h"
 #include "util/proactor_pool.h"
+#include "util/sliding_counter.h"
+
 
 namespace dfly {
 
@@ -32,6 +34,8 @@ class EngineShard {
   struct Stats {
     uint64_t ooo_runs = 0;    // how many times transactions run as OOO.
     uint64_t quick_runs = 0;  //  how many times single shard "RunQuickie" transaction run.
+
+    Stats& operator+=(const Stats&);
   };
 
   // EngineShard() is private down below.
@@ -129,9 +133,20 @@ class EngineShard {
   size_t TEST_AwakenTransLen() const {
     return awakened_transactions_.size();
   }
-#endif
 
   bool HasResultConverged(TxId notifyid) const;
+#endif
+
+  // Moving average counters.
+  enum MovingCnt {
+    TTL_TRAVERSE,
+    TTL_DELETE,
+  };
+
+  // Returns moving sum over the last 6 seconds.
+  uint32_t GetMovingSum6(MovingCnt type) const {
+    return counter_[unsigned(type)].SumTail();
+  }
 
  private:
   EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap);
@@ -139,6 +154,7 @@ class EngineShard {
   // blocks the calling fiber.
   void Shutdown();  // called before destructing EngineShard.
 
+  void Heartbeat();
 
   void CacheStats();
 
@@ -162,6 +178,10 @@ class EngineShard {
   uint64_t task_iters_ = 0;
   std::unique_ptr<TieredStorage> tiered_storage_;
   std::unique_ptr<BlockingController> blocking_controller_;
+
+  using Counter = util::SlidingCounter<7>;
+
+  Counter counter_[2];
 
   static thread_local EngineShard* shard_;
 };

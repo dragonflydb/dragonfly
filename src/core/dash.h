@@ -295,9 +295,10 @@ class DashTable : public detail::DashTableBase {
   // times. if cursor=0 starts traversing from the beginning, otherwise continues from where it
   // stopped. returns 0 if the supplied cursor reached end of traversal. Traverse iterates at bucket
   // granularity, which means for each non-empty bucket it calls cb per each entry in the bucket
-  // before returning. Unlike begin/end interface, traverse is more stable during table mutations.
-  // It guarantees that if key exists at the beginning of traversal, stays in the table during the
-  // traversal, it will eventually reach it even when the table shrinks or grows.
+  // before returning. Unlike begin/end interface, traverse is stable during table mutations.
+  // It guarantees that if key exists (1)at the beginning of traversal, (2) stays in the table
+  // during the traversal, then Traverse() will eventually reach it even when the
+  // table shrinks or grows.
   // Returns: cursor that is guaranteed to be less than 2^40.
   template <typename Cb> cursor Traverse(cursor curs, Cb&& cb);
 

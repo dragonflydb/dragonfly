@@ -27,11 +27,14 @@ struct Metrics {
   std::vector<DbStats> db;
   SliceEvents events;
   TieredStats tiered_stats;
+  EngineShard::Stats shard_stats;
 
   size_t qps = 0;
   size_t heap_used_bytes = 0;
   size_t heap_comitted_bytes = 0;
   size_t small_string_bytes = 0;
+  uint32_t traverse_ttl_per_sec = 0;
+  uint32_t delete_ttl_per_sec = 0;
 
   facade::ConnectionStats conn_stats;
 };

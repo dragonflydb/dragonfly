@@ -34,6 +34,13 @@ vector<EngineShardSet::CachedStats> cached_stats;  // initialized in EngineShard
 thread_local EngineShard* EngineShard::shard_ = nullptr;
 constexpr size_t kQueueLen = 64;
 
+EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
+  ooo_runs += o.ooo_runs;
+  quick_runs += o.quick_runs;
+
+  return *this;
+}
+
 EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap)
     : queue_(kQueueLen), txq_([](const Transaction* t) { return t->txid(); }), mi_resource_(heap),
       db_slice_(pb->GetIndex(), this) {
@@ -45,14 +52,7 @@ EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t*
   if (update_db_time) {
     constexpr uint32_t kClockCycleMs = 1;
 
-    periodic_task_ = pb->AddPeriodic(kClockCycleMs, [this] {
-      // absl::GetCurrentTimeNanos() returns current time since the Unix Epoch.
-      db_slice().UpdateExpireClock(absl::GetCurrentTimeNanos() / 1000000);
-
-      if (task_iters_++ % 8 == 0) {
-        CacheStats();
-      }
-    });
+    periodic_task_ = pb->AddPeriodic(kClockCycleMs, [this] { Heartbeat(); });
   }
 
   tmp_str1 = sdsempty();
@@ -276,6 +276,27 @@ bool EngineShard::HasResultConverged(TxId notifyid) const {
   return txq_.Empty() || txq_.HeadScore() > notifyid;
 }
 #endif
+
+void EngineShard::Heartbeat() {
+  // absl::GetCurrentTimeNanos() returns current time since the Unix Epoch.
+  db_slice().UpdateExpireClock(absl::GetCurrentTimeNanos() / 1000000);
+
+  if (task_iters_++ % 8 == 0) {
+    CacheStats();
+
+    for (unsigned i = 0; i < db_slice_.db_array_size(); ++i) {
+      if (db_slice_.IsDbValid(i)) {
+        auto [pt, expt] = db_slice_.GetTables(i);
+        if (expt->size() > pt->size() / 4) {
+          auto [trav, del] = db_slice_.DeleteExpired(i);
+
+          counter_[TTL_TRAVERSE].IncBy(trav);
+          counter_[TTL_DELETE].IncBy(del);
+        }
+      }
+    }
+  }
+}
 
 void EngineShard::CacheStats() {
 #if 0

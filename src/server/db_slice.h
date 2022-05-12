@@ -110,7 +110,7 @@ class DbSlice {
   }
 
   // returns wall clock in millis as it has been set via UpdateExpireClock.
-  uint64_t Now() const {
+  time_t Now() const {
     return now_ms_;
   }
 
@@ -224,6 +224,11 @@ class DbSlice {
   //! Unregisters the callback.
   void UnregisterOnChange(uint64_t id);
 
+  // Deletes some amount of possible expired items.
+  // Returns a pair where first denotes number of traversed items that have ttl bit
+  // and second denotes number of deleted items due to expiration. (second <= first).
+  std::pair<unsigned, unsigned> DeleteExpired(DbIndex db_indx);
+
  private:
   void CreateDb(DbIndex index);
 
@@ -252,6 +257,7 @@ class DbSlice {
     LockTable lock_table;
 
     mutable InternalDbStats stats;
+    ExpireTable::cursor expire_cursor;
 
     explicit DbWrapper(std::pmr::memory_resource* mr);
   };

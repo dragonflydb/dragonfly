@@ -607,4 +607,27 @@ void DbSlice::UnregisterOnChange(uint64_t id) {
   LOG(DFATAL) << "Could not find " << id << " to unregister";
 }
 
+pair<unsigned, unsigned> DbSlice::DeleteExpired(DbIndex db_ind) {
+  auto& db = *db_arr_[db_ind];
+  unsigned deleted = 0, candidates = 0;
+
+  auto cb = [&](ExpireIterator it) {
+    candidates++;
+    if (ExpireTime(it) <= Now()) {
+      auto prime_it = db.prime_table.Find(it->first);
+      CHECK(!prime_it.is_done());
+      ExpireIfNeeded(db_ind, prime_it);
+      ++deleted;
+    }
+  };
+
+  for (unsigned i = 0; i < 10; ++i) {
+    db.expire_cursor = db.expire_table.Traverse(db.expire_cursor, cb);
+    if (deleted)
+      break;
+  }
+
+  return make_pair(candidates, deleted);
+}
+
 }  // namespace dfly

@@ -456,11 +456,16 @@ Metrics ServerFamily::GetMetrics() const {
       if (shard->tiered_storage()) {
         result.tiered_stats += shard->tiered_storage()->GetStats();
       }
+      result.shard_stats += shard->stats();
+      result.traverse_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_TRAVERSE);
+      result.delete_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_DELETE);
     }
   };
 
   service_.proactor_pool().AwaitFiberOnAll(std::move(cb));
-  result.qps /= 6;
+  result.qps /= 6;  // normalize moving average stats
+  result.traverse_ttl_per_sec /= 6;
+  result.delete_ttl_per_sec /= 6;
 
   return result;
 }
@@ -569,11 +574,14 @@ tcp_port:)";
     append("expired_keys", m.events.expired_keys);
     append("gc_entries", m.events.garbage_collected);
     append("stash_unloaded", m.events.stash_unloaded);
+    append("traverse_ttl_sec", m.traverse_ttl_per_sec);
+    append("delete_ttl_sec", m.delete_ttl_per_sec);
     append("keyspace_hits", -1);
     append("keyspace_misses", -1);
     append("total_reads_processed", m.conn_stats.io_read_cnt);
     append("total_writes_processed", m.conn_stats.io_write_cnt);
     append("async_writes_count", m.conn_stats.async_writes_cnt);
+
   }
 
   if (should_enter("TIERED", true)) {
