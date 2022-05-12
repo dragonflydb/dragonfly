@@ -45,44 +45,43 @@ class PrimeEvictionPolicy {
     db_indx_ = db_indx;
   }
 
-  void RecordSplit() {
+  void RecordSplit(PrimeTable::Segment_t* segment) {
     mem_budget_ -= PrimeTable::kSegBytes;
+    DVLOG(1) << "split: " << segment->SlowSize() << "/" << segment->capacity();
   }
 
   bool CanGrow(const PrimeTable& tbl) const {
     return mem_budget_ > int64_t(PrimeTable::kSegBytes);
   }
 
-  unsigned GarbageCollect(const PrimeTable::EvictionBuckets& eb, PrimeTable* me) {
-    unsigned res = 0;
-    for (unsigned i = 0; i < ABSL_ARRAYSIZE(eb.iter); ++i) {
-      auto it = eb.iter[i];
-      for (; !it.is_done(); ++it) {
-        if (it->second.HasExpire()) {
-          auto [prime_it, exp_it] = db_slice_->ExpireIfNeeded(db_indx_, it);
-          if (prime_it.is_done())
-            ++res;
-        }
-      }
-    }
-
-    gc_count_ += res;
-    return res;
-  }
+  unsigned GarbageCollect(const PrimeTable::EvictionBuckets& eb, PrimeTable* me);
 
   int64_t mem_budget() const {
     return mem_budget_;
-  }
-  unsigned gc_count() const {
-    return gc_count_;
   }
 
  private:
   DbSlice* db_slice_;
   int64_t mem_budget_;
   DbIndex db_indx_;
-  unsigned gc_count_ = 0;
 };
+
+unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::EvictionBuckets& eb,
+                                             PrimeTable* me) {
+  unsigned res = 0;
+  for (unsigned i = 0; i < ABSL_ARRAYSIZE(eb.iter); ++i) {
+    auto it = eb.iter[i];
+    for (; !it.is_done(); ++it) {
+      if (it->second.HasExpire()) {
+        auto [prime_it, exp_it] = db_slice_->ExpireIfNeeded(db_indx_, it);
+        if (prime_it.is_done())
+          ++res;
+      }
+    }
+  }
+
+  return res;
+}
 
 }  // namespace
 
@@ -118,11 +117,12 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 24, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 32, "You should update this function with new fields");
 
   ADD(evicted_keys);
   ADD(expired_keys);
   ADD(garbage_collected);
+  ADD(stash_unloaded);
 
   return *this;
 }
@@ -258,7 +258,8 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) -> pair<PrimeIterator
     db->stats.inline_keys += it->first.IsInline();
     db->stats.obj_memory_usage += it->first.MallocUsed();
 
-    events_.garbage_collected += evp.gc_count();
+    events_.garbage_collected += db->prime_table.garbage_collected();
+    events_.stash_unloaded = db->prime_table.stash_unloaded();
 
     it.SetVersion(NextVersion());
     memory_budget_ = evp.mem_budget();

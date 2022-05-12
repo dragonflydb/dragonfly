@@ -373,7 +373,7 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   }
 
   if (ec && !FiberSocketBase::IsConnClosed(ec)) {
-    LOG(WARNING) << "Socket error " << ec;
+    LOG(WARNING) << "Socket error " << ec << " " << ec.message();
   }
 
   --stats->num_conns;

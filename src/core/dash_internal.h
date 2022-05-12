@@ -474,6 +474,10 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   // Finds a valid entry going from specified indices up.
   Iterator FindValidStartingFrom(unsigned bid, unsigned slot) const;
 
+  // Tries to move stash entries back to their normal buckets (exact or neighour).
+  // Returns number of entries that succeeded to unload.
+  template <typename HFunc> unsigned UnloadStash(HFunc&& hfunc);
+
  private:
   static constexpr uint8_t kNanBid = 0xFF;
   using SlotId = typename BucketType::SlotId;
@@ -1229,6 +1233,7 @@ bool Segment<Key, Value, Policy>::TraverseLogicalBucket(uint8_t bid, HashFn&& hf
 
   uint8_t nid = (bid + 1) % kNumBuckets;
   const Bucket& next = bucket_[nid];
+
   // check for probing entries in the next bucket, i.e. those that should reside in b.
   if (next.GetProbe(true)) {
     next.ForEachSlot([&](SlotId slot, bool probe) {
@@ -1283,6 +1288,33 @@ auto Segment<Key, Value, Policy>::FindValidStartingFrom(unsigned bid, unsigned s
     ++bid;
   }
   return Iterator{};
+}
+
+template <typename Key, typename Value, typename Policy>
+template <typename HFunc>
+unsigned Segment<Key, Value, Policy>::UnloadStash(HFunc&& hfunc) {
+  unsigned moved = 0;
+
+  for (unsigned i = 0; i < STASH_BUCKET_NUM; ++i) {
+    unsigned bid = kNumBuckets + i;
+    Bucket& stash = bucket_[bid];
+    uint32_t invalid_mask = 0;
+
+    auto cb = [&](unsigned slot, bool probe) {
+      auto& key = Key(bid, slot);
+      Hash_t hash = hfunc(key);
+      bool res = TryMoveFromStash(i, slot, hash);
+      if (res) {
+        ++moved;
+        invalid_mask |= (1u << slot);
+      }
+    };
+
+    stash.ForEachSlot(cb);
+    stash.ClearSlots(invalid_mask);
+  }
+
+  return moved;
 }
 
 }  // namespace detail

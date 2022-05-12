@@ -47,6 +47,7 @@ class DashTable : public detail::DashTableBase {
  public:
   using Key_t = _Key;
   using Value_t = _Value;
+  using Segment_t = SegmentType;
 
   //! Number of "official" buckets that are used to position a key. In other words, does not include
   //! stash buckets.
@@ -75,29 +76,7 @@ class DashTable : public detail::DashTableBase {
         : owner_(me), seg_id_(seg_id), bucket_id_(bid), slot_id_(sid) {
     }
 
-    void FindValid() {
-      if constexpr (IsSingleBucket) {
-        const auto& b = owner_->segment_[seg_id_]->GetBucket(bucket_id_);
-        uint32_t mask = b.GetBusy() >> slot_id_;
-        if (mask) {
-          int slot = __builtin_ctz(mask);
-          slot_id_ += slot;
-          return;
-        }
-      } else {
-        while (seg_id_ < owner_->segment_.size()) {
-          auto seg_it = owner_->segment_[seg_id_]->FindValidStartingFrom(bucket_id_, slot_id_);
-          if (seg_it.found()) {
-            bucket_id_ = seg_it.index;
-            slot_id_ = seg_it.slot;
-            return;
-          }
-          seg_id_ = owner_->NextSeg(seg_id_);
-          bucket_id_ = slot_id_ = 0;
-        }
-      }
-      owner_ = nullptr;
-    }
+    void FindValid();
 
    public:
     using iterator_category = std::forward_iterator_tag;
@@ -197,7 +176,7 @@ class DashTable : public detail::DashTableBase {
     unsigned slot_id() const {
       return slot_id_;
     }
-    
+
     unsigned segment_id() const {
       return seg_id_;
     }
@@ -223,22 +202,23 @@ class DashTable : public detail::DashTableBase {
       return true;
     }
 
-    void RecordSplit() {}
- /*
-    /// Required interface in case can_gc is true
-    // Returns number of garbage collected items deleted. 0 - means nothing has been
-    // deleted.
-    unsigned GarbageCollect(const EvictionBuckets& eb, DashTable* me) const {
-      return 0;
+    void RecordSplit(SegmentType* segment) {
     }
+    /*
+       /// Required interface in case can_gc is true
+       // Returns number of garbage collected items deleted. 0 - means nothing has been
+       // deleted.
+       unsigned GarbageCollect(const EvictionBuckets& eb, DashTable* me) const {
+         return 0;
+       }
 
-    // Required interface in case can_gc is true
-    // returns number of items evicted from the table.
-    // 0 means - nothing has been evicted.
-    unsigned Evict(const EvictionBuckets& eb, DashTable* me) {
-      return 0;
-    }
-*/
+       // Required interface in case can_gc is true
+       // returns number of items evicted from the table.
+       // 0 means - nothing has been evicted.
+       unsigned Evict(const EvictionBuckets& eb, DashTable* me) {
+         return 0;
+       }
+   */
   };
 
   DashTable(size_t capacity_log = 1, const Policy& policy = Policy{},
@@ -287,6 +267,11 @@ class DashTable : public detail::DashTableBase {
   using Base::depth;
   using Base::size;
   using Base::unique_segments;
+
+  // Direct access to the segment for debugging purposes.
+  Segment_t* GetSegment(unsigned segment_id) {
+    return segment_[segment_id];
+  }
 
   template <typename U> uint64_t DoHash(const U& k) const {
     return policy_.HashFn(k);
@@ -341,8 +326,17 @@ class DashTable : public detail::DashTableBase {
 
   void Clear();
 
-  uint64_t garbage_collected() const { return garbage_collected_;}
-  uint64_t evicted() const { return evicted_;}
+  uint64_t garbage_collected() const {
+    return garbage_collected_;
+  }
+
+  uint64_t evicted() const {
+    return evicted_;
+  }
+
+  uint64_t stash_unloaded() const {
+    return stash_unloaded_;
+  }
 
  private:
   template <typename U, typename V, typename EvictionPolicy>
@@ -367,7 +361,46 @@ class DashTable : public detail::DashTableBase {
 
   uint64_t garbage_collected_ = 0;
   uint64_t evicted_ = 0;
-};
+  uint64_t stash_unloaded_ = 0;
+};  // DashTable
+
+/**
+  _____                 _                           _        _   _
+ |_   _|               | |                         | |      | | (_)
+   | |  _ __ ___  _ __ | | ___ _ __ ___   ___ _ __ | |_ __ _| |_ _  ___  _ __
+   | | | '_ ` _ \| '_ \| |/ _ \ '_ ` _ \ / _ \ '_ \| __/ _` | __| |/ _ \| '_ \
+  _| |_| | | | | | |_) | |  __/ | | | | |  __/ | | | || (_| | |_| | (_) | | | |
+ |_____|_| |_| |_| .__/|_|\___|_| |_| |_|\___|_| |_|\__\__,_|\__|_|\___/|_| |_|
+                 | |
+                 |_|
+
+**/
+
+template <typename _Key, typename _Value, typename Policy>
+template <bool IsConst, bool IsSingleBucket>
+void DashTable<_Key, _Value, Policy>::Iterator<IsConst, IsSingleBucket>::FindValid() {
+  if constexpr (IsSingleBucket) {
+    const auto& b = owner_->segment_[seg_id_]->GetBucket(bucket_id_);
+    uint32_t mask = b.GetBusy() >> slot_id_;
+    if (mask) {
+      int slot = __builtin_ctz(mask);
+      slot_id_ += slot;
+      return;
+    }
+  } else {
+    while (seg_id_ < owner_->segment_.size()) {
+      auto seg_it = owner_->segment_[seg_id_]->FindValidStartingFrom(bucket_id_, slot_id_);
+      if (seg_it.found()) {
+        bucket_id_ = seg_it.index;
+        slot_id_ = seg_it.slot;
+        return;
+      }
+      seg_id_ = owner_->NextSeg(seg_id_);
+      bucket_id_ = slot_id_ = 0;
+    }
+  }
+  owner_ = nullptr;
+}
 
 template <typename _Key, typename _Value, typename Policy>
 DashTable<_Key, _Value, Policy>::DashTable(size_t capacity_log, const Policy& policy,
@@ -593,9 +626,10 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       return std::make_pair(iterator{this, seg_id, it.index, it.slot}, false);
     }
 
+    // At this point we must split the segment.
     // try garbage collect or evict.
     if constexpr (ev.can_evict || ev.can_gc) {
-      // Try eviction.
+      // Try gc.
       uint8_t bid[2];
       SegmentType::FillProbeArray(key_hash, bid);
       EvictionBuckets buckets;
@@ -615,6 +649,13 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
         garbage_collected_ += res;
         if (res)
           continue;
+      }
+
+      auto hash_fn = [this](const auto& k) { return policy_.HashFn(k); };
+      unsigned moved = target->UnloadStash(hash_fn);
+      if (moved > 0) {
+        stash_unloaded_ += moved;
+        continue;
       }
 
       // We evict only if our policy says we can not grow
@@ -641,8 +682,8 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       assert(seg_id < segment_.size() && segment_[seg_id] == target);
     }
 
+    ev.RecordSplit(target);
     Split(seg_id);
-    ev.RecordSplit();
   }
 
   return std::make_pair(iterator{}, false);
@@ -674,9 +715,9 @@ void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id) {
   SegmentType* target = alloc.allocate(1);
   alloc.construct(target, source->local_depth() + 1);
 
-  auto cb = [this](const auto& k) { return policy_.HashFn(k); };
+  auto hash_fn = [this](const auto& k) { return policy_.HashFn(k); };
 
-  source->Split(std::move(cb), target);  // increases the depth.
+  source->Split(std::move(hash_fn), target);  // increases the depth.
   ++unique_segments_;
 
   for (size_t i = start_idx + chunk_size / 2; i < start_idx + chunk_size; ++i) {

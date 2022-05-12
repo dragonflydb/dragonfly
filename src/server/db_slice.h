@@ -60,6 +60,7 @@ struct SliceEvents {
   size_t evicted_keys = 0;
   size_t expired_keys = 0;
   size_t garbage_collected = 0;
+  size_t stash_unloaded = 0;
 
   SliceEvents& operator+=(const SliceEvents& o);
 };
