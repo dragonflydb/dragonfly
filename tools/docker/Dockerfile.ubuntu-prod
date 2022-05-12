@@ -20,12 +20,15 @@ RUN curl -O https://raw.githubusercontent.com/ncopa/su-exec/master/su-exec.c && 
 # Now prod image
 FROM ubuntu:20.04
 
+# ARG in fact change the env vars during the build process
+# ENV persist the env vars for the built image as well.
 ARG QEMU_CPU
 ARG ORG_NAME=dragonflydb
+ARG DEBIAN_FRONTEND=noninteractive
 
 LABEL org.opencontainers.image.title Dragonfly
 LABEL org.opencontainers.image.source https://github.com/${ORG_NAME}/dragonfly
-ENV DEBIAN_FRONTEND=noninteractive
+
 
 RUN groupadd -r -g 999 dfly && useradd -r -g dfly -u 999 dfly
 RUN apt update && apt install -y libunwind8 libssl1.1 && \
@@ -40,5 +43,7 @@ COPY --from=builder /build/build-opt/su-exec /usr/local/bin/
 
 ENTRYPOINT ["entrypoint.sh"]
 
-EXPOSE 6380
+# For inter-container communication.
+EXPOSE 6379
+
 CMD ["dragonfly", "--logtostderr"]

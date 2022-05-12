@@ -13,7 +13,7 @@ class ExpirePeriod {
   static constexpr size_t kMaxGenId = 15;
 
   ExpirePeriod() : val_(0), gen_(0), precision_(0) {
-    static_assert(sizeof(ExpirePeriod) == 4);
+    static_assert(sizeof(ExpirePeriod) == 8);  // TODO
   }
 
   explicit ExpirePeriod(uint64_t ms, unsigned gen = 0) : ExpirePeriod() {
@@ -38,13 +38,13 @@ class ExpirePeriod {
   bool is_second_precision() { return precision_ == 1;}
 
  private:
-  uint32_t val_ : 27;
-  uint32_t gen_ : 4;
-  uint32_t precision_ : 1;  // 0 - ms, 1 - sec.
+  uint64_t val_ : 59;
+  uint64_t gen_ : 4;
+  uint64_t precision_ : 1;  // 0 - ms, 1 - sec.
 };
 
 inline void ExpirePeriod::Set(uint64_t ms) {
-  constexpr uint64_t kBarrier = (1ULL << 27);
+  constexpr uint64_t kBarrier = (1ULL << 48);
 
   if (ms < kBarrier) {
     val_ = ms;

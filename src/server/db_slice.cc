@@ -32,7 +32,8 @@ constexpr auto kExpireSegmentSize = ExpireTable::kSegBytes;
 static_assert(kPrimeSegmentSize == 32720);
 
 // 20480 is the next goodsize so we are loosing ~300 bytes or 1.5%.
-static_assert(kExpireSegmentSize == 20168);
+// 24576
+static_assert(kExpireSegmentSize == 23528);
 
 class PrimeEvictionPolicy {
  public:

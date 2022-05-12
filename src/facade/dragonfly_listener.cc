@@ -42,6 +42,7 @@ namespace facade {
 using namespace util;
 using namespace std;
 
+namespace {
 // To connect: openssl s_client  -cipher "ADH:@SECLEVEL=0" -state -crlf  -connect 127.0.0.1:6380
 static SSL_CTX* CreateSslCntx() {
   SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
@@ -86,6 +87,35 @@ static SSL_CTX* CreateSslCntx() {
   return ctx;
 }
 
+bool ConfigureKeepAlive(int fd, unsigned interval_sec) {
+  DCHECK_GT(interval_sec, 3u);
+
+  int val = 1;
+  if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val)) < 0)
+    return false;
+
+  val = interval_sec;
+  if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &val, sizeof(val)) < 0)
+    return false;
+
+  /* Send next probes after the specified interval. Note that we set the
+    * delay as interval / 3, as we send three probes before detecting
+    * an error (see the next setsockopt call). */
+  val = interval_sec / 3;
+  if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &val, sizeof(val)) < 0)
+    return false;
+
+  /* Consider the socket in error state after three we send three ACK
+    * probes without getting a reply. */
+  val = 3;
+  if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &val, sizeof(val)) < 0)
+    return false;
+
+  return true;
+}
+
+}  // namespace
+
 Listener::Listener(Protocol protocol, ServiceInterface* e) : service_(e), protocol_(protocol) {
   if (FLAGS_tls) {
     OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, NULL);
@@ -102,6 +132,20 @@ Listener::~Listener() {
 
 util::Connection* Listener::NewConnection(ProactorBase* proactor) {
   return new Connection{protocol_, http_base_.get(), ctx_, service_};
+}
+
+error_code Listener::ConfigureServerSocket(int fd) {
+  int val = 1;
+  constexpr int kInterval = 300;  // 300 seconds is ok to start checking for liveness.
+
+  if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val)) < 0) {
+    LOG(WARNING) << "Could not set reuse addr on socket " << detail::SafeErrorMessage(errno);
+  }
+  bool success = ConfigureKeepAlive(fd, kInterval);
+
+  LOG_IF(WARNING, !success) << "Could not configure keep alive " << detail::SafeErrorMessage(errno);
+
+  return error_code{};
 }
 
 void Listener::PreShutdown() {

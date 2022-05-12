@@ -19,13 +19,15 @@ class Listener : public util::ListenerInterface {
   Listener(Protocol protocol, ServiceInterface*);
   ~Listener();
 
+  std::error_code ConfigureServerSocket(int fd) final;
+
  private:
   util::Connection* NewConnection(util::ProactorBase* proactor) final;
   util::ProactorBase* PickConnectionProactor(util::LinuxSocketBase* sock) final;
 
-  void PreShutdown();
+  void PreShutdown() final;
 
-  void PostShutdown();
+  void PostShutdown() final;
 
   std::unique_ptr<util::HttpListenerBase> http_base_;
 
