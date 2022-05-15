@@ -8,12 +8,12 @@
 
 #include "io/file.h"
 #include "server/table.h"
+#include "server/db_slice.h"
 #include "util/fibers/simple_channel.h"
 
 namespace dfly {
 
 class RdbSerializer;
-class DbSlice;
 
 class SliceSnapshot {
  public:
@@ -37,6 +37,7 @@ class SliceSnapshot {
   void SerializeSingleEntry(const PrimeKey& pk, const PrimeValue& pv);
 
   bool SaveCb(PrimeIterator it);
+  void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
 
   // Returns number of entries serialized.
   // Updates the version of the bucket to snapshot version.

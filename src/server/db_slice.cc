@@ -117,12 +117,13 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 32, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 40, "You should update this function with new fields");
 
   ADD(evicted_keys);
   ADD(expired_keys);
   ADD(garbage_collected);
   ADD(stash_unloaded);
+  ADD(bumpups);
 
   return *this;
 }
@@ -135,7 +136,8 @@ DbSlice::DbWrapper::DbWrapper(std::pmr::memory_resource* mr)
       mcflag_table(0, detail::ExpireTablePolicy{}, mr) {
 }
 
-DbSlice::DbSlice(uint32_t index, EngineShard* owner) : shard_id_(index), owner_(owner) {
+DbSlice::DbSlice(uint32_t index, bool caching_mode, EngineShard* owner)
+    : shard_id_(index), caching_mode_(caching_mode), owner_(owner) {
   db_arr_.emplace_back();
   CreateDb(0);
   expire_base_[0] = expire_base_[1] = 0;
@@ -199,18 +201,34 @@ auto DbSlice::Find(DbIndex db_index, string_view key, unsigned req_obj_type) con
 pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, string_view key) const {
   DCHECK(IsDbValid(db_ind));
 
-  auto& db = db_arr_[db_ind];
-  PrimeIterator it = db->prime_table.Find(key);
+  auto& db = *db_arr_[db_ind];
+  PrimeIterator it = db.prime_table.Find(key);
+  pair<PrimeIterator, ExpireIterator> res(it, ExpireIterator{});
 
   if (!IsValid(it)) {
-    return make_pair(it, ExpireIterator{});
+    return res;
   }
 
   if (it->second.HasExpire()) {  // check expiry state
-    return ExpireIfNeeded(db_ind, it);
+    res = ExpireIfNeeded(db_ind, it);
   }
 
-  return make_pair(it, ExpireIterator{});
+  if (caching_mode_ && IsValid(res.first)) {
+    if (!change_cb_.empty()) {
+      auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
+        for (const auto& ccb : change_cb_) {
+          ccb.second(db_ind, bit);
+        }
+      };
+
+      db.prime_table.CVCUponBump(change_cb_.front().first, res.first, bump_cb);
+    }
+
+    res.first = db.prime_table.BumpUp(res.first);
+    ++events_.bumpups;
+  }
+
+  return res;
 }
 
 OpResult<pair<PrimeIterator, unsigned>> DbSlice::FindFirst(DbIndex db_index, ArgSlice args) {
@@ -237,13 +255,14 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) -> pair<PrimeIterator
   // If we have some registered onchange callbacks, we must know in advance whether its Find or Add.
   if (!change_cb_.empty()) {
     auto it = FindExt(db_index, key).first;
+
     if (IsValid(it)) {
       return make_pair(it, true);
     }
 
     // It's a new entry.
     for (const auto& ccb : change_cb_) {
-      ccb.second(db_index, ChangeReq{key});
+      ccb.second(db_index, key);
     }
   }
 
@@ -411,10 +430,6 @@ uint32_t DbSlice::GetMCFlag(DbIndex db_ind, const PrimeKey& key) const {
 
 PrimeIterator DbSlice::AddNew(DbIndex db_ind, string_view key, PrimeValue obj,
                               uint64_t expire_at_ms) {
-  for (const auto& ccb : change_cb_) {
-    ccb.second(db_ind, ChangeReq{key});
-  }
-
   auto [res, added] = AddOrFind(db_ind, key, std::move(obj), expire_at_ms);
   CHECK(added);
 

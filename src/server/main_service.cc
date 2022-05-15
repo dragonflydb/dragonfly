@@ -43,6 +43,9 @@ DECLARE_string(requirepass);
 DEFINE_uint64(maxmemory, 0,
               "Limit on maximum-memory that is used by the database."
               "0 - means the program will automatically determine its maximum memory usage");
+DEFINE_bool(cache_mode, false,
+            "If true, the backend behaves like a cache, "
+            "by evicting entries when getting close to maxmemory limit");
 
 namespace dfly {
 

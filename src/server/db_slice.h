@@ -61,12 +61,12 @@ struct SliceEvents {
   size_t expired_keys = 0;
   size_t garbage_collected = 0;
   size_t stash_unloaded = 0;
+  size_t bumpups = 0;  // how many bump-upds we did.
 
   SliceEvents& operator+=(const SliceEvents& o);
 };
 
 class DbSlice {
-
   DbSlice(const DbSlice&) = delete;
   void operator=(const DbSlice&) = delete;
 
@@ -78,7 +78,21 @@ class DbSlice {
     size_t small_string_bytes = 0;
   };
 
-  DbSlice(uint32_t index, EngineShard* owner);
+  // ChangeReq - describes the change to the table.
+  struct ChangeReq {
+    // If iterator is set then it's an update to the existing bucket.
+    // Otherwise (string_view is set) then it's a new key that is going to be added to the table.
+    std::variant<PrimeTable::bucket_iterator, std::string_view> change;
+
+    ChangeReq(PrimeTable::bucket_iterator it) : change(it) {}
+    ChangeReq(std::string_view key) : change(key) {}
+
+    const PrimeTable::bucket_iterator* update() const {
+      return std::get_if<PrimeTable::bucket_iterator>(&change);
+    }
+  };
+
+  DbSlice(uint32_t index, bool caching_mode, EngineShard* owner);
   ~DbSlice();
 
   // Activates `db_ind` database if it does not exist (see ActivateDb below).
@@ -209,11 +223,6 @@ class DbSlice {
     return version_;
   }
 
-  // ChangeReq - describes the change to the table. If const_bucket_iterator is
-  // set then it's an update on the existing bucket, otherwise (string_view is set) then
-  // it's a new key that is going to be added to the table.
-  using ChangeReq = std::variant<PrimeTable::bucket_iterator, std::string_view>;
-
   using ChangeCallback = std::function<void(DbIndex, const ChangeReq&)>;
 
   //! Registers the callback to be called for each change.
@@ -237,13 +246,14 @@ class DbSlice {
   }
 
   ShardId shard_id_;
+  uint8_t caching_mode_ : 1;
 
   EngineShard* owner_;
 
-  time_t now_ms_ = 0;         // Used for expire logic, represents a real clock.
-  time_t expire_base_[2];    // Used for expire logic, represents a real clock.
+  time_t now_ms_ = 0;      // Used for expire logic, represents a real clock.
+  time_t expire_base_[2];  // Used for expire logic, represents a real clock.
 
-  uint64_t version_ = 1;        // Used to version entries in the PrimeTable.
+  uint64_t version_ = 1;  // Used to version entries in the PrimeTable.
   int64_t memory_budget_ = INT64_MAX;
   mutable SliceEvents events_;  // we may change this even for const operations.
 

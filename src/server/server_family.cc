@@ -575,7 +575,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("instantaneous_output_kbps", -1);
     append("rejected_connections", -1);
     append("expired_keys", m.events.expired_keys);
-    append("gc_entries", m.events.garbage_collected);
+    append("garbage_collected", m.events.garbage_collected);
+    append("bump_ups", m.events.bumpups);
     append("stash_unloaded", m.events.stash_unloaded);
     append("traverse_ttl_sec", m.traverse_ttl_per_sec);
     append("delete_ttl_sec", m.delete_ttl_per_sec);

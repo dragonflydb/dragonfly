@@ -17,6 +17,7 @@ extern "C" {
 #include "util/varz.h"
 
 DEFINE_string(backing_prefix, "", "");
+DECLARE_bool(cache_mode);
 
 namespace dfly {
 
@@ -43,7 +44,7 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
 
 EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap)
     : queue_(kQueueLen), txq_([](const Transaction* t) { return t->txid(); }), mi_resource_(heap),
-      db_slice_(pb->GetIndex(), this) {
+      db_slice_(pb->GetIndex(), FLAGS_cache_mode, this) {
   fiber_q_ = fibers::fiber([this, index = pb->GetIndex()] {
     this_fiber::properties<FiberProps>().set_name(absl::StrCat("shard_queue", index));
     queue_.Run();

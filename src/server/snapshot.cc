@@ -36,21 +36,8 @@ void SliceSnapshot::Start(DbSlice* slice) {
   DCHECK(!fb_.joinable());
   db_slice_ = slice;
 
-  auto on_change = [this, slice](DbIndex db_index, const DbSlice::ChangeReq& req) {
-    PrimeTable* table = slice->GetTables(db_index).first;
-
-    if (const auto* it = get_if<PrimeTable::bucket_iterator>(&req)) {
-      if (it->GetVersion() < snapshot_version_) {
-        side_saved_ += SerializePhysicalBucket(table, *it);
-      }
-    } else {
-      string_view key = get<string_view>(req);
-      table->CVCUponInsert(key, [this, table](PrimeTable::bucket_iterator it) {
-        if (it.GetVersion() < snapshot_version_) {
-          side_saved_ += SerializePhysicalBucket(table, it);
-        }
-      });
-    }
+  auto on_change = [this](DbIndex db_index, const DbSlice::ChangeReq& req) {
+    OnDbChange(db_index, req);
   };
 
   snapshot_version_ = slice->RegisterOnChange(move(on_change));
@@ -79,7 +66,6 @@ void SliceSnapshot::SerializeSingleEntry(const PrimeKey& pk, const PrimeValue& p
 
   error_code ec = rdb_serializer_->SaveEntry(pk, pv, expire_time);
   CHECK(!ec);  // we write to StringFile.
-  ++serialized_;
 }
 
 // Serializes all the entries with version less than snapshot_version_.
@@ -116,8 +102,8 @@ void SliceSnapshot::FiberFunc() {
   FlushSfile(true);
   dest_->StartClosing();
 
-  VLOG(1) << "Exit SnapshotSerializer (serialized/cbcalls): " << serialized_ << "/"
-          << savecb_calls_;
+  VLOG(1) << "Exit SnapshotSerializer (serialized/side_saved/cbcalls): " << serialized_ << "/"
+          << side_saved_ << "/" << savecb_calls_;
 }
 
 bool SliceSnapshot::FlushSfile(bool force) {
@@ -173,9 +159,25 @@ bool SliceSnapshot::SaveCb(PrimeIterator it) {
     return false;
   }
 
-  SerializePhysicalBucket(prime_table_, it);
+  ++serialized_ += SerializePhysicalBucket(prime_table_, it);
 
   return false;
+}
+
+void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
+  PrimeTable* table = db_slice_->GetTables(db_index).first;
+
+  if (const PrimeTable::bucket_iterator* bit = req.update()) {
+    if (bit->GetVersion() < snapshot_version_) {
+      side_saved_ += SerializePhysicalBucket(table, *bit);
+    }
+  } else {
+    string_view key = get<string_view>(req.change);
+    table->CVCUponInsert(snapshot_version_, key, [this, table](PrimeTable::bucket_iterator it) {
+      DCHECK_LT(it.GetVersion(), snapshot_version_);
+      side_saved_ += SerializePhysicalBucket(table, it);
+    });
+  }
 }
 
 unsigned SliceSnapshot::SerializePhysicalBucket(PrimeTable* table, PrimeTable::bucket_iterator it) {

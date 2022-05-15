@@ -330,7 +330,7 @@ TEST_F(DashTest, BumpUp) {
   EXPECT_TRUE(segment_.GetBucket(kFirstStashId).IsFull());
   EXPECT_TRUE(segment_.GetBucket(kSecondStashId).IsFull());
 
-  Segment::Iterator it{kFirstStashId, 1};
+  // Segment::Iterator it{kFirstStashId, 1};
   Segment::Key_t key = segment_.Key(1, 2);  // key at bucket 1, slot 2
   uint8_t touched_bid[3];
 
@@ -339,13 +339,12 @@ TEST_F(DashTest, BumpUp) {
   segment_.Delete(Segment::Iterator{1, 2}, hash);
   EXPECT_FALSE(segment_.GetBucket(1).IsFull());
 
-
+  segment_.SetVersion(kFirstStashId, 1);
   key = segment_.Key(kFirstStashId, 5);
   hash = dt_.DoHash(key);
 
-  EXPECT_EQ(2, segment_.CVCOnBump(kFirstStashId, 5, hash, touched_bid));
-  EXPECT_EQ(touched_bid[0], kFirstStashId);
-  EXPECT_EQ(touched_bid[1], 1);
+  EXPECT_EQ(1, segment_.CVCOnBump(1, kFirstStashId, 5, hash, touched_bid));
+  EXPECT_EQ(touched_bid[0], 1);
 
   // Bump up
   segment_.BumpUp(kFirstStashId, 5, hash);
@@ -360,7 +359,7 @@ TEST_F(DashTest, BumpUp) {
   key = segment_.Key(kSecondStashId, 9);
   hash = dt_.DoHash(key);
 
-  EXPECT_EQ(2, segment_.CVCOnBump(kSecondStashId, 9, hash, touched_bid));
+  EXPECT_EQ(1, segment_.CVCOnBump(2, kSecondStashId, 9, hash, touched_bid));
   EXPECT_EQ(touched_bid[0], kSecondStashId);
 
   segment_.BumpUp(kSecondStashId, 9, hash);
