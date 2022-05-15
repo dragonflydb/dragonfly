@@ -44,6 +44,8 @@ struct PopulateBatch {
 struct ObjInfo {
   unsigned encoding;
   unsigned bucket_id = 0;
+  unsigned slot_id = 0;
+
   int64_t ttl = INT64_MAX;
   bool has_sec_precision = false;
 
@@ -292,6 +294,7 @@ void DebugCmd::Inspect(string_view key) {
     }
 
     ObjInfo oinfo(it->second.Encoding(), it.bucket_id());
+    oinfo.slot_id = it.slot_id();
 
     if (it->second.HasExpire()) {
       ExpireIterator exp_it = exp_t->Find(it->first);
@@ -309,6 +312,8 @@ void DebugCmd::Inspect(string_view key) {
   if (res) {
     string resp;
     StrAppend(&resp, "encoding:", strEncoding(res->encoding), " bucket_id:", res->bucket_id);
+    StrAppend(&resp, " slot:", res->slot_id);
+
     if (res->ttl != INT64_MAX) {
       StrAppend(&resp, " ttl:", res->ttl, res->has_sec_precision ? "s" : "ms");
     }
