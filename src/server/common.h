@@ -98,6 +98,8 @@ inline void ToLower(const MutableSlice* val) {
 bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes);
 const char* ObjTypeName(int type);
 
+const char* RdbTypeName(unsigned type);
+
 // Cached values, updated frequently to represent the correct state of the system.
 extern std::atomic_uint64_t used_mem_peak;
 extern std::atomic_uint64_t used_mem_current;

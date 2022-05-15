@@ -8,6 +8,7 @@
 
 extern "C" {
 #include "redis/object.h"
+#include "redis/rdb.h"
 }
 
 #include "base/logging.h"
@@ -81,6 +82,22 @@ const char* ObjTypeName(int type) {
   }
   return "invalid";
 };
+
+const char* RdbTypeName(unsigned type) {
+  switch (type) {
+    case RDB_TYPE_STRING:
+      return "string";
+    case RDB_TYPE_LIST:
+      return "list";
+    case RDB_TYPE_SET:
+      return "set";
+    case RDB_TYPE_ZSET:
+      return "zset";
+    case RDB_TYPE_HASH:
+      return "hash";
+  }
+  return "other";
+}
 
 bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes) {
   if (str.empty())

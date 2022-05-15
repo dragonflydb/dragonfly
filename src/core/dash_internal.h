@@ -77,6 +77,13 @@ template <unsigned NUM_SLOTS> class SlotBitmap {
   void ClearSlot(unsigned index);
   void SetSlot(unsigned index, bool probe);
 
+  // cell 0 corresponds to first lsb bit in the busy mask, hence we need to shift left
+  // the bitmap in order to shift right the cell-array.
+  // Returns true if discarded the last slot (i.e. it was busy).
+  bool ShiftLeft();
+
+  void Swap(unsigned slot_a, unsigned slot_b);
+
  private:
   // SINGLE:
   //   val_[0] is [14 bit- busy][14bit-probing, whether the key does not belong to this
@@ -113,7 +120,7 @@ template <unsigned NUM_SLOTS, unsigned NUM_STASH_FPS> class BucketBase {
 
  public:
   using SlotId = uint8_t;
-  enum { kNanSlot = 255 };
+  static constexpr SlotId kNanSlot = 255;
 
   bool IsFull() const {
     return Size() == NUM_SLOTS;
@@ -182,6 +189,11 @@ template <unsigned NUM_SLOTS, unsigned NUM_STASH_FPS> class BucketBase {
     return overflow_count_ > 0;
   }
 
+  // func accepts an fp_index in range [0, kStashFpLen) and
+  // stash position [0, STASH_BUCKET_NUM) that with fingerprint=fp. func must return
+  // a slot id if it found whatever it searched for when iterating or kNanSlot to continue.
+  // IterateStash returns: first - stash position [0, STASH_BUCKET_NUM), second - slot id
+  // pointing to that stash.
   template <typename F>
   std::pair<unsigned, SlotId> IterateStash(uint8_t fp, bool is_probe, F&& func) const;
 
@@ -199,8 +211,14 @@ template <unsigned NUM_SLOTS, unsigned NUM_STASH_FPS> class BucketBase {
     }
   }
 
+  void Swap(unsigned slot_a, unsigned slot_b) {
+    slotb_.Swap(slot_a, slot_b);
+    std::swap(finger_arr_[slot_a], finger_arr_[slot_b]);
+  }
+
  protected:
   uint32_t CompareFP(uint8_t fp) const;
+  bool ShiftRight();
 
   // Returns true if stash_pos was stored, false overwise
   bool SetStash(uint8_t fp, unsigned stash_pos, bool probe);
@@ -239,48 +257,54 @@ class VersionedBB : public BucketBase<NUM_SLOTS, NUM_STASH_FPS> {
   using Base = BucketBase<NUM_SLOTS, NUM_STASH_FPS>;
 
  public:
-  // invariant: slot.version = max(bucket.version, version)
-  // invariant: bucket.version = max(high6(all slots))
-  // In other words, if version is less than BaseVersion,
-  // then we set slot version to be BaseVersion - we never decrease the base version.
-  // If high6(version) is greater then we update the bucket version.
-  // We update the slots version accordingly.
-  void SetVersion(unsigned slot_id, uint64_t version);
+  // one common version per bucket.
+  void SetVersion(uint64_t version);
 
-  uint64_t GetVersion(unsigned slot_id) const {
-    uint64_t c = BaseVersion();
-    c |= low_[slot_id];
+  uint64_t GetVersion() const {
+    uint64_t c = absl::little_endian::Load64(version_);
+    // c |= low_[slot_id];
     return c;
   }
 
+#if 0
   // Returns 64 bit bucket version of 2 low bytes zeroed.
-  uint64_t BaseVersion() const {
+  /*uint64_t BaseVersion() const {
     // high_ is followed by low array.
     // Hence little endian load from high_ ptr copies 2 bytes from low_ into 2 highest bytes of c.
     uint64_t c = absl::little_endian::Load64(high_);
 
     // Fix the version by getting rid of 2 garbage bytes.
     return c << 16;
-  }
-
-  uint64_t MinVersion() const;
+  }*/
+#endif
 
   void Clear() {
     Base::Clear();
-    low_.fill(0);
-    memset(high_, 0, 6);
+    // low_.fill(0);
+    memset(version_, 0, sizeof(version_));
+  }
+
+  bool ShiftRight() {
+    bool res = Base::ShiftRight();
+    /*for (int i = NUM_SLOTS - 1; i > 0; i--) {
+      low_[i] = low_[i - 1];
+    }*/
+    return res;
+  }
+
+  void Swap(unsigned slot_a, unsigned slot_b) {
+    Base::Swap(slot_a, slot_b);
+    // std::swap(low_[slot_a], low_[slot_b]);
   }
 
  private:
-  using Byte6 = uint8_t[6];
-
-  Byte6 high_ = {0};
-  std::array<uint16_t, NUM_SLOTS> low_ = {0};
+  uint8_t version_[8] = {0};
+  // std::array<uint8_t, NUM_SLOTS> low_ = {0};
 };
 
-static_assert(alignof(VersionedBB<14, 4>) == 2, "");
-static_assert(sizeof(VersionedBB<12, 4>) == 12 * 4 + 6, "");
-static_assert(sizeof(VersionedBB<14, 4>) <= 14 * 4 + 6, "");
+static_assert(alignof(VersionedBB<14, 4>) == 1, "");
+static_assert(sizeof(VersionedBB<12, 4>) == 12 * 2 + 8, "");
+static_assert(sizeof(VersionedBB<14, 4>) <= 14 * 2 + 8, "");
 
 // Segment - static-hashtable of size NUM_SLOTS*(BUCKET_CNT + STASH_BUCKET_NUM).
 struct DefaultSegmentPolicy {
@@ -320,21 +344,14 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
     }
 
     template <typename U, typename Pred>
-    SlotId FindByFp(uint8_t fp_hash, bool probe, U&& k, Pred&& pred) const {
-      unsigned mask = this->Find(fp_hash, probe);
-      if (!mask)
-        return kNanSlot;
+    SlotId FindByFp(uint8_t fp_hash, bool probe, U&& k, Pred&& pred) const;
 
-      unsigned delta = __builtin_ctz(mask);
-      mask >>= delta;
-      for (unsigned i = delta; i < NUM_SLOTS; ++i) {
-        if ((mask & 1) && pred(key[i], k)) {
-          return i;
-        }
-        mask >>= 1;
-      };
+    bool ShiftRight();
 
-      return kNanSlot;
+    void Swap(unsigned slot_a, unsigned slot_b) {
+      BucketType::Swap(slot_a, slot_b);
+      std::swap(key[slot_a], key[slot_b]);
+      std::swap(value[slot_a], value[slot_b]);
     }
   };  // class Bucket
 
@@ -399,17 +416,17 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   }
 
   template <bool B = Policy::USE_VERSION>
-  std::enable_if_t<B, uint64_t> GetVersion(uint8_t bid, uint8_t slot_id) {
-    return bucket_[bid].GetVersion(slot_id);
+  std::enable_if_t<B, uint64_t> GetVersion(uint8_t bid) {
+    return bucket_[bid].GetVersion();
   }
 
-  template <bool B = Policy::USE_VERSION> std::enable_if_t<B, uint64_t> MinVersion(uint8_t bid) {
+  /*template <bool B = Policy::USE_VERSION> std::enable_if_t<B, uint64_t> MinVersion(uint8_t bid) {
     return bucket_[bid].MinVersion();
-  }
+  }*/
 
   template <bool B = Policy::USE_VERSION>
-  std::enable_if_t<B> SetVersion(uint8_t bid, uint8_t slot_id, uint64_t v) {
-    return bucket_[bid].SetVersion(slot_id, v);
+  std::enable_if_t<B> SetVersion(uint8_t bid, uint64_t v) {
+    return bucket_[bid].SetVersion(v);
   }
 
   // Traverses over Segment's bucket bid and calls cb(const Iterator& it) 0 or more times
@@ -436,18 +453,22 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   }
 
   Key_t& Key(unsigned bid, unsigned slot) {
+    assert(bucket_[bid].GetBusy() & (1U << slot));
     return bucket_[bid].key[slot];
   }
 
-  const Key_t& Key(unsigned id, unsigned slot) const {
-    return bucket_[id].key[slot];
+  const Key_t& Key(unsigned bid, unsigned slot) const {
+    assert(bucket_[bid].GetBusy() & (1U << slot));
+    return bucket_[bid].key[slot];
   }
 
   Value_t& Value(unsigned bid, unsigned slot) {
+    assert(bucket_[bid].GetBusy() & (1U << slot));
     return bucket_[bid].value[slot];
   }
 
   const Value_t& Value(unsigned bid, unsigned slot) const {
+    assert(bucket_[bid].GetBusy() & (1U << slot));
     return bucket_[bid].value[slot];
   }
 
@@ -471,11 +492,30 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   // spaces.
   unsigned CVCOnInsert(Hash_t key_hash, uint8_t bid[2]) const;
 
+  // Returns bucket ids whose versions will change as a result of bumping up the item
+  // Can return upto 3 buckets.
+  unsigned CVCOnBump(unsigned bid, unsigned slot, Hash_t hash, uint8_t result_bid[3]) const;
+
   // Finds a valid entry going from specified indices up.
   Iterator FindValidStartingFrom(unsigned bid, unsigned slot) const;
 
+  // Shifts all slots in the bucket right.
+  // Returns true if the last slot was busy and the entry has been deleted.
+  template <typename HashFn> bool ShiftRight(unsigned bid, HashFn&& hfn) {
+    if (bid >= kNumBuckets) {  // Stash
+      RemoveStashReference(bid - kNumBuckets, hfn(Key(bid, kNumSlots - 1)));
+    }
+
+    return bucket_[bid].ShiftRight();
+  }
+
+  // Bumps up this entry making it more "important" for the eviction policy.
+  void BumpUp(unsigned bid, unsigned slot, Hash_t key_hash);
+
   // Tries to move stash entries back to their normal buckets (exact or neighour).
   // Returns number of entries that succeeded to unload.
+  // Important! Affects versions of the moved items and the items in the destination
+  // buckets.
   template <typename HFunc> unsigned UnloadStash(HFunc&& hfunc);
 
  private:
@@ -658,6 +698,25 @@ template <unsigned NUM_SLOTS> void SlotBitmap<NUM_SLOTS>::ClearSlot(unsigned ind
   }
 }
 
+template <unsigned NUM_SLOTS> bool SlotBitmap<NUM_SLOTS>::ShiftLeft() {
+  constexpr uint32_t kBusyLastSlot = (kAllocMask >> 1) + 1;
+  bool res;
+  if (SINGLE) {
+    constexpr uint32_t kShlMask = kAllocMask - 1;  // reset lsb
+    res = (val_[0].d & (kBusyLastSlot << 18)) != 0;
+    uint32_t l = (val_[0].d << 1) & (kShlMask << 4);
+    uint32_t p = (val_[0].d << 1) & (kShlMask << 18);
+    val_[0].d = __builtin_popcount(p) | l | p;
+  } else {
+    res = (val_[0].d & kBusyLastSlot) != 0;
+    val_[0].d <<= 1;
+    val_[0].d &= kAllocMask;
+    val_[1].d <<= 1;
+    val_[1].d &= kAllocMask;
+  }
+  return res;
+}
+
 template <unsigned NUM_SLOTS> void SlotBitmap<NUM_SLOTS>::ClearSlots(uint32_t mask) {
   if (SINGLE) {
     uint32_t count = __builtin_popcount(mask);
@@ -668,6 +727,29 @@ template <unsigned NUM_SLOTS> void SlotBitmap<NUM_SLOTS>::ClearSlots(uint32_t ma
   } else {
     val_[0].d &= ~mask;
     val_[1].d &= ~mask;
+  }
+}
+
+template <unsigned NUM_SLOTS> void SlotBitmap<NUM_SLOTS>::Swap(unsigned slot_a, unsigned slot_b) {
+  if (slot_a > slot_b)
+    std::swap(slot_a, slot_b);
+
+  if (SINGLE) {
+    uint32_t a = (val_[0].d << (slot_b - slot_a)) ^ val_[0].d;
+    uint32_t bm = (1 << (slot_b + 4)) | (1 << (slot_b + 18));
+    a &= bm;
+    a |= (a >> (slot_b - slot_a));
+    val_[0].d ^= a;
+  } else {
+    uint32_t a = (val_[0].d << (slot_b - slot_a)) ^ val_[0].d;
+    a &= (1 << slot_b);
+    a |= (a >> (slot_b - slot_a));
+    val_[0].d ^= a;
+
+    a = (val_[1].d << (slot_b - slot_a)) ^ val_[1].d;
+    a &= (1 << slot_b);
+    a |= (a >> (slot_b - slot_a));
+    val_[1].d ^= a;
   }
 }
 
@@ -692,7 +774,7 @@ bool BucketBase<NUM_SLOTS, NUM_OVR>::ClearStash(uint8_t fp, unsigned stash_pos, 
     return kNanSlot;
   };
 
-  auto res = IterateStash(fp, probe, std::move(cb));
+  std::pair<unsigned, SlotId> res = IterateStash(fp, probe, std::move(cb));
   return res.second != kNanSlot;
 }
 
@@ -794,6 +876,21 @@ uint32_t BucketBase<NUM_SLOTS, NUM_OVR>::CompareFP(uint8_t fp) const {
   return mask;
 }
 
+// Bucket slot array goes from left to right: [x, x, ...]
+// Shift right vacates the first slot on the left by shifting all the elements right and
+// possibly deleting the last one on the right.
+template <unsigned NUM_SLOTS, unsigned NUM_OVR> bool BucketBase<NUM_SLOTS, NUM_OVR>::ShiftRight() {
+  for (int i = NUM_SLOTS - 1; i > 0; --i) {
+    finger_arr_[i] = finger_arr_[i - 1];
+  }
+
+  // confusing but correct - slot bit mask LSB corresponds to left part of slot array.
+  // therefore, we shift left slot mask.
+  bool res = slotb_.ShiftLeft();
+  assert(slotb_.FindEmptySlot() == 0);
+  return res;
+}
+
 template <unsigned NUM_SLOTS, unsigned NUM_OVR>
 template <typename F>
 auto BucketBase<NUM_SLOTS, NUM_OVR>::IterateStash(uint8_t fp, bool is_probe, F&& func) const
@@ -816,22 +913,11 @@ auto BucketBase<NUM_SLOTS, NUM_OVR>::IterateStash(uint8_t fp, bool is_probe, F&&
 }
 
 template <unsigned NUM_SLOTS, unsigned NUM_STASH_FPS>
-void VersionedBB<NUM_SLOTS, NUM_STASH_FPS>::SetVersion(unsigned slot_id, uint64_t version) {
-  uint64_t nbv = version >> 16;        // possible new bucket version
-  uint64_t obv = BaseVersion() >> 16;  // old bucket version
-
-  if (nbv < obv) {
-    // nbv is too low, instead we upgrade the slot to higher BaseVersion.
-    low_[slot_id] = 0;  // we increase the slot version to bigger than "version".
-  } else {
-    if (nbv > obv) {  // We bump up the high part for the whole bucket and set low parts to 0.
-      absl::little_endian::Store64(high_, nbv);  // We put garbage into 2 bytes of low_.
-      low_.fill(0);                              // We do not mind because we reset low_ anyway.
-    }
-    low_[slot_id] = version & 0xFFFF;  // In any case we set slot version to lowest 2 bytes.
-  }
+void VersionedBB<NUM_SLOTS, NUM_STASH_FPS>::SetVersion(uint64_t version) {
+  absl::little_endian::Store64(version_, version);
 }
 
+#if 0
 template <unsigned NUM_SLOTS, unsigned NUM_STASH_FPS>
 uint64_t VersionedBB<NUM_SLOTS, NUM_STASH_FPS>::MinVersion() const {
   uint32_t mask = this->GetBusy();
@@ -848,6 +934,7 @@ uint64_t VersionedBB<NUM_SLOTS, NUM_STASH_FPS>::MinVersion() const {
   }
   return BaseVersion() + res;
 }
+#endif
 
 /*
 ____ ____ ____ _  _ ____ _  _ ___
@@ -855,7 +942,38 @@ ____ ____ ____ _  _ ____ _  _ ___
 ___] |___ |__] |  | |___ | \|  |
 
 */
-// stash_pos is index of the stash bucket, it is in the range of [0, kNumStashBucket].
+
+template <typename Key, typename Value, typename Policy>
+template <typename U, typename Pred>
+auto Segment<Key, Value, Policy>::Bucket::FindByFp(uint8_t fp_hash, bool probe, U&& k,
+                                                   Pred&& pred) const -> SlotId {
+  unsigned mask = this->Find(fp_hash, probe);
+  if (!mask)
+    return kNanSlot;
+
+  unsigned delta = __builtin_ctz(mask);
+  mask >>= delta;
+  for (unsigned i = delta; i < NUM_SLOTS; ++i) {
+    if ((mask & 1) && pred(key[i], k)) {
+      return i;
+    }
+    mask >>= 1;
+  };
+
+  return kNanSlot;
+}
+
+template <typename Key, typename Value, typename Policy>
+bool Segment<Key, Value, Policy>::Bucket::ShiftRight() {
+  bool res = BucketType::ShiftRight();
+  for (int i = NUM_SLOTS - 1; i > 0; i--) {
+    key[i] = key[i - 1];
+    value[i] = value[i - 1];
+  }
+  return res;
+}
+
+// stash_pos is index of the stash bucket, in the range of [0, STASH_BUCKET_NUM).
 template <typename Key, typename Value, typename Policy>
 void Segment<Key, Value, Policy>::RemoveStashReference(unsigned stash_pos, Hash_t key_hash) {
   unsigned y = BucketIndex(key_hash);
@@ -887,7 +1005,11 @@ bool Segment<Key, Value, Policy>::TryMoveFromStash(unsigned stash_id, unsigned s
     if constexpr (USE_VERSION) {
       // We maintain the invariant for the physical bucket by updating the version when
       // the entries move between buckets.
-      bucket_[bid].SetVersion(reg_slot, bucket_[stash_bid].GetVersion(stash_slot_id));
+      uint64_t ver = bucket_[stash_bid].GetVersion();
+      uint64_t dest_ver = bucket_[bid].GetVersion();
+      if (dest_ver < ver) {
+        bucket_[bid].SetVersion(ver);
+      }
     }
     RemoveStashReference(stash_id, key_hash);
     return true;
@@ -1037,7 +1159,11 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
       (void)it;
       if constexpr (USE_VERSION) {
         // Maintaining consistent versioning.
-        dest_right->bucket_[it.index].SetVersion(it.slot, bucket_[i].GetVersion(slot));
+        uint64_t ver = bucket_[i].GetVersion();
+        uint64_t dest_ver = dest_right->bucket_[it.index].GetVersion();
+        if (dest_ver < ver) {
+          dest_right->bucket_[it.index].SetVersion(ver);
+        }
       }
     };
 
@@ -1070,7 +1196,11 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
       (void)it;
       if constexpr (USE_VERSION) {
         // Update the version in the destination bucket.
-        dest_right->bucket_[it.index].SetVersion(it.slot, stash.GetVersion(slot));
+        uint64_t ver = stash.GetVersion();
+        uint64_t dest_ver = dest_right->bucket_[it.index].GetVersion();
+        if (dest_ver < ver) {
+          dest_right->bucket_[it.index].SetVersion(ver);
+        }
       }
 
       // Remove stash reference pointing to stach bucket i.
@@ -1083,8 +1213,8 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
 }
 
 template <typename Key, typename Value, typename Policy>
-int Segment<Key, Value, Policy>::MoveToOther(bool own_items, unsigned from, unsigned to) {
-  auto& src = bucket_[from];
+int Segment<Key, Value, Policy>::MoveToOther(bool own_items, unsigned from_bid, unsigned to_bid) {
+  auto& src = bucket_[from_bid];
   uint32_t mask = src.GetProbe(!own_items);
   if (mask == 0) {
     return -1;
@@ -1092,15 +1222,17 @@ int Segment<Key, Value, Policy>::MoveToOther(bool own_items, unsigned from, unsi
 
   int src_slot = __builtin_ctz(mask);
   int dst_slot =
-      TryInsertToBucket(to, std::forward<Key_t>(src.key[src_slot]),
+      TryInsertToBucket(to_bid, std::forward<Key_t>(src.key[src_slot]),
                         std::forward<Value_t>(src.value[src_slot]), src.Fp(src_slot), own_items);
   if (dst_slot < 0)
     return -1;
 
   // We never decrease the version of the entry.
   if constexpr (USE_VERSION) {
-    auto& dst = bucket_[to];
-    dst.SetVersion(dst_slot, src.GetVersion(src_slot));
+    auto& dst = bucket_[to_bid];
+    if (dst.GetVersion() < src.GetVersion()) {
+      dst.SetVersion(src.GetVersion());
+    }
   }
 
   src.Delete(src_slot);
@@ -1216,6 +1348,59 @@ unsigned Segment<Key, Value, Policy>::CVCOnInsert(Hash_t key_hash, uint8_t bid_r
 }
 
 template <typename Key, typename Value, typename Policy>
+unsigned Segment<Key, Value, Policy>::CVCOnBump(unsigned bid, unsigned slot, Hash_t hash,
+                                                uint8_t result_bid[3]) const {
+  if (bid < kNumBuckets) {
+    return 0;
+  }
+
+  // Stash case.
+  result_bid[0] = bid;
+  unsigned result = 1;
+
+  const uint8_t target_bid = BucketIndex(hash);
+  const auto& target = bucket_[target_bid];
+  if (!target.IsFull()) {
+    result_bid[result++] = target_bid;
+    return 2;
+  }
+
+  const uint8_t probing_bid = (target_bid + 1) % kNumBuckets;
+  const auto& probing = bucket_[probing_bid];
+
+  if (!probing.IsFull()) {
+    result_bid[result++] = probing_bid;
+    return 2;
+  }
+
+  unsigned stash_pos = bid - kNumBuckets;
+  uint8_t fp_hash = hash & kFpMask;
+
+  auto find_stash = [&](unsigned, unsigned pos) {
+    return stash_pos == pos ? slot : BucketType::kNanSlot;
+  };
+
+  if (target.HasStashOverflow()) {
+    result_bid[result++] = target_bid;
+  } else {
+    SlotId slot_id = target.IterateStash(fp_hash, false, find_stash).second;
+    if (slot_id != BucketType::kNanSlot) {
+      result_bid[result++] = target_bid;
+    }
+  }
+
+  if (probing.HasStashOverflow()) {
+    result_bid[result++] = probing_bid;
+  } else {
+    SlotId slot_id = probing.IterateStash(fp_hash, true, find_stash).second;
+    if (slot_id != BucketType::kNanSlot) {
+      result_bid[result++] = probing_bid;
+    }
+  }
+  return result;
+}
+
+template <typename Key, typename Value, typename Policy>
 template <typename Cb, typename HashFn>
 bool Segment<Key, Value, Policy>::TraverseLogicalBucket(uint8_t bid, HashFn&& hfun, Cb&& cb) const {
   assert(bid < kNumBuckets);
@@ -1288,6 +1473,88 @@ auto Segment<Key, Value, Policy>::FindValidStartingFrom(unsigned bid, unsigned s
     ++bid;
   }
   return Iterator{};
+}
+
+template <typename Key, typename Value, typename Policy>
+void Segment<Key, Value, Policy>::BumpUp(unsigned bid, unsigned slot, Hash_t key_hash) {
+  auto& from = bucket_[bid];
+
+  uint8_t target_bid = BucketIndex(key_hash);
+  uint8_t nid = (target_bid + 1) % kNumBuckets;
+  uint8_t fp_hash = key_hash & kFpMask;
+  assert(fp_hash == from.Fp(slot));
+
+  if (bid < kNumBuckets) {
+    // non stash case.
+    if (slot > 0) {
+      from.Swap(slot - 1, slot);
+      return;
+    }
+    // TODO: We could promote further, by swapping probing bucket with its previous one.
+    return;
+  }
+
+  // stash bucket
+  // We swap the item with the item in the "normal" bucket in the last slot.
+  unsigned stash_pos = bid - kNumBuckets;
+
+  // If we have an empty space for some reason just unload the stash entry.
+  if (TryMoveFromStash(stash_pos, slot, key_hash)) {
+    // TryMoveFromStash handles versions internally.
+    from.Delete(slot);
+    return;
+  }
+
+  // determine which bucket one we gonna swap.
+  // we swap with the bucket the references the stash entry, not necessary its owning
+  // bucket.
+  auto& target = bucket_[target_bid];
+  auto& next = bucket_[nid];
+
+  // bucket_offs - 0 if exact bucket, 1 if neighbour
+  unsigned bucket_offs = target.UnsetStashPtr(fp_hash, stash_pos, &next);
+  uint8_t swap_bid = (target_bid + bucket_offs) % kNumBuckets;
+  auto& swapb = bucket_[swap_bid];
+
+  constexpr unsigned kLastSlot = kNumSlots - 1;
+  assert(swapb.GetBusy() & (1 << kLastSlot));
+
+  uint8_t swap_fp = swapb.Fp(kLastSlot);
+
+  // is_probing for the existing entry in swapb. It's unrelated to bucket_offs,
+  // i.e. it could be true even if bucket_offs is 0.
+  bool is_probing = swapb.GetProbe(true) & (1 << kLastSlot);
+
+  // swap keys, values and fps. update slots meta.
+  std::swap(from.key[slot], swapb.key[kLastSlot]);
+  std::swap(from.value[slot], swapb.value[kLastSlot]);
+  from.Delete(slot);
+  from.SetHash(slot, swap_fp, false);
+
+  swapb.Delete(kLastSlot);
+  swapb.SetHash(kLastSlot, fp_hash, bucket_offs == 1);
+
+  // update versions.
+  if constexpr (USE_VERSION) {
+    uint64_t from_ver = from.GetVersion();
+    uint64_t swap_ver = swapb.GetVersion();
+    if (from_ver < swap_ver) {
+      from.SetVersion(swap_ver);
+    } else {
+      swapb.SetVersion(from_ver);
+    }
+  }
+
+  // update ptr for swapped items
+  if (is_probing) {
+    unsigned prev_bid = (swap_bid + kNumBuckets - 1) % kNumBuckets;
+    auto& prevb = bucket_[prev_bid];
+    prevb.SetStashPtr(stash_pos, swap_fp, &swapb);
+  } else {
+    // stash_ptr resides in the current or the next bucket.
+    unsigned next_bid = (swap_bid + 1) % kNumBuckets;
+    swapb.SetStashPtr(stash_pos, swap_fp, bucket_ + next_bid);
+  }
 }
 
 template <typename Key, typename Value, typename Policy>

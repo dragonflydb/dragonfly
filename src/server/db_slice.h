@@ -127,7 +127,7 @@ class DbSlice {
   // throws: bad_alloc is insertion could not happen due to out of memory.
   std::pair<PrimeIterator, bool> AddOrFind(DbIndex db_ind, std::string_view key);
 
-  // Returns true if insertion took place, false otherwise.
+  // Returns second=true if insertion took place, false otherwise.
   // expire_at_ms equal to 0 - means no expiry.
   // throws: bad_alloc is insertion could not happen due to out of memory.
   std::pair<PrimeIterator, bool> AddOrFind(DbIndex db_ind, std::string_view key, PrimeValue obj,
@@ -209,10 +209,10 @@ class DbSlice {
     return version_;
   }
 
-  // ChangeReq - describes the change to the table. If PrimeIterator is defined then
-  // it's an update on the existing entry, otherwise if string_view is defined then
+  // ChangeReq - describes the change to the table. If const_bucket_iterator is
+  // set then it's an update on the existing bucket, otherwise (string_view is set) then
   // it's a new key that is going to be added to the table.
-  using ChangeReq = std::variant<PrimeIterator, std::string_view>;
+  using ChangeReq = std::variant<PrimeTable::bucket_iterator, std::string_view>;
 
   using ChangeCallback = std::function<void(DbIndex, const ChangeReq&)>;
 

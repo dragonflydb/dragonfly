@@ -85,7 +85,7 @@ string UnknowSubCmd(string_view subcmd, string cmd) {
 
 ServerFamily::ServerFamily(Service* service) : service_(*service), ess_(service->shard_set()) {
   start_time_ = time(NULL);
-  last_save_ = start_time_;
+  lsinfo_.save_time = start_time_;
   script_mgr_.reset(new ScriptMgr(&service->shard_set()));
 }
 
@@ -239,10 +239,15 @@ error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
     RdbTypeFreqMap freq_map;
     ec = saver.SaveBody(&freq_map);
 
-    // TODO: needs protection from reads.
-    last_save_freq_map_.clear();
+    absl::flat_hash_map<string_view, size_t> tmp_map;
     for (const auto& k_v : freq_map) {
-      last_save_freq_map_.push_back(k_v);
+      tmp_map[RdbTypeName(k_v.first)] += k_v.second;
+    }
+
+    lock_guard lk(save_mu_);
+    lsinfo_.freq_map.clear();
+    for (const auto& k_v : tmp_map) {
+      lsinfo_.freq_map.emplace_back(k_v);
     }
   }
 
@@ -261,8 +266,8 @@ error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
 
   if (!ec) {
     lock_guard lk(save_mu_);
-    last_save_ = time(NULL);
-    last_save_file_ = path.generic_string();
+    lsinfo_.save_time = time(NULL);
+    lsinfo_.file_name = path.generic_string();
   }
 
   return ec;
@@ -283,7 +288,7 @@ error_code ServerFamily::DoFlush(Transaction* transaction, DbIndex db_ind) {
 
 string ServerFamily::LastSaveFile() const {
   lock_guard lk(save_mu_);
-  return last_save_file_;
+  return lsinfo_.file_name;
 }
 
 void ServerFamily::DbSize(CmdArgList args, ConnectionContext* cntx) {
@@ -484,14 +489,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
   string info;
 
-  const char kInfo1[] =
-      R"(# Server
-redis_version:1.9.9
-redis_mode:standalone
-arch_bits:64
-multiplexing_api:iouring
-tcp_port:)";
-
   auto should_enter = [&](string_view name, bool hidden = false) {
     bool res = (!hidden && section.empty()) || section == "ALL" || section == name;
     if (res && !info.empty())
@@ -507,7 +504,13 @@ tcp_port:)";
 #define ADD_HEADER(x) absl::StrAppend(&info, x "\r\n")
 
   if (should_enter("SERVER")) {
-    append(kInfo1, FLAGS_port);
+    ADD_HEADER("# Server");
+
+    append("redis_version", "df-0.1");
+    append("redis_mode", "standalone");
+    append("arch_bits", 64);
+    append("multiplexing_api", "iouring");
+    append("tcp_port", FLAGS_port);
 
     size_t uptime = time(NULL) - start_time_;
     append("uptime_in_seconds", uptime);
@@ -581,7 +584,6 @@ tcp_port:)";
     append("total_reads_processed", m.conn_stats.io_read_cnt);
     append("total_writes_processed", m.conn_stats.io_write_cnt);
     append("async_writes_count", m.conn_stats.async_writes_cnt);
-
   }
 
   if (should_enter("TIERED", true)) {
@@ -592,6 +594,24 @@ tcp_port:)";
     append("external_writes", m.tiered_stats.external_writes);
     append("external_reserved", m.tiered_stats.storage_reserved);
     append("external_capacity", m.tiered_stats.storage_capacity);
+  }
+
+  if (should_enter("PERSISTENCE", true)) {
+    ADD_HEADER("# PERSISTENCE");
+    time_t last_save;
+    string last_filename;
+    decltype(lsinfo_.freq_map) rdb_counts;
+    {
+      lock_guard lk(save_mu_);
+      last_save = lsinfo_.save_time;
+      last_filename = lsinfo_.file_name;
+      rdb_counts = lsinfo_.freq_map;
+    }
+    append("last_save", last_save);
+    append("last_save_file", last_filename);
+    for (const auto& k_v : rdb_counts) {
+      append(StrCat("rdb_", k_v.first), k_v.second);
+    }
   }
 
   if (should_enter("REPLICATION")) {
@@ -742,7 +762,7 @@ void ServerFamily::Psync(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
   lock_guard lk(save_mu_);
-  (*cntx)->SendLong(last_save_);
+  (*cntx)->SendLong(lsinfo_.save_time);
 }
 
 void ServerFamily::Latency(CmdArgList args, ConnectionContext* cntx) {

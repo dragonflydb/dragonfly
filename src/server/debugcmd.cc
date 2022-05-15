@@ -78,6 +78,7 @@ void DebugCmd::Run(CmdArgList args) {
         "DEBUG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
         "OBJECT <key>",
         "    Show low-level info about `key` and associated value.",
+        "LOAD <filename>"
         "RELOAD [option ...]",
         "    Save the RDB on disk (TBD) and reload it back to memory. Valid <option> values:",
         "    * NOSAVE: the database will be loaded from an existing RDB file.",
@@ -101,6 +102,10 @@ void DebugCmd::Run(CmdArgList args) {
 
   if (subcmd == "RELOAD") {
     return Reload(args);
+  }
+
+  if (subcmd == "LOAD" && args.size() == 3) {
+    return Load(ArgS(args, 2));
   }
 
   if (subcmd == "OBJECT" && args.size() == 3) {
@@ -144,19 +149,25 @@ void DebugCmd::Reload(CmdArgList args) {
     }
   }
 
+
+  string last_save_file = sf_.LastSaveFile();
+  Load(last_save_file);
+}
+
+void DebugCmd::Load(std::string_view filename) {
+  EngineShardSet& ess = sf_.service().shard_set();
   const CommandId* cid = sf_.service().FindCmd("FLUSHALL");
   intrusive_ptr<Transaction> flush_trans(new Transaction{cid, &ess});
   flush_trans->InitByArgs(0, {});
   VLOG(1) << "Performing flush";
-  ec = sf_.DoFlush(flush_trans.get(), DbSlice::kDbAll);
+  error_code ec = sf_.DoFlush(flush_trans.get(), DbSlice::kDbAll);
   if (ec) {
     LOG(ERROR) << "Error flushing db " << ec.message();
   }
 
-  string last_save_file = sf_.LastSaveFile();
-  fs::path path(last_save_file);
+  fs::path path(filename);
 
-  if (last_save_file.empty()) {
+  if (filename.empty()) {
     fs::path dir_path(FLAGS_dir);
     string filename = FLAGS_dbfilename;
     dir_path.append(filename);

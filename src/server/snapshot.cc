@@ -8,6 +8,7 @@ extern "C" {
 #include "redis/object.h"
 }
 
+#include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 
 #include "base/logging.h"
@@ -38,14 +39,14 @@ void SliceSnapshot::Start(DbSlice* slice) {
   auto on_change = [this, slice](DbIndex db_index, const DbSlice::ChangeReq& req) {
     PrimeTable* table = slice->GetTables(db_index).first;
 
-    if (const PrimeIterator* it = get_if<PrimeIterator>(&req)) {
+    if (const auto* it = get_if<PrimeTable::bucket_iterator>(&req)) {
       if (it->GetVersion() < snapshot_version_) {
         side_saved_ += SerializePhysicalBucket(table, *it);
       }
     } else {
       string_view key = get<string_view>(req);
-      table->CVCUponInsert(key, [this, table](PrimeTable::const_iterator it) {
-        if (it.MinVersion() < snapshot_version_) {
+      table->CVCUponInsert(key, [this, table](PrimeTable::bucket_iterator it) {
+        if (it.GetVersion() < snapshot_version_) {
           side_saved_ += SerializePhysicalBucket(table, it);
         }
       });
@@ -68,15 +69,15 @@ void SliceSnapshot::Join() {
   fb_.join();
 }
 
-static_assert(sizeof(PrimeTable::const_iterator) == 16);
+void SliceSnapshot::SerializeSingleEntry(const PrimeKey& pk, const PrimeValue& pv) {
+  time_t expire_time = 0;
 
-void SliceSnapshot::SerializeSingleEntry(PrimeIterator it) {
-  uint64_t expire_time = 0;
-  if (it->second.HasExpire()) {
-    auto eit = expire_tbl_->Find(it->first);
+  if (pv.HasExpire()) {
+    auto eit = expire_tbl_->Find(pk);
     expire_time = db_slice_->ExpireTime(eit);
   }
-  error_code ec = rdb_serializer_->SaveEntry(it, expire_time);
+
+  error_code ec = rdb_serializer_->SaveEntry(pk, pv, expire_time);
   CHECK(!ec);  // we write to StringFile.
   ++serialized_;
 }
@@ -86,7 +87,8 @@ void SliceSnapshot::FiberFunc() {
   this_fiber::properties<FiberProps>().set_name(
       absl::StrCat("SliceSnapshot", ProactorBase::GetIndex()));
   PrimeTable::cursor cursor;
-  static_assert(PHYSICAL_LEN > PrimeTable::kPhysicalBucketNum);
+
+  VLOG(1) << "Start traversing " << prime_table_->size() << " items";
 
   uint64_t last_yield = 0;
   do {
@@ -97,7 +99,6 @@ void SliceSnapshot::FiberFunc() {
         prime_table_->Traverse(cursor, [this](auto it) { this->SaveCb(move(it)); });
 
     cursor = next;
-    physical_mask_.reset();
 
     // Flush if needed.
     FlushSfile(false);
@@ -111,11 +112,12 @@ void SliceSnapshot::FiberFunc() {
     }
   } while (cursor);
 
-  DVLOG(1) << "after loop " << this_fiber::properties<FiberProps>().name();
+  DVLOG(2) << "after loop " << this_fiber::properties<FiberProps>().name();
   FlushSfile(true);
   dest_->StartClosing();
 
-  VLOG(1) << "Exit RdbProducer fiber with " << serialized_ << " serialized";
+  VLOG(1) << "Exit SnapshotSerializer (serialized/cbcalls): " << serialized_ << "/"
+          << savecb_calls_;
 }
 
 bool SliceSnapshot::FlushSfile(bool force) {
@@ -141,28 +143,26 @@ bool SliceSnapshot::FlushSfile(bool force) {
   return true;
 }
 
-// The algorithm is to go over all the buckets and serialize entries that
-// have version < snapshot_version_. In order to serialize each entry exactly once we update its
-// version to snapshot_version_ once it has been serialized.
-// Due to how bucket versions work we can not update individual entries - they may affect their
-// neighbours in the bucket. Instead we handle serialization at physical bucket granularity.
+// The algorithm is to go over all the buckets and serialize those with
+// version < snapshot_version_. In order to serialize each physical bucket exactly once we update
+// bucket version to snapshot_version_ once it has been serialized.
+// We handle serialization at physical bucket granularity.
 // To further complicate things, Table::Traverse covers a logical bucket that may comprise of
-// several physical buckets. The reason for this complication is that we need to guarantee
-// a stable traversal during prime table mutations. PrimeTable::Traverse guarantees an atomic
-// traversal of a single logical bucket, it also guarantees 100% coverage of all items
-// that existed when the traversal started and survived until it finished.
-//
-// It's important that cb will run atomically so we avoid anu I/O work inside it.
-// Instead, we flush our string file to disk in the traverse loop below.
+// several physical buckets in dash table. For example, items belonging to logical bucket 0
+// can reside in buckets 0,1 and stash buckets 56-59.
+// PrimeTable::Traverse guarantees an atomic traversal of a single logical bucket,
+// it also guarantees 100% coverage of all items that exists when the traversal started
+// and survived until it finished.
 bool SliceSnapshot::SaveCb(PrimeIterator it) {
   // if we touched that physical bucket - skip it.
   // We must to make sure we TraverseBucket exactly once for each physical bucket.
   // This test is the first one because it's likely to be the fastest one:
   // physical_mask_ is likely to be loaded in L1 and bucket_id() does not require accesing the
   // prime_table.
-  if (physical_mask_.test(it.bucket_id())) {
+  /*if (physical_mask_.test(it.bucket_id())) {
     return false;
-  }
+  }*/
+  ++savecb_calls_;
 
   uint64_t v = it.GetVersion();
   if (v >= snapshot_version_) {
@@ -173,27 +173,23 @@ bool SliceSnapshot::SaveCb(PrimeIterator it) {
     return false;
   }
 
-  physical_mask_.set(it.bucket_id());
   SerializePhysicalBucket(prime_table_, it);
 
   return false;
 }
 
-unsigned SliceSnapshot::SerializePhysicalBucket(PrimeTable* table, PrimeTable::const_iterator it) {
-  // Both traversals below execute atomically.
-  // traverse physical bucket and write into string file.
+unsigned SliceSnapshot::SerializePhysicalBucket(PrimeTable* table, PrimeTable::bucket_iterator it) {
+  DCHECK_LT(it.GetVersion(), snapshot_version_);
+
+  // traverse physical bucket and write it into string file.
+  it.SetVersion(snapshot_version_);
   unsigned result = 0;
-  table->TraverseBucket(it, [&](auto entry_it) {
+  string tmp;
+  while (!it.is_done()) {
     ++result;
-    SerializeSingleEntry(move(entry_it));
-  });
-
-  table->TraverseBucket(it, [this](PrimeIterator entry_it) {
-    DCHECK_LE(entry_it.GetVersion(), snapshot_version_);
-    DVLOG(3) << "Bumping up version " << entry_it.bucket_id() << ":" << entry_it.slot_id();
-
-    entry_it.SetVersion(snapshot_version_);
-  });
+    SerializeSingleEntry(it->first, it->second);
+    ++it;
+  }
 
   return result;
 }

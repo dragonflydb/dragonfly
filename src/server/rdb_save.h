@@ -67,7 +67,7 @@ class RdbSerializer {
   }
 
   // Must be called in the thread to which `it` belongs.
-  std::error_code SaveEntry(PrimeIterator it, uint64_t expire_ms);
+  std::error_code SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms);
   std::error_code WriteRaw(const ::io::Bytes& buf);
   std::error_code SaveString(std::string_view val);
 

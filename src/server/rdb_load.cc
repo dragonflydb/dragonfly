@@ -576,7 +576,12 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   DbSlice& db_slice = EngineShard::tlocal()->db_slice();
   for (const auto& item : ib) {
     std::string_view key{item.key, sdslen(item.key)};
-    db_slice.AddOrFind(db_ind, key, PrimeValue{item.val}, item.expire_ms);
+    auto [it, added] = db_slice.AddOrFind(db_ind, key, PrimeValue{item.val}, item.expire_ms);
+
+    if (!added) {
+      LOG(WARNING) << "RDB has duplicated key '" << key << "' in DB " << db_ind;
+    }
+
     sdsfree(item.key);
   }
 }
@@ -1276,16 +1281,6 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     if (out_buf.size() >= kBufSize) {
       FlushShardAsync(sid);
     }
-
-    // TODO: we should handle the duplicates.
-    if (false) {
-      LOG(WARNING) << "RDB has duplicated key '" << std::string_view(key, sdslen(key)) << "' in DB "
-                   << cur_db_index_;
-      return RdbError(errc::duplicate_key);
-    }
-
-    /* call key space notification on key loaded for modules only */
-    // moduleNotifyKeyspaceEvent(NOTIFY_LOADED, "loaded", &keyobj, db->id);
   }
 
   return kOk;

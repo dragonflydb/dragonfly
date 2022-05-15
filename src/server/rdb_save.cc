@@ -158,7 +158,7 @@ RdbSerializer::~RdbSerializer() {
 }
 
 // Called by snapshot
-error_code RdbSerializer::SaveEntry(PrimeIterator it, uint64_t expire_ms) {
+error_code RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms) {
   uint8_t buf[16];
 
   /* Save the expire time */
@@ -167,9 +167,6 @@ error_code RdbSerializer::SaveEntry(PrimeIterator it, uint64_t expire_ms) {
     absl::little_endian::Store64(buf + 1, expire_ms);
     RETURN_ON_ERR(WriteRaw(Bytes{buf, 9}));
   }
-
-  const PrimeKey& pk = it->first;
-  const PrimeValue& pv = it->second;
 
   string_view key = pk.GetSlice(&tmp_str_);
   unsigned obj_type = pv.ObjType();

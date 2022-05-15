@@ -34,16 +34,15 @@ class SliceSnapshot {
  private:
   void FiberFunc();
   bool FlushSfile(bool force);
-  void SerializeSingleEntry(PrimeIterator it);
+  void SerializeSingleEntry(const PrimeKey& pk, const PrimeValue& pv);
+
   bool SaveCb(PrimeIterator it);
 
   // Returns number of entries serialized.
-  unsigned SerializePhysicalBucket(PrimeTable* table, PrimeTable::const_iterator it);
+  // Updates the version of the bucket to snapshot version.
+  unsigned SerializePhysicalBucket(PrimeTable* table, PrimeTable::bucket_iterator it);
 
   ::boost::fibers::fiber fb_;
-
-  enum {PHYSICAL_LEN = 128};
-  std::bitset<PHYSICAL_LEN> physical_mask_;
 
   std::unique_ptr<io::StringFile> sfile_;
   std::unique_ptr<RdbSerializer> rdb_serializer_;
@@ -55,7 +54,7 @@ class SliceSnapshot {
   DbSlice* db_slice_ = nullptr;
   StringChannel* dest_;
 
-  size_t serialized_ = 0, skipped_ = 0, side_saved_ = 0;
+  size_t serialized_ = 0, skipped_ = 0, side_saved_ = 0, savecb_calls_ = 0;
 };
 
 }  // namespace dfly

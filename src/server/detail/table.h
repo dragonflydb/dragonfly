@@ -16,7 +16,7 @@ using PrimeKey = CompactObj;
 using PrimeValue = CompactObj;
 
 struct PrimeTablePolicy {
-  enum { kSlotNum = 14, kBucketNum = 54, kStashBucketNum = 4 };
+  enum { kSlotNum = 14, kBucketNum = 56, kStashBucketNum = 4 };
 
   static constexpr bool kUseVersion = true;
 

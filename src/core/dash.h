@@ -62,125 +62,7 @@ class DashTable : public detail::DashTableBase {
   static constexpr bool kUseVersion = Policy::kUseVersion;
 
   // if IsSingleBucket is true - iterates only over a single bucket.
-  template <bool IsConst, bool IsSingleBucket = false> class Iterator {
-    using Owner = std::conditional_t<IsConst, const DashTable, DashTable>;
-
-    Owner* owner_;
-    uint32_t seg_id_;
-    uint8_t bucket_id_;
-    uint8_t slot_id_;
-
-    friend class DashTable;
-
-    Iterator(Owner* me, uint32_t seg_id, uint8_t bid, uint8_t sid)
-        : owner_(me), seg_id_(seg_id), bucket_id_(bid), slot_id_(sid) {
-    }
-
-    void FindValid();
-
-   public:
-    using iterator_category = std::forward_iterator_tag;
-    using difference_type = std::ptrdiff_t;
-
-    // Copy constructor from iterator to const_iterator.
-    template <bool TIsConst = IsConst, bool TIsSingleB,
-              typename std::enable_if<TIsConst>::type* = nullptr>
-    Iterator(const Iterator<!TIsConst, TIsSingleB>& other) noexcept
-        : owner_(other.owner_), seg_id_(other.seg_id_), bucket_id_(other.bucket_id_),
-          slot_id_(other.slot_id_) {
-    }
-
-    // Copy constructor from bucket_iterator to iterator.
-    template <bool TIsSingleB>
-    Iterator(const Iterator<IsConst, TIsSingleB>& other) noexcept
-        : owner_(other.owner_), seg_id_(other.seg_id_), bucket_id_(other.bucket_id_),
-          slot_id_(other.slot_id_) {
-    }
-
-    Iterator() : owner_(nullptr), seg_id_(0), bucket_id_(0), slot_id_(0) {
-    }
-
-    Iterator(const Iterator& other) = default;
-
-    Iterator(Iterator&& other) = default;
-
-    Iterator& operator=(const Iterator& other) = default;
-    Iterator& operator=(Iterator&& other) = default;
-
-    // pre
-    Iterator& operator++() {
-      ++slot_id_;
-      FindValid();
-      return *this;
-    }
-
-    Iterator& operator+=(int delta) {
-      slot_id_ += delta;
-      FindValid();
-      return *this;
-    }
-
-    detail::IteratorPair<Key_t, Value_t> operator->() {
-      auto* seg = owner_->segment_[seg_id_];
-      return detail::IteratorPair<Key_t, Value_t>{seg->Key(bucket_id_, slot_id_),
-                                                  seg->Value(bucket_id_, slot_id_)};
-    }
-
-    const detail::IteratorPair<Key_t, Value_t> operator->() const {
-      auto* seg = owner_->segment_[seg_id_];
-      return detail::IteratorPair<Key_t, Value_t>{seg->Key(bucket_id_, slot_id_),
-                                                  seg->Value(bucket_id_, slot_id_)};
-    }
-
-    // Make it self-contained. Does not need container::end().
-    bool is_done() const {
-      return owner_ == nullptr;
-    }
-
-    template <bool B = Policy::kUseVersion> std::enable_if_t<B, uint64_t> GetVersion() const {
-      return owner_->segment_[seg_id_]->GetVersion(bucket_id_, slot_id_);
-    }
-
-    // Returns the minimum version of the physical bucket that this iterator points to.
-    // Note: In an ideal world I would introduce a bucket iterator...
-    template <bool B = Policy::kUseVersion> std::enable_if_t<B, uint64_t> MinVersion() const {
-      return owner_->segment_[seg_id_]->MinVersion(bucket_id_);
-    }
-
-    template <bool B = Policy::kUseVersion> std::enable_if_t<B> SetVersion(uint64_t v) {
-      return owner_->segment_[seg_id_]->SetVersion(bucket_id_, slot_id_, v);
-    }
-
-    friend bool operator==(const Iterator& lhs, const Iterator& rhs) {
-      if (lhs.owner_ == nullptr && rhs.owner_ == nullptr)
-        return true;
-      return lhs.owner_ == rhs.owner_ && lhs.seg_id_ == rhs.seg_id_ &&
-             lhs.bucket_id_ == rhs.bucket_id_ && lhs.slot_id_ == rhs.slot_id_;
-    }
-
-    friend bool operator!=(const Iterator& lhs, const Iterator& rhs) {
-      return !(lhs == rhs);
-    }
-
-    // Bucket resolution cursor that is safe to use with insertions/removals.
-    // Serves as a hint really to the placement of the original item, i.e. the item
-    // could have moved.
-    detail::DashCursor bucket_cursor() const {
-      return detail::DashCursor(owner_->global_depth_, seg_id_, bucket_id_);
-    }
-
-    unsigned bucket_id() const {
-      return bucket_id_;
-    }
-
-    unsigned slot_id() const {
-      return slot_id_;
-    }
-
-    unsigned segment_id() const {
-      return seg_id_;
-    }
-  };
+  template <bool IsConst, bool IsSingleBucket = false> class Iterator;
 
   using const_iterator = Iterator<true>;
   using iterator = Iterator<false>;
@@ -247,13 +129,13 @@ class DashTable : public detail::DashTableBase {
 
   iterator begin() {
     iterator it{this, 0, 0, 0};
-    it.FindValid();
+    it.Seek2Occupied();
     return it;
   }
 
   const_iterator cbegin() const {
     const_iterator it{this, 0, 0, 0};
-    it.FindValid();
+    it.Seek2Occupied();
     return it;
   }
 
@@ -318,14 +200,30 @@ class DashTable : public detail::DashTableBase {
   // would potentially change upon insertion of 'k'.
   // In practice traversal is limited to a single segment. The operation is read-only and
   // simulates insertion process. 'cb' must accept const_iterator. Note: the interface a bit hacky
-  // since the iterator may point to non-existing slot. In practice it only can be sent to
-  // TraverseBucket function.
+  // since the iterator may point to non-existing slot.
   // The function returns any bucket that is touched by the insertion flow. In practice, we
   // could tighten estimates by taking the new version into account.
   // Not sure how important this is though.
-  template <typename U, typename Cb> void CVCUponInsert(const U& key, Cb&& cb) const;
+  // These are not const functions because they send non-const iterators that allow
+  // updating contents/versions of the buckets.
+  template <typename U, typename Cb> void CVCUponInsert(const U& key, Cb&& cb);
+  template <typename U, typename Cb> void CVCUponBump(const_iterator it, Cb&& cb);
 
   void Clear();
+
+  // Returns true if an element was deleted i.e the rightmost slot was busy.
+  bool ShiftRight(bucket_iterator it) {
+    auto cb = [this](const auto& k) { return policy_.HashFn(k); };
+    auto* seg = segment_[it.seg_id_];
+    bool deleted = seg->ShiftRight(it.bucket_id_, std::move(cb));
+    size_ -= unsigned(deleted);
+
+    return deleted;
+  }
+
+  void BumpUp(iterator it) {
+    segment_[it.seg_id_]->BumpUp(it.bucket_id_, it.slot_id_, DoHash(it->first));
+  }
 
   uint64_t garbage_collected() const {
     return garbage_collected_;
@@ -365,6 +263,135 @@ class DashTable : public detail::DashTableBase {
   uint64_t stash_unloaded_ = 0;
 };  // DashTable
 
+
+template <typename _Key, typename _Value, typename Policy>
+template <bool IsConst, bool IsSingleBucket>
+class DashTable<_Key, _Value, Policy>::Iterator {
+    using Owner = std::conditional_t<IsConst, const DashTable, DashTable>;
+
+    Owner* owner_;
+    uint32_t seg_id_;
+    uint8_t bucket_id_;
+    uint8_t slot_id_;
+
+    friend class DashTable;
+
+    Iterator(Owner* me, uint32_t seg_id, uint8_t bid, uint8_t sid)
+        : owner_(me), seg_id_(seg_id), bucket_id_(bid), slot_id_(sid) {
+    }
+
+   public:
+    using iterator_category = std::forward_iterator_tag;
+    using difference_type = std::ptrdiff_t;
+
+    // Copy constructor from iterator to const_iterator.
+    template <bool TIsConst = IsConst, bool TIsSingleB,
+              typename std::enable_if<TIsConst>::type* = nullptr>
+    Iterator(const Iterator<!TIsConst, TIsSingleB>& other) noexcept
+        : owner_(other.owner_), seg_id_(other.seg_id_), bucket_id_(other.bucket_id_),
+          slot_id_(other.slot_id_) {
+    }
+
+    // Copy constructor from iterator to bucket_iterator and vice versa.
+    template <bool TIsSingle>
+    Iterator(const Iterator<IsConst, TIsSingle>& other) noexcept
+        : owner_(other.owner_), seg_id_(other.seg_id_), bucket_id_(other.bucket_id_),
+          slot_id_(IsSingleBucket ? 0 : other.slot_id_) {
+      // if this - is a bucket_iterator - we reset slot_id to the first occupied space.
+      if constexpr (IsSingleBucket) {
+        Seek2Occupied();
+      }
+    }
+
+    Iterator() : owner_(nullptr), seg_id_(0), bucket_id_(0), slot_id_(0) {
+    }
+
+    Iterator(const Iterator& other) = default;
+
+    Iterator(Iterator&& other) = default;
+
+    Iterator& operator=(const Iterator& other) = default;
+    Iterator& operator=(Iterator&& other) = default;
+
+    // pre
+    Iterator& operator++() {
+      ++slot_id_;
+      Seek2Occupied();
+      return *this;
+    }
+
+    Iterator& operator+=(int delta) {
+      slot_id_ += delta;
+      Seek2Occupied();
+      return *this;
+    }
+
+    detail::IteratorPair<Key_t, Value_t> operator->() {
+      auto* seg = owner_->segment_[seg_id_];
+      return detail::IteratorPair<Key_t, Value_t>{seg->Key(bucket_id_, slot_id_),
+                                                  seg->Value(bucket_id_, slot_id_)};
+    }
+
+    const detail::IteratorPair<Key_t, Value_t> operator->() const {
+      auto* seg = owner_->segment_[seg_id_];
+      return detail::IteratorPair<Key_t, Value_t>{seg->Key(bucket_id_, slot_id_),
+                                                  seg->Value(bucket_id_, slot_id_)};
+    }
+
+    // Make it self-contained. Does not need container::end().
+    bool is_done() const {
+      return owner_ == nullptr;
+    }
+
+    template <bool B = Policy::kUseVersion> std::enable_if_t<B, uint64_t> GetVersion() const {
+      return owner_->segment_[seg_id_]->GetVersion(bucket_id_);
+    }
+
+    // Returns the minimum version of the physical bucket that this iterator points to.
+    // Note: In an ideal world I would introduce a bucket iterator...
+    /*template <bool B = Policy::kUseVersion> std::enable_if_t<B, uint64_t> MinVersion() const {
+      return owner_->segment_[seg_id_]->MinVersion(bucket_id_);
+    }*/
+
+    template <bool B = Policy::kUseVersion> std::enable_if_t<B> SetVersion(uint64_t v) {
+      return owner_->segment_[seg_id_]->SetVersion(bucket_id_, v);
+    }
+
+    friend bool operator==(const Iterator& lhs, const Iterator& rhs) {
+      if (lhs.owner_ == nullptr && rhs.owner_ == nullptr)
+        return true;
+      return lhs.owner_ == rhs.owner_ && lhs.seg_id_ == rhs.seg_id_ &&
+             lhs.bucket_id_ == rhs.bucket_id_ && lhs.slot_id_ == rhs.slot_id_;
+    }
+
+    friend bool operator!=(const Iterator& lhs, const Iterator& rhs) {
+      return !(lhs == rhs);
+    }
+
+    // Bucket resolution cursor that is safe to use with insertions/removals.
+    // Serves as a hint really to the placement of the original item, i.e. the item
+    // could have moved.
+    detail::DashCursor bucket_cursor() const {
+      return detail::DashCursor(owner_->global_depth_, seg_id_, bucket_id_);
+    }
+
+    unsigned bucket_id() const {
+      return bucket_id_;
+    }
+
+    unsigned slot_id() const {
+      return slot_id_;
+    }
+
+    unsigned segment_id() const {
+      return seg_id_;
+    }
+
+  private:
+    void Seek2Occupied();
+  };   // Iterator
+
+
 /**
   _____                 _                           _        _   _
  |_   _|               | |                         | |      | | (_)
@@ -379,7 +406,7 @@ class DashTable : public detail::DashTableBase {
 
 template <typename _Key, typename _Value, typename Policy>
 template <bool IsConst, bool IsSingleBucket>
-void DashTable<_Key, _Value, Policy>::Iterator<IsConst, IsSingleBucket>::FindValid() {
+void DashTable<_Key, _Value, Policy>::Iterator<IsConst, IsSingleBucket>::Seek2Occupied() {
   if constexpr (IsSingleBucket) {
     const auto& b = owner_->segment_[seg_id_]->GetBucket(bucket_id_);
     uint32_t mask = b.GetBusy() >> slot_id_;
@@ -433,7 +460,7 @@ DashTable<_Key, _Value, Policy>::~DashTable() {
 
 template <typename _Key, typename _Value, typename Policy>
 template <typename U, typename Cb>
-void DashTable<_Key, _Value, Policy>::CVCUponInsert(const U& key, Cb&& cb) const {
+void DashTable<_Key, _Value, Policy>::CVCUponInsert(const U& key, Cb&& cb) {
   uint64_t key_hash = DoHash(key);
   uint32_t seg_id = SegmentId(key_hash);
   assert(seg_id < segment_.size());
@@ -443,7 +470,7 @@ void DashTable<_Key, _Value, Policy>::CVCUponInsert(const U& key, Cb&& cb) const
   unsigned num_touched = target->CVCOnInsert(key_hash, bids);
   if (num_touched > 0) {
     for (unsigned i = 0; i < num_touched; ++i) {
-      cb(const_iterator{this, seg_id, bids[i], 0});
+      cb(bucket_iterator{this, seg_id, bids[i], 0});
     }
     return;
   }
@@ -453,7 +480,23 @@ void DashTable<_Key, _Value, Policy>::CVCUponInsert(const U& key, Cb&& cb) const
   // Segment is full, we need to return the whole segment, because it can be split
   // and its entries can be reshuffled into different buckets.
   for (uint8_t i = 0; i < kPhysicalBucketNum; ++i) {
-    cb(const_iterator{this, seg_id, i, 0});
+    cb(bucket_iterator{this, seg_id, i, 0});
+  }
+}
+
+template <typename _Key, typename _Value, typename Policy>
+template <typename U, typename Cb>
+void DashTable<_Key, _Value, Policy>::CVCUponBump(const_iterator it, Cb&& cb) {
+  uint64_t key_hash = DoHash(it->first);
+  uint32_t seg_id = it.segment_id();
+  assert(seg_id < segment_.size());
+  const SegmentType* target = segment_[seg_id];
+
+  uint8_t bids[3];
+  unsigned num_touched = target->CVCOnBump(it.bucket_id(), it.slot_id(), key_hash, bids);
+
+  for (unsigned i = 0; i < num_touched; ++i) {
+    cb(bucket_iterator{this, seg_id, bids[i], 0});
   }
 }
 

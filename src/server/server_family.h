@@ -48,7 +48,9 @@ class ServerFamily {
   void Register(CommandRegistry* registry);
   void Shutdown();
 
-  Service& service() { return service_;}
+  Service& service() {
+    return service_;
+  }
 
   Metrics GetMetrics() const;
 
@@ -91,7 +93,6 @@ class ServerFamily {
   void Script(CmdArgList args, ConnectionContext* cntx);
   void Sync(CmdArgList args, ConnectionContext* cntx);
 
-
   void _Shutdown(CmdArgList args, ConnectionContext* cntx);
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
@@ -109,15 +110,16 @@ class ServerFamily {
 
   std::unique_ptr<ScriptMgr> script_mgr_;
 
-
-  int64_t last_save_;  // in seconds. protected by save_mu_.
-  std::string last_save_file_;   // protected by save_mu_.
-
   GlobalState global_state_;
   time_t start_time_ = 0;  // in seconds, epoch time.
 
-  // RDB_TYPE_xxx -> count mapping.
-  std::vector<std::pair<unsigned, size_t>> last_save_freq_map_;
+  struct LastSaveInfo {
+    time_t save_time;        // epoch time in seconds.
+    std::string file_name;  //
+    std::vector<std::pair<std::string_view, size_t>> freq_map; // RDB_TYPE_xxx -> count mapping.
+  };
+
+  LastSaveInfo lsinfo_;
 };
 
 }  // namespace dfly

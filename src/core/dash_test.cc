@@ -132,7 +132,7 @@ class DashTest : public testing::Test {
     return true;
   }
 
-  bool Find(Segment::Key_t key) const {
+  bool Contains(Segment::Key_t key) const {
     uint64_t hash = dt_.DoHash(key);
 
     std::equal_to<Segment::Key_t> eq;
@@ -212,7 +212,7 @@ TEST_F(DashTest, Basic) {
   ASSERT_EQ(1, has_called);
   ASSERT_EQ(0, segment_.TraverseLogicalBucket(cursor, hfun, cb));
   ASSERT_EQ(1, has_called);
-  EXPECT_EQ(0, segment_.GetVersion(0, 0));
+  EXPECT_EQ(0, segment_.GetVersion(0));
 }
 
 TEST_F(DashTest, Segment) {
@@ -255,7 +255,7 @@ TEST_F(DashTest, Segment) {
     segment_.Delete(it, hash);
   }
   EXPECT_EQ(2 * Segment::kNumSlots, segment_.SlowSize());
-  ASSERT_FALSE(Find(arr.front()));
+  ASSERT_FALSE(Contains(arr.front()));
 }
 
 TEST_F(DashTest, SegmentFull) {
@@ -279,7 +279,7 @@ TEST_F(DashTest, SegmentFull) {
   segment_.stats.neighbour_probes = segment_.stats.stash_overflow_probes =
       segment_.stats.stash_probes = 0;
   for (Segment::Key_t key = 0; key < 10000u; ++key) {
-    Find(key);
+    Contains(key);
   }
   LOG(INFO) << segment_.stats.neighbour_probes << " " << segment_.stats.stash_probes << " "
             << segment_.stats.stash_overflow_probes;
@@ -317,6 +317,57 @@ TEST_F(DashTest, Split) {
   EXPECT_EQ(s2.SlowSize(), sum[1]);
   EXPECT_EQ(keys.size(), sum[0] + sum[1]);
   EXPECT_EQ(4 * Segment::kNumSlots, keys.size());
+}
+
+TEST_F(DashTest, BumpUp) {
+  set<Segment::Key_t> keys = FillSegment(0);
+  constexpr unsigned kFirstStashId = Segment::kNumBuckets;
+  constexpr unsigned kSecondStashId = Segment::kNumBuckets + 1;
+  constexpr unsigned kNumSlots = Segment::kNumSlots;
+
+  EXPECT_TRUE(segment_.GetBucket(0).IsFull());
+  EXPECT_TRUE(segment_.GetBucket(1).IsFull());
+  EXPECT_TRUE(segment_.GetBucket(kFirstStashId).IsFull());
+  EXPECT_TRUE(segment_.GetBucket(kSecondStashId).IsFull());
+
+  Segment::Iterator it{kFirstStashId, 1};
+  Segment::Key_t key = segment_.Key(1, 2);  // key at bucket 1, slot 2
+  uint8_t touched_bid[3];
+
+  uint64_t hash = dt_.DoHash(key);
+
+  segment_.Delete(Segment::Iterator{1, 2}, hash);
+  EXPECT_FALSE(segment_.GetBucket(1).IsFull());
+
+
+  key = segment_.Key(kFirstStashId, 5);
+  hash = dt_.DoHash(key);
+
+  EXPECT_EQ(2, segment_.CVCOnBump(kFirstStashId, 5, hash, touched_bid));
+  EXPECT_EQ(touched_bid[0], kFirstStashId);
+  EXPECT_EQ(touched_bid[1], 1);
+
+  // Bump up
+  segment_.BumpUp(kFirstStashId, 5, hash);
+
+  // expect the key to move
+  EXPECT_TRUE(segment_.GetBucket(1).IsFull());
+  EXPECT_FALSE(segment_.GetBucket(kFirstStashId).IsFull());
+  EXPECT_EQ(segment_.Key(1, 2), key);
+  EXPECT_TRUE(Contains(key));
+
+  // 9 is just a random slot id.
+  key = segment_.Key(kSecondStashId, 9);
+  hash = dt_.DoHash(key);
+
+  EXPECT_EQ(2, segment_.CVCOnBump(kSecondStashId, 9, hash, touched_bid));
+  EXPECT_EQ(touched_bid[0], kSecondStashId);
+
+  segment_.BumpUp(kSecondStashId, 9, hash);
+  ASSERT_TRUE(key == segment_.Key(0, kNumSlots - 1) || key == segment_.Key(1, kNumSlots - 1));
+  EXPECT_TRUE(segment_.GetBucket(kSecondStashId).IsFull());
+  EXPECT_TRUE(Contains(key));
+  EXPECT_TRUE(segment_.Key(kSecondStashId, 9));
 }
 
 TEST_F(DashTest, Insert2) {
@@ -474,7 +525,8 @@ struct TestEvictionPolicy {
     return tbl.bucket_count() < max_capacity;
   }
 
-  void RecordSplit(Dash64::Segment_t*) {}
+  void RecordSplit(Dash64::Segment_t*) {
+  }
 
   unsigned Evict(const Dash64::EvictionBuckets& eb, Dash64* me) const {
     if (!evict_enabled)
@@ -630,6 +682,248 @@ TEST_F(DashTest, Sds) {
   dt.Insert(foo, 0);
   // dt.Insert(std::string_view{"bar"}, 1);
 }
+
+/**
+ ______     _      _   _               _______        _
+|  ____|   (_)    | | (_)             |__   __|      | |
+| |____   ___  ___| |_ _  ___  _ __      | | ___  ___| |_ ___
+|  __\ \ / / |/ __| __| |/ _ \| '_ \     | |/ _ \/ __| __/ __|
+| |___\ V /| | (__| |_| | (_) | | | |    | |  __/\__ \ |_\__ \
+|______\_/ |_|\___|\__|_|\___/|_| |_|    |_|\___||___/\__|___/
+ *
+ */
+struct EvictParams {
+  bool use_bumpups;
+  double zipf_param;
+
+  string PrintTo() const {
+    string name = absl::StrCat(use_bumpups ? "" : "no", "bumps");
+    absl::StrAppend(&name, unsigned(zipf_param * 1000));
+
+    return name;
+  }
+};
+
+string PrintParams(const testing::TestParamInfo<EvictParams>& info) {
+  return info.param.PrintTo();
+}
+
+struct U64DashPolicy {
+  enum { kSlotNum = 14, kBucketNum = 64, kStashBucketNum = 4 };
+  static constexpr bool kUseVersion = false;
+
+  static void DestroyValue(uint64_t) {
+  }
+  static void DestroyKey(uint64_t) {
+  }
+
+  static bool Equal(uint64_t u, uint64_t v) {
+    return u == v;
+  }
+
+  static uint64_t HashFn(uint64_t v) {
+    return XXH3_64bits(&v, sizeof(v));
+  }
+};
+
+using U64Dash = DashTable<uint64_t, unsigned, U64DashPolicy>;
+
+struct SimpleEvictPolicy {
+  static constexpr bool can_gc = false;
+  static constexpr bool can_evict = true;
+
+  bool CanGrow(const U64Dash& tbl) {
+    return tbl.bucket_count() + U64Dash::kSegCapacity < max_capacity;
+  }
+
+  void RecordSplit(U64Dash::Segment_t* segment) {
+  }
+
+  // Required interface in case can_gc is true
+  // returns number of items evicted from the table.
+  // 0 means - nothing has been evicted.
+  unsigned Evict(const U64Dash::EvictionBuckets& eb, U64Dash* me) {
+    // kBucketSize - number of slots in the bucket.
+    constexpr size_t kNumSlots = ABSL_ARRAYSIZE(eb.iter) * U64Dash::kBucketSize;
+
+    unsigned slot_index = std::uniform_int_distribution<uint32_t>{0, kNumSlots - 1}(rand_eng_);
+    auto it = eb.iter[slot_index / U64Dash::kBucketSize];
+    it += (slot_index % Dash64::kBucketSize);
+
+    DCHECK(!it.is_done());
+    me->Erase(it);
+
+    return 1;
+  }
+
+  size_t max_capacity = SIZE_MAX;
+  default_random_engine rand_eng_{42};
+};
+
+struct ShiftRightPolicy {
+  absl::flat_hash_map<uint64_t, unsigned> evicted;
+  unsigned index = 0;
+  size_t max_capacity = SIZE_MAX;
+
+  static constexpr bool can_gc = false;
+  static constexpr bool can_evict = true;
+
+  bool CanGrow(const U64Dash& tbl) {
+    return tbl.bucket_count() + U64Dash::kSegCapacity < max_capacity;
+  }
+
+  void RecordSplit(U64Dash::Segment_t* segment) {
+  }
+
+  unsigned Evict(const U64Dash::EvictionBuckets& eb, U64Dash* me) {
+    constexpr unsigned kBucketNum = ABSL_ARRAYSIZE(eb.iter);
+    constexpr unsigned kNumStashBuckets = kBucketNum - 2;
+
+    unsigned stash_pos = index++ % kNumStashBuckets;
+    auto stash_it = eb.iter[2 + stash_pos];
+    stash_it += (U64Dash::kBucketSize - 1);  // go to the last slot.
+
+    uint64_t k = stash_it->first;
+    DVLOG(1) << "Deleting key " << k << " from " << stash_it.bucket_id() << "/"
+             << stash_it.slot_id();
+    evicted[k]++;
+
+    return me->ShiftRight(stash_it);
+  };
+};
+
+class EvictionPolicyTest : public testing::TestWithParam<EvictParams> {
+ protected:
+  template <typename Policy> void FillUniform(unsigned max_range, Policy& policy);
+
+  uint64_t Rand() {
+    return zipf_ ? zipf_->Next(rand_eng_) : udist_(rand_eng_);
+  }
+
+  void SetUp() final {
+    if (GetParam().zipf_param > 0)
+      zipf_.emplace(0, 15000, GetParam().zipf_param);
+    else {
+      uniform_int_distribution<uint64_t>::param_type p{0, 15000};
+      udist_.param(p);
+    }
+  }
+
+  default_random_engine rand_eng_{42};
+  U64Dash dt_;
+  std::optional<base::ZipfianGenerator> zipf_;
+  uniform_int_distribution<uint64_t> udist_;
+};
+
+template <typename Policy>
+void EvictionPolicyTest::FillUniform(unsigned max_range, Policy& policy) {
+  std::uniform_int_distribution<uint64_t> dist(0, max_range - 1);
+  for (unsigned i = 0; i < 100000; ++i) {
+    auto [it, res] = dt_.Insert(dist(rand_eng_), 0, policy);
+    if (!res && it.is_done())  // filled up till the capacity limit
+      break;
+  }
+  LOG(INFO) << dt_.size();
+}
+
+TEST_P(EvictionPolicyTest, HitRate) {
+  CHECK_LT(GetParam().zipf_param, 1);
+  SimpleEvictPolicy ev_policy;
+  ev_policy.max_capacity = 3000;
+  FillUniform(15000, ev_policy);
+
+  unsigned hits = 0;
+  for (unsigned i = 0; i < 150000; ++i) {
+    auto [it, res] = dt_.Insert(Rand(), 0, ev_policy);
+    CHECK(!it.is_done());
+    if (!res) {
+      ++hits;
+    }
+  }
+  LOG(INFO) << "Zipf: " << GetParam().zipf_param << ", hits " << hits << " evictions "
+            << dt_.evicted();
+}
+
+TEST_P(EvictionPolicyTest, HitRateZipf) {
+  base::ZipfianGenerator gen(1, 15000, 0.9);
+  SimpleEvictPolicy ev_policy;
+  ev_policy.max_capacity = 3000;
+
+  FillUniform(15000, ev_policy);
+
+  bool use_bumps = GetParam().use_bumpups;
+
+  unsigned hits = 0;
+  for (unsigned i = 0; i < 150000; ++i) {
+    uint64_t key = Rand();
+    auto [it, res] = dt_.Insert(key, 0, ev_policy);
+    CHECK(!it.is_done());
+    if (res) {
+      DVLOG(1) << "Inserted new key " << key << " to bucket " << it.bucket_id() << " slot "
+               << it.slot_id();
+    } else {
+      if (use_bumps)
+        dt_.BumpUp(it);
+      ++hits;
+    }
+  }
+  LOG(INFO) << "Zipf: " << GetParam().PrintTo() << " hits " << hits << " evictions "
+            << dt_.evicted();
+}
+
+TEST_P(EvictionPolicyTest, HitRateZipfShr) {
+  ShiftRightPolicy ev_policy;
+  ev_policy.max_capacity = 3000;
+
+  FillUniform(15000, ev_policy);
+
+  unsigned hits = 0;
+  unsigned inserted_evicted = 0;
+  bool use_bumps = GetParam().use_bumpups;
+  for (unsigned i = 0; i < 150000; ++i) {
+    unsigned key = Rand();
+
+    auto [it, res] = dt_.Insert(key, 0, ev_policy);
+    if (!it.is_done()) {
+      if (res) {
+        DVLOG(1) << "Inserted new key " << key << " to bucket " << it.bucket_id() << " slot "
+                 << it.slot_id();
+        if (ev_policy.evicted.contains(key)) {
+          ++inserted_evicted;
+        }
+      } else {
+        if (use_bumps) {
+          dt_.BumpUp(it);
+          DVLOG(1) << "Bump up key " << key << " " << it.bucket_id() << " slot " << it.slot_id();
+        } else {
+          DVLOG(1) << "Hit on key " << key;
+        }
+        ++hits;
+      }
+    }
+  }
+
+  vector<pair<unsigned, uint64_t>> freq_evicted;
+  for (const auto& k_v : ev_policy.evicted) {
+    freq_evicted.emplace_back(k_v.second, k_v.first);
+  }
+  sort(freq_evicted.rbegin(), freq_evicted.rend());
+
+  LOG(INFO) << "Params " << GetParam().PrintTo() << " hits " << hits << " evictions "
+            << dt_.evicted() << " "
+            << "reinserted " << inserted_evicted;
+  unsigned num_outs = 0;
+  for (const auto& k_v : freq_evicted) {
+    LOG(INFO) << "Evicted " << k_v.first << " : " << k_v.second;
+    if (++num_outs > 100 || k_v.first < 5)
+      break;
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(Eviction, EvictionPolicyTest,
+                         testing::Values(EvictParams{false, 0}, EvictParams{false, 0.9},
+                                         EvictParams{true, 0.9}),
+                         PrintParams);
 
 // Benchmarks
 static void BM_Insert(benchmark::State& state) {
