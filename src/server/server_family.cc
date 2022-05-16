@@ -41,6 +41,7 @@ DEFINE_string(dbfilename, "", "the filename to save/load the DB");
 DEFINE_string(requirepass, "", "password for AUTH authentication");
 
 DECLARE_uint32(port);
+DECLARE_bool(cache_mode);
 
 extern "C" mi_stats_t _mi_stats_main;
 
@@ -561,6 +562,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("listpack_blobs", total.listpack_blob_cnt);
     append("listpack_bytes", total.listpack_bytes);
     append("small_string_bytes", m.small_string_bytes);
+    append("maxmemory", max_memory_limit);
+    append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
+    append("cache_mode", FLAGS_cache_mode ? "cache" : "store");
   }
 
   if (should_enter("STATS")) {
@@ -575,6 +579,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("instantaneous_output_kbps", -1);
     append("rejected_connections", -1);
     append("expired_keys", m.events.expired_keys);
+    append("evicted_keys", m.events.evicted_keys);
     append("garbage_collected", m.events.garbage_collected);
     append("bump_ups", m.events.bumpups);
     append("stash_unloaded", m.events.stash_unloaded);

@@ -119,7 +119,7 @@ class EngineShard {
   }
 
   // for everyone to use for string transformations during atomic cpu sequences.
-  sds tmp_str1, tmp_str2;
+  sds tmp_str1;
 
 #if 0
   size_t TEST_WatchedDbsLen() const {

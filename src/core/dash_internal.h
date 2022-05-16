@@ -505,9 +505,11 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
 
   // Shifts all slots in the bucket right.
   // Returns true if the last slot was busy and the entry has been deleted.
-  template <typename HashFn> bool ShiftRight(unsigned bid, HashFn&& hfn) {
+  bool ShiftRight(unsigned bid, Hash_t right_hashval) {
     if (bid >= kNumBuckets) {  // Stash
-      RemoveStashReference(bid - kNumBuckets, hfn(Key(bid, kNumSlots - 1)));
+      constexpr auto kLastSlotMask = 1u << (kNumSlots - 1);
+      if (bucket_[bid].GetBusy() & kLastSlotMask)
+        RemoveStashReference(bid - kNumBuckets, right_hashval);
     }
 
     return bucket_[bid].ShiftRight();
@@ -976,8 +978,8 @@ template <typename Key, typename Value, typename Policy>
 bool Segment<Key, Value, Policy>::Bucket::ShiftRight() {
   bool res = BucketType::ShiftRight();
   for (int i = NUM_SLOTS - 1; i > 0; i--) {
-    key[i] = key[i - 1];
-    value[i] = value[i - 1];
+    std::swap(key[i], key[i - 1]);
+    std::swap(value[i], value[i - 1]);
   }
   return res;
 }

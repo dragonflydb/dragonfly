@@ -20,6 +20,7 @@
 #include "util/uring/uring_socket.h"
 
 DEFINE_bool(tcp_nodelay, false, "Configures dragonfly connections with socket option TCP_NODELAY");
+DEFINE_bool(http_admin_console, true, "If true allows accessing http console on main TCP port");
 
 using namespace util;
 using namespace std;
@@ -199,7 +200,9 @@ void Connection::HandleRequests() {
   }
 
   FiberSocketBase* peer = tls_sock ? (FiberSocketBase*)tls_sock.get() : socket_.get();
-  io::Result<bool> http_res = CheckForHttpProto(peer);
+  io::Result<bool> http_res{false};
+  if (FLAGS_http_admin_console)
+    http_res = CheckForHttpProto(peer);
 
   if (http_res) {
     if (*http_res) {

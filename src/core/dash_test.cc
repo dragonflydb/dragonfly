@@ -527,11 +527,11 @@ struct TestEvictionPolicy {
   void RecordSplit(Dash64::Segment_t*) {
   }
 
-  unsigned Evict(const Dash64::EvictionBuckets& eb, Dash64* me) const {
+  unsigned Evict(const Dash64::HotspotBuckets& hotb, Dash64* me) const {
     if (!evict_enabled)
       return 0;
 
-    auto it = eb.iter[0];
+    auto it = hotb.regular_buckets[0];
     unsigned res = 0;
     for (; !it.is_done(); ++it) {
       LOG(INFO) << "Deleting " << it->first;
@@ -549,21 +549,69 @@ struct TestEvictionPolicy {
 TEST_F(DashTest, Eviction) {
   TestEvictionPolicy ev(1500);
 
-  size_t i = 0;
+  size_t num = 0;
   auto loop = [&] {
-    for (; i < 5000; ++i) {
-      dt_.Insert(i, 0, ev);
+    for (; num < 5000; ++num) {
+      dt_.Insert(num, 0, ev);
     }
   };
 
   ASSERT_THROW(loop(), bad_alloc);
-  ASSERT_LT(i, 5000);
+  ASSERT_LT(num, 5000);
   EXPECT_LT(dt_.size(), ev.max_capacity);
   LOG(INFO) << "size is " << dt_.size();
 
+  set<uint64_t> keys;
+  Dash64::bucket_iterator bit = dt_.begin();
+  unsigned last_slot = 0;
+  while (!bit.is_done()) {
+    keys.insert(bit->first);
+    last_slot = bit.slot_id();
+    ++bit;
+  }
+  ASSERT_LT(last_slot, Dash64::kBucketWidth);
+
+  bit = dt_.begin();
+  dt_.ShiftRight(bit);
+  bit = dt_.begin();
+  size_t sz = 0;
+  while (!bit.is_done()) {
+    EXPECT_EQ(1, keys.count(bit->first));
+    ++sz;
+    ++bit;
+  }
+  EXPECT_EQ(sz, keys.size());
+
+  while (!dt_.GetSegment(0)->GetBucket(0).IsFull()) {
+    try {
+      dt_.Insert(num++, 0, ev);
+    } catch(bad_alloc&) {
+    }
+  }
+
+  // Now the bucket is full.
+  keys.clear();
+  uint64_t last_key = dt_.GetSegment(0)->Key(0, Dash64::kBucketWidth - 1);
+  for (Dash64::bucket_iterator bit = dt_.begin(); !bit.is_done(); ++bit) {
+     keys.insert(bit->first);
+  }
+
+  bit = dt_.begin();
+  dt_.ShiftRight(bit);
+  bit = dt_.begin();
+  sz = 0;
+
+  while (!bit.is_done()) {
+    EXPECT_NE(last_key, bit->first);
+    EXPECT_EQ(1, keys.count(bit->first));
+    ++sz;
+    ++bit;
+  }
+  EXPECT_EQ(sz + 1, keys.size());
+
   ev.evict_enabled = true;
   unsigned bucket_cnt = dt_.bucket_count();
-  auto [it, res] = dt_.Insert(i, 0, ev);
+  auto [it, res] = dt_.Insert(num, 0, ev);
   EXPECT_TRUE(res);
   EXPECT_EQ(bucket_cnt, dt_.bucket_count());
 }
@@ -741,28 +789,30 @@ struct SimpleEvictPolicy {
   // Required interface in case can_gc is true
   // returns number of items evicted from the table.
   // 0 means - nothing has been evicted.
-  unsigned Evict(const U64Dash::EvictionBuckets& eb, U64Dash* me) {
-    // kBucketSize - number of slots in the bucket.
-    constexpr size_t kNumSlots = ABSL_ARRAYSIZE(eb.iter) * U64Dash::kBucketSize;
+  unsigned Evict(const U64Dash::HotspotBuckets& hotb, U64Dash* me) {
+    constexpr unsigned kNumBuckets = U64Dash::HotspotBuckets::kNumBuckets;
 
-    unsigned slot_index = std::uniform_int_distribution<uint32_t>{0, kNumSlots - 1}(rand_eng_);
-    auto it = eb.iter[slot_index / U64Dash::kBucketSize];
-    it += (slot_index % Dash64::kBucketSize);
+    uint32_t bid = hotb.key_hash % kNumBuckets;
+    auto it = hotb.at(bid);
+    unsigned slot_index = (hotb.key_hash >> 32) % U64Dash::kBucketWidth;
+    it += slot_index;
 
     DCHECK(!it.is_done());
     me->Erase(it);
+    ++evicted;
 
     return 1;
   }
 
   size_t max_capacity = SIZE_MAX;
-  default_random_engine rand_eng_{42};
+  unsigned evicted = 0;
+  // default_random_engine rand_eng_{42};
 };
 
 struct ShiftRightPolicy {
   absl::flat_hash_map<uint64_t, unsigned> evicted;
-  unsigned index = 0;
   size_t max_capacity = SIZE_MAX;
+  unsigned evicted_sum = 0;
 
   static constexpr bool can_gc = false;
   static constexpr bool can_evict = true;
@@ -774,20 +824,22 @@ struct ShiftRightPolicy {
   void RecordSplit(U64Dash::Segment_t* segment) {
   }
 
-  unsigned Evict(const U64Dash::EvictionBuckets& eb, U64Dash* me) {
-    constexpr unsigned kBucketNum = ABSL_ARRAYSIZE(eb.iter);
-    constexpr unsigned kNumStashBuckets = kBucketNum - 2;
+  unsigned Evict(const U64Dash::HotspotBuckets& hotb, U64Dash* me) {
+    constexpr unsigned kNumStashBuckets = ABSL_ARRAYSIZE(hotb.stash_buckets);
 
-    unsigned stash_pos = index++ % kNumStashBuckets;
-    auto stash_it = eb.iter[2 + stash_pos];
-    stash_it += (U64Dash::kBucketSize - 1);  // go to the last slot.
+    unsigned stash_pos = hotb.key_hash % kNumStashBuckets;
+    auto stash_it = hotb.stash_buckets[stash_pos];
+    stash_it += (U64Dash::kBucketWidth - 1);  // go to the last slot.
 
     uint64_t k = stash_it->first;
     DVLOG(1) << "Deleting key " << k << " from " << stash_it.bucket_id() << "/"
              << stash_it.slot_id();
     evicted[k]++;
 
-    return me->ShiftRight(stash_it);
+    CHECK(me->ShiftRight(stash_it));
+    ++evicted_sum;
+
+    return 1;
   };
 };
 
@@ -840,7 +892,7 @@ TEST_P(EvictionPolicyTest, HitRate) {
     }
   }
   LOG(INFO) << "Zipf: " << GetParam().zipf_param << ", hits " << hits << " evictions "
-            << dt_.evicted();
+            << ev_policy.evicted;
 }
 
 TEST_P(EvictionPolicyTest, HitRateZipf) {
@@ -867,7 +919,7 @@ TEST_P(EvictionPolicyTest, HitRateZipf) {
     }
   }
   LOG(INFO) << "Zipf: " << GetParam().PrintTo() << " hits " << hits << " evictions "
-            << dt_.evicted();
+            << ev_policy.evicted;
 }
 
 TEST_P(EvictionPolicyTest, HitRateZipfShr) {
@@ -909,7 +961,7 @@ TEST_P(EvictionPolicyTest, HitRateZipfShr) {
   sort(freq_evicted.rbegin(), freq_evicted.rend());
 
   LOG(INFO) << "Params " << GetParam().PrintTo() << " hits " << hits << " evictions "
-            << dt_.evicted() << " "
+            << ev_policy.evicted_sum << " "
             << "reinserted " << inserted_evicted;
   unsigned num_outs = 0;
   for (const auto& k_v : freq_evicted) {

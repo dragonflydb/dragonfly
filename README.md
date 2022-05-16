@@ -311,6 +311,12 @@ instance.
 
 ## Design decisions along the way
 
+### Novel cache design
+Redis allows choosing 8 different eviction policies using `maxmemory-policy` flag.
+
+Dragonfly has one unified adaptive caching algorithm that is more memory efficient
+than of Redis. You can enable caching mode by passing `--cache_mode=true` flag. Once this mode is on, Dragonfly will evict items when it reaches maxmemory limit.
+
 ### Expiration deadlines with relative accuracy
 Expiration ranges are limited to ~4 years. Moreover, expiration deadlines
 with millisecond precision (PEXPIRE/PSETEX etc) will be rounded to closest second
@@ -319,3 +325,13 @@ Such rounding has less than 0.001% error which I hope is acceptable for large ra
 If it breaks your use-cases - talk to me or open an issue and explain your case.
 
 For more detailed differences between this and Redis implementations [see here](doc/differences.md).
+
+### Native Http console and Prometheus compatible metrics
+By default Dragonfly also allows http access on its main TCP port (6379). That's right, you
+can use for Redis protocol and for HTTP protocol - type of protocol is determined automatically
+during the connection initiation. Go ahead and try it with your browser.
+Right now it does not have much info but in the future we are planning to add there useful
+debugging and management info. If you go to `:6379/metrics` url you will see some prometheus
+compatible metrics.
+
+Important! Http console is meant to be accessed within a safe network. If you expose Dragonfly's TCP port externally, it is advised to disable the console with `--http_admin_console=false` or `--nohttp_admin_console`.

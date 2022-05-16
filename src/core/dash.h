@@ -55,7 +55,7 @@ class DashTable : public detail::DashTableBase {
 
   //! Total number of buckets in a segment (including stash).
   static constexpr unsigned kPhysicalBucketNum = SegmentType::kTotalBuckets;
-  static constexpr unsigned kBucketSize = Policy::kSlotNum;
+  static constexpr unsigned kBucketWidth = Policy::kSlotNum;
   static constexpr double kTaxAmount = SegmentType::kTaxSize;
   static constexpr size_t kSegBytes = sizeof(SegmentType);
   static constexpr size_t kSegCapacity = SegmentType::capacity();
@@ -71,9 +71,20 @@ class DashTable : public detail::DashTableBase {
   using bucket_iterator = Iterator<false, true>;
   using cursor = detail::DashCursor;
 
-  struct EvictionBuckets {
-    bucket_iterator iter[2 + Policy::kStashBucketNum];
-    // uint64_t key_hash;  // key_hash of a key that we try to insert.
+  struct HotspotBuckets {
+    static constexpr size_t kNumBuckets = 2 + Policy::kStashBucketNum;
+
+    bucket_iterator regular_buckets[2];
+    bucket_iterator stash_buckets[Policy::kStashBucketNum];
+
+    // id must be in the range [0, kNumBuckets).
+    bucket_iterator at(unsigned id) const {
+      return id < 2 ? regular_buckets[id] : stash_buckets[id - 2];
+    }
+
+    // key_hash of a key that we try to insert.
+    // I use it as pseudo-random number in my gc/eviction heuristics.
+    uint64_t key_hash;
   };
 
   struct DefaultEvictionPolicy {
@@ -214,14 +225,7 @@ class DashTable : public detail::DashTableBase {
   void Clear();
 
   // Returns true if an element was deleted i.e the rightmost slot was busy.
-  bool ShiftRight(bucket_iterator it) {
-    auto cb = [this](const auto& k) { return policy_.HashFn(k); };
-    auto* seg = segment_[it.seg_id_];
-    bool deleted = seg->ShiftRight(it.bucket_id_, std::move(cb));
-    size_ -= unsigned(deleted);
-
-    return deleted;
-  }
+  bool ShiftRight(bucket_iterator it);
 
   iterator BumpUp(iterator it) {
     SegmentIterator seg_it =
@@ -232,10 +236,6 @@ class DashTable : public detail::DashTableBase {
 
   uint64_t garbage_collected() const {
     return garbage_collected_;
-  }
-
-  uint64_t evicted() const {
-    return evicted_;
   }
 
   uint64_t stash_unloaded() const {
@@ -264,7 +264,6 @@ class DashTable : public detail::DashTableBase {
   std::pmr::vector<SegmentType*> segment_;
 
   uint64_t garbage_collected_ = 0;
-  uint64_t evicted_ = 0;
   uint64_t stash_unloaded_ = 0;
 };  // DashTable
 
@@ -562,6 +561,26 @@ void DashTable<_Key, _Value, Policy>::Clear() {
 }
 
 template <typename _Key, typename _Value, typename Policy>
+bool DashTable<_Key, _Value, Policy>::ShiftRight(bucket_iterator it) {
+  auto* seg = segment_[it.seg_id_];
+
+  typename Segment_t::Hash_t hash_val;
+  auto& bucket = seg->GetBucket(it.bucket_id_);
+
+  if (bucket.GetBusy() & (1 << (kBucketWidth - 1))) {
+    it.slot_id_ = kBucketWidth - 1;
+    hash_val = DoHash(it->first);
+    policy_.DestroyKey(it->first);
+    policy_.DestroyValue(it->second);
+  }
+
+  bool deleted = seg->ShiftRight(it.bucket_id_, hash_val);
+  size_ -= unsigned(deleted);
+
+  return deleted;
+}
+
+template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
 void DashTable<_Key, _Value, Policy>::IterateUnique(Cb&& cb) {
   size_t i = 0;
@@ -683,13 +702,13 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       // Try gc.
       uint8_t bid[2];
       SegmentType::FillProbeArray(key_hash, bid);
-      EvictionBuckets buckets;
-
-      buckets.iter[0] = bucket_iterator{this, seg_id, bid[0], 0};
-      buckets.iter[1] = bucket_iterator{this, seg_id, bid[1], 0};
+      HotspotBuckets buckets;
+      buckets.key_hash = key_hash;
+      buckets.regular_buckets[0] = bucket_iterator{this, seg_id, bid[0], 0};
+      buckets.regular_buckets[1] = bucket_iterator{this, seg_id, bid[1], 0};
 
       for (unsigned i = 0; i < Policy::kStashBucketNum; ++i) {
-        buckets.iter[2 + i] = bucket_iterator{this, seg_id, uint8_t(kLogicalBucketNum + i), 0};
+        buckets.stash_buckets[i] = bucket_iterator{this, seg_id, uint8_t(kLogicalBucketNum + i), 0};
       }
 
       // The difference between gc and eviction is that gc can be applied even if
@@ -714,7 +733,6 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
         bool can_grow = ev.CanGrow(*this);
         if (!can_grow) {
           unsigned res = ev.Evict(buckets, this);
-          evicted_ += res;
           if (res)
             continue;
         }

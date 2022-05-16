@@ -35,14 +35,21 @@ static_assert(kPrimeSegmentSize == 32288);
 // 24576
 static_assert(kExpireSegmentSize == 23528);
 
+void UpdateStatsOnDeletion(PrimeIterator it, InternalDbStats* stats) {
+  size_t value_heap_size = it->second.MallocUsed();
+  stats->inline_keys -= it->first.IsInline();
+  stats->obj_memory_usage -= (it->first.MallocUsed() + value_heap_size);
+  if (it->second.ObjType() == OBJ_STRING)
+    stats->strval_memory_usage -= value_heap_size;
+}
+
 class PrimeEvictionPolicy {
  public:
-  static constexpr bool can_evict = false;
+  static constexpr bool can_evict = true;  // we implement eviction functionality.
   static constexpr bool can_gc = true;
 
-  PrimeEvictionPolicy(DbIndex db_indx, DbSlice* db_slice, int64_t mem_budget)
-      : db_slice_(db_slice), mem_budget_(mem_budget) {
-    db_indx_ = db_indx;
+  PrimeEvictionPolicy(DbIndex db_indx, bool can_evict, DbSlice* db_slice, int64_t mem_budget)
+      : db_slice_(db_slice), mem_budget_(mem_budget), db_indx_(db_indx), can_evict_(can_evict) {
   }
 
   void RecordSplit(PrimeTable::Segment_t* segment) {
@@ -54,26 +61,35 @@ class PrimeEvictionPolicy {
     return mem_budget_ > int64_t(PrimeTable::kSegBytes);
   }
 
-  unsigned GarbageCollect(const PrimeTable::EvictionBuckets& eb, PrimeTable* me);
+  unsigned GarbageCollect(const PrimeTable::HotspotBuckets& eb, PrimeTable* me);
+  unsigned Evict(const PrimeTable::HotspotBuckets& eb, PrimeTable* me);
 
   int64_t mem_budget() const {
     return mem_budget_;
   }
 
+  unsigned evicted() const {
+    return evicted_;
+  }
+
  private:
   DbSlice* db_slice_;
   int64_t mem_budget_;
-  DbIndex db_indx_;
+  unsigned evicted_ = 0;
+  const DbIndex db_indx_;
+
+  // unlike static constexpr can_evict, this parameter tells whether we can evict
+  // items in runtime.
+  const bool can_evict_;
 };
 
-unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::EvictionBuckets& eb,
-                                             PrimeTable* me) {
+unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& eb, PrimeTable* me) {
   unsigned res = 0;
-  for (unsigned i = 0; i < ABSL_ARRAYSIZE(eb.iter); ++i) {
-    auto it = eb.iter[i];
-    for (; !it.is_done(); ++it) {
-      if (it->second.HasExpire()) {
-        auto [prime_it, exp_it] = db_slice_->ExpireIfNeeded(db_indx_, it);
+  for (unsigned i = 0; i < PrimeTable::HotspotBuckets::kNumBuckets; ++i) {
+    auto bucket_it = eb.at(i);
+    for (; !bucket_it.is_done(); ++bucket_it) {
+      if (bucket_it->second.HasExpire()) {
+        auto [prime_it, exp_it] = db_slice_->ExpireIfNeeded(db_indx_, bucket_it);
         if (prime_it.is_done())
           ++res;
       }
@@ -81,6 +97,25 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::EvictionBuckets& 
   }
 
   return res;
+}
+
+unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeTable* me) {
+  if (!can_evict_)
+    return 0;
+
+  constexpr size_t kNumStashBuckets = ABSL_ARRAYSIZE(eb.stash_buckets);
+
+  // choose "randomly" a stash bucket to evict an item.
+  auto bucket_it = eb.stash_buckets[eb.key_hash % kNumStashBuckets];
+  auto last_slot_it = bucket_it;
+  last_slot_it += (PrimeTable::kBucketWidth -1);
+  if (!last_slot_it.is_done()) {
+    UpdateStatsOnDeletion(last_slot_it, db_slice_->MutableStats(db_indx_));
+  }
+  CHECK(me->ShiftRight(bucket_it));
+  ++evicted_;
+
+  return 1;
 }
 
 }  // namespace
@@ -266,7 +301,8 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) -> pair<PrimeIterator
     }
   }
 
-  PrimeEvictionPolicy evp{db_index, this, int64_t(memory_budget_ - key.size())};
+  PrimeEvictionPolicy evp{db_index, bool(caching_mode_), this,
+                          int64_t(memory_budget_ - key.size())};
 
   // Fast-path if change_cb_ is empty so we Find or Add using
   // the insert operation: twice more efficient.
@@ -279,6 +315,7 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) -> pair<PrimeIterator
 
     events_.garbage_collected += db->prime_table.garbage_collected();
     events_.stash_unloaded = db->prime_table.stash_unloaded();
+    events_.evicted_keys += evp.evicted();
 
     it.SetVersion(NextVersion());
     memory_budget_ = evp.mem_budget();
@@ -348,12 +385,7 @@ bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
     CHECK_EQ(1u, db->mcflag_table.Erase(it->first));
   }
 
-  size_t value_heap_size = it->second.MallocUsed();
-  db->stats.inline_keys -= it->first.IsInline();
-  db->stats.obj_memory_usage -= (it->first.MallocUsed() + value_heap_size);
-  if (it->second.ObjType() == OBJ_STRING)
-    db->stats.obj_memory_usage -= value_heap_size;
-
+  UpdateStatsOnDeletion(it, &db->stats);
   db->prime_table.Erase(it);
 
   return true;
@@ -593,12 +625,7 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(DbIndex db_ind,
     return make_pair(it, expire_it);
 
   db->expire_table.Erase(expire_it);
-
-  db->stats.inline_keys -= it->first.IsInline();
-  size_t value_heap_size = it->second.MallocUsed();
-  db->stats.obj_memory_usage -= (it->first.MallocUsed() + value_heap_size);
-  if (it->second.ObjType() == OBJ_STRING)
-    db->stats.strval_memory_usage -= value_heap_size;
+  UpdateStatsOnDeletion(it, &db->stats);
   db->prime_table.Erase(it);
   ++events_.expired_keys;
 
