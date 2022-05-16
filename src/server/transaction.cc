@@ -38,7 +38,7 @@ IntentLock::Mode Transaction::Mode() const {
  * @param ess
  * @param cs
  */
-Transaction::Transaction(const CommandId* cid, EngineShardSet* ess) : cid_(cid), ess_(ess) {
+Transaction::Transaction(const CommandId* cid) : cid_(cid) {
   string_view cmd_name(cid_->name());
   if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA") {
     multi_.reset(new Multi);
@@ -78,7 +78,7 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   db_index_ = index;
 
   if (IsGlobal()) {
-    unique_shard_cnt_ = ess_->size();
+    unique_shard_cnt_ = shard_set->size();
     shard_data_.resize(unique_shard_cnt_);
     return OpStatus::OK;
   }
@@ -117,7 +117,7 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
     string_view key = args_.front();
 
     unique_shard_cnt_ = 1;
-    unique_shard_id_ = Shard(key, ess_->size());
+    unique_shard_id_ = Shard(key, shard_set->size());
 
     if (needs_reverse_mapping) {
       reverse_index_.resize(args_.size());
@@ -129,7 +129,7 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   }
 
   // Our shard_data is not sparse, so we must allocate for all threads :(
-  shard_data_.resize(ess_->size());
+  shard_data_.resize(shard_set->size());
   CHECK(key_index.step == 1 || key_index.step == 2);
   DCHECK(key_index.step == 1 || (args.size() % 2) == 1);
 
@@ -444,11 +444,11 @@ void Transaction::ScheduleInternal() {
 
   if (span_all) {
     is_active = [](uint32_t) { return true; };
-    num_shards = ess_->size();
+    num_shards = shard_set->size();
 
     // Lock shards
     auto cb = [mode](EngineShard* shard) { shard->shard_lock()->Acquire(mode); };
-    ess_->RunBriefInParallel(std::move(cb));
+    shard_set->RunBriefInParallel(std::move(cb));
   } else {
     num_shards = unique_shard_cnt_;
     DCHECK_GT(num_shards, 0u);
@@ -470,7 +470,7 @@ void Transaction::ScheduleInternal() {
       lock_granted_cnt.fetch_add(res.second, memory_order_relaxed);
     };
 
-    ess_->RunBriefInParallel(std::move(cb), is_active);
+    shard_set->RunBriefInParallel(std::move(cb), is_active);
 
     if (success.load(memory_order_acquire) == num_shards) {
       // We allow out of order execution only for single hop transactions.
@@ -494,7 +494,7 @@ void Transaction::ScheduleInternal() {
       success.fetch_sub(CancelShardCb(shard), memory_order_relaxed);
     };
 
-    ess_->RunBriefInParallel(std::move(cancel), is_active);
+    shard_set->RunBriefInParallel(std::move(cancel), is_active);
     CHECK_EQ(0u, success.load(memory_order_relaxed));
   }
 
@@ -548,7 +548,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
       }
     };
 
-    ess_->Add(unique_shard_id_, std::move(schedule_cb));  // serves as a barrier.
+    shard_set->Add(unique_shard_id_, std::move(schedule_cb));  // serves as a barrier.
   } else {
     // Transaction spans multiple shards or it's global (like flushdb) or multi.
     if (!multi_)
@@ -571,7 +571,7 @@ void Transaction::UnlockMulti() {
 
   DCHECK(multi_);
   using KeyList = vector<pair<std::string_view, LockCnt>>;
-  vector<KeyList> sharded_keys(ess_->size());
+  vector<KeyList> sharded_keys(shard_set->size());
 
   // It's LE and not EQ because there may be callbacks in progress that increase use_count_.
   DCHECK_LE(1u, use_count());
@@ -585,7 +585,7 @@ void Transaction::UnlockMulti() {
   DCHECK_EQ(prev, 0u);
 
   for (ShardId i = 0; i < shard_data_.size(); ++i) {
-    ess_->Add(i, [&] { UnlockMultiShardCb(sharded_keys, EngineShard::tlocal()); });
+    shard_set->Add(i, [&] { UnlockMultiShardCb(sharded_keys, EngineShard::tlocal()); });
   }
   WaitForShardCallbacks();
   DCHECK_GE(use_count(), 1u);
@@ -683,13 +683,13 @@ void Transaction::ExecuteAsync() {
 
   // IsArmedInShard is the protector of non-thread safe data.
   if (!is_global && unique_shard_cnt_ == 1) {
-    ess_->Add(unique_shard_id_, std::move(cb));  // serves as a barrier.
+    shard_set->Add(unique_shard_id_, std::move(cb));  // serves as a barrier.
   } else {
     for (ShardId i = 0; i < shard_data_.size(); ++i) {
       auto& sd = shard_data_[i];
       if (!is_global && sd.arg_count == 0)
         continue;
-      ess_->Add(i, cb);  // serves as a barrier.
+      shard_set->Add(i, cb);  // serves as a barrier.
     }
   }
 }
@@ -732,8 +732,8 @@ void Transaction::ExpireBlocking() {
   auto expire_cb = [this] { ExpireShardCb(EngineShard::tlocal()); };
 
   if (unique_shard_cnt_ == 1) {
-    DCHECK_LT(unique_shard_id_, ess_->size());
-    ess_->Add(unique_shard_id_, move(expire_cb));
+    DCHECK_LT(unique_shard_id_, shard_set->size());
+    shard_set->Add(unique_shard_id_, move(expire_cb));
   } else {
     for (ShardId i = 0; i < shard_data_.size(); ++i) {
       auto& sd = shard_data_[i];
@@ -741,7 +741,7 @@ void Transaction::ExpireBlocking() {
       if (sd.arg_count == 0)
         continue;
 
-      ess_->Add(i, expire_cb);
+      shard_set->Add(i, expire_cb);
     }
   }
 
@@ -963,7 +963,7 @@ bool Transaction::WaitOnWatch(const time_point& tp) {
       DCHECK_EQ(0, sd.local_mask & ARMED);
       if (sd.arg_count == 0)
         continue;
-      ess_->Add(i, converge_cb);
+      shard_set->Add(i, converge_cb);
     }
 
     // Wait for all callbacks to conclude.

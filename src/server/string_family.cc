@@ -36,7 +36,6 @@ DEFINE_VARZ(VarzQps, get_qps);
 constexpr uint32_t kMaxStrLen = 1 << 28;
 constexpr uint32_t kMinTieredLen = TieredStorage::kMinBlobLen;
 
-
 string GetString(EngineShard* shard, const PrimeValue& pv) {
   string res;
   if (pv.IsExternal()) {
@@ -157,7 +156,11 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
   PrimeValue tvalue{value};
   tvalue.SetFlag(params.memcache_flags != 0);
   uint64_t at_ms = params.expire_after_ms ? params.expire_after_ms + db_slice_.Now() : 0;
-  it = db_slice_.AddNew(params.db_index, key, std::move(tvalue), at_ms);
+  try {
+    it = db_slice_.AddNew(params.db_index, key, std::move(tvalue), at_ms);
+  } catch (bad_alloc& e) {
+    return OpStatus::OUT_OF_MEMORY;
+  }
 
   EngineShard* shard = db_slice_.shard_owner();
 
@@ -207,7 +210,6 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
 
   // overwrite existing entry.
   prime_value.SetString(value);
-
 
   if (value.size() >= kMinTieredLen) {  // external storage enabled.
     EngineShard* shard = db_slice_.shard_owner();
@@ -331,8 +333,8 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
   SetCmd::SetParams sparams{cntx->db_index()};
   sparams.prev_val = &prev_val;
 
-  ShardId sid = Shard(key, cntx->shard_set->size());
-  OpResult<void> result = cntx->shard_set->Await(sid, [&] {
+  ShardId sid = Shard(key, shard_set->size());
+  OpResult<void> result = shard_set->Await(sid, [&] {
     EngineShard* es = EngineShard::tlocal();
     SetCmd cmd(&es->db_slice());
 
@@ -518,7 +520,7 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
   DCHECK_GT(args.size(), 1U);
 
   Transaction* transaction = cntx->transaction;
-  unsigned shard_count = transaction->shard_set()->size();
+  unsigned shard_count = shard_set->size();
   std::vector<MGetResponse> mget_resp(shard_count);
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);

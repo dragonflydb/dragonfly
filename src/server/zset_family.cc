@@ -1089,7 +1089,7 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
     return SendAtLeastOneKeyError(cntx);
   }
 
-  vector<OpResult<ScoredMap>> maps(cntx->shard_set->size(), OpStatus::SKIPPED);
+  vector<OpResult<ScoredMap>> maps(shard_set->size(), OpStatus::SKIPPED);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     maps[shard->shard_id()] =
@@ -1386,7 +1386,7 @@ void ZSetFamily::ZUnionStore(CmdArgList args, ConnectionContext* cntx) {
     return SendAtLeastOneKeyError(cntx);
   }
 
-  vector<OpResult<ScoredMap>> maps(cntx->shard_set->size());
+  vector<OpResult<ScoredMap>> maps(shard_set->size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     maps[shard->shard_id()] =

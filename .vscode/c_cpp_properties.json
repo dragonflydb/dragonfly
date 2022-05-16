@@ -8,7 +8,8 @@
             "cStandard": "c17",
             "cppStandard": "c++17",
             "intelliSenseMode": "${default}",
-            "compileCommands": "${workspaceFolder}/build-dbg/compile_commands.json"
+            "compileCommands": "${workspaceFolder}/build-dbg/compile_commands.json",
+            "configurationProvider": "ms-vscode.cmake-tools"
         }
     ],
     "version": 4

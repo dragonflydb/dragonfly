@@ -16,7 +16,7 @@ namespace dfly {
 using namespace std;
 using namespace facade;
 
-ScriptMgr::ScriptMgr(EngineShardSet* ess) : ess_(ess) {
+ScriptMgr::ScriptMgr() {
 }
 
 void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {

@@ -73,7 +73,6 @@ class BaseFamilyTest : public ::testing::Test {
 
   std::unique_ptr<util::ProactorPool> pp_;
   std::unique_ptr<Service> service_;
-  EngineShardSet* ess_ = nullptr;
   unsigned num_threads_ = 3;
 
   absl::flat_hash_map<std::string, std::unique_ptr<TestConnWrapper>> connections_;

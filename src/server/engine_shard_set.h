@@ -209,8 +209,8 @@ class EngineShardSet {
     return pp_;
   }
 
-  void Init(uint32_t size);
-  void InitThreadLocal(util::ProactorBase* pb, bool update_db_time);
+  void Init(uint32_t size, bool update_db_time);
+  void Shutdown();
 
   static const std::vector<CachedStats>& GetCachedStats();
 
@@ -236,6 +236,8 @@ class EngineShardSet {
   template <typename U> void RunBlockingInParallel(U&& func);
 
  private:
+  void InitThreadLocal(util::ProactorBase* pb, bool update_db_time);
+
   util::ProactorPool* pp_;
   std::vector<util::fibers_ext::FiberQueue*> shard_queue_;
 };
@@ -275,5 +277,8 @@ inline ShardId Shard(std::string_view v, ShardId shard_num) {
   XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
   return hash % shard_num;
 }
+
+
+extern EngineShardSet* shard_set;
 
 }  // namespace dfly

@@ -136,13 +136,12 @@ void DebugCmd::Reload(CmdArgList args) {
   }
 
   error_code ec;
-  EngineShardSet& ess = sf_.service().shard_set();
 
   if (save) {
     string err_details;
     const CommandId* cid = sf_.service().FindCmd("SAVE");
     CHECK_NOTNULL(cid);
-    intrusive_ptr<Transaction> trans(new Transaction{cid, &ess});
+    intrusive_ptr<Transaction> trans(new Transaction{cid});
     trans->InitByArgs(0, {});
     VLOG(1) << "Performing save";
     ec = sf_.DoSave(trans.get(), &err_details);
@@ -157,9 +156,9 @@ void DebugCmd::Reload(CmdArgList args) {
 }
 
 void DebugCmd::Load(std::string_view filename) {
-  EngineShardSet& ess = sf_.service().shard_set();
+  EngineShardSet& ess = *shard_set;
   const CommandId* cid = sf_.service().FindCmd("FLUSHALL");
-  intrusive_ptr<Transaction> flush_trans(new Transaction{cid, &ess});
+  intrusive_ptr<Transaction> flush_trans(new Transaction{cid});
   flush_trans->InitByArgs(0, {});
   VLOG(1) << "Performing flush";
   error_code ec = sf_.DoFlush(flush_trans.get(), DbSlice::kDbAll);
@@ -251,7 +250,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view 
   string key = absl::StrCat(prefix, ":");
   size_t prefsize = key.size();
   DbIndex db_indx = cntx_->db_index();
-  EngineShardSet& ess = sf_.service().shard_set();
+  EngineShardSet& ess = *shard_set;
   std::vector<PopulateBatch> ps(ess.size(), PopulateBatch{db_indx});
   SetCmd::SetParams params{db_indx};
 
@@ -281,7 +280,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view 
 }
 
 void DebugCmd::Inspect(string_view key) {
-  EngineShardSet& ess = sf_.service().shard_set();
+  EngineShardSet& ess = *shard_set;
   ShardId sid = Shard(key, ess.size());
 
   auto cb = [&]() -> facade::OpResult<ObjInfo> {

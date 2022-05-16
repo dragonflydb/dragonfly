@@ -228,7 +228,7 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
                      ConnectionContext* cntx) {
   ShardId sid = cursor % 1024;
 
-  EngineShardSet* ess = cntx->shard_set;
+  EngineShardSet* ess = shard_set;
   unsigned shard_count = ess->size();
 
   // Dash table returns a cursor with its right byte empty. We will use it
@@ -489,7 +489,7 @@ void GenericFamily::Select(CmdArgList args, ConnectionContext* cntx) {
     shard->db_slice().ActivateDb(index);
     return OpStatus::OK;
   };
-  cntx->shard_set->RunBriefInParallel(std::move(cb));
+  shard_set->RunBriefInParallel(std::move(cb));
 
   return (*cntx)->SendOk();
 }
@@ -529,7 +529,7 @@ OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool skip_exist_des
   }
 
   transaction->Schedule();
-  unsigned shard_count = transaction->shard_set()->size();
+  unsigned shard_count = shard_set->size();
   Renamer renamer{transaction->db_index(), Shard(key[0], shard_count)};
 
   // Phase 1 -> Fetch  keys from both shards.

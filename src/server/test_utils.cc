@@ -63,14 +63,13 @@ void BaseFamilyTest::SetUp() {
   Service::InitOpts opts;
   opts.disable_time_update = true;
   service_->Init(nullptr, nullptr, opts);
-  ess_ = &service_->shard_set();
 
   expire_now_ = absl::GetCurrentTimeNanos() / 1000000;
   auto cb = [&](EngineShard* s) {
     s->db_slice().UpdateExpireBase(expire_now_ - 1000, 0);
     s->db_slice().UpdateExpireClock(expire_now_);
   };
-  ess_->RunBriefInParallel(cb);
+  shard_set->RunBriefInParallel(cb);
 
   const TestInfo* const test_info = UnitTest::GetInstance()->current_test_info();
   LOG(INFO) << "Starting " << test_info->name();
@@ -88,7 +87,7 @@ void BaseFamilyTest::TearDown() {
 // ts is ms
 void BaseFamilyTest::UpdateTime(uint64_t ms) {
   auto cb = [ms](EngineShard* s) { s->db_slice().UpdateExpireClock(ms); };
-  ess_->RunBriefInParallel(cb);
+  shard_set->RunBriefInParallel(cb);
 }
 
 RespExpr BaseFamilyTest::Run(initializer_list<std::string_view> list) {
@@ -105,7 +104,6 @@ RespExpr BaseFamilyTest::Run(std::string_view id, std::initializer_list<std::str
   CmdArgVec args = conn->Args(list);
 
   auto& context = conn->cmd_cntx;
-  context.shard_set = ess_;
 
   DCHECK(context.transaction == nullptr);
 
@@ -144,7 +142,6 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view va
   TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
 
   auto& context = conn->cmd_cntx;
-  context.shard_set = ess_;
 
   DCHECK(context.transaction == nullptr);
 
@@ -166,7 +163,6 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, std::string_view key) -> MCResp
   TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
 
   auto& context = conn->cmd_cntx;
-  context.shard_set = ess_;
 
   service_->DispatchMC(cmd, string_view{}, &context);
 
@@ -193,7 +189,6 @@ auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::stri
   TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
 
   auto& context = conn->cmd_cntx;
-  context.shard_set = ess_;
 
   service_->DispatchMC(cmd, string_view{}, &context);
 
@@ -249,7 +244,7 @@ RespVec BaseFamilyTest::TestConnWrapper::ParseResponse() {
 }
 
 bool BaseFamilyTest::IsLocked(DbIndex db_index, std::string_view key) const {
-  ShardId sid = Shard(key, ess_->size());
+  ShardId sid = Shard(key, shard_set->size());
   KeyLockArgs args;
   args.db_index = db_index;
   args.args = ArgSlice{&key, 1};

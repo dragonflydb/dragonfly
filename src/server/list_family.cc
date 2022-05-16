@@ -127,7 +127,7 @@ OpResult<ShardFFResult> FindFirst(Transaction* trans) {
   // Holds Find results: (iterator to a found key, and its index in the passed arguments).
   // See DbSlice::FindFirst for more details.
   // spans all the shards for now.
-  std::vector<OpResult<FFResult>> find_res(trans->shard_set()->size());
+  std::vector<OpResult<FFResult>> find_res(shard_set->size());
   fill(find_res.begin(), find_res.end(), OpStatus::KEY_NOTFOUND);
 
   auto cb = [&find_res](auto* t, EngineShard* shard) {

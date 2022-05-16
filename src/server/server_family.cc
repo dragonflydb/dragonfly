@@ -83,10 +83,10 @@ string UnknowSubCmd(string_view subcmd, string cmd) {
 
 }  // namespace
 
-ServerFamily::ServerFamily(Service* service) : service_(*service), ess_(service->shard_set()) {
+ServerFamily::ServerFamily(Service* service) : service_(*service) {
   start_time_ = time(NULL);
   lsinfo_.save_time = start_time_;
-  script_mgr_.reset(new ScriptMgr(&service->shard_set()));
+  script_mgr_.reset(new ScriptMgr());
 }
 
 ServerFamily::~ServerFamily() {
@@ -97,7 +97,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
   acceptor_ = acceptor;
   main_listener_ = main_listener;
 
-  pb_task_ = ess_.pool()->GetNextProactor();
+  pb_task_ = shard_set->pool()->GetNextProactor();
   auto cache_cb = [] {
     uint64_t sum = 0;
     const auto& stats = EngineShardSet::GetCachedStats();
@@ -225,7 +225,7 @@ error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
   unique_ptr<::io::WriteFile> wf(*res);
   auto start = absl::Now();
 
-  RdbSaver saver{&ess_, wf.get()};
+  RdbSaver saver{shard_set, wf.get()};
 
   ec = saver.SaveHeader();
   if (!ec) {
@@ -294,7 +294,7 @@ string ServerFamily::LastSaveFile() const {
 void ServerFamily::DbSize(CmdArgList args, ConnectionContext* cntx) {
   atomic_ulong num_keys{0};
 
-  ess_.RunBriefInParallel(
+  shard_set->RunBriefInParallel(
       [&](EngineShard* shard) {
         auto db_size = shard->db_slice().DbSize(cntx->conn_state.db_index);
         num_keys.fetch_add(db_size, memory_order_relaxed);
@@ -384,7 +384,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
 
     return (*cntx)->SendStringArr(res);
   } else if (sub_cmd == "RESETSTAT") {
-    ess_.pool()->Await([](auto*) {
+    shard_set->pool()->Await([](auto*) {
       auto* stats = ServerState::tl_connection_stats();
       stats->cmd_count_map.clear();
       stats->err_count_map.clear();

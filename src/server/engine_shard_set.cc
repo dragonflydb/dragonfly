@@ -34,6 +34,7 @@ vector<EngineShardSet::CachedStats> cached_stats;  // initialized in EngineShard
 
 thread_local EngineShard* EngineShard::shard_ = nullptr;
 constexpr size_t kQueueLen = 64;
+EngineShardSet* shard_set = nullptr;
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
   ooo_runs += o.ooo_runs;
@@ -326,6 +327,11 @@ void EngineShard::CacheStats() {
 
   size_t used_mem = UsedMemory();
   cached_stats[db_slice_.shard_id()].used_memory.store(used_mem, memory_order_relaxed);
+  ssize_t free_mem = max_memory_limit - used_mem_current.load(memory_order_relaxed);
+  if (free_mem < 0)
+    free_mem = 0;
+
+  db_slice_.SetMemoryBudget(free_mem / shard_set->size());
 }
 
 size_t EngineShard::UsedMemory() const {
@@ -351,10 +357,20 @@ void EngineShard::AddBlocked(Transaction* trans) {
 
  */
 
-void EngineShardSet::Init(uint32_t sz) {
+void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
   CHECK_EQ(0u, size());
   cached_stats.resize(sz);
   shard_queue_.resize(sz);
+
+   pp_->AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
+    if (index < shard_queue_.size()) {
+      InitThreadLocal(pb, update_db_time);
+    }
+  });
+}
+
+void EngineShardSet::Shutdown() {
+  RunBlockingInParallel([](EngineShard*) { EngineShard::DestroyThreadLocal(); });
 }
 
 void EngineShardSet::InitThreadLocal(ProactorBase* pb, bool update_db_time) {

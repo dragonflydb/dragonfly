@@ -94,7 +94,7 @@ TEST_F(DflyEngineTest, Multi) {
 
   atomic_bool tx_empty = true;
 
-  ess_->RunBriefInParallel([&](EngineShard* shard) {
+  shard_set->RunBriefInParallel([&](EngineShard* shard) {
     if (!shard->txq()->Empty())
       tx_empty.store(false);
   });

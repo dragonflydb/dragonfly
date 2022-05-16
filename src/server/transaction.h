@@ -59,7 +59,7 @@ class Transaction {
     EXPIRED_Q = 0x40,    // timed-out and should be garbage collected from the blocking queue.
   };
 
-  Transaction(const CommandId* cid, EngineShardSet* ess);
+  explicit Transaction(const CommandId* cid);
 
   OpStatus InitByArgs(DbIndex index, CmdArgList args);
 
@@ -154,10 +154,6 @@ class Transaction {
 
   bool IsOOO() const {
     return coordinator_state_ & COORD_OOO;
-  }
-
-  EngineShardSet* shard_set() {
-    return ess_;
   }
 
   // Registers transaction into watched queue and blocks until a) either notification is received.
@@ -287,7 +283,7 @@ class Transaction {
   std::unique_ptr<Multi> multi_;  // Initialized when the transaction is multi/exec.
 
   const CommandId* cid_;
-  EngineShardSet* ess_;
+
   TxId txid_{0};
   std::atomic<TxId> notify_txid_{kuint64max};
 

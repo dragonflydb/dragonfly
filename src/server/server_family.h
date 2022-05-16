@@ -71,7 +71,7 @@ class ServerFamily {
 
  private:
   uint32_t shard_count() const {
-    return ess_.size();
+    return shard_set->size();
   }
 
   void Auth(CmdArgList args, ConnectionContext* cntx);
@@ -99,7 +99,6 @@ class ServerFamily {
 
   uint32_t task_10ms_ = 0;
   Service& service_;
-  EngineShardSet& ess_;
 
   util::AcceptServer* acceptor_ = nullptr;
   util::ListenerInterface* main_listener_ = nullptr;

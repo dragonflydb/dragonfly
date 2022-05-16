@@ -72,14 +72,14 @@ TEST_F(RdbTest, Crc) {
 
 TEST_F(RdbTest, LoadEmpty) {
   io::FileSource fs = GetSource("empty.rdb");
-  RdbLoader loader(ess_, NULL);
+  RdbLoader loader(shard_set, NULL);
   auto ec = loader.Load(&fs);
   CHECK(!ec);
 }
 
 TEST_F(RdbTest, LoadSmall6) {
   io::FileSource fs = GetSource("redis6_small.rdb");
-  RdbLoader loader(ess_, service_->script_mgr());
+  RdbLoader loader(shard_set, service_->script_mgr());
   auto ec = loader.Load(&fs);
   ASSERT_FALSE(ec) << ec.message();
 

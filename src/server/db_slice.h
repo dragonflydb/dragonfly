@@ -254,7 +254,8 @@ class DbSlice {
   time_t expire_base_[2];  // Used for expire logic, represents a real clock.
 
   uint64_t version_ = 1;  // Used to version entries in the PrimeTable.
-  int64_t memory_budget_ = INT64_MAX;
+  ssize_t memory_budget_ = SSIZE_MAX;
+
   mutable SliceEvents events_;  // we may change this even for const operations.
 
   using LockTable = absl::flat_hash_map<std::string, IntentLock>;

@@ -78,7 +78,6 @@ class ConnectionContext : public facade::ConnectionContext {
   // TODO: to introduce proper accessors.
   Transaction* transaction = nullptr;
   const CommandId* cid = nullptr;
-  EngineShardSet* shard_set = nullptr;
   ConnectionState conn_state;
 
   DbIndex db_index() const {

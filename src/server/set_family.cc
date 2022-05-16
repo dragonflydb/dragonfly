@@ -815,7 +815,7 @@ void SetFamily::SPop(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void SetFamily::SDiff(CmdArgList args, ConnectionContext* cntx) {
-  ResultStringVec result_set(cntx->transaction->shard_set()->size(), OpStatus::SKIPPED);
+  ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
   std::string_view src_key = ArgS(args, 1);
   ShardId src_shard = Shard(src_key, result_set.size());
 
@@ -846,7 +846,7 @@ void SetFamily::SDiff(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void SetFamily::SDiffStore(CmdArgList args, ConnectionContext* cntx) {
-  ResultStringVec result_set(cntx->transaction->shard_set()->size(), OpStatus::SKIPPED);
+  ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
   std::string_view dest_key = ArgS(args, 1);
   ShardId dest_shard = Shard(dest_key, result_set.size());
   std::string_view src_key = ArgS(args, 2);
@@ -917,7 +917,7 @@ void SetFamily::SMembers(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void SetFamily::SInter(CmdArgList args, ConnectionContext* cntx) {
-  ResultStringVec result_set(cntx->transaction->shard_set()->size(), OpStatus::SKIPPED);
+  ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     result_set[shard->shard_id()] = OpInter(t, shard, false);
@@ -939,7 +939,7 @@ void SetFamily::SInter(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void SetFamily::SInterStore(CmdArgList args, ConnectionContext* cntx) {
-  ResultStringVec result_set(cntx->transaction->shard_set()->size(), OpStatus::SKIPPED);
+  ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
   std::string_view dest_key = ArgS(args, 1);
   ShardId dest_shard = Shard(dest_key, result_set.size());
   atomic_uint32_t inter_shard_cnt{0};
@@ -979,7 +979,7 @@ void SetFamily::SInterStore(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void SetFamily::SUnion(CmdArgList args, ConnectionContext* cntx) {
-  ResultStringVec result_set(cntx->transaction->shard_set()->size());
+  ResultStringVec result_set(shard_set->size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ArgSlice largs = t->ShardArgsInShard(shard->shard_id());
@@ -1002,7 +1002,7 @@ void SetFamily::SUnion(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void SetFamily::SUnionStore(CmdArgList args, ConnectionContext* cntx) {
-  ResultStringVec result_set(cntx->transaction->shard_set()->size(), OpStatus::SKIPPED);
+  ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
   std::string_view dest_key = ArgS(args, 1);
   ShardId dest_shard = Shard(dest_key, result_set.size());
 

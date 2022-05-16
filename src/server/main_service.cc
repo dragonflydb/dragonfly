@@ -296,8 +296,11 @@ bool EvalValidator(CmdArgList args, ConnectionContext* cntx) {
 
 }  // namespace
 
-Service::Service(ProactorPool* pp) : pp_(*pp), shard_set_(pp), server_family_(this) {
+Service::Service(ProactorPool* pp) : pp_(*pp), server_family_(this) {
   CHECK(pp);
+  CHECK(shard_set == NULL);
+
+  shard_set = new EngineShardSet(pp);
 
   // We support less than 1024 threads and we support less than 1024 shards.
   // For example, Scan uses 10 bits in cursor to encode shard id it currently traverses.
@@ -308,6 +311,8 @@ Service::Service(ProactorPool* pp) : pp_(*pp), shard_set_(pp), server_family_(th
 }
 
 Service::~Service() {
+  delete shard_set;
+  shard_set = nullptr;
 }
 
 void Service::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_interface,
@@ -315,14 +320,10 @@ void Service::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_i
   InitRedisTables();
 
   uint32_t shard_num = pp_.size() > 1 ? pp_.size() - 1 : pp_.size();
-  shard_set_.Init(shard_num);
+  shard_set->Init(shard_num, !opts.disable_time_update);
 
   pp_.AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
     ServerState::tlocal()->Init();
-
-    if (index < shard_count()) {
-      shard_set_.InitThreadLocal(pb, !opts.disable_time_update);
-    }
   });
 
   request_latency_usec.Init(&pp_);
@@ -352,7 +353,7 @@ void Service::Shutdown() {
   GenericFamily::Shutdown();
 
   cmd_req.Shutdown();
-  shard_set_.RunBlockingInParallel([&](EngineShard*) { EngineShard::DestroyThreadLocal(); });
+  shard_set->Shutdown();
 
   // wait for all the pending callbacks to stop.
   boost::this_fiber::sleep_for(10ms);
@@ -366,7 +367,7 @@ static void MultiSetError(ConnectionContext* cntx) {
 
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
   CHECK(!args.empty());
-  DCHECK_NE(0u, shard_set_.size()) << "Init was not called";
+  DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
   ToUpper(&args[0]);
 
@@ -489,7 +490,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     DCHECK(dfly_cntx->transaction == nullptr);
 
     if (IsTransactional(cid)) {
-      dist_trans.reset(new Transaction{cid, &shard_set_});
+      dist_trans.reset(new Transaction{cid});
       OpStatus st = dist_trans->InitByArgs(dfly_cntx->conn_state.db_index, args);
       if (st != OpStatus::OK)
         return (*cntx)->SendError(st);
@@ -619,7 +620,6 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
 facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
                                                   facade::Connection* owner) {
   ConnectionContext* res = new ConnectionContext{peer, owner};
-  res->shard_set = &shard_set();
   res->req_auth = IsPassProtected();
 
   // a bit of a hack. I set up breaker callback here for the owner.
@@ -651,7 +651,7 @@ bool Service::IsLocked(DbIndex db_index, std::string_view key) const {
 bool Service::IsShardSetLocked() const {
   std::atomic_uint res{0};
 
-  shard_set_.RunBriefInParallel([&](EngineShard* shard) {
+  shard_set->RunBriefInParallel([&](EngineShard* shard) {
     bool unlocked = shard->shard_lock()->Check(IntentLock::SHARED);
     res.fetch_add(!unlocked, memory_order_relaxed);
   });
@@ -897,14 +897,14 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&] { return EngineShard::tlocal()->channel_slice().FetchSubscribers(channel); };
 
-  vector<ChannelSlice::Subscriber> subsriber_arr = shard_set_.Await(sid, std::move(cb));
+  vector<ChannelSlice::Subscriber> subsriber_arr = shard_set->Await(sid, std::move(cb));
   atomic_uint32_t published{0};
 
   if (!subsriber_arr.empty()) {
     sort(subsriber_arr.begin(), subsriber_arr.end(),
          [](const auto& left, const auto& right) { return left.thread_id < right.thread_id; });
 
-    vector<unsigned> slices(shard_set_.pool()->size(), UINT_MAX);
+    vector<unsigned> slices(shard_set->pool()->size(), UINT_MAX);
     for (size_t i = 0; i < subsriber_arr.size(); ++i) {
       if (slices[subsriber_arr[i].thread_id] > i) {
         slices[subsriber_arr[i].thread_id] = i;
@@ -932,7 +932,7 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
       }
     };
 
-    shard_set_.pool()->Await(publish_cb);
+    shard_set->pool()->Await(publish_cb);
 
     bc.Wait();  // Wait for all the messages to be sent.
   }

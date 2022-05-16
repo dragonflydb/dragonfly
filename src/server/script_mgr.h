@@ -18,17 +18,16 @@ class EngineShardSet;
 // This class has a state through the lifetime of a server because it manipulates scripts
 class ScriptMgr {
  public:
-  ScriptMgr(EngineShardSet* ess);
+  ScriptMgr();
 
   void Run(CmdArgList args, ConnectionContext* cntx);
 
-  bool InsertFunction(std::string_view sha,  std::string_view body);
+  bool InsertFunction(std::string_view sha, std::string_view body);
 
   // Returns body as null-terminated c-string. NULL if sha is not found.
   const char* Find(std::string_view sha) const;
 
  private:
-  EngineShardSet* ess_;
   using ScriptKey = std::array<char, 40>;
   absl::flat_hash_map<ScriptKey, std::unique_ptr<char[]>> db_;
   mutable ::boost::fibers::mutex mu_;

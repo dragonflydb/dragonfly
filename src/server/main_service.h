@@ -48,16 +48,12 @@ class Service : public facade::ServiceInterface {
   facade::ConnectionStats* GetThreadLocalConnectionStats() final;
 
   uint32_t shard_count() const {
-    return shard_set_.size();
+    return shard_set->size();
   }
 
   // Used by tests.
   bool IsLocked(DbIndex db_index, std::string_view key) const;
   bool IsShardSetLocked() const;
-
-  EngineShardSet& shard_set() {
-    return shard_set_;
-  }
 
   util::ProactorPool& proactor_pool() {
     return pp_;
@@ -102,7 +98,6 @@ class Service : public facade::ServiceInterface {
 
   util::ProactorPool& pp_;
 
-  EngineShardSet shard_set_;
   ServerFamily server_family_;
   CommandRegistry registry_;
 
