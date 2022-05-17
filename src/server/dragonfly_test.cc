@@ -356,6 +356,25 @@ TEST_F(DflyEngineTest, LimitMemory) {
   }
 }
 
+TEST_F(DflyEngineTest, FlushAll) {
+  auto fb0 = pp_->at(0)->LaunchFiber([&] {
+      Run({"flushall"});
+  });
+
+  auto fb1 = pp_->at(1)->LaunchFiber([&] {
+    Run({"select", "2"});
+
+    for (size_t i = 1; i < 100; ++i) {
+      RespExpr resp = Run({"set", "foo", "bar"});
+      ASSERT_EQ(resp, "OK");
+      this_fiber::yield();
+    }
+  });
+
+  fb0.join();
+  fb1.join();
+}
+
 // TODO: to test transactions with a single shard since then all transactions become local.
 // To consider having a parameter in dragonfly engine controlling number of shards
 // unconditionally from number of cpus. TO TEST BLPOP under multi for single/multi argument case.

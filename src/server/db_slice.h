@@ -4,10 +4,8 @@
 
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 
-#include "core/intent_lock.h"
 #include "facade/op_status.h"
 #include "server/common.h"
 #include "server/table.h"
@@ -20,23 +18,7 @@ namespace dfly {
 
 using facade::OpResult;
 
-struct InternalDbStats {
-  // Number of inline keys.
-  uint64_t inline_keys = 0;
-
-  // Object memory usage besides hash-table capacity.
-  // Applies for any non-inline objects.
-  size_t obj_memory_usage = 0;
-  size_t strval_memory_usage = 0;
-  size_t listpack_blob_cnt = 0;
-  size_t listpack_bytes = 0;
-  size_t external_entries = 0;
-  size_t external_size = 0;
-
-  InternalDbStats& operator+=(const InternalDbStats& o);
-};
-
-struct DbStats : public InternalDbStats {
+struct DbStats : public DbTableStats {
   // number of active keys.
   size_t key_count = 0;
 
@@ -49,8 +31,8 @@ struct DbStats : public InternalDbStats {
   // Memory used by dictionaries.
   size_t table_mem_usage = 0;
 
-  using InternalDbStats::operator+=;
-  using InternalDbStats::operator=;
+  using DbTableStats::operator+=;
+  using DbTableStats::operator=;
 
   DbStats& operator+=(const DbStats& o);
 };
@@ -84,8 +66,10 @@ class DbSlice {
     // Otherwise (string_view is set) then it's a new key that is going to be added to the table.
     std::variant<PrimeTable::bucket_iterator, std::string_view> change;
 
-    ChangeReq(PrimeTable::bucket_iterator it) : change(it) {}
-    ChangeReq(std::string_view key) : change(key) {}
+    ChangeReq(PrimeTable::bucket_iterator it) : change(it) {
+    }
+    ChangeReq(std::string_view key) : change(key) {
+    }
 
     const PrimeTable::bucket_iterator* update() const {
       return std::get_if<PrimeTable::bucket_iterator>(&change);
@@ -171,7 +155,7 @@ class DbSlice {
    * databases.
    *
    */
-  size_t FlushDb(DbIndex db_ind);
+  void FlushDb(DbIndex db_ind);
 
   EngineShard* shard_owner() {
     return owner_;
@@ -184,7 +168,10 @@ class DbSlice {
   bool Acquire(IntentLock::Mode m, const KeyLockArgs& lock_args);
 
   void Release(IntentLock::Mode m, const KeyLockArgs& lock_args);
-  void Release(IntentLock::Mode m, DbIndex db_index, std::string_view key, unsigned count);
+
+  void Release(IntentLock::Mode m, DbIndex db_index, std::string_view key, unsigned count) {
+    db_arr_[db_index]->Release(m, key, count);
+  }
 
   // Returns true if all keys can be locked under m. Does not lock them though.
   bool CheckLock(IntentLock::Mode m, const KeyLockArgs& lock_args) const;
@@ -198,8 +185,7 @@ class DbSlice {
   }
 
   std::pair<PrimeTable*, ExpireTable*> GetTables(DbIndex id) {
-    return std::pair<PrimeTable*, ExpireTable*>(&db_arr_[id]->prime_table,
-                                                &db_arr_[id]->expire_table);
+    return std::pair<PrimeTable*, ExpireTable*>(&db_arr_[id]->prime, &db_arr_[id]->expire);
   }
 
   // Returns existing keys count in the db.
@@ -209,7 +195,7 @@ class DbSlice {
   void PreUpdate(DbIndex db_ind, PrimeIterator it);
   void PostUpdate(DbIndex db_ind, PrimeIterator it);
 
-  InternalDbStats* MutableStats(DbIndex db_ind) {
+  DbTableStats* MutableStats(DbIndex db_ind) {
     return &db_arr_[db_ind]->stats;
   }
 
@@ -258,22 +244,7 @@ class DbSlice {
 
   mutable SliceEvents events_;  // we may change this even for const operations.
 
-  using LockTable = absl::flat_hash_map<std::string, IntentLock>;
-
-  struct DbWrapper {
-    PrimeTable prime_table;
-    ExpireTable expire_table;
-    DashTable<PrimeKey, uint32_t, detail::ExpireTablePolicy> mcflag_table;
-
-    LockTable lock_table;
-
-    mutable InternalDbStats stats;
-    ExpireTable::cursor expire_cursor;
-
-    explicit DbWrapper(std::pmr::memory_resource* mr);
-  };
-
-  std::vector<std::unique_ptr<DbWrapper>> db_arr_;
+  std::vector<boost::intrusive_ptr<DbTable>> db_arr_;
 
   // Used in temporary computations in Acquire/Release.
   absl::flat_hash_set<std::string_view> uniq_keys_;

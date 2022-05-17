@@ -145,4 +145,9 @@ TEST_F(RdbTest, ReloadTtl) {
   EXPECT_LT(990, CheckedInt({"ttl", "key"}));
 }
 
+TEST_F(RdbTest, SaveFlush) {
+  Run({"debug", "populate", "1000000"});
+
+}
+
 }  // namespace dfly

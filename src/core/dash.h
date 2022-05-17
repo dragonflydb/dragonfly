@@ -249,7 +249,9 @@ class DashTable : public detail::DashTableBase {
   void IncreaseDepth(unsigned new_depth);
   void Split(uint32_t seg_id);
 
-  template <typename Cb> void IterateUnique(Cb&& cb);
+  // Segment directory contains multiple segment pointers, some of them pointing to
+  // the same object. IterateDistinct goes over all distinct segments in the table.
+  template <typename Cb> void IterateDistinct(Cb&& cb);
 
   size_t NextSeg(size_t sid) const {
     size_t delta = (1u << (global_depth_ - segment_[sid]->local_depth()));
@@ -453,7 +455,7 @@ DashTable<_Key, _Value, Policy>::~DashTable() {
   std::pmr::polymorphic_allocator<SegmentType> pa(resource);
   using alloc_traits = std::allocator_traits<decltype(pa)>;
 
-  IterateUnique([&](SegmentType* seg) {
+  IterateDistinct([&](SegmentType* seg) {
     alloc_traits::destroy(pa, seg);
     alloc_traits::deallocate(pa, seg, 1);
     return false;
@@ -517,10 +519,10 @@ void DashTable<_Key, _Value, Policy>::Clear() {
     return false;
   };
 
-  IterateUnique(cb);
+  IterateDistinct(cb);
   size_ = 0;
 
-  // Consider the following case: table with 8 segments overall, 4 unique.
+  // Consider the following case: table with 8 segments overall, 4 distinct.
   // S1, S1, S1, S1, S2, S3, S4, S4
   /* This corresponds to the tree:
             R
@@ -531,7 +533,7 @@ void DashTable<_Key, _Value, Policy>::Clear() {
      We want to collapse this tree into, say, 2 segment directory.
      That means we need to keep S1, S2 but delete S3, S4.
      That means, we need to move representative segments until we reached the desired size
-     and the erase all other unique segments.
+     and then erase all other distinct segments.
   **********/
   if (global_depth_ > initial_depth_) {
     std::pmr::polymorphic_allocator<SegmentType> pa(segment_.get_allocator());
@@ -582,7 +584,7 @@ bool DashTable<_Key, _Value, Policy>::ShiftRight(bucket_iterator it) {
 
 template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
-void DashTable<_Key, _Value, Policy>::IterateUnique(Cb&& cb) {
+void DashTable<_Key, _Value, Policy>::IterateDistinct(Cb&& cb) {
   size_t i = 0;
   while (i < segment_.size()) {
     auto* seg = segment_[i];
