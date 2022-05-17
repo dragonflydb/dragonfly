@@ -102,10 +102,14 @@ class Connection : public util::Connection {
 
   struct Request;
 
+  // args are passed deliberately by value - to pass the ownership.
   static Request* FromArgs(RespVec args, mi_heap_t* heap);
 
   std::deque<Request*> dispatch_q_;  // coordinated via evc_.
   util::fibers_ext::EventCount evc_;
+
+  RespVec parse_args_;
+  CmdArgVec cmd_vec_;
 
   unsigned parser_error_ = 0;
   uint32_t id_;

@@ -383,8 +383,6 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
 }
 
 auto Connection::ParseRedis() -> ParserStatus {
-  RespVec args;
-  CmdArgVec arg_vec;
   uint32_t consumed = 0;
 
   RedisParser::Result result = RedisParser::OK;
@@ -392,10 +390,10 @@ auto Connection::ParseRedis() -> ParserStatus {
   mi_heap_t* tlh = mi_heap_get_backing();
 
   do {
-    result = redis_parser_->Parse(io_buf_.InputBuffer(), &consumed, &args);
+    result = redis_parser_->Parse(io_buf_.InputBuffer(), &consumed, &parse_args_);
 
-    if (result == RedisParser::OK && !args.empty()) {
-      RespExpr& first = args.front();
+    if (result == RedisParser::OK && !parse_args_.empty()) {
+      RespExpr& first = parse_args_.front();
       if (first.type == RespExpr::STRING) {
         DVLOG(2) << "Got Args with first token " << ToSV(first.GetBuf());
       }
@@ -406,12 +404,13 @@ auto Connection::ParseRedis() -> ParserStatus {
       // fiber enters the condition below and executes out of order.
       bool is_sync_dispatch = !cc_->async_dispatch && !cc_->force_dispatch;
       if (dispatch_q_.empty() && is_sync_dispatch && consumed >= io_buf_.InputLen()) {
-        RespToArgList(args, &arg_vec);
-        service_->DispatchCommand(CmdArgList{arg_vec.data(), arg_vec.size()}, cc_.get());
+        RespToArgList(parse_args_, &cmd_vec_);
+        CmdArgList cmd_list{cmd_vec_.data(), cmd_vec_.size()};
+        service_->DispatchCommand(cmd_list, cc_.get());
         last_interaction_ = time(nullptr);
       } else {
         // Dispatch via queue to speedup input reading.
-        Request* req = FromArgs(std::move(args), tlh);
+        Request* req = FromArgs(std::move(parse_args_), tlh);
 
         dispatch_q_.push_back(req);
         if (dispatch_q_.size() == 1) {
