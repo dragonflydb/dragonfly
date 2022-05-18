@@ -417,5 +417,9 @@ with `--http_admin_console=false` or `--nohttp_admin_console`.
        we expirienced ourselves in the past.</em>
 
 6. I get it, but why not change Redis open source? <br>
-   <em>Many of the pain points we addressed like Multi-core support, memory optimization, forkless snapshot, improved eviction algo, unit testing and more... have been the achilles heel and a long standing requests by the community. Some were not addressed for as long as ten years, others were dismissed because they require a complete rewrite of the engine. With Redis open source long legacy codebase it is impossible to innovate at this scale.  
+   <em>Many of the pain points we addressed like Multi-core support, memory optimization, forkless snapshot, improved eviction algo, unit testing and more... have been the achilles heel and a long standing requests by the community. Some were not addressed for as long as ten years, others were dismissed because they require a complete rewrite of the engine. With Redis open source long legacy codebase it is impossible to innovate at this scale.</em>  
+
+7. Who is behind Dragonfly? <br>
+  <em>We! and hofully you. We decided to make the Dragonfly code avilable so the community can enjoy it and contribute to grow it for the collective benefits of all. There are many ways to contribute. Here are some: Star, test, blog, fork, open issues, address issues, suggest features, contibute to code, implement a command, tweet... </em>
+
 
