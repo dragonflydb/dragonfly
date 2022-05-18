@@ -415,3 +415,7 @@ with `--http_admin_console=false` or `--nohttp_admin_console`.
        your ETL involving Redis takes hours to finish or maybe its memory usage and hardware costs
        give you a headache. With Dragonfly we tried to solve every design defficiency
        we expirienced ourselves in the past.</em>
+
+6. I get it, but why not change Redis open source? <br>
+   <em>Many of the pain points we addressed like Multi-core support, memory optimization, forkless snapshot, improved eviction algo, unit testing and more... have been the achilles heel and a long standing requests by the community. Some were not addressed for as long as ten years, others were dismissed because they require a complete rewrite of the engine. With Redis open source long legacy codebase it is impossible to innovate at this scale.  
+
