@@ -72,6 +72,7 @@ const char kExpiryOutOfRange[] = "expiry is out of range";
 const char kSyntaxErrType[] = "syntax_error";
 const char kScriptErrType[] = "script_error";
 const char kIndexOutOfRange[] = "index out of range";
+const char kOutOfMemory[] = "Out of memory";
 
 
 const char* RespExpr::TypeName(Type t) {

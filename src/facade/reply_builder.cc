@@ -240,6 +240,9 @@ void RedisReplyBuilder::SendError(OpStatus status) {
     case OpStatus::SYNTAX_ERR:
       SendError(kSyntaxErr);
       break;
+    case OpStatus::OUT_OF_MEMORY:
+      SendError(kOutOfMemory);
+      break;
     default:
       LOG(ERROR) << "Unsupported status " << status;
       SendError("Internal error");
@@ -254,6 +257,7 @@ void RedisReplyBuilder::SendLong(long num) {
 
 void RedisReplyBuilder::SendDouble(double val) {
   char buf[64];
+
   StringBuilder sb(buf, sizeof(buf));
   CHECK(dfly_conv.ToShortest(val, &sb));
 

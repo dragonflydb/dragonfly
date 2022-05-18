@@ -300,27 +300,6 @@ void EngineShard::Heartbeat() {
 }
 
 void EngineShard::CacheStats() {
-#if 0
-  mi_heap_t* tlh = mi_resource_.heap();
-  struct Sum {
-    size_t used = 0;
-    size_t comitted = 0;
-  } sum;
-
-  auto visit_cb = [](const mi_heap_t* heap, const mi_heap_area_t* area, void* block,
-                     size_t block_size, void* arg) -> bool {
-    DCHECK(!block);
-    Sum* sum = (Sum*)arg;
-
-    // mimalloc mistakenly exports used in blocks instead of bytes.
-    sum->used += block_size * area->used;
-    sum->comitted += area->committed;
-
-    DVLOG(1) << "block_size " << block_size << "/" << area->block_size << ", reserved "
-             << area->reserved << " comitted " << area->committed << " used: " << area->used;
-    return true;  // continue iteration
-  };
-#endif
   // mi_heap_visit_blocks(tlh, false /* visit all blocks*/, visit_cb, &sum);
   mi_stats_merge();
 
@@ -344,6 +323,11 @@ void EngineShard::AddBlocked(Transaction* trans) {
   blocking_controller_->AddWatched(trans);
 }
 
+void EngineShard::TEST_EnableHeartbeat() {
+  auto* pb = ProactorBase::me();
+  periodic_task_ = pb->AddPeriodic(1, [this] { Heartbeat(); });
+}
+
 /**
 
 
@@ -361,7 +345,7 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
   cached_stats.resize(sz);
   shard_queue_.resize(sz);
 
-   pp_->AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
+  pp_->AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
     if (index < shard_queue_.size()) {
       InitThreadLocal(pb, update_db_time);
     }
@@ -380,6 +364,10 @@ void EngineShardSet::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
 
 const vector<EngineShardSet::CachedStats>& EngineShardSet::GetCachedStats() {
   return cached_stats;
+}
+
+void EngineShardSet::TEST_EnableHeartBeat() {
+  RunBriefInParallel([](EngineShard* shard) { shard->TEST_EnableHeartbeat(); });
 }
 
 }  // namespace dfly

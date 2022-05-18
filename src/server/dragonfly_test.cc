@@ -357,9 +357,7 @@ TEST_F(DflyEngineTest, LimitMemory) {
 }
 
 TEST_F(DflyEngineTest, FlushAll) {
-  auto fb0 = pp_->at(0)->LaunchFiber([&] {
-      Run({"flushall"});
-  });
+  auto fb0 = pp_->at(0)->LaunchFiber([&] { Run({"flushall"}); });
 
   auto fb1 = pp_->at(1)->LaunchFiber([&] {
     Run({"select", "2"});
@@ -373,6 +371,37 @@ TEST_F(DflyEngineTest, FlushAll) {
 
   fb0.join();
   fb1.join();
+}
+
+TEST_F(DflyEngineTest, OOM) {
+  shard_set->TEST_EnableHeartBeat();
+  max_memory_limit = 0;
+  size_t i = 0;
+  RespExpr resp;
+  for (; i < 10000; i += 3) {
+    resp = Run({"mset", StrCat("key", i), "bar", StrCat("key", i + 1), "bar", StrCat("key", i + 2),
+                "bar"});
+    if (resp != "OK")
+      break;
+    ASSERT_EQ(resp, "OK");
+  }
+
+  EXPECT_THAT(resp, ErrArg("Out of mem"));
+  for (; i < 10000; ++i) {
+    resp = Run({"set", StrCat("key", i), "bar"});
+    if (resp != "OK")
+      break;
+  }
+  EXPECT_THAT(resp, ErrArg("Out of mem"));
+
+  for (; i < 10000; ++i) {
+    resp = Run({"rpush", StrCat("list", i), "bar"});
+
+    if (resp.type == RespExpr::ERROR)
+      break;
+    ASSERT_THAT(resp, IntArg(1));
+  }
+  EXPECT_THAT(resp, ErrArg("Out of mem"));
 }
 
 // TODO: to test transactions with a single shard since then all transactions become local.

@@ -2,7 +2,10 @@
 // See LICENSE for licensing terms.
 //
 
-// #include <mimalloc-new-delete.h>
+#ifdef NDEBUG
+#include <mimalloc-new-delete.h>
+#endif
+
 #include <mimalloc.h>
 
 #include "base/init.h"
@@ -14,6 +17,7 @@
 #include "util/accept_server.h"
 #include "util/uring/uring_pool.h"
 #include "util/varz.h"
+
 
 DECLARE_uint32(port);
 DECLARE_uint32(memcache_port);

@@ -26,7 +26,7 @@ DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
 }
 
 DbTable::DbTable(std::pmr::memory_resource* mr)
-    : prime(4, detail::PrimeTablePolicy{}, mr),
+    : prime(2, detail::PrimeTablePolicy{}, mr),
       expire(0, detail::ExpireTablePolicy{}, mr),
       mcflag(0, detail::ExpireTablePolicy{}, mr) {
 }

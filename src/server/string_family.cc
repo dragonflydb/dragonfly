@@ -288,6 +288,10 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
     return builder->SendStored();
   }
 
+  if (result == OpStatus::OUT_OF_MEMORY) {
+    return builder->SendError(kOutOfMemory);
+  }
+
   CHECK_EQ(result, OpStatus::SKIPPED);  // in case of NX option
 
   return builder->SendSetSkipped();
@@ -587,8 +591,12 @@ void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
     return OpMSet(OpArgs{es, t->db_index()}, args);
   };
 
-  transaction->ScheduleSingleHop(std::move(cb));
-  (*cntx)->SendOk();
+  OpStatus status = transaction->ScheduleSingleHop(std::move(cb));
+  if (status == OpStatus::OK) {
+    (*cntx)->SendOk();
+  } else {
+    (*cntx)->SendError(status);
+  }
 }
 
 void StringFamily::MSetNx(CmdArgList args, ConnectionContext* cntx) {
@@ -745,9 +753,8 @@ OpStatus StringFamily::OpMSet(const OpArgs& op_args, ArgSlice args) {
   for (size_t i = 0; i < args.size(); i += 2) {
     DVLOG(1) << "MSet " << args[i] << ":" << args[i + 1];
     auto res = sg.Set(params, args[i], args[i + 1]);
-    if (!res) {
-      LOG(ERROR) << "Unexpected error " << res.status();
-      return OpStatus::OK;  // Multi-key operations must return OK.
+    if (!res) {  // OOM for example.
+      return res.status();
     }
   }
 
@@ -768,8 +775,11 @@ OpResult<int64_t> StringFamily::OpIncrBy(const OpArgs& op_args, std::string_view
     CompactObj cobj;
     cobj.SetInt(incr);
 
-    db_slice.AddNew(op_args.db_ind, key, std::move(cobj), 0);
-
+    try {
+      db_slice.AddNew(op_args.db_ind, key, std::move(cobj), 0);
+    } catch (bad_alloc&) {
+      return OpStatus::OUT_OF_MEMORY;
+    }
     return incr;
   }
 

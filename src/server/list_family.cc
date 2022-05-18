@@ -299,8 +299,16 @@ OpResult<string> OpRPopLPushSingleShard(const OpArgs& op_args, string_view src, 
   }
 
   quicklist* dest_ql = nullptr;
-  auto [dest_it, created] = db_slice.AddOrFind(op_args.db_ind, dest);
-  if (created) {
+  pair<PrimeIterator, bool> res;
+  try {
+    res = db_slice.AddOrFind(op_args.db_ind, dest);
+  } catch (bad_alloc&) {
+    return OpStatus::OUT_OF_MEMORY;
+  }
+
+  PrimeIterator& dest_it = res.first;
+
+  if (res.second) {
     robj* obj = createQuicklistObject();
     dest_ql = (quicklist*)obj->ptr;
     quicklistSetOptions(dest_ql, FLAGS_list_max_listpack_size, FLAGS_list_compress_depth);
@@ -366,8 +374,13 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
       return it_res.status();
     it = *it_res;
   } else {
-    tie(it, new_key) = es->db_slice().AddOrFind(op_args.db_ind, key);
+    try {
+      tie(it, new_key) = es->db_slice().AddOrFind(op_args.db_ind, key);
+    } catch (bad_alloc&) {
+      return OpStatus::OUT_OF_MEMORY;
+    }
   }
+
   quicklist* ql = nullptr;
 
   if (new_key) {
@@ -599,11 +612,11 @@ void ListFamily::LInsert(CmdArgList args, ConnectionContext* cntx) {
   };
 
   OpResult<int> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  if (result.status() == OpStatus::WRONG_TYPE) {
-    return (*cntx)->SendError(kWrongTypeErr);
+  if (result) {
+    return (*cntx)->SendLong(result.value());
   }
 
-  (*cntx)->SendLong(result.value());
+  (*cntx)->SendError(result.status());
 }
 
 void ListFamily::LTrim(CmdArgList args, ConnectionContext* cntx) {
@@ -751,11 +764,11 @@ void ListFamily::PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args,
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  if (result.status() == OpStatus::WRONG_TYPE) {
-    return (*cntx)->SendError(kWrongTypeErr);
+  if (result) {
+    return (*cntx)->SendLong(result.value());
   }
 
-  return (*cntx)->SendLong(result.value());
+  return (*cntx)->SendError(result.status());
 }
 
 void ListFamily::PopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cntx) {

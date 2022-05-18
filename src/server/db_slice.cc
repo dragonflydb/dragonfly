@@ -150,6 +150,7 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
 
 #undef ADD
 
+
 DbSlice::DbSlice(uint32_t index, bool caching_mode, EngineShard* owner)
     : shard_id_(index), caching_mode_(caching_mode), owner_(owner) {
   db_arr_.emplace_back();
@@ -263,7 +264,8 @@ OpResult<pair<PrimeIterator, unsigned>> DbSlice::FindFirst(DbIndex db_index, Arg
   return OpStatus::KEY_NOTFOUND;
 }
 
-auto DbSlice::AddOrFind(DbIndex db_index, string_view key) -> pair<PrimeIterator, bool> {
+auto DbSlice::AddOrFind(DbIndex db_index, string_view key) noexcept(false)
+    -> pair<PrimeIterator, bool> {
   DCHECK(IsDbValid(db_index));
 
   auto& db = db_arr_[db_index];
@@ -288,8 +290,16 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) -> pair<PrimeIterator
   // Fast-path if change_cb_ is empty so we Find or Add using
   // the insert operation: twice more efficient.
   CompactObj co_key{key};
+  PrimeIterator it;
+  bool inserted;
 
-  auto [it, inserted] = db->prime.Insert(std::move(co_key), PrimeValue{}, evp);
+  // I try/catch just for sake of having a convenient place to set a breakpoint.
+  try {
+    tie(it, inserted) = db->prime.Insert(std::move(co_key), PrimeValue{}, evp);
+  } catch (bad_alloc& e) {
+    throw e;
+  }
+
   if (inserted) {  // new entry
     db->stats.inline_keys += it->first.IsInline();
     db->stats.obj_memory_usage += it->first.MallocUsed();
@@ -440,20 +450,22 @@ uint32_t DbSlice::GetMCFlag(DbIndex db_ind, const PrimeKey& key) const {
   return it.is_done() ? 0 : it->second;
 }
 
+
 PrimeIterator DbSlice::AddNew(DbIndex db_ind, string_view key, PrimeValue obj,
-                              uint64_t expire_at_ms) {
-  auto [res, added] = AddOrFind(db_ind, key, std::move(obj), expire_at_ms);
+                              uint64_t expire_at_ms) noexcept(false) {
+  auto [it, added] = AddOrFind(db_ind, key, std::move(obj), expire_at_ms);
   CHECK(added);
 
-  return res;
+  return it;
 }
 
+
 pair<PrimeIterator, bool> DbSlice::AddOrFind(DbIndex db_ind, string_view key, PrimeValue obj,
-                                             uint64_t expire_at_ms) {
+                                             uint64_t expire_at_ms) noexcept(false) {
   DCHECK_LT(db_ind, db_arr_.size());
   DCHECK(!obj.IsRef());
 
-  auto res = AddOrFind(db_ind, key);
+  pair<PrimeIterator, bool> res = AddOrFind(db_ind, key);
   if (!res.second)  // have not inserted.
     return res;
 
@@ -475,6 +487,7 @@ pair<PrimeIterator, bool> DbSlice::AddOrFind(DbIndex db_ind, string_view key, Pr
 
   return res;
 }
+
 
 size_t DbSlice::DbSize(DbIndex db_ind) const {
   DCHECK_LT(db_ind, db_array_size());

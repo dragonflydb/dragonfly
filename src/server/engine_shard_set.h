@@ -121,21 +121,6 @@ class EngineShard {
   // for everyone to use for string transformations during atomic cpu sequences.
   sds tmp_str1;
 
-#if 0
-  size_t TEST_WatchedDbsLen() const {
-    return watched_dbs_.size();
-  }
-
-  size_t TEST_AwakenIndicesLen() const {
-    return awakened_indices_.size();
-  }
-
-  size_t TEST_AwakenTransLen() const {
-    return awakened_transactions_.size();
-  }
-
-  bool HasResultConverged(TxId notifyid) const;
-#endif
 
   // Moving average counters.
   enum MovingCnt {
@@ -147,6 +132,8 @@ class EngineShard {
   uint32_t GetMovingSum6(MovingCnt type) const {
     return counter_[unsigned(type)].SumTail();
   }
+
+  void TEST_EnableHeartbeat();
 
  private:
   EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap);
@@ -234,6 +221,9 @@ class EngineShardSet {
   template <typename U, typename P> void RunBriefInParallel(U&& func, P&& pred) const;
 
   template <typename U> void RunBlockingInParallel(U&& func);
+
+  // Used in tests
+  void TEST_EnableHeartBeat();
 
  private:
   void InitThreadLocal(util::ProactorBase* pb, bool update_db_time);

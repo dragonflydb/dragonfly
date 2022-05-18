@@ -27,6 +27,6 @@ extern const char kExpiryOutOfRange[];
 extern const char kSyntaxErrType[];
 extern const char kScriptErrType[];
 extern const char kIndexOutOfRange[];
-
+extern const char kOutOfMemory[];
 
 }  // namespace dfly

@@ -681,7 +681,7 @@ class DashCursor {
  */
 
 template <unsigned NUM_SLOTS> void SlotBitmap<NUM_SLOTS>::SetSlot(unsigned index, bool probe) {
-  if (SINGLE) {
+  if constexpr (SINGLE) {
     assert(((val_[0].d >> (index + 18)) & 1) == 0);
     val_[0].d |= (1 << (index + 18));
     val_[0].d |= (unsigned(probe) << (index + 4));
@@ -698,7 +698,7 @@ template <unsigned NUM_SLOTS> void SlotBitmap<NUM_SLOTS>::SetSlot(unsigned index
 
 template <unsigned NUM_SLOTS> void SlotBitmap<NUM_SLOTS>::ClearSlot(unsigned index) {
   assert(Size() > 0);
-  if (SINGLE) {
+  if constexpr (SINGLE) {
     uint32_t new_bitmap = val_[0].d & (~(1u << (index + 18))) & (~(1u << (index + 4)));
     new_bitmap -= 1;
     val_[0].d = new_bitmap;
@@ -712,7 +712,7 @@ template <unsigned NUM_SLOTS> void SlotBitmap<NUM_SLOTS>::ClearSlot(unsigned ind
 template <unsigned NUM_SLOTS> bool SlotBitmap<NUM_SLOTS>::ShiftLeft() {
   constexpr uint32_t kBusyLastSlot = (kAllocMask >> 1) + 1;
   bool res;
-  if (SINGLE) {
+  if constexpr (SINGLE) {
     constexpr uint32_t kShlMask = kAllocMask - 1;  // reset lsb
     res = (val_[0].d & (kBusyLastSlot << 18)) != 0;
     uint32_t l = (val_[0].d << 1) & (kShlMask << 4);
@@ -745,7 +745,7 @@ template <unsigned NUM_SLOTS> void SlotBitmap<NUM_SLOTS>::Swap(unsigned slot_a, 
   if (slot_a > slot_b)
     std::swap(slot_a, slot_b);
 
-  if (SINGLE) {
+  if constexpr (SINGLE) {
     uint32_t a = (val_[0].d << (slot_b - slot_a)) ^ val_[0].d;
     uint32_t bm = (1 << (slot_b + 4)) | (1 << (slot_b + 18));
     a &= bm;

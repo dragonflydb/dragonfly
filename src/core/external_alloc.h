@@ -33,7 +33,7 @@ constexpr inline unsigned long long operator""_KB(unsigned long long x) {
  */
 
 namespace detail {
-class Page;
+struct Page;
 
 constexpr unsigned kNumFreePages = 29;
 

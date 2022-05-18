@@ -789,7 +789,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   // TODO: to determine whether the script is RO by scanning all "redis.p?call" calls
   // and checking whether all invocations consist of RO commands.
   // we can do it once during script insertion into script mgr.
-  cntx->conn_state.script_info.emplace();
+  cntx->conn_state.script_info.emplace(ConnectionState::Script{});
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
     cntx->conn_state.script_info->keys.insert(ArgS(eval_args.keys, i));
   }

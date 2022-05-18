@@ -338,7 +338,11 @@ bool Transaction::RunInShard(EngineShard* shard) {
       cb_ = nullptr;  // We can do it because only a single thread runs the callback.
       local_result_ = status;
     } else {
-      CHECK_EQ(OpStatus::OK, status);
+      if (status == OpStatus::OUT_OF_MEMORY) {
+        local_result_ = status;
+      } else {
+        CHECK_EQ(OpStatus::OK, status);
+      }
     }
   } catch (std::bad_alloc&) {
     // TODO: to log at most once per sec.

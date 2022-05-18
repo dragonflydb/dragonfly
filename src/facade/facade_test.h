@@ -70,6 +70,10 @@ inline bool operator==(const RespExpr& left, std::string_view s) {
   return left.type == RespExpr::STRING && ToSV(left.GetBuf()) == s;
 }
 
+inline bool operator!=(const RespExpr& left, std::string_view s) {
+  return !(left == s);
+}
+
 void PrintTo(const RespExpr::Vec& vec, std::ostream* os);
 
 }  // namespace facade

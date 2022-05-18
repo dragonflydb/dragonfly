@@ -123,13 +123,13 @@ class DbSlice {
 
   // Return .second=true if insertion ocurred, false if we return the existing key.
   // throws: bad_alloc is insertion could not happen due to out of memory.
-  std::pair<PrimeIterator, bool> AddOrFind(DbIndex db_ind, std::string_view key);
+  std::pair<PrimeIterator, bool> AddOrFind(DbIndex db_ind, std::string_view key) noexcept(false);
 
   // Returns second=true if insertion took place, false otherwise.
   // expire_at_ms equal to 0 - means no expiry.
   // throws: bad_alloc is insertion could not happen due to out of memory.
   std::pair<PrimeIterator, bool> AddOrFind(DbIndex db_ind, std::string_view key, PrimeValue obj,
-                                           uint64_t expire_at_ms);
+                                           uint64_t expire_at_ms) noexcept(false);
 
   // Either adds or removes (if at == 0) expiry. Returns true if a change was made.
   // Does not change expiry if at != 0 and expiry already exists.
@@ -141,7 +141,8 @@ class DbSlice {
   // Adds a new entry. Requires: key does not exist in this slice.
   // Returns the iterator to the newly added entry.
   // throws: bad_alloc is insertion could not happen due to out of memory.
-  PrimeIterator AddNew(DbIndex db_ind, std::string_view key, PrimeValue obj, uint64_t expire_at_ms);
+  PrimeIterator AddNew(DbIndex db_ind, std::string_view key, PrimeValue obj,
+                       uint64_t expire_at_ms) noexcept(false);
 
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);

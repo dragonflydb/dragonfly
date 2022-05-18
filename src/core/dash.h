@@ -122,7 +122,8 @@ class DashTable : public detail::DashTableBase {
 
   // false for duplicate, true if inserted.
   template <typename U, typename V> std::pair<iterator, bool> Insert(U&& key, V&& value) {
-    return InsertInternal(std::forward<U>(key), std::forward<V>(value), DefaultEvictionPolicy{});
+    DefaultEvictionPolicy policy;
+    return InsertInternal(std::forward<U>(key), std::forward<V>(value), policy);
   }
 
   template <typename U, typename V, typename EvictionPolicy>
@@ -244,7 +245,7 @@ class DashTable : public detail::DashTableBase {
 
  private:
   template <typename U, typename V, typename EvictionPolicy>
-  std::pair<iterator, bool> InsertInternal(U&& key, V&& value, EvictionPolicy&& policy);
+  std::pair<iterator, bool> InsertInternal(U&& key, V&& value, EvictionPolicy& policy);
 
   void IncreaseDepth(unsigned new_depth);
   void Split(uint32_t seg_id);
@@ -566,7 +567,7 @@ template <typename _Key, typename _Value, typename Policy>
 bool DashTable<_Key, _Value, Policy>::ShiftRight(bucket_iterator it) {
   auto* seg = segment_[it.seg_id_];
 
-  typename Segment_t::Hash_t hash_val;
+  typename Segment_t::Hash_t hash_val = 0;
   auto& bucket = seg->GetBucket(it.bucket_id_);
 
   if (bucket.GetBusy() & (1 << (kBucketWidth - 1))) {
@@ -675,7 +676,7 @@ void DashTable<_Key, _Value, Policy>::Reserve(size_t size) {
 
 template <typename _Key, typename _Value, typename Policy>
 template <typename U, typename V, typename EvictionPolicy>
-auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, EvictionPolicy&& ev)
+auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, EvictionPolicy& ev)
     -> std::pair<iterator, bool> {
   uint64_t key_hash = DoHash(key);
   uint32_t seg_id = SegmentId(key_hash);
@@ -700,7 +701,7 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
 
     // At this point we must split the segment.
     // try garbage collect or evict.
-    if constexpr (ev.can_evict || ev.can_gc) {
+    if constexpr (EvictionPolicy::can_evict || EvictionPolicy::can_gc) {
       // Try gc.
       uint8_t bid[2];
       SegmentType::FillProbeArray(key_hash, bid);
@@ -716,7 +717,7 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       // The difference between gc and eviction is that gc can be applied even if
       // the table can grow since we throw away logically deleted items.
       // For eviction to be applied we should reach the growth limit.
-      if constexpr (ev.can_gc) {
+      if constexpr (EvictionPolicy::can_gc) {
         unsigned res = ev.GarbageCollect(buckets, this);
         garbage_collected_ += res;
         if (res)
@@ -731,7 +732,7 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       }
 
       // We evict only if our policy says we can not grow
-      if constexpr (ev.can_evict) {
+      if constexpr (EvictionPolicy::can_evict) {
         bool can_grow = ev.CanGrow(*this);
         if (!can_grow) {
           unsigned res = ev.Evict(buckets, this);

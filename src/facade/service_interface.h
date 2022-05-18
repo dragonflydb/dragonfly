@@ -13,7 +13,7 @@ namespace facade {
 
 class ConnectionContext;
 class Connection;
-class ConnectionStats;
+struct ConnectionStats;
 
 class ServiceInterface {
  public:
