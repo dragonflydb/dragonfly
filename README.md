@@ -48,6 +48,8 @@ framework is built upon concepts
 from [VLL: a lock manager redesign for main memory databasesystems](http://www.cs.umd.edu/~abadi/papers/vldbj-vll.pdf).
 
 Our DashTable design is based on paper [Dash: Scalable Hashing on Persistent Memory](https://arxiv.org/abs/2003.07302).
+Our caching scheme is conceptually based on [2Q algorithm from 1994](http://www.vldb.org/conf/1994/P439.PDF) but we leveraged
+useful properties from DashTable and come-up with what we think is a novel approach to efficient caching with high hit-ratio.
 
 <em>
 Before starting Dragonfly, the authors of this project has been using Redis in production for several
