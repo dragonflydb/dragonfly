@@ -1,27 +1,94 @@
+<p align="center">
+  <a href="https://dragonflydb.io">
+    <img  src="/.github/images/logo-full.svg"
+      width="284" border="0" alt="Dragonfly">
+  </a>
+</p>
+
+
 # Dragonfly
 
 [![ci-tests](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml)
 
-A novel memory store that supports Redis and Memcached commands.
-For more detailed status of what's implemented - see below.
+A novel, Redis and Memcached compatible memory store.
+For more detailed picture of what's implemented - see [Roadmap](#roadmap-and-status).
 
-Features include:
-1. High throughput reaching millions of QPS on a single node.
-2. TLS support.
-3. Pipelining mode.
-4. A novel cache design, which does not require specifying eviction policies.
-5. Memory efficiency that can save 20-40% for regular workloads and even more for cache like
-   workloads
+## Background
 
-## Running
-dragonfly requires Linux OS version 5.11 or later.
+Dragonfly started as an experiment to check how in-memory store could look like if it was
+designed in 2022. We set as a goal to design a reliable, cost-efficent memory store that uses
+cloud economy to its advantage.
+
+Our initial focus was on how to achieve full parallelism on multi-core cloud instances but still
+preserve atomicity guarantees for complex multi-key Redis commands or lua scripts. We wanted
+to preserve the original philosophy of Redis and preserve its low latency characteristics,
+especially its tail latency. Therefore, unlike with other attempts to make Redis multi-threaded,
+we wanted to avoid using spinlocks or mutexes for threads coordination.
+We succeed to solved this problem. As a result, a single Dragonfly instance can reach
+as high as 15M QPS 🚀 and all that with sub-millisecond latency.
+
+Our second important contribution is that we built a completely different dictionary
+data-structure for our memory store (called DashTable) that has much less memory overhead than of
+Redis-dictionary or memcached. By leveraging DashTable's unique design we added other enhanments:
+  * Efficient record expiry for TTL records 🕛.
+  * Novel cache eviction algorithm. The latter, by the way, has academic novelty - it achieves
+     higher hit rate for the same memory reservation than other caching strategies like LRU and LFU.
+  * A novel fork-less snapshotting algorithm.
+
+TODO: to explain about each one of these.
+
+After we achieved a breakthrough in those two areas, we went on to implement Redis and
+Memcached functionality, so we could be sure, we can achieve feature parity with most
+popular systems that are used today.
+
+Currently we support ~130 Redis commands and 13 memcached commands.
+
+Our work is based on academic research from the last decade. Specifically, our transactional
+framework is built upon concepts
+from [VLL: a lock manager redesign for main memory databasesystems](http://www.cs.umd.edu/~abadi/papers/vldbj-vll.pdf).
+
+Our DashTable design is based on paper [Dash: Scalable Hashing on Persistent Memory](https://arxiv.org/abs/2003.07302).
+
+<em>
+Before starting Dragonfly, the authors of this project has been using Redis in production for several
+years. They learned along the way of many of Redis strengths and weaknessses.
+Afterwards, one of them was lucky to join a team that provides managed services
+for Redis and Memcached. There he learned that many pains he observed as a user are
+shared by other Redis users as well.
+</em>
+
+## Why Dragonfly
+
+1. Unprecedented performance. We reach 15M GET or 10M SET qps on a single machine in pipeline mode
+   or 3.3M qps without pipeline mode. Yes, x20 higher throughput with sub-millisecond latency
+   using multi-threaded architecture.
+2. Memory efficiency that will save you dozens percents of hardware costs. For some cases we observed
+   x3 costs reduction just because Dragonfly allowed our users to switch from cluster-mode with dozens
+   machines to a big instance with memory-cpu ratio that fit their needs.
+3. Reliability and simplicity. Dragonfly has very smooth and consistent behavior,without memory
+   spikes or connection disconnects during heavy operations like flushdb, save etc.
+4. Robust, memory efficient caching with high hit-rate.
+5. Compatibility with Redis API and protocol. Similarly to Redis, all operations are performed
+   atomically, yet we also provide complete responsiveness and asynchronisity. Yes, you can
+   connect to Dragonfly and run commands while it runs lua scripts or cpu consuming operations.
+6. Support for hundreds of thousands of connections.
+7. Novel persistence algorithm provides two orders of magnitude faster snapshotting.
+   In addition, due to its memory efficiency it can save up-to 50% of peak memory usage
+   compared to Redis.
+8. A built-in http console with prometheus metrics.
+
+
+## Running the server
+
+Dragonfly runs on linux. It uses relatively new linux specific [io-uring API](https://github.com/axboe/liburing)
+for I/O, hence it requires Linux version 5.11 or later.
 Ubuntu 20.04.4 or 22.04 fit these requirements.
 
-If built locally just run:
+If built locally, just run:
 
 ```bash
 
-./dragonfly --logtostderr
+./dragonfly --alsologtostderr
 
 ```
 
@@ -34,68 +101,70 @@ docker tag ghcr.io/dragonflydb/dragonfly:latest dragonfly
 docker run --network=host --rm dragonfly
 ```
 
-Some systems may require adding `--ulimit memlock=-1` to `docker run` options.
+Some hosts may require adding `--ulimit memlock=-1` to `docker run` options.
 
-We support redis command arguments where applicable.
+We support redis run-time arguments where applicable.
 For example, you can run: `docker run --network=host --rm dragonfly --requirepass=foo --bind localhost`.
 
-dragonfly currently supports the following commandline options:
+dragonfly currently supports the following Redis arguments:
  * `port`
  * `bind`
  * `requirepass`
  * `maxmemory`
- * `memcache_port`  - to enable memcached compatible API on this port. Disabled by default.
- * `dir` - by default, dragonfly docker uses `/data` folder for snapshotting. You can use `-v` docker option to map it to your host folder.
+ * `dir` - by default, dragonfly docker uses `/data` folder for snapshotting.
+    You can use `-v` docker option to map it to your host folder.
  * `dbfilename`
- * `dbnum` - maximum number of supported databases for `select`.
+
+In addition, it has Dragonfly specific arguments options:
+ * `memcache_port`  - to enable memcached compatible API on this port. Disabled by default.
  * `keys_output_limit` - maximum number of returned keys in `keys` command. Default is 8192.
    We truncate the output to avoid blowup in memory when fetching too many keys.
+ * `dbnum` - maximum number of supported databases for `select`.
+ * `cache_mode` - see [Cache](#novel-cache-design) section below.
+
 
 for more options like logs management or tls support, run `dragonfly --help`.
 
 
 ## Building from source
-I've tested the build on Ubuntu 20.04+.
-Requires: CMake, Ninja, boost, libunwind8-dev
+
+Dragonfly is usually built on Ubuntu 20.04 or later.
 
 ```bash
-# to install dependencies
-sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev
-
 git clone --recursive https://github.com/dragonflydb/dragonfly && cd dragonfly
 
-# another way to install dependencies
-./helio/install-dependencies.sh
+# to install dependencies
+sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
+     autoconf-archive libtool
 
 # Configure the build
 ./helio/blaze.sh -release
 
 cd build-opt && ninja dragonfly  # build
+
 ```
 
-## Roadmap and milestones
+## Benchmarks
+TODO.
 
-We are planning to implement most of the APIs 1.x and 2.8 (except the replication) before we release the project to source availability on github. In addition, we will support efficient expiry (TTL) and cache eviction algorithms.
+## Roadmap and status
 
-The next milestone afterwards will be implementing `redis -> dragonfly` and
+Currently Dragonfly supports ~130 Redis commands and all memcache commands besides `cas`.
+We are almost on part with Redis 2.8 API. Our first milestone will be to stabilize basic
+functionality and reach API parity with Redis 2.8 and Memcached APIs.
+If you see that a command you need is not implemented yet, please open an issue.
+
+The next milestone will be implementing HA with `redis -> dragonfly` and
 `dragonfly<->dragonfly` replication.
 
-For dragonfly-native replication we are planning to design a distributed log format that will support order of magnitude higher speeds when replicating.
+For dragonfly-native replication we are planning to design a distributed log format that will
+support order of magnitude higher speeds when replicating.
 
-Commands that I wish to implement after releasing the initial code:
-  - PUNSUBSCRIBE
-  - PSUBSCRIBE
-  - HYPERLOGLOG
-  - SCRIPT DEBUG
-  - OBJECT
-  - DUMP/RESTORE
-  - CLIENT
+After replication and failover feature we will continue with other Redis commands from API 3,4,5
+except for cluster mode functionality.
 
-Their priority will be determined based on the requests from the community.
-Also, I will omit keyspace notifications. For that I would like to deep dive and learn
-exact the exact needs for this API.
 
-### Milestone - "Source Available"
+### Initial release
 
 API 1.0
 - [X] String family
@@ -295,27 +364,30 @@ Memchache API
 
 Random commands we implemented as decorators along the way:
 
- - [X] ROLE (2.8) decorator for for master without replicas
+ - [X] ROLE (2.8) decorator as master.
  - [X] UNLINK (4.0) decorator for DEL command
  - [X] BGSAVE (decorator for save)
  - [X] FUNCTION FLUSH (does nothing)
 
-## Milestone "Stability"
-APIs 3,4,5 without cluster support, without modules, without memory introspection commands.
-Without geo commands and without support for keyspace notifications, without streams.
-Design config support. ~10-20 commands overall...
-Probably implement cluster-API decorators to allow cluster-configured clients to connect to a single
-instance.
+### Milestone - H/A
+Implement leader/follower replication (PSYNC/REPLICAOF/...).
 
- - [X] HSTRLEN
+### Milestone - "Maturiry"
+APIs 3,4,5 without cluster support, without modules and without memory introspection commands. Also
+without geo commands and without support for keyspace notifications, without streams.
+Probably design config support. Overall - few dozens commands...
+Probably implement cluster-API decorators to allow cluster-configured clients to connect to a
+single instance.
 
-## Design decisions along the way
+### Next milestones will be determined along the way.
+
+## Design decisions
 
 ### Novel cache design
-Redis allows choosing 8 different eviction policies using `maxmemory-policy` flag.
-
-Dragonfly has one unified adaptive caching algorithm that is more memory efficient
-than of Redis. You can enable caching mode by passing `--cache_mode=true` flag. Once this mode is on, Dragonfly will evict items when it reaches maxmemory limit.
+Dragonfly has a single unified adaptive caching algorithm that is very simple and memory efficient.
+You can enable caching mode by passing `--cache_mode=true` flag. Once this mode
+is on, Dragonfly will evict items least likely to be stumbled upon in the future but only when
+it reaches maxmemory limit.
 
 ### Expiration deadlines with relative accuracy
 Expiration ranges are limited to ~4 years. Moreover, expiration deadlines
@@ -334,4 +406,53 @@ Right now it does not have much info but in the future we are planning to add th
 debugging and management info. If you go to `:6379/metrics` url you will see some prometheus
 compatible metrics.
 
-Important! Http console is meant to be accessed within a safe network. If you expose Dragonfly's TCP port externally, it is advised to disable the console with `--http_admin_console=false` or `--nohttp_admin_console`.
+Important! Http console is meant to be accessed within a safe network.
+If you expose Dragonfly's TCP port externally, it is advised to disable the console
+with `--http_admin_console=false` or `--nohttp_admin_console`.
+
+
+## FAQ
+
+1. Did you really rewrote all from scratch?<br>
+   <em>We reused Redis low-level data-structures like quicklist, listpack, zset etc. It's about 13K
+   lines of code. We rewrote everything else including networking stack, server code,
+   rdb serialization and many other components.</em>
+2. Is your license open-source?<br>
+   <em>We released the code under source-available license which is more permissive than
+       AGPL-like licenses. Basically it says, the software is free to use and free to change
+       as long as you do not provide paying support or managed services for this software.
+       We followed the trend of other technological companies
+       like Elastic, Redis, MongoDB, Cochroach labs, Redpanda Data to protect our rights
+       to provide support for the software we built. If you want to learn more about why this
+       trend started, and the fragile balance between open source, innovation and sustainability,
+       I invite you to read [this article](https://techcrunch.com/2018/11/29/the-crusade-against-open-source-abuse/).
+   </em>
+3. It seems that Dragonfly provides vertical scale, but we can achieve similar
+   throughput with X nodes with Redis cluster.<br>
+  <em>Dragonfly utilizes the underlying hardware in an optimal way. Meaning it can run on small
+  8GB instances and on large 768GB machines with 64 cores. This versatility allows to drastically
+  reduce complexity of running small to medium clusters of 1-20 nodes and instead
+  run the same workload on a single Dragonfly node. As a result it may save you hardware costs but even more importantly,
+  it will vastly reduce the complexity (total cost of ownership) of handling the multi-node cluster.
+  Also, Redis cluster-mode imposes some limitations on multi-key and transactinal operations.
+  Dragonfly provides the same semantics as single node Redis. </em>
+4. Are you against horizontal scale? <br>
+  <em> No, we are not against horizontal scale :). We are against the common mis-conception that
+  horizontal scale is a solution for everything. I think this trend started 20-25 years ago
+  within Google that built their internal systems using commonly used hardware. Today, though,
+  our cloud instances are everything but common. Quoting from Scylla blog:
+  "Hardware on which modern workloads must run is remarkably different from the hardware on which
+   current programming paradigms depend, and for which current software infrastructure is designed.”
+
+   We will work on horizontally scalable solution for Dragonfly but it will be after we reach feature
+   parity with Redis 5-6 and after we introduce other disrupting features we plan to release in Dragonfly.
+   </em>
+
+5. I use Redis and I do not need 3M qps. Why should I use Dragonfly? <br>
+   <em>First of all, if you use Redis and you are happy with it - continue using it,
+       it's a great product 🍻 and maybe you have not reached yet the scale where problems start.
+       Having said that, even for low throughput case you may find Dragonfly
+       working better. It may be that you are sufferring from random latency spikes, or maybe
+       your ETL involving Redis takes hours to finish or maybe its memory usage and hardware costs
+       give you a headache. With Dragonfly we tried to solve every design defficiency
+       we expirienced ourselves in the past.</em>
