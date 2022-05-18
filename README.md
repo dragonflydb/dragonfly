@@ -374,11 +374,10 @@ with `--http_admin_console=false` or `--nohttp_admin_console`.
 ## FAQ
 
 1. Did you really rewrote all from scratch?<br>
-   <em>We reused Redis low-level data-structures like quicklist, listpack, zset etc. It's about 13K
-   lines of code. We rewrote everything else including networking stack, server code,
-   rdb serialization and many other components.</em>
-2. Is your license open-source?<br>
-   <em>We released the code under source-available license which is more permissive than
+   <em>There are more than 50K lines of code for networking, server code, memory managment and more written from scrach.
+   Out of which ~13K lines of code are a reuse of Redis low-level data-structures like quicklist, listpack, zset etc.. </em>
+2. What is the license model of Dragonfly? Is it an open source?<br>
+   <em>Dragonfly is released under source-available license which is more permissive than
        AGPL-like licenses. Basically it says, the software is free to use and free to change
        as long as you do not provide paying support or managed services for this software.
        We followed the trend of other technological companies
@@ -387,8 +386,7 @@ with `--http_admin_console=false` or `--nohttp_admin_console`.
        trend started, and the fragile balance between open source, innovation and sustainability,
        we invite you to read [this article](https://techcrunch.com/2018/11/29/the-crusade-against-open-source-abuse/).
    </em>
-3. It seems that Dragonfly provides vertical scale, but we can achieve similar
-   throughput with X nodes in a Redis cluster.<br>
+3. Dragonfly provides vertical scale, but we can achieve similar throughput with X nodes in a Redis cluster.<br>
   <em>Dragonfly utilizes the underlying hardware in an optimal way. Meaning it can run on small
   8GB instances and scale verticly to large 768GB machines with 64 cores. This versatility allows to drastically
   reduce complexity of running cluster workloads to a single node saving hardware resources and costs. More importantly,
