@@ -1,27 +1,51 @@
-# Dragonfly
+<p align="center">
+  <a href="https://dragonflydb.io">
+    <img  src="/.github/images/logo-full.svg"
+      width="284" border="0" alt="Dragonfly">
+  </a>
+</p>
+
 
 [![ci-tests](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml)
 
-A novel memory store that supports Redis and Memcached commands.
-For more detailed status of what's implemented - see below.
+A novel, Redis and Memcached compatible memory store.
 
-Features include:
-1. High throughput reaching millions of QPS on a single node.
-2. TLS support.
-3. Pipelining mode.
-4. A novel cache design, which does not require specifying eviction policies.
-5. Memory efficiency that can save 20-40% for regular workloads and even more for cache like
-   workloads
+## Background
 
-## Running
-dragonfly requires Linux OS version 5.11 or later.
+Dragonfly started as an experiment to see what an in-memory datastore could look like if it was designed in 2022. Based on the lessons learned from our experience as users of memory stores and as engineers who worked in cloud companies, we knew that we need to preserve two key properties for Dragonfly: a) to provide atomicity guarantees for all its operations, and b) to guarantee low, sub-millisecond latency under very high throughput.
+
+Our first challenge was how we fully utilize CPU, memory, and i/o resources on servers that are available today in public clouds. To solve it, we used [shared-nothing architecture](https://en.wikipedia.org/wiki/Shared-nothing_architecture), which allowed us to partition the keyspace of the memory store between threads, s.t., each thread would manage its own slice of dictionary data. We call these slices - shards. The library that powers thread and I/O management for shared-nothing architecture is open-sourced [here](https://github.com/romange/helio).
+
+To provide atomicity guarantees for multi-key operations, we used the advancements from recent academic research. We chose the paper ["VLL: a lock manager redesign for main memory database systems”](http://www.cs.umd.edu/~abadi/papers/vldbj-vll.pdf) to develop the transactional framework for Dragonfly. The choice of shared-nothing architecture and VLL allowed us to compose atomic multi-key operations without using mutexes or spinlocks. This was a major milestone for our PoC and its performance stood out from other commercial and open-source solutions.
+
+Our second major milestone was to engineer more efficient data structures for the new store. To achieve this goal, we based our core hashtable structure on paper ["Dash: Scalable Hashing on Persistent Memory"](https://arxiv.org/abs/2003.07302). The paper itself is centered around persistent memory domain and is not directly related to main-memory stores.
+Nevertheless, its contributions are very much applicable for our problem. It suggested a hashtable design that allowed us to maintain two special properties that are present in the Redis dictionary: a) its incremental hashing ability during datastore growth b) its ability to traverse the dictionary under changes using a stateless Scan operation. Besides these 2 properties,
+Dashtable is much more efficient in CPU and memory. By leveraging DashTable's design, we were able to innovate further with the following features:
+ * Efficient record expiry for TTL records.
+ * A novel cache eviction algorithm that achieves higher hit rates than other caching strategies like LRU and LFU with **zero memory overhead**.
+ * A novel **fork-less** snapshotting algorithm.
+
+After we built the foundation for Dragonfly and [we were happy with its performance](#benchmarks),
+we went on to implement the Redis and Memcached functionality. By now, we have implemented  ~130 Redis commands (equivalent to 2.8 API) and 13 Memcached commands.
+
+And finally, <br>
+<em>Our mission is to build a well-designed, ultra-fast, cost-efficient in-memory datastore for cloud workloads that take advantage of the latest hardware advancements. We intend to address the pain points of current solutions while preserving their product APIs and propositions.
+</em>
+
+P.S. other engineers share a similar sentiment about what makes a good memory store. See, for example, [this](https://twitter.github.io/pelikan/2019/why-pelikan.html) and [this](https://twitter.github.io/pelikan/2021/segcache.html) blog posts from Twitter memcache team. Or [this post](https://medium.com/@john_63123/redis-should-be-multi-threaded-e28319cab744) from authors of keydb.
+
+
+## Running the server
+
+Dragonfly runs on linux. It uses relatively new linux specific [io-uring API](https://github.com/axboe/liburing)
+for I/O, hence it requires Linux version 5.11 or later.
 Ubuntu 20.04.4 or 22.04 fit these requirements.
 
-If built locally just run:
+If built locally, just run:
 
 ```bash
 
-./dragonfly --logtostderr
+./dragonfly --alsologtostderr
 
 ```
 
@@ -34,68 +58,69 @@ docker tag ghcr.io/dragonflydb/dragonfly:latest dragonfly
 docker run --network=host --rm dragonfly
 ```
 
-Some systems may require adding `--ulimit memlock=-1` to `docker run` options.
+Some hosts may require adding `--ulimit memlock=-1` to `docker run` options.
 
-We support redis command arguments where applicable.
+We support redis run-time arguments where applicable.
 For example, you can run: `docker run --network=host --rm dragonfly --requirepass=foo --bind localhost`.
 
-dragonfly currently supports the following commandline options:
+dragonfly currently supports the following Redis arguments:
  * `port`
  * `bind`
  * `requirepass`
  * `maxmemory`
- * `memcache_port`  - to enable memcached compatible API on this port. Disabled by default.
- * `dir` - by default, dragonfly docker uses `/data` folder for snapshotting. You can use `-v` docker option to map it to your host folder.
+ * `dir` - by default, dragonfly docker uses `/data` folder for snapshotting.
+    You can use `-v` docker option to map it to your host folder.
  * `dbfilename`
- * `dbnum` - maximum number of supported databases for `select`.
+
+In addition, it has Dragonfly specific arguments options:
+ * `memcache_port`  - to enable memcached compatible API on this port. Disabled by default.
  * `keys_output_limit` - maximum number of returned keys in `keys` command. Default is 8192.
-   We truncate the output to avoid blowup in memory when fetching too many keys.
+   `keys` is a dangerous command. we truncate its result to avoid blowup in memory when fetching too many keys.
+ * `dbnum` - maximum number of supported databases for `select`.
+ * `cache_mode` - see [Cache](#novel-cache-design) section below.
+
 
 for more options like logs management or tls support, run `dragonfly --help`.
 
 
 ## Building from source
-I've tested the build on Ubuntu 20.04+.
-Requires: CMake, Ninja, boost, libunwind8-dev
+
+Dragonfly is usually built on Ubuntu 20.04 or later.
 
 ```bash
-# to install dependencies
-sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev
-
 git clone --recursive https://github.com/dragonflydb/dragonfly && cd dragonfly
 
-# another way to install dependencies
-./helio/install-dependencies.sh
+# to install dependencies
+sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
+     autoconf-archive libtool
 
 # Configure the build
 ./helio/blaze.sh -release
 
 cd build-opt && ninja dragonfly  # build
+
 ```
 
-## Roadmap and milestones
+## Benchmarks
+TODO.
 
-We are planning to implement most of the APIs 1.x and 2.8 (except the replication) before we release the project to source availability on github. In addition, we will support efficient expiry (TTL) and cache eviction algorithms.
+## Roadmap and status
 
-The next milestone afterwards will be implementing `redis -> dragonfly` and
+Currently Dragonfly supports ~130 Redis commands and all memcache commands besides `cas`.
+We are almost on part with Redis 2.8 API. Our first milestone will be to stabilize basic
+functionality and reach API parity with Redis 2.8 and Memcached APIs.
+If you see that a command you need, is not implemented yet, please open an issue.
+
+The next milestone will be implementing H/A with `redis -> dragonfly` and
 `dragonfly<->dragonfly` replication.
 
-For dragonfly-native replication we are planning to design a distributed log format that will support order of magnitude higher speeds when replicating.
+For dragonfly-native replication we are planning to design a distributed log format that will
+support order of magnitude higher speeds when replicating.
 
-Commands that I wish to implement after releasing the initial code:
-  - PUNSUBSCRIBE
-  - PSUBSCRIBE
-  - HYPERLOGLOG
-  - SCRIPT DEBUG
-  - OBJECT
-  - DUMP/RESTORE
-  - CLIENT
+After replication and failover feature we will continue with other Redis commands from API 3,4,5
+except for cluster mode functionality.
 
-Their priority will be determined based on the requests from the community.
-Also, I will omit keyspace notifications. For that I would like to deep dive and learn
-exact the exact needs for this API.
-
-### Milestone - "Source Available"
+### Initial release
 
 API 1.0
 - [X] String family
@@ -295,27 +320,30 @@ Memchache API
 
 Random commands we implemented as decorators along the way:
 
- - [X] ROLE (2.8) decorator for for master without replicas
+ - [X] ROLE (2.8) decorator as master.
  - [X] UNLINK (4.0) decorator for DEL command
  - [X] BGSAVE (decorator for save)
  - [X] FUNCTION FLUSH (does nothing)
 
-## Milestone "Stability"
-APIs 3,4,5 without cluster support, without modules, without memory introspection commands.
-Without geo commands and without support for keyspace notifications, without streams.
-Design config support. ~10-20 commands overall...
-Probably implement cluster-API decorators to allow cluster-configured clients to connect to a single
-instance.
+### Milestone - H/A
+Implement leader/follower replication (PSYNC/REPLICAOF/...).
 
- - [X] HSTRLEN
+### Milestone - "Maturity"
+APIs 3,4,5 without cluster support, without modules and without memory introspection commands. Also
+without geo commands and without support for keyspace notifications, without streams.
+Probably design config support. Overall - few dozens commands...
+Probably implement cluster-API decorators to allow cluster-configured clients to connect to a
+single instance.
 
-## Design decisions along the way
+### Next milestones will be determined along the way.
+
+## Design decisions
 
 ### Novel cache design
-Redis allows choosing 8 different eviction policies using `maxmemory-policy` flag.
-
-Dragonfly has one unified adaptive caching algorithm that is more memory efficient
-than of Redis. You can enable caching mode by passing `--cache_mode=true` flag. Once this mode is on, Dragonfly will evict items when it reaches maxmemory limit.
+Dragonfly has a single unified adaptive caching algorithm that is very simple and memory efficient.
+You can enable caching mode by passing `--cache_mode=true` flag. Once this mode
+is on, Dragonfly will evict items least likely to be stumbled upon in the future but only when
+it is near maxmemory limit.
 
 ### Expiration deadlines with relative accuracy
 Expiration ranges are limited to ~4 years. Moreover, expiration deadlines
@@ -327,11 +355,13 @@ If it breaks your use-cases - talk to me or open an issue and explain your case.
 For more detailed differences between this and Redis implementations [see here](doc/differences.md).
 
 ### Native Http console and Prometheus compatible metrics
-By default Dragonfly also allows http access on its main TCP port (6379). That's right, you
-can use for Redis protocol and for HTTP protocol - type of protocol is determined automatically
-during the connection initiation. Go ahead and try it with your browser.
+By default Dragonfly allows http access via its main TCP port (6379). That's right, you
+can connect to Dragonfly via Redis protocol and via HTTP protocol - the server recognizes
+the protocol  automatically during the connection initiation. Go ahead and try it with your browser.
 Right now it does not have much info but in the future we are planning to add there useful
 debugging and management info. If you go to `:6379/metrics` url you will see some prometheus
 compatible metrics.
 
-Important! Http console is meant to be accessed within a safe network. If you expose Dragonfly's TCP port externally, it is advised to disable the console with `--http_admin_console=false` or `--nohttp_admin_console`.
+Important! Http console is meant to be accessed within a safe network.
+If you expose Dragonfly's TCP port externally, it is advised to disable the console
+with `--http_admin_console=false` or `--nohttp_admin_console`.
