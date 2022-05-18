@@ -385,34 +385,33 @@ with `--http_admin_console=false` or `--nohttp_admin_console`.
        like Elastic, Redis, MongoDB, Cochroach labs, Redpanda Data to protect our rights
        to provide support for the software we built. If you want to learn more about why this
        trend started, and the fragile balance between open source, innovation and sustainability,
-       I invite you to read [this article](https://techcrunch.com/2018/11/29/the-crusade-against-open-source-abuse/).
+       we invite you to read [this article](https://techcrunch.com/2018/11/29/the-crusade-against-open-source-abuse/).
    </em>
 3. It seems that Dragonfly provides vertical scale, but we can achieve similar
-   throughput with X nodes with Redis cluster.<br>
+   throughput with X nodes in a Redis cluster.<br>
   <em>Dragonfly utilizes the underlying hardware in an optimal way. Meaning it can run on small
-  8GB instances and on large 768GB machines with 64 cores. This versatility allows to drastically
-  reduce complexity of running small to medium clusters of 1-20 nodes and instead
-  run the same workload on a single Dragonfly node. As a result it may save you hardware costs but even more importantly,
-  it will vastly reduce the complexity (total cost of ownership) of handling the multi-node cluster.
-  Also, Redis cluster-mode imposes some limitations on multi-key and transactinal operations.
+  8GB instances and scale verticly to large 768GB machines with 64 cores. This versatility allows to drastically
+  reduce complexity of running cluster workloads to a single node saving hardware resources and costs. More importantly,
+  it reduces the complexity (total cost of ownership) of handling the multi-node cluster.
+  In addition, Redis cluster-mode imposes some limitations on multi-key and transactinal operations.
   Dragonfly provides the same semantics as single node Redis. </em>
 4. Are you against horizontal scale? <br>
-  <em> No, we are not against horizontal scale :). We are against the common mis-conception that
-  horizontal scale is a solution for everything. I think this trend started 20-25 years ago
-  within Google that built their internal systems using commonly used hardware. Today, though,
-  our cloud instances are everything but common. Quoting from Scylla blog:
-  "Hardware on which modern workloads must run is remarkably different from the hardware on which
-   current programming paradigms depend, and for which current software infrastructure is designed.”
+  <em> No, we are not against horizontal scale :). Horizontal scale as the first solution for in-memory datastores is a necessity of the limitations of old architectures. For example, in many cases it makes little sense to create read replicas (X2-5 in memory and costs) instead of adding CPU resources to the original instance (Saving memory and complexity). 
 
-   We will work on horizontally scalable solution for Dragonfly but it will be after we reach feature
-   parity with Redis 5-6 and after we introduce other disrupting features we plan to release in Dragonfly.
+  Horizontal scale as a solution for everything is no longer valid. This trend started 20-25 years ago
+  within Google that built their internal systems using commonly used hardware. Today, though,
+  cloud instances are everything but common. Quoting from Scylla blog:
+  "Hardware on which modern workloads must run is remarkably different from the hardware on which 
+  current programming paradigms depend, and for which current software infrastructure is designed.” 
+
+  In many of the cases Dragonfly architecture can save us from the complexities, resource waste and associated costs of horizontal scaling. However, instances have their physical limitations, in those cases horizontal scaling is a must and should be on our future roadmap.
    </em>
 
 5. I use Redis and I do not need 3M qps. Why should I use Dragonfly? <br>
    <em>First of all, if you use Redis and you are happy with it - continue using it,
-       it's a great product 🍻 and maybe you have not reached yet the scale where problems start.
+       it's a great product 🍻 and maybe you have not reached the scale where problems start.
        Having said that, even for low throughput case you may find Dragonfly
-       working better. It may be that you are sufferring from random latency spikes, or maybe
+       beneficial. It may be that you are sufferring from random latency spikes, or maybe
        your ETL involving Redis takes hours to finish or maybe its memory usage and hardware costs
        give you a headache. With Dragonfly we tried to solve every design defficiency
        we expirienced ourselves in the past.</em>
