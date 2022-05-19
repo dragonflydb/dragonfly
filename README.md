@@ -14,11 +14,11 @@ Dragonfly is a multi-core blazing fast memory store engine fully compatible with
 
 ## Background
 
-Dragonfly started as an experiment to check how in-memory store could look like if it was designed in 2022 based on state of the art academic research .  Our mission is to build a well-designed, ultra-fast, and cost-effective in-memory engine for cloud workloads that takes advantage of the latest hardware advancements. We want to address the pain-points of current solutions while preserving their product APIs and propositions.
+Dragonfly started as an experiment to check how memory store could look like if designed with 2022 state of the art academic research.  Our mission is to build a well-designed, ultra-fast, and cost-effective in-memory engine for cloud workloads that takes advantage of the latest hardware advancements. We want to address the pain-points of current solutions while preserving their product APIs and propositions.
  
-Our first focus was to achieve **full parallelism** on multi-core cloud instances while preserving low tail latency and atomicity guarantees for complex multi-key operations and transactional commands. For that we use shared nothing architecture and base our transactional framework on paper [VLL: a lock manager redesign for main memory databasesystems](http://www.cs.umd.edu/~abadi/papers/vldbj-vll.pdf). This allows to achieve strongly consistent guarantees while avoiding spinlocks or mutexes for thread coordination. As a result, a single Dragonfly instance can reach 15M qps🚀 with sub-millisecond latency. 
+Our first focus was to achieve **full parallelism**. Redis atomicity guarantees for multi-key operations relays on the fact that its single threaded at core. In our solution we also wanted to avoiding spinlocks or mutexes for thread coordination so prevent contention in high loads. We decided to use [Shared-nothing architecture](https://en.wikipedia.org/wiki/Shared-nothing_architecture) and base our transactional framework on [VLL: a lock manager redesign for main memory databasesystems](http://www.cs.umd.edu/~abadi/papers/vldbj-vll.pdf) paper. As a result, a single Dragonfly instance can reach 15M qps🚀 with sub-millisecond latency. 
 
-Our second target was to optimize memory management. We based the core dictionary structure on the [Dash: Scalable Hashing on Persistent Memory](https://arxiv.org/abs/2003.07302) paper. Dragonfly's caching is conceptually based on [2Q algorithm from 1994](http://www.vldb.org/conf/1994/P439.PDF). By leveraging Dashtable's unique design we were able to minimize the data structure memory overhead while implementing:
+Our second goal was to optimize memory management. We based the core dictionary structure on the [Dash: Scalable Hashing on Persistent Memory](https://arxiv.org/abs/2003.07302) paper. Dragonfly's caching is conceptually based on [2Q algorithm from 1994](http://www.vldb.org/conf/1994/P439.PDF). By leveraging Dashtable's unique design we were able to minimize the data structure memory overhead while implementing:
  * Efficient record expiry for TTL records 🕛.
  * An academic novelty cache eviction algorithm that achieves higher hit rates than other caching strategies like LRU and LFU without overhead memory consumption.
  * A novel fork-less snapshotting algorithm.
@@ -364,7 +364,7 @@ For more detailed differences between the Dragonfly and Redis implementations [s
 
 ### Native Http console and Prometheus compatible metrics
 By default Dragonfly also allows http access on its main TCP port (6379). The type of the connection is determined automatically during the connection initiation. Go ahead and try it with your browser.
-Right now it has only basic info but more will be added int he future. If you go to `:6379/metrics` url you will see some prometheus compatible metrics.
+Right now it has only basic info but more will be added in the future. If you go to `:6379/metrics` url you will see some prometheus compatible metrics.
 
 Important! Http console is meant to be accessed within a safe network.
 If you expose Dragonfly's TCP port externally, it is advised to disable the http console
@@ -376,6 +376,7 @@ with `--http_admin_console=false` or `--nohttp_admin_console`.
 1. Did you really rewrote all from scratch?<br>
    <em>There are more than 50K lines of code for networking, server code, memory managment and more written from scrach.
    Out of which ~13K lines of code are a reuse of Redis low-level data-structures like quicklist, listpack, zset etc.. </em>
+   
 2. What is the license model of Dragonfly? Is it an open source?<br>
    <em>Dragonfly is released under source-available license which is more permissive than
        AGPL-like licenses. Basically it says, the software is free to use and free to change
@@ -386,6 +387,7 @@ with `--http_admin_console=false` or `--nohttp_admin_console`.
        trend started, and the fragile balance between open source, innovation and sustainability,
        we invite you to read [this article](https://techcrunch.com/2018/11/29/the-crusade-against-open-source-abuse/).
    </em>
+
 3. Dragonfly provides vertical scale, but we can achieve similar throughput with X nodes in a Redis cluster.<br>
   <em>Dragonfly utilizes the underlying hardware in an optimal way. Meaning it can run on small
   8GB instances and scale verticly to large 768GB machines with 64 cores. This versatility allows to drastically
@@ -393,31 +395,15 @@ with `--http_admin_console=false` or `--nohttp_admin_console`.
   it reduces the complexity (total cost of ownership) of handling the multi-node cluster.
   In addition, Redis cluster-mode imposes some limitations on multi-key and transactinal operations.
   Dragonfly provides the same semantics as single node Redis. </em>
-4. Are you against horizontal scale? <br>
-  <em> No, we are not against horizontal scale :). Horizontal scale as the first solution for in-memory datastores is a necessity of the limitations of old architectures. For example, in many cases it makes little sense to create read replicas (X2-5 in memory and costs) instead of adding CPU resources to the original instance (Saving memory and complexity). 
 
-  Horizontal scale as a solution for everything is no longer valid. This trend started 20-25 years ago
-  within Google that built their internal systems using commonly used hardware. Today, though,
-  cloud instances are everything but common. Quoting from Scylla blog:
-  "Hardware on which modern workloads must run is remarkably different from the hardware on which 
-  current programming paradigms depend, and for which current software infrastructure is designed.” 
-
-  In many of the cases Dragonfly architecture can save us from the complexities, resource waste and associated costs of horizontal scaling. However, instances have their physical limitations, in those cases horizontal scaling is a must and should be on our future roadmap.
-   </em>
-
-5. I use Redis and I do not need 3M qps. Why should I use Dragonfly? <br>
+4. I use Redis and I do not need 3M qps. Why should I use Dragonfly? <br>
    <em>First of all, if you use Redis and you are happy with it - continue using it,
        it's a great product 🍻 and maybe you have not reached the scale where problems start.
        Having said that, even for low throughput case you may find Dragonfly
        beneficial. It may be that you are sufferring from random latency spikes, or maybe
        your ETL involving Redis takes hours to finish or maybe its memory usage and hardware costs
        give you a headache. With Dragonfly we tried to solve every design defficiency
-       we expirienced ourselves in the past.</em>
+       we experienced ourselves in the past.</em>
 
-6. I get it, but why not change Redis open source? <br>
+5. I get it, but why not change Redis open source? <br>
    <em>Many of the pain points we addressed like Multi-core support, memory optimization, forkless snapshot, improved eviction algo, unit testing and more... have been the achilles heel and a long standing requests by the community. Some were not addressed for as long as ten years, others were dismissed because they require a complete rewrite of the engine. With Redis open source long legacy codebase it is impossible to innovate at this scale.</em>  
-
-7. Who is behind Dragonfly? <br>
-  <em>We! and hofully you. We decided to make the Dragonfly code avilable so the community can enjoy it and contribute to grow it for the collective benefits of all. There are many ways to contribute. Here are some: Star, test, blog, fork, open issues, address issues, suggest features, contibute to code, implement a command, tweet... </em>
-
-
