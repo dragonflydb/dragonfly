@@ -438,14 +438,20 @@ OpResult<uint32_t> HSetFamily::OpSet(const OpArgs& op_args, string_view key, Cmd
   DCHECK(!values.empty() && 0 == values.size() % 2);
 
   auto& db_slice = op_args.shard->db_slice();
-  const auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
+  pair<PrimeIterator, bool> add_res;
+  try {
+    add_res = db_slice.AddOrFind(op_args.db_ind, key);
+  } catch(bad_alloc&) {
+    return OpStatus::OUT_OF_MEMORY;
+  }
 
   DbTableStats* stats = db_slice.MutableStats(op_args.db_ind);
 
   robj* hset = nullptr;
   uint8_t* lp = nullptr;
+  PrimeIterator& it = add_res.first;
 
-  if (inserted) {
+  if (add_res.second) {  // new key
     hset = createHashObject();
     lp = (uint8_t*)hset->ptr;
 

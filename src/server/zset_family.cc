@@ -92,8 +92,16 @@ OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args
     return db_slice.Find(op_args.db_ind, key, OBJ_ZSET);
   }
 
-  auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
-  if (inserted || zparams.override) {
+  pair<PrimeIterator, bool> add_res;
+
+  try {
+    add_res = db_slice.AddOrFind(op_args.db_ind, key);
+  } catch(bad_alloc&) {
+    return OpStatus::OUT_OF_MEMORY;
+  }
+
+  PrimeIterator& it = add_res.first;
+  if (add_res.second || zparams.override) {
     robj* zobj = nullptr;
 
     if (member_len > kMaxListPackValue) {
@@ -103,7 +111,7 @@ OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args
     }
 
     DVLOG(2) << "Created zset " << zobj->ptr;
-    if (!inserted) {
+    if (!add_res.second) {
       db_slice.PreUpdate(op_args.db_ind, it);
     }
     it->second.ImportRObj(zobj);
@@ -965,8 +973,8 @@ void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
   };
 
   OpResult<AddResult> add_result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  if (add_result.status() == OpStatus::WRONG_TYPE) {
-    return (*cntx)->SendError(kWrongTypeErr);
+  if (base::_in(add_result.status(), {OpStatus::WRONG_TYPE, OpStatus::OUT_OF_MEMORY})) {
+    return (*cntx)->SendError(add_result.status());
   }
 
   // KEY_NOTFOUND may happen in case of XX flag.

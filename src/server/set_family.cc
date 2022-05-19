@@ -314,20 +314,26 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
     return 0;
   }
 
-  const auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
+  pair<PrimeIterator, bool> add_res;
 
-  CompactObj& co = it->second;
+  try {
+    add_res = db_slice.AddOrFind(op_args.db_ind, key);
+  } catch (bad_alloc& e) {
+    return OpStatus::OUT_OF_MEMORY;
+  }
 
-  if (!inserted) {
+  CompactObj& co = add_res.first->second;
+
+  if (!add_res.second) {
     // for non-overwrite case it must be set.
     if (!overwrite && co.ObjType() != OBJ_SET)
       return OpStatus::WRONG_TYPE;
 
     // Update stats and trigger any handle the old value if needed.
-    db_slice.PreUpdate(op_args.db_ind, it);
+    db_slice.PreUpdate(op_args.db_ind, add_res.first);
   }
 
-  if (inserted || overwrite) {
+  if (add_res.second || overwrite) {
     // does not store the values, merely sets the encoding.
     // TODO: why not store the values as well?
     InitSet(vals, &co);
@@ -373,7 +379,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
     }
   }
 
-  db_slice.PostUpdate(op_args.db_ind, it);
+  db_slice.PostUpdate(op_args.db_ind, add_res.first);
 
   return res;
 }
@@ -677,18 +683,10 @@ void SetFamily::SAdd(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    (*cntx)->SendLong(result.value());
-    return;
+    return (*cntx)->SendLong(result.value());
   }
 
-  switch (result.status()) {
-    case OpStatus::WRONG_TYPE:
-      return (*cntx)->SendError(kWrongTypeErr);
-    default:
-      LOG(ERROR) << "unexpected opstatus " << result.status();
-  }
-
-  return (*cntx)->SendNull();
+  (*cntx)->SendError(result.status());
 }
 
 void SetFamily::SIsMember(CmdArgList args, ConnectionContext* cntx) {

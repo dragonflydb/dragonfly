@@ -40,13 +40,18 @@ class BaseFamilyTest : public ::testing::Test {
     TestConnWrapper(Protocol proto);
     ~TestConnWrapper();
 
-    CmdArgVec Args(std::initializer_list<std::string_view> list);
+    CmdArgVec Args(ArgSlice list);
 
     RespVec ParseResponse();
   };
 
-  RespExpr Run(std::initializer_list<std::string_view> list);
-  RespExpr Run(std::string_view id, std::initializer_list<std::string_view> list);
+  RespExpr Run(std::initializer_list<const std::string_view> list) {
+    return Run(ArgSlice{list.begin(), list.size()});
+  }
+
+  RespExpr Run(ArgSlice list);
+
+  RespExpr Run(std::string_view id, ArgSlice list);
 
   using MCResponse = std::vector<std::string>;
   MCResponse RunMC(MemcacheParser::CmdType cmd_type, std::string_view key, std::string_view value,

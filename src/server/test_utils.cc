@@ -8,7 +8,6 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
-
 #include <absl/strings/match.h>
 #include <absl/strings/str_split.h>
 #include <mimalloc.h>
@@ -33,7 +32,6 @@ static vector<string> SplitLines(const std::string& src) {
   }
   return res;
 }
-
 
 BaseFamilyTest::TestConnWrapper::TestConnWrapper(Protocol proto)
     : dummy_conn(new facade::Connection(proto, nullptr, nullptr, nullptr)),
@@ -90,7 +88,7 @@ void BaseFamilyTest::UpdateTime(uint64_t ms) {
   shard_set->RunBriefInParallel(cb);
 }
 
-RespExpr BaseFamilyTest::Run(initializer_list<std::string_view> list) {
+RespExpr BaseFamilyTest::Run(ArgSlice list) {
   if (!ProactorBase::IsProactorThread()) {
     return pp_->at(0)->Await([&] { return this->Run(list); });
   }
@@ -98,10 +96,10 @@ RespExpr BaseFamilyTest::Run(initializer_list<std::string_view> list) {
   return Run(GetId(), list);
 }
 
-RespExpr BaseFamilyTest::Run(std::string_view id, std::initializer_list<std::string_view> list) {
+RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
   TestConnWrapper* conn = AddFindConn(Protocol::REDIS, id);
 
-  CmdArgVec args = conn->Args(list);
+  CmdArgVec args = conn->Args(slice);
 
   auto& context = conn->cmd_cntx;
 
@@ -211,7 +209,7 @@ int64_t BaseFamilyTest::CheckedInt(std::initializer_list<std::string_view> list)
   return res;
 }
 
-CmdArgVec BaseFamilyTest::TestConnWrapper::Args(std::initializer_list<std::string_view> list) {
+CmdArgVec BaseFamilyTest::TestConnWrapper::Args(ArgSlice list) {
   CHECK_NE(0u, list.size());
 
   CmdArgVec res;

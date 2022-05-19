@@ -385,23 +385,30 @@ TEST_F(DflyEngineTest, OOM) {
       break;
     ASSERT_EQ(resp, "OK");
   }
-
   EXPECT_THAT(resp, ErrArg("Out of mem"));
-  for (; i < 10000; ++i) {
-    resp = Run({"set", StrCat("key", i), "bar"});
-    if (resp != "OK")
-      break;
+
+  string_view commands[5] = {"set", "rpush", "sadd", "zadd", "hset"};
+  for (unsigned j = 0; j < ABSL_ARRAYSIZE(commands); ++j) {
+    string_view cmd = commands[j];
+    vector<string_view> run_args({cmd, ""});
+    if (cmd == "zadd") {
+      run_args.push_back("1.1");
+    } else if (cmd == "hset") {
+      run_args.push_back("foo");
+    }
+    run_args.push_back("bar");
+
+    for (unsigned i = 0; i < 10000; ++i) {
+      run_args[1] = StrCat("key", cmd, i);
+      resp = Run(run_args);
+
+      if (resp.type == RespExpr::ERROR)
+        break;
+
+      ASSERT_THAT(resp, testing::AnyOf(IntArg(1), "OK")) << cmd;
+    }
+    EXPECT_THAT(resp, ErrArg("Out of mem"));
   }
-  EXPECT_THAT(resp, ErrArg("Out of mem"));
-
-  for (; i < 10000; ++i) {
-    resp = Run({"rpush", StrCat("list", i), "bar"});
-
-    if (resp.type == RespExpr::ERROR)
-      break;
-    ASSERT_THAT(resp, IntArg(1));
-  }
-  EXPECT_THAT(resp, ErrArg("Out of mem"));
 }
 
 // TODO: to test transactions with a single shard since then all transactions become local.
