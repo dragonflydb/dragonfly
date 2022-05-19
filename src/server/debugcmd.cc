@@ -13,10 +13,10 @@
 #include "server/error.h"
 #include "server/main_service.h"
 #include "server/rdb_load.h"
+#include "server/server_state.h"
 #include "server/string_family.h"
 #include "server/transaction.h"
 #include "util/uring/uring_fiber_algo.h"
-#include "util/uring/uring_file.h"
 
 DECLARE_string(dir);
 DECLARE_string(dbfilename);
@@ -150,13 +150,23 @@ void DebugCmd::Reload(CmdArgList args) {
     }
   }
 
-
   string last_save_file = sf_.LastSaveFile();
   Load(last_save_file);
 }
 
 void DebugCmd::Load(std::string_view filename) {
-  EngineShardSet& ess = *shard_set;
+  auto [current, switched] = sf_.global_state()->Next(GlobalState::LOADING);
+  if (!switched) {
+    LOG(WARNING) << GlobalState::Name(current) << " in progress, ignored";
+    return;
+  }
+
+  ProactorPool& pp = sf_.service().proactor_pool();
+  pp.Await([&](ProactorBase*) {
+    CHECK(ServerState::tlocal()->gstate() == GlobalState::IDLE);
+    ServerState::tlocal()->set_gstate(GlobalState::LOADING);
+  });
+
   const CommandId* cid = sf_.service().FindCmd("FLUSHALL");
   intrusive_ptr<Transaction> flush_trans(new Transaction{cid});
   flush_trans->InitByArgs(0, {});
@@ -174,24 +184,14 @@ void DebugCmd::Load(std::string_view filename) {
     dir_path.append(filename);
     path = dir_path;
   }
-  auto res = uring::OpenRead(path.generic_string());
 
-  if (!res) {
-    (*cntx_)->SendError(res.error().message());
-    return;
-  }
-
-  VLOG(1) << "Performing load";
-  io::FileSource fs(*res);
-
-  RdbLoader loader(&ess, sf_.script_mgr());
-  ec = loader.Load(&fs);
-
+  // switches back to
+  ec = sf_.LoadRdb(path.generic_string());
   if (ec) {
-    (*cntx_)->SendError(ec.message());
-  } else {
-    (*cntx_)->SendOk();
+    return (*cntx_)->SendError(ec.message());
   }
+
+  (*cntx_)->SendOk();
 }
 
 void DebugCmd::Populate(CmdArgList args) {

@@ -17,6 +17,8 @@ extern "C" {
 #include "facade/dragonfly_connection.h"
 #include "util/uring/uring_pool.h"
 
+DECLARE_string(dbfilename);
+
 namespace dfly {
 using MP = MemcacheParser;
 using namespace std;
@@ -50,6 +52,7 @@ BaseFamilyTest::~BaseFamilyTest() {
 }
 
 void BaseFamilyTest::SetUpTestSuite() {
+  FLAGS_dbfilename = "";
   init_zmalloc_threadlocal(mi_heap_get_backing());
 }
 

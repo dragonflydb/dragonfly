@@ -11,6 +11,7 @@ extern "C" {
 
 #include "base/logging.h"
 #include "server/blocking_controller.h"
+#include "server/server_state.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "util/fiber_sched_algo.h"
@@ -81,16 +82,13 @@ void EngineShard::Shutdown() {
 
 void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
   CHECK(shard_ == nullptr) << pb->GetIndex();
-  CHECK(mi_heap_get_backing() == mi_heap_get_default());
 
-  mi_heap_t* tlh = mi_heap_new();
-  init_zmalloc_threadlocal(tlh);
-
-  void* ptr = mi_heap_malloc_aligned(tlh, sizeof(EngineShard), alignof(EngineShard));
-  shard_ = new (ptr) EngineShard(pb, update_db_time, tlh);
+  mi_heap_t* data_heap = ServerState::tlocal()->data_heap();
+  void* ptr = mi_heap_malloc_aligned(data_heap, sizeof(EngineShard), alignof(EngineShard));
+  shard_ = new (ptr) EngineShard(pb, update_db_time, data_heap);
 
   CompactObj::InitThreadLocal(shard_->memory_resource());
-  SmallString::InitThreadLocal(tlh);
+  SmallString::InitThreadLocal(data_heap);
 
   if (!FLAGS_backing_prefix.empty()) {
     string fn =

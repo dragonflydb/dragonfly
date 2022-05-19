@@ -5,10 +5,12 @@
 #include "server/common.h"
 
 #include <absl/strings/str_cat.h>
+#include <mimalloc.h>
 
 extern "C" {
 #include "redis/object.h"
 #include "redis/rdb.h"
+#include "redis/zmalloc.h"
 }
 
 #include "base/logging.h"
@@ -27,6 +29,11 @@ unsigned kernel_version = 0;
 size_t max_memory_limit = 0;
 
 ServerState::ServerState() {
+  CHECK(mi_heap_get_backing() == mi_heap_get_default());
+
+  mi_heap_t* tlh = mi_heap_new();
+  init_zmalloc_threadlocal(tlh);
+  data_heap_ = tlh;
 }
 
 ServerState::~ServerState() {
@@ -144,8 +151,9 @@ bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes) {
       return false;
   }
   d *= scale;
-  if (d > kint64max || d < 0)
+  if (int64_t(d) > kint64max || d < 0)
     return false;
+
   *num_bytes = static_cast<int64>(d + 0.5);
   if (neg) {
     *num_bytes = -*num_bytes;

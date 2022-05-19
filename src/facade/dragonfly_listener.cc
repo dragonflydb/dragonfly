@@ -122,7 +122,7 @@ Listener::Listener(Protocol protocol, ServiceInterface* e) : service_(e), protoc
     ctx_ = CreateSslCntx();
   }
   http_base_.reset(new HttpListener<>);
-
+  http_base_->set_resource_prefix("https://romange.s3.eu-west-1.amazonaws.com/static");
   http_base_->enable_metrics();
 }
 

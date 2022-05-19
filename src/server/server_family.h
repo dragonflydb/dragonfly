@@ -69,6 +69,8 @@ class ServerFamily {
 
   std::string LastSaveFile() const;
 
+  std::error_code LoadRdb(const std::string& rdb_file);
+
  private:
   uint32_t shard_count() const {
     return shard_set->size();
@@ -96,6 +98,11 @@ class ServerFamily {
   void _Shutdown(CmdArgList args, ConnectionContext* cntx);
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
+
+  void Load(const std::string& file_name);
+
+
+  boost::fibers::fiber load_fiber_;
 
   uint32_t task_10ms_ = 0;
   Service& service_;

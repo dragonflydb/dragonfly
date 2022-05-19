@@ -19,6 +19,7 @@ extern "C" {
 
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
+#include "io/file_util.h"
 #include "io/proc_reader.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -26,6 +27,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/main_service.h"
+#include "server/rdb_load.h"
 #include "server/rdb_save.h"
 #include "server/replica.h"
 #include "server/script_mgr.h"
@@ -37,7 +39,7 @@ extern "C" {
 #include "util/uring/uring_file.h"
 
 DEFINE_string(dir, "", "working directory");
-DEFINE_string(dbfilename, "", "the filename to save/load the DB");
+DEFINE_string(dbfilename, "dump", "the filename to save/load the DB");
 DEFINE_string(requirepass, "", "password for AUTH authentication");
 
 DECLARE_uint32(port);
@@ -77,9 +79,35 @@ error_code CreateDirs(fs::path dir_path) {
   return ec;
 }
 
-string UnknowSubCmd(string_view subcmd, string cmd) {
+string UnknownSubCmd(string_view subcmd, string cmd) {
   return absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd, "'. Try ",
                       cmd, " HELP.");
+}
+
+string InferLoadFile(fs::path data_dir) {
+  if (FLAGS_dbfilename.empty())
+    return string{};
+
+  fs::path fl_path = data_dir.append(FLAGS_dbfilename);
+
+  if (fs::exists(fl_path))
+    return fl_path.generic_string();
+  if (!fl_path.has_extension()) {
+    string glob = fl_path.generic_string();
+    glob.append("*.rdb");
+
+    io::Result<io::StatShortVec> short_vec = io::StatFiles(glob);
+    if (short_vec) {
+      if (!short_vec->empty()) {
+        return short_vec->back().name;
+      }
+    } else {
+      LOG(WARNING) << "Could not stat " << glob << ", error " << short_vec.error().message();
+    }
+    LOG(INFO) << "Checking " << fl_path;
+  }
+
+  return string{};
 }
 
 }  // namespace
@@ -114,21 +142,28 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
 
   task_10ms_ = pb_task_->AwaitBrief([&] { return pb_task_->AddPeriodic(10, cache_cb); });
 
-  fs::path data_path = fs::current_path();
+  fs::path data_folder = fs::current_path();
 
   if (!FLAGS_dir.empty()) {
-    data_path = FLAGS_dir;
+    data_folder = FLAGS_dir;
 
     error_code ec;
 
-    data_path = fs::canonical(data_path, ec);
+    data_folder = fs::canonical(data_folder, ec);
   }
 
-  LOG(INFO) << "Data directory is " << data_path;
+  LOG(INFO) << "Data directory is " << data_folder;
+  string load_path = InferLoadFile(data_folder);
+  if (!load_path.empty()) {
+    Load(load_path);
+  }
 }
 
 void ServerFamily::Shutdown() {
   VLOG(1) << "ServerFamily::Shutdown";
+
+  if (load_fiber_.joinable())
+    load_fiber_.join();
 
   pb_task_->Await([this] {
     pb_task_->CancelPeriodic(task_10ms_);
@@ -139,6 +174,63 @@ void ServerFamily::Shutdown() {
       replica_->Stop();
     }
   });
+}
+
+void ServerFamily::Load(const std::string& load_path) {
+  CHECK(!load_fiber_.get_id());
+
+  error_code ec;
+  auto path = fs::canonical(load_path, ec);
+  if (ec) {
+    LOG(ERROR) << "Error loading " << load_path << " " << ec.message();
+    return;
+  }
+
+  LOG(INFO) << "Loading " << load_path;
+  auto [current, switched] = global_state()->Next(GlobalState::LOADING);
+  if (!switched) {
+    LOG(WARNING) << GlobalState::Name(current) << " in progress, ignored";
+    return;
+  }
+
+  auto& pool = service_.proactor_pool();
+
+  // Deliberitely run on all I/O threads to update the state for non-shard threads as well.
+  pool.Await([&](ProactorBase*) {
+    // TODO: There can be a bug where status is different.
+    CHECK(ServerState::tlocal()->gstate() == GlobalState::IDLE);
+    ServerState::tlocal()->set_gstate(GlobalState::LOADING);
+  });
+
+  // Choose thread that does not handle shards if possible.
+  // This will balance out the CPU during the load.
+  ProactorBase* proactor =
+      shard_count() < pool.size() ? pool.at(shard_count()) : pool.GetNextProactor();
+
+  load_fiber_ = proactor->LaunchFiber([load_path, this] {
+    auto ec = LoadRdb(load_path);
+    LOG_IF(ERROR, ec) << "Error loading file " << ec.message();
+  });
+}
+
+error_code ServerFamily::LoadRdb(const std::string& rdb_file) {
+  io::ReadonlyFileOrError res = uring::OpenRead(rdb_file);
+  error_code ec;
+
+  if (res) {
+    io::FileSource fs(*res);
+
+    RdbLoader loader(shard_set, script_mgr());
+    ec = loader.Load(&fs);
+  } else {
+    ec = res.error();
+  }
+
+  auto& pool = service_.proactor_pool();
+  pool.Await([](auto*) { ServerState::tlocal()->set_gstate(GlobalState::IDLE); });
+  global_state()->Clear();
+
+  return ec;
 }
 
 void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* cntx) {
@@ -188,8 +280,6 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
 }
 
 error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
-  static unsigned fl_index = 1;
-
   auto [current, switched] = global_state_.Next(GlobalState::SAVING);
   if (!switched) {
     *err_details = StrCat(GlobalState::Name(current), " - can not save database");
@@ -209,10 +299,16 @@ error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
     }
   }
 
-  string filename = FLAGS_dbfilename.empty() ? "dump_save.rdb" : FLAGS_dbfilename;
+  fs::path filename = FLAGS_dbfilename.empty() ? "dump" : FLAGS_dbfilename;
   fs::path path = dir_path;
-  path.append(filename);
-  path.concat(StrCat("_", fl_index++));
+
+  if (!filename.has_extension()) {
+    absl::Time now = absl::Now();
+    string ft_time = absl::FormatTime("-%Y-%m-%dT%H:%M:%S", now, absl::UTCTimeZone());
+    filename += StrCat(ft_time, ".rdb");
+  }
+  path += filename;
+
   VLOG(1) << "Saving to " << path;
 
   auto res = uring::OpenWrite(path.generic_string());
@@ -370,7 +466,7 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   }
 
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
-  return (*cntx)->SendError(UnknowSubCmd(sub_cmd, "CLIENT"), kSyntaxErr);
+  return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "CLIENT"), kSyntaxErr);
 }
 
 void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
@@ -394,7 +490,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
     });
     return (*cntx)->SendOk();
   } else {
-    return (*cntx)->SendError(UnknowSubCmd(sub_cmd, "CONFIG"), kSyntaxErr);
+    return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "CONFIG"), kSyntaxErr);
   }
 }
 

@@ -34,7 +34,7 @@ template <unsigned NUM_SLOTS> class SlotBitmap {
   // probe=true GetProbe returns index of probing entries, i.e. hosted but not owned by this bucket.
   // probe=false - mask of owning entries
   uint32_t GetProbe(bool probe) const {
-    if (SINGLE)
+    if constexpr (SINGLE)
       return ((val_[0].d >> 4) & kAllocMask) ^ ((!probe) * kAllocMask);
     return (val_[1].d & kAllocMask) ^ ((!probe) * kAllocMask);
   }

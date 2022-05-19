@@ -319,12 +319,12 @@ void Service::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_i
                    const InitOpts& opts) {
   InitRedisTables();
 
-  uint32_t shard_num = pp_.size() > 1 ? pp_.size() - 1 : pp_.size();
-  shard_set->Init(shard_num, !opts.disable_time_update);
-
   pp_.AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
     ServerState::tlocal()->Init();
   });
+
+  uint32_t shard_num = pp_.size() > 1 ? pp_.size() - 1 : pp_.size();
+  shard_set->Init(shard_num, !opts.disable_time_update);
 
   request_latency_usec.Init(&pp_);
   StringFamily::Init(&pp_);

@@ -12,6 +12,8 @@
 #include "server/global_state.h"
 #include "util/sliding_counter.h"
 
+typedef struct mi_heap_s mi_heap_t;
+
 namespace dfly {
 
 // Present in every server thread. This class differs from EngineShard. The latter manages
@@ -72,8 +74,15 @@ class ServerState {  // public struct - to allow initialization.
     qps_.Inc();
   }
 
+  // data heap used by zmalloc and shards.
+  mi_heap_t* data_heap() {
+    return data_heap_;
+  }
+
  private:
   int64_t live_transactions_ = 0;
+  mi_heap_t* data_heap_;
+
   std::optional<Interpreter> interpreter_;
   GlobalState::S gstate_ = GlobalState::IDLE;
 
