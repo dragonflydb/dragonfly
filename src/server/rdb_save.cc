@@ -505,10 +505,10 @@ struct RdbSaver::Impl {
   }
 };
 
-RdbSaver::RdbSaver(EngineShardSet* ess, ::io::Sink* sink) : ess_(ess), sink_(sink) {
+RdbSaver::RdbSaver(::io::Sink* sink) : sink_(sink) {
   CHECK_NOTNULL(sink_);
 
-  impl_.reset(new Impl(ess->size()));
+  impl_.reset(new Impl(shard_set->size()));
   impl_->serializer.set_sink(sink_);
 }
 
@@ -571,10 +571,10 @@ error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
 }
 
 void RdbSaver::StartSnapshotInShard(EngineShard* shard) {
-  auto pair = shard->db_slice().GetTables(0);
-  auto s = make_unique<SliceSnapshot>(pair.first, pair.second, &impl_->channel);
+  DbTableArray databases = shard->db_slice().databases();
+  auto s = make_unique<SliceSnapshot>(std::move(databases), &shard->db_slice(), &impl_->channel);
 
-  s->Start(&shard->db_slice());
+  s->Start();
   impl_->shard_snapshots[shard->shard_id()] = move(s);
 }
 

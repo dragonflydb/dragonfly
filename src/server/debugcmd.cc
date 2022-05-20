@@ -3,6 +3,7 @@
 //
 #include "server/debugcmd.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 
 #include <boost/fiber/operations.hpp>
@@ -150,22 +151,20 @@ void DebugCmd::Reload(CmdArgList args) {
     }
   }
 
-  string last_save_file = sf_.LastSaveFile();
+  string last_save_file = sf_.GetLastSaveInfo()->file_name;
   Load(last_save_file);
 }
 
 void DebugCmd::Load(std::string_view filename) {
-  auto [current, switched] = sf_.global_state()->Next(GlobalState::LOADING);
-  if (!switched) {
-    LOG(WARNING) << GlobalState::Name(current) << " in progress, ignored";
+  GlobalState new_state = sf_.service().SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+  if (new_state != GlobalState::LOADING) {
+    LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
     return;
   }
 
-  ProactorPool& pp = sf_.service().proactor_pool();
-  pp.Await([&](ProactorBase*) {
-    CHECK(ServerState::tlocal()->gstate() == GlobalState::IDLE);
-    ServerState::tlocal()->set_gstate(GlobalState::LOADING);
-  });
+  absl::Cleanup rev_state = [this] {
+    sf_.service().SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
+  };
 
   const CommandId* cid = sf_.service().FindCmd("FLUSHALL");
   intrusive_ptr<Transaction> flush_trans(new Transaction{cid});

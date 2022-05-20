@@ -286,6 +286,11 @@ class DashTable<_Key, _Value, Policy>::Iterator {
       : owner_(me), seg_id_(seg_id), bucket_id_(bid), slot_id_(sid) {
   }
 
+  Iterator(Owner* me, uint32_t seg_id, uint8_t bid)
+      : owner_(me), seg_id_(seg_id), bucket_id_(bid), slot_id_(0) {
+    Seek2Occupied();
+  }
+
  public:
   using iterator_category = std::forward_iterator_tag;
   using difference_type = std::ptrdiff_t;
@@ -475,7 +480,7 @@ void DashTable<_Key, _Value, Policy>::CVCUponInsert(uint64_t ver_threshold, cons
   unsigned num_touched = target->CVCOnInsert(ver_threshold, key_hash, bids);
   if (num_touched < UINT16_MAX) {
     for (unsigned i = 0; i < num_touched; ++i) {
-      cb(bucket_iterator{this, seg_id, bids[i], 0});
+      cb(bucket_iterator{this, seg_id, bids[i]});
     }
     return;
   }
@@ -486,7 +491,7 @@ void DashTable<_Key, _Value, Policy>::CVCUponInsert(uint64_t ver_threshold, cons
   // and its entries can be reshuffled into different buckets.
   for (uint8_t i = 0; i < kPhysicalBucketNum; ++i) {
     if (target->GetVersion(i) < ver_threshold) {
-      cb(bucket_iterator{this, seg_id, i, 0});
+      cb(bucket_iterator{this, seg_id, i});
     }
   }
 }
@@ -505,7 +510,7 @@ void DashTable<_Key, _Value, Policy>::CVCUponBump(uint64_t ver_upperbound, const
       target->CVCOnBump(ver_upperbound, it.bucket_id(), it.slot_id(), key_hash, bids);
 
   for (unsigned i = 0; i < num_touched; ++i) {
-    cb(bucket_iterator{this, seg_id, bids[i], 0});
+    cb(bucket_iterator{this, seg_id, bids[i]});
   }
 }
 
@@ -812,10 +817,13 @@ auto DashTable<_Key, _Value, Policy>::Traverse(cursor curs, Cb&& cb) -> cursor {
 
   // We fix bid and go over all segments. Once we reach the end we increase bid and repeat.
   do {
-    SegmentType& s = *segment_[sid];
+
+    SegmentType* s = segment_[sid];
+    assert(s);
+
     auto dt_cb = [&](const SegmentIterator& it) { cb(iterator{this, sid, it.index, it.slot}); };
 
-    fetched = s.TraverseLogicalBucket(bid, hash_fun, std::move(dt_cb));
+    fetched = s->TraverseLogicalBucket(bid, hash_fun, std::move(dt_cb));
     sid = NextSeg(sid);
     if (sid >= segment_.size()) {
       sid = 0;

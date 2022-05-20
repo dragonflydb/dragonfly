@@ -7,7 +7,6 @@
 #include "facade/conn_context.h"
 #include "facade/redis_parser.h"
 #include "server/engine_shard_set.h"
-#include "server/global_state.h"
 #include "util/proactor_pool.h"
 
 namespace util {
@@ -39,6 +38,12 @@ struct Metrics {
   facade::ConnectionStats conn_stats;
 };
 
+struct LastSaveInfo {
+  time_t save_time;        // epoch time in seconds.
+  std::string file_name;  //
+  std::vector<std::pair<std::string_view, size_t>> freq_map; // RDB_TYPE_xxx -> count mapping.
+};
+
 class ServerFamily {
  public:
   ServerFamily(Service* service);
@@ -54,10 +59,6 @@ class ServerFamily {
 
   Metrics GetMetrics() const;
 
-  GlobalState* global_state() {
-    return &global_state_;
-  }
-
   ScriptMgr* script_mgr() {
     return script_mgr_.get();
   }
@@ -67,10 +68,9 @@ class ServerFamily {
   std::error_code DoSave(Transaction* transaction, std::string* err_details);
   std::error_code DoFlush(Transaction* transaction, DbIndex db_ind);
 
-  std::string LastSaveFile() const;
+  std::shared_ptr<const LastSaveInfo> GetLastSaveInfo() const;
 
   std::error_code LoadRdb(const std::string& rdb_file);
-
  private:
   uint32_t shard_count() const {
     return shard_set->size();
@@ -116,16 +116,9 @@ class ServerFamily {
 
   std::unique_ptr<ScriptMgr> script_mgr_;
 
-  GlobalState global_state_;
   time_t start_time_ = 0;  // in seconds, epoch time.
 
-  struct LastSaveInfo {
-    time_t save_time;        // epoch time in seconds.
-    std::string file_name;  //
-    std::vector<std::pair<std::string_view, size_t>> freq_map; // RDB_TYPE_xxx -> count mapping.
-  };
-
-  LastSaveInfo lsinfo_;
+  std::shared_ptr<LastSaveInfo> lsinfo_;  // protected by save_mu_;
 };
 
 }  // namespace dfly

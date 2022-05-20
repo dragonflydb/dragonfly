@@ -9,7 +9,6 @@
 
 #include "core/interpreter.h"
 #include "server/common.h"
-#include "server/global_state.h"
 #include "util/sliding_counter.h"
 
 typedef struct mi_heap_s mi_heap_t;
@@ -56,10 +55,10 @@ class ServerState {  // public struct - to allow initialization.
     return live_transactions_;
   }
 
-  GlobalState::S gstate() const {
+  GlobalState gstate() const {
     return gstate_;
   }
-  void set_gstate(GlobalState::S s) {
+  void set_gstate(GlobalState s) {
     gstate_ = s;
   }
 
@@ -84,7 +83,7 @@ class ServerState {  // public struct - to allow initialization.
   mi_heap_t* data_heap_;
 
   std::optional<Interpreter> interpreter_;
-  GlobalState::S gstate_ = GlobalState::IDLE;
+  GlobalState gstate_ = GlobalState::ACTIVE;
 
   using Counter = util::SlidingCounter<7>;
   Counter qps_;

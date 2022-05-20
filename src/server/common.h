@@ -82,6 +82,12 @@ struct TieredStats {
   TieredStats& operator+=(const TieredStats&);
 };
 
+enum class GlobalState : uint8_t {
+  ACTIVE,
+  LOADING,
+  SAVING,
+  SHUTTING_DOWN,
+};
 
 inline void ToUpper(const MutableSlice* val) {
   for (auto& c : *val) {
@@ -108,5 +114,8 @@ extern size_t max_memory_limit;
 // version 5.11 maps to 511 etc.
 // set upon server start.
 extern unsigned kernel_version;
+
+
+const char* GlobalStateName(GlobalState gs);
 
 }  // namespace dfly

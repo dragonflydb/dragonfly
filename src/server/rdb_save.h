@@ -22,7 +22,7 @@ class EngineShard;
 using RdbTypeFreqMap = absl::flat_hash_map<unsigned, size_t>;
 class RdbSaver {
  public:
-  RdbSaver(EngineShardSet* ess, ::io::Sink* sink);
+  explicit RdbSaver(::io::Sink* sink);
   ~RdbSaver();
 
   std::error_code SaveHeader();
@@ -44,7 +44,6 @@ class RdbSaver {
   std::error_code SaveAuxFieldStrStr(std::string_view key, std::string_view val);
   std::error_code SaveAuxFieldStrInt(std::string_view key, int64_t val);
 
-  EngineShardSet* ess_;
   ::io::Sink* sink_;
   std::unique_ptr<Impl> impl_;
 };

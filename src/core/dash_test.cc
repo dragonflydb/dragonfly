@@ -23,6 +23,8 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#pragma clang diagnostic ignored "-Wunused-const-variable"
+
 namespace dfly {
 
 static uint64_t callbackHash(const void* key) {
@@ -110,7 +112,6 @@ using Dash64 = DashTable<uint64_t, uint64_t, UInt64Policy>;
 constexpr auto kSegTax = Segment::kTaxSize;
 constexpr size_t kMaxSize = Segment::kMaxSize;
 constexpr size_t kSegSize = sizeof(Segment);
-constexpr size_t foo = Segment::kBucketSz;
 
 class DashTest : public testing::Test {
  protected:
@@ -624,8 +625,9 @@ struct VersionPolicy : public BasicDashPolicy {
   }
 };
 
+using VersionDT = DashTable<int, int, VersionPolicy>;
 TEST_F(DashTest, Version) {
-  DashTable<int, int, VersionPolicy> dt;
+  VersionDT dt;
   auto [it, inserted] = dt.Insert(1, 1);
 
   EXPECT_EQ(0, it.GetVersion());
@@ -651,6 +653,36 @@ TEST_F(DashTest, Version) {
     ++items;
   }
   ASSERT_EQ(kNum, items);
+}
+
+
+TEST_F(DashTest, CVCUponInsert) {
+  VersionDT dt;
+  auto [it, added] = dt.Insert(10, 20);  // added to slot 0
+  ASSERT_TRUE(added);
+
+  int i = 11;
+  while (true) {
+    auto [it2, added] = dt.Insert(i, 30);
+    if (it2.bucket_id() == it.bucket_id() && it2.segment_id() == it.segment_id()) {
+      ASSERT_EQ(1, it2.slot_id());
+
+      break;
+    }
+    ++i;
+  }
+
+  // freed slot 0 but the bucket still has i at slot 1.
+  dt.Erase(10);
+
+  auto cb = [](VersionDT::bucket_iterator bit) {
+    LOG(INFO) << "sid: " << bit.segment_id() << " " << bit.bucket_id();
+    while (!bit.is_done()) {
+      LOG(INFO) << "key: " << bit->first;
+      ++bit;
+    }
+  };
+  dt.CVCUponInsert(1, i, cb);
 }
 
 struct A {

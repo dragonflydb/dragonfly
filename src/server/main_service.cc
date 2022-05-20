@@ -319,9 +319,7 @@ void Service::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_i
                    const InitOpts& opts) {
   InitRedisTables();
 
-  pp_.AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
-    ServerState::tlocal()->Init();
-  });
+  pp_.AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) { ServerState::tlocal()->Init(); });
 
   uint32_t shard_num = pp_.size() > 1 ? pp_.size() - 1 : pp_.size();
   shard_set->Init(shard_num, !opts.disable_time_update);
@@ -336,16 +334,12 @@ void Service::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_i
 void Service::Shutdown() {
   VLOG(1) << "Service::Shutdown";
 
-  auto [current, switched] = server_family_.global_state()->Next(GlobalState::SHUTTING_DOWN);
-
-  // TODO: to introduce BlockingNext that waits until the state is switched to idle.
-  CHECK(switched) << "TBD " << GlobalState::Name(current);
+  // We mark that we are shuttind down. After this incoming requests will be
+  // rejected
+  pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Shutdown(); });
 
   engine_varz.reset();
   request_latency_usec.Shutdown();
-
-  // We mark that we are shuttind down.
-  pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Shutdown(); });
 
   // to shutdown all the runtime components that depend on EngineShard.
   server_family_.Shutdown();
@@ -386,14 +380,14 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   if (cid == nullptr) {
     (*cntx)->SendError(absl::StrCat("unknown command `", cmd_str, "`"), "unknown_cmd");
 
-    lock_guard lk(stats_mu_);
+    lock_guard lk(mu_);
     if (unknown_cmds_.size() < 1024)
       unknown_cmds_[cmd_str]++;
     return;
   }
 
   if (etl.gstate() == GlobalState::LOADING || etl.gstate() == GlobalState::SHUTTING_DOWN) {
-    string err = absl::StrCat("Can not execute during ", GlobalState::Name(etl.gstate()));
+    string err = absl::StrCat("Can not execute during ", GlobalStateName(etl.gstate()));
     (*cntx)->SendError(err);
     return;
   }
@@ -664,7 +658,7 @@ bool Service::IsPassProtected() const {
 }
 
 absl::flat_hash_map<std::string, unsigned> Service::UknownCmdMap() const {
-  lock_guard lk(stats_mu_);
+  lock_guard lk(mu_);
   return unknown_cmds_;
 }
 
@@ -988,6 +982,16 @@ VarzValue::Map Service::GetVarzStats() {
   res.emplace_back("table_load_factor", VarzValue::FromDouble(load));
 
   return res;
+}
+
+GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
+  lock_guard lk(mu_);
+  if (global_state_ != from)
+    return global_state_;
+  global_state_ = to;
+
+  pp_.Await([&](ProactorBase*) { ServerState::tlocal()->set_gstate(to); });
+  return to;
 }
 
 using ServiceFunc = void (Service::*)(CmdArgList, ConnectionContext* cntx);

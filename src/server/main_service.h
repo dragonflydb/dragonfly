@@ -71,6 +71,16 @@ class Service : public facade::ServiceInterface {
     return server_family_.script_mgr();
   }
 
+  ServerFamily& server_family() {
+    return server_family_;
+  }
+
+  // Returns: the new state.
+  // if from equals the old state then the switch is performed "to" is returned.
+  // Otherwise, does not switch and returns the current state in the system.
+  // Upon switch, updates cached global state in threadlocal ServerState struct.
+  GlobalState SwitchState(GlobalState from , GlobalState to);
+
  private:
   static void Quit(CmdArgList args, ConnectionContext* cntx);
   static void Multi(CmdArgList args, ConnectionContext* cntx);
@@ -100,9 +110,10 @@ class Service : public facade::ServiceInterface {
 
   ServerFamily server_family_;
   CommandRegistry registry_;
-
-  mutable ::boost::fibers::mutex stats_mu_;
   absl::flat_hash_map<std::string, unsigned> unknown_cmds_;
+  mutable ::boost::fibers::mutex mu_;
+
+  GlobalState global_state_ = GlobalState::ACTIVE;  // protected by mu_;
 };
 
 }  // namespace dfly

@@ -71,4 +71,6 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   void Release(IntentLock::Mode mode, std::string_view key, unsigned count);
 };
 
+using DbTableArray = std::vector<boost::intrusive_ptr<DbTable>>;
+
 }  // namespace dfly

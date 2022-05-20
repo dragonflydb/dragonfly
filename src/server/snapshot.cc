@@ -25,30 +25,29 @@ using namespace chrono_literals;
 namespace this_fiber = ::boost::this_fiber;
 using boost::fibers::fiber;
 
-SliceSnapshot::SliceSnapshot(PrimeTable* prime, ExpireTable* et, StringChannel* dest)
-    : prime_table_(prime), expire_tbl_(et), dest_(dest) {
+SliceSnapshot::SliceSnapshot(DbTableArray db_array, DbSlice* slice, StringChannel* dest)
+    : db_array_(db_array), db_slice_(slice), dest_(dest) {
 }
 
 SliceSnapshot::~SliceSnapshot() {
 }
 
-void SliceSnapshot::Start(DbSlice* slice) {
+void SliceSnapshot::Start() {
   DCHECK(!fb_.joinable());
-  db_slice_ = slice;
 
   auto on_change = [this](DbIndex db_index, const DbSlice::ChangeReq& req) {
     OnDbChange(db_index, req);
   };
 
-  snapshot_version_ = slice->RegisterOnChange(move(on_change));
+  snapshot_version_ = db_slice_->RegisterOnChange(move(on_change));
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
   sfile_.reset(new io::StringFile);
 
   rdb_serializer_.reset(new RdbSerializer(sfile_.get()));
 
-  fb_ = fiber([slice, this] {
+  fb_ = fiber([this] {
     FiberFunc();
-    slice->UnregisterOnChange(snapshot_version_);
+    db_slice_->UnregisterOnChange(snapshot_version_);
   });
 }
 
@@ -56,11 +55,12 @@ void SliceSnapshot::Join() {
   fb_.join();
 }
 
-void SliceSnapshot::SerializeSingleEntry(const PrimeKey& pk, const PrimeValue& pv) {
+void SliceSnapshot::SerializeSingleEntry(DbIndex db_indx, const PrimeKey& pk,
+                                         const PrimeValue& pv) {
   time_t expire_time = 0;
 
   if (pv.HasExpire()) {
-    auto eit = expire_tbl_->Find(pk);
+    auto eit = db_array_[db_indx]->expire.Find(pk);
     expire_time = db_slice_->ExpireTime(eit);
   }
 
@@ -74,32 +74,38 @@ void SliceSnapshot::FiberFunc() {
       absl::StrCat("SliceSnapshot", ProactorBase::GetIndex()));
   PrimeTable::cursor cursor;
 
-  VLOG(1) << "Start traversing " << prime_table_->size() << " items";
+  for (DbIndex db_indx = 0; db_indx < 1; ++db_indx) {
+    if (!db_array_[db_indx])
+      continue;
+    PrimeTable* pt = &db_array_[db_indx]->prime;
+    VLOG(1) << "Start traversing " << pt->size() << " items";
 
-  uint64_t last_yield = 0;
-  do {
-    // Traverse a single logical bucket but do not update its versions.
-    // we can not update a version because entries in the same bucket share part of the version.
-    // Therefore we save first, and then update version in one atomic swipe.
-    PrimeTable::cursor next =
-        prime_table_->Traverse(cursor, [this](auto it) { this->SaveCb(move(it)); });
+    uint64_t last_yield = 0;
+    savecb_current_db_ = db_indx;
 
-    cursor = next;
+    do {
+      // Traverse a single logical bucket but do not update its versions.
+      // we can not update a version because entries in the same bucket share part of the version.
+      // Therefore we save first, and then update version in one atomic swipe.
+      PrimeTable::cursor next = pt->Traverse(cursor, [this](auto it) { this->SaveCb(move(it)); });
 
-    // Flush if needed.
-    FlushSfile(false);
-    if (serialized_ >= last_yield + 100) {
-      DVLOG(2) << "Before sleep " << this_fiber::properties<FiberProps>().name();
-      this_fiber::yield();
-      last_yield = serialized_;
-      DVLOG(2) << "After sleep";
-      // flush in case other fibers (writes commands that pushed previous values) filled the file.
+      cursor = next;
+
+      // Flush if needed.
       FlushSfile(false);
-    }
-  } while (cursor);
+      if (serialized_ >= last_yield + 100) {
+        DVLOG(2) << "Before sleep " << this_fiber::properties<FiberProps>().name();
+        this_fiber::yield();
+        last_yield = serialized_;
+        DVLOG(2) << "After sleep";
+        // flush in case other fibers (writes commands that pushed previous values) filled the file.
+        FlushSfile(false);
+      }
+    } while (cursor);
 
-  DVLOG(2) << "after loop " << this_fiber::properties<FiberProps>().name();
-  FlushSfile(true);
+    DVLOG(2) << "after loop " << this_fiber::properties<FiberProps>().name();
+    FlushSfile(true);
+  }
   dest_->StartClosing();
 
   VLOG(1) << "Exit SnapshotSerializer (serialized/side_saved/cbcalls): " << serialized_ << "/"
@@ -159,7 +165,7 @@ bool SliceSnapshot::SaveCb(PrimeIterator it) {
     return false;
   }
 
-  ++serialized_ += SerializePhysicalBucket(prime_table_, it);
+  ++serialized_ += SerializePhysicalBucket(savecb_current_db_, it);
 
   return false;
 }
@@ -169,18 +175,18 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 
   if (const PrimeTable::bucket_iterator* bit = req.update()) {
     if (bit->GetVersion() < snapshot_version_) {
-      side_saved_ += SerializePhysicalBucket(table, *bit);
+      side_saved_ += SerializePhysicalBucket(db_index, *bit);
     }
   } else {
     string_view key = get<string_view>(req.change);
-    table->CVCUponInsert(snapshot_version_, key, [this, table](PrimeTable::bucket_iterator it) {
+    table->CVCUponInsert(snapshot_version_, key, [this, db_index](PrimeTable::bucket_iterator it) {
       DCHECK_LT(it.GetVersion(), snapshot_version_);
-      side_saved_ += SerializePhysicalBucket(table, it);
+      side_saved_ += SerializePhysicalBucket(db_index, it);
     });
   }
 }
 
-unsigned SliceSnapshot::SerializePhysicalBucket(PrimeTable* table, PrimeTable::bucket_iterator it) {
+unsigned SliceSnapshot::SerializePhysicalBucket(DbIndex db_index, PrimeTable::bucket_iterator it) {
   DCHECK_LT(it.GetVersion(), snapshot_version_);
 
   // traverse physical bucket and write it into string file.
@@ -189,7 +195,7 @@ unsigned SliceSnapshot::SerializePhysicalBucket(PrimeTable* table, PrimeTable::b
   string tmp;
   while (!it.is_done()) {
     ++result;
-    SerializeSingleEntry(it->first, it->second);
+    SerializeSingleEntry(db_index, it->first, it->second);
     ++it;
   }
 

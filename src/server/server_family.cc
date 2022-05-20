@@ -114,7 +114,8 @@ string InferLoadFile(fs::path data_dir) {
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
   start_time_ = time(NULL);
-  lsinfo_.save_time = start_time_;
+  lsinfo_ = make_shared<LastSaveInfo>();
+  lsinfo_->save_time = start_time_;
   script_mgr_.reset(new ScriptMgr());
 }
 
@@ -187,12 +188,14 @@ void ServerFamily::Load(const std::string& load_path) {
   }
 
   LOG(INFO) << "Loading " << load_path;
-  auto [current, switched] = global_state()->Next(GlobalState::LOADING);
-  if (!switched) {
-    LOG(WARNING) << GlobalState::Name(current) << " in progress, ignored";
+
+  GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+  if (new_state != GlobalState::LOADING) {
+    LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
     return;
   }
 
+#if 0
   auto& pool = service_.proactor_pool();
 
   // Deliberitely run on all I/O threads to update the state for non-shard threads as well.
@@ -201,7 +204,9 @@ void ServerFamily::Load(const std::string& load_path) {
     CHECK(ServerState::tlocal()->gstate() == GlobalState::IDLE);
     ServerState::tlocal()->set_gstate(GlobalState::LOADING);
   });
+#endif
 
+  auto& pool = service_.proactor_pool();
   // Choose thread that does not handle shards if possible.
   // This will balance out the CPU during the load.
   ProactorBase* proactor =
@@ -226,9 +231,7 @@ error_code ServerFamily::LoadRdb(const std::string& rdb_file) {
     ec = res.error();
   }
 
-  auto& pool = service_.proactor_pool();
-  pool.Await([](auto*) { ServerState::tlocal()->set_gstate(GlobalState::IDLE); });
-  global_state()->Clear();
+  service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
 
   return ec;
 }
@@ -280,14 +283,6 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
 }
 
 error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
-  auto [current, switched] = global_state_.Next(GlobalState::SAVING);
-  if (!switched) {
-    *err_details = StrCat(GlobalState::Name(current), " - can not save database");
-    return make_error_code(errc::operation_in_progress);
-  }
-
-  absl::Cleanup rev_state = [this] { global_state_.Clear(); };
-
   fs::path dir_path(FLAGS_dir);
   error_code ec;
 
@@ -309,22 +304,31 @@ error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
   }
   path += filename;
 
-  VLOG(1) << "Saving to " << path;
+  GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
+  if (new_state != GlobalState::SAVING) {
+    *err_details = StrCat(GlobalStateName(new_state), " - can not save database");
+    return make_error_code(errc::operation_in_progress);
+  }
+
+  absl::Cleanup rev_state = [this] {
+    service_.SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
+  };
 
   auto res = uring::OpenWrite(path.generic_string());
   if (!res) {
     return res.error();
   }
 
-  auto& pool = service_.proactor_pool();
-  pool.Await([](auto*) { ServerState::tlocal()->set_gstate(GlobalState::SAVING); });
-
   unique_ptr<::io::WriteFile> wf(*res);
+  VLOG(1) << "Saving to " << path;
+
   auto start = absl::Now();
 
-  RdbSaver saver{shard_set, wf.get()};
-
+  RdbSaver saver{wf.get()};
+  RdbTypeFreqMap freq_map;
+  shared_ptr<LastSaveInfo> save_info;
   ec = saver.SaveHeader();
+
   if (!ec) {
     auto cb = [&saver](Transaction* t, EngineShard* shard) {
       saver.StartSnapshotInShard(shard);
@@ -340,16 +344,11 @@ error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
     for (const auto& k_v : freq_map) {
       tmp_map[RdbTypeName(k_v.first)] += k_v.second;
     }
-
-    lock_guard lk(save_mu_);
-    lsinfo_.freq_map.clear();
+    save_info = make_shared<LastSaveInfo>();
     for (const auto& k_v : tmp_map) {
-      lsinfo_.freq_map.emplace_back(k_v);
+      save_info->freq_map.emplace_back(k_v);
     }
   }
-
-  pool.Await([](auto*) { ServerState::tlocal()->set_gstate(GlobalState::IDLE); });
-  CHECK_EQ(GlobalState::SAVING, global_state_.Clear());
 
   absl::Duration dur = absl::Now() - start;
   double seconds = double(absl::ToInt64Milliseconds(dur)) / 1000;
@@ -362,9 +361,12 @@ error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
     ec = close_ec;
 
   if (!ec) {
+    save_info->save_time = time(NULL);
+    save_info->file_name = path.generic_string();
+
     lock_guard lk(save_mu_);
-    lsinfo_.save_time = time(NULL);
-    lsinfo_.file_name = path.generic_string();
+    // swap - to deallocate the old version outstide of the lock.
+    lsinfo_.swap(save_info);
   }
 
   return ec;
@@ -383,9 +385,9 @@ error_code ServerFamily::DoFlush(Transaction* transaction, DbIndex db_ind) {
   return error_code{};
 }
 
-string ServerFamily::LastSaveFile() const {
+shared_ptr<const LastSaveInfo> ServerFamily::GetLastSaveInfo() const {
   lock_guard lk(save_mu_);
-  return lsinfo_.file_name;
+  return lsinfo_;
 }
 
 void ServerFamily::DbSize(CmdArgList args, ConnectionContext* cntx) {
@@ -700,18 +702,14 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
   if (should_enter("PERSISTENCE", true)) {
     ADD_HEADER("# PERSISTENCE");
-    time_t last_save;
-    string last_filename;
-    decltype(lsinfo_.freq_map) rdb_counts;
+    decltype(lsinfo_) save_info;
     {
       lock_guard lk(save_mu_);
-      last_save = lsinfo_.save_time;
-      last_filename = lsinfo_.file_name;
-      rdb_counts = lsinfo_.freq_map;
+      save_info = lsinfo_;
     }
-    append("last_save", last_save);
-    append("last_save_file", last_filename);
-    for (const auto& k_v : rdb_counts) {
+    append("last_save", save_info->save_time);
+    append("last_save_file", save_info->file_name);
+    for (const auto& k_v : save_info->freq_map) {
       append(StrCat("rdb_", k_v.first), k_v.second);
     }
   }
@@ -863,8 +861,12 @@ void ServerFamily::Psync(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
-  lock_guard lk(save_mu_);
-  (*cntx)->SendLong(lsinfo_.save_time);
+  time_t save_time;
+  {
+    lock_guard lk(save_mu_);
+    save_time = lsinfo_->save_time;
+  }
+  (*cntx)->SendLong(save_time);
 }
 
 void ServerFamily::Latency(CmdArgList args, ConnectionContext* cntx) {

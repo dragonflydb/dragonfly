@@ -40,7 +40,7 @@ ServerState::~ServerState() {
 }
 
 void ServerState::Init() {
-  gstate_ = GlobalState::IDLE;
+  gstate_ = GlobalState::ACTIVE;
 }
 
 void ServerState::Shutdown() {
@@ -56,10 +56,10 @@ Interpreter& ServerState::GetInterpreter() {
   return interpreter_.value();
 }
 
-const char* GlobalState::Name(S s) {
+const char* GlobalStateName(GlobalState s) {
   switch (s) {
-    case GlobalState::IDLE:
-      return "IDLE";
+    case GlobalState::ACTIVE:
+      return "ACTIVE";
     case GlobalState::LOADING:
       return "LOADING";
     case GlobalState::SAVING:

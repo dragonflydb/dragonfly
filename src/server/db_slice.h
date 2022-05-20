@@ -225,6 +225,10 @@ class DbSlice {
   // and second denotes number of deleted items due to expiration. (second <= first).
   std::pair<unsigned, unsigned> DeleteExpired(DbIndex db_indx);
 
+  const DbTableArray& databases() const {
+    return db_arr_;
+  }
+
  private:
   void CreateDb(DbIndex index);
 
@@ -245,7 +249,7 @@ class DbSlice {
 
   mutable SliceEvents events_;  // we may change this even for const operations.
 
-  std::vector<boost::intrusive_ptr<DbTable>> db_arr_;
+  DbTableArray db_arr_;
 
   // Used in temporary computations in Acquire/Release.
   absl::flat_hash_set<std::string_view> uniq_keys_;
