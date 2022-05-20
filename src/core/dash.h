@@ -355,6 +355,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   }
 
   template <bool B = Policy::kUseVersion> std::enable_if_t<B, uint64_t> GetVersion() const {
+    assert(owner_ && seg_id_ < owner_->segment_.size());
     return owner_->segment_[seg_id_]->GetVersion(bucket_id_);
   }
 
@@ -490,7 +491,7 @@ void DashTable<_Key, _Value, Policy>::CVCUponInsert(uint64_t ver_threshold, cons
   // Segment is full, we need to return the whole segment, because it can be split
   // and its entries can be reshuffled into different buckets.
   for (uint8_t i = 0; i < kPhysicalBucketNum; ++i) {
-    if (target->GetVersion(i) < ver_threshold) {
+    if (target->GetVersion(i) < ver_threshold && !target->GetBucket(i).IsEmpty()) {
       cb(bucket_iterator{this, seg_id, i});
     }
   }

@@ -157,6 +157,13 @@ RdbSerializer::RdbSerializer(io::Sink* s) : sink_(s), mem_buf_{4_KB}, tmp_buf_(n
 RdbSerializer::~RdbSerializer() {
 }
 
+error_code RdbSerializer::SelectDb(uint32_t dbid) {
+  uint8_t buf[16];
+  buf[0] = RDB_OPCODE_SELECTDB;
+  unsigned enclen = SerializeLen(dbid, buf + 1);
+  return WriteRaw(Bytes{buf, enclen + 1});
+}
+
 // Called by snapshot
 error_code RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms) {
   uint8_t buf[16];
@@ -496,7 +503,7 @@ error_code RdbSerializer::SaveLzfBlob(const io::Bytes& src, size_t uncompressed_
 struct RdbSaver::Impl {
   // used for serializing non-body components in the calling fiber.
   RdbSerializer serializer;
-  SliceSnapshot::StringChannel channel;
+  SliceSnapshot::RecordChannel channel;
   vector<unique_ptr<SliceSnapshot>> shard_snapshots;
 
   // We pass K=sz to say how many producers are pushing data in order to maintain
@@ -515,13 +522,13 @@ RdbSaver::RdbSaver(::io::Sink* sink) : sink_(sink) {
 RdbSaver::~RdbSaver() {
 }
 
-std::error_code RdbSaver::SaveHeader() {
+std::error_code RdbSaver::SaveHeader(const StringVec& lua_scripts) {
   char magic[16];
   size_t sz = absl::SNPrintF(magic, sizeof(magic), "REDIS%04d", RDB_VERSION);
   CHECK_EQ(9u, sz);
 
   RETURN_ON_ERR(impl_->serializer.WriteRaw(Bytes{reinterpret_cast<uint8_t*>(magic), sz}));
-  RETURN_ON_ERR(SaveAux());
+  RETURN_ON_ERR(SaveAux(lua_scripts));
 
   return error_code{};
 }
@@ -531,16 +538,26 @@ error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
   VLOG(1) << "SaveBody";
 
   size_t num_written = 0;
-  string val;
+  SliceSnapshot::DbRecord record;
   vector<string> vals;
   vector<iovec> ivec;
+  uint8_t buf[16];
+  DbIndex last_db_index = kInvalidDbId;
+  buf[0] = RDB_OPCODE_SELECTDB;
 
   auto& channel = impl_->channel;
-  while (channel.Pop(val)) {
-    vals.emplace_back(std::move(val));
-    while (channel.TryPop(val)) {
-      vals.emplace_back(std::move(val));
-    }
+  while (channel.Pop(record)) {
+    do {
+      if (record.db_index != last_db_index) {
+        unsigned enclen = SerializeLen(record.db_index, buf + 1);
+        char* str = (char*)buf;
+        vals.emplace_back(string(str, enclen + 1));
+        last_db_index = record.db_index;
+      }
+
+      vals.emplace_back(std::move(record.value));
+    } while (vals.size() < 256 && channel.TryPop(record));
+
     ivec.resize(vals.size());
     for (size_t i = 0; i < ivec.size(); ++i) {
       ivec[i].iov_base = vals[i].data();
@@ -578,7 +595,7 @@ void RdbSaver::StartSnapshotInShard(EngineShard* shard) {
   impl_->shard_snapshots[shard->shard_id()] = move(s);
 }
 
-error_code RdbSaver::SaveAux() {
+error_code RdbSaver::SaveAux(const StringVec& lua_scripts) {
   static_assert(sizeof(void*) == 8, "");
 
   int aof_preamble = false;
@@ -590,10 +607,13 @@ error_code RdbSaver::SaveAux() {
 
   RETURN_ON_ERR(SaveAuxFieldStrInt("ctime", time(NULL)));
 
-  // TODO: to implement used-mem caching.
   RETURN_ON_ERR(SaveAuxFieldStrInt("used-mem", used_mem_current.load(memory_order_relaxed)));
 
   RETURN_ON_ERR(SaveAuxFieldStrInt("aof-preamble", aof_preamble));
+
+  for (const string& s : lua_scripts) {
+    RETURN_ON_ERR(SaveAuxFieldStrStr("lua", s));
+  }
 
   // TODO: "repl-stream-db", "repl-id", "repl-offset"
   return error_code{};

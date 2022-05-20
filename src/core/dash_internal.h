@@ -126,6 +126,10 @@ template <unsigned NUM_SLOTS, unsigned NUM_STASH_FPS> class BucketBase {
     return Size() == NUM_SLOTS;
   }
 
+  bool IsEmpty() const {
+    return GetBusy() == 0;
+  }
+
   unsigned Size() const {
     return slotb_.Size();
   }
@@ -1331,8 +1335,9 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnInsert(uint64_t
   uint8_t first = target.Size() > neighbor.Size() ? nid : bid;
   unsigned cnt = 0;
 
-  if (!bucket_[first].IsFull()) {
-    if (bucket_[first].GetVersion() < ver_threshold) {
+  const Bucket& bfirst = bucket_[first];
+  if (!bfirst.IsFull()) {
+    if (!bfirst.IsEmpty() && bfirst.GetVersion() < ver_threshold) {
       bid_res[cnt++] = first;
     }
     return cnt;
@@ -1348,7 +1353,7 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnInsert(uint64_t
     if (bucket_[nid].GetVersion() < ver_threshold)
       bid_res[cnt++] = nid;
 
-    if (bucket_[after_next].GetVersion() < ver_threshold)
+    if (!bucket_[after_next].IsEmpty() && bucket_[after_next].GetVersion() < ver_threshold)
       bid_res[cnt++] = after_next;
 
     return cnt;
@@ -1359,7 +1364,7 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnInsert(uint64_t
     if (bucket_[bid].GetVersion() < ver_threshold)
       bid_res[cnt++] = bid;
 
-    if (bucket_[prev_bid].GetVersion() < ver_threshold)
+    if (!bucket_[prev_bid].IsEmpty() && bucket_[prev_bid].GetVersion() < ver_threshold)
       bid_res[cnt++] = prev_bid;
 
     return cnt;
@@ -1370,8 +1375,9 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnInsert(uint64_t
     unsigned stash_bid = kNumBuckets + ((bid + i) % STASH_BUCKET_NUM);
     const Bucket& stash = bucket_[stash_bid];
     if (!stash.IsFull()) {
-      if (stash.GetVersion() < ver_threshold)
+      if (!stash.IsEmpty() && stash.GetVersion() < ver_threshold)
         bid_res[cnt++] = stash_bid;
+
       return cnt;
     }
   }

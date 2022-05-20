@@ -13,9 +13,9 @@ extern "C" {
 #include "base/io_buf.h"
 #include "io/io.h"
 #include "server/table.h"
+#include "server/common.h"
 
 namespace dfly {
-class EngineShardSet;
 class EngineShard;
 
 // keys are RDB_TYPE_xxx constants.
@@ -25,7 +25,7 @@ class RdbSaver {
   explicit RdbSaver(::io::Sink* sink);
   ~RdbSaver();
 
-  std::error_code SaveHeader();
+  std::error_code SaveHeader(const StringVec& lua_scripts);
 
   // Writes the RDB file into sink. Waits for the serialization to finish.
   // Fills freq_map with the histogram of rdb types.
@@ -40,7 +40,7 @@ class RdbSaver {
 
   std::error_code SaveEpilog();
 
-  std::error_code SaveAux();
+  std::error_code SaveAux(const StringVec& lua_scripts);
   std::error_code SaveAuxFieldStrStr(std::string_view key, std::string_view val);
   std::error_code SaveAuxFieldStrInt(std::string_view key, int64_t val);
 
@@ -48,10 +48,8 @@ class RdbSaver {
   std::unique_ptr<Impl> impl_;
 };
 
-
 class RdbSerializer {
  public:
-
   RdbSerializer(::io::Sink* s = nullptr);
 
   ~RdbSerializer();
@@ -64,6 +62,8 @@ class RdbSerializer {
   std::error_code WriteOpcode(uint8_t opcode) {
     return WriteRaw(::io::Bytes{&opcode, 1});
   }
+
+  std::error_code SelectDb(uint32_t dbid);
 
   // Must be called in the thread to which `it` belongs.
   std::error_code SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms);

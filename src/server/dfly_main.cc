@@ -20,8 +20,10 @@
 
 
 DECLARE_uint32(port);
+DECLARE_uint32(dbnum);
 DECLARE_uint32(memcache_port);
 DECLARE_uint64(maxmemory);
+
 DEFINE_bool(use_large_pages, false, "If true - uses large memory pages for allocations");
 DEFINE_string(bind, "",
               "Bind address. If empty - binds on all interfaces. "
@@ -85,6 +87,12 @@ int main(int argc, char* argv[]) {
     LOG(ERROR) << "Kernel 5.11 or later is supported. Exiting...";
     return 1;
   }
+
+  if (FLAGS_dbnum > dfly::kMaxDbId) {
+    LOG(ERROR) << "dbnum is too big. Exiting...";
+    return 1;
+  }
+
   CHECK_LT(kver.minor, 99u);
   dfly::kernel_version = kver.major * 100 + kver.minor;
 

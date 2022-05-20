@@ -173,13 +173,35 @@ TEST_F(RdbTest, SaveManyDbs) {
   ASSERT_EQ(2, metrics.db.size());
   EXPECT_EQ(50000, metrics.db[0].key_count);
   EXPECT_EQ(10000, metrics.db[1].key_count);
-  Run({"save"});
+
+  auto save_fb = pp_->at(0)->LaunchFiber([&] {
+    RespExpr resp = Run({"save"});
+    ASSERT_EQ(resp, "OK");
+  });
+  usleep(1000);
+
+  pp_->at(1)->Await([&] {
+    Run({"select", "1"});
+    for (unsigned i = 0; i < 1000; ++i) {
+      Run({"set", StrCat("abc", i), "bar"});
+    }
+  });
+
+  save_fb.join();
 
   auto save_info = service_->server_family().GetLastSaveInfo();
   ASSERT_EQ(1, save_info->freq_map.size());
   auto& k_v = save_info->freq_map.front();
+
   EXPECT_EQ("string", k_v.first);
-  // EXPECT_EQ(60000, k_v.second);
+  EXPECT_EQ(60000, k_v.second);
+  auto resp = Run({"debug", "reload", "NOSAVE"});
+  EXPECT_EQ(resp, "OK");
+
+  metrics = service_->server_family().GetMetrics();
+  ASSERT_EQ(2, metrics.db.size());
+  EXPECT_EQ(50000, metrics.db[0].key_count);
+  EXPECT_EQ(10000, metrics.db[1].key_count);
 }
 
 }  // namespace dfly

@@ -327,7 +327,9 @@ error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
   RdbSaver saver{wf.get()};
   RdbTypeFreqMap freq_map;
   shared_ptr<LastSaveInfo> save_info;
-  ec = saver.SaveHeader();
+  StringVec lua_scripts = script_mgr_->GetLuaScripts();
+
+  ec = saver.SaveHeader(lua_scripts);
 
   if (!ec) {
     auto cb = [&saver](Transaction* t, EngineShard* shard) {

@@ -27,9 +27,11 @@ class ScriptMgr {
   // Returns body as null-terminated c-string. NULL if sha is not found.
   const char* Find(std::string_view sha) const;
 
+  std::vector<std::string> GetLuaScripts() const;
+
  private:
   using ScriptKey = std::array<char, 40>;
-  absl::flat_hash_map<ScriptKey, std::unique_ptr<char[]>> db_;
+  absl::flat_hash_map<ScriptKey, std::unique_ptr<char[]>> db_;  // protected by mu_
   mutable ::boost::fibers::mutex mu_;
 };
 

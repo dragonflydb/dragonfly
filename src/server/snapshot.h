@@ -17,10 +17,17 @@ class RdbSerializer;
 
 class SliceSnapshot {
  public:
-  using StringChannel =
-      ::util::fibers_ext::SimpleChannel<std::string, base::mpmc_bounded_queue<std::string>>;
+  // Each dbrecord should belong to exactly one db.
+  // RdbSaver adds "select" opcodes when necessary in order to maintain consistency.
+  struct DbRecord {
+    DbIndex db_index;
+    std::string value;
+  };
 
-  SliceSnapshot(DbTableArray db_array, DbSlice* slice, StringChannel* dest);
+  using RecordChannel =
+      ::util::fibers_ext::SimpleChannel<DbRecord, base::mpmc_bounded_queue<DbRecord>>;
+
+  SliceSnapshot(DbTableArray db_array, DbSlice* slice, RecordChannel* dest);
   ~SliceSnapshot();
 
   void Start();
@@ -54,7 +61,7 @@ class SliceSnapshot {
   uint64_t snapshot_version_ = 0;
   DbSlice* db_slice_;
   DbIndex savecb_current_db_;  // used by SaveCb
-  StringChannel* dest_;
+  RecordChannel* dest_;
 
   size_t serialized_ = 0, skipped_ = 0, side_saved_ = 0, savecb_calls_ = 0;
 };

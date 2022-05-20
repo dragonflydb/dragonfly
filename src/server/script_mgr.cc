@@ -109,4 +109,16 @@ const char* ScriptMgr::Find(std::string_view sha) const {
   return it->second.get();
 }
 
+vector<string> ScriptMgr::GetLuaScripts() const {
+  vector<string> res;
+
+  lock_guard lk(mu_);
+  res.reserve(db_.size());
+  for (const auto& k_v : db_) {
+    res.emplace_back(k_v.second.get());
+  }
+
+  return res;
+}
+
 }  // namespace dfly

@@ -31,6 +31,7 @@ extern "C" {
 
 DECLARE_int32(list_max_listpack_size);
 DECLARE_int32(list_compress_depth);
+DECLARE_uint32(dbnum);
 
 namespace dfly {
 
@@ -189,7 +190,6 @@ struct RdbLoader::ObjSettings {
   ObjSettings() = default;
 };
 
-
 RdbLoader::RdbLoader(EngineShardSet* ess, ScriptMgr* script_mgr)
     : script_mgr_(script_mgr), ess_(*ess), mem_buf_{16_KB} {
   shard_buf_.reset(new ItemsBuf[ess_.size()]);
@@ -302,7 +302,9 @@ error_code RdbLoader::Load(io::Source* src) {
       /* SELECTDB: Select the specified database. */
       SET_OR_RETURN(LoadLen(nullptr), dbid);
 
-      if (dbid > kMaxDbId) {
+      if (dbid > FLAGS_dbnum) {
+        LOG(WARNING) << "database id " << dbid << " exceeds dbnum limit. Try increasing the flag.";
+
         return RdbError(errc::bad_db_index);
       }
 

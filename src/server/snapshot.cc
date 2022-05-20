@@ -25,7 +25,7 @@ using namespace chrono_literals;
 namespace this_fiber = ::boost::this_fiber;
 using boost::fibers::fiber;
 
-SliceSnapshot::SliceSnapshot(DbTableArray db_array, DbSlice* slice, StringChannel* dest)
+SliceSnapshot::SliceSnapshot(DbTableArray db_array, DbSlice* slice, RecordChannel* dest)
     : db_array_(db_array), db_slice_(slice), dest_(dest) {
 }
 
@@ -64,8 +64,18 @@ void SliceSnapshot::SerializeSingleEntry(DbIndex db_indx, const PrimeKey& pk,
     expire_time = db_slice_->ExpireTime(eit);
   }
 
+  if (db_indx != savecb_current_db_) {
+    FlushSfile(true);
+  }
   error_code ec = rdb_serializer_->SaveEntry(pk, pv, expire_time);
   CHECK(!ec);  // we write to StringFile.
+
+  if (db_indx != savecb_current_db_) {
+    ec = rdb_serializer_->FlushMem();
+    CHECK(!ec && !sfile_->val.empty());
+    string tmp = std::move(sfile_->val);
+    dest_->Push(DbRecord{db_indx, std::move(tmp)});
+  }
 }
 
 // Serializes all the entries with version less than snapshot_version_.
@@ -74,9 +84,10 @@ void SliceSnapshot::FiberFunc() {
       absl::StrCat("SliceSnapshot", ProactorBase::GetIndex()));
   PrimeTable::cursor cursor;
 
-  for (DbIndex db_indx = 0; db_indx < 1; ++db_indx) {
+  for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
     if (!db_array_[db_indx])
       continue;
+
     PrimeTable* pt = &db_array_[db_indx]->prime;
     VLOG(1) << "Start traversing " << pt->size() << " items";
 
@@ -98,14 +109,17 @@ void SliceSnapshot::FiberFunc() {
         this_fiber::yield();
         last_yield = serialized_;
         DVLOG(2) << "After sleep";
-        // flush in case other fibers (writes commands that pushed previous values) filled the file.
+
+        // flush in case other fibers (writes commands that pushed previous values)
+        // filled the buffer.
         FlushSfile(false);
       }
     } while (cursor);
 
     DVLOG(2) << "after loop " << this_fiber::properties<FiberProps>().name();
     FlushSfile(true);
-  }
+  }  // for (dbindex)
+
   dest_->StartClosing();
 
   VLOG(1) << "Exit SnapshotSerializer (serialized/side_saved/cbcalls): " << serialized_ << "/"
@@ -131,7 +145,8 @@ bool SliceSnapshot::FlushSfile(bool force) {
   VLOG(2) << "FlushSfile " << sfile_->val.size() << " bytes";
 
   string tmp = std::move(sfile_->val);  // important to move before pushing!
-  dest_->Push(std::move(tmp));
+  dest_->Push(DbRecord{savecb_current_db_, std::move(tmp)});
+
   return true;
 }
 
