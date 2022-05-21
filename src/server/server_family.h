@@ -71,6 +71,12 @@ class ServerFamily {
   std::shared_ptr<const LastSaveInfo> GetLastSaveInfo() const;
 
   std::error_code LoadRdb(const std::string& rdb_file);
+
+  // used within tests.
+  bool IsSaving() const {
+    return is_saving_.load(std::memory_order_relaxed);
+  }
+
  private:
   uint32_t shard_count() const {
     return shard_set->size();
@@ -119,6 +125,7 @@ class ServerFamily {
   time_t start_time_ = 0;  // in seconds, epoch time.
 
   std::shared_ptr<LastSaveInfo> lsinfo_;  // protected by save_mu_;
+  std::atomic_bool is_saving_{false};
 };
 
 }  // namespace dfly

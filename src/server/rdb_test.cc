@@ -148,12 +148,16 @@ TEST_F(RdbTest, ReloadTtl) {
 
 TEST_F(RdbTest, SaveFlush) {
   Run({"debug", "populate", "500000"});
+
   auto save_fb = pp_->at(1)->LaunchFiber([&] {
     RespExpr resp = Run({"save"});
     ASSERT_EQ(resp, "OK");
   });
 
-  usleep(1000);
+  do {
+    usleep(10);
+  } while (!service_->server_family().IsSaving());
+
   Run({"flushdb"});
   save_fb.join();
   auto save_info = service_->server_family().GetLastSaveInfo();
@@ -178,7 +182,10 @@ TEST_F(RdbTest, SaveManyDbs) {
     RespExpr resp = Run({"save"});
     ASSERT_EQ(resp, "OK");
   });
-  usleep(1000);
+
+  do {
+    usleep(10);
+  } while (!service_->server_family().IsSaving());
 
   pp_->at(1)->Await([&] {
     Run({"select", "1"});

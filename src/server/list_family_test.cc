@@ -371,6 +371,23 @@ TEST_F(ListFamilyTest, BPopRename) {
   EXPECT_THAT(blpop_resp.GetVec(), ElementsAre(kKey1, "bar"));
 }
 
+TEST_F(ListFamilyTest, BPopFlush) {
+  RespExpr blpop_resp;
+  auto pop_fb = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
+    blpop_resp = Run({"blpop", kKey1, "0"});
+  });
+
+  do {
+    this_fiber::sleep_for(30us);
+  } while (!IsLocked(0, kKey1));
+
+  pp_->at(1)->Await([&] {
+    Run({"flushdb"});
+    EXPECT_EQ(1, CheckedInt({"lpush", kKey1, "bar"}));
+  });
+  pop_fb.join();
+}
+
 TEST_F(ListFamilyTest, LRem) {
   auto resp = Run({"rpush", kKey1, "a", "b", "a", "c"});
   ASSERT_THAT(resp, IntArg(4));

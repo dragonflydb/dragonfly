@@ -336,12 +336,15 @@ error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
       saver.StartSnapshotInShard(shard);
       return OpStatus::OK;
     };
+
     trans->ScheduleSingleHop(std::move(cb));
+    is_saving_.store(true, memory_order_relaxed);
 
     // perform snapshot serialization, block the current fiber until it completes.
     RdbTypeFreqMap freq_map;
     ec = saver.SaveBody(&freq_map);
 
+    is_saving_.store(false, memory_order_relaxed);
     absl::flat_hash_map<string_view, size_t> tmp_map;
     for (const auto& k_v : freq_map) {
       tmp_map[RdbTypeName(k_v.first)] += k_v.second;
@@ -375,6 +378,8 @@ error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
 }
 
 error_code ServerFamily::DoFlush(Transaction* transaction, DbIndex db_ind) {
+  VLOG(1) << "DoFlush";
+
   transaction->Schedule();  // TODO: to convert to ScheduleSingleHop ?
 
   transaction->Execute(

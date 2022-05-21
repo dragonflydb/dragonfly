@@ -390,6 +390,7 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     auto db_ptr = std::move(db);
     DCHECK(!db);
     CreateDb(db_ind);
+    db_arr_[db_ind]->trans_locks.swap(db_ptr->trans_locks);
 
     boost::fibers::fiber([db_ptr = std::move(db_ptr)]() mutable { db_ptr.reset(); }).detach();
 
@@ -401,6 +402,7 @@ void DbSlice::FlushDb(DbIndex db_ind) {
   for (size_t i = 0; i < db_arr_.size(); ++i) {
     if (all_dbs[i]) {
       CreateDb(i);
+      db_arr_[i]->trans_locks.swap(all_dbs[i]->trans_locks);
     }
   }
 
