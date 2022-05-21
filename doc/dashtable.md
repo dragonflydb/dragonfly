@@ -124,6 +124,48 @@ You can see that the total usage is even smaller, because now we maintain smalle
 thread (it's not always the case though - we could get slightly worse memory usage than with
 single-threaded case ,depends where we stand compared to hash table utilization).
 
-*TODO - more benchmarks.*
+### Expiry scenario
+Efficient Expiry is very important for many scenarios. See, for example,
+[Pelikan paper'21](https://twitter.github.io/pelikan/2021/segcache.html). Twitter team says
+that their their memory footprint could be reduced by as much as by 60% by employing better expiry
+methodology. The authors of the post above show prons and cons of expiration methods in the table below:
+
+<img src="https://twitter.github.io/pelikan/assets/img/segcache/expiration.svg" width="400">
+
+They argue that proactive expiration is very important for timely deletion of expired items.
+Dragonfly, employs its own intelligent garbage collection procedure. By leveraging DashTable
+compartmentalized structure it can actually employ passive expiry with low CPU overhead.
+Its passive procedure is complimented with proactive gradual scanning of the table in background.
+
+The procedure is a follows:
+A dashtable grows when its segment becomes full during the insertion and needs to be split.
+This is a convenient point to perform garbage collection, but only of that segment,
+and scan its buckets for the expired items. If we delete some of them, we may avoid growing
+the table altogether!
+
+We use `memtier_benchmark` for the experiment to demonstrate Dragonfly vs Redis expiry efficiency.
+We run locally the following command:
+
+```bash
+memtier_benchmark --ratio 1:0 -n 200000 --threads=2 -c 20 --distinct-client-seed \
+   --key-prefix="key:"  --hide-histogram --expiry-range=20-20 --key-maximum=100000000 -d 256
+```
+
+We load larger values this time (256 bytes) to reduce the impact of metadata savings
+of Dragonfly.
+
+|                        | Dragonfly | Redis 6 |
+|------------------------|-----------|---------|
+| Memory peak usage used | 0.889GB   |  1.44GB |
+| Avg SET qps            | 131K      | 100K    |
+
+Please note that Redis could sustain 30% less qps. That means that the optimal working sets for
+Dragonfly and Redis are different - the former needed to host at least `20s*131k` items
+at any point of time and the latter only needed to keep `100K*20s` items.
+So for `30%` bigger working set Dragonfly needed `40%` less memory at peak.
+
+<em>*Please ignore the performance advantage of Dragonfly over Redis in this test - it has no meaning.
+I run it locally on my machine and ot does not represent a real throughput benchmark. </em>
+
 <br>
 <em> All diagrams in this doc are created in [drawio app](https://app.diagrams.net/) <em>
