@@ -72,14 +72,24 @@ class DashTable : public detail::DashTableBase {
   using cursor = detail::DashCursor;
 
   struct HotspotBuckets {
-    static constexpr size_t kNumBuckets = 2 + Policy::kStashBucketNum;
+    static constexpr size_t kRegularBuckets = 4;
+    static constexpr size_t kNumBuckets = kRegularBuckets + Policy::kStashBucketNum;
 
-    bucket_iterator regular_buckets[2];
-    bucket_iterator stash_buckets[Policy::kStashBucketNum];
+    struct ByType {
+      bucket_iterator regular_buckets[kRegularBuckets];
+      bucket_iterator stash_buckets[Policy::kStashBucketNum];
+    };
+
+    union Probes {
+      ByType by_type;
+      bucket_iterator arr[kNumBuckets];
+
+      Probes() : arr() {}
+    } probes;
 
     // id must be in the range [0, kNumBuckets).
     bucket_iterator at(unsigned id) const {
-      return id < 2 ? regular_buckets[id] : stash_buckets[id - 2];
+      return probes.arr[id];
     }
 
     // key_hash of a key that we try to insert.
@@ -418,6 +428,10 @@ class DashTable<_Key, _Value, Policy>::Iterator {
 template <typename _Key, typename _Value, typename Policy>
 template <bool IsConst, bool IsSingleBucket>
 void DashTable<_Key, _Value, Policy>::Iterator<IsConst, IsSingleBucket>::Seek2Occupied() {
+  if (owner_ == nullptr)
+    return;
+  assert(seg_id_ < owner_->segment_.size());
+
   if constexpr (IsSingleBucket) {
     const auto& b = owner_->segment_[seg_id_]->GetBucket(bucket_id_);
     uint32_t mask = b.GetBusy() >> slot_id_;
@@ -709,15 +723,18 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
     // try garbage collect or evict.
     if constexpr (EvictionPolicy::can_evict || EvictionPolicy::can_gc) {
       // Try gc.
-      uint8_t bid[2];
+      uint8_t bid[HotspotBuckets::kRegularBuckets];
       SegmentType::FillProbeArray(key_hash, bid);
       HotspotBuckets buckets;
       buckets.key_hash = key_hash;
-      buckets.regular_buckets[0] = bucket_iterator{this, seg_id, bid[0], 0};
-      buckets.regular_buckets[1] = bucket_iterator{this, seg_id, bid[1], 0};
+
+      for (unsigned j = 0; j < HotspotBuckets::kRegularBuckets; ++j) {
+        buckets.probes.by_type.regular_buckets[j] = bucket_iterator{this, seg_id, bid[j]};
+      }
 
       for (unsigned i = 0; i < Policy::kStashBucketNum; ++i) {
-        buckets.stash_buckets[i] = bucket_iterator{this, seg_id, uint8_t(kLogicalBucketNum + i), 0};
+        buckets.probes.by_type.stash_buckets[i] =
+            bucket_iterator{this, seg_id, uint8_t(kLogicalBucketNum + i), 0};
       }
 
       // The difference between gc and eviction is that gc can be applied even if
@@ -726,8 +743,18 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       if constexpr (EvictionPolicy::can_gc) {
         unsigned res = ev.GarbageCollect(buckets, this);
         garbage_collected_ += res;
-        if (res)
+        if (res) {
+          // We succeeded to gc. Lets continue with the momentum.
+          // In terms of API abuse it's an awful hack, just to see if it works.
+          /*unsigned start = (bid[HotspotBuckets::kNumBuckets - 1] + 1) % kLogicalBucketNum;
+          for (unsigned i = 0; i < HotspotBuckets::kNumBuckets; ++i) {
+            uint8_t id = (start + i) % kLogicalBucketNum;
+            buckets.probes.arr[i] = bucket_iterator{this, seg_id, id};
+          }
+          garbage_collected_ += ev.GarbageCollect(buckets, this);
+          */
           continue;
+        }
       }
 
       auto hash_fn = [this](const auto& k) { return policy_.HashFn(k); };

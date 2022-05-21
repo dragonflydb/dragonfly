@@ -126,6 +126,7 @@ class EngineShard {
   enum MovingCnt {
     TTL_TRAVERSE,
     TTL_DELETE,
+    COUNTER_TOTAL
   };
 
   // Returns moving sum over the last 6 seconds.
@@ -168,7 +169,8 @@ class EngineShard {
 
   using Counter = util::SlidingCounter<7>;
 
-  Counter counter_[2];
+  Counter counter_[COUNTER_TOTAL];
+  std::vector<Counter> ttl_survivor_sum_;  // we need it per db.
 
   static thread_local EngineShard* shard_;
 };

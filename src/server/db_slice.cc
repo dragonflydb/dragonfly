@@ -27,6 +27,7 @@ namespace {
 
 constexpr auto kPrimeSegmentSize = PrimeTable::kSegBytes;
 constexpr auto kExpireSegmentSize = ExpireTable::kSegBytes;
+constexpr auto kTaxSize = PrimeTable::kTaxAmount;
 
 // mi_malloc good size is 32768. i.e. we have malloc waste of 1.5%.
 static_assert(kPrimeSegmentSize == 32288);
@@ -103,10 +104,10 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
   if (!can_evict_)
     return 0;
 
-  constexpr size_t kNumStashBuckets = ABSL_ARRAYSIZE(eb.stash_buckets);
+  constexpr size_t kNumStashBuckets = ABSL_ARRAYSIZE(eb.probes.by_type.stash_buckets);
 
   // choose "randomly" a stash bucket to evict an item.
-  auto bucket_it = eb.stash_buckets[eb.key_hash % kNumStashBuckets];
+  auto bucket_it = eb.probes.by_type.stash_buckets[eb.key_hash % kNumStashBuckets];
   auto last_slot_it = bucket_it;
   last_slot_it += (PrimeTable::kBucketWidth - 1);
   if (!last_slot_it.is_done()) {
@@ -149,7 +150,6 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
 }
 
 #undef ADD
-
 
 DbSlice::DbSlice(uint32_t index, bool caching_mode, EngineShard* owner)
     : shard_id_(index), caching_mode_(caching_mode), owner_(owner) {
@@ -304,7 +304,7 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) noexcept(false)
     db->stats.inline_keys += it->first.IsInline();
     db->stats.obj_memory_usage += it->first.MallocUsed();
 
-    events_.garbage_collected += db->prime.garbage_collected();
+    events_.garbage_collected = db->prime.garbage_collected();
     events_.stash_unloaded = db->prime.stash_unloaded();
     events_.evicted_keys += evp.evicted();
 
@@ -452,7 +452,6 @@ uint32_t DbSlice::GetMCFlag(DbIndex db_ind, const PrimeKey& key) const {
   return it.is_done() ? 0 : it->second;
 }
 
-
 PrimeIterator DbSlice::AddNew(DbIndex db_ind, string_view key, PrimeValue obj,
                               uint64_t expire_at_ms) noexcept(false) {
   auto [it, added] = AddOrFind(db_ind, key, std::move(obj), expire_at_ms);
@@ -460,7 +459,6 @@ PrimeIterator DbSlice::AddNew(DbIndex db_ind, string_view key, PrimeValue obj,
 
   return it;
 }
-
 
 pair<PrimeIterator, bool> DbSlice::AddOrFind(DbIndex db_ind, string_view key, PrimeValue obj,
                                              uint64_t expire_at_ms) noexcept(false) {
@@ -489,7 +487,6 @@ pair<PrimeIterator, bool> DbSlice::AddOrFind(DbIndex db_ind, string_view key, Pr
 
   return res;
 }
-
 
 size_t DbSlice::DbSize(DbIndex db_ind) const {
   DCHECK_LT(db_ind, db_array_size());
@@ -632,27 +629,36 @@ void DbSlice::UnregisterOnChange(uint64_t id) {
   LOG(DFATAL) << "Could not find " << id << " to unregister";
 }
 
-pair<unsigned, unsigned> DbSlice::DeleteExpired(DbIndex db_ind) {
+auto DbSlice::DeleteExpired(DbIndex db_ind, unsigned count) -> DeleteExpiredStats {
   auto& db = *db_arr_[db_ind];
-  unsigned deleted = 0, candidates = 0;
+  DeleteExpiredStats result;
 
   auto cb = [&](ExpireIterator it) {
-    candidates++;
-    if (ExpireTime(it) <= Now()) {
+    result.traversed++;
+    time_t ttl = ExpireTime(it) - Now();
+    if (ttl <= 0) {
       auto prime_it = db.prime.Find(it->first);
       CHECK(!prime_it.is_done());
       ExpireIfNeeded(db_ind, prime_it);
-      ++deleted;
+      ++result.deleted;
+    } else {
+      result.survivor_ttl_sum += ttl;
     }
   };
 
-  for (unsigned i = 0; i < 10; ++i) {
+  unsigned i = 0;
+  for (; i < count / 3; ++i) {
     db.expire_cursor = db.expire.Traverse(db.expire_cursor, cb);
-    if (deleted)
-      break;
   }
 
-  return make_pair(candidates, deleted);
+  // continue traversing only if we had strong deletion rate based on the first sample.
+  if (result.deleted * 4 > result.traversed) {
+    for (; i < count; ++i) {
+      db.expire_cursor = db.expire.Traverse(db.expire_cursor, cb);
+    }
+  }
+
+  return result;
 }
 
 }  // namespace dfly

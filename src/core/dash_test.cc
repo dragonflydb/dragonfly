@@ -532,7 +532,7 @@ struct TestEvictionPolicy {
     if (!evict_enabled)
       return 0;
 
-    auto it = hotb.regular_buckets[0];
+    auto it = hotb.probes.by_type.regular_buckets[0];
     unsigned res = 0;
     for (; !it.is_done(); ++it) {
       LOG(INFO) << "Deleting " << it->first;
@@ -586,7 +586,7 @@ TEST_F(DashTest, Eviction) {
   while (!dt_.GetSegment(0)->GetBucket(0).IsFull()) {
     try {
       dt_.Insert(num++, 0, ev);
-    } catch(bad_alloc&) {
+    } catch (bad_alloc&) {
     }
   }
 
@@ -594,7 +594,7 @@ TEST_F(DashTest, Eviction) {
   keys.clear();
   uint64_t last_key = dt_.GetSegment(0)->Key(0, Dash64::kBucketWidth - 1);
   for (Dash64::bucket_iterator bit = dt_.begin(); !bit.is_done(); ++bit) {
-     keys.insert(bit->first);
+    keys.insert(bit->first);
   }
 
   bit = dt_.begin();
@@ -654,7 +654,6 @@ TEST_F(DashTest, Version) {
   }
   ASSERT_EQ(kNum, items);
 }
-
 
 TEST_F(DashTest, CVCUponInsert) {
   VersionDT dt;
@@ -825,15 +824,22 @@ struct SimpleEvictPolicy {
     constexpr unsigned kNumBuckets = U64Dash::HotspotBuckets::kNumBuckets;
 
     uint32_t bid = hotb.key_hash % kNumBuckets;
-    auto it = hotb.at(bid);
+
     unsigned slot_index = (hotb.key_hash >> 32) % U64Dash::kBucketWidth;
-    it += slot_index;
 
-    DCHECK(!it.is_done());
-    me->Erase(it);
-    ++evicted;
+    for (unsigned i = 0; i < kNumBuckets; ++i) {
+      auto it = hotb.at((bid + i) % kNumBuckets);
+      it += slot_index;
 
-    return 1;
+      if (it.is_done())
+        continue;
+
+      me->Erase(it);
+      ++evicted;
+
+      return 1;
+    }
+    return 0;
   }
 
   size_t max_capacity = SIZE_MAX;
@@ -857,10 +863,10 @@ struct ShiftRightPolicy {
   }
 
   unsigned Evict(const U64Dash::HotspotBuckets& hotb, U64Dash* me) {
-    constexpr unsigned kNumStashBuckets = ABSL_ARRAYSIZE(hotb.stash_buckets);
+    constexpr unsigned kNumStashBuckets = ABSL_ARRAYSIZE(hotb.probes.by_type.stash_buckets);
 
     unsigned stash_pos = hotb.key_hash % kNumStashBuckets;
-    auto stash_it = hotb.stash_buckets[stash_pos];
+    auto stash_it = hotb.probes.by_type.stash_buckets[stash_pos];
     stash_it += (U64Dash::kBucketWidth - 1);  // go to the last slot.
 
     uint64_t k = stash_it->first;
