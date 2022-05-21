@@ -775,7 +775,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       bool show = (i == 0) || (stats.key_count > 0);
       if (show) {
         string val = StrCat("keys=", stats.key_count, ",expires=", stats.expire_count,
-                            ",avg_ttl=todo");  // TODO
+                            ",avg_ttl=-1");  // TODO
         append(StrCat("db", i), val);
       }
     }

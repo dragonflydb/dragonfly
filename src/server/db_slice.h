@@ -220,10 +220,14 @@ class DbSlice {
   //! Unregisters the callback.
   void UnregisterOnChange(uint64_t id);
 
+  struct DeleteExpiredStats {
+    uint32_t deleted = 0;    // number of deleted items due to expiry (less than traversed).
+    uint32_t traversed = 0;  // number of traversed items that have ttl bit
+    size_t survivor_ttl_sum = 0;  // total sum of ttl of survivors (traversed - deleted).
+  };
+
   // Deletes some amount of possible expired items.
-  // Returns a pair where first denotes number of traversed items that have ttl bit
-  // and second denotes number of deleted items due to expiration. (second <= first).
-  std::pair<unsigned, unsigned> DeleteExpired(DbIndex db_indx);
+  DeleteExpiredStats DeleteExpired(DbIndex db_indx, unsigned count);
 
   const DbTableArray& databases() const {
     return db_arr_;

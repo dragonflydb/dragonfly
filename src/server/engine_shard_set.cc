@@ -283,14 +283,23 @@ void EngineShard::Heartbeat() {
   if (task_iters_++ % 8 == 0) {
     CacheStats();
 
+    uint32_t traversed = GetMovingSum6(TTL_TRAVERSE);
+    uint32_t deleted = GetMovingSum6(TTL_DELETE);
+    unsigned count = 5;
+    if (deleted > 10) {
+      // deleted should leq than traversed.
+      // hence we map our delete/traversed ration into a range [0, 100).
+      count = 200.0 * double(deleted) / (double(traversed) + 10);
+    }
+
     for (unsigned i = 0; i < db_slice_.db_array_size(); ++i) {
       if (db_slice_.IsDbValid(i)) {
         auto [pt, expt] = db_slice_.GetTables(i);
         if (expt->size() > pt->size() / 4) {
-          auto [trav, del] = db_slice_.DeleteExpired(i);
+          DbSlice::DeleteExpiredStats stats = db_slice_.DeleteExpired(i, count);
 
-          counter_[TTL_TRAVERSE].IncBy(trav);
-          counter_[TTL_DELETE].IncBy(del);
+          counter_[TTL_TRAVERSE].IncBy(stats.traversed);
+          counter_[TTL_DELETE].IncBy(stats.deleted);
         }
       }
     }

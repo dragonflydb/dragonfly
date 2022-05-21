@@ -477,9 +477,11 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
 
   // fill bucket ids that may be used probing for this key_hash.
   // The order is: exact, neighbour buckets.
-  static void FillProbeArray(Hash_t key_hash, uint8_t dest[2]) {
-    dest[0] = BucketIndex(key_hash);
-    dest[1] = NextBid(dest[0]);
+  static void FillProbeArray(Hash_t key_hash, uint8_t dest[4]) {
+    dest[1] = BucketIndex(key_hash);
+    dest[0] = PrevBid(dest[1]);
+    dest[2] = NextBid(dest[1]);
+    dest[3] = NextBid(dest[2]);
   }
 
   template <typename U, typename Pred> Iterator FindIt(U&& key, Hash_t key_hash, Pred&& cf) const;
