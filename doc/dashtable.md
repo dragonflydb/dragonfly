@@ -112,7 +112,6 @@ the metadata. For small data use-cases the cost of metadata in Redis is larger t
 ### Multi-threaded scenario
 
 Now I run Dragonfly on all 8 cores.
-
 |             | Dragonfly | Redis 6 |
 |-------------|-----------|---------|
 | Time        |   2.43s   |  16.0s  |
