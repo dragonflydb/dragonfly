@@ -110,6 +110,29 @@ string InferLoadFile(fs::path data_dir) {
   return string{};
 }
 
+class LinuxWriteWrapper : public io::WriteFile {
+
+public:
+  LinuxWriteWrapper(uring::LinuxFile* lf) : WriteFile("wrapper"), lf_(lf) {}
+
+  io::Result<size_t> WriteSome(const iovec* v, uint32_t len) final {
+    io::Result<size_t> res = lf_->WriteSome(v, len, offset_, 0);
+    if (res) {
+      offset_ += *res;
+    }
+
+    return res;
+  }
+
+  std::error_code Close() final {
+    return lf_->Close();
+  }
+
+ private:
+  uring::LinuxFile* lf_;
+  off_t offset_ = 0;
+};
+
 }  // namespace
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
@@ -314,17 +337,22 @@ error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
     service_.SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
   };
 
-  auto res = uring::OpenWrite(path.generic_string());
+  const auto kFlags = O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC | O_DIRECT;
+  auto res = uring::OpenLinux(path.generic_string(), kFlags, 0666);
   if (!res) {
     return res.error();
   }
 
-  unique_ptr<::io::WriteFile> wf(*res);
+  unique_ptr<uring::LinuxFile> lf = std::move(res.value());
+  VLOG(1) << "Saving to " << path;
+  LinuxWriteWrapper wf(lf.get());
+
+  RdbSaver saver{&wf};
+
   VLOG(1) << "Saving to " << path;
 
   auto start = absl::Now();
 
-  RdbSaver saver{wf.get()};
   RdbTypeFreqMap freq_map;
   shared_ptr<LastSaveInfo> save_info;
   StringVec lua_scripts = script_mgr_->GetLuaScripts();
@@ -360,7 +388,7 @@ error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
   LOG(INFO) << "Saving " << path << " finished after "
             << strings::HumanReadableElapsedTime(seconds);
 
-  auto close_ec = wf->Close();
+  auto close_ec = wf.Close();
 
   if (!ec)
     ec = close_ec;

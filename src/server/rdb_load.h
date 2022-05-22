@@ -8,6 +8,7 @@ extern "C" {
 }
 
 #include "base/io_buf.h"
+#include "base/pod_array.h"
 #include "io/io.h"
 #include "server/common.h"
 
@@ -34,7 +35,6 @@ class RdbLoader {
     uint64_t expire_ms;
   };
   using ItemsBuf = std::vector<Item>;
-
 
   void ResizeDb(size_t key_num, size_t expire_num);
   std::error_code HandleAux();

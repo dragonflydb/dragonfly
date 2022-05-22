@@ -25,20 +25,22 @@ Each hash-table `dictht` is implemented as a [classic hashtable with separate ch
 <br>
 Lets estimate the overhead of `dictht` table inside RD.<br>
 
-*Case 1*: it has `N` items at 100% load factor, in other words, buckets count equals to number of items. Each bucket holds a pointer to dictEntry, i.e. it's 8 bytes. In total we need: $8N + 24N = 32N$ bytes overhead per item. <br>
-*Case 2*: `N` items at 75% load factor, in other words, the number of buckets is 1.33 higher than number of items. In total we need: $N\*1.33\*8 + 24N \approx 34N$ bytes overhead per item. <br>
-*Case 3*: `N` items at 50% load factor, say right after table growth. Number of buckets is twice the nujmber of items, hence we need $N\*2\*8 + 24N = 40N$ bytes per item.
+*Case 1*: it has `N` items at 100% load factor, in other words, buckets count equals to number of items. Each bucket holds a pointer to dictEntry, i.e. it's 8 bytes. In total we need: $8N + 24N = 32N$ bytes per record. <br>
+*Case 2*: `N` items at 75% load factor, in other words, the number of buckets is 1.33 higher than number of items. In total we need: $N\*1.33\*8 + 24N \approx 34N$ bytes per record. <br>
+*Case 3*: `N` items at 50% load factor, say right after table growth. Number of buckets is twice the nujmber of items, hence we need $N\*2\*8 + 24N = 40N$ bytes per record.
 
-As you can see, a `dictht` table requires 32-40 bytes per item inserted.
+In best possible case we need at least 16 bytes to store key/value pair into the table, therefore
+the overhead of `dictht` is on average about 16-24 bytes per item.
 
-Now lets take incremental growth into account. When `ht[0]` is full (i.e. RD needs to migrate data to a bigger table), it will instantiate a second temporary instance `ht[1]` that will hold additional 2*N buckets. Both instances will live in parallel until all data is migrated to `ht[1]` and then `ht[0]` bucket array will be deleted. All this complexity is hidden from a user by well engineered API of RD. Lets combine case 3 and case 1 to analyze memory spike at this point: `ht[0]` holds `N` items and it is fully utilized. `ht[1]` is allocated with `2N` buckets. Overall, the overhead is $32N + 16N=48N$ bytes or temporary spike of $16N$ bytes.
+Now lets take incremental growth into account. When `ht[0]` is full (i.e. RD needs to migrate data to a bigger table), it will instantiate a second temporary instance `ht[1]` that will hold additional 2*N buckets. Both instances will live in parallel until all data is migrated to `ht[1]` and then `ht[0]` bucket array will be deleted. All this complexity is hidden from a user by well engineered API of RD. Lets combine case 3 and case 1 to analyze memory spike at this point: `ht[0]` holds `N` items and it is fully utilized. `ht[1]` is allocated with `2N` buckets.
+Overall, the memory needed during the spike is $32N + 16N=48N$ bytes.
 
-To summarize, RD requires between 32 and 40 bytes per item with occasional spike of another 16 bytes per item.
+To summarize, RD requires between **16-32 bytes overhead**.
 
 ## Dash table
 [Dashtable](https://arxiv.org/abs/2003.07302) is an evolution of an algorithm from 1979 called [extendible hashing](https://en.wikipedia.org/wiki/Extendible_hashing).
 
-Similarly to a classic hashtable, dashtable (DT) also holds an array of pointers at front. However, unlike with classic tables, it points to `segments` and not to linked lists of items. Each `segment` is, in fact, a mini-hashtable of constant size. The front array of pointers to segments is called `directory`. Similarly to a classic table, when an item is inserted into a DT, it first determines based on items hashvalue the segment to which the item must enter. Then it tries to insert the item into that segment. The segment is implemented as a hashtable with open-addresed hashing scheme and as I said - constant in size. If an item was successfully inserted we finished, otherwise, the segment is "full" and needs splitting. The DT splits the full segment in 2, and the additional segment is added to the directory. Then it tries to reinsert the item again. To summarize, the classic chaining hash-table is built upon a dynamic array of linked-lists while dashtable is more like a dynamic array of flat hash-tables of constant size.
+Similarly to a classic hashtable, dashtable (DT) also holds an array of pointers at front. However, unlike with classic tables, it points to `segments` and not to linked lists of items. Each `segment` is, in fact, a mini-hashtable of constant size. The front array of pointers to segments is called `directory`. Similarly to a classic table, when an item is inserted into a DT, it first determines the destination segment based on item's hashvalue. The segment is implemented as a hashtable with open-addresed hashing scheme and as I said - constant in size. Once segment is determined, the item inserted into one of its buckets. If an item was successfully inserted, we finished, otherwise, the segment is "full" and needs splitting. The DT splits the contents of a full segment in two segments, and the additional segment is added to the directory. Then it tries to reinsert the item again. To summarize, the classic chaining hash-table is built upon a dynamic array of linked-lists while dashtable is more like a dynamic array of flat hash-tables of constant size.
 
 ![Dashtable Diagram](./dashtable.svg)
 
@@ -46,11 +48,11 @@ In the diagram above you can see how dashtable looks like. Each segment is compr
 
 ### Segment zoom-in
 
-Below you can see the diagram of a segment. It comprised of regular buckets and stash buckets. Each bucket has `k` slots and each slot can host a key-value entry.
+Below you can see the diagram of a segment. It comprised of regular buckets and stash buckets. Each bucket has `k` slots and each slot can host a key-value record.
 
 ![Segment](./dashsegment.svg)
 
-In our implementation, each segment has 56 regular buckets, 4 stash buckets and each bucket contains 14 slots. Overall, each dashtable segment has capacity to host 840 entries. When an item is inserted into a segment, DT first determines its home bucket based on item's hash value. The home bucket is one of 56 regular buckets that reside in the table. Each bucket has 14 available slots and the item can reside in any free slot. If the home bucket is full,
+In our implementation, each segment has 56 regular buckets, 4 stash buckets and each bucket contains 14 slots. Overall, each dashtable segment has capacity to host 840 records. When an item is inserted into a segment, DT first determines its home bucket based on item's hash value. The home bucket is one of 56 regular buckets that reside in the table. Each bucket has 14 available slots and the item can reside in any free slot. If the home bucket is full,
 then DT tries to insert to the regular bucket on the right. And if that bucket is also full,
 it tries to insert into one of 4 stash buckets. These are kept deliberately aside to gather
 spillovers from the regular buckets. The segment is "full" when the insertion fails, i.e. the home bucket and the neighbour bucket and all 4 stash buckets are full. Please note that segment is not necessary at full capacity, it can be that other buckets are not yet full, but unfortunately, that item can go only into these 6 buckets,
@@ -68,25 +70,34 @@ in terms of memory and cpu.
  scheme with probing, that means that they do not need anything like `dictEntry`.
  Dashtable uses lots of tricks to make its own metadata small. In our implementation,
  the average `tax` per entry is short of 20 bits compared to 64 bits in RD (dictEntry.next).
- Also, DT incremental resize is done when a single segment is full.
- It always adds constant space per split event. Assuming that key/pair entry is two 8
- byte pointers like in RD, we can say that DT requires $16N + (8N/840) + 2.5N + O(1) \approx 19N$
- bytes at 100% utilization. This number is very close to optimum.
- In unlikely case when all segments grow together by factor of 2, i.e.
- DT is at 50% of utilization we will need $38N$ bytes. In practice, each segment grows independently from others,
- so the table has smooth memory usage of 20-30 bytes per item.
+ In addition, DT incremental resize does not allocate a bigger table - instead
+ it adds a single segment per split event. Assuming that key/pair entry is two 8
+ byte pointers like in RD, then DT requires $16N + (8N/840) + 2.5N + O(1) \approx 19N$
+ bytes at 100% utilization. This number is very close to the optimum of 16 bytes.
+ In unlikely case when all segments just doubled in size, i.e.
+ DT is at 50% of utilization we may need $38N$ bytes per item.
+ In practice, each segment grows independently from others,
+ so the table has smooth memory usage of 22-32 bytes per item or **6-16 bytes overhead**.
 
- 2. Speed: RD requires an allocation for dictEntry per insertion and deallocation per deletion. In addition, RD uses chaining, which is cache unfriendly on modern hardware. There is a consensus in engineering and research communities that classic chaining schemes are much slower tha open addressing alternatives.
+ 1. Speed: RD requires an allocation for dictEntry per insertion and deallocation per deletion. In addition, RD uses chaining, which is cache unfriendly on modern hardware. There is a consensus in engineering and research communities that classic chaining schemes are slower tha open addressing alternatives.
  Having said that, DT also needs to go through a single level of indirection when
  fetching a segment pointer. However, DT's directory size is relatively small:
  in the example above, all 9K could resize in L1 cache. Once the segment is determined,
  the rest of the insertion, however, is very fast an mostly operates on 1-3 memory cache lines.
  Finally, during resizes, RD requires to allocate a bucket array of size `2N`.
  That could be time consuming - imagine an allocation of 100M buckets for example.
- DT on the other hand requires an allocation of constant size per new segment.
+ DT on the other hand requires an allocation of constant size per new segment. DT is faster
+ and what's more important - it's incremental ability is better. It eliminates latency spikes
+ and reduces tail latency of the operations above.
 
+Please note that with all efficiency of Dashtable, it can not decrease drastically the
+overall memory usage. Its primary goal is to reduce waste around dictionary management.
 
-## Comparison
+Having said that, by reducing metadata waste we could insert dragonfly-specific attributes
+into a table's metadata in order to implement other intelligent algorithms like forkless save. This is where Dragonfly's most impactfuls savings happen.
+
+## Benchmarks
+
 There are many other improvements in dragonfly that save memory besides DT. I will not be
 able to cover them all here. The results below show the final result as of May 2022.
 
@@ -123,7 +134,17 @@ You can see that the total usage is even smaller, because now we maintain smalle
 thread (it's not always the case though - we could get slightly worse memory usage than with
 single-threaded case ,depends where we stand compared to hash table utilization).
 
-### Expiry scenario
+### Forkless Save
+We run `memtier_benchmark` for this experiment. The loadtest has been sending write requests
+according to the command below.
+
+```bash
+memtier_benchmark -p 6380 --ratio 1:0 -n 1000000 --threads=2 -c 20 --distinct-client-seed  --key-prefix="key:"  --hide-histogram  --key-maximum=10000000 -d 256
+```
+
+TODO
+
+### Expiry of items during writes
 Efficient Expiry is very important for many scenarios. See, for example,
 [Pelikan paper'21](https://twitter.github.io/pelikan/2021/segcache.html). Twitter team says
 that their their memory footprint could be reduced by as much as by 60% by employing better expiry
@@ -138,33 +159,35 @@ Its passive procedure is complimented with proactive gradual scanning of the tab
 
 The procedure is a follows:
 A dashtable grows when its segment becomes full during the insertion and needs to be split.
-This is a convenient point to perform garbage collection, but only of that segment,
-and scan its buckets for the expired items. If we delete some of them, we may avoid growing
-the table altogether!
+This is a convenient point to perform garbage collection, but only for that segment.
+We can scan its buckets for the expired items. If we delete some of them, we may avoid growing
+the table altogether! The cost of scanning the segment before potential split is nor more the
+split itself so can be described as `O(1)`.
 
 We use `memtier_benchmark` for the experiment to demonstrate Dragonfly vs Redis expiry efficiency.
 We run locally the following command:
 
 ```bash
-memtier_benchmark --ratio 1:0 -n 200000 --threads=2 -c 20 --distinct-client-seed \
-   --key-prefix="key:"  --hide-histogram --expiry-range=20-20 --key-maximum=100000000 -d 256
+memtier_benchmark --ratio 1:0 -n 600000 --threads=2 -c 20 --distinct-client-seed \
+   --key-prefix="key:"  --hide-histogram --expiry-range=30-30 --key-maximum=100000000 -d 256
 ```
 
 We load larger values this time (256 bytes) to reduce the impact of metadata savings
 of Dragonfly.
 
-|                        | Dragonfly | Redis 6 |
-|------------------------|-----------|---------|
-| Memory peak usage used | 0.889GB   |  1.44GB |
-| Avg SET qps            | 131K      | 100K    |
+|                      | Dragonfly | Redis 6 |
+|----------------------|-----------|---------|
+| Memory peak usage    | 1.45GB    |  1.95GB |
+| Avg SET qps          | 131K      | 100K    |
 
 Please note that Redis could sustain 30% less qps. That means that the optimal working sets for
 Dragonfly and Redis are different - the former needed to host at least `20s*131k` items
-at any point of time and the latter only needed to keep `100K*20s` items.
-So for `30%` bigger working set Dragonfly needed `40%` less memory at peak.
+at any point of time and the latter only needed to keep `20s*100K` items.
+So for `30%` bigger working set Dragonfly needed `25%` less memory at peak.
 
 <em>*Please ignore the performance advantage of Dragonfly over Redis in this test - it has no meaning.
 I run it locally on my machine and ot does not represent a real throughput benchmark. </em>
+
 
 <br>
 <em> All diagrams in this doc are created in [drawio app](https://app.diagrams.net/) <em>
