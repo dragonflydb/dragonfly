@@ -41,6 +41,7 @@ struct SliceEvents {
   // Number of eviction events.
   size_t evicted_keys = 0;
   size_t expired_keys = 0;
+  size_t garbage_checked = 0;
   size_t garbage_collected = 0;
   size_t stash_unloaded = 0;
   size_t bumpups = 0;  // how many bump-upds we did.

@@ -713,6 +713,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("rejected_connections", -1);
     append("expired_keys", m.events.expired_keys);
     append("evicted_keys", m.events.evicted_keys);
+    append("garbage_checked", m.events.garbage_checked);
     append("garbage_collected", m.events.garbage_collected);
     append("bump_ups", m.events.bumpups);
     append("stash_unloaded", m.events.stash_unloaded);
