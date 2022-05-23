@@ -263,7 +263,7 @@ void RobjWrapper::Free(pmr::memory_resource* mr) {
     case OBJ_STRING:
       DVLOG(2) << "Freeing string object";
       DCHECK_EQ(OBJ_ENCODING_RAW, encoding_);
-      mr->deallocate(inner_obj_, 0);  // we do not keep the allocated size.
+      mr->deallocate(inner_obj_, 0, 8);  // we do not keep the allocated size.
       break;
     case OBJ_LIST:
       CHECK_EQ(encoding_, OBJ_ENCODING_QUICKLIST);
@@ -358,13 +358,13 @@ void RobjWrapper::MakeInnerRoom(size_t current_cap, size_t desired, pmr::memory_
       desired += SDS_MAX_PREALLOC;
   }
 
-  void* newp = mr->allocate(desired);
+  void* newp = mr->allocate(desired, 8);
   if (sz_) {
     memcpy(newp, inner_obj_, sz_);
   }
 
   if (current_cap) {
-    mr->deallocate(inner_obj_, current_cap);
+    mr->deallocate(inner_obj_, current_cap, 8);
   }
   inner_obj_ = newp;
 }
@@ -703,11 +703,19 @@ void CompactObj::SetString(std::string_view str) {
     }
   }
 
-  if (kUseSmallStrings && taglen_ == 0 && encoded.size() < (1 << 15)) {
-    SetMeta(SMALL_TAG, mask);
-    u_.small_str.Assign(encoded);
-    tl.small_str_bytes += u_.small_str.MallocUsed();
-    return;
+  if (kUseSmallStrings) {
+    if ((taglen_ == 0 && encoded.size() < (1 << 15))) {
+      SetMeta(SMALL_TAG, mask);
+      tl.small_str_bytes += u_.small_str.Assign(encoded);
+      return;
+    }
+
+    if (taglen_ == SMALL_TAG && encoded.size() <= u_.small_str.size()) {
+      mask_ = mask;
+      tl.small_str_bytes -= u_.small_str.MallocUsed();
+      tl.small_str_bytes += u_.small_str.Assign(encoded);
+      return;
+    }
   }
 
   SetMeta(ROBJ_TAG, mask);

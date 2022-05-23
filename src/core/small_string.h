@@ -25,7 +25,8 @@ class SmallString {
     size_ = 0;
   }
 
-  void Assign(std::string_view s);
+  // Returns malloc used.
+  size_t Assign(std::string_view s);
   void Free();
 
   bool Equal(std::string_view o) const;
@@ -38,9 +39,7 @@ class SmallString {
   uint64_t HashCode() const;
 
   // I am lying here. we should use mi_malloc_usable size really.
-  uint16_t MallocUsed() const {
-    return size_ >= kPrefLen + 8 ? size_ - kPrefLen : 8;
-  }
+  uint16_t MallocUsed() const;
 
   void Get(std::string* dest) const;
 

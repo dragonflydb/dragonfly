@@ -10,29 +10,23 @@
 
 namespace dfly {
 
-class MiMemoryResource final : public std::pmr::memory_resource {
+class MiMemoryResource : public std::pmr::memory_resource {
  public:
   explicit MiMemoryResource(mi_heap_t* heap) : heap_(heap) {
   }
 
-  mi_heap_t* heap() { return heap_;}
+  mi_heap_t* heap() {
+    return heap_;
+  }
 
-  size_t used() const { return used_;}
+  size_t used() const {
+    return used_;
+  }
 
  private:
-  void* do_allocate(std::size_t size, std::size_t align) {
-    void* res = mi_heap_malloc_aligned(heap_, size, align);
+  void* do_allocate(std::size_t size, std::size_t align) final;
 
-    if (!res)
-      throw std::bad_alloc{};
-    used_ += mi_good_size(size);
-    return res;
-  }
-
-  void do_deallocate(void* ptr, std::size_t size, std::size_t align) {
-    mi_free_size_aligned(ptr, size, align);
-    used_ -= mi_good_size(size);
-  }
+  void do_deallocate(void* ptr, std::size_t size, std::size_t align) final;
 
   bool do_is_equal(const std::pmr::memory_resource& o) const noexcept {
     return this == &o;

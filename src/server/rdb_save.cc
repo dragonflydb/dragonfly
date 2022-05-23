@@ -620,14 +620,24 @@ error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
   buf[0] = RDB_OPCODE_SELECTDB;
 
   auto& channel = impl_->channel;
+  error_code io_error;
+
+  // we can not exit on io-error since we spawn fibers that push data.
+  // TODO: we may signal them to stop processing and exit asap in case of the error.
+
   while (channel.Pop(record)) {
+    if (io_error)
+      continue;
+
     do {
       if (record.db_index != last_db_index) {
         unsigned enclen = SerializeLen(record.db_index, buf + 1);
         char* str = (char*)buf;
 
 #if 1
-        RETURN_ON_ERR(aligned_buf_.Write(string_view{str, enclen + 1}));
+        io_error = aligned_buf_.Write(string_view{str, enclen + 1});
+        if (io_error)
+          break;
 #else
         vals.emplace_back(string(str, enclen + 1));
 #endif
@@ -635,12 +645,12 @@ error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
       }
 
 #if 1
-      RETURN_ON_ERR(aligned_buf_.Write(record.value));
+      io_error = aligned_buf_.Write(record.value);
       record.value.clear();
 #else
       vals.emplace_back(std::move(record.value));
 #endif
-    } while (channel.TryPop(record));
+    } while (!io_error && channel.TryPop(record));
 
 #if 1
 
@@ -667,6 +677,8 @@ error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
   }
 
   VLOG(1) << "Blobs written " << num_written;
+  if (io_error)
+    return io_error;
 
   RETURN_ON_ERR(SaveEpilog());
 
@@ -678,6 +690,7 @@ error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
         (*freq_map)[k_v.first] += k_v.second;
     }
   }
+
   return error_code{};
 }
 
