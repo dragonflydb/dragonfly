@@ -94,22 +94,20 @@ Please note that with all efficiency of Dashtable, it can not decrease drastical
 overall memory usage. Its primary goal is to reduce waste around dictionary management.
 
 Having said that, by reducing metadata waste we could insert dragonfly-specific attributes
-into a table's metadata in order to implement other intelligent algorithms like forkless save. This is where Dragonfly's most impactfuls savings happen.
+into a table's metadata in order to implement other intelligent algorithms like forkless save. This is where some the Dragonfly's disrupting qualities [can be seen](#forkless-save).
+
 
 ## Benchmarks
 
 There are many other improvements in dragonfly that save memory besides DT. I will not be
 able to cover them all here. The results below show the final result as of May 2022.
 
-To compare RD vs DT I use an internal debugging command "debug populate" that quickly fills
-both datastores with small data. It just saves time and gives more consistent results compared to memtier_benchmark.
-It also shows the raw speed at which each dictionary gets filled without intermediary factors
-like networking, parsing etc.
+### Populate single-threaded
+To compare RD vs DT I often use an internal debugging command "debug populate" that quickly fills both datastores with data. It just saves time and gives more consistent results compared to memtier_benchmark.
+It also shows the raw speed at which each dictionary gets filled without intermediary factors like networking, parsing etc.
 I deliberately fill datasets with a small data to show how overhead of metadata differs between two data structures.
 
 I run "debug populate 20000000" (20M) on both engines on my home machine "AMD Ryzen 5 3400G with 8 cores".
-
-### Single-threaded scenario
 
 |             | Dragonfly | Redis 6 |
 |-------------|-----------|---------|
@@ -120,49 +118,53 @@ When looking at Redis6 "info memory" stats, you can see that `used_memory_overhe
 to `1.0GB`. That means that out of 1.73GB bytes allocated, a whooping 1.0GB is used for
 the metadata. For small data use-cases the cost of metadata in Redis is larger than the data itself.
 
-### Multi-threaded scenario
+### Populate multi-threaded
 
-Now I run Dragonfly on all 8 cores.
+Now I run Dragonfly on all 8 cores. Redis has the same results, of course.
+
 |             | Dragonfly | Redis 6 |
 |-------------|-----------|---------|
 | Time        |   2.43s   |  16.0s  |
 | Memory used |    896MB  |  1.73G  |
 
-Due to shared-nothing architecture, dragonfly maintains a dashtable per thread with its own slice of data.
-Each thread fills 1/8th of 20M range it owns - and it much faster, almost 8 times faster.
-You can see that the total usage is even smaller, because now we maintain smaller tables in each
+Due to shared-nothing architecture, Dragonfly maintains a dashtable per thread with its own slice of data. Each thread fills 1/8th of 20M range it owns - and it much faster, almost 8 times faster.You can see that the total usage is even smaller, because now we maintain
+smaller tables in each
 thread (it's not always the case though - we could get slightly worse memory usage than with
 single-threaded case ,depends where we stand compared to hash table utilization).
 
 ### Forkless Save
-We run `memtier_benchmark` for this experiment. The loadtest has been sending write requests
-according to the command below.
 
-```bash
-memtier_benchmark -p 6380 --ratio 1:0 -n 1000000 --threads=2 -c 20 --distinct-client-seed  --key-prefix="key:"  --hide-histogram  --key-maximum=10000000 -d 256
-```
+This example shows how much memory Dragonfly uses during BGSAVE under load compared to Redis. Btw, BGSAVE and SAVE in Dragonfly is the same procedure because it's implemented using fully asynchronous algorithm that maintains point-in-time snapshot guarantees.
 
-TODO
+This test consists of 3 steps:
+1. Execute `debug populate 5000000 key 1024` command on both servers to quickly fill them up
+   with ~5GB of data.
+2. Run `memtier_benchmark --ratio 1:0 -n 600000 --threads=2 -c 20 --distinct-client-seed  --key-prefix="key:"  --hide-histogram  --key-maximum=5000000 -d 1024` command in order to send constant update traffic. This traffic should not affect substantially the memory usage of both servers.
+3. Finally, run `bgsave` on both servers while measuring their memory.
+
+It's very hard, technically to measure exact memory usage of Redis during BGSAVE because it creates a child process that shares its parent memory in-part. We chose `cgroupsv2` as a tool to measure the memory. We put each server into a separate cgroup and we sampled `memory.current` attribute for each cgroup. Since a forked Redis process inherits the cgroup of the parent, we get an accurate estimation of their total memory usage. Although we did not need this for Dragonfly we applied the same approach for consistency.
+
+![BGSAVE](./bgsave_memusage.svg)
+
+As you can see on the graph, Redis uses 50% more memory even before BGSAVE starts. Around second 14, BGSAVE kicks off on both servers. Visually you can not see this event on Dragonfly graph, but it's seen very well on Redis graph. It took just few seconds for Dragonfly to finish its snapshot (again, not possible to see) and around second 20 Dragonfly is already behind BGSAVE. You can see a distinguishinable cliff at second 39
+where Redis finishes its snapshot, reaching almost x3 times more memory usage at peak.
 
 ### Expiry of items during writes
 Efficient Expiry is very important for many scenarios. See, for example,
 [Pelikan paper'21](https://twitter.github.io/pelikan/2021/segcache.html). Twitter team says
-that their their memory footprint could be reduced by as much as by 60% by employing better expiry
-methodology. The authors of the post above show prons and cons of expiration methods in the table below:
+that their their memory footprint could be reduced by as much as by 60% by employing better expiry methodology. The authors of the post above show prons and cons of expiration methods in the table below:
 
 <img src="https://twitter.github.io/pelikan/assets/img/segcache/expiration.svg" width="400">
 
 They argue that proactive expiration is very important for timely deletion of expired items.
 Dragonfly, employs its own intelligent garbage collection procedure. By leveraging DashTable
-compartmentalized structure it can actually employ passive expiry with low CPU overhead.
-Its passive procedure is complimented with proactive gradual scanning of the table in background.
+compartmentalized structure it can actually employ a very efficient passive expiry algorithm with low CPU overhead. Our passive procedure is complimented with proactive gradual scanning of the table in background.
 
 The procedure is a follows:
 A dashtable grows when its segment becomes full during the insertion and needs to be split.
 This is a convenient point to perform garbage collection, but only for that segment.
-We can scan its buckets for the expired items. If we delete some of them, we may avoid growing
-the table altogether! The cost of scanning the segment before potential split is nor more the
-split itself so can be described as `O(1)`.
+We scan its buckets for the expired items. If we delete some of them, we may avoid growing the table altogether! The cost of scanning the segment before potential split is no more the
+split itself so can be estimated as `O(1)`.
 
 We use `memtier_benchmark` for the experiment to demonstrate Dragonfly vs Redis expiry efficiency.
 We run locally the following command:
@@ -172,7 +174,7 @@ memtier_benchmark --ratio 1:0 -n 600000 --threads=2 -c 20 --distinct-client-seed
    --key-prefix="key:"  --hide-histogram --expiry-range=30-30 --key-maximum=100000000 -d 256
 ```
 
-We load larger values this time (256 bytes) to reduce the impact of metadata savings
+We load larger values (256 bytes) to reduce the impact of metadata savings
 of Dragonfly.
 
 |                      | Dragonfly | Redis 6 |
@@ -180,8 +182,7 @@ of Dragonfly.
 | Memory peak usage    | 1.45GB    |  1.95GB |
 | Avg SET qps          | 131K      | 100K    |
 
-Please note that Redis could sustain 30% less qps. That means that the optimal working sets for
-Dragonfly and Redis are different - the former needed to host at least `20s*131k` items
+Please note that Redis could sustain 30% less qps. That means that the optimal working sets for Dragonfly and Redis are different - the former needed to host at least `20s*131k` items
 at any point of time and the latter only needed to keep `20s*100K` items.
 So for `30%` bigger working set Dragonfly needed `25%` less memory at peak.
 
