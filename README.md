@@ -5,34 +5,10 @@
   </a>
 </p>
 
-
 [![ci-tests](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml)
 
 A novel, Redis and Memcached compatible memory store.
 
-## Background
-
-Dragonfly started as an experiment to see how an in-memory datastore could look like if it was designed in 2022. Based on  lessons learned from our experience as users of memory stores and as engineers who worked for cloud companies, we knew that we need to preserve two key properties for Dragonfly: a) to provide atomicity guarantees for all its operations, and b) to guarantee low, sub-millisecond latency over very high throughput.
-
-Our first challenge was how to fully utilize CPU, memory, and i/o resources using servers that are available today in public clouds. To solve this, we used [shared-nothing architecture](https://en.wikipedia.org/wiki/Shared-nothing_architecture), which allows us to partition the keyspace of the memory store between threads, so that each thread would manage its own slice of dictionary data. We call these slices - shards. The library that powers thread and I/O management for shared-nothing architecture is open-sourced [here](https://github.com/romange/helio).
-
-To provide atomicity guarantees for multi-key operations, we used the advancements from recent academic research. We chose the paper ["VLL: a lock manager redesign for main memory database systems”](https://www.cs.umd.edu/~abadi/papers/vldbj-vll.pdf) to develop the transactional framework for Dragonfly. The choice of shared-nothing architecture and VLL allowed us to compose atomic multi-key operations without using mutexes or spinlocks. This was a major milestone for our PoC and its performance stood out from other commercial and open-source solutions.
-
-Our second challenge was to engineer more efficient data structures for the new store. To achieve this goal, we based our core hashtable structure on paper ["Dash: Scalable Hashing on Persistent Memory"](https://arxiv.org/pdf/2003.07302.pdf). The paper itself is centered around persistent memory domain and is not directly related to main-memory stores.
-Nevertheless, its very much applicable for our problem. It suggested a hashtable design that allowed us to maintain two special properties that are present in the Redis dictionary: a) its incremental hashing ability during datastore growth b) its ability to traverse the dictionary under changes using a stateless scan operation. Besides these 2 properties,
-Dash is much more efficient in CPU and memory. By leveraging Dash's design, we were able to innovate further with the following features:
- * Efficient record expiry for TTL records.
- * A novel cache eviction algorithm that achieves higher hit rates than other caching strategies like LRU and LFU with **zero memory overhead**.
- * A novel **fork-less** snapshotting algorithm.
-
-After we built the foundation for Dragonfly and [we were happy with its performance](#benchmarks),
-we went on to implement the Redis and Memcached functionality. By now, we have implemented ~130 Redis commands (equivalent to v2.8) and 13 Memcached commands.
-
-And finally, <br>
-<em>Our mission is to build a well-designed, ultra-fast, cost-efficient in-memory datastore for cloud workloads that takes advantage of the latest hardware advancements. We intend to address the pain points of current solutions while preserving their product APIs and propositions.
-</em>
-
-P.S. other engineers share a similar sentiment about what makes a good memory store. See, for example, [here](https://twitter.github.io/pelikan/2019/why-pelikan.html) and [here](https://twitter.github.io/pelikan/2021/segcache.html) blog posts from Twitter's memcache team, or [this post](https://medium.com/@john_63123/redis-should-be-multi-threaded-e28319cab744) from authors of keydb.
 
 ## Benchmarks
 TODO.
@@ -43,15 +19,8 @@ Dragonfly runs on linux. It uses relatively new linux specific [io-uring API](ht
 for I/O, hence it requires Linux version 5.11 or later.
 Ubuntu 20.04.4 or 22.04 fit these requirements.
 
-If built locally, just run:
 
-```bash
-
-./dragonfly --alsologtostderr
-
-```
-
-or with docker:
+### With docker:
 
 ```bash
 docker pull ghcr.io/dragonflydb/dragonfly:latest && \
@@ -62,7 +31,31 @@ docker run --network=host --rm dragonfly
 
 Some hosts may require adding `--ulimit memlock=-1` to `docker run` options.
 
-We support redis run-time arguments where applicable.
+### Building from source
+
+Dragonfly is usually built on Ubuntu 20.04 or later.
+
+```bash
+git clone --recursive https://github.com/dragonflydb/dragonfly && cd dragonfly
+
+# to install dependencies
+sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
+     autoconf-archive libtool
+
+# Configure the build
+./helio/blaze.sh -release
+
+# Build
+cd build-opt && ninja dragonfly  
+
+# Run
+./dragonfly --alsologtostderr
+
+```
+
+
+## Configuration
+Dragonfly supports redis run-time arguments where applicable.
 For example, you can run: `docker run --network=host --rm dragonfly --requirepass=foo --bind localhost`.
 
 dragonfly currently supports the following Redis arguments:
@@ -85,23 +78,6 @@ In addition, it has Dragonfly specific arguments options:
 for more options like logs management or tls support, run `dragonfly --help`.
 
 
-## Building from source
-
-Dragonfly is usually built on Ubuntu 20.04 or later.
-
-```bash
-git clone --recursive https://github.com/dragonflydb/dragonfly && cd dragonfly
-
-# to install dependencies
-sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
-     autoconf-archive libtool
-
-# Configure the build
-./helio/blaze.sh -release
-
-cd build-opt && ninja dragonfly  # build
-
-```
 
 ## Roadmap and status
 
@@ -364,3 +340,28 @@ compatible metrics.
 Important! Http console is meant to be accessed within a safe network.
 If you expose Dragonfly's TCP port externally, it is advised to disable the console
 with `--http_admin_console=false` or `--nohttp_admin_console`.
+
+
+## Background
+
+Dragonfly started as an experiment to see how an in-memory datastore could look like if it was designed in 2022. Based on  lessons learned from our experience as users of memory stores and as engineers who worked for cloud companies, we knew that we need to preserve two key properties for Dragonfly: a) to provide atomicity guarantees for all its operations, and b) to guarantee low, sub-millisecond latency over very high throughput.
+
+Our first challenge was how to fully utilize CPU, memory, and i/o resources using servers that are available today in public clouds. To solve this, we used [shared-nothing architecture](https://en.wikipedia.org/wiki/Shared-nothing_architecture), which allows us to partition the keyspace of the memory store between threads, so that each thread would manage its own slice of dictionary data. We call these slices - shards. The library that powers thread and I/O management for shared-nothing architecture is open-sourced [here](https://github.com/romange/helio).
+
+To provide atomicity guarantees for multi-key operations, we used the advancements from recent academic research. We chose the paper ["VLL: a lock manager redesign for main memory database systems”](https://www.cs.umd.edu/~abadi/papers/vldbj-vll.pdf) to develop the transactional framework for Dragonfly. The choice of shared-nothing architecture and VLL allowed us to compose atomic multi-key operations without using mutexes or spinlocks. This was a major milestone for our PoC and its performance stood out from other commercial and open-source solutions.
+
+Our second challenge was to engineer more efficient data structures for the new store. To achieve this goal, we based our core hashtable structure on paper ["Dash: Scalable Hashing on Persistent Memory"](https://arxiv.org/pdf/2003.07302.pdf). The paper itself is centered around persistent memory domain and is not directly related to main-memory stores.
+Nevertheless, its very much applicable for our problem. It suggested a hashtable design that allowed us to maintain two special properties that are present in the Redis dictionary: a) its incremental hashing ability during datastore growth b) its ability to traverse the dictionary under changes using a stateless scan operation. Besides these 2 properties,
+Dash is much more efficient in CPU and memory. By leveraging Dash's design, we were able to innovate further with the following features:
+ * Efficient record expiry for TTL records.
+ * A novel cache eviction algorithm that achieves higher hit rates than other caching strategies like LRU and LFU with **zero memory overhead**.
+ * A novel **fork-less** snapshotting algorithm.
+
+After we built the foundation for Dragonfly and [we were happy with its performance](#benchmarks),
+we went on to implement the Redis and Memcached functionality. By now, we have implemented ~130 Redis commands (equivalent to v2.8) and 13 Memcached commands.
+
+And finally, <br>
+<em>Our mission is to build a well-designed, ultra-fast, cost-efficient in-memory datastore for cloud workloads that takes advantage of the latest hardware advancements. We intend to address the pain points of current solutions while preserving their product APIs and propositions.
+</em>
+
+P.S. other engineers share a similar sentiment about what makes a good memory store. See, for example, [here](https://twitter.github.io/pelikan/2019/why-pelikan.html) and [here](https://twitter.github.io/pelikan/2021/segcache.html) blog posts from Twitter's memcache team, or [this post](https://medium.com/@john_63123/redis-should-be-multi-threaded-e28319cab744) from authors of keydb.
