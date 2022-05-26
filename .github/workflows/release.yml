@@ -20,7 +20,7 @@ jobs:
           draft: true
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  qemu_job:
+  build-qemu:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -30,6 +30,17 @@ jobs:
     - uses: actions/checkout@v2
       with:
         submodules: true
+    - name: Cache build deps
+      id: cache-deps
+      uses: actions/cache@v3
+      with:
+        path: |
+          ${{github.workspace}}/build-opt/
+          !${{github.workspace}}/build-opt/CMakeCache.txt
+        key: ${{ runner.os }}-release-deps-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-release-deps-
+    
     - uses: uraimo/run-on-arch-action@v2
       name: Run commands
       id: runcmd
@@ -61,9 +72,14 @@ jobs:
       # ${PWD}/build-opt on the host.
       run: |
         echo finished
-        ls -al
-
-  build_native:
+        ls -al            
+    - name: Upload
+      uses: actions/upload-artifact@v2
+      with:
+        name: dragonfly-aarch64
+        path: build-opt/dragonfly-*tar.gz
+  
+  build-native:
     runs-on: ubuntu-latest
     needs: create-release
     container: 
@@ -77,11 +93,28 @@ jobs:
     - name: Build artifacts
       run: |
           ./tools/release.sh
-    - uses: ncipollo/release-action@v1
+    - name: Upload
+      uses: actions/upload-artifact@v2
       with:
-        artifacts: "build-opt/dragonfly-*"
-        allowUpdates: true
-        body: "example"
-        draft: true
-        prerelease: true
-        token: ${{ secrets.GITHUB_TOKEN }}
+        name: dragonfly-amd64
+        path: build-opt/dragonfly-*tar.gz
+  
+  publish_release:
+    runs-on: ubuntu-latest
+    needs: [build-native, build-qemu]
+    steps:
+      - uses: actions/download-artifact@v3
+        name: Download files  
+        with:          
+          path: artifacts
+      - name: See all the artifacts
+        run: |
+          ls -lR artifacts/
+      - uses: ncipollo/release-action@v1
+        with:
+          artifacts: "artifacts/dragonfly-*/*"
+          allowUpdates: true
+          omitBody: true
+          draft: true
+          prerelease: true
+          token: ${{ secrets.GITHUB_TOKEN }}
