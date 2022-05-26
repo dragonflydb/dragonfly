@@ -16,8 +16,8 @@ TODO.
 ## Running the server
 
 Dragonfly runs on linux. It uses relatively new linux specific [io-uring API](https://github.com/axboe/liburing)
-for I/O, hence it requires Linux version 5.11 or later.
-Ubuntu 20.04.4 or 22.04 fit these requirements.
+for I/O, hence it requires Linux version 5.10 or later.
+Debian/Bullseye, Ubuntu 20.04.4 or later fit these requirements.
 
 
 ### With docker:
@@ -26,10 +26,10 @@ Ubuntu 20.04.4 or 22.04 fit these requirements.
 docker pull ghcr.io/dragonflydb/dragonfly:latest && \
 docker tag ghcr.io/dragonflydb/dragonfly:latest dragonfly
 
-docker run --network=host --rm dragonfly
+docker run --network=host --ulimit memlock=-1 --rm dragonfly
 ```
 
-Some hosts may require adding `--ulimit memlock=-1` to `docker run` options.
+*You need `--ulimit memlock=-1` because some Linux distros configure the default memlock limit for containers as 64m and Dragonfly requires more.*
 
 ### Building from source
 
@@ -46,7 +46,7 @@ sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
 ./helio/blaze.sh -release
 
 # Build
-cd build-opt && ninja dragonfly  
+cd build-opt && ninja dragonfly
 
 # Run
 ./dragonfly --alsologtostderr

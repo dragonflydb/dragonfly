@@ -83,8 +83,8 @@ int main(int argc, char* argv[]) {
   base::sys::KernelVersion kver;
   base::sys::GetKernelVersion(&kver);
 
-  if (kver.major < 5 || (kver.major == 5 && kver.minor < 11)) {
-    LOG(ERROR) << "Kernel 5.11 or later is supported. Exiting...";
+  if (kver.kernel < 5 || (kver.kernel == 5 && kver.major < 10)) {
+    LOG(ERROR) << "Kernel 5.10 or later is supported. Exiting...";
     return 1;
   }
 
@@ -93,8 +93,8 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  CHECK_LT(kver.minor, 99u);
-  dfly::kernel_version = kver.major * 100 + kver.minor;
+  CHECK_LT(kver.major, 99u);
+  dfly::kernel_version = kver.kernel * 100 + kver.major;
 
   if (FLAGS_maxmemory == 0) {
     LOG(INFO) << "maxmemory has not been specified. Deciding myself....";
