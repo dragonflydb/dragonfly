@@ -11,6 +11,8 @@ Server server;
 
 void InitRedisTables() {
   crc64_init();
+  memset(&server, 0, sizeof(server));
+
   server.page_size = sysconf(_SC_PAGESIZE);
 
   // been used by t_zset routines that convert listpack to skiplist for cases
@@ -22,6 +24,8 @@ void InitRedisTables() {
   // listpack total size in hset_family.cc
   server.hash_max_listpack_entries = 512;
   server.hash_max_listpack_value = 32;  // decreased from redis default 64.
+
+  server.rdb_compression = 1;
  }
 
 // These functions are moved here from server.c

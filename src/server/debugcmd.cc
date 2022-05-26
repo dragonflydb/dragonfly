@@ -187,6 +187,7 @@ void DebugCmd::Load(std::string_view filename) {
   // switches back to
   ec = sf_.LoadRdb(path.generic_string());
   if (ec) {
+    LOG(INFO) << "Could not load file " << ec.message();
     return (*cntx_)->SendError(ec.message());
   }
 

@@ -11,15 +11,42 @@ extern "C" {
 }
 
 #include "base/io_buf.h"
+#include "base/pod_array.h"
 #include "io/io.h"
-#include "server/table.h"
 #include "server/common.h"
+#include "server/table.h"
 
 namespace dfly {
+
 class EngineShard;
 
 // keys are RDB_TYPE_xxx constants.
 using RdbTypeFreqMap = absl::flat_hash_map<unsigned, size_t>;
+
+class AlignedBuffer {
+ public:
+  AlignedBuffer(size_t cap, ::io::Sink* upstream);
+  ~AlignedBuffer();
+
+  // TODO: maybe to derive AlignedBuffer from Sink?
+  std::error_code Write(std::string_view buf) {
+    return Write(io::Buffer(buf));
+  }
+
+  std::error_code Write(io::Bytes buf);
+
+  std::error_code Flush();
+
+  ::io::Sink* upstream() { return upstream_;}
+
+ private:
+  size_t capacity_;
+  ::io::Sink* upstream_;
+  char* aligned_buf_ = nullptr;
+
+  off_t buf_offs_ = 0;
+};
+
 class RdbSaver {
  public:
   explicit RdbSaver(::io::Sink* sink);
@@ -44,13 +71,18 @@ class RdbSaver {
   std::error_code SaveAuxFieldStrStr(std::string_view key, std::string_view val);
   std::error_code SaveAuxFieldStrInt(std::string_view key, int64_t val);
 
-  ::io::Sink* sink_;
+  AlignedBuffer aligned_buf_;
+
   std::unique_ptr<Impl> impl_;
 };
 
+// TODO: it does not make sense that RdbSerializer will buffer into unaligned
+// mem_buf_ and then flush it into the next level. We should probably use AlignedBuffer
+// directly.
 class RdbSerializer {
  public:
-  RdbSerializer(::io::Sink* s = nullptr);
+  RdbSerializer(::io::Sink* s);
+  RdbSerializer(AlignedBuffer* aligned_buf);
 
   ~RdbSerializer();
 
@@ -94,6 +126,8 @@ class RdbSerializer {
   std::error_code SaveListPackAsZiplist(uint8_t* lp);
 
   ::io::Sink* sink_ = nullptr;
+  AlignedBuffer* aligned_buf_ = nullptr;
+
   std::unique_ptr<LZF_HSLOT[]> lzf_;
   base::IoBuf mem_buf_;
   base::PODArray<uint8_t> tmp_buf_;

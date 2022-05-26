@@ -73,10 +73,15 @@ class PrimeEvictionPolicy {
     return evicted_;
   }
 
+  unsigned checked() const {
+    return checked_;
+  }
+
  private:
   DbSlice* db_slice_;
   int64_t mem_budget_;
   unsigned evicted_ = 0;
+  unsigned checked_ = 0;
   const DbIndex db_indx_;
 
   // unlike static constexpr can_evict, this parameter tells whether we can evict
@@ -84,12 +89,20 @@ class PrimeEvictionPolicy {
   const bool can_evict_;
 };
 
+
 unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& eb, PrimeTable* me) {
   unsigned res = 0;
-  for (unsigned i = 0; i < PrimeTable::HotspotBuckets::kNumBuckets; ++i) {
+  // bool should_print = (eb.key_hash % 128) == 0;
+
+  // based on tests - it's more efficient to pass regular buckets to gc.
+  // stash buckets are filled last so much smaller change they have expired items.
+  unsigned num_buckets =
+      std::min<unsigned>(PrimeTable::HotspotBuckets::kRegularBuckets, eb.num_buckets);
+  for (unsigned i = 0; i < num_buckets; ++i) {
     auto bucket_it = eb.at(i);
     for (; !bucket_it.is_done(); ++bucket_it) {
       if (bucket_it->second.HasExpire()) {
+        ++checked_;
         auto [prime_it, exp_it] = db_slice_->ExpireIfNeeded(db_indx_, bucket_it);
         if (prime_it.is_done())
           ++res;
@@ -138,13 +151,14 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 40, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 48, "You should update this function with new fields");
 
   ADD(evicted_keys);
   ADD(expired_keys);
   ADD(garbage_collected);
   ADD(stash_unloaded);
   ADD(bumpups);
+  ADD(garbage_checked);
 
   return *this;
 }
@@ -307,6 +321,7 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) noexcept(false)
     events_.garbage_collected = db->prime.garbage_collected();
     events_.stash_unloaded = db->prime.stash_unloaded();
     events_.evicted_keys += evp.evicted();
+    events_.garbage_checked += evp.checked();
 
     it.SetVersion(NextVersion());
     memory_budget_ = evp.mem_budget();

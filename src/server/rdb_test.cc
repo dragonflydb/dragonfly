@@ -128,7 +128,8 @@ TEST_F(RdbTest, Reload) {
   Run({"zadd", "zs1", "1.1", "a", "-1.1", "b"});
   Run({"zadd", "zs2", "1.1", string(510, 'a'), "-1.1", string(502, 'b')});
 
-  Run({"debug", "reload"});
+  auto resp = Run({"debug", "reload"});
+  ASSERT_EQ(resp, "OK");
 
   EXPECT_EQ(2, CheckedInt({"scard", "set_key1"}));
   EXPECT_EQ(3, CheckedInt({"scard", "intset_key"}));

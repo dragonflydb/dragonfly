@@ -84,7 +84,8 @@ class DashTable : public detail::DashTableBase {
       ByType by_type;
       bucket_iterator arr[kNumBuckets];
 
-      Probes() : arr() {}
+      Probes() : arr() {
+      }
     } probes;
 
     // id must be in the range [0, kNumBuckets).
@@ -92,6 +93,7 @@ class DashTable : public detail::DashTableBase {
       return probes.arr[id];
     }
 
+    unsigned num_buckets;
     // key_hash of a key that we try to insert.
     // I use it as pseudo-random number in my gc/eviction heuristics.
     uint64_t key_hash;
@@ -725,23 +727,24 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       // Try gc.
       uint8_t bid[HotspotBuckets::kRegularBuckets];
       SegmentType::FillProbeArray(key_hash, bid);
-      HotspotBuckets buckets;
-      buckets.key_hash = key_hash;
+      HotspotBuckets hotspot;
+      hotspot.key_hash = key_hash;
 
       for (unsigned j = 0; j < HotspotBuckets::kRegularBuckets; ++j) {
-        buckets.probes.by_type.regular_buckets[j] = bucket_iterator{this, seg_id, bid[j]};
+        hotspot.probes.by_type.regular_buckets[j] = bucket_iterator{this, seg_id, bid[j]};
       }
 
       for (unsigned i = 0; i < Policy::kStashBucketNum; ++i) {
-        buckets.probes.by_type.stash_buckets[i] =
+        hotspot.probes.by_type.stash_buckets[i] =
             bucket_iterator{this, seg_id, uint8_t(kLogicalBucketNum + i), 0};
       }
+      hotspot.num_buckets = HotspotBuckets::kNumBuckets;
 
       // The difference between gc and eviction is that gc can be applied even if
       // the table can grow since we throw away logically deleted items.
       // For eviction to be applied we should reach the growth limit.
       if constexpr (EvictionPolicy::can_gc) {
-        unsigned res = ev.GarbageCollect(buckets, this);
+        unsigned res = ev.GarbageCollect(hotspot, this);
         garbage_collected_ += res;
         if (res) {
           // We succeeded to gc. Lets continue with the momentum.
@@ -768,7 +771,7 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       if constexpr (EvictionPolicy::can_evict) {
         bool can_grow = ev.CanGrow(*this);
         if (!can_grow) {
-          unsigned res = ev.Evict(buckets, this);
+          unsigned res = ev.Evict(hotspot, this);
           if (res)
             continue;
         }
@@ -845,7 +848,6 @@ auto DashTable<_Key, _Value, Policy>::Traverse(cursor curs, Cb&& cb) -> cursor {
 
   // We fix bid and go over all segments. Once we reach the end we increase bid and repeat.
   do {
-
     SegmentType* s = segment_[sid];
     assert(s);
 
