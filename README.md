@@ -7,11 +7,34 @@
 
 [![ci-tests](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml)
 
-A novel, Redis and Memcached compatible memory store.
+### Probably, the fastest in-memory store in the universe!
+
+Redis and Memcached compatible store.
 
 
 ## Benchmarks
-TODO.
+
+<img src="doc/throughput.svg" width="80%" border="0"/>
+
+Dragonfly is crossing 3.8M QPS on c6gn.16xlarge reaching x25 increase in throughput compared to Redis.
+
+99th latency percentile of Dragonfly at its peak throughput:
+
+| op  |r6g | c6gn | c7g |
+|-----|-----|------|----|
+| set |0.8ms  | 1ms | 1ms   |
+| get | 0.9ms | 0.9ms |0.8ms |
+|setex| 0.9ms | 1.1ms | 1.3ms
+
+
+*All benchmarks were performed using `memtier_benchmark`  (see below) with number of threads tuned per server type and the instance type. `memtier` was running on a separate c6gn.16xlarge machine. For setex benchmark we used expiry-range of 500, so it would survive the end of the test.*
+
+```bash
+  memtier_benchmark --ratio ... -t <threads> -c 30 -n 200000 --distinct-client-seed -d 256 \
+     --expiry-range=...
+```
+
+When running with pipeline mode `--pipeline=30` Dragonfly was reaching 10M QPS for SET and 15M qps for GET operations.
 
 ## Running the server
 
@@ -23,17 +46,23 @@ Debian/Bullseye, Ubuntu 20.04.4 or later fit these requirements.
 ### With docker:
 
 ```bash
-docker pull ghcr.io/dragonflydb/dragonfly:latest && \
-docker tag ghcr.io/dragonflydb/dragonfly:latest dragonfly
+docker pull ghcr.io/dragonflydb/dragonfly && \
+docker tag ghcr.io/dragonflydb/dragonfly dragonfly
 
 docker run --network=host --ulimit memlock=-1 --rm dragonfly
+
+redis-cli PING  # redis-cli can be installed with "apt install -y redis-tools"
 ```
 
 *You need `--ulimit memlock=-1` because some Linux distros configure the default memlock limit for containers as 64m and Dragonfly requires more.*
 
+### Releases
+We maintain [binary releases](https://github.com/dragonflydb/dragonfly/releases) for x86 and arm64 architectures. You will need to install `libunwind8` lib to run the binaries.
+
+
 ### Building from source
 
-Dragonfly is usually built on Ubuntu 20.04 or later.
+You need to install dependencies in order to build on Ubuntu 20.04 or later:
 
 ```bash
 git clone --recursive https://github.com/dragonflydb/dragonfly && cd dragonfly
@@ -53,12 +82,11 @@ cd build-opt && ninja dragonfly
 
 ```
 
-
 ## Configuration
-Dragonfly supports redis run-time arguments where applicable.
-For example, you can run: `docker run --network=host --rm dragonfly --requirepass=foo --bind localhost`.
+Dragonfly supports common redis arguments where applicable.
+For example, you can run: `dragonfly --requirepass=foo --bind localhost`.
 
-dragonfly currently supports the following Redis arguments:
+Dragonfly currently supports the following Redis-specific arguments:
  * `port`
  * `bind`
  * `requirepass`
@@ -92,8 +120,9 @@ The next milestone will be implementing H/A with `redis -> dragonfly` and
 For dragonfly-native replication we are planning to design a distributed log format that will
 support order of magnitude higher speeds when replicating.
 
-After replication and failover feature we will continue with other Redis commands from API 3,4,5
-except for cluster mode functionality.
+After replication and failover feature we will continue with other Redis commands from
+APIs 3,4 and 5.
+
 
 ### Initial release
 
@@ -111,7 +140,7 @@ API 1.0
   - [X] MSET
   - [X] MSETNX
   - [X] SUBSTR
-- [ ] Generic family
+- [x] Generic family
   - [X] DEL
   - [X] ECHO
   - [X] EXISTS
@@ -141,7 +170,7 @@ API 1.0
   - [X] LASTSAVE
   - [X] SLAVEOF/REPLICAOF
   - [ ] SYNC
-- [ ] Set Family
+- [X] Set Family
   - [x] SADD
   - [x] SCARD
   - [X] SDIFF
@@ -178,7 +207,7 @@ API 1.0
   - [X] ZREMRANGEBYSCORE
   - [X] ZREVRANGE
   - [X] ZSCORE
-- [ ] Not sure whether these are required for the initial release.
+- [ ] Other
   - [ ] BGREWRITEAOF
   - [ ] MONITOR
   - [ ] RANDOMKEY
@@ -293,7 +322,7 @@ Memchache API
 - [x] version
 - [x] quit
 
-Random commands we implemented as decorators along the way:
+Some commands were implemented as decorators along the way:
 
  - [X] ROLE (2.8) decorator as master.
  - [X] UNLINK (4.0) decorator for DEL command
@@ -363,5 +392,3 @@ we went on to implement the Redis and Memcached functionality. By now, we have i
 And finally, <br>
 <em>Our mission is to build a well-designed, ultra-fast, cost-efficient in-memory datastore for cloud workloads that takes advantage of the latest hardware advancements. We intend to address the pain points of current solutions while preserving their product APIs and propositions.
 </em>
-
-P.S. other engineers share a similar sentiment about what makes a good memory store. See, for example, [here](https://twitter.github.io/pelikan/2019/why-pelikan.html) and [here](https://twitter.github.io/pelikan/2021/segcache.html) blog posts from Twitter's memcache team, or [this post](https://medium.com/@john_63123/redis-should-be-multi-threaded-e28319cab744) from authors of keydb.
