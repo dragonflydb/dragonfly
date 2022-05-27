@@ -127,7 +127,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   if (trans_mask & Transaction::AWAKED_Q) {
     DCHECK(continuation_trans_ == nullptr);
 
-    CHECK_EQ(committed_txid_, trans->notify_txid()) << "TBD";
+    CHECK_EQ(committed_txid_, trans->notify_txid());
     bool keep = trans->RunInShard(this);
     if (keep)
       return;
@@ -198,21 +198,14 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     DVLOG(1) << "Skipped TxQueue " << continuation_trans_ << " " << has_awaked_trans;
   }
 
-  // For SUSPENDED_Q - if transaction has not been notified, it will still be
-  // in the watch queue. We need to unlock an Execute by running a noop.
-  if (trans_mask & Transaction::SUSPENDED_Q) {
-    // This case happens when some other shard notified the transaction and now it
-    // runs FindFirst on all shards.
-    // TxId notify_txid = trans->notify_txid();
-    // DCHECK(HasResultConverged(notify_txid));
-    trans->RunNoop(this);
-    return;
-  }
+  // we need to run trans if it's OOO or when trans is blocked in this shard and should
+  // be treated here as noop.
+  // trans is OOO, it it locked keys that previous transactions have not locked yet.
+  bool should_run = trans_mask & (Transaction::OUT_OF_ORDER | Transaction::SUSPENDED_Q);
 
-  // If trans is out of order, i.e. locks keys that previous transactions have not locked.
   // It may be that there are other transactions that touch those keys but they necessary ordered
   // after trans in the queue, hence it's safe to run trans out of order.
-  if (trans && (trans_mask & Transaction::OUT_OF_ORDER)) {
+  if (trans && should_run) {
     DCHECK(trans != head);
     DCHECK(!trans->IsMulti());  // multi, global transactions can not be OOO.
     DCHECK(trans_mask & Transaction::ARMED);
@@ -226,9 +219,6 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 
     bool keep = trans->RunInShard(this);
     DLOG_IF(INFO, !dbg_id.empty()) << "Eager run " << sid << ", " << dbg_id << ", keep " << keep;
-
-    // Should be enforced via Schedule(). TODO: to remove the check once the code is mature.
-    CHECK(!keep) << "multi-hop transactions can not be OOO.";
   }
 }
 

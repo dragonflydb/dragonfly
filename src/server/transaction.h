@@ -21,14 +21,15 @@
 
 namespace dfly {
 
-class DbSlice;
-class EngineShardSet;
 class EngineShard;
+class BlockingController;
 
 using facade::OpStatus;
 using facade::OpResult;
 
 class Transaction {
+  friend class BlockingController;
+
   Transaction(const Transaction&);
   void operator=(const Transaction&) = delete;
 
@@ -161,7 +162,6 @@ class Transaction {
   // Expects that the transaction had been scheduled before, and uses Execute(.., true) to register.
   // Returns false if timeout ocurred, true if was notified by one of the keys.
   bool WaitOnWatch(const time_point& tp);
-  void UnregisterWatch();
 
   // Returns true if transaction is awaked, false if it's timed-out and can be removed from the
   // blocking queue. NotifySuspended may be called from (multiple) shard threads and
@@ -174,8 +174,6 @@ class Transaction {
   // Called by EngineShard when performing Execute over the tx queue.
   // Returns true if transaction should be kept in the queue.
   bool RunInShard(EngineShard* shard);
-
-  void RunNoop(EngineShard* shard);
 
   //! Returns locking arguments needed for DbSlice to Acquire/Release transactional locks.
   //! Runs in the shard thread.
@@ -215,7 +213,7 @@ class Transaction {
 
   // Shard callbacks used within Execute calls
   OpStatus AddToWatchedShardCb(EngineShard* shard);
-  bool RemoveFromWatchedShardCb(EngineShard* shard);
+
   void ExpireShardCb(EngineShard* shard);
   void UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard);
 

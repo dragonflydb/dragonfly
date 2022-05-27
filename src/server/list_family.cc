@@ -132,6 +132,7 @@ OpResult<ShardFFResult> FindFirst(Transaction* trans) {
 
   auto cb = [&find_res](auto* t, EngineShard* shard) {
     auto args = t->ShardArgsInShard(shard->shard_id());
+
     OpResult<pair<PrimeIterator, unsigned>> ff_res =
         shard->db_slice().FindFirst(t->db_index(), args);
 
@@ -245,12 +246,16 @@ OpStatus BPopper::Run(Transaction* t, unsigned msec) {
     result = FindFirst(t);  // retry - must find something.
   }
 
+  // We got here
   if (!result) {
-    t->UnregisterWatch();
+    // cleanups, locks removal etc.
+    auto cb = [this](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
+    t->Execute(std::move(cb), true);
+
     return result.status();
   }
 
-  VLOG(1) << "Popping an element";
+  VLOG(1) << "Popping an element " << t->DebugId();
   ff_result_ = move(result.value());
 
   auto cb = [this](Transaction* t, EngineShard* shard) { return Pop(t, shard); };
