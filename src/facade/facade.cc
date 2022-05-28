@@ -74,7 +74,6 @@ const char kScriptErrType[] = "script_error";
 const char kIndexOutOfRange[] = "index out of range";
 const char kOutOfMemory[] = "Out of memory";
 
-
 const char* RespExpr::TypeName(Type t) {
   switch (t) {
     case STRING:
@@ -94,7 +93,10 @@ const char* RespExpr::TypeName(Type t) {
 }
 
 ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : owner_(owner) {
-  switch (owner->protocol()) {
+  if (owner) {
+    protocol_ = owner->protocol();
+  }
+  switch (protocol_) {
     case Protocol::REDIS:
       rbuilder_.reset(new RedisReplyBuilder(stream));
       break;
@@ -109,10 +111,6 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : ow
   replica_conn = false;
   authenticated = false;
   force_dispatch = false;
-}
-
-Protocol ConnectionContext::protocol() const {
-  return owner_->protocol();
 }
 
 RedisReplyBuilder* ConnectionContext::operator->() {

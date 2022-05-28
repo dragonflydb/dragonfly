@@ -7,13 +7,14 @@
 #include <variant>
 
 #include "base/io_buf.h"
+#include "facade/facade_types.h"
 #include "facade/redis_parser.h"
-#include "server/conn_context.h"
 #include "util/fiber_socket_base.h"
 
 namespace dfly {
 
 class Service;
+class ConnectionContext;
 
 class Replica {
  public:
@@ -88,6 +89,8 @@ class Replica {
   // Where the sock_ is handled.
   util::ProactorBase* sock_thread_ = nullptr;
   std::unique_ptr<facade::RedisParser> parser_;
+  facade::RespVec cmd_args_;
+  facade::CmdArgVec cmd_str_args_;
 
   // repl_offs - till what offset we've already read from the master.
   // ack_offs_ last acknowledged offset.

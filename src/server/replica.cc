@@ -14,6 +14,7 @@ extern "C" {
 #include <boost/asio/ip/tcp.hpp>
 
 #include "base/logging.h"
+#include "facade/dragonfly_connection.h"
 #include "facade/redis_parser.h"
 #include "server/error.h"
 #include "server/main_service.h"
@@ -521,6 +522,8 @@ error_code Replica::ConsumeRedisStream() {
   time_t last_ack = time(nullptr);
   string ack_cmd;
 
+
+  // basically reflection of dragonfly_connection IoLoop function.
   while (!ec) {
     io::MutableBytes buf = io_buf.AppendBuffer();
     io::Result<size_t> size_res = sock_->Recv(buf);
@@ -538,7 +541,7 @@ error_code Replica::ConsumeRedisStream() {
       ack_cmd.clear();
       absl::StrAppend(&ack_cmd, "REPLCONF ACK ", repl_offs_);
       serializer.SendCommand(ack_cmd);
-      CHECK_EC(serializer.ec());
+      RETURN_ON_ERR(serializer.ec());
     }
 
     ec = ParseAndExecute(&io_buf);
@@ -570,13 +573,25 @@ error_code Replica::ParseAndExecute(base::IoBuf* io_buf) {
 
   uint32_t consumed = 0;
   RedisParser::Result result = RedisParser::OK;
-  RespVec cmd_args;
+
+  io::NullSink null_sink;  // we never reply back on the commands.
+  ConnectionContext conn_context{&null_sink, nullptr};
+  conn_context.is_replicating = true;
 
   do {
-    result = parser_->Parse(io_buf->InputBuffer(), &consumed, &cmd_args);
+    result = parser_->Parse(io_buf->InputBuffer(), &consumed, &cmd_args_);
 
     switch (result) {
       case RedisParser::OK:
+        if (!cmd_args_.empty()) {
+          VLOG(2) << "Got command " << ToSV(cmd_args_[0].GetBuf()) << ToSV(cmd_args_[1].GetBuf())
+                  << "\n consumed: " << consumed;
+          facade::RespToArgList(cmd_args_, &cmd_str_args_);
+          CmdArgList arg_list{cmd_str_args_.data(), cmd_str_args_.size()};
+          service_.DispatchCommand(arg_list, &conn_context);
+        }
+        io_buf->ConsumeInput(consumed);
+      break;
       case RedisParser::INPUT_PENDING:
         io_buf->ConsumeInput(consumed);
         break;

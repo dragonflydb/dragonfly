@@ -411,7 +411,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   bool under_multi =
       dfly_cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE && !is_trans_cmd;
 
-  if (!etl.is_master && is_write_cmd) {
+  if (!etl.is_master && is_write_cmd && !dfly_cntx->is_replicating) {
     (*cntx)->SendError("-READONLY You can't write against a read only replica.");
     return;
   }

@@ -25,7 +25,9 @@ class ConnectionContext {
     return owner_;
   }
 
-  Protocol protocol() const;
+  Protocol protocol() const {
+    return protocol_;
+  }
 
   // A convenient proxy for redis interface.
   RedisReplyBuilder* operator->();
@@ -55,6 +57,7 @@ class ConnectionContext {
 
  private:
   Connection* owner_;
+  Protocol protocol_ = Protocol::REDIS;
   std::unique_ptr<SinkReplyBuilder> rbuilder_;
 };
 
