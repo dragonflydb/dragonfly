@@ -59,8 +59,8 @@ jobs:
           cd ${{github.workspace}}/build
           ninja src/all
           ccache --show-stats
-          GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1 ctest -V -R rdb_test
+          GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1 ctest -V -R rdb_test
           echo Run ctest -V -L DFLY
           #GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1 
-          GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1 ctest -V -L DFLY
+          GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1 ctest -V -L DFLY
           # GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1 CTEST_OUTPUT_ON_FAILURE=1 ninja server/test

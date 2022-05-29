@@ -434,7 +434,7 @@ error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
   } else {
     if (sink_) {
       iovec v[2] = {{.iov_base = const_cast<uint8_t*>(ib.data()), .iov_len = ib.size()},
-                  {.iov_base = const_cast<uint8_t*>(buf.data()), .iov_len = buf.size()}};
+                    {.iov_base = const_cast<uint8_t*>(buf.data()), .iov_len = buf.size()}};
       RETURN_ON_ERR(sink_->Write(v, ABSL_ARRAYSIZE(v)));
     } else {
       RETURN_ON_ERR(aligned_buf_->Write(ib));
@@ -608,12 +608,6 @@ error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
 
   size_t num_written = 0;
   SliceSnapshot::DbRecord record;
-#if 1
-
-#else
-  vector<string> vals;
-  vector<iovec> ivec;
-#endif
 
   uint8_t buf[16];
   DbIndex last_db_index = kInvalidDbId;
@@ -624,6 +618,7 @@ error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
 
   // we can not exit on io-error since we spawn fibers that push data.
   // TODO: we may signal them to stop processing and exit asap in case of the error.
+  size_t channel_bytes = 0;
 
   while (channel.Pop(record)) {
     if (io_error)
@@ -634,49 +629,27 @@ error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
         unsigned enclen = SerializeLen(record.db_index, buf + 1);
         char* str = (char*)buf;
 
-#if 1
         io_error = aligned_buf_.Write(string_view{str, enclen + 1});
         if (io_error)
           break;
-#else
-        vals.emplace_back(string(str, enclen + 1));
-#endif
         last_db_index = record.db_index;
       }
 
-#if 1
+      channel_bytes += record.value.size();
       io_error = aligned_buf_.Write(record.value);
       record.value.clear();
-#else
-      vals.emplace_back(std::move(record.value));
-#endif
     } while (!io_error && channel.TryPop(record));
 
-#if 1
-
-#else
-    ivec.resize(vals.size());
-    for (size_t i = 0; i < ivec.size(); ++i) {
-      ivec[i].iov_base = vals[i].data();
-      ivec[i].iov_len = vals[i].size();
-    }
-    RETURN_ON_ERR(sink_->Write(ivec.data(), ivec.size()));
-
-    num_written += vals.size();
-    vals.clear();
-#endif
   }  // while (channel.pop)
 
-  /*if (buf_offs_) {
-    size_t len = (buf_offs_ + kAmask) & (~kAmask);
-    ivec.iov_len = len;
-    RETURN_ON_ERR(sink_->Write(&ivec, 1));
-  }*/
+  size_t pushed_bytes = 0;
   for (auto& ptr : impl_->shard_snapshots) {
     ptr->Join();
+    pushed_bytes += ptr->channel_bytes();
   }
 
-  VLOG(1) << "Blobs written " << num_written;
+  VLOG(1) << "Blobs written " << num_written << " pulled bytes: " << channel_bytes
+          << " pushed bytes: " << pushed_bytes;
   if (io_error)
     return io_error;
 

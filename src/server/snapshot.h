@@ -38,6 +38,9 @@ class SliceSnapshot {
   }
 
   RdbSerializer* serializer() { return rdb_serializer_.get(); }
+
+  size_t channel_bytes() const { return channel_bytes_;}
+
  private:
   void FiberFunc();
   bool FlushSfile(bool force);
@@ -63,6 +66,7 @@ class SliceSnapshot {
   DbIndex savecb_current_db_;  // used by SaveCb
   RecordChannel* dest_;
 
+  size_t channel_bytes_ = 0;
   size_t serialized_ = 0, skipped_ = 0, side_saved_ = 0, savecb_calls_ = 0;
 };
 
