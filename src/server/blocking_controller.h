@@ -44,11 +44,9 @@ class BlockingController {
   // Called from operations that create keys like lpush, rename etc.
   void AwakeWatched(DbIndex db_index, std::string_view db_key);
 
-  // void OnTxFinish();
-
-  // void RegisterAwaitForConverge(Transaction* t);
-
+  // Used in tests and debugging functions.
   size_t NumWatched(DbIndex db_indx) const;
+  std::vector<std::string> GetWatchedKeys(DbIndex db_indx) const;
 
  private:
   struct WatchQueue;
@@ -56,9 +54,7 @@ class BlockingController {
 
   using WatchQueueMap = absl::flat_hash_map<std::string, std::unique_ptr<WatchQueue>>;
 
-  /// Returns the notified transaction,
-  /// or null if all transactions in the queue have expired..
-  void NotifyWatchQueue(WatchQueue* wq);
+  void NotifyWatchQueue(std::string_view key, WatchQueueMap* wqm);
 
   // void NotifyConvergence(Transaction* tx);
 

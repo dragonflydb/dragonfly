@@ -46,13 +46,6 @@ void SendProtocolError(RedisParser::Result pres, FiberSocketBase* peer) {
   }
 }
 
-void RespToArgList(const RespVec& src, CmdArgVec* dest) {
-  dest->resize(src.size());
-  for (size_t i = 0; i < src.size(); ++i) {
-    (*dest)[i] = ToMSS(src[i].GetBuf());
-  }
-}
-
 void FetchBuilderStats(ConnectionStats* stats, SinkReplyBuilder* builder) {
   stats->io_write_cnt += builder->io_write_cnt();
   stats->io_write_bytes += builder->io_write_bytes();
@@ -637,6 +630,13 @@ auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> Request* {
   }
 
   return req;
+}
+
+void RespToArgList(const RespVec& src, CmdArgVec* dest) {
+  dest->resize(src.size());
+  for (size_t i = 0; i < src.size(); ++i) {
+    (*dest)[i] = ToMSS(src[i].GetBuf());
+  }
 }
 
 }  // namespace facade

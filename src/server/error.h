@@ -21,9 +21,9 @@ using facade::kDbIndOutOfRangeErr;
 
 #define RETURN_ON_ERR(x) \
   do {                   \
-    auto ec = (x);       \
-    if (ec)              \
-      return ec;         \
+    auto __ec = (x);       \
+    if (__ec)              \
+      return __ec;         \
   } while (0)
 
 #endif  // RETURN_ON_ERR

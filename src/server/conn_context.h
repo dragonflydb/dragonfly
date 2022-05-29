@@ -85,6 +85,8 @@ class ConnectionContext : public facade::ConnectionContext {
   }
 
   void ChangeSubscription(bool to_add, bool to_reply, CmdArgList args);
+
+  bool is_replicating = false;
 };
 
 }  // namespace dfly

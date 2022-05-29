@@ -30,6 +30,12 @@ class ListFamilyTest : public BaseFamilyTest {
   ListFamilyTest() {
     num_threads_ = 4;
   }
+
+  void WaitForLocked(string_view key) {
+    do {
+      this_fiber::sleep_for(30us);
+    } while (!IsLocked(0, key));
+  }
 };
 
 const char kKey1[] = "x";
@@ -181,9 +187,7 @@ TEST_F(ListFamilyTest, BLPopMultiPush) {
     blpop_resp = Run({"blpop", kKey1, kKey2, kKey3, "0"});
   });
 
-  do {
-    this_fiber::sleep_for(30us);
-  } while (!IsLocked(0, kKey1));
+  WaitForLocked(kKey1);
 
   auto p1_fb = pp_->at(1)->LaunchFiber([&] {
     for (unsigned i = 0; i < 100; ++i) {
@@ -221,9 +225,7 @@ TEST_F(ListFamilyTest, BLPopSerialize) {
     blpop_resp = Run({"blpop", kKey1, kKey2, kKey3, "0"});
   });
 
-  do {
-    this_fiber::sleep_for(30us);
-  } while (!IsLocked(0, kKey1));
+  WaitForLocked(kKey1);
 
   LOG(INFO) << "Starting multi";
 
@@ -293,9 +295,7 @@ TEST_F(ListFamilyTest, WrongTypeDoesNotWake) {
     blpop_resp = Run({"blpop", kKey1, "0"});
   });
 
-  do {
-    this_fiber::sleep_for(30us);
-  } while (!IsLocked(0, kKey1));
+  WaitForLocked(kKey1);
 
   auto p1_fb = pp_->at(1)->LaunchFiber([&] {
     Run({"multi"});
@@ -320,11 +320,11 @@ TEST_F(ListFamilyTest, BPopSameKeyTwice) {
 
   auto pop_fb = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
     blpop_resp = Run({"blpop", kKey1, kKey2, kKey2, kKey1, "0"});
+    auto watched = Run({"debug", "watched"});
+    ASSERT_THAT(watched, ArrLen(0));
   });
 
-  do {
-    this_fiber::sleep_for(30us);
-  } while (!IsLocked(0, kKey1));
+  WaitForLocked(kKey1);
 
   pp_->at(1)->Await([&] { EXPECT_EQ(1, CheckedInt({"lpush", kKey1, "bar"})); });
   pop_fb.join();
@@ -336,15 +336,35 @@ TEST_F(ListFamilyTest, BPopSameKeyTwice) {
     blpop_resp = Run({"blpop", kKey1, kKey2, kKey2, kKey1, "0"});
   });
 
-  do {
-    this_fiber::sleep_for(30us);
-  } while (!IsLocked(0, kKey1));
+  WaitForLocked(kKey1);
 
   pp_->at(1)->Await([&] { EXPECT_EQ(1, CheckedInt({"lpush", kKey2, "bar"})); });
   pop_fb.join();
 
   ASSERT_THAT(blpop_resp, ArrLen(2));
   EXPECT_THAT(blpop_resp.GetVec(), ElementsAre(kKey2, "bar"));
+}
+
+TEST_F(ListFamilyTest, BPopTwoKeysSameShard) {
+  Run({"exists", "x", "y"});
+  ASSERT_EQ(1, GetDebugInfo().shards_count);
+  RespExpr blpop_resp;
+
+  auto pop_fb = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
+    blpop_resp = Run({"blpop", "x", "y", "0"});
+    auto watched = Run({"debug", "watched"});
+
+    EXPECT_FALSE(IsLocked(0, "y"));
+    ASSERT_THAT(watched, ArrLen(0));
+  });
+
+  WaitForLocked("x");
+
+  pp_->at(1)->Await([&] { EXPECT_EQ(1, CheckedInt({"lpush", "x", "bar"})); });
+  pop_fb.join();
+
+  ASSERT_THAT(blpop_resp, ArrLen(2));
+  EXPECT_THAT(blpop_resp.GetVec(), ElementsAre("x", "bar"));
 }
 
 TEST_F(ListFamilyTest, BPopRename) {
@@ -357,9 +377,7 @@ TEST_F(ListFamilyTest, BPopRename) {
     blpop_resp = Run({"blpop", kKey1, "0"});
   });
 
-  do {
-    this_fiber::sleep_for(30us);
-  } while (!IsLocked(0, kKey1));
+  WaitForLocked(kKey1);
 
   pp_->at(1)->Await([&] {
     EXPECT_EQ(1, CheckedInt({"lpush", "a", "bar"}));
@@ -377,9 +395,7 @@ TEST_F(ListFamilyTest, BPopFlush) {
     blpop_resp = Run({"blpop", kKey1, "0"});
   });
 
-  do {
-    this_fiber::sleep_for(30us);
-  } while (!IsLocked(0, kKey1));
+  WaitForLocked(kKey1);
 
   pp_->at(1)->Await([&] {
     Run({"flushdb"});

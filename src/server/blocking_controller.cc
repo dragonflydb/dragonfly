@@ -114,20 +114,14 @@ void BlockingController::RunStep(Transaction* completed_t) {
     DbWatchTable& wt = *dbit->second;
     for (auto key : wt.awakened_keys) {
       string_view sv_key = static_cast<string_view>(key);
+      DVLOG(1) << "Processing awakened key " << sv_key;
 
       // Double verify we still got the item.
       auto [it, exp_it] = owner_->db_slice().FindExt(index, sv_key);
       if (!IsValid(it) || it->second.ObjType() != OBJ_LIST)  // Only LIST is allowed to block.
         continue;
 
-      auto w_it = wt.queue_map.find(sv_key);
-      CHECK(w_it != wt.queue_map.end());
-      DVLOG(1) << "NotifyWatchQueue " << key;
-      WatchQueue* wq = w_it->second.get();
-      NotifyWatchQueue(wq);
-      if (wq->items.empty()) {
-        wt.queue_map.erase(w_it);
-      }
+      NotifyWatchQueue(sv_key, &wt.queue_map);
     }
     wt.awakened_keys.clear();
 
@@ -155,33 +149,42 @@ void BlockingController::AddWatched(Transaction* trans) {
       res->second.reset(new WatchQueue);
     }
 
+    if (!res->second->items.empty()) {
+      Transaction* last = res->second->items.back().get();
+      DCHECK_GT(last->use_count(), 0u);
+
+      // Duplicate keys case. We push only once per key.
+      if (last == trans)
+        continue;
+    }
+    DVLOG(2) << "Emplace " << trans << " " << trans->DebugId() << " to watch " << key;
     res->second->items.emplace_back(trans);
   }
 }
 
-// Runs in O(N) complexity.
+// Runs in O(N) complexity in the worst case.
 void BlockingController::RemoveWatched(Transaction* trans) {
   VLOG(1) << "RemoveWatched [" << owner_->shard_id() << "] " << trans->DebugId();
 
   auto dbit = watched_dbs_.find(trans->db_index());
-  CHECK(dbit != watched_dbs_.end());
+  if (dbit == watched_dbs_.end())
+    return;
 
   DbWatchTable& wt = *dbit->second;
   auto args = trans->ShardArgsInShard(owner_->shard_id());
   for (auto key : args) {
     auto watch_it = wt.queue_map.find(key);
-    CHECK(watch_it != wt.queue_map.end());
+    if (watch_it == wt.queue_map.end())
+      continue;  // that can happen in case of duplicate keys
 
     WatchQueue& wq = *watch_it->second;
-    bool erased = false;
     for (auto items_it = wq.items.begin(); items_it != wq.items.end(); ++items_it) {
       if (items_it->trans == trans) {
         wq.items.erase(items_it);
-        erased = true;
         break;
       }
     }
-    CHECK(erased);
+    // again, we may not find trans if we searched for the same key several times.
 
     if (wq.items.empty()) {
       wt.RemoveEntry(watch_it);
@@ -208,13 +211,18 @@ void BlockingController::AwakeWatched(DbIndex db_index, string_view db_key) {
 
   if (wt.AddAwakeEvent(WatchQueue::SUSPENDED, db_key)) {
     awakened_indices_.insert(db_index);
+  } else {
+    DVLOG(1) << "Skipped awakening " << db_index;
   }
 }
 
-// Internal function called from ProcessAwakened().
+// Internal function called from RunStep().
 // Marks the queue as active and notifies the first transaction in the queue.
-void BlockingController::NotifyWatchQueue(WatchQueue* wq) {
-  VLOG(1) << "Notify WQ: [" << owner_->shard_id() << "]";
+void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueueMap* wqm) {
+  auto w_it = wqm->find(key);
+  CHECK(w_it != wqm->end());
+  DVLOG(1) << "Notify WQ: [" << owner_->shard_id() << "] " << key;
+  WatchQueue* wq = w_it->second.get();
 
   wq->state = WatchQueue::ACTIVE;
 
@@ -224,6 +232,7 @@ void BlockingController::NotifyWatchQueue(WatchQueue* wq) {
   do {
     WatchItem& wi = queue.front();
     Transaction* head = wi.get();
+    DVLOG(2) << "Pop " << head << " from key " << key;
 
     queue.pop_front();
 
@@ -233,6 +242,10 @@ void BlockingController::NotifyWatchQueue(WatchQueue* wq) {
       break;
     }
   } while (!queue.empty());
+
+  if (wq->items.empty()) {
+    wqm->erase(w_it);
+  }
 }
 
 #if 0
@@ -286,6 +299,19 @@ size_t BlockingController::NumWatched(DbIndex db_indx) const {
     return 0;
 
   return it->second->queue_map.size();
+}
+
+vector<string> BlockingController::GetWatchedKeys(DbIndex db_indx) const {
+  vector<string> res;
+  auto it = watched_dbs_.find(db_indx);
+
+  if (it != watched_dbs_.end()) {
+    for (const auto& k_v : it->second->queue_map) {
+      res.push_back(k_v.first);
+    }
+  }
+
+  return res;
 }
 
 }  // namespace dfly

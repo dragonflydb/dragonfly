@@ -284,6 +284,8 @@ void Transaction::SetExecCmd(const CommandId* cid) {
 }
 
 string Transaction::DebugId() const {
+  DCHECK_GT(use_count_.load(memory_order_relaxed), 0u);
+
   return absl::StrCat(Name(), "@", txid_, "/", unique_shard_cnt_, " (", trans_id(this), ")");
 }
 
@@ -305,8 +307,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
   DCHECK(sd.local_mask & ARMED);
   sd.local_mask &= ~ARMED;
 
-  DCHECK_EQ(sd.local_mask & (SUSPENDED_Q | EXPIRED_Q), 0);
-
+  bool was_suspended = sd.local_mask & SUSPENDED_Q;
   bool awaked_prerun = (sd.local_mask & AWAKED_Q) != 0;
   bool incremental_lock = multi_ && multi_->incremental;
 
@@ -332,7 +333,8 @@ bool Transaction::RunInShard(EngineShard* shard) {
   /*************************************************************************/
   // Actually running the callback.
   try {
-    OpStatus status = cb_(this, shard);
+    // if transaction is suspended (blocked in watched queue), then it's a noop.
+    OpStatus status = was_suspended ? OpStatus::OK : cb_(this, shard);
 
     if (unique_shard_cnt_ == 1) {
       cb_ = nullptr;  // We can do it because only a single thread runs the callback.
@@ -366,20 +368,25 @@ bool Transaction::RunInShard(EngineShard* shard) {
 
   // If it's a final hop we should release the locks.
   if (should_release) {
-    bool is_suspended = sd.local_mask & SUSPENDED_Q;
+    bool become_suspended = sd.local_mask & SUSPENDED_Q;
 
     if (IsGlobal()) {
-      DCHECK(!awaked_prerun && !is_suspended);  // Global transactions can not be blocking.
+      DCHECK(!awaked_prerun && !become_suspended);  // Global transactions can not be blocking.
       shard->shard_lock()->Release(Mode());
     } else {  // not global.
       KeyLockArgs largs = GetLockArgs(idx);
+      DCHECK(sd.local_mask & KEYLOCK_ACQUIRED);
 
       // If a transaction has been suspended, we keep the lock so that future transaction
       // touching those keys will be ordered via TxQueue. It's necessary because we preserve
       // the atomicity of awaked transactions by halting the TxQueue.
-      if (!is_suspended) {
+      if (was_suspended || !become_suspended) {
         shard->db_slice().Release(mode, largs);
         sd.local_mask &= ~KEYLOCK_ACQUIRED;
+
+        if (was_suspended || (sd.local_mask & AWAKED_Q)) {
+          shard->blocking_controller()->RemoveWatched(this);
+        }
       }
       sd.local_mask &= ~OUT_OF_ORDER;
 
@@ -396,37 +403,6 @@ bool Transaction::RunInShard(EngineShard* shard) {
   // From this point on we can not access 'this'.
 
   return !should_release;  // keep
-}
-
-void Transaction::RunNoop(EngineShard* shard) {
-  DVLOG(1) << "RunNoop " << DebugId();
-
-  unsigned idx = SidToId(shard->shard_id());
-  auto& sd = shard_data_[idx];
-  DCHECK(sd.local_mask & ARMED);
-  DCHECK(sd.local_mask & KEYLOCK_ACQUIRED);
-  DCHECK(!multi_);
-  DCHECK(!IsGlobal());
-
-  sd.local_mask &= ~ARMED;
-
-  if (unique_shard_cnt_ == 1) {
-    cb_ = nullptr;
-    local_result_ = OpStatus::OK;
-  }
-
-  if (coordinator_state_ & COORD_EXEC_CONCLUDING) {
-    KeyLockArgs largs = GetLockArgs(idx);
-    shard->db_slice().Release(Mode(), largs);
-    sd.local_mask &= ~KEYLOCK_ACQUIRED;
-
-    if (sd.local_mask & SUSPENDED_Q) {
-      sd.local_mask |= EXPIRED_Q;
-      shard->blocking_controller()->RemoveWatched(this);
-    }
-  }
-  // Decrease run count after we update all the data in the transaction object.
-  CHECK_GE(DecreaseRunCnt(), 1u);
 }
 
 void Transaction::ScheduleInternal() {
@@ -939,7 +915,8 @@ bool Transaction::WaitOnWatch(const time_point& tp) {
     DVLOG(1) << "WaitOnWatch AfterWait";
   } else {
     DVLOG(1) << "WaitOnWatch TimeWait for "
-             << duration_cast<milliseconds>(tp - time_point::clock::now()).count() << " ms";
+             << duration_cast<milliseconds>(tp - time_point::clock::now()).count() << " ms "
+             << DebugId();
 
     status = blocking_ec_.await_until(move(wake_cb), tp);
 
@@ -982,14 +959,6 @@ bool Transaction::WaitOnWatch(const time_point& tp) {
   return true;
 }
 
-void Transaction::UnregisterWatch() {
-  auto cb = [](Transaction* t, EngineShard* shard) {
-    t->RemoveFromWatchedShardCb(shard);
-    return OpStatus::OK;
-  };
-  Execute(std::move(cb), true);
-}
-
 // Runs only in the shard thread.
 OpStatus Transaction::AddToWatchedShardCb(EngineShard* shard) {
   ShardId idx = SidToId(shard->shard_id());
@@ -1003,25 +972,6 @@ OpStatus Transaction::AddToWatchedShardCb(EngineShard* shard) {
   DVLOG(1) << "AddWatched " << DebugId() << " local_mask:" << sd.local_mask;
 
   return OpStatus::OK;
-}
-
-// Runs only in the shard thread.
-// Quadratic complexity in number of arguments and queue length.
-bool Transaction::RemoveFromWatchedShardCb(EngineShard* shard) {
-  ShardId idx = SidToId(shard->shard_id());
-  auto& sd = shard_data_[idx];
-
-  constexpr uint16_t kQueueMask =
-      Transaction::SUSPENDED_Q | Transaction::AWAKED_Q | Transaction::EXPIRED_Q;
-
-  if ((sd.local_mask & kQueueMask) == 0)
-    return false;
-
-  sd.local_mask &= ~kQueueMask;
-
-  shard->blocking_controller()->RemoveWatched(this);
-
-  return true;
 }
 
 void Transaction::ExpireShardCb(EngineShard* shard) {
@@ -1170,7 +1120,6 @@ void Transaction::BreakOnClose() {
     blocking_ec_.notify();
   }
 }
-
 
 OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
   DCHECK_EQ(0u, cid->opt_mask() & CO::GLOBAL_TRANS);

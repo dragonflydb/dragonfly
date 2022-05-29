@@ -5,11 +5,12 @@ on:
     tags:
     - 'v*'
 
+permissions:
+  contents: write
+    
 jobs:
   create-release:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Create Release
         uses: ncipollo/release-action@v1
@@ -22,8 +23,6 @@ jobs:
 
   build-qemu:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     name: Build aarch64 on ubuntu20.04
     needs: create-release
     steps:
@@ -66,6 +65,14 @@ jobs:
                               --slave /usr/bin/g++ g++ /usr/bin/g++-9
         run: |
             cd /src
+            touch dockerbuild.txt
+            chown -R root build-opt/
+            ls -la build-opt/_deps/ || true
+            echo "now /src:"
+            ls -l 
+            for i in `ls -d ./build-opt/_deps/*-src`; do 
+              git config --global --add safe.directory $(realpath $i)
+            done
             ./tools/release.sh
     - name: Show the artifact
       # Items placed in /src/build-opt in the container will be in
@@ -84,8 +91,6 @@ jobs:
     needs: create-release
     container: 
       image: ghcr.io/romange/ubuntu-dev:20
-    permissions:
-      contents: write
     steps:
     - uses: actions/checkout@v2
       with:
@@ -114,7 +119,7 @@ jobs:
         with:
           artifacts: "artifacts/dragonfly-*/*"
           allowUpdates: true
-          omitBody: true
           draft: true
           prerelease: true
+          omitNameDuringUpdate: true
           token: ${{ secrets.GITHUB_TOKEN }}

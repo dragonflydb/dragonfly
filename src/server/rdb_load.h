@@ -1,4 +1,4 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 #include <system_error>
@@ -19,11 +19,15 @@ class ScriptMgr;
 
 class RdbLoader {
  public:
-  explicit RdbLoader(EngineShardSet* ess, ScriptMgr* script_mgr);
+  explicit RdbLoader(ScriptMgr* script_mgr);
 
   ~RdbLoader();
 
   std::error_code Load(::io::Source* src);
+  void set_source_limit(size_t n) { source_limit_ = n;}
+
+  ::io::Bytes Leftover() const { return mem_buf_.InputBuffer(); }
+  size_t bytes_read() const { return bytes_read_; }
 
  private:
   using MutableBytes = ::io::MutableBytes;
@@ -84,13 +88,13 @@ class RdbLoader {
   static void LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib);
 
   ScriptMgr* script_mgr_;
-  EngineShardSet& ess_;
   base::IoBuf mem_buf_;
   base::PODArray<uint8_t> compr_buf_;
   std::unique_ptr<ItemsBuf[]> shard_buf_;
 
   ::io::Source* src_ = nullptr;
   size_t bytes_read_ = 0;
+  size_t source_limit_ = SIZE_MAX;
   DbIndex cur_db_index_ = 0;
 };
 

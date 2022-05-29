@@ -111,9 +111,9 @@ string InferLoadFile(fs::path data_dir) {
 }
 
 class LinuxWriteWrapper : public io::WriteFile {
-
-public:
-  LinuxWriteWrapper(uring::LinuxFile* lf) : WriteFile("wrapper"), lf_(lf) {}
+ public:
+  LinuxWriteWrapper(uring::LinuxFile* lf) : WriteFile("wrapper"), lf_(lf) {
+  }
 
   io::Result<size_t> WriteSome(const iovec* v, uint32_t len) final {
     io::Result<size_t> res = lf_->WriteSome(v, len, offset_, 0);
@@ -248,7 +248,7 @@ error_code ServerFamily::LoadRdb(const std::string& rdb_file) {
   if (res) {
     io::FileSource fs(*res);
 
-    RdbLoader loader(shard_set, script_mgr());
+    RdbLoader loader(script_mgr());
     ec = loader.Load(&fs);
   } else {
     ec = res.error();
@@ -852,6 +852,10 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   unique_lock lk(replicaof_mu_);
   if (replica_) {
     replica_->Stop();  // NOTE: consider introducing update API flow.
+  } else {
+    // TODO: to disconnect all the blocked clients (pubsub, blpop etc)
+
+    pool.AwaitFiberOnAll([&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = false; });
   }
 
   replica_.swap(new_replica);

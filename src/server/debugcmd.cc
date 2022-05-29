@@ -10,6 +10,7 @@
 #include <filesystem>
 
 #include "base/logging.h"
+#include "server/blocking_controller.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/main_service.h"
@@ -47,13 +48,11 @@ struct ObjInfo {
   unsigned bucket_id = 0;
   unsigned slot_id = 0;
 
+  enum LockStatus { NONE, S, X } lock_status = NONE;
+
   int64_t ttl = INT64_MAX;
   bool has_sec_precision = false;
-
-  ObjInfo(unsigned e, unsigned bid) : encoding(e), bucket_id(bid) {
-  }
-
-  ObjInfo() = default;
+  bool found = false;
 };
 
 void DoPopulateBatch(std::string_view prefix, size_t val_size, const SetCmd::SetParams& params,
@@ -88,6 +87,7 @@ void DebugCmd::Run(CmdArgList args) {
         "    Examples:",
         "    * DEBUG RELOAD NOSAVE: replace the current database with the contents of an",
         "      existing RDB file.",
+        "WATCHED",
         "POPULATE <count> [<prefix>] [<size>]",
         "    Create <count> string keys named key:<num>. If <prefix> is specified then",
         "    it is used instead of the 'key' prefix.",
@@ -105,6 +105,9 @@ void DebugCmd::Run(CmdArgList args) {
 
   if (subcmd == "RELOAD") {
     return Reload(args);
+  }
+  if (subcmd == "WATCHED") {
+    return Watched();
   }
 
   if (subcmd == "LOAD" && args.size() == 3) {
@@ -283,43 +286,72 @@ void DebugCmd::Inspect(string_view key) {
   EngineShardSet& ess = *shard_set;
   ShardId sid = Shard(key, ess.size());
 
-  auto cb = [&]() -> facade::OpResult<ObjInfo> {
+  auto cb = [&]() -> ObjInfo {
     auto& db_slice = EngineShard::tlocal()->db_slice();
     auto [pt, exp_t] = db_slice.GetTables(cntx_->db_index());
 
     PrimeIterator it = pt->Find(key);
-    if (!IsValid(it)) {
-      return OpStatus::KEY_NOTFOUND;
+    ObjInfo oinfo;
+    if (IsValid(it)) {
+      oinfo.found = true;
+      oinfo.encoding = it->second.Encoding();
+      oinfo.bucket_id = it.bucket_id();
+      oinfo.slot_id = it.slot_id();
+      if (it->second.HasExpire()) {
+        ExpireIterator exp_it = exp_t->Find(it->first);
+        CHECK(!exp_it.is_done());
+
+        time_t exp_time = db_slice.ExpireTime(exp_it);
+        oinfo.ttl = exp_time - db_slice.Now();
+        oinfo.has_sec_precision = exp_it->second.is_second_precision();
+      }
     }
 
-    ObjInfo oinfo(it->second.Encoding(), it.bucket_id());
-    oinfo.slot_id = it.slot_id();
-
-    if (it->second.HasExpire()) {
-      ExpireIterator exp_it = exp_t->Find(it->first);
-      CHECK(!exp_it.is_done());
-
-      time_t exp_time = db_slice.ExpireTime(exp_it);
-      oinfo.ttl = exp_time - db_slice.Now();
-      oinfo.has_sec_precision = exp_it->second.is_second_precision();
+    KeyLockArgs lock_args;
+    lock_args.args = ArgSlice{&key, 1};
+    lock_args.db_index = cntx_->db_index();
+    if (!db_slice.CheckLock(IntentLock::EXCLUSIVE, lock_args)) {
+      oinfo.lock_status =
+          db_slice.CheckLock(IntentLock::SHARED, lock_args) ? ObjInfo::S : ObjInfo::X;
     }
 
     return oinfo;
   };
 
-  OpResult<ObjInfo> res = ess.Await(sid, cb);
-  if (res) {
-    string resp;
-    StrAppend(&resp, "encoding:", strEncoding(res->encoding), " bucket_id:", res->bucket_id);
-    StrAppend(&resp, " slot:", res->slot_id);
+  ObjInfo res = ess.Await(sid, cb);
+  string resp;
 
-    if (res->ttl != INT64_MAX) {
-      StrAppend(&resp, " ttl:", res->ttl, res->has_sec_precision ? "s" : "ms");
+  if (res.found) {
+    StrAppend(&resp, "encoding:", strEncoding(res.encoding), " bucket_id:", res.bucket_id);
+    StrAppend(&resp, " slot:", res.slot_id, " shard:", sid);
+
+    if (res.ttl != INT64_MAX) {
+      StrAppend(&resp, " ttl:", res.ttl, res.has_sec_precision ? "s" : "ms");
     }
-    (*cntx_)->SendSimpleString(resp);
-  } else {
-    (*cntx_)->SendError(res.status());
   }
+
+  if (res.lock_status != ObjInfo::NONE) {
+    StrAppend(&resp, " lock:", res.lock_status == ObjInfo::X ? "x" : "s");
+  }
+  (*cntx_)->SendSimpleString(resp);
+}
+
+void DebugCmd::Watched() {
+  vector<string> watched_keys;
+  boost::fibers::mutex mu;
+
+  auto cb = [&](EngineShard* shard) {
+    auto* bc = shard->blocking_controller();
+    if (bc) {
+      auto keys = bc->GetWatchedKeys(cntx_->db_index());
+
+      lock_guard lk(mu);
+      watched_keys.insert(watched_keys.end(), keys.begin(), keys.end());
+    }
+  };
+
+  shard_set->RunBlockingInParallel(cb);
+  (*cntx_)->SendStringArr(watched_keys);
 }
 
 }  // namespace dfly

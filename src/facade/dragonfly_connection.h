@@ -121,4 +121,6 @@ class Connection : public util::Connection {
   BreakerCb breaker_cb_;
 };
 
+void RespToArgList(const RespVec& src, CmdArgVec* dest);
+
 }  // namespace facade

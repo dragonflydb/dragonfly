@@ -190,9 +190,9 @@ struct RdbLoader::ObjSettings {
   ObjSettings() = default;
 };
 
-RdbLoader::RdbLoader(EngineShardSet* ess, ScriptMgr* script_mgr)
-    : script_mgr_(script_mgr), ess_(*ess), mem_buf_{16_KB} {
-  shard_buf_.reset(new ItemsBuf[ess_.size()]);
+RdbLoader::RdbLoader(ScriptMgr* script_mgr)
+    : script_mgr_(script_mgr), mem_buf_{16_KB} {
+  shard_buf_.reset(new ItemsBuf[shard_set->size()]);
 }
 
 RdbLoader::~RdbLoader() {
@@ -309,12 +309,12 @@ error_code RdbLoader::Load(io::Source* src) {
       }
 
       VLOG(1) << "Select DB: " << dbid;
-      for (unsigned i = 0; i < ess_.size(); ++i) {
+      for (unsigned i = 0; i < shard_set->size(); ++i) {
         // we should flush pending items before switching dbid.
         FlushShardAsync(i);
 
         // Active database if not existed before.
-        ess_.Add(i, [dbid] { EngineShard::tlocal()->db_slice().ActivateDb(dbid); });
+        shard_set->Add(i, [dbid] { EngineShard::tlocal()->db_slice().ActivateDb(dbid); });
       }
 
       cur_db_index_ = dbid;
@@ -354,13 +354,13 @@ error_code RdbLoader::Load(io::Source* src) {
   /* Verify the checksum if RDB version is >= 5 */
   RETURN_ON_ERR(VerifyChecksum());
 
-  fibers_ext::BlockingCounter bc(ess_.size());
-  for (unsigned i = 0; i < ess_.size(); ++i) {
+  fibers_ext::BlockingCounter bc(shard_set->size());
+  for (unsigned i = 0; i < shard_set->size(); ++i) {
     // Flush the remaining items.
     FlushShardAsync(i);
 
     // Send sentinel callbacks to ensure that all previous messages have been processed.
-    ess_.Add(i, [bc]() mutable { bc.Dec(); });
+    shard_set->Add(i, [bc]() mutable { bc.Dec(); });
   }
   bc.Wait();  // wait for sentinels to report.
 
@@ -378,6 +378,12 @@ error_code RdbLoader::EnsureReadInternal(size_t min_sz) {
   auto out_buf = mem_buf_.AppendBuffer();
   CHECK_GT(out_buf.size(), min_sz);
 
+  // If limit was applied we do not want to read more than needed
+  // important when reading from sockets.
+  if (bytes_read_ + out_buf.size() > source_limit_) {
+    out_buf = out_buf.subspan(0, source_limit_ - bytes_read_);
+  }
+
   io::Result<size_t> res = src_->ReadAtLeast(out_buf, min_sz);
   if (!res)
     return res.error();
@@ -386,6 +392,8 @@ error_code RdbLoader::EnsureReadInternal(size_t min_sz) {
     return RdbError(errc::rdb_file_corrupted);
 
   bytes_read_ += *res;
+
+  DCHECK_LE(bytes_read_, source_limit_);
   mem_buf_.CommitWrite(*res);
 
   return kOk;
@@ -450,6 +458,12 @@ std::error_code RdbLoader::FetchBuf(size_t size, void* dest) {
 
   next += to_copy;
 
+  if (size + bytes_read_ > source_limit_) {
+    LOG(ERROR) << "Out of bound read " << size + bytes_read_ << " vs " << source_limit_;
+
+    return RdbError(errc::rdb_file_corrupted);
+  }
+
   if (size > 512) {  // Worth reading directly into next.
     io::MutableBytes mb{next, size};
 
@@ -458,6 +472,7 @@ std::error_code RdbLoader::FetchBuf(size_t size, void* dest) {
       return RdbError(errc::rdb_file_corrupted);
 
     bytes_read_ += bytes_read;
+    DCHECK_LE(bytes_read_, source_limit_);
 
     return kOk;
   }
@@ -467,11 +482,17 @@ std::error_code RdbLoader::FetchBuf(size_t size, void* dest) {
   // Must be because mem_buf_ is be empty.
   DCHECK_GT(mb.size(), size);
 
+  if (bytes_read_ + mb.size() > source_limit_) {
+    mb = mb.subspan(0, source_limit_ - bytes_read_);
+  }
+
   SET_OR_RETURN(src_->ReadAtLeast(mb, size), bytes_read);
 
   if (bytes_read < size)
     return RdbError(errc::rdb_file_corrupted);
   bytes_read_ += bytes_read;
+
+  DCHECK_LE(bytes_read_, source_limit_);
 
   mem_buf_.CommitWrite(bytes_read);
   ::memcpy(next, mem_buf_.InputBuffer().data(), size);
@@ -571,7 +592,7 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
     return;
 
   auto cb = [indx = this->cur_db_index_, vec = std::move(out_buf)] { LoadItemsBuffer(indx, vec); };
-  ess_.Add(sid, std::move(cb));
+  shard_set->Add(sid, std::move(cb));
 }
 
 void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
@@ -1273,7 +1294,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     std::move(key_cleanup).Cancel();
 
     std::string_view str_key(key, sdslen(key));
-    ShardId sid = Shard(str_key, ess_.size());
+    ShardId sid = Shard(str_key, shard_set->size());
     uint64_t expire_at_ms = settings->expiretime;
 
     auto& out_buf = shard_buf_[sid];

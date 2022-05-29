@@ -7,13 +7,14 @@
 #include <variant>
 
 #include "base/io_buf.h"
+#include "facade/facade_types.h"
 #include "facade/redis_parser.h"
-#include "server/conn_context.h"
 #include "util/fiber_socket_base.h"
 
 namespace dfly {
 
 class Service;
+class ConnectionContext;
 
 class Replica {
  public:
@@ -51,23 +52,35 @@ class Replica {
   // The flow is : R_ENABLED -> R_TCP_CONNECTED -> (R_SYNCING) -> R_SYNC_OK.
   // SYNCING means that the initial ack succeeded. It may be optional if we can still load from
   // the journal offset.
-  enum State {
+  enum State : unsigned {
     R_ENABLED = 1,  // Replication mode is enabled. Serves for signaling shutdown.
     R_TCP_CONNECTED = 2,
-    R_SYNCING = 4,
-    R_SYNC_OK = 8,
+    R_GREETED = 4,
+    R_SYNCING = 8,
+    R_SYNC_OK = 0x10,
   };
 
-  void ConnectFb();
+  void ReplicateFb();
 
-  using ReplHeader = std::variant<std::string, size_t>;
+  struct PSyncResponse {
+    // string - end of sync token (diskless)
+    // size_t - size of the full sync blob (disk-based).
+    // if fullsync is 0, it means that master can continue with partial replication.
+    std::variant<std::string, size_t> fullsync;
+  };
+
   std::error_code ConnectSocket();
-  std::error_code GreatAndSync();
+  std::error_code Greet();
+  std::error_code InitiatePSync();
+
+  std::error_code ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* header);
+  std::error_code ReadLine(base::IoBuf* io_buf, std::string_view* line);
   std::error_code ConsumeRedisStream();
   std::error_code ParseAndExecute(base::IoBuf* io_buf);
 
   Service& service_;
   std::string host_;
+  std::string master_repl_id_;
   uint16_t port_;
 
   ::boost::fibers::fiber sync_fb_;
@@ -76,6 +89,8 @@ class Replica {
   // Where the sock_ is handled.
   util::ProactorBase* sock_thread_ = nullptr;
   std::unique_ptr<facade::RedisParser> parser_;
+  facade::RespVec cmd_args_;
+  facade::CmdArgVec cmd_str_args_;
 
   // repl_offs - till what offset we've already read from the master.
   // ack_offs_ last acknowledged offset.

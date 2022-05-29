@@ -14,6 +14,7 @@ extern "C" {
 #include <boost/asio/ip/tcp.hpp>
 
 #include "base/logging.h"
+#include "facade/dragonfly_connection.h"
 #include "facade/redis_parser.h"
 #include "server/error.h"
 #include "server/main_service.h"
@@ -26,6 +27,7 @@ using namespace std;
 using namespace util;
 using namespace boost::asio;
 using namespace facade;
+using absl::StrCat;
 namespace this_fiber = ::boost::this_fiber;
 
 namespace {
@@ -75,6 +77,8 @@ error_code Recv(FiberSocketBase* input, base::IoBuf* dest) {
   return error_code{};
 }
 
+constexpr unsigned kRdbEofMarkSize = 40;
+
 // TODO: to remove usages of this macro and make code crash-less.
 #define CHECK_EC(x)                                                                 \
   do {                                                                              \
@@ -108,13 +112,19 @@ bool Replica::Run(ConnectionContext* cntx) {
 
   error_code ec = ConnectSocket();
   if (ec) {
-    (*cntx)->SendError(absl::StrCat(kConnErr, ec.message()));
+    (*cntx)->SendError(StrCat(kConnErr, ec.message()));
     return false;
   }
 
   state_mask_ = R_ENABLED | R_TCP_CONNECTED;
   last_io_time_ = sock_thread_->GetMonotonicTimeNs();
-  sync_fb_ = ::boost::fibers::fiber(&Replica::ConnectFb, this);
+  ec = Greet();
+  if (ec) {
+    (*cntx)->SendError(StrCat("could not greet master ", ec.message()));
+    return false;
+  }
+
+  sync_fb_ = ::boost::fibers::fiber(&Replica::ReplicateFb, this);
   (*cntx)->SendOk();
 
   return true;
@@ -164,9 +174,8 @@ void Replica::Stop() {
     sync_fb_.join();
 }
 
-void Replica::ConnectFb() {
+void Replica::ReplicateFb() {
   error_code ec;
-  constexpr unsigned kOnline = R_SYNC_OK | R_TCP_CONNECTED;
 
   while (state_mask_ & R_ENABLED) {
     if ((state_mask_ & R_TCP_CONNECTED) == 0) {
@@ -180,33 +189,42 @@ void Replica::ConnectFb() {
       state_mask_ |= R_TCP_CONNECTED;
     }
 
-    if ((state_mask_ & kOnline) == R_TCP_CONNECTED) {  // lacks great_ok
-      ec = GreatAndSync();
+    if ((state_mask_ & R_GREETED) == 0) {
+      ec = Greet();
       if (ec) {
-        LOG(INFO) << "Error greating " << ec;
-        state_mask_ &= ~kOnline;
+        LOG(INFO) << "Error greeting " << ec;
+        state_mask_ &= ~R_TCP_CONNECTED;
         continue;
       }
-      VLOG(1) << "Replica great ok";
     }
 
-    if ((state_mask_ & kOnline) == kOnline) {
-      // There is a data race condition in Redis-master code, where "ACK 0" handler may be
-      // triggerred
-      // before Redis is ready to transition to the streaming state and it silenty ignores "ACK
-      // 0". We reduce the chance it happens with this delay.
-      this_fiber::sleep_for(50ms);
-      ec = ConsumeRedisStream();
-
-      LOG_IF(ERROR, !FiberSocketBase::IsConnClosed(ec)) << "Replica socket error " << ec;
-      state_mask_ &= ~kOnline;
+    if ((state_mask_ & R_SYNC_OK) == 0) {  // has not synced
+      ec = InitiatePSync();
+      if (ec) {
+        LOG(WARNING) << "Error syncing " << ec << " " << ec.message();
+        state_mask_ &= R_ENABLED;  // reset
+        continue;
+      }
+      VLOG(1) << "Replica greet ok";
     }
+
+    // There is a data race condition in Redis-master code, where "ACK 0" handler may be
+    // triggerred
+    // before Redis is ready to transition to the streaming state and it silenty ignores "ACK
+    // 0". We reduce the chance it happens with this delay.
+    this_fiber::sleep_for(50ms);
+
+    // Start consuming the replication stream.
+    ec = ConsumeRedisStream();
+
+    LOG_IF(ERROR, !FiberSocketBase::IsConnClosed(ec)) << "Replica socket error " << ec;
+    state_mask_ &= ~R_SYNC_OK;  //
   }
 
   VLOG(1) << "Replication fiber finished";
 }
 
-error_code Replica::GreatAndSync() {
+error_code Replica::Greet() {
   base::IoBuf io_buf{128};
 
   ReqSerializer serializer{sock_.get()};
@@ -214,6 +232,7 @@ error_code Replica::GreatAndSync() {
   RedisParser parser{false};  // client mode
   RespVec args;
 
+  // Corresponds to server.repl_state == REPL_STATE_CONNECTING state in redis
   serializer.SendCommand("PING");  // optional.
   RETURN_ON_ERR(serializer.ec());
   RETURN_ON_ERR(Recv(sock_.get(), &io_buf));
@@ -221,24 +240,55 @@ error_code Replica::GreatAndSync() {
 
   uint32_t consumed = 0;
   RedisParser::Result result = parser.Parse(io_buf.InputBuffer(), &consumed, &args);
-  CHECK_EQ(result, RedisParser::OK);
-  CHECK(!args.empty() && args.front().type == RespExpr::STRING);
+
+  auto check_respok = [&] {
+    return result == RedisParser::OK && !args.empty() && args.front().type == RespExpr::STRING;
+  };
+
+  auto reply_err = [&]() -> string {
+    if (result != RedisParser::OK)
+      return StrCat("parse_err: ", result);
+    if (args.empty())
+      return "none";
+
+    return RespExpr::TypeName(args.front().type);
+  };
+
+  if (!check_respok()) {
+    LOG(WARNING) << "Bad reply from the server " << reply_err();
+    return make_error_code(errc::bad_message);
+  }
+
+  string_view pong = ToSV(args.front().GetBuf());
+  VLOG(1) << "Master ping reply " << pong;
 
   // TODO: to check nauth, permission denied etc responses.
-  VLOG(1) << "Master ping reply " << ToSV(args.front().GetBuf());
+  if (pong != "PONG") {
+    LOG(ERROR) << "Unsupported reply " << pong;
+    return make_error_code(errc::operation_not_permitted);
+  }
 
   io_buf.ConsumeInput(consumed);
 
   // TODO: we may also send REPLCONF listening-port, ip-address
+  // See server.repl_state == REPL_STATE_SEND_PORT condition in replication.c
+
+  // Corresponds to server.repl_state == REPL_STATE_SEND_CAPA
   serializer.SendCommand("REPLCONF capa eof capa psync2");
   RETURN_ON_ERR(serializer.ec());
   RETURN_ON_ERR(Recv(sock_.get(), &io_buf));
 
   result = parser.Parse(io_buf.InputBuffer(), &consumed, &args);
-  CHECK_EQ(result, RedisParser::OK);
-  CHECK(!args.empty() && args.front().type == RespExpr::STRING);
+  if (!check_respok()) {
+    LOG(WARNING) << "Bad reply from the server " << reply_err();
+    return make_error_code(errc::bad_message);
+  }
 
-  VLOG(1) << "Master REPLCONF reply " << ToSV(args.front().GetBuf());
+  pong = ToSV(args.front().GetBuf());
+
+  VLOG(1) << "Master REPLCONF reply " << pong;
+  // TODO: to check replconf reply.
+
   io_buf.ConsumeInput(consumed);
 
   // Announce that we are the dragonfly client.
@@ -247,27 +297,209 @@ error_code Replica::GreatAndSync() {
   serializer.SendCommand("REPLCONF capa dragonfly");
   RETURN_ON_ERR(serializer.ec());
   RETURN_ON_ERR(Recv(sock_.get(), &io_buf));
-  result = parser.Parse(io_buf.InputBuffer(), &consumed, &args);
-  CHECK_EQ(result, RedisParser::OK);
-  CHECK(!args.empty());
-  CHECK_EQ(RespExpr::STRING, args[0].type);
-  last_io_time_ = sock_thread_->GetMonotonicTimeNs();
 
-  if (args.size() == 1) {
-    CHECK_EQ("OK", ToSV(args[0].GetBuf()));
+  result = parser.Parse(io_buf.InputBuffer(), &consumed, &args);
+  if (!check_respok()) {
+    LOG(ERROR) << "Bad response from the server: " << reply_err();
+
+    return make_error_code(errc::bad_message);
+  }
+
+  last_io_time_ = sock_thread_->GetMonotonicTimeNs();
+  string_view cmd = ToSV(args[0].GetBuf());
+  if (args.size() == 1) {  // Redis
+    if (cmd != "OK") {
+      LOG(ERROR) << "Unexpected command " << cmd;
+      return make_error_code(errc::bad_message);
+    }
   } else {
+    // TODO: dragonfly
     LOG(FATAL) << "Bad response " << args;
   }
-  io_buf.ConsumeInput(consumed);
+
+  state_mask_ |= R_GREETED;
+
+  return error_code{};
+}
+
+error_code Replica::InitiatePSync() {
+  base::IoBuf io_buf{128};
+
+  ReqSerializer serializer{sock_.get()};
 
   // Start full sync
   state_mask_ |= R_SYNCING;
-  serializer.SendCommand("PSYNC ? -1");
+
+  // Corresponds to server.repl_state == REPL_STATE_SEND_PSYNC
+  // Send psync command with null master id and null offset
+  string id("?");
+  int64_t offs = -1;
+  if (!master_repl_id_.empty()) {
+    id = master_repl_id_;
+    offs = repl_offs_;
+  }
+  serializer.SendCommand(StrCat("PSYNC ", id, " ", offs));
   RETURN_ON_ERR(serializer.ec());
 
-  DCHECK_EQ(0u, io_buf.InputLen());
+  // Master may delay sync response with "repl_diskless_sync_delay"
+  PSyncResponse repl_header;
 
-  return make_error_code(errc::io_error);
+  RETURN_ON_ERR(ParseReplicationHeader(&io_buf, &repl_header));
+
+  string* token = absl::get_if<string>(&repl_header.fullsync);
+  size_t snapshot_size = SIZE_MAX;
+  if (!token) {
+    snapshot_size = absl::get<size_t>(repl_header.fullsync);
+  }
+  last_io_time_ = sock_thread_->GetMonotonicTimeNs();
+
+  if (snapshot_size || token != nullptr) {  // full sync
+    SocketSource ss{sock_.get()};
+    io::PrefixSource ps{io_buf.InputBuffer(), &ss};
+
+    RdbLoader loader(NULL);
+    loader.set_source_limit(snapshot_size);
+    // TODO: to allow registering callbacks within loader to send '\n' pings back to master.
+    // Also to allow updating last_io_time_.
+    error_code ec = loader.Load(&ps);
+    RETURN_ON_ERR(ec);
+    VLOG(1) << "full sync completed";
+
+    if (token) {
+      uint8_t buf[kRdbEofMarkSize];
+      io::PrefixSource chained(loader.Leftover(), &ps);
+      VLOG(1) << "Before reading from chained stream";
+      io::Result<size_t> eof_res = chained.Read(io::MutableBytes{buf});
+      CHECK(eof_res && *eof_res == kRdbEofMarkSize);
+
+      VLOG(1) << "Comparing token " << ToSV(buf);
+
+      // TODO: handle gracefully...
+      CHECK_EQ(0, memcmp(token->data(), buf, kRdbEofMarkSize));
+      CHECK(chained.unused_prefix().empty());
+    } else {
+      CHECK_EQ(0u, loader.Leftover().size());
+      CHECK_EQ(snapshot_size, loader.bytes_read());
+    }
+
+    CHECK(ps.unused_prefix().empty());
+    io_buf.ConsumeInput(io_buf.InputLen());
+    last_io_time_ = sock_thread_->GetMonotonicTimeNs();
+  }
+
+  state_mask_ &= ~R_SYNCING;
+  state_mask_ |= R_SYNC_OK;
+
+  return error_code{};
+}
+
+error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* dest) {
+  std::string_view str;
+
+  RETURN_ON_ERR(ReadLine(io_buf, &str));
+
+  DCHECK(!str.empty());
+
+  std::string_view header;
+  bool valid = false;
+
+  // non-empty lines
+  if (str[0] != '+') {
+    goto bad_header;
+  }
+
+  header = str.substr(1);
+  VLOG(1) << "header: " << header;
+  if (absl::ConsumePrefix(&header, "FULLRESYNC ")) {
+    // +FULLRESYNC db7bd45bf68ae9b1acac33acb 123\r\n
+    //             master_id  repl_offset
+    size_t pos = header.find(' ');
+    if (pos != std::string_view::npos) {
+      if (absl::SimpleAtoi(header.substr(pos + 1), &repl_offs_)) {
+        master_repl_id_ = string(header.substr(0, pos));
+        valid = true;
+        VLOG(1) << "master repl_id " << master_repl_id_ << " / " << repl_offs_;
+      }
+    }
+
+    if (!valid)
+      goto bad_header;
+
+    io_buf->ConsumeInput(str.size() + 2);
+    RETURN_ON_ERR(ReadLine(io_buf, &str));  // Read the next line parsed below.
+
+    // Readline checks for non ws character first before searching for eol
+    // so str must be non empty.
+    DCHECK(!str.empty());
+
+    if (str[0] != '$') {
+      goto bad_header;
+    }
+
+    std::string_view token = str.substr(1);
+    VLOG(1) << "token: " << token;
+    if (absl::ConsumePrefix(&token, "EOF:")) {
+      CHECK_EQ(kRdbEofMarkSize, token.size()) << token;
+      dest->fullsync.emplace<string>(token);
+      VLOG(1) << "Token: " << token;
+    } else {
+      size_t rdb_size = 0;
+      if (!absl::SimpleAtoi(token, &rdb_size))
+        return std::make_error_code(std::errc::illegal_byte_sequence);
+
+      VLOG(1) << "rdb size " << rdb_size;
+      dest->fullsync.emplace<size_t>(rdb_size);
+    }
+    io_buf->ConsumeInput(str.size() + 2);
+  } else if (absl::ConsumePrefix(&header, "CONTINUE")) {
+    // we send psync2 so we should get master replid.
+    // That could change due to redis failovers.
+    // TODO: part sync
+    dest->fullsync.emplace<size_t>(0);
+  }
+
+  return error_code{};
+
+bad_header:
+  LOG(ERROR) << "Bad replication header: " << str;
+  return std::make_error_code(std::errc::illegal_byte_sequence);
+}
+
+error_code Replica::ReadLine(base::IoBuf* io_buf, string_view* line) {
+  size_t eol_pos;
+  std::string_view input_str = ToSV(io_buf->InputBuffer());
+
+  // consume whitespace.
+  while (true) {
+    auto it = find_if_not(input_str.begin(), input_str.end(), absl::ascii_isspace);
+    size_t ws_len = it - input_str.begin();
+    io_buf->ConsumeInput(ws_len);
+    input_str = ToSV(io_buf->InputBuffer());
+    if (!input_str.empty())
+      break;
+    RETURN_ON_ERR(Recv(sock_.get(), io_buf));
+    input_str = ToSV(io_buf->InputBuffer());
+  };
+
+  // find eol.
+  while (true) {
+    eol_pos = input_str.find('\n');
+
+    if (eol_pos != std::string_view::npos) {
+      DCHECK_GT(eol_pos, 0u);  // can not be 0 because then would be consumed as a whitespace.
+      if (input_str[eol_pos - 1] != '\r') {
+        break;
+      }
+      *line = input_str.substr(0, eol_pos - 1);
+      return error_code{};
+    }
+
+    RETURN_ON_ERR(Recv(sock_.get(), io_buf));
+    input_str = ToSV(io_buf->InputBuffer());
+  }
+
+  LOG(ERROR) << "Bad replication header: " << input_str;
+  return std::make_error_code(std::errc::illegal_byte_sequence);
 }
 
 error_code Replica::ConsumeRedisStream() {
@@ -290,6 +522,8 @@ error_code Replica::ConsumeRedisStream() {
   time_t last_ack = time(nullptr);
   string ack_cmd;
 
+
+  // basically reflection of dragonfly_connection IoLoop function.
   while (!ec) {
     io::MutableBytes buf = io_buf.AppendBuffer();
     io::Result<size_t> size_res = sock_->Recv(buf);
@@ -307,7 +541,7 @@ error_code Replica::ConsumeRedisStream() {
       ack_cmd.clear();
       absl::StrAppend(&ack_cmd, "REPLCONF ACK ", repl_offs_);
       serializer.SendCommand(ack_cmd);
-      CHECK_EC(serializer.ec());
+      RETURN_ON_ERR(serializer.ec());
     }
 
     ec = ParseAndExecute(&io_buf);
@@ -339,13 +573,25 @@ error_code Replica::ParseAndExecute(base::IoBuf* io_buf) {
 
   uint32_t consumed = 0;
   RedisParser::Result result = RedisParser::OK;
-  RespVec cmd_args;
+
+  io::NullSink null_sink;  // we never reply back on the commands.
+  ConnectionContext conn_context{&null_sink, nullptr};
+  conn_context.is_replicating = true;
 
   do {
-    result = parser_->Parse(io_buf->InputBuffer(), &consumed, &cmd_args);
+    result = parser_->Parse(io_buf->InputBuffer(), &consumed, &cmd_args_);
 
     switch (result) {
       case RedisParser::OK:
+        if (!cmd_args_.empty()) {
+          VLOG(2) << "Got command " << ToSV(cmd_args_[0].GetBuf()) << ToSV(cmd_args_[1].GetBuf())
+                  << "\n consumed: " << consumed;
+          facade::RespToArgList(cmd_args_, &cmd_str_args_);
+          CmdArgList arg_list{cmd_str_args_.data(), cmd_str_args_.size()};
+          service_.DispatchCommand(arg_list, &conn_context);
+        }
+        io_buf->ConsumeInput(consumed);
+      break;
       case RedisParser::INPUT_PENDING:
         io_buf->ConsumeInput(consumed);
         break;

@@ -23,6 +23,7 @@ class DebugCmd {
   void Reload(CmdArgList args);
   void Load(std::string_view filename);
   void Inspect(std::string_view key);
+  void Watched();
 
   ServerFamily& sf_;
   ConnectionContext* cntx_;
