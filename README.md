@@ -37,7 +37,21 @@ Dragonfly is crossing 3.8M QPS on c6gn.16xlarge reaching x25 increase in through
      --expiry-range=...
 ```
 
-When running with pipeline mode `--pipeline=30` Dragonfly was reaching 10M QPS for SET and 15M qps for GET operations.
+When running in pipeline mode `--pipeline=30`, Dragonfly reaches **10M qps** for SET and **15M qps** for GET operations.
+
+### Memory efficiency benchmark
+
+In the following test, we filled Dragonfly and Redis with ~5GB of data
+using `debug populate 5000000 key 1024` command. Then we started sending the update traffic with `memtier` and kicked off the snapshotting with the
+"bgsave" command. The following figure demonstrates clearly how both servers behave in terms of memory efficiency.
+
+<img src="doc/bgsave_memusage.svg" width="70%" border="0"/>
+
+Dragonfly was 30% more memory efficient than Redis at the idle state.
+It also did not show any visible memory increase during the snapshot phase.
+Meanwhile, Redis reached almost x3 memory increase at peak compared to Dragonfly.
+Dragonfly also finished the snapshot much faster, just a few seconds after it started.
+For more info about memory efficiency in Dragonfly see [dashtable doc](./doc/dashtable.md)
 
 ## Running the server
 
@@ -141,8 +155,6 @@ In addition, it has Dragonfly specific arguments options:
 
 
 for more options like logs management or tls support, run `dragonfly --help`.
-
-
 
 ## Roadmap and status
 
