@@ -9,8 +9,6 @@
 
 ### Probably, the fastest in-memory store in the universe!
 
-<<<<<<< HEAD
-=======
 Redis and Memcached compatible store.
 
 
@@ -28,7 +26,6 @@ Dragonfly is crossing 3.8M QPS on c6gn.16xlarge reaching x25 increase in through
 | get | 0.9ms | 0.9ms |0.8ms |
 |setex| 0.9ms | 1.1ms | 1.3ms
 
->>>>>>> ccf051742da182c866930cf3afec991c6f543c11
 
 *All benchmarks were performed using `memtier_benchmark`  (see below) with number of threads tuned per server type and the instance type. `memtier` was running on a separate c6gn.16xlarge machine. For setex benchmark we used expiry-range of 500, so it would survive the end of the test.*
 
@@ -60,10 +57,6 @@ for I/O, hence it requires Linux version 5.10 or later.
 Debian/Bullseye, Ubuntu 20.04.4 or later fit these requirements.
 
 
-<<<<<<< HEAD
-
-### With docker:
-=======
 ### With docker:
 
 ```bash
@@ -84,7 +77,6 @@ We maintain [binary releases](https://github.com/dragonflydb/dragonfly/releases)
 ### Building from source
 
 You need to install dependencies in order to build on Ubuntu 20.04 or later:
->>>>>>> ccf051742da182c866930cf3afec991c6f543c11
 
 ```bash
 git clone --recursive https://github.com/dragonflydb/dragonfly && cd dragonfly
@@ -104,38 +96,9 @@ cd build-opt && ninja dragonfly
 
 ```
 
-<<<<<<< HEAD
-### Building from source
-
-Dragonfly is usually built on Ubuntu 20.04 or later.
-
-```bash
-git clone --recursive https://github.com/dragonflydb/dragonfly && cd dragonfly
-
-# to install dependencies
-sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
-     autoconf-archive libtool
-
-# Configure the build
-./helio/blaze.sh -release
-
-# Build
-cd build-opt && ninja dragonfly  
-
-# Run
-./dragonfly --alsologtostderr
-
-```
-
-
-## Configuration
-Dragonfly supports redis run-time arguments where applicable.
-For example, you can run: `docker run --network=host --rm dragonfly --requirepass=foo --bind localhost`.
-=======
 ## Configuration
 Dragonfly supports common redis arguments where applicable.
 For example, you can run: `dragonfly --requirepass=foo --bind localhost`.
->>>>>>> ccf051742da182c866930cf3afec991c6f543c11
 
 Dragonfly currently supports the following Redis-specific arguments:
  * `port`
@@ -441,8 +404,3 @@ we went on to implement the Redis and Memcached functionality. By now, we have i
 And finally, <br>
 <em>Our mission is to build a well-designed, ultra-fast, cost-efficient in-memory datastore for cloud workloads that takes advantage of the latest hardware advancements. We intend to address the pain points of current solutions while preserving their product APIs and propositions.
 </em>
-<<<<<<< HEAD
-
-P.S. other engineers share a similar sentiment about what makes a good memory store. See, for example, [here](https://twitter.github.io/pelikan/2019/why-pelikan.html) and [here](https://twitter.github.io/pelikan/2021/segcache.html) blog posts from Twitter's memcache team, or [this post](https://medium.com/@john_63123/redis-should-be-multi-threaded-e28319cab744) from authors of keydb.
-=======
->>>>>>> ccf051742da182c866930cf3afec991c6f543c11
