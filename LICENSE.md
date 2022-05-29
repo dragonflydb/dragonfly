@@ -6,7 +6,7 @@ Dragonfly Business Source License 1.1
 
 <u>Licensed Work</u>: Dragonfly including the software components, or any portion of them, and any modification.
 
-<u>Change Date</u>: Change date is five (5) years from release date. 
+<u>Change Date</u>: June 1, 2027
 
 <u>Change License</u>: [Apache License, Version
 2.0](https://www.apache.org/licenses/LICENSE-2.0), as published by the
