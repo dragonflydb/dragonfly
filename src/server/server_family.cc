@@ -266,6 +266,10 @@ error_code ServerFamily::LoadRdb(const std::string& rdb_file) {
   return ec;
 }
 
+void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
+
+}
+
 void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* cntx) {
   if (!section.empty()) {
     return cntx->reply_builder()->SendError("");

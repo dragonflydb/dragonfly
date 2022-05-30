@@ -12,6 +12,7 @@
 namespace util {
 class AcceptServer;
 class ListenerInterface;
+class HttpListenerBase;
 }  // namespace util
 
 namespace dfly {
@@ -76,6 +77,8 @@ class ServerFamily {
   bool IsSaving() const {
     return is_saving_.load(std::memory_order_relaxed);
   }
+
+  void ConfigureMetrics(util::HttpListenerBase* listener);
 
  private:
   uint32_t shard_count() const {

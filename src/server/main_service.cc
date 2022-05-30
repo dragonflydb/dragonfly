@@ -1000,6 +1000,10 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
   return to;
 }
 
+void Service::ConfigureHttpHandlers(util::HttpListenerBase* base) {
+  server_family_.ConfigureMetrics(base);
+}
+
 using ServiceFunc = void (Service::*)(CmdArgList, ConnectionContext* cntx);
 
 #define HFUNC(x) SetHandler(&Service::x)

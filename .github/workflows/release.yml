@@ -37,8 +37,8 @@ jobs:
           ${{github.workspace}}/build-opt/
           !${{github.workspace}}/build-opt/CMakeCache.txt
         key: ${{ runner.os }}-release-deps-${{ github.sha }}
-        restore-keys: |
-          ${{ runner.os }}-release-deps-
+        #restore-keys: |
+        #  ${{ runner.os }}-release-deps-
     
     - uses: uraimo/run-on-arch-action@v2
       name: Run commands

@@ -6,8 +6,11 @@
 
 #include "facade/facade_types.h"
 #include "facade/memcache_parser.h"
-
 #include "util/fiber_socket_base.h"
+
+namespace util {
+class HttpListenerBase;
+}  // namespace util
 
 namespace facade {
 
@@ -26,6 +29,9 @@ class ServiceInterface {
 
   virtual ConnectionContext* CreateContext(util::FiberSocketBase* peer, Connection* owner) = 0;
   virtual ConnectionStats* GetThreadLocalConnectionStats() = 0;
+
+  virtual void ConfigureHttpHandlers(util::HttpListenerBase* base) {
+  }
 };
 
 }  // namespace facade

@@ -9,6 +9,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
+#include "facade/service_interface.h"
 #include "util/proactor_pool.h"
 
 using namespace std;
@@ -119,7 +120,7 @@ bool ConfigureKeepAlive(int fd, unsigned interval_sec) {
 
 }  // namespace
 
-Listener::Listener(Protocol protocol, ServiceInterface* e) : service_(e), protocol_(protocol) {
+Listener::Listener(Protocol protocol, ServiceInterface* si) : service_(si), protocol_(protocol) {
   if (GetFlag(FLAGS_tls)) {
     OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, NULL);
     ctx_ = CreateSslCntx();
@@ -127,6 +128,7 @@ Listener::Listener(Protocol protocol, ServiceInterface* e) : service_(e), protoc
   http_base_.reset(new HttpListener<>);
   http_base_->set_resource_prefix("https://romange.s3.eu-west-1.amazonaws.com/static");
   http_base_->enable_metrics();
+  si->ConfigureHttpHandlers(http_base_.get());
 }
 
 Listener::~Listener() {
