@@ -16,6 +16,7 @@ extern "C" {
 #include <boost/fiber/operations.hpp>
 #include <filesystem>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
@@ -29,32 +30,37 @@ extern "C" {
 #include "server/set_family.h"
 #include "server/string_family.h"
 #include "server/transaction.h"
+#include "server/version.h"
 #include "server/zset_family.h"
 #include "util/metrics/metrics.h"
 #include "util/uring/uring_fiber_algo.h"
 #include "util/varz.h"
 
+using namespace std;
+
 // TODO: to move to absl flags and keep legacy flags only for glog library.
 // absl flags allow parsing of custom types and allow specifying which flags appear
 // for helpshort.
-DEFINE_uint32(port, 6379, "Redis port");
-DEFINE_uint32(memcache_port, 0, "Memcached port");
-DECLARE_string(requirepass);
-DEFINE_uint64(maxmemory, 0,
-              "Limit on maximum-memory that is used by the database."
-              "0 - means the program will automatically determine its maximum memory usage");
-DEFINE_bool(cache_mode, false,
-            "If true, the backend behaves like a cache, "
-            "by evicting entries when getting close to maxmemory limit");
+ABSL_FLAG(uint32_t, port, 6379, "Redis port");
+ABSL_FLAG(uint32_t, memcache_port, 0, "Memcached port");
+ABSL_FLAG(uint64_t, maxmemory, 0,
+          "Limit on maximum-memory that is used by the database."
+          "0 - means the program will automatically determine its maximum memory usage");
+ABSL_FLAG(bool, cache_mode, false,
+          "If true, the backend behaves like a cache, "
+          "by evicting entries when getting close to maxmemory limit");
+
+ABSL_DECLARE_FLAG(string, requirepass);
 
 namespace dfly {
 
-using namespace std;
 using namespace util;
 using base::VarzValue;
 using ::boost::intrusive_ptr;
 namespace fibers = ::boost::fibers;
 namespace this_fiber = ::boost::this_fiber;
+using absl::GetFlag;
+using absl::StrCat;
 using facade::MCReplyBuilder;
 using facade::RedisReplyBuilder;
 
@@ -378,7 +384,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   absl::Cleanup multi_error([dfly_cntx] { MultiSetError(dfly_cntx); });
 
   if (cid == nullptr) {
-    (*cntx)->SendError(absl::StrCat("unknown command `", cmd_str, "`"), "unknown_cmd");
+    (*cntx)->SendError(StrCat("unknown command `", cmd_str, "`"), "unknown_cmd");
 
     lock_guard lk(mu_);
     if (unknown_cmds_.size() < 1024)
@@ -387,7 +393,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   }
 
   if (etl.gstate() == GlobalState::LOADING || etl.gstate() == GlobalState::SHUTTING_DOWN) {
-    string err = absl::StrCat("Can not execute during ", GlobalStateName(etl.gstate()));
+    string err = StrCat("Can not execute during ", GlobalStateName(etl.gstate()));
     (*cntx)->SendError(err);
     return;
   }
@@ -564,7 +570,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       server_family_.StatsMC(cmd.key, cntx);
       return;
     case MemcacheParser::VERSION:
-      mc_builder->SendSimpleString(absl::StrCat("VERSION ", gflags::VersionString()));
+      mc_builder->SendSimpleString(StrCat("VERSION ", kGitTag));
       return;
     default:
       mc_builder->SendClientError("bad command line format");
@@ -654,7 +660,7 @@ bool Service::IsShardSetLocked() const {
 }
 
 bool Service::IsPassProtected() const {
-  return !FLAGS_requirepass.empty();
+  return !GetFlag(FLAGS_requirepass).empty();
 }
 
 absl::flat_hash_map<std::string, unsigned> Service::UknownCmdMap() const {
@@ -808,7 +814,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
     cntx->transaction->UnlockMulti();
 
   if (result == Interpreter::RUN_ERR) {
-    string resp = absl::StrCat("Error running script (call to ", eval_args.sha, "): ", error);
+    string resp = StrCat("Error running script (call to ", eval_args.sha, "): ", error);
     return (*cntx)->SendError(resp, facade::kScriptErrType);
   }
 
@@ -963,7 +969,7 @@ void Service::Function(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendOk();
   }
 
-  string err = absl::StrCat("Unknown subcommand '", sub_cmd, "'. Try FUNCTION HELP.");
+  string err = StrCat("Unknown subcommand '", sub_cmd, "'. Try FUNCTION HELP.");
   return (*cntx)->SendError(err, kSyntaxErr);
 }
 
@@ -992,6 +998,10 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
 
   pp_.Await([&](ProactorBase*) { ServerState::tlocal()->set_gstate(to); });
   return to;
+}
+
+void Service::ConfigureHttpHandlers(util::HttpListenerBase* base) {
+  server_family_.ConfigureMetrics(base);
 }
 
 using ServiceFunc = void (Service::*)(CmdArgList, ConnectionContext* cntx);
@@ -1033,7 +1043,7 @@ void Service::RegisterCommands() {
         if (cid.last_key_pos() < 0)
           key_len = "unlimited";
         else
-          key_len = absl::StrCat(cid.last_key_pos() - cid.first_key_pos() + 1);
+          key_len = StrCat(cid.last_key_pos() - cid.first_key_pos() + 1);
         LOG(INFO) << "    " << key << ": with " << key_len << " keys";
       }
     });

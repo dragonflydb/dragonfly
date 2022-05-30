@@ -1,13 +1,13 @@
 name: Version Release
 
-on: 
+on:
   push:
     tags:
     - 'v*'
 
 permissions:
   contents: write
-    
+
 jobs:
   create-release:
     runs-on: ubuntu-latest
@@ -37,9 +37,9 @@ jobs:
           ${{github.workspace}}/build-opt/
           !${{github.workspace}}/build-opt/CMakeCache.txt
         key: ${{ runner.os }}-release-deps-${{ github.sha }}
-        restore-keys: |
-          ${{ runner.os }}-release-deps-
-    
+        #restore-keys: |
+        #  ${{ runner.os }}-release-deps-
+
     - uses: uraimo/run-on-arch-action@v2
       name: Run commands
       id: runcmd
@@ -65,31 +65,30 @@ jobs:
                               --slave /usr/bin/g++ g++ /usr/bin/g++-9
         run: |
             cd /src
-            touch dockerbuild.txt
-            chown -R root build-opt/
-            ls -la build-opt/_deps/ || true
-            echo "now /src:"
-            ls -l 
-            for i in `ls -d ./build-opt/_deps/*-src`; do 
-              git config --global --add safe.directory $(realpath $i)
-            done
+            if [ -d build-opt ]; then
+              chown -R root build-opt
+              ls -l ./build-opt
+              for i in `ls -d ./build-opt/_deps/*-src`; do
+                git config --global --add safe.directory $(realpath $i)
+              done
+            fi
             ./tools/release.sh
     - name: Show the artifact
       # Items placed in /src/build-opt in the container will be in
       # ${PWD}/build-opt on the host.
       run: |
         echo finished
-        ls -al            
+        ls -al
     - name: Upload
       uses: actions/upload-artifact@v2
       with:
         name: dragonfly-aarch64
         path: build-opt/dragonfly-*tar.gz
-  
+
   build-native:
     runs-on: ubuntu-latest
     needs: create-release
-    container: 
+    container:
       image: ghcr.io/romange/ubuntu-dev:20
     steps:
     - uses: actions/checkout@v2
@@ -103,14 +102,14 @@ jobs:
       with:
         name: dragonfly-amd64
         path: build-opt/dragonfly-*tar.gz
-  
+
   publish_release:
     runs-on: ubuntu-latest
     needs: [build-native, build-qemu]
     steps:
       - uses: actions/download-artifact@v3
-        name: Download files  
-        with:          
+        name: Download files
+        with:
           path: artifacts
       - name: See all the artifacts
         run: |

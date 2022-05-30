@@ -20,6 +20,7 @@ extern "C" {
 #include <absl/strings/str_cat.h>
 
 #include "base/endian.h"
+#include "base/flags.h"
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -29,9 +30,9 @@ extern "C" {
 #include "server/set_family.h"
 #include "strings/human_readable.h"
 
-DECLARE_int32(list_max_listpack_size);
-DECLARE_int32(list_compress_depth);
-DECLARE_uint32(dbnum);
+ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
+ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
+ABSL_DECLARE_FLAG(uint32_t, dbnum);
 
 namespace dfly {
 
@@ -39,6 +40,7 @@ using namespace std;
 using base::IoBuf;
 using nonstd::make_unexpected;
 using namespace util;
+using absl::GetFlag;
 using rdb::errc;
 
 namespace {
@@ -190,8 +192,7 @@ struct RdbLoader::ObjSettings {
   ObjSettings() = default;
 };
 
-RdbLoader::RdbLoader(ScriptMgr* script_mgr)
-    : script_mgr_(script_mgr), mem_buf_{16_KB} {
+RdbLoader::RdbLoader(ScriptMgr* script_mgr) : script_mgr_(script_mgr), mem_buf_{16_KB} {
   shard_buf_.reset(new ItemsBuf[shard_set->size()]);
 }
 
@@ -302,7 +303,7 @@ error_code RdbLoader::Load(io::Source* src) {
       /* SELECTDB: Select the specified database. */
       SET_OR_RETURN(LoadLen(nullptr), dbid);
 
-      if (dbid > FLAGS_dbnum) {
+      if (dbid > GetFlag(FLAGS_dbnum)) {
         LOG(WARNING) << "database id " << dbid << " exceeds dbnum limit. Try increasing the flag.";
 
         return RdbError(errc::bad_db_index);
@@ -1193,7 +1194,8 @@ io::Result<robj*> RdbLoader::ReadListQuicklist(int rdbtype) {
   if (len == 0)
     return Unexpected(errc::empty_key);
 
-  quicklist* ql = quicklistNew(FLAGS_list_max_listpack_size, FLAGS_list_compress_depth);
+  quicklist* ql =
+      quicklistNew(GetFlag(FLAGS_list_max_listpack_size), GetFlag(FLAGS_list_compress_depth));
   uint64_t container = QUICKLIST_NODE_CONTAINER_PACKED;
 
   auto cleanup = absl::Cleanup([&] { quicklistRelease(ql); });

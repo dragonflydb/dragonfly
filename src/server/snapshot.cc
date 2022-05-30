@@ -74,6 +74,9 @@ void SliceSnapshot::SerializeSingleEntry(DbIndex db_indx, const PrimeKey& pk,
     ec = rdb_serializer_->FlushMem();
     CHECK(!ec && !sfile_->val.empty());
     string tmp = std::move(sfile_->val);
+    channel_bytes_ += tmp.size();
+    DCHECK(!dest_->IsClosing());
+
     dest_->Push(DbRecord{db_indx, std::move(tmp)});
   }
 }
@@ -145,6 +148,7 @@ bool SliceSnapshot::FlushSfile(bool force) {
   VLOG(2) << "FlushSfile " << sfile_->val.size() << " bytes";
 
   string tmp = std::move(sfile_->val);  // important to move before pushing!
+  channel_bytes_ += tmp.size();
   dest_->Push(DbRecord{savecb_current_db_, std::move(tmp)});
 
   return true;

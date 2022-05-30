@@ -6,18 +6,22 @@
 
 #include <openssl/ssl.h>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
+#include "facade/service_interface.h"
 #include "util/proactor_pool.h"
 
-DEFINE_uint32(conn_threads, 0, "Number of threads used for handing server connections");
-DEFINE_bool(tls, false, "");
-DEFINE_bool(conn_use_incoming_cpu, false,
-            "If true uses incoming cpu of a socket in order to distribute"
-            " incoming connections");
+using namespace std;
 
-DEFINE_string(tls_client_cert_file, "", "cert file for tls connections");
-DEFINE_string(tls_client_key_file, "", "key file for tls connections");
+ABSL_FLAG(uint32_t, conn_threads, 0, "Number of threads used for handing server connections");
+ABSL_FLAG(bool, tls, false, "");
+ABSL_FLAG(bool, conn_use_incoming_cpu, false,
+          "If true uses incoming cpu of a socket in order to distribute"
+          " incoming connections");
+
+ABSL_FLAG(string, tls_client_cert_file, "", "cert file for tls connections");
+ABSL_FLAG(string, tls_client_key_file, "", "key file for tls connections");
 
 #if 0
 enum TlsClientAuth {
@@ -40,14 +44,14 @@ CONFIG_enum(tls_auth_clients, "yes", "", tls_auth_clients_enum, tls_auth_clients
 namespace facade {
 
 using namespace util;
-using namespace std;
+using absl::GetFlag;
 
 namespace {
 // To connect: openssl s_client  -cipher "ADH:@SECLEVEL=0" -state -crlf  -connect 127.0.0.1:6380
 static SSL_CTX* CreateSslCntx() {
   SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
-
-  if (FLAGS_tls_client_key_file.empty()) {
+  const auto& tls_client_key_file = GetFlag(FLAGS_tls_client_key_file);
+  if (tls_client_key_file.empty()) {
     // To connect - use openssl s_client -cipher with either:
     // "AECDH:@SECLEVEL=0" or "ADH:@SECLEVEL=0" setting.
     CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "aNULL"));
@@ -61,14 +65,14 @@ static SSL_CTX* CreateSslCntx() {
         << "tls-client-key-file not set, no keys are loaded and anonymous ciphers are enabled. "
         << "Do not use in production!";
   } else {  // tls_client_key_file is set.
-    CHECK_EQ(1,
-             SSL_CTX_use_PrivateKey_file(ctx, FLAGS_tls_client_key_file.c_str(), SSL_FILETYPE_PEM));
+    CHECK_EQ(1, SSL_CTX_use_PrivateKey_file(ctx, tls_client_key_file.c_str(), SSL_FILETYPE_PEM));
+    const auto& tls_client_cert_file = GetFlag(FLAGS_tls_client_cert_file);
 
-    if (!FLAGS_tls_client_cert_file.empty()) {
+    if (!tls_client_cert_file.empty()) {
       // TO connect with redis-cli you need both tls-client-key-file and tls-client-cert-file
       // loaded. Use `redis-cli --tls -p 6380 --insecure  PING` to test
 
-      CHECK_EQ(1, SSL_CTX_use_certificate_chain_file(ctx, FLAGS_tls_client_cert_file.c_str()));
+      CHECK_EQ(1, SSL_CTX_use_certificate_chain_file(ctx, tls_client_cert_file.c_str()));
     }
     CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
   }
@@ -99,14 +103,14 @@ bool ConfigureKeepAlive(int fd, unsigned interval_sec) {
     return false;
 
   /* Send next probes after the specified interval. Note that we set the
-    * delay as interval / 3, as we send three probes before detecting
-    * an error (see the next setsockopt call). */
+   * delay as interval / 3, as we send three probes before detecting
+   * an error (see the next setsockopt call). */
   val = interval_sec / 3;
   if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &val, sizeof(val)) < 0)
     return false;
 
   /* Consider the socket in error state after three we send three ACK
-    * probes without getting a reply. */
+   * probes without getting a reply. */
   val = 3;
   if (setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &val, sizeof(val)) < 0)
     return false;
@@ -116,14 +120,15 @@ bool ConfigureKeepAlive(int fd, unsigned interval_sec) {
 
 }  // namespace
 
-Listener::Listener(Protocol protocol, ServiceInterface* e) : service_(e), protocol_(protocol) {
-  if (FLAGS_tls) {
+Listener::Listener(Protocol protocol, ServiceInterface* si) : service_(si), protocol_(protocol) {
+  if (GetFlag(FLAGS_tls)) {
     OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, NULL);
     ctx_ = CreateSslCntx();
   }
   http_base_.reset(new HttpListener<>);
   http_base_->set_resource_prefix("https://romange.s3.eu-west-1.amazonaws.com/static");
   http_base_->enable_metrics();
+  si->ConfigureHttpHandlers(http_base_.get());
 }
 
 Listener::~Listener() {
@@ -157,14 +162,14 @@ void Listener::PostShutdown() {
 // We can limit number of threads handling dragonfly connections.
 ProactorBase* Listener::PickConnectionProactor(LinuxSocketBase* sock) {
   util::ProactorPool* pp = pool();
-  uint32_t total = FLAGS_conn_threads;
+  uint32_t total = GetFlag(FLAGS_conn_threads);
   uint32_t id = kuint32max;
 
   if (total == 0 || total > pp->size()) {
     total = pp->size();
   }
 
-  if (FLAGS_conn_use_incoming_cpu) {
+  if (GetFlag(FLAGS_conn_use_incoming_cpu)) {
     int fd = sock->native_handle();
 
     int cpu, napi_id;

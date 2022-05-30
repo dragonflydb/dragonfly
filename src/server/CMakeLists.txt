@@ -8,7 +8,7 @@ add_library(dragonfly_lib blocking_controller.cc channel_slice.cc command_regist
             list_family.cc main_service.cc  rdb_load.cc rdb_save.cc replica.cc
             snapshot.cc script_mgr.cc server_family.cc
             set_family.cc string_family.cc table.cc tiered_storage.cc
-            transaction.cc zset_family.cc)
+            transaction.cc zset_family.cc version.cc)
 
 cxx_link(dragonfly_lib dfly_core dfly_facade redis_lib strings_lib)
 

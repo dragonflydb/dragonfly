@@ -9,6 +9,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "server/blocking_controller.h"
 #include "server/server_state.h"
@@ -17,12 +18,13 @@ extern "C" {
 #include "util/fiber_sched_algo.h"
 #include "util/varz.h"
 
-DEFINE_string(backing_prefix, "", "");
-DECLARE_bool(cache_mode);
+using namespace std;
+
+ABSL_FLAG(string, backing_prefix, "", "");
+ABSL_DECLARE_FLAG(bool, cache_mode);
 
 namespace dfly {
 
-using namespace std;
 using namespace util;
 namespace this_fiber = ::boost::this_fiber;
 namespace fibers = ::boost::fibers;
@@ -46,7 +48,7 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
 
 EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap)
     : queue_(kQueueLen), txq_([](const Transaction* t) { return t->txid(); }), mi_resource_(heap),
-      db_slice_(pb->GetIndex(), FLAGS_cache_mode, this) {
+      db_slice_(pb->GetIndex(), absl::GetFlag(FLAGS_cache_mode), this) {
   fiber_q_ = fibers::fiber([this, index = pb->GetIndex()] {
     this_fiber::properties<FiberProps>().set_name(absl::StrCat("shard_queue", index));
     queue_.Run();
@@ -90,9 +92,10 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
   CompactObj::InitThreadLocal(shard_->memory_resource());
   SmallString::InitThreadLocal(data_heap);
 
-  if (!FLAGS_backing_prefix.empty()) {
+  string backing_prefix = absl::GetFlag(FLAGS_backing_prefix);
+  if (!backing_prefix.empty()) {
     string fn =
-        absl::StrCat(FLAGS_backing_prefix, "-", absl::Dec(pb->GetIndex(), absl::kZeroPad4), ".ssd");
+        absl::StrCat(backing_prefix, "-", absl::Dec(pb->GetIndex(), absl::kZeroPad4), ".ssd");
 
     shard_->tiered_storage_.reset(new TieredStorage(&shard_->db_slice_));
     error_code ec = shard_->tiered_storage_->Open(fn);

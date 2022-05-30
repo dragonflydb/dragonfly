@@ -9,10 +9,11 @@
 #include "util/accept_server.h"
 #include "util/uring/uring_pool.h"
 
-DEFINE_uint32(port, 6379, "server port");
+ABSL_FLAG(uint32_t, port, 6379, "server port");
 
 using namespace util;
 using namespace std;
+using absl::GetFlag;
 
 namespace facade {
 
@@ -43,7 +44,7 @@ class OkService : public ServiceInterface {
 void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   OkService service;
 
-  acceptor->AddListener(FLAGS_port, new Listener{Protocol::REDIS, &service});
+  acceptor->AddListener(GetFlag(FLAGS_port), new Listener{Protocol::REDIS, &service});
 
   acceptor->Run();
   acceptor->Wait();
@@ -56,7 +57,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 int main(int argc, char* argv[]) {
   MainInitGuard guard(&argc, &argv);
 
-  CHECK_GT(FLAGS_port, 0u);
+  CHECK_GT(GetFlag(FLAGS_port), 0u);
 
   uring::UringPool pp{1024};
   pp.Run();

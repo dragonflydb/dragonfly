@@ -17,6 +17,7 @@ extern "C" {
 #include "redis/redis_aux.h"
 }
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "io/file_util.h"
@@ -32,30 +33,33 @@ extern "C" {
 #include "server/replica.h"
 #include "server/script_mgr.h"
 #include "server/server_state.h"
+#include "server/version.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
 #include "util/uring/uring_file.h"
 
-DEFINE_string(dir, "", "working directory");
-DEFINE_string(dbfilename, "dump", "the filename to save/load the DB");
-DEFINE_string(requirepass, "", "password for AUTH authentication");
+using namespace std;
 
-DECLARE_uint32(port);
-DECLARE_bool(cache_mode);
+ABSL_FLAG(string, dir, "", "working directory");
+ABSL_FLAG(string, dbfilename, "dump", "the filename to save/load the DB");
+ABSL_FLAG(string, requirepass, "", "password for AUTH authentication");
+
+ABSL_DECLARE_FLAG(uint32_t, port);
+ABSL_DECLARE_FLAG(bool, cache_mode);
 
 extern "C" mi_stats_t _mi_stats_main;
 
 namespace dfly {
 
-using namespace std;
 using namespace util;
 namespace fibers = ::boost::fibers;
 namespace fs = std::filesystem;
 using absl::StrCat;
 using facade::MCReplyBuilder;
 using strings::HumanReadableNumBytes;
+using absl::GetFlag;
 
 namespace {
 
@@ -85,10 +89,12 @@ string UnknownSubCmd(string_view subcmd, string cmd) {
 }
 
 string InferLoadFile(fs::path data_dir) {
-  if (FLAGS_dbfilename.empty())
+  const auto& dbname = GetFlag(FLAGS_dbfilename);
+
+  if (dbname.empty())
     return string{};
 
-  fs::path fl_path = data_dir.append(FLAGS_dbfilename);
+  fs::path fl_path = data_dir.append(dbname);
 
   if (fs::exists(fl_path))
     return fl_path.generic_string();
@@ -167,9 +173,10 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
   task_10ms_ = pb_task_->AwaitBrief([&] { return pb_task_->AddPeriodic(10, cache_cb); });
 
   fs::path data_folder = fs::current_path();
+  const auto& dir = GetFlag(FLAGS_dir);
 
-  if (!FLAGS_dir.empty()) {
-    data_folder = FLAGS_dir;
+  if (!dir.empty()) {
+    data_folder = dir;
 
     error_code ec;
 
@@ -259,6 +266,10 @@ error_code ServerFamily::LoadRdb(const std::string& rdb_file) {
   return ec;
 }
 
+void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
+
+}
+
 void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* cntx) {
   if (!section.empty()) {
     return cntx->reply_builder()->SendError("");
@@ -284,7 +295,7 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
   ADD_LINE(pid, getpid());
   ADD_LINE(uptime, uptime);
   ADD_LINE(time, now);
-  ADD_LINE(version, "1.6.12");
+  ADD_LINE(version, kGitTag);
   ADD_LINE(libevent, "iouring");
   ADD_LINE(pointer_size, sizeof(void*));
   ADD_LINE(rusage_user, utime);
@@ -306,7 +317,7 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
 }
 
 error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
-  fs::path dir_path(FLAGS_dir);
+  fs::path dir_path(GetFlag(FLAGS_dir));
   error_code ec;
 
   if (!dir_path.empty()) {
@@ -317,7 +328,8 @@ error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
     }
   }
 
-  fs::path filename = FLAGS_dbfilename.empty() ? "dump" : FLAGS_dbfilename;
+  const auto& dbfilename = GetFlag(FLAGS_dbfilename);
+  fs::path filename = dbfilename.empty() ? "dump" : dbfilename;
   fs::path path = dir_path;
 
   if (!filename.has_extension()) {
@@ -471,7 +483,7 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
   }
 
   string_view pass = ArgS(args, 1);
-  if (pass == FLAGS_requirepass) {
+  if (pass == GetFlag(FLAGS_requirepass)) {
     cntx->authenticated = true;
     (*cntx)->SendOk();
   } else {
@@ -640,11 +652,11 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (should_enter("SERVER")) {
     ADD_HEADER("# Server");
 
-    append("redis_version", "df-0.1");
+    append("redis_version", StrCat("df-", kGitTag));
     append("redis_mode", "standalone");
     append("arch_bits", 64);
     append("multiplexing_api", "iouring");
-    append("tcp_port", FLAGS_port);
+    append("tcp_port", GetFlag(FLAGS_port));
 
     size_t uptime = time(NULL) - start_time_;
     append("uptime_in_seconds", uptime);
@@ -697,7 +709,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("small_string_bytes", m.small_string_bytes);
     append("maxmemory", max_memory_limit);
     append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
-    append("cache_mode", FLAGS_cache_mode ? "cache" : "store");
+    append("cache_mode", GetFlag(FLAGS_cache_mode) ? "cache" : "store");
   }
 
   if (should_enter("STATS")) {

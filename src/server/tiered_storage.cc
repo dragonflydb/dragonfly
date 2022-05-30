@@ -10,14 +10,17 @@ extern "C" {
 
 #include <mimalloc.h>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "server/db_slice.h"
 #include "util/proactor_base.h"
 
-DEFINE_uint32(tiered_storage_max_pending_writes, 32, "Maximal number of pending writes per thread");
+ABSL_FLAG(uint32_t, tiered_storage_max_pending_writes, 32,
+          "Maximal number of pending writes per thread");
 
 namespace dfly {
 using namespace std;
+using absl::GetFlag;
 
 struct IndexKey {
   DbIndex db_indx;
@@ -181,7 +184,7 @@ void TieredStorage::SendIoRequest(ActiveIoRequest* req) {
   string_view sv{req->block_ptr, kBatchSize};
 
   active_req_sem_.await(
-      [this] { return num_active_requests_ <= FLAGS_tiered_storage_max_pending_writes; });
+      [this] { return num_active_requests_ <= GetFlag(FLAGS_tiered_storage_max_pending_writes); });
 
   auto cb = [this, req](int res) { FinishIoRequest(res, req); };
   ++num_active_requests_;
@@ -230,7 +233,7 @@ void TieredStorage::FinishIoRequest(int io_res, ActiveIoRequest* req) {
 
   delete req;
   --num_active_requests_;
-  if (num_active_requests_ == FLAGS_tiered_storage_max_pending_writes) {
+  if (num_active_requests_ == GetFlag(FLAGS_tiered_storage_max_pending_writes)) {
     active_req_sem_.notifyAll();
   }
 
@@ -253,7 +256,7 @@ void TieredStorage::SetExternal(DbIndex db_index, size_t item_offset, PrimeValue
 }
 
 bool TieredStorage::ShouldFlush() {
-  if (num_active_requests_ >= FLAGS_tiered_storage_max_pending_writes)
+  if (num_active_requests_ >= GetFlag(FLAGS_tiered_storage_max_pending_writes))
     return false;
 
   return pending_req_.size() > pending_req_.capacity() / 2;
@@ -264,7 +267,7 @@ error_code TieredStorage::UnloadItem(DbIndex db_index, PrimeIterator it) {
 
   size_t blob_len = it->second.Size();
   if (blob_len >= kBatchSize / 2 &&
-      num_active_requests_ < FLAGS_tiered_storage_max_pending_writes) {
+      num_active_requests_ < GetFlag(FLAGS_tiered_storage_max_pending_writes)) {
     LOG(FATAL) << "TBD";
   }
   error_code ec;
