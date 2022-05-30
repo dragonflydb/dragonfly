@@ -10,6 +10,7 @@
 
 #include <boost/fiber/operations.hpp>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
 #include "facade/memcache_parser.h"
@@ -19,8 +20,9 @@
 #include "util/tls/tls_socket.h"
 #include "util/uring/uring_socket.h"
 
-DEFINE_bool(tcp_nodelay, false, "Configures dragonfly connections with socket option TCP_NODELAY");
-DEFINE_bool(http_admin_console, true, "If true allows accessing http console on main TCP port");
+ABSL_FLAG(bool, tcp_nodelay, false,
+          "Configures dragonfly connections with socket option TCP_NODELAY");
+ABSL_FLAG(bool, http_admin_console, true, "If true allows accessing http console on main TCP port");
 
 using namespace util;
 using namespace std;
@@ -172,7 +174,7 @@ void Connection::HandleRequests() {
 
   LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
 
-  if (FLAGS_tcp_nodelay) {
+  if (absl::GetFlag(FLAGS_tcp_nodelay)) {
     int val = 1;
     CHECK_EQ(0, setsockopt(lsb->native_handle(), SOL_TCP, TCP_NODELAY, &val, sizeof(val)));
   }
@@ -194,7 +196,7 @@ void Connection::HandleRequests() {
 
   FiberSocketBase* peer = tls_sock ? (FiberSocketBase*)tls_sock.get() : socket_.get();
   io::Result<bool> http_res{false};
-  if (FLAGS_http_admin_console)
+  if (absl::GetFlag(FLAGS_http_admin_console))
     http_res = CheckForHttpProto(peer);
 
   if (http_res) {

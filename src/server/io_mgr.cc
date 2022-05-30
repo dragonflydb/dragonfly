@@ -7,11 +7,12 @@
 #include <fcntl.h>
 #include <mimalloc.h>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "facade/facade_types.h"
 #include "util/uring/proactor.h"
 
-DEFINE_bool(backing_file_direct, false, "If true uses O_DIRECT to open backing files");
+ABSL_FLAG(bool, backing_file_direct, false, "If true uses O_DIRECT to open backing files");
 
 namespace dfly {
 
@@ -41,7 +42,7 @@ error_code IoMgr::Open(const string& path) {
   CHECK(!backing_file_);
 
   int kFlags = O_CREAT | O_RDWR | O_TRUNC | O_CLOEXEC;
-  if (FLAGS_backing_file_direct) {
+  if (absl::GetFlag(FLAGS_backing_file_direct)) {
     kFlags |= O_DIRECT;
   }
   auto res = uring::OpenLinux(path, kFlags, 0666);
@@ -111,7 +112,7 @@ error_code IoMgr::WriteAsync(size_t offset, string_view blob, WriteCb cb) {
 error_code IoMgr::Read(size_t offset, io::MutableBytes dest) {
   DCHECK(!dest.empty());
 
-  if (FLAGS_backing_file_direct) {
+  if (absl::GetFlag(FLAGS_backing_file_direct)) {
     size_t read_offs = offset & ~4095ULL;
     size_t end_range = alignup(offset + dest.size(), 4096);
     size_t space_needed = end_range - read_offs;

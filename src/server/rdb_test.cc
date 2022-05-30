@@ -8,8 +8,11 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include <absl/flags/reflection.h>
+
 #include <mimalloc.h>
 
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"  // needed to find operator== for RespExpr.
@@ -24,9 +27,10 @@ using namespace std;
 using namespace util;
 using namespace facade;
 using absl::StrCat;
+using absl::SetFlag;
 
-DECLARE_int32(list_compress_depth);
-DECLARE_int32(list_max_listpack_size);
+ABSL_DECLARE_FLAG(int32, list_compress_depth);
+ABSL_DECLARE_FLAG(int32, list_max_listpack_size);
 
 namespace dfly {
 
@@ -109,9 +113,10 @@ TEST_F(RdbTest, LoadSmall6) {
 }
 
 TEST_F(RdbTest, Reload) {
-  gflags::FlagSaver fs;
-  FLAGS_list_compress_depth = 1;
-  FLAGS_list_max_listpack_size = 1;  // limit listpack to a single element.
+  absl::FlagSaver fs;
+
+  SetFlag(&FLAGS_list_compress_depth, 1);
+  SetFlag(&FLAGS_list_max_listpack_size, 1);  // limit listpack to a single element.
 
   Run({"set", "string_key", "val"});
   Run({"set", "large_key", string(511, 'L')});

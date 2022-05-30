@@ -9,6 +9,7 @@ extern "C" {
 #include "redis/util.h"
 }
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
@@ -18,8 +19,8 @@ extern "C" {
 #include "server/transaction.h"
 #include "util/varz.h"
 
-DEFINE_uint32(dbnum, 16, "Number of databases");
-DEFINE_uint32(keys_output_limit, 8192, "Maximum number of keys output by keys command");
+ABSL_FLAG(uint32_t, dbnum, 16, "Number of databases");
+ABSL_FLAG(uint32_t, keys_output_limit, 8192, "Maximum number of keys output by keys command");
 
 namespace dfly {
 using namespace std;
@@ -400,9 +401,11 @@ void GenericFamily::Keys(CmdArgList args, ConnectionContext* cntx) {
   ScanOpts scan_opts;
   scan_opts.pattern = pattern;
   scan_opts.limit = 512;
+  auto output_limit = absl::GetFlag(FLAGS_keys_output_limit);
+
   do {
     cursor = ScanGeneric(cursor, scan_opts, &keys, cntx);
-  } while (cursor != 0 && keys.size() < FLAGS_keys_output_limit);
+  } while (cursor != 0 && keys.size() < output_limit);
 
   (*cntx)->StartArray(keys.size());
   for (const auto& k : keys) {
@@ -481,7 +484,7 @@ void GenericFamily::Select(CmdArgList args, ConnectionContext* cntx) {
   if (!absl::SimpleAtoi(key, &index)) {
     return (*cntx)->SendError(kInvalidDbIndErr);
   }
-  if (index < 0 || index >= FLAGS_dbnum) {
+  if (index < 0 || index >= absl::GetFlag(FLAGS_dbnum)) {
     return (*cntx)->SendError(kDbIndOutOfRangeErr);
   }
   cntx->conn_state.db_index = index;

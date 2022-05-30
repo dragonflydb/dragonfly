@@ -6,6 +6,11 @@
 #include <mimalloc-new-delete.h>
 #endif
 
+#include <absl/flags/usage.h>
+#include <absl/flags/usage_config.h>
+#include <absl/strings/match.h>
+#include <absl/strings/str_cat.h>
+#include <absl/strings/strip.h>
 #include <mimalloc.h>
 
 #include "base/init.h"
@@ -18,26 +23,80 @@
 #include "util/uring/uring_pool.h"
 #include "util/varz.h"
 
+using namespace std;
 
-DECLARE_uint32(port);
-DECLARE_uint32(dbnum);
-DECLARE_uint32(memcache_port);
-DECLARE_uint64(maxmemory);
+ABSL_DECLARE_FLAG(uint32_t, port);
+ABSL_DECLARE_FLAG(uint32_t, dbnum);
+ABSL_DECLARE_FLAG(uint32_t, memcache_port);
+ABSL_DECLARE_FLAG(uint64_t, maxmemory);
 
-DEFINE_bool(use_large_pages, false, "If true - uses large memory pages for allocations");
-DEFINE_string(bind, "",
-              "Bind address. If empty - binds on all interfaces. "
-              "It's not advised due to security implications.");
+ABSL_FLAG(bool, use_large_pages, false, "If true - uses large memory pages for allocations");
+ABSL_FLAG(string, bind, "",
+          "Bind address. If empty - binds on all interfaces. "
+          "It's not advised due to security implications.");
 
 using namespace util;
-using namespace std;
 using namespace facade;
+using absl::GetFlag;
+using absl::StrCat;
 using strings::HumanReadableNumBytes;
 
 namespace dfly {
 
+namespace {
+
+enum class TermColor { kDefault, kRed, kGreen, kYellow };
+// Returns the ANSI color code for the given color. TermColor::kDefault is
+// an invalid input.
+static const char* GetAnsiColorCode(TermColor color) {
+  switch (color) {
+    case TermColor::kRed:
+      return "1";
+    case TermColor::kGreen:
+      return "2";
+    case TermColor::kYellow:
+      return "3";
+    default:
+      return nullptr;
+  }
+}
+
+string ColorStart(TermColor color) {
+  return StrCat("\033[0;3", GetAnsiColorCode(color), "m");
+}
+
+// Resets the terminal to default.
+const char kColorEnd[] = "\033[m";
+
+string ColoredStr(TermColor color, string_view str) {
+  return StrCat(ColorStart(color), str, kColorEnd);
+}
+
+bool HelpshortFlags(std::string_view f) {
+  return absl::StartsWith(f, "\033[0;32");
+}
+
+bool HelpFlags(std::string_view f) {
+  return absl::StartsWith(f, "\033[0;3");
+}
+
+string NormalizePaths(std::string_view path) {
+  if (absl::ConsumePrefix(&path, "../src/"))
+    return ColoredStr(TermColor::kGreen, path);
+
+  if (absl::ConsumePrefix(&path, "../"))
+    return ColoredStr(TermColor::kYellow, path);
+
+  if (absl::ConsumePrefix(&path, "_deps/"))
+    return string(path);
+
+  return string(path);
+}
+
 bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
-  if (FLAGS_maxmemory > 0 && FLAGS_maxmemory < pool->size() * 256_MB) {
+  auto maxmemory = GetFlag(FLAGS_maxmemory);
+
+  if (maxmemory > 0 && maxmemory < pool->size() * 256_MB) {
     LOG(ERROR) << "Max memory is less than 256MB per thread. Exiting...";
     return false;
   }
@@ -49,15 +108,17 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   Service::InitOpts opts;
   opts.disable_time_update = false;
   service.Init(acceptor, main_listener, opts);
+  const auto& bind = GetFlag(FLAGS_bind);
+  const char* bind_addr = bind.empty() ? nullptr : bind.c_str();
+  auto port = GetFlag(FLAGS_port);
+  auto mc_port = GetFlag(FLAGS_memcache_port);
 
-  const char* bind_addr = FLAGS_bind.empty() ? nullptr : FLAGS_bind.c_str();
+  error_code ec = acceptor->AddListener(bind_addr, port, main_listener);
 
-  error_code ec = acceptor->AddListener(bind_addr, FLAGS_port, main_listener);
+  LOG_IF(FATAL, ec) << "Cound not open port " << port << ", error: " << ec.message();
 
-  LOG_IF(FATAL, ec) << "Cound not open port " << FLAGS_port << ", error: " << ec.message();
-
-  if (FLAGS_memcache_port > 0) {
-    acceptor->AddListener(FLAGS_memcache_port, new Listener{Protocol::MEMCACHE, &service});
+  if (mc_port > 0) {
+    acceptor->AddListener(mc_port, new Listener{Protocol::MEMCACHE, &service});
   }
 
   acceptor->Run();
@@ -67,17 +128,23 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   return true;
 }
 
+}  // namespace
 }  // namespace dfly
 
 extern "C" void _mi_options_init();
 
 int main(int argc, char* argv[]) {
-  gflags::SetUsageMessage("dragonfly [FLAGS]");
-  gflags::SetVersionString("v0.2");
+  absl::SetProgramUsageMessage("dragonfly [FLAGS]");
+  absl::FlagsUsageConfig config;
+  config.contains_help_flags = dfly::HelpFlags;
+  config.contains_helpshort_flags = dfly::HelpshortFlags;
+  config.normalize_filename = dfly::NormalizePaths;
+
+  absl::SetFlagsUsageConfig(config);
 
   MainInitGuard guard(&argc, &argv);
 
-  CHECK_GT(FLAGS_port, 0u);
+  CHECK_GT(GetFlag(FLAGS_port), 0u);
   mi_stats_reset();
 
   base::sys::KernelVersion kver;
@@ -88,7 +155,7 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  if (FLAGS_dbnum > dfly::kMaxDbId) {
+  if (GetFlag(FLAGS_dbnum) > dfly::kMaxDbId) {
     LOG(ERROR) << "dbnum is too big. Exiting...";
     return 1;
   }
@@ -96,7 +163,7 @@ int main(int argc, char* argv[]) {
   CHECK_LT(kver.major, 99u);
   dfly::kernel_version = kver.kernel * 100 + kver.major;
 
-  if (FLAGS_maxmemory == 0) {
+  if (GetFlag(FLAGS_maxmemory) == 0) {
     LOG(INFO) << "maxmemory has not been specified. Deciding myself....";
 
     io::Result<io::MemInfoData> res = io::ReadMemInfo();
@@ -104,14 +171,14 @@ int main(int argc, char* argv[]) {
     size_t maxmemory = size_t(0.8 * available);
     LOG(INFO) << "Found " << HumanReadableNumBytes(available)
               << " available memory. Setting maxmemory to " << HumanReadableNumBytes(maxmemory);
-    FLAGS_maxmemory = maxmemory;
+    absl::SetFlag(&FLAGS_maxmemory, maxmemory);
   } else {
-    LOG(INFO) << "Max memory limit is: " << HumanReadableNumBytes(FLAGS_maxmemory);
+    LOG(INFO) << "Max memory limit is: " << HumanReadableNumBytes(GetFlag(FLAGS_maxmemory));
   }
 
-  dfly::max_memory_limit = FLAGS_maxmemory;
+  dfly::max_memory_limit = GetFlag(FLAGS_maxmemory);
 
-  if (FLAGS_use_large_pages) {
+  if (GetFlag(FLAGS_use_large_pages)) {
     mi_option_enable(mi_option_large_os_pages);
   }
   mi_option_enable(mi_option_show_errors);

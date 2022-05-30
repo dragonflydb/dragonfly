@@ -16,6 +16,7 @@ extern "C" {
 #include <boost/fiber/operations.hpp>
 #include <filesystem>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
@@ -34,22 +35,24 @@ extern "C" {
 #include "util/uring/uring_fiber_algo.h"
 #include "util/varz.h"
 
+using namespace std;
+
 // TODO: to move to absl flags and keep legacy flags only for glog library.
 // absl flags allow parsing of custom types and allow specifying which flags appear
 // for helpshort.
-DEFINE_uint32(port, 6379, "Redis port");
-DEFINE_uint32(memcache_port, 0, "Memcached port");
-DECLARE_string(requirepass);
-DEFINE_uint64(maxmemory, 0,
+ABSL_FLAG(uint32_t, port, 6379, "Redis port");
+ABSL_FLAG(uint32_t, memcache_port, 0, "Memcached port");
+ABSL_FLAG(uint64_t, maxmemory, 0,
               "Limit on maximum-memory that is used by the database."
               "0 - means the program will automatically determine its maximum memory usage");
-DEFINE_bool(cache_mode, false,
+ABSL_FLAG(bool, cache_mode, false,
             "If true, the backend behaves like a cache, "
             "by evicting entries when getting close to maxmemory limit");
 
+ABSL_DECLARE_FLAG(string, requirepass);
+
 namespace dfly {
 
-using namespace std;
 using namespace util;
 using base::VarzValue;
 using ::boost::intrusive_ptr;
@@ -57,6 +60,7 @@ namespace fibers = ::boost::fibers;
 namespace this_fiber = ::boost::this_fiber;
 using facade::MCReplyBuilder;
 using facade::RedisReplyBuilder;
+using absl::GetFlag;
 
 namespace {
 
@@ -564,7 +568,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       server_family_.StatsMC(cmd.key, cntx);
       return;
     case MemcacheParser::VERSION:
-      mc_builder->SendSimpleString(absl::StrCat("VERSION ", gflags::VersionString()));
+      mc_builder->SendSimpleString(absl::StrCat("VERSION ", "TBD"));
       return;
     default:
       mc_builder->SendClientError("bad command line format");
@@ -654,7 +658,7 @@ bool Service::IsShardSetLocked() const {
 }
 
 bool Service::IsPassProtected() const {
-  return !FLAGS_requirepass.empty();
+  return !GetFlag(FLAGS_requirepass).empty();
 }
 
 absl::flat_hash_map<std::string, unsigned> Service::UknownCmdMap() const {

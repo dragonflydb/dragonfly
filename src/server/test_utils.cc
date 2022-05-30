@@ -12,16 +12,18 @@ extern "C" {
 #include <absl/strings/str_split.h>
 #include <mimalloc.h>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "facade/dragonfly_connection.h"
 #include "util/uring/uring_pool.h"
 
-DECLARE_string(dbfilename);
+using namespace std;
+
+ABSL_DECLARE_FLAG(string, dbfilename);
 
 namespace dfly {
 using MP = MemcacheParser;
-using namespace std;
 using namespace util;
 using namespace testing;
 
@@ -52,7 +54,7 @@ BaseFamilyTest::~BaseFamilyTest() {
 }
 
 void BaseFamilyTest::SetUpTestSuite() {
-  FLAGS_dbfilename = "";
+  absl::SetFlag(&FLAGS_dbfilename, "");
   init_zmalloc_threadlocal(mi_heap_get_backing());
 }
 

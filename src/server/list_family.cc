@@ -10,6 +10,7 @@ extern "C" {
 
 #include <absl/strings/numbers.h>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
@@ -34,7 +35,7 @@ extern "C" {
  * but if your use case is unique, adjust the settings as necessary.
  *
  */
-DEFINE_int32(list_max_listpack_size, -2, "Maximum listpack size, default is 8kb");
+ABSL_FLAG(int32_t, list_max_listpack_size, -2, "Maximum listpack size, default is 8kb");
 
 /**
  * Lists may also be compressed.
@@ -54,12 +55,13 @@ DEFINE_int32(list_max_listpack_size, -2, "Maximum listpack size, default is 8kb"
  *
  */
 
-DEFINE_int32(list_compress_depth, 0, "Compress depth of the list. Default is no compression");
+ABSL_FLAG(int32_t, list_compress_depth, 0, "Compress depth of the list. Default is no compression");
 
 namespace dfly {
 
 using namespace std;
 using namespace facade;
+using absl::GetFlag;
 
 namespace {
 
@@ -316,7 +318,8 @@ OpResult<string> OpRPopLPushSingleShard(const OpArgs& op_args, string_view src, 
   if (res.second) {
     robj* obj = createQuicklistObject();
     dest_ql = (quicklist*)obj->ptr;
-    quicklistSetOptions(dest_ql, FLAGS_list_max_listpack_size, FLAGS_list_compress_depth);
+    quicklistSetOptions(dest_ql, GetFlag(FLAGS_list_max_listpack_size),
+                        GetFlag(FLAGS_list_compress_depth));
     dest_it->second.ImportRObj(obj);
 
     // Insertion of dest could invalidate src_it. Find it again.
@@ -391,7 +394,8 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   if (new_key) {
     robj* o = createQuicklistObject();
     ql = (quicklist*)o->ptr;
-    quicklistSetOptions(ql, FLAGS_list_max_listpack_size, FLAGS_list_compress_depth);
+    quicklistSetOptions(ql, GetFlag(FLAGS_list_max_listpack_size),
+                        GetFlag(FLAGS_list_compress_depth));
     it->second.ImportRObj(o);
   } else {
     if (it->second.ObjType() != OBJ_LIST)

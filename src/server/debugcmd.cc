@@ -9,6 +9,7 @@
 #include <boost/fiber/operations.hpp>
 #include <filesystem>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "server/blocking_controller.h"
 #include "server/engine_shard_set.h"
@@ -20,12 +21,13 @@
 #include "server/transaction.h"
 #include "util/uring/uring_fiber_algo.h"
 
-DECLARE_string(dir);
-DECLARE_string(dbfilename);
+using namespace std;
+
+ABSL_DECLARE_FLAG(string, dir);
+ABSL_DECLARE_FLAG(string, dbfilename);
 
 namespace dfly {
 
-using namespace std;
 using namespace util;
 namespace this_fiber = ::boost::this_fiber;
 using boost::intrusive_ptr;
@@ -33,6 +35,7 @@ using boost::fibers::fiber;
 using namespace facade;
 namespace fs = std::filesystem;
 using absl::StrAppend;
+using absl::GetFlag;
 
 struct PopulateBatch {
   DbIndex dbid;
@@ -181,8 +184,8 @@ void DebugCmd::Load(std::string_view filename) {
   fs::path path(filename);
 
   if (filename.empty()) {
-    fs::path dir_path(FLAGS_dir);
-    string filename = FLAGS_dbfilename;
+    fs::path dir_path(GetFlag(FLAGS_dir));
+    string filename = GetFlag(FLAGS_dbfilename);
     dir_path.append(filename);
     path = dir_path;
   }
