@@ -33,6 +33,7 @@ extern "C" {
 #include "server/replica.h"
 #include "server/script_mgr.h"
 #include "server/server_state.h"
+#include "server/version.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "strings/human_readable.h"
@@ -290,7 +291,7 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
   ADD_LINE(pid, getpid());
   ADD_LINE(uptime, uptime);
   ADD_LINE(time, now);
-  ADD_LINE(version, "1.6.12");
+  ADD_LINE(version, kGitTag);
   ADD_LINE(libevent, "iouring");
   ADD_LINE(pointer_size, sizeof(void*));
   ADD_LINE(rusage_user, utime);

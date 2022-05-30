@@ -11,7 +11,9 @@ ARCH=`uname -m`
 NAME="dragonfly-${ARCH}"
 
 pwd
-./helio/blaze.sh -release -DBoost_USE_STATIC_LIBS=ON -DOPENSSL_USE_STATIC_LIBS=ON
+./helio/blaze.sh -release -DBoost_USE_STATIC_LIBS=ON -DOPENSSL_USE_STATIC_LIBS=ON \
+          -DENABLE_GIT_VERSION=ON -DWITH_UNWIND=OFF
+
 cd build-opt 
 ninja dragonfly && ldd dragonfly
 strip dragonfly

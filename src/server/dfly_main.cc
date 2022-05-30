@@ -18,6 +18,7 @@
 #include "facade/dragonfly_listener.h"
 #include "io/proc_reader.h"
 #include "server/main_service.h"
+#include "server/version.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
 #include "util/uring/uring_pool.h"
@@ -133,12 +134,23 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
 extern "C" void _mi_options_init();
 
+using namespace dfly;
+
 int main(int argc, char* argv[]) {
-  absl::SetProgramUsageMessage("dragonfly [FLAGS]");
+  absl::SetProgramUsageMessage(
+    R"(a modern in-memory store.
+
+Usage: dragonfly [FLAGS]
+)");
+
   absl::FlagsUsageConfig config;
   config.contains_help_flags = dfly::HelpFlags;
   config.contains_helpshort_flags = dfly::HelpshortFlags;
   config.normalize_filename = dfly::NormalizePaths;
+  config.version_string = [] {
+    return StrCat("dragonfly ", ColoredStr(TermColor::kGreen, dfly::kGitTag),
+                  "\nbuild time: ", dfly::kBuildTime, "\n");
+  };
 
   absl::SetFlagsUsageConfig(config);
 
