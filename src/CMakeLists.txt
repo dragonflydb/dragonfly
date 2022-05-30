@@ -20,8 +20,9 @@ Message(STATUS "THIRD_PARTY_LIB_DIR ${THIRD_PARTY_LIB_DIR}")
 
 option(ENABLE_GIT_VERSION "Build with Git metadata" OFF)
 
+set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/" )
+
 if(ENABLE_GIT_VERSION)
-    MESSAGE(FATAL_ERROR "foobar")
     include(GetGitRevisionDescription)
     get_git_head_revision(GIT_REFSPEC GIT_SHA1)
     git_local_changes(GIT_CLEAN_DIRTY)

@@ -18,4 +18,4 @@ cd build-opt
 ninja dragonfly && ldd dragonfly
 strip dragonfly
 mv dragonfly $NAME
-tar cvfz $NAME.tar.gz $NAME ../LICENSE
+tar cvfz $NAME.tar.gz $NAME ../LICENSE.md

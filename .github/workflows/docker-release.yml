@@ -2,11 +2,21 @@ name: docker release
 
 on:
   workflow_dispatch:
+    inputs:
+      TAG_NAME:
+        description: 'Tag name that the major tag will point to'
+        required: true
+
+  release:
+    types: [released]
 
 permissions:
   packages: write
   contents: read
 
+env:
+  TAG_NAME: ${{ github.event.inputs.TAG_NAME || github.event.release.tag_name }}
+  
 jobs:
 # ===============================================================
 #   Building Dev Images
@@ -16,11 +26,16 @@ jobs:
     steps:
     - name: checkout
       uses: actions/checkout@v2
+    
+    - uses: dsaltares/fetch-gh-release-asset@master
       with:
-        submodules: true
+        version: 'tags/${TAG_NAME}'
+        regex: true
+        file: "dragonfly-.*\\.tar\\.gz"
+        target: 'releases/'
+        token: ${{ secrets.GITHUB_TOKEN }}
 
-    - 
-      name: Set up QEMU
+    - name: Set up QEMU
       id: qemu
       uses: docker/setup-qemu-action@v1
       with:          
@@ -35,16 +50,12 @@ jobs:
         registry: ghcr.io
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-
-    # - name: Build dragonfly alpine
-    #   uses: docker/build-push-action@v2
-    #   with:
-    #     context: .
-    #     platforms: linux/amd64,linux/arm64
-    #     push: ${{ github.event_name != 'pull_request' }}
-    #     tags: |
-    #       ghcr.io/${{ github.repository }}:alpine
-    #     file: tools/docker/Dockerfile.alpine-prod
+    
+    - name: Extract artifacts
+      run: |
+        ls -l
+        ls -l releases
+        tar xvfz releases/*.tar.gz -C releases && rm releases/*.gz
     
     - name: Build dragonfly ubuntu
       uses: docker/build-push-action@v2

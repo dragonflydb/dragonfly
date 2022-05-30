@@ -1,21 +1,17 @@
 # syntax=docker/dockerfile:1
 from ghcr.io/romange/ubuntu-dev:20 as builder
 
-# Serves as environment variable during the build
-# QEMU_CPU tunes how qemu emulator runs.
-ARG QEMU_CPU
+ARG TARGETPLATFORM
 
 WORKDIR /build
-COPY src/  ./src/
-COPY helio/  ./helio/
-COPY patches/  ./patches/
-COPY CMakeLists.txt ./
-RUN ./helio/blaze.sh -release -DBoost_USE_STATIC_LIBS=ON -DOPENSSL_USE_STATIC_LIBS=ON
+COPY tools/docker/fetch_release.sh /tmp/
+COPY releases/dragonfly-* /tmp/
 
-WORKDIR build-opt
-RUN ninja dragonfly
 RUN curl -O https://raw.githubusercontent.com/ncopa/su-exec/master/su-exec.c && \
      gcc -Wall -O2 su-exec.c -o su-exec
+
+RUN /tmp/fetch_release.sh ${TARGETPLATFORM}
+
 
 # Now prod image
 FROM ubuntu:20.04
@@ -31,15 +27,13 @@ LABEL org.opencontainers.image.source https://github.com/${ORG_NAME}/dragonfly
 
 
 RUN groupadd -r -g 999 dfly && useradd -r -g dfly -u 999 dfly
-RUN apt update && apt install -y libunwind8 libssl1.1 && \
-    rm -rf /var/lib/apt/lists/*
-
 RUN mkdir /data && chown dfly:dfly /data
+
 VOLUME /data
 WORKDIR /data
 COPY tools/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY --from=builder /build/build-opt/dragonfly /usr/local/bin/
-COPY --from=builder /build/build-opt/su-exec /usr/local/bin/
+COPY --from=builder /build/su-exec /usr/local/bin/
+COPY --from=builder /build/dragonfly /usr/local/bin/
 
 ENTRYPOINT ["entrypoint.sh"]
 
