@@ -652,7 +652,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (should_enter("SERVER")) {
     ADD_HEADER("# Server");
 
-    append("redis_version", "df-0.1");
+    append("redis_version", StrCat("df-", kGitTag));
     append("redis_mode", "standalone");
     append("arch_bits", 64);
     append("multiplexing_api", "iouring");
