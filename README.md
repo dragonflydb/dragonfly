@@ -60,8 +60,8 @@ Debian/Bullseye, Ubuntu 20.04.4 or later fit these requirements.
 ### With docker:
 
 ```bash
-docker pull ghcr.io/dragonflydb/dragonfly && \
-docker tag ghcr.io/dragonflydb/dragonfly dragonfly
+docker pull docker.dragonflydb.io/dragonflydb/dragonfly && \
+docker tag docker.dragonflydb.io/dragonflydb/dragonfly dragonfly
 
 docker run --network=host --ulimit memlock=-1 --rm dragonfly
 
