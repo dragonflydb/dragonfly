@@ -29,7 +29,7 @@ jobs:
     
     - uses: dsaltares/fetch-gh-release-asset@master
       with:
-        version: 'tags/${TAG_NAME}'
+        version: 'tags/${{ env.TAG_NAME }}'
         regex: true
         file: "dragonfly-.*\\.tar\\.gz"
         target: 'releases/'
@@ -55,7 +55,8 @@ jobs:
       run: |
         ls -l
         ls -l releases
-        tar xvfz releases/*.tar.gz -C releases && rm releases/*.gz
+        for f in releases/*.tar.gz; do tar xvfz $f -C releases; done
+        rm releases/*.tar.gz
     
     - name: Build dragonfly ubuntu
       uses: docker/build-push-action@v2
