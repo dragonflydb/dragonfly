@@ -75,6 +75,8 @@ void SliceSnapshot::SerializeSingleEntry(DbIndex db_indx, const PrimeKey& pk,
     CHECK(!ec && !sfile_->val.empty());
     string tmp = std::move(sfile_->val);
     channel_bytes_ += tmp.size();
+    DCHECK(!dest_->IsClosing());
+
     dest_->Push(DbRecord{db_indx, std::move(tmp)});
   }
 }
