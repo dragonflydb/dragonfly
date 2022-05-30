@@ -27,7 +27,7 @@ Lets estimate the overhead of `dictht` table inside RD.<br>
 
 *Case 1*: it has `N` items at 100% load factor, in other words, buckets count equals to number of items. Each bucket holds a pointer to dictEntry, i.e. it's 8 bytes. In total we need: $8N + 24N = 32N$ bytes per record. <br>
 *Case 2*: `N` items at 75% load factor, in other words, the number of buckets is 1.33 higher than number of items. In total we need: $N\*1.33\*8 + 24N \approx 34N$ bytes per record. <br>
-*Case 3*: `N` items at 50% load factor, say right after table growth. Number of buckets is twice the nujmber of items, hence we need $N\*2\*8 + 24N = 40N$ bytes per record.
+*Case 3*: `N` items at 50% load factor, say right after table growth. Number of buckets is twice the number of items, hence we need $N\*2\*8 + 24N = 40N$ bytes per record.
 
 In best possible case we need at least 16 bytes to store key/value pair into the table, therefore
 the overhead of `dictht` is on average about 16-24 bytes per item.
@@ -40,7 +40,7 @@ To summarize, RD requires between **16-32 bytes overhead**.
 ## Dash table
 [Dashtable](https://arxiv.org/abs/2003.07302) is an evolution of an algorithm from 1979 called [extendible hashing](https://en.wikipedia.org/wiki/Extendible_hashing).
 
-Similarly to a classic hashtable, dashtable (DT) also holds an array of pointers at front. However, unlike with classic tables, it points to `segments` and not to linked lists of items. Each `segment` is, in fact, a mini-hashtable of constant size. The front array of pointers to segments is called `directory`. Similarly to a classic table, when an item is inserted into a DT, it first determines the destination segment based on item's hashvalue. The segment is implemented as a hashtable with open-addresed hashing scheme and as I said - constant in size. Once segment is determined, the item inserted into one of its buckets. If an item was successfully inserted, we finished, otherwise, the segment is "full" and needs splitting. The DT splits the contents of a full segment in two segments, and the additional segment is added to the directory. Then it tries to reinsert the item again. To summarize, the classic chaining hash-table is built upon a dynamic array of linked-lists while dashtable is more like a dynamic array of flat hash-tables of constant size.
+Similarly to a classic hashtable, dashtable (DT) also holds an array of pointers at front. However, unlike with classic tables, it points to `segments` and not to linked lists of items. Each `segment` is, in fact, a mini-hashtable of constant size. The front array of pointers to segments is called `directory`. Similarly to a classic table, when an item is inserted into a DT, it first determines the destination segment based on item's hashvalue. The segment is implemented as a hashtable with open-addressed hashing scheme and as I said - constant in size. Once segment is determined, the item inserted into one of its buckets. If an item was successfully inserted, we finished, otherwise, the segment is "full" and needs splitting. The DT splits the contents of a full segment in two segments, and the additional segment is added to the directory. Then it tries to reinsert the item again. To summarize, the classic chaining hash-table is built upon a dynamic array of linked-lists while dashtable is more like a dynamic array of flat hash-tables of constant size.
 
 ![Dashtable Diagram](./dashtable.svg)
 
@@ -146,13 +146,13 @@ It's very hard, technically to measure exact memory usage of Redis during BGSAVE
 
 ![BGSAVE](./bgsave_memusage.svg)
 
-As you can see on the graph, Redis uses 50% more memory even before BGSAVE starts. Around second 14, BGSAVE kicks off on both servers. Visually you can not see this event on Dragonfly graph, but it's seen very well on Redis graph. It took just few seconds for Dragonfly to finish its snapshot (again, not possible to see) and around second 20 Dragonfly is already behind BGSAVE. You can see a distinguishinable cliff at second 39
+As you can see on the graph, Redis uses 50% more memory even before BGSAVE starts. Around second 14, BGSAVE kicks off on both servers. Visually you can not see this event on Dragonfly graph, but it's seen very well on Redis graph. It took just few seconds for Dragonfly to finish its snapshot (again, not possible to see) and around second 20 Dragonfly is already behind BGSAVE. You can see a distinguishable cliff at second 39
 where Redis finishes its snapshot, reaching almost x3 times more memory usage at peak.
 
 ### Expiry of items during writes
 Efficient Expiry is very important for many scenarios. See, for example,
 [Pelikan paper'21](https://twitter.github.io/pelikan/2021/segcache.html). Twitter team says
-that their their memory footprint could be reduced by as much as by 60% by employing better expiry methodology. The authors of the post above show prons and cons of expiration methods in the table below:
+that their their memory footprint could be reduced by as much as by 60% by employing better expiry methodology. The authors of the post above show pros and cons of expiration methods in the table below:
 
 <img src="https://twitter.github.io/pelikan/assets/img/segcache/expiration.svg" width="400">
 
