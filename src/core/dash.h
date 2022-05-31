@@ -12,7 +12,7 @@ namespace dfly {
 
 // DASH: Dynamic And Scalable Hashing.
 // TODO: We could name it DACHE: Dynamic and Adaptive caCHE.
-// After all, we added additionaly improvements we added as part of the dragonfly project,
+// After all, we added additionally improvements we added as part of the dragonfly project,
 // that probably justify a right to choose our own name for this data structure.
 struct BasicDashPolicy {
   enum { kSlotNum = 12, kBucketNum = 64, kStashBucketNum = 2 };
@@ -225,7 +225,7 @@ class DashTable : public detail::DashTableBase {
   // In practice traversal is limited to a single segment. The operation is read-only and
   // simulates insertion process. 'cb' must accept bucket_iterator.
   // Note: the interface a bit hacky.
-  // The functions call cb on physical buckets with version smalller than ver_threshold that
+  // The functions call cb on physical buckets with version smaller than ver_threshold that
   // due to entry movements might update its version to version greater than ver_threshold.
   //
   // These are not const functions because they send non-const iterators that allow
