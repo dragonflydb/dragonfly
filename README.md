@@ -125,7 +125,7 @@ for more options like logs management or tls support, run `dragonfly --help`.
 ## Roadmap and status
 
 Currently Dragonfly supports ~130 Redis commands and all memcache commands besides `cas`.
-We are almost on part with Redis 2.8 API. Our first milestone will be to stabilize basic
+We are almost on par with Redis 2.8 API. Our first milestone will be to stabilize basic
 functionality and reach API parity with Redis 2.8 and Memcached APIs.
 If you see that a command you need, is not implemented yet, please open an issue.
 
