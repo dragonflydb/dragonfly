@@ -555,7 +555,7 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   /*both clear this bucket and its neighbor bucket*/
   void RemoveStashReference(unsigned stash_pos, Hash_t key_hash);
 
-  // Returns slot id if insertion is succesful, -1 if no free slots are found.
+  // Returns slot id if insertion is successful, -1 if no free slots are found.
   template <typename U, typename V>
   int TryInsertToBucket(unsigned bidx, U&& key, V&& value, uint8_t meta_hash, bool probe) {
     auto& b = bucket_[bidx];

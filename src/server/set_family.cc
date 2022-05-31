@@ -435,7 +435,7 @@ OpStatus Mover::OpFind(Transaction* t, EngineShard* es) {
   for (auto k : largs) {
     unsigned index = (k == src_) ? 0 : 1;
     OpResult<PrimeIterator> res = es->db_slice().Find(t->db_index(), k, OBJ_SET);
-    if (res && index == 0) {  // succesful src find.
+    if (res && index == 0) {  // successful src find.
       DCHECK(!res->is_done());
       const CompactObj& val = res.value()->second;
       SetType st{val.RObjPtr(), val.Encoding()};

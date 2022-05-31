@@ -28,7 +28,7 @@ constexpr inline unsigned long long operator""_KB(unsigned long long x) {
  * as a state machine that either returns an offset to the backign storage or the indication
  * of the resource that is missing. The advantage of such design is that we can use it in
  * asynchronous callbacks without blocking on any IO requests.
- * The allocator uses dynanic memory internally. Should be used in a single thread.
+ * The allocator uses dynamic memory internally. Should be used in a single thread.
  *
  */
 

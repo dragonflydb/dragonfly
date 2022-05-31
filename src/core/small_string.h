@@ -10,7 +10,7 @@
 namespace dfly {
 
 // blob strings of upto ~64KB. Small sizes are probably predominant
-// for in-mmeory workloads, especially for keys.
+// for in-memory workloads, especially for keys.
 // Please note that this class does not have automatic constructors and destructors, therefore
 // it requires explicit management.
 class SmallString {
