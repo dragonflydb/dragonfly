@@ -291,7 +291,6 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
 
     // Memory metrics
     append_metric(&resp, "used_memory", m.heap_used_bytes);
-    append_metric(&resp, "used_memory_human", HumanReadableNumBytes(m.heap_used_bytes));
     append_metric(&resp, "used_memory_peak", used_mem_peak.load(memory_order_relaxed));
     append_metric(&resp, "comitted_memory", _mi_stats_main.committed.current);
 
