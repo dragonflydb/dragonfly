@@ -9,7 +9,10 @@
 
 ### Probably, the fastest in-memory store in the universe!
 
-Redis and Memcached compatible store.
+Dragonfly is a modern in-memory datastore, fully compatible with Redis and Memcached APIs. Dragonfly implements novel algorithms and data structures on top of a multi-threaded, shared-nothing architecture. As a result, Dragonfly reaches x25 performance
+compared to Redis and supports millions of QPS on a single instance.
+
+Dragonfly's core properties make it a cost-effective, high-performing, and easy-to-use Redis replacement.
 
 
 ## Benchmarks
@@ -36,7 +39,7 @@ Dragonfly is crossing 3.8M QPS on c6gn.16xlarge reaching x25 increase in through
 
 When running in pipeline mode `--pipeline=30`, Dragonfly reaches **10M qps** for SET and **15M qps** for GET operations.
 
-### Memory efficiency benchmark
+### Memory efficiency
 
 In the following test, we filled Dragonfly and Redis with ~5GB of data
 using `debug populate 5000000 key 1024` command. Then we started sending the update traffic with `memtier` and kicked off the snapshotting with the
