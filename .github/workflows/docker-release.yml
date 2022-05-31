@@ -72,6 +72,8 @@ jobs:
         tags: |
           ghcr.io/${{ github.repository }}:ubuntu
           ghcr.io/${{ github.repository }}:latest
+          ghcr.io/${{ github.repository }}:${{ env.TAG_NAME }}
+          ghcr.io/${{ github.repository }}:${{ env.TAG_NAME }}-ubuntu
           
         file: tools/docker/Dockerfile.ubuntu-prod
         cache-from: type=registry,ref=${{ github.repository }}:latest
