@@ -267,7 +267,38 @@ error_code ServerFamily::LoadRdb(const std::string& rdb_file) {
 }
 
 void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
+  // The naming should be compatible with redis_exporter, see https://github.com/oliver006/redis_exporter/blob/master/exporter/exporter.go#L111
+  // TODO: add metrics' description
+  // TODO: support other types of metrics, not just gague :)
+  auto append_metric = [](http::StringResponse* resp, absl::AlphaNum name, absl::AlphaNum val) {
+    const auto full_name = StrCat("dragonfly_", name);
+    absl::StrAppend(&resp->body(), "# HELP ", full_name, " ", name, "\n");
+    absl::StrAppend(&resp->body(), "# TYPE ", full_name, " gauge\n");
+    absl::StrAppend(&resp->body(), full_name, " ", val, "\n");
+  };
 
+  auto cb = [&](const http::QueryArgs& args, HttpContext* send) {
+    http::StringResponse resp = http::MakeStringResponse(boost::beast::http::status::ok);
+    Metrics m = this->GetMetrics();
+
+    // Server metrics
+    append_metric(&resp, "uptime_in_seconds", m.uptime);
+
+    // Clients metrics
+    append_metric(&resp, "connected_clients", m.conn_stats.num_conns);
+    append_metric(&resp, "client_read_buf_capacity", m.conn_stats.read_buf_capacity);
+    append_metric(&resp, "blocked_clients", m.conn_stats.num_blocked_clients);
+
+    // Memory metrics
+    append_metric(&resp, "used_memory", m.heap_used_bytes);
+    append_metric(&resp, "used_memory_human", HumanReadableNumBytes(m.heap_used_bytes));
+    append_metric(&resp, "used_memory_peak", used_mem_peak.load(memory_order_relaxed));
+    append_metric(&resp, "comitted_memory", _mi_stats_main.committed.current);
+
+    return send->Invoke(std::move(resp));
+  };
+
+  http_base->RegisterCb("/metrics", cb);
 }
 
 void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* cntx) {
@@ -279,7 +310,6 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
 #define ADD_LINE(name, val) absl::StrAppend(&info, "STAT " #name " ", val, "\r\n")
 
   time_t now = time(NULL);
-  size_t uptime = now - start_time_;
   struct rusage ru;
   getrusage(RUSAGE_SELF, &ru);
 
@@ -293,7 +323,7 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
   Metrics m = GetMetrics();
 
   ADD_LINE(pid, getpid());
-  ADD_LINE(uptime, uptime);
+  ADD_LINE(uptime, m.uptime);
   ADD_LINE(time, now);
   ADD_LINE(version, kGitTag);
   ADD_LINE(libevent, "iouring");
@@ -597,6 +627,7 @@ Metrics ServerFamily::GetMetrics() const {
 
     lock_guard<fibers::mutex> lk(mu);
 
+    result.uptime = time(NULL) - this->start_time_;
     result.conn_stats += ss->connection_stats;
     result.qps += uint64_t(ss->MovingSum6());
 
@@ -648,6 +679,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   };
 
 #define ADD_HEADER(x) absl::StrAppend(&info, x "\r\n")
+  Metrics m = GetMetrics();
 
   if (should_enter("SERVER")) {
     ADD_HEADER("# Server");
@@ -658,12 +690,11 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("multiplexing_api", "iouring");
     append("tcp_port", GetFlag(FLAGS_port));
 
-    size_t uptime = time(NULL) - start_time_;
+    size_t uptime = m.uptime;
     append("uptime_in_seconds", uptime);
     append("uptime_in_days", uptime / (3600 * 24));
   }
 
-  Metrics m = GetMetrics();
   auto sdata_res = io::ReadStatusInfo();
 
   DbStats total;
