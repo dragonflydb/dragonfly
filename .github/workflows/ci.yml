@@ -28,7 +28,7 @@ jobs:
       #  username: ${{ github.repository_owner }}
       #  password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
       with:
         submodules: true
     - name: Install dependencies
@@ -38,7 +38,7 @@ jobs:
           mkdir -p ${{github.workspace}}/build
     - name: Cache build deps
       id: cache-deps
-      uses: actions/cache@v2
+      uses: actions/cache@v3
       with:
         path: |
           ~/.ccache
