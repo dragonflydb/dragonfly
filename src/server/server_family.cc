@@ -266,33 +266,40 @@ error_code ServerFamily::LoadRdb(const std::string& rdb_file) {
   return ec;
 }
 
-void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
-  // The naming should be compatible with redis_exporter, see https://github.com/oliver006/redis_exporter/blob/master/exporter/exporter.go#L111
-  // TODO: add metrics' description
-  // TODO: support other types of metrics, not just gague :)
-  auto append_metric = [](http::StringResponse* resp, absl::AlphaNum name, absl::AlphaNum val) {
-    const auto full_name = StrCat("dragonfly_", name);
-    absl::StrAppend(&resp->body(), "# HELP ", full_name, " ", name, "\n");
-    absl::StrAppend(&resp->body(), "# TYPE ", full_name, " gauge\n");
-    absl::StrAppend(&resp->body(), full_name, " ", val, "\n");
-  };
+void AppendMetric(http::StringResponse* resp, absl::AlphaNum name, absl::AlphaNum val) {
+  /**
+   * Gets a metric name and a value and write it using Prometheus format.
+   *
+   * TODO:
+   *  1. add metrics descriptions.
+   *  2. support other types of metrics, not just gague :)
+   */
 
-  auto cb = [&](const http::QueryArgs& args, HttpContext* send) {
+  const auto full_name = StrCat("dragonfly_", name);
+  absl::StrAppend(&resp->body(), "# HELP ", full_name, " ", name, "\n");
+  absl::StrAppend(&resp->body(), "# TYPE ", full_name, " gauge\n");
+  absl::StrAppend(&resp->body(), full_name, " ", val, "\n");
+}
+
+void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
+  // The naming of the metrics should be compatible with redis_exporter, see https://github.com/oliver006/redis_exporter/blob/master/exporter/exporter.go#L111
+
+  auto cb = [this](const http::QueryArgs& args, HttpContext* send) {
     http::StringResponse resp = http::MakeStringResponse(boost::beast::http::status::ok);
     Metrics m = this->GetMetrics();
 
     // Server metrics
-    append_metric(&resp, "uptime_in_seconds", m.uptime);
+    AppendMetric(&resp, "uptime_in_seconds", m.uptime);
 
     // Clients metrics
-    append_metric(&resp, "connected_clients", m.conn_stats.num_conns);
-    append_metric(&resp, "client_read_buf_capacity", m.conn_stats.read_buf_capacity);
-    append_metric(&resp, "blocked_clients", m.conn_stats.num_blocked_clients);
+    AppendMetric(&resp, "connected_clients", m.conn_stats.num_conns);
+    AppendMetric(&resp, "client_read_buf_capacity", m.conn_stats.read_buf_capacity);
+    AppendMetric(&resp, "blocked_clients", m.conn_stats.num_blocked_clients);
 
     // Memory metrics
-    append_metric(&resp, "used_memory", m.heap_used_bytes);
-    append_metric(&resp, "used_memory_peak", used_mem_peak.load(memory_order_relaxed));
-    append_metric(&resp, "comitted_memory", _mi_stats_main.committed.current);
+    AppendMetric(&resp, "used_memory", m.heap_used_bytes);
+    AppendMetric(&resp, "used_memory_peak", used_mem_peak.load(memory_order_relaxed));
+    AppendMetric(&resp, "comitted_memory", _mi_stats_main.committed.current);
 
     return send->Invoke(std::move(resp));
   };
