@@ -272,7 +272,7 @@ void AppendMetric(http::StringResponse* resp, absl::AlphaNum name, absl::AlphaNu
    *
    * TODO:
    *  1. add metrics descriptions.
-   *  2. support other types of metrics, not just gague :)
+   *  2. support other types of metrics, not just gauge :)
    */
 
   const auto full_name = StrCat("dragonfly_", name);
