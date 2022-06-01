@@ -76,7 +76,7 @@ struct TieredStorage::ActiveIoRequest {
     mi_free(block_ptr);
   }
 
-  bool CanAccomodate(size_t length) const {
+  bool CanAccommodate(size_t length) const {
     return batch_offs + length <= kBatchSize;
   }
 
@@ -337,7 +337,7 @@ void TieredStorage::FlushPending() {
       size_t item_size = it->second.Size();
       DCHECK_GT(item_size, 0u);
 
-      if (!active_req || !active_req->CanAccomodate(item_size)) {
+      if (!active_req || !active_req->CanAccommodate(item_size)) {
         if (active_req) {  // need to close
           // save the block asynchronously.
           ++submitted_io_writes_;

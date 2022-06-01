@@ -232,7 +232,7 @@ void ServerFamily::Load(const std::string& load_path) {
 #if 0
   auto& pool = service_.proactor_pool();
 
-  // Deliberitely run on all I/O threads to update the state for non-shard threads as well.
+  // Deliberately run on all I/O threads to update the state for non-shard threads as well.
   pool.Await([&](ProactorBase*) {
     // TODO: There can be a bug where status is different.
     CHECK(ServerState::tlocal()->gstate() == GlobalState::IDLE);

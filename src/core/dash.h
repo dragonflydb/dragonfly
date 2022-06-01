@@ -12,7 +12,7 @@ namespace dfly {
 
 // DASH: Dynamic And Scalable Hashing.
 // TODO: We could name it DACHE: Dynamic and Adaptive caCHE.
-// After all, we added additionally improvements we added as part of the dragonfly project,
+// After all, we added additional improvements we added as part of the dragonfly project,
 // that probably justify a right to choose our own name for this data structure.
 struct BasicDashPolicy {
   enum { kSlotNum = 12, kBucketNum = 64, kStashBucketNum = 2 };
