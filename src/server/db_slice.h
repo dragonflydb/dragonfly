@@ -86,7 +86,7 @@ class DbSlice {
   Stats GetStats() const;
 
   //! UpdateExpireClock updates the expire clock for this db slice.
-  //! Must be a wall clock so we could replicate it betweeen machines.
+  //! Must be a wall clock so we could replicate it between machines.
   void UpdateExpireClock(uint64_t now_ms) {
     now_ms_ = now_ms;
   }

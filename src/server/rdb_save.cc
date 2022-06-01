@@ -648,6 +648,7 @@ error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
     pushed_bytes += ptr->channel_bytes();
   }
 
+  DCHECK(!channel.TryPop(record));
   VLOG(1) << "Blobs written " << num_written << " pulled bytes: " << channel_bytes
           << " pushed bytes: " << pushed_bytes;
   if (io_error)

@@ -20,7 +20,7 @@ class ExpirePeriod {
     Set(ms);
   }
 
-  // alwaws returns milliseconds value.
+  // always returns milliseconds value.
   uint64_t duration_ms() const {
     return precision_ ? uint64_t(val_) * 1000 : val_;
   }

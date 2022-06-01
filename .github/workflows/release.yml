@@ -26,7 +26,7 @@ jobs:
     name: Build aarch64 on ubuntu20.04
     needs: create-release
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
       with:
         submodules: true
     - name: Cache build deps
@@ -80,7 +80,7 @@ jobs:
         echo finished
         ls -al
     - name: Upload
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v3
       with:
         name: dragonfly-aarch64
         path: build-opt/dragonfly-*tar.gz
@@ -91,14 +91,14 @@ jobs:
     container:
       image: ghcr.io/romange/ubuntu-dev:20
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
       with:
         submodules: true
     - name: Build artifacts
       run: |
           ./tools/release.sh
     - name: Upload
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v3
       with:
         name: dragonfly-amd64
         path: build-opt/dragonfly-*tar.gz

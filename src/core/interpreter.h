@@ -93,7 +93,7 @@ class Interpreter {
   // We have interpreter per thread, not per connection.
   // Since we might preempt into different fibers when operating on interpreter
   // we must lock it until we finish using it per request.
-  // Only RunFunction with companions require locking since other functions peform atomically
+  // Only RunFunction with companions require locking since other functions perform atomically
   // without preemptions.
   std::lock_guard<::boost::fibers::mutex> Lock() {
     return std::lock_guard<::boost::fibers::mutex>{mu_};

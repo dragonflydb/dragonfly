@@ -23,7 +23,8 @@ Each hash-table `dictht` is implemented as a [classic hashtable with separate ch
 ![RD structure](https://miro.medium.com/max/1400/1*gNc8VzCknWRxXTBP9cVEHQ.png)
 
 <br>
-Lets estimate the overhead of `dictht` table inside RD.<br>
+
+Let's estimate the overhead of `dictht` table inside RD.
 
 *Case 1*: it has `N` items at 100% load factor, in other words, buckets count equals to number of items. Each bucket holds a pointer to dictEntry, i.e. it's 8 bytes. In total we need: $8N + 24N = 32N$ bytes per record. <br>
 *Case 2*: `N` items at 75% load factor, in other words, the number of buckets is 1.33 higher than number of items. In total we need: $N\*1.33\*8 + 24N \approx 34N$ bytes per record. <br>
@@ -191,4 +192,5 @@ I run it locally on my machine and ot does not represent a real throughput bench
 
 
 <br>
-<em> All diagrams in this doc are created in [drawio app](https://app.diagrams.net/) <em>
+
+*All diagrams in this doc are created in [drawio app](https://app.diagrams.net/).*
