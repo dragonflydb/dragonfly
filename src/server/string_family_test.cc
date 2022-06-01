@@ -114,6 +114,13 @@ TEST_F(StringFamilyTest, Set) {
   ASSERT_THAT(resp, "OK");
 }
 
+TEST_F(StringFamilyTest, SetHugeKey) {
+  const string key(36000000, 'b');
+  auto resp = Run({"set", key, "1"});
+  ASSERT_THAT(resp, "OK");
+  Run({"del", key});
+}
+
 TEST_F(StringFamilyTest, MGetSet) {
   Run({"mset", "z", "0"});  // single key
   auto resp = Run({"mget", "z"});  // single key
