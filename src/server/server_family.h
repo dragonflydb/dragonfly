@@ -29,6 +29,7 @@ struct Metrics {
   TieredStats tiered_stats;
   EngineShard::Stats shard_stats;
 
+  size_t uptime = 0;
   size_t qps = 0;
   size_t heap_used_bytes = 0;
   size_t heap_comitted_bytes = 0;
