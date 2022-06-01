@@ -14,6 +14,12 @@ void* MiMemoryResource::do_allocate(std::size_t size, std::size_t align) {
 
   if (!res)
     throw std::bad_alloc{};
+
+
+  // It seems that mimalloc has a bug with larger allocations that causes
+  // mi_heap_contains_block to lie. See https://github.com/microsoft/mimalloc/issues/587
+  // For now I avoid the check by checking the size. mi_usable_size works though.
+  DCHECK(size > 33554400 || mi_heap_contains_block(heap_, res));
   size_t delta = mi_usable_size(res);
 
   used_ += delta;
@@ -23,7 +29,7 @@ void* MiMemoryResource::do_allocate(std::size_t size, std::size_t align) {
 }
 
 void MiMemoryResource::do_deallocate(void* ptr, std::size_t size, std::size_t align) {
-  DCHECK(mi_heap_contains_block(heap_, ptr));
+  DCHECK(size > 33554400 || mi_heap_contains_block(heap_, ptr));
 
   size_t usable = mi_usable_size(ptr);
 
