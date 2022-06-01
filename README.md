@@ -88,7 +88,7 @@ git clone --recursive https://github.com/dragonflydb/dragonfly && cd dragonfly
 
 # to install dependencies
 sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
-     autoconf-archive libtool
+     autoconf-archive libtool cmake g++
 
 # Configure the build
 ./helio/blaze.sh -release
