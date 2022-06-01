@@ -26,7 +26,7 @@ class ExpirePeriod {
   }
 
   // generation id for the base of this duration.
-  // when we update the generation, we need to update the value as well accoring to this
+  // when we update the generation, we need to update the value as well according to this
   // logic:
   // new_val = (old_val + old_base) - new_base.
   unsigned generation_id() const {

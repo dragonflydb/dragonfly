@@ -324,7 +324,7 @@ API 2.0
   - [ ] PFCOUNT
   - [ ] PFMERGE
 
-Memchache API
+Memcache API
 - [X] set
 - [X] get
 - [X] replace

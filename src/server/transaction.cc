@@ -59,7 +59,7 @@ Transaction::~Transaction() {
  * There are 4 options that we consider here:
  * a. T spans a single shard and its not multi.
  *    unique_shard_id_ is predefined before the schedule() is called.
- *    In that case only a single thread will be scheduled and it will use shard_data[0] just becase
+ *    In that case only a single thread will be scheduled and it will use shard_data[0] just because
  *    shard_data.size() = 1. Coordinator thread can access any data because there is a
  *    schedule barrier between InitByArgs and RunInShard/IsArmedInShard functions.
  * b. T spans multiple shards and its not multi

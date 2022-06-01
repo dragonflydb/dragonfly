@@ -13,7 +13,7 @@ namespace dfly {
 
 class FlatSet {
   struct Hasher {
-    using is_transparent = void;  // to allow heteregenous lookups.
+    using is_transparent = void;  // to allow heterogeneous lookups.
 
     size_t operator()(const CompactObj& o) const {
       return o.HashCode();
@@ -25,7 +25,7 @@ class FlatSet {
   };
 
   struct Eq {
-    using is_transparent = void;  // to allow heteregenous lookups.
+    using is_transparent = void;  // to allow heterogeneous lookups.
 
     bool operator()(const CompactObj& left, const CompactObj& right) const {
       return left == right;
