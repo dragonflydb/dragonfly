@@ -33,9 +33,9 @@ extern "C" {
 #include "server/replica.h"
 #include "server/script_mgr.h"
 #include "server/server_state.h"
-#include "server/version.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
+#include "server/version.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
 #include "util/uring/uring_file.h"
@@ -48,6 +48,7 @@ ABSL_FLAG(string, requirepass, "", "password for AUTH authentication");
 
 ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
+ABSL_DECLARE_FLAG(uint32_t, hz);
 
 extern "C" mi_stats_t _mi_stats_main;
 
@@ -56,10 +57,10 @@ namespace dfly {
 using namespace util;
 namespace fibers = ::boost::fibers;
 namespace fs = std::filesystem;
+using absl::GetFlag;
 using absl::StrCat;
 using facade::MCReplyBuilder;
 using strings::HumanReadableNumBytes;
-using absl::GetFlag;
 
 namespace {
 
@@ -170,7 +171,10 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
       used_mem_peak.store(sum, memory_order_relaxed);
   };
 
-  task_10ms_ = pb_task_->AwaitBrief([&] { return pb_task_->AddPeriodic(10, cache_cb); });
+  uint32_t cache_hz = max(GetFlag(FLAGS_hz) / 10, 1u);
+  uint32_t period_ms = max(1u, 1000 / cache_hz);
+  stats_caching_task_ =
+      pb_task_->AwaitBrief([&] { return pb_task_->AddPeriodic(period_ms, cache_cb); });
 
   fs::path data_folder = fs::current_path();
   const auto& dir = GetFlag(FLAGS_dir);
@@ -197,8 +201,8 @@ void ServerFamily::Shutdown() {
     load_fiber_.join();
 
   pb_task_->Await([this] {
-    pb_task_->CancelPeriodic(task_10ms_);
-    task_10ms_ = 0;
+    pb_task_->CancelPeriodic(stats_caching_task_);
+    stats_caching_task_ = 0;
 
     unique_lock lk(replicaof_mu_);
     if (replica_) {

@@ -43,9 +43,9 @@ jobs:
         path: |
           ~/.ccache
           ${{github.workspace}}/build/_deps
-        key: ${{ runner.os }}-deps-${{ github.sha }}
+        key: ${{ runner.os }}-deps-${{ github.base_ref }}-${{ github.sha }}
         restore-keys: |
-          ${{ runner.os }}-deps-
+          ${{ runner.os }}-deps-${{ github.base_ref }}-
           
     - name: Configure CMake
       # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
