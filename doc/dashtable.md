@@ -45,7 +45,7 @@ Similarly to a classic hashtable, dashtable (DT) also holds an array of pointers
 
 ![Dashtable Diagram](./dashtable.svg)
 
-In the diagram above you can see how dashtable looks like. Each segment is comprised of `N` buckets. For example, in our implementation a dashtable has 60 buckets per segment (it's a compile-time parameter that can be configured).
+In the diagram above you can see how dashtable looks like. Each segment is comprised of `K` buckets. For example, in our implementation a dashtable has 60 buckets per segment (it's a compile-time parameter that can be configured).
 
 ### Segment zoom-in
 
