@@ -26,11 +26,18 @@ A Helm chart for Kubernetes
 | resources.limits | object | `{}` | The resource limits for the containers |
 | resources.requests | object | `{}` | The requested resources for the containers |
 | securityContext | object | `{}` | Set securityContext for containers |
+| service.metrics.portName | string | `"metrics"` | name for the metrics port |
+| service.metrics.serviceType | string | `"ClusterIP"` | serviceType for the metrics service |
 | service.port | int | `6379` | Dragonfly service port |
 | service.type | string | `"ClusterIP"` | Service type to provision. Can be NodePort, ClusterIP or LoadBalancer |
 | serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
 | serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
 | serviceAccount.name | string | `""` | The name of the service account to use. If not set and create is true, a name is generated using the fullname template |
+| serviceMonitor.enabled | bool | `false` | If true, a ServiceMonitor CRD is created for a prometheus operator |
+| serviceMonitor.interval | string | `"10s"` | scrape interval |
+| serviceMonitor.labels | object | `{}` | additional labels to apply to the metrics |
+| serviceMonitor.namespace | string | `""` | namespace in which to deploy the ServiceMonitor CR. defaults to the application namespace |
+| serviceMonitor.scrapeTimeout | string | `"10s"` | scrape timeout |
 | storage.enabled | bool | `false` | If /data should persist. This will provision a StatefulSet instead. |
 | storage.requests | string | `"128Mi"` | Volume size to request for the PVC |
 | storage.storageClassName | string | `""` | Global StorageClass for Persistent Volume(s) |

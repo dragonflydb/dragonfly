@@ -52,6 +52,23 @@ service:
   type: ClusterIP
   # -- Dragonfly service port
   port: 6379
+  metrics:
+    # -- name for the metrics port
+    portName: metrics
+    # -- serviceType for the metrics service
+    serviceType: ClusterIP
+
+serviceMonitor:
+  # -- If true, a ServiceMonitor CRD is created for a prometheus operator
+  enabled: false
+  # -- namespace in which to deploy the ServiceMonitor CR. defaults to the application namespace
+  namespace: ""
+  # -- additional labels to apply to the metrics
+  labels: {}
+  # -- scrape interval
+  interval: 10s
+  # -- scrape timeout
+  scrapeTimeout: 10s
 
 storage:
   # -- If /data should persist. This will provision a StatefulSet instead.
