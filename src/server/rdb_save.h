@@ -20,9 +20,6 @@ namespace dfly {
 
 class EngineShard;
 
-// keys are RDB_TYPE_xxx constants.
-using RdbTypeFreqMap = absl::flat_hash_map<unsigned, size_t>;
-
 class AlignedBuffer {
  public:
   AlignedBuffer(size_t cap, ::io::Sink* upstream);
@@ -72,7 +69,6 @@ class RdbSaver {
   std::error_code SaveAuxFieldStrInt(std::string_view key, int64_t val);
 
   AlignedBuffer aligned_buf_;
-
   std::unique_ptr<Impl> impl_;
 };
 
@@ -98,7 +94,8 @@ class RdbSerializer {
   std::error_code SelectDb(uint32_t dbid);
 
   // Must be called in the thread to which `it` belongs.
-  std::error_code SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms);
+  // Returns the serialized rdb_type or the error.
+  io::Result<uint8_t> SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms);
   std::error_code WriteRaw(const ::io::Bytes& buf);
   std::error_code SaveString(std::string_view val);
 
@@ -109,10 +106,6 @@ class RdbSerializer {
   std::error_code SaveLen(size_t len);
 
   std::error_code FlushMem();
-
-  const RdbTypeFreqMap& type_freq_map() const {
-    return type_freq_map_;
-  }
 
  private:
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
@@ -132,7 +125,6 @@ class RdbSerializer {
   base::IoBuf mem_buf_;
   base::PODArray<uint8_t> tmp_buf_;
   std::string tmp_str_;
-  RdbTypeFreqMap type_freq_map_;
 };
 
 }  // namespace dfly

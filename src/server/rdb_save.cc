@@ -172,14 +172,17 @@ error_code RdbSerializer::SelectDb(uint32_t dbid) {
 }
 
 // Called by snapshot
-error_code RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms) {
+io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValue& pv,
+                                             uint64_t expire_ms) {
   uint8_t buf[16];
-
+  error_code ec;
   /* Save the expire time */
   if (expire_ms > 0) {
     buf[0] = RDB_OPCODE_EXPIRETIME_MS;
     absl::little_endian::Store64(buf + 1, expire_ms);
-    RETURN_ON_ERR(WriteRaw(Bytes{buf, 9}));
+    ec = WriteRaw(Bytes{buf, 9});
+    if (ec)
+      return make_unexpected(ec);
   }
 
   string_view key = pk.GetSlice(&tmp_str_);
@@ -189,20 +192,28 @@ error_code RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValue& pv, ui
 
   DVLOG(3) << "Saving keyval start " << key;
 
-  ++type_freq_map_[rdb_type];
-  RETURN_ON_ERR(WriteOpcode(rdb_type));
+  ec = WriteOpcode(rdb_type);
+  if (ec)
+    return make_unexpected(ec);
 
-  RETURN_ON_ERR(SaveString(key));
+  ec = SaveString(key);
+  if (ec)
+    return make_unexpected(ec);
 
   if (obj_type == OBJ_STRING) {
     auto opt_int = pv.TryGetInt();
     if (opt_int) {
-      return SaveLongLongAsString(*opt_int);
+      ec = SaveLongLongAsString(*opt_int);
+    } else {
+      ec = SaveString(pv.GetSlice(&tmp_str_));
     }
-    return SaveString(pv.GetSlice(&tmp_str_));
+  } else {
+    ec = SaveObject(pv);
   }
 
-  return SaveObject(pv);
+  if (ec)
+    return make_unexpected(ec);
+  return rdb_type;
 }
 
 error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
@@ -662,7 +673,7 @@ error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
   if (freq_map) {
     freq_map->clear();
     for (auto& ptr : impl_->shard_snapshots) {
-      const RdbTypeFreqMap& src_map = ptr->serializer()->type_freq_map();
+      const RdbTypeFreqMap& src_map = ptr->freq_map();
       for (const auto& k_v : src_map)
         (*freq_map)[k_v.first] += k_v.second;
     }
