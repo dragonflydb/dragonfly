@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dragonfly.fullname" . }}
+  labels:
+    {{- include "dragonfly.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: dragonfly
+      protocol: TCP
+      name: dragonfly
+  selector:
+    {{- include "dragonfly.selectorLabels" . | nindent 4 }}
