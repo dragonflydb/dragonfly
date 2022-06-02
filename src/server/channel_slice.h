@@ -19,6 +19,9 @@ class ChannelSlice {
     util::fibers_ext::BlockingCounter borrow_token;
     uint32_t thread_id;
 
+    // non-empty if was registered via psubscribe
+    std::string pattern;
+
     Subscriber(ConnectionContext* cntx, uint32_t tid);
     // Subscriber() : borrow_token(0) {}
 
@@ -31,18 +34,27 @@ class ChannelSlice {
 
   std::vector<Subscriber> FetchSubscribers(std::string_view channel);
 
-  void RemoveSubscription(std::string_view channel, ConnectionContext* me);
   void AddSubscription(std::string_view channel, ConnectionContext* me, uint32_t thread_id);
+  void RemoveSubscription(std::string_view channel, ConnectionContext* me);
+
+  void AddGlobPattern(std::string_view pattern, ConnectionContext* me, uint32_t thread_id);
+  void RemoveGlobPattern(std::string_view pattern, ConnectionContext* me);
 
  private:
   struct SubscriberInternal {
     uint32_t thread_id;  // proactor thread id.
 
-    SubscriberInternal(uint32_t tid) : thread_id(tid) {}
+    SubscriberInternal(uint32_t tid) : thread_id(tid) {
+    }
   };
 
+  using SubsribeMap = absl::flat_hash_map<ConnectionContext*, SubscriberInternal>;
+
+  static void CopySubsribers(const SubsribeMap& src, const std::string& pattern,
+                             std::vector<Subscriber>* dest);
+
   struct Channel {
-    absl::flat_hash_map<ConnectionContext*, SubscriberInternal> subscribers;
+    SubsribeMap subscribers;
   };
 
   absl::flat_hash_map<std::string, std::unique_ptr<Channel>> channels_;

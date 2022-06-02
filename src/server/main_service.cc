@@ -912,23 +912,22 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
     }
 
     fibers_ext::BlockingCounter bc(subsriber_arr.size());
-    char prefix[] = "*3\r\n$7\r\nmessage\r\n$";
-    char msg_size[32] = {0};
-    char channel_size[32] = {0};
-    absl::SNPrintF(msg_size, sizeof(msg_size), "%u\r\n", message.size());
-    absl::SNPrintF(channel_size, sizeof(channel_size), "%u\r\n", channel.size());
-
-    string_view msg_arr[] = {prefix, channel_size, channel, "\r\n$", msg_size, message, "\r\n"};
-
     auto publish_cb = [&, bc](unsigned idx, util::ProactorBase*) mutable {
       unsigned start = slices[idx];
 
       for (unsigned i = start; i < subsriber_arr.size(); ++i) {
-        if (subsriber_arr[i].thread_id != idx)
+        const ChannelSlice::Subscriber& subscriber = subsriber_arr[i];
+        if (subscriber.thread_id != idx)
           break;
 
         published.fetch_add(1, memory_order_relaxed);
-        subsriber_arr[i].conn_cntx->owner()->SendMsgVecAsync(msg_arr, bc);
+        facade::Connection* conn = subsriber_arr[i].conn_cntx->owner();
+        DCHECK(conn);
+        facade::Connection::PubMessage pmsg;
+        pmsg.channel = channel;
+        pmsg.message = message;
+        pmsg.pattern = subscriber.pattern;
+        conn->SendMsgVecAsync(pmsg, bc);
       }
     };
 
@@ -957,6 +956,17 @@ void Service::Unsubscribe(CmdArgList args, ConnectionContext* cntx) {
   args.remove_prefix(1);
 
   cntx->ChangeSubscription(false, true, std::move(args));
+}
+
+void Service::PSubscribe(CmdArgList args, ConnectionContext* cntx) {
+  args.remove_prefix(1);
+  cntx->ChangePSub(true, true, args);
+}
+
+void Service::PUnsubscribe(CmdArgList args, ConnectionContext* cntx) {
+  args.remove_prefix(1);
+
+  cntx->ChangePSub(false, true, args);
 }
 
 // Not a real implementation. Serves as a decorator to accept some function commands
@@ -1024,6 +1034,8 @@ void Service::RegisterCommands() {
             << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, 0}.MFUNC(Publish)
             << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(Subscribe)
             << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(Unsubscribe)
+            << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(PSubscribe)
+            << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(PUnsubscribe)
             << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0}.MFUNC(Function);
 
   StringFamily::Register(&registry_);

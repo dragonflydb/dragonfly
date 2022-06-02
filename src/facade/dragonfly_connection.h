@@ -46,11 +46,20 @@ class Connection : public util::Connection {
   using BreakerCb = std::function<void(uint32_t)>;
   void RegisterOnBreak(BreakerCb breaker_cb);
 
-  // This interface is used to pass a raw message directly to the socket via zero-copy interface.
+  // This interface is used to pass a published message directly to the socket without
+  // copying strings.
   // Once the msg is sent "bc" will be decreased so that caller could release the underlying
   // storage for the message.
-  void SendMsgVecAsync(absl::Span<const std::string_view> msg_vec,
-                       util::fibers_ext::BlockingCounter bc);
+  // virtual - to allow the testing code to override it.
+
+  struct PubMessage {
+    // if empty - means its a regular message, otherwise it's pmessage.
+    std::string_view pattern;
+    std::string_view channel;
+    std::string_view message;
+  };
+
+  virtual void SendMsgVecAsync(const PubMessage& pub_msg, util::fibers_ext::BlockingCounter bc);
 
   void SetName(std::string_view name) {
     CopyCharBuf(name, sizeof(name_), name_);

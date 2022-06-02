@@ -6,6 +6,7 @@
 
 #include <gmock/gmock.h>
 
+#include "facade/dragonfly_connection.h"
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
 #include "io/io.h"
@@ -15,6 +16,18 @@
 
 namespace dfly {
 using namespace facade;
+
+class TestConnection : public facade::Connection {
+ public:
+  TestConnection(Protocol protocol);
+
+  void SendMsgVecAsync(const PubMessage& pmsg, util::fibers_ext::BlockingCounter bc) final;
+
+  std::vector<PubMessage> messages;
+
+ private:
+  std::vector<std::unique_ptr<std::string>> backing_str_;
+};
 
 class BaseFamilyTest : public ::testing::Test {
  protected:
@@ -27,23 +40,7 @@ class BaseFamilyTest : public ::testing::Test {
   void TearDown() override;
 
  protected:
-  struct TestConnWrapper {
-    ::io::StringSink sink;  // holds the response blob
-
-    std::unique_ptr<facade::Connection> dummy_conn;
-
-    ConnectionContext cmd_cntx;
-    std::vector<std::unique_ptr<std::string>> tmp_str_vec;
-
-    std::unique_ptr<RedisParser> parser;
-
-    TestConnWrapper(Protocol proto);
-    ~TestConnWrapper();
-
-    CmdArgVec Args(ArgSlice list);
-
-    RespVec ParseResponse();
-  };
+  class TestConnWrapper;
 
   RespExpr Run(std::initializer_list<const std::string_view> list) {
     return Run(ArgSlice{list.begin(), list.size()});
@@ -75,6 +72,11 @@ class BaseFamilyTest : public ::testing::Test {
   void UpdateTime(uint64_t ms);
 
   std::string GetId() const;
+  size_t SubsriberMessagesLen(std::string_view conn_id) const;
+
+  // Returns message parts as returned by RESP:
+  // pmessage, pattern, channel, message
+  facade::Connection::PubMessage GetPublishedMessage(std::string_view conn_id, size_t index) const;
 
   std::unique_ptr<util::ProactorPool> pp_;
   std::unique_ptr<Service> service_;

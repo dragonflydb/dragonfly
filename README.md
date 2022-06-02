@@ -268,15 +268,15 @@ API 2.0
   - [X] HSETNX
   - [X] HVALS
   - [X] HSCAN
-- [ ] PubSub family
+- [X] PubSub family
   - [X] PUBLISH
   - [ ] PUBSUB
   - [ ] PUBSUB CHANNELS
   - [X] SUBSCRIBE
   - [X] UNSUBSCRIBE
-  - [ ] PSUBSCRIBE
-  - [ ] PUNSUBSCRIBE
-- [ ] Server Family
+  - [X] PSUBSCRIBE
+  - [X] PUNSUBSCRIBE
+- [X] Server Family
   - [ ] WATCH
   - [ ] UNWATCH
   - [X] DISCARD
