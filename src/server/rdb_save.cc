@@ -187,7 +187,7 @@ error_code RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValue& pv, ui
   unsigned encoding = pv.Encoding();
   uint8_t rdb_type = RdbObjectType(obj_type, encoding);
 
-  DVLOG(2) << "Saving keyval start " << key;
+  DVLOG(3) << "Saving keyval start " << key;
 
   ++type_freq_map_[rdb_type];
   RETURN_ON_ERR(WriteOpcode(rdb_type));
@@ -238,7 +238,7 @@ error_code RdbSerializer::SaveListObject(const robj* obj) {
   RETURN_ON_ERR(SaveLen(ql->len));
 
   while (node) {
-    DVLOG(2) << "QL node (encoding/container/sz): " << node->encoding << "/" << node->container
+    DVLOG(3) << "QL node (encoding/container/sz): " << node->encoding << "/" << node->container
              << "/" << node->sz;
     if (QL_NODE_IS_PLAIN(node)) {
       if (quicklistNodeIsCompressed(node)) {
@@ -604,7 +604,7 @@ std::error_code RdbSaver::SaveHeader(const StringVec& lua_scripts) {
 
 error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
   RETURN_ON_ERR(impl_->serializer.FlushMem());
-  VLOG(1) << "SaveBody";
+  VLOG(1) << "SaveBody , snapshots count: " << impl_->shard_snapshots.size();
 
   size_t num_written = 0;
   SliceSnapshot::DbRecord record;
@@ -635,6 +635,7 @@ error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
         last_db_index = record.db_index;
       }
 
+      DVLOG(2) << "Pulled " << record.id;
       channel_bytes += record.value.size();
       io_error = aligned_buf_.Write(record.value);
       record.value.clear();
@@ -651,8 +652,10 @@ error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
   DCHECK(!channel.TryPop(record));
   VLOG(1) << "Blobs written " << num_written << " pulled bytes: " << channel_bytes
           << " pushed bytes: " << pushed_bytes;
-  if (io_error)
+  if (io_error) {
+    VLOG(1) << "io error " << io_error;
     return io_error;
+  }
 
   RETURN_ON_ERR(SaveEpilog());
 

@@ -21,6 +21,8 @@ class SliceSnapshot {
   // RdbSaver adds "select" opcodes when necessary in order to maintain consistency.
   struct DbRecord {
     DbIndex db_index;
+    uint64_t id;
+    uint32_t num_records;
     std::string value;
   };
 
@@ -68,6 +70,8 @@ class SliceSnapshot {
 
   size_t channel_bytes_ = 0;
   size_t serialized_ = 0, skipped_ = 0, side_saved_ = 0, savecb_calls_ = 0;
+  uint64_t rec_id_ = 0;
+  uint32_t num_records_in_blob_ = 0;
 };
 
 }  // namespace dfly

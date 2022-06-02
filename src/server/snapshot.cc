@@ -69,6 +69,7 @@ void SliceSnapshot::SerializeSingleEntry(DbIndex db_indx, const PrimeKey& pk,
   }
   error_code ec = rdb_serializer_->SaveEntry(pk, pv, expire_time);
   CHECK(!ec);  // we write to StringFile.
+  ++num_records_in_blob_;
 
   if (db_indx != savecb_current_db_) {
     ec = rdb_serializer_->FlushMem();
@@ -76,8 +77,15 @@ void SliceSnapshot::SerializeSingleEntry(DbIndex db_indx, const PrimeKey& pk,
     string tmp = std::move(sfile_->val);
     channel_bytes_ += tmp.size();
     DCHECK(!dest_->IsClosing());
+    DbRecord rec{.db_index = db_indx,
+                 .id = rec_id_,
+                 .num_records = num_records_in_blob_,
+                 .value = std::move(tmp)};
+    DVLOG(2) << "Pushed " << rec_id_;
+    ++rec_id_;
+    num_records_in_blob_ = 0;
 
-    dest_->Push(DbRecord{db_indx, std::move(tmp)});
+    dest_->Push(std::move(rec));
   }
 }
 
@@ -149,7 +157,14 @@ bool SliceSnapshot::FlushSfile(bool force) {
 
   string tmp = std::move(sfile_->val);  // important to move before pushing!
   channel_bytes_ += tmp.size();
-  dest_->Push(DbRecord{savecb_current_db_, std::move(tmp)});
+  DbRecord rec{.db_index = savecb_current_db_,
+                 .id = rec_id_,
+                 .num_records = num_records_in_blob_,
+                 .value = std::move(tmp)};
+  DVLOG(2) << "Pushed " << rec_id_;
+  ++rec_id_;
+  num_records_in_blob_ = 0;
+  dest_->Push(std::move(rec));
 
   return true;
 }
