@@ -70,6 +70,13 @@ serviceMonitor:
   # -- scrape timeout
   scrapeTimeout: 10s
 
+prometheusRule:
+  # -- Deploy a PrometheusRule
+  enabled: false
+  # -- PrometheusRule.Spec
+  # https://awesome-prometheus-alerts.grep.to/rules
+  spec: []
+
 storage:
   # -- If /data should persist. This will provision a StatefulSet instead.
   enabled: false

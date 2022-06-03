@@ -22,6 +22,8 @@ A Helm chart for Kubernetes
 | nodeSelector | object | `{}` | Node labels for pod assignment |
 | podAnnotations | object | `{}` | Annotations for pods |
 | podSecurityContext | object | `{}` | Set securityContext for pod itself |
+| prometheusRule.enabled | bool | `false` | Deploy a PrometheusRule |
+| prometheusRule.spec | list | `[]` | PrometheusRule.Spec https://awesome-prometheus-alerts.grep.to/rules |
 | replicaCount | int | `1` | Number of replicas to deploy |
 | resources.limits | object | `{}` | The resource limits for the containers |
 | resources.requests | object | `{}` | The requested resources for the containers |
