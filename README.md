@@ -383,6 +383,8 @@ Right now it does not have much info but in the future we are planning to add th
 debugging and management info. If you go to `:6379/metrics` url you will see some prometheus
 compatible metrics.
 
+The Prometheus exported metrics are compatible with the Grafana dashboard [see here](examples/grafana/dashboard.json). 
+
 Important! Http console is meant to be accessed within a safe network.
 If you expose Dragonfly's TCP port externally, it is advised to disable the console
 with `--http_admin_console=false` or `--nohttp_admin_console`.
