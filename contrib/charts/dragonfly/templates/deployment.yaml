@@ -12,8 +12,13 @@ spec:
       {{- include "dragonfly.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- with .Values.podAnnotations }}
       annotations:
+{{- if .Values.tls.enabled }}
+{{- if not .Values.tls.existing_secret }}
+        checksum/tls-secret: {{ include (print $.Template.BasePath "/tls-secret.yaml") . | sha256sum }}
+{{- end }}
+{{- end }}
+      {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:
@@ -60,10 +65,19 @@ spec:
           {{- if .Values.extraArgs }}
             {{- toYaml .Values.extraArgs | nindent 12 }}
           {{- end }}
+{{- if .Values.tls.enabled }}
+            - "--tls"
+            - "--tls_client_cert_file=/etc/dragonfly/tls/tls.crt"
+            - "--tls_client_key_file=/etc/dragonfly/tls/tls.key"
+{{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-{{- if .Values.extraVolumeMounts }}
           volumeMounts:
+            {{- if .Values.tls.enabled }}
+            - mountPath: /etc/dragonfly/tls
+              name: tls
+            {{- end }}
+{{- if .Values.extraVolumeMounts }}
             {{- toYaml .Values.extraVolumeMounts | nindent 12 }}
 {{- end }}
       {{- with .Values.nodeSelector }}
@@ -78,8 +92,20 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-{{- if .Values.extraVolumes }}
       volumes:
+{{- if .Values.tls.enabled }}
+  {{- if .Values.tls.existing_secret }}
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.existing_secret }}
+        {{- else }}
+        - name: tls
+          secret:
+            secretName: {{ include "dragonfly.fullname" . }}-tls
+  {{- end }}
+{{- end }}
+{{- if .Values.extraVolumes }}
         {{- toYaml .Values.extraVolumes | nindent 8 }}
 {{- end }}
+
 {{- end }}

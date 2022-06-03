@@ -41,6 +41,10 @@ A Helm chart for Kubernetes
 | storage.enabled | bool | `false` | If /data should persist. This will provision a StatefulSet instead. |
 | storage.requests | string | `"128Mi"` | Volume size to request for the PVC |
 | storage.storageClassName | string | `""` | Global StorageClass for Persistent Volume(s) |
+| tls.cert | string | `""` | TLS certificate |
+| tls.enabled | bool | `false` | enable TLS |
+| tls.existing_secret | string | `""` | use TLS certificates from existing secret |
+| tls.key | string | `""` | TLS private key |
 | tolerations | list | `[]` | Tolerations for pod assignment |
 
 ----------------------------------------------

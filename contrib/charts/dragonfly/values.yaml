@@ -78,6 +78,30 @@ storage:
   # -- Volume size to request for the PVC
   requests: 128Mi
 
+tls:
+  # -- enable TLS
+  enabled: false
+  # -- use TLS certificates from existing secret
+  existing_secret: ""
+  # -- TLS certificate
+  cert: ""
+  # cert: |
+  #   -----BEGIN CERTIFICATE-----
+  #   MIIDazCCAlOgAwIBAgIUfV3ygaaVW3+yzK5Dq6Aw6TsZ494wDQYJKoZIhvcNAQEL
+  #   ...
+  #   BQAwRTELMAkGA1UEBhMCQVUxEzARBgNVBAgMClNvbWUtU3RhdGUxITAfBgNVBAoM
+  #   zJAL4hNw4Tr6E52fqdmX
+  #   -----END CERTIFICATE-----
+  # -- TLS private key
+  key: ""
+  # key: |
+  #   -----BEGIN RSA PRIVATE KEY-----
+  #   MIIEpAIBAAKCAQEAxeD5iQGQpCUlksFvjzzAxPTw6DMJd3MpifV+HoBY4LiTyDer
+  #   ...
+  #   HLunol88AeTOcKfD6hBYGvcRfu5NV29jJxZCOBfbFQXjnNlnrhRCag==
+  #   -----END RSA PRIVATE KEY-----
+
+
 # -- Extra arguments to pass to the dragonfly binary
 extraArgs: []
 

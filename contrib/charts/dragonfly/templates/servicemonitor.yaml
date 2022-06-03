@@ -23,7 +23,13 @@ spec:
       honorLabels: true
       port: {{ default "metrics" .Values.service.metrics.portName }}
       path: /metrics
+      {{- if .Values.tls.enabled }}
+      scheme: https
+      tls:
+        insecureSkipVerify: true
+      {{- else }}
       scheme: http
+      {{- end }}
   jobLabel: "{{ .Release.Name }}"
   selector:
     matchLabels:
