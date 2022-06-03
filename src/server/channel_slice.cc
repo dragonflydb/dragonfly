@@ -69,7 +69,7 @@ auto ChannelSlice::FetchSubscribers(string_view channel) -> vector<Subscriber> {
   return res;
 }
 
-void ChannelSlice::CopySubsribers(const SubsribeMap& src, const std::string& pattern,
+void ChannelSlice::CopySubsribers(const SubscribeMap& src, const std::string& pattern,
                                   vector<Subscriber>* dest) {
   for (const auto& sub : src) {
     Subscriber s(sub.first, sub.second.thread_id);
