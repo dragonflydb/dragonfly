@@ -936,7 +936,7 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
     bc.Wait();  // Wait for all the messages to be sent.
   }
 
-  // If subsriber connections are closing they will wait
+  // If subscriber connections are closing they will wait
   // for the tokens to be reclaimed in OnClose(). This guarantees that subscribers we gathered
   // still exist till we finish publishing.
   for (auto& s : subscriber_arr) {
