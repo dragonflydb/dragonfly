@@ -897,31 +897,31 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&] { return EngineShard::tlocal()->channel_slice().FetchSubscribers(channel); };
 
-  vector<ChannelSlice::Subscriber> subsriber_arr = shard_set->Await(sid, std::move(cb));
+  vector<ChannelSlice::Subscriber> subscriber_arr = shard_set->Await(sid, std::move(cb));
   atomic_uint32_t published{0};
 
-  if (!subsriber_arr.empty()) {
-    sort(subsriber_arr.begin(), subsriber_arr.end(),
+  if (!subscriber_arr.empty()) {
+    sort(subscriber_arr.begin(), subscriber_arr.end(),
          [](const auto& left, const auto& right) { return left.thread_id < right.thread_id; });
 
     vector<unsigned> slices(shard_set->pool()->size(), UINT_MAX);
-    for (size_t i = 0; i < subsriber_arr.size(); ++i) {
-      if (slices[subsriber_arr[i].thread_id] > i) {
-        slices[subsriber_arr[i].thread_id] = i;
+    for (size_t i = 0; i < subscriber_arr.size(); ++i) {
+      if (slices[subscriber_arr[i].thread_id] > i) {
+        slices[subscriber_arr[i].thread_id] = i;
       }
     }
 
-    fibers_ext::BlockingCounter bc(subsriber_arr.size());
+    fibers_ext::BlockingCounter bc(subscriber_arr.size());
     auto publish_cb = [&, bc](unsigned idx, util::ProactorBase*) mutable {
       unsigned start = slices[idx];
 
-      for (unsigned i = start; i < subsriber_arr.size(); ++i) {
-        const ChannelSlice::Subscriber& subscriber = subsriber_arr[i];
+      for (unsigned i = start; i < subscriber_arr.size(); ++i) {
+        const ChannelSlice::Subscriber& subscriber = subscriber_arr[i];
         if (subscriber.thread_id != idx)
           break;
 
         published.fetch_add(1, memory_order_relaxed);
-        facade::Connection* conn = subsriber_arr[i].conn_cntx->owner();
+        facade::Connection* conn = subscriber_arr[i].conn_cntx->owner();
         DCHECK(conn);
         facade::Connection::PubMessage pmsg;
         pmsg.channel = channel;
@@ -939,7 +939,7 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
   // If subsriber connections are closing they will wait
   // for the tokens to be reclaimed in OnClose(). This guarantees that subscribers we gathered
   // still exist till we finish publishing.
-  for (auto& s : subsriber_arr) {
+  for (auto& s : subscriber_arr) {
     s.borrow_token.Dec();
   }
 
