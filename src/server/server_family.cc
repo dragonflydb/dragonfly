@@ -363,7 +363,7 @@ void PrometheusMetricPrinter(http::StringResponse* resp, Metrics m) {
   for (size_t i = 0; i < m.db.size(); ++i) {
     AppendMetricValue(&db_key_metrics, "db_keys", m.db[i].key_count, {"db"}, {StrCat("db", i)});
     AppendMetricValue(&db_key_expire_metrics, "db_keys_expiring", m.db[i].expire_count, {"db"},
-                      {StrCat("db", i), "qwerewqew"});
+                      {StrCat("db", i)});
   }
 
   absl::StrAppend(&resp->body(), db_key_metrics);
