@@ -270,40 +270,113 @@ error_code ServerFamily::LoadRdb(const std::string& rdb_file) {
   return ec;
 }
 
-void AppendMetric(http::StringResponse* resp, absl::AlphaNum name, absl::AlphaNum val) {
-  /**
-   * Gets a metric name and a value and write it using Prometheus format.
-   *
-   * TODO:
-   *  1. add metrics descriptions.
-   *  2. support other types of metrics, not just gauge :)
-   */
+enum MetricType { COUNTER, GAUGE, SUMMARY, HISTOGRAM };
 
-  const auto full_name = StrCat("dragonfly_", name);
-  absl::StrAppend(&resp->body(), "# HELP ", full_name, " ", name, "\n");
-  absl::StrAppend(&resp->body(), "# TYPE ", full_name, " gauge\n");
-  absl::StrAppend(&resp->body(), full_name, " ", val, "\n");
+const char* MetricTypeName(MetricType type) {
+  switch (type) {
+    case MetricType::COUNTER:
+      return "counter";
+    case MetricType::GAUGE:
+      return "gauge";
+    case MetricType::SUMMARY:
+      return "summary";
+    case MetricType::HISTOGRAM:
+      return "histogram";
+  }
+  return "unknown";
+};
+
+#define GET_METRIC_FULLNAME(metric_name) StrCat("dragonfly_", metric_name)
+
+void AppendMetricHeader(string* dest, string_view metric_name, string_view metric_help,
+                        MetricType type) {
+  const auto full_metric_name = GET_METRIC_FULLNAME(metric_name);
+  absl::StrAppend(dest, "# HELP ", full_metric_name, " ", metric_help, "\n");
+  absl::StrAppend(dest, "# TYPE ", full_metric_name, " ", MetricTypeName(type), "\n");
+};
+
+void AppendLabelTupple(absl::Span<const string_view> label_names,
+                       absl::Span<const string_view> label_values, string* dest) {
+  if (label_names.empty())
+    return;
+
+  absl::StrAppend(dest, "{");
+  for (size_t i = 0; i < label_names.size(); ++i) {
+    if (i > 0) {
+      absl::StrAppend(dest, ", ");
+    }
+    absl::StrAppend(dest, label_names[i], "=\"", label_values[i], "\"");
+  }
+
+  absl::StrAppend(dest, "}");
+};
+
+void AppendMetricValue(string* dest, string_view metric_name, absl::AlphaNum value,
+                       absl::Span<const string_view> label_names,
+                       absl::Span<const string_view> label_values) {
+  absl::StrAppend(dest, GET_METRIC_FULLNAME(metric_name));
+  AppendLabelTupple(label_names, label_values, dest);
+  absl::StrAppend(dest, " ", value, "\n");
+};
+
+void PrometheusMetricPrinter(http::StringResponse* resp, Metrics m) {
+#define ADD_METRIC_NO_LABEL(name, help, val, type)     \
+  AppendMetricHeader(&resp->body(), name, help, type); \
+  AppendMetricValue(&resp->body(), name, val, {}, {})
+
+  // Server metrics
+  ADD_METRIC_NO_LABEL("up", "", 1, MetricType::GAUGE);
+  ADD_METRIC_NO_LABEL("uptime_in_seconds", "", m.uptime, MetricType::GAUGE);
+
+  // Clients metrics
+  ADD_METRIC_NO_LABEL("connected_clients", "", m.conn_stats.num_conns, MetricType::GAUGE);
+  ADD_METRIC_NO_LABEL("client_read_buf_capacity", "", m.conn_stats.read_buf_capacity,
+                      MetricType::GAUGE);
+  ADD_METRIC_NO_LABEL("blocked_clients", "", m.conn_stats.num_blocked_clients, MetricType::GAUGE);
+
+  // Memory metrics
+  ADD_METRIC_NO_LABEL("memory_used_bytes", "", m.heap_used_bytes, MetricType::GAUGE);
+  ADD_METRIC_NO_LABEL("memory_used_peak_bytes", "", used_mem_peak.load(memory_order_relaxed),
+                      MetricType::GAUGE);
+  ADD_METRIC_NO_LABEL("comitted_memory", "", _mi_stats_main.committed.current, MetricType::GAUGE);
+  ADD_METRIC_NO_LABEL("memory_max_bytes", "", max_memory_limit, MetricType::GAUGE);
+
+  ADD_METRIC_NO_LABEL("commands_processed_total", "", m.conn_stats.command_cnt,
+                      MetricType::COUNTER);
+
+  // Net metrics
+  ADD_METRIC_NO_LABEL("net_input_bytes_total", "", m.conn_stats.io_read_bytes, MetricType::COUNTER);
+  ADD_METRIC_NO_LABEL("net_output_bytes_total", "", m.conn_stats.io_write_bytes,
+                      MetricType::COUNTER);
+
+  // DB stats
+  ADD_METRIC_NO_LABEL("expired_keys_total", "", m.events.expired_keys, MetricType::COUNTER);
+  ADD_METRIC_NO_LABEL("evicted_keys_total", "", m.events.evicted_keys, MetricType::COUNTER);
+
+  string db_key_metrics;
+  string db_key_expire_metrics;
+
+  AppendMetricHeader(&db_key_metrics, "db_keys", "Total number of keys by DB", MetricType::GAUGE);
+  AppendMetricHeader(&db_key_expire_metrics, "db_keys_expiring",
+                     "Total number of expiring keys by DB", MetricType::GAUGE);
+
+  for (size_t i = 0; i < m.db.size(); ++i) {
+    AppendMetricValue(&db_key_metrics, "db_keys", m.db[i].key_count, {"db"}, {StrCat("db", i)});
+    AppendMetricValue(&db_key_expire_metrics, "db_keys_expiring", m.db[i].expire_count, {"db"},
+                      {StrCat("db", i), "qwerewqew"});
+  }
+
+  absl::StrAppend(&resp->body(), db_key_metrics);
+  absl::StrAppend(&resp->body(), db_key_expire_metrics);
 }
 
 void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
-  // The naming of the metrics should be compatible with redis_exporter, see https://github.com/oliver006/redis_exporter/blob/master/exporter/exporter.go#L111
+  // The naming of the metrics should be compatible with redis_exporter, see
+  // https://github.com/oliver006/redis_exporter/blob/master/exporter/exporter.go#L111
 
   auto cb = [this](const http::QueryArgs& args, HttpContext* send) {
     http::StringResponse resp = http::MakeStringResponse(boost::beast::http::status::ok);
-    Metrics m = this->GetMetrics();
-
-    // Server metrics
-    AppendMetric(&resp, "uptime_in_seconds", m.uptime);
-
-    // Clients metrics
-    AppendMetric(&resp, "connected_clients", m.conn_stats.num_conns);
-    AppendMetric(&resp, "client_read_buf_capacity", m.conn_stats.read_buf_capacity);
-    AppendMetric(&resp, "blocked_clients", m.conn_stats.num_blocked_clients);
-
-    // Memory metrics
-    AppendMetric(&resp, "used_memory", m.heap_used_bytes);
-    AppendMetric(&resp, "used_memory_peak", used_mem_peak.load(memory_order_relaxed));
-    AppendMetric(&resp, "comitted_memory", _mi_stats_main.committed.current);
+    PrometheusMetricPrinter(&resp, this->GetMetrics());
 
     return send->Invoke(std::move(resp));
   };
