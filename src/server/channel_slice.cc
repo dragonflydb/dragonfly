@@ -55,21 +55,21 @@ auto ChannelSlice::FetchSubscribers(string_view channel) -> vector<Subscriber> {
   auto it = channels_.find(channel);
   if (it != channels_.end()) {
     res.reserve(it->second->subscribers.size());
-    CopySubsribers(it->second->subscribers, string{}, &res);
+    CopySubscribers(it->second->subscribers, string{}, &res);
   }
 
   for (const auto& k_v : patterns_) {
     const string& pat = k_v.first;
     // 1 - match
     if (stringmatchlen(pat.data(), pat.size(), channel.data(), channel.size(), 0) == 1) {
-      CopySubsribers(k_v.second->subscribers, pat, &res);
+      CopySubscribers(k_v.second->subscribers, pat, &res);
     }
   }
 
   return res;
 }
 
-void ChannelSlice::CopySubsribers(const SubscribeMap& src, const std::string& pattern,
+void ChannelSlice::CopySubscribers(const SubscribeMap& src, const std::string& pattern,
                                   vector<Subscriber>* dest) {
   for (const auto& sub : src) {
     Subscriber s(sub.first, sub.second.thread_id);
