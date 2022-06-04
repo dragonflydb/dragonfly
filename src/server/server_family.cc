@@ -288,8 +288,8 @@ const char* MetricTypeName(MetricType type) {
 
 #define GET_METRIC_FULLNAME(metric_name) StrCat("dragonfly_", metric_name)
 
-void AppendMetricHeader(string* dest, string_view metric_name, string_view metric_help,
-                        MetricType type) {
+void AppendMetricHeader(string_view metric_name, string_view metric_help, MetricType type,
+                        string* dest) {
   const auto full_metric_name = GET_METRIC_FULLNAME(metric_name);
   absl::StrAppend(dest, "# HELP ", full_metric_name, " ", metric_help, "\n");
   absl::StrAppend(dest, "# TYPE ", full_metric_name, " ", MetricTypeName(type), "\n");
@@ -311,18 +311,18 @@ void AppendLabelTupple(absl::Span<const string_view> label_names,
   absl::StrAppend(dest, "}");
 };
 
-void AppendMetricValue(string* dest, string_view metric_name, absl::AlphaNum value,
+void AppendMetricValue(string_view metric_name, absl::AlphaNum value,
                        absl::Span<const string_view> label_names,
-                       absl::Span<const string_view> label_values) {
+                       absl::Span<const string_view> label_values, string* dest) {
   absl::StrAppend(dest, GET_METRIC_FULLNAME(metric_name));
   AppendLabelTupple(label_names, label_values, dest);
   absl::StrAppend(dest, " ", value, "\n");
 };
 
-void PrometheusMetricPrinter(http::StringResponse* resp, Metrics m) {
+void PrintPrometheusMetrics(http::StringResponse* resp, const Metrics m) {
 #define ADD_METRIC_NO_LABEL(name, help, val, type)     \
-  AppendMetricHeader(&resp->body(), name, help, type); \
-  AppendMetricValue(&resp->body(), name, val, {}, {})
+  AppendMetricHeader(name, help, type, &resp->body()); \
+  AppendMetricValue(name, val, {}, {}, &resp->body())
 
   // Server metrics
   ADD_METRIC_NO_LABEL("up", "", 1, MetricType::GAUGE);
@@ -356,14 +356,14 @@ void PrometheusMetricPrinter(http::StringResponse* resp, Metrics m) {
   string db_key_metrics;
   string db_key_expire_metrics;
 
-  AppendMetricHeader(&db_key_metrics, "db_keys", "Total number of keys by DB", MetricType::GAUGE);
-  AppendMetricHeader(&db_key_expire_metrics, "db_keys_expiring",
-                     "Total number of expiring keys by DB", MetricType::GAUGE);
+  AppendMetricHeader("db_keys", "Total number of keys by DB", MetricType::GAUGE, &db_key_metrics);
+  AppendMetricHeader("db_keys_expiring", "Total number of expiring keys by DB", MetricType::GAUGE,
+                     &db_key_expire_metrics);
 
   for (size_t i = 0; i < m.db.size(); ++i) {
-    AppendMetricValue(&db_key_metrics, "db_keys", m.db[i].key_count, {"db"}, {StrCat("db", i)});
-    AppendMetricValue(&db_key_expire_metrics, "db_keys_expiring", m.db[i].expire_count, {"db"},
-                      {StrCat("db", i)});
+    AppendMetricValue("db_keys", m.db[i].key_count, {"db"}, {StrCat("db", i)}, &db_key_metrics);
+    AppendMetricValue("db_keys_expiring", m.db[i].expire_count, {"db"}, {StrCat("db", i)},
+                      &db_key_expire_metrics);
   }
 
   absl::StrAppend(&resp->body(), db_key_metrics);
@@ -376,7 +376,7 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
 
   auto cb = [this](const http::QueryArgs& args, HttpContext* send) {
     http::StringResponse resp = http::MakeStringResponse(boost::beast::http::status::ok);
-    PrometheusMetricPrinter(&resp, this->GetMetrics());
+    PrintPrometheusMetrics(&resp, this->GetMetrics());
 
     return send->Invoke(std::move(resp));
   };
