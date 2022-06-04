@@ -72,7 +72,7 @@ class BaseFamilyTest : public ::testing::Test {
   void UpdateTime(uint64_t ms);
 
   std::string GetId() const;
-  size_t SubsriberMessagesLen(std::string_view conn_id) const;
+  size_t SubscriberMessagesLen(std::string_view conn_id) const;
 
   // Returns message parts as returned by RESP:
   // pmessage, pattern, channel, message

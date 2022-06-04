@@ -327,7 +327,7 @@ string BaseFamilyTest::GetId() const {
   return absl::StrCat("IO", id);
 }
 
-size_t BaseFamilyTest::SubsriberMessagesLen(string_view conn_id) const {
+size_t BaseFamilyTest::SubscriberMessagesLen(string_view conn_id) const {
   auto it = connections_.find(conn_id);
   if (it == connections_.end())
     return 0;

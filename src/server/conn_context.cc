@@ -27,7 +27,7 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
       this->force_dispatch = true;
     }
 
-    // Gather all the channels we need to subsribe to / remove.
+    // Gather all the channels we need to subscribe to / remove.
     for (size_t i = 0; i < args.size(); ++i) {
       bool res = false;
       string_view channel = ArgS(args, i);
@@ -71,7 +71,7 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
     int32_t tid = util::ProactorBase::GetIndex();
     DCHECK_GE(tid, 0);
 
-    // Update the subsribers on publisher's side.
+    // Update the subscribers on publisher's side.
     auto cb = [&](EngineShard* shard) {
       ChannelSlice& cs = shard->channel_slice();
       unsigned start = shard_idx[shard->shard_id()];
@@ -100,8 +100,8 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
       (*this)->SendBulkString(action[to_add]);
       (*this)->SendBulkString(ArgS(args, i));  // channel
 
-      // number of subsribed channels for this connection *right after*
-      // we subsribe.
+      // number of subscribed channels for this connection *right after*
+      // we subscribe.
       (*this)->SendLong(result[i]);
     }
   }
@@ -121,7 +121,7 @@ void ConnectionContext::ChangePSub(bool to_add, bool to_reply, CmdArgList args) 
       this->force_dispatch = true;
     }
 
-    // Gather all the patterns we need to subsribe to / remove.
+    // Gather all the patterns we need to subscribe to / remove.
     for (size_t i = 0; i < args.size(); ++i) {
       bool res = false;
       string_view pattern = ArgS(args, i);
@@ -147,7 +147,7 @@ void ConnectionContext::ChangePSub(bool to_add, bool to_reply, CmdArgList args) 
     int32_t tid = util::ProactorBase::GetIndex();
     DCHECK_GE(tid, 0);
 
-    // Update the subsribers on publisher's side.
+    // Update the subscribers on publisher's side.
     auto cb = [&](EngineShard* shard) {
       ChannelSlice& cs = shard->channel_slice();
       for (string_view pattern : patterns) {

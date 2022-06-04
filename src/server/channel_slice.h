@@ -48,13 +48,13 @@ class ChannelSlice {
     }
   };
 
-  using SubsribeMap = absl::flat_hash_map<ConnectionContext*, SubscriberInternal>;
+  using SubscribeMap = absl::flat_hash_map<ConnectionContext*, SubscriberInternal>;
 
-  static void CopySubsribers(const SubsribeMap& src, const std::string& pattern,
+  static void CopySubscribers(const SubscribeMap& src, const std::string& pattern,
                              std::vector<Subscriber>* dest);
 
   struct Channel {
-    SubsribeMap subscribers;
+    SubscribeMap subscribers;
   };
 
   absl::flat_hash_map<std::string, std::unique_ptr<Channel>> channels_;
