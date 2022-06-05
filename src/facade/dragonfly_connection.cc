@@ -284,6 +284,10 @@ string Connection::GetClientInfo() const {
   return res;
 }
 
+uint32 Connection::GetClientId() const {
+  return id_;
+}
+
 io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
   size_t last_len = 0;
   do {

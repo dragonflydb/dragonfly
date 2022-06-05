@@ -867,7 +867,29 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
-  return (*cntx)->SendOk();
+  if (args.size() > 1) {
+    string_view proto_version = ArgS(args, 1);
+
+    if (proto_version != "2") {
+      (*cntx)->SendError("NOPROTO unsupported protocol version");
+      return;
+    }
+  }
+
+  (*cntx)->StartArray(12);
+  (*cntx)->SendBulkString("server");
+  (*cntx)->SendBulkString("redis");
+  (*cntx)->SendBulkString("version");
+  (*cntx)->SendBulkString(StrCat("df-", kGitTag));
+  (*cntx)->SendBulkString("proto");
+  (*cntx)->SendLong(2);
+  (*cntx)->SendBulkString("id");
+  (*cntx)->SendLong(cntx->owner()->GetClientId());
+  (*cntx)->SendBulkString("mode");
+  (*cntx)->SendBulkString("standalone");
+  (*cntx)->SendBulkString("role");
+  (*cntx)->SendBulkString((*ServerState::tlocal()).is_master ? "master" : "slave");
+
 }
 
 void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
