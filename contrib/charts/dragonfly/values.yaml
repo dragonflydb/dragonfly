@@ -11,7 +11,7 @@ image:
   # -- Dragonfly image pull policy
   pullPolicy: IfNotPresent
   # -- Overrides the image tag whose default is the chart appVersion.
-  tag: "latest" # TODO: remove as soon as there's a properly tagged image available
+  tag: ""
 
 # -- Container Registry Secret names in an array
 imagePullSecrets: []
@@ -110,7 +110,7 @@ tls:
 
 
 command:
-  # -- Allow overriding the container's init command
+  # -- Allow overriding the container's command
   set: []
 
 # -- Extra arguments to pass to the dragonfly binary
