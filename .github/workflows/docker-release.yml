@@ -6,6 +6,10 @@ on:
       TAG_NAME:
         description: 'Tag name that the major tag will point to'
         required: true
+      PRERELEASE:
+        description: 'Whether this is a prerelease'
+        type: boolean
+        required: false
 
   release:
     types: [published]
@@ -59,7 +63,7 @@ jobs:
         rm releases/*.tar.gz
 
     - name: Build release image
-      if: ${{ !github.event.release.prerelease }}
+      if: ${{ !github.event.release.prerelease && !github.event.inputs.PRERELEASE }}
       uses: docker/build-push-action@v2
       with:
         context: .
@@ -81,7 +85,7 @@ jobs:
         cache-to: type=inline
 
     - name: Build pre-release image
-      if: ${{ github.event.release.prerelease }}
+      if: ${{ github.event.release.prerelease || github.event.inputs.PRERELEASE }}
       uses: docker/build-push-action@v2
       with:
         context: .
