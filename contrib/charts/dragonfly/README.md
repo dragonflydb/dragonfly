@@ -9,6 +9,7 @@ A Helm chart for Kubernetes
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | affinity | object | `{}` | Affinity for pod assignment |
+| command.set | list | `[]` | Allow overriding the container's command |
 | extraArgs | list | `[]` | Extra arguments to pass to the dragonfly binary |
 | extraVolumeMounts | list | `[]` | Extra volume mounts corresponding to the volumes mounted above |
 | extraVolumes | list | `[]` | Extra volumes to mount into the pods |

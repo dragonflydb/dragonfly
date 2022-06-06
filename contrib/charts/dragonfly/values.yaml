@@ -109,6 +109,10 @@ tls:
   #   -----END RSA PRIVATE KEY-----
 
 
+command:
+  # -- Allow overriding the container's init command
+  set: []
+
 # -- Extra arguments to pass to the dragonfly binary
 extraArgs: []
 

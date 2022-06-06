@@ -60,6 +60,10 @@ spec:
             httpGet:
               path: /
               port: dragonfly
+          {{- if .Values.command.cmd }}
+          command:
+            {{ toYaml .Values.command.cmd | nindent 12 }}
+          {{- end }}
           args:
             - "--alsologtostderr"
           {{- if .Values.extraArgs }}
