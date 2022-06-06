@@ -1,0 +1,214 @@
+The following document describes the current API status
+with respect to Memcached and Redis APIs.
+
+## Memcache API
+- [X] set
+- [X] get
+- [X] replace
+- [X] add
+- [X] stats (partial)
+- [x] append
+- [x] prepend
+- [x] delete
+- [x] flush_all
+- [x] incr
+- [x] decr
+- [x] version
+- [x] quit
+
+
+## Redis API
+
+### API 1
+- [X] String family
+  - [X] SET
+  - [ ] SETNX
+  - [X] GET
+  - [X] DECR
+  - [X] INCR
+  - [X] DECRBY
+  - [X] GETSET
+  - [X] INCRBY
+  - [X] MGET
+  - [X] MSET
+  - [X] MSETNX
+  - [X] SUBSTR
+- [x] Generic family
+  - [X] DEL
+  - [X] ECHO
+  - [X] EXISTS
+  - [X] EXPIRE
+  - [X] EXPIREAT
+  - [X] KEYS
+  - [X] PING
+  - [X] RENAME
+  - [X] RENAMENX
+  - [X] SELECT
+  - [X] TTL
+  - [X] TYPE
+  - [ ] SORT
+- [X] Server Family
+  - [X] AUTH
+  - [X] QUIT
+  - [X] DBSIZE
+  - [ ] BGSAVE
+  - [X] SAVE
+  - [X] DEBUG
+  - [X] EXEC
+  - [X] FLUSHALL
+  - [X] FLUSHDB
+  - [X] INFO
+  - [X] MULTI
+  - [X] SHUTDOWN
+  - [X] LASTSAVE
+  - [X] SLAVEOF/REPLICAOF
+  - [ ] SYNC
+- [X] Set Family
+  - [x] SADD
+  - [x] SCARD
+  - [X] SDIFF
+  - [X] SDIFFSTORE
+  - [X] SINTER
+  - [X] SINTERSTORE
+  - [X] SISMEMBER
+  - [X] SMOVE
+  - [X] SPOP
+  - [ ] SRANDMEMBER
+  - [X] SREM
+  - [X] SMEMBERS
+  - [X] SUNION
+  - [X] SUNIONSTORE
+- [X] List Family
+  - [X] LINDEX
+  - [X] LLEN
+  - [X] LPOP
+  - [X] LPUSH
+  - [X] LRANGE
+  - [X] LREM
+  - [X] LSET
+  - [X] LTRIM
+  - [X] RPOP
+  - [X] RPOPLPUSH
+  - [X] RPUSH
+- [X] SortedSet Family
+  - [X] ZADD
+  - [X] ZCARD
+  - [X] ZINCRBY
+  - [X] ZRANGE
+  - [X] ZRANGEBYSCORE
+  - [X] ZREM
+  - [X] ZREMRANGEBYSCORE
+  - [X] ZREVRANGE
+  - [X] ZSCORE
+- [ ] Other
+  - [ ] BGREWRITEAOF
+  - [ ] MONITOR
+  - [ ] RANDOMKEY
+  - [ ] MOVE
+
+### API 2
+- [X] List Family
+  - [X] BLPOP
+  - [X] BRPOP
+  - [ ] BRPOPLPUSH
+  - [X] LINSERT
+  - [X] LPUSHX
+  - [X] RPUSHX
+- [X] String Family
+  - [X] SETEX
+  - [X] APPEND
+  - [X] PREPEND (dragonfly specific)
+  - [ ] BITCOUNT
+  - [ ] BITFIELD
+  - [ ] BITOP
+  - [ ] BITPOS
+  - [ ] GETBIT
+  - [X] GETRANGE
+  - [X] INCRBYFLOAT
+  - [X] PSETEX
+  - [ ] SETBIT
+  - [X] SETRANGE
+  - [X] STRLEN
+- [X] HashSet Family
+  - [X] HSET
+  - [X] HMSET
+  - [X] HDEL
+  - [X] HEXISTS
+  - [X] HGET
+  - [X] HMGET
+  - [X] HLEN
+  - [X] HINCRBY
+  - [X] HINCRBYFLOAT
+  - [X] HGETALL
+  - [X] HKEYS
+  - [X] HSETNX
+  - [X] HVALS
+  - [X] HSCAN
+- [X] PubSub family
+  - [X] PUBLISH
+  - [ ] PUBSUB
+  - [ ] PUBSUB CHANNELS
+  - [X] SUBSCRIBE
+  - [X] UNSUBSCRIBE
+  - [X] PSUBSCRIBE
+  - [X] PUNSUBSCRIBE
+- [X] Server Family
+  - [ ] WATCH
+  - [ ] UNWATCH
+  - [X] DISCARD
+  - [X] CLIENT LIST/SETNAME
+  - [ ] CLIENT KILL/UNPAUSE/PAUSE/GETNAME/REPLY/TRACKINGINFO
+  - [X] COMMAND
+  - [X] COMMAND COUNT
+  - [ ] COMMAND GETKEYS/INFO
+  - [ ] CONFIG GET/REWRITE/SET/RESETSTAT
+  - [ ] MIGRATE
+  - [ ] ROLE
+  - [ ] SLOWLOG
+  - [ ] PSYNC
+  - [ ] TIME
+  - [ ] LATENCY...
+- [X] Generic Family
+  - [X] SCAN
+  - [X] PEXPIREAT
+  - [ ] PEXPIRE
+  - [ ] DUMP
+  - [X] EVAL
+  - [X] EVALSHA
+  - [ ] OBJECT
+  - [ ] PERSIST
+  - [X] PTTL
+  - [ ] RESTORE
+  - [X] SCRIPT LOAD/EXISTS
+  - [ ] SCRIPT DEBUG/KILL/FLUSH
+- [X] Set Family
+  - [X] SSCAN
+- [X] Sorted Set Family
+  - [X] ZCOUNT
+  - [X] ZINTERSTORE
+  - [X] ZLEXCOUNT
+  - [X] ZRANGEBYLEX
+  - [X] ZRANK
+  - [X] ZREMRANGEBYLEX
+  - [X] ZREMRANGEBYRANK
+  - [X] ZREVRANGEBYSCORE
+  - [X] ZREVRANK
+  - [X] ZUNIONSTORE
+  - [X] ZSCAN
+- [ ] HYPERLOGLOG Family
+  - [ ] PFADD
+  - [ ] PFCOUNT
+  - [ ] PFMERGE
+
+### API 3
+### API 4
+### API 5
+### API 6
+
+## Notes
+Some commands were implemented as decorators along the way:
+
+ - [X] ROLE (2.8) decorator as master.
+ - [X] UNLINK (4.0) decorator for DEL command
+ - [X] BGSAVE (decorator for save)
+ - [X] FUNCTION FLUSH (does nothing)
