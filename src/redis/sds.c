@@ -1533,29 +1533,29 @@ int sdsTest(int argc, char **argv, int flags) {
         /* Test sdsresize - extend */
         x = sdsnew("1234567890123456789012345678901234567890");
         x = sdsResize(x, 200);
-        test_cond("sdsrezie() expand len", sdslen(x) == 40);
-        test_cond("sdsrezie() expand strlen", strlen(x) == 40);
-        test_cond("sdsrezie() expand alloc", sdsalloc(x) == 200);
+        test_cond("sdsResize() expand len", sdslen(x) == 40);
+        test_cond("sdsResize() expand strlen", strlen(x) == 40);
+        test_cond("sdsResize() expand alloc", sdsalloc(x) == 200);
         /* Test sdsresize - trim free space */
         x = sdsResize(x, 80);
-        test_cond("sdsrezie() shrink len", sdslen(x) == 40);
-        test_cond("sdsrezie() shrink strlen", strlen(x) == 40);
-        test_cond("sdsrezie() shrink alloc", sdsalloc(x) == 80);
+        test_cond("sdsResize() shrink len", sdslen(x) == 40);
+        test_cond("sdsResize() shrink strlen", strlen(x) == 40);
+        test_cond("sdsResize() shrink alloc", sdsalloc(x) == 80);
         /* Test sdsresize - crop used space */
         x = sdsResize(x, 30);
-        test_cond("sdsrezie() crop len", sdslen(x) == 30);
-        test_cond("sdsrezie() crop strlen", strlen(x) == 30);
-        test_cond("sdsrezie() crop alloc", sdsalloc(x) == 30);
+        test_cond("sdsResize() crop len", sdslen(x) == 30);
+        test_cond("sdsResize() crop strlen", strlen(x) == 30);
+        test_cond("sdsResize() crop alloc", sdsalloc(x) == 30);
         /* Test sdsresize - extend to different class */
         x = sdsResize(x, 400);
-        test_cond("sdsrezie() expand len", sdslen(x) == 30);
-        test_cond("sdsrezie() expand strlen", strlen(x) == 30);
-        test_cond("sdsrezie() expand alloc", sdsalloc(x) == 400);
+        test_cond("sdsResize() expand len", sdslen(x) == 30);
+        test_cond("sdsResize() expand strlen", strlen(x) == 30);
+        test_cond("sdsResize() expand alloc", sdsalloc(x) == 400);
         /* Test sdsresize - shrink to different class */
         x = sdsResize(x, 4);
-        test_cond("sdsrezie() crop len", sdslen(x) == 4);
-        test_cond("sdsrezie() crop strlen", strlen(x) == 4);
-        test_cond("sdsrezie() crop alloc", sdsalloc(x) == 4);
+        test_cond("sdsResize() crop len", sdslen(x) == 4);
+        test_cond("sdsResize() crop strlen", strlen(x) == 4);
+        test_cond("sdsResize() crop alloc", sdsalloc(x) == 4);
         sdsfree(x);
     }
     return 0;
