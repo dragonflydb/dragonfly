@@ -11,7 +11,7 @@ image:
   # -- Dragonfly image pull policy
   pullPolicy: IfNotPresent
   # -- Overrides the image tag whose default is the chart appVersion.
-  tag: "latest" # TODO: remove as soon as there's a properly tagged image available
+  tag: ""
 
 # -- Container Registry Secret names in an array
 imagePullSecrets: []
@@ -52,6 +52,30 @@ service:
   type: ClusterIP
   # -- Dragonfly service port
   port: 6379
+  metrics:
+    # -- name for the metrics port
+    portName: metrics
+    # -- serviceType for the metrics service
+    serviceType: ClusterIP
+
+serviceMonitor:
+  # -- If true, a ServiceMonitor CRD is created for a prometheus operator
+  enabled: false
+  # -- namespace in which to deploy the ServiceMonitor CR. defaults to the application namespace
+  namespace: ""
+  # -- additional labels to apply to the metrics
+  labels: {}
+  # -- scrape interval
+  interval: 10s
+  # -- scrape timeout
+  scrapeTimeout: 10s
+
+prometheusRule:
+  # -- Deploy a PrometheusRule
+  enabled: false
+  # -- PrometheusRule.Spec
+  # https://awesome-prometheus-alerts.grep.to/rules
+  spec: []
 
 storage:
   # -- If /data should persist. This will provision a StatefulSet instead.
@@ -60,6 +84,34 @@ storage:
   storageClassName: ""
   # -- Volume size to request for the PVC
   requests: 128Mi
+
+tls:
+  # -- enable TLS
+  enabled: false
+  # -- use TLS certificates from existing secret
+  existing_secret: ""
+  # -- TLS certificate
+  cert: ""
+  # cert: |
+  #   -----BEGIN CERTIFICATE-----
+  #   MIIDazCCAlOgAwIBAgIUfV3ygaaVW3+yzK5Dq6Aw6TsZ494wDQYJKoZIhvcNAQEL
+  #   ...
+  #   BQAwRTELMAkGA1UEBhMCQVUxEzARBgNVBAgMClNvbWUtU3RhdGUxITAfBgNVBAoM
+  #   zJAL4hNw4Tr6E52fqdmX
+  #   -----END CERTIFICATE-----
+  # -- TLS private key
+  key: ""
+  # key: |
+  #   -----BEGIN RSA PRIVATE KEY-----
+  #   MIIEpAIBAAKCAQEAxeD5iQGQpCUlksFvjzzAxPTw6DMJd3MpifV+HoBY4LiTyDer
+  #   ...
+  #   HLunol88AeTOcKfD6hBYGvcRfu5NV29jJxZCOBfbFQXjnNlnrhRCag==
+  #   -----END RSA PRIVATE KEY-----
+
+
+command:
+  # -- Allow overriding the container's command
+  set: []
 
 # -- Extra arguments to pass to the dragonfly binary
 extraArgs: []
