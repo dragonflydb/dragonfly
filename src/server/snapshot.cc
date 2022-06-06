@@ -55,8 +55,10 @@ void SliceSnapshot::Join() {
   fb_.join();
 }
 
-void SliceSnapshot::SerializeSingleEntry(DbIndex db_indx, const PrimeKey& pk,
-                                         const PrimeValue& pv) {
+// This function should not block and should not preempt because it's called
+// from SerializePhysicalBucket which should execute atomically.
+void SliceSnapshot::SerializeSingleEntry(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv,
+                                         RdbSerializer* serializer) {
   time_t expire_time = 0;
 
   if (pv.HasExpire()) {
@@ -64,21 +66,9 @@ void SliceSnapshot::SerializeSingleEntry(DbIndex db_indx, const PrimeKey& pk,
     expire_time = db_slice_->ExpireTime(eit);
   }
 
-  if (db_indx != savecb_current_db_) {
-    FlushSfile(true);
-  }
-  error_code ec = rdb_serializer_->SaveEntry(pk, pv, expire_time);
-  CHECK(!ec);  // we write to StringFile.
-
-  if (db_indx != savecb_current_db_) {
-    ec = rdb_serializer_->FlushMem();
-    CHECK(!ec && !sfile_->val.empty());
-    string tmp = std::move(sfile_->val);
-    channel_bytes_ += tmp.size();
-    DCHECK(!dest_->IsClosing());
-
-    dest_->Push(DbRecord{db_indx, std::move(tmp)});
-  }
+  io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time);
+  CHECK(res);  // we write to StringFile.
+  ++type_freq_map_[*res];
 }
 
 // Serializes all the entries with version less than snapshot_version_.
@@ -95,12 +85,11 @@ void SliceSnapshot::FiberFunc() {
     VLOG(1) << "Start traversing " << pt->size() << " items";
 
     uint64_t last_yield = 0;
+    mu_.lock();
     savecb_current_db_ = db_indx;
+    mu_.unlock();
 
     do {
-      // Traverse a single logical bucket but do not update its versions.
-      // we can not update a version because entries in the same bucket share part of the version.
-      // Therefore we save first, and then update version in one atomic swipe.
       PrimeTable::cursor next = pt->Traverse(cursor, [this](auto it) { this->SaveCb(move(it)); });
 
       cursor = next;
@@ -123,6 +112,10 @@ void SliceSnapshot::FiberFunc() {
     FlushSfile(true);
   }  // for (dbindex)
 
+  // stupid barrier to make sure that SerializePhysicalBucket finished.
+  // Can not think of anything more elegant.
+  mu_.lock();
+  mu_.unlock();
   dest_->StartClosing();
 
   VLOG(1) << "Exit SnapshotSerializer (serialized/side_saved/cbcalls): " << serialized_ << "/"
@@ -149,7 +142,14 @@ bool SliceSnapshot::FlushSfile(bool force) {
 
   string tmp = std::move(sfile_->val);  // important to move before pushing!
   channel_bytes_ += tmp.size();
-  dest_->Push(DbRecord{savecb_current_db_, std::move(tmp)});
+  DbRecord rec{.db_index = savecb_current_db_,
+               .id = rec_id_,
+               .num_records = num_records_in_blob_,
+               .value = std::move(tmp)};
+  DVLOG(2) << "Pushed " << rec_id_;
+  ++rec_id_;
+  num_records_in_blob_ = 0;
+  dest_->Push(std::move(rec));
 
   return true;
 }
@@ -178,7 +178,7 @@ bool SliceSnapshot::SaveCb(PrimeIterator it) {
   uint64_t v = it.GetVersion();
   if (v >= snapshot_version_) {
     // either has been already serialized or added after snapshotting started.
-    DVLOG(2) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << ":" << it.slot_id()
+    DVLOG(3) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << ":" << it.slot_id()
              << " at " << v;
     ++skipped_;
     return false;
@@ -211,13 +211,38 @@ unsigned SliceSnapshot::SerializePhysicalBucket(DbIndex db_index, PrimeTable::bu
   // traverse physical bucket and write it into string file.
   it.SetVersion(snapshot_version_);
   unsigned result = 0;
-  string tmp;
-  while (!it.is_done()) {
-    ++result;
-    SerializeSingleEntry(db_index, it->first, it->second);
-    ++it;
-  }
 
+  lock_guard lk(mu_);
+
+  if (db_index == savecb_current_db_) {
+    while (!it.is_done()) {
+      ++result;
+      SerializeSingleEntry(db_index, it->first, it->second, rdb_serializer_.get());
+      ++it;
+    }
+    num_records_in_blob_ += result;
+  } else {
+    io::StringFile sfile;
+    RdbSerializer tmp_serializer(&sfile);
+
+    while (!it.is_done()) {
+      ++result;
+      SerializeSingleEntry(db_index, it->first, it->second, &tmp_serializer);
+      ++it;
+    }
+    error_code ec = tmp_serializer.FlushMem();
+    CHECK(!ec && !sfile.val.empty());
+
+    string tmp = std::move(sfile.val);
+    channel_bytes_ += tmp.size();
+
+    DbRecord rec{
+        .db_index = db_index, .id = rec_id_, .num_records = result, .value = std::move(tmp)};
+    DVLOG(2) << "Pushed " << rec_id_;
+    ++rec_id_;
+
+    dest_->Push(std::move(rec));
+  }
   return result;
 }
 

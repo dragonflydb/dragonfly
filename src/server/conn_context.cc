@@ -23,9 +23,11 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
       DCHECK(to_add);
 
       conn_state.subscribe_info.reset(new ConnectionState::SubscribeInfo);
+      // to be able to read input and still write the output.
       this->force_dispatch = true;
     }
 
+    // Gather all the channels we need to subscribe to / remove.
     for (size_t i = 0; i < args.size(); ++i) {
       bool res = false;
       string_view channel = ArgS(args, i);
@@ -44,13 +46,14 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
       }
     }
 
-    if (!to_add && conn_state.subscribe_info->channels.empty()) {
+    if (!to_add && conn_state.subscribe_info->IsEmpty()) {
       conn_state.subscribe_info.reset();
       force_dispatch = false;
     }
 
     sort(channels.begin(), channels.end());
 
+    // prepare the array in order to distribute the updates to the shards.
     vector<unsigned> shard_idx(shard_set->size() + 1, 0);
     for (const auto& k_v : channels) {
       shard_idx[k_v.first]++;
@@ -68,6 +71,7 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
     int32_t tid = util::ProactorBase::GetIndex();
     DCHECK_GE(tid, 0);
 
+    // Update the subscribers on publisher's side.
     auto cb = [&](EngineShard* shard) {
       ChannelSlice& cs = shard->channel_slice();
       unsigned start = shard_idx[shard->shard_id()];
@@ -83,12 +87,84 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
       }
     };
 
+    // Update subscription
     shard_set->RunBriefInParallel(move(cb),
                                   [&](ShardId sid) { return shard_idx[sid + 1] > shard_idx[sid]; });
   }
 
   if (to_reply) {
     const char* action[2] = {"unsubscribe", "subscribe"};
+
+    for (size_t i = 0; i < result.size(); ++i) {
+      (*this)->StartArray(3);
+      (*this)->SendBulkString(action[to_add]);
+      (*this)->SendBulkString(ArgS(args, i));  // channel
+
+      // number of subscribed channels for this connection *right after*
+      // we subscribe.
+      (*this)->SendLong(result[i]);
+    }
+  }
+}
+
+void ConnectionContext::ChangePSub(bool to_add, bool to_reply, CmdArgList args) {
+  vector<unsigned> result(to_reply ? args.size() : 0, 0);
+
+  if (to_add || conn_state.subscribe_info) {
+    std::vector<string_view> patterns;
+    patterns.reserve(args.size());
+
+    if (!conn_state.subscribe_info) {
+      DCHECK(to_add);
+
+      conn_state.subscribe_info.reset(new ConnectionState::SubscribeInfo);
+      this->force_dispatch = true;
+    }
+
+    // Gather all the patterns we need to subscribe to / remove.
+    for (size_t i = 0; i < args.size(); ++i) {
+      bool res = false;
+      string_view pattern = ArgS(args, i);
+      if (to_add) {
+        res = conn_state.subscribe_info->patterns.emplace(pattern).second;
+      } else {
+        res = conn_state.subscribe_info->patterns.erase(pattern) > 0;
+      }
+
+      if (to_reply)
+        result[i] = conn_state.subscribe_info->patterns.size();
+
+      if (res) {
+        patterns.emplace_back(pattern);
+      }
+    }
+
+    if (!to_add && conn_state.subscribe_info->IsEmpty()) {
+      conn_state.subscribe_info.reset();
+      force_dispatch = false;
+    }
+
+    int32_t tid = util::ProactorBase::GetIndex();
+    DCHECK_GE(tid, 0);
+
+    // Update the subscribers on publisher's side.
+    auto cb = [&](EngineShard* shard) {
+      ChannelSlice& cs = shard->channel_slice();
+      for (string_view pattern : patterns) {
+        if (to_add) {
+          cs.AddGlobPattern(pattern, this, tid);
+        } else {
+          cs.RemoveGlobPattern(pattern, this);
+        }
+      }
+    };
+
+    // Update pattern subscription. Run on all shards.
+    shard_set->RunBriefInParallel(move(cb));
+  }
+
+  if (to_reply) {
+    const char* action[2] = {"punsubscribe", "psubscribe"};
 
     for (size_t i = 0; i < result.size(); ++i) {
       (*this)->StartArray(3);
@@ -100,17 +176,34 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
 }
 
 void ConnectionContext::OnClose() {
-  if (conn_state.subscribe_info) {
+  if (!conn_state.subscribe_info)
+    return;
+
+  if (!conn_state.subscribe_info->channels.empty()) {
     StringVec channels(conn_state.subscribe_info->channels.begin(),
                        conn_state.subscribe_info->channels.end());
     CmdArgVec arg_vec(channels.begin(), channels.end());
 
     auto token = conn_state.subscribe_info->borrow_token;
     ChangeSubscription(false, false, CmdArgList{arg_vec});
-    DCHECK(!conn_state.subscribe_info);
 
     // Check that all borrowers finished processing
     token.Wait();
+  }
+
+  if (conn_state.subscribe_info) {
+    DCHECK(!conn_state.subscribe_info->patterns.empty());
+
+    StringVec patterns(conn_state.subscribe_info->patterns.begin(),
+                       conn_state.subscribe_info->patterns.end());
+    CmdArgVec arg_vec(patterns.begin(), patterns.end());
+
+    auto token = conn_state.subscribe_info->borrow_token;
+    ChangePSub(false, false, CmdArgList{arg_vec});
+
+    // Check that all borrowers finished processing
+    token.Wait();
+    DCHECK(!conn_state.subscribe_info);
   }
 }
 

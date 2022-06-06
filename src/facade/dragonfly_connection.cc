@@ -69,11 +69,11 @@ constexpr size_t kMinReadSize = 256;
 constexpr size_t kMaxReadSize = 32_KB;
 
 struct AsyncMsg {
-  absl::Span<const std::string_view> msg_vec;
+  Connection::PubMessage pub_msg;
   fibers_ext::BlockingCounter bc;
 
-  AsyncMsg(absl::Span<const std::string_view> vec, fibers_ext::BlockingCounter b)
-      : msg_vec(vec), bc(move(b)) {
+  AsyncMsg(const Connection::PubMessage& pmsg, fibers_ext::BlockingCounter b)
+      : pub_msg(pmsg), bc(move(b)) {
   }
 };
 
@@ -245,15 +245,17 @@ void Connection::RegisterOnBreak(BreakerCb breaker_cb) {
   breaker_cb_ = breaker_cb;
 }
 
-void Connection::SendMsgVecAsync(absl::Span<const std::string_view> msg_vec,
+void Connection::SendMsgVecAsync(const PubMessage& pub_msg,
                                  fibers_ext::BlockingCounter bc) {
+  DCHECK(cc_);
+
   if (cc_->conn_closing) {
     bc.Dec();
     return;
   }
 
   void* ptr = mi_malloc(sizeof(AsyncMsg));
-  AsyncMsg* amsg = new (ptr) AsyncMsg(msg_vec, move(bc));
+  AsyncMsg* amsg = new (ptr) AsyncMsg(pub_msg, move(bc));
 
   ptr = mi_malloc(sizeof(Request));
   Request* req = new (ptr) Request(0, 0);
@@ -571,7 +573,24 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
     if (req->async_msg) {
       ++stats->async_writes_cnt;
-      builder->SendRawVec(req->async_msg->msg_vec);
+
+      RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
+      const PubMessage& pub_msg = req->async_msg->pub_msg;
+      string_view arr[4];
+
+      if (pub_msg.pattern.empty()) {
+        arr[0] = "message";
+        arr[1] = pub_msg.channel;
+        arr[2] = pub_msg.message;
+        rbuilder->SendStringArr(absl::Span<string_view>{arr, 3});
+      } else {
+        arr[0] = "pmessage";
+        arr[1] = pub_msg.pattern;
+        arr[2] = pub_msg.channel;
+        arr[3] = pub_msg.message;
+        rbuilder->SendStringArr(absl::Span<string_view>{arr, 4});
+      }
+
       req->async_msg->bc.Dec();
 
       req->async_msg->~AsyncMsg();

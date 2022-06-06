@@ -1,0 +1,93 @@
+# Default values for dragonfly.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# -- Number of replicas to deploy
+replicaCount: 1
+
+image:
+  # -- Container Image Registry to pull the image from
+  repository: docker.dragonflydb.io/dragonflydb/dragonfly
+  # -- Dragonfly image pull policy
+  pullPolicy: IfNotPresent
+  # -- Overrides the image tag whose default is the chart appVersion.
+  tag: "latest" # TODO: remove as soon as there's a properly tagged image available
+
+# -- Container Registry Secret names in an array
+imagePullSecrets: []
+
+# -- String to partially override dragonfly.fullname
+nameOverride: ""
+
+# -- String to fully override dragonfly.fullname
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Specifies whether a service account should be created
+  create: true
+  # -- Annotations to add to the service account
+  annotations: {}
+  # -- The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+# -- Annotations for pods
+podAnnotations: {}
+
+# -- Set securityContext for pod itself
+podSecurityContext: {}
+  # fsGroup: 2000
+
+# -- Set securityContext for containers
+securityContext: {}
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+service:
+  # -- Service type to provision. Can be NodePort, ClusterIP or LoadBalancer
+  type: ClusterIP
+  # -- Dragonfly service port
+  port: 6379
+
+storage:
+  # -- If /data should persist. This will provision a StatefulSet instead.
+  enabled: false
+  # -- Global StorageClass for Persistent Volume(s)
+  storageClassName: ""
+  # -- Volume size to request for the PVC
+  requests: 128Mi
+
+# -- Extra arguments to pass to the dragonfly binary
+extraArgs: []
+
+# -- Extra volumes to mount into the pods
+extraVolumes: []
+
+# -- Extra volume mounts corresponding to the volumes mounted above
+extraVolumeMounts: []
+
+# -- A list of initContainers to run before each pod starts
+initContainers: []
+
+resources:
+  # -- The requested resources for the containers
+  requests: {}
+  #   cpu: 100m
+  #   memory: 128Mi
+  # -- The resource limits for the containers
+  limits: {}
+  #   cpu: 100m
+  #   memory: 128Mi
+
+# -- Node labels for pod assignment
+nodeSelector: {}
+
+# -- Tolerations for pod assignment
+tolerations: []
+
+# -- Affinity for pod assignment
+affinity: {}

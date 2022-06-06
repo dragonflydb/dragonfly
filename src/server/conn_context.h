@@ -50,10 +50,16 @@ struct ConnectionState {
   struct SubscribeInfo {
     // TODO: to provide unique_strings across service. This will allow us to use string_view here.
     absl::flat_hash_set<std::string> channels;
+    absl::flat_hash_set<std::string> patterns;
 
     util::fibers_ext::BlockingCounter borrow_token;
 
-    SubscribeInfo() : borrow_token(0) {}
+    bool IsEmpty() const {
+      return channels.empty() && patterns.empty();
+    }
+
+    SubscribeInfo() : borrow_token(0) {
+    }
   };
 
   std::unique_ptr<SubscribeInfo> subscribe_info;
@@ -85,6 +91,7 @@ class ConnectionContext : public facade::ConnectionContext {
   }
 
   void ChangeSubscription(bool to_add, bool to_reply, CmdArgList args);
+  void ChangePSub(bool to_add, bool to_reply, CmdArgList args);
 
   bool is_replicating = false;
 };

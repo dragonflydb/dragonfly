@@ -1,0 +1,99 @@
+{{- if .Values.storage.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "dragonfly.fullname" . }}
+  labels:
+    {{- include "dragonfly.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ .Release.Name }}
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "dragonfly.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "dragonfly.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "dragonfly.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+{{- if .Values.initContainers }}
+      initContainers: {{- toYaml .Values.initContainers | nindent 6 }}
+  {{- if .Values.resources }}
+        resources:
+    {{- toYaml .Values.resources | nindent 10 }}
+  {{- end }}
+        volumeMounts:
+          - mountPath: /data
+            name: "{{ .Release.Name }}-data"
+  {{- if .Values.extraVolumeMounts }}
+    {{- toYaml .Values.extraVolumeMounts | nindent 10 }}
+  {{- end }}
+{{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: dragonfly
+              containerPort: 6379
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: dragonfly
+          readinessProbe:
+            httpGet:
+              path: /
+              port: dragonfly
+          args:
+            - "--alsologtostderr"
+          {{- if .Values.extraArgs }}
+            {{- toYaml .Values.extraArgs | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - mountPath: /data
+              name: "{{ .Release.Name }}-data"
+{{- if .Values.extraVolumeMounts }}
+            {{- toYaml .Values.extraVolumeMounts | nindent 12 }}
+{{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if .Values.extraVolumes }}
+      volumes:
+        {{- toYaml .Values.extraVolumes | nindent 8 }}
+{{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: "{{ .Release.Name }}-data"
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        storageClassName: {{ .Values.storage.storageClassName }}
+        resources:
+          requests:
+            storage: {{ .Values.storage.requests }}
+{{- end }}

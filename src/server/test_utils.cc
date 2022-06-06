@@ -37,9 +37,68 @@ static vector<string> SplitLines(const std::string& src) {
   return res;
 }
 
+TestConnection::TestConnection(Protocol protocol)
+    : facade::Connection(protocol, nullptr, nullptr, nullptr) {
+}
+
+void TestConnection::SendMsgVecAsync(const PubMessage& pmsg, util::fibers_ext::BlockingCounter bc) {
+  backing_str_.emplace_back(new string(pmsg.channel));
+  PubMessage dest;
+  dest.channel = *backing_str_.back();
+
+  backing_str_.emplace_back(new string(pmsg.message));
+  dest.message = *backing_str_.back();
+
+  if (!pmsg.pattern.empty()) {
+    backing_str_.emplace_back(new string(pmsg.pattern));
+    dest.pattern = *backing_str_.back();
+  }
+  messages.push_back(dest);
+
+  bc.Dec();
+}
+
+class BaseFamilyTest::TestConnWrapper {
+ public:
+  TestConnWrapper(Protocol proto);
+  ~TestConnWrapper();
+
+  CmdArgVec Args(ArgSlice list);
+
+  RespVec ParseResponse();
+
+  // returns: type(pmessage), pattern, channel, message.
+  facade::Connection::PubMessage GetPubMessage(size_t index) const;
+
+  ConnectionContext* cmd_cntx() {
+    return &cmd_cntx_;
+  }
+
+  StringVec SplitLines() const {
+    return dfly::SplitLines(sink_.str());
+  }
+
+  void ClearSink() {
+    sink_.Clear();
+  }
+
+  TestConnection* conn() {
+    return dummy_conn_.get();
+  }
+
+ private:
+  ::io::StringSink sink_;  // holds the response blob
+
+  std::unique_ptr<TestConnection> dummy_conn_;
+
+  ConnectionContext cmd_cntx_;
+  std::vector<std::unique_ptr<std::string>> tmp_str_vec_;
+
+  std::unique_ptr<RedisParser> parser_;
+};
+
 BaseFamilyTest::TestConnWrapper::TestConnWrapper(Protocol proto)
-    : dummy_conn(new facade::Connection(proto, nullptr, nullptr, nullptr)),
-      cmd_cntx(&sink, dummy_conn.get()) {
+    : dummy_conn_(new TestConnection(proto)), cmd_cntx_(&sink_, dummy_conn_.get()) {
 }
 
 BaseFamilyTest::TestConnWrapper::~TestConnWrapper() {
@@ -102,22 +161,22 @@ RespExpr BaseFamilyTest::Run(ArgSlice list) {
 }
 
 RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
-  TestConnWrapper* conn = AddFindConn(Protocol::REDIS, id);
+  TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, id);
 
-  CmdArgVec args = conn->Args(slice);
+  CmdArgVec args = conn_wrapper->Args(slice);
 
-  auto& context = conn->cmd_cntx;
+  auto* context = conn_wrapper->cmd_cntx();
 
-  DCHECK(context.transaction == nullptr);
+  DCHECK(context->transaction == nullptr);
 
-  service_->DispatchCommand(CmdArgList{args}, &context);
+  service_->DispatchCommand(CmdArgList{args}, context);
 
-  DCHECK(context.transaction == nullptr);
+  DCHECK(context->transaction == nullptr);
 
   unique_lock lk(mu_);
-  last_cmd_dbg_info_ = context.last_command_debug;
+  last_cmd_dbg_info_ = context->last_command_debug;
 
-  RespVec vec = conn->ParseResponse();
+  RespVec vec = conn_wrapper->ParseResponse();
   if (vec.size() == 1)
     return vec.front();
   RespVec* new_vec = new RespVec(vec);
@@ -144,15 +203,15 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view va
 
   TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
 
-  auto& context = conn->cmd_cntx;
+  auto* context = conn->cmd_cntx();
 
-  DCHECK(context.transaction == nullptr);
+  DCHECK(context->transaction == nullptr);
 
-  service_->DispatchMC(cmd, value, &context);
+  service_->DispatchMC(cmd, value, context);
 
-  DCHECK(context.transaction == nullptr);
+  DCHECK(context->transaction == nullptr);
 
-  return SplitLines(conn->sink.str());
+  return conn->SplitLines();
 }
 
 auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, std::string_view key) -> MCResponse {
@@ -165,11 +224,11 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, std::string_view key) -> MCResp
   cmd.key = key;
   TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
 
-  auto& context = conn->cmd_cntx;
+  auto* context = conn->cmd_cntx();
 
-  service_->DispatchMC(cmd, string_view{}, &context);
+  service_->DispatchMC(cmd, string_view{}, context);
 
-  return SplitLines(conn->sink.str());
+  return conn->SplitLines();
 }
 
 auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::string_view> list)
@@ -191,11 +250,11 @@ auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::stri
 
   TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
 
-  auto& context = conn->cmd_cntx;
+  auto* context = conn->cmd_cntx();
 
-  service_->DispatchMC(cmd, string_view{}, &context);
+  service_->DispatchMC(cmd, string_view{}, context);
 
-  return SplitLines(conn->sink.str());
+  return conn->SplitLines();
 }
 
 int64_t BaseFamilyTest::CheckedInt(std::initializer_list<std::string_view> list) {
@@ -222,8 +281,8 @@ CmdArgVec BaseFamilyTest::TestConnWrapper::Args(ArgSlice list) {
     if (v.empty()) {
       res.push_back(MutableSlice{});
     } else {
-      tmp_str_vec.emplace_back(new string{v});
-      auto& s = *tmp_str_vec.back();
+      tmp_str_vec_.emplace_back(new string{v});
+      auto& s = *tmp_str_vec_.back();
 
       res.emplace_back(s.data(), s.size());
     }
@@ -233,17 +292,22 @@ CmdArgVec BaseFamilyTest::TestConnWrapper::Args(ArgSlice list) {
 }
 
 RespVec BaseFamilyTest::TestConnWrapper::ParseResponse() {
-  tmp_str_vec.emplace_back(new string{sink.str()});
-  auto& s = *tmp_str_vec.back();
+  tmp_str_vec_.emplace_back(new string{sink_.str()});
+  auto& s = *tmp_str_vec_.back();
   auto buf = RespExpr::buffer(&s);
   uint32_t consumed = 0;
 
-  parser.reset(new RedisParser{false});  // Client mode.
+  parser_.reset(new RedisParser{false});  // Client mode.
   RespVec res;
-  RedisParser::Result st = parser->Parse(buf, &consumed, &res);
+  RedisParser::Result st = parser_->Parse(buf, &consumed, &res);
   CHECK_EQ(RedisParser::OK, st);
 
   return res;
+}
+
+facade::Connection::PubMessage BaseFamilyTest::TestConnWrapper::GetPubMessage(size_t index) const {
+  CHECK_LT(index, dummy_conn_->messages.size());
+  return dummy_conn_->messages[index];
 }
 
 bool BaseFamilyTest::IsLocked(DbIndex db_index, std::string_view key) const {
@@ -263,11 +327,30 @@ string BaseFamilyTest::GetId() const {
   return absl::StrCat("IO", id);
 }
 
+size_t BaseFamilyTest::SubscriberMessagesLen(string_view conn_id) const {
+  auto it = connections_.find(conn_id);
+  if (it == connections_.end())
+    return 0;
+
+  return it->second->conn()->messages.size();
+}
+
+facade::Connection::PubMessage BaseFamilyTest::GetPublishedMessage(string_view conn_id,
+                                                                   size_t index) const {
+  facade::Connection::PubMessage res;
+
+  auto it = connections_.find(conn_id);
+  if (it == connections_.end())
+    return res;
+
+  return it->second->GetPubMessage(index);
+}
+
 ConnectionContext::DebugInfo BaseFamilyTest::GetDebugInfo(const std::string& id) const {
   auto it = connections_.find(id);
   CHECK(it != connections_.end());
 
-  return it->second->cmd_cntx.last_command_debug;
+  return it->second->cmd_cntx()->last_command_debug;
 }
 
 auto BaseFamilyTest::AddFindConn(Protocol proto, std::string_view id) -> TestConnWrapper* {
@@ -278,7 +361,7 @@ auto BaseFamilyTest::AddFindConn(Protocol proto, std::string_view id) -> TestCon
   if (inserted) {
     it->second.reset(new TestConnWrapper(proto));
   } else {
-    it->second->sink.Clear();
+    it->second->ClearSink();
   }
   return it->second.get();
 }

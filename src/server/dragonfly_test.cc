@@ -22,13 +22,13 @@ extern "C" {
 
 namespace dfly {
 
-using namespace absl;
-using namespace boost;
 using namespace std;
 using namespace util;
 using ::io::Result;
 using testing::ElementsAre;
 using testing::HasSubstr;
+using absl::StrCat;
+namespace this_fiber = boost::this_fiber;
 
 namespace {
 
@@ -409,6 +409,20 @@ TEST_F(DflyEngineTest, OOM) {
     }
     EXPECT_THAT(resp, ErrArg("Out of mem"));
   }
+}
+
+TEST_F(DflyEngineTest, PSubscribe) {
+  auto resp = pp_->at(1)->Await([&] { return Run({"psubscribe", "a*", "b*"}); });
+  EXPECT_THAT(resp, ArrLen(3));
+  resp = pp_->at(0)->Await([&] { return Run({"publish", "ab", "foo"}); });
+  EXPECT_THAT(resp, IntArg(1));
+
+  ASSERT_EQ(1, SubscriberMessagesLen("IO1"));
+
+  facade::Connection::PubMessage msg = GetPublishedMessage("IO1", 0);
+  EXPECT_EQ("foo", msg.message);
+  EXPECT_EQ("ab", msg.channel);
+  EXPECT_EQ("a*", msg.pattern);
 }
 
 // TODO: to test transactions with a single shard since then all transactions become local.

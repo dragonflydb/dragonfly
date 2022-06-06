@@ -289,7 +289,7 @@ TEST_F(DashTest, SegmentFull) {
   uint32_t probe = segment_.GetBucket(0).GetProbe(true);
 
   EXPECT_EQ((1 << 12) - 1, busy);  // Size 12
-  EXPECT_EQ(539, probe);           // verified by running since the test is determenistic.
+  EXPECT_EQ(539, probe);           // verified by running since the test is deterministic.
 
   unsigned keys[12] = {8045, 8085, 8217, 8330, 8337, 8381, 8432, 8506, 8587, 8605, 8612, 8725};
   for (unsigned i = 0; i < 12; ++i) {

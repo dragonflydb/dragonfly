@@ -29,6 +29,7 @@ struct Metrics {
   TieredStats tiered_stats;
   EngineShard::Stats shard_stats;
 
+  size_t uptime = 0;
   size_t qps = 0;
   size_t heap_used_bytes = 0;
   size_t heap_comitted_bytes = 0;
@@ -113,7 +114,7 @@ class ServerFamily {
 
   boost::fibers::fiber load_fiber_;
 
-  uint32_t task_10ms_ = 0;
+  uint32_t stats_caching_task_ = 0;
   Service& service_;
 
   util::AcceptServer* acceptor_ = nullptr;

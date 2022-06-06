@@ -32,6 +32,9 @@ using facade::ArgS;
 using ArgSlice = absl::Span<const std::string_view>;
 using StringVec = std::vector<std::string>;
 
+// keys are RDB_TYPE_xxx constants.
+using RdbTypeFreqMap = absl::flat_hash_map<unsigned, size_t>;
+
 constexpr DbIndex kInvalidDbId = DbIndex(-1);
 constexpr ShardId kInvalidSid = ShardId(-1);
 constexpr DbIndex kMaxDbId = 1024;  // Reasonable starting point.

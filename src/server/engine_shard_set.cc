@@ -21,6 +21,12 @@ extern "C" {
 using namespace std;
 
 ABSL_FLAG(string, backing_prefix, "", "");
+
+ABSL_FLAG(uint32_t, hz, 1000,
+          "Base frequency at which the server updates its expiry clock "
+          "and performs other background tasks. Warning: not advised to decrease in production, "
+          "because it can affect expiry precision for PSETEX etc.");
+
 ABSL_DECLARE_FLAG(bool, cache_mode);
 
 namespace dfly {
@@ -28,6 +34,7 @@ namespace dfly {
 using namespace util;
 namespace this_fiber = ::boost::this_fiber;
 namespace fibers = ::boost::fibers;
+using absl::GetFlag;
 
 namespace {
 
@@ -48,16 +55,18 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
 
 EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap)
     : queue_(kQueueLen), txq_([](const Transaction* t) { return t->txid(); }), mi_resource_(heap),
-      db_slice_(pb->GetIndex(), absl::GetFlag(FLAGS_cache_mode), this) {
+      db_slice_(pb->GetIndex(), GetFlag(FLAGS_cache_mode), this) {
   fiber_q_ = fibers::fiber([this, index = pb->GetIndex()] {
     this_fiber::properties<FiberProps>().set_name(absl::StrCat("shard_queue", index));
     queue_.Run();
   });
 
   if (update_db_time) {
-    constexpr uint32_t kClockCycleMs = 1;
+    uint32_t clock_cycle_ms = 1000 / std::max<uint32_t>(1, GetFlag(FLAGS_hz));
+    if (clock_cycle_ms == 0)
+      clock_cycle_ms = 1;
 
-    periodic_task_ = pb->AddPeriodic(kClockCycleMs, [this] { Heartbeat(); });
+    periodic_task_ = pb->AddPeriodic(clock_cycle_ms, [this] { Heartbeat(); });
   }
 
   tmp_str1 = sdsempty();
@@ -92,7 +101,7 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
   CompactObj::InitThreadLocal(shard_->memory_resource());
   SmallString::InitThreadLocal(data_heap);
 
-  string backing_prefix = absl::GetFlag(FLAGS_backing_prefix);
+  string backing_prefix = GetFlag(FLAGS_backing_prefix);
   if (!backing_prefix.empty()) {
     string fn =
         absl::StrCat(backing_prefix, "-", absl::Dec(pb->GetIndex(), absl::kZeroPad4), ".ssd");

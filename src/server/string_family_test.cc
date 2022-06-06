@@ -240,7 +240,7 @@ TEST_F(StringFamilyTest, SingleShard) {
 }
 
 TEST_F(StringFamilyTest, MSetIncr) {
-  /*  serialzable orders
+  /*  serializable orders
    init: x=z=0
 
    mset x=z=1

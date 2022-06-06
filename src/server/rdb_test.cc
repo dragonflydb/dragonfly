@@ -9,7 +9,6 @@ extern "C" {
 }
 
 #include <absl/flags/reflection.h>
-
 #include <mimalloc.h>
 
 #include "base/flags.h"
@@ -26,8 +25,8 @@ using namespace testing;
 using namespace std;
 using namespace util;
 using namespace facade;
-using absl::StrCat;
 using absl::SetFlag;
+using absl::StrCat;
 
 ABSL_DECLARE_FLAG(int32, list_compress_depth);
 ABSL_DECLARE_FLAG(int32, list_max_listpack_size);
@@ -85,7 +84,11 @@ TEST_F(RdbTest, LoadEmpty) {
 TEST_F(RdbTest, LoadSmall6) {
   io::FileSource fs = GetSource("redis6_small.rdb");
   RdbLoader loader(service_->script_mgr());
-  auto ec = loader.Load(&fs);
+
+  // must run in proactor thread in order to avoid polluting the serverstate
+  // in the main, testing thread.
+  auto ec = pp_->at(0)->Await([&] { return loader.Load(&fs); });
+
   ASSERT_FALSE(ec) << ec.message();
 
   auto resp = Run({"scan", "0"});
@@ -215,6 +218,14 @@ TEST_F(RdbTest, SaveManyDbs) {
   ASSERT_EQ(2, metrics.db.size());
   EXPECT_EQ(50000, metrics.db[0].key_count);
   EXPECT_EQ(10000, metrics.db[1].key_count);
+  if (metrics.db[1].key_count != 10000) {
+    Run({"select", "1"});
+    resp = Run({"scan", "0", "match", "ab*"});
+    StringVec vec = StrArray(resp.GetVec()[1]);
+    for (const auto& s: vec) {
+      LOG(ERROR) << "Bad key: " << s;
+    }
+  }
 }
 
 }  // namespace dfly

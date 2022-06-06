@@ -33,9 +33,9 @@ extern "C" {
 #include "server/replica.h"
 #include "server/script_mgr.h"
 #include "server/server_state.h"
-#include "server/version.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
+#include "server/version.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
 #include "util/uring/uring_file.h"
@@ -48,6 +48,7 @@ ABSL_FLAG(string, requirepass, "", "password for AUTH authentication");
 
 ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
+ABSL_DECLARE_FLAG(uint32_t, hz);
 
 extern "C" mi_stats_t _mi_stats_main;
 
@@ -56,10 +57,10 @@ namespace dfly {
 using namespace util;
 namespace fibers = ::boost::fibers;
 namespace fs = std::filesystem;
+using absl::GetFlag;
 using absl::StrCat;
 using facade::MCReplyBuilder;
 using strings::HumanReadableNumBytes;
-using absl::GetFlag;
 
 namespace {
 
@@ -170,7 +171,10 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
       used_mem_peak.store(sum, memory_order_relaxed);
   };
 
-  task_10ms_ = pb_task_->AwaitBrief([&] { return pb_task_->AddPeriodic(10, cache_cb); });
+  uint32_t cache_hz = max(GetFlag(FLAGS_hz) / 10, 1u);
+  uint32_t period_ms = max(1u, 1000 / cache_hz);
+  stats_caching_task_ =
+      pb_task_->AwaitBrief([&] { return pb_task_->AddPeriodic(period_ms, cache_cb); });
 
   fs::path data_folder = fs::current_path();
   const auto& dir = GetFlag(FLAGS_dir);
@@ -197,8 +201,8 @@ void ServerFamily::Shutdown() {
     load_fiber_.join();
 
   pb_task_->Await([this] {
-    pb_task_->CancelPeriodic(task_10ms_);
-    task_10ms_ = 0;
+    pb_task_->CancelPeriodic(stats_caching_task_);
+    stats_caching_task_ = 0;
 
     unique_lock lk(replicaof_mu_);
     if (replica_) {
@@ -228,7 +232,7 @@ void ServerFamily::Load(const std::string& load_path) {
 #if 0
   auto& pool = service_.proactor_pool();
 
-  // Deliberitely run on all I/O threads to update the state for non-shard threads as well.
+  // Deliberately run on all I/O threads to update the state for non-shard threads as well.
   pool.Await([&](ProactorBase*) {
     // TODO: There can be a bug where status is different.
     CHECK(ServerState::tlocal()->gstate() == GlobalState::IDLE);
@@ -266,8 +270,128 @@ error_code ServerFamily::LoadRdb(const std::string& rdb_file) {
   return ec;
 }
 
-void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
+enum MetricType { COUNTER, GAUGE, SUMMARY, HISTOGRAM };
 
+const char* MetricTypeName(MetricType type) {
+  switch (type) {
+    case MetricType::COUNTER:
+      return "counter";
+    case MetricType::GAUGE:
+      return "gauge";
+    case MetricType::SUMMARY:
+      return "summary";
+    case MetricType::HISTOGRAM:
+      return "histogram";
+  }
+  return "unknown";
+}
+
+inline string GetMetricFullName(string_view metric_name) {
+  return StrCat("dragonfly_", metric_name);
+}
+
+void AppendMetricHeader(string_view metric_name, string_view metric_help, MetricType type,
+                        string* dest) {
+  const auto full_metric_name = GetMetricFullName(metric_name);
+  absl::StrAppend(dest, "# HELP ", full_metric_name, " ", metric_help, "\n");
+  absl::StrAppend(dest, "# TYPE ", full_metric_name, " ", MetricTypeName(type), "\n");
+}
+
+void AppendLabelTupple(absl::Span<const string_view> label_names,
+                       absl::Span<const string_view> label_values, string* dest) {
+  if (label_names.empty())
+    return;
+
+  absl::StrAppend(dest, "{");
+  for (size_t i = 0; i < label_names.size(); ++i) {
+    if (i > 0) {
+      absl::StrAppend(dest, ", ");
+    }
+    absl::StrAppend(dest, label_names[i], "=\"", label_values[i], "\"");
+  }
+
+  absl::StrAppend(dest, "}");
+}
+
+void AppendMetricValue(string_view metric_name, const absl::AlphaNum& value,
+                       absl::Span<const string_view> label_names,
+                       absl::Span<const string_view> label_values, string* dest) {
+  absl::StrAppend(dest, GetMetricFullName(metric_name));
+  AppendLabelTupple(label_names, label_values, dest);
+  absl::StrAppend(dest, " ", value, "\n");
+}
+
+void AppendMetricWithoutLabels(string_view name, string_view help, const absl::AlphaNum& value,
+                               MetricType type, string* dest) {
+  AppendMetricHeader(name, help, type, dest);
+  AppendMetricValue(name, value, {}, {}, dest);
+}
+
+void PrintPrometheusMetrics(const Metrics& m, http::StringResponse* resp) {
+  // Server metrics
+  AppendMetricWithoutLabels("up", "", 1, MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("uptime_in_seconds", "", m.uptime, MetricType::GAUGE, &resp->body());
+
+  // Clients metrics
+  AppendMetricWithoutLabels("connected_clients", "", m.conn_stats.num_conns, MetricType::GAUGE,
+                            &resp->body());
+  AppendMetricWithoutLabels("client_read_buf_capacity", "", m.conn_stats.read_buf_capacity,
+                            MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("blocked_clients", "", m.conn_stats.num_blocked_clients,
+                            MetricType::GAUGE, &resp->body());
+
+  // Memory metrics
+  AppendMetricWithoutLabels("memory_used_bytes", "", m.heap_used_bytes, MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("memory_used_peak_bytes", "", used_mem_peak.load(memory_order_relaxed),
+                            MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("comitted_memory", "", _mi_stats_main.committed.current,
+                            MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("memory_max_bytes", "", max_memory_limit, MetricType::GAUGE, &resp->body());
+
+  AppendMetricWithoutLabels("commands_processed_total", "", m.conn_stats.command_cnt,
+                            MetricType::COUNTER, &resp->body());
+
+  // Net metrics
+  AppendMetricWithoutLabels("net_input_bytes_total", "", m.conn_stats.io_read_bytes,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("net_output_bytes_total", "", m.conn_stats.io_write_bytes,
+                            MetricType::COUNTER, &resp->body());
+
+  // DB stats
+  AppendMetricWithoutLabels("expired_keys_total", "", m.events.expired_keys, MetricType::COUNTER,
+                            &resp->body());
+  AppendMetricWithoutLabels("evicted_keys_total", "", m.events.evicted_keys, MetricType::COUNTER,
+                            &resp->body());
+
+  string db_key_metrics;
+  string db_key_expire_metrics;
+
+  AppendMetricHeader("db_keys", "Total number of keys by DB", MetricType::GAUGE, &db_key_metrics);
+  AppendMetricHeader("db_keys_expiring", "Total number of expiring keys by DB", MetricType::GAUGE,
+                     &db_key_expire_metrics);
+
+  for (size_t i = 0; i < m.db.size(); ++i) {
+    AppendMetricValue("db_keys", m.db[i].key_count, {"db"}, {StrCat("db", i)}, &db_key_metrics);
+    AppendMetricValue("db_keys_expiring", m.db[i].expire_count, {"db"}, {StrCat("db", i)},
+                      &db_key_expire_metrics);
+  }
+
+  absl::StrAppend(&resp->body(), db_key_metrics);
+  absl::StrAppend(&resp->body(), db_key_expire_metrics);
+}
+
+void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
+  // The naming of the metrics should be compatible with redis_exporter, see
+  // https://github.com/oliver006/redis_exporter/blob/master/exporter/exporter.go#L111
+
+  auto cb = [this](const http::QueryArgs& args, HttpContext* send) {
+    http::StringResponse resp = http::MakeStringResponse(boost::beast::http::status::ok);
+    PrintPrometheusMetrics(this->GetMetrics(), &resp);
+
+    return send->Invoke(std::move(resp));
+  };
+
+  http_base->RegisterCb("/metrics", cb);
 }
 
 void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* cntx) {
@@ -279,7 +403,6 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
 #define ADD_LINE(name, val) absl::StrAppend(&info, "STAT " #name " ", val, "\r\n")
 
   time_t now = time(NULL);
-  size_t uptime = now - start_time_;
   struct rusage ru;
   getrusage(RUSAGE_SELF, &ru);
 
@@ -293,7 +416,7 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
   Metrics m = GetMetrics();
 
   ADD_LINE(pid, getpid());
-  ADD_LINE(uptime, uptime);
+  ADD_LINE(uptime, m.uptime);
   ADD_LINE(time, now);
   ADD_LINE(version, kGitTag);
   ADD_LINE(libevent, "iouring");
@@ -597,6 +720,7 @@ Metrics ServerFamily::GetMetrics() const {
 
     lock_guard<fibers::mutex> lk(mu);
 
+    result.uptime = time(NULL) - this->start_time_;
     result.conn_stats += ss->connection_stats;
     result.qps += uint64_t(ss->MovingSum6());
 
@@ -648,6 +772,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   };
 
 #define ADD_HEADER(x) absl::StrAppend(&info, x "\r\n")
+  Metrics m = GetMetrics();
 
   if (should_enter("SERVER")) {
     ADD_HEADER("# Server");
@@ -658,12 +783,11 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("multiplexing_api", "iouring");
     append("tcp_port", GetFlag(FLAGS_port));
 
-    size_t uptime = time(NULL) - start_time_;
+    size_t uptime = m.uptime;
     append("uptime_in_seconds", uptime);
     append("uptime_in_days", uptime / (3600 * 24));
   }
 
-  Metrics m = GetMetrics();
   auto sdata_res = io::ReadStatusInfo();
 
   DbStats total;

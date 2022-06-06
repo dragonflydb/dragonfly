@@ -94,6 +94,8 @@ class Service : public facade::ServiceInterface {
   void Publish(CmdArgList args, ConnectionContext* cntx);
   void Subscribe(CmdArgList args, ConnectionContext* cntx);
   void Unsubscribe(CmdArgList args, ConnectionContext* cntx);
+  void PSubscribe(CmdArgList args, ConnectionContext* cntx);
+  void PUnsubscribe(CmdArgList args, ConnectionContext* cntx);
   void Function(CmdArgList args, ConnectionContext* cntx);
 
   struct EvalArgs {
@@ -113,6 +115,7 @@ class Service : public facade::ServiceInterface {
   ServerFamily server_family_;
   CommandRegistry registry_;
   absl::flat_hash_map<std::string, unsigned> unknown_cmds_;
+
   mutable ::boost::fibers::mutex mu_;
 
   GlobalState global_state_ = GlobalState::ACTIVE;  // protected by mu_;

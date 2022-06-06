@@ -88,7 +88,7 @@ git clone --recursive https://github.com/dragonflydb/dragonfly && cd dragonfly
 
 # to install dependencies
 sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
-     autoconf-archive libtool
+     autoconf-archive libtool cmake g++
 
 # Configure the build
 ./helio/blaze.sh -release
@@ -268,15 +268,15 @@ API 2.0
   - [X] HSETNX
   - [X] HVALS
   - [X] HSCAN
-- [ ] PubSub family
+- [X] PubSub family
   - [X] PUBLISH
   - [ ] PUBSUB
   - [ ] PUBSUB CHANNELS
   - [X] SUBSCRIBE
   - [X] UNSUBSCRIBE
-  - [ ] PSUBSCRIBE
-  - [ ] PUNSUBSCRIBE
-- [ ] Server Family
+  - [X] PSUBSCRIBE
+  - [X] PUNSUBSCRIBE
+- [X] Server Family
   - [ ] WATCH
   - [ ] UNWATCH
   - [X] DISCARD
@@ -324,7 +324,7 @@ API 2.0
   - [ ] PFCOUNT
   - [ ] PFMERGE
 
-Memchache API
+Memcache API
 - [X] set
 - [X] get
 - [X] replace
@@ -382,6 +382,8 @@ the protocol  automatically during the connection initiation. Go ahead and try i
 Right now it does not have much info but in the future we are planning to add there useful
 debugging and management info. If you go to `:6379/metrics` url you will see some prometheus
 compatible metrics.
+
+The Prometheus exported metrics are compatible with the Grafana dashboard [see here](examples/grafana/dashboard.json). 
 
 Important! Http console is meant to be accessed within a safe network.
 If you expose Dragonfly's TCP port externally, it is advised to disable the console

@@ -897,38 +897,37 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&] { return EngineShard::tlocal()->channel_slice().FetchSubscribers(channel); };
 
-  vector<ChannelSlice::Subscriber> subsriber_arr = shard_set->Await(sid, std::move(cb));
+  vector<ChannelSlice::Subscriber> subscriber_arr = shard_set->Await(sid, std::move(cb));
   atomic_uint32_t published{0};
 
-  if (!subsriber_arr.empty()) {
-    sort(subsriber_arr.begin(), subsriber_arr.end(),
+  if (!subscriber_arr.empty()) {
+    sort(subscriber_arr.begin(), subscriber_arr.end(),
          [](const auto& left, const auto& right) { return left.thread_id < right.thread_id; });
 
     vector<unsigned> slices(shard_set->pool()->size(), UINT_MAX);
-    for (size_t i = 0; i < subsriber_arr.size(); ++i) {
-      if (slices[subsriber_arr[i].thread_id] > i) {
-        slices[subsriber_arr[i].thread_id] = i;
+    for (size_t i = 0; i < subscriber_arr.size(); ++i) {
+      if (slices[subscriber_arr[i].thread_id] > i) {
+        slices[subscriber_arr[i].thread_id] = i;
       }
     }
 
-    fibers_ext::BlockingCounter bc(subsriber_arr.size());
-    char prefix[] = "*3\r\n$7\r\nmessage\r\n$";
-    char msg_size[32] = {0};
-    char channel_size[32] = {0};
-    absl::SNPrintF(msg_size, sizeof(msg_size), "%u\r\n", message.size());
-    absl::SNPrintF(channel_size, sizeof(channel_size), "%u\r\n", channel.size());
-
-    string_view msg_arr[] = {prefix, channel_size, channel, "\r\n$", msg_size, message, "\r\n"};
-
+    fibers_ext::BlockingCounter bc(subscriber_arr.size());
     auto publish_cb = [&, bc](unsigned idx, util::ProactorBase*) mutable {
       unsigned start = slices[idx];
 
-      for (unsigned i = start; i < subsriber_arr.size(); ++i) {
-        if (subsriber_arr[i].thread_id != idx)
+      for (unsigned i = start; i < subscriber_arr.size(); ++i) {
+        const ChannelSlice::Subscriber& subscriber = subscriber_arr[i];
+        if (subscriber.thread_id != idx)
           break;
 
         published.fetch_add(1, memory_order_relaxed);
-        subsriber_arr[i].conn_cntx->owner()->SendMsgVecAsync(msg_arr, bc);
+        facade::Connection* conn = subscriber_arr[i].conn_cntx->owner();
+        DCHECK(conn);
+        facade::Connection::PubMessage pmsg;
+        pmsg.channel = channel;
+        pmsg.message = message;
+        pmsg.pattern = subscriber.pattern;
+        conn->SendMsgVecAsync(pmsg, bc);
       }
     };
 
@@ -937,10 +936,10 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
     bc.Wait();  // Wait for all the messages to be sent.
   }
 
-  // If subsriber connections are closing they will wait
+  // If subscriber connections are closing they will wait
   // for the tokens to be reclaimed in OnClose(). This guarantees that subscribers we gathered
   // still exist till we finish publishing.
-  for (auto& s : subsriber_arr) {
+  for (auto& s : subscriber_arr) {
     s.borrow_token.Dec();
   }
 
@@ -957,6 +956,17 @@ void Service::Unsubscribe(CmdArgList args, ConnectionContext* cntx) {
   args.remove_prefix(1);
 
   cntx->ChangeSubscription(false, true, std::move(args));
+}
+
+void Service::PSubscribe(CmdArgList args, ConnectionContext* cntx) {
+  args.remove_prefix(1);
+  cntx->ChangePSub(true, true, args);
+}
+
+void Service::PUnsubscribe(CmdArgList args, ConnectionContext* cntx) {
+  args.remove_prefix(1);
+
+  cntx->ChangePSub(false, true, args);
 }
 
 // Not a real implementation. Serves as a decorator to accept some function commands
@@ -1024,6 +1034,8 @@ void Service::RegisterCommands() {
             << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, 0}.MFUNC(Publish)
             << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(Subscribe)
             << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(Unsubscribe)
+            << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(PSubscribe)
+            << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(PUnsubscribe)
             << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0}.MFUNC(Function);
 
   StringFamily::Register(&registry_);

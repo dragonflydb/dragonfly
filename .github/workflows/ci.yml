@@ -43,9 +43,9 @@ jobs:
         path: |
           ~/.ccache
           ${{github.workspace}}/build/_deps
-        key: ${{ runner.os }}-deps-${{ github.sha }}
+        key: ${{ runner.os }}-deps-${{ github.base_ref }}-${{ github.sha }}
         restore-keys: |
-          ${{ runner.os }}-deps-
+          ${{ runner.os }}-deps-${{ github.base_ref }}-
           
     - name: Configure CMake
       # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
@@ -62,5 +62,5 @@ jobs:
           GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1 ctest -V -R rdb_test
           echo Run ctest -V -L DFLY
           #GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1 
-          GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1 ctest -V -L DFLY
+          GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=2,snapshot=2 ctest -V -L DFLY
           # GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1 CTEST_OUTPUT_ON_FAILURE=1 ninja server/test
