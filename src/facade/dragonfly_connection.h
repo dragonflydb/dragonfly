@@ -70,6 +70,7 @@ class Connection : public util::Connection {
   }
 
   std::string GetClientInfo() const;
+  uint32 GetClientId() const;
 
  protected:
   void OnShutdown() override;

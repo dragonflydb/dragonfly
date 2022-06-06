@@ -13,4 +13,6 @@ const char kGitSha[] = "@GIT_SHA1@";
 const char kGitClean[] = "@GIT_CLEAN_DIRTY@";
 const char kBuildTime[] = "@PRJ_BUILD_TIME@";
 
+const char* GetVersion() { return "df-@GIT_VER@"; }
+
 }  // namespace dfly
