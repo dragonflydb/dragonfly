@@ -181,7 +181,6 @@ API 1.0
   - [X] EXEC
   - [X] FLUSHALL
   - [X] FLUSHDB
-  - [X] HELLO
   - [X] INFO
   - [X] MULTI
   - [X] SHUTDOWN
