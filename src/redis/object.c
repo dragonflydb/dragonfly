@@ -38,6 +38,7 @@
 #include "listpack.h"
 #include "object.h"
 #include "redis_aux.h"
+#include "stream.h"
 #include "zset.h"
 #include "quicklist.h"
 #include "util.h"
@@ -286,13 +287,14 @@ robj *createZsetListpackObject(void) {
     return o;
 }
 
-#if ROMAN_ENABLE
 robj *createStreamObject(void) {
     stream *s = streamNew();
     robj *o = createObject(OBJ_STREAM,s);
     o->encoding = OBJ_ENCODING_STREAM;
     return o;
 }
+
+#if ROMAN_ENABLE
 
 robj *createModuleObject(moduleType *mt, void *value) {
     moduleValue *mv = zmalloc(sizeof(*mv));

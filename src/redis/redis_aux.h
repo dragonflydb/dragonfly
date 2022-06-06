@@ -96,6 +96,9 @@ typedef struct ServerStub {
     int sanitize_dump_payload;      /* Enables deep sanitization for ziplist and listpack in RDB and RESTORE. */
     long long stat_dump_payload_sanitizations; /* Number deep dump payloads integrity validations. */
     off_t loading_rdb_used_mem;
+
+    size_t stream_node_max_bytes;
+    long long stream_node_max_entries;
 } Server;
 
 
