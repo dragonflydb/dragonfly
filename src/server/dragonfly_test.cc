@@ -294,6 +294,20 @@ TEST_F(DflyEngineTest, EvalResp) {
   EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(5), "foo", "17.5"));
 }
 
+TEST_F(DflyEngineTest, Hello) {
+  auto resp_no_param = Run({"hello"});
+  ASSERT_THAT(resp_no_param, ArrLen(12));
+
+  auto resp = Run({"hello", "2"});
+  ASSERT_THAT(resp, ArrLen(12));
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("server", "redis", "version", "df-dev", "proto",
+                          IntArg(2), "id", ArgType(RespExpr::INT64), "mode",
+                          "standalone", "role", "master"));
+
+  EXPECT_THAT(Run({"hello", "3"}), ErrArg("ERR NOPROTO unsupported protocol"));
+}
+
 TEST_F(DflyEngineTest, EvalSha) {
   auto resp = Run({"script", "load", "return 5"});
   EXPECT_THAT(resp, ArgType(RespExpr::STRING));
