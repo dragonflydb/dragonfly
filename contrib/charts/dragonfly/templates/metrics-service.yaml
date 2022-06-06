@@ -1,0 +1,18 @@
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dragonfly.fullname" . }}-metrics
+  labels:
+    {{- include "dragonfly.labels" . | nindent 4 }}
+    type: metrics
+spec:
+  type: {{ .Values.service.metrics.serviceType }}
+  ports:
+    - name: {{ .Values.service.metrics.portName }}
+      port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.port }}
+      protocol: TCP
+  selector:
+    {{- include "dragonfly.selectorLabels" . | nindent 4 }}
+{{- end }}
