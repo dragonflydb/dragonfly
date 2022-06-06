@@ -11,4 +11,6 @@ extern const char kGitSha[];
 extern const char kGitClean[];
 extern const char kBuildTime[];
 
+const char* GetVersion();
+
 }  // namespace dfly
