@@ -57,6 +57,7 @@ with respect to Memcached and Redis APIs.
   - [X] EXEC
   - [X] FLUSHALL
   - [X] FLUSHDB
+  - [X] HELLO
   - [X] INFO
   - [X] MULTI
   - [X] SHUTDOWN
