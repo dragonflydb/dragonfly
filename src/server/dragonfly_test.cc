@@ -426,7 +426,9 @@ TEST_F(DflyEngineTest, OOM) {
 }
 
 TEST_F(DflyEngineTest, PSubscribe) {
-  auto resp = pp_->at(1)->Await([&] { return Run({"psubscribe", "a*", "b*"}); });
+  auto resp = pp_->at(1)->Await([&] {
+    return Run({"psubscribe", "a*", "b*"});
+  });
   EXPECT_THAT(resp, ArrLen(3));
   resp = pp_->at(0)->Await([&] { return Run({"publish", "ab", "foo"}); });
   EXPECT_THAT(resp, IntArg(1));
@@ -443,7 +445,8 @@ TEST_F(DflyEngineTest, Unsubscribe) {
   EXPECT_THAT(resp.GetVec(), ElementsAre("unsubscribe", "a", IntArg(0)));
 
   resp = pp_->at(1)->Await([&] { return Run({"unsubscribe"}); });
-  EXPECT_THAT(resp.GetVec(), ElementsAre("unsubscribe", ArgType(RespExpr::NIL), IntArg(0)));
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("unsubscribe", ArgType(RespExpr::NIL), IntArg(0)));
   pp_->at(1)->Await([&] { return Run({"subscribe", "a", "b"}); });
 
   resp = pp_->at(1)->Await([&] { return Run({"unsubscribe", "a"}); });
@@ -458,7 +461,8 @@ TEST_F(DflyEngineTest, PUnsubscribe) {
   EXPECT_THAT(resp.GetVec(), ElementsAre("punsubscribe", "a*", IntArg(0)));
 
   resp = pp_->at(1)->Await([&] { return Run({"punsubscribe"}); });
-  EXPECT_THAT(resp.GetVec(), ElementsAre("punsubscribe", ArgType(RespExpr::NIL), IntArg(0)));
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("punsubscribe", ArgType(RespExpr::NIL), IntArg(0)));
   pp_->at(1)->Await([&] { return Run({"psubscribe", "a*", "b*"}); });
 
   resp = pp_->at(1)->Await([&] { return Run({"punsubscribe", "a*"}); });
