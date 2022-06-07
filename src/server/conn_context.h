@@ -58,6 +58,10 @@ struct ConnectionState {
       return channels.empty() && patterns.empty();
     }
 
+    unsigned SubscriptionCount() const {
+      return channels.size() + patterns.size();
+    }
+
     SubscribeInfo() : borrow_token(0) {
     }
   };

@@ -38,7 +38,7 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
       }
 
       if (to_reply)
-        result[i] = conn_state.subscribe_info->channels.size();
+        result[i] = conn_state.subscribe_info->SubscriptionCount();
 
       if (res) {
         ShardId sid = Shard(channel, shard_set->size());
@@ -132,7 +132,7 @@ void ConnectionContext::ChangePSub(bool to_add, bool to_reply, CmdArgList args) 
       }
 
       if (to_reply)
-        result[i] = conn_state.subscribe_info->patterns.size();
+        result[i] = conn_state.subscribe_info->SubscriptionCount();
 
       if (res) {
         patterns.emplace_back(pattern);
