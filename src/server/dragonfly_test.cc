@@ -438,6 +438,35 @@ TEST_F(DflyEngineTest, PSubscribe) {
   EXPECT_EQ("ab", msg.channel);
   EXPECT_EQ("a*", msg.pattern);
 }
+TEST_F(DflyEngineTest, Unsubscribe) {
+  auto resp = pp_->at(1)->Await([&] { return Run({"unsubscribe", "a"}); });
+  EXPECT_THAT(resp.GetVec(), ElementsAre("unsubscribe", "a", IntArg(0)));
+
+  resp = pp_->at(1)->Await([&] { return Run({"unsubscribe"}); });
+  EXPECT_THAT(resp.GetVec(), ElementsAre("unsubscribe", ArgType(RespExpr::NIL), IntArg(0)));
+  pp_->at(1)->Await([&] { return Run({"subscribe", "a", "b"}); });
+
+  resp = pp_->at(1)->Await([&] { return Run({"unsubscribe", "a"}); });
+  EXPECT_THAT(resp.GetVec(), ElementsAre("unsubscribe", "a", IntArg(1)));
+
+  resp = pp_->at(1)->Await([&] { return Run({"unsubscribe"}); });
+  EXPECT_THAT(resp.GetVec(), ElementsAre("unsubscribe", "b", IntArg(0)));
+}
+
+TEST_F(DflyEngineTest, PUnsubscribe) {
+  auto resp = pp_->at(1)->Await([&] { return Run({"punsubscribe", "a*"}); });
+  EXPECT_THAT(resp.GetVec(), ElementsAre("punsubscribe", "a*", IntArg(0)));
+
+  resp = pp_->at(1)->Await([&] { return Run({"punsubscribe"}); });
+  EXPECT_THAT(resp.GetVec(), ElementsAre("punsubscribe", ArgType(RespExpr::NIL), IntArg(0)));
+  pp_->at(1)->Await([&] { return Run({"psubscribe", "a*", "b*"}); });
+
+  resp = pp_->at(1)->Await([&] { return Run({"punsubscribe", "a*"}); });
+  EXPECT_THAT(resp.GetVec(), ElementsAre("punsubscribe", "a*", IntArg(1)));
+
+  resp = pp_->at(1)->Await([&] { return Run({"punsubscribe"}); });
+  EXPECT_THAT(resp.GetVec(), ElementsAre("punsubscribe", "b*", IntArg(0)));
+}
 
 // TODO: to test transactions with a single shard since then all transactions become local.
 // To consider having a parameter in dragonfly engine controlling number of shards
