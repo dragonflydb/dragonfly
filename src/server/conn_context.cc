@@ -175,8 +175,7 @@ void ConnectionContext::ChangePSub(bool to_add, bool to_reply, CmdArgList args) 
   }
 }
 void ConnectionContext::UnsubscribeAll(bool to_reply) {
-  if (to_reply && (!conn_state.subscribe_info ||
-                   conn_state.subscribe_info->channels.empty())) {
+  if (to_reply && (!conn_state.subscribe_info || conn_state.subscribe_info->channels.empty())) {
     return SendSubscriptionChangedResponse("unsubscribe", std::nullopt, 0);
   }
   StringVec channels(conn_state.subscribe_info->channels.begin(),
@@ -184,12 +183,10 @@ void ConnectionContext::UnsubscribeAll(bool to_reply) {
   CmdArgVec arg_vec(channels.begin(), channels.end());
 
   ChangeSubscription(false, to_reply, CmdArgList{arg_vec});
-
 }
 
 void ConnectionContext::PUnsubscribeAll(bool to_reply) {
-  if (to_reply && (!conn_state.subscribe_info ||
-                   conn_state.subscribe_info->patterns.empty())) {
+  if (to_reply && (!conn_state.subscribe_info || conn_state.subscribe_info->patterns.empty())) {
     return SendSubscriptionChangedResponse("punsubscribe", std::nullopt, 0);
   }
 
@@ -197,17 +194,18 @@ void ConnectionContext::PUnsubscribeAll(bool to_reply) {
                      conn_state.subscribe_info->patterns.end());
   CmdArgVec arg_vec(patterns.begin(), patterns.end());
   ChangePSub(false, to_reply, CmdArgList{arg_vec});
-
 }
 
-void ConnectionContext::SendSubscriptionChangedResponse(
-    string_view action, std::optional<string_view> topic, unsigned count) {
+void ConnectionContext::SendSubscriptionChangedResponse(string_view action,
+                                                        std::optional<string_view> topic,
+                                                        unsigned count) {
   (*this)->StartArray(3);
   (*this)->SendBulkString(action);
   topic.has_value() ? (*this)->SendBulkString(topic.value())
                     : (*this)->SendNull();
   (*this)->SendLong(count);
 }
+
 void ConnectionContext::OnClose() {
   if (!conn_state.subscribe_info) return;
 
