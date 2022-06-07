@@ -16,6 +16,7 @@ pwd
 
 cd build-opt 
 ninja dragonfly && ldd dragonfly
+./dragonfly --version
 mv dragonfly $NAME
 tar cvfz $NAME.unstripped.tar.gz $NAME ../LICENSE.md
 strip $NAME

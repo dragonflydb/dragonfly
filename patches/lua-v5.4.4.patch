@@ -12,10 +12,10 @@ index d42d14b7..75647e72 100644
  #define LUAI_MAXSTACK		15000
  #endif
 diff --git a/makefile b/makefile
-index d46e650c..52d8d57b 100644
+index d46e650c..e347e614 100644
 --- a/makefile
 +++ b/makefile
-@@ -66,9 +66,9 @@ LOCAL = $(TESTS) $(CWARNS)
+@@ -66,13 +66,21 @@ LOCAL = $(TESTS) $(CWARNS)
  
  
  # enable Linux goodies
@@ -25,5 +25,18 @@ index d46e650c..52d8d57b 100644
 -MYLIBS= -ldl -lreadline
 +MYLIBS= -ldl
  
++uname_m := $(shell uname -m)
++ifeq ($(uname_m),x86_64)
++OPTFLAGS= -march=broadwell
++else ifeq ($(uname_m), aarch64)
++OPTFLAGS= -march=armv8.2-a+fp16+rcpc+dotprod+crypto
++else
++  $(error ERROR: unknown architecture $(uname_m))
++endif
  
  CC= gcc
+-CFLAGS= -Wall -O2 $(MYCFLAGS) -fno-stack-protector -fno-common -march=native
++CFLAGS= -Wall -O2 $(MYCFLAGS) -fno-stack-protector -fno-common $(OPTFLAGS)
+ AR= ar rc
+ RANLIB= ranlib
+ RM= rm -f
