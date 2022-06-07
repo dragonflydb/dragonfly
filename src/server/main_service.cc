@@ -955,7 +955,11 @@ void Service::Subscribe(CmdArgList args, ConnectionContext* cntx) {
 void Service::Unsubscribe(CmdArgList args, ConnectionContext* cntx) {
   args.remove_prefix(1);
 
-  cntx->ChangeSubscription(false, true, std::move(args));
+  if (args.size() == 0){
+    cntx->UnsubscribeAll(true);
+  }else{
+    cntx->ChangeSubscription(false, true, std::move(args));
+  }
 }
 
 void Service::PSubscribe(CmdArgList args, ConnectionContext* cntx) {
@@ -966,7 +970,11 @@ void Service::PSubscribe(CmdArgList args, ConnectionContext* cntx) {
 void Service::PUnsubscribe(CmdArgList args, ConnectionContext* cntx) {
   args.remove_prefix(1);
 
-  cntx->ChangePSub(false, true, args);
+  if (args.size() == 0) {
+    cntx->PUnsubscribeAll(true);
+  } else {
+    cntx->ChangePSub(false, true, args);
+  }
 }
 
 // Not a real implementation. Serves as a decorator to accept some function commands

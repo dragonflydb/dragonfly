@@ -92,8 +92,15 @@ class ConnectionContext : public facade::ConnectionContext {
 
   void ChangeSubscription(bool to_add, bool to_reply, CmdArgList args);
   void ChangePSub(bool to_add, bool to_reply, CmdArgList args);
+  void UnsubscribeAll(bool to_reply);
+  void PUnsubscribeAll(bool to_reply);
 
   bool is_replicating = false;
+
+ private:
+  void SendSubscriptionChangedResponse(std::string_view action,
+                                       std::optional<std::string_view> topic,
+                                       unsigned count);
 };
 
 }  // namespace dfly

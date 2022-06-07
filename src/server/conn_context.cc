@@ -165,42 +165,63 @@ void ConnectionContext::ChangePSub(bool to_add, bool to_reply, CmdArgList args) 
 
   if (to_reply) {
     const char* action[2] = {"punsubscribe", "psubscribe"};
+    if (result.size() == 0) {
+      return SendSubscriptionChangedResponse(action[to_add], std::nullopt, 0);
+    }
 
     for (size_t i = 0; i < result.size(); ++i) {
-      (*this)->StartArray(3);
-      (*this)->SendBulkString(action[to_add]);
-      (*this)->SendBulkString(ArgS(args, i));
-      (*this)->SendLong(result[i]);
+      SendSubscriptionChangedResponse(action[to_add], ArgS(args, i), result[i]);
     }
   }
 }
+void ConnectionContext::UnsubscribeAll(bool to_reply) {
+  if (to_reply && (!conn_state.subscribe_info ||
+                   conn_state.subscribe_info->channels.empty())) {
+    return SendSubscriptionChangedResponse("unsubscribe", std::nullopt, 0);
+  }
+  StringVec channels(conn_state.subscribe_info->channels.begin(),
+                     conn_state.subscribe_info->channels.end());
+  CmdArgVec arg_vec(channels.begin(), channels.end());
 
+  ChangeSubscription(false, to_reply, CmdArgList{arg_vec});
+
+}
+
+void ConnectionContext::PUnsubscribeAll(bool to_reply) {
+  if (to_reply && (!conn_state.subscribe_info ||
+                   conn_state.subscribe_info->patterns.empty())) {
+    return SendSubscriptionChangedResponse("punsubscribe", std::nullopt, 0);
+  }
+
+  StringVec patterns(conn_state.subscribe_info->patterns.begin(),
+                     conn_state.subscribe_info->patterns.end());
+  CmdArgVec arg_vec(patterns.begin(), patterns.end());
+  ChangePSub(false, to_reply, CmdArgList{arg_vec});
+
+}
+
+void ConnectionContext::SendSubscriptionChangedResponse(
+    string_view action, std::optional<string_view> topic, unsigned count) {
+  (*this)->StartArray(3);
+  (*this)->SendBulkString(action);
+  topic.has_value() ? (*this)->SendBulkString(topic.value())
+                    : (*this)->SendNull();
+  (*this)->SendLong(count);
+}
 void ConnectionContext::OnClose() {
-  if (!conn_state.subscribe_info)
-    return;
+  if (!conn_state.subscribe_info) return;
 
   if (!conn_state.subscribe_info->channels.empty()) {
-    StringVec channels(conn_state.subscribe_info->channels.begin(),
-                       conn_state.subscribe_info->channels.end());
-    CmdArgVec arg_vec(channels.begin(), channels.end());
-
     auto token = conn_state.subscribe_info->borrow_token;
-    ChangeSubscription(false, false, CmdArgList{arg_vec});
-
+    UnsubscribeAll(false);
     // Check that all borrowers finished processing
     token.Wait();
   }
 
   if (conn_state.subscribe_info) {
     DCHECK(!conn_state.subscribe_info->patterns.empty());
-
-    StringVec patterns(conn_state.subscribe_info->patterns.begin(),
-                       conn_state.subscribe_info->patterns.end());
-    CmdArgVec arg_vec(patterns.begin(), patterns.end());
-
     auto token = conn_state.subscribe_info->borrow_token;
-    ChangePSub(false, false, CmdArgList{arg_vec});
-
+    PUnsubscribeAll(false);
     // Check that all borrowers finished processing
     token.Wait();
     DCHECK(!conn_state.subscribe_info);
