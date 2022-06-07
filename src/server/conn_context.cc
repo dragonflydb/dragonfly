@@ -201,8 +201,10 @@ void ConnectionContext::SendSubscriptionChangedResponse(string_view action,
                                                         unsigned count) {
   (*this)->StartArray(3);
   (*this)->SendBulkString(action);
-  topic.has_value() ? (*this)->SendBulkString(topic.value())
-                    : (*this)->SendNull();
+  if (topic.has_value())
+    (*this)->SendBulkString(topic.value());
+  else
+    (*this)->SendNull();
   (*this)->SendLong(count);
 }
 
