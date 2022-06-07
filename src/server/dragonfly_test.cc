@@ -441,34 +441,34 @@ TEST_F(DflyEngineTest, PSubscribe) {
   EXPECT_EQ("a*", msg.pattern);
 }
 TEST_F(DflyEngineTest, Unsubscribe) {
-  auto resp = pp_->at(1)->Await([&] { return Run({"unsubscribe", "a"}); });
+  auto resp = Run({"unsubscribe", "a"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("unsubscribe", "a", IntArg(0)));
 
-  resp = pp_->at(1)->Await([&] { return Run({"unsubscribe"}); });
-  EXPECT_THAT(resp.GetVec(),
-              ElementsAre("unsubscribe", ArgType(RespExpr::NIL), IntArg(0)));
-  pp_->at(1)->Await([&] { return Run({"subscribe", "a", "b"}); });
+  resp = Run({"unsubscribe"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("unsubscribe", ArgType(RespExpr::NIL), IntArg(0)));
 
-  resp = pp_->at(1)->Await([&] { return Run({"unsubscribe", "a"}); });
+  Run({"subscribe", "a", "b"});
+
+  resp = Run({"unsubscribe", "a"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("unsubscribe", "a", IntArg(1)));
 
-  resp = pp_->at(1)->Await([&] { return Run({"unsubscribe"}); });
+  resp = Run({"unsubscribe"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("unsubscribe", "b", IntArg(0)));
 }
 
 TEST_F(DflyEngineTest, PUnsubscribe) {
-  auto resp = pp_->at(1)->Await([&] { return Run({"punsubscribe", "a*"}); });
+  auto resp = Run({"punsubscribe", "a*"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("punsubscribe", "a*", IntArg(0)));
 
-  resp = pp_->at(1)->Await([&] { return Run({"punsubscribe"}); });
-  EXPECT_THAT(resp.GetVec(),
-              ElementsAre("punsubscribe", ArgType(RespExpr::NIL), IntArg(0)));
-  pp_->at(1)->Await([&] { return Run({"psubscribe", "a*", "b*"}); });
+  resp = Run({"punsubscribe"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("punsubscribe", ArgType(RespExpr::NIL), IntArg(0)));
 
-  resp = pp_->at(1)->Await([&] { return Run({"punsubscribe", "a*"}); });
+  Run({"psubscribe", "a*", "b*"});
+
+  resp = Run({"punsubscribe", "a*"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("punsubscribe", "a*", IntArg(1)));
 
-  resp = pp_->at(1)->Await([&] { return Run({"punsubscribe"}); });
+  resp = Run({"punsubscribe"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("punsubscribe", "b*", IntArg(0)));
 }
 
