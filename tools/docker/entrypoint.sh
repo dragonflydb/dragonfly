@@ -1,5 +1,11 @@
 #!/bin/sh
 
+# This is important in order to provide enough locked memory to dragonfly
+# when running on kernels < 5.12.
+# This line should reside before `set -e` so it could fail silently
+# in case the container runs in non-privileged mode.
+ulimit -l 65000 2> /dev/null
+
 set -e
 
 # first arg is `-some-option`
