@@ -426,7 +426,9 @@ TEST_F(DflyEngineTest, OOM) {
 }
 
 TEST_F(DflyEngineTest, PSubscribe) {
-  auto resp = pp_->at(1)->Await([&] { return Run({"psubscribe", "a*", "b*"}); });
+  auto resp = pp_->at(1)->Await([&] {
+    return Run({"psubscribe", "a*", "b*"});
+  });
   EXPECT_THAT(resp, ArrLen(3));
   resp = pp_->at(0)->Await([&] { return Run({"publish", "ab", "foo"}); });
   EXPECT_THAT(resp, IntArg(1));
@@ -437,6 +439,37 @@ TEST_F(DflyEngineTest, PSubscribe) {
   EXPECT_EQ("foo", msg.message);
   EXPECT_EQ("ab", msg.channel);
   EXPECT_EQ("a*", msg.pattern);
+}
+TEST_F(DflyEngineTest, Unsubscribe) {
+  auto resp = Run({"unsubscribe", "a"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("unsubscribe", "a", IntArg(0)));
+
+  resp = Run({"unsubscribe"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("unsubscribe", ArgType(RespExpr::NIL), IntArg(0)));
+
+  Run({"subscribe", "a", "b"});
+
+  resp = Run({"unsubscribe", "a"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("unsubscribe", "a", IntArg(1)));
+
+  resp = Run({"unsubscribe"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("unsubscribe", "b", IntArg(0)));
+}
+
+TEST_F(DflyEngineTest, PUnsubscribe) {
+  auto resp = Run({"punsubscribe", "a*"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("punsubscribe", "a*", IntArg(0)));
+
+  resp = Run({"punsubscribe"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("punsubscribe", ArgType(RespExpr::NIL), IntArg(0)));
+
+  Run({"psubscribe", "a*", "b*"});
+
+  resp = Run({"punsubscribe", "a*"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("punsubscribe", "a*", IntArg(1)));
+
+  resp = Run({"punsubscribe"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("punsubscribe", "b*", IntArg(0)));
 }
 
 // TODO: to test transactions with a single shard since then all transactions become local.

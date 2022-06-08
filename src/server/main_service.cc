@@ -955,7 +955,11 @@ void Service::Subscribe(CmdArgList args, ConnectionContext* cntx) {
 void Service::Unsubscribe(CmdArgList args, ConnectionContext* cntx) {
   args.remove_prefix(1);
 
-  cntx->ChangeSubscription(false, true, std::move(args));
+  if (args.size() == 0){
+    cntx->UnsubscribeAll(true);
+  }else{
+    cntx->ChangeSubscription(false, true, std::move(args));
+  }
 }
 
 void Service::PSubscribe(CmdArgList args, ConnectionContext* cntx) {
@@ -966,7 +970,11 @@ void Service::PSubscribe(CmdArgList args, ConnectionContext* cntx) {
 void Service::PUnsubscribe(CmdArgList args, ConnectionContext* cntx) {
   args.remove_prefix(1);
 
-  cntx->ChangePSub(false, true, args);
+  if (args.size() == 0) {
+    cntx->PUnsubscribeAll(true);
+  } else {
+    cntx->ChangePSub(false, true, args);
+  }
 }
 
 // Not a real implementation. Serves as a decorator to accept some function commands
@@ -1033,9 +1041,9 @@ void Service::RegisterCommands() {
             << CI{"EXEC", kExecMask, 1, 0, 0, 0}.MFUNC(Exec)
             << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, 0}.MFUNC(Publish)
             << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(Subscribe)
-            << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(Unsubscribe)
+            << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(Unsubscribe)
             << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(PSubscribe)
-            << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(PUnsubscribe)
+            << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(PUnsubscribe)
             << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0}.MFUNC(Function);
 
   StringFamily::Register(&registry_);
