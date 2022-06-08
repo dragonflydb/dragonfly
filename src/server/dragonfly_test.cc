@@ -301,7 +301,7 @@ TEST_F(DflyEngineTest, Hello) {
   auto resp = Run({"hello", "2"});
   ASSERT_THAT(resp, ArrLen(12));
   EXPECT_THAT(resp.GetVec(),
-              ElementsAre("server", "redis", "version", "df-dev", "proto",
+              ElementsAre("server", "redis", "version", ArgType(RespExpr::STRING), "proto",
                           IntArg(2), "id", ArgType(RespExpr::INT64), "mode",
                           "standalone", "role", "master"));
 

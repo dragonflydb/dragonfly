@@ -8,6 +8,8 @@ extern "C" {
 #include "redis/util.h"
 }
 
+#include "base/logging.h"
+
 namespace dfly {
 using namespace std;
 
@@ -72,7 +74,10 @@ auto ChannelSlice::FetchSubscribers(string_view channel) -> vector<Subscriber> {
 void ChannelSlice::CopySubscribers(const SubscribeMap& src, const std::string& pattern,
                                   vector<Subscriber>* dest) {
   for (const auto& sub : src) {
-    Subscriber s(sub.first, sub.second.thread_id);
+    ConnectionContext* cntx = sub.first;
+    CHECK(cntx->conn_state.subscribe_info);
+
+    Subscriber s(cntx, sub.second.thread_id);
     s.pattern = pattern;
     s.borrow_token.Inc();
 

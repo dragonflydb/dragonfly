@@ -64,7 +64,11 @@ jobs:
           update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 40  \
                               --slave /usr/bin/g++ g++ /usr/bin/g++-9
         run: |
+            # Work around https://github.com/actions/checkout/issues/766
+            git config --global --add safe.directory /src
             cd /src
+            git describe --always --tags ${{ github.sha }}
+
             if [ -d build-opt ]; then
               chown -R root build-opt
               ls -l ./build-opt
@@ -96,6 +100,12 @@ jobs:
         submodules: true
     - name: Build artifacts
       run: |
+          # Work around https://github.com/actions/checkout/issues/766
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+          git describe --always --tags ${{ github.sha }}
+          VERSION=$(git describe --always --tags ${{ github.sha }})
+          echo "::set-output name=version::${VERSION}"
           ./tools/release.sh
     - name: Upload
       uses: actions/upload-artifact@v3

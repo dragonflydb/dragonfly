@@ -897,6 +897,9 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&] { return EngineShard::tlocal()->channel_slice().FetchSubscribers(channel); };
 
+  // How do we know that subsribers did not disappear after we fetched them?
+  // Each subscriber object hold a borrow_token.
+  // ConnectionContext::OnClose does not reset subscribe_info before all tokens are returned.
   vector<ChannelSlice::Subscriber> subscriber_arr = shard_set->Await(sid, std::move(cb));
   atomic_uint32_t published{0};
 
@@ -912,6 +915,8 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
     }
 
     fibers_ext::BlockingCounter bc(subscriber_arr.size());
+
+    // We run publish_cb in each subsriber's thread.
     auto publish_cb = [&, bc](unsigned idx, util::ProactorBase*) mutable {
       unsigned start = slices[idx];
 
@@ -921,6 +926,7 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
           break;
 
         published.fetch_add(1, memory_order_relaxed);
+
         facade::Connection* conn = subscriber_arr[i].conn_cntx->owner();
         DCHECK(conn);
         facade::Connection::PubMessage pmsg;

@@ -46,11 +46,6 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
       }
     }
 
-    if (!to_add && conn_state.subscribe_info->IsEmpty()) {
-      conn_state.subscribe_info.reset();
-      force_dispatch = false;
-    }
-
     sort(channels.begin(), channels.end());
 
     // prepare the array in order to distribute the updates to the shards.
@@ -90,6 +85,12 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
     // Update subscription
     shard_set->RunBriefInParallel(move(cb),
                                   [&](ShardId sid) { return shard_idx[sid + 1] > shard_idx[sid]; });
+
+    // It's important to reset
+    if (!to_add && conn_state.subscribe_info->IsEmpty()) {
+      conn_state.subscribe_info.reset();
+      force_dispatch = false;
+    }
   }
 
   if (to_reply) {
@@ -139,15 +140,10 @@ void ConnectionContext::ChangePSub(bool to_add, bool to_reply, CmdArgList args) 
       }
     }
 
-    if (!to_add && conn_state.subscribe_info->IsEmpty()) {
-      conn_state.subscribe_info.reset();
-      force_dispatch = false;
-    }
-
     int32_t tid = util::ProactorBase::GetIndex();
     DCHECK_GE(tid, 0);
 
-    // Update the subscribers on publisher's side.
+    // Update the subscribers on channel-slice side.
     auto cb = [&](EngineShard* shard) {
       ChannelSlice& cs = shard->channel_slice();
       for (string_view pattern : patterns) {
@@ -161,6 +157,13 @@ void ConnectionContext::ChangePSub(bool to_add, bool to_reply, CmdArgList args) 
 
     // Update pattern subscription. Run on all shards.
     shard_set->RunBriefInParallel(move(cb));
+
+    // Important to reset conn_state.subscribe_info only after all references to it were
+    // removed from channel slices.
+    if (!to_add && conn_state.subscribe_info->IsEmpty()) {
+      conn_state.subscribe_info.reset();
+      force_dispatch = false;
+    }
   }
 
   if (to_reply) {
@@ -209,7 +212,8 @@ void ConnectionContext::SendSubscriptionChangedResponse(string_view action,
 }
 
 void ConnectionContext::OnClose() {
-  if (!conn_state.subscribe_info) return;
+  if (!conn_state.subscribe_info)
+    return;
 
   if (!conn_state.subscribe_info->channels.empty()) {
     auto token = conn_state.subscribe_info->borrow_token;
