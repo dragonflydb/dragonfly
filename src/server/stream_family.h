@@ -17,7 +17,9 @@ class StreamFamily {
 
  private:
   static void XAdd(CmdArgList args, ConnectionContext* cntx);
+  static void XLen(CmdArgList args, ConnectionContext* cntx);
   static void XRange(CmdArgList args, ConnectionContext* cntx);
+
 };
 
 }  // namespace dfly

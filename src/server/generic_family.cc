@@ -309,7 +309,7 @@ void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
 
 void GenericFamily::Ping(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 2) {
-    return (*cntx)->SendError(facade::WrongNumArgsError("ping"), kSyntaxErr);
+    return (*cntx)->SendError(facade::WrongNumArgsError("ping"), kSyntaxErrType);
   }
 
   // We synchronously block here until the engine sends us the payload and notifies that

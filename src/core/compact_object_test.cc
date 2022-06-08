@@ -17,6 +17,7 @@ extern "C" {
 #include "redis/intset.h"
 #include "redis/object.h"
 #include "redis/redis_aux.h"
+#include "redis/stream.h"
 #include "redis/zmalloc.h"
 }
 
@@ -238,6 +239,24 @@ TEST_F(CompactObjectTest, FlatSet) {
   size_t fs_used = allocated2 - allocated1;
   LOG(INFO) << "dict used: " << dict_used << " fs used: " << fs_used;
   EXPECT_LT(fs_used + 8 * kTestSize, dict_used);
+}
+
+TEST_F(CompactObjectTest, StreamObj) {
+  robj* stream_obj = createStreamObject();
+  stream* sm = (stream*)stream_obj->ptr;
+  robj* item[2];
+  item[0] = createStringObject("FIELD", 5);
+  item[1] = createStringObject("VALUE", 5);
+  ASSERT_EQ(C_OK, streamAppendItem(sm, item, 1, NULL, NULL, 0));
+
+  decrRefCount(item[0]);
+  decrRefCount(item[1]);
+
+  cobj_.ImportRObj(stream_obj);
+
+  EXPECT_EQ(OBJ_STREAM, cobj_.ObjType());
+  EXPECT_EQ(OBJ_ENCODING_STREAM, cobj_.Encoding());
+  EXPECT_FALSE(cobj_.IsInline());
 }
 
 }  // namespace dfly

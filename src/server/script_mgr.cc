@@ -76,7 +76,7 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
 
   string err = absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd,
                             "'. Try SCRIPT HELP.");
-  cntx->reply_builder()->SendError(err, kSyntaxErr);
+  cntx->reply_builder()->SendError(err, kSyntaxErrType);
 }
 
 bool ScriptMgr::InsertFunction(std::string_view id, std::string_view body) {

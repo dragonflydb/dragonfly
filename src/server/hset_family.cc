@@ -337,7 +337,7 @@ void HSetFamily::HSet(CmdArgList args, ConnectionContext* cntx) {
   string_view cmd = ArgS(args, 0);
 
   if (args.size() % 2 != 0) {
-    return (*cntx)->SendError(facade::WrongNumArgsError(cmd), kSyntaxErr);
+    return (*cntx)->SendError(facade::WrongNumArgsError(cmd), kSyntaxErrType);
   }
 
   args.remove_prefix(2);

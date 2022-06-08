@@ -54,13 +54,16 @@ extern "C" mi_stats_t _mi_stats_main;
 
 namespace dfly {
 
-using namespace util;
 namespace fibers = ::boost::fibers;
 namespace fs = std::filesystem;
+namespace uring = util::uring;
+
 using absl::GetFlag;
 using absl::StrCat;
-using facade::MCReplyBuilder;
+using namespace facade;
 using strings::HumanReadableNumBytes;
+using util::ProactorBase;
+using util::http::StringResponse;
 
 namespace {
 
@@ -327,7 +330,7 @@ void AppendMetricWithoutLabels(string_view name, string_view help, const absl::A
   AppendMetricValue(name, value, {}, {}, dest);
 }
 
-void PrintPrometheusMetrics(const Metrics& m, http::StringResponse* resp) {
+void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   // Server metrics
   AppendMetricWithoutLabels("up", "", 1, MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("uptime_in_seconds", "", m.uptime, MetricType::GAUGE, &resp->body());
@@ -384,8 +387,8 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
   // The naming of the metrics should be compatible with redis_exporter, see
   // https://github.com/oliver006/redis_exporter/blob/master/exporter/exporter.go#L111
 
-  auto cb = [this](const http::QueryArgs& args, HttpContext* send) {
-    http::StringResponse resp = http::MakeStringResponse(boost::beast::http::status::ok);
+  auto cb = [this](const util::http::QueryArgs& args, util::HttpContext* send) {
+    StringResponse resp = util::http::MakeStringResponse(boost::beast::http::status::ok);
     PrintPrometheusMetrics(this->GetMetrics(), &resp);
 
     return send->Invoke(std::move(resp));
@@ -624,7 +627,7 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   } else if (sub_cmd == "LIST") {
     vector<string> client_info;
     fibers::mutex mu;
-    auto cb = [&](Connection* conn) {
+    auto cb = [&](util::Connection* conn) {
       facade::Connection* dcon = static_cast<facade::Connection*>(conn);
       string info = dcon->GetClientInfo();
       lock_guard lk(mu);
@@ -638,7 +641,7 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   }
 
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
-  return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "CLIENT"), kSyntaxErr);
+  return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "CLIENT"), kSyntaxErrType);
 }
 
 void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
@@ -662,7 +665,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
     });
     return (*cntx)->SendOk();
   } else {
-    return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "CONFIG"), kSyntaxErr);
+    return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "CONFIG"), kSyntaxErrType);
   }
 }
 
@@ -683,7 +686,7 @@ void ServerFamily::Memory(CmdArgList args, ConnectionContext* cntx) {
 
   string err = StrCat("Unknown subcommand or wrong number of arguments for '", sub_cmd,
                       "'. Try MEMORY HELP.");
-  return (*cntx)->SendError(err, kSyntaxErr);
+  return (*cntx)->SendError(err, kSyntaxErrType);
 }
 
 void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {

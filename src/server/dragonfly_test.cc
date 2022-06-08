@@ -440,6 +440,7 @@ TEST_F(DflyEngineTest, PSubscribe) {
   EXPECT_EQ("ab", msg.channel);
   EXPECT_EQ("a*", msg.pattern);
 }
+
 TEST_F(DflyEngineTest, Unsubscribe) {
   auto resp = Run({"unsubscribe", "a"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("unsubscribe", "a", IntArg(0)));

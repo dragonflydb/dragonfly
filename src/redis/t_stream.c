@@ -75,7 +75,7 @@ int streamParseIDOrReply(client *c, robj *o, streamID *id, uint64_t missing_seq)
 /* Create a new stream data structure. */
 stream *streamNew(void) {
     stream *s = zmalloc(sizeof(*s));
-    s->rax = raxNew();
+    s->rax_tree = raxNew();
     s->length = 0;
     s->first_id.ms = 0;
     s->first_id.seq = 0;
@@ -90,7 +90,7 @@ stream *streamNew(void) {
 
 /* Free a stream, including the listpacks stored inside the radix tree. */
 void freeStream(stream *s) {
-    raxFreeWithCallback(s->rax,(void(*)(void*))lpFree);
+    raxFreeWithCallback(s->rax_tree,(void(*)(void*))lpFree);
     if (s->cgroups)
         raxFreeWithCallback(s->cgroups,(void(*)(void*))streamFreeCG);
     zfree(s);
@@ -183,7 +183,7 @@ robj *streamDup(robj *o) {
 
     raxIterator ri;
     uint64_t rax_key[2];
-    raxStart(&ri, s->rax);
+    raxStart(&ri, s->rax_tree);
     raxSeek(&ri, "^", NULL, 0);
     size_t lp_bytes = 0;      /* Total bytes in the listpack. */
     unsigned char *lp = NULL; /* listpack pointer. */
@@ -194,7 +194,7 @@ robj *streamDup(robj *o) {
         unsigned char *new_lp = zmalloc(lp_bytes);
         memcpy(new_lp, lp, lp_bytes);
         memcpy(rax_key, ri.key, sizeof(rax_key));
-        raxInsert(new_s->rax, (unsigned char *)&rax_key, sizeof(rax_key),
+        raxInsert(new_s->rax_tree, (unsigned char *)&rax_key, sizeof(rax_key),
                   new_lp, NULL);
     }
     new_s->length = s->length;
@@ -482,7 +482,7 @@ int streamAppendItem(stream *s, robj **argv, int64_t numfields, streamID *added_
 
     /* Add the new entry. */
     raxIterator ri;
-    raxStart(&ri,s->rax);
+    raxStart(&ri,s->rax_tree);
     raxSeek(&ri,"$",NULL,0);
 
     size_t lp_bytes = 0;        /* Total bytes in the tail listpack. */
@@ -550,7 +550,7 @@ int streamAppendItem(stream *s, robj **argv, int64_t numfields, streamID *added_
                 /* Shrink extra pre-allocated memory */
                 lp = lpShrinkToFit(lp);
                 if (ri.data != lp)
-                    raxInsert(s->rax,ri.key,ri.key_len,lp,NULL);
+                    raxInsert(s->rax_tree,ri.key,ri.key_len,lp,NULL);
                 lp = NULL;
             }
         }
@@ -579,7 +579,7 @@ int streamAppendItem(stream *s, robj **argv, int64_t numfields, streamID *added_
             lp = lpAppend(lp,(unsigned char*)field,sdslen(field));
         }
         lp = lpAppendInteger(lp,0); /* Master entry zero terminator. */
-        raxInsert(s->rax,(unsigned char*)&rax_key,sizeof(rax_key),lp,NULL);
+        raxInsert(s->rax_tree,(unsigned char*)&rax_key,sizeof(rax_key),lp,NULL);
         /* The first entry we insert, has obviously the same fields of the
          * master entry. */
         flags |= STREAM_ITEM_FLAG_SAMEFIELDS;
@@ -664,7 +664,7 @@ int streamAppendItem(stream *s, robj **argv, int64_t numfields, streamID *added_
 
     /* Insert back into the tree in order to update the listpack pointer. */
     if (ri.data != lp)
-        raxInsert(s->rax,(unsigned char*)&rax_key,sizeof(rax_key),lp,NULL);
+        raxInsert(s->rax_tree,(unsigned char*)&rax_key,sizeof(rax_key),lp,NULL);
     s->length++;
     s->entries_added++;
     s->last_id = id;
@@ -731,7 +731,7 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args) {
         return 0;
 
     raxIterator ri;
-    raxStart(&ri,s->rax);
+    raxStart(&ri,s->rax_tree);
     raxSeek(&ri,"^",NULL,0);
 
     int64_t deleted = 0;
@@ -765,7 +765,7 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args) {
 
         if (remove_node) {
             lpFree(lp);
-            raxRemove(s->rax,ri.key,ri.key_len,NULL);
+            raxRemove(s->rax_tree,ri.key,ri.key_len,NULL);
             raxSeek(&ri,">=",ri.key,ri.key_len);
             s->length -= entries;
             deleted += entries;
@@ -863,7 +863,7 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args) {
         }
 
         /* Update the listpack with the new pointer. */
-        raxInsert(s->rax,ri.key,ri.key_len,lp,NULL);
+        raxInsert(s->rax_tree,ri.key,ri.key_len,lp,NULL);
 
         break; /* If we are here, there was enough to delete in the current
                   node, so no need to go to the next node. */
@@ -1085,7 +1085,7 @@ void streamIteratorStart(streamIterator *si, stream *s, streamID *start, streamI
     }
 
     /* Seek the correct node in the radix tree. */
-    raxStart(&si->ri,s->rax);
+    raxStart(&si->ri,s->rax_tree);
     if (!rev) {
         if (start && (start->ms || start->seq)) {
             raxSeek(&si->ri,"<=",(unsigned char*)si->start_key,
@@ -1302,7 +1302,7 @@ void streamIteratorRemoveEntry(streamIterator *si, streamID *current) {
         /* If this is the last element in the listpack, we can remove the whole
          * node. */
         lpFree(lp);
-        raxRemove(si->stream->rax,si->ri.key,si->ri.key_len,NULL);
+        raxRemove(si->stream->rax_tree,si->ri.key,si->ri.key_len,NULL);
     } else {
         /* In the base case we alter the counters of valid/deleted entries. */
         lp = lpReplaceInteger(lp,&p,aux-1);
@@ -1312,7 +1312,7 @@ void streamIteratorRemoveEntry(streamIterator *si, streamID *current) {
 
         /* Update the listpack with the new pointer. */
         if (si->lp != lp)
-            raxInsert(si->stream->rax,si->ri.key,si->ri.key_len,lp,NULL);
+            raxInsert(si->stream->rax_tree,si->ri.key,si->ri.key_len,lp,NULL);
     }
 
     /* Update the number of entries counter. */
@@ -3668,9 +3668,9 @@ void xinfoReplyWithStreamInfo(client *c, stream *s) {
     addReplyBulkCString(c,"length");
     addReplyLongLong(c,s->length);
     addReplyBulkCString(c,"radix-tree-keys");
-    addReplyLongLong(c,raxSize(s->rax));
+    addReplyLongLong(c,raxSize(s->rax_tree));
     addReplyBulkCString(c,"radix-tree-nodes");
-    addReplyLongLong(c,s->rax->numnodes);
+    addReplyLongLong(c,s->rax_tree->numnodes);
     addReplyBulkCString(c,"last-generated-id");
     addReplyStreamID(c,&s->last_id);
     addReplyBulkCString(c,"max-deleted-entry-id");

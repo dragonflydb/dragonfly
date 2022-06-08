@@ -102,6 +102,8 @@ const char* RdbTypeName(unsigned type) {
       return "zset";
     case RDB_TYPE_HASH:
       return "hash";
+    case RDB_TYPE_STREAM_LISTPACKS:
+      return "stream";
   }
   return "other";
 }

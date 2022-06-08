@@ -28,6 +28,7 @@ extern "C" {
 #include "server/script_mgr.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
+#include "server/stream_family.h"
 #include "server/string_family.h"
 #include "server/transaction.h"
 #include "server/version.h"
@@ -61,8 +62,7 @@ namespace fibers = ::boost::fibers;
 namespace this_fiber = ::boost::this_fiber;
 using absl::GetFlag;
 using absl::StrCat;
-using facade::MCReplyBuilder;
-using facade::RedisReplyBuilder;
+using namespace facade;
 
 namespace {
 
@@ -293,7 +293,7 @@ bool EvalValidator(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (unsigned(num_keys) > args.size() - 3) {
-    (*cntx)->SendError("Number of keys can't be greater than number of args", kSyntaxErr);
+    (*cntx)->SendError("Number of keys can't be greater than number of args", kSyntaxErrType);
     return false;
   }
 
@@ -424,11 +424,11 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   if ((cid->arity() > 0 && args.size() != size_t(cid->arity())) ||
       (cid->arity() < 0 && args.size() < size_t(-cid->arity()))) {
-    return (*cntx)->SendError(facade::WrongNumArgsError(cmd_str), kSyntaxErr);
+    return (*cntx)->SendError(facade::WrongNumArgsError(cmd_str), kSyntaxErrType);
   }
 
   if (cid->key_arg_step() == 2 && (args.size() % 2) == 0) {
-    return (*cntx)->SendError(facade::WrongNumArgsError(cmd_str), kSyntaxErr);
+    return (*cntx)->SendError(facade::WrongNumArgsError(cmd_str), kSyntaxErrType);
   }
 
   // Validate more complicated cases with custom validators.
@@ -994,7 +994,7 @@ void Service::Function(CmdArgList args, ConnectionContext* cntx) {
   }
 
   string err = StrCat("Unknown subcommand '", sub_cmd, "'. Try FUNCTION HELP.");
-  return (*cntx)->SendError(err, kSyntaxErr);
+  return (*cntx)->SendError(err, kSyntaxErrType);
 }
 
 VarzValue::Map Service::GetVarzStats() {
@@ -1052,6 +1052,7 @@ void Service::RegisterCommands() {
             << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(PUnsubscribe)
             << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0}.MFUNC(Function);
 
+  StreamFamily::Register(&registry_);
   StringFamily::Register(&registry_);
   GenericFamily::Register(&registry_);
   ListFamily::Register(&registry_);

@@ -21,8 +21,21 @@ class StreamFamilyTest : public BaseFamilyTest {
 };
 
 TEST_F(StreamFamilyTest, Add) {
-  Run({"xadd", "key", "*", "field", "value"});
-  Run({"xrange", "key", "-", "+"});
+  auto resp = Run({"xadd", "key", "*", "field", "value"});
+  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
+  string id = string(ToSV(resp.GetBuf()));
+  EXPECT_TRUE(id.ends_with("-0")) << id;
+
+  resp = Run({"xrange", "null", "-", "+"});
+  EXPECT_THAT(resp, ArrLen(0));
+
+  resp = Run({"xrange", "key", "-", "+"});
+  EXPECT_THAT(resp, ArrLen(2));
+  auto sub_arr = resp.GetVec();
+  EXPECT_THAT(sub_arr, ElementsAre(id, ArrLen(2)));
+
+  resp = Run({"xlen", "key"});
+  EXPECT_THAT(resp, IntArg(1));
 }
 
 }  // namespace dfly

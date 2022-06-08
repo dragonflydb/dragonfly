@@ -11,6 +11,7 @@ extern "C" {
 #include "redis/intset.h"
 #include "redis/listpack.h"
 #include "redis/object.h"
+#include "redis/stream.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"  // for non-string objects.
 #include "redis/zset.h"
@@ -126,6 +127,10 @@ inline void FreeObjZset(unsigned encoding, void* ptr) {
     default:
       LOG(FATAL) << "Unknown sorted set encoding" << encoding;
   }
+}
+
+inline void FreeObjStream(void* ptr) {
+  freeStream((stream*)ptr);
 }
 
 // Deniel's Lemire function validate_ascii_fast() - under Apache/MIT license.
@@ -282,7 +287,7 @@ void RobjWrapper::Free(pmr::memory_resource* mr) {
       LOG(FATAL) << "Unsupported OBJ_MODULE type";
       break;
     case OBJ_STREAM:
-      LOG(FATAL) << "Unsupported OBJ_STREAM type";
+      FreeObjStream(inner_obj_);
       break;
     default:
       LOG(FATAL) << "Unknown object type";

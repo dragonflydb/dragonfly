@@ -6,6 +6,7 @@
 #include "object.h"
 #include "listpack.h"
 
+
 /* Stream item ID: a 128 bit number composed of a milliseconds time and
  * a sequence counter. IDs generated in the same millisecond (or in a past
  * millisecond if the clock jumped backward) will use the millisecond time
@@ -16,7 +17,7 @@ typedef struct streamID {
 } streamID;
 
 typedef struct stream {
-    rax *rax;               /* The radix tree holding the stream. */
+    rax *rax_tree;               /* The radix tree holding the stream. */
     uint64_t length;        /* Current number of elements inside this stream. */
     streamID last_id;       /* Zero if there are yet no items. */
     streamID first_id;      /* The first non-tombstone entry, zero if empty. */
