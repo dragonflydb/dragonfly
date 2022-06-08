@@ -102,10 +102,7 @@ jobs:
       run: |
           # Work around https://github.com/actions/checkout/issues/766
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
           git describe --always --tags ${{ github.sha }}
-          VERSION=$(git describe --always --tags ${{ github.sha }})
-          echo "::set-output name=version::${VERSION}"
           ./tools/release.sh
     - name: Upload
       uses: actions/upload-artifact@v3
