@@ -93,8 +93,8 @@ string UnknownSubCmd(string_view subcmd, string cmd) {
 }
 
 string UnknownCmd(string cmd, CmdArgList args) {
-  return absl::StrCat("Unknown command '", cmd, "' with arguments beginning with: ",
-                      StrJoin(args.begin(), args.end(), ",", CmdArgListFormatter()));
+  return absl::StrCat("Unknown command '", cmd, "' with args beginning with: ",
+                      StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
 }
 
 string InferLoadFile(fs::path data_dir) {
