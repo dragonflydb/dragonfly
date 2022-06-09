@@ -24,7 +24,7 @@ TEST_F(StreamFamilyTest, Add) {
   auto resp = Run({"xadd", "key", "*", "field", "value"});
   ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   string id = string(ToSV(resp.GetBuf()));
-  EXPECT_THAT(id, EndsWith("-0")) << id;
+  EXPECT_THAT(id, EndsWith("-0"));
 
   resp = Run({"xrange", "null", "-", "+"});
   EXPECT_THAT(resp, ArrLen(0));
