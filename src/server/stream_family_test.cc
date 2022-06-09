@@ -38,4 +38,13 @@ TEST_F(StreamFamilyTest, Add) {
   EXPECT_THAT(resp, IntArg(1));
 }
 
+TEST_F(StreamFamilyTest, AddExtended) {
+  auto resp1 = Run({"xadd", "key", "maxlen", "1", "*", "field1", "val1"});
+  Run({"xadd", "key", "maxlen", "1", "*", "field2", "val2"});
+  string id1 = string(ToSV(resp1.GetBuf()));
+
+  EXPECT_THAT(Run({"xlen", "key"}), IntArg(1));
+  EXPECT_THAT(Run({"xrange", "key", id1, id1}), ArrLen(0));
+}
+
 }  // namespace dfly

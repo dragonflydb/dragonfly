@@ -43,6 +43,12 @@ struct RangeId {
   bool exclude = false;
 };
 
+struct AddOpts {
+  ParsedStreamId parsed_id;
+  uint32_t max_limit = kuint32max;
+  bool max_limit_approx = false;
+};
+
 bool ParseID(string_view strid, bool strict, uint64_t missing_seq, ParsedStreamId* dest) {
   if (strid.empty() || strid.size() > 127)
     return false;
@@ -106,7 +112,7 @@ bool ParseRangeId(string_view id, RangeId* dest) {
   return ParseID(id, dest->exclude, 0, &dest->parsed_id);
 }
 
-OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const ParsedStreamId& parsed_id,
+OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& opts,
                          CmdArgList args) {
   DCHECK(!args.empty() && args.size() % 2 == 0);
   auto& db_slice = op_args.shard->db_slice();
@@ -132,7 +138,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const ParsedStr
     db_slice.PreUpdate(op_args.db_ind, it);
   }
 
-  stream* str = (stream*)it->second.RObjPtr();
+  stream* stream_inst = (stream*)it->second.RObjPtr();
 
   // we should really get rid of this monstrousity and rewrite streamAppendItem ourselves here.
   unique_ptr<robj*[]> objs(new robj*[args.size()]);
@@ -141,9 +147,15 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const ParsedStr
   }
 
   streamID result_id;
+  const auto& parsed_id = opts.parsed_id;
   streamID passed_id = parsed_id.val;
-  int res = streamAppendItem(str, objs.get(), args.size() / 2, &result_id,
+  int res = streamAppendItem(stream_inst, objs.get(), args.size() / 2, &result_id,
                              parsed_id.id_given ? &passed_id : nullptr, parsed_id.has_seq);
+
+  for (size_t i = 0; i < args.size(); ++i) {
+    decrRefCount(objs[i]);
+  }
+
   if (res != C_OK) {
     if (errno == ERANGE)
       return OpStatus::OUT_OF_RANGE;
@@ -151,6 +163,11 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const ParsedStr
     return OpStatus::OUT_OF_MEMORY;
   }
 
+  if (opts.max_limit < kuint32max) {
+    /* Notify xtrim event if needed. */
+    streamTrimByLength(stream_inst, opts.max_limit, opts.max_limit_approx);
+    // TODO: when replicating, we should propagate it as exact limit in case of trimming.
+  }
   return result_id;
 }
 
@@ -221,23 +238,45 @@ const char kInvalidStreamId[] = "Invalid stream ID specified as stream command a
 
 void StreamFamily::XAdd(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
+  unsigned id_indx = 2;
+  AddOpts add_opts;
 
-  // TODO: args parsing
-  string_view id = ArgS(args, 2);
-  ParsedStreamId parsed_id;
+  for (; id_indx < args.size(); ++id_indx) {
+    ToUpper(&args[id_indx]);
+    string_view arg = ArgS(args, id_indx);
+    if (arg == "MAXLEN") {
+      if (id_indx + 2 >= args.size()) {
+        return (*cntx)->SendError(kSyntaxErr);
+      }
+      ++id_indx;
+      if (ArgS(args, id_indx) == "~") {
+        add_opts.max_limit_approx = true;
+        ++id_indx;
+      }
+      arg = ArgS(args, id_indx);
+      if (!absl::SimpleAtoi(arg, &add_opts.max_limit)) {
+        return (*cntx)->SendError(kSyntaxErr);
+      }
+    } else {
+      break;
+    }
+  }
 
-  args.remove_prefix(3);
-  if (args.empty() || args.size() % 2 == 1) {
+  args.remove_prefix(id_indx);
+  if (args.size() < 3 || args.size() % 2 == 0) {
     return (*cntx)->SendError(WrongNumArgsError("XADD"), kSyntaxErrType);
   }
 
-  if (!ParseID(id, true, 0, &parsed_id)) {
+  string_view id = ArgS(args, 0);
+
+  if (!ParseID(id, true, 0, &add_opts.parsed_id)) {
     return (*cntx)->SendError(kInvalidStreamId, kSyntaxErrType);
   }
 
+  args.remove_prefix(1);
   auto cb = [&](Transaction* t, EngineShard* shard) {
     OpArgs op_args{shard, t->db_index()};
-    return OpAdd(op_args, key, parsed_id, args);
+    return OpAdd(op_args, key, add_opts, args);
   };
 
   OpResult<streamID> add_result = cntx->transaction->ScheduleSingleHopT(std::move(cb));

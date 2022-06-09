@@ -99,6 +99,11 @@ size_t MallocUsedZSet(unsigned encoding, void* ptr) {
   return 0;
 }
 
+size_t MallocUsedStream(unsigned encoding, void* streamv) {
+  // stream* str_obj = (stream*)streamv;
+  return 0; // TODO
+}
+
 inline void FreeObjHash(unsigned encoding, void* ptr) {
   switch (encoding) {
     case OBJ_ENCODING_HT:
@@ -228,6 +233,8 @@ size_t RobjWrapper::MallocUsed() const {
       return MallocUsedHSet(encoding_, inner_obj_);
     case OBJ_ZSET:
       return MallocUsedZSet(encoding_, inner_obj_);
+    case OBJ_STREAM:
+      return MallocUsedStream(encoding_, inner_obj_);
 
     default:
       LOG(FATAL) << "Not supported " << type_;
