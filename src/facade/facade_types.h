@@ -18,6 +18,11 @@ using MutableSlice = absl::Span<char>;
 using CmdArgList = absl::Span<MutableSlice>;
 using CmdArgVec = std::vector<MutableSlice>;
 
+struct CmdArgListFormatter {
+  void operator()(std::string* out, MutableSlice arg) const {
+    out->append(absl::StrCat("`", std::string_view(arg.data(), arg.size()), "`"));
+  }
+};
 
 struct ConnectionStats {
   absl::flat_hash_map<std::string, uint64_t> err_count_map;

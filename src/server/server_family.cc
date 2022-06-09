@@ -92,6 +92,11 @@ string UnknownSubCmd(string_view subcmd, string cmd) {
                       cmd, " HELP.");
 }
 
+string UnknownCmd(string cmd, CmdArgList args) {
+  return absl::StrCat("unknown command '", cmd, "' with args beginning with: ",
+                      StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
+}
+
 string InferLoadFile(fs::path data_dir) {
   const auto& dbname = GetFlag(FLAGS_dbfilename);
 
@@ -953,11 +958,16 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
+  // Allow calling this commands with no arguments or protover=2
+  // technically that is all that is supported at the moment.
+  // For all other cases degrade to 'unknown command' so that clients
+  // checking for the existence of the command to detect if RESP3 is
+  // supported or whether authentication can be performed using HELLO
+  // will gracefully fallback to RESP2 and using the AUTH command explicitly.
   if (args.size() > 1) {
     string_view proto_version = ArgS(args, 1);
-
-    if (proto_version != "2") {
-      (*cntx)->SendError("NOPROTO unsupported protocol version");
+    if (proto_version != "2" || args.size() > 2) {
+      (*cntx)->SendError(UnknownCmd("HELLO", args.subspan(1)));
       return;
     }
   }

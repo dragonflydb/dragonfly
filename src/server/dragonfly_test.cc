@@ -295,17 +295,22 @@ TEST_F(DflyEngineTest, EvalResp) {
 }
 
 TEST_F(DflyEngineTest, Hello) {
-  auto resp_no_param = Run({"hello"});
-  ASSERT_THAT(resp_no_param, ArrLen(12));
-
-  auto resp = Run({"hello", "2"});
+  auto resp = Run({"hello"});
   ASSERT_THAT(resp, ArrLen(12));
-  EXPECT_THAT(resp.GetVec(),
-              ElementsAre("server", "redis", "version", ArgType(RespExpr::STRING), "proto",
-                          IntArg(2), "id", ArgType(RespExpr::INT64), "mode",
-                          "standalone", "role", "master"));
+  resp = Run({"hello", "2"});
+  ASSERT_THAT(resp, ArrLen(12));
 
-  EXPECT_THAT(Run({"hello", "3"}), ErrArg("ERR NOPROTO unsupported protocol"));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("server", "redis", "version", ArgType(RespExpr::STRING),
+                                         "proto", IntArg(2), "id", ArgType(RespExpr::INT64), "mode",
+                                         "standalone", "role", "master"));
+
+  // These are valid arguments to HELLO, however as they are not yet supported the implementation
+  // is degraded to 'unknown command'.
+  EXPECT_THAT(Run({"hello", "3"}),
+              ErrArg("ERR unknown command 'HELLO' with args beginning with: `3`"));
+  EXPECT_THAT(
+      Run({"hello", "2", "AUTH", "uname", "pwd"}),
+      ErrArg("ERR unknown command 'HELLO' with args beginning with: `2`, `AUTH`, `uname`, `pwd`"));
 }
 
 TEST_F(DflyEngineTest, EvalSha) {
