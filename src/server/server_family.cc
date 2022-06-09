@@ -93,7 +93,7 @@ string UnknownSubCmd(string_view subcmd, string cmd) {
 }
 
 string UnknownCmd(string cmd, CmdArgList args) {
-  return absl::StrCat("Unknown command '", cmd, "' with args beginning with: ",
+  return absl::StrCat("unknown command '", cmd, "' with args beginning with: ",
                       StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
 }
 
