@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+
+# list of Conventional Commits types
+cc_types=("feat" "fix")
+default_types=("build" "chore" "ci" "docs" "${cc_types[@]}" "perf" "refactor" "revert" "style" "test")
+types=( "${cc_types[@]}" )
+
+if [ $# -eq 1 ]; then
+    types=( "${default_types[@]}" )
+else
+    while [ $# -gt 1 ]; do
+        types+=( "$1" )
+        shift
+    done
+fi
+
+msg_file="$1"
+
+r_types="($(IFS='|'; echo "${types[*]}"))"
+r_scope="(\([[:alnum:] \/-]+\))?"
+r_delim='!?:'
+r_subject=" [[:print:]].+"
+pattern="^$r_types$r_scope$r_delim$r_subject$"
+
+if grep -Eq "$pattern" "$msg_file"; then
+    exit 0
+fi
+
+echo "[Commit message] $( cat "$msg_file" )"
+echo "
+Thank you for your interest in Dragonfly DB. 
+
+To keep things clean, we ask all commits to meet the following criteria:
+  - Be Signed (git commit -s -m ...)
+  - Valid Conventional Commit https://www.conventionalcommits.org/
+  
+  Special Commit Words are correlated to versioning. Specifically \"fix\" and \"feat\"
+  - fix: a commit of the type fix patches a bug in your codebase (this correlates with PATCH in Semantic Versioning).
+  - feat: a commit of the type feat introduces a new feature to the codebase (this correlates with MINOR in Semantic Versioning).
+  - Breaking changes have a ! before the \":\"
+
+  Finally, If there is an Issue for this Commit, Please add it to the end of the commit message.
+  - Reference Issue Number at End of Commit Message (Optional)
+
+Thank you for helping us label a \`fix\` and \`feat\` properly so that our commits, issues and semantic versioning are all aligned!
+
+A Signed Conventional Commit with Issue Number look like: 
+
+    git commit -s -m \"type(scope): description #112\"
+
+Valid types:
+
+    $(IFS=' '; echo "${types[*]}")
+
+Example Document Change:
+
+    docs(readme): Fix Example Links #121
+
+Example Breaking New Feature
+    feat(ingest)!: Add new ingest # 122
+
+This is an example of a fix with an Issue #
+
+    fix(ingest): Refactor for loop to list comprehension #123
+
+Thank you for your contribution!
+
+Sincerely,
+The Dragonfly DB Contributors
+"
+exit 1

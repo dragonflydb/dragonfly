@@ -1,0 +1,7 @@
+- id: conventional-commits
+  name: Conventional Commits Minder
+  entry: contrib/scripts/conventional-commits
+  language: script
+  description: Conventional Commits Enforcement at the `git commit` client-side level
+  always_run: true
+  stages: [commit-msg]
