@@ -3,6 +3,6 @@ repos:
     hooks:
       - id: conventional-commits
         name: Conventional Commit Minder
-        entry: scripts/conventional-commits
+        entry: contrib/scripts/conventional-commits
         language: script
         stages: [commit-msg]
