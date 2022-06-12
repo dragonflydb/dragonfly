@@ -2485,7 +2485,7 @@ void streamFreeConsumer(streamConsumer *sc) {
  * specified name, last server ID and reads counter. If a consumer group with
  * the same name already exists NULL is returned, otherwise the pointer to the
  * consumer group is returned. */
-streamCG *streamCreateCG(stream *s, char *name, size_t namelen, streamID *id, long long entries_read) {
+streamCG *streamCreateCG(stream *s, const char *name, size_t namelen, streamID *id, long long entries_read) {
     if (s->cgroups == NULL) s->cgroups = raxNew();
     if (raxFind(s->cgroups,(unsigned char*)name,namelen) != raxNotFound)
         return NULL;

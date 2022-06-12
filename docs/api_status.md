@@ -204,7 +204,26 @@ with respect to Memcached and Redis APIs.
 ### API 3
 ### API 4
 ### API 5
-### API 6
+- [X] Stream Family
+  - [X] XADD
+  - [ ] XCLAIM
+  - [X] XDEL
+  - [X] XGROUP CREATE/DELCONSUMER/DESTROY/HELP/SETID
+  - [ ] XGROUP CREATECONSUMER
+  - [X] XINFO GROUPS/HELP
+  - [ ] XINFO CONSUMERS/GROUPS/STREAM
+  - [X] XLEN
+  - [ ] XPENDING
+  - [X] XRANGE
+  - [ ] XREAD
+  - [ ] XREADGROUP
+  - [X] XREVRANGE
+  - [X] XSETID
+  - [ ] XTRIM
+
+### API 6,7
+- [ ] Stream Family
+  - [ ] XAUTOCLAIM
 
 ## Notes
 Some commands were implemented as decorators along the way:

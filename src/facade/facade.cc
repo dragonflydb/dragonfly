@@ -57,6 +57,12 @@ string InvalidExpireTime(string_view cmd) {
   return absl::StrCat("invalid expire time in '", cmd, "' command");
 }
 
+string UnknownSubCmd(string_view subcmd, string_view cmd) {
+  return absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd, "'. Try ",
+                      cmd, " HELP.");
+}
+
+
 const char kSyntaxErr[] = "syntax error";
 const char kWrongTypeErr[] = "-WRONGTYPE Operation against a key holding the wrong kind of value";
 const char kKeyNotFoundErr[] = "no such key";

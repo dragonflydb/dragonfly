@@ -87,11 +87,6 @@ error_code CreateDirs(fs::path dir_path) {
   return ec;
 }
 
-string UnknownSubCmd(string_view subcmd, string cmd) {
-  return absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd, "'. Try ",
-                      cmd, " HELP.");
-}
-
 string UnknownCmd(string cmd, CmdArgList args) {
   return absl::StrCat("unknown command '", cmd, "' with args beginning with: ",
                       StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
@@ -689,8 +684,7 @@ void ServerFamily::Memory(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendLong(1);
   }
 
-  string err = StrCat("Unknown subcommand or wrong number of arguments for '", sub_cmd,
-                      "'. Try MEMORY HELP.");
+  string err = UnknownSubCmd(sub_cmd, "MEMORY");
   return (*cntx)->SendError(err, kSyntaxErrType);
 }
 
