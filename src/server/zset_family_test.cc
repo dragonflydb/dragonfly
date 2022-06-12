@@ -142,6 +142,14 @@ TEST_F(ZSetFamilyTest, ZRevRange) {
   resp = Run({"zrevrangebyscore", "key", "2", "-inf", "withscores"});
   ASSERT_THAT(resp, ArrLen(6));
   EXPECT_THAT(resp.GetVec(), ElementsAre("c", "2", "b", "1", "a", "-inf"));
+
+  resp = Run({"zrevrange", "key", "0", "2"});
+  ASSERT_THAT(resp, ArrLen(3));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("c", "b", "a"));
+
+  resp = Run({"zrevrange", "key", "1", "2", "withscores"});
+  ASSERT_THAT(resp, ArrLen(4));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("b", "1", "a", "-inf"));
 }
 
 TEST_F(ZSetFamilyTest, ZScan) {
