@@ -152,8 +152,11 @@ TEST_F(RedisParserTest, Hierarchy) {
   const char* kThirdArg = "*2\r\n$3\r\n100\r\n$3\r\n200\r\n";
   string resp = absl::StrCat("*3\r\n$3\r\n900\r\n$3\r\n800\r\n", kThirdArg);
   ASSERT_EQ(RedisParser::OK, Parse(resp));
-  EXPECT_THAT(args_, ElementsAre("900", "800", ArrArg(2)));
-  EXPECT_THAT(*get<RespVec*>(args_[2].u), ElementsAre("100", "200"));
+  ASSERT_THAT(args_, ElementsAre("900", "800", ArrArg(2)));
+  EXPECT_THAT(args_[2].GetVec(), ElementsAre("100", "200"));
+
+  ASSERT_EQ(RedisParser::OK, Parse("*2\r\n*1\r\n$3\r\n1-0\r\n*1\r\n$2\r\nf1\r\n"));
+  ASSERT_THAT(args_, ElementsAre(ArrLen(1), ArrLen(1)));
 }
 
 TEST_F(RedisParserTest, InvalidMult1) {

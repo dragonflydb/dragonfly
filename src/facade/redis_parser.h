@@ -11,6 +11,9 @@ namespace facade {
 
 /**
  * @brief Zero-copy (best-effort) parser.
+ * Note: The client-mode parsing is buggy and should not be used in production.
+ *       Currently we only use server-mode parsing in production and client-mode in tests.
+ *       It works because tests do not do any incremental parsing.
  *
  */
 class RedisParser {

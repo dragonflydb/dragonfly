@@ -247,10 +247,7 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> Result {
       LOG(ERROR) << "Unexpected result " << res;
   }
 
-  if (parse_stack_.size() > 0 && server_mode_)
-    return BAD_STRING;
-
-  if (parse_stack_.size() == 0 && !cached_expr_->empty())
+  if (server_mode_ && (parse_stack_.size() > 0 || !cached_expr_->empty()))
     return BAD_STRING;
 
   if (len <= 0) {
@@ -266,17 +263,21 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> Result {
     return OK;
   }
 
+  DVLOG(1) << "PushStack: (" << len << ", " << cached_expr_ << ")";
   parse_stack_.emplace_back(len, cached_expr_);
-  if (!cached_expr_->empty()) {
+
+  if (state_ == PARSE_ARG_S) {
     DCHECK(!server_mode_);
+
     cached_expr_->emplace_back(RespExpr::ARRAY);
     stash_.emplace_back(new RespExpr::Vec());
     RespExpr::Vec* arr = stash_.back().get();
     arr->reserve(len);
     cached_expr_->back().u = arr;
     cached_expr_ = arr;
+  } else {
+    state_ = PARSE_ARG_S;
   }
-  state_ = PARSE_ARG_S;
 
   return OK;
 }
@@ -304,6 +305,7 @@ auto RedisParser::ParseArg(Buffer str) -> Result {
       state_ = FINISH_ARG_S;
       cached_expr_->emplace_back(RespExpr::NIL);
     } else {
+      DVLOG(1) << "String(" << len << ")";
       cached_expr_->emplace_back(RespExpr::STRING);
       bulk_len_ = len;
       state_ = BULK_STR_S;
@@ -405,15 +407,16 @@ auto RedisParser::ConsumeBulk(Buffer str) -> Result {
 }
 
 void RedisParser::HandleFinishArg() {
+  state_ = PARSE_ARG_S;
   DCHECK(!parse_stack_.empty());
   DCHECK_GT(parse_stack_.back().first, 0u);
 
   while (true) {
     --parse_stack_.back().first;
-    state_ = PARSE_ARG_S;
     if (parse_stack_.back().first != 0)
       break;
-
+    auto* arr = parse_stack_.back().second;
+    DVLOG(1) << "PopStack (" << arr << ")";
     parse_stack_.pop_back();  // pop 0.
     if (parse_stack_.empty()) {
       state_ = CMD_COMPLETE_S;
