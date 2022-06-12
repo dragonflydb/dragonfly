@@ -1,0 +1,8 @@
+repos:
+  - repo: local
+    hooks:
+      - id: conventional-commits
+        name: Conventional Commit Minder
+        entry: contrib/scripts/conventional-commits
+        language: script
+        stages: [commit-msg]
