@@ -954,6 +954,20 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
+  if (should_enter("CPU")) {
+      ADD_HEADER("# CPU");
+      struct rusage ru, cu, tu;
+      getrusage(RUSAGE_SELF, &ru);
+      getrusage(RUSAGE_CHILDREN, &cu);
+      getrusage(RUSAGE_THREAD, &tu);
+      append("used_cpu_sys", StrCat(ru.ru_stime.tv_sec, ".", ru.ru_stime.tv_usec));
+      append("used_cpu_user", StrCat(ru.ru_utime.tv_sec, ".", ru.ru_utime.tv_usec));
+      append("used_cpu_sys_children", StrCat(cu.ru_stime.tv_sec, ".", cu.ru_stime.tv_usec));
+      append("used_cpu_user_children", StrCat(cu.ru_utime.tv_sec, ".", cu.ru_utime.tv_usec));
+      append("used_cpu_sys_main_thread", StrCat(tu.ru_stime.tv_sec, ".", tu.ru_stime.tv_usec));
+      append("used_cpu_user_main_thread", StrCat(tu.ru_utime.tv_sec, ".", tu.ru_utime.tv_usec));
+  }
+
   (*cntx)->SendBulkString(info);
 }
 
