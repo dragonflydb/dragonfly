@@ -77,9 +77,9 @@ DebugCmd::DebugCmd(ServerFamily* owner, ConnectionContext* cntx) : sf_(*owner), 
 }
 
 void DebugCmd::Run(CmdArgList args) {
-  std::string_view subcmd = ArgS(args, 1);
+  string_view subcmd = ArgS(args, 1);
   if (subcmd == "HELP") {
-    std::string_view help_arr[] = {
+    string_view help_arr[] = {
         "DEBUG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
         "OBJECT <key>",
         "    Show low-level info about `key` and associated value.",
@@ -122,8 +122,7 @@ void DebugCmd::Run(CmdArgList args) {
     return Inspect(key);
   }
 
-  string reply = absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd,
-                              "'. Try DEBUG HELP.");
+  string reply = UnknownSubCmd(subcmd, "DEBUG");
   return (*cntx_)->SendError(reply, kSyntaxErrType);
 }
 
@@ -132,7 +131,7 @@ void DebugCmd::Reload(CmdArgList args) {
 
   for (size_t i = 2; i < args.size(); ++i) {
     ToUpper(&args[i]);
-    std::string_view opt = ArgS(args, i);
+    string_view opt = ArgS(args, i);
     VLOG(1) << "opt " << opt;
 
     if (opt == "NOSAVE") {
@@ -161,7 +160,7 @@ void DebugCmd::Reload(CmdArgList args) {
   Load(last_save_file);
 }
 
-void DebugCmd::Load(std::string_view filename) {
+void DebugCmd::Load(string_view filename) {
   GlobalState new_state = sf_.service().SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
   if (new_state != GlobalState::LOADING) {
     LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
@@ -202,8 +201,7 @@ void DebugCmd::Load(std::string_view filename) {
 
 void DebugCmd::Populate(CmdArgList args) {
   if (args.size() < 3 || args.size() > 5) {
-    return (*cntx_)->SendError(
-        "Unknown subcommand or wrong number of arguments for 'populate'. Try DEBUG HELP.");
+    return (*cntx_)->SendError(UnknownSubCmd("populate", "DEBUG"));
   }
 
   uint64_t total_count = 0;

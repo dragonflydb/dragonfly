@@ -21,6 +21,9 @@ enum class OpStatus : uint16_t {
   INVALID_FLOAT,
   INVALID_INT,
   SYNTAX_ERR,
+  BUSY_GROUP,
+  STREAM_ID_SMALL,
+  ENTRIES_ADDED_SMALL,
 };
 
 class OpResultBase {

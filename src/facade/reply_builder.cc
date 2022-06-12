@@ -243,6 +243,9 @@ void RedisReplyBuilder::SendError(OpStatus status) {
     case OpStatus::OUT_OF_MEMORY:
       SendError(kOutOfMemory);
       break;
+    case OpStatus::BUSY_GROUP:
+      SendError("-BUSYGROUP Consumer Group name already exists");
+      break;
     default:
       LOG(ERROR) << "Unsupported status " << status;
       SendError("Internal error");

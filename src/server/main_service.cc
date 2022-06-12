@@ -993,7 +993,7 @@ void Service::Function(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendOk();
   }
 
-  string err = StrCat("Unknown subcommand '", sub_cmd, "'. Try FUNCTION HELP.");
+  string err = UnknownSubCmd(sub_cmd, "FUNCTION");
   return (*cntx)->SendError(err, kSyntaxErrType);
 }
 
