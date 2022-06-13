@@ -53,10 +53,12 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
 
   if (subcmd == "LOAD" && args.size() == 2) {
     string_view body = ArgS(args, 1);
-    body = absl::StripAsciiWhitespace(body);
 
-    if (body.empty())
-      return (*cntx)->SendError("Refuse to load empty script");
+    if (body.empty()) {
+      char sha[41];
+      Interpreter::FuncSha1(body, sha);
+      return (*cntx)->SendBulkString(sha);
+    }
 
     Interpreter& interpreter = ServerState::tlocal()->GetInterpreter();
     // no need to lock the interpreter since we do not mess the stack.

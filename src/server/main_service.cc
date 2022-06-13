@@ -702,7 +702,7 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   CHECK(absl::SimpleAtoi(ArgS(args, 2), &num_keys));  // we already validated this
 
   string_view body = ArgS(args, 1);
-  body = absl::StripAsciiWhitespace(body);
+  // body = absl::StripAsciiWhitespace(body);
 
   if (body.empty()) {
     return (*cntx)->SendNull();
@@ -1042,8 +1042,8 @@ void Service::RegisterCommands() {
   registry_ << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0}.HFUNC(Quit)
             << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(Multi)
             << CI{"DISCARD", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.MFUNC(Discard)
-            << CI{"EVAL", CO::NOSCRIPT, -3, 0, 0, 0}.MFUNC(Eval).SetValidator(&EvalValidator)
-            << CI{"EVALSHA", CO::NOSCRIPT, -3, 0, 0, 0}.MFUNC(EvalSha).SetValidator(&EvalValidator)
+            << CI{"EVAL", CO::NOSCRIPT, -3, 3, 3, 1}.MFUNC(Eval).SetValidator(&EvalValidator)
+            << CI{"EVALSHA", CO::NOSCRIPT, -3, 3, 3, 1}.MFUNC(EvalSha).SetValidator(&EvalValidator)
             << CI{"EXEC", kExecMask, 1, 0, 0, 0}.MFUNC(Exec)
             << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, 0}.MFUNC(Publish)
             << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(Subscribe)

@@ -283,6 +283,9 @@ TEST_F(DflyEngineTest, Eval) {
 
   ASSERT_FALSE(service_->IsLocked(0, "foo"));
   ASSERT_FALSE(service_->IsShardSetLocked());
+
+  resp = Run({"eval", "return 77", "2", "foo", "zoo"});
+  EXPECT_THAT(resp, IntArg(77));
 }
 
 TEST_F(DflyEngineTest, EvalResp) {
@@ -322,15 +325,18 @@ TEST_F(DflyEngineTest, EvalSha) {
   resp = Run({"evalsha", sha, "0"});
   EXPECT_THAT(resp, IntArg(5));
 
-  resp = Run({"script", "load", " return 5  "});
-  EXPECT_EQ(resp, sha);
-
   absl::AsciiStrToUpper(&sha);
   resp = Run({"evalsha", sha, "0"});
   EXPECT_THAT(resp, IntArg(5));
 
   resp = Run({"evalsha", "foobar", "0"});
   EXPECT_THAT(resp, ErrArg("No matching"));
+
+  resp = Run({"script", "load", "\n return 5"});
+
+  // Important to keep spaces in order to be compatible with Redis.
+  // See https://github.com/dragonflydb/dragonfly/issues/146
+  EXPECT_THAT(resp, "c6459b95a0e81df97af6fdd49b1a9e0287a57363");
 }
 
 TEST_F(DflyEngineTest, Memcache) {
