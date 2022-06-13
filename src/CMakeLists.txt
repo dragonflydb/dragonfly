@@ -15,6 +15,19 @@ add_third_party(
   LIB libdouble-conversion.a
 )
 
+add_third_party(
+  jsoncons
+  URL https://github.com/danielaparker/jsoncons/archive/refs/tags/v0.168.7.tar.gz
+  CMAKE_PASS_FLAGS "-DJSONCONS_BUILD_TESTS=OFF"
+  
+  LIB "none"
+)
+
+add_library(TRDP::jsoncons INTERFACE IMPORTED)
+add_dependencies(TRDP::jsoncons jsoncons_project)
+set_target_properties(TRDP::jsoncons PROPERTIES
+                      INTERFACE_INCLUDE_DIRECTORIES "${JSONCONS_INCLUDE_DIR}")
+
 Message(STATUS "THIRD_PARTY_LIB_DIR ${THIRD_PARTY_LIB_DIR}")
 
 
