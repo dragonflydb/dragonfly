@@ -89,7 +89,7 @@ jobs:
         cache-to: type=inline
 
     - name: Build pre-release image
-      if: env.IS_PRERELEASE == true
+      if: env.IS_PRERELEASE == 'true'
       uses: docker/build-push-action@v3
       with:
         context: .
