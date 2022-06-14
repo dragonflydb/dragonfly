@@ -243,4 +243,9 @@ TEST_F(ZSetFamilyTest, ZInterStore) {
   EXPECT_THAT(resp.GetVec(), ElementsAre("b", "4"));
 }
 
+TEST_F(ZSetFamilyTest, ZAddBug148) {
+  auto resp = Run({"zadd", "key", "1", "9fe9f1eb"});
+  EXPECT_THAT(resp, IntArg(1));
+}
+
 }  // namespace dfly

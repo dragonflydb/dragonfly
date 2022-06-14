@@ -277,14 +277,21 @@ CmdArgVec BaseFamilyTest::TestConnWrapper::Args(ArgSlice list) {
   CHECK_NE(0u, list.size());
 
   CmdArgVec res;
+  string* str = new string;
+
+  // I compact all the arguments together on purpose.
+  // This way I check that arguments handling works well without c-string endings.
+  for (auto v : list) {
+    str->append(v);
+  }
+  tmp_str_vec_.emplace_back(str);
+  size_t offset = 0;
   for (auto v : list) {
     if (v.empty()) {
       res.push_back(MutableSlice{});
     } else {
-      tmp_str_vec_.emplace_back(new string{v});
-      auto& s = *tmp_str_vec_.back();
-
-      res.emplace_back(s.data(), s.size());
+      res.emplace_back(str->data() + offset, v.size());
+      offset += v.size();
     }
   }
 

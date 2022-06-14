@@ -11,7 +11,7 @@ extern "C" {
 #include "redis/zset.h"
 }
 
-#include <double-conversion/double-to-string.h>
+#include <absl/strings/charconv.h>
 
 #include "base/logging.h"
 #include "base/stl_util.h"
@@ -23,7 +23,6 @@ extern "C" {
 
 namespace dfly {
 
-using namespace double_conversion;
 using namespace std;
 using namespace facade;
 using absl::SimpleAtoi;
@@ -96,7 +95,7 @@ OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args
 
   try {
     add_res = db_slice.AddOrFind(op_args.db_ind, key);
-  } catch(bad_alloc&) {
+  } catch (bad_alloc&) {
     return OpStatus::OUT_OF_MEMORY;
   }
 
@@ -541,7 +540,9 @@ bool ParseScore(string_view src, double* score) {
   } else if (src == "+inf") {
     *score = HUGE_VAL;
   } else {
-    return string2d(src.data(), src.size(), score);
+    absl::from_chars_result result = absl::from_chars(src.data(), src.end(), *score);
+    if (int(result.ec) != 0 || result.ptr != src.end() || isnan(*score))
+      return false;
   }
   return true;
 };

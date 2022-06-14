@@ -658,27 +658,6 @@ size_t stringObjectLen(robj *o) {
     }
 }
 
-int getDoubleFromObject(const robj *o, double *target) {
-    double value;
-
-    if (o == NULL) {
-        value = 0;
-    } else {
-        serverAssertWithInfo(NULL,o,o->type == OBJ_STRING);
-        if (sdsEncodedObject(o)) {
-            if (!string2d(o->ptr, sdslen(o->ptr), &value))
-                return C_ERR;
-        } else if (o->encoding == OBJ_ENCODING_INT) {
-            value = (long)o->ptr;
-        } else {
-            serverPanic("Unknown string encoding");
-        }
-    }
-    *target = value;
-    return C_OK;
-}
-
-
 // ROMAN: Copied from the DISABLED part below 
 int getLongLongFromObject(robj *o, long long *target) {
     long long value;
