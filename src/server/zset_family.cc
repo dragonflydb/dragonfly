@@ -956,6 +956,7 @@ void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
     double val = 0;
 
     if (!ParseScore(cur_arg, &val)) {
+      VLOG(1) << "Bad score:" << cur_arg << "|";
       return (*cntx)->SendError(kInvalidFloatErr);
     }
     if (isnan(val)) {
@@ -1049,6 +1050,7 @@ void ZSetFamily::ZIncrBy(CmdArgList args, ConnectionContext* cntx) {
   scored_member.second = ArgS(args, 3);
 
   if (!absl::SimpleAtod(score_arg, &scored_member.first)) {
+    VLOG(1) << "Bad score:" << score_arg << "|";
     return (*cntx)->SendError(kInvalidFloatErr);
   }
 
