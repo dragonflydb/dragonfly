@@ -1,0 +1,14 @@
+blank_issues_enabled: true
+
+contact_links:
+  - name: Dragonfly DB Discord Channel
+    url: https://discord.gg/HsPjXGVH85
+    about: Get help! Ask questions, get support, and share ideas.
+
+  - name: GitHub Discussions
+    url: https://github.com/dragonflydb/dragonfly/discussions
+    about: Ask Questions. Benchmark Questions Belong here.
+
+  - name: Twitter
+    url: https://twitter.com/romanger
+    about: Follow Roman on Twitter
