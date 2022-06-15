@@ -381,8 +381,10 @@ void RobjWrapper::MakeInnerRoom(size_t current_cap, size_t desired, pmr::memory_
   inner_obj_ = newp;
 }
 
-#pragma GCC push_options
-#pragma GCC optimize("Ofast")
+#if defined(__GNUC__) && !defined(__clang__)
+  #pragma GCC push_options
+  #pragma GCC optimize("Ofast")
+#endif
 
 // len must be at least 16
 void ascii_pack(const char* ascii, size_t len, uint8_t* bin) {
@@ -460,7 +462,9 @@ bool compare_packed(const uint8_t* packed, const char* ascii, size_t ascii_len) 
   return true;
 }
 
-#pragma GCC pop_options
+#if defined(__GNUC__) && !defined(__clang__)
+  #pragma GCC pop_options
+#endif
 
 }  // namespace detail
 

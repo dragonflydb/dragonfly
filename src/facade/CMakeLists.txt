@@ -1,7 +1,13 @@
 add_library(dfly_facade dragonfly_listener.cc dragonfly_connection.cc facade.cc
             memcache_parser.cc redis_parser.cc reply_builder.cc)
+
+if (DF_USE_SSL)
+  set(TLS_LIB tls_lib)
+  target_compile_definitions(dfly_facade PRIVATE DFLY_USE_SSL)
+endif()
+
 cxx_link(dfly_facade base uring_fiber_lib fibers_ext strings_lib http_server_lib 
-         tls_lib TRDP::mimalloc TRDP::dconv)
+         ${TLS_LIB} TRDP::mimalloc TRDP::dconv)
 
 add_library(facade_test facade_test.cc)
 cxx_link(facade_test dfly_facade gtest_main_ext)

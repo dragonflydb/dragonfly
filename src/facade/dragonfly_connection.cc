@@ -17,7 +17,11 @@
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
 #include "util/fiber_sched_algo.h"
+
+#ifdef DFLY_USE_SSL
 #include "util/tls/tls_socket.h"
+#endif
+
 #include "util/uring/uring_socket.h"
 
 ABSL_FLAG(bool, tcp_nodelay, false,
@@ -181,6 +185,7 @@ void Connection::HandleRequests() {
 
   auto remote_ep = lsb->RemoteEndpoint();
 
+#ifdef DFLY_USE_SSL
   unique_ptr<tls::TlsSocket> tls_sock;
   if (ctx_) {
     tls_sock.reset(new tls::TlsSocket(socket_.get()));
@@ -193,8 +198,11 @@ void Connection::HandleRequests() {
     }
     VLOG(1) << "TLS handshake succeeded";
   }
-
   FiberSocketBase* peer = tls_sock ? (FiberSocketBase*)tls_sock.get() : socket_.get();
+#else
+  FiberSocketBase* peer = socket_.get();
+#endif
+
   io::Result<bool> http_res{false};
   if (absl::GetFlag(FLAGS_http_admin_console))
     http_res = CheckForHttpProto(peer);

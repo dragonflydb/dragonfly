@@ -27,7 +27,7 @@ index d46e650c..e347e614 100644
  
 +uname_m := $(shell uname -m)
 +ifeq ($(uname_m),x86_64)
-+OPTFLAGS= -march=broadwell
++OPTFLAGS= -march=sandybridge
 +else ifeq ($(uname_m), aarch64)
 +OPTFLAGS= -march=armv8.2-a+fp16+rcpc+dotprod+crypto
 +else

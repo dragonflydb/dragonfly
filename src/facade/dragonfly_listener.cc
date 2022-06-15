@@ -4,7 +4,9 @@
 
 #include "facade/dragonfly_listener.h"
 
+#ifdef DFLY_USE_SSL
 #include <openssl/ssl.h>
+#endif
 
 #include "base/flags.h"
 #include "base/logging.h"
@@ -47,6 +49,8 @@ using namespace util;
 using absl::GetFlag;
 
 namespace {
+
+#ifdef DFLY_USE_SSL
 // To connect: openssl s_client  -cipher "ADH:@SECLEVEL=0" -state -crlf  -connect 127.0.0.1:6380
 static SSL_CTX* CreateSslCntx() {
   SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
@@ -90,6 +94,7 @@ static SSL_CTX* CreateSslCntx() {
 
   return ctx;
 }
+#endif
 
 bool ConfigureKeepAlive(int fd, unsigned interval_sec) {
   DCHECK_GT(interval_sec, 3u);
@@ -121,17 +126,23 @@ bool ConfigureKeepAlive(int fd, unsigned interval_sec) {
 }  // namespace
 
 Listener::Listener(Protocol protocol, ServiceInterface* si) : service_(si), protocol_(protocol) {
+
+#ifdef DFLY_USE_SSL
   if (GetFlag(FLAGS_tls)) {
     OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, NULL);
     ctx_ = CreateSslCntx();
   }
+#endif
+
   http_base_.reset(new HttpListener<>);
   http_base_->set_resource_prefix("https://romange.s3.eu-west-1.amazonaws.com/static");
   si->ConfigureHttpHandlers(http_base_.get());
 }
 
 Listener::~Listener() {
+#ifdef DFLY_USE_SSL
   SSL_CTX_free(ctx_);
+#endif
 }
 
 util::Connection* Listener::NewConnection(ProactorBase* proactor) {
