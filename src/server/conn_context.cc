@@ -232,4 +232,16 @@ void ConnectionContext::OnClose() {
   }
 }
 
+string ConnectionContext::GetContextInfo() const {
+  char buf[16] = {0};
+  unsigned index = 0;
+  if (async_dispatch)
+    buf[index++] = 'a';
+
+  if (conn_closing)
+    buf[index++] = 't';
+
+  return index ? absl::StrCat("flags:", buf) : string();
+}
+
 }  // namespace dfly

@@ -299,7 +299,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
   // because Scheduling is done before multi-exec batch is executed. Therefore we
   // lock keys right before the execution of each statement.
 
-  DVLOG(1) << "RunInShard: " << DebugId() << " sid:" << shard->shard_id();
+  VLOG(2) << "RunInShard: " << DebugId() << " sid:" << shard->shard_id();
 
   unsigned idx = SidToId(shard->shard_id());
   auto& sd = shard_data_[idx];
@@ -462,20 +462,45 @@ void Transaction::ScheduleInternal() {
         DCHECK(!span_all);
         coordinator_state_ |= COORD_OOO;
       }
-      DVLOG(1) << "Scheduled " << DebugId()
-               << " OutOfOrder: " << bool(coordinator_state_ & COORD_OOO);
+      VLOG(2) << "Scheduled " << DebugId()
+              << " OutOfOrder: " << bool(coordinator_state_ & COORD_OOO)
+              << " num_shards: " << num_shards;
       coordinator_state_ |= COORD_SCHED;
       break;
     }
 
-    DVLOG(1) << "Cancelling " << DebugId();
+    VLOG(2) << "Cancelling " << DebugId();
+
+    atomic_bool should_poll_execution{false};
 
     auto cancel = [&](EngineShard* shard) {
-      success.fetch_sub(CancelShardCb(shard), memory_order_relaxed);
+      bool res = CancelShardCb(shard);
+      if (res) {
+        should_poll_execution.store(true, memory_order_relaxed);
+      }
     };
 
     shard_set->RunBriefInParallel(std::move(cancel), is_active);
-    CHECK_EQ(0u, success.load(memory_order_relaxed));
+
+    // We must follow up with PollExecution because in rare cases with multi-trans
+    // that follows this one, we may find the next transaction in the queue that is never
+    // trigerred. Which leads to deadlock. I could solve this by adding PollExecution to
+    // CancelShardCb above but then we would need to use the shard_set queue since PollExecution
+    // is blocking. I wanted to avoid the additional latency for the general case of running
+    // CancelShardCb because of the very rate case below. Therefore, I decided to just fetch the
+    // indication that we need to follow up with PollExecution and then send it to shard_set queue.
+    // We do not need to wait for this callback to finish - just make sure it will eventually run.
+    // See https://github.com/dragonflydb/dragonfly/issues/150 for more info.
+    if (should_poll_execution.load(memory_order_relaxed)) {
+      for (uint32_t i = 0; i < shard_set->size(); ++i) {
+        if (!is_active(i))
+          continue;
+
+        shard_set->Add(i, [] {
+          EngineShard::tlocal()->PollExecution("cancel_cleanup", nullptr);
+        });
+      }
+    }
   }
 
   if (IsOOO()) {
@@ -855,11 +880,12 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
 
   sd.pq_pos = TxQueue::kEnd;
 
-  TxQueue* pq = shard->txq();
-  auto val = pq->At(pos);
+  TxQueue* txq = shard->txq();
+  TxQueue::Iterator head = txq->Head();
+  auto val = txq->At(pos);
   Transaction* trans = absl::get<Transaction*>(val);
-  DCHECK(trans == this) << "Pos " << pos << ", pq size " << pq->size() << ", trans " << trans;
-  pq->Remove(pos);
+  DCHECK(trans == this) << "Pos " << pos << ", txq size " << txq->size() << ", trans " << trans;
+  txq->Remove(pos);
 
   if (sd.local_mask & KEYLOCK_ACQUIRED) {
     auto mode = Mode();
@@ -867,7 +893,12 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
     shard->db_slice().Release(mode, lock_args);
     sd.local_mask &= ~KEYLOCK_ACQUIRED;
   }
-  return true;
+
+  if (pos == head && !txq->Empty()) {
+    return true;
+  }
+
+  return false;
 }
 
 // runs in engine-shard thread.

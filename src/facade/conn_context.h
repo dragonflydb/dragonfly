@@ -53,7 +53,7 @@ class ConnectionContext {
 
   virtual void OnClose() {}
 
-  std::string GetContextInfo() const { return std::string{}; }
+  virtual std::string GetContextInfo() const { return std::string{}; }
 
  private:
   Connection* owner_;

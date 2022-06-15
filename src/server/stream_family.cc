@@ -629,7 +629,8 @@ void StreamFamily::XDel(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
   args.remove_prefix(2);
 
-  absl::InlinedVector<streamID, 8> ids(ids.size());
+  absl::InlinedVector<streamID, 8> ids(args.size());
+
   for (size_t i = 0; i < args.size(); ++i) {
     ParsedStreamId parsed_id;
     string_view str_id = ArgS(args, i);

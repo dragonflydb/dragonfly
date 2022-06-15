@@ -33,7 +33,7 @@ extern "C" {
 #include "server/transaction.h"
 #include "server/version.h"
 #include "server/zset_family.h"
-#include "util/metrics/metrics.h"
+#include "util/html/sorted_table.h"
 #include "util/uring/uring_fiber_algo.h"
 #include "util/varz.h"
 
@@ -63,13 +63,13 @@ namespace this_fiber = ::boost::this_fiber;
 using absl::GetFlag;
 using absl::StrCat;
 using namespace facade;
+namespace h2 = boost::beast::http;
 
 namespace {
 
 DEFINE_VARZ(VarzMapAverage, request_latency_usec);
 
 std::optional<VarzFunction> engine_varz;
-metrics::CounterFamily cmd_req("requests_total", "Number of served redis requests");
 
 constexpr size_t kMaxThreadSize = 1024;
 
@@ -300,6 +300,48 @@ bool EvalValidator(CmdArgList args, ConnectionContext* cntx) {
   return true;
 }
 
+void TxTable(const http::QueryArgs& args, HttpContext* send) {
+  using html::SortedTable;
+
+  http::StringResponse resp = http::MakeStringResponse(h2::status::ok);
+  resp.body() = SortedTable::HtmlStart();
+  SortedTable::StartTable({"ShardId", "TID", "TxId", "Armed"}, &resp.body());
+
+  if (shard_set) {
+    vector<string> rows(shard_set->size());
+
+    shard_set->RunBriefInParallel([&](EngineShard* shard) {
+      ShardId sid = shard->shard_id();
+
+      absl::AlphaNum tid(gettid());
+      absl::AlphaNum sid_an(sid);
+
+      string& mine = rows[sid];
+      TxQueue* queue = shard->txq();
+
+      if (!queue->Empty()) {
+        auto cur = queue->Head();
+        do {
+          auto value = queue->At(cur);
+          Transaction* trx = std::get<Transaction*>(value);
+
+          absl::AlphaNum an2(trx->txid());
+          absl::AlphaNum an3(trx->IsArmedInShard(sid));
+          SortedTable::Row({sid_an.Piece(), tid.Piece(), an2.Piece(), an3.Piece()}, &mine);
+          cur = queue->Next(cur);
+        } while (cur != queue->Head());
+      }
+    });
+
+    for (const auto& s : rows) {
+      resp.body().append(s);
+    }
+  }
+
+  SortedTable::EndTable(&resp.body());
+  send->Invoke(std::move(resp));
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp) : pp_(*pp), server_family_(this) {
@@ -334,7 +376,6 @@ void Service::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_i
   StringFamily::Init(&pp_);
   GenericFamily::Init(&pp_);
   server_family_.Init(acceptor, main_interface);
-  cmd_req.Init(&pp_, {"type"});
 }
 
 void Service::Shutdown() {
@@ -352,7 +393,6 @@ void Service::Shutdown() {
   StringFamily::Shutdown();
   GenericFamily::Shutdown();
 
-  cmd_req.Shutdown();
   shard_set->Shutdown();
 
   // wait for all the pending callbacks to stop.
@@ -503,7 +543,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   }
 
   dfly_cntx->cid = cid;
-  cmd_req.Inc({cmd_name});
+
   cid->Invoke(args, dfly_cntx);
   end_usec = ProactorBase::GetMonotonicTimeNs();
 
@@ -856,6 +896,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     return rb->SendError("-EXECABORT Transaction discarded because of previous errors");
   }
 
+  VLOG(1) << "StartExec " << cntx->conn_state.exec_body.size();
   rb->StartArray(cntx->conn_state.exec_body.size());
   if (!cntx->conn_state.exec_body.empty()) {
     CmdArgVec str_list;
@@ -961,9 +1002,9 @@ void Service::Subscribe(CmdArgList args, ConnectionContext* cntx) {
 void Service::Unsubscribe(CmdArgList args, ConnectionContext* cntx) {
   args.remove_prefix(1);
 
-  if (args.size() == 0){
+  if (args.size() == 0) {
     cntx->UnsubscribeAll(true);
-  }else{
+  } else {
     cntx->ChangeSubscription(false, true, std::move(args));
   }
 }
@@ -1026,6 +1067,7 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
 
 void Service::ConfigureHttpHandlers(util::HttpListenerBase* base) {
   server_family_.ConfigureMetrics(base);
+  base->RegisterCb("/txz", TxTable);
 }
 
 using ServiceFunc = void (Service::*)(CmdArgList, ConnectionContext* cntx);

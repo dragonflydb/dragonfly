@@ -132,7 +132,9 @@ void EngineShard::DestroyThreadLocal() {
 // Is called by Transaction::ExecuteAsync in order to run transaction tasks.
 // Only runs in its own thread.
 void EngineShard::PollExecution(const char* context, Transaction* trans) {
-  DVLOG(1) << "PollExecution " << context << " " << (trans ? trans->DebugId() : "");
+  VLOG(2) << "PollExecution " << context << " " << (trans ? trans->DebugId() : "")
+          << " " << txq_.size() << " " << continuation_trans_;
+
   ShardId sid = shard_id();
 
   uint16_t trans_mask = trans ? trans->GetLocalMask(sid) : 0;
@@ -170,7 +172,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
       // The fact that Tx is in the queue, already means that coordinator fiber will not progress,
       // hence here it's enough to test for run_count and check local_mask.
       bool is_armed = head->IsArmedInShard(sid);
-      DVLOG(2) << "Considering head " << head->DebugId() << " isarmed: " << is_armed;
+      VLOG(2) << "Considering head " << head->DebugId() << " isarmed: " << is_armed;
 
       if (!is_armed)
         break;

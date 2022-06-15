@@ -208,7 +208,7 @@ class Transaction {
   /// Runs in the shard thread.
   std::pair<bool, bool> ScheduleInShard(EngineShard* shard);
 
-  // Returns true if operation was cancelled for this shard. Runs in the shard thread.
+  // Returns true if we need to follow up with PollExecution on this shard.
   bool CancelShardCb(EngineShard* shard);
 
   // Shard callbacks used within Execute calls
@@ -332,7 +332,7 @@ class Transaction {
 };
 
 inline uint16_t trans_id(const Transaction* ptr) {
-  return intptr_t(ptr) & 0xFFFF;
+  return (intptr_t(ptr) >> 8) & 0xFFFF;
 }
 
 OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args);
