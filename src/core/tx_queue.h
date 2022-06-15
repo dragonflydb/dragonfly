@@ -76,6 +76,10 @@ class TxQueue {
     return head_;
   }
 
+  Iterator Next(Iterator it) const {
+    return vec_[it].next;
+  }
+
  private:
   enum { TRANS_TAG = 0, UINT_TAG = 11, FREE_TAG = 12 };
 

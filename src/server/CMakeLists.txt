@@ -10,7 +10,7 @@ add_library(dragonfly_lib blocking_controller.cc channel_slice.cc command_regist
             set_family.cc stream_family.cc string_family.cc table.cc tiered_storage.cc
             transaction.cc zset_family.cc version.cc)
 
-cxx_link(dragonfly_lib dfly_core dfly_facade redis_lib strings_lib)
+cxx_link(dragonfly_lib dfly_core dfly_facade redis_lib strings_lib html_lib)
 
 add_library(dfly_test_lib test_utils.cc)
 cxx_link(dfly_test_lib dragonfly_lib facade_test gtest_main_ext)

@@ -101,6 +101,8 @@ class ConnectionContext : public facade::ConnectionContext {
 
   bool is_replicating = false;
 
+  std::string GetContextInfo() const override;
+
  private:
   void SendSubscriptionChangedResponse(std::string_view action,
                                        std::optional<std::string_view> topic,

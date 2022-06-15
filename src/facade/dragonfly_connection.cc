@@ -349,7 +349,9 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   // After the client disconnected.
   cc_->conn_closing = true;  // Signal dispatch to close.
   evc_.notify();
+  VLOG(1) << "Before dispatch_fb.join()";
   dispatch_fb.join();
+  VLOG(1) << "After dispatch_fb.join()";
   cc_->OnClose();
 
   stats->read_buf_capacity -= io_buf_.Capacity();
