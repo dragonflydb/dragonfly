@@ -511,21 +511,23 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   if (under_script) {
     DCHECK(dfly_cntx->transaction);
-    OpResult<KeyIndex> key_index_res = DetermineKeys(cid, args);
-    if (!key_index_res)
-      return (*cntx)->SendError(key_index_res.status());
+    if (IsTransactional(cid)) {
+      OpResult<KeyIndex> key_index_res = DetermineKeys(cid, args);
+      if (!key_index_res)
+        return (*cntx)->SendError(key_index_res.status());
 
-    const auto& key_index = *key_index_res;
-    for (unsigned i = key_index.start; i < key_index.end; ++i) {
-      string_view key = ArgS(args, i);
-      if (!dfly_cntx->conn_state.script_info->keys.contains(key)) {
-        return (*cntx)->SendError("script tried accessing undeclared key");
+      const auto& key_index = *key_index_res;
+      for (unsigned i = key_index.start; i < key_index.end; ++i) {
+        string_view key = ArgS(args, i);
+        if (!dfly_cntx->conn_state.script_info->keys.contains(key)) {
+          return (*cntx)->SendError("script tried accessing undeclared key");
+        }
       }
+      dfly_cntx->transaction->SetExecCmd(cid);
+      OpStatus st = dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args);
+      if (st != OpStatus::OK)
+        return (*cntx)->SendError(st);
     }
-    dfly_cntx->transaction->SetExecCmd(cid);
-    OpStatus st = dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args);
-    if (st != OpStatus::OK)
-      return (*cntx)->SendError(st);
   } else {
     DCHECK(dfly_cntx->transaction == nullptr);
 
@@ -1081,18 +1083,21 @@ void Service::RegisterCommands() {
 
   constexpr auto kExecMask = CO::LOADING | CO::NOSCRIPT | CO::GLOBAL_TRANS;
 
-  registry_ << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0}.HFUNC(Quit)
-            << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(Multi)
-            << CI{"DISCARD", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.MFUNC(Discard)
-            << CI{"EVAL", CO::NOSCRIPT, -3, 3, 3, 1}.MFUNC(Eval).SetValidator(&EvalValidator)
-            << CI{"EVALSHA", CO::NOSCRIPT, -3, 3, 3, 1}.MFUNC(EvalSha).SetValidator(&EvalValidator)
-            << CI{"EXEC", kExecMask, 1, 0, 0, 0}.MFUNC(Exec)
-            << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, 0}.MFUNC(Publish)
-            << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(Subscribe)
-            << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(Unsubscribe)
-            << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(PSubscribe)
-            << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(PUnsubscribe)
-            << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0}.MFUNC(Function);
+  registry_
+      << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0}.HFUNC(Quit)
+      << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(Multi)
+      << CI{"DISCARD", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.MFUNC(Discard)
+      << CI{"EVAL", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, 1}.MFUNC(Eval).SetValidator(
+             &EvalValidator)
+      << CI{"EVALSHA", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, 1}.MFUNC(EvalSha).SetValidator(
+             &EvalValidator)
+      << CI{"EXEC", kExecMask, 1, 0, 0, 0}.MFUNC(Exec)
+      << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, 0}.MFUNC(Publish)
+      << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(Subscribe)
+      << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(Unsubscribe)
+      << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(PSubscribe)
+      << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(PUnsubscribe)
+      << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0}.MFUNC(Function);
 
   StreamFamily::Register(&registry_);
   StringFamily::Register(&registry_);
@@ -1114,6 +1119,13 @@ void Service::RegisterCommands() {
         else
           key_len = StrCat(cid.last_key_pos() - cid.first_key_pos() + 1);
         LOG(INFO) << "    " << key << ": with " << key_len << " keys";
+      }
+    });
+
+    LOG(INFO) << "Non-transactional commands are: ";
+    registry_.Traverse([](std::string_view name, const CI& cid) {
+      if (!IsTransactional(&cid)) {
+        LOG(INFO) << "    " << name;
       }
     });
   }

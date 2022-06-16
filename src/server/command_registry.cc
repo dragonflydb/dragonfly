@@ -111,8 +111,8 @@ const char* OptName(CO::CommandOpt fl) {
       return "blocking";
     case GLOBAL_TRANS:
       return "global-trans";
-    case DESTINATION_KEY:
-      return "dest-key";
+    case VARIADIC_KEYS:
+      return "variadic-keys";
   }
   return "unknown";
 }
