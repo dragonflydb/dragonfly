@@ -862,6 +862,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("total_reads_processed", m.conn_stats.io_read_cnt);
     append("total_writes_processed", m.conn_stats.io_write_cnt);
     append("async_writes_count", m.conn_stats.async_writes_cnt);
+    append("parser_err_count", m.conn_stats.parser_err_cnt);
   }
 
   if (should_enter("TIERED", true)) {

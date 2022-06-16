@@ -13,7 +13,7 @@ using namespace std;
 
 namespace {
 
-constexpr int kMaxArrayLen = 8192;
+constexpr int kMaxArrayLen = 65536;
 constexpr int64_t kMaxBulkLen = 64 * (1ul << 20);  // 64MB.
 
 }  // namespace
