@@ -16,6 +16,7 @@ namespace dfly {
 
 using namespace std;
 using namespace util;
+using absl::StrCat;
 
 thread_local Transaction::TLTmpSpace Transaction::tmp_space;
 
@@ -51,7 +52,8 @@ Transaction::Transaction(const CommandId* cid) : cid_(cid) {
 }
 
 Transaction::~Transaction() {
-  DVLOG(2) << "Transaction " << DebugId() << " destroyed";
+  DVLOG(2) << "Transaction " << StrCat(Name(), "@", txid_, "/", unique_shard_cnt_, ")")
+           << " destroyed";
 }
 
 /**
@@ -286,7 +288,7 @@ void Transaction::SetExecCmd(const CommandId* cid) {
 string Transaction::DebugId() const {
   DCHECK_GT(use_count_.load(memory_order_relaxed), 0u);
 
-  return absl::StrCat(Name(), "@", txid_, "/", unique_shard_cnt_, " (", trans_id(this), ")");
+  return StrCat(Name(), "@", txid_, "/", unique_shard_cnt_, " (", trans_id(this), ")");
 }
 
 // Runs in the dbslice thread. Returns true if transaction needs to be kept in the queue.
@@ -496,9 +498,7 @@ void Transaction::ScheduleInternal() {
         if (!is_active(i))
           continue;
 
-        shard_set->Add(i, [] {
-          EngineShard::tlocal()->PollExecution("cancel_cleanup", nullptr);
-        });
+        shard_set->Add(i, [] { EngineShard::tlocal()->PollExecution("cancel_cleanup", nullptr); });
       }
     }
   }
@@ -1156,14 +1156,19 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
   DCHECK_EQ(0u, cid->opt_mask() & CO::GLOBAL_TRANS);
 
   KeyIndex key_index;
+
   int num_custom_keys = -1;
 
-  if (cid->opt_mask() & CO::DESTINATION_KEY) {
-    key_index.bonus = 1;
+  if (cid->opt_mask() & CO::VARIADIC_KEYS) {
     if (args.size() < 3) {
       return OpStatus::SYNTAX_ERR;
     }
 
+    string_view name{cid->name()};
+
+    if (!absl::StartsWith(name, "EVAL")) {
+      key_index.bonus = 1;  // Z<xxx>STORE commands
+    }
     string_view num(ArgS(args, 2));
     if (!absl::SimpleAtoi(num, &num_custom_keys) || num_custom_keys < 0)
       return OpStatus::INVALID_INT;
@@ -1185,20 +1190,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
     return key_index;
   }
 
-  string_view name{cid->name()};
-  if (name == "EVAL" || name == "EVALSHA") {
-    DCHECK_GE(args.size(), 3u);
-    uint32_t num_keys;
-
-    CHECK(absl::SimpleAtoi(ArgS(args, 2), &num_keys));
-    key_index.start = 3;
-    key_index.end = 3 + num_keys;
-    key_index.step = 1;
-
-    return key_index;
-  }
-
-  LOG(FATAL) << "TBD: Not supported";
+  LOG(FATAL) << "TBD: Not supported " << cid->name();
 
   return key_index;
 }

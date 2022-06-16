@@ -24,10 +24,10 @@ namespace dfly {
 
 using namespace std;
 using namespace util;
+using absl::StrCat;
 using ::io::Result;
 using testing::ElementsAre;
 using testing::HasSubstr;
-using absl::StrCat;
 namespace this_fiber = boost::this_fiber;
 
 namespace {
@@ -286,6 +286,11 @@ TEST_F(DflyEngineTest, Eval) {
 
   resp = Run({"eval", "return 77", "2", "foo", "zoo"});
   EXPECT_THAT(resp, IntArg(77));
+
+  // a,b important here to spawn multiple shards.
+  resp = Run({"eval", "return redis.call('exists', KEYS[2])", "2", "a", "b"});
+  EXPECT_EQ(2, GetDebugInfo().shards_count);
+  EXPECT_THAT(resp, IntArg(0));
 }
 
 TEST_F(DflyEngineTest, EvalResp) {
@@ -297,23 +302,40 @@ TEST_F(DflyEngineTest, EvalResp) {
   EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(5), "foo", "17.5"));
 }
 
-TEST_F(DflyEngineTest, Hello) {
-  auto resp = Run({"hello"});
-  ASSERT_THAT(resp, ArrLen(12));
-  resp = Run({"hello", "2"});
-  ASSERT_THAT(resp, ArrLen(12));
+TEST_F(DflyEngineTest, EvalPublish) {
+  auto resp = pp_->at(1)->Await([&] { return Run({"subscribe", "foo"}); });
+  EXPECT_THAT(resp, ArrLen(3));
 
-  EXPECT_THAT(resp.GetVec(), ElementsAre("server", "redis", "version", ArgType(RespExpr::STRING),
-                                         "proto", IntArg(2), "id", ArgType(RespExpr::INT64), "mode",
-                                         "standalone", "role", "master"));
+  resp = Run({"eval", "return redis.call('publish', 'foo', 'bar')", "0"});
+  EXPECT_THAT(resp, IntArg(1));
+}
 
-  // These are valid arguments to HELLO, however as they are not yet supported the implementation
-  // is degraded to 'unknown command'.
-  EXPECT_THAT(Run({"hello", "3"}),
-              ErrArg("ERR unknown command 'HELLO' with args beginning with: `3`"));
-  EXPECT_THAT(
-      Run({"hello", "2", "AUTH", "uname", "pwd"}),
-      ErrArg("ERR unknown command 'HELLO' with args beginning with: `2`, `AUTH`, `uname`, `pwd`"));
+TEST_F(DflyEngineTest, EvalBug59) {
+  auto resp = Run({"eval", R"(
+local epoch
+if redis.call('exists', KEYS[2]) ~= 0 then
+  epoch = redis.call("hget", KEYS[2], "e")
+end
+if epoch == false or epoch == nil then
+  epoch = ARGV[6]
+  redis.call("hset", KEYS[2], "e", epoch)
+end
+local offset = redis.call("hincrby", KEYS[2], "s", 1)
+if ARGV[5] ~= '0' then
+	redis.call("expire", KEYS[2], ARGV[5])
+end
+redis.call("xadd", KEYS[1], "MAXLEN", ARGV[2], offset, "d", ARGV[1])
+redis.call("expire", KEYS[1], ARGV[3])
+if ARGV[4] ~= '' then
+	local payload = "__" .. "p1:" .. offset .. ":" .. epoch .. "__" .. ARGV[1]
+	redis.call("publish", ARGV[4], payload)
+end
+
+return {offset, epoch}
+    )",
+                   "2", "x", "y", "1", "2", "3", "4", "5", "6"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(1), "6"));
 }
 
 TEST_F(DflyEngineTest, EvalSha) {
@@ -337,6 +359,25 @@ TEST_F(DflyEngineTest, EvalSha) {
   // Important to keep spaces in order to be compatible with Redis.
   // See https://github.com/dragonflydb/dragonfly/issues/146
   EXPECT_THAT(resp, "c6459b95a0e81df97af6fdd49b1a9e0287a57363");
+}
+
+TEST_F(DflyEngineTest, Hello) {
+  auto resp = Run({"hello"});
+  ASSERT_THAT(resp, ArrLen(12));
+  resp = Run({"hello", "2"});
+  ASSERT_THAT(resp, ArrLen(12));
+
+  EXPECT_THAT(resp.GetVec(), ElementsAre("server", "redis", "version", ArgType(RespExpr::STRING),
+                                         "proto", IntArg(2), "id", ArgType(RespExpr::INT64), "mode",
+                                         "standalone", "role", "master"));
+
+  // These are valid arguments to HELLO, however as they are not yet supported the implementation
+  // is degraded to 'unknown command'.
+  EXPECT_THAT(Run({"hello", "3"}),
+              ErrArg("ERR unknown command 'HELLO' with args beginning with: `3`"));
+  EXPECT_THAT(
+      Run({"hello", "2", "AUTH", "uname", "pwd"}),
+      ErrArg("ERR unknown command 'HELLO' with args beginning with: `2`, `AUTH`, `uname`, `pwd`"));
 }
 
 TEST_F(DflyEngineTest, Memcache) {
@@ -437,9 +478,7 @@ TEST_F(DflyEngineTest, OOM) {
 }
 
 TEST_F(DflyEngineTest, PSubscribe) {
-  auto resp = pp_->at(1)->Await([&] {
-    return Run({"psubscribe", "a*", "b*"});
-  });
+  auto resp = pp_->at(1)->Await([&] { return Run({"psubscribe", "a*", "b*"}); });
   EXPECT_THAT(resp, ArrLen(3));
   resp = pp_->at(0)->Await([&] { return Run({"publish", "ab", "foo"}); });
   EXPECT_THAT(resp, IntArg(1));
