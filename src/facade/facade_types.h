@@ -35,6 +35,7 @@ struct ConnectionStats {
   size_t io_write_bytes = 0;
   size_t command_cnt = 0;
   size_t pipelined_cmd_cnt = 0;
+  size_t parser_err_cnt = 0;
 
   // Writes count that happenned via SendRawMessageAsync call.
   size_t async_writes_cnt = 0;

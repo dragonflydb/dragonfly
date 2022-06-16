@@ -228,10 +228,13 @@ void Connection::HandleRequests() {
       if (breaker_cb_) {
         should_disarm_poller = true;
 
-        poll_id = us->PollEvent(POLLERR | POLLHUP, [&](uint32_t mask) {
-          VLOG(1) << "Got event " << mask;
+        poll_id = us->PollEvent(POLLERR | POLLHUP, [&](int32_t mask) {
           cc_->conn_closing = true;
-          breaker_cb_(mask);
+          if (mask > 0) {
+            VLOG(1) << "Got event " << mask;
+            breaker_cb_(mask);
+          }
+
           evc_.notify();  // Notify dispatch fiber.
           should_disarm_poller = false;
         });
@@ -372,10 +375,12 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   // We wait for dispatch_fb to finish writing the previous replies before replying to the last
   // offending request.
   if (parse_status == ERROR) {
-    VLOG(1) << "Error parser status " << parse_status;
+    VLOG(1) << "Error parser status " << parser_error_;
+    ++stats->parser_err_cnt;
 
     if (redis_parser_) {
       SendProtocolError(RedisParser::Result(parser_error_), peer);
+      peer->Shutdown(SHUT_RDWR);
     } else {
       string_view sv{"CLIENT_ERROR bad command line format\r\n"};
       auto size_res = peer->Send(::io::Buffer(sv));
@@ -420,6 +425,8 @@ auto Connection::ParseRedis() -> ParserStatus {
         service_->DispatchCommand(cmd_list, cc_.get());
         last_interaction_ = time(nullptr);
       } else {
+        VLOG(2) << "Dispatch async";
+
         // Dispatch via queue to speedup input reading.
         Request* req = FromArgs(std::move(parse_args_), tlh);
 
