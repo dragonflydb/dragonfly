@@ -72,6 +72,7 @@ class RdbLoader {
   ::io::Result<robj*> ReadZSet(int rdbtype);
   ::io::Result<robj*> ReadZSetZL();
   ::io::Result<robj*> ReadListQuicklist(int rdbtype);
+  ::io::Result<robj*> ReadStreams();
 
   std::error_code EnsureRead(size_t min_sz) {
     if (mem_buf_.InputLen() >= min_sz)

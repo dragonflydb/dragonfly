@@ -10,6 +10,7 @@ extern "C" {
 #include "redis/listpack.h"
 #include "redis/lzfP.h" /* LZF compression library */
 #include "redis/rdb.h"
+#include "redis/stream.h"
 #include "redis/util.h"
 #include "redis/ziplist.h"
 #include "redis/zmalloc.h"
@@ -834,6 +835,9 @@ io::Result<robj*> RdbLoader::ReadObj(int rdbtype) {
     case RDB_TYPE_LIST_QUICKLIST:
       res_obj = ReadListQuicklist(rdbtype);
       break;
+    case RDB_TYPE_STREAM_LISTPACKS:
+      res_obj = ReadStreams();
+      break;
     default:
       LOG(ERROR) << "Unsupported rdb type " << rdbtype;
       return Unexpected(errc::invalid_encoding);
@@ -1262,6 +1266,179 @@ io::Result<robj*> RdbLoader::ReadListQuicklist(int rdbtype) {
   res->encoding = OBJ_ENCODING_QUICKLIST;
 
   return res;
+}
+
+::io::Result<robj*> RdbLoader::ReadStreams() {
+  uint64_t listpacks;
+  SET_OR_UNEXPECT(LoadLen(nullptr), listpacks);
+
+  robj* o = createStreamObject();
+  stream* s = (stream*)o->ptr;
+
+  auto cleanup = absl::Cleanup([&] { decrRefCount(o); });
+
+  while (listpacks--) {
+    /* Get the master ID, the one we'll use as key of the radix tree
+     * node: the entries inside the listpack itself are delta-encoded
+     * relatively to this ID. */
+    sds nodekey;
+    SET_OR_UNEXPECT(ReadKey(), nodekey);
+    auto cleanup2 = absl::Cleanup([&] { sdsfree(nodekey); });
+
+    if (sdslen(nodekey) != sizeof(streamID)) {
+      LOG(ERROR) << "Stream node key entry is not the size of a stream ID";
+
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+
+    /* Load the listpack. */
+    OpaqueBuf fetch;
+    SET_OR_UNEXPECT(FetchGenericString(RDB_LOAD_PLAIN), fetch);
+    if (fetch.second == 0 || fetch.first == nullptr) {
+      LOG(ERROR) << "Stream listpacks loading failed";
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+    DCHECK(fetch.first);
+
+    uint8_t* lp = (uint8_t*)fetch.first;
+
+    if (!streamValidateListpackIntegrity(lp, fetch.second, 0)) {
+      zfree(lp);
+      LOG(ERROR) << "Stream listpack integrity check failed.";
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+
+    unsigned char* first = lpFirst(lp);
+    if (first == NULL) {
+      /* Serialized listpacks should never be empty, since on
+       * deletion we should remove the radix tree key if the
+       * resulting listpack is empty. */
+      LOG(ERROR) << "Empty listpack inside stream";
+      zfree(lp);
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+
+    /* Insert the key in the radix tree. */
+    int retval = raxTryInsert(s->rax_tree, (unsigned char*)nodekey, sizeof(streamID), lp, NULL);
+    if (!retval) {
+      LOG(ERROR) << "Listpack re-added with existing key";
+      return Unexpected(errc::duplicate_key);
+    }
+  }
+
+  /* Load total number of items inside the stream. */
+  SET_OR_UNEXPECT(LoadLen(nullptr), s->length);
+
+  /* Load the last entry ID. */
+  SET_OR_UNEXPECT(LoadLen(nullptr), s->last_id.ms);
+  SET_OR_UNEXPECT(LoadLen(nullptr), s->last_id.seq);
+
+  /* Consumer groups loading */
+  uint64_t cgroups_count;
+  SET_OR_UNEXPECT(LoadLen(nullptr), cgroups_count);
+
+  while (cgroups_count--) {
+    /* Get the consumer group name and ID. We can then create the
+     * consumer group ASAP and populate its structure as
+     * we read more data. */
+    streamID cg_id;
+
+    sds cgname;
+    SET_OR_UNEXPECT(ReadKey(), cgname);
+
+    auto cleanup2 = absl::Cleanup([&] { sdsfree(cgname); });
+    SET_OR_UNEXPECT(LoadLen(nullptr), cg_id.ms);
+    SET_OR_UNEXPECT(LoadLen(nullptr), cg_id.seq);
+
+    streamCG* cgroup = streamCreateCG(s, cgname, sdslen(cgname), &cg_id, 0);
+    if (cgroup == NULL) {
+      LOG(ERROR) << "Duplicated consumer group name " << cgname;
+      return Unexpected(errc::duplicate_key);
+    }
+    std::move(cleanup2).Invoke();
+    // no need to free cgroup because it's attached to s.
+
+    /* Load the global PEL for this consumer group, however we'll
+     * not yet populate the NACK structures with the message
+     * owner, since consumers for this group and their messages will
+     * be read as a next step. So for now leave them not resolved
+     * and later populate it. */
+    uint64_t pel_size;
+    SET_OR_UNEXPECT(LoadLen(nullptr), pel_size);
+
+    while (pel_size--) {
+      uint8_t rawid[sizeof(streamID)];
+      error_code ec = FetchBuf(sizeof(rawid), rawid);
+      if (ec) {
+        LOG(ERROR) << "Stream PEL ID loading failed.";
+        return make_unexpected(ec);
+      }
+
+      streamNACK* nack = streamCreateNACK(NULL);
+      auto cleanup2 = absl::Cleanup([&] { streamFreeNACK(nack); });
+
+      SET_OR_UNEXPECT(FetchInt<int64_t>(), nack->delivery_time);
+      SET_OR_UNEXPECT(LoadLen(nullptr), nack->delivery_count);
+
+      if (!raxTryInsert(cgroup->pel, rawid, sizeof(rawid), nack, NULL)) {
+        LOG(ERROR) << "Duplicated global PEL entry loading stream consumer group";
+        return Unexpected(errc::duplicate_key);
+      }
+      std::move(cleanup2).Cancel();
+    }
+
+    /* Now that we loaded our global PEL, we need to load the
+     * consumers and their local PELs. */
+    uint64_t consumers_num;
+    SET_OR_UNEXPECT(LoadLen(nullptr), consumers_num);
+
+    while (consumers_num--) {
+      sds cname;
+      SET_OR_UNEXPECT(ReadKey(), cname);
+
+      streamConsumer* consumer =
+          streamCreateConsumer(cgroup, cname, NULL, 0, SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
+      sdsfree(cname);
+      if (!consumer) {
+        LOG(ERROR) << "Duplicate stream consumer detected.";
+        return Unexpected(errc::duplicate_key);
+      }
+      // no need to free consumer because it's attached to cgroup.
+
+      SET_OR_UNEXPECT(FetchInt<int64_t>(), consumer->seen_time);
+
+      /* Load the PEL about entries owned by this specific
+       * consumer. */
+      SET_OR_UNEXPECT(LoadLen(nullptr), pel_size);
+      while (pel_size--) {
+        unsigned char rawid[sizeof(streamID)];
+        error_code ec = FetchBuf(sizeof(rawid), rawid);
+        if (ec) {
+          LOG(ERROR) << "Stream PEL ID loading failed.";
+          return make_unexpected(ec);
+        }
+        streamNACK* nack = (streamNACK*)raxFind(cgroup->pel, rawid, sizeof(rawid));
+        if (nack == raxNotFound) {
+          LOG(ERROR) << "Consumer entry not found in group global PEL";
+          return Unexpected(errc::rdb_file_corrupted);
+        }
+
+        /* Set the NACK consumer, that was left to NULL when
+         * loading the global PEL. Then set the same shared
+         * NACK structure also in the consumer-specific PEL. */
+        nack->consumer = consumer;
+        if (!raxTryInsert(consumer->pel, rawid, sizeof(rawid), nack, NULL)) {
+          LOG(ERROR) << "Duplicated consumer PEL entry loading a stream consumer group";
+          streamFreeNACK(nack);
+          return Unexpected(errc::duplicate_key);
+        }
+      }
+    }  // while (consumers_num)
+  }    // while (cgroup_num)
+
+  std::move(cleanup).Cancel();
+
+  return o;
 }
 
 void RdbLoader::ResizeDb(size_t key_num, size_t expire_num) {

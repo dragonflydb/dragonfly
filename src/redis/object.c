@@ -369,10 +369,11 @@ void freeModuleObject(robj *o) {
     zfree(mv);
 }
 
-void freeStreamObject(robj *o) {
-    freeStream(o->ptr);
-}
 #endif
+
+void freeStreamObject(robj *o) {
+  freeStream(o->ptr);
+}
 
 void incrRefCount(robj *o) {
     if (o->refcount < OBJ_FIRST_SPECIAL_REFCOUNT) {
@@ -399,8 +400,7 @@ void decrRefCount(robj *o) {
             // freeModuleObject(o);
         break;
         case OBJ_STREAM:
-            serverPanic("Unsupported OBJ_STREAM type");
-            //freeStreamObject(o);
+            freeStreamObject(o);
         break;
         default: serverPanic("Unknown object type"); break;
         }
@@ -658,7 +658,7 @@ size_t stringObjectLen(robj *o) {
     }
 }
 
-// ROMAN: Copied from the DISABLED part below 
+// ROMAN: Copied from the DISABLED part below
 int getLongLongFromObject(robj *o, long long *target) {
     long long value;
 
@@ -850,7 +850,7 @@ size_t objectComputeSize(robj *key, robj *o, size_t sample_size, int dbid) {
         }
     } else if (o->type == OBJ_STREAM) {
         serverPanic("OBJ_STREAM not supported");
-#ifdef ROMAN_CLIENT_DISABLE        
+#ifdef ROMAN_CLIENT_DISABLE
         stream *s = o->ptr;
         asize = sizeof(*o)+sizeof(*s);
         asize += streamRadixTreeMemoryUsage(s->rax);
@@ -911,10 +911,10 @@ size_t objectComputeSize(robj *key, robj *o, size_t sample_size, int dbid) {
             }
             raxStop(&ri);
         }
-#endif        
+#endif
     } else if (o->type == OBJ_MODULE) {
         serverPanic("OBJ_MODULE not supported");
-#ifdef ROMAN_CLIENT_DISABLE        
+#ifdef ROMAN_CLIENT_DISABLE
         moduleValue *mv = o->ptr;
         moduleType *mt = mv->type;
         if (mt->mem_usage != NULL) {
@@ -922,7 +922,7 @@ size_t objectComputeSize(robj *key, robj *o, size_t sample_size, int dbid) {
         } else {
             asize = 0;
         }
-#endif        
+#endif
     } else {
         serverPanic("Unknown object type");
     }
@@ -1175,7 +1175,7 @@ sds getMemoryDoctorReport(void) {
     return s;
 }
 
-#endif 
+#endif
 
 /* Set the object LRU/LFU depending on server.maxmemory_policy.
  * The lfu_freq arg is only relevant if policy is MAXMEMORY_FLAG_LFU.

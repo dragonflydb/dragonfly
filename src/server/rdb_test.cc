@@ -115,6 +115,17 @@ TEST_F(RdbTest, LoadSmall6) {
   EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(1), IntArg(1)));
 }
 
+TEST_F(RdbTest, LoadStream) {
+  io::FileSource fs = GetSource("redis6_stream.rdb");
+  RdbLoader loader(service_->script_mgr());
+
+  // must run in proactor thread in order to avoid polluting the serverstate
+  // in the main, testing thread.
+  auto ec = pp_->at(0)->Await([&] { return loader.Load(&fs); });
+
+  ASSERT_FALSE(ec) << ec.message();
+}
+
 TEST_F(RdbTest, Reload) {
   absl::FlagSaver fs;
 
