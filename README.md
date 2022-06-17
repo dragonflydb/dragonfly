@@ -20,7 +20,7 @@ Dragonfly's core properties make it a cost-effective, high-performing, and easy-
 
 ## Benchmarks
 
-<img src="docs/throughput.svg" width="80%" border="0"/>
+<img src="http://assets.dragonflydb.io/repo-assets/aws-throughput.svg" width="80%" border="0"/>
 
 Dragonfly is crossing 3.8M QPS on c6gn.16xlarge reaching x25 increase in throughput compared to Redis.
 
@@ -42,13 +42,36 @@ Dragonfly is crossing 3.8M QPS on c6gn.16xlarge reaching x25 increase in through
 
 When running in pipeline mode `--pipeline=30`, Dragonfly reaches **10M qps** for SET and **15M qps** for GET operations.
 
+### Memcached / Dragonfly
+
+We compared memcached with Dragonfly on `c6gn.16xlarge` instance on AWS.
+As you can see below Dragonfly dominates memcached for both write and read workloads
+in terms of throughput with a comparable latency. For write workloads, Dragonfly has also better latency, due to contention on the [write path in memcached](docs/memcached_benchmark.md).
+
+#### SET benchmark
+
+| Server    | QPS(thousands qps) | latency 99% | 99.9%   |
+|:---------:|:------------------:|:-----------:|:-------:|
+| Dragonfly |  🟩 3844           |🟩 0.9ms     | 🟩 2.4ms |
+| Memcached |   806              |   1.6ms     | 3.2ms    |
+
+#### GET benchmark
+
+| Server    | QPS(thousands qps) | latency 99% | 99.9%   |
+|-----------|:------------------:|:-----------:|:-------:|
+| Dragonfly | 🟩 3717            |   1ms       | 2.4ms   |
+| Memcached |   2100             |  🟩 0.34ms  | 🟩 0.6ms |
+
+
+Memcached exhibited lower latency for the read benchmark, but also lower throughput.
+
 ### Memory efficiency
 
 In the following test, we filled Dragonfly and Redis with ~5GB of data
 using `debug populate 5000000 key 1024` command. Then we started sending the update traffic with `memtier` and kicked off the snapshotting with the
 "bgsave" command. The following figure demonstrates clearly how both servers behave in terms of memory efficiency.
 
-<img src="docs/bgsave_memusage.svg" width="70%" border="0"/>
+<img src="http://assets.dragonflydb.io/repo-assets/bgsave-memusage.svg" width="70%" border="0"/>
 
 Dragonfly was 30% more memory efficient than Redis at the idle state.
 It also did not show any visible memory increase during the snapshot phase.
