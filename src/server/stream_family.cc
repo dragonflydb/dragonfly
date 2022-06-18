@@ -255,9 +255,9 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
   return s->length;
 }
 
-OpResult<vector<GroupInfo>> OpListGroups(const OpArgs& op_args, string_view key) {
-  auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_ind, key, OBJ_STREAM);
+OpResult<vector<GroupInfo>> OpListGroups(DbIndex db_index, string_view key, EngineShard* shard) {
+  auto& db_slice = shard->db_slice();
+  OpResult<PrimeIterator> res_it = db_slice.Find(db_index, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
@@ -719,13 +719,16 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
 
   if (args.size() >= 3) {
     string_view key = ArgS(args, 2);
+    ShardId sid = Shard(key, shard_set->size());
+
     if (sub_cmd == "GROUPS") {
-      auto cb = [&](Transaction* t, EngineShard* shard) {
-        OpArgs op_args{shard, t->db_index()};
-        return OpListGroups(op_args, key);
+      // We do not use transactional xemantics for xinfo since it's informational command.
+      auto cb = [&]() {
+        EngineShard* shard = EngineShard::tlocal();
+        return OpListGroups(cntx->db_index(), key, shard);
       };
 
-      OpResult<vector<GroupInfo>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+      OpResult<vector<GroupInfo>> result = shard_set->Await(sid, std::move(cb));
       if (result) {
         (*cntx)->StartArray(result->size());
         for (const auto& ginfo : *result) {
@@ -865,7 +868,7 @@ void StreamFamily::Register(CommandRegistry* registry) {
   *registry << CI{"XADD", CO::WRITE | CO::FAST, -5, 1, 1, 1}.HFUNC(XAdd)
             << CI{"XDEL", CO::WRITE | CO::FAST, -3, 1, 1, 1}.HFUNC(XDel)
             << CI{"XGROUP", CO::WRITE | CO::DENYOOM, -2, 2, 2, 1}.HFUNC(XGroup)
-            << CI{"XINFO", CO::READONLY, -2, 2, 2, 1}.HFUNC(XInfo)
+            << CI{"XINFO", CO::READONLY | CO::NOSCRIPT, -2, 0, 0, 0}.HFUNC(XInfo)
             << CI{"XLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(XLen)
             << CI{"XRANGE", CO::READONLY, -4, 1, 1, 1}.HFUNC(XRange)
             << CI{"XREVRANGE", CO::READONLY, -4, 1, 1, 1}.HFUNC(XRevRange)

@@ -16,6 +16,10 @@ extern "C" {
 #include "server/common.h"
 #include "server/table.h"
 
+
+typedef struct rax rax;
+typedef struct streamCG streamCG;
+
 namespace dfly {
 
 class EngineShard;
@@ -114,9 +118,12 @@ class RdbSerializer {
   std::error_code SaveSetObject(const PrimeValue& pv);
   std::error_code SaveHSetObject(const robj* obj);
   std::error_code SaveZSetObject(const robj* obj);
+  std::error_code SaveStreamObject(const robj* obj);
   std::error_code SaveLongLongAsString(int64_t value);
   std::error_code SaveBinaryDouble(double val);
   std::error_code SaveListPackAsZiplist(uint8_t* lp);
+  std::error_code SaveStreamPEL(rax* pel, bool nacks);
+  std::error_code SaveStreamConsumers(streamCG* cg);
 
   ::io::Sink* sink_ = nullptr;
   AlignedBuffer* aligned_buf_ = nullptr;

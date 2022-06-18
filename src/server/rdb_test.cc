@@ -115,7 +115,7 @@ TEST_F(RdbTest, LoadSmall6) {
   EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(1), IntArg(1)));
 }
 
-TEST_F(RdbTest, LoadStream) {
+TEST_F(RdbTest, Stream) {
   io::FileSource fs = GetSource("redis6_stream.rdb");
   RdbLoader loader(service_->script_mgr());
 
@@ -124,6 +124,21 @@ TEST_F(RdbTest, LoadStream) {
   auto ec = pp_->at(0)->Await([&] { return loader.Load(&fs); });
 
   ASSERT_FALSE(ec) << ec.message();
+
+  auto resp = Run({"type", "key:10"});
+  EXPECT_EQ(resp, "stream");
+  resp = Run({"xinfo", "groups", "key:0"});
+  EXPECT_THAT(resp, ArrLen(2));
+
+  resp = Run({"xinfo", "groups", "key:1"});  // test dereferences array of size 1
+  EXPECT_THAT(resp, ArrLen(8));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("name", "g2", "consumers", "0", "pending", "0",
+                                         "last-delivered-id", "1655444851523-1"));
+
+  resp = Run({"xinfo", "groups", "key:2"});
+  EXPECT_THAT(resp, ArrLen(0));
+
+  Run({"save"});
 }
 
 TEST_F(RdbTest, Reload) {
@@ -233,7 +248,7 @@ TEST_F(RdbTest, SaveManyDbs) {
     Run({"select", "1"});
     resp = Run({"scan", "0", "match", "ab*"});
     StringVec vec = StrArray(resp.GetVec()[1]);
-    for (const auto& s: vec) {
+    for (const auto& s : vec) {
       LOG(ERROR) << "Bad key: " << s;
     }
   }

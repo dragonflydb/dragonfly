@@ -25,14 +25,14 @@ enum CommandOpt : uint32_t {
   LOADING = 8,
   DENYOOM = 0x10,  // use-memory in redis.
   REVERSE_MAPPING = 0x20,
-  RANDOM = 0x40,
+
+  // arg 2 determines number of keys. Relevant for ZUNIONSTORE, EVAL etc.
+  VARIADIC_KEYS = 0x40,
+
   ADMIN = 0x80,  // implies NOSCRIPT,
   NOSCRIPT = 0x100,
   BLOCKING = 0x200,  // implies REVERSE_MAPPING
   GLOBAL_TRANS = 0x1000,
-
-  // arg 2 determines number of keys. Relevant for ZUNIONSTORE, EVAL etc.
-  VARIADIC_KEYS = 0x2000,
 };
 
 const char* OptName(CommandOpt fl);

@@ -12,6 +12,7 @@ extern "C" {
 #include "redis/intset.h"
 #include "redis/listpack.h"
 #include "redis/rdb.h"
+#include "redis/stream.h"
 #include "redis/util.h"
 #include "redis/ziplist.h"
 #include "redis/zmalloc.h"
@@ -236,6 +237,10 @@ error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
     return SaveZSetObject(pv.AsRObj());
   }
 
+  if (obj_type == OBJ_STREAM) {
+    return SaveStreamObject(pv.AsRObj());
+  }
+
   LOG(ERROR) << "Not implemented " << obj_type;
   return make_error_code(errc::function_not_supported);
 }
@@ -375,6 +380,83 @@ error_code RdbSerializer::SaveZSetObject(const robj* obj) {
   return error_code{};
 }
 
+error_code RdbSerializer::SaveStreamObject(const robj* obj) {
+  /* Store how many listpacks we have inside the radix tree. */
+  stream* s = (stream*)obj->ptr;
+  rax* rax = s->rax_tree;
+
+  RETURN_ON_ERR(SaveLen(raxSize(rax)));
+
+  /* Serialize all the listpacks inside the radix tree as they are,
+   * when loading back, we'll use the first entry of each listpack
+   * to insert it back into the radix tree. */
+  raxIterator ri;
+  raxStart(&ri, rax);
+  raxSeek(&ri, "^", NULL, 0);
+  while (raxNext(&ri)) {
+    uint8_t* lp = (uint8_t*)ri.data;
+    size_t lp_bytes = lpBytes(lp);
+    error_code ec = SaveString((uint8_t*)ri.key, ri.key_len);
+    if (ec) {
+      raxStop(&ri);
+      return ec;
+    }
+
+    ec = SaveString(lp, lp_bytes);
+    if (ec) {
+      raxStop(&ri);
+      return ec;
+    }
+  }
+  raxStop(&ri);
+
+  /* Save the number of elements inside the stream. We cannot obtain
+   * this easily later, since our macro nodes should be checked for
+   * number of items: not a great CPU / space tradeoff. */
+
+  RETURN_ON_ERR(SaveLen(s->length));
+
+  /* Save the last entry ID. */
+  RETURN_ON_ERR(SaveLen(s->last_id.ms));
+  RETURN_ON_ERR(SaveLen(s->last_id.seq));
+
+  /* The consumer groups and their clients are part of the stream
+   * type, so serialize every consumer group. */
+
+  /* Save the number of groups. */
+  size_t num_cgroups = s->cgroups ? raxSize(s->cgroups) : 0;
+  RETURN_ON_ERR(SaveLen(num_cgroups));
+
+  if (num_cgroups) {
+    /* Serialize each consumer group. */
+    raxStart(&ri, s->cgroups);
+    raxSeek(&ri, "^", NULL, 0);
+
+    auto cleanup = absl::MakeCleanup([&] { raxStop(&ri); });
+
+    while (raxNext(&ri)) {
+      streamCG* cg = (streamCG*)ri.data;
+
+      /* Save the group name. */
+      RETURN_ON_ERR(SaveString((uint8_t*)ri.key, ri.key_len));
+
+      /* Last ID. */
+      RETURN_ON_ERR(SaveLen(s->last_id.ms));
+
+      RETURN_ON_ERR(SaveLen(s->last_id.seq));
+
+      /* Save the global PEL. */
+      RETURN_ON_ERR(SaveStreamPEL(cg->pel, true));
+
+      /* Save the consumers of this group. */
+
+      RETURN_ON_ERR(SaveStreamConsumers(cg));
+    }
+  }
+
+  return error_code{};
+}
+
 /* Save a long long value as either an encoded string or a string. */
 error_code RdbSerializer::SaveLongLongAsString(int64_t value) {
   uint8_t buf[32];
@@ -422,6 +504,71 @@ error_code RdbSerializer::SaveListPackAsZiplist(uint8_t* lp) {
   zfree(zl);
 
   return ec;
+}
+
+error_code RdbSerializer::SaveStreamPEL(rax* pel, bool nacks) {
+  /* Number of entries in the PEL. */
+
+  RETURN_ON_ERR(SaveLen(raxSize(pel)));
+
+  /* Save each entry. */
+  raxIterator ri;
+  raxStart(&ri, pel);
+  raxSeek(&ri, "^", NULL, 0);
+  auto cleanup = absl::MakeCleanup([&] { raxStop(&ri); });
+
+  while (raxNext(&ri)) {
+    /* We store IDs in raw form as 128 big big endian numbers, like
+     * they are inside the radix tree key. */
+    RETURN_ON_ERR(WriteRaw(Bytes{ri.key, sizeof(streamID)}));
+
+    if (nacks) {
+      streamNACK* nack = (streamNACK*)ri.data;
+      uint8_t buf[8];
+      absl::little_endian::Store64(buf, nack->delivery_time);
+      RETURN_ON_ERR(WriteRaw(buf));
+      RETURN_ON_ERR(SaveLen(nack->delivery_count));
+
+      /* We don't save the consumer name: we'll save the pending IDs
+       * for each consumer in the consumer PEL, and resolve the consumer
+       * at loading time. */
+    }
+  }
+
+  return error_code{};
+}
+
+error_code RdbSerializer::SaveStreamConsumers(streamCG* cg) {
+  /* Number of consumers in this consumer group. */
+
+  RETURN_ON_ERR(SaveLen(raxSize(cg->consumers)));
+
+  /* Save each consumer. */
+  raxIterator ri;
+  raxStart(&ri, cg->consumers);
+  raxSeek(&ri, "^", NULL, 0);
+  auto cleanup = absl::MakeCleanup([&] { raxStop(&ri); });
+  uint8_t buf[8];
+
+  while (raxNext(&ri)) {
+    streamConsumer* consumer = (streamConsumer*)ri.data;
+
+    /* Consumer name. */
+    RETURN_ON_ERR(SaveString(ri.key, ri.key_len));
+
+    /* Last seen time. */
+    absl::little_endian::Store64(buf, consumer->seen_time);
+    RETURN_ON_ERR(WriteRaw(buf));
+
+    /* Consumer PEL, without the ACKs (see last parameter of the function
+     * passed with value of 0), at loading time we'll lookup the ID
+     * in the consumer group global PEL and will put a reference in the
+     * consumer local PEL. */
+
+    RETURN_ON_ERR(SaveStreamPEL(consumer->pel, false));
+  }
+
+  return error_code{};
 }
 
 // TODO: if buf is large enough, it makes sense to write both mem_buf and buf
