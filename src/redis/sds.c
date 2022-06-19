@@ -622,7 +622,7 @@ int sdsull2str(char *s, unsigned long long v) {
  * sdscatprintf(sdsempty(),"%lld\n", value);
  */
 sds sdsfromlonglong(long long value) {
-    char buf[SDS_LLSTR_SIZE];
+    char buf[SDS_LLSTR_SIZE + 10];
     int len = sdsll2str(buf,value);
 
     return sdsnewlen(buf,len);

@@ -278,18 +278,23 @@ OpResult<pair<PrimeIterator, unsigned>> DbSlice::FindFirst(DbIndex db_index, Arg
   return OpStatus::KEY_NOTFOUND;
 }
 
-auto DbSlice::AddOrFind(DbIndex db_index, string_view key) noexcept(false)
-    -> pair<PrimeIterator, bool> {
+pair<PrimeIterator, bool> DbSlice::AddOrFind(DbIndex db_index, string_view key) noexcept(false) {
+  auto res = AddOrFind2(db_index, key);
+  return make_pair(get<0>(res), get<2>(res));
+}
+
+tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(DbIndex db_index,
+                                                             std::string_view key) noexcept(false) {
   DCHECK(IsDbValid(db_index));
 
   auto& db = db_arr_[db_index];
 
   // If we have some registered onchange callbacks, we must know in advance whether its Find or Add.
   if (!change_cb_.empty()) {
-    auto it = FindExt(db_index, key).first;
+    auto res = FindExt(db_index, key);
 
-    if (IsValid(it)) {
-      return make_pair(it, true);
+    if (IsValid(res.first)) {
+      return tuple_cat(res, make_tuple(true));
     }
 
     // It's a new entry.
@@ -326,15 +331,16 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) noexcept(false)
     it.SetVersion(NextVersion());
     memory_budget_ = evp.mem_budget();
 
-    return make_pair(it, true);
+    return make_tuple(it, ExpireIterator{}, true);
   }
 
   auto& existing = it;
 
   DCHECK(IsValid(existing));
 
+  ExpireIterator expire_it;
   if (existing->second.HasExpire()) {
-    auto expire_it = db->expire.Find(existing->first);
+    expire_it = db->expire.Find(existing->first);
     CHECK(IsValid(expire_it));
 
     // TODO: to implement the incremental update of expiry values using multi-generation
@@ -357,11 +363,11 @@ auto DbSlice::AddOrFind(DbIndex db_index, string_view key) noexcept(false)
       existing->second.Reset();
       events_.expired_keys++;
 
-      return make_pair(existing, true);
+      return make_tuple(existing, ExpireIterator{}, true);
     }
   }
 
-  return make_pair(existing, false);
+  return make_tuple(existing, expire_it, false);
 }
 
 void DbSlice::ActivateDb(DbIndex db_ind) {
@@ -429,7 +435,7 @@ void DbSlice::FlushDb(DbIndex db_ind) {
 }
 
 // Returns true if a state has changed, false otherwise.
-bool DbSlice::Expire(DbIndex db_ind, PrimeIterator it, uint64_t at) {
+bool DbSlice::UpdateExpire(DbIndex db_ind, PrimeIterator it, uint64_t at) {
   auto& db = *db_arr_[db_ind];
   if (at == 0 && it->second.HasExpire()) {
     CHECK_EQ(1u, db.expire.Erase(it->first));
@@ -485,19 +491,15 @@ pair<PrimeIterator, bool> DbSlice::AddOrFind(DbIndex db_ind, string_view key, Pr
     return res;
 
   auto& db = *db_arr_[db_ind];
-  auto& new_it = res.first;
+  auto& it = res.first;
 
-  size_t value_heap_size = obj.MallocUsed();
-  db.stats.obj_memory_usage += value_heap_size;
-  if (obj.ObjType() == OBJ_STRING)
-    db.stats.strval_memory_usage += value_heap_size;
-
-  new_it->second = std::move(obj);
+  it->second = std::move(obj);
+  PostUpdate(db_ind, it);
 
   if (expire_at_ms) {
-    new_it->second.SetExpire(true);
+    it->second.SetExpire(true);
     uint64_t delta = expire_at_ms - expire_base_[0];
-    CHECK(db.expire.Insert(new_it->first.AsRef(), ExpirePeriod(delta)).second);
+    CHECK(db.expire.Insert(it->first.AsRef(), ExpirePeriod(delta)).second);
   }
 
   return res;

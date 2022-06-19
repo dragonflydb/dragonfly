@@ -143,24 +143,40 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
 
   VLOG(2) << "Set " << key << "(" << db_slice_.shard_id() << ") ";
 
-  auto [it, expire_it] = db_slice_.FindExt(params.db_index, key);
+  if (params.how == SET_IF_EXISTS) {
+    auto [it, expire_it] = db_slice_.FindExt(params.db_index, key);
 
-  if (IsValid(it)) {  // existing
-    return SetExisting(params, it, expire_it, value);
+    if (IsValid(it)) {  // existing
+      return SetExisting(params, it, expire_it, value);
+    }
+    return OpStatus::SKIPPED;
   }
 
   // New entry
-  if (params.how == SET_IF_EXISTS)
-    return OpStatus::SKIPPED;
-
-  PrimeValue tvalue{value};
-  tvalue.SetFlag(params.memcache_flags != 0);
-  uint64_t at_ms = params.expire_after_ms ? params.expire_after_ms + db_slice_.Now() : 0;
+  tuple<PrimeIterator, ExpireIterator, bool> add_res;
   try {
-    it = db_slice_.AddNew(params.db_index, key, std::move(tvalue), at_ms);
+    add_res = db_slice_.AddOrFind2(params.db_index, key);
   } catch (bad_alloc& e) {
     return OpStatus::OUT_OF_MEMORY;
   }
+
+  PrimeIterator it = get<0>(add_res);
+  if (!get<2>(add_res)) {
+    return SetExisting(params, it, get<1>(add_res), value);
+  }
+
+  // adding new value.
+  PrimeValue tvalue{value};
+  tvalue.SetFlag(params.memcache_flags != 0);
+  it->second = std::move(tvalue);
+  db_slice_.PostUpdate(params.db_index, it);
+
+  if (params.expire_after_ms) {
+    db_slice_.UpdateExpire(params.db_index, it, params.expire_after_ms + db_slice_.Now());
+  }
+
+  if (params.memcache_flags)
+    db_slice_.SetMCFlag(params.db_index, it->first.AsRef(), params.memcache_flags);
 
   EngineShard* shard = db_slice_.shard_owner();
 
@@ -169,9 +185,6 @@ OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::s
       shard->tiered_storage()->UnloadItem(params.db_index, it);
     }
   }
-
-  if (params.memcache_flags)
-    db_slice_.SetMCFlag(params.db_index, it->first.AsRef(), params.memcache_flags);
 
   return OpStatus::OK;
 }
@@ -194,7 +207,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
   if (IsValid(e_it) && at_ms) {
     e_it->second = db_slice_.FromAbsoluteTime(at_ms);
   } else {
-    bool changed = db_slice_.Expire(params.db_index, it, at_ms);
+    bool changed = db_slice_.UpdateExpire(params.db_index, it, at_ms);
     if (changed && at_ms == 0)  // erased.
       return OpStatus::OK;
   }

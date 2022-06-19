@@ -39,9 +39,6 @@ extern "C" {
 
 using namespace std;
 
-// TODO: to move to absl flags and keep legacy flags only for glog library.
-// absl flags allow parsing of custom types and allow specifying which flags appear
-// for helpshort.
 ABSL_FLAG(uint32_t, port, 6379, "Redis port");
 ABSL_FLAG(uint32_t, memcache_port, 0, "Memcached port");
 ABSL_FLAG(uint64_t, maxmemory, 0,

@@ -708,6 +708,9 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
     assert(seg_id < segment_.size());
     SegmentType* target = segment_[seg_id];
 
+    // Load heap allocated segment data - to avoid TLB miss when accessing the bucket.
+    __builtin_prefetch(target, 0, 1);
+
     auto [it, res] =
         target->Insert(std::forward<U>(key), std::forward<V>(value), key_hash, EqPred());
 
