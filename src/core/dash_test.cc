@@ -23,7 +23,9 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#if defined(__clang__)
 #pragma clang diagnostic ignored "-Wunused-const-variable"
+#endif
 
 namespace dfly {
 
@@ -1027,7 +1029,7 @@ static void BM_Insert(benchmark::State& state) {
     }
   }
 }
-BENCHMARK(BM_Insert)->Arg(1000)->Arg(10000)->Arg(100000);
+BENCHMARK(BM_Insert)->Arg(10000)->Arg(100000)->Arg(1000000);
 
 struct NoDestroySdsPolicy : public SdsDashPolicy {
   static void DestroyKey(sds s) {
@@ -1109,7 +1111,7 @@ static void BM_RedisDictInsert(benchmark::State& state) {
     dictRelease(d);
   }
 }
-BENCHMARK(BM_RedisDictInsert)->Arg(1000)->Arg(10000)->Arg(100000);
+BENCHMARK(BM_RedisDictInsert)->Arg(10000)->Arg(100000)->Arg(1000000);
 
 static void BM_RedisStringInsert(benchmark::State& state) {
   unsigned count = state.range(0);

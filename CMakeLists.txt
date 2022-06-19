@@ -17,8 +17,6 @@ option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 option(DF_USE_SSL "Provide support for SSL connections" ON)
 
 include(third_party)
-message(STATUS "after thirdpary")
-
 include(internal)
 
 include_directories(src)

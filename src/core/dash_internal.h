@@ -1055,6 +1055,10 @@ auto Segment<Key, Value, Policy>::FindIt(U&& key, Hash_t key_hash, Pred&& cf) co
   uint8_t bidx = BucketIndex(key_hash);
   const Bucket& target = bucket_[bidx];
 
+  // It helps a bit (10% on my home machine) and more importantly, it does not hurt
+  // since we are going to access this memory in a bit.
+  __builtin_prefetch(&target);
+
   uint8_t fp_hash = key_hash & kFpMask;
   SlotId sid = target.FindByFp(fp_hash, false, key, cf);
   if (sid != BucketType::kNanSlot) {

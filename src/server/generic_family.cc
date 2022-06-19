@@ -149,7 +149,7 @@ OpStatus Renamer::UpdateDest(Transaction* t, EngineShard* es) {
         dest_it->second = std::move(pv_);
       }
       dest_it->second.SetExpire(has_expire);  // preserve expire flag.
-      db_slice.Expire(db_indx_, dest_it, src_res_.expire_ts);
+      db_slice.UpdateExpire(db_indx_, dest_it, src_res_.expire_ts);
     } else {
       if (src_res_.ref_val.ObjType() == OBJ_STRING) {
         pv_.SetString(str_val_);
@@ -621,7 +621,7 @@ OpStatus GenericFamily::OpExpire(const OpArgs& op_args, string_view key,
   } else if (IsValid(expire_it)) {
     expire_it->second = db_slice.FromAbsoluteTime(now_msec + rel_msec);
   } else {
-    db_slice.Expire(op_args.db_ind, it, rel_msec + now_msec);
+    db_slice.UpdateExpire(op_args.db_ind, it, rel_msec + now_msec);
   }
 
   return OpStatus::OK;
@@ -698,10 +698,10 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     to_it->second = std::move(from_obj);
     to_it->second.SetExpire(IsValid(to_expire));  // keep the expire flag on 'to'.
 
-    // It is guaranteed that Expire() call does not erase the element because then
-    // from_it would be invalid. Therefore, it Expire does not invalidate any iterators and
-    // we can delete via from_it.
-    db_slice.Expire(op_args.db_ind, to_it, exp_ts);
+    // It is guaranteed that UpdateExpire() call does not erase the element because then
+    // from_it would be invalid. Therefore, UpdateExpire does not invalidate any iterators,
+    // therefore we can delete 'from_it'.
+    db_slice.UpdateExpire(op_args.db_ind, to_it, exp_ts);
     CHECK(db_slice.Del(op_args.db_ind, from_it));
   } else {
     // Here we first delete from_it because AddNew below could invalidate from_it.

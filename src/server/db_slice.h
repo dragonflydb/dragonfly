@@ -124,7 +124,10 @@ class DbSlice {
 
   // Return .second=true if insertion ocurred, false if we return the existing key.
   // throws: bad_alloc is insertion could not happen due to out of memory.
-  std::pair<PrimeIterator, bool> AddOrFind(DbIndex db_ind, std::string_view key) noexcept(false);
+  std::pair<PrimeIterator, bool> AddOrFind(DbIndex db_index, std::string_view key) noexcept(false);
+
+  std::tuple<PrimeIterator, ExpireIterator, bool> AddOrFind2(DbIndex db_index,
+                                                             std::string_view key) noexcept(false);
 
   // Returns second=true if insertion took place, false otherwise.
   // expire_at_ms equal to 0 - means no expiry.
@@ -134,7 +137,7 @@ class DbSlice {
 
   // Either adds or removes (if at == 0) expiry. Returns true if a change was made.
   // Does not change expiry if at != 0 and expiry already exists.
-  bool Expire(DbIndex db_ind, PrimeIterator main_it, uint64_t at);
+  bool UpdateExpire(DbIndex db_ind, PrimeIterator main_it, uint64_t at);
 
   void SetMCFlag(DbIndex db_ind, PrimeKey key, uint32_t flag);
   uint32_t GetMCFlag(DbIndex db_ind, const PrimeKey& key) const;
@@ -222,8 +225,8 @@ class DbSlice {
   void UnregisterOnChange(uint64_t id);
 
   struct DeleteExpiredStats {
-    uint32_t deleted = 0;    // number of deleted items due to expiry (less than traversed).
-    uint32_t traversed = 0;  // number of traversed items that have ttl bit
+    uint32_t deleted = 0;         // number of deleted items due to expiry (less than traversed).
+    uint32_t traversed = 0;       // number of traversed items that have ttl bit
     size_t survivor_ttl_sum = 0;  // total sum of ttl of survivors (traversed - deleted).
   };
 
