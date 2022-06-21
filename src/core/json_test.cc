@@ -63,4 +63,18 @@ TEST_F(JsonTest, Query) {
             out);
 }
 
+TEST_F(JsonTest, Errors) {
+  auto cb = [](json_errc err, const ser_context& contexts) { return false; };
+
+  json_decoder<json> decoder;
+  basic_json_parser<char> parser(basic_json_decode_options<char>{}, cb);
+
+  string_view input{"\000bla"};
+  parser.update(input.data(), input.size());
+  parser.parse_some(decoder);
+  parser.finish_parse(decoder);
+  parser.check_done();
+  EXPECT_FALSE(decoder.is_valid());
+}
+
 }  // namespace dfly
