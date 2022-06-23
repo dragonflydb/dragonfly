@@ -17,7 +17,7 @@ This guide will have you up running DragonflyDB with `docker-compose` in just a 
 
 ```bash
 # Download Official Dragonfly DB Docker Compose File
-wget https://github.com/dragonflydb/dragonfly/tree/main/contrib/docker/docker-compose.yml
+wget https://raw.githubusercontent.com/dragonflydb/dragonfly/main/contrib/docker/docker-compose.yml
 
 # Launch the Dragonfly DB Instance
 docker-compose up -d
