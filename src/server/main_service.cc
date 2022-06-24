@@ -1038,6 +1038,79 @@ void Service::Function(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendError(err, kSyntaxErrType);
 }
 
+vector<std::string_view> UnionResultVec(const vector<vector<string_view>>& result_vec) {
+  absl::flat_hash_set<std::string_view> uniques;
+
+  for (const auto& val : result_vec) {
+    for (const string_view& s : val) {
+      uniques.emplace(s);
+    }
+  }
+
+  vector<std::string_view> result;
+  result.reserve(uniques.size());
+  copy(uniques.begin(), uniques.end(), back_inserter(result));
+  return result;
+}
+
+void Service::PubsubChannels(string_view pattern, ConnectionContext* cntx) {
+  vector<vector<string_view>> result_set(shard_set->size());
+
+  shard_set->RunBriefInParallel([&](EngineShard* shard) {
+    result_set[shard->shard_id()] = shard->channel_slice().ListChannels(pattern);
+  });
+
+  (*cntx)->SendStringArr(UnionResultVec(result_set));
+}
+
+void Service::PubsubPatterns(ConnectionContext* cntx) {
+  vector<vector<string_view>> result_set(shard_set->size());
+
+  shard_set->RunBriefInParallel([&](EngineShard* shard) {
+    result_set[shard->shard_id()] = shard->channel_slice().ListPatterns();
+  });
+
+  auto unionset = UnionResultVec(result_set);
+  (*cntx)->SendLong(unionset.size());
+}
+
+void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() < 2) {
+    (*cntx)->SendError("wrong number of arguments for 'pubsub' command");
+    return;
+  }
+
+  string_view subcmd = ArgS(args, 1);
+
+  if (subcmd == "HELP") {
+    vector<string_view> help_lines = {"PUBSUB <subcommand> [<arg> [value] [opt] ...]. Subcommands are:", "CHANNELS [<pattern>]",
+    "\tReturn the currently active channels matching a <pattern> (default: '*').",
+    "NUMPAT",
+    "\tReturn number of subscriptions to patterns.",
+    "HELP",
+    "\tPrints this help."};
+    // (*cntx)->SendStringArr(help_lines);
+    (*cntx)->StartArray(help_lines.size());
+    for (auto line : help_lines) {
+      (*cntx)->SendSimpleString(line);
+    }
+    return;
+  }
+
+  if (subcmd == "CHANNELS") {
+    string pattern = "";
+    if (args.size() > 2) {
+      pattern = ArgS(args, 2);
+    }
+
+    PubsubChannels(pattern, cntx);
+  } else if (subcmd == "NUMPAT") {
+    PubsubPatterns(cntx);
+  } else {
+    (*cntx)->SendError(absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd, "'. Try PUBSUB HELP."));
+  }
+}
+
 VarzValue::Map Service::GetVarzStats() {
   VarzValue::Map res;
 
@@ -1095,7 +1168,8 @@ void Service::RegisterCommands() {
       << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(Unsubscribe)
       << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(PSubscribe)
       << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(PUnsubscribe)
-      << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0}.MFUNC(Function);
+      << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0}.MFUNC(Function)
+      << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, 0}.MFUNC(Pubsub);
 
   StreamFamily::Register(&registry_);
   StringFamily::Register(&registry_);
