@@ -53,7 +53,16 @@ OK
 
 ## Step 3
 
-Continue being great and build your app with the power of DragonflyDB!
+Continue being great and build your app with the power of DragonflyDB!  
+
+## Tuning Dragonfly DB
+If you are attempting to tune Dragonfly DB for performance, consider `NAT` performance costs associated with containerization.  
+> ## Performance Tuning
+> ---
+> In `docker-compose`, there is a meaningful difference between an `overlay` network(which relies on docker `NAT` traversal on every request) and using the `host` network(see [`docker-compose.yml`](https://github.com/dragonflydb/dragonfly/blob/main/contrib/docker/docker-compose.yml)).  
+> &nbsp;  
+> Fore more information, see the [official docker-compose network_mode Docs](https://docs.docker.com/compose/compose-file/compose-file-v3/#network_mode)  
+> &nbsp;  
 
 ### More Build Options
 - [Docker Quick Start](/docs/quick-start/)
