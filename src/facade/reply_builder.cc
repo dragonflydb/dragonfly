@@ -3,6 +3,7 @@
 //
 #include "facade/reply_builder.h"
 
+#include <absl/container/fixed_array.h>
 #include <absl/strings/numbers.h>
 #include <absl/strings/str_cat.h>
 #include <double-conversion/double-to-string.h>
@@ -89,13 +90,13 @@ void SinkReplyBuilder::SendRaw(std::string_view raw) {
 }
 
 void SinkReplyBuilder::SendRawVec(absl::Span<const std::string_view> msg_vec) {
-  iovec v[msg_vec.size()];
+  absl::FixedArray<iovec, 16> arr(msg_vec.size());
 
   for (unsigned i = 0; i < msg_vec.size(); ++i) {
-    v[i].iov_base = const_cast<char*>(msg_vec[i].data());
-    v[i].iov_len = msg_vec[i].size();
+    arr[i].iov_base = const_cast<char*>(msg_vec[i].data());
+    arr[i].iov_len = msg_vec[i].size();
   }
-  Send(v, msg_vec.size());
+  Send(arr.data(), msg_vec.size());
 }
 
 MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
@@ -305,14 +306,65 @@ void RedisReplyBuilder::SendStringArr(absl::Span<const std::string_view> arr) {
   SendRaw(res);
 }
 
+// This implementation a bit complicated because it uses vectorized
+// send to send an array. The problem with that is the OS limits vector length
+// to low numbers (around 1024). Therefore, to make it robust we send the array in batches.
+// We limit the vector length to 256 and when it fills up we flush it to the socket and continue
+// iterating.
 void RedisReplyBuilder::SendStringArr(absl::Span<const string> arr) {
-  string res = absl::StrCat("*", arr.size(), kCRLF);
+  // When vector length is too long, Send returns EMSGSIZE.
+  size_t vec_len = std::min<size_t>(256u, arr.size());
 
-  for (size_t i = 0; i < arr.size(); ++i) {
-    StrAppend(&res, "$", arr[i].size(), kCRLF);
-    res.append(arr[i]).append(kCRLF);
+  absl::FixedArray<iovec, 16> vec(vec_len * 2 + 2);
+  absl::FixedArray<char, 64> meta((vec_len + 1) * 16);
+  char* next = meta.data();
+
+  *next++ = '*';
+  next = absl::numbers_internal::FastIntToBuffer(arr.size(), next);
+  *next++ = '\r';
+  *next++ = '\n';
+  vec[0].iov_base = meta.data();
+  vec[0].iov_len = next - meta.data();
+  char* start = next;
+
+  unsigned vec_indx = 1;
+  for (unsigned i = 0; i < arr.size(); ++i) {
+    const auto& src = arr[i];
+    *next++ = '$';
+    next = absl::numbers_internal::FastIntToBuffer(src.size(), next);
+    *next++ = '\r';
+    *next++ = '\n';
+    vec[vec_indx].iov_base = start;
+    vec[vec_indx].iov_len = next - start;
+    DCHECK_GT(next - start, 0);
+
+    start = next;
+    ++vec_indx;
+
+    vec[vec_indx].iov_base = const_cast<char*>(src.data());
+    vec[vec_indx].iov_len = src.size();
+
+    *next++ = '\r';
+    *next++ = '\n';
+    ++vec_indx;
+
+    if (vec_indx + 1 >= vec.size()) {
+      if (i < arr.size() - 1 || vec_indx == vec.size()) {
+        Send(vec.data(), vec_indx);
+        if (ec_)
+          return;
+
+        vec_indx = 0;
+        start = meta.data();
+        next = start + 2;
+        start[0] = '\r';
+        start[1] = '\n';
+      }
+    }
   }
-  SendRaw(res);
+  vec[vec_indx].iov_base = start;
+  vec[vec_indx].iov_len = 2;
+  Send(vec.data(), vec_indx + 1);
 }
 
 void RedisReplyBuilder::StartArray(unsigned len) {

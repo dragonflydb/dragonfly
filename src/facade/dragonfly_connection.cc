@@ -46,9 +46,9 @@ void SendProtocolError(RedisParser::Result pres, FiberSocketBase* peer) {
     res.append("invalid multibulk length\r\n");
   }
 
-  auto size_res = peer->Send(::io::Buffer(res));
-  if (!size_res) {
-    LOG(WARNING) << "Error " << size_res.error();
+  error_code ec = peer->Write(::io::Buffer(res));
+  if (ec) {
+    LOG(WARNING) << "Error " << ec;
   }
 }
 
@@ -344,10 +344,10 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
     }
   }
 
-  error_code ec;
+  error_code ec = cc_->reply_builder()->GetError();
 
   // Main loop.
-  if (parse_status != ERROR) {
+  if (parse_status != ERROR && !ec) {
     auto res = IoLoop(peer);
 
     if (holds_alternative<error_code>(res)) {
@@ -380,15 +380,15 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
 
     if (redis_parser_) {
       SendProtocolError(RedisParser::Result(parser_error_), peer);
-      peer->Shutdown(SHUT_RDWR);
     } else {
       string_view sv{"CLIENT_ERROR bad command line format\r\n"};
-      auto size_res = peer->Send(::io::Buffer(sv));
-      if (!size_res) {
-        LOG(WARNING) << "Error " << size_res.error();
-        ec = size_res.error();
+      error_code ec2 = peer->Write(::io::Buffer(sv));
+      if (ec2) {
+        LOG(WARNING) << "Error " << ec2;
+        ec = ec;
       }
     }
+    peer->Shutdown(SHUT_RDWR);
   }
 
   if (ec && !FiberSocketBase::IsConnClosed(ec)) {
@@ -532,9 +532,9 @@ auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, Pars
     ++stats->io_read_cnt;
     SetPhase("process");
 
-    if (redis_parser_)
+    if (redis_parser_) {
       parse_status = ParseRedis();
-    else {
+    } else {
       DCHECK(memcache_parser_);
       parse_status = ParseMemcache();
     }
