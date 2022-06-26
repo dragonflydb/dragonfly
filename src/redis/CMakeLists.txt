@@ -15,6 +15,8 @@ add_library(redis_lib crc64.c crcspeed.c debug.c dict.c intset.c
 
 cxx_link(redis_lib  ${ZMALLOC_DEPS})
 
+target_compile_options(redis_lib PRIVATE -Wno-maybe-uninitialized)
+
 if (REDIS_ZMALLOC_MI)
   target_compile_definitions(redis_lib PUBLIC USE_ZMALLOC_MI)
 endif()

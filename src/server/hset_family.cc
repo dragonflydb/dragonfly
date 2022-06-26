@@ -290,10 +290,7 @@ void HSetFamily::HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t g
   OpResult<vector<string>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    (*cntx)->StartArray(result->size());
-    for (const auto& s : *result) {
-      (*cntx)->SendBulkString(s);
-    }
+    (*cntx)->SendStringArr(absl::Span<const string>{*result});
   } else {
     (*cntx)->SendError(result.status());
   }

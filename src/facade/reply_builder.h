@@ -7,7 +7,7 @@
 #include <string_view>
 
 #include "facade/op_status.h"
-#include "io/sync_stream_interface.h"
+#include "io/io.h"
 
 namespace facade {
 
