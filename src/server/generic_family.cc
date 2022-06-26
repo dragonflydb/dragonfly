@@ -739,10 +739,10 @@ void GenericFamily::Register(CommandRegistry* registry) {
             << CI{"RENAME", CO::WRITE, 3, 1, 2, 1}.HFUNC(Rename)
             << CI{"RENAMENX", CO::WRITE, 3, 1, 2, 1}.HFUNC(RenameNx)
             << CI{"SELECT", kSelectOpts, 2, 0, 0, 0}.HFUNC(Select)
-            << CI{"SCAN", CO::READONLY | CO::FAST, -2, 0, 0, 0}.HFUNC(Scan)
+            << CI{"SCAN", CO::READONLY | CO::FAST | CO::LOADING, -2, 0, 0, 0}.HFUNC(Scan)
             << CI{"TTL", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Ttl)
             << CI{"PTTL", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Pttl)
-            << CI{"TYPE", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Type)
+            << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, 1}.HFUNC(Type)
             << CI{"UNLINK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Del);
 }
 
