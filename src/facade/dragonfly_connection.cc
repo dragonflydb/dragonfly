@@ -290,7 +290,9 @@ string Connection::GetClientInfo() const {
   absl::StrAppend(&res, " fd=", lsb->native_handle(), " name=", name_);
   absl::StrAppend(&res, " age=", now - creation_time_, " idle=", now - last_interaction_);
   absl::StrAppend(&res, " phase=", phase_, " ");
-  absl::StrAppend(&res, cc_->GetContextInfo());
+  if (cc_) {
+    absl::StrAppend(&res, cc_->GetContextInfo());
+  }
 
   return res;
 }
