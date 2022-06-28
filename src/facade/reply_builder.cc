@@ -297,13 +297,12 @@ void RedisReplyBuilder::SendNullArray() {
 }
 
 void RedisReplyBuilder::SendStringArr(absl::Span<const std::string_view> arr) {
-  string res = absl::StrCat("*", arr.size(), kCRLF);
-
-  for (size_t i = 0; i < arr.size(); ++i) {
-    StrAppend(&res, "$", arr[i].size(), kCRLF);
-    res.append(arr[i]).append(kCRLF);
+  if (arr.empty()) {
+    SendRaw("*0\r\n");
+    return;
   }
-  SendRaw(res);
+
+  SendStringArr(arr.data(), arr.size());
 }
 
 // This implementation a bit complicated because it uses vectorized
@@ -312,44 +311,59 @@ void RedisReplyBuilder::SendStringArr(absl::Span<const std::string_view> arr) {
 // We limit the vector length to 256 and when it fills up we flush it to the socket and continue
 // iterating.
 void RedisReplyBuilder::SendStringArr(absl::Span<const string> arr) {
+  if (arr.empty()) {
+    SendRaw("*0\r\n");
+    return;
+  }
+  SendStringArr(arr.data(), arr.size());
+}
+
+void RedisReplyBuilder::StartArray(unsigned len) {
+  SendRaw(absl::StrCat("*", len, kCRLF));
+}
+
+void RedisReplyBuilder::SendStringArr(StrPtr str_ptr, uint32_t len) {
   // When vector length is too long, Send returns EMSGSIZE.
-  size_t vec_len = std::min<size_t>(256u, arr.size());
+  size_t vec_len = std::min<size_t>(256u, len);
 
   absl::FixedArray<iovec, 16> vec(vec_len * 2 + 2);
   absl::FixedArray<char, 64> meta((vec_len + 1) * 16);
   char* next = meta.data();
 
   *next++ = '*';
-  next = absl::numbers_internal::FastIntToBuffer(arr.size(), next);
+  next = absl::numbers_internal::FastIntToBuffer(len, next);
   *next++ = '\r';
   *next++ = '\n';
-  vec[0].iov_base = meta.data();
-  vec[0].iov_len = next - meta.data();
+  vec[0] = IoVec(string_view{meta.data(), size_t(next - meta.data())});
   char* start = next;
 
   unsigned vec_indx = 1;
-  for (unsigned i = 0; i < arr.size(); ++i) {
-    const auto& src = arr[i];
+  string_view src;
+  for (unsigned i = 0; i < len; ++i) {
+
+    if (holds_alternative<const string_view*>(str_ptr)) {
+      src = get<const string_view*>(str_ptr)[i];
+    } else {
+      src = get<const string*>(str_ptr)[i];
+    }
     *next++ = '$';
     next = absl::numbers_internal::FastIntToBuffer(src.size(), next);
     *next++ = '\r';
     *next++ = '\n';
-    vec[vec_indx].iov_base = start;
-    vec[vec_indx].iov_len = next - start;
+    vec[vec_indx] = IoVec(string_view{start, size_t(next - start)});
     DCHECK_GT(next - start, 0);
 
     start = next;
     ++vec_indx;
 
-    vec[vec_indx].iov_base = const_cast<char*>(src.data());
-    vec[vec_indx].iov_len = src.size();
+    vec[vec_indx] = IoVec(src);
 
     *next++ = '\r';
     *next++ = '\n';
     ++vec_indx;
 
     if (vec_indx + 1 >= vec.size()) {
-      if (i < arr.size() - 1 || vec_indx == vec.size()) {
+      if (i < len - 1 || vec_indx == vec.size()) {
         Send(vec.data(), vec_indx);
         if (ec_)
           return;
@@ -362,13 +376,10 @@ void RedisReplyBuilder::SendStringArr(absl::Span<const string> arr) {
       }
     }
   }
+
   vec[vec_indx].iov_base = start;
   vec[vec_indx].iov_len = 2;
   Send(vec.data(), vec_indx + 1);
-}
-
-void RedisReplyBuilder::StartArray(unsigned len) {
-  SendRaw(absl::StrCat("*", len, kCRLF));
 }
 
 void ReqSerializer::SendCommand(std::string_view str) {

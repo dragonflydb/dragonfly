@@ -65,7 +65,7 @@ class BaseFamilyTest::TestConnWrapper {
 
   CmdArgVec Args(ArgSlice list);
 
-  RespVec ParseResponse();
+  RespVec ParseResponse(bool fully_consumed);
 
   // returns: type(pmessage), pattern, channel, message.
   facade::Connection::PubMessage GetPubMessage(size_t index) const;
@@ -176,7 +176,7 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
   unique_lock lk(mu_);
   last_cmd_dbg_info_ = context->last_command_debug;
 
-  RespVec vec = conn_wrapper->ParseResponse();
+  RespVec vec = conn_wrapper->ParseResponse(single_response_);
   if (vec.size() == 1)
     return vec.front();
   RespVec* new_vec = new RespVec(vec);
@@ -298,7 +298,7 @@ CmdArgVec BaseFamilyTest::TestConnWrapper::Args(ArgSlice list) {
   return res;
 }
 
-RespVec BaseFamilyTest::TestConnWrapper::ParseResponse() {
+RespVec BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
   tmp_str_vec_.emplace_back(new string{sink_.str()});
   auto& s = *tmp_str_vec_.back();
   auto buf = RespExpr::buffer(&s);
@@ -308,7 +308,9 @@ RespVec BaseFamilyTest::TestConnWrapper::ParseResponse() {
   RespVec res;
   RedisParser::Result st = parser_->Parse(buf, &consumed, &res);
   CHECK_EQ(RedisParser::OK, st);
-
+  if (fully_consumed) {
+    DCHECK_EQ(consumed, s.size()) << s;
+  }
   return res;
 }
 

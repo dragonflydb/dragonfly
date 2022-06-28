@@ -132,4 +132,9 @@ TEST_F(SetFamilyTest, SPop) {
   EXPECT_THAT(resp.GetVec(), IsSubsetOf({"a", "b", "c"}));
 }
 
+TEST_F(SetFamilyTest, Empty) {
+  auto resp = Run({"smembers", "x"});
+  ASSERT_THAT(resp, ArrLen(0));
+}
+
 }  // namespace dfly

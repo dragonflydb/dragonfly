@@ -693,26 +693,31 @@ OpResult<vector<string>> HSetFamily::OpGetAll(const OpArgs& op_args, string_view
   hashTypeIterator* hi = hashTypeInitIterator(hset);
 
   vector<string> res;
+  bool keyval = (mask == (FIELDS | VALUES));
+  size_t len = hashTypeLength(hset);
+  res.resize(keyval ? len * 2 : len);
+  unsigned index = 0;
+
   if (hset->encoding == OBJ_ENCODING_LISTPACK) {
     while (hashTypeNext(hi) != C_ERR) {
       if (mask & FIELDS) {
-        res.push_back(LpGetVal(hi->fptr));
+        res[index++] = LpGetVal(hi->fptr);
       }
 
       if (mask & VALUES) {
-        res.push_back(LpGetVal(hi->vptr));
+        res[index++] = LpGetVal(hi->vptr);
       }
     }
   } else {
     while (hashTypeNext(hi) != C_ERR) {
       if (mask & FIELDS) {
         sds key = (sds)dictGetKey(hi->de);
-        res.emplace_back(key, sdslen(key));
+        res[index++].assign(key, sdslen(key));
       }
 
       if (mask & VALUES) {
         sds val = (sds)dictGetVal(hi->de);
-        res.emplace_back(val, sdslen(val));
+        res[index++].assign(val, sdslen(val));
       }
     }
   }

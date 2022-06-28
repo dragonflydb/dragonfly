@@ -87,6 +87,7 @@ class BaseFamilyTest : public ::testing::Test {
   ConnectionContext::DebugInfo last_cmd_dbg_info_;
   uint64_t expire_now_;
   std::vector<RespVec*> resp_vec_;
+  bool single_response_ = true;
 };
 
 }  // namespace dfly

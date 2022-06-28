@@ -852,6 +852,7 @@ void StreamFamily::XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext
         (*cntx)->SendBulkString(k_v.second);
       }
     }
+    return;
   }
 
   if (result.status() == OpStatus::KEY_NOTFOUND) {

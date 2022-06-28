@@ -478,6 +478,7 @@ TEST_F(DflyEngineTest, OOM) {
 }
 
 TEST_F(DflyEngineTest, PSubscribe) {
+  single_response_ = false;
   auto resp = pp_->at(1)->Await([&] { return Run({"psubscribe", "a*", "b*"}); });
   EXPECT_THAT(resp, ArrLen(3));
   resp = pp_->at(0)->Await([&] { return Run({"publish", "ab", "foo"}); });
@@ -498,6 +499,8 @@ TEST_F(DflyEngineTest, Unsubscribe) {
   resp = Run({"unsubscribe"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("unsubscribe", ArgType(RespExpr::NIL), IntArg(0)));
 
+  single_response_ = false;
+
   Run({"subscribe", "a", "b"});
 
   resp = Run({"unsubscribe", "a"});
@@ -514,6 +517,7 @@ TEST_F(DflyEngineTest, PUnsubscribe) {
   resp = Run({"punsubscribe"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("punsubscribe", ArgType(RespExpr::NIL), IntArg(0)));
 
+  single_response_ = false;
   Run({"psubscribe", "a*", "b*"});
 
   resp = Run({"punsubscribe", "a*"});
