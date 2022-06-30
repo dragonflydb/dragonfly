@@ -85,7 +85,7 @@ void ChannelSlice::CopySubscribers(const SubscribeMap& src, const std::string& p
   }
 }
 
-vector<string> ChannelSlice::ListChannels(const string_view pattern) {
+vector<string> ChannelSlice::ListChannels(const string_view pattern) const {
   vector<string> res;
   for (const auto& k_v : channels_) {
     const string& channel = k_v.first;
@@ -98,7 +98,7 @@ vector<string> ChannelSlice::ListChannels(const string_view pattern) {
   return res;
 }
 
-size_t ChannelSlice::PatternCount() {
+size_t ChannelSlice::PatternCount() const {
   return patterns_.size();
 }
 

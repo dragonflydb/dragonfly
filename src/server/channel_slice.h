@@ -40,8 +40,8 @@ class ChannelSlice {
   void AddGlobPattern(std::string_view pattern, ConnectionContext* me, uint32_t thread_id);
   void RemoveGlobPattern(std::string_view pattern, ConnectionContext* me);
 
-  std::vector<std::string> ListChannels(const std::string_view pattern);
-  size_t PatternCount();
+  std::vector<std::string> ListChannels(const std::string_view pattern) const;
+  size_t PatternCount() const;
 
  private:
   struct SubscriberInternal {
