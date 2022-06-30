@@ -1054,8 +1054,8 @@ void Service::PubsubChannels(string_view pattern, ConnectionContext* cntx) {
 }
 
 void Service::PubsubPatterns(ConnectionContext* cntx) {
-  (*cntx)->SendLong(
-      shard_set->Await(0, [&] { return EngineShard::tlocal()->channel_slice().PatternCount(); }));
+  size_t pattern_count = shard_set->Await(0, [&] { return EngineShard::tlocal()->channel_slice().PatternCount(); });
+  (*cntx)->SendLong(pattern_count);
 }
 
 void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
