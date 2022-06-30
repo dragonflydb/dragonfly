@@ -85,11 +85,12 @@ void ChannelSlice::CopySubscribers(const SubscribeMap& src, const std::string& p
   }
 }
 
-auto ChannelSlice::ListChannels(string_view pattern) -> vector<string_view> {
-  vector<string_view> res;
+vector<string> ChannelSlice::ListChannels(const string_view pattern) {
+  vector<string> res;
   for (const auto& k_v : channels_) {
     const string& channel = k_v.first;
-    if (pattern == "" || stringmatchlen(pattern.data(), pattern.size(), channel.data(), channel.size(), 0) == 1) {
+
+    if (pattern.empty() || stringmatchlen(pattern.data(), pattern.size(), channel.data(), channel.size(), 0) == 1) {
       res.push_back(channel);
     }
   }
@@ -97,13 +98,8 @@ auto ChannelSlice::ListChannels(string_view pattern) -> vector<string_view> {
   return res;
 }
 
-auto ChannelSlice::ListPatterns() -> vector<string_view> {
-  vector<string_view> res;
-  for (const auto& k_v : patterns_) {
-    res.push_back(k_v.first);
-  }
-
-  return res;
+size_t ChannelSlice::PatternCount() {
+  return patterns_.size();
 }
 
 }  // namespace dfly

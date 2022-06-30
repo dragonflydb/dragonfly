@@ -1038,67 +1038,50 @@ void Service::Function(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendError(err, kSyntaxErrType);
 }
 
-vector<std::string_view> UnionResultVec(const vector<vector<string_view>>& result_vec) {
-  absl::flat_hash_set<std::string_view> uniques;
-
-  for (const auto& val : result_vec) {
-    for (const string_view& s : val) {
-      uniques.emplace(s);
-    }
-  }
-
-  vector<std::string_view> result;
-  result.reserve(uniques.size());
-  copy(uniques.begin(), uniques.end(), back_inserter(result));
-  return result;
-}
-
 void Service::PubsubChannels(string_view pattern, ConnectionContext* cntx) {
-  vector<vector<string_view>> result_set(shard_set->size());
+  vector<vector<string>> result_set(shard_set->size());
 
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
     result_set[shard->shard_id()] = shard->channel_slice().ListChannels(pattern);
   });
 
-  (*cntx)->SendStringArr(UnionResultVec(result_set));
+  vector<string> union_set;
+  for (auto&& v : result_set) {
+    union_set.insert(union_set.end(), v.begin(), v.end());
+  }
+
+  (*cntx)->SendStringArr(union_set);
 }
 
 void Service::PubsubPatterns(ConnectionContext* cntx) {
-  vector<vector<string_view>> result_set(shard_set->size());
-
-  shard_set->RunBriefInParallel([&](EngineShard* shard) {
-    result_set[shard->shard_id()] = shard->channel_slice().ListPatterns();
-  });
-
-  auto unionset = UnionResultVec(result_set);
-  (*cntx)->SendLong(unionset.size());
+  (*cntx)->SendLong(
+      shard_set->Await(0, [&] { return EngineShard::tlocal()->channel_slice().PatternCount(); }));
 }
 
 void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() < 2) {
-    (*cntx)->SendError("wrong number of arguments for 'pubsub' command");
+    (*cntx)->SendError(WrongNumArgsError(ArgS(args, 0)));
     return;
   }
 
   string_view subcmd = ArgS(args, 1);
 
   if (subcmd == "HELP") {
-    vector<string_view> help_lines = {"PUBSUB <subcommand> [<arg> [value] [opt] ...]. Subcommands are:", "CHANNELS [<pattern>]",
-    "\tReturn the currently active channels matching a <pattern> (default: '*').",
-    "NUMPAT",
-    "\tReturn number of subscriptions to patterns.",
-    "HELP",
-    "\tPrints this help."};
-    // (*cntx)->SendStringArr(help_lines);
-    (*cntx)->StartArray(help_lines.size());
-    for (auto line : help_lines) {
-      (*cntx)->SendSimpleString(line);
-    }
+    string_view help_arr[] = {
+        "PUBSUB <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+        "CHANNELS [<pattern>]",
+        "\tReturn the currently active channels matching a <pattern> (default: '*').",
+        "NUMPAT",
+        "\tReturn number of subscriptions to patterns.",
+        "HELP",
+        "\tPrints this help."};
+
+    (*cntx)->SendSimpleStrArr(help_arr, ABSL_ARRAYSIZE(help_arr));
     return;
   }
 
   if (subcmd == "CHANNELS") {
-    string pattern = "";
+    string pattern;
     if (args.size() > 2) {
       pattern = ArgS(args, 2);
     }
@@ -1107,7 +1090,7 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
   } else if (subcmd == "NUMPAT") {
     PubsubPatterns(cntx);
   } else {
-    (*cntx)->SendError(absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd, "'. Try PUBSUB HELP."));
+    (*cntx)->SendError(UnknownSubCmd(subcmd, "PUBSUB"));
   }
 }
 
