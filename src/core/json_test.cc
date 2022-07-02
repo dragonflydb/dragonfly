@@ -77,4 +77,43 @@ TEST_F(JsonTest, Errors) {
   EXPECT_FALSE(decoder.is_valid());
 }
 
+TEST_F(JsonTest, Delete) {
+  json j1 = R"({"c":{"a":1, "b":2}, "d":{"a":1, "b":2, "c":3}, "e": [1,2]})"_json;
+
+  auto deleter = [](const json::string_view_type& path, json& val) {
+    LOG(INFO) << "path: " << path;
+    // val.evaluate();
+    // if (val.is_object())
+    //   val.erase(val.object_range().begin(), val.object_range().end());
+  };
+  jsonpath::json_replace(j1, "$.d.*", deleter);
+
+  auto expr = jsonpath::make_expression<json>("$.d.*");
+
+  auto callback = [](const std::string& path, const json& val) {
+    LOG(INFO) << path << ": " << val << "\n";
+  };
+  expr.evaluate(j1, callback, jsonpath::result_options::path);
+  auto it = j1.find("d");
+  ASSERT_TRUE(it != j1.object_range().end());
+
+  it->value().erase("a");
+  EXPECT_EQ(R"({"c":{"a":1, "b":2}, "d":{"b":2, "c":3}, "e": [1,2]})"_json, j1);
+}
+
+TEST_F(JsonTest, DeleteExt) {
+  jsonpath::detail::static_resources<json, const json&> resources;
+  jsonpath::jsonpath_expression<json>::evaluator_t eval;
+  jsonpath::jsonpath_expression<json>::json_selector_t sel = eval.compile(resources, "$.d.*");
+  json j1 = R"({"c":{"a":1, "b":2}, "d":{"a":1, "b":2, "c":3}, "e": [1,2]})"_json;
+
+  jsoncons::jsonpath::detail::dynamic_resources<json, const json&> dyn_res;
+
+  auto f = [](const jsonpath::json_location<char>& path, const json& val) {
+    LOG(INFO) << path.to_string();
+  };
+
+  sel.evaluate(dyn_res, j1, dyn_res.root_path_node(), j1, f, jsonpath::result_options::path);
+}
+
 }  // namespace dfly
