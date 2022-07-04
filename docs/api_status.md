@@ -147,8 +147,8 @@ with respect to Memcached and Redis APIs.
   - [X] HSCAN
 - [X] PubSub family
   - [X] PUBLISH
-  - [ ] PUBSUB
-  - [ ] PUBSUB CHANNELS
+  - [X] PUBSUB
+  - [X] PUBSUB CHANNELS
   - [X] SUBSCRIBE
   - [X] UNSUBSCRIBE
   - [X] PSUBSCRIBE
