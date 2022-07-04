@@ -25,7 +25,7 @@ class SetFamily {
 
   static uint32_t MaxIntsetEntries();
 
-  static void ConvertTo(intset* src, dict* dest);
+  static void ConvertTo(const intset* src, dict* dest);
 
  private:
   static void SAdd(CmdArgList args,  ConnectionContext* cntx);

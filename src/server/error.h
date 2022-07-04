@@ -22,8 +22,10 @@ using facade::kDbIndOutOfRangeErr;
 #define RETURN_ON_ERR(x) \
   do {                   \
     auto __ec = (x);       \
-    if (__ec)              \
+    if (__ec) {            \
+      VLOG(1) << "Error " << __ec << " while calling " #x; \
       return __ec;         \
+    }                      \
   } while (0)
 
 #endif  // RETURN_ON_ERR

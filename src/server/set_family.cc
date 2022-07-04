@@ -1182,13 +1182,13 @@ uint32_t SetFamily::MaxIntsetEntries() {
   return kMaxIntSetEntries;
 }
 
-void SetFamily::ConvertTo(intset* src, dict* dest) {
+void SetFamily::ConvertTo(const intset* src, dict* dest) {
   int64_t intele;
   char buf[32];
 
   /* To add the elements we extract integers and create redis objects */
   int ii = 0;
-  while (intsetGet(src, ii++, &intele)) {
+  while (intsetGet(const_cast<intset*>(src), ii++, &intele)) {
     char* next = absl::numbers_internal::FastIntToBuffer(intele, buf);
     sds s = sdsnewlen(buf, next - buf);
     CHECK(dictAddRaw(dest, s, NULL));
