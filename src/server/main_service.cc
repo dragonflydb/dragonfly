@@ -1054,7 +1054,9 @@ void Service::PubsubChannels(string_view pattern, ConnectionContext* cntx) {
 }
 
 void Service::PubsubPatterns(ConnectionContext* cntx) {
-  size_t pattern_count = shard_set->Await(0, [&] { return EngineShard::tlocal()->channel_slice().PatternCount(); });
+  size_t pattern_count =
+      shard_set->Await(0, [&] { return EngineShard::tlocal()->channel_slice().PatternCount(); });
+
   (*cntx)->SendLong(pattern_count);
 }
 
@@ -1064,6 +1066,7 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
+  ToUpper(&args[1]);
   string_view subcmd = ArgS(args, 1);
 
   if (subcmd == "HELP") {
@@ -1081,7 +1084,7 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (subcmd == "CHANNELS") {
-    string pattern;
+    string_view pattern;
     if (args.size() > 2) {
       pattern = ArgS(args, 2);
     }
