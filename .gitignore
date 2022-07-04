@@ -10,3 +10,4 @@ genfiles/*
 *.pyc
 /CMakeLists.txt.user
 _deps
+releases

@@ -1038,6 +1038,62 @@ void Service::Function(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendError(err, kSyntaxErrType);
 }
 
+void Service::PubsubChannels(string_view pattern, ConnectionContext* cntx) {
+  vector<vector<string>> result_set(shard_set->size());
+
+  shard_set->RunBriefInParallel([&](EngineShard* shard) {
+    result_set[shard->shard_id()] = shard->channel_slice().ListChannels(pattern);
+  });
+
+  vector<string> union_set;
+  for (auto&& v : result_set) {
+    union_set.insert(union_set.end(), v.begin(), v.end());
+  }
+
+  (*cntx)->SendStringArr(union_set);
+}
+
+void Service::PubsubPatterns(ConnectionContext* cntx) {
+  size_t pattern_count = shard_set->Await(0, [&] { return EngineShard::tlocal()->channel_slice().PatternCount(); });
+  (*cntx)->SendLong(pattern_count);
+}
+
+void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() < 2) {
+    (*cntx)->SendError(WrongNumArgsError(ArgS(args, 0)));
+    return;
+  }
+
+  string_view subcmd = ArgS(args, 1);
+
+  if (subcmd == "HELP") {
+    string_view help_arr[] = {
+        "PUBSUB <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+        "CHANNELS [<pattern>]",
+        "\tReturn the currently active channels matching a <pattern> (default: '*').",
+        "NUMPAT",
+        "\tReturn number of subscriptions to patterns.",
+        "HELP",
+        "\tPrints this help."};
+
+    (*cntx)->SendSimpleStrArr(help_arr, ABSL_ARRAYSIZE(help_arr));
+    return;
+  }
+
+  if (subcmd == "CHANNELS") {
+    string pattern;
+    if (args.size() > 2) {
+      pattern = ArgS(args, 2);
+    }
+
+    PubsubChannels(pattern, cntx);
+  } else if (subcmd == "NUMPAT") {
+    PubsubPatterns(cntx);
+  } else {
+    (*cntx)->SendError(UnknownSubCmd(subcmd, "PUBSUB"));
+  }
+}
+
 VarzValue::Map Service::GetVarzStats() {
   VarzValue::Map res;
 
@@ -1095,7 +1151,8 @@ void Service::RegisterCommands() {
       << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(Unsubscribe)
       << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(PSubscribe)
       << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(PUnsubscribe)
-      << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0}.MFUNC(Function);
+      << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0}.MFUNC(Function)
+      << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, 0}.MFUNC(Pubsub);
 
   StreamFamily::Register(&registry_);
   StringFamily::Register(&registry_);

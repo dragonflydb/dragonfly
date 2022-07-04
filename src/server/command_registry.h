@@ -52,6 +52,9 @@ class CommandId {
   /**
    * @brief Construct a new Command Id object
    *
+   * When creating a new command use the https://github.com/redis/redis/tree/unstable/src/commands
+   * files to find the right arguments.
+   *
    * @param name
    * @param mask
    * @param arity -     positive if command has fixed number of required arguments

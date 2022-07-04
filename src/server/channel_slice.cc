@@ -72,7 +72,7 @@ auto ChannelSlice::FetchSubscribers(string_view channel) -> vector<Subscriber> {
 }
 
 void ChannelSlice::CopySubscribers(const SubscribeMap& src, const std::string& pattern,
-                                  vector<Subscriber>* dest) {
+                                   vector<Subscriber>* dest) {
   for (const auto& sub : src) {
     ConnectionContext* cntx = sub.first;
     CHECK(cntx->conn_state.subscribe_info);
@@ -83,6 +83,23 @@ void ChannelSlice::CopySubscribers(const SubscribeMap& src, const std::string& p
 
     dest->push_back(std::move(s));
   }
+}
+
+vector<string> ChannelSlice::ListChannels(const string_view pattern) const {
+  vector<string> res;
+  for (const auto& k_v : channels_) {
+    const string& channel = k_v.first;
+
+    if (pattern.empty() || stringmatchlen(pattern.data(), pattern.size(), channel.data(), channel.size(), 0) == 1) {
+      res.push_back(channel);
+    }
+  }
+
+  return res;
+}
+
+size_t ChannelSlice::PatternCount() const {
+  return patterns_.size();
 }
 
 }  // namespace dfly
