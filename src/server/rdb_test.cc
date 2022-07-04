@@ -97,6 +97,9 @@ TEST_F(RdbTest, LoadSmall6) {
   EXPECT_THAT(StrArray(resp.GetVec()[1]),
               UnorderedElementsAre("list1", "hset_zl", "list2", "zset_sl", "intset", "set1",
                                    "zset_zl", "hset_ht", "intkey", "strkey"));
+  EXPECT_THAT(Run({"get", "intkey"}), "1234567");
+  EXPECT_THAT(Run({"get", "strkey"}), "abcdefghjjjjjjjjjj");
+
   resp = Run({"smembers", "intset"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(),
