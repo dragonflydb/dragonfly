@@ -35,6 +35,8 @@ jobs:
 
     - name: checkout
       uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
 
     - uses: dsaltares/fetch-gh-release-asset@master
       with:
@@ -115,6 +117,7 @@ jobs:
     - name: Update helm chart
       if: env.IS_PRERELEASE != 'true'
       run: |
+        git checkout main
         sed -Ei \
             -e 's/^(version\:) .*/\1 '${{ env.TAG_NAME }}'/g' \
             -e 's/^(appVersion\:) .*/\1 "'${{ env.TAG_NAME }}'"/g' \
@@ -124,4 +127,8 @@ jobs:
           -m 'chore(helm-chart): update to ${{ env.TAG_NAME }}' \
           contrib/charts/dragonfly/Chart.yaml
 
-        git push
+    - name: GitHub Push
+      uses: CasperWA/push-protected@v2
+      with:
+        token: ${{ secrets.DRAGONFLY_TOKEN }}
+        branch: main
