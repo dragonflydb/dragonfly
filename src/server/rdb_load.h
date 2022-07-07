@@ -42,7 +42,6 @@ class RdbLoader {
   using MutableBytes = ::io::MutableBytes;
   struct ObjSettings;
 
-  using OpaqueBuf = std::pair<void*, size_t>;
   struct LzfString {
     base::PODArray<uint8_t> compressed_blob;
     uint64_t uncompressed_len;
@@ -50,7 +49,7 @@ class RdbLoader {
 
   struct LoadTrace;
 
-  using RdbVariant = std::variant<long long, robj*, base::PODArray<char>, LzfString,
+  using RdbVariant = std::variant<long long, base::PODArray<char>, LzfString,
                                   std::unique_ptr<LoadTrace>>;
   struct OpaqueObj {
     RdbVariant obj;
@@ -65,14 +64,43 @@ class RdbLoader {
     };
   };
 
+  struct StreamPelTrace {
+    std::array<uint8_t, 16> rawid;
+    int64_t delivery_time;
+    uint64_t delivery_count;
+  };
+
+  struct StreamConsumerTrace {
+    RdbVariant name;
+    int64_t seen_time;
+    std::vector<std::array<uint8_t, 16>> nack_arr;
+  };
+
+  struct StreamCGTrace {
+    RdbVariant name;
+    uint64_t ms;
+    uint64_t seq;
+
+    std::vector<StreamPelTrace> pel_arr;
+    std::vector<StreamConsumerTrace> cons_arr;
+  };
+
+  struct StreamTrace {
+    size_t lp_len;
+    size_t stream_len;
+    uint64_t ms, seq;
+    std::vector<StreamCGTrace> cgroup;
+  };
+
   struct LoadTrace {
     std::vector<LoadBlob> arr;
+    std::unique_ptr<StreamTrace> stream_trace;
   };
 
   class OpaqueObjLoader;
 
   struct Item {
-    sds key;
+    std::string key;
     OpaqueObj val;
     uint64_t expire_ms;
   };
@@ -90,17 +118,14 @@ class RdbLoader {
   io::Result<uint64_t> LoadLen(bool* is_encoded);
   std::error_code FetchBuf(size_t size, void* dest);
 
-  // FetchGenericString may return various types. I basically copied the code
-  // from rdb.c and tried not to shoot myself on the way.
-  // flags are RDB_LOAD_XXX masks.
-  io::Result<OpaqueBuf> FetchGenericString(int flags);
-  io::Result<OpaqueBuf> FetchLzfStringObject(int flags);
-  io::Result<OpaqueBuf> FetchIntegerObject(int enctype, int flags);
+  io::Result<std::string> FetchGenericString();
+  io::Result<std::string> FetchLzfStringObject();
+  io::Result<std::string> FetchIntegerObject(int enctype);
 
   io::Result<double> FetchBinaryDouble();
   io::Result<double> FetchDouble();
 
-  ::io::Result<sds> ReadKey();
+  ::io::Result<std::string> ReadKey();
 
   ::io::Result<OpaqueObj> ReadObj(int rdbtype);
   ::io::Result<RdbVariant> ReadStringObj();
@@ -114,7 +139,7 @@ class RdbLoader {
   ::io::Result<OpaqueObj> ReadZSet(int rdbtype);
   ::io::Result<OpaqueObj> ReadZSetZL();
   ::io::Result<OpaqueObj> ReadListQuicklist(int rdbtype);
-  ::io::Result<robj*> ReadStreams();
+  ::io::Result<OpaqueObj> ReadStreams();
 
   std::error_code EnsureRead(size_t min_sz) {
     if (mem_buf_.InputLen() >= min_sz)
