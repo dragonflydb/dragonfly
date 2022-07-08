@@ -22,6 +22,9 @@ Dragonfly DB will answer to both `http` and `redis` requests out of the box!
 
 You can use `redis-cli` to connect to `localhost:6379` or open a browser and visit `http://localhost:6379`
 
+**NOTE**: On some configurations, running with the `docker run --privileged ...` flag can fix some
+initialization errors.
+
 ## Step 2
 
 Connect with a redis client
@@ -41,7 +44,14 @@ OK
 
 Continue being great and build your app with the power of DragonflyDB!
 
-### More Build Options
+## Known issues
+
+#### `Error initializing io_uring`
+
+This likely means your kernel version is too low to run DragonflyDB. Make sure to install
+a kernel version that supports `io_uring`.
+
+## More Build Options
 - [Docker Compose Deployment](/contrib/docker/)
 - [Kubernetes Deployment with Helm Chart](/contrib/charts/dragonfly/)
 - [Build From Source](/docs/build-from-source.md)
