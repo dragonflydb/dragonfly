@@ -344,12 +344,14 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             MetricType::GAUGE, &resp->body());
 
   // Memory metrics
-  AppendMetricWithoutLabels("memory_used_bytes", "", m.heap_used_bytes, MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("memory_used_bytes", "", m.heap_used_bytes, MetricType::GAUGE,
+                            &resp->body());
   AppendMetricWithoutLabels("memory_used_peak_bytes", "", used_mem_peak.load(memory_order_relaxed),
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("comitted_memory", "", _mi_stats_main.committed.current,
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("memory_max_bytes", "", max_memory_limit, MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("memory_max_bytes", "", max_memory_limit, MetricType::GAUGE,
+                            &resp->body());
 
   AppendMetricWithoutLabels("commands_processed_total", "", m.conn_stats.command_cnt,
                             MetricType::COUNTER, &resp->body());
@@ -817,7 +819,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       append("used_memory_rss", sdata_res->vm_rss);
       append("used_memory_rss_human", HumanReadableNumBytes(sdata_res->vm_rss));
     } else {
-      LOG(ERROR) << "Error fetching /proc/self/status stats";
+      LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
+                             << sdata_res.error().message();
     }
 
     // Blob - all these cases where the key/objects are represented by a single blob allocated on
@@ -950,17 +953,17 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("CPU")) {
-      ADD_HEADER("# CPU");
-      struct rusage ru, cu, tu;
-      getrusage(RUSAGE_SELF, &ru);
-      getrusage(RUSAGE_CHILDREN, &cu);
-      getrusage(RUSAGE_THREAD, &tu);
-      append("used_cpu_sys", StrCat(ru.ru_stime.tv_sec, ".", ru.ru_stime.tv_usec));
-      append("used_cpu_user", StrCat(ru.ru_utime.tv_sec, ".", ru.ru_utime.tv_usec));
-      append("used_cpu_sys_children", StrCat(cu.ru_stime.tv_sec, ".", cu.ru_stime.tv_usec));
-      append("used_cpu_user_children", StrCat(cu.ru_utime.tv_sec, ".", cu.ru_utime.tv_usec));
-      append("used_cpu_sys_main_thread", StrCat(tu.ru_stime.tv_sec, ".", tu.ru_stime.tv_usec));
-      append("used_cpu_user_main_thread", StrCat(tu.ru_utime.tv_sec, ".", tu.ru_utime.tv_usec));
+    ADD_HEADER("# CPU");
+    struct rusage ru, cu, tu;
+    getrusage(RUSAGE_SELF, &ru);
+    getrusage(RUSAGE_CHILDREN, &cu);
+    getrusage(RUSAGE_THREAD, &tu);
+    append("used_cpu_sys", StrCat(ru.ru_stime.tv_sec, ".", ru.ru_stime.tv_usec));
+    append("used_cpu_user", StrCat(ru.ru_utime.tv_sec, ".", ru.ru_utime.tv_usec));
+    append("used_cpu_sys_children", StrCat(cu.ru_stime.tv_sec, ".", cu.ru_stime.tv_usec));
+    append("used_cpu_user_children", StrCat(cu.ru_utime.tv_sec, ".", cu.ru_utime.tv_usec));
+    append("used_cpu_sys_main_thread", StrCat(tu.ru_stime.tv_sec, ".", tu.ru_stime.tv_usec));
+    append("used_cpu_user_main_thread", StrCat(tu.ru_utime.tv_sec, ".", tu.ru_utime.tv_usec));
   }
 
   (*cntx)->SendBulkString(info);
@@ -994,7 +997,6 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendBulkString("standalone");
   (*cntx)->SendBulkString("role");
   (*cntx)->SendBulkString((*ServerState::tlocal()).is_master ? "master" : "slave");
-
 }
 
 void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
@@ -1137,8 +1139,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"INFO", CO::LOADING, -1, 0, 0, 0}.HFUNC(Info)
             << CI{"HELLO", CO::LOADING, -1, 0, 0, 0}.HFUNC(Hello)
             << CI{"LASTSAVE", CO::LOADING | CO::FAST, 1, 0, 0, 0}.HFUNC(LastSave)
-            << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING | CO::FAST, -2, 0, 0, 0}.HFUNC(
-                   Latency)
+            << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING | CO::FAST, -2, 0, 0, 0}.HFUNC(Latency)
             << CI{"MEMORY", kMemOpts, -2, 0, 0, 0}.HFUNC(Memory)
             << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Save)
             << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0}.HFUNC(_Shutdown)
