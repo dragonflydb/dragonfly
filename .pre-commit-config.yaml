@@ -6,3 +6,9 @@ repos:
         entry: contrib/scripts/conventional-commits
         language: script
         stages: [commit-msg]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.3.0
+    hooks:
+    - id: trailing-whitespace
+    - id: end-of-file-fixer
