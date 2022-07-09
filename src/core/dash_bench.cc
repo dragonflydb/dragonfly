@@ -89,45 +89,38 @@ void Sample(int64_t start, int64_t end, base::Histogram* hist) {
   hist->Add((end - start) / 1000);
 }
 
-void BenchDash() {
+Dash64 udt;
+DashSds sds_dt;
+base::Histogram hist;
+
+void BenchDash(time_t start) {
   uint64_t num = GetFlag(FLAGS_n);
 
-  Dash64 dt;
-  base::Histogram hist;
-
-  time_t start = absl::GetCurrentTimeNanos();
   for (uint64_t i = 0; i < num; ++i) {
-    dt.Insert(i, 0);
+    udt.Insert(i, 0);
     time_t end = absl::GetCurrentTimeNanos();
     Sample(start, end, &hist);
     start = end;
   }
-
-  CONSOLE_INFO << hist.ToString();
 }
 
 inline sds Prefix() {
   return sdsnew("xxxxxxxxxxxxxxxxxxxxxxx");
 }
 
-void BenchDashSds() {
+void BenchDashSds(time_t start) {
   uint64_t num = GetFlag(FLAGS_n);
 
-  base::Histogram hist;
   sds key = sdscatsds(Prefix(), sdsfromlonglong(0));
-  DashSds dt;
 
-  time_t start = absl::GetCurrentTimeNanos();
   for (uint64_t i = 0; i < num; ++i) {
-    dt.Insert(key, 0);
+    sds_dt.Insert(key, 0);
     time_t end = absl::GetCurrentTimeNanos();
     Sample(start, end, &hist);
 
     key = sdscatsds(Prefix(), sdsfromlonglong(i + 1));
     start = absl::GetCurrentTimeNanos();
   }
-
-  CONSOLE_INFO << hist.ToString();
 }
 
 static uint64_t callbackHash(const void* key) {
@@ -136,42 +129,33 @@ static uint64_t callbackHash(const void* key) {
 
 static dictType IntDict = {callbackHash, NULL, NULL, NULL, NULL, NULL, NULL};
 
-void BenchDict() {
+dict* redis_dict = nullptr;
+
+void BenchDict(time_t start) {
   uint64_t num = GetFlag(FLAGS_n);
 
-  base::Histogram hist;
-
-  time_t start = absl::GetCurrentTimeNanos();
-  dict* d = dictCreate(&IntDict);
+  redis_dict = dictCreate(&IntDict);
   for (uint64_t i = 0; i < num; ++i) {
-    dictAdd(d, (void*)i, nullptr);
+    dictAdd(redis_dict, (void*)i, nullptr);
     time_t end = absl::GetCurrentTimeNanos();
     Sample(start, end, &hist);
     start = end;
   }
-  dictRelease(d);
-
-  CONSOLE_INFO << hist.ToString();
 }
 
-void BenchDictSds() {
+void BenchDictSds(time_t start) {
   uint64_t num = GetFlag(FLAGS_n);
 
-  base::Histogram hist;
   sds key = sdscat(Prefix(), sdsfromlonglong(0));
-  dict* d = dictCreate(&SdsDict);
+  redis_dict = dictCreate(&SdsDict);
 
-  time_t start = absl::GetCurrentTimeNanos();
   for (uint64_t i = 0; i < num; ++i) {
-    dictAdd(d, key, nullptr);
+    dictAdd(redis_dict, key, nullptr);
     time_t end = absl::GetCurrentTimeNanos();
     Sample(start, end, &hist);
     key = sdscatsds(Prefix(), sdsfromlonglong(i + 1));
     start = absl::GetCurrentTimeNanos();
   }
-  dictRelease(d);
-
-  CONSOLE_INFO << hist.ToString();
 }
 
 }  // namespace dfly
@@ -184,20 +168,23 @@ int main(int argc, char* argv[]) {
 
   bool is_dash = GetFlag(FLAGS_dash);
   bool is_sds = GetFlag(FLAGS_sds);
-
+  uint64_t start = absl::GetCurrentTimeNanos();
   if (is_dash) {
     if (is_sds) {
-      BenchDashSds();
+      BenchDashSds(start);
     } else {
-      BenchDash();
+      BenchDash(start);
     }
   } else {
     if (is_sds) {
-      BenchDictSds();
+      BenchDictSds(start);
     } else {
-      BenchDict();
+      BenchDict(start);
     }
   }
+  CONSOLE_INFO << "latencies histogram (usec):\n" << hist.ToString();
+  uint64_t delta = (absl::GetCurrentTimeNanos() - start) / 1000000;
+  CONSOLE_INFO << "Took " << delta << " ms";
 
   return 0;
 }
