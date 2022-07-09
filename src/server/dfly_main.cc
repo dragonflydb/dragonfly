@@ -6,6 +6,7 @@
 #include <mimalloc-new-delete.h>
 #endif
 
+#include <liburing.h>
 #include <absl/flags/usage.h>
 #include <absl/flags/usage_config.h>
 #include <absl/strings/match.h>
@@ -164,6 +165,13 @@ Usage: dragonfly [FLAGS]
 
   if (kver.kernel < 5 || (kver.kernel == 5 && kver.major < 10)) {
     LOG(ERROR) << "Kernel 5.10 or later is supported. Exiting...";
+    return 1;
+  }
+
+  int iouring_res = io_uring_queue_init_params(0, nullptr, nullptr);
+  if (-iouring_res == ENOSYS) {
+    LOG(ERROR)
+        << "iouring system call interface is not supported. Exiting...";
     return 1;
   }
 
