@@ -1,3 +1,4 @@
+
 // Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
@@ -6,6 +7,7 @@
 #include <mimalloc-new-delete.h>
 #endif
 
+#include <signal.h>
 #include <liburing.h>
 #include <absl/flags/usage.h>
 #include <absl/flags/usage_config.h>
@@ -137,6 +139,13 @@ extern "C" void _mi_options_init();
 
 using namespace dfly;
 
+void sigill_hdlr(int signo) {
+  LOG(ERROR)
+        << "An attempt to execute an instruction failed."
+        << "The root cause might be an old hardware. Exiting...";
+  exit(1);
+}
+
 int main(int argc, char* argv[]) {
   absl::SetProgramUsageMessage(
     R"(a modern in-memory store.
@@ -156,6 +165,11 @@ Usage: dragonfly [FLAGS]
   absl::SetFlagsUsageConfig(config);
 
   MainInitGuard guard(&argc, &argv);
+
+  struct sigaction act;
+  act.sa_handler = sigill_hdlr;
+  sigemptyset(&act.sa_mask);
+  sigaction(SIGILL, &act, nullptr);
 
   CHECK_GT(GetFlag(FLAGS_port), 0u);
   mi_stats_reset();
