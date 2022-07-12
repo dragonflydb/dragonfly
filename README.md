@@ -138,9 +138,11 @@ Dragonfly currently supports the following Redis-specific arguments:
 In addition, it has Dragonfly specific arguments options:
  * `memcache_port`  - to enable memcached compatible API on this port. Disabled by default.
  * `keys_output_limit` - maximum number of returned keys in `keys` command. Default is 8192.
-   `keys` is a dangerous command. we truncate its result to avoid blowup in memory when fetching too many keys.
+   `keys` is a dangerous command. We truncate its result to avoid blowup in memory when fetching too many keys.
  * `dbnum` - maximum number of supported databases for `select`.
  * `cache_mode` - see [Cache](#novel-cache-design) section below.
+ * `hz` - key expiry evaluation frequency. Default is 1000. Lower frequency uses less cpu when 
+   idle at the expense of precision in key eviction.
 
 
 for more options like logs management or tls support, run `dragonfly --help`.
