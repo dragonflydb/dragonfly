@@ -162,11 +162,11 @@ Usage: dragonfly [FLAGS]
                   "\nbuild time: ", dfly::kBuildTime, "\n");
   };
 
-  LOG(INFO) << "Starting dragonfly " << GetVersion();
-
   absl::SetFlagsUsageConfig(config);
 
   MainInitGuard guard(&argc, &argv);
+
+  LOG(INFO) << "Starting dragonfly " << GetVersion();
 
   struct sigaction act;
   act.sa_handler = sigill_hdlr;
