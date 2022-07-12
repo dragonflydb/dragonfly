@@ -1,13 +1,41 @@
 import pytest
 import redis
+import os
+import subprocess
+import time
 from threading import Thread
-from redis.client import NEVER_DECODE
 
-@pytest.fixture
-def client():
+
+@pytest.fixture(scope="module")
+def dragonfly_db():
+    dragonfly_path = os.environ.get("DRAGONFLY_HOME", '../../build-dbg/dragonfly')
+    print("Starting DragonflyDB [{}]".format(dragonfly_path))
+    # TODO: parse arguments and pass them over
+    p = subprocess.Popen([dragonfly_path])
+    time.sleep(0.1)
+    return_code = p.poll()
+    if return_code is not None:
+        pytest.exit("Failed to start DragonflyDB [{}]".format(dragonfly_path))
+
+    yield
+
+    print("Terminating DragonflyDB process [{}]".format(p.id))
+    try:
+        p.terminate()
+        outs, errs = p.communicate(timeout=15)
+    except subprocess.TimeoutExpired:
+        print("Unable to terminate DragonflyDB gracefully, it was killed")
+        outs, errs = p.communicate()
+        print(outs)
+        print(errs)
+
+
+@pytest.fixture(scope="module")
+def client(dragonfly_db):
     pool = redis.ConnectionPool(decode_responses=True)
-    client = redis.Redis(connection_pool=pool)    
+    client = redis.Redis(connection_pool=pool)
     return client
+
 
 class BLPopWorkerThread:
     def __init__(self):
@@ -30,7 +58,7 @@ class BLPopWorkerThread:
 
 
 @pytest.mark.parametrize('index', range(50))
-def test_blpop_multiple_keys(client : redis.Redis, index):
+def test_blpop_multiple_keys(client: redis.Redis, index):
     wt_blpop = BLPopWorkerThread()
     wt_blpop.async_blpop(client)
 
