@@ -119,7 +119,7 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
   error_code ec = acceptor->AddListener(bind_addr, port, main_listener);
 
-  LOG_IF(FATAL, ec) << "Cound not open port " << port << ", error: " << ec.message();
+  LOG_IF(FATAL, ec) << "Could not open port " << port << ", error: " << ec.message();
 
   if (mc_port > 0) {
     acceptor->AddListener(mc_port, new Listener{Protocol::MEMCACHE, &service});
@@ -165,6 +165,8 @@ Usage: dragonfly [FLAGS]
   absl::SetFlagsUsageConfig(config);
 
   MainInitGuard guard(&argc, &argv);
+
+  LOG(INFO) << "Starting dragonfly " << GetVersion();
 
   struct sigaction act;
   act.sa_handler = sigill_hdlr;
