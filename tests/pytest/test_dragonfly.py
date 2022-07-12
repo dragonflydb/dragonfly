@@ -8,18 +8,18 @@ from threading import Thread
 
 @pytest.fixture(scope="module")
 def dragonfly_db():
-    df_path = os.environ.get("DRAGONFLY_HOME", get_dragon_fly_default_path())
-    print("Starting DragonflyDB [", df_path, "]")
+    dragonfly_path = os.environ.get("DRAGONFLY_HOME", '../../build-dbg/dragonfly')
+    print("Starting DragonflyDB [{}]".format(dragonfly_path))
     # TODO: parse arguments and pass them over
-    p = subprocess.Popen([df_path])
+    p = subprocess.Popen([dragonfly_path])
     time.sleep(0.1)
     return_code = p.poll()
     if return_code is not None:
-        pytest.exit("Failed to start DragonflyDB [{}]".format(df_path))
+        pytest.exit("Failed to start DragonflyDB [{}]".format(dragonfly_path))
 
     yield
 
-    print("Terminating DragonflyDB process [", p.pid, "]")
+    print("Terminating DragonflyDB process [{}]".format(p.id))
     try:
         p.terminate()
         outs, errs = p.communicate(timeout=15)
@@ -28,11 +28,6 @@ def dragonfly_db():
         outs, errs = p.communicate()
         print(outs)
         print(errs)
-
-
-def get_dragon_fly_default_path():
-    df_repo_root_dir = subprocess.Popen(['git', 'rev-parse', '--show-toplevel'], stdout=subprocess.PIPE).communicate()[0].rstrip().decode('utf-8')
-    return df_repo_root_dir + '/build-opt/dragonfly'
 
 
 @pytest.fixture(scope="module")
