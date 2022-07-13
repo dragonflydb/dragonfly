@@ -8,6 +8,7 @@ from threading import Thread
 
 @pytest.fixture(scope="module")
 def dragonfly_db():
+    """ Starts a single DragonflyDB process, runs only once. """
     dragonfly_path = os.environ.get("DRAGONFLY_HOME", '../../build-dbg/dragonfly')
     print("Starting DragonflyDB [{}]".format(dragonfly_path))
     # TODO: parse arguments and pass them over
@@ -19,7 +20,7 @@ def dragonfly_db():
 
     yield
 
-    print("Terminating DragonflyDB process [{}]".format(p.id))
+    print("Terminating DragonflyDB process [{}]".format(p.pid))
     try:
         p.terminate()
         outs, errs = p.communicate(timeout=15)
@@ -31,10 +32,17 @@ def dragonfly_db():
 
 
 @pytest.fixture(scope="module")
-def client(dragonfly_db):
+def connection(dragonfly_db):
     pool = redis.ConnectionPool(decode_responses=True)
     client = redis.Redis(connection_pool=pool)
     return client
+
+
+@pytest.fixture
+def client(connection):
+    """ Flushes all the records, runs before each test. """
+    connection.flushall()
+    return connection
 
 
 class BLPopWorkerThread:
