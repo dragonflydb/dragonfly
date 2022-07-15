@@ -501,6 +501,7 @@ void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContex
   builder->SendSetSkipped();
 }
 
+/// (P)SETEX key seconds value
 void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
   string_view ex = ArgS(args, 2);

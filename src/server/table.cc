@@ -10,6 +10,9 @@ namespace dfly {
 
 #define ADD(x) (x) += o.x
 
+// It should be const, but we override this variable in our tests so that they run faster.
+unsigned kInitSegmentLog = 3;
+
 DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
   constexpr size_t kDbSz = sizeof(DbTableStats);
   static_assert(kDbSz == 56);
@@ -26,7 +29,7 @@ DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
 }
 
 DbTable::DbTable(std::pmr::memory_resource* mr)
-    : prime(2, detail::PrimeTablePolicy{}, mr),
+    : prime(kInitSegmentLog, detail::PrimeTablePolicy{}, mr),
       expire(0, detail::ExpireTablePolicy{}, mr),
       mcflag(0, detail::ExpireTablePolicy{}, mr) {
 }

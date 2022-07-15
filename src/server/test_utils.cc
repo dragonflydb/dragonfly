@@ -23,6 +23,9 @@ using namespace std;
 ABSL_DECLARE_FLAG(string, dbfilename);
 
 namespace dfly {
+
+extern unsigned kInitSegmentLog;
+
 using MP = MemcacheParser;
 using namespace util;
 using namespace testing;
@@ -113,6 +116,8 @@ BaseFamilyTest::~BaseFamilyTest() {
 }
 
 void BaseFamilyTest::SetUpTestSuite() {
+  kInitSegmentLog = 1;
+
   absl::SetFlag(&FLAGS_dbfilename, "");
   init_zmalloc_threadlocal(mi_heap_get_backing());
 }

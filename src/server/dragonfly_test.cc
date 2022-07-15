@@ -7,6 +7,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include <absl/flags/reflection.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/strip.h>
@@ -444,7 +445,7 @@ TEST_F(DflyEngineTest, OOM) {
   max_memory_limit = 0;
   size_t i = 0;
   RespExpr resp;
-  for (; i < 10000; i += 3) {
+  for (; i < 5000; i += 3) {
     resp = Run({"mset", StrCat("key", i), "bar", StrCat("key", i + 1), "bar", StrCat("key", i + 2),
                 "bar"});
     if (resp != "OK")
@@ -464,7 +465,7 @@ TEST_F(DflyEngineTest, OOM) {
     }
     run_args.push_back("bar");
 
-    for (unsigned i = 0; i < 10000; ++i) {
+    for (unsigned i = 0; i < 5000; ++i) {
       run_args[1] = StrCat("key", cmd, i);
       resp = Run(run_args);
 
@@ -474,6 +475,27 @@ TEST_F(DflyEngineTest, OOM) {
       ASSERT_THAT(resp, testing::AnyOf(IntArg(1), "OK")) << cmd;
     }
     EXPECT_THAT(resp, ErrArg("Out of mem"));
+  }
+}
+
+/// Reproduces the case where items with expiry data were evicted,
+/// and then written with the same key.
+TEST_F(DflyEngineTest, Bug207) {
+  shard_set->TEST_EnableHeartBeat();
+  shard_set->TEST_EnableCacheMode();
+
+  max_memory_limit = 0;
+
+  ssize_t i = 0;
+  RespExpr resp;
+  for (; i < 5000; ++i) {
+    resp = Run({"setex", StrCat("key", i), "30", "bar"});
+    // we evict some items because 5000 is too much when max_memory_limit is zero.
+    ASSERT_EQ(resp, "OK");
+  }
+
+  for (; i > 0; --i) {
+    resp = Run({"setex", StrCat("key", i), "30", "bar"});
   }
 }
 
