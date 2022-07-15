@@ -71,6 +71,9 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   void Release(IntentLock::Mode mode, std::string_view key, unsigned count);
 };
 
+// We use reference counting semantics of DbTable when doing snapshotting.
+// There we need to preserve the copy of the table in case someone flushes it during
+// the snapshot process. We copy the pointers in StartSnapshotInShard function.
 using DbTableArray = std::vector<boost::intrusive_ptr<DbTable>>;
 
 }  // namespace dfly

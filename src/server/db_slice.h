@@ -237,6 +237,10 @@ class DbSlice {
     return db_arr_;
   }
 
+  void TEST_EnableCacheMode() {
+    caching_mode_ = 1;
+  }
+
  private:
   void CreateDb(DbIndex index);
 

@@ -381,4 +381,8 @@ void EngineShardSet::TEST_EnableHeartBeat() {
   RunBriefInParallel([](EngineShard* shard) { shard->TEST_EnableHeartbeat(); });
 }
 
+void EngineShardSet::TEST_EnableCacheMode() {
+  RunBriefInParallel([](EngineShard* shard) { shard->db_slice().TEST_EnableCacheMode(); });
+}
+
 }  // namespace dfly

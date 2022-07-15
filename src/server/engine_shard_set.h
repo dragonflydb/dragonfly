@@ -226,6 +226,7 @@ class EngineShardSet {
 
   // Used in tests
   void TEST_EnableHeartBeat();
+  void TEST_EnableCacheMode();
 
  private:
   void InitThreadLocal(util::ProactorBase* pb, bool update_db_time);

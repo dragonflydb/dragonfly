@@ -124,6 +124,10 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
   auto last_slot_it = bucket_it;
   last_slot_it += (PrimeTable::kBucketWidth - 1);
   if (!last_slot_it.is_done()) {
+    if (last_slot_it->second.HasExpire()) {
+      ExpireTable* expire_tbl = db_slice_->GetTables(db_indx_).second;
+      CHECK_EQ(1u, expire_tbl->Erase(last_slot_it->first));
+    }
     UpdateStatsOnDeletion(last_slot_it, db_slice_->MutableStats(db_indx_));
   }
   CHECK(me->ShiftRight(bucket_it));
@@ -446,7 +450,6 @@ bool DbSlice::UpdateExpire(DbIndex db_ind, PrimeIterator it, uint64_t at) {
 
   if (!it->second.HasExpire() && at) {
     uint64_t delta = at - expire_base_[0];  // TODO: employ multigen expire updates.
-
     CHECK(db.expire.Insert(it->first.AsRef(), ExpirePeriod(delta)).second);
     it->second.SetExpire(true);
 
