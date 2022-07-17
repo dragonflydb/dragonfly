@@ -452,7 +452,7 @@ OpStatus Mover::OpMutate(Transaction* t, EngineShard* es) {
   ArgSlice largs = t->ShardArgsInShard(es->shard_id());
   DCHECK_LE(largs.size(), 2u);
 
-  OpArgs op_args{es, t->db_index()};
+  OpArgs op_args = t->GetOpArgs(es);
   for (auto k : largs) {
     if (k == src_) {
       CHECK_EQ(1u, OpRem(op_args, k, {member_}).value());  // must succeed.
@@ -677,8 +677,7 @@ void SetFamily::SAdd(CmdArgList args, ConnectionContext* cntx) {
   ArgSlice arg_slice{vals.data(), vals.size()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpAdd(op_args, key, arg_slice, false);
+    return OpAdd(t->GetOpArgs(shard), key, arg_slice, false);
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -741,7 +740,7 @@ void SetFamily::SRem(CmdArgList args, ConnectionContext* cntx) {
   ArgSlice span{vals.data(), vals.size()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpRem(OpArgs{shard, t->db_index()}, key, span);
+    return OpRem(t->GetOpArgs(shard), key, span);
   };
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
 
@@ -791,7 +790,7 @@ void SetFamily::SPop(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpPop(OpArgs{shard, t->db_index()}, key, count);
+    return OpPop(t->GetOpArgs(shard), key, count);
   };
 
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -821,9 +820,9 @@ void SetFamily::SDiff(CmdArgList args, ConnectionContext* cntx) {
     ArgSlice largs = t->ShardArgsInShard(shard->shard_id());
     if (shard->shard_id() == src_shard) {
       CHECK_EQ(src_key, largs.front());
-      result_set[shard->shard_id()] = OpDiff(OpArgs{shard, t->db_index()}, largs);
+      result_set[shard->shard_id()] = OpDiff(t->GetOpArgs(shard), largs);
     } else {
-      result_set[shard->shard_id()] = OpUnion(OpArgs{shard, t->db_index()}, largs);
+      result_set[shard->shard_id()] = OpUnion(t->GetOpArgs(shard), largs);
     }
 
     return OpStatus::OK;
@@ -864,7 +863,7 @@ void SetFamily::SDiffStore(CmdArgList args, ConnectionContext* cntx) {
         return OpStatus::OK;
     }
 
-    OpArgs op_args{shard, t->db_index()};
+    OpArgs op_args = t->GetOpArgs(shard);
     if (shard->shard_id() == src_shard) {
       CHECK_EQ(src_key, largs.front());
       result_set[shard->shard_id()] = OpDiff(op_args, largs);  // Diff
@@ -887,7 +886,7 @@ void SetFamily::SDiffStore(CmdArgList args, ConnectionContext* cntx) {
   SvArray result = ToSvArray(rsv.value());
   auto store_cb = [&](Transaction* t, EngineShard* shard) {
     if (shard->shard_id() == dest_shard) {
-      OpAdd(OpArgs{shard, t->db_index()}, dest_key, result, true);
+      OpAdd(t->GetOpArgs(shard), dest_key, result, true);
     }
 
     return OpStatus::OK;
@@ -966,7 +965,7 @@ void SetFamily::SInterStore(CmdArgList args, ConnectionContext* cntx) {
 
   auto store_cb = [&](Transaction* t, EngineShard* shard) {
     if (shard->shard_id() == dest_shard) {
-      OpAdd(OpArgs{shard, t->db_index()}, dest_key, result.value(), true);
+      OpAdd(t->GetOpArgs(shard), dest_key, result.value(), true);
     }
 
     return OpStatus::OK;
@@ -981,7 +980,7 @@ void SetFamily::SUnion(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ArgSlice largs = t->ShardArgsInShard(shard->shard_id());
-    result_set[shard->shard_id()] = OpUnion(OpArgs{shard, t->db_index()}, largs);
+    result_set[shard->shard_id()] = OpUnion(t->GetOpArgs(shard), largs);
     return OpStatus::OK;
   };
 
@@ -1012,7 +1011,7 @@ void SetFamily::SUnionStore(CmdArgList args, ConnectionContext* cntx) {
       if (largs.empty())
         return OpStatus::OK;
     }
-    result_set[shard->shard_id()] = OpUnion(OpArgs{shard, t->db_index()}, largs);
+    result_set[shard->shard_id()] = OpUnion(t->GetOpArgs(shard), largs);
     return OpStatus::OK;
   };
 
@@ -1030,7 +1029,7 @@ void SetFamily::SUnionStore(CmdArgList args, ConnectionContext* cntx) {
 
   auto store_cb = [&](Transaction* t, EngineShard* shard) {
     if (shard->shard_id() == dest_shard) {
-      OpAdd(OpArgs{shard, t->db_index()}, dest_key, result, true);
+      OpAdd(t->GetOpArgs(shard), dest_key, result, true);
     }
 
     return OpStatus::OK;
@@ -1055,7 +1054,7 @@ void SetFamily::SScan(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpScan(OpArgs{shard, t->db_index()}, key, &cursor);
+    return OpScan(t->GetOpArgs(shard), key, &cursor);
   };
 
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));

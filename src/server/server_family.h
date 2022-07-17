@@ -17,8 +17,13 @@ class HttpListenerBase;
 
 namespace dfly {
 
+namespace journal {
+class Journal;
+}  // namespace journal
+
 class ConnectionContext;
 class CommandRegistry;
+class DflyCmd;
 class Service;
 class Replica;
 class ScriptMgr;
@@ -41,9 +46,9 @@ struct Metrics {
 };
 
 struct LastSaveInfo {
-  time_t save_time;        // epoch time in seconds.
-  std::string file_name;  //
-  std::vector<std::pair<std::string_view, size_t>> freq_map; // RDB_TYPE_xxx -> count mapping.
+  time_t save_time;                                           // epoch time in seconds.
+  std::string file_name;                                      //
+  std::vector<std::pair<std::string_view, size_t>> freq_map;  // RDB_TYPE_xxx -> count mapping.
 };
 
 class ServerFamily {
@@ -91,6 +96,7 @@ class ServerFamily {
   void Config(CmdArgList args, ConnectionContext* cntx);
   void DbSize(CmdArgList args, ConnectionContext* cntx);
   void Debug(CmdArgList args, ConnectionContext* cntx);
+  void Dfly(CmdArgList args, ConnectionContext* cntx);
   void Memory(CmdArgList args, ConnectionContext* cntx);
   void FlushDb(CmdArgList args, ConnectionContext* cntx);
   void FlushAll(CmdArgList args, ConnectionContext* cntx);
@@ -111,7 +117,6 @@ class ServerFamily {
 
   void Load(const std::string& file_name);
 
-
   boost::fibers::fiber load_fiber_;
 
   uint32_t stats_caching_task_ = 0;
@@ -125,6 +130,8 @@ class ServerFamily {
   std::shared_ptr<Replica> replica_;  // protected by replica_of_mu_
 
   std::unique_ptr<ScriptMgr> script_mgr_;
+  std::unique_ptr<journal::Journal> journal_;
+  std::unique_ptr<DflyCmd> dfly_cmd_;
 
   time_t start_time_ = 0;  // in seconds, epoch time.
 

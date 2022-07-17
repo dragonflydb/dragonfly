@@ -495,7 +495,7 @@ void ListFamily::RPopLPush(CmdArgList args, ConnectionContext* cntx) {
 
   if (cntx->transaction->unique_shard_cnt() == 1) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
-      return OpRPopLPushSingleShard(OpArgs{shard, t->db_index()}, src, dest);
+      return OpRPopLPushSingleShard(t->GetOpArgs(shard), src, dest);
     };
 
     result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -515,7 +515,7 @@ void ListFamily::RPopLPush(CmdArgList args, ConnectionContext* cntx) {
       auto args = t->ShardArgsInShard(shard->shard_id());
       DCHECK_EQ(1u, args.size());
       bool is_dest = args.front() == dest;
-      find_res[is_dest] = RPeek(OpArgs{shard, t->db_index()}, args.front(), !is_dest);
+      find_res[is_dest] = RPeek(t->GetOpArgs(shard), args.front(), !is_dest);
       return OpStatus::OK;
     };
 
@@ -530,7 +530,7 @@ void ListFamily::RPopLPush(CmdArgList args, ConnectionContext* cntx) {
       auto cb = [&](Transaction* t, EngineShard* shard) {
         auto args = t->ShardArgsInShard(shard->shard_id());
         bool is_dest = args.front() == dest;
-        OpArgs op_args{shard, t->db_index()};
+        OpArgs op_args = t->GetOpArgs(shard);
 
         if (is_dest) {
           string_view val{find_res[0].value()};
@@ -564,7 +564,7 @@ void ListFamily::RPopLPush(CmdArgList args, ConnectionContext* cntx) {
 void ListFamily::LLen(CmdArgList args, ConnectionContext* cntx) {
   auto key = ArgS(args, 1);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpLen(OpArgs{shard, t->db_index()}, key);
+    return OpLen(t->GetOpArgs(shard), key);
   };
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
@@ -586,7 +586,7 @@ void ListFamily::LIndex(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpIndex(OpArgs{shard, t->db_index()}, key, index);
+    return OpIndex(t->GetOpArgs(shard), key, index);
   };
 
   OpResult<string> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -617,7 +617,7 @@ void ListFamily::LInsert(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpInsert(OpArgs{shard, t->db_index()}, key, pivot, elem, where);
+    return OpInsert(t->GetOpArgs(shard), key, pivot, elem, where);
   };
 
   OpResult<int> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -640,7 +640,7 @@ void ListFamily::LTrim(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpTrim(OpArgs{shard, t->db_index()}, key, start, end);
+    return OpTrim(t->GetOpArgs(shard), key, start, end);
   };
   cntx->transaction->ScheduleSingleHop(std::move(cb));
   (*cntx)->SendOk();
@@ -658,7 +658,7 @@ void ListFamily::LRange(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpRange(OpArgs{shard, t->db_index()}, key, start, end);
+    return OpRange(t->GetOpArgs(shard), key, start, end);
   };
 
   auto res = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -682,7 +682,7 @@ void ListFamily::LRem(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpRem(OpArgs{shard, t->db_index()}, key, elem, count);
+    return OpRem(t->GetOpArgs(shard), key, elem, count);
   };
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
@@ -704,7 +704,7 @@ void ListFamily::LSet(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(OpArgs{shard, t->db_index()}, key, elem, count);
+    return OpSet(t->GetOpArgs(shard), key, elem, count);
   };
   OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
   if (result) {
@@ -769,7 +769,7 @@ void ListFamily::PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args,
   }
   absl::Span<std::string_view> span{vals.data(), vals.size()};
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpPush(OpArgs{shard, t->db_index()}, key, dir, skip_notexists, span);
+    return OpPush(t->GetOpArgs(shard), key, dir, skip_notexists, span);
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -803,7 +803,7 @@ void ListFamily::PopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cnt
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpPop(OpArgs{shard, t->db_index()}, key, dir, count, true);
+    return OpPop(t->GetOpArgs(shard), key, dir, count, true);
   };
 
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));

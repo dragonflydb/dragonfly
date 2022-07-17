@@ -494,8 +494,7 @@ void CreateGroup(CmdArgList args, string_view key, ConnectionContext* cntx) {
   opts.id = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpCreate(op_args, key, opts);
+    return OpCreate(t->GetOpArgs(shard), key, opts);
   };
 
   OpStatus result = cntx->transaction->ScheduleSingleHop(std::move(cb));
@@ -509,8 +508,7 @@ void CreateGroup(CmdArgList args, string_view key, ConnectionContext* cntx) {
 
 void DestroyGroup(string_view key, string_view gname, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpDestroyGroup(op_args, key, gname);
+    return OpDestroyGroup(t->GetOpArgs(shard), key, gname);
   };
 
   OpStatus result = cntx->transaction->ScheduleSingleHop(std::move(cb));
@@ -529,8 +527,7 @@ void DestroyGroup(string_view key, string_view gname, ConnectionContext* cntx) {
 void DelConsumer(string_view key, string_view gname, string_view consumer,
                  ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpDelConsumer(op_args, key, gname, consumer);
+    return OpDelConsumer(t->GetOpArgs(shard), key, gname, consumer);
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -551,8 +548,7 @@ void SetId(string_view key, string_view gname, CmdArgList args, ConnectionContex
   string_view id = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpSetId(op_args, key, gname, id);
+    return OpSetId(t->GetOpArgs(shard), key, gname, id);
   };
 
   OpStatus result = cntx->transaction->ScheduleSingleHop(std::move(cb));
@@ -607,8 +603,7 @@ void StreamFamily::XAdd(CmdArgList args, ConnectionContext* cntx) {
 
   args.remove_prefix(1);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpAdd(op_args, key, add_opts, args);
+    return OpAdd(t->GetOpArgs(shard), key, add_opts, args);
   };
 
   OpResult<streamID> add_result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -641,8 +636,7 @@ void StreamFamily::XDel(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpDel(op_args, key, absl::Span{ids.data(), ids.size()});
+    return OpDel(t->GetOpArgs(shard), key, absl::Span{ids.data(), ids.size()});
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -751,8 +745,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
 void StreamFamily::XLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpLen(op_args, key);
+    return OpLen(t->GetOpArgs(shard), key);
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -781,8 +774,7 @@ void StreamFamily::XSetId(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpSetId2(op_args, key, parsed_id.val);
+    return OpSetId2(t->GetOpArgs(shard), key, parsed_id.val);
   };
 
   OpStatus result = cntx->transaction->ScheduleSingleHop(std::move(cb));
@@ -835,8 +827,7 @@ void StreamFamily::XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext
   range_opts.is_rev = is_rev;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpRange(op_args, key, range_opts);
+    return OpRange(t->GetOpArgs(shard), key, range_opts);
   };
 
   OpResult<RecordVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));

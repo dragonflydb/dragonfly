@@ -21,13 +21,14 @@ constexpr int64_t kMaxExpireDeadlineSec = (1u << 27) - 1;
 
 using DbIndex = uint16_t;
 using ShardId = uint16_t;
+using LSN = uint64_t;
 using TxId = uint64_t;
 using TxClock = uint64_t;
 
-using facade::MutableSlice;
+using facade::ArgS;
 using facade::CmdArgList;
 using facade::CmdArgVec;
-using facade::ArgS;
+using facade::MutableSlice;
 
 using ArgSlice = absl::Span<const std::string_view>;
 using StringVec = std::vector<std::string>;
@@ -55,8 +56,8 @@ struct KeyIndex {
   // relevant for for commands like ZUNIONSTORE/ZINTERSTORE for destination key.
   unsigned bonus = 0;
   unsigned start;
-  unsigned end;  // does not include this index (open limit).
-  unsigned step; // 1 for commands like mget. 2 for commands like mset.
+  unsigned end;   // does not include this index (open limit).
+  unsigned step;  // 1 for commands like mget. 2 for commands like mset.
 
   bool HasSingleKey() const {
     return bonus == 0 && (start + step >= end);
@@ -69,9 +70,15 @@ struct KeyIndex {
 
 struct OpArgs {
   EngineShard* shard;
+  TxId txid;
   DbIndex db_ind;
-};
 
+  OpArgs() : shard(nullptr), txid(0), db_ind(0) {
+  }
+
+  OpArgs(EngineShard* s, TxId i, DbIndex d) : shard(s), txid(i), db_ind(d) {
+  }
+};
 
 struct TieredStats {
   size_t external_reads = 0;
@@ -117,7 +124,6 @@ extern size_t max_memory_limit;
 // version 5.11 maps to 511 etc.
 // set upon server start.
 extern unsigned kernel_version;
-
 
 const char* GlobalStateName(GlobalState gs);
 

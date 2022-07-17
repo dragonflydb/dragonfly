@@ -60,7 +60,8 @@ struct ObjInfo {
 
 void DoPopulateBatch(std::string_view prefix, size_t val_size, const SetCmd::SetParams& params,
                      const PopulateBatch& batch) {
-  SetCmd sg(&EngineShard::tlocal()->db_slice());
+  OpArgs op_args(EngineShard::tlocal(), 0, params.db_index);
+  SetCmd sg(op_args);
 
   for (unsigned i = 0; i < batch.sz; ++i) {
     string key = absl::StrCat(prefix, ":", batch.index[i]);

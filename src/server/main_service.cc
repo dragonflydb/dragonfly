@@ -44,9 +44,6 @@ ABSL_FLAG(uint32_t, memcache_port, 0, "Memcached port");
 ABSL_FLAG(uint64_t, maxmemory, 0,
           "Limit on maximum-memory that is used by the database."
           "0 - means the program will automatically determine its maximum memory usage");
-ABSL_FLAG(bool, cache_mode, false,
-          "If true, the backend behaves like a cache, "
-          "by evicting entries when getting close to maxmemory limit");
 
 ABSL_DECLARE_FLAG(string, requirepass);
 

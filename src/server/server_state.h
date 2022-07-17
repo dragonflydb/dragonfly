@@ -15,6 +15,10 @@ typedef struct mi_heap_s mi_heap_t;
 
 namespace dfly {
 
+namespace journal {
+class Journal;
+}  // namespace journal
+
 // Present in every server thread. This class differs from EngineShard. The latter manages
 // state around engine shards while the former represents coordinator/connection state.
 // There may be threads that handle engine shards but not IO, there may be threads that handle IO
@@ -58,6 +62,7 @@ class ServerState {  // public struct - to allow initialization.
   GlobalState gstate() const {
     return gstate_;
   }
+
   void set_gstate(GlobalState s) {
     gstate_ = s;
   }
@@ -66,7 +71,9 @@ class ServerState {  // public struct - to allow initialization.
 
   // Returns sum of all requests in the last 6 seconds
   // (not including the current one).
-  uint32_t MovingSum6() const { return qps_.SumTail(); }
+  uint32_t MovingSum6() const {
+    return qps_.SumTail();
+  }
 
   void RecordCmd() {
     ++connection_stats.command_cnt;
@@ -78,9 +85,18 @@ class ServerState {  // public struct - to allow initialization.
     return data_heap_;
   }
 
+  journal::Journal* journal() {
+    return journal_;
+  }
+
+  void set_journal(journal::Journal* j) {
+    journal_ = j;
+  }
+
  private:
   int64_t live_transactions_ = 0;
   mi_heap_t* data_heap_;
+  journal::Journal* journal_ = nullptr;
 
   std::optional<Interpreter> interpreter_;
   GlobalState gstate_ = GlobalState::ACTIVE;
