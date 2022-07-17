@@ -1,16 +1,20 @@
 add_executable(dragonfly dfly_main.cc)
 cxx_link(dragonfly base dragonfly_lib)
 
-add_library(dragonfly_lib blocking_controller.cc channel_slice.cc command_registry.cc
-            common.cc config_flags.cc
-            conn_context.cc db_slice.cc debugcmd.cc
-            engine_shard_set.cc generic_family.cc hset_family.cc io_mgr.cc
+add_library(dfly_transaction db_slice.cc engine_shard_set.cc blocking_controller.cc common.cc
+            io_mgr.cc journal/journal.cc journal/journal_shard.cc table.cc
+            tiered_storage.cc transaction.cc)
+cxx_link(dfly_transaction uring_fiber_lib dfly_core strings_lib)
+
+add_library(dragonfly_lib  channel_slice.cc command_registry.cc
+            config_flags.cc conn_context.cc debugcmd.cc dflycmd.cc
+            generic_family.cc hset_family.cc
             list_family.cc main_service.cc  rdb_load.cc rdb_save.cc replica.cc
             snapshot.cc script_mgr.cc server_family.cc
-            set_family.cc stream_family.cc string_family.cc table.cc tiered_storage.cc
-            transaction.cc zset_family.cc version.cc)
+            set_family.cc stream_family.cc string_family.cc
+            zset_family.cc version.cc)
 
-cxx_link(dragonfly_lib dfly_core dfly_facade redis_lib strings_lib html_lib)
+cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib strings_lib html_lib)
 
 add_library(dfly_test_lib test_utils.cc)
 cxx_link(dfly_test_lib dragonfly_lib facade_test gtest_main_ext)

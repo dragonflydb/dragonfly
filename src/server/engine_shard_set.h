@@ -26,6 +26,10 @@ extern "C" {
 
 namespace dfly {
 
+namespace journal {
+class Journal;
+}  // namespace journal
+
 class TieredStorage;
 class BlockingController;
 
@@ -134,6 +138,14 @@ class EngineShard {
     return counter_[unsigned(type)].SumTail();
   }
 
+  journal::Journal* journal() {
+    return journal_;
+  }
+
+  void set_journal(journal::Journal* j) {
+    journal_ = j;
+  }
+
   void TEST_EnableHeartbeat();
 
  private:
@@ -160,6 +172,7 @@ class EngineShard {
   // Logical ts used to order distributed transactions.
   TxId committed_txid_ = 0;
   Transaction* continuation_trans_ = nullptr;
+  journal::Journal* journal_ = nullptr;
   IntentLock shard_lock_;
 
   uint32_t periodic_task_ = 0;

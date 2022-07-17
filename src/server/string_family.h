@@ -16,11 +16,10 @@ using facade::OpResult;
 using facade::OpStatus;
 
 class SetCmd {
-  DbSlice& db_slice_;
+  const OpArgs op_args_;
 
  public:
-  explicit SetCmd(DbSlice* db_slice);
-  ~SetCmd();
+  explicit SetCmd(const OpArgs& op_args) : op_args_(op_args) {}
 
   enum SetHow { SET_ALWAYS, SET_IF_NOTEXIST, SET_IF_EXISTS };
 
@@ -38,7 +37,7 @@ class SetCmd {
     }
   };
 
-  OpResult<void> Set(const SetParams& params, std::string_view key, std::string_view value);
+  OpStatus Set(const SetParams& params, std::string_view key, std::string_view value);
 
  private:
   OpStatus SetExisting(const SetParams& params, PrimeIterator it, ExpireIterator e_it,
@@ -86,24 +85,6 @@ class StringFamily {
   using MGetResponse = std::vector<std::optional<GetResp>>;
   static MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction* t,
                              EngineShard* shard);
-
-  // Returns true if keys were set, false otherwise.
-  static OpStatus OpMSet(const OpArgs& op_args, ArgSlice args);
-
-  // if skip_on_missing - returns KEY_NOTFOUND.
-  static OpResult<int64_t> OpIncrBy(const OpArgs& op_args, std::string_view key, int64_t val,
-                                    bool skip_on_missing);
-  static OpResult<double> OpIncrFloat(const OpArgs& op_args, std::string_view key, double val);
-
-  // Returns the length of the extended string. if prepend is false - appends the val.
-  static OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, std::string_view key,
-                                        std::string_view val, bool prepend);
-
-  // Returns true if was extended, false if the key was not found.
-  static OpResult<bool> ExtendOrSkip(const OpArgs& op_args, std::string_view key,
-                                     std::string_view val, bool prepend);
-
-  static OpResult<std::string> OpGet(const OpArgs& op_args, std::string_view key);
 };
 
 }  // namespace dfly

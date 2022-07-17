@@ -99,7 +99,7 @@ void HSetFamily::HDel(CmdArgList args, ConnectionContext* cntx) {
 
   args.remove_prefix(2);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpDel(OpArgs{shard, t->db_index()}, key, args);
+    return OpDel(t->GetOpArgs(shard), key, args);
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -114,7 +114,7 @@ void HSetFamily::HLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpLen(OpArgs{shard, t->db_index()}, key);
+    return OpLen(t->GetOpArgs(shard), key);
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -157,7 +157,7 @@ void HSetFamily::HMGet(CmdArgList args, ConnectionContext* cntx) {
 
   args.remove_prefix(2);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpMGet(OpArgs{shard, t->db_index()}, key, args);
+    return OpMGet(t->GetOpArgs(shard), key, args);
   };
 
   OpResult<vector<OptStr>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -186,7 +186,7 @@ void HSetFamily::HGet(CmdArgList args, ConnectionContext* cntx) {
   string_view field = ArgS(args, 2);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpGet(OpArgs{shard, t->db_index()}, key, field);
+    return OpGet(t->GetOpArgs(shard), key, field);
   };
 
   OpResult<string> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -214,7 +214,7 @@ void HSetFamily::HIncrBy(CmdArgList args, ConnectionContext* cntx) {
   IncrByParam param{ival};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpIncrBy(OpArgs{shard, t->db_index()}, key, field, &param);
+    return OpIncrBy(t->GetOpArgs(shard), key, field, &param);
   };
 
   OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
@@ -249,7 +249,7 @@ void HSetFamily::HIncrByFloat(CmdArgList args, ConnectionContext* cntx) {
   IncrByParam param{dval};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpIncrBy(OpArgs{shard, t->db_index()}, key, field, &param);
+    return OpIncrBy(t->GetOpArgs(shard), key, field, &param);
   };
 
   OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
@@ -284,7 +284,7 @@ void HSetFamily::HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t g
   string_view key = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpGetAll(OpArgs{shard, t->db_index()}, key, getall_mask);
+    return OpGetAll(t->GetOpArgs(shard), key, getall_mask);
   };
 
   OpResult<vector<string>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -311,7 +311,7 @@ void HSetFamily::HScan(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpScan(OpArgs{shard, t->db_index()}, key, &cursor);
+    return OpScan(t->GetOpArgs(shard), key, &cursor);
   };
 
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -339,7 +339,7 @@ void HSetFamily::HSet(CmdArgList args, ConnectionContext* cntx) {
 
   args.remove_prefix(2);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(OpArgs{shard, t->db_index()}, key, args, false);
+    return OpSet(t->GetOpArgs(shard), key, args, false);
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -355,7 +355,7 @@ void HSetFamily::HSetNx(CmdArgList args, ConnectionContext* cntx) {
 
   args.remove_prefix(2);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(OpArgs{shard, t->db_index()}, key, args, true);
+    return OpSet(t->GetOpArgs(shard), key, args, true);
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -371,7 +371,7 @@ void HSetFamily::HStrLen(CmdArgList args, ConnectionContext* cntx) {
   string_view field = ArgS(args, 2);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpStrLen(OpArgs{shard, t->db_index()}, key, field);
+    return OpStrLen(t->GetOpArgs(shard), key, field);
   };
 
   OpResult<size_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));

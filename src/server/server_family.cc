@@ -25,8 +25,10 @@ extern "C" {
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/debugcmd.h"
+#include "server/dflycmd.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/journal/journal.h"
 #include "server/main_service.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
@@ -150,6 +152,7 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
   lsinfo_ = make_shared<LastSaveInfo>();
   lsinfo_->save_time = start_time_;
   script_mgr_.reset(new ScriptMgr());
+  journal_.reset(new journal::Journal);
 }
 
 ServerFamily::~ServerFamily() {
@@ -159,6 +162,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
   CHECK(acceptor_ == nullptr);
   acceptor_ = acceptor;
   main_listener_ = main_listener;
+  dfly_cmd_.reset(new DflyCmd(main_listener, journal_.get()));
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   auto cache_cb = [] {
@@ -206,6 +210,11 @@ void ServerFamily::Shutdown() {
   pb_task_->Await([this] {
     pb_task_->CancelPeriodic(stats_caching_task_);
     stats_caching_task_ = 0;
+
+    if (journal_->EnterLameDuck()) {
+      auto ec = journal_->Close();
+      LOG_IF(ERROR, ec) << "Error closing journal " << ec;
+    }
 
     unique_lock lk(replicaof_mu_);
     if (replica_) {
@@ -1122,6 +1131,10 @@ void ServerFamily::SyncGeneric(std::string_view repl_master_id, uint64_t offs,
   // TBD.
 }
 
+void ServerFamily::Dfly(CmdArgList args, ConnectionContext* cntx) {
+  dfly_cmd_->Run(args, cntx);
+}
+
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ServerFamily::x))
 
 void ServerFamily::Register(CommandRegistry* registry) {
@@ -1148,7 +1161,8 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, 0}.HFUNC(Role)
             << CI{"SYNC", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Sync)
             << CI{"PSYNC", CO::ADMIN | CO::GLOBAL_TRANS, 3, 0, 0, 0}.HFUNC(Psync)
-            << CI{"SCRIPT", CO::NOSCRIPT, -2, 0, 0, 0}.HFUNC(Script);
+            << CI{"SCRIPT", CO::NOSCRIPT, -2, 0, 0, 0}.HFUNC(Script)
+            << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS, -2, 0, 0, 0}.HFUNC(Dfly);
 }
 
 }  // namespace dfly

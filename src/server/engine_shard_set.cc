@@ -27,7 +27,9 @@ ABSL_FLAG(uint32_t, hz, 1000,
           "and performs other background tasks. Warning: not advised to decrease in production, "
           "because it can affect expiry precision for PSETEX etc.");
 
-ABSL_DECLARE_FLAG(bool, cache_mode);
+ABSL_FLAG(bool, cache_mode, false,
+          "If true, the backend behaves like a cache, "
+          "by evicting entries when getting close to maxmemory limit");
 
 namespace dfly {
 
@@ -42,8 +44,9 @@ vector<EngineShardSet::CachedStats> cached_stats;  // initialized in EngineShard
 
 }  // namespace
 
-thread_local EngineShard* EngineShard::shard_ = nullptr;
 constexpr size_t kQueueLen = 64;
+
+thread_local EngineShard* EngineShard::shard_ = nullptr;
 EngineShardSet* shard_set = nullptr;
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {

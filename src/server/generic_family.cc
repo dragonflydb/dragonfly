@@ -244,7 +244,7 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
 
   do {
     ess->Await(sid, [&] {
-      OpArgs op_args{EngineShard::tlocal(), cntx->conn_state.db_index};
+      OpArgs op_args{EngineShard::tlocal(), 0, cntx->conn_state.db_index};
 
       OpScan(op_args, scan_opts, &cursor, keys);
     });
@@ -281,7 +281,7 @@ void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&result](const Transaction* t, EngineShard* shard) {
     ArgSlice args = t->ShardArgsInShard(shard->shard_id());
-    auto res = OpDel(OpArgs{shard, t->db_index()}, args);
+    auto res = OpDel(t->GetOpArgs(shard), args);
     result.fetch_add(res.value_or(0), memory_order_relaxed);
 
     return OpStatus::OK;
@@ -332,7 +332,7 @@ void GenericFamily::Exists(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&result](Transaction* t, EngineShard* shard) {
     ArgSlice args = t->ShardArgsInShard(shard->shard_id());
-    auto res = OpExists(OpArgs{shard, t->db_index()}, args);
+    auto res = OpExists(t->GetOpArgs(shard), args);
     result.fetch_add(res.value_or(0), memory_order_relaxed);
 
     return OpStatus::OK;
@@ -362,7 +362,7 @@ void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
   ExpireParams params{.ts = int_arg};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpExpire(OpArgs{shard, t->db_index()}, key, params);
+    return OpExpire(t->GetOpArgs(shard), key, params);
   };
 
   OpStatus status = cntx->transaction->ScheduleSingleHop(move(cb));
@@ -381,7 +381,7 @@ void GenericFamily::ExpireAt(CmdArgList args, ConnectionContext* cntx) {
   ExpireParams params{.ts = int_arg, .absolute = true};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpExpire(OpArgs{shard, t->db_index()}, key, params);
+    return OpExpire(t->GetOpArgs(shard), key, params);
   };
   OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
 
@@ -425,7 +425,7 @@ void GenericFamily::PexpireAt(CmdArgList args, ConnectionContext* cntx) {
   ExpireParams params{.ts = int_arg, .absolute = true, .unit = MSEC};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpExpire(OpArgs{shard, t->db_index()}, key, params);
+    return OpExpire(t->GetOpArgs(shard), key, params);
   };
   OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
 
@@ -524,7 +524,7 @@ OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool skip_exist_des
 
   if (transaction->unique_shard_cnt() == 1) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
-      return OpRen(OpArgs{shard, t->db_index()}, key[0], key[1], skip_exist_dest);
+      return OpRen(t->GetOpArgs(shard), key[0], key[1], skip_exist_dest);
     };
     OpResult<void> result = transaction->ScheduleSingleHopT(std::move(cb));
 

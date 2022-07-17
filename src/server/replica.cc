@@ -79,13 +79,6 @@ error_code Recv(FiberSocketBase* input, base::IoBuf* dest) {
 
 constexpr unsigned kRdbEofMarkSize = 40;
 
-// TODO: to remove usages of this macro and make code crash-less.
-#define CHECK_EC(x)                                                                 \
-  do {                                                                              \
-    auto __ec$ = (x);                                                               \
-    CHECK(!__ec$) << "Error: " << __ec$ << " " << __ec$.message() << " for " << #x; \
-  } while (false)
-
 }  // namespace
 
 Replica::Replica(string host, uint16_t port, Service* se)
@@ -510,7 +503,7 @@ error_code Replica::ConsumeRedisStream() {
 
   // Master waits for this command in order to start sending replication stream.
   serializer.SendCommand("REPLCONF ACK 0");
-  CHECK_EC(serializer.ec());
+  RETURN_ON_ERR(serializer.ec());
 
   VLOG(1) << "Before reading repl-log";
 

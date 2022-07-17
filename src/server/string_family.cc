@@ -17,6 +17,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/io_mgr.h"
+#include "server/journal/journal.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "util/varz.h"
@@ -60,6 +61,12 @@ string_view GetSlice(EngineShard* shard, const PrimeValue& pv, string* tmp) {
   return pv.GetSlice(tmp);
 }
 
+inline void RecordJournal(const OpArgs& op_args, const PrimeKey& pkey, const PrimeKey& pvalue) {
+  if (op_args.shard->journal()) {
+    op_args.shard->journal()->RecordEntry(op_args.txid, pkey, pvalue);
+  }
+}
+
 OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t start,
                               string_view value) {
   auto& db_slice = op_args.shard->db_slice();
@@ -90,9 +97,11 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
 
     db_slice.PreUpdate(op_args.db_ind, it);
   }
+
   memcpy(s.data() + start, value.data(), value.size());
   it->second.SetString(s);
   db_slice.PostUpdate(op_args.db_ind, it);
+  RecordJournal(op_args, it->first, it->second);
 
   return it->second.Size();
 }
@@ -129,110 +138,300 @@ OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t star
   return string(slice.substr(start, end - start + 1));
 };
 
-}  // namespace
+// Returns the length of the extended string. if prepend is false - appends the val.
+OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, std::string_view key, std::string_view val,
+                               bool prepend) {
+  auto* shard = op_args.shard;
+  auto& db_slice = shard->db_slice();
+  auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
+  if (inserted) {
+    it->second.SetString(val);
+    db_slice.PostUpdate(op_args.db_ind, it);
+    RecordJournal(op_args, it->first, it->second);
 
-SetCmd::SetCmd(DbSlice* db_slice) : db_slice_(*db_slice) {
+    return val.size();
+  }
+
+  if (it->second.ObjType() != OBJ_STRING)
+    return OpStatus::WRONG_TYPE;
+
+  string tmp, new_val;
+  string_view slice = GetSlice(op_args.shard, it->second, &tmp);
+  if (prepend)
+    new_val = absl::StrCat(val, slice);
+  else
+    new_val = absl::StrCat(slice, val);
+
+  db_slice.PreUpdate(op_args.db_ind, it);
+  it->second.SetString(new_val);
+  db_slice.PostUpdate(op_args.db_ind, it);
+  RecordJournal(op_args, it->first, it->second);
+
+  return new_val.size();
 }
 
-SetCmd::~SetCmd() {
+OpResult<bool> ExtendOrSkip(const OpArgs& op_args, std::string_view key, std::string_view val,
+                            bool prepend) {
+  auto& db_slice = op_args.shard->db_slice();
+  OpResult<PrimeIterator> it_res = db_slice.Find(op_args.db_ind, key, OBJ_STRING);
+  if (!it_res) {
+    return false;
+  }
+
+  CompactObj& cobj = (*it_res)->second;
+
+  string tmp, new_val;
+  string_view slice = GetSlice(op_args.shard, cobj, &tmp);
+  if (prepend)
+    new_val = absl::StrCat(val, slice);
+  else
+    new_val = absl::StrCat(slice, val);
+
+  db_slice.PreUpdate(op_args.db_ind, *it_res);
+  cobj.SetString(new_val);
+  db_slice.PostUpdate(op_args.db_ind, *it_res);
+
+  return new_val.size();
 }
 
-OpResult<void> SetCmd::Set(const SetParams& params, std::string_view key, std::string_view value) {
-  DCHECK_LT(params.db_index, db_slice_.db_array_size());
-  DCHECK(db_slice_.IsDbValid(params.db_index));
+OpResult<string> OpGet(const OpArgs& op_args, string_view key) {
+  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_STRING);
+  if (!it_res.ok())
+    return it_res.status();
 
-  VLOG(2) << "Set " << key << "(" << db_slice_.shard_id() << ") ";
+  const PrimeValue& pv = it_res.value()->second;
 
-  if (params.how == SET_IF_EXISTS) {
-    auto [it, expire_it] = db_slice_.FindExt(params.db_index, key);
+  return GetString(op_args.shard, pv);
+}
 
-    if (IsValid(it)) {  // existing
-      return SetExisting(params, it, expire_it, value);
+OpResult<double> OpIncrFloat(const OpArgs& op_args, std::string_view key, double val) {
+  auto& db_slice = op_args.shard->db_slice();
+  auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
+
+  char buf[128];
+
+  if (inserted) {
+    char* str = RedisReplyBuilder::FormatDouble(val, buf, sizeof(buf));
+    it->second.SetString(str);
+    db_slice.PostUpdate(op_args.db_ind, it);
+    RecordJournal(op_args, it->first, it->second);
+
+    return val;
+  }
+
+  if (it->second.ObjType() != OBJ_STRING)
+    return OpStatus::WRONG_TYPE;
+
+  if (it->second.Size() == 0)
+    return OpStatus::INVALID_FLOAT;
+
+  string tmp;
+  string_view slice = GetSlice(op_args.shard, it->second, &tmp);
+
+  StringToDoubleConverter stod(StringToDoubleConverter::NO_FLAGS, 0, 0, NULL, NULL);
+  int processed_digits = 0;
+  double base = stod.StringToDouble(slice.data(), slice.size(), &processed_digits);
+  if (unsigned(processed_digits) != slice.size()) {
+    return OpStatus::INVALID_FLOAT;
+  }
+
+  base += val;
+
+  if (isnan(base) || isinf(base)) {
+    return OpStatus::INVALID_FLOAT;
+  }
+
+  char* str = RedisReplyBuilder::FormatDouble(base, buf, sizeof(buf));
+
+  db_slice.PreUpdate(op_args.db_ind, it);
+  it->second.SetString(str);
+  db_slice.PostUpdate(op_args.db_ind, it);
+  RecordJournal(op_args, it->first, it->second);
+
+  return base;
+}
+
+// if skip_on_missing - returns KEY_NOTFOUND.
+OpResult<int64_t> OpIncrBy(const OpArgs& op_args, std::string_view key, int64_t incr,
+                           bool skip_on_missing) {
+  auto& db_slice = op_args.shard->db_slice();
+
+  // we avoid using AddOrFind because of skip_on_missing option for memcache.
+  auto [it, expire_it] = db_slice.FindExt(op_args.db_ind, key);
+
+  if (!IsValid(it)) {
+    if (skip_on_missing)
+      return OpStatus::KEY_NOTFOUND;
+
+    CompactObj cobj;
+    cobj.SetInt(incr);
+
+    // AddNew calls PostUpdate inside.
+    try {
+      it = db_slice.AddNew(op_args.db_ind, key, std::move(cobj), 0);
+    } catch (bad_alloc&) {
+      return OpStatus::OUT_OF_MEMORY;
     }
-    return OpStatus::SKIPPED;
+
+    RecordJournal(op_args, it->first, it->second);
+
+    return incr;
   }
 
-  // New entry
-  tuple<PrimeIterator, ExpireIterator, bool> add_res;
-  try {
-    add_res = db_slice_.AddOrFind2(params.db_index, key);
-  } catch (bad_alloc& e) {
-    return OpStatus::OUT_OF_MEMORY;
+  if (it->second.ObjType() != OBJ_STRING) {
+    return OpStatus::WRONG_TYPE;
   }
 
-  PrimeIterator it = get<0>(add_res);
-  if (!get<2>(add_res)) {
-    return SetExisting(params, it, get<1>(add_res), value);
+  auto opt_prev = it->second.TryGetInt();
+  if (!opt_prev) {
+    return OpStatus::INVALID_VALUE;
   }
 
-  // adding new value.
-  PrimeValue tvalue{value};
-  tvalue.SetFlag(params.memcache_flags != 0);
-  it->second = std::move(tvalue);
-  db_slice_.PostUpdate(params.db_index, it);
-
-  if (params.expire_after_ms) {
-    db_slice_.UpdateExpire(params.db_index, it, params.expire_after_ms + db_slice_.Now());
+  long long prev = *opt_prev;
+  if ((incr < 0 && prev < 0 && incr < (LLONG_MIN - prev)) ||
+      (incr > 0 && prev > 0 && incr > (LLONG_MAX - prev))) {
+    return OpStatus::OUT_OF_RANGE;
   }
 
-  if (params.memcache_flags)
-    db_slice_.SetMCFlag(params.db_index, it->first.AsRef(), params.memcache_flags);
+  int64_t new_val = prev + incr;
+  DCHECK(!it->second.IsExternal());
+  db_slice.PreUpdate(op_args.db_ind, it);
+  it->second.SetInt(new_val);
+  db_slice.PostUpdate(op_args.db_ind, it);
+  RecordJournal(op_args, it->first, it->second);
 
-  EngineShard* shard = db_slice_.shard_owner();
+  return new_val;
+}
 
-  if (shard->tiered_storage()) {  // external storage enabled.
-    if (value.size() >= kMinTieredLen) {
-      shard->tiered_storage()->UnloadItem(params.db_index, it);
+// Returns true if keys were set, false otherwise.
+OpStatus OpMSet(const OpArgs& op_args, ArgSlice args) {
+  DCHECK(!args.empty() && args.size() % 2 == 0);
+
+  SetCmd::SetParams params{op_args.db_ind};
+  SetCmd sg(op_args);
+
+  for (size_t i = 0; i < args.size(); i += 2) {
+    DVLOG(1) << "MSet " << args[i] << ":" << args[i + 1];
+    OpStatus res = sg.Set(params, args[i], args[i + 1]);
+    if (res != OpStatus::OK) {  // OOM for example.
+      return res;
     }
   }
 
   return OpStatus::OK;
 }
 
+}  // namespace
+
+OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value) {
+  EngineShard* shard = op_args_.shard;
+  auto& db_slice = shard->db_slice();
+
+  DCHECK_LT(params.db_index, db_slice.db_array_size());
+  DCHECK(db_slice.IsDbValid(params.db_index));
+
+  VLOG(2) << "Set " << key << "(" << db_slice.shard_id() << ") ";
+
+  if (params.how == SET_IF_EXISTS) {
+    auto [it, expire_it] = db_slice.FindExt(params.db_index, key);
+
+    if (IsValid(it)) {  // existing
+      return SetExisting(params, it, expire_it, value);
+    }
+
+    return OpStatus::SKIPPED;
+  }
+
+  // Trying to add a new entry.
+  tuple<PrimeIterator, ExpireIterator, bool> add_res;
+  try {
+    add_res = db_slice.AddOrFind2(params.db_index, key);
+  } catch (bad_alloc& e) {
+    return OpStatus::OUT_OF_MEMORY;
+  }
+
+  PrimeIterator it = get<0>(add_res);
+  if (!get<2>(add_res)) {  // Existing.
+    return SetExisting(params, it, get<1>(add_res), value);
+  }
+
+  //
+  // Adding new value.
+  PrimeValue tvalue{value};
+  tvalue.SetFlag(params.memcache_flags != 0);
+  it->second = std::move(tvalue);
+  db_slice.PostUpdate(params.db_index, it);
+
+  if (params.expire_after_ms) {
+    db_slice.UpdateExpire(params.db_index, it, params.expire_after_ms + db_slice.Now());
+  }
+
+  if (params.memcache_flags)
+    db_slice.SetMCFlag(params.db_index, it->first.AsRef(), params.memcache_flags);
+
+  if (shard->tiered_storage()) {  // external storage enabled.
+    // TODO: we may have a bug if we block the fiber inside UnloadItem - "it" may be invalid
+    // afterwards.
+    if (value.size() >= kMinTieredLen) {
+      shard->tiered_storage()->UnloadItem(params.db_index, it);
+    }
+  }
+
+  RecordJournal(op_args_, it->first, it->second);
+  return OpStatus::OK;
+}
+
 OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIterator e_it,
-                             std::string_view value) {
+                             string_view value) {
   if (params.how == SET_IF_NOTEXIST)
     return OpStatus::SKIPPED;
 
   PrimeValue& prime_value = it->second;
+  EngineShard* shard = op_args_.shard;
+
   if (params.prev_val) {
     if (prime_value.ObjType() != OBJ_STRING)
       return OpStatus::WRONG_TYPE;
 
-    string val = GetString(db_slice_.shard_owner(), prime_value);
+    string val = GetString(shard, prime_value);
     params.prev_val->emplace(move(val));
   }
 
-  uint64_t at_ms = params.expire_after_ms ? params.expire_after_ms + db_slice_.Now() : 0;
+  DbSlice& db_slice = shard->db_slice();
+  uint64_t at_ms = params.expire_after_ms ? params.expire_after_ms + db_slice.Now() : 0;
   if (IsValid(e_it) && at_ms) {
-    e_it->second = db_slice_.FromAbsoluteTime(at_ms);
+    e_it->second = db_slice.FromAbsoluteTime(at_ms);
   } else {
-    bool changed = db_slice_.UpdateExpire(params.db_index, it, at_ms);
+    // We need to update expiry, or maybe erase the object if it was expired.
+    bool changed = db_slice.UpdateExpire(params.db_index, it, at_ms);
     if (changed && at_ms == 0)  // erased.
-      return OpStatus::OK;
+      return OpStatus::OK;      // TODO: to update journal with deletion.
   }
 
-  db_slice_.PreUpdate(params.db_index, it);
+  db_slice.PreUpdate(params.db_index, it);
 
   // Check whether we need to update flags table.
   bool req_flag_update = (params.memcache_flags != 0) != prime_value.HasFlag();
   if (req_flag_update) {
     prime_value.SetFlag(params.memcache_flags != 0);
-    db_slice_.SetMCFlag(params.db_index, it->first.AsRef(), params.memcache_flags);
+    db_slice.SetMCFlag(params.db_index, it->first.AsRef(), params.memcache_flags);
   }
 
   // overwrite existing entry.
   prime_value.SetString(value);
 
   if (value.size() >= kMinTieredLen) {  // external storage enabled.
-    EngineShard* shard = db_slice_.shard_owner();
 
+    // TODO: if UnloadItem can block the calling fiber, then we have the bug because then "it"
+    // can be invalid after the function returns and the functions that follow may access invalid
+    // entry.
     if (shard->tiered_storage()) {
       shard->tiered_storage()->UnloadItem(params.db_index, it);
     }
   }
 
-  db_slice_.PostUpdate(params.db_index, it);
+  db_slice.PostUpdate(params.db_index, it);
+  RecordJournal(op_args_, it->first, it->second);
 
   return OpStatus::OK;
 }
@@ -261,7 +460,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
         builder->SendError(kSyntaxErr);
       }
 
-      std::string_view ex = ArgS(args, i);
+      string_view ex = ArgS(args, i);
       if (!absl::SimpleAtoi(ex, &int_arg)) {
         return builder->SendError(kInvalidIntErr);
       }
@@ -291,9 +490,8 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   DCHECK(cntx->transaction);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    SetCmd sg(&shard->db_slice());
-    auto status = sg.Set(sparams, key, value).status();
-    return status;
+    SetCmd sg(t->GetOpArgs(shard));
+    return sg.Set(sparams, key, value);
   };
   OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
 
@@ -319,9 +517,7 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 
   std::string_view key = ArgS(args, 1);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpGet(OpArgs{shard, t->db_index()}, key);
-  };
+  auto cb = [&](Transaction* t, EngineShard* shard) { return OpGet(t->GetOpArgs(shard), key); };
 
   DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
   Transaction* trans = cntx->transaction;
@@ -350,16 +546,15 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
   SetCmd::SetParams sparams{cntx->db_index()};
   sparams.prev_val = &prev_val;
 
-  ShardId sid = Shard(key, shard_set->size());
-  OpResult<void> result = shard_set->Await(sid, [&] {
-    EngineShard* es = EngineShard::tlocal();
-    SetCmd cmd(&es->db_slice());
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    SetCmd cmd(t->GetOpArgs(shard));
 
     return cmd.Set(sparams, key, value);
-  });
+  };
+  OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
 
-  if (!result) {
-    (*cntx)->SendError(result.status());
+  if (status != OpStatus::OK) {
+    (*cntx)->SendError(status);
     return;
   }
 
@@ -367,6 +562,7 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
     (*cntx)->SendBulkString(*prev_val);
     return;
   }
+
   return (*cntx)->SendNull();
 }
 
@@ -398,7 +594,7 @@ void StringFamily::IncrByFloat(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpIncrFloat(OpArgs{shard, t->db_index()}, key, val);
+    return OpIncrFloat(t->GetOpArgs(shard), key, val);
   };
 
   OpResult<double> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -444,7 +640,7 @@ void StringFamily::IncrByGeneric(std::string_view key, int64_t val, ConnectionCo
   bool skip_on_missing = cntx->protocol() == Protocol::MEMCACHE;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpResult<int64_t> res = OpIncrBy(OpArgs{shard, t->db_index()}, key, val, skip_on_missing);
+    OpResult<int64_t> res = OpIncrBy(t->GetOpArgs(shard), key, val, skip_on_missing);
     return res;
   };
 
@@ -477,7 +673,7 @@ void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContex
 
   if (cntx->protocol() == Protocol::REDIS) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
-      return ExtendOrSet(OpArgs{shard, t->db_index()}, key, sval, prepend);
+      return ExtendOrSet(t->GetOpArgs(shard), key, sval, prepend);
     };
 
     OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -489,7 +685,7 @@ void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContex
   DCHECK(cntx->protocol() == Protocol::MEMCACHE);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return ExtendOrSkip(OpArgs{shard, t->db_index()}, key, sval, prepend);
+    return ExtendOrSkip(t->GetOpArgs(shard), key, sval, prepend);
   };
 
   OpResult<bool> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -524,9 +720,8 @@ void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext
     sparams.expire_after_ms = unit_vals;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    SetCmd sg(&shard->db_slice());
-    auto status = sg.Set(sparams, key, value).status();
-    return status;
+    SetCmd sg(t->GetOpArgs(shard));
+    return sg.Set(sparams, key, value);
   };
 
   OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
@@ -600,9 +795,9 @@ void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
     LOG(INFO) << "MSET/" << transaction->unique_shard_cnt() << str;
   }
 
-  auto cb = [&](Transaction* t, EngineShard* es) {
-    auto args = t->ShardArgsInShard(es->shard_id());
-    return OpMSet(OpArgs{es, t->db_index()}, args);
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    auto args = t->ShardArgsInShard(shard->shard_id());
+    return OpMSet(t->GetOpArgs(shard), args);
   };
 
   OpStatus status = transaction->ScheduleSingleHop(std::move(cb));
@@ -635,12 +830,13 @@ void StringFamily::MSetNx(CmdArgList args, ConnectionContext* cntx) {
 
   transaction->Execute(std::move(cb), false);
   bool to_skip = exists.load(memory_order_relaxed) == true;
-  auto epilog_cb = [&](Transaction* t, EngineShard* es) {
+
+  auto epilog_cb = [&](Transaction* t, EngineShard* shard) {
     if (to_skip)
       return OpStatus::OK;
 
-    auto args = t->ShardArgsInShard(es->shard_id());
-    return OpMSet(OpArgs{es, t->db_index()}, std::move(args));
+    auto args = t->ShardArgsInShard(shard->shard_id());
+    return OpMSet(t->GetOpArgs(shard), std::move(args));
   };
 
   transaction->Execute(std::move(epilog_cb), true);
@@ -680,7 +876,7 @@ void StringFamily::GetRange(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpGetRange(OpArgs{shard, t->db_index()}, key, start, end);
+    return OpGetRange(t->GetOpArgs(shard), key, start, end);
   };
 
   Transaction* trans = cntx->transaction;
@@ -713,7 +909,7 @@ void StringFamily::SetRange(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
-    return OpSetRange(OpArgs{shard, t->db_index()}, key, start, value);
+    return OpSetRange(t->GetOpArgs(shard), key, start, value);
   };
 
   Transaction* trans = cntx->transaction;
@@ -756,176 +952,6 @@ auto StringFamily::OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction
   }
 
   return response;
-}
-
-OpStatus StringFamily::OpMSet(const OpArgs& op_args, ArgSlice args) {
-  DCHECK(!args.empty() && args.size() % 2 == 0);
-
-  SetCmd::SetParams params{op_args.db_ind};
-  SetCmd sg(&op_args.shard->db_slice());
-
-  for (size_t i = 0; i < args.size(); i += 2) {
-    DVLOG(1) << "MSet " << args[i] << ":" << args[i + 1];
-    auto res = sg.Set(params, args[i], args[i + 1]);
-    if (!res) {  // OOM for example.
-      return res.status();
-    }
-  }
-
-  return OpStatus::OK;
-}
-
-OpResult<int64_t> StringFamily::OpIncrBy(const OpArgs& op_args, std::string_view key, int64_t incr,
-                                         bool skip_on_missing) {
-  auto& db_slice = op_args.shard->db_slice();
-
-  // we avoid using AddOrFind because of skip_on_missing option for memcache.
-  auto [it, expire_it] = db_slice.FindExt(op_args.db_ind, key);
-
-  if (!IsValid(it)) {
-    if (skip_on_missing)
-      return OpStatus::KEY_NOTFOUND;
-
-    CompactObj cobj;
-    cobj.SetInt(incr);
-
-    try {
-      db_slice.AddNew(op_args.db_ind, key, std::move(cobj), 0);
-    } catch (bad_alloc&) {
-      return OpStatus::OUT_OF_MEMORY;
-    }
-    return incr;
-  }
-
-  if (it->second.ObjType() != OBJ_STRING) {
-    return OpStatus::WRONG_TYPE;
-  }
-
-  auto opt_prev = it->second.TryGetInt();
-  if (!opt_prev) {
-    return OpStatus::INVALID_VALUE;
-  }
-
-  long long prev = *opt_prev;
-  if ((incr < 0 && prev < 0 && incr < (LLONG_MIN - prev)) ||
-      (incr > 0 && prev > 0 && incr > (LLONG_MAX - prev))) {
-    return OpStatus::OUT_OF_RANGE;
-  }
-
-  int64_t new_val = prev + incr;
-  DCHECK(!it->second.IsExternal());
-  db_slice.PreUpdate(op_args.db_ind, it);
-  it->second.SetInt(new_val);
-  db_slice.PostUpdate(op_args.db_ind, it);
-  return new_val;
-}
-
-OpResult<double> StringFamily::OpIncrFloat(const OpArgs& op_args, std::string_view key,
-                                           double val) {
-  auto& db_slice = op_args.shard->db_slice();
-  auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
-
-  char buf[128];
-
-  if (inserted) {
-    char* str = RedisReplyBuilder::FormatDouble(val, buf, sizeof(buf));
-    it->second.SetString(str);
-    db_slice.PostUpdate(op_args.db_ind, it);
-
-    return val;
-  }
-
-  if (it->second.ObjType() != OBJ_STRING)
-    return OpStatus::WRONG_TYPE;
-
-  if (it->second.Size() == 0)
-    return OpStatus::INVALID_FLOAT;
-
-  string tmp;
-  string_view slice = GetSlice(op_args.shard, it->second, &tmp);
-
-  StringToDoubleConverter stod(StringToDoubleConverter::NO_FLAGS, 0, 0, NULL, NULL);
-  int processed_digits = 0;
-  double base = stod.StringToDouble(slice.data(), slice.size(), &processed_digits);
-  if (unsigned(processed_digits) != slice.size()) {
-    return OpStatus::INVALID_FLOAT;
-  }
-
-  base += val;
-
-  if (isnan(base) || isinf(base)) {
-    return OpStatus::INVALID_FLOAT;
-  }
-
-  char* str = RedisReplyBuilder::FormatDouble(base, buf, sizeof(buf));
-
-  db_slice.PreUpdate(op_args.db_ind, it);
-  it->second.SetString(str);
-  db_slice.PostUpdate(op_args.db_ind, it);
-
-  return base;
-}
-
-OpResult<uint32_t> StringFamily::ExtendOrSet(const OpArgs& op_args, std::string_view key,
-                                             std::string_view val, bool prepend) {
-  auto& db_slice = op_args.shard->db_slice();
-  auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
-  if (inserted) {
-    it->second.SetString(val);
-    db_slice.PostUpdate(op_args.db_ind, it);
-
-    return val.size();
-  }
-
-  if (it->second.ObjType() != OBJ_STRING)
-    return OpStatus::WRONG_TYPE;
-
-  string tmp, new_val;
-  string_view slice = GetSlice(op_args.shard, it->second, &tmp);
-  if (prepend)
-    new_val = absl::StrCat(val, slice);
-  else
-    new_val = absl::StrCat(slice, val);
-
-  db_slice.PreUpdate(op_args.db_ind, it);
-  it->second.SetString(new_val);
-  db_slice.PostUpdate(op_args.db_ind, it);
-
-  return new_val.size();
-}
-
-OpResult<bool> StringFamily::ExtendOrSkip(const OpArgs& op_args, std::string_view key,
-                                          std::string_view val, bool prepend) {
-  auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> it_res = db_slice.Find(op_args.db_ind, key, OBJ_STRING);
-  if (!it_res) {
-    return false;
-  }
-
-  CompactObj& cobj = (*it_res)->second;
-
-  string tmp, new_val;
-  string_view slice = GetSlice(op_args.shard, cobj, &tmp);
-  if (prepend)
-    new_val = absl::StrCat(val, slice);
-  else
-    new_val = absl::StrCat(slice, val);
-
-  db_slice.PreUpdate(op_args.db_ind, *it_res);
-  cobj.SetString(new_val);
-  db_slice.PostUpdate(op_args.db_ind, *it_res);
-
-  return new_val.size();
-}
-
-OpResult<string> StringFamily::OpGet(const OpArgs& op_args, string_view key) {
-  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_STRING);
-  if (!it_res.ok())
-    return it_res.status();
-
-  const PrimeValue& pv = it_res.value()->second;
-
-  return GetString(op_args.shard, pv);
 }
 
 void StringFamily::Init(util::ProactorPool* pp) {

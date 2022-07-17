@@ -970,8 +970,7 @@ void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
 
   absl::Span memb_sp{members.data(), members.size()};
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpAdd(op_args, zparams, key, memb_sp);
+    return OpAdd(t->GetOpArgs(shard), zparams, key, memb_sp);
   };
 
   OpResult<AddResult> add_result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1031,8 +1030,7 @@ void ZSetFamily::ZCount(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpCount(op_args, key, si);
+    return OpCount(t->GetOpArgs(shard), key, si);
   };
 
   OpResult<unsigned> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1063,8 +1061,7 @@ void ZSetFamily::ZIncrBy(CmdArgList args, ConnectionContext* cntx) {
   zparams.flags = ZADD_IN_INCR;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpAdd(op_args, zparams, key, ScoredMemberSpan{&scored_member, 1});
+    return OpAdd(t->GetOpArgs(shard), zparams, key, ScoredMemberSpan{&scored_member, 1});
   };
 
   OpResult<AddResult> add_result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1139,7 +1136,7 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
       ZParams zparams;
       zparams.override = true;
       add_result =
-          OpAdd(OpArgs{shard, t->db_index()}, zparams, dest_key, ScoredMemberSpan{smvec}).value();
+          OpAdd(t->GetOpArgs(shard), zparams, dest_key, ScoredMemberSpan{smvec}).value();
     }
     return OpStatus::OK;
   };
@@ -1161,8 +1158,7 @@ void ZSetFamily::ZLexCount(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpLexCount(op_args, key, li);
+    return OpLexCount(t->GetOpArgs(shard), key, li);
   };
 
   OpResult<unsigned> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1237,8 +1233,7 @@ void ZSetFamily::ZRangeByLex(CmdArgList args, ConnectionContext* cntx) {
   range_spec.interval = li;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpRange(range_spec, op_args, key);
+    return OpRange(range_spec, t->GetOpArgs(shard), key);
   };
 
   OpResult<ScoredArray> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1318,8 +1313,7 @@ void ZSetFamily::ZRem(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpRem(op_args, key, members);
+    return OpRem(t->GetOpArgs(shard), key, members);
   };
 
   OpResult<unsigned> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1335,8 +1329,7 @@ void ZSetFamily::ZScore(CmdArgList args, ConnectionContext* cntx) {
   string_view member = ArgS(args, 2);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpScore(op_args, key, member);
+    return OpScore(t->GetOpArgs(shard), key, member);
   };
 
   OpResult<double> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1364,7 +1357,7 @@ void ZSetFamily::ZScan(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpScan(OpArgs{shard, t->db_index()}, key, &cursor);
+    return OpScan(t->GetOpArgs(shard), key, &cursor);
   };
 
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1427,7 +1420,7 @@ void ZSetFamily::ZUnionStore(CmdArgList args, ConnectionContext* cntx) {
       ZParams zparams;
       zparams.override = true;
       add_result =
-          OpAdd(OpArgs{shard, t->db_index()}, zparams, dest_key, ScoredMemberSpan{smvec}).value();
+          OpAdd(t->GetOpArgs(shard), zparams, dest_key, ScoredMemberSpan{smvec}).value();
     }
     return OpStatus::OK;
   };
@@ -1449,8 +1442,7 @@ void ZSetFamily::ZRangeByScoreInternal(string_view key, string_view min_s, strin
   range_spec.interval = si;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpRange(range_spec, op_args, key);
+    return OpRange(range_spec, t->GetOpArgs(shard), key);
   };
 
   OpResult<ScoredArray> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1480,8 +1472,7 @@ void ZSetFamily::OutputScoredArrayResult(const OpResult<ScoredArray>& result,
 void ZSetFamily::ZRemRangeGeneric(string_view key, const ZRangeSpec& range_spec,
                                   ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpRemRange(op_args, key, range_spec);
+    return OpRemRange(t->GetOpArgs(shard), key, range_spec);
   };
 
   OpResult<unsigned> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1531,8 +1522,7 @@ void ZSetFamily::ZRangeGeneric(CmdArgList args, bool reverse, ConnectionContext*
   range_spec.interval = ii;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
-    return OpRange(range_spec, op_args, key);
+    return OpRange(range_spec, t->GetOpArgs(shard), key);
   };
 
   OpResult<ScoredArray> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1544,9 +1534,8 @@ void ZSetFamily::ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* 
   string_view member = ArgS(args, 2);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpArgs op_args{shard, t->db_index()};
 
-    return OpRank(op_args, key, member, reverse);
+    return OpRank(t->GetOpArgs(shard), key, member, reverse);
   };
 
   OpResult<unsigned> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));

@@ -11,6 +11,8 @@
 #include "server/command_registry.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/journal/journal.h"
+#include "server/server_state.h"
 
 namespace dfly {
 
@@ -334,9 +336,14 @@ bool Transaction::RunInShard(EngineShard* shard) {
 
   /*************************************************************************/
   // Actually running the callback.
+  // If you change the logic here, also please change the logic
   try {
     // if transaction is suspended (blocked in watched queue), then it's a noop.
-    OpStatus status = was_suspended ? OpStatus::OK : cb_(this, shard);
+    OpStatus status = OpStatus::OK;
+
+    if (!was_suspended)  {
+      status = cb_(this, shard);
+    }
 
     if (unique_shard_cnt_ == 1) {
       cb_ = nullptr;  // We can do it because only a single thread runs the callback.
@@ -467,6 +474,13 @@ void Transaction::ScheduleInternal() {
       VLOG(2) << "Scheduled " << DebugId()
               << " OutOfOrder: " << bool(coordinator_state_ & COORD_OOO)
               << " num_shards: " << num_shards;
+
+      if (mode == IntentLock::EXCLUSIVE) {
+        journal::Journal* j = ServerState::tlocal()->journal();
+        // TODO: we may want to pass custom command name into journal.
+        if (j && j->SchedStartTx(txid_, 0, num_shards)) {
+        }
+      }
       coordinator_state_ |= COORD_SCHED;
       break;
     }
