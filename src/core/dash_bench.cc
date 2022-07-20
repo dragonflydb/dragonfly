@@ -4,6 +4,9 @@
 
 #include <mimalloc.h>
 
+#include <absl/base/internal/cycleclock.h>
+#include <absl/container/flat_hash_map.h>
+
 #include "base/hash.h"
 #include "base/histogram.h"
 #include "base/init.h"
@@ -15,9 +18,11 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+using namespace std;
+
 ABSL_FLAG(uint32_t, n, 100000, "num items");
-ABSL_FLAG(bool, dash, true, "");
-ABSL_FLAG(bool, sds, true, "");
+ABSL_FLAG(string, type, "dash", "");
+ABSL_FLAG(bool, sds, false, "If true, uses sds as primary key");
 
 namespace dfly {
 
@@ -85,22 +90,51 @@ using DashSds = DashTable<sds, uint64_t, SdsDashPolicy>;
 
 using absl::GetFlag;
 
-void Sample(int64_t start, int64_t end, base::Histogram* hist) {
-  hist->Add((end - start) / 1000);
+inline void Sample(int64_t start, int64_t end, base::Histogram* hist) {
+  hist->Add((end - start) / 100);
 }
 
 Dash64 udt;
 DashSds sds_dt;
 base::Histogram hist;
 
-void BenchDash(time_t start) {
-  uint64_t num = GetFlag(FLAGS_n);
+#define USE_TIME 1
 
+int64_t GetNow() {
+  #if USE_TIME
+    return absl::GetCurrentTimeNanos();
+#else
+    return absl::base_internal::CycleClock::Now();
+#endif
+}
+
+#if defined(__i386__) || defined(__amd64__)
+  #define LFENCE __asm__ __volatile__("lfence")
+#else
+  #define LFENCE __asm__ __volatile__("ISB")
+#endif
+
+absl::flat_hash_map<uint64_t, uint64_t> mymap;
+
+void BenchFlat(uint64_t num) {
   for (uint64_t i = 0; i < num; ++i) {
-    udt.Insert(i, 0);
-    time_t end = absl::GetCurrentTimeNanos();
+    time_t start = GetNow();
+    mymap.emplace(i, 0);
+    LFENCE;
+
+    time_t end = GetNow();
     Sample(start, end, &hist);
-    start = end;
+  }
+}
+
+void BenchDash(uint64_t num) {
+  for (uint64_t i = 0; i < num; ++i) {
+    time_t start = GetNow();
+    udt.Insert(i, 0);
+    LFENCE;
+
+    time_t end = GetNow();
+    Sample(start, end, &hist);
   }
 }
 
@@ -108,18 +142,15 @@ inline sds Prefix() {
   return sdsnew("xxxxxxxxxxxxxxxxxxxxxxx");
 }
 
-void BenchDashSds(time_t start) {
-  uint64_t num = GetFlag(FLAGS_n);
-
+void BenchDashSds(uint64_t num) {
   sds key = sdscatsds(Prefix(), sdsfromlonglong(0));
-
   for (uint64_t i = 0; i < num; ++i) {
+    time_t start = GetNow();
     sds_dt.Insert(key, 0);
-    time_t end = absl::GetCurrentTimeNanos();
+    time_t end = GetNow();
     Sample(start, end, &hist);
 
     key = sdscatsds(Prefix(), sdsfromlonglong(i + 1));
-    start = absl::GetCurrentTimeNanos();
   }
 }
 
@@ -131,58 +162,68 @@ static dictType IntDict = {callbackHash, NULL, NULL, NULL, NULL, NULL, NULL};
 
 dict* redis_dict = nullptr;
 
-void BenchDict(time_t start) {
-  uint64_t num = GetFlag(FLAGS_n);
-
+void BenchDict(uint64_t num) {
   redis_dict = dictCreate(&IntDict);
+
   for (uint64_t i = 0; i < num; ++i) {
+    time_t start = GetNow();
     dictAdd(redis_dict, (void*)i, nullptr);
-    time_t end = absl::GetCurrentTimeNanos();
+    LFENCE;
+    time_t end = GetNow();
     Sample(start, end, &hist);
-    start = end;
   }
 }
 
-void BenchDictSds(time_t start) {
+void BenchDictSds() {
   uint64_t num = GetFlag(FLAGS_n);
 
   sds key = sdscat(Prefix(), sdsfromlonglong(0));
   redis_dict = dictCreate(&SdsDict);
 
   for (uint64_t i = 0; i < num; ++i) {
+    time_t start = GetNow();
     dictAdd(redis_dict, key, nullptr);
-    time_t end = absl::GetCurrentTimeNanos();
+    time_t end = GetNow();
     Sample(start, end, &hist);
+
     key = sdscatsds(Prefix(), sdsfromlonglong(i + 1));
-    start = absl::GetCurrentTimeNanos();
   }
 }
 
 }  // namespace dfly
 
 using namespace dfly;
+
 int main(int argc, char* argv[]) {
   MainInitGuard guard(&argc, &argv);
 
   init_zmalloc_threadlocal(mi_heap_get_backing());
 
-  bool is_dash = GetFlag(FLAGS_dash);
+  string table_type = GetFlag(FLAGS_type);
+
   bool is_sds = GetFlag(FLAGS_sds);
   uint64_t start = absl::GetCurrentTimeNanos();
-  if (is_dash) {
+  uint64_t num = GetFlag(FLAGS_n);
+
+  if (table_type == "dash") {
     if (is_sds) {
-      BenchDashSds(start);
+      BenchDashSds(num);
     } else {
-      BenchDash(start);
+      BenchDash(num);
     }
+  } else if (table_type == "dict") {
+    if (is_sds) {
+      BenchDictSds();
+    } else {
+      BenchDict(num);
+    }
+  } else if (table_type == "flat") {
+    BenchFlat(num);
   } else {
-    if (is_sds) {
-      BenchDictSds(start);
-    } else {
-      BenchDict(start);
-    }
+    LOG(FATAL) << "Unknown type " << table_type;
   }
-  CONSOLE_INFO << "latencies histogram (usec):\n" << hist.ToString();
+
+  CONSOLE_INFO << "latencies histogram (jiffies, 100ns):\n" << hist.ToString();
   uint64_t delta = (absl::GetCurrentTimeNanos() - start) / 1000000;
   CONSOLE_INFO << "Took " << delta << " ms";
 
