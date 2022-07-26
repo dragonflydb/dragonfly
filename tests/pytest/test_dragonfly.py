@@ -5,11 +5,13 @@ import subprocess
 import time
 from threading import Thread
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 @pytest.fixture(scope="module")
-def dragonfly_db():
+def df_server():
     """ Starts a single DragonflyDB process, runs only once. """
-    dragonfly_path = os.environ.get("DRAGONFLY_HOME", '../../build-dbg/dragonfly')
+    dragonfly_path = os.environ.get("DRAGONFLY_HOME", os.path.join(
+        SCRIPT_DIR, '../../build-dbg/dragonfly'))
     print("Starting DragonflyDB [{}]".format(dragonfly_path))
     # TODO: parse arguments and pass them over
     p = subprocess.Popen([dragonfly_path])
@@ -32,7 +34,7 @@ def dragonfly_db():
 
 
 @pytest.fixture(scope="module")
-def connection(dragonfly_db):
+def connection(df_server):
     pool = redis.ConnectionPool(decode_responses=True)
     client = redis.Redis(connection_pool=pool)
     return client
