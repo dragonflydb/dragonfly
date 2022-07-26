@@ -24,6 +24,7 @@ extern "C" {
 #include "server/error.h"
 #include "server/generic_family.h"
 #include "server/hset_family.h"
+#include "server/json_family.h"
 #include "server/list_family.h"
 #include "server/script_mgr.h"
 #include "server/server_state.h"
@@ -1164,6 +1165,7 @@ void Service::RegisterCommands() {
   SetFamily::Register(&registry_);
   HSetFamily::Register(&registry_);
   ZSetFamily::Register(&registry_);
+  JsonFamily::Register(&registry_);
 
   server_family_.Register(&registry_);
 
