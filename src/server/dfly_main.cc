@@ -184,15 +184,16 @@ Usage: dragonfly [FLAGS]
   config.contains_helpshort_flags = dfly::HelpshortFlags;
   config.normalize_filename = dfly::NormalizePaths;
   config.version_string = [] {
-    return StrCat("dragonfly ", ColoredStr(TermColor::kGreen, dfly::kGitTag),
-                  "\nbuild time: ", dfly::kBuildTime, "\n");
+    string version = StrCat(dfly::kGitTag, "-", dfly::kGitSha);
+    return StrCat("dragonfly ", ColoredStr(TermColor::kGreen, version),
+                  "\nbuild time: ", ColoredStr(TermColor::kYellow, dfly::kBuildTime), "\n");
   };
 
   absl::SetFlagsUsageConfig(config);
 
   MainInitGuard guard(&argc, &argv);
 
-  LOG(INFO) << "Starting dragonfly " << GetVersion();
+  LOG(INFO) << "Starting dragonfly " << GetVersion() << "-" << kGitSha;
 
   struct sigaction act;
   act.sa_handler = sigill_hdlr;
