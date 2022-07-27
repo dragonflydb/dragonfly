@@ -19,6 +19,8 @@
 #include "base/init.h"
 #include "base/proc_util.h"  // for GetKernelVersion
 #include "facade/dragonfly_listener.h"
+#include "io/file.h"
+#include "io/file_util.h"
 #include "io/proc_reader.h"
 #include "server/main_service.h"
 #include "server/version.h"
@@ -38,9 +40,11 @@ ABSL_FLAG(bool, use_large_pages, false, "If true - uses large memory pages for a
 ABSL_FLAG(string, bind, "",
           "Bind address. If empty - binds on all interfaces. "
           "It's not advised due to security implications.");
+ABSL_FLAG(string, pidfile, "", "If not empty - server writes its pid into the file");
 
 using namespace util;
 using namespace facade;
+using namespace io;
 using absl::GetFlag;
 using absl::StrCat;
 using strings::HumanReadableNumBytes;
@@ -132,6 +136,28 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   return true;
 }
 
+bool CreatePidFile(const string& path) {
+  Result<WriteFile*> res = OpenWrite(path);
+  if (!res) {
+    LOG(ERROR) << "Failed to open pidfile with error: " << res.error().message() << ". Exiting...";
+    return false;
+  }
+
+  unique_ptr<WriteFile> wf(res.value());
+  auto ec = wf->Write(to_string(getpid()));
+  if (ec) {
+    LOG(ERROR) << "Failed to write pid into pidfile with error: " << ec.message() << ". Exiting...";
+    return false;
+  }
+
+  ec = wf->Close();
+  if (ec) {
+    LOG(WARNING) << "Failed to close pidfile file descriptor with error: " << ec.message() << ".";
+  }
+
+  return true;
+}
+
 }  // namespace
 }  // namespace dfly
 
@@ -199,10 +225,17 @@ Usage: dragonfly [FLAGS]
   CHECK_LT(kver.major, 99u);
   dfly::kernel_version = kver.kernel * 100 + kver.major;
 
+  string pidfile_path = GetFlag(FLAGS_pidfile);
+  if (!pidfile_path.empty()) {
+    if (!CreatePidFile(pidfile_path)) {
+      return 1;
+    }
+  }
+
   if (GetFlag(FLAGS_maxmemory) == 0) {
     LOG(INFO) << "maxmemory has not been specified. Deciding myself....";
 
-    io::Result<io::MemInfoData> res = io::ReadMemInfo();
+    Result<MemInfoData> res = ReadMemInfo();
     size_t available = res->mem_avail;
     size_t maxmemory = size_t(0.8 * available);
     LOG(INFO) << "Found " << HumanReadableNumBytes(available)
@@ -228,6 +261,10 @@ Usage: dragonfly [FLAGS]
   int res = dfly::RunEngine(&pp, &acceptor) ? 0 : -1;
 
   pp.Stop();
+
+  if (!pidfile_path.empty()) {
+    unlink(pidfile_path.c_str());
+  }
 
   return res;
 }
