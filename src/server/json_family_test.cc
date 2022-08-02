@@ -122,4 +122,41 @@ TEST_F(JsonFamilyTest, SetGetFromPhonebook) {
   EXPECT_EQ(resp, string_view(R"(["646 555-4567","office"])", 25));
 }
 
+TEST_F(JsonFamilyTest, Type) {
+  string json = R"(
+    [1, 2.3, "foo", true, null, {}, []]
+  )";
+
+  auto resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.TYPE", "json", "$[*]"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre("integer", "number", "string", "boolean", "null", "object", "array"));
+
+  resp = Run({"JSON.TYPE", "json", "$[10]"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  resp = Run({"JSON.TYPE", "not_exist_key", "$[10]"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+}
+
+TEST_F(JsonFamilyTest, StrLen) {
+  string json = R"(
+    {"a":{"a":"a"}, "b":{"a":"a", "b":1}, "c":{"a":"a", "b":"bb"}, "d":{"a":1, "b":"b", "c":3}}
+  )";
+
+  auto resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.STRLEN", "json", "$.a.a"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.STRLEN", "json", "$.a.*"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.STRLEN", "json", "$.c.b"});
+  EXPECT_THAT(resp, IntArg(2));
+}
+
 }  // namespace dfly
