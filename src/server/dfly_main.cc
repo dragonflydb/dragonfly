@@ -7,14 +7,14 @@
 #include <mimalloc-new-delete.h>
 #endif
 
-#include <signal.h>
-#include <liburing.h>
 #include <absl/flags/usage.h>
 #include <absl/flags/usage_config.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
+#include <liburing.h>
 #include <mimalloc.h>
+#include <signal.h>
 
 #include "base/init.h"
 #include "base/proc_util.h"  // for GetKernelVersion
@@ -41,6 +41,9 @@ ABSL_FLAG(string, bind, "",
           "Bind address. If empty - binds on all interfaces. "
           "It's not advised due to security implications.");
 ABSL_FLAG(string, pidfile, "", "If not empty - server writes its pid into the file");
+ABSL_FLAG(string, unixsocket, "",
+          "If not empty - specifies path for the Unis socket that will "
+          "be used for listening for incoming connections.");
 
 using namespace util;
 using namespace facade;
@@ -120,6 +123,22 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   const char* bind_addr = bind.empty() ? nullptr : bind.c_str();
   auto port = GetFlag(FLAGS_port);
   auto mc_port = GetFlag(FLAGS_memcache_port);
+  string unix_sock = GetFlag(FLAGS_unixsocket);
+  bool unlink_uds = false;
+
+  if (!unix_sock.empty()) {
+    unlink(unix_sock.c_str());
+
+    Listener* uds_listener = new Listener{Protocol::REDIS, &service};
+    error_code ec = acceptor->AddUDSListener(unix_sock.c_str(), uds_listener);
+    if (ec) {
+      LOG(WARNING) << "Could not open unix socket " << unix_sock << ", error " << ec;
+      delete uds_listener;
+    } else {
+      LOG(INFO) << "Listening on unix socket " << unix_sock;
+      unlink_uds = true;
+    }
+  }
 
   error_code ec = acceptor->AddListener(bind_addr, port, main_listener);
 
@@ -133,6 +152,11 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   acceptor->Wait();
 
   service.Shutdown();
+
+  if (unlink_uds) {
+    unlink(unix_sock.c_str());
+  }
+
   return true;
 }
 
@@ -166,15 +190,14 @@ extern "C" void _mi_options_init();
 using namespace dfly;
 
 void sigill_hdlr(int signo) {
-  LOG(ERROR)
-        << "An attempt to execute an instruction failed."
-        << "The root cause might be an old hardware. Exiting...";
+  LOG(ERROR) << "An attempt to execute an instruction failed."
+             << "The root cause might be an old hardware. Exiting...";
   exit(1);
 }
 
 int main(int argc, char* argv[]) {
   absl::SetProgramUsageMessage(
-    R"(a modern in-memory store.
+      R"(a modern in-memory store.
 
 Usage: dragonfly [FLAGS]
 )");
@@ -213,8 +236,7 @@ Usage: dragonfly [FLAGS]
 
   int iouring_res = io_uring_queue_init_params(0, nullptr, nullptr);
   if (-iouring_res == ENOSYS) {
-    LOG(ERROR)
-        << "iouring system call interface is not supported. Exiting...";
+    LOG(ERROR) << "iouring system call interface is not supported. Exiting...";
     return 1;
   }
 
