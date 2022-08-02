@@ -20,6 +20,8 @@ class JsonFamily {
 
  private:
   static void Get(CmdArgList args, ConnectionContext* cntx);
+  static void Type(CmdArgList args, ConnectionContext* cntx);
+  static void StrLen(CmdArgList args, ConnectionContext* cntx);
 };
 
 }  // namespace dfly
