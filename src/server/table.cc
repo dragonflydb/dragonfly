@@ -15,11 +15,12 @@ unsigned kInitSegmentLog = 3;
 
 DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
   constexpr size_t kDbSz = sizeof(DbTableStats);
-  static_assert(kDbSz == 56);
+  static_assert(kDbSz == 64);
 
   ADD(inline_keys);
   ADD(obj_memory_usage);
   ADD(strval_memory_usage);
+  ADD(update_value_amount);
   ADD(listpack_blob_cnt);
   ADD(listpack_bytes);
   ADD(external_entries);

@@ -100,7 +100,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
 
   memcpy(s.data() + start, value.data(), value.size());
   it->second.SetString(s);
-  db_slice.PostUpdate(op_args.db_ind, it);
+  db_slice.PostUpdate(op_args.db_ind, it, !added);
   RecordJournal(op_args, it->first, it->second);
 
   return it->second.Size();
@@ -138,15 +138,33 @@ OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t star
   return string(slice.substr(start, end - start + 1));
 };
 
+size_t ExtendExisting(const OpArgs& op_args, PrimeIterator it, string_view val, bool prepend) {
+  string tmp, new_val;
+  auto* shard = op_args.shard;
+  string_view slice = GetSlice(shard, it->second, &tmp);
+  if (prepend)
+    new_val = absl::StrCat(val, slice);
+  else
+    new_val = absl::StrCat(slice, val);
+
+  auto& db_slice = shard->db_slice();
+  db_slice.PreUpdate(op_args.db_ind, it);
+  it->second.SetString(new_val);
+  db_slice.PostUpdate(op_args.db_ind, it, true);
+  RecordJournal(op_args, it->first, it->second);
+
+  return new_val.size();
+}
+
 // Returns the length of the extended string. if prepend is false - appends the val.
-OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, std::string_view key, std::string_view val,
+OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_view val,
                                bool prepend) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
   auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
   if (inserted) {
     it->second.SetString(val);
-    db_slice.PostUpdate(op_args.db_ind, it);
+    db_slice.PostUpdate(op_args.db_ind, it, false);
     RecordJournal(op_args, it->first, it->second);
 
     return val.size();
@@ -155,19 +173,7 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, std::string_view key, std:
   if (it->second.ObjType() != OBJ_STRING)
     return OpStatus::WRONG_TYPE;
 
-  string tmp, new_val;
-  string_view slice = GetSlice(op_args.shard, it->second, &tmp);
-  if (prepend)
-    new_val = absl::StrCat(val, slice);
-  else
-    new_val = absl::StrCat(slice, val);
-
-  db_slice.PreUpdate(op_args.db_ind, it);
-  it->second.SetString(new_val);
-  db_slice.PostUpdate(op_args.db_ind, it);
-  RecordJournal(op_args, it->first, it->second);
-
-  return new_val.size();
+  return ExtendExisting(op_args, it, val, prepend);
 }
 
 OpResult<bool> ExtendOrSkip(const OpArgs& op_args, std::string_view key, std::string_view val,
@@ -178,20 +184,7 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, std::string_view key, std::st
     return false;
   }
 
-  CompactObj& cobj = (*it_res)->second;
-
-  string tmp, new_val;
-  string_view slice = GetSlice(op_args.shard, cobj, &tmp);
-  if (prepend)
-    new_val = absl::StrCat(val, slice);
-  else
-    new_val = absl::StrCat(slice, val);
-
-  db_slice.PreUpdate(op_args.db_ind, *it_res);
-  cobj.SetString(new_val);
-  db_slice.PostUpdate(op_args.db_ind, *it_res);
-
-  return new_val.size();
+  return ExtendExisting(op_args, *it_res, val, prepend);
 }
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key) {
@@ -213,7 +206,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, std::string_view key, double
   if (inserted) {
     char* str = RedisReplyBuilder::FormatDouble(val, buf, sizeof(buf));
     it->second.SetString(str);
-    db_slice.PostUpdate(op_args.db_ind, it);
+    db_slice.PostUpdate(op_args.db_ind, it, false);
     RecordJournal(op_args, it->first, it->second);
 
     return val;
@@ -245,7 +238,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, std::string_view key, double
 
   db_slice.PreUpdate(op_args.db_ind, it);
   it->second.SetString(str);
-  db_slice.PostUpdate(op_args.db_ind, it);
+  db_slice.PostUpdate(op_args.db_ind, it, true);
   RecordJournal(op_args, it->first, it->second);
 
   return base;
@@ -360,7 +353,7 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
   PrimeValue tvalue{value};
   tvalue.SetFlag(params.memcache_flags != 0);
   it->second = std::move(tvalue);
-  db_slice.PostUpdate(params.db_index, it);
+  db_slice.PostUpdate(params.db_index, it, false);
 
   if (params.expire_after_ms) {
     db_slice.UpdateExpire(params.db_index, it, params.expire_after_ms + db_slice.Now());

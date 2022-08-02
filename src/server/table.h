@@ -42,6 +42,9 @@ struct DbTableStats {
   // Applies for any non-inline objects.
   size_t obj_memory_usage = 0;
   size_t strval_memory_usage = 0;
+
+  // how much we we increased or decreased the existing entries.
+  ssize_t update_value_amount = 0;
   size_t listpack_blob_cnt = 0;
   size_t listpack_bytes = 0;
   size_t external_entries = 0;

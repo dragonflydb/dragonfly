@@ -142,7 +142,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
 
 DbStats& DbStats::operator+=(const DbStats& o) {
   constexpr size_t kDbSz = sizeof(DbStats);
-  static_assert(kDbSz == 88);
+  static_assert(kDbSz == 96);
 
   DbTableStats::operator+=(o);
 
@@ -287,8 +287,8 @@ pair<PrimeIterator, bool> DbSlice::AddOrFind(DbIndex db_index, string_view key) 
   return make_pair(get<0>(res), get<2>(res));
 }
 
-tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(DbIndex db_index,
-                                                             std::string_view key) noexcept(false) {
+tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(
+    DbIndex db_index, string_view key) noexcept(false) {
   DCHECK(IsDbValid(db_index));
 
   auto& db = db_arr_[db_index];
@@ -497,7 +497,7 @@ pair<PrimeIterator, bool> DbSlice::AddOrFind(DbIndex db_ind, string_view key, Pr
   auto& it = res.first;
 
   it->second = std::move(obj);
-  PostUpdate(db_ind, it);
+  PostUpdate(db_ind, it, false);
 
   if (expire_at_ms) {
     it->second.SetExpire(true);
@@ -582,15 +582,16 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) con
 }
 
 void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
-  auto& db = db_arr_[db_ind];
   for (const auto& ccb : change_cb_) {
     ccb.second(db_ind, ChangeReq{it});
   }
   size_t value_heap_size = it->second.MallocUsed();
-  db->stats.obj_memory_usage -= value_heap_size;
+  auto* stats = MutableStats(db_ind);
+  stats->obj_memory_usage -= value_heap_size;
+  stats->update_value_amount -= value_heap_size;
 
   if (it->second.ObjType() == OBJ_STRING) {
-    db->stats.strval_memory_usage -= value_heap_size;
+    stats->strval_memory_usage -= value_heap_size;
     if (it->second.IsExternal()) {
       TieredStorage* tiered = shard_owner()->tiered_storage();
       auto [offset, size] = it->second.GetExternalPtr();
@@ -602,12 +603,15 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
   it.SetVersion(NextVersion());
 }
 
-void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it) {
-  auto& db = db_arr_[db_ind];
+void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, bool existing) {
+  DbTableStats* stats = MutableStats(db_ind);
+
   size_t value_heap_size = it->second.MallocUsed();
-  db->stats.obj_memory_usage += value_heap_size;
+  stats->obj_memory_usage += value_heap_size;
   if (it->second.ObjType() == OBJ_STRING)
-    db->stats.strval_memory_usage += value_heap_size;
+    stats->strval_memory_usage += value_heap_size;
+  if (existing)
+    stats->update_value_amount += value_heap_size;
 }
 
 pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(DbIndex db_ind,

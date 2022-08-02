@@ -99,6 +99,10 @@ class DbSlice {
     memory_budget_ = budget;
   }
 
+  ssize_t memory_budget() const {
+    return memory_budget_;
+  }
+
   // returns absolute time of the expiration.
   time_t ExpireTime(ExpireIterator it) const {
     return it.is_done() ? 0 : expire_base_[0] + it->second.duration_ms();
@@ -198,7 +202,7 @@ class DbSlice {
 
   // Callback functions called upon writing to the existing key.
   void PreUpdate(DbIndex db_ind, PrimeIterator it);
-  void PostUpdate(DbIndex db_ind, PrimeIterator it);
+  void PostUpdate(DbIndex db_ind, PrimeIterator it, bool existing_entry = true);
 
   DbTableStats* MutableStats(DbIndex db_ind) {
     return &db_arr_[db_ind]->stats;

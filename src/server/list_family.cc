@@ -306,16 +306,15 @@ OpResult<string> OpRPopLPushSingleShard(const OpArgs& op_args, string_view src, 
   }
 
   quicklist* dest_ql = nullptr;
-  pair<PrimeIterator, bool> res;
+  PrimeIterator dest_it;
+  bool new_key = false;
   try {
-    res = db_slice.AddOrFind(op_args.db_ind, dest);
+    tie(dest_it, new_key) = db_slice.AddOrFind(op_args.db_ind, dest);
   } catch (bad_alloc&) {
     return OpStatus::OUT_OF_MEMORY;
   }
 
-  PrimeIterator& dest_it = res.first;
-
-  if (res.second) {
+  if (new_key) {
     robj* obj = createQuicklistObject();
     dest_ql = (quicklist*)obj->ptr;
     quicklistSetOptions(dest_ql, GetFlag(FLAGS_list_max_listpack_size),
@@ -338,7 +337,7 @@ OpResult<string> OpRPopLPushSingleShard(const OpArgs& op_args, string_view src, 
   quicklistPushHead(dest_ql, val.data(), val.size());
 
   db_slice.PostUpdate(op_args.db_ind, src_it);
-  db_slice.PostUpdate(op_args.db_ind, dest_it);
+  db_slice.PostUpdate(op_args.db_ind, dest_it, !new_key);
 
   if (quicklistCount(src_ql) == 0) {
     CHECK(db_slice.Del(op_args.db_ind, src_it));
@@ -419,7 +418,7 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
       es->blocking_controller()->AwakeWatched(op_args.db_ind, key);
     }
   } else {
-    es->db_slice().PostUpdate(op_args.db_ind, it);
+    es->db_slice().PostUpdate(op_args.db_ind, it, true);
   }
 
   return quicklistCount(ql);
