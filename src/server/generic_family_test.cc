@@ -153,6 +153,19 @@ TEST_F(GenericFamilyTest, RenameBinary) {
   EXPECT_EQ(Run({"get", kKey2}), "bar");
 }
 
+TEST_F(GenericFamilyTest, RenameNx) {
+  // Set two keys
+  string b_val(32, 'b');
+  string x_val(32, 'x');
+  Run({"mset", "x", x_val, "b", b_val});  
+    
+  ASSERT_THAT(Run({"renamenx", "z", "b"}), ErrArg("no such key"));
+  ASSERT_THAT(Run({"renamenx", "x", "b"}), IntArg(0)); // b already exists
+  ASSERT_THAT(Run({"renamenx", "x", "y"}), IntArg(1));
+  ASSERT_EQ(Run({"get", "y"}), x_val);
+}
+
+
 using testing::AnyOf;
 using testing::Each;
 using testing::StartsWith;

@@ -443,7 +443,14 @@ void GenericFamily::Rename(CmdArgList args, ConnectionContext* cntx) {
 
 void GenericFamily::RenameNx(CmdArgList args, ConnectionContext* cntx) {
   OpResult<void> st = RenameGeneric(args, true, cntx);
-  (*cntx)->SendError(st.status());
+  OpStatus status = st.status();
+  if (status == OpStatus::OK) {
+    (*cntx)->SendLong(1);
+  } else if (status == OpStatus::KEY_EXISTS) {
+    (*cntx)->SendLong(0);
+  } else {
+    (*cntx)->SendError(status);
+  }
 }
 
 void GenericFamily::Ttl(CmdArgList args, ConnectionContext* cntx) {
