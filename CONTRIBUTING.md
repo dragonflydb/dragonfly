@@ -6,17 +6,62 @@ Feel free to browse our [Discussions](https://github.com/dragonflydb/dragonfly/d
 
 # Best Practices
 
-# Signoff Commits
+## Fork and Clone the DragonflyDB repository
+```
+# Fork https://github.com/dragonflydb/dragonfly
+
+# Clone from your fork
+git@github.com:<YOURUSERNAME>/dragonfly.git
+
+cd dragonfly
+
+# IMPORTANT! Enable our pre-commit message hooks
+# This will ensure your commits match our formatting requirements
+pre-commit install --hook-type commit-msg
+```
+
+This step must be done on each machine you wish to develop and contribute from to activate the `commit-msg` hook client-side.
+
+Once you have done these things, we look forward to adding your contributions and improvements to the Dragonfly DB project.
+
+## Build from source
+```
+# to install dependencies
+sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
+     autoconf-archive libtool cmake g++
+
+# Configure the build
+./helio/blaze.sh -release
+
+# Build
+cd build-opt && ninja dragonfly
+
+# Run
+./dragonfly --alsologtostderr
+```
+
+## Unit testing
+```
+# Build specific test
+cd build-opt && ninja [test_name]
+# e.g cd build-opt && ninja generic_family_test 
+
+# Run
+./[test_name]
+# e.g ./generic_family_test
+```
+
+## Signoff Commits
 All community submissions must include a signoff.
 
 ```bash
 git commit -s -m '...'
 ```
 
-# Squash Commits
+## Squash Commits
 Please squash all commits for a change into a single commit (this can be done using "git rebase -i"). Do your best to have a well-formed commit message for the change.
 
-# Use Conventional Commits
+## Use Conventional Commits
 This repo uses [Conventional Commmits](https://www.conventionalcommits.org/en/v1.0.0/)
 
 
@@ -43,30 +88,10 @@ This repo uses automated tools to standardize the formatting of code, text files
  - [Pre-commit hooks](#pre-commit-hooks) validate and automatically apply code
    formatting rules.
 
-# `pre-commit` hooks
+## `pre-commit` hooks
 The Dragonfly DB team has agreed to systematically use a number of pre-commit hooks to
 normalize formatting of code. You need to install and enable pre-commit to have these used
 when you do your own commits.
-
-## Fork and Clone the DragonflyDB repository
-```
-# Fork https://github.com/dragonflydb/dragonfly
-
-# Clone from your fork
-git@github.com:<YOURUSERNAME>/dragonfly.git
-
-cd dragonfly
-
-# IMPORTANT! Enable our pre-commit message hooks
-# This will ensure your commits match our formatting requirements
-pre-commit install --hook-type commit-msg
-```
-
-This step must be done on each machine you wish to develop and contribute from to activate the `commit-msg` hook client-side.
-
-
-Once you have done these things, we look forward to adding your contributions and improvements to the Dragonfly DB project.
-
 
 ## License terms for contributions
 This Project welcomes contributions, suggestions, and feedback.  Dragonfly uses the BSL license. You represent that if you do not own copyright in the code that you have the authority to submit it under the BSL. All feedback, suggestions, or contributions are not confidential.
