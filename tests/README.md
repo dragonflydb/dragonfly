@@ -22,9 +22,21 @@ docker run --network=host [test-name]
 Integration test for node-redis client.
 Build:
 ```
-docker build -t node-redis-test -f ./node-redis-dockerfile .
+docker build -t node-redis-test -f ./node-redis.Dockerfile .
 ```
 Run:
 ```
 docker run --network=host node-redis-test
+```
+
+
+## Jedis
+Integration test for the Jedis client.
+Build:
+```
+docker build -t jedis-test -f ./jedis.Dockerfile .
+```
+Run:
+```
+docker run --network=host jedis-test
 ```

@@ -5,12 +5,9 @@ ENV NODE_ENV=development
 
 WORKDIR /app
 # Clone node-redis dragonfly fork
-RUN git clone https://github.com/dragonflydb/node-redis.git
+RUN git clone -b dragonfly https://github.com/dragonflydb/node-redis.git
 
 WORKDIR /app/node-redis
-
-# Switch to branch
-RUN git switch dragonfly
 
 RUN npm install
 
