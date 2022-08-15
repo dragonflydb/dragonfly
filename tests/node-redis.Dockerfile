@@ -9,10 +9,6 @@ RUN git clone -b dragonfly https://github.com/dragonflydb/node-redis.git
 
 WORKDIR /app/node-redis
 
-RUN npm install
+RUN npm install && npm run build:tests-tools
 
-RUN npm run build -w ./packages/client
-
-RUN npm run build -w ./packages/test-utils
-
-CMD npm run test -w ./packages/client -- --redis-version=2.8 
+CMD npm run test -w ./packages/client -- --redis-version=2.8
