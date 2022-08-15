@@ -845,6 +845,7 @@ error_code RdbLoader::Load(io::Source* src) {
 
     int rdbver = atoi(buf);
     if (rdbver < 5 || rdbver > RDB_VERSION) {  // We accept starting from 5.
+      LOG(ERROR) << "RDB Version " << rdbver << " is not supported";
       return RdbError(errc::bad_version);
     }
 
