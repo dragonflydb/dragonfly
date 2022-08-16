@@ -135,7 +135,7 @@ Listener::Listener(Protocol protocol, ServiceInterface* si) : service_(si), prot
 #endif
 
   http_base_.reset(new HttpListener<>);
-  http_base_->set_resource_prefix("https://romange.s3.eu-west-1.amazonaws.com/static");
+  http_base_->set_resource_prefix("http://static.dragonflydb.io");
   si->ConfigureHttpHandlers(http_base_.get());
 }
 
