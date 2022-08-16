@@ -73,7 +73,7 @@ TEST_F(JsonFamilyTest, SetGetBasic) {
 }
 
 TEST_F(JsonFamilyTest, SetGetFromPhonebook) {
-    string json = R"(
+  string json = R"(
     {
       "firstName":"John",
       "lastName":"Smith",
@@ -107,19 +107,19 @@ TEST_F(JsonFamilyTest, SetGetFromPhonebook) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.GET", "json", "$.address.*"});
-  EXPECT_EQ(resp, string_view(R"(["New York","NY","21 2nd Street","10021-3100"])", 46));
+  EXPECT_EQ(resp, R"(["New York","NY","21 2nd Street","10021-3100"])");
 
   resp = Run({"JSON.GET", "json", "$.firstName", "$.age", "$.lastName"});
-  EXPECT_EQ(resp, string_view(R"({"$.age":[27],"$.firstName":["John"],"$.lastName":["Smith"]})", 60));
+  EXPECT_EQ(resp, R"({"$.age":[27],"$.firstName":["John"],"$.lastName":["Smith"]})");
 
   resp = Run({"JSON.GET", "json", "$.spouse.*"});
-  EXPECT_EQ(resp, string_view("[]", 2));
+  EXPECT_EQ(resp, "[]");
 
   resp = Run({"JSON.GET", "json", "$.children.*"});
-  EXPECT_EQ(resp, string_view("[]", 2));
+  EXPECT_EQ(resp, "[]");
 
   resp = Run({"JSON.GET", "json", "$..phoneNumbers[1].*"});
-  EXPECT_EQ(resp, string_view(R"(["646 555-4567","office"])", 25));
+  EXPECT_EQ(resp, R"(["646 555-4567","office"])");
 }
 
 TEST_F(JsonFamilyTest, Type) {
@@ -132,7 +132,8 @@ TEST_F(JsonFamilyTest, Type) {
 
   resp = Run({"JSON.TYPE", "json", "$[*]"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
-  EXPECT_THAT(resp.GetVec(), ElementsAre("integer", "number", "string", "boolean", "null", "object", "array"));
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("integer", "number", "string", "boolean", "null", "object", "array"));
 
   resp = Run({"JSON.TYPE", "json", "$[10]"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
@@ -155,8 +156,110 @@ TEST_F(JsonFamilyTest, StrLen) {
   resp = Run({"JSON.STRLEN", "json", "$.a.*"});
   EXPECT_THAT(resp, IntArg(1));
 
+  resp = Run({"JSON.STRLEN", "json", "$.c.*"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(1), IntArg(2)));
+
   resp = Run({"JSON.STRLEN", "json", "$.c.b"});
   EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"JSON.STRLEN", "json", "$.d.*"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre(ArgType(RespExpr::NIL), IntArg(1), ArgType(RespExpr::NIL)));
+}
+
+TEST_F(JsonFamilyTest, ObjLen) {
+  string json = R"(
+    {"a":{}, "b":{"a":"a"}, "c":{"a":"a", "b":"bb"}, "d":{"a":1, "b":"b", "c":{"a":3,"b":4}}, "e":1}
+  )";
+
+  auto resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.OBJLEN", "json", "$.a"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  resp = Run({"JSON.OBJLEN", "json", "$.a.*"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+
+  resp = Run({"JSON.OBJLEN", "json", "$.b"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.OBJLEN", "json", "$.b.*"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  resp = Run({"JSON.OBJLEN", "json", "$.c"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"JSON.OBJLEN", "json", "$.c.*"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::NIL), ArgType(RespExpr::NIL)));
+
+  resp = Run({"JSON.OBJLEN", "json", "$.d"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  resp = Run({"JSON.OBJLEN", "json", "$.d.*"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre(ArgType(RespExpr::NIL), ArgType(RespExpr::NIL), IntArg(2)));
+
+  resp = Run({"JSON.OBJLEN", "json", "$.*"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre(IntArg(0), IntArg(1), IntArg(2), IntArg(3), ArgType(RespExpr::NIL)));
+}
+
+TEST_F(JsonFamilyTest, ArrLen) {
+  string json = R"(
+    [[], ["a"], ["a", "b"], ["a", "b", "c"]]
+  )";
+
+  auto resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRLEN", "json", "$[*]"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(0), IntArg(1), IntArg(2), IntArg(3)));
+
+  json = R"(
+    [[], "a", ["a", "b"], ["a", "b", "c"], 4]
+  )";
+
+  resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRLEN", "json", "$[*]"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(0), ArgType(RespExpr::NIL), IntArg(2), IntArg(3),
+                                         ArgType(RespExpr::NIL)));
+}
+
+TEST_F(JsonFamilyTest, Toggle) {
+  string json = R"(
+    {"a":true, "b":false, "c":1, "d":null, "e":"foo", "f":[], "g":{}}
+  )";
+
+  auto resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.TOGGLE", "json", "$.*"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre(IntArg(0), IntArg(1), ArgType(RespExpr::NIL), ArgType(RespExpr::NIL),
+                          ArgType(RespExpr::NIL), ArgType(RespExpr::NIL), ArgType(RespExpr::NIL)));
+
+  resp = Run({"JSON.GET", "json", "$.*"});
+  EXPECT_EQ(resp, R"([false,true,1,null,"foo",[],{}])");
+
+  resp = Run({"JSON.TOGGLE", "json", "$.*"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre(IntArg(1), IntArg(0), ArgType(RespExpr::NIL), ArgType(RespExpr::NIL),
+                          ArgType(RespExpr::NIL), ArgType(RespExpr::NIL), ArgType(RespExpr::NIL)));
+
+  resp = Run({"JSON.GET", "json", "$.*"});
+  EXPECT_EQ(resp, R"([true,false,1,null,"foo",[],{}])");
 }
 
 }  // namespace dfly
