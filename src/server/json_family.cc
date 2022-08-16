@@ -6,17 +6,20 @@
 
 extern "C" {
 #include "redis/object.h"
+#include "redis/util.h"
 }
+
+#include <absl/strings/str_join.h>
+
+#include <jsoncons/json.hpp>
+#include <jsoncons_ext/jsonpath/jsonpath.hpp>
 
 #include "base/logging.h"
 #include "server/command_registry.h"
 #include "server/error.h"
+#include "server/journal/journal.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
-
-#include <jsoncons/json.hpp>
-#include <jsoncons_ext/jsonpath/jsonpath.hpp>
-#include <absl/strings/str_join.h>
 
 namespace dfly {
 
@@ -24,7 +27,9 @@ using namespace std;
 using namespace jsoncons;
 
 using JsonExpression = jsonpath::jsonpath_expression<json>;
+using OptBool = optional<bool>;
 using OptSizeT = optional<size_t>;
+using JsonReplaceCb = std::function<void(const string&, json&)>;
 using CI = CommandId;
 
 namespace {
@@ -45,9 +50,18 @@ string GetString(EngineShard* shard, const PrimeValue& pv) {
   return res;
 }
 
-bool JsonErrorHandler(json_errc ec, const ser_context&) {
-  VLOG(1) << "Error while decode JSON: " << make_error_code(ec).message();
-  return false;
+inline void RecordJournal(const OpArgs& op_args, const PrimeKey& pkey, const PrimeKey& pvalue) {
+  if (op_args.shard->journal()) {
+    op_args.shard->journal()->RecordEntry(op_args.txid, pkey, pvalue);
+  }
+}
+
+void SetString(const OpArgs& op_args, string_view key, const string& value) {
+  auto& db_slice = op_args.shard->db_slice();
+  auto [it_output, added] = db_slice.AddOrFind(op_args.db_ind, key);
+  it_output->second.SetString(value);
+  db_slice.PostUpdate(op_args.db_ind, it_output);
+  RecordJournal(op_args, it_output->first, it_output->second);
 }
 
 string JsonType(const json& val) {
@@ -70,7 +84,38 @@ string JsonType(const json& val) {
   return "";
 }
 
-OpResult<string> OpGet(const OpArgs& op_args, string_view key, vector<pair<string_view, JsonExpression>> expressions) {
+error_code JsonReplace(json& instance, string_view& path, JsonReplaceCb callback) {
+  using evaluator_t = jsoncons::jsonpath::detail::jsonpath_evaluator<json, json&>;
+  using value_type = evaluator_t::value_type;
+  using reference = evaluator_t::reference;
+  using json_selector_t = evaluator_t::path_expression_type;
+  using json_location_type = evaluator_t::json_location_type;
+  jsonpath::custom_functions<json> funcs = jsonpath::custom_functions<json>();
+
+  error_code ec;
+  jsoncons::jsonpath::detail::static_resources<value_type, reference> static_resources(funcs);
+  evaluator_t e;
+  json_selector_t expr = e.compile(static_resources, path, ec);
+  if (ec) {
+    return ec;
+  }
+
+  jsoncons::jsonpath::detail::dynamic_resources<value_type, reference> resources;
+  auto f = [&callback](const json_location_type& path, reference val) {
+    callback(path.to_string(), val);
+  };
+
+  expr.evaluate(resources, instance, resources.root_path_node(), instance, f,
+                jsonpath::result_options::nodups);
+  return ec;
+}
+
+bool JsonErrorHandler(json_errc ec, const ser_context&) {
+  VLOG(1) << "Error while decode JSON: " << make_error_code(ec).message();
+  return false;
+}
+
+OpResult<json> GetJson(const OpArgs& op_args, string_view key) {
   OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_STRING);
   if (!it_res.ok())
     return it_res.status();
@@ -89,15 +134,24 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key, vector<pair<strin
     return OpStatus::SYNTAX_ERR;
   }
 
+  return decoder.get_result();
+}
+
+OpResult<string> OpGet(const OpArgs& op_args, string_view key,
+                       vector<pair<string_view, JsonExpression>> expressions) {
+  OpResult<json> result = GetJson(op_args, key);
+  if (!result) {
+    return result.status();
+  }
+
   if (expressions.size() == 1) {
-    json out = expressions[0].second.evaluate(decoder.get_result());
+    json out = expressions[0].second.evaluate(*result);
     return out.as<string>();
   }
 
   json out;
-  json result = decoder.get_result();
-  for (auto& expr: expressions) {
-    json eval = expr.second.evaluate(result);
+  for (auto& expr : expressions) {
+    json eval = expr.second.evaluate(*result);
     out[expr.first] = eval;
   }
 
@@ -105,50 +159,23 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key, vector<pair<strin
 }
 
 OpResult<vector<string>> OpType(const OpArgs& op_args, string_view key, JsonExpression expression) {
-  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_STRING);
-  if (!it_res.ok())
-    return it_res.status();
-
-  error_code ec;
-  json_decoder<json> decoder;
-  const PrimeValue& pv = it_res.value()->second;
-
-  string val = GetString(op_args.shard, pv);
-  basic_json_parser<char> parser(basic_json_decode_options<char>{}, &JsonErrorHandler);
-
-  parser.update(val);
-  parser.finish_parse(decoder, ec);
-
-  if (!decoder.is_valid()) {
-    return OpStatus::SYNTAX_ERR;
+  OpResult<json> result = GetJson(op_args, key);
+  if (!result) {
+    return result.status();
   }
 
   vector<string> vec;
-  auto cb = [&vec](const string_view& path, const json& val) {
-    vec.emplace_back(JsonType(val));
-  };
+  auto cb = [&vec](const string_view& path, const json& val) { vec.emplace_back(JsonType(val)); };
 
-  expression.evaluate(decoder.get_result(), cb);
+  expression.evaluate(*result, cb);
   return vec;
 }
 
-OpResult<vector<OptSizeT>> OpStrLen(const OpArgs& op_args, string_view key, JsonExpression expression) {
-  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_STRING);
-  if (!it_res.ok())
-    return it_res.status();
-
-  error_code ec;
-  json_decoder<json> decoder;
-  const PrimeValue& pv = it_res.value()->second;
-
-  string val = GetString(op_args.shard, pv);
-  basic_json_parser<char> parser(basic_json_decode_options<char>{}, &JsonErrorHandler);
-
-  parser.update(val);
-  parser.finish_parse(decoder, ec);
-
-  if (!decoder.is_valid()) {
-    return OpStatus::SYNTAX_ERR;
+OpResult<vector<OptSizeT>> OpStrLen(const OpArgs& op_args, string_view key,
+                                    JsonExpression expression) {
+  OpResult<json> result = GetJson(op_args, key);
+  if (!result) {
+    return result.status();
   }
 
   vector<OptSizeT> vec;
@@ -160,11 +187,110 @@ OpResult<vector<OptSizeT>> OpStrLen(const OpArgs& op_args, string_view key, Json
     }
   };
 
-  expression.evaluate(decoder.get_result(), cb);
+  expression.evaluate(*result, cb);
   return vec;
 }
 
-} // namespace
+OpResult<vector<OptSizeT>> OpObjLen(const OpArgs& op_args, string_view key,
+                                    JsonExpression expression) {
+  OpResult<json> result = GetJson(op_args, key);
+  if (!result) {
+    return result.status();
+  }
+
+  vector<OptSizeT> vec;
+  auto cb = [&vec](const string_view& path, const json& val) {
+    if (val.is_object()) {
+      vec.emplace_back(val.object_value().size());
+    } else {
+      vec.emplace_back(nullopt);
+    }
+  };
+
+  expression.evaluate(*result, cb);
+  return vec;
+}
+
+OpResult<vector<OptSizeT>> OpArrLen(const OpArgs& op_args, string_view key,
+                                    JsonExpression expression) {
+  OpResult<json> result = GetJson(op_args, key);
+  if (!result) {
+    return result.status();
+  }
+
+  vector<OptSizeT> vec;
+  auto cb = [&vec](const string_view& path, const json& val) {
+    if (val.is_array()) {
+      vec.emplace_back(val.array_value().size());
+    } else {
+      vec.emplace_back(nullopt);
+    }
+  };
+
+  expression.evaluate(*result, cb);
+  return vec;
+}
+
+OpResult<vector<OptBool>> OpToggle(const OpArgs& op_args, string_view key, string_view path) {
+  OpResult<json> result = GetJson(op_args, key);
+  if (!result) {
+    return result.status();
+  }
+
+  vector<OptBool> vec;
+  auto cb = [&vec](const string& path, json& val) {
+    if (val.is_bool()) {
+      bool current_val = val.as_bool() ^ true;
+      val = current_val;
+      vec.emplace_back(current_val);
+    } else {
+      vec.emplace_back(nullopt);
+    }
+  };
+
+  json j = result.value();
+  error_code ec = JsonReplace(j, path, cb);
+  if (ec) {
+    VLOG(1) << "Failed to evaulate expression on json with error: " << ec.message();
+    return OpStatus::SYNTAX_ERR;
+  }
+
+  SetString(op_args, key, j.as_string());
+  return vec;
+}
+
+}  // namespace
+
+void JsonFamily::Toggle(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view path = ArgS(args, 2);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpToggle(t->GetOpArgs(shard), key, path);
+  };
+
+  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
+  Transaction* trans = cntx->transaction;
+  OpResult<vector<OptBool>> result = trans->ScheduleSingleHopT(move(cb));
+
+  if (result) {
+    DVLOG(1) << "JSON.TOGGLE " << trans->DebugId() << ": " << key;
+    if (result->empty()) {
+      (*cntx)->SendNullArray();
+    } else {
+      (*cntx)->StartArray(result->size());
+      for (auto& it : *result) {
+        if (it.has_value()) {
+          (*cntx)->SendLong(*it);
+        } else {
+          (*cntx)->SendNull();
+        }
+      }
+    }
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
 
 void JsonFamily::Type(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
@@ -196,17 +322,91 @@ void JsonFamily::Type(CmdArgList args, ConnectionContext* cntx) {
       (*cntx)->SendStringArr(*result);
     }
   } else {
-    switch (result.status()) {
-      case OpStatus::SYNTAX_ERR:
-        (*cntx)->SendError(kSyntaxErr);
-        break;
-      case OpStatus::KEY_NOTFOUND:
-        (*cntx)->SendNullArray();
-        break;
-      default:
-        DVLOG(1) << "JSON.TYPE " << key << " nil";
-        (*cntx)->SendNull();
+    if (result.status() == OpStatus::KEY_NOTFOUND) {
+      (*cntx)->SendNullArray();
+    } else {
+      (*cntx)->SendError(result.status());
     }
+  }
+}
+
+void JsonFamily::ArrLen(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view path = ArgS(args, 2);
+
+  error_code ec;
+  JsonExpression expression = jsonpath::make_expression<json>(path, ec);
+
+  if (ec) {
+    VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
+    (*cntx)->SendError(kSyntaxErr);
+    return;
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpArrLen(t->GetOpArgs(shard), key, move(expression));
+  };
+
+  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
+  Transaction* trans = cntx->transaction;
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+
+  if (result) {
+    DVLOG(1) << "JSON.ARRLEN " << trans->DebugId() << ": " << key;
+    if (result->empty()) {
+      (*cntx)->SendNullArray();
+    } else {
+      (*cntx)->StartArray(result->size());
+      for (auto& it : *result) {
+        if (it.has_value()) {
+          (*cntx)->SendLong(*it);
+        } else {
+          (*cntx)->SendNull();
+        }
+      }
+    }
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
+
+void JsonFamily::ObjLen(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view path = ArgS(args, 2);
+
+  error_code ec;
+  JsonExpression expression = jsonpath::make_expression<json>(path, ec);
+
+  if (ec) {
+    VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
+    (*cntx)->SendError(kSyntaxErr);
+    return;
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpObjLen(t->GetOpArgs(shard), key, move(expression));
+  };
+
+  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
+  Transaction* trans = cntx->transaction;
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+
+  if (result) {
+    DVLOG(1) << "JSON.OBJLEN " << trans->DebugId() << ": " << key;
+    if (result->empty()) {
+      (*cntx)->SendNullArray();
+    } else {
+      (*cntx)->StartArray(result->size());
+      for (auto& it : *result) {
+        if (it.has_value()) {
+          (*cntx)->SendLong(*it);
+        } else {
+          (*cntx)->SendNull();
+        }
+      }
+    }
+  } else {
+    (*cntx)->SendError(result.status());
   }
 }
 
@@ -237,7 +437,7 @@ void JsonFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
       (*cntx)->SendNullArray();
     } else {
       (*cntx)->StartArray(result->size());
-      for (auto& it: *result) {
+      for (auto& it : *result) {
         if (it.has_value()) {
           (*cntx)->SendLong(*it);
         } else {
@@ -246,14 +446,7 @@ void JsonFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
       }
     }
   } else {
-    switch (result.status()) {
-      case OpStatus::SYNTAX_ERR:
-        (*cntx)->SendError(kSyntaxErr);
-        break;
-      default:
-        DVLOG(1) << "JSON.STRLEN " << key << " nil";
-        (*cntx)->SendNull();
-    }
+    (*cntx)->SendError(result.status());
   }
 }
 
@@ -289,17 +482,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
     DVLOG(1) << "JSON.GET " << trans->DebugId() << ": " << key << " " << result.value();
     (*cntx)->SendBulkString(*result);
   } else {
-    switch (result.status()) {
-      case OpStatus::WRONG_TYPE:
-        (*cntx)->SendError(kWrongTypeErr);
-        break;
-      case OpStatus::SYNTAX_ERR:
-        (*cntx)->SendError(kSyntaxErr);
-        break;
-      default:
-        DVLOG(1) << "JSON.GET " << key << " nil";
-        (*cntx)->SendNull();
-    }
+    (*cntx)->SendError(result.status());
   }
 }
 
@@ -309,6 +492,9 @@ void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.GET", CO::READONLY | CO::FAST, -3, 1, 1, 1}.HFUNC(Get);
   *registry << CI{"JSON.TYPE", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(Type);
   *registry << CI{"JSON.STRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(StrLen);
+  *registry << CI{"JSON.OBJLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ObjLen);
+  *registry << CI{"JSON.ARRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ArrLen);
+  *registry << CI{"JSON.TOGGLE", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(Toggle);
 }
 
 }  // namespace dfly
