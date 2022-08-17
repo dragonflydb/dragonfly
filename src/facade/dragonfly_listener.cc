@@ -135,7 +135,7 @@ Listener::Listener(Protocol protocol, ServiceInterface* si) : service_(si), prot
 #endif
 
   http_base_.reset(new HttpListener<>);
-  http_base_->set_resource_prefix("http://static.dragonflydb.io/data_plane");
+  http_base_->set_resource_prefix("http://static.dragonflydb.io/data-plane");
   si->ConfigureHttpHandlers(http_base_.get());
 }
 
