@@ -20,7 +20,7 @@ Dragonfly's core properties make it a cost-effective, high-performing, and easy-
 
 ## Benchmarks
 
-<img src="http://assets.dragonflydb.io/repo-assets/aws-throughput.svg" width="80%" border="0"/>
+<img src="http://static.dragonflydb.io/repo-assets/aws-throughput.svg" width="80%" border="0"/>
 
 Dragonfly is crossing 3.8M QPS on c6gn.16xlarge reaching x25 increase in throughput compared to Redis.
 
@@ -71,7 +71,7 @@ In the following test, we filled Dragonfly and Redis with ~5GB of data
 using `debug populate 5000000 key 1024` command. Then we started sending the update traffic with `memtier` and kicked off the snapshotting with the
 "bgsave" command. The following figure demonstrates clearly how both servers behave in terms of memory efficiency.
 
-<img src="http://assets.dragonflydb.io/repo-assets/bgsave-memusage.svg" width="70%" border="0"/>
+<img src="http://static.dragonflydb.io/repo-assets/bgsave-memusage.svg" width="70%" border="0"/>
 
 Dragonfly was 30% more memory efficient than Redis at the idle state.
 It also did not show any visible memory increase during the snapshot phase.
