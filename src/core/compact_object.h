@@ -108,6 +108,7 @@ class CompactObj {
     ASCII1_ENC_BIT = 8,
     ASCII2_ENC_BIT = 0x10,
     IO_PENDING = 0x20,
+    STICKY = 0x40,
   };
 
   static constexpr uint8_t kEncMask = ASCII1_ENC_BIT | ASCII2_ENC_BIT;
@@ -210,6 +211,18 @@ class CompactObj {
       mask_ |= IO_PENDING;
     } else {
       mask_ &= ~IO_PENDING;
+    }
+  }
+
+  bool IsSticky() const {
+    return mask_ & STICKY;
+  }
+
+  void SetSticky(bool s) {
+    if (s) {
+      mask_ |= STICKY;
+    } else {
+      mask_ &= ~STICKY;
     }
   }
 

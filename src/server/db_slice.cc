@@ -124,6 +124,10 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
   auto last_slot_it = bucket_it;
   last_slot_it += (PrimeTable::kBucketWidth - 1);
   if (!last_slot_it.is_done()) {
+    // don't evict sticky items
+    if (last_slot_it->second.IsSticky()) {
+      return 0;
+    }
     if (last_slot_it->second.HasExpire()) {
       ExpireTable* expire_tbl = db_slice_->GetTables(db_indx_).second;
       CHECK_EQ(1u, expire_tbl->Erase(last_slot_it->first));

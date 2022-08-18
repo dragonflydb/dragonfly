@@ -436,6 +436,29 @@ void GenericFamily::PexpireAt(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void GenericFamily::Stick(CmdArgList args, ConnectionContext* cntx) {
+  Transaction* transaction = cntx->transaction;
+  VLOG(1) << "Stick " << ArgS(args, 1);
+
+  atomic_uint32_t result{0};
+
+  auto cb = [&result](const Transaction* t, EngineShard* shard) {
+    ArgSlice args = t->ShardArgsInShard(shard->shard_id());
+    auto res = OpStick(t->GetOpArgs(shard), args);
+    result.fetch_add(res.value_or(0), memory_order_relaxed);
+
+    return OpStatus::OK;
+  };
+
+  OpStatus status = transaction->ScheduleSingleHop(std::move(cb));
+  CHECK_EQ(OpStatus::OK, status);
+
+  DVLOG(2) << "Stick ts " << transaction->txid();
+
+  uint32_t match_cnt = result.load(memory_order_relaxed);
+  (*cntx)->SendLong(match_cnt);
+}
+
 void GenericFamily::Rename(CmdArgList args, ConnectionContext* cntx) {
   OpResult<void> st = RenameGeneric(args, false, cntx);
   (*cntx)->SendError(st.status());
@@ -724,6 +747,23 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
   return OpStatus::OK;
 }
 
+OpResult<uint32_t> GenericFamily::OpStick(const OpArgs& op_args, ArgSlice keys) {
+  DVLOG(1) << "Stick: " << keys[0];
+
+  auto& db_slice = op_args.shard->db_slice();
+
+  uint32_t res = 0;
+  for (uint32_t i = 0; i < keys.size(); ++i) {
+    auto [it, _] = db_slice.FindExt(op_args.db_ind, keys[i]);
+    if (IsValid(it) && !it->second.IsSticky()) {
+      it->second.SetSticky(true);
+      ++res;
+    }
+  }
+
+  return res;
+}
+
 using CI = CommandId;
 
 #define HFUNC(x) SetHandler(&GenericFamily::x)
@@ -750,7 +790,8 @@ void GenericFamily::Register(CommandRegistry* registry) {
             << CI{"TTL", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Ttl)
             << CI{"PTTL", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Pttl)
             << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, 1}.HFUNC(Type)
-            << CI{"UNLINK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Del);
+            << CI{"UNLINK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Del)
+            << CI{"STICK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Stick);
 }
 
 }  // namespace dfly
