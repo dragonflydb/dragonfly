@@ -29,6 +29,13 @@ Run:
 docker run --network=host node-redis-test
 ```
 
+to run only selected tests use:
+
+```
+docker run --network=host node-redis-test npm run test -w ./packages/client -- --redis-version=2.8 -g <regex>
+```
+
+In general, you can add this way any option from [mocha framework](https://mochajs.org/#command-line-usage).
 
 ## Jedis
 Integration test for the Jedis client.
