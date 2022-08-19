@@ -1559,7 +1559,7 @@ auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_ha
       return Iterator{bid, uint8_t(slot - 1)};
     }
     // TODO: We could promote further, by swapping probing bucket with its previous one.
-    return  Iterator{bid, slot};
+    return Iterator{bid, slot};
   }
 
   // stash bucket
@@ -1586,6 +1586,11 @@ auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_ha
 
   constexpr unsigned kLastSlot = kNumSlots - 1;
   assert(swapb.GetBusy() & (1 << kLastSlot));
+
+  // Don't move sticky items back to the stash because they're not evictable
+  if (swapb.value[kLastSlot].IsSticky()) {
+    return Iterator{bid, slot};
+  }
 
   uint8_t swap_fp = swapb.Fp(kLastSlot);
 
