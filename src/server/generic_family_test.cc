@@ -165,6 +165,14 @@ TEST_F(GenericFamilyTest, RenameNx) {
   ASSERT_EQ(Run({"get", "y"}), x_val);
 }
 
+TEST_F(GenericFamilyTest, Stick) {
+  ASSERT_THAT(Run({"stick", "a", "b"}), IntArg(2));
+  ASSERT_THAT(Run({"stick", "a", "b"}), IntArg(0));
+  ASSERT_THAT(Run({"stick", "a", "c"}), IntArg(1));
+  ASSERT_THAT(Run({"stick", "b", "d"}), IntArg(1));
+  ASSERT_THAT(Run({"stick", "c", "d"}), IntArg(0));
+}
+
 
 using testing::AnyOf;
 using testing::Each;
