@@ -52,6 +52,7 @@ class Renamer {
     string_view key;
     PrimeValue ref_val;
     uint64_t expire_ts;
+    bool sticky;
     bool found = false;
   };
 
@@ -77,6 +78,7 @@ void Renamer::Find(Transaction* t) {
     if (IsValid(it)) {
       res->ref_val = it->second.AsRef();
       res->expire_ts = db_slice.ExpireTime(exp_it);
+      res->sticky = it->first.IsSticky();
     }
     return OpStatus::OK;
   };
@@ -156,6 +158,8 @@ OpStatus Renamer::UpdateDest(Transaction* t, EngineShard* es) {
       }
       dest_it = db_slice.AddNew(db_indx_, dest_key, std::move(pv_), src_res_.expire_ts);
     }
+
+    dest_it->first.SetSticky(src_res_.sticky);
 
     if (!is_prior_list && dest_it->second.ObjType() == OBJ_LIST && es->blocking_controller()) {
       es->blocking_controller()->AwakeWatched(db_indx_, dest_key);
@@ -436,6 +440,29 @@ void GenericFamily::PexpireAt(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void GenericFamily::Stick(CmdArgList args, ConnectionContext* cntx) {
+  Transaction* transaction = cntx->transaction;
+  VLOG(1) << "Stick " << ArgS(args, 1);
+
+  atomic_uint32_t result{0};
+
+  auto cb = [&result](const Transaction* t, EngineShard* shard) {
+    ArgSlice args = t->ShardArgsInShard(shard->shard_id());
+    auto res = OpStick(t->GetOpArgs(shard), args);
+    result.fetch_add(res.value_or(0), memory_order_relaxed);
+
+    return OpStatus::OK;
+  };
+
+  OpStatus status = transaction->ScheduleSingleHop(std::move(cb));
+  CHECK_EQ(OpStatus::OK, status);
+
+  DVLOG(2) << "Stick ts " << transaction->txid();
+
+  uint32_t match_cnt = result.load(memory_order_relaxed);
+  (*cntx)->SendLong(match_cnt);
+}
+
 void GenericFamily::Rename(CmdArgList args, ConnectionContext* cntx) {
   OpResult<void> st = RenameGeneric(args, false, cntx);
   (*cntx)->SendError(st.status());
@@ -693,6 +720,7 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     is_prior_list = (to_it->second.ObjType() == OBJ_LIST);
   }
 
+  bool sticky = from_it->first.IsSticky();
   uint64_t exp_ts = db_slice.ExpireTime(from_expire);
 
   // we keep the value we want to move.
@@ -718,10 +746,29 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     to_it = db_slice.AddNew(op_args.db_ind, to_key, std::move(from_obj), exp_ts);
   }
 
+  to_it->first.SetSticky(sticky);
+
   if (!is_prior_list && to_it->second.ObjType() == OBJ_LIST && es->blocking_controller()) {
     es->blocking_controller()->AwakeWatched(op_args.db_ind, to_key);
   }
   return OpStatus::OK;
+}
+
+OpResult<uint32_t> GenericFamily::OpStick(const OpArgs& op_args, ArgSlice keys) {
+  DVLOG(1) << "Stick: " << keys[0];
+
+  auto& db_slice = op_args.shard->db_slice();
+
+  uint32_t res = 0;
+  for (uint32_t i = 0; i < keys.size(); ++i) {
+    auto [it, _] = db_slice.FindExt(op_args.db_ind, keys[i]);
+    if (IsValid(it) && !it->first.IsSticky()) {
+      it->first.SetSticky(true);
+      ++res;
+    }
+  }
+
+  return res;
 }
 
 using CI = CommandId;
@@ -750,7 +797,8 @@ void GenericFamily::Register(CommandRegistry* registry) {
             << CI{"TTL", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Ttl)
             << CI{"PTTL", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Pttl)
             << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, 1}.HFUNC(Type)
-            << CI{"UNLINK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Del);
+            << CI{"UNLINK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Del)
+            << CI{"STICK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Stick);
 }
 
 }  // namespace dfly

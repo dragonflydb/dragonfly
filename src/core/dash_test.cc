@@ -75,6 +75,12 @@ struct UInt64Policy : public BasicDashPolicy {
   }
 };
 
+struct RelaxedBumpPolicy {
+  bool CanBumpDown(uint64_t key) const {
+    return true;
+  }
+};
+
 class CappedResource final : public std::pmr::memory_resource {
  public:
   explicit CappedResource(size_t cap) : cap_(cap) {
@@ -350,7 +356,7 @@ TEST_F(DashTest, BumpUp) {
   EXPECT_EQ(touched_bid[0], 1);
 
   // Bump up
-  segment_.BumpUp(kFirstStashId, 5, hash);
+  segment_.BumpUp(kFirstStashId, 5, hash, RelaxedBumpPolicy{});
 
   // expect the key to move
   EXPECT_TRUE(segment_.GetBucket(1).IsFull());
@@ -365,11 +371,38 @@ TEST_F(DashTest, BumpUp) {
   EXPECT_EQ(1, segment_.CVCOnBump(2, kSecondStashId, 9, hash, touched_bid));
   EXPECT_EQ(touched_bid[0], kSecondStashId);
 
-  segment_.BumpUp(kSecondStashId, 9, hash);
+  segment_.BumpUp(kSecondStashId, 9, hash, RelaxedBumpPolicy{});
   ASSERT_TRUE(key == segment_.Key(0, kNumSlots - 1) || key == segment_.Key(1, kNumSlots - 1));
   EXPECT_TRUE(segment_.GetBucket(kSecondStashId).IsFull());
   EXPECT_TRUE(Contains(key));
   EXPECT_TRUE(segment_.Key(kSecondStashId, 9));
+}
+
+TEST_F(DashTest, BumpPolicy) {
+  struct RestrictedBumpPolicy {
+    bool CanBumpDown(uint64_t key) const {
+      return false;
+    }
+  };
+
+  set<Segment::Key_t> keys = FillSegment(0);
+  constexpr unsigned kFirstStashId = Segment::kNumBuckets;
+
+  EXPECT_TRUE(segment_.GetBucket(0).IsFull());
+  EXPECT_TRUE(segment_.GetBucket(1).IsFull());
+  EXPECT_TRUE(segment_.GetBucket(kFirstStashId).IsFull());
+
+  // check items are immovable in bucket
+  Segment::Key_t key = segment_.Key(1, 2);
+  uint64_t hash = dt_.DoHash(key);
+  segment_.BumpUp(1, 2, hash, RestrictedBumpPolicy{});
+  EXPECT_EQ(key, segment_.Key(1, 2));
+
+  // check items don't swap from stash
+  key = segment_.Key(kFirstStashId, 2);
+  hash = dt_.DoHash(key);
+  segment_.BumpUp(kFirstStashId, 2, hash, RestrictedBumpPolicy{});
+  EXPECT_EQ(key, segment_.Key(kFirstStashId, 2));
 }
 
 TEST_F(DashTest, Insert2) {
@@ -954,7 +987,7 @@ TEST_P(EvictionPolicyTest, HitRateZipf) {
                << it.slot_id();
     } else {
       if (use_bumps)
-        dt_.BumpUp(it);
+        dt_.BumpUp(it, RelaxedBumpPolicy{});
       ++hits;
     }
   }
@@ -984,7 +1017,7 @@ TEST_P(EvictionPolicyTest, HitRateZipfShr) {
         }
       } else {
         if (use_bumps) {
-          dt_.BumpUp(it);
+          dt_.BumpUp(it, RelaxedBumpPolicy{});
           DVLOG(1) << "Bump up key " << key << " " << it.bucket_id() << " slot " << it.slot_id();
         } else {
           DVLOG(1) << "Hit on key " << key;

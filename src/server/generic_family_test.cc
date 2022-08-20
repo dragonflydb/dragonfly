@@ -165,6 +165,42 @@ TEST_F(GenericFamilyTest, RenameNx) {
   ASSERT_EQ(Run({"get", "y"}), x_val);
 }
 
+TEST_F(GenericFamilyTest, Stick) {
+  // check stick returns zero on non-existent keys
+  ASSERT_THAT(Run({"stick", "a", "b"}), IntArg(0));
+
+  for (auto key: {"a", "b", "c", "d"}) {
+    Run({"set", key, "."});
+  }
+
+  // check stick is applied only once
+  ASSERT_THAT(Run({"stick", "a", "b"}), IntArg(2));
+  ASSERT_THAT(Run({"stick", "a", "b"}), IntArg(0));
+  ASSERT_THAT(Run({"stick", "a", "c"}), IntArg(1));
+  ASSERT_THAT(Run({"stick", "b", "d"}), IntArg(1));
+  ASSERT_THAT(Run({"stick", "c", "d"}), IntArg(0));
+
+  // check stickyness presists during writes
+  Run({"set", "a", "new"});
+  ASSERT_THAT(Run({"stick", "a"}), IntArg(0));
+  Run({"append", "a", "-value"});
+  ASSERT_THAT(Run({"stick", "a"}), IntArg(0));
+
+  // check rename persists stickyness
+  Run({"rename", "a", "k"});
+  ASSERT_THAT(Run({"stick", "k"}), IntArg(0));
+
+  // check rename perists stickyness on multiple shards
+  Run({"del", "b"});
+  string b_val(32, 'b');
+  string x_val(32, 'x');
+  Run({"mset", "b", b_val, "x", x_val});
+  ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
+  Run({"stick", "x"});
+  Run({"rename", "x", "b"});
+  ASSERT_THAT(Run({"stick", "b"}), IntArg(0));
+}
+
 
 using testing::AnyOf;
 using testing::Each;

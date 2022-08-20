@@ -499,6 +499,32 @@ TEST_F(DflyEngineTest, Bug207) {
   }
 }
 
+TEST_F(DflyEngineTest, StickyEviction) {
+  shard_set->TEST_EnableHeartBeat();
+  shard_set->TEST_EnableCacheMode();
+  max_memory_limit = 0;
+
+  string tmp_val(100, '.');
+
+  ssize_t failed = -1;
+  for (ssize_t i = 0; i < 5000; ++i) {
+    auto set_resp = Run({"set", StrCat("key", i), tmp_val});
+    auto stick_resp = Run({"stick", StrCat("key", i)});
+
+    if (set_resp != "OK") {
+      failed = i;
+      break;
+    }
+    ASSERT_THAT(stick_resp, IntArg(1));
+  }
+
+  ASSERT_GE(failed, 0);
+  // Make sure neither of the sticky values was evicted
+  for (ssize_t i = 0; i < failed; ++i) {
+    ASSERT_THAT(Run({"exists", StrCat("key", i)}), IntArg(1));
+  }
+}
+
 TEST_F(DflyEngineTest, PSubscribe) {
   single_response_ = false;
   auto resp = pp_->at(1)->Await([&] { return Run({"psubscribe", "a*", "b*"}); });
