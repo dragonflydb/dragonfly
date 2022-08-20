@@ -158,7 +158,18 @@ error_code Listener::ConfigureServerSocket(int fd) {
   }
   bool success = ConfigureKeepAlive(fd, kInterval);
 
-  LOG_IF(WARNING, !success) << "Could not configure keep alive " << detail::SafeErrorMessage(errno);
+  if (!success) {
+    int myerr = errno;
+
+    int socket_type;
+    socklen_t length = sizeof(socket_type);
+
+    // Ignore the error on UDS.
+    if (getsockopt(fd, SOL_SOCKET, SO_DOMAIN, &socket_type, &length) != 0 ||
+        socket_type != AF_UNIX) {
+      LOG(WARNING) << "Could not configure keep alive " << detail::SafeErrorMessage(myerr);
+    }
+  }
 
   return error_code{};
 }
