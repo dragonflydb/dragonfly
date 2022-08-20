@@ -240,9 +240,10 @@ class DashTable : public detail::DashTableBase {
   // Returns true if an element was deleted i.e the rightmost slot was busy.
   bool ShiftRight(bucket_iterator it);
 
-  iterator BumpUp(iterator it) {
+  template<typename BumpPolicy>
+  iterator BumpUp(iterator it, const BumpPolicy& bp) {
     SegmentIterator seg_it =
-        segment_[it.seg_id_]->BumpUp(it.bucket_id_, it.slot_id_, DoHash(it->first));
+        segment_[it.seg_id_]->BumpUp(it.bucket_id_, it.slot_id_, DoHash(it->first), bp);
 
     return iterator{this, it.seg_id_, seg_it.index, seg_it.slot};
   }

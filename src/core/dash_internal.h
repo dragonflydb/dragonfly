@@ -522,7 +522,7 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   }
 
   // Bumps up this entry making it more "important" for the eviction policy.
-  Iterator BumpUp(uint8_t bid, SlotId slot, Hash_t key_hash);
+  template<typename BumpPolicy> Iterator BumpUp(uint8_t bid, SlotId slot, Hash_t key_hash, const BumpPolicy& ev);
 
   // Tries to move stash entries back to their normal buckets (exact or neighour).
   // Returns number of entries that succeeded to unload.
@@ -1544,7 +1544,8 @@ auto Segment<Key, Value, Policy>::FindValidStartingFrom(unsigned bid, unsigned s
 }
 
 template <typename Key, typename Value, typename Policy>
-auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_hash) -> Iterator {
+template <typename BumpPolicy>
+auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_hash, const BumpPolicy& bp) -> Iterator {
   auto& from = bucket_[bid];
 
   uint8_t target_bid = BucketIndex(key_hash);
@@ -1554,7 +1555,7 @@ auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_ha
 
   if (bid < kNumBuckets) {
     // non stash case.
-    if (slot > 0) {
+    if (slot > 0 && bp.CanBumpDown(from.key[slot-1])) {
       from.Swap(slot - 1, slot);
       return Iterator{bid, uint8_t(slot - 1)};
     }
@@ -1588,7 +1589,9 @@ auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_ha
   assert(swapb.GetBusy() & (1 << kLastSlot));
 
   // Don't move sticky items back to the stash because they're not evictable
-  if (swapb.value[kLastSlot].IsSticky()) {
+  // TODO: search for first swappable item
+  if (!bp.CanBumpDown(swapb.key[kLastSlot])) {
+    target.SetStashPtr(stash_pos, fp_hash, &next);
     return Iterator{bid, slot};
   }
 

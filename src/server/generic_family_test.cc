@@ -166,11 +166,29 @@ TEST_F(GenericFamilyTest, RenameNx) {
 }
 
 TEST_F(GenericFamilyTest, Stick) {
+  // check stick returns zero on non-existent keys
+  ASSERT_THAT(Run({"stick", "a", "b"}), IntArg(0));
+
+  for (auto key: {"a", "b", "c", "d"}) {
+    Run({"set", key, "."});
+  }
+
+  // check stick is applied only once
   ASSERT_THAT(Run({"stick", "a", "b"}), IntArg(2));
   ASSERT_THAT(Run({"stick", "a", "b"}), IntArg(0));
   ASSERT_THAT(Run({"stick", "a", "c"}), IntArg(1));
   ASSERT_THAT(Run({"stick", "b", "d"}), IntArg(1));
   ASSERT_THAT(Run({"stick", "c", "d"}), IntArg(0));
+
+  // check stickyness destructs during writes
+  Run({"set", "a", "new"});
+  ASSERT_THAT(Run({"stick", "a"}), IntArg(1));
+  Run({"append", "a", "-value"});
+  ASSERT_THAT(Run({"stick", "a"}), IntArg(1));
+
+  // check rename persists stickyness
+  Run({"rename", "a", "k"});
+  ASSERT_THAT(Run({"stick", "k"}), IntArg(0));
 }
 
 

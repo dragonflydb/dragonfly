@@ -89,6 +89,14 @@ class PrimeEvictionPolicy {
   const bool can_evict_;
 };
 
+class PrimeBumpPolicy {
+public:
+  // returns true if key can be made less important for eviction (opposite of bump up)
+  bool CanBumpDown(const CompactObj& key) const {
+    return !key.IsSticky();
+  }
+};
+
 
 unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& eb, PrimeTable* me) {
   unsigned res = 0;
@@ -125,7 +133,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
   last_slot_it += (PrimeTable::kBucketWidth - 1);
   if (!last_slot_it.is_done()) {
     // don't evict sticky items
-    if (last_slot_it->second.IsSticky()) {
+    if (last_slot_it->first.IsSticky()) {
       return 0;
     }
     if (last_slot_it->second.HasExpire()) {
@@ -263,7 +271,7 @@ pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, string_view
       db.prime.CVCUponBump(change_cb_.front().first, res.first, bump_cb);
     }
 
-    res.first = db.prime.BumpUp(res.first);
+    res.first = db.prime.BumpUp(res.first, PrimeBumpPolicy{});
     ++events_.bumpups;
   }
 
@@ -605,6 +613,7 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
   }
 
   it.SetVersion(NextVersion());
+  it->first.SetSticky(false);
 }
 
 void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, bool existing) {

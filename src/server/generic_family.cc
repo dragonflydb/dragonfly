@@ -716,6 +716,7 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     is_prior_list = (to_it->second.ObjType() == OBJ_LIST);
   }
 
+  bool sticky = from_it->first.IsSticky();
   uint64_t exp_ts = db_slice.ExpireTime(from_expire);
 
   // we keep the value we want to move.
@@ -741,6 +742,8 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     to_it = db_slice.AddNew(op_args.db_ind, to_key, std::move(from_obj), exp_ts);
   }
 
+  to_it->first.SetSticky(sticky);
+
   if (!is_prior_list && to_it->second.ObjType() == OBJ_LIST && es->blocking_controller()) {
     es->blocking_controller()->AwakeWatched(op_args.db_ind, to_key);
   }
@@ -755,8 +758,8 @@ OpResult<uint32_t> GenericFamily::OpStick(const OpArgs& op_args, ArgSlice keys) 
   uint32_t res = 0;
   for (uint32_t i = 0; i < keys.size(); ++i) {
     auto [it, _] = db_slice.FindExt(op_args.db_ind, keys[i]);
-    if (IsValid(it) && !it->second.IsSticky()) {
-      it->second.SetSticky(true);
+    if (IsValid(it) && !it->first.IsSticky()) {
+      it->first.SetSticky(true);
       ++res;
     }
   }
