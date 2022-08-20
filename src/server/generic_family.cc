@@ -52,6 +52,7 @@ class Renamer {
     string_view key;
     PrimeValue ref_val;
     uint64_t expire_ts;
+    bool sticky;
     bool found = false;
   };
 
@@ -77,6 +78,7 @@ void Renamer::Find(Transaction* t) {
     if (IsValid(it)) {
       res->ref_val = it->second.AsRef();
       res->expire_ts = db_slice.ExpireTime(exp_it);
+      res->sticky = it->first.IsSticky();
     }
     return OpStatus::OK;
   };
@@ -156,6 +158,8 @@ OpStatus Renamer::UpdateDest(Transaction* t, EngineShard* es) {
       }
       dest_it = db_slice.AddNew(db_indx_, dest_key, std::move(pv_), src_res_.expire_ts);
     }
+
+    dest_it->first.SetSticky(src_res_.sticky);
 
     if (!is_prior_list && dest_it->second.ObjType() == OBJ_LIST && es->blocking_controller()) {
       es->blocking_controller()->AwakeWatched(db_indx_, dest_key);

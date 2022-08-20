@@ -613,7 +613,6 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
   }
 
   it.SetVersion(NextVersion());
-  it->first.SetSticky(false);
 }
 
 void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, bool existing) {

@@ -1555,7 +1555,7 @@ auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_ha
 
   if (bid < kNumBuckets) {
     // non stash case.
-    if (slot > 0 && bp.CanBumpDown(from.key[slot-1])) {
+    if (slot > 0 && bp.CanBumpDown(from.key[slot - 1])) {
       from.Swap(slot - 1, slot);
       return Iterator{bid, uint8_t(slot - 1)};
     }
