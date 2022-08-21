@@ -11,6 +11,7 @@
 #include <mimalloc-types.h>
 #include <sys/resource.h>
 
+#include <chrono>
 #include <filesystem>
 
 extern "C" {
@@ -47,6 +48,8 @@ using namespace std;
 ABSL_FLAG(string, dir, "", "working directory");
 ABSL_FLAG(string, dbfilename, "dump", "the filename to save/load the DB");
 ABSL_FLAG(string, requirepass, "", "password for AUTH authentication");
+ABSL_FLAG(string, save_schedule, "", "glob spec for the time to save a snapshot which matches HH:MM 24h time");
+ABSL_FLAG(bool, save_schedule_use_utc, false, "use UTC when specifying the time to save a snapshot");
 
 ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
@@ -147,6 +150,78 @@ class LinuxWriteWrapper : public io::WriteFile {
 
 }  // namespace
 
+bool IsValidSaveScheduleNibble(string_view time, unsigned int max, unsigned int min_len = 2) {
+  size_t digit_mask = std::pow(10, time.size() - 1);
+  for (size_t i = 0; i < time.length(); ++i, digit_mask /= 10) {
+    // ignore wildcards as they are always valid for their placeholder
+    if (time[i] == '*') continue;
+    // if it is not a number and not a '*' invalid string
+    if (time[i] < '0' || time[i] > '9') return false;
+    // get the expected digits from both items
+    unsigned int digit = max / digit_mask;
+    unsigned int time_digit = time[i] - '0';
+    // the validation only needs to continue as long as digit == time_digit
+    // take for example max 24, if time is 1x any x will still be less than the max
+    if (digit > time_digit) return true;
+    if (digit < time_digit) return false;
+
+    max = max % digit_mask;
+  }
+
+  return true;
+}
+
+bool IsValidSaveSchedule(string_view time) {
+  if (time.length() < 3 || time.length() > 5) return false;
+
+  size_t separator_idx = 0;
+  while (separator_idx < 3 && time[separator_idx] != ':') ++separator_idx;
+
+  // the time cannot start with ':' and it must be present in the first 3 characters of any time
+  if (separator_idx == 3 || separator_idx == 0) return false;
+
+  auto hour_view = string_view(time.data(), separator_idx);
+  auto min_view = string_view(time.data() + separator_idx + 1, time.length() - separator_idx - 1);
+
+  // any hour is >= 0 and <= 23
+  if (hour_view.length() < 1 || hour_view.length() > 2) return false;
+  // a minute should be 2 digits as it is zero padded, unless it is a '*' in which case this greedily can
+  // make up both digits
+  if ((min_view.length() < 2 && min_view != "*") || min_view.length() > 2) return false;
+
+  return IsValidSaveScheduleNibble(hour_view, 23, 1) 
+          && IsValidSaveScheduleNibble(min_view, 59, 2);
+}
+
+bool DoesTimeMatchSpecifier(string_view::const_reverse_iterator begin, string_view::const_reverse_iterator end, unsigned int time) {
+  // single greedy wildcard matches everything
+  if (*begin == '*' && begin + 1 == end) return true;
+  // otherwise start from the least significant digit of the string
+  // check if the current digit in the matcher is a wildcard or if it matches the digit specified
+  while (begin < end) {
+    if (*begin != '*' && *begin != '0' + (time % 10)) return false;
+    ++begin;
+    time /= 10;
+  }
+
+  return true;
+}
+
+bool DoesTimeMatchSpecifier(string_view time, unsigned int hour, unsigned int min) {
+  std::string_view::const_iterator it;
+  for (it = time.begin(); it != time.end() && *it != ':'; ++it);
+  if (!DoesTimeMatchSpecifier(std::make_reverse_iterator(it), time.rend(), hour)) {
+    return false;
+  }
+
+  ++it;
+  if (!DoesTimeMatchSpecifier(time.rbegin(), std::make_reverse_iterator(it), min)) {
+    return false;
+  } 
+
+  return true;
+}
+
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
   start_time_ = time(NULL);
   lsinfo_ = make_shared<LastSaveInfo>();
@@ -199,6 +274,19 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
   if (!load_path.empty()) {
     Load(load_path);
   }
+
+  string save_time = GetFlag(FLAGS_save_schedule);
+  if (!save_time.empty() && IsValidSaveSchedule(save_time)) {
+    snapshot_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber([save_time = std::move(save_time), this] {
+      SnapshotScheduling(std::move(save_time));
+    });
+  }
+  // if the argument is not empty it is an invalid format so print a warning
+  else if (!save_time.empty()) {
+    LOG(WARNING)<<"Invalid snapshot time specifier "<<save_time;
+  }
+
+  is_running_ = true;
 }
 
 void ServerFamily::Shutdown() {
@@ -206,6 +294,12 @@ void ServerFamily::Shutdown() {
 
   if (load_fiber_.joinable())
     load_fiber_.join();
+
+  is_running_ = false;
+  if (snapshot_fiber_.joinable()) {
+    snapshot_timer_cv_.notify_all();
+    snapshot_fiber_.join();
+  }
 
   pb_task_->Await([this] {
     pb_task_->CancelPeriodic(stats_caching_task_);
@@ -262,6 +356,44 @@ void ServerFamily::Load(const std::string& load_path) {
     auto ec = LoadRdb(load_path);
     LOG_IF(ERROR, ec) << "Error loading file " << ec.message();
   });
+}
+
+void ServerFamily::SnapshotScheduling(const string &&time) {
+  auto timezone = GetFlag(FLAGS_save_schedule_use_utc) ? absl::UTCTimeZone() : absl::LocalTimeZone();
+  while (is_running_) {
+    std::unique_lock lk(snapshot_mu_);
+    snapshot_timer_cv_.wait_for(lk, std::chrono::seconds(20));
+
+    absl::Time now = absl::Now();
+    absl::TimeZone::CivilInfo tz = timezone.At(now);
+  
+    if (!DoesTimeMatchSpecifier(time, tz.cs.hour(), tz.cs.minute())) {
+      continue;
+    }
+
+    // if it matches check the last save time, if it is the same minute don't save another snapshot
+    time_t last_save;
+    {
+      lock_guard lk(save_mu_);
+      last_save = lsinfo_->save_time;
+    }
+
+    if ((last_save / 60) == (absl::ToTimeT(now) / 60)) {
+      continue;
+    }
+
+    // do the save
+    string err_details;
+    error_code ec;
+    const CommandId* cid = service().FindCmd("SAVE");
+    CHECK_NOTNULL(cid);
+    boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
+    trans->InitByArgs(0, {});
+    ec = DoSave(trans.get(), &err_details);
+    if (ec) {
+      LOG(WARNING) << "Failed to perform snapshot "<<err_details;
+    }
+  }
 }
 
 error_code ServerFamily::LoadRdb(const std::string& rdb_file) {

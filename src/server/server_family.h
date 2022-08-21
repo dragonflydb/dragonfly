@@ -117,7 +117,9 @@ class ServerFamily {
 
   void Load(const std::string& file_name);
 
-  boost::fibers::fiber load_fiber_;
+  void SnapshotScheduling(const std::string &&time);
+
+  boost::fibers::fiber load_fiber_, snapshot_fiber_;
 
   uint32_t stats_caching_task_ = 0;
   Service& service_;
@@ -126,7 +128,8 @@ class ServerFamily {
   util::ListenerInterface* main_listener_ = nullptr;
   util::ProactorBase* pb_task_ = nullptr;
 
-  mutable ::boost::fibers::mutex replicaof_mu_, save_mu_;
+  mutable ::boost::fibers::mutex replicaof_mu_, save_mu_, snapshot_mu_;
+  ::boost::fibers::condition_variable snapshot_timer_cv_;
   std::shared_ptr<Replica> replica_;  // protected by replica_of_mu_
 
   std::unique_ptr<ScriptMgr> script_mgr_;
@@ -137,6 +140,7 @@ class ServerFamily {
 
   std::shared_ptr<LastSaveInfo> lsinfo_;  // protected by save_mu_;
   std::atomic_bool is_saving_{false};
+  std::atomic_bool is_running_{false};
 };
 
 }  // namespace dfly
