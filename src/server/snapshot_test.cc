@@ -1,14 +1,13 @@
 // Copyright 2022, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
-#include <gtest/gtest.h>
 #include <gmock/gmock.h>
+#include <gtest/gtest.h>
+
+#include <chrono>
 
 #include "base/gtest.h"
 #include "server/test_utils.h"
-
-#include <iostream>
-#include <chrono>
 
 using namespace testing;
 using namespace std;
@@ -27,7 +26,9 @@ bool DoesTimeMatchSpecifier(const SnapshotSpec&, time_t);
 
 bool DoesTimeMatchSpecifier(string_view time_spec, unsigned int hour, unsigned int min) {
   auto spec = ParseSaveSchedule(time_spec);
-  if (!spec) return false;
+  if (!spec) {
+    return false;
+  }
 
   time_t now = ((hour * 60) + min) * 60;
 
@@ -54,6 +55,7 @@ TEST_F(SnapshotTest, InvalidTimes) {
   // Negative numbers / non numeric characters
   EXPECT_FALSE(ParseSaveSchedule("-1:-2"));
   EXPECT_FALSE(ParseSaveSchedule("12:34b"));
+  EXPECT_FALSE(ParseSaveSchedule("0;:1="));
 
   // Wildcards for full times
   EXPECT_FALSE(ParseSaveSchedule("12*:09"));
@@ -86,6 +88,7 @@ TEST_F(SnapshotTest, TimeMatches) {
   EXPECT_TRUE(DoesTimeMatchSpecifier("2:04", 2, 4));
 
   EXPECT_FALSE(DoesTimeMatchSpecifier("12:34", 2, 4));
+  EXPECT_FALSE(DoesTimeMatchSpecifier("12:34", 2, 34));
   EXPECT_FALSE(DoesTimeMatchSpecifier("2:34", 12, 34));
   EXPECT_FALSE(DoesTimeMatchSpecifier("2:34", 3, 34));
   EXPECT_FALSE(DoesTimeMatchSpecifier("2:04", 3, 5));

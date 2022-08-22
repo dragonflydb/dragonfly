@@ -133,8 +133,7 @@ class ServerFamily {
   util::ListenerInterface* main_listener_ = nullptr;
   util::ProactorBase* pb_task_ = nullptr;
 
-  mutable ::boost::fibers::mutex replicaof_mu_, save_mu_, snapshot_mu_;
-  ::boost::fibers::condition_variable snapshot_timer_cv_;
+  mutable ::boost::fibers::mutex replicaof_mu_, save_mu_;
   std::shared_ptr<Replica> replica_;  // protected by replica_of_mu_
 
   std::unique_ptr<ScriptMgr> script_mgr_;
@@ -145,7 +144,8 @@ class ServerFamily {
 
   std::shared_ptr<LastSaveInfo> lsinfo_;  // protected by save_mu_;
   std::atomic_bool is_saving_{false};
-  std::atomic_bool is_running_{false};
+
+  util::fibers_ext::Done is_snapshot_done_;
 };
 
 }  // namespace dfly

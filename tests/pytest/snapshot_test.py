@@ -1,25 +1,28 @@
-from test_dragonfly import DRAGONFLY_PATH, dfly_args, df_server, client, connection
-
-import redis
 from pathlib import Path
-import time
+from tempfile import TemporaryDirectory
+from conftest import dfly_args
+
 import pytest
+import redis
+import time
+import os
 
-OUT_DIR = Path(DRAGONFLY_PATH).parent
+OUT_DIR = TemporaryDirectory()
 
-@pytest.mark.usefixtures("client")
-@dfly_args("--dbfilename", "test.rdb", 
-	"--save_schedule", "*:*", 
-	"--dir", str(OUT_DIR)+"/")
+
+@dfly_args("--alsologtostderr", "--dbfilename", "test.rdb",
+           "--save_schedule", "*:*",
+           "--dir", "{DRAGONFLY_TMP}/")
 class TestSnapshot:
-	def test_snapshot(self, client: redis.Redis):
-		out_path = OUT_DIR / "test.rdb"
-		client.set("test", "test")
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_dir: Path):
+        self.rdb_out = tmp_dir / "test.rdb"
+        if self.rdb_out.exists():
+            self.rdb_out.unlink()
 
-		if out_path.exists():
-			out_path.unlink()
+    def test_snapshot(self, client: redis.Redis):
+        client.set("test", "test")
 
-		time.sleep(60)
+        time.sleep(60)
 
-		assert out_path.exists()
-	
+        assert self.rdb_out.exists()
