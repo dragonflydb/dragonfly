@@ -1,13 +1,10 @@
-from pathlib import Path
-from tempfile import TemporaryDirectory
-from conftest import dfly_args
-
+import time
 import pytest
 import redis
-import time
-import os
 
-OUT_DIR = TemporaryDirectory()
+
+from pathlib import Path
+from dragonfly import dfly_args
 
 
 @dfly_args("--alsologtostderr", "--dbfilename", "test.rdb",

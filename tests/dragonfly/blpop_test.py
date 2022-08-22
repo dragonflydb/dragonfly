@@ -1,8 +1,7 @@
-from conftest import dfly_multi_test_args
+from threading import Thread
 
 import pytest
 import redis
-from threading import Thread
 
 
 class BLPopWorkerThread:
@@ -41,12 +40,3 @@ class TestBlPop:
         client.lpush('list2{t}', 'b')
         assert wt_blpop.wait(2)
         assert wt_blpop.result[1] == 'b'
-
-
-@dfly_multi_test_args(["--keys_output_limit", "512"], ["--keys_output_limit", "1024"])
-class TestKeys:
-    def test_max_keys(self, client):
-        for x in range(8192):
-            client.set(str(x), str(x))
-        keys = client.keys()
-        assert len(keys) in [513, 1025]
