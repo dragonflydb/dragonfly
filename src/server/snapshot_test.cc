@@ -7,6 +7,9 @@
 #include "base/gtest.h"
 #include "server/test_utils.h"
 
+#include <iostream>
+#include <chrono>
+
 using namespace testing;
 using namespace std;
 using namespace util;
@@ -19,53 +22,62 @@ class SnapshotTest : public Test {
  protected:
 };
 
-bool IsValidSaveSchedule(string_view time);
-bool DoesTimeMatchSpecifier(string_view time, unsigned int hour, unsigned int min);
+std::optional<SnapshotSpec> ParseSaveSchedule(string_view time);
+bool DoesTimeMatchSpecifier(const SnapshotSpec&, time_t);
+
+bool DoesTimeMatchSpecifier(string_view time_spec, unsigned int hour, unsigned int min) {
+  auto spec = ParseSaveSchedule(time_spec);
+  if (!spec) return false;
+
+  time_t now = ((hour * 60) + min) * 60;
+
+  return DoesTimeMatchSpecifier(spec.value(), now);
+}
 
 TEST_F(SnapshotTest, InvalidTimes) {
-  EXPECT_FALSE(IsValidSaveSchedule("24:00"));
-  EXPECT_FALSE(IsValidSaveSchedule("00:60"));
-  EXPECT_FALSE(IsValidSaveSchedule("100:00"));
-  EXPECT_FALSE(IsValidSaveSchedule("00:100"));
+  EXPECT_FALSE(ParseSaveSchedule("24:00"));
+  EXPECT_FALSE(ParseSaveSchedule("00:60"));
+  EXPECT_FALSE(ParseSaveSchedule("100:00"));
+  EXPECT_FALSE(ParseSaveSchedule("00:100"));
 
   // invalid times with regex
-  EXPECT_FALSE(IsValidSaveSchedule("23:6*"));
+  EXPECT_FALSE(ParseSaveSchedule("23:6*"));
 
   // Minutes must be zero padded
-  EXPECT_FALSE(IsValidSaveSchedule("00:9"));
+  EXPECT_FALSE(ParseSaveSchedule("00:9"));
 
   // No separators or start with separator
-  EXPECT_FALSE(IsValidSaveSchedule(":12"));
-  EXPECT_FALSE(IsValidSaveSchedule("1234"));
-  EXPECT_FALSE(IsValidSaveSchedule("1"));
+  EXPECT_FALSE(ParseSaveSchedule(":12"));
+  EXPECT_FALSE(ParseSaveSchedule("1234"));
+  EXPECT_FALSE(ParseSaveSchedule("1"));
 
   // Negative numbers / non numeric characters
-  EXPECT_FALSE(IsValidSaveSchedule("-1:-2"));
-  EXPECT_FALSE(IsValidSaveSchedule("12:34b"));
+  EXPECT_FALSE(ParseSaveSchedule("-1:-2"));
+  EXPECT_FALSE(ParseSaveSchedule("12:34b"));
 
   // Wildcards for full times
-  EXPECT_FALSE(IsValidSaveSchedule("12*:09"));
-  EXPECT_FALSE(IsValidSaveSchedule("23:45*"));
+  EXPECT_FALSE(ParseSaveSchedule("12*:09"));
+  EXPECT_FALSE(ParseSaveSchedule("23:45*"));
 }
 
 TEST_F(SnapshotTest, ValidTimes) {
   // Test endpoints
-  EXPECT_TRUE(IsValidSaveSchedule("23:59"));
-  EXPECT_TRUE(IsValidSaveSchedule("00:00"));
+  EXPECT_TRUE(ParseSaveSchedule("23:59"));
+  EXPECT_TRUE(ParseSaveSchedule("00:00"));
   // hours don't need to be zero padded
-  EXPECT_TRUE(IsValidSaveSchedule("0:00"));
+  EXPECT_TRUE(ParseSaveSchedule("0:00"));
 
   // wildcard checks
-  EXPECT_TRUE(IsValidSaveSchedule("1*:09"));
-  EXPECT_TRUE(IsValidSaveSchedule("*9:23"));
-  EXPECT_TRUE(IsValidSaveSchedule("23:*1"));
-  EXPECT_TRUE(IsValidSaveSchedule("18:1*"));
+  EXPECT_TRUE(ParseSaveSchedule("1*:09"));
+  EXPECT_TRUE(ParseSaveSchedule("*9:23"));
+  EXPECT_TRUE(ParseSaveSchedule("23:*1"));
+  EXPECT_TRUE(ParseSaveSchedule("18:1*"));
 
   // Greedy wildcards
-  EXPECT_TRUE(IsValidSaveSchedule("*:12"));
-  EXPECT_TRUE(IsValidSaveSchedule("9:*"));
-  EXPECT_TRUE(IsValidSaveSchedule("09:*"));
-  EXPECT_TRUE(IsValidSaveSchedule("*:*"));
+  EXPECT_TRUE(ParseSaveSchedule("*:12"));
+  EXPECT_TRUE(ParseSaveSchedule("9:*"));
+  EXPECT_TRUE(ParseSaveSchedule("09:*"));
+  EXPECT_TRUE(ParseSaveSchedule("*:*"));
 }
 
 TEST_F(SnapshotTest, TimeMatches) {
@@ -74,6 +86,7 @@ TEST_F(SnapshotTest, TimeMatches) {
   EXPECT_TRUE(DoesTimeMatchSpecifier("2:04", 2, 4));
 
   EXPECT_FALSE(DoesTimeMatchSpecifier("12:34", 2, 4));
+  EXPECT_FALSE(DoesTimeMatchSpecifier("2:34", 12, 34));
   EXPECT_FALSE(DoesTimeMatchSpecifier("2:34", 3, 34));
   EXPECT_FALSE(DoesTimeMatchSpecifier("2:04", 3, 5));
 

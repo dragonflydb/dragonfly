@@ -51,6 +51,11 @@ struct LastSaveInfo {
   std::vector<std::pair<std::string_view, size_t>> freq_map;  // RDB_TYPE_xxx -> count mapping.
 };
 
+struct SnapshotSpec {
+  std::string hour_spec;
+  std::string minute_spec;
+};
+
 class ServerFamily {
  public:
   ServerFamily(Service* service);
@@ -117,7 +122,7 @@ class ServerFamily {
 
   void Load(const std::string& file_name);
 
-  void SnapshotScheduling(const std::string &&time);
+  void SnapshotScheduling(const SnapshotSpec &&time);
 
   boost::fibers::fiber load_fiber_, snapshot_fiber_;
 
