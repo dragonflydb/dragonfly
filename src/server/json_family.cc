@@ -6,9 +6,9 @@
 
 extern "C" {
 #include "redis/object.h"
-#include "redis/util.h"
 }
 
+#include <absl/strings/charconv.h>
 #include <absl/strings/str_join.h>
 
 #include <jsoncons/json.hpp>
@@ -28,8 +28,9 @@ using namespace jsoncons;
 
 using JsonExpression = jsonpath::jsonpath_expression<json>;
 using OptBool = optional<bool>;
+using OptDouble = optional<double>;
 using OptSizeT = optional<size_t>;
-using JsonReplaceCb = std::function<void(const string&, json&)>;
+using JsonReplaceCb = function<void(const string&, json&)>;
 using CI = CommandId;
 
 namespace {
@@ -82,6 +83,42 @@ string JsonType(const json& val) {
   }
 
   return "";
+}
+
+bool ParseDouble(string_view src, double* value) {
+  if (src.empty())
+    return false;
+
+  if (src == "-inf") {
+    *value = -HUGE_VAL;
+  } else if (src == "+inf") {
+    *value = HUGE_VAL;
+  } else {
+    absl::from_chars_result result = absl::from_chars(src.data(), src.end(), *value);
+    if (int(result.ec) != 0 || result.ptr != src.end() || isnan(*value))
+      return false;
+  }
+  return true;
+}
+
+template <typename T>
+void PrintOptVec(ConnectionContext* cntx, const OpResult<vector<optional<T>>>& result) {
+  if (result->empty()) {
+    (*cntx)->SendNullArray();
+  } else {
+    (*cntx)->StartArray(result->size());
+    for (auto& it : *result) {
+      if (it.has_value()) {
+        if constexpr (is_integral_v<T>) {
+          (*cntx)->SendLong(*it);
+        } else if (is_floating_point_v<T>) {
+          (*cntx)->SendDouble(*it);
+        }
+      } else {
+        (*cntx)->SendNull();
+      }
+    }
+  }
 }
 
 error_code JsonReplace(json& instance, string_view& path, JsonReplaceCb callback) {
@@ -259,7 +296,99 @@ OpResult<vector<OptBool>> OpToggle(const OpArgs& op_args, string_view key, strin
   return vec;
 }
 
+template <typename Op>
+OpResult<vector<OptDouble>> OpDoubleArithmetic(const OpArgs& op_args, string_view key,
+                                               string_view path, double num, Op arithmetic_op) {
+  OpResult<json> result = GetJson(op_args, key);
+  if (!result) {
+    return result.status();
+  }
+
+  double int_part;
+  bool has_fractional_part = (modf(num, &int_part) != 0);
+  vector<OptDouble> vec;
+
+  auto cb = [&](const string& path, json& val) {
+    if (val.is_number()) {
+      double result = arithmetic_op(val.as<double>(), num);
+      if (val.is_double() || has_fractional_part) {
+        val = result;
+        vec.emplace_back(result);
+      } else {
+        val = (uint64_t)result;
+        vec.emplace_back(result);
+      }
+    } else {
+      vec.emplace_back(nullopt);
+    }
+  };
+
+  json j = result.value();
+  error_code ec = JsonReplace(j, path, cb);
+  if (ec) {
+    VLOG(1) << "Failed to evaulate expression on json with error: " << ec.message();
+    return OpStatus::SYNTAX_ERR;
+  }
+
+  SetString(op_args, key, j.as_string());
+  return vec;
+}
+
 }  // namespace
+
+void JsonFamily::NumIncrBy(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view path = ArgS(args, 2);
+  string_view num = ArgS(args, 3);
+
+  double dnum;
+  if (!ParseDouble(num, &dnum)) {
+    (*cntx)->SendError(kWrongTypeErr);
+    return;
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpDoubleArithmetic(t->GetOpArgs(shard), key, path, dnum, plus<double>{});
+  };
+
+  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
+  Transaction* trans = cntx->transaction;
+  OpResult<vector<OptDouble>> result = trans->ScheduleSingleHopT(move(cb));
+
+  if (result) {
+    DVLOG(1) << "JSON.NUMINCRBY " << trans->DebugId() << ": " << key;
+    PrintOptVec(cntx, result);
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
+
+void JsonFamily::NumMultBy(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view path = ArgS(args, 2);
+  string_view num = ArgS(args, 3);
+
+  double dnum;
+  if (!ParseDouble(num, &dnum)) {
+    (*cntx)->SendError(kWrongTypeErr);
+    return;
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpDoubleArithmetic(t->GetOpArgs(shard), key, path, dnum, multiplies<double>{});
+  };
+
+  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
+  Transaction* trans = cntx->transaction;
+  OpResult<vector<OptDouble>> result = trans->ScheduleSingleHopT(move(cb));
+
+  if (result) {
+    DVLOG(1) << "JSON.NUMMULTBY " << trans->DebugId() << ": " << key;
+    PrintOptVec(cntx, result);
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
 
 void JsonFamily::Toggle(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
@@ -275,18 +404,7 @@ void JsonFamily::Toggle(CmdArgList args, ConnectionContext* cntx) {
 
   if (result) {
     DVLOG(1) << "JSON.TOGGLE " << trans->DebugId() << ": " << key;
-    if (result->empty()) {
-      (*cntx)->SendNullArray();
-    } else {
-      (*cntx)->StartArray(result->size());
-      for (auto& it : *result) {
-        if (it.has_value()) {
-          (*cntx)->SendLong(*it);
-        } else {
-          (*cntx)->SendNull();
-        }
-      }
-    }
+    PrintOptVec(cntx, result);
   } else {
     (*cntx)->SendError(result.status());
   }
@@ -353,18 +471,7 @@ void JsonFamily::ArrLen(CmdArgList args, ConnectionContext* cntx) {
 
   if (result) {
     DVLOG(1) << "JSON.ARRLEN " << trans->DebugId() << ": " << key;
-    if (result->empty()) {
-      (*cntx)->SendNullArray();
-    } else {
-      (*cntx)->StartArray(result->size());
-      for (auto& it : *result) {
-        if (it.has_value()) {
-          (*cntx)->SendLong(*it);
-        } else {
-          (*cntx)->SendNull();
-        }
-      }
-    }
+    PrintOptVec(cntx, result);
   } else {
     (*cntx)->SendError(result.status());
   }
@@ -393,18 +500,7 @@ void JsonFamily::ObjLen(CmdArgList args, ConnectionContext* cntx) {
 
   if (result) {
     DVLOG(1) << "JSON.OBJLEN " << trans->DebugId() << ": " << key;
-    if (result->empty()) {
-      (*cntx)->SendNullArray();
-    } else {
-      (*cntx)->StartArray(result->size());
-      for (auto& it : *result) {
-        if (it.has_value()) {
-          (*cntx)->SendLong(*it);
-        } else {
-          (*cntx)->SendNull();
-        }
-      }
-    }
+    PrintOptVec(cntx, result);
   } else {
     (*cntx)->SendError(result.status());
   }
@@ -433,18 +529,7 @@ void JsonFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
 
   if (result) {
     DVLOG(1) << "JSON.STRLEN " << trans->DebugId() << ": " << key;
-    if (result->empty()) {
-      (*cntx)->SendNullArray();
-    } else {
-      (*cntx)->StartArray(result->size());
-      for (auto& it : *result) {
-        if (it.has_value()) {
-          (*cntx)->SendLong(*it);
-        } else {
-          (*cntx)->SendNull();
-        }
-      }
-    }
+    PrintOptVec(cntx, result);
   } else {
     (*cntx)->SendError(result.status());
   }
@@ -495,6 +580,10 @@ void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.OBJLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ObjLen);
   *registry << CI{"JSON.ARRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ArrLen);
   *registry << CI{"JSON.TOGGLE", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(Toggle);
+  *registry << CI{"JSON.NUMINCRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1}.HFUNC(
+      NumIncrBy);
+  *registry << CI{"JSON.NUMMULTBY", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1}.HFUNC(
+      NumMultBy);
 }
 
 }  // namespace dfly
