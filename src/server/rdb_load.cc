@@ -1214,7 +1214,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
       break;
     }
 
-    auto [it, added] = db_slice.AddOrFind(db_ind, key, std::move(pv), item.expire_ms);
+    auto [it, added] = db_slice.AddEntry(db_ind, key, std::move(pv), item.expire_ms);
 
     if (!added) {
       LOG(WARNING) << "RDB has duplicated key '" << key << "' in DB " << db_ind;

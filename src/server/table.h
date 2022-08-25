@@ -65,7 +65,8 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   LockTable trans_locks;
 
   mutable DbTableStats stats;
-  ExpireTable::cursor expire_cursor;
+  ExpireTable::Cursor expire_cursor;
+  PrimeTable::Cursor prime_cursor;
 
   explicit DbTable(std::pmr::memory_resource* mr);
   ~DbTable();

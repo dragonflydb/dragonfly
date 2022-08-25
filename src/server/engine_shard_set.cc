@@ -289,25 +289,37 @@ void EngineShard::Heartbeat() {
 
   if (task_iters_++ % 8 == 0) {
     CacheStats();
+    constexpr double kTtlDeleteLimit = 200;
+    constexpr double kRedLimitFactor = 0.1;
 
     uint32_t traversed = GetMovingSum6(TTL_TRAVERSE);
     uint32_t deleted = GetMovingSum6(TTL_DELETE);
-    unsigned count = 5;
+    unsigned ttl_delete_target = 5;
+
     if (deleted > 10) {
-      // deleted should leq than traversed.
-      // hence we map our delete/traversed ration into a range [0, 100).
-      count = 200.0 * double(deleted) / (double(traversed) + 10);
+      // deleted should be <= traversed.
+      // hence we map our delete/traversed ratio into a range [0, kTtlDeleteLimit).
+      // The higher t
+      ttl_delete_target = kTtlDeleteLimit * double(deleted) / (double(traversed) + 10);
     }
 
-    for (unsigned i = 0; i < db_slice_.db_array_size(); ++i) {
-      if (db_slice_.IsDbValid(i)) {
-        auto [pt, expt] = db_slice_.GetTables(i);
-        if (expt->size() > pt->size() / 4) {
-          DbSlice::DeleteExpiredStats stats = db_slice_.DeleteExpired(i, count);
+    ssize_t redline = (max_memory_limit * kRedLimitFactor) / shard_set->size();
 
-          counter_[TTL_TRAVERSE].IncBy(stats.traversed);
-          counter_[TTL_DELETE].IncBy(stats.deleted);
-        }
+    for (unsigned i = 0; i < db_slice_.db_array_size(); ++i) {
+      if (!db_slice_.IsDbValid(i))
+        continue;
+
+      auto [pt, expt] = db_slice_.GetTables(i);
+      if (expt->size() > pt->size() / 4) {
+        DbSlice::DeleteExpiredStats stats = db_slice_.DeleteExpiredStep(i, ttl_delete_target);
+
+        counter_[TTL_TRAVERSE].IncBy(stats.traversed);
+        counter_[TTL_DELETE].IncBy(stats.deleted);
+      }
+
+      // if our budget is below the limit
+      if (db_slice_.memory_budget() < redline) {
+        db_slice_.FreeMemWithEvictionStep(i, redline - db_slice_.memory_budget());
       }
     }
   }
@@ -317,13 +329,24 @@ void EngineShard::CacheStats() {
   // mi_heap_visit_blocks(tlh, false /* visit all blocks*/, visit_cb, &sum);
   mi_stats_merge();
 
+  // Used memory for this shard.
   size_t used_mem = UsedMemory();
   cached_stats[db_slice_.shard_id()].used_memory.store(used_mem, memory_order_relaxed);
   ssize_t free_mem = max_memory_limit - used_mem_current.load(memory_order_relaxed);
-  if (free_mem < 0)
-    free_mem = 0;
 
-  db_slice_.SetMemoryBudget(free_mem / shard_set->size());
+  size_t entries = 0;
+  size_t table_memory = 0;
+  for (size_t i = 0; i < db_slice_.db_array_size(); ++i) {
+    DbTable* table = db_slice_.GetDBTable(i);
+    if (table) {
+      entries += table->prime.size();
+      table_memory += (table->prime.mem_usage() + table->expire.mem_usage());
+    }
+  }
+  size_t obj_memory = table_memory <= used_mem ? used_mem - table_memory : 0;
+
+  size_t bytes_per_obj = entries > 0 ? obj_memory / entries : 0;
+  db_slice_.SetCachedParams(free_mem / shard_set->size(), bytes_per_obj);
 }
 
 size_t EngineShard::UsedMemory() const {

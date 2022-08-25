@@ -512,7 +512,7 @@ TEST_F(DashTest, Traverse) {
     dt_.Insert(i, i);
   }
 
-  Dash64::cursor cursor;
+  Dash64::Cursor cursor;
   vector<unsigned> nums;
   auto tr_cb = [&](Dash64::iterator it) {
     nums.push_back(it->first);
@@ -536,7 +536,7 @@ TEST_F(DashTest, Bucket) {
   }
   std::vector<uint64_t> s;
   auto it = dt_.begin();
-  auto bucket_it = Dash64::bucket_it(it);
+  auto bucket_it = Dash64::BucketIt(it);
 
   dt_.TraverseBucket(it, [&](auto i) { s.push_back(i->first); });
 

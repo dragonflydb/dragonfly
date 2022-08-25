@@ -174,6 +174,10 @@ template <unsigned NUM_SLOTS, unsigned NUM_STASH_FPS> class BucketBase {
     return slotb_.GetBusy();
   }
 
+  bool IsBusy(unsigned slot) const {
+    return (GetBusy() & (1u << slot)) != 0;
+  }
+
   // mask is saying which slots needs to be freed (1 - should clear).
   void ClearSlots(uint32_t mask) {
     slotb_.ClearSlots(mask);
@@ -664,8 +668,8 @@ class DashCursor {
   // | segment_id......| bucket_id
   // 40                8          0
   // By using depth we take most significant bits of segment_id if depth has decreased
-  // since the cursort was created, or extend the least significant bits with zeros if
-  // depth has increased.
+  // since the cursor has been created, or extend the least significant bits with zeros,
+  // if depth was increased.
   uint32_t segment_id(uint8_t depth) {
     return val_ >> (40 - depth);
   }

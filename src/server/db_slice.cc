@@ -44,13 +44,27 @@ void UpdateStatsOnDeletion(PrimeIterator it, DbTableStats* stats) {
     stats->strval_memory_usage -= value_heap_size;
 }
 
+void EvictItemFun(PrimeIterator del_it, DbTable* table) {
+  if (del_it->second.HasExpire()) {
+    CHECK_EQ(1u, table->expire.Erase(del_it->first));
+  }
+
+  UpdateStatsOnDeletion(del_it, &table->stats);
+
+  DVLOG(2) << "Evicted from bucket " << del_it.bucket_id() << " " << del_it->first.ToString();
+
+  table->prime.Erase(del_it);
+};
+
 class PrimeEvictionPolicy {
  public:
   static constexpr bool can_evict = true;  // we implement eviction functionality.
   static constexpr bool can_gc = true;
 
-  PrimeEvictionPolicy(DbIndex db_indx, bool can_evict, DbSlice* db_slice, int64_t mem_budget)
-      : db_slice_(db_slice), mem_budget_(mem_budget), db_indx_(db_indx), can_evict_(can_evict) {
+  PrimeEvictionPolicy(DbIndex db_indx, bool can_evict, ssize_t mem_budget, ssize_t soft_limit,
+                      DbSlice* db_slice)
+      : db_slice_(db_slice), mem_budget_(mem_budget), soft_limit_(soft_limit), db_indx_(db_indx),
+        can_evict_(can_evict) {
   }
 
   void RecordSplit(PrimeTable::Segment_t* segment) {
@@ -58,14 +72,12 @@ class PrimeEvictionPolicy {
     DVLOG(1) << "split: " << segment->SlowSize() << "/" << segment->capacity();
   }
 
-  bool CanGrow(const PrimeTable& tbl) const {
-    return mem_budget_ > int64_t(PrimeTable::kSegBytes);
-  }
+  bool CanGrow(const PrimeTable& tbl) const;
 
   unsigned GarbageCollect(const PrimeTable::HotspotBuckets& eb, PrimeTable* me);
   unsigned Evict(const PrimeTable::HotspotBuckets& eb, PrimeTable* me);
 
-  int64_t mem_budget() const {
+  ssize_t mem_budget() const {
     return mem_budget_;
   }
 
@@ -79,7 +91,8 @@ class PrimeEvictionPolicy {
 
  private:
   DbSlice* db_slice_;
-  int64_t mem_budget_;
+  ssize_t mem_budget_;
+  ssize_t soft_limit_ = 0;
   unsigned evicted_ = 0;
   unsigned checked_ = 0;
   const DbIndex db_indx_;
@@ -90,13 +103,26 @@ class PrimeEvictionPolicy {
 };
 
 class PrimeBumpPolicy {
-public:
+ public:
   // returns true if key can be made less important for eviction (opposite of bump up)
   bool CanBumpDown(const CompactObj& key) const {
     return !key.IsSticky();
   }
 };
 
+bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
+  if (mem_budget_ > soft_limit_)
+    return true;
+
+  DCHECK_LT(tbl.size(), tbl.capacity());
+
+  // We take a conservative stance here -
+  // we estimate how much memory we will take with the current capacity
+  // even though we may currently use less memory.
+  // see https://github.com/dragonflydb/dragonfly/issues/256#issuecomment-1227095503
+  size_t available = tbl.capacity() - tbl.size();
+  return mem_budget_ > int64_t(PrimeTable::kSegBytes + db_slice_->bytes_per_object() * available);
+}
 
 unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& eb, PrimeTable* me) {
   unsigned res = 0;
@@ -136,14 +162,12 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
     if (last_slot_it->first.IsSticky()) {
       return 0;
     }
-    if (last_slot_it->second.HasExpire()) {
-      ExpireTable* expire_tbl = db_slice_->GetTables(db_indx_).second;
-      CHECK_EQ(1u, expire_tbl->Erase(last_slot_it->first));
-    }
-    UpdateStatsOnDeletion(last_slot_it, db_slice_->MutableStats(db_indx_));
+
+    DbTable* table = db_slice_->GetDBTable(db_indx_);
+    EvictItemFun(last_slot_it, table);
+    ++evicted_;
   }
-  CHECK(me->ShiftRight(bucket_it));
-  ++evicted_;
+  me->ShiftRight(bucket_it);
 
   return 1;
 }
@@ -167,9 +191,10 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 48, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 56, "You should update this function with new fields");
 
   ADD(evicted_keys);
+  ADD(hard_evictions);
   ADD(expired_keys);
   ADD(garbage_collected);
   ADD(stash_unloaded);
@@ -186,6 +211,7 @@ DbSlice::DbSlice(uint32_t index, bool caching_mode, EngineShard* owner)
   db_arr_.emplace_back();
   CreateDb(0);
   expire_base_[0] = expire_base_[1] = 0;
+  soft_budget_limit_ = (0.1 * max_memory_limit / shard_set->size());
 }
 
 DbSlice::~DbSlice() {
@@ -299,11 +325,11 @@ pair<PrimeIterator, bool> DbSlice::AddOrFind(DbIndex db_index, string_view key) 
   return make_pair(get<0>(res), get<2>(res));
 }
 
-tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(
-    DbIndex db_index, string_view key) noexcept(false) {
+tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(DbIndex db_index,
+                                                               string_view key) noexcept(false) {
   DCHECK(IsDbValid(db_index));
 
-  auto& db = db_arr_[db_index];
+  DbTable& db = *db_arr_[db_index];
 
   // If we have some registered onchange callbacks, we must know in advance whether its Find or Add.
   if (!change_cb_.empty()) {
@@ -319,8 +345,13 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(
     }
   }
 
-  PrimeEvictionPolicy evp{db_index, bool(caching_mode_), this,
-                          int64_t(memory_budget_ - key.size())};
+  PrimeEvictionPolicy evp{db_index, bool(caching_mode_), int64_t(memory_budget_ - key.size()),
+                          ssize_t(soft_budget_limit_), this};
+
+  // If we are over limit in non-cache scenario, just be conservative and throw.
+  if (!caching_mode_ && evp.mem_budget() < 0) {
+    throw bad_alloc();
+  }
 
   // Fast-path if change_cb_ is empty so we Find or Add using
   // the insert operation: twice more efficient.
@@ -330,22 +361,31 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(
 
   // I try/catch just for sake of having a convenient place to set a breakpoint.
   try {
-    tie(it, inserted) = db->prime.Insert(std::move(co_key), PrimeValue{}, evp);
+    tie(it, inserted) = db.prime.Insert(std::move(co_key), PrimeValue{}, evp);
   } catch (bad_alloc& e) {
     throw e;
   }
 
-  if (inserted) {  // new entry
-    db->stats.inline_keys += it->first.IsInline();
-    db->stats.obj_memory_usage += it->first.MallocUsed();
+  size_t evicted_obj_bytes = 0;
 
-    events_.garbage_collected = db->prime.garbage_collected();
-    events_.stash_unloaded = db->prime.stash_unloaded();
+  // We may still reach the state when our memory usage is above the limit even if we
+  // do not add new segments. For example, we have half full segments
+  // and we add new objects or update the existing ones and our memory usage grows.
+  if (evp.mem_budget() < 0) {
+    evicted_obj_bytes = EvictObjects(-evp.mem_budget(), it, &db);
+  }
+
+  if (inserted) {  // new entry
+    db.stats.inline_keys += it->first.IsInline();
+    db.stats.obj_memory_usage += it->first.MallocUsed();
+
+    events_.garbage_collected = db.prime.garbage_collected();
+    events_.stash_unloaded = db.prime.stash_unloaded();
     events_.evicted_keys += evp.evicted();
     events_.garbage_checked += evp.checked();
 
     it.SetVersion(NextVersion());
-    memory_budget_ = evp.mem_budget();
+    memory_budget_ = evp.mem_budget() + evicted_obj_bytes;
 
     return make_tuple(it, ExpireIterator{}, true);
   }
@@ -354,9 +394,11 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(
 
   DCHECK(IsValid(existing));
 
+  memory_budget_ += evicted_obj_bytes;
+
   ExpireIterator expire_it;
   if (existing->second.HasExpire()) {
-    expire_it = db->expire.Find(existing->first);
+    expire_it = db.expire.Find(existing->first);
     CHECK(IsValid(expire_it));
 
     // TODO: to implement the incremental update of expiry values using multi-generation
@@ -364,17 +406,17 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(
     uint64_t delta_ms = now_ms_ - expire_base_[0];
 
     if (expire_it->second.duration_ms() <= delta_ms) {
-      db->expire.Erase(expire_it);
+      db.expire.Erase(expire_it);
 
       if (existing->second.HasFlag()) {
-        db->mcflag.Erase(existing->first);
+        db.mcflag.Erase(existing->first);
       }
 
       // Keep the entry but reset the object.
       size_t value_heap_size = existing->second.MallocUsed();
-      db->stats.obj_memory_usage -= value_heap_size;
+      db.stats.obj_memory_usage -= value_heap_size;
       if (existing->second.ObjType() == OBJ_STRING)
-        db->stats.obj_memory_usage -= value_heap_size;
+        db.stats.obj_memory_usage -= value_heap_size;
 
       existing->second.Reset();
       events_.expired_keys++;
@@ -390,13 +432,6 @@ void DbSlice::ActivateDb(DbIndex db_ind) {
   if (db_arr_.size() <= db_ind)
     db_arr_.resize(db_ind + 1);
   CreateDb(db_ind);
-}
-
-void DbSlice::CreateDb(DbIndex index) {
-  auto& db = db_arr_[index];
-  if (!db) {
-    db.reset(new DbTable{owner_->memory_resource()});
-  }
 }
 
 bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
@@ -490,14 +525,14 @@ uint32_t DbSlice::GetMCFlag(DbIndex db_ind, const PrimeKey& key) const {
 
 PrimeIterator DbSlice::AddNew(DbIndex db_ind, string_view key, PrimeValue obj,
                               uint64_t expire_at_ms) noexcept(false) {
-  auto [it, added] = AddOrFind(db_ind, key, std::move(obj), expire_at_ms);
+  auto [it, added] = AddEntry(db_ind, key, std::move(obj), expire_at_ms);
   CHECK(added);
 
   return it;
 }
 
-pair<PrimeIterator, bool> DbSlice::AddOrFind(DbIndex db_ind, string_view key, PrimeValue obj,
-                                             uint64_t expire_at_ms) noexcept(false) {
+pair<PrimeIterator, bool> DbSlice::AddEntry(DbIndex db_ind, string_view key, PrimeValue obj,
+                                            uint64_t expire_at_ms) noexcept(false) {
   DCHECK_LT(db_ind, db_arr_.size());
   DCHECK(!obj.IsRef());
 
@@ -666,7 +701,7 @@ void DbSlice::UnregisterOnChange(uint64_t id) {
   LOG(DFATAL) << "Could not find " << id << " to unregister";
 }
 
-auto DbSlice::DeleteExpired(DbIndex db_ind, unsigned count) -> DeleteExpiredStats {
+auto DbSlice::DeleteExpiredStep(DbIndex db_ind, unsigned count) -> DeleteExpiredStats {
   auto& db = *db_arr_[db_ind];
   DeleteExpiredStats result;
 
@@ -697,5 +732,101 @@ auto DbSlice::DeleteExpired(DbIndex db_ind, unsigned count) -> DeleteExpiredStat
 
   return result;
 }
+
+// TODO: Design a better background evicting heuristic.
+void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes) {
+  if (!caching_mode_)
+    return;
+}
+
+void DbSlice::CreateDb(DbIndex db_ind) {
+  auto& db = db_arr_[db_ind];
+  if (!db) {
+    db.reset(new DbTable{owner_->memory_resource()});
+  }
+}
+
+// "it" is the iterator that we just added/updated and it should not be deleted.
+// "table" is the instance where we should delete the objects from.
+size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* table) {
+  PrimeTable::Segment_t* segment = table->prime.GetSegment(it.segment_id());
+  DCHECK(segment);
+
+  constexpr unsigned kNumStashBuckets =
+      PrimeTable::Segment_t::kTotalBuckets - PrimeTable::Segment_t::kNumBuckets;
+
+  PrimeTable::bucket_iterator it2(it);
+  unsigned evicted = 0;
+  bool evict_succeeded = false;
+
+  EngineShard* shard = owner_;
+  size_t used_memory_start = shard->UsedMemory();
+
+  auto freed_memory_fun = [&] {
+    size_t current = shard->UsedMemory();
+    return current < used_memory_start ? used_memory_start - current : 0;
+  };
+
+  for (unsigned i = 0; !evict_succeeded && i < kNumStashBuckets; ++i) {
+    unsigned stash_bid = i + PrimeTable::Segment_t::kNumBuckets;
+    const auto& bucket = segment->GetBucket(stash_bid);
+    if (bucket.IsEmpty())
+      continue;
+
+    for (int slot_id = PrimeTable::Segment_t::kNumSlots - 1; slot_id >= 0; --slot_id) {
+      if (!bucket.IsBusy(slot_id))
+        continue;
+
+      auto evict_it = table->prime.GetIterator(it.segment_id(), stash_bid, slot_id);
+      // skip the iterator that we must keep or the sticky items.
+      if (evict_it == it || evict_it->first.IsSticky())
+        continue;
+
+      EvictItemFun(evict_it, table);
+      ++evicted;
+      if (freed_memory_fun() > memory_to_free) {
+        evict_succeeded = true;
+        break;
+      }
+    }
+  }
+
+  if (evicted) {
+    DVLOG(1) << "Evicted " << evicted << " stashed items, freed " << freed_memory_fun() << " bytes";
+  }
+
+  // Try normal buckets now. We iterate from largest slot to smallest across the whole segment.
+  for (int slot_id = PrimeTable::Segment_t::kNumSlots - 1; !evict_succeeded && slot_id >= 0;
+       --slot_id) {
+    for (unsigned i = 0; i < PrimeTable::Segment_t::kNumBuckets; ++i) {
+      unsigned bid = (it.bucket_id() + i) % PrimeTable::Segment_t::kNumBuckets;
+      const auto& bucket = segment->GetBucket(bid);
+      if (!bucket.IsBusy(slot_id))
+        continue;
+
+      auto evict_it = table->prime.GetIterator(it.segment_id(), bid, slot_id);
+      if (evict_it == it || evict_it->first.IsSticky())
+        continue;
+
+      EvictItemFun(evict_it, table);
+      ++evicted;
+
+      if (freed_memory_fun() > memory_to_free) {
+        evict_succeeded = true;
+        break;
+      }
+    }
+  }
+
+  if (evicted) {
+    DVLOG(1) << "Evicted total: " << evicted << " items, freed " << freed_memory_fun() << " bytes "
+             << "success: " << evict_succeeded;
+
+    events_.evicted_keys += evicted;
+    events_.hard_evictions += evicted;
+  }
+
+  return freed_memory_fun();
+};
 
 }  // namespace dfly

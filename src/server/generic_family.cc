@@ -218,7 +218,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor,
   VLOG(1) << "PrimeTable " << db_slice.shard_id() << "/" << op_args.db_ind << " has "
           << db_slice.DbSize(op_args.db_ind);
 
-  PrimeTable::cursor cur = *cursor;
+  PrimeTable::Cursor cur = *cursor;
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_ind);
   do {
     cur = prime_table->Traverse(

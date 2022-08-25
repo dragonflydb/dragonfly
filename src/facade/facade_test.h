@@ -74,6 +74,14 @@ inline bool operator!=(const RespExpr& left, std::string_view s) {
   return !(left == s);
 }
 
+inline bool operator==(std::string_view s, const RespExpr& right) {
+  return right == s;
+}
+
+inline bool operator!=(std::string_view s, const RespExpr& right) {
+  return !(right == s);
+}
+
 void PrintTo(const RespExpr::Vec& vec, std::ostream* os);
 
 }  // namespace facade

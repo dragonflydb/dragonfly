@@ -165,6 +165,9 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
   dfly_cmd_.reset(new DflyCmd(main_listener, journal_.get()));
 
   pb_task_ = shard_set->pool()->GetNextProactor();
+
+  // Unlike EngineShard::Heartbeat that runs independently in each shard thread,
+  // this callback runs in a single thread and it aggregates globally stats from all the shards.
   auto cache_cb = [] {
     uint64_t sum = 0;
     const auto& stats = EngineShardSet::GetCachedStats();
@@ -864,6 +867,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("rejected_connections", -1);
     append("expired_keys", m.events.expired_keys);
     append("evicted_keys", m.events.evicted_keys);
+    append("hard_evictions", m.events.hard_evictions);
     append("garbage_checked", m.events.garbage_checked);
     append("garbage_collected", m.events.garbage_collected);
     append("bump_ups", m.events.bumpups);
