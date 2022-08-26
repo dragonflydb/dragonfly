@@ -75,7 +75,7 @@ void SliceSnapshot::SerializeSingleEntry(DbIndex db_indx, const PrimeKey& pk, co
 void SliceSnapshot::FiberFunc() {
   this_fiber::properties<FiberProps>().set_name(
       absl::StrCat("SliceSnapshot", ProactorBase::GetIndex()));
-  PrimeTable::cursor cursor;
+  PrimeTable::Cursor cursor;
 
   for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
     if (!db_array_[db_indx])
@@ -90,7 +90,7 @@ void SliceSnapshot::FiberFunc() {
     mu_.unlock();
 
     do {
-      PrimeTable::cursor next = pt->Traverse(cursor, [this](auto it) { this->SaveCb(move(it)); });
+      PrimeTable::Cursor next = pt->Traverse(cursor, [this](auto it) { this->SaveCb(move(it)); });
 
       cursor = next;
 

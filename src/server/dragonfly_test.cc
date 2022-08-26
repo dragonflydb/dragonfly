@@ -502,20 +502,26 @@ TEST_F(DflyEngineTest, Bug207) {
 TEST_F(DflyEngineTest, StickyEviction) {
   shard_set->TEST_EnableHeartBeat();
   shard_set->TEST_EnableCacheMode();
-  max_memory_limit = 0;
+  max_memory_limit = 300000;
 
   string tmp_val(100, '.');
 
   ssize_t failed = -1;
   for (ssize_t i = 0; i < 5000; ++i) {
-    auto set_resp = Run({"set", StrCat("key", i), tmp_val});
-    auto stick_resp = Run({"stick", StrCat("key", i)});
+    string key = StrCat("volatile", i);
+    ASSERT_EQ("OK", Run({"set", key, tmp_val}));
+  }
+
+  for (ssize_t i = 0; i < 5000; ++i) {
+    string key = StrCat("key", i);
+    auto set_resp = Run({"set", key, tmp_val});
+    auto stick_resp = Run({"stick", key});
 
     if (set_resp != "OK") {
       failed = i;
       break;
     }
-    ASSERT_THAT(stick_resp, IntArg(1));
+    ASSERT_THAT(stick_resp, IntArg(1)) << i;
   }
 
   ASSERT_GE(failed, 0);

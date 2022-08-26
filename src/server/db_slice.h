@@ -40,6 +40,9 @@ struct DbStats : public DbTableStats {
 struct SliceEvents {
   // Number of eviction events.
   size_t evicted_keys = 0;
+
+  // evictions that were performed when we have a negative memory budget.
+  size_t hard_evictions = 0;
   size_t expired_keys = 0;
   size_t garbage_checked = 0;
   size_t garbage_collected = 0;
@@ -83,6 +86,7 @@ class DbSlice {
   // Activates `db_ind` database if it does not exist (see ActivateDb below).
   void Reserve(DbIndex db_ind, size_t key_size);
 
+  // Returns statistics for the whole db slice. A bit heavy operation.
   Stats GetStats() const;
 
   //! UpdateExpireClock updates the expire clock for this db slice.
@@ -95,12 +99,19 @@ class DbSlice {
     expire_base_[generation & 1] = now;
   }
 
-  void SetMemoryBudget(int64_t budget) {
+  // From time to time DbSlice is set with a new set of params needed to estimate its
+  // memory usage.
+  void SetCachedParams(int64_t budget, size_t bytes_per_object) {
     memory_budget_ = budget;
+    bytes_per_object_ = bytes_per_object;
   }
 
   ssize_t memory_budget() const {
     return memory_budget_;
+  }
+
+  size_t bytes_per_object() const {
+    return bytes_per_object_;
   }
 
   // returns absolute time of the expiration.
@@ -136,8 +147,14 @@ class DbSlice {
   // Returns second=true if insertion took place, false otherwise.
   // expire_at_ms equal to 0 - means no expiry.
   // throws: bad_alloc is insertion could not happen due to out of memory.
-  std::pair<PrimeIterator, bool> AddOrFind(DbIndex db_ind, std::string_view key, PrimeValue obj,
-                                           uint64_t expire_at_ms) noexcept(false);
+  std::pair<PrimeIterator, bool> AddEntry(DbIndex db_ind, std::string_view key, PrimeValue obj,
+                                          uint64_t expire_at_ms) noexcept(false);
+
+  // Adds a new entry. Requires: key does not exist in this slice.
+  // Returns the iterator to the newly added entry.
+  // throws: bad_alloc is insertion could not happen due to out of memory.
+  PrimeIterator AddNew(DbIndex db_ind, std::string_view key, PrimeValue obj,
+                       uint64_t expire_at_ms) noexcept(false);
 
   // Either adds or removes (if at == 0) expiry. Returns true if a change was made.
   // Does not change expiry if at != 0 and expiry already exists.
@@ -145,12 +162,6 @@ class DbSlice {
 
   void SetMCFlag(DbIndex db_ind, PrimeKey key, uint32_t flag);
   uint32_t GetMCFlag(DbIndex db_ind, const PrimeKey& key) const;
-
-  // Adds a new entry. Requires: key does not exist in this slice.
-  // Returns the iterator to the newly added entry.
-  // throws: bad_alloc is insertion could not happen due to out of memory.
-  PrimeIterator AddNew(DbIndex db_ind, std::string_view key, PrimeValue obj,
-                       uint64_t expire_at_ms) noexcept(false);
 
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);
@@ -191,6 +202,10 @@ class DbSlice {
 
   bool IsDbValid(DbIndex id) const {
     return id < db_arr_.size() && bool(db_arr_[id]);
+  }
+
+  DbTable* GetDBTable(DbIndex id) {
+    return db_arr_[id].get();
   }
 
   std::pair<PrimeTable*, ExpireTable*> GetTables(DbIndex id) {
@@ -235,7 +250,8 @@ class DbSlice {
   };
 
   // Deletes some amount of possible expired items.
-  DeleteExpiredStats DeleteExpired(DbIndex db_indx, unsigned count);
+  DeleteExpiredStats DeleteExpiredStep(DbIndex db_indx, unsigned count);
+  void FreeMemWithEvictionStep(DbIndex db_indx, size_t increase_goal_bytes);
 
   const DbTableArray& databases() const {
     return db_arr_;
@@ -247,6 +263,7 @@ class DbSlice {
 
  private:
   void CreateDb(DbIndex index);
+  size_t EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* table);
 
   uint64_t NextVersion() {
     return version_++;
@@ -262,6 +279,8 @@ class DbSlice {
 
   uint64_t version_ = 1;  // Used to version entries in the PrimeTable.
   ssize_t memory_budget_ = SSIZE_MAX;
+  size_t bytes_per_object_ = 0;
+  size_t soft_budget_limit_ = 0;
 
   mutable SliceEvents events_;  // we may change this even for const operations.
 

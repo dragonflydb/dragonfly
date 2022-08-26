@@ -69,7 +69,7 @@ class DashTable : public detail::DashTableBase {
 
   using const_bucket_iterator = Iterator<true, true>;
   using bucket_iterator = Iterator<false, true>;
-  using cursor = detail::DashCursor;
+  using Cursor = detail::DashCursor;
 
   struct HotspotBuckets {
     static constexpr size_t kRegularBuckets = 4;
@@ -193,6 +193,11 @@ class DashTable : public detail::DashTableBase {
     return unique_segments_ * SegmentType::capacity();
   }
 
+  // Overall capacity of the table (including stash buckets).
+  size_t capacity() const {
+    return bucket_count();
+  }
+
   double load_factor() const {
     return double(size()) / (SegmentType::capacity() * unique_segments());
   }
@@ -206,17 +211,27 @@ class DashTable : public detail::DashTableBase {
   // during the traversal, then Traverse() will eventually reach it even when the
   // table shrinks or grows.
   // Returns: cursor that is guaranteed to be less than 2^40.
-  template <typename Cb> cursor Traverse(cursor curs, Cb&& cb);
+  template <typename Cb> Cursor Traverse(Cursor curs, Cb&& cb);
 
   // Takes an iterator pointing to an entry in a dash bucket and traverses all bucket's entries by
   // calling cb(iterator) for every non-empty slot. The iteration goes over a physical bucket.
   template <typename Cb> void TraverseBucket(const_iterator it, Cb&& cb);
 
-  static const_bucket_iterator bucket_it(const_iterator it) {
+  // Discards slots information.
+  static const_bucket_iterator BucketIt(const_iterator it) {
     return const_bucket_iterator{it.owner_, it.seg_id_, it.bucket_id_, 0};
   }
 
-  const_bucket_iterator CursorToBucketIt(cursor c) const {
+  // Seeks to the first occupied slot if exists in the bucket.
+  const_bucket_iterator BucketIt(unsigned segment_id, unsigned bucket_id) const {
+    return const_bucket_iterator{this, segment_id, uint8_t(bucket_id)};
+  }
+
+  iterator GetIterator(unsigned segment_id, unsigned bucket_id, unsigned slot_id) {
+    return iterator{this, segment_id, uint8_t(bucket_id), uint8_t(slot_id)};
+  }
+
+  const_bucket_iterator CursorToBucketIt(Cursor c) const {
     return const_bucket_iterator{this, c.segment_id(global_depth_), c.bucket_id(), 0};
   }
 
@@ -240,8 +255,7 @@ class DashTable : public detail::DashTableBase {
   // Returns true if an element was deleted i.e the rightmost slot was busy.
   bool ShiftRight(bucket_iterator it);
 
-  template<typename BumpPolicy>
-  iterator BumpUp(iterator it, const BumpPolicy& bp) {
+  template <typename BumpPolicy> iterator BumpUp(iterator it, const BumpPolicy& bp) {
     SegmentIterator seg_it =
         segment_[it.seg_id_]->BumpUp(it.bucket_id_, it.slot_id_, DoHash(it->first), bp);
 
@@ -642,12 +656,12 @@ template <typename _Key, typename _Value, typename Policy>
 template <typename U>
 auto DashTable<_Key, _Value, Policy>::Find(U&& key) -> iterator {
   uint64_t key_hash = DoHash(key);
-  size_t x = SegmentId(key_hash);
-  const auto* target = segment_[x];
+  uint32_t segid = SegmentId(key_hash);
+  const auto* target = segment_[segid];
 
   auto seg_it = target->FindIt(key, key_hash, EqPred());
   if (seg_it.found()) {
-    return iterator{this, uint32_t(x), seg_it.index, seg_it.slot};
+    return iterator{this, segid, seg_it.index, seg_it.slot};
   }
   return iterator{};
 }
@@ -839,7 +853,7 @@ void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id) {
 
 template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
-auto DashTable<_Key, _Value, Policy>::Traverse(cursor curs, Cb&& cb) -> cursor {
+auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
   if (curs.bucket_id() >= kLogicalBucketNum)  // sanity.
     return 0;
 
@@ -868,7 +882,7 @@ auto DashTable<_Key, _Value, Policy>::Traverse(cursor curs, Cb&& cb) -> cursor {
     }
   } while (!fetched);
 
-  return cursor{global_depth_, sid, bid};
+  return Cursor{global_depth_, sid, bid};
 }
 
 template <typename _Key, typename _Value, typename Policy>

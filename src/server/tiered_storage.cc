@@ -329,7 +329,7 @@ void TieredStorage::FlushPending() {
   for (size_t i = 0; i < canonic_req.size(); ++i) {
     DbIndex db_ind = canonic_req[i].first;
     uint64_t cursor_val = canonic_req[i].second;
-    PrimeTable::cursor curs(cursor_val);
+    PrimeTable::Cursor curs(cursor_val);
     db_slice_.GetTables(db_ind).first->Traverse(curs, tr_cb);
 
     for (unsigned j = 0; j < batch_len; ++j) {
