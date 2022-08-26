@@ -51,6 +51,11 @@ struct LastSaveInfo {
   std::vector<std::pair<std::string_view, size_t>> freq_map;  // RDB_TYPE_xxx -> count mapping.
 };
 
+struct SnapshotSpec {
+  std::string hour_spec;
+  std::string minute_spec;
+};
+
 class ServerFamily {
  public:
   ServerFamily(Service* service);
@@ -117,7 +122,9 @@ class ServerFamily {
 
   void Load(const std::string& file_name);
 
-  boost::fibers::fiber load_fiber_;
+  void SnapshotScheduling(const SnapshotSpec &&time);
+
+  boost::fibers::fiber load_fiber_, snapshot_fiber_;
 
   uint32_t stats_caching_task_ = 0;
   Service& service_;
@@ -137,6 +144,8 @@ class ServerFamily {
 
   std::shared_ptr<LastSaveInfo> lsinfo_;  // protected by save_mu_;
   std::atomic_bool is_saving_{false};
+
+  util::fibers_ext::Done is_snapshot_done_;
 };
 
 }  // namespace dfly

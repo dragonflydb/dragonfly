@@ -11,7 +11,9 @@
 #include <mimalloc-types.h>
 #include <sys/resource.h>
 
+#include <chrono>
 #include <filesystem>
+#include <optional>
 
 extern "C" {
 #include "redis/redis_aux.h"
@@ -47,6 +49,8 @@ using namespace std;
 ABSL_FLAG(string, dir, "", "working directory");
 ABSL_FLAG(string, dbfilename, "dump", "the filename to save/load the DB");
 ABSL_FLAG(string, requirepass, "", "password for AUTH authentication");
+ABSL_FLAG(string, save_schedule, "",
+          "glob spec for the UTC time to save a snapshot which matches HH:MM 24h time");
 
 ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
@@ -147,6 +151,80 @@ class LinuxWriteWrapper : public io::WriteFile {
 
 }  // namespace
 
+bool IsValidSaveScheduleNibble(string_view time, unsigned int max) {
+  /*
+   * a nibble is valid iff there exists one time that matches the pattern
+   * and that time is <= max. For any wildcard the minimum value is 0.
+   * Therefore the minimum time the pattern can match is the time with
+   * all *s replaced with 0s. If this time is > max all other times that
+   * match the pattern are > max and the pattern is invalid. Otherwise
+   * there exists at least one valid nibble specified by this pattern
+   *
+   * Note the edge case of "*" is equivalent to "**". While using this
+   * approach "*" and "**" both map to 0.
+   */
+  unsigned int min_match = 0;
+  for (size_t i = 0; i < time.size(); ++i) {
+    // check for valid characters
+    if (time[i] != '*' && (time[i] < '0' || time[i] > '9')) {
+      return false;
+    }
+    min_match *= 10;
+    min_match += time[i] == '*' ? 0 : time[i] - '0';
+  }
+
+  return min_match <= max;
+}
+
+std::optional<SnapshotSpec> ParseSaveSchedule(string_view time) {
+  if (time.length() < 3 || time.length() > 5) {
+    return std::nullopt;
+  }
+
+  size_t separator_idx = time.find(':');
+  // the time cannot start with ':' and it must be present in the first 3 characters of any time
+  if (separator_idx == 0 || separator_idx >= 3) {
+    return std::nullopt;
+  }
+
+  SnapshotSpec spec{string(time.substr(0, separator_idx)), string(time.substr(separator_idx + 1))};
+  // a minute should be 2 digits as it is zero padded, unless it is a '*' in which case this
+  // greedily can make up both digits
+  if (spec.minute_spec != "*" && spec.minute_spec.length() != 2) {
+    return std::nullopt;
+  }
+
+  return IsValidSaveScheduleNibble(spec.hour_spec, 23) &&
+                 IsValidSaveScheduleNibble(spec.minute_spec, 59)
+             ? std::optional<SnapshotSpec>(spec)
+             : std::nullopt;
+}
+
+bool DoesTimeNibbleMatchSpecifier(string_view time_spec, unsigned int current_time) {
+  // single greedy wildcard matches everything
+  if (time_spec == "*") {
+    return true;
+  }
+
+  for (int i = time_spec.length() - 1; i >= 0; --i) {
+    // if the current digit is not a wildcard and it does not match the digit in the current time it
+    // does not match
+    if (time_spec[i] != '*' && (current_time % 10) != (time_spec[i] - '0')) {
+      return false;
+    }
+    current_time /= 10;
+  }
+
+  return current_time == 0;
+}
+
+bool DoesTimeMatchSpecifier(const SnapshotSpec& spec, time_t now) {
+  unsigned hour = (now / 3600) % 24;
+  unsigned min = (now / 60) % 60;
+  return DoesTimeNibbleMatchSpecifier(spec.hour_spec, hour) &&
+         DoesTimeNibbleMatchSpecifier(spec.minute_spec, min);
+}
+
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
   start_time_ = time(NULL);
   lsinfo_ = make_shared<LastSaveInfo>();
@@ -199,6 +277,19 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
   if (!load_path.empty()) {
     Load(load_path);
   }
+
+  string save_time = GetFlag(FLAGS_save_schedule);
+  if (!save_time.empty()) {
+    std::optional<SnapshotSpec> spec = ParseSaveSchedule(save_time);
+    if (spec) {
+      snapshot_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
+          [save_spec = std::move(spec.value()), this] {
+            SnapshotScheduling(std::move(save_spec));
+          });
+    } else {
+      LOG(WARNING) << "Invalid snapshot time specifier " << save_time;
+    }
+  }
 }
 
 void ServerFamily::Shutdown() {
@@ -206,6 +297,11 @@ void ServerFamily::Shutdown() {
 
   if (load_fiber_.joinable())
     load_fiber_.join();
+
+  is_snapshot_done_.Notify();
+  if (snapshot_fiber_.joinable()) {
+    snapshot_fiber_.join();
+  }
 
   pb_task_->Await([this] {
     pb_task_->CancelPeriodic(stats_caching_task_);
@@ -262,6 +358,44 @@ void ServerFamily::Load(const std::string& load_path) {
     auto ec = LoadRdb(load_path);
     LOG_IF(ERROR, ec) << "Error loading file " << ec.message();
   });
+}
+
+void ServerFamily::SnapshotScheduling(const SnapshotSpec&& spec) {
+  const auto loop_sleep_time = std::chrono::seconds(20);
+  while (true) {
+    if (is_snapshot_done_.WaitFor(loop_sleep_time)) {
+      break;
+    }
+
+    time_t now = std::time(NULL);
+
+    if (!DoesTimeMatchSpecifier(spec, now)) {
+      continue;
+    }
+
+    // if it matches check the last save time, if it is the same minute don't save another snapshot
+    time_t last_save;
+    {
+      lock_guard lk(save_mu_);
+      last_save = lsinfo_->save_time;
+    }
+
+    if ((last_save / 60) == (now / 60)) {
+      continue;
+    }
+
+    // do the save
+    string err_details;
+    error_code ec;
+    const CommandId* cid = service().FindCmd("SAVE");
+    CHECK_NOTNULL(cid);
+    boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
+    trans->InitByArgs(0, {});
+    ec = DoSave(trans.get(), &err_details);
+    if (ec) {
+      LOG(WARNING) << "Failed to perform snapshot " << err_details;
+    }
+  }
 }
 
 error_code ServerFamily::LoadRdb(const std::string& rdb_file) {

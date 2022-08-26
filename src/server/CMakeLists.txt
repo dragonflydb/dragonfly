@@ -30,6 +30,7 @@ cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/redis6_small.rd
          testdata/redis6_stream.rdb LABELS DFLY)
 cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
 cxx_test(blocking_controller_test dragonfly_lib LABELS DFLY)
+cxx_test(snapshot_test dragonfly_lib LABELS DFLY)
 
 
 add_custom_target(check_dfly WORKING_DIRECTORY .. COMMAND ctest -L DFLY)
