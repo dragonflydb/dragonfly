@@ -24,6 +24,7 @@ enum class OpStatus : uint16_t {
   BUSY_GROUP,
   STREAM_ID_SMALL,
   ENTRIES_ADDED_SMALL,
+  INVALID_NUMERIC_RESULT,
 };
 
 class OpResultBase {

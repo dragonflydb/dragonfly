@@ -11,8 +11,6 @@ extern "C" {
 #include "redis/zset.h"
 }
 
-#include <absl/strings/charconv.h>
-
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "facade/error.h"
@@ -531,22 +529,6 @@ void IntervalVisitor::AddResult(const uint8_t* vstr, unsigned vlen, long long vl
   }
 }
 
-bool ParseScore(string_view src, double* score) {
-  if (src.empty())
-    return false;
-
-  if (src == "-inf") {
-    *score = -HUGE_VAL;
-  } else if (src == "+inf") {
-    *score = HUGE_VAL;
-  } else {
-    absl::from_chars_result result = absl::from_chars(src.data(), src.end(), *score);
-    if (int(result.ec) != 0 || result.ptr != src.end() || isnan(*score))
-      return false;
-  }
-  return true;
-};
-
 bool ParseBound(string_view src, ZSetFamily::Bound* bound) {
   if (src.empty())
     return false;
@@ -556,7 +538,7 @@ bool ParseBound(string_view src, ZSetFamily::Bound* bound) {
     src.remove_prefix(1);
   }
 
-  return ParseScore(src, &bound->val);
+  return ParseDouble(src, &bound->val);
 }
 
 bool ParseLexBound(string_view src, ZSetFamily::LexBound* bound) {
@@ -956,7 +938,7 @@ void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
     string_view cur_arg = ArgS(args, i);
     double val = 0;
 
-    if (!ParseScore(cur_arg, &val)) {
+    if (!ParseDouble(cur_arg, &val)) {
       VLOG(1) << "Bad score:" << cur_arg << "|";
       return (*cntx)->SendError(kInvalidFloatErr);
     }
@@ -1135,8 +1117,7 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
     if (shard->shard_id() == dest_shard) {
       ZParams zparams;
       zparams.override = true;
-      add_result =
-          OpAdd(t->GetOpArgs(shard), zparams, dest_key, ScoredMemberSpan{smvec}).value();
+      add_result = OpAdd(t->GetOpArgs(shard), zparams, dest_key, ScoredMemberSpan{smvec}).value();
     }
     return OpStatus::OK;
   };
@@ -1419,8 +1400,7 @@ void ZSetFamily::ZUnionStore(CmdArgList args, ConnectionContext* cntx) {
     if (shard->shard_id() == dest_shard) {
       ZParams zparams;
       zparams.override = true;
-      add_result =
-          OpAdd(t->GetOpArgs(shard), zparams, dest_key, ScoredMemberSpan{smvec}).value();
+      add_result = OpAdd(t->GetOpArgs(shard), zparams, dest_key, ScoredMemberSpan{smvec}).value();
     }
     return OpStatus::OK;
   };
@@ -1534,7 +1514,6 @@ void ZSetFamily::ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* 
   string_view member = ArgS(args, 2);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-
     return OpRank(t->GetOpArgs(shard), key, member, reverse);
   };
 
