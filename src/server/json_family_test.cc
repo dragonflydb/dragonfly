@@ -271,15 +271,12 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.a", "1.1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[2.1]");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.e", "1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[2.5]");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.e", "inf"});
-  ASSERT_THAT(resp, ArgType(RespExpr::ERROR));
   EXPECT_THAT(resp, ErrArg("ERR result is not a number"));
 
   json = R"(
@@ -290,15 +287,12 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.e", "1.7e308"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[1.7e+308]");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.e", "1.7e308"});
-  ASSERT_THAT(resp, ArgType(RespExpr::ERROR));
   EXPECT_THAT(resp, ErrArg("ERR result is not a number"));
 
   resp = Run({"JSON.GET", "json", "$.*"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, R"([1,1.7e+308])");
 
   json = R"(
@@ -309,7 +303,6 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.d[*]", "10"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[11,12,13]");
 
   resp = Run({"JSON.GET", "json", "$.d[*]"});
@@ -323,19 +316,15 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.a[*]", "1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[]");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.b[*]", "1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[2]");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.c[*]", "1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[2,3]");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.d[*]", "1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[2,3,4]");
 
   resp = Run({"JSON.GET", "json", "$.*"});
@@ -349,19 +338,15 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.a.*", "1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[]");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.b.*", "1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[2]");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.c.*", "1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[2,3]");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.d.*", "1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[2,3,4]");
 
   resp = Run({"JSON.GET", "json", "$.*"});
@@ -375,19 +360,15 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.a.*", "1"});
-  EXPECT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[null]");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.b.*", "1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[null,2]");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.c.*", "1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[null,null]");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.d.*", "1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[2,null,4]");
 
   resp = Run({"JSON.GET", "json", "$.*"});
@@ -403,7 +384,6 @@ TEST_F(JsonFamilyTest, NumMultBy) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMMULTBY", "json", "$.d[*]", "2"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[2,4,6]");
 
   resp = Run({"JSON.GET", "json", "$.d[*]"});
@@ -417,19 +397,15 @@ TEST_F(JsonFamilyTest, NumMultBy) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMMULTBY", "json", "$.a[*]", "2"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[]");
 
   resp = Run({"JSON.NUMMULTBY", "json", "$.b[*]", "2"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[2]");
 
   resp = Run({"JSON.NUMMULTBY", "json", "$.c[*]", "2"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[2,4]");
 
   resp = Run({"JSON.NUMMULTBY", "json", "$.d[*]", "2"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[2,4,6]");
 
   resp = Run({"JSON.GET", "json", "$.*"});
@@ -443,19 +419,15 @@ TEST_F(JsonFamilyTest, NumMultBy) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMMULTBY", "json", "$.a.*", "2"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[]");
 
   resp = Run({"JSON.NUMMULTBY", "json", "$.b.*", "2"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[2]");
 
   resp = Run({"JSON.NUMMULTBY", "json", "$.c.*", "2"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[2,4]");
 
   resp = Run({"JSON.NUMMULTBY", "json", "$.d.*", "2"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[2,4,6]");
 
   resp = Run({"JSON.GET", "json", "$.*"});
@@ -469,24 +441,19 @@ TEST_F(JsonFamilyTest, NumMultBy) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMMULTBY", "json", "$.a.*", "2"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[null]");
 
   resp = Run({"JSON.NUMMULTBY", "json", "$.b.*", "2"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[null,2]");
 
   resp = Run({"JSON.NUMMULTBY", "json", "$.c.*", "2"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[null,null]");
 
   resp = Run({"JSON.NUMMULTBY", "json", "$.d.*", "2"});
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
   EXPECT_EQ(resp, "[2,null,6]");
 
   resp = Run({"JSON.GET", "json", "$.*"});
   EXPECT_EQ(resp, R"([{"a":"a"},{"a":"a","b":2},{"a":"a","b":"b"},{"a":2,"b":"b","c":6}])");
-  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
 }
 
 }  // namespace dfly

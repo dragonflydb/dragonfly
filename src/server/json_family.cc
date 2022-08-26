@@ -297,6 +297,7 @@ OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key, stri
       double result = arithmetic_op(val.as<double>(), num);
       if (isinf(result)) {
         is_result_overflow = true;
+        return;
       }
 
       if (val.is_double() || has_fractional_part) {

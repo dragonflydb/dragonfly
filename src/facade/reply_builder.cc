@@ -249,6 +249,7 @@ void RedisReplyBuilder::SendError(OpStatus status) {
       break;
     case OpStatus::INVALID_NUMERIC_RESULT:
       SendError(kInvalidNumericResult);
+      break;
     default:
       LOG(ERROR) << "Unsupported status " << status;
       SendError("Internal error");
