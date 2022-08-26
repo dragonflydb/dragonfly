@@ -112,6 +112,7 @@ inline void ToLower(const MutableSlice* val) {
 }
 
 bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes);
+bool ParseDouble(std::string_view src, double* value);
 const char* ObjTypeName(int type);
 
 const char* RdbTypeName(unsigned type);

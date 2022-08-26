@@ -262,4 +262,198 @@ TEST_F(JsonFamilyTest, Toggle) {
   EXPECT_EQ(resp, R"([true,false,1,null,"foo",[],{}])");
 }
 
+TEST_F(JsonFamilyTest, NumIncrBy) {
+  string json = R"(
+    {"e":1.5,"a":1}
+  )";
+
+  auto resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMINCRBY", "json", "$.a", "1.1"});
+  EXPECT_EQ(resp, "[2.1]");
+
+  resp = Run({"JSON.NUMINCRBY", "json", "$.e", "1"});
+  EXPECT_EQ(resp, "[2.5]");
+
+  resp = Run({"JSON.NUMINCRBY", "json", "$.e", "inf"});
+  EXPECT_THAT(resp, ErrArg("ERR result is not a number"));
+
+  json = R"(
+    {"e":1.5,"a":1}
+  )";
+
+  resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMINCRBY", "json", "$.e", "1.7e308"});
+  EXPECT_EQ(resp, "[1.7e+308]");
+
+  resp = Run({"JSON.NUMINCRBY", "json", "$.e", "1.7e308"});
+  EXPECT_THAT(resp, ErrArg("ERR result is not a number"));
+
+  resp = Run({"JSON.GET", "json", "$.*"});
+  EXPECT_EQ(resp, R"([1,1.7e+308])");
+
+  json = R"(
+    {"a":[], "b":[1], "c":[1,2], "d":[1,2,3]}
+  )";
+
+  resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMINCRBY", "json", "$.d[*]", "10"});
+  EXPECT_EQ(resp, "[11,12,13]");
+
+  resp = Run({"JSON.GET", "json", "$.d[*]"});
+  EXPECT_EQ(resp, "[11,12,13]");
+
+  json = R"(
+    {"a":[], "b":[1], "c":[1,2], "d":[1,2,3]}
+  )";
+
+  resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMINCRBY", "json", "$.a[*]", "1"});
+  EXPECT_EQ(resp, "[]");
+
+  resp = Run({"JSON.NUMINCRBY", "json", "$.b[*]", "1"});
+  EXPECT_EQ(resp, "[2]");
+
+  resp = Run({"JSON.NUMINCRBY", "json", "$.c[*]", "1"});
+  EXPECT_EQ(resp, "[2,3]");
+
+  resp = Run({"JSON.NUMINCRBY", "json", "$.d[*]", "1"});
+  EXPECT_EQ(resp, "[2,3,4]");
+
+  resp = Run({"JSON.GET", "json", "$.*"});
+  EXPECT_EQ(resp, R"([[],[2],[2,3],[2,3,4]])");
+
+  json = R"(
+    {"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}, "d":{"a":1, "b":2, "c":3}}
+  )";
+
+  resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMINCRBY", "json", "$.a.*", "1"});
+  EXPECT_EQ(resp, "[]");
+
+  resp = Run({"JSON.NUMINCRBY", "json", "$.b.*", "1"});
+  EXPECT_EQ(resp, "[2]");
+
+  resp = Run({"JSON.NUMINCRBY", "json", "$.c.*", "1"});
+  EXPECT_EQ(resp, "[2,3]");
+
+  resp = Run({"JSON.NUMINCRBY", "json", "$.d.*", "1"});
+  EXPECT_EQ(resp, "[2,3,4]");
+
+  resp = Run({"JSON.GET", "json", "$.*"});
+  EXPECT_EQ(resp, R"([{},{"a":2},{"a":2,"b":3},{"a":2,"b":3,"c":4}])");
+
+  json = R"(
+    {"a":{"a":"a"}, "b":{"a":"a", "b":1}, "c":{"a":"a", "b":"b"}, "d":{"a":1, "b":"b", "c":3}}
+  )";
+
+  resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMINCRBY", "json", "$.a.*", "1"});
+  EXPECT_EQ(resp, "[null]");
+
+  resp = Run({"JSON.NUMINCRBY", "json", "$.b.*", "1"});
+  EXPECT_EQ(resp, "[null,2]");
+
+  resp = Run({"JSON.NUMINCRBY", "json", "$.c.*", "1"});
+  EXPECT_EQ(resp, "[null,null]");
+
+  resp = Run({"JSON.NUMINCRBY", "json", "$.d.*", "1"});
+  EXPECT_EQ(resp, "[2,null,4]");
+
+  resp = Run({"JSON.GET", "json", "$.*"});
+  EXPECT_EQ(resp, R"([{"a":"a"},{"a":"a","b":2},{"a":"a","b":"b"},{"a":2,"b":"b","c":4}])");
+}
+
+TEST_F(JsonFamilyTest, NumMultBy) {
+  string json = R"(
+    {"a":[], "b":[1], "c":[1,2], "d":[1,2,3]}
+  )";
+
+  auto resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMMULTBY", "json", "$.d[*]", "2"});
+  EXPECT_EQ(resp, "[2,4,6]");
+
+  resp = Run({"JSON.GET", "json", "$.d[*]"});
+  EXPECT_EQ(resp, R"([2,4,6])");
+
+  json = R"(
+    {"a":[], "b":[1], "c":[1,2], "d":[1,2,3]}
+  )";
+
+  resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMMULTBY", "json", "$.a[*]", "2"});
+  EXPECT_EQ(resp, "[]");
+
+  resp = Run({"JSON.NUMMULTBY", "json", "$.b[*]", "2"});
+  EXPECT_EQ(resp, "[2]");
+
+  resp = Run({"JSON.NUMMULTBY", "json", "$.c[*]", "2"});
+  EXPECT_EQ(resp, "[2,4]");
+
+  resp = Run({"JSON.NUMMULTBY", "json", "$.d[*]", "2"});
+  EXPECT_EQ(resp, "[2,4,6]");
+
+  resp = Run({"JSON.GET", "json", "$.*"});
+  EXPECT_EQ(resp, R"([[],[2],[2,4],[2,4,6]])");
+
+  json = R"(
+    {"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}, "d":{"a":1, "b":2, "c":3}}
+  )";
+
+  resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMMULTBY", "json", "$.a.*", "2"});
+  EXPECT_EQ(resp, "[]");
+
+  resp = Run({"JSON.NUMMULTBY", "json", "$.b.*", "2"});
+  EXPECT_EQ(resp, "[2]");
+
+  resp = Run({"JSON.NUMMULTBY", "json", "$.c.*", "2"});
+  EXPECT_EQ(resp, "[2,4]");
+
+  resp = Run({"JSON.NUMMULTBY", "json", "$.d.*", "2"});
+  EXPECT_EQ(resp, "[2,4,6]");
+
+  resp = Run({"JSON.GET", "json", "$.*"});
+  EXPECT_EQ(resp, R"([{},{"a":2},{"a":2,"b":4},{"a":2,"b":4,"c":6}])");
+
+  json = R"(
+    {"a":{"a":"a"}, "b":{"a":"a", "b":1}, "c":{"a":"a", "b":"b"}, "d":{"a":1, "b":"b", "c":3}}
+  )";
+
+  resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMMULTBY", "json", "$.a.*", "2"});
+  EXPECT_EQ(resp, "[null]");
+
+  resp = Run({"JSON.NUMMULTBY", "json", "$.b.*", "2"});
+  EXPECT_EQ(resp, "[null,2]");
+
+  resp = Run({"JSON.NUMMULTBY", "json", "$.c.*", "2"});
+  EXPECT_EQ(resp, "[null,null]");
+
+  resp = Run({"JSON.NUMMULTBY", "json", "$.d.*", "2"});
+  EXPECT_EQ(resp, "[2,null,6]");
+
+  resp = Run({"JSON.GET", "json", "$.*"});
+  EXPECT_EQ(resp, R"([{"a":"a"},{"a":"a","b":2},{"a":"a","b":"b"},{"a":2,"b":"b","c":6}])");
+}
+
 }  // namespace dfly

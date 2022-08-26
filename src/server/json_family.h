@@ -13,6 +13,7 @@ class ConnectionContext;
 class CommandRegistry;
 using facade::OpResult;
 using facade::OpStatus;
+using facade::RedisReplyBuilder;
 
 class JsonFamily {
  public:
@@ -25,6 +26,8 @@ class JsonFamily {
   static void ObjLen(CmdArgList args, ConnectionContext* cntx);
   static void ArrLen(CmdArgList args, ConnectionContext* cntx);
   static void Toggle(CmdArgList args, ConnectionContext* cntx);
+  static void NumIncrBy(CmdArgList args, ConnectionContext* cntx);
+  static void NumMultBy(CmdArgList args, ConnectionContext* cntx);
 };
 
 }  // namespace dfly

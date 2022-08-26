@@ -4,6 +4,7 @@
 
 #include "server/common.h"
 
+#include <absl/strings/charconv.h>
 #include <absl/strings/str_cat.h>
 #include <mimalloc.h>
 
@@ -159,6 +160,22 @@ bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes) {
   *num_bytes = static_cast<int64>(d + 0.5);
   if (neg) {
     *num_bytes = -*num_bytes;
+  }
+  return true;
+}
+
+bool ParseDouble(string_view src, double* value) {
+  if (src.empty())
+    return false;
+
+  if (src == "-inf") {
+    *value = -HUGE_VAL;
+  } else if (src == "+inf") {
+    *value = HUGE_VAL;
+  } else {
+    absl::from_chars_result result = absl::from_chars(src.data(), src.end(), *value);
+    if (int(result.ec) != 0 || result.ptr != src.end() || isnan(*value))
+      return false;
   }
   return true;
 }
