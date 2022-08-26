@@ -30,5 +30,6 @@ extern const char kSyntaxErrType[];
 extern const char kScriptErrType[];
 extern const char kIndexOutOfRange[];
 extern const char kOutOfMemory[];
+extern const char kInvalidNumericResult[];
 
 }  // namespace dfly

@@ -247,6 +247,8 @@ void RedisReplyBuilder::SendError(OpStatus status) {
     case OpStatus::BUSY_GROUP:
       SendError("-BUSYGROUP Consumer Group name already exists");
       break;
+    case OpStatus::INVALID_NUMERIC_RESULT:
+      SendError(kInvalidNumericResult);
     default:
       LOG(ERROR) << "Unsupported status " << status;
       SendError("Internal error");
@@ -340,7 +342,6 @@ void RedisReplyBuilder::SendStringArr(StrPtr str_ptr, uint32_t len) {
   unsigned vec_indx = 1;
   string_view src;
   for (unsigned i = 0; i < len; ++i) {
-
     if (holds_alternative<const string_view*>(str_ptr)) {
       src = get<const string_view*>(str_ptr)[i];
     } else {

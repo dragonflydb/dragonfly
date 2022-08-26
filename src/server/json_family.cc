@@ -8,7 +8,6 @@ extern "C" {
 #include "redis/object.h"
 }
 
-#include <absl/strings/charconv.h>
 #include <absl/strings/str_join.h>
 
 #include <jsoncons/json.hpp>
@@ -28,7 +27,6 @@ using namespace jsoncons;
 
 using JsonExpression = jsonpath::jsonpath_expression<json>;
 using OptBool = optional<bool>;
-using OptDouble = optional<double>;
 using OptSizeT = optional<size_t>;
 using JsonReplaceCb = function<void(const string&, json&)>;
 using CI = CommandId;
@@ -85,22 +83,6 @@ string JsonType(const json& val) {
   return "";
 }
 
-bool ParseDouble(string_view src, double* value) {
-  if (src.empty())
-    return false;
-
-  if (src == "-inf") {
-    *value = -HUGE_VAL;
-  } else if (src == "+inf") {
-    *value = HUGE_VAL;
-  } else {
-    absl::from_chars_result result = absl::from_chars(src.data(), src.end(), *value);
-    if (int(result.ec) != 0 || result.ptr != src.end() || isnan(*value))
-      return false;
-  }
-  return true;
-}
-
 template <typename T>
 void PrintOptVec(ConnectionContext* cntx, const OpResult<vector<optional<T>>>& result) {
   if (result->empty()) {
@@ -109,10 +91,11 @@ void PrintOptVec(ConnectionContext* cntx, const OpResult<vector<optional<T>>>& r
     (*cntx)->StartArray(result->size());
     for (auto& it : *result) {
       if (it.has_value()) {
-        if constexpr (is_integral_v<T>) {
-          (*cntx)->SendLong(*it);
-        } else if (is_floating_point_v<T>) {
+        if constexpr (is_floating_point_v<T>) {
           (*cntx)->SendDouble(*it);
+        } else {
+          static_assert(is_integral_v<T>, "Integral required.");
+          (*cntx)->SendLong(*it);
         }
       } else {
         (*cntx)->SendNull();
@@ -297,29 +280,33 @@ OpResult<vector<OptBool>> OpToggle(const OpArgs& op_args, string_view key, strin
 }
 
 template <typename Op>
-OpResult<vector<OptDouble>> OpDoubleArithmetic(const OpArgs& op_args, string_view key,
-                                               string_view path, double num, Op arithmetic_op) {
+OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key, string_view path,
+                                    double num, Op arithmetic_op) {
   OpResult<json> result = GetJson(op_args, key);
   if (!result) {
     return result.status();
   }
 
+  bool is_result_overflow = false;
   double int_part;
   bool has_fractional_part = (modf(num, &int_part) != 0);
-  vector<OptDouble> vec;
+  json output(json_array_arg);
 
   auto cb = [&](const string& path, json& val) {
     if (val.is_number()) {
       double result = arithmetic_op(val.as<double>(), num);
+      if (isinf(result)) {
+        is_result_overflow = true;
+      }
+
       if (val.is_double() || has_fractional_part) {
         val = result;
-        vec.emplace_back(result);
       } else {
         val = (uint64_t)result;
-        vec.emplace_back(result);
       }
+      output.push_back(val);
     } else {
-      vec.emplace_back(nullopt);
+      output.push_back(json::null());
     }
   };
 
@@ -330,8 +317,12 @@ OpResult<vector<OptDouble>> OpDoubleArithmetic(const OpArgs& op_args, string_vie
     return OpStatus::SYNTAX_ERR;
   }
 
+  if (is_result_overflow) {
+    return OpStatus::INVALID_NUMERIC_RESULT;
+  }
+
   SetString(op_args, key, j.as_string());
-  return vec;
+  return output.as_string();
 }
 
 }  // namespace
@@ -353,11 +344,11 @@ void JsonFamily::NumIncrBy(CmdArgList args, ConnectionContext* cntx) {
 
   DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptDouble>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<string> result = trans->ScheduleSingleHopT(move(cb));
 
   if (result) {
     DVLOG(1) << "JSON.NUMINCRBY " << trans->DebugId() << ": " << key;
-    PrintOptVec(cntx, result);
+    (*cntx)->SendSimpleString(*result);
   } else {
     (*cntx)->SendError(result.status());
   }
@@ -380,11 +371,11 @@ void JsonFamily::NumMultBy(CmdArgList args, ConnectionContext* cntx) {
 
   DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptDouble>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<string> result = trans->ScheduleSingleHopT(move(cb));
 
   if (result) {
     DVLOG(1) << "JSON.NUMMULTBY " << trans->DebugId() << ": " << key;
-    PrintOptVec(cntx, result);
+    (*cntx)->SendSimpleString(*result);
   } else {
     (*cntx)->SendError(result.status());
   }
