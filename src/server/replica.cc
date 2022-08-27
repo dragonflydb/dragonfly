@@ -244,6 +244,9 @@ error_code Replica::Greet() {
     if (args.empty())
       return "none";
 
+    if (args.front().type == RespExpr::ERROR) {
+      return StrCat("error(", ToSV(args.front().GetBuf()), ")");
+    }
     return RespExpr::TypeName(args.front().type);
   };
 
@@ -324,12 +327,11 @@ error_code Replica::InitiatePSync() {
   state_mask_ |= R_SYNCING;
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_PSYNC
-  // Send psync command with null master id and null offset
-  string id("?");
+  string id("?");  // corresponds to null master id and null offset
   int64_t offs = -1;
-  if (!master_repl_id_.empty()) {
-    id = master_repl_id_;
-    offs = repl_offs_;
+  if (!master_repl_id_.empty()) {  // in case we synced before
+    id = master_repl_id_;  // provide the replication offset and master id
+    offs = repl_offs_;     // to try incremental sync.
   }
   serializer.SendCommand(StrCat("PSYNC ", id, " ", offs));
   RETURN_ON_ERR(serializer.ec());
@@ -346,6 +348,8 @@ error_code Replica::InitiatePSync() {
   }
   last_io_time_ = sock_thread_->GetMonotonicTimeNs();
 
+  // we get token for diskless redis replication. For disk based replication
+  // we get the snapshot size.
   if (snapshot_size || token != nullptr) {  // full sync
     SocketSource ss{sock_.get()};
     io::PrefixSource ps{io_buf.InputBuffer(), &ss};
