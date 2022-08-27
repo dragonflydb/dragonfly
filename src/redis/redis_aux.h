@@ -64,38 +64,21 @@ void dictSdsDestructor(dict *privdata, void *val);
 size_t sdsZmallocSize(sds s) ;
 
 typedef struct ServerStub {
-    // char replid[CONFIG_RUN_ID_SIZE+1]; /* Master replication ID (if master). */
-    size_t loading_loaded_bytes;
-    size_t page_size;
-    long long dirty, master_repl_offset;
-    time_t lastsave;
-    char* masterhost;
-
     int rdb_compression;
-    int loading;
-    int key_load_delay;
-    int repl_state;
-    int loading_start_time;
-    int loading_total_bytes;
-    int lastbgsave_status;
 
     int lfu_decay_time;             /* LFU counter decay factor. */
     /* should not be used. Use FLAGS_list_max_ziplist_size and FLAGS_list_compress_depth instead. */
     // int list_compress_depth;
     // int list_max_ziplist_size;
 
-    unsigned long long maxmemory;   /* Max number of memory bytes to use */
+    // unused - left so that object.c will compile.
     int maxmemory_policy;           /* Policy for key eviction */
 
-    int rdb_save_incremental_fsync;
-    size_t stat_peak_memory;
+    unsigned long page_size;
     size_t hash_max_listpack_entries,
            hash_max_listpack_value;
     size_t zset_max_listpack_entries;
     size_t zset_max_listpack_value;
-    int sanitize_dump_payload;      /* Enables deep sanitization for ziplist and listpack in RDB and RESTORE. */
-    long long stat_dump_payload_sanitizations; /* Number deep dump payloads integrity validations. */
-    off_t loading_rdb_used_mem;
 
     size_t stream_node_max_bytes;
     long long stream_node_max_entries;

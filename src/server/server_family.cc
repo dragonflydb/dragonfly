@@ -209,7 +209,7 @@ bool DoesTimeNibbleMatchSpecifier(string_view time_spec, unsigned int current_ti
   for (int i = time_spec.length() - 1; i >= 0; --i) {
     // if the current digit is not a wildcard and it does not match the digit in the current time it
     // does not match
-    if (time_spec[i] != '*' && (current_time % 10) != (time_spec[i] - '0')) {
+    if (time_spec[i] != '*' && int(current_time % 10) != (time_spec[i] - '0')) {
       return false;
     }
     current_time /= 10;

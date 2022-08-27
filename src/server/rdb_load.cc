@@ -297,6 +297,8 @@ void RdbLoader::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
   } else {
     res = createSetObject();
 
+    // TODO: to move this logic to set_family similarly to ConvertToStrSet.
+
     /* It's faster to expand the dict to the right size asap in order
      * to avoid rehashing */
     if (len > DICT_HT_INITIAL_SIZE && dictTryExpand((dict*)res->ptr, len) != DICT_OK) {
@@ -651,14 +653,12 @@ void RdbLoader::OpaqueObjLoader::HandleBlob(string_view blob) {
     unsigned len = intsetLen(is);
     if (len > SetFamily::MaxIntsetEntries()) {
       res = createSetObject();
-      if (len > DICT_HT_INITIAL_SIZE && dictTryExpand((dict*)res->ptr, len) != DICT_OK) {
-        LOG(ERROR) << "OOM in dictTryExpand " << len;
+      if (!SetFamily::ConvertToStrSet(is, len, res)) {
+        LOG(ERROR) << "OOM in ConvertToStrSet " << len;
         decrRefCount(res);
         ec_ = RdbError(errc::out_of_memory);
         return;
       }
-
-      SetFamily::ConvertTo(is, (dict*)res->ptr);
     } else {
       intset* mine = (intset*)zmalloc(blob.size());
       memcpy(mine, blob.data(), blob.size());
