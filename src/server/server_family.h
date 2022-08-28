@@ -91,6 +91,8 @@ class ServerFamily {
 
   void ConfigureMetrics(util::HttpListenerBase* listener);
 
+  void PauseReplication(bool pause);
+
  private:
   uint32_t shard_count() const {
     return shard_set->size();

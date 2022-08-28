@@ -47,6 +47,7 @@ class Replica {
 
   // Threadsafe, fiber blocking.
   Info GetInfo() const;
+  void Pause(bool pause);
 
  private:
   // The flow is : R_ENABLED -> R_TCP_CONNECTED -> (R_SYNCING) -> R_SYNC_OK.
@@ -97,6 +98,7 @@ class Replica {
   size_t repl_offs_ = 0, ack_offs_ = 0;
   uint64_t last_io_time_ = 0;  // in ns, monotonic clock.
   unsigned state_mask_ = 0;
+  bool is_paused_ = false;
 };
 
 }  // namespace dfly

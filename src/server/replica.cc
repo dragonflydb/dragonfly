@@ -173,6 +173,9 @@ void Replica::ReplicateFb() {
   while (state_mask_ & R_ENABLED) {
     if ((state_mask_ & R_TCP_CONNECTED) == 0) {
       this_fiber::sleep_for(500ms);
+      if (is_paused_)
+        continue;
+
       ec = ConnectSocket();
       if (ec) {
         LOG(ERROR) << "Error connecting " << ec;
@@ -330,8 +333,8 @@ error_code Replica::InitiatePSync() {
   string id("?");  // corresponds to null master id and null offset
   int64_t offs = -1;
   if (!master_repl_id_.empty()) {  // in case we synced before
-    id = master_repl_id_;  // provide the replication offset and master id
-    offs = repl_offs_;     // to try incremental sync.
+    id = master_repl_id_;          // provide the replication offset and master id
+    offs = repl_offs_;             // to try incremental sync.
   }
   serializer.SendCommand(StrCat("PSYNC ", id, " ", offs));
   RETURN_ON_ERR(serializer.ec());
@@ -519,7 +522,6 @@ error_code Replica::ConsumeRedisStream() {
   time_t last_ack = time(nullptr);
   string ack_cmd;
 
-
   // basically reflection of dragonfly_connection IoLoop function.
   while (!ec) {
     io::MutableBytes buf = io_buf.AppendBuffer();
@@ -562,6 +564,10 @@ auto Replica::GetInfo() const -> Info {
   });
 }
 
+void Replica::Pause(bool pause) {
+  sock_thread_->Await([&] { is_paused_ = pause; });
+}
+
 error_code Replica::ParseAndExecute(base::IoBuf* io_buf) {
   VLOG(1) << "ParseAndExecute: input len " << io_buf->InputLen();
   if (parser_->stash_size() > 0) {
@@ -588,7 +594,7 @@ error_code Replica::ParseAndExecute(base::IoBuf* io_buf) {
           service_.DispatchCommand(arg_list, &conn_context);
         }
         io_buf->ConsumeInput(consumed);
-      break;
+        break;
       case RedisParser::INPUT_PENDING:
         io_buf->ConsumeInput(consumed);
         break;

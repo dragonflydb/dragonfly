@@ -34,8 +34,8 @@ using boost::intrusive_ptr;
 using boost::fibers::fiber;
 using namespace facade;
 namespace fs = std::filesystem;
-using absl::StrAppend;
 using absl::GetFlag;
+using absl::StrAppend;
 
 struct PopulateBatch {
   DbIndex dbid;
@@ -84,14 +84,17 @@ void DebugCmd::Run(CmdArgList args) {
         "DEBUG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
         "OBJECT <key>",
         "    Show low-level info about `key` and associated value.",
-        "LOAD <filename>"
+        "LOAD <filename>",
         "RELOAD [option ...]",
-        "    Save the RDB on disk (TBD) and reload it back to memory. Valid <option> values:",
+        "    Save the RDB on disk and reload it back to memory. Valid <option> values:",
         "    * NOSAVE: the database will be loaded from an existing RDB file.",
         "    Examples:",
         "    * DEBUG RELOAD NOSAVE: replace the current database with the contents of an",
         "      existing RDB file.",
+        "REPLICA PAUSE/RESUME",
+        "    Stops replica from reconnecting to master, or resumes",
         "WATCHED",
+        "    Shows the watched keys as a result of BLPOP and similar operations."
         "POPULATE <count> [<prefix>] [<size>]",
         "    Create <count> string keys named key:<num>. If <prefix> is specified then",
         "    it is used instead of the 'key' prefix.",
@@ -110,6 +113,11 @@ void DebugCmd::Run(CmdArgList args) {
   if (subcmd == "RELOAD") {
     return Reload(args);
   }
+
+  if (subcmd == "REPLICA" && args.size() == 3) {
+    return Replica(args);
+  }
+
   if (subcmd == "WATCHED") {
     return Watched();
   }
@@ -159,6 +167,18 @@ void DebugCmd::Reload(CmdArgList args) {
 
   string last_save_file = sf_.GetLastSaveInfo()->file_name;
   Load(last_save_file);
+}
+
+void DebugCmd::Replica(CmdArgList args) {
+  args.remove_prefix(2);
+  ToUpper(&args[0]);
+  string_view opt = ArgS(args, 0);
+
+  if (opt == "PAUSE" || opt == "RESUME") {
+    sf_.PauseReplication(opt == "PAUSE");
+    return (*cntx_)->SendOk();
+  }
+  return (*cntx_)->SendError(UnknownSubCmd("replica", "DEBUG"));
 }
 
 void DebugCmd::Load(string_view filename) {

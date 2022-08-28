@@ -545,6 +545,17 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
   http_base->RegisterCb("/metrics", cb);
 }
 
+void ServerFamily::PauseReplication(bool pause) {
+  unique_lock lk(replicaof_mu_);
+
+  // Switch to primary mode.
+  if (!ServerState::tlocal()->is_master) {
+    auto repl_ptr = replica_;
+    CHECK(repl_ptr);
+    repl_ptr->Pause(pause);
+  }
+}
+
 void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* cntx) {
   if (!section.empty()) {
     return cntx->reply_builder()->SendError("");

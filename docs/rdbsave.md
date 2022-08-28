@@ -36,22 +36,90 @@ and replay it by distributing entries among `K` replica shards. After all the sn
 they will continue with replaying the change log (stable state replication), which is out of context
 of this document.
 
-## Moving point-in-time (TBD)
+## Relaxed point-in-time (TBD)
 When DF saves its snapshot file on disk, it maintains snapshot isolation by applying a virtual cut
-through all the process shards. Snapshotting may take time during which DF may apply multiple mutations
-to its contents. These mutations won't be part of the snapshot since it captures data
-*right before* it has started. This is perfect for backups.
+through all the process shards. Snapshotting may take time, during which, DF may process many write requests.
+These mutations won't be part of the snapshot, because the cut captures data up to the point
+**it has started**. This is perfect for backups. I call this variation - conservative snapshotting.
 
-However, when we peform snapshotting for replication, we would love to produce a snapshot
-that includes all the data upto point in time when the snapshotting finishes.
-(Why, actually, we do not want similar semantics for file snapshots??).
+However, when we peform snapshotting for replication, we would like to produce a snapshot
+that includes all the data upto point in time when the snapshotting **finishes**. I called
+this *relaxed snapshotting*. The reason for relaxed snapshotting is to avoid keeping the changelog
+of all mutations during the snapshot creation.
 
-The reason for this is because, otherwise, we would need to keep aside a change-log
-of all mutations after the snapshot is started so we could replay it after it finishes.
+As a side comment - we could, in theory, support the same (relaxed)
+semantics for file snapshots, but it's no necessary since it might increase the snapshot sizes.
 
-We would need this change-log anyways, after the snapshot finishes - this changelog is what
-provides data for the stable state replication. However, the snapshotting phase can take up
-lots of time and add lots of memory pressure on the system. Keeping the change-log during this phase,
-will only add more pressure. By relaxing the requirement of point-in-time we can push the changelog
-into replication sockets without saving it aside. Of course we would still need a point in time consistency,
-in order to know when the snapshotting finished and stable state replication started.
+The snapshotting phase (full-sync) can take up lots of time which add lots of memory pressure on the system.
+Keeping the change-log aside during the full-sync phase will only add more pressure.
+We achieve relaxed snapshotting by pushing the changes into the replication sockets without saving them aside.
+Of course, we would still need a point-in-time consistency,
+in order to know when the snapshotting finished and the stable state replication started.
+
+## Conservative and relaxed snapshotting variations
+
+Both algorithms maintain a scanning process (fiber) that iterarively goes over the main dictionary
+and serializes its data. Before starting the process, the SnapshotShard captures
+the change epoch of its shard (this epoch is increased with each write request).
+
+```cpp
+SnapshotShard.epoch = shard.epoch++;
+```
+
+For sake of simplicity, we can assume that each entry in the shard maintains its own version counter.
+By capturing the epoch number we establish a cut: all entries with `version <= SnapshotShard.epoch`
+have not been serialized yet and were not modified by the concurrent writes.
+
+The DashTable iteration algorithm guarantees convergeance and coverage ("at most once"),
+but it does not guarantee that each entry is visited *exactly once*.
+Therefore, we use entry versions for two things: 1) to avoid serialization of the same entry multiple times,
+and 2) to correctly serialize entries that need to change due to concurrent writes.
+
+Serialization Fiber:
+
+```cpp
+ for (entry : table) {
+    if (entry.version <= cut.epoch) {
+      entry.version = cut.epoch + 1;
+      SendToSerializationSink(entry);
+    }
+ }
+```
+
+To allow concurrent writes during the snapshotting phase, we setup a hook that is triggerred on each
+entry mutation in the table:
+
+OnWriteHook:
+```cpp
+....
+if (entry.version <= cut.version) {
+  SendToSerializationSink(entry);
+}
+...
+entry = new_entry;
+entry.version = shard.epoch++;  // guaranteed to become > cut.version
+```
+
+Please note that this hook maintains point-in-time semantics for the conservative variation by pushing
+the previous value of the entry into the sink before changing it.
+
+However, for the relaxed point-in-time, we do not have to store the old value.
+Therefore, we can do the following:
+
+OnWriteHook:
+
+```cpp
+if (entry.version <= cut.version) {
+  SendToSerializationSink(new_entry);  // do not have to send the old value
+} else {
+  // Keep sending the changes.
+  SendToSerializationSink(IncrementalDiff(entry, new_entry));
+}
+
+entry = new_entry;
+entry.version = shard.epoch++;
+```
+
+The change data is sent along with the rest of the contents, and it requires to extend
+the existing rdb format to support differential operations like (hset, append, etc).
+The Serialization Fiber loop is the same for this variation.
