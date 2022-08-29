@@ -11,7 +11,9 @@ extern "C" {
 #include <absl/strings/str_join.h>
 
 #include <jsoncons/json.hpp>
+#include <jsoncons_ext/jsonpatch/jsonpatch.hpp>
 #include <jsoncons_ext/jsonpath/jsonpath.hpp>
+#include <jsoncons_ext/jsonpointer/jsonpointer.hpp>
 
 #include "base/logging.h"
 #include "server/command_registry.h"
@@ -326,7 +328,73 @@ OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key, stri
   return output.as_string();
 }
 
+OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path) {
+  long total_deletions = 0;
+  OpResult<json> result = GetJson(op_args, key);
+  if (!result) {
+    return total_deletions;
+  }
+
+  vector<string> deletion_items;
+  auto cb = [&](const string& path, json& val) { deletion_items.emplace_back(path); };
+
+  json j = result.value();
+  error_code ec = JsonReplace(j, path, cb);
+  if (ec) {
+    VLOG(1) << "Failed to evaulate expression on json with error: " << ec.message();
+    return total_deletions;
+  }
+
+  if (deletion_items.empty()) {
+    return total_deletions;
+  }
+
+  auto fJsonPathToPointer = [](const string& path) -> string {
+    json j(json_object_arg, {{path, ""}});
+    j = jsonpath::unflatten(j);
+    json flat = jsonpointer::flatten(j);
+    if (flat.empty() || !flat.is_object()) {
+      return "";
+    }
+
+    auto it_begin = flat.object_range().begin();
+    return it_begin->key();
+  };
+
+  json patch(json_array_arg, {});
+  for (const auto& it : deletion_items) {
+    string pointer = fJsonPathToPointer(it);
+    if (pointer.empty()) {
+      continue;
+    }
+
+    json patch_item(json_object_arg, {{"op", "remove"}, {"path", pointer}});
+    patch.emplace_back(patch_item);
+  }
+
+  total_deletions = deletion_items.size();
+  jsonpatch::apply_patch(j, patch, ec);
+  SetString(op_args, key, j.as_string());
+
+  return total_deletions;
+}
+
 }  // namespace
+
+void JsonFamily::Del(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view path = ArgS(args, 2);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpDel(t->GetOpArgs(shard), key, path);
+  };
+
+  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
+  Transaction* trans = cntx->transaction;
+  OpResult<long> result = trans->ScheduleSingleHopT(move(cb));
+  DVLOG(1) << "JSON.DEL " << trans->DebugId() << ": " << key;
+  (*cntx)->SendLong(*result);
+}
 
 void JsonFamily::NumIncrBy(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
@@ -576,6 +644,7 @@ void JsonFamily::Register(CommandRegistry* registry) {
       NumIncrBy);
   *registry << CI{"JSON.NUMMULTBY", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1}.HFUNC(
       NumMultBy);
+  *registry << CI{"JSON.DEL", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(Del);
 }
 
 }  // namespace dfly
