@@ -29,7 +29,7 @@ class SliceSnapshot {
   using RecordChannel =
       ::util::fibers_ext::SimpleChannel<DbRecord, base::mpmc_bounded_queue<DbRecord>>;
 
-  SliceSnapshot(DbTableArray db_array, DbSlice* slice, RecordChannel* dest);
+  SliceSnapshot(DbSlice* slice, RecordChannel* dest);
   ~SliceSnapshot();
 
   void Start();

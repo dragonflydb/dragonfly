@@ -25,8 +25,9 @@ using namespace chrono_literals;
 namespace this_fiber = ::boost::this_fiber;
 using boost::fibers::fiber;
 
-SliceSnapshot::SliceSnapshot(DbTableArray db_array, DbSlice* slice, RecordChannel* dest)
-    : db_array_(db_array), db_slice_(slice), dest_(dest) {
+SliceSnapshot::SliceSnapshot(DbSlice* slice, RecordChannel* dest)
+    : db_slice_(slice), dest_(dest) {
+  db_array_ = slice->databases();
 }
 
 SliceSnapshot::~SliceSnapshot() {

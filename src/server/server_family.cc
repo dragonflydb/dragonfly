@@ -126,29 +126,6 @@ string InferLoadFile(fs::path data_dir) {
   return string{};
 }
 
-class LinuxWriteWrapper : public io::WriteFile {
- public:
-  LinuxWriteWrapper(uring::LinuxFile* lf) : WriteFile("wrapper"), lf_(lf) {
-  }
-
-  io::Result<size_t> WriteSome(const iovec* v, uint32_t len) final {
-    io::Result<size_t> res = lf_->WriteSome(v, len, offset_, 0);
-    if (res) {
-      offset_ += *res;
-    }
-
-    return res;
-  }
-
-  std::error_code Close() final {
-    return lf_->Close();
-  }
-
- private:
-  uring::LinuxFile* lf_;
-  off_t offset_ = 0;
-};
-
 }  // namespace
 
 bool IsValidSaveScheduleNibble(string_view time, unsigned int max) {
