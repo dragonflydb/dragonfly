@@ -767,17 +767,15 @@ class RdbSaver::Impl {
   // used for serializing non-body components in the calling fiber.
   RdbSerializer meta_serializer_;
   vector<unique_ptr<SliceSnapshot>> shard_snapshots_;
-
-  // it may not present if we write sharded rdb.
-  optional<SliceSnapshot::RecordChannel> channel_;
+  SliceSnapshot::RecordChannel channel_;
 };
 
 // We pass K=sz to say how many producers are pushing data in order to maintain
 // correct closing semantics - channel is closing when K producers marked it as closed.
 RdbSaver::Impl::Impl(unsigned producers_len, io::Sink* sink)
     : aligned_buf_(kBufLen, sink), meta_serializer_(&aligned_buf_),
-      shard_snapshots_(producers_len) {
-  channel_.emplace(128, producers_len);
+      shard_snapshots_(producers_len), channel_{128, producers_len} {
+
 }
 
 error_code RdbSaver::Impl::SaveAuxFieldStrStr(string_view key, string_view val) {
@@ -801,7 +799,7 @@ error_code RdbSaver::Impl::ConsumeChannel() {
 
   buf[0] = RDB_OPCODE_SELECTDB;
 
-  auto& channel = *channel_;
+  auto& channel = channel_;
   while (channel.Pop(record)) {
     if (io_error)
       continue;
@@ -838,10 +836,14 @@ error_code RdbSaver::Impl::ConsumeChannel() {
 }
 
 void RdbSaver::Impl::StartSnapshotting(EngineShard* shard) {
-  auto s = make_unique<SliceSnapshot>(&shard->db_slice(), &channel_.value());
+  auto s = make_unique<SliceSnapshot>(&shard->db_slice(), &channel_);
 
   s->Start();
-  shard_snapshots_[shard->shard_id()] = move(s);
+
+  // For single shard configuration, we maintain only one snapshot,
+  // so we do not have to map it via shard_id.
+  unsigned sid = shard_snapshots_.size() == 1 ? 0 : shard->shard_id();
+  shard_snapshots_[sid] = move(s);
 }
 
 void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {
@@ -852,10 +854,10 @@ void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {
   }
 }
 
-RdbSaver::RdbSaver(::io::Sink* sink) {
+RdbSaver::RdbSaver(::io::Sink* sink, bool single_shard) {
   CHECK_NOTNULL(sink);
 
-  impl_.reset(new Impl(shard_set->size(), sink));
+  impl_.reset(new Impl(single_shard ? 1 : shard_set->size(), sink));
 }
 
 RdbSaver::~RdbSaver() {

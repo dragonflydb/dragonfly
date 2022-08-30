@@ -159,7 +159,7 @@ void DebugCmd::Reload(CmdArgList args) {
     intrusive_ptr<Transaction> trans(new Transaction{cid});
     trans->InitByArgs(0, {});
     VLOG(1) << "Performing save";
-    ec = sf_.DoSave(trans.get(), &err_details);
+    ec = sf_.DoSave(false, trans.get(), &err_details);
     if (ec) {
       return (*cntx_)->SendError(absl::StrCat(err_details, ec.message()));
     }

@@ -66,7 +66,11 @@ class AlignedBuffer {
 
 class RdbSaver {
  public:
-  explicit RdbSaver(::io::Sink* sink);
+  // single_shard - true means that we run RdbSaver on a single shard and we do not use
+  // to snapshot all the datastore shards.
+  // single_shard - false, means we capture all the data using a single RdbSaver instance
+  // (corresponds to legacy, redis compatible mode)
+  explicit RdbSaver(::io::Sink* sink, bool single_shard);
   ~RdbSaver();
 
   std::error_code SaveHeader(const StringVec& lua_scripts);

@@ -77,7 +77,8 @@ class ServerFamily {
 
   void StatsMC(std::string_view section, facade::ConnectionContext* cntx);
 
-  std::error_code DoSave(Transaction* transaction, std::string* err_details);
+  // if new_version is true, saves DF specific, non redis compatible snapshot.
+  std::error_code DoSave(bool new_version, Transaction* transaction, std::string* err_details);
   std::error_code DoFlush(Transaction* transaction, DbIndex db_ind);
 
   std::shared_ptr<const LastSaveInfo> GetLastSaveInfo() const;

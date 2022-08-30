@@ -126,8 +126,6 @@ string InferLoadFile(fs::path data_dir) {
   return string{};
 }
 
-}  // namespace
-
 bool IsValidSaveScheduleNibble(string_view time, unsigned int max) {
   /*
    * a nibble is valid iff there exists one time that matches the pattern
@@ -152,6 +150,82 @@ bool IsValidSaveScheduleNibble(string_view time, unsigned int max) {
 
   return min_match <= max;
 }
+
+class RdbSnapshot {
+ public:
+  RdbSnapshot(bool single_shard, uring::LinuxFile* fl)
+      : file_(fl), linux_sink_(fl), saver_(&linux_sink_, single_shard) {
+  }
+
+  error_code Start(const StringVec& lua_scripts);
+  void StartInShard(EngineShard* shard);
+
+  error_code SaveBody();
+  error_code Close();
+
+  const RdbTypeFreqMap freq_map() const {
+    return freq_map_;
+  }
+
+  bool HasStarted() const {
+    return started_;
+  }
+
+ private:
+  // whether this RdbSnapshot captures only a single shard,
+  // false for legacy - rdb snapshot that captures
+  bool single_shard_;
+  bool started_ = false;
+
+  unique_ptr<uring::LinuxFile> file_;
+  LinuxWriteWrapper linux_sink_;
+  RdbSaver saver_;
+  RdbTypeFreqMap freq_map_;
+};
+
+error_code RdbSnapshot::Start(const StringVec& lua_scripts) {
+  return saver_.SaveHeader(lua_scripts);
+}
+
+error_code RdbSnapshot::SaveBody() {
+  return saver_.SaveBody(&freq_map_);
+}
+
+error_code RdbSnapshot::Close() {
+  return linux_sink_.Close();
+}
+
+void RdbSnapshot::StartInShard(EngineShard* shard) {
+  saver_.StartSnapshotInShard(shard);
+  started_ = true;
+}
+
+string FormatTs(absl::Time now) {
+  return absl::FormatTime("%Y-%m-%dT%H:%M:%S", now, absl::LocalTimeZone());
+}
+
+void ExtendFilename(absl::Time now, int shard, fs::path* filename) {
+  if (shard < 0) {
+    if (!filename->has_extension()) {
+      string ft_time = FormatTs(now);
+      *filename += StrCat("-", ft_time, ".rdb");
+    }
+  } else {
+    string ft_time = FormatTs(now);
+    filename->replace_extension();  // clear if exists
+
+    // dragonfly snapshot
+    *filename += StrCat("-", ft_time, "-", absl::Dec(shard, absl::kZeroPad4), ".dfs");
+  }
+}
+
+inline void UpdateError(error_code src, error_code* dest) {
+  if (!(*dest)) {
+    *dest = src;
+  }
+}
+
+}  // namespace
 
 std::optional<SnapshotSpec> ParseSaveSchedule(string_view time) {
   if (time.length() < 3 || time.length() > 5) {
@@ -371,7 +445,7 @@ void ServerFamily::SnapshotScheduling(const SnapshotSpec&& spec) {
     CHECK_NOTNULL(cid);
     boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
     trans->InitByArgs(0, {});
-    ec = DoSave(trans.get(), &err_details);
+    ec = DoSave(false, trans.get(), &err_details);
     if (ec) {
       LOG(WARNING) << "Failed to perform snapshot " << err_details;
     }
@@ -578,7 +652,15 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
 #undef ADD_LINE
 }
 
-error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
+static void RunStage(bool new_version, std::function<void(unsigned)> cb) {
+  if (new_version) {
+    shard_set->RunBlockingInParallel([&](EngineShard* es) { cb(es->shard_id()); });
+  } else {
+    cb(0);
+  }
+};
+
+error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* err_details) {
   fs::path dir_path(GetFlag(FLAGS_dir));
   error_code ec;
 
@@ -594,13 +676,6 @@ error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
   fs::path filename = dbfilename.empty() ? "dump" : dbfilename;
   fs::path path = dir_path;
 
-  if (!filename.has_extension()) {
-    absl::Time now = absl::Now();
-    string ft_time = absl::FormatTime("-%Y-%m-%dT%H:%M:%S", now, absl::UTCTimeZone());
-    filename += StrCat(ft_time, ".rdb");
-  }
-  path += filename;
-
   GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
   if (new_state != GlobalState::SAVING) {
     *err_details = StrCat(GlobalStateName(new_state), " - can not save database");
@@ -612,70 +687,133 @@ error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
   };
 
   const auto kFlags = O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC | O_DIRECT;
-  auto res = uring::OpenLinux(path.generic_string(), kFlags, 0666);
-  if (!res) {
-    return res.error();
-  }
-
-  unique_ptr<uring::LinuxFile> lf = std::move(res.value());
-  VLOG(1) << "Saving to " << path;
-  LinuxWriteWrapper wf(lf.get());
-
-  RdbSaver saver{&wf};
-
-  VLOG(1) << "Saving to " << path;
-
   auto start = absl::Now();
-
-  RdbTypeFreqMap freq_map;
   shared_ptr<LastSaveInfo> save_info;
   StringVec lua_scripts = script_mgr_->GetLuaScripts();
+  absl::Time now = absl::Now();
 
-  ec = saver.SaveHeader(lua_scripts);
+  absl::flat_hash_map<string_view, size_t> rdb_name_map;
+  vector<unique_ptr<RdbSnapshot>> snapshots;
+  fibers::mutex mu;
 
-  if (!ec) {
-    auto cb = [&saver](Transaction* t, EngineShard* shard) {
-      saver.StartSnapshotInShard(shard);
+  auto save_cb = [&](unsigned index) {
+    auto& snapshot = snapshots[index];
+    if (snapshot && snapshot->HasStarted()) {
+      error_code local_ec = snapshot->SaveBody();
+      if (local_ec) {
+        lock_guard lk(mu);
+        UpdateError(local_ec, &ec);
+      }
+    }
+  };
+
+  auto close_cb = [&](unsigned index) {
+    auto& snapshot = snapshots[index];
+    if (snapshot) {
+      auto local_ec = snapshot->Close();
+
+      lock_guard lk(mu);
+      UpdateError(local_ec, &ec);
+
+      for (const auto& k_v : snapshot->freq_map()) {
+        rdb_name_map[RdbTypeName(k_v.first)] += k_v.second;
+      }
+    }
+  };
+
+  if (new_version) {
+    snapshots.resize(shard_set->size());
+
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      fs::path shard_file = filename, abs_path = path;
+      ShardId sid = shard->shard_id();
+      error_code local_ec;
+
+      ExtendFilename(now, sid, &shard_file);
+      abs_path += shard_file;
+
+      VLOG(1) << "Saving to " << abs_path;
+      auto res = uring::OpenLinux(abs_path.generic_string(), kFlags, 0666);
+
+      if (res) {
+        snapshots[sid].reset(new RdbSnapshot{true, res.value().release()});
+        auto& snapshot = *snapshots[sid];
+        local_ec = snapshot.Start(lua_scripts);
+        if (!local_ec) {
+          snapshot.StartInShard(shard);
+        }
+      } else {
+        local_ec = res.error();
+      }
+
+      if (local_ec) {
+        lock_guard lk(mu);
+        UpdateError(local_ec, &ec);
+      }
+
       return OpStatus::OK;
     };
 
     trans->ScheduleSingleHop(std::move(cb));
-    is_saving_.store(true, memory_order_relaxed);
+  } else {
+    snapshots.resize(1);
 
-    // perform snapshot serialization, block the current fiber until it completes.
-    RdbTypeFreqMap freq_map;
-    ec = saver.SaveBody(&freq_map);
+    ExtendFilename(now, -1, &filename);
+    path += filename;
 
-    is_saving_.store(false, memory_order_relaxed);
-    absl::flat_hash_map<string_view, size_t> tmp_map;
-    for (const auto& k_v : freq_map) {
-      tmp_map[RdbTypeName(k_v.first)] += k_v.second;
+    auto res = uring::OpenLinux(path.generic_string(), kFlags, 0666);
+    if (!res) {
+      return res.error();
     }
-    save_info = make_shared<LastSaveInfo>();
-    for (const auto& k_v : tmp_map) {
-      save_info->freq_map.emplace_back(k_v);
+    VLOG(1) << "Saving to " << path;
+
+    snapshots[0].reset(new RdbSnapshot{false, res.value().release()});
+    ec = snapshots[0]->Start(lua_scripts);
+
+    if (!ec) {
+      auto cb = [&](Transaction* t, EngineShard* shard) {
+        snapshots[0]->StartInShard(shard);
+
+        return OpStatus::OK;
+      };
+
+      trans->ScheduleSingleHop(std::move(cb));
     }
   }
 
+  is_saving_.store(true, memory_order_relaxed);
+
+  // perform snapshot serialization, block the current fiber until it completes.
+  RunStage(new_version, save_cb);
+
+  is_saving_.store(false, memory_order_relaxed);
+
+  RunStage(new_version, close_cb);
+
   absl::Duration dur = absl::Now() - start;
   double seconds = double(absl::ToInt64Milliseconds(dur)) / 1000;
+
+  if (new_version) {
+    ExtendFilename(now, 0, &filename);
+    path += filename;
+  }
+
   LOG(INFO) << "Saving " << path << " finished after "
             << strings::HumanReadableElapsedTime(seconds);
 
-  auto close_ec = wf.Close();
-
-  if (!ec)
-    ec = close_ec;
-
   if (!ec) {
-    save_info->save_time = time(NULL);
+    save_info = make_shared<LastSaveInfo>();
+    for (const auto& k_v : rdb_name_map) {
+      save_info->freq_map.emplace_back(k_v);
+    }
+
+    save_info->save_time = absl::ToUnixSeconds(now);
     save_info->file_name = path.generic_string();
 
     lock_guard lk(save_mu_);
     // swap - to deallocate the old version outstide of the lock.
     lsinfo_.swap(save_info);
   }
-
   return ec;
 }
 
@@ -826,8 +964,22 @@ void ServerFamily::Memory(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
   string err_detail;
+  bool new_version = false;
+  if (args.size() > 2) {
+    return (*cntx)->SendError(kSyntaxErr);
+  }
 
-  error_code ec = DoSave(cntx->transaction, &err_detail);
+  if (args.size() == 2) {
+    ToUpper(&args[1]);
+    string_view sub_cmd = ArgS(args, 1);
+    if (sub_cmd == "DF") {
+      new_version = true;
+    } else {
+      return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "SAVE"), kSyntaxErrType);
+    }
+  }
+
+  error_code ec = DoSave(new_version, cntx->transaction, &err_detail);
 
   if (ec) {
     (*cntx)->SendError(absl::StrCat(err_detail, ec.message()));
@@ -1281,7 +1433,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"LASTSAVE", CO::LOADING | CO::FAST, 1, 0, 0, 0}.HFUNC(LastSave)
             << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING | CO::FAST, -2, 0, 0, 0}.HFUNC(Latency)
             << CI{"MEMORY", kMemOpts, -2, 0, 0, 0}.HFUNC(Memory)
-            << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Save)
+            << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, 0}.HFUNC(Save)
             << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0}.HFUNC(_Shutdown)
             << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)

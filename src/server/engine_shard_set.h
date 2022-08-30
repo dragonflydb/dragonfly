@@ -271,6 +271,8 @@ template <typename U> void EngineShardSet::RunBlockingInParallel(U&& func) {
 
   for (uint32_t i = 0; i < size(); ++i) {
     util::ProactorBase* dest = pp_->at(i);
+
+    // the "Dispatch" call spawns a fiber underneath.
     dest->Dispatch([func, bc]() mutable {
       func(EngineShard::tlocal());
       bc.Dec();
