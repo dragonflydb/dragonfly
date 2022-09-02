@@ -521,8 +521,9 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
       }
       dfly_cntx->transaction->SetExecCmd(cid);
       OpStatus st = dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args);
-      if (st != OpStatus::OK)
+      if (st != OpStatus::OK) {
         return (*cntx)->SendError(st);
+      }
     }
   } else {
     DCHECK(dfly_cntx->transaction == nullptr);
@@ -542,7 +543,14 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   dfly_cntx->cid = cid;
 
-  cid->Invoke(args, dfly_cntx);
+  try {
+    cid->Invoke(args, dfly_cntx);
+  } catch(std::exception& e) {
+    LOG(ERROR) << "Internal error, system probably unstable " << e.what();
+    dfly_cntx->reply_builder()->SendError("Internal Error");
+    dfly_cntx->reply_builder()->CloseConnection();
+  }
+
   end_usec = ProactorBase::GetMonotonicTimeNs();
 
   request_latency_usec.IncBy(cmd_str, (end_usec - start_usec) / 1000);

@@ -39,6 +39,9 @@ struct ConnectionState {
   // For get op - we use it as a mask of MCGetMask values.
   uint32_t memcache_flag = 0;
 
+  // If it's a replication client - then it holds positive sync session id.
+  uint32_t sync_session_id = 0;
+
   // Lua-script related data.
   struct Script {
     bool is_write = true;

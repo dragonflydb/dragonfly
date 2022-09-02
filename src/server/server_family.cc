@@ -278,10 +278,26 @@ bool DoesTimeMatchSpecifier(const SnapshotSpec& spec, time_t now) {
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
   start_time_ = time(NULL);
-  lsinfo_ = make_shared<LastSaveInfo>();
-  lsinfo_->save_time = start_time_;
+  last_save_info_ = make_shared<LastSaveInfo>();
+  last_save_info_->save_time = start_time_;
   script_mgr_.reset(new ScriptMgr());
   journal_.reset(new journal::Journal);
+
+  {
+    // TODO: if we start using random generator in more places, we should probably
+    // refactor this code.
+
+    absl::InsecureBitGen eng;
+    absl::uniform_int_distribution<uint32_t> ud;
+
+    absl::AlphaNum a1(absl::Hex(eng(), absl::kZeroPad16));
+    absl::AlphaNum a2(absl::Hex(eng(), absl::kZeroPad16));
+    absl::AlphaNum a3(absl::Hex(ud(eng), absl::kZeroPad8));
+    absl::StrAppend(&master_id_, a1, a2, a3);
+
+    size_t constexpr kConfigRunIdSize = CONFIG_RUN_ID_SIZE;
+    DCHECK_EQ(kConfigRunIdSize, master_id_.size());
+  }
 }
 
 ServerFamily::~ServerFamily() {
@@ -291,7 +307,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
   CHECK(acceptor_ == nullptr);
   acceptor_ = acceptor;
   main_listener_ = main_listener;
-  dfly_cmd_.reset(new DflyCmd(main_listener, journal_.get()));
+  dfly_cmd_.reset(new DflyCmd(main_listener, this));
 
   pb_task_ = shard_set->pool()->GetNextProactor();
 
@@ -431,7 +447,7 @@ void ServerFamily::SnapshotScheduling(const SnapshotSpec&& spec) {
     time_t last_save;
     {
       lock_guard lk(save_mu_);
-      last_save = lsinfo_->save_time;
+      last_save = last_save_info_->save_time;
     }
 
     if ((last_save / 60) == (now / 60)) {
@@ -724,6 +740,7 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
   if (new_version) {
     snapshots.resize(shard_set->size());
 
+    // In the new version we open a file per shard
     auto cb = [&](Transaction* t, EngineShard* shard) {
       fs::path shard_file = filename, abs_path = path;
       ShardId sid = shard->shard_id();
@@ -812,7 +829,7 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
 
     lock_guard lk(save_mu_);
     // swap - to deallocate the old version outstide of the lock.
-    lsinfo_.swap(save_info);
+    last_save_info_.swap(save_info);
   }
   return ec;
 }
@@ -834,7 +851,7 @@ error_code ServerFamily::DoFlush(Transaction* transaction, DbIndex db_ind) {
 
 shared_ptr<const LastSaveInfo> ServerFamily::GetLastSaveInfo() const {
   lock_guard lk(save_mu_);
-  return lsinfo_;
+  return last_save_info_;
 }
 
 void ServerFamily::DbSize(CmdArgList args, ConnectionContext* cntx) {
@@ -1168,10 +1185,10 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
   if (should_enter("PERSISTENCE", true)) {
     ADD_HEADER("# PERSISTENCE");
-    decltype(lsinfo_) save_info;
+    decltype(last_save_info_) save_info;
     {
       lock_guard lk(save_mu_);
-      save_info = lsinfo_;
+      save_info = last_save_info_;
     }
     append("last_save", save_info->save_time);
     append("last_save_file", save_info->file_name);
@@ -1188,6 +1205,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     if (etl.is_master) {
       append("role", "master");
       append("connected_slaves", m.conn_stats.num_replicas);
+      append("master_replid", master_id_);
     } else {
       append("role", "slave");
 
@@ -1351,6 +1369,41 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
       [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
 }
 
+void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() % 2 == 0)
+    goto err;
+
+  for (unsigned i = 1; i < args.size(); i += 2) {
+    DCHECK_LT(i + 1, args.size());
+    ToUpper(&args[i]);
+
+    std::string_view cmd = ArgS(args, i);
+    std::string_view arg = ArgS(args, i + 1);
+    if (cmd == "CAPA") {
+      if (arg == "dragonfly" && args.size() == 3 && i == 1) {
+        uint32_t sid = dfly_cmd_->AllocateSyncSession();
+        string sync_id = absl::StrCat("SYNC", sid);
+        cntx->conn_state.sync_session_id = sid;
+
+        // The response for 'capa dragonfly' is: <masterid> <syncid> <numthreads>
+        (*cntx)->StartArray(3);
+        (*cntx)->SendSimpleString(master_id_);
+        (*cntx)->SendSimpleString(sync_id);
+        (*cntx)->SendLong(shard_set->size());
+        return;
+      }
+    } else {
+      VLOG(1) << cmd << " " << arg;
+    }
+  }
+
+  (*cntx)->SendOk();
+  return;
+
+err:
+  (*cntx)->SendError(kSyntaxErr);
+}
+
 void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendRaw("*3\r\n$6\r\nmaster\r\n:0\r\n*0\r\n");
 }
@@ -1374,7 +1427,7 @@ void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
   time_t save_time;
   {
     lock_guard lk(save_mu_);
-    save_time = lsinfo_->save_time;
+    save_time = last_save_info_->save_time;
   }
   (*cntx)->SendLong(save_time);
 }
@@ -1437,6 +1490,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0}.HFUNC(_Shutdown)
             << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
+            << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, 0}.HFUNC(ReplConf)
             << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, 0}.HFUNC(Role)
             << CI{"SYNC", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Sync)
             << CI{"PSYNC", CO::ADMIN | CO::GLOBAL_TRANS, 3, 0, 0, 0}.HFUNC(Psync)

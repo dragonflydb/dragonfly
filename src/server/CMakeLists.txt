@@ -8,13 +8,14 @@ cxx_link(dfly_transaction uring_fiber_lib dfly_core strings_lib)
 
 add_library(dragonfly_lib  channel_slice.cc command_registry.cc
             config_flags.cc conn_context.cc debugcmd.cc dflycmd.cc
-            generic_family.cc hset_family.cc json_family.cc 
+            generic_family.cc hset_family.cc json_family.cc
             list_family.cc main_service.cc  rdb_load.cc rdb_save.cc replica.cc
             snapshot.cc script_mgr.cc server_family.cc
             set_family.cc stream_family.cc string_family.cc
             zset_family.cc version.cc)
 
-cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib strings_lib html_lib TRDP::jsoncons)
+cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib strings_lib html_lib
+         absl::random_random TRDP::jsoncons)
 
 add_library(dfly_test_lib test_utils.cc)
 cxx_link(dfly_test_lib dragonfly_lib facade_test gtest_main_ext)

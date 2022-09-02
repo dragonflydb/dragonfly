@@ -679,6 +679,8 @@ auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> Request* {
 void RespToArgList(const RespVec& src, CmdArgVec* dest) {
   dest->resize(src.size());
   for (size_t i = 0; i < src.size(); ++i) {
+    DCHECK(src[i].type == RespExpr::STRING);
+
     (*dest)[i] = ToMSS(src[i].GetBuf());
   }
 }
