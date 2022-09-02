@@ -159,6 +159,15 @@ OpResult<json> GetJson(const OpArgs& op_args, string_view key) {
   return decoder.get_result();
 }
 
+string ConvertToJsonPointer(const string& path) {
+  json j(json_object_arg, {{path, ""}});
+  j = jsonpath::unflatten(j);
+  json flat = jsonpointer::flatten(j);
+
+  auto it_begin = flat.object_range().begin();
+  return it_begin->key();
+}
+
 OpResult<string> OpGet(const OpArgs& op_args, string_view key,
                        vector<pair<string_view, JsonExpression>> expressions) {
   OpResult<json> result = GetJson(op_args, key);
@@ -330,6 +339,14 @@ OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key, stri
 
 OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path) {
   long total_deletions = 0;
+  if (path.empty()) {
+    auto& db_slice = op_args.shard->db_slice();
+    auto fres = db_slice.FindExt(op_args.db_ind, key);
+    if (IsValid(fres.first))
+      total_deletions += long(db_slice.Del(op_args.db_ind, fres.first));
+    return total_deletions;
+  }
+
   OpResult<json> result = GetJson(op_args, key);
   if (!result) {
     return total_deletions;
@@ -349,33 +366,26 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path) {
     return total_deletions;
   }
 
-  auto fJsonPathToPointer = [](const string& path) -> string {
-    json j(json_object_arg, {{path, ""}});
-    j = jsonpath::unflatten(j);
-    json flat = jsonpointer::flatten(j);
-    if (flat.empty() || !flat.is_object()) {
-      return "";
-    }
-
-    auto it_begin = flat.object_range().begin();
-    return it_begin->key();
-  };
-
   json patch(json_array_arg, {});
   for (const auto& it : deletion_items) {
-    string pointer = fJsonPathToPointer(it);
+    string pointer = ConvertToJsonPointer(it);
     if (pointer.empty()) {
+      VLOG(1) << "Failed to convert the following JSONPath to pointer: " << it;
       continue;
     }
 
+    total_deletions++;
     json patch_item(json_object_arg, {{"op", "remove"}, {"path", pointer}});
     patch.emplace_back(patch_item);
   }
 
-  total_deletions = deletion_items.size();
   jsonpatch::apply_patch(j, patch, ec);
-  SetString(op_args, key, j.as_string());
+  if (ec) {
+    VLOG(1) << "Failed to apply patch on json with error: " << ec.message();
+    return 0;
+  }
 
+  SetString(op_args, key, j.as_string());
   return total_deletions;
 }
 
@@ -383,7 +393,10 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path) {
 
 void JsonFamily::Del(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
-  string_view path = ArgS(args, 2);
+  string_view path;
+  if (args.size() > 2) {
+    path = ArgS(args, 2);
+  }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpDel(t->GetOpArgs(shard), key, path);
@@ -644,7 +657,7 @@ void JsonFamily::Register(CommandRegistry* registry) {
       NumIncrBy);
   *registry << CI{"JSON.NUMMULTBY", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1}.HFUNC(
       NumMultBy);
-  *registry << CI{"JSON.DEL", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(Del);
+  *registry << CI{"JSON.DEL", CO::WRITE, -2, 1, 1, 1}.HFUNC(Del);
 }
 
 }  // namespace dfly

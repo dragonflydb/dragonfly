@@ -464,6 +464,8 @@ TEST_F(JsonFamilyTest, Del) {
   auto resp = Run({"set", "json", json});
   ASSERT_THAT(resp, "OK");
 
+  /*
+
   resp = Run({"JSON.DEL", "json", "$.d.*"});
   EXPECT_THAT(resp, IntArg(3));
 
@@ -476,11 +478,19 @@ TEST_F(JsonFamilyTest, Del) {
   resp = Run({"GET", "json"});
   EXPECT_EQ(resp, R"({"a":{},"b":{"a":1},"c":{"a":1,"b":2},"d":{},"e":[]})");
 
-  resp = Run({"JSON.DEL", "json", "$.*"});
+  */
+
+  resp = Run({"JSON.DEL", "json", "$..*"});
   EXPECT_THAT(resp, IntArg(5));
 
   resp = Run({"GET", "json"});
   EXPECT_EQ(resp, R"({})");
+
+  resp = Run({"JSON.DEL", "json"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"GET", "json"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
 }  // namespace dfly
