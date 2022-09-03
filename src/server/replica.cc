@@ -123,7 +123,7 @@ bool Replica::Run(ConnectionContext* cntx) {
     return false;
   }
 
-  sync_fb_ = ::boost::fibers::fiber(&Replica::ReplicateFb, this);
+  sync_fb_ = ::boost::fibers::fiber(&Replica::ReplicateRedisFb, this);
   (*cntx)->SendOk();
 
   return true;
@@ -207,9 +207,13 @@ void Replica::Stop() {
   }
   if (sync_fb_.joinable())
     sync_fb_.join();
+
+  for (auto& ptr : shard_flows_) {
+    ptr->Stop();
+  }
 }
 
-void Replica::ReplicateFb() {
+void Replica::ReplicateRedisFb() {
   error_code ec;
 
   while (state_mask_ & R_ENABLED) {
@@ -266,11 +270,32 @@ void Replica::ReplicateFb() {
     else
       ec = ConsumeDflyStream();
 
-    LOG_IF(ERROR, !FiberSocketBase::IsConnClosed(ec)) << "Replica socket error " << ec;
+    LOG_IF(ERROR, ec && !FiberSocketBase::IsConnClosed(ec)) << "Replica socket error " << ec;
     state_mask_ &= ~R_SYNC_OK;  //
   }
 
   VLOG(1) << "Replication fiber finished";
+}
+
+void Replica::ReplicateDFFb() {
+  base::IoBuf io_buf(16_KB);
+
+  error_code ec;
+  size_t total_read = 0;
+  while (state_mask_ & R_ENABLED) {
+    io::MutableBytes buf = io_buf.AppendBuffer();
+    io::Result<size_t> size_res = sock_->Recv(buf);
+    if (!size_res) {
+      error_code ec = size_res.error();
+      LOG_IF(WARNING, (!FiberSocketBase::IsConnClosed(ec)))
+          << "Error reading flow " << size_res.error().message();
+      break;
+    }
+
+    total_read += *size_res;
+  }
+
+  VLOG(1) << "ReplicateDFFb finished after reading " << total_read << " bytes";
 }
 
 error_code Replica::Greet() {
@@ -358,8 +383,8 @@ error_code Replica::Greet() {
     master_context_.dfly_session_id = param1;
     num_df_flows_ = param2;
 
-    VLOG(1) << "Master id: " << param0 << ", sync id: " << param1
-            << ", num journals " << num_df_flows_;
+    VLOG(1) << "Master id: " << param0 << ", sync id: " << param1 << ", num flows "
+            << num_df_flows_;
   } else {
     LOG(ERROR) << "Bad response " << ToSV(io_buf.InputBuffer());
 
@@ -473,6 +498,21 @@ error_code Replica::InitiateDflySync() {
 
   if (ec)
     return ec;
+
+  ReqSerializer serializer{sock_.get()};
+
+  // Master waits for this command in order to start sending replication stream.
+  serializer.SendCommand(StrCat("DFLY SYNC ", master_context_.dfly_session_id));
+  RETURN_ON_ERR(serializer.ec());
+
+  base::IoBuf io_buf{128};
+  unsigned consumed = 0;
+  RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
+  if (resp_args_.size() != 1 || resp_args_.front().type != RespExpr::STRING ||
+      ToSV(resp_args_.front().GetBuf()) != "OK") {
+    LOG(ERROR) << "Sync failed " << ToSV(io_buf.InputBuffer());
+    return make_error_code(errc::bad_message);
+  }
 
   state_mask_ |= R_SYNC_OK;
 
@@ -721,20 +761,24 @@ error_code Replica::StartFlow() {
   RETURN_ON_ERR(sock_->Connect(master_context_.master_ep));
 
   ReqSerializer serializer{sock_.get()};
-  serializer.SendCommand(StrCat("DFLY SYNC ", master_context_.master_repl_id, " ",
+  serializer.SendCommand(StrCat("DFLY FLOW ", master_context_.master_repl_id, " ",
                                 master_context_.dfly_session_id, " ", master_context_.flow_id));
   RETURN_ON_ERR(serializer.ec());
 
   parser_.reset(new RedisParser{false});  // client mode
+
   base::IoBuf io_buf{128};
   unsigned consumed = 0;
   RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
 
   if (resp_args_.size() != 1 || resp_args_.front().type != RespExpr::STRING ||
       ToSV(resp_args_.front().GetBuf()) != "OK") {
-    LOG(ERROR) << "Bad SYNC response " << ToSV(io_buf.InputBuffer());
+    LOG(ERROR) << "Bad FLOW response " << ToSV(io_buf.InputBuffer());
     return make_error_code(errc::bad_message);
   }
+  state_mask_ = R_ENABLED | R_TCP_CONNECTED;
+
+  sync_fb_ = ::boost::fibers::fiber(&Replica::ReplicateDFFb, this);
 
   return error_code{};
 }

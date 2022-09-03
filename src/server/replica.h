@@ -76,14 +76,18 @@ class Replica {
     R_SYNC_OK = 0x10,
   };
 
-  void ReplicateFb();
-
   struct PSyncResponse {
     // string - end of sync token (diskless)
     // size_t - size of the full sync blob (disk-based).
     // if fullsync is 0, it means that master can continue with partial replication.
     std::variant<std::string, size_t> fullsync;
   };
+
+  // Fiber function used to sync from Redis master.
+  void ReplicateRedisFb();
+
+  // Fiber function used to sync from DF master.
+  void ReplicateDFFb();
 
   // This function uses parser_ and cmd_args_ in order to consume a single response
   // from the sock_. The output will reside in cmd_str_args_.

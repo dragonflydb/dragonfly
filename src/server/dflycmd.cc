@@ -12,6 +12,7 @@
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
+#include "server/rdb_save.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
@@ -25,6 +26,21 @@ namespace dfly {
 using namespace facade;
 using namespace std;
 using util::ProactorBase;
+
+namespace {
+
+const char kIdNotFound[] = "syncid not found";
+const char kInvalidSyncId[] = "bad sync id";
+
+bool ToSyncId(string_view str, uint32_t* num) {
+  if (!absl::StartsWith(str, "SYNC"))
+    return false;
+  str.remove_prefix(4);
+
+  return absl::SimpleAtoi(str, num);
+}
+
+}  // namespace
 
 DflyCmd::DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family)
     : listener_(listener), sf_(server_family) {
@@ -73,44 +89,82 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  if (sub_cmd == "SYNC") {
-    // SYNC <masterid> <syncid> <shardid>
+  if (sub_cmd == "FLOW" && args.size() == 5) {
+    // FLOW <masterid> <syncid> <shardid>
 
-    if (args.size() == 5) {
-      string_view masterid = ArgS(args, 2);
-      string_view syncid_str = ArgS(args, 3);
-      string_view shard_id_str = ArgS(args, 4);
+    string_view masterid = ArgS(args, 2);
+    string_view syncid_str = ArgS(args, 3);
+    string_view shard_id_str = ArgS(args, 4);
 
-      unsigned shard_id, sync_id;
-      VLOG(1) << "Got DFLY SYNC " << masterid << " " << syncid_str << " " << shard_id_str;
+    unsigned shard_id, sync_id;
+    VLOG(1) << "Got DFLY FLOW " << masterid << " " << syncid_str << " " << shard_id_str;
 
-      if (masterid != sf_->master_id()) {
-        return rb->SendError("Bad master id");
-      }
+    if (masterid != sf_->master_id()) {
+      return rb->SendError("Bad master id");
+    }
 
-      if (!absl::SimpleAtoi(shard_id_str, &shard_id) || !absl::StartsWith(syncid_str, "SYNC")) {
-        return rb->SendError(kSyntaxErr);
-      }
+    if (!absl::SimpleAtoi(shard_id_str, &shard_id) || shard_id >= shard_set->size()) {
+      return rb->SendError(facade::kInvalidIntErr);
+    }
 
-      syncid_str.remove_prefix(4);
-      if (!absl::SimpleAtoi(syncid_str, &sync_id) || shard_id >= shard_set->size()) {
-        return rb->SendError("Bad id");
-      }
+    if (!ToSyncId(syncid_str, &sync_id)) {
+      return rb->SendError(kInvalidSyncId);
+    }
 
+    {
+      unique_lock lk(mu_);
       auto it = sync_info_.find(sync_id);
       if (it == sync_info_.end()) {
-        return rb->SendError("syncid not found");
+        return rb->SendError(kIdNotFound);
       }
-
-      // assuming here that shard id and thread id is the same thing.
-      if (int(shard_id) != ProactorBase::GetIndex()) {
-        listener_->Migrate(cntx->owner(), pool->at(shard_id));
-      }
-      return rb->SendOk();
+      auto& entry = it->second.shard_map[shard_id];
+      entry.conn = cntx->owner();
     }
+    cntx->owner()->SetName(absl::StrCat("repl_flow_", sync_id));
+
+    cntx->conn_state.repl_session_id = sync_id;
+    cntx->conn_state.repl_threadid = shard_id;
+
+    // assuming here that shard id and thread id is the same thing.
+    listener_->Migrate(cntx->owner(), pool->at(shard_id));
+    CHECK(EngineShard::tlocal() && EngineShard::tlocal()->shard_id() == shard_id);
+
+    return rb->SendOk();
   }
 
+  if (sub_cmd == "SYNC" && args.size() == 3) {
+    string_view syncid_str = ArgS(args, 2);
+    uint32_t syncid;
+
+    if (!ToSyncId(syncid_str, &syncid)) {
+      return rb->SendError(kInvalidSyncId);
+    }
+
+    cntx->transaction->Schedule();
+    OpStatus status = OpStatus::OK;
+    boost::fibers::mutex mu;
+    cntx->transaction->Execute(
+        [&](Transaction* t, EngineShard* shard) {
+          OpStatus st = ReplicateInShard(syncid, t, shard);
+          lock_guard lk(mu);
+          status = st;
+          return OpStatus::OK;
+        },
+        true);
+
+    if (status == OpStatus::OK)
+      return rb->SendOk();
+    return rb->SendError("replication error");
+  }
   rb->SendError(kSyntaxErr);
+}
+
+uint32_t DflyCmd::AllocateSyncSession() {
+  unique_lock lk(mu_);
+  auto [it, inserted] = sync_info_.emplace(next_sync_id_, SyncInfo{});
+  CHECK(inserted);
+  ++next_sync_id_;
+  return it->first;
 }
 
 void DflyCmd::OnClose(ConnectionContext* cntx) {
@@ -193,12 +247,48 @@ void DflyCmd::HandleJournal(CmdArgList args, ConnectionContext* cntx) {
   return rb->SendError(reply, kSyntaxErrType);
 }
 
-uint32_t DflyCmd::AllocateSyncSession() {
+OpStatus DflyCmd::ReplicateInShard(uint32_t syncid, Transaction* t, EngineShard* shard) {
   unique_lock lk(mu_);
-  auto [it, inserted] = sync_info_.emplace(next_sync_id_, SyncInfo{});
-  CHECK(inserted);
-  ++next_sync_id_;
-  return it->first;
+  auto it = sync_info_.find(syncid);
+  if (it == sync_info_.end()) {
+    return OpStatus::KEY_NOTFOUND;
+  }
+
+  auto shard_it = it->second.shard_map.find(shard->shard_id());
+  if (shard_it == it->second.shard_map.end()) {
+    return OpStatus::KEY_NOTFOUND;
+  }
+  CHECK(!shard_it->second.repl_fb.joinable());
+  Connection* conn = shard_it->second.conn;
+  shard_it->second.repl_fb = boost::fibers::fiber(&DflyCmd::SnapshotFb, this, conn, shard);
+  lk.unlock();
+
+  return OpStatus::OK;
+}
+
+void DflyCmd::SnapshotFb(Connection* conn, EngineShard* shard) {
+  RdbSaver saver(conn->socket(), true, false);
+
+  // TODO: right now it's a poc code just for sake of sending something and show it can be done.
+  // we will need to think how we send rdb header etc.
+  error_code ec = saver.SaveHeader({});
+
+  // also we need to think how to manage errors when replicating.
+  if (ec) {
+    LOG(ERROR) << ec;
+    return;
+  }
+
+  saver.StartSnapshotInShard(true, shard);
+  ec = saver.SaveBody(nullptr);
+  if (ec) {
+    LOG(ERROR) << ec;
+    return;
+  }
+
+  LOG(INFO) << "shard sync finished";
+  // Again, to remove....
+  conn->socket()->Shutdown(SHUT_RDWR);
 }
 
 void DflyCmd::BreakOnShutdown() {
