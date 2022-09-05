@@ -74,6 +74,8 @@ class Connection : public util::Connection {
 
  protected:
   void OnShutdown() override;
+  void OnPreMigrateThread() override;
+  void OnPostMigrateThread() override;
 
  private:
   enum ParserStatus { OK, NEED_MORE, ERROR };
@@ -97,6 +99,7 @@ class Connection : public util::Connection {
 
   ParserStatus ParseRedis();
   ParserStatus ParseMemcache();
+  void OnBreakCb(int32_t mask);
 
   base::IoBuf io_buf_;
   std::unique_ptr<RedisParser> redis_parser_;
@@ -123,6 +126,7 @@ class Connection : public util::Connection {
 
   unsigned parser_error_ = 0;
   uint32_t id_;
+  uint32_t break_poll_id_ = UINT32_MAX;
 
   Protocol protocol_;
 
