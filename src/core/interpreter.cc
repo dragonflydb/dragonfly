@@ -14,6 +14,11 @@ extern "C" {
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
+
+LUALIB_API int (luaopen_cjson) (lua_State *L);
+LUALIB_API int (luaopen_struct) (lua_State *L);
+LUALIB_API int (luaopen_cmsgpack) (lua_State *L);
+LUALIB_API int (luaopen_bit) (lua_State *L);
 }
 
 #include <absl/strings/str_format.h>
@@ -196,12 +201,24 @@ int RaiseError(lua_State* lua) {
   return lua_error(lua);
 }
 
+void LoadLibrary(lua_State *lua, const char *libname, lua_CFunction luafunc) {
+  lua_pushcfunction(lua, luafunc);
+  lua_pushstring(lua, libname);
+  lua_call(lua, 1, 0);
+}
+
 void InitLua(lua_State* lua) {
   Require(lua, "", luaopen_base);
   Require(lua, LUA_TABLIBNAME, luaopen_table);
   Require(lua, LUA_STRLIBNAME, luaopen_string);
   Require(lua, LUA_MATHLIBNAME, luaopen_math);
   Require(lua, LUA_DBLIBNAME, luaopen_debug);
+
+  LoadLibrary(lua, "cjson", luaopen_cjson);
+  LoadLibrary(lua, "struct", luaopen_struct);
+  LoadLibrary(lua, "cmsgpack", luaopen_cmsgpack);
+  LoadLibrary(lua, "bit", luaopen_bit);
+
 
   /* Add a helper function we use for pcall error reporting.
    * Note that when the error is in the C function we want to report the
