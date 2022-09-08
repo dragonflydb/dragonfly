@@ -294,7 +294,8 @@ pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, string_view
         }
       };
 
-      db.prime.CVCUponBump(change_cb_.front().first, res.first, bump_cb);
+      //
+      db.prime.CVCUponBump(change_cb_.back().first, res.first, bump_cb);
     }
 
     res.first = db.prime.BumpUp(res.first, PrimeBumpPolicy{});

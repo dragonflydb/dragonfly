@@ -301,4 +301,24 @@ TEST_F(InterpreterTest, ArgKeys) {
   EXPECT_EQ("[str(foo) str(key1) str(key2)]", ser_.res);
 }
 
+TEST_F(InterpreterTest, Modules) {
+  // cjson module
+  EXPECT_TRUE(Execute("return cjson.encode({1, 2, 3})"));
+  EXPECT_EQ("str([1,2,3])", ser_.res);
+  EXPECT_TRUE(Execute("return cjson.decode('{\"a\": 1}')['a']"));
+  EXPECT_EQ("d(1)", ser_.res);
+
+  // cmsgpack module
+  EXPECT_TRUE(Execute("return cmsgpack.pack('ok', true)"));
+  EXPECT_EQ("str(\xA2ok\xC3)", ser_.res);
+
+  // bit module
+  EXPECT_TRUE(Execute("return bit.bor(8, 4, 5)"));
+  EXPECT_EQ("i(13)", ser_.res);
+
+  // struct module
+  EXPECT_TRUE(Execute("return struct.pack('bbc4', 1, 2, 'test')"));
+  EXPECT_EQ("str(\x1\x2test)", ser_.res);
+}
+
 }  // namespace dfly
