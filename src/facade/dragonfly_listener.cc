@@ -22,8 +22,8 @@ ABSL_FLAG(bool, conn_use_incoming_cpu, false,
           "If true uses incoming cpu of a socket in order to distribute"
           " incoming connections");
 
-ABSL_FLAG(string, tls_client_cert_file, "", "cert file for tls connections");
-ABSL_FLAG(string, tls_client_key_file, "", "key file for tls connections");
+ABSL_FLAG(string, tls_cert_file, "", "cert file for tls connections");
+ABSL_FLAG(string, tls_key_file, "", "key file for tls connections");
 
 #if 0
 enum TlsClientAuth {
@@ -54,8 +54,8 @@ namespace {
 // To connect: openssl s_client  -cipher "ADH:@SECLEVEL=0" -state -crlf  -connect 127.0.0.1:6380
 static SSL_CTX* CreateSslCntx() {
   SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
-  const auto& tls_client_key_file = GetFlag(FLAGS_tls_client_key_file);
-  if (tls_client_key_file.empty()) {
+  const auto& tls_key_file = GetFlag(FLAGS_tls_key_file);
+  if (tls_key_file.empty()) {
     // To connect - use openssl s_client -cipher with either:
     // "AECDH:@SECLEVEL=0" or "ADH:@SECLEVEL=0" setting.
     CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "aNULL"));
@@ -66,17 +66,17 @@ static SSL_CTX* CreateSslCntx() {
     // you can still connect with redis-cli with :
     // redis-cli --tls --insecure --tls-ciphers "ADH:@SECLEVEL=0"
     LOG(WARNING)
-        << "tls-client-key-file not set, no keys are loaded and anonymous ciphers are enabled. "
+        << "tls-key-file not set, no keys are loaded and anonymous ciphers are enabled. "
         << "Do not use in production!";
-  } else {  // tls_client_key_file is set.
-    CHECK_EQ(1, SSL_CTX_use_PrivateKey_file(ctx, tls_client_key_file.c_str(), SSL_FILETYPE_PEM));
-    const auto& tls_client_cert_file = GetFlag(FLAGS_tls_client_cert_file);
+  } else {  // tls_key_file is set.
+    CHECK_EQ(1, SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM));
+    const auto& tls_cert_file = GetFlag(FLAGS_tls_cert_file);
 
-    if (!tls_client_cert_file.empty()) {
-      // TO connect with redis-cli you need both tls-client-key-file and tls-client-cert-file
+    if (!tls_cert_file.empty()) {
+      // TO connect with redis-cli you need both tls-key-file and tls-cert-file
       // loaded. Use `redis-cli --tls -p 6380 --insecure  PING` to test
 
-      CHECK_EQ(1, SSL_CTX_use_certificate_chain_file(ctx, tls_client_cert_file.c_str()));
+      CHECK_EQ(1, SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()));
     }
     CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
   }
