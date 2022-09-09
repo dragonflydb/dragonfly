@@ -22,17 +22,17 @@ class StringSet : public DenseSet {
 
   bool Add(std::string_view s1);
 
-  bool AddRaw(sds s1);
+  bool AddSds(sds s1);
 
   bool Erase(std::string_view s1);
 
-  bool EraseRaw(sds s1);
+  bool EraseSds(sds s1);
 
   bool Contains(std::string_view s1) const;
 
-  bool ContainsRaw(sds s1) const;
+  bool ContainsSds(sds s1) const;
 
-  void Clear() override;
+  void Clear();
 
   std::optional<std::string> Pop();
   sds PopRaw();

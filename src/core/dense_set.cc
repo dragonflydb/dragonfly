@@ -29,7 +29,7 @@ DenseSet::DenseSet(pmr::memory_resource* mr) : entries_(mr) {
 }
 
 DenseSet::~DenseSet() {
-  Clear();
+  ClearInternal();
 }
 
 size_t DenseSet::PushFront(DenseSet::ChainVectorIterator it, void* data) {
@@ -40,14 +40,7 @@ size_t DenseSet::PushFront(DenseSet::ChainVectorIterator it, void* data) {
   }
 
   // otherwise make a new link and connect it to the front of the list
-  LinkAllocator la(mr());
-  DenseLinkKey* lk = la.allocate(1);
-  la.construct(lk);
-
-  lk->next = *it;
-  it->SetLink(lk);
-  lk->SetObject(data);
-
+  it->SetLink(NewLink(data, *it));
   return ObjectAllocSize(data);
 }
 
@@ -55,8 +48,7 @@ void DenseSet::PushFront(DenseSet::ChainVectorIterator it, DenseSet::DensePtr pt
   if (it->IsEmpty()) {
     it->SetObject(ptr.GetObject());
     if (ptr.IsLink()) {
-      // deallocate the link if it is no longer a link as it is now in an empty list
-      mr()->deallocate(ptr.Raw(), sizeof(DenseLinkKey), alignof(DenseLinkKey));
+      FreeLink(ptr);
     }
   } else if (ptr.IsLink()) {
     // if the pointer is already a link then no allocation needed
@@ -64,19 +56,13 @@ void DenseSet::PushFront(DenseSet::ChainVectorIterator it, DenseSet::DensePtr pt
     *it = ptr;
   } else {
     // allocate a new link if needed and copy the pointer to the new link
-    LinkAllocator la(mr());
-    DenseLinkKey* lk = la.allocate(1);
-    la.construct(lk);
-
-    lk->next = *it;
-    lk->SetObject(ptr.GetObject());
-    it->SetLink(lk);
+    it->SetLink(NewLink(ptr.GetObject(), *it));
   }
 }
 
 auto DenseSet::PopPtrFront(DenseSet::ChainVectorIterator it) -> DensePtr {
   if (it->IsEmpty()) {
-    return DensePtr(nullptr);
+    return DensePtr{};
   }
 
   DensePtr front = *it;
@@ -87,8 +73,13 @@ auto DenseSet::PopPtrFront(DenseSet::ChainVectorIterator it) -> DensePtr {
     it->Reset();
   } else {
     DCHECK(it->IsLink());
-    // this will not return nullptr since it is a Link
-    *it = *it->Next();
+    // since a DenseLinkKey could be at the end of a chain and have a nullptr for next
+    // avoid dereferencing a nullptr and just reset the pointer to this DenseLinkKey
+    if (it->Next() == nullptr) {
+      it->Reset();
+    } else {
+      *it = *it->Next();
+    }
   }
 
   return front;
@@ -99,13 +90,13 @@ void* DenseSet::PopDataFront(DenseSet::ChainVectorIterator it) {
   void* ret = front.GetObject();
 
   if (front.IsLink()) {
-    DenseLinkKey* lk = (DenseLinkKey*)front.Raw();
-    mr()->deallocate(lk, sizeof(DenseLinkKey), alignof(DenseLinkKey));
+    FreeLink(front);
   }
 
   return ret;
 }
 
+// updates *node with the next item
 auto DenseSet::Unlink(DenseSet::DensePtr* node) -> DensePtr {
   DensePtr ret = *node;
   if (node->IsObject()) {
@@ -117,18 +108,19 @@ auto DenseSet::Unlink(DenseSet::DensePtr* node) -> DensePtr {
   return ret;
 }
 
+// updates *node with the next item
 void* DenseSet::UnlinkAndFree(DenseSet::DensePtr* node) {
   DensePtr unlinked = Unlink(node);
   void* ret = unlinked.GetObject();
 
   if (unlinked.IsLink()) {
-    mr()->deallocate(unlinked.Raw(), sizeof(DenseLinkKey), alignof(DenseLinkKey));
+    FreeLink(unlinked);
   }
 
   return ret;
 }
 
-void DenseSet::Clear() {
+void DenseSet::ClearInternal() {
   for (auto it = entries_.begin(); it != entries_.end(); ++it) {
     while (!it->IsEmpty()) {
       PopDataFront(it);
@@ -158,22 +150,12 @@ auto DenseSet::FindEmptyAround(uint32_t bid) -> ChainVectorIterator {
   return entries_.end();
 }
 
-bool DenseSet::Reserve(size_t sz) {
+void DenseSet::Reserve(size_t sz) {
   sz = std::min<size_t>(sz, kMinSize);
-
-  if (sz > entries_.max_size()) {
-    return false;
-  }
 
   sz = absl::bit_ceil(sz);
   capacity_log_ = absl::bit_width(sz);
   entries_.reserve(sz);
-
-  if (entries_.capacity() != sz) {
-    return false;
-  }
-
-  return true;
 }
 
 void DenseSet::Grow() {
@@ -280,7 +262,12 @@ bool DenseSet::AddInternal(void* ptr) {
 }
 
 auto DenseSet::Find(const void* ptr, uint32_t bid) const -> const DensePtr* {
-  // first look for displaced nodes since this is quicker than iterating a poential long chain
+  const DensePtr* curr = &entries_[bid];
+  if (!curr->IsEmpty() && Equal(*curr, ptr)) {
+    return curr;
+  }
+
+  // first look for displaced nodes since this is quicker than iterating a potential long chain
   if (bid && Equal(entries_[bid - 1], ptr)) {
     return &entries_[bid - 1];
   }
@@ -290,7 +277,7 @@ auto DenseSet::Find(const void* ptr, uint32_t bid) const -> const DensePtr* {
   }
 
   // if the node is not displaced, search the correct chain
-  const DensePtr* curr = &entries_[bid];
+  curr = curr->Next();
   while (curr != nullptr) {
     if (Equal(*curr, ptr)) {
       return curr;
@@ -301,20 +288,6 @@ auto DenseSet::Find(const void* ptr, uint32_t bid) const -> const DensePtr* {
 
   // not in the Set
   return nullptr;
-}
-
-auto DenseSet::Find(const void* ptr) const -> const DensePtr* {
-  return Find(ptr, BucketId(ptr));
-}
-
-auto DenseSet::Find(const void* ptr, uint32_t bid) -> DensePtr* {
-  const DensePtr* ret = const_cast<const DenseSet*>(this)->Find(ptr, bid);
-  return const_cast<DensePtr*>(ret);
-}
-
-auto DenseSet::Find(const void* ptr) -> DensePtr* {
-  const DensePtr* ret = const_cast<const DenseSet*>(this)->Find(ptr);
-  return const_cast<DensePtr*>(ret);
 }
 
 // Same idea as FindAround but provide the const guarantee

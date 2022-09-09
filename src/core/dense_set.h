@@ -45,12 +45,15 @@ class DenseSet {
   virtual uint64_t Hash(const void*) const = 0;
   virtual bool Equal(const void*, const void*) const = 0;
   virtual size_t ObjectAllocSize(const void*) const = 0;
-  virtual void Clear();
 
   bool AddInternal(void*);
   bool ContainsInternal(const void*) const;
   void* EraseInternal(void*);
   void* PopInternal();
+  // Note this does not free any dynamic allocations done by derived classes, that a DensePtr
+  // in the set may point to. This function only frees the allocated DenseLinkKeys created by
+  // DenseSet. All data allocated by a derived class should be freed before calling this
+  void ClearInternal();
 
  private:
   DenseSet(const DenseSet&) = delete;
@@ -122,8 +125,8 @@ class DenseSet {
       if (IsObject()) {
         return Raw();
       }
-      DenseLinkKey* lk = (DenseLinkKey*)Raw();
-      return lk->Raw();
+
+      return AsLink()->Raw();
     }
 
     // Sets pointer but preserves tagging info
@@ -131,12 +134,20 @@ class DenseSet {
       ptr_ = (void*)((uptr() & kTagMask) | (uintptr_t(obj) & ~kTagMask));
     }
 
+    DenseLinkKey* AsLink() {
+      return (DenseLinkKey*)Raw();
+    }
+
+    const DenseLinkKey* AsLink() const {
+      return (const DenseLinkKey*)Raw();
+    }
+
     DensePtr* Next() {
       if (!IsLink()) {
         return nullptr;
       }
 
-      return &((DenseLinkKey*)Raw())->next;
+      return &AsLink()->next;
     }
 
     const DensePtr* Next() const {
@@ -144,7 +155,7 @@ class DenseSet {
         return nullptr;
       }
 
-      return &((DenseLinkKey*)Raw())->next;
+      return &AsLink()->next;
     }
 
    private:
@@ -205,9 +216,35 @@ class DenseSet {
 
   // ============ Pseudo Linked List in DenseSet end ==================
   const DensePtr* Find(const void* ptr, uint32_t bid) const;
-  const DensePtr* Find(const void* ptr) const;
-  DensePtr* Find(const void* ptr, uint32_t bid);
-  DensePtr* Find(const void* ptr);
+
+  const DensePtr* Find(const void* ptr) const {
+    return Find(ptr, BucketId(ptr));
+  }
+
+  DensePtr* Find(const void* ptr, uint32_t bid) {
+    const DensePtr* ret = const_cast<const DenseSet*>(this)->Find(ptr, bid);
+    return const_cast<DensePtr*>(ret);
+  }
+
+  DensePtr* Find(const void* ptr) {
+    const DensePtr* ret = const_cast<const DenseSet*>(this)->Find(ptr);
+    return const_cast<DensePtr*>(ret);
+  }
+
+  inline DenseLinkKey* NewLink(void* data, DensePtr next) {
+    LinkAllocator la(mr());
+    DenseLinkKey* lk = la.allocate(1);
+    la.construct(lk);
+
+    lk->next = next;
+    lk->SetObject(data);
+    return lk;
+  }
+
+  inline void FreeLink(DensePtr link) {
+    // deallocate the link if it is no longer a link as it is now in an empty list
+    mr()->deallocate(link.AsLink(), sizeof(DenseLinkKey), alignof(DenseLinkKey));
+  }
 
   std::pmr::vector<DensePtr> entries_;
   size_t obj_malloc_used_ = 0;
@@ -374,7 +411,7 @@ class DenseSet {
   using ItemCb = std::function<void(const void*)>;
 
   uint32_t Scan(uint32_t cursor, const ItemCb& cb) const;
-  bool Reserve(size_t sz);
+  void Reserve(size_t sz);
 };
 
 }  // namespace dfly

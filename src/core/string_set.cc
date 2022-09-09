@@ -1,7 +1,6 @@
-#include <cstdint>
+#include "core/string_set.h"
 
 #include "core/compact_object.h"
-#include "core/string_set.h"
 #include "redis/sds.h"
 
 extern "C" {
@@ -29,7 +28,7 @@ size_t StringSet::ObjectAllocSize(const void* s1) const {
   return zmalloc_usable_size(sdsAllocPtr((sds)s1));
 }
 
-bool StringSet::AddRaw(sds s1) {
+bool StringSet::AddSds(sds s1) {
   return AddInternal(s1);
 }
 
@@ -43,8 +42,8 @@ bool StringSet::Add(std::string_view s1) {
   return true;
 }
 
-bool StringSet::EraseRaw(sds s1) {
-  void *ret = EraseInternal(s1);
+bool StringSet::EraseSds(sds s1) {
+  void* ret = EraseInternal(s1);
   if (ret == nullptr) {
     return false;
   } else {
@@ -55,12 +54,12 @@ bool StringSet::EraseRaw(sds s1) {
 
 bool StringSet::Erase(std::string_view s1) {
   sds to_erase = sdsnewlen(s1.data(), s1.size());
-  bool ret = EraseRaw(to_erase);
+  bool ret = EraseSds(to_erase);
   sdsfree(to_erase);
   return ret;
 }
 
-bool StringSet::ContainsRaw(sds s1) const {
+bool StringSet::ContainsSds(sds s1) const {
   return ContainsInternal(s1);
 }
 
@@ -76,7 +75,7 @@ void StringSet::Clear() {
     sdsfree((sds)*it);
   }
 
-  DenseSet::Clear();
+  ClearInternal();
 }
 
 std::optional<std::string> StringSet::Pop() {
