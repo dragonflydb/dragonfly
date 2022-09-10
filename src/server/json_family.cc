@@ -159,13 +159,46 @@ OpResult<json> GetJson(const OpArgs& op_args, string_view key) {
   return decoder.get_result();
 }
 
-string ConvertToJsonPointer(const string& path) {
-  json j(json_object_arg, {{path, ""}});
-  j = jsonpath::unflatten(j);
-  json flat = jsonpointer::flatten(j);
+string ConvertToJsonPointer(const string& json_path) {
+  if (json_path.empty() || json_path[0] != '$') {
+    return "";
+  }
 
-  auto it_begin = flat.object_range().begin();
-  return it_begin->key();
+  vector<string> parts;
+  bool invalid_format = false;
+  std::size_t i = 1;
+  while (i < json_path.size()) {
+    bool is_array = false;
+    bool is_object = false;
+    if (json_path[i] == '[' && json_path[i + 1] == '\'') {
+      is_object = true;
+      i += 2;
+    }
+    else if (json_path[i] == '[') {
+      is_array = true;
+      i += 1;
+    }
+
+    if (is_array) {
+      auto end_pos = json_path.find(']', i);
+      parts.emplace_back(json_path.substr(i, end_pos - i));
+      i = end_pos + 1;
+    } else if (is_object) {
+      auto end_pos = json_path.find("']", i);
+      parts.emplace_back(json_path.substr(i, end_pos - i));
+      i = end_pos + 2;
+    } else {
+      invalid_format = true;
+      break;
+    }
+  }
+
+  if (invalid_format) {
+    return "";
+  }
+
+  string result = absl::StrJoin(parts, "/");
+  return '/' + result; // add leading slash
 }
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key,
@@ -342,8 +375,10 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path) {
   if (path.empty()) {
     auto& db_slice = op_args.shard->db_slice();
     auto fres = db_slice.FindExt(op_args.db_ind, key);
-    if (IsValid(fres.first))
+    if (IsValid(fres.first)) {
       total_deletions += long(db_slice.Del(op_args.db_ind, fres.first));
+    }
+
     return total_deletions;
   }
 
@@ -367,13 +402,13 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path) {
   }
 
   json patch(json_array_arg, {});
+  reverse(deletion_items.begin(), deletion_items.end()); // deletion should finish at root keys.
   for (const auto& it : deletion_items) {
     string pointer = ConvertToJsonPointer(it);
     if (pointer.empty()) {
       VLOG(1) << "Failed to convert the following JSONPath to pointer: " << it;
       continue;
     }
-
     total_deletions++;
     json patch_item(json_object_arg, {{"op", "remove"}, {"path", pointer}});
     patch.emplace_back(patch_item);

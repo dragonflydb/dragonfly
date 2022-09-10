@@ -464,8 +464,6 @@ TEST_F(JsonFamilyTest, Del) {
   auto resp = Run({"set", "json", json});
   ASSERT_THAT(resp, "OK");
 
-  /*
-
   resp = Run({"JSON.DEL", "json", "$.d.*"});
   EXPECT_THAT(resp, IntArg(3));
 
@@ -478,10 +476,8 @@ TEST_F(JsonFamilyTest, Del) {
   resp = Run({"GET", "json"});
   EXPECT_EQ(resp, R"({"a":{},"b":{"a":1},"c":{"a":1,"b":2},"d":{},"e":[]})");
 
-  */
-
   resp = Run({"JSON.DEL", "json", "$..*"});
-  EXPECT_THAT(resp, IntArg(5));
+  EXPECT_THAT(resp, IntArg(8));
 
   resp = Run({"GET", "json"});
   EXPECT_EQ(resp, R"({})");
