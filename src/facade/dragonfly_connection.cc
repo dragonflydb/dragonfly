@@ -148,6 +148,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 Connection::~Connection() {
 }
 
+// Called from Connection::Shutdown() right after socket_->Shutdown call.
 void Connection::OnShutdown() {
   VLOG(1) << "Connection::OnShutdown";
 
@@ -155,6 +156,26 @@ void Connection::OnShutdown() {
     for (const auto& k_v : shutdown_->map) {
       k_v.second();
     }
+  }
+}
+
+void Connection::OnPreMigrateThread() {
+  // If we migrating to another io_uring we should cancel any pending requests we have.
+  if (break_poll_id_ != kuint32max) {
+    uring::UringSocket* us = static_cast<uring::UringSocket*>(socket_.get());
+    us->CancelPoll(break_poll_id_);
+    break_poll_id_ = kuint32max;
+  }
+}
+
+void Connection::OnPostMigrateThread() {
+  // Once we migrated, we should rearm OnBreakCb callback.
+  if (breaker_cb_) {
+    DCHECK_EQ(kuint32max, break_poll_id_);
+
+    uring::UringSocket* us = static_cast<uring::UringSocket*>(socket_.get());
+    break_poll_id_ =
+        us->PollEvent(POLLERR | POLLHUP, [this](int32_t mask) { this->OnBreakCb(mask); });
   }
 }
 
@@ -221,30 +242,19 @@ void Connection::HandleRequests() {
     } else {
       cc_.reset(service_->CreateContext(peer, this));
 
-      bool should_disarm_poller = false;
       // TODO: to move this interface to LinuxSocketBase so we won't need to cast.
       uring::UringSocket* us = static_cast<uring::UringSocket*>(socket_.get());
-      uint32_t poll_id = 0;
       if (breaker_cb_) {
-        should_disarm_poller = true;
-
-        poll_id = us->PollEvent(POLLERR | POLLHUP, [&](int32_t mask) {
-          cc_->conn_closing = true;
-          if (mask > 0) {
-            VLOG(1) << "Got event " << mask;
-            breaker_cb_(mask);
-          }
-
-          evc_.notify();  // Notify dispatch fiber.
-          should_disarm_poller = false;
-        });
+        break_poll_id_ =
+            us->PollEvent(POLLERR | POLLHUP, [this](int32_t mask) { this->OnBreakCb(mask); });
       }
 
       ConnectionFlow(peer);
 
-      if (should_disarm_poller) {
-        us->CancelPoll(poll_id);
+      if (break_poll_id_ != kuint32max) {
+        us->CancelPoll(break_poll_id_);
       }
+
       cc_.reset();
     }
   }
@@ -256,8 +266,7 @@ void Connection::RegisterOnBreak(BreakerCb breaker_cb) {
   breaker_cb_ = breaker_cb;
 }
 
-void Connection::SendMsgVecAsync(const PubMessage& pub_msg,
-                                 fibers_ext::BlockingCounter bc) {
+void Connection::SendMsgVecAsync(const PubMessage& pub_msg, fibers_ext::BlockingCounter bc) {
   DCHECK(cc_);
 
   if (cc_->conn_closing) {
@@ -508,6 +517,19 @@ auto Connection::ParseMemcache() -> ParserStatus {
   return OK;
 }
 
+void Connection::OnBreakCb(int32_t mask) {
+  if (mask <= 0)
+    return;  // we cancelled the poller, which means we do not need to break from anything.
+
+  VLOG(1) << "Got event " << mask;
+  CHECK(cc_);
+  cc_->conn_closing = true;
+  break_poll_id_ = kuint32max;  // do not attempt to cancel it.
+
+  breaker_cb_(mask);
+  evc_.notify();  // Notify dispatch fiber.
+}
+
 auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, ParserStatus> {
   SinkReplyBuilder* builder = cc_->reply_builder();
   ConnectionStats* stats = service_->GetThreadLocalConnectionStats();
@@ -679,6 +701,8 @@ auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> Request* {
 void RespToArgList(const RespVec& src, CmdArgVec* dest) {
   dest->resize(src.size());
   for (size_t i = 0; i < src.size(); ++i) {
+    DCHECK(src[i].type == RespExpr::STRING);
+
     (*dest)[i] = ToMSS(src[i].GetBuf());
   }
 }

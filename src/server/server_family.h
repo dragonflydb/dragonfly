@@ -77,7 +77,8 @@ class ServerFamily {
 
   void StatsMC(std::string_view section, facade::ConnectionContext* cntx);
 
-  std::error_code DoSave(Transaction* transaction, std::string* err_details);
+  // if new_version is true, saves DF specific, non redis compatible snapshot.
+  std::error_code DoSave(bool new_version, Transaction* transaction, std::string* err_details);
   std::error_code DoFlush(Transaction* transaction, DbIndex db_ind);
 
   std::shared_ptr<const LastSaveInfo> GetLastSaveInfo() const;
@@ -90,6 +91,16 @@ class ServerFamily {
   }
 
   void ConfigureMetrics(util::HttpListenerBase* listener);
+
+  void PauseReplication(bool pause);
+
+  const std::string& master_id() const {
+    return master_id_;
+  }
+
+  journal::Journal* journal() {
+    return journal_.get();
+  }
 
  private:
   uint32_t shard_count() const {
@@ -111,6 +122,7 @@ class ServerFamily {
   void Latency(CmdArgList args, ConnectionContext* cntx);
   void Psync(CmdArgList args, ConnectionContext* cntx);
   void ReplicaOf(CmdArgList args, ConnectionContext* cntx);
+  void ReplConf(CmdArgList args, ConnectionContext* cntx);
   void Role(CmdArgList args, ConnectionContext* cntx);
   void Save(CmdArgList args, ConnectionContext* cntx);
   void Script(CmdArgList args, ConnectionContext* cntx);
@@ -139,10 +151,11 @@ class ServerFamily {
   std::unique_ptr<ScriptMgr> script_mgr_;
   std::unique_ptr<journal::Journal> journal_;
   std::unique_ptr<DflyCmd> dfly_cmd_;
+  std::string master_id_;
 
   time_t start_time_ = 0;  // in seconds, epoch time.
 
-  std::shared_ptr<LastSaveInfo> lsinfo_;  // protected by save_mu_;
+  std::shared_ptr<LastSaveInfo> last_save_info_;  // protected by save_mu_;
   std::atomic_bool is_saving_{false};
 
   util::fibers_ext::Done is_snapshot_done_;

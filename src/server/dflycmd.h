@@ -15,6 +15,7 @@ class ListenerInterface;
 namespace dfly {
 
 class EngineShardSet;
+class ServerFamily;
 
 namespace journal {
 class Journal;
@@ -22,17 +23,26 @@ class Journal;
 
 class DflyCmd {
  public:
-  DflyCmd(util::ListenerInterface* listener, journal::Journal* journal);
+  DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family);
 
   void Run(CmdArgList args, ConnectionContext* cntx);
+
+  uint32_t AllocateSyncSession();
 
  private:
   void HandleJournal(CmdArgList args, ConnectionContext* cntx);
 
   util::ListenerInterface* listener_;
-  journal::Journal* journal_;
+  ServerFamily* sf_;
   ::boost::fibers::mutex mu_;
   TxId journal_txid_ = 0;
+
+  struct SyncInfo {
+    int64_t tx_id = 0;
+  };
+
+  absl::btree_map<uint32_t, SyncInfo> sync_info_;
+  uint32_t next_sync_id_ = 1;
 };
 
 }  // namespace dfly

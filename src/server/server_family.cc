@@ -126,31 +126,6 @@ string InferLoadFile(fs::path data_dir) {
   return string{};
 }
 
-class LinuxWriteWrapper : public io::WriteFile {
- public:
-  LinuxWriteWrapper(uring::LinuxFile* lf) : WriteFile("wrapper"), lf_(lf) {
-  }
-
-  io::Result<size_t> WriteSome(const iovec* v, uint32_t len) final {
-    io::Result<size_t> res = lf_->WriteSome(v, len, offset_, 0);
-    if (res) {
-      offset_ += *res;
-    }
-
-    return res;
-  }
-
-  std::error_code Close() final {
-    return lf_->Close();
-  }
-
- private:
-  uring::LinuxFile* lf_;
-  off_t offset_ = 0;
-};
-
-}  // namespace
-
 bool IsValidSaveScheduleNibble(string_view time, unsigned int max) {
   /*
    * a nibble is valid iff there exists one time that matches the pattern
@@ -175,6 +150,82 @@ bool IsValidSaveScheduleNibble(string_view time, unsigned int max) {
 
   return min_match <= max;
 }
+
+class RdbSnapshot {
+ public:
+  RdbSnapshot(bool single_shard, uring::LinuxFile* fl)
+      : file_(fl), linux_sink_(fl), saver_(&linux_sink_, single_shard) {
+  }
+
+  error_code Start(const StringVec& lua_scripts);
+  void StartInShard(EngineShard* shard);
+
+  error_code SaveBody();
+  error_code Close();
+
+  const RdbTypeFreqMap freq_map() const {
+    return freq_map_;
+  }
+
+  bool HasStarted() const {
+    return started_;
+  }
+
+ private:
+  // whether this RdbSnapshot captures only a single shard,
+  // false for legacy - rdb snapshot that captures
+  bool single_shard_;
+  bool started_ = false;
+
+  unique_ptr<uring::LinuxFile> file_;
+  LinuxWriteWrapper linux_sink_;
+  RdbSaver saver_;
+  RdbTypeFreqMap freq_map_;
+};
+
+error_code RdbSnapshot::Start(const StringVec& lua_scripts) {
+  return saver_.SaveHeader(lua_scripts);
+}
+
+error_code RdbSnapshot::SaveBody() {
+  return saver_.SaveBody(&freq_map_);
+}
+
+error_code RdbSnapshot::Close() {
+  return linux_sink_.Close();
+}
+
+void RdbSnapshot::StartInShard(EngineShard* shard) {
+  saver_.StartSnapshotInShard(shard);
+  started_ = true;
+}
+
+string FormatTs(absl::Time now) {
+  return absl::FormatTime("%Y-%m-%dT%H:%M:%S", now, absl::LocalTimeZone());
+}
+
+void ExtendFilename(absl::Time now, int shard, fs::path* filename) {
+  if (shard < 0) {
+    if (!filename->has_extension()) {
+      string ft_time = FormatTs(now);
+      *filename += StrCat("-", ft_time, ".rdb");
+    }
+  } else {
+    string ft_time = FormatTs(now);
+    filename->replace_extension();  // clear if exists
+
+    // dragonfly snapshot
+    *filename += StrCat("-", ft_time, "-", absl::Dec(shard, absl::kZeroPad4), ".dfs");
+  }
+}
+
+inline void UpdateError(error_code src, error_code* dest) {
+  if (!(*dest)) {
+    *dest = src;
+  }
+}
+
+}  // namespace
 
 std::optional<SnapshotSpec> ParseSaveSchedule(string_view time) {
   if (time.length() < 3 || time.length() > 5) {
@@ -209,7 +260,7 @@ bool DoesTimeNibbleMatchSpecifier(string_view time_spec, unsigned int current_ti
   for (int i = time_spec.length() - 1; i >= 0; --i) {
     // if the current digit is not a wildcard and it does not match the digit in the current time it
     // does not match
-    if (time_spec[i] != '*' && (current_time % 10) != (time_spec[i] - '0')) {
+    if (time_spec[i] != '*' && int(current_time % 10) != (time_spec[i] - '0')) {
       return false;
     }
     current_time /= 10;
@@ -227,10 +278,26 @@ bool DoesTimeMatchSpecifier(const SnapshotSpec& spec, time_t now) {
 
 ServerFamily::ServerFamily(Service* service) : service_(*service) {
   start_time_ = time(NULL);
-  lsinfo_ = make_shared<LastSaveInfo>();
-  lsinfo_->save_time = start_time_;
+  last_save_info_ = make_shared<LastSaveInfo>();
+  last_save_info_->save_time = start_time_;
   script_mgr_.reset(new ScriptMgr());
   journal_.reset(new journal::Journal);
+
+  {
+    // TODO: if we start using random generator in more places, we should probably
+    // refactor this code.
+
+    absl::InsecureBitGen eng;
+    absl::uniform_int_distribution<uint32_t> ud;
+
+    absl::AlphaNum a1(absl::Hex(eng(), absl::kZeroPad16));
+    absl::AlphaNum a2(absl::Hex(eng(), absl::kZeroPad16));
+    absl::AlphaNum a3(absl::Hex(ud(eng), absl::kZeroPad8));
+    absl::StrAppend(&master_id_, a1, a2, a3);
+
+    size_t constexpr kConfigRunIdSize = CONFIG_RUN_ID_SIZE;
+    DCHECK_EQ(kConfigRunIdSize, master_id_.size());
+  }
 }
 
 ServerFamily::~ServerFamily() {
@@ -240,7 +307,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
   CHECK(acceptor_ == nullptr);
   acceptor_ = acceptor;
   main_listener_ = main_listener;
-  dfly_cmd_.reset(new DflyCmd(main_listener, journal_.get()));
+  dfly_cmd_.reset(new DflyCmd(main_listener, this));
 
   pb_task_ = shard_set->pool()->GetNextProactor();
 
@@ -380,7 +447,7 @@ void ServerFamily::SnapshotScheduling(const SnapshotSpec&& spec) {
     time_t last_save;
     {
       lock_guard lk(save_mu_);
-      last_save = lsinfo_->save_time;
+      last_save = last_save_info_->save_time;
     }
 
     if ((last_save / 60) == (now / 60)) {
@@ -394,7 +461,7 @@ void ServerFamily::SnapshotScheduling(const SnapshotSpec&& spec) {
     CHECK_NOTNULL(cid);
     boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
     trans->InitByArgs(0, {});
-    ec = DoSave(trans.get(), &err_details);
+    ec = DoSave(false, trans.get(), &err_details);
     if (ec) {
       LOG(WARNING) << "Failed to perform snapshot " << err_details;
     }
@@ -545,6 +612,17 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
   http_base->RegisterCb("/metrics", cb);
 }
 
+void ServerFamily::PauseReplication(bool pause) {
+  unique_lock lk(replicaof_mu_);
+
+  // Switch to primary mode.
+  if (!ServerState::tlocal()->is_master) {
+    auto repl_ptr = replica_;
+    CHECK(repl_ptr);
+    repl_ptr->Pause(pause);
+  }
+}
+
 void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* cntx) {
   if (!section.empty()) {
     return cntx->reply_builder()->SendError("");
@@ -590,7 +668,15 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
 #undef ADD_LINE
 }
 
-error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
+static void RunStage(bool new_version, std::function<void(unsigned)> cb) {
+  if (new_version) {
+    shard_set->RunBlockingInParallel([&](EngineShard* es) { cb(es->shard_id()); });
+  } else {
+    cb(0);
+  }
+};
+
+error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* err_details) {
   fs::path dir_path(GetFlag(FLAGS_dir));
   error_code ec;
 
@@ -606,13 +692,6 @@ error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
   fs::path filename = dbfilename.empty() ? "dump" : dbfilename;
   fs::path path = dir_path;
 
-  if (!filename.has_extension()) {
-    absl::Time now = absl::Now();
-    string ft_time = absl::FormatTime("-%Y-%m-%dT%H:%M:%S", now, absl::UTCTimeZone());
-    filename += StrCat(ft_time, ".rdb");
-  }
-  path += filename;
-
   GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
   if (new_state != GlobalState::SAVING) {
     *err_details = StrCat(GlobalStateName(new_state), " - can not save database");
@@ -624,70 +703,134 @@ error_code ServerFamily::DoSave(Transaction* trans, string* err_details) {
   };
 
   const auto kFlags = O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC | O_DIRECT;
-  auto res = uring::OpenLinux(path.generic_string(), kFlags, 0666);
-  if (!res) {
-    return res.error();
-  }
-
-  unique_ptr<uring::LinuxFile> lf = std::move(res.value());
-  VLOG(1) << "Saving to " << path;
-  LinuxWriteWrapper wf(lf.get());
-
-  RdbSaver saver{&wf};
-
-  VLOG(1) << "Saving to " << path;
-
   auto start = absl::Now();
-
-  RdbTypeFreqMap freq_map;
   shared_ptr<LastSaveInfo> save_info;
   StringVec lua_scripts = script_mgr_->GetLuaScripts();
+  absl::Time now = absl::Now();
 
-  ec = saver.SaveHeader(lua_scripts);
+  absl::flat_hash_map<string_view, size_t> rdb_name_map;
+  vector<unique_ptr<RdbSnapshot>> snapshots;
+  fibers::mutex mu;
 
-  if (!ec) {
-    auto cb = [&saver](Transaction* t, EngineShard* shard) {
-      saver.StartSnapshotInShard(shard);
+  auto save_cb = [&](unsigned index) {
+    auto& snapshot = snapshots[index];
+    if (snapshot && snapshot->HasStarted()) {
+      error_code local_ec = snapshot->SaveBody();
+      if (local_ec) {
+        lock_guard lk(mu);
+        UpdateError(local_ec, &ec);
+      }
+    }
+  };
+
+  auto close_cb = [&](unsigned index) {
+    auto& snapshot = snapshots[index];
+    if (snapshot) {
+      auto local_ec = snapshot->Close();
+
+      lock_guard lk(mu);
+      UpdateError(local_ec, &ec);
+
+      for (const auto& k_v : snapshot->freq_map()) {
+        rdb_name_map[RdbTypeName(k_v.first)] += k_v.second;
+      }
+    }
+  };
+
+  if (new_version) {
+    snapshots.resize(shard_set->size());
+
+    // In the new version we open a file per shard
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      fs::path shard_file = filename, abs_path = path;
+      ShardId sid = shard->shard_id();
+      error_code local_ec;
+
+      ExtendFilename(now, sid, &shard_file);
+      abs_path += shard_file;
+
+      VLOG(1) << "Saving to " << abs_path;
+      auto res = uring::OpenLinux(abs_path.generic_string(), kFlags, 0666);
+
+      if (res) {
+        snapshots[sid].reset(new RdbSnapshot{true, res.value().release()});
+        auto& snapshot = *snapshots[sid];
+        local_ec = snapshot.Start(lua_scripts);
+        if (!local_ec) {
+          snapshot.StartInShard(shard);
+        }
+      } else {
+        local_ec = res.error();
+      }
+
+      if (local_ec) {
+        lock_guard lk(mu);
+        UpdateError(local_ec, &ec);
+      }
+
       return OpStatus::OK;
     };
 
     trans->ScheduleSingleHop(std::move(cb));
-    is_saving_.store(true, memory_order_relaxed);
+  } else {
+    snapshots.resize(1);
 
-    // perform snapshot serialization, block the current fiber until it completes.
-    RdbTypeFreqMap freq_map;
-    ec = saver.SaveBody(&freq_map);
+    ExtendFilename(now, -1, &filename);
+    path += filename;
 
-    is_saving_.store(false, memory_order_relaxed);
-    absl::flat_hash_map<string_view, size_t> tmp_map;
-    for (const auto& k_v : freq_map) {
-      tmp_map[RdbTypeName(k_v.first)] += k_v.second;
+    auto res = uring::OpenLinux(path.generic_string(), kFlags, 0666);
+    if (!res) {
+      return res.error();
     }
-    save_info = make_shared<LastSaveInfo>();
-    for (const auto& k_v : tmp_map) {
-      save_info->freq_map.emplace_back(k_v);
+    VLOG(1) << "Saving to " << path;
+
+    snapshots[0].reset(new RdbSnapshot{false, res.value().release()});
+    ec = snapshots[0]->Start(lua_scripts);
+
+    if (!ec) {
+      auto cb = [&](Transaction* t, EngineShard* shard) {
+        snapshots[0]->StartInShard(shard);
+
+        return OpStatus::OK;
+      };
+
+      trans->ScheduleSingleHop(std::move(cb));
     }
   }
 
+  is_saving_.store(true, memory_order_relaxed);
+
+  // perform snapshot serialization, block the current fiber until it completes.
+  RunStage(new_version, save_cb);
+
+  is_saving_.store(false, memory_order_relaxed);
+
+  RunStage(new_version, close_cb);
+
   absl::Duration dur = absl::Now() - start;
   double seconds = double(absl::ToInt64Milliseconds(dur)) / 1000;
+
+  if (new_version) {
+    ExtendFilename(now, 0, &filename);
+    path += filename;
+  }
+
   LOG(INFO) << "Saving " << path << " finished after "
             << strings::HumanReadableElapsedTime(seconds);
 
-  auto close_ec = wf.Close();
-
-  if (!ec)
-    ec = close_ec;
-
   if (!ec) {
-    save_info->save_time = time(NULL);
+    save_info = make_shared<LastSaveInfo>();
+    for (const auto& k_v : rdb_name_map) {
+      save_info->freq_map.emplace_back(k_v);
+    }
+
+    save_info->save_time = absl::ToUnixSeconds(now);
     save_info->file_name = path.generic_string();
 
     lock_guard lk(save_mu_);
     // swap - to deallocate the old version outstide of the lock.
-    lsinfo_.swap(save_info);
+    last_save_info_.swap(save_info);
   }
-
   return ec;
 }
 
@@ -708,7 +851,7 @@ error_code ServerFamily::DoFlush(Transaction* transaction, DbIndex db_ind) {
 
 shared_ptr<const LastSaveInfo> ServerFamily::GetLastSaveInfo() const {
   lock_guard lk(save_mu_);
-  return lsinfo_;
+  return last_save_info_;
 }
 
 void ServerFamily::DbSize(CmdArgList args, ConnectionContext* cntx) {
@@ -838,8 +981,22 @@ void ServerFamily::Memory(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
   string err_detail;
+  bool new_version = false;
+  if (args.size() > 2) {
+    return (*cntx)->SendError(kSyntaxErr);
+  }
 
-  error_code ec = DoSave(cntx->transaction, &err_detail);
+  if (args.size() == 2) {
+    ToUpper(&args[1]);
+    string_view sub_cmd = ArgS(args, 1);
+    if (sub_cmd == "DF") {
+      new_version = true;
+    } else {
+      return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "SAVE"), kSyntaxErrType);
+    }
+  }
+
+  error_code ec = DoSave(new_version, cntx->transaction, &err_detail);
 
   if (ec) {
     (*cntx)->SendError(absl::StrCat(err_detail, ec.message()));
@@ -1028,10 +1185,10 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
   if (should_enter("PERSISTENCE", true)) {
     ADD_HEADER("# PERSISTENCE");
-    decltype(lsinfo_) save_info;
+    decltype(last_save_info_) save_info;
     {
       lock_guard lk(save_mu_);
-      save_info = lsinfo_;
+      save_info = last_save_info_;
     }
     append("last_save", save_info->save_time);
     append("last_save_file", save_info->file_name);
@@ -1048,6 +1205,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     if (etl.is_master) {
       append("role", "master");
       append("connected_slaves", m.conn_stats.num_replicas);
+      append("master_replid", master_id_);
     } else {
       append("role", "slave");
 
@@ -1211,6 +1369,41 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
       [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
 }
 
+void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() % 2 == 0)
+    goto err;
+
+  for (unsigned i = 1; i < args.size(); i += 2) {
+    DCHECK_LT(i + 1, args.size());
+    ToUpper(&args[i]);
+
+    std::string_view cmd = ArgS(args, i);
+    std::string_view arg = ArgS(args, i + 1);
+    if (cmd == "CAPA") {
+      if (arg == "dragonfly" && args.size() == 3 && i == 1) {
+        uint32_t sid = dfly_cmd_->AllocateSyncSession();
+        string sync_id = absl::StrCat("SYNC", sid);
+        cntx->conn_state.sync_session_id = sid;
+
+        // The response for 'capa dragonfly' is: <masterid> <syncid> <numthreads>
+        (*cntx)->StartArray(3);
+        (*cntx)->SendSimpleString(master_id_);
+        (*cntx)->SendSimpleString(sync_id);
+        (*cntx)->SendLong(shard_set->size());
+        return;
+      }
+    } else {
+      VLOG(1) << cmd << " " << arg;
+    }
+  }
+
+  (*cntx)->SendOk();
+  return;
+
+err:
+  (*cntx)->SendError(kSyntaxErr);
+}
+
 void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendRaw("*3\r\n$6\r\nmaster\r\n:0\r\n*0\r\n");
 }
@@ -1234,7 +1427,7 @@ void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
   time_t save_time;
   {
     lock_guard lk(save_mu_);
-    save_time = lsinfo_->save_time;
+    save_time = last_save_info_->save_time;
   }
   (*cntx)->SendLong(save_time);
 }
@@ -1293,10 +1486,11 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"LASTSAVE", CO::LOADING | CO::FAST, 1, 0, 0, 0}.HFUNC(LastSave)
             << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING | CO::FAST, -2, 0, 0, 0}.HFUNC(Latency)
             << CI{"MEMORY", kMemOpts, -2, 0, 0, 0}.HFUNC(Memory)
-            << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Save)
+            << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, 0}.HFUNC(Save)
             << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0}.HFUNC(_Shutdown)
             << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
+            << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, 0}.HFUNC(ReplConf)
             << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, 0}.HFUNC(Role)
             << CI{"SYNC", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Sync)
             << CI{"PSYNC", CO::ADMIN | CO::GLOBAL_TRANS, 3, 0, 0, 0}.HFUNC(Psync)

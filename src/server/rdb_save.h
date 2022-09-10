@@ -15,7 +15,7 @@ extern "C" {
 #include "io/io.h"
 #include "server/common.h"
 #include "server/table.h"
-
+#include "util/uring/uring_file.h"
 
 typedef struct rax rax;
 typedef struct streamCG streamCG;
@@ -23,6 +23,22 @@ typedef struct streamCG streamCG;
 namespace dfly {
 
 class EngineShard;
+
+class LinuxWriteWrapper : public io::Sink {
+ public:
+  LinuxWriteWrapper(util::uring::LinuxFile* lf) : lf_(lf) {
+  }
+
+  io::Result<size_t> WriteSome(const iovec* v, uint32_t len) final;
+
+  std::error_code Close() {
+    return lf_->Close();
+  }
+
+ private:
+  util::uring::LinuxFile* lf_;
+  off_t offset_ = 0;
+};
 
 class AlignedBuffer {
  public:
@@ -50,7 +66,11 @@ class AlignedBuffer {
 
 class RdbSaver {
  public:
-  explicit RdbSaver(::io::Sink* sink);
+  // single_shard - true means that we run RdbSaver on a single shard and we do not use
+  // to snapshot all the datastore shards.
+  // single_shard - false, means we capture all the data using a single RdbSaver instance
+  // (corresponds to legacy, redis compatible mode)
+  explicit RdbSaver(::io::Sink* sink, bool single_shard);
   ~RdbSaver();
 
   std::error_code SaveHeader(const StringVec& lua_scripts);
@@ -64,15 +84,13 @@ class RdbSaver {
   void StartSnapshotInShard(EngineShard* shard);
 
  private:
-  struct Impl;
+  class Impl;
 
   std::error_code SaveEpilog();
 
   std::error_code SaveAux(const StringVec& lua_scripts);
-  std::error_code SaveAuxFieldStrStr(std::string_view key, std::string_view val);
   std::error_code SaveAuxFieldStrInt(std::string_view key, int64_t val);
 
-  AlignedBuffer aligned_buf_;
   std::unique_ptr<Impl> impl_;
 };
 

@@ -1,7 +1,7 @@
 add_library(dfly_core compact_object.cc dragonfly_core.cc extent_tree.cc 
             external_alloc.cc interpreter.cc mi_memory_resource.cc
             segment_allocator.cc small_string.cc tx_queue.cc)
-cxx_link(dfly_core base absl::flat_hash_map absl::str_format redis_lib TRDP::lua 
+cxx_link(dfly_core base absl::flat_hash_map absl::str_format redis_lib TRDP::lua lua_modules
          Boost::fiber crypto)
 
 

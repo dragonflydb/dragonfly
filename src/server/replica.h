@@ -17,6 +17,18 @@ class Service;
 class ConnectionContext;
 
 class Replica {
+
+  // The attributes of the master we are connecting to.
+  struct MasterContext {
+    std::string host;
+    std::string master_repl_id;
+    std::string dfly_session_id;  // for dragonfly replication
+    boost::asio::ip::tcp::endpoint master_ep;
+
+    uint16_t port;
+    uint32_t flow_id = UINT32_MAX;  // Relevant if this replica is used to transfer a flow.
+  };
+
  public:
   Replica(std::string master_host, uint16_t port, Service* se);
   ~Replica();
@@ -30,11 +42,11 @@ class Replica {
   void Stop();
 
   const std::string& master_host() const {
-    return host_;
+    return master_context_.host;
   }
 
   uint16_t port() {
-    return port_;
+    return master_context_.port;
   }
 
   struct Info {
@@ -47,8 +59,12 @@ class Replica {
 
   // Threadsafe, fiber blocking.
   Info GetInfo() const;
+  void Pause(bool pause);
 
  private:
+  // Used to initialize df replication flow.
+  Replica(const MasterContext& context, uint32_t flow_id, Service* service);
+
   // The flow is : R_ENABLED -> R_TCP_CONNECTED -> (R_SYNCING) -> R_SYNC_OK.
   // SYNCING means that the initial ack succeeded. It may be optional if we can still load from
   // the journal offset.
@@ -69,27 +85,33 @@ class Replica {
     std::variant<std::string, size_t> fullsync;
   };
 
+  // This function uses parser_ and cmd_args_ in order to consume a single response
+  // from the sock_. The output will reside in cmd_str_args_.
+  std::error_code ReadRespReply(base::IoBuf* io_buf, uint32_t* consumed);
+
   std::error_code ConnectSocket();
   std::error_code Greet();
   std::error_code InitiatePSync();
+  std::error_code InitiateDflySync();
 
   std::error_code ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* header);
   std::error_code ReadLine(base::IoBuf* io_buf, std::string_view* line);
   std::error_code ConsumeRedisStream();
+  std::error_code ConsumeDflyStream();
   std::error_code ParseAndExecute(base::IoBuf* io_buf);
 
+  std::error_code StartFlow();
+
   Service& service_;
-  std::string host_;
-  std::string master_repl_id_;
-  uint16_t port_;
 
   ::boost::fibers::fiber sync_fb_;
   std::unique_ptr<util::LinuxSocketBase> sock_;
+  MasterContext master_context_;
 
   // Where the sock_ is handled.
-  util::ProactorBase* sock_thread_ = nullptr;
+  // util::ProactorBase* sock_thread_ = nullptr;
   std::unique_ptr<facade::RedisParser> parser_;
-  facade::RespVec cmd_args_;
+  facade::RespVec resp_args_;
   facade::CmdArgVec cmd_str_args_;
 
   // repl_offs - till what offset we've already read from the master.
@@ -97,6 +119,11 @@ class Replica {
   size_t repl_offs_ = 0, ack_offs_ = 0;
   uint64_t last_io_time_ = 0;  // in ns, monotonic clock.
   unsigned state_mask_ = 0;
+  unsigned num_df_flows_ = 0;
+
+  bool is_paused_ = false;
+
+  std::vector<std::unique_ptr<Replica>> shard_flows_;
 };
 
 }  // namespace dfly
