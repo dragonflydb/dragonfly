@@ -159,46 +159,96 @@ OpResult<json> GetJson(const OpArgs& op_args, string_view key) {
   return decoder.get_result();
 }
 
-string ConvertToJsonPointer(const string& json_path) {
+string ConvertToJsonPointer(string_view json_path) {
   if (json_path.empty() || json_path[0] != '$') {
     return "";
   }
 
+  // except the supplied string is compatible with JSONPath syntax.
+  // Each item in the string is a left bracket followed by
+  // numeric or '<key>' and then a right bracket.
   vector<string> parts;
-  bool invalid_format = false;
+  bool invalid_syntax = false;
   std::size_t i = 1;
   while (i < json_path.size()) {
     bool is_array = false;
     bool is_object = false;
-    if (json_path[i] == '[' && json_path[i + 1] == '\'') {
-      is_object = true;
-      i += 2;
+
+    // check string size is sufficient enough for at least one item.
+    if (i + 2 >= json_path.size()) {
+      invalid_syntax = true;
+      break;
     }
-    else if (json_path[i] == '[') {
-      is_array = true;
-      i += 1;
+
+    if (json_path[i] == '[') {
+      if (json_path[i + 1] == '\'') {
+        is_object = true;
+        i += 2;
+      } else if (isdigit(json_path[i + 1])) {
+        is_array = true;
+        i += 1;
+      } else {
+        invalid_syntax = true;
+        break;
+      }
+    } else {
+      invalid_syntax = true;
+      break;
     }
 
     if (is_array) {
       auto end_pos = json_path.find(']', i);
+      if (end_pos == string::npos) {
+        invalid_syntax = true;
+        break;
+      }
+
       parts.emplace_back(json_path.substr(i, end_pos - i));
       i = end_pos + 1;
+
     } else if (is_object) {
-      auto end_pos = json_path.find("']", i);
-      parts.emplace_back(json_path.substr(i, end_pos - i));
-      i = end_pos + 2;
+      // find the index of the right bracket.
+      auto end_val_idx = string::npos;
+      auto current_idx = i;
+      while (end_val_idx == string::npos) {
+        if (current_idx + 1 >= json_path.size()) {
+          break;
+        }
+
+        // ignore escaped character (e.g. \']).
+        if (json_path[current_idx] == '\\') {
+          current_idx += 2;
+        }
+
+        else if (json_path[current_idx] == '\'' && json_path[current_idx + 1] == ']') {
+          end_val_idx = current_idx++;
+        }
+
+        else {
+          current_idx++;
+        }
+      }
+
+      if (end_val_idx == string::npos) {
+        invalid_syntax = true;
+        break;
+      }
+
+      parts.emplace_back(json_path.substr(i, end_val_idx - i));
+      i = end_val_idx + 2;
+
     } else {
-      invalid_format = true;
+      invalid_syntax = true;
       break;
     }
   }
 
-  if (invalid_format) {
-    return "";
+  if (invalid_syntax) {
+    LOG(FATAL) << "Unexpected JSONPath syntax: " << json_path;
   }
 
   string result = absl::StrJoin(parts, "/");
-  return '/' + result; // add leading slash
+  return '/' + result;  // add leading slash
 }
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key,
@@ -402,7 +452,7 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path) {
   }
 
   json patch(json_array_arg, {});
-  reverse(deletion_items.begin(), deletion_items.end()); // deletion should finish at root keys.
+  reverse(deletion_items.begin(), deletion_items.end());  // deletion should finish at root keys.
   for (const auto& it : deletion_items) {
     string pointer = ConvertToJsonPointer(it);
     if (pointer.empty()) {
