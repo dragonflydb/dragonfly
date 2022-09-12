@@ -48,7 +48,7 @@ def df_server(request, tmp_dir: Path, test_env):
     arguments = [arg.format(**test_env) for arg in request.param]
     dfly_proc = subprocess.Popen([DRAGONFLY_PATH, *arguments],
                                  env=test_env, cwd=str(tmp_dir))
-    time.sleep(0.1)
+    time.sleep(0.3)
     return_code = dfly_proc.poll()
     if return_code is not None:
         dfly_proc.terminate()
@@ -66,17 +66,19 @@ def df_server(request, tmp_dir: Path, test_env):
         print(outs)
         print(errs)
 
+@pytest.fixture(scope="function")
+def connection(df_server):
+    return redis.Connection()
 
 @pytest.fixture(scope="class")
-def connection(df_server):
+def raw_client(df_server):
     """ Creates the Redis client to interact with the Dragonfly instance """
     pool = redis.ConnectionPool(decode_responses=True)
     client = redis.Redis(connection_pool=pool)
     return client
 
-
 @pytest.fixture
-def client(connection):
+def client(raw_client):
     """ Flushes all the records, runs before each test. """
-    connection.flushall()
-    return connection
+    raw_client.flushall()
+    return raw_client

@@ -72,6 +72,8 @@ class Connection : public util::Connection {
   std::string GetClientInfo() const;
   uint32 GetClientId() const;
 
+  void RequestShutdown();
+
  protected:
   void OnShutdown() override;
   void OnPreMigrateThread() override;
