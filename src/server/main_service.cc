@@ -395,8 +395,8 @@ void Service::Shutdown() {
 }
 
 static void MultiSetError(ConnectionContext* cntx) {
-  if (cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE) {
-    cntx->conn_state.exec_state = ConnectionState::EXEC_ERROR;
+  if (cntx->conn_state.exec_info.IsActive()) {
+    cntx->conn_state.exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
   }
 }
 
@@ -451,7 +451,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   bool is_write_cmd = (cid->opt_mask() & CO::WRITE) ||
                       (under_script && dfly_cntx->conn_state.script_info->is_write);
   bool under_multi =
-      dfly_cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE && !is_trans_cmd;
+      dfly_cntx->conn_state.exec_info.IsActive() && !is_trans_cmd;
 
   if (!etl.is_master && is_write_cmd && !dfly_cntx->is_replicating) {
     (*cntx)->SendError("-READONLY You can't write against a read only replica.");
@@ -488,14 +488,14 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   etl.connection_stats.cmd_count_map[cmd_name]++;
 
-  if (dfly_cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE && !is_trans_cmd) {
+  if (dfly_cntx->conn_state.exec_info.IsActive() && !is_trans_cmd) {
     // TODO: protect against aggregating huge transactions.
     StoredCmd stored_cmd{cid};
     stored_cmd.cmd.reserve(args.size());
     for (size_t i = 0; i < args.size(); ++i) {
       stored_cmd.cmd.emplace_back(ArgS(args, i));
     }
-    dfly_cntx->conn_state.exec_body.push_back(std::move(stored_cmd));
+    dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
 
     return (*cntx)->SendSimpleString("QUEUED");
   }
@@ -724,10 +724,10 @@ void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::Multi(CmdArgList args, ConnectionContext* cntx) {
-  if (cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE) {
+  if (cntx->conn_state.exec_info.IsActive()) {
     return (*cntx)->SendError("MULTI calls can not be nested");
   }
-  cntx->conn_state.exec_state = ConnectionState::EXEC_COLLECT;
+  cntx->conn_state.exec_info.state = ConnectionState::ExecInfo::EXEC_COLLECT;
   // TODO: to protect against huge exec transactions.
   return (*cntx)->SendOk();
 }
@@ -835,7 +835,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   // TODO: to determine whether the script is RO by scanning all "redis.p?call" calls
   // and checking whether all invocations consist of RO commands.
   // we can do it once during script insertion into script mgr.
-  cntx->conn_state.script_info.emplace(ConnectionState::Script{});
+  cntx->conn_state.script_info.emplace(ConnectionState::ScriptInfo{});
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
     cntx->conn_state.script_info->keys.insert(ArgS(eval_args.keys, i));
   }
@@ -879,12 +879,12 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
 void Service::Discard(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = (*cntx).operator->();
 
-  if (cntx->conn_state.exec_state == ConnectionState::EXEC_INACTIVE) {
+  if (!cntx->conn_state.exec_info.IsActive()) {
     return rb->SendError("DISCARD without MULTI");
   }
 
-  cntx->conn_state.exec_state = ConnectionState::EXEC_INACTIVE;
-  cntx->conn_state.exec_body.clear();
+  cntx->conn_state.exec_info.Clear();
+  rb->SendOk();
 
   rb->SendOk();
 }
@@ -892,22 +892,26 @@ void Service::Discard(CmdArgList args, ConnectionContext* cntx) {
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = (*cntx).operator->();
 
-  if (cntx->conn_state.exec_state == ConnectionState::EXEC_INACTIVE) {
+  if (!cntx->conn_state.exec_info.IsActive()) {
     return rb->SendError("EXEC without MULTI");
   }
 
-  if (cntx->conn_state.exec_state == ConnectionState::EXEC_ERROR) {
-    cntx->conn_state.exec_state = ConnectionState::EXEC_INACTIVE;
-    cntx->conn_state.exec_body.clear();
+  auto& exec_info = cntx->conn_state.exec_info;
+  absl::Cleanup exec_clear = [&cntx, &exec_info] {
+    exec_info.Clear();
+  };
+
+  if (exec_info.state == ConnectionState::ExecInfo::EXEC_ERROR) {
     return rb->SendError("-EXECABORT Transaction discarded because of previous errors");
   }
 
-  VLOG(1) << "StartExec " << cntx->conn_state.exec_body.size();
-  rb->StartArray(cntx->conn_state.exec_body.size());
-  if (!cntx->conn_state.exec_body.empty()) {
+  VLOG(1) << "StartExec " << exec_info.body.size();
+  rb->StartArray(exec_info.body.size());
+
+  if (!exec_info.body.empty()) {
     CmdArgVec str_list;
 
-    for (auto& scmd : cntx->conn_state.exec_body) {
+    for (auto& scmd : exec_info.body) {
       str_list.resize(scmd.cmd.size());
       for (size_t i = 0; i < scmd.cmd.size(); ++i) {
         string& s = scmd.cmd[i];
@@ -928,12 +932,10 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
         break;
     }
 
-    VLOG(1) << "Exec unlocking " << cntx->conn_state.exec_body.size() << " commands";
+    VLOG(1) << "Exec unlocking " << exec_info.body.size() << " commands";
     cntx->transaction->UnlockMulti();
   }
 
-  cntx->conn_state.exec_state = ConnectionState::EXEC_INACTIVE;
-  cntx->conn_state.exec_body.clear();
   VLOG(1) << "Exec completed";
 }
 

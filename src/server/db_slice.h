@@ -9,6 +9,7 @@
 #include "facade/op_status.h"
 #include "server/common.h"
 #include "server/table.h"
+#include "server/conn_context.h"
 
 namespace util {
 class ProactorBase;
@@ -217,7 +218,7 @@ class DbSlice {
 
   // Callback functions called upon writing to the existing key.
   void PreUpdate(DbIndex db_ind, PrimeIterator it);
-  void PostUpdate(DbIndex db_ind, PrimeIterator it, bool existing_entry = true);
+  void PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key, bool existing_entry = true);
 
   DbTableStats* MutableStats(DbIndex db_ind) {
     return &db_arr_[db_ind]->stats;
@@ -269,6 +270,7 @@ class DbSlice {
     return version_++;
   }
 
+ private:
   ShardId shard_id_;
   uint8_t caching_mode_ : 1;
 
@@ -285,6 +287,9 @@ class DbSlice {
   mutable SliceEvents events_;  // we may change this even for const operations.
 
   DbTableArray db_arr_;
+
+  // Stores a list of dependant connections for each watched key.
+  absl::flat_hash_map<std::string, std::vector<ConnectionState::ExecInfo*>> watched_keys_;
 
   // Used in temporary computations in Acquire/Release.
   absl::flat_hash_set<std::string_view> uniq_keys_;

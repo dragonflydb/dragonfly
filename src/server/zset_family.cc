@@ -812,7 +812,7 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
   DVLOG(2) << "ZAdd " << zobj->ptr;
 
   res_it.value()->second.SyncRObj();
-  op_args.shard->db_slice().PostUpdate(op_args.db_ind, *res_it);
+  op_args.shard->db_slice().PostUpdate(op_args.db_ind, *res_it, key);
 
   if (zparams.flags & ZADD_IN_INCR) {
     aresult.new_score = new_score;
@@ -1627,7 +1627,7 @@ OpResult<unsigned> ZSetFamily::OpRem(const OpArgs& op_args, string_view key, Arg
   }
   auto zlen = zsetLength(zobj);
   res_it.value()->second.SyncRObj();
-  db_slice.PostUpdate(op_args.db_ind, *res_it);
+  db_slice.PostUpdate(op_args.db_ind, *res_it, key);
 
   if (zlen == 0) {
     CHECK(op_args.shard->db_slice().Del(op_args.db_ind, res_it.value()));
@@ -1681,7 +1681,7 @@ OpResult<unsigned> ZSetFamily::OpRemRange(const OpArgs& op_args, string_view key
   std::visit(iv, range_spec.interval);
 
   res_it.value()->second.SyncRObj();
-  db_slice.PostUpdate(op_args.db_ind, *res_it);
+  db_slice.PostUpdate(op_args.db_ind, *res_it, key);
 
   auto zlen = zsetLength(zobj);
   if (zlen == 0) {

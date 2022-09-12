@@ -41,7 +41,7 @@ class SetCmd {
 
  private:
   OpStatus SetExisting(const SetParams& params, PrimeIterator it, ExpireIterator e_it,
-                       std::string_view value);
+                       std::string_view key, std::string_view value);
 };
 
 class StringFamily {

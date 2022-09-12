@@ -244,4 +244,16 @@ string ConnectionContext::GetContextInfo() const {
   return index ? absl::StrCat("flags:", buf) : string();
 }
 
+void ConnectionState::ExecInfo::Clear() {
+  state = EXEC_INACTIVE;
+  body.clear();
+  ClearWatched();
+}
+
+void ConnectionState::ExecInfo::ClearWatched() {
+  watched_keys.clear();
+  watched_dirty.store(false);
+  watched_existed = 0;
+}
+
 }  // namespace dfly

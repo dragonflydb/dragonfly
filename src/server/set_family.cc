@@ -442,7 +442,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
     res = AddStrSet(std::move(vals), &co);
   }
 
-  db_slice.PostUpdate(op_args.db_ind, it, !new_key);
+  db_slice.PostUpdate(op_args.db_ind, it, key, !new_key);
 
   return res;
 }
@@ -460,7 +460,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, std::string_view key, const ArgS
   CompactObj& co = find_res.value()->second;
   auto [removed, isempty] = RemoveSet(vals, &co);
 
-  db_slice.PostUpdate(op_args.db_ind, *find_res);
+  db_slice.PostUpdate(op_args.db_ind, *find_res, key);
 
   if (isempty) {
     CHECK(db_slice.Del(op_args.db_ind, find_res.value()));
@@ -1157,7 +1157,7 @@ OpResult<StringVec> SetFamily::OpPop(const OpArgs& op_args, std::string_view key
     } else {
       result = PopStrSet(count, st);
     }
-    db_slice.PostUpdate(op_args.db_ind, it);
+    db_slice.PostUpdate(op_args.db_ind, it, key);
   }
   return result;
 }

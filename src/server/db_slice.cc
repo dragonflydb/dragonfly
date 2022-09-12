@@ -545,7 +545,7 @@ pair<PrimeIterator, bool> DbSlice::AddEntry(DbIndex db_ind, string_view key, Pri
   auto& it = res.first;
 
   it->second = std::move(obj);
-  PostUpdate(db_ind, it, false);
+  PostUpdate(db_ind, it, key, false);
 
   if (expire_at_ms) {
     it->second.SetExpire(true);
@@ -651,7 +651,7 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
   it.SetVersion(NextVersion());
 }
 
-void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, bool existing) {
+void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key, bool existing) {
   DbTableStats* stats = MutableStats(db_ind);
 
   size_t value_heap_size = it->second.MallocUsed();
