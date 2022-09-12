@@ -327,25 +327,34 @@ TEST_F(StringFamilyTest, IncrByFloat) {
 }
 
 TEST_F(StringFamilyTest, SetNx) {
+  // Make sure that we "screen out" invalid parameters for this command
+  // this is important as it uses similar path as the "normal" set
   auto resp = Run({"setnx", "foo", "bar", "XX"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
 
   resp = Run({"setnx", "foo", "bar", "NX"});
-  ASSERT_THAT(resp, "OK");
+  ASSERT_THAT(resp, ErrArg("wrong number of arguments"));
   resp = Run({"setnx", "foo", "bar", "NX"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
 
   resp = Run({"setnx", "foo", "bar", "xx"});
-  ASSERT_THAT(resp, "OK");
+  ASSERT_THAT(resp, ErrArg("wrong number of arguments"));
 
   resp = Run({"setnx", "foo", "bar", "ex", "abc"});
-  ASSERT_THAT(resp, ErrArg(kInvalidIntErr));
+  ASSERT_THAT(resp, ErrArg("wrong number of arguments"));
 
   resp = Run({"setnx", "foo", "bar", "ex", "-1"});
-  ASSERT_THAT(resp, ErrArg("invalid expire time"));
+  ASSERT_THAT(resp, ErrArg("wrong number of arguments"));
 
   resp = Run({"setnx", "foo", "bar", "ex", "1"});
-  ASSERT_THAT(resp, "OK");
+  ASSERT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  // now let see how it goes for the valid parameters
+  EXPECT_EQ(1, CheckedInt({"setnx", "foo", "bar"}));
+  EXPECT_EQ(Run({"get", "foo"}), "bar");
+  // second call to the same key should return 0 as we have it
+  EXPECT_EQ(0, CheckedInt({"setnx", "foo", "hello"}));
+  EXPECT_EQ(Run({"get", "foo"}), "bar");  // the value was not changed
 }
 
 }  // namespace dfly

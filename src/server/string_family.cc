@@ -326,14 +326,16 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
   VLOG(2) << "Set " << key << "(" << db_slice.shard_id() << ") ";
 
   if (params.IsConditionalSet()) {
+    const auto [it, expire_it] = db_slice.FindExt(params.db_index, key);
     // Make sure that we have this key, and only add it if it does exists
-    auto [it, expire_it] = db_slice.FindExt(params.db_index, key);
-    if (IsValid(it)) {  // We found this key entry, check what to do next
-      if (params.how == SET_IF_EXISTS) {
+    if (params.how == SET_IF_EXISTS) {
+      if (IsValid(it)) {
         return SetExisting(params, it, expire_it, value);
       } else {
-        // at this point, we know that we are execpting to no override,
-        // so let the caller know that we did nothing
+        return OpStatus::SKIPPED;
+      }
+    } else {
+      if (IsValid(it)) {  // if the policy is not to overide and have the key, just return
         return OpStatus::SKIPPED;
       }
     }
