@@ -482,6 +482,11 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
       (*cntx)->SendError("Can not call SELECT within a transaction");
       return;
     }
+
+    if (cmd_name == "WATCH") {
+      (*cntx)->SendError("WATCH inside MULTI is not allowed");
+      return;
+    }
   }
 
   std::move(multi_error).Cancel();
@@ -732,6 +737,53 @@ void Service::Multi(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendOk();
 }
 
+void Service::Watch(CmdArgList args, ConnectionContext* cntx) {
+  auto& exec_info = cntx->conn_state.exec_info;
+
+  // Skip if EXEC will already fail due previous WATCH.
+  if (exec_info.watched_dirty.load(memory_order_relaxed)) {
+    return (*cntx)->SendOk();
+  }
+
+  atomic_uint32_t keys_existed = 0;
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    ArgSlice largs = t->ShardArgsInShard(shard->shard_id());
+    for (auto k: largs) {
+      shard->db_slice().RegisterWatchedKey(k, &exec_info);
+    }
+
+    auto res = GenericFamily::OpExists(t->GetOpArgs(shard), largs);
+    keys_existed.fetch_add(res.value_or(0), memory_order_relaxed);
+    return OpStatus::OK;
+  };
+  cntx->transaction->ScheduleSingleHop(std::move(cb));
+
+  exec_info.watched_existed += keys_existed.load(memory_order_relaxed);
+  for (size_t i = 1; i < args.size(); i++) {
+    exec_info.watched_keys.emplace_back(ArgS(args, i));
+  }
+
+  return (*cntx)->SendOk();
+}
+
+// Unwatch all keys for a connection and unregister from DbSlices.
+// Used by UNWATCH, DICARD and EXEC.
+void UnwatchAllKeys(ConnectionContext* cntx) {
+  auto& exec_info = cntx->conn_state.exec_info;
+  if (!exec_info.watched_keys.empty()) {
+    auto cb = [&](EngineShard* shard) {
+      shard->db_slice().UnregisterWatches(&exec_info);
+    };
+    shard_set->RunBriefInParallel(std::move(cb));
+  }
+  exec_info.ClearWatched();
+}
+
+void Service::Unwatch(CmdArgList args, ConnectionContext* cntx) {
+  UnwatchAllKeys(cntx);
+  return (*cntx)->SendOk();
+}
+
 void Service::CallFromScript(CmdArgList args, ObjectExplorer* reply, ConnectionContext* cntx) {
   DCHECK(cntx->transaction);
   InterpreterReplier replier(reply);
@@ -883,10 +935,43 @@ void Service::Discard(CmdArgList args, ConnectionContext* cntx) {
     return rb->SendError("DISCARD without MULTI");
   }
 
+  UnwatchAllKeys(cntx);
   cntx->conn_state.exec_info.Clear();
   rb->SendOk();
+}
 
-  rb->SendOk();
+// Return true if non of the connections watched keys expired.
+bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandRegistry& registry) {
+  static char EXISTS[] = "EXISTS";
+  auto& exec_info = cntx->conn_state.exec_info;
+
+  CmdArgVec str_list(exec_info.watched_keys.size()+1);
+  str_list[0] = MutableSlice{EXISTS, strlen(EXISTS)};
+  for (size_t i = 1;  i < str_list.size(); i++) {
+    string& s = exec_info.watched_keys[i-1];
+    str_list[i] = MutableSlice{s.data(), s.size()};
+  }
+
+  atomic_uint32_t watch_exist_count{0};
+  auto cb = [&watch_exist_count, &exec_info](Transaction* t, EngineShard* shard) {
+    ArgSlice args = t->ShardArgsInShard(shard->shard_id());
+    auto res = GenericFamily::OpExists(t->GetOpArgs(shard), args);
+    watch_exist_count.fetch_add(res.value_or(0), memory_order_relaxed);
+    return OpStatus::OK;
+  };
+
+  VLOG(1) << "Checking expired watch keys";
+
+  cntx->transaction->SetExecCmd(registry.Find(EXISTS));
+  cntx->transaction->InitByArgs(cntx->conn_state.db_index,
+    CmdArgList{str_list.data(), str_list.size()});
+  OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
+  CHECK_EQ(OpStatus::OK, status);
+
+  // The comparison can still be true even if a key expired due to another one being created.
+  // So we have to check the watched_dirty flag, which is set if a key expired.
+  return watch_exist_count.load() == exec_info.watched_existed
+    && !exec_info.watched_dirty.load();
 }
 
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
@@ -898,11 +983,22 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
   auto& exec_info = cntx->conn_state.exec_info;
   absl::Cleanup exec_clear = [&cntx, &exec_info] {
+    UnwatchAllKeys(cntx);
     exec_info.Clear();
   };
 
   if (exec_info.state == ConnectionState::ExecInfo::EXEC_ERROR) {
     return rb->SendError("-EXECABORT Transaction discarded because of previous errors");
+  }
+
+  if (exec_info.watched_dirty.load()) {
+    return rb->SendNull();
+  }
+
+  // EXEC should not run if any of the watched keys expired.
+  if (!exec_info.watched_keys.empty() && !CheckWatchedKeyExpiry(cntx, registry_)) {
+    cntx->transaction->UnlockMulti();
+    return rb->SendNull();
   }
 
   VLOG(1) << "StartExec " << exec_info.body.size();
@@ -1151,6 +1247,8 @@ void Service::RegisterCommands() {
   registry_
       << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0}.HFUNC(Quit)
       << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(Multi)
+      << CI{"WATCH", CO::LOADING, -2, 1, -1, 1}.HFUNC(Watch)
+      << CI{"UNWATCH", CO::LOADING, 1, 0, 0, 0}.HFUNC(Unwatch)
       << CI{"DISCARD", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.MFUNC(Discard)
       << CI{"EVAL", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, 1}.MFUNC(Eval).SetValidator(
              &EvalValidator)

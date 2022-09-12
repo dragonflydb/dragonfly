@@ -660,6 +660,17 @@ void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
     stats->strval_memory_usage += value_heap_size;
   if (existing)
     stats->update_value_amount += value_heap_size;
+
+  if (!watched_keys_.empty()) {
+    // Check if the key is watched.
+    if (auto wit = watched_keys_.find(key); wit != watched_keys_.end()) {
+      for (auto conn_ptr : wit->second) {
+        conn_ptr->watched_dirty.store(true);
+      }
+      // No connections need to watch it anymore.
+      watched_keys_.erase(wit);
+    }
+  }
 }
 
 pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(DbIndex db_ind,
@@ -829,5 +840,20 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
 
   return freed_memory_fun();
 };
+
+void DbSlice::RegisterWatchedKey(std::string_view key, ConnectionState::ExecInfo* exec_info) {
+  watched_keys_[key].push_back(exec_info);
+}
+
+void DbSlice::UnregisterWatches(ConnectionState::ExecInfo* exec_info) {
+  for (const auto& key : exec_info->watched_keys) {
+    if (auto it = watched_keys_.find(key); it != watched_keys_.end()) {
+      it->second.erase(std::remove(it->second.begin(), it->second.end(), exec_info),
+                       it->second.end());
+      if (it->second.empty())
+        watched_keys_.erase(it);
+    }
+  }
+}
 
 }  // namespace dfly

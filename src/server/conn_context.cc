@@ -212,6 +212,12 @@ void ConnectionContext::SendSubscriptionChangedResponse(string_view action,
 }
 
 void ConnectionContext::OnClose() {
+  if (!conn_state.exec_info.watched_keys.empty()) {
+    shard_set->RunBriefInParallel([this](EngineShard* shard) {
+      return shard->db_slice().UnregisterWatches(&conn_state.exec_info);
+    });
+  }
+
   if (!conn_state.subscribe_info)
     return;
 

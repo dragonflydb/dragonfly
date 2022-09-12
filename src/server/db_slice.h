@@ -262,6 +262,10 @@ class DbSlice {
     caching_mode_ = 1;
   }
 
+  void RegisterWatchedKey(std::string_view key, ConnectionState::ExecInfo* exec_info);
+
+  void UnregisterWatches(ConnectionState::ExecInfo* exec_info);
+
  private:
   void CreateDb(DbIndex index);
   size_t EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* table);
