@@ -325,16 +325,21 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
 
   VLOG(2) << "Set " << key << "(" << db_slice.shard_id() << ") ";
 
-  if (params.how == SET_IF_EXISTS) {
+  if (params.IsConditionalSet()) {
+    // Make sure that we have this key, and only add it if it does exists
     auto [it, expire_it] = db_slice.FindExt(params.db_index, key);
-
-    if (IsValid(it)) {  // existing
-      return SetExisting(params, it, expire_it, value);
+    if (IsValid(it)) {  // We found this key entry, check what to do next
+      if (params.how == SET_IF_EXISTS) {
+        return SetExisting(params, it, expire_it, value);
+      } else {
+        // at this point, we know that we are execpting to no override,
+        // so let the caller know that we did nothing
+        return OpStatus::SKIPPED;
+      }
     }
-
-    return OpStatus::SKIPPED;
   }
-
+  // At this point we either need to add missing entry, or we
+  // will override an existing one
   // Trying to add a new entry.
   tuple<PrimeIterator, ExpireIterator, bool> add_res;
   try {
@@ -347,7 +352,6 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
   if (!get<2>(add_res)) {  // Existing.
     return SetExisting(params, it, get<1>(add_res), value);
   }
-
   //
   // Adding new value.
   PrimeValue tvalue{value};
@@ -480,14 +484,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  DCHECK(cntx->transaction);
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    SetCmd sg(t->GetOpArgs(shard));
-    return sg.Set(sparams, key, value);
-  };
-  OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
-
+  const auto result{SetGeneric(cntx, std::move(sparams), key, value)};
   if (result == OpStatus::OK) {
     return builder->SendStored();
   }
@@ -501,8 +498,44 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   return builder->SendSetSkipped();
 }
 
+OpResult<void> StringFamily::SetGeneric(ConnectionContext* cntx, SetCmd::SetParams sparams,
+                                        std::string_view key, std::string_view value) {
+  DCHECK(cntx->transaction);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    SetCmd sg(t->GetOpArgs(shard));
+    return sg.Set(sparams, key, value);
+  };
+  return cntx->transaction->ScheduleSingleHop(std::move(cb));
+}
+
 void StringFamily::SetEx(CmdArgList args, ConnectionContext* cntx) {
   SetExGeneric(true, std::move(args), cntx);
+}
+
+void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
+  // This is the same as calling the "Set" function, only in this case we are
+  // changing the value only if the don't have this key already, if it does exists
+  // the function will not modify it. in which case it would return 0
+  // it would return to the caller 1 in case the key did not exists and was added
+  string_view key = ArgS(args, 1);
+  string_view value = ArgS(args, 2);
+
+  SetCmd::SetParams sparams{cntx->db_index()};
+  sparams.how = SetCmd::SET_IF_NOTEXIST;
+  sparams.memcache_flags = cntx->conn_state.memcache_flag;
+  const auto results{SetGeneric(cntx, std::move(sparams), key, value)};
+  SinkReplyBuilder* builder = cntx->reply_builder();
+  if (results == OpStatus::OK) {
+    return builder->SendLong(1);  // this means that we successfully set the value
+  }
+  if (results == OpStatus::OUT_OF_MEMORY) {
+    return builder->SendError(kOutOfMemory);
+  }
+  CHECK_EQ(results, OpStatus::SKIPPED);  // in this case it must be skipped!
+  if (results == OpStatus::SKIPPED) {
+    return builder->SendLong(0);  // value do exists, we need to report that we didn't change it
+  }
 }
 
 void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
@@ -962,6 +995,7 @@ void StringFamily::Shutdown() {
 void StringFamily::Register(CommandRegistry* registry) {
   *registry << CI{"SET", CO::WRITE | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(Set)
             << CI{"SETEX", CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(SetEx)
+            << CI{"SETNX", CO::WRITE | CO::DENYOOM, 3, 1, 1, 1}.HFUNC(SetNx)
             << CI{"PSETEX", CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(PSetEx)
             << CI{"APPEND", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Append)
             << CI{"PREPEND", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Prepend)

@@ -40,7 +40,6 @@ vector<int64_t> ToIntArr(const RespExpr& e) {
   return res;
 }
 
-
 TEST_F(StringFamilyTest, SetGet) {
   auto resp = Run({"set", "key", "val"});
 
@@ -122,7 +121,7 @@ TEST_F(StringFamilyTest, SetHugeKey) {
 }
 
 TEST_F(StringFamilyTest, MGetSet) {
-  Run({"mset", "z", "0"});  // single key
+  Run({"mset", "z", "0"});         // single key
   auto resp = Run({"mget", "z"});  // single key
   EXPECT_THAT(resp, "0");
 
@@ -187,7 +186,6 @@ TEST_F(StringFamilyTest, MSetGet) {
   mset_fb.join();
   get_fb.join();
 }
-
 
 TEST_F(StringFamilyTest, MSetDel) {
   auto mset_fb = pp_->at(0)->LaunchFiber([&] {
@@ -310,8 +308,8 @@ TEST_F(StringFamilyTest, Range) {
   EXPECT_EQ(Run({"getrange", "key3", "4", "5"}), "");
 
   Run({"SET", "num", "1234"});
-  EXPECT_EQ(Run({"getrange","num", "3", "5000"}), "4");
-  EXPECT_EQ(Run({"getrange","num", "-5000", "10000"}), "1234");
+  EXPECT_EQ(Run({"getrange", "num", "3", "5000"}), "4");
+  EXPECT_EQ(Run({"getrange", "num", "-5000", "10000"}), "1234");
 }
 
 TEST_F(StringFamilyTest, IncrByFloat) {
@@ -326,6 +324,28 @@ TEST_F(StringFamilyTest, IncrByFloat) {
   Run({"SET", "num", "2.566"});
   resp = Run({"INCRBYFLOAT", "num", "1.0"});
   EXPECT_EQ(resp, "3.566");
+}
+
+TEST_F(StringFamilyTest, SetNx) {
+  auto resp = Run({"setnx", "foo", "bar", "XX"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  resp = Run({"setnx", "foo", "bar", "NX"});
+  ASSERT_THAT(resp, "OK");
+  resp = Run({"setnx", "foo", "bar", "NX"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  resp = Run({"setnx", "foo", "bar", "xx"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"setnx", "foo", "bar", "ex", "abc"});
+  ASSERT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  resp = Run({"setnx", "foo", "bar", "ex", "-1"});
+  ASSERT_THAT(resp, ErrArg("invalid expire time"));
+
+  resp = Run({"setnx", "foo", "bar", "ex", "1"});
+  ASSERT_THAT(resp, "OK");
 }
 
 }  // namespace dfly
