@@ -214,7 +214,7 @@ void ConnectionContext::SendSubscriptionChangedResponse(string_view action,
 void ConnectionContext::OnClose() {
   if (!conn_state.exec_info.watched_keys.empty()) {
     shard_set->RunBriefInParallel([this](EngineShard* shard) {
-      return shard->db_slice().UnregisterWatches(&conn_state.exec_info);
+      return shard->db_slice().UnregisterConnectionWatches(&conn_state.exec_info);
     });
   }
 
@@ -258,7 +258,7 @@ void ConnectionState::ExecInfo::Clear() {
 
 void ConnectionState::ExecInfo::ClearWatched() {
   watched_keys.clear();
-  watched_dirty.store(false);
+  watched_dirty.store(false, memory_order_relaxed);
   watched_existed = 0;
 }
 

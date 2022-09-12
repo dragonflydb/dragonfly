@@ -43,7 +43,7 @@ struct ConnectionState {
     ExecState state = EXEC_INACTIVE;
     std::vector<StoredCmd> body;
     // List of keys registered with WATCH
-    std::vector<std::string> watched_keys;
+    std::vector<std::pair<DbIndex, std::string>> watched_keys;
     // Set if a watched key was changed before EXEC
     std::atomic_bool watched_dirty = false;
     // Number of times watch was called on an existing key.

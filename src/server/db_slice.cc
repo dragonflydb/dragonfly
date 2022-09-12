@@ -460,6 +460,10 @@ void DbSlice::FlushDb(DbIndex db_ind) {
 
   if (db_ind != kDbAll) {
     auto& db = db_arr_[db_ind];
+    if (db) {
+      InvalidateDbWatches(db_ind);
+    }
+
     auto db_ptr = std::move(db);
     DCHECK(!db);
     CreateDb(db_ind);
@@ -468,6 +472,12 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     boost::fibers::fiber([db_ptr = std::move(db_ptr)]() mutable { db_ptr.reset(); }).detach();
 
     return;
+  }
+
+  for (size_t i = 0; i < db_arr_.size(); i++) {
+    if (db_arr_[i]) {
+      InvalidateDbWatches(i);
+    }
   }
 
   auto all_dbs = std::move(db_arr_);
@@ -661,14 +671,15 @@ void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
   if (existing)
     stats->update_value_amount += value_heap_size;
 
-  if (!watched_keys_.empty()) {
+  auto& watched_keys = db_arr_[db_ind]->watched_keys;
+  if (!watched_keys.empty()) {
     // Check if the key is watched.
-    if (auto wit = watched_keys_.find(key); wit != watched_keys_.end()) {
+    if (auto wit = watched_keys.find(key); wit != watched_keys.end()) {
       for (auto conn_ptr : wit->second) {
-        conn_ptr->watched_dirty.store(true);
+        conn_ptr->watched_dirty.store(true, memory_order_relaxed);
       }
       // No connections need to watch it anymore.
-      watched_keys_.erase(wit);
+      watched_keys.erase(wit);
     }
   }
 }
@@ -841,17 +852,26 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
   return freed_memory_fun();
 };
 
-void DbSlice::RegisterWatchedKey(std::string_view key, ConnectionState::ExecInfo* exec_info) {
-  watched_keys_[key].push_back(exec_info);
+void DbSlice::RegisterWatchedKey(DbIndex db_indx, std::string_view key, ConnectionState::ExecInfo* exec_info) {
+  db_arr_[db_indx]->watched_keys[key].push_back(exec_info);
 }
 
-void DbSlice::UnregisterWatches(ConnectionState::ExecInfo* exec_info) {
-  for (const auto& key : exec_info->watched_keys) {
-    if (auto it = watched_keys_.find(key); it != watched_keys_.end()) {
+void DbSlice::UnregisterConnectionWatches(ConnectionState::ExecInfo* exec_info) {
+  for (const auto& [db_indx, key] : exec_info->watched_keys) {
+    auto& watched_keys = db_arr_[db_indx]->watched_keys;
+    if (auto it = watched_keys.find(key); it != watched_keys.end()) {
       it->second.erase(std::remove(it->second.begin(), it->second.end(), exec_info),
                        it->second.end());
       if (it->second.empty())
-        watched_keys_.erase(it);
+        watched_keys.erase(it);
+    }
+  }
+}
+
+void DbSlice::InvalidateDbWatches(DbIndex db_indx) {
+  for (const auto& [key, conn_list] : db_arr_[db_indx]->watched_keys) {
+    for (auto conn_ptr : conn_list) {
+      conn_ptr->watched_dirty.store(true, memory_order_relaxed);
     }
   }
 }

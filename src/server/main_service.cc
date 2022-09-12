@@ -20,7 +20,6 @@ extern "C" {
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
-#include "server/conn_context.h"
 #include "server/error.h"
 #include "server/generic_family.h"
 #include "server/hset_family.h"
@@ -450,8 +449,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   bool is_write_cmd = (cid->opt_mask() & CO::WRITE) ||
                       (under_script && dfly_cntx->conn_state.script_info->is_write);
-  bool under_multi =
-      dfly_cntx->conn_state.exec_info.IsActive() && !is_trans_cmd;
+  bool under_multi = dfly_cntx->conn_state.exec_info.IsActive() && !is_trans_cmd;
 
   if (!etl.is_master && is_write_cmd && !dfly_cntx->is_replicating) {
     (*cntx)->SendError("-READONLY You can't write against a read only replica.");
@@ -748,8 +746,8 @@ void Service::Watch(CmdArgList args, ConnectionContext* cntx) {
   atomic_uint32_t keys_existed = 0;
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ArgSlice largs = t->ShardArgsInShard(shard->shard_id());
-    for (auto k: largs) {
-      shard->db_slice().RegisterWatchedKey(k, &exec_info);
+    for (auto k : largs) {
+      shard->db_slice().RegisterWatchedKey(cntx->db_index(), k, &exec_info);
     }
 
     auto res = GenericFamily::OpExists(t->GetOpArgs(shard), largs);
@@ -758,9 +756,10 @@ void Service::Watch(CmdArgList args, ConnectionContext* cntx) {
   };
   cntx->transaction->ScheduleSingleHop(std::move(cb));
 
+  // Duplicate keys are stored to keep correct count.
   exec_info.watched_existed += keys_existed.load(memory_order_relaxed);
   for (size_t i = 1; i < args.size(); i++) {
-    exec_info.watched_keys.emplace_back(ArgS(args, i));
+    exec_info.watched_keys.emplace_back(cntx->db_index(), ArgS(args, i));
   }
 
   return (*cntx)->SendOk();
@@ -772,7 +771,7 @@ void UnwatchAllKeys(ConnectionContext* cntx) {
   auto& exec_info = cntx->conn_state.exec_info;
   if (!exec_info.watched_keys.empty()) {
     auto cb = [&](EngineShard* shard) {
-      shard->db_slice().UnregisterWatches(&exec_info);
+      shard->db_slice().UnregisterConnectionWatches(&exec_info);
     };
     shard_set->RunBriefInParallel(std::move(cb));
   }
@@ -945,10 +944,10 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandRegistry& regis
   static char EXISTS[] = "EXISTS";
   auto& exec_info = cntx->conn_state.exec_info;
 
-  CmdArgVec str_list(exec_info.watched_keys.size()+1);
+  CmdArgVec str_list(exec_info.watched_keys.size() + 1);
   str_list[0] = MutableSlice{EXISTS, strlen(EXISTS)};
-  for (size_t i = 1;  i < str_list.size(); i++) {
-    string& s = exec_info.watched_keys[i-1];
+  for (size_t i = 1; i < str_list.size(); i++) {
+    auto& [db, s] = exec_info.watched_keys[i - 1];
     str_list[i] = MutableSlice{s.data(), s.size()};
   }
 
@@ -964,14 +963,23 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandRegistry& regis
 
   cntx->transaction->SetExecCmd(registry.Find(EXISTS));
   cntx->transaction->InitByArgs(cntx->conn_state.db_index,
-    CmdArgList{str_list.data(), str_list.size()});
+                                CmdArgList{str_list.data(), str_list.size()});
   OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, status);
 
   // The comparison can still be true even if a key expired due to another one being created.
   // So we have to check the watched_dirty flag, which is set if a key expired.
-  return watch_exist_count.load() == exec_info.watched_existed
-    && !exec_info.watched_dirty.load();
+  return watch_exist_count.load() == exec_info.watched_existed && !exec_info.watched_dirty.load(memory_order_relaxed);
+}
+
+// Check if exec_info watches keys on dbs other than db_indx.
+bool IsWatchingOtherDbs(DbIndex db_indx, const ConnectionState::ExecInfo& exec_info) {
+  for (const auto& [key_db, _] : exec_info.watched_keys) {
+    if (key_db != db_indx) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
@@ -987,11 +995,15 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     exec_info.Clear();
   };
 
+  if (IsWatchingOtherDbs(cntx->db_index(), exec_info)) {
+    return rb->SendError("Dragonfly does not allow WATCH and EXEC on different databases");
+  }
+
   if (exec_info.state == ConnectionState::ExecInfo::EXEC_ERROR) {
     return rb->SendError("-EXECABORT Transaction discarded because of previous errors");
   }
 
-  if (exec_info.watched_dirty.load()) {
+  if (exec_info.watched_dirty.load(memory_order_relaxed)) {
     return rb->SendNull();
   }
 

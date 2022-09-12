@@ -262,9 +262,13 @@ class DbSlice {
     caching_mode_ = 1;
   }
 
-  void RegisterWatchedKey(std::string_view key, ConnectionState::ExecInfo* exec_info);
+  void RegisterWatchedKey(DbIndex db_indx, std::string_view key, ConnectionState::ExecInfo* exec_info);
 
-  void UnregisterWatches(ConnectionState::ExecInfo* exec_info);
+  // Unregisted all watched key entries for connection.
+  void UnregisterConnectionWatches(ConnectionState::ExecInfo* exec_info);
+
+  // Invalidate all watched keys in database. Used on FLUSH.
+  void InvalidateDbWatches(DbIndex db_indx);
 
  private:
   void CreateDb(DbIndex index);
@@ -291,9 +295,6 @@ class DbSlice {
   mutable SliceEvents events_;  // we may change this even for const operations.
 
   DbTableArray db_arr_;
-
-  // Stores a list of dependant connections for each watched key.
-  absl::flat_hash_map<std::string, std::vector<ConnectionState::ExecInfo*>> watched_keys_;
 
   // Used in temporary computations in Acquire/Release.
   absl::flat_hash_set<std::string_view> uniq_keys_;

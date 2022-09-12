@@ -640,6 +640,31 @@ TEST_F(DflyEngineTest, Watch) {
   UpdateTime(expire_now_ + 1000);
   Run({"multi"});
   ASSERT_THAT(Run({"exec"}), kExecFail);
+
+  // Check FLUSHDB touches watched keys
+  Run({"select", "1"});
+  Run({"set", "a", "1"});
+  Run({"watch", "a"});
+  Run({"flushdb"});
+  Run({"multi"});
+  ASSERT_THAT(Run({"exec"}), kExecFail);
+
+  // Check multi db watches are not supported.
+  Run({"select", "1"});
+  Run({"set", "a", "1"});
+  Run({"watch", "a"});
+  Run({"select", "0"});
+  Run({"multi"});
+  ASSERT_THAT(Run({"exec"}), ArgType(RespExpr::ERROR));
+
+  // Check watch keys are isolated between databases.
+  Run({"set", "a", "1"});
+  Run({"watch", "a"});
+  Run({"select", "1"});
+  Run({"set", "a", "2"}); // changing a on db 1
+  Run({"select", "0"});
+  Run({"multi"});
+  ASSERT_THAT(Run({"exec"}), kExecSuccess);
 }
 
 // TODO: to test transactions with a single shard since then all transactions become local.
