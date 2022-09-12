@@ -72,7 +72,7 @@ class Connection : public util::Connection {
   std::string GetClientInfo() const;
   uint32 GetClientId() const;
 
-  void RequestShutdown();
+  void ShutdownSelf();
 
  protected:
   void OnShutdown() override;

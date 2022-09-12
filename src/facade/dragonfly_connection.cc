@@ -698,7 +698,7 @@ auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> Request* {
   return req;
 }
 
-void Connection::RequestShutdown() {
+void Connection::ShutdownSelf() {
   util::Connection::Shutdown();
 }
 
