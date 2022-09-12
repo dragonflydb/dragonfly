@@ -163,17 +163,25 @@ void DenseSet::Grow() {
   entries_.resize(prev_size * 2);
   ++capacity_log_;
 
+  // perform rehashing of items in the set
   for (long i = prev_size - 1; i >= 0; --i) {
     DensePtr* curr = &entries_[i];
 
+    // curr != nullptr checks if we have reached the end of a chain
+    // while !curr->IsEmpty() checks that the current chain is not empty
     while (curr != nullptr && !curr->IsEmpty()) {
       void* ptr = curr->GetObject();
       uint32_t bid = BucketId(ptr);
 
+      // if the item does not move from the current chain, ensure
+      // it is not marked as displaced and move to the next item in the chain
       if (bid == i) {
         curr->ClearDisplaced();
         curr = curr->Next();
       } else {
+        // if the entry is in the wrong chain remove it and
+        // add it to the correct chain. This will also correct
+        // displaced entries
         DensePtr node = Unlink(curr);
         PushFront(entries_.begin() + bid, node);
         entries_[bid].ClearDisplaced();
@@ -233,10 +241,10 @@ bool DenseSet::AddInternal(void* ptr) {
    * Since the current entry is not empty, it is either a valid chain
    * or there is a displaced node here. In the latter case it is best to
    * move the displaced node to its correct bucket. However there could be
-   * a displaced node there and so forth. Keep a stack of nodes that are displaced
-   * until we find a displaced node which hashes to an empty bucket.
-   * Then unwind the stack of pending displacements until each node is in
-   * its correct bucket
+   * a displaced node there and so forth. Keep to avoid having to keep a stack
+   * of displacements we can keep track of the current displaced node, add it
+   * to the correct chain, and if the correct chain contains a displaced node
+   * unlink it and repeat the steps
    */
 
   DensePtr to_insert(ptr);
