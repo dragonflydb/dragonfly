@@ -581,6 +581,92 @@ TEST_F(DflyEngineTest, PUnsubscribe) {
   EXPECT_THAT(resp.GetVec(), ElementsAre("punsubscribe", "b*", IntArg(0)));
 }
 
+TEST_F(DflyEngineTest, Watch) {
+  auto kExecFail = ArgType(RespExpr::NIL);
+  auto kExecSuccess = ArgType(RespExpr::ARRAY);
+
+  // Check watch doesn't run in multi.
+  Run({"multi"});
+  ASSERT_THAT(Run({"watch", "a"}), ErrArg("WATCH inside MULTI is not allowed"));
+  Run({"discard"});
+
+  // Check watch on existing key.
+  Run({"set", "a", "1"});
+  EXPECT_EQ(Run({"watch", "a"}), "OK");
+  Run({"set", "a", "2"});
+  Run({"multi"});
+  ASSERT_THAT(Run({"exec"}), kExecFail);
+
+  // Check watch data cleared after EXEC.
+  Run({"set", "a", "1"});
+  Run({"multi"});
+  ASSERT_THAT(Run({"exec"}), kExecSuccess);
+
+  // Check watch on non-existent key.
+  Run({"del", "b"});
+  EXPECT_EQ(Run({"watch", "b"}), "OK"); // didn't exist yet
+  Run({"set", "b", "1"});
+  Run({"multi"});
+  ASSERT_THAT(Run({"exec"}), kExecFail);
+
+  // Check EXEC doesn't miss watched key expiration.
+  Run({"watch", "a"});
+  Run({"expire", "a", "1"});
+  UpdateTime(expire_now_ + 1000);
+  Run({"multi"});
+  ASSERT_THAT(Run({"exec"}), kExecFail);
+
+  // Check unwatch.
+  Run({"watch", "a"});
+  Run({"unwatch"});
+  Run({"set", "a", "3"});
+  Run({"multi"});
+  ASSERT_THAT(Run({"exec"}), kExecSuccess);
+
+  // Check double expire
+  Run({"watch", "a", "b"});
+  Run({"set", "a", "2"});
+  Run({"set", "b", "2"});
+  Run({"multi"});
+  ASSERT_THAT(Run({"exec"}), kExecFail);
+
+  // Check EXPIRE + new key.
+  Run({"set", "a", "1"});
+  Run({"del", "c"});
+  Run({"watch", "c"}); // didn't exist yet
+  Run({"watch", "a"});
+  Run({"set", "c", "1"});
+  Run({"expire", "a", "1"}); // a existed
+  UpdateTime(expire_now_ + 1000);
+  Run({"multi"});
+  ASSERT_THAT(Run({"exec"}), kExecFail);
+
+  // Check FLUSHDB touches watched keys
+  Run({"select", "1"});
+  Run({"set", "a", "1"});
+  Run({"watch", "a"});
+  Run({"flushdb"});
+  Run({"multi"});
+  ASSERT_THAT(Run({"exec"}), kExecFail);
+
+  // Check multi db watches are not supported.
+  Run({"select", "1"});
+  Run({"set", "a", "1"});
+  Run({"watch", "a"});
+  Run({"select", "0"});
+  Run({"multi"});
+  ASSERT_THAT(Run({"exec"}), ArgType(RespExpr::ERROR));
+
+  // Check watch keys are isolated between databases.
+  Run({"set", "a", "1"});
+  Run({"watch", "a"});
+  Run({"select", "1"});
+  Run({"set", "a", "2"}); // changing a on db 1
+  Run({"select", "0"});
+  Run({"multi"});
+  ASSERT_THAT(Run({"exec"}), kExecSuccess);
+}
+
 // TODO: to test transactions with a single shard since then all transactions become local.
 // To consider having a parameter in dragonfly engine controlling number of shards
 // unconditionally from number of cpus. TO TEST BLPOP under multi for single/multi argument case.

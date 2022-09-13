@@ -509,7 +509,7 @@ OpResult<uint32_t> HSetFamily::OpSet(const OpArgs& op_args, string_view key, Cmd
     }
   }
   it->second.SyncRObj();
-  db_slice.PostUpdate(op_args.db_ind, it);
+  db_slice.PostUpdate(op_args.db_ind, it, key);
 
   return created;
 }
@@ -548,7 +548,7 @@ OpResult<uint32_t> HSetFamily::OpDel(const OpArgs& op_args, string_view key, Cmd
 
   co.SyncRObj();
 
-  db_slice.PostUpdate(op_args.db_ind, *it_res);
+  db_slice.PostUpdate(op_args.db_ind, *it_res, key);
   if (key_remove) {
     if (hset->encoding == OBJ_ENCODING_LISTPACK) {
       stats->listpack_blob_cnt--;
@@ -874,7 +874,7 @@ OpStatus HSetFamily::OpIncrBy(const OpArgs& op_args, string_view key, string_vie
   }
 
   it->second.SyncRObj();
-  db_slice.PostUpdate(op_args.db_ind, it);
+  db_slice.PostUpdate(op_args.db_ind, it, key);
 
   return OpStatus::OK;
 }

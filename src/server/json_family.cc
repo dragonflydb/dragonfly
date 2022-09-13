@@ -59,7 +59,7 @@ void SetString(const OpArgs& op_args, string_view key, const string& value) {
   auto& db_slice = op_args.shard->db_slice();
   auto [it_output, added] = db_slice.AddOrFind(op_args.db_ind, key);
   it_output->second.SetString(value);
-  db_slice.PostUpdate(op_args.db_ind, it_output);
+  db_slice.PostUpdate(op_args.db_ind, it_output, key);
   RecordJournal(op_args, it_output->first, it_output->second);
 }
 
