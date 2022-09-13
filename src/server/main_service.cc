@@ -20,7 +20,6 @@ extern "C" {
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
-#include "server/conn_context.h"
 #include "server/error.h"
 #include "server/generic_family.h"
 #include "server/hset_family.h"
@@ -395,8 +394,8 @@ void Service::Shutdown() {
 }
 
 static void MultiSetError(ConnectionContext* cntx) {
-  if (cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE) {
-    cntx->conn_state.exec_state = ConnectionState::EXEC_ERROR;
+  if (cntx->conn_state.exec_info.IsActive()) {
+    cntx->conn_state.exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
   }
 }
 
@@ -450,8 +449,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   bool is_write_cmd = (cid->opt_mask() & CO::WRITE) ||
                       (under_script && dfly_cntx->conn_state.script_info->is_write);
-  bool under_multi =
-      dfly_cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE && !is_trans_cmd;
+  bool under_multi = dfly_cntx->conn_state.exec_info.IsActive() && !is_trans_cmd;
 
   if (!etl.is_master && is_write_cmd && !dfly_cntx->is_replicating) {
     (*cntx)->SendError("-READONLY You can't write against a read only replica.");
@@ -482,20 +480,25 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
       (*cntx)->SendError("Can not call SELECT within a transaction");
       return;
     }
+
+    if (cmd_name == "WATCH") {
+      (*cntx)->SendError("WATCH inside MULTI is not allowed");
+      return;
+    }
   }
 
   std::move(multi_error).Cancel();
 
   etl.connection_stats.cmd_count_map[cmd_name]++;
 
-  if (dfly_cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE && !is_trans_cmd) {
+  if (dfly_cntx->conn_state.exec_info.IsActive() && !is_trans_cmd) {
     // TODO: protect against aggregating huge transactions.
     StoredCmd stored_cmd{cid};
     stored_cmd.cmd.reserve(args.size());
     for (size_t i = 0; i < args.size(); ++i) {
       stored_cmd.cmd.emplace_back(ArgS(args, i));
     }
-    dfly_cntx->conn_state.exec_body.push_back(std::move(stored_cmd));
+    dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
 
     return (*cntx)->SendSimpleString("QUEUED");
   }
@@ -725,11 +728,59 @@ void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::Multi(CmdArgList args, ConnectionContext* cntx) {
-  if (cntx->conn_state.exec_state != ConnectionState::EXEC_INACTIVE) {
+  if (cntx->conn_state.exec_info.IsActive()) {
     return (*cntx)->SendError("MULTI calls can not be nested");
   }
-  cntx->conn_state.exec_state = ConnectionState::EXEC_COLLECT;
+  cntx->conn_state.exec_info.state = ConnectionState::ExecInfo::EXEC_COLLECT;
   // TODO: to protect against huge exec transactions.
+  return (*cntx)->SendOk();
+}
+
+void Service::Watch(CmdArgList args, ConnectionContext* cntx) {
+  auto& exec_info = cntx->conn_state.exec_info;
+
+  // Skip if EXEC will already fail due previous WATCH.
+  if (exec_info.watched_dirty.load(memory_order_relaxed)) {
+    return (*cntx)->SendOk();
+  }
+
+  atomic_uint32_t keys_existed = 0;
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    ArgSlice largs = t->ShardArgsInShard(shard->shard_id());
+    for (auto k : largs) {
+      shard->db_slice().RegisterWatchedKey(cntx->db_index(), k, &exec_info);
+    }
+
+    auto res = GenericFamily::OpExists(t->GetOpArgs(shard), largs);
+    keys_existed.fetch_add(res.value_or(0), memory_order_relaxed);
+    return OpStatus::OK;
+  };
+  cntx->transaction->ScheduleSingleHop(std::move(cb));
+
+  // Duplicate keys are stored to keep correct count.
+  exec_info.watched_existed += keys_existed.load(memory_order_relaxed);
+  for (size_t i = 1; i < args.size(); i++) {
+    exec_info.watched_keys.emplace_back(cntx->db_index(), ArgS(args, i));
+  }
+
+  return (*cntx)->SendOk();
+}
+
+// Unwatch all keys for a connection and unregister from DbSlices.
+// Used by UNWATCH, DICARD and EXEC.
+void UnwatchAllKeys(ConnectionContext* cntx) {
+  auto& exec_info = cntx->conn_state.exec_info;
+  if (!exec_info.watched_keys.empty()) {
+    auto cb = [&](EngineShard* shard) {
+      shard->db_slice().UnregisterConnectionWatches(&exec_info);
+    };
+    shard_set->RunBriefInParallel(std::move(cb));
+  }
+  exec_info.ClearWatched();
+}
+
+void Service::Unwatch(CmdArgList args, ConnectionContext* cntx) {
+  UnwatchAllKeys(cntx);
   return (*cntx)->SendOk();
 }
 
@@ -836,7 +887,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   // TODO: to determine whether the script is RO by scanning all "redis.p?call" calls
   // and checking whether all invocations consist of RO commands.
   // we can do it once during script insertion into script mgr.
-  cntx->conn_state.script_info.emplace(ConnectionState::Script{});
+  cntx->conn_state.script_info.emplace(ConnectionState::ScriptInfo{});
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
     cntx->conn_state.script_info->keys.insert(ArgS(eval_args.keys, i));
   }
@@ -880,35 +931,96 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
 void Service::Discard(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = (*cntx).operator->();
 
-  if (cntx->conn_state.exec_state == ConnectionState::EXEC_INACTIVE) {
+  if (!cntx->conn_state.exec_info.IsActive()) {
     return rb->SendError("DISCARD without MULTI");
   }
 
-  cntx->conn_state.exec_state = ConnectionState::EXEC_INACTIVE;
-  cntx->conn_state.exec_body.clear();
-
+  UnwatchAllKeys(cntx);
+  cntx->conn_state.exec_info.Clear();
   rb->SendOk();
+}
+
+// Return true if non of the connections watched keys expired.
+bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandRegistry& registry) {
+  static char EXISTS[] = "EXISTS";
+  auto& exec_info = cntx->conn_state.exec_info;
+
+  CmdArgVec str_list(exec_info.watched_keys.size() + 1);
+  str_list[0] = MutableSlice{EXISTS, strlen(EXISTS)};
+  for (size_t i = 1; i < str_list.size(); i++) {
+    auto& [db, s] = exec_info.watched_keys[i - 1];
+    str_list[i] = MutableSlice{s.data(), s.size()};
+  }
+
+  atomic_uint32_t watch_exist_count{0};
+  auto cb = [&watch_exist_count, &exec_info](Transaction* t, EngineShard* shard) {
+    ArgSlice args = t->ShardArgsInShard(shard->shard_id());
+    auto res = GenericFamily::OpExists(t->GetOpArgs(shard), args);
+    watch_exist_count.fetch_add(res.value_or(0), memory_order_relaxed);
+    return OpStatus::OK;
+  };
+
+  VLOG(1) << "Checking expired watch keys";
+
+  cntx->transaction->SetExecCmd(registry.Find(EXISTS));
+  cntx->transaction->InitByArgs(cntx->conn_state.db_index,
+                                CmdArgList{str_list.data(), str_list.size()});
+  OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
+  CHECK_EQ(OpStatus::OK, status);
+
+  // The comparison can still be true even if a key expired due to another one being created.
+  // So we have to check the watched_dirty flag, which is set if a key expired.
+  return watch_exist_count.load() == exec_info.watched_existed && !exec_info.watched_dirty.load(memory_order_relaxed);
+}
+
+// Check if exec_info watches keys on dbs other than db_indx.
+bool IsWatchingOtherDbs(DbIndex db_indx, const ConnectionState::ExecInfo& exec_info) {
+  for (const auto& [key_db, _] : exec_info.watched_keys) {
+    if (key_db != db_indx) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = (*cntx).operator->();
 
-  if (cntx->conn_state.exec_state == ConnectionState::EXEC_INACTIVE) {
+  if (!cntx->conn_state.exec_info.IsActive()) {
     return rb->SendError("EXEC without MULTI");
   }
 
-  if (cntx->conn_state.exec_state == ConnectionState::EXEC_ERROR) {
-    cntx->conn_state.exec_state = ConnectionState::EXEC_INACTIVE;
-    cntx->conn_state.exec_body.clear();
+  auto& exec_info = cntx->conn_state.exec_info;
+  absl::Cleanup exec_clear = [&cntx, &exec_info] {
+    UnwatchAllKeys(cntx);
+    exec_info.Clear();
+  };
+
+  if (IsWatchingOtherDbs(cntx->db_index(), exec_info)) {
+    return rb->SendError("Dragonfly does not allow WATCH and EXEC on different databases");
+  }
+
+  if (exec_info.state == ConnectionState::ExecInfo::EXEC_ERROR) {
     return rb->SendError("-EXECABORT Transaction discarded because of previous errors");
   }
 
-  VLOG(1) << "StartExec " << cntx->conn_state.exec_body.size();
-  rb->StartArray(cntx->conn_state.exec_body.size());
-  if (!cntx->conn_state.exec_body.empty()) {
+  if (exec_info.watched_dirty.load(memory_order_relaxed)) {
+    return rb->SendNull();
+  }
+
+  // EXEC should not run if any of the watched keys expired.
+  if (!exec_info.watched_keys.empty() && !CheckWatchedKeyExpiry(cntx, registry_)) {
+    cntx->transaction->UnlockMulti();
+    return rb->SendNull();
+  }
+
+  VLOG(1) << "StartExec " << exec_info.body.size();
+  rb->StartArray(exec_info.body.size());
+
+  if (!exec_info.body.empty()) {
     CmdArgVec str_list;
 
-    for (auto& scmd : cntx->conn_state.exec_body) {
+    for (auto& scmd : exec_info.body) {
       str_list.resize(scmd.cmd.size());
       for (size_t i = 0; i < scmd.cmd.size(); ++i) {
         string& s = scmd.cmd[i];
@@ -929,12 +1041,10 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
         break;
     }
 
-    VLOG(1) << "Exec unlocking " << cntx->conn_state.exec_body.size() << " commands";
+    VLOG(1) << "Exec unlocking " << exec_info.body.size() << " commands";
     cntx->transaction->UnlockMulti();
   }
 
-  cntx->conn_state.exec_state = ConnectionState::EXEC_INACTIVE;
-  cntx->conn_state.exec_body.clear();
   VLOG(1) << "Exec completed";
 }
 
@@ -1150,6 +1260,8 @@ void Service::RegisterCommands() {
   registry_
       << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0}.HFUNC(Quit)
       << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(Multi)
+      << CI{"WATCH", CO::LOADING, -2, 1, -1, 1}.HFUNC(Watch)
+      << CI{"UNWATCH", CO::LOADING, 1, 0, 0, 0}.HFUNC(Unwatch)
       << CI{"DISCARD", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.MFUNC(Discard)
       << CI{"EVAL", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, 1}.MFUNC(Eval).SetValidator(
              &EvalValidator)

@@ -9,6 +9,7 @@
 #include "facade/op_status.h"
 #include "server/common.h"
 #include "server/table.h"
+#include "server/conn_context.h"
 
 namespace util {
 class ProactorBase;
@@ -217,7 +218,7 @@ class DbSlice {
 
   // Callback functions called upon writing to the existing key.
   void PreUpdate(DbIndex db_ind, PrimeIterator it);
-  void PostUpdate(DbIndex db_ind, PrimeIterator it, bool existing_entry = true);
+  void PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key, bool existing_entry = true);
 
   DbTableStats* MutableStats(DbIndex db_ind) {
     return &db_arr_[db_ind]->stats;
@@ -261,6 +262,14 @@ class DbSlice {
     caching_mode_ = 1;
   }
 
+  void RegisterWatchedKey(DbIndex db_indx, std::string_view key, ConnectionState::ExecInfo* exec_info);
+
+  // Unregisted all watched key entries for connection.
+  void UnregisterConnectionWatches(ConnectionState::ExecInfo* exec_info);
+
+  // Invalidate all watched keys in database. Used on FLUSH.
+  void InvalidateDbWatches(DbIndex db_indx);
+
  private:
   void CreateDb(DbIndex index);
   size_t EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* table);
@@ -269,6 +278,7 @@ class DbSlice {
     return version_++;
   }
 
+ private:
   ShardId shard_id_;
   uint8_t caching_mode_ : 1;
 

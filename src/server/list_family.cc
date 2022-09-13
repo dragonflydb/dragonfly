@@ -277,7 +277,7 @@ OpStatus BPopper::Pop(Transaction* t, EngineShard* shard) {
 
     db_slice.PreUpdate(t->db_index(), it);
     value_ = ListPop(dir_, ql);
-    db_slice.PostUpdate(t->db_index(), it);
+    db_slice.PostUpdate(t->db_index(), it, key_);
     if (quicklistCount(ql) == 0) {
       CHECK(shard->db_slice().Del(t->db_index(), it));
     }
@@ -300,7 +300,7 @@ OpResult<string> OpRPopLPushSingleShard(const OpArgs& op_args, string_view src, 
     string val = ListPop(ListDir::RIGHT, src_ql);
 
     quicklistPushHead(src_ql, val.data(), val.size());
-    db_slice.PostUpdate(op_args.db_ind, src_it);
+    db_slice.PostUpdate(op_args.db_ind, src_it, src);
 
     return val;
   }
@@ -336,8 +336,8 @@ OpResult<string> OpRPopLPushSingleShard(const OpArgs& op_args, string_view src, 
   string val = ListPop(ListDir::RIGHT, src_ql);
   quicklistPushHead(dest_ql, val.data(), val.size());
 
-  db_slice.PostUpdate(op_args.db_ind, src_it);
-  db_slice.PostUpdate(op_args.db_ind, dest_it, !new_key);
+  db_slice.PostUpdate(op_args.db_ind, src_it, src);
+  db_slice.PostUpdate(op_args.db_ind, dest_it, dest, !new_key);
 
   if (quicklistCount(src_ql) == 0) {
     CHECK(db_slice.Del(op_args.db_ind, src_it));
@@ -418,7 +418,7 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
       es->blocking_controller()->AwakeWatched(op_args.db_ind, key);
     }
   } else {
-    es->db_slice().PostUpdate(op_args.db_ind, it, true);
+    es->db_slice().PostUpdate(op_args.db_ind, it, key, true);
   }
 
   return quicklistCount(ql);
@@ -451,7 +451,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
     }
   }
 
-  db_slice.PostUpdate(op_args.db_ind, it);
+  db_slice.PostUpdate(op_args.db_ind, it, key);
 
   if (quicklistCount(ql) == 0) {
     CHECK(db_slice.Del(op_args.db_ind, it));
@@ -891,7 +891,7 @@ OpResult<int> ListFamily::OpInsert(const OpArgs& op_args, string_view key, strin
       DCHECK_EQ(LIST_HEAD, insert_param);
       quicklistInsertBefore(qiter, &entry, elem.data(), elem.size());
     }
-    db_slice.PostUpdate(op_args.db_ind, *it_res);
+    db_slice.PostUpdate(op_args.db_ind, *it_res, key);
     res = quicklistCount(ql);
   }
   quicklistReleaseIterator(qiter);
@@ -931,7 +931,7 @@ OpResult<uint32_t> ListFamily::OpRem(const OpArgs& op_args, string_view key, str
         break;
     }
   }
-  db_slice.PostUpdate(op_args.db_ind, it);
+  db_slice.PostUpdate(op_args.db_ind, it, key);
 
   quicklistReleaseIterator(qiter);
 
@@ -954,7 +954,7 @@ OpStatus ListFamily::OpSet(const OpArgs& op_args, string_view key, string_view e
 
   db_slice.PreUpdate(op_args.db_ind, it);
   int replaced = quicklistReplaceAtIndex(ql, index, elem.data(), elem.size());
-  db_slice.PostUpdate(op_args.db_ind, it);
+  db_slice.PostUpdate(op_args.db_ind, it, key);
 
   if (!replaced) {
     return OpStatus::OUT_OF_RANGE;
@@ -998,7 +998,7 @@ OpStatus ListFamily::OpTrim(const OpArgs& op_args, string_view key, long start, 
   db_slice.PreUpdate(op_args.db_ind, it);
   quicklistDelRange(ql, 0, ltrim);
   quicklistDelRange(ql, -rtrim, rtrim);
-  db_slice.PostUpdate(op_args.db_ind, it);
+  db_slice.PostUpdate(op_args.db_ind, it, key);
 
   if (quicklistCount(ql) == 0) {
     CHECK(db_slice.Del(op_args.db_ind, it));
