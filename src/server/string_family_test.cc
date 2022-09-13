@@ -40,7 +40,6 @@ vector<int64_t> ToIntArr(const RespExpr& e) {
   return res;
 }
 
-
 TEST_F(StringFamilyTest, SetGet) {
   auto resp = Run({"set", "key", "val"});
 
@@ -122,7 +121,7 @@ TEST_F(StringFamilyTest, SetHugeKey) {
 }
 
 TEST_F(StringFamilyTest, MGetSet) {
-  Run({"mset", "z", "0"});  // single key
+  Run({"mset", "z", "0"});         // single key
   auto resp = Run({"mget", "z"});  // single key
   EXPECT_THAT(resp, "0");
 
@@ -187,7 +186,6 @@ TEST_F(StringFamilyTest, MSetGet) {
   mset_fb.join();
   get_fb.join();
 }
-
 
 TEST_F(StringFamilyTest, MSetDel) {
   auto mset_fb = pp_->at(0)->LaunchFiber([&] {
@@ -310,8 +308,8 @@ TEST_F(StringFamilyTest, Range) {
   EXPECT_EQ(Run({"getrange", "key3", "4", "5"}), "");
 
   Run({"SET", "num", "1234"});
-  EXPECT_EQ(Run({"getrange","num", "3", "5000"}), "4");
-  EXPECT_EQ(Run({"getrange","num", "-5000", "10000"}), "1234");
+  EXPECT_EQ(Run({"getrange", "num", "3", "5000"}), "4");
+  EXPECT_EQ(Run({"getrange", "num", "-5000", "10000"}), "1234");
 }
 
 TEST_F(StringFamilyTest, IncrByFloat) {
@@ -326,6 +324,35 @@ TEST_F(StringFamilyTest, IncrByFloat) {
   Run({"SET", "num", "2.566"});
   resp = Run({"INCRBYFLOAT", "num", "1.0"});
   EXPECT_EQ(resp, "3.566");
+}
+
+TEST_F(StringFamilyTest, SetNx) {
+  // Make sure that we "screen out" invalid parameters for this command
+  // this is important as it uses similar path as the "normal" set
+  auto resp = Run({"setnx", "foo", "bar", "XX"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  resp = Run({"setnx", "foo", "bar", "NX"});
+  ASSERT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  resp = Run({"setnx", "foo", "bar", "xx"});
+  ASSERT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  resp = Run({"setnx", "foo", "bar", "ex", "abc"});
+  ASSERT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  resp = Run({"setnx", "foo", "bar", "ex", "-1"});
+  ASSERT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  resp = Run({"setnx", "foo", "bar", "ex", "1"});
+  ASSERT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  // now let see how it goes for the valid parameters
+  EXPECT_EQ(1, CheckedInt({"setnx", "foo", "bar"}));
+  EXPECT_EQ(Run({"get", "foo"}), "bar");
+  // second call to the same key should return 0 as we have it
+  EXPECT_EQ(0, CheckedInt({"setnx", "foo", "hello"}));
+  EXPECT_EQ(Run({"get", "foo"}), "bar");  // the value was not changed
 }
 
 }  // namespace dfly

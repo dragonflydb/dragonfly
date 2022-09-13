@@ -71,8 +71,8 @@ spec:
           {{- end }}
 {{- if .Values.tls.enabled }}
             - "--tls"
-            - "--tls_client_cert_file=/etc/dragonfly/tls/tls.crt"
-            - "--tls_client_key_file=/etc/dragonfly/tls/tls.key"
+            - "--tls_cert_file=/etc/dragonfly/tls/tls.crt"
+            - "--tls_key_file=/etc/dragonfly/tls/tls.key"
 {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
