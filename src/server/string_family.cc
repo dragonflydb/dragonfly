@@ -330,7 +330,7 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
     // Make sure that we have this key, and only add it if it does exists
     if (params.how == SET_IF_EXISTS) {
       if (IsValid(it)) {
-        return SetExisting(params, it, expire_it, value);
+        return SetExisting(params, it, expire_it, key, value);
       } else {
         return OpStatus::SKIPPED;
       }
