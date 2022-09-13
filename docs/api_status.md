@@ -22,7 +22,7 @@ with respect to Memcached and Redis APIs.
 ### API 1
 - [X] String family
   - [X] SET
-  - [ ] SETNX
+  - [X] SETNX
   - [X] GET
   - [X] DECR
   - [X] INCR
