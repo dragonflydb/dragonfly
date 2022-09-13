@@ -721,6 +721,7 @@ void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
 
   SinkReplyBuilder* builder = cntx->reply_builder();
   builder->CloseConnection();
+  cntx->owner()->ShutdownSelf();
 }
 
 void Service::Multi(CmdArgList args, ConnectionContext* cntx) {
