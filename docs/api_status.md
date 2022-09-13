@@ -154,8 +154,8 @@ with respect to Memcached and Redis APIs.
   - [X] PSUBSCRIBE
   - [X] PUNSUBSCRIBE
 - [X] Server Family
-  - [ ] WATCH
-  - [ ] UNWATCH
+  - [X] WATCH
+  - [X] UNWATCH
   - [X] DISCARD
   - [X] CLIENT LIST/SETNAME
   - [ ] CLIENT KILL/UNPAUSE/PAUSE/GETNAME/REPLY/TRACKINGINFO
@@ -202,7 +202,23 @@ with respect to Memcached and Redis APIs.
   - [ ] PFMERGE
 
 ### API 3
+- [X] Generic Family
+  - [ ] TOUCH 
+- [X] HashSet Family
+  - [X] HSTRLEN
+- [X] Server Family
+  - [ ] CLIENT REPLY
+  - [X] REPLCONF
+  - [ ] WAIT
+
 ### API 4
+
+- [X] Generic Family
+  - [X] UNLINK
+- [X] Server Faimily
+  - [ ] MEMORY USAGE/STATS/PURGE/DOCTOR
+  - [ ] SWAPDB
+
 ### API 5
 - [X] Stream Family
   - [X] XADD
