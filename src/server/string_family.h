@@ -19,7 +19,8 @@ class SetCmd {
   const OpArgs op_args_;
 
  public:
-  explicit SetCmd(const OpArgs& op_args) : op_args_(op_args) {}
+  explicit SetCmd(const OpArgs& op_args) : op_args_(op_args) {
+  }
 
   enum SetHow { SET_ALWAYS, SET_IF_NOTEXIST, SET_IF_EXISTS };
 
@@ -34,6 +35,10 @@ class SetCmd {
     bool keep_expire = false;                                // KEEPTTL - TODO: to implement it.
 
     explicit SetParams(DbIndex dib) : db_index(dib) {
+    }
+
+    constexpr bool IsConditionalSet() const {
+      return how == SET_IF_NOTEXIST || how == SET_IF_EXISTS;
     }
   };
 
@@ -67,14 +72,18 @@ class StringFamily {
 
   static void Set(CmdArgList args, ConnectionContext* cntx);
   static void SetEx(CmdArgList args, ConnectionContext* cntx);
+  static void SetNx(CmdArgList args, ConnectionContext* cntx);
   static void SetRange(CmdArgList args, ConnectionContext* cntx);
   static void StrLen(CmdArgList args, ConnectionContext* cntx);
   static void Prepend(CmdArgList args, ConnectionContext* cntx);
   static void PSetEx(CmdArgList args, ConnectionContext* cntx);
 
+  // These functions are used internally, they do not implement any specific command
   static void IncrByGeneric(std::string_view key, int64_t val, ConnectionContext* cntx);
   static void ExtendGeneric(CmdArgList args, bool prepend, ConnectionContext* cntx);
   static void SetExGeneric(bool seconds, CmdArgList args, ConnectionContext* cntx);
+  static OpResult<void> SetGeneric(ConnectionContext* cntx, SetCmd::SetParams sparams,
+                                   std::string_view key, std::string_view value);
 
   struct GetResp {
     std::string value;
