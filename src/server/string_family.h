@@ -78,6 +78,7 @@ class StringFamily {
   static void Prepend(CmdArgList args, ConnectionContext* cntx);
   static void PSetEx(CmdArgList args, ConnectionContext* cntx);
 
+  // These functions are used internally, they do not implement any specific command
   static void IncrByGeneric(std::string_view key, int64_t val, ConnectionContext* cntx);
   static void ExtendGeneric(CmdArgList args, bool prepend, ConnectionContext* cntx);
   static void SetExGeneric(bool seconds, CmdArgList args, ConnectionContext* cntx);
