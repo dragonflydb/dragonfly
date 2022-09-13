@@ -20,6 +20,8 @@ extern "C" {
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
+#include "server/bitops_family.h"
+#include "server/conn_context.h"
 #include "server/error.h"
 #include "server/generic_family.h"
 #include "server/hset_family.h"
@@ -548,7 +550,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   try {
     cid->Invoke(args, dfly_cntx);
-  } catch(std::exception& e) {
+  } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     dfly_cntx->reply_builder()->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
@@ -1285,6 +1287,7 @@ void Service::RegisterCommands() {
   HSetFamily::Register(&registry_);
   ZSetFamily::Register(&registry_);
   JsonFamily::Register(&registry_);
+  BitOpsFamily::Register(&registry_);
 
   server_family_.Register(&registry_);
 
