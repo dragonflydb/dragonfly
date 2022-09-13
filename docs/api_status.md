@@ -202,7 +202,7 @@ with respect to Memcached and Redis APIs.
   - [ ] PFMERGE
 
 ### API 3
-- [X] Generic Family
+- [ ] Generic Family
   - [ ] TOUCH 
 - [X] HashSet Family
   - [X] HSTRLEN
@@ -212,10 +212,9 @@ with respect to Memcached and Redis APIs.
   - [ ] WAIT
 
 ### API 4
-
 - [X] Generic Family
   - [X] UNLINK
-- [X] Server Faimily
+- [ ] Server Family
   - [ ] MEMORY USAGE/STATS/PURGE/DOCTOR
   - [ ] SWAPDB
 
@@ -245,6 +244,5 @@ with respect to Memcached and Redis APIs.
 Some commands were implemented as decorators along the way:
 
  - [X] ROLE (2.8) decorator as master.
- - [X] UNLINK (4.0) decorator for DEL command
  - [X] BGSAVE (decorator for save)
  - [X] FUNCTION FLUSH (does nothing)
