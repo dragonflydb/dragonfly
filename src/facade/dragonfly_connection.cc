@@ -698,6 +698,10 @@ auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> Request* {
   return req;
 }
 
+void Connection::ShutdownSelf() {
+  util::Connection::Shutdown();
+}
+
 void RespToArgList(const RespVec& src, CmdArgVec* dest) {
   dest->resize(src.size());
   for (size_t i = 0; i < src.size(); ++i) {
