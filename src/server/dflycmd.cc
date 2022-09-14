@@ -90,20 +90,20 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (sub_cmd == "FLOW" && args.size() == 5) {
-    // FLOW <masterid> <syncid> <shardid>
+    // FLOW <masterid> <syncid> <threadid>
 
     string_view masterid = ArgS(args, 2);
     string_view syncid_str = ArgS(args, 3);
-    string_view shard_id_str = ArgS(args, 4);
+    string_view threadid_str = ArgS(args, 4);
 
-    unsigned shard_id, sync_id;
-    VLOG(1) << "Got DFLY FLOW " << masterid << " " << syncid_str << " " << shard_id_str;
+    unsigned threadid, sync_id;
+    VLOG(1) << "Got DFLY FLOW " << masterid << " " << syncid_str << " " << threadid_str;
 
     if (masterid != sf_->master_id()) {
       return rb->SendError("Bad master id");
     }
 
-    if (!absl::SimpleAtoi(shard_id_str, &shard_id) || shard_id >= shard_set->size()) {
+    if (!absl::SimpleAtoi(threadid_str, &threadid) || threadid >= shard_set->pool()->size()) {
       return rb->SendError(facade::kInvalidIntErr);
     }
 
@@ -117,17 +117,16 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
       if (it == sync_info_.end()) {
         return rb->SendError(kIdNotFound);
       }
-      auto& entry = it->second.shard_map[shard_id];
+      auto& entry = it->second->thread_map[threadid];
       entry.conn = cntx->owner();
     }
     cntx->owner()->SetName(absl::StrCat("repl_flow_", sync_id));
 
     cntx->conn_state.repl_session_id = sync_id;
-    cntx->conn_state.repl_threadid = shard_id;
+    cntx->conn_state.repl_threadid = threadid;
 
     // assuming here that shard id and thread id is the same thing.
-    listener_->Migrate(cntx->owner(), pool->at(shard_id));
-    CHECK(EngineShard::tlocal() && EngineShard::tlocal()->shard_id() == shard_id);
+    listener_->Migrate(cntx->owner(), pool->at(threadid));
 
     return rb->SendOk();
   }
@@ -141,19 +140,31 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
     }
 
     cntx->transaction->Schedule();
+
     OpStatus status = OpStatus::OK;
     boost::fibers::mutex mu;
+
+    // kick off the snapshotting simultaneously in all shards.
     cntx->transaction->Execute(
         [&](Transaction* t, EngineShard* shard) {
-          OpStatus st = ReplicateInShard(syncid, t, shard);
+          OpStatus st = FullSyncInShard(syncid, t, shard);
+
           lock_guard lk(mu);
           status = st;
           return OpStatus::OK;
         },
         true);
 
+    // TODO: after the full sync we should continue streaming data from non-shard threads as well
+    // because those threads provide locking/transaction information needed to provide atomicity
+    // guarantees on replica.
+
     if (status == OpStatus::OK)
       return rb->SendOk();
+
+    // TODO: to stop the replication in shards that started doing this.
+    // We can do it without the transaction via shard_set.
+
     return rb->SendError("replication error");
   }
   rb->SendError(kSyntaxErr);
@@ -161,10 +172,13 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
 
 uint32_t DflyCmd::AllocateSyncSession() {
   unique_lock lk(mu_);
-  auto [it, inserted] = sync_info_.emplace(next_sync_id_, SyncInfo{});
+  auto [it, inserted] = sync_info_.emplace(next_sync_id_, new SyncInfo);
   CHECK(inserted);
-  ++next_sync_id_;
-  return it->first;
+
+  it->second->start_time_ns = ProactorBase::me()->GetMonotonicTimeNs();
+  it->second->full_sync_cnt.store(shard_set->size(), memory_order_relaxed);
+
+  return next_sync_id_++;
 }
 
 void DflyCmd::OnClose(ConnectionContext* cntx) {
@@ -175,7 +189,21 @@ void DflyCmd::OnClose(ConnectionContext* cntx) {
 
     auto it = sync_info_.find(cntx->conn_state.repl_session_id);
     if (it != sync_info_.end()) {
-      VLOG(1) << "Found tbd: " << cntx->conn_state.repl_session_id;
+      SyncInfo* si = it->second;
+      auto& thread_map = si->thread_map;
+      auto shard_it = thread_map.find(cntx->conn_state.repl_threadid);
+      if (shard_it != thread_map.end() && shard_it->second.conn == cntx->owner()) {
+        repl_fb.swap(shard_it->second.repl_fb);
+        thread_map.erase(shard_it);
+
+        if (thread_map.empty()) {
+          int64_t dur_ms = (ProactorBase::me()->GetMonotonicTimeNs() - si->start_time_ns) / 1000000;
+
+          LOG(INFO) << "session " << it->first << " closed after " << dur_ms << "ms";
+          delete si;
+          sync_info_.erase(it);
+        }
+      }
     }
   }
 
@@ -247,48 +275,71 @@ void DflyCmd::HandleJournal(CmdArgList args, ConnectionContext* cntx) {
   return rb->SendError(reply, kSyntaxErrType);
 }
 
-OpStatus DflyCmd::ReplicateInShard(uint32_t syncid, Transaction* t, EngineShard* shard) {
+OpStatus DflyCmd::FullSyncInShard(uint32_t syncid, Transaction* t, EngineShard* shard) {
+  // we can not check sync_info_ state in coordinator thread because by the time
+  // this function runs things can change.
   unique_lock lk(mu_);
   auto it = sync_info_.find(syncid);
   if (it == sync_info_.end()) {
     return OpStatus::KEY_NOTFOUND;
   }
 
-  auto shard_it = it->second.shard_map.find(shard->shard_id());
-  if (shard_it == it->second.shard_map.end()) {
+  auto shard_it = it->second->thread_map.find(shard->shard_id());
+  if (shard_it == it->second->thread_map.end()) {
     return OpStatus::KEY_NOTFOUND;
   }
+
   CHECK(!shard_it->second.repl_fb.joinable());
   Connection* conn = shard_it->second.conn;
-  shard_it->second.repl_fb = boost::fibers::fiber(&DflyCmd::SnapshotFb, this, conn, shard);
   lk.unlock();
+
+  unique_ptr<RdbSaver> saver = make_unique<RdbSaver>(conn->socket(), true, false);
+
+  // Enable in-memory journaling. Please note that we need further enable it on all threads.
+  auto ec = sf_->journal()->OpenInThread(false, string_view());
+  CHECK(!ec);
+
+  // We must initialize snapshotting in this function because it provides us
+  // the snapshot isolation required for point-in-time full sync.
+  // StartSnapshotInShard assigns the epoch to the snapshot to preserve the snapshot isolation.
+  saver->StartSnapshotInShard(true, shard);
+
+  shard_it->second.repl_fb =
+      boost::fibers::fiber(&DflyCmd::FullSyncFb, this, it->second, conn, saver.release());
 
   return OpStatus::OK;
 }
 
-void DflyCmd::SnapshotFb(Connection* conn, EngineShard* shard) {
-  RdbSaver saver(conn->socket(), true, false);
+void DflyCmd::FullSyncFb(SyncInfo* si, Connection* conn, RdbSaver* saver) {
+  unique_ptr<RdbSaver> guard(saver);
+  error_code ec;
 
   // TODO: right now it's a poc code just for sake of sending something and show it can be done.
   // we will need to think how we send rdb header etc.
-  error_code ec = saver.SaveHeader({});
-
+  ec = saver->SaveHeader({});
   // also we need to think how to manage errors when replicating.
   if (ec) {
     LOG(ERROR) << ec;
     return;
   }
 
-  saver.StartSnapshotInShard(true, shard);
-  ec = saver.SaveBody(nullptr);
+  // TODO: we should be able to stop earlier if requested.
+  ec = saver->SaveBody(nullptr);
   if (ec) {
     LOG(ERROR) << ec;
     return;
   }
 
-  LOG(INFO) << "shard sync finished";
+  VLOG(1) << "SaveBody sync finished";
+
+  if (si->full_sync_cnt.fetch_sub(1, memory_order_acq_rel) == 1) {
+    int64_t dur_ms = (ProactorBase::me()->GetMonotonicTimeNs() - si->start_time_ns) / 1000000;
+    LOG(INFO) << "Finished full sync after " << dur_ms << "ms";
+  }
   // Again, to remove....
-  conn->socket()->Shutdown(SHUT_RDWR);
+  // Instead - to pull from a journal log incremental diffs and send them on the wire.
+  // should be a loop picking up and writing it.
+  ec = conn->socket()->Shutdown(SHUT_RDWR);
 }
 
 void DflyCmd::BreakOnShutdown() {

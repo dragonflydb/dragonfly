@@ -271,6 +271,7 @@ void Replica::ReplicateRedisFb() {
       ec = ConsumeDflyStream();
 
     LOG_IF(ERROR, ec && !FiberSocketBase::IsConnClosed(ec)) << "Replica socket error " << ec;
+
     state_mask_ &= ~R_SYNC_OK;  //
   }
 
@@ -358,7 +359,7 @@ error_code Replica::Greet() {
       return make_error_code(errc::bad_message);
     }
   } else if (resp_args_.size() == 3) {  // it's dragonfly master.
-    // Reponse is: <master_repl_id, syncid, num_shards>
+    // Reponse is: <master_repl_id, syncid, num_threads>
 
     if (resp_args_[0].type != RespExpr::STRING || resp_args_[1].type != RespExpr::STRING ||
         resp_args_[2].type != RespExpr::INT64 ||

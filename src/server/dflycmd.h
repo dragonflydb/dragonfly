@@ -16,12 +16,27 @@ namespace dfly {
 
 class EngineShardSet;
 class ServerFamily;
+class RdbSaver;
 
 namespace journal {
 class Journal;
 }  // namespace journal
 
 class DflyCmd {
+  struct ReplicateFlow {
+    facade::Connection* conn;
+    ::boost::fibers::fiber repl_fb;
+  };
+
+  struct SyncInfo {
+    int64_t tx_id = 0;
+    int64_t start_time_ns;
+    absl::flat_hash_map<uint32_t, ReplicateFlow> thread_map;
+
+    // How many connections have still not finished the full sync phase.
+    std::atomic_uint16_t full_sync_cnt;
+  };
+
  public:
   DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family);
 
@@ -37,26 +52,19 @@ class DflyCmd {
 
  private:
   void HandleJournal(CmdArgList args, ConnectionContext* cntx);
-  facade::OpStatus ReplicateInShard(uint32_t syncid, Transaction* t, EngineShard* shard);
-  void SnapshotFb(facade::Connection* conn, EngineShard* shard);
+
+  // This function kicks off the replication asynchronously and exits.
+  facade::OpStatus FullSyncInShard(uint32_t syncid, Transaction* t, EngineShard* shard);
+
+  // The fiber for full sync process.
+  void FullSyncFb(SyncInfo* si, facade::Connection* conn, RdbSaver* saver);
 
   util::ListenerInterface* listener_;
   ServerFamily* sf_;
   ::boost::fibers::mutex mu_;
   TxId journal_txid_ = 0;
 
-  struct ReplicateFlow {
-    facade::Connection* conn;
-    ::boost::fibers::fiber repl_fb;
-  };
-
-  struct SyncInfo {
-    int64_t tx_id = 0;
-
-    absl::flat_hash_map<ShardId, ReplicateFlow> shard_map;
-  };
-
-  absl::btree_map<uint32_t, SyncInfo> sync_info_;
+  absl::btree_map<uint32_t, SyncInfo*> sync_info_;
   uint32_t next_sync_id_ = 1;
 };
 

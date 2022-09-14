@@ -41,11 +41,11 @@ error_code Journal::OpenInThread(bool persistent, string_view dir) {
     }
   }
 
-      ServerState::tlocal()->set_journal(this);
-      EngineShard* shard = EngineShard::tlocal();
-      if (shard) {
-        shard->set_journal(this);
-      }
+  ServerState::tlocal()->set_journal(this);
+  EngineShard* shard = EngineShard::tlocal();
+  if (shard) {
+    shard->set_journal(this);
+  }
 
   return ec;
 }
