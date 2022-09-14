@@ -8,7 +8,7 @@
 #include <absl/random/random.h>  // for master_id_ generation.
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
-#include <mimalloc-types.h>
+
 #include <sys/resource.h>
 
 #include <chrono>
@@ -55,8 +55,6 @@ ABSL_FLAG(string, save_schedule, "",
 ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(uint32_t, hz);
-
-extern "C" mi_stats_t _mi_stats_main;
 
 namespace dfly {
 
@@ -172,9 +170,6 @@ class RdbSnapshot {
   }
 
  private:
-  // whether this RdbSnapshot captures only a single shard,
-  // false for legacy - rdb snapshot that captures
-  bool single_shard_;
   bool started_ = false;
 
   unique_ptr<uring::LinuxFile> file_;
@@ -561,7 +556,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             &resp->body());
   AppendMetricWithoutLabels("memory_used_peak_bytes", "", used_mem_peak.load(memory_order_relaxed),
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("comitted_memory", "", _mi_stats_main.committed.current,
+  AppendMetricWithoutLabels("comitted_memory", "", GetMallocCurrentCommitted(),
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("memory_max_bytes", "", max_memory_limit, MetricType::GAUGE,
                             &resp->body());
@@ -1116,7 +1111,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("used_memory_human", HumanReadableNumBytes(m.heap_used_bytes));
     append("used_memory_peak", used_mem_peak.load(memory_order_relaxed));
 
-    append("comitted_memory", _mi_stats_main.committed.current);
+    append("comitted_memory", GetMallocCurrentCommitted());
 
     if (sdata_res.has_value()) {
       append("used_memory_rss", sdata_res->vm_rss);
