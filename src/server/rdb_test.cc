@@ -30,7 +30,6 @@ using absl::StrCat;
 
 ABSL_DECLARE_FLAG(int32, list_compress_depth);
 ABSL_DECLARE_FLAG(int32, list_max_listpack_size);
-ABSL_DECLARE_FLAG(bool, use_set2);
 
 namespace dfly {
 
@@ -38,11 +37,6 @@ class RdbTest : public BaseFamilyTest {
  protected:
  protected:
   io::FileSource GetSource(string name);
-
-  // disable usage of DenseSet until the RDB patches are added
-  RdbTest() : BaseFamilyTest() {
-    SetFlag(&FLAGS_use_set2, false);
-  }
 };
 
 inline const uint8_t* to_byte(const void* s) {
