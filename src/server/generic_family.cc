@@ -463,6 +463,33 @@ void GenericFamily::Stick(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendLong(match_cnt);
 }
 
+void GenericFamily::Move(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  int64_t target_db;
+
+  if (!absl::SimpleAtoi(ArgS(args, 2), &target_db)) {
+    return (*cntx)->SendError(kInvalidIntErr);
+  }
+
+  if (target_db < 0 || target_db >= absl::GetFlag(FLAGS_dbnum)) {
+    return (*cntx)->SendError(kDbIndOutOfRangeErr);
+  }
+
+  OpStatus res = OpStatus::SKIPPED;
+  ShardId target_shard = Shard(key, shard_set->size());
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    // MOVE runs as a global transaction and is therefore scheduled on every shard.
+    if (target_shard == shard->shard_id()) {
+      res = OpMove(t->GetOpArgs(shard), key, target_db);
+    }
+    return OpStatus::OK;
+  };
+
+  cntx->transaction->ScheduleSingleHop(std::move(cb));
+  DCHECK(res != OpStatus::SKIPPED);
+  (*cntx)->SendLong(res == OpStatus::OK);
+}
+
 void GenericFamily::Rename(CmdArgList args, ConnectionContext* cntx) {
   OpResult<void> st = RenameGeneric(args, false, cntx);
   (*cntx)->SendError(st.status());
@@ -771,6 +798,39 @@ OpResult<uint32_t> GenericFamily::OpStick(const OpArgs& op_args, ArgSlice keys) 
   return res;
 }
 
+// OpMove touches multiple databases (op_args.db_idx, target_db), so it assumes it runs
+// as a global transaction.
+// TODO: Allow running OpMove without a global transaction.
+OpStatus GenericFamily::OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
+  auto& db_slice = op_args.shard->db_slice();
+
+  // Fetch value at key in current db.
+  auto [from_it, from_expire] = db_slice.FindExt(op_args.db_ind, key);
+  if (!IsValid(from_it))
+    return OpStatus::KEY_NOTFOUND;
+
+  // Fetch value at key in target db.
+  auto [to_it, _] = db_slice.FindExt(target_db, key);
+  if (IsValid(to_it))
+    return OpStatus::KEY_EXISTS;
+
+  // Ensure target database exists.
+  db_slice.ActivateDb(target_db);
+
+  bool sticky = from_it->first.IsSticky();
+  uint64_t exp_ts = db_slice.ExpireTime(from_expire);
+  PrimeValue from_obj = std::move(from_it->second);
+
+  // Restore expire flag after std::move.
+  from_it->second.SetExpire(IsValid(from_expire));
+
+  CHECK(db_slice.Del(op_args.db_ind, from_it));
+  to_it = db_slice.AddNew(target_db, key, std::move(from_obj), exp_ts);
+  to_it->first.SetSticky(sticky);
+
+  return OpStatus::OK;
+}
+
 using CI = CommandId;
 
 #define HFUNC(x) SetHandler(&GenericFamily::x)
@@ -798,7 +858,8 @@ void GenericFamily::Register(CommandRegistry* registry) {
             << CI{"PTTL", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Pttl)
             << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, 1}.HFUNC(Type)
             << CI{"UNLINK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Del)
-            << CI{"STICK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Stick);
+            << CI{"STICK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Stick)
+            << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS, 3, 1, 1, 1}.HFUNC(Move);
 }
 
 }  // namespace dfly

@@ -40,6 +40,7 @@ with respect to Memcached and Redis APIs.
   - [X] EXPIRE
   - [X] EXPIREAT
   - [X] KEYS
+  - [X] MOVE
   - [X] PING
   - [X] RENAME
   - [X] RENAMENX
@@ -105,7 +106,6 @@ with respect to Memcached and Redis APIs.
   - [ ] BGREWRITEAOF
   - [ ] MONITOR
   - [ ] RANDOMKEY
-  - [ ] MOVE
 
 ### API 2
 - [X] List Family
