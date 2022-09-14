@@ -362,7 +362,7 @@ void* DenseSet::PopInternal() {
  * 1110 come from hashes 1110XXXXX.... When a table grows to log size 5,
  * these entries can move either to 11100 or 11101. So if we traversed with our cursor
  * range [0000-1110], it's guaranteed that in grown table we do not need to cover again
- * [00000-11100]. Similarly with shrinkage, if a table is shrinked to log size 3,
+ * [00000-11100]. Similarly with shrinkage, if a table is shrunk to log size 3,
  * keys from 1110 and 1111 will move to bucket 111. Again, it's guaranteed that we
  * covered the range [000-111] (all keys in that case).
  * Returns: next cursor or 0 if reached the end of scan.

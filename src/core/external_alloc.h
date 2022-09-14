@@ -25,7 +25,7 @@ constexpr inline unsigned long long operator""_KB(unsigned long long x) {
  * An external allocator inspired by mimalloc. Its goal is to maintain a state machine for
  * bookkeeping the allocations of different sizes that are backed up by a separate
  * storage. It could be a disk, SSD or another memory allocator. This class serves
- * as a state machine that either returns an offset to the backign storage or the indication
+ * as a state machine that either returns an offset to the backing storage or the indication
  * of the resource that is missing. The advantage of such design is that we can use it in
  * asynchronous callbacks without blocking on any IO requests.
  * The allocator uses dynamic memory internally. Should be used in a single thread.

@@ -181,7 +181,7 @@ PageClass ClassFromSize(size_t size) {
  * SegmentDescr denotes a 256MB segment on external storage -
  * holds upto 256 pages (in case of small pages).
  * Each segment has pages of the same type, but each page can host blocks of
- * differrent sizes upto maximal block size for that page class.
+ * different sizes upto maximal block size for that page class.
  * SegmentDescr points to the range within external storage space.
  * By using the page.id together with segment->page_shift and segment->offset
  * one can know where the page is located in the storage.
