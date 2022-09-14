@@ -953,10 +953,11 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandRegistry& regis
   }
 
   atomic_uint32_t watch_exist_count{0};
-  auto cb = [&watch_exist_count, &exec_info](Transaction* t, EngineShard* shard) {
+  auto cb = [&watch_exist_count](Transaction* t, EngineShard* shard) {
     ArgSlice args = t->ShardArgsInShard(shard->shard_id());
     auto res = GenericFamily::OpExists(t->GetOpArgs(shard), args);
     watch_exist_count.fetch_add(res.value_or(0), memory_order_relaxed);
+
     return OpStatus::OK;
   };
 

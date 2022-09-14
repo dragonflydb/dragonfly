@@ -251,7 +251,7 @@ OpStatus BPopper::Run(Transaction* t, unsigned msec) {
   // We got here
   if (!result) {
     // cleanups, locks removal etc.
-    auto cb = [this](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
+    auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
     t->Execute(std::move(cb), true);
 
     return result.status();
