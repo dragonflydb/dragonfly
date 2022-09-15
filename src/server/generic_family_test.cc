@@ -227,6 +227,26 @@ TEST_F(GenericFamilyTest, Move) {
   ASSERT_THAT(Run({"move", "a", "1"}), IntArg(0));  // exists from test case above
   Run({"select", "1"});
   ASSERT_THAT(Run({"get", "a"}), "test");
+
+  // Check MOVE awakes blocking operations
+  auto fb_blpop = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
+    Run({"select", "1"});
+    auto resp = Run({"blpop", "l", "0"});
+    ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+    EXPECT_THAT(resp.GetVec(), ElementsAre("l", "TestItem"));
+  });
+
+  do {
+    this_fiber::sleep_for(100us);
+  } while (!IsLocked(1, "l"));
+
+  pp_->at(1)->Await([&] {
+    Run({"select", "0"});
+    Run({"lpush", "l", "TestItem"});
+    Run({"move", "l", "1"});
+  });
+
+  fb_blpop.join();
 }
 
 using testing::AnyOf;

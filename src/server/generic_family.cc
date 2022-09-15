@@ -475,6 +475,10 @@ void GenericFamily::Move(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kDbIndOutOfRangeErr);
   }
 
+  if (target_db == cntx->db_index()) {
+    return (*cntx)->SendError("source and destination objects are the same");
+  }
+
   OpStatus res = OpStatus::SKIPPED;
   ShardId target_shard = Shard(key, shard_set->size());
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -827,6 +831,10 @@ OpStatus GenericFamily::OpMove(const OpArgs& op_args, string_view key, DbIndex t
   CHECK(db_slice.Del(op_args.db_ind, from_it));
   to_it = db_slice.AddNew(target_db, key, std::move(from_obj), exp_ts);
   to_it->first.SetSticky(sticky);
+
+  if (to_it->second.ObjType() == OBJ_LIST && op_args.shard->blocking_controller()) {
+    op_args.shard->blocking_controller()->AwakeWatched(target_db, key);
+  }
 
   return OpStatus::OK;
 }
