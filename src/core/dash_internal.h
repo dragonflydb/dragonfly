@@ -528,7 +528,7 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   // Bumps up this entry making it more "important" for the eviction policy.
   template<typename BumpPolicy> Iterator BumpUp(uint8_t bid, SlotId slot, Hash_t key_hash, const BumpPolicy& ev);
 
-  // Tries to move stash entries back to their normal buckets (exact or neighour).
+  // Tries to move stash entries back to their normal buckets (exact or neighbour).
   // Returns number of entries that succeeded to unload.
   // Important! Affects versions of the moved items and the items in the destination
   // buckets.

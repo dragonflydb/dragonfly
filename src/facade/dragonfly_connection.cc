@@ -396,10 +396,11 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
       error_code ec2 = peer->Write(::io::Buffer(sv));
       if (ec2) {
         LOG(WARNING) << "Error " << ec2;
-        ec = ec;
+        ec = ec2;
       }
     }
-    peer->Shutdown(SHUT_RDWR);
+    error_code ec2 = peer->Shutdown(SHUT_RDWR);
+    LOG_IF(WARNING, ec2) << "Could not shutdown socket " << ec2;
   }
 
   if (ec && !FiberSocketBase::IsConnClosed(ec)) {

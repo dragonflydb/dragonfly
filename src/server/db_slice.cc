@@ -460,6 +460,10 @@ void DbSlice::FlushDb(DbIndex db_ind) {
 
   if (db_ind != kDbAll) {
     auto& db = db_arr_[db_ind];
+    if (db) {
+      InvalidateDbWatches(db_ind);
+    }
+
     auto db_ptr = std::move(db);
     DCHECK(!db);
     CreateDb(db_ind);
@@ -468,6 +472,12 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     boost::fibers::fiber([db_ptr = std::move(db_ptr)]() mutable { db_ptr.reset(); }).detach();
 
     return;
+  }
+
+  for (size_t i = 0; i < db_arr_.size(); i++) {
+    if (db_arr_[i]) {
+      InvalidateDbWatches(i);
+    }
   }
 
   auto all_dbs = std::move(db_arr_);
@@ -545,7 +555,7 @@ pair<PrimeIterator, bool> DbSlice::AddEntry(DbIndex db_ind, string_view key, Pri
   auto& it = res.first;
 
   it->second = std::move(obj);
-  PostUpdate(db_ind, it, false);
+  PostUpdate(db_ind, it, key, false);
 
   if (expire_at_ms) {
     it->second.SetExpire(true);
@@ -651,7 +661,7 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
   it.SetVersion(NextVersion());
 }
 
-void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, bool existing) {
+void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key, bool existing) {
   DbTableStats* stats = MutableStats(db_ind);
 
   size_t value_heap_size = it->second.MallocUsed();
@@ -660,6 +670,18 @@ void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, bool existing) {
     stats->strval_memory_usage += value_heap_size;
   if (existing)
     stats->update_value_amount += value_heap_size;
+
+  auto& watched_keys = db_arr_[db_ind]->watched_keys;
+  if (!watched_keys.empty()) {
+    // Check if the key is watched.
+    if (auto wit = watched_keys.find(key); wit != watched_keys.end()) {
+      for (auto conn_ptr : wit->second) {
+        conn_ptr->watched_dirty.store(true, memory_order_relaxed);
+      }
+      // No connections need to watch it anymore.
+      watched_keys.erase(wit);
+    }
+  }
 }
 
 pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(DbIndex db_ind,
@@ -829,5 +851,29 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
 
   return freed_memory_fun();
 };
+
+void DbSlice::RegisterWatchedKey(DbIndex db_indx, std::string_view key, ConnectionState::ExecInfo* exec_info) {
+  db_arr_[db_indx]->watched_keys[key].push_back(exec_info);
+}
+
+void DbSlice::UnregisterConnectionWatches(ConnectionState::ExecInfo* exec_info) {
+  for (const auto& [db_indx, key] : exec_info->watched_keys) {
+    auto& watched_keys = db_arr_[db_indx]->watched_keys;
+    if (auto it = watched_keys.find(key); it != watched_keys.end()) {
+      it->second.erase(std::remove(it->second.begin(), it->second.end(), exec_info),
+                       it->second.end());
+      if (it->second.empty())
+        watched_keys.erase(it);
+    }
+  }
+}
+
+void DbSlice::InvalidateDbWatches(DbIndex db_indx) {
+  for (const auto& [key, conn_list] : db_arr_[db_indx]->watched_keys) {
+    for (auto conn_ptr : conn_list) {
+      conn_ptr->watched_dirty.store(true, memory_order_relaxed);
+    }
+  }
+}
 
 }  // namespace dfly

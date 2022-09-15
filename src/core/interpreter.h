@@ -52,7 +52,7 @@ class Interpreter {
     COMPILE_ERR = 2,
   };
 
-  // returns false if an error happenned, sets error string into result.
+  // returns false if an error happened, sets error string into result.
   // otherwise, returns true and sets result to function id.
   // function id is sha1 of the function body.
   AddResult AddFunction(std::string_view body, std::string* result);

@@ -212,6 +212,12 @@ void ConnectionContext::SendSubscriptionChangedResponse(string_view action,
 }
 
 void ConnectionContext::OnClose() {
+  if (!conn_state.exec_info.watched_keys.empty()) {
+    shard_set->RunBriefInParallel([this](EngineShard* shard) {
+      return shard->db_slice().UnregisterConnectionWatches(&conn_state.exec_info);
+    });
+  }
+
   if (!conn_state.subscribe_info)
     return;
 
@@ -242,6 +248,18 @@ string ConnectionContext::GetContextInfo() const {
     buf[index++] = 't';
 
   return index ? absl::StrCat("flags:", buf) : string();
+}
+
+void ConnectionState::ExecInfo::Clear() {
+  state = EXEC_INACTIVE;
+  body.clear();
+  ClearWatched();
+}
+
+void ConnectionState::ExecInfo::ClearWatched() {
+  watched_keys.clear();
+  watched_dirty.store(false, memory_order_relaxed);
+  watched_existed = 0;
 }
 
 }  // namespace dfly

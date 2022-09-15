@@ -22,7 +22,7 @@ with respect to Memcached and Redis APIs.
 ### API 1
 - [X] String family
   - [X] SET
-  - [ ] SETNX
+  - [X] SETNX
   - [X] GET
   - [X] DECR
   - [X] INCR
@@ -154,8 +154,8 @@ with respect to Memcached and Redis APIs.
   - [X] PSUBSCRIBE
   - [X] PUNSUBSCRIBE
 - [X] Server Family
-  - [ ] WATCH
-  - [ ] UNWATCH
+  - [X] WATCH
+  - [X] UNWATCH
   - [X] DISCARD
   - [X] CLIENT LIST/SETNAME
   - [ ] CLIENT KILL/UNPAUSE/PAUSE/GETNAME/REPLY/TRACKINGINFO
@@ -202,7 +202,22 @@ with respect to Memcached and Redis APIs.
   - [ ] PFMERGE
 
 ### API 3
+- [ ] Generic Family
+  - [ ] TOUCH 
+- [X] HashSet Family
+  - [X] HSTRLEN
+- [X] Server Family
+  - [ ] CLIENT REPLY
+  - [X] REPLCONF
+  - [ ] WAIT
+
 ### API 4
+- [X] Generic Family
+  - [X] UNLINK
+- [ ] Server Family
+  - [ ] MEMORY USAGE/STATS/PURGE/DOCTOR
+  - [ ] SWAPDB
+
 ### API 5
 - [X] Stream Family
   - [X] XADD
@@ -229,6 +244,5 @@ with respect to Memcached and Redis APIs.
 Some commands were implemented as decorators along the way:
 
  - [X] ROLE (2.8) decorator as master.
- - [X] UNLINK (4.0) decorator for DEL command
  - [X] BGSAVE (decorator for save)
  - [X] FUNCTION FLUSH (does nothing)

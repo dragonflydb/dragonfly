@@ -100,7 +100,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
 
   memcpy(s.data() + start, value.data(), value.size());
   it->second.SetString(s);
-  db_slice.PostUpdate(op_args.db_ind, it, !added);
+  db_slice.PostUpdate(op_args.db_ind, it, key, !added);
   RecordJournal(op_args, it->first, it->second);
 
   return it->second.Size();
@@ -138,7 +138,7 @@ OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t star
   return string(slice.substr(start, end - start + 1));
 };
 
-size_t ExtendExisting(const OpArgs& op_args, PrimeIterator it, string_view val, bool prepend) {
+size_t ExtendExisting(const OpArgs& op_args, PrimeIterator it, string_view key, string_view val, bool prepend) {
   string tmp, new_val;
   auto* shard = op_args.shard;
   string_view slice = GetSlice(shard, it->second, &tmp);
@@ -150,7 +150,7 @@ size_t ExtendExisting(const OpArgs& op_args, PrimeIterator it, string_view val, 
   auto& db_slice = shard->db_slice();
   db_slice.PreUpdate(op_args.db_ind, it);
   it->second.SetString(new_val);
-  db_slice.PostUpdate(op_args.db_ind, it, true);
+  db_slice.PostUpdate(op_args.db_ind, it, key, true);
   RecordJournal(op_args, it->first, it->second);
 
   return new_val.size();
@@ -164,7 +164,7 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
   auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
   if (inserted) {
     it->second.SetString(val);
-    db_slice.PostUpdate(op_args.db_ind, it, false);
+    db_slice.PostUpdate(op_args.db_ind, it, key, false);
     RecordJournal(op_args, it->first, it->second);
 
     return val.size();
@@ -173,7 +173,7 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
   if (it->second.ObjType() != OBJ_STRING)
     return OpStatus::WRONG_TYPE;
 
-  return ExtendExisting(op_args, it, val, prepend);
+  return ExtendExisting(op_args, it, key, val, prepend);
 }
 
 OpResult<bool> ExtendOrSkip(const OpArgs& op_args, std::string_view key, std::string_view val,
@@ -184,7 +184,7 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, std::string_view key, std::st
     return false;
   }
 
-  return ExtendExisting(op_args, *it_res, val, prepend);
+  return ExtendExisting(op_args, *it_res, key, val, prepend);
 }
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key) {
@@ -206,7 +206,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, std::string_view key, double
   if (inserted) {
     char* str = RedisReplyBuilder::FormatDouble(val, buf, sizeof(buf));
     it->second.SetString(str);
-    db_slice.PostUpdate(op_args.db_ind, it, false);
+    db_slice.PostUpdate(op_args.db_ind, it, key, false);
     RecordJournal(op_args, it->first, it->second);
 
     return val;
@@ -238,7 +238,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, std::string_view key, double
 
   db_slice.PreUpdate(op_args.db_ind, it);
   it->second.SetString(str);
-  db_slice.PostUpdate(op_args.db_ind, it, true);
+  db_slice.PostUpdate(op_args.db_ind, it, key, true);
   RecordJournal(op_args, it->first, it->second);
 
   return base;
@@ -290,7 +290,7 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, std::string_view key, int64_t 
   DCHECK(!it->second.IsExternal());
   db_slice.PreUpdate(op_args.db_ind, it);
   it->second.SetInt(new_val);
-  db_slice.PostUpdate(op_args.db_ind, it);
+  db_slice.PostUpdate(op_args.db_ind, it, key);
   RecordJournal(op_args, it->first, it->second);
 
   return new_val;
@@ -325,16 +325,23 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
 
   VLOG(2) << "Set " << key << "(" << db_slice.shard_id() << ") ";
 
-  if (params.how == SET_IF_EXISTS) {
-    auto [it, expire_it] = db_slice.FindExt(params.db_index, key);
-
-    if (IsValid(it)) {  // existing
-      return SetExisting(params, it, expire_it, value);
+  if (params.IsConditionalSet()) {
+    const auto [it, expire_it] = db_slice.FindExt(params.db_index, key);
+    // Make sure that we have this key, and only add it if it does exists
+    if (params.how == SET_IF_EXISTS) {
+      if (IsValid(it)) {
+        return SetExisting(params, it, expire_it, key, value);
+      } else {
+        return OpStatus::SKIPPED;
+      }
+    } else {
+      if (IsValid(it)) {  // if the policy is not to overide and have the key, just return
+        return OpStatus::SKIPPED;
+      }
     }
-
-    return OpStatus::SKIPPED;
   }
-
+  // At this point we either need to add missing entry, or we
+  // will override an existing one
   // Trying to add a new entry.
   tuple<PrimeIterator, ExpireIterator, bool> add_res;
   try {
@@ -345,15 +352,14 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
 
   PrimeIterator it = get<0>(add_res);
   if (!get<2>(add_res)) {  // Existing.
-    return SetExisting(params, it, get<1>(add_res), value);
+    return SetExisting(params, it, get<1>(add_res), key, value);
   }
-
   //
   // Adding new value.
   PrimeValue tvalue{value};
   tvalue.SetFlag(params.memcache_flags != 0);
   it->second = std::move(tvalue);
-  db_slice.PostUpdate(params.db_index, it, false);
+  db_slice.PostUpdate(params.db_index, it, key, false);
 
   if (params.expire_after_ms) {
     db_slice.UpdateExpire(params.db_index, it, params.expire_after_ms + db_slice.Now());
@@ -375,7 +381,7 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
 }
 
 OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIterator e_it,
-                             string_view value) {
+                             string_view key, string_view value) {
   if (params.how == SET_IF_NOTEXIST)
     return OpStatus::SKIPPED;
 
@@ -423,7 +429,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
     }
   }
 
-  db_slice.PostUpdate(params.db_index, it);
+  db_slice.PostUpdate(params.db_index, it, key);
   RecordJournal(op_args_, it->first, it->second);
 
   return OpStatus::OK;
@@ -480,14 +486,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  DCHECK(cntx->transaction);
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    SetCmd sg(t->GetOpArgs(shard));
-    return sg.Set(sparams, key, value);
-  };
-  OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
-
+  const auto result{SetGeneric(cntx, std::move(sparams), key, value)};
   if (result == OpStatus::OK) {
     return builder->SendStored();
   }
@@ -501,8 +500,42 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   return builder->SendSetSkipped();
 }
 
+OpResult<void> StringFamily::SetGeneric(ConnectionContext* cntx, SetCmd::SetParams sparams,
+                                        std::string_view key, std::string_view value) {
+  DCHECK(cntx->transaction);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    SetCmd sg(t->GetOpArgs(shard));
+    return sg.Set(sparams, key, value);
+  };
+  return cntx->transaction->ScheduleSingleHop(std::move(cb));
+}
+
 void StringFamily::SetEx(CmdArgList args, ConnectionContext* cntx) {
   SetExGeneric(true, std::move(args), cntx);
+}
+
+void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
+  // This is the same as calling the "Set" function, only in this case we are
+  // change the value only if the key does not exist. Otherwise the function 
+  // will not modify it. in which case it would return 0
+  // it would return to the caller 1 in case the key did not exists and was added
+  string_view key = ArgS(args, 1);
+  string_view value = ArgS(args, 2);
+
+  SetCmd::SetParams sparams{cntx->db_index()};
+  sparams.how = SetCmd::SET_IF_NOTEXIST;
+  sparams.memcache_flags = cntx->conn_state.memcache_flag;
+  const auto results{SetGeneric(cntx, std::move(sparams), key, value)};
+  SinkReplyBuilder* builder = cntx->reply_builder();
+  if (results == OpStatus::OK) {
+    return builder->SendLong(1);  // this means that we successfully set the value
+  }
+  if (results == OpStatus::OUT_OF_MEMORY) {
+    return builder->SendError(kOutOfMemory);
+  }
+  CHECK_EQ(results, OpStatus::SKIPPED);  // in this case it must be skipped!
+  return builder->SendLong(0);  // value do exists, we need to report that we didn't change it
 }
 
 void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
@@ -962,6 +995,7 @@ void StringFamily::Shutdown() {
 void StringFamily::Register(CommandRegistry* registry) {
   *registry << CI{"SET", CO::WRITE | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(Set)
             << CI{"SETEX", CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(SetEx)
+            << CI{"SETNX", CO::WRITE | CO::DENYOOM, 3, 1, 1, 1}.HFUNC(SetNx)
             << CI{"PSETEX", CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(PSetEx)
             << CI{"APPEND", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Append)
             << CI{"PREPEND", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Prepend)

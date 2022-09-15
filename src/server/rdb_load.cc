@@ -23,6 +23,7 @@ extern "C" {
 #include "base/endian.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/string_set.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/hset_family.h"
@@ -34,6 +35,7 @@ extern "C" {
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
+ABSL_DECLARE_FLAG(bool, use_set2);
 
 namespace dfly {
 
@@ -173,6 +175,15 @@ int ziplistPairsConvertAndValidateIntegrity(const uint8_t* zl, size_t size, unsi
   return ret;
 }
 
+bool resizeStringSet(robj* set, size_t size, bool use_set2) {
+  if (use_set2) {
+    ((dfly::StringSet*)set->ptr)->Reserve(size);
+    return true;
+  } else {
+    return dictTryExpand((dict*)set->ptr, size) != DICT_OK;
+  }
+}
+
 }  // namespace
 
 class RdbLoader::OpaqueObjLoader {
@@ -295,27 +306,48 @@ void RdbLoader::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       }
     }
   } else {
-    res = createSetObject();
+    bool use_set2 = GetFlag(FLAGS_use_set2);
+    if (use_set2) {
+      StringSet* set = new StringSet{CompactObj::memory_resource()};
+      res = createObject(OBJ_SET, set);
+      res->encoding = OBJ_ENCODING_HT;
+    } else {
+      res = createSetObject();
+    }
 
     // TODO: to move this logic to set_family similarly to ConvertToStrSet.
 
     /* It's faster to expand the dict to the right size asap in order
      * to avoid rehashing */
-    if (len > DICT_HT_INITIAL_SIZE && dictTryExpand((dict*)res->ptr, len) != DICT_OK) {
+    if (len > DICT_HT_INITIAL_SIZE && !resizeStringSet(res, len, use_set2)) {
       LOG(ERROR) << "OOM in dictTryExpand " << len;
       ec_ = RdbError(errc::out_of_memory);
       return;
     }
 
-    for (size_t i = 0; i < len; i++) {
-      sdsele = ToSds(ltrace->arr[i].rdb_var);
-      if (!sdsele)
-        return;
+    if (use_set2) {
+      for (size_t i = 0; i < len; i++) {
+        sdsele = ToSds(ltrace->arr[i].rdb_var);
+        if (!sdsele)
+          return;
 
-      if (dictAdd((dict*)res->ptr, sdsele, NULL) != DICT_OK) {
-        LOG(ERROR) << "Duplicate set members detected";
-        ec_ = RdbError(errc::duplicate_key);
-        return;
+        if (!((StringSet*)res->ptr)->AddSds(sdsele)) {
+          LOG(ERROR) << "Duplicate set members detected";
+          ec_ = RdbError(errc::duplicate_key);
+          return;
+        }
+      }
+    } else {
+      for (size_t i = 0; i < len; i++) {
+        sdsele = ToSds(ltrace->arr[i].rdb_var);
+        if (!sdsele)
+          return;
+
+        if (dictAdd((dict*)res->ptr, sdsele, NULL) != DICT_OK) {
+          LOG(ERROR) << "Duplicate set members detected";
+          ec_ = RdbError(errc::duplicate_key);
+          return;
+        }
       }
     }
   }
