@@ -489,7 +489,7 @@ TEST_F(JsonFamilyTest, Del) {
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 
   json = R"(
-    {"a":[{"b": [1,2,3]}], "b": [{"c": 2}]}
+    {"a":[{"b": [1,2,3]}], "b": [{"c": 2}], "c']":[1,2,3]}
   )";
 
   resp = Run({"set", "json", json});
@@ -499,13 +499,19 @@ TEST_F(JsonFamilyTest, Del) {
   EXPECT_THAT(resp, IntArg(1));
 
   resp = Run({"GET", "json"});
-  EXPECT_EQ(resp, R"({"a":[{"b":[2,3]}],"b":[{"c":2}]})");
+  EXPECT_EQ(resp, R"({"a":[{"b":[2,3]}],"b":[{"c":2}],"c']":[1,2,3]})");
 
   resp = Run({"JSON.DEL", "json", "$.b[0].c"});
   EXPECT_THAT(resp, IntArg(1));
 
   resp = Run({"GET", "json"});
-  EXPECT_EQ(resp, R"({"a":[{"b":[2,3]}],"b":[{}]})");
+  EXPECT_EQ(resp, R"({"a":[{"b":[2,3]}],"b":[{}],"c']":[1,2,3]})");
+
+  resp = Run({"JSON.DEL", "json", "$.*"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  resp = Run({"GET", "json"});
+  EXPECT_EQ(resp, R"({})");
 }
 
 }  // namespace dfly

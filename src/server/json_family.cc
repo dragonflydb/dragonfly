@@ -189,11 +189,18 @@ optional<size_t> GetNextIndex(string_view str) {
 // Encodes special characters when appending token to JSONPointer
 struct JsonPointerFormatter {
   void operator()(std::string* out, string_view token) const {
-    for (const auto ch : token) {
+    for (size_t i = 0; i < token.size(); i++) {
+      char ch = token[i];
       if (ch == '~') {
         out->append("~0");
       } else if (ch == '/') {
         out->append("~1");
+      } else if (ch == '\\') {
+        // backslash for encoded another character should remove.
+        if (i + 1 < token.size() && token[i + 1] == '\\') {
+          out->append(1, '\\');
+          i++;
+        }
       } else {
         out->append(1, ch);
       }
