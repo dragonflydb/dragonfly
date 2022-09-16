@@ -60,6 +60,7 @@ inline void RecordJournal(const OpArgs& op_args, const PrimeKey& pkey, const Pri
 void SetString(const OpArgs& op_args, string_view key, const string& value) {
   auto& db_slice = op_args.shard->db_slice();
   auto [it_output, added] = db_slice.AddOrFind(op_args.db_ind, key);
+  db_slice.PreUpdate(op_args.db_ind, it_output);
   it_output->second.SetString(value);
   db_slice.PostUpdate(op_args.db_ind, it_output, key);
   RecordJournal(op_args, it_output->first, it_output->second);
@@ -159,34 +160,79 @@ OpResult<json> GetJson(const OpArgs& op_args, string_view key) {
   return decoder.get_result();
 }
 
+// Returns the index of the next right bracket
+optional<size_t> GetNextIndex(string_view str) {
+  size_t end_val_idx = string::npos;
+  size_t current_idx = 0;
+  while (current_idx + 1 < str.size()) {
+    if (end_val_idx != string::npos) {
+      break;
+    }
+
+    // ignore escaped character after the backslash (e.g. \').
+    if (str[current_idx] == '\\') {
+      current_idx += 2;
+    } else if (str[current_idx] == '\'' && str[current_idx + 1] == ']') {
+      end_val_idx = current_idx++;
+    } else {
+      current_idx++;
+    }
+  }
+
+  if (end_val_idx == string::npos) {
+    return {};
+  }
+
+  return end_val_idx;
+}
+
+// Encodes special characters when appending token to JSONPointer
+struct JsonPointerFormatter {
+  void operator()(std::string* out, string_view token) const {
+    for (const auto ch : token) {
+      if (ch == '~') {
+        out->append("~0");
+      } else if (ch == '/') {
+        out->append("~1");
+      } else {
+        out->append(1, ch);
+      }
+    }
+  }
+};
+
+// Returns the JsonPointer of a JsonPath
+// e.g. $[a][b][0] -> /a/b/0
 string ConvertToJsonPointer(string_view json_path) {
   if (json_path.empty() || json_path[0] != '$') {
-    return "";
+    LOG(FATAL) << "Unexpected JSONPath syntax: " << json_path;
   }
+
+  // remove prefix
+  json_path.remove_prefix(1);
 
   // except the supplied string is compatible with JSONPath syntax.
   // Each item in the string is a left bracket followed by
   // numeric or '<key>' and then a right bracket.
-  vector<string> parts;
+  vector<string_view> parts;
   bool invalid_syntax = false;
-  std::size_t i = 1;
-  while (i < json_path.size()) {
+  while (json_path.size() > 0) {
     bool is_array = false;
     bool is_object = false;
 
     // check string size is sufficient enough for at least one item.
-    if (i + 2 >= json_path.size()) {
+    if (2 >= json_path.size()) {
       invalid_syntax = true;
       break;
     }
 
-    if (json_path[i] == '[') {
-      if (json_path[i + 1] == '\'') {
+    if (json_path[0] == '[') {
+      if (json_path[1] == '\'') {
         is_object = true;
-        i += 2;
-      } else if (isdigit(json_path[i + 1])) {
+        json_path.remove_prefix(2);
+      } else if (isdigit(json_path[1])) {
         is_array = true;
-        i += 1;
+        json_path.remove_prefix(1);
       } else {
         invalid_syntax = true;
         break;
@@ -197,46 +243,23 @@ string ConvertToJsonPointer(string_view json_path) {
     }
 
     if (is_array) {
-      auto end_pos = json_path.find(']', i);
-      if (end_pos == string::npos) {
-        invalid_syntax = true;
-        break;
-      }
-
-      parts.emplace_back(json_path.substr(i, end_pos - i));
-      i = end_pos + 1;
-
-    } else if (is_object) {
-      // find the index of the right bracket.
-      auto end_val_idx = string::npos;
-      auto current_idx = i;
-      while (end_val_idx == string::npos) {
-        if (current_idx + 1 >= json_path.size()) {
-          break;
-        }
-
-        // ignore escaped character (e.g. \']).
-        if (json_path[current_idx] == '\\') {
-          current_idx += 2;
-        }
-
-        else if (json_path[current_idx] == '\'' && json_path[current_idx + 1] == ']') {
-          end_val_idx = current_idx++;
-        }
-
-        else {
-          current_idx++;
-        }
-      }
-
+      size_t end_val_idx = json_path.find(']');
       if (end_val_idx == string::npos) {
         invalid_syntax = true;
         break;
       }
 
-      parts.emplace_back(json_path.substr(i, end_val_idx - i));
-      i = end_val_idx + 2;
+      parts.emplace_back(json_path.substr(0, end_val_idx));
+      json_path.remove_prefix(end_val_idx + 1);
+    } else if (is_object) {
+      optional<size_t> end_val_idx = GetNextIndex(json_path);
+      if (!end_val_idx) {
+        invalid_syntax = true;
+        break;
+      }
 
+      parts.emplace_back(json_path.substr(0, *end_val_idx));
+      json_path.remove_prefix(*end_val_idx + 2);
     } else {
       invalid_syntax = true;
       break;
@@ -247,8 +270,9 @@ string ConvertToJsonPointer(string_view json_path) {
     LOG(FATAL) << "Unexpected JSONPath syntax: " << json_path;
   }
 
-  string result = absl::StrJoin(parts, "/");
-  return '/' + result;  // add leading slash
+  string result{"/"};  // initialize with a leading slash
+  result += absl::StrJoin(parts, "/", JsonPointerFormatter());
+  return result;
 }
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key,
@@ -453,12 +477,8 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path) {
 
   json patch(json_array_arg, {});
   reverse(deletion_items.begin(), deletion_items.end());  // deletion should finish at root keys.
-  for (const auto& it : deletion_items) {
-    string pointer = ConvertToJsonPointer(it);
-    if (pointer.empty()) {
-      VLOG(1) << "Failed to convert the following JSONPath to pointer: " << it;
-      continue;
-    }
+  for (const auto& item : deletion_items) {
+    string pointer = ConvertToJsonPointer(item);
     total_deletions++;
     json patch_item(json_object_arg, {{"op", "remove"}, {"path", pointer}});
     patch.emplace_back(patch_item);
@@ -487,10 +507,8 @@ void JsonFamily::Del(CmdArgList args, ConnectionContext* cntx) {
     return OpDel(t->GetOpArgs(shard), key, path);
   };
 
-  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
   Transaction* trans = cntx->transaction;
   OpResult<long> result = trans->ScheduleSingleHopT(move(cb));
-  DVLOG(1) << "JSON.DEL " << trans->DebugId() << ": " << key;
   (*cntx)->SendLong(*result);
 }
 
@@ -509,12 +527,10 @@ void JsonFamily::NumIncrBy(CmdArgList args, ConnectionContext* cntx) {
     return OpDoubleArithmetic(t->GetOpArgs(shard), key, path, dnum, plus<double>{});
   };
 
-  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
   Transaction* trans = cntx->transaction;
   OpResult<string> result = trans->ScheduleSingleHopT(move(cb));
 
   if (result) {
-    DVLOG(1) << "JSON.NUMINCRBY " << trans->DebugId() << ": " << key;
     (*cntx)->SendSimpleString(*result);
   } else {
     (*cntx)->SendError(result.status());
@@ -536,12 +552,10 @@ void JsonFamily::NumMultBy(CmdArgList args, ConnectionContext* cntx) {
     return OpDoubleArithmetic(t->GetOpArgs(shard), key, path, dnum, multiplies<double>{});
   };
 
-  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
   Transaction* trans = cntx->transaction;
   OpResult<string> result = trans->ScheduleSingleHopT(move(cb));
 
   if (result) {
-    DVLOG(1) << "JSON.NUMMULTBY " << trans->DebugId() << ": " << key;
     (*cntx)->SendSimpleString(*result);
   } else {
     (*cntx)->SendError(result.status());
@@ -556,12 +570,10 @@ void JsonFamily::Toggle(CmdArgList args, ConnectionContext* cntx) {
     return OpToggle(t->GetOpArgs(shard), key, path);
   };
 
-  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
   Transaction* trans = cntx->transaction;
   OpResult<vector<OptBool>> result = trans->ScheduleSingleHopT(move(cb));
 
   if (result) {
-    DVLOG(1) << "JSON.TOGGLE " << trans->DebugId() << ": " << key;
     PrintOptVec(cntx, result);
   } else {
     (*cntx)->SendError(result.status());
@@ -585,12 +597,10 @@ void JsonFamily::Type(CmdArgList args, ConnectionContext* cntx) {
     return OpType(t->GetOpArgs(shard), key, move(expression));
   };
 
-  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
   Transaction* trans = cntx->transaction;
   OpResult<vector<string>> result = trans->ScheduleSingleHopT(move(cb));
 
   if (result) {
-    DVLOG(1) << "JSON.TYPE " << trans->DebugId() << ": " << key;
     if (result->empty()) {
       // When vector is empty, the path doesn't exist in the corresponding json.
       (*cntx)->SendNull();
@@ -623,12 +633,10 @@ void JsonFamily::ArrLen(CmdArgList args, ConnectionContext* cntx) {
     return OpArrLen(t->GetOpArgs(shard), key, move(expression));
   };
 
-  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
   Transaction* trans = cntx->transaction;
   OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
 
   if (result) {
-    DVLOG(1) << "JSON.ARRLEN " << trans->DebugId() << ": " << key;
     PrintOptVec(cntx, result);
   } else {
     (*cntx)->SendError(result.status());
@@ -652,12 +660,10 @@ void JsonFamily::ObjLen(CmdArgList args, ConnectionContext* cntx) {
     return OpObjLen(t->GetOpArgs(shard), key, move(expression));
   };
 
-  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
   Transaction* trans = cntx->transaction;
   OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
 
   if (result) {
-    DVLOG(1) << "JSON.OBJLEN " << trans->DebugId() << ": " << key;
     PrintOptVec(cntx, result);
   } else {
     (*cntx)->SendError(result.status());
@@ -681,12 +687,10 @@ void JsonFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
     return OpStrLen(t->GetOpArgs(shard), key, move(expression));
   };
 
-  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
   Transaction* trans = cntx->transaction;
   OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
 
   if (result) {
-    DVLOG(1) << "JSON.STRLEN " << trans->DebugId() << ": " << key;
     PrintOptVec(cntx, result);
   } else {
     (*cntx)->SendError(result.status());
@@ -717,12 +721,10 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
     return OpGet(t->GetOpArgs(shard), key, move(expressions));
   };
 
-  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
   Transaction* trans = cntx->transaction;
   OpResult<string> result = trans->ScheduleSingleHopT(move(cb));
 
   if (result) {
-    DVLOG(1) << "JSON.GET " << trans->DebugId() << ": " << key << " " << result.value();
     (*cntx)->SendBulkString(*result);
   } else {
     (*cntx)->SendError(result.status());
