@@ -241,7 +241,7 @@ void Replica::ReplicateFb() {
         ec = InitiatePSync();  // redis -> df
 
         // There is a data race condition in Redis-master code, where "ACK 0" handler may be
-        // triggerred
+        // triggered
         // before Redis is ready to transition to the streaming state and it silenty ignores "ACK
         // 0". We reduce the chance it happens with this delay.
         this_fiber::sleep_for(50ms);

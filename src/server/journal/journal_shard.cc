@@ -71,7 +71,7 @@ std::error_code JournalShard::Open(const std::string_view dir, unsigned index) {
   // For file integrity guidelines see:
   // https://lwn.net/Articles/457667/
   // https://www.evanjones.ca/durability-filesystem.html
-  // NOTE: O_DSYNC is omited.
+  // NOTE: O_DSYNC is omitted.
   constexpr auto kJournalFlags = O_CLOEXEC | O_CREAT | O_TRUNC | O_RDWR;
   io::Result<std::unique_ptr<uring::LinuxFile>> res =
       uring::OpenLinux(shard_path_, kJournalFlags, 0666);
