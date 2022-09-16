@@ -152,7 +152,7 @@ inline void FreeObjStream(void* ptr) {
   freeStream((stream*)ptr);
 }
 
-// Daniel's Lemire function validate_ascii_fast() - under Apache/MIT license.
+// Daniel Lemire's function validate_ascii_fast() - under Apache/MIT license.
 // See https://github.com/lemire/fastvalidate-utf-8/
 // The function returns true (1) if all chars passed in src are
 // 7-bit values (0x00..0x7F). Otherwise, it returns false (0).
