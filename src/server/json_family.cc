@@ -162,28 +162,19 @@ OpResult<json> GetJson(const OpArgs& op_args, string_view key) {
 
 // Returns the index of the next right bracket
 optional<size_t> GetNextIndex(string_view str) {
-  size_t end_val_idx = string::npos;
   size_t current_idx = 0;
   while (current_idx + 1 < str.size()) {
-    if (end_val_idx != string::npos) {
-      break;
-    }
-
     // ignore escaped character after the backslash (e.g. \').
     if (str[current_idx] == '\\') {
       current_idx += 2;
     } else if (str[current_idx] == '\'' && str[current_idx + 1] == ']') {
-      end_val_idx = current_idx++;
+      return current_idx;
     } else {
       current_idx++;
     }
   }
 
-  if (end_val_idx == string::npos) {
-    return {};
-  }
-
-  return end_val_idx;
+  return nullopt;
 }
 
 // Encodes special characters when appending token to JSONPointer
@@ -455,11 +446,8 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path) {
   long total_deletions = 0;
   if (path.empty()) {
     auto& db_slice = op_args.shard->db_slice();
-    auto fres = db_slice.FindExt(op_args.db_ind, key);
-    if (IsValid(fres.first)) {
-      total_deletions += long(db_slice.Del(op_args.db_ind, fres.first));
-    }
-
+    auto [it, _] = db_slice.FindExt(op_args.db_ind, key);
+    total_deletions += long(db_slice.Del(op_args.db_ind, it));
     return total_deletions;
   }
 
