@@ -28,6 +28,7 @@ class JsonFamily {
   static void Toggle(CmdArgList args, ConnectionContext* cntx);
   static void NumIncrBy(CmdArgList args, ConnectionContext* cntx);
   static void NumMultBy(CmdArgList args, ConnectionContext* cntx);
+  static void Del(CmdArgList args, ConnectionContext* cntx);
 };
 
 }  // namespace dfly
