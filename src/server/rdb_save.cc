@@ -648,7 +648,7 @@ error_code RdbSerializer::SaveString(string_view val) {
     size_t comprlen, outlen = len;
     tmp_buf_.resize(outlen + 1);
 
-    // Due to stack constrainsts im fibers we can not allow large arrays on stack.
+    // Due to stack constraints im fibers we can not allow large arrays on stack.
     // Therefore I am lazily allocating it on heap. It's not fixed in quicklist.
     if (!lzf_) {
       lzf_.reset(new LZF_HSLOT[1 << HLOG]);

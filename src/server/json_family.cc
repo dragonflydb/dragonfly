@@ -271,7 +271,7 @@ OpResult<vector<OptBool>> OpToggle(const OpArgs& op_args, string_view key, strin
   json j = result.value();
   error_code ec = JsonReplace(j, path, cb);
   if (ec) {
-    VLOG(1) << "Failed to evaulate expression on json with error: " << ec.message();
+    VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
     return OpStatus::SYNTAX_ERR;
   }
 
@@ -314,7 +314,7 @@ OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key, stri
   json j = result.value();
   error_code ec = JsonReplace(j, path, cb);
   if (ec) {
-    VLOG(1) << "Failed to evaulate expression on json with error: " << ec.message();
+    VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
     return OpStatus::SYNTAX_ERR;
   }
 

@@ -56,7 +56,7 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
     unsigned prev = shard_idx[0];
     shard_idx[0] = 0;
 
-    // compute cumulitive sum, or in other words a beginning index in channels for each shard.
+    // compute cumulative sum, or in other words a beginning index in channels for each shard.
     for (size_t i = 1; i < shard_idx.size(); ++i) {
       unsigned cur = shard_idx[i];
       shard_idx[i] = shard_idx[i - 1] + prev;
