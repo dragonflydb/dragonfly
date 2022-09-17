@@ -245,7 +245,7 @@ TEST_F(ListFamilyTest, BLPopSerialize) {
 
     // Either this lpush has run first or the one below.
     // In any case it must be that between 2 invocations of lpush (wrapped in multi)
-    // blpop will be triggerred and it will empty the list again. Hence, in any case
+    // blpop will be triggered and it will empty the list again. Hence, in any case
     // lpush kKey1 here and below should return 1.
     ASSERT_THAT(resp, ArrLen(11));*/
     cl1 = GetDebugInfo("IO1").clock;
