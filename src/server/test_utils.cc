@@ -157,6 +157,16 @@ void BaseFamilyTest::UpdateTime(uint64_t ms) {
   shard_set->RunBriefInParallel(cb);
 }
 
+void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double timeout) {
+  auto step = 50us;
+  auto timeout_micro = chrono::duration_cast<chrono::microseconds> (1000ms * timeout);
+  int64_t steps = timeout_micro.count() / step.count();
+  do {
+    ::boost::this_fiber::sleep_for(step);
+  } while (!IsLocked(db_index, key) && --steps > 0);
+  CHECK(IsLocked(db_index, key));
+}
+
 RespExpr BaseFamilyTest::Run(ArgSlice list) {
   if (!ProactorBase::IsProactorThread()) {
     return pp_->at(0)->Await([&] { return this->Run(list); });

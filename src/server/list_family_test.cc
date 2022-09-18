@@ -30,12 +30,6 @@ class ListFamilyTest : public BaseFamilyTest {
   ListFamilyTest() {
     num_threads_ = 4;
   }
-
-  void WaitForLocked(string_view key) {
-    do {
-      this_fiber::sleep_for(30us);
-    } while (!IsLocked(0, key));
-  }
 };
 
 const char kKey1[] = "x";
@@ -187,7 +181,7 @@ TEST_F(ListFamilyTest, BLPopMultiPush) {
     blpop_resp = Run({"blpop", kKey1, kKey2, kKey3, "0"});
   });
 
-  WaitForLocked(kKey1);
+  WaitUntilLocked(0, kKey1);
 
   auto p1_fb = pp_->at(1)->LaunchFiber([&] {
     for (unsigned i = 0; i < 100; ++i) {
@@ -225,7 +219,7 @@ TEST_F(ListFamilyTest, BLPopSerialize) {
     blpop_resp = Run({"blpop", kKey1, kKey2, kKey3, "0"});
   });
 
-  WaitForLocked(kKey1);
+  WaitUntilLocked(0, kKey1);
 
   LOG(INFO) << "Starting multi";
 
@@ -295,7 +289,7 @@ TEST_F(ListFamilyTest, WrongTypeDoesNotWake) {
     blpop_resp = Run({"blpop", kKey1, "0"});
   });
 
-  WaitForLocked(kKey1);
+  WaitUntilLocked(0, kKey1);
 
   auto p1_fb = pp_->at(1)->LaunchFiber([&] {
     Run({"multi"});
@@ -324,7 +318,7 @@ TEST_F(ListFamilyTest, BPopSameKeyTwice) {
     ASSERT_THAT(watched, ArrLen(0));
   });
 
-  WaitForLocked(kKey1);
+  WaitUntilLocked(0, kKey1);
 
   pp_->at(1)->Await([&] { EXPECT_EQ(1, CheckedInt({"lpush", kKey1, "bar"})); });
   pop_fb.join();
@@ -336,7 +330,7 @@ TEST_F(ListFamilyTest, BPopSameKeyTwice) {
     blpop_resp = Run({"blpop", kKey1, kKey2, kKey2, kKey1, "0"});
   });
 
-  WaitForLocked(kKey1);
+  WaitUntilLocked(0, kKey1);
 
   pp_->at(1)->Await([&] { EXPECT_EQ(1, CheckedInt({"lpush", kKey2, "bar"})); });
   pop_fb.join();
@@ -358,7 +352,7 @@ TEST_F(ListFamilyTest, BPopTwoKeysSameShard) {
     ASSERT_THAT(watched, ArrLen(0));
   });
 
-  WaitForLocked("x");
+  WaitUntilLocked(0, "x");
 
   pp_->at(1)->Await([&] { EXPECT_EQ(1, CheckedInt({"lpush", "x", "bar"})); });
   pop_fb.join();
@@ -377,7 +371,7 @@ TEST_F(ListFamilyTest, BPopRename) {
     blpop_resp = Run({"blpop", kKey1, "0"});
   });
 
-  WaitForLocked(kKey1);
+  WaitUntilLocked(0, kKey1);
 
   pp_->at(1)->Await([&] {
     EXPECT_EQ(1, CheckedInt({"lpush", "a", "bar"}));
@@ -395,7 +389,7 @@ TEST_F(ListFamilyTest, BPopFlush) {
     blpop_resp = Run({"blpop", kKey1, "0"});
   });
 
-  WaitForLocked(kKey1);
+  WaitUntilLocked(0, kKey1);
 
   pp_->at(1)->Await([&] {
     Run({"flushdb"});

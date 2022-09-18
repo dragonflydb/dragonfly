@@ -236,9 +236,7 @@ TEST_F(GenericFamilyTest, Move) {
     EXPECT_THAT(resp.GetVec(), ElementsAre("l", "TestItem"));
   });
 
-  do {
-    this_fiber::sleep_for(100us);
-  } while (!IsLocked(1, "l"));
+  WaitUntilLocked(1, "l");
 
   pp_->at(1)->Await([&] {
     Run({"select", "0"});

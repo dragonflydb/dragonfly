@@ -490,6 +490,7 @@ void GenericFamily::Move(CmdArgList args, ConnectionContext* cntx) {
   };
 
   cntx->transaction->ScheduleSingleHop(std::move(cb));
+  // Exactly one shard will call OpMove.
   DCHECK(res != OpStatus::SKIPPED);
   (*cntx)->SendLong(res == OpStatus::OK);
 }
