@@ -355,4 +355,35 @@ TEST_F(StringFamilyTest, SetNx) {
   EXPECT_EQ(Run({"get", "foo"}), "bar");  // the value was not changed
 }
 
+TEST_F(StringFamilyTest, SetPxAtExAt) {
+  using std::chrono::duration_cast;
+  using std::chrono::milliseconds;
+  using std::chrono::seconds;
+  using std::chrono::system_clock;
+
+  // Expiration time as set at unix time
+  auto resp = Run({"set", "foo", "bar", "EXAT", "-1"});
+  ASSERT_THAT(resp, ErrArg("invalid expire time"));
+  resp = Run({"set", "foo", "bar", "EXAT", std::to_string(time(nullptr) - 1)});
+  ASSERT_THAT(resp, "OK");  // it would return OK but will not set the value - expiration time is 0
+                            // (checked with Redis)
+  EXPECT_EQ(Run({"get", "foo"}).type, facade::RespExpr::NIL);
+
+  resp = Run({"set", "foo", "bar", "PXAT", "-1"});
+  ASSERT_THAT(resp, ErrArg("invalid expire time"));
+
+  auto now = duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+  resp = Run({"set", "foo", "bar", "PXAT", std::to_string(now - 23)});
+  ASSERT_THAT(resp, "OK");  // it would return OK but will not set the value (checked with Redis)
+  EXPECT_EQ(Run({"get", "foo"}).type, facade::RespExpr::NIL);
+
+  resp = Run({"set", "foo", "bar", "EXAT", std::to_string(time(nullptr) + 1)});
+  ASSERT_THAT(resp, "OK");  // valid expiration time
+  EXPECT_EQ(Run({"get", "foo"}), "bar");
+
+  resp = Run({"set", "foo2", "abc", "PXAT", std::to_string(now + 300)});
+  ASSERT_THAT(resp, "OK");
+  EXPECT_EQ(Run({"get", "foo2"}), "abc");
+}
+
 }  // namespace dfly
