@@ -2,6 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
+#include "core/string_set.h"
 #include "server/rdb_save.h"
 
 #include <absl/cleanup/cleanup.h>
@@ -126,7 +127,7 @@ uint8_t RdbObjectType(unsigned type, unsigned encoding) {
     case OBJ_SET:
       if (encoding == kEncodingIntSet)
         return RDB_TYPE_SET_INTSET;
-      else if (encoding == kEncodingStrMap)
+      else if (encoding == kEncodingStrMap || encoding == kEncodingStrMap2)
         return RDB_TYPE_SET;
       break;
     case OBJ_ZSET:
@@ -307,6 +308,14 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
     while ((de = dictNext(di)) != NULL) {
       sds ele = (sds)de->key;
 
+      RETURN_ON_ERR(SaveString(string_view{ele, sdslen(ele)}));
+    }
+  } else if (obj.Encoding() == kEncodingStrMap2) {
+    StringSet *set = (StringSet*)obj.RObjPtr();
+
+    RETURN_ON_ERR(SaveLen(set->Size()));
+
+    for (sds ele : *set) {
       RETURN_ON_ERR(SaveString(string_view{ele, sdslen(ele)}));
     }
   } else {
@@ -639,7 +648,7 @@ error_code RdbSerializer::SaveString(string_view val) {
     size_t comprlen, outlen = len;
     tmp_buf_.resize(outlen + 1);
 
-    // Due to stack constrainsts im fibers we can not allow large arrays on stack.
+    // Due to stack constraints im fibers we can not allow large arrays on stack.
     // Therefore I am lazily allocating it on heap. It's not fixed in quicklist.
     if (!lzf_) {
       lzf_.reset(new LZF_HSLOT[1 << HLOG]);

@@ -1,5 +1,6 @@
 # Contributors (alphabetical by surname)
 
+* **[Amir Alperin](https://github.com/iko1)**
 * **[Philipp Born](https://github.com/tamcore)**
   * Helm Chart
 * **[Braydn Moore](https://github.com/braydnm)**

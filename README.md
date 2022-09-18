@@ -127,13 +127,13 @@ Dragonfly supports common redis arguments where applicable.
 For example, you can run: `dragonfly --requirepass=foo --bind localhost`.
 
 Dragonfly currently supports the following Redis-specific arguments:
- * `port`
- * `bind`
- * `requirepass`
- * `maxmemory`
- * `dir` - by default, dragonfly docker uses `/data` folder for snapshotting.
+ * `port` redis connection port, default: 6379
+ * `bind` localhost to only allow locahost connections, Public IP ADDRESS , to allow connections **to that ip** address (aka from outside too)
+ * `requirepass` password for AUTH authentication, default: ""
+ * `maxmemory` Limit on maximum-memory (in bytes) that is used by the database.0 - means the program will automatically determine its maximum memory usage. default: 0
+ * `dir` - by default, dragonfly docker uses `/data` folder for snapshotting. the CLI uses: ""
     You can use `-v` docker option to map it to your host folder.
- * `dbfilename`
+ * `dbfilename` the filename to save/load the DB. default: "dump";
 
 In addition, it has Dragonfly specific arguments options:
  * `memcache_port`  - to enable memcached compatible API on this port. Disabled by default.
@@ -143,6 +143,8 @@ In addition, it has Dragonfly specific arguments options:
  * `cache_mode` - see [Cache](#novel-cache-design) section below.
  * `hz` - key expiry evaluation frequency. Default is 1000. Lower frequency uses less cpu when 
    idle at the expense of precision in key eviction.
+ * `save_schedule` - glob spec for the UTC time to save a snapshot which matches HH:MM (24h time). default: "" 
+ * `keys_output_limit` -  Maximum number of keys output by keys command. default: 8192
 
 
 for more options like logs management or tls support, run `dragonfly --help`.

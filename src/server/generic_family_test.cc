@@ -180,7 +180,7 @@ TEST_F(GenericFamilyTest, Stick) {
   ASSERT_THAT(Run({"stick", "b", "d"}), IntArg(1));
   ASSERT_THAT(Run({"stick", "c", "d"}), IntArg(0));
 
-  // check stickyness presists during writes
+  // check stickyness persists during writes
   Run({"set", "a", "new"});
   ASSERT_THAT(Run({"stick", "a"}), IntArg(0));
   Run({"append", "a", "-value"});
@@ -190,7 +190,7 @@ TEST_F(GenericFamilyTest, Stick) {
   Run({"rename", "a", "k"});
   ASSERT_THAT(Run({"stick", "k"}), IntArg(0));
 
-  // check rename perists stickyness on multiple shards
+  // check rename persists stickyness on multiple shards
   Run({"del", "b"});
   string b_val(32, 'b');
   string x_val(32, 'x');

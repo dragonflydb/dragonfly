@@ -208,7 +208,7 @@ class DenseSet {
   // to point to the next node in the chain
   DensePtr Unlink(DensePtr* node);
 
-  // Note this will only free the encapsulaing DenseLinkKey and not
+  // Note this will only free the encapsulating DenseLinkKey and not
   // the data it points to, this will be returned.
   // This function will modify the iterator passed to it
   // to point to the next node in the chain

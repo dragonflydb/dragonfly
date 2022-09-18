@@ -26,7 +26,7 @@ class SetCmd {
 
   struct SetParams {
     SetHow how = SET_ALWAYS;
-    DbIndex db_index;
+    DbIndex db_index = 0;
 
     uint32_t memcache_flags = 0;
     // Relative value based on now. 0 means no expiration.

@@ -123,11 +123,11 @@ with respect to Memcached and Redis APIs.
   - [ ] BITFIELD
   - [ ] BITOP
   - [ ] BITPOS
-  - [ ] GETBIT
+  - [x] GETBIT
   - [X] GETRANGE
   - [X] INCRBYFLOAT
   - [X] PSETEX
-  - [ ] SETBIT
+  - [x] SETBIT
   - [X] SETRANGE
   - [X] STRLEN
 - [X] HashSet Family
