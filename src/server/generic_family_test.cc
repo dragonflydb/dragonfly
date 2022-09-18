@@ -201,6 +201,51 @@ TEST_F(GenericFamilyTest, Stick) {
   ASSERT_THAT(Run({"stick", "b"}), IntArg(0));
 }
 
+TEST_F(GenericFamilyTest, Move) {
+  // Check MOVE returns 0 on non-existent keys
+  ASSERT_THAT(Run({"move", "a", "1"}), IntArg(0));
+
+  // Check MOVE catches non-existent database indices
+  ASSERT_THAT(Run({"move", "a", "-1"}), ArgType(RespExpr::ERROR));
+  ASSERT_THAT(Run({"move", "a", "100500"}), ArgType(RespExpr::ERROR));
+
+  // Check MOVE moves value & expiry & stickyness
+  Run({"set", "a", "test"});
+  Run({"expire", "a", "1000"});
+  Run({"stick", "a"});
+  ASSERT_THAT(Run({"move", "a", "1"}), IntArg(1));
+  Run({"select", "1"});
+  ASSERT_THAT(Run({"get", "a"}), "test");
+  ASSERT_THAT(Run({"ttl", "a"}), testing::Not(IntArg(-1)));
+  ASSERT_THAT(Run({"stick", "a"}), IntArg(0));
+
+  // Check MOVE doesn't move if key exists
+  Run({"select", "1"});
+  Run({"set", "a", "test"});
+  Run({"select", "0"});
+  Run({"set", "a", "another test"});
+  ASSERT_THAT(Run({"move", "a", "1"}), IntArg(0));  // exists from test case above
+  Run({"select", "1"});
+  ASSERT_THAT(Run({"get", "a"}), "test");
+
+  // Check MOVE awakes blocking operations
+  auto fb_blpop = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
+    Run({"select", "1"});
+    auto resp = Run({"blpop", "l", "0"});
+    ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+    EXPECT_THAT(resp.GetVec(), ElementsAre("l", "TestItem"));
+  });
+
+  WaitUntilLocked(1, "l");
+
+  pp_->at(1)->Await([&] {
+    Run({"select", "0"});
+    Run({"lpush", "l", "TestItem"});
+    Run({"move", "l", "1"});
+  });
+
+  fb_blpop.join();
+}
 
 using testing::AnyOf;
 using testing::Each;

@@ -49,6 +49,7 @@ class GenericFamily {
   static void Keys(CmdArgList args, ConnectionContext* cntx);
   static void PexpireAt(CmdArgList args, ConnectionContext* cntx);
   static void Stick(CmdArgList args, ConnectionContext* cntx);
+  static void Move(CmdArgList args, ConnectionContext* cntx);
 
   static void Rename(CmdArgList args, ConnectionContext* cntx);
   static void RenameNx(CmdArgList args, ConnectionContext* cntx);
@@ -71,6 +72,7 @@ class GenericFamily {
   static OpResult<void> OpRen(const OpArgs& op_args, std::string_view from, std::string_view to,
                               bool skip_exists);
   static OpResult<uint32_t> OpStick(const OpArgs& op_args, ArgSlice keys);
+  static OpStatus OpMove(const OpArgs& op_args, std::string_view key, DbIndex target_db);
 };
 
 }  // namespace dfly

@@ -71,6 +71,9 @@ class BaseFamilyTest : public ::testing::Test {
   // ts is ms
   void UpdateTime(uint64_t ms);
 
+  // Wait for a locked key to unlock. Aborts after timeout seconds passed.
+  void WaitUntilLocked(DbIndex db_index, std::string_view key, double timeout = 3);
+
   std::string GetId() const;
   size_t SubscriberMessagesLen(std::string_view conn_id) const;
 
