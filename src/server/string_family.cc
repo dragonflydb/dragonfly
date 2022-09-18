@@ -1,4 +1,4 @@
-// Copyright 2022, Roman Gershman.  All rights reserved.
+// Copyright 2022, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -517,7 +517,7 @@ void StringFamily::SetEx(CmdArgList args, ConnectionContext* cntx) {
 
 void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
   // This is the same as calling the "Set" function, only in this case we are
-  // change the value only if the key does not exist. Otherwise the function 
+  // change the value only if the key does not exist. Otherwise the function
   // will not modify it. in which case it would return 0
   // it would return to the caller 1 in case the key did not exists and was added
   string_view key = ArgS(args, 1);
