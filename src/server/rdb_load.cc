@@ -395,8 +395,8 @@ void RdbLoader::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
     }
 
     lp = lpShrinkToFit(lp);
-    robj* o = createObject(OBJ_HASH, lp);
-    o->encoding = OBJ_ENCODING_LISTPACK;
+    res = createObject(OBJ_HASH, lp);
+    res->encoding = OBJ_ENCODING_LISTPACK;
   } else {
     dict* hmap = dictCreate(&hashDictType);
 

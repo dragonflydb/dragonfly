@@ -5,6 +5,7 @@
 
 extern "C" {
 #include "redis/crc64.h"
+#include "redis/redis_aux.h"
 #include "redis/zmalloc.h"
 }
 
@@ -255,6 +256,17 @@ TEST_F(RdbTest, SaveManyDbs) {
       LOG(ERROR) << "Bad key: " << s;
     }
   }
+}
+
+TEST_F(RdbTest, HMapBugs) {
+  // Force OBJ_ENCODING_HT encoding.
+  server.hash_max_listpack_value = 0;
+  Run({"hset", "hmap1", "key1", "val", "key2", "val2"});
+  Run({"hset", "hmap2", "key1", string(690557, 'a')});
+
+  server.hash_max_listpack_value = 32;
+  Run({"debug", "reload"});
+  EXPECT_EQ(2, CheckedInt({"hlen", "hmap1"}));
 }
 
 }  // namespace dfly
