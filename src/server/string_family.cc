@@ -11,7 +11,10 @@ extern "C" {
 #include <absl/container/inlined_vector.h>
 #include <double-conversion/string-to-double.h>
 
+#include <chrono>
+
 #include "base/logging.h"
+#include "redis/util.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
@@ -138,7 +141,8 @@ OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t star
   return string(slice.substr(start, end - start + 1));
 };
 
-size_t ExtendExisting(const OpArgs& op_args, PrimeIterator it, string_view key, string_view val, bool prepend) {
+size_t ExtendExisting(const OpArgs& op_args, PrimeIterator it, string_view key, string_view val,
+                      bool prepend) {
   string tmp, new_val;
   auto* shard = op_args.shard;
   string_view slice = GetSlice(shard, it->second, &tmp);
@@ -294,6 +298,19 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, std::string_view key, int64_t 
   RecordJournal(op_args, it->first, it->second);
 
   return new_val;
+}
+
+int64_t CalculateAbsTime(int64_t unix_time, bool as_milli) {
+  using std::chrono::duration_cast;
+  using std::chrono::milliseconds;
+  using std::chrono::seconds;
+  using std::chrono::system_clock;
+
+  if (as_milli) {
+    return unix_time - duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+  } else {
+    return unix_time - duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
+  }
 }
 
 // Returns true if keys were set, false otherwise.
@@ -452,8 +469,8 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
 
     string_view cur_arg = ArgS(args, i);
 
-    if (cur_arg == "EX" || cur_arg == "PX") {
-      bool is_ms = (cur_arg == "PX");
+    if (cur_arg == "EX" || cur_arg == "PX" || cur_arg == "EXAT" || cur_arg == "PXAT") {
+      bool is_ms = (cur_arg == "PX" || cur_arg == "PXAT");
       ++i;
       if (i == args.size()) {
         builder->SendError(kSyntaxErr);
@@ -464,7 +481,21 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
         return builder->SendError(kInvalidIntErr);
       }
 
-      if (int_arg <= 0 || (!is_ms && int_arg >= kMaxExpireDeadlineSec)) {
+      // Since PXAT/EXAT can change this, we need to check this ahead
+      if (int_arg <= 0) {
+        return builder->SendError(InvalidExpireTime("set"));
+      }
+      // for []AT we need to take expiration time as absolute from the value given
+      // check here and if the time is in the past, return OK but don't set it
+      // Note that the time pass here for PXAT is in milliseconds, we must not change it!
+      if (cur_arg == "EXAT" || cur_arg == "PXAT") {
+        int_arg = CalculateAbsTime(int_arg, is_ms);
+        if (int_arg < 0) {
+          // this happened in the past, just return, for some reason Redis reports OK in this case
+          return builder->SendStored();
+        }
+      }
+      if (!is_ms && int_arg >= kMaxExpireDeadlineSec) {
         return builder->SendError(InvalidExpireTime("set"));
       }
 
@@ -517,7 +548,7 @@ void StringFamily::SetEx(CmdArgList args, ConnectionContext* cntx) {
 
 void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
   // This is the same as calling the "Set" function, only in this case we are
-  // change the value only if the key does not exist. Otherwise the function 
+  // change the value only if the key does not exist. Otherwise the function
   // will not modify it. in which case it would return 0
   // it would return to the caller 1 in case the key did not exists and was added
   string_view key = ArgS(args, 1);
