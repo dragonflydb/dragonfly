@@ -1,4 +1,4 @@
-// Copyright 2021, Roman Gershman.  All rights reserved.
+// Copyright 2022, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -89,4 +89,3 @@ inline bool TrueValidator(const char* nm, const std::string& val) {
 
 #define CONFIG_enum(name, val, txt, enum_arr, dest_var)    \
     CONFIG_string(name, val, txt, BIND_ENUM_CONFIG(enum_arr, dest_var))
-
