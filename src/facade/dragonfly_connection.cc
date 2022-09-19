@@ -300,7 +300,7 @@ string Connection::GetClientInfo() const {
   absl::StrAppend(&res, " age=", now - creation_time_, " idle=", now - last_interaction_);
   absl::StrAppend(&res, " phase=", phase_, " ");
   if (cc_) {
-    absl::StrAppend(&res, cc_->GetContextInfo());
+    absl::StrAppend(&res, service_->GetContextInfo(cc_.get()));
   }
 
   return res;
@@ -374,7 +374,7 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   VLOG(1) << "Before dispatch_fb.join()";
   dispatch_fb.join();
   VLOG(1) << "After dispatch_fb.join()";
-  cc_->OnClose();
+  service_->OnClose(cc_.get());
 
   stats->read_buf_capacity -= io_buf_.Capacity();
 

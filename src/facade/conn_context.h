@@ -17,8 +17,8 @@ class ConnectionContext {
  public:
   ConnectionContext(::io::Sink* stream, Connection* owner);
 
-  // We won't have any virtual methods, probably. However, since we allocate derived class,
-  // we need to declare a virtual d-tor so we could delete them inside Connection.
+  // We won't have any virtual methods, probably. However, since we allocate a derived class,
+  // we need to declare a virtual d-tor, so we could properly delete it from Connection code.
   virtual ~ConnectionContext() {}
 
   Connection* owner() {
@@ -50,10 +50,6 @@ class ConnectionContext {
   bool replica_conn: 1;
   bool authenticated: 1;
   bool force_dispatch: 1;   // whether we should route all requests to the dispatch fiber.
-
-  virtual void OnClose() {}
-
-  virtual std::string GetContextInfo() const { return std::string{}; }
 
  private:
   Connection* owner_;

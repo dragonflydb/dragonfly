@@ -29,6 +29,11 @@ class DflyCmd {
 
   uint32_t AllocateSyncSession();
 
+  void OnClose(ConnectionContext* cntx);
+
+  // stops all background processes so we could exit in orderly manner.
+  void BreakOnShutdown();
+
  private:
   void HandleJournal(CmdArgList args, ConnectionContext* cntx);
 

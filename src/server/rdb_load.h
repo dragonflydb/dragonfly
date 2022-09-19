@@ -34,8 +34,18 @@ class RdbLoader {
   ::io::Bytes Leftover() const {
     return mem_buf_.InputBuffer();
   }
+
   size_t bytes_read() const {
     return bytes_read_;
+  }
+
+  size_t keys_loaded() const {
+    return keys_loaded_;
+  }
+
+  // returns time in seconds.
+  double load_time() const {
+    return load_time_;
   }
 
  private:
@@ -49,8 +59,8 @@ class RdbLoader {
 
   struct LoadTrace;
 
-  using RdbVariant = std::variant<long long, base::PODArray<char>, LzfString,
-                                  std::unique_ptr<LoadTrace>>;
+  using RdbVariant =
+      std::variant<long long, base::PODArray<char>, LzfString, std::unique_ptr<LoadTrace>>;
   struct OpaqueObj {
     RdbVariant obj;
     int rdb_type;
@@ -164,6 +174,9 @@ class RdbLoader {
   ::io::Source* src_ = nullptr;
   size_t bytes_read_ = 0;
   size_t source_limit_ = SIZE_MAX;
+  size_t keys_loaded_ = 0;
+  double load_time_ = 0;
+
   DbIndex cur_db_index_ = 0;
 
   ::boost::fibers::mutex mu_;

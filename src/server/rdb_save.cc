@@ -2,12 +2,13 @@
 // See LICENSE for licensing terms.
 //
 
-#include "core/string_set.h"
 #include "server/rdb_save.h"
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
+
+#include "core/string_set.h"
 
 extern "C" {
 #include "redis/intset.h"
@@ -159,10 +160,6 @@ constexpr size_t kAmask = 4_KB - 1;
 RdbSerializer::RdbSerializer(io::Sink* s) : sink_(s), mem_buf_{4_KB}, tmp_buf_(nullptr) {
 }
 
-RdbSerializer::RdbSerializer(AlignedBuffer* aligned_buf) : RdbSerializer((io::Sink*)nullptr) {
-  aligned_buf_ = aligned_buf;
-}
-
 RdbSerializer::~RdbSerializer() {
 }
 
@@ -311,7 +308,7 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
       RETURN_ON_ERR(SaveString(string_view{ele, sdslen(ele)}));
     }
   } else if (obj.Encoding() == kEncodingStrMap2) {
-    StringSet *set = (StringSet*)obj.RObjPtr();
+    StringSet* set = (StringSet*)obj.RObjPtr();
 
     RETURN_ON_ERR(SaveLen(set->Size()));
 
@@ -593,22 +590,14 @@ error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
   io::Bytes ib = mem_buf_.InputBuffer();
 
   if (ib.empty()) {
-    if (sink_) {
-      return sink_->Write(buf);
-    } else {
-      return aligned_buf_->Write(buf);
-    }
-  } else {
-    if (sink_) {
-      iovec v[2] = {{.iov_base = const_cast<uint8_t*>(ib.data()), .iov_len = ib.size()},
-                    {.iov_base = const_cast<uint8_t*>(buf.data()), .iov_len = buf.size()}};
-      RETURN_ON_ERR(sink_->Write(v, ABSL_ARRAYSIZE(v)));
-    } else {
-      RETURN_ON_ERR(aligned_buf_->Write(ib));
-      RETURN_ON_ERR(aligned_buf_->Write(buf));
-    }
-    mem_buf_.ConsumeInput(ib.size());
+    return sink_->Write(buf);
   }
+  // else
+  iovec v[2] = {{.iov_base = const_cast<uint8_t*>(ib.data()), .iov_len = ib.size()},
+                {.iov_base = const_cast<uint8_t*>(buf.data()), .iov_len = buf.size()}};
+  RETURN_ON_ERR(sink_->Write(v, ABSL_ARRAYSIZE(v)));
+  mem_buf_.ConsumeInput(ib.size());
+
   return error_code{};
 }
 
@@ -620,11 +609,7 @@ error_code RdbSerializer::FlushMem() {
   DVLOG(2) << "FlushMem " << sz << " bytes";
 
   // interrupt point.
-  if (sink_) {
-    RETURN_ON_ERR(sink_->Write(mem_buf_.InputBuffer()));
-  } else {
-    RETURN_ON_ERR(aligned_buf_->Write(mem_buf_.InputBuffer()));
-  }
+  RETURN_ON_ERR(sink_->Write(mem_buf_.InputBuffer()));
   mem_buf_.ConsumeInput(sz);
 
   return error_code{};
@@ -705,37 +690,37 @@ AlignedBuffer::~AlignedBuffer() {
   mi_free(aligned_buf_);
 }
 
-// TODO: maybe to derive AlignedBuffer from Sink?
-std::error_code AlignedBuffer::Write(io::Bytes record) {
-  if (buf_offs_ + record.size() < capacity_) {
-    memcpy(aligned_buf_ + buf_offs_, record.data(), record.size());
-    buf_offs_ += record.size();
-    return error_code{};
+io::Result<size_t> AlignedBuffer::WriteSome(const iovec* v, uint32_t len) {
+  size_t total_len = 0;
+  uint32_t vindx = 0;
+
+  for (; vindx < len; ++vindx) {
+    auto item = v[vindx];
+    total_len += item.iov_len;
+
+    while (buf_offs_ + item.iov_len > capacity_) {
+      size_t to_write = capacity_ - buf_offs_;
+      memcpy(aligned_buf_ + buf_offs_, item.iov_base, to_write);
+      iovec ivec{.iov_base = aligned_buf_, .iov_len = capacity_};
+      error_code ec = upstream_->Write(&ivec, 1);
+      if (ec)
+        return nonstd::make_unexpected(ec);
+
+      item.iov_len -= to_write;
+      item.iov_base = reinterpret_cast<char*>(item.iov_base) + to_write;
+      buf_offs_ = 0;
+    }
+
+    DCHECK_GT(item.iov_len, 0u);
+    memcpy(aligned_buf_ + buf_offs_, item.iov_base, item.iov_len);
+    buf_offs_ += item.iov_len;
   }
 
-  memcpy(aligned_buf_ + buf_offs_, record.data(), capacity_ - buf_offs_);
-  size_t record_offs = capacity_ - buf_offs_;
-  buf_offs_ = 0;
-  size_t needed;
-  do {
-    iovec ivec{.iov_base = aligned_buf_, .iov_len = capacity_};
-    RETURN_ON_ERR(upstream_->Write(&ivec, 1));
-    needed = record.size() - record_offs;
-    if (needed < capacity_)
-      break;
-
-    memcpy(aligned_buf_, record.data() + record_offs, capacity_);
-    record_offs += capacity_;
-  } while (true);
-
-  if (needed) {
-    memcpy(aligned_buf_, record.data() + record_offs, needed);
-    buf_offs_ = needed;
-  }
-
-  return error_code{};
+  return total_len;
 }
 
+// Note that it may write more than AlignedBuffer has at this point since it rounds up the length
+// to the nearest page boundary.
 error_code AlignedBuffer::Flush() {
   size_t len = (buf_offs_ + kAmask) & (~kAmask);
   iovec ivec{.iov_base = aligned_buf_, .iov_len = len};
@@ -748,7 +733,7 @@ class RdbSaver::Impl {
  public:
   // We pass K=sz to say how many producers are pushing data in order to maintain
   // correct closing semantics - channel is closing when K producers marked it as closed.
-  Impl(unsigned producers_len, io::Sink* sink);
+  Impl(bool align_writes, unsigned producers_len, io::Sink* sink);
 
   error_code SaveAuxFieldStrStr(string_view key, string_view val);
 
@@ -758,10 +743,13 @@ class RdbSaver::Impl {
 
   error_code ConsumeChannel();
 
-  void StartSnapshotting(EngineShard* shard);
+  void StartSnapshotting(bool include_journal_changes, EngineShard* shard);
 
   error_code Flush() {
-    return aligned_buf_.Flush();
+    if (aligned_buf_)
+      return aligned_buf_->Flush();
+
+    return error_code{};
   }
 
   size_t Size() const {
@@ -771,20 +759,23 @@ class RdbSaver::Impl {
   void FillFreqMap(RdbTypeFreqMap* dest) const;
 
  private:
-  AlignedBuffer aligned_buf_;
-
+  io::Sink* sink_;
   // used for serializing non-body components in the calling fiber.
   RdbSerializer meta_serializer_;
   vector<unique_ptr<SliceSnapshot>> shard_snapshots_;
   SliceSnapshot::RecordChannel channel_;
+  std::optional<AlignedBuffer> aligned_buf_;
 };
 
 // We pass K=sz to say how many producers are pushing data in order to maintain
 // correct closing semantics - channel is closing when K producers marked it as closed.
-RdbSaver::Impl::Impl(unsigned producers_len, io::Sink* sink)
-    : aligned_buf_(kBufLen, sink), meta_serializer_(&aligned_buf_),
+RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, io::Sink* sink)
+    : sink_(sink), meta_serializer_(sink),
       shard_snapshots_(producers_len), channel_{128, producers_len} {
-
+  if (align_writes) {
+    aligned_buf_.emplace(kBufLen, sink);
+    meta_serializer_.set_sink(&aligned_buf_.value());
+  }
 }
 
 error_code RdbSaver::Impl::SaveAuxFieldStrStr(string_view key, string_view val) {
@@ -799,14 +790,15 @@ error_code RdbSaver::Impl::SaveAuxFieldStrStr(string_view key, string_view val) 
 error_code RdbSaver::Impl::ConsumeChannel() {
   error_code io_error;
 
-  // we can not exit on io-error since we spawn fibers that push data.
-  // TODO: we may signal them to stop processing and exit asap in case of the error.
   uint8_t buf[16];
   size_t channel_bytes = 0;
   SliceSnapshot::DbRecord record;
   DbIndex last_db_index = kInvalidDbId;
 
   buf[0] = RDB_OPCODE_SELECTDB;
+
+  // we can not exit on io-error since we spawn fibers that push data.
+  // TODO: we may signal them to stop processing and exit asap in case of the error.
 
   auto& channel = channel_;
   while (channel.Pop(record)) {
@@ -816,9 +808,13 @@ error_code RdbSaver::Impl::ConsumeChannel() {
     do {
       if (record.db_index != last_db_index) {
         unsigned enclen = SerializeLen(record.db_index, buf + 1);
-        char* str = (char*)buf;
+        string_view str{(char*)buf, enclen + 1};
 
-        io_error = aligned_buf_.Write(string_view{str, enclen + 1});
+        if (aligned_buf_) {
+          io_error = aligned_buf_->Write(str);
+        } else {
+          io_error = sink_->Write(io::Buffer(str));
+        }
         if (io_error)
           break;
         last_db_index = record.db_index;
@@ -826,7 +822,12 @@ error_code RdbSaver::Impl::ConsumeChannel() {
 
       DVLOG(2) << "Pulled " << record.id;
       channel_bytes += record.value.size();
-      io_error = aligned_buf_.Write(record.value);
+
+      if (aligned_buf_) {
+        io_error = aligned_buf_->Write(record.value);
+      } else {
+        io_error = sink_->Write(io::Buffer(record.value));
+      }
       record.value.clear();
     } while (!io_error && channel.TryPop(record));
   }  // while (channel.pop)
@@ -844,10 +845,10 @@ error_code RdbSaver::Impl::ConsumeChannel() {
   return io_error;
 }
 
-void RdbSaver::Impl::StartSnapshotting(EngineShard* shard) {
+void RdbSaver::Impl::StartSnapshotting(bool include_journal_changes, EngineShard* shard) {
   auto s = make_unique<SliceSnapshot>(&shard->db_slice(), &channel_);
 
-  s->Start();
+  s->Start(include_journal_changes);
 
   // For single shard configuration, we maintain only one snapshot,
   // so we do not have to map it via shard_id.
@@ -863,10 +864,10 @@ void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {
   }
 }
 
-RdbSaver::RdbSaver(::io::Sink* sink, bool single_shard) {
+RdbSaver::RdbSaver(::io::Sink* sink, bool single_shard, bool align_writes) {
   CHECK_NOTNULL(sink);
 
-  impl_.reset(new Impl(single_shard ? 1 : shard_set->size(), sink));
+  impl_.reset(new Impl(align_writes, single_shard ? 1 : shard_set->size(), sink));
 }
 
 RdbSaver::~RdbSaver() {
@@ -904,8 +905,8 @@ error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
   return error_code{};
 }
 
-void RdbSaver::StartSnapshotInShard(EngineShard* shard) {
-  impl_->StartSnapshotting(shard);
+void RdbSaver::StartSnapshotInShard(bool include_journal_changes, EngineShard* shard) {
+  impl_->StartSnapshotting(include_journal_changes, shard);
 }
 
 error_code RdbSaver::SaveAux(const StringVec& lua_scripts) {

@@ -83,8 +83,11 @@ struct ConnectionState {
   // For set op - it's the flag value we are storing along with the value.
   // For get op - we use it as a mask of MCGetMask values.
   uint32_t memcache_flag = 0;
-  // If it's a replication client - then it holds positive sync session id.
-  uint32_t sync_session_id = 0;
+
+  // If this server is master, and this connection is from a secondary replica,
+  // then it holds positive sync session id.
+  uint32_t repl_session_id = 0;
+  uint32_t repl_threadid = kuint32max;
 
   ExecInfo exec_info;
   std::optional<ScriptInfo> script_info;
@@ -96,8 +99,6 @@ class ConnectionContext : public facade::ConnectionContext {
   ConnectionContext(::io::Sink* stream, facade::Connection* owner)
       : facade::ConnectionContext(stream, owner) {
   }
-
-  void OnClose() override;
 
   struct DebugInfo {
     uint32_t shards_count = 0;
@@ -122,8 +123,6 @@ class ConnectionContext : public facade::ConnectionContext {
   void PUnsubscribeAll(bool to_reply);
 
   bool is_replicating = false;
-
-  std::string GetContextInfo() const override;
 
  private:
   void SendSubscriptionChangedResponse(std::string_view action,

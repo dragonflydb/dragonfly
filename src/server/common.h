@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/strings/ascii.h>
+#include <absl/strings/str_cat.h>
 #include <absl/types/span.h>
 
 #include <string_view>
@@ -130,5 +131,29 @@ int64_t GetMallocCurrentCommitted();
 extern unsigned kernel_version;
 
 const char* GlobalStateName(GlobalState gs);
+
+template <typename RandGen> std::string GetRandomHex(RandGen& gen, size_t len) {
+  static_assert(std::is_same<uint64_t, decltype(gen())>::value);
+  std::string res(len, '\0');
+  size_t indx = 0;
+
+  for (size_t i = 0; i < len / 16; ++i) {  // 2 chars per byte
+    absl::AlphaNum an(absl::Hex(gen(), absl::kZeroPad16));
+
+    for (unsigned j = 0; j < 16; ++j) {
+      res[indx++] = an.Piece()[j];
+    }
+  }
+
+  if (indx < res.size()) {
+    absl::AlphaNum an(absl::Hex(gen(), absl::kZeroPad16));
+
+    for (unsigned j = 0; indx < res.size(); indx++, j++) {
+      res[indx] = an.Piece()[j];
+    }
+  }
+
+  return res;
+}
 
 }  // namespace dfly

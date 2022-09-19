@@ -8,7 +8,6 @@
 #include <absl/random/random.h>  // for master_id_ generation.
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
-
 #include <sys/resource.h>
 
 #include <chrono>
@@ -70,6 +69,8 @@ using util::ProactorBase;
 using util::http::StringResponse;
 
 namespace {
+
+const auto kRdbWriteFlags = O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC | O_DIRECT;
 
 using EngineFunc = void (ServerFamily::*)(CmdArgList args, ConnectionContext* cntx);
 
@@ -152,7 +153,7 @@ bool IsValidSaveScheduleNibble(string_view time, unsigned int max) {
 class RdbSnapshot {
  public:
   RdbSnapshot(bool single_shard, uring::LinuxFile* fl)
-      : file_(fl), linux_sink_(fl), saver_(&linux_sink_, single_shard) {
+      : file_(fl), linux_sink_(fl), saver_(&linux_sink_, single_shard, kRdbWriteFlags & O_DIRECT) {
   }
 
   error_code Start(const StringVec& lua_scripts);
@@ -191,7 +192,7 @@ error_code RdbSnapshot::Close() {
 }
 
 void RdbSnapshot::StartInShard(EngineShard* shard) {
-  saver_.StartSnapshotInShard(shard);
+  saver_.StartSnapshotInShard(false, shard);
   started_ = true;
 }
 
@@ -279,19 +280,9 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
   journal_.reset(new journal::Journal);
 
   {
-    // TODO: if we start using random generator in more places, we should probably
-    // refactor this code.
-
     absl::InsecureBitGen eng;
-    absl::uniform_int_distribution<uint32_t> ud;
-
-    absl::AlphaNum a1(absl::Hex(eng(), absl::kZeroPad16));
-    absl::AlphaNum a2(absl::Hex(eng(), absl::kZeroPad16));
-    absl::AlphaNum a3(absl::Hex(ud(eng), absl::kZeroPad8));
-    absl::StrAppend(&master_id_, a1, a2, a3);
-
-    size_t constexpr kConfigRunIdSize = CONFIG_RUN_ID_SIZE;
-    DCHECK_EQ(kConfigRunIdSize, master_id_.size());
+    master_id_ = GetRandomHex(eng, CONFIG_RUN_ID_SIZE);
+    DCHECK_EQ(CONFIG_RUN_ID_SIZE, master_id_.size());
   }
 }
 
@@ -472,6 +463,11 @@ error_code ServerFamily::LoadRdb(const std::string& rdb_file) {
 
     RdbLoader loader(script_mgr());
     ec = loader.Load(&fs);
+    if (!ec) {
+      LOG(INFO) << "Done loading RDB, keys loaded: " << loader.keys_loaded();
+      LOG(INFO) << "Loading finished after "
+                << strings::HumanReadableElapsedTime(loader.load_time());
+    }
   } else {
     ec = res.error();
   }
@@ -556,8 +552,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             &resp->body());
   AppendMetricWithoutLabels("memory_used_peak_bytes", "", used_mem_peak.load(memory_order_relaxed),
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("comitted_memory", "", GetMallocCurrentCommitted(),
-                            MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("comitted_memory", "", GetMallocCurrentCommitted(), MetricType::GAUGE,
+                            &resp->body());
   AppendMetricWithoutLabels("memory_max_bytes", "", max_memory_limit, MetricType::GAUGE,
                             &resp->body());
 
@@ -616,6 +612,10 @@ void ServerFamily::PauseReplication(bool pause) {
     CHECK(repl_ptr);
     repl_ptr->Pause(pause);
   }
+}
+
+void ServerFamily::OnClose(ConnectionContext* cntx) {
+  dfly_cmd_->OnClose(cntx);
 }
 
 void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* cntx) {
@@ -697,7 +697,6 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
     service_.SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
   };
 
-  const auto kFlags = O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC | O_DIRECT;
   auto start = absl::Now();
   shared_ptr<LastSaveInfo> save_info;
   StringVec lua_scripts = script_mgr_->GetLuaScripts();
@@ -745,7 +744,7 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
       abs_path += shard_file;
 
       VLOG(1) << "Saving to " << abs_path;
-      auto res = uring::OpenLinux(abs_path.generic_string(), kFlags, 0666);
+      auto res = uring::OpenLinux(abs_path.generic_string(), kRdbWriteFlags, 0666);
 
       if (res) {
         snapshots[sid].reset(new RdbSnapshot{true, res.value().release()});
@@ -773,7 +772,7 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
     ExtendFilename(now, -1, &filename);
     path += filename;
 
-    auto res = uring::OpenLinux(path.generic_string(), kFlags, 0666);
+    auto res = uring::OpenLinux(path.generic_string(), kRdbWriteFlags, 0666);
     if (!res) {
       return res.error();
     }
@@ -862,6 +861,10 @@ void ServerFamily::DbSize(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendLong(num_keys.load(memory_order_relaxed));
 }
 
+void ServerFamily::BreakOnShutdown() {
+  dfly_cmd_->BreakOnShutdown();
+}
+
 void ServerFamily::FlushDb(CmdArgList args, ConnectionContext* cntx) {
   DCHECK(cntx->transaction);
   DoFlush(cntx->transaction, cntx->transaction->db_index());
@@ -910,7 +913,9 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   if (sub_cmd == "SETNAME" && args.size() == 3) {
     cntx->owner()->SetName(ArgS(args, 2));
     return (*cntx)->SendOk();
-  } else if (sub_cmd == "LIST") {
+  }
+
+  if (sub_cmd == "LIST") {
     vector<string> client_info;
     fibers::mutex mu;
     auto cb = [&](util::Connection* conn) {
@@ -1377,14 +1382,16 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
     if (cmd == "CAPA") {
       if (arg == "dragonfly" && args.size() == 3 && i == 1) {
         uint32_t sid = dfly_cmd_->AllocateSyncSession();
+        cntx->owner()->SetName(absl::StrCat("repl_ctrl_", sid));
+
         string sync_id = absl::StrCat("SYNC", sid);
-        cntx->conn_state.sync_session_id = sid;
+        cntx->conn_state.repl_session_id = sid;
 
         // The response for 'capa dragonfly' is: <masterid> <syncid> <numthreads>
         (*cntx)->StartArray(3);
         (*cntx)->SendSimpleString(master_id_);
         (*cntx)->SendSimpleString(sync_id);
-        (*cntx)->SendLong(shard_set->size());
+        (*cntx)->SendLong(shard_set->pool()->size());
         return;
       }
     } else {
@@ -1487,8 +1494,10 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, 0}.HFUNC(ReplConf)
             << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, 0}.HFUNC(Role)
-            << CI{"SYNC", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Sync)
-            << CI{"PSYNC", CO::ADMIN | CO::GLOBAL_TRANS, 3, 0, 0, 0}.HFUNC(Psync)
+            // We won't support DF->REDIS replication for now, hence we do not need to support
+            // these commands.
+            // << CI{"SYNC", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Sync)
+            // << CI{"PSYNC", CO::ADMIN | CO::GLOBAL_TRANS, 3, 0, 0, 0}.HFUNC(Psync)
             << CI{"SCRIPT", CO::NOSCRIPT, -2, 0, 0, 0}.HFUNC(Script)
             << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS, -2, 0, 0, 0}.HFUNC(Dfly);
 }

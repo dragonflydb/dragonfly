@@ -64,9 +64,10 @@ string_view GetSlice(EngineShard* shard, const PrimeValue& pv, string* tmp) {
   return pv.GetSlice(tmp);
 }
 
-inline void RecordJournal(const OpArgs& op_args, const PrimeKey& pkey, const PrimeKey& pvalue) {
+inline void RecordJournal(const OpArgs& op_args, string_view key, const PrimeKey& pvalue) {
   if (op_args.shard->journal()) {
-    op_args.shard->journal()->RecordEntry(op_args.txid, pkey, pvalue);
+    journal::Entry entry{op_args.db_ind, op_args.txid, key, pvalue};
+    op_args.shard->journal()->RecordEntry(entry);
   }
 }
 
@@ -104,7 +105,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
   memcpy(s.data() + start, value.data(), value.size());
   it->second.SetString(s);
   db_slice.PostUpdate(op_args.db_ind, it, key, !added);
-  RecordJournal(op_args, it->first, it->second);
+  RecordJournal(op_args, key, it->second);
 
   return it->second.Size();
 }
@@ -141,8 +142,8 @@ OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t star
   return string(slice.substr(start, end - start + 1));
 };
 
-size_t ExtendExisting(const OpArgs& op_args, PrimeIterator it, string_view key, string_view val,
-                      bool prepend) {
+size_t ExtendExisting(const OpArgs& op_args, PrimeIterator it, string_view key,
+                      string_view val, bool prepend) {
   string tmp, new_val;
   auto* shard = op_args.shard;
   string_view slice = GetSlice(shard, it->second, &tmp);
@@ -155,7 +156,7 @@ size_t ExtendExisting(const OpArgs& op_args, PrimeIterator it, string_view key, 
   db_slice.PreUpdate(op_args.db_ind, it);
   it->second.SetString(new_val);
   db_slice.PostUpdate(op_args.db_ind, it, key, true);
-  RecordJournal(op_args, it->first, it->second);
+  RecordJournal(op_args, key, it->second);
 
   return new_val.size();
 }
@@ -169,7 +170,7 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
   if (inserted) {
     it->second.SetString(val);
     db_slice.PostUpdate(op_args.db_ind, it, key, false);
-    RecordJournal(op_args, it->first, it->second);
+    RecordJournal(op_args, key, it->second);
 
     return val.size();
   }
@@ -180,7 +181,7 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
   return ExtendExisting(op_args, it, key, val, prepend);
 }
 
-OpResult<bool> ExtendOrSkip(const OpArgs& op_args, std::string_view key, std::string_view val,
+OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view val,
                             bool prepend) {
   auto& db_slice = op_args.shard->db_slice();
   OpResult<PrimeIterator> it_res = db_slice.Find(op_args.db_ind, key, OBJ_STRING);
@@ -201,7 +202,7 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key) {
   return GetString(op_args.shard, pv);
 }
 
-OpResult<double> OpIncrFloat(const OpArgs& op_args, std::string_view key, double val) {
+OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val) {
   auto& db_slice = op_args.shard->db_slice();
   auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
 
@@ -211,7 +212,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, std::string_view key, double
     char* str = RedisReplyBuilder::FormatDouble(val, buf, sizeof(buf));
     it->second.SetString(str);
     db_slice.PostUpdate(op_args.db_ind, it, key, false);
-    RecordJournal(op_args, it->first, it->second);
+    RecordJournal(op_args, key, it->second);
 
     return val;
   }
@@ -243,13 +244,13 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, std::string_view key, double
   db_slice.PreUpdate(op_args.db_ind, it);
   it->second.SetString(str);
   db_slice.PostUpdate(op_args.db_ind, it, key, true);
-  RecordJournal(op_args, it->first, it->second);
+  RecordJournal(op_args, key, it->second);
 
   return base;
 }
 
 // if skip_on_missing - returns KEY_NOTFOUND.
-OpResult<int64_t> OpIncrBy(const OpArgs& op_args, std::string_view key, int64_t incr,
+OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
                            bool skip_on_missing) {
   auto& db_slice = op_args.shard->db_slice();
 
@@ -270,7 +271,7 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, std::string_view key, int64_t 
       return OpStatus::OUT_OF_MEMORY;
     }
 
-    RecordJournal(op_args, it->first, it->second);
+    RecordJournal(op_args, key, it->second);
 
     return incr;
   }
@@ -295,7 +296,7 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, std::string_view key, int64_t 
   db_slice.PreUpdate(op_args.db_ind, it);
   it->second.SetInt(new_val);
   db_slice.PostUpdate(op_args.db_ind, it, key);
-  RecordJournal(op_args, it->first, it->second);
+  RecordJournal(op_args, key, it->second);
 
   return new_val;
 }
@@ -393,7 +394,7 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
     }
   }
 
-  RecordJournal(op_args_, it->first, it->second);
+  RecordJournal(op_args_, key, it->second);
   return OpStatus::OK;
 }
 
@@ -447,7 +448,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
   }
 
   db_slice.PostUpdate(params.db_index, it, key);
-  RecordJournal(op_args_, it->first, it->second);
+  RecordJournal(op_args_, key, it->second);
 
   return OpStatus::OK;
 }
@@ -572,7 +573,7 @@ void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
 void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   get_qps.Inc();
 
-  std::string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpGet(t->GetOpArgs(shard), key); };
 
@@ -596,8 +597,8 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
-  std::string_view value = ArgS(args, 2);
+  string_view key = ArgS(args, 1);
+  string_view value = ArgS(args, 2);
   std::optional<string> prev_val;
 
   SetCmd::SetParams sparams{cntx->db_index()};
@@ -624,15 +625,15 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StringFamily::Incr(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 1);
   return IncrByGeneric(key, 1, cntx);
 }
 
 void StringFamily::IncrBy(CmdArgList args, ConnectionContext* cntx) {
   DCHECK_EQ(3u, args.size());
 
-  std::string_view key = ArgS(args, 1);
-  std::string_view sval = ArgS(args, 2);
+  string_view key = ArgS(args, 1);
+  string_view sval = ArgS(args, 2);
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
@@ -642,8 +643,8 @@ void StringFamily::IncrBy(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StringFamily::IncrByFloat(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
-  std::string_view sval = ArgS(args, 2);
+  string_view key = ArgS(args, 1);
+  string_view sval = ArgS(args, 2);
   double val;
 
   if (!absl::SimpleAtod(sval, &val)) {
@@ -666,13 +667,13 @@ void StringFamily::IncrByFloat(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StringFamily::Decr(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 1);
   return IncrByGeneric(key, -1, cntx);
 }
 
 void StringFamily::DecrBy(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
-  std::string_view sval = ArgS(args, 2);
+  string_view key = ArgS(args, 1);
+  string_view sval = ArgS(args, 2);
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
@@ -693,7 +694,7 @@ void StringFamily::Prepend(CmdArgList args, ConnectionContext* cntx) {
   ExtendGeneric(std::move(args), true, cntx);
 }
 
-void StringFamily::IncrByGeneric(std::string_view key, int64_t val, ConnectionContext* cntx) {
+void StringFamily::IncrByGeneric(string_view key, int64_t val, ConnectionContext* cntx) {
   bool skip_on_missing = cntx->protocol() == Protocol::MEMCACHE;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -725,8 +726,8 @@ void StringFamily::IncrByGeneric(std::string_view key, int64_t val, ConnectionCo
 }
 
 void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
-  std::string_view sval = ArgS(args, 2);
+  string_view key = ArgS(args, 1);
+  string_view sval = ArgS(args, 2);
 
   if (cntx->protocol() == Protocol::REDIS) {
     auto cb = [&](Transaction* t, EngineShard* shard) {

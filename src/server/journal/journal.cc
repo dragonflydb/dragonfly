@@ -8,7 +8,7 @@
 
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
-#include "server/journal/journal_shard.h"
+#include "server/journal/journal_slice.h"
 #include "server/server_state.h"
 
 namespace dfly {
@@ -21,43 +21,33 @@ namespace fibers = boost::fibers;
 
 namespace {
 
-thread_local JournalShard journal_shard;
+// Present in all threads (not only in shard threads).
+thread_local JournalSlice journal_slice;
 
 }  // namespace
 
 Journal::Journal() {
 }
 
-error_code Journal::StartLogging(std::string_view dir) {
-  if (journal_shard.IsOpen()) {
-    return error_code{};
+error_code Journal::OpenInThread(bool persistent, string_view dir) {
+  journal_slice.Init(unsigned(ProactorBase::GetIndex()));
+
+  error_code ec;
+
+  if (persistent) {
+    ec = journal_slice.Open(dir);
+    if (ec) {
+      return ec;
+    }
   }
 
-  auto* pool = shard_set->pool();
-  atomic_uint32_t created{0};
-  lock_guard lk(state_mu_);
-
-  auto open_cb = [&](auto* pb) {
-    auto ec = journal_shard.Open(dir, unsigned(ProactorBase::GetIndex()));
-    if (ec) {
-      LOG(FATAL) << "Could not create journal " << ec;  // TODO
-    } else {
-      created.fetch_add(1, memory_order_relaxed);
       ServerState::tlocal()->set_journal(this);
       EngineShard* shard = EngineShard::tlocal();
       if (shard) {
         shard->set_journal(this);
       }
-    }
-  };
 
-  pool->AwaitFiberOnAll(open_cb);
-
-  if (created.load(memory_order_acquire) != pool->size()) {
-    LOG(FATAL) << "TBD / revert";
-  }
-
-  return error_code{};
+  return ec;
 }
 
 error_code Journal::Close() {
@@ -76,7 +66,7 @@ error_code Journal::Close() {
       shard->set_journal(nullptr);
     }
 
-    auto ec = journal_shard.Close();
+    auto ec = journal_slice.Close();
 
     if (ec) {
       lock_guard lk2(ec_mu);
@@ -89,21 +79,30 @@ error_code Journal::Close() {
   return res;
 }
 
+uint32_t Journal::RegisterOnChange(ChangeCallback cb) {
+  return journal_slice.RegisterOnChange(cb);
+}
+
+void Journal::Unregister(uint32_t id) {
+  journal_slice.Unregister(id);
+}
+
 bool Journal::SchedStartTx(TxId txid, unsigned num_keys, unsigned num_shards) {
-  if (!journal_shard.IsOpen() || lameduck_.load(memory_order_relaxed))
+  if (!journal_slice.IsOpen() || lameduck_.load(memory_order_relaxed))
     return false;
 
-  journal_shard.AddLogRecord(txid, unsigned(Op::SCHED));
+  // TODO: to complete the metadata.
+  journal_slice.AddLogRecord(Entry::Sched(txid));
 
   return true;
 }
 
 LSN Journal::GetLsn() const {
-  return journal_shard.cur_lsn();
+  return journal_slice.cur_lsn();
 }
 
 bool Journal::EnterLameDuck() {
-  if (!journal_shard.IsOpen()) {
+  if (!journal_slice.IsOpen()) {
     return false;
   }
 
@@ -112,15 +111,17 @@ bool Journal::EnterLameDuck() {
   return res;
 }
 
+void Journal::RecordEntry(const Entry& entry) {
+  journal_slice.AddLogRecord(entry);
+}
+
+/*
 void Journal::OpArgs(TxId txid, Op opcode, Span keys) {
-  DCHECK(journal_shard.IsOpen());
+  DCHECK(journal_slice.IsOpen());
 
-  journal_shard.AddLogRecord(txid, unsigned(opcode));
+  journal_slice.AddLogRecord(txid, opcode);
 }
-
-void Journal::RecordEntry(TxId txid, const PrimeKey& key, const PrimeValue& pval) {
-  journal_shard.AddLogRecord(txid, unsigned(Op::VAL));
-}
+*/
 
 }  // namespace journal
 }  // namespace dfly

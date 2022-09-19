@@ -67,6 +67,7 @@ class PrimeEvictionPolicy {
         can_evict_(can_evict) {
   }
 
+  // A hook function that is called every time a segment is full and requires splitting.
   void RecordSplit(PrimeTable::Segment_t* segment) {
     mem_budget_ -= PrimeTable::kSegBytes;
     DVLOG(1) << "split: " << segment->SlowSize() << "/" << segment->capacity();

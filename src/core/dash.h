@@ -716,12 +716,12 @@ template <typename U, typename V, typename EvictionPolicy>
 auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, EvictionPolicy& ev)
     -> std::pair<iterator, bool> {
   uint64_t key_hash = DoHash(key);
-  uint32_t seg_id = SegmentId(key_hash);
+  uint32_t target_seg_id = SegmentId(key_hash);
 
   while (true) {
     // Keep last global_depth_ msb bits of the hash.
-    assert(seg_id < segment_.size());
-    SegmentType* target = segment_[seg_id];
+    assert(target_seg_id < segment_.size());
+    SegmentType* target = segment_[target_seg_id];
 
     // Load heap allocated segment data - to avoid TLB miss when accessing the bucket.
     __builtin_prefetch(target, 0, 1);
@@ -731,12 +731,12 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
 
     if (res) {  // success
       ++size_;
-      return std::make_pair(iterator{this, seg_id, it.index, it.slot}, true);
+      return std::make_pair(iterator{this, target_seg_id, it.index, it.slot}, true);
     }
 
     /*duplicate insert, insertion failure*/
     if (it.found()) {
-      return std::make_pair(iterator{this, seg_id, it.index, it.slot}, false);
+      return std::make_pair(iterator{this, target_seg_id, it.index, it.slot}, false);
     }
 
     // At this point we must split the segment.
@@ -749,12 +749,12 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       hotspot.key_hash = key_hash;
 
       for (unsigned j = 0; j < HotspotBuckets::kRegularBuckets; ++j) {
-        hotspot.probes.by_type.regular_buckets[j] = bucket_iterator{this, seg_id, bid[j]};
+        hotspot.probes.by_type.regular_buckets[j] = bucket_iterator{this, target_seg_id, bid[j]};
       }
 
       for (unsigned i = 0; i < Policy::kStashBucketNum; ++i) {
         hotspot.probes.by_type.stash_buckets[i] =
-            bucket_iterator{this, seg_id, uint8_t(kLogicalBucketNum + i), 0};
+            bucket_iterator{this, target_seg_id, uint8_t(kLogicalBucketNum + i), 0};
       }
       hotspot.num_buckets = HotspotBuckets::kNumBuckets;
 
@@ -770,7 +770,7 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
           /*unsigned start = (bid[HotspotBuckets::kNumBuckets - 1] + 1) % kLogicalBucketNum;
           for (unsigned i = 0; i < HotspotBuckets::kNumBuckets; ++i) {
             uint8_t id = (start + i) % kLogicalBucketNum;
-            buckets.probes.arr[i] = bucket_iterator{this, seg_id, id};
+            buckets.probes.arr[i] = bucket_iterator{this, target_seg_id, id};
           }
           garbage_collected_ += ev.GarbageCollect(buckets, this);
           */
@@ -804,12 +804,12 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
     if (target->local_depth() == global_depth_) {
       IncreaseDepth(global_depth_ + 1);
 
-      seg_id = SegmentId(key_hash);
-      assert(seg_id < segment_.size() && segment_[seg_id] == target);
+      target_seg_id = SegmentId(key_hash);
+      assert(target_seg_id < segment_.size() && segment_[target_seg_id] == target);
     }
 
     ev.RecordSplit(target);
-    Split(seg_id);
+    Split(target_seg_id);
   }
 
   return std::make_pair(iterator{}, false);
