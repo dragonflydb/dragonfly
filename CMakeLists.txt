@@ -24,3 +24,5 @@ include_directories(helio)
 
 add_subdirectory(helio)
 add_subdirectory(src)
+
+include(cmake/Packing.cmake)
