@@ -19,7 +19,6 @@ add_third_party(
   jsoncons
   URL https://github.com/danielaparker/jsoncons/archive/refs/tags/v0.168.7.tar.gz
   CMAKE_PASS_FLAGS "-DJSONCONS_BUILD_TESTS=OFF"
-  
   LIB "none"
 )
 
