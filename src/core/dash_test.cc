@@ -16,6 +16,8 @@
 #include "base/hash.h"
 #include "base/logging.h"
 #include "base/zipf_gen.h"
+#include "io/file.h"
+#include "io/line_reader.h"
 
 extern "C" {
 #include "redis/dict.h"
@@ -794,6 +796,32 @@ TEST_F(DashTest, Sds) {
   sds foo = sdscatlen(sdsempty(), "foo", 3);
   dt.Insert(foo, 0);
   // dt.Insert(std::string_view{"bar"}, 1);
+}
+
+struct BlankPolicy : public BasicDashPolicy {
+  static uint64_t HashFn(uint64_t v) {
+    return v;
+  }
+};
+
+
+// The bug was that for very rare cases when during segment splitting we move all the items
+// into a new segment, not every item finds a place.
+TEST_F(DashTest, SplitBug) {
+  DashTable<uint64_t, uint64_t, BlankPolicy> table;
+
+  io::ReadonlyFileOrError fl_err =
+      io::OpenRead(base::ProgramRunfile("testdata/ids.txt"), io::ReadonlyFile::Options{});
+  CHECK(fl_err);
+  io::FileSource fs(std::move(*fl_err));
+  io::LineReader lr(&fs, DO_NOT_TAKE_OWNERSHIP);
+  string_view line;
+  uint64_t val;
+  while (lr.Next(&line)) {
+    CHECK(absl::SimpleHexAtoi(line, &val));
+    table.Insert(val, 0);
+  }
+  EXPECT_EQ(746, table.size());
 }
 
 /**

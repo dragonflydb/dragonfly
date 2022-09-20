@@ -492,7 +492,12 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
 
   // Returns valid iterator if succeeded or invalid if not (it's full).
   // Requires: key should be not present in the segment.
-  template <typename U, typename V> Iterator InsertUniq(U&& key, V&& value, Hash_t key_hash);
+  // if spread is true, tries to spread the load between neighbour and home buckets,
+  // otherwise chooses home bucket first.
+  // TODO: I am actually not sure if spread optimization is helpful. Worth checking
+  // whether we get higher occupancy rates when using it.
+  template <typename U, typename V>
+  Iterator InsertUniq(U&& key, V&& value, Hash_t key_hash, bool spread);
 
   // capture version change in case of insert.
   // Returns ids of buckets whose version would cross ver_threshold upon insertion of key_hash
@@ -526,7 +531,8 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   }
 
   // Bumps up this entry making it more "important" for the eviction policy.
-  template<typename BumpPolicy> Iterator BumpUp(uint8_t bid, SlotId slot, Hash_t key_hash, const BumpPolicy& ev);
+  template <typename BumpPolicy>
+  Iterator BumpUp(uint8_t bid, SlotId slot, Hash_t key_hash, const BumpPolicy& ev);
 
   // Tries to move stash entries back to their normal buckets (exact or neighbour).
   // Returns number of entries that succeeded to unload.
@@ -1048,7 +1054,7 @@ auto Segment<Key, Value, Policy>::Insert(U&& key, V&& value, Hash_t key_hash, Pr
     return std::make_pair(it, false); /* duplicate insert*/
   }
 
-  it = InsertUniq(std::forward<U>(key), std::forward<V>(value), key_hash);
+  it = InsertUniq(std::forward<U>(key), std::forward<V>(value), key_hash, true);
 
   return std::make_pair(it, it.found());
 }
@@ -1181,8 +1187,13 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
       invalid_mask |= (1u << slot);
 
       auto it = dest_right->InsertUniq(std::forward<Key_t>(key),
-                                       std::forward<Value_t>(Value(i, slot)), hash);
+                                       std::forward<Value_t>(Value(i, slot)), hash, false);
+
+      // we move items residing in a regular bucket to a new segment.
+      // I do not see a reason why it might overflow to a stash bucket.
+      assert(it.index < kNumBuckets);
       (void)it;
+
       if constexpr (USE_VERSION) {
         // Maintaining consistent versioning.
         uint64_t ver = bucket_[i].GetVersion();
@@ -1218,7 +1229,7 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right) {
 
       invalid_mask |= (1u << slot);
       auto it = dest_right->InsertUniq(std::forward<Key_t>(Key(bid, slot)),
-                                       std::forward<Value_t>(Value(bid, slot)), hash);
+                                       std::forward<Value_t>(Value(bid, slot)), hash, false);
       (void)it;
       assert(it.index != kNanBid);
 
@@ -1283,7 +1294,8 @@ bool Segment<Key, Value, Policy>::CheckIfMovesToOther(bool own_items, unsigned f
 
 template <typename Key, typename Value, typename Policy>
 template <typename U, typename V>
-auto Segment<Key, Value, Policy>::InsertUniq(U&& key, V&& value, Hash_t key_hash) -> Iterator {
+auto Segment<Key, Value, Policy>::InsertUniq(U&& key, V&& value, Hash_t key_hash, bool spread)
+    -> Iterator {
   const uint8_t bid = BucketIndex(key_hash);
   const uint8_t nid = NextBid(bid);
 
@@ -1295,7 +1307,7 @@ auto Segment<Key, Value, Policy>::InsertUniq(U&& key, V&& value, Hash_t key_hash
   unsigned ts = target.Size(), ns = neighbor.Size();
   bool probe = false;
 
-  if (ts > ns) {
+  if (spread && ts > ns) {
     insert_first = &neighbor;
     probe = true;
   }
@@ -1305,6 +1317,12 @@ auto Segment<Key, Value, Policy>::InsertUniq(U&& key, V&& value, Hash_t key_hash
     insert_first->Insert(slot, std::forward<U>(key), std::forward<V>(value), meta_hash, probe);
 
     return Iterator{uint8_t(insert_first - bucket_), uint8_t(slot)};
+  } else if (!spread) {
+    int slot = neighbor.FindEmptySlot();
+    if (slot >= 0) {
+      neighbor.Insert(slot, std::forward<U>(key), std::forward<V>(value), meta_hash, true);
+      return Iterator{nid, uint8_t(slot)};
+    }
   }
 
   int displace_index = MoveToOther(true, nid, NextBid(nid));
@@ -1551,7 +1569,8 @@ auto Segment<Key, Value, Policy>::FindValidStartingFrom(unsigned bid, unsigned s
 
 template <typename Key, typename Value, typename Policy>
 template <typename BumpPolicy>
-auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_hash, const BumpPolicy& bp) -> Iterator {
+auto Segment<Key, Value, Policy>::BumpUp(uint8_t bid, SlotId slot, Hash_t key_hash,
+                                         const BumpPolicy& bp) -> Iterator {
   auto& from = bucket_[bid];
 
   uint8_t target_bid = BucketIndex(key_hash);
