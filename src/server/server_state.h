@@ -22,8 +22,9 @@ class Journal;
 // Present in every server thread. This class differs from EngineShard. The latter manages
 // state around engine shards while the former represents coordinator/connection state.
 // There may be threads that handle engine shards but not IO, there may be threads that handle IO
-// but not engine shards and there can be threads that handle both. This class is present only
-// for threads that handle IO and manage incoming connections.
+// but not engine shards and there can be threads that handle both.
+// Instances of ServerState are present only for threads that handle
+// IO and manage incoming connections.
 class ServerState {  // public struct - to allow initialization.
   ServerState(const ServerState&) = delete;
   void operator=(const ServerState&) = delete;

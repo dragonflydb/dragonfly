@@ -2,12 +2,11 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/journal/journal_shard.h"
-
-#include <fcntl.h>
+#include "server/journal/journal_slice.h"
 
 #include <absl/container/inlined_vector.h>
 #include <absl/strings/str_cat.h>
+#include <fcntl.h>
 
 #include <filesystem>
 
@@ -35,17 +34,30 @@ string ShardName(std::string_view base, unsigned index) {
     CHECK(!__ec$) << "Error: " << __ec$ << " " << __ec$.message() << " for " << #x; \
   } while (false)
 
+struct JournalSlice::RingItem {
+  LSN lsn;
+  TxId txid;
+  Op opcode;
+};
 
-
-JournalShard::JournalShard() {
+JournalSlice::JournalSlice() {
 }
 
-JournalShard::~JournalShard() {
+JournalSlice::~JournalSlice() {
   CHECK(!shard_file_);
 }
 
-std::error_code JournalShard::Open(const std::string_view dir, unsigned index) {
+void JournalSlice::Init(unsigned index) {
+  if (ring_buffer_)  // calling this function multiple times is allowed and it's a no-op.
+    return;
+
+  slice_index_ = index;
+  ring_buffer_.emplace(128);  // TODO: to make it configurable
+}
+
+std::error_code JournalSlice::Open(std::string_view dir) {
   CHECK(!shard_file_);
+  DCHECK_NE(slice_index_, UINT32_MAX);
 
   fs::path dir_path;
 
@@ -65,7 +77,8 @@ std::error_code JournalShard::Open(const std::string_view dir, unsigned index) {
     }
     // LOG(INFO) << int(dir_status.type());
   }
-  dir_path.append(ShardName("journal", index));
+
+  dir_path.append(ShardName("journal", slice_index_));
   shard_path_ = dir_path;
 
   // For file integrity guidelines see:
@@ -81,15 +94,14 @@ std::error_code JournalShard::Open(const std::string_view dir, unsigned index) {
   DVLOG(1) << "Opened journal " << shard_path_;
 
   shard_file_ = std::move(res).value();
-  shard_index_ = index;
   file_offset_ = 0;
   status_ec_.clear();
 
   return error_code{};
 }
 
-error_code JournalShard::Close() {
-  VLOG(1) << "JournalShard::Close";
+error_code JournalSlice::Close() {
+  VLOG(1) << "JournalSlice::Close";
 
   CHECK(shard_file_);
   lameduck_ = true;
@@ -103,12 +115,43 @@ error_code JournalShard::Close() {
   return ec;
 }
 
-void JournalShard::AddLogRecord(TxId txid, unsigned opcode) {
-  string line = absl::StrCat(lsn_, " ", txid, " ", opcode, "\n");
-  error_code ec = shard_file_->Write(io::Buffer(line), file_offset_, 0);
-  CHECK_EC(ec);
-  file_offset_ += line.size();
+void JournalSlice::AddLogRecord(const Entry& entry) {
+  DCHECK(ring_buffer_);
+
+  for (const auto& k_v : change_cb_arr_) {
+    k_v.second(entry);
+  }
+
+  RingItem item;
+  item.lsn = lsn_;
+  item.opcode = entry.opcode;
+  item.txid = entry.txid;
+  VLOG(1) << "Writing item " << item.lsn;
+  ring_buffer_->EmplaceOrOverride(move(item));
+
+  if (shard_file_) {
+    string line = absl::StrCat(lsn_, " ", entry.txid, " ", entry.opcode, "\n");
+    error_code ec = shard_file_->Write(io::Buffer(line), file_offset_, 0);
+    CHECK_EC(ec);
+    file_offset_ += line.size();
+  }
+
   ++lsn_;
+}
+
+uint32_t JournalSlice::RegisterOnChange(ChangeCallback cb) {
+  uint32_t id = next_cb_id_++;
+  change_cb_arr_.emplace_back(id, std::move(cb));
+  return id;
+}
+
+void JournalSlice::Unregister(uint32_t id) {
+  for (auto it = change_cb_arr_.begin(); it != change_cb_arr_.end(); ++it) {
+    if (it->first == id) {
+      change_cb_arr_.erase(it);
+      break;
+    }
+  }
 }
 
 }  // namespace journal

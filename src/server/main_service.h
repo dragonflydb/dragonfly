@@ -82,6 +82,8 @@ class Service : public facade::ServiceInterface {
   GlobalState SwitchState(GlobalState from , GlobalState to);
 
   void ConfigureHttpHandlers(util::HttpListenerBase* base) final;
+  void OnClose(facade::ConnectionContext* cntx) final;
+  std::string GetContextInfo(facade::ConnectionContext* cntx) final;
 
  private:
   static void Quit(CmdArgList args, ConnectionContext* cntx);

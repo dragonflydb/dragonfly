@@ -211,45 +211,6 @@ void ConnectionContext::SendSubscriptionChangedResponse(string_view action,
   (*this)->SendLong(count);
 }
 
-void ConnectionContext::OnClose() {
-  if (!conn_state.exec_info.watched_keys.empty()) {
-    shard_set->RunBriefInParallel([this](EngineShard* shard) {
-      return shard->db_slice().UnregisterConnectionWatches(&conn_state.exec_info);
-    });
-  }
-
-  if (!conn_state.subscribe_info)
-    return;
-
-  if (!conn_state.subscribe_info->channels.empty()) {
-    auto token = conn_state.subscribe_info->borrow_token;
-    UnsubscribeAll(false);
-    // Check that all borrowers finished processing
-    token.Wait();
-  }
-
-  if (conn_state.subscribe_info) {
-    DCHECK(!conn_state.subscribe_info->patterns.empty());
-    auto token = conn_state.subscribe_info->borrow_token;
-    PUnsubscribeAll(false);
-    // Check that all borrowers finished processing
-    token.Wait();
-    DCHECK(!conn_state.subscribe_info);
-  }
-}
-
-string ConnectionContext::GetContextInfo() const {
-  char buf[16] = {0};
-  unsigned index = 0;
-  if (async_dispatch)
-    buf[index++] = 'a';
-
-  if (conn_closing)
-    buf[index++] = 't';
-
-  return index ? absl::StrCat("flags:", buf) : string();
-}
-
 void ConnectionState::ExecInfo::Clear() {
   state = EXEC_INACTIVE;
   body.clear();

@@ -169,7 +169,7 @@ class Transaction {
   // this transaction has been awaked.
   bool NotifySuspended(TxId committed_ts, ShardId sid);
 
-  void BreakOnClose();
+  void BreakOnShutdown();
 
   // Called by EngineShard when performing Execute over the tx queue.
   // Returns true if transaction should be kept in the queue.

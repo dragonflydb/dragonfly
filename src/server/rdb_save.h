@@ -40,21 +40,24 @@ class LinuxWriteWrapper : public io::Sink {
   off_t offset_ = 0;
 };
 
-class AlignedBuffer {
+class AlignedBuffer : public ::io::Sink {
  public:
+  using io::Sink::Write;
+
   AlignedBuffer(size_t cap, ::io::Sink* upstream);
   ~AlignedBuffer();
 
-  // TODO: maybe to derive AlignedBuffer from Sink?
   std::error_code Write(std::string_view buf) {
     return Write(io::Buffer(buf));
   }
 
-  std::error_code Write(io::Bytes buf);
+  io::Result<size_t> WriteSome(const iovec* v, uint32_t len) final;
 
   std::error_code Flush();
 
-  ::io::Sink* upstream() { return upstream_;}
+  ::io::Sink* upstream() {
+    return upstream_;
+  }
 
  private:
   size_t capacity_;
@@ -70,7 +73,9 @@ class RdbSaver {
   // to snapshot all the datastore shards.
   // single_shard - false, means we capture all the data using a single RdbSaver instance
   // (corresponds to legacy, redis compatible mode)
-  explicit RdbSaver(::io::Sink* sink, bool single_shard);
+  // if align_writes is true - writes data in aligned chunks of 4KB to fit direct I/O requirements.
+  explicit RdbSaver(::io::Sink* sink, bool single_shard, bool align_writes);
+
   ~RdbSaver();
 
   std::error_code SaveHeader(const StringVec& lua_scripts);
@@ -81,7 +86,8 @@ class RdbSaver {
   std::error_code SaveBody(RdbTypeFreqMap* freq_map);
 
   // Initiates the serialization in the shard's thread.
-  void StartSnapshotInShard(EngineShard* shard);
+  // TODO: to implement break functionality to allow stopping early.
+  void StartSnapshotInShard(bool include_journal_changes, EngineShard* shard);
 
  private:
   class Impl;
@@ -94,13 +100,12 @@ class RdbSaver {
   std::unique_ptr<Impl> impl_;
 };
 
-// TODO: it does not make sense that RdbSerializer will buffer into unaligned
-// mem_buf_ and then flush it into the next level. We should probably use AlignedBuffer
-// directly.
 class RdbSerializer {
  public:
+  // TODO: for aligned cased, it does not make sense that RdbSerializer buffers into unaligned
+  // mem_buf_ and then flush it into the next level. We should probably use AlignedBuffer
+  // directly.
   RdbSerializer(::io::Sink* s);
-  RdbSerializer(AlignedBuffer* aligned_buf);
 
   ~RdbSerializer();
 
@@ -117,6 +122,7 @@ class RdbSerializer {
 
   // Must be called in the thread to which `it` belongs.
   // Returns the serialized rdb_type or the error.
+  // expire_ms = 0 means no expiry.
   io::Result<uint8_t> SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms);
   std::error_code WriteRaw(const ::io::Bytes& buf);
   std::error_code SaveString(std::string_view val);
@@ -143,8 +149,7 @@ class RdbSerializer {
   std::error_code SaveStreamPEL(rax* pel, bool nacks);
   std::error_code SaveStreamConsumers(streamCG* cg);
 
-  ::io::Sink* sink_ = nullptr;
-  AlignedBuffer* aligned_buf_ = nullptr;
+  ::io::Sink* sink_;
 
   std::unique_ptr<LZF_HSLOT[]> lzf_;
   base::IoBuf mem_buf_;

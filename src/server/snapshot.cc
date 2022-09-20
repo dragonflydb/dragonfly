@@ -13,6 +13,8 @@ extern "C" {
 
 #include "base/logging.h"
 #include "server/db_slice.h"
+#include "server/engine_shard_set.h"
+#include "server/journal/journal.h"
 #include "server/rdb_save.h"
 #include "util/fiber_sched_algo.h"
 #include "util/proactor_base.h"
@@ -25,15 +27,14 @@ using namespace chrono_literals;
 namespace this_fiber = ::boost::this_fiber;
 using boost::fibers::fiber;
 
-SliceSnapshot::SliceSnapshot(DbSlice* slice, RecordChannel* dest)
-    : db_slice_(slice), dest_(dest) {
+SliceSnapshot::SliceSnapshot(DbSlice* slice, RecordChannel* dest) : db_slice_(slice), dest_(dest) {
   db_array_ = slice->databases();
 }
 
 SliceSnapshot::~SliceSnapshot() {
 }
 
-void SliceSnapshot::Start() {
+void SliceSnapshot::Start(bool include_journal_changes) {
   DCHECK(!fb_.joinable());
 
   auto on_change = [this](DbIndex db_index, const DbSlice::ChangeReq& req) {
@@ -42,6 +43,14 @@ void SliceSnapshot::Start() {
 
   snapshot_version_ = db_slice_->RegisterOnChange(move(on_change));
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
+
+  if (include_journal_changes) {
+    auto* journal = db_slice_->shard_owner()->journal();
+    DCHECK(journal);
+    journal_cb_id_ = journal->RegisterOnChange(
+        [this](const journal::Entry& e) { OnJournalEntry(e); });
+  }
+
   sfile_.reset(new io::StringFile);
 
   rdb_serializer_.reset(new RdbSerializer(sfile_.get()));
@@ -49,6 +58,8 @@ void SliceSnapshot::Start() {
   fb_ = fiber([this] {
     FiberFunc();
     db_slice_->UnregisterOnChange(snapshot_version_);
+    if (journal_cb_id_)
+      db_slice_->shard_owner()->journal()->Unregister(journal_cb_id_);
   });
 }
 
@@ -141,15 +152,8 @@ bool SliceSnapshot::FlushSfile(bool force) {
   }
   VLOG(2) << "FlushSfile " << sfile_->val.size() << " bytes";
 
-  string tmp = std::move(sfile_->val);  // important to move before pushing!
-  channel_bytes_ += tmp.size();
-  DbRecord rec{.db_index = savecb_current_db_,
-               .id = rec_id_,
-               .num_records = num_records_in_blob_,
-               .value = std::move(tmp)};
-  DVLOG(2) << "Pushed " << rec_id_;
-  ++rec_id_;
-  num_records_in_blob_ = 0;
+  DbRecord rec = GetDbRecord(savecb_current_db_, std::move(sfile_->val), num_records_in_blob_);
+  num_records_in_blob_ = 0;  // We can not move this line after the push, because Push is blocking.
   dest_->Push(std::move(rec));
 
   return true;
@@ -206,6 +210,32 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
   }
 }
 
+void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
+  CHECK(journal::Op::VAL == entry.opcode);
+
+  PrimeKey pkey{entry.key};
+
+  if (entry.db_ind == savecb_current_db_) {
+    ++num_records_in_blob_;
+    io::Result<uint8_t> res =
+        rdb_serializer_->SaveEntry(pkey, *entry.pval_ptr, entry.expire_ms);
+    CHECK(res);  // we write to StringFile.
+  } else {
+    io::StringFile sfile;
+    RdbSerializer tmp_serializer(&sfile);
+
+    io::Result<uint8_t> res =
+        tmp_serializer.SaveEntry(pkey, *entry.pval_ptr, entry.expire_ms);
+    CHECK(res);  // we write to StringFile.
+
+    error_code ec = tmp_serializer.FlushMem();
+    CHECK(!ec && !sfile.val.empty());
+
+    DbRecord rec = GetDbRecord(entry.db_ind, std::move(sfile.val), 1);
+    dest_->Push(std::move(rec));
+  }
+}
+
 unsigned SliceSnapshot::SerializePhysicalBucket(DbIndex db_index, PrimeTable::bucket_iterator it) {
   DCHECK_LT(it.GetVersion(), snapshot_version_);
 
@@ -234,17 +264,19 @@ unsigned SliceSnapshot::SerializePhysicalBucket(DbIndex db_index, PrimeTable::bu
     error_code ec = tmp_serializer.FlushMem();
     CHECK(!ec && !sfile.val.empty());
 
-    string tmp = std::move(sfile.val);
-    channel_bytes_ += tmp.size();
-
-    DbRecord rec{
-        .db_index = db_index, .id = rec_id_, .num_records = result, .value = std::move(tmp)};
-    DVLOG(2) << "Pushed " << rec_id_;
-    ++rec_id_;
-
-    dest_->Push(std::move(rec));
+    dest_->Push(GetDbRecord(db_index, std::move(sfile.val), result));
   }
   return result;
+}
+
+auto SliceSnapshot::GetDbRecord(DbIndex db_index, std::string value, unsigned num_records)
+    -> DbRecord {
+  channel_bytes_ += value.size();
+  auto id = rec_id_++;
+  DVLOG(2) << "Pushed " << id;
+
+  return DbRecord{
+      .db_index = db_index, .id = id, .num_records = num_records, .value = std::move(value)};
 }
 
 }  // namespace dfly

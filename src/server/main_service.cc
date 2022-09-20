@@ -675,10 +675,11 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
 
   // a bit of a hack. I set up breaker callback here for the owner.
   // Should work though it's confusing to have it here.
-  owner->RegisterOnBreak([res](uint32_t) {
+  owner->RegisterOnBreak([res, this](uint32_t) {
     if (res->transaction) {
-      res->transaction->BreakOnClose();
+      res->transaction->BreakOnShutdown();
     }
+    this->server_family().BreakOnShutdown();
   });
 
   return res;
@@ -1060,7 +1061,7 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
 
   // How do we know that subsribers did not disappear after we fetched them?
   // Each subscriber object hold a borrow_token.
-  // ConnectionContext::OnClose does not reset subscribe_info before all tokens are returned.
+  // OnClose does not reset subscribe_info before all tokens are returned.
   vector<ChannelSlice::Subscriber> subscriber_arr = shard_set->Await(sid, std::move(cb));
   atomic_uint32_t published{0};
 
@@ -1247,6 +1248,45 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
 void Service::ConfigureHttpHandlers(util::HttpListenerBase* base) {
   server_family_.ConfigureMetrics(base);
   base->RegisterCb("/txz", TxTable);
+}
+
+void Service::OnClose(facade::ConnectionContext* cntx) {
+  ConnectionContext* server_cntx = static_cast<ConnectionContext*>(cntx);
+  ConnectionState& conn_state = server_cntx->conn_state;
+
+  if (conn_state.subscribe_info) {  // Clean-ups related to PUBSUB
+    if (!conn_state.subscribe_info->channels.empty()) {
+      auto token = conn_state.subscribe_info->borrow_token;
+      server_cntx->UnsubscribeAll(false);
+
+      // Check that all borrowers finished processing.
+      // token is increased in channel_slice (the publisher side).
+      token.Wait();
+    }
+
+    if (conn_state.subscribe_info) {
+      DCHECK(!conn_state.subscribe_info->patterns.empty());
+      auto token = conn_state.subscribe_info->borrow_token;
+      server_cntx->PUnsubscribeAll(false);
+      // Check that all borrowers finished processing
+      token.Wait();
+      DCHECK(!conn_state.subscribe_info);
+    }
+  }
+
+  server_family_.OnClose(server_cntx);
+}
+
+string Service::GetContextInfo(facade::ConnectionContext* cntx) {
+  char buf[16] = {0};
+  unsigned index = 0;
+  if (cntx->async_dispatch)
+    buf[index++] = 'a';
+
+  if (cntx->conn_closing)
+    buf[index++] = 't';
+
+  return index ? absl::StrCat("flags:", buf) : string();
 }
 
 using ServiceFunc = void (Service::*)(CmdArgList, ConnectionContext* cntx);

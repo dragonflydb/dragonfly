@@ -32,6 +32,13 @@ class ServiceInterface {
 
   virtual void ConfigureHttpHandlers(util::HttpListenerBase* base) {
   }
+
+  virtual void OnClose(ConnectionContext* cntx) {
+  }
+
+  virtual std::string GetContextInfo(ConnectionContext* cntx) {
+    return {};
+  }
 };
 
 }  // namespace facade

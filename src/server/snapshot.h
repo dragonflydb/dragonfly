@@ -13,6 +13,10 @@
 
 namespace dfly {
 
+namespace journal {
+struct Entry;
+}  // namespace journal
+
 class RdbSerializer;
 
 class SliceSnapshot {
@@ -32,7 +36,7 @@ class SliceSnapshot {
   SliceSnapshot(DbSlice* slice, RecordChannel* dest);
   ~SliceSnapshot();
 
-  void Start();
+  void Start(bool include_journal_changes);
   void Join();
 
   uint64_t snapshot_version() const {
@@ -59,10 +63,12 @@ class SliceSnapshot {
 
   bool SaveCb(PrimeIterator it);
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
+  void OnJournalEntry(const journal::Entry& entry);
 
   // Returns number of entries serialized.
   // Updates the version of the bucket to snapshot version.
   unsigned SerializePhysicalBucket(DbIndex db_index, PrimeTable::bucket_iterator it);
+  DbRecord GetDbRecord(DbIndex db_index, std::string value, unsigned num_records);
 
   ::boost::fibers::fiber fb_;
 
@@ -82,6 +88,7 @@ class SliceSnapshot {
   size_t serialized_ = 0, skipped_ = 0, side_saved_ = 0, savecb_calls_ = 0;
   uint64_t rec_id_ = 0;
   uint32_t num_records_in_blob_ = 0;
+  uint32_t journal_cb_id_ = 0;
 };
 
 }  // namespace dfly

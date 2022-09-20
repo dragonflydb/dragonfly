@@ -9,18 +9,23 @@
 #include <optional>
 #include <string_view>
 
+#include "base/ring_buffer.h"
 #include "server/common.h"
+#include "server/journal/types.h"
 #include "util/uring/uring_file.h"
 
 namespace dfly {
 namespace journal {
 
-class JournalShard {
+// Journal slice is present for both shards and io threads.
+class JournalSlice {
  public:
-  JournalShard();
-  ~JournalShard();
+  JournalSlice();
+  ~JournalSlice();
 
-  std::error_code Open(const std::string_view dir, unsigned index);
+  void Init(unsigned index);
+
+  std::error_code Open(std::string_view dir);
 
   std::error_code Close();
 
@@ -32,20 +37,30 @@ class JournalShard {
     return status_ec_;
   }
 
+  // Whether the file-based journaling is open.
   bool IsOpen() const {
     return bool(shard_file_);
   }
 
-  void AddLogRecord(TxId txid, unsigned opcode);
+  void AddLogRecord(const Entry& entry);
+
+  uint32_t RegisterOnChange(ChangeCallback cb);
+  void Unregister(uint32_t);
 
  private:
+
+  struct RingItem;
+
   std::string shard_path_;
   std::unique_ptr<util::uring::LinuxFile> shard_file_;
+  std::optional<base::RingBuffer<RingItem>> ring_buffer_;
+  std::vector<std::pair<uint32_t, ChangeCallback>> change_cb_arr_;
 
   size_t file_offset_ = 0;
   LSN lsn_ = 1;
 
-  unsigned shard_index_ = -1;
+  uint32_t slice_index_ = UINT32_MAX;
+  uint32_t next_cb_id_ = 1;
 
   std::error_code status_ec_;
 

@@ -113,6 +113,23 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
   rb->SendError(kSyntaxErr);
 }
 
+void DflyCmd::OnClose(ConnectionContext* cntx) {
+  boost::fibers::fiber repl_fb;
+
+  if (cntx->conn_state.repl_session_id > 0 && cntx->conn_state.repl_threadid != kuint32max) {
+    unique_lock lk(mu_);
+
+    auto it = sync_info_.find(cntx->conn_state.repl_session_id);
+    if (it != sync_info_.end()) {
+      VLOG(1) << "Found tbd: " << cntx->conn_state.repl_session_id;
+    }
+  }
+
+  if (repl_fb.joinable()) {
+    repl_fb.join();
+  }
+}
+
 void DflyCmd::HandleJournal(CmdArgList args, ConnectionContext* cntx) {
   DCHECK_GE(args.size(), 3u);
   ToUpper(&args[2]);
@@ -127,7 +144,26 @@ void DflyCmd::HandleJournal(CmdArgList args, ConnectionContext* cntx) {
     journal::Journal* journal = ServerState::tlocal()->journal();
     if (!journal) {
       string dir = absl::GetFlag(FLAGS_dir);
-      sf_->journal()->StartLogging(dir);
+
+      atomic_uint32_t created{0};
+      auto* pool = shard_set->pool();
+
+      auto open_cb = [&](auto* pb) {
+        auto ec = sf_->journal()->OpenInThread(true, dir);
+        if (ec) {
+          LOG(ERROR) << "Could not create journal " << ec;
+        } else {
+          created.fetch_add(1, memory_order_relaxed);
+        }
+      };
+
+      pool->AwaitFiberOnAll(open_cb);
+      if (created.load(memory_order_acquire) != pool->size()) {
+        LOG(FATAL) << "TBD / revert";
+      }
+
+      // We can not use transaction distribution mechanism because we must open journal for all
+      // threads and not only for shards.
       trans->Schedule();
       auto barrier_cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
       trans->Execute(barrier_cb, true);
@@ -163,6 +199,10 @@ uint32_t DflyCmd::AllocateSyncSession() {
   CHECK(inserted);
   ++next_sync_id_;
   return it->first;
+}
+
+void DflyCmd::BreakOnShutdown() {
+  VLOG(1) << "BreakOnShutdown";
 }
 
 }  // namespace dfly

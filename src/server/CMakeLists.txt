@@ -2,7 +2,7 @@ add_executable(dragonfly dfly_main.cc)
 cxx_link(dragonfly base dragonfly_lib)
 
 add_library(dfly_transaction db_slice.cc engine_shard_set.cc blocking_controller.cc common.cc
-            io_mgr.cc journal/journal.cc journal/journal_shard.cc table.cc
+            io_mgr.cc journal/journal.cc journal/journal_slice.cc table.cc
             tiered_storage.cc transaction.cc)
 cxx_link(dfly_transaction uring_fiber_lib dfly_core strings_lib)
 
