@@ -119,7 +119,7 @@ with respect to Memcached and Redis APIs.
   - [X] SETEX
   - [X] APPEND
   - [X] PREPEND (dragonfly specific)
-  - [ ] BITCOUNT
+  - [x] BITCOUNT
   - [ ] BITFIELD
   - [ ] BITOP
   - [ ] BITPOS
