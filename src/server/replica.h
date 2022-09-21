@@ -87,7 +87,8 @@ class Replica {
   void ReplicateRedisFb();
 
   // Fiber function used to sync from DF master.
-  void ReplicateDFFb();
+  // We pass io_buf that may have data leftovers from the previous reads.
+  void ReplicateDFFb(std::unique_ptr<base::IoBuf> io_buf, std::string eof_token);
 
   // This function uses parser_ and cmd_args_ in order to consume a single response
   // from the sock_. The output will reside in cmd_str_args_.
@@ -95,7 +96,11 @@ class Replica {
 
   std::error_code ConnectSocket();
   std::error_code Greet();
+
+  // PSYNC from a Redis-master.
   std::error_code InitiatePSync();
+
+  // DFLY SYNC
   std::error_code InitiateDflySync();
 
   std::error_code ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* header);

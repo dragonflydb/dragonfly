@@ -361,6 +361,7 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
   CompactObj co_key{key};
   PrimeIterator it;
   bool inserted;
+  DVLOG(2) << "Inserting key " << key;
 
   // I try/catch just for sake of having a convenient place to set a breakpoint.
   try {
@@ -368,6 +369,7 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
   } catch (bad_alloc& e) {
     throw e;
   }
+
 
   size_t evicted_obj_bytes = 0;
 
