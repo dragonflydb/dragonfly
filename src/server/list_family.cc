@@ -19,6 +19,7 @@ extern "C" {
 #include "server/error.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
+#include "server/container_utils.h"
 
 /**
  * The number of entries allowed per internal list node can be specified
@@ -64,17 +65,6 @@ using namespace facade;
 using absl::GetFlag;
 
 namespace {
-
-quicklistEntry QLEntry() {
-  quicklistEntry res{.quicklist = NULL,
-                     .node = NULL,
-                     .zi = NULL,
-                     .value = NULL,
-                     .longval = 0,
-                     .sz = 0,
-                     .offset = 0};
-  return res;
-}
 
 quicklist* GetQL(const PrimeValue& mv) {
   return (quicklist*)mv.RObjPtr();
@@ -358,7 +348,7 @@ OpResult<string> RPeek(const OpArgs& op_args, string_view key, bool fetch) {
     return OpStatus::OK;
 
   quicklist* ql = GetQL(it_res.value()->second);
-  quicklistEntry entry = QLEntry();
+  quicklistEntry entry = container_utils::QLEntry();
   quicklistIter* iter = quicklistGetIterator(ql, AL_START_TAIL);
   CHECK(quicklistNext(iter, &entry));
   quicklistReleaseIterator(iter);
@@ -845,7 +835,7 @@ OpResult<string> ListFamily::OpIndex(const OpArgs& op_args, std::string_view key
   if (!res)
     return res.status();
   quicklist* ql = GetQL(res.value()->second);
-  quicklistEntry entry = QLEntry();
+  quicklistEntry entry = container_utils::QLEntry();
   quicklistIter* iter = quicklistGetIteratorAtIdx(ql, AL_START_TAIL, index);
   if (!iter)
     return OpStatus::KEY_NOTFOUND;
@@ -871,7 +861,7 @@ OpResult<int> ListFamily::OpInsert(const OpArgs& op_args, string_view key, strin
     return it_res.status();
 
   quicklist* ql = GetQL(it_res.value()->second);
-  quicklistEntry entry = QLEntry();
+  quicklistEntry entry = container_utils::QLEntry();
   quicklistIter* qiter = quicklistGetIterator(ql, AL_START_HEAD);
   bool found = false;
 
@@ -1030,24 +1020,12 @@ OpResult<StringVec> ListFamily::OpRange(const OpArgs& op_args, std::string_view 
     return StringVec{};
   }
 
-  if (end >= llen)
-    end = llen - 1;
-
-  unsigned lrange = end - start + 1;
-  quicklistIter* qiter = quicklistGetIteratorAtIdx(ql, AL_START_HEAD, start);
-  quicklistEntry entry = QLEntry();
   StringVec str_vec;
-
-  unsigned cnt = 0;
-  while (cnt < lrange && quicklistNext(qiter, &entry)) {
-    if (entry.value)
-      str_vec.emplace_back(reinterpret_cast<char*>(entry.value), entry.sz);
-    else
-      str_vec.push_back(absl::StrCat(entry.longval));
-    ++cnt;
-  }
-  quicklistReleaseIterator(qiter);
-
+  container_utils::IterateList(res.value()->second, [&str_vec](container_utils::ContainerEntry ce) {
+    str_vec.emplace_back(ce.ToString());
+    return true;
+  }, start, end);
+  
   return str_vec;
 }
 

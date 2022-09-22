@@ -128,7 +128,10 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   void SendError(OpStatus status);
 
   virtual void SendSimpleStrArr(const std::string_view* arr, uint32_t count);
+  // Send *-1
   virtual void SendNullArray();
+  // Send *0
+  virtual void SendEmptyArray();
 
   virtual void SendStringArr(absl::Span<const std::string_view> arr);
   virtual void SendStringArr(absl::Span<const std::string> arr);

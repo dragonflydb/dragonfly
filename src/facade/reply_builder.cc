@@ -299,6 +299,10 @@ void RedisReplyBuilder::SendNullArray() {
   SendRaw("*-1\r\n");
 }
 
+void RedisReplyBuilder::SendEmptyArray() {
+  StartArray(0);
+}
+
 void RedisReplyBuilder::SendStringArr(absl::Span<const std::string_view> arr) {
   if (arr.empty()) {
     SendRaw("*0\r\n");

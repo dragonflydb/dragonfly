@@ -18,6 +18,7 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/transaction.h"
+#include "server/container_utils.h"
 
 namespace dfly {
 
@@ -244,60 +245,10 @@ void IntervalVisitor::operator()(const ZSetFamily::LexInterval& li) {
 }
 
 void IntervalVisitor::ActionRange(unsigned start, unsigned end) {
-  unsigned rangelen = (end - start) + 1;
-
-  if (zobj_->encoding == OBJ_ENCODING_LISTPACK) {
-    uint8_t* zl = (uint8_t*)zobj_->ptr;
-    uint8_t *eptr, *sptr;
-    uint8_t* vstr;
-    unsigned int vlen;
-    long long vlong;
-    double score = 0.0;
-
-    if (params_.reverse)
-      eptr = lpSeek(zl, -2 - long(2 * start));
-    else
-      eptr = lpSeek(zl, 2 * start);
-    DCHECK(eptr);
-
-    sptr = lpNext(zl, eptr);
-
-    while (rangelen--) {
-      DCHECK(eptr != NULL && sptr != NULL);
-      vstr = lpGetValue(eptr, &vlen, &vlong);
-
-      if (params_.with_scores) /* don't bother to extract the score if it's gonna be ignored. */
-        score = zzlGetScore(sptr);
-
-      AddResult(vstr, vlen, vlong, score);
-
-      Next(zl, &eptr, &sptr);
-    }
-  } else {
-    CHECK_EQ(zobj_->encoding, OBJ_ENCODING_SKIPLIST);
-    zset* zs = (zset*)zobj_->ptr;
-    zskiplist* zsl = zs->zsl;
-    zskiplistNode* ln;
-
-    /* Check if starting point is trivial, before doing log(N) lookup. */
-    if (params_.reverse) {
-      ln = zsl->tail;
-      unsigned long llen = zsetLength(zobj_);
-      if (start > 0)
-        ln = zslGetElementByRank(zsl, llen - start);
-    } else {
-      ln = zsl->header->level[0].forward;
-      if (start > 0)
-        ln = zslGetElementByRank(zsl, start + 1);
-    }
-
-    while (rangelen--) {
-      DCHECK(ln != NULL);
-      sds ele = ln->ele;
-      result_.emplace_back(string(ele, sdslen(ele)), ln->score);
-      ln = Next(ln);
-    }
-  }
+  container_utils::IterateSortedSet(zobj_, [this](container_utils::ContainerEntry ce, double score){
+    result_.emplace_back(ce.ToString(), score);
+    return true;
+  }, start, end, params_.reverse, params_.with_scores);
 }
 
 void IntervalVisitor::ActionRange(const zrangespec& range) {

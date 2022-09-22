@@ -160,7 +160,7 @@ TEST_F(GenericFamilyTest, RenameNx) {
   Run({"mset", "x", x_val, "b", b_val});
 
   ASSERT_THAT(Run({"renamenx", "z", "b"}), ErrArg("no such key"));
-  ASSERT_THAT(Run({"renamenx", "x", "b"}), IntArg(0)); // b already exists
+  ASSERT_THAT(Run({"renamenx", "x", "b"}), IntArg(0));  // b already exists
   ASSERT_THAT(Run({"renamenx", "x", "y"}), IntArg(1));
   ASSERT_EQ(Run({"get", "y"}), x_val);
 }
@@ -169,7 +169,7 @@ TEST_F(GenericFamilyTest, Stick) {
   // check stick returns zero on non-existent keys
   ASSERT_THAT(Run({"stick", "a", "b"}), IntArg(0));
 
-  for (auto key: {"a", "b", "c", "d"}) {
+  for (auto key : {"a", "b", "c", "d"}) {
     Run({"set", key, "."});
   }
 
@@ -274,6 +274,61 @@ TEST_F(GenericFamilyTest, Scan) {
   vec = StrArray(resp.GetVec()[1]);
   EXPECT_EQ(10, vec.size());
   EXPECT_THAT(vec, Each(StartsWith("zset")));
+}
+
+TEST_F(GenericFamilyTest, Sort) {
+  // Test list sort with params
+  Run({"del", "list-1"});
+  Run({"lpush", "list-1", "3.5", "1.2", "10.1", "2.20", "200"});
+  // numeric
+  ASSERT_THAT(Run({"sort", "list-1"}).GetVec(), ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
+  // string
+  ASSERT_THAT(Run({"sort", "list-1", "ALPHA"}).GetVec(), ElementsAre("1.2", "10.1", "2.20", "200", "3.5"));
+  // desc numeric
+  ASSERT_THAT(Run({"sort", "list-1", "DESC"}).GetVec(), ElementsAre("200", "10.1", "3.5", "2.20", "1.2"));
+  // desc strig
+  ASSERT_THAT(Run({"sort", "list-1", "DESC", "ALPHA"}).GetVec(), ElementsAre("3.5", "200", "2.20", "10.1", "1.2"));
+  // limits
+  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "0", "5"}).GetVec(), ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
+  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "0", "10"}).GetVec(), ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
+  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "2", "2"}).GetVec(), ElementsAre("3.5", "10.1"));
+  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "1", "1"}), "2.20");
+  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "4", "2"}), "200");
+  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "5", "2"}), ArrLen(0));
+  // limits desc
+  ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "0", "5"}).GetVec(), ElementsAre("200", "10.1", "3.5", "2.20", "1.2"));
+  ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "2", "2"}).GetVec(), ElementsAre("3.5", "2.20"));
+  ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "1", "1"}), "10.1");
+  ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "5", "2"}), ArrLen(0));
+
+  // Test set sort
+  Run({"del", "set-1"});
+  Run({"sadd", "set-1", "5.3", "4.4", "60", "99.9", "100", "9"});
+  ASSERT_THAT(Run({"sort", "set-1"}).GetVec(), ElementsAre("4.4", "5.3", "9", "60", "99.9", "100"));
+  ASSERT_THAT(Run({"sort", "set-1", "ALPHA"}).GetVec(), ElementsAre("100", "4.4", "5.3", "60", "9", "99.9"));
+  ASSERT_THAT(Run({"sort", "set-1", "DESC"}).GetVec(), ElementsAre("100", "99.9", "60", "9", "5.3", "4.4"));
+  ASSERT_THAT(Run({"sort", "set-1", "DESC", "ALPHA"}).GetVec(), ElementsAre("99.9", "9", "60", "5.3", "4.4", "100"));
+
+  // Test intset sort
+  Run({"del", "intset-1"});
+  Run({"sadd", "intset-1", "5", "4", "3", "2", "1"});
+  ASSERT_THAT(Run({"sort", "intset-1"}).GetVec(), ElementsAre("1", "2", "3", "4", "5"));
+
+  // Test sorted set sort
+  Run({"del", "zset-1"});
+  Run({"zadd", "zset-1", "0", "3.3", "0", "30.1", "0", "8.2"});
+  ASSERT_THAT(Run({"sort", "zset-1"}).GetVec(), ElementsAre("3.3", "8.2", "30.1"));
+  ASSERT_THAT(Run({"sort", "zset-1", "ALPHA"}).GetVec(), ElementsAre("3.3", "30.1", "8.2"));
+  ASSERT_THAT(Run({"sort", "zset-1", "DESC"}).GetVec(), ElementsAre("30.1", "8.2", "3.3"));
+  ASSERT_THAT(Run({"sort", "zset-1", "DESC", "ALPHA"}).GetVec(), ElementsAre("8.2", "30.1", "3.3"));
+
+  // Test sort with non existent key
+  Run({"del", "list-2"});
+  ASSERT_THAT(Run({"sort", "list-2"}), ArrLen(0));
+
+  // Test not convertible to double
+  Run({"lpush", "list-2", "NOTADOUBLE"});
+  ASSERT_THAT(Run({"sort", "list-2"}), ErrArg("One or more scores can't be converted into double"));
 }
 
 }  // namespace dfly
