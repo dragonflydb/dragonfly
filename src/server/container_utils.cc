@@ -42,7 +42,7 @@ bool IterateList(const PrimeValue& pv, const IterateFunc& func, long start, long
     if (entry.value) {
       success = func(ContainerEntry{reinterpret_cast<char*>(entry.value), entry.sz});
     } else {
-      success = func(ContainerEntry{nullptr, .longval=entry.longval});
+      success = func(ContainerEntry{entry.longval});
     }
   }
   quicklistReleaseIterator(qiter);
@@ -57,7 +57,7 @@ bool IterateSet(const PrimeValue& pv, const IterateFunc& func) {
     int ii = 0;
 
     while (success && intsetGet(is, ii++, &ival)) {
-      success = func(ContainerEntry{nullptr, .longval=ival});
+      success = func(ContainerEntry{ival});
     }
   } else {
     if (pv.Encoding() == kEncodingStrMap2) {
@@ -117,7 +117,7 @@ bool IterateSortedSet(robj* zobj, const IterateSortedFunc& func, int32_t start, 
         score = zzlGetScore(sptr);
 
       if (vstr == NULL) {
-        success = func(ContainerEntry{nullptr, .longval=vlong}, score);
+        success = func(ContainerEntry{vlong}, score);
       } else {
         success = func(ContainerEntry{reinterpret_cast<const char*>(vstr), vlen}, score);
       }

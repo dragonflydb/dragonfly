@@ -32,17 +32,23 @@ quicklistEntry QLEntry();
 // - A single long long value (longval) when value = nullptr
 // - A single char* (value) when value != nullptr
 struct ContainerEntry {
-  const char* value;
-  union {
-    size_t length;
-    long long longval;
-  };
+  ContainerEntry(const char* value, size_t length) : value{value}, length{length} {
+  }
+  ContainerEntry(long long longval) : value{nullptr}, longval{longval} {
+  }
+
   std::string ToString() {
     if (value)
       return {value, length};
     else
       return absl::StrCat(longval);
   }
+
+  const char* value;
+  union {
+    size_t length;
+    long long longval;
+  };
 };
 
 using IterateFunc = std::function<bool(ContainerEntry)>;
@@ -61,8 +67,8 @@ bool IterateSet(const PrimeValue& pv, const IterateFunc& func);
 // Iterate over all values and call func(val). Iteration stops as soon
 // as func return false. Returns true if it successfully processed all elements
 // without stopping.
-bool IterateSortedSet(robj* zobj, const IterateSortedFunc& func, int32_t start = 0, int32_t end = -1,
-                      bool reverse = false, bool use_score = false);
+bool IterateSortedSet(robj* zobj, const IterateSortedFunc& func, int32_t start = 0,
+                      int32_t end = -1, bool reverse = false, bool use_score = false);
 
 };  // namespace container_utils
 
