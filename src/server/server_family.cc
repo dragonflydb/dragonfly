@@ -1439,7 +1439,7 @@ void ServerFamily::Latency(CmdArgList args, ConnectionContext* cntx) {
   string_view sub_cmd = ArgS(args, 1);
 
   if (sub_cmd == "LATEST") {
-    return (*cntx)->StartArray(0);
+    return (*cntx)->SendEmptyArray();
   }
 
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";

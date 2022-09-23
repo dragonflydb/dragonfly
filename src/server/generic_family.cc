@@ -14,6 +14,7 @@ extern "C" {
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
+#include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/transaction.h"
@@ -208,8 +209,7 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator it, const ScanOpts& opts, Strin
   return true;
 }
 
-void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor,
-            StringVec* vec) {
+void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, StringVec* vec) {
   auto& db_slice = op_args.shard->db_slice();
   DCHECK(db_slice.IsDbValid(op_args.db_ind));
 
@@ -461,6 +461,170 @@ void GenericFamily::Stick(CmdArgList args, ConnectionContext* cntx) {
 
   uint32_t match_cnt = result.load(memory_order_relaxed);
   (*cntx)->SendLong(match_cnt);
+}
+
+// Used to conditionally store double score
+struct SortEntryScore {
+  double score;
+};
+
+// SortEntry stores all data required for sorting
+template <bool ALPHA>
+struct SortEntry
+    // Store score only if we need it
+    : public std::conditional_t<ALPHA, std::tuple<>, SortEntryScore> {
+  std::string key;
+
+  bool Parse(std::string&& item) {
+    if constexpr (!ALPHA) {
+      if (!absl::SimpleAtod(item, &this->score))
+        return false;
+    }
+    key = std::move(item);
+    return true;
+  }
+
+  bool Parse(int64_t item) {
+    if constexpr (!ALPHA) {
+      this->score = item;
+    }
+    key = absl::StrCat(item);
+    return true;
+  }
+
+  std::conditional_t<ALPHA, const std::string&, double> Cmp() const {
+    if constexpr (ALPHA) {
+      return key;
+    } else {
+      return this->score;
+    }
+  }
+};
+
+// std::variant of all possible vectors of SortEntries
+using SortEntryList = std::variant<
+    // Used when sorting by double values
+    std::vector<SortEntry<false>>,
+    // Used when sorting by string values
+    std::vector<SortEntry<true>>>;
+
+// Create SortEntryList based on runtime arguments
+SortEntryList MakeSortEntryList(bool alpha) {
+  if (alpha)
+    return SortEntryList{std::vector<SortEntry<true>>{}};
+  else
+    return SortEntryList{std::vector<SortEntry<false>>{}};
+}
+
+// Iterate over container with generic function that accepts strings and ints
+template <typename F> bool Iterate(const PrimeValue& pv, F&& func) {
+  auto cb = [&func](container_utils::ContainerEntry ce) {
+    if (ce.value)
+      return func(ce.ToString());
+    else
+      return func(ce.longval);
+  };
+
+  switch (pv.ObjType()) {
+    case OBJ_LIST:
+      return container_utils::IterateList(pv, cb);
+    case OBJ_SET:
+      return container_utils::IterateSet(pv, cb);
+    case OBJ_ZSET:
+      return container_utils::IterateSortedSet(
+          pv.AsRObj(), [&cb](container_utils::ContainerEntry ce, double) { return cb(ce); });
+    default:
+      return false;
+  }
+}
+
+// Create a SortEntryList from given key
+OpResult<SortEntryList> OpFetchSortEntries(const OpArgs& op_args, std::string_view key,
+                                           bool alpha) {
+  using namespace container_utils;
+
+  auto [it, _] = op_args.shard->db_slice().FindExt(op_args.db_ind, key);
+  if (!IsValid(it) || !IsContainer(it->second)) {
+    return OpStatus::KEY_NOTFOUND;
+  }
+
+  auto result = MakeSortEntryList(alpha);
+  bool success = std::visit(
+      [&pv = it->second](auto& entries) {
+        entries.reserve(pv.Size());
+        return Iterate(pv, [&entries](auto&& val) {
+          return entries.emplace_back().Parse(std::forward<decltype(val)>(val));
+        });
+      },
+      result);
+  return success ? OpResult{std::move(result)} : OpStatus::WRONG_TYPE;
+}
+
+void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
+  std::string_view key = ArgS(args, 1);
+  bool alpha = false;
+  bool reversed = false;
+  std::optional<std::pair<size_t, size_t>> bounds;
+
+  for (size_t i = 2; i < args.size(); i++) {
+    ToUpper(&args[i]);
+
+    std::string_view arg = ArgS(args, i);
+    if (arg == "ALPHA") {
+      alpha = true;
+    } else if (arg == "DESC") {
+      reversed = true;
+    } else if (arg == "LIMIT") {
+      int offset, limit;
+      if (i + 2 >= args.size()) {
+        return (*cntx)->SendError(kSyntaxErr);
+      }
+      if (!absl::SimpleAtoi(ArgS(args, i + 1), &offset) ||
+          !absl::SimpleAtoi(ArgS(args, i + 2), &limit)) {
+        return (*cntx)->SendError(kInvalidIntErr);
+      }
+      bounds = {offset, limit};
+      i += 2;
+    }
+  }
+
+  OpResult<SortEntryList> entries =
+      cntx->transaction->ScheduleSingleHopT([&](Transaction* t, EngineShard* shard) {
+        return OpFetchSortEntries(t->GetOpArgs(shard), key, alpha);
+      });
+
+  if (entries.status() == OpStatus::WRONG_TYPE)
+    return (*cntx)->SendError("One or more scores can't be converted into double");
+
+  if (!entries.ok())
+    return (*cntx)->SendEmptyArray();
+
+  auto sort_call = [cntx, bounds, reversed, key](auto& entries) {
+    if (bounds) {
+      auto sort_it = entries.begin() + std::min(bounds->first + bounds->second, entries.size());
+      std::partial_sort(entries.begin(), sort_it, entries.end(),
+                        [reversed](const auto& lhs, const auto& rhs) {
+                          return bool(lhs.Cmp() < rhs.Cmp()) ^ reversed;
+                        });
+    } else {
+      std::sort(entries.begin(), entries.end(), [reversed](const auto& lhs, const auto& rhs) {
+        return bool(lhs.Cmp() < rhs.Cmp()) ^ reversed;
+      });
+    }
+
+    auto start_it = entries.begin();
+    auto end_it = entries.end();
+    if (bounds) {
+      start_it += std::min(bounds->first, entries.size());
+      end_it = entries.begin() + std::min(bounds->first + bounds->second, entries.size());
+    }
+
+    (*cntx)->StartArray(std::distance(start_it, end_it));
+    for (auto it = start_it; it != end_it; ++it) {
+      (*cntx)->SendBulkString(it->key);
+    }
+  };
+  std::visit(std::move(sort_call), entries.value());
 }
 
 void GenericFamily::Move(CmdArgList args, ConnectionContext* cntx) {
@@ -868,6 +1032,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
             << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, 1}.HFUNC(Type)
             << CI{"UNLINK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Del)
             << CI{"STICK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Stick)
+            << CI{"SORT", CO::READONLY, -2, 1, 1, 1}.HFUNC(Sort)
             << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS, 3, 1, 1, 1}.HFUNC(Move);
 }
 

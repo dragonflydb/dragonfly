@@ -21,6 +21,8 @@ extern "C" {
 #include "server/error.h"
 #include "server/transaction.h"
 
+#include "server/container_utils.h"
+
 ABSL_DECLARE_FLAG(bool, use_set2);
 
 namespace dfly {
@@ -143,27 +145,6 @@ void InitStrSet(CompactObj* set) {
   } else {
     dict* ds = dictCreate(&setDictType);
     set->InitRobj(OBJ_SET, kEncodingStrMap, ds);
-  }
-}
-
-// f receives a str object.
-template <typename F> void FillFromStrSet(F&& f, void* ptr) {
-  string str;
-  if (GetFlag(FLAGS_use_set2)) {
-    for (sds ptr : *(StringSet*)ptr) {
-      str.assign(ptr, sdslen(ptr));
-      f(move(str));
-    }
-  } else {
-    dict* ds = (dict*)ptr;
-
-    dictIterator* di = dictGetIterator(ds);
-    dictEntry* de = nullptr;
-    while ((de = dictNext(di))) {
-      str.assign((sds)de->key, sdslen((sds)de->key));
-      f(move(str));
-    }
-    dictReleaseIterator(di);
   }
 }
 
@@ -493,22 +474,6 @@ OpStatus NoOpCb(Transaction* t, EngineShard* shard) {
   return OpStatus::OK;
 };
 
-template <typename F> void FillSet(const SetType& set, F&& f) {
-  if (set.second == kEncodingIntSet) {
-    intset* is = (intset*)set.first;
-    int64_t ival;
-    int ii = 0;
-    char buf[32];
-
-    while (intsetGet(is, ii++, &ival)) {
-      char* next = absl::numbers_internal::FastIntToBuffer(ival, buf);
-      f(string{buf, size_t(next - buf)});
-    }
-  } else {
-    FillFromStrSet(move(f), set.first);
-  }
-}
-
 // if overwrite is true then OpAdd writes vals into the key and discards its previous value.
 OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice vals,
                          bool overwrite) {
@@ -713,8 +678,10 @@ OpResult<StringVec> OpUnion(const OpArgs& op_args, ArgSlice keys) {
   for (std::string_view key : keys) {
     OpResult<PrimeIterator> find_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_SET);
     if (find_res) {
-      SetType st{find_res.value()->second.RObjPtr(), find_res.value()->second.Encoding()};
-      FillSet(st, [&uniques](string s) { uniques.emplace(move(s)); });
+      container_utils::IterateSet(find_res.value()->second, [&uniques](container_utils::ContainerEntry ce){
+        uniques.emplace(ce.ToString());
+        return true;
+      });
       continue;
     }
 
@@ -738,9 +705,10 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ArgSlice keys) {
   }
 
   absl::flat_hash_set<string> uniques;
-  SetType st{find_res.value()->second.RObjPtr(), find_res.value()->second.Encoding()};
-
-  FillSet(st, [&uniques](string s) { uniques.insert(move(s)); });
+  container_utils::IterateSet(find_res.value()->second, [&uniques](container_utils::ContainerEntry ce) {
+    uniques.emplace(ce.ToString());
+    return true;
+  });
 
   DCHECK(!uniques.empty());  // otherwise the key would not exist.
 
@@ -786,9 +754,10 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
     if (!find_res)
       return find_res.status();
 
-    SetType st{find_res.value()->second.RObjPtr(), find_res.value()->second.Encoding()};
-
-    FillSet(st, [&result](string s) { result.push_back(move(s)); });
+    container_utils::IterateSet(find_res.value()->second, [&result](container_utils::ContainerEntry ce) {
+      result.push_back(ce.ToString());
+      return true;
+    });
     return result;
   }
 
@@ -1261,16 +1230,20 @@ OpResult<StringVec> SetFamily::OpPop(const OpArgs& op_args, std::string_view key
 
   PrimeIterator it = find_res.value();
   size_t slen = it->second.Size();
-  SetType st{it->second.RObjPtr(), it->second.Encoding()};
 
   /* CASE 1:
    * The number of requested elements is greater than or equal to
    * the number of elements inside the set: simply return the whole set. */
   if (count >= slen) {
-    FillSet(st, [&result](string s) { result.push_back(move(s)); });
+    container_utils::IterateSet(it->second, [&result](container_utils::ContainerEntry ce) {
+      result.push_back(ce.ToString());
+      return true;
+    });
+
     /* Delete the set as it is now empty */
     CHECK(db_slice.Del(op_args.db_ind, it));
   } else {
+    SetType st{it->second.RObjPtr(), it->second.Encoding()};
     db_slice.PreUpdate(op_args.db_ind, it);
     if (st.second == kEncodingIntSet) {
       intset* is = (intset*)st.first;

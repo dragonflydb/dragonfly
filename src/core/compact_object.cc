@@ -262,6 +262,16 @@ size_t RobjWrapper::Size() const {
     case OBJ_STRING:
       DCHECK_EQ(OBJ_ENCODING_RAW, encoding_);
       return sz_;
+    case OBJ_LIST:
+      return quicklistCount((quicklist*)inner_obj_);
+    case OBJ_ZSET: {
+      robj self{.type = type_,
+                .encoding = encoding_,
+                .lru = 0,
+                .refcount = OBJ_STATIC_REFCOUNT,
+                .ptr = inner_obj_};
+      return zsetLength(&self);
+    }
     case OBJ_SET:
       switch (encoding_) {
         case kEncodingIntSet: {
@@ -278,7 +288,7 @@ size_t RobjWrapper::Size() const {
         }
         default:
           LOG(FATAL) << "Unexpected encoding " << encoding_;
-      }
+      };
     default:;
   }
   return 0;
