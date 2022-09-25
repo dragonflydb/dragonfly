@@ -6,6 +6,7 @@ add_library(lua_modules STATIC
 )
 
 target_compile_options(lua_modules PRIVATE
-    -Wno-sign-compare -Wno-misleading-indentation -Wno-implicit-fallthrough -Wno-undefined-inline)
+    -Wno-sign-compare -Wno-misleading-indentation -Wno-implicit-fallthrough -Wno-undefined-inline
+    -Wno-stringop-overflow)
 
 target_link_libraries(lua_modules TRDP::lua)
