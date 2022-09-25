@@ -106,18 +106,22 @@ void BlockingController::RunStep(Transaction* completed_t) {
     }
   }
 
+  DbContext context;
+  context.time_now_ms = GetCurrentTimeMs();
+
   for (DbIndex index : awakened_indices_) {
     auto dbit = watched_dbs_.find(index);
     if (dbit == watched_dbs_.end())
       continue;
 
+    context.db_index = index;
     DbWatchTable& wt = *dbit->second;
     for (auto key : wt.awakened_keys) {
       string_view sv_key = static_cast<string_view>(key);
       DVLOG(1) << "Processing awakened key " << sv_key;
 
       // Double verify we still got the item.
-      auto [it, exp_it] = owner_->db_slice().FindExt(index, sv_key);
+      auto [it, exp_it] = owner_->db_slice().FindExt(context, sv_key);
       if (!IsValid(it) || it->second.ObjType() != OBJ_LIST)  // Only LIST is allowed to block.
         continue;
 

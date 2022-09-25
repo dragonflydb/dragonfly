@@ -60,7 +60,8 @@ struct ObjInfo {
 
 void DoPopulateBatch(std::string_view prefix, size_t val_size, const SetCmd::SetParams& params,
                      const PopulateBatch& batch) {
-  OpArgs op_args(EngineShard::tlocal(), 0, params.db_index);
+  DbContext db_cntx{batch.dbid, 0};
+  OpArgs op_args(EngineShard::tlocal(), 0, db_cntx);
   SetCmd sg(op_args);
 
   for (unsigned i = 0; i < batch.sz; ++i) {
@@ -277,7 +278,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view 
   DbIndex db_indx = cntx_->db_index();
   EngineShardSet& ess = *shard_set;
   std::vector<PopulateBatch> ps(ess.size(), PopulateBatch{db_indx});
-  SetCmd::SetParams params{db_indx};
+  SetCmd::SetParams params;
 
   for (uint64_t i = from; i < from + len; ++i) {
     StrAppend(&key, i);
@@ -324,7 +325,7 @@ void DebugCmd::Inspect(string_view key) {
         CHECK(!exp_it.is_done());
 
         time_t exp_time = db_slice.ExpireTime(exp_it);
-        oinfo.ttl = exp_time - db_slice.Now();
+        oinfo.ttl = exp_time - GetCurrentTimeMs();
         oinfo.has_sec_precision = exp_it->second.is_second_precision();
       }
     }

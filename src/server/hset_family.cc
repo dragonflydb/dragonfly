@@ -131,7 +131,7 @@ void HSetFamily::HExists(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<int> {
     auto& db_slice = shard->db_slice();
-    auto it_res = db_slice.Find(t->db_index(), key, OBJ_HASH);
+    auto it_res = db_slice.Find(t->db_context(), key, OBJ_HASH);
 
     if (it_res) {
       robj* hset = (*it_res)->second.AsRObj();
@@ -387,7 +387,7 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
     auto& db_slice = shard->db_slice();
-    auto it_res = db_slice.Find(t->db_index(), key, OBJ_HASH);
+    auto it_res = db_slice.Find(t->db_context(), key, OBJ_HASH);
 
     if (!it_res)
       return it_res.status();
@@ -437,12 +437,12 @@ OpResult<uint32_t> HSetFamily::OpSet(const OpArgs& op_args, string_view key, Cmd
   auto& db_slice = op_args.shard->db_slice();
   pair<PrimeIterator, bool> add_res;
   try {
-    add_res = db_slice.AddOrFind(op_args.db_ind, key);
+    add_res = db_slice.AddOrFind(op_args.db_cntx, key);
   } catch(bad_alloc&) {
     return OpStatus::OUT_OF_MEMORY;
   }
 
-  DbTableStats* stats = db_slice.MutableStats(op_args.db_ind);
+  DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
 
   robj* hset = nullptr;
   uint8_t* lp = nullptr;
@@ -459,7 +459,7 @@ OpResult<uint32_t> HSetFamily::OpSet(const OpArgs& op_args, string_view key, Cmd
     if (it->second.ObjType() != OBJ_HASH)
       return OpStatus::WRONG_TYPE;
 
-    db_slice.PreUpdate(op_args.db_ind, it);
+    db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   }
   hset = it->second.AsRObj();
 
@@ -509,7 +509,7 @@ OpResult<uint32_t> HSetFamily::OpSet(const OpArgs& op_args, string_view key, Cmd
     }
   }
   it->second.SyncRObj();
-  db_slice.PostUpdate(op_args.db_ind, it, key);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
 
   return created;
 }
@@ -518,17 +518,17 @@ OpResult<uint32_t> HSetFamily::OpDel(const OpArgs& op_args, string_view key, Cmd
   DCHECK(!values.empty());
 
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.Find(op_args.db_ind, key, OBJ_HASH);
+  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_HASH);
 
   if (!it_res)
     return it_res.status();
 
-  db_slice.PreUpdate(op_args.db_ind, *it_res);
+  db_slice.PreUpdate(op_args.db_cntx.db_index, *it_res);
   CompactObj& co = (*it_res)->second;
   robj* hset = co.AsRObj();
   unsigned deleted = 0;
   bool key_remove = false;
-  DbTableStats* stats = db_slice.MutableStats(op_args.db_ind);
+  DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
 
   if (hset->encoding == OBJ_ENCODING_LISTPACK) {
     stats->listpack_bytes -= lpBytes((uint8_t*)hset->ptr);
@@ -548,12 +548,12 @@ OpResult<uint32_t> HSetFamily::OpDel(const OpArgs& op_args, string_view key, Cmd
 
   co.SyncRObj();
 
-  db_slice.PostUpdate(op_args.db_ind, *it_res, key);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, *it_res, key);
   if (key_remove) {
     if (hset->encoding == OBJ_ENCODING_LISTPACK) {
       stats->listpack_blob_cnt--;
     }
-    db_slice.Del(op_args.db_ind, *it_res);
+    db_slice.Del(op_args.db_cntx.db_index, *it_res);
   } else if (hset->encoding == OBJ_ENCODING_LISTPACK) {
     stats->listpack_bytes += lpBytes((uint8_t*)hset->ptr);
   }
@@ -566,7 +566,7 @@ auto HSetFamily::OpMGet(const OpArgs& op_args, std::string_view key, CmdArgList 
   DCHECK(!fields.empty());
 
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.Find(op_args.db_ind, key, OBJ_HASH);
+  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_HASH);
 
   if (!it_res)
     return it_res.status();
@@ -631,7 +631,7 @@ auto HSetFamily::OpMGet(const OpArgs& op_args, std::string_view key, CmdArgList 
 
 OpResult<uint32_t> HSetFamily::OpLen(const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.Find(op_args.db_ind, key, OBJ_HASH);
+  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_HASH);
 
   if (it_res) {
     robj* hset = (*it_res)->second.AsRObj();
@@ -644,7 +644,7 @@ OpResult<uint32_t> HSetFamily::OpLen(const OpArgs& op_args, string_view key) {
 
 OpResult<string> HSetFamily::OpGet(const OpArgs& op_args, string_view key, string_view field) {
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.Find(op_args.db_ind, key, OBJ_HASH);
+  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_HASH);
   if (!it_res)
     return it_res.status();
 
@@ -682,7 +682,7 @@ OpResult<string> HSetFamily::OpGet(const OpArgs& op_args, string_view key, strin
 OpResult<vector<string>> HSetFamily::OpGetAll(const OpArgs& op_args, string_view key,
                                               uint8_t mask) {
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.Find(op_args.db_ind, key, OBJ_HASH);
+  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_HASH);
   if (!it_res) {
     if (it_res.status() == OpStatus::KEY_NOTFOUND)
       return vector<string>{};
@@ -729,7 +729,7 @@ OpResult<vector<string>> HSetFamily::OpGetAll(const OpArgs& op_args, string_view
 
 OpResult<size_t> HSetFamily::OpStrLen(const OpArgs& op_args, string_view key, string_view field) {
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.Find(op_args.db_ind, key, OBJ_HASH);
+  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_HASH);
 
   if (!it_res) {
     if (it_res.status() == OpStatus::KEY_NOTFOUND)
@@ -761,9 +761,9 @@ OpResult<size_t> HSetFamily::OpStrLen(const OpArgs& op_args, string_view key, st
 OpStatus HSetFamily::OpIncrBy(const OpArgs& op_args, string_view key, string_view field,
                               IncrByParam* param) {
   auto& db_slice = op_args.shard->db_slice();
-  const auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
+  const auto [it, inserted] = db_slice.AddOrFind(op_args.db_cntx, key);
 
-  DbTableStats* stats = db_slice.MutableStats(op_args.db_ind);
+  DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
 
   robj* hset = nullptr;
   size_t lpb = 0;
@@ -777,7 +777,7 @@ OpStatus HSetFamily::OpIncrBy(const OpArgs& op_args, string_view key, string_vie
     if (it->second.ObjType() != OBJ_HASH)
       return OpStatus::WRONG_TYPE;
 
-    db_slice.PreUpdate(op_args.db_ind, it);
+    db_slice.PreUpdate(op_args.db_cntx.db_index, it);
     hset = it->second.AsRObj();
 
     if (hset->encoding == OBJ_ENCODING_LISTPACK) {
@@ -874,14 +874,14 @@ OpStatus HSetFamily::OpIncrBy(const OpArgs& op_args, string_view key, string_vie
   }
 
   it->second.SyncRObj();
-  db_slice.PostUpdate(op_args.db_ind, it, key);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
 
   return OpStatus::OK;
 }
 
 OpResult<StringVec> HSetFamily::OpScan(const OpArgs& op_args, std::string_view key,
                                        uint64_t* cursor) {
-  OpResult<PrimeIterator> find_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_HASH);
+  OpResult<PrimeIterator> find_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_HASH);
 
   if (!find_res)
     return find_res.status();

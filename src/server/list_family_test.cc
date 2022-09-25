@@ -52,7 +52,8 @@ TEST_F(ListFamilyTest, Expire) {
   resp = Run({"expire", kKey1, "1"});
   EXPECT_THAT(resp, IntArg(1));
 
-  UpdateTime(expire_now_ + 1000);
+  AdvanceTime(1000);
+
   resp = Run({"lpush", kKey1, "1"});
   EXPECT_THAT(resp, IntArg(1));
 }

@@ -131,10 +131,9 @@ void BaseFamilyTest::SetUp() {
   opts.disable_time_update = true;
   service_->Init(nullptr, nullptr, opts);
 
-  expire_now_ = absl::GetCurrentTimeNanos() / 1000000;
+  TEST_current_time_ms = absl::GetCurrentTimeNanos() / 1000000;
   auto cb = [&](EngineShard* s) {
-    s->db_slice().UpdateExpireBase(expire_now_ - 1000, 0);
-    s->db_slice().UpdateExpireClock(expire_now_);
+    s->db_slice().UpdateExpireBase(TEST_current_time_ms - 1000, 0);
   };
   shard_set->RunBriefInParallel(cb);
 
@@ -149,12 +148,6 @@ void BaseFamilyTest::TearDown() {
 
   const TestInfo* const test_info = UnitTest::GetInstance()->current_test_info();
   LOG(INFO) << "Finishing " << test_info->name();
-}
-
-// ts is ms
-void BaseFamilyTest::UpdateTime(uint64_t ms) {
-  auto cb = [ms](EngineShard* s) { s->db_slice().UpdateExpireClock(ms); };
-  shard_set->RunBriefInParallel(cb);
 }
 
 void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double timeout) {

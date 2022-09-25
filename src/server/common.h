@@ -69,15 +69,20 @@ struct KeyIndex {
   }
 };
 
+struct DbContext {
+  DbIndex db_index = 0;
+  uint64_t time_now_ms = 0;
+};
+
 struct OpArgs {
   EngineShard* shard;
   TxId txid;
-  DbIndex db_ind;
+  DbContext db_cntx;
 
-  OpArgs() : shard(nullptr), txid(0), db_ind(0) {
+  OpArgs() : shard(nullptr), txid(0) {
   }
 
-  OpArgs(EngineShard* s, TxId i, DbIndex d) : shard(s), txid(i), db_ind(d) {
+  OpArgs(EngineShard* s, TxId i, const DbContext& cntx) : shard(s), txid(i), db_cntx(cntx) {
   }
 };
 

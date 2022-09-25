@@ -26,16 +26,12 @@ class SetCmd {
 
   struct SetParams {
     SetHow how = SET_ALWAYS;
-    DbIndex db_index = 0;
 
     uint32_t memcache_flags = 0;
     // Relative value based on now. 0 means no expiration.
     uint64_t expire_after_ms = 0;
     mutable std::optional<std::string>* prev_val = nullptr;  // GETSET option
     bool keep_expire = false;                                // KEEPTTL - TODO: to implement it.
-
-    explicit SetParams(DbIndex dib) : db_index(dib) {
-    }
 
     constexpr bool IsConditionalSet() const {
       return how == SET_IF_NOTEXIST || how == SET_IF_EXISTS;
@@ -82,8 +78,6 @@ class StringFamily {
   static void IncrByGeneric(std::string_view key, int64_t val, ConnectionContext* cntx);
   static void ExtendGeneric(CmdArgList args, bool prepend, ConnectionContext* cntx);
   static void SetExGeneric(bool seconds, CmdArgList args, ConnectionContext* cntx);
-  static OpResult<void> SetGeneric(ConnectionContext* cntx, SetCmd::SetParams sparams,
-                                   std::string_view key, std::string_view value);
 
   struct GetResp {
     std::string value;

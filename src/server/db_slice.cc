@@ -61,9 +61,9 @@ class PrimeEvictionPolicy {
   static constexpr bool can_evict = true;  // we implement eviction functionality.
   static constexpr bool can_gc = true;
 
-  PrimeEvictionPolicy(DbIndex db_indx, bool can_evict, ssize_t mem_budget, ssize_t soft_limit,
-                      DbSlice* db_slice)
-      : db_slice_(db_slice), mem_budget_(mem_budget), soft_limit_(soft_limit), db_indx_(db_indx),
+  PrimeEvictionPolicy(const DbContext& cntx, bool can_evict, ssize_t mem_budget,
+                      ssize_t soft_limit, DbSlice* db_slice)
+      : db_slice_(db_slice), mem_budget_(mem_budget), soft_limit_(soft_limit), cntx_(cntx),
         can_evict_(can_evict) {
   }
 
@@ -94,9 +94,10 @@ class PrimeEvictionPolicy {
   DbSlice* db_slice_;
   ssize_t mem_budget_;
   ssize_t soft_limit_ = 0;
+  const DbContext cntx_;
+
   unsigned evicted_ = 0;
   unsigned checked_ = 0;
-  const DbIndex db_indx_;
 
   // unlike static constexpr can_evict, this parameter tells whether we can evict
   // items in runtime.
@@ -138,7 +139,7 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& e
     for (; !bucket_it.is_done(); ++bucket_it) {
       if (bucket_it->second.HasExpire()) {
         ++checked_;
-        auto [prime_it, exp_it] = db_slice_->ExpireIfNeeded(db_indx_, bucket_it);
+        auto [prime_it, exp_it] = db_slice_->ExpireIfNeeded(cntx_, bucket_it);
         if (prime_it.is_done())
           ++res;
       }
@@ -164,7 +165,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
       return 0;
     }
 
-    DbTable* table = db_slice_->GetDBTable(db_indx_);
+    DbTable* table = db_slice_->GetDBTable(cntx_.db_index);
     EvictItemFun(last_slot_it, table);
     ++evicted_;
   }
@@ -256,9 +257,9 @@ void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
   db->prime.Reserve(key_size);
 }
 
-auto DbSlice::Find(DbIndex db_index, string_view key, unsigned req_obj_type) const
+auto DbSlice::Find(const Context& cntx, string_view key, unsigned req_obj_type) const
     -> OpResult<PrimeIterator> {
-  auto it = FindExt(db_index, key).first;
+  auto it = FindExt(cntx, key).first;
 
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
@@ -270,13 +271,13 @@ auto DbSlice::Find(DbIndex db_index, string_view key, unsigned req_obj_type) con
   return it;
 }
 
-pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, string_view key) const {
+pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string_view key) const {
   pair<PrimeIterator, ExpireIterator> res;
 
-  if (!IsDbValid(db_ind))
+  if (!IsDbValid(cntx.db_index))
     return res;
 
-  auto& db = *db_arr_[db_ind];
+  auto& db = *db_arr_[cntx.db_index];
   res.first = db.prime.Find(key);
 
   if (!IsValid(res.first)) {
@@ -284,14 +285,14 @@ pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, string_view
   }
 
   if (res.first->second.HasExpire()) {  // check expiry state
-    res = ExpireIfNeeded(db_ind, res.first);
+    res = ExpireIfNeeded(cntx, res.first);
   }
 
   if (caching_mode_ && IsValid(res.first)) {
     if (!change_cb_.empty()) {
       auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
         for (const auto& ccb : change_cb_) {
-          ccb.second(db_ind, bit);
+          ccb.second(cntx.db_index, bit);
         }
       };
 
@@ -306,12 +307,12 @@ pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(DbIndex db_ind, string_view
   return res;
 }
 
-OpResult<pair<PrimeIterator, unsigned>> DbSlice::FindFirst(DbIndex db_index, ArgSlice args) {
+OpResult<pair<PrimeIterator, unsigned>> DbSlice::FindFirst(const Context& cntx, ArgSlice args) {
   DCHECK(!args.empty());
 
   for (unsigned i = 0; i < args.size(); ++i) {
     string_view s = args[i];
-    OpResult<PrimeIterator> res = Find(db_index, s, OBJ_LIST);
+    OpResult<PrimeIterator> res = Find(cntx, s, OBJ_LIST);
     if (res)
       return make_pair(res.value(), i);
     if (res.status() != OpStatus::KEY_NOTFOUND)
@@ -322,20 +323,20 @@ OpResult<pair<PrimeIterator, unsigned>> DbSlice::FindFirst(DbIndex db_index, Arg
   return OpStatus::KEY_NOTFOUND;
 }
 
-pair<PrimeIterator, bool> DbSlice::AddOrFind(DbIndex db_index, string_view key) noexcept(false) {
-  auto res = AddOrFind2(db_index, key);
+pair<PrimeIterator, bool> DbSlice::AddOrFind(const Context& cntx, string_view key) noexcept(false) {
+  auto res = AddOrFind2(cntx, key);
   return make_pair(get<0>(res), get<2>(res));
 }
 
-tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(DbIndex db_index,
+tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cntx,
                                                                string_view key) noexcept(false) {
-  DCHECK(IsDbValid(db_index));
+  DCHECK(IsDbValid(cntx.db_index));
 
-  DbTable& db = *db_arr_[db_index];
+  DbTable& db = *db_arr_[cntx.db_index];
 
   // If we have some registered onchange callbacks, we must know in advance whether its Find or Add.
   if (!change_cb_.empty()) {
-    auto res = FindExt(db_index, key);
+    auto res = FindExt(cntx, key);
 
     if (IsValid(res.first)) {
       return tuple_cat(res, make_tuple(true));
@@ -343,11 +344,11 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(DbIndex db_index,
 
     // It's a new entry.
     for (const auto& ccb : change_cb_) {
-      ccb.second(db_index, key);
+      ccb.second(cntx.db_index, key);
     }
   }
 
-  PrimeEvictionPolicy evp{db_index, bool(caching_mode_), int64_t(memory_budget_ - key.size()),
+  PrimeEvictionPolicy evp{cntx, bool(caching_mode_), int64_t(memory_budget_ - key.size()),
                           ssize_t(soft_budget_limit_), this};
 
   // If we are over limit in non-cache scenario, just be conservative and throw.
@@ -405,7 +406,7 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(DbIndex db_index,
 
     // TODO: to implement the incremental update of expiry values using multi-generation
     // expire_base_ update. Right now we use only index 0.
-    uint64_t delta_ms = now_ms_ - expire_base_[0];
+    uint64_t delta_ms = cntx.time_now_ms - expire_base_[0];
 
     if (expire_it->second.duration_ms() <= delta_ms) {
       db.expire.Erase(expire_it);
@@ -535,28 +536,27 @@ uint32_t DbSlice::GetMCFlag(DbIndex db_ind, const PrimeKey& key) const {
   return it.is_done() ? 0 : it->second;
 }
 
-PrimeIterator DbSlice::AddNew(DbIndex db_ind, string_view key, PrimeValue obj,
+PrimeIterator DbSlice::AddNew(const Context& cntx, string_view key, PrimeValue obj,
                               uint64_t expire_at_ms) noexcept(false) {
-  auto [it, added] = AddEntry(db_ind, key, std::move(obj), expire_at_ms);
+  auto [it, added] = AddEntry(cntx, key, std::move(obj), expire_at_ms);
   CHECK(added);
 
   return it;
 }
 
-pair<PrimeIterator, bool> DbSlice::AddEntry(DbIndex db_ind, string_view key, PrimeValue obj,
+pair<PrimeIterator, bool> DbSlice::AddEntry(const Context& cntx, string_view key, PrimeValue obj,
                                             uint64_t expire_at_ms) noexcept(false) {
-  DCHECK_LT(db_ind, db_arr_.size());
   DCHECK(!obj.IsRef());
 
-  pair<PrimeIterator, bool> res = AddOrFind(db_ind, key);
+  pair<PrimeIterator, bool> res = AddOrFind(cntx, key);
   if (!res.second)  // have not inserted.
     return res;
 
-  auto& db = *db_arr_[db_ind];
+  auto& db = *db_arr_[cntx.db_index];
   auto& it = res.first;
 
   it->second = std::move(obj);
-  PostUpdate(db_ind, it, key, false);
+  PostUpdate(cntx.db_index, it, key, false);
 
   if (expire_at_ms) {
     it->second.SetExpire(true);
@@ -685,10 +685,10 @@ void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
   }
 }
 
-pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(DbIndex db_ind,
+pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
                                                             PrimeIterator it) const {
   DCHECK(it->second.HasExpire());
-  auto& db = db_arr_[db_ind];
+  auto& db = db_arr_[cntx.db_index];
 
   auto expire_it = db->expire.Find(it->first);
 
@@ -697,7 +697,7 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(DbIndex db_ind,
   // TODO: to employ multi-generation update of expire-base and the underlying values.
   time_t expire_time = ExpireTime(expire_it);
 
-  if (now_ms_ < expire_time)
+  if (time_t(cntx.time_now_ms) < expire_time)
     return make_pair(it, expire_it);
 
   db->expire.Erase(expire_it);
@@ -725,17 +725,17 @@ void DbSlice::UnregisterOnChange(uint64_t id) {
   LOG(DFATAL) << "Could not find " << id << " to unregister";
 }
 
-auto DbSlice::DeleteExpiredStep(DbIndex db_ind, unsigned count) -> DeleteExpiredStats {
-  auto& db = *db_arr_[db_ind];
+auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteExpiredStats {
+  auto& db = *db_arr_[cntx.db_index];
   DeleteExpiredStats result;
 
   auto cb = [&](ExpireIterator it) {
     result.traversed++;
-    time_t ttl = ExpireTime(it) - Now();
+    time_t ttl = ExpireTime(it) - cntx.time_now_ms;
     if (ttl <= 0) {
       auto prime_it = db.prime.Find(it->first);
       CHECK(!prime_it.is_done());
-      ExpireIfNeeded(db_ind, prime_it);
+      ExpireIfNeeded(cntx, prime_it);
       ++result.deleted;
     } else {
       result.survivor_ttl_sum += ttl;
@@ -853,7 +853,8 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
   return freed_memory_fun();
 };
 
-void DbSlice::RegisterWatchedKey(DbIndex db_indx, std::string_view key, ConnectionState::ExecInfo* exec_info) {
+void DbSlice::RegisterWatchedKey(DbIndex db_indx, std::string_view key,
+                                 ConnectionState::ExecInfo* exec_info) {
   db_arr_[db_indx]->watched_keys[key].push_back(exec_info);
 }
 

@@ -87,13 +87,13 @@ OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args
                                    size_t member_len) {
   auto& db_slice = op_args.shard->db_slice();
   if (zparams.flags & ZADD_IN_XX) {
-    return db_slice.Find(op_args.db_ind, key, OBJ_ZSET);
+    return db_slice.Find(op_args.db_cntx, key, OBJ_ZSET);
   }
 
   pair<PrimeIterator, bool> add_res;
 
   try {
-    add_res = db_slice.AddOrFind(op_args.db_ind, key);
+    add_res = db_slice.AddOrFind(op_args.db_cntx, key);
   } catch (bad_alloc&) {
     return OpStatus::OUT_OF_MEMORY;
   }
@@ -110,13 +110,13 @@ OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args
 
     DVLOG(2) << "Created zset " << zobj->ptr;
     if (!add_res.second) {
-      db_slice.PreUpdate(op_args.db_ind, it);
+      db_slice.PreUpdate(op_args.db_cntx.db_index, it);
     }
     it->second.ImportRObj(zobj);
   } else {
     if (it->second.ObjType() != OBJ_ZSET)
       return OpStatus::WRONG_TYPE;
-    db_slice.PreUpdate(op_args.db_ind, it);
+    db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   }
 
   return it;
@@ -615,7 +615,7 @@ OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest
     return OpStatus::OK;  // return empty map
 
   for (unsigned j = start; j < keys.size(); ++j) {
-    auto it_res = db_slice.Find(t->db_index(), keys[j], OBJ_ZSET);
+    auto it_res = db_slice.Find(t->db_context(), keys[j], OBJ_ZSET);
     if (it_res == OpStatus::WRONG_TYPE)  // TODO: support sets with default score 1.
       return it_res.status();
     if (!it_res)
@@ -661,7 +661,7 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
     return OpStatus::SKIPPED;  // return noop
 
   for (unsigned j = start; j < keys.size(); ++j) {
-    auto it_res = db_slice.Find(t->db_index(), keys[j], OBJ_ZSET);
+    auto it_res = db_slice.Find(t->db_context(), keys[j], OBJ_ZSET);
     if (it_res == OpStatus::WRONG_TYPE)  // TODO: support sets with default score 1.
       return it_res.status();
 
@@ -710,8 +710,8 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
   auto& db_slice = op_args.shard->db_slice();
 
   if (zparams.override && members.empty()) {
-    auto it = db_slice.FindExt(op_args.db_ind, key).first;
-    db_slice.Del(op_args.db_ind, it);
+    auto it = db_slice.FindExt(op_args.db_cntx, key).first;
+    db_slice.Del(op_args.db_cntx.db_index, it);
     return OpStatus::OK;
   }
 
@@ -763,7 +763,7 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
   DVLOG(2) << "ZAdd " << zobj->ptr;
 
   res_it.value()->second.SyncRObj();
-  op_args.shard->db_slice().PostUpdate(op_args.db_ind, *res_it, key);
+  op_args.shard->db_slice().PostUpdate(op_args.db_cntx.db_index, *res_it, key);
 
   if (zparams.flags & ZADD_IN_INCR) {
     aresult.new_score = new_score;
@@ -934,7 +934,7 @@ void ZSetFamily::ZCard(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
-    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->db_index(), key, OBJ_ZSET);
+    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->db_context(), key, OBJ_ZSET);
     if (!find_res) {
       return find_res.status();
     }
@@ -1505,7 +1505,7 @@ bool ZSetFamily::ParseRangeByScoreParams(CmdArgList args, RangeParams* params) {
 
 OpResult<StringVec> ZSetFamily::OpScan(const OpArgs& op_args, std::string_view key,
                                        uint64_t* cursor) {
-  OpResult<PrimeIterator> find_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_ZSET);
+  OpResult<PrimeIterator> find_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_ZSET);
 
   if (!find_res)
     return find_res.status();
@@ -1564,11 +1564,11 @@ OpResult<StringVec> ZSetFamily::OpScan(const OpArgs& op_args, std::string_view k
 
 OpResult<unsigned> ZSetFamily::OpRem(const OpArgs& op_args, string_view key, ArgSlice members) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_ind, key, OBJ_ZSET);
+  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 
-  db_slice.PreUpdate(op_args.db_ind, *res_it);
+  db_slice.PreUpdate(op_args.db_cntx.db_index, *res_it);
   robj* zobj = res_it.value()->second.AsRObj();
   sds& tmp_str = op_args.shard->tmp_str1;
   unsigned deleted = 0;
@@ -1578,17 +1578,17 @@ OpResult<unsigned> ZSetFamily::OpRem(const OpArgs& op_args, string_view key, Arg
   }
   auto zlen = zsetLength(zobj);
   res_it.value()->second.SyncRObj();
-  db_slice.PostUpdate(op_args.db_ind, *res_it, key);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, *res_it, key);
 
   if (zlen == 0) {
-    CHECK(op_args.shard->db_slice().Del(op_args.db_ind, res_it.value()));
+    CHECK(op_args.shard->db_slice().Del(op_args.db_cntx.db_index, res_it.value()));
   }
 
   return deleted;
 }
 
 OpResult<double> ZSetFamily::OpScore(const OpArgs& op_args, string_view key, string_view member) {
-  OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_ZSET);
+  OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 
@@ -1605,7 +1605,7 @@ OpResult<double> ZSetFamily::OpScore(const OpArgs& op_args, string_view key, str
 
 auto ZSetFamily::OpRange(const ZRangeSpec& range_spec, const OpArgs& op_args, string_view key)
     -> OpResult<ScoredArray> {
-  OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_ZSET);
+  OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 
@@ -1620,11 +1620,11 @@ auto ZSetFamily::OpRange(const ZRangeSpec& range_spec, const OpArgs& op_args, st
 OpResult<unsigned> ZSetFamily::OpRemRange(const OpArgs& op_args, string_view key,
                                           const ZRangeSpec& range_spec) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_ind, key, OBJ_ZSET);
+  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 
-  db_slice.PreUpdate(op_args.db_ind, *res_it);
+  db_slice.PreUpdate(op_args.db_cntx.db_index, *res_it);
 
   robj* zobj = res_it.value()->second.AsRObj();
 
@@ -1632,11 +1632,11 @@ OpResult<unsigned> ZSetFamily::OpRemRange(const OpArgs& op_args, string_view key
   std::visit(iv, range_spec.interval);
 
   res_it.value()->second.SyncRObj();
-  db_slice.PostUpdate(op_args.db_ind, *res_it, key);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, *res_it, key);
 
   auto zlen = zsetLength(zobj);
   if (zlen == 0) {
-    CHECK(op_args.shard->db_slice().Del(op_args.db_ind, res_it.value()));
+    CHECK(op_args.shard->db_slice().Del(op_args.db_cntx.db_index, res_it.value()));
   }
 
   return iv.removed();
@@ -1644,7 +1644,7 @@ OpResult<unsigned> ZSetFamily::OpRemRange(const OpArgs& op_args, string_view key
 
 OpResult<unsigned> ZSetFamily::OpRank(const OpArgs& op_args, string_view key, string_view member,
                                       bool reverse) {
-  OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_ZSET);
+  OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 
@@ -1659,7 +1659,7 @@ OpResult<unsigned> ZSetFamily::OpRank(const OpArgs& op_args, string_view key, st
 
 OpResult<unsigned> ZSetFamily::OpCount(const OpArgs& op_args, std::string_view key,
                                        const ScoreInterval& interval) {
-  OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_ZSET);
+  OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 
@@ -1730,7 +1730,7 @@ OpResult<unsigned> ZSetFamily::OpCount(const OpArgs& op_args, std::string_view k
 
 OpResult<unsigned> ZSetFamily::OpLexCount(const OpArgs& op_args, string_view key,
                                           const ZSetFamily::LexInterval& interval) {
-  OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_ZSET);
+  OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 

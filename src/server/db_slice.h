@@ -8,8 +8,8 @@
 
 #include "facade/op_status.h"
 #include "server/common.h"
-#include "server/table.h"
 #include "server/conn_context.h"
+#include "server/table.h"
 
 namespace util {
 class ProactorBase;
@@ -65,6 +65,8 @@ class DbSlice {
     size_t small_string_bytes = 0;
   };
 
+  using Context = DbContext;
+
   // ChangeReq - describes the change to the table.
   struct ChangeReq {
     // If iterator is set then it's an update to the existing bucket.
@@ -89,12 +91,6 @@ class DbSlice {
 
   // Returns statistics for the whole db slice. A bit heavy operation.
   Stats GetStats() const;
-
-  //! UpdateExpireClock updates the expire clock for this db slice.
-  //! Must be a wall clock so we could replicate it between machines.
-  void UpdateExpireClock(uint64_t now_ms) {
-    now_ms_ = now_ms;
-  }
 
   void UpdateExpireBase(uint64_t now, unsigned generation) {
     expire_base_[generation & 1] = now;
@@ -124,37 +120,34 @@ class DbSlice {
     return ExpirePeriod{time_ms - expire_base_[0]};
   }
 
-  // returns wall clock in millis as it has been set via UpdateExpireClock.
-  time_t Now() const {
-    return now_ms_;
-  }
-
-  OpResult<PrimeIterator> Find(DbIndex db_index, std::string_view key, unsigned req_obj_type) const;
+  OpResult<PrimeIterator> Find(const Context& cntx, std::string_view key,
+                               unsigned req_obj_type) const;
 
   // Returns (value, expire) dict entries if key exists, null if it does not exist or has expired.
-  std::pair<PrimeIterator, ExpireIterator> FindExt(DbIndex db_ind, std::string_view key) const;
+  std::pair<PrimeIterator, ExpireIterator> FindExt(const Context& cntx, std::string_view key) const;
 
   // Returns (iterator, args-index) if found, KEY_NOTFOUND otherwise.
   // If multiple keys are found, returns the first index in the ArgSlice.
-  OpResult<std::pair<PrimeIterator, unsigned>> FindFirst(DbIndex db_index, ArgSlice args);
+  OpResult<std::pair<PrimeIterator, unsigned>> FindFirst(const Context& cntx, ArgSlice args);
 
   // Return .second=true if insertion ocurred, false if we return the existing key.
   // throws: bad_alloc is insertion could not happen due to out of memory.
-  std::pair<PrimeIterator, bool> AddOrFind(DbIndex db_index, std::string_view key) noexcept(false);
+  std::pair<PrimeIterator, bool> AddOrFind(const Context& cntx,
+                                           std::string_view key) noexcept(false);
 
-  std::tuple<PrimeIterator, ExpireIterator, bool> AddOrFind2(DbIndex db_index,
+  std::tuple<PrimeIterator, ExpireIterator, bool> AddOrFind2(const Context& cntx,
                                                              std::string_view key) noexcept(false);
 
   // Returns second=true if insertion took place, false otherwise.
   // expire_at_ms equal to 0 - means no expiry.
   // throws: bad_alloc is insertion could not happen due to out of memory.
-  std::pair<PrimeIterator, bool> AddEntry(DbIndex db_ind, std::string_view key, PrimeValue obj,
+  std::pair<PrimeIterator, bool> AddEntry(const Context& cntx, std::string_view key, PrimeValue obj,
                                           uint64_t expire_at_ms) noexcept(false);
 
   // Adds a new entry. Requires: key does not exist in this slice.
   // Returns the iterator to the newly added entry.
   // throws: bad_alloc is insertion could not happen due to out of memory.
-  PrimeIterator AddNew(DbIndex db_ind, std::string_view key, PrimeValue obj,
+  PrimeIterator AddNew(const Context& cntx, std::string_view key, PrimeValue obj,
                        uint64_t expire_at_ms) noexcept(false);
 
   // Either adds or removes (if at == 0) expiry. Returns true if a change was made.
@@ -218,7 +211,8 @@ class DbSlice {
 
   // Callback functions called upon writing to the existing key.
   void PreUpdate(DbIndex db_ind, PrimeIterator it);
-  void PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key, bool existing_entry = true);
+  void PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
+                  bool existing_entry = true);
 
   DbTableStats* MutableStats(DbIndex db_ind) {
     return &db_arr_[db_ind]->stats;
@@ -226,7 +220,8 @@ class DbSlice {
 
   // Check whether 'it' has not expired. Returns it if it's still valid. Otherwise, erases it
   // from both tables and return PrimeIterator{}.
-  std::pair<PrimeIterator, ExpireIterator> ExpireIfNeeded(DbIndex db_ind, PrimeIterator it) const;
+  std::pair<PrimeIterator, ExpireIterator> ExpireIfNeeded(const Context& cntx,
+                                                          PrimeIterator it) const;
 
   // Current version of this slice.
   // We maintain a shared versioning scheme for all databases in the slice.
@@ -251,7 +246,7 @@ class DbSlice {
   };
 
   // Deletes some amount of possible expired items.
-  DeleteExpiredStats DeleteExpiredStep(DbIndex db_indx, unsigned count);
+  DeleteExpiredStats DeleteExpiredStep(const Context& cntx, unsigned count);
   void FreeMemWithEvictionStep(DbIndex db_indx, size_t increase_goal_bytes);
 
   const DbTableArray& databases() const {
@@ -262,7 +257,8 @@ class DbSlice {
     caching_mode_ = 1;
   }
 
-  void RegisterWatchedKey(DbIndex db_indx, std::string_view key, ConnectionState::ExecInfo* exec_info);
+  void RegisterWatchedKey(DbIndex db_indx, std::string_view key,
+                          ConnectionState::ExecInfo* exec_info);
 
   // Unregisted all watched key entries for connection.
   void UnregisterConnectionWatches(ConnectionState::ExecInfo* exec_info);
@@ -284,7 +280,6 @@ class DbSlice {
 
   EngineShard* owner_;
 
-  time_t now_ms_ = 0;      // Used for expire logic, represents a real clock.
   time_t expire_base_[2];  // Used for expire logic, represents a real clock.
 
   uint64_t version_ = 1;  // Used to version entries in the PrimeTable.

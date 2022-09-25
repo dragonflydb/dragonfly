@@ -184,25 +184,23 @@ bool SetBitValue(uint32_t offset, bool bit_value, std::string* entry) {
 // Helper functions to access the data or change it
 
 class OverrideValue {
-  EngineShard* shard_ = nullptr;
-  DbIndex index_ = 0;
+  const OpArgs& args_;
 
  public:
-  explicit OverrideValue(const OpArgs& args) : shard_{args.shard}, index_{args.db_ind} {
+  explicit OverrideValue(const OpArgs& args) : args_{args} {
   }
 
   OpResult<bool> Set(std::string_view key, uint32_t offset, bool bit_value);
 };
 
 OpResult<bool> OverrideValue::Set(std::string_view key, uint32_t offset, bool bit_value) {
-  auto& db_slice = shard_->db_slice();
-  DbIndex index = index_;
+  auto& db_slice = args_.shard->db_slice();
 
-  DCHECK(db_slice.IsDbValid(index_));
+  DCHECK(db_slice.IsDbValid(args_.db_cntx.db_index));
 
   std::pair<PrimeIterator, bool> add_res;
   try {
-    add_res = db_slice.AddOrFind(index_, key);
+    add_res = db_slice.AddOrFind(args_.db_cntx, key);
   } catch (const std::bad_alloc&) {
     return OpStatus::OUT_OF_MEMORY;
   }
@@ -210,9 +208,9 @@ OpResult<bool> OverrideValue::Set(std::string_view key, uint32_t offset, bool bi
   PrimeIterator& it = add_res.first;
   bool added = add_res.second;
   auto UpdateBitMapValue = [&](std::string_view value) {
-    db_slice.PreUpdate(index, it);
+    db_slice.PreUpdate(args_.db_cntx.db_index, it);
     it->second.SetString(value);
-    db_slice.PostUpdate(index, it, key, !added);
+    db_slice.PostUpdate(args_.db_cntx.db_index, it, key, !added);
   };
 
   if (added) {  // this is a new entry in the "table"
@@ -224,7 +222,7 @@ OpResult<bool> OverrideValue::Set(std::string_view key, uint32_t offset, bool bi
       return OpStatus::WRONG_TYPE;
     }
     bool reset = false;
-    std::string existing_entry{GetString(shard_, it->second)};
+    std::string existing_entry{GetString(args_.shard, it->second)};
     if ((existing_entry.size() * OFFSET_FACTOR) <= offset) {  // need to resize first
       existing_entry.resize(GetByteIndex(offset) + 1, 0);
       reset = true;
@@ -398,7 +396,7 @@ OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, std::string_view key, ui
 }
 
 OpResult<std::string> ReadValue(const OpArgs& op_args, std::string_view key) {
-  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_STRING);
+  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res.ok()) {
     return it_res.status();
   }

@@ -126,7 +126,7 @@ OpResult<ShardFFResult> FindFirst(Transaction* trans) {
     auto args = t->ShardArgsInShard(shard->shard_id());
 
     OpResult<pair<PrimeIterator, unsigned>> ff_res =
-        shard->db_slice().FindFirst(t->db_index(), args);
+        shard->db_slice().FindFirst(t->db_context(), args);
 
     if (ff_res) {
       FFResult ff_result(ff_res->first->first.AsRef(), ff_res->second);
@@ -260,7 +260,7 @@ OpStatus BPopper::Pop(Transaction* t, EngineShard* shard) {
   if (shard->shard_id() == ff_result_.sid) {
     ff_result_.key.GetString(&key_);
     auto& db_slice = shard->db_slice();
-    auto it_res = db_slice.Find(t->db_index(), key_, OBJ_LIST);
+    auto it_res = db_slice.Find(t->db_context(), key_, OBJ_LIST);
     CHECK(it_res);  // must exist and must be ok.
     PrimeIterator it = *it_res;
     quicklist* ql = GetQL(it->second);
@@ -278,7 +278,7 @@ OpStatus BPopper::Pop(Transaction* t, EngineShard* shard) {
 
 OpResult<string> OpRPopLPushSingleShard(const OpArgs& op_args, string_view src, string_view dest) {
   auto& db_slice = op_args.shard->db_slice();
-  auto src_res = db_slice.Find(op_args.db_ind, src, OBJ_LIST);
+  auto src_res = db_slice.Find(op_args.db_cntx, src, OBJ_LIST);
   if (!src_res)
     return src_res.status();
 
@@ -286,11 +286,11 @@ OpResult<string> OpRPopLPushSingleShard(const OpArgs& op_args, string_view src, 
   quicklist* src_ql = GetQL(src_it->second);
 
   if (src == dest) {  // simple case.
-    db_slice.PreUpdate(op_args.db_ind, src_it);
+    db_slice.PreUpdate(op_args.db_cntx.db_index, src_it);
     string val = ListPop(ListDir::RIGHT, src_ql);
 
     quicklistPushHead(src_ql, val.data(), val.size());
-    db_slice.PostUpdate(op_args.db_ind, src_it, src);
+    db_slice.PostUpdate(op_args.db_cntx.db_index, src_it, src);
 
     return val;
   }
@@ -299,7 +299,7 @@ OpResult<string> OpRPopLPushSingleShard(const OpArgs& op_args, string_view src, 
   PrimeIterator dest_it;
   bool new_key = false;
   try {
-    tie(dest_it, new_key) = db_slice.AddOrFind(op_args.db_ind, dest);
+    tie(dest_it, new_key) = db_slice.AddOrFind(op_args.db_cntx, dest);
   } catch (bad_alloc&) {
     return OpStatus::OUT_OF_MEMORY;
   }
@@ -312,25 +312,25 @@ OpResult<string> OpRPopLPushSingleShard(const OpArgs& op_args, string_view src, 
     dest_it->second.ImportRObj(obj);
 
     // Insertion of dest could invalidate src_it. Find it again.
-    src_it = db_slice.GetTables(op_args.db_ind).first->Find(src);
+    src_it = db_slice.GetTables(op_args.db_cntx.db_index).first->Find(src);
   } else {
     if (dest_it->second.ObjType() != OBJ_LIST)
       return OpStatus::WRONG_TYPE;
 
     dest_ql = GetQL(dest_it->second);
-    db_slice.PreUpdate(op_args.db_ind, dest_it);
+    db_slice.PreUpdate(op_args.db_cntx.db_index, dest_it);
   }
 
-  db_slice.PreUpdate(op_args.db_ind, src_it);
+  db_slice.PreUpdate(op_args.db_cntx.db_index, src_it);
 
   string val = ListPop(ListDir::RIGHT, src_ql);
   quicklistPushHead(dest_ql, val.data(), val.size());
 
-  db_slice.PostUpdate(op_args.db_ind, src_it, src);
-  db_slice.PostUpdate(op_args.db_ind, dest_it, dest, !new_key);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, src_it, src);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, dest_it, dest, !new_key);
 
   if (quicklistCount(src_ql) == 0) {
-    CHECK(db_slice.Del(op_args.db_ind, src_it));
+    CHECK(db_slice.Del(op_args.db_cntx.db_index, src_it));
   }
 
   return val;
@@ -339,7 +339,7 @@ OpResult<string> OpRPopLPushSingleShard(const OpArgs& op_args, string_view src, 
 // Read-only peek operation that determines wether the list exists and optionally
 // returns the first from right value without popping it from the list.
 OpResult<string> RPeek(const OpArgs& op_args, string_view key, bool fetch) {
-  auto it_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_LIST);
+  auto it_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res) {
     return it_res.status();
   }
@@ -366,13 +366,13 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   bool new_key = false;
 
   if (skip_notexist) {
-    auto it_res = es->db_slice().Find(op_args.db_ind, key, OBJ_LIST);
+    auto it_res = es->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
     if (!it_res)
       return it_res.status();
     it = *it_res;
   } else {
     try {
-      tie(it, new_key) = es->db_slice().AddOrFind(op_args.db_ind, key);
+      tie(it, new_key) = es->db_slice().AddOrFind(op_args.db_cntx, key);
     } catch (bad_alloc&) {
       return OpStatus::OUT_OF_MEMORY;
     }
@@ -389,7 +389,7 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   } else {
     if (it->second.ObjType() != OBJ_LIST)
       return OpStatus::WRONG_TYPE;
-    es->db_slice().PreUpdate(op_args.db_ind, it);
+    es->db_slice().PreUpdate(op_args.db_cntx.db_index, it);
     ql = GetQL(it->second);
   }
 
@@ -405,10 +405,10 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
     if (es->blocking_controller()) {
       string tmp;
       string_view key = it->first.GetSlice(&tmp);
-      es->blocking_controller()->AwakeWatched(op_args.db_ind, key);
+      es->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, key);
     }
   } else {
-    es->db_slice().PostUpdate(op_args.db_ind, it, key, true);
+    es->db_slice().PostUpdate(op_args.db_cntx.db_index, it, key, true);
   }
 
   return quicklistCount(ql);
@@ -417,13 +417,13 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
 OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, uint32_t count,
                           bool return_results) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> it_res = db_slice.Find(op_args.db_ind, key, OBJ_LIST);
+  OpResult<PrimeIterator> it_res = db_slice.Find(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
 
   PrimeIterator it = *it_res;
   quicklist* ql = GetQL(it->second);
-  db_slice.PreUpdate(op_args.db_ind, it);
+  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
 
   StringVec res;
   if (quicklistCount(ql) < count) {
@@ -441,10 +441,10 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
     }
   }
 
-  db_slice.PostUpdate(op_args.db_ind, it, key);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
 
   if (quicklistCount(ql) == 0) {
-    CHECK(db_slice.Del(op_args.db_ind, it));
+    CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
   }
 
   return res;
@@ -821,7 +821,7 @@ void ListFamily::PopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cnt
 }
 
 OpResult<uint32_t> ListFamily::OpLen(const OpArgs& op_args, std::string_view key) {
-  auto res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_LIST);
+  auto res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
   if (!res)
     return res.status();
 
@@ -831,7 +831,7 @@ OpResult<uint32_t> ListFamily::OpLen(const OpArgs& op_args, std::string_view key
 }
 
 OpResult<string> ListFamily::OpIndex(const OpArgs& op_args, std::string_view key, long index) {
-  auto res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_LIST);
+  auto res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
   if (!res)
     return res.status();
   quicklist* ql = GetQL(res.value()->second);
@@ -856,7 +856,7 @@ OpResult<string> ListFamily::OpIndex(const OpArgs& op_args, std::string_view key
 OpResult<int> ListFamily::OpInsert(const OpArgs& op_args, string_view key, string_view pivot,
                                    string_view elem, int insert_param) {
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.Find(op_args.db_ind, key, OBJ_LIST);
+  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
 
@@ -874,14 +874,14 @@ OpResult<int> ListFamily::OpInsert(const OpArgs& op_args, string_view key, strin
 
   int res = -1;
   if (found) {
-    db_slice.PreUpdate(op_args.db_ind, *it_res);
+    db_slice.PreUpdate(op_args.db_cntx.db_index, *it_res);
     if (insert_param == LIST_TAIL) {
       quicklistInsertAfter(qiter, &entry, elem.data(), elem.size());
     } else {
       DCHECK_EQ(LIST_HEAD, insert_param);
       quicklistInsertBefore(qiter, &entry, elem.data(), elem.size());
     }
-    db_slice.PostUpdate(op_args.db_ind, *it_res, key);
+    db_slice.PostUpdate(op_args.db_cntx.db_index, *it_res, key);
     res = quicklistCount(ql);
   }
   quicklistReleaseIterator(qiter);
@@ -892,7 +892,7 @@ OpResult<uint32_t> ListFamily::OpRem(const OpArgs& op_args, string_view key, str
                                      long count) {
   DCHECK(!elem.empty());
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.Find(op_args.db_ind, key, OBJ_LIST);
+  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
 
@@ -912,7 +912,7 @@ OpResult<uint32_t> ListFamily::OpRem(const OpArgs& op_args, string_view key, str
   unsigned removed = 0;
   const uint8_t* elem_ptr = reinterpret_cast<const uint8_t*>(elem.data());
 
-  db_slice.PreUpdate(op_args.db_ind, it);
+  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   while (quicklistNext(qiter, &entry)) {
     if (quicklistCompare(&entry, elem_ptr, elem.size())) {
       quicklistDelEntry(qiter, &entry);
@@ -921,12 +921,12 @@ OpResult<uint32_t> ListFamily::OpRem(const OpArgs& op_args, string_view key, str
         break;
     }
   }
-  db_slice.PostUpdate(op_args.db_ind, it, key);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
 
   quicklistReleaseIterator(qiter);
 
   if (quicklistCount(ql) == 0) {
-    CHECK(db_slice.Del(op_args.db_ind, it));
+    CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
   }
 
   return removed;
@@ -935,16 +935,16 @@ OpResult<uint32_t> ListFamily::OpRem(const OpArgs& op_args, string_view key, str
 OpStatus ListFamily::OpSet(const OpArgs& op_args, string_view key, string_view elem, long index) {
   DCHECK(!elem.empty());
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.Find(op_args.db_ind, key, OBJ_LIST);
+  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
 
   PrimeIterator it = *it_res;
   quicklist* ql = GetQL(it->second);
 
-  db_slice.PreUpdate(op_args.db_ind, it);
+  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   int replaced = quicklistReplaceAtIndex(ql, index, elem.data(), elem.size());
-  db_slice.PostUpdate(op_args.db_ind, it, key);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
 
   if (!replaced) {
     return OpStatus::OUT_OF_RANGE;
@@ -954,7 +954,7 @@ OpStatus ListFamily::OpSet(const OpArgs& op_args, string_view key, string_view e
 
 OpStatus ListFamily::OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.Find(op_args.db_ind, key, OBJ_LIST);
+  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
 
@@ -985,20 +985,20 @@ OpStatus ListFamily::OpTrim(const OpArgs& op_args, string_view key, long start, 
     rtrim = llen - end - 1;
   }
 
-  db_slice.PreUpdate(op_args.db_ind, it);
+  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   quicklistDelRange(ql, 0, ltrim);
   quicklistDelRange(ql, -rtrim, rtrim);
-  db_slice.PostUpdate(op_args.db_ind, it, key);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
 
   if (quicklistCount(ql) == 0) {
-    CHECK(db_slice.Del(op_args.db_ind, it));
+    CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
   }
   return OpStatus::OK;
 }
 
 OpResult<StringVec> ListFamily::OpRange(const OpArgs& op_args, std::string_view key, long start,
                                         long end) {
-  auto res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_LIST);
+  auto res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
   if (!res)
     return res.status();
 
@@ -1025,7 +1025,7 @@ OpResult<StringVec> ListFamily::OpRange(const OpArgs& op_args, std::string_view 
     str_vec.emplace_back(ce.ToString());
     return true;
   }, start, end);
-  
+
   return str_vec;
 }
 
