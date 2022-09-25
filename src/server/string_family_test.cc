@@ -70,6 +70,8 @@ TEST_F(StringFamilyTest, Incr) {
 
 TEST_F(StringFamilyTest, Append) {
   Run({"setex", "key", "100", "val"});
+  EXPECT_THAT(Run({"ttl", "key"}), IntArg(100));
+
   EXPECT_THAT(Run({"append", "key", "bar"}), IntArg(6));
   EXPECT_THAT(Run({"ttl", "key"}), IntArg(100));
 }
@@ -77,17 +79,17 @@ TEST_F(StringFamilyTest, Append) {
 TEST_F(StringFamilyTest, Expire) {
   ASSERT_EQ(Run({"set", "key", "val", "PX", "20"}), "OK");
 
-  UpdateTime(expire_now_ + 10);
+  AdvanceTime(10);
   EXPECT_EQ(Run({"get", "key"}), "val");
 
-  UpdateTime(expire_now_ + 20);
+  AdvanceTime(10);
 
   EXPECT_THAT(Run({"get", "key"}), ArgType(RespExpr::NIL));
 
   ASSERT_THAT(Run({"set", "i", "1", "PX", "10"}), "OK");
   ASSERT_THAT(Run({"incr", "i"}), IntArg(2));
 
-  UpdateTime(expire_now_ + 30);
+  AdvanceTime(10);
   ASSERT_THAT(Run({"incr", "i"}), IntArg(1));
 }
 

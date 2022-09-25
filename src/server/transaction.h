@@ -135,10 +135,6 @@ class Transaction {
 
   const char* Name() const;
 
-  DbIndex db_index() const {
-    return db_index_;  // TODO: support multiple db indexes.
-  }
-
   uint32_t unique_shard_cnt() const {
     return unique_shard_cnt_;
   }
@@ -180,7 +176,15 @@ class Transaction {
   KeyLockArgs GetLockArgs(ShardId sid) const;
 
   OpArgs GetOpArgs(EngineShard* shard) const {
-    return OpArgs{shard, txid_, db_index_};
+    return OpArgs{shard, txid_, db_context()};
+  }
+
+  DbContext db_context() const {
+    return DbContext{.db_index = db_index_, .time_now_ms = time_now_ms_};
+  }
+
+  DbIndex db_index() const {
+    return db_index_;
   }
 
  private:
@@ -287,15 +291,15 @@ class Transaction {
   const CommandId* cid_;
 
   TxId txid_{0};
+  uint64_t time_now_ms_{0};
   std::atomic<TxId> notify_txid_{kuint64max};
-
   std::atomic_uint32_t use_count_{0}, run_count_{0}, seqlock_{0};
 
   // unique_shard_cnt_ and unique_shard_id_ is accessed only by coordinator thread.
   uint32_t unique_shard_cnt_{0};  // number of unique shards span by args_
 
   ShardId unique_shard_id_{kInvalidSid};
-  DbIndex db_index_ = 0;
+  DbIndex db_index_;
 
   // Used for single-hop transactions with unique_shards_ == 1, hence no data-race.
   OpStatus local_result_ = OpStatus::OK;

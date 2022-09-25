@@ -24,7 +24,7 @@ thread_local Transaction::TLTmpSpace Transaction::tmp_space;
 
 namespace {
 
-std::atomic_uint64_t op_seq{1};
+atomic_uint64_t op_seq{1};
 
 [[maybe_unused]] constexpr size_t kTransSize = sizeof(Transaction);
 
@@ -449,10 +449,12 @@ void Transaction::ScheduleInternal() {
   }
 
   while (true) {
-    txid_ = op_seq.fetch_add(1, std::memory_order_relaxed);
+    txid_ = op_seq.fetch_add(1, memory_order_relaxed);
 
-    std::atomic_uint32_t lock_granted_cnt{0};
-    std::atomic_uint32_t success{0};
+    atomic_uint32_t lock_granted_cnt{0};
+    atomic_uint32_t success{0};
+
+    time_now_ms_ = GetCurrentTimeMs();
 
     auto cb = [&](EngineShard* shard) {
       pair<bool, bool> res = ScheduleInShard(shard);
@@ -551,6 +553,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     // above.
     // IsArmedInShard() first checks run_count_ before accessing shard_data.
     run_count_.fetch_add(1, memory_order_release);
+    time_now_ms_ = GetCurrentTimeMs();
 
     // Please note that schedule_cb can not update any data on ScheduleSingleHop stack
     // since the latter can exit before ScheduleUniqueShard returns.
@@ -805,7 +808,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   }
 
   // we can do it because only a single thread writes into txid_ and sd.
-  txid_ = op_seq.fetch_add(1, std::memory_order_relaxed);
+  txid_ = op_seq.fetch_add(1, memory_order_relaxed);
   sd.pq_pos = shard->txq()->Insert(this);
 
   DCHECK_EQ(0, sd.local_mask & KEYLOCK_ACQUIRED);
@@ -1111,7 +1114,7 @@ inline uint32_t Transaction::DecreaseRunCnt() {
   ::boost::intrusive_ptr guard(this);
 
   // We use release so that no stores will be reordered after.
-  uint32_t res = run_count_.fetch_sub(1, std::memory_order_release);
+  uint32_t res = run_count_.fetch_sub(1, memory_order_release);
   if (res == 1) {
     run_ec_.notify();
   }

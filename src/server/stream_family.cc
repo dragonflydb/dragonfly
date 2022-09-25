@@ -145,7 +145,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
   pair<PrimeIterator, bool> add_res;
 
   try {
-    add_res = db_slice.AddOrFind(op_args.db_ind, key);
+    add_res = db_slice.AddOrFind(op_args.db_cntx, key);
   } catch (bad_alloc&) {
     return OpStatus::OUT_OF_MEMORY;
   }
@@ -161,7 +161,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
     if (it->second.ObjType() != OBJ_STREAM)
       return OpStatus::WRONG_TYPE;
 
-    db_slice.PreUpdate(op_args.db_ind, it);
+    db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   }
 
   stream* stream_inst = (stream*)it->second.RObjPtr();
@@ -201,7 +201,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
 
 OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeOpts& opts) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_ind, key, OBJ_STREAM);
+  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
@@ -247,7 +247,7 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
 
 OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_ind, key, OBJ_STREAM);
+  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
   CompactObj& cobj = (*res_it)->second;
@@ -255,9 +255,10 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
   return s->length;
 }
 
-OpResult<vector<GroupInfo>> OpListGroups(DbIndex db_index, string_view key, EngineShard* shard) {
+OpResult<vector<GroupInfo>> OpListGroups(const DbContext& db_cntx, string_view key,
+                                         EngineShard* shard) {
   auto& db_slice = shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(db_index, key, OBJ_STREAM);
+  OpResult<PrimeIterator> res_it = db_slice.Find(db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
@@ -294,7 +295,7 @@ struct CreateOpts {
 OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_ind, key, OBJ_STREAM);
+  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
@@ -323,7 +324,7 @@ OpResult<pair<stream*, streamCG*>> FindGroup(const OpArgs& op_args, string_view 
                                              string_view gname) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_ind, key, OBJ_STREAM);
+  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
@@ -406,7 +407,7 @@ OpStatus OpSetId(const OpArgs& op_args, string_view key, string_view gname, stri
 OpStatus OpSetId2(const OpArgs& op_args, string_view key, const streamID& sid) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_ind, key, OBJ_STREAM);
+  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
@@ -445,7 +446,7 @@ OpStatus OpSetId2(const OpArgs& op_args, string_view key, const streamID& sid) {
 OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, absl::Span<streamID> ids) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
-  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_ind, key, OBJ_STREAM);
+  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
 
@@ -719,7 +720,8 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
       // We do not use transactional xemantics for xinfo since it's informational command.
       auto cb = [&]() {
         EngineShard* shard = EngineShard::tlocal();
-        return OpListGroups(cntx->db_index(), key, shard);
+        DbContext db_context{.db_index = cntx->db_index(), .time_now_ms = GetCurrentTimeMs()};
+        return OpListGroups(db_context, key, shard);
       };
 
       OpResult<vector<GroupInfo>> result = shard_set->Await(sid, std::move(cb));
@@ -744,9 +746,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
 
 void StreamFamily::XLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpLen(t->GetOpArgs(shard), key);
-  };
+  auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {

@@ -612,7 +612,9 @@ TEST_F(DflyEngineTest, Watch) {
   // Check EXEC doesn't miss watched key expiration.
   Run({"watch", "a"});
   Run({"expire", "a", "1"});
-  UpdateTime(expire_now_ + 1000);
+
+  AdvanceTime(1000);
+
   Run({"multi"});
   ASSERT_THAT(Run({"exec"}), kExecFail);
 
@@ -637,7 +639,9 @@ TEST_F(DflyEngineTest, Watch) {
   Run({"watch", "a"});
   Run({"set", "c", "1"});
   Run({"expire", "a", "1"}); // a existed
-  UpdateTime(expire_now_ + 1000);
+
+  AdvanceTime(1000);
+
   Run({"multi"});
   ASSERT_THAT(Run({"exec"}), kExecFail);
 

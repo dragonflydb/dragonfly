@@ -66,7 +66,7 @@ string_view GetSlice(EngineShard* shard, const PrimeValue& pv, string* tmp) {
 
 inline void RecordJournal(const OpArgs& op_args, string_view key, const PrimeKey& pvalue) {
   if (op_args.shard->journal()) {
-    journal::Entry entry{op_args.db_ind, op_args.txid, key, pvalue};
+    journal::Entry entry{op_args.db_cntx.db_index, op_args.txid, key, pvalue};
     op_args.shard->journal()->RecordEntry(entry);
   }
 }
@@ -77,7 +77,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
   size_t range_len = start + value.size();
 
   if (range_len == 0) {
-    auto it_res = db_slice.Find(op_args.db_ind, key, OBJ_STRING);
+    auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_STRING);
     if (it_res) {
       return it_res.value()->second.Size();
     } else {
@@ -85,7 +85,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
     }
   }
 
-  auto [it, added] = db_slice.AddOrFind(op_args.db_ind, key);
+  auto [it, added] = db_slice.AddOrFind(op_args.db_cntx, key);
 
   string s;
 
@@ -99,12 +99,12 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
     if (s.size() < range_len)
       s.resize(range_len);
 
-    db_slice.PreUpdate(op_args.db_ind, it);
+    db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   }
 
   memcpy(s.data() + start, value.data(), value.size());
   it->second.SetString(s);
-  db_slice.PostUpdate(op_args.db_ind, it, key, !added);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, !added);
   RecordJournal(op_args, key, it->second);
 
   return it->second.Size();
@@ -112,7 +112,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
 
 OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t start, int32_t end) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> it_res = db_slice.Find(op_args.db_ind, key, OBJ_STRING);
+  OpResult<PrimeIterator> it_res = db_slice.Find(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res.ok())
     return it_res.status();
 
@@ -142,8 +142,8 @@ OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t star
   return string(slice.substr(start, end - start + 1));
 };
 
-size_t ExtendExisting(const OpArgs& op_args, PrimeIterator it, string_view key,
-                      string_view val, bool prepend) {
+size_t ExtendExisting(const OpArgs& op_args, PrimeIterator it, string_view key, string_view val,
+                      bool prepend) {
   string tmp, new_val;
   auto* shard = op_args.shard;
   string_view slice = GetSlice(shard, it->second, &tmp);
@@ -153,9 +153,9 @@ size_t ExtendExisting(const OpArgs& op_args, PrimeIterator it, string_view key,
     new_val = absl::StrCat(slice, val);
 
   auto& db_slice = shard->db_slice();
-  db_slice.PreUpdate(op_args.db_ind, it);
+  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   it->second.SetString(new_val);
-  db_slice.PostUpdate(op_args.db_ind, it, key, true);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, true);
   RecordJournal(op_args, key, it->second);
 
   return new_val.size();
@@ -166,10 +166,10 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
                                bool prepend) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
-  auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
+  auto [it, inserted] = db_slice.AddOrFind(op_args.db_cntx, key);
   if (inserted) {
     it->second.SetString(val);
-    db_slice.PostUpdate(op_args.db_ind, it, key, false);
+    db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, false);
     RecordJournal(op_args, key, it->second);
 
     return val.size();
@@ -181,10 +181,9 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
   return ExtendExisting(op_args, it, key, val, prepend);
 }
 
-OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view val,
-                            bool prepend) {
+OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view val, bool prepend) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> it_res = db_slice.Find(op_args.db_ind, key, OBJ_STRING);
+  OpResult<PrimeIterator> it_res = db_slice.Find(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res) {
     return false;
   }
@@ -193,7 +192,7 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
 }
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key) {
-  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_STRING);
+  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res.ok())
     return it_res.status();
 
@@ -204,14 +203,14 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key) {
 
 OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val) {
   auto& db_slice = op_args.shard->db_slice();
-  auto [it, inserted] = db_slice.AddOrFind(op_args.db_ind, key);
+  auto [it, inserted] = db_slice.AddOrFind(op_args.db_cntx, key);
 
   char buf[128];
 
   if (inserted) {
     char* str = RedisReplyBuilder::FormatDouble(val, buf, sizeof(buf));
     it->second.SetString(str);
-    db_slice.PostUpdate(op_args.db_ind, it, key, false);
+    db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, false);
     RecordJournal(op_args, key, it->second);
 
     return val;
@@ -241,9 +240,9 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
 
   char* str = RedisReplyBuilder::FormatDouble(base, buf, sizeof(buf));
 
-  db_slice.PreUpdate(op_args.db_ind, it);
+  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   it->second.SetString(str);
-  db_slice.PostUpdate(op_args.db_ind, it, key, true);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, true);
   RecordJournal(op_args, key, it->second);
 
   return base;
@@ -255,7 +254,7 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
   auto& db_slice = op_args.shard->db_slice();
 
   // we avoid using AddOrFind because of skip_on_missing option for memcache.
-  auto [it, expire_it] = db_slice.FindExt(op_args.db_ind, key);
+  auto [it, expire_it] = db_slice.FindExt(op_args.db_cntx, key);
 
   if (!IsValid(it)) {
     if (skip_on_missing)
@@ -266,7 +265,7 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
 
     // AddNew calls PostUpdate inside.
     try {
-      it = db_slice.AddNew(op_args.db_ind, key, std::move(cobj), 0);
+      it = db_slice.AddNew(op_args.db_cntx, key, std::move(cobj), 0);
     } catch (bad_alloc&) {
       return OpStatus::OUT_OF_MEMORY;
     }
@@ -293,9 +292,9 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
 
   int64_t new_val = prev + incr;
   DCHECK(!it->second.IsExternal());
-  db_slice.PreUpdate(op_args.db_ind, it);
+  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   it->second.SetInt(new_val);
-  db_slice.PostUpdate(op_args.db_ind, it, key);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
   RecordJournal(op_args, key, it->second);
 
   return new_val;
@@ -318,7 +317,7 @@ int64_t CalculateAbsTime(int64_t unix_time, bool as_milli) {
 OpStatus OpMSet(const OpArgs& op_args, ArgSlice args) {
   DCHECK(!args.empty() && args.size() % 2 == 0);
 
-  SetCmd::SetParams params{op_args.db_ind};
+  SetCmd::SetParams params;
   SetCmd sg(op_args);
 
   for (size_t i = 0; i < args.size(); i += 2) {
@@ -332,19 +331,29 @@ OpStatus OpMSet(const OpArgs& op_args, ArgSlice args) {
   return OpStatus::OK;
 }
 
+OpResult<void> SetGeneric(ConnectionContext* cntx, const SetCmd::SetParams& sparams,
+                          string_view key, string_view value) {
+  DCHECK(cntx->transaction);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    SetCmd sg(t->GetOpArgs(shard));
+    return sg.Set(sparams, key, value);
+  };
+  return cntx->transaction->ScheduleSingleHop(std::move(cb));
+}
+
 }  // namespace
 
 OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value) {
   EngineShard* shard = op_args_.shard;
   auto& db_slice = shard->db_slice();
 
-  DCHECK_LT(params.db_index, db_slice.db_array_size());
-  DCHECK(db_slice.IsDbValid(params.db_index));
+  DCHECK(db_slice.IsDbValid(op_args_.db_cntx.db_index));
 
   VLOG(2) << "Set " << key << "(" << db_slice.shard_id() << ") ";
 
   if (params.IsConditionalSet()) {
-    const auto [it, expire_it] = db_slice.FindExt(params.db_index, key);
+    const auto [it, expire_it] = db_slice.FindExt(op_args_.db_cntx, key);
     // Make sure that we have this key, and only add it if it does exists
     if (params.how == SET_IF_EXISTS) {
       if (IsValid(it)) {
@@ -363,7 +372,7 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
   // Trying to add a new entry.
   tuple<PrimeIterator, ExpireIterator, bool> add_res;
   try {
-    add_res = db_slice.AddOrFind2(params.db_index, key);
+    add_res = db_slice.AddOrFind2(op_args_.db_cntx, key);
   } catch (bad_alloc& e) {
     return OpStatus::OUT_OF_MEMORY;
   }
@@ -377,20 +386,21 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
   PrimeValue tvalue{value};
   tvalue.SetFlag(params.memcache_flags != 0);
   it->second = std::move(tvalue);
-  db_slice.PostUpdate(params.db_index, it, key, false);
+  db_slice.PostUpdate(op_args_.db_cntx.db_index, it, key, false);
 
   if (params.expire_after_ms) {
-    db_slice.UpdateExpire(params.db_index, it, params.expire_after_ms + db_slice.Now());
+    db_slice.UpdateExpire(op_args_.db_cntx.db_index, it,
+                          params.expire_after_ms + op_args_.db_cntx.time_now_ms);
   }
 
   if (params.memcache_flags)
-    db_slice.SetMCFlag(params.db_index, it->first.AsRef(), params.memcache_flags);
+    db_slice.SetMCFlag(op_args_.db_cntx.db_index, it->first.AsRef(), params.memcache_flags);
 
   if (shard->tiered_storage()) {  // external storage enabled.
     // TODO: we may have a bug if we block the fiber inside UnloadItem - "it" may be invalid
     // afterwards.
     if (value.size() >= kMinTieredLen) {
-      shard->tiered_storage()->UnloadItem(params.db_index, it);
+      shard->tiered_storage()->UnloadItem(op_args_.db_cntx.db_index, it);
     }
   }
 
@@ -415,23 +425,24 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
   }
 
   DbSlice& db_slice = shard->db_slice();
-  uint64_t at_ms = params.expire_after_ms ? params.expire_after_ms + db_slice.Now() : 0;
+  uint64_t at_ms =
+      params.expire_after_ms ? params.expire_after_ms + op_args_.db_cntx.time_now_ms : 0;
   if (IsValid(e_it) && at_ms) {
     e_it->second = db_slice.FromAbsoluteTime(at_ms);
   } else {
     // We need to update expiry, or maybe erase the object if it was expired.
-    bool changed = db_slice.UpdateExpire(params.db_index, it, at_ms);
+    bool changed = db_slice.UpdateExpire(op_args_.db_cntx.db_index, it, at_ms);
     if (changed && at_ms == 0)  // erased.
       return OpStatus::OK;      // TODO: to update journal with deletion.
   }
 
-  db_slice.PreUpdate(params.db_index, it);
+  db_slice.PreUpdate(op_args_.db_cntx.db_index, it);
 
   // Check whether we need to update flags table.
   bool req_flag_update = (params.memcache_flags != 0) != prime_value.HasFlag();
   if (req_flag_update) {
     prime_value.SetFlag(params.memcache_flags != 0);
-    db_slice.SetMCFlag(params.db_index, it->first.AsRef(), params.memcache_flags);
+    db_slice.SetMCFlag(op_args_.db_cntx.db_index, it->first.AsRef(), params.memcache_flags);
   }
 
   // overwrite existing entry.
@@ -443,11 +454,11 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
     // can be invalid after the function returns and the functions that follow may access invalid
     // entry.
     if (shard->tiered_storage()) {
-      shard->tiered_storage()->UnloadItem(params.db_index, it);
+      shard->tiered_storage()->UnloadItem(op_args_.db_cntx.db_index, it);
     }
   }
 
-  db_slice.PostUpdate(params.db_index, it, key);
+  db_slice.PostUpdate(op_args_.db_cntx.db_index, it, key);
   RecordJournal(op_args_, key, it->second);
 
   return OpStatus::OK;
@@ -459,7 +470,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
   string_view value = ArgS(args, 2);
 
-  SetCmd::SetParams sparams{cntx->db_index()};
+  SetCmd::SetParams sparams;
   sparams.memcache_flags = cntx->conn_state.memcache_flag;
 
   int64_t int_arg;
@@ -518,7 +529,8 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  const auto result{SetGeneric(cntx, std::move(sparams), key, value)};
+  const auto result{SetGeneric(cntx, sparams, key, value)};
+
   if (result == OpStatus::OK) {
     return builder->SendStored();
   }
@@ -530,17 +542,6 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   CHECK_EQ(result, OpStatus::SKIPPED);  // in case of NX option
 
   return builder->SendSetSkipped();
-}
-
-OpResult<void> StringFamily::SetGeneric(ConnectionContext* cntx, SetCmd::SetParams sparams,
-                                        std::string_view key, std::string_view value) {
-  DCHECK(cntx->transaction);
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    SetCmd sg(t->GetOpArgs(shard));
-    return sg.Set(sparams, key, value);
-  };
-  return cntx->transaction->ScheduleSingleHop(std::move(cb));
 }
 
 void StringFamily::SetEx(CmdArgList args, ConnectionContext* cntx) {
@@ -555,7 +556,7 @@ void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
   string_view value = ArgS(args, 2);
 
-  SetCmd::SetParams sparams{cntx->db_index()};
+  SetCmd::SetParams sparams;
   sparams.how = SetCmd::SET_IF_NOTEXIST;
   sparams.memcache_flags = cntx->conn_state.memcache_flag;
   const auto results{SetGeneric(cntx, std::move(sparams), key, value)};
@@ -601,7 +602,7 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
   string_view value = ArgS(args, 2);
   std::optional<string> prev_val;
 
-  SetCmd::SetParams sparams{cntx->db_index()};
+  SetCmd::SetParams sparams;
   sparams.prev_val = &prev_val;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -771,7 +772,7 @@ void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext
     return (*cntx)->SendError(InvalidExpireTime(ArgS(args, 0)));
   }
 
-  SetCmd::SetParams sparams{cntx->db_index()};
+  SetCmd::SetParams sparams;
   if (seconds)
     sparams.expire_after_ms = uint64_t(unit_vals) * 1000;
   else
@@ -876,7 +877,7 @@ void StringFamily::MSetNx(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* es) {
     auto args = t->ShardArgsInShard(es->shard_id());
     for (size_t i = 0; i < args.size(); i += 2) {
-      auto it = es->db_slice().FindExt(t->db_index(), args[i]).first;
+      auto it = es->db_slice().FindExt(t->db_context(), args[i]).first;
       if (IsValid(it)) {
         exists.store(true, memory_order_relaxed);
         break;
@@ -906,7 +907,7 @@ void StringFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<size_t> {
-    OpResult<PrimeIterator> it_res = shard->db_slice().Find(t->db_index(), key, OBJ_STRING);
+    OpResult<PrimeIterator> it_res = shard->db_slice().Find(t->db_context(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 
@@ -993,7 +994,7 @@ auto StringFamily::OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction
 
   auto& db_slice = shard->db_slice();
   for (size_t i = 0; i < args.size(); ++i) {
-    OpResult<PrimeIterator> it_res = db_slice.Find(t->db_index(), args[i], OBJ_STRING);
+    OpResult<PrimeIterator> it_res = db_slice.Find(t->db_context(), args[i], OBJ_STRING);
     if (!it_res)
       continue;
 

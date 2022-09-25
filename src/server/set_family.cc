@@ -484,8 +484,8 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
   // to overwrite the key. However, if the set is empty it means we should delete the
   // key if it exists.
   if (overwrite && vals.empty()) {
-    auto it = db_slice.FindExt(op_args.db_ind, key).first;
-    db_slice.Del(op_args.db_ind, it);
+    auto it = db_slice.FindExt(op_args.db_cntx, key).first;
+    db_slice.Del(op_args.db_cntx.db_index, it);
 
     return 0;
   }
@@ -494,7 +494,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
   bool new_key = false;
 
   try {
-    tie(it, new_key) = db_slice.AddOrFind(op_args.db_ind, key);
+    tie(it, new_key) = db_slice.AddOrFind(op_args.db_cntx, key);
   } catch (bad_alloc& e) {
     return OpStatus::OUT_OF_MEMORY;
   }
@@ -507,7 +507,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
       return OpStatus::WRONG_TYPE;
 
     // Update stats and trigger any handle the old value if needed.
-    db_slice.PreUpdate(op_args.db_ind, it);
+    db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   }
 
   if (new_key || overwrite) {
@@ -555,7 +555,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
     res = AddStrSet(std::move(vals), &co);
   }
 
-  db_slice.PostUpdate(op_args.db_ind, it, key, !new_key);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, !new_key);
 
   return res;
 }
@@ -563,20 +563,20 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
 OpResult<uint32_t> OpRem(const OpArgs& op_args, std::string_view key, const ArgSlice& vals) {
   auto* es = op_args.shard;
   auto& db_slice = es->db_slice();
-  OpResult<PrimeIterator> find_res = db_slice.Find(op_args.db_ind, key, OBJ_SET);
+  OpResult<PrimeIterator> find_res = db_slice.Find(op_args.db_cntx, key, OBJ_SET);
   if (!find_res) {
     return find_res.status();
   }
 
-  db_slice.PreUpdate(op_args.db_ind, *find_res);
+  db_slice.PreUpdate(op_args.db_cntx.db_index, *find_res);
 
   CompactObj& co = find_res.value()->second;
   auto [removed, isempty] = RemoveSet(vals, &co);
 
-  db_slice.PostUpdate(op_args.db_ind, *find_res, key);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, *find_res, key);
 
   if (isempty) {
-    CHECK(db_slice.Del(op_args.db_ind, find_res.value()));
+    CHECK(db_slice.Del(op_args.db_cntx.db_index, find_res.value()));
   }
 
   return removed;
@@ -610,7 +610,7 @@ OpStatus Mover::OpFind(Transaction* t, EngineShard* es) {
 
   for (auto k : largs) {
     unsigned index = (k == src_) ? 0 : 1;
-    OpResult<PrimeIterator> res = es->db_slice().Find(t->db_index(), k, OBJ_SET);
+    OpResult<PrimeIterator> res = es->db_slice().Find(t->db_context(), k, OBJ_SET);
     if (res && index == 0) {  // successful src find.
       DCHECK(!res->is_done());
       const CompactObj& val = res.value()->second;
@@ -676,7 +676,7 @@ OpResult<StringVec> OpUnion(const OpArgs& op_args, ArgSlice keys) {
   absl::flat_hash_set<string> uniques;
 
   for (std::string_view key : keys) {
-    OpResult<PrimeIterator> find_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_SET);
+    OpResult<PrimeIterator> find_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_SET);
     if (find_res) {
       container_utils::IterateSet(find_res.value()->second, [&uniques](container_utils::ContainerEntry ce){
         uniques.emplace(ce.ToString());
@@ -698,7 +698,7 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ArgSlice keys) {
   DCHECK(!keys.empty());
   DVLOG(1) << "OpDiff from " << keys.front();
   EngineShard* es = op_args.shard;
-  OpResult<PrimeIterator> find_res = es->db_slice().Find(op_args.db_ind, keys.front(), OBJ_SET);
+  OpResult<PrimeIterator> find_res = es->db_slice().Find(op_args.db_cntx, keys.front(), OBJ_SET);
 
   if (!find_res) {
     return find_res.status();
@@ -713,7 +713,7 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ArgSlice keys) {
   DCHECK(!uniques.empty());  // otherwise the key would not exist.
 
   for (size_t i = 1; i < keys.size(); ++i) {
-    OpResult<PrimeIterator> diff_res = es->db_slice().Find(op_args.db_ind, keys[i], OBJ_SET);
+    OpResult<PrimeIterator> diff_res = es->db_slice().Find(op_args.db_cntx, keys[i], OBJ_SET);
     if (!diff_res) {
       if (diff_res.status() == OpStatus::WRONG_TYPE) {
         return OpStatus::WRONG_TYPE;
@@ -750,7 +750,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
 
   StringVec result;
   if (keys.size() == 1) {
-    OpResult<PrimeIterator> find_res = es->db_slice().Find(t->db_index(), keys.front(), OBJ_SET);
+    OpResult<PrimeIterator> find_res = es->db_slice().Find(t->db_context(), keys.front(), OBJ_SET);
     if (!find_res)
       return find_res.status();
 
@@ -767,7 +767,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
   OpStatus status = OpStatus::OK;
 
   for (size_t i = 0; i < keys.size(); ++i) {
-    OpResult<PrimeIterator> find_res = es->db_slice().Find(t->db_index(), keys[i], OBJ_SET);
+    OpResult<PrimeIterator> find_res = es->db_slice().Find(t->db_context(), keys[i], OBJ_SET);
     if (!find_res) {
       if (status == OpStatus::OK || status == OpStatus::KEY_NOTFOUND ||
           find_res.status() != OpStatus::KEY_NOTFOUND) {
@@ -841,7 +841,7 @@ void SetFamily::SIsMember(CmdArgList args, ConnectionContext* cntx) {
   std::string_view val = ArgS(args, 2);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->db_index(), key, OBJ_SET);
+    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->db_context(), key, OBJ_SET);
 
     if (find_res) {
       SetType st{find_res.value()->second.RObjPtr(), find_res.value()->second.Encoding()};
@@ -906,7 +906,7 @@ void SetFamily::SCard(CmdArgList args, ConnectionContext* cntx) {
   std::string_view key = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
-    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->db_index(), key, OBJ_SET);
+    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->db_context(), key, OBJ_SET);
     if (!find_res) {
       return find_res.status();
     }
@@ -1220,7 +1220,7 @@ void SetFamily::SScan(CmdArgList args, ConnectionContext* cntx) {
 
 OpResult<StringVec> SetFamily::OpPop(const OpArgs& op_args, std::string_view key, unsigned count) {
   auto& db_slice = op_args.shard->db_slice();
-  OpResult<PrimeIterator> find_res = db_slice.Find(op_args.db_ind, key, OBJ_SET);
+  OpResult<PrimeIterator> find_res = db_slice.Find(op_args.db_cntx, key, OBJ_SET);
   if (!find_res)
     return find_res.status();
 
@@ -1241,10 +1241,10 @@ OpResult<StringVec> SetFamily::OpPop(const OpArgs& op_args, std::string_view key
     });
 
     /* Delete the set as it is now empty */
-    CHECK(db_slice.Del(op_args.db_ind, it));
+    CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
   } else {
     SetType st{it->second.RObjPtr(), it->second.Encoding()};
-    db_slice.PreUpdate(op_args.db_ind, it);
+    db_slice.PreUpdate(op_args.db_cntx.db_index, it);
     if (st.second == kEncodingIntSet) {
       intset* is = (intset*)st.first;
       int64_t val = 0;
@@ -1260,14 +1260,14 @@ OpResult<StringVec> SetFamily::OpPop(const OpArgs& op_args, std::string_view key
     } else {
       result = PopStrSet(count, st);
     }
-    db_slice.PostUpdate(op_args.db_ind, it, key);
+    db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
   }
   return result;
 }
 
 OpResult<StringVec> SetFamily::OpScan(const OpArgs& op_args, std::string_view key,
                                       uint64_t* cursor) {
-  OpResult<PrimeIterator> find_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_SET);
+  OpResult<PrimeIterator> find_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_SET);
 
   if (!find_res)
     return find_res.status();

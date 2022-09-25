@@ -1232,6 +1232,8 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
 
 void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   DbSlice& db_slice = EngineShard::tlocal()->db_slice();
+  DbContext db_cntx{.db_index = db_ind, .time_now_ms = GetCurrentTimeMs()};
+
   for (const auto& item : ib) {
     std::string_view key{item.key};
     PrimeValue pv;
@@ -1245,7 +1247,10 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
       break;
     }
 
-    auto [it, added] = db_slice.AddEntry(db_ind, key, std::move(pv), item.expire_ms);
+    if (item.expire_ms > 0 && db_cntx.time_now_ms >= item.expire_ms)
+      continue;
+
+    auto [it, added] = db_slice.AddEntry(db_cntx, key, std::move(pv), item.expire_ms);
 
     if (!added) {
       LOG(WARNING) << "RDB has duplicated key '" << key << "' in DB " << db_ind;

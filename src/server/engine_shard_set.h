@@ -176,7 +176,6 @@ class EngineShard {
   IntentLock shard_lock_;
 
   uint32_t periodic_task_ = 0;
-  uint64_t task_iters_ = 0;
   std::unique_ptr<TieredStorage> tiered_storage_;
   std::unique_ptr<BlockingController> blocking_controller_;
 
@@ -284,6 +283,16 @@ template <typename U> void EngineShardSet::RunBlockingInParallel(U&& func) {
 inline ShardId Shard(std::string_view v, ShardId shard_num) {
   XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
   return hash % shard_num;
+}
+
+
+// absl::GetCurrentTimeNanos is twice faster than clock_gettime(CLOCK_REALTIME) on my laptop
+// and 4 times faster than on a VM. it takes 5-10ns to do a call.
+
+extern uint64_t TEST_current_time_ms;
+
+inline uint64_t GetCurrentTimeMs() {
+  return TEST_current_time_ms ? TEST_current_time_ms : absl::GetCurrentTimeNanos() / 1000000;
 }
 
 

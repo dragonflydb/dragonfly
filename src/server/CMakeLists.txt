@@ -39,4 +39,4 @@ cxx_test(json_family_test dfly_test_lib LABELS DFLY)
 add_custom_target(check_dfly WORKING_DIRECTORY .. COMMAND ctest -L DFLY)
 add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  generic_family_test memcache_parser_test rdb_test
-                 redis_parser_test snapshot_test stream_family_test string_family_test bitops_family_test)
+                 redis_parser_test snapshot_test stream_family_test string_family_test bitops_family_test set_family_test zset_family_test)

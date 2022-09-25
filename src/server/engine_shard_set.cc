@@ -22,10 +22,9 @@ using namespace std;
 
 ABSL_FLAG(string, backing_prefix, "", "");
 
-ABSL_FLAG(uint32_t, hz, 1000,
-          "Base frequency at which the server updates its expiry clock "
-          "and performs other background tasks. Warning: not advised to decrease in production, "
-          "because it can affect expiry precision for PSETEX etc.");
+ABSL_FLAG(uint32_t, hz, 100,
+          "Base frequency at which the server performs other background tasks. "
+          "Warning: not advised to decrease in production.");
 
 ABSL_FLAG(bool, cache_mode, false,
           "If true, the backend behaves like a cache, "
@@ -48,6 +47,7 @@ constexpr size_t kQueueLen = 64;
 
 thread_local EngineShard* EngineShard::shard_ = nullptr;
 EngineShardSet* shard_set = nullptr;
+uint64_t TEST_current_time_ms = 0;
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
   ooo_runs += o.ooo_runs;
@@ -284,43 +284,41 @@ bool EngineShard::HasResultConverged(TxId notifyid) const {
 #endif
 
 void EngineShard::Heartbeat() {
-  // absl::GetCurrentTimeNanos() returns current time since the Unix Epoch.
-  db_slice().UpdateExpireClock(absl::GetCurrentTimeNanos() / 1000000);
+  CacheStats();
+  constexpr double kTtlDeleteLimit = 200;
+  constexpr double kRedLimitFactor = 0.1;
 
-  if (task_iters_++ % 8 == 0) {
-    CacheStats();
-    constexpr double kTtlDeleteLimit = 200;
-    constexpr double kRedLimitFactor = 0.1;
+  uint32_t traversed = GetMovingSum6(TTL_TRAVERSE);
+  uint32_t deleted = GetMovingSum6(TTL_DELETE);
+  unsigned ttl_delete_target = 5;
 
-    uint32_t traversed = GetMovingSum6(TTL_TRAVERSE);
-    uint32_t deleted = GetMovingSum6(TTL_DELETE);
-    unsigned ttl_delete_target = 5;
+  if (deleted > 10) {
+    // deleted should be <= traversed.
+    // hence we map our delete/traversed ratio into a range [0, kTtlDeleteLimit).
+    // The higher t
+    ttl_delete_target = kTtlDeleteLimit * double(deleted) / (double(traversed) + 10);
+  }
 
-    if (deleted > 10) {
-      // deleted should be <= traversed.
-      // hence we map our delete/traversed ratio into a range [0, kTtlDeleteLimit).
-      // The higher t
-      ttl_delete_target = kTtlDeleteLimit * double(deleted) / (double(traversed) + 10);
+  ssize_t redline = (max_memory_limit * kRedLimitFactor) / shard_set->size();
+  DbContext db_cntx;
+  db_cntx.time_now_ms = GetCurrentTimeMs();
+
+  for (unsigned i = 0; i < db_slice_.db_array_size(); ++i) {
+    if (!db_slice_.IsDbValid(i))
+      continue;
+
+    db_cntx.db_index = i;
+    auto [pt, expt] = db_slice_.GetTables(i);
+    if (expt->size() > pt->size() / 4) {
+      DbSlice::DeleteExpiredStats stats = db_slice_.DeleteExpiredStep(db_cntx, ttl_delete_target);
+
+      counter_[TTL_TRAVERSE].IncBy(stats.traversed);
+      counter_[TTL_DELETE].IncBy(stats.deleted);
     }
 
-    ssize_t redline = (max_memory_limit * kRedLimitFactor) / shard_set->size();
-
-    for (unsigned i = 0; i < db_slice_.db_array_size(); ++i) {
-      if (!db_slice_.IsDbValid(i))
-        continue;
-
-      auto [pt, expt] = db_slice_.GetTables(i);
-      if (expt->size() > pt->size() / 4) {
-        DbSlice::DeleteExpiredStats stats = db_slice_.DeleteExpiredStep(i, ttl_delete_target);
-
-        counter_[TTL_TRAVERSE].IncBy(stats.traversed);
-        counter_[TTL_DELETE].IncBy(stats.deleted);
-      }
-
-      // if our budget is below the limit
-      if (db_slice_.memory_budget() < redline) {
-        db_slice_.FreeMemWithEvictionStep(i, redline - db_slice_.memory_budget());
-      }
+    // if our budget is below the limit
+    if (db_slice_.memory_budget() < redline) {
+      db_slice_.FreeMemWithEvictionStep(i, redline - db_slice_.memory_budget());
     }
   }
 }

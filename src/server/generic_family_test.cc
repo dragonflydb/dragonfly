@@ -30,23 +30,23 @@ TEST_F(GenericFamilyTest, Expire) {
   auto resp = Run({"expire", "key", "1"});
 
   EXPECT_THAT(resp, IntArg(1));
-  UpdateTime(expire_now_ + 1000);
+  AdvanceTime(1000);
   resp = Run({"get", "key"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 
   Run({"set", "key", "val"});
-  resp = Run({"pexpireat", "key", absl::StrCat(expire_now_ + 2000)});
+  resp = Run({"pexpireat", "key", absl::StrCat(TEST_current_time_ms + 2000)});
   EXPECT_THAT(resp, IntArg(1));
 
   // override
-  resp = Run({"pexpireat", "key", absl::StrCat(expire_now_ + 3000)});
+  resp = Run({"pexpireat", "key", absl::StrCat(TEST_current_time_ms + 3000)});
   EXPECT_THAT(resp, IntArg(1));
 
-  UpdateTime(expire_now_ + 2999);
+  AdvanceTime(2999);
   resp = Run({"get", "key"});
   EXPECT_THAT(resp, "val");
 
-  UpdateTime(expire_now_ + 3000);
+  AdvanceTime(1);
   resp = Run({"get", "key"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
@@ -329,6 +329,30 @@ TEST_F(GenericFamilyTest, Sort) {
   // Test not convertible to double
   Run({"lpush", "list-2", "NOTADOUBLE"});
   ASSERT_THAT(Run({"sort", "list-2"}), ErrArg("One or more scores can't be converted into double"));
+}
+
+TEST_F(GenericFamilyTest, Time) {
+  auto resp = Run({"time"});
+  EXPECT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[0], ArgType(RespExpr::INT64));
+  EXPECT_THAT(resp.GetVec()[1], ArgType(RespExpr::INT64));
+
+  // Check that time is the same inside a transaction.
+  Run({"multi"});
+  Run({"time"});
+  usleep(2000);
+  Run({"time"});
+  resp = Run({"exec"});
+  EXPECT_THAT(resp, ArrLen(2));
+
+  ASSERT_THAT(resp.GetVec()[0], ArrLen(2));
+  ASSERT_THAT(resp.GetVec()[1], ArrLen(2));
+
+  for (int i = 0; i < 2; ++i) {
+    int64_t val0 = get<int64_t>(resp.GetVec()[0].GetVec()[i].u);
+    int64_t val1 = get<int64_t>(resp.GetVec()[1].GetVec()[i].u);
+    EXPECT_EQ(val0, val1);
+  }
 }
 
 }  // namespace dfly

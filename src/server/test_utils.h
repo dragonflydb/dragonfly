@@ -68,8 +68,9 @@ class BaseFamilyTest : public ::testing::Test {
   TestConnWrapper* AddFindConn(Protocol proto, std::string_view id);
   static std::vector<std::string> StrArray(const RespExpr& expr);
 
-  // ts is ms
-  void UpdateTime(uint64_t ms);
+  void AdvanceTime(int64_t ms) {
+    TEST_current_time_ms += ms;
+  }
 
   // Wait for a locked key to unlock. Aborts after timeout seconds passed.
   void WaitUntilLocked(DbIndex db_index, std::string_view key, double timeout = 3);
@@ -88,7 +89,7 @@ class BaseFamilyTest : public ::testing::Test {
   absl::flat_hash_map<std::string, std::unique_ptr<TestConnWrapper>> connections_;
   ::boost::fibers::mutex mu_;
   ConnectionContext::DebugInfo last_cmd_dbg_info_;
-  uint64_t expire_now_;
+
   std::vector<RespVec*> resp_vec_;
   bool single_response_ = true;
 };

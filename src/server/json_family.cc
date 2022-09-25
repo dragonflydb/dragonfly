@@ -53,17 +53,18 @@ string GetString(EngineShard* shard, const PrimeValue& pv) {
 
 inline void RecordJournal(const OpArgs& op_args, string_view key, const PrimeKey& pvalue) {
   if (op_args.shard->journal()) {
-    journal::Entry entry{op_args.db_ind, op_args.txid, key, pvalue};
+    journal::Entry entry{op_args.db_cntx.db_index, op_args.txid, key, pvalue};
     op_args.shard->journal()->RecordEntry(entry);
   }
 }
 
 void SetString(const OpArgs& op_args, string_view key, const string& value) {
   auto& db_slice = op_args.shard->db_slice();
-  auto [it_output, added] = db_slice.AddOrFind(op_args.db_ind, key);
-  db_slice.PreUpdate(op_args.db_ind, it_output);
+  DbIndex db_index = op_args.db_cntx.db_index;
+  auto [it_output, added] = db_slice.AddOrFind(op_args.db_cntx, key);
+  db_slice.PreUpdate(db_index, it_output);
   it_output->second.SetString(value);
-  db_slice.PostUpdate(op_args.db_ind, it_output, key);
+  db_slice.PostUpdate(db_index, it_output, key);
   RecordJournal(op_args, key, it_output->second);
 }
 
@@ -140,7 +141,7 @@ bool JsonErrorHandler(json_errc ec, const ser_context&) {
 }
 
 OpResult<json> GetJson(const OpArgs& op_args, string_view key) {
-  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_ind, key, OBJ_STRING);
+  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res.ok())
     return it_res.status();
 
@@ -447,8 +448,8 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path) {
   long total_deletions = 0;
   if (path.empty()) {
     auto& db_slice = op_args.shard->db_slice();
-    auto [it, _] = db_slice.FindExt(op_args.db_ind, key);
-    total_deletions += long(db_slice.Del(op_args.db_ind, it));
+    auto [it, _] = db_slice.FindExt(op_args.db_cntx, key);
+    total_deletions += long(db_slice.Del(op_args.db_cntx.db_index, it));
     return total_deletions;
   }
 
