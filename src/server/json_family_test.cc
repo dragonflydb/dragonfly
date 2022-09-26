@@ -514,4 +514,61 @@ TEST_F(JsonFamilyTest, Del) {
   EXPECT_EQ(resp, R"({})");
 }
 
+TEST_F(JsonFamilyTest, ObjKeys) {
+  string json = R"(
+    {"a":{}, "b":{"a":"a"}, "c":{"a":"a", "b":"bb"}, "d":{"a":1, "b":"b", "c":{"a":3,"b":4}}, "e":1}
+  )";
+
+  auto resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.OBJKEYS", "json", "$.a"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+
+  resp = Run({"JSON.OBJKEYS", "json", "$.b"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a"));
+
+  resp = Run({"JSON.OBJKEYS", "json", "$.*"});
+  ASSERT_THAT(resp, ArrLen(5));
+  const auto& arr = resp.GetVec();
+  EXPECT_THAT(arr[0], ArgType(RespExpr::NIL_ARRAY));
+  EXPECT_THAT(arr[1].GetVec(), ElementsAre("a"));
+  EXPECT_THAT(arr[2].GetVec(), ElementsAre("a", "b"));
+  EXPECT_THAT(arr[3].GetVec(), ElementsAre("a", "b", "c"));
+  EXPECT_THAT(arr[4], ArgType(RespExpr::NIL_ARRAY));
+
+  resp = Run({"JSON.OBJKEYS", "json", "$.notfound"});
+  EXPECT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp, ArrLen(0));
+
+  json = R"(
+    {"a":[7], "inner": {"a": {"b": 2, "c": 1337}}}
+  )";
+
+  resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.OBJKEYS", "json", "$..a"});
+  ASSERT_THAT(resp, ArrLen(2));
+  const auto& arr1 = resp.GetVec();
+  EXPECT_THAT(arr1[0], ArgType(RespExpr::NIL_ARRAY));
+  EXPECT_THAT(arr1[1].GetVec(), ElementsAre("b", "c"));
+
+  json = R"(
+    {"a":{}, "b":{"c":{"d": {"e": 1337}}}}
+  )";
+
+  resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.OBJKEYS", "json", "$..*"});
+  ASSERT_THAT(resp, ArrLen(5));
+  const auto& arr2 = resp.GetVec();
+  EXPECT_THAT(arr2[0], ArgType(RespExpr::NIL_ARRAY));
+  EXPECT_THAT(arr2[1].GetVec(), ElementsAre("c"));
+  EXPECT_THAT(arr2[2].GetVec(), ElementsAre("d"));
+  EXPECT_THAT(arr2[3].GetVec(), ElementsAre("e"));
+  EXPECT_THAT(arr2[4], ArgType(RespExpr::NIL_ARRAY));
+}
+
 }  // namespace dfly
