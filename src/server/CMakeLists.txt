@@ -1,6 +1,12 @@
 add_executable(dragonfly dfly_main.cc)
 cxx_link(dragonfly base dragonfly_lib)
 
+if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_BUILD_TYPE STREQUAL "Release")
+  # Add core2 only to this file, thus avoiding instructions in this object file that
+  # can cause SIGILL.
+  set_source_files_properties(dfly_main.cc PROPERTIES COMPILE_FLAGS -march=core2)
+endif()
+
 add_library(dfly_transaction db_slice.cc engine_shard_set.cc blocking_controller.cc common.cc
             io_mgr.cc journal/journal.cc journal/journal_slice.cc table.cc
             tiered_storage.cc transaction.cc)
