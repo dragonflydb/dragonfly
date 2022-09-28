@@ -121,7 +121,7 @@ with respect to Memcached and Redis APIs.
   - [X] PREPEND (dragonfly specific)
   - [x] BITCOUNT
   - [ ] BITFIELD
-  - [ ] BITOP
+  - [x] BITOP
   - [ ] BITPOS
   - [x] GETBIT
   - [X] GETRANGE
