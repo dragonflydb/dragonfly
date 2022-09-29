@@ -13,6 +13,7 @@ extern "C" {
 
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
+#include "server/server_state.h"
 #include "server/tiered_storage.h"
 #include "util/fiber_sched_algo.h"
 #include "util/proactor_base.h"
@@ -61,8 +62,8 @@ class PrimeEvictionPolicy {
   static constexpr bool can_evict = true;  // we implement eviction functionality.
   static constexpr bool can_gc = true;
 
-  PrimeEvictionPolicy(const DbContext& cntx, bool can_evict, ssize_t mem_budget,
-                      ssize_t soft_limit, DbSlice* db_slice)
+  PrimeEvictionPolicy(const DbContext& cntx, bool can_evict, ssize_t mem_budget, ssize_t soft_limit,
+                      DbSlice* db_slice)
       : db_slice_(db_slice), mem_budget_(mem_budget), soft_limit_(soft_limit), cntx_(cntx),
         can_evict_(can_evict) {
   }
@@ -471,7 +472,12 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     CreateDb(db_ind);
     db_arr_[db_ind]->trans_locks.swap(db_ptr->trans_locks);
 
-    boost::fibers::fiber([db_ptr = std::move(db_ptr)]() mutable { db_ptr.reset(); }).detach();
+    auto cb = [db_ptr = std::move(db_ptr)]() mutable {
+      db_ptr.reset();
+      mi_heap_collect(ServerState::tlocal()->data_heap(), true);
+    };
+
+    boost::fibers::fiber(std::move(cb)).detach();
 
     return;
   }
