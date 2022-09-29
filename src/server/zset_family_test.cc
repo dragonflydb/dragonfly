@@ -150,6 +150,16 @@ TEST_F(ZSetFamilyTest, ZRevRange) {
   resp = Run({"zrevrange", "key", "1", "2", "withscores"});
   ASSERT_THAT(resp, ArrLen(4));
   EXPECT_THAT(resp.GetVec(), ElementsAre("b", "1", "a", "-inf"));
+
+  // Make sure that when using with upper case it works as well (see
+  // https://github.com/dragonflydb/dragonfly/issues/326)
+  resp = Run({"zrevrangebyscore", "key", "2", "-INF"});
+  ASSERT_THAT(resp, ArrLen(3));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("c", "b", "a"));
+
+  resp = Run({"zrevrangebyscore", "key", "2", "-INF", "withscores"});
+  ASSERT_THAT(resp, ArrLen(6));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("c", "2", "b", "1", "a", "-inf"));
 }
 
 TEST_F(ZSetFamilyTest, ZScan) {

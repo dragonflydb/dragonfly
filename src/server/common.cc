@@ -5,6 +5,7 @@
 #include "server/common.h"
 
 #include <absl/strings/charconv.h>
+#include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <mimalloc.h>
 
@@ -168,9 +169,9 @@ bool ParseDouble(string_view src, double* value) {
   if (src.empty())
     return false;
 
-  if (src == "-inf") {
+  if (absl::EqualsIgnoreCase(src, "-inf")) {
     *value = -HUGE_VAL;
-  } else if (src == "+inf") {
+  } else if (absl::EqualsIgnoreCase(src, "+inf")) {
     *value = HUGE_VAL;
   } else {
     absl::from_chars_result result = absl::from_chars(src.data(), src.end(), *value);
