@@ -108,18 +108,6 @@ auto DenseSet::Unlink(DenseSet::DensePtr* node) -> DensePtr {
   return ret;
 }
 
-// updates *node with the next item
-void* DenseSet::UnlinkAndFree(DenseSet::DensePtr* node) {
-  DensePtr unlinked = Unlink(node);
-  void* ret = unlinked.GetObject();
-
-  if (unlinked.IsLink()) {
-    FreeLink(unlinked);
-  }
-
-  return ret;
-}
-
 void DenseSet::ClearInternal() {
   for (auto it = entries_.begin(); it != entries_.end(); ++it) {
     while (!it->IsEmpty()) {
@@ -128,6 +116,14 @@ void DenseSet::ClearInternal() {
   }
 
   entries_.clear();
+}
+
+bool DenseSet::Equal(DensePtr dptr, const void* ptr) const {
+  if (dptr.IsEmpty()) {
+    return false;
+  }
+
+  return ObjEqual(dptr.GetObject(), ptr);
 }
 
 auto DenseSet::FindEmptyAround(uint32_t bid) -> ChainVectorIterator {
@@ -271,7 +267,7 @@ bool DenseSet::AddInternal(void* ptr) {
 
 auto DenseSet::Find(const void* ptr, uint32_t bid) const -> const DensePtr* {
   const DensePtr* curr = &entries_[bid];
-  if (!curr->IsEmpty() && Equal(*curr, ptr)) {
+  if (Equal(*curr, ptr)) {
     return curr;
   }
 
@@ -298,31 +294,26 @@ auto DenseSet::Find(const void* ptr, uint32_t bid) const -> const DensePtr* {
   return nullptr;
 }
 
-// Same idea as FindAround but provide the const guarantee
-bool DenseSet::ContainsInternal(const void* ptr) const {
-  uint32_t bid = BucketId(ptr);
-  return Find(ptr, bid) != nullptr;
-}
+void* DenseSet::Delete(DensePtr* ptr) {
+  void* ret = nullptr;
 
-void* DenseSet::EraseInternal(void* ptr) {
-  uint32_t bid = BucketId(ptr);
-  auto found = Find(ptr, bid);
-
-  if (found == nullptr) {
-    return nullptr;
-  }
-
-  if (found->IsLink()) {
-    --num_chain_entries_;
-  } else {
-    DCHECK(found->IsObject());
+  if (ptr->IsObject()) {
+    ret = ptr->Raw();
+    ptr->Reset();
     --num_used_buckets_;
+  } else {
+    DCHECK(ptr->IsLink());
+
+    DenseLinkKey* link = ptr->AsLink();
+    ret = link->Raw();
+    *ptr = link->next;
+    --num_chain_entries_;
+    mr()->deallocate(link, sizeof(DenseLinkKey), alignof(DenseLinkKey));
   }
 
-  obj_malloc_used_ -= ObjectAllocSize(ptr);
-  void* ret = UnlinkAndFree(found);
-
+  obj_malloc_used_ -= ObjectAllocSize(ret);
   --size_;
+
   return ret;
 }
 
@@ -402,4 +393,15 @@ uint32_t DenseSet::Scan(uint32_t cursor, const ItemCb& cb) const {
 
   return entries_idx << (32 - capacity_log_);
 }
+
+auto DenseSet::NewLink(void* data, DensePtr next) -> DenseLinkKey* {
+  LinkAllocator la(mr());
+  DenseLinkKey* lk = la.allocate(1);
+  la.construct(lk);
+
+  lk->next = next;
+  lk->SetObject(data);
+  return lk;
+}
+
 }  // namespace dfly

@@ -14,12 +14,6 @@ namespace dfly {
 
 class StringSet : public DenseSet {
  public:
-  uint64_t Hash(const void* ptr) const override;
-
-  bool Equal(const void* ptr1, const void* ptr2) const override;
-
-  size_t ObjectAllocSize(const void* s1) const override;
-
   bool Add(std::string_view s1);
 
   bool AddSds(sds s1);
@@ -61,6 +55,13 @@ class StringSet : public DenseSet {
   }
 
   uint32_t Scan(uint32_t, const std::function<void(sds)>&) const;
+
+ protected:
+  uint64_t Hash(const void* ptr) const override;
+
+  bool ObjEqual(const void* ptr1, const void* ptr2) const override;
+
+  size_t ObjectAllocSize(const void* s1) const override;
 };
 
 }  // end namespace dfly

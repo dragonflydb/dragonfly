@@ -36,28 +36,6 @@ namespace dfly {
 // static_assert(sizeof(dictEntry) == 24);
 
 class DenseSet {
- public:
-  explicit DenseSet(std::pmr::memory_resource* mr = std::pmr::get_default_resource());
-  virtual ~DenseSet();
-
- protected:
-  // Virtual functions to be implemented for generic data
-  virtual uint64_t Hash(const void*) const = 0;
-  virtual bool Equal(const void*, const void*) const = 0;
-  virtual size_t ObjectAllocSize(const void*) const = 0;
-
-  bool AddInternal(void*);
-  bool ContainsInternal(const void*) const;
-  void* EraseInternal(void*);
-  void* PopInternal();
-  // Note this does not free any dynamic allocations done by derived classes, that a DensePtr
-  // in the set may point to. This function only frees the allocated DenseLinkKeys created by
-  // DenseSet. All data allocated by a derived class should be freed before calling this
-  void ClearInternal();
-
- private:
-  DenseSet(const DenseSet&) = delete;
-  DenseSet& operator=(DenseSet&) = delete;
 
   struct DenseLinkKey;
   // we can assume that high 12 bits of user address space
@@ -82,7 +60,7 @@ class DenseSet {
     }
 
     bool IsLink() const {
-      return (uptr() & kLinkBit) == kLinkBit;
+      return (uptr() & kLinkBit) != 0;
     }
 
     bool IsEmpty() const {
@@ -173,87 +151,10 @@ class DenseSet {
   using ChainVectorIterator = std::pmr::vector<DensePtr>::iterator;
   using ChainVectorConstIterator = std::pmr::vector<DensePtr>::const_iterator;
 
-  bool Equal(const DensePtr dptr, const void* ptr) const {
-    if (dptr.IsEmpty()) {
-      return false;
-    }
-
-    return Equal(dptr.GetObject(), ptr);
-  }
-
-  std::pmr::memory_resource* mr() {
-    return entries_.get_allocator().resource();
-  }
-
-  uint32_t BucketId(uint64_t hash) const {
-    return hash >> (64 - capacity_log_);
-  }
-
-  uint32_t BucketId(const void* ptr) const {
-    return BucketId(Hash(ptr));
-  }
-
-  // return a ChainVectorIterator (a.k.a iterator) or end if there is an empty chain found
-  ChainVectorIterator FindEmptyAround(uint32_t bid);
-  void Grow();
-
-  // ============ Pseudo Linked List Functions for interacting with Chains ==================
-  size_t PushFront(ChainVectorIterator, void*);
-  void PushFront(ChainVectorIterator, DensePtr);
-
-  void* PopDataFront(ChainVectorIterator);
-  DensePtr PopPtrFront(ChainVectorIterator);
-
-  // Note this function will modify the iterator passed to it
-  // to point to the next node in the chain
-  DensePtr Unlink(DensePtr* node);
-
-  // Note this will only free the encapsulating DenseLinkKey and not
-  // the data it points to, this will be returned.
-  // This function will modify the iterator passed to it
-  // to point to the next node in the chain
-  void* UnlinkAndFree(DensePtr* node);
-
-  // ============ Pseudo Linked List in DenseSet end ==================
-  const DensePtr* Find(const void* ptr, uint32_t bid) const;
-
-  const DensePtr* Find(const void* ptr) const {
-    return Find(ptr, BucketId(ptr));
-  }
-
-  DensePtr* Find(const void* ptr, uint32_t bid) {
-    const DensePtr* ret = const_cast<const DenseSet*>(this)->Find(ptr, bid);
-    return const_cast<DensePtr*>(ret);
-  }
-
-  DensePtr* Find(const void* ptr) {
-    const DensePtr* ret = const_cast<const DenseSet*>(this)->Find(ptr);
-    return const_cast<DensePtr*>(ret);
-  }
-
-  inline DenseLinkKey* NewLink(void* data, DensePtr next) {
-    LinkAllocator la(mr());
-    DenseLinkKey* lk = la.allocate(1);
-    la.construct(lk);
-
-    lk->next = next;
-    lk->SetObject(data);
-    return lk;
-  }
-
-  inline void FreeLink(DensePtr link) {
-    // deallocate the link if it is no longer a link as it is now in an empty list
-    mr()->deallocate(link.AsLink(), sizeof(DenseLinkKey), alignof(DenseLinkKey));
-  }
-
-  std::pmr::vector<DensePtr> entries_;
-  size_t obj_malloc_used_ = 0;
-  uint32_t size_ = 0;
-  uint32_t num_chain_entries_ = 0;
-  uint32_t num_used_buckets_ = 0;
-  unsigned capacity_log_ = 0;
-
  public:
+  explicit DenseSet(std::pmr::memory_resource* mr = std::pmr::get_default_resource());
+  virtual ~DenseSet();
+
   size_t Size() const {
     return size_;
   }
@@ -412,6 +313,99 @@ class DenseSet {
 
   uint32_t Scan(uint32_t cursor, const ItemCb& cb) const;
   void Reserve(size_t sz);
+
+ protected:
+  // Virtual functions to be implemented for generic data
+  virtual uint64_t Hash(const void* obj) const = 0;
+  virtual bool ObjEqual(const void* obj1, const void* obj2) const = 0;
+  virtual size_t ObjectAllocSize(const void* obj) const = 0;
+
+  void* EraseInternal(void* obj) {
+    DensePtr* found = Find(obj);
+    return found ? Delete(found) : nullptr;
+  }
+
+  bool AddInternal(void* obj);
+
+  bool ContainsInternal(const void* obj) const {
+    return Find(obj, BucketId(obj)) != nullptr;
+  }
+
+  void* PopInternal();
+
+  // Note this does not free any dynamic allocations done by derived classes, that a DensePtr
+  // in the set may point to. This function only frees the allocated DenseLinkKeys created by
+  // DenseSet. All data allocated by a derived class should be freed before calling this
+  void ClearInternal();
+
+ private:
+  DenseSet(const DenseSet&) = delete;
+  DenseSet& operator=(DenseSet&) = delete;
+
+  bool Equal(DensePtr dptr, const void* ptr) const;
+
+  std::pmr::memory_resource* mr() {
+    return entries_.get_allocator().resource();
+  }
+
+  uint32_t BucketId(uint64_t hash) const {
+    return hash >> (64 - capacity_log_);
+  }
+
+  uint32_t BucketId(const void* ptr) const {
+    return BucketId(Hash(ptr));
+  }
+
+  // return a ChainVectorIterator (a.k.a iterator) or end if there is an empty chain found
+  ChainVectorIterator FindEmptyAround(uint32_t bid);
+  void Grow();
+
+  // ============ Pseudo Linked List Functions for interacting with Chains ==================
+  size_t PushFront(ChainVectorIterator, void*);
+  void PushFront(ChainVectorIterator, DensePtr);
+
+  void* PopDataFront(ChainVectorIterator);
+  DensePtr PopPtrFront(ChainVectorIterator);
+
+  // Note this function will modify the iterator passed to it
+  // to point to the next node in the chain
+  DensePtr Unlink(DensePtr* node);
+
+  // ============ Pseudo Linked List in DenseSet end ==================
+
+  const DensePtr* Find(const void* ptr, uint32_t bid) const;
+
+  const DensePtr* Find(const void* ptr) const {
+    return Find(ptr, BucketId(ptr));
+  }
+
+  DensePtr* Find(const void* ptr, uint32_t bid) {
+    const DensePtr* ret = const_cast<const DenseSet*>(this)->Find(ptr, bid);
+    return const_cast<DensePtr*>(ret);
+  }
+
+  DensePtr* Find(const void* ptr) {
+    const DensePtr* ret = const_cast<const DenseSet*>(this)->Find(ptr);
+    return const_cast<DensePtr*>(ret);
+  }
+
+  DenseLinkKey* NewLink(void* data, DensePtr next);
+
+  inline void FreeLink(DensePtr link) {
+    // deallocate the link if it is no longer a link as it is now in an empty list
+    mr()->deallocate(link.AsLink(), sizeof(DenseLinkKey), alignof(DenseLinkKey));
+  }
+
+  void* Delete(DensePtr* ptr);
+
+  // We may update it during const operations due to expiry interactions.
+  std::pmr::vector<DensePtr> entries_;
+
+  size_t obj_malloc_used_ = 0;
+  uint32_t size_ = 0;
+  uint32_t num_chain_entries_ = 0;
+  uint32_t num_used_buckets_ = 0;
+  unsigned capacity_log_ = 0;
 };
 
 }  // namespace dfly
