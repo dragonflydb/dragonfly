@@ -16,15 +16,12 @@ class StringSet : public DenseSet {
  public:
   bool Add(std::string_view s1);
 
+  // Used currently by rdb_load.
   bool AddSds(sds s1);
 
   bool Erase(std::string_view s1);
 
-  bool EraseSds(sds s1);
-
   bool Contains(std::string_view s1) const;
-
-  bool ContainsSds(sds s1) const;
 
   void Clear();
 
@@ -57,11 +54,12 @@ class StringSet : public DenseSet {
   uint32_t Scan(uint32_t, const std::function<void(sds)>&) const;
 
  protected:
-  uint64_t Hash(const void* ptr) const override;
+  uint64_t Hash(const void* ptr, uint32_t cookie) const override;
 
-  bool ObjEqual(const void* ptr1, const void* ptr2) const override;
+  bool ObjEqual(const void* left, const void* right, uint32_t right_cookie) const override;
 
   size_t ObjectAllocSize(const void* s1) const override;
+  void ObjDelete(void* obj) const override;
 };
 
 }  // end namespace dfly
