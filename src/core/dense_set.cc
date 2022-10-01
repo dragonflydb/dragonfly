@@ -25,6 +25,35 @@ constexpr size_t kMinSizeShift = 2;
 constexpr size_t kMinSize = 1 << kMinSizeShift;
 constexpr bool kAllowDisplacements = true;
 
+DenseSet::IteratorBase::IteratorBase(const DenseSet* owner, ChainVectorIterator begin_list)
+    : owner_(*owner), curr_list_(begin_list) {
+  if (begin_list != owner->entries_.end()) {
+    curr_entry_ = *begin_list;
+    // find the first non null entry
+    if (curr_entry_.IsEmpty()) {
+      Advance();
+    }
+  }
+}
+
+void DenseSet::IteratorBase::Advance() {
+  if (curr_entry_.IsLink()) {
+    curr_entry_ = curr_entry_.AsLink()->next;
+    DCHECK(!curr_entry_.IsEmpty());
+  } else {
+    DCHECK(curr_list_ != owner_.entries_.end());
+    do {
+      ++curr_list_;
+      if (curr_list_ == owner_.entries_.end()) {
+        curr_entry_.Reset();
+        return;
+      }
+    } while (curr_list_->IsEmpty());
+    DCHECK(curr_list_ != owner_.entries_.end());
+    curr_entry_ = *curr_list_;
+  }
+}
+
 DenseSet::DenseSet(pmr::memory_resource* mr) : entries_(mr) {
 }
 
@@ -36,27 +65,34 @@ size_t DenseSet::PushFront(DenseSet::ChainVectorIterator it, void* data) {
   // if this is an empty list assign the value to the empty placeholder pointer
   if (it->IsEmpty()) {
     it->SetObject(data);
-    return ObjectAllocSize(data);
+  } else {
+    // otherwise make a new link and connect it to the front of the list
+    it->SetLink(NewLink(data, *it));
   }
 
-  // otherwise make a new link and connect it to the front of the list
-  it->SetLink(NewLink(data, *it));
   return ObjectAllocSize(data);
 }
 
 void DenseSet::PushFront(DenseSet::ChainVectorIterator it, DenseSet::DensePtr ptr) {
+  DVLOG(2) << "PushFront to " << distance(entries_.begin(), it) << ", "
+           << ObjectAllocSize(ptr.GetObject());
+
   if (it->IsEmpty()) {
     it->SetObject(ptr.GetObject());
     if (ptr.IsLink()) {
-      FreeLink(ptr);
+      FreeLink(ptr.AsLink());
     }
   } else if (ptr.IsLink()) {
-    // if the pointer is already a link then no allocation needed
+    // if the pointer is already a link then no allocation needed.
     *ptr.Next() = *it;
     *it = ptr;
+    DCHECK(!it->AsLink()->next.IsEmpty());
   } else {
+    DCHECK(ptr.IsObject());
+
     // allocate a new link if needed and copy the pointer to the new link
-    it->SetLink(NewLink(ptr.GetObject(), *it));
+    it->SetLink(NewLink(ptr.Raw(), *it));
+    DCHECK(!it->AsLink()->next.IsEmpty());
   }
 }
 
@@ -73,6 +109,7 @@ auto DenseSet::PopPtrFront(DenseSet::ChainVectorIterator it) -> DensePtr {
     it->Reset();
   } else {
     DCHECK(it->IsLink());
+
     // since a DenseLinkKey could be at the end of a chain and have a nullptr for next
     // avoid dereferencing a nullptr and just reset the pointer to this DenseLinkKey
     if (it->Next() == nullptr) {
@@ -90,19 +127,7 @@ void* DenseSet::PopDataFront(DenseSet::ChainVectorIterator it) {
   void* ret = front.GetObject();
 
   if (front.IsLink()) {
-    FreeLink(front);
-  }
-
-  return ret;
-}
-
-// updates *node with the next item
-auto DenseSet::Unlink(DenseSet::DensePtr* node) -> DensePtr {
-  DensePtr ret = *node;
-  if (node->IsObject()) {
-    node->Reset();
-  } else {
-    *node = *node->Next();
+    FreeLink(front.AsLink());
   }
 
   return ret;
@@ -111,19 +136,20 @@ auto DenseSet::Unlink(DenseSet::DensePtr* node) -> DensePtr {
 void DenseSet::ClearInternal() {
   for (auto it = entries_.begin(); it != entries_.end(); ++it) {
     while (!it->IsEmpty()) {
-      PopDataFront(it);
+      void* obj = PopDataFront(it);
+      ObjDelete(obj);
     }
   }
 
   entries_.clear();
 }
 
-bool DenseSet::Equal(DensePtr dptr, const void* ptr) const {
+bool DenseSet::Equal(DensePtr dptr, const void* ptr, uint32_t cookie) const {
   if (dptr.IsEmpty()) {
     return false;
   }
 
-  return ObjEqual(dptr.GetObject(), ptr);
+  return ObjEqual(dptr.GetObject(), ptr, cookie);
 }
 
 auto DenseSet::FindEmptyAround(uint32_t bid) -> ChainVectorIterator {
@@ -135,12 +161,16 @@ auto DenseSet::FindEmptyAround(uint32_t bid) -> ChainVectorIterator {
     return entries_.end();
   }
 
-  if (bid + 1 < entries_.size() && entries_[bid + 1].IsEmpty()) {
-    return entries_.begin() + bid + 1;
+  if (bid + 1 < entries_.size()) {
+    auto it = next(entries_.begin(), bid + 1);
+    if (it->IsEmpty())
+      return it;
   }
 
-  if (bid && entries_[bid - 1].IsEmpty()) {
-    return entries_.begin() + bid - 1;
+  if (bid) {
+    auto it = next(entries_.begin(), bid - 1);
+    if (it->IsEmpty())
+      return it;
   }
 
   return entries_.end();
@@ -162,32 +192,70 @@ void DenseSet::Grow() {
   // perform rehashing of items in the set
   for (long i = prev_size - 1; i >= 0; --i) {
     DensePtr* curr = &entries_[i];
+    DensePtr* prev = nullptr;
 
-    // curr != nullptr checks if we have reached the end of a chain
-    // while !curr->IsEmpty() checks that the current chain is not empty
-    while (curr != nullptr && !curr->IsEmpty()) {
+    while (true) {
+      if (curr->IsEmpty())
+        break;
       void* ptr = curr->GetObject();
-      uint32_t bid = BucketId(ptr);
+
+      DCHECK(ptr != nullptr && ObjectAllocSize(ptr));
+
+      uint32_t bid = BucketId(ptr, 0);
 
       // if the item does not move from the current chain, ensure
       // it is not marked as displaced and move to the next item in the chain
       if (bid == i) {
         curr->ClearDisplaced();
+        prev = curr;
         curr = curr->Next();
+        if (curr == nullptr)
+          break;
       } else {
         // if the entry is in the wrong chain remove it and
         // add it to the correct chain. This will also correct
         // displaced entries
-        DensePtr node = Unlink(curr);
-        PushFront(entries_.begin() + bid, node);
-        entries_[bid].ClearDisplaced();
+        auto dest = entries_.begin() + bid;
+        DensePtr dptr = *curr;
+
+        if (curr->IsObject()) {
+          curr->Reset();  // reset the original placeholder (.next or root)
+
+          if (prev) {
+            DCHECK(prev->IsLink());
+
+            DenseLinkKey* plink = prev->AsLink();
+            DCHECK(&plink->next == curr);
+
+            // we want to make *prev a DensePtr instead of DenseLink and we
+            // want to deallocate the link.
+            DensePtr tmp = DensePtr::From(plink);
+            DCHECK(ObjectAllocSize(tmp.GetObject()));
+
+            FreeLink(plink);
+            *prev = tmp;
+          }
+
+          DVLOG(2) << " Pushing to " << bid << " " << dptr.GetObject();
+          PushFront(dest, dptr);
+
+          dest->ClearDisplaced();
+
+          break;
+        }  // if IsObject
+
+        *curr = *dptr.Next();
+        DCHECK(!curr->IsEmpty());
+
+        PushFront(dest, dptr);
+        dest->ClearDisplaced();
       }
     }
   }
 }
 
 bool DenseSet::AddInternal(void* ptr) {
-  uint64_t hc = Hash(ptr);
+  uint64_t hc = Hash(ptr, 0);
 
   if (entries_.empty()) {
     capacity_log_ = kMinSizeShift;
@@ -203,7 +271,7 @@ bool DenseSet::AddInternal(void* ptr) {
 
   // if the value is already in the set exit early
   uint32_t bucket_id = BucketId(hc);
-  if (Find(ptr, bucket_id) != nullptr) {
+  if (Find(ptr, bucket_id, 0).second != nullptr) {
     return false;
   }
 
@@ -265,42 +333,57 @@ bool DenseSet::AddInternal(void* ptr) {
   return true;
 }
 
-auto DenseSet::Find(const void* ptr, uint32_t bid) const -> const DensePtr* {
-  const DensePtr* curr = &entries_[bid];
-  if (Equal(*curr, ptr)) {
-    return curr;
-  }
+auto DenseSet::Find(const void* ptr, uint32_t bid, uint32_t cookie) -> pair<DensePtr*, DensePtr*> {
+  // could do it with zigzag decoding but this is clearer.
+  int offset[] = {0, -1, 1};
 
   // first look for displaced nodes since this is quicker than iterating a potential long chain
-  if (bid && Equal(entries_[bid - 1], ptr)) {
-    return &entries_[bid - 1];
-  }
+  for (int j = 0; j < 3; ++j) {
+    if ((bid == 0 && j == 1) || (bid + 1 == entries_.size() && j == 2))
+      continue;
 
-  if (bid + 1 < entries_.size() && Equal(entries_[bid + 1], ptr)) {
-    return &entries_[bid + 1];
+    DensePtr* curr = &entries_[bid + offset[j]];
+
+    if (Equal(*curr, ptr, cookie)) {
+      return make_pair(nullptr, curr);
+    }
   }
 
   // if the node is not displaced, search the correct chain
-  curr = curr->Next();
+  DensePtr* prev = &entries_[bid];
+  DensePtr* curr = prev->Next();
   while (curr != nullptr) {
-    if (Equal(*curr, ptr)) {
-      return curr;
+    if (Equal(*curr, ptr, cookie)) {
+      return make_pair(prev, curr);
     }
-
+    prev = curr;
     curr = curr->Next();
   }
 
   // not in the Set
-  return nullptr;
+  return make_pair(nullptr, nullptr);
 }
 
-void* DenseSet::Delete(DensePtr* ptr) {
+void* DenseSet::Delete(DensePtr* prev, DensePtr* ptr) {
   void* ret = nullptr;
 
   if (ptr->IsObject()) {
     ret = ptr->Raw();
     ptr->Reset();
-    --num_used_buckets_;
+    if (prev == nullptr) {
+      --num_used_buckets_;
+    } else {
+      DCHECK(prev->IsLink());
+
+      --num_chain_entries_;
+      DenseLinkKey* plink = prev->AsLink();
+      DensePtr tmp = DensePtr::From(plink);
+      DCHECK(ObjectAllocSize(tmp.GetObject()));
+
+      FreeLink(plink);
+      *prev = tmp;
+      DCHECK(!prev->IsLink());
+    }
   } else {
     DCHECK(ptr->IsLink());
 
@@ -308,7 +391,7 @@ void* DenseSet::Delete(DensePtr* ptr) {
     ret = link->Raw();
     *ptr = link->next;
     --num_chain_entries_;
-    mr()->deallocate(link, sizeof(DenseLinkKey), alignof(DenseLinkKey));
+    FreeLink(link);
   }
 
   obj_malloc_used_ -= ObjectAllocSize(ret);
@@ -373,7 +456,7 @@ uint32_t DenseSet::Scan(uint32_t cursor, const ItemCb& cb) const {
     ++entries_idx;
   }
 
-  if (entries_idx >= entries_.size()) {
+  if (entries_idx == entries_.size()) {
     return 0;
   }
 

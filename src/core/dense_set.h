@@ -47,8 +47,16 @@ class DenseSet {
   static constexpr size_t kDisplaceDirectionBit = 1ULL << 54;
   static constexpr size_t kTagMask = 4095ULL << 51;  // we reserve 12 high bits.
 
-  struct DensePtr {
+  class DensePtr {
+   public:
     explicit DensePtr(void* p = nullptr) : ptr_(p) {
+    }
+
+    // Imports the object with its metadata except the link bit that is reset.
+    static DensePtr From(DenseLinkKey* o) {
+      DensePtr res;
+      res.ptr_ = (void*)(o->uptr() & (~kLinkBit));
+      return res;
     }
 
     uint64_t uptr() const {
@@ -137,7 +145,7 @@ class DenseSet {
     }
 
    private:
-    void* ptr_ = nullptr;  //
+    void* ptr_ = nullptr;
   };
 
   struct DenseLinkKey : public DensePtr {
@@ -150,6 +158,17 @@ class DenseSet {
   using LinkAllocator = std::pmr::polymorphic_allocator<DenseLinkKey>;
   using ChainVectorIterator = std::pmr::vector<DensePtr>::iterator;
   using ChainVectorConstIterator = std::pmr::vector<DensePtr>::const_iterator;
+
+  class IteratorBase {
+   protected:
+    IteratorBase(const DenseSet* owner, ChainVectorIterator begin_list);
+
+    void Advance();
+
+    const DenseSet& owner_;
+    ChainVectorIterator curr_list_;
+    DensePtr curr_entry_;
+  };
 
  public:
   explicit DenseSet(std::pmr::memory_resource* mr = std::pmr::get_default_resource());
@@ -184,7 +203,7 @@ class DenseSet {
     return (num_chain_entries_ + entries_.capacity()) * sizeof(DensePtr);
   }
 
-  template <typename T> class iterator {
+  template <typename T> class iterator : private IteratorBase {
     static_assert(std::is_pointer_v<T>, "Iterators can only return pointers");
 
    public:
@@ -193,26 +212,11 @@ class DenseSet {
     using pointer = value_type*;
     using reference = value_type&;
 
-    iterator(DenseSet* set, ChainVectorIterator begin_list) : set_(set), curr_list_(begin_list) {
-      if (begin_list == set->entries_.end()) {
-        curr_entry_ = nullptr;
-      } else {
-        curr_entry_ = &*begin_list;
-        // find the first non null entry
-        if (curr_entry_ == nullptr || curr_entry_->IsEmpty()) {
-          ++(*this);
-        }
-      }
+    iterator(DenseSet* set, ChainVectorIterator begin_list) : IteratorBase(set, begin_list) {
     }
 
     iterator& operator++() {
-      curr_entry_ = curr_entry_->Next();
-      while (curr_list_ != set_->entries_.end() &&
-             (curr_entry_ == nullptr || curr_entry_->IsEmpty())) {
-        ++curr_list_;
-        curr_entry_ = &*curr_list_;
-      }
-
+      Advance();
       return *this;
     }
 
@@ -225,20 +229,15 @@ class DenseSet {
     }
 
     value_type operator*() {
-      return (value_type)curr_entry_->GetObject();
+      return (value_type)curr_entry_.GetObject();
     }
 
     value_type operator->() {
-      return (value_type)curr_entry_->GetObject();
+      return (value_type)curr_entry_.GetObject();
     }
-
-   private:
-    DenseSet* set_;
-    ChainVectorIterator curr_list_;
-    DensePtr* curr_entry_;
   };
 
-  template <typename T> class const_iterator {
+  template <typename T> class const_iterator : private IteratorBase {
     static_assert(std::is_pointer_v<T>, "Iterators can only return pointer types");
 
    public:
@@ -248,26 +247,11 @@ class DenseSet {
     using reference = value_type&;
 
     const_iterator(const DenseSet* set, ChainVectorConstIterator begin_list)
-        : set_(set), curr_list_(begin_list) {
-      if (begin_list == set->entries_.end()) {
-        curr_entry_ = nullptr;
-      } else {
-        curr_entry_ = &*begin_list;
-        // find the first non null entry
-        if (curr_entry_ == nullptr || curr_entry_->IsEmpty()) {
-          ++(*this);
-        }
-      }
+        : IteratorBase(set, curr_list_) {
     }
 
     const_iterator& operator++() {
-      curr_entry_ = curr_entry_->Next();
-      curr_entry_ = curr_entry_->Next();
-      while (curr_list_ != set_->entries_.end() &&
-             (curr_entry_ == nullptr || curr_entry_->IsEmpty())) {
-        ++curr_list_;
-        curr_entry_ = &*curr_list_;
-      }
+      Advance();
       return *this;
     }
 
@@ -280,17 +264,12 @@ class DenseSet {
     }
 
     value_type operator*() const {
-      return (value_type)curr_entry_->GetObject();
+      return (value_type)curr_entry_.GetObject();
     }
 
     value_type operator->() const {
-      return (value_type)curr_entry_->GetObject();
+      return (value_type)curr_entry_.GetObject();
     }
-
-   private:
-    const DenseSet* set_;
-    ChainVectorConstIterator curr_list_;
-    const DensePtr* curr_entry_;
   };
 
   template <typename T> iterator<T> begin() {
@@ -316,19 +295,20 @@ class DenseSet {
 
  protected:
   // Virtual functions to be implemented for generic data
-  virtual uint64_t Hash(const void* obj) const = 0;
-  virtual bool ObjEqual(const void* obj1, const void* obj2) const = 0;
+  virtual uint64_t Hash(const void* obj, uint32_t cookie) const = 0;
+  virtual bool ObjEqual(const void* left, const void* right, uint32_t right_cookie) const = 0;
   virtual size_t ObjectAllocSize(const void* obj) const = 0;
+  virtual void ObjDelete(void* obj) const = 0;
 
-  void* EraseInternal(void* obj) {
-    DensePtr* found = Find(obj);
-    return found ? Delete(found) : nullptr;
+  void* EraseInternal(void* obj, uint32_t cookie) {
+    auto [prev, found] = Find(obj, BucketId(obj, cookie), cookie);
+    return found ? Delete(prev, found) : nullptr;
   }
 
   bool AddInternal(void* obj);
 
-  bool ContainsInternal(const void* obj) const {
-    return Find(obj, BucketId(obj)) != nullptr;
+  bool ContainsInternal(const void* obj, uint32_t cookie) const {
+    return const_cast<DenseSet*>(this)->Find(obj, BucketId(obj, cookie), cookie).second != nullptr;
   }
 
   void* PopInternal();
@@ -342,7 +322,7 @@ class DenseSet {
   DenseSet(const DenseSet&) = delete;
   DenseSet& operator=(DenseSet&) = delete;
 
-  bool Equal(DensePtr dptr, const void* ptr) const;
+  bool Equal(DensePtr dptr, const void* ptr, uint32_t cookie) const;
 
   std::pmr::memory_resource* mr() {
     return entries_.get_allocator().resource();
@@ -352,8 +332,8 @@ class DenseSet {
     return hash >> (64 - capacity_log_);
   }
 
-  uint32_t BucketId(const void* ptr) const {
-    return BucketId(Hash(ptr));
+  uint32_t BucketId(const void* ptr, uint32_t cookie) const {
+    return BucketId(Hash(ptr, cookie));
   }
 
   // return a ChainVectorIterator (a.k.a iterator) or end if there is an empty chain found
@@ -367,38 +347,21 @@ class DenseSet {
   void* PopDataFront(ChainVectorIterator);
   DensePtr PopPtrFront(ChainVectorIterator);
 
-  // Note this function will modify the iterator passed to it
-  // to point to the next node in the chain
-  DensePtr Unlink(DensePtr* node);
-
   // ============ Pseudo Linked List in DenseSet end ==================
 
-  const DensePtr* Find(const void* ptr, uint32_t bid) const;
-
-  const DensePtr* Find(const void* ptr) const {
-    return Find(ptr, BucketId(ptr));
-  }
-
-  DensePtr* Find(const void* ptr, uint32_t bid) {
-    const DensePtr* ret = const_cast<const DenseSet*>(this)->Find(ptr, bid);
-    return const_cast<DensePtr*>(ret);
-  }
-
-  DensePtr* Find(const void* ptr) {
-    const DensePtr* ret = const_cast<const DenseSet*>(this)->Find(ptr);
-    return const_cast<DensePtr*>(ret);
-  }
+  // returns (prev, item) pair. If item is root, then prev is null.
+  std::pair<DensePtr*, DensePtr*> Find(const void* ptr, uint32_t bid, uint32_t cookie);
 
   DenseLinkKey* NewLink(void* data, DensePtr next);
 
-  inline void FreeLink(DensePtr link) {
+  inline void FreeLink(DenseLinkKey* plink) {
     // deallocate the link if it is no longer a link as it is now in an empty list
-    mr()->deallocate(link.AsLink(), sizeof(DenseLinkKey), alignof(DenseLinkKey));
+    mr()->deallocate(plink, sizeof(DenseLinkKey), alignof(DenseLinkKey));
   }
 
-  void* Delete(DensePtr* ptr);
+  // Returns the object that was removed from ptr. If ptr is a link then deletes it internally.
+  void* Delete(DensePtr* prev, DensePtr* ptr);
 
-  // We may update it during const operations due to expiry interactions.
   std::pmr::vector<DensePtr> entries_;
 
   size_t obj_malloc_used_ = 0;

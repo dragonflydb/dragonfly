@@ -29,25 +29,25 @@ namespace dfly {
 
 using namespace std;
 
-class DenseSetAllocator : public std::pmr::memory_resource {
+class DenseSetAllocator : public pmr::memory_resource {
  public:
   bool all_freed() const {
     return alloced_ == 0;
   }
 
-  void* do_allocate(std::size_t bytes, std::size_t alignment) override {
+  void* do_allocate(size_t bytes, size_t alignment) override {
     alloced_ += bytes;
-    void* p = std::pmr::new_delete_resource()->allocate(bytes, alignment);
+    void* p = pmr::new_delete_resource()->allocate(bytes, alignment);
     return p;
   }
 
-  void do_deallocate(void* p, std::size_t bytes, std::size_t alignment) override {
+  void do_deallocate(void* p, size_t bytes, size_t alignment) override {
     alloced_ -= bytes;
-    return std::pmr::new_delete_resource()->deallocate(p, bytes, alignment);
+    return pmr::new_delete_resource()->deallocate(p, bytes, alignment);
   }
 
-  bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override {
-    return std::pmr::new_delete_resource()->is_equal(other);
+  bool do_is_equal(const pmr::memory_resource& other) const noexcept override {
+    return pmr::new_delete_resource()->is_equal(other);
   }
 
  private:
@@ -65,9 +65,7 @@ class StringSetTest : public ::testing::Test {
   }
 
   void SetUp() override {
-    orig_resource_ = std::pmr::get_default_resource();
-    std::pmr::set_default_resource(&alloc_);
-    ss_ = new StringSet();
+    ss_ = new StringSet(&alloc_);
   }
 
   void TearDown() override {
@@ -76,21 +74,19 @@ class StringSetTest : public ::testing::Test {
     // ensure there are no memory leaks after every test
     EXPECT_TRUE(alloc_.all_freed());
     EXPECT_EQ(zmalloc_used_memory_tl, 0);
-    std::pmr::set_default_resource(orig_resource_);
   }
 
   StringSet* ss_;
-  std::pmr::memory_resource* orig_resource_;
   DenseSetAllocator alloc_;
 };
 
 TEST_F(StringSetTest, Basic) {
-  EXPECT_TRUE(ss_->Add(std::string_view{"foo"}));
-  EXPECT_TRUE(ss_->Add(std::string_view{"bar"}));
-  EXPECT_FALSE(ss_->Add(std::string_view{"foo"}));
-  EXPECT_FALSE(ss_->Add(std::string_view{"bar"}));
-  EXPECT_TRUE(ss_->Contains(std::string_view{"foo"}));
-  EXPECT_TRUE(ss_->Contains(std::string_view{"bar"}));
+  EXPECT_TRUE(ss_->Add("foo"sv));
+  EXPECT_TRUE(ss_->Add("bar"sv));
+  EXPECT_FALSE(ss_->Add("foo"sv));
+  EXPECT_FALSE(ss_->Add("bar"sv));
+  EXPECT_TRUE(ss_->Contains("foo"sv));
+  EXPECT_TRUE(ss_->Contains("bar"sv));
   EXPECT_EQ(2, ss_->Size());
 }
 
@@ -107,6 +103,7 @@ TEST_F(StringSetTest, StandardAddErase) {
   EXPECT_TRUE(ss_->Add("BBBBBAAAAAAAAAAA"));
   EXPECT_TRUE(ss_->Add("BBBBBBBBAAAAAAAA"));
   EXPECT_TRUE(ss_->Add("CCCCCBBBBBBBBBBB"));
+
   // Remove link in the middle of chain
   EXPECT_TRUE(ss_->Erase("BBBBBBBBAAAAAAAA"));
   // Remove start of a chain
@@ -120,9 +117,9 @@ TEST_F(StringSetTest, StandardAddErase) {
   EXPECT_TRUE(ss_->Erase("AAAAAAAAAAAAAAA@"));
 }
 
-static std::string random_string(std::mt19937& rand, unsigned len) {
-  const std::string_view alpanum = "1234567890abcdefghijklmnopqrstuvwxyz";
-  std::string ret;
+static string random_string(mt19937& rand, unsigned len) {
+  const string_view alpanum = "1234567890abcdefghijklmnopqrstuvwxyz";
+  string ret;
   ret.reserve(len);
 
   for (size_t i = 0; i < len; ++i) {
@@ -136,12 +133,12 @@ TEST_F(StringSetTest, Resizing) {
   constexpr size_t num_strs = 4096;
   // pseudo random deterministic sequence with known seed should produce
   // the same sequence on all systems
-  std::mt19937 rand(0);
+  mt19937 rand(0);
 
-  std::vector<std::string> strs;
+  vector<string> strs;
   while (strs.size() != num_strs) {
     auto str = random_string(rand, 10);
-    if (std::find(strs.begin(), strs.end(), str) != strs.end()) {
+    if (find(strs.begin(), strs.end(), str) != strs.end()) {
       continue;
     }
 
@@ -163,8 +160,8 @@ TEST_F(StringSetTest, Resizing) {
 }
 
 TEST_F(StringSetTest, SimpleScan) {
-  std::unordered_set<std::string_view> info = {"foo", "bar"};
-  std::unordered_set<std::string_view> seen;
+  unordered_set<string_view> info = {"foo", "bar"};
+  unordered_set<string_view> seen;
 
   for (auto str : info) {
     EXPECT_TRUE(ss_->Add(str));
@@ -174,26 +171,26 @@ TEST_F(StringSetTest, SimpleScan) {
   do {
     cursor = ss_->Scan(cursor, [&](const sds ptr) {
       sds s = (sds)ptr;
-      std::string_view str{s, sdslen(s)};
+      string_view str{s, sdslen(s)};
       EXPECT_TRUE(info.count(str));
       seen.insert(str);
     });
   } while (cursor != 0);
 
-  EXPECT_TRUE(seen.size() == info.size() && std::equal(seen.begin(), seen.end(), info.begin()));
+  EXPECT_TRUE(seen.size() == info.size() && equal(seen.begin(), seen.end(), info.begin()));
 }
 
 // Ensure REDIS scan guarantees are met
 TEST_F(StringSetTest, ScanGuarantees) {
-  std::unordered_set<std::string_view> to_be_seen = {"foo", "bar"};
-  std::unordered_set<std::string_view> not_be_seen = {"AAA", "BBB"};
-  std::unordered_set<std::string_view> maybe_seen = {"AA@@@@@@@@@@@@@@", "AAA@@@@@@@@@@@@@",
-                                                     "AAAAAAAAA@@@@@@@", "AAAAAAAAAA@@@@@@"};
-  std::unordered_set<std::string_view> seen;
+  unordered_set<string_view> to_be_seen = {"foo", "bar"};
+  unordered_set<string_view> not_be_seen = {"AAA", "BBB"};
+  unordered_set<string_view> maybe_seen = {"AA@@@@@@@@@@@@@@", "AAA@@@@@@@@@@@@@",
+                                           "AAAAAAAAA@@@@@@@", "AAAAAAAAAA@@@@@@"};
+  unordered_set<string_view> seen;
 
   auto scan_callback = [&](const sds ptr) {
     sds s = (sds)ptr;
-    std::string_view str{s, sdslen(s)};
+    string_view str{s, sdslen(s)};
     EXPECT_TRUE(to_be_seen.count(str) || maybe_seen.count(str));
     EXPECT_FALSE(not_be_seen.count(str));
     if (to_be_seen.count(str)) {
@@ -231,25 +228,25 @@ TEST_F(StringSetTest, ScanGuarantees) {
 
 TEST_F(StringSetTest, IntOnly) {
   constexpr size_t num_ints = 8192;
-  std::unordered_set<unsigned int> numbers;
+  unordered_set<unsigned int> numbers;
   for (size_t i = 0; i < num_ints; ++i) {
     numbers.insert(i);
-    EXPECT_TRUE(ss_->Add(std::to_string(i)));
+    EXPECT_TRUE(ss_->Add(to_string(i)));
   }
 
   for (size_t i = 0; i < num_ints; ++i) {
-    EXPECT_FALSE(ss_->Add(std::to_string(i)));
+    EXPECT_FALSE(ss_->Add(to_string(i)));
   }
 
-  std::mt19937 generator(0);
+  mt19937 generator(0);
   size_t num_remove = generator() % 4096;
-  std::unordered_set<std::string> removed;
+  unordered_set<string> removed;
 
   for (size_t i = 0; i < num_remove; ++i) {
     auto remove_int = generator() % num_ints;
-    auto remove = std::to_string(remove_int);
+    auto remove = to_string(remove_int);
     if (numbers.count(remove_int)) {
-      EXPECT_TRUE(ss_->Contains(remove));
+      ASSERT_TRUE(ss_->Contains(remove)) << remove_int;
       EXPECT_TRUE(ss_->Erase(remove));
       numbers.erase(remove_int);
     } else {
@@ -263,9 +260,10 @@ TEST_F(StringSetTest, IntOnly) {
   size_t expected_seen = 0;
   auto scan_callback = [&](const sds ptr) {
     sds s = (sds)ptr;
-    std::string_view str{s, sdslen(s)};
-    EXPECT_FALSE(removed.count(std::string(str)));
-    if (numbers.count(std::atoi(str.data()))) {
+    string_view str{s, sdslen(s)};
+    EXPECT_FALSE(removed.count(string(str)));
+
+    if (numbers.count(atoi(str.data()))) {
       ++expected_seen;
     }
   };
@@ -274,22 +272,24 @@ TEST_F(StringSetTest, IntOnly) {
   do {
     cursor = ss_->Scan(cursor, scan_callback);
     // randomly throw in some new numbers
-    ss_->Add(std::to_string(generator()));
+    uint32_t val = generator();
+    VLOG(1) << "Val " << val;
+    ss_->Add(to_string(val));
   } while (cursor != 0);
 
   EXPECT_TRUE(expected_seen + removed.size() == num_ints);
 }
 
 TEST_F(StringSetTest, XtremeScanGrow) {
-  std::unordered_set<std::string> to_see, force_grow, seen;
+  unordered_set<string> to_see, force_grow, seen;
 
-  std::mt19937 generator(0);
+  mt19937 generator(0);
   while (to_see.size() != 8) {
     to_see.insert(random_string(generator, 10));
   }
 
   while (force_grow.size() != 8192) {
-    std::string str = random_string(generator, 10);
+    string str = random_string(generator, 10);
 
     if (to_see.count(str)) {
       continue;
@@ -304,9 +304,9 @@ TEST_F(StringSetTest, XtremeScanGrow) {
 
   auto scan_callback = [&](const sds ptr) {
     sds s = (sds)ptr;
-    std::string_view str{s, sdslen(s)};
-    if (to_see.count(std::string(str))) {
-      seen.insert(std::string(str));
+    string_view str{s, sdslen(s)};
+    if (to_see.count(string(str))) {
+      seen.insert(string(str));
     }
   };
 
@@ -326,9 +326,9 @@ TEST_F(StringSetTest, XtremeScanGrow) {
 
 TEST_F(StringSetTest, Pop) {
   constexpr size_t num_items = 8;
-  std::unordered_set<std::string> to_insert;
+  unordered_set<string> to_insert;
 
-  std::mt19937 generator(0);
+  mt19937 generator(0);
 
   while (to_insert.size() != num_items) {
     auto str = random_string(generator, 10);
@@ -356,9 +356,9 @@ TEST_F(StringSetTest, Pop) {
 
 TEST_F(StringSetTest, Iteration) {
   constexpr size_t num_items = 8192;
-  std::unordered_set<std::string> to_insert;
+  unordered_set<string> to_insert;
 
-  std::mt19937 generator(0);
+  mt19937 generator(0);
 
   while (to_insert.size() != num_items) {
     auto str = random_string(generator, 10);
@@ -371,7 +371,7 @@ TEST_F(StringSetTest, Iteration) {
   }
 
   for (const sds ptr : *ss_) {
-    std::string str{ptr, sdslen(ptr)};
+    string str{ptr, sdslen(ptr)};
     EXPECT_TRUE(to_insert.count(str));
     to_insert.erase(str);
   }

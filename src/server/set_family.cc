@@ -89,8 +89,7 @@ pair<unsigned, bool> RemoveStrSet(ArgSlice vals, CompactObj* set) {
     DCHECK_EQ(set->Encoding(), kEncodingStrMap2);
     StringSet* ss = ((StringSet*)set->RObjPtr());
     for (auto member : vals) {
-      shard->tmp_str1 = sdscpylen(shard->tmp_str1, member.data(), member.size());
-      removed += ss->EraseSds(shard->tmp_str1);
+      removed += ss->Erase(member);
     }
 
     isempty = ss->Empty();
