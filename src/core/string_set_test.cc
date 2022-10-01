@@ -263,9 +263,8 @@ TEST_F(StringSetTest, IntOnly) {
 
   size_t expected_seen = 0;
   auto scan_callback = [&](const sds ptr) {
-    sds s = (sds)ptr;
-    string_view str{s, sdslen(s)};
-    EXPECT_FALSE(removed.count(string(str)));
+    string str{ptr, sdslen(ptr)};
+    EXPECT_FALSE(removed.count(str));
 
     if (numbers.count(atoi(str.data()))) {
       ++expected_seen;
@@ -281,7 +280,7 @@ TEST_F(StringSetTest, IntOnly) {
     ss_->Add(to_string(val));
   } while (cursor != 0);
 
-  EXPECT_TRUE(expected_seen + removed.size() == num_ints);
+  EXPECT_GE(expected_seen + removed.size(), num_ints);
 }
 
 TEST_F(StringSetTest, XtremeScanGrow) {
