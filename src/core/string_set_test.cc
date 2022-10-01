@@ -16,6 +16,9 @@
 #include <unordered_set>
 #include <vector>
 
+#include <absl/strings/match.h>
+#include <absl/strings/str_cat.h>
+
 #include "core/compact_object.h"
 #include "core/mi_memory_resource.h"
 #include "glog/logging.h"
@@ -28,6 +31,7 @@ extern "C" {
 namespace dfly {
 
 using namespace std;
+using absl::StrCat;
 
 class DenseSetAllocator : public pmr::memory_resource {
  public:
@@ -377,6 +381,30 @@ TEST_F(StringSetTest, Iteration) {
   }
 
   EXPECT_EQ(to_insert.size(), 0);
+}
+
+TEST_F(StringSetTest, Ttl) {
+  EXPECT_TRUE(ss_->Add("bla"sv, 1));
+  EXPECT_FALSE(ss_->Add("bla"sv, 1));
+  ss_->set_time(1);
+  EXPECT_TRUE(ss_->Add("bla"sv, 1));
+  EXPECT_EQ(1u, ss_->Size());
+
+  for (unsigned i = 0; i < 100; ++i) {
+    EXPECT_TRUE(ss_->Add(StrCat("foo", i), 1));
+  }
+  EXPECT_EQ(101u, ss_->Size());
+
+  ss_->set_time(2);
+  for (unsigned i = 0; i < 100; ++i) {
+    EXPECT_TRUE(ss_->Add(StrCat("bar", i)));
+  }
+
+  for (auto it = ss_->begin(); it != ss_->end(); ++it) {
+    ASSERT_TRUE(absl::StartsWith(*it, "bar")) << *it;
+    string str = *it;
+    VLOG(1) << *it;
+  }
 }
 
 }  // namespace dfly

@@ -36,7 +36,6 @@ namespace dfly {
 // static_assert(sizeof(dictEntry) == 24);
 
 class DenseSet {
-
   struct DenseLinkKey;
   // we can assume that high 12 bits of user address space
   // can be used for tagging. At most 52 bits of address are reserved for
@@ -45,6 +44,7 @@ class DenseSet {
   static constexpr size_t kLinkBit = 1ULL << 52;
   static constexpr size_t kDisplaceBit = 1ULL << 53;
   static constexpr size_t kDisplaceDirectionBit = 1ULL << 54;
+  static constexpr size_t kTtlBit = 1ULL << 55;
   static constexpr size_t kTagMask = 4095ULL << 51;  // we reserve 12 high bits.
 
   class DensePtr {
@@ -69,6 +69,10 @@ class DenseSet {
 
     bool IsLink() const {
       return (uptr() & kLinkBit) != 0;
+    }
+
+    bool HasTtl() const {
+      return (uptr() & kTtlBit) != 0;
     }
 
     bool IsEmpty() const {
@@ -101,6 +105,10 @@ class DenseSet {
     // returns 1 if the displaced node is right of the correct bucket and -1 if it is left
     int GetDisplacedDirection() const {
       return (uptr() & kDisplaceDirectionBit) == kDisplaceDirectionBit ? 1 : -1;
+    }
+
+    void SetTtl() {
+      ptr_ = (void*)(uptr() | kTtlBit);
     }
 
     void Reset() {
@@ -161,13 +169,13 @@ class DenseSet {
 
   class IteratorBase {
    protected:
-    IteratorBase(const DenseSet* owner, ChainVectorIterator begin_list);
+    IteratorBase(const DenseSet* owner, bool is_end);
 
     void Advance();
 
-    const DenseSet& owner_;
+    DenseSet& owner_;
     ChainVectorIterator curr_list_;
-    DensePtr curr_entry_;
+    DensePtr* curr_entry_;
   };
 
  public:
@@ -212,7 +220,7 @@ class DenseSet {
     using pointer = value_type*;
     using reference = value_type&;
 
-    iterator(DenseSet* set, ChainVectorIterator begin_list) : IteratorBase(set, begin_list) {
+    iterator(DenseSet* set, bool is_end) : IteratorBase(set, is_end) {
     }
 
     iterator& operator++() {
@@ -229,11 +237,11 @@ class DenseSet {
     }
 
     value_type operator*() {
-      return (value_type)curr_entry_.GetObject();
+      return (value_type)curr_entry_->GetObject();
     }
 
     value_type operator->() {
-      return (value_type)curr_entry_.GetObject();
+      return (value_type)curr_entry_->GetObject();
     }
   };
 
@@ -246,8 +254,7 @@ class DenseSet {
     using pointer = value_type*;
     using reference = value_type&;
 
-    const_iterator(const DenseSet* set, ChainVectorConstIterator begin_list)
-        : IteratorBase(set, curr_list_) {
+    const_iterator(const DenseSet* set, bool is_end) : IteratorBase(set, is_end) {
     }
 
     const_iterator& operator++() {
@@ -264,28 +271,28 @@ class DenseSet {
     }
 
     value_type operator*() const {
-      return (value_type)curr_entry_.GetObject();
+      return (value_type)curr_entry_->GetObject();
     }
 
     value_type operator->() const {
-      return (value_type)curr_entry_.GetObject();
+      return (value_type)curr_entry_->GetObject();
     }
   };
 
   template <typename T> iterator<T> begin() {
-    return iterator<T>(this, entries_.begin());
+    return iterator<T>(this, false);
   }
 
   template <typename T> iterator<T> end() {
-    return iterator<T>(this, entries_.end());
+    return iterator<T>(this, true);
   }
 
   template <typename T> const_iterator<T> cbegin() const {
-    return const_iterator<T>(this, entries_.cbegin());
+    return const_iterator<T>(this, false);
   }
 
   template <typename T> const_iterator<T> cend() const {
-    return const_iterator<T>(this, entries_.cend());
+    return const_iterator<T>(this, true);
   }
 
   using ItemCb = std::function<void(const void*)>;
@@ -293,19 +300,33 @@ class DenseSet {
   uint32_t Scan(uint32_t cursor, const ItemCb& cb) const;
   void Reserve(size_t sz);
 
+  // set an abstract time that allows expiry.
+  void set_time(uint32_t val) {
+    time_now_ = val;
+  }
+
+  uint32_t time_now() const {
+    return time_now_;
+  }
+
  protected:
   // Virtual functions to be implemented for generic data
   virtual uint64_t Hash(const void* obj, uint32_t cookie) const = 0;
   virtual bool ObjEqual(const void* left, const void* right, uint32_t right_cookie) const = 0;
   virtual size_t ObjectAllocSize(const void* obj) const = 0;
-  virtual void ObjDelete(void* obj) const = 0;
+  virtual uint32_t ObjExpireTime(const void* obj) const = 0;
+  virtual void ObjDelete(void* obj, bool has_ttl) const = 0;
 
-  void* EraseInternal(void* obj, uint32_t cookie) {
+  bool EraseInternal(void* obj, uint32_t cookie) {
     auto [prev, found] = Find(obj, BucketId(obj, cookie), cookie);
-    return found ? Delete(prev, found) : nullptr;
+    if (found) {
+      Delete(prev, found);
+      return true;
+    }
+    return false;
   }
 
-  bool AddInternal(void* obj);
+  bool AddInternal(void* obj, bool has_ttl);
 
   bool ContainsInternal(const void* obj, uint32_t cookie) const {
     return const_cast<DenseSet*>(this)->Find(obj, BucketId(obj, cookie), cookie).second != nullptr;
@@ -341,7 +362,7 @@ class DenseSet {
   void Grow();
 
   // ============ Pseudo Linked List Functions for interacting with Chains ==================
-  size_t PushFront(ChainVectorIterator, void*);
+  size_t PushFront(ChainVectorIterator, void* obj, bool has_ttl);
   void PushFront(ChainVectorIterator, DensePtr);
 
   void* PopDataFront(ChainVectorIterator);
@@ -359,16 +380,22 @@ class DenseSet {
     mr()->deallocate(plink, sizeof(DenseLinkKey), alignof(DenseLinkKey));
   }
 
-  // Returns the object that was removed from ptr. If ptr is a link then deletes it internally.
-  void* Delete(DensePtr* prev, DensePtr* ptr);
+  // Returns true if *ptr was deleted.
+  bool ExpireIfNeeded(DensePtr* prev, DensePtr* ptr) const;
+
+  // Deletes the object pointed by ptr and removes it from the set.
+  // If ptr is a link then it will be deleted internally.
+  void Delete(DensePtr* prev, DensePtr* ptr);
 
   std::pmr::vector<DensePtr> entries_;
 
-  size_t obj_malloc_used_ = 0;
-  uint32_t size_ = 0;
-  uint32_t num_chain_entries_ = 0;
-  uint32_t num_used_buckets_ = 0;
+  mutable size_t obj_malloc_used_ = 0;
+  mutable uint32_t size_ = 0;
+  mutable uint32_t num_chain_entries_ = 0;
+  mutable uint32_t num_used_buckets_ = 0;
   unsigned capacity_log_ = 0;
+
+  uint32_t time_now_ = 0;
 };
 
 }  // namespace dfly
