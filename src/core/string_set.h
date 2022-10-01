@@ -14,7 +14,7 @@ namespace dfly {
 
 class StringSet : public DenseSet {
  public:
-  bool Add(std::string_view s1);
+  bool Add(std::string_view s1, uint32_t ttl_sec = UINT32_MAX);
 
   // Used currently by rdb_load.
   bool AddSds(sds s1);
@@ -59,7 +59,8 @@ class StringSet : public DenseSet {
   bool ObjEqual(const void* left, const void* right, uint32_t right_cookie) const override;
 
   size_t ObjectAllocSize(const void* s1) const override;
-  void ObjDelete(void* obj) const override;
+  uint32_t ObjExpireTime(const void* obj) const override;
+  void ObjDelete(void* obj, bool has_ttl) const override;
 };
 
 }  // end namespace dfly
