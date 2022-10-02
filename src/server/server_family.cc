@@ -150,13 +150,28 @@ bool IsValidSaveScheduleNibble(string_view time, unsigned int max) {
   return min_match <= max;
 }
 
-class RdbSnapshot {
+// takes ownership over the file.
+class LinuxWriteWrapper : public io::Sink {
  public:
-  RdbSnapshot(bool single_shard, uring::LinuxFile* fl)
-      : file_(fl), linux_sink_(fl), saver_(&linux_sink_, single_shard, kRdbWriteFlags & O_DIRECT) {
+  LinuxWriteWrapper(uring::LinuxFile* lf) : lf_(lf) {
   }
 
-  error_code Start(const StringVec& lua_scripts);
+  io::Result<size_t> WriteSome(const iovec* v, uint32_t len) final;
+
+  std::error_code Close() {
+    return lf_->Close();
+  }
+
+ private:
+  std::unique_ptr<uring::LinuxFile> lf_;
+  off_t offset_ = 0;
+};
+
+class RdbSnapshot {
+ public:
+  RdbSnapshot() {}
+
+  error_code Start(bool single_shard, const std::string& path, const StringVec& lua_scripts);
   void StartInShard(EngineShard* shard);
 
   error_code SaveBody();
@@ -173,26 +188,45 @@ class RdbSnapshot {
  private:
   bool started_ = false;
 
-  unique_ptr<uring::LinuxFile> file_;
-  LinuxWriteWrapper linux_sink_;
-  RdbSaver saver_;
+  std::unique_ptr<io::Sink> io_sink_;
+  std::unique_ptr<RdbSaver> saver_;
   RdbTypeFreqMap freq_map_;
 };
 
-error_code RdbSnapshot::Start(const StringVec& lua_scripts) {
-  return saver_.SaveHeader(lua_scripts);
+
+io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
+  io::Result<size_t> res = lf_->WriteSome(v, len, offset_, 0);
+  if (res) {
+    offset_ += *res;
+  }
+
+  return res;
+}
+
+error_code RdbSnapshot::Start(bool sharded_snapshot,
+                              const std::string& path, const StringVec& lua_scripts) {
+  auto res = uring::OpenLinux(path, kRdbWriteFlags, 0666);
+  if (!res) {
+    return res.error();
+  }
+
+  io_sink_.reset(new LinuxWriteWrapper(res->release()));
+  saver_.reset(new RdbSaver(io_sink_.get(), sharded_snapshot, kRdbWriteFlags & O_DIRECT));
+
+  return saver_->SaveHeader(lua_scripts);
 }
 
 error_code RdbSnapshot::SaveBody() {
-  return saver_.SaveBody(&freq_map_);
+  return saver_->SaveBody(&freq_map_);
 }
 
 error_code RdbSnapshot::Close() {
-  return linux_sink_.Close();
+  // TODO: to solve it in a more elegant way.
+  return static_cast<LinuxWriteWrapper*>(io_sink_.get())->Close();
 }
 
 void RdbSnapshot::StartInShard(EngineShard* shard) {
-  saver_.StartSnapshotInShard(false, shard);
+  saver_->StartSnapshotInShard(false, shard);
   started_ = true;
 }
 
@@ -738,28 +772,21 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
     auto cb = [&](Transaction* t, EngineShard* shard) {
       fs::path shard_file = filename, abs_path = path;
       ShardId sid = shard->shard_id();
-      error_code local_ec;
 
       ExtendFilename(now, sid, &shard_file);
       abs_path += shard_file;
 
       VLOG(1) << "Saving to " << abs_path;
-      auto res = uring::OpenLinux(abs_path.generic_string(), kRdbWriteFlags, 0666);
-
-      if (res) {
-        snapshots[sid].reset(new RdbSnapshot{true, res.value().release()});
-        auto& snapshot = *snapshots[sid];
-        local_ec = snapshot.Start(lua_scripts);
-        if (!local_ec) {
-          snapshot.StartInShard(shard);
-        }
-      } else {
-        local_ec = res.error();
-      }
-
+      snapshots[sid].reset(new RdbSnapshot);
+      auto& snapshot = snapshots[sid];
+      error_code local_ec = snapshot->Start(true, abs_path.generic_string(), lua_scripts);
       if (local_ec) {
+        snapshot.reset();  // Reset to make sure stages won't block on faulty snapshots.
+
         lock_guard lk(mu);
         UpdateError(local_ec, &ec);
+      } else {
+        snapshot->StartInShard(shard);
       }
 
       return OpStatus::OK;
@@ -771,15 +798,10 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
 
     ExtendFilename(now, -1, &filename);
     path += filename;
-
-    auto res = uring::OpenLinux(path.generic_string(), kRdbWriteFlags, 0666);
-    if (!res) {
-      return res.error();
-    }
     VLOG(1) << "Saving to " << path;
 
-    snapshots[0].reset(new RdbSnapshot{false, res.value().release()});
-    ec = snapshots[0]->Start(lua_scripts);
+    snapshots[0].reset(new RdbSnapshot);
+    ec = snapshots[0]->Start(false, path.generic_string(), lua_scripts);
 
     if (!ec) {
       auto cb = [&](Transaction* t, EngineShard* shard) {

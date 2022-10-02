@@ -19,7 +19,6 @@
 #include "server/error.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
-#include "util/uring/uring_pool.h"
 
 using namespace testing;
 using namespace std;

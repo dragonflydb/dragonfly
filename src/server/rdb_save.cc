@@ -672,15 +672,6 @@ error_code RdbSerializer::SaveLzfBlob(const io::Bytes& src, size_t uncompressed_
   return error_code{};
 }
 
-io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
-  io::Result<size_t> res = lf_->WriteSome(v, len, offset_, 0);
-  if (res) {
-    offset_ += *res;
-  }
-
-  return res;
-}
-
 AlignedBuffer::AlignedBuffer(size_t cap, ::io::Sink* upstream)
     : capacity_(cap), upstream_(upstream) {
   aligned_buf_ = (char*)mi_malloc_aligned(kBufLen, 4_KB);
