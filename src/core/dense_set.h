@@ -6,7 +6,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <iterator>
 #include <memory_resource>
 #include <type_traits>
 
@@ -163,17 +162,21 @@ class DenseSet {
   static_assert(sizeof(DensePtr) == sizeof(uintptr_t));
   static_assert(sizeof(DenseLinkKey) == 2 * sizeof(uintptr_t));
 
+ protected:
   using LinkAllocator = std::pmr::polymorphic_allocator<DenseLinkKey>;
   using ChainVectorIterator = std::pmr::vector<DensePtr>::iterator;
   using ChainVectorConstIterator = std::pmr::vector<DensePtr>::const_iterator;
 
   class IteratorBase {
    protected:
+    IteratorBase() : owner_(nullptr), curr_entry_(nullptr) {
+    }
+
     IteratorBase(const DenseSet* owner, bool is_end);
 
     void Advance();
 
-    DenseSet& owner_;
+    DenseSet* owner_;
     ChainVectorIterator curr_list_;
     DensePtr* curr_entry_;
   };
@@ -211,90 +214,6 @@ class DenseSet {
     return (num_chain_entries_ + entries_.capacity()) * sizeof(DensePtr);
   }
 
-  template <typename T> class iterator : private IteratorBase {
-    static_assert(std::is_pointer_v<T>, "Iterators can only return pointers");
-
-   public:
-    using iterator_category = std::forward_iterator_tag;
-    using value_type = T;
-    using pointer = value_type*;
-    using reference = value_type&;
-
-    iterator(DenseSet* set, bool is_end) : IteratorBase(set, is_end) {
-    }
-
-    iterator& operator++() {
-      Advance();
-      return *this;
-    }
-
-    friend bool operator==(const iterator& a, const iterator& b) {
-      return a.curr_list_ == b.curr_list_;
-    }
-
-    friend bool operator!=(const iterator& a, const iterator& b) {
-      return !(a == b);
-    }
-
-    value_type operator*() {
-      return (value_type)curr_entry_->GetObject();
-    }
-
-    value_type operator->() {
-      return (value_type)curr_entry_->GetObject();
-    }
-  };
-
-  template <typename T> class const_iterator : private IteratorBase {
-    static_assert(std::is_pointer_v<T>, "Iterators can only return pointer types");
-
-   public:
-    using iterator_category = std::input_iterator_tag;
-    using value_type = const T;
-    using pointer = value_type*;
-    using reference = value_type&;
-
-    const_iterator(const DenseSet* set, bool is_end) : IteratorBase(set, is_end) {
-    }
-
-    const_iterator& operator++() {
-      Advance();
-      return *this;
-    }
-
-    friend bool operator==(const const_iterator& a, const const_iterator& b) {
-      return a.curr_list_ == b.curr_list_;
-    }
-
-    friend bool operator!=(const const_iterator& a, const const_iterator& b) {
-      return !(a == b);
-    }
-
-    value_type operator*() const {
-      return (value_type)curr_entry_->GetObject();
-    }
-
-    value_type operator->() const {
-      return (value_type)curr_entry_->GetObject();
-    }
-  };
-
-  template <typename T> iterator<T> begin() {
-    return iterator<T>(this, false);
-  }
-
-  template <typename T> iterator<T> end() {
-    return iterator<T>(this, true);
-  }
-
-  template <typename T> const_iterator<T> cbegin() const {
-    return const_iterator<T>(this, false);
-  }
-
-  template <typename T> const_iterator<T> cend() const {
-    return const_iterator<T>(this, true);
-  }
-
   using ItemCb = std::function<void(const void*)>;
 
   uint32_t Scan(uint32_t cursor, const ItemCb& cb) const;
@@ -328,8 +247,9 @@ class DenseSet {
 
   bool AddInternal(void* obj, bool has_ttl);
 
-  bool ContainsInternal(const void* obj, uint32_t cookie) const {
-    return const_cast<DenseSet*>(this)->Find(obj, BucketId(obj, cookie), cookie).second != nullptr;
+  void* FindInternal(const void* obj, uint32_t cookie) const {
+    DensePtr* ptr = const_cast<DenseSet*>(this)->Find(obj, BucketId(obj, cookie), cookie).second;
+    return ptr ? ptr->GetObject() : nullptr;
   }
 
   void* PopInternal();

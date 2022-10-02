@@ -1,9 +1,14 @@
+// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
+
 #include "core/string_set.h"
 
 #include "core/compact_object.h"
-#include "redis/sds.h"
+#include "core/sds_utils.h"
 
 extern "C" {
+#include "redis/sds.h"
 #include "redis/zmalloc.h"
 }
 
@@ -15,92 +20,23 @@ namespace dfly {
 
 namespace {
 
-inline char SdsReqType(size_t string_size) {
-  if (string_size < 1 << 5)
-    return SDS_TYPE_5;
-  if (string_size < 1 << 8)
-    return SDS_TYPE_8;
-  if (string_size < 1 << 16)
-    return SDS_TYPE_16;
-  if (string_size < 1ll << 32)
-    return SDS_TYPE_32;
-  return SDS_TYPE_64;
-}
-
-inline int SdsHdrSize(char type) {
-  switch (type & SDS_TYPE_MASK) {
-    case SDS_TYPE_5:
-      return sizeof(struct sdshdr5);
-    case SDS_TYPE_8:
-      return sizeof(struct sdshdr8);
-    case SDS_TYPE_16:
-      return sizeof(struct sdshdr16);
-    case SDS_TYPE_32:
-      return sizeof(struct sdshdr32);
-    case SDS_TYPE_64:
-      return sizeof(struct sdshdr64);
-  }
-  return 0;
-}
-
-sds AllocImmutableWithTtl(uint32_t len, uint32_t at) {
-  size_t usable;
-  char type = SdsReqType(len);
-  int hdrlen = SdsHdrSize(type);
-
-  char* ptr = (char*)zmalloc_usable(hdrlen + len + 1 + 4, &usable);
-  char* s = ptr + hdrlen;
-  char* fp = s - 1;
-
-  switch (type) {
-    case SDS_TYPE_5: {
-      *fp = type | (len << SDS_TYPE_BITS);
-      break;
-    }
-
-    case SDS_TYPE_8: {
-      SDS_HDR_VAR(8, s);
-      sh->len = len;
-      sh->alloc = len;
-      *fp = type;
-      break;
-    }
-
-    case SDS_TYPE_16: {
-      SDS_HDR_VAR(16, s);
-      sh->len = len;
-      sh->alloc = len;
-      *fp = type;
-      break;
-    }
-
-    case SDS_TYPE_32: {
-      SDS_HDR_VAR(32, s);
-      sh->len = len;
-      sh->alloc = len;
-      *fp = type;
-      break;
-    }
-    case SDS_TYPE_64: {
-      SDS_HDR_VAR(64, s);
-      sh->len = len;
-      sh->alloc = len;
-      *fp = type;
-      break;
-    }
-  }
-  s[len] = '\0';
-  absl::little_endian::Store32(s + len + 1, at);
-
-  return s;
-}
-
 inline bool MayHaveTtl(sds s) {
   char* alloc_ptr = (char*)sdsAllocPtr(s);
   return sdslen(s) + 1 + 4 <= zmalloc_usable_size(alloc_ptr);
 }
 
+sds AllocImmutableWithTtl(uint32_t len, uint32_t at) {
+  sds res = AllocSdsWithSpace(len, sizeof(at));
+  absl::little_endian::Store32(res + len + 1, at);
+
+  return res;
+}
+
 }  // namespace
+
+StringSet::~StringSet() {
+  Clear();
+}
 
 bool StringSet::AddSds(sds s1) {
   return AddInternal(s1, false);
@@ -137,8 +73,7 @@ bool StringSet::Erase(string_view str) {
 }
 
 bool StringSet::Contains(string_view s1) const {
-  bool ret = ContainsInternal(&s1, 1);
-  return ret;
+  return FindInternal(&s1, 1) != nullptr;
 }
 
 void StringSet::Clear() {
@@ -156,10 +91,6 @@ std::optional<std::string> StringSet::Pop() {
   sdsfree(str);
 
   return ret;
-}
-
-sds StringSet::PopRaw() {
-  return (sds)PopInternal();
 }
 
 uint32_t StringSet::Scan(uint32_t cursor, const std::function<void(const sds)>& func) const {

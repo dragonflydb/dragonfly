@@ -1,3 +1,7 @@
+// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
+
 #pragma once
 
 #include <cstdint>
@@ -14,6 +18,11 @@ namespace dfly {
 
 class StringSet : public DenseSet {
  public:
+  StringSet(std::pmr::memory_resource* res = std::pmr::get_default_resource()) : DenseSet(res) {
+  }
+
+  ~StringSet();
+
   bool Add(std::string_view s1, uint32_t ttl_sec = UINT32_MAX);
 
   // Used currently by rdb_load.
@@ -26,29 +35,91 @@ class StringSet : public DenseSet {
   void Clear();
 
   std::optional<std::string> Pop();
-  sds PopRaw();
 
-  ~StringSet() {
-    Clear();
+  class iterator : private IteratorBase {
+   public:
+    using iterator_category = std::forward_iterator_tag;
+    using value_type = sds;
+    using pointer = sds*;
+    using reference = sds&;
+
+    iterator() : IteratorBase() {
+    }
+
+    iterator(DenseSet* set, bool is_end) : IteratorBase(set, is_end) {
+    }
+
+    iterator& operator++() {
+      Advance();
+      return *this;
+    }
+
+    bool operator==(const iterator& b) const {
+      return curr_list_ == b.curr_list_;
+    }
+
+    bool operator!=(const iterator& b) const {
+      return !(*this == b);
+    }
+
+    value_type operator*() {
+      return (value_type)curr_entry_->GetObject();
+    }
+
+    value_type operator->() {
+      return (value_type)curr_entry_->GetObject();
+    }
+  };
+
+  class const_iterator : private IteratorBase {
+   public:
+    using iterator_category = std::input_iterator_tag;
+    using value_type = const char*;
+    using pointer = value_type*;
+    using reference = value_type&;
+
+    const_iterator() : IteratorBase() {
+    }
+
+    const_iterator(const DenseSet* set, bool is_end) : IteratorBase(set, is_end) {
+    }
+
+    const_iterator& operator++() {
+      Advance();
+      return *this;
+    }
+
+    bool operator==(const const_iterator& b) const {
+      return curr_list_ == b.curr_list_;
+    }
+
+    bool operator!=(const const_iterator& b) const {
+      return !(*this == b);
+    }
+
+    value_type operator*() const {
+      return (value_type)curr_entry_->GetObject();
+    }
+
+    value_type operator->() const {
+      return (value_type)curr_entry_->GetObject();
+    }
+  };
+
+  iterator begin() {
+    return iterator{this, false};
   }
 
-  StringSet(std::pmr::memory_resource* res = std::pmr::get_default_resource()) : DenseSet(res) {
+  iterator end() {
+    return iterator{this, true};
   }
 
-  iterator<sds> begin() {
-    return DenseSet::begin<sds>();
+  const_iterator cbegin() const {
+    return const_iterator{this, false};
   }
 
-  iterator<sds> end() {
-    return DenseSet::end<sds>();
-  }
-
-  const_iterator<sds> cbegin() const {
-    return DenseSet::cbegin<sds>();
-  }
-
-  const_iterator<sds> cend() const {
-    return DenseSet::cend<sds>();
+  const_iterator cend() const {
+    return const_iterator{this, true};
   }
 
   uint32_t Scan(uint32_t, const std::function<void(sds)>&) const;

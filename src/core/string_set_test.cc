@@ -4,6 +4,8 @@
 
 #include "core/string_set.h"
 
+#include <absl/strings/match.h>
+#include <absl/strings/str_cat.h>
 #include <gtest/gtest.h>
 #include <mimalloc.h>
 
@@ -15,9 +17,6 @@
 #include <string_view>
 #include <unordered_set>
 #include <vector>
-
-#include <absl/strings/match.h>
-#include <absl/strings/str_cat.h>
 
 #include "core/compact_object.h"
 #include "core/mi_memory_resource.h"
@@ -358,6 +357,11 @@ TEST_F(StringSetTest, Pop) {
 }
 
 TEST_F(StringSetTest, Iteration) {
+  ss_->Add("foo");
+  for (const sds ptr : *ss_) {
+    LOG(INFO) << ptr;
+  }
+  ss_->Clear();
   constexpr size_t num_items = 8192;
   unordered_set<string> to_insert;
 
