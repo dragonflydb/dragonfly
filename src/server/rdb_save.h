@@ -15,7 +15,6 @@ extern "C" {
 #include "io/io.h"
 #include "server/common.h"
 #include "server/table.h"
-#include "util/uring/uring_file.h"
 
 typedef struct rax rax;
 typedef struct streamCG streamCG;
@@ -23,22 +22,6 @@ typedef struct streamCG streamCG;
 namespace dfly {
 
 class EngineShard;
-
-class LinuxWriteWrapper : public io::Sink {
- public:
-  LinuxWriteWrapper(util::uring::LinuxFile* lf) : lf_(lf) {
-  }
-
-  io::Result<size_t> WriteSome(const iovec* v, uint32_t len) final;
-
-  std::error_code Close() {
-    return lf_->Close();
-  }
-
- private:
-  util::uring::LinuxFile* lf_;
-  off_t offset_ = 0;
-};
 
 class AlignedBuffer : public ::io::Sink {
  public:

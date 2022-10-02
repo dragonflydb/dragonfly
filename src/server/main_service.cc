@@ -36,7 +36,6 @@ extern "C" {
 #include "server/version.h"
 #include "server/zset_family.h"
 #include "util/html/sorted_table.h"
-#include "util/uring/uring_fiber_algo.h"
 #include "util/varz.h"
 
 using namespace std;

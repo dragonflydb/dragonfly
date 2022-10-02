@@ -20,7 +20,6 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/rdb_load.h"
 #include "server/test_utils.h"
-#include "util/uring/uring_pool.h"
 
 using namespace testing;
 using namespace std;

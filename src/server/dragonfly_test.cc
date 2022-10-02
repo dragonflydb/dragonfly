@@ -19,7 +19,6 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/main_service.h"
 #include "server/test_utils.h"
-#include "util/uring/uring_pool.h"
 
 namespace dfly {
 

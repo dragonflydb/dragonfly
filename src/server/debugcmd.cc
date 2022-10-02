@@ -19,7 +19,7 @@
 #include "server/server_state.h"
 #include "server/string_family.h"
 #include "server/transaction.h"
-#include "util/uring/uring_fiber_algo.h"
+#include "util/fiber_sched_algo.h"
 
 using namespace std;
 
