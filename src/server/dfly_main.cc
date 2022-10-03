@@ -29,6 +29,13 @@
 #include "util/uring/uring_pool.h"
 #include "util/varz.h"
 
+#define STRING_PP_NX(A) #A
+#define STRING_MAKE_PP(A) STRING_PP_NX(A)
+
+// This would create a string value from a "defined" location of the source code
+// Note that SOURCE_PATH_FROM_BUILD_ENV is taken from the build system
+#define BUILD_LOCATION_PATH STRING_MAKE_PP(SOURCE_PATH_FROM_BUILD_ENV)
+
 using namespace std;
 
 ABSL_DECLARE_FLAG(uint32_t, port);
@@ -92,10 +99,14 @@ bool HelpFlags(std::string_view f) {
 }
 
 string NormalizePaths(std::string_view path) {
-  if (absl::ConsumePrefix(&path, "../src/"))
+  const std::string FULL_PATH = BUILD_LOCATION_PATH;
+  const std::string FULL_PATH_SRC = FULL_PATH + "/src";
+  const std::string FULL_PATH_HELIO = FULL_PATH + "/helio";
+
+  if (absl::ConsumePrefix(&path, "../src/") || absl::ConsumePrefix(&path, FULL_PATH_SRC))
     return ColoredStr(TermColor::kGreen, path);
 
-  if (absl::ConsumePrefix(&path, "../"))
+  if (absl::ConsumePrefix(&path, "../") || absl::ConsumePrefix(&path, FULL_PATH_HELIO))
     return ColoredStr(TermColor::kYellow, path);
 
   if (absl::ConsumePrefix(&path, "_deps/"))
