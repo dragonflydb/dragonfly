@@ -41,6 +41,7 @@ extern "C" {
 #include "server/version.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
+#include "util/fibers/fiber_file.h"
 #include "util/uring/uring_file.h"
 
 using namespace std;
@@ -66,6 +67,7 @@ using absl::StrCat;
 using namespace facade;
 using strings::HumanReadableNumBytes;
 using util::ProactorBase;
+using util::fibers_ext::FiberQueueThreadPool;
 using util::http::StringResponse;
 
 namespace {
@@ -169,7 +171,8 @@ class LinuxWriteWrapper : public io::Sink {
 
 class RdbSnapshot {
  public:
-  RdbSnapshot() {}
+  RdbSnapshot(FiberQueueThreadPool* fq_tp) : fq_tp_(fq_tp) {
+  }
 
   error_code Start(bool single_shard, const std::string& path, const StringVec& lua_scripts);
   void StartInShard(EngineShard* shard);
@@ -187,12 +190,11 @@ class RdbSnapshot {
 
  private:
   bool started_ = false;
-
+  FiberQueueThreadPool* fq_tp_;
   std::unique_ptr<io::Sink> io_sink_;
   std::unique_ptr<RdbSaver> saver_;
   RdbTypeFreqMap freq_map_;
 };
-
 
 io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
   io::Result<size_t> res = lf_->WriteSome(v, len, offset_, 0);
@@ -203,15 +205,24 @@ io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
   return res;
 }
 
-error_code RdbSnapshot::Start(bool sharded_snapshot,
-                              const std::string& path, const StringVec& lua_scripts) {
-  auto res = uring::OpenLinux(path, kRdbWriteFlags, 0666);
-  if (!res) {
-    return res.error();
+error_code RdbSnapshot::Start(bool sharded_snapshot, const std::string& path,
+                              const StringVec& lua_scripts) {
+  bool is_direct = false;
+  if (fq_tp_) {  // EPOLL
+    auto res = util::OpenFiberWriteFile(path, fq_tp_);
+    if (!res)
+      return res.error();
+    io_sink_.reset(*res);
+  } else {
+    auto res = uring::OpenLinux(path, kRdbWriteFlags, 0666);
+    if (!res) {
+      return res.error();
+    }
+    io_sink_.reset(new LinuxWriteWrapper(res->release()));
+    is_direct = kRdbWriteFlags & O_DIRECT;
   }
 
-  io_sink_.reset(new LinuxWriteWrapper(res->release()));
-  saver_.reset(new RdbSaver(io_sink_.get(), sharded_snapshot, kRdbWriteFlags & O_DIRECT));
+  saver_.reset(new RdbSaver(io_sink_.get(), sharded_snapshot, is_direct));
 
   return saver_->SaveHeader(lua_scripts);
 }
@@ -222,6 +233,9 @@ error_code RdbSnapshot::SaveBody() {
 
 error_code RdbSnapshot::Close() {
   // TODO: to solve it in a more elegant way.
+  if (fq_tp_) {
+    return static_cast<io::WriteFile*>(io_sink_.get())->Close();
+  }
   return static_cast<LinuxWriteWrapper*>(io_sink_.get())->Close();
 }
 
@@ -330,6 +344,9 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
   dfly_cmd_.reset(new DflyCmd(main_listener, this));
 
   pb_task_ = shard_set->pool()->GetNextProactor();
+  if (pb_task_->GetKind() == ProactorBase::EPOLL) {
+    fq_threadpool_.reset(new FiberQueueThreadPool());
+  }
 
   // Unlike EngineShard::Heartbeat that runs independently in each shard thread,
   // this callback runs in a single thread and it aggregates globally stats from all the shards.
@@ -489,8 +506,14 @@ void ServerFamily::SnapshotScheduling(const SnapshotSpec&& spec) {
 }
 
 error_code ServerFamily::LoadRdb(const std::string& rdb_file) {
-  io::ReadonlyFileOrError res = uring::OpenRead(rdb_file);
   error_code ec;
+  io::ReadonlyFileOrError res;
+
+  if (fq_threadpool_) {
+    res = util::OpenFiberReadFile(rdb_file, fq_threadpool_.get());
+  } else {
+    res = uring::OpenRead(rdb_file);
+  }
 
   if (res) {
     io::FileSource fs(*res);
@@ -777,7 +800,7 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
       abs_path += shard_file;
 
       VLOG(1) << "Saving to " << abs_path;
-      snapshots[sid].reset(new RdbSnapshot);
+      snapshots[sid].reset(new RdbSnapshot(fq_threadpool_.get()));
       auto& snapshot = snapshots[sid];
       error_code local_ec = snapshot->Start(true, abs_path.generic_string(), lua_scripts);
       if (local_ec) {
@@ -800,7 +823,7 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
     path += filename;
     VLOG(1) << "Saving to " << path;
 
-    snapshots[0].reset(new RdbSnapshot);
+    snapshots[0].reset(new RdbSnapshot(fq_threadpool_.get()));
     ec = snapshots[0]->Start(false, path.generic_string(), lua_scripts);
 
     if (!ec) {
@@ -1104,12 +1127,15 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   Metrics m = GetMetrics();
 
   if (should_enter("SERVER")) {
+    ProactorBase::ProactorKind kind = ProactorBase::me()->GetKind();
+    const char* multiplex_api = (kind == ProactorBase::IOURING) ? "iouring" : "epoll";
+
     ADD_HEADER("# Server");
 
     append("redis_version", GetVersion());
     append("redis_mode", "standalone");
     append("arch_bits", 64);
-    append("multiplexing_api", "iouring");
+    append("multiplexing_api", multiplex_api);
     append("tcp_port", GetFlag(FLAGS_port));
 
     size_t uptime = m.uptime;

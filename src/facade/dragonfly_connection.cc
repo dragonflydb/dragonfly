@@ -22,8 +22,6 @@
 #include "util/tls/tls_socket.h"
 #endif
 
-#include "util/uring/uring_socket.h"
-
 ABSL_FLAG(bool, tcp_nodelay, false,
           "Configures dragonfly connections with socket option TCP_NODELAY");
 ABSL_FLAG(bool, http_admin_console, true, "If true allows accessing http console on main TCP port");
@@ -162,8 +160,8 @@ void Connection::OnShutdown() {
 void Connection::OnPreMigrateThread() {
   // If we migrating to another io_uring we should cancel any pending requests we have.
   if (break_poll_id_ != kuint32max) {
-    uring::UringSocket* us = static_cast<uring::UringSocket*>(socket_.get());
-    us->CancelPoll(break_poll_id_);
+    auto* ls = static_cast<LinuxSocketBase*>(socket_.get());
+    ls->CancelPoll(break_poll_id_);
     break_poll_id_ = kuint32max;
   }
 }
@@ -173,9 +171,9 @@ void Connection::OnPostMigrateThread() {
   if (breaker_cb_) {
     DCHECK_EQ(kuint32max, break_poll_id_);
 
-    uring::UringSocket* us = static_cast<uring::UringSocket*>(socket_.get());
+    auto* ls = static_cast<LinuxSocketBase*>(socket_.get());
     break_poll_id_ =
-        us->PollEvent(POLLERR | POLLHUP, [this](int32_t mask) { this->OnBreakCb(mask); });
+        ls->PollEvent(POLLERR | POLLHUP, [this](int32_t mask) { this->OnBreakCb(mask); });
   }
 }
 
@@ -242,8 +240,7 @@ void Connection::HandleRequests() {
     } else {
       cc_.reset(service_->CreateContext(peer, this));
 
-      // TODO: to move this interface to LinuxSocketBase so we won't need to cast.
-      uring::UringSocket* us = static_cast<uring::UringSocket*>(socket_.get());
+      auto* us = static_cast<LinuxSocketBase*>(socket_.get());
       if (breaker_cb_) {
         break_poll_id_ =
             us->PollEvent(POLLERR | POLLHUP, [this](int32_t mask) { this->OnBreakCb(mask); });

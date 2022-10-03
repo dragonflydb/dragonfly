@@ -163,6 +163,7 @@ class ServerFamily {
   std::atomic_bool is_saving_{false};
 
   util::fibers_ext::Done is_snapshot_done_;
+  std::unique_ptr<util::fibers_ext::FiberQueueThreadPool> fq_threadpool_;
 };
 
 }  // namespace dfly

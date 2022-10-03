@@ -37,7 +37,7 @@ OK
 1) "hello"
 127.0.0.1:6379> get hello
 "world"
-127.0.0.1:6379> 
+127.0.0.1:6379>
 ```
 
 ## Step 3
@@ -46,10 +46,6 @@ Continue being great and build your app with the power of DragonflyDB!
 
 ## Known issues
 
-#### `Error initializing io_uring`
-
-This likely means your kernel version is too low to run DragonflyDB. Make sure to install
-a kernel version that supports `io_uring`.
 
 ## More Build Options
 - [Docker Compose Deployment](/contrib/docker/)
