@@ -211,8 +211,7 @@ void DebugCmd::Load(string_view filename) {
     path = dir_path;
   }
 
-  // switches back to
-  ec = sf_.LoadRdb(path.generic_string());
+  ec = sf_.Load(path.generic_string()).get();
   if (ec) {
     LOG(INFO) << "Could not load file " << ec.message();
     return (*cntx_)->SendError(ec.message());

@@ -170,6 +170,7 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
         [&](Transaction* t, EngineShard* shard) {
           OpStatus st = FullSyncInShard(syncid, t, shard);
 
+          // TODO: POSSIBLE BUG why is status not overwritten?
           lock_guard lk(mu);
           status = st;
           return OpStatus::OK;
@@ -317,7 +318,7 @@ OpStatus DflyCmd::FullSyncInShard(uint32_t syncid, Transaction* t, EngineShard* 
   Connection* conn = shard_it->second.conn;
   lk.unlock();
 
-  unique_ptr<RdbSaver> saver = make_unique<RdbSaver>(conn->socket(), true /* single shard */,
+  unique_ptr<RdbSaver> saver = make_unique<RdbSaver>(conn->socket(), SaveMode::SINGLE_SHARD /* single shard */,
                                                      false /* do not align writes */);
 
   // Enable in-memory journaling. Please note that we need further enable it on all threads.
