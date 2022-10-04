@@ -135,14 +135,15 @@ void EngineShard::DestroyThreadLocal() {
 // Is called by Transaction::ExecuteAsync in order to run transaction tasks.
 // Only runs in its own thread.
 void EngineShard::PollExecution(const char* context, Transaction* trans) {
-  VLOG(2) << "PollExecution " << context << " " << (trans ? trans->DebugId() : "")
-          << " " << txq_.size() << " " << continuation_trans_;
+  VLOG(2) << "PollExecution " << context << " " << (trans ? trans->DebugId() : "") << " "
+          << txq_.size() << " " << continuation_trans_;
 
   ShardId sid = shard_id();
 
   uint16_t trans_mask = trans ? trans->GetLocalMask(sid) : 0;
   if (trans_mask & Transaction::AWAKED_Q) {
-    DCHECK(continuation_trans_ == nullptr);
+    DCHECK(continuation_trans_ == nullptr)
+        << continuation_trans_->DebugId() << " when polling " << trans->DebugId();
 
     CHECK_EQ(committed_txid_, trans->notify_txid());
     bool keep = trans->RunInShard(this);
