@@ -2,9 +2,8 @@
 
 ## Running the server
 
-Dragonfly runs on linux. It uses relatively new linux specific [io-uring API](https://github.com/axboe/liburing)
-for I/O, hence it requires `Linux verion 5.10` or later.
-Debian/Bullseye, `Ubuntu 20.04.4` or later fit these requirements.
+Dragonfly runs on linux. We advice running it on linux version 5.11 or later
+but you can also run Dragonfly on older kernels as well.
 
 ### WARNING: Building from source on older kernels WILL NOT WORK.
 
@@ -58,7 +57,7 @@ OK
 1) "hello"
 127.0.0.1:6379> get hello
 "world"
-127.0.0.1:6379> 
+127.0.0.1:6379>
 ```
 
 ## Step 6

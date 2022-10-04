@@ -26,6 +26,7 @@
 #include "server/version.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
+#include "util/epoll/epoll_pool.h"
 #include "util/uring/uring_pool.h"
 #include "util/varz.h"
 
@@ -51,6 +52,10 @@ ABSL_FLAG(string, pidfile, "", "If not empty - server writes its pid into the fi
 ABSL_FLAG(string, unixsocket, "",
           "If not empty - specifies path for the Unis socket that will "
           "be used for listening for incoming connections.");
+
+ABSL_FLAG(bool, force_epoll, false,
+          "If true - uses linux epoll engine underneath."
+          "Can fit for kernels older than 5.10.");
 
 using namespace util;
 using namespace facade;
@@ -193,6 +198,42 @@ bool CreatePidFile(const string& path) {
   return true;
 }
 
+bool ShouldUseEpollAPI(const base::sys::KernelVersion& kver) {
+  if (GetFlag(FLAGS_force_epoll))
+    return true;
+
+  if (kver.kernel < 5 || (kver.kernel == 5 && kver.major < 10)) {
+    LOG(WARNING) << "Kernel is older than 5.10, switching to epoll engine.";
+    return true;
+  }
+
+  struct io_uring ring;
+  io_uring_params params;
+  memset(&params, 0, sizeof(params));
+
+  int iouring_res = io_uring_queue_init_params(1024, &ring, &params);
+
+  if (iouring_res == 0) {
+    io_uring_queue_exit(&ring);
+    return false;
+  }
+
+  iouring_res = -iouring_res;
+
+  if (iouring_res == ENOSYS) {
+    LOG(WARNING) << "iouring API is not supported. switching to epoll.";
+  } else if (iouring_res == ENOMEM) {
+    LOG(WARNING) << "io_uring does not have enough memory. That can happen when your "
+                    "max locked memory is too limited. If you run via docker, "
+                    "try adding '--ulimit memlock=-1' to \"docker run\" command."
+                    "Meanwhile, switching to epoll";
+  } else {
+    LOG(WARNING) << "Weird error " << iouring_res << " switching to epoll";
+  }
+
+  return true;
+}
+
 }  // namespace
 }  // namespace dfly
 
@@ -237,27 +278,10 @@ Usage: dragonfly [FLAGS]
   CHECK_GT(GetFlag(FLAGS_port), 0u);
   mi_stats_reset();
 
-  base::sys::KernelVersion kver;
-  base::sys::GetKernelVersion(&kver);
-
-  if (kver.kernel < 5 || (kver.kernel == 5 && kver.major < 10)) {
-    LOG(ERROR) << "Kernel 5.10 or later is supported. Exiting...";
-    return 1;
-  }
-
-  int iouring_res = io_uring_queue_init_params(0, nullptr, nullptr);
-  if (-iouring_res == ENOSYS) {
-    LOG(ERROR) << "iouring system call interface is not supported. Exiting...";
-    return 1;
-  }
-
   if (GetFlag(FLAGS_dbnum) > dfly::kMaxDbId) {
     LOG(ERROR) << "dbnum is too big. Exiting...";
     return 1;
   }
-
-  CHECK_LT(kver.major, 99u);
-  dfly::kernel_version = kver.kernel * 100 + kver.major;
 
   string pidfile_path = GetFlag(FLAGS_pidfile);
   if (!pidfile_path.empty()) {
@@ -287,14 +311,28 @@ Usage: dragonfly [FLAGS]
   mi_option_enable(mi_option_show_errors);
   mi_option_set(mi_option_max_warnings, 0);
 
-  uring::UringPool pp{1024};
-  pp.Run();
+  base::sys::KernelVersion kver;
+  base::sys::GetKernelVersion(&kver);
 
-  AcceptServer acceptor(&pp);
+  CHECK_LT(kver.major, 99u);
+  dfly::kernel_version = kver.kernel * 100 + kver.major;
 
-  int res = dfly::RunEngine(&pp, &acceptor) ? 0 : -1;
+  unique_ptr<util::ProactorPool> pool;
 
-  pp.Stop();
+  bool use_epoll = ShouldUseEpollAPI(kver);
+  if (use_epoll) {
+    pool.reset(new epoll::EpollPool);
+  } else {
+    pool.reset(new uring::UringPool(1024));  // 1024 - iouring queue size.
+  }
+
+  pool->Run();
+
+  AcceptServer acceptor(pool.get());
+
+  int res = dfly::RunEngine(pool.get(), &acceptor) ? 0 : -1;
+
+  pool->Stop();
 
   if (!pidfile_path.empty()) {
     unlink(pidfile_path.c_str());

@@ -81,9 +81,8 @@ For more info about memory efficiency in Dragonfly see [dashtable doc](/docs/das
 
 ## Running the server
 
-Dragonfly runs on linux. It uses relatively new linux specific [io-uring API](https://github.com/axboe/liburing)
-for I/O, hence it requires Linux version 5.10 or later.
-Debian/Bullseye, Ubuntu 20.04.4 or later fit these requirements.
+Dragonfly runs on linux. We advice running it on linux version 5.11 or later
+but you can also run Dragonfly on older kernels as well.
 
 
 ### With docker:
@@ -141,9 +140,9 @@ In addition, it has Dragonfly specific arguments options:
    `keys` is a dangerous command. We truncate its result to avoid blowup in memory when fetching too many keys.
  * `dbnum` - maximum number of supported databases for `select`.
  * `cache_mode` - see [Cache](#novel-cache-design) section below.
- * `hz` - key expiry evaluation frequency. Default is 1000. Lower frequency uses less cpu when 
+ * `hz` - key expiry evaluation frequency. Default is 1000. Lower frequency uses less cpu when
    idle at the expense of precision in key eviction.
- * `save_schedule` - glob spec for the UTC time to save a snapshot which matches HH:MM (24h time). default: "" 
+ * `save_schedule` - glob spec for the UTC time to save a snapshot which matches HH:MM (24h time). default: ""
  * `keys_output_limit` -  Maximum number of keys output by keys command. default: 8192
 
 

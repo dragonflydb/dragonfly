@@ -25,7 +25,7 @@ If applicable, add screenshots to help explain your problem.
 
 **Environment (please complete the following information):**
  - OS: [ubuntu 20.04]
- - Kernel: [MUST BE 5.10 or greater] # Command: `uname -a`
+ - Kernel: # Command: `uname -a`
  - Containerized?: [Bare Metal, Docker, Docker Compose, Docker Swarm, Kubernetes, Other]
  - Dragonfly Version: [e.g. 0.3.0]
 
