@@ -29,6 +29,8 @@ using namespace facade;
 
 namespace {
 
+OpStatus OpPersist(const OpArgs& op_args, string_view key);
+
 class Renamer {
  public:
   Renamer(ShardId source_id) : src_sid_(source_id) {
@@ -176,6 +178,22 @@ struct ScanOpts {
 
   unsigned bucket_id = UINT_MAX;
 };
+
+OpStatus OpPersist(const OpArgs& op_args, string_view key) {
+  auto& db_slice = op_args.shard->db_slice();
+  auto [it, expire_it] = db_slice.FindExt(op_args.db_cntx, key);
+
+  if (!IsValid(it)) {
+    return OpStatus::KEY_NOTFOUND;
+  } else {
+    if (IsValid(expire_it)) {
+      // The SKIPPED not really used, just placeholder for error
+      return db_slice.UpdateExpire(op_args.db_cntx.db_index, it, 0) ? OpStatus::OK
+                                                                    : OpStatus::SKIPPED;
+    }
+    return OpStatus::OK;  // fall though - this is the default
+  }
+}
 
 bool ScanCb(const OpArgs& op_args, PrimeIterator it, const ScanOpts& opts, StringVec* res) {
   auto& db_slice = op_args.shard->db_slice();
@@ -346,6 +364,15 @@ void GenericFamily::Exists(CmdArgList args, ConnectionContext* cntx) {
   CHECK_EQ(OpStatus::OK, status);
 
   return (*cntx)->SendLong(result.load(memory_order_release));
+}
+
+void GenericFamily::Persist(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) { return OpPersist(t->GetOpArgs(shard), key); };
+
+  OpStatus status = cntx->transaction->ScheduleSingleHop(move(cb));
+  (*cntx)->SendLong(status == OpStatus::OK);
 }
 
 void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
@@ -1036,6 +1063,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
             << CI{"EXISTS", CO::READONLY | CO::FAST, -2, 1, -1, 1}.HFUNC(Exists)
             << CI{"EXPIRE", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Expire)
             << CI{"EXPIREAT", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(ExpireAt)
+            << CI{"PERSIST", CO::WRITE | CO::FAST, 2, 1, 1, 1}.HFUNC(Persist)
             << CI{"KEYS", CO::READONLY, 2, 0, 0, 0}.HFUNC(Keys)
             << CI{"PEXPIREAT", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(PexpireAt)
             << CI{"RENAME", CO::WRITE, 3, 1, 2, 1}.HFUNC(Rename)

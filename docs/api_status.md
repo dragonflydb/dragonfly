@@ -177,7 +177,7 @@ with respect to Memcached and Redis APIs.
   - [X] EVAL
   - [X] EVALSHA
   - [ ] OBJECT
-  - [ ] PERSIST
+  - [x] PERSIST
   - [X] PTTL
   - [ ] RESTORE
   - [X] SCRIPT LOAD/EXISTS
