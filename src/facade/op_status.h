@@ -27,6 +27,8 @@ enum class OpStatus : uint16_t {
   INVALID_NUMERIC_RESULT,
 };
 
+const char* DebugString(OpStatus op);
+
 class OpResultBase {
  public:
   OpResultBase(OpStatus st = OpStatus::OK) : st_(st) {
@@ -47,6 +49,8 @@ class OpResultBase {
   bool ok() const {
     return st_ == OpStatus::OK;
   }
+
+  const char* DebugFormat() const;
 
  private:
   OpStatus st_;
@@ -97,7 +101,7 @@ inline bool operator==(OpStatus st, const OpResultBase& ob) {
 namespace std {
 
 template <typename T> std::ostream& operator<<(std::ostream& os, const facade::OpResult<T>& res) {
-  os << int(res.status());
+  os << res.status();
   return os;
 }
 

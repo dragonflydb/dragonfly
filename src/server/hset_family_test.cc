@@ -118,4 +118,43 @@ TEST_F(HSetFamilyTest, HIncr) {
   EXPECT_THAT(resp, ErrArg("hash value is not an integer"));
 }
 
+TEST_F(HSetFamilyTest, HScan) {
+  for (int i = 0; i < 10; i++) {
+    Run({"HSET", "myhash", absl::StrCat("Field-", i), absl::StrCat("Value-", i)});
+  }
+
+  // Note that even though this limit by 4, it would return more because
+  // all fields are on listpack
+  auto resp = Run({"hscan", "myhash", "0", "count", "4"});
+  EXPECT_THAT(resp, ArrLen(2));
+  auto vec = StrArray(resp.GetVec()[1]);
+  EXPECT_EQ(vec.size(), 20);
+  EXPECT_THAT(vec, Each(AnyOf(StartsWith("Field"), StartsWith("Value"))));
+
+  // Now run with filter on the results - we are expecting to not getting
+  // any result at this point
+  resp = Run({"hscan", "myhash", "0", "match", "*x*"});  // nothing should match this
+  EXPECT_THAT(resp, ArrLen(2));
+  vec = StrArray(resp.GetVec()[1]);
+  EXPECT_EQ(vec.size(), 0);
+
+  // now we will do a positive match - anything that has 1 on it
+  resp = Run({"hscan", "myhash", "0", "match", "*1*"});
+  EXPECT_THAT(resp, ArrLen(2));
+  vec = StrArray(resp.GetVec()[1]);
+  EXPECT_EQ(vec.size(), 2);  // key/value = 2
+
+  // Test with large hash to see that count limit the number of entries
+  for (int i = 0; i < 200; i++) {
+    Run({"HSET", "largehash", absl::StrCat("KeyNum-", i), absl::StrCat("KeyValue-", i)});
+  }
+  resp = Run({"hscan", "largehash", "0", "count", "20"});
+  EXPECT_THAT(resp, ArrLen(2));
+  vec = StrArray(resp.GetVec()[1]);
+
+  // See https://redis.io/commands/scan/ --> "The COUNT option", for why this cannot be exact
+  EXPECT_GT(vec.size(), 40);  // This should be larger than (20 * 2) and less than about 50
+  EXPECT_LT(vec.size(), 60);
+}
+
 }  // namespace dfly
