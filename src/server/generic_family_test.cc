@@ -282,21 +282,28 @@ TEST_F(GenericFamilyTest, Sort) {
   // numeric
   ASSERT_THAT(Run({"sort", "list-1"}).GetVec(), ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
   // string
-  ASSERT_THAT(Run({"sort", "list-1", "ALPHA"}).GetVec(), ElementsAre("1.2", "10.1", "2.20", "200", "3.5"));
+  ASSERT_THAT(Run({"sort", "list-1", "ALPHA"}).GetVec(),
+              ElementsAre("1.2", "10.1", "2.20", "200", "3.5"));
   // desc numeric
-  ASSERT_THAT(Run({"sort", "list-1", "DESC"}).GetVec(), ElementsAre("200", "10.1", "3.5", "2.20", "1.2"));
+  ASSERT_THAT(Run({"sort", "list-1", "DESC"}).GetVec(),
+              ElementsAre("200", "10.1", "3.5", "2.20", "1.2"));
   // desc strig
-  ASSERT_THAT(Run({"sort", "list-1", "DESC", "ALPHA"}).GetVec(), ElementsAre("3.5", "200", "2.20", "10.1", "1.2"));
+  ASSERT_THAT(Run({"sort", "list-1", "DESC", "ALPHA"}).GetVec(),
+              ElementsAre("3.5", "200", "2.20", "10.1", "1.2"));
   // limits
-  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "0", "5"}).GetVec(), ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
-  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "0", "10"}).GetVec(), ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
+  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "0", "5"}).GetVec(),
+              ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
+  ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "0", "10"}).GetVec(),
+              ElementsAre("1.2", "2.20", "3.5", "10.1", "200"));
   ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "2", "2"}).GetVec(), ElementsAre("3.5", "10.1"));
   ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "1", "1"}), "2.20");
   ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "4", "2"}), "200");
   ASSERT_THAT(Run({"sort", "list-1", "LIMIT", "5", "2"}), ArrLen(0));
   // limits desc
-  ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "0", "5"}).GetVec(), ElementsAre("200", "10.1", "3.5", "2.20", "1.2"));
-  ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "2", "2"}).GetVec(), ElementsAre("3.5", "2.20"));
+  ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "0", "5"}).GetVec(),
+              ElementsAre("200", "10.1", "3.5", "2.20", "1.2"));
+  ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "2", "2"}).GetVec(),
+              ElementsAre("3.5", "2.20"));
   ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "1", "1"}), "10.1");
   ASSERT_THAT(Run({"sort", "list-1", "DESC", "LIMIT", "5", "2"}), ArrLen(0));
 
@@ -304,9 +311,12 @@ TEST_F(GenericFamilyTest, Sort) {
   Run({"del", "set-1"});
   Run({"sadd", "set-1", "5.3", "4.4", "60", "99.9", "100", "9"});
   ASSERT_THAT(Run({"sort", "set-1"}).GetVec(), ElementsAre("4.4", "5.3", "9", "60", "99.9", "100"));
-  ASSERT_THAT(Run({"sort", "set-1", "ALPHA"}).GetVec(), ElementsAre("100", "4.4", "5.3", "60", "9", "99.9"));
-  ASSERT_THAT(Run({"sort", "set-1", "DESC"}).GetVec(), ElementsAre("100", "99.9", "60", "9", "5.3", "4.4"));
-  ASSERT_THAT(Run({"sort", "set-1", "DESC", "ALPHA"}).GetVec(), ElementsAre("99.9", "9", "60", "5.3", "4.4", "100"));
+  ASSERT_THAT(Run({"sort", "set-1", "ALPHA"}).GetVec(),
+              ElementsAre("100", "4.4", "5.3", "60", "9", "99.9"));
+  ASSERT_THAT(Run({"sort", "set-1", "DESC"}).GetVec(),
+              ElementsAre("100", "99.9", "60", "9", "5.3", "4.4"));
+  ASSERT_THAT(Run({"sort", "set-1", "DESC", "ALPHA"}).GetVec(),
+              ElementsAre("99.9", "9", "60", "5.3", "4.4", "100"));
 
   // Test intset sort
   Run({"del", "intset-1"});
@@ -352,6 +362,18 @@ TEST_F(GenericFamilyTest, Time) {
     int64_t val1 = get<int64_t>(resp.GetVec()[1].GetVec()[i].u);
     EXPECT_EQ(val0, val1);
   }
+}
+
+TEST_F(GenericFamilyTest, Persist) {
+  auto resp = Run({"set", "mykey", "somevalue"});
+  EXPECT_EQ(resp, "OK");
+  // Key without expiration time - return 1
+  EXPECT_EQ(1, CheckedInt({"persist", "mykey"}));
+  // set expiration time and try again
+  resp = Run({"EXPIRE", "mykey", "10"});
+  EXPECT_EQ(10, CheckedInt({"TTL", "mykey"}));
+  EXPECT_EQ(1, CheckedInt({"persist", "mykey"}));
+  EXPECT_EQ(-1, CheckedInt({"TTL", "mykey"}));
 }
 
 }  // namespace dfly

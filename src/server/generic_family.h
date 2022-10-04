@@ -46,6 +46,7 @@ class GenericFamily {
   static void Exists(CmdArgList args, ConnectionContext* cntx);
   static void Expire(CmdArgList args, ConnectionContext* cntx);
   static void ExpireAt(CmdArgList args, ConnectionContext* cntx);
+  static void Persist(CmdArgList args, ConnectionContext* cntx);
   static void Keys(CmdArgList args, ConnectionContext* cntx);
   static void PexpireAt(CmdArgList args, ConnectionContext* cntx);
   static void Stick(CmdArgList args, ConnectionContext* cntx);
