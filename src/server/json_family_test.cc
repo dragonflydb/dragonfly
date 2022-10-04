@@ -571,4 +571,119 @@ TEST_F(JsonFamilyTest, ObjKeys) {
   EXPECT_THAT(arr2[4], ArgType(RespExpr::NIL_ARRAY));
 }
 
+TEST_F(JsonFamilyTest, StrAppend) {
+  string json = R"(
+    {"a":{"a":"a"}, "b":{"a":"a", "b":1}, "c":{"a":"a", "b":"bb"}, "d":{"a":1, "b":"b", "c":3}}
+  )";
+
+  auto resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.STRAPPEND", "json", "$.a.a", "a", "b"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  resp = Run({"GET", "json"});
+  EXPECT_EQ(
+      resp,
+      R"({"a":{"a":"aab"},"b":{"a":"a","b":1},"c":{"a":"a","b":"bb"},"d":{"a":1,"b":"b","c":3}})");
+
+  resp = Run({"JSON.STRAPPEND", "json", "$.a.*", "a"});
+  EXPECT_THAT(resp, IntArg(4));
+
+  resp = Run({"GET", "json"});
+  EXPECT_EQ(
+      resp,
+      R"({"a":{"a":"aaba"},"b":{"a":"a","b":1},"c":{"a":"a","b":"bb"},"d":{"a":1,"b":"b","c":3}})");
+
+  resp = Run({"JSON.STRAPPEND", "json", "$.b.*", "a"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(2), ArgType(RespExpr::NIL)));
+
+  resp = Run({"GET", "json"});
+  EXPECT_EQ(
+      resp,
+      R"({"a":{"a":"aaba"},"b":{"a":"aa","b":1},"c":{"a":"a","b":"bb"},"d":{"a":1,"b":"b","c":3}})");
+
+  resp = Run({"JSON.STRAPPEND", "json", "$.c.*", "a"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(2), IntArg(3)));
+
+  resp = Run({"GET", "json"});
+  EXPECT_EQ(
+      resp,
+      R"({"a":{"a":"aaba"},"b":{"a":"aa","b":1},"c":{"a":"aa","b":"bba"},"d":{"a":1,"b":"b","c":3}})");
+
+  resp = Run({"JSON.STRAPPEND", "json", "$.c.b", "a"});
+  EXPECT_THAT(resp, IntArg(4));
+
+  resp = Run({"GET", "json"});
+  EXPECT_EQ(
+      resp,
+      R"({"a":{"a":"aaba"},"b":{"a":"aa","b":1},"c":{"a":"aa","b":"bbaa"},"d":{"a":1,"b":"b","c":3}})");
+
+  resp = Run({"JSON.STRAPPEND", "json", "$.d.*", "a"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre(ArgType(RespExpr::NIL), IntArg(2), ArgType(RespExpr::NIL)));
+
+  resp = Run({"GET", "json"});
+  EXPECT_EQ(
+      resp,
+      R"({"a":{"a":"aaba"},"b":{"a":"aa","b":1},"c":{"a":"aa","b":"bbaa"},"d":{"a":1,"b":"ba","c":3}})");
+
+  json = R"(
+    {"a":"foo", "inner": {"a": "bye"}, "inner1": {"a": 7}}
+  )";
+
+  resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.STRAPPEND", "json", "$..a", "bar"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(6), IntArg(6), ArgType(RespExpr::NIL)));
+
+  resp = Run({"GET", "json"});
+  EXPECT_EQ(resp, R"({"a":"foobar","inner":{"a":"byebar"},"inner1":{"a":7}})");
+}
+
+TEST_F(JsonFamilyTest, Clear) {
+  string json = R"(
+    [[], [0], [0,1], [0,1,2], 1, true, null, "d"]
+  )";
+
+  auto resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.CLEAR", "json", "$[*]"});
+  EXPECT_THAT(resp, IntArg(5));
+
+  resp = Run({"GET", "json"});
+  EXPECT_EQ(resp, R"([[],[],[],[],0,true,null,"d"])");
+
+  resp = Run({"JSON.CLEAR", "json", "$"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"GET", "json"});
+  EXPECT_EQ(resp, R"([])");
+
+  json = R"(
+    {"children": ["Yossi", "Rafi", "Benni", "Avraham", "Yehoshua", "Moshe"]}
+  )";
+
+  resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.CLEAR", "json", "$.children"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"GET", "json"});
+  EXPECT_EQ(resp, R"({"children":[]})");
+
+  resp = Run({"JSON.CLEAR", "json", "$"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"GET", "json"});
+  EXPECT_EQ(resp, R"({})");
+}
+
 }  // namespace dfly

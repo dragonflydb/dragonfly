@@ -518,7 +518,118 @@ OpResult<vector<StringVec>> OpObjKeys(const OpArgs& op_args, string_view key,
   return vec;
 }
 
+// Retruns array of string lengths after a successful operation.
+OpResult<vector<OptSizeT>> OpStrAppend(const OpArgs& op_args, string_view key, string_view path,
+                                       const vector<string_view>& strs) {
+  OpResult<json> result = GetJson(op_args, key);
+  if (!result) {
+    return result.status();
+  }
+
+  vector<OptSizeT> vec;
+  auto cb = [&](const string& path, json& val) {
+    if (val.is_string()) {
+      string new_val = val.as_string();
+      for (auto& str : strs) {
+        new_val += str;
+      }
+
+      val = new_val;
+      vec.emplace_back(new_val.size());
+    } else {
+      vec.emplace_back(nullopt);
+    }
+  };
+
+  json j = result.value();
+  error_code ec = JsonReplace(j, path, cb);
+  if (ec) {
+    VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
+    return OpStatus::SYNTAX_ERR;
+  }
+
+  SetString(op_args, key, j.as_string());
+  return vec;
+}
+
+// Returns the numbers of values cleared.
+// Clears containers(arrays or objects) and zeroing numbers.
+OpResult<long> OpClear(const OpArgs& op_args, string_view key, string_view path) {
+  OpResult<json> result = GetJson(op_args, key);
+  if (!result) {
+    return result.status();
+  }
+
+  long clear_items = 0;
+  auto cb = [&clear_items](const string& path, json& val) {
+    if (!(val.is_object() || val.is_array() || val.is_number())) {
+      return;
+    }
+
+    if (val.is_object()) {
+      val.erase(val.object_range().begin(), val.object_range().end());
+    } else if (val.is_array()) {
+      val.erase(val.array_range().begin(), val.array_range().end());
+    } else if (val.is_number()) {
+      val = 0;
+    }
+
+    clear_items += 1;
+  };
+
+  json j = result.value();
+  error_code ec = JsonReplace(j, path, cb);
+  if (ec) {
+    VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
+    return OpStatus::SYNTAX_ERR;
+  }
+
+  SetString(op_args, key, j.as_string());
+  return clear_items;
+}
+
 }  // namespace
+
+void JsonFamily::Clear(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view path = ArgS(args, 2);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpClear(t->GetOpArgs(shard), key, path);
+  };
+
+  Transaction* trans = cntx->transaction;
+  OpResult<long> result = trans->ScheduleSingleHopT(move(cb));
+
+  if (result) {
+    (*cntx)->SendLong(*result);
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
+
+void JsonFamily::StrAppend(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view path = ArgS(args, 2);
+
+  vector<string_view> strs;
+  for (size_t i = 3; i < args.size(); ++i) {
+    strs.emplace_back(ArgS(args, i));
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpStrAppend(t->GetOpArgs(shard), key, path, strs);
+  };
+
+  Transaction* trans = cntx->transaction;
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+
+  if (result) {
+    PrintOptVec(cntx, result);
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
 
 void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
@@ -803,7 +914,11 @@ void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.NUMMULTBY", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1}.HFUNC(
       NumMultBy);
   *registry << CI{"JSON.DEL", CO::WRITE, -2, 1, 1, 1}.HFUNC(Del);
+  *registry << CI{"JSON.FORGET", CO::WRITE, -2, 1, 1, 1}.HFUNC(Del);  // An alias of JSON.DEL.
   *registry << CI{"JSON.OBJKEYS", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ObjKeys);
+  *registry << CI{"JSON.STRAPPEND", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1}.HFUNC(
+      StrAppend);
+  *registry << CI{"JSON.CLEAR", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(Clear);
 }
 
 }  // namespace dfly
