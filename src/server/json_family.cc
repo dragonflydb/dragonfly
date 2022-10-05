@@ -30,6 +30,7 @@ using namespace jsoncons;
 using JsonExpression = jsonpath::jsonpath_expression<json>;
 using OptBool = optional<bool>;
 using OptSizeT = optional<size_t>;
+using OptString = optional<string>;
 using JsonReplaceCb = function<void(const string&, json&)>;
 using CI = CommandId;
 
@@ -588,7 +589,93 @@ OpResult<long> OpClear(const OpArgs& op_args, string_view key, string_view path)
   return clear_items;
 }
 
+// Returns string vector that represents the pop out values.
+OpResult<vector<OptString>> OpArrPop(const OpArgs& op_args, string_view key, string_view path,
+                                     int index) {
+  OpResult<json> result = GetJson(op_args, key);
+  if (!result) {
+    return result.status();
+  }
+
+  vector<OptString> vec;
+  auto cb = [&](const string& path, json& val) {
+    if (!val.is_array() || val.empty()) {
+      vec.emplace_back(nullopt);
+      return;
+    }
+
+    size_t removal_index;
+    if (index < 0) {
+      int temp_index = index + val.size();
+      removal_index = abs(temp_index);
+    } else {
+      removal_index = index;
+    }
+
+    if (removal_index >= val.size()) {
+      removal_index %= val.size();  // rounded to the array boundaries.
+    }
+
+    auto it = std::next(val.array_range().begin(), removal_index);
+    ostringstream os;
+    os << pretty_print(*it);
+    vec.emplace_back(os.str());
+    val.erase(it);
+  };
+
+  json j = result.value();
+  error_code ec = JsonReplace(j, path, cb);
+  if (ec) {
+    VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
+    return OpStatus::SYNTAX_ERR;
+  }
+
+  SetString(op_args, key, j.as_string());
+  return vec;
+}
+
 }  // namespace
+
+void JsonFamily::ArrPop(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view path = ArgS(args, 2);
+  int index = -1;
+
+  if (args.size() >= 4) {
+    if (!absl::SimpleAtoi(ArgS(args, 3), &index)) {
+      VLOG(1) << "Failed to convert the following value to numeric, pop out the last item"
+              << ArgS(args, 3);
+    }
+  }
+
+  error_code ec;
+  JsonExpression expression = jsonpath::make_expression<json>(path, ec);
+
+  if (ec) {
+    VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
+    (*cntx)->SendError(kSyntaxErr);
+    return;
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpArrPop(t->GetOpArgs(shard), key, path, index);
+  };
+
+  Transaction* trans = cntx->transaction;
+  OpResult<vector<OptString>> result = trans->ScheduleSingleHopT(move(cb));
+  if (result) {
+    (*cntx)->StartArray(result->size());
+    for (auto& it : *result) {
+      if (!it) {
+        (*cntx)->SendNull();
+      } else {
+        (*cntx)->SendSimpleString(*it);
+      }
+    }
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
 
 void JsonFamily::Clear(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
@@ -919,6 +1006,7 @@ void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.STRAPPEND", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1}.HFUNC(
       StrAppend);
   *registry << CI{"JSON.CLEAR", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(Clear);
+  *registry << CI{"JSON.ARRPOP", CO::WRITE | CO::DENYOOM | CO::FAST, -3, 1, 1, 1}.HFUNC(ArrPop);
 }
 
 }  // namespace dfly
