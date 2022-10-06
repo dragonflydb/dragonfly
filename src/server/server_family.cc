@@ -31,6 +31,7 @@ extern "C" {
 #include "server/error.h"
 #include "server/journal/journal.h"
 #include "server/main_service.h"
+#include "server/memory_cmd.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
 #include "server/replica.h"
@@ -1015,13 +1016,10 @@ void ServerFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::Memory(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[1]);
-  string_view sub_cmd = ArgS(args, 1);
-  if (sub_cmd == "USAGE") {
-    return (*cntx)->SendLong(1);
-  }
 
-  string err = UnknownSubCmd(sub_cmd, "MEMORY");
-  return (*cntx)->SendError(err, kSyntaxErrType);
+  MemoryCmd mem_cmd{this, cntx};
+
+  return mem_cmd.Run(args);
 }
 
 void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
