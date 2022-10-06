@@ -24,7 +24,7 @@ cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib strings_lib html_l
          absl::random_random TRDP::jsoncons)
 
 add_library(dfly_test_lib test_utils.cc)
-cxx_link(dfly_test_lib dragonfly_lib facade_test gtest_main_ext)
+cxx_link(dfly_test_lib dragonfly_lib epoll_fiber_lib facade_test gtest_main_ext)
 
 cxx_test(dragonfly_test dfly_test_lib LABELS DFLY)
 cxx_test(generic_family_test dfly_test_lib LABELS DFLY)
