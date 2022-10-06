@@ -387,4 +387,16 @@ TEST_F(StringFamilyTest, SetPxAtExAt) {
   EXPECT_EQ(Run({"get", "foo2"}), "abc");
 }
 
+TEST_F(StringFamilyTest, GetDel) {
+  auto resp = Run({"set", "foo", "bar"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"getdel", "foo"});
+  // foo's value
+  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
+
+  resp = Run({"get", "foo"});
+  ASSERT_THAT(resp, ArgType(RespExpr::NIL));
+}
+
 }  // namespace dfly

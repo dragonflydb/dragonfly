@@ -3,6 +3,7 @@
 //
 
 #include "server/string_family.h"
+#include "server/generic_family.h"
 
 extern "C" {
 #include "redis/object.h"
@@ -597,6 +598,42 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void StringFamily::GetDel(CmdArgList args, ConnectionContext* cntx) {
+  get_qps.Inc();
+
+  string_view key = ArgS(args, 1);
+
+  auto get_cb = [&](Transaction* t, EngineShard* shard) { return OpGet(t->GetOpArgs(shard), key); };
+
+  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
+
+  Transaction* trans = cntx->transaction;
+  OpResult<string> result = trans->ScheduleSingleHopT(std::move(get_cb));
+
+  if (result) {
+    DVLOG(1) << "GET " << trans->DebugId() << ": " << key << " " << result.value();
+    (*cntx)->SendBulkString(*result);
+
+    auto del_cb = [](const Transaction* t, EngineShard* shard) {
+      ArgSlice arg_slice = t->ShardArgsInShard(shard->shard_id());
+      GenericFamily::OpDel(t->GetOpArgs(shard), arg_slice);
+      return OpStatus::OK;
+    };
+
+    OpStatus status = trans->ScheduleSingleHop(std::move(del_cb));
+    CHECK_EQ(OpStatus::OK, status);
+  } else {
+    switch (result.status()) {
+      case OpStatus::WRONG_TYPE:
+        (*cntx)->SendError(kWrongTypeErr);
+        break;
+      default:
+        DVLOG(1) << "GET " << key << " nil";
+        (*cntx)->SendNull();
+    }
+  }
+}
+
 void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
   string_view value = ArgS(args, 2);
@@ -1038,6 +1075,7 @@ void StringFamily::Register(CommandRegistry* registry) {
             << CI{"INCRBYFLOAT", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(IncrByFloat)
             << CI{"DECRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(DecrBy)
             << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Get)
+            << CI{"GETDEL", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(GetDel)
             << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(GetSet)
             << CI{"MGET", CO::READONLY | CO::FAST | CO::REVERSE_MAPPING, -2, 1, -1, 1}.HFUNC(MGet)
             << CI{"MSET", CO::WRITE | CO::DENYOOM, -3, 1, -1, 2}.HFUNC(MSet)
