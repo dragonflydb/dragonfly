@@ -211,8 +211,8 @@ void DebugCmd::Load(string_view filename) {
     path = dir_path;
   }
 
-  ec = sf_.Load(path.generic_string()).get();
-  if (ec) {
+  auto fut_ec = sf_.Load(path.generic_string());
+  if (fut_ec.valid() && !(ec = fut_ec.get())) {
     LOG(INFO) << "Could not load file " << ec.message();
     return (*cntx_)->SendError(ec.message());
   }

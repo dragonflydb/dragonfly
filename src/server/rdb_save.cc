@@ -870,11 +870,20 @@ void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {
 RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes) {
   CHECK_NOTNULL(sink);
 
-  int size = 0;
-  if (save_mode == SaveMode::SINGLE_SHARD) size = 1;
-  else if (save_mode == SaveMode::RDB) size = shard_set->size();
+  int producer_count = 0;
+  switch (save_mode) {
+    case SaveMode::SUMMARY:
+      producer_count = 0;
+      break;
+    case SaveMode::SINGLE_SHARD:
+      producer_count = 1;
+      break;
+    case SaveMode::RDB:
+      producer_count = shard_set->size();
+      break;
+  }
 
-  impl_.reset(new Impl(align_writes, size, sink));
+  impl_.reset(new Impl(align_writes, producer_count, sink));
   save_mode_ = save_mode;
 }
 

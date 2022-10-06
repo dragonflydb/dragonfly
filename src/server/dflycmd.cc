@@ -170,9 +170,9 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
         [&](Transaction* t, EngineShard* shard) {
           OpStatus st = FullSyncInShard(syncid, t, shard);
 
-          // TODO: POSSIBLE BUG why is status not overwritten?
           lock_guard lk(mu);
-          status = st;
+          if (st != OpStatus::OK)
+            status = st;
           return OpStatus::OK;
         },
         true);

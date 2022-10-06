@@ -409,7 +409,6 @@ fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path)
   }
 
   // Check all paths are valid.
-  // TODO: Maybe result has to be overwritten.
   for (const auto& path : paths) {
     error_code ec;
     fs::canonical(path, ec);
@@ -426,7 +425,6 @@ fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path)
   GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
   if (new_state != GlobalState::LOADING) {
     LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
-    // TODO: What to return?? -> is_valid check on receiver?
     return {};
   }
 
