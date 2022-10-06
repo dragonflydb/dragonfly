@@ -17,10 +17,13 @@ extern "C" {
 #include "base/stl_util.h"
 #include "facade/dragonfly_connection.h"
 #include "util/uring/uring_pool.h"
+#include "util/epoll/epoll_pool.h"
 
 using namespace std;
 
 ABSL_DECLARE_FLAG(string, dbfilename);
+ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to run tests");
+
 
 namespace dfly {
 
@@ -123,7 +126,11 @@ void BaseFamilyTest::SetUpTestSuite() {
 }
 
 void BaseFamilyTest::SetUp() {
-  pp_.reset(new uring::UringPool(16, num_threads_));
+  if (absl::GetFlag(FLAGS_force_epoll)) {
+    pp_.reset(new epoll::EpollPool(num_threads_));
+  } else {
+    pp_.reset(new uring::UringPool(16, num_threads_));
+  }
   pp_->Run();
   service_.reset(new Service{pp_.get()});
 
