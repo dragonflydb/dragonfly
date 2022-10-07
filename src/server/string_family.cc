@@ -4,8 +4,6 @@
 
 #include "server/string_family.h"
 
-#include "server/generic_family.h"
-
 extern "C" {
 #include "redis/object.h"
 }
@@ -206,9 +204,7 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key, bool del_hit = fa
     DVLOG(1) << "Del: " << key;
     auto& db_slice = op_args.shard->db_slice();
 
-    auto res = db_slice.Del(op_args.db_cntx.db_index, it_res.value());
-    if (!res)
-      return OpStatus::KEY_NOTFOUND;
+    CHECK(db_slice.Del(op_args.db_cntx.db_index, it_res.value()));
 
     return key_bearer;
   }
@@ -1083,7 +1079,7 @@ void StringFamily::Register(CommandRegistry* registry) {
             << CI{"INCRBYFLOAT", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(IncrByFloat)
             << CI{"DECRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(DecrBy)
             << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Get)
-            << CI{"GETDEL", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(GetDel)
+            << CI{"GETDEL", CO::WRITE | CO::DENYOOM | CO::FAST, 2, 1, 1, 1}.HFUNC(GetDel)
             << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(GetSet)
             << CI{"MGET", CO::READONLY | CO::FAST | CO::REVERSE_MAPPING, -2, 1, -1, 1}.HFUNC(MGet)
             << CI{"MSET", CO::WRITE | CO::DENYOOM, -3, 1, -1, 2}.HFUNC(MSet)
