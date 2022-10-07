@@ -1274,6 +1274,35 @@ void ZSetFamily::ZScore(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void ZSetFamily::ZMScore(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+
+  absl::InlinedVector<string_view, 8> members(args.size() - 2);
+  for (size_t i = 2; i < args.size(); ++i) {
+    members[i - 2] = ArgS(args, i);
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpMScore(t->GetOpArgs(shard), key, members);
+  };
+
+  OpResult<MScoreResponse> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+
+  if (result.status() == OpStatus::WRONG_TYPE) {
+    return (*cntx)->SendError(kWrongTypeErr);
+  }
+
+  (*cntx)->StartArray(result->size());
+  const MScoreResponse& array = result.value();
+  for (const auto& p : array) {
+    if (p) {
+      (*cntx)->SendDouble(*p);
+    } else {
+      (*cntx)->SendNull();
+    }
+  }
+}
+
 void ZSetFamily::ZScan(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
   string_view token = ArgS(args, 2);
@@ -1603,6 +1632,32 @@ OpResult<double> ZSetFamily::OpScore(const OpArgs& op_args, string_view key, str
   return score;
 }
 
+OpResult<ZSetFamily::MScoreResponse> ZSetFamily::OpMScore(const OpArgs& op_args, string_view key, ArgSlice members) {
+  OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_ZSET);
+  if (!res_it)
+    return res_it.status();
+
+  MScoreResponse scores(members.size());
+
+  robj* zobj = res_it.value()->second.AsRObj();
+  sds& tmp_str = op_args.shard->tmp_str1;
+
+  for (size_t i = 0; i < members.size(); i++) {
+    const auto& m = members[i];
+
+    tmp_str = sdscpylen(tmp_str, m.data(), m.size());
+    double score;
+    int retval = zsetScore(zobj, tmp_str, &score);
+    if (retval == C_OK) {
+      scores[i] = score;
+    } else {
+      scores[i] = std::nullopt;
+    }
+  }
+
+  return scores;
+}
+
 auto ZSetFamily::OpRange(const ZRangeSpec& range_spec, const OpArgs& op_args, string_view key)
     -> OpResult<ScoredArray> {
   OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_ZSET);
@@ -1808,6 +1863,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRangeByLex)
             << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRangeByScore)
             << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZScore)
+            << CI{"ZMSCORE", CO::READONLY | CO::FAST, -3, 1, 1, 1}.HFUNC(ZMScore)
             << CI{"ZREMRANGEBYRANK", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRemRangeByRank)
             << CI{"ZREMRANGEBYSCORE", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRemRangeByScore)
             << CI{"ZREMRANGEBYLEX", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRemRangeByLex)
