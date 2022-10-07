@@ -8,3 +8,4 @@
 * **[Ryan Russell](https://github.com/ryanrussell)**
   * Docs & Code Readability
 * **[Ali-Akber Saifee](https://github.com/alisaifee)**
+* **[Elle Y](https://github.com/inohime)**

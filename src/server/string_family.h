@@ -57,6 +57,7 @@ class StringFamily {
   static void Decr(CmdArgList args, ConnectionContext* cntx);
   static void DecrBy(CmdArgList args, ConnectionContext* cntx);
   static void Get(CmdArgList args, ConnectionContext* cntx);
+  static void GetDel(CmdArgList args, ConnectionContext* cntx);
   static void GetRange(CmdArgList args, ConnectionContext* cntx);
   static void GetSet(CmdArgList args, ConnectionContext* cntx);
   static void Incr(CmdArgList args, ConnectionContext* cntx);
