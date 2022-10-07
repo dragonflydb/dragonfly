@@ -62,6 +62,7 @@ class ZSetFamily {
   static void ZRank(CmdArgList args, ConnectionContext* cntx);
   static void ZRem(CmdArgList args, ConnectionContext* cntx);
   static void ZScore(CmdArgList args, ConnectionContext* cntx);
+  static void ZMScore(CmdArgList args, ConnectionContext* cntx);
   static void ZRangeByLex(CmdArgList args, ConnectionContext* cntx);
   static void ZRangeByScore(CmdArgList args, ConnectionContext* cntx);
   static void ZRemRangeByRank(CmdArgList args, ConnectionContext* cntx);
@@ -89,6 +90,9 @@ class ZSetFamily {
   static OpResult<unsigned> OpRem(const OpArgs& op_args, std::string_view key, ArgSlice members);
   static OpResult<double> OpScore(const OpArgs& op_args, std::string_view key,
                                   std::string_view member);
+  using MScoreResponse = std::vector<std::optional<double>>;
+  static OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, std::string_view key,
+                                  ArgSlice members);
   static OpResult<ScoredArray> OpRange(const ZRangeSpec& range_spec, const OpArgs& op_args,
                                        std::string_view key);
   static OpResult<unsigned> OpRemRange(const OpArgs& op_args, std::string_view key,
