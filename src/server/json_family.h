@@ -32,6 +32,7 @@ class JsonFamily {
   static void ObjKeys(CmdArgList args, ConnectionContext* cntx);
   static void StrAppend(CmdArgList args, ConnectionContext* cntx);
   static void Clear(CmdArgList args, ConnectionContext* cntx);
+  static void ArrPop(CmdArgList args, ConnectionContext* cntx);
 };
 
 }  // namespace dfly

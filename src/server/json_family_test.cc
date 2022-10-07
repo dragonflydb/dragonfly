@@ -686,4 +686,20 @@ TEST_F(JsonFamilyTest, Clear) {
   EXPECT_EQ(resp, R"({})");
 }
 
+TEST_F(JsonFamilyTest, ArrPop) {
+  string json = R"(
+    [[6,1,6], [7,2,7], [8,3,8]]
+  )";
+
+  auto resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRPOP", "json", "$[*]", "-2"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre("1", "2", "3"));
+
+  resp = Run({"GET", "json"});
+  EXPECT_EQ(resp, R"([[6,6],[7,7],[8,8]])");
+}
+
 }  // namespace dfly
