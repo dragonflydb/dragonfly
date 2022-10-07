@@ -3,6 +3,7 @@
 //
 
 #include "server/string_family.h"
+
 #include "server/generic_family.h"
 
 extern "C" {
@@ -192,12 +193,25 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
   return ExtendExisting(op_args, *it_res, key, val, prepend);
 }
 
-OpResult<string> OpGet(const OpArgs& op_args, string_view key) {
+OpResult<string> OpGet(const OpArgs& op_args, string_view key, bool del_hit = false) {
   OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res.ok())
     return it_res.status();
 
   const PrimeValue& pv = it_res.value()->second;
+
+  if (del_hit) {
+    string key_bearer = GetString(op_args.shard, pv);
+
+    DVLOG(1) << "Del: " << key;
+    auto& db_slice = op_args.shard->db_slice();
+
+    auto res = db_slice.Del(op_args.db_cntx.db_index, it_res.value());
+    if (!res)
+      return OpStatus::KEY_NOTFOUND;
+
+    return key_bearer;
+  }
 
   return GetString(op_args.shard, pv);
 }
@@ -603,25 +617,19 @@ void StringFamily::GetDel(CmdArgList args, ConnectionContext* cntx) {
 
   string_view key = ArgS(args, 1);
 
-  auto get_cb = [&](Transaction* t, EngineShard* shard) { return OpGet(t->GetOpArgs(shard), key); };
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    bool run_del = true;
+    return OpGet(t->GetOpArgs(shard), key, run_del);
+  };
 
   DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
 
   Transaction* trans = cntx->transaction;
-  OpResult<string> result = trans->ScheduleSingleHopT(std::move(get_cb));
+  OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
     DVLOG(1) << "GET " << trans->DebugId() << ": " << key << " " << result.value();
     (*cntx)->SendBulkString(*result);
-
-    auto del_cb = [](const Transaction* t, EngineShard* shard) {
-      ArgSlice arg_slice = t->ShardArgsInShard(shard->shard_id());
-      GenericFamily::OpDel(t->GetOpArgs(shard), arg_slice);
-      return OpStatus::OK;
-    };
-
-    OpStatus status = trans->ScheduleSingleHop(std::move(del_cb));
-    CHECK_EQ(OpStatus::OK, status);
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
