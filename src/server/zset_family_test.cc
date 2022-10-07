@@ -64,6 +64,15 @@ TEST_F(ZSetFamilyTest, ZRem) {
   EXPECT_THAT(Run({"zrange", "x", "(-inf", "(+inf", "byscore"}), "a");
 }
 
+TEST_F(ZSetFamilyTest, ZMScore) {
+  Run({"zadd", "zms", "3.14", "a"});
+  Run({"zadd", "zms", "42", "another"});
+
+  auto resp = Run({"zmscore", "zms", "another", "a", "nofield"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre("42", "3.14", ArgType(RespExpr::NIL)));
+}
+
 TEST_F(ZSetFamilyTest, ZRangeRank) {
   Run({"zadd", "x", "1.1", "a", "2.1", "b"});
   EXPECT_THAT(Run({"zrangebyscore", "x", "0", "(1.1"}), ArrLen(0));
