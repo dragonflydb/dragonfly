@@ -43,7 +43,6 @@ extern "C" {
 #include "server/version.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
-#include "util/fibers/simple_channel.h"
 #include "util/uring/uring_file.h"
 
 using namespace std;
@@ -387,10 +386,9 @@ void ServerFamily::Shutdown() {
   });
 }
 
-// Load starts as many fibers as there are files and collects
-// the load results in a channel.
-// It starts one more fiber to empty the channel and return the first
-// error if any occured with a future.
+// Load starts as many fibers as there are files to load each one separately.
+// It starts one more fiber that waits for all load fibers to finish and returns the first
+// error (if any occured) with a future.
 fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path) {
   CHECK(absl::EndsWith(load_path, ".rdb") || absl::EndsWith(load_path, "summary.dfs"));
 
@@ -441,9 +439,10 @@ fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path)
 
   auto& pool = service_.proactor_pool();
 
-  // Channel to receive error codes from loading fibers.
-  // buffer size is no less than there are load fibers to prevent any blocking.
-  auto chan = std::make_shared<::util::fibers_ext::SimpleChannel<std::error_code>>(paths.size());
+  std::vector<::boost::fibers::fiber> load_fibers;
+  load_fibers.reserve(paths.size());
+
+  auto first_error = std::make_shared<AggregateError>();
 
   for (auto& path : paths) {
     // For single file, choose thread that does not handle shards if possible.
@@ -455,31 +454,27 @@ fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path)
       proactor = pool.GetNextProactor();
     }
 
-    auto load_fiber = [this, chan, path = std::move(path)]() {
-      auto ec = LoadRdb(path);
-      LOG_IF(ERROR, ec) << "Error loading file " << ec.message();
-      chan->Push(ec);
-      chan->StartClosing();
+    auto load_fiber = [this, first_error, path = std::move(path)]() {
+      *first_error = LoadRdb(path);
     };
-
-    proactor->LaunchFiber(std::move(load_fiber)).detach();
+    load_fibers.push_back(proactor->LaunchFiber(std::move(load_fiber)));
   }
 
   boost::fibers::promise<std::error_code> ec_promise;
   boost::fibers::future<std::error_code> ec_future = ec_promise.get_future();
 
   // Run fiber that empties the channel and sets ec_promise.
-  auto load_join_fiber = [this, chan, ec_promise = std::move(ec_promise)]() mutable {
-    std::error_code ec, ec_result;
-    while (chan->Pop(ec)) {
-      if (ec && !ec_result)
-        ec_result = ec;
+  auto load_join_fiber = [this, first_error, load_fibers = std::move(load_fibers),
+                          ec_promise = std::move(ec_promise)]() mutable {
+    for (auto& fiber : load_fibers) {
+      fiber.join();
     }
+
     VLOG(1) << "Load finished";
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-    ec_promise.set_value(ec_result);
+    ec_promise.set_value(**first_error);
   };
-  pool.GetNextProactor()->LaunchFiber(std::move(load_join_fiber)).detach();
+  pool.GetNextProactor()->Dispatch(std::move(load_join_fiber));
 
   return ec_future;
 }

@@ -160,19 +160,13 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
 
     cntx->transaction->Schedule();
 
-    OpStatus status = OpStatus::OK;
-    boost::fibers::mutex mu;
-
+    AggregateStatus status;
     // kick off the snapshotting simultaneously in all shards.
     // we do it via data sockets but reply here
     // via control socket that orchestrates the flow from the replica side.
     cntx->transaction->Execute(
         [&](Transaction* t, EngineShard* shard) {
-          OpStatus st = FullSyncInShard(syncid, t, shard);
-
-          lock_guard lk(mu);
-          if (st != OpStatus::OK)
-            status = st;
+          status = FullSyncInShard(syncid, t, shard);
           return OpStatus::OK;
         },
         true);
@@ -181,7 +175,7 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
     // because those threads provide locking/transaction information needed to provide atomicity
     // guarantees on replica.
 
-    if (status == OpStatus::OK)
+    if (*status == OpStatus::OK)
       return rb->SendOk();
 
     // TODO: to stop the replication in shards that started doing this.
