@@ -173,7 +173,7 @@ with respect to Memcached and Redis APIs.
   - [X] SCAN
   - [X] PEXPIREAT
   - [ ] PEXPIRE
-  - [ ] DUMP
+  - [x] DUMP
   - [X] EVAL
   - [X] EVALSHA
   - [ ] OBJECT

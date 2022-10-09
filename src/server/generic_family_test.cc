@@ -4,6 +4,10 @@
 
 #include "server/generic_family.h"
 
+extern "C" {
+#include "redis/rdb.h"
+}
+
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
@@ -376,4 +380,41 @@ TEST_F(GenericFamilyTest, Persist) {
   EXPECT_EQ(-1, CheckedInt({"TTL", "mykey"}));
 }
 
+TEST_F(GenericFamilyTest, Dump) {
+  // The following would only work for RDB version 9
+  // The format was changed at version 10
+  // The expected results were taken from running the same with Redis branch 6.2
+  ASSERT_THAT(RDB_VERSION, 9);
+  uint8_t EXPECTED_STRING_DUMP[13] = {0x00, 0xc0, 0x13, 0x09, 0x00, 0x23, 0x13,
+                                      0x6f, 0x4d, 0x68, 0xf6, 0x35, 0x6e};
+  uint8_t EXPECTED_HASH_DUMP[] = {0x0d, 0x12, 0x12, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00,
+                                  0x02, 0x00, 0x00, 0xfe, 0x13, 0x03, 0xc0, 0xd2, 0x04, 0xff,
+                                  0x09, 0x00, 0xb1, 0x0b, 0xae, 0x6c, 0x23, 0x5d, 0x17, 0xaa};
+  uint8_t EXPECTED_LIST_DUMP[] = {0x0e, 0x01, 0x0e, 0x0e, 0x00, 0x00, 0x00, 0x0a, 0x00,
+                                  0x00, 0x00, 0x01, 0x00, 0x00, 0xfe, 0x14, 0xff, 0x09,
+                                  0x00, 0xba, 0x1e, 0xa9, 0x6b, 0xba, 0xfe, 0x2d, 0x3f};
+
+  // Check string dump
+  auto resp = Run({"set", "z", "19"});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"dump", "z"});
+  auto dump = resp.GetBuf();
+  CHECK_EQ(ToSV(dump), ToSV(EXPECTED_STRING_DUMP));
+
+  // Check list dump
+  EXPECT_EQ(1, CheckedInt({"rpush", "l", "20"}));
+  resp = Run({"dump", "l"});
+  dump = resp.GetBuf();
+  CHECK_EQ(ToSV(dump), ToSV(EXPECTED_LIST_DUMP));
+
+  // Check for hash dump
+  EXPECT_EQ(1, CheckedInt({"hset", "z2", "19", "1234"}));
+  resp = Run({"dump", "z2"});
+  dump = resp.GetBuf();
+  CHECK_EQ(ToSV(dump), ToSV(EXPECTED_HASH_DUMP));
+
+  // Check that when running with none existing key we're getting nil
+  resp = Run({"dump", "foo"});
+  EXPECT_EQ(resp.type, RespExpr::NIL);
+}
 }  // namespace dfly

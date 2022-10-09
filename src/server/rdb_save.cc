@@ -117,6 +117,11 @@ inline unsigned SerializeLen(uint64_t len, uint8_t* buf) {
   return 1 + 8;
 }
 
+constexpr size_t kBufLen = 64_KB;
+constexpr size_t kAmask = 4_KB - 1;
+
+}  // namespace
+
 uint8_t RdbObjectType(unsigned type, unsigned encoding) {
   switch (type) {
     case OBJ_STRING:
@@ -152,15 +157,25 @@ uint8_t RdbObjectType(unsigned type, unsigned encoding) {
   return 0; /* avoid warning */
 }
 
-constexpr size_t kBufLen = 64_KB;
-constexpr size_t kAmask = 4_KB - 1;
-
-}  // namespace
-
 RdbSerializer::RdbSerializer(io::Sink* s) : sink_(s), mem_buf_{4_KB}, tmp_buf_(nullptr) {
 }
 
 RdbSerializer::~RdbSerializer() {
+}
+
+std::error_code RdbSerializer::SaveValue(const PrimeValue& pv) {
+  std::error_code ec;
+  if (pv.ObjType() == OBJ_STRING) {
+    auto opt_int = pv.TryGetInt();
+    if (opt_int) {
+      ec = SaveLongLongAsString(*opt_int);
+    } else {
+      ec = SaveString(pv.GetSlice(&tmp_str_));
+    }
+  } else {
+    ec = SaveObject(pv);
+  }
+  return ec;
 }
 
 error_code RdbSerializer::SelectDb(uint32_t dbid) {
@@ -189,7 +204,7 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
   unsigned encoding = pv.Encoding();
   uint8_t rdb_type = RdbObjectType(obj_type, encoding);
 
-  DVLOG(3) << "Saving keyval start " << key;
+  DVLOG(3) << "Saving key/val start " << key;
 
   ec = WriteOpcode(rdb_type);
   if (ec)
@@ -198,18 +213,7 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
   ec = SaveString(key);
   if (ec)
     return make_unexpected(ec);
-
-  if (obj_type == OBJ_STRING) {
-    auto opt_int = pv.TryGetInt();
-    if (opt_int) {
-      ec = SaveLongLongAsString(*opt_int);
-    } else {
-      ec = SaveString(pv.GetSlice(&tmp_str_));
-    }
-  } else {
-    ec = SaveObject(pv);
-  }
-
+  ec = SaveValue(pv);
   if (ec)
     return make_unexpected(ec);
   return rdb_type;

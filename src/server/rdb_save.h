@@ -21,6 +21,8 @@ typedef struct streamCG streamCG;
 
 namespace dfly {
 
+uint8_t RdbObjectType(unsigned type, unsigned encoding);
+
 class EngineShard;
 
 class AlignedBuffer : public ::io::Sink {
@@ -117,6 +119,12 @@ class RdbSerializer {
   std::error_code SaveLen(size_t len);
 
   std::error_code FlushMem();
+
+  // This would work for either string or an object.
+  // The arg pv is taken from it->second if accessing
+  // this by finding the key. This function is used
+  // for the dump command - thus it is public function
+  std::error_code SaveValue(const PrimeValue& pv);
 
  private:
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
