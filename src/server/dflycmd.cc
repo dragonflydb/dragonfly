@@ -160,18 +160,13 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
 
     cntx->transaction->Schedule();
 
-    OpStatus status = OpStatus::OK;
-    boost::fibers::mutex mu;
-
+    AggregateStatus status;
     // kick off the snapshotting simultaneously in all shards.
     // we do it via data sockets but reply here
     // via control socket that orchestrates the flow from the replica side.
     cntx->transaction->Execute(
         [&](Transaction* t, EngineShard* shard) {
-          OpStatus st = FullSyncInShard(syncid, t, shard);
-
-          lock_guard lk(mu);
-          status = st;
+          status = FullSyncInShard(syncid, t, shard);
           return OpStatus::OK;
         },
         true);
@@ -180,7 +175,7 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
     // because those threads provide locking/transaction information needed to provide atomicity
     // guarantees on replica.
 
-    if (status == OpStatus::OK)
+    if (*status == OpStatus::OK)
       return rb->SendOk();
 
     // TODO: to stop the replication in shards that started doing this.
@@ -317,7 +312,7 @@ OpStatus DflyCmd::FullSyncInShard(uint32_t syncid, Transaction* t, EngineShard* 
   Connection* conn = shard_it->second.conn;
   lk.unlock();
 
-  unique_ptr<RdbSaver> saver = make_unique<RdbSaver>(conn->socket(), true /* single shard */,
+  unique_ptr<RdbSaver> saver = make_unique<RdbSaver>(conn->socket(), SaveMode::SINGLE_SHARD /* single shard */,
                                                      false /* do not align writes */);
 
   // Enable in-memory journaling. Please note that we need further enable it on all threads.

@@ -67,6 +67,13 @@ class AlignedBuffer : public ::io::Sink {
   off_t buf_offs_ = 0;
 };
 
+// SaveMode for snapshot. Used by RdbSaver to adjust internals.
+enum class SaveMode {
+  SUMMARY,       // Save only header values (summary.dfs). Expected to read no shards.
+  SINGLE_SHARD,  // Save single shard values (XXXX.dfs). Expected to read one shard.
+  RDB,           // Save .rdb file. Expected to read all shards.
+};
+
 class RdbSaver {
  public:
   // single_shard - true means that we run RdbSaver on a single shard and we do not use
@@ -74,10 +81,11 @@ class RdbSaver {
   // single_shard - false, means we capture all the data using a single RdbSaver instance
   // (corresponds to legacy, redis compatible mode)
   // if align_writes is true - writes data in aligned chunks of 4KB to fit direct I/O requirements.
-  explicit RdbSaver(::io::Sink* sink, bool single_shard, bool align_writes);
+  explicit RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes);
 
   ~RdbSaver();
 
+  // Stores auxiliary (meta) values and lua scripts.
   std::error_code SaveHeader(const StringVec& lua_scripts);
 
   // Writes the RDB file into sink. Waits for the serialization to finish.
@@ -89,6 +97,8 @@ class RdbSaver {
   // TODO: to implement break functionality to allow stopping early.
   void StartSnapshotInShard(bool include_journal_changes, EngineShard* shard);
 
+  SaveMode Mode() const { return save_mode_; }
+
  private:
   class Impl;
 
@@ -97,6 +107,7 @@ class RdbSaver {
   std::error_code SaveAux(const StringVec& lua_scripts);
   std::error_code SaveAuxFieldStrInt(std::string_view key, int64_t val);
 
+  SaveMode save_mode_;
   std::unique_ptr<Impl> impl_;
 };
 
