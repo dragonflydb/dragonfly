@@ -32,7 +32,6 @@ using absl::GetFlag;
 using ResultStringVec = vector<OpResult<StringVec>>;
 using ResultSetView = OpResult<absl::flat_hash_set<std::string_view>>;
 using SvArray = vector<std::string_view>;
-
 namespace {
 
 constexpr uint32_t kMaxIntSetEntries = 256;
@@ -280,6 +279,15 @@ bool IsInSet(const DbContext& db_context, const SetType& st, string_view member)
   } else {
     DCHECK_EQ(st.second, kEncodingStrMap);
     return dictContains((dict*)st.first, member);
+  }
+}
+
+void FindInSet(StringVec& memberships,
+		const DbContext& db_context, const SetType& st, 
+		const vector<string_view>& members) {
+  for (const auto& member : members) {
+    bool status = IsInSet(db_context, st, member);
+    memberships.emplace_back(to_string(status));
   }
 }
 
@@ -1020,6 +1028,37 @@ void SIsMember(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void SMIsMember(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+
+  vector<string_view> vals(args.size() - 2);
+  for (size_t i = 2; i < args.size(); ++i) {
+    vals[i - 2] = ArgS(args, i);
+  }
+
+  StringVec memberships;
+  memberships.reserve(vals.size());
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->db_context(), key, OBJ_SET);
+    if (find_res) {
+      SetType st{find_res.value()->second.RObjPtr(), find_res.value()->second.Encoding()};
+      FindInSet(memberships, t->db_context(), st, vals);
+      return OpStatus::OK;
+    }
+    return find_res.status();
+  };
+
+  OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
+  if (result == OpStatus::KEY_NOTFOUND) {
+    memberships.assign(vals.size(), "0");
+    return (*cntx)->SendStringArr(memberships);
+  } else if (result == OpStatus::OK) {
+    return (*cntx)->SendStringArr(memberships);
+  }
+  (*cntx)->SendError(result.status());
+}
+
 void SMove(CmdArgList args, ConnectionContext* cntx) {
   string_view src = ArgS(args, 1);
   string_view dest = ArgS(args, 2);
@@ -1464,6 +1503,7 @@ void SetFamily::Register(CommandRegistry* registry) {
             << CI{"SINTERSTORE", CO::WRITE | CO::DENYOOM, -3, 1, -1, 1}.HFUNC(SInterStore)
             << CI{"SMEMBERS", CO::READONLY, 2, 1, 1, 1}.HFUNC(SMembers)
             << CI{"SISMEMBER", CO::FAST | CO::READONLY, 3, 1, 1, 1}.HFUNC(SIsMember)
+            << CI{"SMISMEMBER", CO::READONLY, -3, 1, 1, 1}.HFUNC(SMIsMember)
             << CI{"SMOVE", CO::FAST | CO::WRITE, 4, 1, 2, 1}.HFUNC(SMove)
             << CI{"SREM", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(SRem)
             << CI{"SCARD", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(SCard)

@@ -132,6 +132,36 @@ TEST_F(SetFamilyTest, SPop) {
   EXPECT_THAT(resp.GetVec(), IsSubsetOf({"a", "b", "c"}));
 }
 
+TEST_F(SetFamilyTest, SMIsMember) {
+  Run({"sadd", "foo", "a"});
+  Run({"sadd", "foo", "b"});
+
+  auto resp = Run({"smismember", "foo"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+  
+  resp = Run({"smismember", "foo1", "a", "b"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("0", "0"));
+  
+  resp = Run({"smismember", "foo", "a", "c"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("1", "0"));
+  
+  resp = Run({"smismember", "foo", "a", "b"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("1", "1"));
+  
+  resp = Run({"smismember", "foo", "d", "e"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("0", "0"));
+  
+  resp = Run({"smismember", "foo", "b"});
+  EXPECT_THAT(resp, "1");
+  
+  resp = Run({"smismember", "foo", "x"});
+  EXPECT_THAT(resp, "0");
+}
+
 TEST_F(SetFamilyTest, Empty) {
   auto resp = Run({"smembers", "x"});
   ASSERT_THAT(resp, ArrLen(0));
