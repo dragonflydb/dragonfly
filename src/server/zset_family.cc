@@ -140,7 +140,7 @@ class IntervalVisitor {
 
   void operator()(const ZSetFamily::LexInterval& li);
 
-  void operator()(ZSetFamily::ScoreCount sc);
+  void operator()(ZSetFamily::TopNScored sc);
 
   ZSetFamily::ScoredArray PopResult() {
     return std::move(result_);
@@ -157,8 +157,8 @@ class IntervalVisitor {
   void ExtractListPack(const zlexrangespec& range);
   void ExtractSkipList(const zlexrangespec& range);
 
-  void PopListPack(ZSetFamily::ScoreCount sc);
-  void PopSkipList(ZSetFamily::ScoreCount sc);
+  void PopListPack(ZSetFamily::TopNScored sc);
+  void PopSkipList(ZSetFamily::TopNScored sc);
 
   void ActionRange(unsigned start, unsigned end);  // rank
   void ActionRange(const zrangespec& range);       // score
@@ -168,7 +168,7 @@ class IntervalVisitor {
   void ActionRem(const zrangespec& range);       // score
   void ActionRem(const zlexrangespec& range);    // lex
 
-  void ActionPop(ZSetFamily::ScoreCount sc);
+  void ActionPop(ZSetFamily::TopNScored sc);
 
   void Next(uint8_t* zl, uint8_t** eptr, uint8_t** sptr) const {
     if (params_.reverse) {
@@ -258,7 +258,7 @@ void IntervalVisitor::operator()(const ZSetFamily::LexInterval& li) {
   zslFreeLexRange(&range);
 }
 
-void IntervalVisitor::operator()(ZSetFamily::ScoreCount sc) {
+void IntervalVisitor::operator()(ZSetFamily::TopNScored sc) {
   switch (action_) {
     case Action::POP:
       ActionPop(sc);
@@ -335,7 +335,7 @@ void IntervalVisitor::ActionRem(const zlexrangespec& range) {
   }
 }
 
-void IntervalVisitor::ActionPop(ZSetFamily::ScoreCount sc) {
+void IntervalVisitor::ActionPop(ZSetFamily::TopNScored sc) {
   if (zobj_->encoding == OBJ_ENCODING_LISTPACK) {
     PopListPack(sc);
   } else {
@@ -505,7 +505,7 @@ void IntervalVisitor::ExtractSkipList(const zlexrangespec& range) {
   }
 }
 
-void IntervalVisitor::PopListPack(ZSetFamily::ScoreCount sc) {
+void IntervalVisitor::PopListPack(ZSetFamily::TopNScored sc) {
   uint8_t* zl = (uint8_t*)zobj_->ptr;
   uint8_t *eptr, *sptr;
   uint8_t* vstr;
@@ -544,7 +544,7 @@ void IntervalVisitor::PopListPack(ZSetFamily::ScoreCount sc) {
   zobj_->ptr = lpDeleteRange(zl, start, 2*sc);
 }
 
-void IntervalVisitor::PopSkipList(ZSetFamily::ScoreCount sc) {
+void IntervalVisitor::PopSkipList(ZSetFamily::TopNScored sc) {
   zset* zs = (zset*)zobj_->ptr;
   zskiplist* zsl = zs->zsl;
   zskiplistNode* ln;
@@ -1642,8 +1642,12 @@ void ZSetFamily::ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cn
   range_params.reverse = reverse;
   ZRangeSpec range_spec;
   range_spec.params = range_params;
-  ScoreCount sc;
-  CHECK(SimpleAtoi(count, &sc));
+  TopNScored sc;
+
+  if (!SimpleAtoi(count, &sc)) {
+    return (*cntx)->SendError(kInvalidIntErr);
+  }
+
   range_spec.interval = sc;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {

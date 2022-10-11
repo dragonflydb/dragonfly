@@ -34,7 +34,7 @@ class ZSetFamily {
 
   using LexInterval = std::pair<LexBound, LexBound>;
 
-  using ScoreCount = uint32_t;
+  using TopNScored = uint32_t;
 
   struct RangeParams {
     uint32_t offset = 0;
@@ -44,7 +44,7 @@ class ZSetFamily {
   };
 
   struct ZRangeSpec {
-    std::variant<IndexInterval, ScoreInterval, LexInterval, ScoreCount> interval;
+    std::variant<IndexInterval, ScoreInterval, LexInterval, TopNScored> interval;
     RangeParams params;
   };
 

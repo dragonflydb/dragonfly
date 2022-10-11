@@ -275,6 +275,9 @@ TEST_F(ZSetFamilyTest, ZPopMin) {
   ASSERT_THAT(resp, ArrLen(2));
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "b"));
 
+  resp = Run({"zpopmin", "key", "-1"});
+  ASSERT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
   resp = Run({"zpopmin", "key", "1"});
   ASSERT_THAT(resp, "c");
 
@@ -293,6 +296,9 @@ TEST_F(ZSetFamilyTest, ZPopMax) {
   resp = Run({"zpopmax", "key", "2"});
   ASSERT_THAT(resp, ArrLen(2));
   EXPECT_THAT(resp.GetVec(), ElementsAre("e", "d"));
+
+  resp = Run({"zpopmax", "key", "-1"});
+  ASSERT_THAT(resp, ErrArg("value is not an integer or out of range"));
 
   resp = Run({"zpopmax", "key", "1"});
   ASSERT_THAT(resp, "c");
