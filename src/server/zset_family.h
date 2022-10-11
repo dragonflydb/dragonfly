@@ -34,6 +34,8 @@ class ZSetFamily {
 
   using LexInterval = std::pair<LexBound, LexBound>;
 
+  using ScoreCount = uint32_t;
+
   struct RangeParams {
     uint32_t offset = 0;
     uint32_t limit = UINT32_MAX;
@@ -42,7 +44,7 @@ class ZSetFamily {
   };
 
   struct ZRangeSpec {
-    std::variant<IndexInterval, ScoreInterval, LexInterval> interval;
+    std::variant<IndexInterval, ScoreInterval, LexInterval, ScoreCount> interval;
     RangeParams params;
   };
 
@@ -58,6 +60,8 @@ class ZSetFamily {
   static void ZIncrBy(CmdArgList args, ConnectionContext* cntx);
   static void ZInterStore(CmdArgList args, ConnectionContext* cntx);
   static void ZLexCount(CmdArgList args, ConnectionContext* cntx);
+  static void ZPopMax(CmdArgList args, ConnectionContext* cntx);
+  static void ZPopMin(CmdArgList args, ConnectionContext* cntx);
   static void ZRange(CmdArgList args, ConnectionContext* cntx);
   static void ZRank(CmdArgList args, ConnectionContext* cntx);
   static void ZRem(CmdArgList args, ConnectionContext* cntx);
@@ -84,7 +88,7 @@ class ZSetFamily {
   static void ZRangeGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx);
   static void ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx);
   static bool ParseRangeByScoreParams(CmdArgList args, RangeParams* params);
-
+  static void ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cntx);
   static OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t* cursor);
 
   static OpResult<unsigned> OpRem(const OpArgs& op_args, std::string_view key, ArgSlice members);
@@ -93,6 +97,8 @@ class ZSetFamily {
   using MScoreResponse = std::vector<std::optional<double>>;
   static OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, std::string_view key,
                                   ArgSlice members);
+  static OpResult<ScoredArray> OpPopCount(const ZRangeSpec& range_spec, const OpArgs& op_args,
+                                          std::string_view key);
   static OpResult<ScoredArray> OpRange(const ZRangeSpec& range_spec, const OpArgs& op_args,
                                        std::string_view key);
   static OpResult<unsigned> OpRemRange(const OpArgs& op_args, std::string_view key,

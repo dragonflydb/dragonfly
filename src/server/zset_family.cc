@@ -125,6 +125,7 @@ OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args
 enum class Action {
   RANGE = 0,
   REMOVE = 1,
+  POP = 2
 };
 
 class IntervalVisitor {
@@ -138,6 +139,8 @@ class IntervalVisitor {
   void operator()(const ZSetFamily::ScoreInterval& si);
 
   void operator()(const ZSetFamily::LexInterval& li);
+
+  void operator()(ZSetFamily::ScoreCount sc);
 
   ZSetFamily::ScoredArray PopResult() {
     return std::move(result_);
@@ -154,6 +157,9 @@ class IntervalVisitor {
   void ExtractListPack(const zlexrangespec& range);
   void ExtractSkipList(const zlexrangespec& range);
 
+  void PopListPack(ZSetFamily::ScoreCount sc);
+  void PopSkipList(ZSetFamily::ScoreCount sc);
+
   void ActionRange(unsigned start, unsigned end);  // rank
   void ActionRange(const zrangespec& range);       // score
   void ActionRange(const zlexrangespec& range);    // lex
@@ -161,6 +167,8 @@ class IntervalVisitor {
   void ActionRem(unsigned start, unsigned end);  // rank
   void ActionRem(const zrangespec& range);       // score
   void ActionRem(const zlexrangespec& range);    // lex
+
+  void ActionPop(ZSetFamily::ScoreCount sc);
 
   void Next(uint8_t* zl, uint8_t** eptr, uint8_t** sptr) const {
     if (params_.reverse) {
@@ -214,6 +222,8 @@ void IntervalVisitor::operator()(const ZSetFamily::IndexInterval& ii) {
     case Action::REMOVE:
       ActionRem(start, end);
       break;
+    default:
+      break;
   }
 }
 
@@ -226,6 +236,8 @@ void IntervalVisitor::operator()(const ZSetFamily::ScoreInterval& si) {
       break;
     case Action::REMOVE:
       ActionRem(range);
+      break;
+    default:
       break;
   }
 }
@@ -240,8 +252,20 @@ void IntervalVisitor::operator()(const ZSetFamily::LexInterval& li) {
     case Action::REMOVE:
       ActionRem(range);
       break;
+    default:
+      break;
   }
   zslFreeLexRange(&range);
+}
+
+void IntervalVisitor::operator()(ZSetFamily::ScoreCount sc) {
+  switch (action_) {
+    case Action::POP:
+      ActionPop(sc);
+      break;
+    default:
+      break;
+  }
 }
 
 void IntervalVisitor::ActionRange(unsigned start, unsigned end) {
@@ -308,6 +332,15 @@ void IntervalVisitor::ActionRem(const zlexrangespec& range) {
     CHECK_EQ(OBJ_ENCODING_SKIPLIST, zobj_->encoding);
     zset* zs = (zset*)zobj_->ptr;
     removed_ = zslDeleteRangeByLex(zs->zsl, &range, zs->dict);
+  }
+}
+
+void IntervalVisitor::ActionPop(ZSetFamily::ScoreCount sc) {
+  if (zobj_->encoding == OBJ_ENCODING_LISTPACK) {
+    PopListPack(sc);
+  } else {
+    CHECK_EQ(zobj_->encoding, OBJ_ENCODING_SKIPLIST);
+    PopSkipList(sc);
   }
 }
 
@@ -468,6 +501,67 @@ void IntervalVisitor::ExtractSkipList(const zlexrangespec& range) {
     result_.emplace_back(string{ln->ele, sdslen(ln->ele)}, ln->score);
 
     /* Move to next node */
+    ln = Next(ln);
+  }
+}
+
+void IntervalVisitor::PopListPack(ZSetFamily::ScoreCount sc) {
+  uint8_t* zl = (uint8_t*)zobj_->ptr;
+  uint8_t *eptr, *sptr;
+  uint8_t* vstr;
+  unsigned int vlen = 0;
+  long long vlong = 0;
+
+  if (params_.reverse) {
+    eptr = lpSeek(zl,-2);
+  } else {
+    eptr = lpSeek(zl,0);
+  }
+
+  /* Get score pointer for the first element. */
+  if (eptr)
+    sptr = lpNext(zl, eptr);
+
+  /* First we get the entries */
+  unsigned int num = sc;
+  while (eptr && num--) {
+    double score = zzlGetScore(sptr);
+    vstr = lpGetValue(eptr, &vlen, &vlong);
+    AddResult(vstr, vlen, vlong, score);
+
+    /* Move to next node */
+    Next(zl, &eptr, &sptr);
+  }
+
+  int start = 0;
+  if (params_.reverse) {
+    /* If the number of elements to delete is greater than the listpack length, 
+     * we set the start to 0 because lpseek fails to search beyond length in reverse */
+    start = (2*sc > lpLength(zl)) ? 0 : -2*sc;
+  }
+    
+  /* We can finally delete the elements */
+  zobj_->ptr = lpDeleteRange(zl, start, 2*sc);
+}
+
+void IntervalVisitor::PopSkipList(ZSetFamily::ScoreCount sc) {
+  zset* zs = (zset*)zobj_->ptr;
+  zskiplist* zsl = zs->zsl;
+  zskiplistNode* ln;
+
+  /* We start from the header, or the tail if reversed. */
+  if (params_.reverse) {
+    ln = zsl->tail;
+  } else {
+    ln = zsl->header;
+  }
+
+  while (ln && sc--) {
+    result_.emplace_back(string{ln->ele, sdslen(ln->ele)}, ln->score);
+    
+    /* we can delete the element now */
+    zsetDel(zobj_, ln->ele);
+
     ln = Next(ln);
   }
 }
@@ -1078,6 +1172,14 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendLong(smvec.size());
 }
 
+void ZSetFamily::ZPopMax(CmdArgList args, ConnectionContext* cntx) {
+  ZPopMinMax(std::move(args), true, cntx);
+}
+
+void ZSetFamily::ZPopMin(CmdArgList args, ConnectionContext* cntx) {
+  ZPopMinMax(std::move(args), false, cntx);
+}
+
 void ZSetFamily::ZLexCount(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
 
@@ -1532,6 +1634,26 @@ bool ZSetFamily::ParseRangeByScoreParams(CmdArgList args, RangeParams* params) {
   return true;
 }
 
+void ZSetFamily::ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view count = ArgS(args, 2);
+
+  RangeParams range_params;
+  range_params.reverse = reverse;
+  ZRangeSpec range_spec;
+  range_spec.params = range_params;
+  ScoreCount sc;
+  CHECK(SimpleAtoi(count, &sc));
+  range_spec.interval = sc;
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpPopCount(range_spec, t->GetOpArgs(shard), key);
+  };
+
+  OpResult<ScoredArray> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OutputScoredArrayResult(result, range_params, cntx);
+}
+
 OpResult<StringVec> ZSetFamily::OpScan(const OpArgs& op_args, std::string_view key,
                                        uint64_t* cursor) {
   OpResult<PrimeIterator> find_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_ZSET);
@@ -1656,6 +1778,30 @@ OpResult<ZSetFamily::MScoreResponse> ZSetFamily::OpMScore(const OpArgs& op_args,
   }
 
   return scores;
+}
+
+auto ZSetFamily::OpPopCount(const ZRangeSpec& range_spec, const OpArgs& op_args, string_view key) -> OpResult<ScoredArray> {
+  auto& db_slice = op_args.shard->db_slice();
+  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_ZSET);
+  if (!res_it)
+    return res_it.status();
+
+  db_slice.PreUpdate(op_args.db_cntx.db_index, *res_it);
+
+  robj* zobj = res_it.value()->second.AsRObj();
+
+  IntervalVisitor iv{Action::POP, range_spec.params, zobj};
+  std::visit(iv, range_spec.interval);
+
+  res_it.value()->second.SyncRObj();
+  db_slice.PostUpdate(op_args.db_cntx.db_index, *res_it, key);
+
+  auto zlen = zsetLength(zobj);
+  if (zlen == 0) {
+    CHECK(op_args.shard->db_slice().Del(op_args.db_cntx.db_index, res_it.value()));
+  }
+
+  return iv.PopResult();
 }
 
 auto ZSetFamily::OpRange(const ZRangeSpec& range_spec, const OpArgs& op_args, string_view key)
@@ -1857,6 +2003,8 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZINCRBY", CO::FAST | CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(ZIncrBy)
             << CI{"ZINTERSTORE", kUnionMask, -4, 3, 3, 1}.HFUNC(ZInterStore)
             << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1, 1}.HFUNC(ZLexCount)
+            << CI{"ZPOPMAX", CO::READONLY, 3, 1, 1, 1}.HFUNC(ZPopMax)
+            << CI{"ZPOPMIN", CO::READONLY, 3, 1, 1, 1}.HFUNC(ZPopMin)
             << CI{"ZREM", CO::FAST | CO::WRITE, -3, 1, 1, 1}.HFUNC(ZRem)
             << CI{"ZRANGE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRange)
             << CI{"ZRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZRank)
