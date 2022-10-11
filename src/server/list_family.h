@@ -29,6 +29,7 @@ class ListFamily {
   static void BLPop(CmdArgList args, ConnectionContext* cntx);
   static void BRPop(CmdArgList args, ConnectionContext* cntx);
   static void LLen(CmdArgList args, ConnectionContext* cntx);
+  static void LPos(CmdArgList args, ConnectionContext* cntx);
   static void LIndex(CmdArgList args, ConnectionContext* cntx);
   static void LInsert(CmdArgList args, ConnectionContext* cntx);
   static void LTrim(CmdArgList args, ConnectionContext* cntx);
@@ -45,6 +46,9 @@ class ListFamily {
 
   static OpResult<uint32_t> OpLen(const OpArgs& op_args, std::string_view key);
   static OpResult<std::string> OpIndex(const OpArgs& op_args, std::string_view key, long index);
+  static OpResult<std::vector<uint32_t>> OpPos(const OpArgs& op_args, std::string_view key,
+                                               std::string_view element, int rank = 0, int count = -1,
+                                               int max_len = 0);
   static OpResult<int> OpInsert(const OpArgs& op_args, std::string_view key, std::string_view pivot,
                                 std::string_view elem, int insert_param);
 
@@ -56,7 +60,6 @@ class ListFamily {
 
   static OpResult<StringVec> OpRange(const OpArgs& op_args, std::string_view key, long start,
                                      long end);
-
 };
 
 }  // namespace dfly
