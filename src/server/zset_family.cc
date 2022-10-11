@@ -535,11 +535,11 @@ void IntervalVisitor::PopListPack(ZSetFamily::ScoreCount sc) {
 
   int start = 0;
   if (params_.reverse) {
-    /* If the number of elements to delete is greater than the listpack length, 
+    /* If the number of elements to delete is greater than the listpack length,
      * we set the start to 0 because lpseek fails to search beyond length in reverse */
     start = (2*sc > lpLength(zl)) ? 0 : -2*sc;
   }
-    
+
   /* We can finally delete the elements */
   zobj_->ptr = lpDeleteRange(zl, start, 2*sc);
 }
@@ -558,7 +558,7 @@ void IntervalVisitor::PopSkipList(ZSetFamily::ScoreCount sc) {
 
   while (ln && sc--) {
     result_.emplace_back(string{ln->ele, sdslen(ln->ele)}, ln->score);
-    
+
     /* we can delete the element now */
     zsetDel(zobj_, ln->ele);
 
