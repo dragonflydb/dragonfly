@@ -1645,7 +1645,7 @@ void ZSetFamily::ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cn
   TopNScored sc;
 
   if (!SimpleAtoi(count, &sc)) {
-    return (*cntx)->SendError(kInvalidIntErr);
+    return (*cntx)->SendError(kUintErr);
   }
 
   range_spec.interval = sc;
