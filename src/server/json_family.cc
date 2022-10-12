@@ -634,7 +634,101 @@ OpResult<vector<OptString>> OpArrPop(const OpArgs& op_args, string_view key, str
   return vec;
 }
 
+// Returns numeric vector that represents the new length of the array at each path.
+OpResult<vector<OptSizeT>> OpArrTrim(const OpArgs& op_args, string_view key, string_view path,
+                                     int start_index, int stop_index) {
+  OpResult<json> result = GetJson(op_args, key);
+  if (!result) {
+    return result.status();
+  }
+
+  vector<OptSizeT> vec;
+  auto cb = [&](const string& path, json& val) {
+    if (!val.is_array() || val.empty()) {
+      vec.emplace_back(nullopt);
+      return;
+    }
+
+    size_t trim_start_index;
+    if (start_index < 0) {
+      trim_start_index = 0;
+    } else {
+      trim_start_index = start_index;
+    }
+
+    size_t trim_stop_index;
+    if ((size_t)stop_index >= val.size()) {
+      trim_stop_index = val.size();
+    } else {
+      trim_stop_index = stop_index;
+    }
+
+    if (trim_start_index >= val.size() || trim_start_index > trim_stop_index) {
+      val.erase(val.array_range().begin(), val.array_range().end());
+      vec.emplace_back(val.size());
+      return;
+    }
+
+    auto it = std::next(val.array_range().begin(), trim_start_index);
+    while (it != val.array_range().end()) {
+      if (trim_start_index++ == trim_stop_index) {
+        break;
+      }
+
+      it = val.erase(it);
+    }
+
+    vec.emplace_back(val.size());
+  };
+
+  json j = result.value();
+  error_code ec = JsonReplace(j, path, cb);
+  if (ec) {
+    VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
+    return OpStatus::SYNTAX_ERR;
+  }
+
+  SetString(op_args, key, j.as_string());
+  return vec;
+}
+
 }  // namespace
+
+void JsonFamily::ArrTrim(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view path = ArgS(args, 2);
+  int start_index;
+  int stop_index;
+
+  if (!absl::SimpleAtoi(ArgS(args, 3), &start_index)) {
+    VLOG(1) << "Failed to parse array start index";
+    (*cntx)->SendError(kInvalidIntErr);
+    return;
+  }
+
+  if (!absl::SimpleAtoi(ArgS(args, 4), &stop_index)) {
+    VLOG(1) << "Failed to parse array stop index";
+    (*cntx)->SendError(kInvalidIntErr);
+    return;
+  }
+
+  if (stop_index < 0) {
+    (*cntx)->SendError(kInvalidIntErr);
+    return;
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpArrTrim(t->GetOpArgs(shard), key, path, start_index, stop_index);
+  };
+
+  Transaction* trans = cntx->transaction;
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+  if (result) {
+    PrintOptVec(cntx, result);
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
 
 void JsonFamily::ArrPop(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
@@ -1007,6 +1101,7 @@ void JsonFamily::Register(CommandRegistry* registry) {
       StrAppend);
   *registry << CI{"JSON.CLEAR", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(Clear);
   *registry << CI{"JSON.ARRPOP", CO::WRITE | CO::DENYOOM | CO::FAST, -3, 1, 1, 1}.HFUNC(ArrPop);
+  *registry << CI{"JSON.ARRTRIM", CO::WRITE | CO::DENYOOM | CO::FAST, 5, 1, 1, 1}.HFUNC(ArrTrim);
 }
 
 }  // namespace dfly
