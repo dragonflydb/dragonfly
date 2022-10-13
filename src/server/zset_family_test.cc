@@ -267,4 +267,47 @@ TEST_F(ZSetFamilyTest, ZAddBug148) {
   EXPECT_THAT(resp, IntArg(1));
 }
 
+TEST_F(ZSetFamilyTest, ZPopMin) {
+  auto resp = Run({"zadd", "key", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"});
+  EXPECT_THAT(resp, IntArg(5));
+
+  resp = Run({"zpopmin", "key", "2"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "b"));
+
+  resp = Run({"zpopmin", "key", "-1"});
+  ASSERT_THAT(resp, ErrArg("value is out of range, must be positive"));
+
+  resp = Run({"zpopmin", "key", "1"});
+  ASSERT_THAT(resp, "c");
+
+  resp = Run({"zpopmin", "key", "3"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("d", "e"));
+
+  resp = Run({"zpopmin", "key", "1"});
+  ASSERT_THAT(resp, ArrLen(0));
+}
+
+TEST_F(ZSetFamilyTest, ZPopMax) {
+  auto resp = Run({"zadd", "key", "1", "a", "2", "b", "3", "c", "4", "d", "5", "e"});
+  EXPECT_THAT(resp, IntArg(5));
+
+  resp = Run({"zpopmax", "key", "2"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("e", "d"));
+
+  resp = Run({"zpopmax", "key", "-1"});
+  ASSERT_THAT(resp, ErrArg("value is out of range, must be positive"));
+
+  resp = Run({"zpopmax", "key", "1"});
+  ASSERT_THAT(resp, "c");
+
+  resp = Run({"zpopmax", "key", "3"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("b", "a"));
+
+  resp = Run({"zpopmax", "key", "1"});
+  ASSERT_THAT(resp, ArrLen(0));
+}
 }  // namespace dfly

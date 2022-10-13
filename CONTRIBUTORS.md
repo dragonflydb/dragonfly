@@ -3,6 +3,7 @@
 * **[Amir Alperin](https://github.com/iko1)**
 * **[Philipp Born](https://github.com/tamcore)**
   * Helm Chart
+* **[Redha Lhimeur](https://github.com/redhal)**
 * **[Braydn Moore](https://github.com/braydnm)**
 * **[Logan Raarup](https://github.com/logandk)**
 * **[Ryan Russell](https://github.com/ryanrussell)**
