@@ -702,4 +702,48 @@ TEST_F(JsonFamilyTest, ArrPop) {
   EXPECT_EQ(resp, R"([[6,6],[7,7],[8,8]])");
 }
 
+TEST_F(JsonFamilyTest, ArrTrim) {
+  string json = R"(
+    [[], ["a"], ["a", "b"], ["a", "b", "c"]]
+  )";
+
+  auto resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRTRIM", "json", "$[*]", "0", "1"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::NIL), IntArg(0), IntArg(1), IntArg(2)));
+
+  resp = Run({"GET", "json"});
+  EXPECT_EQ(resp, R"([[],[],["b"],["b","c"]])");
+
+  json = R"(
+    {"a":[], "nested": {"a": [1,4]}}
+  )";
+
+  resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRTRIM", "json", "$..a", "0", "1"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::NIL), IntArg(1)));
+
+  resp = Run({"GET", "json"});
+  EXPECT_EQ(resp, R"({"a":[],"nested":{"a":[4]}})");
+
+  json = R"(
+    {"a":[1,2,3,2], "nested": {"a": false}}
+  )";
+
+  resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRTRIM", "json", "$..a", "1", "2"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(3), ArgType(RespExpr::NIL)));
+
+  resp = Run({"GET", "json"});
+  EXPECT_EQ(resp, R"({"a":[1,3,2],"nested":{"a":false}})");
+}
+
 }  // namespace dfly
