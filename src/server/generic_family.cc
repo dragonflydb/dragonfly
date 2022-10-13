@@ -5,18 +5,21 @@
 #include "server/generic_family.h"
 
 extern "C" {
+#include "redis/crc64.h"
 #include "redis/object.h"
 #include "redis/util.h"
 }
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "redis/rdb.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/rdb_save.h"
 #include "server/transaction.h"
 #include "util/varz.h"
 
@@ -28,6 +31,35 @@ using namespace std;
 using namespace facade;
 
 namespace {
+using VersionBuffer = std::array<char, 2>;
+using CrcBuffer = std::array<char, sizeof(uint64_t)>;
+
+VersionBuffer MakeRdbVersion() {
+  VersionBuffer buf;
+  buf[0] = RDB_VERSION & 0xff;
+  buf[1] = (RDB_VERSION >> 8) & 0xff;
+  return buf;
+}
+
+CrcBuffer MakeCheckSum(std::string_view dump_res) {
+  uint64_t chksum = crc64(0, reinterpret_cast<const uint8_t*>(dump_res.data()), dump_res.size());
+  CrcBuffer buf;
+  absl::little_endian::Store64(buf.data(), chksum);
+  return buf;
+}
+
+void AppendFooter(std::string* dump_res) {
+  /* Write the footer, this is how it looks like:
+   * ----------------+---------------------+---------------+
+   * ... RDB payload | 2 bytes RDB version | 8 bytes CRC64 |
+   * ----------------+---------------------+---------------+
+   * RDB version and CRC are both in little endian.
+   */
+  const auto ver = MakeRdbVersion();
+  dump_res->append(ver.data(), ver.size());
+  const auto crc = MakeCheckSum(*dump_res);
+  dump_res->append(crc.data(), crc.size());
+}
 
 OpStatus OpPersist(const OpArgs& op_args, string_view key);
 
@@ -193,6 +225,38 @@ OpStatus OpPersist(const OpArgs& op_args, string_view key) {
     }
     return OpStatus::OK;  // fall though - this is the default
   }
+}
+
+OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
+  auto& db_slice = op_args.shard->db_slice();
+  auto [it, expire_it] = db_slice.FindExt(op_args.db_cntx, key);
+
+  if (IsValid(it)) {
+    DVLOG(1) << "Dump: key '" << key << "' successfully found, going to dump it";
+    std::unique_ptr<::io::StringSink> sink = std::make_unique<::io::StringSink>();
+    RdbSerializer serializer(sink.get());
+
+    // According to Redis code we need to
+    // 1. Save the value itself - without the key
+    // 2. Save footer: this include the RDB version and the CRC value for the message
+    unsigned obj_type = it->second.ObjType();
+    unsigned encoding = it->second.Encoding();
+    auto type = RdbObjectType(obj_type, encoding);
+    DVLOG(1) << "We are going to dump object type: " << type;
+    std::error_code ec = serializer.WriteOpcode(type);
+    CHECK(!ec);
+    ec = serializer.SaveValue(it->second);
+    CHECK(!ec);  // make sure that fully was successful
+    ec = serializer.FlushMem();
+    CHECK(!ec);  // make sure that fully was successful
+    std::string dump_payload(sink->str());
+    AppendFooter(&dump_payload);  // version and crc
+    CHECK_GT(dump_payload.size(), 10u);
+    return dump_payload;
+  }
+  // fallback
+  DVLOG(1) << "Dump: '" << key << "' Not found";
+  return OpStatus::KEY_NOTFOUND;
 }
 
 bool ScanCb(const OpArgs& op_args, PrimeIterator it, const ScanOpts& opts, StringVec* res) {
@@ -754,6 +818,23 @@ void GenericFamily::Select(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendOk();
 }
 
+void GenericFamily::Dump(CmdArgList args, ConnectionContext* cntx) {
+  std::string_view key = ArgS(args, 1);
+  DVLOG(1) << "Dumping before ::ScheduleSingleHopT " << key;
+  auto cb = [&](Transaction* t, EngineShard* shard) { return OpDump(t->GetOpArgs(shard), key); };
+
+  Transaction* trans = cntx->transaction;
+  OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
+  if (result) {
+    DVLOG(1) << "Dump " << trans->DebugId() << ": " << key << ", dump size "
+             << result.value().size();
+    (*cntx)->SendBulkString(*result);
+  } else {
+    DVLOG(1) << "Dump failed: " << result.DebugFormat() << key << " nil";
+    (*cntx)->SendNull();
+  }
+}
+
 void GenericFamily::Type(CmdArgList args, ConnectionContext* cntx) {
   std::string_view key = ArgS(args, 1);
 
@@ -1074,6 +1155,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
             << CI{"PTTL", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Pttl)
             << CI{"TIME", CO::LOADING | CO::FAST, 1, 0, 0, 0}.HFUNC(Time)
             << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, 1}.HFUNC(Type)
+            << CI{"DUMP", CO::READONLY, 2, 1, 1, 1}.HFUNC(Dump)
             << CI{"UNLINK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Del)
             << CI{"STICK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Stick)
             << CI{"SORT", CO::READONLY, -2, 1, 1, 1}.HFUNC(Sort)

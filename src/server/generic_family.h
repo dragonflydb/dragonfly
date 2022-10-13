@@ -63,6 +63,7 @@ class GenericFamily {
   static void Scan(CmdArgList args, ConnectionContext* cntx);
   static void Time(CmdArgList args, ConnectionContext* cntx);
   static void Type(CmdArgList args, ConnectionContext* cntx);
+  static void Dump(CmdArgList args, ConnectionContext* cntx);
 
   static OpResult<void> RenameGeneric(CmdArgList args, bool skip_exist_dest,
                                       ConnectionContext* cntx);
