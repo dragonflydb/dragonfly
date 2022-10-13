@@ -3,6 +3,7 @@
 * **[Amir Alperin](https://github.com/iko1)**
 * **[Philipp Born](https://github.com/tamcore)**
   * Helm Chart
+* **[Meng Chen](https://github.com/matchyc)**
 * **[Yuxuan Chen](https://github.com/YuxuanChen98)**
 * **[Redha Lhimeur](https://github.com/redhal)**
 * **[Braydn Moore](https://github.com/braydnm)**
