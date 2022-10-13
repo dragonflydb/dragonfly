@@ -417,4 +417,80 @@ TEST_F(GenericFamilyTest, Dump) {
   resp = Run({"dump", "foo"});
   EXPECT_EQ(resp.type, RespExpr::NIL);
 }
+
+TEST_F(GenericFamilyTest, Restore) {
+  using std::chrono::duration_cast;
+  using std::chrono::milliseconds;
+  using std::chrono::seconds;
+  using std::chrono::system_clock;
+
+  uint8_t STRING_DUMP_REDIS[] = {0x00, 0xc1, 0xd2, 0x04, 0x09, 0x00, 0xd0,
+                                 0x75, 0x59, 0x6d, 0x10, 0x04, 0x3f, 0x5c};
+
+  auto resp = Run({"set", "exiting-key", "1234"});
+  EXPECT_EQ(resp, "OK");
+  // try to restore into existing key - this should failed
+  ASSERT_THAT(Run({"restore", "exiting-key", "0", ToSV(STRING_DUMP_REDIS)}),
+              ArgType(RespExpr::ERROR));
+
+  // Try restore while setting expiration into the pass
+  // note that value for expiration is just some valid unix time stamp from the pass
+  resp = Run(
+      {"restore", "exiting-key", "1665476212900", ToSV(STRING_DUMP_REDIS), "ABSTTL", "REPLACE"});
+  CHECK_EQ(resp, "OK");
+  resp = Run({"get", "exiting-key"});
+  EXPECT_EQ(resp.type, RespExpr::NIL);  // it was deleted as a result of restore action
+
+  // Test for string that we can successfully load the dumped data and read it back
+  resp = Run({"restore", "new-key", "0", ToSV(STRING_DUMP_REDIS)});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"get", "new-key"});
+  EXPECT_EQ("1234", resp);
+  resp = Run({"dump", "new-key"});
+  auto dump = resp.GetBuf();
+  CHECK_EQ(ToSV(dump), ToSV(STRING_DUMP_REDIS));
+
+  // test for list
+  EXPECT_EQ(1, CheckedInt({"rpush", "orig-list", "20"}));
+  resp = Run({"dump", "orig-list"});
+  dump = resp.GetBuf();
+  resp = Run({"restore", "new-list", "10", ToSV(dump)});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"lpop", "new-list"});
+  EXPECT_EQ("20", resp);
+
+  // run with hash type
+  EXPECT_EQ(1, CheckedInt({"hset", "orig-hash", "123", "45678"}));
+  resp = Run({"dump", "orig-hash"});
+  dump = resp.GetBuf();
+  resp = Run({"restore", "new-hash", "1", ToSV(dump)});
+  EXPECT_EQ(resp, "OK");
+  EXPECT_EQ(1, CheckedInt({"hexists", "new-hash", "123"}));
+
+  // test with replace and no TTL
+  resp = Run({"set", "string-key", "hello world"});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"dump", "string-key"});
+  dump = resp.GetBuf();
+  // this will change the value from "hello world" to "1234"
+  resp = Run({"restore", "string-key", "7", ToSV(STRING_DUMP_REDIS), "REPLACE"});
+  resp = Run({"get", "string-key"});
+  EXPECT_EQ("1234", resp);
+  // check TTL validity
+  EXPECT_EQ(CheckedInt({"ttl", "string-key"}), 7);
+
+  // Make check about ttl with abs time, restoring back to "hello world"
+  resp = Run({"restore", "string-key", absl::StrCat(TEST_current_time_ms + 2000), ToSV(dump),
+              "ABSTTL", "REPLACE"});
+  resp = Run({"get", "string-key"});
+  EXPECT_EQ("hello world", resp);
+  EXPECT_EQ(CheckedInt({"pttl", "string-key"}), 2000);
+
+  // Last but not least - just make sure that we are good without TTL as well
+  resp = Run({"restore", "string-key", "0", ToSV(STRING_DUMP_REDIS), "REPLACE"});
+  resp = Run({"get", "string-key"});
+  EXPECT_EQ("1234", resp);
+  EXPECT_EQ(CheckedInt({"ttl", "string-key"}), -1);
+}
+
 }  // namespace dfly

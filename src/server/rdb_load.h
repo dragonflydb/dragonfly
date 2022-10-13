@@ -19,48 +19,23 @@ namespace dfly {
 
 class EngineShardSet;
 class ScriptMgr;
+class CompactObj;
 
-class RdbLoader {
- public:
-  explicit RdbLoader(ScriptMgr* script_mgr);
+class RdbLoaderBase {
+ protected:
+  RdbLoaderBase();
 
-  ~RdbLoader();
-
-  std::error_code Load(::io::Source* src);
-  void set_source_limit(size_t n) {
-    source_limit_ = n;
-  }
-
-  ::io::Bytes Leftover() const {
-    return mem_buf_.InputBuffer();
-  }
-
-  size_t bytes_read() const {
-    return bytes_read_;
-  }
-
-  size_t keys_loaded() const {
-    return keys_loaded_;
-  }
-
-  // returns time in seconds.
-  double load_time() const {
-    return load_time_;
-  }
-
- private:
+  struct LoadTrace;
   using MutableBytes = ::io::MutableBytes;
-  struct ObjSettings;
 
   struct LzfString {
     base::PODArray<uint8_t> compressed_blob;
     uint64_t uncompressed_len;
   };
 
-  struct LoadTrace;
-
   using RdbVariant =
       std::variant<long long, base::PODArray<char>, LzfString, std::unique_ptr<LoadTrace>>;
+
   struct OpaqueObj {
     RdbVariant obj;
     int rdb_type;
@@ -116,14 +91,13 @@ class RdbLoader {
   };
   using ItemsBuf = std::vector<Item>;
 
-  void ResizeDb(size_t key_num, size_t expire_num);
-  std::error_code HandleAux();
-
   ::io::Result<uint8_t> FetchType() {
     return FetchInt<uint8_t>();
   }
 
   template <typename T> io::Result<T> FetchInt();
+
+  std::error_code Visit(const Item& item, CompactObj* pv);
 
   io::Result<uint64_t> LoadLen(bool* is_encoded);
   std::error_code FetchBuf(size_t size, void* dest);
@@ -151,6 +125,8 @@ class RdbLoader {
   ::io::Result<OpaqueObj> ReadListQuicklist(int rdbtype);
   ::io::Result<OpaqueObj> ReadStreams();
 
+  static size_t StrLen(const RdbVariant& tset);
+
   std::error_code EnsureRead(size_t min_sz) {
     if (mem_buf_.InputLen() >= min_sz)
       return std::error_code{};
@@ -159,21 +135,57 @@ class RdbLoader {
   }
 
   std::error_code EnsureReadInternal(size_t min_sz);
+
+ protected:
+  base::IoBuf mem_buf_;
+  ::io::Source* src_ = nullptr;
+  size_t bytes_read_ = 0;
+  size_t source_limit_ = SIZE_MAX;
+  base::PODArray<uint8_t> compr_buf_;
+};
+
+class RdbLoader : protected RdbLoaderBase {
+ public:
+  explicit RdbLoader(ScriptMgr* script_mgr);
+
+  ~RdbLoader();
+
+  std::error_code Load(::io::Source* src);
+  void set_source_limit(size_t n) {
+    source_limit_ = n;
+  }
+
+  ::io::Bytes Leftover() const {
+    return mem_buf_.InputBuffer();
+  }
+
+  size_t bytes_read() const {
+    return bytes_read_;
+  }
+
+  size_t keys_loaded() const {
+    return keys_loaded_;
+  }
+
+  // returns time in seconds.
+  double load_time() const {
+    return load_time_;
+  }
+
+ private:
+  struct ObjSettings;
   std::error_code LoadKeyValPair(int type, ObjSettings* settings);
+  void ResizeDb(size_t key_num, size_t expire_num);
+  std::error_code HandleAux();
+
   std::error_code VerifyChecksum();
   void FlushShardAsync(ShardId sid);
 
   void LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib);
-  static size_t StrLen(const RdbVariant& tset);
 
   ScriptMgr* script_mgr_;
-  base::IoBuf mem_buf_;
-  base::PODArray<uint8_t> compr_buf_;
   std::unique_ptr<ItemsBuf[]> shard_buf_;
 
-  ::io::Source* src_ = nullptr;
-  size_t bytes_read_ = 0;
-  size_t source_limit_ = SIZE_MAX;
   size_t keys_loaded_ = 0;
   double load_time_ = 0;
 

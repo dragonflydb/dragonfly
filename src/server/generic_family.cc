@@ -19,6 +19,7 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/rdb_load.h"
 #include "server/rdb_save.h"
 #include "server/transaction.h"
 #include "util/varz.h"
@@ -31,8 +32,16 @@ using namespace std;
 using namespace facade;
 
 namespace {
-using VersionBuffer = std::array<char, 2>;
+
+using VersionBuffer = std::array<char, sizeof(uint16_t)>;
 using CrcBuffer = std::array<char, sizeof(uint64_t)>;
+constexpr size_t DUMP_FOOTER_SIZE = sizeof(uint64_t) + sizeof(uint16_t);  // version number and crc
+
+int64_t CalculateExpirationTime(bool seconds, bool absolute, int64_t ts, int64_t now_msec) {
+  int64_t msec = seconds ? ts * 1000 : ts;
+  int64_t rel_msec = absolute ? msec - now_msec : msec;
+  return rel_msec;
+}
 
 VersionBuffer MakeRdbVersion() {
   VersionBuffer buf;
@@ -59,6 +68,200 @@ void AppendFooter(std::string* dump_res) {
   dump_res->append(ver.data(), ver.size());
   const auto crc = MakeCheckSum(*dump_res);
   dump_res->append(crc.data(), crc.size());
+}
+
+bool VerifyFooter(std::string_view msg) {
+  if (msg.size() <= DUMP_FOOTER_SIZE) {
+    LOG(WARNING) << "got restore payload that is too short - " << msg.size();
+    return false;
+  }
+  const uint8_t* footer =
+      reinterpret_cast<const uint8_t*>(msg.data()) + (msg.size() - DUMP_FOOTER_SIZE);
+  uint16_t version = (*(footer + 1) << 8 | (*footer));
+  if (version > RDB_VERSION) {
+    LOG(WARNING) << "got restore payload with illegal version - supporting version up to "
+                 << RDB_VERSION << " got version " << version;
+    return false;
+  }
+  uint64_t expected_cs =
+      crc64(0, reinterpret_cast<const uint8_t*>(msg.data()), msg.size() - sizeof(uint64_t));
+  uint64_t actual_cs = absl::little_endian::Load64(footer + sizeof(version));
+  if (actual_cs != expected_cs) {
+    LOG(WARNING) << "CRC check failed for restore command, expecting: " << expected_cs << " got "
+                 << actual_cs;
+    return false;
+  }
+  return true;
+}
+
+class InMemSource : public ::io::Source {
+ public:
+  InMemSource(std::string_view buf) : buf_(buf) {
+  }
+
+  ::io::Result<size_t> ReadSome(const iovec* v, uint32_t len) final;
+
+ protected:
+  std::string_view buf_;
+  off_t offs_ = 0;
+};
+
+::io::Result<size_t> InMemSource::ReadSome(const iovec* v, uint32_t len) {
+  ssize_t read_total = 0;
+  while (size_t(offs_) < buf_.size() && len > 0) {
+    size_t read_sz = min(buf_.size() - offs_, v->iov_len);
+    memcpy(v->iov_base, buf_.data() + offs_, read_sz);
+    read_total += read_sz;
+    offs_ += read_sz;
+
+    ++v;
+    --len;
+  }
+
+  return read_total;
+}
+
+class RdbRestoreValue : protected RdbLoaderBase {
+ public:
+  bool Add(std::string_view payload, std::string_view key, DbSlice& db_slice, DbIndex index,
+           uint64_t expire_ms);
+
+ private:
+  std::optional<OpaqueObj> Parse(std::string_view payload);
+};
+
+std::optional<RdbLoaderBase::OpaqueObj> RdbRestoreValue::Parse(std::string_view payload) {
+  InMemSource source(payload);
+  src_ = &source;
+  if (auto type_id = FetchType(); type_id && rdbIsObjectType(type_id.value())) {
+    io::Result<OpaqueObj> io_res = ReadObj(type_id.value());  // load the type from the input stream
+    if (!io_res) {
+      LOG(ERROR) << "failed to load data for type id " << (unsigned int)type_id.value();
+      return std::nullopt;
+    }
+    return std::optional<OpaqueObj>(std::move(io_res.value()));
+  } else {
+    LOG(ERROR) << "failed to load type id from the input stream or type id is invalid";
+    return std::nullopt;
+  }
+}
+
+bool RdbRestoreValue::Add(std::string_view data, std::string_view key, DbSlice& db_slice,
+                          DbIndex index, uint64_t expire_ms) {
+  auto value_to_load = Parse(data);
+  if (!value_to_load) {
+    return false;
+  }
+  Item item{
+      .key = std::string(key), .val = std::move(value_to_load.value()), .expire_ms = expire_ms};
+  PrimeValue pv;
+  if (auto ec = Visit(item, &pv); ec) {
+    // we failed - report and exit
+    LOG(WARNING) << "error while trying to save data: " << ec;
+    return false;
+  }
+  DbContext context{.db_index = index, .time_now_ms = GetCurrentTimeMs()};
+  auto [it, added] = db_slice.AddEntry(context, key, std::move(pv), item.expire_ms);
+  return added;
+}
+
+class RestoreArgs {
+  static constexpr int64_t NO_EXPIRATION = 0;
+
+  int64_t expiration_ = NO_EXPIRATION;
+  bool abs_time_ = false;
+  bool replace_ = false;  // if true, over-ride existing key
+
+ public:
+  constexpr bool Replace() const {
+    return replace_;
+  }
+
+  constexpr int64_t ExpirationTime() const {
+    return expiration_;
+  }
+
+  [[nodiscard]] constexpr bool Expired() const {
+    return ExpirationTime() < 0;
+  }
+
+  [[nodiscard]] constexpr bool HasExpiration() const {
+    return expiration_ != NO_EXPIRATION;
+  }
+
+  [[nodiscard]] bool UpdateExpiration(int64_t now_msec);
+
+  static OpResult<RestoreArgs> TryFrom(const CmdArgList& args);
+};
+
+[[nodiscard]] bool RestoreArgs::UpdateExpiration(int64_t now_msec) {
+  if (HasExpiration()) {
+    auto new_ttl = CalculateExpirationTime(!abs_time_, abs_time_, expiration_, now_msec);
+    if (new_ttl > kMaxExpireDeadlineSec * 1000) {
+      return false;
+    }
+    expiration_ = new_ttl;
+    if (new_ttl > 0) {
+      expiration_ += now_msec;
+    }
+  }
+  return true;
+}
+
+// The structure that we are expecting is:
+// args[0] == "RESTORE"
+// args[1] == "key"
+// args[2] == "ttl"
+// args[3] == serialized value (list of chars that are used for the actual restore).
+// args[4] .. args[n]: optional arguments that can be [REPLACE] [ABSTTL] [IDLETIME seconds]
+//            [FREQ frequency], in any order
+OpResult<RestoreArgs> RestoreArgs::TryFrom(const CmdArgList& args) {
+  RestoreArgs out_args;
+  std::string_view cur_arg = ArgS(args, 2);  // extract ttl
+  if (!absl::SimpleAtoi(cur_arg, &out_args.expiration_) || (out_args.expiration_ < 0)) {
+    return OpStatus::INVALID_INT;
+  }
+
+  // the 3rd arg is the serialized value, so we are starting from one pass it
+  // Note that all these are actually optional
+  // note about the redis doc for this command: https://redis.io/commands/restore/
+  // the IDLETIME and FREQ are not required, but to make this the same as in redis
+  // we would parse them and ensure that they are correct, maybe later they will be used
+  int64_t idle_time = 0;
+
+  for (size_t i = 4; i < args.size(); ++i) {
+    ToUpper(&args[i]);
+    cur_arg = ArgS(args, i);
+    bool additional = args.size() - i - 1 >= 1;
+    if (cur_arg == "REPLACE") {
+      out_args.replace_ = true;
+    } else if (cur_arg == "ABSTTL") {
+      out_args.abs_time_ = true;
+    } else if (cur_arg == "IDLETIME" && additional) {
+      ++i;
+      cur_arg = ArgS(args, i);
+      if (!absl::SimpleAtoi(cur_arg, &idle_time)) {
+        return OpStatus::INVALID_INT;
+      }
+      if (idle_time < 0) {
+        return OpStatus::SYNTAX_ERR;
+      }
+    } else if (cur_arg == "FREQ" && additional) {
+      ++i;
+      cur_arg = ArgS(args, i);
+      int freq = 0;
+      if (!absl::SimpleAtoi(cur_arg, &freq)) {
+        return OpStatus::INVALID_INT;
+      }
+      if (freq < 0 || freq > 255) {
+        return OpStatus::OUT_OF_RANGE;  // need to translate in this case
+      }
+    } else {
+      LOG(WARNING) << "Got unknown command line option for restore '" << cur_arg << "'";
+      return OpStatus::SYNTAX_ERR;
+    }
+  }
+  return out_args;
 }
 
 OpStatus OpPersist(const OpArgs& op_args, string_view key);
@@ -257,6 +460,40 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
   // fallback
   DVLOG(1) << "Dump: '" << key << "' Not found";
   return OpStatus::KEY_NOTFOUND;
+}
+
+OpResult<bool> OnRestore(const OpArgs& op_args, std::string_view key, std::string_view payload,
+                         RestoreArgs restore_args) {
+  if (!restore_args.UpdateExpiration(op_args.db_cntx.time_now_ms)) {
+    return OpStatus::OUT_OF_RANGE;
+  }
+
+  auto& db_slice = op_args.shard->db_slice();
+  // The redis impl (see cluster.c function restoreCommand), remove the old key if
+  // the replace option is set, so lets do the same here
+  auto [from_it, from_expire] = db_slice.FindExt(op_args.db_cntx, key);
+  if (restore_args.Replace()) {
+    if (IsValid(from_it)) {
+      VLOG(1) << "restore command is running with replace, found old key '" << key
+              << "' and removing it";
+      CHECK(db_slice.Del(op_args.db_cntx.db_index, from_it));
+    }
+  } else {
+    // we are not allowed to replace it, so make sure it doesn't exist
+    if (IsValid(from_it)) {
+      return OpStatus::KEY_EXISTS;
+    }
+  }
+
+  if (restore_args.Expired()) {
+    VLOG(1) << "the new key '" << key << "' already expired, will not save the value";
+    return true;
+  }
+
+  RdbRestoreValue loader{};
+
+  return loader.Add(payload, key, db_slice, op_args.db_cntx.db_index,
+                    restore_args.ExpirationTime());
 }
 
 bool ScanCb(const OpArgs& op_args, PrimeIterator it, const ScanOpts& opts, StringVec* res) {
@@ -728,6 +965,47 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
   std::visit(std::move(sort_call), entries.value());
 }
 
+void GenericFamily::Restore(CmdArgList args, ConnectionContext* cntx) {
+  std::string_view key = ArgS(args, 1);
+  std::string_view serialized_value = ArgS(args, 3);
+
+  if (!VerifyFooter(serialized_value)) {
+    return (*cntx)->SendError("ERR DUMP payload version or checksum are wrong");
+  }
+
+  OpResult<RestoreArgs> restore_args = RestoreArgs::TryFrom(args);
+  if (!restore_args) {
+    if (restore_args.status() == OpStatus::OUT_OF_RANGE) {
+      return (*cntx)->SendError("Invalid IDLETIME value, must be >= 0");
+    } else {
+      return (*cntx)->SendError(restore_args.status());
+    }
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OnRestore(t->GetOpArgs(shard), key, serialized_value, restore_args.value());
+  };
+
+  OpResult<bool> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+
+  if (result) {
+    if (result.value()) {
+      return (*cntx)->SendOk();
+    } else {
+      return (*cntx)->SendError("Bad data format");
+    }
+  } else {
+    switch (result.status()) {
+      case OpStatus::KEY_EXISTS:
+        return (*cntx)->SendError("BUSYKEY: key name already exists.");
+      case OpStatus::WRONG_TYPE:
+        return (*cntx)->SendError("Bad data format");
+      default:
+        return (*cntx)->SendError(result.status());
+    }
+  }
+}
+
 void GenericFamily::Move(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
   int64_t target_db;
@@ -1144,7 +1422,8 @@ void GenericFamily::Register(CommandRegistry* registry) {
             << CI{"UNLINK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Del)
             << CI{"STICK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Stick)
             << CI{"SORT", CO::READONLY, -2, 1, 1, 1}.HFUNC(Sort)
-            << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS, 3, 1, 1, 1}.HFUNC(Move);
+            << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS, 3, 1, 1, 1}.HFUNC(Move)
+            << CI{"RESTORE", CO::WRITE, -4, 1, 1, 1}.HFUNC(Restore);
 }
 
 }  // namespace dfly

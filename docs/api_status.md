@@ -179,7 +179,7 @@ with respect to Memcached and Redis APIs.
   - [ ] OBJECT
   - [x] PERSIST
   - [X] PTTL
-  - [ ] RESTORE
+  - [x] RESTORE
   - [X] SCRIPT LOAD/EXISTS
   - [ ] SCRIPT DEBUG/KILL/FLUSH
 - [X] Set Family

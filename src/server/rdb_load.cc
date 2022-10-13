@@ -37,6 +37,22 @@ ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 ABSL_DECLARE_FLAG(bool, use_set2);
 
+#define SET_OR_RETURN(expr, dest) \
+  do {                            \
+    auto exp_val = (expr);        \
+    if (!exp_val)                 \
+      return exp_val.error();     \
+    dest = exp_val.value();       \
+  } while (0)
+
+#define SET_OR_UNEXPECT(expr, dest)            \
+  {                                            \
+    auto exp_res = (expr);                     \
+    if (!exp_res)                              \
+      return make_unexpected(exp_res.error()); \
+    dest = std::move(exp_res.value());         \
+  }
+
 namespace dfly {
 
 using namespace std;
@@ -186,7 +202,7 @@ bool resizeStringSet(robj* set, size_t size, bool use_set2) {
 
 }  // namespace
 
-class RdbLoader::OpaqueObjLoader {
+class RdbLoaderBase::OpaqueObjLoader {
  public:
   OpaqueObjLoader(int rdb_type, PrimeValue* pv) : rdb_type_(rdb_type), pv_(pv) {
   }
@@ -226,12 +242,15 @@ class RdbLoader::OpaqueObjLoader {
   PrimeValue* pv_;
 };
 
-void RdbLoader::OpaqueObjLoader::operator()(const base::PODArray<char>& str) {
+RdbLoaderBase::RdbLoaderBase() : mem_buf_{16_KB} {
+}
+
+void RdbLoaderBase::OpaqueObjLoader::operator()(const base::PODArray<char>& str) {
   string_view sv(str.data(), str.size());
   HandleBlob(sv);
 }
 
-void RdbLoader::OpaqueObjLoader::operator()(const LzfString& lzfstr) {
+void RdbLoaderBase::OpaqueObjLoader::operator()(const LzfString& lzfstr) {
   string tmp(lzfstr.uncompressed_len, '\0');
   if (lzf_decompress(lzfstr.compressed_blob.data(), lzfstr.compressed_blob.size(), tmp.data(),
                      tmp.size()) == 0) {
@@ -242,7 +261,7 @@ void RdbLoader::OpaqueObjLoader::operator()(const LzfString& lzfstr) {
   HandleBlob(tmp);
 }
 
-void RdbLoader::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr) {
+void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr) {
   switch (rdb_type_) {
     case RDB_TYPE_SET:
       CreateSet(ptr.get());
@@ -266,7 +285,7 @@ void RdbLoader::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr) {
   }
 }
 
-void RdbLoader::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
+void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
   size_t len = ltrace->arr.size();
 
   bool is_intset = true;
@@ -356,7 +375,7 @@ void RdbLoader::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
   std::move(cleanup).Cancel();
 }
 
-void RdbLoader::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
+void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
   size_t len = ltrace->arr.size() / 2;
 
   /* Too many entries? Use a hash table right from the start. */
@@ -435,7 +454,7 @@ void RdbLoader::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
   pv_->ImportRObj(res);
 }
 
-void RdbLoader::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
+void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
   quicklist* ql =
       quicklistNew(GetFlag(FLAGS_list_max_listpack_size), GetFlag(FLAGS_list_compress_depth));
   auto cleanup = absl::Cleanup([&] { quicklistRelease(ql); });
@@ -502,7 +521,7 @@ void RdbLoader::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
   pv_->ImportRObj(res);
 }
 
-void RdbLoader::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
+void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
   robj* res = createZsetObject();
   zset* zs = (zset*)res->ptr;
 
@@ -550,7 +569,7 @@ void RdbLoader::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
   pv_->ImportRObj(res);
 }
 
-void RdbLoader::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
+void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   CHECK(ltrace->stream_trace);
 
   robj* res = createStreamObject();
@@ -666,7 +685,7 @@ void RdbLoader::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   pv_->ImportRObj(res);
 }
 
-void RdbLoader::OpaqueObjLoader::HandleBlob(string_view blob) {
+void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
   if (rdb_type_ == RDB_TYPE_STRING) {
     pv_->SetString(blob);
     return;
@@ -748,7 +767,7 @@ void RdbLoader::OpaqueObjLoader::HandleBlob(string_view blob) {
   pv_->ImportRObj(res);
 }
 
-sds RdbLoader::OpaqueObjLoader::ToSds(const RdbVariant& obj) {
+sds RdbLoaderBase::OpaqueObjLoader::ToSds(const RdbVariant& obj) {
   if (holds_alternative<long long>(obj)) {
     return sdsfromlonglong(get<long long>(obj));
   }
@@ -776,7 +795,7 @@ sds RdbLoader::OpaqueObjLoader::ToSds(const RdbVariant& obj) {
   return nullptr;
 }
 
-string_view RdbLoader::OpaqueObjLoader::ToSV(const RdbVariant& obj) {
+string_view RdbLoaderBase::OpaqueObjLoader::ToSV(const RdbVariant& obj) {
   if (holds_alternative<long long>(obj)) {
     tset_blob_.resize(32);
     auto val = get<long long>(obj);
@@ -805,6 +824,626 @@ string_view RdbLoader::OpaqueObjLoader::ToSV(const RdbVariant& obj) {
   return string_view{};
 }
 
+std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
+  if (size == 0)
+    return kOk;
+
+  uint8_t* next = (uint8_t*)dest;
+  size_t bytes_read;
+
+  size_t to_copy = std::min(mem_buf_.InputLen(), size);
+  DVLOG(2) << "Copying " << to_copy << " bytes";
+
+  ::memcpy(next, mem_buf_.InputBuffer().data(), to_copy);
+  mem_buf_.ConsumeInput(to_copy);
+  size -= to_copy;
+  if (size == 0)
+    return kOk;
+
+  next += to_copy;
+
+  if (size + bytes_read_ > source_limit_) {
+    LOG(ERROR) << "Out of bound read " << size + bytes_read_ << " vs " << source_limit_;
+
+    return RdbError(errc::rdb_file_corrupted);
+  }
+
+  if (size > 512) {  // Worth reading directly into next.
+    io::MutableBytes mb{next, size};
+
+    SET_OR_RETURN(src_->Read(mb), bytes_read);
+    if (bytes_read < size)
+      return RdbError(errc::rdb_file_corrupted);
+
+    bytes_read_ += bytes_read;
+    DCHECK_LE(bytes_read_, source_limit_);
+
+    return kOk;
+  }
+
+  io::MutableBytes mb = mem_buf_.AppendBuffer();
+
+  // Must be because mem_buf_ is be empty.
+  DCHECK_GT(mb.size(), size);
+
+  if (bytes_read_ + mb.size() > source_limit_) {
+    mb = mb.subspan(0, source_limit_ - bytes_read_);
+  }
+
+  SET_OR_RETURN(src_->ReadAtLeast(mb, size), bytes_read);
+
+  if (bytes_read < size)
+    return RdbError(errc::rdb_file_corrupted);
+  bytes_read_ += bytes_read;
+
+  DCHECK_LE(bytes_read_, source_limit_);
+
+  mem_buf_.CommitWrite(bytes_read);
+  ::memcpy(next, mem_buf_.InputBuffer().data(), size);
+  mem_buf_.ConsumeInput(size);
+
+  return kOk;
+}
+
+size_t RdbLoaderBase::StrLen(const RdbVariant& tset) {
+  const base::PODArray<char>* arr = get_if<base::PODArray<char>>(&tset);
+  if (arr)
+    return arr->size();
+
+  if (holds_alternative<long long>(tset)) {
+    auto val = get<long long>(tset);
+    char buf[32];
+    char* next = absl::numbers_internal::FastIntToBuffer(val, buf);
+    return (next - buf);
+  }
+
+  const LzfString* lzf = get_if<LzfString>(&tset);
+  if (lzf)
+    return lzf->uncompressed_len;
+
+  LOG(DFATAL) << "should not reach";
+  return 0;
+}
+
+auto RdbLoaderBase::FetchGenericString() -> io::Result<string> {
+  bool isencoded;
+  size_t len;
+
+  SET_OR_UNEXPECT(LoadLen(&isencoded), len);
+
+  if (isencoded) {
+    switch (len) {
+      case RDB_ENC_INT8:
+      case RDB_ENC_INT16:
+      case RDB_ENC_INT32:
+        return FetchIntegerObject(len);
+      case RDB_ENC_LZF:
+        return FetchLzfStringObject();
+      default:
+        LOG(ERROR) << "Unknown RDB string encoding len " << len;
+        return Unexpected(errc::rdb_file_corrupted);
+    }
+  }
+
+  string res;
+
+  if (len > 0) {
+    res.resize(len);
+    error_code ec = FetchBuf(len, res.data());
+    if (ec) {
+      return make_unexpected(ec);
+    }
+  }
+
+  return res;
+}
+
+auto RdbLoaderBase::FetchLzfStringObject() -> io::Result<string> {
+  bool zerocopy_decompress = true;
+
+  const uint8_t* cbuf = NULL;
+  uint64_t clen, len;
+
+  SET_OR_UNEXPECT(LoadLen(NULL), clen);
+  SET_OR_UNEXPECT(LoadLen(NULL), len);
+
+  if (len > 1ULL << 29 || len <= clen || clen == 0) {
+    LOG(ERROR) << "Bad compressed string";
+    return Unexpected(rdb::rdb_file_corrupted);
+  }
+
+  if (mem_buf_.InputLen() >= clen) {
+    cbuf = mem_buf_.InputBuffer().data();
+  } else {
+    compr_buf_.resize(clen);
+    zerocopy_decompress = false;
+
+    /* Load the compressed representation and uncompress it to target. */
+    error_code ec = FetchBuf(clen, compr_buf_.data());
+    if (ec) {
+      return make_unexpected(ec);
+    }
+    cbuf = compr_buf_.data();
+  }
+
+  string res(len, 0);
+
+  if (lzf_decompress(cbuf, clen, res.data(), len) == 0) {
+    LOG(ERROR) << "Invalid LZF compressed string";
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+
+  // FetchBuf consumes the input but if we have not went through that path
+  // we need to consume now.
+  if (zerocopy_decompress)
+    mem_buf_.ConsumeInput(clen);
+
+  return res;
+}
+
+auto RdbLoaderBase::FetchIntegerObject(int enctype) -> io::Result<string> {
+  long long val;
+
+  if (enctype == RDB_ENC_INT8) {
+    SET_OR_UNEXPECT(FetchInt<int8_t>(), val);
+  } else if (enctype == RDB_ENC_INT16) {
+    SET_OR_UNEXPECT(FetchInt<uint16_t>(), val);
+  } else if (enctype == RDB_ENC_INT32) {
+    SET_OR_UNEXPECT(FetchInt<uint32_t>(), val);
+  } else {
+    return Unexpected(errc::invalid_encoding);
+  }
+
+  char buf[32];
+  absl::numbers_internal::FastIntToBuffer(val, buf);
+
+  return string(buf);
+}
+
+io::Result<double> RdbLoaderBase::FetchBinaryDouble() {
+  union {
+    uint64_t val;
+    double d;
+  } u;
+
+  static_assert(sizeof(u) == sizeof(uint64_t));
+  auto ec = EnsureRead(8);
+  if (ec)
+    return make_unexpected(ec);
+
+  uint8_t buf[8];
+  mem_buf_.ReadAndConsume(8, buf);
+  u.val = base::LE::LoadT<uint64_t>(buf);
+  return u.d;
+}
+
+io::Result<double> RdbLoaderBase::FetchDouble() {
+  uint8_t len;
+
+  SET_OR_UNEXPECT(FetchInt<uint8_t>(), len);
+  constexpr double kInf = std::numeric_limits<double>::infinity();
+  switch (len) {
+    case 255:
+      return -kInf;
+    case 254:
+      return kInf;
+    case 253:
+      return std::numeric_limits<double>::quiet_NaN();
+    default:;
+  }
+  char buf[256];
+  error_code ec = FetchBuf(len, buf);
+  if (ec)
+    return make_unexpected(ec);
+  buf[len] = '\0';
+  double val;
+  if (sscanf(buf, "%lg", &val) != 1)
+    return Unexpected(errc::rdb_file_corrupted);
+  return val;
+}
+
+auto RdbLoaderBase::ReadKey() -> io::Result<string> {
+  return FetchGenericString();
+}
+
+auto RdbLoaderBase::ReadObj(int rdbtype) -> io::Result<OpaqueObj> {
+  switch (rdbtype) {
+    case RDB_TYPE_STRING: {
+      /* Read string value */
+      auto fetch = ReadStringObj();
+      if (!fetch)
+        return make_unexpected(fetch.error());
+      return OpaqueObj{std::move(*fetch), RDB_TYPE_STRING};
+    }
+    case RDB_TYPE_SET:
+      return ReadSet();
+    case RDB_TYPE_SET_INTSET:
+      return ReadIntSet();
+    case RDB_TYPE_HASH_ZIPLIST:
+      return ReadHZiplist();
+    case RDB_TYPE_HASH:
+      return ReadHMap();
+    case RDB_TYPE_ZSET:
+    case RDB_TYPE_ZSET_2:
+      return ReadZSet(rdbtype);
+    case RDB_TYPE_ZSET_ZIPLIST:
+      return ReadZSetZL();
+    case RDB_TYPE_LIST_QUICKLIST:
+    case RDB_TYPE_LIST_QUICKLIST_2:
+      return ReadListQuicklist(rdbtype);
+    case RDB_TYPE_STREAM_LISTPACKS:
+      return ReadStreams();
+      break;
+  }
+
+  LOG(ERROR) << "Unsupported rdb type " << rdbtype;
+
+  return Unexpected(errc::invalid_encoding);
+}
+
+auto RdbLoaderBase::ReadStringObj() -> io::Result<RdbVariant> {
+  bool isencoded;
+  size_t len;
+
+  SET_OR_UNEXPECT(LoadLen(&isencoded), len);
+
+  if (isencoded) {
+    switch (len) {
+      case RDB_ENC_INT8:
+      case RDB_ENC_INT16:
+      case RDB_ENC_INT32:
+        return ReadIntObj(len);
+      case RDB_ENC_LZF:
+        return ReadLzf();
+      default:
+        LOG(ERROR) << "Unknown RDB string encoding " << len;
+        return Unexpected(errc::rdb_file_corrupted);
+    }
+  }
+
+  base::PODArray<char> blob;
+  blob.resize(len);
+  error_code ec = FetchBuf(len, blob.data());
+  if (ec) {
+    return make_unexpected(ec);
+  }
+
+  return blob;
+}
+
+io::Result<long long> RdbLoaderBase::ReadIntObj(int enctype) {
+  long long val;
+
+  if (enctype == RDB_ENC_INT8) {
+    SET_OR_UNEXPECT(FetchInt<int8_t>(), val);
+  } else if (enctype == RDB_ENC_INT16) {
+    SET_OR_UNEXPECT(FetchInt<uint16_t>(), val);
+  } else if (enctype == RDB_ENC_INT32) {
+    SET_OR_UNEXPECT(FetchInt<uint32_t>(), val);
+  } else {
+    return Unexpected(errc::invalid_encoding);
+  }
+  return val;
+}
+
+auto RdbLoaderBase::ReadLzf() -> io::Result<LzfString> {
+  uint64_t clen;
+  LzfString res;
+
+  SET_OR_UNEXPECT(LoadLen(NULL), clen);
+  SET_OR_UNEXPECT(LoadLen(NULL), res.uncompressed_len);
+
+  if (res.uncompressed_len > 1ULL << 29) {
+    LOG(ERROR) << "Uncompressed length is too big " << res.uncompressed_len;
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+
+  res.compressed_blob.resize(clen);
+  /* Load the compressed representation and uncompress it to target. */
+  error_code ec = FetchBuf(clen, res.compressed_blob.data());
+  if (ec) {
+    return make_unexpected(ec);
+  }
+
+  return res;
+}
+
+auto RdbLoaderBase::ReadSet() -> io::Result<OpaqueObj> {
+  size_t len;
+  SET_OR_UNEXPECT(LoadLen(NULL), len);
+
+  if (len == 0)
+    return Unexpected(errc::empty_key);
+
+  unique_ptr<LoadTrace> res(new LoadTrace);
+  res->arr.resize(len);
+  for (size_t i = 0; i < len; i++) {
+    io::Result<RdbVariant> fetch = ReadStringObj();
+    if (!fetch) {
+      return make_unexpected(fetch.error());
+    }
+    res->arr[i].rdb_var = std::move(fetch.value());
+  }
+
+  return OpaqueObj{std::move(res), RDB_TYPE_SET};
+}
+
+auto RdbLoaderBase::ReadIntSet() -> io::Result<OpaqueObj> {
+  io::Result<RdbVariant> fetch = ReadStringObj();
+  if (!fetch) {
+    return make_unexpected(fetch.error());
+  }
+
+  const LzfString* lzf = get_if<LzfString>(&fetch.value());
+  const base::PODArray<char>* arr = get_if<base::PODArray<char>>(&fetch.value());
+
+  if (lzf) {
+    if (lzf->uncompressed_len == 0 || lzf->compressed_blob.empty())
+      return Unexpected(errc::rdb_file_corrupted);
+  } else if (arr) {
+    if (arr->empty())
+      return Unexpected(errc::rdb_file_corrupted);
+  } else {
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+
+  return OpaqueObj{std::move(*fetch), RDB_TYPE_SET_INTSET};
+}
+
+auto RdbLoaderBase::ReadHZiplist() -> io::Result<OpaqueObj> {
+  RdbVariant str_obj;
+  SET_OR_UNEXPECT(ReadStringObj(), str_obj);
+
+  if (StrLen(str_obj) == 0) {
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+
+  return OpaqueObj{std::move(str_obj), RDB_TYPE_HASH_ZIPLIST};
+}
+
+auto RdbLoaderBase::ReadHMap() -> io::Result<OpaqueObj> {
+  uint64_t len;
+  SET_OR_UNEXPECT(LoadLen(nullptr), len);
+
+  if (len == 0)
+    return Unexpected(errc::empty_key);
+
+  unique_ptr<LoadTrace> load_trace(new LoadTrace);
+  load_trace->arr.resize(len * 2);
+
+  for (size_t i = 0; i < load_trace->arr.size(); ++i) {
+    SET_OR_UNEXPECT(ReadStringObj(), load_trace->arr[i].rdb_var);
+  }
+
+  return OpaqueObj{std::move(load_trace), RDB_TYPE_HASH};
+}
+
+auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
+  /* Read sorted set value. */
+  uint64_t zsetlen;
+  SET_OR_UNEXPECT(LoadLen(nullptr), zsetlen);
+
+  if (zsetlen == 0)
+    return Unexpected(errc::empty_key);
+
+  unique_ptr<LoadTrace> load_trace(new LoadTrace);
+  load_trace->arr.resize(zsetlen);
+
+  double score;
+
+  for (size_t i = 0; i < load_trace->arr.size(); ++i) {
+    SET_OR_UNEXPECT(ReadStringObj(), load_trace->arr[i].rdb_var);
+    if (rdbtype == RDB_TYPE_ZSET_2) {
+      SET_OR_UNEXPECT(FetchBinaryDouble(), score);
+    } else {
+      SET_OR_UNEXPECT(FetchDouble(), score);
+    }
+
+    if (isnan(score)) {
+      LOG(ERROR) << "Zset with NAN score detected";
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+    load_trace->arr[i].score = score;
+  }
+
+  return OpaqueObj{std::move(load_trace), rdbtype};
+}
+
+auto RdbLoaderBase::ReadZSetZL() -> io::Result<OpaqueObj> {
+  RdbVariant str_obj;
+  SET_OR_UNEXPECT(ReadStringObj(), str_obj);
+
+  if (StrLen(str_obj) == 0) {
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+
+  return OpaqueObj{std::move(str_obj), RDB_TYPE_ZSET_ZIPLIST};
+}
+
+auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
+  uint64_t len;
+  SET_OR_UNEXPECT(LoadLen(nullptr), len);
+
+  if (len == 0)
+    return Unexpected(errc::empty_key);
+
+  unique_ptr<LoadTrace> load_trace(new LoadTrace);
+  load_trace->arr.resize(len);
+
+  for (size_t i = 0; i < len; ++i) {
+    uint64_t container = QUICKLIST_NODE_CONTAINER_PACKED;
+    if (rdbtype == RDB_TYPE_LIST_QUICKLIST_2) {
+      SET_OR_UNEXPECT(LoadLen(nullptr), container);
+
+      if (container != QUICKLIST_NODE_CONTAINER_PACKED &&
+          container != QUICKLIST_NODE_CONTAINER_PLAIN) {
+        LOG(ERROR) << "Quicklist integrity check failed.";
+        return Unexpected(errc::rdb_file_corrupted);
+      }
+    }
+
+    RdbVariant var;
+    SET_OR_UNEXPECT(ReadStringObj(), var);
+    if (StrLen(var) == 0) {
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+    load_trace->arr[i].rdb_var = std::move(var);
+    load_trace->arr[i].encoding = container;
+  }
+
+  return OpaqueObj{std::move(load_trace), rdbtype};
+}
+
+auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
+  uint64_t listpacks;
+  SET_OR_UNEXPECT(LoadLen(nullptr), listpacks);
+
+  unique_ptr<LoadTrace> load_trace(new LoadTrace);
+  load_trace->arr.resize(listpacks * 2);
+
+  for (size_t i = 0; i < listpacks; ++i) {
+    /* Get the master ID, the one we'll use as key of the radix tree
+     * node: the entries inside the listpack itself are delta-encoded
+     * relatively to this ID. */
+    RdbVariant stream_id, blob;
+    SET_OR_UNEXPECT(ReadStringObj(), stream_id);
+
+    if (StrLen(stream_id) != sizeof(streamID)) {
+      LOG(ERROR) << "Stream node key entry is not the size of a stream ID";
+
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+
+    SET_OR_UNEXPECT(ReadStringObj(), blob);
+
+    if (StrLen(blob) == 0) {
+      LOG(ERROR) << "Stream listpacks loading failed";
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+
+    load_trace->arr[2 * i].rdb_var = std::move(stream_id);
+    load_trace->arr[2 * i + 1].rdb_var = std::move(blob);
+  }
+
+  load_trace->stream_trace.reset(new StreamTrace);
+
+  /* Load total number of items inside the stream. */
+  SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->stream_len);
+
+  /* Load the last entry ID. */
+  SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->ms);
+  SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->seq);
+
+  /* Consumer groups loading */
+  uint64_t cgroups_count;
+  SET_OR_UNEXPECT(LoadLen(nullptr), cgroups_count);
+  load_trace->stream_trace->cgroup.resize(cgroups_count);
+
+  for (size_t i = 0; i < cgroups_count; ++i) {
+    auto& cgroup = load_trace->stream_trace->cgroup[i];
+    /* Get the consumer group name and ID. We can then create the
+     * consumer group ASAP and populate its structure as
+     * we read more data. */
+
+    // sds cgname;
+    RdbVariant cgname;
+    SET_OR_UNEXPECT(ReadStringObj(), cgname);
+    cgroup.name = std::move(cgname);
+
+    SET_OR_UNEXPECT(LoadLen(nullptr), cgroup.ms);
+    SET_OR_UNEXPECT(LoadLen(nullptr), cgroup.seq);
+
+    /* Load the global PEL for this consumer group, however we'll
+     * not yet populate the NACK structures with the message
+     * owner, since consumers for this group and their messages will
+     * be read as a next step. So for now leave them not resolved
+     * and later populate it. */
+    uint64_t pel_size;
+    SET_OR_UNEXPECT(LoadLen(nullptr), pel_size);
+
+    cgroup.pel_arr.resize(pel_size);
+
+    for (size_t j = 0; j < pel_size; ++j) {
+      auto& pel = cgroup.pel_arr[j];
+      error_code ec = FetchBuf(pel.rawid.size(), pel.rawid.data());
+      if (ec) {
+        LOG(ERROR) << "Stream PEL ID loading failed.";
+        return make_unexpected(ec);
+      }
+
+      // streamNACK* nack = streamCreateNACK(NULL);
+      // auto cleanup2 = absl::Cleanup([&] { streamFreeNACK(nack); });
+
+      SET_OR_UNEXPECT(FetchInt<int64_t>(), pel.delivery_time);
+      SET_OR_UNEXPECT(LoadLen(nullptr), pel.delivery_count);
+
+      /*if (!raxTryInsert(cgroup->pel, rawid, sizeof(rawid), nack, NULL)) {
+        LOG(ERROR) << "Duplicated global PEL entry loading stream consumer group";
+        return Unexpected(errc::duplicate_key);
+      }
+      std::move(cleanup2).Cancel();*/
+    }
+
+    /* Now that we loaded our global PEL, we need to load the
+     * consumers and their local PELs. */
+    uint64_t consumers_num;
+    SET_OR_UNEXPECT(LoadLen(nullptr), consumers_num);
+    cgroup.cons_arr.resize(consumers_num);
+
+    for (size_t j = 0; j < consumers_num; ++j) {
+      auto& consumer = cgroup.cons_arr[j];
+      SET_OR_UNEXPECT(ReadStringObj(), consumer.name);
+
+      SET_OR_UNEXPECT(FetchInt<int64_t>(), consumer.seen_time);
+
+      /* Load the PEL about entries owned by this specific
+       * consumer. */
+      SET_OR_UNEXPECT(LoadLen(nullptr), pel_size);
+      consumer.nack_arr.resize(pel_size);
+      for (size_t k = 0; k < pel_size; ++k) {
+        auto& nack = consumer.nack_arr[k];
+        // unsigned char rawid[sizeof(streamID)];
+        error_code ec = FetchBuf(nack.size(), nack.data());
+        if (ec) {
+          LOG(ERROR) << "Stream PEL ID loading failed.";
+          return make_unexpected(ec);
+        }
+        /*streamNACK* nack = (streamNACK*)raxFind(cgroup->pel, rawid, sizeof(rawid));
+        if (nack == raxNotFound) {
+          LOG(ERROR) << "Consumer entry not found in group global PEL";
+          return Unexpected(errc::rdb_file_corrupted);
+        }*/
+
+        /* Set the NACK consumer, that was left to NULL when
+         * loading the global PEL. Then set the same shared
+         * NACK structure also in the consumer-specific PEL. */
+        /*
+        nack->consumer = consumer;
+        if (!raxTryInsert(consumer->pel, rawid, sizeof(rawid), nack, NULL)) {
+          LOG(ERROR) << "Duplicated consumer PEL entry loading a stream consumer group";
+          streamFreeNACK(nack);
+          return Unexpected(errc::duplicate_key);
+        }*/
+      }
+    }  // while (consumers_num)
+  }    // while (cgroup_num)
+
+  return OpaqueObj{std::move(load_trace), RDB_TYPE_STREAM_LISTPACKS};
+}
+
+template <typename T> io::Result<T> RdbLoaderBase::FetchInt() {
+  auto ec = EnsureRead(sizeof(T));
+  if (ec)
+    return make_unexpected(ec);
+
+  char buf[16];
+  mem_buf_.ReadAndConsume(sizeof(T), buf);
+
+  return base::LE::LoadT<std::make_unsigned_t<T>>(buf);
+}
+
+// -------------- RdbLoader   ----------------------------
+
 struct RdbLoader::ObjSettings {
   long long now;           // current epoch time in ms.
   int64_t expiretime = 0;  // expire epoch time in ms
@@ -824,28 +1463,12 @@ struct RdbLoader::ObjSettings {
   ObjSettings() = default;
 };
 
-RdbLoader::RdbLoader(ScriptMgr* script_mgr) : script_mgr_(script_mgr), mem_buf_{16_KB} {
+RdbLoader::RdbLoader(ScriptMgr* script_mgr) : script_mgr_(script_mgr) {
   shard_buf_.reset(new ItemsBuf[shard_set->size()]);
 }
 
 RdbLoader::~RdbLoader() {
 }
-
-#define SET_OR_RETURN(expr, dest) \
-  do {                            \
-    auto exp_val = (expr);        \
-    if (!exp_val)                 \
-      return exp_val.error();     \
-    dest = exp_val.value();       \
-  } while (0)
-
-#define SET_OR_UNEXPECT(expr, dest)            \
-  {                                            \
-    auto exp_res = (expr);                     \
-    if (!exp_res)                              \
-      return make_unexpected(exp_res.error()); \
-    dest = std::move(exp_res.value());         \
-  }
 
 error_code RdbLoader::Load(io::Source* src) {
   CHECK(!src_ && src);
@@ -1010,7 +1633,7 @@ error_code RdbLoader::Load(io::Source* src) {
   return kOk;
 }
 
-error_code RdbLoader::EnsureReadInternal(size_t min_sz) {
+error_code RdbLoaderBase::EnsureReadInternal(size_t min_sz) {
   DCHECK_LT(mem_buf_.InputLen(), min_sz);
 
   auto out_buf = mem_buf_.AppendBuffer();
@@ -1037,7 +1660,7 @@ error_code RdbLoader::EnsureReadInternal(size_t min_sz) {
   return kOk;
 }
 
-auto RdbLoader::LoadLen(bool* is_encoded) -> io::Result<uint64_t> {
+auto RdbLoaderBase::LoadLen(bool* is_encoded) -> io::Result<uint64_t> {
   if (is_encoded)
     *is_encoded = false;
 
@@ -1076,67 +1699,6 @@ auto RdbLoader::LoadLen(bool* is_encoded) -> io::Result<uint64_t> {
   }
 
   return res;
-}
-
-std::error_code RdbLoader::FetchBuf(size_t size, void* dest) {
-  if (size == 0)
-    return kOk;
-
-  uint8_t* next = (uint8_t*)dest;
-  size_t bytes_read;
-
-  size_t to_copy = std::min(mem_buf_.InputLen(), size);
-  DVLOG(2) << "Copying " << to_copy << " bytes";
-
-  ::memcpy(next, mem_buf_.InputBuffer().data(), to_copy);
-  mem_buf_.ConsumeInput(to_copy);
-  size -= to_copy;
-  if (size == 0)
-    return kOk;
-
-  next += to_copy;
-
-  if (size + bytes_read_ > source_limit_) {
-    LOG(ERROR) << "Out of bound read " << size + bytes_read_ << " vs " << source_limit_;
-
-    return RdbError(errc::rdb_file_corrupted);
-  }
-
-  if (size > 512) {  // Worth reading directly into next.
-    io::MutableBytes mb{next, size};
-
-    SET_OR_RETURN(src_->Read(mb), bytes_read);
-    if (bytes_read < size)
-      return RdbError(errc::rdb_file_corrupted);
-
-    bytes_read_ += bytes_read;
-    DCHECK_LE(bytes_read_, source_limit_);
-
-    return kOk;
-  }
-
-  io::MutableBytes mb = mem_buf_.AppendBuffer();
-
-  // Must be because mem_buf_ is be empty.
-  DCHECK_GT(mb.size(), size);
-
-  if (bytes_read_ + mb.size() > source_limit_) {
-    mb = mb.subspan(0, source_limit_ - bytes_read_);
-  }
-
-  SET_OR_RETURN(src_->ReadAtLeast(mb, size), bytes_read);
-
-  if (bytes_read < size)
-    return RdbError(errc::rdb_file_corrupted);
-  bytes_read_ += bytes_read;
-
-  DCHECK_LE(bytes_read_, source_limit_);
-
-  mem_buf_.CommitWrite(bytes_read);
-  ::memcpy(next, mem_buf_.InputBuffer().data(), size);
-  mem_buf_.ConsumeInput(size);
-
-  return kOk;
 }
 
 error_code RdbLoader::HandleAux() {
@@ -1230,19 +1792,22 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
   shard_set->Add(sid, std::move(cb));
 }
 
+std::error_code RdbLoaderBase::Visit(const Item& item, CompactObj* pv) {
+  std::string_view key{item.key};
+  OpaqueObjLoader visitor(item.val.rdb_type, pv);
+  std::visit(visitor, item.val.obj);
+  return visitor.ec();
+}
+
 void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   DbSlice& db_slice = EngineShard::tlocal()->db_slice();
   DbContext db_cntx{.db_index = db_ind, .time_now_ms = GetCurrentTimeMs()};
 
   for (const auto& item : ib) {
-    std::string_view key{item.key};
     PrimeValue pv;
-    OpaqueObjLoader visitor(item.val.rdb_type, &pv);
-    std::visit(visitor, item.val.obj);
-
-    if (visitor.ec()) {
+    if (auto ec = Visit(item, &pv); ec) {
       lock_guard lk(mu_);
-      ec_ = visitor.ec();
+      ec_ = ec;
       stop_early_ = true;
       break;
     }
@@ -1250,558 +1815,12 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     if (item.expire_ms > 0 && db_cntx.time_now_ms >= item.expire_ms)
       continue;
 
-    auto [it, added] = db_slice.AddEntry(db_cntx, key, std::move(pv), item.expire_ms);
+    auto [it, added] = db_slice.AddEntry(db_cntx, item.key, std::move(pv), item.expire_ms);
 
     if (!added) {
-      LOG(WARNING) << "RDB has duplicated key '" << key << "' in DB " << db_ind;
+      LOG(WARNING) << "RDB has duplicated key '" << item.key << "' in DB " << db_ind;
     }
   }
-}
-
-size_t RdbLoader::StrLen(const RdbVariant& tset) {
-  const base::PODArray<char>* arr = get_if<base::PODArray<char>>(&tset);
-  if (arr)
-    return arr->size();
-
-  if (holds_alternative<long long>(tset)) {
-    auto val = get<long long>(tset);
-    char buf[32];
-    char* next = absl::numbers_internal::FastIntToBuffer(val, buf);
-    return (next - buf);
-  }
-
-  const LzfString* lzf = get_if<LzfString>(&tset);
-  if (lzf)
-    return lzf->uncompressed_len;
-
-  LOG(DFATAL) << "should not reach";
-  return 0;
-}
-
-auto RdbLoader::FetchGenericString() -> io::Result<string> {
-  bool isencoded;
-  size_t len;
-
-  SET_OR_UNEXPECT(LoadLen(&isencoded), len);
-
-  if (isencoded) {
-    switch (len) {
-      case RDB_ENC_INT8:
-      case RDB_ENC_INT16:
-      case RDB_ENC_INT32:
-        return FetchIntegerObject(len);
-      case RDB_ENC_LZF:
-        return FetchLzfStringObject();
-      default:
-        LOG(ERROR) << "Unknown RDB string encoding len " << len;
-        return Unexpected(errc::rdb_file_corrupted);
-    }
-  }
-
-  string res;
-
-  if (len > 0) {
-    res.resize(len);
-    error_code ec = FetchBuf(len, res.data());
-    if (ec) {
-      return make_unexpected(ec);
-    }
-  }
-
-  return res;
-}
-
-auto RdbLoader::FetchLzfStringObject() -> io::Result<string> {
-  bool zerocopy_decompress = true;
-
-  const uint8_t* cbuf = NULL;
-  uint64_t clen, len;
-
-  SET_OR_UNEXPECT(LoadLen(NULL), clen);
-  SET_OR_UNEXPECT(LoadLen(NULL), len);
-
-  if (len > 1ULL << 29 || len <= clen || clen == 0) {
-    LOG(ERROR) << "Bad compressed string";
-    return Unexpected(rdb::rdb_file_corrupted);
-  }
-
-  if (mem_buf_.InputLen() >= clen) {
-    cbuf = mem_buf_.InputBuffer().data();
-  } else {
-    compr_buf_.resize(clen);
-    zerocopy_decompress = false;
-
-    /* Load the compressed representation and uncompress it to target. */
-    error_code ec = FetchBuf(clen, compr_buf_.data());
-    if (ec) {
-      return make_unexpected(ec);
-    }
-    cbuf = compr_buf_.data();
-  }
-
-  string res(len, 0);
-
-  if (lzf_decompress(cbuf, clen, res.data(), len) == 0) {
-    LOG(ERROR) << "Invalid LZF compressed string";
-    return Unexpected(errc::rdb_file_corrupted);
-  }
-
-  // FetchBuf consumes the input but if we have not went through that path
-  // we need to consume now.
-  if (zerocopy_decompress)
-    mem_buf_.ConsumeInput(clen);
-
-  return res;
-}
-
-auto RdbLoader::FetchIntegerObject(int enctype) -> io::Result<string> {
-  long long val;
-
-  if (enctype == RDB_ENC_INT8) {
-    SET_OR_UNEXPECT(FetchInt<int8_t>(), val);
-  } else if (enctype == RDB_ENC_INT16) {
-    SET_OR_UNEXPECT(FetchInt<uint16_t>(), val);
-  } else if (enctype == RDB_ENC_INT32) {
-    SET_OR_UNEXPECT(FetchInt<uint32_t>(), val);
-  } else {
-    return Unexpected(errc::invalid_encoding);
-  }
-
-  char buf[32];
-  absl::numbers_internal::FastIntToBuffer(val, buf);
-
-  return string(buf);
-}
-
-io::Result<double> RdbLoader::FetchBinaryDouble() {
-  union {
-    uint64_t val;
-    double d;
-  } u;
-
-  static_assert(sizeof(u) == sizeof(uint64_t));
-  auto ec = EnsureRead(8);
-  if (ec)
-    return make_unexpected(ec);
-
-  uint8_t buf[8];
-  mem_buf_.ReadAndConsume(8, buf);
-  u.val = base::LE::LoadT<uint64_t>(buf);
-  return u.d;
-}
-
-io::Result<double> RdbLoader::FetchDouble() {
-  uint8_t len;
-
-  SET_OR_UNEXPECT(FetchInt<uint8_t>(), len);
-  constexpr double kInf = std::numeric_limits<double>::infinity();
-  switch (len) {
-    case 255:
-      return -kInf;
-    case 254:
-      return kInf;
-    case 253:
-      return std::numeric_limits<double>::quiet_NaN();
-    default:;
-  }
-  char buf[256];
-  error_code ec = FetchBuf(len, buf);
-  if (ec)
-    return make_unexpected(ec);
-  buf[len] = '\0';
-  double val;
-  if (sscanf(buf, "%lg", &val) != 1)
-    return Unexpected(errc::rdb_file_corrupted);
-  return val;
-}
-
-auto RdbLoader::ReadKey() -> io::Result<string> {
-  return FetchGenericString();
-}
-
-auto RdbLoader::ReadObj(int rdbtype) -> io::Result<OpaqueObj> {
-  switch (rdbtype) {
-    case RDB_TYPE_STRING: {
-      /* Read string value */
-      auto fetch = ReadStringObj();
-      if (!fetch)
-        return make_unexpected(fetch.error());
-      return OpaqueObj{std::move(*fetch), RDB_TYPE_STRING};
-    }
-    case RDB_TYPE_SET:
-      return ReadSet();
-    case RDB_TYPE_SET_INTSET:
-      return ReadIntSet();
-    case RDB_TYPE_HASH_ZIPLIST:
-      return ReadHZiplist();
-    case RDB_TYPE_HASH:
-      return ReadHMap();
-    case RDB_TYPE_ZSET:
-    case RDB_TYPE_ZSET_2:
-      return ReadZSet(rdbtype);
-    case RDB_TYPE_ZSET_ZIPLIST:
-      return ReadZSetZL();
-    case RDB_TYPE_LIST_QUICKLIST:
-    case RDB_TYPE_LIST_QUICKLIST_2:
-      return ReadListQuicklist(rdbtype);
-    case RDB_TYPE_STREAM_LISTPACKS:
-      return ReadStreams();
-      break;
-  }
-
-  LOG(ERROR) << "Unsupported rdb type " << rdbtype;
-
-  return Unexpected(errc::invalid_encoding);
-}
-
-auto RdbLoader::ReadStringObj() -> io::Result<RdbVariant> {
-  bool isencoded;
-  size_t len;
-
-  SET_OR_UNEXPECT(LoadLen(&isencoded), len);
-
-  if (isencoded) {
-    switch (len) {
-      case RDB_ENC_INT8:
-      case RDB_ENC_INT16:
-      case RDB_ENC_INT32:
-        return ReadIntObj(len);
-      case RDB_ENC_LZF:
-        return ReadLzf();
-      default:
-        LOG(ERROR) << "Unknown RDB string encoding " << len;
-        return Unexpected(errc::rdb_file_corrupted);
-    }
-  }
-
-  base::PODArray<char> blob;
-  blob.resize(len);
-  error_code ec = FetchBuf(len, blob.data());
-  if (ec) {
-    return make_unexpected(ec);
-  }
-
-  return blob;
-}
-
-io::Result<long long> RdbLoader::ReadIntObj(int enctype) {
-  long long val;
-
-  if (enctype == RDB_ENC_INT8) {
-    SET_OR_UNEXPECT(FetchInt<int8_t>(), val);
-  } else if (enctype == RDB_ENC_INT16) {
-    SET_OR_UNEXPECT(FetchInt<uint16_t>(), val);
-  } else if (enctype == RDB_ENC_INT32) {
-    SET_OR_UNEXPECT(FetchInt<uint32_t>(), val);
-  } else {
-    return Unexpected(errc::invalid_encoding);
-  }
-  return val;
-}
-
-auto RdbLoader::ReadLzf() -> io::Result<LzfString> {
-  uint64_t clen;
-  LzfString res;
-
-  SET_OR_UNEXPECT(LoadLen(NULL), clen);
-  SET_OR_UNEXPECT(LoadLen(NULL), res.uncompressed_len);
-
-  if (res.uncompressed_len > 1ULL << 29) {
-    LOG(ERROR) << "Uncompressed length is too big " << res.uncompressed_len;
-    return Unexpected(errc::rdb_file_corrupted);
-  }
-
-  res.compressed_blob.resize(clen);
-  /* Load the compressed representation and uncompress it to target. */
-  error_code ec = FetchBuf(clen, res.compressed_blob.data());
-  if (ec) {
-    return make_unexpected(ec);
-  }
-
-  return res;
-}
-
-auto RdbLoader::ReadSet() -> io::Result<OpaqueObj> {
-  size_t len;
-  SET_OR_UNEXPECT(LoadLen(NULL), len);
-
-  if (len == 0)
-    return Unexpected(errc::empty_key);
-
-  unique_ptr<LoadTrace> res(new LoadTrace);
-  res->arr.resize(len);
-  for (size_t i = 0; i < len; i++) {
-    io::Result<RdbVariant> fetch = ReadStringObj();
-    if (!fetch) {
-      return make_unexpected(fetch.error());
-    }
-    res->arr[i].rdb_var = std::move(fetch.value());
-  }
-
-  return OpaqueObj{std::move(res), RDB_TYPE_SET};
-}
-
-auto RdbLoader::ReadIntSet() -> io::Result<OpaqueObj> {
-  io::Result<RdbVariant> fetch = ReadStringObj();
-  if (!fetch) {
-    return make_unexpected(fetch.error());
-  }
-
-  const LzfString* lzf = get_if<LzfString>(&fetch.value());
-  const base::PODArray<char>* arr = get_if<base::PODArray<char>>(&fetch.value());
-
-  if (lzf) {
-    if (lzf->uncompressed_len == 0 || lzf->compressed_blob.empty())
-      return Unexpected(errc::rdb_file_corrupted);
-  } else if (arr) {
-    if (arr->empty())
-      return Unexpected(errc::rdb_file_corrupted);
-  } else {
-    return Unexpected(errc::rdb_file_corrupted);
-  }
-
-  return OpaqueObj{std::move(*fetch), RDB_TYPE_SET_INTSET};
-}
-
-auto RdbLoader::ReadHZiplist() -> io::Result<OpaqueObj> {
-  RdbVariant str_obj;
-  SET_OR_UNEXPECT(ReadStringObj(), str_obj);
-
-  if (StrLen(str_obj) == 0) {
-    return Unexpected(errc::rdb_file_corrupted);
-  }
-
-  return OpaqueObj{std::move(str_obj), RDB_TYPE_HASH_ZIPLIST};
-}
-
-auto RdbLoader::ReadHMap() -> io::Result<OpaqueObj> {
-  uint64_t len;
-  SET_OR_UNEXPECT(LoadLen(nullptr), len);
-
-  if (len == 0)
-    return Unexpected(errc::empty_key);
-
-  unique_ptr<LoadTrace> load_trace(new LoadTrace);
-  load_trace->arr.resize(len * 2);
-
-  for (size_t i = 0; i < load_trace->arr.size(); ++i) {
-    SET_OR_UNEXPECT(ReadStringObj(), load_trace->arr[i].rdb_var);
-  }
-
-  return OpaqueObj{std::move(load_trace), RDB_TYPE_HASH};
-}
-
-auto RdbLoader::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
-  /* Read sorted set value. */
-  uint64_t zsetlen;
-  SET_OR_UNEXPECT(LoadLen(nullptr), zsetlen);
-
-  if (zsetlen == 0)
-    return Unexpected(errc::empty_key);
-
-  unique_ptr<LoadTrace> load_trace(new LoadTrace);
-  load_trace->arr.resize(zsetlen);
-
-  double score;
-
-  for (size_t i = 0; i < load_trace->arr.size(); ++i) {
-    SET_OR_UNEXPECT(ReadStringObj(), load_trace->arr[i].rdb_var);
-    if (rdbtype == RDB_TYPE_ZSET_2) {
-      SET_OR_UNEXPECT(FetchBinaryDouble(), score);
-    } else {
-      SET_OR_UNEXPECT(FetchDouble(), score);
-    }
-
-    if (isnan(score)) {
-      LOG(ERROR) << "Zset with NAN score detected";
-      return Unexpected(errc::rdb_file_corrupted);
-    }
-    load_trace->arr[i].score = score;
-  }
-
-  return OpaqueObj{std::move(load_trace), rdbtype};
-}
-
-auto RdbLoader::ReadZSetZL() -> io::Result<OpaqueObj> {
-  RdbVariant str_obj;
-  SET_OR_UNEXPECT(ReadStringObj(), str_obj);
-
-  if (StrLen(str_obj) == 0) {
-    return Unexpected(errc::rdb_file_corrupted);
-  }
-
-  return OpaqueObj{std::move(str_obj), RDB_TYPE_ZSET_ZIPLIST};
-}
-
-auto RdbLoader::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
-  uint64_t len;
-  SET_OR_UNEXPECT(LoadLen(nullptr), len);
-
-  if (len == 0)
-    return Unexpected(errc::empty_key);
-
-  unique_ptr<LoadTrace> load_trace(new LoadTrace);
-  load_trace->arr.resize(len);
-
-  for (size_t i = 0; i < len; ++i) {
-    uint64_t container = QUICKLIST_NODE_CONTAINER_PACKED;
-    if (rdbtype == RDB_TYPE_LIST_QUICKLIST_2) {
-      SET_OR_UNEXPECT(LoadLen(nullptr), container);
-
-      if (container != QUICKLIST_NODE_CONTAINER_PACKED &&
-          container != QUICKLIST_NODE_CONTAINER_PLAIN) {
-        LOG(ERROR) << "Quicklist integrity check failed.";
-        return Unexpected(errc::rdb_file_corrupted);
-      }
-    }
-
-    RdbVariant var;
-    SET_OR_UNEXPECT(ReadStringObj(), var);
-    if (StrLen(var) == 0) {
-      return Unexpected(errc::rdb_file_corrupted);
-    }
-    load_trace->arr[i].rdb_var = std::move(var);
-    load_trace->arr[i].encoding = container;
-  }
-
-  return OpaqueObj{std::move(load_trace), rdbtype};
-}
-
-auto RdbLoader::ReadStreams() -> io::Result<OpaqueObj> {
-  uint64_t listpacks;
-  SET_OR_UNEXPECT(LoadLen(nullptr), listpacks);
-
-  unique_ptr<LoadTrace> load_trace(new LoadTrace);
-  load_trace->arr.resize(listpacks * 2);
-
-  for (size_t i = 0; i < listpacks; ++i) {
-    /* Get the master ID, the one we'll use as key of the radix tree
-     * node: the entries inside the listpack itself are delta-encoded
-     * relatively to this ID. */
-    RdbVariant stream_id, blob;
-    SET_OR_UNEXPECT(ReadStringObj(), stream_id);
-
-    if (StrLen(stream_id) != sizeof(streamID)) {
-      LOG(ERROR) << "Stream node key entry is not the size of a stream ID";
-
-      return Unexpected(errc::rdb_file_corrupted);
-    }
-
-    SET_OR_UNEXPECT(ReadStringObj(), blob);
-
-    if (StrLen(blob) == 0) {
-      LOG(ERROR) << "Stream listpacks loading failed";
-      return Unexpected(errc::rdb_file_corrupted);
-    }
-
-    load_trace->arr[2 * i].rdb_var = std::move(stream_id);
-    load_trace->arr[2 * i + 1].rdb_var = std::move(blob);
-  }
-
-  load_trace->stream_trace.reset(new StreamTrace);
-
-  /* Load total number of items inside the stream. */
-  SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->stream_len);
-
-  /* Load the last entry ID. */
-  SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->ms);
-  SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->seq);
-
-  /* Consumer groups loading */
-  uint64_t cgroups_count;
-  SET_OR_UNEXPECT(LoadLen(nullptr), cgroups_count);
-  load_trace->stream_trace->cgroup.resize(cgroups_count);
-
-  for (size_t i = 0; i < cgroups_count; ++i) {
-    auto& cgroup = load_trace->stream_trace->cgroup[i];
-    /* Get the consumer group name and ID. We can then create the
-     * consumer group ASAP and populate its structure as
-     * we read more data. */
-
-    // sds cgname;
-    RdbVariant cgname;
-    SET_OR_UNEXPECT(ReadStringObj(), cgname);
-    cgroup.name = std::move(cgname);
-
-    SET_OR_UNEXPECT(LoadLen(nullptr), cgroup.ms);
-    SET_OR_UNEXPECT(LoadLen(nullptr), cgroup.seq);
-
-    /* Load the global PEL for this consumer group, however we'll
-     * not yet populate the NACK structures with the message
-     * owner, since consumers for this group and their messages will
-     * be read as a next step. So for now leave them not resolved
-     * and later populate it. */
-    uint64_t pel_size;
-    SET_OR_UNEXPECT(LoadLen(nullptr), pel_size);
-
-    cgroup.pel_arr.resize(pel_size);
-
-    for (size_t j = 0; j < pel_size; ++j) {
-      auto& pel = cgroup.pel_arr[j];
-      error_code ec = FetchBuf(pel.rawid.size(), pel.rawid.data());
-      if (ec) {
-        LOG(ERROR) << "Stream PEL ID loading failed.";
-        return make_unexpected(ec);
-      }
-
-      // streamNACK* nack = streamCreateNACK(NULL);
-      // auto cleanup2 = absl::Cleanup([&] { streamFreeNACK(nack); });
-
-      SET_OR_UNEXPECT(FetchInt<int64_t>(), pel.delivery_time);
-      SET_OR_UNEXPECT(LoadLen(nullptr), pel.delivery_count);
-
-      /*if (!raxTryInsert(cgroup->pel, rawid, sizeof(rawid), nack, NULL)) {
-        LOG(ERROR) << "Duplicated global PEL entry loading stream consumer group";
-        return Unexpected(errc::duplicate_key);
-      }
-      std::move(cleanup2).Cancel();*/
-    }
-
-    /* Now that we loaded our global PEL, we need to load the
-     * consumers and their local PELs. */
-    uint64_t consumers_num;
-    SET_OR_UNEXPECT(LoadLen(nullptr), consumers_num);
-    cgroup.cons_arr.resize(consumers_num);
-
-    for (size_t j = 0; j < consumers_num; ++j) {
-      auto& consumer = cgroup.cons_arr[j];
-      SET_OR_UNEXPECT(ReadStringObj(), consumer.name);
-
-      SET_OR_UNEXPECT(FetchInt<int64_t>(), consumer.seen_time);
-
-      /* Load the PEL about entries owned by this specific
-       * consumer. */
-      SET_OR_UNEXPECT(LoadLen(nullptr), pel_size);
-      consumer.nack_arr.resize(pel_size);
-      for (size_t k = 0; k < pel_size; ++k) {
-        auto& nack = consumer.nack_arr[k];
-        // unsigned char rawid[sizeof(streamID)];
-        error_code ec = FetchBuf(nack.size(), nack.data());
-        if (ec) {
-          LOG(ERROR) << "Stream PEL ID loading failed.";
-          return make_unexpected(ec);
-        }
-        /*streamNACK* nack = (streamNACK*)raxFind(cgroup->pel, rawid, sizeof(rawid));
-        if (nack == raxNotFound) {
-          LOG(ERROR) << "Consumer entry not found in group global PEL";
-          return Unexpected(errc::rdb_file_corrupted);
-        }*/
-
-        /* Set the NACK consumer, that was left to NULL when
-         * loading the global PEL. Then set the same shared
-         * NACK structure also in the consumer-specific PEL. */
-        /*
-        nack->consumer = consumer;
-        if (!raxTryInsert(consumer->pel, rawid, sizeof(rawid), nack, NULL)) {
-          LOG(ERROR) << "Duplicated consumer PEL entry loading a stream consumer group";
-          streamFreeNACK(nack);
-          return Unexpected(errc::duplicate_key);
-        }*/
-      }
-    }  // while (consumers_num)
-  }    // while (cgroup_num)
-
-  return OpaqueObj{std::move(load_trace), RDB_TYPE_STREAM_LISTPACKS};
 }
 
 void RdbLoader::ResizeDb(size_t key_num, size_t expire_num) {
@@ -1853,17 +1872,6 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   }
 
   return kOk;
-}
-
-template <typename T> io::Result<T> RdbLoader::FetchInt() {
-  auto ec = EnsureRead(sizeof(T));
-  if (ec)
-    return make_unexpected(ec);
-
-  char buf[16];
-  mem_buf_.ReadAndConsume(sizeof(T), buf);
-
-  return base::LE::LoadT<std::make_unsigned_t<T>>(buf);
 }
 
 }  // namespace dfly
