@@ -141,26 +141,35 @@ bool JsonErrorHandler(json_errc ec, const ser_context&) {
   return false;
 }
 
-OpResult<json> GetJson(const OpArgs& op_args, string_view key) {
-  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_STRING);
-  if (!it_res.ok())
-    return it_res.status();
-
+optional<json> ConstructJsonFromString(string_view val) {
   error_code ec;
   json_decoder<json> decoder;
-  const PrimeValue& pv = it_res.value()->second;
-
-  string val = GetString(op_args.shard, pv);
   basic_json_parser<char> parser(basic_json_decode_options<char>{}, &JsonErrorHandler);
 
   parser.update(val);
   parser.finish_parse(decoder, ec);
 
   if (!decoder.is_valid()) {
-    return OpStatus::SYNTAX_ERR;
+    return nullopt;
   }
 
   return decoder.get_result();
+}
+
+OpResult<json> GetJson(const OpArgs& op_args, string_view key) {
+  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_STRING);
+  if (!it_res.ok())
+    return it_res.status();
+
+  const PrimeValue& pv = it_res.value()->second;
+
+  string val = GetString(op_args.shard, pv);
+  optional<json> j = ConstructJsonFromString(val);
+  if (!j) {
+    return OpStatus::SYNTAX_ERR;
+  }
+
+  return *j;
 }
 
 // Returns the index of the next right bracket
@@ -692,7 +701,112 @@ OpResult<vector<OptSizeT>> OpArrTrim(const OpArgs& op_args, string_view key, str
   return vec;
 }
 
+// Returns numeric vector that represents the new length of the array at each path.
+OpResult<vector<OptSizeT>> OpArrInsert(const OpArgs& op_args, string_view key, string_view path,
+                                       int index, const vector<json>& new_values) {
+  OpResult<json> result = GetJson(op_args, key);
+  if (!result) {
+    return result.status();
+  }
+
+  bool out_of_boundaries_encountered = false;
+  vector<OptSizeT> vec;
+  // Insert user-supplied value into the supplied index that should be valid.
+  // If at least one index isn't valid within an array in the json doc, the operation is discarded.
+  // Negative indexes start from the end of the array.
+  auto cb = [&](const string& path, json& val) {
+    if (out_of_boundaries_encountered) {
+      return;
+    }
+
+    if (!val.is_array()) {
+      vec.emplace_back(nullopt);
+      return;
+    }
+
+    size_t removal_index;
+    if (index < 0) {
+      if (val.empty()) {
+        out_of_boundaries_encountered = true;
+        return;
+      }
+
+      int temp_index = index + val.size();
+      if (temp_index < 0) {
+        out_of_boundaries_encountered = true;
+        return;
+      }
+
+      removal_index = temp_index;
+    } else {
+      if ((size_t)index > val.size()) {
+        out_of_boundaries_encountered = true;
+        return;
+      }
+
+      removal_index = index;
+    }
+
+    auto it = next(val.array_range().begin(), removal_index);
+    for (auto& new_val : new_values) {
+      it = val.insert(it, new_val);
+      it++;
+    }
+
+    vec.emplace_back(val.size());
+  };
+
+  json j = result.value();
+  error_code ec = JsonReplace(j, path, cb);
+  if (ec) {
+    VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
+    return OpStatus::SYNTAX_ERR;
+  }
+
+  if (out_of_boundaries_encountered) {
+    return OpStatus::OUT_OF_RANGE;
+  }
+
+  SetString(op_args, key, j.as_string());
+  return vec;
+}
+
 }  // namespace
+
+void JsonFamily::ArrInsert(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view path = ArgS(args, 2);
+  int index = -1;
+
+  if (!absl::SimpleAtoi(ArgS(args, 3), &index)) {
+    VLOG(1) << "Failed to convert the following value to numeric: " << ArgS(args, 3);
+    (*cntx)->SendError(kInvalidIntErr);
+    return;
+  }
+
+  vector<json> new_values;
+  for (size_t i = 4; i < args.size(); i++) {
+    optional<json> val = ConstructJsonFromString(ArgS(args, i));
+    if (!val) {
+      (*cntx)->SendError(kSyntaxErr);
+      return;
+    }
+
+    new_values.emplace_back(move(*val));
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpArrInsert(t->GetOpArgs(shard), key, path, index, new_values);
+  };
+
+  Transaction* trans = cntx->transaction;
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+  if (result) {
+    PrintOptVec(cntx, result);
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
 
 void JsonFamily::ArrTrim(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
@@ -1102,6 +1216,8 @@ void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.CLEAR", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(Clear);
   *registry << CI{"JSON.ARRPOP", CO::WRITE | CO::DENYOOM | CO::FAST, -3, 1, 1, 1}.HFUNC(ArrPop);
   *registry << CI{"JSON.ARRTRIM", CO::WRITE | CO::DENYOOM | CO::FAST, 5, 1, 1, 1}.HFUNC(ArrTrim);
+  *registry << CI{"JSON.ARRINSERT", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1}.HFUNC(
+      ArrInsert);
 }
 
 }  // namespace dfly
