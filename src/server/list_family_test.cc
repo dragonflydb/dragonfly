@@ -439,4 +439,25 @@ TEST_F(ListFamilyTest, Lset) {
   ASSERT_THAT(Run({"lset", kKey2, "1", "foo"}), ErrArg("index out of range"));
 }
 
+TEST_F(ListFamilyTest, LPos) {
+  auto resp = Run({"rpush", kKey1, "1", "a", "b", "1", "1", "a", "1"});
+  ASSERT_THAT(resp, IntArg(7));
+
+  ASSERT_THAT(Run({"lpos", kKey1, "1"}), IntArg(0));
+
+  ASSERT_THAT(Run({"lpos", kKey1, "f"}), ArgType(RespExpr::NIL));
+  ASSERT_THAT(Run({"lpos", kKey1, "1", "COUNT", "-1"}), ArgType(RespExpr::ERROR));
+  ASSERT_THAT(Run({"lpos", kKey1, "1", "MAXLEN", "-1"}), ArgType(RespExpr::ERROR));
+  ASSERT_THAT(Run({"lpos", kKey1, "1", "RANK", "0"}), ArgType(RespExpr::ERROR));
+
+  resp = Run({"lpos", kKey1, "a", "RANK", "-1", "COUNT", "2"});
+  ASSERT_THAT(resp.GetVec(), ElementsAre(IntArg(5), IntArg(1)));
+
+  resp = Run({"lpos", kKey1, "1", "COUNT", "0"});
+  ASSERT_THAT(resp.GetVec(), ElementsAre(IntArg(0), IntArg(3), IntArg(4), IntArg(6)));
+
+  resp = Run({"lpos", kKey1, "1", "COUNT", "0", "MAXLEN", "5"});
+  ASSERT_THAT(resp.GetVec(), ElementsAre(IntArg(0), IntArg(3), IntArg(4)));
+}
+
 }  // namespace dfly
