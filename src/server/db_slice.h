@@ -83,6 +83,18 @@ class DbSlice {
     }
   };
 
+  struct ExpireParams {
+    int64_t value = INT64_MIN;  // undefined
+
+    bool absolute = false;
+    TimeUnit unit = TimeUnit::SEC;
+    bool persist = false;
+
+    bool IsDefined() const {
+      return persist || value > INT64_MIN;
+    }
+  };
+
   DbSlice(uint32_t index, bool caching_mode, EngineShard* owner);
   ~DbSlice();
 
@@ -149,6 +161,9 @@ class DbSlice {
   // throws: bad_alloc is insertion could not happen due to out of memory.
   PrimeIterator AddNew(const Context& cntx, std::string_view key, PrimeValue obj,
                        uint64_t expire_at_ms) noexcept(false);
+
+  facade::OpStatus UpdateExpire(const Context& cntx, PrimeIterator prime_it, ExpireIterator exp_it,
+                                const ExpireParams& params);
 
   // Either adds or removes (if at == 0) expiry. Returns true if a change was made.
   // Does not change expiry if at != 0 and expiry already exists.

@@ -550,6 +550,31 @@ PrimeIterator DbSlice::AddNew(const Context& cntx, string_view key, PrimeValue o
   return it;
 }
 
+OpStatus DbSlice::UpdateExpire(const Context& cntx, PrimeIterator prime_it,
+                               ExpireIterator expire_it, const ExpireParams& params) {
+  DCHECK(params.IsDefined());
+  DCHECK(IsValid(prime_it));
+
+  int64_t msec = (params.unit == TimeUnit::SEC) ? params.value * 1000 : params.value;
+  int64_t now_msec = cntx.time_now_ms;
+  int64_t rel_msec = params.absolute ? msec - now_msec : msec;
+  if (rel_msec > kMaxExpireDeadlineSec * 1000) {
+    return OpStatus::OUT_OF_RANGE;
+  }
+
+  // TODO: to support persist.
+
+  if (rel_msec <= 0) {
+    CHECK(Del(cntx.db_index, prime_it));
+  } else if (IsValid(expire_it)) {
+    expire_it->second = FromAbsoluteTime(now_msec + rel_msec);
+  } else {
+    UpdateExpire(cntx.db_index, prime_it, rel_msec + now_msec);
+  }
+
+  return OpStatus::OK;
+}
+
 pair<PrimeIterator, bool> DbSlice::AddEntry(const Context& cntx, string_view key, PrimeValue obj,
                                             uint64_t expire_at_ms) noexcept(false) {
   DCHECK(!obj.IsRef());
