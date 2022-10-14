@@ -350,6 +350,15 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
   return cursor;
 }
 
+OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireParams& params) {
+  auto& db_slice = op_args.shard->db_slice();
+  auto [it, expire_it] = db_slice.FindExt(op_args.db_cntx, key);
+  if (!IsValid(it))
+    return OpStatus::KEY_NOTFOUND;
+
+  return db_slice.UpdateExpire(op_args.db_cntx, it, expire_it, params);
+}
+
 }  // namespace
 
 void GenericFamily::Init(util::ProactorPool* pp) {
@@ -454,7 +463,7 @@ void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
   }
 
   int_arg = std::max(int_arg, -1L);
-  ExpireParams params{.ts = int_arg};
+  DbSlice::ExpireParams params{.value = int_arg};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
@@ -472,8 +481,9 @@ void GenericFamily::ExpireAt(CmdArgList args, ConnectionContext* cntx) {
   if (!absl::SimpleAtoi(sec, &int_arg)) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
+
   int_arg = std::max(int_arg, 0L);
-  ExpireParams params{.ts = int_arg, .absolute = true};
+  DbSlice::ExpireParams params{.value = int_arg, .absolute = true};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
@@ -517,7 +527,7 @@ void GenericFamily::PexpireAt(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
   int_arg = std::max(int_arg, 0L);
-  ExpireParams params{.ts = int_arg, .absolute = true, .unit = MSEC};
+  DbSlice::ExpireParams params{.value = int_arg, .absolute = true, .unit = TimeUnit::MSEC};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExpire(t->GetOpArgs(shard), key, params);
@@ -951,31 +961,6 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
   for (const auto& k : keys) {
     (*cntx)->SendBulkString(k);
   }
-}
-
-OpStatus GenericFamily::OpExpire(const OpArgs& op_args, string_view key,
-                                 const ExpireParams& params) {
-  auto& db_slice = op_args.shard->db_slice();
-  auto [it, expire_it] = db_slice.FindExt(op_args.db_cntx, key);
-  if (!IsValid(it))
-    return OpStatus::KEY_NOTFOUND;
-
-  int64_t msec = (params.unit == TimeUnit::SEC) ? params.ts * 1000 : params.ts;
-  int64_t now_msec = op_args.db_cntx.time_now_ms;
-  int64_t rel_msec = params.absolute ? msec - now_msec : msec;
-  if (rel_msec > kMaxExpireDeadlineSec * 1000) {
-    return OpStatus::OUT_OF_RANGE;
-  }
-
-  if (rel_msec <= 0) {
-    CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
-  } else if (IsValid(expire_it)) {
-    expire_it->second = db_slice.FromAbsoluteTime(now_msec + rel_msec);
-  } else {
-    db_slice.UpdateExpire(op_args.db_cntx.db_index, it, rel_msec + now_msec);
-  }
-
-  return OpStatus::OK;
 }
 
 OpResult<uint64_t> GenericFamily::OpTtl(Transaction* t, EngineShard* shard, string_view key) {

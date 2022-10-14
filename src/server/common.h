@@ -105,6 +105,11 @@ enum class GlobalState : uint8_t {
   SHUTTING_DOWN,
 };
 
+enum class TimeUnit : uint8_t {
+  SEC,
+  MSEC
+};
+
 inline void ToUpper(const MutableSlice* val) {
   for (auto& c : *val) {
     c = absl::ascii_toupper(c);

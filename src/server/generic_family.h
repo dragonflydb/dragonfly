@@ -32,14 +32,6 @@ class GenericFamily {
   static OpResult<uint32_t> OpExists(const OpArgs& op_args, ArgSlice keys);
 
  private:
-  enum TimeUnit { SEC, MSEC };
-
-  struct ExpireParams {
-    int64_t ts;
-    bool absolute = false;
-
-    TimeUnit unit = SEC;
-  };
 
   static void Del(CmdArgList args, ConnectionContext* cntx);
   static void Ping(CmdArgList args, ConnectionContext* cntx);
@@ -68,8 +60,6 @@ class GenericFamily {
   static OpResult<void> RenameGeneric(CmdArgList args, bool skip_exist_dest,
                                       ConnectionContext* cntx);
   static void TtlGeneric(CmdArgList args, ConnectionContext* cntx, TimeUnit unit);
-
-  static OpStatus OpExpire(const OpArgs& op_args, std::string_view key, const ExpireParams& params);
 
   static OpResult<uint64_t> OpTtl(Transaction* t, EngineShard* shard, std::string_view key);
   static OpResult<uint32_t> OpDel(const OpArgs& op_args, ArgSlice keys);
