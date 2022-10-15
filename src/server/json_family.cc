@@ -29,6 +29,7 @@ using namespace jsoncons;
 
 using JsonExpression = jsonpath::jsonpath_expression<json>;
 using OptBool = optional<bool>;
+using OptLong = optional<long>;
 using OptSizeT = optional<size_t>;
 using OptString = optional<string>;
 using JsonReplaceCb = function<void(const string&, json&)>;
@@ -771,7 +772,129 @@ OpResult<vector<OptSizeT>> OpArrInsert(const OpArgs& op_args, string_view key, s
   return vec;
 }
 
+// Returns a numeric vector representing each JSON value first index of the JSON scalar.
+// An index value of -1 represents unfound in the array.
+// JSON scalar has types of string, boolean, null, and number.
+OpResult<vector<OptLong>> OpArrIndex(const OpArgs& op_args, string_view key,
+                                     JsonExpression expression, const json& search_val,
+                                     int start_index, int end_index) {
+  OpResult<json> result = GetJson(op_args, key);
+  if (!result) {
+    return result.status();
+  }
+
+  vector<OptLong> vec;
+  auto cb = [&](const string_view& path, const json& val) {
+    if (!val.is_array()) {
+      vec.emplace_back(nullopt);
+      return;
+    }
+
+    if (val.empty()) {
+      vec.emplace_back(-1);
+      return;
+    }
+
+    // Negative value or out-of-range index is handled by rounding the index to the array's start
+    // and end. example: for array size 9 and index -11 the index mapped to index 7.
+    if (start_index < 0) {
+      start_index %= val.size();
+      start_index += val.size();
+    }
+
+    // See the comment above.
+    // A value index of 0 means searching until the end of the array.
+    if (end_index == 0) {
+      end_index = val.size();
+    } else if (end_index < 0) {
+      end_index %= val.size();
+      end_index += val.size();
+    }
+
+    if (start_index > end_index) {
+      vec.emplace_back(-1);
+      return;
+    }
+
+    size_t pos = -1;
+    auto it = next(val.array_range().begin(), start_index);
+    while (it != val.array_range().end()) {
+      if (search_val == *it) {
+        pos = start_index;
+        break;
+      }
+
+      ++it;
+      if (++start_index == end_index) {
+        break;
+      }
+    }
+
+    vec.emplace_back(pos);
+  };
+
+  expression.evaluate(*result, cb);
+  return vec;
+}
+
 }  // namespace
+
+void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view path = ArgS(args, 2);
+
+  error_code ec;
+  JsonExpression expression = jsonpath::make_expression<json>(path, ec);
+
+  if (ec) {
+    VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
+    (*cntx)->SendError(kSyntaxErr);
+    return;
+  }
+
+  optional<json> search_value = ConstructJsonFromString(ArgS(args, 3));
+  if (!search_value) {
+    (*cntx)->SendError(kSyntaxErr);
+    return;
+  }
+
+  if (search_value->is_object() || search_value->is_array()) {
+    (*cntx)->SendError(kWrongTypeErr);
+    return;
+  }
+
+  int start_index = 0;
+  if (args.size() >= 5) {
+    if (!absl::SimpleAtoi(ArgS(args, 4), &start_index)) {
+      VLOG(1) << "Failed to convert the start index to numeric" << ArgS(args, 4);
+      (*cntx)->SendError(kInvalidIntErr);
+      return;
+    }
+  }
+
+  int end_index = 0;
+  if (args.size() >= 6) {
+    if (!absl::SimpleAtoi(ArgS(args, 5), &end_index)) {
+      VLOG(1) << "Failed to convert the stop index to numeric" << ArgS(args, 5);
+      (*cntx)->SendError(kInvalidIntErr);
+      return;
+    }
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpArrIndex(t->GetOpArgs(shard), key, move(expression), *search_value, start_index,
+                      end_index);
+  };
+
+  Transaction* trans = cntx->transaction;
+  OpResult<vector<OptLong>> result = trans->ScheduleSingleHopT(move(cb));
+
+  if (result) {
+    PrintOptVec(cntx, result);
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
 
 void JsonFamily::ArrInsert(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
@@ -1218,6 +1341,7 @@ void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.ARRTRIM", CO::WRITE | CO::DENYOOM | CO::FAST, 5, 1, 1, 1}.HFUNC(ArrTrim);
   *registry << CI{"JSON.ARRINSERT", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1}.HFUNC(
       ArrInsert);
+  *registry << CI{"JSON.ARRINDEX", CO::READONLY | CO::FAST, -4, 1, 1, 1}.HFUNC(ArrIndex);
 }
 
 }  // namespace dfly
