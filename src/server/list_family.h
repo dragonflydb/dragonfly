@@ -37,10 +37,13 @@ class ListFamily {
   static void LRem(CmdArgList args, ConnectionContext* cntx);
   static void LSet(CmdArgList args, ConnectionContext* cntx);
   static void RPopLPush(CmdArgList args, ConnectionContext* cntx);
+  static void LMove(CmdArgList args, ConnectionContext* cntx);
 
   static void PopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cntx);
   static void PushGeneric(ListDir dir, bool skip_notexist, CmdArgList args,
                           ConnectionContext* cntx);
+  static void MoveGeneric(ConnectionContext* cntx, std::string_view src, std::string_view dest,
+                          ListDir src_dir, ListDir dest_dir);
 
   static void BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cntx);
 
