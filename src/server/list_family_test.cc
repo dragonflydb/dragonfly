@@ -460,4 +460,166 @@ TEST_F(ListFamilyTest, LPos) {
   ASSERT_THAT(resp.GetVec(), ElementsAre(IntArg(0), IntArg(3), IntArg(4)));
 }
 
+TEST_F(ListFamilyTest, RPopLPush) {
+  // src and dest are diffrent keys
+  auto resp = Run({"rpush", kKey1, "1", "a", "b", "1", "2", "3", "4"});
+  ASSERT_THAT(resp, IntArg(7));
+
+  resp = Run({"rpoplpush", kKey1, kKey2});
+  ASSERT_THAT(resp, "4");
+
+  resp = Run({"rpoplpush", kKey1, kKey2});
+  ASSERT_THAT(resp, "3");
+
+  resp = Run({"rpoplpush", kKey1, kKey2});
+  ASSERT_THAT(resp, "2");
+
+  resp = Run({"rpoplpush", kKey1, kKey2});
+  ASSERT_THAT(resp, "1");
+
+  resp = Run({"lrange", kKey1, "0", "-1"});
+  ASSERT_THAT(resp, ArrLen(3));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("1", "a", "b"));
+
+  resp = Run({"lrange", kKey2, "0", "-1"});
+  ASSERT_THAT(resp, ArrLen(4));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("1", "2", "3", "4"));
+
+  resp = Run({"rpoplpush", kKey1, kKey2});
+  ASSERT_THAT(resp, "b");
+
+  resp = Run({"rpoplpush", kKey1, kKey2});
+  ASSERT_THAT(resp, "a");
+
+  resp = Run({"rpoplpush", kKey1, kKey2});
+  ASSERT_THAT(resp, "1");
+
+  ASSERT_THAT(Run({"lrange", kKey1, "0", "-1"}), ArrLen(0));
+  EXPECT_THAT(Run({"exists", kKey1}), IntArg(0));
+  ASSERT_THAT(Run({"rpoplpush", kKey1, kKey2}), ArgType(RespExpr::NIL));
+
+  resp = Run({"lrange", kKey2, "0", "-1"});
+  ASSERT_THAT(resp, ArrLen(7));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("1", "a", "b", "1", "2", "3", "4"));
+
+  // src and dest are the same key
+  resp = Run({"rpush", kKey1, "1", "a", "b", "1", "2", "3", "4"});
+  ASSERT_THAT(resp, IntArg(7));
+
+  resp = Run({"rpoplpush", kKey1, kKey1});
+  ASSERT_THAT(resp, "4");
+
+  resp = Run({"rpoplpush", kKey1, kKey1});
+  ASSERT_THAT(resp, "3");
+
+  resp = Run({"rpoplpush", kKey1, kKey1});
+  ASSERT_THAT(resp, "2");
+
+  resp = Run({"rpoplpush", kKey1, kKey1});
+  ASSERT_THAT(resp, "1");
+
+  resp = Run({"lrange", kKey1, "0", "-1"});
+  ASSERT_THAT(resp, ArrLen(7));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("1", "2", "3", "4", "1", "a", "b"));
+
+  resp = Run({"rpoplpush", kKey1, kKey1});
+  ASSERT_THAT(resp, "b");
+
+  resp = Run({"rpoplpush", kKey1, kKey1});
+  ASSERT_THAT(resp, "a");
+
+  resp = Run({"rpoplpush", kKey1, kKey1});
+  ASSERT_THAT(resp, "1");
+
+  resp = Run({"lrange", kKey1, "0", "-1"});
+  ASSERT_THAT(resp, ArrLen(7));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("1", "a", "b", "1", "2", "3", "4"));
+}
+
+TEST_F(ListFamilyTest, LMove) {
+  // src and dest are different keys
+  auto resp = Run({"rpush", kKey1, "1", "2", "3", "4", "5"});
+  ASSERT_THAT(resp, IntArg(5));
+
+  resp = Run({"lmove", kKey1, kKey2, "LEFT", "RIGHT"});
+  ASSERT_THAT(resp, "1");
+
+  resp = Run({"lmove", kKey1, kKey2, "LEFT", "LEFT"});
+  ASSERT_THAT(resp, "2");
+
+  resp = Run({"lrange", kKey2, "0", "-1"});
+  ASSERT_THAT(resp, ArrLen(2));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("2", "1"));
+
+  resp = Run({"lmove", kKey1, kKey2, "RIGHT", "LEFT"});
+  ASSERT_THAT(resp, "5");
+
+  resp = Run({"lrange", kKey2, "0", "-1"});
+  ASSERT_THAT(resp, ArrLen(3));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("5", "2", "1"));
+
+  resp = Run({"lmove", kKey1, kKey2, "RIGHT", "RIGHT"});
+  ASSERT_THAT(resp, "4");
+
+  resp = Run({"lrange", kKey1, "0", "-1"});
+  ASSERT_EQ(resp, "3");
+
+  resp = Run({"lrange", kKey2, "0", "-1"});
+  ASSERT_THAT(resp, ArrLen(4));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("5", "2", "1", "4"));
+
+  resp = Run({"lmove", kKey1, kKey2, "RIGHT", "RIGHT"});
+  ASSERT_THAT(resp, "3");
+
+  ASSERT_THAT(Run({"lrange", kKey1, "0", "-1"}), ArrLen(0));
+  EXPECT_THAT(Run({"exists", kKey1}), IntArg(0));
+  ASSERT_THAT(Run({"lmove", kKey1, kKey2, "LEFT", "RIGHT"}), ArgType(RespExpr::NIL));
+  ASSERT_THAT(Run({"lmove", kKey1, kKey2, "RIGHT", "RIGHT"}), ArgType(RespExpr::NIL));
+
+  resp = Run({"lrange", kKey2, "0", "-1"});
+  ASSERT_THAT(resp, ArrLen(5));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("5", "2", "1", "4", "3"));
+
+  // src and dest are the same key
+  resp = Run({"rpush", kKey1, "1", "2", "3", "4", "5"});
+  ASSERT_THAT(resp, IntArg(5));
+
+  resp = Run({"lmove", kKey1, kKey1, "LEFT", "RIGHT"});
+  ASSERT_THAT(resp, "1");
+
+  resp = Run({"lmove", kKey1, kKey1, "LEFT", "LEFT"});
+  ASSERT_THAT(resp, "2");
+
+  resp = Run({"lmove", kKey1, kKey1, "RIGHT", "LEFT"});
+  ASSERT_THAT(resp, "1");
+
+  resp = Run({"lmove", kKey1, kKey1, "RIGHT", "RIGHT"});
+  ASSERT_THAT(resp, "5");
+
+  resp = Run({"lmove", kKey1, kKey1, "LEFT", "RIGHT"});
+  ASSERT_THAT(resp, "1");
+
+  resp = Run({"lrange", kKey1, "0", "-1"});
+  ASSERT_THAT(resp, ArrLen(5));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("2", "3", "4", "5", "1"));
+
+  resp = Run({"lmove", kKey1, kKey1, "LEFT", "RIGHT"});
+  ASSERT_THAT(resp, "2");
+
+  resp = Run({"lmove", kKey1, kKey1, "LEFT", "RIGHT"});
+  ASSERT_THAT(resp, "3");
+
+  resp = Run({"lmove", kKey1, kKey1, "RIGHT", "RIGHT"});
+  ASSERT_THAT(resp, "3");
+
+  resp = Run({"lmove", kKey1, kKey1, "LEFT", "RIGHT"});
+  ASSERT_THAT(resp, "4");
+
+  resp = Run({"lrange", kKey1, "0", "-1"});
+  ASSERT_THAT(resp, ArrLen(5));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("5", "1", "2", "3", "4"));
+
+  ASSERT_THAT(Run({"lmove", kKey1, kKey1, "LEFT", "R"}), ArgType(RespExpr::ERROR));
+}
+
 }  // namespace dfly
