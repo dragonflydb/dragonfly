@@ -615,6 +615,12 @@ error_code RdbSerializer::FlushMem() {
   return error_code{};
 }
 
+error_code RdbSerializer::SendFullSyncCut() {
+  RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_FULLSYNC_END));
+  VLOG(0) << "Sending FS cut";
+  return FlushMem();
+}
+
 error_code RdbSerializer::SaveString(string_view val) {
   /* Try integer encoding */
   if (val.size() <= 11) {
@@ -745,7 +751,7 @@ class RdbSaver::Impl {
   error_code ConsumeChannel();
 
   // Start filling record channel with entries from shard.
-  void StartSnapshotting(bool include_journal_changes, EngineShard* shard);
+  void StartSnapshotting(SnapshotSyncBlock* block, EngineShard* shard);
 
   error_code Flush() {
     if (aligned_buf_)
@@ -848,10 +854,10 @@ error_code RdbSaver::Impl::ConsumeChannel() {
   return io_error;
 }
 
-void RdbSaver::Impl::StartSnapshotting(bool include_journal_changes, EngineShard* shard) {
+void RdbSaver::Impl::StartSnapshotting(SnapshotSyncBlock* block, EngineShard* shard) {
   auto s = make_unique<SliceSnapshot>(&shard->db_slice(), &channel_);
 
-  s->Start(include_journal_changes);
+  s->Start(block);
 
   // For single shard configuration, we maintain only one snapshot,
   // so we do not have to map it via shard_id.
@@ -890,6 +896,13 @@ RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes) {
 RdbSaver::~RdbSaver() {
 }
 
+error_code RdbSaver::CloseImmediately(::io::Sink* sink) {
+  RdbSaver saver(sink, SaveMode::SUMMARY, false);
+  saver.SaveHeader({});
+  saver.impl_->serializer()->SendFullSyncCut(); // TODO: provide better access
+  return saver.SaveEpilog();
+}
+
 error_code RdbSaver::SaveHeader(const StringVec& lua_scripts) {
   char magic[16];
   size_t sz = absl::SNPrintF(magic, sizeof(magic), "REDIS%04d", RDB_VERSION);
@@ -922,8 +935,8 @@ error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
   return error_code{};
 }
 
-void RdbSaver::StartSnapshotInShard(bool include_journal_changes, EngineShard* shard) {
-  impl_->StartSnapshotting(include_journal_changes, shard);
+void RdbSaver::StartSnapshotInShard(SnapshotSyncBlock* block, EngineShard* shard) {
+  impl_->StartSnapshotting(block, shard);
 }
 
 error_code RdbSaver::SaveAux(const StringVec& lua_scripts) {

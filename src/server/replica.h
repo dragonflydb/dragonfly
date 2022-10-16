@@ -4,6 +4,8 @@
 #pragma once
 
 #include <boost/fiber/fiber.hpp>
+#include <boost/fiber/condition_variable.hpp>
+#include <boost/fiber/mutex.hpp>
 #include <variant>
 
 #include "base/io_buf.h"
@@ -12,6 +14,12 @@
 #include "util/fiber_socket_base.h"
 
 namespace dfly {
+
+struct ReplicaSyncBlock {
+  int events_left;
+  ::boost::fibers::mutex mu_;
+  ::boost::fibers::condition_variable cv_;
+};
 
 class Service;
 class ConnectionContext;
@@ -88,7 +96,11 @@ class Replica {
 
   // Fiber function used to sync from DF master.
   // We pass io_buf that may have data leftovers from the previous reads.
-  void ReplicateDFFb(std::unique_ptr<base::IoBuf> io_buf, std::string eof_token);
+  void ReplicateDFFb(ReplicaSyncBlock* block, std::unique_ptr<base::IoBuf> io_buf, std::string eof_token);
+
+  // Fiber function used to sync from DF master.
+  // We pass io_buf that may have data leftovers from the previous reads.
+  void ConsumeDFFb();
 
   // This function uses parser_ and cmd_args_ in order to consume a single response
   // from the sock_. The output will reside in cmd_str_args_.
@@ -109,7 +121,8 @@ class Replica {
   std::error_code ConsumeDflyStream();
   std::error_code ParseAndExecute(base::IoBuf* io_buf);
 
-  std::error_code StartFlow();
+  std::error_code StartConsumeFlow();
+  std::error_code StartFlow(ReplicaSyncBlock* block);
 
   Service& service_;
 

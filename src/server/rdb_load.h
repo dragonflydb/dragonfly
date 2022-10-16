@@ -48,6 +48,9 @@ class RdbLoader {
     return load_time_;
   }
 
+  // TODO: Callback? Event consumer + virtual?
+  std::function<void()> fullsync_cut;
+
  private:
   using MutableBytes = ::io::MutableBytes;
   struct ObjSettings;

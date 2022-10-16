@@ -79,6 +79,14 @@ error_code Recv(FiberSocketBase* input, base::IoBuf* dest) {
 
 constexpr unsigned kRdbEofMarkSize = 40;
 
+vector<vector<unsigned>> Partition(unsigned num_threads, unsigned num_flows) {
+  vector<vector<unsigned>> out(num_threads);
+  for (unsigned i = 0; i < num_flows; ++i) {
+    out[i % num_threads].push_back(i);
+  }
+  return out;
+}
+
 }  // namespace
 
 Replica::Replica(string host, uint16_t port, Service* se) : service_(*se) {
@@ -96,6 +104,7 @@ Replica::~Replica() {
     sync_fb_.join();
 
   if (sock_) {
+    VLOG(0) << "Closing replica socket";
     auto ec = sock_->Close();
     LOG_IF(ERROR, ec) << "Error closing replica socket " << ec;
   }
@@ -270,6 +279,8 @@ void Replica::ReplicateRedisFb() {
     else
       ec = ConsumeDflyStream();
 
+    VLOG(0) << "Consume[R|DF]Stream Done" << endl;
+
     LOG_IF(ERROR, ec && !FiberSocketBase::IsConnClosed(ec)) << "Replica socket error " << ec;
 
     state_mask_ &= ~R_SYNC_OK;  //
@@ -278,12 +289,27 @@ void Replica::ReplicateRedisFb() {
   VLOG(1) << "Replication fiber finished";
 }
 
-void Replica::ReplicateDFFb(unique_ptr<base::IoBuf> io_buf, string eof_token) {
+void Replica::ReplicateDFFb(ReplicaSyncBlock* block, unique_ptr<base::IoBuf> io_buf, string eof_token) {
+  VLOG(0) << "Running ReplicateDFFb " << master_context_.flow_id;
+
   SocketSource ss{sock_.get()};
   io::PrefixSource ps{io_buf->InputBuffer(), &ss};
 
   RdbLoader loader(NULL);
+  loader.fullsync_cut = [this, block, ran = false]() mutable {
+    {
+      std::unique_lock lk(block->mu_);
+      if (!ran) // TODO: Remove this!!!!.
+        block->events_left--;
+      ran = true;
+    }
+    block->cv_.notify_all();
+  };
+
   error_code ec = loader.Load(&ps);
+
+  VLOG(0) << "ReplicateDFFb loaded " << master_context_.flow_id << " ec " << ec;
+
   if (!eof_token.empty()) {
     unique_ptr<uint8_t[]> buf(new uint8_t[eof_token.size()]);
     // pass leftover data from the loader.
@@ -296,8 +322,39 @@ void Replica::ReplicateDFFb(unique_ptr<base::IoBuf> io_buf, string eof_token) {
 
     // TODO - to compare tokens
   }
-  VLOG(1) << "ReplicateDFFb finished after reading " << loader.bytes_read() << " bytes";
+
+  VLOG(0) << "ReplicateDFFb finished after reading " << loader.bytes_read() << " bytes";
 }
+
+void Replica::ConsumeDFFb() {
+  base::IoBuf io_buf(16_KB);
+  parser_.reset(new RedisParser);
+
+  error_code ec;
+  time_t last_ack = time(nullptr);
+  string ack_cmd;
+
+  while (!ec) {
+    VLOG(0) << "ConsumeDFFb iteration";
+    io::MutableBytes buf = io_buf.AppendBuffer();
+    io::Result<size_t> size_res = sock_->Recv(buf);
+    if (!size_res)
+      return;
+      //return size_res.error();
+
+    VLOG(0) << "Read replication stream of " << *size_res << " bytes";
+    last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
+
+    io_buf.CommitWrite(*size_res);
+    repl_offs_ += *size_res;
+
+    ec = ParseAndExecute(&io_buf);
+  }
+
+  VLOG(0) << "ConsumeDFFb finished";
+  return;
+}
+
 
 error_code Replica::Greet() {
   base::IoBuf io_buf{128};
@@ -485,11 +542,10 @@ error_code Replica::InitiatePSync() {
 error_code Replica::InitiateDflySync() {
   DCHECK_GT(num_df_flows_, 0u);
   unsigned num_threads = shard_set->pool()->size();
-  vector<vector<unsigned>> partition(num_threads);
+  vector<vector<unsigned>> partition = Partition(num_threads, num_df_flows_);
 
   shard_flows_.resize(num_df_flows_);
   for (unsigned i = 0; i < num_df_flows_; ++i) {
-    partition[i % num_threads].push_back(i);
     shard_flows_[i].reset(new Replica(master_context_, i, &service_));
   }
 
@@ -498,10 +554,16 @@ error_code Replica::InitiateDflySync() {
 
   absl::Time start = absl::Now();
 
+  // sync block
+
+  ReplicaSyncBlock block;
+  block.events_left = shard_set->pool()->size();
+
+  // TODO: check lifetime
   shard_set->pool()->AwaitFiberOnAll([&](unsigned index, auto*) {
     const auto& local_ids = partition[index];
     for (unsigned id : local_ids) {
-      error_code local_ec = shard_flows_[id]->StartFlow();
+      error_code local_ec = shard_flows_[id]->StartFlow(&block);
       if (local_ec) {
         lock_guard lk(mu);
         ec = local_ec;
@@ -528,9 +590,15 @@ error_code Replica::InitiateDflySync() {
     return make_error_code(errc::bad_message);
   }
 
-  for (unsigned i = 0; i < num_df_flows_; ++i) {
-    shard_flows_[i]->sync_fb_.join();
+  VLOG(0) << "DflySync before block";
+  // wait for all fibers to arrive on fs cut
+  {
+    std::unique_lock lk(block.mu_);
+    block.cv_.wait(lk, [&](){
+      return block.events_left == 0;
+    });
   }
+  VLOG(0) << "DflySync after block";
 
   absl::Duration dur = absl::Now() - start;
   uint64_t ms = absl::ToInt64Milliseconds(dur);
@@ -538,6 +606,7 @@ error_code Replica::InitiateDflySync() {
 
   state_mask_ |= R_SYNC_OK;
 
+  // TODO: block ptr is invalid now. Not in use, but still around.
   return error_code{};
 }
 
@@ -698,15 +767,56 @@ error_code Replica::ConsumeRedisStream() {
 }
 
 error_code Replica::ConsumeDflyStream() {
-  ReqSerializer serializer{sock_.get()};
-  // TBD
-  serializer.SendCommand("QUIT");
-  state_mask_ &= ~R_ENABLED;  // disable further - TODO: not finished.
-  RETURN_ON_ERR(serializer.ec());
+  VLOG(0) << "15 seconds to check changes are streamed on full sync";
+  ::boost::this_fiber::sleep_for(15s);
 
-  base::IoBuf io_buf{128};
+  // Send watch -> request transition from full sync to stable state.
+  {
+    ReqSerializer serializer{sock_.get()};
+    serializer.SendCommand(StrCat("DFLY SWITCH ", master_context_.dfly_session_id));
+    RETURN_ON_ERR(serializer.ec());
+  }
 
-  RETURN_ON_ERR(Recv(sock_.get(), &io_buf));
+  // Finish last full sync phase.
+  // TODO: continue in same fiber + barrier?
+  for (unsigned i = 0; i < num_df_flows_; ++i) {
+    shard_flows_[i]->sync_fb_.join();
+  }
+
+  VLOG(0) << "Consuming dfly stream";
+
+  DCHECK_GT(num_df_flows_, 0u);
+
+  // Make sure flows are already initialized from full sync.
+  CHECK(shard_flows_.size() == num_df_flows_);
+  unsigned num_threads = shard_set->pool()->size();
+  vector<vector<unsigned>> partition = Partition(num_threads, num_df_flows_);
+
+  auto& pool = service_.proactor_pool();
+
+  AggregateError all_ec;
+  shard_set->pool()->AwaitFiberOnAll([&](unsigned index, auto*) {
+    const auto& local_ids = partition[index];
+    for (unsigned id : local_ids) {
+      all_ec = shard_flows_[id]->StartConsumeFlow();
+      if (all_ec)
+        break;
+    }
+  });
+
+  VLOG(0) << "Started all flows " << *all_ec;
+  RETURN_ON_ERR(*all_ec);
+
+  // consume flows started - loop over control fiber
+  base::IoBuf io_buf(16_KB);
+  std::error_code ec;
+  while (!ec) {
+    VLOG(0) << "Looping";
+    io::MutableBytes buf = io_buf.AppendBuffer();
+    io::Result<size_t> size_res = sock_->Recv(buf);
+    if (!size_res)
+      return size_res.error();
+  }
 
   return error_code{};
 }
@@ -771,7 +881,25 @@ error_code Replica::ParseAndExecute(base::IoBuf* io_buf) {
   return error_code{};
 }
 
-error_code Replica::StartFlow() {
+error_code Replica::StartConsumeFlow() {
+  VLOG(0) << "Starting consume flow";
+
+  DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
+  ProactorBase* mythread = ProactorBase::me();
+  CHECK(mythread);
+
+  CHECK(sock_->IsOpen());
+  //sock_.reset(mythread->CreateSocket());
+  //RETURN_ON_ERR(sock_->Connect(master_context_.master_ep));
+  sync_fb_ =
+      ::boost::fibers::fiber(&Replica::ConsumeDFFb, this);
+
+  return std::error_code{};
+}
+
+error_code Replica::StartFlow(ReplicaSyncBlock* block) {
+  VLOG(0) << "Starting flow " << master_context_.flow_id;
+
   CHECK(!sock_);
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
 
@@ -812,7 +940,7 @@ error_code Replica::StartFlow() {
   // We can not discard io_buf because it may contain data
   // besides the response we parsed. Therefore we pass it further to ReplicateDFFb.
   sync_fb_ =
-      ::boost::fibers::fiber(&Replica::ReplicateDFFb, this, std::move(io_buf), move(eof_token));
+      ::boost::fibers::fiber(&Replica::ReplicateDFFb, this, block, std::move(io_buf), move(eof_token));
 
   return error_code{};
 }

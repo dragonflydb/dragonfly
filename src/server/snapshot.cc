@@ -34,7 +34,7 @@ SliceSnapshot::SliceSnapshot(DbSlice* slice, RecordChannel* dest) : db_slice_(sl
 SliceSnapshot::~SliceSnapshot() {
 }
 
-void SliceSnapshot::Start(bool include_journal_changes) {
+void SliceSnapshot::Start(SnapshotSyncBlock* block) {
   DCHECK(!fb_.joinable());
 
   auto on_change = [this](DbIndex db_index, const DbSlice::ChangeReq& req) {
@@ -44,19 +44,20 @@ void SliceSnapshot::Start(bool include_journal_changes) {
   snapshot_version_ = db_slice_->RegisterOnChange(move(on_change));
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
-  if (include_journal_changes) {
+  if (block != nullptr) {
     auto* journal = db_slice_->shard_owner()->journal();
     DCHECK(journal);
-    journal_cb_id_ = journal->RegisterOnChange(
-        [this](const journal::Entry& e) { OnJournalEntry(e); });
+    journal_cb_id_ =
+        journal->RegisterOnChange([this](const journal::Entry& e) { OnJournalEntry(e); });
   }
 
   sfile_.reset(new io::StringFile);
 
   rdb_serializer_.reset(new RdbSerializer(sfile_.get()));
 
-  fb_ = fiber([this] {
-    FiberFunc();
+  fb_ = fiber([this, block] {
+    FiberFunc(block);
+    // notify all entries send and in streaming mode
     db_slice_->UnregisterOnChange(snapshot_version_);
     if (journal_cb_id_)
       db_slice_->shard_owner()->journal()->Unregister(journal_cb_id_);
@@ -84,7 +85,8 @@ void SliceSnapshot::SerializeSingleEntry(DbIndex db_indx, const PrimeKey& pk, co
 }
 
 // Serializes all the entries with version less than snapshot_version_.
-void SliceSnapshot::FiberFunc() {
+void SliceSnapshot::FiberFunc(SnapshotSyncBlock* block) {
+  VLOG(0) << "Running FiberFunc()";
   this_fiber::properties<FiberProps>().set_name(
       absl::StrCat("SliceSnapshot", ProactorBase::GetIndex()));
   PrimeTable::Cursor cursor;
@@ -94,7 +96,7 @@ void SliceSnapshot::FiberFunc() {
       continue;
 
     PrimeTable* pt = &db_array_[db_indx]->prime;
-    VLOG(1) << "Start traversing " << pt->size() << " items";
+    VLOG(0) << "Start traversing " << pt->size() << " items";
 
     uint64_t last_yield = 0;
     mu_.lock();
@@ -123,6 +125,23 @@ void SliceSnapshot::FiberFunc() {
     DVLOG(2) << "after loop " << this_fiber::properties<FiberProps>().name();
     FlushSfile(true);
   }  // for (dbindex)
+
+  VLOG(0) << "Fiber finished full sync";
+
+  // Handle for continious journal mode.
+  if (block) {
+    // TODO: FIX THIS SOMEHOW!!!!!
+    for (int i = 10; i >= 1; i--)
+      CHECK(!rdb_serializer_->SendFullSyncCut());
+    FlushSfile(true);
+
+    block->wait();
+
+    // Flush after wakeup. TODO: Conitinous flush
+    FlushSfile(true);
+  }
+
+  VLOG(0) << "Fiber passed barrier";
 
   // stupid barrier to make sure that SerializePhysicalBucket finished.
   // Can not think of anything more elegant.
@@ -217,15 +236,13 @@ void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
 
   if (entry.db_ind == savecb_current_db_) {
     ++num_records_in_blob_;
-    io::Result<uint8_t> res =
-        rdb_serializer_->SaveEntry(pkey, *entry.pval_ptr, entry.expire_ms);
+    io::Result<uint8_t> res = rdb_serializer_->SaveEntry(pkey, *entry.pval_ptr, entry.expire_ms);
     CHECK(res);  // we write to StringFile.
   } else {
     io::StringFile sfile;
     RdbSerializer tmp_serializer(&sfile);
 
-    io::Result<uint8_t> res =
-        tmp_serializer.SaveEntry(pkey, *entry.pval_ptr, entry.expire_ms);
+    io::Result<uint8_t> res = tmp_serializer.SaveEntry(pkey, *entry.pval_ptr, entry.expire_ms);
     CHECK(res);  // we write to StringFile.
 
     error_code ec = tmp_serializer.FlushMem();

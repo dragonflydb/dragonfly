@@ -15,6 +15,7 @@ extern "C" {
 #include "io/io.h"
 #include "server/common.h"
 #include "server/table.h"
+#include "server/snapshot.h"
 #include "util/uring/uring_file.h"
 
 typedef struct rax rax;
@@ -95,9 +96,12 @@ class RdbSaver {
 
   // Initiates the serialization in the shard's thread.
   // TODO: to implement break functionality to allow stopping early.
-  void StartSnapshotInShard(bool include_journal_changes, EngineShard* shard);
+  // TODO: Add SnapshotMode additionally to SyncBlock for more ambiguity?
+  void StartSnapshotInShard(SnapshotSyncBlock* block, EngineShard* shard);
 
   SaveMode Mode() const { return save_mode_; }
+
+  static std::error_code CloseImmediately(::io::Sink* sink);
 
  private:
   class Impl;
@@ -145,6 +149,8 @@ class RdbSerializer {
   std::error_code SaveLen(size_t len);
 
   std::error_code FlushMem();
+
+  std::error_code SendFullSyncCut();
 
  private:
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);

@@ -884,6 +884,8 @@ error_code RdbLoader::Load(io::Source* src) {
     mem_buf_.ConsumeInput(9);
   }
 
+  VLOG(0) << "Membuf size " << mem_buf_.InputLen() << " read " << *read_sz;
+
   int type;
 
   /* Key-specific attributes, set by opcodes before the key type. */
@@ -894,6 +896,8 @@ error_code RdbLoader::Load(io::Source* src) {
   while (!stop_early_.load(memory_order_relaxed)) {
     /* Read type. */
     SET_OR_RETURN(FetchType(), type);
+
+    VLOG(0) << "RDB LOAD TYPE " << type;
 
     /* Handle special types. */
     if (type == RDB_OPCODE_EXPIRETIME) {
@@ -928,6 +932,14 @@ error_code RdbLoader::Load(io::Source* src) {
     if (type == RDB_OPCODE_EOF) {
       /* EOF: End of file, exit the main loop. */
       break;
+    }
+
+    if (type == RDB_OPCODE_FULLSYNC_END) {
+      VLOG(0) << "GOT FULLSYNC OPCODE";
+      // notify fullsync end
+      if (fullsync_cut)
+        fullsync_cut();
+      continue;
     }
 
     if (type == RDB_OPCODE_SELECTDB) {
@@ -1252,6 +1264,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
 
     auto [it, added] = db_slice.AddEntry(db_cntx, key, std::move(pv), item.expire_ms);
 
+    // TODO: Continious journal duplicates keys
     if (!added) {
       LOG(WARNING) << "RDB has duplicated key '" << key << "' in DB " << db_ind;
     }

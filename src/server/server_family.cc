@@ -202,7 +202,7 @@ error_code RdbSnapshot::Close() {
 }
 
 void RdbSnapshot::StartInShard(EngineShard* shard) {
-  saver_.StartSnapshotInShard(false, shard);
+  saver_.StartSnapshotInShard(nullptr, shard);
   started_ = true;
 }
 
@@ -676,6 +676,7 @@ void ServerFamily::PauseReplication(bool pause) {
 }
 
 void ServerFamily::OnClose(ConnectionContext* cntx) {
+  VLOG(0) << "Connection close";
   dfly_cmd_->OnClose(cntx);
 }
 

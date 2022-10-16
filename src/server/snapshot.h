@@ -4,7 +4,9 @@
 
 #pragma once
 
+#include <atomic>
 #include <bitset>
+#include <boost/fiber/barrier.hpp>
 
 #include "io/file.h"
 #include "server/db_slice.h"
@@ -12,6 +14,25 @@
 #include "util/fibers/simple_channel.h"
 
 namespace dfly {
+
+// TODO: Change to virtual interface?
+struct SnapshotSyncBlock {
+  explicit SnapshotSyncBlock(unsigned threads, std::atomic_uint16_t* counter)
+      : barrier_(threads), counter_(counter) {
+  }
+
+  void wait() {
+    counter_->fetch_add(-1, std::memory_order_relaxed);
+    barrier_.wait();
+  }
+
+ private:
+  // Barrier to sync consumer fibers on CONTINIOUS_JOURNAL mode.
+  // TODO: No wait until. No fail behaviour.
+  ::boost::fibers::barrier barrier_;
+  // Atomic flag
+  std::atomic_uint16_t* counter_;
+};
 
 namespace journal {
 struct Entry;
@@ -36,7 +57,7 @@ class SliceSnapshot {
   SliceSnapshot(DbSlice* slice, RecordChannel* dest);
   ~SliceSnapshot();
 
-  void Start(bool include_journal_changes);
+  void Start(SnapshotSyncBlock* block);
   void Join();
 
   uint64_t snapshot_version() const {
@@ -56,7 +77,7 @@ class SliceSnapshot {
   }
 
  private:
-  void FiberFunc();
+  void FiberFunc(SnapshotSyncBlock* block);
   bool FlushSfile(bool force);
   void SerializeSingleEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
                             RdbSerializer* serializer);
@@ -70,14 +91,14 @@ class SliceSnapshot {
   unsigned SerializePhysicalBucket(DbIndex db_index, PrimeTable::bucket_iterator it);
   DbRecord GetDbRecord(DbIndex db_index, std::string value, unsigned num_records);
 
-  ::boost::fibers::fiber fb_;
+  ::boost::fibers::fiber fb_;  // fiber dispatched by Start().
 
   DbTableArray db_array_;
   RdbTypeFreqMap type_freq_map_;
 
   std::unique_ptr<io::StringFile> sfile_;
   std::unique_ptr<RdbSerializer> rdb_serializer_;
-  boost::fibers::mutex mu_;
+  boost::fibers::mutex mu_;  // guards multiple members.
 
   // version upper bound for entries that should be saved (not included).
   uint64_t snapshot_version_ = 0;
