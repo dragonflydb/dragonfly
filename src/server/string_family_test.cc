@@ -399,4 +399,90 @@ TEST_F(StringFamilyTest, GetDel) {
   ASSERT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
+TEST_F(StringFamilyTest, GetEx) {
+  auto resp = Run({"set", "foo", "bar"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"getex", "foo", "EX"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"getex", "foo", "bar", "EX"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"getex", "foo", "PERSIST", "1"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"getex", "foo", "PXAT"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"getex", "foo", "EX", "0"});
+  EXPECT_THAT(resp, ErrArg("invalid expire time"));
+
+  resp = Run({"getex", "foo", "PXAT", "-1"});
+  EXPECT_THAT(resp, ErrArg("invalid expire time"));
+
+  EXPECT_EQ(Run({"getex", "foo"}), "bar");
+
+  resp = Run({"getex", "foo", "PERSIST"});
+  EXPECT_EQ(resp, "bar");
+  EXPECT_THAT(Run({"TTL", "foo"}), IntArg(-1));
+
+  resp = Run({"getex", "foo", "pxat", absl::StrCat(TEST_current_time_ms - 1)});
+  EXPECT_EQ(resp, "bar");
+
+  EXPECT_THAT(Run({"getex", "foo"}), ArgType(RespExpr::NIL));
+
+  Run({"set", "foo", "bar"});
+
+  resp = Run({"getex", "foo", "PXAT", absl::StrCat(TEST_current_time_ms + 10)});
+  EXPECT_EQ(resp, "bar");
+
+  AdvanceTime(9);
+  EXPECT_EQ(Run({"getex", "foo"}), "bar");
+
+  AdvanceTime(1);
+  EXPECT_THAT(Run({"getex", "foo"}), ArgType(RespExpr::NIL));
+
+  Run({"set", "foo", "bar"});
+
+  resp = Run({"getex", "foo", "exat", absl::StrCat(TEST_current_time_ms / 1000 - 1)});
+  EXPECT_EQ(resp, "bar");
+  EXPECT_THAT(Run({"getex", "foo"}), ArgType(RespExpr::NIL));
+
+  Run({"set", "foo", "bar"});
+
+  uint64_t next_two_seconds = TEST_current_time_ms + 2000;
+  uint64_t next_two_seconds_round_down = static_cast<uint64_t>(next_two_seconds / 1000);
+  uint64_t diff = next_two_seconds_round_down * 1000 - TEST_current_time_ms;
+
+  resp = Run({"getex", "foo", "EXAT", absl::StrCat(next_two_seconds_round_down)});
+  EXPECT_EQ(resp, "bar");
+
+  AdvanceTime(diff - 1);
+  EXPECT_EQ(Run({"getex", "foo"}), "bar");
+
+  AdvanceTime(1);
+  EXPECT_THAT(Run({"getex", "foo"}), ArgType(RespExpr::NIL));
+
+  Run({"set", "foo", "bar"});
+
+  resp = Run({"getex", "foo", "PX", "10"});
+
+  AdvanceTime(9);
+  EXPECT_EQ(Run({"getex", "foo"}), "bar");
+
+  AdvanceTime(1);
+  EXPECT_THAT(Run({"getex", "foo"}), ArgType(RespExpr::NIL));
+
+  Run({"set", "foo", "bar"});
+
+  resp = Run({"getex", "foo", "ex", "1"});
+
+  AdvanceTime(999);
+  EXPECT_EQ(Run({"getex", "foo"}), "bar");
+
+  AdvanceTime(1);
+  EXPECT_THAT(Run({"getex", "foo"}), ArgType(RespExpr::NIL));
+}
+
 }  // namespace dfly

@@ -60,6 +60,7 @@ class StringFamily {
   static void GetDel(CmdArgList args, ConnectionContext* cntx);
   static void GetRange(CmdArgList args, ConnectionContext* cntx);
   static void GetSet(CmdArgList args, ConnectionContext* cntx);
+  static void GetEx(CmdArgList args, ConnectionContext* cntx);
   static void Incr(CmdArgList args, ConnectionContext* cntx);
   static void IncrBy(CmdArgList args, ConnectionContext* cntx);
   static void IncrByFloat(CmdArgList args, ConnectionContext* cntx);

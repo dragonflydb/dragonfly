@@ -562,14 +562,12 @@ OpStatus DbSlice::UpdateExpire(const Context& cntx, PrimeIterator prime_it,
     return OpStatus::OUT_OF_RANGE;
   }
 
-  // TODO: to support persist.
-
-  if (rel_msec <= 0) {
+  if (rel_msec <= 0 && !params.persist) {
     CHECK(Del(cntx.db_index, prime_it));
   } else if (IsValid(expire_it)) {
     expire_it->second = FromAbsoluteTime(now_msec + rel_msec);
   } else {
-    UpdateExpire(cntx.db_index, prime_it, rel_msec + now_msec);
+    UpdateExpire(cntx.db_index, prime_it, params.persist ? 0 : rel_msec + now_msec);
   }
 
   return OpStatus::OK;

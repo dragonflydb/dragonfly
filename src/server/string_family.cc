@@ -191,12 +191,18 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
   return ExtendExisting(op_args, *it_res, key, val, prepend);
 }
 
-OpResult<string> OpGet(const OpArgs& op_args, string_view key, bool del_hit = false) {
-  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_STRING);
-  if (!it_res.ok())
-    return it_res.status();
+OpResult<string> OpGet(const OpArgs& op_args, string_view key, bool del_hit = false,
+                       const DbSlice::ExpireParams& exp_params = {}) {
+  /*Get primeIterator and ExpireIterator at the same time*/
+  auto [it, it_expire] = op_args.shard->db_slice().FindExt(op_args.db_cntx, key);
 
-  const PrimeValue& pv = it_res.value()->second;
+  if (!IsValid(it))
+    return OpStatus::KEY_NOTFOUND;
+
+  if (it->second.ObjType() != OBJ_STRING)
+    return OpStatus::WRONG_TYPE;
+
+  const PrimeValue& pv = it->second;
 
   if (del_hit) {
     string key_bearer = GetString(op_args.shard, pv);
@@ -204,12 +210,23 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key, bool del_hit = fa
     DVLOG(1) << "Del: " << key;
     auto& db_slice = op_args.shard->db_slice();
 
-    CHECK(db_slice.Del(op_args.db_cntx.db_index, it_res.value()));
+    CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
 
     return key_bearer;
   }
 
-  return GetString(op_args.shard, pv);
+  /*Get value before expire*/
+  string ret_val = GetString(op_args.shard, pv);
+
+  if (exp_params.IsDefined()) {
+    DVLOG(1) << "Expire: " << key;
+    auto& db_slice = op_args.shard->db_slice();
+    OpStatus status = db_slice.UpdateExpire(op_args.db_cntx, it, it_expire, exp_params);
+    if (status != OpStatus::OK)
+      return status;
+  }
+
+  return ret_val;
 }
 
 OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val) {
@@ -666,6 +683,70 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendNull();
 }
 
+void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+
+  DbSlice::ExpireParams exp_params;
+  int64_t int_arg = 0;
+
+  for (size_t i = 2; i < args.size(); i++) {
+    ToUpper(&args[i]);
+
+    string_view cur_arg = ArgS(args, i);
+
+    if (cur_arg == "EX" || cur_arg == "PX" || cur_arg == "EXAT" || cur_arg == "PXAT") {
+      i++;
+      if (i >= args.size()) {
+        return (*cntx)->SendError(kSyntaxErr);
+      }
+
+      string_view ex = ArgS(args, i);
+      if (!absl::SimpleAtoi(ex, &int_arg)) {
+        return (*cntx)->SendError(kInvalidIntErr);
+      }
+
+      if (int_arg <= 0) {
+        return (*cntx)->SendError(InvalidExpireTime("getex"));
+      }
+
+      if (cur_arg == "EXAT" || cur_arg == "PXAT") {
+        exp_params.absolute = true;
+      }
+
+      exp_params.value = int_arg;
+      if (cur_arg == "EX" || cur_arg == "EXAT") {
+        exp_params.unit = TimeUnit::SEC;
+      } else {
+        exp_params.unit = TimeUnit::MSEC;
+      }
+    } else if (cur_arg == "PERSIST") {
+      exp_params.persist = true;
+    } else {
+      return (*cntx)->SendError(kSyntaxErr);
+    }
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpGet(t->GetOpArgs(shard), key, false, exp_params);
+  };
+
+  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
+
+  OpResult<string> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+
+  if (result)
+    return (*cntx)->SendBulkString(*result);
+
+  switch (result.status()) {
+    case OpStatus::WRONG_TYPE:
+      (*cntx)->SendError(kWrongTypeErr);
+      break;
+    default:
+      DVLOG(1) << "GET " << key << " nil";
+      (*cntx)->SendNull();
+  }
+}
+
 void StringFamily::Incr(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
   return IncrByGeneric(key, 1, cntx);
@@ -1080,6 +1161,7 @@ void StringFamily::Register(CommandRegistry* registry) {
             << CI{"DECRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(DecrBy)
             << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Get)
             << CI{"GETDEL", CO::WRITE | CO::DENYOOM | CO::FAST, 2, 1, 1, 1}.HFUNC(GetDel)
+            << CI{"GETEX", CO::WRITE | CO::DENYOOM | CO::FAST, -1, 1, 1, 1}.HFUNC(GetEx)
             << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(GetSet)
             << CI{"MGET", CO::READONLY | CO::FAST | CO::REVERSE_MAPPING, -2, 1, -1, 1}.HFUNC(MGet)
             << CI{"MSET", CO::WRITE | CO::DENYOOM, -3, 1, -1, 2}.HFUNC(MSet)
