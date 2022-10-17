@@ -936,7 +936,7 @@ error_code RdbLoader::Load(io::Source* src) {
 
     if (type == RDB_OPCODE_FULLSYNC_END) {
       VLOG(0) << "GOT FULLSYNC OPCODE";
-      // notify fullsync end
+      // notify full sync end
       if (fullsync_cut)
         fullsync_cut();
       continue;

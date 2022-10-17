@@ -58,7 +58,7 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
 
   // Run command with args.
   using CmdType = void (DflyCmd::*)(CmdArgList, ConnectionContext * cntx);
-  auto run_with_args = [this, args, cntx, rb, sub_cmd](CmdType cmd, int expected_args) {
+  auto run_with_args = [this, args, cntx, rb, sub_cmd](CmdType cmd, unsigned expected_args) {
     if (args.size() != expected_args) {
       return rb->SendError(WrongNumArgsError(absl::StrCat("DFLY ", sub_cmd)));
     }
@@ -181,6 +181,10 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
     unsigned flows = sync_info->thread_map.size();
     sync_info->snapshot_block.emplace(flows, &sync_info->fiber_flag_counter);
     sync_info->fiber_flag_counter.store(flows, std::memory_order_relaxed);
+
+    // TODO: Who cares about errors possible errors?
+    // State switch has to happen atomically (mutex POV). Add separate busy/transitioning flag?
+    sync_info->state = ReplicaState::FULL_SYNC;
   }
 
   // Before setting up a transaction that initiates a full sync,
@@ -209,9 +213,6 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
   // TODO: after the full sync we should continue streaming data from non-shard threads as well
   // because those threads provide locking/transaction information needed to provide atomicity
   // guarantees on replica.
-
-  // TODO: Who cares about errors?
-  sync_info->state = ReplicaState::FULL_SYNC;
 
   if (*status == OpStatus::OK)
     return rb->SendOk();
@@ -243,12 +244,11 @@ void DflyCmd::Switch(CmdArgList args, ConnectionContext* cntx) {
 
   {
     // Guard scope with two global cuts.
+    Transaction* t = cntx->transaction;
     auto kEmptyOp = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
-    cntx->transaction->Schedule();
-    cntx->transaction->Execute(kEmptyOp, false);
-    absl::Cleanup transaction_cut = [kEmptyOp, t = cntx->transaction]() {
-      t->Execute(kEmptyOp, true);
-    };
+    t->Schedule();
+    t->Execute(kEmptyOp, false);
+    absl::Cleanup transaction_cut = [kEmptyOp, t]() { t->Execute(kEmptyOp, true); };
 
     // Overflow barrier and unblock full sync fibers.
     sync_info->snapshot_block->wait();
@@ -258,6 +258,8 @@ void DflyCmd::Switch(CmdArgList args, ConnectionContext* cntx) {
         [this, sync_info = sync_info](unsigned flow_id, ProactorBase*) {
           StartStableSync(flow_id, &sync_info->thread_map[flow_id]);
         });
+
+    sync_info->state = ReplicaState::STABLE_SYNC;
   }
 }
 
@@ -330,7 +332,6 @@ DflyCmd::SyncId DflyCmd::AllocateSyncSession() {
   CHECK(inserted);
 
   it->second->start_time_ns = ProactorBase::me()->GetMonotonicTimeNs();
-  it->second->fiber_flag_counter.store(shard_set->size(), memory_order_relaxed);
 
   return next_sync_id_++;
 }
@@ -389,7 +390,7 @@ void DflyCmd::StartReplInThread(uint32_t thread_id, SyncId syncid) {
 
   // TODO: We do not support any replication yet.
 
-  // Send RDB FS_CUT + EOF + EOF token
+  // Send RDB FS_CUT + RDB EOF + EOF token
   // TODO: Replace with header serialization
   RdbSaver::CloseImmediately(conn->socket());
 
@@ -485,7 +486,7 @@ OpStatus DflyCmd::StartStableSync(unsigned flow_id, ReplicateFlow* flow) {
   if (flow->repl_fb.joinable()) {
     flow->repl_fb.join();
   } else {
-    VLOG(0) << "For some reason not joinable on " << flow_id;
+    // TODO: store non shard repl fiber as well.
   }
 
   // Start stable state fiber.
@@ -495,7 +496,7 @@ OpStatus DflyCmd::StartStableSync(unsigned flow_id, ReplicateFlow* flow) {
 }
 
 void DflyCmd::StableSyncFb(unsigned flow_id, ReplicateFlow* flow) {
-  sf_->journal()->OpenInThread(false, "");
+  // sf_->journal()->OpenInThread(false, "");
   auto cb = sf_->journal()->RegisterOnChange([flow, flow_id](const journal::Entry& je) {
     // TODO: Serialize event.
     VLOG(0) << "Got change event " << je.key << " at " << flow_id;
@@ -504,7 +505,7 @@ void DflyCmd::StableSyncFb(unsigned flow_id, ReplicateFlow* flow) {
     CHECK(!serializer.ec());
   });
 
-  // TODO: block on barrier again?
+  // TODO: block on barrier again? Cancellation?
   ::boost::this_fiber::sleep_for(1000s);
 }
 

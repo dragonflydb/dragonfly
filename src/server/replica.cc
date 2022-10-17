@@ -79,7 +79,9 @@ error_code Recv(FiberSocketBase* input, base::IoBuf* dest) {
 
 constexpr unsigned kRdbEofMarkSize = 40;
 
-vector<vector<unsigned>> Partition(unsigned num_threads, unsigned num_flows) {
+// Partition flows on real threads.
+vector<vector<unsigned>> Partition(unsigned num_flows) {
+  unsigned num_threads = shard_set->pool()->size();
   vector<vector<unsigned>> out(num_threads);
   for (unsigned i = 0; i < num_flows; ++i) {
     out[i % num_threads].push_back(i);
@@ -138,74 +140,6 @@ bool Replica::Run(ConnectionContext* cntx) {
   return true;
 }
 
-error_code Replica::ReadRespReply(base::IoBuf* io_buf, uint32_t* consumed) {
-  DCHECK(parser_);
-
-  error_code ec;
-
-  // basically reflection of dragonfly_connection IoLoop function.
-  while (!ec) {
-    io::MutableBytes buf = io_buf->AppendBuffer();
-    io::Result<size_t> size_res = sock_->Recv(buf);
-    if (!size_res)
-      return size_res.error();
-
-    VLOG(2) << "Read master response of " << *size_res << " bytes";
-
-    last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
-
-    io_buf->CommitWrite(*size_res);
-
-    RedisParser::Result result = parser_->Parse(io_buf->InputBuffer(), consumed, &resp_args_);
-
-    if (result == RedisParser::OK && !resp_args_.empty()) {
-      return error_code{};  // success path
-    }
-
-    if (result != RedisParser::INPUT_PENDING) {
-      LOG(ERROR) << "Invalid parser status " << result << " for buffer of size "
-                 << io_buf->InputLen();
-      return std::make_error_code(std::errc::bad_message);
-    }
-    io_buf->ConsumeInput(*consumed);
-  }
-
-  return ec;
-}
-
-error_code Replica::ConnectSocket() {
-  sock_.reset(ProactorBase::me()->CreateSocket());
-
-  char ip_addr[INET6_ADDRSTRLEN];
-  int resolve_res = ResolveDns(master_context_.host, ip_addr);
-  if (resolve_res != 0) {
-    LOG(ERROR) << "Dns error " << gai_strerror(resolve_res) << ", host: " << master_context_.host;
-    return make_error_code(errc::host_unreachable);
-  }
-
-  auto address = ip::make_address(ip_addr);
-  master_context_.master_ep = ip::tcp::endpoint{address, master_context_.port};
-
-  /* These may help but require additional field testing to learn.
-
- int yes = 1;
-
- CHECK_EQ(0, setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes)));
- CHECK_EQ(0, setsockopt(sock_->native_handle(), SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes)));
-
- int intv = 15;
- CHECK_EQ(0, setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_KEEPIDLE, &intv, sizeof(intv)));
-
- intv /= 3;
- CHECK_EQ(0, setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_KEEPINTVL, &intv, sizeof(intv)));
-
- intv = 3;
- CHECK_EQ(0, setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_KEEPCNT, &intv, sizeof(intv)));
-*/
-
-  return sock_->Connect(master_context_.master_ep);
-}
-
 void Replica::Stop() {
   if (sock_) {
     sock_->proactor()->Await([this] {
@@ -220,6 +154,246 @@ void Replica::Stop() {
   for (auto& ptr : shard_flows_) {
     ptr->Stop();
   }
+}
+
+error_code Replica::InitiatePSync() {
+  base::IoBuf io_buf{128};
+
+  ReqSerializer serializer{sock_.get()};
+
+  // Corresponds to server.repl_state == REPL_STATE_SEND_PSYNC
+  string id("?");  // corresponds to null master id and null offset
+  int64_t offs = -1;
+  if (!master_context_.master_repl_id.empty()) {  // in case we synced before
+    id = master_context_.master_repl_id;          // provide the replication offset and master id
+    offs = repl_offs_;                            // to try incremental sync.
+  }
+  serializer.SendCommand(StrCat("PSYNC ", id, " ", offs));
+  RETURN_ON_ERR(serializer.ec());
+
+  // Master may delay sync response with "repl_diskless_sync_delay"
+  PSyncResponse repl_header;
+
+  RETURN_ON_ERR(ParseReplicationHeader(&io_buf, &repl_header));
+
+  ProactorBase* sock_thread = sock_->proactor();
+  string* eof_token = absl::get_if<string>(&repl_header.fullsync);
+  size_t snapshot_size = SIZE_MAX;
+  if (!eof_token) {
+    snapshot_size = absl::get<size_t>(repl_header.fullsync);
+  }
+  last_io_time_ = sock_thread->GetMonotonicTimeNs();
+
+  // we get token for diskless redis replication. For disk based replication
+  // we get the snapshot size.
+  if (snapshot_size || eof_token != nullptr) {  // full sync
+    // Start full sync
+    state_mask_ |= R_SYNCING;
+
+    SocketSource ss{sock_.get()};
+    io::PrefixSource ps{io_buf.InputBuffer(), &ss};
+
+    RdbLoader loader(NULL);
+    loader.set_source_limit(snapshot_size);
+    // TODO: to allow registering callbacks within loader to send '\n' pings back to master.
+    // Also to allow updating last_io_time_.
+    error_code ec = loader.Load(&ps);
+    RETURN_ON_ERR(ec);
+    VLOG(1) << "full sync completed";
+
+    if (eof_token) {
+      uint8_t buf[kRdbEofMarkSize];
+      io::PrefixSource chained(loader.Leftover(), &ps);
+      VLOG(1) << "Before reading from chained stream";
+      io::Result<size_t> eof_res = chained.Read(io::MutableBytes{buf});
+      CHECK(eof_res && *eof_res == kRdbEofMarkSize);
+
+      VLOG(1) << "Comparing token " << ToSV(buf);
+
+      // TODO: handle gracefully...
+      CHECK_EQ(0, memcmp(eof_token->data(), buf, kRdbEofMarkSize));
+      CHECK(chained.unused_prefix().empty());
+    } else {
+      CHECK_EQ(0u, loader.Leftover().size());
+      CHECK_EQ(snapshot_size, loader.bytes_read());
+    }
+
+    CHECK(ps.unused_prefix().empty());
+    io_buf.ConsumeInput(io_buf.InputLen());
+    last_io_time_ = sock_thread->GetMonotonicTimeNs();
+  }
+
+  state_mask_ &= ~R_SYNCING;
+  state_mask_ |= R_SYNC_OK;
+
+  return error_code{};
+}
+
+/***
+ * This function starts a sync with DF master.
+ * At first it establishes N connections (flows) where N is the number of threads on the master.
+ * Each connection authenticates itself with the master by suppplying its session id, flow id.
+ * TBD: it should also negotiate the state in case an incremental sync is possible.
+ *
+ * Once the initial handshake with all the connections succeeded,
+ * this function signals the master that it can start sending data on the wire using
+ * DFLY SYNC command.
+ *
+ **/
+error_code Replica::InitiateDflySync() {
+  DCHECK_GT(num_df_flows_, 0u);
+  shard_flows_.resize(num_df_flows_);
+  for (unsigned i = 0; i < num_df_flows_; ++i) {
+    shard_flows_[i].reset(new Replica(master_context_, i, &service_));
+  }
+
+  AggregateError all_ec;
+  absl::Time start = absl::Now();
+  ReplicaSyncBlock block{shard_set->pool()->size()};
+
+  // Start full sync flows.
+  auto partition = Partition(num_df_flows_);
+  shard_set->pool()->AwaitFiberOnAll([&](unsigned index, auto*) {
+    const auto& local_ids = partition[index];
+    for (unsigned id : local_ids) {
+      all_ec = shard_flows_[id]->StartReplicateFlow(&block);
+      if (all_ec)
+        break;
+    }
+  });
+
+  RETURN_ON_ERR(*all_ec);
+
+  // Master starts sending data after DFLY SYNC.
+  {
+    ReqSerializer serializer{sock_.get()};
+    serializer.SendCommand(StrCat("DFLY SYNC ", master_context_.dfly_session_id));
+    RETURN_ON_ERR(serializer.ec());
+  }
+
+  base::IoBuf io_buf{128};
+  unsigned consumed = 0;
+  RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
+  if (resp_args_.size() != 1 || resp_args_.front().type != RespExpr::STRING ||
+      ToSV(resp_args_.front().GetBuf()) != "OK") {
+    LOG(ERROR) << "Sync failed " << ToSV(io_buf.InputBuffer());
+    return make_error_code(errc::bad_message);
+  }
+
+  // Block until all flows reached full sync cut.
+  // This means they're ready to switch to stable state immediately.
+  {
+    VLOG(0) << "DflySync before full sync cut";
+
+    std::unique_lock lk(block.mu_);
+    block.cv_.wait(lk, [&]() { return block.flows_left == 0; });
+
+    VLOG(0) << "DflySync after full sync cut";
+  }
+
+  absl::Duration dur = absl::Now() - start;
+  uint64_t ms = absl::ToInt64Milliseconds(dur);
+  LOG(INFO) << "Full sync finished in " << ms << "ms";
+
+  state_mask_ |= R_SYNC_OK;
+
+  // TODO: block ptr is invalid now. Not in use, but still around.
+  return error_code{};
+}
+
+error_code Replica::ConsumeRedisStream() {
+  base::IoBuf io_buf(16_KB);
+  parser_.reset(new RedisParser);
+
+  ReqSerializer serializer{sock_.get()};
+
+  // Master waits for this command in order to start sending replication stream.
+  serializer.SendCommand("REPLCONF ACK 0");
+  RETURN_ON_ERR(serializer.ec());
+
+  VLOG(1) << "Before reading repl-log";
+
+  // Redis sends eiher pings every "repl_ping_slave_period" time inside replicationCron().
+  // or, alternatively, write commands stream coming from propagate() function.
+  // Replica connection must send "REPLCONF ACK xxx" in order to make sure that master replication
+  // buffer gets disposed of already processed commands.
+  error_code ec;
+  time_t last_ack = time(nullptr);
+  string ack_cmd;
+
+  // basically reflection of dragonfly_connection IoLoop function.
+  while (!ec) {
+    io::MutableBytes buf = io_buf.AppendBuffer();
+    io::Result<size_t> size_res = sock_->Recv(buf);
+    if (!size_res)
+      return size_res.error();
+
+    VLOG(1) << "Read replication stream of " << *size_res << " bytes";
+    last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
+
+    io_buf.CommitWrite(*size_res);
+    repl_offs_ += *size_res;
+
+    // Send repl ack back to master.
+    if (repl_offs_ > ack_offs_ + 1024 || time(nullptr) > last_ack + 5) {
+      ack_cmd.clear();
+      absl::StrAppend(&ack_cmd, "REPLCONF ACK ", repl_offs_);
+      serializer.SendCommand(ack_cmd);
+      RETURN_ON_ERR(serializer.ec());
+    }
+
+    ec = ParseAndExecute(&io_buf);
+  }
+
+  VLOG(1) << "ConsumeRedisStream finished";
+  return ec;
+}
+
+error_code Replica::ConsumeDflyStream() {
+  VLOG(0) << "15 seconds to check changes are streamed on full sync";
+  ::boost::this_fiber::sleep_for(15s);
+
+  // Request master to transition to stable sync.
+  {
+    ReqSerializer serializer{sock_.get()};
+    serializer.SendCommand(StrCat("DFLY SWITCH ", master_context_.dfly_session_id));
+    RETURN_ON_ERR(serializer.ec());
+  }
+
+  // Wait for all flows to finish full sync.
+  for (auto& sub_repl: shard_flows_)
+    sub_repl->sync_fb_.join();
+
+  VLOG(0) << "Consuming dfly stream";
+
+  // Make sure flows are already initialized from full sync.
+  DCHECK_GT(num_df_flows_, 0u);
+  CHECK(shard_flows_.size() == num_df_flows_);
+
+  AggregateError all_ec;
+  vector<vector<unsigned>> partition = Partition(num_df_flows_);
+  shard_set->pool()->AwaitFiberOnAll([&](unsigned index, auto*) {
+    const auto& local_ids = partition[index];
+    for (unsigned id : local_ids) {
+      all_ec = shard_flows_[id]->StartConsumeFlow();
+      if (all_ec)
+        break;
+    }
+  });
+
+  RETURN_ON_ERR(*all_ec);
+
+  // consume flows started - loop over control fiber
+  base::IoBuf io_buf(16_KB);
+  std::error_code ec;
+  while (!ec) {
+    io::MutableBytes buf = io_buf.AppendBuffer();
+    io::Result<size_t> size_res = sock_->Recv(buf);
+    if (!size_res)
+      return size_res.error();
+  }
+
+  return error_code{};
 }
 
 void Replica::ReplicateRedisFb() {
@@ -289,7 +463,8 @@ void Replica::ReplicateRedisFb() {
   VLOG(1) << "Replication fiber finished";
 }
 
-void Replica::ReplicateDFFb(ReplicaSyncBlock* block, unique_ptr<base::IoBuf> io_buf, string eof_token) {
+void Replica::ReplicateDFFb(ReplicaSyncBlock* block, unique_ptr<base::IoBuf> io_buf,
+                            string eof_token) {
   VLOG(0) << "Running ReplicateDFFb " << master_context_.flow_id;
 
   SocketSource ss{sock_.get()};
@@ -299,8 +474,8 @@ void Replica::ReplicateDFFb(ReplicaSyncBlock* block, unique_ptr<base::IoBuf> io_
   loader.fullsync_cut = [this, block, ran = false]() mutable {
     {
       std::unique_lock lk(block->mu_);
-      if (!ran) // TODO: Remove this!!!!.
-        block->events_left--;
+      if (!ran)  // TODO: Remove this!!!!.
+        block->flows_left--;
       ran = true;
     }
     block->cv_.notify_all();
@@ -340,7 +515,7 @@ void Replica::ConsumeDFFb() {
     io::Result<size_t> size_res = sock_->Recv(buf);
     if (!size_res)
       return;
-      //return size_res.error();
+    // return size_res.error();
 
     VLOG(0) << "Read replication stream of " << *size_res << " bytes";
     last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
@@ -355,6 +530,38 @@ void Replica::ConsumeDFFb() {
   return;
 }
 
+error_code Replica::ConnectSocket() {
+  sock_.reset(ProactorBase::me()->CreateSocket());
+
+  char ip_addr[INET6_ADDRSTRLEN];
+  int resolve_res = ResolveDns(master_context_.host, ip_addr);
+  if (resolve_res != 0) {
+    LOG(ERROR) << "Dns error " << gai_strerror(resolve_res) << ", host: " << master_context_.host;
+    return make_error_code(errc::host_unreachable);
+  }
+
+  auto address = ip::make_address(ip_addr);
+  master_context_.master_ep = ip::tcp::endpoint{address, master_context_.port};
+
+  /* These may help but require additional field testing to learn.
+
+ int yes = 1;
+
+ CHECK_EQ(0, setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes)));
+ CHECK_EQ(0, setsockopt(sock_->native_handle(), SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes)));
+
+ int intv = 15;
+ CHECK_EQ(0, setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_KEEPIDLE, &intv, sizeof(intv)));
+
+ intv /= 3;
+ CHECK_EQ(0, setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_KEEPINTVL, &intv, sizeof(intv)));
+
+ intv = 3;
+ CHECK_EQ(0, setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_KEEPCNT, &intv, sizeof(intv)));
+*/
+
+  return sock_->Connect(master_context_.master_ep);
+}
 
 error_code Replica::Greet() {
   base::IoBuf io_buf{128};
@@ -452,161 +659,6 @@ error_code Replica::Greet() {
   io_buf.ConsumeInput(consumed);
   state_mask_ |= R_GREETED;
 
-  return error_code{};
-}
-
-error_code Replica::InitiatePSync() {
-  base::IoBuf io_buf{128};
-
-  ReqSerializer serializer{sock_.get()};
-
-  // Corresponds to server.repl_state == REPL_STATE_SEND_PSYNC
-  string id("?");  // corresponds to null master id and null offset
-  int64_t offs = -1;
-  if (!master_context_.master_repl_id.empty()) {  // in case we synced before
-    id = master_context_.master_repl_id;          // provide the replication offset and master id
-    offs = repl_offs_;                            // to try incremental sync.
-  }
-  serializer.SendCommand(StrCat("PSYNC ", id, " ", offs));
-  RETURN_ON_ERR(serializer.ec());
-
-  // Master may delay sync response with "repl_diskless_sync_delay"
-  PSyncResponse repl_header;
-
-  RETURN_ON_ERR(ParseReplicationHeader(&io_buf, &repl_header));
-
-  ProactorBase* sock_thread = sock_->proactor();
-  string* eof_token = absl::get_if<string>(&repl_header.fullsync);
-  size_t snapshot_size = SIZE_MAX;
-  if (!eof_token) {
-    snapshot_size = absl::get<size_t>(repl_header.fullsync);
-  }
-  last_io_time_ = sock_thread->GetMonotonicTimeNs();
-
-  // we get token for diskless redis replication. For disk based replication
-  // we get the snapshot size.
-  if (snapshot_size || eof_token != nullptr) {  // full sync
-    // Start full sync
-    state_mask_ |= R_SYNCING;
-
-    SocketSource ss{sock_.get()};
-    io::PrefixSource ps{io_buf.InputBuffer(), &ss};
-
-    RdbLoader loader(NULL);
-    loader.set_source_limit(snapshot_size);
-    // TODO: to allow registering callbacks within loader to send '\n' pings back to master.
-    // Also to allow updating last_io_time_.
-    error_code ec = loader.Load(&ps);
-    RETURN_ON_ERR(ec);
-    VLOG(1) << "full sync completed";
-
-    if (eof_token) {
-      uint8_t buf[kRdbEofMarkSize];
-      io::PrefixSource chained(loader.Leftover(), &ps);
-      VLOG(1) << "Before reading from chained stream";
-      io::Result<size_t> eof_res = chained.Read(io::MutableBytes{buf});
-      CHECK(eof_res && *eof_res == kRdbEofMarkSize);
-
-      VLOG(1) << "Comparing token " << ToSV(buf);
-
-      // TODO: handle gracefully...
-      CHECK_EQ(0, memcmp(eof_token->data(), buf, kRdbEofMarkSize));
-      CHECK(chained.unused_prefix().empty());
-    } else {
-      CHECK_EQ(0u, loader.Leftover().size());
-      CHECK_EQ(snapshot_size, loader.bytes_read());
-    }
-
-    CHECK(ps.unused_prefix().empty());
-    io_buf.ConsumeInput(io_buf.InputLen());
-    last_io_time_ = sock_thread->GetMonotonicTimeNs();
-  }
-
-  state_mask_ &= ~R_SYNCING;
-  state_mask_ |= R_SYNC_OK;
-
-  return error_code{};
-}
-
-/***
- * This function starts a sync with DF master.
- * At first it establishes N connections (flows) where N is the number of threads on the master.
- * Each connection authenticates itself with the master by suppplying its session id, flow id.
- * TBD: it should also negotiate the state in case an incremental sync is possible.
- *
- * Once the initial handshake with all the connections succeeded,
- * this function signals the master that it can start sending data on the wire using
- * DFLY SYNC command.
- *
- **/
-error_code Replica::InitiateDflySync() {
-  DCHECK_GT(num_df_flows_, 0u);
-  unsigned num_threads = shard_set->pool()->size();
-  vector<vector<unsigned>> partition = Partition(num_threads, num_df_flows_);
-
-  shard_flows_.resize(num_df_flows_);
-  for (unsigned i = 0; i < num_df_flows_; ++i) {
-    shard_flows_[i].reset(new Replica(master_context_, i, &service_));
-  }
-
-  boost::fibers::mutex mu;
-  error_code ec;
-
-  absl::Time start = absl::Now();
-
-  // sync block
-
-  ReplicaSyncBlock block;
-  block.events_left = shard_set->pool()->size();
-
-  // TODO: check lifetime
-  shard_set->pool()->AwaitFiberOnAll([&](unsigned index, auto*) {
-    const auto& local_ids = partition[index];
-    for (unsigned id : local_ids) {
-      error_code local_ec = shard_flows_[id]->StartFlow(&block);
-      if (local_ec) {
-        lock_guard lk(mu);
-        ec = local_ec;
-        break;
-      }
-    }
-  });
-
-  if (ec)
-    return ec;
-
-  ReqSerializer serializer{sock_.get()};
-
-  // Master waits for this command in order to start sending replication stream.
-  serializer.SendCommand(StrCat("DFLY SYNC ", master_context_.dfly_session_id));
-  RETURN_ON_ERR(serializer.ec());
-
-  base::IoBuf io_buf{128};
-  unsigned consumed = 0;
-  RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
-  if (resp_args_.size() != 1 || resp_args_.front().type != RespExpr::STRING ||
-      ToSV(resp_args_.front().GetBuf()) != "OK") {
-    LOG(ERROR) << "Sync failed " << ToSV(io_buf.InputBuffer());
-    return make_error_code(errc::bad_message);
-  }
-
-  VLOG(0) << "DflySync before block";
-  // wait for all fibers to arrive on fs cut
-  {
-    std::unique_lock lk(block.mu_);
-    block.cv_.wait(lk, [&](){
-      return block.events_left == 0;
-    });
-  }
-  VLOG(0) << "DflySync after block";
-
-  absl::Duration dur = absl::Now() - start;
-  uint64_t ms = absl::ToInt64Milliseconds(dur);
-  LOG(INFO) << "Full sync finished in " << ms << "ms";
-
-  state_mask_ |= R_SYNC_OK;
-
-  // TODO: block ptr is invalid now. Not in use, but still around.
   return error_code{};
 }
 
@@ -718,111 +770,42 @@ error_code Replica::ReadLine(base::IoBuf* io_buf, string_view* line) {
   return std::make_error_code(std::errc::illegal_byte_sequence);
 }
 
-error_code Replica::ConsumeRedisStream() {
-  base::IoBuf io_buf(16_KB);
-  parser_.reset(new RedisParser);
+error_code Replica::ReadRespReply(base::IoBuf* io_buf, uint32_t* consumed) {
+  DCHECK(parser_);
 
-  ReqSerializer serializer{sock_.get()};
-
-  // Master waits for this command in order to start sending replication stream.
-  serializer.SendCommand("REPLCONF ACK 0");
-  RETURN_ON_ERR(serializer.ec());
-
-  VLOG(1) << "Before reading repl-log";
-
-  // Redis sends eiher pings every "repl_ping_slave_period" time inside replicationCron().
-  // or, alternatively, write commands stream coming from propagate() function.
-  // Replica connection must send "REPLCONF ACK xxx" in order to make sure that master replication
-  // buffer gets disposed of already processed commands.
   error_code ec;
-  time_t last_ack = time(nullptr);
-  string ack_cmd;
 
   // basically reflection of dragonfly_connection IoLoop function.
   while (!ec) {
-    io::MutableBytes buf = io_buf.AppendBuffer();
+    io::MutableBytes buf = io_buf->AppendBuffer();
     io::Result<size_t> size_res = sock_->Recv(buf);
     if (!size_res)
       return size_res.error();
 
-    VLOG(1) << "Read replication stream of " << *size_res << " bytes";
+    VLOG(2) << "Read master response of " << *size_res << " bytes";
+
     last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
 
-    io_buf.CommitWrite(*size_res);
-    repl_offs_ += *size_res;
+    io_buf->CommitWrite(*size_res);
 
-    // Send repl ack back to master.
-    if (repl_offs_ > ack_offs_ + 1024 || time(nullptr) > last_ack + 5) {
-      ack_cmd.clear();
-      absl::StrAppend(&ack_cmd, "REPLCONF ACK ", repl_offs_);
-      serializer.SendCommand(ack_cmd);
-      RETURN_ON_ERR(serializer.ec());
+    RedisParser::Result result = parser_->Parse(io_buf->InputBuffer(), consumed, &resp_args_);
+
+    if (result == RedisParser::OK && !resp_args_.empty()) {
+      return error_code{};  // success path
     }
 
-    ec = ParseAndExecute(&io_buf);
+    if (result != RedisParser::INPUT_PENDING) {
+      LOG(ERROR) << "Invalid parser status " << result << " for buffer of size "
+                 << io_buf->InputLen();
+      return std::make_error_code(std::errc::bad_message);
+    }
+    io_buf->ConsumeInput(*consumed);
   }
 
-  VLOG(1) << "ConsumeRedisStream finished";
   return ec;
 }
 
-error_code Replica::ConsumeDflyStream() {
-  VLOG(0) << "15 seconds to check changes are streamed on full sync";
-  ::boost::this_fiber::sleep_for(15s);
-
-  // Send watch -> request transition from full sync to stable state.
-  {
-    ReqSerializer serializer{sock_.get()};
-    serializer.SendCommand(StrCat("DFLY SWITCH ", master_context_.dfly_session_id));
-    RETURN_ON_ERR(serializer.ec());
-  }
-
-  // Finish last full sync phase.
-  // TODO: continue in same fiber + barrier?
-  for (unsigned i = 0; i < num_df_flows_; ++i) {
-    shard_flows_[i]->sync_fb_.join();
-  }
-
-  VLOG(0) << "Consuming dfly stream";
-
-  DCHECK_GT(num_df_flows_, 0u);
-
-  // Make sure flows are already initialized from full sync.
-  CHECK(shard_flows_.size() == num_df_flows_);
-  unsigned num_threads = shard_set->pool()->size();
-  vector<vector<unsigned>> partition = Partition(num_threads, num_df_flows_);
-
-  auto& pool = service_.proactor_pool();
-
-  AggregateError all_ec;
-  shard_set->pool()->AwaitFiberOnAll([&](unsigned index, auto*) {
-    const auto& local_ids = partition[index];
-    for (unsigned id : local_ids) {
-      all_ec = shard_flows_[id]->StartConsumeFlow();
-      if (all_ec)
-        break;
-    }
-  });
-
-  VLOG(0) << "Started all flows " << *all_ec;
-  RETURN_ON_ERR(*all_ec);
-
-  // consume flows started - loop over control fiber
-  base::IoBuf io_buf(16_KB);
-  std::error_code ec;
-  while (!ec) {
-    VLOG(0) << "Looping";
-    io::MutableBytes buf = io_buf.AppendBuffer();
-    io::Result<size_t> size_res = sock_->Recv(buf);
-    if (!size_res)
-      return size_res.error();
-  }
-
-  return error_code{};
-}
-
-// Threadsafe, fiber blocking.
-auto Replica::GetInfo() const -> Info {
+Replica::Info Replica::GetInfo() const {
   CHECK(sock_);
 
   return sock_->proactor()->AwaitBrief([this] {
@@ -889,15 +872,14 @@ error_code Replica::StartConsumeFlow() {
   CHECK(mythread);
 
   CHECK(sock_->IsOpen());
-  //sock_.reset(mythread->CreateSocket());
-  //RETURN_ON_ERR(sock_->Connect(master_context_.master_ep));
-  sync_fb_ =
-      ::boost::fibers::fiber(&Replica::ConsumeDFFb, this);
+  // sock_.reset(mythread->CreateSocket());
+  // RETURN_ON_ERR(sock_->Connect(master_context_.master_ep));
+  sync_fb_ = ::boost::fibers::fiber(&Replica::ConsumeDFFb, this);
 
   return std::error_code{};
 }
 
-error_code Replica::StartFlow(ReplicaSyncBlock* block) {
+error_code Replica::StartReplicateFlow(ReplicaSyncBlock* block) {
   VLOG(0) << "Starting flow " << master_context_.flow_id;
 
   CHECK(!sock_);
@@ -939,8 +921,8 @@ error_code Replica::StartFlow(ReplicaSyncBlock* block) {
 
   // We can not discard io_buf because it may contain data
   // besides the response we parsed. Therefore we pass it further to ReplicateDFFb.
-  sync_fb_ =
-      ::boost::fibers::fiber(&Replica::ReplicateDFFb, this, block, std::move(io_buf), move(eof_token));
+  sync_fb_ = ::boost::fibers::fiber(&Replica::ReplicateDFFb, this, block, std::move(io_buf),
+                                    move(eof_token));
 
   return error_code{};
 }

@@ -31,17 +31,18 @@ class Journal;
 
 class DflyCmd {
   enum class ReplicaState {
-    PREPARATION,
-    FULL_SYNC,
-    STABLE_SYNC,
+    PREPARATION, // Preparation for full sync.
+    FULL_SYNC, // Full sync step.
+    STABLE_SYNC, // Stable sync step.
   };
 
+  // Stores per-flow data.
   struct ReplicateFlow {
     facade::Connection* conn;
+    std::string eof_token;
     // Stores currently active flow fiber if present.
     // Either full (FullSyncFb) or stable sync (StableSyncFb).
     ::boost::fibers::fiber repl_fb;
-    std::string eof_token;
   };
 
   // Stores sync info for one replica.
@@ -50,18 +51,18 @@ class DflyCmd {
     int64_t start_time_ns;
 
     ReplicaState state = ReplicaState::PREPARATION;
-    // Full sync fibers block here after sending all static data to resume atomically.
+    // Full sync fibers block here after sending all static data.
     std::optional<SnapshotSyncBlock> snapshot_block;
     // Generic fiber flag counter.
-    // During ReplicaState::FULL_SYNC: how many fibers have finished sending static data.
+    // During ReplicaState::FULL_SYNC: how many fibers are still sending static data.
     std::atomic_uint16_t fiber_flag_counter;
     // Per-flow data.
     absl::flat_hash_map<uint32_t, ReplicateFlow> thread_map;
   };
 
+ public:
   using SyncId = uint32_t;
 
- public:
   DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family);
 
   // Main entrypoint of DlfyCmd.
@@ -114,7 +115,7 @@ class DflyCmd {
   // The fiber for stable sync.
   void StableSyncFb(unsigned flow_id, ReplicateFlow* flow);
 
-  // Return sync info from argument or respond.
+  // Return sync info from argument or respond with error.
   std::optional<std::pair<SyncId, SyncInfo*>> GetSyncInfoOrRespond(std::string_view id,
                                                                    facade::RedisReplyBuilder* rb);
 
@@ -126,7 +127,7 @@ class DflyCmd {
   absl::btree_map<SyncId, SyncInfo*> sync_info_;
   SyncId next_sync_id_ = 1;
 
-  ::boost::fibers::mutex mu_;
+  ::boost::fibers::mutex mu_; // guards all sync_info_ ops
 };
 
 }  // namespace dfly

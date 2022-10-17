@@ -30,7 +30,6 @@ struct SnapshotSyncBlock {
   // Barrier to sync consumer fibers on CONTINIOUS_JOURNAL mode.
   // TODO: No wait until. No fail behaviour.
   ::boost::fibers::barrier barrier_;
-  // Atomic flag
   std::atomic_uint16_t* counter_;
 };
 
