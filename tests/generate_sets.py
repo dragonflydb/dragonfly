@@ -47,5 +47,6 @@ def main():
     elif args.type == 'set':
         fill_set(args, redis)
 
+
 if __name__ == "__main__":
     main()
