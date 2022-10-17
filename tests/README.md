@@ -41,7 +41,7 @@ Parameters can use environmental variables with a formatted string where `"{<VAR
 - **[key_limt_test](./dragonfly/key_limit_test.py)**: Example test using `@dfly_multi_test_args`
 
 # Integration tests
-To simplify running integration test each package should have its own Dockerfile. The Dockerfile should contain everything needed in order to test the package against Drafongly. Docker can assume Dragonfly is running on localhost:6379.
+To simplify running integration test each package should have its own Dockerfile. The Dockerfile should contain everything needed in order to test the package against Dragonfly. Docker can assume Dragonfly is running on localhost:6379.
 To run the test:
 ```
 docker build -t [test-name] -f [test-dockerfile-name] .
@@ -66,6 +66,30 @@ docker run --network=host node-redis-test npm run test -w ./packages/client -- -
 ```
 
 In general, you can add this way any option from [mocha framework](https://mochajs.org/#command-line-usage).
+
+## ioredis
+Integration tests for ioredis client.
+Build:
+```
+docker build -t ioredis-test -f ./ioredis.Dockerfile .
+```
+Run:
+```
+docker run --network=host mocha [options]
+```
+The dockerfile already has an entrypoint setup. This way, you can add your own arguments to the mocha command.
+
+Example 1 - running all tests inside the `unit` directory:
+```
+docker run -it --network=host ioredis mocha "test/unit/**/*.ts"
+```
+Example 2 - running a single test by supplying the `--grep` option:
+```
+docker run -it --network=host ioredis mocha --grep "should properly mark commands as transactions" "test/unit/**/*.ts"
+```
+
+For more details on the entrypoint setup, compare the `ioredis.Dockerfile`
+with the npm test script located on the `package.json` of the ioredis project.
 
 ## Jedis
 Integration test for the Jedis client.
