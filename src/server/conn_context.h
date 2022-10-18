@@ -32,7 +32,9 @@ struct ConnectionState {
     ExecInfo(ExecInfo&&) = delete;
 
     // Return true if ExecInfo is active (after MULTI)
-    bool IsActive() { return state != EXEC_INACTIVE; }
+    bool IsActive() {
+      return state != EXEC_INACTIVE;
+    }
 
     // Resets to blank state after EXEC or DISCARD
     void Clear();
@@ -73,6 +75,10 @@ struct ConnectionState {
     util::fibers_ext::BlockingCounter borrow_token{0};
   };
 
+  struct Monitor {
+    util::fibers_ext::BlockingCounter borrow_token{0};
+  };
+
   enum MCGetMask {
     FETCH_CAS_VER = 1,
   };
@@ -92,6 +98,7 @@ struct ConnectionState {
   ExecInfo exec_info;
   std::optional<ScriptInfo> script_info;
   std::unique_ptr<SubscribeInfo> subscribe_info;
+  std::unique_ptr<Monitor> monitor;
 };
 
 class ConnectionContext : public facade::ConnectionContext {
@@ -117,17 +124,19 @@ class ConnectionContext : public facade::ConnectionContext {
     return conn_state.db_index;
   }
 
+  void SendMonitorMsg(std::string_view msg, util::fibers_ext::BlockingCounter borrows);
+
   void ChangeSubscription(bool to_add, bool to_reply, CmdArgList args);
   void ChangePSub(bool to_add, bool to_reply, CmdArgList args);
   void UnsubscribeAll(bool to_reply);
   void PUnsubscribeAll(bool to_reply);
+  void ChangeMonitor(bool start);  // either start or stop monitor on a given connection
 
   bool is_replicating = false;
 
  private:
   void SendSubscriptionChangedResponse(std::string_view action,
-                                       std::optional<std::string_view> topic,
-                                       unsigned count);
+                                       std::optional<std::string_view> topic, unsigned count);
 };
 
 }  // namespace dfly

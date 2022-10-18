@@ -68,6 +68,36 @@ std::optional<VarzFunction> engine_varz;
 
 constexpr size_t kMaxThreadSize = 1024;
 
+void UnregisterMonitors(ConnectionContext* server_ctx) {
+  ConnectionState& conn_state = server_ctx->conn_state;
+  if (conn_state.monitor) {
+    // remove monitor on this connection
+    auto token = conn_state.monitor->borrow_token;
+    server_ctx->ChangeMonitor(false /*start*/);
+    token.Wait();
+  }
+}
+
+void MonitorCmd(bool admin_cmd, ConnectionContext* connection) {
+  // We are not sending any admin command in the monitor, and we do not want to
+  // do any processing if we don't have any waiting connections with monitor
+  // enabled on them - see https://redis.io/commands/monitor/
+  const auto& my_monitors = ServerState::tlocal()->Monitors();
+  if (!(my_monitors.Empty() || admin_cmd)) {
+    util::fibers_ext::BlockingCounter bc(my_monitors.Size());
+    //  We have connections waiting to get the info on the last command, send it to them
+    auto monitor_msg = connection->owner()->CreateMonitorMessage(connection->conn_state);
+    LOG(WARNING) << "sending command '" << monitor_msg << "' to the clients that registered on it";
+    shard_set->pool()->Await([&monitor_msg, bc](unsigned idx, util::ProactorBase*) {
+      ServerState::tlocal()->Monitors().Send(monitor_msg, bc, idx);
+    });
+    bc.Wait();  // Wait for all the messages to be sent.
+    //  we need to un-borrow what we used, do this here
+    shard_set->pool()->Await(
+        [](unsigned idx, util::ProactorBase*) { ServerState::tlocal()->Monitors().Release(idx); });
+  }
+}
+
 class InterpreterReplier : public RedisReplyBuilder {
  public:
   InterpreterReplier(ObjectExplorer* explr) : RedisReplyBuilder(nullptr), explr_(explr) {
@@ -376,7 +406,7 @@ void Service::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_i
 void Service::Shutdown() {
   VLOG(1) << "Service::Shutdown";
 
-  // We mark that we are shuttind down. After this incoming requests will be
+  // We mark that we are shutting down. After this incoming requests will be
   // rejected
   pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Shutdown(); });
 
@@ -440,6 +470,11 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     if (cmd_name != "AUTH" && cmd_name != "QUIT") {
       return (*cntx)->SendError("-NOAUTH Authentication required.");
     }
+  }
+
+  // only reset and quit are allow if this connection is used for monitoring
+  if (cntx->monitor && (cmd_name != "RESET" && cmd_name != "QUIT")) {
+    return (*cntx)->SendError("Replica can't interact with the keyspace");
   }
 
   bool under_script = dfly_cntx->conn_state.script_info.has_value();
@@ -554,6 +589,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->reply_builder()->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
   }
+  MonitorCmd(cid->opt_mask() & CO::ADMIN, dfly_cntx);
 
   end_usec = ProactorBase::GetMonotonicTimeNs();
 
@@ -720,12 +756,15 @@ absl::flat_hash_map<std::string, unsigned> Service::UknownCmdMap() const {
 }
 
 void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
+  VLOG(1) << "quit command started - closing connection";
   if (cntx->protocol() == facade::Protocol::REDIS)
     (*cntx)->SendOk();
   using facade::SinkReplyBuilder;
 
   SinkReplyBuilder* builder = cntx->reply_builder();
   builder->CloseConnection();
+
+  UnregisterMonitors(static_cast<ConnectionContext*>(cntx));
   cntx->owner()->ShutdownSelf();
 }
 
@@ -973,7 +1012,8 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandRegistry& regis
 
   // The comparison can still be true even if a key expired due to another one being created.
   // So we have to check the watched_dirty flag, which is set if a key expired.
-  return watch_exist_count.load() == exec_info.watched_existed && !exec_info.watched_dirty.load(memory_order_relaxed);
+  return watch_exist_count.load() == exec_info.watched_existed &&
+         !exec_info.watched_dirty.load(memory_order_relaxed);
 }
 
 // Check if exec_info watches keys on dbs other than db_indx.
@@ -1180,6 +1220,13 @@ void Service::PubsubPatterns(ConnectionContext* cntx) {
   (*cntx)->SendLong(pattern_count);
 }
 
+void Service::Monitor(CmdArgList args, ConnectionContext* cntx) {
+  VLOG(1) << "starting monitor on this connection: " << cntx->owner()->GetClientInfo();
+  // we are registering the current connection for all threads so they will be aware of
+  // this connection, to send to it any command
+  cntx->ChangeMonitor(true /* start */);
+}
+
 void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() < 2) {
     (*cntx)->SendError(WrongNumArgsError(ArgS(args, 0)));
@@ -1273,6 +1320,8 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
     }
   }
 
+  UnregisterMonitors(server_cntx);
+
   server_family_.OnClose(server_cntx);
 }
 
@@ -1316,6 +1365,7 @@ void Service::RegisterCommands() {
       << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(PSubscribe)
       << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(PUnsubscribe)
       << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0}.MFUNC(Function)
+      << CI{"MONITOR", CO::ADMIN, 1, 0, 0, 0}.MFUNC(Monitor)
       << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, 0}.MFUNC(Pubsub);
 
   StreamFamily::Register(&registry_);

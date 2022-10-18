@@ -63,7 +63,6 @@ string UnknownSubCmd(string_view subcmd, string_view cmd) {
                       cmd, " HELP.");
 }
 
-
 const char kSyntaxErr[] = "syntax error";
 const char kWrongTypeErr[] = "-WRONGTYPE Operation against a key holding the wrong kind of value";
 const char kKeyNotFoundErr[] = "no such key";
@@ -119,6 +118,7 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : ow
   replica_conn = false;
   authenticated = false;
   force_dispatch = false;
+  monitor = false;
 }
 
 RedisReplyBuilder* ConnectionContext::operator->() {

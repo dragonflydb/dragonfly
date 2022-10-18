@@ -19,6 +19,10 @@
 typedef struct ssl_ctx_st SSL_CTX;
 typedef struct mi_heap_s mi_heap_t;
 
+namespace dfly {
+class ConnectionState;
+}
+
 namespace facade {
 
 class ConnectionContext;
@@ -61,6 +65,9 @@ class Connection : public util::Connection {
 
   virtual void SendMsgVecAsync(const PubMessage& pub_msg, util::fibers_ext::BlockingCounter bc);
 
+  // for monitor
+  virtual void SendMonitorMsg(std::string_view monitor_msg, util::fibers_ext::BlockingCounter bc);
+
   void SetName(std::string_view name) {
     CopyCharBuf(name, sizeof(name_), name_);
   }
@@ -73,6 +80,8 @@ class Connection : public util::Connection {
   uint32 GetClientId() const;
 
   void ShutdownSelf();
+
+  std::string CreateMonitorMessage(const dfly::ConnectionState& conn_state) const;
 
  protected:
   void OnShutdown() override;
@@ -116,11 +125,16 @@ class Connection : public util::Connection {
   std::unique_ptr<ConnectionContext> cc_;
 
   struct Request;
+  struct DispatchOperations;
+  struct DispatchCleanup;
+  struct RequestDeleter;
+
+  using RequestPtr = std::unique_ptr<Request, RequestDeleter>;
 
   // args are passed deliberately by value - to pass the ownership.
-  static Request* FromArgs(RespVec args, mi_heap_t* heap);
+  static RequestPtr FromArgs(RespVec args, mi_heap_t* heap);
 
-  std::deque<Request*> dispatch_q_;  // coordinated via evc_.
+  std::deque<RequestPtr> dispatch_q_;  // coordinated via evc_.
   util::fibers_ext::EventCount evc_;
 
   RespVec parse_args_;

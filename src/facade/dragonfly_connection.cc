@@ -6,6 +6,7 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/match.h>
+#include <ctype.h>
 #include <mimalloc.h>
 
 #include <boost/fiber/operations.hpp>
@@ -16,6 +17,8 @@
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
+#include "server/common.h"
+#include "server/conn_context.h"
 #include "util/fiber_sched_algo.h"
 
 #ifdef DFLY_USE_SSL
@@ -34,6 +37,8 @@ namespace fibers = boost::fibers;
 
 namespace facade {
 namespace {
+
+template <class> inline constexpr bool always_false_v = false;
 
 void SendProtocolError(RedisParser::Result pres, FiberSocketBase* peer) {
   string res("-ERR Protocol error: ");
@@ -85,6 +90,53 @@ constexpr size_t kReqStorageSize = 88;
 constexpr size_t kReqStorageSize = 120;
 #endif
 
+// The format of the message that are sending is
+// +"time of day" [db-number <lua|unix:path|connection info] "command" "arg1" .. "argM"
+std::string MonitorTimestamp() {
+  timeval tv;
+
+  gettimeofday(&tv, nullptr);
+  return absl::StrCat(tv.tv_sec, ".", tv.tv_usec, absl::kZeroPad6);
+}
+
+auto CmdEntryToMonitorFormat(std::string_view str) -> std::string {
+  std::string result = absl::StrCat("\"");
+
+  for (auto c : str) {
+    switch (c) {
+      case '\\':
+      case '"':
+        absl::StrAppend(&result, "\\");
+        result += c;
+        break;
+      case '\n':
+        absl::StrAppend(&result, "\\n");
+        break;
+      case '\r':
+        absl::StrAppend(&result, "\\r");
+        break;
+      case '\t':
+        absl::StrAppend(&result, "\\t");
+        break;
+      case '\a':
+        absl::StrAppend(&result, "\\a");
+        break;
+      case '\b':
+        absl::StrAppend(&result, "\\b");
+        break;
+      default:
+        if (isprint(c)) {
+          result += c;
+        } else {
+          absl::StrAppend(&result, "\\x", absl::Hex((unsigned char)c, absl::kSpacePad2));
+        }
+        break;
+    }
+  }
+  absl::StrAppend(&result, "\"");
+  return result;
+}
+
 }  // namespace
 
 struct Connection::Shutdown {
@@ -101,20 +153,96 @@ struct Connection::Shutdown {
   }
 };
 
+// Used as custom deleter for Request object
+struct Connection::RequestDeleter {
+  void operator()(Request* req) const;
+};
+
 struct Connection::Request {
-  absl::FixedArray<MutableSlice, 6> args;
+  struct PipelineMsg {
+    absl::FixedArray<MutableSlice, 6> args;
 
-  // I do not use mi_heap_t explicitly but mi_stl_allocator at the end does the same job
-  // of using the thread's heap.
-  // The capacity is chosen so that we allocate a fully utilized (256 bytes) block.
-  absl::FixedArray<char, kReqStorageSize, mi_stl_allocator<char>> storage;
-  AsyncMsg* async_msg = nullptr;  // allocated and released via mi_malloc.
+    // I do not use mi_heap_t explicitly but mi_stl_allocator at the end does the same job
+    // of using the thread's heap.
+    // The capacity is chosen so that we allocate a fully utilized (256 bytes) block.
+    absl::FixedArray<char, kReqStorageSize, mi_stl_allocator<char>> storage;
 
-  Request(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
+    PipelineMsg(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
+    }
+  };
+
+  struct MonitorMessage {
+    std::string_view msg;
+    fibers_ext::BlockingCounter bc;
+
+    explicit MonitorMessage(std::string_view m, fibers_ext::BlockingCounter token)
+        : msg{m}, bc{std::move(token)} {
+    }
+  };
+
+ private:
+  using MessagePayload = std::variant<PipelineMsg, AsyncMsg, MonitorMessage>;
+
+  Request(size_t nargs, size_t capacity) : payload(PipelineMsg{nargs, capacity}) {
+  }
+
+  Request(AsyncMsg msg) : payload(std::move(msg)) {
+  }
+
+  Request(MonitorMessage msg) : payload(std::move(msg)) {
   }
 
   Request(const Request&) = delete;
+
+ public:
+  static RequestPtr New(mi_heap_t* heap, RespVec args, size_t capacity);
+
+  static RequestPtr New(const PubMessage& pub_msg, fibers_ext::BlockingCounter bc);
+
+  static RequestPtr New(std::string_view msg, fibers_ext::BlockingCounter bc);
+
+  MessagePayload payload;
 };
+
+Connection::RequestPtr Connection::Request::New(std::string_view data,
+                                                fibers_ext::BlockingCounter bc) {
+  MonitorMessage msg{data, std::move(bc)};
+
+  void* ptr = mi_malloc(sizeof(Request));
+  Request* req = new (ptr) Request(std::move(msg));
+  return Connection::RequestPtr{req, Connection::RequestDeleter{}};
+}
+
+Connection::RequestPtr Connection::Request::New(mi_heap_t* heap, RespVec args, size_t capacity) {
+  constexpr auto kReqSz = sizeof(Request);
+  void* ptr = mi_heap_malloc_small(heap, kReqSz);
+  Request* msg = new (ptr) Request(args.size(), capacity);
+  // at this point we know that we have PipelineMsg in Request so next op is safe
+  // We must construct in place here, since there is a slice that uses memory locations
+  Request::PipelineMsg& req = std::get<Request::PipelineMsg>(msg->payload);
+  auto* next = req.storage.data();
+  for (size_t i = 0; i < args.size(); ++i) {
+    auto buf = args[i].GetBuf();
+    size_t s = buf.size();
+    memcpy(next, buf.data(), s);
+    req.args[i] = MutableSlice(next, s);
+    next += s;
+  }
+  return Connection::RequestPtr{msg, Connection::RequestDeleter{}};
+}
+
+Connection::RequestPtr Connection::Request::New(const PubMessage& pub_msg,
+                                                fibers_ext::BlockingCounter bc) {
+  AsyncMsg req{pub_msg, std::move(bc)};
+  void* ptr = mi_malloc(sizeof(Request));
+  Request* msg = new (ptr) Request(std::move(req));
+  return Connection::RequestPtr{msg, Connection::RequestDeleter{}};
+}
+
+void Connection::RequestDeleter::operator()(Request* req) const {
+  req->~Request();
+  mi_free(req);
+}
 
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
                        ServiceInterface* service)
@@ -263,6 +391,21 @@ void Connection::RegisterOnBreak(BreakerCb breaker_cb) {
   breaker_cb_ = breaker_cb;
 }
 
+void Connection::SendMonitorMsg(std::string_view monitor_msg,
+                                util::fibers_ext::BlockingCounter bc) {
+  DCHECK(cc_);
+
+  if (cc_->conn_closing) {
+    bc.Dec();
+    return;
+  }
+  RequestPtr req = Request::New(monitor_msg, std::move(bc));
+  dispatch_q_.push_back(std::move(req));
+  if (dispatch_q_.size() == 1) {
+    evc_.notify();
+  }
+}
+
 void Connection::SendMsgVecAsync(const PubMessage& pub_msg, fibers_ext::BlockingCounter bc) {
   DCHECK(cc_);
 
@@ -270,14 +413,8 @@ void Connection::SendMsgVecAsync(const PubMessage& pub_msg, fibers_ext::Blocking
     bc.Dec();
     return;
   }
-
-  void* ptr = mi_malloc(sizeof(AsyncMsg));
-  AsyncMsg* amsg = new (ptr) AsyncMsg(pub_msg, move(bc));
-
-  ptr = mi_malloc(sizeof(Request));
-  Request* req = new (ptr) Request(0, 0);
-  req->async_msg = amsg;
-  dispatch_q_.push_back(req);
+  RequestPtr req = Request::New(pub_msg, std::move(bc));  // new (ptr) Request(0, 0);
+  dispatch_q_.push_back(std::move(req));
   if (dispatch_q_.size() == 1) {
     evc_.notify();
   }
@@ -437,9 +574,9 @@ auto Connection::ParseRedis() -> ParserStatus {
         VLOG(2) << "Dispatch async";
 
         // Dispatch via queue to speedup input reading.
-        Request* req = FromArgs(std::move(parse_args_), tlh);
+        RequestPtr req = FromArgs(std::move(parse_args_), tlh);
 
-        dispatch_q_.push_back(req);
+        dispatch_q_.push_back(std::move(req));
         if (dispatch_q_.size() == 1) {
           evc_.notify();
         } else if (dispatch_q_.size() > 10) {
@@ -596,79 +733,102 @@ auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, Pars
   return parse_status;
 }
 
+struct Connection::DispatchOperations {
+  DispatchOperations(SinkReplyBuilder* b, Connection* me)
+      : stats{me->service_->GetThreadLocalConnectionStats()}, builder{b},
+        empty{me->dispatch_q_.empty()}, self(me) {
+  }
+
+  void operator()(AsyncMsg& msg);
+  void operator()(Request::MonitorMessage& msg);
+  void operator()(Request::PipelineMsg& msg);
+
+  ConnectionStats* stats = nullptr;
+  SinkReplyBuilder* builder = nullptr;
+  bool empty = false;
+  Connection* self = nullptr;
+};
+
+void Connection::DispatchOperations::operator()(AsyncMsg& msg) {
+  RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
+  ++stats->async_writes_cnt;
+  const PubMessage& pub_msg = msg.pub_msg;
+  string_view arr[4];
+  if (pub_msg.pattern.empty()) {
+    arr[0] = "message";
+    arr[1] = pub_msg.channel;
+    arr[2] = pub_msg.message;
+    rbuilder->SendStringArr(absl::Span<string_view>{arr, 3});
+  } else {
+    arr[0] = "pmessage";
+    arr[1] = pub_msg.pattern;
+    arr[2] = pub_msg.channel;
+    arr[3] = pub_msg.message;
+    rbuilder->SendStringArr(absl::Span<string_view>{arr, 4});
+  }
+  msg.bc.Dec();
+}
+
+void Connection::DispatchOperations::operator()(Request::MonitorMessage& msg) {
+  RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
+  rbuilder->SendSimpleString(msg.msg);
+  msg.bc.Dec();
+}
+
+void Connection::DispatchOperations::operator()(Request::PipelineMsg& msg) {
+  ++stats->pipelined_cmd_cnt;
+
+  builder->SetBatchMode(!empty);
+  self->cc_->async_dispatch = true;
+  self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()}, self->cc_.get());
+  self->last_interaction_ = time(nullptr);
+  self->cc_->async_dispatch = false;
+}
+
+struct Connection::DispatchCleanup {
+  void operator()(AsyncMsg& msg) const {
+    msg.bc.Dec();
+  }
+  void operator()(Connection::Request::MonitorMessage& msg) const {
+    msg.bc.Dec();
+  }
+  void operator()(const Connection::Request::PipelineMsg&) const {
+  }
+};
+
 // DispatchFiber handles commands coming from the InputLoop.
 // Thus, InputLoop can quickly read data from the input buffer, parse it and push
-// into the dispatch queue and DispatchFiber will run those commands asynchronously with InputLoop.
-// Note: in some cases, InputLoop may decide to dispatch directly and bypass the DispatchFiber.
+// into the dispatch queue and DispatchFiber will run those commands asynchronously with
+// InputLoop. Note: in some cases, InputLoop may decide to dispatch directly and bypass the
+// DispatchFiber.
 void Connection::DispatchFiber(util::FiberSocketBase* peer) {
   this_fiber::properties<FiberProps>().set_name("DispatchFiber");
 
-  ConnectionStats* stats = service_->GetThreadLocalConnectionStats();
   SinkReplyBuilder* builder = cc_->reply_builder();
+  DispatchOperations dispatch_op{builder, this};
 
   while (!builder->GetError()) {
     evc_.await([this] { return cc_->conn_closing || !dispatch_q_.empty(); });
     if (cc_->conn_closing)
       break;
 
-    Request* req = dispatch_q_.front();
+    RequestPtr req{std::move(dispatch_q_.front())};
     dispatch_q_.pop_front();
-
-    if (req->async_msg) {
-      ++stats->async_writes_cnt;
-
-      RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
-      const PubMessage& pub_msg = req->async_msg->pub_msg;
-      string_view arr[4];
-
-      if (pub_msg.pattern.empty()) {
-        arr[0] = "message";
-        arr[1] = pub_msg.channel;
-        arr[2] = pub_msg.message;
-        rbuilder->SendStringArr(absl::Span<string_view>{arr, 3});
-      } else {
-        arr[0] = "pmessage";
-        arr[1] = pub_msg.pattern;
-        arr[2] = pub_msg.channel;
-        arr[3] = pub_msg.message;
-        rbuilder->SendStringArr(absl::Span<string_view>{arr, 4});
-      }
-
-      req->async_msg->bc.Dec();
-
-      req->async_msg->~AsyncMsg();
-      mi_free(req->async_msg);
-    } else {
-      ++stats->pipelined_cmd_cnt;
-
-      builder->SetBatchMode(!dispatch_q_.empty());
-      cc_->async_dispatch = true;
-      service_->DispatchCommand(CmdArgList{req->args.data(), req->args.size()}, cc_.get());
-      last_interaction_ = time(nullptr);
-      cc_->async_dispatch = false;
-    }
-    req->~Request();
-    mi_free(req);
+    std::visit(dispatch_op, req->payload);
   }
 
   cc_->conn_closing = true;
 
   // Clean up leftovers.
+  DispatchCleanup clean_op;
   while (!dispatch_q_.empty()) {
-    Request* req = dispatch_q_.front();
+    RequestPtr req{std::move(dispatch_q_.front())};
     dispatch_q_.pop_front();
-
-    if (req->async_msg) {
-      req->async_msg->bc.Dec();
-      req->async_msg->~AsyncMsg();
-      mi_free(req->async_msg);
-    }
-    req->~Request();
-    mi_free(req);
+    std::visit(clean_op, req->payload);
   }
 }
 
-auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> Request* {
+auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> RequestPtr {
   DCHECK(!args.empty());
   size_t backed_sz = 0;
   for (const auto& arg : args) {
@@ -680,22 +840,11 @@ auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> Request* {
   constexpr auto kReqSz = sizeof(Request);
   static_assert(kReqSz < MI_SMALL_SIZE_MAX);
   static_assert(alignof(Request) == 8);
-  void* ptr = mi_heap_malloc_small(heap, kReqSz);
 
-  Request* req = new (ptr) Request{args.size(), backed_sz};
-
-  auto* next = req->storage.data();
-  for (size_t i = 0; i < args.size(); ++i) {
-    auto buf = args[i].GetBuf();
-    size_t s = buf.size();
-    memcpy(next, buf.data(), s);
-    req->args[i] = MutableSlice(next, s);
-    next += s;
-  }
+  RequestPtr req = Request::New(heap, args, backed_sz);
 
   return req;
 }
-
 void Connection::ShutdownSelf() {
   util::Connection::Shutdown();
 }
@@ -707,6 +856,46 @@ void RespToArgList(const RespVec& src, CmdArgVec* dest) {
 
     (*dest)[i] = ToMSS(src[i].GetBuf());
   }
+}
+
+std::string Connection::CreateMonitorMessage(const dfly::ConnectionState& conn_state) const {
+  std::string command_details("+" + MonitorTimestamp() + " [" +
+                              std::to_string(conn_state.db_index) + " ");
+
+  LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
+
+  auto AppendConnDetails = [&]() {
+    if (conn_state.script_info.has_value()) {
+      absl::StrAppend(&command_details, "lua] ");
+    } else {
+      if (lsb->IsUDS()) {  // Unix domain socket
+        absl::StrAppend(&command_details, "unix:");
+      }
+      auto re = lsb->RemoteEndpoint();
+      absl::StrAppend(&command_details, re.address().to_string(), ":", re.port(), "] ");
+    }
+  };
+
+  auto AppendCmd = [&](const CmdArgVec& args) {
+    if (args.empty()) {
+      absl::StrAppend(&command_details, "error - empty cmd list!");
+    } else if (auto cmd_name = std::string_view(args[0].data(), args[0].size());
+               cmd_name == "AUTH") {  // we cannot just send auth details in this case
+      absl::StrAppend(&command_details, "\"", cmd_name, "\"");
+    } else {
+      command_details =
+          std::accumulate(args.begin(), args.end(), command_details, [](auto str, const auto& cmd) {
+            // absl::StrAppend(&str, "\"", std::string_view(cmd.data(), cmd.size()), "\" ");
+            absl::StrAppend(&str, " ",
+                            CmdEntryToMonitorFormat(std::string_view(cmd.data(), cmd.size())));
+            return str;
+          });
+    }
+  };
+
+  AppendConnDetails();
+  AppendCmd(cmd_vec_);
+  return command_details;
 }
 
 }  // namespace facade

@@ -19,7 +19,8 @@ class ConnectionContext {
 
   // We won't have any virtual methods, probably. However, since we allocate a derived class,
   // we need to declare a virtual d-tor, so we could properly delete it from Connection code.
-  virtual ~ConnectionContext() {}
+  virtual ~ConnectionContext() {
+  }
 
   Connection* owner() {
     return owner_;
@@ -44,12 +45,19 @@ class ConnectionContext {
   }
 
   // connection state / properties.
-  bool async_dispatch: 1;  // whether this connection is currently handled by dispatch fiber.
-  bool conn_closing: 1;
-  bool req_auth: 1;
-  bool replica_conn: 1;
-  bool authenticated: 1;
-  bool force_dispatch: 1;   // whether we should route all requests to the dispatch fiber.
+  bool async_dispatch : 1;  // whether this connection is currently handled by dispatch fiber.
+  bool conn_closing : 1;
+  bool req_auth : 1;
+  bool replica_conn : 1;
+  bool authenticated : 1;
+  bool force_dispatch : 1;  // whether we should route all requests to the dispatch fiber.
+  bool monitor : 1;         // when the connection is monitor do not support most commands other
+                            // than quit and reset
+ protected:
+  void EnableMonitoring(bool enable) {
+    force_dispatch = enable;  // required to support the monitoring
+    monitor = enable;
+  }
 
  private:
   Connection* owner_;

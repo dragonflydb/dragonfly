@@ -6,11 +6,38 @@
 
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
+#include "server/server_family.h"
+#include "server/server_state.h"
+#include "src/facade/dragonfly_connection.h"
 #include "util/proactor_base.h"
-
 namespace dfly {
 
 using namespace std;
+
+void ConnectionContext::SendMonitorMsg(std::string_view msg,
+                                       util::fibers_ext::BlockingCounter borrows) {
+  CHECK(owner());
+
+  owner()->SendMonitorMsg(msg, borrows);
+}
+
+void ConnectionContext::ChangeMonitor(bool start) {
+  // This will either remove or register a new connection
+  // at the "top level" thread --> ServerState context
+  if (start) {
+    conn_state.monitor.reset(new ConnectionState::Monitor);
+    MonitorsRepo::MonitorInfo new_entry(this);
+    shard_set->pool()->Await(
+        [&new_entry](auto*) { ServerState::tlocal()->Monitors().Add(new_entry); });
+  } else {
+    VLOG(1) << "connection " << owner()->GetClientInfo()
+            << " no longer needs to be monitored - removing 0x" << std::hex << (const void*)this;
+    shard_set->pool()->Await(
+        [self = this](auto*) { ServerState::tlocal()->Monitors().Remove(self); });
+    conn_state.monitor.reset();
+  }
+  EnableMonitoring(start);
+}
 
 void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgList args) {
   vector<unsigned> result(to_reply ? args.size() : 0, 0);
