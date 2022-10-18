@@ -23,7 +23,7 @@ void MiStatsCallback(const char* msg, void* arg) {
   absl::StrAppend(str, msg);
 }
 
-// blocksize, reserved, commited, used.
+// blocksize, reserved, committed, used.
 using BlockKey = std::tuple<size_t, size_t, size_t, size_t>;
 using BlockMap = absl::flat_hash_map<BlockKey, uint64_t>;
 

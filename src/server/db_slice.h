@@ -142,7 +142,7 @@ class DbSlice {
   // If multiple keys are found, returns the first index in the ArgSlice.
   OpResult<std::pair<PrimeIterator, unsigned>> FindFirst(const Context& cntx, ArgSlice args);
 
-  // Return .second=true if insertion ocurred, false if we return the existing key.
+  // Return .second=true if insertion occurred, false if we return the existing key.
   // throws: bad_alloc is insertion could not happen due to out of memory.
   std::pair<PrimeIterator, bool> AddOrFind(const Context& cntx,
                                            std::string_view key) noexcept(false);

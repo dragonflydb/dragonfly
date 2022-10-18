@@ -97,7 +97,7 @@ string LpGetVal(uint8_t* lp_it) {
 // returns a new pointer to lp. Returns true if field was inserted or false it it already existed.
 // skip_exists controls what happens if the field already existed. If skip_exists = true,
 // then val does not override the value and listpack is not changed. Otherwise, the corresponding
-// value is overriden by val.
+// value is overridden by val.
 pair<uint8_t*, bool> LpInsert(uint8_t* lp, string_view field, string_view val, bool skip_exists) {
   uint8_t* vptr;
 
