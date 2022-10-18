@@ -156,7 +156,7 @@ class Transaction {
   // Registers transaction into watched queue and blocks until a) either notification is received.
   // or b) tp is reached. If tp is time_point::max() then waits indefinitely.
   // Expects that the transaction had been scheduled before, and uses Execute(.., true) to register.
-  // Returns false if timeout ocurred, true if was notified by one of the keys.
+  // Returns false if timeout occurred, true if was notified by one of the keys.
   bool WaitOnWatch(const time_point& tp);
 
   // Returns true if transaction is awaked, false if it's timed-out and can be removed from the
