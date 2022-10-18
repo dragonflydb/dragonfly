@@ -73,7 +73,7 @@ using `debug populate 5000000 key 1024` command. Then we started sending the upd
 
 <img src="http://static.dragonflydb.io/repo-assets/bgsave-memusage.svg" width="70%" border="0"/>
 
-Dragonfly was 30% more memory efficient than Redis at the idle state.
+Dragonfly was 30% more memory efficient than Redis in the idle state.
 It also did not show any visible memory increase during the snapshot phase.
 Meanwhile, Redis reached almost x3 memory increase at peak compared to Dragonfly.
 Dragonfly also finished the snapshot much faster, just a few seconds after it started.
@@ -81,7 +81,7 @@ For more info about memory efficiency in Dragonfly see [dashtable doc](/docs/das
 
 ## Running the server
 
-Dragonfly runs on linux. We advice running it on linux version 5.11 or later
+Dragonfly runs on Linux. We advise running it on Linux version 5.11 or later
 but you can also run Dragonfly on older kernels as well.
 
 
@@ -122,7 +122,7 @@ cd build-opt && ninja dragonfly
 ```
 
 ## Configuration
-Dragonfly supports common redis arguments where applicable.
+Dragonfly supports common Redis arguments where applicable.
 For example, you can run: `dragonfly --requirepass=foo --bind localhost`.
 
 Dragonfly currently supports the following Redis-specific arguments:
@@ -150,7 +150,7 @@ for more options like logs management or tls support, run `dragonfly --help`.
 
 ## Roadmap and status
 
-Currently Dragonfly supports ~130 Redis commands and all memcache commands besides `cas`.
+Currently, Dragonfly supports ~130 Redis commands and all memcache commands besides `cas`.
 We are almost on par with Redis 2.8 API. Our first milestone will be to stabilize basic
 functionality and reach API parity with Redis 2.8 and Memcached APIs.
 If you see that a command you need, is not implemented yet, please open an issue.
@@ -161,7 +161,7 @@ The next milestone will be implementing H/A with `redis -> dragonfly` and
 For dragonfly-native replication, we are planning to design a distributed log format that will
 support order of magnitude higher speeds when replicating.
 
-After replication and failover feature we will continue with other Redis commands from
+After the replication and failover feature we will continue with other Redis commands from
 APIs 3,4 and 5.
 
 Please see [API readiness doc](docs/api_status.md) for the current status of Dragonfly.
@@ -176,7 +176,7 @@ Probably design config support. Overall - few dozens commands...
 Probably implement cluster-API decorators to allow cluster-configured clients to connect to a
 single instance.
 
-### Next milestones will be determined along the way.
+### The next milestones will be determined along the way.
 
 ## Design decisions
 
@@ -196,17 +196,17 @@ If it breaks your use-cases - talk to me or open an issue and explain your case.
 For more detailed differences between this and Redis implementations [see here](docs/differences.md).
 
 ### Native Http console and Prometheus compatible metrics
-By default Dragonfly allows http access via its main TCP port (6379). That's right, you
+By default, Dragonfly allows http access via its main TCP port (6379). That's right, you
 can connect to Dragonfly via Redis protocol and via HTTP protocol - the server recognizes
 the protocol  automatically during the connection initiation. Go ahead and try it with your browser.
-Right now it does not have much info but in the future we are planning to add there useful
+Right now it does not have much info but in the future, we are planning to add there useful
 debugging and management info. If you go to `:6379/metrics` url you will see some prometheus
 compatible metrics.
 
 The Prometheus exported metrics are compatible with the Grafana dashboard [see here](tools/local/monitoring/grafana/provisioning/dashboards/dashboard.json).
 
 
-Important! Http console is meant to be accessed within a safe network.
+Important! The http console is meant to be accessed within a safe network.
 If you expose Dragonfly's TCP port externally, it is advised to disable the console
 with `--http_admin_console=false` or `--nohttp_admin_console`.
 
@@ -215,12 +215,12 @@ with `--http_admin_console=false` or `--nohttp_admin_console`.
 
 Dragonfly started as an experiment to see how an in-memory datastore could look like if it was designed in 2022. Based on  lessons learned from our experience as users of memory stores and as engineers who worked for cloud companies, we knew that we need to preserve two key properties for Dragonfly: a) to provide atomicity guarantees for all its operations, and b) to guarantee low, sub-millisecond latency over very high throughput.
 
-Our first challenge was how to fully utilize CPU, memory, and i/o resources using servers that are available today in public clouds. To solve this, we used [shared-nothing architecture](https://en.wikipedia.org/wiki/Shared-nothing_architecture), which allows us to partition the keyspace of the memory store between threads, so that each thread would manage its own slice of dictionary data. We call these slices - shards. The library that powers thread and I/O management for shared-nothing architecture is open-sourced [here](https://github.com/romange/helio).
+Our first challenge was how to fully utilize CPU, memory, and i/o resources using servers that are available today in public clouds. To solve this, we used [shared-nothing architecture](https://en.wikipedia.org/wiki/Shared-nothing_architecture), which allows us to partition the keyspace of the memory store between threads so that each thread would manage its own slice of dictionary data. We call these slices - shards. The library that powers thread and I/O management for shared-nothing architecture is open-sourced [here](https://github.com/romange/helio).
 
 To provide atomicity guarantees for multi-key operations, we used the advancements from recent academic research. We chose the paper ["VLL: a lock manager redesign for main memory database systems”](https://www.cs.umd.edu/~abadi/papers/vldbj-vll.pdf) to develop the transactional framework for Dragonfly. The choice of shared-nothing architecture and VLL allowed us to compose atomic multi-key operations without using mutexes or spinlocks. This was a major milestone for our PoC and its performance stood out from other commercial and open-source solutions.
 
-Our second challenge was to engineer more efficient data structures for the new store. To achieve this goal, we based our core hashtable structure on paper ["Dash: Scalable Hashing on Persistent Memory"](https://arxiv.org/pdf/2003.07302.pdf). The paper itself is centered around persistent memory domain and is not directly related to main-memory stores.
-Nevertheless, its very much applicable for our problem. It suggested a hashtable design that allowed us to maintain two special properties that are present in the Redis dictionary: a) its incremental hashing ability during datastore growth b) its ability to traverse the dictionary under changes using a stateless scan operation. Besides these 2 properties,
+Our second challenge was to engineer more efficient data structures for the new store. To achieve this goal, we based our core hashtable structure on paper ["Dash: Scalable Hashing on Persistent Memory"](https://arxiv.org/pdf/2003.07302.pdf). The paper itself is centered around the persistent memory domain and is not directly related to main-memory stores.
+Nevertheless, it's very much applicable to our problem. It suggested a hashtable design that allowed us to maintain two special properties that are present in the Redis dictionary: a) its incremental hashing ability during datastore growth b) its ability to traverse the dictionary under changes using a stateless scan operation. Besides these 2 properties,
 Dash is much more efficient in CPU and memory. By leveraging Dash's design, we were able to innovate further with the following features:
  * Efficient record expiry for TTL records.
  * A novel cache eviction algorithm that achieves higher hit rates than other caching strategies like LRU and LFU with **zero memory overhead**.
