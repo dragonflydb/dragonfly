@@ -107,7 +107,7 @@ You need to install dependencies in order to build on Ubuntu 20.04 or later:
 git clone --recursive https://github.com/dragonflydb/dragonfly && cd dragonfly
 
 # to install dependencies
-sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
+sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev libxml2-dev \
      autoconf-archive libtool cmake g++
 
 # Configure the build
