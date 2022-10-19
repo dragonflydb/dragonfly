@@ -116,7 +116,7 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
       return OpStatus::OK;
     });
 
-    rb->SendOk();
+    return rb->SendOk();
   }
 
   rb->SendError(kSyntaxErr);
