@@ -102,18 +102,83 @@ struct Connection::Shutdown {
 };
 
 struct Connection::Request {
-  absl::FixedArray<MutableSlice, 6> args;
+  struct PipelineMsg {
+    absl::FixedArray<MutableSlice, 6> args;
 
-  // I do not use mi_heap_t explicitly but mi_stl_allocator at the end does the same job
-  // of using the thread's heap.
-  // The capacity is chosen so that we allocate a fully utilized (256 bytes) block.
-  absl::FixedArray<char, kReqStorageSize, mi_stl_allocator<char>> storage;
-  AsyncMsg* async_msg = nullptr;  // allocated and released via mi_malloc.
+    // I do not use mi_heap_t explicitly but mi_stl_allocator at the end does the same job
+    // of using the thread's heap.
+    // The capacity is chosen so that we allocate a fully utilized (256 bytes) block.
+    absl::FixedArray<char, kReqStorageSize, mi_stl_allocator<char>> storage;
 
-  Request(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
+    PipelineMsg(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
+    }
+  };
+
+  struct PubSubMsg {
+    AsyncMsg* async_msg = nullptr;  // allocated and released via mi_malloc.
+
+    PubSubMsg(const PubMessage& pub_msg, fibers_ext::BlockingCounter bc)
+        : async_msg{(AsyncMsg*)mi_malloc(sizeof(AsyncMsg))} {
+      async_msg->bc = std::move(bc);
+      async_msg->pub_msg = pub_msg;
+    }
+
+    void Free() {
+      async_msg->bc.Dec();
+      async_msg->~AsyncMsg();
+      mi_free(async_msg);
+    }
+  };
+
+ private:
+  using MessagePayload = std::variant<PipelineMsg, PubSubMsg>;
+
+  Request(PipelineMsg msg) : payload(std::move(msg)) {
+  }
+
+  Request(PubSubMsg msg) : payload(std::move(msg)) {
   }
 
   Request(const Request&) = delete;
+
+ public:
+  static void Free(Request* self) {
+    std::visit(
+        [&](auto&& arg) {
+          using T = std::decay_t<decltype(arg)>;
+          if constexpr (std::is_same_v<T, PubSubMsg>) {
+            arg.Free();
+          }
+        },
+        self->payload);
+    self->~Request();
+    mi_free(self);
+  }
+
+  static Request* New(mi_heap_t* heap, RespVec args, size_t capacity) {
+    constexpr auto kReqSz = sizeof(Request);
+    PipelineMsg req{args.size(), capacity};
+    auto* next = req.storage.data();
+    for (size_t i = 0; i < args.size(); ++i) {
+      auto buf = args[i].GetBuf();
+      size_t s = buf.size();
+      memcpy(next, buf.data(), s);
+      req.args[i] = MutableSlice(next, s);
+      next += s;
+    }
+    void* ptr = mi_heap_malloc_small(heap, kReqSz);
+    Request* msg = new (ptr) Request(req);
+    return msg;
+  }
+
+  static Request* New(const PubMessage& pub_msg, fibers_ext::BlockingCounter bc) {
+    PubSubMsg req{pub_msg, std::move(bc)};
+    void* ptr = mi_malloc(sizeof(Request));
+    Request* msg = new (ptr) Request(std::move(req));
+    return msg;
+  }
+
+  MessagePayload payload;
 };
 
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
@@ -123,9 +188,9 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 
   protocol_ = protocol;
 
-  constexpr size_t kReqSz = sizeof(Connection::Request);
+  constexpr size_t kReqSz = sizeof(Connection::Request::PipelineMsg);
   static_assert(kReqSz <= 256 && kReqSz >= 232);
-  // LOG(INFO) << "kReqSz: " << kReqSz;
+  //   LOG(INFO) << "kReqSz: " << kReqSz;
 
   switch (protocol) {
     case Protocol::REDIS:
@@ -270,13 +335,7 @@ void Connection::SendMsgVecAsync(const PubMessage& pub_msg, fibers_ext::Blocking
     bc.Dec();
     return;
   }
-
-  void* ptr = mi_malloc(sizeof(AsyncMsg));
-  AsyncMsg* amsg = new (ptr) AsyncMsg(pub_msg, move(bc));
-
-  ptr = mi_malloc(sizeof(Request));
-  Request* req = new (ptr) Request(0, 0);
-  req->async_msg = amsg;
+  Request* req = Request::New(pub_msg, std::move(bc));  // new (ptr) Request(0, 0);
   dispatch_q_.push_back(req);
   if (dispatch_q_.size() == 1) {
     evc_.notify();
@@ -598,13 +657,44 @@ auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, Pars
 
 // DispatchFiber handles commands coming from the InputLoop.
 // Thus, InputLoop can quickly read data from the input buffer, parse it and push
-// into the dispatch queue and DispatchFiber will run those commands asynchronously with InputLoop.
-// Note: in some cases, InputLoop may decide to dispatch directly and bypass the DispatchFiber.
+// into the dispatch queue and DispatchFiber will run those commands asynchronously with
+// InputLoop. Note: in some cases, InputLoop may decide to dispatch directly and bypass the
+// DispatchFiber.
 void Connection::DispatchFiber(util::FiberSocketBase* peer) {
   this_fiber::properties<FiberProps>().set_name("DispatchFiber");
 
   ConnectionStats* stats = service_->GetThreadLocalConnectionStats();
   SinkReplyBuilder* builder = cc_->reply_builder();
+  bool empty = dispatch_q_.empty();
+
+  auto PubsubHandler = [&](Request::PubSubMsg msg) {
+    RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
+    ++stats->async_writes_cnt;
+    const PubMessage& pub_msg = msg.async_msg->pub_msg;
+    string_view arr[4];
+    if (pub_msg.pattern.empty()) {
+      arr[0] = "message";
+      arr[1] = pub_msg.channel;
+      arr[2] = pub_msg.message;
+      rbuilder->SendStringArr(absl::Span<string_view>{arr, 3});
+    } else {
+      arr[0] = "pmessage";
+      arr[1] = pub_msg.pattern;
+      arr[2] = pub_msg.channel;
+      arr[3] = pub_msg.message;
+      rbuilder->SendStringArr(absl::Span<string_view>{arr, 4});
+    }
+  };
+
+  auto PipelineHandler = [&](Request::PipelineMsg msg) {
+    ++stats->pipelined_cmd_cnt;
+
+    builder->SetBatchMode(!empty);
+    cc_->async_dispatch = true;
+    service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()}, cc_.get());
+    last_interaction_ = time(nullptr);
+    cc_->async_dispatch = false;
+  };
 
   while (!builder->GetError()) {
     evc_.await([this] { return cc_->conn_closing || !dispatch_q_.empty(); });
@@ -613,42 +703,19 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
     Request* req = dispatch_q_.front();
     dispatch_q_.pop_front();
-
-    if (req->async_msg) {
-      ++stats->async_writes_cnt;
-
-      RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
-      const PubMessage& pub_msg = req->async_msg->pub_msg;
-      string_view arr[4];
-
-      if (pub_msg.pattern.empty()) {
-        arr[0] = "message";
-        arr[1] = pub_msg.channel;
-        arr[2] = pub_msg.message;
-        rbuilder->SendStringArr(absl::Span<string_view>{arr, 3});
-      } else {
-        arr[0] = "pmessage";
-        arr[1] = pub_msg.pattern;
-        arr[2] = pub_msg.channel;
-        arr[3] = pub_msg.message;
-        rbuilder->SendStringArr(absl::Span<string_view>{arr, 4});
-      }
-
-      req->async_msg->bc.Dec();
-
-      req->async_msg->~AsyncMsg();
-      mi_free(req->async_msg);
-    } else {
-      ++stats->pipelined_cmd_cnt;
-
-      builder->SetBatchMode(!dispatch_q_.empty());
-      cc_->async_dispatch = true;
-      service_->DispatchCommand(CmdArgList{req->args.data(), req->args.size()}, cc_.get());
-      last_interaction_ = time(nullptr);
-      cc_->async_dispatch = false;
-    }
-    req->~Request();
-    mi_free(req);
+    std::visit(
+        [&](auto&& arg) {
+          using T = std::decay_t<decltype(arg)>;
+          if constexpr (std::is_same_v<T, Request::PipelineMsg>) {
+            PipelineHandler(arg);
+          } else if constexpr (std::is_same_v<T, Request::PubSubMsg>) {
+            PubsubHandler(arg);
+          } else {
+            CHECK(false);  // should not be here!
+          }
+        },
+        req->payload);
+    Request::Free(req);
   }
 
   cc_->conn_closing = true;
@@ -657,14 +724,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
   while (!dispatch_q_.empty()) {
     Request* req = dispatch_q_.front();
     dispatch_q_.pop_front();
-
-    if (req->async_msg) {
-      req->async_msg->bc.Dec();
-      req->async_msg->~AsyncMsg();
-      mi_free(req->async_msg);
-    }
-    req->~Request();
-    mi_free(req);
+    Request::Free(req);
   }
 }
 
@@ -680,18 +740,8 @@ auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> Request* {
   constexpr auto kReqSz = sizeof(Request);
   static_assert(kReqSz < MI_SMALL_SIZE_MAX);
   static_assert(alignof(Request) == 8);
-  void* ptr = mi_heap_malloc_small(heap, kReqSz);
 
-  Request* req = new (ptr) Request{args.size(), backed_sz};
-
-  auto* next = req->storage.data();
-  for (size_t i = 0; i < args.size(); ++i) {
-    auto buf = args[i].GetBuf();
-    size_t s = buf.size();
-    memcpy(next, buf.data(), s);
-    req->args[i] = MutableSlice(next, s);
-    next += s;
-  }
+  Request* req = Request::New(heap, args, backed_sz);
 
   return req;
 }
