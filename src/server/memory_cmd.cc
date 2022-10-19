@@ -57,6 +57,8 @@ void MemoryCmd::Run(CmdArgList args) {
 
 string MemoryCmd::MallocStats() {
   string str;
+
+  uint64_t start = absl::GetCurrentTimeNanos();
   absl::StrAppend(&str, "___ Begin mimalloc statistics ___\n");
   mi_stats_print_out(MiStatsCallback, &str);
 
@@ -73,7 +75,8 @@ string MemoryCmd::MallocStats() {
                     get<2>(k_v.first), " ", get<3>(k_v.first), "\n");
   }
 
-  absl::StrAppend(&str, "--- End mimalloc statistics ---\n");
+  uint64_t delta = (absl::GetCurrentTimeNanos() - start) / 1000;
+  absl::StrAppend(&str, "--- End mimalloc statistics, took ", delta, "us ---\n");
 
   return str;
 }

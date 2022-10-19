@@ -419,8 +419,6 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
       // Keep the entry but reset the object.
       size_t value_heap_size = existing->second.MallocUsed();
       db.stats.obj_memory_usage -= value_heap_size;
-      if (existing->second.ObjType() == OBJ_STRING)
-        db.stats.obj_memory_usage -= value_heap_size;
 
       existing->second.Reset();
       events_.expired_keys++;
