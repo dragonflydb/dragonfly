@@ -238,6 +238,9 @@ class DbSlice {
   std::pair<PrimeIterator, ExpireIterator> ExpireIfNeeded(const Context& cntx,
                                                           PrimeIterator it) const;
 
+  // Iterate over all expire table entries and delete expired.
+  void ExpireAllIfNeeded();
+
   // Current version of this slice.
   // We maintain a shared versioning scheme for all databases in the slice.
   uint64_t version() const {

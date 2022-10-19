@@ -110,6 +110,15 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
+  if (sub_cmd == "EXPIRE") {
+    cntx->transaction->ScheduleSingleHop([](Transaction* t, EngineShard* shard){
+      shard->db_slice().ExpireAllIfNeeded();
+      return OpStatus::OK;
+    });
+
+    rb->SendOk();
+  }
+
   rb->SendError(kSyntaxErr);
 }
 
