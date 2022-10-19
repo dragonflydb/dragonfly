@@ -738,16 +738,18 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
 }
 
 void DbSlice::ExpireAllIfNeeded() {
-  for (unsigned db_index = 0; db_index < db_arr_.size(); db_index++) {
+  for (DbIndex db_index = 0; db_index < db_arr_.size(); db_index++) {
     if (!db_arr_[db_index])
       continue;
     auto& db = *db_arr_[db_index];
 
     auto cb = [&](ExpireTable::iterator exp_it) {
-      auto it = db.prime.Find(exp_it->first.ToString());
-      if (!IsValid(it))
+      auto prime_it = db.prime.Find(exp_it->first);
+      if (!IsValid(prime_it)) {
+        LOG(ERROR) << "Expire entry " << exp_it->first.ToString() << " not found in prime table";
         return;
-      ExpireIfNeeded(DbSlice::Context{db_index, GetCurrentTimeMs()}, it);
+      }
+      ExpireIfNeeded(DbSlice::Context{db_index, GetCurrentTimeMs()}, prime_it);
     };
 
     ExpireTable::Cursor cursor;
