@@ -15,24 +15,6 @@
 
 namespace dfly {
 
-// TODO: Change to virtual interface?
-struct SnapshotSyncBlock {
-  explicit SnapshotSyncBlock(unsigned threads, std::atomic_uint16_t* counter)
-      : barrier_(threads), counter_(counter) {
-  }
-
-  void wait() {
-    counter_->fetch_add(-1, std::memory_order_relaxed);
-    barrier_.wait();
-  }
-
- private:
-  // Barrier to sync consumer fibers on CONTINIOUS_JOURNAL mode.
-  // TODO: No wait until. No fail behaviour.
-  ::boost::fibers::barrier barrier_;
-  std::atomic_uint16_t* counter_;
-};
-
 namespace journal {
 struct Entry;
 }  // namespace journal
@@ -56,7 +38,8 @@ class SliceSnapshot {
   SliceSnapshot(DbSlice* slice, RecordChannel* dest);
   ~SliceSnapshot();
 
-  void Start(SnapshotSyncBlock* block);
+  void Start(bool include_journal, bool auto_close = false);
+  void Stop();
   void Join();
 
   uint64_t snapshot_version() const {
@@ -76,7 +59,12 @@ class SliceSnapshot {
   }
 
  private:
-  void FiberFunc(SnapshotSyncBlock* block);
+  // Iterate over all entries and write them to record channel.
+  void SerializeEntries();
+
+  // Close record channel and unregister from journal.
+  void Close();
+
   bool FlushSfile(bool force);
   void SerializeSingleEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
                             RdbSerializer* serializer);

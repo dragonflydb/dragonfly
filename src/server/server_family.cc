@@ -202,7 +202,7 @@ error_code RdbSnapshot::Close() {
 }
 
 void RdbSnapshot::StartInShard(EngineShard* shard) {
-  saver_.StartSnapshotInShard(nullptr, shard);
+  saver_.StartSnapshotInShard(false, true, shard);
   started_ = true;
 }
 

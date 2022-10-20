@@ -43,6 +43,8 @@ class DflyCmd {
     // Stores currently active flow fiber if present.
     // Either full (FullSyncFb) or stable sync (StableSyncFb).
     ::boost::fibers::fiber repl_fb;
+
+    RdbSaver* saver;
   };
 
   // Stores sync info for one replica.
@@ -51,8 +53,6 @@ class DflyCmd {
     int64_t start_time_ns;
 
     ReplicaState state = ReplicaState::PREPARATION;
-    // Full sync fibers block here after sending all static data.
-    std::optional<SnapshotSyncBlock> snapshot_block;
     // Generic fiber flag counter.
     // During ReplicaState::FULL_SYNC: how many fibers are still sending static data.
     std::atomic_uint16_t fiber_flag_counter;
@@ -101,19 +101,19 @@ class DflyCmd {
   void HandleJournal(CmdArgList args, ConnectionContext* cntx);
 
   // Some threads are not shards but we still need context from them.
-  void StartReplInThread(uint32_t thread_id, SyncId syncid);
+  void StartReplInThread(ReplicateFlow* flow);
 
   // Dispatch FullSyncFb (full sync fiber) and return status.
-  facade::OpStatus StartFullSync(SyncId syncid, Transaction* t, EngineShard* shard);
+  facade::OpStatus StartFullSync(ReplicateFlow* flow, EngineShard* shard);
 
   // The fiber for full sync.
-  void FullSyncFb(std::string eof_token, SyncInfo* si, facade::Connection* conn, RdbSaver* saver);
+  void FullSyncFb(std::string eof_token, facade::Connection* conn, RdbSaver* saver);
 
   // Dispatch StableSyncFb (stable sync fiber) and return status.
-  facade::OpStatus StartStableSync(unsigned flow_id, ReplicateFlow* flow);
+  facade::OpStatus StartStableSync(ReplicateFlow* flow, EngineShard* shard);
 
   // The fiber for stable sync.
-  void StableSyncFb(unsigned flow_id, ReplicateFlow* flow);
+  void StableSyncFb(ReplicateFlow* flow);
 
   // Return sync info from argument or respond with error.
   std::optional<std::pair<SyncId, SyncInfo*>> GetSyncInfoOrRespond(std::string_view id,

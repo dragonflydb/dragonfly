@@ -95,9 +95,13 @@ class RdbSaver {
   std::error_code SaveBody(RdbTypeFreqMap* freq_map);
 
   // Initiates the serialization in the shard's thread.
+  // Must be called from thread assigned to shard.
   // TODO: to implement break functionality to allow stopping early.
   // TODO: Add SnapshotMode additionally to SyncBlock for more ambiguity?
-  void StartSnapshotInShard(SnapshotSyncBlock* block, EngineShard* shard);
+  void StartSnapshotInShard(bool include_journal, bool auto_close, EngineShard* shard);
+
+  // Stop snapshotting in shard. Must be called from thread assigned to shard.
+  void StopSnapshotInShard(EngineShard* shard);
 
   SaveMode Mode() const { return save_mode_; }
 
