@@ -91,9 +91,9 @@ size_t MallocUsedSet(unsigned encoding, void* ptr) {
 
 size_t MallocUsedHSet(unsigned encoding, void* ptr) {
   switch (encoding) {
-    case OBJ_ENCODING_LISTPACK:
+    case kEncodingListPack:
       return lpBytes(reinterpret_cast<uint8_t*>(ptr));
-    case OBJ_ENCODING_HT:
+    case kEncodingStrMap:
       return DictMallocSize((dict*)ptr);
   }
   LOG(DFATAL) << "Unknown set encoding type " << encoding;
@@ -120,10 +120,10 @@ size_t MallocUsedStream(unsigned encoding, void* streamv) {
 
 inline void FreeObjHash(unsigned encoding, void* ptr) {
   switch (encoding) {
-    case OBJ_ENCODING_HT:
+    case kEncodingStrMap:
       dictRelease((dict*)ptr);
       break;
-    case OBJ_ENCODING_LISTPACK:
+    case kEncodingListPack:
       lpFree((uint8_t*)ptr);
       break;
     default:
@@ -638,6 +638,12 @@ void CompactObj::ImportRObj(robj* o) {
       } else {
         enc = GetFlag(FLAGS_use_set2) ? kEncodingStrMap2 : kEncodingStrMap;
       }
+    } else if (o->type == OBJ_HASH) {
+      if (o->encoding == OBJ_ENCODING_HT) {
+        enc = kEncodingStrMap;
+      } else {
+        enc = kEncodingListPack;
+      }
     }
     u_.r_obj.Init(type, enc, o->ptr);
     if (o->refcount == 1)
@@ -653,9 +659,14 @@ robj* CompactObj::AsRObj() const {
   res->type = u_.r_obj.type();
 
   if (res->type == OBJ_SET) {
-    LOG(FATAL) << "Should not call AsRObj for sets";
+    LOG(FATAL) << "Should not call AsRObj for type " <<  res->type;
   }
-  res->encoding = enc;
+
+  if (res->type == OBJ_HASH) {
+    res->encoding = (enc == kEncodingListPack) ? OBJ_ENCODING_LISTPACK : OBJ_ENCODING_HT;
+  } else {
+    res->encoding = enc;
+  }
   res->lru = 0;  // u_.r_obj.unneeded;
   res->ptr = u_.r_obj.inner_obj();
 
@@ -676,6 +687,9 @@ void CompactObj::SyncRObj() {
   CHECK_NE(OBJ_SET, obj->type) << "sets should be handled without robj";
 
   unsigned enc = obj->encoding;
+  if (obj->type == OBJ_HASH) {
+    enc = (obj->encoding == OBJ_ENCODING_LISTPACK) ? kEncodingListPack : kEncodingStrMap;
+  }
   u_.r_obj.Init(obj->type, enc, obj->ptr);
 }
 
