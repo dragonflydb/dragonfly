@@ -47,7 +47,7 @@ with respect to Memcached and Redis APIs.
   - [X] SELECT
   - [X] TTL
   - [X] TYPE
-  - [ ] SORT
+  - [X] SORT
 - [X] Server Family
   - [X] AUTH
   - [X] QUIT
@@ -122,7 +122,7 @@ with respect to Memcached and Redis APIs.
   - [x] BITCOUNT
   - [ ] BITFIELD
   - [x] BITOP
-  - [ ] BITPOS
+  - [x] BITPOS
   - [x] GETBIT
   - [X] GETRANGE
   - [X] INCRBYFLOAT
@@ -203,7 +203,7 @@ with respect to Memcached and Redis APIs.
 
 ### API 3
 - [ ] Generic Family
-  - [ ] TOUCH 
+  - [ ] TOUCH
 - [X] HashSet Family
   - [X] HSTRLEN
 - [X] Server Family
@@ -236,9 +236,26 @@ with respect to Memcached and Redis APIs.
   - [X] XSETID
   - [ ] XTRIM
 
-### API 6,7
+- [X] Sorted Set Family
+  - [X] ZPOPMIN
+  - [X] ZPOPMAX
+
+### API 6
+- [X] String Family
+  - [X] GETEX
+
+- [X] Set Family
+  - [X] SMISMEMBER
+
+- [X] List Family
+  - [X] LMOVE
+  - [X] LPOS
+
 - [ ] Stream Family
   - [ ] XAUTOCLAIM
+
+- [ ] Sorted Set Family
+  - [ ] ZUNION
 
 ## Notes
 Some commands were implemented as decorators along the way:

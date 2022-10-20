@@ -140,8 +140,8 @@ In addition, it has Dragonfly specific arguments options:
    `keys` is a dangerous command. We truncate its result to avoid blowup in memory when fetching too many keys.
  * `dbnum` - maximum number of supported databases for `select`.
  * `cache_mode` - see [Cache](#novel-cache-design) section below.
- * `hz` - key expiry evaluation frequency. Default is 1000. Lower frequency uses less cpu when
-   idle at the expense of precision in key eviction.
+ * `hz` - key expiry evaluation frequency. Default is 100. Lower frequency uses less cpu when
+   idle at the expense of slower eviction rate.
  * `save_schedule` - glob spec for the UTC time to save a snapshot which matches HH:MM (24h time). default: ""
  * `keys_output_limit` -  Maximum number of keys output by keys command. default: 8192
 
@@ -150,33 +150,17 @@ for more options like logs management or tls support, run `dragonfly --help`.
 
 ## Roadmap and status
 
-Currently, Dragonfly supports ~130 Redis commands and all memcache commands besides `cas`.
-We are almost on par with Redis 2.8 API. Our first milestone will be to stabilize basic
-functionality and reach API parity with Redis 2.8 and Memcached APIs.
+Currently, Dragonfly supports ~185 Redis commands and all memcache commands besides `cas`.
+We are almost on par with Redis 5 API. Our next milestone will be to stabilize basic
+functionality and implement the replication API.
 If you see that a command you need, is not implemented yet, please open an issue.
 
-The next milestone will be implementing H/A with `redis -> dragonfly` and
-`dragonfly<->dragonfly` replication.
+For dragonfly-native replication, we are designing a distributed log format that will support order of magnitude higher speeds.
 
-For dragonfly-native replication, we are planning to design a distributed log format that will
-support order of magnitude higher speeds when replicating.
-
-After the replication and failover feature we will continue with other Redis commands from
-APIs 3,4 and 5.
+After the replication feature we will continue with other Redis missing commands from
+APIs 3-6.
 
 Please see [API readiness doc](docs/api_status.md) for the current status of Dragonfly.
-
-### Milestone - H/A
-Implement leader/follower replication (PSYNC/REPLICAOF/...).
-
-### Milestone - "Maturity"
-APIs 3,4,5 without cluster support, without modules and without memory introspection commands. Also
-without geo commands and without support for keyspace notifications, without streams.
-Probably design config support. Overall - few dozens commands...
-Probably implement cluster-API decorators to allow cluster-configured clients to connect to a
-single instance.
-
-### The next milestones will be determined along the way.
 
 ## Design decisions
 
@@ -227,7 +211,7 @@ Dash is much more efficient in CPU and memory. By leveraging Dash's design, we w
  * A novel **fork-less** snapshotting algorithm.
 
 After we built the foundation for Dragonfly and [we were happy with its performance](#benchmarks),
-we went on to implement the Redis and Memcached functionality. By now, we have implemented ~130 Redis commands (equivalent to v2.8) and 13 Memcached commands.
+we went on to implement the Redis and Memcached functionality. By now, we have implemented ~185 Redis commands (roughly equivalent to Redis 5.0 API) and 13 Memcached commands.
 
 And finally, <br>
 <em>Our mission is to build a well-designed, ultra-fast, cost-efficient in-memory datastore for cloud workloads that takes advantage of the latest hardware advancements. We intend to address the pain points of current solutions while preserving their product APIs and propositions.
