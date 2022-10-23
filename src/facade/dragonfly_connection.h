@@ -116,11 +116,16 @@ class Connection : public util::Connection {
   std::unique_ptr<ConnectionContext> cc_;
 
   struct Request;
+  struct DispatchOperations;
+  struct DispatchCleanup;
+  struct RequestDeleter;
+
+  using RequestPtr = std::unique_ptr<Request, RequestDeleter>;
 
   // args are passed deliberately by value - to pass the ownership.
-  static Request* FromArgs(RespVec args, mi_heap_t* heap);
+  static RequestPtr FromArgs(RespVec args, mi_heap_t* heap);
 
-  std::deque<Request*> dispatch_q_;  // coordinated via evc_.
+  std::deque<RequestPtr> dispatch_q_;  // coordinated via evc_.
   util::fibers_ext::EventCount evc_;
 
   RespVec parse_args_;
