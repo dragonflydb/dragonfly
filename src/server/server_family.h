@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <boost/fiber/future.hpp>
+
 #include "facade/conn_context.h"
 #include "facade/redis_parser.h"
 #include "server/engine_shard_set.h"
@@ -83,7 +85,9 @@ class ServerFamily {
 
   std::shared_ptr<const LastSaveInfo> GetLastSaveInfo() const;
 
-  std::error_code LoadRdb(const std::string& rdb_file);
+  // Load snapshot from file (.rdb file or summary.dfs file) and return
+  // future with error_code.
+  boost::fibers::future<std::error_code> Load(const std::string& file_name);
 
   // used within tests.
   bool IsSaving() const {
@@ -136,11 +140,12 @@ class ServerFamily {
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
 
-  void Load(const std::string& file_name);
+  std::error_code LoadRdb(const std::string& rdb_file);
 
   void SnapshotScheduling(const SnapshotSpec &&time);
 
-  boost::fibers::fiber load_fiber_, snapshot_fiber_;
+  boost::fibers::fiber snapshot_fiber_;
+  boost::fibers::future<std::error_code> load_result_;
 
   uint32_t stats_caching_task_ = 0;
   Service& service_;

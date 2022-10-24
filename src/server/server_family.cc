@@ -8,8 +8,10 @@
 #include <absl/random/random.h>  // for master_id_ generation.
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
+#include <absl/strings/str_replace.h>
 #include <sys/resource.h>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <optional>
@@ -111,20 +113,20 @@ string InferLoadFile(fs::path data_dir) {
   if (fs::exists(fl_path))
     return fl_path.generic_string();
   if (!fl_path.has_extension()) {
-    string glob = fl_path.generic_string();
-    glob.append("*.rdb");
-
+    std::string glob = absl::StrCat(fl_path.generic_string(), "*");
     io::Result<io::StatShortVec> short_vec = io::StatFiles(glob);
+
     if (short_vec) {
-      if (!short_vec->empty()) {
-        return short_vec->back().name;
-      }
+      auto it = std::find_if(short_vec->rbegin(), short_vec->rend(), [](const auto& stat) {
+        return absl::EndsWith(stat.name, ".rdb") || absl::EndsWith(stat.name, "summary.dfs");
+      });
+      if (it != short_vec->rend())
+        return it->name;
     } else {
       LOG(WARNING) << "Could not stat " << glob << ", error " << short_vec.error().message();
     }
     LOG(INFO) << "Checking " << fl_path;
   }
-
   return string{};
 }
 
@@ -175,7 +177,7 @@ class RdbSnapshot {
   RdbSnapshot(FiberQueueThreadPool* fq_tp) : fq_tp_(fq_tp) {
   }
 
-  error_code Start(bool single_shard, const std::string& path, const StringVec& lua_scripts);
+  error_code Start(SaveMode save_mode, const std::string& path, const StringVec& lua_scripts);
   void StartInShard(EngineShard* shard);
 
   error_code SaveBody();
@@ -186,7 +188,7 @@ class RdbSnapshot {
   }
 
   bool HasStarted() const {
-    return started_;
+    return started_ || (saver_ && saver_->Mode() == SaveMode::SUMMARY);
   }
 
  private:
@@ -206,7 +208,7 @@ io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
   return res;
 }
 
-error_code RdbSnapshot::Start(bool sharded_snapshot, const std::string& path,
+error_code RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
                               const StringVec& lua_scripts) {
   bool is_direct = false;
   if (fq_tp_) {  // EPOLL
@@ -223,7 +225,7 @@ error_code RdbSnapshot::Start(bool sharded_snapshot, const std::string& path,
     is_direct = kRdbWriteFlags & O_DIRECT;
   }
 
-  saver_.reset(new RdbSaver(io_sink_.get(), sharded_snapshot, is_direct));
+  saver_.reset(new RdbSaver(io_sink_.get(), save_mode, is_direct));
 
   return saver_->SaveHeader(lua_scripts);
 }
@@ -249,24 +251,19 @@ string FormatTs(absl::Time now) {
   return absl::FormatTime("%Y-%m-%dT%H:%M:%S", now, absl::LocalTimeZone());
 }
 
-void ExtendFilename(absl::Time now, int shard, fs::path* filename) {
-  if (shard < 0) {
-    if (!filename->has_extension()) {
-      string ft_time = FormatTs(now);
-      *filename += StrCat("-", ft_time, ".rdb");
-    }
-  } else {
-    string ft_time = FormatTs(now);
-    filename->replace_extension();  // clear if exists
-
-    // dragonfly snapshot
-    *filename += StrCat("-", ft_time, "-", absl::Dec(shard, absl::kZeroPad4), ".dfs");
-  }
+template <typename T> void ExtendFilename(absl::Time now, T postfix, fs::path* filename) {
+  *filename += StrCat("-", FormatTs(now), "-", postfix, ".dfs");
 }
 
-inline void UpdateError(error_code src, error_code* dest) {
-  if (!(*dest)) {
-    *dest = src;
+void ExtendFilenameWithShard(absl::Time now, int shard, fs::path* filename) {
+  if (shard < 0) {
+    if (!filename->has_extension()) {
+      *filename += StrCat("-", FormatTs(now), ".rdb");
+    }
+  } else {
+    filename->replace_extension();  // clear if exists
+    // dragonfly snapshot.
+    ExtendFilename(now, absl::Dec(shard, absl::kZeroPad4), filename);
   }
 }
 
@@ -383,7 +380,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
   LOG(INFO) << "Data directory is " << data_folder;
   string load_path = InferLoadFile(data_folder);
   if (!load_path.empty()) {
-    Load(load_path);
+    load_result_ = Load(load_path);
   }
 
   string save_time = GetFlag(FLAGS_save_schedule);
@@ -403,8 +400,8 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
 void ServerFamily::Shutdown() {
   VLOG(1) << "ServerFamily::Shutdown";
 
-  if (load_fiber_.joinable())
-    load_fiber_.join();
+  if (load_result_.valid())
+    load_result_.wait();
 
   is_snapshot_done_.Notify();
   if (snapshot_fiber_.joinable()) {
@@ -427,14 +424,36 @@ void ServerFamily::Shutdown() {
   });
 }
 
-void ServerFamily::Load(const std::string& load_path) {
-  CHECK(!load_fiber_.get_id());
+// Load starts as many fibers as there are files to load each one separately.
+// It starts one more fiber that waits for all load fibers to finish and returns the first
+// error (if any occured) with a future.
+fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path) {
+  CHECK(absl::EndsWith(load_path, ".rdb") || absl::EndsWith(load_path, "summary.dfs"));
 
-  error_code ec;
-  auto path = fs::canonical(load_path, ec);
-  if (ec) {
-    LOG(ERROR) << "Error loading " << load_path << " " << ec.message();
-    return;
+  vector<std::string> paths{{load_path}};
+
+  // Collect all other files in case we're loading dfs.
+  if (absl::EndsWith(load_path, "summary.dfs")) {
+    std::string glob = absl::StrReplaceAll(load_path, {{"summary", "????"}});
+    io::Result<io::StatShortVec> files = io::StatFiles(glob);
+
+    // TODO: Return error
+    DCHECK(files && files->size() > 0);
+    for (auto& fstat : *files) {
+      paths.push_back(std::move(fstat.name));
+    }
+  }
+
+  // Check all paths are valid.
+  for (const auto& path : paths) {
+    error_code ec;
+    fs::canonical(path, ec);
+    if (ec) {
+      LOG(ERROR) << "Error loading " << load_path << " " << ec.message();
+      fibers::promise<std::error_code> ec_promise;
+      ec_promise.set_value(ec);
+      return ec_promise.get_future();
+    }
   }
 
   LOG(INFO) << "Loading " << load_path;
@@ -442,12 +461,11 @@ void ServerFamily::Load(const std::string& load_path) {
   GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
   if (new_state != GlobalState::LOADING) {
     LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
-    return;
+    return {};
   }
 
 #if 0
   auto& pool = service_.proactor_pool();
-
   // Deliberately run on all I/O threads to update the state for non-shard threads as well.
   pool.Await([&](ProactorBase*) {
     // TODO: There can be a bug where status is different.
@@ -457,15 +475,45 @@ void ServerFamily::Load(const std::string& load_path) {
 #endif
 
   auto& pool = service_.proactor_pool();
-  // Choose thread that does not handle shards if possible.
-  // This will balance out the CPU during the load.
-  ProactorBase* proactor =
-      shard_count() < pool.size() ? pool.at(shard_count()) : pool.GetNextProactor();
 
-  load_fiber_ = proactor->LaunchFiber([load_path, this] {
-    auto ec = LoadRdb(load_path);
-    LOG_IF(ERROR, ec) << "Error loading file " << ec.message();
-  });
+  std::vector<::boost::fibers::fiber> load_fibers;
+  load_fibers.reserve(paths.size());
+
+  auto first_error = std::make_shared<AggregateError>();
+
+  for (auto& path : paths) {
+    // For single file, choose thread that does not handle shards if possible.
+    // This will balance out the CPU during the load.
+    ProactorBase* proactor;
+    if (paths.size() == 1 && shard_count() < pool.size()) {
+      proactor = pool.at(shard_count());
+    } else {
+      proactor = pool.GetNextProactor();
+    }
+
+    auto load_fiber = [this, first_error, path = std::move(path)]() {
+      *first_error = LoadRdb(path);
+    };
+    load_fibers.push_back(proactor->LaunchFiber(std::move(load_fiber)));
+  }
+
+  boost::fibers::promise<std::error_code> ec_promise;
+  boost::fibers::future<std::error_code> ec_future = ec_promise.get_future();
+
+  // Run fiber that empties the channel and sets ec_promise.
+  auto load_join_fiber = [this, first_error, load_fibers = std::move(load_fibers),
+                          ec_promise = std::move(ec_promise)]() mutable {
+    for (auto& fiber : load_fibers) {
+      fiber.join();
+    }
+
+    VLOG(1) << "Load finished";
+    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+    ec_promise.set_value(**first_error);
+  };
+  pool.GetNextProactor()->Dispatch(std::move(load_join_fiber));
+
+  return ec_future;
 }
 
 void ServerFamily::SnapshotScheduling(const SnapshotSpec&& spec) {
@@ -721,98 +769,120 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
 #undef ADD_LINE
 }
 
+// Run callback for all active RdbSnapshots (passed as index).
+// .dfs format contains always `shard_set->size() + 1` snapshots (for every shard and summary file).
 static void RunStage(bool new_version, std::function<void(unsigned)> cb) {
   if (new_version) {
     shard_set->RunBlockingInParallel([&](EngineShard* es) { cb(es->shard_id()); });
+    cb(shard_set->size());
   } else {
     cb(0);
   }
 };
 
+// Start saving a single snapshot of a multi-file dfly snapshot.
+// If shard is null, then this is the summary file.
+error_code DoPartialSave(const string& filename, const string& path, absl::Time now,
+                         const dfly::StringVec& scripts, RdbSnapshot* snapshot,
+                         EngineShard* shard) {
+  // Construct resulting filename.
+  fs::path file = filename, abs_path = path;
+  if (shard == nullptr) {
+    ExtendFilename(now, "summary", &file);
+  } else {
+    ExtendFilenameWithShard(now, shard->shard_id(), &file);
+  }
+  abs_path += file;
+  VLOG(1) << "Saving partial file to " << abs_path;
+
+  // Start rdb saving.
+  SaveMode mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
+  std::error_code local_ec = snapshot->Start(mode, abs_path.generic_string(), scripts);
+
+  if (!local_ec && mode == SaveMode::SINGLE_SHARD) {
+    snapshot->StartInShard(shard);
+  }
+
+  return local_ec;
+}
+
 error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* err_details) {
   fs::path dir_path(GetFlag(FLAGS_dir));
-  error_code ec;
+  AggregateError ec;
 
+  // Check directory.
   if (!dir_path.empty()) {
     ec = CreateDirs(dir_path);
     if (ec) {
       *err_details = "create-dir ";
-      return ec;
+      return *ec;
     }
   }
 
-  const auto& dbfilename = GetFlag(FLAGS_dbfilename);
-  fs::path filename = dbfilename.empty() ? "dump" : dbfilename;
-  fs::path path = dir_path;
-
+  // Manage global state.
   GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
   if (new_state != GlobalState::SAVING) {
     *err_details = StrCat(GlobalStateName(new_state), " - can not save database");
     return make_error_code(errc::operation_in_progress);
   }
-
   absl::Cleanup rev_state = [this] {
     service_.SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
   };
 
+  const auto& dbfilename = GetFlag(FLAGS_dbfilename);
+  fs::path filename = dbfilename.empty() ? "dump" : dbfilename;
+  fs::path path = dir_path;
+
   auto start = absl::Now();
   shared_ptr<LastSaveInfo> save_info;
-  StringVec lua_scripts = script_mgr_->GetLuaScripts();
   absl::Time now = absl::Now();
 
-  absl::flat_hash_map<string_view, size_t> rdb_name_map;
   vector<unique_ptr<RdbSnapshot>> snapshots;
-  fibers::mutex mu;
+  absl::flat_hash_map<string_view, size_t> rdb_name_map;
+  fibers::mutex mu;  // guards rdb_name_map
 
   auto save_cb = [&](unsigned index) {
     auto& snapshot = snapshots[index];
     if (snapshot && snapshot->HasStarted()) {
-      error_code local_ec = snapshot->SaveBody();
-      if (local_ec) {
-        lock_guard lk(mu);
-        UpdateError(local_ec, &ec);
-      }
+      ec = snapshot->SaveBody();
     }
   };
 
   auto close_cb = [&](unsigned index) {
     auto& snapshot = snapshots[index];
     if (snapshot) {
-      auto local_ec = snapshot->Close();
+      ec = snapshot->Close();
 
       lock_guard lk(mu);
-      UpdateError(local_ec, &ec);
-
       for (const auto& k_v : snapshot->freq_map()) {
         rdb_name_map[RdbTypeName(k_v.first)] += k_v.second;
       }
     }
   };
 
+  // Start snapshots.
   if (new_version) {
-    snapshots.resize(shard_set->size());
+    // In the new version (.dfs) we store a file for every shard and one more summary file.
+    // Summary file is always last in snapshots array.
+    snapshots.resize(shard_set->size() + 1);
 
-    // In the new version we open a file per shard
-    auto cb = [&](Transaction* t, EngineShard* shard) {
-      fs::path shard_file = filename, abs_path = path;
-      ShardId sid = shard->shard_id();
-
-      ExtendFilename(now, sid, &shard_file);
-      abs_path += shard_file;
-
-      VLOG(1) << "Saving to " << abs_path;
-      snapshots[sid].reset(new RdbSnapshot(fq_threadpool_.get()));
-      auto& snapshot = snapshots[sid];
-      error_code local_ec = snapshot->Start(true, abs_path.generic_string(), lua_scripts);
-      if (local_ec) {
-        snapshot.reset();  // Reset to make sure stages won't block on faulty snapshots.
-
-        lock_guard lk(mu);
-        UpdateError(local_ec, &ec);
-      } else {
-        snapshot->StartInShard(shard);
+    // Save summary file.
+    {
+      const auto& scripts = script_mgr_->GetLuaScripts();
+      auto& summary_snapshot = snapshots[shard_set->size()];
+      summary_snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
+      if (ec = DoPartialSave(filename, path, now, scripts, summary_snapshot.get(), nullptr)) {
+        summary_snapshot.reset();
       }
+    }
 
+    // Save shard files.
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      auto& snapshot = snapshots[shard->shard_id()];
+      snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
+      if (ec = DoPartialSave(filename, path, now, {}, snapshot.get(), shard)) {
+        snapshot.reset();
+      }
       return OpStatus::OK;
     };
 
@@ -820,12 +890,13 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
   } else {
     snapshots.resize(1);
 
-    ExtendFilename(now, -1, &filename);
+    ExtendFilenameWithShard(now, -1, &filename);
     path += filename;
     VLOG(1) << "Saving to " << path;
 
     snapshots[0].reset(new RdbSnapshot(fq_threadpool_.get()));
-    ec = snapshots[0]->Start(false, path.generic_string(), lua_scripts);
+    const auto& lua_scripts = script_mgr_->GetLuaScripts();
+    ec = snapshots[0]->Start(SaveMode::RDB, path.generic_string(), lua_scripts);
 
     if (!ec) {
       auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -840,24 +911,26 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
 
   is_saving_.store(true, memory_order_relaxed);
 
-  // perform snapshot serialization, block the current fiber until it completes.
+  // Perform snapshot serialization, block the current fiber until it completes.
   RunStage(new_version, save_cb);
 
   is_saving_.store(false, memory_order_relaxed);
 
   RunStage(new_version, close_cb);
 
-  absl::Duration dur = absl::Now() - start;
-  double seconds = double(absl::ToInt64Milliseconds(dur)) / 1000;
-
   if (new_version) {
-    ExtendFilename(now, 0, &filename);
+    ExtendFilename(now, "summary", &filename);
     path += filename;
   }
 
-  LOG(INFO) << "Saving " << path << " finished after "
-            << strings::HumanReadableElapsedTime(seconds);
+  {
+    absl::Duration dur = absl::Now() - start;
+    double seconds = double(absl::ToInt64Milliseconds(dur)) / 1000;
+    LOG(INFO) << "Saving " << path << " finished after "
+              << strings::HumanReadableElapsedTime(seconds);
+  }
 
+  // Populate LastSaveInfo.
   if (!ec) {
     save_info = make_shared<LastSaveInfo>();
     for (const auto& k_v : rdb_name_map) {
@@ -871,7 +944,7 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
     // swap - to deallocate the old version outstide of the lock.
     last_save_info_.swap(save_info);
   }
-  return ec;
+  return *ec;
 }
 
 error_code ServerFamily::DoFlush(Transaction* transaction, DbIndex db_ind) {

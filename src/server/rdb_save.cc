@@ -771,6 +771,8 @@ RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, io::Sink* sink)
     aligned_buf_.emplace(kBufLen, sink);
     meta_serializer_.set_sink(&aligned_buf_.value());
   }
+
+  DCHECK(producers_len > 0 || channel_.IsClosing());
 }
 
 error_code RdbSaver::Impl::SaveAuxFieldStrStr(string_view key, string_view val) {
@@ -859,10 +861,24 @@ void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {
   }
 }
 
-RdbSaver::RdbSaver(::io::Sink* sink, bool single_shard, bool align_writes) {
+RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes) {
   CHECK_NOTNULL(sink);
 
-  impl_.reset(new Impl(align_writes, single_shard ? 1 : shard_set->size(), sink));
+  int producer_count = 0;
+  switch (save_mode) {
+    case SaveMode::SUMMARY:
+      producer_count = 0;
+      break;
+    case SaveMode::SINGLE_SHARD:
+      producer_count = 1;
+      break;
+    case SaveMode::RDB:
+      producer_count = shard_set->size();
+      break;
+  }
+
+  impl_.reset(new Impl(align_writes, producer_count, sink));
+  save_mode_ = save_mode;
 }
 
 RdbSaver::~RdbSaver() {
@@ -920,6 +936,8 @@ error_code RdbSaver::SaveAux(const StringVec& lua_scripts) {
 
   RETURN_ON_ERR(SaveAuxFieldStrInt("aof-preamble", aof_preamble));
 
+  // Save lua scripts only in rdb or summary file
+  DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || lua_scripts.empty());
   for (const string& s : lua_scripts) {
     RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("lua", s));
   }
