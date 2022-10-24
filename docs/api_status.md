@@ -104,7 +104,7 @@ with respect to Memcached and Redis APIs.
   - [X] ZSCORE
 - [ ] Other
   - [ ] BGREWRITEAOF
-  - [ ] MONITOR
+  - [x] MONITOR
   - [ ] RANDOMKEY
 
 ### API 2

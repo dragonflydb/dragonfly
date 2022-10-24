@@ -63,7 +63,6 @@ string UnknownSubCmd(string_view subcmd, string_view cmd) {
                       cmd, " HELP.");
 }
 
-
 const char kSyntaxErr[] = "syntax error";
 const char kWrongTypeErr[] = "-WRONGTYPE Operation against a key holding the wrong kind of value";
 const char kKeyNotFoundErr[] = "no such key";

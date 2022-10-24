@@ -32,7 +32,9 @@ struct ConnectionState {
     ExecInfo(ExecInfo&&) = delete;
 
     // Return true if ExecInfo is active (after MULTI)
-    bool IsActive() { return state != EXEC_INACTIVE; }
+    bool IsActive() {
+      return state != EXEC_INACTIVE;
+    }
 
     // Resets to blank state after EXEC or DISCARD
     void Clear();
@@ -117,17 +119,29 @@ class ConnectionContext : public facade::ConnectionContext {
     return conn_state.db_index;
   }
 
+  // Note that this is accepted by value for lifetime reasons
+  // we want to have our own copy since we are assuming that
+  // 1. there will be not to many connections that we in monitor state
+  // 2. we need to have for each of them each own copy for thread safe reasons
+  void SendMonitorMsg(std::string msg);
+
   void ChangeSubscription(bool to_add, bool to_reply, CmdArgList args);
   void ChangePSub(bool to_add, bool to_reply, CmdArgList args);
   void UnsubscribeAll(bool to_reply);
   void PUnsubscribeAll(bool to_reply);
+  void ChangeMonitor(bool start);  // either start or stop monitor on a given connection
 
   bool is_replicating = false;
+  bool monitor = false;  // when a monitor command is sent over a given connection, we need to aware
+                         // of it as a state for the connection
 
  private:
+  void EnableMonitoring(bool enable) {
+    force_dispatch = enable;  // required to support the monitoring
+    monitor = enable;
+  }
   void SendSubscriptionChangedResponse(std::string_view action,
-                                       std::optional<std::string_view> topic,
-                                       unsigned count);
+                                       std::optional<std::string_view> topic, unsigned count);
 };
 
 }  // namespace dfly

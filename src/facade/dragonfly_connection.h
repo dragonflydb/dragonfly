@@ -59,7 +59,14 @@ class Connection : public util::Connection {
     std::string_view message;
   };
 
+  // this function is overriden at test_utils TestConnection
   virtual void SendMsgVecAsync(const PubMessage& pub_msg, util::fibers_ext::BlockingCounter bc);
+
+  // Please note, this accept the message by value, since we really want to
+  // create a new copy here, so that we would not need to "worry" about memory
+  // management, we are assuming that we would not have many copy for this, and that
+  // we would not need in this way to sync on the lifetime of the message
+  void SendMonitorMsg(std::string monitor_msg);
 
   void SetName(std::string_view name) {
     CopyCharBuf(name, sizeof(name_), name_);
@@ -70,6 +77,7 @@ class Connection : public util::Connection {
   }
 
   std::string GetClientInfo() const;
+  std::string RemoteEndpointStr() const;
   uint32 GetClientId() const;
 
   void ShutdownSelf();
