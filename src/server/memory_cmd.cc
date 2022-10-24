@@ -47,7 +47,13 @@ void MemoryCmd::Run(CmdArgList args) {
     // dummy output, in practice not implemented yet.
     return (*cntx_)->SendLong(1);
   } else if (sub_cmd == "MALLOC-STATS") {
-    string res = shard_set->pool()->at(0)->AwaitBrief([this] { return MallocStats(); });
+    uint32_t tid = 0;
+    if (args.size() >= 3 && !absl::SimpleAtoi(ArgS(args, 2), &tid)) {
+      return (*cntx_)->SendError(kInvalidIntErr);
+    }
+    tid = tid % shard_set->pool()->size();
+    string res = shard_set->pool()->at(tid)->AwaitBrief([this] { return MallocStats(); });
+
     return (*cntx_)->SendBulkString(res);
   }
 
