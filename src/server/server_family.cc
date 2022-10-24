@@ -251,7 +251,8 @@ string FormatTs(absl::Time now) {
   return absl::FormatTime("%Y-%m-%dT%H:%M:%S", now, absl::LocalTimeZone());
 }
 
-template <typename T> void ExtendFilename(absl::Time now, T postfix, fs::path* filename) {
+void ExtendFilename(absl::Time now, absl::AlphaNum postfix, fs::path* filename) {
+  filename->replace_extension();  // clear if exists
   *filename += StrCat("-", FormatTs(now), "-", postfix, ".dfs");
 }
 
@@ -261,7 +262,6 @@ void ExtendFilenameWithShard(absl::Time now, int shard, fs::path* filename) {
       *filename += StrCat("-", FormatTs(now), ".rdb");
     }
   } else {
-    filename->replace_extension();  // clear if exists
     // dragonfly snapshot.
     ExtendFilename(now, absl::Dec(shard, absl::kZeroPad4), filename);
   }
@@ -437,8 +437,12 @@ fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path)
     std::string glob = absl::StrReplaceAll(load_path, {{"summary", "????"}});
     io::Result<io::StatShortVec> files = io::StatFiles(glob);
 
-    // TODO: Return error
-    DCHECK(files && files->size() > 0);
+    if (files && files->size() == 0) {
+      fibers::promise<std::error_code> ec_promise;
+      ec_promise.set_value(make_error_code(errc::no_such_file_or_directory));
+      return ec_promise.get_future();
+    }
+
     for (auto& fstat : *files) {
       paths.push_back(std::move(fstat.name));
     }
