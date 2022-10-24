@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <boost/fiber/mutex.hpp>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 #include <absl/types/span.h>
@@ -12,6 +13,7 @@
 #include <vector>
 
 #include "facade/facade_types.h"
+#include "facade/op_status.h"
 
 namespace dfly {
 
@@ -105,10 +107,7 @@ enum class GlobalState : uint8_t {
   SHUTTING_DOWN,
 };
 
-enum class TimeUnit : uint8_t {
-  SEC,
-  MSEC
-};
+enum class TimeUnit : uint8_t { SEC, MSEC };
 
 inline void ToUpper(const MutableSlice* val) {
   for (auto& c : *val) {
@@ -165,5 +164,36 @@ template <typename RandGen> std::string GetRandomHex(RandGen& gen, size_t len) {
 
   return res;
 }
+
+// AggregateValue is a thread safe utility to store the first
+// non-default value.
+template <typename T> struct AggregateValue {
+  bool operator=(T val) {
+    std::lock_guard l{mu_};
+    if (current_ == T{} && val != T{}) {
+      current_ = val;
+    }
+    return val != T{};
+  }
+
+  T operator*() {
+    std::lock_guard l{mu_};
+    return current_;
+  }
+
+  operator bool() {
+    return **this != T{};
+  }
+
+ private:
+  ::boost::fibers::mutex mu_{};
+  T current_{};
+};
+
+using AggregateError = AggregateValue<std::error_code>;
+
+using AggregateStatus = AggregateValue<facade::OpStatus>;
+static_assert(facade::OpStatus::OK == facade::OpStatus{},
+              "Default intitialization should be OK value");
 
 }  // namespace dfly
