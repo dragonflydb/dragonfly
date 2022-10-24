@@ -68,6 +68,105 @@ std::optional<VarzFunction> engine_varz;
 
 constexpr size_t kMaxThreadSize = 1024;
 
+void DeactivateMonitoring(ConnectionContext* server_ctx) {
+  if (server_ctx->monitor) {
+    // remove monitor on this connection
+    server_ctx->ChangeMonitor(false /*start*/);
+  }
+}
+
+// The format of the message that are sending is
+// +"time of day" [db-number <lua|unix:path|connection info] "command" "arg1" .. "argM"
+std::string CreateMonitorTimestamp() {
+  timeval tv;
+
+  gettimeofday(&tv, nullptr);
+  return absl::StrCat(tv.tv_sec, ".", tv.tv_usec, absl::kZeroPad6);
+}
+
+auto CmdEntryToMonitorFormat(std::string_view str) -> std::string {
+  // This code is based on Redis impl for it at sdscatrepr@sds.c
+  std::string result = absl::StrCat("\"");
+
+  for (auto c : str) {
+    switch (c) {
+      case '\\':
+        absl::StrAppend(&result, "\\\\");
+        break;
+      case '"':
+        absl::StrAppend(&result, "\\\"");
+        break;
+      case '\n':
+        absl::StrAppend(&result, "\\n");
+        break;
+      case '\r':
+        absl::StrAppend(&result, "\\r");
+        break;
+      case '\t':
+        absl::StrAppend(&result, "\\t");
+        break;
+      case '\a':
+        absl::StrAppend(&result, "\\a");
+        break;
+      case '\b':
+        absl::StrAppend(&result, "\\b");
+        break;
+      default:
+        if (isprint(c)) {
+          result += c;
+        } else {
+          absl::StrAppend(&result, "\\x", absl::Hex((unsigned char)c, absl::kZeroPad2));
+        }
+        break;
+    }
+  }
+  absl::StrAppend(&result, "\"");
+  return result;
+}
+
+std::string MakeMonitorMessage(const ConnectionState& conn_state,
+                               const facade::Connection* connection, CmdArgList args) {
+  std::string message = CreateMonitorTimestamp();
+
+  if (conn_state.script_info.has_value()) {
+    absl::StrAppend(&message, "lua] ");
+  } else {
+    absl::StrAppend(&message, connection->RemoteEndpointStr());
+  }
+  if (args.empty()) {
+    absl::StrAppend(&message, "error - empty cmd list!");
+  } else if (auto cmd_name = std::string_view(args[0].data(), args[0].size());
+             cmd_name == "AUTH") {  // we cannot just send auth details in this case
+    absl::StrAppend(&message, "\"", cmd_name, "\"");
+  } else {
+    message = std::accumulate(args.begin(), args.end(), message, [](auto str, const auto& cmd) {
+      absl::StrAppend(&str, " ", CmdEntryToMonitorFormat(std::string_view(cmd.data(), cmd.size())));
+      return str;
+    });
+  }
+  return message;
+}
+
+void DispatchMonitorIfNeeded(bool admin_cmd, ConnectionContext* connection, CmdArgList args) {
+  // We are not sending any admin command in the monitor, and we do not want to
+  // do any processing if we don't have any waiting connections with monitor
+  // enabled on them - see https://redis.io/commands/monitor/
+  const auto& my_monitors = ServerState::tlocal()->Monitors();
+  if (!(my_monitors.Empty() || admin_cmd)) {
+    //  We have connections waiting to get the info on the last command, send it to them
+    auto monitor_msg = MakeMonitorMessage(connection->conn_state, connection->owner(), args);
+    // Note that this is accepted by value for lifetime reasons
+    // we want to have our own copy since we are assuming that
+    // 1. there will be not to many connections that we in monitor state
+    // 2. we need to have for each of them each own copy for thread safe reasons
+    VLOG(1) << "sending command '" << monitor_msg << "' to the clients that registered on it";
+    shard_set->pool()->DispatchBrief(
+        [msg = std::move(monitor_msg)](unsigned idx, util::ProactorBase*) {
+          ServerState::tlocal()->Monitors().Send(msg);
+        });
+  }
+}
+
 class InterpreterReplier : public RedisReplyBuilder {
  public:
   InterpreterReplier(ObjectExplorer* explr) : RedisReplyBuilder(nullptr), explr_(explr) {
@@ -376,7 +475,7 @@ void Service::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_i
 void Service::Shutdown() {
   VLOG(1) << "Service::Shutdown";
 
-  // We mark that we are shuttind down. After this incoming requests will be
+  // We mark that we are shutting down. After this incoming requests will be
   // rejected
   pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Shutdown(); });
 
@@ -440,6 +539,11 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     if (cmd_name != "AUTH" && cmd_name != "QUIT") {
       return (*cntx)->SendError("-NOAUTH Authentication required.");
     }
+  }
+
+  // only reset and quit are allow if this connection is used for monitoring
+  if (dfly_cntx->monitor && (cmd_name != "RESET" && cmd_name != "QUIT")) {
+    return (*cntx)->SendError("Replica can't interact with the keyspace");
   }
 
   bool under_script = dfly_cntx->conn_state.script_info.has_value();
@@ -554,6 +658,8 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->reply_builder()->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
   }
+
+  DispatchMonitorIfNeeded(cid->opt_mask() & CO::ADMIN, dfly_cntx, args);
 
   end_usec = ProactorBase::GetMonotonicTimeNs();
 
@@ -726,6 +832,8 @@ void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
 
   SinkReplyBuilder* builder = cntx->reply_builder();
   builder->CloseConnection();
+
+  DeactivateMonitoring(static_cast<ConnectionContext*>(cntx));
   cntx->owner()->ShutdownSelf();
 }
 
@@ -973,7 +1081,8 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandRegistry& regis
 
   // The comparison can still be true even if a key expired due to another one being created.
   // So we have to check the watched_dirty flag, which is set if a key expired.
-  return watch_exist_count.load() == exec_info.watched_existed && !exec_info.watched_dirty.load(memory_order_relaxed);
+  return watch_exist_count.load() == exec_info.watched_existed &&
+         !exec_info.watched_dirty.load(memory_order_relaxed);
 }
 
 // Check if exec_info watches keys on dbs other than db_indx.
@@ -1180,6 +1289,13 @@ void Service::PubsubPatterns(ConnectionContext* cntx) {
   (*cntx)->SendLong(pattern_count);
 }
 
+void Service::Monitor(CmdArgList args, ConnectionContext* cntx) {
+  VLOG(1) << "starting monitor on this connection: " << cntx->owner()->GetClientInfo();
+  // we are registering the current connection for all threads so they will be aware of
+  // this connection, to send to it any command
+  cntx->ChangeMonitor(true /* start */);
+}
+
 void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() < 2) {
     (*cntx)->SendError(WrongNumArgsError(ArgS(args, 0)));
@@ -1273,6 +1389,8 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
     }
   }
 
+  DeactivateMonitoring(server_cntx);
+
   server_family_.OnClose(server_cntx);
 }
 
@@ -1316,6 +1434,7 @@ void Service::RegisterCommands() {
       << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(PSubscribe)
       << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(PUnsubscribe)
       << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0}.MFUNC(Function)
+      << CI{"MONITOR", CO::ADMIN, 1, 0, 0, 0}.MFUNC(Monitor)
       << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, 0}.MFUNC(Pubsub);
 
   StreamFamily::Register(&registry_);

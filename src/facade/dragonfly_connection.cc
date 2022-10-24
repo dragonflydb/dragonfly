@@ -109,6 +109,8 @@ struct Connection::RequestDeleter {
 // Please note: The call to the Dtor is mandatory for this!!
 // This class contain types that don't have trivial destructed objects
 struct Connection::Request {
+  using MonitorMessage = std::string;
+
   struct PipelineMsg {
     absl::FixedArray<MutableSlice, 6> args;
 
@@ -122,12 +124,15 @@ struct Connection::Request {
   };
 
  private:
-  using MessagePayload = std::variant<PipelineMsg, PubMsgRecord>;
+  using MessagePayload = std::variant<PipelineMsg, PubMsgRecord, MonitorMessage>;
 
   Request(size_t nargs, size_t capacity) : payload(PipelineMsg{nargs, capacity}) {
   }
 
   Request(PubMsgRecord msg) : payload(std::move(msg)) {
+  }
+
+  Request(MonitorMessage msg) : payload(std::move(msg)) {
   }
 
   Request(const Request&) = delete;
@@ -136,11 +141,20 @@ struct Connection::Request {
   // Overload to create the a new pipeline message
   static RequestPtr New(mi_heap_t* heap, RespVec args, size_t capacity);
 
-  // overload to create a new pubsub message
+  // Overload to create a new pubsub message
   static RequestPtr New(const PubMessage& pub_msg, fibers_ext::BlockingCounter bc);
+
+  // Overload to create a new the monitor message
+  static RequestPtr New(MonitorMessage msg);
 
   MessagePayload payload;
 };
+
+Connection::RequestPtr Connection::Request::New(std::string msg) {
+  void* ptr = mi_malloc(sizeof(Request));
+  Request* req = new (ptr) Request(std::move(msg));
+  return Connection::RequestPtr{req, Connection::RequestDeleter{}};
+}
 
 Connection::RequestPtr Connection::Request::New(mi_heap_t* heap, RespVec args, size_t capacity) {
   constexpr auto kReqSz = sizeof(Request);
@@ -159,6 +173,7 @@ Connection::RequestPtr Connection::Request::New(mi_heap_t* heap, RespVec args, s
     pipeline_msg.args[i] = MutableSlice(next, s);
     next += s;
   }
+
   return Connection::RequestPtr{req, Connection::RequestDeleter{}};
 }
 
@@ -491,8 +506,6 @@ auto Connection::ParseRedis() -> ParserStatus {
         service_->DispatchCommand(cmd_list, cc_.get());
         last_interaction_ = time(nullptr);
       } else {
-        VLOG(2) << "Dispatch async";
-
         // Dispatch via queue to speedup input reading.
         RequestPtr req = FromArgs(std::move(parse_args_), tlh);
 
@@ -655,18 +668,22 @@ auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, Pars
 
 struct Connection::DispatchOperations {
   DispatchOperations(SinkReplyBuilder* b, Connection* me)
-      : stats{me->service_->GetThreadLocalConnectionStats()}, builder{b},
-        empty{me->dispatch_q_.empty()}, self(me) {
+      : stats{me->service_->GetThreadLocalConnectionStats()}, builder{b}, self(me) {
   }
 
   void operator()(PubMsgRecord& msg);
   void operator()(Request::PipelineMsg& msg);
+  void operator()(const Request::MonitorMessage& msg);
 
   ConnectionStats* stats = nullptr;
   SinkReplyBuilder* builder = nullptr;
-  bool empty = false;
   Connection* self = nullptr;
 };
+
+void Connection::DispatchOperations::operator()(const Request::MonitorMessage& msg) {
+  RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
+  rbuilder->SendSimpleString(msg);
+}
 
 void Connection::DispatchOperations::operator()(PubMsgRecord& msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
@@ -690,7 +707,7 @@ void Connection::DispatchOperations::operator()(PubMsgRecord& msg) {
 
 void Connection::DispatchOperations::operator()(Request::PipelineMsg& msg) {
   ++stats->pipelined_cmd_cnt;
-
+  bool empty = self->dispatch_q_.empty();
   builder->SetBatchMode(!empty);
   self->cc_->async_dispatch = true;
   self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()}, self->cc_.get());
@@ -701,6 +718,9 @@ void Connection::DispatchOperations::operator()(Request::PipelineMsg& msg) {
 struct Connection::DispatchCleanup {
   void operator()(PubMsgRecord& msg) const {
     msg.bc.Dec();
+  }
+
+  void operator()(const Connection::Request::MonitorMessage&) const {
   }
 
   void operator()(const Connection::Request::PipelineMsg&) const {
@@ -767,6 +787,28 @@ void RespToArgList(const RespVec& src, CmdArgVec* dest) {
 
     (*dest)[i] = ToMSS(src[i].GetBuf());
   }
+}
+
+void Connection::SendMonitorMsg(std::string monitor_msg) {
+  DCHECK(cc_);
+
+  if (!cc_->conn_closing) {
+    RequestPtr req = Request::New(std::move(monitor_msg));
+    dispatch_q_.push_back(std::move(req));
+    if (dispatch_q_.size() == 1) {
+      evc_.notify();
+    }
+  }
+}
+
+std::string Connection::RemoteEndpointStr() const {
+  LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
+  bool unix_socket = lsb->IsUDS();
+  std::string connection_str = unix_socket ? "unix:" : std::string{};
+
+  auto re = lsb->RemoteEndpoint();
+  absl::StrAppend(&connection_str, re.address().to_string(), ":", re.port());
+  return connection_str;
 }
 
 }  // namespace facade
