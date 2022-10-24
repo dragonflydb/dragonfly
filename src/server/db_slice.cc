@@ -419,8 +419,6 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
       // Keep the entry but reset the object.
       size_t value_heap_size = existing->second.MallocUsed();
       db.stats.obj_memory_usage -= value_heap_size;
-      if (existing->second.ObjType() == OBJ_STRING)
-        db.stats.obj_memory_usage -= value_heap_size;
 
       existing->second.Reset();
       events_.expired_keys++;
@@ -735,6 +733,28 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
   ++events_.expired_keys;
 
   return make_pair(PrimeIterator{}, ExpireIterator{});
+}
+
+void DbSlice::ExpireAllIfNeeded() {
+  for (DbIndex db_index = 0; db_index < db_arr_.size(); db_index++) {
+    if (!db_arr_[db_index])
+      continue;
+    auto& db = *db_arr_[db_index];
+
+    auto cb = [&](ExpireTable::iterator exp_it) {
+      auto prime_it = db.prime.Find(exp_it->first);
+      if (!IsValid(prime_it)) {
+        LOG(ERROR) << "Expire entry " << exp_it->first.ToString() << " not found in prime table";
+        return;
+      }
+      ExpireIfNeeded(DbSlice::Context{db_index, GetCurrentTimeMs()}, prime_it);
+    };
+
+    ExpireTable::Cursor cursor;
+    do {
+      cursor = db.expire.Traverse(cursor, cb);
+    } while (cursor);
+  }
 }
 
 uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {

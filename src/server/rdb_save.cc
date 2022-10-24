@@ -143,9 +143,9 @@ uint8_t RdbObjectType(unsigned type, unsigned encoding) {
         return RDB_TYPE_ZSET_2;
       break;
     case OBJ_HASH:
-      if (encoding == OBJ_ENCODING_LISTPACK)
+      if (encoding == kEncodingListPack)
         return RDB_TYPE_HASH_ZIPLIST;
-      else if (encoding == OBJ_ENCODING_HT)
+      else if (encoding == kEncodingStrMap)
         return RDB_TYPE_HASH;
       break;
     case OBJ_STREAM:

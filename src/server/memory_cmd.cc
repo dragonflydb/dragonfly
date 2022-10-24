@@ -23,7 +23,7 @@ void MiStatsCallback(const char* msg, void* arg) {
   absl::StrAppend(str, msg);
 }
 
-// blocksize, reserved, commited, used.
+// blocksize, reserved, committed, used.
 using BlockKey = std::tuple<size_t, size_t, size_t, size_t>;
 using BlockMap = absl::flat_hash_map<BlockKey, uint64_t>;
 
@@ -47,7 +47,13 @@ void MemoryCmd::Run(CmdArgList args) {
     // dummy output, in practice not implemented yet.
     return (*cntx_)->SendLong(1);
   } else if (sub_cmd == "MALLOC-STATS") {
-    string res = shard_set->pool()->at(0)->AwaitBrief([this] { return MallocStats(); });
+    uint32_t tid = 0;
+    if (args.size() >= 3 && !absl::SimpleAtoi(ArgS(args, 2), &tid)) {
+      return (*cntx_)->SendError(kInvalidIntErr);
+    }
+    tid = tid % shard_set->pool()->size();
+    string res = shard_set->pool()->at(tid)->AwaitBrief([this] { return MallocStats(); });
+
     return (*cntx_)->SendBulkString(res);
   }
 
@@ -57,6 +63,8 @@ void MemoryCmd::Run(CmdArgList args) {
 
 string MemoryCmd::MallocStats() {
   string str;
+
+  uint64_t start = absl::GetCurrentTimeNanos();
   absl::StrAppend(&str, "___ Begin mimalloc statistics ___\n");
   mi_stats_print_out(MiStatsCallback, &str);
 
@@ -73,7 +81,8 @@ string MemoryCmd::MallocStats() {
                     get<2>(k_v.first), " ", get<3>(k_v.first), "\n");
   }
 
-  absl::StrAppend(&str, "--- End mimalloc statistics ---\n");
+  uint64_t delta = (absl::GetCurrentTimeNanos() - start) / 1000;
+  absl::StrAppend(&str, "--- End mimalloc statistics, took ", delta, "us ---\n");
 
   return str;
 }
