@@ -444,6 +444,17 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
   PrimeValue& prime_value = it->second;
   EngineShard* shard = op_args_.shard;
 
+  DbSlice& db_slice = shard->db_slice();
+
+  uint64_t at_ms;
+  if (params.keep_expire) {
+    at_ms = std::max((long unsigned int) 0, db_slice.ExpireTime(e_it) - op_args_.db_cntx.time_now_ms);
+  } else if (params.expire_after_ms) {
+    at_ms = params.expire_after_ms + op_args_.db_cntx.time_now_ms;
+  } else {
+    at_ms = 0;
+  }
+
   if (params.prev_val) {
     if (prime_value.ObjType() != OBJ_STRING)
       return OpStatus::WRONG_TYPE;
@@ -452,16 +463,19 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
     params.prev_val->emplace(move(val));
   }
 
-  DbSlice& db_slice = shard->db_slice();
-  uint64_t at_ms =
-      params.expire_after_ms ? params.expire_after_ms + op_args_.db_cntx.time_now_ms : 0;
   if (IsValid(e_it) && at_ms) {
     e_it->second = db_slice.FromAbsoluteTime(at_ms);
   } else {
     // We need to update expiry, or maybe erase the object if it was expired.
     bool changed = db_slice.UpdateExpire(op_args_.db_cntx.db_index, it, at_ms);
-    if (changed && at_ms == 0)  // erased.
-      return OpStatus::OK;      // TODO: to update journal with deletion.
+    if (changed && at_ms == 0) { // erased.
+      // We only want to reset `prev_val` if there is an expiry
+      // If not `prev_val` should be preserved
+      if ((params.keep_expire || params.expire_after_ms) && params.prev_val)
+        params.prev_val->reset();
+
+      return OpStatus::OK; // TODO: to update journal with deletion.    
+    }
   }
 
   db_slice.PreUpdate(op_args_.db_cntx.db_index, it);
@@ -550,8 +564,12 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       sparams.how = SetCmd::SET_IF_NOTEXIST;
     } else if (cur_arg == "XX") {
       sparams.how = SetCmd::SET_IF_EXISTS;
+    } else if (cur_arg == "GET") {
+      std::optional<std::string> prev_val = std::make_optional(std::string(""));
+
+      sparams.prev_val = &prev_val;
     } else if (cur_arg == "KEEPTTL") {
-      sparams.keep_expire = true;  // TODO
+      sparams.keep_expire = true;
     } else {
       return builder->SendError(kSyntaxErr);
     }
@@ -560,6 +578,9 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   const auto result{SetGeneric(cntx, sparams, key, value)};
 
   if (result == OpStatus::OK) {
+    if (sparams.prev_val && sparams.prev_val->has_value())
+      return builder->SendSimpleString(**sparams.prev_val);
+
     return builder->SendStored();
   }
 

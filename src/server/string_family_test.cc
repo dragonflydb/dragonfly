@@ -48,6 +48,12 @@ TEST_F(StringFamilyTest, SetGet) {
   EXPECT_EQ(Run({"get", "key1"}), "1");
   EXPECT_EQ(Run({"set", "key", "2"}), "OK");
   EXPECT_EQ(Run({"get", "key"}), "2");
+
+  Run({"set", "foo", "bar", "px", "20"});
+  AdvanceTime(10);
+  EXPECT_EQ(Run({"get", "foo"}), "bar");
+  AdvanceTime(10);
+  EXPECT_EQ(Run({"set", "foo", "baz", "get", "keepttl"}), "OK");
 }
 
 TEST_F(StringFamilyTest, Incr) {
@@ -112,6 +118,10 @@ TEST_F(StringFamilyTest, Set) {
 
   resp = Run({"set", "foo", "bar", "ex", "1"});
   ASSERT_THAT(resp, "OK");
+
+  Run({"set", "foo", "bar"});
+  resp = Run({"set", "foo", "baz", "get"});
+  ASSERT_THAT(resp, "bar");
 }
 
 TEST_F(StringFamilyTest, SetHugeKey) {
