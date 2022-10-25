@@ -1504,7 +1504,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
     std::string_view arg = ArgS(args, i + 1);
     if (cmd == "CAPA") {
       if (arg == "dragonfly" && args.size() == 3 && i == 1) {
-        uint32_t sid = dfly_cmd_->AllocateSyncSession();
+        uint32_t sid = dfly_cmd_->CreateSyncSession();
         cntx->owner()->SetName(absl::StrCat("repl_ctrl_", sid));
 
         string sync_id = absl::StrCat("SYNC", sid);
