@@ -730,15 +730,11 @@ class RdbSaver::Impl {
   // correct closing semantics - channel is closing when K producers marked it as closed.
   Impl(bool align_writes, unsigned producers_len, io::Sink* sink);
 
-  error_code SaveAuxFieldStrStr(string_view key, string_view val);
+  void StartSnapshotting(bool stream_journal, EngineShard* shard);
 
-  RdbSerializer* serializer() {
-    return &meta_serializer_;
-  }
+  void StopSnapshotting(EngineShard* shard);
 
   error_code ConsumeChannel();
-
-  void StartSnapshotting(bool include_journal_changes, EngineShard* shard);
 
   error_code Flush() {
     if (aligned_buf_)
@@ -747,17 +743,25 @@ class RdbSaver::Impl {
     return error_code{};
   }
 
+  void FillFreqMap(RdbTypeFreqMap* dest) const;
+
+  error_code SaveAuxFieldStrStr(string_view key, string_view val);
+
   size_t Size() const {
     return shard_snapshots_.size();
   }
 
-  void FillFreqMap(RdbTypeFreqMap* dest) const;
+  RdbSerializer* serializer() {
+    return &meta_serializer_;
+  }
 
  private:
+  unique_ptr<SliceSnapshot>& GetSnapshot(EngineShard* shard);
+
   io::Sink* sink_;
+  vector<unique_ptr<SliceSnapshot>> shard_snapshots_;
   // used for serializing non-body components in the calling fiber.
   RdbSerializer meta_serializer_;
-  vector<unique_ptr<SliceSnapshot>> shard_snapshots_;
   SliceSnapshot::RecordChannel channel_;
   std::optional<AlignedBuffer> aligned_buf_;
 };
@@ -765,8 +769,8 @@ class RdbSaver::Impl {
 // We pass K=sz to say how many producers are pushing data in order to maintain
 // correct closing semantics - channel is closing when K producers marked it as closed.
 RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, io::Sink* sink)
-    : sink_(sink), meta_serializer_(sink),
-      shard_snapshots_(producers_len), channel_{128, producers_len} {
+    : sink_(sink), shard_snapshots_(producers_len),
+      meta_serializer_(sink), channel_{128, producers_len} {
   if (align_writes) {
     aligned_buf_.emplace(kBufLen, sink);
     meta_serializer_.set_sink(&aligned_buf_.value());
@@ -842,15 +846,15 @@ error_code RdbSaver::Impl::ConsumeChannel() {
   return io_error;
 }
 
-void RdbSaver::Impl::StartSnapshotting(bool include_journal_changes, EngineShard* shard) {
-  auto s = make_unique<SliceSnapshot>(&shard->db_slice(), &channel_);
+void RdbSaver::Impl::StartSnapshotting(bool stream_journal, EngineShard* shard) {
+  auto& s = GetSnapshot(shard);
+  s.reset(new SliceSnapshot(&shard->db_slice(), &channel_));
 
-  s->Start(include_journal_changes);
+  s->Start(stream_journal);
+}
 
-  // For single shard configuration, we maintain only one snapshot,
-  // so we do not have to map it via shard_id.
-  unsigned sid = shard_snapshots_.size() == 1 ? 0 : shard->shard_id();
-  shard_snapshots_[sid] = move(s);
+void RdbSaver::Impl::StopSnapshotting(EngineShard* shard) {
+  GetSnapshot(shard)->Stop();
 }
 
 void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {
@@ -859,6 +863,14 @@ void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {
     for (const auto& k_v : src_map)
       (*dest)[k_v.first] += k_v.second;
   }
+}
+
+unique_ptr<SliceSnapshot>& RdbSaver::Impl::GetSnapshot(EngineShard* shard) {
+  // For single shard configuration, we maintain only one snapshot,
+  // so we do not have to map it via shard_id.
+  unsigned sid = shard_snapshots_.size() == 1 ? 0 : shard->shard_id();
+  CHECK(sid < shard_snapshots_.size());
+  return shard_snapshots_[sid];
 }
 
 RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes) {
@@ -882,6 +894,14 @@ RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes) {
 }
 
 RdbSaver::~RdbSaver() {
+}
+
+void RdbSaver::StartSnapshotInShard(bool stream_journal, EngineShard* shard) {
+  impl_->StartSnapshotting(stream_journal, shard);
+}
+
+void RdbSaver::StopSnapshotInShard(EngineShard* shard) {
+  impl_->StopSnapshotting(shard);
 }
 
 error_code RdbSaver::SaveHeader(const StringVec& lua_scripts) {
@@ -914,10 +934,6 @@ error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
   }
 
   return error_code{};
-}
-
-void RdbSaver::StartSnapshotInShard(bool include_journal_changes, EngineShard* shard) {
-  impl_->StartSnapshotting(include_journal_changes, shard);
 }
 
 error_code RdbSaver::SaveAux(const StringVec& lua_scripts) {
