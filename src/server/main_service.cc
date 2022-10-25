@@ -50,6 +50,11 @@ ABSL_DECLARE_FLAG(string, requirepass);
 
 namespace dfly {
 
+#if __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
+#include <sys/syscall.h>
+#define gettid() syscall(SYS_gettid)
+#endif
+
 using namespace util;
 using base::VarzValue;
 using ::boost::intrusive_ptr;
