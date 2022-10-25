@@ -126,12 +126,12 @@ auto CmdEntryToMonitorFormat(std::string_view str) -> std::string {
 
 std::string MakeMonitorMessage(const ConnectionState& conn_state,
                                const facade::Connection* connection, CmdArgList args) {
-  std::string message = CreateMonitorTimestamp();
+  std::string message = absl::StrCat(CreateMonitorTimestamp(), " [", conn_state.db_index);
 
   if (conn_state.script_info.has_value()) {
-    absl::StrAppend(&message, "lua] ");
+    absl::StrAppend(&message, " lua] ");
   } else {
-    absl::StrAppend(&message, connection->RemoteEndpointStr());
+    absl::StrAppend(&message, " ", connection->RemoteEndpointStr(), "] ");
   }
   if (args.empty()) {
     absl::StrAppend(&message, "error - empty cmd list!");
@@ -1293,6 +1293,7 @@ void Service::Monitor(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "starting monitor on this connection: " << cntx->owner()->GetClientInfo();
   // we are registering the current connection for all threads so they will be aware of
   // this connection, to send to it any command
+  (*cntx)->SendOk();
   cntx->ChangeMonitor(true /* start */);
 }
 
