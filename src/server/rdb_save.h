@@ -70,6 +70,13 @@ class RdbSaver {
 
   ~RdbSaver();
 
+  // Initiates the serialization in the shard's thread.
+  // TODO: to implement break functionality to allow stopping early.
+  void StartSnapshotInShard(bool stream_journal, EngineShard* shard);
+
+  // Stops serialization in journal streaming mode in the shard's thread.
+  void StopSnapshotInShard(EngineShard* shard);
+
   // Stores auxiliary (meta) values and lua scripts.
   std::error_code SaveHeader(const StringVec& lua_scripts);
 
@@ -77,10 +84,6 @@ class RdbSaver {
   // Fills freq_map with the histogram of rdb types.
   // freq_map can optionally be null.
   std::error_code SaveBody(RdbTypeFreqMap* freq_map);
-
-  // Initiates the serialization in the shard's thread.
-  // TODO: to implement break functionality to allow stopping early.
-  void StartSnapshotInShard(bool include_journal_changes, EngineShard* shard);
 
   SaveMode Mode() const { return save_mode_; }
 
