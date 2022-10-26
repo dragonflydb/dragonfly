@@ -872,7 +872,7 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
 
     // Save summary file.
     {
-      const auto& scripts = script_mgr_->GetLuaScripts();
+      const auto scripts = script_mgr_->GetLuaScripts();
       auto& summary_snapshot = snapshots[shard_set->size()];
       summary_snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
       if (ec = DoPartialSave(filename, path, now, scripts, summary_snapshot.get(), nullptr)) {

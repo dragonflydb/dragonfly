@@ -358,8 +358,8 @@ error_code Replica::Greet() {
     master_context_.dfly_session_id = param1;
     num_df_flows_ = param2;
 
-    VLOG(1) << "Master id: " << param0 << ", sync id: " << param1
-            << ", num journals " << num_df_flows_;
+    VLOG(1) << "Master id: " << param0 << ", sync id: " << param1 << ", num journals "
+            << num_df_flows_;
   } else {
     LOG(ERROR) << "Bad response " << ToSV(io_buf.InputBuffer());
 
@@ -473,6 +473,27 @@ error_code Replica::InitiateDflySync() {
 
   if (ec)
     return ec;
+
+   ReqSerializer serializer{sock_.get()};
+
+  // Master waits for this command in order to start sending replication stream.
+  serializer.SendCommand(StrCat("DFLY SYNC ", master_context_.dfly_session_id));
+  RETURN_ON_ERR(serializer.ec());
+
+  base::IoBuf io_buf{128};
+  unsigned consumed = 0;
+  RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
+  if (resp_args_.size() != 1 || resp_args_.front().type != RespExpr::STRING ||
+      ToSV(resp_args_.front().GetBuf()) != "OK") {
+    LOG(ERROR) << "Sync failed " << ToSV(io_buf.InputBuffer());
+    return make_error_code(errc::bad_message);
+  }
+
+  for (unsigned i = 0; i < num_df_flows_; ++i) {
+    shard_flows_[i]->sync_fb_.join();
+  }
+
+  LOG(INFO) << "Full sync finished";
 
   state_mask_ |= R_SYNC_OK;
 
@@ -710,6 +731,28 @@ error_code Replica::ParseAndExecute(base::IoBuf* io_buf) {
   return error_code{};
 }
 
+void Replica::ReplicateDFFb(unique_ptr<base::IoBuf> io_buf, string eof_token) {
+  SocketSource ss{sock_.get()};
+  io::PrefixSource ps{io_buf->InputBuffer(), &ss};
+
+  RdbLoader loader(NULL);
+  loader.Load(&ps);
+
+  if (!eof_token.empty()) {
+    unique_ptr<uint8_t[]> buf(new uint8_t[eof_token.size()]);
+    // pass leftover data from the loader.
+    io::PrefixSource chained(loader.Leftover(), &ps);
+    VLOG(1) << "Before reading from chained stream";
+    io::Result<size_t> eof_res = chained.Read(io::MutableBytes{buf.get(), eof_token.size()});
+    if (!eof_res || *eof_res != eof_token.size()) {
+      LOG(ERROR) << "Error finding eof token in the stream";
+    }
+
+    // TODO - to compare tokens
+  }
+  VLOG(1) << "ReplicateDFFb finished after reading " << loader.bytes_read() << " bytes";
+}
+
 error_code Replica::StartFlow() {
   CHECK(!sock_);
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
@@ -720,21 +763,41 @@ error_code Replica::StartFlow() {
   sock_.reset(mythread->CreateSocket());
   RETURN_ON_ERR(sock_->Connect(master_context_.master_ep));
 
+  VLOG(1) << "Sending on flow " << master_context_.master_repl_id << " " << master_context_.dfly_session_id
+    << " " << master_context_.flow_id;
+
   ReqSerializer serializer{sock_.get()};
-  serializer.SendCommand(StrCat("DFLY SYNC ", master_context_.master_repl_id, " ",
+  serializer.SendCommand(StrCat("DFLY FLOW ", master_context_.master_repl_id, " ",
                                 master_context_.dfly_session_id, " ", master_context_.flow_id));
   RETURN_ON_ERR(serializer.ec());
 
   parser_.reset(new RedisParser{false});  // client mode
-  base::IoBuf io_buf{128};
-  unsigned consumed = 0;
-  RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
 
-  if (resp_args_.size() != 1 || resp_args_.front().type != RespExpr::STRING ||
-      ToSV(resp_args_.front().GetBuf()) != "OK") {
-    LOG(ERROR) << "Bad SYNC response " << ToSV(io_buf.InputBuffer());
+  std::unique_ptr<base::IoBuf> io_buf{new base::IoBuf(128)};
+  unsigned consumed = 0;
+  RETURN_ON_ERR(ReadRespReply(io_buf.get(), &consumed));  // uses parser_
+
+  if (resp_args_.size() < 2 || resp_args_[0].type != RespExpr::STRING ||
+      resp_args_[1].type != RespExpr::STRING) {
+    LOG(ERROR) << "Bad FLOW response " << ToSV(io_buf->InputBuffer());
     return make_error_code(errc::bad_message);
   }
+
+  string_view flow_directive = ToSV(resp_args_[0].GetBuf());
+  string eof_token;
+  if (flow_directive == "FULL") {
+    eof_token = ToSV(resp_args_[1].GetBuf());
+  } else {
+    LOG(ERROR) << "Bad FLOW response " << ToSV(io_buf->InputBuffer());
+  }
+  io_buf->ConsumeInput(consumed);
+
+  state_mask_ = R_ENABLED | R_TCP_CONNECTED;
+
+  // We can not discard io_buf because it may contain data
+  // besides the response we parsed. Therefore we pass it further to ReplicateDFFb.
+  sync_fb_ =
+      ::boost::fibers::fiber(&Replica::ReplicateDFFb, this, std::move(io_buf), move(eof_token));
 
   return error_code{};
 }
