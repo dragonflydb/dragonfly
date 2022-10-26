@@ -55,7 +55,7 @@ string WrongNumArgsError(string_view cmd) {
 }
 
 string InvalidExpireTime(string_view cmd) {
-  return absl::StrCat("invalid expire time in '", cmd, "' command");
+  return absl::StrCat("invalid expire time in '", absl::AsciiStrToLower(cmd), "' command");
 }
 
 string UnknownSubCmd(string_view subcmd, string_view cmd) {
