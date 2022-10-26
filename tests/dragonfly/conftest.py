@@ -11,6 +11,10 @@ import time
 
 import pytest
 import redis
+import aioredis
+import asyncio
+
+DATABASE_INDEX = 1
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -66,9 +70,11 @@ def df_server(request, tmp_dir: Path, test_env):
         print(outs)
         print(errs)
 
+
 @pytest.fixture(scope="function")
 def connection(df_server):
     return redis.Connection()
+
 
 @pytest.fixture(scope="class")
 def raw_client(df_server):
@@ -77,8 +83,24 @@ def raw_client(df_server):
     client = redis.Redis(connection_pool=pool)
     return client
 
+
 @pytest.fixture
 def client(raw_client):
     """ Flushes all the records, runs before each test. """
     raw_client.flushall()
     return raw_client
+
+
+@pytest.fixture(scope="function")
+def async_pool(df_server):
+    pool = aioredis.ConnectionPool(host="localhost", port=6379,
+                                   db=DATABASE_INDEX, decode_responses=True, max_connections=16)
+    return pool
+
+
+@pytest.fixture(scope="function")
+def event_loop():
+    policy = asyncio.get_event_loop_policy()
+    loop = policy.new_event_loop()
+    yield loop
+    loop.close()

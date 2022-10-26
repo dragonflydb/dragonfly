@@ -5,7 +5,22 @@
 
 The tests assume you have the "dragonfly" binary in `<root>/build-dbg` directory.
 You can override the location of the binary using `DRAGONFLY_HOME` environment var.
-
+### Before you start
+Please make sure that you have python 3 installed on you local host.
+If have more both python 2 and python 3 installed on you host, you can run the tests with the following command:
+```
+python3 -m pytest -xv dragonfly
+```
+It is advisable to use you python virtual environment: [python virtual environment](https://docs.python.org/3/library/venv.html).
+To activate it, run:
+```
+source <virtual env name>/bin/activate
+```
+Then install all the required dependencies for the tests:
+```
+pip install -r dragonfly/requirements.txt
+```
+### Running the tests
 to run pytest, run:
 `pytest -xv dragonfly`
 
@@ -38,7 +53,21 @@ Parameters can use environmental variables with a formatted string where `"{<VAR
 ### Test Examples
 - **[blpop_test](./dragonfly/blpop_test.py)**: Simple test case interacting with Dragonfly
 - **[snapshot_test](./dragonfly/snapshot_test.py)**: Example test using `@dfly_args`, environment variables and pre-test setup
-- **[key_limt_test](./dragonfly/key_limit_test.py)**: Example test using `@dfly_multi_test_args`
+- **[key_limit_test](./dragonfly/key_limit_test.py)**: Example test using `@dfly_multi_test_args`
+- **[connection_test](./dragonfly/connection_test.py)**: Example for testing running with asynchronous multiple connections. 
+
+### Writing your own fixtures
+The fixture functions located in [conftest.py](./dragonfly/conftest.py).
+You can write your own fixture inside this file, as seem fit. Just make sure, before adding new fixture that there maybe one already written.
+Try to make the fixture running at the smallest scope possible to ensure that the test can be independent of each other (this will ensure no side effect - match our policy of "share nothing").
+
+### Managing test environment
+Do forget to add any new dependency that you may created to [dragonfly/requirement.txt](./dragonfly/requirements.txt) file.
+You can do so by running
+```
+pip3 freeze > requirements.txt 
+```
+from [dragonfly](./dragonfly/) directory.
 
 # Integration tests
 To simplify running integration test each package should have its own Dockerfile. The Dockerfile should contain everything needed in order to test the package against Dragonfly. Docker can assume Dragonfly is running on localhost:6379.
