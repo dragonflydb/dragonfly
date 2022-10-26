@@ -51,7 +51,9 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
 #undef ADD
 
 string WrongNumArgsError(string_view cmd) {
-  return absl::StrCat("wrong number of arguments for '", cmd, "' command");
+  string lcmd(cmd);
+  absl::AsciiStrToLower(&lcmd);
+  return absl::StrCat("wrong number of arguments for '", lcmd, "' command");
 }
 
 string InvalidExpireTime(string_view cmd) {
