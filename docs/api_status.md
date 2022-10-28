@@ -202,8 +202,8 @@ with respect to Memcached and Redis APIs.
   - [ ] PFMERGE
 
 ### API 3
-- [ ] Generic Family
-  - [ ] TOUCH
+- [X] Generic Family
+  - [X] TOUCH
 - [X] HashSet Family
   - [X] HSTRLEN
 - [X] Server Family
