@@ -738,13 +738,13 @@ void GenericFamily::Keys(CmdArgList args, ConnectionContext* cntx) {
   string_view pattern(ArgS(args, 1));
   uint64_t cursor = 0;
 
-  StringVec keys;
+  auto output_limit = absl::GetFlag(FLAGS_keys_output_limit);
 
   ScanOpts scan_opts;
   scan_opts.pattern = pattern;
-  scan_opts.limit = 512;
-  auto output_limit = absl::GetFlag(FLAGS_keys_output_limit);
+  scan_opts.limit = std::min(output_limit, 512U);
 
+  StringVec keys;
   do {
     cursor = ScanGeneric(cursor, scan_opts, &keys, cntx);
   } while (cursor != 0 && keys.size() < output_limit);
