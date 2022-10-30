@@ -4,7 +4,7 @@
 ## Pytest
 
 The tests assume you have the "dragonfly" binary in `<root>/build-dbg` directory.
-You can override the location of the binary using `DRAGONFLY_HOME` environment var.
+You can override the location of the binary using `DRAGONFLY_PATH` environment var.
 ### Before you start
 Please make sure that you have python 3 installed on you local host.
 If have more both python 2 and python 3 installed on you host, you can run the tests with the following command:
@@ -39,9 +39,8 @@ Pytest allows for parameters with a specific name to be automatically resolved t
 | ----- | ---- | ----- | ----------- |
 | tmp_dir | [pathlib.Path](https://docs.python.org/3/library/pathlib.html) | Session | The temporary directory the Dragonfly binary will be running in. The environment variable `DRAGONFLY_TMP` is also set to this value |
 | test_env | `dict` | Session | The environment variables used when running Dragonfly as a dictionary |
-| client | [redis.Redis](https://redis-py.readthedocs.io/en/stable/connections.html#generic-client) | Class | The redis client to interact with the Dragonfly instance | 
-
-To avoid the overhead of spawning a Dragonfly process for every test the `client` provided fixture has a `Class` scope which means that all test functions in the same class will interact with the same Dragonfly instance.
+| client | [redis.Redis](https://redis-py.readthedocs.io/en/stable/connections.html#generic-client) | Class | The redis client to interact with the Dragonfly instance |
+| async_client | [aioredis.Redis](https://aioredis.readthedocs.io/en/latest/api/high-level/#aioredis.client.Redis) | Class | The async redis client to interact with the Dragonfly instance |
 
 ### Passing CLI commands to Dragonfly
 To pass custom flags to the Dragonfly executable two class decorators have been created. `@dfly_args` allows you to pass a list of parameters to the Dragonfly executable, similarly `@dfly_multi_test_args` allows you to specify multiple parameter configurations to test with a given test class.
@@ -51,10 +50,9 @@ In the case of `@dfly_multi_test_args` each parameter configuration will create 
 Parameters can use environmental variables with a formatted string where `"{<VAR>}"` will be replaced with the value of the `<VAR>` environment variable. Due to [current pytest limtations](https://github.com/pytest-dev/pytest/issues/349) fixtures cannot be passed to either of these decorators, this is currently the provided way to pass the temporary directory path in a CLI parameter.
 
 ### Test Examples
-- **[blpop_test](./dragonfly/blpop_test.py)**: Simple test case interacting with Dragonfly
 - **[snapshot_test](./dragonfly/snapshot_test.py)**: Example test using `@dfly_args`, environment variables and pre-test setup
-- **[key_limit_test](./dragonfly/key_limit_test.py)**: Example test using `@dfly_multi_test_args`
-- **[connection_test](./dragonfly/connection_test.py)**: Example for testing running with asynchronous multiple connections. 
+- **[generic_test](./dragonfly/generic_test.py)**: Example test using `@dfly_multi_test_args`
+- **[connection_test](./dragonfly/connection_test.py)**: Example for testing running with multiple asynchronous connections.
 
 ### Writing your own fixtures
 The fixture functions located in [conftest.py](./dragonfly/conftest.py).
@@ -70,6 +68,8 @@ pip3 freeze > requirements.txt
 from [dragonfly](./dragonfly/) directory.
 
 # Integration tests
+Integration tests are located in the `integration` folder.
+
 To simplify running integration test each package should have its own Dockerfile. The Dockerfile should contain everything needed in order to test the package against Dragonfly. Docker can assume Dragonfly is running on localhost:6379.
 To run the test:
 ```
