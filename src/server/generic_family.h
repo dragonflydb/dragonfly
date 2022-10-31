@@ -32,7 +32,6 @@ class GenericFamily {
   static OpResult<uint32_t> OpExists(const OpArgs& op_args, ArgSlice keys);
 
  private:
-
   static void Del(CmdArgList args, ConnectionContext* cntx);
   static void Ping(CmdArgList args, ConnectionContext* cntx);
   static void Exists(CmdArgList args, ConnectionContext* cntx);

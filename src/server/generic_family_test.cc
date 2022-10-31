@@ -94,6 +94,17 @@ TEST_F(GenericFamilyTest, Exists) {
   EXPECT_THAT(resp, IntArg(3));
 }
 
+TEST_F(GenericFamilyTest, Touch) {
+  RespExpr resp;
+
+  Run({"mset", "x", "0", "y", "1"});
+  resp = Run({"touch", "x", "y", "x"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  resp = Run({"touch", "z", "x", "w"});
+  EXPECT_THAT(resp, IntArg(1));
+}
+
 TEST_F(GenericFamilyTest, Rename) {
   RespExpr resp;
   string b_val(32, 'b');
