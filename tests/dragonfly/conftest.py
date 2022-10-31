@@ -3,6 +3,7 @@ Pytest fixtures to be provided for all tests without import
 """
 
 import os
+import sys
 import pytest
 import pytest_asyncio
 import redis
@@ -61,7 +62,16 @@ def df_server(df_factory: DflyInstanceFactory) -> DflyInstance:
     instance = df_factory.create()
     instance.start()
     yield instance
+
+    clients_left = None
+    try:
+        client = redis.Redis(port=instance.port)
+        clients_left = client.execute_command("INFO")['connected_clients']
+    except Exception as e:
+        print(e, file=sys.stderr)
+
     instance.stop()
+    assert clients_left == 1
 
 
 @pytest.fixture(scope="class")
@@ -72,7 +82,8 @@ def connection(df_server: DflyInstance):
 @pytest.fixture(scope="class")
 def sync_pool(df_server: DflyInstance):
     pool = redis.ConnectionPool(decode_responses=True, port=df_server.port)
-    return pool
+    yield pool
+    pool.disconnect()
 
 
 @pytest.fixture(scope="class")
@@ -85,11 +96,12 @@ def client(sync_pool):
     return client
 
 
-@pytest.fixture(scope="class")
-def async_pool(df_server: DflyInstance):
+@pytest_asyncio.fixture(scope="function")
+async def async_pool(df_server: DflyInstance):
     pool = aioredis.ConnectionPool(host="localhost", port=df_server.port,
                                    db=DATABASE_INDEX, decode_responses=True, max_connections=16)
-    return pool
+    yield pool
+    await pool.disconnect()
 
 
 @pytest_asyncio.fixture(scope="function")

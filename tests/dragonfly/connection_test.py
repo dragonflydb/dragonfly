@@ -152,6 +152,8 @@ async def run_pubsub(async_client, messages, channel_name):
 
     await future
     status, message = future.result()
+
+    await pubsub.close()
     if status and success:
         return True, "successfully completed all"
     else:
