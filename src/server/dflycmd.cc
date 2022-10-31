@@ -262,6 +262,7 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
     return rb->SendError(kInvalidState);
 
   // Check all flows are connected.
+  // This might happen if a flow abruptly disconnected before sending the SYNC request.
   for (const FlowInfo& flow : sync_info->flows) {
     if (!flow.conn) {
       return rb->SendError(kInvalidState);
@@ -317,9 +318,9 @@ void DflyCmd::FullSyncFb(FlowInfo* flow) {
 
   if (saver->Mode() == SaveMode::SUMMARY) {
     auto scripts = sf_->script_mgr()->GetLuaScripts();
-    saver->SaveHeader(scripts);
+    ec = saver->SaveHeader(scripts);
   } else {
-    saver->SaveHeader({});
+    ec = saver->SaveHeader({});
   }
 
   if (ec) {

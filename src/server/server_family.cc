@@ -899,7 +899,7 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
     VLOG(1) << "Saving to " << path;
 
     snapshots[0].reset(new RdbSnapshot(fq_threadpool_.get()));
-    const auto& lua_scripts = script_mgr_->GetLuaScripts();
+    const auto lua_scripts = script_mgr_->GetLuaScripts();
     ec = snapshots[0]->Start(SaveMode::RDB, path.generic_string(), lua_scripts);
 
     if (!ec) {
