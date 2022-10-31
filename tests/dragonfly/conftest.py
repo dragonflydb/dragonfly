@@ -2,24 +2,19 @@
 Pytest fixtures to be provided for all tests without import
 """
 
+import os
+import sys
+import pytest
+import pytest_asyncio
+import redis
+import aioredis
+
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-import os
-import subprocess
-import time
-
-import pytest
-import redis
-import aioredis
-import asyncio
+from . import DflyInstance, DflyInstanceFactory
 
 DATABASE_INDEX = 1
-
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-DRAGONFLY_PATH = os.environ.get("DRAGONFLY_HOME", os.path.join(
-    SCRIPT_DIR, '../../build-dbg/dragonfly'))
 
 
 @pytest.fixture(scope="session")
@@ -45,62 +40,75 @@ def test_env(tmp_dir: Path):
     return env
 
 
-@pytest.fixture(scope="class", params=[[]])
-def df_server(request, tmp_dir: Path, test_env):
-    """ Starts a single DragonflyDB process, runs once per test class. """
-    print(f"Starting DragonflyDB [{DRAGONFLY_PATH}]")
-    arguments = [arg.format(**test_env) for arg in request.param]
-    dfly_proc = subprocess.Popen([DRAGONFLY_PATH, *arguments],
-                                 env=test_env, cwd=str(tmp_dir))
-    time.sleep(0.3)
-    return_code = dfly_proc.poll()
-    if return_code is not None:
-        dfly_proc.terminate()
-        pytest.exit(f"Failed to start DragonflyDB [{DRAGONFLY_PATH}]")
+@pytest.fixture(scope="session", params=[{}])
+def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
+    """
+    Create an instance factory with supplied params.
+    """
+    scripts_dir = os.path.dirname(os.path.abspath(__file__))
+    path = os.environ.get("DRAGONFLY_PATH", os.path.join(
+        scripts_dir, '../../build-dbg/dragonfly'))
 
-    yield
+    args = request.param if request.param else {}
+    return DflyInstanceFactory(test_env, tmp_dir, path=path, args=args)
 
-    print(f"Terminating DragonflyDB process [{dfly_proc.pid}]")
+
+@pytest.fixture(scope="session")
+def df_server(df_factory: DflyInstanceFactory) -> DflyInstance:
+    """
+    Start the default Dragonfly server that will be used for the default pools
+    and clients.
+    """
+    instance = df_factory.create()
+    instance.start()
+    yield instance
+
+    clients_left = None
     try:
-        dfly_proc.terminate()
-        outs, errs = dfly_proc.communicate(timeout=15)
-    except subprocess.TimeoutExpired:
-        print("Unable to terminate DragonflyDB gracefully, it was killed")
-        outs, errs = dfly_proc.communicate()
-        print(outs)
-        print(errs)
+        client = redis.Redis(port=instance.port)
+        clients_left = client.execute_command("INFO")['connected_clients']
+    except Exception as e:
+        print(e, file=sys.stderr)
 
-
-@pytest.fixture(scope="function")
-def connection(df_server):
-    return redis.Connection()
+    instance.stop()
+    assert clients_left == 1
 
 
 @pytest.fixture(scope="class")
-def raw_client(df_server):
-    """ Creates the Redis client to interact with the Dragonfly instance """
-    pool = redis.ConnectionPool(decode_responses=True)
-    client = redis.Redis(connection_pool=pool)
+def connection(df_server: DflyInstance):
+    return redis.Connection(port=df_server.port)
+
+
+@pytest.fixture(scope="class")
+def sync_pool(df_server: DflyInstance):
+    pool = redis.ConnectionPool(decode_responses=True, port=df_server.port)
+    yield pool
+    pool.disconnect()
+
+
+@pytest.fixture(scope="class")
+def client(sync_pool):
+    """
+    Return a client to the default instance with all entries flushed.
+    """
+    client = redis.Redis(connection_pool=sync_pool)
+    client.flushall()
     return client
 
 
-@pytest.fixture
-def client(raw_client):
-    """ Flushes all the records, runs before each test. """
-    raw_client.flushall()
-    return raw_client
-
-
-@pytest.fixture(scope="function")
-def async_pool(df_server):
-    pool = aioredis.ConnectionPool(host="localhost", port=6379,
+@pytest_asyncio.fixture(scope="function")
+async def async_pool(df_server: DflyInstance):
+    pool = aioredis.ConnectionPool(host="localhost", port=df_server.port,
                                    db=DATABASE_INDEX, decode_responses=True, max_connections=16)
-    return pool
+    yield pool
+    await pool.disconnect()
 
 
-@pytest.fixture(scope="function")
-def event_loop():
-    policy = asyncio.get_event_loop_policy()
-    loop = policy.new_event_loop()
-    yield loop
-    loop.close()
+@pytest_asyncio.fixture(scope="function")
+async def async_client(async_pool):
+    """
+    Return an async client to the default instance with all entries flushed.
+    """
+    client = aioredis.Redis(connection_pool=async_pool)
+    await client.flushall()
+    return client

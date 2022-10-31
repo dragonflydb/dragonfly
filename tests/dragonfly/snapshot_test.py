@@ -9,7 +9,7 @@ import glob
 from pathlib import Path
 from dragonfly import dfly_args
 
-BASIC_ARGS = ["--alsologtostderr", "--dir", "{DRAGONFLY_TMP}/"]
+BASIC_ARGS = {"dir": "{DRAGONFLY_TMP}/"}
 
 
 class SnapshotTestBase:
@@ -37,7 +37,7 @@ class SnapshotTestBase:
         return next(f for f in sorted(files) if is_main(f))
 
 
-@dfly_args(*BASIC_ARGS, "--dbfilename", "test")
+@dfly_args({**BASIC_ARGS, "dbfilename": "test"})
 class TestRdbSnapshot(SnapshotTestBase):
     """Test single file rdb snapshot"""
     @pytest.fixture(autouse=True)
@@ -54,7 +54,8 @@ class TestRdbSnapshot(SnapshotTestBase):
 
         super().check(client)
 
-@dfly_args(*BASIC_ARGS, "--dbfilename", "test")
+
+@dfly_args({**BASIC_ARGS, "dbfilename": "test"})
 class TestDflySnapshot(SnapshotTestBase):
     """Test multi file snapshot"""
     @pytest.fixture(autouse=True)
@@ -75,7 +76,7 @@ class TestDflySnapshot(SnapshotTestBase):
         super().check(client)
 
 
-@dfly_args(*BASIC_ARGS, "--dbfilename", "test.rdb", "--save_schedule", "*:*")
+@dfly_args({**BASIC_ARGS, "dbfilename": "test.rdb", "save_schedule": "*:*"})
 class TestPeriodicSnapshot(SnapshotTestBase):
     """Test periodic snapshotting"""
     @pytest.fixture(autouse=True)

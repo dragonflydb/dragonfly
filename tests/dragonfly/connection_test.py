@@ -1,7 +1,24 @@
+import pytest
 import asyncio
 import aioredis
 import async_timeout
-#from conftest import DATABASE_INDEX
+
+'''
+Test the monitor command.
+Open connection which is used for monitoring
+Then send on other connection commands to dragonfly instance
+Make sure that we are getting the commands in the monitor context
+'''
+
+
+@pytest.mark.asyncio
+async def test_monitor_command(async_pool):
+    def generate(max):
+        for i in range(max):
+            yield f"key{i}", f"value={i}"
+
+    messages = {a: b for a, b in generate(5)}
+    assert await run_monitor(messages, async_pool)
 
 
 def verify_response(monitor_response: dict, key: str, value: str) -> bool:
@@ -54,48 +71,6 @@ async def run_monitor(messages: dict, pool: aioredis.ConnectionPool):
         return False, f"monitor result: {status}: {message}, set command success {success}"
 
 
-async def run_monitor_command(connection, messages):
-    res = await run_monitor(messages, connection)
-    print(f"finish test monitoring returning: {res}")
-    return res
-
-'''
-Test the monitor command.
-Open connection which is used for monitoring
-Then send on other connection commands to dragonfly instance
-Make sure that we are getting the commands in the monitor context
-'''
-
-
-def test_monitor_command(async_pool, event_loop):
-    def generate(max):
-        for i in range(max):
-            yield f"key{i}", f"value={i}"
-
-    messages = {a: b for a, b in generate(5)}
-
-    success, message = event_loop.run_until_complete(
-        run_monitor_command(messages=messages, connection=async_pool))
-
-    assert success == True, message
-
-
-async def run_pipeline_mode(pool, messages):
-    conn = aioredis.Redis(connection_pool=pool)
-    pipe = conn.pipeline()
-    for key, val in messages.items():
-        pipe.set(key, val)
-    result = await pipe.execute()
-
-    print(f"got result from the pipeline of {result} with len = {len(result)}")
-    if len(result) != len(messages):
-        return False, f"number of results from pipe {len(result)} != expected {len(messages)}"
-    elif False in result:
-        return False, "expecting to successfully get all result good, but some failed"
-    else:
-        return True, "all command processed successfully"
-
-
 '''
 Run test in pipeline mode.
 This is mostly how this is done with python - its more like a transaction that
@@ -103,20 +78,17 @@ the connections is running all commands in its context
 '''
 
 
-def test_pipeline_support(async_pool, event_loop):
+@pytest.mark.asyncio
+async def test_pipeline_support(async_client):
     def generate(max):
         for i in range(max):
             yield f"key{i}", f"value={i}"
 
     messages = {a: b for a, b in generate(5)}
-    success, message = event_loop.run_until_complete(
-        run_pipeline_mode(async_pool, messages))
-    assert success, message
+    assert await run_pipeline_mode(async_client, messages)
 
 
 async def reader(channel: aioredis.client.PubSub, messages):
-
-    success = True
     message_count = len(messages)
     while message_count > 0:
         try:
@@ -132,28 +104,22 @@ async def reader(channel: aioredis.client.PubSub, messages):
     return True, "success"
 
 
-async def run_pubsub(pool, messages, channel_name):
-    conn = aioredis.Redis(connection_pool=pool)
-    pubsub = conn.pubsub()
-    await pubsub.subscribe(channel_name)
+async def run_pipeline_mode(async_client, messages):
+    pipe = async_client.pipeline()
+    for key, val in messages.items():
+        pipe.set(key, val)
+    result = await pipe.execute()
 
-    future = asyncio.create_task(reader(pubsub, messages))
-    success = True
-
-    for message in messages:
-        res = await conn.publish(channel_name, message)
-        if not res:
-            success = False
-            break
-
-    await future
-    status, message = future.result()
-    if status and success:
-        return True, "successfully completed all"
+    print(f"got result from the pipeline of {result} with len = {len(result)}")
+    if len(result) != len(messages):
+        return False, f"number of results from pipe {len(result)} != expected {len(messages)}"
+    elif False in result:
+        return False, "expecting to successfully get all result good, but some failed"
     else:
-        return False, f"subscriber result: {status}: {message},  publisher publish: success {success}"
+        return True, "all command processed successfully"
 
-''' 
+
+'''
 Test the pipeline command
 Open connection to the subscriber and publish on the other end messages
 Make sure that we are able to send all of them and that we are getting the
@@ -161,12 +127,34 @@ expected results on the subscriber side
 '''
 
 
-def test_pubsub_command(async_pool, event_loop):
+@pytest.mark.asyncio
+async def test_pubsub_command(async_client):
     def generate(max):
         for i in range(max):
             yield f"message number {i}"
 
     messages = [a for a in generate(5)]
-    success, message = event_loop.run_until_complete(
-        run_pubsub(async_pool, messages, "channel-1"))
-    assert success, message
+    assert await run_pubsub(async_client, messages, "channel-1")
+
+
+async def run_pubsub(async_client, messages, channel_name):
+    pubsub = async_client.pubsub()
+    await pubsub.subscribe(channel_name)
+
+    future = asyncio.create_task(reader(pubsub, messages))
+    success = True
+
+    for message in messages:
+        res = await async_client.publish(channel_name, message)
+        if not res:
+            success = False
+            break
+
+    await future
+    status, message = future.result()
+
+    await pubsub.close()
+    if status and success:
+        return True, "successfully completed all"
+    else:
+        return False, f"subscriber result: {status}: {message},  publisher publish: success {success}"
