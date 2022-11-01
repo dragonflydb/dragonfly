@@ -29,7 +29,7 @@ class ZSetFamily {
 
   struct LexBound {
     std::string_view val;
-    enum Type {PLUS_INF, MINUS_INF, OPEN, CLOSED} type = CLOSED;
+    enum Type { PLUS_INF, MINUS_INF, OPEN, CLOSED } type = CLOSED;
   };
 
   using LexInterval = std::pair<LexBound, LexBound>;
@@ -41,6 +41,7 @@ class ZSetFamily {
     uint32_t limit = UINT32_MAX;
     bool with_scores = false;
     bool reverse = false;
+    enum INTERVALTYPE { LEX, RANK, SCORE } interval_type = RANK;
   };
 
   struct ZRangeSpec {
@@ -68,6 +69,8 @@ class ZSetFamily {
   static void ZScore(CmdArgList args, ConnectionContext* cntx);
   static void ZMScore(CmdArgList args, ConnectionContext* cntx);
   static void ZRangeByLex(CmdArgList args, ConnectionContext* cntx);
+  static void ZRevRangeByLex(CmdArgList args, ConnectionContext* cntx);
+  static void ZRangeByLexInternal(CmdArgList args, bool reverse, ConnectionContext* cntx);
   static void ZRangeByScore(CmdArgList args, ConnectionContext* cntx);
   static void ZRemRangeByRank(CmdArgList args, ConnectionContext* cntx);
   static void ZRemRangeByScore(CmdArgList args, ConnectionContext* cntx);
@@ -78,14 +81,12 @@ class ZSetFamily {
   static void ZScan(CmdArgList args, ConnectionContext* cntx);
   static void ZUnionStore(CmdArgList args, ConnectionContext* cntx);
 
-  static void ZRangeByScoreInternal(std::string_view key, std::string_view min_s,
-                                    std::string_view max_s, const RangeParams& params,
-                                    ConnectionContext* cntx);
+  static void ZRangeByScoreInternal(CmdArgList args, bool reverse, ConnectionContext* cntx);
   static void OutputScoredArrayResult(const OpResult<ScoredArray>& arr, const RangeParams& params,
                                       ConnectionContext* cntx);
   static void ZRemRangeGeneric(std::string_view key, const ZRangeSpec& range_spec,
                                ConnectionContext* cntx);
-  static void ZRangeGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx);
+  static void ZRangeGeneric(CmdArgList args, RangeParams range_params, ConnectionContext* cntx);
   static void ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx);
   static bool ParseRangeByScoreParams(CmdArgList args, RangeParams* params);
   static void ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cntx);
@@ -96,7 +97,7 @@ class ZSetFamily {
                                   std::string_view member);
   using MScoreResponse = std::vector<std::optional<double>>;
   static OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, std::string_view key,
-                                  ArgSlice members);
+                                           ArgSlice members);
   static OpResult<ScoredArray> OpPopCount(const ZRangeSpec& range_spec, const OpArgs& op_args,
                                           std::string_view key);
   static OpResult<ScoredArray> OpRange(const ZRangeSpec& range_spec, const OpArgs& op_args,
@@ -112,7 +113,6 @@ class ZSetFamily {
 
   static OpResult<unsigned> OpLexCount(const OpArgs& op_args, std::string_view key,
                                        const LexInterval& interval);
-
 };
 
 }  // namespace dfly
