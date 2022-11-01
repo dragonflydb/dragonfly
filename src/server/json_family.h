@@ -21,6 +21,7 @@ class JsonFamily {
 
  private:
   static void Get(CmdArgList args, ConnectionContext* cntx);
+  static void MGet(CmdArgList args, ConnectionContext* cntx);
   static void Type(CmdArgList args, ConnectionContext* cntx);
   static void StrLen(CmdArgList args, ConnectionContext* cntx);
   static void ObjLen(CmdArgList args, ConnectionContext* cntx);
