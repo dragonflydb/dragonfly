@@ -811,4 +811,24 @@ TEST_F(JsonFamilyTest, ArrIndex) {
   EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(1), ArgType(RespExpr::NIL)));
 }
 
+TEST_F(JsonFamilyTest, MGet) {
+  string json[] = {
+      R"(
+    {"address":{"street":"14 Imber Street","city":"Petah-Tikva","country":"Israel","zipcode":"49511"}}
+  )",
+      R"(
+    {"address":{"street":"Oranienburger Str. 27","city":"Berlin","country":"Germany","zipcode":"10117"}}
+  )"};
+
+  auto resp = Run({"set", "json1", json[0]});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"set", "json2", json[1]});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.MGET", "json1", "json2", "json3", "$.address.country"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(R"("Israel")", R"("Germany")", ArgType(RespExpr::NIL)));
+}
+
 }  // namespace dfly

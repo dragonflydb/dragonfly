@@ -627,9 +627,15 @@ OpResult<vector<OptString>> OpArrPop(const OpArgs& op_args, string_view key, str
     }
 
     auto it = std::next(val.array_range().begin(), removal_index);
-    ostringstream os;
-    os << pretty_print(*it);
-    vec.emplace_back(os.str());
+    string str;
+    error_code ec;
+    it->dump(str, {}, ec);
+    if (ec) {
+      VLOG(1) << "Failed to dump JSON to string with the error: " << ec.message();
+      return;
+    }
+
+    vec.push_back(str);
     val.erase(it);
   };
 
@@ -837,7 +843,73 @@ OpResult<vector<OptLong>> OpArrIndex(const OpArgs& op_args, string_view key,
   return vec;
 }
 
+// Returns string vector that represents the query result of each supplied key.
+OpResult<vector<OptString>> OpMGet(const OpArgs& op_args, const vector<string_view>& keys,
+                                   JsonExpression expression) {
+  vector<OptString> vec;
+  for (auto& it : keys) {
+    OpResult<json> result = GetJson(op_args, it);
+    if (!result) {
+      vec.emplace_back();
+      continue;
+    }
+
+    auto cb = [&vec](const string_view& path, const json& val) {
+      string str;
+      error_code ec;
+      val.dump(str, {}, ec);
+      if (ec) {
+        VLOG(1) << "Failed to dump JSON to string with the error: " << ec.message();
+        return;
+      }
+
+      vec.push_back(move(str));
+    };
+
+    expression.evaluate(*result, cb);
+  }
+
+  return vec;
+}
+
 }  // namespace
+
+void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
+  error_code ec;
+  string_view path = ArgS(args, args.size() - 1);
+  JsonExpression expression = jsonpath::make_expression<json>(path, ec);
+
+  if (ec) {
+    VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
+    (*cntx)->SendError(kSyntaxErr);
+    return;
+  }
+
+  vector<string_view> vec;
+  for (auto i = 1U; i < args.size() - 1; i++) {
+    vec.emplace_back(ArgS(args, i));
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpMGet(t->GetOpArgs(shard), vec, move(expression));
+  };
+
+  Transaction* trans = cntx->transaction;
+  OpResult<vector<OptString>> result = trans->ScheduleSingleHopT(move(cb));
+
+  if (result) {
+    (*cntx)->StartArray(result->size());
+    for (auto& it : *result) {
+      if (!it) {
+        (*cntx)->SendNull();
+      } else {
+        (*cntx)->SendSimpleString(*it);
+      }
+    }
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
 
 void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
@@ -1322,6 +1394,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 
 void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.GET", CO::READONLY | CO::FAST, -3, 1, 1, 1}.HFUNC(Get);
+  *registry << CI{"JSON.MGET", CO::READONLY | CO::FAST, -3, 1, 1, 1}.HFUNC(MGet);
   *registry << CI{"JSON.TYPE", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(Type);
   *registry << CI{"JSON.STRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(StrLen);
   *registry << CI{"JSON.OBJLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ObjLen);
