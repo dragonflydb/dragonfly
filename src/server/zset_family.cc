@@ -1233,7 +1233,7 @@ void ZSetFamily::ZRange(CmdArgList args, ConnectionContext* cntx) {
       if (!SimpleAtoi(os, &range_params.offset) || !SimpleAtoi(cs, &range_params.limit)) {
         return (*cntx)->SendError(kInvalidIntErr);
       }
-      i += 3;
+      i += 2;
     } else {
       return cntx->reply_builder()->SendError(absl::StrCat("unsupported option ", cur_arg));
     }
