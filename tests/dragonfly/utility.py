@@ -4,7 +4,9 @@ import itertools
 import time
 import asyncio
 
+
 def grouper(n, iterable):
+    """Transform iterable into iterator of chunks of size n"""
     it = iter(iterable)
     while True:
         chunk = tuple(itertools.islice(it, n))
@@ -63,7 +65,8 @@ def wait_available(client: redis.Redis):
             assert "Can not execute during LOADING" in str(e)
 
         time.sleep(0.01)
-        its +=1
+        its += 1
+
 
 async def wait_available_async(client: aioredis.Redis):
     its = 0

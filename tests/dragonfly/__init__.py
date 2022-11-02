@@ -33,14 +33,17 @@ class DflyInstance:
             raise Exception(
                 f"Failed to start instance, return code {return_code}")
 
-    def stop(self):
+    def stop(self, kill=False):
         proc, self.proc = self.proc, None
         if proc is None:
             return
 
         print(f"Stopping instance on {self.port}")
         try:
-            proc.terminate()
+            if kill:
+                proc.kill()
+            else:
+                proc.terminate()
             outs, errs = proc.communicate(timeout=15)
         except subprocess.TimeoutExpired:
             print("Unable to terminate DragonflyDB gracefully, it was killed")

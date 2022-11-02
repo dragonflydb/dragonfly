@@ -3,6 +3,7 @@ Pytest fixtures to be provided for all tests without import
 """
 
 import os
+import sys
 import pytest
 import pytest_asyncio
 import redis
@@ -70,8 +71,18 @@ def df_server(df_factory: DflyInstanceFactory) -> DflyInstance:
     """
     instance = df_factory.create()
     instance.start()
+
     yield instance
+
+    clients_left = None
+    try:
+        client = redis.Redis(port=instance.port)
+        clients_left = client.execute_command("INFO")['connected_clients']
+    except Exception as e:
+        print(e, file=sys.stderr)
+
     instance.stop()
+    assert clients_left == 1
 
 
 @pytest.fixture(scope="class")

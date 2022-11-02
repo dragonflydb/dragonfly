@@ -359,6 +359,7 @@ uint32_t DflyCmd::CreateSyncSession() {
 }
 
 void DflyCmd::UnregisterFlow(FlowInfo* flow) {
+  // TODO: Cancel saver operations.
   flow->conn = nullptr;
   flow->saver.reset();
 }
