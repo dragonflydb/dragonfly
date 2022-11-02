@@ -1203,7 +1203,6 @@ void ZSetFamily::ZLexCount(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZRange(CmdArgList args, ConnectionContext* cntx) {
-  RangeParams::INTERVALTYPE interval_type = RangeParams::INTERVALTYPE::RANK;
   RangeParams range_params;
 
   for (size_t i = 4; i < args.size(); ++i) {
@@ -1211,15 +1210,15 @@ void ZSetFamily::ZRange(CmdArgList args, ConnectionContext* cntx) {
 
     string_view cur_arg = ArgS(args, i);
     if (cur_arg == "BYSCORE") {
-      if (interval_type == RangeParams::INTERVALTYPE::LEX) {
+      if (range_params.interval_type == RangeParams::IntervalType::LEX) {
         return (*cntx)->SendError("BYSCORE and BYLEX options are not compatible");
       }
-      interval_type = RangeParams::INTERVALTYPE::SCORE;
+      range_params.interval_type = RangeParams::IntervalType::SCORE;
     } else if (cur_arg == "BYLEX") {
-      if (interval_type == RangeParams::INTERVALTYPE::SCORE) {
+      if (range_params.interval_type == RangeParams::IntervalType::SCORE) {
         return (*cntx)->SendError("BYSCORE and BYLEX options are not compatible");
       }
-      interval_type = RangeParams::INTERVALTYPE::LEX;
+      range_params.interval_type = RangeParams::IntervalType::LEX;
     } else if (cur_arg == "REV") {
       range_params.reverse = true;
     } else if (cur_arg == "WITHSCORES") {
@@ -1238,8 +1237,6 @@ void ZSetFamily::ZRange(CmdArgList args, ConnectionContext* cntx) {
       return cntx->reply_builder()->SendError(absl::StrCat("unsupported option ", cur_arg));
     }
   }
-
-  range_params.interval_type = interval_type;
   ZRangeGeneric(std::move(args), range_params, cntx);
 }
 
@@ -1285,7 +1282,7 @@ void ZSetFamily::ZRangeByLexInternal(CmdArgList args, bool reverse, ConnectionCo
   uint32_t count = kuint32max;
 
   RangeParams range_params;
-  range_params.interval_type = RangeParams::INTERVALTYPE::LEX;
+  range_params.interval_type = RangeParams::IntervalType::LEX;
   range_params.reverse = reverse;
 
   if (args.size() > 4) {
@@ -1516,7 +1513,7 @@ void ZSetFamily::ZUnionStore(CmdArgList args, ConnectionContext* cntx) {
 
 void ZSetFamily::ZRangeByScoreInternal(CmdArgList args, bool reverse, ConnectionContext* cntx) {
   RangeParams range_params;
-  range_params.interval_type = RangeParams::INTERVALTYPE::SCORE;
+  range_params.interval_type = RangeParams::IntervalType::SCORE;
   range_params.reverse = reverse;
   if (!ParseRangeByScoreParams(args.subspan(4), &range_params)) {
     return (*cntx)->SendError(kSyntaxErr);
@@ -1567,7 +1564,7 @@ void ZSetFamily::ZRangeGeneric(CmdArgList args, RangeParams range_params, Connec
   range_spec.params = range_params;
 
   switch (range_params.interval_type) {
-    case RangeParams::INTERVALTYPE::SCORE: {
+    case RangeParams::IntervalType::SCORE: {
       ScoreInterval si;
       if (!ParseBound(min_s, &si.first) || !ParseBound(max_s, &si.second)) {
         return (*cntx)->SendError(kFloatRangeErr);
@@ -1575,7 +1572,7 @@ void ZSetFamily::ZRangeGeneric(CmdArgList args, RangeParams range_params, Connec
       range_spec.interval = si;
       break;
     }
-    case RangeParams::INTERVALTYPE::LEX: {
+    case RangeParams::IntervalType::LEX: {
       LexInterval li;
       if (!ParseLexBound(min_s, &li.first) || !ParseLexBound(max_s, &li.second)) {
         return (*cntx)->SendError(kLexRangeErr);
@@ -1583,7 +1580,7 @@ void ZSetFamily::ZRangeGeneric(CmdArgList args, RangeParams range_params, Connec
       range_spec.interval = li;
       break;
     }
-    case RangeParams::INTERVALTYPE::RANK: {
+    case RangeParams::IntervalType::RANK: {
       IndexInterval ii;
       if (!SimpleAtoi(min_s, &ii.first) || !SimpleAtoi(max_s, &ii.second)) {
         (*cntx)->SendError(kInvalidIntErr);

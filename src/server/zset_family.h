@@ -41,7 +41,7 @@ class ZSetFamily {
     uint32_t limit = UINT32_MAX;
     bool with_scores = false;
     bool reverse = false;
-    enum INTERVALTYPE { LEX, RANK, SCORE } interval_type = RANK;
+    enum IntervalType { LEX, RANK, SCORE } interval_type = RANK;
   };
 
   struct ZRangeSpec {
