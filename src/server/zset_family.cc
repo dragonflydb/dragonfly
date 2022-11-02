@@ -1225,7 +1225,7 @@ void ZSetFamily::ZRange(CmdArgList args, ConnectionContext* cntx) {
     } else if (cur_arg == "WITHSCORES") {
       range_params.with_scores = true;
     } else if (cur_arg == "LIMIT") {
-      if (i + 3 != args.size()) {
+      if (i + 3 > args.size()) {
         return (*cntx)->SendError(kSyntaxErr);
       }
       string_view os = ArgS(args, i + 1);

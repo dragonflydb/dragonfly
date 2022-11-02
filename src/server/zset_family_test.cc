@@ -200,9 +200,9 @@ TEST_F(ZSetFamilyTest, ZRange) {
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), ElementsAre("great", "foo"));
 
-
   resp = Run({"zrange", "key", "+", "[cool", "BYLEX", "LIMIT", "2", "2", "REV"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("great", "foo"));
 }
 
 TEST_F(ZSetFamilyTest, ZRevRange) {
