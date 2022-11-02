@@ -1471,6 +1471,12 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
   replica_.swap(new_replica);
 
+  GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+  if (new_state != GlobalState::LOADING) {
+    LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
+    return;
+  }
+
   // Flushing all the data after we marked this instance as replica.
   Transaction* transaction = cntx->transaction;
   transaction->Schedule();
@@ -1484,6 +1490,7 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   // Replica sends response in either case. No need to send response in this function.
   // It's a bit confusing but simpler.
   if (!replica_->Run(cntx)) {
+    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     replica_.reset();
   }
 

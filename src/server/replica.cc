@@ -254,6 +254,8 @@ void Replica::ReplicateFb() {
         state_mask_ &= R_ENABLED;  // reset all flags besides R_ENABLED
         continue;
       }
+
+      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
       VLOG(1) << "Replica greet ok";
     }
 

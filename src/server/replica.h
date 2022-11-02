@@ -101,6 +101,7 @@ class Replica {
 
   std::error_code StartFlow();
 
+  // Full sync fiber function.
   void ReplicateDFFb(std::unique_ptr<base::IoBuf> io_buf, std::string eof_token);
 
   Service& service_;

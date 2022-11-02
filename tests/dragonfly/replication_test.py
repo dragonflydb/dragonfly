@@ -39,7 +39,7 @@ def test_simple_full_sync(df_local_factory, t_master, t_replica, n_keys):
     c_replica.replicaof("localhost", str(master.port))
 
     # Check replica received test data
-    time.sleep(0.1)
+    wait_available(c_replica)
     batch_check_data(c_replica, gen_test_data(n_keys))
 
     # Stop replication manually
@@ -81,10 +81,9 @@ async def test_simple_full_sync_multi(df_local_factory, t_master, t_replicas, n_
     await batch_fill_data_async(c_master, data_gen())
 
     # Start replica tasks in parallel
-    wait_time = len(replicas) * 0.1
     tasks = [
         asyncio.create_task(run_sfs_replica(
-            replica, master, data_gen, wait_time), name="replica-"+str(replica.port))
+            replica, master, data_gen), name="replica-"+str(replica.port))
         for replica in replicas
     ]
 
@@ -94,14 +93,14 @@ async def test_simple_full_sync_multi(df_local_factory, t_master, t_replicas, n_
     await c_master.connection_pool.disconnect()
 
 
-async def run_sfs_replica(replica, master, data_gen, wait_time):
+async def run_sfs_replica(replica, master, data_gen):
     replica.start()
     c_replica = aioredis.Redis(
         port=replica.port, single_connection_client=None)
 
     await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
 
-    await asyncio.sleep(wait_time)
+    await wait_available_async(c_replica)
     await batch_check_data_async(c_replica, data_gen())
 
     await c_replica.connection_pool.disconnect()

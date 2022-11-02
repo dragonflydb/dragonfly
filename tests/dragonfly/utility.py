@@ -1,7 +1,8 @@
 import redis
 import aioredis
 import itertools
-
+import time
+import asyncio
 
 def grouper(n, iterable):
     it = iter(iterable)
@@ -49,3 +50,30 @@ async def batch_check_data_async(client: aioredis.Redis, gen):
     for group in grouper(BATCH_SIZE, gen):
         vals = await client.mget(k for k, _ in group)
         assert all(as_str_val(vals[i]) == v for i, (_, v) in enumerate(group))
+
+
+def wait_available(client: redis.Redis):
+    its = 0
+    while True:
+        try:
+            client.get('key')
+            print("wait_available iterations:", its)
+            return
+        except redis.ResponseError as e:
+            assert "Can not execute during LOADING" in str(e)
+
+        time.sleep(0.01)
+        its +=1
+
+async def wait_available_async(client: aioredis.Redis):
+    its = 0
+    while True:
+        try:
+            await client.get('key')
+            print("wait_available iterations:", its)
+            return
+        except aioredis.ResponseError as e:
+            assert "Can not execute during LOADING" in str(e)
+
+        await asyncio.sleep(0.01)
+        its += 1
