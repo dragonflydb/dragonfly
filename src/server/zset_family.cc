@@ -1625,7 +1625,7 @@ bool ZSetFamily::ParseRangeByScoreParams(CmdArgList args, RangeParams* params) {
     if (cur_arg == "WITHSCORES") {
       params->with_scores = true;
     } else if (cur_arg == "LIMIT") {
-      if (i + 3 != args.size())
+      if (i + 3 > args.size())
         return false;
 
       string_view os = ArgS(args, i + 1);
@@ -1633,7 +1633,7 @@ bool ZSetFamily::ParseRangeByScoreParams(CmdArgList args, RangeParams* params) {
 
       if (!SimpleAtoi(os, &params->offset) || !SimpleAtoi(cs, &params->limit))
         return false;
-      i += 3;
+      i += 2;
     } else {
       return false;
     }

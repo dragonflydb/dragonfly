@@ -78,7 +78,15 @@ TEST_F(ZSetFamilyTest, ZRangeRank) {
   EXPECT_THAT(Run({"zrangebyscore", "x", "0", "(1.1"}), ArrLen(0));
   EXPECT_THAT(Run({"zrangebyscore", "x", "-inf", "1.1", "limit", "0", "10"}), "a");
 
-  auto resp = Run({"zrevrangebyscore", "x", "+inf", "-inf", "limit", "0", "5"});
+  auto resp = Run({"zrangebyscore", "x", "-inf", "1.1", "limit", "0", "10", "WITHSCORES"});
+  ASSERT_THAT(resp, ArrLen(2));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("a", "1.1"));
+
+  resp = Run({"zrangebyscore", "x", "-inf", "1.1", "WITHSCORES", "limit", "0", "10"});
+  ASSERT_THAT(resp, ArrLen(2));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("a", "1.1"));
+
+  resp = Run({"zrevrangebyscore", "x", "+inf", "-inf", "limit", "0", "5"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   ASSERT_THAT(resp.GetVec(), ElementsAre("b", "a"));
 
