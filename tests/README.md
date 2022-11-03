@@ -63,7 +63,7 @@ Try to make the fixture running at the smallest scope possible to ensure that th
 Do forget to add any new dependency that you may created to [dragonfly/requirement.txt](./dragonfly/requirements.txt) file.
 You can do so by running
 ```
-pip3 freeze > requirements.txt 
+pip3 freeze > requirements.txt
 ```
 from [dragonfly](./dragonfly/) directory.
 
@@ -97,24 +97,34 @@ docker run --network=host node-redis-test npm run test -w ./packages/client -- -
 In general, you can add this way any option from [mocha framework](https://mochajs.org/#command-line-usage).
 
 ## ioredis
+NOTE: we are depending on some changes to ioredis test, in order to pass more tests, as we are currently failing
+because in monitor command we always returning the command name in upper case, and the tests expected it to
+be in lower case.
+
 Integration tests for ioredis client.
+[ioredis](https://github.com/luin/ioredis) is a robust, performance-focused and full-featured Redis client for Node.js.
+It contains a very extensive test coverage for Redis. Currently not all features are supported by Dragonfly.
+As such please use the scripts for running the test successfully -
+ **[run_ioredis_on_docker.sh](./integration/run_ioredis_on_docker.sh)**: to run the supported tests on a docker image
+ Please note that you can run this script in tow forms:
+
+ If the image is already build:
+ ```
+ ./integration/run_ioredis_on_docker
+ ```
+
+A more safe way is to build the image (or ensure that it is up to date), and then execute the tests:
+```
+ ./integration/run_ioredis_on_docker --build
+ ```
+ The the "--build" first build the image and then execute the tests.
+ Please do not try to run out of docker image as this brigs the correct version and patch some tests.
+Please note that the script only run tests that are currently supported
+You can just build the image with
+
 Build:
 ```
 docker build -t ioredis-test -f ./ioredis.Dockerfile .
-```
-Run:
-```
-docker run --network=host mocha [options]
-```
-The dockerfile already has an entrypoint setup. This way, you can add your own arguments to the mocha command.
-
-Example 1 - running all tests inside the `unit` directory:
-```
-docker run -it --network=host ioredis mocha "test/unit/**/*.ts"
-```
-Example 2 - running a single test by supplying the `--grep` option:
-```
-docker run -it --network=host ioredis mocha --grep "should properly mark commands as transactions" "test/unit/**/*.ts"
 ```
 
 For more details on the entrypoint setup, compare the `ioredis.Dockerfile`
