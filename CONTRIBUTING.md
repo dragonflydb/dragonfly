@@ -23,12 +23,15 @@ cd build-dbg && ninja dragonfly
 ```sh
 cd dragonfly   # project root
 
+# Make sure you have 'pre-commit' e 'clang-format' installed
+pip install pre-commit clang-format
+
 # IMPORTANT! Enable our pre-commit message hooks
 # This will ensure your commits match our formatting requirements
-pre-commit install --hook-type commit-msg
+pre-commit install
 ```
 
-This step must be done on each machine you wish to develop and contribute from to activate the `commit-msg` hook client-side.
+This step must be done on each machine you wish to develop and contribute from to activate the `commit-msg` and `commit` hooks client-side.
 
 Once you have done these things, we look forward to adding your contributions and improvements to the Dragonfly DB project.
 
