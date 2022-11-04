@@ -1137,7 +1137,8 @@ bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid) {
     return false;
   }
 
-  DVLOG(1) << "NotifySuspended " << DebugId() << ", local_mask:" << local_mask;
+  DVLOG(1) << "NotifySuspended " << DebugId() << ", local_mask:" << local_mask
+           << " by " << committed_txid;
 
   // local_mask could be awaked (i.e. not suspended) if the transaction has been
   // awakened by another key or awakened by the same key multiple times.
