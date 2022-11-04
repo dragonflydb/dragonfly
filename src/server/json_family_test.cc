@@ -776,6 +776,36 @@ TEST_F(JsonFamilyTest, ArrInsert) {
   EXPECT_EQ(resp, R"([["b","c","a"],["a","c","b","a"],["a","c","a","b","b"]])");
 }
 
+TEST_F(JsonFamilyTest, ArrAppend) {
+  string json = R"(
+    [[], ["a"], ["a", "b"]]
+  )";
+
+  auto resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRAPPEND", "json", "$[*]", R"("a")"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(1), IntArg(2), IntArg(3)));
+
+  resp = Run({"JSON.ARRAPPEND", "json", "$[*]", R"("b")"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(2), IntArg(3), IntArg(4)));
+
+  json = R"(
+    {"a": [1], "nested": {"a": [1,2], "nested2": {"a": 42}}}
+  )";
+  resp = Run({"set", "json", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRAPPEND", "json", "$..a", "3"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(2), IntArg(3), ArgType(RespExpr::NIL)));
+
+  resp = Run({"GET", "json"});
+  EXPECT_EQ(resp, R"({"a":[1,3],"nested":{"a":[1,2,3],"nested2":{"a":42}}})");
+}
+
 TEST_F(JsonFamilyTest, ArrIndex) {
   string json = R"(
     [[], ["a"], ["a", "b"], ["a", "b", "c"]]
