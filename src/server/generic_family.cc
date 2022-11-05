@@ -778,6 +778,29 @@ void GenericFamily::PexpireAt(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void GenericFamily::Pexpire(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view msec = ArgS(args, 2);
+  int64_t int_arg;
+
+  if (!absl::SimpleAtoi(msec, &int_arg)) {
+    return (*cntx)->SendError(kInvalidIntErr);
+  }
+  int_arg = std::max(int_arg, 0L);
+  DbSlice::ExpireParams params{.value = int_arg, .unit = TimeUnit::MSEC};
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpExpire(t->GetOpArgs(shard), key, params);
+  };
+  OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
+
+  if (status == OpStatus::OUT_OF_RANGE) {
+    return (*cntx)->SendError(kExpiryOutOfRange);
+  } else {
+    (*cntx)->SendLong(status == OpStatus::OK);
+  }
+}
+
 void GenericFamily::Stick(CmdArgList args, ConnectionContext* cntx) {
   Transaction* transaction = cntx->transaction;
   VLOG(1) << "Stick " << ArgS(args, 1);
@@ -1411,6 +1434,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
             << CI{"PERSIST", CO::WRITE | CO::FAST, 2, 1, 1, 1}.HFUNC(Persist)
             << CI{"KEYS", CO::READONLY, 2, 0, 0, 0}.HFUNC(Keys)
             << CI{"PEXPIREAT", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(PexpireAt)
+            << CI{"PEXPIRE", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Pexpire)
             << CI{"RENAME", CO::WRITE, 3, 1, 2, 1}.HFUNC(Rename)
             << CI{"RENAMENX", CO::WRITE, 3, 1, 2, 1}.HFUNC(RenameNx)
             << CI{"SELECT", kSelectOpts, 2, 0, 0, 0}.HFUNC(Select)

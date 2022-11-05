@@ -172,7 +172,7 @@ with respect to Memcached and Redis APIs.
 - [X] Generic Family
   - [X] SCAN
   - [X] PEXPIREAT
-  - [ ] PEXPIRE
+  - [X] PEXPIRE
   - [x] DUMP
   - [X] EVAL
   - [X] EVALSHA
