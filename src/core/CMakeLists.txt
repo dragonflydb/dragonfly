@@ -1,5 +1,5 @@
-add_library(dfly_core compact_object.cc dragonfly_core.cc extent_tree.cc
-    external_alloc.cc interpreter.cc mi_memory_resource.cc
+add_library(dfly_core compact_object.cc dragonfly_core.cc extent_tree.cc lru.cc
+    external_alloc.cc interpreter.cc mi_memory_resource.cc heavy_keeper.cc 
     segment_allocator.cc small_string.cc tx_queue.cc dense_set.cc string_set.cc)
 cxx_link(dfly_core base absl::flat_hash_map absl::str_format redis_lib TRDP::lua lua_modules
     Boost::fiber crypto)

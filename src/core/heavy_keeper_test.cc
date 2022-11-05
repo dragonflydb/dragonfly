@@ -4,6 +4,7 @@
 
 #include <random>
 #include <unordered_set>
+#include <chrono>
 
 #include "base/gtest.h"
 #include <gperftools/profiler.h> 
@@ -48,24 +49,22 @@ TEST_F(HeavyKeeperTest, Basic) {
 
   for (size_t i = 0; i < hotkey_lens; i++) {
       size_t s = random(1, m);
+      // Simulation of hotkey.
       for (size_t j=0; j<=10000 + s; j++) {
           B[changeValue(s)]++;
           sum++;
       }
   }
-  auto start = std::chrono::steady_clock::now();
-  ProfilerStart("HeavyKeeperTest.prof");
+  //ProfilerStart("HeavyKeeperTest.prof");
   for (const auto& item : B) {
     uint32_t num = item.second;
     for (size_t i = 0; i < num; i++) {
       hk_->Insert(item.first);
     }
   }
-  ProfilerStop();
-  auto end = std::chrono::steady_clock::now();
-  double duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
-  std::cout << duration << " Nanoseconds; " << sum << " Insert; " << duration/static_cast<double>(sum) << " AVG;" << std::endl;
-  hk_->Work();
+  //ProfilerStop();
+
+  hk_->SortHotKey();
 
   int cnt=0;
   struct node {string x; int y;} p[B.size()];
@@ -78,6 +77,7 @@ TEST_F(HeavyKeeperTest, Basic) {
   auto cmp = [](node lhs, node rhs) {return lhs.y > rhs.y;};
   sort(p, p+cnt, cmp);
 
+  // The actual recorded hotkey_lens hotkeys.
   for (int i = 0; i < min(static_cast<int>(B.size()), hotkey_lens); i++) {
       C[p[i].x]=p[i].y;
   }
@@ -89,8 +89,8 @@ TEST_F(HeavyKeeperTest, Basic) {
   int hk_num;
 
   for (int i = 0; i < min(static_cast<int>(B.size()), hotkey_lens); i++) {
-      hk_string = (hk_->Query(i)).first; 
-      hk_num = static_cast<int>((hk_->Query(i)).second);
+      hk_string = (hk_->Query(i))->first; 
+      hk_num = static_cast<int>((hk_->Query(i))->second);
       hk_AAE += abs(B[hk_string] - hk_num); 
       hk_ARE += abs(B[hk_string] - hk_num)/(B[hk_string] + 0.0);
       // The actual hotkey identified
@@ -103,7 +103,7 @@ TEST_F(HeavyKeeperTest, Basic) {
   // of the single test pass, we mitigate the constraints appropriately.
   EXPECT_GE(hk_sum, hotkey_lens-1);
 
-  printf("heavkeeper:\nAccepted: %d/%d  %.10f\nARE: %.10f\nAAE: %.10d\n\n", 
+  printf("HeavyKeeper accepted: %d/%d  %.10f\nARE: %.10f\nAAE: %.10d\n", 
     hk_sum, hotkey_lens, (hk_sum/(hotkey_lens+0.0)), hk_ARE, hk_AAE);
 }
 
@@ -119,7 +119,7 @@ TEST_F(HeavyKeeperTest, HotkeyEliminationTest) {
       hk_->Insert(changeValue(i));
     }
   }
-  hk_->Work();
+  hk_->SortHotKey();
   
   for (size_t i = 200-hotkey_lens; i < 200; i++) {
     B.insert(changeValue(i));
@@ -128,12 +128,25 @@ TEST_F(HeavyKeeperTest, HotkeyEliminationTest) {
   int hk_sum = 0;
   string hk_string; 
   for (int i = 0; i < min(static_cast<int>(B.size()), hotkey_lens); i++) {
-      hk_string = (hk_->Query(i)).first; 
+      hk_string = (hk_->Query(i))->first; 
       if (B.count(hk_string)){
         hk_sum++;
       }
   }
   EXPECT_EQ(hk_sum, hotkey_lens);
 }
+
+static void HK_Insert(benchmark::State& state) {
+  unsigned count = state.range(0);
+  
+  while (state.KeepRunning()) {
+    HeavyKeeper dt(100);
+
+    for (unsigned i = 0; i < count; ++i) {
+      dt.Insert(std::to_string(i));
+    }
+  }
+}
+BENCHMARK(HK_Insert)->Arg(10000)->Arg(100000)->Arg(1000000);
 
 }
