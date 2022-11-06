@@ -476,7 +476,7 @@ error_code Replica::InitiateDflySync() {
   if (ec)
     return ec;
 
-   ReqSerializer serializer{sock_.get()};
+  ReqSerializer serializer{sock_.get()};
 
   // Master waits for this command in order to start sending replication stream.
   serializer.SendCommand(StrCat("DFLY SYNC ", master_context_.dfly_session_id));
@@ -765,8 +765,8 @@ error_code Replica::StartFlow() {
   sock_.reset(mythread->CreateSocket());
   RETURN_ON_ERR(sock_->Connect(master_context_.master_ep));
 
-  VLOG(1) << "Sending on flow " << master_context_.master_repl_id << " " << master_context_.dfly_session_id
-    << " " << master_context_.flow_id;
+  VLOG(1) << "Sending on flow " << master_context_.master_repl_id << " "
+          << master_context_.dfly_session_id << " " << master_context_.flow_id;
 
   ReqSerializer serializer{sock_.get()};
   serializer.SendCommand(StrCat("DFLY FLOW ", master_context_.master_repl_id, " ",

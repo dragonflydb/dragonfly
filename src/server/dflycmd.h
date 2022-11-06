@@ -5,9 +5,9 @@
 #pragma once
 
 #include <absl/container/btree_map.h>
-#include <boost/fiber/fiber.hpp>
-
 #include <memory.h>
+
+#include <boost/fiber/fiber.hpp>
 
 #include "server/conn_context.h"
 
@@ -51,7 +51,7 @@ class DflyCmd {
 
     std::vector<FlowInfo> flows;
 
-    ::boost::fibers::mutex mu; // guard operations on replica.
+    ::boost::fibers::mutex mu;  // guard operations on replica.
   };
 
  public:
