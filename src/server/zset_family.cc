@@ -690,23 +690,42 @@ void InterScoredMap(ScoredMap* dest, ScoredMap* src, AggType agg_type) {
     dest->swap(*src);
 }
 
-OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
-                            const vector<double>& weights, bool store) {
-  ArgSlice keys = t->ShardArgsInShard(shard->shard_id());
-  DVLOG(1) << "shard:" << shard->shard_id() << ", keys " << vector(keys.begin(), keys.end());
-  DCHECK(!keys.empty());
+template<typename SliceIt>
+ScoredMap UnionSliceResultScore(SliceIt start, SliceIt end, AggType agg_type) {
+  ScoredMap result;
+  for (auto it = start; it != end; ++it) {
+    if (it->first.is_done()) {
+      continue;
+    }
 
-  unsigned start = 0;
-
-  if (keys.front() == dest) {
-    ++start;
+    ScoredMap sm = FromObject(it->first->second, it->second);
+    if (result.empty()) {
+      result.swap(sm);
+    } else {
+      UnionScoredMap(&result, &sm, agg_type);
+    }
   }
+  return result;
+}
 
+using ScoredPI = pair<PrimeIterator, double>;
+using ScoredPIVec = vector<ScoredPI>;
+
+double SliceResultWeight(EngineShard* shard, Transaction* t,
+		            const vector<double>& weights,
+			    unsigned key_index, unsigned offset) {
+
+  unsigned windex = t->ReverseArgIndex(shard->shard_id(), key_index) - offset;
+  DCHECK_LT(windex, weights.size());
+  return weights[windex];
+}
+
+OpResult<ScoredPIVec> FindSliceResult(EngineShard* shard, Transaction* t,
+				    const ArgSlice& keys,
+				    const vector<double>& weights,
+				    unsigned start, unsigned offset) {
   auto& db_slice = shard->db_slice();
   vector<pair<PrimeIterator, double>> it_arr(keys.size() - start);
-  if (it_arr.empty())     // could be when only the dest key is hosted in this shard
-    return OpStatus::OK;  // return empty map
-
   for (unsigned j = start; j < keys.size(); ++j) {
     auto it_res = db_slice.Find(t->db_context(), keys[j], OBJ_ZSET);
     if (it_res == OpStatus::WRONG_TYPE)  // TODO: support sets with default score 1.
@@ -715,59 +734,38 @@ OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest
       continue;
 
     // first global index is 2 after {destkey, numkeys}
-    unsigned src_indx = j - start;
-    unsigned windex = t->ReverseArgIndex(shard->shard_id(), j) - 2;
-    DCHECK_LT(windex, weights.size());
-    it_arr[src_indx] = {*it_res, weights[windex]};
+    it_arr[j - start] = {*it_res, SliceResultWeight(shard, t, weights, j, offset)};
   }
-
-  ScoredMap result;
-  for (auto it = it_arr.begin(); it != it_arr.end(); ++it) {
-    if (it->first.is_done())
-      continue;
-
-    ScoredMap sm = FromObject(it->first->second, it->second);
-    if (result.empty())
-      result.swap(sm);
-    else
-      UnionScoredMap(&result, &sm, agg_type);
-  }
-
-  return result;
+  return it_arr;
 }
 
-OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, AggType agg_type,
-                            const vector<double>& weights) {
+OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
+                            const vector<double>& weights, bool store) {
   ArgSlice keys = t->ShardArgsInShard(shard->shard_id());
   DVLOG(1) << "shard:" << shard->shard_id() << ", keys " << vector(keys.begin(), keys.end());
   DCHECK(!keys.empty());
 
-  auto& db_slice = shard->db_slice();
-  vector<pair<PrimeIterator, double>> it_arr(keys.size());
-  for (unsigned j = 0; j < keys.size(); ++j) {
-    auto it_res = db_slice.Find(t->db_context(), keys[j], OBJ_ZSET);
-    if (it_res == OpStatus::WRONG_TYPE)  // TODO: support sets with default score 1.
-      return it_res.status();
-    if (!it_res)
-      continue;
+  unsigned start = 0;
+  unsigned offset = 0;
 
-    unsigned windex = t->ReverseArgIndex(shard->shard_id(), j);
-    DCHECK_LT(windex, weights.size());
-    it_arr[j] = {*it_res, weights[windex]};
+  if (!dest.empty()) {
+    // first global index is 2 after {destkey, numkeys}
+    offset = 2;
+    if (keys.front() == dest) {
+      ++start;
+    }
+
+    // could be when only the dest key is hosted in this shard
+    if (start >= keys.size()) {
+      return OpStatus::OK;
+    }
+  }
+  const auto& scored = FindSliceResult(shard, t, keys, weights, start, offset);
+  if (scored == OpStatus::WRONG_TYPE) {
+    return scored.status();
   }
 
-  ScoredMap result;
-  for (auto it = it_arr.begin(); it != it_arr.end(); ++it) {
-    if (it->first.is_done())
-      continue;
-
-    ScoredMap sm = FromObject(it->first->second, it->second);
-    if (result.empty())
-      result.swap(sm);
-    else
-      UnionScoredMap(&result, &sm, agg_type);
-  }
-  return result;
+  return UnionSliceResultScore(scored->begin(), scored->end(), agg_type);
 }
 
 OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
@@ -903,121 +901,121 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
   return aresult;
 }
 
-struct StoreArgs {
+struct UnionArgs {
   AggType agg_type = AggType::SUM;
   unsigned num_keys;
   vector<double> weights;
+  bool with_scores = false;
 };
 
-OpResult<StoreArgs> ParseStoreArgs(CmdArgList args) {
-  string_view num_str = ArgS(args, 2);
-  StoreArgs store_args;
+OpResult<void> FillAggType(UnionArgs& union_args, CmdArgList args, unsigned arg_pos) {
+  ToUpper(&args[arg_pos]);
+  string_view agg = ArgS(args, arg_pos);
+  if (agg == "SUM") {
+    union_args.agg_type = AggType::SUM;
+  } else if (agg == "MIN") {
+    union_args.agg_type = AggType::MIN;
+  } else if (agg == "MAX") {
+    union_args.agg_type = AggType::MAX;
+  } else {
+    return OpStatus::SYNTAX_ERR;
+  }
+  return OpStatus::OK;
+}
 
+OpResult<unsigned> ParseAggregate(UnionArgs& union_args, CmdArgList args,
+				unsigned arg_pos, bool store) {
+  if (store && arg_pos + 2 != args.size()) {
+    return OpStatus::SYNTAX_ERR;
+  }
+  if (!store && arg_pos + 3 < args.size()) {
+    return OpStatus::SYNTAX_ERR;
+  }
+  const auto& filled = FillAggType(union_args, args, arg_pos + 1);
+  if (filled == OpStatus::SYNTAX_ERR) {
+    return filled.status();
+  }
+  return arg_pos + 1;
+}
+
+OpResult<unsigned> ParseWeights(UnionArgs& union_args, CmdArgList args,
+				unsigned arg_pos) {
+  if (args.size() <= arg_pos + union_args.num_keys) {
+    return OpStatus::SYNTAX_ERR;
+  }
+
+  for (unsigned j = 0; j < union_args.num_keys; ++j) {
+    string_view weight = ArgS(args, arg_pos + j + 1);
+    if (!absl::SimpleAtod(weight, &(union_args.weights[j]))) {
+      return OpStatus::INVALID_FLOAT;
+    }
+  }
+  return arg_pos + union_args.num_keys;
+}
+
+OpResult<unsigned> ValidateKeyCount(string_view arg_num_keys) {
   // we parsed the structure before, when transaction has been initialized.
-  CHECK(absl::SimpleAtoi(num_str, &store_args.num_keys));
-  DCHECK_GE(args.size(), 3 + store_args.num_keys);
+  unsigned num_keys;
+  if (!absl::SimpleAtoi(arg_num_keys, &num_keys)) {
+    return OpStatus::SYNTAX_ERR;
+  }
+  return num_keys;
+}
 
-  store_args.weights.resize(store_args.num_keys, 1);
-  for (size_t i = 3 + store_args.num_keys; i < args.size(); ++i) {
+OpResult<unsigned> ParseWithScores(UnionArgs& union_args, CmdArgList args, unsigned arg_pos) {
+  if (arg_pos + 1 != args.size()) {
+    return OpStatus::SYNTAX_ERR;
+  }
+  union_args.with_scores = true;
+  return arg_pos;
+}
+
+OpResult<UnionArgs> ParseUnionArgs(CmdArgList args, bool store) {
+  // TODO: support variadic key for ZUNION command (now fixed to 3)
+  string_view num_str = store ? ArgS(args, 2) : "3";
+  UnionArgs union_args;
+
+  const auto& parsed = ValidateKeyCount(num_str);
+  if (parsed == OpStatus::SYNTAX_ERR) {
+    return parsed.status();
+  }
+  union_args.num_keys = *parsed;
+  unsigned key_start = store ? 3 + union_args.num_keys : 1 + union_args.num_keys;
+  // TODO: modify this check when there is variadic key support for ZUNION command
+  DCHECK_GE(args.size(), key_start);
+
+  union_args.weights.resize(union_args.num_keys, 1);
+
+  for (size_t i = key_start; i < args.size(); ++i) {
     ToUpper(&args[i]);
     string_view arg = ArgS(args, i);
     if (arg == "WEIGHTS") {
-      if (args.size() <= i + store_args.num_keys) {
-        return OpStatus::SYNTAX_ERR;
+      const auto& parsed = ParseWeights(union_args, args, i);
+      if (parsed == OpStatus::SYNTAX_ERR || parsed == OpStatus::INVALID_FLOAT) {
+        return parsed.status();
       }
-
-      for (unsigned j = 0; j < store_args.num_keys; ++j) {
-        string_view weight = ArgS(args, i + j + 1);
-        if (!absl::SimpleAtod(weight, &store_args.weights[j])) {
-          return OpStatus::INVALID_FLOAT;
-        }
-      }
-      i += store_args.num_keys;
+      i = *parsed;
     } else if (arg == "AGGREGATE") {
-      if (i + 2 != args.size()) {
-        return OpStatus::SYNTAX_ERR;
+      const auto& parsed = ParseAggregate(union_args, args, i, store);
+      if (parsed == OpStatus::SYNTAX_ERR) {
+        return parsed.status();
       }
-
-      ToUpper(&args[i + 1]);
-
-      string_view agg = ArgS(args, i + 1);
-      if (agg == "SUM") {
-        store_args.agg_type = AggType::SUM;
-      } else if (agg == "MIN") {
-        store_args.agg_type = AggType::MIN;
-      } else if (agg == "MAX") {
-        store_args.agg_type = AggType::MAX;
-      } else {
-        return OpStatus::SYNTAX_ERR;
+      i = *parsed;
+      // Commands with store capability does not offer WITHSCORES option
+      if (store) {
+	break;
       }
+    } else if (!store && arg == "WITHSCORES") {
+      const auto& parsed = ParseWithScores(union_args, args, i);
+      if (parsed == OpStatus::SYNTAX_ERR) {
+        return parsed.status();
+      }
+      i = *parsed;
       break;
     } else {
       return OpStatus::SYNTAX_ERR;
     }
   }
-
-  return store_args;
-};
-
-struct UnionArgs {
-  StoreArgs store_args;
-  bool with_scores = false;
-};
-
-OpResult<UnionArgs> ParseUnionArgs(CmdArgList args) {
-  string_view arg_num_keys = "3";
-  StoreArgs store_args;
-  bool with_scores = false;
-
-  if (!absl::SimpleAtoi(arg_num_keys, &store_args.num_keys)) {
-    return OpStatus::SYNTAX_ERR;
-  }
-  DCHECK_GE(args.size(), 1 + store_args.num_keys);
-
-  store_args.weights.resize(store_args.num_keys, 1);
-  for (size_t i = 1 + store_args.num_keys; i < args.size(); ++i) {
-    ToUpper(&args[i]);
-    string_view arg = ArgS(args, i);
-    if (arg == "WEIGHTS") {
-      if (args.size() <= i + store_args.num_keys) {
-        return OpStatus::SYNTAX_ERR;
-      }
-
-      for (unsigned j = 0; j < store_args.num_keys; ++j) {
-        string_view weight = ArgS(args, i + j + 1);
-        if (!absl::SimpleAtod(weight, &store_args.weights[j])) {
-          return OpStatus::INVALID_FLOAT;
-        }
-      }
-      i += store_args.num_keys;
-    } else if (arg == "AGGREGATE") {
-      if (i + 3 < args.size()) {
-        return OpStatus::SYNTAX_ERR;
-      }
-
-      ToUpper(&args[i + 1]);
-
-      string_view agg = ArgS(args, i + 1);
-      if (agg == "SUM") {
-        store_args.agg_type = AggType::SUM;
-      } else if (agg == "MIN") {
-        store_args.agg_type = AggType::MIN;
-      } else if (agg == "MAX") {
-        store_args.agg_type = AggType::MAX;
-      } else {
-        return OpStatus::SYNTAX_ERR;
-      }
-      i++;
-    } else if (arg == "WITHSCORES") {
-      if (i + 1 != args.size()) {
-        return OpStatus::SYNTAX_ERR;
-      }
-      with_scores = true;
-    } else {
-      return OpStatus::SYNTAX_ERR;
-    }
-  }
-  UnionArgs union_args{store_args, with_scores};
   return union_args;
 }
 
@@ -1204,18 +1202,18 @@ void ZSetFamily::ZIncrBy(CmdArgList args, ConnectionContext* cntx) {
 
 void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
   string_view dest_key = ArgS(args, 1);
-  OpResult<StoreArgs> store_args_res = ParseStoreArgs(args);
+  OpResult<UnionArgs> union_args_res = ParseUnionArgs(args, true);
 
-  if (!store_args_res) {
-    switch (store_args_res.status()) {
+  if (!union_args_res) {
+    switch (union_args_res.status()) {
       case OpStatus::INVALID_FLOAT:
         return (*cntx)->SendError("weight value is not a float", kSyntaxErrType);
       default:
-        return (*cntx)->SendError(store_args_res.status());
+        return (*cntx)->SendError(union_args_res.status());
     }
   }
-  const auto& store_args = *store_args_res;
-  if (store_args.num_keys == 0) {
+  const auto& union_args = *union_args_res;
+  if (union_args.num_keys == 0) {
     return SendAtLeastOneKeyError(cntx);
   }
 
@@ -1223,7 +1221,7 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     maps[shard->shard_id()] =
-        OpInter(shard, t, dest_key, store_args.agg_type, store_args.weights, false);
+        OpInter(shard, t, dest_key, union_args.agg_type, union_args.weights, false);
     return OpStatus::OK;
   };
 
@@ -1241,7 +1239,7 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
     if (result.empty())
       result.swap(op_res.value());
     else
-      InterScoredMap(&result, &op_res.value(), store_args.agg_type);
+      InterScoredMap(&result, &op_res.value(), union_args.agg_type);
     if (result.empty())
       break;
   }
@@ -1552,7 +1550,7 @@ void ZSetFamily::ZScan(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZUnion(CmdArgList args, ConnectionContext* cntx) {
-  OpResult<UnionArgs> union_args_res = ParseUnionArgs(args);
+  OpResult<UnionArgs> union_args_res = ParseUnionArgs(args, false);
 
   if (!union_args_res) {
     switch (union_args_res.status()) {
@@ -1562,29 +1560,28 @@ void ZSetFamily::ZUnion(CmdArgList args, ConnectionContext* cntx) {
         return (*cntx)->SendError(union_args_res.status());
     }
   }
-  const auto& store_args = union_args_res->store_args;
-  const bool with_scores = union_args_res->with_scores;
-  if (store_args.num_keys == 0) {
+  const auto& union_args = *union_args_res;
+  if (union_args.num_keys == 0) {
     return SendAtLeastOneKeyError(cntx);
   }
 
   vector<OpResult<ScoredMap>> maps(shard_set->size());
+  std::string_view dest_key{""};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     maps[shard->shard_id()] =
-        OpUnion(shard, t, store_args.agg_type, store_args.weights);
+        OpUnion(shard, t, dest_key, union_args.agg_type, union_args.weights, false);
     return OpStatus::OK;
   };
 
-  cntx->transaction->Schedule();
+  cntx->transaction->ScheduleSingleHop(std::move(cb));
 
-  cntx->transaction->Execute(std::move(cb), false);
   ScoredMap result;
 
   for (auto& op_res : maps) {
     if (!op_res)
       return (*cntx)->SendError(op_res.status());
-    UnionScoredMap(&result, &op_res.value(), store_args.agg_type);
+    UnionScoredMap(&result, &op_res.value(), union_args.agg_type);
   }
 
   vector<ScoredMemberView> smvec;
@@ -1593,10 +1590,10 @@ void ZSetFamily::ZUnion(CmdArgList args, ConnectionContext* cntx) {
   }
   std::sort(std::begin(smvec), std::end(smvec));
 
-  (*cntx)->StartArray(smvec.size() * (with_scores ? 2 : 1));
+  (*cntx)->StartArray(smvec.size() * (union_args.with_scores ? 2 : 1));
   for (const auto& elem : smvec) {
     (*cntx)->SendBulkString(elem.second);
-    if (with_scores) {
+    if (union_args.with_scores) {
       (*cntx)->SendDouble(elem.first);
     }
   }
@@ -1604,18 +1601,18 @@ void ZSetFamily::ZUnion(CmdArgList args, ConnectionContext* cntx) {
 
 void ZSetFamily::ZUnionStore(CmdArgList args, ConnectionContext* cntx) {
   string_view dest_key = ArgS(args, 1);
-  OpResult<StoreArgs> store_args_res = ParseStoreArgs(args);
+  OpResult<UnionArgs> union_args_res = ParseUnionArgs(args, true);
 
-  if (!store_args_res) {
-    switch (store_args_res.status()) {
+  if (!union_args_res) {
+    switch (union_args_res.status()) {
       case OpStatus::INVALID_FLOAT:
         return (*cntx)->SendError("weight value is not a float", kSyntaxErrType);
       default:
-        return (*cntx)->SendError(store_args_res.status());
+        return (*cntx)->SendError(union_args_res.status());
     }
   }
-  const auto& store_args = *store_args_res;
-  if (store_args.num_keys == 0) {
+  const auto& union_args = *union_args_res;
+  if (union_args.num_keys == 0) {
     return SendAtLeastOneKeyError(cntx);
   }
 
@@ -1623,7 +1620,7 @@ void ZSetFamily::ZUnionStore(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     maps[shard->shard_id()] =
-        OpUnion(shard, t, dest_key, store_args.agg_type, store_args.weights, false);
+        OpUnion(shard, t, dest_key, union_args.agg_type, union_args.weights, false);
     return OpStatus::OK;
   };
 
@@ -1635,7 +1632,7 @@ void ZSetFamily::ZUnionStore(CmdArgList args, ConnectionContext* cntx) {
   for (auto& op_res : maps) {
     if (!op_res)
       return (*cntx)->SendError(op_res.status());
-    UnionScoredMap(&result, &op_res.value(), store_args.agg_type);
+    UnionScoredMap(&result, &op_res.value(), union_args.agg_type);
   }
   ShardId dest_shard = Shard(dest_key, maps.size());
   AddResult add_result;
@@ -2181,8 +2178,8 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZREVRANGEBYSCORE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRevRangeByScore)
             << CI{"ZREVRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZRevRank)
             << CI{"ZSCAN", CO::READONLY, -3, 1, 1, 1}.HFUNC(ZScan)
-	    << CI{"ZUNION", CO::READONLY | CO::REVERSE_MAPPING, -4, 1, 3, 1}.HFUNC(ZUnion)
-	    << CI{"ZUNIONSTORE", kUnionMask, -4, 3, 3, 1}.HFUNC(ZUnionStore);
+            << CI{"ZUNION", CO::READONLY | CO::REVERSE_MAPPING, -4, 1, 3, 1}.HFUNC(ZUnion)
+            << CI{"ZUNIONSTORE", kUnionMask, -4, 3, 3, 1}.HFUNC(ZUnionStore);
 }
 
 }  // namespace dfly
