@@ -50,7 +50,17 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
         scripts_dir, '../../build-dbg/dragonfly'))
 
     args = request.param if request.param else {}
-    return DflyInstanceFactory(test_env, tmp_dir, path=path, args=args)
+    factory = DflyInstanceFactory(test_env, tmp_dir, path=path, args=args)
+    yield factory
+    factory.stop_all()
+
+
+@pytest.fixture(scope="function")
+def df_local_factory(df_factory: DflyInstanceFactory):
+    factory = DflyInstanceFactory(
+        df_factory.env, df_factory.cwd, df_factory.path, df_factory.args)
+    yield factory
+    factory.stop_all()
 
 
 @pytest.fixture(scope="session")
@@ -61,6 +71,7 @@ def df_server(df_factory: DflyInstanceFactory) -> DflyInstance:
     """
     instance = df_factory.create()
     instance.start()
+
     yield instance
 
     clients_left = None

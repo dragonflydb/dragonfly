@@ -872,7 +872,7 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
 
     // Save summary file.
     {
-      const auto& scripts = script_mgr_->GetLuaScripts();
+      const auto scripts = script_mgr_->GetLuaScripts();
       auto& summary_snapshot = snapshots[shard_set->size()];
       summary_snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
       if (ec = DoPartialSave(filename, path, now, scripts, summary_snapshot.get(), nullptr)) {
@@ -899,7 +899,7 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
     VLOG(1) << "Saving to " << path;
 
     snapshots[0].reset(new RdbSnapshot(fq_threadpool_.get()));
-    const auto& lua_scripts = script_mgr_->GetLuaScripts();
+    const auto lua_scripts = script_mgr_->GetLuaScripts();
     ec = snapshots[0]->Start(SaveMode::RDB, path.generic_string(), lua_scripts);
 
     if (!ec) {
@@ -1471,6 +1471,12 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
   replica_.swap(new_replica);
 
+  GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+  if (new_state != GlobalState::LOADING) {
+    LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
+    return;
+  }
+
   // Flushing all the data after we marked this instance as replica.
   Transaction* transaction = cntx->transaction;
   transaction->Schedule();
@@ -1484,6 +1490,7 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   // Replica sends response in either case. No need to send response in this function.
   // It's a bit confusing but simpler.
   if (!replica_->Run(cntx)) {
+    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     replica_.reset();
   }
 

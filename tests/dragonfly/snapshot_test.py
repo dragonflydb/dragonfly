@@ -4,32 +4,21 @@ import redis
 import string
 import os
 import glob
-
-
 from pathlib import Path
-from dragonfly import dfly_args
+
+from . import dfly_args
+from .utility import batch_check_data, batch_fill_data, gen_test_data
 
 BASIC_ARGS = {"dir": "{DRAGONFLY_TMP}/"}
+NUM_KEYS = 100
 
 
 class SnapshotTestBase:
-    KEYS = string.ascii_lowercase
-
     def setup(self, tmp_dir: Path):
         self.tmp_dir = tmp_dir
         self.rdb_out = tmp_dir / "test.rdb"
         if self.rdb_out.exists():
             self.rdb_out.unlink()
-
-    def populate(self, client: redis.Redis):
-        """Populate instance with test data"""
-        for k in self.KEYS:
-            client.set(k, "val-"+k)
-
-    def check(self, client: redis.Redis):
-        """Check instance contains test data"""
-        for k in self.KEYS:
-            assert client.get(k) == "val-"+k
 
     def get_main_file(self, suffix):
         def is_main(f): return "summary" in f if suffix == "dfs" else True
@@ -45,14 +34,14 @@ class TestRdbSnapshot(SnapshotTestBase):
         super().setup(tmp_dir)
 
     def test_snapshot(self, client: redis.Redis):
-        super().populate(client)
+        batch_fill_data(client, gen_test_data(NUM_KEYS))
 
         # save + flush + load
         client.execute_command("SAVE")
         assert client.flushall()
         client.execute_command("DEBUG LOAD " + super().get_main_file("rdb"))
 
-        super().check(client)
+        batch_check_data(client, gen_test_data(NUM_KEYS))
 
 
 @dfly_args({**BASIC_ARGS, "dbfilename": "test"})
@@ -66,14 +55,14 @@ class TestDflySnapshot(SnapshotTestBase):
             os.remove(file)
 
     def test_snapshot(self, client: redis.Redis):
-        super().populate(client)
+        batch_fill_data(client, gen_test_data(NUM_KEYS))
 
         # save + flush + load
         client.execute_command("SAVE DF")
         assert client.flushall()
         client.execute_command("DEBUG LOAD " + super().get_main_file("dfs"))
 
-        super().check(client)
+        batch_check_data(client, gen_test_data(NUM_KEYS))
 
 
 @dfly_args({**BASIC_ARGS, "dbfilename": "test.rdb", "save_schedule": "*:*"})
@@ -84,7 +73,7 @@ class TestPeriodicSnapshot(SnapshotTestBase):
         super().setup(tmp_dir)
 
     def test_snapshot(self, client: redis.Redis):
-        super().populate(client)
+        batch_fill_data(client, gen_test_data(NUM_KEYS))
 
         time.sleep(60)
 

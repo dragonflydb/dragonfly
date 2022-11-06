@@ -72,6 +72,10 @@ class Connection : public util::Connection {
     CopyCharBuf(name, sizeof(name_), name_);
   }
 
+  const char* GetName() const {
+    return name_;
+  }
+
   void SetPhase(std::string_view phase) {
     CopyCharBuf(phase, sizeof(phase_), phase_);
   }
