@@ -40,6 +40,7 @@ class GenericFamily {
   static void Persist(CmdArgList args, ConnectionContext* cntx);
   static void Keys(CmdArgList args, ConnectionContext* cntx);
   static void PexpireAt(CmdArgList args, ConnectionContext* cntx);
+  static void Pexpire(CmdArgList args, ConnectionContext* cntx);
   static void Stick(CmdArgList args, ConnectionContext* cntx);
   static void Sort(CmdArgList args, ConnectionContext* cntx);
   static void Move(CmdArgList args, ConnectionContext* cntx);

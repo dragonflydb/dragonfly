@@ -52,6 +52,23 @@ TEST_F(GenericFamilyTest, Expire) {
   AdvanceTime(1);
   resp = Run({"get", "key"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  // pexpire test
+  Run({"set", "key", "val"});
+  resp = Run({"pexpire", "key", absl::StrCat(2000)});
+  EXPECT_THAT(resp, IntArg(1));
+
+  // expire time override
+  resp = Run({"pexpire", "key", absl::StrCat(3000)});
+  EXPECT_THAT(resp, IntArg(1));
+
+  AdvanceTime(2999);
+  resp = Run({"get", "key"});
+  EXPECT_THAT(resp, "val");
+
+  AdvanceTime(1);
+  resp = Run({"get", "key"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
 TEST_F(GenericFamilyTest, Del) {
