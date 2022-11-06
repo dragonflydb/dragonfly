@@ -690,7 +690,7 @@ void InterScoredMap(ScoredMap* dest, ScoredMap* src, AggType agg_type) {
     dest->swap(*src);
 }
 
-template<typename SliceIt>
+template <typename SliceIt>
 ScoredMap UnionSliceResultScore(SliceIt start, SliceIt end, AggType agg_type) {
   ScoredMap result;
   for (auto it = start; it != end; ++it) {
@@ -711,19 +711,16 @@ ScoredMap UnionSliceResultScore(SliceIt start, SliceIt end, AggType agg_type) {
 using ScoredPI = pair<PrimeIterator, double>;
 using ScoredPIVec = vector<ScoredPI>;
 
-double SliceResultWeight(EngineShard* shard, Transaction* t,
-		            const vector<double>& weights,
-			    unsigned key_index, unsigned offset) {
-
+double SliceResultWeight(EngineShard* shard, Transaction* t, const vector<double>& weights,
+                         unsigned key_index, unsigned offset) {
   unsigned windex = t->ReverseArgIndex(shard->shard_id(), key_index) - offset;
   DCHECK_LT(windex, weights.size());
   return weights[windex];
 }
 
-OpResult<ScoredPIVec> FindSliceResult(EngineShard* shard, Transaction* t,
-				    const ArgSlice& keys,
-				    const vector<double>& weights,
-				    unsigned start, unsigned offset) {
+OpResult<ScoredPIVec> FindSliceResult(EngineShard* shard, Transaction* t, const ArgSlice& keys,
+                                      const vector<double>& weights, unsigned start,
+                                      unsigned offset) {
   auto& db_slice = shard->db_slice();
   vector<pair<PrimeIterator, double>> it_arr(keys.size() - start);
   for (unsigned j = start; j < keys.size(); ++j) {
@@ -923,8 +920,8 @@ OpResult<void> FillAggType(UnionArgs& union_args, CmdArgList args, unsigned arg_
   return OpStatus::OK;
 }
 
-OpResult<unsigned> ParseAggregate(UnionArgs& union_args, CmdArgList args,
-				unsigned arg_pos, bool store) {
+OpResult<unsigned> ParseAggregate(UnionArgs& union_args, CmdArgList args, unsigned arg_pos,
+                                  bool store) {
   if (store && arg_pos + 2 != args.size()) {
     return OpStatus::SYNTAX_ERR;
   }
@@ -938,8 +935,7 @@ OpResult<unsigned> ParseAggregate(UnionArgs& union_args, CmdArgList args,
   return arg_pos + 1;
 }
 
-OpResult<unsigned> ParseWeights(UnionArgs& union_args, CmdArgList args,
-				unsigned arg_pos) {
+OpResult<unsigned> ParseWeights(UnionArgs& union_args, CmdArgList args, unsigned arg_pos) {
   if (args.size() <= arg_pos + union_args.num_keys) {
     return OpStatus::SYNTAX_ERR;
   }
@@ -1003,7 +999,7 @@ OpResult<UnionArgs> ParseUnionArgs(CmdArgList args, bool store) {
       i = *parsed;
       // Commands with store capability does not offer WITHSCORES option
       if (store) {
-	break;
+        break;
       }
     } else if (!store && arg == "WITHSCORES") {
       const auto& parsed = ParseWithScores(union_args, args, i);

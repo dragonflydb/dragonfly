@@ -266,14 +266,14 @@ TEST_F(ZSetFamilyTest, ZScan) {
 
 TEST_F(ZSetFamilyTest, ZUnion) {
   RespExpr resp;
-  
+
   resp = Run({"zunion", "0"});
   EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
 
   EXPECT_EQ(2, CheckedInt({"zadd", "z1", "1", "a", "3", "b"}));
   EXPECT_EQ(2, CheckedInt({"zadd", "z2", "3", "c", "2", "b"}));
   EXPECT_EQ(2, CheckedInt({"zadd", "z3", "1", "c", "1", "d"}));
-  
+
   resp = Run({"zunion", "z1", "z2", "z3", "weights", "1", "1", "k"});
   EXPECT_THAT(resp, ErrArg("weight value is not a float"));
 
@@ -290,18 +290,20 @@ TEST_F(ZSetFamilyTest, ZUnion) {
   EXPECT_THAT(resp, ErrArg("syntax error"));
 
   resp = Run({"zunion", "z1", "z2", "z3"});
-  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "d", "c", "b")); 
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "d", "c", "b"));
 
   resp = Run({"zunion", "z1", "z2", "z3", "weights", "1", "1", "2"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "d", "b", "c"));
-  
+
   resp = Run({"zunion", "z1", "z2", "z3", "weights", "1", "1", "2", "withscores"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "d", "2", "b", "5", "c", "5"));
-  
-  resp = Run({"zunion", "z1", "z2", "z3", "weights", "1", "1", "2", "aggregate", "min", "withscores"});
+
+  resp =
+      Run({"zunion", "z1", "z2", "z3", "weights", "1", "1", "2", "aggregate", "min", "withscores"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "b", "2", "c", "2", "d", "2"));
 
-  resp = Run({"zunion", "z1", "z2", "z3", "weights", "1", "1", "2", "aggregate", "max", "withscores"});
+  resp =
+      Run({"zunion", "z1", "z2", "z3", "weights", "1", "1", "2", "aggregate", "max", "withscores"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "d", "2", "b", "3", "c", "3"));
 }
 
