@@ -78,6 +78,20 @@ TEST_F(DflyEngineTest, Sds) {
   sdsfreesplitres(argv, argc);
 }
 
+TEST_F(DflyEngineTest, MultiAndEval) {
+  RespExpr resp = Run({"multi"});
+  ASSERT_EQ(resp, "OK");
+
+  resp = Run({"get", kKey1});
+  ASSERT_EQ(resp, "QUEUED");
+
+  resp = Run({"get", kKey4});
+  ASSERT_EQ(resp, "QUEUED");
+  EXPECT_THAT(Run({"eval", "return redis.call('exists', KEYS[2])", "2", "a", "b"}),
+              ErrArg("'EVAL' Dragonfly does not allow execution of a server-side Lua script inside "
+                     "transaction block"));
+}
+
 TEST_F(DflyEngineTest, Multi) {
   RespExpr resp = Run({"multi"});
   ASSERT_EQ(resp, "OK");
@@ -189,9 +203,12 @@ TEST_F(DflyEngineTest, MultiConsistent) {
 }
 
 TEST_F(DflyEngineTest, MultiWeirdCommands) {
+  // FIXME: issue https://github.com/dragonflydb/dragonfly/issues/457
+  // once we would have fix for supporting EVAL from within transaction
   Run({"multi"});
-  ASSERT_EQ(Run({"eval", "return 42", "0"}), "QUEUED");
-  EXPECT_THAT(Run({"exec"}), IntArg(42));
+  EXPECT_THAT(Run({"eval", "return 42", "0"}),
+              ErrArg("'EVAL' Dragonfly does not allow execution of a server-side Lua script inside "
+                     "transaction block"));
 }
 
 TEST_F(DflyEngineTest, MultiRename) {
