@@ -36,6 +36,7 @@ class JsonFamily {
   static void ArrPop(CmdArgList args, ConnectionContext* cntx);
   static void ArrTrim(CmdArgList args, ConnectionContext* cntx);
   static void ArrInsert(CmdArgList args, ConnectionContext* cntx);
+  static void ArrAppend(CmdArgList args, ConnectionContext* cntx);
   static void ArrIndex(CmdArgList args, ConnectionContext* cntx);
 };
 
