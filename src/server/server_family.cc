@@ -1489,7 +1489,7 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
   // Replica sends response in either case. No need to send response in this function.
   // It's a bit confusing but simpler.
-  if (!replica_->Run(cntx)) {
+  if (!replica_->Start(cntx)) {
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     replica_.reset();
   }
