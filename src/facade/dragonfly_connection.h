@@ -56,11 +56,12 @@ class Connection : public util::Connection {
     // if empty - means its a regular message, otherwise it's pmessage.
     std::string_view pattern;
     std::string_view channel;
-    std::string_view message;
+    std::shared_ptr<const std::string> message;  // ensure that this message would out live passing
+                                                 // between different threads/fibers
   };
 
   // this function is overriden at test_utils TestConnection
-  virtual void SendMsgVecAsync(const PubMessage& pub_msg, util::fibers_ext::BlockingCounter bc);
+  virtual void SendMsgVecAsync(const PubMessage& pub_msg);
 
   // Please note, this accept the message by value, since we really want to
   // create a new copy here, so that we would not need to "worry" about memory

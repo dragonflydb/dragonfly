@@ -72,10 +72,8 @@ constexpr size_t kMaxReadSize = 32_KB;
 
 struct PubMsgRecord {
   Connection::PubMessage pub_msg;
-  fibers_ext::BlockingCounter bc;
 
-  PubMsgRecord(const Connection::PubMessage& pmsg, fibers_ext::BlockingCounter b)
-      : pub_msg(pmsg), bc(move(b)) {
+  PubMsgRecord(const Connection::PubMessage& pmsg) : pub_msg(pmsg) {
   }
 };
 
@@ -142,7 +140,7 @@ struct Connection::Request {
   static RequestPtr New(mi_heap_t* heap, RespVec args, size_t capacity);
 
   // Overload to create a new pubsub message
-  static RequestPtr New(const PubMessage& pub_msg, fibers_ext::BlockingCounter bc);
+  static RequestPtr New(const PubMessage& pub_msg);
 
   // Overload to create a new the monitor message
   static RequestPtr New(MonitorMessage msg);
@@ -162,7 +160,6 @@ Connection::RequestPtr Connection::Request::New(mi_heap_t* heap, RespVec args, s
 
   // We must construct in place here, since there is a slice that uses memory locations
   Request* req = new (ptr) Request(args.size(), capacity);
-
   // At this point we know that we have PipelineMsg in Request so next op is safe.
   Request::PipelineMsg& pipeline_msg = std::get<Request::PipelineMsg>(req->payload);
   auto* next = pipeline_msg.storage.data();
@@ -177,14 +174,13 @@ Connection::RequestPtr Connection::Request::New(mi_heap_t* heap, RespVec args, s
   return Connection::RequestPtr{req, Connection::RequestDeleter{}};
 }
 
-Connection::RequestPtr Connection::Request::New(const PubMessage& pub_msg,
-                                                fibers_ext::BlockingCounter bc) {
+Connection::RequestPtr Connection::Request::New(const PubMessage& pub_msg) {
   // This will generate a new request for pubsub message
   // Please note that unlike the above case, we don't need to "protect", the internals here
   // since we are currently using a borrow token for it - i.e. the BlockingCounter will
   // ensure that the message is not deleted until we are finish sending it at the other
   // side of the queue
-  PubMsgRecord new_msg{pub_msg, std::move(bc)};
+  PubMsgRecord new_msg{pub_msg};
   void* ptr = mi_malloc(sizeof(Request));
   Request* req = new (ptr) Request(std::move(new_msg));
   return Connection::RequestPtr{req, Connection::RequestDeleter{}};
@@ -341,14 +337,13 @@ void Connection::RegisterOnBreak(BreakerCb breaker_cb) {
   breaker_cb_ = breaker_cb;
 }
 
-void Connection::SendMsgVecAsync(const PubMessage& pub_msg, fibers_ext::BlockingCounter bc) {
+void Connection::SendMsgVecAsync(const PubMessage& pub_msg) {
   DCHECK(cc_);
 
   if (cc_->conn_closing) {
-    bc.Dec();
     return;
   }
-  RequestPtr req = Request::New(pub_msg, std::move(bc));  // new (ptr) Request(0, 0);
+  RequestPtr req = Request::New(pub_msg);  // new (ptr) Request(0, 0);
   dispatch_q_.push_back(std::move(req));
   if (dispatch_q_.size() == 1) {
     evc_.notify();
@@ -671,7 +666,7 @@ struct Connection::DispatchOperations {
       : stats{me->service_->GetThreadLocalConnectionStats()}, builder{b}, self(me) {
   }
 
-  void operator()(PubMsgRecord& msg);
+  void operator()(const PubMsgRecord& msg);
   void operator()(Request::PipelineMsg& msg);
   void operator()(const Request::MonitorMessage& msg);
 
@@ -685,7 +680,7 @@ void Connection::DispatchOperations::operator()(const Request::MonitorMessage& m
   rbuilder->SendSimpleString(msg);
 }
 
-void Connection::DispatchOperations::operator()(PubMsgRecord& msg) {
+void Connection::DispatchOperations::operator()(const PubMsgRecord& msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
   ++stats->async_writes_cnt;
   const PubMessage& pub_msg = msg.pub_msg;
@@ -693,16 +688,15 @@ void Connection::DispatchOperations::operator()(PubMsgRecord& msg) {
   if (pub_msg.pattern.empty()) {
     arr[0] = "message";
     arr[1] = pub_msg.channel;
-    arr[2] = pub_msg.message;
+    arr[2] = *pub_msg.message;
     rbuilder->SendStringArr(absl::Span<string_view>{arr, 3});
   } else {
     arr[0] = "pmessage";
     arr[1] = pub_msg.pattern;
     arr[2] = pub_msg.channel;
-    arr[3] = pub_msg.message;
+    arr[3] = *pub_msg.message;
     rbuilder->SendStringArr(absl::Span<string_view>{arr, 4});
   }
-  msg.bc.Dec();
 }
 
 void Connection::DispatchOperations::operator()(Request::PipelineMsg& msg) {
@@ -714,18 +708,6 @@ void Connection::DispatchOperations::operator()(Request::PipelineMsg& msg) {
   self->last_interaction_ = time(nullptr);
   self->cc_->async_dispatch = false;
 }
-
-struct Connection::DispatchCleanup {
-  void operator()(PubMsgRecord& msg) const {
-    msg.bc.Dec();
-  }
-
-  void operator()(const Connection::Request::MonitorMessage&) const {
-  }
-
-  void operator()(const Connection::Request::PipelineMsg&) const {
-  }
-};
 
 // DispatchFiber handles commands coming from the InputLoop.
 // Thus, InputLoop can quickly read data from the input buffer, parse it and push
@@ -750,13 +732,8 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
   cc_->conn_closing = true;
 
-  // Clean up leftovers.
-  DispatchCleanup clean_op;
-  while (!dispatch_q_.empty()) {
-    RequestPtr req{std::move(dispatch_q_.front())};
-    dispatch_q_.pop_front();
-    std::visit(clean_op, req->payload);
-  }
+  // make sure that we don't have any leftovers!
+  dispatch_q_.clear();
 }
 
 auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> RequestPtr {
