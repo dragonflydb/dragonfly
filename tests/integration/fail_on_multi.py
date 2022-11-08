@@ -14,7 +14,7 @@ async def run_pipeline_mode(pool, messages):
         for key, val in messages.items():
             pipe.set(key, val)
    #     pipe.get(key)
-        pipe.set("foo", "bar", "EX", "oiuqwer") 
+        #pipe.set("foo", "bar", "EX", "oiuqwer") 
         pipe.eval("return {KEYS[1],KEYS[2],ARGV[1],ARGV[2]}", 2, 'key1', 'key2', 'first', 'second')
         result = await pipe.execute()
 
