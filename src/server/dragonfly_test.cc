@@ -78,6 +78,25 @@ TEST_F(DflyEngineTest, Sds) {
   sdsfreesplitres(argv, argc);
 }
 
+TEST_F(DflyEngineTest, MultiIssueNumber467) {
+  // With this test, we are going to crash!!
+  RespExpr resp = Run({"multi"});
+  ASSERT_EQ(resp, "OK");
+
+  resp = Run({"get", kKey1});
+  ASSERT_EQ(resp, "QUEUED");
+
+  resp = Run({"get", kKey4});
+  ASSERT_EQ(resp, "QUEUED");
+  // Up until now it would go well,
+  // then adding the lua script would succeed, but execute will not
+  ASSERT_EQ(Run({"eval", "return {KEYS[1],KEYS[2],ARGV[1],ARGV[2]}", "2", "key1", "key2", "first",
+                 "second"}),
+            "QUEUED");
+  resp = Run({"exec"});
+  EXPECT_TRUE(false);  // it would not succeed here
+}
+
 TEST_F(DflyEngineTest, Multi) {
   RespExpr resp = Run({"multi"});
   ASSERT_EQ(resp, "OK");
@@ -603,7 +622,7 @@ TEST_F(DflyEngineTest, Watch) {
 
   // Check watch on non-existent key.
   Run({"del", "b"});
-  EXPECT_EQ(Run({"watch", "b"}), "OK"); // didn't exist yet
+  EXPECT_EQ(Run({"watch", "b"}), "OK");  // didn't exist yet
   Run({"set", "b", "1"});
   Run({"multi"});
   ASSERT_THAT(Run({"exec"}), kExecFail);
@@ -634,10 +653,10 @@ TEST_F(DflyEngineTest, Watch) {
   // Check EXPIRE + new key.
   Run({"set", "a", "1"});
   Run({"del", "c"});
-  Run({"watch", "c"}); // didn't exist yet
+  Run({"watch", "c"});  // didn't exist yet
   Run({"watch", "a"});
   Run({"set", "c", "1"});
-  Run({"expire", "a", "1"}); // a existed
+  Run({"expire", "a", "1"});  // a existed
 
   AdvanceTime(1000);
 
@@ -664,7 +683,7 @@ TEST_F(DflyEngineTest, Watch) {
   Run({"set", "a", "1"});
   Run({"watch", "a"});
   Run({"select", "1"});
-  Run({"set", "a", "2"}); // changing a on db 1
+  Run({"set", "a", "2"});  // changing a on db 1
   Run({"select", "0"});
   Run({"multi"});
   ASSERT_THAT(Run({"exec"}), kExecSuccess);
