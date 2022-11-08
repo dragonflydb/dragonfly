@@ -397,7 +397,7 @@ OpResult<vector<OptBool>> OpToggle(const OpArgs& op_args, string_view key, strin
     }
   };
 
-  json j = result.value();
+  json j = move(result.value());
   error_code ec = JsonReplace(j, path, cb);
   if (ec) {
     VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
@@ -440,7 +440,7 @@ OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key, stri
     }
   };
 
-  json j = result.value();
+  json j = move(result.value());
   error_code ec = JsonReplace(j, path, cb);
   if (ec) {
     VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
@@ -472,7 +472,7 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path) {
   vector<string> deletion_items;
   auto cb = [&](const string& path, json& val) { deletion_items.emplace_back(path); };
 
-  json j = result.value();
+  json j = move(result.value());
   error_code ec = JsonReplace(j, path, cb);
   if (ec) {
     VLOG(1) << "Failed to evaulate expression on json with error: " << ec.message();
@@ -552,7 +552,7 @@ OpResult<vector<OptSizeT>> OpStrAppend(const OpArgs& op_args, string_view key, s
     }
   };
 
-  json j = result.value();
+  json j = move(result.value());
   error_code ec = JsonReplace(j, path, cb);
   if (ec) {
     VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
@@ -588,7 +588,7 @@ OpResult<long> OpClear(const OpArgs& op_args, string_view key, string_view path)
     clear_items += 1;
   };
 
-  json j = result.value();
+  json j = move(result.value());
   error_code ec = JsonReplace(j, path, cb);
   if (ec) {
     VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
@@ -639,7 +639,7 @@ OpResult<vector<OptString>> OpArrPop(const OpArgs& op_args, string_view key, str
     val.erase(it);
   };
 
-  json j = result.value();
+  json j = move(result.value());
   error_code ec = JsonReplace(j, path, cb);
   if (ec) {
     VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
@@ -697,7 +697,7 @@ OpResult<vector<OptSizeT>> OpArrTrim(const OpArgs& op_args, string_view key, str
     vec.emplace_back(val.size());
   };
 
-  json j = result.value();
+  json j = move(result.value());
   error_code ec = JsonReplace(j, path, cb);
   if (ec) {
     VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
@@ -763,7 +763,7 @@ OpResult<vector<OptSizeT>> OpArrInsert(const OpArgs& op_args, string_view key, s
     vec.emplace_back(val.size());
   };
 
-  json j = result.value();
+  json j = move(result.value());
   error_code ec = JsonReplace(j, path, cb);
   if (ec) {
     VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
@@ -772,6 +772,39 @@ OpResult<vector<OptSizeT>> OpArrInsert(const OpArgs& op_args, string_view key, s
 
   if (out_of_boundaries_encountered) {
     return OpStatus::OUT_OF_RANGE;
+  }
+
+  SetString(op_args, key, j.as_string());
+  return vec;
+}
+
+// Returns numeric vector that represents the new length of the array at each path, or Null reply
+// if the matching JSON value is not an array.
+OpResult<vector<OptSizeT>> OpArrAppend(const OpArgs& op_args, string_view key, string_view path,
+                                       const vector<json>& append_values) {
+  vector<OptSizeT> vec;
+
+  OpResult<json> result = GetJson(op_args, key);
+  if (!result) {
+    return result.status();
+  }
+
+  auto cb = [&](const string& path, json& val) {
+    if (!val.is_array()) {
+      vec.emplace_back(nullopt);
+      return;
+    }
+    for (auto& new_val : append_values) {
+      val.emplace_back(new_val);
+    }
+    vec.emplace_back(val.size());
+  };
+
+  json j = move(result.value());
+  error_code ec = JsonReplace(j, path, cb);
+  if (ec) {
+    VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
+    return OpStatus::SYNTAX_ERR;
   }
 
   SetString(op_args, key, j.as_string());
@@ -992,6 +1025,38 @@ void JsonFamily::ArrInsert(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpArrInsert(t->GetOpArgs(shard), key, path, index, new_values);
+  };
+
+  Transaction* trans = cntx->transaction;
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+  if (result) {
+    PrintOptVec(cntx, result);
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
+
+void JsonFamily::ArrAppend(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view path = ArgS(args, 2);
+  vector<json> append_values;
+  for (size_t i = 3; i < args.size(); ++i) {
+    optional<json> converted_val = ConstructJsonFromString(ArgS(args, i));
+    if (!converted_val) {
+      (*cntx)->SendError(kSyntaxErr);
+      return;
+    }
+
+    if (converted_val->is_object()) {
+      (*cntx)->SendError(kWrongTypeErr);
+      return;
+    }
+
+    append_values.emplace_back(converted_val);
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpArrAppend(t->GetOpArgs(shard), key, path, append_values);
   };
 
   Transaction* trans = cntx->transaction;
@@ -1414,6 +1479,8 @@ void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.ARRTRIM", CO::WRITE | CO::DENYOOM | CO::FAST, 5, 1, 1, 1}.HFUNC(ArrTrim);
   *registry << CI{"JSON.ARRINSERT", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1}.HFUNC(
       ArrInsert);
+  *registry << CI{"JSON.ARRAPPEND", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1}.HFUNC(
+      ArrAppend);
   *registry << CI{"JSON.ARRINDEX", CO::READONLY | CO::FAST, -4, 1, 1, 1}.HFUNC(ArrIndex);
 }
 

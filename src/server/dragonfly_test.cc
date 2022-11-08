@@ -540,7 +540,7 @@ TEST_F(DflyEngineTest, PSubscribe) {
   ASSERT_EQ(1, SubscriberMessagesLen("IO1"));
 
   facade::Connection::PubMessage msg = GetPublishedMessage("IO1", 0);
-  EXPECT_EQ("foo", msg.message);
+  EXPECT_EQ("foo", *msg.message);
   EXPECT_EQ("ab", msg.channel);
   EXPECT_EQ("a*", msg.pattern);
 }
@@ -603,7 +603,7 @@ TEST_F(DflyEngineTest, Watch) {
 
   // Check watch on non-existent key.
   Run({"del", "b"});
-  EXPECT_EQ(Run({"watch", "b"}), "OK"); // didn't exist yet
+  EXPECT_EQ(Run({"watch", "b"}), "OK");  // didn't exist yet
   Run({"set", "b", "1"});
   Run({"multi"});
   ASSERT_THAT(Run({"exec"}), kExecFail);
@@ -634,10 +634,10 @@ TEST_F(DflyEngineTest, Watch) {
   // Check EXPIRE + new key.
   Run({"set", "a", "1"});
   Run({"del", "c"});
-  Run({"watch", "c"}); // didn't exist yet
+  Run({"watch", "c"});  // didn't exist yet
   Run({"watch", "a"});
   Run({"set", "c", "1"});
-  Run({"expire", "a", "1"}); // a existed
+  Run({"expire", "a", "1"});  // a existed
 
   AdvanceTime(1000);
 
@@ -664,7 +664,7 @@ TEST_F(DflyEngineTest, Watch) {
   Run({"set", "a", "1"});
   Run({"watch", "a"});
   Run({"select", "1"});
-  Run({"set", "a", "2"}); // changing a on db 1
+  Run({"set", "a", "2"});  // changing a on db 1
   Run({"select", "0"});
   Run({"multi"});
   ASSERT_THAT(Run({"exec"}), kExecSuccess);

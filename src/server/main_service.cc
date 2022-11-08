@@ -1167,12 +1167,15 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
 void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
   string_view channel = ArgS(args, 1);
-  string_view message = ArgS(args, 2);
+
+  // shared_ptr ensures that the message lives until it's been sent to all subscribers and handled
+  // by DispatchOperations.
+  std::shared_ptr<const std::string> message = std::make_shared<const std::string>(ArgS(args, 2));
   ShardId sid = Shard(channel, shard_count());
 
   auto cb = [&] { return EngineShard::tlocal()->channel_slice().FetchSubscribers(channel); };
 
-  // How do we know that subsribers did not disappear after we fetched them?
+  // How do we know that subscribers did not disappear after we fetched them?
   // Each subscriber object hold a borrow_token.
   // OnClose does not reset subscribe_info before all tokens are returned.
   vector<ChannelSlice::Subscriber> subscriber_arr = shard_set->Await(sid, std::move(cb));
@@ -1189,10 +1192,8 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
       }
     }
 
-    fibers_ext::BlockingCounter bc(subscriber_arr.size());
-
-    // We run publish_cb in each subsriber's thread.
-    auto publish_cb = [&, bc](unsigned idx, util::ProactorBase*) mutable {
+    // We run publish_cb in each subscriber's thread.
+    auto publish_cb = [&](unsigned idx, util::ProactorBase*) mutable {
       unsigned start = slices[idx];
 
       for (unsigned i = start; i < subscriber_arr.size(); ++i) {
@@ -1208,13 +1209,11 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
         pmsg.channel = channel;
         pmsg.message = message;
         pmsg.pattern = subscriber.pattern;
-        conn->SendMsgVecAsync(pmsg, bc);
+        conn->SendMsgVecAsync(pmsg);
       }
     };
 
     shard_set->pool()->Await(publish_cb);
-
-    bc.Wait();  // Wait for all the messages to be sent.
   }
 
   // If subscriber connections are closing they will wait
