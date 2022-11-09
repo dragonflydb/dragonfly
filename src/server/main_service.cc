@@ -632,8 +632,10 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
           return (*cntx)->SendError("script tried accessing undeclared key");
         }
       }
+
       dfly_cntx->transaction->SetExecCmd(cid);
       OpStatus st = dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args);
+
       if (st != OpStatus::OK) {
         return (*cntx)->SendError(st);
       }
@@ -1154,7 +1156,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
         }
       }
       scmd.descr->Invoke(cmd_arg_list, cntx);
-      if (rb->GetError())
+      if (rb->GetError())  // checks for i/o error, not logical error.
         break;
     }
 
