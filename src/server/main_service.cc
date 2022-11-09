@@ -73,6 +73,24 @@ std::optional<VarzFunction> engine_varz;
 
 constexpr size_t kMaxThreadSize = 1024;
 
+// Unwatch all keys for a connection and unregister from DbSlices.
+// Used by UNWATCH, DICARD and EXEC.
+void UnwatchAllKeys(ConnectionContext* cntx) {
+  auto& exec_info = cntx->conn_state.exec_info;
+  if (!exec_info.watched_keys.empty()) {
+    auto cb = [&](EngineShard* shard) {
+      shard->db_slice().UnregisterConnectionWatches(&exec_info);
+    };
+    shard_set->RunBriefInParallel(std::move(cb));
+  }
+  exec_info.ClearWatched();
+}
+
+void MultiCleanup(ConnectionContext* cntx) {
+  UnwatchAllKeys(cntx);
+  cntx->conn_state.exec_info.Clear();
+}
+
 void DeactivateMonitoring(ConnectionContext* server_ctx) {
   if (server_ctx->monitor) {
     // remove monitor on this connection
@@ -602,6 +620,15 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   etl.connection_stats.cmd_count_map[cmd_name]++;
 
   if (dfly_cntx->conn_state.exec_info.IsActive() && !is_trans_cmd) {
+    auto cmd_name = ArgS(args, 0);
+    if (cmd_name == "EVAL" || cmd_name == "EVALSHA") {
+      auto error =
+          absl::StrCat("'", cmd_name,
+                       "' Dragonfly does not allow execution of a server-side Lua script inside "
+                       "transaction block");
+      MultiSetError(dfly_cntx);
+      return (*cntx)->SendError(error);
+    }
     // TODO: protect against aggregating huge transactions.
     StoredCmd stored_cmd{cid};
     stored_cmd.cmd.reserve(args.size());
@@ -881,19 +908,6 @@ void Service::Watch(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendOk();
 }
 
-// Unwatch all keys for a connection and unregister from DbSlices.
-// Used by UNWATCH, DICARD and EXEC.
-void UnwatchAllKeys(ConnectionContext* cntx) {
-  auto& exec_info = cntx->conn_state.exec_info;
-  if (!exec_info.watched_keys.empty()) {
-    auto cb = [&](EngineShard* shard) {
-      shard->db_slice().UnregisterConnectionWatches(&exec_info);
-    };
-    shard_set->RunBriefInParallel(std::move(cb));
-  }
-  exec_info.ClearWatched();
-}
-
 void Service::Unwatch(CmdArgList args, ConnectionContext* cntx) {
   UnwatchAllKeys(cntx);
   return (*cntx)->SendOk();
@@ -1050,8 +1064,7 @@ void Service::Discard(CmdArgList args, ConnectionContext* cntx) {
     return rb->SendError("DISCARD without MULTI");
   }
 
-  UnwatchAllKeys(cntx);
-  cntx->conn_state.exec_info.Clear();
+  MultiCleanup(cntx);
   rb->SendOk();
 }
 
@@ -1108,10 +1121,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto& exec_info = cntx->conn_state.exec_info;
-  absl::Cleanup exec_clear = [&cntx, &exec_info] {
-    UnwatchAllKeys(cntx);
-    exec_info.Clear();
-  };
+  absl::Cleanup exec_clear = [&cntx] { MultiCleanup(cntx); };
 
   if (IsWatchingOtherDbs(cntx->db_index(), exec_info)) {
     return rb->SendError("Dragonfly does not allow WATCH and EXEC on different databases");
