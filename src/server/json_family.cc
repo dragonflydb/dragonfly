@@ -8,6 +8,7 @@ extern "C" {
 #include "redis/object.h"
 }
 
+#include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 
 #include <jsoncons/json.hpp>
@@ -284,6 +285,33 @@ string ConvertToJsonPointer(string_view json_path) {
   string result{"/"};  // initialize with a leading slash
   result += absl::StrJoin(parts, "/", JsonPointerFormatter());
   return result;
+}
+
+size_t CountJsonFields(const json& j) {
+  size_t res = 0;
+  json_type type = j.type();
+  if (type == json_type::array_value) {
+    res += j.size();
+    for (const auto& item : j.array_range()) {
+      if (item.type() == json_type::array_value || item.type() == json_type::object_value) {
+        res += CountJsonFields(item);
+      }
+    }
+
+  } else if (type == json_type::object_value) {
+    res += j.size();
+    for (const auto& item : j.object_range()) {
+      if (item.value().type() == json_type::array_value ||
+          item.value().type() == json_type::object_value) {
+        res += CountJsonFields(item.value());
+      }
+    }
+
+  } else {
+    res += 1;
+  }
+
+  return res;
 }
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key,
@@ -905,7 +933,74 @@ OpResult<vector<OptString>> OpMGet(const OpArgs& op_args, const vector<string_vi
   return vec;
 }
 
+// Returns numeric vector that represents the number of fields of JSON value at each path.
+OpResult<vector<OptSizeT>> OpFields(const OpArgs& op_args, string_view key,
+                                    JsonExpression expression) {
+  OpResult<json> result = GetJson(op_args, key);
+  if (!result) {
+    return result.status();
+  }
+
+  vector<OptSizeT> vec;
+  auto cb = [&vec](const string_view& path, const json& val) {
+    vec.emplace_back(CountJsonFields(val));
+  };
+
+  expression.evaluate(*result, cb);
+  return vec;
+}
+
 }  // namespace
+
+void JsonFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
+  function<decltype(OpFields)> func;
+  string_view command = ArgS(args, 1);
+  // The 'MEMORY' sub-command is not supported yet, calling to operation function should be added
+  // here.
+  if (absl::EqualsIgnoreCase(command, "help")) {
+    (*cntx)->StartArray(2);
+    (*cntx)->SendSimpleString(
+        "JSON.DEBUG FIELDS <key> <path> - report number of fields in the JSON element.");
+    (*cntx)->SendSimpleString("JSON.DEBUG HELP - print help message.");
+    return;
+
+  } else if (absl::EqualsIgnoreCase(command, "fields")) {
+    func = &OpFields;
+
+  } else {
+    (*cntx)->SendError(facade::UnknownSubCmd(command, "JSON.DEBUG"), facade::kSyntaxErrType);
+    return;
+  }
+
+  if (args.size() < 4) {
+    (*cntx)->SendError(facade::WrongNumArgsError(command), facade::kSyntaxErrType);
+    return;
+  }
+
+  error_code ec;
+  string_view key = ArgS(args, 2);
+  string_view path = ArgS(args, 3);
+  JsonExpression expression = jsonpath::make_expression<json>(path, ec);
+
+  if (ec) {
+    VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
+    (*cntx)->SendError(kSyntaxErr);
+    return;
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return func(t->GetOpArgs(shard), key, move(expression));
+  };
+
+  Transaction* trans = cntx->transaction;
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+
+  if (result) {
+    PrintOptVec(cntx, result);
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
 
 void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
   error_code ec;
@@ -1482,6 +1577,7 @@ void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.ARRAPPEND", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1}.HFUNC(
       ArrAppend);
   *registry << CI{"JSON.ARRINDEX", CO::READONLY | CO::FAST, -4, 1, 1, 1}.HFUNC(ArrIndex);
+  *registry << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -2, 1, 1, 1}.HFUNC(Debug);
 }
 
 }  // namespace dfly

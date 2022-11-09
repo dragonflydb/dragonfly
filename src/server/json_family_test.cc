@@ -861,4 +861,35 @@ TEST_F(JsonFamilyTest, MGet) {
   EXPECT_THAT(resp.GetVec(), ElementsAre(R"("Israel")", R"("Germany")", ArgType(RespExpr::NIL)));
 }
 
+TEST_F(JsonFamilyTest, DebugFields) {
+  string json = R"(
+    [1, 2.3, "foo", true, null, {}, [], {"a":1, "b":2}, [1,2,3]]
+  )";
+
+  auto resp = Run({"set", "json1", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.DEBUG", "fields", "json1", "$[*]"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(1), IntArg(1), IntArg(1), IntArg(1), IntArg(1),
+                                         IntArg(0), IntArg(0), IntArg(2), IntArg(3)));
+
+  resp = Run({"JSON.DEBUG", "fields", "json1", "$"});
+  EXPECT_THAT(resp, IntArg(14));
+
+  json = R"(
+    [[1,2,3, [4,5,6,[6,7,8]]], {"a": {"b": {"c": 1337}}}]
+  )";
+
+  resp = Run({"set", "json1", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.DEBUG", "fields", "json1", "$[*]"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(11), IntArg(3)));
+
+  resp = Run({"JSON.DEBUG", "fields", "json1", "$"});
+  EXPECT_THAT(resp, IntArg(16));
+}
+
 }  // namespace dfly
