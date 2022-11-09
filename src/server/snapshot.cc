@@ -126,6 +126,10 @@ void SliceSnapshot::SerializeEntriesFb() {
   mu_.lock();
   mu_.unlock();
 
+  for (int i = 10; i >= 1; i--)
+    CHECK(!rdb_serializer_->SendFullSyncCut());
+  FlushSfile(true);
+
   VLOG(1) << "Exit SnapshotSerializer (serialized/side_saved/cbcalls): " << serialized_ << "/"
           << side_saved_ << "/" << savecb_calls_;
 }

@@ -3,7 +3,9 @@
 //
 #pragma once
 
+#include <boost/fiber/condition_variable.hpp>
 #include <boost/fiber/fiber.hpp>
+#include <boost/fiber/mutex.hpp>
 #include <variant>
 
 #include "base/io_buf.h"
@@ -44,6 +46,14 @@ class Replica {
     R_SYNC_OK = 0x10,
   };
 
+  struct SyncBlock {
+    SyncBlock(unsigned flows) : flows_left{flows} {
+    }
+    unsigned flows_left;
+    ::boost::fibers::mutex mu_;
+    ::boost::fibers::condition_variable cv_;
+  };
+
  public:
   Replica(std::string master_host, uint16_t port, Service* se);
   ~Replica();
@@ -75,10 +85,14 @@ class Replica {
   Replica(const MasterContext& context, uint32_t dfly_flow_id, Service* service);
 
   // Start replica initialized as dfly flow.
-  std::error_code StartAsDflyFlow();
+  std::error_code StartFullSyncFlow(SyncBlock* block);
 
-  // Sindle flow Dragonfly full sync fiber spawned by StartAsDflyFlow.
-  void FullSyncDflyFb(std::unique_ptr<base::IoBuf> io_buf, std::string eof_token);
+  std::error_code StartStableSyncFlow();
+
+  // Single flow Dragonfly full sync fiber spawned by StartFullSyncFlow.
+  void FullSyncDflyFb(SyncBlock* block, std::unique_ptr<base::IoBuf> io_buf, std::string eof_token);
+
+  void StableSyncDflyFb();
 
  private: /* Utility */
   struct PSyncResponse {

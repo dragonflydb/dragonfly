@@ -140,6 +140,8 @@ class RdbSerializer {
   // for the dump command - thus it is public function
   std::error_code SaveValue(const PrimeValue& pv);
 
+  std::error_code SendFullSyncCut();
+
  private:
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
   std::error_code SaveObject(const PrimeValue& pv);

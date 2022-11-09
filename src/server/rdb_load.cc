@@ -1553,6 +1553,14 @@ error_code RdbLoader::Load(io::Source* src) {
       break;
     }
 
+    if (type == RDB_OPCODE_FULLSYNC_END) {
+      VLOG(0) << "GOT FULLSYNC OPCODE";
+      if (fullsyncb)
+        fullsyncb();
+      // notify full sync end
+      continue;
+    }
+
     if (type == RDB_OPCODE_SELECTDB) {
       unsigned dbid = 0;
 

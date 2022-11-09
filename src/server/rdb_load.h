@@ -172,6 +172,8 @@ class RdbLoader : protected RdbLoaderBase {
     return load_time_;
   }
 
+  std::function<void()> fullsyncb;
+
  private:
   struct ObjSettings;
   std::error_code LoadKeyValPair(int type, ObjSettings* settings);

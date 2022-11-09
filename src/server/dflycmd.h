@@ -31,7 +31,7 @@ class Journal;
 
 class DflyCmd {
  public:
-  enum class SyncState { PREPARATION, FULL_SYNC, CANCELLED };
+  enum class SyncState { PREPARATION, FULL_SYNC, STABLE_SYNC, CANCELLED };
 
   struct FlowInfo {
     FlowInfo() = default;
@@ -80,10 +80,13 @@ class DflyCmd {
   // Register connection as flow for sync session.
   void Flow(CmdArgList args, ConnectionContext* cntx);
 
-  // SYNC <masterid> <syncid> <flowid>
-  // Migrate connection to required flow thread.
-  // Stub: will be replcaed with full sync.
+  // SYNC <syncid>
+  // Initiate full sync.
   void Sync(CmdArgList args, ConnectionContext* cntx);
+
+  // STARTSTABLE <syncid>
+  // Switch to stable state replication.
+  void StartStable(CmdArgList args, ConnectionContext* cntx);
 
   // EXPIRE
   // Check all keys for expiry.
@@ -92,8 +95,14 @@ class DflyCmd {
   // Start full sync in thread. Start FullSyncFb. Called for each flow.
   facade::OpStatus StartFullSyncInThread(FlowInfo* flow, EngineShard* shard);
 
+  // Start stable sync in thread. Start StableSyncFB. Called for each flow.
+  facade::OpStatus StartStableSyncInThread(FlowInfo* flow, EngineShard* shard);
+
   // Fiber that runs full sync for each flow.
   void FullSyncFb(FlowInfo* flow);
+
+  // Fiber that runs stable sync for each flow.
+  void StableSyncFb(FlowInfo* flow);
 
   // Unregister flow. Must be called when flow disconnects.
   void UnregisterFlow(FlowInfo*);
@@ -107,6 +116,8 @@ class DflyCmd {
   // Find sync info by id or send error reply.
   std::pair<uint32_t, std::shared_ptr<SyncInfo>> GetSyncInfoOrReply(std::string_view id,
                                                                     facade::RedisReplyBuilder* rb);
+
+  bool CheckReplicaStateOrReply(const SyncInfo& si, SyncState expected, facade::RedisReplyBuilder* rb);
 
   ServerFamily* sf_;
 
