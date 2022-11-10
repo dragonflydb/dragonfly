@@ -18,9 +18,9 @@ def grouper(n, iterable):
 BATCH_SIZE = 100
 
 
-def gen_test_data(n):
-    for i in range(n):
-        yield "k-"+str(i), "v-"+str(i)
+def gen_test_data(n, start=0, seed=None):
+    for i in range(start, n):
+        yield "k-"+str(i), "v-"+str(i) + ("-"+str(seed) if seed else "")
 
 
 def batch_fill_data(client: redis.Redis, gen):
@@ -44,15 +44,15 @@ def as_str_val(v) -> str:
 
 def batch_check_data(client: redis.Redis, gen):
     for group in grouper(BATCH_SIZE, gen):
-        vals = client.mget(k for k, _ in group)
-        assert all(as_str_val(vals[i]) == v for i, (_, v) in enumerate(group))
-
+        vals = [as_str_val(v) for v in client.mget(k for k, _ in group)]
+        gvals = [v for _, v in group]
+        assert vals == gvals
 
 async def batch_check_data_async(client: aioredis.Redis, gen):
     for group in grouper(BATCH_SIZE, gen):
-        vals = await client.mget(k for k, _ in group)
-        assert all(as_str_val(vals[i]) == v for i, (_, v) in enumerate(group))
-
+        vals = [as_str_val(v) for v in await client.mget(k for k, _ in group)]
+        gvals = [v for _, v in group]
+        assert vals == gvals
 
 def wait_available(client: redis.Redis):
     its = 0
