@@ -192,9 +192,14 @@ TEST_F(SetFamilyTest, SScan) {
   vec = StrArray(resp.GetVec()[1]);
   EXPECT_THAT(vec.size(), 5);
 
+  resp = Run({"sscan", "mystrset", "0", "match", "str-1*"});
+  vec = StrArray(resp.GetVec()[1]);
+  EXPECT_THAT(vec, UnorderedElementsAre("str-1", "str-10", "str-11", "str-12", "str-13", "str-14"));
+
   resp = Run({"sscan", "mystrset", "0", "match", "str-1*", "count", "3"});
   vec = StrArray(resp.GetVec()[1]);
   EXPECT_THAT(vec, IsSubsetOf({"str-1", "str-10", "str-11", "str-12", "str-13", "str-14"}));
+  EXPECT_EQ(vec.size(), 3);
 
   // nothing should match this
   resp = Run({"sscan", "mystrset", "0", "match", "1*"});
