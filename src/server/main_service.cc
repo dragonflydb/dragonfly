@@ -42,9 +42,6 @@ using namespace std;
 
 ABSL_FLAG(uint32_t, port, 6379, "Redis port");
 ABSL_FLAG(uint32_t, memcache_port, 0, "Memcached port");
-ABSL_FLAG(uint64_t, maxmemory, 0,
-          "Limit on maximum-memory that is used by the database."
-          "0 - means the program will automatically determine its maximum memory usage");
 
 ABSL_DECLARE_FLAG(string, requirepass);
 
