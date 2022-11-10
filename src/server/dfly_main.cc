@@ -44,14 +44,16 @@ struct MaxMemoryFlag {
   MaxMemoryFlag() = default;
   MaxMemoryFlag(const MaxMemoryFlag&) = default;
   MaxMemoryFlag& operator=(const MaxMemoryFlag&) = default;
-  MaxMemoryFlag(int64_t v) : value(v) {
+  MaxMemoryFlag(uint64_t v) : value(v) {
   }  // NOLINT
 
-  int64_t value;
+  uint64_t value;
 };
 
 bool AbslParseFlag(absl::string_view in, MaxMemoryFlag* flag, std::string* err) {
-  if (dfly::ParseHumanReadableBytes(in, &flag->value)) {
+  int64_t val;
+  if (dfly::ParseHumanReadableBytes(in, &val) && val >= 0) {
+    flag->value = val;
     return true;
   }
 
@@ -148,7 +150,7 @@ string NormalizePaths(std::string_view path) {
 
 bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   auto maxmemory = GetFlag(FLAGS_maxmemory).value;
-  if (maxmemory > 0 && (unsigned)maxmemory < pool->size() * 256_MB) {
+  if (maxmemory > 0 && maxmemory < pool->size() * 256_MB) {
     LOG(ERROR) << "There are " << pool->size() << " threads, so "
                << HumanReadableNumBytes(pool->size() * 256_MB) << " are required. Exiting...";
     return false;
