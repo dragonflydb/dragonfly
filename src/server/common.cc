@@ -123,26 +123,29 @@ bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes) {
   char* end;
   double d = strtod(cstr, &end);
 
-  // If this didn't consume the entire string, fail.
-  if (end + 1 < str.end())
-    return false;
-
   int64 scale = 1;
   switch (*end) {
+    // Considers just the first character after the number
+    // so it matches: 1G, 1GB, 1GiB and 1Gigabytes
     // NB: an int64 can only go up to <8 EB.
     case 'E':
+    case 'e':
       scale <<= 10;  // Fall through...
       ABSL_FALLTHROUGH_INTENDED;
     case 'P':
+    case 'p':
       scale <<= 10;
       ABSL_FALLTHROUGH_INTENDED;
     case 'T':
+    case 't':
       scale <<= 10;
       ABSL_FALLTHROUGH_INTENDED;
     case 'G':
+    case 'g':
       scale <<= 10;
       ABSL_FALLTHROUGH_INTENDED;
     case 'M':
+    case 'm':
       scale <<= 10;
       ABSL_FALLTHROUGH_INTENDED;
     case 'K':
@@ -150,6 +153,7 @@ bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes) {
       scale <<= 10;
       ABSL_FALLTHROUGH_INTENDED;
     case 'B':
+    case 'b':
     case '\0':
       break;  // To here.
     default:
