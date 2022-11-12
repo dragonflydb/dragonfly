@@ -314,6 +314,34 @@ size_t CountJsonFields(const json& j) {
   return res;
 }
 
+void SendJsonValue(ConnectionContext* cntx, const json& j) {
+  if (j.is_double()) {
+    (*cntx)->SendDouble(j.as_double());
+  } else if (j.is_number()) {
+    (*cntx)->SendLong(j.as_integer<long>());
+  } else if (j.is_bool()) {
+    (*cntx)->SendSimpleString(j.as_bool() ? "true" : "false");
+  } else if (j.is_null()) {
+    (*cntx)->SendNull();
+  } else if (j.is_string()) {
+    (*cntx)->SendSimpleString(j.as_string_view());
+  } else if (j.is_object()) {
+    (*cntx)->StartArray(j.size() + 1);
+    (*cntx)->SendSimpleString("{");
+    for (const auto& item : j.object_range()) {
+      (*cntx)->StartArray(2);
+      (*cntx)->SendSimpleString(item.key());
+      SendJsonValue(cntx, item.value());
+    }
+  } else if (j.is_array()) {
+    (*cntx)->StartArray(j.size() + 1);
+    (*cntx)->SendSimpleString("[");
+    for (const auto& item : j.array_range()) {
+      SendJsonValue(cntx, item);
+    }
+  }
+}
+
 OpResult<string> OpGet(const OpArgs& op_args, string_view key,
                        vector<pair<string_view, JsonExpression>> expressions) {
   OpResult<json> result = GetJson(op_args, key);
@@ -950,7 +978,51 @@ OpResult<vector<OptSizeT>> OpFields(const OpArgs& op_args, string_view key,
   return vec;
 }
 
+// Returns json vector that represents the result of the json query.
+OpResult<vector<json>> OpResp(const OpArgs& op_args, string_view key, JsonExpression expression) {
+  OpResult<json> result = GetJson(op_args, key);
+  if (!result) {
+    return result.status();
+  }
+
+  vector<json> vec;
+  auto cb = [&vec](const string_view& path, const json& val) { vec.emplace_back(val); };
+
+  expression.evaluate(*result, cb);
+  return vec;
+}
+
 }  // namespace
+
+void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view path = ArgS(args, 2);
+
+  error_code ec;
+  JsonExpression expression = jsonpath::make_expression<json>(path, ec);
+
+  if (ec) {
+    VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
+    (*cntx)->SendError(kSyntaxErr);
+    return;
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpResp(t->GetOpArgs(shard), key, move(expression));
+  };
+
+  Transaction* trans = cntx->transaction;
+  OpResult<vector<json>> result = trans->ScheduleSingleHopT(move(cb));
+
+  if (result) {
+    (*cntx)->StartArray(result->size());
+    for (const auto& it : *result) {
+      SendJsonValue(cntx, it);
+    }
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
 
 void JsonFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
   function<decltype(OpFields)> func;
@@ -1578,6 +1650,7 @@ void JsonFamily::Register(CommandRegistry* registry) {
       ArrAppend);
   *registry << CI{"JSON.ARRINDEX", CO::READONLY | CO::FAST, -4, 1, 1, 1}.HFUNC(ArrIndex);
   *registry << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -2, 1, 1, 1}.HFUNC(Debug);
+  *registry << CI{"JSON.RESP", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(Resp);
 }
 
 }  // namespace dfly
