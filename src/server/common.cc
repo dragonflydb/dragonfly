@@ -12,6 +12,7 @@
 extern "C" {
 #include "redis/object.h"
 #include "redis/rdb.h"
+#include "redis/util.h"
 #include "redis/zmalloc.h"
 }
 
@@ -122,26 +123,29 @@ bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes) {
   char* end;
   double d = strtod(cstr, &end);
 
-  // If this didn't consume the entire string, fail.
-  if (end + 1 < str.end())
-    return false;
-
   int64 scale = 1;
   switch (*end) {
+    // Considers just the first character after the number
+    // so it matches: 1G, 1GB, 1GiB and 1Gigabytes
     // NB: an int64 can only go up to <8 EB.
     case 'E':
+    case 'e':
       scale <<= 10;  // Fall through...
       ABSL_FALLTHROUGH_INTENDED;
     case 'P':
+    case 'p':
       scale <<= 10;
       ABSL_FALLTHROUGH_INTENDED;
     case 'T':
+    case 't':
       scale <<= 10;
       ABSL_FALLTHROUGH_INTENDED;
     case 'G':
+    case 'g':
       scale <<= 10;
       ABSL_FALLTHROUGH_INTENDED;
     case 'M':
+    case 'm':
       scale <<= 10;
       ABSL_FALLTHROUGH_INTENDED;
     case 'K':
@@ -149,6 +153,7 @@ bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes) {
       scale <<= 10;
       ABSL_FALLTHROUGH_INTENDED;
     case 'B':
+    case 'b':
     case '\0':
       break;  // To here.
     default:
@@ -191,6 +196,48 @@ TieredStats& TieredStats::operator+=(const TieredStats& o) {
   ADD(storage_capacity);
   ADD(storage_reserved);
   return *this;
+}
+
+OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
+  ScanOpts scan_opts;
+
+  for (unsigned i = 0; i < args.size(); i += 2) {
+    ToUpper(&args[i]);
+    string_view opt = ArgS(args, i);
+    if (i + 1 == args.size()) {
+      return facade::OpStatus::SYNTAX_ERR;
+    }
+
+    if (opt == "COUNT") {
+      if (!absl::SimpleAtoi(ArgS(args, i + 1), &scan_opts.limit)) {
+        return facade::OpStatus::INVALID_INT;
+      }
+      if (scan_opts.limit == 0)
+        scan_opts.limit = 1;
+      else if (scan_opts.limit > 4096)
+        scan_opts.limit = 4096;
+    } else if (opt == "MATCH") {
+      scan_opts.pattern = ArgS(args, i + 1);
+      if (scan_opts.pattern == "*")
+        scan_opts.pattern = string_view{};
+    } else if (opt == "TYPE") {
+      ToLower(&args[i + 1]);
+      scan_opts.type_filter = ArgS(args, i + 1);
+    } else if (opt == "BUCKET") {
+      if (!absl::SimpleAtoi(ArgS(args, i + 1), &scan_opts.bucket_id)) {
+        return facade::OpStatus::INVALID_INT;
+      }
+    } else {
+      return facade::OpStatus::SYNTAX_ERR;
+    }
+  }
+  return scan_opts;
+}
+
+bool ScanOpts::Matches(std::string_view val_name) const {
+  if (pattern.empty())
+    return true;
+  return stringmatchlen(pattern.data(), pattern.size(), val_name.data(), val_name.size(), 0) == 1;
 }
 
 }  // namespace dfly

@@ -42,9 +42,6 @@ using namespace std;
 
 ABSL_FLAG(uint32_t, port, 6379, "Redis port");
 ABSL_FLAG(uint32_t, memcache_port, 0, "Memcached port");
-ABSL_FLAG(uint64_t, maxmemory, 0,
-          "Limit on maximum-memory that is used by the database."
-          "0 - means the program will automatically determine its maximum memory usage");
 
 ABSL_DECLARE_FLAG(string, requirepass);
 
@@ -659,8 +656,10 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
           return (*cntx)->SendError("script tried accessing undeclared key");
         }
       }
+
       dfly_cntx->transaction->SetExecCmd(cid);
       OpStatus st = dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args);
+
       if (st != OpStatus::OK) {
         return (*cntx)->SendError(st);
       }
@@ -1164,7 +1163,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
         }
       }
       scmd.descr->Invoke(cmd_arg_list, cntx);
-      if (rb->GetError())
+      if (rb->GetError())  // checks for i/o error, not logical error.
         break;
     }
 

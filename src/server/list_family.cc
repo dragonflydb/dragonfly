@@ -209,9 +209,7 @@ OpStatus BPopper::Run(Transaction* t, unsigned msec) {
   time_point tp =
       msec ? chrono::steady_clock::now() + chrono::milliseconds(msec) : time_point::max();
   bool is_multi = t->IsMulti();
-  if (!is_multi) {
-    t->Schedule();
-  }
+  t->Schedule();
 
   auto* stats = ServerState::tl_connection_stats();
 
@@ -352,8 +350,8 @@ OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool 
 
   quicklist* ql = GetQL(it_res.value()->second);
   quicklistEntry entry = container_utils::QLEntry();
-  quicklistIter* iter = (dir == ListDir::LEFT) ? quicklistGetIterator(ql, AL_START_HEAD) :
-          quicklistGetIterator(ql, AL_START_TAIL);
+  quicklistIter* iter = (dir == ListDir::LEFT) ? quicklistGetIterator(ql, AL_START_HEAD)
+                                               : quicklistGetIterator(ql, AL_START_TAIL);
   CHECK(quicklistNext(iter, &entry));
   quicklistReleaseIterator(iter);
 
@@ -848,7 +846,7 @@ void ListFamily::MoveGeneric(ConnectionContext* cntx, string_view src, string_vi
 
   if (cntx->transaction->unique_shard_cnt() == 1) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
-        return OpMoveSingleShard(t->GetOpArgs(shard), src, dest, src_dir, dest_dir);
+      return OpMoveSingleShard(t->GetOpArgs(shard), src, dest, src_dir, dest_dir);
     };
 
     result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -865,11 +863,11 @@ void ListFamily::MoveGeneric(ConnectionContext* cntx, string_view src, string_vi
     //
     cntx->transaction->Schedule();
     auto cb = [&](Transaction* t, EngineShard* shard) {
-        auto args = t->ShardArgsInShard(shard->shard_id());
-        DCHECK_EQ(1u, args.size());
-        bool is_dest = args.front() == dest;
-        find_res[is_dest] = Peek(t->GetOpArgs(shard), args.front(), src_dir, !is_dest);
-        return OpStatus::OK;
+      auto args = t->ShardArgsInShard(shard->shard_id());
+      DCHECK_EQ(1u, args.size());
+      bool is_dest = args.front() == dest;
+      find_res[is_dest] = Peek(t->GetOpArgs(shard), args.front(), src_dir, !is_dest);
+      return OpStatus::OK;
     };
 
     cntx->transaction->Execute(move(cb), false);
@@ -881,18 +879,18 @@ void ListFamily::MoveGeneric(ConnectionContext* cntx, string_view src, string_vi
     } else {
       // Everything is ok, lets proceed with the mutations.
       auto cb = [&](Transaction* t, EngineShard* shard) {
-          auto args = t->ShardArgsInShard(shard->shard_id());
-          bool is_dest = args.front() == dest;
-          OpArgs op_args = t->GetOpArgs(shard);
+        auto args = t->ShardArgsInShard(shard->shard_id());
+        bool is_dest = args.front() == dest;
+        OpArgs op_args = t->GetOpArgs(shard);
 
-          if (is_dest) {
-            string_view val{find_res[0].value()};
-            absl::Span<string_view> span{&val, 1};
-            OpPush(op_args, args.front(), dest_dir, false, span);
-          } else {
-            OpPop(op_args, args.front(), src_dir, 1, false);
-          }
-          return OpStatus::OK;
+        if (is_dest) {
+          string_view val{find_res[0].value()};
+          absl::Span<string_view> span{&val, 1};
+          OpPush(op_args, args.front(), dest_dir, false, span);
+        } else {
+          OpPop(op_args, args.front(), src_dir, 1, false);
+        }
+        return OpStatus::OK;
       };
       cntx->transaction->Execute(move(cb), true);
       result = std::move(find_res[0].value());
