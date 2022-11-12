@@ -905,17 +905,19 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
     if (!ec) {
       auto cb = [&](Transaction* t, EngineShard* shard) {
         snapshots[0]->StartInShard(shard);
-
         return OpStatus::OK;
       };
 
       trans->ScheduleSingleHop(std::move(cb));
+    } else {
+      snapshots[0].reset();
     }
   }
 
   is_saving_.store(true, memory_order_relaxed);
 
   // Perform snapshot serialization, block the current fiber until it completes.
+  // TODO: Add cancellation in case of error.
   RunStage(new_version, save_cb);
 
   is_saving_.store(false, memory_order_relaxed);
