@@ -52,3 +52,11 @@ def test_multi_eval(client):
     except Exception as e:
         msg = str(e)
         assert "Dragonfly does not allow execution of" in msg
+
+
+def test_connection_name(client):
+    name = client.execute_command("CLIENT GETNAME")
+    assert not name
+    client.execute_command("CLIENT SETNAME test_conn_name")
+    name = client.execute_command("CLIENT GETNAME")
+    assert name == "test_conn_name"
