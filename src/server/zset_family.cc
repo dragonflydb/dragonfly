@@ -898,55 +898,54 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
   return aresult;
 }
 
-struct UnionArgs {
+struct SetOpArgs {
   AggType agg_type = AggType::SUM;
   unsigned num_keys;
   vector<double> weights;
   bool with_scores = false;
 };
 
-OpResult<void> FillAggType(UnionArgs& union_args, CmdArgList args, unsigned arg_pos) {
-  ToUpper(&args[arg_pos]);
-  string_view agg = ArgS(args, arg_pos);
+OpResult<void> FillAggType(string_view agg, SetOpArgs* op_args) {
   if (agg == "SUM") {
-    union_args.agg_type = AggType::SUM;
+    op_args->agg_type = AggType::SUM;
   } else if (agg == "MIN") {
-    union_args.agg_type = AggType::MIN;
+    op_args->agg_type = AggType::MIN;
   } else if (agg == "MAX") {
-    union_args.agg_type = AggType::MAX;
+    op_args->agg_type = AggType::MAX;
   } else {
     return OpStatus::SYNTAX_ERR;
   }
   return OpStatus::OK;
 }
 
-OpResult<unsigned> ParseAggregate(UnionArgs& union_args, CmdArgList args, unsigned arg_pos,
-                                  bool store) {
-  if (store && arg_pos + 2 != args.size()) {
+OpResult<unsigned> ParseAggregate(CmdArgList args, bool store, SetOpArgs* op_args) {
+  if (store && args.size() != 2) {
     return OpStatus::SYNTAX_ERR;
   }
-  if (!store && arg_pos + 3 < args.size()) {
+  if (!store && args.size() < 2) {
     return OpStatus::SYNTAX_ERR;
   }
-  const auto& filled = FillAggType(union_args, args, arg_pos + 1);
-  if (filled == OpStatus::SYNTAX_ERR) {
+
+  ToUpper(&args[1]);
+  const auto filled = FillAggType(ArgS(args, 1), op_args);
+  if (!filled) {
     return filled.status();
   }
-  return arg_pos + 1;
+  return 1;
 }
 
-OpResult<unsigned> ParseWeights(UnionArgs& union_args, CmdArgList args, unsigned arg_pos) {
-  if (args.size() <= arg_pos + union_args.num_keys) {
+OpResult<unsigned> ParseWeights(CmdArgList args, SetOpArgs* op_args) {
+  if (args.size() <= op_args->num_keys) {
     return OpStatus::SYNTAX_ERR;
   }
 
-  for (unsigned j = 0; j < union_args.num_keys; ++j) {
-    string_view weight = ArgS(args, arg_pos + j + 1);
-    if (!absl::SimpleAtod(weight, &(union_args.weights[j]))) {
+  for (unsigned i = 0; i < op_args->num_keys; ++i) {
+    string_view weight = ArgS(args, i + 1);
+    if (!absl::SimpleAtod(weight, &(op_args->weights[i]))) {
       return OpStatus::INVALID_FLOAT;
     }
   }
-  return arg_pos + union_args.num_keys;
+  return op_args->num_keys;
 }
 
 OpResult<unsigned> ValidateKeyCount(string_view arg_num_keys) {
@@ -958,61 +957,127 @@ OpResult<unsigned> ValidateKeyCount(string_view arg_num_keys) {
   return num_keys;
 }
 
-OpResult<unsigned> ParseWithScores(UnionArgs& union_args, CmdArgList args, unsigned arg_pos) {
-  if (arg_pos + 1 != args.size()) {
+OpResult<unsigned> ParseWithScores(CmdArgList args, SetOpArgs* op_args) {
+  if (args.size() != 1) {
     return OpStatus::SYNTAX_ERR;
   }
-  union_args.with_scores = true;
-  return arg_pos;
+  op_args->with_scores = true;
+  return 0;
 }
 
-OpResult<UnionArgs> ParseUnionArgs(CmdArgList args, bool store) {
+OpResult<SetOpArgs> ParseSetOpArgs(CmdArgList args, bool store) {
   // TODO: support variadic key for ZUNION command (now fixed to 3)
   string_view num_str = store ? ArgS(args, 2) : "3";
-  UnionArgs union_args;
+  SetOpArgs op_args;
 
-  const auto& parsed = ValidateKeyCount(num_str);
-  if (parsed == OpStatus::SYNTAX_ERR) {
+  const auto parsed = ValidateKeyCount(num_str);
+  if (!parsed) {
     return parsed.status();
   }
-  union_args.num_keys = *parsed;
-  unsigned key_start = store ? 3 + union_args.num_keys : 1 + union_args.num_keys;
+  op_args.num_keys = *parsed;
+  unsigned key_start = store ? 3 + op_args.num_keys : 1 + op_args.num_keys;
   // TODO: modify this check when there is variadic key support for ZUNION command
   DCHECK_GE(args.size(), key_start);
 
-  union_args.weights.resize(union_args.num_keys, 1);
+  op_args.weights.resize(op_args.num_keys, 1);
 
   for (size_t i = key_start; i < args.size(); ++i) {
     ToUpper(&args[i]);
     string_view arg = ArgS(args, i);
     if (arg == "WEIGHTS") {
-      const auto& parsed = ParseWeights(union_args, args, i);
-      if (parsed == OpStatus::SYNTAX_ERR || parsed == OpStatus::INVALID_FLOAT) {
+      const auto parsed = ParseWeights(args.subspan(i), &op_args);
+      if (!parsed) {
         return parsed.status();
       }
-      i = *parsed;
+      i += *parsed;
     } else if (arg == "AGGREGATE") {
-      const auto& parsed = ParseAggregate(union_args, args, i, store);
-      if (parsed == OpStatus::SYNTAX_ERR) {
+      const auto parsed = ParseAggregate(args.subspan(i), store, &op_args);
+      if (!parsed) {
         return parsed.status();
       }
-      i = *parsed;
+      i += *parsed;
       // Commands with store capability does not offer WITHSCORES option
       if (store) {
         break;
       }
     } else if (!store && arg == "WITHSCORES") {
-      const auto& parsed = ParseWithScores(union_args, args, i);
-      if (parsed == OpStatus::SYNTAX_ERR) {
+      const auto parsed = ParseWithScores(args.subspan(i), &op_args);
+      if (!parsed) {
         return parsed.status();
       }
-      i = *parsed;
+      i += *parsed;
       break;
     } else {
       return OpStatus::SYNTAX_ERR;
     }
   }
-  return union_args;
+  return op_args;
+}
+
+void ZUnionFamilyInternal(CmdArgList args, bool store, ConnectionContext* cntx) {
+  OpResult<SetOpArgs> op_args_res = ParseSetOpArgs(args, store);
+  if (!op_args_res) {
+    switch (op_args_res.status()) {
+      case OpStatus::INVALID_FLOAT:
+        return (*cntx)->SendError("weight value is not a float", kSyntaxErrType);
+      default:
+        return (*cntx)->SendError(op_args_res.status());
+    }
+  }
+  const auto& op_args = *op_args_res;
+  if (op_args.num_keys == 0) {
+    return SendAtLeastOneKeyError(cntx);
+  }
+
+  vector<OpResult<ScoredMap>> maps(shard_set->size());
+
+  string_view dest_key = store ? ArgS(args, 1) : "";
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    maps[shard->shard_id()] = OpUnion(shard, t, dest_key, op_args.agg_type, op_args.weights, false);
+    return OpStatus::OK;
+  };
+
+  cntx->transaction->Schedule();
+
+  // For commands not storing computed result, this should be
+  // the last transaction hop (e.g. ZUNION)
+  cntx->transaction->Execute(std::move(cb), !store);
+
+  ScoredMap result;
+  for (auto& op_res : maps) {
+    if (!op_res)
+      return (*cntx)->SendError(op_res.status());
+    UnionScoredMap(&result, &op_res.value(), op_args.agg_type);
+  }
+
+  vector<ScoredMemberView> smvec;
+  for (const auto& elem : result) {
+    smvec.emplace_back(elem.second, elem.first);
+  }
+
+  if (store) {
+    ShardId dest_shard = Shard(dest_key, maps.size());
+    AddResult add_result;
+    auto store_cb = [&](Transaction* t, EngineShard* shard) {
+      if (shard->shard_id() == dest_shard) {
+        ZParams zparams;
+        zparams.override = true;
+        add_result = OpAdd(t->GetOpArgs(shard), zparams, dest_key, ScoredMemberSpan{smvec}).value();
+      }
+      return OpStatus::OK;
+    };
+    cntx->transaction->Execute(std::move(store_cb), true);
+    (*cntx)->SendLong(smvec.size());
+  } else {
+    std::sort(std::begin(smvec), std::end(smvec));
+    (*cntx)->StartArray(smvec.size() * (op_args.with_scores ? 2 : 1));
+    for (const auto& elem : smvec) {
+      (*cntx)->SendBulkString(elem.second);
+      if (op_args.with_scores) {
+        (*cntx)->SendDouble(elem.first);
+      }
+    }
+  }
 }
 
 }  // namespace
@@ -1198,26 +1263,25 @@ void ZSetFamily::ZIncrBy(CmdArgList args, ConnectionContext* cntx) {
 
 void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
   string_view dest_key = ArgS(args, 1);
-  OpResult<UnionArgs> union_args_res = ParseUnionArgs(args, true);
+  OpResult<SetOpArgs> op_args_res = ParseSetOpArgs(args, true);
 
-  if (!union_args_res) {
-    switch (union_args_res.status()) {
+  if (!op_args_res) {
+    switch (op_args_res.status()) {
       case OpStatus::INVALID_FLOAT:
         return (*cntx)->SendError("weight value is not a float", kSyntaxErrType);
       default:
-        return (*cntx)->SendError(union_args_res.status());
+        return (*cntx)->SendError(op_args_res.status());
     }
   }
-  const auto& union_args = *union_args_res;
-  if (union_args.num_keys == 0) {
+  const auto& op_args = *op_args_res;
+  if (op_args.num_keys == 0) {
     return SendAtLeastOneKeyError(cntx);
   }
 
   vector<OpResult<ScoredMap>> maps(shard_set->size(), OpStatus::SKIPPED);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    maps[shard->shard_id()] =
-        OpInter(shard, t, dest_key, union_args.agg_type, union_args.weights, false);
+    maps[shard->shard_id()] = OpInter(shard, t, dest_key, op_args.agg_type, op_args.weights, false);
     return OpStatus::OK;
   };
 
@@ -1235,7 +1299,7 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
     if (result.empty())
       result.swap(op_res.value());
     else
-      InterScoredMap(&result, &op_res.value(), union_args.agg_type);
+      InterScoredMap(&result, &op_res.value(), op_args.agg_type);
     if (result.empty())
       break;
   }
@@ -1546,109 +1610,11 @@ void ZSetFamily::ZScan(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZUnion(CmdArgList args, ConnectionContext* cntx) {
-  OpResult<UnionArgs> union_args_res = ParseUnionArgs(args, false);
-
-  if (!union_args_res) {
-    switch (union_args_res.status()) {
-      case OpStatus::INVALID_FLOAT:
-        return (*cntx)->SendError("weight value is not a float", kSyntaxErrType);
-      default:
-        return (*cntx)->SendError(union_args_res.status());
-    }
-  }
-  const auto& union_args = *union_args_res;
-  if (union_args.num_keys == 0) {
-    return SendAtLeastOneKeyError(cntx);
-  }
-
-  vector<OpResult<ScoredMap>> maps(shard_set->size());
-  std::string_view dest_key{""};
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    maps[shard->shard_id()] =
-        OpUnion(shard, t, dest_key, union_args.agg_type, union_args.weights, false);
-    return OpStatus::OK;
-  };
-
-  cntx->transaction->ScheduleSingleHop(std::move(cb));
-
-  ScoredMap result;
-
-  for (auto& op_res : maps) {
-    if (!op_res)
-      return (*cntx)->SendError(op_res.status());
-    UnionScoredMap(&result, &op_res.value(), union_args.agg_type);
-  }
-
-  vector<ScoredMemberView> smvec;
-  for (const auto& elem : result) {
-    smvec.emplace_back(elem.second, elem.first);
-  }
-  std::sort(std::begin(smvec), std::end(smvec));
-
-  (*cntx)->StartArray(smvec.size() * (union_args.with_scores ? 2 : 1));
-  for (const auto& elem : smvec) {
-    (*cntx)->SendBulkString(elem.second);
-    if (union_args.with_scores) {
-      (*cntx)->SendDouble(elem.first);
-    }
-  }
+  ZUnionFamilyInternal(args, false, cntx);
 }
 
 void ZSetFamily::ZUnionStore(CmdArgList args, ConnectionContext* cntx) {
-  string_view dest_key = ArgS(args, 1);
-  OpResult<UnionArgs> union_args_res = ParseUnionArgs(args, true);
-
-  if (!union_args_res) {
-    switch (union_args_res.status()) {
-      case OpStatus::INVALID_FLOAT:
-        return (*cntx)->SendError("weight value is not a float", kSyntaxErrType);
-      default:
-        return (*cntx)->SendError(union_args_res.status());
-    }
-  }
-  const auto& union_args = *union_args_res;
-  if (union_args.num_keys == 0) {
-    return SendAtLeastOneKeyError(cntx);
-  }
-
-  vector<OpResult<ScoredMap>> maps(shard_set->size());
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    maps[shard->shard_id()] =
-        OpUnion(shard, t, dest_key, union_args.agg_type, union_args.weights, false);
-    return OpStatus::OK;
-  };
-
-  cntx->transaction->Schedule();
-
-  cntx->transaction->Execute(std::move(cb), false);
-  ScoredMap result;
-
-  for (auto& op_res : maps) {
-    if (!op_res)
-      return (*cntx)->SendError(op_res.status());
-    UnionScoredMap(&result, &op_res.value(), union_args.agg_type);
-  }
-  ShardId dest_shard = Shard(dest_key, maps.size());
-  AddResult add_result;
-  vector<ScoredMemberView> smvec;
-  for (const auto& elem : result) {
-    smvec.emplace_back(elem.second, elem.first);
-  }
-
-  auto store_cb = [&](Transaction* t, EngineShard* shard) {
-    if (shard->shard_id() == dest_shard) {
-      ZParams zparams;
-      zparams.override = true;
-      add_result = OpAdd(t->GetOpArgs(shard), zparams, dest_key, ScoredMemberSpan{smvec}).value();
-    }
-    return OpStatus::OK;
-  };
-
-  cntx->transaction->Execute(std::move(store_cb), true);
-
-  (*cntx)->SendLong(smvec.size());
+  ZUnionFamilyInternal(args, true, cntx);
 }
 
 void ZSetFamily::ZRangeByScoreInternal(CmdArgList args, bool reverse, ConnectionContext* cntx) {
