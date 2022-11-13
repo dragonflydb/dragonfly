@@ -589,7 +589,7 @@ auto DenseSet::NewLink(void* data, DensePtr next) -> DenseLinkKey* {
 }
 
 bool DenseSet::ExpireIfNeeded(DensePtr* prev, DensePtr* node) const {
-  DCHECK_NOTNULL(node);
+  DCHECK(node != nullptr);
 
   bool deleted = false;
   while (node->HasTtl()) {
