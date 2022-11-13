@@ -63,23 +63,24 @@ string UnknownSubCmd(string_view subcmd, string_view cmd) {
                       cmd, " HELP.");
 }
 
-const char kSyntaxErr[] = "syntax error";
-const char kWrongTypeErr[] = "-WRONGTYPE Operation against a key holding the wrong kind of value";
-const char kKeyNotFoundErr[] = "no such key";
-const char kInvalidIntErr[] = "value is not an integer or out of range";
-const char kInvalidFloatErr[] = "value is not a valid float";
-const char kUintErr[] = "value is out of range, must be positive";
-const char kIncrOverflow[] = "increment or decrement would overflow";
-const char kDbIndOutOfRangeErr[] = "DB index is out of range";
-const char kInvalidDbIndErr[] = "invalid DB index";
-const char kScriptNotFound[] = "-NOSCRIPT No matching script. Please use EVAL.";
-const char kAuthRejected[] = "-WRONGPASS invalid username-password pair or user is disabled.";
-const char kExpiryOutOfRange[] = "expiry is out of range";
-const char kSyntaxErrType[] = "syntax_error";
-const char kScriptErrType[] = "script_error";
-const char kIndexOutOfRange[] = "index out of range";
-const char kOutOfMemory[] = "Out of memory";
-const char kInvalidNumericResult[] = "result is not a number";
+constexpr char kSyntaxErr[] = "syntax error";
+constexpr char kWrongTypeErr[] =
+    "-WRONGTYPE Operation against a key holding the wrong kind of value";
+constexpr char kKeyNotFoundErr[] = "no such key";
+constexpr char kInvalidIntErr[] = "value is not an integer or out of range";
+constexpr char kInvalidFloatErr[] = "value is not a valid float";
+constexpr char kUintErr[] = "value is out of range, must be positive";
+constexpr char kIncrOverflow[] = "increment or decrement would overflow";
+constexpr char kDbIndOutOfRangeErr[] = "DB index is out of range";
+constexpr char kInvalidDbIndErr[] = "invalid DB index";
+constexpr char kScriptNotFound[] = "-NOSCRIPT No matching script. Please use EVAL.";
+constexpr char kAuthRejected[] = "-WRONGPASS invalid username-password pair or user is disabled.";
+constexpr char kExpiryOutOfRange[] = "expiry is out of range";
+constexpr char kSyntaxErrType[] = "syntax_error";
+constexpr char kScriptErrType[] = "script_error";
+constexpr char kIndexOutOfRange[] = "index out of range";
+constexpr char kOutOfMemory[] = "Out of memory";
+constexpr char kInvalidNumericResult[] = "result is not a number";
 
 const char* RespExpr::TypeName(Type t) {
   switch (t) {
@@ -124,6 +125,22 @@ RedisReplyBuilder* ConnectionContext::operator->() {
   CHECK(Protocol::REDIS == protocol());
 
   return static_cast<RedisReplyBuilder*>(rbuilder_.get());
+}
+
+MCReplyBuilder* ConnectionContext::memcache_reply_builder() const {
+  CHECK(Protocol::MEMCACHE == protocol());
+
+  return static_cast<MCReplyBuilder*>(rbuilder_.get());
+}
+
+RedisReplyBuilder* ConnectionContext::redis_reply_builder() const {
+  CHECK(Protocol::REDIS == protocol());
+
+  return static_cast<RedisReplyBuilder*>(rbuilder_.get());
+}
+
+SinkReplyBuilder* ConnectionContext::reply_builder() const {
+  return rbuilder_.get();
 }
 
 }  // namespace facade

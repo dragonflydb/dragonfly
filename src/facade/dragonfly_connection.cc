@@ -478,7 +478,7 @@ auto Connection::ParseRedis() -> ParserStatus {
   uint32_t consumed = 0;
 
   RedisParser::Result result = RedisParser::OK;
-  SinkReplyBuilder* builder = cc_->reply_builder();
+  RedisReplyBuilder* builder = cc_->redis_reply_builder();
   mi_heap_t* tlh = mi_heap_get_backing();
 
   do {
@@ -530,7 +530,7 @@ auto Connection::ParseMemcache() -> ParserStatus {
   uint32_t consumed = 0;
   MemcacheParser::Command cmd;
   string_view value;
-  MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(cc_->reply_builder());
+  MCReplyBuilder* builder = cc_->memcache_reply_builder();
 
   do {
     string_view str = ToSV(io_buf_.InputBuffer());

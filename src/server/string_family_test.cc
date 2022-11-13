@@ -108,6 +108,22 @@ TEST_F(StringFamilyTest, Keepttl) {
   EXPECT_TRUE(actual > 0 && actual <= 200);
 }
 
+TEST_F(StringFamilyTest, GetSet) {
+  string old_value = "old_value";
+  string new_value = "new_value";
+  auto args_old_value = RespExpr::buffer(&old_value);
+  auto args_new_value = RespExpr::buffer(&new_value);
+
+  EXPECT_THAT(Run({"set", "key", old_value, "get"}), ArgType(RespExpr::NIL));
+  auto resp = Run({"set", "key", new_value, "get"});
+  auto res_old_value = resp.GetBuf();
+
+  resp = Run({"get", "key"});
+  auto res_new_value = resp.GetBuf();
+  ASSERT_EQ(res_old_value, args_old_value);
+  ASSERT_EQ(res_new_value, args_new_value);
+}
+
 TEST_F(StringFamilyTest, SetOptionsSyntaxError) {
   auto TEST_current_time_s = TEST_current_time_ms / 1000;
 

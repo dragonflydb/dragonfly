@@ -29,13 +29,13 @@ class ConnectionContext {
   Protocol protocol() const {
     return protocol_;
   }
-
-  // A convenient proxy for redis interface.
+  // A simpler convenient proxy for redis interface.
   RedisReplyBuilder* operator->();
 
-  SinkReplyBuilder* reply_builder() {
-    return rbuilder_.get();
-  }
+  // Convenient proxys for redis/memcache interface.
+  MCReplyBuilder* memcache_reply_builder() const;
+  RedisReplyBuilder* redis_reply_builder() const;
+  SinkReplyBuilder* reply_builder() const;
 
   // Allows receiving the output data from the commands called from scripts.
   SinkReplyBuilder* Inject(SinkReplyBuilder* new_i) {

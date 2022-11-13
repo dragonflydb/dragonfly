@@ -65,7 +65,7 @@ DflyCmd::DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family)
 }
 
 void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  RedisReplyBuilder* rb = cntx->redis_reply_builder();
 
   DCHECK_GE(args.size(), 2u);
   ToUpper(&args[1]);
@@ -121,7 +121,7 @@ void DflyCmd::Journal(CmdArgList args, ConnectionContext* cntx) {
   std::string_view sub_cmd = ArgS(args, 2);
   Transaction* trans = cntx->transaction;
   DCHECK(trans);
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  RedisReplyBuilder* rb = cntx->redis_reply_builder();
 
   if (sub_cmd == "START") {
     unique_lock lk(mu_);
@@ -178,7 +178,7 @@ void DflyCmd::Journal(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void DflyCmd::Thread(CmdArgList args, ConnectionContext* cntx) {
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  RedisReplyBuilder* rb = cntx->redis_reply_builder();
   util::ProactorPool* pool = shard_set->pool();
 
   if (args.size() == 2) {  // DFLY THREAD : returns connection thread index and number of threads.
@@ -207,7 +207,7 @@ void DflyCmd::Thread(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  RedisReplyBuilder* rb = cntx->redis_reply_builder();
   string_view master_id = ArgS(args, 2);
   string_view sync_id_str = ArgS(args, 3);
   string_view flow_id_str = ArgS(args, 4);
@@ -248,7 +248,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  RedisReplyBuilder* rb = cntx->redis_reply_builder();
   string_view sync_id_str = ArgS(args, 2);
 
   VLOG(1) << "Got DFLY SYNC " << sync_id_str;
@@ -289,7 +289,7 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void DflyCmd::Expire(CmdArgList args, ConnectionContext* cntx) {
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  RedisReplyBuilder* rb = cntx->redis_reply_builder();
   cntx->transaction->ScheduleSingleHop([](Transaction* t, EngineShard* shard) {
     shard->db_slice().ExpireAllIfNeeded();
     return OpStatus::OK;

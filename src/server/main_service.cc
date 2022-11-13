@@ -713,7 +713,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
   char store_opt[32] = {0};
   char ttl_op[] = "EX";
 
-  MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
+  MCReplyBuilder* mc_builder = cntx->memcache_reply_builder();
 
   switch (cmd.type) {
     case MemcacheParser::REPLACE:
@@ -1046,7 +1046,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
 
   CHECK(result == Interpreter::RUN_OK);
 
-  EvalSerializer ser{static_cast<RedisReplyBuilder*>(cntx->reply_builder())};
+  EvalSerializer ser{cntx->redis_reply_builder()};
 
   if (!interpreter->IsResultSafe()) {
     (*cntx)->SendError("reached lua stack limit");

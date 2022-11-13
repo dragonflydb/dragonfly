@@ -444,12 +444,12 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
   PrimeValue& prime_value = it->second;
   EngineShard* shard = op_args_.shard;
 
-  if (params.prev_val) {
+  if (params.flags & SET_GET) {
+    DCHECK(params.prev_val != nullptr);
     if (prime_value.ObjType() != OBJ_STRING)
       return OpStatus::WRONG_TYPE;
 
-    string val = GetString(shard, prime_value);
-    params.prev_val->emplace(move(val));
+    params.prev_val->emplace(GetString(shard, prime_value));
   }
 
   DbSlice& db_slice = shard->db_slice();
@@ -500,6 +500,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
 
   SetCmd::SetParams sparams;
   sparams.memcache_flags = cntx->conn_state.memcache_flag;
+  std::optional<string> prev_val;
 
   int64_t int_arg;
   SinkReplyBuilder* builder = cntx->reply_builder();
@@ -557,6 +558,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       sparams.flags |= SetCmd::SET_KEEP_EXPIRE;
     } else if (cur_arg == "GET") {
       sparams.flags |= SetCmd::SET_GET;
+      sparams.prev_val = &prev_val;
     } else {
       return builder->SendError(kSyntaxErr);
     }
@@ -565,7 +567,15 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   const auto result{SetGeneric(cntx, sparams, key, value)};
 
   if (result == OpStatus::OK) {
-    return builder->SendStored();
+    if (sparams.flags & SetCmd::SET_GET) {
+      if (prev_val) {
+        return builder->SendSimpleString(*prev_val);
+      } else {
+        return builder->SendSetSkipped();
+      }
+    } else {
+      return builder->SendStored();
+    }
   }
 
   if (result == OpStatus::OUT_OF_MEMORY) {
@@ -667,6 +677,7 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
 
   SetCmd::SetParams sparams;
   sparams.prev_val = &prev_val;
+  sparams.flags |= SetCmd::SET_GET;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     SetCmd cmd(t->GetOpArgs(shard));
