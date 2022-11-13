@@ -25,6 +25,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/snapshot.h"
+#include "server/rdb_extensions.h"
 #include "util/fibers/simple_channel.h"
 
 namespace dfly {

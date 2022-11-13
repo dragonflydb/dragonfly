@@ -613,15 +613,14 @@ void Replica::FullSyncDflyFb(SyncBlock* sb, string eof_token) {
   io::PrefixSource ps{leftover_buf_->InputBuffer(), &ss};
 
   RdbLoader loader(NULL);
-  loader.fullsyncb = [this, sb, ran = false]() mutable {
-    if (ran) return;
-    {
+  loader.SetFullSyncCutCb([this, sb, ran = false]() mutable {
+    if (!ran) {
       std::unique_lock lk(sb->mu_);
       sb->flows_left--;
       ran = true;
     }
     sb->cv_.notify_all();
-  };
+  });
   loader.Load(&ps);
 
   // Try finding eof token.

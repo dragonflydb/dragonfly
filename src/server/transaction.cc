@@ -341,7 +341,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
     // if transaction is suspended (blocked in watched queue), then it's a noop.
     OpStatus status = OpStatus::OK;
 
-    if (!was_suspended)  {
+    if (!was_suspended) {
       status = cb_(this, shard);
     }
 
@@ -802,7 +802,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
 
   // Fast path - for uncontended keys, just run the callback.
   // That applies for single key operations like set, get, lpush etc.
-  if (shard->db_slice().CheckLock(mode, lock_args)) {
+  if (shard->db_slice().CheckLock(mode, lock_args) && shard->shard_lock()->Check(mode)) {
     RunQuickie(shard);
     return true;
   }
@@ -814,7 +814,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   DCHECK_EQ(0, sd.local_mask & KEYLOCK_ACQUIRED);
   bool lock_acquired = shard->db_slice().Acquire(mode, lock_args);
   sd.local_mask |= KEYLOCK_ACQUIRED;
-  DCHECK(!lock_acquired);  // Because CheckLock above failed.
+  // DCHECK(!lock_acquired);  // Because CheckLock above failed.
 
   DVLOG(1) << "Rescheduling into TxQueue " << DebugId();
 
@@ -1137,8 +1137,8 @@ bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid) {
     return false;
   }
 
-  DVLOG(1) << "NotifySuspended " << DebugId() << ", local_mask:" << local_mask
-           << " by " << committed_txid;
+  DVLOG(1) << "NotifySuspended " << DebugId() << ", local_mask:" << local_mask << " by "
+           << committed_txid;
 
   // local_mask could be awaked (i.e. not suspended) if the transaction has been
   // awakened by another key or awakened by the same key multiple times.

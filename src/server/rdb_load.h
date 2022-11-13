@@ -172,7 +172,9 @@ class RdbLoader : protected RdbLoaderBase {
     return load_time_;
   }
 
-  std::function<void()> fullsyncb;
+  void SetFullSyncCutCb(std::function<void()> cb) {
+    full_sync_cut_cb = std::move(cb);
+  }
 
  private:
   struct ObjSettings;
@@ -196,6 +198,8 @@ class RdbLoader : protected RdbLoaderBase {
   ::boost::fibers::mutex mu_;
   std::error_code ec_;  // guarded by mu_
   std::atomic_bool stop_early_{false};
+
+  std::function<void()> full_sync_cut_cb;
 };
 
 }  // namespace dfly

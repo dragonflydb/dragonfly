@@ -103,9 +103,6 @@
 /* Test if a type is an object type. */
 #define rdbIsObjectType(t) ((t >= 0 && t <= 7) || (t >= 9 && t <= 18))
 
-// DFLY EXTENSIONS: WHAT FILE TO PUT THEM?
-#define RDB_OPCODE_FULLSYNC_END 233
-
 /* Special RDB opcodes (saved/loaded with rdbSaveType/rdbLoadType). */
 #define RDB_OPCODE_FUNCTION   246   /* engine data */
 #define RDB_OPCODE_MODULE_AUX 247   /* Module auxiliary data. */

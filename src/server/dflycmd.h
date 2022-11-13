@@ -95,14 +95,11 @@ class DflyCmd {
   // Start full sync in thread. Start FullSyncFb. Called for each flow.
   facade::OpStatus StartFullSyncInThread(FlowInfo* flow, EngineShard* shard);
 
-  // Start stable sync in thread. Start StableSyncFB. Called for each flow.
+  // Start stable sync in thread. Called for each flow.
   facade::OpStatus StartStableSyncInThread(FlowInfo* flow, EngineShard* shard);
 
   // Fiber that runs full sync for each flow.
   void FullSyncFb(FlowInfo* flow);
-
-  // Fiber that runs stable sync for each flow.
-  void StableSyncFb(FlowInfo* flow);
 
   // Unregister flow. Must be called when flow disconnects.
   void UnregisterFlow(FlowInfo*);
@@ -117,7 +114,8 @@ class DflyCmd {
   std::pair<uint32_t, std::shared_ptr<SyncInfo>> GetSyncInfoOrReply(std::string_view id,
                                                                     facade::RedisReplyBuilder* rb);
 
-  bool CheckReplicaStateOrReply(const SyncInfo& si, SyncState expected, facade::RedisReplyBuilder* rb);
+  bool CheckReplicaStateOrReply(const SyncInfo& si, SyncState expected,
+                                facade::RedisReplyBuilder* rb);
 
   ServerFamily* sf_;
 

@@ -85,7 +85,9 @@ class RdbSaver {
   // freq_map can optionally be null.
   std::error_code SaveBody(RdbTypeFreqMap* freq_map);
 
-  SaveMode Mode() const { return save_mode_; }
+  SaveMode Mode() const {
+    return save_mode_;
+  }
 
  private:
   class Impl;

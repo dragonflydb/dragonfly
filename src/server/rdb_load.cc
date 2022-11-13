@@ -27,6 +27,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/hset_family.h"
+#include "server/rdb_extensions.h"
 #include "server/script_mgr.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
@@ -1554,10 +1555,8 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_FULLSYNC_END) {
-      VLOG(0) << "GOT FULLSYNC OPCODE";
-      if (fullsyncb)
-        fullsyncb();
-      // notify full sync end
+      if (full_sync_cut_cb)
+        full_sync_cut_cb();
       continue;
     }
 

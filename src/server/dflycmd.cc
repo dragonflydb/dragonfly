@@ -300,41 +300,19 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
   if (!CheckReplicaStateOrReply(*sync_info, SyncState::FULL_SYNC, rb))
     return;
 
-  // TODO: Temporary solution
   {
+    TransactionGuard tg{cntx->transaction};
     AggregateStatus status;
 
-    auto cb = [this, &status, sync_info = sync_info](Transaction* t, EngineShard* shard) {
-      unsigned index = shard->shard_id();
-      status = StartStableSyncInThread(&sync_info->flows[index], shard);
-      return OpStatus::OK;
-    };
-    cntx->transaction->ScheduleSingleHop(std::move(cb));
-
-    auto cb2 = [this, &status, sync_info = sync_info](unsigned index, auto*) {
-      if (EngineShard::tlocal() != nullptr) return OpStatus::OK;
+    auto cb = [this, &status, sync_info = sync_info](unsigned index, auto*) {
       status = StartStableSyncInThread(&sync_info->flows[index], EngineShard::tlocal());
       return OpStatus::OK;
     };
-    shard_set->pool()->AwaitFiberOnAll(std::move(cb2));
+    shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 
     if (*status != OpStatus::OK)
       return rb->SendError(kInvalidState);
   }
-
-  //{
-  //  TransactionGuard tg{cntx->transaction};
-  //  AggregateStatus status;
-
-  //  auto cb = [this, &status, sync_info = sync_info](unsigned index, auto*) {
-  //    status = StartStableSyncInThread(&sync_info->flows[index], EngineShard::tlocal());
-  //    return OpStatus::OK;
-  //  };
-  //  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
-
-  //  if (*status != OpStatus::OK)
-  //    return rb->SendError(kInvalidState);
-  //}
 
   sync_info->state = SyncState::STABLE_SYNC;
   return rb->SendOk();
@@ -379,11 +357,12 @@ OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, EngineShard* shard) {
   if (shard != nullptr) {
     flow->saver.reset();
 
-    // Start stable state fiber.
-    flow->fb = boost::fibers::fiber(&DflyCmd::StableSyncFb, this, flow);
-
-    // TODO: Temporary solution
-    flow->fb.join();
+    // TODO: Add cancellation.
+    auto cb = sf_->journal()->RegisterOnChange([flow](const journal::Entry& je) {
+      // TODO: Serialize event.
+      ReqSerializer serializer{flow->conn->socket()};
+      serializer.SendCommand(absl::StrCat("SET ", je.key, " ", je.pval_ptr->ToString()));
+    });
   }
 
   return OpStatus::OK;
@@ -419,20 +398,6 @@ void DflyCmd::FullSyncFb(FlowInfo* flow) {
     LOG(ERROR) << ec;
     return;
   }
-
-  // ec = flow->conn->socket()->Shutdown(SHUT_RDWR);
-}
-
-void DflyCmd::StableSyncFb(FlowInfo* flow) {
-  auto cb = sf_->journal()->RegisterOnChange([flow](const journal::Entry& je) {
-    // TODO: Temporary solution
-    if (flow->conn == nullptr) return;
-
-    // TODO: Serialize event.
-    ReqSerializer serializer{flow->conn->socket()};
-    serializer.SendCommand(absl::StrCat("SET ", je.key, " ", je.pval_ptr->ToString()));
-    //CHECK(!serializer.ec());
-  });
 }
 
 uint32_t DflyCmd::CreateSyncSession() {
