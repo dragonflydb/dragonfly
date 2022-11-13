@@ -105,6 +105,8 @@ void DflyCmd::OnClose(ConnectionContext* cntx) {
   if (!session_id)
     return;
 
+  VLOG(0) << "Disconnected !!! " << flow_id;
+
   if (flow_id == kuint32max) {
     DeleteSyncSession(session_id);
   } else {
@@ -298,19 +300,41 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
   if (!CheckReplicaStateOrReply(*sync_info, SyncState::FULL_SYNC, rb))
     return;
 
+  // TODO: Temporary solution
   {
-    TransactionGuard tg{cntx->transaction};
     AggregateStatus status;
 
-    auto cb = [this, &status, sync_info = sync_info](unsigned index, auto*) {
+    auto cb = [this, &status, sync_info = sync_info](Transaction* t, EngineShard* shard) {
+      unsigned index = shard->shard_id();
+      status = StartStableSyncInThread(&sync_info->flows[index], shard);
+      return OpStatus::OK;
+    };
+    cntx->transaction->ScheduleSingleHop(std::move(cb));
+
+    auto cb2 = [this, &status, sync_info = sync_info](unsigned index, auto*) {
+      if (EngineShard::tlocal() != nullptr) return OpStatus::OK;
       status = StartStableSyncInThread(&sync_info->flows[index], EngineShard::tlocal());
       return OpStatus::OK;
     };
-    shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+    shard_set->pool()->AwaitFiberOnAll(std::move(cb2));
 
     if (*status != OpStatus::OK)
       return rb->SendError(kInvalidState);
   }
+
+  //{
+  //  TransactionGuard tg{cntx->transaction};
+  //  AggregateStatus status;
+
+  //  auto cb = [this, &status, sync_info = sync_info](unsigned index, auto*) {
+  //    status = StartStableSyncInThread(&sync_info->flows[index], EngineShard::tlocal());
+  //    return OpStatus::OK;
+  //  };
+  //  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+
+  //  if (*status != OpStatus::OK)
+  //    return rb->SendError(kInvalidState);
+  //}
 
   sync_info->state = SyncState::STABLE_SYNC;
   return rb->SendOk();
@@ -357,13 +381,15 @@ OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, EngineShard* shard) {
 
     // Start stable state fiber.
     flow->fb = boost::fibers::fiber(&DflyCmd::StableSyncFb, this, flow);
+
+    // TODO: Temporary solution
+    flow->fb.join();
   }
 
   return OpStatus::OK;
 }
 
 void DflyCmd::FullSyncFb(FlowInfo* flow) {
-  VLOG(0) << "Fullsyncfb";
   error_code ec;
   RdbSaver* saver = flow->saver.get();
 
@@ -386,7 +412,7 @@ void DflyCmd::FullSyncFb(FlowInfo* flow) {
     return;
   }
 
-  VLOG(0) << "SaveBody finished";
+  VLOG(1) << "Sending full sync EOF";
 
   ec = flow->conn->socket()->Write(io::Buffer(flow->eof_token));
   if (ec) {
@@ -394,16 +420,18 @@ void DflyCmd::FullSyncFb(FlowInfo* flow) {
     return;
   }
 
-  //ec = flow->conn->socket()->Shutdown(SHUT_RDWR);
+  // ec = flow->conn->socket()->Shutdown(SHUT_RDWR);
 }
 
 void DflyCmd::StableSyncFb(FlowInfo* flow) {
   auto cb = sf_->journal()->RegisterOnChange([flow](const journal::Entry& je) {
+    // TODO: Temporary solution
+    if (flow->conn == nullptr) return;
+
     // TODO: Serialize event.
-    VLOG(0) << "Got change event " << je.key;
     ReqSerializer serializer{flow->conn->socket()};
     serializer.SendCommand(absl::StrCat("SET ", je.key, " ", je.pval_ptr->ToString()));
-    CHECK(!serializer.ec());
+    //CHECK(!serializer.ec());
   });
 }
 
@@ -490,7 +518,8 @@ pair<uint32_t, shared_ptr<DflyCmd::SyncInfo>> DflyCmd::GetSyncInfoOrReply(std::s
   return {sync_id, sync_it->second};
 }
 
-bool DflyCmd::CheckReplicaStateOrReply(const SyncInfo& sync_info, SyncState expected, RedisReplyBuilder* rb) {
+bool DflyCmd::CheckReplicaStateOrReply(const SyncInfo& sync_info, SyncState expected,
+                                       RedisReplyBuilder* rb) {
   if (sync_info.state != expected) {
     rb->SendError(kInvalidState);
     return false;

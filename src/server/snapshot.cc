@@ -126,8 +126,7 @@ void SliceSnapshot::SerializeEntriesFb() {
   mu_.lock();
   mu_.unlock();
 
-  for (int i = 10; i >= 1; i--)
-    CHECK(!rdb_serializer_->SendFullSyncCut());
+  CHECK(!rdb_serializer_->SendFullSyncCut());
   FlushSfile(true);
 
   VLOG(1) << "Exit SnapshotSerializer (serialized/side_saved/cbcalls): " << serialized_ << "/"
@@ -254,6 +253,7 @@ void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
     CHECK(!ec && !sfile.val.empty());
 
     DbRecord rec = GetDbRecord(entry.db_ind, std::move(sfile.val), 1);
+
     dest_->Push(std::move(rec));
   }
 }

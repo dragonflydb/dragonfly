@@ -567,12 +567,12 @@ error_code Replica::StartFullSyncFlow(SyncBlock* sb) {
 
   parser_.reset(new RedisParser{false});  // client mode
 
-  std::unique_ptr<base::IoBuf> io_buf{new base::IoBuf(128)};
+  leftover_buf_.reset(new base::IoBuf(128));
   unsigned consumed = 0;
-  RETURN_ON_ERR(ReadRespReply(io_buf.get(), &consumed));  // uses parser_
+  RETURN_ON_ERR(ReadRespReply(leftover_buf_.get(), &consumed));  // uses parser_
 
   if (!CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING})) {
-    LOG(ERROR) << "Bad FLOW response " << ToSV(io_buf->InputBuffer());
+    LOG(ERROR) << "Bad FLOW response " << ToSV(leftover_buf_->InputBuffer());
     return make_error_code(errc::bad_message);
   }
 
@@ -581,23 +581,20 @@ error_code Replica::StartFullSyncFlow(SyncBlock* sb) {
   if (flow_directive == "FULL") {
     eof_token = ToSV(resp_args_[1].GetBuf());
   } else {
-    LOG(ERROR) << "Bad FLOW response " << ToSV(io_buf->InputBuffer());
+    LOG(ERROR) << "Bad FLOW response " << ToSV(leftover_buf_->InputBuffer());
   }
-  io_buf->ConsumeInput(consumed);
+  leftover_buf_->ConsumeInput(consumed);
 
   state_mask_ = R_ENABLED | R_TCP_CONNECTED;
 
   // We can not discard io_buf because it may contain data
   // besides the response we parsed. Therefore we pass it further to ReplicateDFFb.
-  sync_fb_ = ::boost::fibers::fiber(&Replica::FullSyncDflyFb, this, sb, std::move(io_buf),
-                                    move(eof_token));
+  sync_fb_ = ::boost::fibers::fiber(&Replica::FullSyncDflyFb, this, sb, move(eof_token));
 
   return error_code{};
 }
 
 error_code Replica::StartStableSyncFlow() {
-  VLOG(0) << "Starting consume flow";
-
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
@@ -610,58 +607,71 @@ error_code Replica::StartStableSyncFlow() {
   return std::error_code{};
 }
 
-void Replica::FullSyncDflyFb(SyncBlock* sb, unique_ptr<base::IoBuf> io_buf, string eof_token) {
-  VLOG(0) << "Start Fullsyncfb";
+void Replica::FullSyncDflyFb(SyncBlock* sb, string eof_token) {
+  DCHECK(leftover_buf_);
   SocketSource ss{sock_.get()};
-  io::PrefixSource ps{io_buf->InputBuffer(), &ss};
+  io::PrefixSource ps{leftover_buf_->InputBuffer(), &ss};
 
   RdbLoader loader(NULL);
   loader.fullsyncb = [this, sb, ran = false]() mutable {
+    if (ran) return;
     {
       std::unique_lock lk(sb->mu_);
-      if (!ran)  // TODO: Remove this!!!!.
-        sb->flows_left--;
+      sb->flows_left--;
       ran = true;
     }
     sb->cv_.notify_all();
   };
   loader.Load(&ps);
 
-  VLOG(0) << "Done Fullsyncfb";
-
+  // Try finding eof token.
+  io::PrefixSource chained_tail{loader.Leftover(), &ps};
   if (!eof_token.empty()) {
-    unique_ptr<uint8_t[]> buf(new uint8_t[eof_token.size()]);
-    // pass leftover data from the loader.
-    io::PrefixSource chained(loader.Leftover(), &ps);
-    VLOG(0) << "Before reading from chained stream";
-    //io::Result<size_t> eof_res = chained.Read(io::MutableBytes{buf.get(), eof_token.size()});
-    //if (!eof_res || *eof_res != eof_token.size()) {
-    //  LOG(ERROR) << "Error finding eof token in the stream";
-    //}
+    unique_ptr<uint8_t[]> buf{new uint8_t[eof_token.size()]};
 
-    // TODO - to compare tokens
+    io::Result<size_t> res =
+        chained_tail.ReadAtLeast(io::MutableBytes{buf.get(), eof_token.size()}, eof_token.size());
+
+    if (!res || *res != eof_token.size()) {
+      LOG(ERROR) << "Error finding eof token in the stream";
+    }
   }
-  VLOG(0) << "ReplicateDFFb finished after reading " << loader.bytes_read() << " bytes";
+
+  // Keep laoder leftover.
+  io::Bytes unused = chained_tail.unused_prefix();
+  if (unused.size() > 0) {
+    leftover_buf_.reset(new base::IoBuf{unused.size()});
+    auto mut_bytes = leftover_buf_->AppendBuffer();
+    memcpy(mut_bytes.data(), unused.data(), unused.size());
+    leftover_buf_->CommitWrite(unused.size());
+  } else {
+    leftover_buf_.reset();
+  }
+
+  VLOG(1) << "FullSyncDflyFb finished after reading " << loader.bytes_read() << " bytes";
 }
 
 void Replica::StableSyncDflyFb() {
-  VLOG(0) << "RUNNING STABLE SYNC";
   base::IoBuf io_buf(16_KB);
   parser_.reset(new RedisParser);
 
+  // Check leftover from stable state.
+  if (leftover_buf_ && leftover_buf_->InputLen() > 0) {
+    size_t len = leftover_buf_->InputLen();
+    leftover_buf_->ReadAndConsume(len, io_buf.AppendBuffer().data());
+    io_buf.CommitWrite(len);
+    leftover_buf_.reset();
+  }
+
   error_code ec;
-  time_t last_ack = time(nullptr);
   string ack_cmd;
 
   while (!ec) {
-    VLOG(0) << "StableSyncDflyFb iteration";
     io::MutableBytes buf = io_buf.AppendBuffer();
     io::Result<size_t> size_res = sock_->Recv(buf);
     if (!size_res)
       return;
-    // return size_res.error();
 
-    VLOG(0) << "Read replication stream of " << *size_res << " bytes";
     last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
 
     io_buf.CommitWrite(*size_res);
@@ -670,7 +680,8 @@ void Replica::StableSyncDflyFb() {
     ec = ParseAndExecute(&io_buf);
   }
 
-  VLOG(0) << "StableSyncDflyFb finished";
+  VLOG(0) << "GOT EC " << ec.message();
+
   return;
 }
 

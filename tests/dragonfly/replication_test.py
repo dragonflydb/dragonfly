@@ -3,7 +3,6 @@ import pytest
 import asyncio
 import aioredis
 import redis
-import time
 
 from .utility import *
 from . import dfly_args
@@ -16,16 +15,17 @@ Test full replication pipeline. Test full sync with streaming changes and stable
 """
 
 replication_cases = [
-    (2, 2, 1500, 200)
+    (2, 2, 500, 200),
+    (8, 8, 5000, 1000),
+    (12, 8, 20000, 4000)
 ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replica, n_keys, n_stream_keys", replication_cases)
-@dfly_args({"logtostdout": ""})
 async def test_replication_all(df_local_factory, t_master, t_replica, n_keys, n_stream_keys):
-    master = df_local_factory.create(port=1111, proactor_threads=t_master)
-    replica = df_local_factory.create(port=1112, proactor_threads=t_replica)
+    master = df_local_factory.create(port=1111, proactor_threads=t_master, logtostdout="")
+    replica = df_local_factory.create(port=1112, proactor_threads=t_replica, logtostdout="")
 
     # Start master and fill with test data
     master.start()
@@ -49,6 +49,7 @@ async def test_replication_all(df_local_factory, t_master, t_replica, n_keys, n_
     # Check range [n_stream_keys, n_keys] is of seed 1
     await batch_check_data_async(c_replica, gen_test_data(n_keys, start=n_stream_keys, seed=1))
     # Check range [0, n_stream_keys] is of seed 2
+    await asyncio.sleep(0.1)
     await batch_check_data_async(c_replica, gen_test_data(n_stream_keys, seed=2))
 
     # Check stable state streaming

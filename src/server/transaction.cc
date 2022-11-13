@@ -560,7 +560,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     // The problematic flow is as follows: ScheduleUniqueShard schedules into TxQueue and then
     // call PollExecute that runs the callback which calls DecreaseRunCnt.
     // As a result WaitForShardCallbacks below is unblocked.
-    auto schedule_cb = [&] {
+    auto schedule_cb = [this] {
       bool run_eager = ScheduleUniqueShard(EngineShard::tlocal());
       if (run_eager) {
         // it's important to DecreaseRunCnt only for run_eager and after run_eager was assigned.

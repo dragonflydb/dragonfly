@@ -924,7 +924,7 @@ error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
   RETURN_ON_ERR(impl_->serializer()->FlushMem());
 
   if (save_mode_ == SaveMode::SUMMARY) {
-    return impl_->serializer()->SendFullSyncCut();
+    impl_->serializer()->SendFullSyncCut();
   } else {
     VLOG(1) << "SaveBody , snapshots count: " << impl_->Size();
     error_code io_error = impl_->ConsumeChannel();

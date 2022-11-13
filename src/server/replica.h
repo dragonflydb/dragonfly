@@ -90,7 +90,7 @@ class Replica {
   std::error_code StartStableSyncFlow();
 
   // Single flow Dragonfly full sync fiber spawned by StartFullSyncFlow.
-  void FullSyncDflyFb(SyncBlock* block, std::unique_ptr<base::IoBuf> io_buf, std::string eof_token);
+  void FullSyncDflyFb(SyncBlock* block, std::string eof_token);
 
   void StableSyncDflyFb();
 
@@ -156,6 +156,7 @@ class Replica {
   ::boost::fibers::fiber sync_fb_;
   std::vector<std::unique_ptr<Replica>> shard_flows_;
 
+  std::unique_ptr<base::IoBuf> leftover_buf_;
   std::unique_ptr<facade::RedisParser> parser_;
   facade::RespVec resp_args_;
   facade::CmdArgVec cmd_str_args_;
