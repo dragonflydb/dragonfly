@@ -72,8 +72,7 @@ TEST_F(JsonFamilyTest, SetGetBasic) {
   EXPECT_THAT(resp, ArgType(RespExpr::ERROR));
 }
 
-TEST_F(JsonFamilyTest, SetGetFromPhonebook) {
-  string json = R"(
+static const string PhonebookJson = R"(
     {
       "firstName":"John",
       "lastName":"Smith",
@@ -103,7 +102,8 @@ TEST_F(JsonFamilyTest, SetGetFromPhonebook) {
     }
   )";
 
-  auto resp = Run({"set", "json", json});
+TEST_F(JsonFamilyTest, SetGetFromPhonebook) {
+  auto resp = Run({"set", "json", PhonebookJson});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.GET", "json", "$.address.*"});
@@ -890,6 +890,24 @@ TEST_F(JsonFamilyTest, DebugFields) {
 
   resp = Run({"JSON.DEBUG", "fields", "json1", "$"});
   EXPECT_THAT(resp, IntArg(16));
+}
+
+TEST_F(JsonFamilyTest, Resp) {
+  auto resp = Run({"set", "json", PhonebookJson});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.RESP", "json", "$.address.*"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre("New York", "NY", "21 2nd Street", "10021-3100"));
+
+  resp = Run({"JSON.RESP", "json", "$.isAlive"});
+  EXPECT_THAT(resp, "true");
+
+  resp = Run({"JSON.RESP", "json", "$.age"});
+  EXPECT_THAT(resp, IntArg(27));
+
+  resp = Run({"JSON.RESP", "json", "$.weight"});
+  EXPECT_THAT(resp, "135.25");
 }
 
 }  // namespace dfly
