@@ -796,7 +796,7 @@ error_code DoPartialSave(const string& filename, const string& path, absl::Time 
   } else {
     ExtendFilenameWithShard(now, shard->shard_id(), &file);
   }
-  abs_path += file;
+  abs_path /= file;  // use / operator to concatenate paths.
   VLOG(1) << "Saving partial file to " << abs_path;
 
   // Start rdb saving.
@@ -895,7 +895,7 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
     snapshots.resize(1);
 
     ExtendFilenameWithShard(now, -1, &filename);
-    path += filename;
+    path /= filename;  // use / operator to concatenate paths.
     VLOG(1) << "Saving to " << path;
 
     snapshots[0].reset(new RdbSnapshot(fq_threadpool_.get()));
