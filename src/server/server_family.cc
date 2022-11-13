@@ -1040,6 +1040,15 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendOk();
   }
 
+  if (sub_cmd == "GETNAME") {
+    const char* name = cntx->owner()->GetName();
+    if (*name != 0) {
+      return (*cntx)->SendBulkString(name);
+    } else {
+      return (*cntx)->SendNull();
+    }
+  }
+
   if (sub_cmd == "LIST") {
     vector<string> client_info;
     fibers::mutex mu;
