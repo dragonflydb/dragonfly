@@ -571,9 +571,10 @@ OpStatus DbSlice::UpdateExpire(const Context& cntx, PrimeIterator prime_it,
   return OpStatus::OK;
 }
 
-std::pair<PrimeIterator, bool> DbSlice::AddOrUpdateInternal(const Context& cntx, std::string_view key,
-                                                   PrimeValue obj, uint64_t expire_at_ms,
-                                                   bool force_update) noexcept(false) {
+std::pair<PrimeIterator, bool> DbSlice::AddOrUpdateInternal(const Context& cntx,
+                                                            std::string_view key, PrimeValue obj,
+                                                            uint64_t expire_at_ms,
+                                                            bool force_update) noexcept(false) {
   DCHECK(!obj.IsRef());
 
   pair<PrimeIterator, bool> res = AddOrFind(cntx, key);
@@ -600,10 +601,9 @@ std::pair<PrimeIterator, bool> DbSlice::AddOrUpdateInternal(const Context& cntx,
 }
 
 pair<PrimeIterator, bool> DbSlice::AddOrUpdate(const Context& cntx, string_view key, PrimeValue obj,
-                                            uint64_t expire_at_ms) noexcept(false) {
+                                               uint64_t expire_at_ms) noexcept(false) {
   return AddOrUpdateInternal(cntx, key, std::move(obj), expire_at_ms, true);
 }
-
 
 pair<PrimeIterator, bool> DbSlice::AddEntry(const Context& cntx, string_view key, PrimeValue obj,
                                             uint64_t expire_at_ms) noexcept(false) {

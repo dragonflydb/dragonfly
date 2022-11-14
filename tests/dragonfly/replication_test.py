@@ -2,10 +2,8 @@
 import pytest
 import asyncio
 import aioredis
-import redis
 
 from .utility import *
-from . import dfly_args
 
 
 BASE_PORT = 1111
@@ -21,6 +19,7 @@ replication_cases = [
     (6, [6, 6, 6], 30000, 15000),
     (4, [1] * 12, 10000, 4000),
 ]
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replicas, n_keys, n_stream_keys", replication_cases)
@@ -46,7 +45,7 @@ async def test_replication_all(df_local_factory, t_master, t_replicas, n_keys, n
         """ Stream data during stable state replication phase and afterwards """
         gen = gen_test_data(n_stream_keys, seed=2)
         for chunk in grouper(3, gen):
-            await c_master.mset({k:v for k,v in chunk})
+            await c_master.mset({k: v for k, v in chunk})
 
     async def run_replication(c_replica):
         await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
@@ -65,7 +64,8 @@ async def test_replication_all(df_local_factory, t_master, t_replicas, n_keys, n
     await asyncio.gather(*(asyncio.create_task(run_replication(c))
                            for c in c_replicas))
 
-    assert not stream_fut.done(), "Weak testcase. Increase number of streamed keys to surpass full sync"
+    assert not stream_fut.done(
+    ), "Weak testcase. Increase number of streamed keys to surpass full sync"
     await stream_fut
 
     # Check full sync results

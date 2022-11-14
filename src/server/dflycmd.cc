@@ -105,8 +105,6 @@ void DflyCmd::OnClose(ConnectionContext* cntx) {
   if (!session_id)
     return;
 
-  VLOG(0) << "Disconnected !!! " << flow_id;
-
   if (flow_id == kuint32max) {
     DeleteSyncSession(session_id);
   } else {
@@ -290,7 +288,7 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   string_view sync_id_str = ArgS(args, 2);
 
-  VLOG(0) << "Got DFLY STARTSTABLE " << sync_id_str;
+  VLOG(1) << "Got DFLY STARTSTABLE " << sync_id_str;
 
   auto [sync_id, sync_info] = GetSyncInfoOrReply(sync_id_str, rb);
   if (!sync_id)

@@ -46,6 +46,8 @@ class Replica {
     R_SYNC_OK = 0x10,
   };
 
+  // A generic barrier that is used for waiting for
+  // flow fibers to become ready for the stable state switch.
   struct SyncBlock {
     SyncBlock(unsigned flows) : flows_left{flows} {
     }
@@ -87,11 +89,13 @@ class Replica {
   // Start replica initialized as dfly flow.
   std::error_code StartFullSyncFlow(SyncBlock* block);
 
+  // Transition into stable state mode as dfly flow.
   std::error_code StartStableSyncFlow();
 
-  // Single flow Dragonfly full sync fiber spawned by StartFullSyncFlow.
+  // Single flow full sync fiber spawned by StartFullSyncFlow.
   void FullSyncDflyFb(SyncBlock* block, std::string eof_token);
 
+  // Single flow stable state sync fiber spawned by StartStableSyncFlow.
   void StableSyncDflyFb();
 
  private: /* Utility */

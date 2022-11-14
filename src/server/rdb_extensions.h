@@ -5,7 +5,7 @@
 #pragma once
 
 /*
-Opcode range 230-240 is used by DF extensions.
+Range 200-240 is used by DF extensions.
 */
 
-const uint8_t RDB_OPCODE_FULLSYNC_END = 230;
+const uint8_t RDB_OPCODE_FULLSYNC_END = 200;

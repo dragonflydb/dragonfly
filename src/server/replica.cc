@@ -450,10 +450,9 @@ error_code Replica::InitiateDflySync() {
 
   // Wait for all flows to receive full sync cut.
   {
-    VLOG(0) << "BEFORE FULL SYNC WAIT";
+    VLOG(1) << "Blocking before full sync cut";
     std::unique_lock lk(sb.mu_);
     sb.cv_.wait(lk, [&]() { return sb.flows_left == 0; });
-    VLOG(0) << "AFTER FULL SYNC WAIT";
   }
 
   LOG(INFO) << "Full sync finished";
@@ -519,8 +518,6 @@ error_code Replica::ConsumeDflyStream() {
   // Wait for all flows to finish full sync.
   for (auto& sub_repl : shard_flows_)
     sub_repl->sync_fb_.join();
-
-  VLOG(0) << "FULL SYNC FIBERS JOINED";
 
   AggregateError all_ec;
   vector<vector<unsigned>> partition = Partition(num_df_flows_);
@@ -636,7 +633,7 @@ void Replica::FullSyncDflyFb(SyncBlock* sb, string eof_token) {
     }
   }
 
-  // Keep laoder leftover.
+  // Keep loader leftover.
   io::Bytes unused = chained_tail.unused_prefix();
   if (unused.size() > 0) {
     leftover_buf_.reset(new base::IoBuf{unused.size()});
@@ -678,8 +675,6 @@ void Replica::StableSyncDflyFb() {
 
     ec = ParseAndExecute(&io_buf);
   }
-
-  VLOG(0) << "GOT EC " << ec.message();
 
   return;
 }
