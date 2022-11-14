@@ -1822,12 +1822,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     if (item.expire_ms > 0 && db_cntx.time_now_ms >= item.expire_ms)
       continue;
 
-    auto [fit, _] = db_slice.FindExt(db_cntx, item.key);
-    if (IsValid(fit))
-      db_slice.Del(db_cntx.db_index, fit);
-
-    auto [it, added] = db_slice.AddEntry(db_cntx, item.key, std::move(pv), item.expire_ms);
-
+    auto [it, added] = db_slice.AddOrUpdate(db_cntx, item.key, std::move(pv), item.expire_ms);
     if (!added) {
       LOG(WARNING) << "RDB has duplicated key '" << item.key << "' in DB " << db_ind;
     }
