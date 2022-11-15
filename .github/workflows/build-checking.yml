@@ -10,19 +10,19 @@ on:
       
 jobs:
   build-n-test:
-    runs-on: ubuntu-latest
+    runs-on: ghcr.io/romange/ubuntu-dev:20
     steps:
       - uses: actions/checkout@master
         with:
           submodules: true
       - name: Creating build
         run: |
-          sudo apt-get update
           sudo apt-get install -y lsb-release ninja-build libunwind-dev libboost-fiber-dev libssl-dev autoconf-archive libtool cmake g++
-          ./helio/blaze.sh -release
+          ./helio/blaze.sh
           cd build-opt && ninja dragonfly
       - name: Run PyTests
         run: |
+          echo "Current commit is ${{github.sha}}"
           chmod +x $DRAGONFLY_PATH
           cd ${{ github.workspace }}/tests
           pip install -r dragonfly/requirements.txt
@@ -34,9 +34,4 @@ jobs:
             -X POST \
             -H 'Content-Type: application/json' \
             '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
-            -d '{"text": "Unforunately the tests of dragonfly build are not passed :("}'
-      - uses: actions/upload-artifact@master
-        if: failure()
-        with:
-          name: build
-          path: build-opt/dragonfly       
+            -d '{"text": "Unforunately the tests of dragonfly build are not passed :( \nThe commit is ${{github.sha}}	"}'
