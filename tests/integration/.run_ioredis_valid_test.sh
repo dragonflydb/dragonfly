@@ -28,5 +28,5 @@
 
 TS_NODE_TRANSPILE_ONLY=true NODE_ENV=test mocha \
 "test/helpers/*.ts" "test/unit/**/*.ts" "test/functional/**/*.ts" \
--g "should reload scripts on redis restart|should reconnect if reconnectOnError|should be supported in transaction blocks|rejects when monitor is disabled|should resend unfulfilled commands to the correct|should set the name before any subscribe|should name the connection if options|scanStream|does not fallback to EVAL|should try to use EVALSHA and fallback to EVAL|should use evalsha when script|should affect the old way|should support Map|should support object|should batch all commands before ready event|should support key prefixing for sort|should be sent on the connect event" \
+-g "should reload scripts on redis restart|should reconnect if reconnectOnError|should be supported in transaction blocks|rejects when monitor is disabled|should resend unfulfilled commands to the correct|should set the name before any subscribe|should name the connection if options|scanStream|does not fallback to EVAL|should try to use EVALSHA and fallback to EVAL|should use evalsha when script|should affect the old way|should support Map|should support object|should batch all commands before ready event|should support key prefixing for sort|should be sent on the connect event|spub|ssub|should support parallel script execution|works for moved" \
 --invert

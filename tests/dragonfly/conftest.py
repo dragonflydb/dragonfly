@@ -119,6 +119,19 @@ def client(sync_pool):
     return client
 
 
+@pytest.fixture(scope="function")
+def cluster_client(df_server):
+    """
+    Return a cluster client to the default instance with all entries flushed.
+    """
+    client = redis.RedisCluster(decode_responses=True, host="localhost",
+                                port=df_server.port)
+    client.flushall()
+
+    yield client
+    client.disconnect_connection_pools()
+
+
 @pytest_asyncio.fixture(scope="function")
 async def async_pool(df_server: DflyInstance):
     pool = aioredis.ConnectionPool(host="localhost", port=df_server.port,

@@ -458,6 +458,12 @@ void Connection::SendMsgVecAsync(const PubMessage& pub_msg) {
   }
 }
 
+std::string Connection::LocalBindAddress() const {
+  LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
+  auto le = lsb->LocalEndpoint();
+  return le.address().to_string();
+}
+
 string Connection::GetClientInfo() const {
   LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
 

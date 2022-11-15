@@ -111,19 +111,19 @@ Integration tests for ioredis client.
 It contains a very extensive test coverage for Redis. Currently not all features are supported by Dragonfly.
 As such please use the scripts for running the test successfully -
  **[run_ioredis_on_docker.sh](./integration/run_ioredis_on_docker.sh)**: to run the supported tests on a docker image
- Please note that you can run this script in tow forms:
+ Please note that you can run this script in two forms:
 
  If the image is already build:
  ```
- ./integration/run_ioredis_on_docker
+ ./integration/run_ioredis_on_docker.sh
  ```
 
 A more safe way is to build the image (or ensure that it is up to date), and then execute the tests:
 ```
- ./integration/run_ioredis_on_docker --build
+ ./integration/run_ioredis_on_docker.sh --build
  ```
  The the "--build" first build the image and then execute the tests.
- Please do not try to run out of docker image as this brigs the correct version and patch some tests.
+ Please do not try to run out of docker image as this brings the correct version and patch some tests.
 Please note that the script only run tests that are currently supported
 You can just build the image with
 
