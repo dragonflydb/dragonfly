@@ -197,7 +197,7 @@ void DebugCmd::Load(string_view filename) {
   intrusive_ptr<Transaction> flush_trans(new Transaction{cid});
   flush_trans->InitByArgs(0, {});
   VLOG(1) << "Performing flush";
-  error_code ec = sf_.DoFlush(flush_trans.get(), DbSlice::kDbAll);
+  error_code ec = sf_.Drakarys(flush_trans.get(), DbSlice::kDbAll);
   if (ec) {
     LOG(ERROR) << "Error flushing db " << ec.message();
   }
