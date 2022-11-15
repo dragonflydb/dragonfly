@@ -81,7 +81,10 @@ class ServerFamily {
 
   // if new_version is true, saves DF specific, non redis compatible snapshot.
   std::error_code DoSave(bool new_version, Transaction* transaction, std::string* err_details);
-  std::error_code DoFlush(Transaction* transaction, DbIndex db_ind);
+
+  // Burns down and destroy all the data from the database.
+  // if kDbAll is passed, burns all the databases to the ground.
+  std::error_code Drakarys(Transaction* transaction, DbIndex db_ind);
 
   std::shared_ptr<const LastSaveInfo> GetLastSaveInfo() const;
 
@@ -142,7 +145,7 @@ class ServerFamily {
 
   std::error_code LoadRdb(const std::string& rdb_file);
 
-  void SnapshotScheduling(const SnapshotSpec &&time);
+  void SnapshotScheduling(const SnapshotSpec& time);
 
   boost::fibers::fiber snapshot_fiber_;
   boost::fibers::future<std::error_code> load_result_;

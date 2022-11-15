@@ -388,9 +388,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
     std::optional<SnapshotSpec> spec = ParseSaveSchedule(save_time);
     if (spec) {
       snapshot_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
-          [save_spec = std::move(spec.value()), this] {
-            SnapshotScheduling(std::move(save_spec));
-          });
+          [save_spec = std::move(spec.value()), this] { SnapshotScheduling(save_spec); });
     } else {
       LOG(WARNING) << "Invalid snapshot time specifier " << save_time;
     }
@@ -520,7 +518,7 @@ fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path)
   return ec_future;
 }
 
-void ServerFamily::SnapshotScheduling(const SnapshotSpec&& spec) {
+void ServerFamily::SnapshotScheduling(const SnapshotSpec& spec) {
   const auto loop_sleep_time = std::chrono::seconds(20);
   while (true) {
     if (is_snapshot_done_.WaitFor(loop_sleep_time)) {
@@ -953,8 +951,8 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
   return *ec;
 }
 
-error_code ServerFamily::DoFlush(Transaction* transaction, DbIndex db_ind) {
-  VLOG(1) << "DoFlush";
+error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
+  VLOG(1) << "Drakarys";
 
   transaction->Schedule();  // TODO: to convert to ScheduleSingleHop ?
 
@@ -992,7 +990,7 @@ void ServerFamily::BreakOnShutdown() {
 
 void ServerFamily::FlushDb(CmdArgList args, ConnectionContext* cntx) {
   DCHECK(cntx->transaction);
-  DoFlush(cntx->transaction, cntx->transaction->db_index());
+  Drakarys(cntx->transaction, cntx->transaction->db_index());
   cntx->reply_builder()->SendOk();
 }
 
@@ -1003,7 +1001,7 @@ void ServerFamily::FlushAll(CmdArgList args, ConnectionContext* cntx) {
   }
 
   DCHECK(cntx->transaction);
-  DoFlush(cntx->transaction, DbSlice::kDbAll);
+  Drakarys(cntx->transaction, DbSlice::kDbAll);
   (*cntx)->SendOk();
 }
 
