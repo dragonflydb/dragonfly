@@ -10,7 +10,7 @@ on:
       
 jobs:
   build-n-test:
-    runs-on: ghcr.io/romange/ubuntu-dev:20
+    runs-on: ubuntu-dev:20
     steps:
       - uses: actions/checkout@master
         with:
