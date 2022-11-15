@@ -217,7 +217,8 @@ struct TL {
 
 thread_local TL tl;
 
-constexpr bool kUseSmallStrings = true;
+// disable the use of small string (For the defag of memory)
+constexpr bool kUseSmallStrings = false;
 
 /// TODO: Ascii encoding becomes slow for large blobs. We should factor it out into a separate
 /// file and implement with SIMD instructions.
@@ -659,7 +660,7 @@ robj* CompactObj::AsRObj() const {
   res->type = u_.r_obj.type();
 
   if (res->type == OBJ_SET) {
-    LOG(FATAL) << "Should not call AsRObj for type " <<  res->type;
+    LOG(FATAL) << "Should not call AsRObj for type " << res->type;
   }
 
   if (res->type == OBJ_HASH) {

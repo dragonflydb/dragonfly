@@ -9,12 +9,16 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include <mimalloc-types.h>
+
 #include "base/flags.h"
 #include "base/logging.h"
+#include "base/proc_util.h"
 #include "server/blocking_controller.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
+#include "strings/human_readable.h"
 #include "util/fiber_sched_algo.h"
 #include "util/varz.h"
 
@@ -30,6 +34,13 @@ ABSL_FLAG(bool, cache_mode, false,
           "If true, the backend behaves like a cache, "
           "by evicting entries when getting close to maxmemory limit");
 
+ABSL_FLAG(uint64_t, mem_defrag_threshold, 20,
+          "Threshold level to run memory fragmentation between total available memory and "
+          "currently commited memory");
+
+ABSL_FLAG(float, commit_use_threshold, 1.3,
+          "The threshold to apply memory fragmentation between commited and used memory");
+
 namespace dfly {
 
 using namespace util;
@@ -39,7 +50,144 @@ using absl::GetFlag;
 
 namespace {
 
+constexpr DbIndex DEFAULT_DB_INDEX = 0;
+
+inline auto MatchType(int redis_type, std::uint8_t op_type) -> bool {
+  return op_type == redis_type;
+}
+
+struct MemoryDefragParams {
+  mi_heap_t* heap_ptr = nullptr;
+  DbSlice* slice = nullptr;
+  uint64_t cursor = 0;
+  uint8_t object_type = OBJ_STRING;  // use with map for type
+
+  MemoryDefragParams(mi_heap_t* hp, DbSlice* s) : heap_ptr{hp}, slice{s} {
+  }
+};
+
 vector<EngineShardSet::CachedStats> cached_stats;  // initialized in EngineShardSet::Init
+
+// few issues here:
+// 1. Do we need to lock? (I think we do, since this is a task that I'm not sure is running
+// exclusively). - No we don't need a lock
+// 2. If we do need to lock, we can use the code similar to scan - ScanCb function. This require the
+// DB index, which we don't have! - we would be using index 0
+// 3. We need to find a way to map between the memory that we are moving to the new location that we
+// want to copy to
+//    we have a function that can tell use about memory usage for the given pointer (which in this
+//    case can be either the key or the value!), so are we going to move the value? (I think so),
+//    the key? (not sure), both?
+//  No we don't need, when we are doing new allocation, it would ensure that the allocation will
+//  happen to the first available space, this would result in moving all the memory to the "front"
+//  of the list.
+// 4, This leave the biggest issue, we need to find a new location to move to, how? - No we don't
+// see above To summarized:
+//  IF I understand this correctly:
+//    for each database id on this shared: (this is only 0)
+//      lock each key - don't
+//      check memory utilization for the address  of the key/value -> only for the value
+//      move the key/value to new location  -> just do allocation (for the value), move data to new
+//      memory location and free old one.
+//   The for each is running by the task itself, and the cursor is the for index - again for now
+//   only index 0!
+
+auto ReallocateValueImpl(PrimeValue& current_value) -> bool {
+  // we know that this is a string, we checked that before
+  auto val = current_value.ToString();
+  // we can now reset the old object as we are going to create a new one
+  current_value.Reset();
+  // This should allocate a new value
+  current_value.SetString(val);
+  return current_value.MallocUsed() > 0;
+}
+
+auto ReallocateValue(PrimeIterator it, void* from, const MemoryDefragParams& params, DbIndex index)
+    -> bool {
+  // allocate a new memory for the value, and then free the memory that used for the old one
+  CHECK(it->second.ObjType() == OBJ_STRING);  // only supporting for string right now!
+  CHECK(it->second.IsExternal());
+
+  params.slice->PreUpdate(index, it);
+  auto key = it->first.ToString();
+  auto state = ReallocateValueImpl(it->second);
+  params.slice->PostUpdate(index, it, key);
+  return state;
+}
+
+auto MemoryReallocate(PrimeIterator it, const MemoryDefragParams& params, DbIndex index) -> bool {
+  DCHECK(!IsValid(it));
+
+  if (MatchType(it->second.ObjType(), params.object_type)) {
+    auto ptr = it->second.RObjPtr();
+    return ReallocateValue(it, ptr, params, index);
+  }
+  return false;
+}
+
+auto DefragMemory(const MemoryDefragParams& params, DbIndex index) -> std::tuple<bool, uint64_t> {
+  constexpr size_t CURSOR_COUNT_RELATION = 50;
+
+  auto shard_id = params.slice->shard_id();
+  DCHECK(params.slice->IsDbValid(index));
+
+  unsigned cnt = 0;
+  std::size_t max = params.slice->DbSize(index) / CURSOR_COUNT_RELATION;
+  VLOG(1) << "PrimeTable shared id/index " << params.slice->shard_id() << "/" << index << " has "
+          << params.slice->DbSize(index) << " elements in it";
+
+  PrimeTable::Cursor cur = params.cursor;
+  auto [prime_table, expire_table] = params.slice->GetTables(index);
+  bool state = max > 0;
+
+  while (cnt < max) {
+    cur = prime_table->Traverse(
+        cur, [&](PrimeIterator it) { state = MemoryReallocate(it, params, index); });
+    if (!cur) {
+      break;
+    }
+  }
+
+  if (cnt > 0) {
+    VLOG(1) << shard_id << ": ran the memory re-ordering task for " << cnt << " times - cursor "
+            << cur.value();
+  }
+
+  return {state, cur.value()};
+}
+
+inline auto MemUsageChanged(uint64_t current, uint64_t now) -> bool {
+  static const float commit_use_threshold = GetFlag(FLAGS_commit_use_threshold);
+  // we only care whether the memory usage is going up
+  // otherwise we don't really case
+  return (current * commit_use_threshold) < float(now);
+}
+
+auto IsMemDefragRequired(uint16_t id, uint64_t* current_commit, uint64_t* current_use, int count)
+    -> bool {
+  static const uint64_t mem_size = max_memory_limit;
+  static const uint64_t threshold_mem = mem_size / GetFlag(FLAGS_mem_defrag_threshold);
+  static const float commit_use_threshold = GetFlag(FLAGS_commit_use_threshold);
+
+  uint64_t commited = GetMallocCurrentCommitted();
+  uint64_t mem_in_use = used_mem_current.load(memory_order_relaxed);
+
+  // we want to make sure that we are not running this to many times - i.e.
+  // if there was no change to the memory, don't run this
+  if (MemUsageChanged(*current_commit, commited) || MemUsageChanged(*current_use, mem_in_use)) {
+    if (threshold_mem < commited && mem_in_use != 0 &&
+        (float(mem_in_use * commit_use_threshold) < commited)) {
+      // we have way more commited then actual usage
+      VLOG(1) << id << ": need to update memory - commited memory "
+              << strings::HumanReadableNumBytes(commited) << ", the use memory is "
+              << strings::HumanReadableNumBytes(mem_in_use);
+      *current_commit = commited;
+      *current_use = mem_in_use;
+      return true;
+    }
+  }
+  return false;
+}
 
 }  // namespace
 
@@ -54,6 +202,31 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
   quick_runs += o.quick_runs;
 
   return *this;
+}
+
+void EngineShard::StartDefragTask(util::ProactorBase* pb) {
+  MemoryDefragParams params(mi_resource_.heap(), &db_slice_);
+
+  uint64_t commited = GetMallocCurrentCommitted();
+  uint64_t mem_in_use = used_mem_current.load(memory_order_relaxed);
+
+  defrag_task_ = pb->AddOnIdleTask(
+      [task_params = std::move(params), commited, mem_in_use, count = 0]() mutable {
+        auto shard_id = task_params.slice->shard_id();
+        auto required_state = IsMemDefragRequired(shard_id, &commited, &mem_in_use, ++count);
+        if (required_state) {
+          auto [res, cur] = DefragMemory(task_params,
+                                         DEFAULT_DB_INDEX);  // we are only checking for DB == 0
+          task_params.cursor = cur;
+          if (res) {
+            return util::ProactorBase::kOnIdleMaxLevel;  // we need to run more of this
+          }
+        } else {
+          task_params.cursor = 0;  // set it back, we're not running any more
+        }
+        // by default we just want to not get in the way..
+        return 0u;
+      });
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap)
@@ -75,6 +248,8 @@ EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t*
   tmp_str1 = sdsempty();
 
   db_slice_.UpdateExpireBase(absl::GetCurrentTimeNanos() / 1000000, 0);
+
+  StartDefragTask(pb);
 }
 
 EngineShard::~EngineShard() {
@@ -92,6 +267,8 @@ void EngineShard::Shutdown() {
   if (periodic_task_) {
     ProactorBase::me()->CancelPeriodic(periodic_task_);
   }
+
+  ProactorBase::me()->RemoveOnIdleTask(defrag_task_);
 }
 
 void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
