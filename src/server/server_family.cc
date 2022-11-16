@@ -104,14 +104,13 @@ string UnknownCmd(string cmd, CmdArgList args) {
 
 string InferLoadFile(fs::path data_dir) {
   const auto& dbname = GetFlag(FLAGS_dbfilename);
-
   if (dbname.empty())
     return string{};
 
   fs::path fl_path = data_dir.append(dbname);
-
   if (fs::exists(fl_path))
     return fl_path.generic_string();
+
   if (!fl_path.has_extension()) {
     std::string glob = absl::StrCat(fl_path.generic_string(), "*");
     io::Result<io::StatShortVec> short_vec = io::StatFiles(glob);
@@ -125,7 +124,6 @@ string InferLoadFile(fs::path data_dir) {
     } else {
       LOG(WARNING) << "Could not stat " << glob << ", error " << short_vec.error().message();
     }
-    LOG(INFO) << "Checking " << fl_path;
   }
   return string{};
 }
@@ -369,18 +367,19 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
   fs::path data_folder = fs::current_path();
   const auto& dir = GetFlag(FLAGS_dir);
 
+  error_code file_ec;
   if (!dir.empty()) {
-    data_folder = dir;
-
-    error_code ec;
-
-    data_folder = fs::canonical(data_folder, ec);
+    data_folder = fs::canonical(dir, file_ec);
   }
 
-  LOG(INFO) << "Data directory is " << data_folder;
-  string load_path = InferLoadFile(data_folder);
-  if (!load_path.empty()) {
-    load_result_ = Load(load_path);
+  if (!file_ec) {
+    LOG(INFO) << "Data directory is " << data_folder;
+    string load_path = InferLoadFile(data_folder);
+    if (!load_path.empty()) {
+      load_result_ = Load(load_path);
+    }
+  } else {
+    LOG(ERROR) << "Data directory error: " << file_ec.message();
   }
 
   string save_time = GetFlag(FLAGS_save_schedule);
@@ -923,7 +922,7 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
 
   if (new_version) {
     ExtendFilename(start, "summary", &filename);
-    path += filename;
+    path /= filename;
   }
 
   absl::Duration dur = absl::Now() - start;
