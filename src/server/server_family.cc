@@ -835,9 +835,8 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
   fs::path filename = dbfilename.empty() ? "dump" : dbfilename;
   fs::path path = dir_path;
 
-  auto start = absl::Now();
+  absl::Time start = absl::Now();
   shared_ptr<LastSaveInfo> save_info;
-  absl::Time now = absl::Now();
 
   vector<unique_ptr<RdbSnapshot>> snapshots;
   absl::flat_hash_map<string_view, size_t> rdb_name_map;
@@ -873,7 +872,7 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
       const auto scripts = script_mgr_->GetLuaScripts();
       auto& summary_snapshot = snapshots[shard_set->size()];
       summary_snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
-      if (ec = DoPartialSave(filename, path, now, scripts, summary_snapshot.get(), nullptr)) {
+      if (ec = DoPartialSave(filename, path, start, scripts, summary_snapshot.get(), nullptr)) {
         summary_snapshot.reset();
       }
     }
@@ -882,7 +881,7 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
     auto cb = [&](Transaction* t, EngineShard* shard) {
       auto& snapshot = snapshots[shard->shard_id()];
       snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
-      if (ec = DoPartialSave(filename, path, now, {}, snapshot.get(), shard)) {
+      if (ec = DoPartialSave(filename, path, start, {}, snapshot.get(), shard)) {
         snapshot.reset();
       }
       return OpStatus::OK;
@@ -892,7 +891,7 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
   } else {
     snapshots.resize(1);
 
-    ExtendFilenameWithShard(now, -1, &filename);
+    ExtendFilenameWithShard(start, -1, &filename);
     path /= filename;  // use / operator to concatenate paths.
     VLOG(1) << "Saving to " << path;
 
@@ -923,13 +922,14 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
   RunStage(new_version, close_cb);
 
   if (new_version) {
-    ExtendFilename(now, "summary", &filename);
+    ExtendFilename(start, "summary", &filename);
     path += filename;
   }
 
+  absl::Duration dur = absl::Now() - start;
+  double seconds = double(absl::ToInt64Milliseconds(dur)) / 1000;
+
   {
-    absl::Duration dur = absl::Now() - start;
-    double seconds = double(absl::ToInt64Milliseconds(dur)) / 1000;
     LOG(INFO) << "Saving " << path << " finished after "
               << strings::HumanReadableElapsedTime(seconds);
   }
@@ -941,8 +941,9 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
       save_info->freq_map.emplace_back(k_v);
     }
 
-    save_info->save_time = absl::ToUnixSeconds(now);
+    save_info->save_time = absl::ToUnixSeconds(start);
     save_info->file_name = path.generic_string();
+    save_info->duration_sec = uint32_t(seconds);
 
     lock_guard lk(save_mu_);
     // swap - to deallocate the old version outstide of the lock.
@@ -1322,8 +1323,11 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       lock_guard lk(save_mu_);
       save_info = last_save_info_;
     }
+    // when when last save
     append("last_save", save_info->save_time);
+    append("last_save_duration_sec", save_info->duration_sec);
     append("last_save_file", save_info->file_name);
+
     for (const auto& k_v : save_info->freq_map) {
       append(StrCat("rdb_", k_v.first), k_v.second);
     }

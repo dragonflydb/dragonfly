@@ -48,7 +48,8 @@ struct Metrics {
 };
 
 struct LastSaveInfo {
-  time_t save_time;                                           // epoch time in seconds.
+  time_t save_time = 0;  // epoch time in seconds.
+  uint32_t duration_sec = 0;
   std::string file_name;                                      //
   std::vector<std::pair<std::string_view, size_t>> freq_map;  // RDB_TYPE_xxx -> count mapping.
 };
