@@ -542,7 +542,7 @@ uint32_t DbSlice::GetMCFlag(DbIndex db_ind, const PrimeKey& key) const {
 
 PrimeIterator DbSlice::AddNew(const Context& cntx, string_view key, PrimeValue obj,
                               uint64_t expire_at_ms) noexcept(false) {
-  auto [it, added] = AddEntry(cntx, key, std::move(obj), expire_at_ms);
+  auto [it, added] = AddOrSkip(cntx, key, std::move(obj), expire_at_ms);
   CHECK(added);
 
   return it;
@@ -605,7 +605,7 @@ pair<PrimeIterator, bool> DbSlice::AddOrUpdate(const Context& cntx, string_view 
   return AddOrUpdateInternal(cntx, key, std::move(obj), expire_at_ms, true);
 }
 
-pair<PrimeIterator, bool> DbSlice::AddEntry(const Context& cntx, string_view key, PrimeValue obj,
+pair<PrimeIterator, bool> DbSlice::AddOrSkip(const Context& cntx, string_view key, PrimeValue obj,
                                             uint64_t expire_at_ms) noexcept(false) {
   return AddOrUpdateInternal(cntx, key, std::move(obj), expire_at_ms, false);
 }

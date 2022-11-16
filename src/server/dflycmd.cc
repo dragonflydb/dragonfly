@@ -332,6 +332,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
   SaveMode save_mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
   flow->saver.reset(new RdbSaver(flow->conn->socket(), save_mode, false));
 
+  // Shard can be null for io thread.
   if (shard != nullptr) {
     auto ec = sf_->journal()->OpenInThread(false, string_view());
     CHECK(!ec);
@@ -343,6 +344,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
 }
 
 OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, EngineShard* shard) {
+  // Shard can be null for io thread.
   if (shard != nullptr) {
     flow->saver->StopSnapshotInShard(shard);
   }
