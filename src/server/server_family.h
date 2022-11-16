@@ -48,7 +48,8 @@ struct Metrics {
 };
 
 struct LastSaveInfo {
-  time_t save_time;                                           // epoch time in seconds.
+  time_t save_time = 0;  // epoch time in seconds.
+  uint32_t duration_sec = 0;
   std::string file_name;                                      //
   std::vector<std::pair<std::string_view, size_t>> freq_map;  // RDB_TYPE_xxx -> count mapping.
 };
@@ -81,7 +82,10 @@ class ServerFamily {
 
   // if new_version is true, saves DF specific, non redis compatible snapshot.
   std::error_code DoSave(bool new_version, Transaction* transaction, std::string* err_details);
-  std::error_code DoFlush(Transaction* transaction, DbIndex db_ind);
+
+  // Burns down and destroy all the data from the database.
+  // if kDbAll is passed, burns all the databases to the ground.
+  std::error_code Drakarys(Transaction* transaction, DbIndex db_ind);
 
   std::shared_ptr<const LastSaveInfo> GetLastSaveInfo() const;
 
@@ -142,7 +146,7 @@ class ServerFamily {
 
   std::error_code LoadRdb(const std::string& rdb_file);
 
-  void SnapshotScheduling(const SnapshotSpec &&time);
+  void SnapshotScheduling(const SnapshotSpec& time);
 
   boost::fibers::fiber snapshot_fiber_;
   boost::fibers::future<std::error_code> load_result_;
