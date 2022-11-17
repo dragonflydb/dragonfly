@@ -3,6 +3,7 @@
 //
 
 #include <assert.h>
+#include <mimalloc-types.h>
 #include <mimalloc.h>
 #include <string.h>
 
@@ -136,4 +137,48 @@ void init_zmalloc_threadlocal(void* heap) {
   if (zmalloc_heap)
     return;
   zmalloc_heap = heap;
+}
+
+// taken from mimalloc private code.
+static inline mi_slice_t* mi_slice_first(const mi_slice_t* slice) {
+  mi_slice_t* start = (mi_slice_t*)((uint8_t*)slice - slice->slice_offset);
+  return start;
+}
+
+// taken from mimalloc private code.
+static inline mi_segment_t* _mi_ptr_segment(const void* p) {
+  return (mi_segment_t*)((uintptr_t)p & ~MI_SEGMENT_MASK);
+}
+
+#define mi_likely(x) __builtin_expect(!!(x), true)
+
+// returns true if page is not active, and its used blocks <= capacity * ratio
+int zmalloc_page_is_underutilized(void* ptr, float ratio) {
+  mi_segment_t* const segment = _mi_ptr_segment(ptr);
+
+  // from _mi_segment_page_of
+  ptrdiff_t diff = (uint8_t*)ptr - (uint8_t*)segment;
+  size_t idx = (size_t)diff >> MI_SEGMENT_SLICE_SHIFT;
+  mi_slice_t* slice0 = (mi_slice_t*)&segment->slices[idx];
+  mi_slice_t* slice = mi_slice_first(slice0);  // adjust to the block that holds the page data
+  mi_page_t* page = (mi_page_t*)slice;
+  // end from _mi_segment_page_of //
+
+  // from mi_page_heap
+  mi_heap_t* page_heap = (mi_heap_t*)(mi_atomic_load_relaxed(&(page)->xheap));
+
+  // the heap id matches and it is not a full page
+  if (mi_likely(page_heap == zmalloc_heap && page->flags.x.in_full == 0)) {
+    // mi_page_queue_t* pq = mi_heap_page_queue_of(heap, page);
+
+    // first in the list, meaning it's the head of page queue, thus being used for malloc
+    if (page->prev == NULL)
+      return false;
+
+    // this page belong to this heap and is not first in the page queue. Lets check its
+    // utilization.
+    return page->used <= (unsigned)(page->capacity * ratio);
+  }
+
+  return false;
 }

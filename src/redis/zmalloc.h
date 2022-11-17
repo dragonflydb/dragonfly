@@ -38,7 +38,9 @@
 #define __zm_str(s) #s
 
 #if defined(USE_JEMALLOC)
-#define ZMALLOC_LIB ("jemalloc-" __xstr(JEMALLOC_VERSION_MAJOR) "." __xstr(JEMALLOC_VERSION_MINOR) "." __xstr(JEMALLOC_VERSION_BUGFIX))
+#define ZMALLOC_LIB                                                                          \
+  ("jemalloc-" __xstr(JEMALLOC_VERSION_MAJOR) "." __xstr(JEMALLOC_VERSION_MINOR) "." __xstr( \
+      JEMALLOC_VERSION_BUGFIX))
 #include <jemalloc/jemalloc.h>
 #if (JEMALLOC_VERSION_MAJOR == 2 && JEMALLOC_VERSION_MINOR >= 1) || (JEMALLOC_VERSION_MAJOR > 2)
 #define HAVE_MALLOC_SIZE 1
@@ -82,32 +84,32 @@
 #define HAVE_DEFRAG
 #endif
 
-void *zmalloc(size_t size);
-void *zcalloc(size_t size);
-void *zrealloc(void *ptr, size_t size);
-void *ztrymalloc(size_t size);
-void *ztrycalloc(size_t size);
-void *ztryrealloc(void *ptr, size_t size);
-void zfree(void *ptr);
+void* zmalloc(size_t size);
+void* zcalloc(size_t size);
+void* zrealloc(void* ptr, size_t size);
+void* ztrymalloc(size_t size);
+void* ztrycalloc(size_t size);
+void* ztryrealloc(void* ptr, size_t size);
+void zfree(void* ptr);
 
-size_t znallocx(size_t size); // Equivalent to nallocx for jemalloc or mi_good_size for mimalloc.
+size_t znallocx(size_t size);  // Equivalent to nallocx for jemalloc or mi_good_size for mimalloc.
 void zfree_size(void* ptr, size_t size);  // equivalent to sdallocx or mi_free_size
 
-void *zmalloc_usable(size_t size, size_t *usable);
-void *zcalloc_usable(size_t size, size_t *usable);
-void *zrealloc_usable(void *ptr, size_t size, size_t *usable);
-void *ztrymalloc_usable(size_t size, size_t *usable);
-void *ztrycalloc_usable(size_t size, size_t *usable);
-void *ztryrealloc_usable(void *ptr, size_t size, size_t *usable);
+void* zmalloc_usable(size_t size, size_t* usable);
+void* zcalloc_usable(size_t size, size_t* usable);
+void* zrealloc_usable(void* ptr, size_t size, size_t* usable);
+void* ztrymalloc_usable(size_t size, size_t* usable);
+void* ztrycalloc_usable(size_t size, size_t* usable);
+void* ztryrealloc_usable(void* ptr, size_t size, size_t* usable);
 
 // size_t zmalloc_used_memory(void);
 void zmalloc_set_oom_handler(void (*oom_handler)(size_t));
 size_t zmalloc_get_rss(void);
-int zmalloc_get_allocator_info(size_t *allocated, size_t *active, size_t *resident);
+int zmalloc_get_allocator_info(size_t* allocated, size_t* active, size_t* resident);
 void set_jemalloc_bg_thread(int enable);
 int jemalloc_purge();
 size_t zmalloc_get_private_dirty(long pid);
-size_t zmalloc_get_smap_bytes_by_field(char *field, long pid);
+size_t zmalloc_get_smap_bytes_by_field(char* field, long pid);
 size_t zmalloc_get_memory_size(void);
 size_t zmalloc_usable_size(const void* p);
 
@@ -115,6 +117,9 @@ size_t zmalloc_usable_size(const void* p);
 
 void init_zmalloc_threadlocal(void* heap);
 extern __thread ssize_t zmalloc_used_memory_tl;
+
+// returns 1 if the page is underutilized and 0 otherwise.
+int zmalloc_page_is_underutilized(void* ptr, float ratio);
 
 #undef __zm_str
 #undef __xstr

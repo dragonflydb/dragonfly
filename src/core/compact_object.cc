@@ -386,6 +386,21 @@ void RobjWrapper::Init(unsigned type, unsigned encoding, void* inner) {
   Set(inner, 0);
 }
 
+bool RobjWrapper::DefragIfNeeded(float ratio, std::pmr::memory_resource* mr) {
+  if (type_ != OBJ_STRING)
+    return false;  // Currently only for strings.
+
+  if (!zmalloc_page_is_underutilized(inner_obj_, ratio))
+    return false;
+
+  void* old_ptr = inner_obj_;
+  inner_obj_ = mr->allocate(sz_, 8);
+  memcpy(inner_obj_, old_ptr, sz_);
+  mr->deallocate(old_ptr, 0, 8);
+
+  return true;
+}
+
 inline size_t RobjWrapper::InnerObjMallocUsed() const {
   return zmalloc_size(inner_obj_);
 }
@@ -659,7 +674,7 @@ robj* CompactObj::AsRObj() const {
   res->type = u_.r_obj.type();
 
   if (res->type == OBJ_SET) {
-    LOG(FATAL) << "Should not call AsRObj for type " <<  res->type;
+    LOG(FATAL) << "Should not call AsRObj for type " << res->type;
   }
 
   if (res->type == OBJ_HASH) {
@@ -848,6 +863,17 @@ string_view CompactObj::GetSlice(string* scratch) const {
   LOG(FATAL) << "Bad tag " << int(taglen_);
 
   return string_view{};
+}
+
+bool CompactObj::DefragIfNeeded(float ratio) {
+  if (!HasAllocated())
+    return false;
+
+  if (taglen_ == ROBJ_TAG)
+    return u_.r_obj.DefragIfNeeded(ratio, tl.local_mr);
+
+  // not implemented for other types like SMALL_STRING.
+  return false;
 }
 
 bool CompactObj::HasAllocated() const {

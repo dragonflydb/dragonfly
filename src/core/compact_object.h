@@ -16,7 +16,7 @@ typedef struct redisObject robj;
 namespace dfly {
 
 constexpr unsigned kEncodingIntSet = 0;
-constexpr unsigned kEncodingStrMap = 1;  // for set/map encodings of strings
+constexpr unsigned kEncodingStrMap = 1;   // for set/map encodings of strings
 constexpr unsigned kEncodingStrMap2 = 2;  // for set/map encodings of strings using DenseSet
 constexpr unsigned kEncodingListPack = 3;
 
@@ -51,6 +51,9 @@ class RobjWrapper {
   std::string_view AsView() const {
     return std::string_view{reinterpret_cast<char*>(inner_obj_), sz_};
   }
+
+  // See CompactObject::DefragIfNeeded below.
+  bool DefragIfNeeded(float ratio, std::pmr::memory_resource* mr);
 
  private:
   size_t InnerObjMallocUsed() const;
@@ -292,6 +295,12 @@ class CompactObj {
 
   static void InitThreadLocal(std::pmr::memory_resource* mr);
   static std::pmr::memory_resource* memory_resource();  // thread-local.
+
+  // ratio - in [0,1] range sets the threshold, that if
+  // the page containing the pointer is utilized less than this threshold
+  // then it reallocs this pointer to another page.
+  // Returns true if defragmentation applied, false otherwise.
+  bool DefragIfNeeded(float ratio);
 
  private:
   size_t DecodedLen(size_t sz) const;
