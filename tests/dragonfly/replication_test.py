@@ -2,8 +2,6 @@
 import pytest
 import asyncio
 import aioredis
-import redis
-import time
 
 from .utility import *
 
@@ -11,65 +9,22 @@ from .utility import *
 BASE_PORT = 1111
 
 """
-Test simple full sync on one replica without altering data during replication.
+Test full replication pipeline. Test full sync with streaming changes and stable state streaming.
 """
 
-# (threads_master, threads_replica, n entries)
-simple_full_sync_cases = [
-    (2, 2, 100),
-    (8, 2, 500),
-    (2, 8, 500),
-    (6, 4, 500)
-]
-
-
-@pytest.mark.parametrize("t_master, t_replica, n_keys", simple_full_sync_cases)
-def test_simple_full_sync(df_local_factory, t_master, t_replica, n_keys):
-    master = df_local_factory.create(port=1111, proactor_threads=t_master)
-    replica = df_local_factory.create(port=1112, proactor_threads=t_replica)
-
-    # Start master and fill with test data
-    master.start()
-    c_master = redis.Redis(port=master.port)
-    batch_fill_data(c_master, gen_test_data(n_keys))
-
-    # Start replica and run REPLICAOF
-    replica.start()
-    c_replica = redis.Redis(port=replica.port)
-    c_replica.replicaof("localhost", str(master.port))
-
-    # Check replica received test data
-    wait_available(c_replica)
-    batch_check_data(c_replica, gen_test_data(n_keys))
-
-    # Stop replication manually
-    c_replica.replicaof("NO", "ONE")
-    assert c_replica.set("writeable", "true")
-
-    # Check test data persisted
-    batch_check_data(c_replica, gen_test_data(n_keys))
-
-
-"""
-Test simple full sync on multiple replicas without altering data during replication.
-The replicas start running in parallel.
-"""
-
-# (threads_master, threads_replicas, n entries)
-simple_full_sync_multi_cases = [
-    (4, [3, 2], 500),
-    (8, [6, 5, 4], 500),
-    (8, [2] * 5, 100),
-    (4, [1] * 20, 500)
+replication_cases = [
+    (8, [8], 20000, 5000),
+    (8, [8], 10000, 10000),
+    (8, [2, 2, 2, 2], 20000, 5000),
+    (6, [6, 6, 6], 30000, 15000),
+    (4, [1] * 12, 10000, 4000),
 ]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("t_master, t_replicas, n_keys", simple_full_sync_multi_cases)
-async def test_simple_full_sync_multi(df_local_factory, t_master, t_replicas, n_keys):
-    def data_gen(): return gen_test_data(n_keys)
-
-    master = df_local_factory.create(port=BASE_PORT, proactor_threads=t_master)
+@pytest.mark.parametrize("t_master, t_replicas, n_keys, n_stream_keys", replication_cases)
+async def test_replication_all(df_local_factory, t_master, t_replicas, n_keys, n_stream_keys):
+    master = df_local_factory.create(port=1111, proactor_threads=t_master)
     replicas = [
         df_local_factory.create(port=BASE_PORT+i+1, proactor_threads=t)
         for i, t in enumerate(t_replicas)
@@ -77,34 +32,51 @@ async def test_simple_full_sync_multi(df_local_factory, t_master, t_replicas, n_
 
     # Start master and fill with test data
     master.start()
-    c_master = aioredis.Redis(port=master.port, single_connection_client=True)
-    await batch_fill_data_async(c_master, data_gen())
+    c_master = aioredis.Redis(port=master.port)
+    await batch_fill_data_async(c_master, gen_test_data(n_keys, seed=1))
 
-    # Start replica tasks in parallel
-    tasks = [
-        asyncio.create_task(run_sfs_replica(
-            replica, master, data_gen), name="replica-"+str(replica.port))
-        for replica in replicas
-    ]
+    # Start replicas
+    for replica in replicas:
+        replica.start()
 
-    for task in tasks:
-        assert await task
+    c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
 
-    await c_master.connection_pool.disconnect()
+    async def stream_data():
+        """ Stream data during stable state replication phase and afterwards """
+        gen = gen_test_data(n_stream_keys, seed=2)
+        for chunk in grouper(3, gen):
+            await c_master.mset({k: v for k, v in chunk})
 
+    async def run_replication(c_replica):
+        await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
 
-async def run_sfs_replica(replica, master, data_gen):
-    replica.start()
-    c_replica = aioredis.Redis(
-        port=replica.port, single_connection_client=None)
+    async def check_replication(c_replica):
+        """ Check that static and streamed data arrived """
+        await wait_available_async(c_replica)
+        # Check range [n_stream_keys, n_keys] is of seed 1
+        await batch_check_data_async(c_replica, gen_test_data(n_keys, start=n_stream_keys, seed=1))
+        # Check range [0, n_stream_keys] is of seed 2
+        await asyncio.sleep(0.2)
+        await batch_check_data_async(c_replica, gen_test_data(n_stream_keys, seed=2))
 
-    await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
+    # Start streaming data and run REPLICAOF in parallel
+    stream_fut = asyncio.create_task(stream_data())
+    await asyncio.gather(*(asyncio.create_task(run_replication(c))
+                           for c in c_replicas))
 
-    await wait_available_async(c_replica)
-    await batch_check_data_async(c_replica, data_gen())
+    assert not stream_fut.done(
+    ), "Weak testcase. Increase number of streamed keys to surpass full sync"
+    await stream_fut
 
-    await c_replica.connection_pool.disconnect()
-    return True
+    # Check full sync results
+    await asyncio.gather(*(check_replication(c) for c in c_replicas))
+
+    # Check stable state streaming
+    await batch_fill_data_async(c_master, gen_test_data(n_keys, seed=3))
+
+    await asyncio.sleep(0.5)
+    await asyncio.gather(*(batch_check_data_async(c, gen_test_data(n_keys, seed=3))
+                           for c in c_replicas))
 
 
 """

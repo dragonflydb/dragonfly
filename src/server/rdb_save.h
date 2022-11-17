@@ -85,7 +85,9 @@ class RdbSaver {
   // freq_map can optionally be null.
   std::error_code SaveBody(RdbTypeFreqMap* freq_map);
 
-  SaveMode Mode() const { return save_mode_; }
+  SaveMode Mode() const {
+    return save_mode_;
+  }
 
  private:
   class Impl;
@@ -139,6 +141,8 @@ class RdbSerializer {
   // this by finding the key. This function is used
   // for the dump command - thus it is public function
   std::error_code SaveValue(const PrimeValue& pv);
+
+  std::error_code SendFullSyncCut();
 
  private:
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);

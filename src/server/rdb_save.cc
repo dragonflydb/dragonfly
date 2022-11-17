@@ -24,6 +24,7 @@ extern "C" {
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/rdb_extensions.h"
 #include "server/snapshot.h"
 #include "util/fibers/simple_channel.h"
 
@@ -581,6 +582,11 @@ error_code RdbSerializer::SaveStreamConsumers(streamCG* cg) {
   return error_code{};
 }
 
+error_code RdbSerializer::SendFullSyncCut() {
+  RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_FULLSYNC_END));
+  return FlushMem();
+}
+
 // TODO: if buf is large enough, it makes sense to write both mem_buf and buf
 // directly to sink_.
 error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
@@ -921,12 +927,15 @@ error_code RdbSaver::SaveHeader(const StringVec& lua_scripts) {
 error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
   RETURN_ON_ERR(impl_->serializer()->FlushMem());
 
-  VLOG(1) << "SaveBody , snapshots count: " << impl_->Size();
-
-  error_code io_error = impl_->ConsumeChannel();
-  if (io_error) {
-    LOG(ERROR) << "io error " << io_error;
-    return io_error;
+  if (save_mode_ == SaveMode::SUMMARY) {
+    impl_->serializer()->SendFullSyncCut();
+  } else {
+    VLOG(1) << "SaveBody , snapshots count: " << impl_->Size();
+    error_code io_error = impl_->ConsumeChannel();
+    if (io_error) {
+      LOG(ERROR) << "io error " << io_error;
+      return io_error;
+    }
   }
 
   RETURN_ON_ERR(SaveEpilog());

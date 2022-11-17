@@ -87,6 +87,10 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
     return Sync(args, cntx);
   }
 
+  if (sub_cmd == "STARTSTABLE" && args.size() == 3) {
+    return StartStable(args, cntx);
+  }
+
   if (sub_cmd == "EXPIRE") {
     return Expire(args, cntx);
   }
@@ -258,16 +262,8 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
     return;
 
   unique_lock lk(sync_info->mu);
-  if (sync_info->state != SyncState::PREPARATION)
-    return rb->SendError(kInvalidState);
-
-  // Check all flows are connected.
-  // This might happen if a flow abruptly disconnected before sending the SYNC request.
-  for (const FlowInfo& flow : sync_info->flows) {
-    if (!flow.conn) {
-      return rb->SendError(kInvalidState);
-    }
-  }
+  if (!CheckReplicaStateOrReply(*sync_info, SyncState::PREPARATION, rb))
+    return;
 
   // Start full sync.
   {
@@ -288,6 +284,38 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
   return rb->SendOk();
 }
 
+void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
+  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  string_view sync_id_str = ArgS(args, 2);
+
+  VLOG(1) << "Got DFLY STARTSTABLE " << sync_id_str;
+
+  auto [sync_id, sync_info] = GetSyncInfoOrReply(sync_id_str, rb);
+  if (!sync_id)
+    return;
+
+  unique_lock lk(sync_info->mu);
+  if (!CheckReplicaStateOrReply(*sync_info, SyncState::FULL_SYNC, rb))
+    return;
+
+  {
+    TransactionGuard tg{cntx->transaction};
+    AggregateStatus status;
+
+    auto cb = [this, &status, sync_info = sync_info](unsigned index, auto*) {
+      status = StartStableSyncInThread(&sync_info->flows[index], EngineShard::tlocal());
+      return OpStatus::OK;
+    };
+    shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+
+    if (*status != OpStatus::OK)
+      return rb->SendError(kInvalidState);
+  }
+
+  sync_info->state = SyncState::STABLE_SYNC;
+  return rb->SendOk();
+}
+
 void DflyCmd::Expire(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   cntx->transaction->ScheduleSingleHop([](Transaction* t, EngineShard* shard) {
@@ -304,11 +332,39 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
   SaveMode save_mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
   flow->saver.reset(new RdbSaver(flow->conn->socket(), save_mode, false));
 
+  // Shard can be null for io thread.
   if (shard != nullptr) {
-    flow->saver->StartSnapshotInShard(false, shard);
+    auto ec = sf_->journal()->OpenInThread(false, string_view());
+    CHECK(!ec);
+    flow->saver->StartSnapshotInShard(true, shard);
   }
 
   flow->fb = ::boost::fibers::fiber(&DflyCmd::FullSyncFb, this, flow);
+  return OpStatus::OK;
+}
+
+OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, EngineShard* shard) {
+  // Shard can be null for io thread.
+  if (shard != nullptr) {
+    flow->saver->StopSnapshotInShard(shard);
+  }
+
+  // Wait for full sync to finish.
+  if (flow->fb.joinable()) {
+    flow->fb.join();
+  }
+
+  if (shard != nullptr) {
+    flow->saver.reset();
+
+    // TODO: Add cancellation.
+    auto cb = sf_->journal()->RegisterOnChange([flow](const journal::Entry& je) {
+      // TODO: Serialize event.
+      ReqSerializer serializer{flow->conn->socket()};
+      serializer.SendCommand(absl::StrCat("SET ", je.key, " ", je.pval_ptr->ToString()));
+    });
+  }
+
   return OpStatus::OK;
 }
 
@@ -328,22 +384,20 @@ void DflyCmd::FullSyncFb(FlowInfo* flow) {
     return;
   }
 
-  if (saver->Mode() != SaveMode::SUMMARY) {
-    // TODO: we should be able to stop earlier if requested.
-    ec = saver->SaveBody(nullptr);
-    if (ec) {
-      LOG(ERROR) << ec;
-      return;
-    }
+  // TODO: we should be able to stop earlier if requested.
+  ec = saver->SaveBody(nullptr);
+  if (ec) {
+    LOG(ERROR) << ec;
+    return;
   }
+
+  VLOG(1) << "Sending full sync EOF";
 
   ec = flow->conn->socket()->Write(io::Buffer(flow->eof_token));
   if (ec) {
     LOG(ERROR) << ec;
     return;
   }
-
-  ec = flow->conn->socket()->Shutdown(SHUT_RDWR);
 }
 
 uint32_t DflyCmd::CreateSyncSession() {
@@ -427,6 +481,25 @@ pair<uint32_t, shared_ptr<DflyCmd::SyncInfo>> DflyCmd::GetSyncInfoOrReply(std::s
   }
 
   return {sync_id, sync_it->second};
+}
+
+bool DflyCmd::CheckReplicaStateOrReply(const SyncInfo& sync_info, SyncState expected,
+                                       RedisReplyBuilder* rb) {
+  if (sync_info.state != expected) {
+    rb->SendError(kInvalidState);
+    return false;
+  }
+
+  // Check all flows are connected.
+  // This might happen if a flow abruptly disconnected before sending the SYNC request.
+  for (const FlowInfo& flow : sync_info.flows) {
+    if (!flow.conn) {
+      rb->SendError(kInvalidState);
+      return false;
+    }
+  }
+
+  return true;
 }
 
 void DflyCmd::BreakOnShutdown() {

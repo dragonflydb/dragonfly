@@ -3,7 +3,9 @@
 //
 #pragma once
 
+#include <boost/fiber/condition_variable.hpp>
 #include <boost/fiber/fiber.hpp>
+#include <boost/fiber/mutex.hpp>
 #include <variant>
 
 #include "base/io_buf.h"
@@ -44,6 +46,16 @@ class Replica {
     R_SYNC_OK = 0x10,
   };
 
+  // A generic barrier that is used for waiting for
+  // flow fibers to become ready for the stable state switch.
+  struct SyncBlock {
+    SyncBlock(unsigned flows) : flows_left{flows} {
+    }
+    unsigned flows_left;
+    ::boost::fibers::mutex mu_;
+    ::boost::fibers::condition_variable cv_;
+  };
+
  public:
   Replica(std::string master_host, uint16_t port, Service* se);
   ~Replica();
@@ -75,10 +87,16 @@ class Replica {
   Replica(const MasterContext& context, uint32_t dfly_flow_id, Service* service);
 
   // Start replica initialized as dfly flow.
-  std::error_code StartAsDflyFlow();
+  std::error_code StartFullSyncFlow(SyncBlock* block);
 
-  // Sindle flow Dragonfly full sync fiber spawned by StartAsDflyFlow.
-  void FullSyncDflyFb(std::unique_ptr<base::IoBuf> io_buf, std::string eof_token);
+  // Transition into stable state mode as dfly flow.
+  std::error_code StartStableSyncFlow();
+
+  // Single flow full sync fiber spawned by StartFullSyncFlow.
+  void FullSyncDflyFb(SyncBlock* block, std::string eof_token);
+
+  // Single flow stable state sync fiber spawned by StartStableSyncFlow.
+  void StableSyncDflyFb();
 
  private: /* Utility */
   struct PSyncResponse {
@@ -142,6 +160,7 @@ class Replica {
   ::boost::fibers::fiber sync_fb_;
   std::vector<std::unique_ptr<Replica>> shard_flows_;
 
+  std::unique_ptr<base::IoBuf> leftover_buf_;
   std::unique_ptr<facade::RedisParser> parser_;
   facade::RespVec resp_args_;
   facade::CmdArgVec cmd_str_args_;

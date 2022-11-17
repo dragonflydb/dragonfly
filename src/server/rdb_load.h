@@ -172,6 +172,13 @@ class RdbLoader : protected RdbLoaderBase {
     return load_time_;
   }
 
+  // Set callback for receiving RDB_OPCODE_FULLSYNC_END.
+  // This opcode is used by a master instance to notify it finished streaming static data
+  // and is ready to switch to stable state sync.
+  void SetFullSyncCutCb(std::function<void()> cb) {
+    full_sync_cut_cb = std::move(cb);
+  }
+
  private:
   struct ObjSettings;
   std::error_code LoadKeyValPair(int type, ObjSettings* settings);
@@ -194,6 +201,9 @@ class RdbLoader : protected RdbLoaderBase {
   ::boost::fibers::mutex mu_;
   std::error_code ec_;  // guarded by mu_
   std::atomic_bool stop_early_{false};
+
+  // Callback when receiving RDB_OPCODE_FULLSYNC_END
+  std::function<void()> full_sync_cut_cb;
 };
 
 }  // namespace dfly

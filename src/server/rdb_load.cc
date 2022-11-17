@@ -27,6 +27,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/hset_family.h"
+#include "server/rdb_extensions.h"
 #include "server/script_mgr.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
@@ -1553,6 +1554,12 @@ error_code RdbLoader::Load(io::Source* src) {
       break;
     }
 
+    if (type == RDB_OPCODE_FULLSYNC_END) {
+      if (full_sync_cut_cb)
+        full_sync_cut_cb();
+      continue;
+    }
+
     if (type == RDB_OPCODE_SELECTDB) {
       unsigned dbid = 0;
 
@@ -1815,8 +1822,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     if (item.expire_ms > 0 && db_cntx.time_now_ms >= item.expire_ms)
       continue;
 
-    auto [it, added] = db_slice.AddEntry(db_cntx, item.key, std::move(pv), item.expire_ms);
-
+    auto [it, added] = db_slice.AddOrUpdate(db_cntx, item.key, std::move(pv), item.expire_ms);
     if (!added) {
       LOG(WARNING) << "RDB has duplicated key '" << item.key << "' in DB " << db_ind;
     }

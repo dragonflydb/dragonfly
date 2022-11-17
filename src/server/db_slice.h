@@ -150,11 +150,16 @@ class DbSlice {
   std::tuple<PrimeIterator, ExpireIterator, bool> AddOrFind2(const Context& cntx,
                                                              std::string_view key) noexcept(false);
 
+  // Same as AddOrSkip, but overwrites in case entry exists.
+  // Returns second=true if insertion took place.
+  std::pair<PrimeIterator, bool> AddOrUpdate(const Context& cntx, std::string_view key,
+                                             PrimeValue obj, uint64_t expire_at_ms) noexcept(false);
+
   // Returns second=true if insertion took place, false otherwise.
   // expire_at_ms equal to 0 - means no expiry.
   // throws: bad_alloc is insertion could not happen due to out of memory.
-  std::pair<PrimeIterator, bool> AddEntry(const Context& cntx, std::string_view key, PrimeValue obj,
-                                          uint64_t expire_at_ms) noexcept(false);
+  std::pair<PrimeIterator, bool> AddOrSkip(const Context& cntx, std::string_view key,
+                                           PrimeValue obj, uint64_t expire_at_ms) noexcept(false);
 
   // Adds a new entry. Requires: key does not exist in this slice.
   // Returns the iterator to the newly added entry.
@@ -285,6 +290,10 @@ class DbSlice {
   void InvalidateDbWatches(DbIndex db_indx);
 
  private:
+  std::pair<PrimeIterator, bool> AddOrUpdateInternal(const Context& cntx, std::string_view key,
+                                                     PrimeValue obj, uint64_t expire_at_ms,
+                                                     bool force_update) noexcept(false);
+
   void CreateDb(DbIndex index);
   size_t EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* table);
 

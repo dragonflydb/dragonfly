@@ -1,4 +1,5 @@
 default_stages: [commit]
+exclude: 'src\/redis\/.*'
 repos:
   - repo: local
     hooks:

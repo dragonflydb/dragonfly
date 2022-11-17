@@ -161,7 +161,7 @@ bool RdbRestoreValue::Add(std::string_view data, std::string_view key, DbSlice& 
     return false;
   }
   DbContext context{.db_index = index, .time_now_ms = GetCurrentTimeMs()};
-  auto [it, added] = db_slice.AddEntry(context, key, std::move(pv), item.expire_ms);
+  auto [it, added] = db_slice.AddOrSkip(context, key, std::move(pv), item.expire_ms);
   return added;
 }
 

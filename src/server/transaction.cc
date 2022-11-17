@@ -577,7 +577,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     // The problematic flow is as follows: ScheduleUniqueShard schedules into TxQueue and then
     // call PollExecute that runs the callback which calls DecreaseRunCnt.
     // As a result WaitForShardCallbacks below is unblocked.
-    auto schedule_cb = [&] {
+    auto schedule_cb = [this] {
       bool run_eager = ScheduleUniqueShard(EngineShard::tlocal());
       if (run_eager) {
         // it's important to DecreaseRunCnt only for run_eager and after run_eager was assigned.
@@ -833,7 +833,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
 
   // Fast path - for uncontended keys, just run the callback.
   // That applies for single key operations like set, get, lpush etc.
-  if (shard->db_slice().CheckLock(mode, lock_args)) {
+  if (shard->db_slice().CheckLock(mode, lock_args) && shard->shard_lock()->Check(mode)) {
     RunQuickie(shard);
     return true;
   }
@@ -845,7 +845,6 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   DCHECK_EQ(0, sd.local_mask & KEYLOCK_ACQUIRED);
   bool lock_acquired = shard->db_slice().Acquire(mode, lock_args);
   sd.local_mask |= KEYLOCK_ACQUIRED;
-  DCHECK(!lock_acquired);  // Because CheckLock above failed.
 
   DVLOG(1) << "Rescheduling into TxQueue " << DebugId();
 
