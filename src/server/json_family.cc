@@ -8,6 +8,7 @@ extern "C" {
 #include "redis/object.h"
 }
 
+#include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 
 #include <jsoncons/json.hpp>
@@ -284,6 +285,61 @@ string ConvertToJsonPointer(string_view json_path) {
   string result{"/"};  // initialize with a leading slash
   result += absl::StrJoin(parts, "/", JsonPointerFormatter());
   return result;
+}
+
+size_t CountJsonFields(const json& j) {
+  size_t res = 0;
+  json_type type = j.type();
+  if (type == json_type::array_value) {
+    res += j.size();
+    for (const auto& item : j.array_range()) {
+      if (item.type() == json_type::array_value || item.type() == json_type::object_value) {
+        res += CountJsonFields(item);
+      }
+    }
+
+  } else if (type == json_type::object_value) {
+    res += j.size();
+    for (const auto& item : j.object_range()) {
+      if (item.value().type() == json_type::array_value ||
+          item.value().type() == json_type::object_value) {
+        res += CountJsonFields(item.value());
+      }
+    }
+
+  } else {
+    res += 1;
+  }
+
+  return res;
+}
+
+void SendJsonValue(ConnectionContext* cntx, const json& j) {
+  if (j.is_double()) {
+    (*cntx)->SendDouble(j.as_double());
+  } else if (j.is_number()) {
+    (*cntx)->SendLong(j.as_integer<long>());
+  } else if (j.is_bool()) {
+    (*cntx)->SendSimpleString(j.as_bool() ? "true" : "false");
+  } else if (j.is_null()) {
+    (*cntx)->SendNull();
+  } else if (j.is_string()) {
+    (*cntx)->SendSimpleString(j.as_string_view());
+  } else if (j.is_object()) {
+    (*cntx)->StartArray(j.size() + 1);
+    (*cntx)->SendSimpleString("{");
+    for (const auto& item : j.object_range()) {
+      (*cntx)->StartArray(2);
+      (*cntx)->SendSimpleString(item.key());
+      SendJsonValue(cntx, item.value());
+    }
+  } else if (j.is_array()) {
+    (*cntx)->StartArray(j.size() + 1);
+    (*cntx)->SendSimpleString("[");
+    for (const auto& item : j.array_range()) {
+      SendJsonValue(cntx, item);
+    }
+  }
 }
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key,
@@ -905,7 +961,118 @@ OpResult<vector<OptString>> OpMGet(const OpArgs& op_args, const vector<string_vi
   return vec;
 }
 
+// Returns numeric vector that represents the number of fields of JSON value at each path.
+OpResult<vector<OptSizeT>> OpFields(const OpArgs& op_args, string_view key,
+                                    JsonExpression expression) {
+  OpResult<json> result = GetJson(op_args, key);
+  if (!result) {
+    return result.status();
+  }
+
+  vector<OptSizeT> vec;
+  auto cb = [&vec](const string_view& path, const json& val) {
+    vec.emplace_back(CountJsonFields(val));
+  };
+
+  expression.evaluate(*result, cb);
+  return vec;
+}
+
+// Returns json vector that represents the result of the json query.
+OpResult<vector<json>> OpResp(const OpArgs& op_args, string_view key, JsonExpression expression) {
+  OpResult<json> result = GetJson(op_args, key);
+  if (!result) {
+    return result.status();
+  }
+
+  vector<json> vec;
+  auto cb = [&vec](const string_view& path, const json& val) { vec.emplace_back(val); };
+
+  expression.evaluate(*result, cb);
+  return vec;
+}
+
 }  // namespace
+
+void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view path = ArgS(args, 2);
+
+  error_code ec;
+  JsonExpression expression = jsonpath::make_expression<json>(path, ec);
+
+  if (ec) {
+    VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
+    (*cntx)->SendError(kSyntaxErr);
+    return;
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpResp(t->GetOpArgs(shard), key, move(expression));
+  };
+
+  Transaction* trans = cntx->transaction;
+  OpResult<vector<json>> result = trans->ScheduleSingleHopT(move(cb));
+
+  if (result) {
+    (*cntx)->StartArray(result->size());
+    for (const auto& it : *result) {
+      SendJsonValue(cntx, it);
+    }
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
+
+void JsonFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
+  function<decltype(OpFields)> func;
+  string_view command = ArgS(args, 1);
+  // The 'MEMORY' sub-command is not supported yet, calling to operation function should be added
+  // here.
+  if (absl::EqualsIgnoreCase(command, "help")) {
+    (*cntx)->StartArray(2);
+    (*cntx)->SendSimpleString(
+        "JSON.DEBUG FIELDS <key> <path> - report number of fields in the JSON element.");
+    (*cntx)->SendSimpleString("JSON.DEBUG HELP - print help message.");
+    return;
+
+  } else if (absl::EqualsIgnoreCase(command, "fields")) {
+    func = &OpFields;
+
+  } else {
+    (*cntx)->SendError(facade::UnknownSubCmd(command, "JSON.DEBUG"), facade::kSyntaxErrType);
+    return;
+  }
+
+  if (args.size() < 4) {
+    (*cntx)->SendError(facade::WrongNumArgsError(command), facade::kSyntaxErrType);
+    return;
+  }
+
+  error_code ec;
+  string_view key = ArgS(args, 2);
+  string_view path = ArgS(args, 3);
+  JsonExpression expression = jsonpath::make_expression<json>(path, ec);
+
+  if (ec) {
+    VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
+    (*cntx)->SendError(kSyntaxErr);
+    return;
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return func(t->GetOpArgs(shard), key, move(expression));
+  };
+
+  Transaction* trans = cntx->transaction;
+  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(move(cb));
+
+  if (result) {
+    PrintOptVec(cntx, result);
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
 
 void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
   error_code ec;
@@ -1482,6 +1649,8 @@ void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.ARRAPPEND", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, 1}.HFUNC(
       ArrAppend);
   *registry << CI{"JSON.ARRINDEX", CO::READONLY | CO::FAST, -4, 1, 1, 1}.HFUNC(ArrIndex);
+  *registry << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -2, 1, 1, 1}.HFUNC(Debug);
+  *registry << CI{"JSON.RESP", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(Resp);
 }
 
 }  // namespace dfly

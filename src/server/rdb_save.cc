@@ -724,6 +724,9 @@ io::Result<size_t> AlignedBuffer::WriteSome(const iovec* v, uint32_t len) {
 // to the nearest page boundary.
 error_code AlignedBuffer::Flush() {
   size_t len = (buf_offs_ + kAmask) & (~kAmask);
+  if (len == 0)
+    return error_code{};
+
   iovec ivec{.iov_base = aligned_buf_, .iov_len = len};
   buf_offs_ = 0;
 
@@ -930,7 +933,7 @@ error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
     VLOG(1) << "SaveBody , snapshots count: " << impl_->Size();
     error_code io_error = impl_->ConsumeChannel();
     if (io_error) {
-      VLOG(1) << "io error " << io_error;
+      LOG(ERROR) << "io error " << io_error;
       return io_error;
     }
   }

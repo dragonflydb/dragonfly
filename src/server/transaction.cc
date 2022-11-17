@@ -48,7 +48,7 @@ Transaction::Transaction(const CommandId* cid) : cid_(cid) {
     multi_->multi_opts = cid->opt_mask();
 
     if (cmd_name == "EVAL" || cmd_name == "EVALSHA") {
-      multi_->incremental = false;  // we lock all the keys at once.
+      multi_->is_expanding = false;  // we lock all the keys at once.
     }
   }
 }
@@ -105,7 +105,7 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   DCHECK_LT(key_index.start, args.size());
   DCHECK_GT(key_index.start, 0u);
 
-  bool incremental_locking = multi_ && multi_->incremental;
+  bool incremental_locking = multi_ && multi_->is_expanding;
   bool single_key = !multi_ && key_index.HasSingleKey();
   bool needs_reverse_mapping = cid_->opt_mask() & CO::REVERSE_MAPPING;
 
@@ -151,8 +151,12 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
 
   if (multi_) {
     mode = Mode();
+    multi_->keys.clear();
     tmp_space.uniq_keys.clear();
     DCHECK_LT(int(mode), 2);
+
+    // With EVAL, we call this function for EVAL itself as well as for each command
+    // for eval. currently, we lock everything only during the eval call.
     should_record_locks = incremental_locking || !multi_->locks_recorded;
   }
 
@@ -175,7 +179,11 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
       shard_index[sid].original_index.push_back(i - 1);
 
     if (should_record_locks && tmp_space.uniq_keys.insert(key).second) {
-      multi_->locks[key].cnt[int(mode)]++;
+      if (multi_->is_expanding) {
+        multi_->keys.push_back(key);
+      } else {
+        multi_->locks[key].cnt[int(mode)]++;
+      }
     };
 
     if (key_index.step == 2) {  // value
@@ -272,13 +280,12 @@ void Transaction::SetExecCmd(const CommandId* cid) {
   DCHECK(multi_);
   DCHECK(!cb_);
 
-  // The order is important, we are Schedule() for multi transaction before overriding cid_.
-  // TODO: The flow is ugly. I should introduce a proper interface for Multi transactions
+  // The order is important, we call Schedule for multi transaction before overriding cid_.
+  // TODO: The flow is ugly. Consider introducing a proper interface for Multi transactions
   // like SetupMulti/TurndownMulti. We already have UnlockMulti that should be part of
   // TurndownMulti.
-
   if (txid_ == 0) {
-    Schedule();
+    ScheduleInternal();
   }
 
   unique_shard_cnt_ = 0;
@@ -313,7 +320,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
 
   bool was_suspended = sd.local_mask & SUSPENDED_Q;
   bool awaked_prerun = (sd.local_mask & AWAKED_Q) != 0;
-  bool incremental_lock = multi_ && multi_->incremental;
+  bool incremental_lock = multi_ && multi_->is_expanding;
 
   // For multi we unlock transaction (i.e. its keys) in UnlockMulti() call.
   // Therefore we differentiate between concluding, which says that this specific
@@ -527,6 +534,16 @@ void Transaction::ScheduleInternal() {
   }
 }
 
+void Transaction::LockMulti() {
+  DCHECK(multi_ && multi_->is_expanding);
+
+  IntentLock::Mode mode = Mode();
+  for (auto key : multi_->keys) {
+    multi_->locks[key].cnt[int(mode)]++;
+  }
+  multi_->keys.clear();
+}
+
 // Optimized "Schedule and execute" function for the most common use-case of a single hop
 // transactions like set/mset/mget etc. Does not apply for more complicated cases like RENAME or
 // BLPOP where a data must be read from multiple shards before performing another hop.
@@ -574,8 +591,14 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     shard_set->Add(unique_shard_id_, std::move(schedule_cb));  // serves as a barrier.
   } else {
     // Transaction spans multiple shards or it's global (like flushdb) or multi.
-    if (!multi_)
+    // Note that the logic here is a bit different from the public Schedule() function.
+    if (multi_) {
+      if (multi_->is_expanding)
+        LockMulti();
+    } else {
       ScheduleInternal();
+    }
+
     ExecuteAsync();
   }
 
@@ -614,6 +637,14 @@ void Transaction::UnlockMulti() {
   DCHECK_GE(use_count(), 1u);
 
   VLOG(1) << "UnlockMultiEnd " << DebugId();
+}
+
+void Transaction::Schedule() {
+  if (multi_ && multi_->is_expanding) {
+    LockMulti();
+  } else {
+    ScheduleInternal();
+  }
 }
 
 // Runs in coordinator thread.

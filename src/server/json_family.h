@@ -38,6 +38,8 @@ class JsonFamily {
   static void ArrInsert(CmdArgList args, ConnectionContext* cntx);
   static void ArrAppend(CmdArgList args, ConnectionContext* cntx);
   static void ArrIndex(CmdArgList args, ConnectionContext* cntx);
+  static void Debug(CmdArgList args, ConnectionContext* cntx);
+  static void Resp(CmdArgList args, ConnectionContext* cntx);
 };
 
 }  // namespace dfly

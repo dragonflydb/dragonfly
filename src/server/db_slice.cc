@@ -340,7 +340,7 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
     auto res = FindExt(cntx, key);
 
     if (IsValid(res.first)) {
-      return tuple_cat(res, make_tuple(true));
+      return tuple_cat(res, make_tuple(false));
     }
 
     // It's a new entry.

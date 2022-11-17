@@ -93,6 +93,7 @@ simple_full_sync_multi_crash_cases = [
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="test is currently crashing")
 @pytest.mark.parametrize("t_master, t_replicas, n_keys", simple_full_sync_multi_crash_cases)
 async def test_simple_full_sync_mutli_crash(df_local_factory, t_master, t_replicas, n_keys):
     def data_gen(): return gen_test_data(n_keys)

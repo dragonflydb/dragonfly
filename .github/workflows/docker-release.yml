@@ -38,6 +38,9 @@ jobs:
       with:
         fetch-depth: 0
 
+    - name: Install helm
+      uses: azure/setup-helm@v3
+
     - uses: dsaltares/fetch-gh-release-asset@master
       with:
         version: 'tags/${{ env.TAG_NAME }}'
@@ -126,6 +129,16 @@ jobs:
         git commit \
           -m 'chore(helm-chart): update to ${{ env.TAG_NAME }}' \
           contrib/charts/dragonfly/Chart.yaml
+
+    - name: Push Helm chart as OCI to Github
+      if: env.IS_PRERELEASE != 'true'
+      run: |
+        echo "${{ secrets.GITHUB_TOKEN }}" | \
+          helm registry login -u ${{ github.actor }} --password-stdin ghcr.io
+
+        helm package contrib/charts/dragonfly
+
+        helm push dragonfly-${{ env.TAG_NAME }}.tgz oci://ghcr.io/${{ github.repository }}/helm
 
     - name: GitHub Push
       uses: CasperWA/push-protected@v2

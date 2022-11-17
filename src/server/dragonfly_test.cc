@@ -212,7 +212,10 @@ TEST_F(DflyEngineTest, MultiWeirdCommands) {
 }
 
 TEST_F(DflyEngineTest, MultiRename) {
-  RespExpr resp = Run({"multi"});
+  RespExpr resp = Run({"mget", kKey1, kKey4});
+  ASSERT_EQ(1, GetDebugInfo().shards_count);
+
+  resp = Run({"multi"});
   ASSERT_EQ(resp, "OK");
   Run({"set", kKey1, "1"});
 
@@ -222,9 +225,21 @@ TEST_F(DflyEngineTest, MultiRename) {
 
   ASSERT_THAT(resp, ArrLen(2));
   EXPECT_THAT(resp.GetVec(), ElementsAre("OK", "OK"));
-  ASSERT_FALSE(service_->IsLocked(0, kKey1));
-  ASSERT_FALSE(service_->IsLocked(0, kKey4));
-  ASSERT_FALSE(service_->IsShardSetLocked());
+
+  // Now rename with keys spawning multiple shards.
+  Run({"mget", kKey4, kKey2});
+  ASSERT_EQ(2, GetDebugInfo().shards_count);
+
+  Run({"multi"});
+  resp = Run({"rename", kKey4, kKey2});
+  ASSERT_EQ(resp, "QUEUED");
+  resp = Run({"exec"});
+  EXPECT_EQ(resp, "OK");
+
+  EXPECT_FALSE(service_->IsLocked(0, kKey1));
+  EXPECT_FALSE(service_->IsLocked(0, kKey2));
+  EXPECT_FALSE(service_->IsLocked(0, kKey4));
+  EXPECT_FALSE(service_->IsShardSetLocked());
 }
 
 TEST_F(DflyEngineTest, MultiHop) {
@@ -281,7 +296,9 @@ TEST_F(DflyEngineTest, FlushDb) {
 }
 
 TEST_F(DflyEngineTest, Eval) {
-  auto resp = Run({"incrby", "foo", "42"});
+  RespExpr resp;
+
+  resp = Run({"incrby", "foo", "42"});
   EXPECT_THAT(resp, IntArg(42));
 
   resp = Run({"eval", "return redis.call('get', 'foo')", "0"});
@@ -294,6 +311,7 @@ TEST_F(DflyEngineTest, Eval) {
 
   resp = Run({"eval", "return redis.call('get', 'foo')", "1", "foo"});
   EXPECT_THAT(resp, "42");
+  ASSERT_FALSE(service_->IsLocked(0, "foo"));
 
   resp = Run({"eval", "return redis.call('get', KEYS[1])", "1", "foo"});
   EXPECT_THAT(resp, "42");
@@ -685,6 +703,50 @@ TEST_F(DflyEngineTest, Watch) {
   Run({"select", "0"});
   Run({"multi"});
   ASSERT_THAT(Run({"exec"}), kExecSuccess);
+}
+
+TEST_F(DflyEngineTest, Bug468) {
+  RespExpr resp = Run({"multi"});
+  ASSERT_EQ(resp, "OK");
+  resp = Run({"SET", "foo", "bar", "EX", "moo"});
+  ASSERT_EQ(resp, "QUEUED");
+
+  resp = Run({"exec"});
+  ASSERT_THAT(resp, ErrArg("not an integer"));
+  ASSERT_FALSE(service_->IsLocked(0, "foo"));
+
+  resp = Run({"eval", "return redis.call('set', 'foo', 'bar', 'EX', 'moo')", "1", "foo"});
+  ASSERT_THAT(resp, ErrArg("not an integer"));
+
+  ASSERT_FALSE(service_->IsLocked(0, "foo"));
+}
+
+TEST_F(DflyEngineTest, Bug496) {
+  shard_set->pool()->AwaitFiberOnAll([&](unsigned index, ProactorBase* base) {
+    EngineShard* shard = EngineShard::tlocal();
+    if (shard == nullptr)
+      return;
+
+    auto& db = shard->db_slice();
+
+    int cb_hits = 0;
+    uint32_t cb_id =
+        db.RegisterOnChange([&cb_hits](DbIndex, const DbSlice::ChangeReq&) { cb_hits++; });
+
+    auto [_, added] = db.AddOrFind({}, "key-1");
+    EXPECT_TRUE(added);
+    EXPECT_EQ(cb_hits, 1);
+
+    tie(_, added) = db.AddOrFind({}, "key-1");
+    EXPECT_FALSE(added);
+    EXPECT_EQ(cb_hits, 1);
+
+    tie(_, added) = db.AddOrFind({}, "key-2");
+    EXPECT_TRUE(added);
+    EXPECT_EQ(cb_hits, 2);
+
+    db.UnregisterOnChange(cb_id);
+  });
 }
 
 // TODO: to test transactions with a single shard since then all transactions become local.

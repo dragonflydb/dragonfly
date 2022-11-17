@@ -17,7 +17,7 @@ class MemoryCmd {
   void Run(CmdArgList args);
 
  private:
-  std::string MallocStats();
+  std::string MallocStats(unsigned tid);
 
   ServerFamily& sf_;
   ConnectionContext* cntx_;
