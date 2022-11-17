@@ -721,6 +721,34 @@ TEST_F(DflyEngineTest, Bug468) {
   ASSERT_FALSE(service_->IsLocked(0, "foo"));
 }
 
+TEST_F(DflyEngineTest, Bug496) {
+  shard_set->pool()->AwaitFiberOnAll([&](unsigned index, ProactorBase* base) {
+    EngineShard* shard = EngineShard::tlocal();
+    if (shard == nullptr)
+      return;
+
+    auto& db = shard->db_slice();
+
+    int cb_hits = 0;
+    uint32_t cb_id =
+        db.RegisterOnChange([&cb_hits](DbIndex, const DbSlice::ChangeReq&) { cb_hits++; });
+
+    auto [_, added] = db.AddOrFind({}, "key-1");
+    EXPECT_TRUE(added);
+    EXPECT_EQ(cb_hits, 1);
+
+    tie(_, added) = db.AddOrFind({}, "key-1");
+    EXPECT_FALSE(added);
+    EXPECT_EQ(cb_hits, 1);
+
+    tie(_, added) = db.AddOrFind({}, "key-2");
+    EXPECT_TRUE(added);
+    EXPECT_EQ(cb_hits, 2);
+
+    db.UnregisterOnChange(cb_id);
+  });
+}
+
 // TODO: to test transactions with a single shard since then all transactions become local.
 // To consider having a parameter in dragonfly engine controlling number of shards
 // unconditionally from number of cpus. TO TEST BLPOP under multi for single/multi argument case.
