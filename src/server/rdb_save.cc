@@ -873,6 +873,14 @@ void RdbSaver::Impl::StopSnapshotting(EngineShard* shard) {
 }
 
 void RdbSaver::Impl::Cancel() {
+  auto* shard = EngineShard::tlocal();
+  if (!shard)
+    return;
+
+  auto& snapshot = GetSnapshot(shard);
+  if (snapshot)
+    snapshot->Cancel();
+  
   dfly::SliceSnapshot::DbRecord rec;
   while (channel_.Pop(rec)) {
   }

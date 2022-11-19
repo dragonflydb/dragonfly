@@ -78,9 +78,11 @@ void SliceSnapshot::Stop() {
 }
 
 void SliceSnapshot::Cancel() {
-  CloseRecordChannel();
+  VLOG(0) << "Running cancel "  << closed_chan_.load();
+  CloseRecordChannel(true);
   if (journal_cb_id_) {
     db_slice_->shard_owner()->journal()->Unregister(journal_cb_id_);
+    journal_cb_id_ = 0;
   }
 }
 
@@ -97,8 +99,10 @@ void SliceSnapshot::SerializeEntriesFb(const Cancellation& cll) {
   PrimeTable::Cursor cursor;
 
   for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
-    if (cll)
+    if (cll) {
+      VLOG(0) << "Snapshot cancelled @ 1";
       return;
+    }
 
     if (!db_array_[db_indx])
       continue;
@@ -112,12 +116,16 @@ void SliceSnapshot::SerializeEntriesFb(const Cancellation& cll) {
     mu_.unlock();
 
     do {
-      if (cll)
+      if (cll) {
+        VLOG(0) << "Snapshot cancelled @ 2";
         return;
+      }
 
       PrimeTable::Cursor next = pt->Traverse(cursor, [this, &cll](auto it) {
-        if (cll)
+        if (cll) {
+          VLOG(0) << "Snapshot cancelled @ 3";
           return;
+        }
         this->SaveCb(move(it));
       });
 
@@ -149,16 +157,23 @@ void SliceSnapshot::SerializeEntriesFb(const Cancellation& cll) {
     CHECK(!rdb_serializer_->SendFullSyncCut());
   FlushSfile(true);
 
-  VLOG(1) << "Exit SnapshotSerializer (serialized/side_saved/cbcalls): " << serialized_ << "/"
+  VLOG(0) << "Exit SnapshotSerializer (serialized/side_saved/cbcalls): " << serialized_ << "/"
           << side_saved_ << "/" << savecb_calls_;
 }
 
-void SliceSnapshot::CloseRecordChannel() {
-  // stupid barrier to make sure that SerializePhysicalBucket finished.
-  // Can not think of anything more elegant.
-  mu_.lock();
-  mu_.unlock();
-  dest_->StartClosing();
+void SliceSnapshot::CloseRecordChannel(bool force) {
+  if (!force) {
+    // stupid barrier to make sure that SerializePhysicalBucket finished.
+    // Can not think of anything more elegant.
+    mu_.lock();
+    mu_.unlock();
+  }
+
+  bool actual = false;
+  if (closed_chan_.compare_exchange_strong(actual, true)) {
+    VLOG(0) << "Closed channel";
+    dest_->StartClosing();
+  }
 }
 
 // This function should not block and should not preempt because it's called

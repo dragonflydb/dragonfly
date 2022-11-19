@@ -31,33 +31,91 @@ namespace journal {
 class Journal;
 }  // namespace journal
 
+// DflyCmd is responsible for managing replication. A master instance can be connected
+// to many replica instances, what is more, each of them can open multiple connections.
+// This is why its important to understand replica lifecycle management before making
+// any crucial changes.
+//
+// A SyncInfo instance is responsible for managing a replica's state and is accessible by its
+// sync_id. Each per-thread connection is called a Flow and is represented by the FlowInfo
+// instace, accessible by its index.
+//
+// An important aspect is synchronization and efficient locking. Three levels of locking are used:
+//  1. Global locking.
+//    Member  mutex `mu_` is used for synchronizing operations connected with internal data
+//    structures.
+//  2. Per-replica locking
+//    SyncInfo contains a separate mutex that is used for replica-only routines. It is held during
+//    state transitions (start full sync, start stable state sync) and mebmer access.
+//  3. Connection per-replica locking.
+//    Once we aborted the replication process, we need to keep Dragonfly's connection objects alive
+//    during the cleanup phase by blocking in the OnClose call (because internal structures like
+//    RdbSaver still keep references to them). This is done by separate connection_hold locks inside
+//    SyncInfo
+//
+//
+// Upon first connection from the replica, a new SyncInfo is created.
+// It tranistions through the following phases:
+//  1. Preparation
+//    During this start phase the "flows" are set up - one connection for every master thread. Those
+//    connections registered by the FLOW command sent from each newly opened connection.
+//  2. Full sync
+//    This phase is initiated by the SYNC command. It makes sure all flows are connected and the
+//    replica is in a valid state.
+//  3. Stable state sync
+//    After the replica has received confirmation, that each flow is ready to transition, it sends a
+//    STARTSTABLE command. This transitions the replica into streaming journal changes.
+//  4. Cancellation
+//    This can happed due to an error at any phase or through a normal abort. For properly releasing
+//    resources we need to run a multi-step cancellation procedure:
+//    1. Transition state
+//      We obtain the SyncInfo lock, transition into the cancelled state, cancel the context and set
+//      the on-hold lock. Immediately after we release the SyncInfo lock to allow other operations
+//      to fail-fast without awaiting full cancellation.
+//    2. Joining tasks
+//      Running tasks will stop on receiving the cancellation flag. Each FlowInfo has also an
+//      optional cleanup handler, that is invoked after cancelling. This should allow recovering
+//      from any state. The flows task will be awaited and joined if present.
+//    3. Opening connection locks
+//      Now that all tasks have finished and all cleanup handlers have run, we can safely release
+//      the on-hold connection lock, so that internal resources will be released by dragonfly. Then
+//      the SyncInfo is removed from the global map.
+//
+//
 class DflyCmd {
  public:
+  // See header comments for state descriptions.
   enum class SyncState { PREPARATION, FULL_SYNC, STABLE_SYNC, CANCELLED };
 
+  // Stores information related to a single flow.
   struct FlowInfo {
     FlowInfo() = default;
     FlowInfo(facade::Connection* conn, const std::string& eof_token)
-        : conn{conn}, eof_token{eof_token}, cleanup{} {};
+        : conn{conn}, eof_token{eof_token}, cleanup{[]() {}} {};
 
     facade::Connection* conn;
+
+    std::unique_ptr<RdbSaver> saver;  // Saver used by the full sync phase.
     std::string eof_token;
 
-    std::unique_ptr<RdbSaver> saver;
-
-    std::function<void()> cleanup;
-    ::boost::fibers::fiber fb;
+    std::function<void()> cleanup;   // Optional cleanup for cancellation.
+    ::boost::fibers::fiber task_fb;  // Current running task.
   };
 
+  // Stores information related to a single replica.
   struct SyncInfo {
     SyncInfo(unsigned flow_count, Context::ErrHandler err_handler)
-        : state{SyncState::PREPARATION}, flows{flow_count}, cntx{std::move(err_handler)} {
+        : state{SyncState::PREPARATION}, cntx{std::move(err_handler)}, flows{flow_count} {
     }
 
     SyncState state;
-    std::vector<FlowInfo> flows;
     Context cntx;
-    ::boost::fibers::mutex mu;  // guard operations on replica.
+
+    std::vector<FlowInfo> flows;
+
+    // See header top for locking levels.
+    ::boost::fibers::mutex mu;
+    ::boost::fibers::mutex connection_hold_mu;
   };
 
  public:
@@ -72,9 +130,6 @@ class DflyCmd {
 
   // Create new sync session.
   uint32_t CreateSyncSession();
-
- private:
-  struct OnHoldHandle : public ::boost::fibers::mutex {};
 
  private:
   // JOURNAL [START/STOP]
@@ -104,19 +159,22 @@ class DflyCmd {
   // Start full sync in thread. Start FullSyncFb. Called for each flow.
   facade::OpStatus StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard);
 
+  // Stop full sync in thread. Run state switch cleanup.
+  void StopFullSyncInThread(FlowInfo* flow, EngineShard* shard);
+
   // Start stable sync in thread. Called for each flow.
   facade::OpStatus StartStableSyncInThread(FlowInfo* flow, EngineShard* shard);
 
   // Fiber that runs full sync for each flow.
   void FullSyncFb(FlowInfo* flow, Context* cntx);
 
-  void StopReplication(uint32_t sync_id, bool lock_mutex = true);
+  // Main entrypoint for stopping replication.
+  void StopReplication(uint32_t sync_id);
 
-  // Delete sync session.
-  std::pair<std::shared_ptr<SyncInfo>, std::function<void()>> TransferHoldSyncSession(uint32_t sync_id);
-
-  // Cancel context and cleanup flows.
-  void CancelSyncSession(std::shared_ptr<SyncInfo> sync_info);
+  // Transition into cancelled state, run cleanup. If lock_mutex is true, lock sync_info's mutex,
+  // otherwise it should already be locked.
+  void CancelSyncSession(uint32_t sync_id, std::shared_ptr<SyncInfo> sync_info,
+                         bool lock_mutex = true);
 
   // Get SyncInfo by sync_id.
   std::shared_ptr<SyncInfo> GetSyncInfo(uint32_t sync_id);
@@ -136,10 +194,8 @@ class DflyCmd {
 
   uint32_t next_sync_id_ = 1;
   absl::btree_map<uint32_t, std::shared_ptr<SyncInfo>> sync_infos_;
-  absl::btree_map<uint32_t, std::shared_ptr<OnHoldHandle>> connection_holds_;
 
-
-  ::boost::fibers::mutex mu_;  // guard sync info and journal operations.
+  ::boost::fibers::mutex mu_;  // Guard global operations. See header top for locking levels.
 };
 
 }  // namespace dfly

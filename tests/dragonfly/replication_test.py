@@ -88,8 +88,15 @@ Test replica crash during full sync on multiple replicas without altering data d
 
 
 crash_cases = [
-    (4, [4], [], 100000),
-    #(8, [4, 4], [4, 4], 10000)
+    # balanced
+    (8, [4, 4], [4, 4], 10000),
+    (8, [2] * 6, [2] * 6, 10000),
+    # full sync heavy 
+    (8, [4] * 6, [], 10000),
+    (8, [2] * 12, [], 10000),
+    # stable state heavy
+    (8, [], [4] * 6, 10000),
+    (8, [], [2] * 12, 10000)
 ]
 
 
@@ -129,7 +136,7 @@ async def test_crash(df_local_factory, t_master, t_crash_fs, t_crash_ss, n_keys)
         c_replica = aioredis.Redis(port=replica.port)
         await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
         if crash_fs:
-            await asyncio.sleep(random.random()/10)
+            await asyncio.sleep(random.random()/100+0.01)
             replica.stop(kill=True)
         else:
             await wait_available_async(c_replica)
@@ -153,6 +160,7 @@ async def test_crash(df_local_factory, t_master, t_crash_fs, t_crash_ss, n_keys)
 
     # Run stable state crashes
     async def stable_sync(replica, c_replica):
+        await asyncio.sleep(random.random() / 100)
         replica.stop(kill=True)
 
     await asyncio.gather(*(stable_sync(*args) for args in c_replicas_ss))

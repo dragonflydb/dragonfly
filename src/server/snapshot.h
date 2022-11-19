@@ -5,6 +5,7 @@
 #pragma once
 
 #include <bitset>
+#include <atomic>
 
 #include "io/file.h"
 #include "server/db_slice.h"
@@ -42,6 +43,8 @@ class SliceSnapshot {
 
   void Join();
 
+  void Cancel();
+
   uint64_t snapshot_version() const {
     return snapshot_version_;
   }
@@ -59,9 +62,7 @@ class SliceSnapshot {
   }
 
  private:
-  void Cancel();
-
-  void CloseRecordChannel();
+  void CloseRecordChannel(bool force = false);
 
   void SerializeEntriesFb(const Cancellation& cll);
   
@@ -100,6 +101,8 @@ class SliceSnapshot {
   uint32_t journal_cb_id_ = 0;
 
   ::boost::fibers::fiber snapshot_fb_;
+
+  std::atomic_bool closed_chan_{false};
 };
 
 }  // namespace dfly
