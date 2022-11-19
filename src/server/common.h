@@ -8,6 +8,7 @@
 #include <absl/strings/str_cat.h>
 #include <absl/types/span.h>
 
+#include <atomic>
 #include <boost/fiber/mutex.hpp>
 #include <string_view>
 #include <vector>
@@ -196,6 +197,70 @@ using AggregateError = AggregateValue<std::error_code>;
 using AggregateStatus = AggregateValue<facade::OpStatus>;
 static_assert(facade::OpStatus::OK == facade::OpStatus{},
               "Default intitialization should be OK value");
+
+struct Cancellation {
+  void Cancel() {
+    flag_.store(true);
+  }
+
+  operator bool() const {
+    return flag_.load();
+  }
+
+ private:
+  std::atomic_bool flag_;
+};
+
+struct GenericError {
+  GenericError() = default;
+  GenericError(std::error_code ec) : ec_{ec}, details_{} {
+  }
+  GenericError(std::error_code ec, std::string details) : ec_{ec}, details_{std::move(details)} {
+  }
+
+  std::pair<std::error_code, const std::string&> Get() const {
+    return {ec_, details_};
+  }
+
+  std::error_code GetError() const {
+    return ec_;
+  }
+
+  const std::string& GetDetails() const {
+    return details_;
+  }
+
+  operator bool() const {
+    return bool(ec_);
+  }
+
+ private:
+  std::error_code ec_;
+  std::string details_;
+};
+
+using AggregateGenericError = AggregateValue<GenericError>;
+
+struct Context : public Cancellation {
+  using ErrHandler = std::function<bool(const GenericError&)>;
+
+  Context() = default;
+  Context(ErrHandler err_handler) : Cancellation{}, err_handler_{std::move(err_handler)} {
+  }
+
+  template <typename... T> void Error(T... ts) {
+    std::lock_guard lk{mu_};
+    err_ = GenericError{std::forward<T>(ts)...};
+    if (err_handler_ && err_handler_(err_)) {
+      Cancel();
+    }
+  }
+
+ private:
+  GenericError err_;
+  ErrHandler err_handler_;
+  ::boost::fibers::mutex mu_;
+};
 
 struct ScanOpts {
   std::string_view pattern;

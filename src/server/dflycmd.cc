@@ -98,26 +98,6 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
   rb->SendError(kSyntaxErr);
 }
 
-void DflyCmd::OnClose(ConnectionContext* cntx) {
-  unsigned session_id = cntx->conn_state.repl_session_id;
-  unsigned flow_id = cntx->conn_state.repl_flow_id;
-
-  if (!session_id)
-    return;
-
-  if (flow_id == kuint32max) {
-    DeleteSyncSession(session_id);
-  } else {
-    shared_ptr<SyncInfo> sync_info = GetSyncInfo(session_id);
-    if (sync_info) {
-      lock_guard lk(sync_info->mu);
-      if (sync_info->state != SyncState::CANCELLED) {
-        UnregisterFlow(&sync_info->flows[flow_id]);
-      }
-    }
-  }
-}
-
 void DflyCmd::Journal(CmdArgList args, ConnectionContext* cntx) {
   DCHECK_GE(args.size(), 3u);
   ToUpper(&args[2]);
@@ -271,7 +251,8 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
     AggregateStatus status;
 
     auto cb = [this, &status, sync_info = sync_info](unsigned index, auto*) {
-      status = StartFullSyncInThread(&sync_info->flows[index], EngineShard::tlocal());
+      status =
+          StartFullSyncInThread(&sync_info->flows[index], &sync_info->cntx, EngineShard::tlocal());
     };
     shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 
@@ -326,20 +307,24 @@ void DflyCmd::Expire(CmdArgList args, ConnectionContext* cntx) {
   return rb->SendOk();
 }
 
-OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
+OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
   DCHECK(!flow->fb.joinable());
 
   SaveMode save_mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
   flow->saver.reset(new RdbSaver(flow->conn->socket(), save_mode, false));
 
+  flow->cleanup = [saver = flow->saver.get()]() {
+    VLOG(0) << "Running saver cleanup";
+    saver->Cancel();
+  };
+
   // Shard can be null for io thread.
   if (shard != nullptr) {
-    auto ec = sf_->journal()->OpenInThread(false, string_view());
-    CHECK(!ec);
-    flow->saver->StartSnapshotInShard(true, shard);
+    CHECK(!sf_->journal()->OpenInThread(false, ""sv));  // can only happen in persistent mode.
+    flow->saver->StartSnapshotInShard(true, *cntx, shard);
   }
 
-  flow->fb = ::boost::fibers::fiber(&DflyCmd::FullSyncFb, this, flow);
+  flow->fb = ::boost::fibers::fiber(&DflyCmd::FullSyncFb, this, flow, cntx);
   return OpStatus::OK;
 }
 
@@ -354,21 +339,29 @@ OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, EngineShard* shard) {
     flow->fb.join();
   }
 
+  // Register journal listener and cleanup.
   if (shard != nullptr) {
-    flow->saver.reset();
-
-    // TODO: Add cancellation.
-    auto cb = sf_->journal()->RegisterOnChange([flow](const journal::Entry& je) {
+    uint32_t cb_id = sf_->journal()->RegisterOnChange([flow](const journal::Entry& je) {
       // TODO: Serialize event.
       ReqSerializer serializer{flow->conn->socket()};
       serializer.SendCommand(absl::StrCat("SET ", je.key, " ", je.pval_ptr->ToString()));
     });
+
+    flow->cleanup = [this, cb_id]() {
+      VLOG(0) << "Running SS cleanup";
+      sf_->journal()->Unregister(cb_id);
+    };
+  } else {
+    flow->cleanup = []() {};  // overwrite io threads cleanup.
   }
+
+  // Reset saver.
+  flow->saver.reset();
 
   return OpStatus::OK;
 }
 
-void DflyCmd::FullSyncFb(FlowInfo* flow) {
+void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
   error_code ec;
   RdbSaver* saver = flow->saver.get();
 
@@ -380,79 +373,138 @@ void DflyCmd::FullSyncFb(FlowInfo* flow) {
   }
 
   if (ec) {
-    LOG(ERROR) << ec;
-    return;
+    return cntx->Error(ec);
   }
 
-  // TODO: we should be able to stop earlier if requested.
-  ec = saver->SaveBody(nullptr);
-  if (ec) {
-    LOG(ERROR) << ec;
-    return;
+  if ((ec = saver->SaveBody(*cntx, nullptr))) {
+    return cntx->Error(ec);
   }
 
   VLOG(1) << "Sending full sync EOF";
 
   ec = flow->conn->socket()->Write(io::Buffer(flow->eof_token));
   if (ec) {
-    LOG(ERROR) << ec;
-    return;
+    return cntx->Error(ec);
   }
 }
 
 uint32_t DflyCmd::CreateSyncSession() {
   unique_lock lk(mu_);
+  unsigned sync_id = next_sync_id_++;
 
-  auto sync_info = make_shared<SyncInfo>();
-  sync_info->flows.resize(shard_set->size() + 1);
+  unsigned flow_count = shard_set->size() + 1;
+  auto err_handler = [this, sync_id](const GenericError& err) {
+    StopReplication(sync_id);  // Stop replication in case of error
+    return true;               // Cancel context
+  };
 
-  auto [it, inserted] = sync_infos_.emplace(next_sync_id_, std::move(sync_info));
+  auto sync_info = make_shared<SyncInfo>(flow_count, std::move(err_handler));
+  auto [it, inserted] = sync_infos_.emplace(sync_id, std::move(sync_info));
   CHECK(inserted);
 
-  return next_sync_id_++;
+  return sync_id;
 }
 
-void DflyCmd::UnregisterFlow(FlowInfo* flow) {
-  // TODO: Cancel saver operations.
-  flow->conn = nullptr;
-  flow->saver.reset();
+void DflyCmd::OnClose(ConnectionContext* cntx) {
+  unsigned session_id = cntx->conn_state.repl_session_id;
+  if (!session_id)
+    return;
+
+
+  VLOG(0) << "Pre on close of " << session_id << " thread " << uint64_t(EngineShard::tlocal());
+
+  // The following actions (read connection_holds, call StopReplication)
+  // should happen strictly within one global lock.
+  // StopReplication is responsible for unlocking the mutex.
+  mu_.lock();
+  VLOG(0) << "On close of " << session_id;
+
+  // Check if connection should be on-hold.
+  auto hold_it = connection_holds_.find(session_id);
+  if (hold_it != connection_holds_.end()) {
+    shared_ptr<OnHoldHandle> handle = hold_it->second;
+    mu_.unlock();
+    VLOG(0) << "Connection is on hold" << session_id;
+    handle->lock();  // wait till cleanup finished.
+    handle->unlock();
+    return;
+  }
+
+  VLOG(0) << "Stopping replication for " << session_id;
+
+  StopReplication(session_id, false);
+
+  VLOG(0) << "Done with on close";
 }
 
-void DflyCmd::DeleteSyncSession(uint32_t sync_id) {
+void DflyCmd::StopReplication(uint32_t sync_id, bool lock_mutex) {
+  if (lock_mutex)
+    mu_.lock();
+
+  // No cleanup is running. Remove sync session and put it on hold.
+  auto [sync_info, hold_cleanup] = TransferHoldSyncSession(sync_id);
+  mu_.unlock();
+
+  VLOG(0) << "Transferred sync session";
+
+  // sync_id has no sync_info entry, so it expired
+  if (!sync_info)
+    return;
+
+  CancelSyncSession(std::move(sync_info));
+
+  hold_cleanup();
+}
+
+pair<shared_ptr<DflyCmd::SyncInfo>, function<void()>> DflyCmd::TransferHoldSyncSession(uint32_t sync_id) {
   shared_ptr<SyncInfo> sync_info;
 
   // Remove sync_info from map.
-  // Store by value to keep alive.
-  {
-    unique_lock lk(mu_);
+  // Store by value to keep pointer alive.
+  auto it = sync_infos_.find(sync_id);
+  if (it == sync_infos_.end())
+    return {{}, {}};
 
-    auto it = sync_infos_.find(sync_id);
-    if (it == sync_infos_.end())
-      return;
+  sync_info = it->second;
+  sync_infos_.erase(it);
 
-    sync_info = it->second;
-    sync_infos_.erase(it);
-  }
+  auto keep_alive = make_shared<OnHoldHandle>();
+  keep_alive->lock();
+  connection_holds_[sync_id] = std::move(keep_alive);
 
+  VLOG(0) << "Put on hold connection " << sync_id;
+
+  auto cleanup = [this, sync_id]() {
+    lock_guard lk(mu_);
+    auto it = connection_holds_.find(sync_id);
+    it->second->unlock();
+    VLOG(0) << "Unput from hold connection " << sync_id;
+    connection_holds_.erase(it);
+  };
+
+  return {std::move(sync_info), std::move(cleanup)};
+}
+
+void DflyCmd::CancelSyncSession(shared_ptr<SyncInfo> sync_info) {
+  VLOG(0) << "Running CancelSyncSession";
   // Wait for all operations to finish.
   // Set state to CANCELLED so no other operations will run.
   {
     unique_lock lk(sync_info->mu);
     sync_info->state = SyncState::CANCELLED;
+    sync_info->cntx.Cancel();
   }
 
-  // Try to cleanup flows.
-  for (auto& flow : sync_info->flows) {
-    if (flow.conn != nullptr) {
-      VLOG(1) << "Flow connection " << flow.conn->GetName() << " is still alive"
-              << " on sync_id " << sync_id;
+  VLOG(0) << "Running cancellation!!!";
+  shard_set->pool()->AwaitFiberOnAll([sync_info](unsigned index, auto*) {
+    FlowInfo* flow = &sync_info->flows[index];
+    if (flow->cleanup) {
+      flow->cleanup();
     }
-    // TODO: Implement cancellation.
-    if (flow.fb.joinable()) {
-      VLOG(1) << "Force joining fiber on on sync_id " << sync_id;
-      flow.fb.join();
+    if (flow->fb.joinable()) {
+      flow->fb.join();
     }
-  }
+  });
 }
 
 shared_ptr<DflyCmd::SyncInfo> DflyCmd::GetSyncInfo(uint32_t sync_id) {

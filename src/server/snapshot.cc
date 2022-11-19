@@ -34,7 +34,7 @@ SliceSnapshot::SliceSnapshot(DbSlice* slice, RecordChannel* dest) : db_slice_(sl
 SliceSnapshot::~SliceSnapshot() {
 }
 
-void SliceSnapshot::Start(bool stream_journal) {
+void SliceSnapshot::Start(bool stream_journal, const Cancellation& cll) {
   DCHECK(!snapshot_fb_.joinable());
 
   auto on_change = [this](DbIndex db_index, const DbSlice::ChangeReq& req) {
@@ -54,9 +54,11 @@ void SliceSnapshot::Start(bool stream_journal) {
   sfile_.reset(new io::StringFile);
   rdb_serializer_.reset(new RdbSerializer(sfile_.get()));
 
-  snapshot_fb_ = fiber([this, stream_journal] {
-    SerializeEntriesFb();
-    if (!stream_journal) {
+  snapshot_fb_ = fiber([this, stream_journal, &cll] {
+    SerializeEntriesFb(cll);
+    if (cll) {
+      Cancel();
+    } else if (!stream_journal) {
       CloseRecordChannel();
     }
     db_slice_->UnregisterOnChange(snapshot_version_);
@@ -75,6 +77,13 @@ void SliceSnapshot::Stop() {
   CloseRecordChannel();
 }
 
+void SliceSnapshot::Cancel() {
+  CloseRecordChannel();
+  if (journal_cb_id_) {
+    db_slice_->shard_owner()->journal()->Unregister(journal_cb_id_);
+  }
+}
+
 void SliceSnapshot::Join() {
   // Fiber could have already been joined by Stop.
   if (snapshot_fb_.joinable())
@@ -82,12 +91,15 @@ void SliceSnapshot::Join() {
 }
 
 // Serializes all the entries with version less than snapshot_version_.
-void SliceSnapshot::SerializeEntriesFb() {
+void SliceSnapshot::SerializeEntriesFb(const Cancellation& cll) {
   this_fiber::properties<FiberProps>().set_name(
       absl::StrCat("SliceSnapshot", ProactorBase::GetIndex()));
   PrimeTable::Cursor cursor;
 
   for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
+    if (cll)
+      return;
+
     if (!db_array_[db_indx])
       continue;
 
@@ -100,7 +112,14 @@ void SliceSnapshot::SerializeEntriesFb() {
     mu_.unlock();
 
     do {
-      PrimeTable::Cursor next = pt->Traverse(cursor, [this](auto it) { this->SaveCb(move(it)); });
+      if (cll)
+        return;
+
+      PrimeTable::Cursor next = pt->Traverse(cursor, [this, &cll](auto it) {
+        if (cll)
+          return;
+        this->SaveCb(move(it));
+      });
 
       cursor = next;
 
@@ -126,7 +145,8 @@ void SliceSnapshot::SerializeEntriesFb() {
   mu_.lock();
   mu_.unlock();
 
-  CHECK(!rdb_serializer_->SendFullSyncCut());
+  for (unsigned i = 10; i > 1; i--)
+    CHECK(!rdb_serializer_->SendFullSyncCut());
   FlushSfile(true);
 
   VLOG(1) << "Exit SnapshotSerializer (serialized/side_saved/cbcalls): " << serialized_ << "/"

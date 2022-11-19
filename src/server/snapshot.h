@@ -36,7 +36,7 @@ class SliceSnapshot {
   SliceSnapshot(DbSlice* slice, RecordChannel* dest);
   ~SliceSnapshot();
 
-  void Start(bool stream_journal);
+  void Start(bool stream_journal, const Cancellation& cll);
 
   void Stop(); // only needs to be called in journal streaming mode.
 
@@ -59,9 +59,11 @@ class SliceSnapshot {
   }
 
  private:
+  void Cancel();
+
   void CloseRecordChannel();
 
-  void SerializeEntriesFb();
+  void SerializeEntriesFb(const Cancellation& cll);
   
   void SerializeSingleEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
                             RdbSerializer* serializer);

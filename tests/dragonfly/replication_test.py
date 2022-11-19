@@ -2,8 +2,11 @@
 import pytest
 import asyncio
 import aioredis
+import random
+from itertools import count, chain, repeat
 
 from .utility import *
+from . import dfly_args
 
 
 BASE_PORT = 1111
@@ -84,57 +87,76 @@ Test replica crash during full sync on multiple replicas without altering data d
 """
 
 
-# (threads_master, threads_replicas, n entries)
-simple_full_sync_multi_crash_cases = [
-    (5, [1] * 15, 5000),
-    (5, [1] * 20, 5000),
-    (5, [1] * 25, 5000)
+crash_cases = [
+    (4, [4], [], 100000),
+    #(8, [4, 4], [4, 4], 10000)
 ]
 
 
+@dfly_args({"logtostdout": ""})
 @pytest.mark.asyncio
-@pytest.mark.skip(reason="test is currently crashing")
-@pytest.mark.parametrize("t_master, t_replicas, n_keys", simple_full_sync_multi_crash_cases)
-async def test_simple_full_sync_mutli_crash(df_local_factory, t_master, t_replicas, n_keys):
-    def data_gen(): return gen_test_data(n_keys)
-
+@pytest.mark.parametrize("t_master, t_crash_fs, t_crash_ss, n_keys", crash_cases)
+async def test_crash(df_local_factory, t_master, t_crash_fs, t_crash_ss, n_keys):
     master = df_local_factory.create(port=BASE_PORT, proactor_threads=t_master)
     replicas = [
-        df_local_factory.create(port=BASE_PORT+i+1, proactor_threads=t)
-        for i, t in enumerate(t_replicas)
+        (df_local_factory.create(
+            port=BASE_PORT+i+1, proactor_threads=t), crash_fs)
+        for i, (t, crash_fs) in enumerate(
+            chain(
+                zip(t_crash_fs, repeat(True)),
+                zip(t_crash_ss, repeat(False))
+            )
+        )
     ]
 
-    # Start master and fill with test data
+    # Start master
     master.start()
     c_master = aioredis.Redis(port=master.port, single_connection_client=True)
-    await batch_fill_data_async(c_master, data_gen())
 
-    # Start replica tasks in parallel
-    tasks = [
-        asyncio.create_task(run_sfs_crash_replica(
-            replica, master, data_gen), name="replica-"+str(replica.port))
-        for replica in replicas
+    # Start replicas
+    for replica, _ in replicas:
+        replica.start()
+
+    # Start data fill loop
+    async def fill_loop():
+        for seed in count(1):
+            await batch_fill_data_async(c_master, gen_test_data(n_keys, seed=seed))
+
+    fill_task = asyncio.create_task(fill_loop())
+
+    # Run full sync
+    async def full_sync(replica, crash_fs):
+        c_replica = aioredis.Redis(port=replica.port)
+        await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
+        if crash_fs:
+            await asyncio.sleep(random.random()/10)
+            replica.stop(kill=True)
+        else:
+            await wait_available_async(c_replica)
+
+    await asyncio.gather(*(full_sync(*args) for args in replicas))
+
+    # Wait for master to stream a bit more
+    await asyncio.sleep(0.1)
+
+    # Check master survived full sync crashes
+    assert await c_master.ping()
+
+    # Check phase-2 replicas survived
+    c_replicas_ss = [
+        (replica, aioredis.Redis(port=replica.port))
+        for replica, crash_fs in replicas
+        if not crash_fs
     ]
+    for _, c_replica in c_replicas_ss:
+        assert await c_replica.ping()
 
-    for task in tasks:
-        assert await task
+    # Run stable state crashes
+    async def stable_sync(replica, c_replica):
+        replica.stop(kill=True)
 
-    # Check master is ok
-    await batch_check_data_async(c_master, data_gen())
+    await asyncio.gather(*(stable_sync(*args) for args in c_replicas_ss))
 
-    await c_master.connection_pool.disconnect()
-
-
-async def run_sfs_crash_replica(replica, master, data_gen):
-    replica.start()
-    c_replica = aioredis.Redis(
-        port=replica.port, single_connection_client=None)
-
-    await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
-
-    # Kill the replica after a short delay
-    await asyncio.sleep(0.0)
-    replica.stop(kill=True)
-
-    await c_replica.connection_pool.disconnect()
-    return True
+    # Check master survived full sync crashes
+    assert await c_master.ping()
+    fill_task.cancel()
