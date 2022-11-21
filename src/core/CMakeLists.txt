@@ -9,6 +9,7 @@ cxx_link(dash_bench dfly_core)
 
 cxx_test(dfly_core_test dfly_core LABELS DFLY)
 cxx_test(compact_object_test dfly_core LABELS DFLY)
+cxx_test(compact_object_defrag_test dfly_core LABELS DFLY)
 cxx_test(extent_tree_test dfly_core LABELS DFLY)
 cxx_test(external_alloc_test dfly_core LABELS DFLY)
 cxx_test(dash_test dfly_core file DATA testdata/ids.txt LABELS DFLY)

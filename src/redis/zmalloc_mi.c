@@ -3,11 +3,13 @@
 //
 
 #include <assert.h>
-#include <mimalloc-types.h>
 #include <mimalloc.h>
 #include <string.h>
 
 #include "atomicvar.h"
+// we must force this include after mimalloc otherwise it would compile about "error: unknown type
+// name ‘bool’"
+#include "mimalloc-types.h"
 #include "zmalloc.h"
 
 __thread ssize_t zmalloc_used_memory_tl = 0;

@@ -217,7 +217,7 @@ struct TL {
 
 thread_local TL tl;
 
-constexpr bool kUseSmallStrings = true;
+constexpr bool kUseSmallStrings = false;  // for defrag
 
 /// TODO: Ascii encoding becomes slow for large blobs. We should factor it out into a separate
 /// file and implement with SIMD instructions.
