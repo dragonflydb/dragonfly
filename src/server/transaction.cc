@@ -367,8 +367,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
     LOG_FIRST_N(ERROR, 16) << " out of memory";
     local_result_ = OpStatus::OUT_OF_MEMORY;
   } catch (std::exception& e) {
-    VLOG(0) << "TRANSACTION FAILURE " << e.what();
-    //LOG(FATAL) << "Unexpected exception " << e.what();
+    LOG(FATAL) << "Unexpected exception " << e.what();
   }
 
   /*************************************************************************/
@@ -769,8 +768,7 @@ void Transaction::RunQuickie(EngineShard* shard) {
     LOG_FIRST_N(ERROR, 16) << " out of memory";
     local_result_ = OpStatus::OUT_OF_MEMORY;
   } catch (std::exception& e) {
-    VLOG(0) << "TRANSACTION FAILURE " << e.what();
-    //LOG(FATAL) << "Unexpected exception " << e.what();
+    LOG(FATAL) << "Unexpected exception " << e.what();
   }
 
   sd.local_mask &= ~ARMED;

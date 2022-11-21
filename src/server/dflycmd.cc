@@ -341,7 +341,7 @@ void DflyCmd::StopFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
   }
 
   // Reset cleanup and saver
-  flow->cleanup = [](){};
+  flow->cleanup = []() {};
   flow->saver.reset();
 }
 
@@ -376,11 +376,8 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
   }
 
   if ((ec = saver->SaveBody(*cntx, nullptr))) {
-    VLOG(0) << "Save body error";
     return cntx->Error(ec);
   }
-
-  VLOG(1) << "Sending full sync EOF";
 
   ec = flow->conn->socket()->Write(io::Buffer(flow->eof_token));
   if (ec) {
@@ -394,9 +391,14 @@ uint32_t DflyCmd::CreateSyncSession() {
 
   unsigned flow_count = shard_set->size() + 1;
   auto err_handler = [this, sync_id](const GenericError& err) {
-    VLOG(0) << "Running error handler";
-    StopReplication(sync_id);  // Stop replication in case of error
-    return true;               // Cancel context
+    LOG(INFO) << "Running error handler for sync session " << sync_id;
+
+    // Stop replication in case of error.
+    // StopReplication needs to run async to prevent blocking
+    // the error handler.
+    ::boost::fibers::fiber{&DflyCmd::StopReplication, this, sync_id}.detach();
+
+    return true;  // Cancel context
   };
 
   auto sync_info = make_shared<SyncInfo>(flow_count, std::move(err_handler));
@@ -415,70 +417,60 @@ void DflyCmd::OnClose(ConnectionContext* cntx) {
   if (!sync_info)
     return;
 
-  sync_info->mu.lock();
-  if (sync_info->state == SyncState::CANCELLED) {
-    sync_info->mu.unlock();
-    // Wait for cancelletion to finish before releasing connection.
-    sync_info->connection_hold_mu.lock();
-    sync_info->connection_hold_mu.unlock();
-  } else {
-    CancelSyncSession(session_id, sync_info, false);
+  // Because cancellation holds the mutex,
+  // this lock waits for it to finish before releasing the underlying connection
+  lock_guard lk(sync_info->mu);
+  if (sync_info->state != SyncState::CANCELLED) {
+    // Nobody started cancellation yet - lets do it
+    CancelSyncSession(session_id, sync_info);
   }
 }
 
 void DflyCmd::StopReplication(uint32_t sync_id) {
   auto ptr = GetSyncInfo(sync_id);
-  if (ptr)
-    CancelSyncSession(sync_id, ptr, true);
+  if (!ptr)
+    return;
+
+  VLOG(0) << "<<<<<<<<<<<<<<<<<<< STOP IN";
+  if (!ptr->cancel_flag.load()) {
+    lock_guard lk(ptr->mu);
+    CancelSyncSession(sync_id, ptr);
+  }
+  VLOG(0) << ">>>>>>>>>>>>>>>>>>>> STOP OUT";
 }
 
-void DflyCmd::CancelSyncSession(uint32_t sync_id, shared_ptr<SyncInfo> sync_info, bool lock_mutex) {
-  // Update sync_info state, cancel context, set on-hold lock.
-  if (lock_mutex)
-    sync_info->mu.lock();
-
+void DflyCmd::CancelSyncSession(uint32_t sync_id, shared_ptr<SyncInfo> sync_info) {
+  // Update sync_info state, cancel context and cancel flag.
   if (sync_info->state == SyncState::CANCELLED) {
-    sync_info->mu.unlock();
-    VLOG(0) << "Cold cancellation run";
     return;
   }
 
-  VLOG(0) << "Cancelling sync session " << sync_id;
+  LOG(INFO) << "Cancelling sync session " << sync_id;
 
   sync_info->state = SyncState::CANCELLED;
+  sync_info->cancel_flag.store(true);
   sync_info->cntx.Cancel();
-  sync_info->connection_hold_mu.lock();
 
-  sync_info->mu.unlock();
-
-  VLOG(0) << "Running cleanup " << sync_id;
   // Run cleanup and await tasks.
-  shard_set->pool()->AwaitFiberOnAll([sync_info](unsigned index, auto*) {
+  shard_set->pool()->AwaitFiberOnAll([sync_id, sync_info](unsigned index, auto*) {
     FlowInfo* flow = &sync_info->flows[index];
-    try {
-      if (flow->cleanup) {
-        VLOG(0) << "About to run cleanup";
-        flow->cleanup();
-      }
-    } catch (const exception& e) {
-      VLOG(0) << "================WTF=========";
-    }
+    if (flow->cleanup)
+      flow->cleanup();
   });
 
-  VLOG(0) << "Joining tasks " << sync_id;
   for (FlowInfo& flow : sync_info->flows) {
     if (flow.task_fb.joinable()) {
       flow.task_fb.join();
     }
   }
 
-  VLOG(0) << "Finishing cleanup " << sync_id;
   // Unlock on-hold and remove from map.
-  sync_info->connection_hold_mu.unlock();
   {
     lock_guard lk(mu_);
     sync_infos_.erase(sync_id);
   }
+
+  LOG(INFO) << "Evicted sync session " << sync_id;
 }
 
 shared_ptr<DflyCmd::SyncInfo> DflyCmd::GetSyncInfo(uint32_t sync_id) {

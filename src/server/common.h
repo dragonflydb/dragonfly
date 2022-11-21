@@ -198,6 +198,8 @@ using AggregateStatus = AggregateValue<facade::OpStatus>;
 static_assert(facade::OpStatus::OK == facade::OpStatus{},
               "Default intitialization should be OK value");
 
+// Re-usable component for signaling cancellation.
+// Simple wrapper around atomic flag.
 struct Cancellation {
   void Cancel() {
     flag_.store(true);
@@ -211,6 +213,7 @@ struct Cancellation {
   std::atomic_bool flag_;
 };
 
+// Error wrapper, that stores error_code and optional string message.
 struct GenericError {
   GenericError() = default;
   GenericError(std::error_code ec) : ec_{ec}, details_{} {
@@ -241,6 +244,7 @@ struct GenericError {
 
 using AggregateGenericError = AggregateValue<GenericError>;
 
+// Contest combines Cancellation and error submission in one class.
 struct Context : public Cancellation {
   using ErrHandler = std::function<bool(const GenericError&)>;
 

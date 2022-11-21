@@ -257,8 +257,12 @@ void EngineShardSet::RunBriefInParallel(U&& func, P&& pred) const {
 
     bc.Add(1);
     util::ProactorBase* dest = pp_->at(i);
-    dest->DispatchBrief([f = std::forward<U>(func), bc]() mutable {
-      f(EngineShard::tlocal());
+    dest->DispatchBrief([i, f = func, bc]() mutable {
+      if constexpr(std::is_invocable_v<U, EngineShard*>) {
+        f(EngineShard::tlocal());
+      } else {
+        f(i, EngineShard::tlocal());
+      }
       bc.Dec();
     });
   }
@@ -272,8 +276,12 @@ template <typename U> void EngineShardSet::RunBlockingInParallel(U&& func) {
     util::ProactorBase* dest = pp_->at(i);
 
     // the "Dispatch" call spawns a fiber underneath.
-    dest->Dispatch([func, bc]() mutable {
-      func(EngineShard::tlocal());
+    dest->Dispatch([i, f = func, bc]() mutable {
+      if constexpr(std::is_invocable_v<U, EngineShard*>) {
+        f(EngineShard::tlocal());
+      } else {
+        f(i, EngineShard::tlocal());
+      }
       bc.Dec();
     });
   }

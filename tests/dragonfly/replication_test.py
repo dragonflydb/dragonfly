@@ -15,6 +15,10 @@ BASE_PORT = 1111
 Test full replication pipeline. Test full sync with streaming changes and stable state streaming.
 """
 
+# 1. Number of master threads
+# 2. Number of threads for each replica
+# 3. Number of keys stored and sent in full sync
+# 4. Number of keys overwritten during full sync
 replication_cases = [
     (8, [8], 20000, 5000),
     (8, [8], 10000, 10000),
@@ -86,12 +90,15 @@ async def test_replication_all(df_local_factory, t_master, t_replicas, n_keys, n
 Test replica crash during full sync on multiple replicas without altering data during replication.
 """
 
-
+# 1. Number of master threads
+# 2. Number of threads for each replica that crashes during full sync
+# 2. NUmber of threads for each replica that crashes during stable sync
+# 3. Number of distinct keys that are constantly streamed
 crash_cases = [
     # balanced
     (8, [4, 4], [4, 4], 10000),
     (8, [2] * 6, [2] * 6, 10000),
-    # full sync heavy 
+    # full sync heavy
     (8, [4] * 6, [], 10000),
     (8, [2] * 12, [], 10000),
     # stable state heavy

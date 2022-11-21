@@ -78,7 +78,6 @@ void SliceSnapshot::Stop() {
 }
 
 void SliceSnapshot::Cancel() {
-  VLOG(0) << "Running cancel "  << closed_chan_.load();
   CloseRecordChannel(true);
   if (journal_cb_id_) {
     db_slice_->shard_owner()->journal()->Unregister(journal_cb_id_);
@@ -100,7 +99,6 @@ void SliceSnapshot::SerializeEntriesFb(const Cancellation& cll) {
 
   for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
     if (cll) {
-      VLOG(0) << "Snapshot cancelled @ 1";
       return;
     }
 
@@ -117,15 +115,10 @@ void SliceSnapshot::SerializeEntriesFb(const Cancellation& cll) {
 
     do {
       if (cll) {
-        VLOG(0) << "Snapshot cancelled @ 2";
         return;
       }
 
       PrimeTable::Cursor next = pt->Traverse(cursor, [this, &cll](auto it) {
-        if (cll) {
-          VLOG(0) << "Snapshot cancelled @ 3";
-          return;
-        }
         this->SaveCb(move(it));
       });
 
@@ -157,7 +150,7 @@ void SliceSnapshot::SerializeEntriesFb(const Cancellation& cll) {
     CHECK(!rdb_serializer_->SendFullSyncCut());
   FlushSfile(true);
 
-  VLOG(0) << "Exit SnapshotSerializer (serialized/side_saved/cbcalls): " << serialized_ << "/"
+  VLOG(1) << "Exit SnapshotSerializer (serialized/side_saved/cbcalls): " << serialized_ << "/"
           << side_saved_ << "/" << savecb_calls_;
 }
 
@@ -171,7 +164,6 @@ void SliceSnapshot::CloseRecordChannel(bool force) {
 
   bool actual = false;
   if (closed_chan_.compare_exchange_strong(actual, true)) {
-    VLOG(0) << "Closed channel";
     dest_->StartClosing();
   }
 }

@@ -40,19 +40,13 @@ class Journal;
 // sync_id. Each per-thread connection is called a Flow and is represented by the FlowInfo
 // instace, accessible by its index.
 //
-// An important aspect is synchronization and efficient locking. Three levels of locking are used:
+// An important aspect is synchronization and efficient locking. Two levels of locking are used:
 //  1. Global locking.
 //    Member  mutex `mu_` is used for synchronizing operations connected with internal data
 //    structures.
 //  2. Per-replica locking
 //    SyncInfo contains a separate mutex that is used for replica-only routines. It is held during
-//    state transitions (start full sync, start stable state sync) and mebmer access.
-//  3. Connection per-replica locking.
-//    Once we aborted the replication process, we need to keep Dragonfly's connection objects alive
-//    during the cleanup phase by blocking in the OnClose call (because internal structures like
-//    RdbSaver still keep references to them). This is done by separate connection_hold locks inside
-//    SyncInfo
-//
+//    state transitions (start full sync, start stable state sync), cancellation and mebmer access.
 //
 // Upon first connection from the replica, a new SyncInfo is created.
 // It tranistions through the following phases:
@@ -69,17 +63,15 @@ class Journal;
 //    This can happed due to an error at any phase or through a normal abort. For properly releasing
 //    resources we need to run a multi-step cancellation procedure:
 //    1. Transition state
-//      We obtain the SyncInfo lock, transition into the cancelled state, cancel the context and set
-//      the on-hold lock. Immediately after we release the SyncInfo lock to allow other operations
-//      to fail-fast without awaiting full cancellation.
+//      We obtain the SyncInfo lock, transition into the cancelled state and cancel the context.
 //    2. Joining tasks
 //      Running tasks will stop on receiving the cancellation flag. Each FlowInfo has also an
 //      optional cleanup handler, that is invoked after cancelling. This should allow recovering
 //      from any state. The flows task will be awaited and joined if present.
-//    3. Opening connection locks
+//    3. Unlocking the mutex
 //      Now that all tasks have finished and all cleanup handlers have run, we can safely release
-//      the on-hold connection lock, so that internal resources will be released by dragonfly. Then
-//      the SyncInfo is removed from the global map.
+//      the per-replica mutex, so that all OnClose handlers will unblock and  internal resources
+//      will be released by dragonfly. Then the SyncInfo is removed from the global map.
 //
 //
 class DflyCmd {
@@ -91,7 +83,7 @@ class DflyCmd {
   struct FlowInfo {
     FlowInfo() = default;
     FlowInfo(facade::Connection* conn, const std::string& eof_token)
-        : conn{conn}, eof_token{eof_token}, cleanup{[]() {}} {};
+        : conn{conn}, eof_token{eof_token} {};
 
     facade::Connection* conn;
 
@@ -105,17 +97,17 @@ class DflyCmd {
   // Stores information related to a single replica.
   struct SyncInfo {
     SyncInfo(unsigned flow_count, Context::ErrHandler err_handler)
-        : state{SyncState::PREPARATION}, cntx{std::move(err_handler)}, flows{flow_count} {
+        : state{SyncState::PREPARATION}, cntx{std::move(err_handler)}, flows{flow_count},
+          cancel_flag{false} {
     }
 
     SyncState state;
     Context cntx;
 
     std::vector<FlowInfo> flows;
-
     // See header top for locking levels.
     ::boost::fibers::mutex mu;
-    ::boost::fibers::mutex connection_hold_mu;
+    std::atomic_bool cancel_flag;
   };
 
  public:
@@ -171,10 +163,9 @@ class DflyCmd {
   // Main entrypoint for stopping replication.
   void StopReplication(uint32_t sync_id);
 
-  // Transition into cancelled state, run cleanup. If lock_mutex is true, lock sync_info's mutex,
-  // otherwise it should already be locked.
-  void CancelSyncSession(uint32_t sync_id, std::shared_ptr<SyncInfo> sync_info,
-                         bool lock_mutex = true);
+  // Transition into cancelled state, run cleanup.
+  // Per-replica mutex should be already locked.
+  void CancelSyncSession(uint32_t sync_id, std::shared_ptr<SyncInfo> sync_info);
 
   // Get SyncInfo by sync_id.
   std::shared_ptr<SyncInfo> GetSyncInfo(uint32_t sync_id);
