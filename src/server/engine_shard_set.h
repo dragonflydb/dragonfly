@@ -23,7 +23,6 @@ extern "C" {
 #include "util/proactor_pool.h"
 #include "util/sliding_counter.h"
 
-
 namespace dfly {
 
 namespace journal {
@@ -98,7 +97,6 @@ class EngineShard {
     return &shard_lock_;
   }
 
-
   // TODO: Awkward interface. I should solve it somehow.
   void ShutdownMulti(Transaction* multi);
 
@@ -113,7 +111,9 @@ class EngineShard {
   // Returns used memory for this shard.
   size_t UsedMemory() const;
 
-  TieredStorage* tiered_storage() { return tiered_storage_.get(); }
+  TieredStorage* tiered_storage() {
+    return tiered_storage_.get();
+  }
 
   // Adds blocked transaction to the watch-list.
   void AddBlocked(Transaction* trans);
@@ -125,13 +125,8 @@ class EngineShard {
   // for everyone to use for string transformations during atomic cpu sequences.
   sds tmp_str1;
 
-
   // Moving average counters.
-  enum MovingCnt {
-    TTL_TRAVERSE,
-    TTL_DELETE,
-    COUNTER_TOTAL
-  };
+  enum MovingCnt { TTL_TRAVERSE, TTL_DELETE, COUNTER_TOTAL };
 
   // Returns moving sum over the last 6 seconds.
   uint32_t GetMovingSum6(MovingCnt type) const {
@@ -157,7 +152,6 @@ class EngineShard {
   void Heartbeat();
 
   void CacheStats();
-
 
   ::util::fibers_ext::FiberQueue queue_;
   ::boost::fibers::fiber fiber_q_;
@@ -257,8 +251,8 @@ void EngineShardSet::RunBriefInParallel(U&& func, P&& pred) const {
 
     bc.Add(1);
     util::ProactorBase* dest = pp_->at(i);
-    dest->DispatchBrief([f = std::forward<U>(func), bc]() mutable {
-      f(EngineShard::tlocal());
+    dest->DispatchBrief([&func, bc]() mutable {
+      func(EngineShard::tlocal());
       bc.Dec();
     });
   }
@@ -272,7 +266,7 @@ template <typename U> void EngineShardSet::RunBlockingInParallel(U&& func) {
     util::ProactorBase* dest = pp_->at(i);
 
     // the "Dispatch" call spawns a fiber underneath.
-    dest->Dispatch([func, bc]() mutable {
+    dest->Dispatch([&func, bc]() mutable {
       func(EngineShard::tlocal());
       bc.Dec();
     });
@@ -285,7 +279,6 @@ inline ShardId Shard(std::string_view v, ShardId shard_num) {
   return hash % shard_num;
 }
 
-
 // absl::GetCurrentTimeNanos is twice faster than clock_gettime(CLOCK_REALTIME) on my laptop
 // and 4 times faster than on a VM. it takes 5-10ns to do a call.
 
@@ -294,7 +287,6 @@ extern uint64_t TEST_current_time_ms;
 inline uint64_t GetCurrentTimeMs() {
   return TEST_current_time_ms ? TEST_current_time_ms : absl::GetCurrentTimeNanos() / 1000000;
 }
-
 
 extern EngineShardSet* shard_set;
 
