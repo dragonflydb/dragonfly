@@ -21,7 +21,7 @@ add_library(dragonfly_lib  channel_slice.cc command_registry.cc
             zset_family.cc version.cc bitops_family.cc container_utils.cc)
 
 cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib strings_lib html_lib
-         absl::random_random TRDP::jsoncons)
+         absl::random_random TRDP::jsoncons zstd)
 
 add_library(dfly_test_lib test_utils.cc)
 cxx_link(dfly_test_lib dragonfly_lib epoll_fiber_lib facade_test gtest_main_ext)

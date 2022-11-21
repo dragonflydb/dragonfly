@@ -7,6 +7,7 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
+#include <zstd.h>
 
 #include "core/string_set.h"
 
@@ -21,12 +22,19 @@ extern "C" {
 #include "redis/zset.h"
 }
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/rdb_extensions.h"
 #include "server/snapshot.h"
 #include "util/fibers/simple_channel.h"
+
+ABSL_FLAG(int, compression_mode, 2,
+          "set 0 for no compression,"
+          "set 1 for single entry lzf compression,"
+          "set 2 for multi entry zstd compression on df snapshot and single entry on rdb snapshot");
+ABSL_FLAG(int, zstd_compression_level, 2, "Compression level to use on zstd compression");
 
 namespace dfly {
 
@@ -158,7 +166,8 @@ uint8_t RdbObjectType(unsigned type, unsigned encoding) {
   return 0; /* avoid warning */
 }
 
-RdbSerializer::RdbSerializer(io::Sink* s) : sink_(s), mem_buf_{4_KB}, tmp_buf_(nullptr) {
+RdbSerializer::RdbSerializer(io::Sink* s, bool do_compression)
+    : sink_(s), mem_buf_{4_KB}, tmp_buf_(nullptr), do_entry_level_compression_(do_compression) {
 }
 
 RdbSerializer::~RdbSerializer() {
@@ -639,7 +648,7 @@ error_code RdbSerializer::SaveString(string_view val) {
   /* Try LZF compression - under 20 bytes it's unable to compress even
    * aaaaaaaaaaaaaaaaaa so skip it */
   size_t len = val.size();
-  if (server.rdb_compression && len > 20) {
+  if (do_entry_level_compression_ && len > 20) {
     size_t comprlen, outlen = len;
     tmp_buf_.resize(outlen + 1);
 
@@ -737,7 +746,7 @@ class RdbSaver::Impl {
  public:
   // We pass K=sz to say how many producers are pushing data in order to maintain
   // correct closing semantics - channel is closing when K producers marked it as closed.
-  Impl(bool align_writes, unsigned producers_len, io::Sink* sink);
+  Impl(bool align_writes, unsigned producers_len, CompressionMode compression_mode, io::Sink* sink);
 
   void StartSnapshotting(bool stream_journal, const Cancellation* cll, EngineShard* shard);
 
@@ -775,13 +784,20 @@ class RdbSaver::Impl {
   RdbSerializer meta_serializer_;
   SliceSnapshot::RecordChannel channel_;
   std::optional<AlignedBuffer> aligned_buf_;
+  CompressionMode
+      compression_mode_;  // Single entry compression is compatible with redis rdb snapshot
+                          // Multi entry compression is available only on df snapshot, this will
+                          // make snapshot size smaller and opreation faster.
 };
 
 // We pass K=sz to say how many producers are pushing data in order to maintain
 // correct closing semantics - channel is closing when K producers marked it as closed.
-RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, io::Sink* sink)
+RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, CompressionMode compression_mode,
+                     io::Sink* sink)
     : sink_(sink), shard_snapshots_(producers_len),
-      meta_serializer_(sink), channel_{128, producers_len} {
+      meta_serializer_(sink, compression_mode != CompressionMode::NONE), channel_{128,
+                                                                                  producers_len},
+      compression_mode_(compression_mode) {
   if (align_writes) {
     aligned_buf_.emplace(kBufLen, sink);
     meta_serializer_.set_sink(&aligned_buf_.value());
@@ -863,7 +879,7 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
 void RdbSaver::Impl::StartSnapshotting(bool stream_journal, const Cancellation* cll,
                                        EngineShard* shard) {
   auto& s = GetSnapshot(shard);
-  s.reset(new SliceSnapshot(&shard->db_slice(), &channel_));
+  s.reset(new SliceSnapshot(&shard->db_slice(), &channel_, compression_mode_));
 
   s->Start(stream_journal, cll);
 }
@@ -906,21 +922,38 @@ unique_ptr<SliceSnapshot>& RdbSaver::Impl::GetSnapshot(EngineShard* shard) {
 
 RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes) {
   CHECK_NOTNULL(sink);
-
+  int compression_mode = absl::GetFlag(FLAGS_compression_mode);
   int producer_count = 0;
   switch (save_mode) {
     case SaveMode::SUMMARY:
       producer_count = 0;
+      if (compression_mode == 1 || compression_mode == 2) {
+        compression_mode_ = CompressionMode::SINGLE_ENTRY;
+      } else {
+        compression_mode_ = CompressionMode::NONE;
+      }
       break;
     case SaveMode::SINGLE_SHARD:
       producer_count = 1;
+      if (compression_mode == 2) {
+        compression_mode_ = CompressionMode::MULTY_ENTRY;
+      } else if (compression_mode == 1) {
+        compression_mode_ = CompressionMode::SINGLE_ENTRY;
+      } else {
+        compression_mode_ = CompressionMode::NONE;
+      }
       break;
     case SaveMode::RDB:
       producer_count = shard_set->size();
+      if (compression_mode == 1 || compression_mode == 2) {
+        compression_mode_ = CompressionMode::SINGLE_ENTRY;
+      } else {
+        compression_mode_ = CompressionMode::NONE;
+      }
       break;
   }
 
-  impl_.reset(new Impl(align_writes, producer_count, sink));
+  impl_.reset(new Impl(align_writes, producer_count, compression_mode_, sink));
   save_mode_ = save_mode;
 }
 
@@ -1026,6 +1059,77 @@ error_code RdbSaver::SaveAuxFieldStrInt(string_view key, int64_t val) {
 
 void RdbSaver::Cancel() {
   impl_->Cancel();
+}
+
+class ZstdCompressSerializer::ZstdCompressImpl {
+ public:
+  ZstdCompressImpl() {
+    cctx_ = ZSTD_createCCtx();
+    compression_level_ = absl::GetFlag(FLAGS_zstd_compression_level);
+  }
+  ~ZstdCompressImpl() {
+    ZSTD_freeCCtx(cctx_);
+
+    VLOG(1) << "zstd compressed size: " << compressed_size_total_;
+    VLOG(1) << "zstd uncompressed size: " << uncompressed_size_total_;
+  }
+
+  std::string_view Compress(std::string_view str);
+
+ private:
+  ZSTD_CCtx* cctx_;
+  int compression_level_ = 1;
+  base::PODArray<uint8_t> compr_buf_;
+  uint32_t compressed_size_total_ = 0;
+  uint32_t uncompressed_size_total_ = 0;
+};
+
+std::string_view ZstdCompressSerializer::ZstdCompressImpl::Compress(string_view str) {
+  size_t buf_size = ZSTD_compressBound(str.size());
+  if (compr_buf_.size() < buf_size) {
+    compr_buf_.reserve(buf_size);
+  }
+  size_t compressed_size = ZSTD_compressCCtx(cctx_, compr_buf_.data(), compr_buf_.capacity(),
+                                             str.data(), str.size(), compression_level_);
+
+  compressed_size_total_ += compressed_size;
+  uncompressed_size_total_ += str.size();
+  return string_view(reinterpret_cast<const char*>(compr_buf_.data()), compressed_size);
+}
+
+ZstdCompressSerializer::ZstdCompressSerializer() {
+  impl_.reset(new ZstdCompressImpl());
+}
+
+std::pair<bool, std::string> ZstdCompressSerializer::Compress(std::string_view str) {
+  if (str.size() < kMinStrSizeToCompress) {
+    ++small_str_count_;
+    return std::make_pair(false, "");
+  }
+
+  // Compress the string
+  string_view compressed_res = impl_->Compress(str);
+  if (compressed_res.size() > str.size() * kMinCompressionReductionPrecentage) {
+    ++compression_no_effective_;
+    return std::make_pair(false, "");
+  }
+
+  string serialized_compressed_blob;
+  // First write opcode for compressed string
+  serialized_compressed_blob.push_back(RDB_OPCODE_COMPRESSED_BLOB_START);
+  // Get compressed string len encoded
+  uint8_t buf[9];
+  unsigned enclen = SerializeLen(compressed_res.size(), buf);
+
+  // Write encoded compressed string len and than the compressed string
+  serialized_compressed_blob.append(reinterpret_cast<const char*>(buf), enclen);
+  serialized_compressed_blob.append(compressed_res);
+  return std::make_pair(true, std::move(serialized_compressed_blob));
+}
+
+ZstdCompressSerializer::~ZstdCompressSerializer() {
+  VLOG(1) << "zstd compression not effective: " << compression_no_effective_;
+  VLOG(1) << "small string none compression applied: " << small_str_count_;
 }
 
 }  // namespace dfly
