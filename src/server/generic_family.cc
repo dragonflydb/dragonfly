@@ -1219,7 +1219,7 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
   cursor = ScanGeneric(cursor, scan_op, &keys, cntx);
 
   (*cntx)->StartArray(2);
-  (*cntx)->SendSimpleString(absl::StrCat(cursor));
+  (*cntx)->SendBulkString(absl::StrCat(cursor));
   (*cntx)->StartArray(keys.size());
   for (const auto& k : keys) {
     (*cntx)->SendBulkString(k);
