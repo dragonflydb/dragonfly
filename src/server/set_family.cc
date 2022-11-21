@@ -1445,7 +1445,7 @@ void SScan(CmdArgList args, ConnectionContext* cntx) {
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
     (*cntx)->StartArray(2);
-    (*cntx)->SendSimpleString(absl::StrCat(cursor));
+    (*cntx)->SendBulkString(absl::StrCat(cursor));
     (*cntx)->StartArray(result->size());
     for (const auto& k : *result) {
       (*cntx)->SendBulkString(k);
