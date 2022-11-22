@@ -85,6 +85,9 @@ class DflyCmd {
     FlowInfo(facade::Connection* conn, const std::string& eof_token)
         : conn{conn}, eof_token{eof_token} {};
 
+    // Try closing socket for cleanup.
+    void TryCloseSocket();
+
     facade::Connection* conn;
 
     std::unique_ptr<RdbSaver> saver;  // Saver used by the full sync phase.

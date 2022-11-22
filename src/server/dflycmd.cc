@@ -317,7 +317,10 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
   SaveMode save_mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
   flow->saver.reset(new RdbSaver(flow->conn->socket(), save_mode, false));
 
-  flow->cleanup = [saver = flow->saver.get()]() { saver->Cancel(); };
+  flow->cleanup = [flow]() {
+    flow->saver->Cancel();
+    flow->TryCloseSocket();
+  };
 
   // Shard can be null for io thread.
   if (shard != nullptr) {
@@ -347,18 +350,20 @@ void DflyCmd::StopFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
 
 OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, EngineShard* shard) {
   // Register journal listener and cleanup.
+  uint32_t cb_id = 0;
   if (shard != nullptr) {
-    uint32_t cb_id = sf_->journal()->RegisterOnChange([flow](const journal::Entry& je) {
+    cb_id = sf_->journal()->RegisterOnChange([flow](const journal::Entry& je) {
       // TODO: Serialize event.
       ReqSerializer serializer{flow->conn->socket()};
       serializer.SendCommand(absl::StrCat("SET ", je.key, " ", je.pval_ptr->ToString()));
     });
-
-    flow->cleanup = [flow, this, cb_id]() {
-      VLOG(1) << "Unregister flow " << flow << " " << cb_id;
-      sf_->journal()->Unregister(cb_id);
-    };
   }
+
+  flow->cleanup = [flow, this, cb_id]() {
+    if (cb_id)
+      sf_->journal()->Unregister(cb_id);
+    flow->TryCloseSocket();
+  };
 
   return OpStatus::OK;
 }
@@ -528,6 +533,13 @@ bool DflyCmd::CheckReplicaStateOrReply(const SyncInfo& sync_info, SyncState expe
 
 void DflyCmd::BreakOnShutdown() {
   VLOG(1) << "BreakOnShutdown";
+}
+
+void DflyCmd::FlowInfo::TryCloseSocket() {
+  // Close socket for clean disconnect.
+  if (conn->socket()->IsOpen()) {
+    conn->socket()->Shutdown(SHUT_RDWR);
+  }
 }
 
 }  // namespace dfly
