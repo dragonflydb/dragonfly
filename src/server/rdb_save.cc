@@ -739,11 +739,11 @@ class RdbSaver::Impl {
   // correct closing semantics - channel is closing when K producers marked it as closed.
   Impl(bool align_writes, unsigned producers_len, io::Sink* sink);
 
-  void StartSnapshotting(bool stream_journal, const Cancellation& cll, EngineShard* shard);
+  void StartSnapshotting(bool stream_journal, const Cancellation* cll, EngineShard* shard);
 
   void StopSnapshotting(EngineShard* shard);
 
-  error_code ConsumeChannel(const Cancellation& cll);
+  error_code ConsumeChannel(const Cancellation* cll);
 
   error_code Flush() {
     if (aligned_buf_)
@@ -799,7 +799,7 @@ error_code RdbSaver::Impl::SaveAuxFieldStrStr(string_view key, string_view val) 
   return error_code{};
 }
 
-error_code RdbSaver::Impl::ConsumeChannel(const Cancellation& cll) {
+error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
   error_code io_error;
 
   uint8_t buf[16];
@@ -814,11 +814,11 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation& cll) {
 
   auto& channel = channel_;
   while (channel.Pop(record)) {
-    if (io_error || cll)
+    if (io_error || cll->IsCancelled())
       continue;
 
     do {
-      if (cll)
+      if (cll->IsCancelled())
         continue;
 
       if (record.db_index != last_db_index) {
@@ -860,7 +860,7 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation& cll) {
   return io_error;
 }
 
-void RdbSaver::Impl::StartSnapshotting(bool stream_journal, const Cancellation& cll,
+void RdbSaver::Impl::StartSnapshotting(bool stream_journal, const Cancellation* cll,
                                        EngineShard* shard) {
   auto& s = GetSnapshot(shard);
   s.reset(new SliceSnapshot(&shard->db_slice(), &channel_));
@@ -925,7 +925,7 @@ RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes) {
 RdbSaver::~RdbSaver() {
 }
 
-void RdbSaver::StartSnapshotInShard(bool stream_journal, const Cancellation& cll,
+void RdbSaver::StartSnapshotInShard(bool stream_journal, const Cancellation* cll,
                                     EngineShard* shard) {
   impl_->StartSnapshotting(stream_journal, cll, shard);
 }
@@ -945,7 +945,7 @@ error_code RdbSaver::SaveHeader(const StringVec& lua_scripts) {
   return error_code{};
 }
 
-error_code RdbSaver::SaveBody(const Cancellation& cll, RdbTypeFreqMap* freq_map) {
+error_code RdbSaver::SaveBody(const Cancellation* cll, RdbTypeFreqMap* freq_map) {
   RETURN_ON_ERR(impl_->serializer()->FlushMem());
 
   if (save_mode_ == SaveMode::SUMMARY) {

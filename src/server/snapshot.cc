@@ -34,7 +34,7 @@ SliceSnapshot::SliceSnapshot(DbSlice* slice, RecordChannel* dest) : db_slice_(sl
 SliceSnapshot::~SliceSnapshot() {
 }
 
-void SliceSnapshot::Start(bool stream_journal, const Cancellation& cll) {
+void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
   DCHECK(!snapshot_fb_.joinable());
 
   auto on_change = [this](DbIndex db_index, const DbSlice::ChangeReq& req) {
@@ -54,9 +54,9 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation& cll) {
   sfile_.reset(new io::StringFile);
   rdb_serializer_.reset(new RdbSerializer(sfile_.get()));
 
-  snapshot_fb_ = fiber([this, stream_journal, &cll] {
+  snapshot_fb_ = fiber([this, stream_journal, cll] {
     SerializeEntriesFb(cll);
-    if (cll) {
+    if (cll->IsCancelled()) {
       Cancel();
     } else if (!stream_journal) {
       CloseRecordChannel();
@@ -92,15 +92,14 @@ void SliceSnapshot::Join() {
 }
 
 // Serializes all the entries with version less than snapshot_version_.
-void SliceSnapshot::SerializeEntriesFb(const Cancellation& cll) {
+void SliceSnapshot::SerializeEntriesFb(const Cancellation* cll) {
   this_fiber::properties<FiberProps>().set_name(
       absl::StrCat("SliceSnapshot", ProactorBase::GetIndex()));
   PrimeTable::Cursor cursor;
 
   for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
-    if (cll) {
+    if (cll->IsCancelled())
       return;
-    }
 
     if (!db_array_[db_indx])
       continue;
@@ -114,12 +113,10 @@ void SliceSnapshot::SerializeEntriesFb(const Cancellation& cll) {
     mu_.unlock();
 
     do {
-      if (cll) {
+      if (cll->IsCancelled())
         return;
-      }
 
-      PrimeTable::Cursor next =
-          pt->Traverse(cursor, [this, &cll](auto it) { this->SaveCb(move(it)); });
+      PrimeTable::Cursor next = pt->Traverse(cursor, [this](auto it) { this->SaveCb(move(it)); });
 
       cursor = next;
 

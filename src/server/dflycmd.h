@@ -36,7 +36,7 @@ class Journal;
 // This is why its important to understand replica lifecycle management before making
 // any crucial changes.
 //
-// A SyncInfo instance is responsible for managing a replica's state and is accessible by its
+// A ReplicaInfo instance is responsible for managing a replica's state and is accessible by its
 // sync_id. Each per-thread connection is called a Flow and is represented by the FlowInfo
 // instance, accessible by its index.
 //
@@ -45,10 +45,11 @@ class Journal;
 //    Member  mutex `mu_` is used for synchronizing operations connected with internal data
 //    structures.
 //  2. Per-replica locking
-//    SyncInfo contains a separate mutex that is used for replica-only routines. It is held during
-//    state transitions (start full sync, start stable state sync), cancellation and member access.
+//    ReplicaInfo contains a separate mutex that is used for replica-only routines. It is held
+//    during state transitions (start full sync, start stable state sync), cancellation and member
+//    access.
 //
-// Upon first connection from the replica, a new SyncInfo is created.
+// Upon first connection from the replica, a new ReplicaInfo is created.
 // It tranistions through the following phases:
 //  1. Preparation
 //    During this start phase the "flows" are set up - one connection for every master thread. Those
@@ -63,7 +64,7 @@ class Journal;
 //    This can happed due to an error at any phase or through a normal abort. For properly releasing
 //    resources we need to run a multi-step cancellation procedure:
 //    1. Transition state
-//      We obtain the SyncInfo lock, transition into the cancelled state and cancel the context.
+//      We obtain the ReplicaInfo lock, transition into the cancelled state and cancel the context.
 //    2. Joining tasks
 //      Running tasks will stop on receiving the cancellation flag. Each FlowInfo has also an
 //      optional cleanup handler, that is invoked after cancelling. This should allow recovering
@@ -71,7 +72,7 @@ class Journal;
 //    3. Unlocking the mutex
 //      Now that all tasks have finished and all cleanup handlers have run, we can safely release
 //      the per-replica mutex, so that all OnClose handlers will unblock and  internal resources
-//      will be released by dragonfly. Then the SyncInfo is removed from the global map.
+//      will be released by dragonfly. Then the ReplicaInfo is removed from the global map.
 //
 //
 class DflyCmd {
@@ -85,21 +86,21 @@ class DflyCmd {
     FlowInfo(facade::Connection* conn, const std::string& eof_token)
         : conn{conn}, eof_token{eof_token} {};
 
-    // Try closing socket for cleanup.
-    void TryCloseSocket();
+    // Shutdown associated socket if its still open.
+    void TryShutdownSocket();
 
     facade::Connection* conn;
 
-    std::unique_ptr<RdbSaver> saver;  // Saver used by the full sync phase.
+    ::boost::fibers::fiber full_sync_fb;  // Full sync fiber.
+    std::unique_ptr<RdbSaver> saver;      // Saver used by the full sync phase.
     std::string eof_token;
 
-    std::function<void()> cleanup;   // Optional cleanup for cancellation.
-    ::boost::fibers::fiber task_fb;  // Current running task.
+    std::function<void()> cleanup;  // Optional cleanup for cancellation.
   };
 
   // Stores information related to a single replica.
-  struct SyncInfo {
-    SyncInfo(unsigned flow_count, Context::ErrHandler err_handler)
+  struct ReplicaInfo {
+    ReplicaInfo(unsigned flow_count, Context::ErrHandler err_handler)
         : state{SyncState::PREPARATION}, cntx{std::move(err_handler)}, flows{flow_count} {
     }
 
@@ -164,16 +165,17 @@ class DflyCmd {
   void StopReplication(uint32_t sync_id);
 
   // Transition into cancelled state, run cleanup.
-  void CancelSyncSession(uint32_t sync_id, std::shared_ptr<SyncInfo> sync_info);
+  void CancelReplication(uint32_t sync_id, std::shared_ptr<ReplicaInfo> replica_info_ptr);
 
-  // Get SyncInfo by sync_id.
-  std::shared_ptr<SyncInfo> GetSyncInfo(uint32_t sync_id);
+  // Get ReplicaInfo by sync_id.
+  std::shared_ptr<ReplicaInfo> GetReplicaInfo(uint32_t sync_id);
 
   // Find sync info by id or send error reply.
-  std::pair<uint32_t, std::shared_ptr<SyncInfo>> GetSyncInfoOrReply(std::string_view id,
-                                                                    facade::RedisReplyBuilder* rb);
+  std::pair<uint32_t, std::shared_ptr<ReplicaInfo>> GetReplicaInfoOrReply(
+      std::string_view id, facade::RedisReplyBuilder* rb);
 
-  bool CheckReplicaStateOrReply(const SyncInfo& si, SyncState expected,
+  // Check replica is in expected state and flows are set-up correctly.
+  bool CheckReplicaStateOrReply(const ReplicaInfo& ri, SyncState expected,
                                 facade::RedisReplyBuilder* rb);
 
  private:
@@ -183,7 +185,7 @@ class DflyCmd {
   TxId journal_txid_ = 0;
 
   uint32_t next_sync_id_ = 1;
-  absl::btree_map<uint32_t, std::shared_ptr<SyncInfo>> sync_infos_;
+  absl::btree_map<uint32_t, std::shared_ptr<ReplicaInfo>> replica_infos_;
 
   ::boost::fibers::mutex mu_;  // Guard global operations. See header top for locking levels.
 };

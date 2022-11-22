@@ -202,11 +202,11 @@ static_assert(facade::OpStatus::OK == facade::OpStatus{},
 // Simple wrapper around atomic flag.
 struct Cancellation {
   void Cancel() {
-    flag_.store(true);
+    flag_.store(true, std::memory_order_relaxed);
   }
 
-  operator bool() const {
-    return flag_.load();
+  bool IsCancelled() const {
+    return flag_.load(std::memory_order_relaxed);
   }
 
  private:
@@ -214,7 +214,8 @@ struct Cancellation {
 };
 
 // Error wrapper, that stores error_code and optional string message.
-struct GenericError {
+class GenericError {
+ public:
   GenericError() = default;
   GenericError(std::error_code ec) : ec_{ec}, details_{} {
   }
@@ -244,8 +245,11 @@ struct GenericError {
 
 using AggregateGenericError = AggregateValue<GenericError>;
 
-// Contest combines Cancellation and error submission in one class.
-struct Context : public Cancellation {
+// Contest combines Cancellation and AggregateGenericError in one class.
+// Allows setting an error_handler to run on errors.
+class Context : public Cancellation {
+ public:
+  // The error handler should return false if this error is ignored.
   using ErrHandler = std::function<bool(const GenericError&)>;
 
   Context() = default;
@@ -254,8 +258,12 @@ struct Context : public Cancellation {
 
   template <typename... T> void Error(T... ts) {
     std::lock_guard lk{mu_};
-    err_ = GenericError{std::forward<T>(ts)...};
-    if (err_handler_ && err_handler_(err_)) {
+    if (err_)
+      return;
+
+    GenericError new_err{std::forward<T>(ts)...};
+    if (!err_handler_ || err_handler_(new_err)) {
+      err_ = std::move(new_err);
       Cancel();
     }
   }

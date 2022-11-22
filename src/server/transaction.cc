@@ -843,7 +843,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   sd.pq_pos = shard->txq()->Insert(this);
 
   DCHECK_EQ(0, sd.local_mask & KEYLOCK_ACQUIRED);
-  bool lock_acquired = shard->db_slice().Acquire(mode, lock_args);
+  shard->db_slice().Acquire(mode, lock_args);
   sd.local_mask |= KEYLOCK_ACQUIRED;
 
   DVLOG(1) << "Rescheduling into TxQueue " << DebugId();
