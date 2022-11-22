@@ -871,7 +871,7 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
       const auto scripts = script_mgr_->GetLuaScripts();
       auto& summary_snapshot = snapshots[shard_set->size()];
       summary_snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
-      if (ec = DoPartialSave(filename, path, start, scripts, summary_snapshot.get(), nullptr)) {
+      if ((ec = DoPartialSave(filename, path, start, scripts, summary_snapshot.get(), nullptr))) {
         summary_snapshot.reset();
       }
     }
@@ -880,7 +880,7 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
     auto cb = [&](Transaction* t, EngineShard* shard) {
       auto& snapshot = snapshots[shard->shard_id()];
       snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
-      if (ec = DoPartialSave(filename, path, start, {}, snapshot.get(), shard)) {
+      if ((ec = DoPartialSave(filename, path, start, {}, snapshot.get(), shard))) {
         snapshot.reset();
       }
       return OpStatus::OK;
