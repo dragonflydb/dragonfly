@@ -399,7 +399,7 @@ uint32_t DflyCmd::CreateSyncSession() {
 
   unsigned flow_count = shard_set->size() + 1;
   auto err_handler = [this, sync_id](const GenericError& err) {
-    LOG(INFO) << "Replication error: " << err.GetError().message() << " " << err.GetDetails();
+    LOG(INFO) << "Replication error: " << err.Format();
 
     // Stop replication in case of error.
     // StopReplication needs to run async to prevent blocking

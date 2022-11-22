@@ -81,7 +81,7 @@ class ServerFamily {
   void StatsMC(std::string_view section, facade::ConnectionContext* cntx);
 
   // if new_version is true, saves DF specific, non redis compatible snapshot.
-  std::error_code DoSave(bool new_version, Transaction* transaction, std::string* err_details);
+  GenericError DoSave(bool new_version, Transaction* transaction);
 
   // Burns down and destroy all the data from the database.
   // if kDbAll is passed, burns all the databases to the ground.

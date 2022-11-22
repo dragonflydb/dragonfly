@@ -543,16 +543,14 @@ void ServerFamily::SnapshotScheduling(const SnapshotSpec& spec) {
       continue;
     }
 
-    // do the save
-    string err_details;
-    error_code ec;
     const CommandId* cid = service().FindCmd("SAVE");
     CHECK_NOTNULL(cid);
     boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
     trans->InitByArgs(0, {});
-    ec = DoSave(false, trans.get(), &err_details);
+
+    GenericError ec = DoSave(false, trans.get());
     if (ec) {
-      LOG(WARNING) << "Failed to perform snapshot " << err_details;
+      LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
     }
   }
 }
@@ -783,11 +781,14 @@ static void RunStage(bool new_version, std::function<void(unsigned)> cb) {
   }
 };
 
+using PartialSaveOpts =
+    tuple<const string& /*filename*/, const string& /*path*/, absl::Time /*start*/>;
+
 // Start saving a single snapshot of a multi-file dfly snapshot.
 // If shard is null, then this is the summary file.
-error_code DoPartialSave(const string& filename, const string& path, absl::Time now,
-                         const dfly::StringVec& scripts, RdbSnapshot* snapshot,
-                         EngineShard* shard) {
+error_code DoPartialSave(PartialSaveOpts opts, const dfly::StringVec& scripts,
+                         RdbSnapshot* snapshot, EngineShard* shard) {
+  auto [filename, path, now] = opts;
   // Construct resulting filename.
   fs::path file = filename, abs_path = path;
   if (shard == nullptr) {
@@ -809,24 +810,22 @@ error_code DoPartialSave(const string& filename, const string& path, absl::Time 
   return local_ec;
 }
 
-error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* err_details) {
+GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
   fs::path dir_path(GetFlag(FLAGS_dir));
-  AggregateError ec;
+  AggregateGenericError ec;
 
   // Check directory.
   if (!dir_path.empty()) {
-    ec = CreateDirs(dir_path);
-    if (ec) {
-      *err_details = "create-dir ";
-      return *ec;
+    if (auto local_ec = CreateDirs(dir_path); local_ec) {
+      return {local_ec, "create-dir"};
     }
   }
 
   // Manage global state.
   GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
   if (new_state != GlobalState::SAVING) {
-    *err_details = StrCat(GlobalStateName(new_state), " - can not save database");
-    return make_error_code(errc::operation_in_progress);
+    return {make_error_code(errc::operation_in_progress),
+            StrCat(GlobalStateName(new_state), " - can not save database")};
   }
   absl::Cleanup rev_state = [this] {
     service_.SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
@@ -864,6 +863,8 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
 
   // Start snapshots.
   if (new_version) {
+    auto file_opts = make_tuple(cref(filename), cref(path), start);
+
     // In the new version (.dfs) we store a file for every shard and one more summary file.
     // Summary file is always last in snapshots array.
     snapshots.resize(shard_set->size() + 1);
@@ -871,10 +872,11 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
     // Save summary file.
     {
       const auto scripts = script_mgr_->GetLuaScripts();
-      auto& summary_snapshot = snapshots[shard_set->size()];
-      summary_snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
-      if ((ec = DoPartialSave(filename, path, start, scripts, summary_snapshot.get(), nullptr))) {
-        summary_snapshot.reset();
+      auto& snapshot = snapshots[shard_set->size()];
+      snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
+      if (auto local_ec = DoPartialSave(file_opts, scripts, snapshot.get(), nullptr); local_ec) {
+        ec = local_ec;
+        snapshot.reset();
       }
     }
 
@@ -882,7 +884,8 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
     auto cb = [&](Transaction* t, EngineShard* shard) {
       auto& snapshot = snapshots[shard->shard_id()];
       snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
-      if ((ec = DoPartialSave(filename, path, start, {}, snapshot.get(), shard))) {
+      if (auto local_ec = DoPartialSave(file_opts, {}, snapshot.get(), shard); local_ec) {
+        ec = local_ec;
         snapshot.reset();
       }
       return OpStatus::OK;
@@ -950,6 +953,7 @@ error_code ServerFamily::DoSave(bool new_version, Transaction* trans, string* er
     // swap - to deallocate the old version outstide of the lock.
     last_save_info_.swap(save_info);
   }
+
   return *ec;
 }
 
@@ -1127,10 +1131,9 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  error_code ec = DoSave(new_version, cntx->transaction, &err_detail);
-
+  GenericError ec = DoSave(new_version, cntx->transaction);
   if (ec) {
-    (*cntx)->SendError(absl::StrCat(err_detail, ec.message()));
+    (*cntx)->SendError(ec.Format());
   } else {
     (*cntx)->SendOk();
   }
