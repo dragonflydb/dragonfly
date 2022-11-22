@@ -87,7 +87,11 @@ async def test_replication_all(df_local_factory, t_master, t_replicas, n_keys, n
 
 
 """
-Test replica crash during full sync on multiple replicas without altering data during replication.
+Test disconnecting replicas during different phases with constantly streaming changes to master.
+Three types are tested:
+1. Replicas crashing during full sync state
+2. Replicas crashing during stable sync state
+3. Replicas disconnecting normally with REPLICAOF NO ONE during stable state
 """
 
 # 1. Number of master threads
@@ -95,7 +99,7 @@ Test replica crash during full sync on multiple replicas without altering data d
 # 3. Number of threads for each replica that crashes during stable sync
 # 4. Number of threads for each replica that disconnects normally
 # 5. Number of distinct keys that are constantly streamed
-crash_cases = [
+disconnect_cases = [
     # balanced
     (8, [4, 4], [4, 4], [4], 10000),
     (8, [2] * 6, [2] * 6, [2, 2], 10000),
@@ -111,8 +115,8 @@ crash_cases = [
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys", crash_cases)
-async def test_crash(df_local_factory, t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys):
+@pytest.mark.parametrize("t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys", disconnect_cases)
+async def test_disconnect(df_local_factory, t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys):
     master = df_local_factory.create(port=BASE_PORT, proactor_threads=t_master)
     replicas = [
         (df_local_factory.create(
