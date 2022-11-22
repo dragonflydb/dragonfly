@@ -437,7 +437,7 @@ error_code Replica::InitiateDflySync() {
   auto partition = Partition(num_df_flows_);
   shard_set->pool()->AwaitFiberOnAll([&](unsigned index, auto*) {
     for (auto id : partition[index]) {
-      if (ec = shard_flows_[id]->StartFullSyncFlow(&sb))
+      if ((ec = shard_flows_[id]->StartFullSyncFlow(&sb)))
         break;
     }
   });
@@ -619,7 +619,7 @@ void Replica::FullSyncDflyFb(SyncBlock* sb, string eof_token) {
   io::PrefixSource ps{leftover_buf_->InputBuffer(), &ss};
 
   RdbLoader loader(NULL);
-  loader.SetFullSyncCutCb([this, sb, ran = false]() mutable {
+  loader.SetFullSyncCutCb([sb, ran = false]() mutable {
     if (!ran) {
       std::unique_lock lk(sb->mu_);
       sb->flows_left--;
