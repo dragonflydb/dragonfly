@@ -198,8 +198,7 @@ class RdbLoader : protected RdbLoaderBase {
 
   DbIndex cur_db_index_ = 0;
 
-  ::boost::fibers::mutex mu_;
-  std::error_code ec_;  // guarded by mu_
+  AggregateError ec_;
   std::atomic_bool stop_early_{false};
 
   // Callback when receiving RDB_OPCODE_FULLSYNC_END

@@ -1616,8 +1616,7 @@ error_code RdbLoader::Load(io::Source* src) {
   }  // main load loop
 
   if (stop_early_) {
-    lock_guard lk(mu_);
-    return ec_;
+    return *ec_;
   }
 
   /* Verify the checksum if RDB version is >= 5 */
@@ -1811,9 +1810,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
 
   for (const auto& item : ib) {
     PrimeValue pv;
-    if (auto ec = Visit(item, &pv); ec) {
-      lock_guard lk(mu_);
-      ec_ = ec;
+    if (ec_ = Visit(item, &pv); ec_) {
       stop_early_ = true;
       break;
     }

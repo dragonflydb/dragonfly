@@ -240,4 +240,14 @@ bool ScanOpts::Matches(std::string_view val_name) const {
   return stringmatchlen(pattern.data(), pattern.size(), val_name.data(), val_name.size(), 0) == 1;
 }
 
+std::string GenericError::Format() const {
+  if (!ec_)
+    return "";
+
+  if (details_.empty())
+    return ec_.message();
+  else
+    return absl::StrCat(ec_.message(), ":", details_);
+}
+
 }  // namespace dfly

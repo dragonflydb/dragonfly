@@ -151,8 +151,6 @@ void DebugCmd::Reload(CmdArgList args) {
     }
   }
 
-  error_code ec;
-
   if (save) {
     string err_details;
     const CommandId* cid = sf_.service().FindCmd("SAVE");
@@ -160,9 +158,10 @@ void DebugCmd::Reload(CmdArgList args) {
     intrusive_ptr<Transaction> trans(new Transaction{cid});
     trans->InitByArgs(0, {});
     VLOG(1) << "Performing save";
-    ec = sf_.DoSave(false, trans.get(), &err_details);
+
+    GenericError ec = sf_.DoSave(false, trans.get());
     if (ec) {
-      return (*cntx_)->SendError(absl::StrCat(err_details, ec.message()));
+      return (*cntx_)->SendError(ec.Format());
     }
   }
 

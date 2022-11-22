@@ -222,10 +222,6 @@ class GenericError {
   GenericError(std::error_code ec, std::string details) : ec_{ec}, details_{std::move(details)} {
   }
 
-  std::pair<std::error_code, const std::string&> Get() const {
-    return {ec_, details_};
-  }
-
   std::error_code GetError() const {
     return ec_;
   }
@@ -237,6 +233,9 @@ class GenericError {
   operator bool() const {
     return bool(ec_);
   }
+
+  // Get string representation of error.
+  std::string Format() const;
 
  private:
   std::error_code ec_;
