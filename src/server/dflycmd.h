@@ -38,7 +38,7 @@ class Journal;
 //
 // A SyncInfo instance is responsible for managing a replica's state and is accessible by its
 // sync_id. Each per-thread connection is called a Flow and is represented by the FlowInfo
-// instace, accessible by its index.
+// instance, accessible by its index.
 //
 // An important aspect is synchronization and efficient locking. Two levels of locking are used:
 //  1. Global locking.
@@ -46,7 +46,7 @@ class Journal;
 //    structures.
 //  2. Per-replica locking
 //    SyncInfo contains a separate mutex that is used for replica-only routines. It is held during
-//    state transitions (start full sync, start stable state sync), cancellation and mebmer access.
+//    state transitions (start full sync, start stable state sync), cancellation and member access.
 //
 // Upon first connection from the replica, a new SyncInfo is created.
 // It tranistions through the following phases:
@@ -97,17 +97,14 @@ class DflyCmd {
   // Stores information related to a single replica.
   struct SyncInfo {
     SyncInfo(unsigned flow_count, Context::ErrHandler err_handler)
-        : state{SyncState::PREPARATION}, cntx{std::move(err_handler)}, flows{flow_count},
-          cancel_flag{false} {
+        : state{SyncState::PREPARATION}, cntx{std::move(err_handler)}, flows{flow_count} {
     }
 
     SyncState state;
     Context cntx;
 
     std::vector<FlowInfo> flows;
-    // See header top for locking levels.
-    ::boost::fibers::mutex mu;
-    std::atomic_bool cancel_flag;
+    ::boost::fibers::mutex mu;  // See top of header for locking levels.
   };
 
  public:
@@ -164,7 +161,6 @@ class DflyCmd {
   void StopReplication(uint32_t sync_id);
 
   // Transition into cancelled state, run cleanup.
-  // Per-replica mutex should be already locked.
   void CancelSyncSession(uint32_t sync_id, std::shared_ptr<SyncInfo> sync_info);
 
   // Get SyncInfo by sync_id.

@@ -120,23 +120,9 @@ void JournalSlice::AddLogRecord(const Entry& entry) {
 
   iterating_cb_arr_ = true;
   for (const auto& k_v : change_cb_arr_) {
-    // Comment this to cause bug.
-    // if (k_v.first == 0)
-    //  continue;
-
-    // Testing details:
-    // Run pytest with many replicas that crash during stable state sync
-    // They are described by the second array:
-    // (8, [], [2] * 16, 10000)
-
-    // (8, [], [2] * 12, 10000) is part of the test and crashes for me
     k_v.second(entry);
   }
   iterating_cb_arr_ = false;
-
-  change_cb_arr_.erase(remove_if(change_cb_arr_.begin(), change_cb_arr_.end(),
-                                 [](const auto& e) { return e.first == 0; }),
-                       change_cb_arr_.end());
 
   RingItem item;
   item.lsn = lsn_;
@@ -167,18 +153,7 @@ void JournalSlice::Unregister(uint32_t id) {
   auto it = find_if(change_cb_arr_.begin(), change_cb_arr_.end(),
                     [id](const auto& e) { return e.first == id; });
   CHECK(it != change_cb_arr_.end());
-
-  // Becase Unregister might be called midst iterating over change_cb_arr_, we can't directly delete
-  // elements during this phase, so we just mark them as soon-to-be deleted
-  if (iterating_cb_arr_) {
-    it->first = 0;
-  } else {
-    /*if (it != (change_cb_arr_.end() - 1)) {
-      swap(change_cb_arr_.back(), *it);
-    }
-    change_cb_arr_.pop_back();*/
-    change_cb_arr_.erase(it);
-  }
+  change_cb_arr_.erase(it);
 }
 
 }  // namespace journal

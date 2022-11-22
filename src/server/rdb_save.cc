@@ -880,7 +880,7 @@ void RdbSaver::Impl::Cancel() {
   auto& snapshot = GetSnapshot(shard);
   if (snapshot)
     snapshot->Cancel();
-  
+
   dfly::SliceSnapshot::DbRecord rec;
   while (channel_.Pop(rec)) {
   }

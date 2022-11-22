@@ -78,7 +78,7 @@ void SliceSnapshot::Stop() {
 }
 
 void SliceSnapshot::Cancel() {
-  CloseRecordChannel(true);
+  CloseRecordChannel();
   if (journal_cb_id_) {
     db_slice_->shard_owner()->journal()->Unregister(journal_cb_id_);
     journal_cb_id_ = 0;
@@ -118,9 +118,8 @@ void SliceSnapshot::SerializeEntriesFb(const Cancellation& cll) {
         return;
       }
 
-      PrimeTable::Cursor next = pt->Traverse(cursor, [this, &cll](auto it) {
-        this->SaveCb(move(it));
-      });
+      PrimeTable::Cursor next =
+          pt->Traverse(cursor, [this, &cll](auto it) { this->SaveCb(move(it)); });
 
       cursor = next;
 
@@ -154,14 +153,13 @@ void SliceSnapshot::SerializeEntriesFb(const Cancellation& cll) {
           << side_saved_ << "/" << savecb_calls_;
 }
 
-void SliceSnapshot::CloseRecordChannel(bool force) {
-  if (!force) {
-    // stupid barrier to make sure that SerializePhysicalBucket finished.
-    // Can not think of anything more elegant.
-    mu_.lock();
-    mu_.unlock();
-  }
+void SliceSnapshot::CloseRecordChannel() {
+  // stupid barrier to make sure that SerializePhysicalBucket finished.
+  // Can not think of anything more elegant.
+  mu_.lock();
+  mu_.unlock();
 
+  // Make sure we close the channel only once with a CAS check.
   bool actual = false;
   if (closed_chan_.compare_exchange_strong(actual, true)) {
     dest_->StartClosing();

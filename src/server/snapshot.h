@@ -4,8 +4,8 @@
 
 #pragma once
 
-#include <bitset>
 #include <atomic>
+#include <bitset>
 
 #include "io/file.h"
 #include "server/db_slice.h"
@@ -39,7 +39,7 @@ class SliceSnapshot {
 
   void Start(bool stream_journal, const Cancellation& cll);
 
-  void Stop(); // only needs to be called in journal streaming mode.
+  void Stop();  // only needs to be called in journal streaming mode.
 
   void Join();
 
@@ -62,10 +62,10 @@ class SliceSnapshot {
   }
 
  private:
-  void CloseRecordChannel(bool force = false);
+  void CloseRecordChannel();
 
   void SerializeEntriesFb(const Cancellation& cll);
-  
+
   void SerializeSingleEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
                             RdbSerializer* serializer);
 
@@ -92,12 +92,12 @@ class SliceSnapshot {
   // version upper bound for entries that should be saved (not included).
   uint64_t snapshot_version_ = 0;
   DbIndex savecb_current_db_;  // used by SaveCb
-  
+
   size_t channel_bytes_ = 0;
   size_t serialized_ = 0, skipped_ = 0, side_saved_ = 0, savecb_calls_ = 0;
   uint64_t rec_id_ = 0;
   uint32_t num_records_in_blob_ = 0;
-  
+
   uint32_t journal_cb_id_ = 0;
 
   ::boost::fibers::fiber snapshot_fb_;

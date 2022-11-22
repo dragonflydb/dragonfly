@@ -207,12 +207,12 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
     return rb->SendError(facade::kInvalidIntErr);
   }
 
-  auto [sync_id, sync_info] = GetSyncInfoOrReply(sync_id_str, rb);
+  auto [sync_id, sync_info_ptr] = GetSyncInfoOrReply(sync_id_str, rb);
   if (!sync_id)
     return;
 
-  unique_lock lk(sync_info->mu);
-  if (sync_info->state != SyncState::PREPARATION)
+  unique_lock lk(sync_info_ptr->mu);
+  if (sync_info_ptr->state != SyncState::PREPARATION)
     return rb->SendError(kInvalidState);
 
   // Set meta info on connection.
@@ -223,7 +223,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
   absl::InsecureBitGen gen;
   string eof_token = GetRandomHex(gen, 40);
 
-  sync_info->flows[flow_id] = FlowInfo{cntx->owner(), eof_token};
+  sync_info_ptr->flows[flow_id] = FlowInfo{cntx->owner(), eof_token};
   listener_->Migrate(cntx->owner(), shard_set->pool()->at(flow_id));
 
   rb->StartArray(2);
@@ -237,12 +237,12 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
 
   VLOG(1) << "Got DFLY SYNC " << sync_id_str;
 
-  auto [sync_id, sync_info] = GetSyncInfoOrReply(sync_id_str, rb);
+  auto [sync_id, sync_info_ptr] = GetSyncInfoOrReply(sync_id_str, rb);
   if (!sync_id)
     return;
 
-  unique_lock lk(sync_info->mu);
-  if (!CheckReplicaStateOrReply(*sync_info, SyncState::PREPARATION, rb))
+  unique_lock lk(sync_info_ptr->mu);
+  if (!CheckReplicaStateOrReply(*sync_info_ptr, SyncState::PREPARATION, rb))
     return;
 
   // Start full sync.
@@ -250,9 +250,9 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
     TransactionGuard tg{cntx->transaction};
     AggregateStatus status;
 
-    auto cb = [this, &status, sync_info = sync_info](unsigned index, auto*) {
-      status =
-          StartFullSyncInThread(&sync_info->flows[index], &sync_info->cntx, EngineShard::tlocal());
+    auto cb = [this, &status, sync_info_ptr](unsigned index, auto*) {
+      status = StartFullSyncInThread(&sync_info_ptr->flows[index], &sync_info_ptr->cntx,
+                                     EngineShard::tlocal());
     };
     shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 
@@ -261,7 +261,7 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
       return rb->SendError(kInvalidState);
   }
 
-  sync_info->state = SyncState::FULL_SYNC;
+  sync_info_ptr->state = SyncState::FULL_SYNC;
   return rb->SendOk();
 }
 
@@ -271,21 +271,21 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
 
   VLOG(1) << "Got DFLY STARTSTABLE " << sync_id_str;
 
-  auto [sync_id, sync_info] = GetSyncInfoOrReply(sync_id_str, rb);
+  auto [sync_id, sync_info_ptr] = GetSyncInfoOrReply(sync_id_str, rb);
   if (!sync_id)
     return;
 
-  unique_lock lk(sync_info->mu);
-  if (!CheckReplicaStateOrReply(*sync_info, SyncState::FULL_SYNC, rb))
+  unique_lock lk(sync_info_ptr->mu);
+  if (!CheckReplicaStateOrReply(*sync_info_ptr, SyncState::FULL_SYNC, rb))
     return;
 
   {
     TransactionGuard tg{cntx->transaction};
     AggregateStatus status;
 
-    auto cb = [this, &status, sync_info = sync_info](unsigned index, auto*) {
+    auto cb = [this, &status, sync_info_ptr](unsigned index, auto*) {
       EngineShard* shard = EngineShard::tlocal();
-      FlowInfo* flow = &sync_info->flows[index];
+      FlowInfo* flow = &sync_info_ptr->flows[index];
 
       StopFullSyncInThread(flow, shard);
       status = StartStableSyncInThread(flow, shard);
@@ -297,7 +297,7 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
       return rb->SendError(kInvalidState);
   }
 
-  sync_info->state = SyncState::STABLE_SYNC;
+  sync_info_ptr->state = SyncState::STABLE_SYNC;
   return rb->SendOk();
 }
 
@@ -404,8 +404,8 @@ uint32_t DflyCmd::CreateSyncSession() {
     return true;  // Cancel context
   };
 
-  auto sync_info = make_shared<SyncInfo>(flow_count, std::move(err_handler));
-  auto [it, inserted] = sync_infos_.emplace(sync_id, std::move(sync_info));
+  auto sync_info_ptr = make_shared<SyncInfo>(flow_count, std::move(err_handler));
+  auto [it, inserted] = sync_infos_.emplace(sync_id, std::move(sync_info_ptr));
   CHECK(inserted);
 
   return sync_id;
@@ -416,59 +416,61 @@ void DflyCmd::OnClose(ConnectionContext* cntx) {
   if (!session_id)
     return;
 
-  auto sync_info = GetSyncInfo(session_id);
-  if (!sync_info)
+  auto sync_info_ptr = GetSyncInfo(session_id);
+  if (!sync_info_ptr)
     return;
 
-  // Because cancellation holds the mutex,
-  // this lock waits for it to finish before releasing the underlying connection
-  lock_guard lk(sync_info->mu);
-  if (sync_info->state != SyncState::CANCELLED) {
-    // Nobody started cancellation yet - lets do it
-    CancelSyncSession(session_id, sync_info);
-  }
+  // Because CancelSyncSession holds the per-replica mutex,
+  // aborting connection will block here until cancellation finishes.
+  // This allows keeping resources alive during the cleanup phase.
+  CancelSyncSession(session_id, sync_info_ptr);
 }
 
 void DflyCmd::StopReplication(uint32_t sync_id) {
-  auto ptr = GetSyncInfo(sync_id);
-  if (!ptr)
+  auto sync_info_ptr = GetSyncInfo(sync_id);
+  if (!sync_info_ptr)
     return;
 
-  VLOG(0) << "<<<<<<<<<<<<<<<<<<< STOP IN";
-  if (!ptr->cancel_flag.load()) {
-    lock_guard lk(ptr->mu);
-    CancelSyncSession(sync_id, ptr);
-  }
-  VLOG(0) << ">>>>>>>>>>>>>>>>>>>> STOP OUT";
+  CancelSyncSession(sync_id, sync_info_ptr);
 }
 
-void DflyCmd::CancelSyncSession(uint32_t sync_id, shared_ptr<SyncInfo> sync_info) {
-  // Update sync_info state, cancel context and cancel flag.
-  if (sync_info->state == SyncState::CANCELLED) {
+void DflyCmd::CancelSyncSession(uint32_t sync_id, shared_ptr<SyncInfo> sync_info_ptr) {
+  lock_guard lk(sync_info_ptr->mu);
+  if (sync_info_ptr->state == SyncState::CANCELLED) {
     return;
   }
 
   LOG(INFO) << "Cancelling sync session " << sync_id;
 
-  sync_info->state = SyncState::CANCELLED;
-  sync_info->cancel_flag.store(true);
-  sync_info->cntx.Cancel();
+  // Update sync_info_ptr state and cancel context.
+  sync_info_ptr->state = SyncState::CANCELLED;
+  sync_info_ptr->cntx.Cancel();
 
-  // Run cleanup and await tasks.
-  shard_set->AwaitRunningOnShardQueue([sync_id, sync_info](EngineShard* shard) {
-    FlowInfo* flow = &sync_info->flows[shard->shard_id()];
+  // Run cleanup for shard threads.
+  shard_set->AwaitRunningOnShardQueue([sync_info_ptr](EngineShard* shard) {
+    FlowInfo* flow = &sync_info_ptr->flows[shard->shard_id()];
     if (flow->cleanup) {
       flow->cleanup();
     }
   });
 
-  for (FlowInfo& flow : sync_info->flows) {
-    if (flow.task_fb.joinable()) {
-      flow.task_fb.join();
-    }
-  }
+  // Wait for tasks to finish.
+  shard_set->pool()->AwaitFiberOnAll([sync_info_ptr](unsigned index, auto*) {
+    FlowInfo* flow = &sync_info_ptr->flows[index];
 
-  // Unlock on-hold and remove from map.
+    // Cleanup hasn't been run for io-thread.
+    if (EngineShard::tlocal() == nullptr) {
+      if (flow->cleanup) {
+        flow->cleanup();
+      }
+    }
+
+    if (flow->task_fb.joinable()) {
+      flow->task_fb.join();
+    }
+  });
+
+  // Remove SyncInfo from global map
   {
     lock_guard lk(mu_);
     sync_infos_.erase(sync_id);
