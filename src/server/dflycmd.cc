@@ -354,7 +354,10 @@ OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, EngineShard* shard) {
       serializer.SendCommand(absl::StrCat("SET ", je.key, " ", je.pval_ptr->ToString()));
     });
 
-    flow->cleanup = [this, cb_id]() { sf_->journal()->Unregister(cb_id); };
+    flow->cleanup = [flow, this, cb_id]() {
+      VLOG(1) << "Unregister flow " << flow << " " << cb_id;
+      sf_->journal()->Unregister(cb_id);
+    };
   }
 
   return OpStatus::OK;
@@ -452,10 +455,11 @@ void DflyCmd::CancelSyncSession(uint32_t sync_id, shared_ptr<SyncInfo> sync_info
   sync_info->cntx.Cancel();
 
   // Run cleanup and await tasks.
-  shard_set->pool()->AwaitFiberOnAll([sync_id, sync_info](unsigned index, auto*) {
-    FlowInfo* flow = &sync_info->flows[index];
-    if (flow->cleanup)
+  shard_set->AwaitRunningOnShardQueue([sync_id, sync_info](EngineShard* shard) {
+    FlowInfo* flow = &sync_info->flows[shard->shard_id()];
+    if (flow->cleanup) {
       flow->cleanup();
+    }
   });
 
   for (FlowInfo& flow : sync_info->flows) {
