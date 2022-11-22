@@ -7,7 +7,7 @@ if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_BUILD_TYPE STREQUAL "Rele
   set_source_files_properties(dfly_main.cc PROPERTIES COMPILE_FLAGS -march=core2 COMPILE_DEFINITIONS SOURCE_PATH_FROM_BUILD_ENV=${CMAKE_SOURCE_DIR})
 endif()
 
-add_library(dfly_transaction db_slice.cc engine_shard_set.cc blocking_controller.cc common.cc
+add_library(dfly_transaction db_slice.cc malloc_stats.cc engine_shard_set.cc blocking_controller.cc common.cc
             io_mgr.cc journal/journal.cc journal/journal_slice.cc table.cc
             tiered_storage.cc transaction.cc)
 cxx_link(dfly_transaction uring_fiber_lib dfly_core strings_lib)
