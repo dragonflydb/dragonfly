@@ -739,11 +739,11 @@ class RdbSaver::Impl {
   // correct closing semantics - channel is closing when K producers marked it as closed.
   Impl(bool align_writes, unsigned producers_len, io::Sink* sink);
 
-  void StartSnapshotting(bool stream_journal, EngineShard* shard);
+  void StartSnapshotting(bool stream_journal, const Cancellation* cll, EngineShard* shard);
 
   void StopSnapshotting(EngineShard* shard);
 
-  error_code ConsumeChannel();
+  error_code ConsumeChannel(const Cancellation* cll);
 
   error_code Flush() {
     if (aligned_buf_)
@@ -763,6 +763,8 @@ class RdbSaver::Impl {
   RdbSerializer* serializer() {
     return &meta_serializer_;
   }
+
+  void Cancel();
 
  private:
   unique_ptr<SliceSnapshot>& GetSnapshot(EngineShard* shard);
@@ -797,7 +799,7 @@ error_code RdbSaver::Impl::SaveAuxFieldStrStr(string_view key, string_view val) 
   return error_code{};
 }
 
-error_code RdbSaver::Impl::ConsumeChannel() {
+error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
   error_code io_error;
 
   uint8_t buf[16];
@@ -812,10 +814,13 @@ error_code RdbSaver::Impl::ConsumeChannel() {
 
   auto& channel = channel_;
   while (channel.Pop(record)) {
-    if (io_error)
+    if (io_error || cll->IsCancelled())
       continue;
 
     do {
+      if (cll->IsCancelled())
+        continue;
+
       if (record.db_index != last_db_index) {
         unsigned enclen = SerializeLen(record.db_index, buf + 1);
         string_view str{(char*)buf, enclen + 1};
@@ -855,15 +860,30 @@ error_code RdbSaver::Impl::ConsumeChannel() {
   return io_error;
 }
 
-void RdbSaver::Impl::StartSnapshotting(bool stream_journal, EngineShard* shard) {
+void RdbSaver::Impl::StartSnapshotting(bool stream_journal, const Cancellation* cll,
+                                       EngineShard* shard) {
   auto& s = GetSnapshot(shard);
   s.reset(new SliceSnapshot(&shard->db_slice(), &channel_));
 
-  s->Start(stream_journal);
+  s->Start(stream_journal, cll);
 }
 
 void RdbSaver::Impl::StopSnapshotting(EngineShard* shard) {
   GetSnapshot(shard)->Stop();
+}
+
+void RdbSaver::Impl::Cancel() {
+  auto* shard = EngineShard::tlocal();
+  if (!shard)
+    return;
+
+  auto& snapshot = GetSnapshot(shard);
+  if (snapshot)
+    snapshot->Cancel();
+
+  dfly::SliceSnapshot::DbRecord rec;
+  while (channel_.Pop(rec)) {
+  }
 }
 
 void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {
@@ -905,8 +925,9 @@ RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes) {
 RdbSaver::~RdbSaver() {
 }
 
-void RdbSaver::StartSnapshotInShard(bool stream_journal, EngineShard* shard) {
-  impl_->StartSnapshotting(stream_journal, shard);
+void RdbSaver::StartSnapshotInShard(bool stream_journal, const Cancellation* cll,
+                                    EngineShard* shard) {
+  impl_->StartSnapshotting(stream_journal, cll, shard);
 }
 
 void RdbSaver::StopSnapshotInShard(EngineShard* shard) {
@@ -924,14 +945,14 @@ error_code RdbSaver::SaveHeader(const StringVec& lua_scripts) {
   return error_code{};
 }
 
-error_code RdbSaver::SaveBody(RdbTypeFreqMap* freq_map) {
+error_code RdbSaver::SaveBody(const Cancellation* cll, RdbTypeFreqMap* freq_map) {
   RETURN_ON_ERR(impl_->serializer()->FlushMem());
 
   if (save_mode_ == SaveMode::SUMMARY) {
     impl_->serializer()->SendFullSyncCut();
   } else {
     VLOG(1) << "SaveBody , snapshots count: " << impl_->Size();
-    error_code io_error = impl_->ConsumeChannel();
+    error_code io_error = impl_->ConsumeChannel(cll);
     if (io_error) {
       LOG(ERROR) << "io error " << io_error;
       return io_error;
@@ -999,6 +1020,10 @@ error_code RdbSaver::SaveAuxFieldStrInt(string_view key, int64_t val) {
   char buf[LONG_STR_SIZE];
   int vlen = ll2string(buf, sizeof(buf), val);
   return impl_->SaveAuxFieldStrStr(key, string_view(buf, vlen));
+}
+
+void RdbSaver::Cancel() {
+  impl_->Cancel();
 }
 
 }  // namespace dfly

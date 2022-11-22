@@ -225,10 +225,25 @@ class EngineShardSet {
     RunBriefInParallel(std::forward<U>(func), [](auto i) { return true; });
   }
 
-  // Runs a brief function on selected shards. Waits for it to complete.
+  // Runs a brief function on selected shard thread. Waits for it to complete.
   template <typename U, typename P> void RunBriefInParallel(U&& func, P&& pred) const;
 
   template <typename U> void RunBlockingInParallel(U&& func);
+
+  // Runs func on all shards via the same shard queue that's been used by transactions framework.
+  // The functions running inside the shard queue run atomically (sequentially)
+  // with respect each other on the same shard.
+  template <typename U> void AwaitRunningOnShardQueue(U&& func) {
+    util::fibers_ext::BlockingCounter bc{unsigned(shard_queue_.size())};
+    for (size_t i = 0; i < shard_queue_.size(); ++i) {
+      Add(i, [&func, bc]() mutable {
+        func(EngineShard::tlocal());
+        bc.Dec();
+      });
+    }
+
+    bc.Wait();
+  }
 
   // Used in tests
   void TEST_EnableHeartBeat();

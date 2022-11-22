@@ -195,6 +195,8 @@ class RdbSnapshot {
   std::unique_ptr<io::Sink> io_sink_;
   std::unique_ptr<RdbSaver> saver_;
   RdbTypeFreqMap freq_map_;
+
+  Cancellation cll_{};
 };
 
 io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
@@ -229,7 +231,7 @@ error_code RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
 }
 
 error_code RdbSnapshot::SaveBody() {
-  return saver_->SaveBody(&freq_map_);
+  return saver_->SaveBody(&cll_, &freq_map_);
 }
 
 error_code RdbSnapshot::Close() {
@@ -241,7 +243,7 @@ error_code RdbSnapshot::Close() {
 }
 
 void RdbSnapshot::StartInShard(EngineShard* shard) {
-  saver_->StartSnapshotInShard(false, shard);
+  saver_->StartSnapshotInShard(false, &cll_, shard);
   started_ = true;
 }
 

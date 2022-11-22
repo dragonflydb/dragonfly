@@ -149,6 +149,15 @@ void Replica::Stop() {
       LOG_IF(ERROR, ec) << "Could not shutdown socket " << ec;
     });
   }
+
+  // Close sub flows.
+  auto partition = Partition(num_df_flows_);
+  shard_set->pool()->AwaitFiberOnAll([&](unsigned index, auto*) {
+    for (auto id : partition[index]) {
+      shard_flows_[id]->Stop();
+    }
+  });
+
   if (sync_fb_.joinable())
     sync_fb_.join();
 }
