@@ -56,7 +56,10 @@ class BaseFamilyTest : public ::testing::Test {
   MCResponse RunMC(MemcacheParser::CmdType cmd_type, std::string_view key = std::string_view{});
   MCResponse GetMC(MemcacheParser::CmdType cmd_type, std::initializer_list<std::string_view> list);
 
-  int64_t CheckedInt(std::initializer_list<std::string_view> list);
+  int64_t CheckedInt(std::initializer_list<std::string_view> list) {
+    return CheckedInt(ArgSlice{list.begin(), list.size()});
+  }
+  int64_t CheckedInt(ArgSlice list);
 
   bool IsLocked(DbIndex db_index, std::string_view key) const;
   ConnectionContext::DebugInfo GetDebugInfo(const std::string& id) const;
