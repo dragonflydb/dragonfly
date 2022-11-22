@@ -1800,7 +1800,6 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
 }
 
 std::error_code RdbLoaderBase::Visit(const Item& item, CompactObj* pv) {
-  std::string_view key{item.key};
   OpaqueObjLoader visitor(item.val.rdb_type, pv);
   std::visit(visitor, item.val.obj);
   return visitor.ec();

@@ -948,7 +948,7 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
   if (!entries.ok())
     return (*cntx)->SendEmptyArray();
 
-  auto sort_call = [cntx, bounds, reversed, key](auto& entries) {
+  auto sort_call = [cntx, bounds, reversed](auto& entries) {
     if (bounds) {
       auto sort_it = entries.begin() + std::min(bounds->first + bounds->second, entries.size());
       std::partial_sort(entries.begin(), sort_it, entries.end(),
