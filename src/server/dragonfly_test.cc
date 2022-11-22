@@ -7,7 +7,6 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
-#include <absl/flags/reflection.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/strip.h>
@@ -47,6 +46,13 @@ class DflyEngineTest : public BaseFamilyTest {
  protected:
   DflyEngineTest() : BaseFamilyTest() {
     num_threads_ = kPoolThreadCount;
+  }
+};
+
+class DefragDflyEngineTest : public DflyEngineTest {
+ protected:
+  DefragDflyEngineTest() : DflyEngineTest() {
+    num_threads_ = 1;
   }
 };
 
@@ -746,6 +752,27 @@ TEST_F(DflyEngineTest, Bug496) {
     EXPECT_EQ(cb_hits, 2);
 
     db.UnregisterOnChange(cb_id);
+  });
+}
+
+TEST_F(DefragDflyEngineTest, TestDefragOption) {
+  // Fill data into dragonfly and then check if we have
+  // any location in memory to defrag. See issue #448 for details about this.
+  EXPECT_GE(max_memory_limit, 100'000);
+  const int NUMBER_OF_KEYS = 184000;
+
+  RespExpr resp = Run({"DEBUG", "POPULATE", std::to_string(NUMBER_OF_KEYS), "key-name", "130"});
+  ASSERT_EQ(resp, "OK");
+  resp = Run({"DBSIZE"});
+  EXPECT_THAT(resp, IntArg(NUMBER_OF_KEYS));
+
+  shard_set->pool()->AwaitFiberOnAll([&](unsigned index, ProactorBase* base) {
+    EngineShard* shard = EngineShard::tlocal();
+    ASSERT_FALSE(shard == nullptr);  // we only have one and its should not be empty!
+    EXPECT_EQ(shard->GetDefragStats().success_count, 0);
+    // we are not running stats yet
+    EXPECT_EQ(shard->GetDefragStats().tries, 0);
+    EXPECT_GT(GetMallocCurrentCommitted(), NUMBER_OF_KEYS);
   });
 }
 
