@@ -4,6 +4,7 @@
 #include "server/debugcmd.h"
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/random/random.h>
 #include <absl/strings/str_cat.h>
 
 #include <boost/fiber/operations.hpp>
@@ -14,6 +15,7 @@
 #include "server/blocking_controller.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/generic_family.h"
 #include "server/main_service.h"
 #include "server/rdb_load.h"
 #include "server/server_state.h"
@@ -37,15 +39,6 @@ namespace fs = std::filesystem;
 using absl::GetFlag;
 using absl::StrAppend;
 
-struct PopulateBatch {
-  DbIndex dbid;
-  uint64_t index[32];
-  uint64_t sz = 0;
-
-  PopulateBatch(DbIndex id) : dbid(id) {
-  }
-};
-
 struct ObjInfo {
   unsigned encoding;
   unsigned bucket_id = 0;
@@ -57,23 +50,6 @@ struct ObjInfo {
   bool has_sec_precision = false;
   bool found = false;
 };
-
-void DoPopulateBatch(std::string_view prefix, size_t val_size, const SetCmd::SetParams& params,
-                     const PopulateBatch& batch) {
-  DbContext db_cntx{batch.dbid, 0};
-  OpArgs op_args(EngineShard::tlocal(), 0, db_cntx);
-  SetCmd sg(op_args);
-
-  for (unsigned i = 0; i < batch.sz; ++i) {
-    string key = absl::StrCat(prefix, ":", batch.index[i]);
-    string val = absl::StrCat("value:", batch.index[i]);
-
-    if (val.size() < val_size) {
-      val.resize(val_size, 'x');
-    }
-    sg.Set(params, key, val);
-  }
-}
 
 DebugCmd::DebugCmd(ServerFamily* owner, ConnectionContext* cntx) : sf_(*owner), cntx_(cntx) {
 }
@@ -109,6 +85,10 @@ void DebugCmd::Run(CmdArgList args) {
 
   if (subcmd == "POPULATE") {
     return Populate(args);
+  }
+
+  if (subcmd == "MEMORYFUZZ") {
+    return MemoryFuzz(args);
   }
 
   if (subcmd == "RELOAD") {
@@ -222,6 +202,48 @@ void DebugCmd::Load(string_view filename) {
   (*cntx_)->SendOk();
 }
 
+bool FIncludeAll(uint64_t) {
+  return true;
+}
+
+template <typename F = bool(uint64_t)>
+void PopulateSetKV(std::string_view prefix, uint64_t val_size, const DebugCmd::PopulateBatch& batch,
+                   F f = FIncludeAll) {
+  DbContext db_cntx{batch.dbid, 0};
+  OpArgs op_args(EngineShard::tlocal(), 0, db_cntx);
+  SetCmd::SetParams params;
+  SetCmd sg(op_args);
+
+  for (unsigned i = 0; i < batch.sz; ++i) {
+    if (!f(i))
+      continue;
+    string key = absl::StrCat(prefix, ":", batch.index[i]);
+    string val = absl::StrCat("value:", batch.index[i]);
+
+    if (val.size() < val_size) {
+      val.resize(val_size, 'x');
+    }
+    sg.Set(params, key, val);
+  }
+}
+
+template <typename F = bool(uint64_t)>
+void PopulateDel(std::string_view prefix, const DebugCmd::PopulateBatch& batch, F f = FIncludeAll) {
+  DbContext db_cntx{batch.dbid, 0};
+  OpArgs op_args(EngineShard::tlocal(), 0, db_cntx);
+  SetCmd::SetParams params;
+  SetCmd sg(op_args);
+
+  for (unsigned i = 0; i < batch.sz; ++i) {
+    if (!f(i))
+      continue;
+    string key = absl::StrCat(prefix, ":", batch.index[i]);
+    string_view key_sv = key;
+
+    GenericFamily::OpDel(op_args, ArgSlice{&key_sv, 1});
+  }
+}
+
 void DebugCmd::Populate(CmdArgList args) {
   if (args.size() < 3 || args.size() > 5) {
     return (*cntx_)->SendError(UnknownSubCmd("populate", "DEBUG"));
@@ -242,46 +264,107 @@ void DebugCmd::Populate(CmdArgList args) {
       return (*cntx_)->SendError(kUintErr);
   }
 
+  auto func = [val_size](std::string_view prefix, const PopulateBatch& batch) {
+    PopulateSetKV(prefix, val_size, batch);
+  };
+
+  KeyRange range{0, total_count, prefix};
+  RunPopulate(range, func);
+
+  return (*cntx_)->SendOk();
+}
+
+void DebugCmd::MemoryFuzz(CmdArgList args) {
+  if (args.size() < 3 || args.size() > 4) {
+    return (*cntx_)->SendError(UnknownSubCmd("populate", "DEBUG"));
+  }
+
+  uint64_t total_count = 0;
+  if (!absl::SimpleAtoi(ArgS(args, 2), &total_count))
+    return (*cntx_)->SendError(kUintErr);
+
+  absl::BitGen gen;
+
+  double saturation = absl::Uniform(gen, 0.5, 1.0);
+  if (args.size() > 3 && !ParseDouble(ArgS(args, 3), &saturation)) {
+    return (*cntx_)->SendError(kUintErr);
+  }
+
+  std::string_view prefix{"k"};
+
+  uint64_t mod = 0;
+  uint64_t offset = 0;
+  auto filter = [&mod, &offset](uint64_t index) { return mod == 0 || (index + offset) % mod == 0; };
+
+  double size_factor = 1 + absl::Uniform(gen, -1, 2) * absl::Uniform(gen, 0.1, 0.25);
+  auto set_func = [&filter, &gen, size_factor](string_view prefix, const PopulateBatch batch) {
+    uint64_t value_len = uint64_t(size_factor * absl::Uniform(gen, 32, 8192));
+    PopulateSetKV(prefix, value_len, batch, filter);
+  };
+
+  auto del_func = [&filter](string_view prefix, const PopulateBatch batch) {
+    PopulateDel(prefix, batch, filter);
+  };
+
+  KeyRange total_range{0, total_count, prefix};
+  RunPopulate(total_range, set_func);
+  for (uint64_t it_mod : {5, 7}) {
+    mod = it_mod;
+
+    uint64_t base_offset = absl::Uniform(gen, 0ULL, it_mod);
+    for (uint64_t it_offset = 0; it_offset < it_mod; it_offset++) {
+      offset = (it_offset + base_offset) % it_mod;
+      RunPopulate(total_range, del_func);
+
+      if (absl::Uniform(gen, 0.0, 1.0) < saturation)
+        RunPopulate(total_range, set_func);
+    }
+  }
+
+  return (*cntx_)->SendOk();
+}
+
+void DebugCmd::RunPopulate(KeyRange range, DebugCmd::PopulateFunction func) {
   ProactorPool& pp = sf_.service().proactor_pool();
   size_t runners_count = pp.size();
   vector<pair<uint64_t, uint64_t>> ranges(runners_count - 1);
+
+  uint64_t total_count = range.to - range.from + 1;
   uint64_t batch_size = total_count / runners_count;
-  size_t from = 0;
+  uint64_t cur = range.from;
   for (size_t i = 0; i < ranges.size(); ++i) {
-    ranges[i].first = from;
-    ranges[i].second = batch_size;
-    from += batch_size;
+    ranges[i].first = cur;
+    ranges[i].second = cur + batch_size;
+    cur += batch_size;
   }
-  ranges.emplace_back(from, total_count - from);
+  ranges.emplace_back(cur, range.to);
 
   vector<fiber> fb_arr(ranges.size());
   for (size_t i = 0; i < ranges.size(); ++i) {
-    auto range = ranges[i];
+    auto sub_range = ranges[i];
 
     // whatever we do, we should not capture i by reference.
-    fb_arr[i] = pp.at(i)->LaunchFiber([range, prefix, val_size, this] {
-      this->PopulateRangeFiber(range.first, range.second, prefix, val_size);
+    fb_arr[i] = pp.at(i)->LaunchFiber([this, sub_range, range, func] {
+      this->PopulateRangeFiber(KeyRange{sub_range.first, sub_range.second, range.prefix}, func);
     });
   }
+
   for (auto& fb : fb_arr)
     fb.join();
-
-  (*cntx_)->SendOk();
 }
 
-void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view prefix,
-                                  unsigned value_len) {
+void DebugCmd::PopulateRangeFiber(KeyRange range, DebugCmd::PopulateFunction func) {
   this_fiber::properties<FiberProps>().set_name("populate_range");
-  VLOG(1) << "PopulateRange: " << from << "-" << (from + len - 1);
+  VLOG(1) << "PopulateRange: " << range.from << "-" << range.to;
 
-  string key = absl::StrCat(prefix, ":");
+  string key = absl::StrCat(range.prefix, ":");
   size_t prefsize = key.size();
   DbIndex db_indx = cntx_->db_index();
   EngineShardSet& ess = *shard_set;
   std::vector<PopulateBatch> ps(ess.size(), PopulateBatch{db_indx});
   SetCmd::SetParams params;
 
-  for (uint64_t i = from; i < from + len; ++i) {
+  for (uint64_t i = range.from; i < range.to; ++i) {
     StrAppend(&key, i);
     ShardId sid = Shard(key, ess.size());
     key.resize(prefsize);  // shrink back
@@ -290,7 +373,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view 
     shard_batch.index[shard_batch.sz++] = i;
     if (shard_batch.sz == 32) {
       ess.Add(sid, [=] {
-        DoPopulateBatch(prefix, value_len, params, shard_batch);
+        func(range.prefix, shard_batch);
         if (i % 50 == 0) {
           this_fiber::yield();
         }
@@ -301,9 +384,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view 
     }
   }
 
-  ess.RunBlockingInParallel([&](EngineShard* shard) {
-    DoPopulateBatch(prefix, value_len, params, ps[shard->shard_id()]);
-  });
+  ess.RunBlockingInParallel([&](EngineShard* shard) { func(range.prefix, ps[shard->shard_id()]); });
 }
 
 void DebugCmd::Inspect(string_view key) {

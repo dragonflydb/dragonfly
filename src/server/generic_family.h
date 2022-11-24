@@ -31,6 +31,9 @@ class GenericFamily {
   // Accessed by Service::Exec and Service::Watch as an utility.
   static OpResult<uint32_t> OpExists(const OpArgs& op_args, ArgSlice keys);
 
+  // Accessed by DebugCmd
+  static OpResult<uint32_t> OpDel(const OpArgs& op_args, ArgSlice keys);
+
  private:
   static void Del(CmdArgList args, ConnectionContext* cntx);
   static void Ping(CmdArgList args, ConnectionContext* cntx);
@@ -63,7 +66,6 @@ class GenericFamily {
   static void TtlGeneric(CmdArgList args, ConnectionContext* cntx, TimeUnit unit);
 
   static OpResult<uint64_t> OpTtl(Transaction* t, EngineShard* shard, std::string_view key);
-  static OpResult<uint32_t> OpDel(const OpArgs& op_args, ArgSlice keys);
   static OpResult<void> OpRen(const OpArgs& op_args, std::string_view from, std::string_view to,
                               bool skip_exists);
   static OpResult<uint32_t> OpStick(const OpArgs& op_args, ArgSlice keys);
