@@ -205,7 +205,7 @@ async def test_disconnect(df_local_factory, t_master, t_crash_fs, t_crash_ss, t_
     def check_gen(): return gen_test_data(n_keys//5, seed=0)
 
     await batch_fill_data_async(c_master, check_gen())
-    await asyncio.sleep(0.1)
+    await asyncio.sleep(1.0)
     for _, c_replica, _ in replicas_of_type(lambda t: t > 1):
         await batch_check_data_async(c_replica, check_gen())
 
@@ -216,6 +216,8 @@ async def test_disconnect(df_local_factory, t_master, t_crash_fs, t_crash_ss, t_
 
     await asyncio.gather(*(disconnect(*args) for args
                            in replicas_of_type(lambda t: t == 2)))
+
+    await asyncio.sleep(0.5)
 
     # Check phase 3 replica survived
     for _, c_replica, _ in replicas_of_type(lambda t: t == 2):

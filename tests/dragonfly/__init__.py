@@ -41,7 +41,7 @@ class DflyInstance:
 
         # Give Dragonfly time to start and detect possible failure causes
         # Gdb starts slowly
-        time.sleep(0.3 if not self.params.gdb else 2.0)
+        time.sleep(0.4 if not self.params.gdb else 3.0)
 
         return_code = self.proc.poll()
         if return_code is not None:
