@@ -6,6 +6,16 @@ import subprocess
 import time
 import subprocess
 
+from dataclasses import dataclass
+
+
+@dataclass
+class DflyParams:
+    path: str
+    cwd: str
+    gdb: bool
+    env: any
+
 
 class DflyInstance:
     """
@@ -13,20 +23,25 @@ class DflyInstance:
     with fixed arguments.
     """
 
-    def __init__(self, path, args, cwd):
-        self.path = path
+    def __init__(self, params: DflyParams, args):
         self.args = args
-        self.cwd = cwd
+        self.params = params
         self.proc = None
 
     def start(self):
         arglist = DflyInstance.format_args(self.args)
 
         print(f"Starting instance on {self.port} with arguments {arglist}")
-        self.proc = subprocess.Popen([self.path, *arglist], cwd=self.cwd)
+
+        args = [self.params.path, *arglist]
+        if self.params.gdb:
+            args = ["gdb", "--ex", "r", "--args"] + args
+
+        self.proc = subprocess.Popen(args, cwd=self.params.cwd)
 
         # Give Dragonfly time to start and detect possible failure causes
-        time.sleep(0.3)
+        # Gdb starts slowly
+        time.sleep(0.3 if not self.params.gdb else 2.0)
 
         return_code = self.proc.poll()
         if return_code is not None:
@@ -70,19 +85,17 @@ class DflyInstanceFactory:
     A factory for creating dragonfly instances with pre-supplied arguments.
     """
 
-    def __init__(self, env, cwd, path, args):
-        self.env = env
-        self.cwd = cwd
-        self.path = path
+    def __init__(self, params: DflyParams, args):
         self.args = args
+        self.params = params
         self.instances = []
 
     def create(self, **kwargs) -> DflyInstance:
         args = {**self.args, **kwargs}
         for k, v in args.items():
-            args[k] = v.format(**self.env) if isinstance(v, str) else v
+            args[k] = v.format(**self.params.env) if isinstance(v, str) else v
 
-        instance = DflyInstance(self.path, args, self.cwd)
+        instance = DflyInstance(self.params, args)
         self.instances.append(instance)
         return instance
 
