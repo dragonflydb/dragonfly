@@ -32,7 +32,6 @@ class GenericFamily {
   static OpResult<uint32_t> OpExists(const OpArgs& op_args, ArgSlice keys);
 
  private:
-
   static void Del(CmdArgList args, ConnectionContext* cntx);
   static void Ping(CmdArgList args, ConnectionContext* cntx);
   static void Exists(CmdArgList args, ConnectionContext* cntx);
@@ -41,6 +40,7 @@ class GenericFamily {
   static void Persist(CmdArgList args, ConnectionContext* cntx);
   static void Keys(CmdArgList args, ConnectionContext* cntx);
   static void PexpireAt(CmdArgList args, ConnectionContext* cntx);
+  static void Pexpire(CmdArgList args, ConnectionContext* cntx);
   static void Stick(CmdArgList args, ConnectionContext* cntx);
   static void Sort(CmdArgList args, ConnectionContext* cntx);
   static void Move(CmdArgList args, ConnectionContext* cntx);

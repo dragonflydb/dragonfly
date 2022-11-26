@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <bitset>
 
 #include "io/file.h"
@@ -36,8 +37,13 @@ class SliceSnapshot {
   SliceSnapshot(DbSlice* slice, RecordChannel* dest);
   ~SliceSnapshot();
 
-  void Start(bool include_journal_changes);
+  void Start(bool stream_journal, const Cancellation* cll);
+
+  void Stop();  // only needs to be called in journal streaming mode.
+
   void Join();
+
+  void Cancel();
 
   uint64_t snapshot_version() const {
     return snapshot_version_;
@@ -56,12 +62,16 @@ class SliceSnapshot {
   }
 
  private:
-  void FiberFunc();
-  bool FlushSfile(bool force);
+  void CloseRecordChannel();
+
+  void SerializeEntriesFb(const Cancellation* cll);
+
   void SerializeSingleEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
                             RdbSerializer* serializer);
 
+  bool FlushSfile(bool force);
   bool SaveCb(PrimeIterator it);
+
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
   void OnJournalEntry(const journal::Entry& entry);
 
@@ -70,25 +80,29 @@ class SliceSnapshot {
   unsigned SerializePhysicalBucket(DbIndex db_index, PrimeTable::bucket_iterator it);
   DbRecord GetDbRecord(DbIndex db_index, std::string value, unsigned num_records);
 
-  ::boost::fibers::fiber fb_;
-
+  DbSlice* db_slice_;
   DbTableArray db_array_;
   RdbTypeFreqMap type_freq_map_;
 
   std::unique_ptr<io::StringFile> sfile_;
   std::unique_ptr<RdbSerializer> rdb_serializer_;
-  boost::fibers::mutex mu_;
+  RecordChannel* dest_;
 
+  boost::fibers::mutex mu_;
   // version upper bound for entries that should be saved (not included).
   uint64_t snapshot_version_ = 0;
-  DbSlice* db_slice_;
   DbIndex savecb_current_db_;  // used by SaveCb
-  RecordChannel* dest_;
-  ::size_t channel_bytes_ = 0;
+
+  size_t channel_bytes_ = 0;
   size_t serialized_ = 0, skipped_ = 0, side_saved_ = 0, savecb_calls_ = 0;
   uint64_t rec_id_ = 0;
   uint32_t num_records_in_blob_ = 0;
+
   uint32_t journal_cb_id_ = 0;
+
+  ::boost::fibers::fiber snapshot_fb_;
+
+  std::atomic_bool closed_chan_{false};
 };
 
 }  // namespace dfly

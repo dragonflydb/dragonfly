@@ -209,14 +209,9 @@ void InitSet(ArgSlice vals, CompactObj* set) {
   }
 }
 
-void ScanCallback(void* privdata, const dictEntry* de) {
-  StringVec* sv = (StringVec*)privdata;
-  sds key = (sds)de->key;
-  sv->push_back(string(key, sdslen(key)));
-}
-
 uint64_t ScanStrSet(const DbContext& db_context, const CompactObj& co, uint64_t curs,
-                    unsigned count, StringVec* res) {
+                    const ScanOpts& scan_op, StringVec* res) {
+  uint32_t count = scan_op.limit;
   long maxiterations = count * 10;
 
   if (IsDenseEncoding(co)) {
@@ -224,13 +219,36 @@ uint64_t ScanStrSet(const DbContext& db_context, const CompactObj& co, uint64_t 
     set->set_time(TimeNowSecRel(db_context.time_now_ms));
 
     do {
-      curs = set->Scan(curs, [&](const sds ptr) { res->push_back(std::string(ptr, sdslen(ptr))); });
+      auto scan_callback = [&](const sds ptr) {
+        string_view str{ptr, sdslen(ptr)};
+        if (scan_op.Matches(str)) {
+          res->push_back(std::string(str));
+        }
+      };
+
+      curs = set->Scan(curs, scan_callback);
+
     } while (curs && maxiterations-- && res->size() < count);
   } else {
     DCHECK_EQ(co.Encoding(), kEncodingStrMap);
+    using PrivateDataRef = std::tuple<StringVec*, const ScanOpts&>;
+    PrivateDataRef private_data_ref(res, scan_op);
+    void* private_data = &private_data_ref;
     dict* ds = (dict*)co.RObjPtr();
+
+    auto scan_callback = [](void* private_data, const dictEntry* de) {
+      StringVec* sv = std::get<0>(*(PrivateDataRef*)private_data);
+      const ScanOpts& scan_op = std::get<1>(*(PrivateDataRef*)private_data);
+
+      sds key = (sds)de->key;
+      auto len = sdslen(key);
+      if (scan_op.Matches(std::string_view(key, len))) {
+        sv->emplace_back(key, len);
+      }
+    };
+
     do {
-      curs = dictScan(ds, curs, ScanCallback, NULL, res);
+      curs = dictScan(ds, curs, scan_callback, NULL, private_data);
     } while (curs && maxiterations-- && res->size() < count);
   }
 
@@ -290,9 +308,8 @@ bool IsInSet(const DbContext& db_context, const SetType& st, string_view member)
   }
 }
 
-void FindInSet(StringVec& memberships,
-		const DbContext& db_context, const SetType& st,
-		const vector<string_view>& members) {
+void FindInSet(StringVec& memberships, const DbContext& db_context, const SetType& st,
+               const vector<string_view>& members) {
   for (const auto& member : members) {
     bool status = IsInSet(db_context, st, member);
     memberships.emplace_back(to_string(status));
@@ -967,7 +984,8 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
   return result;
 }
 
-OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cursor) {
+OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cursor,
+                           const ScanOpts& scan_op) {
   OpResult<PrimeIterator> find_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_SET);
 
   if (!find_res)
@@ -975,18 +993,20 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cur
 
   PrimeIterator it = find_res.value();
   StringVec res;
-  uint32_t count = 10;
 
   if (it->second.Encoding() == kEncodingIntSet) {
     intset* is = (intset*)it->second.RObjPtr();
     int64_t intele;
     uint32_t pos = 0;
     while (intsetGet(is, pos++, &intele)) {
-      res.push_back(absl::StrCat(intele));
+      std::string int_str = absl::StrCat(intele);
+      if (scan_op.Matches(int_str)) {
+        res.push_back(int_str);
+      }
     }
     *cursor = 0;
   } else {
-    *cursor = ScanStrSet(op_args.db_cntx, it->second, *cursor, count, &res);
+    *cursor = ScanStrSet(op_args.db_cntx, it->second, *cursor, scan_op, &res);
   }
 
   return res;
@@ -1404,18 +1424,28 @@ void SScan(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError("invalid cursor");
   }
 
-  if (args.size() > 3) {
-    return (*cntx)->SendError("scan options are not supported yet");
+  // SSCAN key cursor [MATCH pattern] [COUNT count]
+  if (args.size() > 7) {
+    DVLOG(1) << "got " << args.size() << " this is more than it should be";
+    return (*cntx)->SendError(kSyntaxErr);
   }
 
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(3));
+  if (!ops) {
+    DVLOG(1) << "SScan invalid args - return " << ops << " to the user";
+    return (*cntx)->SendError(ops.status());
+  }
+
+  ScanOpts scan_op = ops.value();
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpScan(t->GetOpArgs(shard), key, &cursor);
+    return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
   };
 
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
     (*cntx)->StartArray(2);
-    (*cntx)->SendSimpleString(absl::StrCat(cursor));
+    (*cntx)->SendBulkString(absl::StrCat(cursor));
     (*cntx)->StartArray(result->size());
     for (const auto& k : *result) {
       (*cntx)->SendBulkString(k);

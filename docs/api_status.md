@@ -104,7 +104,7 @@ with respect to Memcached and Redis APIs.
   - [X] ZSCORE
 - [ ] Other
   - [ ] BGREWRITEAOF
-  - [ ] MONITOR
+  - [x] MONITOR
   - [ ] RANDOMKEY
 
 ### API 2
@@ -157,7 +157,7 @@ with respect to Memcached and Redis APIs.
   - [X] WATCH
   - [X] UNWATCH
   - [X] DISCARD
-  - [X] CLIENT LIST/SETNAME
+  - [X] CLIENT LIST/SETNAME/GETNAME
   - [ ] CLIENT KILL/UNPAUSE/PAUSE/GETNAME/REPLY/TRACKINGINFO
   - [X] COMMAND
   - [X] COMMAND COUNT
@@ -172,7 +172,7 @@ with respect to Memcached and Redis APIs.
 - [X] Generic Family
   - [X] SCAN
   - [X] PEXPIREAT
-  - [ ] PEXPIRE
+  - [X] PEXPIRE
   - [x] DUMP
   - [X] EVAL
   - [X] EVALSHA
@@ -202,8 +202,8 @@ with respect to Memcached and Redis APIs.
   - [ ] PFMERGE
 
 ### API 3
-- [ ] Generic Family
-  - [ ] TOUCH
+- [X] Generic Family
+  - [X] TOUCH
 - [X] HashSet Family
   - [X] HSTRLEN
 - [X] Server Family

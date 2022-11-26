@@ -78,7 +78,15 @@ TEST_F(ZSetFamilyTest, ZRangeRank) {
   EXPECT_THAT(Run({"zrangebyscore", "x", "0", "(1.1"}), ArrLen(0));
   EXPECT_THAT(Run({"zrangebyscore", "x", "-inf", "1.1", "limit", "0", "10"}), "a");
 
-  auto resp = Run({"zrevrangebyscore", "x", "+inf", "-inf", "limit", "0", "5"});
+  auto resp = Run({"zrangebyscore", "x", "-inf", "1.1", "limit", "0", "10", "WITHSCORES"});
+  ASSERT_THAT(resp, ArrLen(2));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("a", "1.1"));
+
+  resp = Run({"zrangebyscore", "x", "-inf", "1.1", "WITHSCORES", "limit", "0", "10"});
+  ASSERT_THAT(resp, ArrLen(2));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("a", "1.1"));
+
+  resp = Run({"zrevrangebyscore", "x", "+inf", "-inf", "limit", "0", "5"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   ASSERT_THAT(resp.GetVec(), ElementsAre("b", "a"));
 
@@ -140,6 +148,69 @@ TEST_F(ZSetFamilyTest, ByLex) {
   resp = Run({"zrangebylex", "key", "[a", "+"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   ASSERT_THAT(resp.GetVec(), ElementsAre("alpha", "bar", "cool", "down", "elephant", "foo"));
+}
+
+TEST_F(ZSetFamilyTest, ZRevRangeByLex) {
+  Run({
+      "zadd", "key",      "0", "alpha", "0", "bar",   "0", "cool", "0", "down",
+      "0",    "elephant", "0", "foo",   "0", "great", "0", "hill", "0", "omega",
+  });
+
+  auto resp = Run({"zrevrangebylex", "key", "[cool", "-"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("cool", "bar", "alpha"));
+
+  EXPECT_EQ(3, CheckedInt({"ZLEXCOUNT", "key", "(foo", "+"}));
+  EXPECT_EQ(3, CheckedInt({"ZREMRANGEBYLEX", "key", "(foo", "+"}));
+
+  resp = Run({"zrevrangebylex", "key", "+", "[a"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("foo", "elephant", "down", "cool", "bar", "alpha"));
+}
+
+TEST_F(ZSetFamilyTest, ZRange) {
+  Run({"zadd", "key", "0", "a", "1", "d", "1", "b", "2", "c", "4", "e"});
+
+  auto resp = Run({"zrange", "key", "0", "2"});
+  ASSERT_THAT(resp, ArrLen(3));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("a", "b", "d"));
+
+  resp = Run({"zrange", "key", "1", "3", "WITHSCORES"});
+  ASSERT_THAT(resp, ArrLen(6));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("b", "1", "d", "1", "c", "2"));
+
+  resp = Run({"zrange", "key", "1", "3", "WITHSCORES", "REV"});
+  ASSERT_THAT(resp, ArrLen(6));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("c", "2", "d", "1", "b", "1"));
+
+  resp = Run({"zrange", "key", "(1", "4", "BYSCORE", "WITHSCORES"});
+  ASSERT_THAT(resp, ArrLen(4));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("c", "2", "e", "4"));
+
+  resp = Run({"zrange", "key", "-", "d", "BYLEX", "BYSCORE"});
+  EXPECT_THAT(resp, ErrArg("BYSCORE and BYLEX options are not compatible"));
+
+  Run({"zremrangebyscore", "key", "0", "4"});
+
+  Run({
+      "zadd", "key",      "0", "alpha", "0", "bar",   "0", "cool", "0", "down",
+      "0",    "elephant", "0", "foo",   "0", "great", "0", "hill", "0", "omega",
+  });
+  resp = Run({"zrange", "key", "-", "[cool", "BYLEX"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("alpha", "bar", "cool"));
+
+  resp = Run({"zrange", "key", "[cool", "-", "REV", "BYLEX"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("cool", "bar", "alpha"));
+
+  resp = Run({"zrange", "key", "+", "[cool", "REV", "BYLEX", "LIMIT", "2", "2"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("great", "foo"));
+
+  resp = Run({"zrange", "key", "+", "[cool", "BYLEX", "LIMIT", "2", "2", "REV"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("great", "foo"));
 }
 
 TEST_F(ZSetFamilyTest, ZRevRange) {

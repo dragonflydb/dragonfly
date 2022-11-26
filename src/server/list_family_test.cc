@@ -622,4 +622,43 @@ TEST_F(ListFamilyTest, LMove) {
   ASSERT_THAT(Run({"lmove", kKey1, kKey1, "LEFT", "R"}), ArgType(RespExpr::ERROR));
 }
 
+TEST_F(ListFamilyTest, TwoQueueBug451) {
+  // The bug was that if 2 push operations where queued together in the tx queue,
+  // and the first awoke pending blpop, then the PollExecution function would continue with the
+  // second push before switching to blpop, which contradicts the spec.
+  std::atomic_bool running{true};
+  std::atomic_int it_cnt{0};
+
+  auto pop_fiber = [&]() {
+    auto id = "t-" + std::to_string(it_cnt.fetch_add(1));
+    while (running.load()) {
+      Run(id, {"blpop", "a", "0.1"});
+    }
+  };
+
+  auto push_fiber = [&]() {
+    auto id = "t-" + std::to_string(it_cnt.fetch_add(1));
+    for (int i = 0; i < 1000; i++) {
+      Run(id, {"rpush", "a", "DATA"});
+    }
+    ::boost::this_fiber::sleep_for(100ms);
+    running = false;
+  };
+
+  vector<boost::fibers::fiber> fbs;
+
+  // more likely to reproduce the bug if we start pop_fiber first.
+  for (int i = 0; i < 2; i++) {
+    fbs.push_back(pp_->at(i)->LaunchFiber(pop_fiber));
+  }
+
+
+  for (int i = 0; i < 2; i++) {
+    fbs.push_back(pp_->at(i)->LaunchFiber(push_fiber));
+  }
+
+  for (auto& f : fbs)
+    f.join();
+}
+
 }  // namespace dfly

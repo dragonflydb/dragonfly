@@ -27,6 +27,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/hset_family.h"
+#include "server/rdb_extensions.h"
 #include "server/script_mgr.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
@@ -1553,6 +1554,12 @@ error_code RdbLoader::Load(io::Source* src) {
       break;
     }
 
+    if (type == RDB_OPCODE_FULLSYNC_END) {
+      if (full_sync_cut_cb)
+        full_sync_cut_cb();
+      continue;
+    }
+
     if (type == RDB_OPCODE_SELECTDB) {
       unsigned dbid = 0;
 
@@ -1609,8 +1616,7 @@ error_code RdbLoader::Load(io::Source* src) {
   }  // main load loop
 
   if (stop_early_) {
-    lock_guard lk(mu_);
-    return ec_;
+    return *ec_;
   }
 
   /* Verify the checksum if RDB version is >= 5 */
@@ -1793,7 +1799,6 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
 }
 
 std::error_code RdbLoaderBase::Visit(const Item& item, CompactObj* pv) {
-  std::string_view key{item.key};
   OpaqueObjLoader visitor(item.val.rdb_type, pv);
   std::visit(visitor, item.val.obj);
   return visitor.ec();
@@ -1805,9 +1810,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
 
   for (const auto& item : ib) {
     PrimeValue pv;
-    if (auto ec = Visit(item, &pv); ec) {
-      lock_guard lk(mu_);
-      ec_ = ec;
+    if (ec_ = Visit(item, &pv); ec_) {
       stop_early_ = true;
       break;
     }
@@ -1815,8 +1818,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     if (item.expire_ms > 0 && db_cntx.time_now_ms >= item.expire_ms)
       continue;
 
-    auto [it, added] = db_slice.AddEntry(db_cntx, item.key, std::move(pv), item.expire_ms);
-
+    auto [it, added] = db_slice.AddOrUpdate(db_cntx, item.key, std::move(pv), item.expire_ms);
     if (!added) {
       LOG(WARNING) << "RDB has duplicated key '" << item.key << "' in DB " << db_ind;
     }

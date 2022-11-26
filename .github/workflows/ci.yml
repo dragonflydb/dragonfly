@@ -4,13 +4,31 @@ on:
   # push:
   # branches: [ main ]
   pull_request:
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
 
 env:
   # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
   BUILD_TYPE: Debug
 jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-python@v3
+      - name: Install dependencies
+        run: |
+          python -m pip install pre-commit
+          python -m pip freeze --local
+      - uses: actions/cache@v3
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit|${{ env.pythonLocation }}|${{ hashFiles('.pre-commit-config.yaml') }}
+      - name: Run pre-commit checks
+        run: pre-commit run --show-diff-on-failure --color=always --from-ref HEAD^ --to-ref HEAD
+        shell: bash
   build:
     # The CMake configure and build commands are platform agnostic and should work equally
     # well on Windows or Mac.  You can convert this to a matrix build if you need
@@ -22,46 +40,46 @@ jobs:
         # Test of these containers
         container: ["ubuntu-dev:20", "alpine-dev:latest"]
     timeout-minutes: 30
-    container: 
+    container:
       image: ghcr.io/romange/${{ matrix.container }}
       # credentials:
       #  username: ${{ github.repository_owner }}
       #  password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-    - uses: actions/checkout@v3
-      with:
-        submodules: true
-    - name: Install dependencies
-      run: |
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: Install dependencies
+        run: |
           uname -a
           cmake --version
           mkdir -p ${{github.workspace}}/build
-    - name: Cache build deps
-      id: cache-deps
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.ccache
-          ${{github.workspace}}/build/_deps
-        key: ${{ runner.os }}-deps-${{ github.base_ref }}-${{ github.sha }}
-        restore-keys: |
-          ${{ runner.os }}-deps-${{ github.base_ref }}-
-          
-    - name: Configure CMake
-      # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
-      # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
-      run: |
+      - name: Cache build deps
+        id: cache-deps
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.ccache
+            ${{github.workspace}}/build/_deps
+          key: ${{ runner.os }}-deps-${{ github.base_ref }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-deps-${{ github.base_ref }}-
+
+      - name: Configure CMake
+        # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
+        # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
+        run: |
           cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -GNinja -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cd ${{github.workspace}}/build && pwd
           du -hcs _deps/
-    - name: Build & Test      
-      run: |
+      - name: Build & Test
+        run: |
           cd ${{github.workspace}}/build
           ninja src/all
           ccache --show-stats
           GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1 ctest -V -R rdb_test
           echo Run ctest -V -L DFLY
-          #GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1 
+          #GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1
           GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=2,snapshot=2 ctest -V -L DFLY
           # GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1 CTEST_OUTPUT_ON_FAILURE=1 ninja server/test
 Federal 941 Deposit Report + +ADP +Report Range 5/4/2022 - 6/4/2022                                        00519                                                                         

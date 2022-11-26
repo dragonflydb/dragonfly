@@ -101,25 +101,7 @@ We maintain [binary releases](https://github.com/dragonflydb/dragonfly/releases)
 
 ### Building from source
 
-You need to install dependencies in order to build on Ubuntu 20.04 or later:
-
-```bash
-git clone --recursive https://github.com/dragonflydb/dragonfly && cd dragonfly
-
-# to install dependencies
-sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev libxml2-dev \
-     autoconf-archive libtool cmake g++
-
-# Configure the build
-./helio/blaze.sh -release
-
-# Build
-cd build-opt && ninja dragonfly
-
-# Run
-./dragonfly --alsologtostderr
-
-```
+See [building from source](./docs/build-from-source.md) for details.
 
 ## Configuration
 Dragonfly supports common Redis arguments where applicable.
@@ -129,7 +111,7 @@ Dragonfly currently supports the following Redis-specific arguments:
  * `port` redis connection port, default: 6379
  * `bind` localhost to only allow locahost connections, Public IP ADDRESS , to allow connections **to that ip** address (aka from outside too)
  * `requirepass` password for AUTH authentication, default: ""
- * `maxmemory` Limit on maximum-memory (in bytes) that is used by the database.0 - means the program will automatically determine its maximum memory usage. default: 0
+ * `maxmemory` Limit on maximum-memory (in human-readble bytes) that is used by the database. 0 - means the program will automatically determine its maximum memory usage. default: 0
  * `dir` - by default, dragonfly docker uses `/data` folder for snapshotting. the CLI uses: ""
     You can use `-v` docker option to map it to your host folder.
  * `dbfilename` the filename to save/load the DB. default: "dump";

@@ -1,0 +1,39 @@
+name: Check Build
+
+env:
+  DRAGONFLY_BUILD_DIR: "${{github.workspace}}/build-dbg"
+  
+on: 
+  schedule:
+    - cron: '0 7 */3 * *'
+  workflow_dispatch:
+      
+jobs:
+  build-n-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@master
+        with:
+          submodules: true
+      - name: Creating build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lsb-release ninja-build libunwind-dev libboost-fiber-dev libssl-dev autoconf-archive libtool cmake g++
+          ./helio/blaze.sh
+          cd $DRAGONFLY_BUILD_DIR && ninja dragonfly
+      - name: Run PyTests
+        run: |
+          export DRAGONFLY_PATH="${{ env.DRAGONFLY_BUILD_DIR }}/dragonfly" # used by PyTests
+          echo "Current commit is ${{github.sha}}"
+          chmod +x $DRAGONFLY_PATH
+          cd ${{ github.workspace }}/tests
+          pip install -r dragonfly/requirements.txt
+          pytest -xv dragonfly
+      - name: Send notification on failure
+        if: failure()
+        run: |
+          curl -s \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
+            -d '{"text": "Unforunately the tests of dragonfly build are not passed :( \n The commit is ${{github.sha}}	"}'       

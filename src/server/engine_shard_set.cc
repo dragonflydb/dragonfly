@@ -106,11 +106,13 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
 
   string backing_prefix = GetFlag(FLAGS_backing_prefix);
   if (!backing_prefix.empty()) {
-    string fn =
-        absl::StrCat(backing_prefix, "-", absl::Dec(pb->GetIndex(), absl::kZeroPad4), ".ssd");
+    if (pb->GetKind() != ProactorBase::IOURING) {
+      LOG(ERROR) << "Only ioring based backing storage is supported. Exiting...";
+      exit(1);
+    }
 
     shard_->tiered_storage_.reset(new TieredStorage(&shard_->db_slice_));
-    error_code ec = shard_->tiered_storage_->Open(fn);
+    error_code ec = shard_->tiered_storage_->Open(backing_prefix);
     CHECK(!ec) << ec.message();  // TODO
   }
 }
@@ -164,12 +166,18 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     }
   }
 
-  bool has_awaked_trans = blocking_controller_ && blocking_controller_->HasAwakedTransaction();
   Transaction* head = nullptr;
   string dbg_id;
 
-  if (continuation_trans_ == nullptr && !has_awaked_trans) {
+  if (continuation_trans_ == nullptr) {
     while (!txq_.Empty()) {
+      // we must check every iteration so that if the current transaction awakens
+      // another transaction, the loop won't proceed further and will break, because we must run
+      // the notified transaction before all other transactions in the queue can proceed.
+      bool has_awaked_trans = blocking_controller_ && blocking_controller_->HasAwakedTransaction();
+      if (has_awaked_trans)
+        break;
+
       auto val = txq_.Front();
       head = absl::get<Transaction*>(val);
 
@@ -212,13 +220,12 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
         break;
       }
     }       // while(!txq_.Empty())
-  } else {  // if (continuation_trans_ == nullptr && !has_awaked_trans)
-    DVLOG(1) << "Skipped TxQueue " << continuation_trans_ << " " << has_awaked_trans;
+  } else {  // if (continuation_trans_ == nullptr)
+    DVLOG(1) << "Skipped TxQueue " << continuation_trans_;
   }
 
   // we need to run trans if it's OOO or when trans is blocked in this shard and should
   // be treated here as noop.
-  // trans is OOO, it it locked keys that previous transactions have not locked yet.
   bool should_run = trans_mask & (Transaction::OUT_OF_ORDER | Transaction::SUSPENDED_Q);
 
   // It may be that there are other transactions that touch those keys but they necessary ordered

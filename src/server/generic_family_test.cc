@@ -52,6 +52,23 @@ TEST_F(GenericFamilyTest, Expire) {
   AdvanceTime(1);
   resp = Run({"get", "key"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  // pexpire test
+  Run({"set", "key", "val"});
+  resp = Run({"pexpire", "key", absl::StrCat(2000)});
+  EXPECT_THAT(resp, IntArg(1));
+
+  // expire time override
+  resp = Run({"pexpire", "key", absl::StrCat(3000)});
+  EXPECT_THAT(resp, IntArg(1));
+
+  AdvanceTime(2999);
+  resp = Run({"get", "key"});
+  EXPECT_THAT(resp, "val");
+
+  AdvanceTime(1);
+  resp = Run({"get", "key"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
 TEST_F(GenericFamilyTest, Del) {
@@ -92,6 +109,17 @@ TEST_F(GenericFamilyTest, Exists) {
   Run({"mset", "x", "0", "y", "1"});
   auto resp = Run({"exists", "x", "y", "x"});
   EXPECT_THAT(resp, IntArg(3));
+}
+
+TEST_F(GenericFamilyTest, Touch) {
+  RespExpr resp;
+
+  Run({"mset", "x", "0", "y", "1"});
+  resp = Run({"touch", "x", "y", "x"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  resp = Run({"touch", "z", "x", "w"});
+  EXPECT_THAT(resp, IntArg(1));
 }
 
 TEST_F(GenericFamilyTest, Rename) {

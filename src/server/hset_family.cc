@@ -26,48 +26,6 @@ using namespace facade;
 
 namespace {
 
-struct ScanOpts {
-  string_view pattern;
-  size_t limit = 10;
-
-  constexpr bool Matches(std::string_view val_name) const {
-    if (pattern.empty())
-      return true;
-    return stringmatchlen(pattern.data(), pattern.size(), val_name.data(), val_name.size(), 0) == 1;
-  }
-
-  static OpResult<ScanOpts> TryFrom(CmdArgList args);
-};
-
-OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
-  ScanOpts scan_opts;
-
-  for (unsigned i = 3; i < args.size(); i += 2) {
-    ToUpper(&args[i]);
-    string_view opt = ArgS(args, i);
-    if (i + 1 == args.size()) {
-      return OpStatus::SYNTAX_ERR;
-    }
-
-    if (opt == "COUNT") {
-      if (!absl::SimpleAtoi(ArgS(args, i + 1), &scan_opts.limit)) {
-        return OpStatus::INVALID_INT;
-      }
-      if (scan_opts.limit == 0)
-        scan_opts.limit = 1;
-      else if (scan_opts.limit > 4096)
-        scan_opts.limit = 4096;
-    } else if (opt == "MATCH") {
-      scan_opts.pattern = ArgS(args, i + 1);
-      if (scan_opts.pattern == "*")
-        scan_opts.pattern = string_view{};
-    } else {
-      return OpStatus::SYNTAX_ERR;
-    }
-  }
-  return scan_opts;
-}
-
 constexpr size_t kMaxListPackLen = 1024;
 using IncrByParam = std::variant<double, int64_t>;
 using OptStr = std::optional<std::string>;
@@ -881,7 +839,7 @@ void HSetFamily::HScan(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kSyntaxErr);
   }
 
-  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args);
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(3));
   if (!ops) {
     DVLOG(1) << "HScan invalid args - return " << ops << " to the user";
     return (*cntx)->SendError(ops.status());
@@ -896,7 +854,7 @@ void HSetFamily::HScan(CmdArgList args, ConnectionContext* cntx) {
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
     (*cntx)->StartArray(2);
-    (*cntx)->SendSimpleString(absl::StrCat(cursor));
+    (*cntx)->SendBulkString(absl::StrCat(cursor));
     (*cntx)->StartArray(result->size());
     for (const auto& k : *result) {
       (*cntx)->SendBulkString(k);

@@ -21,7 +21,7 @@ class TestConnection : public facade::Connection {
  public:
   TestConnection(Protocol protocol);
 
-  void SendMsgVecAsync(const PubMessage& pmsg, util::fibers_ext::BlockingCounter bc) final;
+  void SendMsgVecAsync(const PubMessage& pmsg) final;
 
   std::vector<PubMessage> messages;
 
