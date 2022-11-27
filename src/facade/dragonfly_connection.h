@@ -56,25 +56,13 @@ class Connection : public util::Connection {
     // if empty - means its a regular message, otherwise it's pmessage.
     std::string_view pattern;
     std::string_view channel;
-    std::shared_ptr<const std::string> message;  // ensure that this message would out live passing
-                                                 // between different threads/fibers
+    std::string_view message;
   };
 
-  // this function is overriden at test_utils TestConnection
-  virtual void SendMsgVecAsync(const PubMessage& pub_msg);
-
-  // Please note, this accept the message by value, since we really want to
-  // create a new copy here, so that we would not need to "worry" about memory
-  // management, we are assuming that we would not have many copy for this, and that
-  // we would not need in this way to sync on the lifetime of the message
-  void SendMonitorMsg(std::string monitor_msg);
+  virtual void SendMsgVecAsync(const PubMessage& pub_msg, util::fibers_ext::BlockingCounter bc);
 
   void SetName(std::string_view name) {
     CopyCharBuf(name, sizeof(name_), name_);
-  }
-
-  const char* GetName() const {
-    return name_;
   }
 
   void SetPhase(std::string_view phase) {
@@ -82,7 +70,6 @@ class Connection : public util::Connection {
   }
 
   std::string GetClientInfo() const;
-  std::string RemoteEndpointStr() const;
   uint32 GetClientId() const;
 
   void ShutdownSelf();
@@ -129,16 +116,11 @@ class Connection : public util::Connection {
   std::unique_ptr<ConnectionContext> cc_;
 
   struct Request;
-  struct DispatchOperations;
-  struct DispatchCleanup;
-  struct RequestDeleter;
-
-  using RequestPtr = std::unique_ptr<Request, RequestDeleter>;
 
   // args are passed deliberately by value - to pass the ownership.
-  static RequestPtr FromArgs(RespVec args, mi_heap_t* heap);
+  static Request* FromArgs(RespVec args, mi_heap_t* heap);
 
-  std::deque<RequestPtr> dispatch_q_;  // coordinated via evc_.
+  std::deque<Request*> dispatch_q_;  // coordinated via evc_.
   util::fibers_ext::EventCount evc_;
 
   RespVec parse_args_;

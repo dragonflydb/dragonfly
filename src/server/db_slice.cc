@@ -340,7 +340,7 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
     auto res = FindExt(cntx, key);
 
     if (IsValid(res.first)) {
-      return tuple_cat(res, make_tuple(false));
+      return tuple_cat(res, make_tuple(true));
     }
 
     // It's a new entry.
@@ -419,6 +419,8 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
       // Keep the entry but reset the object.
       size_t value_heap_size = existing->second.MallocUsed();
       db.stats.obj_memory_usage -= value_heap_size;
+      if (existing->second.ObjType() == OBJ_STRING)
+        db.stats.obj_memory_usage -= value_heap_size;
 
       existing->second.Reset();
       events_.expired_keys++;
@@ -542,7 +544,7 @@ uint32_t DbSlice::GetMCFlag(DbIndex db_ind, const PrimeKey& key) const {
 
 PrimeIterator DbSlice::AddNew(const Context& cntx, string_view key, PrimeValue obj,
                               uint64_t expire_at_ms) noexcept(false) {
-  auto [it, added] = AddOrSkip(cntx, key, std::move(obj), expire_at_ms);
+  auto [it, added] = AddEntry(cntx, key, std::move(obj), expire_at_ms);
   CHECK(added);
 
   return it;
@@ -571,14 +573,12 @@ OpStatus DbSlice::UpdateExpire(const Context& cntx, PrimeIterator prime_it,
   return OpStatus::OK;
 }
 
-std::pair<PrimeIterator, bool> DbSlice::AddOrUpdateInternal(const Context& cntx,
-                                                            std::string_view key, PrimeValue obj,
-                                                            uint64_t expire_at_ms,
-                                                            bool force_update) noexcept(false) {
+pair<PrimeIterator, bool> DbSlice::AddEntry(const Context& cntx, string_view key, PrimeValue obj,
+                                            uint64_t expire_at_ms) noexcept(false) {
   DCHECK(!obj.IsRef());
 
   pair<PrimeIterator, bool> res = AddOrFind(cntx, key);
-  if (!res.second && !force_update)  // have not inserted.
+  if (!res.second)  // have not inserted.
     return res;
 
   auto& db = *db_arr_[cntx.db_index];
@@ -590,24 +590,10 @@ std::pair<PrimeIterator, bool> DbSlice::AddOrUpdateInternal(const Context& cntx,
   if (expire_at_ms) {
     it->second.SetExpire(true);
     uint64_t delta = expire_at_ms - expire_base_[0];
-    auto [eit, inserted] = db.expire.Insert(it->first.AsRef(), ExpirePeriod(delta));
-    CHECK(inserted || force_update);
-    if (!inserted) {
-      eit->second = ExpirePeriod(delta);
-    }
+    CHECK(db.expire.Insert(it->first.AsRef(), ExpirePeriod(delta)).second);
   }
 
   return res;
-}
-
-pair<PrimeIterator, bool> DbSlice::AddOrUpdate(const Context& cntx, string_view key, PrimeValue obj,
-                                               uint64_t expire_at_ms) noexcept(false) {
-  return AddOrUpdateInternal(cntx, key, std::move(obj), expire_at_ms, true);
-}
-
-pair<PrimeIterator, bool> DbSlice::AddOrSkip(const Context& cntx, string_view key, PrimeValue obj,
-                                             uint64_t expire_at_ms) noexcept(false) {
-  return AddOrUpdateInternal(cntx, key, std::move(obj), expire_at_ms, false);
 }
 
 size_t DbSlice::DbSize(DbIndex db_ind) const {
@@ -749,28 +735,6 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
   ++events_.expired_keys;
 
   return make_pair(PrimeIterator{}, ExpireIterator{});
-}
-
-void DbSlice::ExpireAllIfNeeded() {
-  for (DbIndex db_index = 0; db_index < db_arr_.size(); db_index++) {
-    if (!db_arr_[db_index])
-      continue;
-    auto& db = *db_arr_[db_index];
-
-    auto cb = [&](ExpireTable::iterator exp_it) {
-      auto prime_it = db.prime.Find(exp_it->first);
-      if (!IsValid(prime_it)) {
-        LOG(ERROR) << "Expire entry " << exp_it->first.ToString() << " not found in prime table";
-        return;
-      }
-      ExpireIfNeeded(DbSlice::Context{db_index, GetCurrentTimeMs()}, prime_it);
-    };
-
-    ExpireTable::Cursor cursor;
-    do {
-      cursor = db.expire.Traverse(cursor, cb);
-    } while (cursor);
-  }
 }
 
 uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {

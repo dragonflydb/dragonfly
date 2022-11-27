@@ -16,13 +16,14 @@ extern "C" {
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "facade/dragonfly_connection.h"
-#include "util/epoll/epoll_pool.h"
 #include "util/uring/uring_pool.h"
+#include "util/epoll/epoll_pool.h"
 
 using namespace std;
 
 ABSL_DECLARE_FLAG(string, dbfilename);
 ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to run tests");
+
 
 namespace dfly {
 
@@ -46,19 +47,21 @@ TestConnection::TestConnection(Protocol protocol)
     : facade::Connection(protocol, nullptr, nullptr, nullptr) {
 }
 
-void TestConnection::SendMsgVecAsync(const PubMessage& pmsg) {
+void TestConnection::SendMsgVecAsync(const PubMessage& pmsg, util::fibers_ext::BlockingCounter bc) {
   backing_str_.emplace_back(new string(pmsg.channel));
   PubMessage dest;
   dest.channel = *backing_str_.back();
 
-  backing_str_.emplace_back(new string(*pmsg.message));
-  dest.message = pmsg.message;
+  backing_str_.emplace_back(new string(pmsg.message));
+  dest.message = *backing_str_.back();
 
   if (!pmsg.pattern.empty()) {
     backing_str_.emplace_back(new string(pmsg.pattern));
     dest.pattern = *backing_str_.back();
   }
   messages.push_back(dest);
+
+  bc.Dec();
 }
 
 class BaseFamilyTest::TestConnWrapper {
@@ -136,7 +139,9 @@ void BaseFamilyTest::SetUp() {
   service_->Init(nullptr, nullptr, opts);
 
   TEST_current_time_ms = absl::GetCurrentTimeNanos() / 1000000;
-  auto cb = [&](EngineShard* s) { s->db_slice().UpdateExpireBase(TEST_current_time_ms - 1000, 0); };
+  auto cb = [&](EngineShard* s) {
+    s->db_slice().UpdateExpireBase(TEST_current_time_ms - 1000, 0);
+  };
   shard_set->RunBriefInParallel(cb);
 
   const TestInfo* const test_info = UnitTest::GetInstance()->current_test_info();
@@ -154,7 +159,7 @@ void BaseFamilyTest::TearDown() {
 
 void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double timeout) {
   auto step = 50us;
-  auto timeout_micro = chrono::duration_cast<chrono::microseconds>(1000ms * timeout);
+  auto timeout_micro = chrono::duration_cast<chrono::microseconds> (1000ms * timeout);
   int64_t steps = timeout_micro.count() / step.count();
   do {
     ::boost::this_fiber::sleep_for(step);

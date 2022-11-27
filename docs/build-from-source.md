@@ -7,6 +7,9 @@ but you can also run Dragonfly on older kernels as well.
 
 ### WARNING: Building from source on older kernels WILL NOT WORK.
 
+If your host machine does not have at least `Linux verion 5.10` or later, we suggest you choose a [Dockerized Quick Start](/docs/quick-start/).
+
+
 ## Step 1
 
 ```bash

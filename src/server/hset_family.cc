@@ -26,6 +26,48 @@ using namespace facade;
 
 namespace {
 
+struct ScanOpts {
+  string_view pattern;
+  size_t limit = 10;
+
+  constexpr bool Matches(std::string_view val_name) const {
+    return pattern.empty() ? true
+                           : stringmatchlen(pattern.data(), pattern.size(), val_name.data(),
+                                            val_name.size(), 0);
+  }
+
+  static OpResult<ScanOpts> TryFrom(CmdArgList args);
+};
+
+OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
+  ScanOpts scan_opts;
+
+  for (unsigned i = 3; i < args.size(); i += 2) {
+    ToUpper(&args[i]);
+    string_view opt = ArgS(args, i);
+    if (i + 1 == args.size()) {
+      return OpStatus::SYNTAX_ERR;
+    }
+
+    if (opt == "COUNT") {
+      if (!absl::SimpleAtoi(ArgS(args, i + 1), &scan_opts.limit)) {
+        return OpStatus::INVALID_INT;
+      }
+      if (scan_opts.limit == 0)
+        scan_opts.limit = 1;
+      else if (scan_opts.limit > 4096)
+        scan_opts.limit = 4096;
+    } else if (opt == "MATCH") {
+      scan_opts.pattern = ArgS(args, i + 1);
+      if (scan_opts.pattern == "*")
+        scan_opts.pattern = string_view{};
+    } else {
+      return OpStatus::SYNTAX_ERR;
+    }
+  }
+  return scan_opts;
+}
+
 constexpr size_t kMaxListPackLen = 1024;
 using IncrByParam = std::variant<double, int64_t>;
 using OptStr = std::optional<std::string>;
@@ -52,17 +94,10 @@ string LpGetVal(uint8_t* lp_it) {
   return absl::StrCat(ele_len);
 }
 
-string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]) {
-  int64_t ele_len = 0;
-  uint8_t* elem = lpGet(lp_it, &ele_len, int_buf);
-  DCHECK(elem);
-  return string_view{reinterpret_cast<char*>(elem), size_t(ele_len)};
-}
-
 // returns a new pointer to lp. Returns true if field was inserted or false it it already existed.
 // skip_exists controls what happens if the field already existed. If skip_exists = true,
 // then val does not override the value and listpack is not changed. Otherwise, the corresponding
-// value is overridden by val.
+// value is overriden by val.
 pair<uint8_t*, bool> LpInsert(uint8_t* lp, string_view field, string_view val, bool skip_exists) {
   uint8_t* vptr;
 
@@ -111,20 +146,20 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   robj* hset = nullptr;
   size_t lpb = 0;
 
-  PrimeValue& pv = it->second;
   if (inserted) {
-    pv.InitRobj(OBJ_HASH, kEncodingListPack, lpNew(0));
+    hset = createHashObject();
+    it->second.ImportRObj(hset);
     stats->listpack_blob_cnt++;
     hset = it->second.AsRObj();
   } else {
-    if (pv.ObjType() != OBJ_HASH)
+    if (it->second.ObjType() != OBJ_HASH)
       return OpStatus::WRONG_TYPE;
 
     db_slice.PreUpdate(op_args.db_cntx.db_index, it);
     hset = it->second.AsRObj();
 
-    if (pv.Encoding() == kEncodingListPack) {
-      lpb = lpBytes((uint8_t*)pv.RObjPtr());
+    if (hset->encoding == OBJ_ENCODING_LISTPACK) {
+      lpb = lpBytes((uint8_t*)hset->ptr);
       stats->listpack_bytes -= lpb;
 
       if (lpb >= kMaxListPackLen) {
@@ -134,8 +169,7 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
     }
   }
 
-  int enc = pv.Encoding();
-  uint8_t* vstr = NULL;
+  unsigned char* vstr = NULL;
   unsigned int vlen = UINT_MAX;
   long long old_val = 0;
 
@@ -171,19 +205,18 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
     char* str = RedisReplyBuilder::FormatDouble(value, buf, sizeof(buf));
     string_view sval{str};
 
-    if (enc == kEncodingListPack) {
-      uint8_t* lp = (uint8_t*)pv.RObjPtr();
+    if (hset->encoding == OBJ_ENCODING_LISTPACK) {
+      uint8_t* lp = (uint8_t*)hset->ptr;
 
       lp = LpInsert(lp, field, sval, false).first;
-      pv.SetRObjPtr(lp);
+      hset->ptr = lp;
       stats->listpack_bytes += lpBytes(lp);
     } else {
       sds news = sdsnewlen(str, sval.size());
       hashTypeSet(hset, op_args.shard->tmp_str1, news, HASH_SET_TAKE_VALUE);
-      pv.SyncRObj();
     }
     param->emplace<double>(value);
-  } else {  // integer increment
+  } else {
     if (exist_res == C_OK && vstr) {
       const char* exist_val = reinterpret_cast<char*>(vstr);
       if (!string2ll(exist_val, vlen, &old_val)) {
@@ -192,7 +225,6 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
         return OpStatus::INVALID_VALUE;
       }
     }
-
     int64_t incr = get<int64_t>(*param);
     if ((incr < 0 && old_val < 0 && incr < (LLONG_MIN - old_val)) ||
         (incr > 0 && old_val > 0 && incr > (LLONG_MAX - old_val))) {
@@ -202,24 +234,24 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
     }
 
     int64_t new_val = old_val + incr;
-    char buf[32];
-    char* next = absl::numbers_internal::FastIntToBuffer(new_val, buf);
-    string_view sval{buf, size_t(next - buf)};
 
-    if (enc == kEncodingListPack) {
-      uint8_t* lp = (uint8_t*)pv.RObjPtr();
+    if (hset->encoding == OBJ_ENCODING_LISTPACK) {
+      char buf[32];
+      char* next = absl::numbers_internal::FastIntToBuffer(new_val, buf);
+      string_view sval{buf, size_t(next - buf)};
+      uint8_t* lp = (uint8_t*)hset->ptr;
 
       lp = LpInsert(lp, field, sval, false).first;
-      pv.SetRObjPtr(lp);
+      hset->ptr = lp;
       stats->listpack_bytes += lpBytes(lp);
     } else {
       sds news = sdsfromlonglong(new_val);
       hashTypeSet(hset, op_args.shard->tmp_str1, news, HASH_SET_TAKE_VALUE);
-      pv.SyncRObj();
     }
     param->emplace<int64_t>(new_val);
   }
 
+  it->second.SyncRObj();
   db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
 
   return OpStatus::OK;
@@ -254,21 +286,18 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
 
     DCHECK(lp_elem);  // empty containers are not allowed.
 
+    int64_t ele_len;
     unsigned char intbuf[LP_INTBUF_SIZE];
 
     // We do single pass on listpack for this operation - ignore any limits.
     do {
-      string_view key = LpGetView(lp_elem, intbuf);
-      lp_elem = lpNext(lp, lp_elem);  // switch to value
-      DCHECK(lp_elem);
-
-      if (scan_op.Matches(key)) {
-        res.emplace_back(key);
-        res.emplace_back(LpGetView(lp_elem, intbuf));
+      uint8_t* elem = lpGet(lp_elem, &ele_len, intbuf);
+      DCHECK(elem);
+      if (scan_op.Matches({reinterpret_cast<char*>(elem), size_t(ele_len)})) {
+        res.emplace_back(reinterpret_cast<char*>(elem), size_t(ele_len));
       }
-      lp_elem = lpNext(lp, lp_elem);  // switch to next key
+      lp_elem = lpNext(lp, lp_elem);  // switch to value
     } while (lp_elem);
-
     *cursor = 0;
   } else {
     dict* ht = (dict*)hset->ptr;
@@ -553,13 +582,15 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
 
   DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
 
+  robj* hset = nullptr;
   uint8_t* lp = nullptr;
   PrimeIterator& it = add_res.first;
 
   if (add_res.second) {  // new key
-    lp = lpNew(0);
-    it->second.InitRobj(OBJ_HASH, kEncodingListPack, lp);
+    hset = createHashObject();
+    lp = (uint8_t*)hset->ptr;
 
+    it->second.ImportRObj(hset);
     stats->listpack_blob_cnt++;
     stats->listpack_bytes += lpBytes(lp);
   } else {
@@ -568,7 +599,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
 
     db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   }
-  robj* hset = it->second.AsRObj();
+  hset = it->second.AsRObj();
 
   if (hset->encoding == OBJ_ENCODING_LISTPACK) {
     lp = (uint8_t*)hset->ptr;
@@ -839,7 +870,7 @@ void HSetFamily::HScan(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kSyntaxErr);
   }
 
-  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(3));
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args);
   if (!ops) {
     DVLOG(1) << "HScan invalid args - return " << ops << " to the user";
     return (*cntx)->SendError(ops.status());
@@ -854,7 +885,7 @@ void HSetFamily::HScan(CmdArgList args, ConnectionContext* cntx) {
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
     (*cntx)->StartArray(2);
-    (*cntx)->SendBulkString(absl::StrCat(cursor));
+    (*cntx)->SendSimpleString(absl::StrCat(cursor));
     (*cntx)->StartArray(result->size());
     for (const auto& k : *result) {
       (*cntx)->SendBulkString(k);

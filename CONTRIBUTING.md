@@ -4,43 +4,47 @@ Thank you for your interest in Dragonfly DB.
 
 Feel free to browse our [Discussions](https://github.com/dragonflydb/dragonfly/discussions) and [Issues](https://github.com/dragonflydb/dragonfly/issues)
 
+# Best Practices
 
-## Build from source
-
-See [building from source](./docs/build-from-source.md)
-
-Please note that in order to build development/debug version,
-it's better to alter the configure and build steps above with:
-
-```sh
-./helio/blaze.sh   # without '-release' flag. Creates build-dbg subfolder
-cd build-dbg && ninja dragonfly
+## Fork and Clone the DragonflyDB repository
 ```
+# Fork https://github.com/dragonflydb/dragonfly
 
+# Clone from your fork
+git@github.com:<YOURUSERNAME>/dragonfly.git
 
-## Before you make your changes
-
-```sh
-cd dragonfly   # project root
-
-# Make sure you have 'pre-commit' e 'clang-format' installed
-pip install pre-commit clang-format
+cd dragonfly
 
 # IMPORTANT! Enable our pre-commit message hooks
 # This will ensure your commits match our formatting requirements
-pre-commit install
+pre-commit install --hook-type commit-msg
 ```
 
-This step must be done on each machine you wish to develop and contribute from to activate the `commit-msg` and `commit` hooks client-side.
+This step must be done on each machine you wish to develop and contribute from to activate the `commit-msg` hook client-side.
 
 Once you have done these things, we look forward to adding your contributions and improvements to the Dragonfly DB project.
 
+## Build from source
+```
+# to install dependencies
+sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
+     autoconf-archive libtool cmake g++
+
+# Configure the build
+./helio/blaze.sh -release
+
+# Build
+cd build-opt && ninja dragonfly
+
+# Run
+./dragonfly --alsologtostderr
+```
 
 ## Unit testing
 ```
 # Build specific test
-cd build-dbg && ninja [test_name]
-# e.g cd build-dbg && ninja generic_family_test
+cd build-opt && ninja [test_name]
+# e.g cd build-opt && ninja generic_family_test 
 
 # Run
 ./[test_name]
@@ -90,6 +94,7 @@ normalize formatting of code. You need to install and enable pre-commit to have 
 when you do your own commits.
 
 ## License terms for contributions
-Please see our [CLA agreement](./CLA.txt)
+This Project welcomes contributions, suggestions, and feedback.  Dragonfly uses the BSL license. You represent that if you do not own copyright in the code that you have the authority to submit it under the BSL. All feedback, suggestions, or contributions are not confidential.
+
 
 ## THANK YOU FOR YOUR CONTRIBUTIONS

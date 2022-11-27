@@ -92,82 +92,6 @@ TEST_F(StringFamilyTest, Expire) {
   ASSERT_THAT(Run({"incr", "i"}), IntArg(1));
 }
 
-TEST_F(StringFamilyTest, Keepttl) {
-  ASSERT_EQ(Run({"set", "key", "val", "EX", "100"}), "OK");
-  ASSERT_EQ(Run({"set", "key", "val"}), "OK");
-  auto resp = Run({"ttl", "key"});
-  auto actual = get<int64_t>(resp.u);
-  ASSERT_EQ(actual, -1);
-
-  resp = Run({"set", "key", "val", "EX", "200"});
-  ASSERT_EQ(Run({"set", "key", "val", "KEEPTTL"}), "OK");
-
-  resp = Run({"ttl", "key"});
-  actual = get<int64_t>(resp.u);
-
-  EXPECT_TRUE(actual > 0 && actual <= 200);
-}
-
-TEST_F(StringFamilyTest, SetOptionsSyntaxError) {
-  auto TEST_current_time_s = TEST_current_time_ms / 1000;
-
-  EXPECT_THAT(Run({"set", "key", "val", "EX", "1030", "PX", "1030"}), ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "EX", "1030", "EXAT", absl::StrCat(TEST_current_time_s + 1030)}),
-      ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "EX", "1030", "PXAT", absl::StrCat(TEST_current_time_ms + 1030)}),
-      ErrArg("ERR syntax error"));
-
-  EXPECT_THAT(Run({"set", "key", "val", "PX", "1030", "EX", "1030"}), ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "PX", "1030", "EXAT", absl::StrCat(TEST_current_time_s + 1030)}),
-      ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "PX", "1030", "PXAT", absl::StrCat(TEST_current_time_ms + 1030)}),
-      ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "EXAT", absl::StrCat(TEST_current_time_s + 1030), "EX", "1030"}),
-      ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "EXAT", absl::StrCat(TEST_current_time_s + 1030), "PX", "1030"}),
-      ErrArg("ERR syntax error"));
-  EXPECT_THAT(Run({"set", "key", "val", "EXAT", absl::StrCat(TEST_current_time_s + 1030), "PXAT",
-                   absl::StrCat(TEST_current_time_ms + 1030)}),
-              ErrArg("ERR syntax error"));
-
-  EXPECT_THAT(
-      Run({"set", "key", "val", "PXAT", absl::StrCat(TEST_current_time_ms + 1030), "EX", "1030"}),
-      ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "PXAT", absl::StrCat(TEST_current_time_ms + 1030), "PX", "1030"}),
-      ErrArg("ERR syntax error"));
-  EXPECT_THAT(Run({"set", "key", "val", "PXAT", absl::StrCat(TEST_current_time_ms + 1030), "EXAT",
-                   absl::StrCat(TEST_current_time_s + 1030)}),
-              ErrArg("ERR syntax error"));
-
-  EXPECT_THAT(Run({"set", "key", "val", "EX", "1030", "KEEPTTL"}), ErrArg("ERR syntax error"));
-  EXPECT_THAT(Run({"set", "key", "val", "PX", "1030", "KEEPTTL"}), ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "EXAT", absl::StrCat(TEST_current_time_s + 1030), "KEEPTTL"}),
-      ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "PXAT", absl::StrCat(TEST_current_time_ms + 1030), "KEEPTTL"}),
-      ErrArg("ERR syntax error"));
-
-  EXPECT_THAT(Run({"set", "key", "val", "KEEPTTL", "PX", "1030"}), ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "KEEPTTL", "PXAT", absl::StrCat(TEST_current_time_ms + 1030)}),
-      ErrArg("ERR syntax error"));
-  EXPECT_THAT(Run({"set", "key", "val", "KEEPTTL", "EX", "1030"}), ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "KEEPTTL", "EXAT", absl::StrCat(TEST_current_time_s + 1030)}),
-      ErrArg("ERR syntax error"));
-
-  EXPECT_THAT(Run({"set", "key", "val", "NX", "XX"}), ErrArg("ERR syntax error"));
-  EXPECT_THAT(Run({"set", "key", "val", "XX", "NX"}), ErrArg("ERR syntax error"));
-}
-
 TEST_F(StringFamilyTest, Set) {
   auto resp = Run({"set", "foo", "bar", "XX"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
@@ -433,12 +357,15 @@ TEST_F(StringFamilyTest, SetNx) {
 }
 
 TEST_F(StringFamilyTest, SetPxAtExAt) {
-  // Expiration time as set at unix time
-  auto TEST_current_time_s = TEST_current_time_ms / 1000;
+  using std::chrono::duration_cast;
+  using std::chrono::milliseconds;
+  using std::chrono::seconds;
+  using std::chrono::system_clock;
 
+  // Expiration time as set at unix time
   auto resp = Run({"set", "foo", "bar", "EXAT", "-1"});
   ASSERT_THAT(resp, ErrArg("invalid expire time"));
-  resp = Run({"set", "foo", "bar", "EXAT", absl::StrCat(TEST_current_time_s - 1)});
+  resp = Run({"set", "foo", "bar", "EXAT", std::to_string(time(nullptr) - 1)});
   ASSERT_THAT(resp, "OK");  // it would return OK but will not set the value - expiration time is 0
                             // (checked with Redis)
   EXPECT_EQ(Run({"get", "foo"}).type, facade::RespExpr::NIL);
@@ -446,15 +373,16 @@ TEST_F(StringFamilyTest, SetPxAtExAt) {
   resp = Run({"set", "foo", "bar", "PXAT", "-1"});
   ASSERT_THAT(resp, ErrArg("invalid expire time"));
 
-  resp = Run({"set", "foo", "bar", "PXAT", absl::StrCat(TEST_current_time_ms - 23)});
+  auto now = duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+  resp = Run({"set", "foo", "bar", "PXAT", std::to_string(now - 23)});
   ASSERT_THAT(resp, "OK");  // it would return OK but will not set the value (checked with Redis)
   EXPECT_EQ(Run({"get", "foo"}).type, facade::RespExpr::NIL);
 
-  resp = Run({"set", "foo", "bar", "EXAT", absl::StrCat(TEST_current_time_s + 1)});
+  resp = Run({"set", "foo", "bar", "EXAT", std::to_string(time(nullptr) + 1)});
   ASSERT_THAT(resp, "OK");  // valid expiration time
   EXPECT_EQ(Run({"get", "foo"}), "bar");
 
-  resp = Run({"set", "foo2", "abc", "PXAT", absl::StrCat(TEST_current_time_ms + 300)});
+  resp = Run({"set", "foo2", "abc", "PXAT", std::to_string(now + 300)});
   ASSERT_THAT(resp, "OK");
   EXPECT_EQ(Run({"get", "foo2"}), "abc");
 }

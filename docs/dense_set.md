@@ -49,13 +49,9 @@ At 100% utilization the Redis dictionary implementation uses approximately 32 by
 
 In comparison using the neighbour cell optimization, `DenseSet` has ~21% of spaces unused at full utilization resulting in $N\*8 + 0.2\*16N \approx 11.2N$ or ~12 bytes per record, yielding ~20 byte savings. The number of bytes per record saved grows as utilization decreases.
 
-Command `memtier_benchmark -p 6379 --command "sadd __key__ __data__"   -n 10000000 --threads=1 -c 1 --command-key-pattern=R   --data-size=10     --key-prefix="key:"  --hide-histogram --random-data --key-maximum=1 --randomize --pipeline 20`
-produces two sets entries with lots of small records in them.
+Inserting 20M 10 byte strings into a set in chunks of 500 on an i5-8250U give the following results
 
-This is how memory usage looks like with DenseSet:
-
-| Server                | Memory (RSS) |
-|:---------------------:|:------:      |
-| Dragonfly/DenseSet    |  323MB 🟩    |
-| Redis                 |  586MB       |
-| Dragonfly/RedisDict   |  663MB       |
+|             | Dragonfly (DenseSet) | Dragonfly (Redis Dictionary) | Redis 7 |
+|-------------|----------------------|------------------------------|---------|
+| Time        |    44.1s             |            46.9s             |  50.3s  |
+| Memory used |    626.44MiB         |            1.27G             |  1.27G  |

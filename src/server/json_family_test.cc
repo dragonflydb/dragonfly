@@ -72,7 +72,8 @@ TEST_F(JsonFamilyTest, SetGetBasic) {
   EXPECT_THAT(resp, ArgType(RespExpr::ERROR));
 }
 
-static const string PhonebookJson = R"(
+TEST_F(JsonFamilyTest, SetGetFromPhonebook) {
+  string json = R"(
     {
       "firstName":"John",
       "lastName":"Smith",
@@ -102,8 +103,7 @@ static const string PhonebookJson = R"(
     }
   )";
 
-TEST_F(JsonFamilyTest, SetGetFromPhonebook) {
-  auto resp = Run({"set", "json", PhonebookJson});
+  auto resp = Run({"set", "json", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.GET", "json", "$.address.*"});
@@ -776,36 +776,6 @@ TEST_F(JsonFamilyTest, ArrInsert) {
   EXPECT_EQ(resp, R"([["b","c","a"],["a","c","b","a"],["a","c","a","b","b"]])");
 }
 
-TEST_F(JsonFamilyTest, ArrAppend) {
-  string json = R"(
-    [[], ["a"], ["a", "b"]]
-  )";
-
-  auto resp = Run({"set", "json", json});
-  ASSERT_THAT(resp, "OK");
-
-  resp = Run({"JSON.ARRAPPEND", "json", "$[*]", R"("a")"});
-  ASSERT_EQ(RespExpr::ARRAY, resp.type);
-  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(1), IntArg(2), IntArg(3)));
-
-  resp = Run({"JSON.ARRAPPEND", "json", "$[*]", R"("b")"});
-  ASSERT_EQ(RespExpr::ARRAY, resp.type);
-  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(2), IntArg(3), IntArg(4)));
-
-  json = R"(
-    {"a": [1], "nested": {"a": [1,2], "nested2": {"a": 42}}}
-  )";
-  resp = Run({"set", "json", json});
-  ASSERT_THAT(resp, "OK");
-
-  resp = Run({"JSON.ARRAPPEND", "json", "$..a", "3"});
-  ASSERT_EQ(RespExpr::ARRAY, resp.type);
-  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(2), IntArg(3), ArgType(RespExpr::NIL)));
-
-  resp = Run({"GET", "json"});
-  EXPECT_EQ(resp, R"({"a":[1,3],"nested":{"a":[1,2,3],"nested2":{"a":42}}})");
-}
-
 TEST_F(JsonFamilyTest, ArrIndex) {
   string json = R"(
     [[], ["a"], ["a", "b"], ["a", "b", "c"]]
@@ -839,75 +809,6 @@ TEST_F(JsonFamilyTest, ArrIndex) {
   resp = Run({"JSON.ARRINDEX", "json", "$..a", R"("b")"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(1), ArgType(RespExpr::NIL)));
-}
-
-TEST_F(JsonFamilyTest, MGet) {
-  string json[] = {
-      R"(
-    {"address":{"street":"14 Imber Street","city":"Petah-Tikva","country":"Israel","zipcode":"49511"}}
-  )",
-      R"(
-    {"address":{"street":"Oranienburger Str. 27","city":"Berlin","country":"Germany","zipcode":"10117"}}
-  )"};
-
-  auto resp = Run({"set", "json1", json[0]});
-  ASSERT_THAT(resp, "OK");
-
-  resp = Run({"set", "json2", json[1]});
-  ASSERT_THAT(resp, "OK");
-
-  resp = Run({"JSON.MGET", "json1", "json2", "json3", "$.address.country"});
-  ASSERT_EQ(RespExpr::ARRAY, resp.type);
-  EXPECT_THAT(resp.GetVec(), ElementsAre(R"("Israel")", R"("Germany")", ArgType(RespExpr::NIL)));
-}
-
-TEST_F(JsonFamilyTest, DebugFields) {
-  string json = R"(
-    [1, 2.3, "foo", true, null, {}, [], {"a":1, "b":2}, [1,2,3]]
-  )";
-
-  auto resp = Run({"set", "json1", json});
-  ASSERT_THAT(resp, "OK");
-
-  resp = Run({"JSON.DEBUG", "fields", "json1", "$[*]"});
-  ASSERT_EQ(RespExpr::ARRAY, resp.type);
-  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(1), IntArg(1), IntArg(1), IntArg(1), IntArg(1),
-                                         IntArg(0), IntArg(0), IntArg(2), IntArg(3)));
-
-  resp = Run({"JSON.DEBUG", "fields", "json1", "$"});
-  EXPECT_THAT(resp, IntArg(14));
-
-  json = R"(
-    [[1,2,3, [4,5,6,[6,7,8]]], {"a": {"b": {"c": 1337}}}]
-  )";
-
-  resp = Run({"set", "json1", json});
-  ASSERT_THAT(resp, "OK");
-
-  resp = Run({"JSON.DEBUG", "fields", "json1", "$[*]"});
-  ASSERT_EQ(RespExpr::ARRAY, resp.type);
-  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(11), IntArg(3)));
-
-  resp = Run({"JSON.DEBUG", "fields", "json1", "$"});
-  EXPECT_THAT(resp, IntArg(16));
-}
-
-TEST_F(JsonFamilyTest, Resp) {
-  auto resp = Run({"set", "json", PhonebookJson});
-  ASSERT_THAT(resp, "OK");
-
-  resp = Run({"JSON.RESP", "json", "$.address.*"});
-  ASSERT_EQ(RespExpr::ARRAY, resp.type);
-  EXPECT_THAT(resp.GetVec(), ElementsAre("New York", "NY", "21 2nd Street", "10021-3100"));
-
-  resp = Run({"JSON.RESP", "json", "$.isAlive"});
-  EXPECT_THAT(resp, "true");
-
-  resp = Run({"JSON.RESP", "json", "$.age"});
-  EXPECT_THAT(resp, IntArg(27));
-
-  resp = Run({"JSON.RESP", "json", "$.weight"});
-  EXPECT_THAT(resp, "135.25");
 }
 
 }  // namespace dfly
