@@ -47,7 +47,7 @@ with respect to Memcached and Redis APIs.
   - [X] SELECT
   - [X] TTL
   - [X] TYPE
-  - [X] SORT
+  - [ ] SORT
 - [X] Server Family
   - [X] AUTH
   - [X] QUIT
@@ -104,7 +104,7 @@ with respect to Memcached and Redis APIs.
   - [X] ZSCORE
 - [ ] Other
   - [ ] BGREWRITEAOF
-  - [x] MONITOR
+  - [ ] MONITOR
   - [ ] RANDOMKEY
 
 ### API 2
@@ -122,7 +122,7 @@ with respect to Memcached and Redis APIs.
   - [x] BITCOUNT
   - [ ] BITFIELD
   - [x] BITOP
-  - [x] BITPOS
+  - [ ] BITPOS
   - [x] GETBIT
   - [X] GETRANGE
   - [X] INCRBYFLOAT
@@ -157,7 +157,7 @@ with respect to Memcached and Redis APIs.
   - [X] WATCH
   - [X] UNWATCH
   - [X] DISCARD
-  - [X] CLIENT LIST/SETNAME/GETNAME
+  - [X] CLIENT LIST/SETNAME
   - [ ] CLIENT KILL/UNPAUSE/PAUSE/GETNAME/REPLY/TRACKINGINFO
   - [X] COMMAND
   - [X] COMMAND COUNT
@@ -172,14 +172,14 @@ with respect to Memcached and Redis APIs.
 - [X] Generic Family
   - [X] SCAN
   - [X] PEXPIREAT
-  - [X] PEXPIRE
+  - [ ] PEXPIRE
   - [x] DUMP
   - [X] EVAL
   - [X] EVALSHA
   - [ ] OBJECT
   - [x] PERSIST
   - [X] PTTL
-  - [x] RESTORE
+  - [ ] RESTORE
   - [X] SCRIPT LOAD/EXISTS
   - [ ] SCRIPT DEBUG/KILL/FLUSH
 - [X] Set Family
@@ -202,8 +202,8 @@ with respect to Memcached and Redis APIs.
   - [ ] PFMERGE
 
 ### API 3
-- [X] Generic Family
-  - [X] TOUCH
+- [ ] Generic Family
+  - [ ] TOUCH 
 - [X] HashSet Family
   - [X] HSTRLEN
 - [X] Server Family
@@ -236,26 +236,9 @@ with respect to Memcached and Redis APIs.
   - [X] XSETID
   - [ ] XTRIM
 
-- [X] Sorted Set Family
-  - [X] ZPOPMIN
-  - [X] ZPOPMAX
-
-### API 6
-- [X] String Family
-  - [X] GETEX
-
-- [X] Set Family
-  - [X] SMISMEMBER
-
-- [X] List Family
-  - [X] LMOVE
-  - [X] LPOS
-
+### API 6,7
 - [ ] Stream Family
   - [ ] XAUTOCLAIM
-
-- [ ] Sorted Set Family
-  - [ ] ZUNION
 
 ## Notes
 Some commands were implemented as decorators along the way:

@@ -23,7 +23,7 @@ void MiStatsCallback(const char* msg, void* arg) {
   absl::StrAppend(str, msg);
 }
 
-// blocksize, reserved, committed, used.
+// blocksize, reserved, commited, used.
 using BlockKey = std::tuple<size_t, size_t, size_t, size_t>;
 using BlockMap = absl::flat_hash_map<BlockKey, uint64_t>;
 
@@ -47,13 +47,7 @@ void MemoryCmd::Run(CmdArgList args) {
     // dummy output, in practice not implemented yet.
     return (*cntx_)->SendLong(1);
   } else if (sub_cmd == "MALLOC-STATS") {
-    uint32_t tid = 0;
-    if (args.size() >= 3 && !absl::SimpleAtoi(ArgS(args, 2), &tid)) {
-      return (*cntx_)->SendError(kInvalidIntErr);
-    }
-    tid = tid % shard_set->pool()->size();
-    string res = shard_set->pool()->at(tid)->AwaitBrief([&] { return MallocStats(tid); });
-
+    string res = shard_set->pool()->at(0)->AwaitBrief([this] { return MallocStats(); });
     return (*cntx_)->SendBulkString(res);
   }
 
@@ -61,33 +55,25 @@ void MemoryCmd::Run(CmdArgList args) {
   return (*cntx_)->SendError(err, kSyntaxErrType);
 }
 
-string MemoryCmd::MallocStats(unsigned tid) {
+string MemoryCmd::MallocStats() {
   string str;
-
-  uint64_t start = absl::GetCurrentTimeNanos();
   absl::StrAppend(&str, "___ Begin mimalloc statistics ___\n");
   mi_stats_print_out(MiStatsCallback, &str);
 
-  absl::StrAppend(&str, "\nArena statistics from thread:", tid, "\n");
+  absl::StrAppend(&str, "\nArena statistics from a single thread:\n");
   absl::StrAppend(&str, "Count BlockSize Reserved Committed Used\n");
 
   mi_heap_t* data_heap = ServerState::tlocal()->data_heap();
   BlockMap block_map;
 
   mi_heap_visit_blocks(data_heap, false /* visit all blocks*/, MiArenaVisit, &block_map);
-  uint64_t reserved = 0, committed = 0, used = 0;
+
   for (const auto& k_v : block_map) {
     absl::StrAppend(&str, k_v.second, " ", get<0>(k_v.first), " ", get<1>(k_v.first), " ",
                     get<2>(k_v.first), " ", get<3>(k_v.first), "\n");
-    reserved += k_v.second * get<1>(k_v.first);
-    committed += k_v.second * get<2>(k_v.first);
-    used += k_v.second * get<3>(k_v.first);
   }
 
-  uint64_t delta = (absl::GetCurrentTimeNanos() - start) / 1000;
-  absl::StrAppend(&str, "--- End mimalloc statistics, took ", delta, "us ---\n");
-  absl::StrAppend(&str, "total reserved: ", reserved, ", comitted: ", committed, ", used: ", used,
-                  "\n");
+  absl::StrAppend(&str, "--- End mimalloc statistics ---\n");
 
   return str;
 }

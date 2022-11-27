@@ -70,10 +70,12 @@ bool MatchHttp11Line(string_view line) {
 constexpr size_t kMinReadSize = 256;
 constexpr size_t kMaxReadSize = 32_KB;
 
-struct PubMsgRecord {
+struct AsyncMsg {
   Connection::PubMessage pub_msg;
+  fibers_ext::BlockingCounter bc;
 
-  PubMsgRecord(const Connection::PubMessage& pmsg) : pub_msg(pmsg) {
+  AsyncMsg(const Connection::PubMessage& pmsg, fibers_ext::BlockingCounter b)
+      : pub_msg(pmsg), bc(move(b)) {
   }
 };
 
@@ -99,97 +101,20 @@ struct Connection::Shutdown {
   }
 };
 
-// Used as custom deleter for Request object
-struct Connection::RequestDeleter {
-  void operator()(Request* req) const;
-};
-
-// Please note: The call to the Dtor is mandatory for this!!
-// This class contain types that don't have trivial destructed objects
 struct Connection::Request {
-  using MonitorMessage = std::string;
+  absl::FixedArray<MutableSlice, 6> args;
 
-  struct PipelineMsg {
-    absl::FixedArray<MutableSlice, 6> args;
+  // I do not use mi_heap_t explicitly but mi_stl_allocator at the end does the same job
+  // of using the thread's heap.
+  // The capacity is chosen so that we allocate a fully utilized (256 bytes) block.
+  absl::FixedArray<char, kReqStorageSize, mi_stl_allocator<char>> storage;
+  AsyncMsg* async_msg = nullptr;  // allocated and released via mi_malloc.
 
-    // I do not use mi_heap_t explicitly but mi_stl_allocator at the end does the same job
-    // of using the thread's heap.
-    // The capacity is chosen so that we allocate a fully utilized (256 bytes) block.
-    absl::FixedArray<char, kReqStorageSize, mi_stl_allocator<char>> storage;
-
-    PipelineMsg(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
-    }
-  };
-
- private:
-  using MessagePayload = std::variant<PipelineMsg, PubMsgRecord, MonitorMessage>;
-
-  Request(size_t nargs, size_t capacity) : payload(PipelineMsg{nargs, capacity}) {
-  }
-
-  Request(PubMsgRecord msg) : payload(std::move(msg)) {
-  }
-
-  Request(MonitorMessage msg) : payload(std::move(msg)) {
+  Request(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
   }
 
   Request(const Request&) = delete;
-
- public:
-  // Overload to create the a new pipeline message
-  static RequestPtr New(mi_heap_t* heap, RespVec args, size_t capacity);
-
-  // Overload to create a new pubsub message
-  static RequestPtr New(const PubMessage& pub_msg);
-
-  // Overload to create a new the monitor message
-  static RequestPtr New(MonitorMessage msg);
-
-  MessagePayload payload;
 };
-
-Connection::RequestPtr Connection::Request::New(std::string msg) {
-  void* ptr = mi_malloc(sizeof(Request));
-  Request* req = new (ptr) Request(std::move(msg));
-  return Connection::RequestPtr{req, Connection::RequestDeleter{}};
-}
-
-Connection::RequestPtr Connection::Request::New(mi_heap_t* heap, RespVec args, size_t capacity) {
-  constexpr auto kReqSz = sizeof(Request);
-  void* ptr = mi_heap_malloc_small(heap, kReqSz);
-
-  // We must construct in place here, since there is a slice that uses memory locations
-  Request* req = new (ptr) Request(args.size(), capacity);
-  // At this point we know that we have PipelineMsg in Request so next op is safe.
-  Request::PipelineMsg& pipeline_msg = std::get<Request::PipelineMsg>(req->payload);
-  auto* next = pipeline_msg.storage.data();
-  for (size_t i = 0; i < args.size(); ++i) {
-    auto buf = args[i].GetBuf();
-    size_t s = buf.size();
-    memcpy(next, buf.data(), s);
-    pipeline_msg.args[i] = MutableSlice(next, s);
-    next += s;
-  }
-
-  return Connection::RequestPtr{req, Connection::RequestDeleter{}};
-}
-
-Connection::RequestPtr Connection::Request::New(const PubMessage& pub_msg) {
-  // This will generate a new request for pubsub message
-  // Please note that unlike the above case, we don't need to "protect", the internals here
-  // since we are currently using a borrow token for it - i.e. the BlockingCounter will
-  // ensure that the message is not deleted until we are finish sending it at the other
-  // side of the queue
-  PubMsgRecord new_msg{pub_msg};
-  void* ptr = mi_malloc(sizeof(Request));
-  Request* req = new (ptr) Request(std::move(new_msg));
-  return Connection::RequestPtr{req, Connection::RequestDeleter{}};
-}
-
-void Connection::RequestDeleter::operator()(Request* req) const {
-  req->~Request();
-  mi_free(req);
-}
 
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
                        ServiceInterface* service)
@@ -200,6 +125,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 
   constexpr size_t kReqSz = sizeof(Connection::Request);
   static_assert(kReqSz <= 256 && kReqSz >= 232);
+  // LOG(INFO) << "kReqSz: " << kReqSz;
 
   switch (protocol) {
     case Protocol::REDIS:
@@ -337,14 +263,21 @@ void Connection::RegisterOnBreak(BreakerCb breaker_cb) {
   breaker_cb_ = breaker_cb;
 }
 
-void Connection::SendMsgVecAsync(const PubMessage& pub_msg) {
+void Connection::SendMsgVecAsync(const PubMessage& pub_msg, fibers_ext::BlockingCounter bc) {
   DCHECK(cc_);
 
   if (cc_->conn_closing) {
+    bc.Dec();
     return;
   }
-  RequestPtr req = Request::New(pub_msg);  // new (ptr) Request(0, 0);
-  dispatch_q_.push_back(std::move(req));
+
+  void* ptr = mi_malloc(sizeof(AsyncMsg));
+  AsyncMsg* amsg = new (ptr) AsyncMsg(pub_msg, move(bc));
+
+  ptr = mi_malloc(sizeof(Request));
+  Request* req = new (ptr) Request(0, 0);
+  req->async_msg = amsg;
+  dispatch_q_.push_back(req);
   if (dispatch_q_.size() == 1) {
     evc_.notify();
   }
@@ -501,10 +434,12 @@ auto Connection::ParseRedis() -> ParserStatus {
         service_->DispatchCommand(cmd_list, cc_.get());
         last_interaction_ = time(nullptr);
       } else {
-        // Dispatch via queue to speedup input reading.
-        RequestPtr req = FromArgs(std::move(parse_args_), tlh);
+        VLOG(2) << "Dispatch async";
 
-        dispatch_q_.push_back(std::move(req));
+        // Dispatch via queue to speedup input reading.
+        Request* req = FromArgs(std::move(parse_args_), tlh);
+
+        dispatch_q_.push_back(req);
         if (dispatch_q_.size() == 1) {
           evc_.notify();
         } else if (dispatch_q_.size() > 10) {
@@ -661,82 +596,79 @@ auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, Pars
   return parse_status;
 }
 
-struct Connection::DispatchOperations {
-  DispatchOperations(SinkReplyBuilder* b, Connection* me)
-      : stats{me->service_->GetThreadLocalConnectionStats()}, builder{b}, self(me) {
-  }
-
-  void operator()(const PubMsgRecord& msg);
-  void operator()(Request::PipelineMsg& msg);
-  void operator()(const Request::MonitorMessage& msg);
-
-  ConnectionStats* stats = nullptr;
-  SinkReplyBuilder* builder = nullptr;
-  Connection* self = nullptr;
-};
-
-void Connection::DispatchOperations::operator()(const Request::MonitorMessage& msg) {
-  RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
-  rbuilder->SendSimpleString(msg);
-}
-
-void Connection::DispatchOperations::operator()(const PubMsgRecord& msg) {
-  RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
-  ++stats->async_writes_cnt;
-  const PubMessage& pub_msg = msg.pub_msg;
-  string_view arr[4];
-  if (pub_msg.pattern.empty()) {
-    arr[0] = "message";
-    arr[1] = pub_msg.channel;
-    arr[2] = *pub_msg.message;
-    rbuilder->SendStringArr(absl::Span<string_view>{arr, 3});
-  } else {
-    arr[0] = "pmessage";
-    arr[1] = pub_msg.pattern;
-    arr[2] = pub_msg.channel;
-    arr[3] = *pub_msg.message;
-    rbuilder->SendStringArr(absl::Span<string_view>{arr, 4});
-  }
-}
-
-void Connection::DispatchOperations::operator()(Request::PipelineMsg& msg) {
-  ++stats->pipelined_cmd_cnt;
-  bool empty = self->dispatch_q_.empty();
-  builder->SetBatchMode(!empty);
-  self->cc_->async_dispatch = true;
-  self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()}, self->cc_.get());
-  self->last_interaction_ = time(nullptr);
-  self->cc_->async_dispatch = false;
-}
-
 // DispatchFiber handles commands coming from the InputLoop.
 // Thus, InputLoop can quickly read data from the input buffer, parse it and push
-// into the dispatch queue and DispatchFiber will run those commands asynchronously with
-// InputLoop. Note: in some cases, InputLoop may decide to dispatch directly and bypass the
-// DispatchFiber.
+// into the dispatch queue and DispatchFiber will run those commands asynchronously with InputLoop.
+// Note: in some cases, InputLoop may decide to dispatch directly and bypass the DispatchFiber.
 void Connection::DispatchFiber(util::FiberSocketBase* peer) {
   this_fiber::properties<FiberProps>().set_name("DispatchFiber");
 
+  ConnectionStats* stats = service_->GetThreadLocalConnectionStats();
   SinkReplyBuilder* builder = cc_->reply_builder();
-  DispatchOperations dispatch_op{builder, this};
 
   while (!builder->GetError()) {
     evc_.await([this] { return cc_->conn_closing || !dispatch_q_.empty(); });
     if (cc_->conn_closing)
       break;
 
-    RequestPtr req{std::move(dispatch_q_.front())};
+    Request* req = dispatch_q_.front();
     dispatch_q_.pop_front();
-    std::visit(dispatch_op, req->payload);
+
+    if (req->async_msg) {
+      ++stats->async_writes_cnt;
+
+      RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
+      const PubMessage& pub_msg = req->async_msg->pub_msg;
+      string_view arr[4];
+
+      if (pub_msg.pattern.empty()) {
+        arr[0] = "message";
+        arr[1] = pub_msg.channel;
+        arr[2] = pub_msg.message;
+        rbuilder->SendStringArr(absl::Span<string_view>{arr, 3});
+      } else {
+        arr[0] = "pmessage";
+        arr[1] = pub_msg.pattern;
+        arr[2] = pub_msg.channel;
+        arr[3] = pub_msg.message;
+        rbuilder->SendStringArr(absl::Span<string_view>{arr, 4});
+      }
+
+      req->async_msg->bc.Dec();
+
+      req->async_msg->~AsyncMsg();
+      mi_free(req->async_msg);
+    } else {
+      ++stats->pipelined_cmd_cnt;
+
+      builder->SetBatchMode(!dispatch_q_.empty());
+      cc_->async_dispatch = true;
+      service_->DispatchCommand(CmdArgList{req->args.data(), req->args.size()}, cc_.get());
+      last_interaction_ = time(nullptr);
+      cc_->async_dispatch = false;
+    }
+    req->~Request();
+    mi_free(req);
   }
 
   cc_->conn_closing = true;
 
-  // make sure that we don't have any leftovers!
-  dispatch_q_.clear();
+  // Clean up leftovers.
+  while (!dispatch_q_.empty()) {
+    Request* req = dispatch_q_.front();
+    dispatch_q_.pop_front();
+
+    if (req->async_msg) {
+      req->async_msg->bc.Dec();
+      req->async_msg->~AsyncMsg();
+      mi_free(req->async_msg);
+    }
+    req->~Request();
+    mi_free(req);
+  }
 }
 
-auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> RequestPtr {
+auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> Request* {
   DCHECK(!args.empty());
   size_t backed_sz = 0;
   for (const auto& arg : args) {
@@ -748,11 +680,22 @@ auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> RequestPtr {
   constexpr auto kReqSz = sizeof(Request);
   static_assert(kReqSz < MI_SMALL_SIZE_MAX);
   static_assert(alignof(Request) == 8);
+  void* ptr = mi_heap_malloc_small(heap, kReqSz);
 
-  RequestPtr req = Request::New(heap, args, backed_sz);
+  Request* req = new (ptr) Request{args.size(), backed_sz};
+
+  auto* next = req->storage.data();
+  for (size_t i = 0; i < args.size(); ++i) {
+    auto buf = args[i].GetBuf();
+    size_t s = buf.size();
+    memcpy(next, buf.data(), s);
+    req->args[i] = MutableSlice(next, s);
+    next += s;
+  }
 
   return req;
 }
+
 void Connection::ShutdownSelf() {
   util::Connection::Shutdown();
 }
@@ -764,28 +707,6 @@ void RespToArgList(const RespVec& src, CmdArgVec* dest) {
 
     (*dest)[i] = ToMSS(src[i].GetBuf());
   }
-}
-
-void Connection::SendMonitorMsg(std::string monitor_msg) {
-  DCHECK(cc_);
-
-  if (!cc_->conn_closing) {
-    RequestPtr req = Request::New(std::move(monitor_msg));
-    dispatch_q_.push_back(std::move(req));
-    if (dispatch_q_.size() == 1) {
-      evc_.notify();
-    }
-  }
-}
-
-std::string Connection::RemoteEndpointStr() const {
-  LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
-  bool unix_socket = lsb->IsUDS();
-  std::string connection_str = unix_socket ? "unix:" : std::string{};
-
-  auto re = lsb->RemoteEndpoint();
-  absl::StrAppend(&connection_str, re.address().to_string(), ":", re.port());
-  return connection_str;
 }
 
 }  // namespace facade

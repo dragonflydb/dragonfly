@@ -5,6 +5,7 @@
 
 #include "core/compact_object.h"
 #include "core/string_set.h"
+#include "server/common.h"
 #include "server/table.h"
 
 extern "C" {

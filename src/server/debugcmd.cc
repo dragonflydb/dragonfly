@@ -151,6 +151,8 @@ void DebugCmd::Reload(CmdArgList args) {
     }
   }
 
+  error_code ec;
+
   if (save) {
     string err_details;
     const CommandId* cid = sf_.service().FindCmd("SAVE");
@@ -158,10 +160,9 @@ void DebugCmd::Reload(CmdArgList args) {
     intrusive_ptr<Transaction> trans(new Transaction{cid});
     trans->InitByArgs(0, {});
     VLOG(1) << "Performing save";
-
-    GenericError ec = sf_.DoSave(false, trans.get());
+    ec = sf_.DoSave(false, trans.get(), &err_details);
     if (ec) {
-      return (*cntx_)->SendError(ec.Format());
+      return (*cntx_)->SendError(absl::StrCat(err_details, ec.message()));
     }
   }
 
@@ -196,7 +197,7 @@ void DebugCmd::Load(string_view filename) {
   intrusive_ptr<Transaction> flush_trans(new Transaction{cid});
   flush_trans->InitByArgs(0, {});
   VLOG(1) << "Performing flush";
-  error_code ec = sf_.Drakarys(flush_trans.get(), DbSlice::kDbAll);
+  error_code ec = sf_.DoFlush(flush_trans.get(), DbSlice::kDbAll);
   if (ec) {
     LOG(ERROR) << "Error flushing db " << ec.message();
   }
@@ -210,13 +211,11 @@ void DebugCmd::Load(string_view filename) {
     path = dir_path;
   }
 
-  auto fut_ec = sf_.Load(path.generic_string());
-  if (fut_ec.valid()) {
-    ec = fut_ec.get();
-    if (ec) {
-      LOG(INFO) << "Could not load file " << ec.message();
-      return (*cntx_)->SendError(ec.message());
-    }
+  // switches back to
+  ec = sf_.LoadRdb(path.generic_string());
+  if (ec) {
+    LOG(INFO) << "Could not load file " << ec.message();
+    return (*cntx_)->SendError(ec.message());
   }
 
   (*cntx_)->SendOk();

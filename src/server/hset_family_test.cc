@@ -157,10 +157,4 @@ TEST_F(HSetFamilyTest, HScan) {
   EXPECT_LT(vec.size(), 60);
 }
 
-TEST_F(HSetFamilyTest, HScanLpMatchBug) {
-  Run({"HSET", "key", "1", "2"});
-  auto resp = Run({"hscan", "key", "0", "match", "1"});
-  EXPECT_THAT(resp, ArrLen(2));
-}
-
 }  // namespace dfly

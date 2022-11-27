@@ -48,7 +48,7 @@ Transaction::Transaction(const CommandId* cid) : cid_(cid) {
     multi_->multi_opts = cid->opt_mask();
 
     if (cmd_name == "EVAL" || cmd_name == "EVALSHA") {
-      multi_->is_expanding = false;  // we lock all the keys at once.
+      multi_->incremental = false;  // we lock all the keys at once.
     }
   }
 }
@@ -105,7 +105,7 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   DCHECK_LT(key_index.start, args.size());
   DCHECK_GT(key_index.start, 0u);
 
-  bool incremental_locking = multi_ && multi_->is_expanding;
+  bool incremental_locking = multi_ && multi_->incremental;
   bool single_key = !multi_ && key_index.HasSingleKey();
   bool needs_reverse_mapping = cid_->opt_mask() & CO::REVERSE_MAPPING;
 
@@ -151,12 +151,8 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
 
   if (multi_) {
     mode = Mode();
-    multi_->keys.clear();
     tmp_space.uniq_keys.clear();
     DCHECK_LT(int(mode), 2);
-
-    // With EVAL, we call this function for EVAL itself as well as for each command
-    // for eval. currently, we lock everything only during the eval call.
     should_record_locks = incremental_locking || !multi_->locks_recorded;
   }
 
@@ -179,11 +175,7 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
       shard_index[sid].original_index.push_back(i - 1);
 
     if (should_record_locks && tmp_space.uniq_keys.insert(key).second) {
-      if (multi_->is_expanding) {
-        multi_->keys.push_back(key);
-      } else {
-        multi_->locks[key].cnt[int(mode)]++;
-      }
+      multi_->locks[key].cnt[int(mode)]++;
     };
 
     if (key_index.step == 2) {  // value
@@ -280,12 +272,13 @@ void Transaction::SetExecCmd(const CommandId* cid) {
   DCHECK(multi_);
   DCHECK(!cb_);
 
-  // The order is important, we call Schedule for multi transaction before overriding cid_.
-  // TODO: The flow is ugly. Consider introducing a proper interface for Multi transactions
+  // The order is important, we are Schedule() for multi transaction before overriding cid_.
+  // TODO: The flow is ugly. I should introduce a proper interface for Multi transactions
   // like SetupMulti/TurndownMulti. We already have UnlockMulti that should be part of
   // TurndownMulti.
+
   if (txid_ == 0) {
-    ScheduleInternal();
+    Schedule();
   }
 
   unique_shard_cnt_ = 0;
@@ -320,7 +313,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
 
   bool was_suspended = sd.local_mask & SUSPENDED_Q;
   bool awaked_prerun = (sd.local_mask & AWAKED_Q) != 0;
-  bool incremental_lock = multi_ && multi_->is_expanding;
+  bool incremental_lock = multi_ && multi_->incremental;
 
   // For multi we unlock transaction (i.e. its keys) in UnlockMulti() call.
   // Therefore we differentiate between concluding, which says that this specific
@@ -348,7 +341,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
     // if transaction is suspended (blocked in watched queue), then it's a noop.
     OpStatus status = OpStatus::OK;
 
-    if (!was_suspended) {
+    if (!was_suspended)  {
       status = cb_(this, shard);
     }
 
@@ -534,16 +527,6 @@ void Transaction::ScheduleInternal() {
   }
 }
 
-void Transaction::LockMulti() {
-  DCHECK(multi_ && multi_->is_expanding);
-
-  IntentLock::Mode mode = Mode();
-  for (auto key : multi_->keys) {
-    multi_->locks[key].cnt[int(mode)]++;
-  }
-  multi_->keys.clear();
-}
-
 // Optimized "Schedule and execute" function for the most common use-case of a single hop
 // transactions like set/mset/mget etc. Does not apply for more complicated cases like RENAME or
 // BLPOP where a data must be read from multiple shards before performing another hop.
@@ -577,7 +560,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     // The problematic flow is as follows: ScheduleUniqueShard schedules into TxQueue and then
     // call PollExecute that runs the callback which calls DecreaseRunCnt.
     // As a result WaitForShardCallbacks below is unblocked.
-    auto schedule_cb = [this] {
+    auto schedule_cb = [&] {
       bool run_eager = ScheduleUniqueShard(EngineShard::tlocal());
       if (run_eager) {
         // it's important to DecreaseRunCnt only for run_eager and after run_eager was assigned.
@@ -591,14 +574,8 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     shard_set->Add(unique_shard_id_, std::move(schedule_cb));  // serves as a barrier.
   } else {
     // Transaction spans multiple shards or it's global (like flushdb) or multi.
-    // Note that the logic here is a bit different from the public Schedule() function.
-    if (multi_) {
-      if (multi_->is_expanding)
-        LockMulti();
-    } else {
+    if (!multi_)
       ScheduleInternal();
-    }
-
     ExecuteAsync();
   }
 
@@ -637,14 +614,6 @@ void Transaction::UnlockMulti() {
   DCHECK_GE(use_count(), 1u);
 
   VLOG(1) << "UnlockMultiEnd " << DebugId();
-}
-
-void Transaction::Schedule() {
-  if (multi_ && multi_->is_expanding) {
-    LockMulti();
-  } else {
-    ScheduleInternal();
-  }
 }
 
 // Runs in coordinator thread.
@@ -833,7 +802,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
 
   // Fast path - for uncontended keys, just run the callback.
   // That applies for single key operations like set, get, lpush etc.
-  if (shard->db_slice().CheckLock(mode, lock_args) && shard->shard_lock()->Check(mode)) {
+  if (shard->db_slice().CheckLock(mode, lock_args)) {
     RunQuickie(shard);
     return true;
   }
@@ -843,8 +812,9 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   sd.pq_pos = shard->txq()->Insert(this);
 
   DCHECK_EQ(0, sd.local_mask & KEYLOCK_ACQUIRED);
-  shard->db_slice().Acquire(mode, lock_args);
+  bool lock_acquired = shard->db_slice().Acquire(mode, lock_args);
   sd.local_mask |= KEYLOCK_ACQUIRED;
+  DCHECK(!lock_acquired);  // Because CheckLock above failed.
 
   DVLOG(1) << "Rescheduling into TxQueue " << DebugId();
 
@@ -1167,8 +1137,7 @@ bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid) {
     return false;
   }
 
-  DVLOG(1) << "NotifySuspended " << DebugId() << ", local_mask:" << local_mask << " by "
-           << committed_txid;
+  DVLOG(1) << "NotifySuspended " << DebugId() << ", local_mask:" << local_mask;
 
   // local_mask could be awaked (i.e. not suspended) if the transaction has been
   // awakened by another key or awakened by the same key multiple times.

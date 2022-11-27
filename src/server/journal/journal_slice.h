@@ -48,13 +48,12 @@ class JournalSlice {
   void Unregister(uint32_t);
 
  private:
+
   struct RingItem;
 
   std::string shard_path_;
   std::unique_ptr<util::uring::LinuxFile> shard_file_;
   std::optional<base::RingBuffer<RingItem>> ring_buffer_;
-
-  bool iterating_cb_arr_ = false;
   std::vector<std::pair<uint32_t, ChangeCallback>> change_cb_arr_;
 
   size_t file_offset_ = 0;

@@ -142,7 +142,7 @@ class DbSlice {
   // If multiple keys are found, returns the first index in the ArgSlice.
   OpResult<std::pair<PrimeIterator, unsigned>> FindFirst(const Context& cntx, ArgSlice args);
 
-  // Return .second=true if insertion occurred, false if we return the existing key.
+  // Return .second=true if insertion ocurred, false if we return the existing key.
   // throws: bad_alloc is insertion could not happen due to out of memory.
   std::pair<PrimeIterator, bool> AddOrFind(const Context& cntx,
                                            std::string_view key) noexcept(false);
@@ -150,16 +150,11 @@ class DbSlice {
   std::tuple<PrimeIterator, ExpireIterator, bool> AddOrFind2(const Context& cntx,
                                                              std::string_view key) noexcept(false);
 
-  // Same as AddOrSkip, but overwrites in case entry exists.
-  // Returns second=true if insertion took place.
-  std::pair<PrimeIterator, bool> AddOrUpdate(const Context& cntx, std::string_view key,
-                                             PrimeValue obj, uint64_t expire_at_ms) noexcept(false);
-
   // Returns second=true if insertion took place, false otherwise.
   // expire_at_ms equal to 0 - means no expiry.
   // throws: bad_alloc is insertion could not happen due to out of memory.
-  std::pair<PrimeIterator, bool> AddOrSkip(const Context& cntx, std::string_view key,
-                                           PrimeValue obj, uint64_t expire_at_ms) noexcept(false);
+  std::pair<PrimeIterator, bool> AddEntry(const Context& cntx, std::string_view key, PrimeValue obj,
+                                          uint64_t expire_at_ms) noexcept(false);
 
   // Adds a new entry. Requires: key does not exist in this slice.
   // Returns the iterator to the newly added entry.
@@ -243,9 +238,6 @@ class DbSlice {
   std::pair<PrimeIterator, ExpireIterator> ExpireIfNeeded(const Context& cntx,
                                                           PrimeIterator it) const;
 
-  // Iterate over all expire table entries and delete expired.
-  void ExpireAllIfNeeded();
-
   // Current version of this slice.
   // We maintain a shared versioning scheme for all databases in the slice.
   uint64_t version() const {
@@ -290,10 +282,6 @@ class DbSlice {
   void InvalidateDbWatches(DbIndex db_indx);
 
  private:
-  std::pair<PrimeIterator, bool> AddOrUpdateInternal(const Context& cntx, std::string_view key,
-                                                     PrimeValue obj, uint64_t expire_at_ms,
-                                                     bool force_update) noexcept(false);
-
   void CreateDb(DbIndex index);
   size_t EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* table);
 

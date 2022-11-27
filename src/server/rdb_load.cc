@@ -27,7 +27,6 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/hset_family.h"
-#include "server/rdb_extensions.h"
 #include "server/script_mgr.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
@@ -37,22 +36,6 @@ ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 ABSL_DECLARE_FLAG(bool, use_set2);
-
-#define SET_OR_RETURN(expr, dest) \
-  do {                            \
-    auto exp_val = (expr);        \
-    if (!exp_val)                 \
-      return exp_val.error();     \
-    dest = exp_val.value();       \
-  } while (0)
-
-#define SET_OR_UNEXPECT(expr, dest)            \
-  {                                            \
-    auto exp_res = (expr);                     \
-    if (!exp_res)                              \
-      return make_unexpected(exp_res.error()); \
-    dest = std::move(exp_res.value());         \
-  }
 
 namespace dfly {
 
@@ -203,7 +186,7 @@ bool resizeStringSet(robj* set, size_t size, bool use_set2) {
 
 }  // namespace
 
-class RdbLoaderBase::OpaqueObjLoader {
+class RdbLoader::OpaqueObjLoader {
  public:
   OpaqueObjLoader(int rdb_type, PrimeValue* pv) : rdb_type_(rdb_type), pv_(pv) {
   }
@@ -243,15 +226,12 @@ class RdbLoaderBase::OpaqueObjLoader {
   PrimeValue* pv_;
 };
 
-RdbLoaderBase::RdbLoaderBase() : mem_buf_{16_KB} {
-}
-
-void RdbLoaderBase::OpaqueObjLoader::operator()(const base::PODArray<char>& str) {
+void RdbLoader::OpaqueObjLoader::operator()(const base::PODArray<char>& str) {
   string_view sv(str.data(), str.size());
   HandleBlob(sv);
 }
 
-void RdbLoaderBase::OpaqueObjLoader::operator()(const LzfString& lzfstr) {
+void RdbLoader::OpaqueObjLoader::operator()(const LzfString& lzfstr) {
   string tmp(lzfstr.uncompressed_len, '\0');
   if (lzf_decompress(lzfstr.compressed_blob.data(), lzfstr.compressed_blob.size(), tmp.data(),
                      tmp.size()) == 0) {
@@ -262,7 +242,7 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const LzfString& lzfstr) {
   HandleBlob(tmp);
 }
 
-void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr) {
+void RdbLoader::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr) {
   switch (rdb_type_) {
     case RDB_TYPE_SET:
       CreateSet(ptr.get());
@@ -286,7 +266,7 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr
   }
 }
 
-void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
+void RdbLoader::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
   size_t len = ltrace->arr.size();
 
   bool is_intset = true;
@@ -376,7 +356,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
   std::move(cleanup).Cancel();
 }
 
-void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
+void RdbLoader::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
   size_t len = ltrace->arr.size() / 2;
 
   /* Too many entries? Use a hash table right from the start. */
@@ -455,7 +435,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
   pv_->ImportRObj(res);
 }
 
-void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
+void RdbLoader::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
   quicklist* ql =
       quicklistNew(GetFlag(FLAGS_list_max_listpack_size), GetFlag(FLAGS_list_compress_depth));
   auto cleanup = absl::Cleanup([&] { quicklistRelease(ql); });
@@ -522,7 +502,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
   pv_->ImportRObj(res);
 }
 
-void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
+void RdbLoader::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
   robj* res = createZsetObject();
   zset* zs = (zset*)res->ptr;
 
@@ -570,7 +550,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
   pv_->ImportRObj(res);
 }
 
-void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
+void RdbLoader::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   CHECK(ltrace->stream_trace);
 
   robj* res = createStreamObject();
@@ -686,7 +666,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   pv_->ImportRObj(res);
 }
 
-void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
+void RdbLoader::OpaqueObjLoader::HandleBlob(string_view blob) {
   if (rdb_type_ == RDB_TYPE_STRING) {
     pv_->SetString(blob);
     return;
@@ -768,7 +748,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
   pv_->ImportRObj(res);
 }
 
-sds RdbLoaderBase::OpaqueObjLoader::ToSds(const RdbVariant& obj) {
+sds RdbLoader::OpaqueObjLoader::ToSds(const RdbVariant& obj) {
   if (holds_alternative<long long>(obj)) {
     return sdsfromlonglong(get<long long>(obj));
   }
@@ -796,7 +776,7 @@ sds RdbLoaderBase::OpaqueObjLoader::ToSds(const RdbVariant& obj) {
   return nullptr;
 }
 
-string_view RdbLoaderBase::OpaqueObjLoader::ToSV(const RdbVariant& obj) {
+string_view RdbLoader::OpaqueObjLoader::ToSV(const RdbVariant& obj) {
   if (holds_alternative<long long>(obj)) {
     tset_blob_.resize(32);
     auto val = get<long long>(obj);
@@ -825,7 +805,280 @@ string_view RdbLoaderBase::OpaqueObjLoader::ToSV(const RdbVariant& obj) {
   return string_view{};
 }
 
-std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
+struct RdbLoader::ObjSettings {
+  long long now;           // current epoch time in ms.
+  int64_t expiretime = 0;  // expire epoch time in ms
+
+  bool has_expired = false;
+
+  void Reset() {
+    expiretime = 0;
+    has_expired = false;
+  }
+
+  void SetExpire(int64_t val) {
+    expiretime = val;
+    has_expired = (val <= now);
+  }
+
+  ObjSettings() = default;
+};
+
+RdbLoader::RdbLoader(ScriptMgr* script_mgr) : script_mgr_(script_mgr), mem_buf_{16_KB} {
+  shard_buf_.reset(new ItemsBuf[shard_set->size()]);
+}
+
+RdbLoader::~RdbLoader() {
+}
+
+#define SET_OR_RETURN(expr, dest) \
+  do {                            \
+    auto exp_val = (expr);        \
+    if (!exp_val)                 \
+      return exp_val.error();     \
+    dest = exp_val.value();       \
+  } while (0)
+
+#define SET_OR_UNEXPECT(expr, dest)            \
+  {                                            \
+    auto exp_res = (expr);                     \
+    if (!exp_res)                              \
+      return make_unexpected(exp_res.error()); \
+    dest = std::move(exp_res.value());         \
+  }
+
+error_code RdbLoader::Load(io::Source* src) {
+  CHECK(!src_ && src);
+
+  absl::Time start = absl::Now();
+  src_ = src;
+
+  IoBuf::Bytes bytes = mem_buf_.AppendBuffer();
+  io::Result<size_t> read_sz = src_->ReadAtLeast(bytes, 9);
+  if (!read_sz)
+    return read_sz.error();
+
+  bytes_read_ = *read_sz;
+  if (bytes_read_ < 9) {
+    return RdbError(errc::wrong_signature);
+  }
+
+  mem_buf_.CommitWrite(bytes_read_);
+
+  {
+    auto cb = mem_buf_.InputBuffer();
+
+    if (memcmp(cb.data(), "REDIS", 5) != 0) {
+      return RdbError(errc::wrong_signature);
+    }
+
+    char buf[64] = {0};
+    ::memcpy(buf, cb.data() + 5, 4);
+
+    int rdbver = atoi(buf);
+    if (rdbver < 5 || rdbver > RDB_VERSION) {  // We accept starting from 5.
+      LOG(ERROR) << "RDB Version " << rdbver << " is not supported";
+      return RdbError(errc::bad_version);
+    }
+
+    mem_buf_.ConsumeInput(9);
+  }
+
+  int type;
+
+  /* Key-specific attributes, set by opcodes before the key type. */
+  ObjSettings settings;
+  settings.now = mstime();
+  size_t keys_loaded = 0;
+
+  while (!stop_early_.load(memory_order_relaxed)) {
+    /* Read type. */
+    SET_OR_RETURN(FetchType(), type);
+
+    /* Handle special types. */
+    if (type == RDB_OPCODE_EXPIRETIME) {
+      LOG(ERROR) << "opcode RDB_OPCODE_EXPIRETIME not supported";
+
+      return RdbError(errc::invalid_encoding);
+    }
+
+    if (type == RDB_OPCODE_EXPIRETIME_MS) {
+      int64_t val;
+      /* EXPIRETIME_MS: milliseconds precision expire times introduced
+       * with RDB v3. Like EXPIRETIME but no with more precision. */
+      SET_OR_RETURN(FetchInt<int64_t>(), val);
+      settings.SetExpire(val);
+      continue; /* Read next opcode. */
+    }
+
+    if (type == RDB_OPCODE_FREQ) {
+      /* FREQ: LFU frequency. */
+      FetchInt<uint8_t>();  // IGNORE
+      continue;             /* Read next opcode. */
+    }
+
+    if (type == RDB_OPCODE_IDLE) {
+      /* IDLE: LRU idle time. */
+      uint64_t idle;
+      SET_OR_RETURN(LoadLen(nullptr), idle);  // ignore
+      (void)idle;
+      continue; /* Read next opcode. */
+    }
+
+    if (type == RDB_OPCODE_EOF) {
+      /* EOF: End of file, exit the main loop. */
+      break;
+    }
+
+    if (type == RDB_OPCODE_SELECTDB) {
+      unsigned dbid = 0;
+
+      /* SELECTDB: Select the specified database. */
+      SET_OR_RETURN(LoadLen(nullptr), dbid);
+
+      if (dbid > GetFlag(FLAGS_dbnum)) {
+        LOG(WARNING) << "database id " << dbid << " exceeds dbnum limit. Try increasing the flag.";
+
+        return RdbError(errc::bad_db_index);
+      }
+
+      VLOG(1) << "Select DB: " << dbid;
+      for (unsigned i = 0; i < shard_set->size(); ++i) {
+        // we should flush pending items before switching dbid.
+        FlushShardAsync(i);
+
+        // Active database if not existed before.
+        shard_set->Add(i, [dbid] { EngineShard::tlocal()->db_slice().ActivateDb(dbid); });
+      }
+
+      cur_db_index_ = dbid;
+      continue; /* Read next opcode. */
+    }
+
+    if (type == RDB_OPCODE_RESIZEDB) {
+      /* RESIZEDB: Hint about the size of the keys in the currently
+       * selected data base, in order to avoid useless rehashing. */
+      uint64_t db_size, expires_size;
+      SET_OR_RETURN(LoadLen(nullptr), db_size);
+      SET_OR_RETURN(LoadLen(nullptr), expires_size);
+
+      ResizeDb(db_size, expires_size);
+      continue; /* Read next opcode. */
+    }
+
+    if (type == RDB_OPCODE_AUX) {
+      RETURN_ON_ERR(HandleAux());
+      continue; /* Read type again. */
+    }
+
+    if (type == RDB_OPCODE_MODULE_AUX) {
+      LOG(ERROR) << "Modules are not supported";
+      return RdbError(errc::feature_not_supported);
+    }
+
+    if (!rdbIsObjectType(type)) {
+      return RdbError(errc::invalid_rdb_type);
+    }
+
+    ++keys_loaded;
+    RETURN_ON_ERR(LoadKeyValPair(type, &settings));
+    settings.Reset();
+  }  // main load loop
+
+  if (stop_early_) {
+    lock_guard lk(mu_);
+    return ec_;
+  }
+
+  /* Verify the checksum if RDB version is >= 5 */
+  RETURN_ON_ERR(VerifyChecksum());
+
+  fibers_ext::BlockingCounter bc(shard_set->size());
+  for (unsigned i = 0; i < shard_set->size(); ++i) {
+    // Flush the remaining items.
+    FlushShardAsync(i);
+
+    // Send sentinel callbacks to ensure that all previous messages have been processed.
+    shard_set->Add(i, [bc]() mutable { bc.Dec(); });
+  }
+  bc.Wait();  // wait for sentinels to report.
+
+  absl::Duration dur = absl::Now() - start;
+  load_time_ = double(absl::ToInt64Milliseconds(dur)) / 1000;
+  keys_loaded_ = keys_loaded;
+
+  return kOk;
+}
+
+error_code RdbLoader::EnsureReadInternal(size_t min_sz) {
+  DCHECK_LT(mem_buf_.InputLen(), min_sz);
+
+  auto out_buf = mem_buf_.AppendBuffer();
+  CHECK_GT(out_buf.size(), min_sz);
+
+  // If limit was applied we do not want to read more than needed
+  // important when reading from sockets.
+  if (bytes_read_ + out_buf.size() > source_limit_) {
+    out_buf = out_buf.subspan(0, source_limit_ - bytes_read_);
+  }
+
+  io::Result<size_t> res = src_->ReadAtLeast(out_buf, min_sz);
+  if (!res)
+    return res.error();
+
+  if (*res < min_sz)
+    return RdbError(errc::rdb_file_corrupted);
+
+  bytes_read_ += *res;
+
+  DCHECK_LE(bytes_read_, source_limit_);
+  mem_buf_.CommitWrite(*res);
+
+  return kOk;
+}
+
+auto RdbLoader::LoadLen(bool* is_encoded) -> io::Result<uint64_t> {
+  if (is_encoded)
+    *is_encoded = false;
+
+  // Every RDB file with rdbver >= 5 has 8-bytes checksum at the end,
+  // so we can ensure we have 9 bytes to read up until that point.
+  error_code ec = EnsureRead(9);
+  if (ec)
+    return make_unexpected(ec);
+
+  uint64_t res = 0;
+  uint8_t first = mem_buf_.InputBuffer()[0];
+  int type = (first & 0xC0) >> 6;
+  mem_buf_.ConsumeInput(1);
+  if (type == RDB_ENCVAL) {
+    /* Read a 6 bit encoding type. */
+    if (is_encoded)
+      *is_encoded = true;
+    res = first & 0x3F;
+  } else if (type == RDB_6BITLEN) {
+    /* Read a 6 bit len. */
+    res = first & 0x3F;
+  } else if (type == RDB_14BITLEN) {
+    res = ((first & 0x3F) << 8) | mem_buf_.InputBuffer()[0];
+    mem_buf_.ConsumeInput(1);
+  } else if (first == RDB_32BITLEN) {
+    /* Read a 32 bit len. */
+    res = absl::big_endian::Load32(mem_buf_.InputBuffer().data());
+    mem_buf_.ConsumeInput(4);
+  } else if (first == RDB_64BITLEN) {
+    /* Read a 64 bit len. */
+    res = absl::big_endian::Load64(mem_buf_.InputBuffer().data());
+    mem_buf_.ConsumeInput(8);
+  } else {
+    LOG(ERROR) << "Bad length encoding " << type << " in rdbLoadLen()";
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+
+  return res;
+}
+
+std::error_code RdbLoader::FetchBuf(size_t size, void* dest) {
   if (size == 0)
     return kOk;
 
@@ -886,7 +1139,126 @@ std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
   return kOk;
 }
 
-size_t RdbLoaderBase::StrLen(const RdbVariant& tset) {
+error_code RdbLoader::HandleAux() {
+  /* AUX: generic string-string fields. Use to add state to RDB
+   * which is backward compatible. Implementations of RDB loading
+   * are required to skip AUX fields they don't understand.
+   *
+   * An AUX field is composed of two strings: key and value. */
+  string auxkey, auxval;
+
+  SET_OR_RETURN(FetchGenericString(), auxkey);
+  SET_OR_RETURN(FetchGenericString(), auxval);
+
+  if (!auxkey.empty() && auxkey[0] == '%') {
+    /* All the fields with a name staring with '%' are considered
+     * information fields and are logged at startup with a log
+     * level of NOTICE. */
+    LOG(INFO) << "RDB '" << auxkey << "': " << auxval;
+  } else if (auxkey == "repl-stream-db") {
+    // TODO
+  } else if (auxkey == "repl-id") {
+    // TODO
+  } else if (auxkey == "repl-offset") {
+    // TODO
+  } else if (auxkey == "lua") {
+    ServerState* ss = ServerState::tlocal();
+    Interpreter& script = ss->GetInterpreter();
+    string_view body{auxval};
+    string result;
+    Interpreter::AddResult add_result = script.AddFunction(body, &result);
+    if (add_result == Interpreter::ADD_OK) {
+      if (script_mgr_)
+        script_mgr_->InsertFunction(result, body);
+    } else if (add_result == Interpreter::COMPILE_ERR) {
+      LOG(ERROR) << "Error when compiling lua scripts";
+    }
+  } else if (auxkey == "redis-ver") {
+    LOG(INFO) << "Loading RDB produced by version " << auxval;
+  } else if (auxkey == "ctime") {
+    int64_t ctime;
+    if (absl::SimpleAtoi(auxval, &ctime)) {
+      time_t age = time(NULL) - ctime;
+      if (age < 0)
+        age = 0;
+      LOG(INFO) << "RDB age " << strings::HumanReadableElapsedTime(age);
+    }
+  } else if (auxkey == "used-mem") {
+    long long usedmem;
+    if (absl::SimpleAtoi(auxval, &usedmem)) {
+      LOG(INFO) << "RDB memory usage when created " << strings::HumanReadableNumBytes(usedmem);
+    }
+  } else if (auxkey == "aof-preamble") {
+    long long haspreamble;
+    if (absl::SimpleAtoi(auxval, &haspreamble) && haspreamble) {
+      LOG(INFO) << "RDB has an AOF tail";
+    }
+  } else if (auxkey == "redis-bits") {
+    /* Just ignored. */
+  } else {
+    /* We ignore fields we don't understand, as by AUX field
+     * contract. */
+    LOG(WARNING) << "Unrecognized RDB AUX field: '" << auxkey << "'";
+  }
+
+  return kOk;
+}
+
+error_code RdbLoader::VerifyChecksum() {
+  uint64_t expected;
+
+  SET_OR_RETURN(FetchInt<uint64_t>(), expected);
+
+  io::Bytes cur_buf = mem_buf_.InputBuffer();
+
+  VLOG(1) << "VerifyChecksum: input buffer len " << cur_buf.size() << ", expected " << expected;
+
+  return kOk;
+}
+
+void RdbLoader::FlushShardAsync(ShardId sid) {
+  auto& out_buf = shard_buf_[sid];
+  if (out_buf.empty())
+    return;
+
+  ItemsBuf* ib = new ItemsBuf{std::move(out_buf)};
+  auto cb = [indx = this->cur_db_index_, ib, this] {
+    this->LoadItemsBuffer(indx, *ib);
+    delete ib;
+  };
+
+  shard_set->Add(sid, std::move(cb));
+}
+
+void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
+  DbSlice& db_slice = EngineShard::tlocal()->db_slice();
+  DbContext db_cntx{.db_index = db_ind, .time_now_ms = GetCurrentTimeMs()};
+
+  for (const auto& item : ib) {
+    std::string_view key{item.key};
+    PrimeValue pv;
+    OpaqueObjLoader visitor(item.val.rdb_type, &pv);
+    std::visit(visitor, item.val.obj);
+
+    if (visitor.ec()) {
+      lock_guard lk(mu_);
+      ec_ = visitor.ec();
+      stop_early_ = true;
+      break;
+    }
+
+    if (item.expire_ms > 0 && db_cntx.time_now_ms >= item.expire_ms)
+      continue;
+
+    auto [it, added] = db_slice.AddEntry(db_cntx, key, std::move(pv), item.expire_ms);
+
+    if (!added) {
+      LOG(WARNING) << "RDB has duplicated key '" << key << "' in DB " << db_ind;
+    }
+  }
+}
+
+size_t RdbLoader::StrLen(const RdbVariant& tset) {
   const base::PODArray<char>* arr = get_if<base::PODArray<char>>(&tset);
   if (arr)
     return arr->size();
@@ -906,7 +1278,7 @@ size_t RdbLoaderBase::StrLen(const RdbVariant& tset) {
   return 0;
 }
 
-auto RdbLoaderBase::FetchGenericString() -> io::Result<string> {
+auto RdbLoader::FetchGenericString() -> io::Result<string> {
   bool isencoded;
   size_t len;
 
@@ -939,7 +1311,7 @@ auto RdbLoaderBase::FetchGenericString() -> io::Result<string> {
   return res;
 }
 
-auto RdbLoaderBase::FetchLzfStringObject() -> io::Result<string> {
+auto RdbLoader::FetchLzfStringObject() -> io::Result<string> {
   bool zerocopy_decompress = true;
 
   const uint8_t* cbuf = NULL;
@@ -982,7 +1354,7 @@ auto RdbLoaderBase::FetchLzfStringObject() -> io::Result<string> {
   return res;
 }
 
-auto RdbLoaderBase::FetchIntegerObject(int enctype) -> io::Result<string> {
+auto RdbLoader::FetchIntegerObject(int enctype) -> io::Result<string> {
   long long val;
 
   if (enctype == RDB_ENC_INT8) {
@@ -1001,7 +1373,7 @@ auto RdbLoaderBase::FetchIntegerObject(int enctype) -> io::Result<string> {
   return string(buf);
 }
 
-io::Result<double> RdbLoaderBase::FetchBinaryDouble() {
+io::Result<double> RdbLoader::FetchBinaryDouble() {
   union {
     uint64_t val;
     double d;
@@ -1018,7 +1390,7 @@ io::Result<double> RdbLoaderBase::FetchBinaryDouble() {
   return u.d;
 }
 
-io::Result<double> RdbLoaderBase::FetchDouble() {
+io::Result<double> RdbLoader::FetchDouble() {
   uint8_t len;
 
   SET_OR_UNEXPECT(FetchInt<uint8_t>(), len);
@@ -1043,11 +1415,11 @@ io::Result<double> RdbLoaderBase::FetchDouble() {
   return val;
 }
 
-auto RdbLoaderBase::ReadKey() -> io::Result<string> {
+auto RdbLoader::ReadKey() -> io::Result<string> {
   return FetchGenericString();
 }
 
-auto RdbLoaderBase::ReadObj(int rdbtype) -> io::Result<OpaqueObj> {
+auto RdbLoader::ReadObj(int rdbtype) -> io::Result<OpaqueObj> {
   switch (rdbtype) {
     case RDB_TYPE_STRING: {
       /* Read string value */
@@ -1082,7 +1454,7 @@ auto RdbLoaderBase::ReadObj(int rdbtype) -> io::Result<OpaqueObj> {
   return Unexpected(errc::invalid_encoding);
 }
 
-auto RdbLoaderBase::ReadStringObj() -> io::Result<RdbVariant> {
+auto RdbLoader::ReadStringObj() -> io::Result<RdbVariant> {
   bool isencoded;
   size_t len;
 
@@ -1112,7 +1484,7 @@ auto RdbLoaderBase::ReadStringObj() -> io::Result<RdbVariant> {
   return blob;
 }
 
-io::Result<long long> RdbLoaderBase::ReadIntObj(int enctype) {
+io::Result<long long> RdbLoader::ReadIntObj(int enctype) {
   long long val;
 
   if (enctype == RDB_ENC_INT8) {
@@ -1127,7 +1499,7 @@ io::Result<long long> RdbLoaderBase::ReadIntObj(int enctype) {
   return val;
 }
 
-auto RdbLoaderBase::ReadLzf() -> io::Result<LzfString> {
+auto RdbLoader::ReadLzf() -> io::Result<LzfString> {
   uint64_t clen;
   LzfString res;
 
@@ -1149,7 +1521,7 @@ auto RdbLoaderBase::ReadLzf() -> io::Result<LzfString> {
   return res;
 }
 
-auto RdbLoaderBase::ReadSet() -> io::Result<OpaqueObj> {
+auto RdbLoader::ReadSet() -> io::Result<OpaqueObj> {
   size_t len;
   SET_OR_UNEXPECT(LoadLen(NULL), len);
 
@@ -1169,7 +1541,7 @@ auto RdbLoaderBase::ReadSet() -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(res), RDB_TYPE_SET};
 }
 
-auto RdbLoaderBase::ReadIntSet() -> io::Result<OpaqueObj> {
+auto RdbLoader::ReadIntSet() -> io::Result<OpaqueObj> {
   io::Result<RdbVariant> fetch = ReadStringObj();
   if (!fetch) {
     return make_unexpected(fetch.error());
@@ -1191,7 +1563,7 @@ auto RdbLoaderBase::ReadIntSet() -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(*fetch), RDB_TYPE_SET_INTSET};
 }
 
-auto RdbLoaderBase::ReadHZiplist() -> io::Result<OpaqueObj> {
+auto RdbLoader::ReadHZiplist() -> io::Result<OpaqueObj> {
   RdbVariant str_obj;
   SET_OR_UNEXPECT(ReadStringObj(), str_obj);
 
@@ -1202,7 +1574,7 @@ auto RdbLoaderBase::ReadHZiplist() -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(str_obj), RDB_TYPE_HASH_ZIPLIST};
 }
 
-auto RdbLoaderBase::ReadHMap() -> io::Result<OpaqueObj> {
+auto RdbLoader::ReadHMap() -> io::Result<OpaqueObj> {
   uint64_t len;
   SET_OR_UNEXPECT(LoadLen(nullptr), len);
 
@@ -1219,7 +1591,7 @@ auto RdbLoaderBase::ReadHMap() -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(load_trace), RDB_TYPE_HASH};
 }
 
-auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
+auto RdbLoader::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
   /* Read sorted set value. */
   uint64_t zsetlen;
   SET_OR_UNEXPECT(LoadLen(nullptr), zsetlen);
@@ -1250,7 +1622,7 @@ auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(load_trace), rdbtype};
 }
 
-auto RdbLoaderBase::ReadZSetZL() -> io::Result<OpaqueObj> {
+auto RdbLoader::ReadZSetZL() -> io::Result<OpaqueObj> {
   RdbVariant str_obj;
   SET_OR_UNEXPECT(ReadStringObj(), str_obj);
 
@@ -1261,7 +1633,7 @@ auto RdbLoaderBase::ReadZSetZL() -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(str_obj), RDB_TYPE_ZSET_ZIPLIST};
 }
 
-auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
+auto RdbLoader::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
   uint64_t len;
   SET_OR_UNEXPECT(LoadLen(nullptr), len);
 
@@ -1295,7 +1667,7 @@ auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(load_trace), rdbtype};
 }
 
-auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
+auto RdbLoader::ReadStreams() -> io::Result<OpaqueObj> {
   uint64_t listpacks;
   SET_OR_UNEXPECT(LoadLen(nullptr), listpacks);
 
@@ -1432,399 +1804,6 @@ auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(load_trace), RDB_TYPE_STREAM_LISTPACKS};
 }
 
-template <typename T> io::Result<T> RdbLoaderBase::FetchInt() {
-  auto ec = EnsureRead(sizeof(T));
-  if (ec)
-    return make_unexpected(ec);
-
-  char buf[16];
-  mem_buf_.ReadAndConsume(sizeof(T), buf);
-
-  return base::LE::LoadT<std::make_unsigned_t<T>>(buf);
-}
-
-// -------------- RdbLoader   ----------------------------
-
-struct RdbLoader::ObjSettings {
-  long long now;           // current epoch time in ms.
-  int64_t expiretime = 0;  // expire epoch time in ms
-
-  bool has_expired = false;
-
-  void Reset() {
-    expiretime = 0;
-    has_expired = false;
-  }
-
-  void SetExpire(int64_t val) {
-    expiretime = val;
-    has_expired = (val <= now);
-  }
-
-  ObjSettings() = default;
-};
-
-RdbLoader::RdbLoader(ScriptMgr* script_mgr) : script_mgr_(script_mgr) {
-  shard_buf_.reset(new ItemsBuf[shard_set->size()]);
-}
-
-RdbLoader::~RdbLoader() {
-}
-
-error_code RdbLoader::Load(io::Source* src) {
-  CHECK(!src_ && src);
-
-  absl::Time start = absl::Now();
-  src_ = src;
-
-  IoBuf::Bytes bytes = mem_buf_.AppendBuffer();
-  io::Result<size_t> read_sz = src_->ReadAtLeast(bytes, 9);
-  if (!read_sz)
-    return read_sz.error();
-
-  bytes_read_ = *read_sz;
-  if (bytes_read_ < 9) {
-    return RdbError(errc::wrong_signature);
-  }
-
-  mem_buf_.CommitWrite(bytes_read_);
-
-  {
-    auto cb = mem_buf_.InputBuffer();
-
-    if (memcmp(cb.data(), "REDIS", 5) != 0) {
-      return RdbError(errc::wrong_signature);
-    }
-
-    char buf[64] = {0};
-    ::memcpy(buf, cb.data() + 5, 4);
-
-    int rdbver = atoi(buf);
-    if (rdbver < 5 || rdbver > RDB_VERSION) {  // We accept starting from 5.
-      LOG(ERROR) << "RDB Version " << rdbver << " is not supported";
-      return RdbError(errc::bad_version);
-    }
-
-    mem_buf_.ConsumeInput(9);
-  }
-
-  int type;
-
-  /* Key-specific attributes, set by opcodes before the key type. */
-  ObjSettings settings;
-  settings.now = mstime();
-  size_t keys_loaded = 0;
-
-  while (!stop_early_.load(memory_order_relaxed)) {
-    /* Read type. */
-    SET_OR_RETURN(FetchType(), type);
-
-    /* Handle special types. */
-    if (type == RDB_OPCODE_EXPIRETIME) {
-      LOG(ERROR) << "opcode RDB_OPCODE_EXPIRETIME not supported";
-
-      return RdbError(errc::invalid_encoding);
-    }
-
-    if (type == RDB_OPCODE_EXPIRETIME_MS) {
-      int64_t val;
-      /* EXPIRETIME_MS: milliseconds precision expire times introduced
-       * with RDB v3. Like EXPIRETIME but no with more precision. */
-      SET_OR_RETURN(FetchInt<int64_t>(), val);
-      settings.SetExpire(val);
-      continue; /* Read next opcode. */
-    }
-
-    if (type == RDB_OPCODE_FREQ) {
-      /* FREQ: LFU frequency. */
-      FetchInt<uint8_t>();  // IGNORE
-      continue;             /* Read next opcode. */
-    }
-
-    if (type == RDB_OPCODE_IDLE) {
-      /* IDLE: LRU idle time. */
-      uint64_t idle;
-      SET_OR_RETURN(LoadLen(nullptr), idle);  // ignore
-      (void)idle;
-      continue; /* Read next opcode. */
-    }
-
-    if (type == RDB_OPCODE_EOF) {
-      /* EOF: End of file, exit the main loop. */
-      break;
-    }
-
-    if (type == RDB_OPCODE_FULLSYNC_END) {
-      if (full_sync_cut_cb)
-        full_sync_cut_cb();
-      continue;
-    }
-
-    if (type == RDB_OPCODE_SELECTDB) {
-      unsigned dbid = 0;
-
-      /* SELECTDB: Select the specified database. */
-      SET_OR_RETURN(LoadLen(nullptr), dbid);
-
-      if (dbid > GetFlag(FLAGS_dbnum)) {
-        LOG(WARNING) << "database id " << dbid << " exceeds dbnum limit. Try increasing the flag.";
-
-        return RdbError(errc::bad_db_index);
-      }
-
-      VLOG(1) << "Select DB: " << dbid;
-      for (unsigned i = 0; i < shard_set->size(); ++i) {
-        // we should flush pending items before switching dbid.
-        FlushShardAsync(i);
-
-        // Active database if not existed before.
-        shard_set->Add(i, [dbid] { EngineShard::tlocal()->db_slice().ActivateDb(dbid); });
-      }
-
-      cur_db_index_ = dbid;
-      continue; /* Read next opcode. */
-    }
-
-    if (type == RDB_OPCODE_RESIZEDB) {
-      /* RESIZEDB: Hint about the size of the keys in the currently
-       * selected data base, in order to avoid useless rehashing. */
-      uint64_t db_size, expires_size;
-      SET_OR_RETURN(LoadLen(nullptr), db_size);
-      SET_OR_RETURN(LoadLen(nullptr), expires_size);
-
-      ResizeDb(db_size, expires_size);
-      continue; /* Read next opcode. */
-    }
-
-    if (type == RDB_OPCODE_AUX) {
-      RETURN_ON_ERR(HandleAux());
-      continue; /* Read type again. */
-    }
-
-    if (type == RDB_OPCODE_MODULE_AUX) {
-      LOG(ERROR) << "Modules are not supported";
-      return RdbError(errc::feature_not_supported);
-    }
-
-    if (!rdbIsObjectType(type)) {
-      return RdbError(errc::invalid_rdb_type);
-    }
-
-    ++keys_loaded;
-    RETURN_ON_ERR(LoadKeyValPair(type, &settings));
-    settings.Reset();
-  }  // main load loop
-
-  if (stop_early_) {
-    return *ec_;
-  }
-
-  /* Verify the checksum if RDB version is >= 5 */
-  RETURN_ON_ERR(VerifyChecksum());
-
-  fibers_ext::BlockingCounter bc(shard_set->size());
-  for (unsigned i = 0; i < shard_set->size(); ++i) {
-    // Flush the remaining items.
-    FlushShardAsync(i);
-
-    // Send sentinel callbacks to ensure that all previous messages have been processed.
-    shard_set->Add(i, [bc]() mutable { bc.Dec(); });
-  }
-  bc.Wait();  // wait for sentinels to report.
-
-  absl::Duration dur = absl::Now() - start;
-  load_time_ = double(absl::ToInt64Milliseconds(dur)) / 1000;
-  keys_loaded_ = keys_loaded;
-
-  return kOk;
-}
-
-error_code RdbLoaderBase::EnsureReadInternal(size_t min_sz) {
-  DCHECK_LT(mem_buf_.InputLen(), min_sz);
-
-  auto out_buf = mem_buf_.AppendBuffer();
-  CHECK_GT(out_buf.size(), min_sz);
-
-  // If limit was applied we do not want to read more than needed
-  // important when reading from sockets.
-  if (bytes_read_ + out_buf.size() > source_limit_) {
-    out_buf = out_buf.subspan(0, source_limit_ - bytes_read_);
-  }
-
-  io::Result<size_t> res = src_->ReadAtLeast(out_buf, min_sz);
-  if (!res)
-    return res.error();
-
-  if (*res < min_sz)
-    return RdbError(errc::rdb_file_corrupted);
-
-  bytes_read_ += *res;
-
-  DCHECK_LE(bytes_read_, source_limit_);
-  mem_buf_.CommitWrite(*res);
-
-  return kOk;
-}
-
-auto RdbLoaderBase::LoadLen(bool* is_encoded) -> io::Result<uint64_t> {
-  if (is_encoded)
-    *is_encoded = false;
-
-  // Every RDB file with rdbver >= 5 has 8-bytes checksum at the end,
-  // so we can ensure we have 9 bytes to read up until that point.
-  error_code ec = EnsureRead(9);
-  if (ec)
-    return make_unexpected(ec);
-
-  uint64_t res = 0;
-  uint8_t first = mem_buf_.InputBuffer()[0];
-  int type = (first & 0xC0) >> 6;
-  mem_buf_.ConsumeInput(1);
-  if (type == RDB_ENCVAL) {
-    /* Read a 6 bit encoding type. */
-    if (is_encoded)
-      *is_encoded = true;
-    res = first & 0x3F;
-  } else if (type == RDB_6BITLEN) {
-    /* Read a 6 bit len. */
-    res = first & 0x3F;
-  } else if (type == RDB_14BITLEN) {
-    res = ((first & 0x3F) << 8) | mem_buf_.InputBuffer()[0];
-    mem_buf_.ConsumeInput(1);
-  } else if (first == RDB_32BITLEN) {
-    /* Read a 32 bit len. */
-    res = absl::big_endian::Load32(mem_buf_.InputBuffer().data());
-    mem_buf_.ConsumeInput(4);
-  } else if (first == RDB_64BITLEN) {
-    /* Read a 64 bit len. */
-    res = absl::big_endian::Load64(mem_buf_.InputBuffer().data());
-    mem_buf_.ConsumeInput(8);
-  } else {
-    LOG(ERROR) << "Bad length encoding " << type << " in rdbLoadLen()";
-    return Unexpected(errc::rdb_file_corrupted);
-  }
-
-  return res;
-}
-
-error_code RdbLoader::HandleAux() {
-  /* AUX: generic string-string fields. Use to add state to RDB
-   * which is backward compatible. Implementations of RDB loading
-   * are required to skip AUX fields they don't understand.
-   *
-   * An AUX field is composed of two strings: key and value. */
-  string auxkey, auxval;
-
-  SET_OR_RETURN(FetchGenericString(), auxkey);
-  SET_OR_RETURN(FetchGenericString(), auxval);
-
-  if (!auxkey.empty() && auxkey[0] == '%') {
-    /* All the fields with a name staring with '%' are considered
-     * information fields and are logged at startup with a log
-     * level of NOTICE. */
-    LOG(INFO) << "RDB '" << auxkey << "': " << auxval;
-  } else if (auxkey == "repl-stream-db") {
-    // TODO
-  } else if (auxkey == "repl-id") {
-    // TODO
-  } else if (auxkey == "repl-offset") {
-    // TODO
-  } else if (auxkey == "lua") {
-    ServerState* ss = ServerState::tlocal();
-    Interpreter& script = ss->GetInterpreter();
-    string_view body{auxval};
-    string result;
-    Interpreter::AddResult add_result = script.AddFunction(body, &result);
-    if (add_result == Interpreter::ADD_OK) {
-      if (script_mgr_)
-        script_mgr_->InsertFunction(result, body);
-    } else if (add_result == Interpreter::COMPILE_ERR) {
-      LOG(ERROR) << "Error when compiling lua scripts";
-    }
-  } else if (auxkey == "redis-ver") {
-    LOG(INFO) << "Loading RDB produced by version " << auxval;
-  } else if (auxkey == "ctime") {
-    int64_t ctime;
-    if (absl::SimpleAtoi(auxval, &ctime)) {
-      time_t age = time(NULL) - ctime;
-      if (age < 0)
-        age = 0;
-      LOG(INFO) << "RDB age " << strings::HumanReadableElapsedTime(age);
-    }
-  } else if (auxkey == "used-mem") {
-    long long usedmem;
-    if (absl::SimpleAtoi(auxval, &usedmem)) {
-      LOG(INFO) << "RDB memory usage when created " << strings::HumanReadableNumBytes(usedmem);
-    }
-  } else if (auxkey == "aof-preamble") {
-    long long haspreamble;
-    if (absl::SimpleAtoi(auxval, &haspreamble) && haspreamble) {
-      LOG(INFO) << "RDB has an AOF tail";
-    }
-  } else if (auxkey == "redis-bits") {
-    /* Just ignored. */
-  } else {
-    /* We ignore fields we don't understand, as by AUX field
-     * contract. */
-    LOG(WARNING) << "Unrecognized RDB AUX field: '" << auxkey << "'";
-  }
-
-  return kOk;
-}
-
-error_code RdbLoader::VerifyChecksum() {
-  uint64_t expected;
-
-  SET_OR_RETURN(FetchInt<uint64_t>(), expected);
-
-  io::Bytes cur_buf = mem_buf_.InputBuffer();
-
-  VLOG(1) << "VerifyChecksum: input buffer len " << cur_buf.size() << ", expected " << expected;
-
-  return kOk;
-}
-
-void RdbLoader::FlushShardAsync(ShardId sid) {
-  auto& out_buf = shard_buf_[sid];
-  if (out_buf.empty())
-    return;
-
-  ItemsBuf* ib = new ItemsBuf{std::move(out_buf)};
-  auto cb = [indx = this->cur_db_index_, ib, this] {
-    this->LoadItemsBuffer(indx, *ib);
-    delete ib;
-  };
-
-  shard_set->Add(sid, std::move(cb));
-}
-
-std::error_code RdbLoaderBase::Visit(const Item& item, CompactObj* pv) {
-  OpaqueObjLoader visitor(item.val.rdb_type, pv);
-  std::visit(visitor, item.val.obj);
-  return visitor.ec();
-}
-
-void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
-  DbSlice& db_slice = EngineShard::tlocal()->db_slice();
-  DbContext db_cntx{.db_index = db_ind, .time_now_ms = GetCurrentTimeMs()};
-
-  for (const auto& item : ib) {
-    PrimeValue pv;
-    if (ec_ = Visit(item, &pv); ec_) {
-      stop_early_ = true;
-      break;
-    }
-
-    if (item.expire_ms > 0 && db_cntx.time_now_ms >= item.expire_ms)
-      continue;
-
-    auto [it, added] = db_slice.AddOrUpdate(db_cntx, item.key, std::move(pv), item.expire_ms);
-    if (!added) {
-      LOG(WARNING) << "RDB has duplicated key '" << item.key << "' in DB " << db_ind;
-    }
-  }
-}
-
 void RdbLoader::ResizeDb(size_t key_num, size_t expire_num) {
   DCHECK_LT(key_num, 1U << 31);
   DCHECK_LT(expire_num, 1U << 31);
@@ -1874,6 +1853,17 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   }
 
   return kOk;
+}
+
+template <typename T> io::Result<T> RdbLoader::FetchInt() {
+  auto ec = EnsureRead(sizeof(T));
+  if (ec)
+    return make_unexpected(ec);
+
+  char buf[16];
+  mem_buf_.ReadAndConsume(sizeof(T), buf);
+
+  return base::LE::LoadT<std::make_unsigned_t<T>>(buf);
 }
 
 }  // namespace dfly

@@ -383,7 +383,7 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
   if (params.IsConditionalSet()) {
     const auto [it, expire_it] = db_slice.FindExt(op_args_.db_cntx, key);
     // Make sure that we have this key, and only add it if it does exists
-    if (params.flags & SET_IF_EXISTS) {
+    if (params.how == SET_IF_EXISTS) {
       if (IsValid(it)) {
         return SetExisting(params, it, expire_it, key, value);
       } else {
@@ -409,7 +409,7 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
   if (!get<2>(add_res)) {  // Existing.
     return SetExisting(params, it, get<1>(add_res), key, value);
   }
-
+  //
   // Adding new value.
   PrimeValue tvalue{value};
   tvalue.SetFlag(params.memcache_flags != 0);
@@ -438,7 +438,7 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
 
 OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIterator e_it,
                              string_view key, string_view value) {
-  if (params.flags & SET_IF_NOTEXIST)
+  if (params.how == SET_IF_NOTEXIST)
     return OpStatus::SKIPPED;
 
   PrimeValue& prime_value = it->second;
@@ -457,7 +457,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
       params.expire_after_ms ? params.expire_after_ms + op_args_.db_cntx.time_now_ms : 0;
   if (IsValid(e_it) && at_ms) {
     e_it->second = db_slice.FromAbsoluteTime(at_ms);
-  } else if (!(params.flags & SET_KEEP_EXPIRE)) {
+  } else {
     // We need to update expiry, or maybe erase the object if it was expired.
     bool changed = db_slice.UpdateExpire(op_args_.db_cntx.db_index, it, at_ms);
     if (changed && at_ms == 0)  // erased.
@@ -509,10 +509,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
 
     string_view cur_arg = ArgS(args, i);
 
-    if ((cur_arg == "EX" || cur_arg == "PX" || cur_arg == "EXAT" || cur_arg == "PXAT") &&
-        !(sparams.flags & SetCmd::SET_KEEP_EXPIRE) &&
-        !(sparams.flags & SetCmd::SET_EXPIRE_AFTER_MS)) {
-      sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
+    if (cur_arg == "EX" || cur_arg == "PX" || cur_arg == "EXAT" || cur_arg == "PXAT") {
       bool is_ms = (cur_arg == "PX" || cur_arg == "PXAT");
       ++i;
       if (i == args.size()) {
@@ -549,14 +546,12 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
         return builder->SendError(InvalidExpireTime("set"));
       }
       sparams.expire_after_ms = int_arg;
-    } else if (cur_arg == "NX" && !(sparams.flags & SetCmd::SET_IF_EXISTS)) {
-      sparams.flags |= SetCmd::SET_IF_NOTEXIST;
-    } else if (cur_arg == "XX" && !(sparams.flags & SetCmd::SET_IF_NOTEXIST)) {
-      sparams.flags |= SetCmd::SET_IF_EXISTS;
-    } else if (cur_arg == "KEEPTTL" && !(sparams.flags & SetCmd::SET_EXPIRE_AFTER_MS)) {
-      sparams.flags |= SetCmd::SET_KEEP_EXPIRE;
-    } else if (cur_arg == "GET") {
-      sparams.flags |= SetCmd::SET_GET;
+    } else if (cur_arg == "NX") {
+      sparams.how = SetCmd::SET_IF_NOTEXIST;
+    } else if (cur_arg == "XX") {
+      sparams.how = SetCmd::SET_IF_EXISTS;
+    } else if (cur_arg == "KEEPTTL") {
+      sparams.keep_expire = true;  // TODO
     } else {
       return builder->SendError(kSyntaxErr);
     }
@@ -590,7 +585,7 @@ void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
   string_view value = ArgS(args, 2);
 
   SetCmd::SetParams sparams;
-  sparams.flags |= SetCmd::SET_IF_NOTEXIST;
+  sparams.how = SetCmd::SET_IF_NOTEXIST;
   sparams.memcache_flags = cntx->conn_state.memcache_flag;
   const auto results{SetGeneric(cntx, std::move(sparams), key, value)};
   SinkReplyBuilder* builder = cntx->reply_builder();

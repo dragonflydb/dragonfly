@@ -6,39 +6,11 @@
 
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
-#include "server/server_family.h"
-#include "server/server_state.h"
-#include "src/facade/dragonfly_connection.h"
 #include "util/proactor_base.h"
 
 namespace dfly {
 
 using namespace std;
-
-void ConnectionContext::SendMonitorMsg(std::string msg) {
-  CHECK(owner());
-
-  owner()->SendMonitorMsg(std::move(msg));
-}
-
-void ConnectionContext::ChangeMonitor(bool start) {
-  // This will either remove or register a new connection
-  // at the "top level" thread --> ServerState context
-  // note that we are registering/removing this connection to the thread at which at run
-  // then notify all other threads that there is a change in the number of monitors
-  auto& my_monitors = ServerState::tlocal()->Monitors();
-  if (start) {
-    my_monitors.Add(this);
-  } else {
-    VLOG(1) << "connection " << owner()->GetClientInfo()
-            << " no longer needs to be monitored - removing 0x" << std::hex << (const void*)this;
-    my_monitors.Remove(this);
-  }
-  // Tell other threads that about the change in the number of connection that we monitor
-  shard_set->pool()->Await(
-      [start](auto*) { ServerState::tlocal()->Monitors().NotifyChangeCount(start); });
-  EnableMonitoring(start);
-}
 
 void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgList args) {
   vector<unsigned> result(to_reply ? args.size() : 0, 0);

@@ -138,26 +138,26 @@ TEST_F(SetFamilyTest, SMIsMember) {
 
   auto resp = Run({"smismember", "foo"});
   EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
-
+  
   resp = Run({"smismember", "foo1", "a", "b"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), ElementsAre("0", "0"));
-
+  
   resp = Run({"smismember", "foo", "a", "c"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), ElementsAre("1", "0"));
-
+  
   resp = Run({"smismember", "foo", "a", "b"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), ElementsAre("1", "1"));
-
+  
   resp = Run({"smismember", "foo", "d", "e"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), ElementsAre("0", "0"));
-
+  
   resp = Run({"smismember", "foo", "b"});
   EXPECT_THAT(resp, "1");
-
+  
   resp = Run({"smismember", "foo", "x"});
   EXPECT_THAT(resp, "0");
 }
@@ -165,46 +165,6 @@ TEST_F(SetFamilyTest, SMIsMember) {
 TEST_F(SetFamilyTest, Empty) {
   auto resp = Run({"smembers", "x"});
   ASSERT_THAT(resp, ArrLen(0));
-}
-
-TEST_F(SetFamilyTest, SScan) {
-  // Test for int set
-  for (int i = 0; i < 15; i++) {
-    Run({"sadd", "myintset", absl::StrCat(i)});
-  }
-
-  // Note that even though this limit by 4, it would return more because
-  // all fields are on intlist
-  auto resp = Run({"sscan", "myintset", "0", "count", "4"});
-  auto vec = StrArray(resp.GetVec()[1]);
-  EXPECT_THAT(vec.size(), 15);
-
-  resp = Run({"sscan", "myintset", "0", "match", "1*"});
-  vec = StrArray(resp.GetVec()[1]);
-  EXPECT_THAT(vec, UnorderedElementsAre("1", "10", "11", "12", "13", "14"));
-
-  // test string set
-  for (int i = 0; i < 15; i++) {
-    Run({"sadd", "mystrset", absl::StrCat("str-", i)});
-  }
-
-  resp = Run({"sscan", "mystrset", "0", "count", "5"});
-  vec = StrArray(resp.GetVec()[1]);
-  EXPECT_THAT(vec.size(), 5);
-
-  resp = Run({"sscan", "mystrset", "0", "match", "str-1*"});
-  vec = StrArray(resp.GetVec()[1]);
-  EXPECT_THAT(vec, UnorderedElementsAre("str-1", "str-10", "str-11", "str-12", "str-13", "str-14"));
-
-  resp = Run({"sscan", "mystrset", "0", "match", "str-1*", "count", "3"});
-  vec = StrArray(resp.GetVec()[1]);
-  EXPECT_THAT(vec, IsSubsetOf({"str-1", "str-10", "str-11", "str-12", "str-13", "str-14"}));
-  EXPECT_EQ(vec.size(), 3);
-
-  // nothing should match this
-  resp = Run({"sscan", "mystrset", "0", "match", "1*"});
-  vec = StrArray(resp.GetVec()[1]);
-  EXPECT_THAT(vec.size(), 0);
 }
 
 }  // namespace dfly

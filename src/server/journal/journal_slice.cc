@@ -118,11 +118,9 @@ error_code JournalSlice::Close() {
 void JournalSlice::AddLogRecord(const Entry& entry) {
   DCHECK(ring_buffer_);
 
-  iterating_cb_arr_ = true;
   for (const auto& k_v : change_cb_arr_) {
     k_v.second(entry);
   }
-  iterating_cb_arr_ = false;
 
   RingItem item;
   item.lsn = lsn_;
@@ -148,12 +146,12 @@ uint32_t JournalSlice::RegisterOnChange(ChangeCallback cb) {
 }
 
 void JournalSlice::Unregister(uint32_t id) {
-  CHECK(!iterating_cb_arr_);
-
-  auto it = find_if(change_cb_arr_.begin(), change_cb_arr_.end(),
-                    [id](const auto& e) { return e.first == id; });
-  CHECK(it != change_cb_arr_.end());
-  change_cb_arr_.erase(it);
+  for (auto it = change_cb_arr_.begin(); it != change_cb_arr_.end(); ++it) {
+    if (it->first == id) {
+      change_cb_arr_.erase(it);
+      break;
+    }
+  }
 }
 
 }  // namespace journal

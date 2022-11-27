@@ -42,15 +42,13 @@ using namespace std;
 
 ABSL_FLAG(uint32_t, port, 6379, "Redis port");
 ABSL_FLAG(uint32_t, memcache_port, 0, "Memcached port");
+ABSL_FLAG(uint64_t, maxmemory, 0,
+          "Limit on maximum-memory that is used by the database."
+          "0 - means the program will automatically determine its maximum memory usage");
 
 ABSL_DECLARE_FLAG(string, requirepass);
 
 namespace dfly {
-
-#if __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
-#include <sys/syscall.h>
-#define gettid() syscall(SYS_gettid)
-#endif
 
 using namespace util;
 using base::VarzValue;
@@ -69,123 +67,6 @@ DEFINE_VARZ(VarzMapAverage, request_latency_usec);
 std::optional<VarzFunction> engine_varz;
 
 constexpr size_t kMaxThreadSize = 1024;
-
-// Unwatch all keys for a connection and unregister from DbSlices.
-// Used by UNWATCH, DICARD and EXEC.
-void UnwatchAllKeys(ConnectionContext* cntx) {
-  auto& exec_info = cntx->conn_state.exec_info;
-  if (!exec_info.watched_keys.empty()) {
-    auto cb = [&](EngineShard* shard) {
-      shard->db_slice().UnregisterConnectionWatches(&exec_info);
-    };
-    shard_set->RunBriefInParallel(std::move(cb));
-  }
-  exec_info.ClearWatched();
-}
-
-void MultiCleanup(ConnectionContext* cntx) {
-  UnwatchAllKeys(cntx);
-  cntx->conn_state.exec_info.Clear();
-}
-
-void DeactivateMonitoring(ConnectionContext* server_ctx) {
-  if (server_ctx->monitor) {
-    // remove monitor on this connection
-    server_ctx->ChangeMonitor(false /*start*/);
-  }
-}
-
-// The format of the message that are sending is
-// +"time of day" [db-number <lua|unix:path|connection info] "command" "arg1" .. "argM"
-std::string CreateMonitorTimestamp() {
-  timeval tv;
-
-  gettimeofday(&tv, nullptr);
-  return absl::StrCat(tv.tv_sec, ".", tv.tv_usec, absl::kZeroPad6);
-}
-
-auto CmdEntryToMonitorFormat(std::string_view str) -> std::string {
-  // This code is based on Redis impl for it at sdscatrepr@sds.c
-  std::string result = absl::StrCat("\"");
-
-  for (auto c : str) {
-    switch (c) {
-      case '\\':
-        absl::StrAppend(&result, "\\\\");
-        break;
-      case '"':
-        absl::StrAppend(&result, "\\\"");
-        break;
-      case '\n':
-        absl::StrAppend(&result, "\\n");
-        break;
-      case '\r':
-        absl::StrAppend(&result, "\\r");
-        break;
-      case '\t':
-        absl::StrAppend(&result, "\\t");
-        break;
-      case '\a':
-        absl::StrAppend(&result, "\\a");
-        break;
-      case '\b':
-        absl::StrAppend(&result, "\\b");
-        break;
-      default:
-        if (isprint(c)) {
-          result += c;
-        } else {
-          absl::StrAppend(&result, "\\x", absl::Hex((unsigned char)c, absl::kZeroPad2));
-        }
-        break;
-    }
-  }
-  absl::StrAppend(&result, "\"");
-  return result;
-}
-
-std::string MakeMonitorMessage(const ConnectionState& conn_state,
-                               const facade::Connection* connection, CmdArgList args) {
-  std::string message = absl::StrCat(CreateMonitorTimestamp(), " [", conn_state.db_index);
-
-  if (conn_state.script_info.has_value()) {
-    absl::StrAppend(&message, " lua] ");
-  } else {
-    absl::StrAppend(&message, " ", connection->RemoteEndpointStr(), "] ");
-  }
-  if (args.empty()) {
-    absl::StrAppend(&message, "error - empty cmd list!");
-  } else if (auto cmd_name = std::string_view(args[0].data(), args[0].size());
-             cmd_name == "AUTH") {  // we cannot just send auth details in this case
-    absl::StrAppend(&message, "\"", cmd_name, "\"");
-  } else {
-    message = std::accumulate(args.begin(), args.end(), message, [](auto str, const auto& cmd) {
-      absl::StrAppend(&str, " ", CmdEntryToMonitorFormat(std::string_view(cmd.data(), cmd.size())));
-      return str;
-    });
-  }
-  return message;
-}
-
-void DispatchMonitorIfNeeded(bool admin_cmd, ConnectionContext* connection, CmdArgList args) {
-  // We are not sending any admin command in the monitor, and we do not want to
-  // do any processing if we don't have any waiting connections with monitor
-  // enabled on them - see https://redis.io/commands/monitor/
-  const auto& my_monitors = ServerState::tlocal()->Monitors();
-  if (!(my_monitors.Empty() || admin_cmd)) {
-    //  We have connections waiting to get the info on the last command, send it to them
-    auto monitor_msg = MakeMonitorMessage(connection->conn_state, connection->owner(), args);
-    // Note that this is accepted by value for lifetime reasons
-    // we want to have our own copy since we are assuming that
-    // 1. there will be not to many connections that we in monitor state
-    // 2. we need to have for each of them each own copy for thread safe reasons
-    VLOG(1) << "sending command '" << monitor_msg << "' to the clients that registered on it";
-    shard_set->pool()->DispatchBrief(
-        [msg = std::move(monitor_msg)](unsigned idx, util::ProactorBase*) {
-          ServerState::tlocal()->Monitors().Send(msg);
-        });
-  }
-}
 
 class InterpreterReplier : public RedisReplyBuilder {
  public:
@@ -495,7 +376,7 @@ void Service::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_i
 void Service::Shutdown() {
   VLOG(1) << "Service::Shutdown";
 
-  // We mark that we are shutting down. After this incoming requests will be
+  // We mark that we are shuttind down. After this incoming requests will be
   // rejected
   pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Shutdown(); });
 
@@ -561,11 +442,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     }
   }
 
-  // only reset and quit are allow if this connection is used for monitoring
-  if (dfly_cntx->monitor && (cmd_name != "RESET" && cmd_name != "QUIT")) {
-    return (*cntx)->SendError("Replica can't interact with the keyspace");
-  }
-
   bool under_script = dfly_cntx->conn_state.script_info.has_value();
 
   if (under_script && (cid->opt_mask() & CO::NOSCRIPT)) {
@@ -617,15 +493,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   etl.connection_stats.cmd_count_map[cmd_name]++;
 
   if (dfly_cntx->conn_state.exec_info.IsActive() && !is_trans_cmd) {
-    auto cmd_name = ArgS(args, 0);
-    if (cmd_name == "EVAL" || cmd_name == "EVALSHA") {
-      auto error =
-          absl::StrCat("'", cmd_name,
-                       "' Dragonfly does not allow execution of a server-side Lua script inside "
-                       "transaction block");
-      MultiSetError(dfly_cntx);
-      return (*cntx)->SendError(error);
-    }
     // TODO: protect against aggregating huge transactions.
     StoredCmd stored_cmd{cid};
     stored_cmd.cmd.reserve(args.size());
@@ -656,10 +523,8 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
           return (*cntx)->SendError("script tried accessing undeclared key");
         }
       }
-
       dfly_cntx->transaction->SetExecCmd(cid);
       OpStatus st = dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args);
-
       if (st != OpStatus::OK) {
         return (*cntx)->SendError(st);
       }
@@ -689,8 +554,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->reply_builder()->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
   }
-
-  DispatchMonitorIfNeeded(cid->opt_mask() & CO::ADMIN, dfly_cntx, args);
 
   end_usec = ProactorBase::GetMonotonicTimeNs();
 
@@ -863,8 +726,6 @@ void Service::Quit(CmdArgList args, ConnectionContext* cntx) {
 
   SinkReplyBuilder* builder = cntx->reply_builder();
   builder->CloseConnection();
-
-  DeactivateMonitoring(static_cast<ConnectionContext*>(cntx));
   cntx->owner()->ShutdownSelf();
 }
 
@@ -905,6 +766,19 @@ void Service::Watch(CmdArgList args, ConnectionContext* cntx) {
   }
 
   return (*cntx)->SendOk();
+}
+
+// Unwatch all keys for a connection and unregister from DbSlices.
+// Used by UNWATCH, DICARD and EXEC.
+void UnwatchAllKeys(ConnectionContext* cntx) {
+  auto& exec_info = cntx->conn_state.exec_info;
+  if (!exec_info.watched_keys.empty()) {
+    auto cb = [&](EngineShard* shard) {
+      shard->db_slice().UnregisterConnectionWatches(&exec_info);
+    };
+    shard_set->RunBriefInParallel(std::move(cb));
+  }
+  exec_info.ClearWatched();
 }
 
 void Service::Unwatch(CmdArgList args, ConnectionContext* cntx) {
@@ -1063,7 +937,8 @@ void Service::Discard(CmdArgList args, ConnectionContext* cntx) {
     return rb->SendError("DISCARD without MULTI");
   }
 
-  MultiCleanup(cntx);
+  UnwatchAllKeys(cntx);
+  cntx->conn_state.exec_info.Clear();
   rb->SendOk();
 }
 
@@ -1098,8 +973,7 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandRegistry& regis
 
   // The comparison can still be true even if a key expired due to another one being created.
   // So we have to check the watched_dirty flag, which is set if a key expired.
-  return watch_exist_count.load() == exec_info.watched_existed &&
-         !exec_info.watched_dirty.load(memory_order_relaxed);
+  return watch_exist_count.load() == exec_info.watched_existed && !exec_info.watched_dirty.load(memory_order_relaxed);
 }
 
 // Check if exec_info watches keys on dbs other than db_indx.
@@ -1120,7 +994,10 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto& exec_info = cntx->conn_state.exec_info;
-  absl::Cleanup exec_clear = [&cntx] { MultiCleanup(cntx); };
+  absl::Cleanup exec_clear = [&cntx, &exec_info] {
+    UnwatchAllKeys(cntx);
+    exec_info.Clear();
+  };
 
   if (IsWatchingOtherDbs(cntx->db_index(), exec_info)) {
     return rb->SendError("Dragonfly does not allow WATCH and EXEC on different databases");
@@ -1163,7 +1040,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
         }
       }
       scmd.descr->Invoke(cmd_arg_list, cntx);
-      if (rb->GetError())  // checks for i/o error, not logical error.
+      if (rb->GetError())
         break;
     }
 
@@ -1176,15 +1053,12 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
 void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
   string_view channel = ArgS(args, 1);
-
-  // shared_ptr ensures that the message lives until it's been sent to all subscribers and handled
-  // by DispatchOperations.
-  std::shared_ptr<const std::string> message = std::make_shared<const std::string>(ArgS(args, 2));
+  string_view message = ArgS(args, 2);
   ShardId sid = Shard(channel, shard_count());
 
   auto cb = [&] { return EngineShard::tlocal()->channel_slice().FetchSubscribers(channel); };
 
-  // How do we know that subscribers did not disappear after we fetched them?
+  // How do we know that subsribers did not disappear after we fetched them?
   // Each subscriber object hold a borrow_token.
   // OnClose does not reset subscribe_info before all tokens are returned.
   vector<ChannelSlice::Subscriber> subscriber_arr = shard_set->Await(sid, std::move(cb));
@@ -1201,8 +1075,10 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
       }
     }
 
-    // We run publish_cb in each subscriber's thread.
-    auto publish_cb = [&](unsigned idx, util::ProactorBase*) mutable {
+    fibers_ext::BlockingCounter bc(subscriber_arr.size());
+
+    // We run publish_cb in each subsriber's thread.
+    auto publish_cb = [&, bc](unsigned idx, util::ProactorBase*) mutable {
       unsigned start = slices[idx];
 
       for (unsigned i = start; i < subscriber_arr.size(); ++i) {
@@ -1218,11 +1094,13 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
         pmsg.channel = channel;
         pmsg.message = message;
         pmsg.pattern = subscriber.pattern;
-        conn->SendMsgVecAsync(pmsg);
+        conn->SendMsgVecAsync(pmsg, bc);
       }
     };
 
     shard_set->pool()->Await(publish_cb);
+
+    bc.Wait();  // Wait for all the messages to be sent.
   }
 
   // If subscriber connections are closing they will wait
@@ -1300,14 +1178,6 @@ void Service::PubsubPatterns(ConnectionContext* cntx) {
       shard_set->Await(0, [&] { return EngineShard::tlocal()->channel_slice().PatternCount(); });
 
   (*cntx)->SendLong(pattern_count);
-}
-
-void Service::Monitor(CmdArgList args, ConnectionContext* cntx) {
-  VLOG(1) << "starting monitor on this connection: " << cntx->owner()->GetClientInfo();
-  // we are registering the current connection for all threads so they will be aware of
-  // this connection, to send to it any command
-  (*cntx)->SendOk();
-  cntx->ChangeMonitor(true /* start */);
 }
 
 void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
@@ -1403,8 +1273,6 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
     }
   }
 
-  DeactivateMonitoring(server_cntx);
-
   server_family_.OnClose(server_cntx);
 }
 
@@ -1448,7 +1316,6 @@ void Service::RegisterCommands() {
       << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(PSubscribe)
       << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(PUnsubscribe)
       << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0}.MFUNC(Function)
-      << CI{"MONITOR", CO::ADMIN, 1, 0, 0, 0}.MFUNC(Monitor)
       << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, 0}.MFUNC(Pubsub);
 
   StreamFamily::Register(&registry_);

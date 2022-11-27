@@ -40,7 +40,7 @@
  * This should be the size of the buffer given to ld2string */
 #define MAX_LONG_DOUBLE_CHARS 5*1024
 
-/* long double to string conversion options */
+/* long double to string convertion options */
 typedef enum {
     LD_STR_AUTO,     /* %.17Lg */
     LD_STR_HUMAN,    /* %.17Lf + Trimming of trailing zeros */

@@ -32,8 +32,6 @@ using absl::GetFlag;
 using ResultStringVec = vector<OpResult<StringVec>>;
 using ResultSetView = OpResult<absl::flat_hash_set<std::string_view>>;
 using SvArray = vector<std::string_view>;
-using SetType = pair<void*, unsigned>;
-
 namespace {
 
 constexpr uint32_t kMaxIntSetEntries = 256;
@@ -43,14 +41,6 @@ constexpr uint64_t kNowBase = 1664582400ULL;
 
 uint32_t TimeNowSecRel(uint64_t now_ms) {
   return (now_ms / 1000) - kNowBase;
-}
-
-bool IsDenseEncoding(const CompactObj& co) {
-  return co.Encoding() == kEncodingStrMap2;
-}
-
-bool IsDenseEncoding(const SetType& co) {
-  return co.second == kEncodingStrMap2;
 }
 
 intset* IntsetAddSafe(string_view val, intset* is, bool* success, bool* added) {
@@ -100,7 +90,7 @@ pair<unsigned, bool> RemoveStrSet(uint32_t now_sec, ArgSlice vals, CompactObj* s
   bool isempty = false;
   auto* shard = EngineShard::tlocal();
 
-  if (IsDenseEncoding(*set)) {
+  if (set->Encoding() == kEncodingStrMap2) {
     StringSet* ss = ((StringSet*)set->RObjPtr());
     ss->set_time(now_sec);
 
@@ -127,7 +117,7 @@ pair<unsigned, bool> RemoveStrSet(uint32_t now_sec, ArgSlice vals, CompactObj* s
 unsigned AddStrSet(const DbContext& db_context, ArgSlice vals, uint32_t ttl_sec, CompactObj* dest) {
   unsigned res = 0;
 
-  if (IsDenseEncoding(*dest)) {
+  if (dest->Encoding() == kEncodingStrMap2) {
     StringSet* ss = (StringSet*)dest->RObjPtr();
     uint32_t time_now = TimeNowSecRel(db_context.time_now_ms);
 
@@ -209,58 +199,42 @@ void InitSet(ArgSlice vals, CompactObj* set) {
   }
 }
 
+void ScanCallback(void* privdata, const dictEntry* de) {
+  StringVec* sv = (StringVec*)privdata;
+  sds key = (sds)de->key;
+  sv->push_back(string(key, sdslen(key)));
+}
+
 uint64_t ScanStrSet(const DbContext& db_context, const CompactObj& co, uint64_t curs,
-                    const ScanOpts& scan_op, StringVec* res) {
-  uint32_t count = scan_op.limit;
+                    unsigned count, StringVec* res) {
   long maxiterations = count * 10;
 
-  if (IsDenseEncoding(co)) {
+  if (co.Encoding() == kEncodingStrMap2) {
     StringSet* set = (StringSet*)co.RObjPtr();
     set->set_time(TimeNowSecRel(db_context.time_now_ms));
 
     do {
-      auto scan_callback = [&](const sds ptr) {
-        string_view str{ptr, sdslen(ptr)};
-        if (scan_op.Matches(str)) {
-          res->push_back(std::string(str));
-        }
-      };
-
-      curs = set->Scan(curs, scan_callback);
-
+      curs = set->Scan(curs, [&](const sds ptr) { res->push_back(std::string(ptr, sdslen(ptr))); });
     } while (curs && maxiterations-- && res->size() < count);
   } else {
     DCHECK_EQ(co.Encoding(), kEncodingStrMap);
-    using PrivateDataRef = std::tuple<StringVec*, const ScanOpts&>;
-    PrivateDataRef private_data_ref(res, scan_op);
-    void* private_data = &private_data_ref;
     dict* ds = (dict*)co.RObjPtr();
-
-    auto scan_callback = [](void* private_data, const dictEntry* de) {
-      StringVec* sv = std::get<0>(*(PrivateDataRef*)private_data);
-      const ScanOpts& scan_op = std::get<1>(*(PrivateDataRef*)private_data);
-
-      sds key = (sds)de->key;
-      auto len = sdslen(key);
-      if (scan_op.Matches(std::string_view(key, len))) {
-        sv->emplace_back(key, len);
-      }
-    };
-
     do {
-      curs = dictScan(ds, curs, scan_callback, NULL, private_data);
+      curs = dictScan(ds, curs, ScanCallback, NULL, res);
     } while (curs && maxiterations-- && res->size() < count);
   }
 
   return curs;
 }
 
+using SetType = pair<void*, unsigned>;
+
 uint32_t SetTypeLen(const DbContext& db_context, const SetType& set) {
   if (set.second == kEncodingIntSet) {
     return intsetLen((const intset*)set.first);
   }
 
-  if (IsDenseEncoding(set)) {
+  if (set.second == kEncodingStrMap2) {
     StringSet* ss = (StringSet*)set.first;
     ss->set_time(TimeNowSecRel(db_context.time_now_ms));
     return ss->Size();
@@ -278,7 +252,7 @@ bool IsInSet(const DbContext& db_context, const SetType& st, int64_t val) {
   char* next = absl::numbers_internal::FastIntToBuffer(val, buf);
   string_view str{buf, size_t(next - buf)};
 
-  if (IsDenseEncoding(st)) {
+  if (st.second == kEncodingStrMap2) {
     StringSet* ss = (StringSet*)st.first;
     ss->set_time(TimeNowSecRel(db_context.time_now_ms));
     return ss->Contains(str);
@@ -297,7 +271,7 @@ bool IsInSet(const DbContext& db_context, const SetType& st, string_view member)
     return intsetFind((intset*)st.first, llval);
   }
 
-  if (IsDenseEncoding(st)) {
+  if (st.second == kEncodingStrMap2) {
     StringSet* ss = (StringSet*)st.first;
     ss->set_time(TimeNowSecRel(db_context.time_now_ms));
 
@@ -308,8 +282,9 @@ bool IsInSet(const DbContext& db_context, const SetType& st, string_view member)
   }
 }
 
-void FindInSet(StringVec& memberships, const DbContext& db_context, const SetType& st,
-               const vector<string_view>& members) {
+void FindInSet(StringVec& memberships,
+		const DbContext& db_context, const SetType& st, 
+		const vector<string_view>& members) {
   for (const auto& member : members) {
     bool status = IsInSet(db_context, st, member);
     memberships.emplace_back(to_string(status));
@@ -319,7 +294,7 @@ void FindInSet(StringVec& memberships, const DbContext& db_context, const SetTyp
 // Removes arg from result.
 void DiffStrSet(const DbContext& db_context, const SetType& st,
                 absl::flat_hash_set<string>* result) {
-  if (IsDenseEncoding(st)) {
+  if (st.second == kEncodingStrMap2) {
     StringSet* ss = (StringSet*)st.first;
     ss->set_time(TimeNowSecRel(db_context.time_now_ms));
     for (sds ptr : *ss) {
@@ -339,7 +314,7 @@ void DiffStrSet(const DbContext& db_context, const SetType& st,
 }
 
 void InterStrSet(const DbContext& db_context, const vector<SetType>& vec, StringVec* result) {
-  if (IsDenseEncoding(vec.front())) {
+  if (vec.front().second == kEncodingStrMap2) {
     StringSet* ss = (StringSet*)vec.front().first;
     ss->set_time(TimeNowSecRel(db_context.time_now_ms));
     for (const sds ptr : *ss) {
@@ -382,7 +357,7 @@ void InterStrSet(const DbContext& db_context, const vector<SetType>& vec, String
 StringVec PopStrSet(const DbContext& db_context, unsigned count, const SetType& st) {
   StringVec result;
 
-  if (IsDenseEncoding(st)) {
+  if (st.second == kEncodingStrMap2) {
     StringSet* ss = (StringSet*)st.first;
     ss->set_time(TimeNowSecRel(db_context.time_now_ms));
 
@@ -647,7 +622,7 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
       co.InitRobj(OBJ_SET, kEncodingStrMap2, tmp.ptr);
     }
 
-    CHECK(IsDenseEncoding(co));
+    CHECK(co.Encoding() == kEncodingStrMap2);
   }
 
   uint32_t res = AddStrSet(op_args.db_cntx, std::move(vals), ttl_sec, &co);
@@ -777,7 +752,7 @@ OpResult<StringVec> OpUnion(const OpArgs& op_args, ArgSlice keys) {
         op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_SET);
     if (find_res) {
       PrimeValue& pv = find_res.value()->second;
-      if (IsDenseEncoding(pv)) {
+      if (pv.Encoding() == kEncodingStrMap2) {
         StringSet* ss = (StringSet*)pv.RObjPtr();
         ss->set_time(TimeNowSecRel(op_args.db_cntx.time_now_ms));
       }
@@ -809,7 +784,7 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ArgSlice keys) {
 
   absl::flat_hash_set<string> uniques;
   PrimeValue& pv = find_res.value()->second;
-  if (IsDenseEncoding(pv)) {
+  if (pv.Encoding() == kEncodingStrMap2) {
     StringSet* ss = (StringSet*)pv.RObjPtr();
     ss->set_time(TimeNowSecRel(op_args.db_cntx.time_now_ms));
   }
@@ -864,7 +839,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
       return find_res.status();
 
     PrimeValue& pv = find_res.value()->second;
-    if (IsDenseEncoding(pv)) {
+    if (pv.Encoding() == kEncodingStrMap2) {
       StringSet* ss = (StringSet*)pv.RObjPtr();
       ss->set_time(TimeNowSecRel(t->db_context().time_now_ms));
     }
@@ -949,7 +924,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
    * the number of elements inside the set: simply return the whole set. */
   if (count >= slen) {
     PrimeValue& pv = it->second;
-    if (IsDenseEncoding(pv)) {
+    if (pv.Encoding() == kEncodingStrMap2) {
       StringSet* ss = (StringSet*)pv.RObjPtr();
       ss->set_time(TimeNowSecRel(op_args.db_cntx.time_now_ms));
     }
@@ -984,8 +959,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
   return result;
 }
 
-OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cursor,
-                           const ScanOpts& scan_op) {
+OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cursor) {
   OpResult<PrimeIterator> find_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_SET);
 
   if (!find_res)
@@ -993,20 +967,18 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cur
 
   PrimeIterator it = find_res.value();
   StringVec res;
+  uint32_t count = 10;
 
   if (it->second.Encoding() == kEncodingIntSet) {
     intset* is = (intset*)it->second.RObjPtr();
     int64_t intele;
     uint32_t pos = 0;
     while (intsetGet(is, pos++, &intele)) {
-      std::string int_str = absl::StrCat(intele);
-      if (scan_op.Matches(int_str)) {
-        res.push_back(int_str);
-      }
+      res.push_back(absl::StrCat(intele));
     }
     *cursor = 0;
   } else {
-    *cursor = ScanStrSet(op_args.db_cntx, it->second, *cursor, scan_op, &res);
+    *cursor = ScanStrSet(op_args.db_cntx, it->second, *cursor, count, &res);
   }
 
   return res;
@@ -1424,28 +1396,18 @@ void SScan(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError("invalid cursor");
   }
 
-  // SSCAN key cursor [MATCH pattern] [COUNT count]
-  if (args.size() > 7) {
-    DVLOG(1) << "got " << args.size() << " this is more than it should be";
-    return (*cntx)->SendError(kSyntaxErr);
+  if (args.size() > 3) {
+    return (*cntx)->SendError("scan options are not supported yet");
   }
-
-  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(3));
-  if (!ops) {
-    DVLOG(1) << "SScan invalid args - return " << ops << " to the user";
-    return (*cntx)->SendError(ops.status());
-  }
-
-  ScanOpts scan_op = ops.value();
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
+    return OpScan(t->GetOpArgs(shard), key, &cursor);
   };
 
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
     (*cntx)->StartArray(2);
-    (*cntx)->SendBulkString(absl::StrCat(cursor));
+    (*cntx)->SendSimpleString(absl::StrCat(cursor));
     (*cntx)->StartArray(result->size());
     for (const auto& k : *result) {
       (*cntx)->SendBulkString(k);
