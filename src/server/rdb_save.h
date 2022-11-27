@@ -52,6 +52,13 @@ class AlignedBuffer : public ::io::Sink {
   off_t buf_offs_ = 0;
 };
 
+// SaveMode for snapshot. Used by RdbSaver to adjust internals.
+enum class SaveMode {
+  SUMMARY,       // Save only header values (summary.dfs). Expected to read no shards.
+  SINGLE_SHARD,  // Save single shard values (XXXX.dfs). Expected to read one shard.
+  RDB,           // Save .rdb file. Expected to read all shards.
+};
+
 class RdbSaver {
  public:
   // single_shard - true means that we run RdbSaver on a single shard and we do not use
@@ -59,20 +66,30 @@ class RdbSaver {
   // single_shard - false, means we capture all the data using a single RdbSaver instance
   // (corresponds to legacy, redis compatible mode)
   // if align_writes is true - writes data in aligned chunks of 4KB to fit direct I/O requirements.
-  explicit RdbSaver(::io::Sink* sink, bool single_shard, bool align_writes);
+  explicit RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes);
 
   ~RdbSaver();
 
+  // Initiates the serialization in the shard's thread.
+  // TODO: to implement break functionality to allow stopping early.
+  void StartSnapshotInShard(bool stream_journal, const Cancellation* cll, EngineShard* shard);
+
+  // Stops serialization in journal streaming mode in the shard's thread.
+  void StopSnapshotInShard(EngineShard* shard);
+
+  // Stores auxiliary (meta) values and lua scripts.
   std::error_code SaveHeader(const StringVec& lua_scripts);
 
   // Writes the RDB file into sink. Waits for the serialization to finish.
   // Fills freq_map with the histogram of rdb types.
   // freq_map can optionally be null.
-  std::error_code SaveBody(RdbTypeFreqMap* freq_map);
+  std::error_code SaveBody(const Cancellation* cll, RdbTypeFreqMap* freq_map);
 
-  // Initiates the serialization in the shard's thread.
-  // TODO: to implement break functionality to allow stopping early.
-  void StartSnapshotInShard(bool include_journal_changes, EngineShard* shard);
+  void Cancel();
+
+  SaveMode Mode() const {
+    return save_mode_;
+  }
 
  private:
   class Impl;
@@ -82,6 +99,7 @@ class RdbSaver {
   std::error_code SaveAux(const StringVec& lua_scripts);
   std::error_code SaveAuxFieldStrInt(std::string_view key, int64_t val);
 
+  SaveMode save_mode_;
   std::unique_ptr<Impl> impl_;
 };
 
@@ -125,6 +143,8 @@ class RdbSerializer {
   // this by finding the key. This function is used
   // for the dump command - thus it is public function
   std::error_code SaveValue(const PrimeValue& pv);
+
+  std::error_code SendFullSyncCut();
 
  private:
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);

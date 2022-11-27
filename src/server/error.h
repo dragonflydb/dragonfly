@@ -11,21 +11,21 @@
 
 namespace dfly {
 
-using facade::kWrongTypeErr;
+using facade::kDbIndOutOfRangeErr;
+using facade::kInvalidDbIndErr;
 using facade::kInvalidIntErr;
 using facade::kSyntaxErr;
-using facade::kInvalidDbIndErr;
-using facade::kDbIndOutOfRangeErr;
+using facade::kWrongTypeErr;
 
 #ifndef RETURN_ON_ERR
 
-#define RETURN_ON_ERR(x) \
-  do {                   \
-    auto __ec = (x);       \
-    if (__ec) {            \
-      VLOG(1) << "Error " << __ec << " while calling " #x; \
-      return __ec;         \
-    }                      \
+#define RETURN_ON_ERR(x)                                      \
+  do {                                                        \
+    auto __ec = (x);                                          \
+    if (__ec) {                                               \
+      LOG(ERROR) << "Error " << __ec << " while calling " #x; \
+      return __ec;                                            \
+    }                                                         \
   } while (0)
 
 #endif  // RETURN_ON_ERR

@@ -359,6 +359,9 @@ class DenseSet {
 
   // return a ChainVectorIterator (a.k.a iterator) or end if there is an empty chain found
   ChainVectorIterator FindEmptyAround(uint32_t bid);
+  // return if bucket has no item which is not displaced and right/left bucket has no displaced item
+  // belong to given bid
+  bool NoItemBelongsBucket(uint32_t bid) const;
   void Grow();
 
   // ============ Pseudo Linked List Functions for interacting with Chains ==================

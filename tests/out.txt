@@ -1,0 +1,643 @@
+============================= test session starts ==============================
+platform linux -- Python 3.9.7, pytest-7.1.3, pluggy-1.0.0
+rootdir: /home/dranikpg/proj/dragonfly/tests
+plugins: asyncio-0.20.1
+asyncio: mode=strict
+collected 12 items / 11 deselected / 1 selected
+
+dragonfly/replication_test.py F                                          [100%]
+
+=================================== FAILURES ===================================
+__ test_disconnect[df_factory0-8-t_crash_fs6-t_crash_ss6-t_disonnect6-10000] ___
+
+self = Connection<host=localhost,port=1117,db=0>
+
+    async def connect(self):
+        """Connects to the Redis server if not already connected"""
+        if self.is_connected:
+            return
+        try:
+>           await self._connect()
+
+../../../.local/lib/python3.9/site-packages/aioredis/connection.py:692: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = Connection<host=localhost,port=1117,db=0>
+
+    async def _connect(self):
+        """Create a TCP socket connection"""
+        async with async_timeout.timeout(self.socket_connect_timeout):
+>           reader, writer = await asyncio.open_connection(
+                host=self.host,
+                port=self.port,
+                ssl=self.ssl_context.get() if self.ssl_context else None,
+            )
+
+../../../.local/lib/python3.9/site-packages/aioredis/connection.py:719: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+host = 'localhost', port = 1117
+loop = <_UnixSelectorEventLoop running=False closed=False debug=False>
+limit = 65536, kwds = {'ssl': None}, reader = <StreamReader>
+
+    async def open_connection(host=None, port=None, *,
+                              loop=None, limit=_DEFAULT_LIMIT, **kwds):
+        """A wrapper for create_connection() returning a (reader, writer) pair.
+    
+        The reader returned is a StreamReader instance; the writer is a
+        StreamWriter instance.
+    
+        The arguments are all the usual arguments to create_connection()
+        except protocol_factory; most common are positional host and port,
+        with various optional keyword arguments following.
+    
+        Additional optional keyword arguments are loop (to set the event loop
+        instance to use) and limit (to set the buffer limit passed to the
+        StreamReader).
+    
+        (If you want to customize the StreamReader and/or
+        StreamReaderProtocol classes, just copy the code -- there's
+        really nothing special here except some convenience.)
+        """
+        if loop is None:
+            loop = events.get_event_loop()
+        else:
+            warnings.warn("The loop argument is deprecated since Python 3.8, "
+                          "and scheduled for removal in Python 3.10.",
+                          DeprecationWarning, stacklevel=2)
+        reader = StreamReader(limit=limit, loop=loop)
+        protocol = StreamReaderProtocol(reader, loop=loop)
+>       transport, _ = await loop.create_connection(
+            lambda: protocol, host, port, **kwds)
+
+/usr/lib/python3.9/asyncio/streams.py:52: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <_UnixSelectorEventLoop running=False closed=False debug=False>
+protocol_factory = <function open_connection.<locals>.<lambda> at 0x7f0077544310>
+host = 'localhost', port = 1117
+
+    async def create_connection(
+            self, protocol_factory, host=None, port=None,
+            *, ssl=None, family=0,
+            proto=0, flags=0, sock=None,
+            local_addr=None, server_hostname=None,
+            ssl_handshake_timeout=None,
+            happy_eyeballs_delay=None, interleave=None):
+        """Connect to a TCP server.
+    
+        Create a streaming transport connection to a given Internet host and
+        port: socket family AF_INET or socket.AF_INET6 depending on host (or
+        family if specified), socket type SOCK_STREAM. protocol_factory must be
+        a callable returning a protocol instance.
+    
+        This method is a coroutine which will try to establish the connection
+        in the background.  When successful, the coroutine returns a
+        (transport, protocol) pair.
+        """
+        if server_hostname is not None and not ssl:
+            raise ValueError('server_hostname is only meaningful with ssl')
+    
+        if server_hostname is None and ssl:
+            # Use host as default for server_hostname.  It is an error
+            # if host is empty or not set, e.g. when an
+            # already-connected socket was passed or when only a port
+            # is given.  To avoid this error, you can pass
+            # server_hostname='' -- this will bypass the hostname
+            # check.  (This also means that if host is a numeric
+            # IP/IPv6 address, we will attempt to verify that exact
+            # address; this will probably fail, but it is possible to
+            # create a certificate for a specific IP address, so we
+            # don't judge it here.)
+            if not host:
+                raise ValueError('You must set server_hostname '
+                                 'when using ssl without a host')
+            server_hostname = host
+    
+        if ssl_handshake_timeout is not None and not ssl:
+            raise ValueError(
+                'ssl_handshake_timeout is only meaningful with ssl')
+    
+        if happy_eyeballs_delay is not None and interleave is None:
+            # If using happy eyeballs, default to interleave addresses by family
+            interleave = 1
+    
+        if host is not None or port is not None:
+            if sock is not None:
+                raise ValueError(
+                    'host/port and sock can not be specified at the same time')
+    
+            infos = await self._ensure_resolved(
+                (host, port), family=family,
+                type=socket.SOCK_STREAM, proto=proto, flags=flags, loop=self)
+            if not infos:
+                raise OSError('getaddrinfo() returned empty list')
+    
+            if local_addr is not None:
+                laddr_infos = await self._ensure_resolved(
+                    local_addr, family=family,
+                    type=socket.SOCK_STREAM, proto=proto,
+                    flags=flags, loop=self)
+                if not laddr_infos:
+                    raise OSError('getaddrinfo() returned empty list')
+            else:
+                laddr_infos = None
+    
+            if interleave:
+                infos = _interleave_addrinfos(infos, interleave)
+    
+            exceptions = []
+            if happy_eyeballs_delay is None:
+                # not using happy eyeballs
+                for addrinfo in infos:
+                    try:
+                        sock = await self._connect_sock(
+                            exceptions, addrinfo, laddr_infos)
+                        break
+                    except OSError:
+                        continue
+            else:  # using happy eyeballs
+                sock, _, _ = await staggered.staggered_race(
+                    (functools.partial(self._connect_sock,
+                                       exceptions, addrinfo, laddr_infos)
+                     for addrinfo in infos),
+                    happy_eyeballs_delay, loop=self)
+    
+            if sock is None:
+                exceptions = [exc for sub in exceptions for exc in sub]
+                if len(exceptions) == 1:
+>                   raise exceptions[0]
+
+/usr/lib/python3.9/asyncio/base_events.py:1056: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <_UnixSelectorEventLoop running=False closed=False debug=False>
+protocol_factory = <function open_connection.<locals>.<lambda> at 0x7f0077544310>
+host = 'localhost', port = 1117
+
+    async def create_connection(
+            self, protocol_factory, host=None, port=None,
+            *, ssl=None, family=0,
+            proto=0, flags=0, sock=None,
+            local_addr=None, server_hostname=None,
+            ssl_handshake_timeout=None,
+            happy_eyeballs_delay=None, interleave=None):
+        """Connect to a TCP server.
+    
+        Create a streaming transport connection to a given Internet host and
+        port: socket family AF_INET or socket.AF_INET6 depending on host (or
+        family if specified), socket type SOCK_STREAM. protocol_factory must be
+        a callable returning a protocol instance.
+    
+        This method is a coroutine which will try to establish the connection
+        in the background.  When successful, the coroutine returns a
+        (transport, protocol) pair.
+        """
+        if server_hostname is not None and not ssl:
+            raise ValueError('server_hostname is only meaningful with ssl')
+    
+        if server_hostname is None and ssl:
+            # Use host as default for server_hostname.  It is an error
+            # if host is empty or not set, e.g. when an
+            # already-connected socket was passed or when only a port
+            # is given.  To avoid this error, you can pass
+            # server_hostname='' -- this will bypass the hostname
+            # check.  (This also means that if host is a numeric
+            # IP/IPv6 address, we will attempt to verify that exact
+            # address; this will probably fail, but it is possible to
+            # create a certificate for a specific IP address, so we
+            # don't judge it here.)
+            if not host:
+                raise ValueError('You must set server_hostname '
+                                 'when using ssl without a host')
+            server_hostname = host
+    
+        if ssl_handshake_timeout is not None and not ssl:
+            raise ValueError(
+                'ssl_handshake_timeout is only meaningful with ssl')
+    
+        if happy_eyeballs_delay is not None and interleave is None:
+            # If using happy eyeballs, default to interleave addresses by family
+            interleave = 1
+    
+        if host is not None or port is not None:
+            if sock is not None:
+                raise ValueError(
+                    'host/port and sock can not be specified at the same time')
+    
+            infos = await self._ensure_resolved(
+                (host, port), family=family,
+                type=socket.SOCK_STREAM, proto=proto, flags=flags, loop=self)
+            if not infos:
+                raise OSError('getaddrinfo() returned empty list')
+    
+            if local_addr is not None:
+                laddr_infos = await self._ensure_resolved(
+                    local_addr, family=family,
+                    type=socket.SOCK_STREAM, proto=proto,
+                    flags=flags, loop=self)
+                if not laddr_infos:
+                    raise OSError('getaddrinfo() returned empty list')
+            else:
+                laddr_infos = None
+    
+            if interleave:
+                infos = _interleave_addrinfos(infos, interleave)
+    
+            exceptions = []
+            if happy_eyeballs_delay is None:
+                # not using happy eyeballs
+                for addrinfo in infos:
+                    try:
+>                       sock = await self._connect_sock(
+                            exceptions, addrinfo, laddr_infos)
+
+/usr/lib/python3.9/asyncio/base_events.py:1041: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <_UnixSelectorEventLoop running=False closed=False debug=False>
+exceptions = [[ConnectionRefusedError(111, "Connect call failed ('127.0.0.1', 1117)")]]
+addr_info = (<AddressFamily.AF_INET: 2>, <SocketKind.SOCK_STREAM: 1>, 6, '', ('127.0.0.1', 1117))
+local_addr_infos = None
+
+    async def _connect_sock(self, exceptions, addr_info, local_addr_infos=None):
+        """Create, bind and connect one socket."""
+        my_exceptions = []
+        exceptions.append(my_exceptions)
+        family, type_, proto, _, address = addr_info
+        sock = None
+        try:
+            sock = socket.socket(family=family, type=type_, proto=proto)
+            sock.setblocking(False)
+            if local_addr_infos is not None:
+                for _, _, _, _, laddr in local_addr_infos:
+                    try:
+                        sock.bind(laddr)
+                        break
+                    except OSError as exc:
+                        msg = (
+                            f'error while attempting to bind on '
+                            f'address {laddr!r}: '
+                            f'{exc.strerror.lower()}'
+                        )
+                        exc = OSError(exc.errno, msg)
+                        my_exceptions.append(exc)
+                else:  # all bind attempts failed
+                    raise my_exceptions.pop()
+>           await self.sock_connect(sock, address)
+
+/usr/lib/python3.9/asyncio/base_events.py:955: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <_UnixSelectorEventLoop running=False closed=False debug=False>
+sock = <socket.socket [closed] fd=-1, family=AddressFamily.AF_INET, type=SocketKind.SOCK_STREAM, proto=6>
+address = ('127.0.0.1', 1117)
+
+    async def sock_connect(self, sock, address):
+        """Connect to a remote socket at address.
+    
+        This method is a coroutine.
+        """
+        _check_ssl_socket(sock)
+        if self._debug and sock.gettimeout() != 0:
+            raise ValueError("the socket must be non-blocking")
+    
+        if not hasattr(socket, 'AF_UNIX') or sock.family != socket.AF_UNIX:
+            resolved = await self._ensure_resolved(
+                address, family=sock.family, proto=sock.proto, loop=self)
+            _, _, _, _, address = resolved[0]
+    
+        fut = self.create_future()
+        self._sock_connect(fut, sock, address)
+>       return await fut
+
+/usr/lib/python3.9/asyncio/selector_events.py:502: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <_UnixSelectorEventLoop running=False closed=False debug=False>
+fut = <Future finished exception=ConnectionRefusedError(111, "Connect call failed ('127.0.0.1', 1117)")>
+sock = <socket.socket [closed] fd=-1, family=AddressFamily.AF_INET, type=SocketKind.SOCK_STREAM, proto=6>
+address = ('127.0.0.1', 1117)
+
+    def _sock_connect_cb(self, fut, sock, address):
+        if fut.done():
+            return
+    
+        try:
+            err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            if err != 0:
+                # Jump to any except clause below.
+>               raise OSError(err, f'Connect call failed {address}')
+E               ConnectionRefusedError: [Errno 111] Connect call failed ('127.0.0.1', 1117)
+
+/usr/lib/python3.9/asyncio/selector_events.py:537: ConnectionRefusedError
+
+During handling of the above exception, another exception occurred:
+
+df_local_factory = <dragonfly.DflyInstanceFactory object at 0x7f00785b9e80>
+t_master = 8, t_crash_fs = [], t_crash_ss = [], t_disonnect = [2, 2, 2, 2, 2, 2]
+n_keys = 10000
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys", disconnect_cases)
+    async def test_disconnect(df_local_factory, t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys):
+        master = df_local_factory.create(port=BASE_PORT, proactor_threads=t_master)
+        replicas = [
+            (df_local_factory.create(
+                port=BASE_PORT+i+1, proactor_threads=t), crash_fs)
+            for i, (t, crash_fs) in enumerate(
+                chain(
+                    zip(t_crash_fs, repeat(0)),
+                    zip(t_crash_ss, repeat(1)),
+                    zip(t_disonnect, repeat(2))
+                )
+            )
+        ]
+    
+        # Start master
+        master.start()
+        c_master = aioredis.Redis(port=master.port, single_connection_client=True)
+    
+        # Start replicas and create clients
+        for replica, _ in replicas:
+            replica.start()
+    
+        c_replicas = [
+            (replica, aioredis.Redis(port=replica.port), crash_type)
+            for replica, crash_type in replicas
+        ]
+    
+        def replicas_of_type(tfunc):
+            return [
+                args for args in c_replicas
+                if tfunc(args[2])
+            ]
+    
+        # Start data fill loop
+        async def fill_loop():
+            local_c = aioredis.Redis(
+                port=master.port, single_connection_client=True)
+            for seed in count(1):
+                await batch_fill_data_async(local_c, gen_test_data(n_keys, seed=seed))
+    
+        fill_task = asyncio.create_task(fill_loop())
+    
+        # Run full sync
+        async def full_sync(replica, c_replica, crash_type):
+            c_replica = aioredis.Redis(port=replica.port)
+            await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
+            if crash_type == 0:
+                await asyncio.sleep(random.random()/100+0.01)
+                replica.stop(kill=True)
+            else:
+                await wait_available_async(c_replica)
+    
+>       await asyncio.gather(*(full_sync(*args) for args in c_replicas))
+
+dragonfly/replication_test.py:171: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+dragonfly/replication_test.py:164: in full_sync
+    await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
+../../../.local/lib/python3.9/site-packages/aioredis/client.py:1082: in execute_command
+    conn = self.connection or await pool.get_connection(command_name, **options)
+../../../.local/lib/python3.9/site-packages/aioredis/connection.py:1416: in get_connection
+    await connection.connect()
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = Connection<host=localhost,port=1117,db=0>
+
+    async def connect(self):
+        """Connects to the Redis server if not already connected"""
+        if self.is_connected:
+            return
+        try:
+            await self._connect()
+        except asyncio.CancelledError:
+            raise
+        except (socket.timeout, asyncio.TimeoutError):
+            raise TimeoutError("Timeout connecting to server")
+        except OSError as e:
+>           raise ConnectionError(self._error_message(e))
+E           aioredis.exceptions.ConnectionError: Error 111 connecting to localhost:1117. 111.
+
+../../../.local/lib/python3.9/site-packages/aioredis/connection.py:698: ConnectionError
+----------------------------- Captured stdout call -----------------------------
+Starting instance on 1111 with arguments ['--port', '1111', '--proactor_threads', '8']
+GNU gdb (Ubuntu 11.1-0ubuntu2) 11.1
+Copyright (C) 2021 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+Type "show copying" and "show warranty" for details.
+This GDB was configured as "x86_64-linux-gnu".
+Type "show configuration" for configuration details.
+For bug reporting instructions, please see:
+<https://www.gnu.org/software/gdb/bugs/>.
+Find the GDB manual and other documentation resources online at:
+    <http://www.gnu.org/software/gdb/documentation/>.
+
+For help, type "help".
+Type "apropos word" to search for commands related to "word"...
+Reading symbols from /home/dranikpg/proj/dragonfly/tests/dragonfly/../../build-dbg/dragonfly...
+Starting program: /home/dranikpg/proj/dragonfly/build-dbg/dragonfly --port 1111 --proactor_threads 8
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+[New Thread 0x7ffff6cb9640 (LWP 23513)]
+[New Thread 0x7ffff6c78640 (LWP 23514)]
+[New Thread 0x7ffff6c2d640 (LWP 23515)]
+[New Thread 0x7ffff6bc2640 (LWP 23516)]
+[New Thread 0x7ffff6b4d640 (LWP 23517)]
+[New Thread 0x7ffff6b02640 (LWP 23518)]
+[New Thread 0x7ffff6a97640 (LWP 23519)]
+[New Thread 0x7ffff6a3c640 (LWP 23520)]
+Starting instance on 1112 with arguments ['--port', '1112', '--proactor_threads', '2']
+GNU gdb (Ubuntu 11.1-0ubuntu2) 11.1
+Copyright (C) 2021 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+Type "show copying" and "show warranty" for details.
+This GDB was configured as "x86_64-linux-gnu".
+Type "show configuration" for configuration details.
+For bug reporting instructions, please see:
+<https://www.gnu.org/software/gdb/bugs/>.
+Find the GDB manual and other documentation resources online at:
+    <http://www.gnu.org/software/gdb/documentation/>.
+
+For help, type "help".
+Type "apropos word" to search for commands related to "word"...
+Reading symbols from /home/dranikpg/proj/dragonfly/tests/dragonfly/../../build-dbg/dragonfly...
+Starting program: /home/dranikpg/proj/dragonfly/build-dbg/dragonfly --port 1112 --proactor_threads 2
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+[New Thread 0x7ffff6cb9640 (LWP 23530)]
+[New Thread 0x7ffff6c78640 (LWP 23531)]
+Starting instance on 1113 with arguments ['--port', '1113', '--proactor_threads', '2']
+GNU gdb (Ubuntu 11.1-0ubuntu2) 11.1
+Copyright (C) 2021 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+Type "show copying" and "show warranty" for details.
+This GDB was configured as "x86_64-linux-gnu".
+Type "show configuration" for configuration details.
+For bug reporting instructions, please see:
+<https://www.gnu.org/software/gdb/bugs/>.
+Find the GDB manual and other documentation resources online at:
+    <http://www.gnu.org/software/gdb/documentation/>.
+
+For help, type "help".
+Type "apropos word" to search for commands related to "word"...
+Reading symbols from /home/dranikpg/proj/dragonfly/tests/dragonfly/../../build-dbg/dragonfly...
+Starting program: /home/dranikpg/proj/dragonfly/build-dbg/dragonfly --port 1113 --proactor_threads 2
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+[New Thread 0x7ffff6cb9640 (LWP 23540)]
+[New Thread 0x7ffff6c78640 (LWP 23541)]
+Starting instance on 1114 with arguments ['--port', '1114', '--proactor_threads', '2']
+GNU gdb (Ubuntu 11.1-0ubuntu2) 11.1
+Copyright (C) 2021 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+Type "show copying" and "show warranty" for details.
+This GDB was configured as "x86_64-linux-gnu".
+Type "show configuration" for configuration details.
+For bug reporting instructions, please see:
+<https://www.gnu.org/software/gdb/bugs/>.
+Find the GDB manual and other documentation resources online at:
+    <http://www.gnu.org/software/gdb/documentation/>.
+
+For help, type "help".
+Type "apropos word" to search for commands related to "word"...
+Reading symbols from /home/dranikpg/proj/dragonfly/tests/dragonfly/../../build-dbg/dragonfly...
+Starting program: /home/dranikpg/proj/dragonfly/build-dbg/dragonfly --port 1114 --proactor_threads 2
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+[New Thread 0x7ffff6cb9640 (LWP 23553)]
+[New Thread 0x7ffff6c78640 (LWP 23554)]
+Starting instance on 1115 with arguments ['--port', '1115', '--proactor_threads', '2']
+GNU gdb (Ubuntu 11.1-0ubuntu2) 11.1
+Copyright (C) 2021 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+Type "show copying" and "show warranty" for details.
+This GDB was configured as "x86_64-linux-gnu".
+Type "show configuration" for configuration details.
+For bug reporting instructions, please see:
+<https://www.gnu.org/software/gdb/bugs/>.
+Find the GDB manual and other documentation resources online at:
+    <http://www.gnu.org/software/gdb/documentation/>.
+
+For help, type "help".
+Type "apropos word" to search for commands related to "word"...
+Reading symbols from /home/dranikpg/proj/dragonfly/tests/dragonfly/../../build-dbg/dragonfly...
+Starting program: /home/dranikpg/proj/dragonfly/build-dbg/dragonfly --port 1115 --proactor_threads 2
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+[New Thread 0x7ffff6cb9640 (LWP 23593)]
+[New Thread 0x7ffff6c5e640 (LWP 23594)]
+Starting instance on 1116 with arguments ['--port', '1116', '--proactor_threads', '2']
+GNU gdb (Ubuntu 11.1-0ubuntu2) 11.1
+Copyright (C) 2021 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+Type "show copying" and "show warranty" for details.
+This GDB was configured as "x86_64-linux-gnu".
+Type "show configuration" for configuration details.
+For bug reporting instructions, please see:
+<https://www.gnu.org/software/gdb/bugs/>.
+Find the GDB manual and other documentation resources online at:
+    <http://www.gnu.org/software/gdb/documentation/>.
+
+For help, type "help".
+Type "apropos word" to search for commands related to "word"...
+Reading symbols from /home/dranikpg/proj/dragonfly/tests/dragonfly/../../build-dbg/dragonfly...
+Starting program: /home/dranikpg/proj/dragonfly/build-dbg/dragonfly --port 1116 --proactor_threads 2
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+[New Thread 0x7ffff6cb9640 (LWP 23603)]
+[New Thread 0x7ffff6c78640 (LWP 23604)]
+Starting instance on 1117 with arguments ['--port', '1117', '--proactor_threads', '2']
+GNU gdb (Ubuntu 11.1-0ubuntu2) 11.1
+Copyright (C) 2021 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+Type "show copying" and "show warranty" for details.
+This GDB was configured as "x86_64-linux-gnu".
+Type "show configuration" for configuration details.
+For bug reporting instructions, please see:
+<https://www.gnu.org/software/gdb/bugs/>.
+Find the GDB manual and other documentation resources online at:
+    <http://www.gnu.org/software/gdb/documentation/>.
+
+For help, type "help".
+Type "apropos word" to search for commands related to "word"...
+Reading symbols from /home/dranikpg/proj/dragonfly/tests/dragonfly/../../build-dbg/dragonfly...
+Starting program: /home/dranikpg/proj/dragonfly/build-dbg/dragonfly --port 1117 --proactor_threads 2
+--------------------------- Captured stdout teardown ---------------------------
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+[New Thread 0x7ffff6cb9640 (LWP 23636)]
+[New Thread 0x7ffff6c78640 (LWP 23637)]
+Stopping instance on 1111
+Stopping instance on 1112
+Stopping instance on 1113
+Stopping instance on 1114
+Stopping instance on 1115
+Stopping instance on 1116
+Stopping instance on 1117
+--------------------------- Captured stderr teardown ---------------------------
+Exception ignored in: <gdb._GdbOutputFile object at 0x7f3ee6146c70>
+Traceback (most recent call last):
+  File "/usr/share/gdb/python/gdb/__init__.py", line 46, in flush
+    def flush(self):
+KeyboardInterrupt: 
+E20221125 19:37:58.959133 23531 replica.cc:564] Error system:111 while calling sock_->Connect(master_context_.endpoint)
+E20221125 19:37:58.959653 23530 replica.cc:564] Error system:111 while calling sock_->Connect(master_context_.endpoint)
+E20221125 19:37:58.960052 23530 replica.cc:445] Error system:111 while calling *ec
+E20221125 19:37:58.960911 23541 replica.cc:564] Error system:111 while calling sock_->Connect(master_context_.endpoint)
+E20221125 19:37:58.961769 23593 replica.cc:564] Error system:111 while calling sock_->Connect(master_context_.endpoint)
+E20221125 19:37:58.961942 23594 replica.cc:564] Error system:111 while calling sock_->Connect(master_context_.endpoint)
+E20221125 19:37:58.962674 23593 replica.cc:445] Error system:111 while calling *ec
+E20221125 19:37:58.963496 23540 replica.cc:564] Error system:111 while calling sock_->Connect(master_context_.endpoint)
+E20221125 19:37:58.963603 23540 replica.cc:445] Error system:111 while calling *ec
+E20221125 19:37:58.963344 23554 replica.cc:564] Error system:111 while calling sock_->Connect(master_context_.endpoint)
+E20221125 19:37:58.963462 23553 replica.cc:564] Error system:111 while calling sock_->Connect(master_context_.endpoint)
+E20221125 19:37:58.964252 23553 replica.cc:445] Error system:111 while calling *ec
+Exception ignored in: <gdb._GdbOutputFile object at 0x7f01ef720c70>
+Traceback (most recent call last):
+  File "/usr/share/gdb/python/gdb/__init__.py", line 46, in flush
+    def flush(self):
+KeyboardInterrupt: 
+Exception ignored in: <gdb._GdbOutputFile object at 0x7f5f99329c70>
+Traceback (most recent call last):
+  File "/usr/share/gdb/python/gdb/__init__.py", line 46, in flush
+    def flush(self):
+KeyboardInterrupt: 
+Exception ignored in: <gdb._GdbOutputFile object at 0x7f2cf4762c70>
+Traceback (most recent call last):
+  File "/usr/share/gdb/python/gdb/__init__.py", line 46, in flush
+    def flush(self):
+KeyboardInterrupt: 
+Exception ignored in: <gdb._GdbOutputFile object at 0x7f3259ec5c70>
+Traceback (most recent call last):
+  File "/usr/share/gdb/python/gdb/__init__.py", line 46, in flush
+    def flush(self):
+KeyboardInterrupt: 
+Exception ignored in: <gdb._GdbOutputFile object at 0x7fc3b727cc70>
+Traceback (most recent call last):
+  File "/usr/share/gdb/python/gdb/__init__.py", line 46, in flush
+    def flush(self):
+KeyboardInterrupt: 
+Exception ignored in: <gdb._GdbOutputFile object at 0x7f273f627c70>
+Traceback (most recent call last):
+  File "/usr/share/gdb/python/gdb/__init__.py", line 46, in flush
+    def flush(self):
+KeyboardInterrupt: 
+=========================== short test summary info ============================
+FAILED dragonfly/replication_test.py::test_disconnect[df_factory0-8-t_crash_fs6-t_crash_ss6-t_disonnect6-10000]
+====================== 1 failed, 11 deselected in 14.53s =======================

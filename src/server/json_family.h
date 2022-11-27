@@ -21,6 +21,7 @@ class JsonFamily {
 
  private:
   static void Get(CmdArgList args, ConnectionContext* cntx);
+  static void MGet(CmdArgList args, ConnectionContext* cntx);
   static void Type(CmdArgList args, ConnectionContext* cntx);
   static void StrLen(CmdArgList args, ConnectionContext* cntx);
   static void ObjLen(CmdArgList args, ConnectionContext* cntx);
@@ -35,7 +36,10 @@ class JsonFamily {
   static void ArrPop(CmdArgList args, ConnectionContext* cntx);
   static void ArrTrim(CmdArgList args, ConnectionContext* cntx);
   static void ArrInsert(CmdArgList args, ConnectionContext* cntx);
+  static void ArrAppend(CmdArgList args, ConnectionContext* cntx);
   static void ArrIndex(CmdArgList args, ConnectionContext* cntx);
+  static void Debug(CmdArgList args, ConnectionContext* cntx);
+  static void Resp(CmdArgList args, ConnectionContext* cntx);
 };
 
 }  // namespace dfly

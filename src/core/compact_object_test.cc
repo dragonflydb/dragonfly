@@ -179,7 +179,7 @@ TEST_F(CompactObjectTest, HSet) {
   cobj_.ImportRObj(src);
 
   EXPECT_EQ(OBJ_HASH, cobj_.ObjType());
-  EXPECT_EQ(OBJ_ENCODING_LISTPACK, cobj_.Encoding());
+  EXPECT_EQ(kEncodingListPack, cobj_.Encoding());
 
   robj* os = cobj_.AsRObj();
 

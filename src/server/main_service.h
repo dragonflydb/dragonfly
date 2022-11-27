@@ -102,7 +102,7 @@ class Service : public facade::ServiceInterface {
   void PSubscribe(CmdArgList args, ConnectionContext* cntx);
   void PUnsubscribe(CmdArgList args, ConnectionContext* cntx);
   void Function(CmdArgList args, ConnectionContext* cntx);
-
+  void Monitor(CmdArgList args, ConnectionContext* cntx);
   void Pubsub(CmdArgList args, ConnectionContext* cntx);
   void PubsubChannels(std::string_view pattern, ConnectionContext* cntx);
   void PubsubPatterns(ConnectionContext* cntx);

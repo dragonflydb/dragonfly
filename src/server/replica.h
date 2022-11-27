@@ -3,7 +3,9 @@
 //
 #pragma once
 
+#include <boost/fiber/condition_variable.hpp>
 #include <boost/fiber/fiber.hpp>
+#include <boost/fiber/mutex.hpp>
 #include <variant>
 
 #include "base/io_buf.h"
@@ -11,59 +13,27 @@
 #include "facade/redis_parser.h"
 #include "util/fiber_socket_base.h"
 
+namespace facade {
+class ReqSerializer;
+};  // namespace facade
+
 namespace dfly {
 
 class Service;
 class ConnectionContext;
 
 class Replica {
-
+ private:
   // The attributes of the master we are connecting to.
   struct MasterContext {
     std::string host;
+    uint16_t port;
+    boost::asio::ip::tcp::endpoint endpoint;
+
     std::string master_repl_id;
-    std::string dfly_session_id;  // for dragonfly replication
-    boost::asio::ip::tcp::endpoint master_ep;
-
-    uint16_t port;
-    uint32_t flow_id = UINT32_MAX;  // Relevant if this replica is used to transfer a flow.
+    std::string dfly_session_id;         // Sync session id for dfly sync.
+    uint32_t dfly_flow_id = UINT32_MAX;  // Flow id if replica acts as a dfly flow.
   };
-
- public:
-  Replica(std::string master_host, uint16_t port, Service* se);
-  ~Replica();
-
-  // Spawns a fiber that runs until link with master is broken or the replication is stopped.
-  // Returns true if initial link with master has been established or
-  // false if it has failed.
-  bool Run(ConnectionContext* cntx);
-
-  // Thread-safe
-  void Stop();
-
-  const std::string& master_host() const {
-    return master_context_.host;
-  }
-
-  uint16_t port() {
-    return master_context_.port;
-  }
-
-  struct Info {
-    std::string host;
-    uint16_t port;
-    bool master_link_established;
-    bool sync_in_progress;      // snapshot sync.
-    time_t master_last_io_sec;  // monotonic clock.
-  };
-
-  // Threadsafe, fiber blocking.
-  Info GetInfo() const;
-  void Pause(bool pause);
-
- private:
-  // Used to initialize df replication flow.
-  Replica(const MasterContext& context, uint32_t flow_id, Service* service);
 
   // The flow is : R_ENABLED -> R_TCP_CONNECTED -> (R_SYNCING) -> R_SYNC_OK.
   // SYNCING means that the initial ack succeeded. It may be optional if we can still load from
@@ -76,8 +46,59 @@ class Replica {
     R_SYNC_OK = 0x10,
   };
 
-  void ReplicateFb();
+  // A generic barrier that is used for waiting for
+  // flow fibers to become ready for the stable state switch.
+  struct SyncBlock {
+    SyncBlock(unsigned flows) : flows_left{flows} {
+    }
+    unsigned flows_left;
+    ::boost::fibers::mutex mu_;
+    ::boost::fibers::condition_variable cv_;
+  };
 
+ public:
+  Replica(std::string master_host, uint16_t port, Service* se);
+  ~Replica();
+
+  // Spawns a fiber that runs until link with master is broken or the replication is stopped.
+  // Returns true if initial link with master has been established or
+  // false if it has failed.
+  bool Start(ConnectionContext* cntx);
+
+  void Stop();  // thread-safe
+
+  void Pause(bool pause);
+
+ private: /* Main standalone mode functions */
+  // Coordinate state transitions. Spawned by start.
+  void MainReplicationFb();
+
+  std::error_code ConnectSocket();  // Connect to master.
+  std::error_code Greet();          // Send PING and REPLCONF.
+
+  std::error_code InitiatePSync();     // Redis full sync.
+  std::error_code InitiateDflySync();  // Dragonfly full sync.
+
+  std::error_code ConsumeRedisStream();  // Redis stable state.
+  std::error_code ConsumeDflyStream();   // Dragonfly stable state.
+
+ private: /* Main dlfly flow mode functions */
+  // Initialize as single dfly flow.
+  Replica(const MasterContext& context, uint32_t dfly_flow_id, Service* service);
+
+  // Start replica initialized as dfly flow.
+  std::error_code StartFullSyncFlow(SyncBlock* block);
+
+  // Transition into stable state mode as dfly flow.
+  std::error_code StartStableSyncFlow();
+
+  // Single flow full sync fiber spawned by StartFullSyncFlow.
+  void FullSyncDflyFb(SyncBlock* block, std::string eof_token);
+
+  // Single flow stable state sync fiber spawned by StartStableSyncFlow.
+  void StableSyncDflyFb();
+
+ private: /* Utility */
   struct PSyncResponse {
     // string - end of sync token (diskless)
     // size_t - size of the full sync blob (disk-based).
@@ -89,27 +110,57 @@ class Replica {
   // from the sock_. The output will reside in cmd_str_args_.
   std::error_code ReadRespReply(base::IoBuf* io_buf, uint32_t* consumed);
 
-  std::error_code ConnectSocket();
-  std::error_code Greet();
-  std::error_code InitiatePSync();
-  std::error_code InitiateDflySync();
-
   std::error_code ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* header);
   std::error_code ReadLine(base::IoBuf* io_buf, std::string_view* line);
-  std::error_code ConsumeRedisStream();
-  std::error_code ConsumeDflyStream();
+
   std::error_code ParseAndExecute(base::IoBuf* io_buf);
 
-  std::error_code StartFlow();
+  // Check if reps_args contains a simple reply.
+  bool CheckRespIsSimpleReply(std::string_view reply) const;
 
+  // Check resp_args contains the following types at front.
+  bool CheckRespFirstTypes(std::initializer_list<facade::RespExpr::Type> types) const;
+
+  // Send command, update last_io_time, return error.
+  std::error_code SendCommand(std::string_view command, facade::ReqSerializer* serializer);
+
+ public: /* Utility */
+  struct Info {
+    std::string host;
+    uint16_t port;
+    bool master_link_established;
+    bool sync_in_progress;      // snapshot sync.
+    time_t master_last_io_sec;  // monotonic clock.
+  };
+
+  Info GetInfo() const;  // thread-safe, blocks fiber
+
+  bool HasDflyMaster() const {
+    return !master_context_.dfly_session_id.empty();
+  }
+
+  bool IsDflyFlow() const {
+    return master_context_.dfly_flow_id != UINT32_MAX;
+  }
+
+  const std::string& MasterHost() const {
+    return master_context_.host;
+  }
+
+  uint16_t Port() const {
+    return master_context_.port;
+  }
+
+ private:
   Service& service_;
-
-  ::boost::fibers::fiber sync_fb_;
-  std::unique_ptr<util::LinuxSocketBase> sock_;
   MasterContext master_context_;
+  std::unique_ptr<util::LinuxSocketBase> sock_;
 
-  // Where the sock_ is handled.
-  // util::ProactorBase* sock_thread_ = nullptr;
+  // MainReplicationFb in standalone mode, FullSyncDflyFb in flow mode.
+  ::boost::fibers::fiber sync_fb_;
+  std::vector<std::unique_ptr<Replica>> shard_flows_;
+
+  std::unique_ptr<base::IoBuf> leftover_buf_;
   std::unique_ptr<facade::RedisParser> parser_;
   facade::RespVec resp_args_;
   facade::CmdArgVec cmd_str_args_;
@@ -122,8 +173,6 @@ class Replica {
   unsigned num_df_flows_ = 0;
 
   bool is_paused_ = false;
-
-  std::vector<std::unique_ptr<Replica>> shard_flows_;
 };
 
 }  // namespace dfly

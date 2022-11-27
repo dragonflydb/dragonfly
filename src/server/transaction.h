@@ -24,8 +24,8 @@ namespace dfly {
 class EngineShard;
 class BlockingController;
 
-using facade::OpStatus;
 using facade::OpResult;
+using facade::OpStatus;
 
 class Transaction {
   friend class BlockingController;
@@ -101,9 +101,7 @@ class Transaction {
 
   // Schedules a transaction. Usually used for multi-hop transactions like Rename or BLPOP.
   // For single hop, use ScheduleSingleHop instead.
-  void Schedule() {
-    ScheduleInternal();
-  }
+  void Schedule();
 
   // if conclude is true, removes the transaction from the pending queue.
   void Execute(RunnableType cb, bool conclude);
@@ -156,7 +154,7 @@ class Transaction {
   // Registers transaction into watched queue and blocks until a) either notification is received.
   // or b) tp is reached. If tp is time_point::max() then waits indefinitely.
   // Expects that the transaction had been scheduled before, and uses Execute(.., true) to register.
-  // Returns false if timeout ocurred, true if was notified by one of the keys.
+  // Returns false if timeout occurred, true if was notified by one of the keys.
   bool WaitOnWatch(const time_point& tp);
 
   // Returns true if transaction is awaked, false if it's timed-out and can be removed from the
@@ -188,7 +186,6 @@ class Transaction {
   }
 
  private:
-
   struct LockCnt {
     unsigned cnt[2] = {0, 0};
   };
@@ -200,6 +197,7 @@ class Transaction {
   }
 
   void ScheduleInternal();
+  void LockMulti();
 
   void ExpireBlocking();
   void ExecuteAsync();
@@ -259,12 +257,14 @@ class Transaction {
   };
   enum { kPerShardSize = sizeof(PerShardData) };
 
-
   struct Multi {
     absl::flat_hash_map<std::string_view, LockCnt> locks;
+    std::vector<std::string_view> keys;
+
     uint32_t multi_opts = 0;  // options of the parent transaction.
 
-    bool incremental = true;
+    // Whether this transaction can lock more keys during its progress.
+    bool is_expanding = true;
     bool locks_recorded = false;
   };
 
