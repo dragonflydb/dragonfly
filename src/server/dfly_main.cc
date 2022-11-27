@@ -22,6 +22,7 @@
 #include "io/file.h"
 #include "io/file_util.h"
 #include "io/proc_reader.h"
+#include "server/common.h"
 #include "server/main_service.h"
 #include "server/version.h"
 #include "strings/human_readable.h"
@@ -39,10 +40,34 @@
 
 using namespace std;
 
+struct MaxMemoryFlag {
+  MaxMemoryFlag() = default;
+  MaxMemoryFlag(const MaxMemoryFlag&) = default;
+  MaxMemoryFlag& operator=(const MaxMemoryFlag&) = default;
+  MaxMemoryFlag(uint64_t v) : value(v) {
+  }  // NOLINT
+
+  uint64_t value;
+};
+
+bool AbslParseFlag(absl::string_view in, MaxMemoryFlag* flag, std::string* err) {
+  int64_t val;
+  if (dfly::ParseHumanReadableBytes(in, &val) && val >= 0) {
+    flag->value = val;
+    return true;
+  }
+
+  *err = "Use human-readable format, eg.: 1G, 1GB, 10GB";
+  return false;
+}
+
+std::string AbslUnparseFlag(const MaxMemoryFlag& flag) {
+  return strings::HumanReadableNumBytes(flag.value);
+}
+
 ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 ABSL_DECLARE_FLAG(uint32_t, memcache_port);
-ABSL_DECLARE_FLAG(uint64_t, maxmemory);
 
 ABSL_FLAG(bool, use_large_pages, false, "If true - uses large memory pages for allocations");
 ABSL_FLAG(string, bind, "",
@@ -52,10 +77,13 @@ ABSL_FLAG(string, pidfile, "", "If not empty - server writes its pid into the fi
 ABSL_FLAG(string, unixsocket, "",
           "If not empty - specifies path for the Unis socket that will "
           "be used for listening for incoming connections.");
-
 ABSL_FLAG(bool, force_epoll, false,
           "If true - uses linux epoll engine underneath."
           "Can fit for kernels older than 5.10.");
+ABSL_FLAG(MaxMemoryFlag, maxmemory, MaxMemoryFlag(0),
+          "Limit on maximum-memory that is used by the database. "
+          "0 - means the program will automatically determine its maximum memory usage. "
+          "default: 0");
 
 using namespace util;
 using namespace facade;
@@ -121,10 +149,10 @@ string NormalizePaths(std::string_view path) {
 }
 
 bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
-  auto maxmemory = GetFlag(FLAGS_maxmemory);
-
+  auto maxmemory = GetFlag(FLAGS_maxmemory).value;
   if (maxmemory > 0 && maxmemory < pool->size() * 256_MB) {
-    LOG(ERROR) << "Max memory is less than 256MB per thread. Exiting...";
+    LOG(ERROR) << "There are " << pool->size() << " threads, so "
+               << HumanReadableNumBytes(pool->size() * 256_MB) << " are required. Exiting...";
     return false;
   }
 
@@ -290,7 +318,7 @@ Usage: dragonfly [FLAGS]
     }
   }
 
-  if (GetFlag(FLAGS_maxmemory) == 0) {
+  if (GetFlag(FLAGS_maxmemory).value == 0) {
     LOG(INFO) << "maxmemory has not been specified. Deciding myself....";
 
     Result<MemInfoData> res = ReadMemInfo();
@@ -298,12 +326,12 @@ Usage: dragonfly [FLAGS]
     size_t maxmemory = size_t(0.8 * available);
     LOG(INFO) << "Found " << HumanReadableNumBytes(available)
               << " available memory. Setting maxmemory to " << HumanReadableNumBytes(maxmemory);
-    absl::SetFlag(&FLAGS_maxmemory, maxmemory);
+    absl::SetFlag(&FLAGS_maxmemory, MaxMemoryFlag(maxmemory));
   } else {
-    LOG(INFO) << "Max memory limit is: " << HumanReadableNumBytes(GetFlag(FLAGS_maxmemory));
+    LOG(INFO) << "Max memory limit is: " << HumanReadableNumBytes(GetFlag(FLAGS_maxmemory).value);
   }
 
-  dfly::max_memory_limit = GetFlag(FLAGS_maxmemory);
+  dfly::max_memory_limit = GetFlag(FLAGS_maxmemory).value;
 
   if (GetFlag(FLAGS_use_large_pages)) {
     mi_option_enable(mi_option_large_os_pages);

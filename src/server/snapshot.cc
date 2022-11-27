@@ -34,8 +34,8 @@ SliceSnapshot::SliceSnapshot(DbSlice* slice, RecordChannel* dest) : db_slice_(sl
 SliceSnapshot::~SliceSnapshot() {
 }
 
-void SliceSnapshot::Start(bool include_journal_changes) {
-  DCHECK(!fb_.joinable());
+void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
+  DCHECK(!snapshot_fb_.joinable());
 
   auto on_change = [this](DbIndex db_index, const DbSlice::ChangeReq& req) {
     OnDbChange(db_index, req);
@@ -44,52 +44,63 @@ void SliceSnapshot::Start(bool include_journal_changes) {
   snapshot_version_ = db_slice_->RegisterOnChange(move(on_change));
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
-  if (include_journal_changes) {
+  if (stream_journal) {
     auto* journal = db_slice_->shard_owner()->journal();
     DCHECK(journal);
-    journal_cb_id_ = journal->RegisterOnChange(
-        [this](const journal::Entry& e) { OnJournalEntry(e); });
+    journal_cb_id_ =
+        journal->RegisterOnChange([this](const journal::Entry& e) { OnJournalEntry(e); });
   }
 
   sfile_.reset(new io::StringFile);
-
   rdb_serializer_.reset(new RdbSerializer(sfile_.get()));
 
-  fb_ = fiber([this] {
-    FiberFunc();
+  snapshot_fb_ = fiber([this, stream_journal, cll] {
+    SerializeEntriesFb(cll);
+    if (cll->IsCancelled()) {
+      Cancel();
+    } else if (!stream_journal) {
+      CloseRecordChannel();
+    }
     db_slice_->UnregisterOnChange(snapshot_version_);
-    if (journal_cb_id_)
-      db_slice_->shard_owner()->journal()->Unregister(journal_cb_id_);
   });
 }
 
-void SliceSnapshot::Join() {
-  fb_.join();
-}
+void SliceSnapshot::Stop() {
+  // Wait for serialization to finish in any case.
+  Join();
 
-// This function should not block and should not preempt because it's called
-// from SerializePhysicalBucket which should execute atomically.
-void SliceSnapshot::SerializeSingleEntry(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv,
-                                         RdbSerializer* serializer) {
-  time_t expire_time = 0;
-
-  if (pv.HasExpire()) {
-    auto eit = db_array_[db_indx]->expire.Find(pk);
-    expire_time = db_slice_->ExpireTime(eit);
+  if (journal_cb_id_) {
+    db_slice_->shard_owner()->journal()->Unregister(journal_cb_id_);
   }
 
-  io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time);
-  CHECK(res);  // we write to StringFile.
-  ++type_freq_map_[*res];
+  FlushSfile(true);
+  CloseRecordChannel();
+}
+
+void SliceSnapshot::Cancel() {
+  CloseRecordChannel();
+  if (journal_cb_id_) {
+    db_slice_->shard_owner()->journal()->Unregister(journal_cb_id_);
+    journal_cb_id_ = 0;
+  }
+}
+
+void SliceSnapshot::Join() {
+  // Fiber could have already been joined by Stop.
+  if (snapshot_fb_.joinable())
+    snapshot_fb_.join();
 }
 
 // Serializes all the entries with version less than snapshot_version_.
-void SliceSnapshot::FiberFunc() {
+void SliceSnapshot::SerializeEntriesFb(const Cancellation* cll) {
   this_fiber::properties<FiberProps>().set_name(
       absl::StrCat("SliceSnapshot", ProactorBase::GetIndex()));
   PrimeTable::Cursor cursor;
 
   for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
+    if (cll->IsCancelled())
+      return;
+
     if (!db_array_[db_indx])
       continue;
 
@@ -102,6 +113,9 @@ void SliceSnapshot::FiberFunc() {
     mu_.unlock();
 
     do {
+      if (cll->IsCancelled())
+        return;
+
       PrimeTable::Cursor next = pt->Traverse(cursor, [this](auto it) { this->SaveCb(move(it)); });
 
       cursor = next;
@@ -124,14 +138,45 @@ void SliceSnapshot::FiberFunc() {
     FlushSfile(true);
   }  // for (dbindex)
 
+  // Wait for SerializePhysicalBucket to finish.
+  mu_.lock();
+  mu_.unlock();
+
+  for (unsigned i = 10; i > 1; i--)
+    CHECK(!rdb_serializer_->SendFullSyncCut());
+  FlushSfile(true);
+
+  VLOG(1) << "Exit SnapshotSerializer (serialized/side_saved/cbcalls): " << serialized_ << "/"
+          << side_saved_ << "/" << savecb_calls_;
+}
+
+void SliceSnapshot::CloseRecordChannel() {
   // stupid barrier to make sure that SerializePhysicalBucket finished.
   // Can not think of anything more elegant.
   mu_.lock();
   mu_.unlock();
-  dest_->StartClosing();
 
-  VLOG(1) << "Exit SnapshotSerializer (serialized/side_saved/cbcalls): " << serialized_ << "/"
-          << side_saved_ << "/" << savecb_calls_;
+  // Make sure we close the channel only once with a CAS check.
+  bool actual = false;
+  if (closed_chan_.compare_exchange_strong(actual, true)) {
+    dest_->StartClosing();
+  }
+}
+
+// This function should not block and should not preempt because it's called
+// from SerializePhysicalBucket which should execute atomically.
+void SliceSnapshot::SerializeSingleEntry(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv,
+                                         RdbSerializer* serializer) {
+  time_t expire_time = 0;
+
+  if (pv.HasExpire()) {
+    auto eit = db_array_[db_indx]->expire.Find(pk);
+    expire_time = db_slice_->ExpireTime(eit);
+  }
+
+  io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time);
+  CHECK(res);  // we write to StringFile.
+  ++type_freq_map_[*res];
 }
 
 bool SliceSnapshot::FlushSfile(bool force) {
@@ -217,21 +262,20 @@ void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
 
   if (entry.db_ind == savecb_current_db_) {
     ++num_records_in_blob_;
-    io::Result<uint8_t> res =
-        rdb_serializer_->SaveEntry(pkey, *entry.pval_ptr, entry.expire_ms);
+    io::Result<uint8_t> res = rdb_serializer_->SaveEntry(pkey, *entry.pval_ptr, entry.expire_ms);
     CHECK(res);  // we write to StringFile.
   } else {
     io::StringFile sfile;
     RdbSerializer tmp_serializer(&sfile);
 
-    io::Result<uint8_t> res =
-        tmp_serializer.SaveEntry(pkey, *entry.pval_ptr, entry.expire_ms);
+    io::Result<uint8_t> res = tmp_serializer.SaveEntry(pkey, *entry.pval_ptr, entry.expire_ms);
     CHECK(res);  // we write to StringFile.
 
     error_code ec = tmp_serializer.FlushMem();
     CHECK(!ec && !sfile.val.empty());
 
     DbRecord rec = GetDbRecord(entry.db_ind, std::move(sfile.val), 1);
+
     dest_->Push(std::move(rec));
   }
 }

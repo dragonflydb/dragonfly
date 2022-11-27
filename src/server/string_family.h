@@ -22,19 +22,24 @@ class SetCmd {
   explicit SetCmd(const OpArgs& op_args) : op_args_(op_args) {
   }
 
-  enum SetHow { SET_ALWAYS, SET_IF_NOTEXIST, SET_IF_EXISTS };
+  enum SetFlags {
+    SET_ALWAYS = 0,
+    SET_IF_NOTEXIST = 1 << 0,    /* NX: Set if key not exists. */
+    SET_IF_EXISTS = 1 << 1,      /* XX: Set if key exists. */
+    SET_KEEP_EXPIRE = 1 << 2,    /* KEEPTTL: Set and keep the ttl */
+    SET_GET = 1 << 3,            /* GET: Set if want to get key before set */
+    SET_EXPIRE_AFTER_MS = 1 << 4 /* EX,PX,EXAT,PXAT: Expire after ms. */
+  };
 
   struct SetParams {
-    SetHow how = SET_ALWAYS;
-
-    uint32_t memcache_flags = 0;
+    uint16_t flags = SET_ALWAYS;
+    uint16_t memcache_flags = 0;
     // Relative value based on now. 0 means no expiration.
     uint64_t expire_after_ms = 0;
     mutable std::optional<std::string>* prev_val = nullptr;  // GETSET option
-    bool keep_expire = false;                                // KEEPTTL - TODO: to implement it.
 
     constexpr bool IsConditionalSet() const {
-      return how == SET_IF_NOTEXIST || how == SET_IF_EXISTS;
+      return flags & SET_IF_NOTEXIST || flags & SET_IF_EXISTS;
     }
   };
 

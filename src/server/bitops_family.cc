@@ -67,7 +67,7 @@ uint8_t GetByteAt(std::string_view s, std::size_t at) {
 // For XOR, OR, AND operations on a collection of bytes
 template <typename BitOp, typename SkipOp>
 std::string BitOpString(BitOp operation_f, SkipOp skip_f, const BitsStrVec& values,
-                        std::string&& new_value) {
+                        std::string new_value) {
   // at this point, values are not empty
   std::size_t max_size = new_value.size();
 
@@ -441,7 +441,7 @@ OpResult<std::string> RunBitOpOnShard(std::string_view op, const OpArgs& op_args
   for (auto& key : keys) {
     OpResult<PrimeIterator> find_res = es->db_slice().Find(op_args.db_cntx, key, OBJ_STRING);
     if (find_res) {
-      values.emplace_back(std::move(GetString(find_res.value()->second, es)));
+      values.emplace_back(GetString(find_res.value()->second, es));
     } else {
       if (find_res.status() == OpStatus::KEY_NOTFOUND) {
         continue;  // this is allowed, just return empty string per Redis
