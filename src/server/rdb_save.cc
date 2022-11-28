@@ -884,6 +884,8 @@ void RdbSaver::Impl::Cancel() {
   dfly::SliceSnapshot::DbRecord rec;
   while (channel_.Pop(rec)) {
   }
+
+  snapshot->Join();
 }
 
 void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {
