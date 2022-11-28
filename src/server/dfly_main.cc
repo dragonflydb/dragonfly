@@ -339,6 +339,10 @@ Usage: dragonfly [FLAGS]
   mi_option_enable(mi_option_show_errors);
   mi_option_set(mi_option_max_warnings, 0);
 
+  // TODO: remove in case of merge
+  mi_option_set(mi_option_decommit_extend_delay, 0);
+  mi_option_set(mi_option_decommit_delay, 0);
+
   base::sys::KernelVersion kver;
   base::sys::GetKernelVersion(&kver);
 

@@ -9,6 +9,7 @@
 
 #include <boost/fiber/operations.hpp>
 #include <filesystem>
+#include <set>
 
 #include "base/flags.h"
 #include "base/logging.h"
@@ -276,50 +277,45 @@ void DebugCmd::Populate(CmdArgList args) {
 
 void DebugCmd::MemoryFuzz(CmdArgList args) {
   if (args.size() < 3 || args.size() > 4) {
-    return (*cntx_)->SendError(UnknownSubCmd("populate", "DEBUG"));
+    return (*cntx_)->SendError(UnknownSubCmd("memoryfuzz", "DEBUG"));
   }
 
   uint64_t total_count = 0;
   if (!absl::SimpleAtoi(ArgS(args, 2), &total_count))
     return (*cntx_)->SendError(kUintErr);
 
-  absl::BitGen gen;
-
-  double saturation = absl::Uniform(gen, 0.5, 1.0);
-  if (args.size() > 3 && !ParseDouble(ArgS(args, 3), &saturation)) {
-    return (*cntx_)->SendError(kUintErr);
-  }
+  double delete_prob = 0.9;
+  if (args.size() > 3 && !ParseDouble(ArgS(args, 3), &delete_prob))
+    return (*cntx_)->SendError(kInvalidFloatErr);
 
   std::string_view prefix{"k"};
 
-  uint64_t mod = 0;
-  uint64_t offset = 0;
-  auto filter = [&mod, &offset](uint64_t index) { return mod == 0 || (index + offset) % mod == 0; };
+  vector<size_t> block_sizes;
+  {
+    set<size_t> size_set;
+    for (int i = 1; i < 100000; i += 10) {
+      size_set.insert(mi_good_size(i));
+    }
+    block_sizes.insert(block_sizes.end(), size_set.begin(), size_set.end());
+  }
 
-  double size_factor = 1 + absl::Uniform(gen, -1, 2) * absl::Uniform(gen, 0.1, 0.25);
-  auto set_func = [&filter, &gen, size_factor](string_view prefix, const PopulateBatch batch) {
-    uint64_t value_len = uint64_t(size_factor * absl::Uniform(gen, 32, 8192));
-    PopulateSetKV(prefix, value_len, batch, filter);
+  auto set_func = [&block_sizes](string_view prefix, const PopulateBatch& batch) {
+    absl::BitGen gen;
+    size_t size_idx = absl::Uniform(gen, size_t(0), block_sizes.size());
+    PopulateSetKV(prefix, block_sizes[size_idx], batch);
   };
 
-  auto del_func = [&filter](string_view prefix, const PopulateBatch batch) {
+  auto del_func = [delete_prob](string_view prefix, const PopulateBatch& batch) {
+    absl::BitGen gen;
+    auto filter = [&gen, delete_prob](uint64_t index) {
+      return absl::Uniform(gen, 0.0, 1.0) < delete_prob;
+    };
     PopulateDel(prefix, batch, filter);
   };
 
   KeyRange total_range{0, total_count, prefix};
   RunPopulate(total_range, set_func);
-  for (uint64_t it_mod : {5, 7}) {
-    mod = it_mod;
-
-    uint64_t base_offset = absl::Uniform(gen, 0ULL, it_mod);
-    for (uint64_t it_offset = 0; it_offset < it_mod; it_offset++) {
-      offset = (it_offset + base_offset) % it_mod;
-      RunPopulate(total_range, del_func);
-
-      if (absl::Uniform(gen, 0.0, 1.0) < saturation)
-        RunPopulate(total_range, set_func);
-    }
-  }
+  RunPopulate(total_range, del_func);
 
   return (*cntx_)->SendOk();
 }
