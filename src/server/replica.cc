@@ -624,8 +624,8 @@ void Replica::FullSyncDflyFb(SyncBlock* sb, string eof_token) {
       std::unique_lock lk(sb->mu_);
       sb->flows_left--;
       ran = true;
+      sb->cv_.notify_all();
     }
-    sb->cv_.notify_all();
   });
   loader.Load(&ps);
 
