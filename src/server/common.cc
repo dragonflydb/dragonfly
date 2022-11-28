@@ -15,8 +15,8 @@ extern "C" {
 #include "redis/util.h"
 #include "redis/zmalloc.h"
 }
-
 #include "base/logging.h"
+#include "core/compact_object.h"
 #include "server/error.h"
 #include "server/server_state.h"
 
@@ -87,6 +87,8 @@ const char* ObjTypeName(int type) {
       return "hash";
     case OBJ_STREAM:
       return "stream";
+    case OBJ_JSON:
+      return "ReJSON-RL";
     default:
       LOG(ERROR) << "Unsupported type " << type;
   }

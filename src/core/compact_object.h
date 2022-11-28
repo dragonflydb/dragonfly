@@ -9,6 +9,7 @@
 #include <memory_resource>
 #include <optional>
 
+#include "core/json_object.h"
 #include "core/small_string.h"
 
 typedef struct redisObject robj;
@@ -94,12 +95,7 @@ class CompactObj {
   CompactObj(const CompactObj&) = delete;
 
   // 0-16 is reserved for inline lengths of string type.
-  enum TagEnum {
-    INT_TAG = 17,
-    SMALL_TAG = 18,
-    ROBJ_TAG = 19,
-    EXTERNAL_TAG = 20,
-  };
+  enum TagEnum { INT_TAG = 17, SMALL_TAG = 18, ROBJ_TAG = 19, EXTERNAL_TAG = 20, JSON_TAG = 21 };
 
   enum MaskBit {
     REF_BIT = 1,
@@ -265,6 +261,15 @@ class CompactObj {
   void SetString(std::string_view str);
   void GetString(std::string* res) const;
 
+  // Will set this to hold OBJ_JSON, after that it is safe to call GetJson
+  // NOTE: in order to avid copy which can be expensive in this case,
+  // you need to move an object that created with the function JsonFromString
+  // into here, no copying is allowed!
+  void SetJson(JsonType&& j);
+
+  // pre condition - the type here is OBJ_JSON and was set with SetJson
+  JsonType* GetJson() const;
+
   // dest must have at least Size() bytes available
   void GetString(char* dest) const;
 
@@ -326,6 +331,11 @@ class CompactObj {
     uint32_t unneeded;
   } __attribute__((packed));
 
+  struct JsonWrapper {
+    JsonType* json_ptr = nullptr;
+    size_t unneeded = 0;
+  } __attribute__((packed));
+
   // My main data structure. Union of representations.
   // RobjWrapper is kInlineLen=16 bytes, so we employ SSO of that size via inline_str.
   // In case of int values, we waste 8 bytes. I am assuming it's ok and it's not the data type
@@ -335,6 +345,7 @@ class CompactObj {
 
     SmallString small_str;
     detail::RobjWrapper r_obj;
+    JsonWrapper json_obj;
     int64_t ival __attribute__((packed));
     ExternalPtr ext_ptr;
 
