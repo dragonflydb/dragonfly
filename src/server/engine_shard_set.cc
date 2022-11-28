@@ -106,11 +106,13 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
 
   string backing_prefix = GetFlag(FLAGS_backing_prefix);
   if (!backing_prefix.empty()) {
-    string fn =
-        absl::StrCat(backing_prefix, "-", absl::Dec(pb->GetIndex(), absl::kZeroPad4), ".ssd");
+    if (pb->GetKind() != ProactorBase::IOURING) {
+      LOG(ERROR) << "Only ioring based backing storage is supported. Exiting...";
+      exit(1);
+    }
 
     shard_->tiered_storage_.reset(new TieredStorage(&shard_->db_slice_));
-    error_code ec = shard_->tiered_storage_->Open(fn);
+    error_code ec = shard_->tiered_storage_->Open(backing_prefix);
     CHECK(!ec) << ec.message();  // TODO
   }
 }

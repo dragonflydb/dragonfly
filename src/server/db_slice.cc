@@ -695,10 +695,16 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
   if (it->second.ObjType() == OBJ_STRING) {
     stats->strval_memory_usage -= value_heap_size;
     if (it->second.IsExternal()) {
+      // We assume here that the operation code either loaded the entry into memory
+      // before calling to PreUpdate or it does not need to read it at all.
+      // After this code executes, the external blob is lost.
       TieredStorage* tiered = shard_owner()->tiered_storage();
       auto [offset, size] = it->second.GetExternalPtr();
-      tiered->Free(db_ind, offset, size);
+      tiered->Free(offset, size);
       it->second.Reset();
+
+      stats->external_entries -= 1;
+      stats->external_size -= size;
     }
   }
 

@@ -992,7 +992,72 @@ OpResult<vector<json>> OpResp(const OpArgs& op_args, string_view key, JsonExpres
   return vec;
 }
 
+// Returns boolean that represents the result of the operation.
+OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
+                     string_view json_str) {
+  // Check if the supplied JSON is valid.
+  optional<json> j = ConstructJsonFromString(json_str);
+  if (!j) {
+    return OpStatus::SYNTAX_ERR;
+  }
+
+  // The whole key should be replaced.
+  if (path == "." || path == "$") {
+    SetString(op_args, key, j->as_string());
+    return true;
+  }
+
+  // Update the existing JSON.
+  OpResult<json> result = GetJson(op_args, key);
+  if (!result) {
+    return result.status();
+  }
+
+  json existing_json = move(result.value());
+  bool path_exists = false;
+  auto cb = [&](const string& path, json& val) {
+    path_exists = true;
+    val = *j;
+  };
+
+  error_code ec = JsonReplace(existing_json, path, cb);
+  if (ec) {
+    VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
+    return OpStatus::SYNTAX_ERR;
+  }
+
+  if (!path_exists) {
+    return false;
+  }
+
+  SetString(op_args, key, existing_json.as_string());
+  return true;
+}
+
 }  // namespace
+
+void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view path = ArgS(args, 2);
+  string_view json_str = ArgS(args, 3);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpSet(t->GetOpArgs(shard), key, path, json_str);
+  };
+
+  Transaction* trans = cntx->transaction;
+  OpResult<bool> result = trans->ScheduleSingleHopT(move(cb));
+
+  if (result) {
+    if (*result) {
+      (*cntx)->SendSimpleString("OK");
+    } else {
+      (*cntx)->SendNull();
+    }
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
 
 void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
@@ -1651,6 +1716,7 @@ void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.ARRINDEX", CO::READONLY | CO::FAST, -4, 1, 1, 1}.HFUNC(ArrIndex);
   *registry << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -2, 1, 1, 1}.HFUNC(Debug);
   *registry << CI{"JSON.RESP", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(Resp);
+  *registry << CI{"JSON.SET", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1}.HFUNC(Set);
 }
 
 }  // namespace dfly
