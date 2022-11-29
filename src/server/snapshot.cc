@@ -56,7 +56,7 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
   sfile_.reset(new io::StringFile);
 
   bool do_compression = (compression_mode_ == CompressionMode::SINGLE_ENTRY);
-  rdb_serializer_.reset(new RdbSerializer(sfile_.get(), do_compression));
+  rdb_serializer_.reset(new RdbSerializer(do_compression));
 
   snapshot_fb_ = fiber([this, stream_journal, cll] {
     SerializeEntriesFb(cll);
@@ -147,7 +147,7 @@ void SliceSnapshot::SerializeEntriesFb(const Cancellation* cll) {
   mu_.unlock();
 
   for (unsigned i = 10; i > 1; i--)
-    CHECK(!rdb_serializer_->SendFullSyncCut());
+    CHECK(!rdb_serializer_->SendFullSyncCut(sfile_.get()));
   FlushSfile(true);
 
   VLOG(1) << "Exit SnapshotSerializer (serialized/side_saved/cbcalls): " << serialized_ << "/"
@@ -185,7 +185,7 @@ void SliceSnapshot::SerializeSingleEntry(DbIndex db_indx, const PrimeKey& pk, co
 
 bool SliceSnapshot::FlushSfile(bool force) {
   if (force) {
-    auto ec = rdb_serializer_->FlushMem();
+    auto ec = rdb_serializer_->FlushToSink(sfile_.get());
     CHECK(!ec);
     if (sfile_->val.empty())
       return false;
@@ -196,7 +196,7 @@ bool SliceSnapshot::FlushSfile(bool force) {
 
     // Make sure we flush everything from membuffer in order to preserve the atomicity of keyvalue
     // serializations.
-    auto ec = rdb_serializer_->FlushMem();
+    auto ec = rdb_serializer_->FlushToSink(sfile_.get());
     CHECK(!ec);  // stringfile always succeeds.
   }
   VLOG(2) << "FlushSfile " << sfile_->val.size() << " bytes";
@@ -270,14 +270,14 @@ void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
     io::Result<uint8_t> res = rdb_serializer_->SaveEntry(pkey, *entry.pval_ptr, entry.expire_ms);
     CHECK(res);  // we write to StringFile.
   } else {
-    io::StringFile sfile;
     bool serializer_compression = (compression_mode_ != CompressionMode::NONE);
-    RdbSerializer tmp_serializer(&sfile, serializer_compression);
+    RdbSerializer tmp_serializer(serializer_compression);
 
     io::Result<uint8_t> res = tmp_serializer.SaveEntry(pkey, *entry.pval_ptr, entry.expire_ms);
     CHECK(res);  // we write to StringFile.
 
-    error_code ec = tmp_serializer.FlushMem();
+    io::StringFile sfile;
+    error_code ec = tmp_serializer.FlushToSink(&sfile);
     CHECK(!ec && !sfile.val.empty());
     PushFileToChannel(&sfile, entry.db_ind, 1, false);
   }
@@ -300,16 +300,16 @@ unsigned SliceSnapshot::SerializePhysicalBucket(DbIndex db_index, PrimeTable::bu
     }
     num_records_in_blob_ += result;
   } else {
-    io::StringFile sfile;
     bool serializer_compression = (compression_mode_ != CompressionMode::NONE);
-    RdbSerializer tmp_serializer(&sfile, serializer_compression);
+    RdbSerializer tmp_serializer(serializer_compression);
 
     while (!it.is_done()) {
       ++result;
       SerializeSingleEntry(db_index, it->first, it->second, &tmp_serializer);
       ++it;
     }
-    error_code ec = tmp_serializer.FlushMem();
+    io::StringFile sfile;
+    error_code ec = tmp_serializer.FlushToSink(&sfile);
     CHECK(!ec && !sfile.val.empty());
     PushFileToChannel(&sfile, db_index, result, false);
   }
