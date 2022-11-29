@@ -59,6 +59,12 @@ enum class SaveMode {
   RDB,           // Save .rdb file. Expected to read all shards.
 };
 
+enum class CompressionMode {
+  NONE,
+  SINGLE_ENTRY,
+  MULTY_ENTRY,
+};
+
 class RdbSaver {
  public:
   // single_shard - true means that we run RdbSaver on a single shard and we do not use
@@ -101,6 +107,29 @@ class RdbSaver {
 
   SaveMode save_mode_;
   std::unique_ptr<Impl> impl_;
+  CompressionMode compression_mode_;
+};
+
+class ZstdCompressSerializer {
+ public:
+  ZstdCompressSerializer();
+  ZstdCompressSerializer(const ZstdCompressSerializer&) = delete;
+  void operator=(const ZstdCompressSerializer&) = delete;
+
+  ~ZstdCompressSerializer();
+
+  // Returns a pair consisting of an bool denoting whether the string was compressed
+  // and a string the result of compression. If given string was not compressed returned
+  // string will be empty.
+  std::pair<bool, string> Compress(std::string_view str);
+
+ private:
+  class ZstdCompressImpl;
+  std::unique_ptr<ZstdCompressImpl> impl_;
+  static constexpr size_t kMinStrSizeToCompress = 256;
+  static constexpr double kMinCompressionReductionPrecentage = 0.95;
+  uint32_t compression_no_effective_ = 0;
+  uint32_t small_str_count_ = 0;
 };
 
 class RdbSerializer {
@@ -108,7 +137,7 @@ class RdbSerializer {
   // TODO: for aligned cased, it does not make sense that RdbSerializer buffers into unaligned
   // mem_buf_ and then flush it into the next level. We should probably use AlignedBuffer
   // directly.
-  RdbSerializer(::io::Sink* s);
+  RdbSerializer(::io::Sink* s, bool do_entry_level_compression);
 
   ~RdbSerializer();
 
@@ -166,6 +195,7 @@ class RdbSerializer {
   base::IoBuf mem_buf_;
   base::PODArray<uint8_t> tmp_buf_;
   std::string tmp_str_;
+  bool do_entry_level_compression_;
 };
 
 }  // namespace dfly

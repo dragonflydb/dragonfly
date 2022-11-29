@@ -10,3 +10,5 @@
 // to notify that it finished streaming static data and is ready
 // to switch to the stable state replication phase.
 const uint8_t RDB_OPCODE_FULLSYNC_END = 200;
+const uint8_t RDB_OPCODE_COMPRESSED_BLOB_START = 201;
+const uint8_t RDB_OPCODE_COMPRESSED_BLOB_END = 202;

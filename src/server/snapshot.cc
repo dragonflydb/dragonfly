@@ -15,6 +15,7 @@ extern "C" {
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
+#include "server/rdb_extensions.h"
 #include "server/rdb_save.h"
 #include "util/fiber_sched_algo.h"
 #include "util/proactor_base.h"
@@ -27,7 +28,8 @@ using namespace chrono_literals;
 namespace this_fiber = ::boost::this_fiber;
 using boost::fibers::fiber;
 
-SliceSnapshot::SliceSnapshot(DbSlice* slice, RecordChannel* dest) : db_slice_(slice), dest_(dest) {
+SliceSnapshot::SliceSnapshot(DbSlice* slice, RecordChannel* dest, CompressionMode compression_mode)
+    : db_slice_(slice), dest_(dest), compression_mode_(compression_mode) {
   db_array_ = slice->databases();
 }
 
@@ -52,7 +54,9 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
   }
 
   sfile_.reset(new io::StringFile);
-  rdb_serializer_.reset(new RdbSerializer(sfile_.get()));
+
+  bool do_compression = (compression_mode_ == CompressionMode::SINGLE_ENTRY);
+  rdb_serializer_.reset(new RdbSerializer(sfile_.get(), do_compression));
 
   snapshot_fb_ = fiber([this, stream_journal, cll] {
     SerializeEntriesFb(cll);
@@ -197,9 +201,10 @@ bool SliceSnapshot::FlushSfile(bool force) {
   }
   VLOG(2) << "FlushSfile " << sfile_->val.size() << " bytes";
 
-  DbRecord rec = GetDbRecord(savecb_current_db_, std::move(sfile_->val), num_records_in_blob_);
+  uint32_t record_num = num_records_in_blob_;
   num_records_in_blob_ = 0;  // We can not move this line after the push, because Push is blocking.
-  dest_->Push(std::move(rec));
+  bool multi_entries_compression = (compression_mode_ == CompressionMode::MULTY_ENTRY);
+  PushFileToChannel(sfile_.get(), savecb_current_db_, record_num, multi_entries_compression);
 
   return true;
 }
@@ -266,17 +271,15 @@ void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
     CHECK(res);  // we write to StringFile.
   } else {
     io::StringFile sfile;
-    RdbSerializer tmp_serializer(&sfile);
+    bool serializer_compression = (compression_mode_ != CompressionMode::NONE);
+    RdbSerializer tmp_serializer(&sfile, serializer_compression);
 
     io::Result<uint8_t> res = tmp_serializer.SaveEntry(pkey, *entry.pval_ptr, entry.expire_ms);
     CHECK(res);  // we write to StringFile.
 
     error_code ec = tmp_serializer.FlushMem();
     CHECK(!ec && !sfile.val.empty());
-
-    DbRecord rec = GetDbRecord(entry.db_ind, std::move(sfile.val), 1);
-
-    dest_->Push(std::move(rec));
+    PushFileToChannel(&sfile, entry.db_ind, 1, false);
   }
 }
 
@@ -298,7 +301,8 @@ unsigned SliceSnapshot::SerializePhysicalBucket(DbIndex db_index, PrimeTable::bu
     num_records_in_blob_ += result;
   } else {
     io::StringFile sfile;
-    RdbSerializer tmp_serializer(&sfile);
+    bool serializer_compression = (compression_mode_ != CompressionMode::NONE);
+    RdbSerializer tmp_serializer(&sfile, serializer_compression);
 
     while (!it.is_done()) {
       ++result;
@@ -307,10 +311,25 @@ unsigned SliceSnapshot::SerializePhysicalBucket(DbIndex db_index, PrimeTable::bu
     }
     error_code ec = tmp_serializer.FlushMem();
     CHECK(!ec && !sfile.val.empty());
-
-    dest_->Push(GetDbRecord(db_index, std::move(sfile.val), result));
+    PushFileToChannel(&sfile, db_index, result, false);
   }
   return result;
+}
+
+void SliceSnapshot::PushFileToChannel(io::StringFile* sfile, DbIndex db_index, unsigned num_records,
+                                      bool should_compress) {
+  string string_to_push = std::move(sfile->val);
+
+  if (should_compress) {
+    if (!zstd_serializer_) {
+      zstd_serializer_.reset(new ZstdCompressSerializer());
+    }
+    auto comp_res = zstd_serializer_->Compress(string_to_push);
+    if (comp_res.first) {
+      string_to_push.swap(comp_res.second);
+    }
+  }
+  dest_->Push(GetDbRecord(db_index, std::move(string_to_push), num_records));
 }
 
 auto SliceSnapshot::GetDbRecord(DbIndex db_index, std::string value, unsigned num_records)
