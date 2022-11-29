@@ -952,7 +952,7 @@ RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes) {
       }
       break;
   }
-
+  VLOG(1) << "Rdb save using compression mode:" << uint32_t(compression_mode_);
   impl_.reset(new Impl(align_writes, producer_count, compression_mode_, sink));
   save_mode_ = save_mode;
 }
