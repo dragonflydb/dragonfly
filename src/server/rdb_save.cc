@@ -166,8 +166,8 @@ uint8_t RdbObjectType(unsigned type, unsigned encoding) {
   return 0; /* avoid warning */
 }
 
-RdbSerializer::RdbSerializer(io::Sink* s, bool do_compression)
-    : sink_(s), mem_buf_{4_KB}, tmp_buf_(nullptr), do_entry_level_compression_(do_compression) {
+RdbSerializer::RdbSerializer(bool do_compression)
+    : mem_buf_{4_KB}, tmp_buf_(nullptr), do_entry_level_compression_(do_compression) {
 }
 
 RdbSerializer::~RdbSerializer() {
@@ -591,47 +591,35 @@ error_code RdbSerializer::SaveStreamConsumers(streamCG* cg) {
   return error_code{};
 }
 
-error_code RdbSerializer::SendFullSyncCut() {
+error_code RdbSerializer::SendFullSyncCut(io::Sink* s) {
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_FULLSYNC_END));
-  return FlushMem();
+  return FlushToSink(s);
 }
 
-// TODO: if buf is large enough, it makes sense to write both mem_buf and buf
-// directly to sink_.
 error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
+  mem_buf_.Reserve(mem_buf_.InputLen() + buf.size());
   IoBuf::Bytes dest = mem_buf_.AppendBuffer();
-  if (dest.size() >= buf.size()) {
-    memcpy(dest.data(), buf.data(), buf.size());
-    mem_buf_.CommitWrite(buf.size());
-    return error_code{};
-  }
-
-  io::Bytes ib = mem_buf_.InputBuffer();
-
-  if (ib.empty()) {
-    return sink_->Write(buf);
-  }
-  // else
-  iovec v[2] = {{.iov_base = const_cast<uint8_t*>(ib.data()), .iov_len = ib.size()},
-                {.iov_base = const_cast<uint8_t*>(buf.data()), .iov_len = buf.size()}};
-  RETURN_ON_ERR(sink_->Write(v, ABSL_ARRAYSIZE(v)));
-  mem_buf_.ConsumeInput(ib.size());
-
+  memcpy(dest.data(), buf.data(), buf.size());
+  mem_buf_.CommitWrite(buf.size());
   return error_code{};
 }
 
-error_code RdbSerializer::FlushMem() {
+error_code RdbSerializer::FlushToSink(io::Sink* s) {
   size_t sz = mem_buf_.InputLen();
   if (sz == 0)
     return error_code{};
 
-  DVLOG(2) << "FlushMem " << sz << " bytes";
+  DVLOG(2) << "FlushToSink " << sz << " bytes";
 
   // interrupt point.
-  RETURN_ON_ERR(sink_->Write(mem_buf_.InputBuffer()));
+  RETURN_ON_ERR(s->Write(mem_buf_.InputBuffer()));
   mem_buf_.ConsumeInput(sz);
 
   return error_code{};
+}
+
+size_t RdbSerializer::SerializedLen() const {
+  return mem_buf_.InputLen();
 }
 
 error_code RdbSerializer::SaveString(string_view val) {
@@ -772,6 +760,9 @@ class RdbSaver::Impl {
   RdbSerializer* serializer() {
     return &meta_serializer_;
   }
+  io::Sink* sink() {
+    return sink_;
+  }
 
   void Cancel();
 
@@ -795,12 +786,11 @@ class RdbSaver::Impl {
 RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, CompressionMode compression_mode,
                      io::Sink* sink)
     : sink_(sink), shard_snapshots_(producers_len),
-      meta_serializer_(sink, compression_mode != CompressionMode::NONE), channel_{128,
-                                                                                  producers_len},
+      meta_serializer_(compression_mode != CompressionMode::NONE), channel_{128, producers_len},
       compression_mode_(compression_mode) {
   if (align_writes) {
     aligned_buf_.emplace(kBufLen, sink);
-    meta_serializer_.set_sink(&aligned_buf_.value());
+    sink_ = &aligned_buf_.value();
   }
 
   DCHECK(producers_len > 0 || channel_.IsClosing());
@@ -841,11 +831,7 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
         unsigned enclen = SerializeLen(record.db_index, buf + 1);
         string_view str{(char*)buf, enclen + 1};
 
-        if (aligned_buf_) {
-          io_error = aligned_buf_->Write(str);
-        } else {
-          io_error = sink_->Write(io::Buffer(str));
-        }
+        io_error = sink_->Write(io::Buffer(str));
         if (io_error)
           break;
         last_db_index = record.db_index;
@@ -854,11 +840,8 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
       DVLOG(2) << "Pulled " << record.id;
       channel_bytes += record.value.size();
 
-      if (aligned_buf_) {
-        io_error = aligned_buf_->Write(record.value);
-      } else {
-        io_error = sink_->Write(io::Buffer(record.value));
-      }
+      io_error = sink_->Write(io::Buffer(record.value));
+
       record.value.clear();
     } while (!io_error && channel.TryPop(record));
   }  // while (channel.pop)
@@ -981,10 +964,10 @@ error_code RdbSaver::SaveHeader(const StringVec& lua_scripts) {
 }
 
 error_code RdbSaver::SaveBody(const Cancellation* cll, RdbTypeFreqMap* freq_map) {
-  RETURN_ON_ERR(impl_->serializer()->FlushMem());
+  RETURN_ON_ERR(impl_->serializer()->FlushToSink(impl_->sink()));
 
   if (save_mode_ == SaveMode::SUMMARY) {
-    impl_->serializer()->SendFullSyncCut();
+    impl_->serializer()->SendFullSyncCut(impl_->sink());
   } else {
     VLOG(1) << "SaveBody , snapshots count: " << impl_->Size();
     error_code io_error = impl_->ConsumeChannel(cll);
@@ -1046,7 +1029,7 @@ error_code RdbSaver::SaveEpilog() {
   absl::little_endian::Store64(buf, chksum);
   RETURN_ON_ERR(ser.WriteRaw(buf));
 
-  RETURN_ON_ERR(ser.FlushMem());
+  RETURN_ON_ERR(ser.FlushToSink(impl_->sink()));
 
   return impl_->Flush();
 }
