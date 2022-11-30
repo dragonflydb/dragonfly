@@ -184,21 +184,16 @@ void SliceSnapshot::SerializeSingleEntry(DbIndex db_indx, const PrimeKey& pk, co
 }
 
 bool SliceSnapshot::FlushSfile(bool force) {
-  if (force) {
-    auto ec = rdb_serializer_->FlushToSink(sfile_.get());
-    CHECK(!ec);
-    if (sfile_->val.empty())
-      return false;
-  } else {
-    if (sfile_->val.size() < 4096) {
-      return false;
-    }
-
-    // Make sure we flush everything from membuffer in order to preserve the atomicity of keyvalue
-    // serializations.
-    auto ec = rdb_serializer_->FlushToSink(sfile_.get());
-    CHECK(!ec);  // stringfile always succeeds.
+  if ((!force) && (rdb_serializer_->SerializedLen() < 4096)) {
+    return false;
   }
+
+  auto ec = rdb_serializer_->FlushToSink(sfile_.get());
+  CHECK(!ec);
+
+  if (sfile_->val.empty())
+    return false;
+
   VLOG(2) << "FlushSfile " << sfile_->val.size() << " bytes";
 
   uint32_t record_num = num_records_in_blob_;

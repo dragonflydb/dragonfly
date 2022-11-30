@@ -618,6 +618,10 @@ error_code RdbSerializer::FlushToSink(io::Sink* s) {
   return error_code{};
 }
 
+size_t RdbSerializer::SerializedLen() {
+  return mem_buf_.InputLen();
+}
+
 error_code RdbSerializer::SaveString(string_view val) {
   /* Try integer encoding */
   if (val.size() <= 11) {
