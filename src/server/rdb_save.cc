@@ -618,7 +618,7 @@ error_code RdbSerializer::FlushToSink(io::Sink* s) {
   return error_code{};
 }
 
-size_t RdbSerializer::SerializedLen() {
+size_t RdbSerializer::SerializedLen() const {
   return mem_buf_.InputLen();
 }
 

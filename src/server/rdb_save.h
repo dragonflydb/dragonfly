@@ -169,7 +169,7 @@ class RdbSerializer {
   std::error_code SaveValue(const PrimeValue& pv);
 
   std::error_code SendFullSyncCut(io::Sink* s);
-  size_t SerializedLen();
+  size_t SerializedLen() const;
 
  private:
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
