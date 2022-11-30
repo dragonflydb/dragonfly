@@ -7,8 +7,10 @@
 #include <atomic>
 #include <bitset>
 
+#include "base/pod_array.h"
 #include "io/file.h"
 #include "server/db_slice.h"
+#include "server/rdb_save.h"
 #include "server/table.h"
 #include "util/fibers/simple_channel.h"
 
@@ -19,6 +21,7 @@ struct Entry;
 }  // namespace journal
 
 class RdbSerializer;
+class ZstdCompressSerializer;
 
 class SliceSnapshot {
  public:
@@ -34,7 +37,7 @@ class SliceSnapshot {
   using RecordChannel =
       ::util::fibers_ext::SimpleChannel<DbRecord, base::mpmc_bounded_queue<DbRecord>>;
 
-  SliceSnapshot(DbSlice* slice, RecordChannel* dest);
+  SliceSnapshot(DbSlice* slice, RecordChannel* dest, CompressionMode compression_mode);
   ~SliceSnapshot();
 
   void Start(bool stream_journal, const Cancellation* cll);
@@ -63,7 +66,6 @@ class SliceSnapshot {
 
  private:
   void CloseRecordChannel();
-
   void SerializeEntriesFb(const Cancellation* cll);
 
   void SerializeSingleEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
@@ -79,6 +81,8 @@ class SliceSnapshot {
   // Updates the version of the bucket to snapshot version.
   unsigned SerializePhysicalBucket(DbIndex db_index, PrimeTable::bucket_iterator it);
   DbRecord GetDbRecord(DbIndex db_index, std::string value, unsigned num_records);
+  void PushFileToChannel(io::StringFile* sfile, DbIndex db_index, unsigned num_records,
+                         bool should_compress);
 
   DbSlice* db_slice_;
   DbTableArray db_array_;
@@ -97,6 +101,9 @@ class SliceSnapshot {
   size_t serialized_ = 0, skipped_ = 0, side_saved_ = 0, savecb_calls_ = 0;
   uint64_t rec_id_ = 0;
   uint32_t num_records_in_blob_ = 0;
+
+  CompressionMode compression_mode_;
+  std::unique_ptr<ZstdCompressSerializer> zstd_serializer_;
 
   uint32_t journal_cb_id_ = 0;
 

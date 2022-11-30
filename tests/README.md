@@ -5,6 +5,17 @@
 
 The tests assume you have the "dragonfly" binary in `<root>/build-dbg` directory.
 You can override the location of the binary using `DRAGONFLY_PATH` environment var.
+
+### Important fixtures
+
+- `df_server` is the default instance that is available for testing. Use the `dfly_args` decorator to change its default arguments.
+- `client` and `async_client` are clients to the default instance. The default instance is re-used accross tests with the same arguments, but each new client flushes the instance.
+- `pool` and `async_pool` are client pools that are connected to the default instance
+
+### Custom arguments
+
+- use `--gdb` to start all instances inside gdb.
+
 ### Before you start
 Please make sure that you have python 3 installed on you local host.
 If have more both python 2 and python 3 installed on you host, you can run the tests with the following command:
@@ -20,6 +31,7 @@ Then install all the required dependencies for the tests:
 ```
 pip install -r dragonfly/requirements.txt
 ```
+
 ### Running the tests
 to run pytest, run:
 `pytest -xv dragonfly`
@@ -32,15 +44,6 @@ Pytest will recursively search the `tests/dragonfly` directory for files matchin
 - Functions or methods prefixed by `test` inside a class prefixed by `Test` (without an `__init__` method)
 
 **Note**: When making a new directory in `tests/dragonfly` be sure to create an `__init__.py` file to avoid [name conflicts](https://docs.pytest.org/en/7.1.x/explanation/goodpractices.html#tests-outside-application-code)
-
-### Interacting with Dragonfly
-Pytest allows for parameters with a specific name to be automatically resolved through [fixtures](https://docs.pytest.org/en/7.1.x/explanation/fixtures.html) for any test function. The following fixtures are to be used to interact with Dragonfly when writing a test:
-| Name  | Type | [Scope](https://docs.pytest.org/en/7.1.x/how-to/fixtures.html?highlight=scope#scope-sharing-fixtures-across-classes-modules-packages-or-session) | Description
-| ----- | ---- | ----- | ----------- |
-| tmp_dir | [pathlib.Path](https://docs.python.org/3/library/pathlib.html) | Session | The temporary directory the Dragonfly binary will be running in. The environment variable `DRAGONFLY_TMP` is also set to this value |
-| test_env | `dict` | Session | The environment variables used when running Dragonfly as a dictionary |
-| client | [redis.Redis](https://redis-py.readthedocs.io/en/stable/connections.html#generic-client) | Class | The redis client to interact with the Dragonfly instance |
-| async_client | [aioredis.Redis](https://aioredis.readthedocs.io/en/latest/api/high-level/#aioredis.client.Redis) | Class | The async redis client to interact with the Dragonfly instance |
 
 ### Passing CLI commands to Dragonfly
 To pass custom flags to the Dragonfly executable two class decorators have been created. `@dfly_args` allows you to pass a list of parameters to the Dragonfly executable, similarly `@dfly_multi_test_args` allows you to specify multiple parameter configurations to test with a given test class.

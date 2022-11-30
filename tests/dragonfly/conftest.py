@@ -12,7 +12,7 @@ import aioredis
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from . import DflyInstance, DflyInstanceFactory
+from . import DflyInstance, DflyInstanceFactory, DflyParams
 
 DATABASE_INDEX = 1
 
@@ -40,6 +40,12 @@ def test_env(tmp_dir: Path):
     return env
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        '--gdb', action='store_true', default=False, help='Run instances in gdb'
+    )
+
+
 @pytest.fixture(scope="session", params=[{}])
 def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
     """
@@ -50,15 +56,22 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
         scripts_dir, '../../build-dbg/dragonfly'))
 
     args = request.param if request.param else {}
-    factory = DflyInstanceFactory(test_env, tmp_dir, path=path, args=args)
+
+    params = DflyParams(
+        path=path,
+        cwd=tmp_dir,
+        gdb=request.config.getoption("--gdb"),
+        env=test_env
+    )
+
+    factory = DflyInstanceFactory(params, args)
     yield factory
     factory.stop_all()
 
 
 @pytest.fixture(scope="function")
 def df_local_factory(df_factory: DflyInstanceFactory):
-    factory = DflyInstanceFactory(
-        df_factory.env, df_factory.cwd, df_factory.path, df_factory.args)
+    factory = DflyInstanceFactory(df_factory.params, df_factory.args)
     yield factory
     factory.stop_all()
 

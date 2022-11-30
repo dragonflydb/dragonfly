@@ -26,6 +26,7 @@ extern "C" {
 
 ABSL_FLAG(uint32_t, dbnum, 16, "Number of databases");
 ABSL_FLAG(uint32_t, keys_output_limit, 8192, "Maximum number of keys output by keys command");
+ABSL_DECLARE_FLAG(int, compression_mode);
 
 namespace dfly {
 using namespace std;
@@ -429,7 +430,8 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
   if (IsValid(it)) {
     DVLOG(1) << "Dump: key '" << key << "' successfully found, going to dump it";
     std::unique_ptr<::io::StringSink> sink = std::make_unique<::io::StringSink>();
-    RdbSerializer serializer(sink.get());
+    int compression_mode = absl::GetFlag(FLAGS_compression_mode);
+    RdbSerializer serializer(compression_mode != 0);
 
     // According to Redis code we need to
     // 1. Save the value itself - without the key
@@ -442,7 +444,7 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
     CHECK(!ec);
     ec = serializer.SaveValue(it->second);
     CHECK(!ec);  // make sure that fully was successful
-    ec = serializer.FlushMem();
+    ec = serializer.FlushToSink(sink.get());
     CHECK(!ec);  // make sure that fully was successful
     std::string dump_payload(sink->str());
     AppendFooter(&dump_payload);  // version and crc
