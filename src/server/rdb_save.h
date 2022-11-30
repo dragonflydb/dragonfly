@@ -10,6 +10,8 @@ extern "C" {
 #include "redis/object.h"
 }
 
+#include <optional>
+
 #include "base/io_buf.h"
 #include "base/pod_array.h"
 #include "io/io.h"
@@ -105,8 +107,8 @@ class RdbSaver {
   std::error_code SaveAux(const StringVec& lua_scripts);
   std::error_code SaveAuxFieldStrInt(std::string_view key, int64_t val);
 
-  SaveMode save_mode_;
   std::unique_ptr<Impl> impl_;
+  SaveMode save_mode_;
   CompressionMode compression_mode_;
 };
 
@@ -118,10 +120,8 @@ class ZstdCompressSerializer {
 
   ~ZstdCompressSerializer();
 
-  // Returns a pair consisting of an bool denoting whether the string was compressed
-  // and a string the result of compression. If given string was not compressed returned
-  // string will be empty.
-  std::pair<bool, string> Compress(std::string_view str);
+  // Returns string if compression was applied, null otherwise
+  std::optional<string> Compress(std::string_view str);
 
  private:
   class ZstdCompressImpl;
@@ -137,14 +137,9 @@ class RdbSerializer {
   // TODO: for aligned cased, it does not make sense that RdbSerializer buffers into unaligned
   // mem_buf_ and then flush it into the next level. We should probably use AlignedBuffer
   // directly.
-  RdbSerializer(::io::Sink* s, bool do_entry_level_compression);
+  RdbSerializer(bool do_entry_level_compression);
 
   ~RdbSerializer();
-
-  // The ownership stays with the caller.
-  void set_sink(::io::Sink* s) {
-    sink_ = s;
-  }
 
   std::error_code WriteOpcode(uint8_t opcode) {
     return WriteRaw(::io::Bytes{&opcode, 1});
@@ -163,9 +158,9 @@ class RdbSerializer {
     return SaveString(std::string_view{reinterpret_cast<const char*>(buf), len});
   }
 
+  // TODO(Adi) : add flag to flush compressed blob to sink, move zstd serializer under RdbSerializer
+  std::error_code FlushToSink(io::Sink* s);
   std::error_code SaveLen(size_t len);
-
-  std::error_code FlushMem();
 
   // This would work for either string or an object.
   // The arg pv is taken from it->second if accessing
@@ -173,7 +168,8 @@ class RdbSerializer {
   // for the dump command - thus it is public function
   std::error_code SaveValue(const PrimeValue& pv);
 
-  std::error_code SendFullSyncCut();
+  std::error_code SendFullSyncCut(io::Sink* s);
+  size_t SerializedLen() const;
 
  private:
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
@@ -188,8 +184,6 @@ class RdbSerializer {
   std::error_code SaveListPackAsZiplist(uint8_t* lp);
   std::error_code SaveStreamPEL(rax* pel, bool nacks);
   std::error_code SaveStreamConsumers(streamCG* cg);
-
-  ::io::Sink* sink_;
 
   std::unique_ptr<LZF_HSLOT[]> lzf_;
   base::IoBuf mem_buf_;
