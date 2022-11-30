@@ -114,7 +114,10 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
 
   PrimeTable::Cursor cursor;
   for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
-    if (cll->IsCancelled() || !db_array_[db_indx])
+    if (cll->IsCancelled())
+      return;
+
+    if (!db_array_[db_indx])
       continue;
 
     uint64_t last_yield = 0;
@@ -196,15 +199,22 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
 
   lock_guard lk(mu_);
 
-  BorrowedSerializer serializer{this, db_index, compression_mode_};
-  RdbSerializer* serializer_ptr = serializer;
+  optional<RdbSerializer> tmp_serializer;
+  RdbSerializer* serializer_ptr = default_serializer_.get();
+  if (db_index != current_db_) {
+    tmp_serializer.emplace(compression_mode_ != CompressionMode::NONE);
+    serializer_ptr = &*tmp_serializer;
+  }
 
   while (!it.is_done()) {
     ++result;
     SerializeEntry(db_index, it->first, it->second, nullopt, serializer_ptr);
     ++it;
   }
-  serializer.num_records += result;
+
+  if (tmp_serializer) {
+    FlushTmpSerializer(db_index, &*tmp_serializer);
+  }
 
   return result;
 }
@@ -224,7 +234,7 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
   ++type_freq_map_[*res];
 }
 
-void SliceSnapshot::PushFileToChannel(DbIndex db_index, unsigned num_records, bool should_compress,
+void SliceSnapshot::PushFileToChannel(DbIndex db_index, bool should_compress,
                                       io::StringFile* sfile) {
   string payload = std::move(sfile->val);
 
@@ -238,7 +248,7 @@ void SliceSnapshot::PushFileToChannel(DbIndex db_index, unsigned num_records, bo
     }
   }
 
-  dest_->Push(GetDbRecord(db_index, std::move(payload), num_records));
+  dest_->Push(GetDbRecord(db_index, std::move(payload)));
 }
 
 bool SliceSnapshot::FlushDefaultBuffer(bool force) {
@@ -252,11 +262,8 @@ bool SliceSnapshot::FlushDefaultBuffer(bool force) {
 
   VLOG(2) << "FlushDefaultBuffer " << default_buffer_->val.size() << " bytes";
 
-  uint32_t record_num = default_buffer_records_;
-  default_buffer_records_ = 0;  // Can't move after push because its blocking
-
   bool multi_entries_compression = (compression_mode_ == CompressionMode::MULTY_ENTRY);
-  PushFileToChannel(current_db_, record_num, multi_entries_compression, default_buffer_.get());
+  PushFileToChannel(current_db_, multi_entries_compression, default_buffer_.get());
   return true;
 }
 
@@ -279,11 +286,19 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
   CHECK(journal::Op::VAL == entry.opcode);
 
-  BorrowedSerializer serializer{this, entry.db_ind, compression_mode_};
+  optional<RdbSerializer> tmp_serializer;
+  RdbSerializer* serializer_ptr = default_serializer_.get();
+  if (entry.db_ind != current_db_) {
+    tmp_serializer.emplace(compression_mode_ != CompressionMode::NONE);
+    serializer_ptr = &*tmp_serializer;
+  }
 
   PrimeKey pkey{entry.key};
-  SerializeEntry(entry.db_ind, pkey, *entry.pval_ptr, entry.expire_ms, serializer);
-  serializer.num_records++;
+  SerializeEntry(entry.db_ind, pkey, *entry.pval_ptr, entry.expire_ms, serializer_ptr);
+
+  if (tmp_serializer) {
+    FlushTmpSerializer(entry.db_ind, &*tmp_serializer);
+  }
 }
 
 void SliceSnapshot::CloseRecordChannel() {
@@ -299,37 +314,18 @@ void SliceSnapshot::CloseRecordChannel() {
   }
 }
 
-SliceSnapshot::DbRecord SliceSnapshot::GetDbRecord(DbIndex db_index, std::string value,
-                                                   unsigned num_records) {
+SliceSnapshot::DbRecord SliceSnapshot::GetDbRecord(DbIndex db_index, std::string value) {
   auto id = rec_id_++;
   DVLOG(2) << "Pushed " << id;
 
   stats_.channel_bytes += value.size();
-  return DbRecord{
-      .db_index = db_index, .id = id, .num_records = num_records, .value = std::move(value)};
+  return DbRecord{.db_index = db_index, .id = id, .value = std::move(value)};
 }
 
-SliceSnapshot::BorrowedSerializer::BorrowedSerializer(SliceSnapshot* snapshot, DbIndex index,
-                                                      CompressionMode compression_mode)
-    : num_records{0}, db_index{index}, snapshot{snapshot}, serializer{nullopt} {
-  if (index != snapshot->current_db_) {
-    serializer.emplace(compression_mode != CompressionMode::NONE);
-  }
+void SliceSnapshot::FlushTmpSerializer(DbIndex db_index, RdbSerializer* serializer) {
+  io::StringFile sfile{};
+  error_code ec = serializer->FlushToSink(&sfile);
+  CHECK(!ec && !sfile.val.empty());
+  PushFileToChannel(db_index, false, &sfile);
 }
-
-SliceSnapshot::BorrowedSerializer::~BorrowedSerializer() {
-  if (serializer) {
-    io::StringFile sfile{};
-    error_code ec = serializer->FlushToSink(&sfile);
-    CHECK(!ec && !sfile.val.empty());
-    snapshot->PushFileToChannel(db_index, num_records, false, &sfile);
-  } else {
-    snapshot->default_buffer_records_ += num_records;
-  }
-}
-
-SliceSnapshot::BorrowedSerializer::operator RdbSerializer*() {
-  return serializer ? &*serializer : snapshot->default_serializer_.get();
-}
-
 }  // namespace dfly

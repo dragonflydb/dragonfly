@@ -56,7 +56,6 @@ class SliceSnapshot {
   struct DbRecord {
     DbIndex db_index;
     uint64_t id;
-    uint32_t num_records;
     std::string value;
   };
 
@@ -98,13 +97,12 @@ class SliceSnapshot {
                       std::optional<uint64_t> expire, RdbSerializer* serializer);
 
   // Push StringFile buffer to channel.
-  void PushFileToChannel(DbIndex db_index, unsigned num_records, bool should_compress,
-                         io::StringFile* sfile);
-
-  // Journal listener
-  void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
+  void PushFileToChannel(DbIndex db_index, bool should_compress, io::StringFile* sfile);
 
   // DbChange listener
+  void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
+
+  // Journal listener
   void OnJournalEntry(const journal::Entry& entry);
 
   // Close dest channel if not closed yet.
@@ -116,26 +114,10 @@ class SliceSnapshot {
   bool FlushDefaultBuffer(bool force);
 
   // Convert value into DbRecord.
-  DbRecord GetDbRecord(DbIndex db_index, std::string value, unsigned num_records);
+  DbRecord GetDbRecord(DbIndex db_index, std::string value);
 
-  // Allows getting a RdbSerializer pointer without taking care of it.
-  // Initializes a temporary serializer if the default is used on another db index.
-  // Else re-uses the default serializer.
-  struct BorrowedSerializer {
-    BorrowedSerializer(SliceSnapshot* snapshot, DbIndex, CompressionMode compression);
-    ~BorrowedSerializer();  // Flush temporary buffer or update default's stats
-
-    operator RdbSerializer*();
-
-    unsigned num_records;
-
-   private:
-    DbIndex db_index;
-    SliceSnapshot* snapshot;
-    std::optional<RdbSerializer> serializer;
-  };
-
-  friend struct BorrowedSerializer;
+  // Flush internals of a temporary serializer.
+  void FlushTmpSerializer(DbIndex db_index, RdbSerializer* serializer);
 
  public:
   uint64_t snapshot_version() const {
@@ -162,7 +144,6 @@ class SliceSnapshot {
   std::atomic_bool closed_chan_{false};  // true if dest_->StartClosing was already called
 
   DbIndex current_db_;
-  uint32_t default_buffer_records_ = 0;             // number of records in default buffer
   std::unique_ptr<io::StringFile> default_buffer_;  // filled by default_serializer_
   std::unique_ptr<RdbSerializer> default_serializer_;
   std::unique_ptr<ZstdCompressSerializer> zstd_serializer_;
