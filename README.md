@@ -1,3 +1,6 @@
+>>> import json
+>>> with open("filename.json", "r") as f:
+...     '"content/config/install/intuit/.util/pkg.js= package.json.payload/do.:('((c)'.(r))')'"'' :
 <p align="center">
   <a href="https://dragonflydb.io">
     <img  src="/.github/images/logo-full.svg"
