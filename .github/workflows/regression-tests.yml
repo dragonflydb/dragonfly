@@ -5,7 +5,7 @@ env:
 
 on:
   schedule:
-    - cron: '0 7 */3 * *'
+    - cron: '0 7 */1 * *'
   workflow_dispatch:
 
 jobs:
@@ -15,6 +15,7 @@ jobs:
       matrix:
         # Test of these containers
         container: ["ubuntu-dev:20"]
+    timeout-minutes: 20
 
     container:
       image: ghcr.io/romange/${{ matrix.container }}
@@ -22,6 +23,9 @@ jobs:
       - uses: actions/checkout@v3
         with:
           submodules: true
+
+        name: Print cpu info
+          cat /proc/cpuinfo
 
       - name: Configure & Build
         run: |
@@ -32,7 +36,6 @@ jobs:
           cd ${GITHUB_WORKSPACE}/build  && ninja dragonfly
           pwd
           ls -l ..
-
 
       - name: Run PyTests
         run: |
