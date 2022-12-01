@@ -132,12 +132,7 @@ class RdbLoaderBase {
 
   static size_t StrLen(const RdbVariant& tset);
 
-  std::error_code EnsureRead(size_t min_sz) {
-    if (mem_buf_->InputLen() >= min_sz)
-      return std::error_code{};
-
-    return EnsureReadInternal(min_sz);
-  }
+  std::error_code EnsureRead(size_t min_sz);
 
   std::error_code EnsureReadInternal(size_t min_sz);
 
