@@ -111,6 +111,12 @@ size_t zmalloc_get_smap_bytes_by_field(char *field, long pid);
 size_t zmalloc_get_memory_size(void);
 size_t zmalloc_usable_size(const void* p);
 
+/*
+ * checks whether a page that the pointer ptr located at is underutilized.
+ * This uses the current local thread heap.
+ * return 0 if not, 1 if underutilized
+ */
+int zmalloc_page_is_underutilized(void *ptr, float ratio);
 // roman: void zlibc_free(void *ptr);
 
 void init_zmalloc_threadlocal(void* heap);

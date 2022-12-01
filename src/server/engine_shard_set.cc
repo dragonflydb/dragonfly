@@ -30,6 +30,18 @@ ABSL_FLAG(bool, cache_mode, false,
           "If true, the backend behaves like a cache, "
           "by evicting entries when getting close to maxmemory limit");
 
+// memory defragmented related flags
+ABSL_FLAG(float, mem_defrag_threshold,
+          1,  // The default now is to disable the task from running! change this to 0.05!!
+          "Minimum percentage of used memory relative to total available memory before running "
+          "defragmentation");
+
+ABSL_FLAG(float, commit_use_threshold, 1.3,
+          "The ratio of commited/used memory above which we run defragmentation");
+
+ABSL_FLAG(float, mem_utilization_threshold, 0.8,
+          "memory page under utilization threshold. Ratio between used and commited size, below "
+          "this, memory in this page will defragmented");
 namespace dfly {
 
 using namespace util;
@@ -38,6 +50,8 @@ namespace fibers = ::boost::fibers;
 using absl::GetFlag;
 
 namespace {
+
+constexpr DbIndex DEFAULT_DB_INDEX = 0;
 
 vector<EngineShardSet::CachedStats> cached_stats;  // initialized in EngineShardSet::Init
 
@@ -54,6 +68,66 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
   quick_runs += o.quick_runs;
 
   return *this;
+}
+
+// This function checks 3 things:
+// 1. Don't try memory fragmentation if we don't use "enough" memory (control by
+// mem_defrag_threshold flag)
+// 2. That we had change in memory usage - to prevent endless loop - out of scope for now
+// 3. in case the above is OK, make sure that we have a "gap" between usage and commited memory
+// (control by commit_use_threshold flag)
+bool EngineShard::DefragTaskState::IsRequired() {
+  const uint64_t threshold_mem = max_memory_limit * GetFlag(FLAGS_mem_defrag_threshold);
+  const double commit_use_threshold = GetFlag(FLAGS_commit_use_threshold);
+
+  if (cursor > 0) {
+    return true;
+  }
+
+  uint64_t commited = GetMallocCurrentCommitted();
+  uint64_t mem_in_use = used_mem_current.load(memory_order_relaxed);
+
+  // we want to make sure that we are not running this to many times - i.e.
+  // if there was no change to the memory, don't run this
+  if (threshold_mem < commited && mem_in_use > 0 &&
+      (uint64_t(mem_in_use * commit_use_threshold) < commited)) {
+    // we have way more commited then actual usage
+    return true;
+  }
+
+  return false;
+}
+
+// for now this does nothing
+bool EngineShard::DoDefrag() {
+  // TODO - Impl!!
+  return defrag_state_.cursor > 0;
+}
+
+void EngineShard::DefragTaskState::Init() {
+  cursor = 0u;
+}
+
+// the memory defragmentation task is as follow:
+//  1. Check if memory usage is high enough
+//  2. Check if diff between commited and used memory is high enough
+//  3. Check if we have memory changes (to ensure that we not running endlessly). - TODO
+//  4. if all the above pass -> run on the shard and try to defragmented memory by re-allocating
+//  values
+//     if the cursor for this is signal that we are not done, schedule the task to run at high
+//     priority otherwise lower the task priority so that it would not use the CPU when not required
+uint32_t EngineShard::DefragTask() {
+  const auto shard_id = db_slice().shard_id();
+  bool required_state = defrag_state_.IsRequired();
+  if (required_state) {
+    VLOG(1) << shard_id << ": need to run defrag memory cursor state: " << defrag_state_.cursor;
+    if (DoDefrag()) {
+      // we didn't finish the scan
+      return util::ProactorBase::kOnIdleMaxLevel;
+    }
+  }
+  // by default we just want to not get in the way..
+  return 0u;
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap)
@@ -75,6 +149,9 @@ EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t*
   tmp_str1 = sdsempty();
 
   db_slice_.UpdateExpireBase(absl::GetCurrentTimeNanos() / 1000000, 0);
+  // start the defragmented task here
+  defrag_state_.Init();
+  defrag_task_ = pb->AddOnIdleTask([this]() { return this->DefragTask(); });
 }
 
 EngineShard::~EngineShard() {
@@ -91,6 +168,10 @@ void EngineShard::Shutdown() {
 
   if (periodic_task_) {
     ProactorBase::me()->CancelPeriodic(periodic_task_);
+  }
+
+  if (defrag_task_ != 0) {
+    ProactorBase::me()->RemoveOnIdleTask(defrag_task_);
   }
 }
 
