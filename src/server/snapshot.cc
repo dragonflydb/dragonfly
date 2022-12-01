@@ -133,7 +133,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
         return;
 
       PrimeTable::Cursor next =
-          pt->Traverse(cursor, bind(&SliceSnapshot::BucketSaveCb, this, placeholders::_1));
+          pt->Traverse(cursor, absl::bind_front(&SliceSnapshot::BucketSaveCb, this));
       cursor = next;
       FlushDefaultBuffer(false);
 
@@ -157,6 +157,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
   mu_.lock();
   mu_.unlock();
 
+  // TODO: investigate why a single byte gets stuck and does not arrive to replica
   for (unsigned i = 10; i > 1; i--)
     CHECK(!default_serializer_->SendFullSyncCut(default_buffer_.get()));
   FlushDefaultBuffer(true);
