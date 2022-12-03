@@ -79,7 +79,22 @@ Transaction::~Transaction() {
  **/
 
 OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
+  return InitInterally(index, args, false);
+}
+
+OpStatus Transaction::InitByKeys(DbIndex index, ArgSlice keys) {
+  return InitInterally(index, keys, true);
+}
+
+template <typename T> OpStatus Transaction::InitInterally(DbIndex index, T args, bool keys_only) {
   db_index_ = index;
+
+  auto arg_at = [args](size_t i) {
+    if constexpr (std::is_same_v<T, ArgSlice>)
+      return args.at(i);
+    else
+      return ArgS(args, i);
+  };
 
   if (IsGlobal()) {
     unique_shard_cnt_ = shard_set->size();
@@ -87,15 +102,26 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
     return OpStatus::OK;
   }
 
-  CHECK_GT(args.size(), 1U);  // first entry is the command name.
+  CHECK(keys_only || args.size() > 1U); // first entry is the command name.
   DCHECK_EQ(unique_shard_cnt_, 0u);
   DCHECK(args_.empty());
 
-  OpResult<KeyIndex> key_index_res = DetermineKeys(cid_, args);
-  if (!key_index_res)
-    return key_index_res.status();
+  KeyIndex key_index;
 
-  const auto& key_index = *key_index_res;
+  if (keys_only) {
+    key_index = KeyIndex{0, 0, args.size(), 1};
+  } else {
+    auto pargs = [args](){
+      if constexpr(std::is_same_v<T, ArgSlice>)
+        return CmdArgList{};
+      else
+        return args;
+    };
+    OpResult<KeyIndex> key_index_res = DetermineKeys(cid_, pargs());
+    if (!key_index_res)
+      return key_index_res.status();
+    key_index = *key_index_res;
+  }
 
   if (key_index.start == args.size()) {  // eval with 0 keys.
     CHECK(absl::StartsWith(cid_->name(), "EVAL"));
@@ -103,7 +129,7 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   }
 
   DCHECK_LT(key_index.start, args.size());
-  DCHECK_GT(key_index.start, 0u);
+  CHECK(keys_only || key_index.start > 0u);
 
   bool incremental_locking = multi_ && multi_->is_expanding;
   bool single_key = !multi_ && key_index.HasSingleKey();
@@ -116,7 +142,7 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
 
     // even for a single key we may have multiple arguments per key (MSET).
     for (unsigned j = key_index.start; j < key_index.start + key_index.step; ++j) {
-      args_.push_back(ArgS(args, j));
+      args_.push_back(arg_at(j));
     }
     string_view key = args_.front();
 
@@ -163,7 +189,7 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   if (key_index.bonus) {  // additional one-of key.
     DCHECK(key_index.step == 1);
 
-    string_view key = ArgS(args, key_index.bonus);
+    string_view key = arg_at(key_index.bonus);
     uint32_t sid = Shard(key, shard_data_.size());
     shard_index[sid].args.push_back(key);
     if (needs_reverse_mapping)
@@ -171,7 +197,7 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   }
 
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
-    string_view key = ArgS(args, i);
+    string_view key = arg_at(i);
     uint32_t sid = Shard(key, shard_data_.size());
 
     shard_index[sid].args.push_back(key);
@@ -189,7 +215,7 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
     if (key_index.step == 2) {  // value
       ++i;
 
-      string_view val = ArgS(args, i);
+      string_view val = arg_at(i);
       shard_index[sid].args.push_back(val);
       if (needs_reverse_mapping)
         shard_index[sid].original_index.push_back(i - 1);
@@ -247,7 +273,8 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   // validation
   if (needs_reverse_mapping) {
     for (size_t i = 0; i < args_.size(); ++i) {
-      DCHECK_EQ(args_[i], ArgS(args, 1 + reverse_index_[i]));  // 1 for the commandname.
+      // TODO FIX OFFSET
+      DCHECK_EQ(args_[i], arg_at(1 + reverse_index_[i]));  // 1 for the commandname.
     }
   }
 
@@ -275,6 +302,10 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
 
   return OpStatus::OK;
 }
+
+template OpStatus Transaction::InitInterally(DbIndex index, ArgSlice slice, bool);
+
+template OpStatus Transaction::InitInterally(DbIndex index, CmdArgList slice, bool);
 
 void Transaction::SetExecCmd(const CommandId* cid) {
   DCHECK(multi_);

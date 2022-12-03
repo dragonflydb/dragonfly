@@ -2,7 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/rdb_save.h"
+#include "server/serialization/rdb_save.h"
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
@@ -26,7 +26,7 @@ extern "C" {
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
-#include "server/rdb_extensions.h"
+#include "server/serialization/rdb_extensions.h"
 #include "server/snapshot.h"
 #include "util/fibers/simple_channel.h"
 

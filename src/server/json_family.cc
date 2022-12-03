@@ -54,10 +54,11 @@ string GetString(EngineShard* shard, const PrimeValue& pv) {
   return res;
 }
 
-inline void RecordJournal(const OpArgs& op_args, string_view key, const PrimeKey& pvalue) {
+inline void RecordJournal(const OpArgs& op_args, string_view key, const PrimeValue& pvalue) {
   if (op_args.shard->journal()) {
-    journal::Entry entry{op_args.db_cntx.db_index, op_args.txid, key, pvalue};
-    op_args.shard->journal()->RecordEntry(entry);
+    journal::Entry entry{op_args.txid, op_args.db_cntx.db_index, journal::OpCode::SET, key,
+                         &pvalue};
+    op_args.shard->journal()->RecordEntry(std::move(entry));
   }
 }
 

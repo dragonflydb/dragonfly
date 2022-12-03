@@ -19,6 +19,9 @@ class ListFamily {
  public:
   static void Register(CommandRegistry* registry);
 
+  static OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,
+                          bool skip_notexist, absl::Span<const std::string_view> vals);
+
  private:
   static void LPush(CmdArgList args, ConnectionContext* cntx);
   static void LPushX(CmdArgList args, ConnectionContext* cntx);

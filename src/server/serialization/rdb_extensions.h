@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <cstddef>
+
 // Range 200-240 is used by DF extensions.
 
 // This opcode is sent by the master Dragonfly instance to a replica

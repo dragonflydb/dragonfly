@@ -15,8 +15,8 @@ extern "C" {
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
-#include "server/rdb_extensions.h"
-#include "server/rdb_save.h"
+#include "server/serialization/rdb_extensions.h"
+#include "server/serialization/rdb_save.h"
 #include "util/fiber_sched_algo.h"
 #include "util/proactor_base.h"
 
@@ -256,26 +256,26 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 }
 
 void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
-  CHECK(journal::Op::VAL == entry.opcode);
-
-  PrimeKey pkey{entry.key};
-
-  if (entry.db_ind == savecb_current_db_) {
-    ++num_records_in_blob_;
-    io::Result<uint8_t> res = rdb_serializer_->SaveEntry(pkey, *entry.pval_ptr, entry.expire_ms);
-    CHECK(res);  // we write to StringFile.
-  } else {
-    bool serializer_compression = (compression_mode_ != CompressionMode::NONE);
-    RdbSerializer tmp_serializer(serializer_compression);
-
-    io::Result<uint8_t> res = tmp_serializer.SaveEntry(pkey, *entry.pval_ptr, entry.expire_ms);
-    CHECK(res);  // we write to StringFile.
-
-    io::StringFile sfile;
-    error_code ec = tmp_serializer.FlushToSink(&sfile);
-    CHECK(!ec && !sfile.val.empty());
-    PushFileToChannel(&sfile, entry.db_ind, 1, false);
-  }
+  //CHECK(journal::Op::VAL == entry.opcode);
+  //
+  //PrimeKey pkey{entry.key};
+  //
+  //if (entry.db_ind == savecb_current_db_) {
+  //  ++num_records_in_blob_;
+  //  io::Result<uint8_t> res = rdb_serializer_->SaveEntry(pkey, *entry.pval_ptr, entry.expire_ms);
+  //  CHECK(res);  // we write to StringFile.
+  //} else {
+  //  bool serializer_compression = (compression_mode_ != CompressionMode::NONE);
+  //  RdbSerializer tmp_serializer(serializer_compression);
+  //
+  //  io::Result<uint8_t> res = tmp_serializer.SaveEntry(pkey, *entry.pval_ptr, entry.expire_ms);
+  //  CHECK(res);  // we write to StringFile.
+  //
+  //  io::StringFile sfile;
+  //  error_code ec = tmp_serializer.FlushToSink(&sfile);
+  //  CHECK(!ec && !sfile.val.empty());
+  //  PushFileToChannel(&sfile, entry.db_ind, 1, false);
+  //}
 }
 
 unsigned SliceSnapshot::SerializePhysicalBucket(DbIndex db_index, PrimeTable::bucket_iterator it) {

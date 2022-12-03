@@ -3,45 +3,52 @@
 //
 #pragma once
 
+#include <string>
+#include <variant>
+
 #include "server/common.h"
 #include "server/table.h"
 
 namespace dfly {
 namespace journal {
 
-enum class Op : uint8_t {
+enum class OpCode : uint8_t {
+  // 0-20 control opcodes
   NOOP = 0,
-  LOCK = 1,
-  UNLOCK = 2,
-  LOCK_SHARD = 3,
-  UNLOCK_SHARD = 4,
-  SCHED = 5,
-  VAL = 10,
-  DEL,
-  MSET,
+
+  // 21-50 commands
+  SET = 21,
+  DEL = 22,
+  LPUSH = 23,
 };
 
-// TODO: to pass all the attributes like ttl, stickiness etc.
+using KeyType = std::string_view;
+using ValueType = std::variant<KeyType, const PrimeValue*>;
+using ListType = ArgSlice;
+
+using PldEmpty = std::tuple<>;
+using PldKeyValue = std::tuple<KeyType, ValueType>;
+using PldKeyList = std::tuple<KeyType, ListType>;
+
+using Payload = std::variant<PldEmpty, ListType, PldKeyValue, PldKeyList>;
+
 struct Entry {
-  Entry(Op op, DbIndex did, TxId tid, std::string_view skey)
-      : opcode(op), db_ind(did), txid(tid), key(skey) {
+  Entry() = default;
+
+  template <typename... Ts>
+  Entry(TxId txid, DbIndex dbid, OpCode code, Ts... ts)
+      : txid{txid}, dbid{dbid}, code{code}, payload{} {
+    if constexpr (sizeof...(Ts) > 1)
+      payload = std::make_tuple(std::forward<Ts>(ts)...);
+    else
+      payload = std::get<0>(std::make_tuple(std::forward<Ts>(ts)...));
   }
 
-  Entry(DbIndex did, TxId tid, std::string_view skey, const PrimeValue& pval)
-      : Entry(Op::VAL, did, tid, skey) {
-    pval_ptr = &pval;
-  }
-
-  static Entry Sched(TxId tid) {
-    return Entry{Op::SCHED, 0, tid, {}};
-  }
-
-  Op opcode;
-  DbIndex db_ind;
   TxId txid;
-  std::string_view key;
-  const PrimeValue* pval_ptr = nullptr;
-  uint64_t expire_ms = 0;  // 0 means no expiry.
+  DbIndex dbid;
+
+  OpCode code;
+  Payload payload;
 };
 
 using ChangeCallback = std::function<void(const Entry&)>;

@@ -37,7 +37,7 @@ string ShardName(std::string_view base, unsigned index) {
 struct JournalSlice::RingItem {
   LSN lsn;
   TxId txid;
-  Op opcode;
+  OpCode opcode;
 };
 
 JournalSlice::JournalSlice() {
@@ -126,13 +126,13 @@ void JournalSlice::AddLogRecord(const Entry& entry) {
 
   RingItem item;
   item.lsn = lsn_;
-  item.opcode = entry.opcode;
+  item.opcode = entry.code;
   item.txid = entry.txid;
   VLOG(1) << "Writing item " << item.lsn;
   ring_buffer_->EmplaceOrOverride(move(item));
 
   if (shard_file_) {
-    string line = absl::StrCat(lsn_, " ", entry.txid, " ", entry.opcode, "\n");
+    string line = absl::StrCat(lsn_, " ", entry.txid, " ", entry.code, "\n");
     error_code ec = shard_file_->Write(io::Buffer(line), file_offset_, 0);
     CHECK_EC(ec);
     file_offset_ += line.size();

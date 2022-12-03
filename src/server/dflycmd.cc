@@ -13,11 +13,12 @@
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
-#include "server/rdb_save.h"
+#include "server/serialization/rdb_save.h"
 #include "server/script_mgr.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
+#include "server/serialization/journal_serializer.h"
 
 using namespace std;
 
@@ -250,7 +251,7 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
     TransactionGuard tg{cntx->transaction};
     AggregateStatus status;
 
-    auto cb = [this, &status, replica_ptr](unsigned index, auto*) {
+    auto cb = [this, &status, replica_ptr=replica_ptr](unsigned index, auto*) {
       status = StartFullSyncInThread(&replica_ptr->flows[index], &replica_ptr->cntx,
                                      EngineShard::tlocal());
     };
@@ -283,7 +284,7 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
     TransactionGuard tg{cntx->transaction};
     AggregateStatus status;
 
-    auto cb = [this, &status, replica_ptr](unsigned index, auto*) {
+    auto cb = [this, &status, replica_ptr=replica_ptr](unsigned index, auto*) {
       EngineShard* shard = EngineShard::tlocal();
       FlowInfo* flow = &replica_ptr->flows[index];
 
@@ -353,9 +354,8 @@ OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, EngineShard* shard) {
   uint32_t cb_id = 0;
   if (shard != nullptr) {
     cb_id = sf_->journal()->RegisterOnChange([flow](const journal::Entry& je) {
-      // TODO: Serialize event.
-      ReqSerializer serializer{flow->conn->socket()};
-      serializer.SendCommand(absl::StrCat("SET ", je.key, " ", je.pval_ptr->ToString()));
+      JournalWriter jw{flow->conn->socket()};
+      jw.Serialize(je);
     });
   }
 

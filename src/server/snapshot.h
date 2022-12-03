@@ -10,7 +10,7 @@
 #include "base/pod_array.h"
 #include "io/file.h"
 #include "server/db_slice.h"
-#include "server/rdb_save.h"
+#include "server/serialization/rdb_save.h"
 #include "server/table.h"
 #include "util/fibers/simple_channel.h"
 

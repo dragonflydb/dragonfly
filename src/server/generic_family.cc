@@ -19,8 +19,10 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
-#include "server/rdb_load.h"
-#include "server/rdb_save.h"
+#include "server/journal/journal.h"
+#include "server/journal/types.h"
+#include "server/serialization/rdb_load.h"
+#include "server/serialization/rdb_save.h"
 #include "server/transaction.h"
 #include "util/varz.h"
 
@@ -1253,6 +1255,13 @@ OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, ArgSlice keys) {
     if (!IsValid(fres.first))
       continue;
     res += int(db_slice.Del(op_args.db_cntx.db_index, fres.first));
+  }
+
+  // TODO: filter deleted with bitset
+  if (op_args.shard->journal()) {
+    VLOG(0) << "Recording del of " << keys.size();
+    journal::Entry entry{op_args.txid, op_args.db_cntx.db_index, journal::OpCode::DEL, keys};
+    op_args.shard->journal()->RecordEntry(std::move(entry));
   }
 
   return res;

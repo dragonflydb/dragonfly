@@ -92,7 +92,7 @@ bool Journal::SchedStartTx(TxId txid, unsigned num_keys, unsigned num_shards) {
     return false;
 
   // TODO: to complete the metadata.
-  journal_slice.AddLogRecord(Entry::Sched(txid));
+  // journal_slice.AddLogRecord(Entry::Sched(txid));
 
   return true;
 }

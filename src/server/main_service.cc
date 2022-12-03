@@ -642,6 +642,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   // Create command transaction
   intrusive_ptr<Transaction> dist_trans;
 
+
   if (under_script) {
     DCHECK(dfly_cntx->transaction);
     if (IsTransactional(cid)) {

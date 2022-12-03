@@ -15,11 +15,14 @@
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/main_service.h"
-#include "server/rdb_load.h"
+#include "server/serialization/rdb_load.h"
 #include "server/server_state.h"
 #include "server/string_family.h"
 #include "server/transaction.h"
 #include "util/fiber_sched_algo.h"
+
+#include "server/journal/journal.h"
+#include "server/serialization/journal_serializer.h"
 
 using namespace std;
 
@@ -130,6 +133,35 @@ void DebugCmd::Run(CmdArgList args) {
   if (subcmd == "OBJECT" && args.size() == 3) {
     string_view key = ArgS(args, 2);
     return Inspect(key);
+  }
+
+
+  if (subcmd == "JT") {
+    sf_.journal()->OpenInThread(false, "");
+
+    const Service* service = &sf_.service();
+    sf_.journal()->RegisterOnChange([this, service](const journal::Entry& e) {
+      io::StringSink str_sink;
+      JournalWriter srz{&str_sink};
+      srz.Serialize(e);
+      
+      VLOG(0) << "==VALUE==";
+      for (char c: str_sink.str()) {
+        VLOG(0) << uint32_t(c);
+      }
+      VLOG(0) << "=========";
+
+      
+      io::BytesSource new_src{io::Buffer(str_sink.str())};
+      JournalReader rd{&new_src};
+      auto entry = rd.ReadEntry();
+
+      VLOG(0) << "GOT " << JournalUtility::Print(entry);
+      
+      str_sink.Clear();
+    });
+
+    return (*cntx_)->SendOk();
   }
 
   string reply = UnknownSubCmd(subcmd, "DEBUG");

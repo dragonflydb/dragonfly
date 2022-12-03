@@ -18,6 +18,8 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/journal/journal.h"
+#include "server/journal/types.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
 
@@ -359,61 +361,6 @@ OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool 
     return string(reinterpret_cast<char*>(entry.value), entry.sz);
   else
     return absl::StrCat(entry.longval);
-}
-
-OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,
-                          bool skip_notexist, absl::Span<std::string_view> vals) {
-  EngineShard* es = op_args.shard;
-  PrimeIterator it;
-  bool new_key = false;
-
-  if (skip_notexist) {
-    auto it_res = es->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
-    if (!it_res)
-      return it_res.status();
-    it = *it_res;
-  } else {
-    try {
-      tie(it, new_key) = es->db_slice().AddOrFind(op_args.db_cntx, key);
-    } catch (bad_alloc&) {
-      return OpStatus::OUT_OF_MEMORY;
-    }
-  }
-
-  quicklist* ql = nullptr;
-
-  if (new_key) {
-    robj* o = createQuicklistObject();
-    ql = (quicklist*)o->ptr;
-    quicklistSetOptions(ql, GetFlag(FLAGS_list_max_listpack_size),
-                        GetFlag(FLAGS_list_compress_depth));
-    it->second.ImportRObj(o);
-  } else {
-    if (it->second.ObjType() != OBJ_LIST)
-      return OpStatus::WRONG_TYPE;
-    es->db_slice().PreUpdate(op_args.db_cntx.db_index, it);
-    ql = GetQL(it->second);
-  }
-
-  // Left push is LIST_HEAD.
-  int pos = (dir == ListDir::LEFT) ? QUICKLIST_HEAD : QUICKLIST_TAIL;
-
-  for (auto v : vals) {
-    es->tmp_str1 = sdscpylen(es->tmp_str1, v.data(), v.size());
-    quicklistPush(ql, es->tmp_str1, sdslen(es->tmp_str1), pos);
-  }
-
-  if (new_key) {
-    if (es->blocking_controller()) {
-      string tmp;
-      string_view key = it->first.GetSlice(&tmp);
-      es->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, key);
-    }
-  } else {
-    es->db_slice().PostUpdate(op_args.db_cntx.db_index, it, key, true);
-  }
-
-  return quicklistCount(ql);
 }
 
 OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, uint32_t count,
@@ -1166,6 +1113,66 @@ OpResult<StringVec> ListFamily::OpRange(const OpArgs& op_args, std::string_view 
       start, end);
 
   return str_vec;
+}
+
+OpResult<uint32_t> ListFamily::OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,
+                                      bool skip_notexist, absl::Span<const std::string_view> vals) {
+  EngineShard* es = op_args.shard;
+  PrimeIterator it;
+  bool new_key = false;
+
+  if (skip_notexist) {
+    auto it_res = es->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
+    if (!it_res)
+      return it_res.status();
+    it = *it_res;
+  } else {
+    try {
+      tie(it, new_key) = es->db_slice().AddOrFind(op_args.db_cntx, key);
+    } catch (bad_alloc&) {
+      return OpStatus::OUT_OF_MEMORY;
+    }
+  }
+
+  quicklist* ql = nullptr;
+
+  if (new_key) {
+    robj* o = createQuicklistObject();
+    ql = (quicklist*)o->ptr;
+    quicklistSetOptions(ql, GetFlag(FLAGS_list_max_listpack_size),
+                        GetFlag(FLAGS_list_compress_depth));
+    it->second.ImportRObj(o);
+  } else {
+    if (it->second.ObjType() != OBJ_LIST)
+      return OpStatus::WRONG_TYPE;
+    es->db_slice().PreUpdate(op_args.db_cntx.db_index, it);
+    ql = GetQL(it->second);
+  }
+
+  // Left push is LIST_HEAD.
+  int pos = (dir == ListDir::LEFT) ? QUICKLIST_HEAD : QUICKLIST_TAIL;
+
+  for (auto v : vals) {
+    es->tmp_str1 = sdscpylen(es->tmp_str1, v.data(), v.size());
+    quicklistPush(ql, es->tmp_str1, sdslen(es->tmp_str1), pos);
+  }
+
+  if (new_key) {
+    if (es->blocking_controller()) {
+      string tmp;
+      string_view key = it->first.GetSlice(&tmp);
+      es->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, key);
+    }
+  } else {
+    es->db_slice().PostUpdate(op_args.db_cntx.db_index, it, key, true);
+  }
+
+  if (op_args.shard->journal()) {
+    journal::Entry e{op_args.txid, op_args.db_cntx.db_index, journal::OpCode::LPUSH, key, vals};
+    op_args.shard->journal()->RecordEntry(std::move(e));
+  }
+
+  return quicklistCount(ql);
 }
 
 using CI = CommandId;

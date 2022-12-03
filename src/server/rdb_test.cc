@@ -18,7 +18,7 @@ extern "C" {
 #include "facade/facade_test.h"  // needed to find operator== for RespExpr.
 #include "io/file.h"
 #include "server/engine_shard_set.h"
-#include "server/rdb_load.h"
+#include "server/serialization/rdb_load.h"
 #include "server/test_utils.h"
 
 using namespace testing;

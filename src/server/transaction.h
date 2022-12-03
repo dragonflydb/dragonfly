@@ -64,6 +64,8 @@ class Transaction {
 
   OpStatus InitByArgs(DbIndex index, CmdArgList args);
 
+  OpStatus InitByKeys(DbIndex index, ArgSlice keys);
+
   void SetExecCmd(const CommandId* cid);
 
   std::string DebugId() const;
@@ -195,6 +197,9 @@ class Transaction {
   unsigned SidToId(ShardId sid) const {
     return sid < shard_data_.size() ? sid : 0;
   }
+
+  template<typename T>
+  OpStatus InitInterally(DbIndex db_index, T slice, bool keys_only);
 
   void ScheduleInternal();
   void LockMulti();

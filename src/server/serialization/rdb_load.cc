@@ -2,7 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/rdb_load.h"
+#include "server/serialization/rdb_load.h"
 
 extern "C" {
 
@@ -27,7 +27,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/hset_family.h"
-#include "server/rdb_extensions.h"
+#include "server/serialization/rdb_extensions.h"
 #include "server/script_mgr.h"
 #include "server/server_state.h"
 #include "server/set_family.h"

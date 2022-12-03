@@ -18,8 +18,10 @@ extern "C" {
 #include "facade/redis_parser.h"
 #include "server/error.h"
 #include "server/main_service.h"
-#include "server/rdb_load.h"
+#include "server/serialization/rdb_load.h"
 #include "util/proactor_base.h"
+#include "server/journal/types.h"
+#include "server/serialization/journal_serializer.h"
 
 namespace dfly {
 
@@ -657,6 +659,18 @@ void Replica::FullSyncDflyFb(SyncBlock* sb, string eof_token) {
 }
 
 void Replica::StableSyncDflyFb() {
+  SocketSource ss{sock_.get()};
+  //io::PrefixSource ps{leftover_buf_->InputBuffer(), &ss};
+
+  JournalReader rd{&ss};
+  JournalExecutor ex{&service_};
+  while (true) {
+    auto entry = rd.ReadEntry();
+    VLOG(0) << JournalUtility::Print(entry);
+    ex.Execute(entry);
+  }
+
+/*
   base::IoBuf io_buf(16_KB);
   parser_.reset(new RedisParser);
 
@@ -684,7 +698,7 @@ void Replica::StableSyncDflyFb() {
 
     ec = ParseAndExecute(&io_buf);
   }
-
+*/
   return;
 }
 
