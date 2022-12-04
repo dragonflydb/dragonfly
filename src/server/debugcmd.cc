@@ -4,6 +4,7 @@
 #include "server/debugcmd.h"
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/random/random.h>
 #include <absl/strings/str_cat.h>
 
 #include <boost/fiber/operations.hpp>
@@ -58,19 +59,26 @@ struct ObjInfo {
   bool found = false;
 };
 
-void DoPopulateBatch(std::string_view prefix, size_t val_size, const SetCmd::SetParams& params,
-                     const PopulateBatch& batch) {
+void DoPopulateBatch(std::string_view prefix, size_t val_size, bool random_value_str,
+                     const SetCmd::SetParams& params, const PopulateBatch& batch) {
   DbContext db_cntx{batch.dbid, 0};
   OpArgs op_args(EngineShard::tlocal(), 0, db_cntx);
   SetCmd sg(op_args);
 
+  absl::InsecureBitGen gen;
   for (unsigned i = 0; i < batch.sz; ++i) {
     string key = absl::StrCat(prefix, ":", batch.index[i]);
-    string val = absl::StrCat("value:", batch.index[i]);
+    string val;
 
-    if (val.size() < val_size) {
-      val.resize(val_size, 'x');
+    if (random_value_str) {
+      val = GetRandomHex(gen, val_size);
+    } else {
+      val = absl::StrCat("value:", batch.index[i]);
+      if (val.size() < val_size) {
+        val.resize(val_size, 'x');
+      }
     }
+
     sg.Set(params, key, val);
   }
 }
@@ -223,7 +231,7 @@ void DebugCmd::Load(string_view filename) {
 }
 
 void DebugCmd::Populate(CmdArgList args) {
-  if (args.size() < 3 || args.size() > 5) {
+  if (args.size() < 3 || args.size() > 6) {
     return (*cntx_)->SendError(UnknownSubCmd("populate", "DEBUG"));
   }
 
@@ -240,6 +248,16 @@ void DebugCmd::Populate(CmdArgList args) {
     std::string_view str = ArgS(args, 4);
     if (!absl::SimpleAtoi(str, &val_size))
       return (*cntx_)->SendError(kUintErr);
+  }
+
+  bool populate_random_values = false;
+  if (args.size() > 5) {
+    ToUpper(&args[5]);
+    std::string_view str = ArgS(args, 5);
+    if (str != "RAND") {
+      return (*cntx_)->SendError(kSyntaxErr);
+    }
+    populate_random_values = true;
   }
 
   ProactorPool& pp = sf_.service().proactor_pool();
@@ -259,8 +277,8 @@ void DebugCmd::Populate(CmdArgList args) {
     auto range = ranges[i];
 
     // whatever we do, we should not capture i by reference.
-    fb_arr[i] = pp.at(i)->LaunchFiber([range, prefix, val_size, this] {
-      this->PopulateRangeFiber(range.first, range.second, prefix, val_size);
+    fb_arr[i] = pp.at(i)->LaunchFiber([range, prefix, val_size, populate_random_values, this] {
+      this->PopulateRangeFiber(range.first, range.second, prefix, val_size, populate_random_values);
     });
   }
   for (auto& fb : fb_arr)
@@ -270,7 +288,7 @@ void DebugCmd::Populate(CmdArgList args) {
 }
 
 void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view prefix,
-                                  unsigned value_len) {
+                                  unsigned value_len, bool populate_random_values) {
   this_fiber::properties<FiberProps>().set_name("populate_range");
   VLOG(1) << "PopulateRange: " << from << "-" << (from + len - 1);
 
@@ -288,9 +306,9 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view 
 
     auto& shard_batch = ps[sid];
     shard_batch.index[shard_batch.sz++] = i;
-    if (shard_batch.sz == 32) {
+    if (shard_batch.sz == 32) {  // TODO what is this 32?
       ess.Add(sid, [=] {
-        DoPopulateBatch(prefix, value_len, params, shard_batch);
+        DoPopulateBatch(prefix, value_len, populate_random_values, params, shard_batch);
         if (i % 50 == 0) {
           this_fiber::yield();
         }
@@ -302,7 +320,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view 
   }
 
   ess.RunBlockingInParallel([&](EngineShard* shard) {
-    DoPopulateBatch(prefix, value_len, params, ps[shard->shard_id()]);
+    DoPopulateBatch(prefix, value_len, populate_random_values, params, ps[shard->shard_id()]);
   });
 }
 
