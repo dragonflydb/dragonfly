@@ -250,7 +250,7 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
     TransactionGuard tg{cntx->transaction};
     AggregateStatus status;
 
-    auto cb = [this, &status, replica_ptr](unsigned index, auto*) {
+    auto cb = [this, &status, replica_ptr = replica_ptr](unsigned index, auto*) {
       status = StartFullSyncInThread(&replica_ptr->flows[index], &replica_ptr->cntx,
                                      EngineShard::tlocal());
     };
@@ -283,7 +283,7 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
     TransactionGuard tg{cntx->transaction};
     AggregateStatus status;
 
-    auto cb = [this, &status, replica_ptr](unsigned index, auto*) {
+    auto cb = [this, &status, replica_ptr = replica_ptr](unsigned index, auto*) {
       EngineShard* shard = EngineShard::tlocal();
       FlowInfo* flow = &replica_ptr->flows[index];
 
@@ -325,7 +325,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
   // Shard can be null for io thread.
   if (shard != nullptr) {
     CHECK(!sf_->journal()->OpenInThread(false, ""sv));  // can only happen in persistent mode.
-    flow->saver->StartSnapshotInShard(true, cntx, shard);
+    flow->saver->StartSnapshotInShard(true, *cntx, shard);
   }
 
   flow->full_sync_fb = ::boost::fibers::fiber(&DflyCmd::FullSyncFb, this, flow, cntx);
@@ -383,7 +383,7 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
     return cntx->Error(ec);
   }
 
-  if (ec = saver->SaveBody(cntx, nullptr); ec) {
+  if (ec = saver->SaveBody(*cntx, nullptr); ec) {
     return cntx->Error(ec);
   }
 
@@ -405,8 +405,6 @@ uint32_t DflyCmd::CreateSyncSession() {
     // StopReplication needs to run async to prevent blocking
     // the error handler.
     ::boost::fibers::fiber{&DflyCmd::StopReplication, this, sync_id}.detach();
-
-    return true;  // Cancel context
   };
 
   auto replica_ptr = make_shared<ReplicaInfo>(flow_count, std::move(err_handler));
@@ -532,7 +530,21 @@ bool DflyCmd::CheckReplicaStateOrReply(const ReplicaInfo& sync_info, SyncState e
 }
 
 void DflyCmd::BreakOnShutdown() {
-  VLOG(1) << "BreakOnShutdown";
+}
+
+void DflyCmd::Shutdown() {
+  vector<pair<uint32_t, shared_ptr<ReplicaInfo>>> pending;
+
+  // Copy all sync infos to prevent blocking.
+  {
+    std::lock_guard lk(mu_);
+    pending.resize(replica_infos_.size());
+    std::copy(replica_infos_.begin(), replica_infos_.end(), pending.begin());
+  }
+
+  for (auto [sync_id, replica_ptr] : pending) {
+    CancelReplication(sync_id, replica_ptr);
+  }
 }
 
 void DflyCmd::FlowInfo::TryShutdownSocket() {

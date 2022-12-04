@@ -118,8 +118,10 @@ class DflyCmd {
 
   void OnClose(ConnectionContext* cntx);
 
-  // Stop all background processes so we can exit in orderly manner.
   void BreakOnShutdown();
+
+  // Stop all background processes so we can exit in orderly manner.
+  void Shutdown();
 
   // Create new sync session.
   uint32_t CreateSyncSession();

@@ -420,6 +420,8 @@ void ServerFamily::Shutdown() {
     if (replica_) {
       replica_->Stop();
     }
+
+    dfly_cmd_->Shutdown();
   });
 }
 

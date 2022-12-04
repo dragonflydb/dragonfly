@@ -9,6 +9,8 @@
 #include <absl/strings/str_cat.h>
 #include <mimalloc.h>
 
+#include <system_error>
+
 extern "C" {
 #include "redis/object.h"
 #include "redis/rdb.h"
@@ -248,6 +250,40 @@ std::string GenericError::Format() const {
     return ec_.message();
   else
     return absl::StrCat(ec_.message(), ":", details_);
+}
+
+Context::operator dfly::GenericError() {
+  std::lock_guard lk(mu_);
+  return err_;
+}
+
+Context::operator std::error_code() {
+  std::lock_guard lk(mu_);
+  return err_.GetError();
+}
+
+Context::operator const dfly::Cancellation*() {
+  return this;
+}
+
+void Context::Cancel() {
+  Error(std::make_error_code(errc::operation_canceled), "Context cancelled");
+}
+
+void Context::Reset(ErrHandler handler) {
+  std::lock_guard lk{mu_};
+  err_ = {};
+  err_handler_ = std::move(handler);
+  Cancellation::flag_.store(false, std::memory_order_relaxed);
+}
+
+bool Context::Switch(ErrHandler handler) {
+  std::lock_guard lk{mu_};
+  if (Cancellation::IsCancelled())
+    return true;
+
+  err_handler_ = std::move(handler);
+  return false;
 }
 
 }  // namespace dfly
