@@ -22,6 +22,14 @@ add_third_party(
   LIB "none"
 )
 
+add_third_party(
+  lz4
+  URL https://github.com/lz4/lz4/archive/refs/tags/v1.9.4.tar.gz
+
+  SOURCE_SUBDIR build/cmake
+  CMAKE_PASS_FLAGS "-DBUILD_SHARED_LIBS=OFF"
+)
+
 add_library(TRDP::jsoncons INTERFACE IMPORTED)
 add_dependencies(TRDP::jsoncons jsoncons_project)
 set_target_properties(TRDP::jsoncons PROPERTIES
