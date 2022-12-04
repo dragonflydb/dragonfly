@@ -158,8 +158,6 @@ class EngineShard {
     uint64_t cursor = 0u;
     DefragStats stats;
 
-    void Init();
-
     // check the current threshold and return true if
     // we need to do the de-fermentation
     bool IsRequired();
