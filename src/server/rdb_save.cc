@@ -1084,17 +1084,17 @@ ZstdCompressSerializer::ZstdCompressSerializer() {
   impl_.reset(new ZstdCompressImpl());
 }
 
-std::pair<bool, std::string> ZstdCompressSerializer::Compress(std::string_view str) {
+optional<string> ZstdCompressSerializer::Compress(std::string_view str) {
   if (str.size() < kMinStrSizeToCompress) {
     ++small_str_count_;
-    return std::make_pair(false, "");
+    return nullopt;
   }
 
   // Compress the string
   string_view compressed_res = impl_->Compress(str);
   if (compressed_res.size() > str.size() * kMinCompressionReductionPrecentage) {
     ++compression_no_effective_;
-    return std::make_pair(false, "");
+    return nullopt;
   }
 
   string serialized_compressed_blob;
@@ -1107,7 +1107,7 @@ std::pair<bool, std::string> ZstdCompressSerializer::Compress(std::string_view s
   // Write encoded compressed string len and than the compressed string
   serialized_compressed_blob.append(reinterpret_cast<const char*>(buf), enclen);
   serialized_compressed_blob.append(compressed_res);
-  return std::make_pair(true, std::move(serialized_compressed_blob));
+  return serialized_compressed_blob;
 }
 
 ZstdCompressSerializer::~ZstdCompressSerializer() {

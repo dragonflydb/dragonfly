@@ -10,6 +10,8 @@ extern "C" {
 #include "redis/object.h"
 }
 
+#include <optional>
+
 #include "base/io_buf.h"
 #include "base/pod_array.h"
 #include "io/io.h"
@@ -105,8 +107,8 @@ class RdbSaver {
   std::error_code SaveAux(const StringVec& lua_scripts);
   std::error_code SaveAuxFieldStrInt(std::string_view key, int64_t val);
 
-  SaveMode save_mode_;
   std::unique_ptr<Impl> impl_;
+  SaveMode save_mode_;
   CompressionMode compression_mode_;
 };
 
@@ -118,10 +120,8 @@ class ZstdCompressSerializer {
 
   ~ZstdCompressSerializer();
 
-  // Returns a pair consisting of an bool denoting whether the string was compressed
-  // and a string the result of compression. If given string was not compressed returned
-  // string will be empty.
-  std::pair<bool, string> Compress(std::string_view str);
+  // Returns string if compression was applied, null otherwise
+  std::optional<string> Compress(std::string_view str);
 
  private:
   class ZstdCompressImpl;
