@@ -103,10 +103,13 @@ void DebugCmd::Run(CmdArgList args) {
         "REPLICA PAUSE/RESUME",
         "    Stops replica from reconnecting to master, or resumes",
         "WATCHED",
-        "    Shows the watched keys as a result of BLPOP and similar operations."
-        "POPULATE <count> [<prefix>] [<size>]",
-        "    Create <count> string keys named key:<num>. If <prefix> is specified then",
-        "    it is used instead of the 'key' prefix.",
+        "    Shows the watched keys as a result of BLPOP and similar operations.",
+        "POPULATE <count> [<prefix>] [<size>] [RAND]",
+        "    Create <count> string keys named key:<num> with value value:<num>.",
+        "    If <prefix> is specified then it is used instead of the 'key' prefix.",
+        "    If <size> is specified then X character is concatenated multiple times to value:<num>",
+        "    to meet value size.",
+        "    If RAND is specified than value will be set to random hex string in specified size.",
         "HELP",
         "    Prints this help.",
     };
