@@ -1709,7 +1709,11 @@ error_code RdbLoader::Load(io::Source* src) {
 }
 
 std::error_code RdbLoaderBase::EnsureRead(size_t min_sz) {
-  // In the flow of compressed data, all the data is already in the memory buffer.
+  // In the flow of reading compressed data, we store the uncompressed data to in uncompressed
+  // buffer. When parsing entries we call ensure read with 9 bytes to read the length of key/value.
+  // If the key/value is very small (less than 9 bytes) the remainded data in uncompressed buffer
+  // might contain less than 9 bytes. We need to make sure that we dont read from sink to the
+  // uncompressed buffer and therefor in this flow we return here.
   if (mem_buf_ != &origin_mem_buf_)
     return std::error_code{};
   if (mem_buf_->InputLen() >= min_sz)
