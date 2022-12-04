@@ -38,12 +38,14 @@ ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 ABSL_DECLARE_FLAG(bool, use_set2);
 
-#define SET_OR_RETURN(expr, dest) \
-  do {                            \
-    auto exp_val = (expr);        \
-    if (!exp_val)                 \
-      return exp_val.error();     \
-    dest = exp_val.value();       \
+#define SET_OR_RETURN(expr, dest)              \
+  do {                                         \
+    auto exp_val = (expr);                     \
+    if (!exp_val) {                            \
+      VLOG(1) << "Error while calling " #expr; \
+      return exp_val.error();                  \
+    }                                          \
+    dest = exp_val.value();                    \
   } while (0)
 
 #define SET_OR_UNEXPECT(expr, dest)            \
@@ -230,6 +232,7 @@ io::Result<base::IoBuf*> ZstdDecompressImpl::Decompress(std::string_view str) {
     LOG(ERROR) << "Invalid ZSTD compressed string";
     return Unexpected(errc::invalid_encoding);
   }
+
   uncompressed_mem_buf_.Reserve(uncomp_size + 1);
 
   // Uncompress string to membuf
@@ -1705,6 +1708,19 @@ error_code RdbLoader::Load(io::Source* src) {
   return kOk;
 }
 
+std::error_code RdbLoaderBase::EnsureRead(size_t min_sz) {
+  // In the flow of reading compressed data, we store the uncompressed data to in uncompressed
+  // buffer. When parsing entries we call ensure read with 9 bytes to read the length of key/value.
+  // If the key/value is very small (less than 9 bytes) the remainded data in uncompressed buffer
+  // might contain less than 9 bytes. We need to make sure that we dont read from sink to the
+  // uncompressed buffer and therefor in this flow we return here.
+  if (mem_buf_ != &origin_mem_buf_)
+    return std::error_code{};
+  if (mem_buf_->InputLen() >= min_sz)
+    return std::error_code{};
+  return EnsureReadInternal(min_sz);
+}
+
 error_code RdbLoaderBase::EnsureReadInternal(size_t min_sz) {
   DCHECK_LT(mem_buf_->InputLen(), min_sz);
 
@@ -1792,7 +1808,8 @@ error_code RdbLoaderBase::HandleCompressedBlob() {
 }
 
 error_code RdbLoaderBase::HandleCompressedBlobFinish() {
-  // TODO validate that all uncompressed data was fetched
+  CHECK_NE(&origin_mem_buf_, mem_buf_);
+  CHECK_EQ(mem_buf_->InputLen(), size_t(0));
   mem_buf_ = &origin_mem_buf_;
   return kOk;
 }
