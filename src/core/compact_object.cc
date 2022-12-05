@@ -218,7 +218,7 @@ struct TL {
 
 thread_local TL tl;
 
-constexpr bool kUseSmallStrings = false;
+constexpr bool kUseSmallStrings = true;
 
 /// TODO: Ascii encoding becomes slow for large blobs. We should factor it out into a separate
 /// file and implement with SIMD instructions.
@@ -877,8 +877,7 @@ bool CompactObj::DefragIfNeeded(float ratio) {
       }
       return false;
     case SMALL_TAG:
-      // TODO - support this later
-      return false;
+      return u_.small_str.DefragIfNeeded(ratio);
     case INT_TAG:
       // this is not relevant in this case
       return false;
