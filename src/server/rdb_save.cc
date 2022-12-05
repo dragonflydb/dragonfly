@@ -831,7 +831,7 @@ class RdbSaver::Impl {
 RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, CompressionMode compression_mode,
                      io::Sink* sink)
     : sink_(sink), shard_snapshots_(producers_len),
-      meta_serializer_(CompressionMode::NONE),  // TODO: I think there is not need for compression
+      meta_serializer_(CompressionMode::NONE),  // Note: I think there is not need for compression
                                                 // at all in meta serializer
       channel_{128, producers_len}, compression_mode_(compression_mode) {
   if (align_writes) {
