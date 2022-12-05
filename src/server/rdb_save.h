@@ -170,7 +170,7 @@ class RdbSerializer {
   base::PODArray<uint8_t> tmp_buf_;
   std::string tmp_str_;
   CompressionMode compression_mode_;
-  // TODO : This compressor can use different compression algorithms zstd/lz4 etc.
+  // TODO : This compressor impl should support different compression algorithms zstd/lz4 etc.
   std::unique_ptr<ZstdCompressImpl> compressor_impl_;
 
   static constexpr size_t kMinStrSizeToCompress = 256;
