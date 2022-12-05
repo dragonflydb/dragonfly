@@ -253,7 +253,7 @@ void SliceSnapshot::PushFileToChannel(DbIndex db_index, bool should_compress,
 }
 
 bool SliceSnapshot::FlushDefaultBuffer(bool force) {
-  if (!force && default_buffer_->val.size() < 4096)
+  if (!force && default_serializer_->SerializedLen() < 4096)
     return false;
 
   CHECK(!default_serializer_->FlushToSink(default_buffer_.get()));

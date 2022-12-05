@@ -144,6 +144,8 @@ class SliceSnapshot {
   std::atomic_bool closed_chan_{false};  // true if dest_->StartClosing was already called
 
   DbIndex current_db_;
+
+  // TODO : drop default_buffer from this class, we dont realy need it.
   std::unique_ptr<io::StringFile> default_buffer_;  // filled by default_serializer_
   std::unique_ptr<RdbSerializer> default_serializer_;
   std::unique_ptr<ZstdCompressSerializer> zstd_serializer_;
