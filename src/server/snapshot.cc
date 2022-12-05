@@ -244,7 +244,7 @@ void SliceSnapshot::PushFileToChannel(DbIndex db_index, bool should_compress,
       zstd_serializer_.reset(new ZstdCompressSerializer());
     }
 
-    if (auto comp = zstd_serializer_->Compress(payload)) {
+    if (auto comp = zstd_serializer_->Compress(payload); comp) {
       payload = std::move(*comp);
     }
   }
