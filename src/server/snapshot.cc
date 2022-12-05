@@ -202,10 +202,10 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
   optional<RdbSerializer> tmp_serializer;
   RdbSerializer* serializer_ptr = default_serializer_.get();
   if (db_index != current_db_) {
-    CompressionMode tmp_serializer_compression_mode = compression_mode_ == CompressionMode::NONE
-                                                          ? CompressionMode::NONE
-                                                          : CompressionMode::SINGLE_ENTRY;
-    tmp_serializer.emplace(tmp_serializer_compression_mode);
+    CompressionMode compression_mode = compression_mode_ == CompressionMode::NONE
+                                           ? CompressionMode::NONE
+                                           : CompressionMode::SINGLE_ENTRY;
+    tmp_serializer.emplace(compression_mode);
     serializer_ptr = &*tmp_serializer;
   }
 
@@ -278,10 +278,10 @@ void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
   optional<RdbSerializer> tmp_serializer;
   RdbSerializer* serializer_ptr = default_serializer_.get();
   if (entry.db_ind != current_db_) {
-    CompressionMode tmp_serializer_compression_mode = compression_mode_ == CompressionMode::NONE
-                                                          ? CompressionMode::NONE
-                                                          : CompressionMode::SINGLE_ENTRY;
-    tmp_serializer.emplace(tmp_serializer_compression_mode);
+    CompressionMode compression_mode = compression_mode_ == CompressionMode::NONE
+                                           ? CompressionMode::NONE
+                                           : CompressionMode::SINGLE_ENTRY;
+    tmp_serializer.emplace(compression_mode);
     serializer_ptr = &*tmp_serializer;
   }
 

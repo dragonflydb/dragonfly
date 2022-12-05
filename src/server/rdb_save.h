@@ -178,7 +178,8 @@ class RdbSerializer {
   struct CompressionStats {
     uint32_t compression_no_effective = 0;
     uint32_t small_str_count = 0;
-  } compression_stats_;
+  };
+  std::optional<CompressionStats> compression_stats_;
 };
 
 }  // namespace dfly

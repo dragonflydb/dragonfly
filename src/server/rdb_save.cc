@@ -208,8 +208,10 @@ RdbSerializer::RdbSerializer(CompressionMode compression_mode)
 
 RdbSerializer::~RdbSerializer() {
   VLOG(1) << "compression mode: " << uint32_t(compression_mode_);
-  VLOG(1) << "compression not effective: " << compression_stats_.compression_no_effective;
-  VLOG(1) << "small string none compression applied: " << compression_stats_.small_str_count;
+  if (compression_stats_) {
+    VLOG(1) << "compression not effective: " << compression_stats_->compression_no_effective;
+    VLOG(1) << "small string none compression applied: " << compression_stats_->small_str_count;
+  }
 }
 
 std::error_code RdbSerializer::SaveValue(const PrimeValue& pv) {
@@ -1091,10 +1093,13 @@ void RdbSaver::Cancel() {
 }
 
 void RdbSerializer::CompressBlob() {
+  if (!compression_stats_) {
+    compression_stats_.emplace();
+  }
   Bytes blob_to_compress = mem_buf_.InputBuffer();
   size_t blob_size = blob_to_compress.size();
   if (blob_size < kMinStrSizeToCompress) {
-    ++compression_stats_.small_str_count;
+    ++compression_stats_->small_str_count;
     return;
   }
 
@@ -1105,12 +1110,13 @@ void RdbSerializer::CompressBlob() {
 
   Bytes compressed_blob = compressor_impl_->Compress(blob_to_compress);
   if (compressed_blob.length() > blob_size * kMinCompressionReductionPrecentage) {
-    ++compression_stats_.compression_no_effective;
+    ++compression_stats_->compression_no_effective;
     return;
   }
 
   // Clear membuf and write the compressed blob to it
   mem_buf_.ConsumeInput(blob_size);
+  mem_buf_.Reserve(compressed_blob.length() + 1 + 9);  // reserve space for blob + opcode + len
 
   // First write opcode for compressed string
   auto dest = mem_buf_.AppendBuffer();
