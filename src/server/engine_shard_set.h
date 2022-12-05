@@ -37,13 +37,10 @@ class EngineShard {
   struct Stats {
     uint64_t ooo_runs = 0;    // how many times transactions run as OOO.
     uint64_t quick_runs = 0;  //  how many times single shard "RunQuickie" transaction run.
+    uint64_t defrag_attempt_total = 0;
+    uint64_t defrag_realloc_total = 0;
 
     Stats& operator+=(const Stats&);
-  };
-
-  struct DefragStats {
-    uint64_t success_count = 0;  // how many objects were moved
-    uint64_t tries = 0;          // how many times we tried
   };
 
   // EngineShard() is private down below.
@@ -146,17 +143,12 @@ class EngineShard {
     journal_ = j;
   }
 
-  const DefragStats& GetDefragStats() const {
-    return defrag_state_.stats;
-  }
-
   void TEST_EnableHeartbeat();
 
  private:
   struct DefragTaskState {
     // we will add more data members later
     uint64_t cursor = 0u;
-    DefragStats stats;
 
     // check the current threshold and return true if
     // we need to do the de-fermentation

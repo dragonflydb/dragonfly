@@ -792,9 +792,9 @@ TEST_F(DefragDflyEngineTest, TestDefragOption) {
     EngineShard* shard = EngineShard::tlocal();
     ASSERT_FALSE(shard == nullptr);  // we only have one and its should not be empty!
     this_fiber::sleep_for(100ms);
-    EXPECT_EQ(shard->GetDefragStats().success_count, 0);
+    EXPECT_EQ(shard->stats().defrag_realloc_total, 0);
     // we are expecting to have at least one try by now
-    EXPECT_GT(shard->GetDefragStats().tries, 0);
+    EXPECT_GT(shard->stats().defrag_attempt_total, 0);
   });
 
   ArgSlice delete_cmd(keys);
@@ -808,16 +808,16 @@ TEST_F(DefragDflyEngineTest, TestDefragOption) {
     ASSERT_FALSE(shard == nullptr);  // we only have one and its should not be empty!
     // a "busy wait" to ensure that memory defragmentations was successful:
     // the task ran and did it work
-    auto stats = shard->GetDefragStats();
+    auto stats = shard->stats();
     for (int i = 0; i < kMaxDefragTriesForTests; i++) {
-      stats = shard->GetDefragStats();
-      if (stats.success_count > 0) {
+      stats = shard->stats();
+      if (stats.defrag_realloc_total > 0) {
         break;
       }
       this_fiber::sleep_for(220ms);
     }
     // make sure that we successfully found places to defrag in memory
-    EXPECT_GT(stats.success_count, 0);
+    EXPECT_GT(stats.defrag_realloc_total, 0);
   });
 }
 

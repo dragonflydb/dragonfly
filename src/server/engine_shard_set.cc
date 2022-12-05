@@ -67,6 +67,8 @@ uint64_t TEST_current_time_ms = 0;
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
   ooo_runs += o.ooo_runs;
   quick_runs += o.quick_runs;
+  defrag_attempt_total += o.defrag_attempt_total;
+  defrag_realloc_total += o.defrag_realloc_total;
 
   return *this;
 }
@@ -115,7 +117,7 @@ bool EngineShard::DoDefrag() {
   DCHECK(slice.IsDbValid(kDefaultDbIndex));
   auto [prime_table, expire_table] = slice.GetTables(kDefaultDbIndex);
   PrimeTable::Cursor cur = defrag_state_.cursor;
-  uint64_t defrag_count = 0;
+  uint64_t reallocations = 0;
   unsigned traverses_count = 0;
 
   do {
@@ -124,15 +126,15 @@ bool EngineShard::DoDefrag() {
       // seats on underutilized page of memory, and if so, do it.
       bool did = it->second.DefragIfNeeded(threshold);
       if (did) {
-        defrag_count++;
+        reallocations++;
       }
     });
     traverses_count++;
   } while (traverses_count < kMaxTraverses && cur);
 
   defrag_state_.cursor = cur.value();
-  if (defrag_count > 0) {
-    VLOG(1) << "shard " << slice.shard_id() << ": successfully defrag  " << defrag_count
+  if (reallocations > 0) {
+    VLOG(1) << "shard " << slice.shard_id() << ": successfully defrag  " << reallocations
             << " times, did it in " << traverses_count << " cursor is at the "
             << (defrag_state_.cursor == 0 ? "end" : "in progress");
   } else {
@@ -141,8 +143,8 @@ bool EngineShard::DoDefrag() {
             << (defrag_state_.cursor == 0 ? "end" : "in progress")
             << " but no location for defrag were found";
   }
-  defrag_state_.stats.success_count += defrag_count;
-  defrag_state_.stats.tries++;
+  stats_.defrag_realloc_total += reallocations;
+  stats_.defrag_attempt_total++;
   return defrag_state_.cursor > kCursorDoneState;
 }
 
