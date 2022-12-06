@@ -223,7 +223,7 @@ class ZstdDecompressImpl {
 
 io::Result<base::IoBuf*> ZstdDecompressImpl::Decompress(std::string_view str) {
   // Prepare membuf memory to uncompressed string.
-  unsigned long long const uncomp_size = ZSTD_getFrameContentSize(str.data(), str.size());
+  auto uncomp_size = ZSTD_getFrameContentSize(str.data(), str.size());
   if (uncomp_size == ZSTD_CONTENTSIZE_UNKNOWN) {
     LOG(ERROR) << "Zstd compression missing frame content size";
     return Unexpected(errc::invalid_encoding);
@@ -1666,10 +1666,15 @@ error_code RdbLoader::Load(io::Source* src) {
       return RdbError(errc::feature_not_supported);
     }
 
-    if (type == RDB_OPCODE_COMPRESSED_BLOB_START) {
+    if (type == RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START) {
       RETURN_ON_ERR(HandleCompressedBlob());
       continue;
     }
+    if (type == RDB_OPCODE_COMPRESSED_LZ4_BLOB_START) {
+      LOG(ERROR) << "LZ4 not supported yet";
+      return RdbError(errc::feature_not_supported);
+    }
+
     if (type == RDB_OPCODE_COMPRESSED_BLOB_END) {
       RETURN_ON_ERR(HandleCompressedBlobFinish());
       continue;

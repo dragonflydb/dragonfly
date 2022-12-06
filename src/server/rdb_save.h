@@ -61,11 +61,7 @@ enum class SaveMode {
   RDB,           // Save .rdb file. Expected to read all shards.
 };
 
-enum class CompressionMode {
-  NONE,
-  SINGLE_ENTRY,
-  MULTY_ENTRY,
-};
+enum class CompressionMode { NONE, SINGLE_ENTRY, MULTY_ENTRY_ZSTD, MULTY_ENTRY_LZ4 };
 
 class RdbSaver {
  public:
@@ -112,7 +108,7 @@ class RdbSaver {
   CompressionMode compression_mode_;
 };
 
-class ZstdCompressor;
+class CompressorImpl;
 
 class RdbSerializer {
  public:
@@ -171,7 +167,7 @@ class RdbSerializer {
   std::string tmp_str_;
   CompressionMode compression_mode_;
   // TODO : This compressor impl should support different compression algorithms zstd/lz4 etc.
-  std::unique_ptr<ZstdCompressor> compressor_impl_;
+  std::unique_ptr<CompressorImpl> compressor_impl_;
 
   static constexpr size_t kMinStrSizeToCompress = 256;
   static constexpr double kMinCompressionReductionPrecentage = 0.95;
