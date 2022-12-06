@@ -51,9 +51,8 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
     journal_cb_id_ = journal->RegisterOnChange(move(journal_cb));
   }
 
-  bool do_compression = (compression_mode_ == CompressionMode::SINGLE_ENTRY);
   default_buffer_.reset(new io::StringFile);
-  default_serializer_.reset(new RdbSerializer(do_compression));
+  default_serializer_.reset(new RdbSerializer(compression_mode_));
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
@@ -203,7 +202,10 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
   optional<RdbSerializer> tmp_serializer;
   RdbSerializer* serializer_ptr = default_serializer_.get();
   if (db_index != current_db_) {
-    tmp_serializer.emplace(compression_mode_ != CompressionMode::NONE);
+    CompressionMode compression_mode = compression_mode_ == CompressionMode::NONE
+                                           ? CompressionMode::NONE
+                                           : CompressionMode::SINGLE_ENTRY;
+    tmp_serializer.emplace(compression_mode);
     serializer_ptr = &*tmp_serializer;
   }
 
@@ -235,21 +237,8 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
   ++type_freq_map_[*res];
 }
 
-void SliceSnapshot::PushFileToChannel(DbIndex db_index, bool should_compress,
-                                      io::StringFile* sfile) {
-  string payload = std::move(sfile->val);
-
-  if (should_compress) {
-    if (!zstd_serializer_) {
-      zstd_serializer_.reset(new ZstdCompressSerializer());
-    }
-
-    if (auto comp = zstd_serializer_->Compress(payload); comp) {
-      payload = std::move(*comp);
-    }
-  }
-
-  dest_->Push(GetDbRecord(db_index, std::move(payload)));
+void SliceSnapshot::PushFileToChannel(DbIndex db_index, io::StringFile* sfile) {
+  dest_->Push(GetDbRecord(db_index, std::move(sfile->val)));
 }
 
 bool SliceSnapshot::FlushDefaultBuffer(bool force) {
@@ -263,8 +252,7 @@ bool SliceSnapshot::FlushDefaultBuffer(bool force) {
 
   VLOG(2) << "FlushDefaultBuffer " << default_buffer_->val.size() << " bytes";
 
-  bool multi_entries_compression = (compression_mode_ == CompressionMode::MULTY_ENTRY);
-  PushFileToChannel(current_db_, multi_entries_compression, default_buffer_.get());
+  PushFileToChannel(current_db_, default_buffer_.get());
   return true;
 }
 
@@ -290,7 +278,10 @@ void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
   optional<RdbSerializer> tmp_serializer;
   RdbSerializer* serializer_ptr = default_serializer_.get();
   if (entry.db_ind != current_db_) {
-    tmp_serializer.emplace(compression_mode_ != CompressionMode::NONE);
+    CompressionMode compression_mode = compression_mode_ == CompressionMode::NONE
+                                           ? CompressionMode::NONE
+                                           : CompressionMode::SINGLE_ENTRY;
+    tmp_serializer.emplace(compression_mode);
     serializer_ptr = &*tmp_serializer;
   }
 
@@ -327,6 +318,6 @@ void SliceSnapshot::FlushTmpSerializer(DbIndex db_index, RdbSerializer* serializ
   io::StringFile sfile{};
   error_code ec = serializer->FlushToSink(&sfile);
   CHECK(!ec && !sfile.val.empty());
-  PushFileToChannel(db_index, false, &sfile);
+  PushFileToChannel(db_index, &sfile);
 }
 }  // namespace dfly

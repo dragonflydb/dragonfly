@@ -21,7 +21,6 @@ struct Entry;
 }  // namespace journal
 
 class RdbSerializer;
-class ZstdCompressSerializer;
 
 //┌────────────────┐   ┌─────────────┐
 //│IterateBucketsFb│   │  OnDbChange │
@@ -97,7 +96,7 @@ class SliceSnapshot {
                       std::optional<uint64_t> expire, RdbSerializer* serializer);
 
   // Push StringFile buffer to channel.
-  void PushFileToChannel(DbIndex db_index, bool should_compress, io::StringFile* sfile);
+  void PushFileToChannel(DbIndex db_index, io::StringFile* sfile);
 
   // DbChange listener
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
@@ -148,7 +147,6 @@ class SliceSnapshot {
   // TODO : drop default_buffer from this class, we dont realy need it.
   std::unique_ptr<io::StringFile> default_buffer_;  // filled by default_serializer_
   std::unique_ptr<RdbSerializer> default_serializer_;
-  std::unique_ptr<ZstdCompressSerializer> zstd_serializer_;
 
   ::boost::fibers::mutex mu_;
   ::boost::fibers::fiber snapshot_fb_;  // IterateEntriesFb

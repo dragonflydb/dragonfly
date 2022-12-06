@@ -166,11 +166,52 @@ uint8_t RdbObjectType(unsigned type, unsigned encoding) {
   return 0; /* avoid warning */
 }
 
-RdbSerializer::RdbSerializer(bool do_compression)
-    : mem_buf_{4_KB}, tmp_buf_(nullptr), do_entry_level_compression_(do_compression) {
+class ZstdCompressImpl {
+ public:
+  ZstdCompressImpl() {
+    cctx_ = ZSTD_createCCtx();
+    compression_level_ = absl::GetFlag(FLAGS_zstd_compression_level);
+  }
+  ~ZstdCompressImpl() {
+    ZSTD_freeCCtx(cctx_);
+
+    VLOG(1) << "zstd compressed size: " << compressed_size_total_;
+    VLOG(1) << "zstd uncompressed size: " << uncompressed_size_total_;
+  }
+
+  io::Bytes Compress(io::Bytes str);
+
+ private:
+  ZSTD_CCtx* cctx_;
+  int compression_level_ = 1;
+  size_t compressed_size_total_ = 0;
+  size_t uncompressed_size_total_ = 0;
+  base::PODArray<uint8_t> compr_buf_;
+};
+
+io::Bytes ZstdCompressImpl::Compress(io::Bytes str) {
+  size_t buf_size = ZSTD_compressBound(str.size());
+  if (compr_buf_.capacity() < buf_size) {
+    compr_buf_.reserve(buf_size);
+  }
+  size_t compressed_size = ZSTD_compressCCtx(cctx_, compr_buf_.data(), compr_buf_.capacity(),
+                                             str.data(), str.size(), compression_level_);
+
+  compressed_size_total_ += compressed_size;
+  uncompressed_size_total_ += str.size();
+  return io::Bytes(compr_buf_.data(), compressed_size);
+}
+
+RdbSerializer::RdbSerializer(CompressionMode compression_mode)
+    : mem_buf_{4_KB}, tmp_buf_(nullptr), compression_mode_(compression_mode) {
 }
 
 RdbSerializer::~RdbSerializer() {
+  VLOG(1) << "compression mode: " << uint32_t(compression_mode_);
+  if (compression_stats_) {
+    VLOG(1) << "compression not effective: " << compression_stats_->compression_no_effective;
+    VLOG(1) << "small string none compression applied: " << compression_stats_->small_str_count;
+  }
 }
 
 std::error_code RdbSerializer::SaveValue(const PrimeValue& pv) {
@@ -611,6 +652,12 @@ error_code RdbSerializer::FlushToSink(io::Sink* s) {
 
   DVLOG(2) << "FlushToSink " << sz << " bytes";
 
+  if (compression_mode_ == CompressionMode::MULTY_ENTRY) {
+    CompressBlob();
+    // After blob was compressed membuf was overwirten with compressed data
+    sz = mem_buf_.InputLen();
+  }
+
   // interrupt point.
   RETURN_ON_ERR(s->Write(mem_buf_.InputBuffer()));
   mem_buf_.ConsumeInput(sz);
@@ -636,7 +683,7 @@ error_code RdbSerializer::SaveString(string_view val) {
   /* Try LZF compression - under 20 bytes it's unable to compress even
    * aaaaaaaaaaaaaaaaaa so skip it */
   size_t len = val.size();
-  if (do_entry_level_compression_ && len > 20) {
+  if ((compression_mode_ == CompressionMode::SINGLE_ENTRY) && (len > 20)) {
     size_t comprlen, outlen = len;
     tmp_buf_.resize(outlen + 1);
 
@@ -786,8 +833,9 @@ class RdbSaver::Impl {
 RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, CompressionMode compression_mode,
                      io::Sink* sink)
     : sink_(sink), shard_snapshots_(producers_len),
-      meta_serializer_(compression_mode != CompressionMode::NONE), channel_{128, producers_len},
-      compression_mode_(compression_mode) {
+      meta_serializer_(CompressionMode::NONE),  // Note: I think there is not need for compression
+                                                // at all in meta serializer
+      channel_{128, producers_len}, compression_mode_(compression_mode) {
   if (align_writes) {
     aligned_buf_.emplace(kBufLen, sink);
     sink_ = &aligned_buf_.value();
@@ -1044,75 +1092,46 @@ void RdbSaver::Cancel() {
   impl_->Cancel();
 }
 
-class ZstdCompressSerializer::ZstdCompressImpl {
- public:
-  ZstdCompressImpl() {
-    cctx_ = ZSTD_createCCtx();
-    compression_level_ = absl::GetFlag(FLAGS_zstd_compression_level);
+void RdbSerializer::CompressBlob() {
+  if (!compression_stats_) {
+    compression_stats_.emplace();
   }
-  ~ZstdCompressImpl() {
-    ZSTD_freeCCtx(cctx_);
-
-    VLOG(1) << "zstd compressed size: " << compressed_size_total_;
-    VLOG(1) << "zstd uncompressed size: " << uncompressed_size_total_;
+  Bytes blob_to_compress = mem_buf_.InputBuffer();
+  size_t blob_size = blob_to_compress.size();
+  if (blob_size < kMinStrSizeToCompress) {
+    ++compression_stats_->small_str_count;
+    return;
   }
 
-  std::string_view Compress(std::string_view str);
-
- private:
-  ZSTD_CCtx* cctx_;
-  int compression_level_ = 1;
-  base::PODArray<uint8_t> compr_buf_;
-  uint32_t compressed_size_total_ = 0;
-  uint32_t uncompressed_size_total_ = 0;
-};
-
-std::string_view ZstdCompressSerializer::ZstdCompressImpl::Compress(string_view str) {
-  size_t buf_size = ZSTD_compressBound(str.size());
-  if (compr_buf_.size() < buf_size) {
-    compr_buf_.reserve(buf_size);
-  }
-  size_t compressed_size = ZSTD_compressCCtx(cctx_, compr_buf_.data(), compr_buf_.capacity(),
-                                             str.data(), str.size(), compression_level_);
-
-  compressed_size_total_ += compressed_size;
-  uncompressed_size_total_ += str.size();
-  return string_view(reinterpret_cast<const char*>(compr_buf_.data()), compressed_size);
-}
-
-ZstdCompressSerializer::ZstdCompressSerializer() {
-  impl_.reset(new ZstdCompressImpl());
-}
-
-optional<string> ZstdCompressSerializer::Compress(std::string_view str) {
-  if (str.size() < kMinStrSizeToCompress) {
-    ++small_str_count_;
-    return nullopt;
+  // Compress the data
+  if (!compressor_impl_) {
+    compressor_impl_.reset(new ZstdCompressImpl());
   }
 
-  // Compress the string
-  string_view compressed_res = impl_->Compress(str);
-  if (compressed_res.size() > str.size() * kMinCompressionReductionPrecentage) {
-    ++compression_no_effective_;
-    return nullopt;
+  Bytes compressed_blob = compressor_impl_->Compress(blob_to_compress);
+  if (compressed_blob.length() > blob_size * kMinCompressionReductionPrecentage) {
+    ++compression_stats_->compression_no_effective;
+    return;
   }
 
-  string serialized_compressed_blob;
+  // Clear membuf and write the compressed blob to it
+  mem_buf_.ConsumeInput(blob_size);
+  mem_buf_.Reserve(compressed_blob.length() + 1 + 9);  // reserve space for blob + opcode + len
+
   // First write opcode for compressed string
-  serialized_compressed_blob.push_back(RDB_OPCODE_COMPRESSED_BLOB_START);
-  // Get compressed string len encoded
-  uint8_t buf[9];
-  unsigned enclen = SerializeLen(compressed_res.size(), buf);
+  auto dest = mem_buf_.AppendBuffer();
+  dest[0] = RDB_OPCODE_COMPRESSED_BLOB_START;
+  mem_buf_.CommitWrite(1);
 
-  // Write encoded compressed string len and than the compressed string
-  serialized_compressed_blob.append(reinterpret_cast<const char*>(buf), enclen);
-  serialized_compressed_blob.append(compressed_res);
-  return serialized_compressed_blob;
-}
+  // Write encoded compressed blob len
+  dest = mem_buf_.AppendBuffer();
+  unsigned enclen = SerializeLen(compressed_blob.length(), dest.data());
+  mem_buf_.CommitWrite(enclen);
 
-ZstdCompressSerializer::~ZstdCompressSerializer() {
-  VLOG(1) << "zstd compression not effective: " << compression_no_effective_;
-  VLOG(1) << "small string none compression applied: " << small_str_count_;
+  // Write compressed blob
+  dest = mem_buf_.AppendBuffer();
+  memcpy(dest.data(), compressed_blob.data(), compressed_blob.length());
+  mem_buf_.CommitWrite(compressed_blob.length());
 }
 
 }  // namespace dfly
