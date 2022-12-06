@@ -7,6 +7,7 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
+#include <lz4frame.h>
 #include <zstd.h>
 
 #include "core/string_set.h"
@@ -166,20 +167,20 @@ uint8_t RdbObjectType(unsigned type, unsigned encoding) {
   return 0; /* avoid warning */
 }
 
-class ZstdCompressImpl {
+class ZstdCompressor {
  public:
-  ZstdCompressImpl() {
+  ZstdCompressor() {
     cctx_ = ZSTD_createCCtx();
     compression_level_ = absl::GetFlag(FLAGS_zstd_compression_level);
   }
-  ~ZstdCompressImpl() {
+  ~ZstdCompressor() {
     ZSTD_freeCCtx(cctx_);
 
     VLOG(1) << "zstd compressed size: " << compressed_size_total_;
     VLOG(1) << "zstd uncompressed size: " << uncompressed_size_total_;
   }
 
-  io::Bytes Compress(io::Bytes str);
+  io::Result<io::Bytes> Compress(io::Bytes data);
 
  private:
   ZSTD_CCtx* cctx_;
@@ -189,16 +190,75 @@ class ZstdCompressImpl {
   base::PODArray<uint8_t> compr_buf_;
 };
 
-io::Bytes ZstdCompressImpl::Compress(io::Bytes str) {
-  size_t buf_size = ZSTD_compressBound(str.size());
+io::Result<io::Bytes> ZstdCompressor::Compress(io::Bytes data) {
+  size_t buf_size = ZSTD_compressBound(data.size());
   if (compr_buf_.capacity() < buf_size) {
     compr_buf_.reserve(buf_size);
   }
   size_t compressed_size = ZSTD_compressCCtx(cctx_, compr_buf_.data(), compr_buf_.capacity(),
-                                             str.data(), str.size(), compression_level_);
+                                             data.data(), data.size(), compression_level_);
+
+  if (ZSTD_isError(compressed_size)) {
+    return make_unexpected(error_code{int(compressed_size), generic_category()});
+  }
+  compressed_size_total_ += compressed_size;
+  uncompressed_size_total_ += data.size();
+  return io::Bytes(compr_buf_.data(), compressed_size);
+}
+
+class Lz4Compressor {
+ public:
+  // create a compression context
+  Lz4Compressor() {
+    LZ4F_errorCode_t result = LZ4F_createCompressionContext(&ctx_, LZ4F_VERSION);
+    if (LZ4F_isError(result)) {
+      // TODO this can fail on memory allocation. What should we do in this case?
+    }
+  }
+
+  // destroy the compression context
+  ~Lz4Compressor() {
+    LZ4F_freeCompressionContext(ctx_);
+    VLOG(1) << "lz4 compressed size: " << compressed_size_total_;
+    VLOG(1) << "lz4 uncompressed size: " << uncompressed_size_total_;
+  }
+
+  // compress a string of data
+  io::Result<io::Bytes> Compress(io::Bytes data);
+
+ private:
+  LZ4F_cctx* ctx_;
+  base::PODArray<uint8_t> compr_buf_;
+  size_t compressed_size_total_ = 0;
+  size_t uncompressed_size_total_ = 0;
+};
+
+io::Result<io::Bytes> Lz4Compressor::Compress(io::Bytes data) {
+  size_t buf_size = LZ4F_compressFrameBound(data.size(), NULL);
+  if (compr_buf_.capacity() < buf_size) {
+    compr_buf_.reserve(buf_size);
+  }
+  // initialize the compression context
+  size_t compressed_size = LZ4F_compressBegin(ctx_, compr_buf_.data(), compr_buf_.capacity(), NULL);
+  if (LZ4F_isError(compressed_size)) {
+    return make_unexpected(error_code{int(compressed_size), generic_category()});
+  }
+
+  // compress the data
+  compressed_size = LZ4F_compressUpdate(ctx_, compr_buf_.data(), compr_buf_.capacity(), data.data(),
+                                        data.size(), NULL);
+  if (LZ4F_isError(compressed_size)) {
+    return make_unexpected(error_code{int(compressed_size), generic_category()});
+  }
+
+  // finish the compression process
+  compressed_size = LZ4F_compressEnd(ctx_, compr_buf_.data(), compr_buf_.capacity(), NULL);
+  if (LZ4F_isError(compressed_size)) {
+    return make_unexpected(error_code{int(compressed_size), generic_category()});
+  }
 
   compressed_size_total_ += compressed_size;
-  uncompressed_size_total_ += str.size();
+  uncompressed_size_total_ += data.size();
   return io::Bytes(compr_buf_.data(), compressed_size);
 }
 
@@ -1105,10 +1165,15 @@ void RdbSerializer::CompressBlob() {
 
   // Compress the data
   if (!compressor_impl_) {
-    compressor_impl_.reset(new ZstdCompressImpl());
+    compressor_impl_.reset(new ZstdCompressor());
   }
 
-  Bytes compressed_blob = compressor_impl_->Compress(blob_to_compress);
+  auto ec = compressor_impl_->Compress(blob_to_compress);
+  if (!ec) {
+    ++compression_stats_->compression_failed;
+    return;
+  }
+  Bytes compressed_blob = *ec;
   if (compressed_blob.length() > blob_size * kMinCompressionReductionPrecentage) {
     ++compression_stats_->compression_no_effective;
     return;
