@@ -1132,7 +1132,6 @@ void RdbSerializer::CompressBlob() {
   dest = mem_buf_.AppendBuffer();
   memcpy(dest.data(), compressed_blob.data(), compressed_blob.length());
   mem_buf_.CommitWrite(compressed_blob.length());
-  return;
 }
 
 }  // namespace dfly
