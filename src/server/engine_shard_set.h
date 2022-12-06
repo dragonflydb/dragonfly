@@ -39,6 +39,7 @@ class EngineShard {
     uint64_t quick_runs = 0;  //  how many times single shard "RunQuickie" transaction run.
     uint64_t defrag_attempt_total = 0;
     uint64_t defrag_realloc_total = 0;
+    uint64_t defrag_task_invocation_total = 0;
 
     Stats& operator+=(const Stats&);
   };
@@ -152,7 +153,7 @@ class EngineShard {
 
     // check the current threshold and return true if
     // we need to do the de-fermentation
-    bool IsRequired();
+    bool IsRequired() const;
   };
 
   EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap);

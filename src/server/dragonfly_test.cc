@@ -794,7 +794,7 @@ TEST_F(DefragDflyEngineTest, TestDefragOption) {
     this_fiber::sleep_for(100ms);
     EXPECT_EQ(shard->stats().defrag_realloc_total, 0);
     // we are expecting to have at least one try by now
-    EXPECT_GT(shard->stats().defrag_attempt_total, 0);
+    EXPECT_GT(shard->stats().defrag_task_invocation_total, 0);
   });
 
   ArgSlice delete_cmd(keys);
@@ -818,6 +818,7 @@ TEST_F(DefragDflyEngineTest, TestDefragOption) {
     }
     // make sure that we successfully found places to defrag in memory
     EXPECT_GT(stats.defrag_realloc_total, 0);
+    EXPECT_GE(stats.defrag_attempt_total, stats.defrag_realloc_total);
   });
 }
 
