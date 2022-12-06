@@ -112,7 +112,7 @@ class RdbSaver {
   CompressionMode compression_mode_;
 };
 
-class ZstdCompressImpl;
+class ZstdCompressor;
 
 class RdbSerializer {
  public:
@@ -171,13 +171,14 @@ class RdbSerializer {
   std::string tmp_str_;
   CompressionMode compression_mode_;
   // TODO : This compressor impl should support different compression algorithms zstd/lz4 etc.
-  std::unique_ptr<ZstdCompressImpl> compressor_impl_;
+  std::unique_ptr<ZstdCompressor> compressor_impl_;
 
   static constexpr size_t kMinStrSizeToCompress = 256;
   static constexpr double kMinCompressionReductionPrecentage = 0.95;
   struct CompressionStats {
     uint32_t compression_no_effective = 0;
     uint32_t small_str_count = 0;
+    uint32_t compression_failed = 0;
   };
   std::optional<CompressionStats> compression_stats_;
 };
