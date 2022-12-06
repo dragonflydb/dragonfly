@@ -69,6 +69,7 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
   quick_runs += o.quick_runs;
   defrag_attempt_total += o.defrag_attempt_total;
   defrag_realloc_total += o.defrag_realloc_total;
+  defrag_task_invocation_total += o.defrag_task_invocation_total;
 
   return *this;
 }
@@ -79,7 +80,7 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
 // 2. That we had change in memory usage - to prevent endless loop - out of scope for now
 // 3. in case the above is OK, make sure that we have a "gap" between usage and commited memory
 // (control by commit_use_threshold flag)
-bool EngineShard::DefragTaskState::IsRequired() {
+bool EngineShard::DefragTaskState::IsRequired() const {
   const uint64_t threshold_mem = max_memory_limit * GetFlag(FLAGS_mem_defrag_threshold);
   const double commit_use_threshold = GetFlag(FLAGS_commit_use_threshold);
 
@@ -119,12 +120,14 @@ bool EngineShard::DoDefrag() {
   PrimeTable::Cursor cur = defrag_state_.cursor;
   uint64_t reallocations = 0;
   unsigned traverses_count = 0;
+  uint64_t attempts = 0;
 
   do {
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
       // for each value check whether we should move it because it
       // seats on underutilized page of memory, and if so, do it.
       bool did = it->second.DefragIfNeeded(threshold);
+      attempts++;
       if (did) {
         reallocations++;
       }
@@ -144,7 +147,8 @@ bool EngineShard::DoDefrag() {
             << " but no location for defrag were found";
   }
   stats_.defrag_realloc_total += reallocations;
-  stats_.defrag_attempt_total++;
+  stats_.defrag_task_invocation_total++;
+  stats_.defrag_attempt_total += attempts;
   return defrag_state_.cursor > kCursorDoneState;
 }
 
@@ -159,7 +163,6 @@ bool EngineShard::DoDefrag() {
 //     otherwise lower the task priority so that it would not use the CPU when not required
 uint32_t EngineShard::DefragTask() {
   constexpr uint32_t kRunAtLowPriority = 0u;
-
   const auto shard_id = db_slice().shard_id();
   if (defrag_state_.IsRequired()) {
     VLOG(1) << shard_id << ": need to run defrag memory cursor state: " << defrag_state_.cursor;
