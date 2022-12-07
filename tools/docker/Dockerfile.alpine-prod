@@ -18,15 +18,17 @@ LABEL org.opencontainers.image.source https://github.com/${ORG_NAME}/dragonfly
 
 RUN addgroup -S -g 1000 dfly && adduser -S -G dfly -u 999 dfly
 RUN apk --no-cache add libgcc libstdc++ libunwind boost1.77-fiber \
-    'su-exec>=0.2'
+    'su-exec>=0.2' netcat-openbsd
 
 RUN mkdir /data && chown dfly:dfly /data
 VOLUME /data
 WORKDIR /data
 COPY tools/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY tools/docker/healthcheck.sh /usr/local/bin/healthcheck.sh
 COPY --from=builder /build/build-opt/dragonfly /usr/local/bin/
 RUN dragonfly -version
 
+HEALTHCHECK CMD /usr/local/bin/healthcheck.sh
 ENTRYPOINT ["entrypoint.sh"]
 
 EXPOSE 6380

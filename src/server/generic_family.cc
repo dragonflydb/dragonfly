@@ -431,7 +431,9 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
     DVLOG(1) << "Dump: key '" << key << "' successfully found, going to dump it";
     std::unique_ptr<::io::StringSink> sink = std::make_unique<::io::StringSink>();
     int compression_mode = absl::GetFlag(FLAGS_compression_mode);
-    RdbSerializer serializer(compression_mode != 0);
+    CompressionMode serializer_compression_mode =
+        compression_mode == 0 ? CompressionMode::NONE : CompressionMode::SINGLE_ENTRY;
+    RdbSerializer serializer(serializer_compression_mode);
 
     // According to Redis code we need to
     // 1. Save the value itself - without the key

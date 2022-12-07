@@ -16,7 +16,7 @@ typedef struct redisObject robj;
 namespace dfly {
 
 constexpr unsigned kEncodingIntSet = 0;
-constexpr unsigned kEncodingStrMap = 1;  // for set/map encodings of strings
+constexpr unsigned kEncodingStrMap = 1;   // for set/map encodings of strings
 constexpr unsigned kEncodingStrMap2 = 2;  // for set/map encodings of strings using DenseSet
 constexpr unsigned kEncodingListPack = 3;
 
@@ -52,7 +52,10 @@ class RobjWrapper {
     return std::string_view{reinterpret_cast<char*>(inner_obj_), sz_};
   }
 
+  bool DefragIfNeeded(float ratio);
+
  private:
+  bool Reallocate(std::pmr::memory_resource* mr);
   size_t InnerObjMallocUsed() const;
   void MakeInnerRoom(size_t current_cap, size_t desired, std::pmr::memory_resource* mr);
 
@@ -207,6 +210,8 @@ class CompactObj {
   bool HasIoPending() const {
     return mask_ & IO_PENDING;
   }
+
+  bool DefragIfNeeded(float ratio);
 
   void SetIoPending(bool b) {
     if (b) {

@@ -342,7 +342,7 @@ TEST_F(CompactObjectTest, MimallocUnderutilzationWithRealloc) {
   bool found = HasUnderutilizedMemory(ptrs, kUnderUtilizedRatio);
   ASSERT_FALSE(found);
   DeallocateAtRandom(kRandomStep, &ptrs);
-  // TestMiMallocUnderutilized(ptrs, run_reallocation, allocation_size);
+
   //  This is another case, where we are filling the "gaps" by doing re-allocations
   //  in this case, since we are not setting all the values back it should still have
   //  places that are not used. Plus since we are not looking at the first page

@@ -17,8 +17,7 @@ class SmallString {
   static constexpr unsigned kPrefLen = 10;
 
  public:
-
-  static void InitThreadLocal(void * heap);
+  static void InitThreadLocal(void* heap);
   static size_t UsedThreadLocal();
 
   void Reset() {
@@ -47,6 +46,8 @@ class SmallString {
   // Guarantees zero copy, i.e. dest will not point to any of external buffers.
   // With current implementation, it will return 2 slices for a non-empty string.
   unsigned GetV(std::string_view dest[2]) const;
+
+  bool DefragIfNeeded(float ratio);
 
  private:
   // prefix of the string that is broken down into 2 parts.

@@ -10,6 +10,8 @@ extern "C" {
 #include "redis/object.h"
 }
 
+#include <optional>
+
 #include "base/io_buf.h"
 #include "base/pod_array.h"
 #include "io/io.h"
@@ -59,11 +61,7 @@ enum class SaveMode {
   RDB,           // Save .rdb file. Expected to read all shards.
 };
 
-enum class CompressionMode {
-  NONE,
-  SINGLE_ENTRY,
-  MULTY_ENTRY,
-};
+enum class CompressionMode { NONE, SINGLE_ENTRY, MULTY_ENTRY_ZSTD, MULTY_ENTRY_LZ4 };
 
 class RdbSaver {
  public:
@@ -105,39 +103,16 @@ class RdbSaver {
   std::error_code SaveAux(const StringVec& lua_scripts);
   std::error_code SaveAuxFieldStrInt(std::string_view key, int64_t val);
 
-  SaveMode save_mode_;
   std::unique_ptr<Impl> impl_;
+  SaveMode save_mode_;
   CompressionMode compression_mode_;
 };
 
-class ZstdCompressSerializer {
- public:
-  ZstdCompressSerializer();
-  ZstdCompressSerializer(const ZstdCompressSerializer&) = delete;
-  void operator=(const ZstdCompressSerializer&) = delete;
-
-  ~ZstdCompressSerializer();
-
-  // Returns a pair consisting of an bool denoting whether the string was compressed
-  // and a string the result of compression. If given string was not compressed returned
-  // string will be empty.
-  std::pair<bool, string> Compress(std::string_view str);
-
- private:
-  class ZstdCompressImpl;
-  std::unique_ptr<ZstdCompressImpl> impl_;
-  static constexpr size_t kMinStrSizeToCompress = 256;
-  static constexpr double kMinCompressionReductionPrecentage = 0.95;
-  uint32_t compression_no_effective_ = 0;
-  uint32_t small_str_count_ = 0;
-};
+class CompressorImpl;
 
 class RdbSerializer {
  public:
-  // TODO: for aligned cased, it does not make sense that RdbSerializer buffers into unaligned
-  // mem_buf_ and then flush it into the next level. We should probably use AlignedBuffer
-  // directly.
-  RdbSerializer(bool do_entry_level_compression);
+  RdbSerializer(CompressionMode compression_mode);
 
   ~RdbSerializer();
 
@@ -158,7 +133,6 @@ class RdbSerializer {
     return SaveString(std::string_view{reinterpret_cast<const char*>(buf), len});
   }
 
-  // TODO(Adi) : add flag to flush compressed blob to sink, move zstd serializer under RdbSerializer
   std::error_code FlushToSink(io::Sink* s);
   std::error_code SaveLen(size_t len);
 
@@ -184,12 +158,25 @@ class RdbSerializer {
   std::error_code SaveListPackAsZiplist(uint8_t* lp);
   std::error_code SaveStreamPEL(rax* pel, bool nacks);
   std::error_code SaveStreamConsumers(streamCG* cg);
+  // If membuf data is compressable use compression impl to compress the data and write it to membuf
+  void CompressBlob();
 
   std::unique_ptr<LZF_HSLOT[]> lzf_;
   base::IoBuf mem_buf_;
   base::PODArray<uint8_t> tmp_buf_;
   std::string tmp_str_;
-  bool do_entry_level_compression_;
+  CompressionMode compression_mode_;
+  // TODO : This compressor impl should support different compression algorithms zstd/lz4 etc.
+  std::unique_ptr<CompressorImpl> compressor_impl_;
+
+  static constexpr size_t kMinStrSizeToCompress = 256;
+  static constexpr double kMinCompressionReductionPrecentage = 0.95;
+  struct CompressionStats {
+    uint32_t compression_no_effective = 0;
+    uint32_t small_str_count = 0;
+    uint32_t compression_failed = 0;
+  };
+  std::optional<CompressionStats> compression_stats_;
 };
 
 }  // namespace dfly
