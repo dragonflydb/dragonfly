@@ -1,6 +1,6 @@
 apiVersion: v2
 name: dragonfly
-description: A Helm chart for Kubernetes
+description: Dragonfly is a modern in-memory datastore, fully compatible with Redis and Memcached APIs.
 
 # A chart can be either an 'application' or a 'library' chart.
 #
@@ -22,3 +22,15 @@ version: v0.12.0
 # follow Semantic Versioning. They should reflect the version the application is using.
 # It is recommended to use it with quotes.
 appVersion: "v0.12.0"
+
+home: https://dragonflydb.io/
+
+keywords:
+  - database
+  - keyvalue
+  - cache
+
+sources:
+  - https://github.com/dragonflydb/dragonfly
+
+kubeVersion: ">=1.23.0-0"
