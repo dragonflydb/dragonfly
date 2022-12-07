@@ -10,6 +10,8 @@ extern "C" {
 #include "redis/object.h"
 }
 
+#include <optional>
+
 #include "base/io_buf.h"
 #include "base/pod_array.h"
 #include "io/io.h"
@@ -52,6 +54,15 @@ class AlignedBuffer : public ::io::Sink {
   off_t buf_offs_ = 0;
 };
 
+// SaveMode for snapshot. Used by RdbSaver to adjust internals.
+enum class SaveMode {
+  SUMMARY,       // Save only header values (summary.dfs). Expected to read no shards.
+  SINGLE_SHARD,  // Save single shard values (XXXX.dfs). Expected to read one shard.
+  RDB,           // Save .rdb file. Expected to read all shards.
+};
+
+enum class CompressionMode { NONE, SINGLE_ENTRY, MULTY_ENTRY_ZSTD, MULTY_ENTRY_LZ4 };
+
 class RdbSaver {
  public:
   // single_shard - true means that we run RdbSaver on a single shard and we do not use
@@ -59,20 +70,30 @@ class RdbSaver {
   // single_shard - false, means we capture all the data using a single RdbSaver instance
   // (corresponds to legacy, redis compatible mode)
   // if align_writes is true - writes data in aligned chunks of 4KB to fit direct I/O requirements.
-  explicit RdbSaver(::io::Sink* sink, bool single_shard, bool align_writes);
+  explicit RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes);
 
   ~RdbSaver();
 
+  // Initiates the serialization in the shard's thread.
+  // TODO: to implement break functionality to allow stopping early.
+  void StartSnapshotInShard(bool stream_journal, const Cancellation* cll, EngineShard* shard);
+
+  // Stops serialization in journal streaming mode in the shard's thread.
+  void StopSnapshotInShard(EngineShard* shard);
+
+  // Stores auxiliary (meta) values and lua scripts.
   std::error_code SaveHeader(const StringVec& lua_scripts);
 
   // Writes the RDB file into sink. Waits for the serialization to finish.
   // Fills freq_map with the histogram of rdb types.
   // freq_map can optionally be null.
-  std::error_code SaveBody(RdbTypeFreqMap* freq_map);
+  std::error_code SaveBody(const Cancellation* cll, RdbTypeFreqMap* freq_map);
 
-  // Initiates the serialization in the shard's thread.
-  // TODO: to implement break functionality to allow stopping early.
-  void StartSnapshotInShard(bool include_journal_changes, EngineShard* shard);
+  void Cancel();
+
+  SaveMode Mode() const {
+    return save_mode_;
+  }
 
  private:
   class Impl;
@@ -83,21 +104,17 @@ class RdbSaver {
   std::error_code SaveAuxFieldStrInt(std::string_view key, int64_t val);
 
   std::unique_ptr<Impl> impl_;
+  SaveMode save_mode_;
+  CompressionMode compression_mode_;
 };
+
+class CompressorImpl;
 
 class RdbSerializer {
  public:
-  // TODO: for aligned cased, it does not make sense that RdbSerializer buffers into unaligned
-  // mem_buf_ and then flush it into the next level. We should probably use AlignedBuffer
-  // directly.
-  RdbSerializer(::io::Sink* s);
+  RdbSerializer(CompressionMode compression_mode);
 
   ~RdbSerializer();
-
-  // The ownership stays with the caller.
-  void set_sink(::io::Sink* s) {
-    sink_ = s;
-  }
 
   std::error_code WriteOpcode(uint8_t opcode) {
     return WriteRaw(::io::Bytes{&opcode, 1});
@@ -116,15 +133,17 @@ class RdbSerializer {
     return SaveString(std::string_view{reinterpret_cast<const char*>(buf), len});
   }
 
+  std::error_code FlushToSink(io::Sink* s);
   std::error_code SaveLen(size_t len);
-
-  std::error_code FlushMem();
 
   // This would work for either string or an object.
   // The arg pv is taken from it->second if accessing
   // this by finding the key. This function is used
   // for the dump command - thus it is public function
   std::error_code SaveValue(const PrimeValue& pv);
+
+  std::error_code SendFullSyncCut(io::Sink* s);
+  size_t SerializedLen() const;
 
  private:
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
@@ -139,13 +158,25 @@ class RdbSerializer {
   std::error_code SaveListPackAsZiplist(uint8_t* lp);
   std::error_code SaveStreamPEL(rax* pel, bool nacks);
   std::error_code SaveStreamConsumers(streamCG* cg);
-
-  ::io::Sink* sink_;
+  // If membuf data is compressable use compression impl to compress the data and write it to membuf
+  void CompressBlob();
 
   std::unique_ptr<LZF_HSLOT[]> lzf_;
   base::IoBuf mem_buf_;
   base::PODArray<uint8_t> tmp_buf_;
   std::string tmp_str_;
+  CompressionMode compression_mode_;
+  // TODO : This compressor impl should support different compression algorithms zstd/lz4 etc.
+  std::unique_ptr<CompressorImpl> compressor_impl_;
+
+  static constexpr size_t kMinStrSizeToCompress = 256;
+  static constexpr double kMinCompressionReductionPrecentage = 0.95;
+  struct CompressionStats {
+    uint32_t compression_no_effective = 0;
+    uint32_t small_str_count = 0;
+    uint32_t compression_failed = 0;
+  };
+  std::optional<CompressionStats> compression_stats_;
 };
 
 }  // namespace dfly

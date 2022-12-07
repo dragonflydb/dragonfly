@@ -1,0 +1,57 @@
+name: Regression Tests
+
+env:
+  BUILD_TYPE: Debug
+
+on:
+  schedule:
+    - cron: '0 7 */1 * *'
+  workflow_dispatch:
+
+jobs:
+  build-n-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Test of these containers
+        container: ["ubuntu-dev:20"]
+    timeout-minutes: 20
+
+    container:
+      image: ghcr.io/romange/${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+
+        name: Print cpu info
+          cat /proc/cpuinfo
+
+      - name: Configure & Build
+        run: |
+          apt update && apt install -y pip
+          cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -GNinja \
+                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+          cd ${GITHUB_WORKSPACE}/build  && ninja dragonfly
+          pwd
+          ls -l ..
+
+      - name: Run PyTests
+        run: |
+          ls -l ${GITHUB_WORKSPACE}/
+          cd ${GITHUB_WORKSPACE}/tests
+          echo "Current commit is ${{github.sha}}"
+          pip install -r dragonfly/requirements.txt
+          export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
+
+          pytest -xv dragonfly
+
+      - name: Send notification on failure
+        if: failure()
+        run: |
+          curl -s \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
+            -d '{"text": "Unforunately the tests of dragonfly build are not passed :( \n The commit is ${{github.sha}}	"}'

@@ -23,7 +23,6 @@ extern "C" {
 #include "util/proactor_pool.h"
 #include "util/sliding_counter.h"
 
-
 namespace dfly {
 
 namespace journal {
@@ -38,6 +37,9 @@ class EngineShard {
   struct Stats {
     uint64_t ooo_runs = 0;    // how many times transactions run as OOO.
     uint64_t quick_runs = 0;  //  how many times single shard "RunQuickie" transaction run.
+    uint64_t defrag_attempt_total = 0;
+    uint64_t defrag_realloc_total = 0;
+    uint64_t defrag_task_invocation_total = 0;
 
     Stats& operator+=(const Stats&);
   };
@@ -98,7 +100,6 @@ class EngineShard {
     return &shard_lock_;
   }
 
-
   // TODO: Awkward interface. I should solve it somehow.
   void ShutdownMulti(Transaction* multi);
 
@@ -113,7 +114,9 @@ class EngineShard {
   // Returns used memory for this shard.
   size_t UsedMemory() const;
 
-  TieredStorage* tiered_storage() { return tiered_storage_.get(); }
+  TieredStorage* tiered_storage() {
+    return tiered_storage_.get();
+  }
 
   // Adds blocked transaction to the watch-list.
   void AddBlocked(Transaction* trans);
@@ -125,13 +128,8 @@ class EngineShard {
   // for everyone to use for string transformations during atomic cpu sequences.
   sds tmp_str1;
 
-
   // Moving average counters.
-  enum MovingCnt {
-    TTL_TRAVERSE,
-    TTL_DELETE,
-    COUNTER_TOTAL
-  };
+  enum MovingCnt { TTL_TRAVERSE, TTL_DELETE, COUNTER_TOTAL };
 
   // Returns moving sum over the last 6 seconds.
   uint32_t GetMovingSum6(MovingCnt type) const {
@@ -149,6 +147,15 @@ class EngineShard {
   void TEST_EnableHeartbeat();
 
  private:
+  struct DefragTaskState {
+    // we will add more data members later
+    uint64_t cursor = 0u;
+
+    // check the current threshold and return true if
+    // we need to do the de-fermentation
+    bool IsRequired() const;
+  };
+
   EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap);
 
   // blocks the calling fiber.
@@ -158,6 +165,22 @@ class EngineShard {
 
   void CacheStats();
 
+  // We are running a task that checks whether we need to
+  // do memory de-fragmentation here, this task only run
+  // when there are available CPU time.
+  // --------------------------------------------------------------------------
+  // NOTE: This task is running with exclusive access to the shard.
+  // i.e. - Since we are using shared noting access here, and all access
+  // are done using fibers, This fiber is run only when no other fiber in the
+  // context of the controlling thread will access this shard!
+  // --------------------------------------------------------------------------
+  uint32_t DefragTask();
+
+  // scan the shard with the cursor and apply
+  // de-fragmentation option for entries. This function will return the new cursor at the end of the
+  // scan This function is called from context of StartDefragTask
+  // return true if we did not complete the shard scan
+  bool DoDefrag();
 
   ::util::fibers_ext::FiberQueue queue_;
   ::boost::fibers::fiber fiber_q_;
@@ -176,6 +199,8 @@ class EngineShard {
   IntentLock shard_lock_;
 
   uint32_t periodic_task_ = 0;
+  uint32_t defrag_task_ = 0;
+  DefragTaskState defrag_state_;
   std::unique_ptr<TieredStorage> tiered_storage_;
   std::unique_ptr<BlockingController> blocking_controller_;
 
@@ -231,10 +256,25 @@ class EngineShardSet {
     RunBriefInParallel(std::forward<U>(func), [](auto i) { return true; });
   }
 
-  // Runs a brief function on selected shards. Waits for it to complete.
+  // Runs a brief function on selected shard thread. Waits for it to complete.
   template <typename U, typename P> void RunBriefInParallel(U&& func, P&& pred) const;
 
   template <typename U> void RunBlockingInParallel(U&& func);
+
+  // Runs func on all shards via the same shard queue that's been used by transactions framework.
+  // The functions running inside the shard queue run atomically (sequentially)
+  // with respect each other on the same shard.
+  template <typename U> void AwaitRunningOnShardQueue(U&& func) {
+    util::fibers_ext::BlockingCounter bc{unsigned(shard_queue_.size())};
+    for (size_t i = 0; i < shard_queue_.size(); ++i) {
+      Add(i, [&func, bc]() mutable {
+        func(EngineShard::tlocal());
+        bc.Dec();
+      });
+    }
+
+    bc.Wait();
+  }
 
   // Used in tests
   void TEST_EnableHeartBeat();
@@ -257,8 +297,8 @@ void EngineShardSet::RunBriefInParallel(U&& func, P&& pred) const {
 
     bc.Add(1);
     util::ProactorBase* dest = pp_->at(i);
-    dest->DispatchBrief([f = std::forward<U>(func), bc]() mutable {
-      f(EngineShard::tlocal());
+    dest->DispatchBrief([&func, bc]() mutable {
+      func(EngineShard::tlocal());
       bc.Dec();
     });
   }
@@ -272,7 +312,7 @@ template <typename U> void EngineShardSet::RunBlockingInParallel(U&& func) {
     util::ProactorBase* dest = pp_->at(i);
 
     // the "Dispatch" call spawns a fiber underneath.
-    dest->Dispatch([func, bc]() mutable {
+    dest->Dispatch([&func, bc]() mutable {
       func(EngineShard::tlocal());
       bc.Dec();
     });
@@ -285,7 +325,6 @@ inline ShardId Shard(std::string_view v, ShardId shard_num) {
   return hash % shard_num;
 }
 
-
 // absl::GetCurrentTimeNanos is twice faster than clock_gettime(CLOCK_REALTIME) on my laptop
 // and 4 times faster than on a VM. it takes 5-10ns to do a call.
 
@@ -294,7 +333,6 @@ extern uint64_t TEST_current_time_ms;
 inline uint64_t GetCurrentTimeMs() {
   return TEST_current_time_ms ? TEST_current_time_ms : absl::GetCurrentTimeNanos() / 1000000;
 }
-
 
 extern EngineShardSet* shard_set;
 

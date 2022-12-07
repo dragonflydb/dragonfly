@@ -7,9 +7,6 @@ but you can also run Dragonfly on older kernels as well.
 
 ### WARNING: Building from source on older kernels WILL NOT WORK.
 
-If your host machine does not have at least `Linux verion 5.10` or later, we suggest you choose a [Dockerized Quick Start](/docs/quick-start/).
-
-
 ## Step 1
 
 ```bash
@@ -20,7 +17,7 @@ git clone --recursive https://github.com/dragonflydb/dragonfly && cd dragonfly
 ```bash
 # Install dependencies
 sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
-     autoconf-archive libtool cmake g++
+     autoconf-archive libtool cmake g++ libzstd-dev
 ```
 
 ## Step 3

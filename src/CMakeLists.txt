@@ -22,6 +22,16 @@ add_third_party(
   LIB "none"
 )
 
+add_third_party(
+  lz4
+  URL https://github.com/lz4/lz4/archive/refs/tags/v1.9.4.tar.gz
+
+  BUILD_IN_SOURCE 1
+  CONFIGURE_COMMAND echo skip
+  BUILD_COMMAND make lib-release
+  INSTALL_COMMAND make install BUILD_SHARED=no PREFIX=${THIRD_PARTY_LIB_DIR}/lz4
+)
+
 add_library(TRDP::jsoncons INTERFACE IMPORTED)
 add_dependencies(TRDP::jsoncons jsoncons_project)
 set_target_properties(TRDP::jsoncons PROPERTIES

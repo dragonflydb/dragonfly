@@ -26,6 +26,7 @@ extern "C" {
 
 ABSL_FLAG(uint32_t, dbnum, 16, "Number of databases");
 ABSL_FLAG(uint32_t, keys_output_limit, 8192, "Maximum number of keys output by keys command");
+ABSL_DECLARE_FLAG(int, compression_mode);
 
 namespace dfly {
 using namespace std;
@@ -161,7 +162,7 @@ bool RdbRestoreValue::Add(std::string_view data, std::string_view key, DbSlice& 
     return false;
   }
   DbContext context{.db_index = index, .time_now_ms = GetCurrentTimeMs()};
-  auto [it, added] = db_slice.AddEntry(context, key, std::move(pv), item.expire_ms);
+  auto [it, added] = db_slice.AddOrSkip(context, key, std::move(pv), item.expire_ms);
   return added;
 }
 
@@ -406,14 +407,6 @@ OpStatus Renamer::UpdateDest(Transaction* t, EngineShard* es) {
   return OpStatus::OK;
 }
 
-struct ScanOpts {
-  string_view pattern;
-  string_view type_filter;
-  size_t limit = 10;
-
-  unsigned bucket_id = UINT_MAX;
-};
-
 OpStatus OpPersist(const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.shard->db_slice();
   auto [it, expire_it] = db_slice.FindExt(op_args.db_cntx, key);
@@ -437,7 +430,10 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
   if (IsValid(it)) {
     DVLOG(1) << "Dump: key '" << key << "' successfully found, going to dump it";
     std::unique_ptr<::io::StringSink> sink = std::make_unique<::io::StringSink>();
-    RdbSerializer serializer(sink.get());
+    int compression_mode = absl::GetFlag(FLAGS_compression_mode);
+    CompressionMode serializer_compression_mode =
+        compression_mode == 0 ? CompressionMode::NONE : CompressionMode::SINGLE_ENTRY;
+    RdbSerializer serializer(serializer_compression_mode);
 
     // According to Redis code we need to
     // 1. Save the value itself - without the key
@@ -450,7 +446,7 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
     CHECK(!ec);
     ec = serializer.SaveValue(it->second);
     CHECK(!ec);  // make sure that fully was successful
-    ec = serializer.FlushMem();
+    ec = serializer.FlushToSink(sink.get());
     CHECK(!ec);  // make sure that fully was successful
     std::string dump_payload(sink->str());
     AppendFooter(&dump_payload);  // version and crc
@@ -514,15 +510,11 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator it, const ScanOpts& opts, Strin
     return false;
   }
 
-  if (opts.pattern.empty()) {
-    res->push_back(it->first.ToString());
-  } else {
-    string str = it->first.ToString();
-    if (stringmatchlen(opts.pattern.data(), opts.pattern.size(), str.data(), str.size(), 0) != 1)
-      return false;
-
-    res->push_back(std::move(str));
+  string str = it->first.ToString();
+  if (!opts.Matches(str)) {
+    return false;
   }
+  res->push_back(std::move(str));
 
   return true;
 }
@@ -778,6 +770,29 @@ void GenericFamily::PexpireAt(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void GenericFamily::Pexpire(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+  string_view msec = ArgS(args, 2);
+  int64_t int_arg;
+
+  if (!absl::SimpleAtoi(msec, &int_arg)) {
+    return (*cntx)->SendError(kInvalidIntErr);
+  }
+  int_arg = std::max(int_arg, 0L);
+  DbSlice::ExpireParams params{.value = int_arg, .unit = TimeUnit::MSEC};
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpExpire(t->GetOpArgs(shard), key, params);
+  };
+  OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
+
+  if (status == OpStatus::OUT_OF_RANGE) {
+    return (*cntx)->SendError(kExpiryOutOfRange);
+  } else {
+    (*cntx)->SendLong(status == OpStatus::OK);
+  }
+}
+
 void GenericFamily::Stick(CmdArgList args, ConnectionContext* cntx) {
   Transaction* transaction = cntx->transaction;
   VLOG(1) << "Stick " << ArgS(args, 1);
@@ -937,7 +952,7 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
   if (!entries.ok())
     return (*cntx)->SendEmptyArray();
 
-  auto sort_call = [cntx, bounds, reversed, key](auto& entries) {
+  auto sort_call = [cntx, bounds, reversed](auto& entries) {
     if (bounds) {
       auto sort_it = entries.begin() + std::min(bounds->first + bounds->second, entries.size());
       std::partial_sort(entries.begin(), sort_it, entries.end(),
@@ -1196,45 +1211,19 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError("invalid cursor");
   }
 
-  ScanOpts scan_opts;
-
-  for (unsigned i = 2; i < args.size(); i += 2) {
-    if (i + 1 == args.size()) {
-      return (*cntx)->SendError(kSyntaxErr);
-    }
-
-    ToUpper(&args[i]);
-
-    string_view opt = ArgS(args, i);
-    if (opt == "COUNT") {
-      if (!absl::SimpleAtoi(ArgS(args, i + 1), &scan_opts.limit)) {
-        return (*cntx)->SendError(kInvalidIntErr);
-      }
-      if (scan_opts.limit == 0)
-        scan_opts.limit = 1;
-      else if (scan_opts.limit > 4096)
-        scan_opts.limit = 4096;
-    } else if (opt == "MATCH") {
-      scan_opts.pattern = ArgS(args, i + 1);
-      if (scan_opts.pattern == "*")
-        scan_opts.pattern = string_view{};
-    } else if (opt == "TYPE") {
-      ToLower(&args[i + 1]);
-      scan_opts.type_filter = ArgS(args, i + 1);
-    } else if (opt == "BUCKET") {
-      if (!absl::SimpleAtoi(ArgS(args, i + 1), &scan_opts.bucket_id)) {
-        return (*cntx)->SendError(kInvalidIntErr);
-      }
-    } else {
-      return (*cntx)->SendError(kSyntaxErr);
-    }
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2));
+  if (!ops) {
+    DVLOG(1) << "Scan invalid args - return " << ops << " to the user";
+    return (*cntx)->SendError(ops.status());
   }
 
+  ScanOpts scan_op = ops.value();
+
   StringVec keys;
-  cursor = ScanGeneric(cursor, scan_opts, &keys, cntx);
+  cursor = ScanGeneric(cursor, scan_op, &keys, cntx);
 
   (*cntx)->StartArray(2);
-  (*cntx)->SendSimpleString(absl::StrCat(cursor));
+  (*cntx)->SendBulkString(absl::StrCat(cursor));
   (*cntx)->StartArray(keys.size());
   for (const auto& k : keys) {
     (*cntx)->SendBulkString(k);
@@ -1405,11 +1394,13 @@ void GenericFamily::Register(CommandRegistry* registry) {
             << CI{"PING", CO::FAST, -1, 0, 0, 0}.HFUNC(Ping)
             << CI{"ECHO", CO::LOADING | CO::FAST, 2, 0, 0, 0}.HFUNC(Echo)
             << CI{"EXISTS", CO::READONLY | CO::FAST, -2, 1, -1, 1}.HFUNC(Exists)
+            << CI{"TOUCH", CO::READONLY | CO::FAST, -2, 1, -1, 1}.HFUNC(Exists)
             << CI{"EXPIRE", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Expire)
             << CI{"EXPIREAT", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(ExpireAt)
             << CI{"PERSIST", CO::WRITE | CO::FAST, 2, 1, 1, 1}.HFUNC(Persist)
             << CI{"KEYS", CO::READONLY, 2, 0, 0, 0}.HFUNC(Keys)
             << CI{"PEXPIREAT", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(PexpireAt)
+            << CI{"PEXPIRE", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Pexpire)
             << CI{"RENAME", CO::WRITE, 3, 1, 2, 1}.HFUNC(Rename)
             << CI{"RENAMENX", CO::WRITE, 3, 1, 2, 1}.HFUNC(RenameNx)
             << CI{"SELECT", kSelectOpts, 2, 0, 0, 0}.HFUNC(Select)

@@ -7,7 +7,6 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
-#include <absl/flags/reflection.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/strip.h>
@@ -50,6 +49,13 @@ class DflyEngineTest : public BaseFamilyTest {
   }
 };
 
+class DefragDflyEngineTest : public DflyEngineTest {
+ protected:
+  DefragDflyEngineTest() : DflyEngineTest() {
+    num_threads_ = 1;
+  }
+};
+
 // TODO: to implement equivalent parsing in redis parser.
 TEST_F(DflyEngineTest, Sds) {
   int argc;
@@ -76,6 +82,20 @@ TEST_F(DflyEngineTest, Sds) {
   EXPECT_STREQ("abc\xf0", argv[0]);
   EXPECT_STREQ("oops\n", argv[1]);
   sdsfreesplitres(argv, argc);
+}
+
+TEST_F(DflyEngineTest, MultiAndEval) {
+  RespExpr resp = Run({"multi"});
+  ASSERT_EQ(resp, "OK");
+
+  resp = Run({"get", kKey1});
+  ASSERT_EQ(resp, "QUEUED");
+
+  resp = Run({"get", kKey4});
+  ASSERT_EQ(resp, "QUEUED");
+  EXPECT_THAT(Run({"eval", "return redis.call('exists', KEYS[2])", "2", "a", "b"}),
+              ErrArg("'EVAL' Dragonfly does not allow execution of a server-side Lua script inside "
+                     "transaction block"));
 }
 
 TEST_F(DflyEngineTest, Multi) {
@@ -189,13 +209,19 @@ TEST_F(DflyEngineTest, MultiConsistent) {
 }
 
 TEST_F(DflyEngineTest, MultiWeirdCommands) {
+  // FIXME: issue https://github.com/dragonflydb/dragonfly/issues/457
+  // once we would have fix for supporting EVAL from within transaction
   Run({"multi"});
-  ASSERT_EQ(Run({"eval", "return 42", "0"}), "QUEUED");
-  EXPECT_THAT(Run({"exec"}), IntArg(42));
+  EXPECT_THAT(Run({"eval", "return 42", "0"}),
+              ErrArg("'EVAL' Dragonfly does not allow execution of a server-side Lua script inside "
+                     "transaction block"));
 }
 
 TEST_F(DflyEngineTest, MultiRename) {
-  RespExpr resp = Run({"multi"});
+  RespExpr resp = Run({"mget", kKey1, kKey4});
+  ASSERT_EQ(1, GetDebugInfo().shards_count);
+
+  resp = Run({"multi"});
   ASSERT_EQ(resp, "OK");
   Run({"set", kKey1, "1"});
 
@@ -205,9 +231,21 @@ TEST_F(DflyEngineTest, MultiRename) {
 
   ASSERT_THAT(resp, ArrLen(2));
   EXPECT_THAT(resp.GetVec(), ElementsAre("OK", "OK"));
-  ASSERT_FALSE(service_->IsLocked(0, kKey1));
-  ASSERT_FALSE(service_->IsLocked(0, kKey4));
-  ASSERT_FALSE(service_->IsShardSetLocked());
+
+  // Now rename with keys spawning multiple shards.
+  Run({"mget", kKey4, kKey2});
+  ASSERT_EQ(2, GetDebugInfo().shards_count);
+
+  Run({"multi"});
+  resp = Run({"rename", kKey4, kKey2});
+  ASSERT_EQ(resp, "QUEUED");
+  resp = Run({"exec"});
+  EXPECT_EQ(resp, "OK");
+
+  EXPECT_FALSE(service_->IsLocked(0, kKey1));
+  EXPECT_FALSE(service_->IsLocked(0, kKey2));
+  EXPECT_FALSE(service_->IsLocked(0, kKey4));
+  EXPECT_FALSE(service_->IsShardSetLocked());
 }
 
 TEST_F(DflyEngineTest, MultiHop) {
@@ -264,7 +302,9 @@ TEST_F(DflyEngineTest, FlushDb) {
 }
 
 TEST_F(DflyEngineTest, Eval) {
-  auto resp = Run({"incrby", "foo", "42"});
+  RespExpr resp;
+
+  resp = Run({"incrby", "foo", "42"});
   EXPECT_THAT(resp, IntArg(42));
 
   resp = Run({"eval", "return redis.call('get', 'foo')", "0"});
@@ -277,6 +317,7 @@ TEST_F(DflyEngineTest, Eval) {
 
   resp = Run({"eval", "return redis.call('get', 'foo')", "1", "foo"});
   EXPECT_THAT(resp, "42");
+  ASSERT_FALSE(service_->IsLocked(0, "foo"));
 
   resp = Run({"eval", "return redis.call('get', KEYS[1])", "1", "foo"});
   EXPECT_THAT(resp, "42");
@@ -540,7 +581,7 @@ TEST_F(DflyEngineTest, PSubscribe) {
   ASSERT_EQ(1, SubscriberMessagesLen("IO1"));
 
   facade::Connection::PubMessage msg = GetPublishedMessage("IO1", 0);
-  EXPECT_EQ("foo", msg.message);
+  EXPECT_EQ("foo", *msg.message);
   EXPECT_EQ("ab", msg.channel);
   EXPECT_EQ("a*", msg.pattern);
 }
@@ -603,7 +644,7 @@ TEST_F(DflyEngineTest, Watch) {
 
   // Check watch on non-existent key.
   Run({"del", "b"});
-  EXPECT_EQ(Run({"watch", "b"}), "OK"); // didn't exist yet
+  EXPECT_EQ(Run({"watch", "b"}), "OK");  // didn't exist yet
   Run({"set", "b", "1"});
   Run({"multi"});
   ASSERT_THAT(Run({"exec"}), kExecFail);
@@ -634,10 +675,10 @@ TEST_F(DflyEngineTest, Watch) {
   // Check EXPIRE + new key.
   Run({"set", "a", "1"});
   Run({"del", "c"});
-  Run({"watch", "c"}); // didn't exist yet
+  Run({"watch", "c"});  // didn't exist yet
   Run({"watch", "a"});
   Run({"set", "c", "1"});
-  Run({"expire", "a", "1"}); // a existed
+  Run({"expire", "a", "1"});  // a existed
 
   AdvanceTime(1000);
 
@@ -664,10 +705,121 @@ TEST_F(DflyEngineTest, Watch) {
   Run({"set", "a", "1"});
   Run({"watch", "a"});
   Run({"select", "1"});
-  Run({"set", "a", "2"}); // changing a on db 1
+  Run({"set", "a", "2"});  // changing a on db 1
   Run({"select", "0"});
   Run({"multi"});
   ASSERT_THAT(Run({"exec"}), kExecSuccess);
+}
+
+TEST_F(DflyEngineTest, Bug468) {
+  RespExpr resp = Run({"multi"});
+  ASSERT_EQ(resp, "OK");
+  resp = Run({"SET", "foo", "bar", "EX", "moo"});
+  ASSERT_EQ(resp, "QUEUED");
+
+  resp = Run({"exec"});
+  ASSERT_THAT(resp, ErrArg("not an integer"));
+  ASSERT_FALSE(service_->IsLocked(0, "foo"));
+
+  resp = Run({"eval", "return redis.call('set', 'foo', 'bar', 'EX', 'moo')", "1", "foo"});
+  ASSERT_THAT(resp, ErrArg("not an integer"));
+
+  ASSERT_FALSE(service_->IsLocked(0, "foo"));
+}
+
+TEST_F(DflyEngineTest, Bug496) {
+  shard_set->pool()->AwaitFiberOnAll([&](unsigned index, ProactorBase* base) {
+    EngineShard* shard = EngineShard::tlocal();
+    if (shard == nullptr)
+      return;
+
+    auto& db = shard->db_slice();
+
+    int cb_hits = 0;
+    uint32_t cb_id =
+        db.RegisterOnChange([&cb_hits](DbIndex, const DbSlice::ChangeReq&) { cb_hits++; });
+
+    auto [_, added] = db.AddOrFind({}, "key-1");
+    EXPECT_TRUE(added);
+    EXPECT_EQ(cb_hits, 1);
+
+    tie(_, added) = db.AddOrFind({}, "key-1");
+    EXPECT_FALSE(added);
+    EXPECT_EQ(cb_hits, 1);
+
+    tie(_, added) = db.AddOrFind({}, "key-2");
+    EXPECT_TRUE(added);
+    EXPECT_EQ(cb_hits, 2);
+
+    db.UnregisterOnChange(cb_id);
+  });
+}
+
+TEST_F(DefragDflyEngineTest, TestDefragOption) {
+  // Fill data into dragonfly and then check if we have
+  // any location in memory to defrag. See issue #448 for details about this.
+  max_memory_limit = 300'000;             // control memory size so no need for too many keys
+  constexpr int kNumberOfKeys = 100'000;  // this fill the memory
+  constexpr int kKeySize = 137;
+  constexpr int kMaxDefragTriesForTests = 10;
+
+  std::vector<std::string> keys2delete;
+  keys2delete.push_back("del");
+
+  // Generate a list of keys that would be deleted
+  // The keys that we will delete are all in the form of "key-name:1<other digits>"
+  // This is because we are populating keys that has this format, but we don't want
+  // to delete all keys, only some random keys so we deleting those that start with 1
+  constexpr int kFactor = 10;
+  int kMaxNumKeysToDelete = 10'000;
+  int current_step = kFactor;
+  for (int i = 1; i < kMaxNumKeysToDelete; current_step *= kFactor) {
+    for (; i < current_step; i++) {
+      int j = i - 1 + current_step;
+      keys2delete.push_back("key-name:" + std::to_string(j));
+    }
+  }
+
+  std::vector<std::string_view> keys(keys2delete.begin(), keys2delete.end());
+
+  RespExpr resp = Run(
+      {"DEBUG", "POPULATE", std::to_string(kNumberOfKeys), "key-name", std::to_string(kKeySize)});
+  ASSERT_EQ(resp, "OK");
+  resp = Run({"DBSIZE"});
+  EXPECT_THAT(resp, IntArg(kNumberOfKeys));
+
+  shard_set->pool()->AwaitFiberOnAll([&](unsigned index, ProactorBase* base) {
+    EngineShard* shard = EngineShard::tlocal();
+    ASSERT_FALSE(shard == nullptr);  // we only have one and its should not be empty!
+    this_fiber::sleep_for(100ms);
+    EXPECT_EQ(shard->stats().defrag_realloc_total, 0);
+    // we are expecting to have at least one try by now
+    EXPECT_GT(shard->stats().defrag_task_invocation_total, 0);
+  });
+
+  ArgSlice delete_cmd(keys);
+  auto r = CheckedInt(delete_cmd);
+  // the first element in this is the command del so size is one less
+  ASSERT_EQ(r, keys2delete.size() - 1);
+
+  // At this point we need to see whether we did running the task and whether the task did something
+  shard_set->pool()->AwaitFiberOnAll([&](unsigned index, ProactorBase* base) {
+    EngineShard* shard = EngineShard::tlocal();
+    ASSERT_FALSE(shard == nullptr);  // we only have one and its should not be empty!
+    // a "busy wait" to ensure that memory defragmentations was successful:
+    // the task ran and did it work
+    auto stats = shard->stats();
+    for (int i = 0; i < kMaxDefragTriesForTests; i++) {
+      stats = shard->stats();
+      if (stats.defrag_realloc_total > 0) {
+        break;
+      }
+      this_fiber::sleep_for(220ms);
+    }
+    // make sure that we successfully found places to defrag in memory
+    EXPECT_GT(stats.defrag_realloc_total, 0);
+    EXPECT_GE(stats.defrag_attempt_total, stats.defrag_realloc_total);
+  });
 }
 
 // TODO: to test transactions with a single shard since then all transactions become local.

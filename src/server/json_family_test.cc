@@ -50,7 +50,7 @@ TEST_F(JsonFamilyTest, SetGetBasic) {
     </store>
 )";
 
-  auto resp = Run({"set", "json", json});
+  auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.GET", "json", "$..*"});
@@ -65,15 +65,14 @@ TEST_F(JsonFamilyTest, SetGetBasic) {
   resp = Run({"JSON.GET", "json", "//book[0]"});
   EXPECT_THAT(resp, ArgType(RespExpr::ERROR));
 
-  resp = Run({"set", "xml", xml});
+  resp = Run({"SET", "xml", xml});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.GET", "xml", "$..*"});
   EXPECT_THAT(resp, ArgType(RespExpr::ERROR));
 }
 
-TEST_F(JsonFamilyTest, SetGetFromPhonebook) {
-  string json = R"(
+static const string PhonebookJson = R"(
     {
       "firstName":"John",
       "lastName":"Smith",
@@ -103,7 +102,8 @@ TEST_F(JsonFamilyTest, SetGetFromPhonebook) {
     }
   )";
 
-  auto resp = Run({"set", "json", json});
+TEST_F(JsonFamilyTest, SetGetFromPhonebook) {
+  auto resp = Run({"JSON.SET", "json", ".", PhonebookJson});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.GET", "json", "$.address.*"});
@@ -127,7 +127,7 @@ TEST_F(JsonFamilyTest, Type) {
     [1, 2.3, "foo", true, null, {}, []]
   )";
 
-  auto resp = Run({"set", "json", json});
+  auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.TYPE", "json", "$[*]"});
@@ -147,7 +147,7 @@ TEST_F(JsonFamilyTest, StrLen) {
     {"a":{"a":"a"}, "b":{"a":"a", "b":1}, "c":{"a":"a", "b":"bb"}, "d":{"a":1, "b":"b", "c":3}}
   )";
 
-  auto resp = Run({"set", "json", json});
+  auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.STRLEN", "json", "$.a.a"});
@@ -174,7 +174,7 @@ TEST_F(JsonFamilyTest, ObjLen) {
     {"a":{}, "b":{"a":"a"}, "c":{"a":"a", "b":"bb"}, "d":{"a":1, "b":"b", "c":{"a":3,"b":4}}, "e":1}
   )";
 
-  auto resp = Run({"set", "json", json});
+  auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.OBJLEN", "json", "$.a"});
@@ -215,7 +215,7 @@ TEST_F(JsonFamilyTest, ArrLen) {
     [[], ["a"], ["a", "b"], ["a", "b", "c"]]
   )";
 
-  auto resp = Run({"set", "json", json});
+  auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRLEN", "json", "$[*]"});
@@ -226,7 +226,7 @@ TEST_F(JsonFamilyTest, ArrLen) {
     [[], "a", ["a", "b"], ["a", "b", "c"], 4]
   )";
 
-  resp = Run({"set", "json", json});
+  resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRLEN", "json", "$[*]"});
@@ -240,7 +240,7 @@ TEST_F(JsonFamilyTest, Toggle) {
     {"a":true, "b":false, "c":1, "d":null, "e":"foo", "f":[], "g":{}}
   )";
 
-  auto resp = Run({"set", "json", json});
+  auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.TOGGLE", "json", "$.*"});
@@ -267,7 +267,7 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
     {"e":1.5,"a":1}
   )";
 
-  auto resp = Run({"set", "json", json});
+  auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.a", "1.1"});
@@ -283,7 +283,7 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
     {"e":1.5,"a":1}
   )";
 
-  resp = Run({"set", "json", json});
+  resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.e", "1.7e308"});
@@ -299,7 +299,7 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
     {"a":[], "b":[1], "c":[1,2], "d":[1,2,3]}
   )";
 
-  resp = Run({"set", "json", json});
+  resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.d[*]", "10"});
@@ -312,7 +312,7 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
     {"a":[], "b":[1], "c":[1,2], "d":[1,2,3]}
   )";
 
-  resp = Run({"set", "json", json});
+  resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.a[*]", "1"});
@@ -334,7 +334,7 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
     {"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}, "d":{"a":1, "b":2, "c":3}}
   )";
 
-  resp = Run({"set", "json", json});
+  resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.a.*", "1"});
@@ -356,7 +356,7 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
     {"a":{"a":"a"}, "b":{"a":"a", "b":1}, "c":{"a":"a", "b":"b"}, "d":{"a":1, "b":"b", "c":3}}
   )";
 
-  resp = Run({"set", "json", json});
+  resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.a.*", "1"});
@@ -380,7 +380,7 @@ TEST_F(JsonFamilyTest, NumMultBy) {
     {"a":[], "b":[1], "c":[1,2], "d":[1,2,3]}
   )";
 
-  auto resp = Run({"set", "json", json});
+  auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMMULTBY", "json", "$.d[*]", "2"});
@@ -393,7 +393,7 @@ TEST_F(JsonFamilyTest, NumMultBy) {
     {"a":[], "b":[1], "c":[1,2], "d":[1,2,3]}
   )";
 
-  resp = Run({"set", "json", json});
+  resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMMULTBY", "json", "$.a[*]", "2"});
@@ -415,7 +415,7 @@ TEST_F(JsonFamilyTest, NumMultBy) {
     {"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}, "d":{"a":1, "b":2, "c":3}}
   )";
 
-  resp = Run({"set", "json", json});
+  resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMMULTBY", "json", "$.a.*", "2"});
@@ -437,7 +437,7 @@ TEST_F(JsonFamilyTest, NumMultBy) {
     {"a":{"a":"a"}, "b":{"a":"a", "b":1}, "c":{"a":"a", "b":"b"}, "d":{"a":1, "b":"b", "c":3}}
   )";
 
-  resp = Run({"set", "json", json});
+  resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.NUMMULTBY", "json", "$.a.*", "2"});
@@ -461,7 +461,7 @@ TEST_F(JsonFamilyTest, Del) {
     {"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}, "d":{"a":1, "b":2, "c":3}, "e": [1,2,3,4,5]}}
   )";
 
-  auto resp = Run({"set", "json", json});
+  auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.DEL", "json", "$.d.*"});
@@ -492,7 +492,7 @@ TEST_F(JsonFamilyTest, Del) {
     {"a":[{"b": [1,2,3]}], "b": [{"c": 2}], "c']":[1,2,3]}
   )";
 
-  resp = Run({"set", "json", json});
+  resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.DEL", "json", "$.a[0].b[0]"});
@@ -519,7 +519,7 @@ TEST_F(JsonFamilyTest, ObjKeys) {
     {"a":{}, "b":{"a":"a"}, "c":{"a":"a", "b":"bb"}, "d":{"a":1, "b":"b", "c":{"a":3,"b":4}}, "e":1}
   )";
 
-  auto resp = Run({"set", "json", json});
+  auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.OBJKEYS", "json", "$.a"});
@@ -545,7 +545,7 @@ TEST_F(JsonFamilyTest, ObjKeys) {
     {"a":[7], "inner": {"a": {"b": 2, "c": 1337}}}
   )";
 
-  resp = Run({"set", "json", json});
+  resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.OBJKEYS", "json", "$..a"});
@@ -558,7 +558,7 @@ TEST_F(JsonFamilyTest, ObjKeys) {
     {"a":{}, "b":{"c":{"d": {"e": 1337}}}}
   )";
 
-  resp = Run({"set", "json", json});
+  resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.OBJKEYS", "json", "$..*"});
@@ -576,7 +576,7 @@ TEST_F(JsonFamilyTest, StrAppend) {
     {"a":{"a":"a"}, "b":{"a":"a", "b":1}, "c":{"a":"a", "b":"bb"}, "d":{"a":1, "b":"b", "c":3}}
   )";
 
-  auto resp = Run({"set", "json", json});
+  auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.STRAPPEND", "json", "$.a.a", "a", "b"});
@@ -635,7 +635,7 @@ TEST_F(JsonFamilyTest, StrAppend) {
     {"a":"foo", "inner": {"a": "bye"}, "inner1": {"a": 7}}
   )";
 
-  resp = Run({"set", "json", json});
+  resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.STRAPPEND", "json", "$..a", "bar"});
@@ -651,7 +651,7 @@ TEST_F(JsonFamilyTest, Clear) {
     [[], [0], [0,1], [0,1,2], 1, true, null, "d"]
   )";
 
-  auto resp = Run({"set", "json", json});
+  auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.CLEAR", "json", "$[*]"});
@@ -670,7 +670,7 @@ TEST_F(JsonFamilyTest, Clear) {
     {"children": ["Yossi", "Rafi", "Benni", "Avraham", "Yehoshua", "Moshe"]}
   )";
 
-  resp = Run({"set", "json", json});
+  resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.CLEAR", "json", "$.children"});
@@ -691,7 +691,7 @@ TEST_F(JsonFamilyTest, ArrPop) {
     [[6,1,6], [7,2,7], [8,3,8]]
   )";
 
-  auto resp = Run({"set", "json", json});
+  auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRPOP", "json", "$[*]", "-2"});
@@ -707,7 +707,7 @@ TEST_F(JsonFamilyTest, ArrTrim) {
     [[], ["a"], ["a", "b"], ["a", "b", "c"]]
   )";
 
-  auto resp = Run({"set", "json", json});
+  auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRTRIM", "json", "$[*]", "0", "1"});
@@ -721,7 +721,7 @@ TEST_F(JsonFamilyTest, ArrTrim) {
     {"a":[], "nested": {"a": [1,4]}}
   )";
 
-  resp = Run({"set", "json", json});
+  resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRTRIM", "json", "$..a", "0", "1"});
@@ -735,7 +735,7 @@ TEST_F(JsonFamilyTest, ArrTrim) {
     {"a":[1,2,3,2], "nested": {"a": false}}
   )";
 
-  resp = Run({"set", "json", json});
+  resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRTRIM", "json", "$..a", "1", "2"});
@@ -751,7 +751,7 @@ TEST_F(JsonFamilyTest, ArrInsert) {
     [[], ["a"], ["a", "b"]]
   )";
 
-  auto resp = Run({"set", "json", json});
+  auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRINSERT", "json", "$[*]", "0", R"("a")"});
@@ -776,12 +776,42 @@ TEST_F(JsonFamilyTest, ArrInsert) {
   EXPECT_EQ(resp, R"([["b","c","a"],["a","c","b","a"],["a","c","a","b","b"]])");
 }
 
+TEST_F(JsonFamilyTest, ArrAppend) {
+  string json = R"(
+    [[], ["a"], ["a", "b"]]
+  )";
+
+  auto resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRAPPEND", "json", "$[*]", R"("a")"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(1), IntArg(2), IntArg(3)));
+
+  resp = Run({"JSON.ARRAPPEND", "json", "$[*]", R"("b")"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(2), IntArg(3), IntArg(4)));
+
+  json = R"(
+    {"a": [1], "nested": {"a": [1,2], "nested2": {"a": 42}}}
+  )";
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRAPPEND", "json", "$..a", "3"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(2), IntArg(3), ArgType(RespExpr::NIL)));
+
+  resp = Run({"GET", "json"});
+  EXPECT_EQ(resp, R"({"a":[1,3],"nested":{"a":[1,2,3],"nested2":{"a":42}}})");
+}
+
 TEST_F(JsonFamilyTest, ArrIndex) {
   string json = R"(
     [[], ["a"], ["a", "b"], ["a", "b", "c"]]
   )";
 
-  auto resp = Run({"set", "json", json});
+  auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRINDEX", "json", "$[*]", R"("b")"});
@@ -792,7 +822,7 @@ TEST_F(JsonFamilyTest, ArrIndex) {
     {"a":["a","b","c","d"], "nested": {"a": ["c","d"]}}
   )";
 
-  resp = Run({"set", "json", json});
+  resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRINDEX", "json", "$..a", R"("b")"});
@@ -803,12 +833,109 @@ TEST_F(JsonFamilyTest, ArrIndex) {
     {"a":["a","b","c","d"], "nested": {"a": false}}
   )";
 
-  resp = Run({"set", "json", json});
+  resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRINDEX", "json", "$..a", R"("b")"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(1), ArgType(RespExpr::NIL)));
+}
+
+TEST_F(JsonFamilyTest, MGet) {
+  string json[] = {
+      R"(
+    {"address":{"street":"14 Imber Street","city":"Petah-Tikva","country":"Israel","zipcode":"49511"}}
+  )",
+      R"(
+    {"address":{"street":"Oranienburger Str. 27","city":"Berlin","country":"Germany","zipcode":"10117"}}
+  )"};
+
+  auto resp = Run({"JSON.SET", "json1", ".", json[0]});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "json2", ".", json[1]});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.MGET", "json1", "json2", "json3", "$.address.country"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(R"("Israel")", R"("Germany")", ArgType(RespExpr::NIL)));
+}
+
+TEST_F(JsonFamilyTest, DebugFields) {
+  string json = R"(
+    [1, 2.3, "foo", true, null, {}, [], {"a":1, "b":2}, [1,2,3]]
+  )";
+
+  auto resp = Run({"JSON.SET", "json1", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.DEBUG", "fields", "json1", "$[*]"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(1), IntArg(1), IntArg(1), IntArg(1), IntArg(1),
+                                         IntArg(0), IntArg(0), IntArg(2), IntArg(3)));
+
+  resp = Run({"JSON.DEBUG", "fields", "json1", "$"});
+  EXPECT_THAT(resp, IntArg(14));
+
+  json = R"(
+    [[1,2,3, [4,5,6,[6,7,8]]], {"a": {"b": {"c": 1337}}}]
+  )";
+
+  resp = Run({"JSON.SET", "json1", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.DEBUG", "fields", "json1", "$[*]"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(11), IntArg(3)));
+
+  resp = Run({"JSON.DEBUG", "fields", "json1", "$"});
+  EXPECT_THAT(resp, IntArg(16));
+}
+
+TEST_F(JsonFamilyTest, Resp) {
+  auto resp = Run({"JSON.SET", "json", ".", PhonebookJson});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.RESP", "json", "$.address.*"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre("New York", "NY", "21 2nd Street", "10021-3100"));
+
+  resp = Run({"JSON.RESP", "json", "$.isAlive"});
+  EXPECT_THAT(resp, "true");
+
+  resp = Run({"JSON.RESP", "json", "$.age"});
+  EXPECT_THAT(resp, IntArg(27));
+
+  resp = Run({"JSON.RESP", "json", "$.weight"});
+  EXPECT_THAT(resp, "135.25");
+}
+
+TEST_F(JsonFamilyTest, Set) {
+  string json = R"(
+    {"a":{"a":1, "b":2, "c":3}}
+  )";
+
+  auto resp = Run({"JSON.SET", "json1", ".", json});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "json1", "$.a.*", "0"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "json1", "$"});
+  EXPECT_EQ(resp, R"([{"a":{"a":0,"b":0,"c":0}}])");
+
+  json = R"(
+    {"a": [1,2,3,4,5]}
+  )";
+
+  resp = Run({"JSON.SET", "json2", ".", json});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "json2", "$.a[*]", "0"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "json2", "$"});
+  EXPECT_EQ(resp, R"([{"a":[0,0,0,0,0]}])");
 }
 
 }  // namespace dfly

@@ -30,6 +30,18 @@ ABSL_FLAG(bool, cache_mode, false,
           "If true, the backend behaves like a cache, "
           "by evicting entries when getting close to maxmemory limit");
 
+// memory defragmented related flags
+ABSL_FLAG(float, mem_defrag_threshold,
+          1,  // The default now is to disable the task from running! change this to 0.05!!
+          "Minimum percentage of used memory relative to total available memory before running "
+          "defragmentation");
+
+ABSL_FLAG(float, commit_use_threshold, 1.3,
+          "The ratio of commited/used memory above which we run defragmentation");
+
+ABSL_FLAG(float, mem_utilization_threshold, 0.8,
+          "memory page under utilization threshold. Ratio between used and commited size, below "
+          "this, memory in this page will defragmented");
 namespace dfly {
 
 using namespace util;
@@ -38,6 +50,9 @@ namespace fibers = ::boost::fibers;
 using absl::GetFlag;
 
 namespace {
+
+constexpr DbIndex kDefaultDbIndex = 0;
+constexpr uint64_t kCursorDoneState = 0u;
 
 vector<EngineShardSet::CachedStats> cached_stats;  // initialized in EngineShardSet::Init
 
@@ -52,8 +67,112 @@ uint64_t TEST_current_time_ms = 0;
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
   ooo_runs += o.ooo_runs;
   quick_runs += o.quick_runs;
+  defrag_attempt_total += o.defrag_attempt_total;
+  defrag_realloc_total += o.defrag_realloc_total;
+  defrag_task_invocation_total += o.defrag_task_invocation_total;
 
   return *this;
+}
+
+// This function checks 3 things:
+// 1. Don't try memory fragmentation if we don't use "enough" memory (control by
+// mem_defrag_threshold flag)
+// 2. That we had change in memory usage - to prevent endless loop - out of scope for now
+// 3. in case the above is OK, make sure that we have a "gap" between usage and commited memory
+// (control by commit_use_threshold flag)
+bool EngineShard::DefragTaskState::IsRequired() const {
+  const uint64_t threshold_mem = max_memory_limit * GetFlag(FLAGS_mem_defrag_threshold);
+  const double commit_use_threshold = GetFlag(FLAGS_commit_use_threshold);
+
+  if (cursor > kCursorDoneState) {
+    return true;
+  }
+
+  uint64_t commited = GetMallocCurrentCommitted();
+  uint64_t mem_in_use = used_mem_current.load(memory_order_relaxed);
+
+  // we want to make sure that we are not running this to many times - i.e.
+  // if there was no change to the memory, don't run this
+  if (threshold_mem < commited && mem_in_use > 0 &&
+      (uint64_t(mem_in_use * commit_use_threshold) < commited)) {
+    // we have way more commited then actual usage
+    return true;
+  }
+
+  return false;
+}
+
+// for now this does nothing
+bool EngineShard::DoDefrag() {
+  // --------------------------------------------------------------------------
+  // NOTE: This task is running with exclusive access to the shard.
+  // i.e. - Since we are using shared noting access here, and all access
+  // are done using fibers, This fiber is run only when no other fiber in the
+  // context of the controlling thread will access this shard!
+  // --------------------------------------------------------------------------
+
+  constexpr size_t kMaxTraverses = 50;
+  const float threshold = GetFlag(FLAGS_mem_utilization_threshold);
+
+  auto& slice = db_slice();
+  DCHECK(slice.IsDbValid(kDefaultDbIndex));
+  auto [prime_table, expire_table] = slice.GetTables(kDefaultDbIndex);
+  PrimeTable::Cursor cur = defrag_state_.cursor;
+  uint64_t reallocations = 0;
+  unsigned traverses_count = 0;
+  uint64_t attempts = 0;
+
+  do {
+    cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
+      // for each value check whether we should move it because it
+      // seats on underutilized page of memory, and if so, do it.
+      bool did = it->second.DefragIfNeeded(threshold);
+      attempts++;
+      if (did) {
+        reallocations++;
+      }
+    });
+    traverses_count++;
+  } while (traverses_count < kMaxTraverses && cur);
+
+  defrag_state_.cursor = cur.value();
+  if (reallocations > 0) {
+    VLOG(1) << "shard " << slice.shard_id() << ": successfully defrag  " << reallocations
+            << " times, did it in " << traverses_count << " cursor is at the "
+            << (defrag_state_.cursor == 0 ? "end" : "in progress");
+  } else {
+    VLOG(1) << "shard " << slice.shard_id() << ": run the defrag " << traverses_count
+            << " times out of maximum " << kMaxTraverses << ", with cursor at "
+            << (defrag_state_.cursor == 0 ? "end" : "in progress")
+            << " but no location for defrag were found";
+  }
+  stats_.defrag_realloc_total += reallocations;
+  stats_.defrag_task_invocation_total++;
+  stats_.defrag_attempt_total += attempts;
+  return defrag_state_.cursor > kCursorDoneState;
+}
+
+// the memory defragmentation task is as follow:
+//  1. Check if memory usage is high enough
+//  2. Check if diff between commited and used memory is high enough
+//  3. Check if we have memory changes (to ensure that we not running endlessly). - TODO
+//  4. if all the above pass -> scan this shard and try to find whether we can move pointer to
+//  underutilized pages values
+//     if the cursor returned from scan is not in done state, schedule the task to run at high
+//     priority.
+//     otherwise lower the task priority so that it would not use the CPU when not required
+uint32_t EngineShard::DefragTask() {
+  constexpr uint32_t kRunAtLowPriority = 0u;
+  const auto shard_id = db_slice().shard_id();
+  if (defrag_state_.IsRequired()) {
+    VLOG(1) << shard_id << ": need to run defrag memory cursor state: " << defrag_state_.cursor;
+    if (DoDefrag()) {
+      // we didn't finish the scan
+      return util::ProactorBase::kOnIdleMaxLevel;
+    }
+  }
+
+  return kRunAtLowPriority;
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap)
@@ -75,6 +194,8 @@ EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t*
   tmp_str1 = sdsempty();
 
   db_slice_.UpdateExpireBase(absl::GetCurrentTimeNanos() / 1000000, 0);
+  // start the defragmented task here
+  defrag_task_ = pb->AddOnIdleTask([this]() { return this->DefragTask(); });
 }
 
 EngineShard::~EngineShard() {
@@ -92,6 +213,8 @@ void EngineShard::Shutdown() {
   if (periodic_task_) {
     ProactorBase::me()->CancelPeriodic(periodic_task_);
   }
+
+  ProactorBase::me()->RemoveOnIdleTask(defrag_task_);
 }
 
 void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
@@ -106,11 +229,13 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
 
   string backing_prefix = GetFlag(FLAGS_backing_prefix);
   if (!backing_prefix.empty()) {
-    string fn =
-        absl::StrCat(backing_prefix, "-", absl::Dec(pb->GetIndex(), absl::kZeroPad4), ".ssd");
+    if (pb->GetKind() != ProactorBase::IOURING) {
+      LOG(ERROR) << "Only ioring based backing storage is supported. Exiting...";
+      exit(1);
+    }
 
     shard_->tiered_storage_.reset(new TieredStorage(&shard_->db_slice_));
-    error_code ec = shard_->tiered_storage_->Open(fn);
+    error_code ec = shard_->tiered_storage_->Open(backing_prefix);
     CHECK(!ec) << ec.message();  // TODO
   }
 }
@@ -164,12 +289,18 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     }
   }
 
-  bool has_awaked_trans = blocking_controller_ && blocking_controller_->HasAwakedTransaction();
   Transaction* head = nullptr;
   string dbg_id;
 
-  if (continuation_trans_ == nullptr && !has_awaked_trans) {
+  if (continuation_trans_ == nullptr) {
     while (!txq_.Empty()) {
+      // we must check every iteration so that if the current transaction awakens
+      // another transaction, the loop won't proceed further and will break, because we must run
+      // the notified transaction before all other transactions in the queue can proceed.
+      bool has_awaked_trans = blocking_controller_ && blocking_controller_->HasAwakedTransaction();
+      if (has_awaked_trans)
+        break;
+
       auto val = txq_.Front();
       head = absl::get<Transaction*>(val);
 
@@ -212,13 +343,12 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
         break;
       }
     }       // while(!txq_.Empty())
-  } else {  // if (continuation_trans_ == nullptr && !has_awaked_trans)
-    DVLOG(1) << "Skipped TxQueue " << continuation_trans_ << " " << has_awaked_trans;
+  } else {  // if (continuation_trans_ == nullptr)
+    DVLOG(1) << "Skipped TxQueue " << continuation_trans_;
   }
 
   // we need to run trans if it's OOO or when trans is blocked in this shard and should
   // be treated here as noop.
-  // trans is OOO, it it locked keys that previous transactions have not locked yet.
   bool should_run = trans_mask & (Transaction::OUT_OF_ORDER | Transaction::SUSPENDED_Q);
 
   // It may be that there are other transactions that touch those keys but they necessary ordered

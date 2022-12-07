@@ -340,7 +340,7 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
     auto res = FindExt(cntx, key);
 
     if (IsValid(res.first)) {
-      return tuple_cat(res, make_tuple(true));
+      return tuple_cat(res, make_tuple(false));
     }
 
     // It's a new entry.
@@ -542,7 +542,7 @@ uint32_t DbSlice::GetMCFlag(DbIndex db_ind, const PrimeKey& key) const {
 
 PrimeIterator DbSlice::AddNew(const Context& cntx, string_view key, PrimeValue obj,
                               uint64_t expire_at_ms) noexcept(false) {
-  auto [it, added] = AddEntry(cntx, key, std::move(obj), expire_at_ms);
+  auto [it, added] = AddOrSkip(cntx, key, std::move(obj), expire_at_ms);
   CHECK(added);
 
   return it;
@@ -571,12 +571,14 @@ OpStatus DbSlice::UpdateExpire(const Context& cntx, PrimeIterator prime_it,
   return OpStatus::OK;
 }
 
-pair<PrimeIterator, bool> DbSlice::AddEntry(const Context& cntx, string_view key, PrimeValue obj,
-                                            uint64_t expire_at_ms) noexcept(false) {
+std::pair<PrimeIterator, bool> DbSlice::AddOrUpdateInternal(const Context& cntx,
+                                                            std::string_view key, PrimeValue obj,
+                                                            uint64_t expire_at_ms,
+                                                            bool force_update) noexcept(false) {
   DCHECK(!obj.IsRef());
 
   pair<PrimeIterator, bool> res = AddOrFind(cntx, key);
-  if (!res.second)  // have not inserted.
+  if (!res.second && !force_update)  // have not inserted.
     return res;
 
   auto& db = *db_arr_[cntx.db_index];
@@ -588,10 +590,24 @@ pair<PrimeIterator, bool> DbSlice::AddEntry(const Context& cntx, string_view key
   if (expire_at_ms) {
     it->second.SetExpire(true);
     uint64_t delta = expire_at_ms - expire_base_[0];
-    CHECK(db.expire.Insert(it->first.AsRef(), ExpirePeriod(delta)).second);
+    auto [eit, inserted] = db.expire.Insert(it->first.AsRef(), ExpirePeriod(delta));
+    CHECK(inserted || force_update);
+    if (!inserted) {
+      eit->second = ExpirePeriod(delta);
+    }
   }
 
   return res;
+}
+
+pair<PrimeIterator, bool> DbSlice::AddOrUpdate(const Context& cntx, string_view key, PrimeValue obj,
+                                               uint64_t expire_at_ms) noexcept(false) {
+  return AddOrUpdateInternal(cntx, key, std::move(obj), expire_at_ms, true);
+}
+
+pair<PrimeIterator, bool> DbSlice::AddOrSkip(const Context& cntx, string_view key, PrimeValue obj,
+                                             uint64_t expire_at_ms) noexcept(false) {
+  return AddOrUpdateInternal(cntx, key, std::move(obj), expire_at_ms, false);
 }
 
 size_t DbSlice::DbSize(DbIndex db_ind) const {
@@ -679,10 +695,16 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
   if (it->second.ObjType() == OBJ_STRING) {
     stats->strval_memory_usage -= value_heap_size;
     if (it->second.IsExternal()) {
+      // We assume here that the operation code either loaded the entry into memory
+      // before calling to PreUpdate or it does not need to read it at all.
+      // After this code executes, the external blob is lost.
       TieredStorage* tiered = shard_owner()->tiered_storage();
       auto [offset, size] = it->second.GetExternalPtr();
-      tiered->Free(db_ind, offset, size);
+      tiered->Free(offset, size);
       it->second.Reset();
+
+      stats->external_entries -= 1;
+      stats->external_size -= size;
     }
   }
 
