@@ -31,7 +31,7 @@ extern "C" {
 #include "server/snapshot.h"
 #include "util/fibers/simple_channel.h"
 
-ABSL_FLAG(int, compression_mode, 2,
+ABSL_FLAG(int, compression_mode, 3,
           "set 0 for no compression,"
           "set 1 for single entry lzf compression,"
           "set 2 for multi entry zstd compression on df snapshot and single entry on rdb snapshot,"
