@@ -21,7 +21,7 @@ class EngineShardSet;
 class ScriptMgr;
 class CompactObj;
 
-class ZstdDecompressImpl;
+class DecompressImpl;
 
 class RdbLoaderBase {
  protected:
@@ -144,7 +144,7 @@ class RdbLoaderBase {
   size_t bytes_read_ = 0;
   size_t source_limit_ = SIZE_MAX;
   base::PODArray<uint8_t> compr_buf_;
-  std::unique_ptr<ZstdDecompressImpl> zstd_decompress_;
+  std::unique_ptr<DecompressImpl> decompress_impl_;
 };
 
 class RdbLoader : protected RdbLoaderBase {

@@ -205,12 +205,24 @@ bool resizeStringSet(robj* set, size_t size, bool use_set2) {
 
 }  // namespace
 
-class ZstdDecompressImpl {
+class DecompressImpl {
  public:
-  ZstdDecompressImpl() : uncompressed_mem_buf_{16_KB} {
+  DecompressImpl() : uncompressed_mem_buf_{16_KB} {
+  }
+  ~DecompressImpl() {
+  }
+  virtual io::Result<base::IoBuf*> Decompress(std::string_view str) = 0;
+
+ protected:
+  base::IoBuf uncompressed_mem_buf_;
+};
+
+class ZstdDecompress : public DecompressImpl {
+ public:
+  ZstdDecompress() {
     dctx_ = ZSTD_createDCtx();
   }
-  ~ZstdDecompressImpl() {
+  ~ZstdDecompress() {
     ZSTD_freeDCtx(dctx_);
   }
 
@@ -218,10 +230,9 @@ class ZstdDecompressImpl {
 
  private:
   ZSTD_DCtx* dctx_;
-  base::IoBuf uncompressed_mem_buf_;
 };
 
-io::Result<base::IoBuf*> ZstdDecompressImpl::Decompress(std::string_view str) {
+io::Result<base::IoBuf*> ZstdDecompress::Decompress(std::string_view str) {
   // Prepare membuf memory to uncompressed string.
   auto uncomp_size = ZSTD_getFrameContentSize(str.data(), str.size());
   if (uncomp_size == ZSTD_CONTENTSIZE_UNKNOWN) {
@@ -258,6 +269,8 @@ io::Result<base::IoBuf*> ZstdDecompressImpl::Decompress(std::string_view str) {
 
   return &uncompressed_mem_buf_;
 }
+
+// TODO(Adi): write lz4 decompress impl
 
 class RdbLoaderBase::OpaqueObjLoader {
  public:
@@ -1671,7 +1684,7 @@ error_code RdbLoader::Load(io::Source* src) {
       continue;
     }
     if (type == RDB_OPCODE_COMPRESSED_LZ4_BLOB_START) {
-      LOG(ERROR) << "LZ4 not supported yet";
+      LOG(ERROR) << "LZ4 not supported yet";  // TODO(Adi) : add support for lz4 decompress
       return RdbError(errc::feature_not_supported);
     }
 
@@ -1795,8 +1808,8 @@ auto RdbLoaderBase::LoadLen(bool* is_encoded) -> io::Result<uint64_t> {
 }
 
 error_code RdbLoaderBase::HandleCompressedBlob() {
-  if (!zstd_decompress_) {
-    zstd_decompress_.reset(new ZstdDecompressImpl());
+  if (!decompress_impl_) {
+    decompress_impl_.reset(new ZstdDecompress());  // TODO(Adi) : add support for lz4 decompress
   }
 
   // Fetch uncompress blob
@@ -1807,7 +1820,7 @@ error_code RdbLoaderBase::HandleCompressedBlob() {
   // Last type in the compressed blob is RDB_OPCODE_COMPRESSED_BLOB_END
   // in which we will switch back to the origin membuf (HandleCompressedBlobFinish)
   string_view uncompressed_blob;
-  SET_OR_RETURN(zstd_decompress_->Decompress(res), mem_buf_);
+  SET_OR_RETURN(decompress_impl_->Decompress(res), mem_buf_);
 
   return kOk;
 }
