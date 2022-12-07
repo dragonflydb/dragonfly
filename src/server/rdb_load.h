@@ -127,8 +127,9 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadZSetZL();
   ::io::Result<OpaqueObj> ReadListQuicklist(int rdbtype);
   ::io::Result<OpaqueObj> ReadStreams();
-  std::error_code HandleCompressedBlob();
+  std::error_code HandleCompressedBlob(int op_type);
   std::error_code HandleCompressedBlobFinish();
+  void AlocateDecompressOnce(int op_type);
 
   static size_t StrLen(const RdbVariant& tset);
 

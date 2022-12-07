@@ -222,7 +222,6 @@ class Lz4Compressor : public CompressorImpl {
  public:
   Lz4Compressor() {
     lz4_pref_.compressionLevel = compression_level_;
-    LOG(ERROR) << "using compression level:" << lz4_pref_.compressionLevel;
   }
 
   ~Lz4Compressor() {
@@ -236,6 +235,7 @@ class Lz4Compressor : public CompressorImpl {
 };
 
 io::Result<io::Bytes> Lz4Compressor::Compress(io::Bytes data) {
+  lz4_pref_.frameInfo.contentSize = data.size();
   size_t buf_size = LZ4F_compressFrameBound(data.size(), &lz4_pref_);
   if (compr_buf_.capacity() < buf_size) {
     compr_buf_.reserve(buf_size);
