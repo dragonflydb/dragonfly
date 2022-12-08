@@ -160,6 +160,7 @@ class RdbSerializer {
   std::error_code SaveStreamConsumers(streamCG* cg);
   // If membuf data is compressable use compression impl to compress the data and write it to membuf
   void CompressBlob();
+  void AllocateCompressorOnce();
 
   std::unique_ptr<LZF_HSLOT[]> lzf_;
   base::IoBuf mem_buf_;
@@ -175,6 +176,7 @@ class RdbSerializer {
     uint32_t compression_no_effective = 0;
     uint32_t small_str_count = 0;
     uint32_t compression_failed = 0;
+    uint32_t compressed_blobs = 0;
   };
   std::optional<CompressionStats> compression_stats_;
 };

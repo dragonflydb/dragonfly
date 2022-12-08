@@ -31,7 +31,7 @@ extern "C" {
 #include "server/snapshot.h"
 #include "util/fibers/simple_channel.h"
 
-ABSL_FLAG(int, compression_mode, 2,
+ABSL_FLAG(int, compression_mode, 3,
           "set 0 for no compression,"
           "set 1 for single entry lzf compression,"
           "set 2 for multi entry zstd compression on df snapshot and single entry on rdb snapshot,"
@@ -190,7 +190,6 @@ class ZstdCompressor : public CompressorImpl {
  public:
   ZstdCompressor() {
     cctx_ = ZSTD_createCCtx();
-    compression_level_ = absl::GetFlag(FLAGS_compression_level);
   }
   ~ZstdCompressor() {
     ZSTD_freeCCtx(cctx_);
@@ -200,9 +199,6 @@ class ZstdCompressor : public CompressorImpl {
 
  private:
   ZSTD_CCtx* cctx_;
-  int compression_level_ = 1;
-  size_t compressed_size_total_ = 0;
-  size_t uncompressed_size_total_ = 0;
   base::PODArray<uint8_t> compr_buf_;
 };
 
@@ -224,54 +220,35 @@ io::Result<io::Bytes> ZstdCompressor::Compress(io::Bytes data) {
 
 class Lz4Compressor : public CompressorImpl {
  public:
-  // create a compression context
   Lz4Compressor() {
-    LZ4F_errorCode_t result = LZ4F_createCompressionContext(&ctx_, LZ4F_VERSION);
-    CHECK(!LZ4F_isError(result));
     lz4_pref_.compressionLevel = compression_level_;
   }
 
-  // destroy the compression context
   ~Lz4Compressor() {
-    LZ4F_freeCompressionContext(ctx_);
   }
 
   // compress a string of data
   io::Result<io::Bytes> Compress(io::Bytes data);
 
  private:
-  LZ4F_cctx* ctx_;
-  LZ4F_preferences_t lz4_pref_;
+  LZ4F_preferences_t lz4_pref_ = LZ4F_INIT_PREFERENCES;
 };
 
 io::Result<io::Bytes> Lz4Compressor::Compress(io::Bytes data) {
-  size_t buf_size = LZ4F_compressFrameBound(data.size(), NULL);
+  lz4_pref_.frameInfo.contentSize = data.size();
+  size_t buf_size = LZ4F_compressFrameBound(data.size(), &lz4_pref_);
   if (compr_buf_.capacity() < buf_size) {
     compr_buf_.reserve(buf_size);
   }
-  // initialize the compression context
-  size_t compressed_size =
-      LZ4F_compressBegin(ctx_, compr_buf_.data(), compr_buf_.capacity(), &lz4_pref_);
-  if (LZ4F_isError(compressed_size)) {
-    return make_unexpected(error_code{int(compressed_size), generic_category()});
-  }
 
-  // compress the data
-  compressed_size = LZ4F_compressUpdate(ctx_, compr_buf_.data(), compr_buf_.capacity(), data.data(),
-                                        data.size(), NULL);
-  if (LZ4F_isError(compressed_size)) {
-    return make_unexpected(error_code{int(compressed_size), generic_category()});
+  size_t frame_size = LZ4F_compressFrame(compr_buf_.data(), compr_buf_.capacity(), data.data(),
+                                         data.size(), &lz4_pref_);
+  if (LZ4F_isError(frame_size)) {
+    return make_unexpected(error_code{int(frame_size), generic_category()});
   }
-
-  // finish the compression process
-  compressed_size = LZ4F_compressEnd(ctx_, compr_buf_.data(), compr_buf_.capacity(), NULL);
-  if (LZ4F_isError(compressed_size)) {
-    return make_unexpected(error_code{int(compressed_size), generic_category()});
-  }
-
-  compressed_size_total_ += compressed_size;
+  compressed_size_total_ += frame_size;
   uncompressed_size_total_ += data.size();
-  return io::Bytes(compr_buf_.data(), compressed_size);
+  return io::Bytes(compr_buf_.data(), frame_size);
 }
 
 RdbSerializer::RdbSerializer(CompressionMode compression_mode)
@@ -283,6 +260,8 @@ RdbSerializer::~RdbSerializer() {
   if (compression_stats_) {
     VLOG(1) << "compression not effective: " << compression_stats_->compression_no_effective;
     VLOG(1) << "small string none compression applied: " << compression_stats_->small_str_count;
+    VLOG(1) << "compression failed: " << compression_stats_->compression_failed;
+    VLOG(1) << "compressed blobs:" << compression_stats_->compressed_blobs;
   }
 }
 
@@ -724,7 +703,8 @@ error_code RdbSerializer::FlushToSink(io::Sink* s) {
 
   DVLOG(2) << "FlushToSink " << sz << " bytes";
 
-  if (compression_mode_ == CompressionMode::MULTY_ENTRY_ZSTD) {
+  if (compression_mode_ == CompressionMode::MULTY_ENTRY_ZSTD ||
+      compression_mode_ == CompressionMode::MULTY_ENTRY_LZ4) {
     CompressBlob();
     // After blob was compressed membuf was overwirten with compressed data
     sz = mem_buf_.InputLen();
@@ -1040,7 +1020,6 @@ RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes) {
       producer_count = 1;
       if (compression_mode == 3) {
         compression_mode_ = CompressionMode::MULTY_ENTRY_LZ4;
-        LOG(ERROR) << "Lz4 compression not supported yet";
       } else if (compression_mode == 2) {
         compression_mode_ = CompressionMode::MULTY_ENTRY_ZSTD;
       } else if (compression_mode == 1) {
@@ -1167,6 +1146,19 @@ void RdbSaver::Cancel() {
   impl_->Cancel();
 }
 
+void RdbSerializer::AllocateCompressorOnce() {
+  if (compressor_impl_) {
+    return;
+  }
+  if (compression_mode_ == CompressionMode::MULTY_ENTRY_ZSTD) {
+    compressor_impl_.reset(new ZstdCompressor());
+  } else if (compression_mode_ == CompressionMode::MULTY_ENTRY_LZ4) {
+    compressor_impl_.reset(new Lz4Compressor());
+  } else {
+    CHECK(false) << "Compressor allocation should not be done";
+  }
+}
+
 void RdbSerializer::CompressBlob() {
   if (!compression_stats_) {
     compression_stats_.emplace();
@@ -1178,11 +1170,8 @@ void RdbSerializer::CompressBlob() {
     return;
   }
 
+  AllocateCompressorOnce();
   // Compress the data
-  if (!compressor_impl_) {
-    compressor_impl_.reset(new ZstdCompressor());  // TODO(Adi): add support for lz4
-  }
-
   auto ec = compressor_impl_->Compress(blob_to_compress);
   if (!ec) {
     ++compression_stats_->compression_failed;
@@ -1200,7 +1189,10 @@ void RdbSerializer::CompressBlob() {
 
   // First write opcode for compressed string
   auto dest = mem_buf_.AppendBuffer();
-  dest[0] = RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START;  // TODO(Adi): add support for lz4
+  uint8_t opcode = compression_mode_ == CompressionMode::MULTY_ENTRY_ZSTD
+                       ? RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START
+                       : RDB_OPCODE_COMPRESSED_LZ4_BLOB_START;
+  dest[0] = opcode;
   mem_buf_.CommitWrite(1);
 
   // Write encoded compressed blob len
@@ -1212,6 +1204,7 @@ void RdbSerializer::CompressBlob() {
   dest = mem_buf_.AppendBuffer();
   memcpy(dest.data(), compressed_blob.data(), compressed_blob.length());
   mem_buf_.CommitWrite(compressed_blob.length());
+  ++compression_stats_->compressed_blobs;
 }
 
 }  // namespace dfly
