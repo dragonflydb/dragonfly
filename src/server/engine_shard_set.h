@@ -37,6 +37,9 @@ class EngineShard {
   struct Stats {
     uint64_t ooo_runs = 0;    // how many times transactions run as OOO.
     uint64_t quick_runs = 0;  //  how many times single shard "RunQuickie" transaction run.
+    uint64_t defrag_attempt_total = 0;
+    uint64_t defrag_realloc_total = 0;
+    uint64_t defrag_task_invocation_total = 0;
 
     Stats& operator+=(const Stats&);
   };
@@ -144,6 +147,15 @@ class EngineShard {
   void TEST_EnableHeartbeat();
 
  private:
+  struct DefragTaskState {
+    // we will add more data members later
+    uint64_t cursor = 0u;
+
+    // check the current threshold and return true if
+    // we need to do the de-fermentation
+    bool IsRequired() const;
+  };
+
   EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap);
 
   // blocks the calling fiber.
@@ -152,6 +164,23 @@ class EngineShard {
   void Heartbeat();
 
   void CacheStats();
+
+  // We are running a task that checks whether we need to
+  // do memory de-fragmentation here, this task only run
+  // when there are available CPU time.
+  // --------------------------------------------------------------------------
+  // NOTE: This task is running with exclusive access to the shard.
+  // i.e. - Since we are using shared noting access here, and all access
+  // are done using fibers, This fiber is run only when no other fiber in the
+  // context of the controlling thread will access this shard!
+  // --------------------------------------------------------------------------
+  uint32_t DefragTask();
+
+  // scan the shard with the cursor and apply
+  // de-fragmentation option for entries. This function will return the new cursor at the end of the
+  // scan This function is called from context of StartDefragTask
+  // return true if we did not complete the shard scan
+  bool DoDefrag();
 
   ::util::fibers_ext::FiberQueue queue_;
   ::boost::fibers::fiber fiber_q_;
@@ -170,6 +199,8 @@ class EngineShard {
   IntentLock shard_lock_;
 
   uint32_t periodic_task_ = 0;
+  uint32_t defrag_task_ = 0;
+  DefragTaskState defrag_state_;
   std::unique_ptr<TieredStorage> tiered_storage_;
   std::unique_ptr<BlockingController> blocking_controller_;
 

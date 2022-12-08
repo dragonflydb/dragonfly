@@ -186,7 +186,10 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
   error_code ec = acceptor->AddListener(bind_addr, port, main_listener);
 
-  LOG_IF(FATAL, ec) << "Could not open port " << port << ", error: " << ec.message();
+  if (ec) {
+    LOG(ERROR) << "Could not open port " << port << ", error: " << ec.message();
+    exit(1);
+  }
 
   if (mc_port > 0) {
     acceptor->AddListener(mc_port, new Listener{Protocol::MEMCACHE, &service});
@@ -338,6 +341,7 @@ Usage: dragonfly [FLAGS]
   }
   mi_option_enable(mi_option_show_errors);
   mi_option_set(mi_option_max_warnings, 0);
+  mi_option_set(mi_option_decommit_delay, 0);
 
   base::sys::KernelVersion kver;
   base::sys::GetKernelVersion(&kver);

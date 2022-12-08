@@ -782,7 +782,7 @@ static void RunStage(bool new_version, std::function<void(unsigned)> cb) {
 };
 
 using PartialSaveOpts =
-    tuple<const string& /*filename*/, const string& /*path*/, absl::Time /*start*/>;
+    tuple<const fs::path& /*filename*/, const fs::path& /*path*/, absl::Time /*start*/>;
 
 // Start saving a single snapshot of a multi-file dfly snapshot.
 // If shard is null, then this is the summary file.
@@ -790,18 +790,17 @@ error_code DoPartialSave(PartialSaveOpts opts, const dfly::StringVec& scripts,
                          RdbSnapshot* snapshot, EngineShard* shard) {
   auto [filename, path, now] = opts;
   // Construct resulting filename.
-  fs::path file = filename, abs_path = path;
+  fs::path full_filename = filename;
   if (shard == nullptr) {
-    ExtendFilename(now, "summary", &file);
+    ExtendFilename(now, "summary", &full_filename);
   } else {
-    ExtendFilenameWithShard(now, shard->shard_id(), &file);
+    ExtendFilenameWithShard(now, shard->shard_id(), &full_filename);
   }
-  abs_path /= file;  // use / operator to concatenate paths.
-  VLOG(1) << "Saving partial file to " << abs_path;
+  fs::path full_path = path / full_filename;  // use / operator to concatenate paths.
 
   // Start rdb saving.
   SaveMode mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
-  std::error_code local_ec = snapshot->Start(mode, abs_path.generic_string(), scripts);
+  error_code local_ec = snapshot->Start(mode, full_path.generic_string(), scripts);
 
   if (!local_ec && mode == SaveMode::SINGLE_SHARD) {
     snapshot->StartInShard(shard);
@@ -897,7 +896,6 @@ GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
 
     ExtendFilenameWithShard(start, -1, &filename);
     path /= filename;  // use / operator to concatenate paths.
-    VLOG(1) << "Saving to " << path;
 
     snapshots[0].reset(new RdbSnapshot(fq_threadpool_.get()));
     const auto lua_scripts = script_mgr_->GetLuaScripts();
@@ -933,13 +931,11 @@ GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
   absl::Duration dur = absl::Now() - start;
   double seconds = double(absl::ToInt64Milliseconds(dur)) / 1000;
 
-  {
-    LOG(INFO) << "Saving " << path << " finished after "
-              << strings::HumanReadableElapsedTime(seconds);
-  }
-
   // Populate LastSaveInfo.
   if (!ec) {
+    LOG(INFO) << "Saving " << path << " finished after "
+              << strings::HumanReadableElapsedTime(seconds);
+
     save_info = make_shared<LastSaveInfo>();
     for (const auto& k_v : rdb_name_map) {
       save_info->freq_map.emplace_back(k_v);
@@ -1308,6 +1304,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("total_writes_processed", m.conn_stats.io_write_cnt);
     append("async_writes_count", m.conn_stats.async_writes_cnt);
     append("parser_err_count", m.conn_stats.parser_err_cnt);
+    append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
+    append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
+    append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
   }
 
   if (should_enter("TIERED", true)) {

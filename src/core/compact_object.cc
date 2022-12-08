@@ -39,6 +39,7 @@ using absl::GetFlag;
 namespace {
 
 constexpr XXH64_hash_t kHashSeed = 24061983;
+constexpr size_t kAlignSize = 8u;
 
 // Approximation since does not account for listpacks.
 size_t QlMAllocSize(quicklist* ql) {
@@ -380,6 +381,23 @@ void RobjWrapper::SetString(string_view s, pmr::memory_resource* mr) {
   }
 }
 
+bool RobjWrapper::DefragIfNeeded(float ratio) {
+  if (type() == OBJ_STRING) {  // only applicable to strings
+    if (zmalloc_page_is_underutilized(inner_obj(), ratio)) {
+      return Reallocate(tl.local_mr);
+    }
+  }
+  return false;
+}
+
+bool RobjWrapper::Reallocate(std::pmr::memory_resource* mr) {
+  void* old_ptr = inner_obj_;
+  inner_obj_ = mr->allocate(sz_, kAlignSize);
+  memcpy(inner_obj_, old_ptr, sz_);
+  mr->deallocate(old_ptr, 0, kAlignSize);
+  return true;
+}
+
 void RobjWrapper::Init(unsigned type, unsigned encoding, void* inner) {
   type_ = type;
   encoding_ = encoding;
@@ -398,13 +416,13 @@ void RobjWrapper::MakeInnerRoom(size_t current_cap, size_t desired, pmr::memory_
       desired += SDS_MAX_PREALLOC;
   }
 
-  void* newp = mr->allocate(desired, 8);
+  void* newp = mr->allocate(desired, kAlignSize);
   if (sz_) {
     memcpy(newp, inner_obj_, sz_);
   }
 
   if (current_cap) {
-    mr->deallocate(inner_obj_, current_cap, 8);
+    mr->deallocate(inner_obj_, current_cap, kAlignSize);
   }
   inner_obj_ = newp;
 }
@@ -659,7 +677,7 @@ robj* CompactObj::AsRObj() const {
   res->type = u_.r_obj.type();
 
   if (res->type == OBJ_SET) {
-    LOG(FATAL) << "Should not call AsRObj for type " <<  res->type;
+    LOG(FATAL) << "Should not call AsRObj for type " << res->type;
   }
 
   if (res->type == OBJ_HASH) {
@@ -848,6 +866,27 @@ string_view CompactObj::GetSlice(string* scratch) const {
   LOG(FATAL) << "Bad tag " << int(taglen_);
 
   return string_view{};
+}
+
+bool CompactObj::DefragIfNeeded(float ratio) {
+  switch (taglen_) {
+    case ROBJ_TAG:
+      // currently only these objet types are supported for this operation
+      if (u_.r_obj.inner_obj() != nullptr) {
+        return u_.r_obj.DefragIfNeeded(ratio);
+      }
+      return false;
+    case SMALL_TAG:
+      return u_.small_str.DefragIfNeeded(ratio);
+    case INT_TAG:
+      // this is not relevant in this case
+      return false;
+    case EXTERNAL_TAG:
+      return false;
+    default:
+      // This is the case when the object is at inline_str
+      return false;
+  }
 }
 
 bool CompactObj::HasAllocated() const {

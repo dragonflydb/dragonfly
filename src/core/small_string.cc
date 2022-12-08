@@ -4,6 +4,7 @@
 
 #include "core/small_string.h"
 
+#include <mimalloc.h>
 #include <xxhash.h>
 
 #include <memory>
@@ -155,6 +156,7 @@ void SmallString::Get(std::string* dest) const {
 }
 
 unsigned SmallString::GetV(string_view dest[2]) const {
+  DCHECK_GT(size_, kPrefLen);
   if (size_ <= kPrefLen) {
     dest[0] = string_view{prefix_, size_};
     return 1;
@@ -164,6 +166,25 @@ unsigned SmallString::GetV(string_view dest[2]) const {
   uint8_t* ptr = tl.seg_alloc->Translate(small_ptr_);
   dest[1] = string_view{reinterpret_cast<char*>(ptr), size_ - kPrefLen};
   return 2;
+}
+
+bool SmallString::DefragIfNeeded(float ratio) {
+  DCHECK_GT(size_, kPrefLen);
+  if (size_ <= kPrefLen) {
+    return false;
+  }
+
+  uint8_t* cur_real_ptr = tl.seg_alloc->Translate(small_ptr_);
+  if (!mi_heap_page_is_underutilized(tl.seg_alloc->heap(), cur_real_ptr, ratio))
+    return false;
+
+  auto [sp, rp] = tl.seg_alloc->Allocate(size_ - kPrefLen);
+
+  memcpy(rp, cur_real_ptr, size_ - kPrefLen);
+  tl.seg_alloc->Free(small_ptr_);
+  small_ptr_ = sp;
+
+  return true;
 }
 
 }  // namespace dfly

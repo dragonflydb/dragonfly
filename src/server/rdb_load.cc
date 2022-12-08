@@ -16,9 +16,9 @@ extern "C" {
 #include "redis/zmalloc.h"
 #include "redis/zset.h"
 }
-
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
+#include <zstd.h>
 
 #include "base/endian.h"
 #include "base/flags.h"
@@ -38,12 +38,14 @@ ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 ABSL_DECLARE_FLAG(bool, use_set2);
 
-#define SET_OR_RETURN(expr, dest) \
-  do {                            \
-    auto exp_val = (expr);        \
-    if (!exp_val)                 \
-      return exp_val.error();     \
-    dest = exp_val.value();       \
+#define SET_OR_RETURN(expr, dest)              \
+  do {                                         \
+    auto exp_val = (expr);                     \
+    if (!exp_val) {                            \
+      VLOG(1) << "Error while calling " #expr; \
+      return exp_val.error();                  \
+    }                                          \
+    dest = exp_val.value();                    \
   } while (0)
 
 #define SET_OR_UNEXPECT(expr, dest)            \
@@ -203,6 +205,60 @@ bool resizeStringSet(robj* set, size_t size, bool use_set2) {
 
 }  // namespace
 
+class ZstdDecompressImpl {
+ public:
+  ZstdDecompressImpl() : uncompressed_mem_buf_{16_KB} {
+    dctx_ = ZSTD_createDCtx();
+  }
+  ~ZstdDecompressImpl() {
+    ZSTD_freeDCtx(dctx_);
+  }
+
+  io::Result<base::IoBuf*> Decompress(std::string_view str);
+
+ private:
+  ZSTD_DCtx* dctx_;
+  base::IoBuf uncompressed_mem_buf_;
+};
+
+io::Result<base::IoBuf*> ZstdDecompressImpl::Decompress(std::string_view str) {
+  // Prepare membuf memory to uncompressed string.
+  auto uncomp_size = ZSTD_getFrameContentSize(str.data(), str.size());
+  if (uncomp_size == ZSTD_CONTENTSIZE_UNKNOWN) {
+    LOG(ERROR) << "Zstd compression missing frame content size";
+    return Unexpected(errc::invalid_encoding);
+  }
+  if (uncomp_size == ZSTD_CONTENTSIZE_ERROR) {
+    LOG(ERROR) << "Invalid ZSTD compressed string";
+    return Unexpected(errc::invalid_encoding);
+  }
+
+  uncompressed_mem_buf_.Reserve(uncomp_size + 1);
+
+  // Uncompress string to membuf
+  IoBuf::Bytes dest = uncompressed_mem_buf_.AppendBuffer();
+  if (dest.size() < uncomp_size) {
+    return Unexpected(errc::out_of_memory);
+  }
+  size_t const d_size =
+      ZSTD_decompressDCtx(dctx_, dest.data(), dest.size(), str.data(), str.size());
+  if (d_size == 0 || d_size != uncomp_size) {
+    LOG(ERROR) << "Invalid ZSTD compressed string";
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+  uncompressed_mem_buf_.CommitWrite(d_size);
+
+  // Add opcode of compressed blob end to membuf.
+  dest = uncompressed_mem_buf_.AppendBuffer();
+  if (dest.size() < 1) {
+    return Unexpected(errc::out_of_memory);
+  }
+  dest[0] = RDB_OPCODE_COMPRESSED_BLOB_END;
+  uncompressed_mem_buf_.CommitWrite(1);
+
+  return &uncompressed_mem_buf_;
+}
+
 class RdbLoaderBase::OpaqueObjLoader {
  public:
   OpaqueObjLoader(int rdb_type, PrimeValue* pv) : rdb_type_(rdb_type), pv_(pv) {
@@ -243,7 +299,11 @@ class RdbLoaderBase::OpaqueObjLoader {
   PrimeValue* pv_;
 };
 
-RdbLoaderBase::RdbLoaderBase() : mem_buf_{16_KB} {
+RdbLoaderBase::RdbLoaderBase() : origin_mem_buf_{16_KB} {
+  mem_buf_ = &origin_mem_buf_;
+}
+
+RdbLoaderBase::~RdbLoaderBase() {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::operator()(const base::PODArray<char>& str) {
@@ -832,11 +892,11 @@ std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
   uint8_t* next = (uint8_t*)dest;
   size_t bytes_read;
 
-  size_t to_copy = std::min(mem_buf_.InputLen(), size);
+  size_t to_copy = std::min(mem_buf_->InputLen(), size);
   DVLOG(2) << "Copying " << to_copy << " bytes";
 
-  ::memcpy(next, mem_buf_.InputBuffer().data(), to_copy);
-  mem_buf_.ConsumeInput(to_copy);
+  ::memcpy(next, mem_buf_->InputBuffer().data(), to_copy);
+  mem_buf_->ConsumeInput(to_copy);
   size -= to_copy;
   if (size == 0)
     return kOk;
@@ -862,7 +922,7 @@ std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
     return kOk;
   }
 
-  io::MutableBytes mb = mem_buf_.AppendBuffer();
+  io::MutableBytes mb = mem_buf_->AppendBuffer();
 
   // Must be because mem_buf_ is be empty.
   DCHECK_GT(mb.size(), size);
@@ -879,9 +939,9 @@ std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
 
   DCHECK_LE(bytes_read_, source_limit_);
 
-  mem_buf_.CommitWrite(bytes_read);
-  ::memcpy(next, mem_buf_.InputBuffer().data(), size);
-  mem_buf_.ConsumeInput(size);
+  mem_buf_->CommitWrite(bytes_read);
+  ::memcpy(next, mem_buf_->InputBuffer().data(), size);
+  mem_buf_->ConsumeInput(size);
 
   return kOk;
 }
@@ -953,8 +1013,8 @@ auto RdbLoaderBase::FetchLzfStringObject() -> io::Result<string> {
     return Unexpected(rdb::rdb_file_corrupted);
   }
 
-  if (mem_buf_.InputLen() >= clen) {
-    cbuf = mem_buf_.InputBuffer().data();
+  if (mem_buf_->InputLen() >= clen) {
+    cbuf = mem_buf_->InputBuffer().data();
   } else {
     compr_buf_.resize(clen);
     zerocopy_decompress = false;
@@ -977,7 +1037,7 @@ auto RdbLoaderBase::FetchLzfStringObject() -> io::Result<string> {
   // FetchBuf consumes the input but if we have not went through that path
   // we need to consume now.
   if (zerocopy_decompress)
-    mem_buf_.ConsumeInput(clen);
+    mem_buf_->ConsumeInput(clen);
 
   return res;
 }
@@ -1013,7 +1073,7 @@ io::Result<double> RdbLoaderBase::FetchBinaryDouble() {
     return make_unexpected(ec);
 
   uint8_t buf[8];
-  mem_buf_.ReadAndConsume(8, buf);
+  mem_buf_->ReadAndConsume(8, buf);
   u.val = base::LE::LoadT<uint64_t>(buf);
   return u.d;
 }
@@ -1438,7 +1498,7 @@ template <typename T> io::Result<T> RdbLoaderBase::FetchInt() {
     return make_unexpected(ec);
 
   char buf[16];
-  mem_buf_.ReadAndConsume(sizeof(T), buf);
+  mem_buf_->ReadAndConsume(sizeof(T), buf);
 
   return base::LE::LoadT<std::make_unsigned_t<T>>(buf);
 }
@@ -1477,7 +1537,7 @@ error_code RdbLoader::Load(io::Source* src) {
   absl::Time start = absl::Now();
   src_ = src;
 
-  IoBuf::Bytes bytes = mem_buf_.AppendBuffer();
+  IoBuf::Bytes bytes = mem_buf_->AppendBuffer();
   io::Result<size_t> read_sz = src_->ReadAtLeast(bytes, 9);
   if (!read_sz)
     return read_sz.error();
@@ -1487,10 +1547,10 @@ error_code RdbLoader::Load(io::Source* src) {
     return RdbError(errc::wrong_signature);
   }
 
-  mem_buf_.CommitWrite(bytes_read_);
+  mem_buf_->CommitWrite(bytes_read_);
 
   {
-    auto cb = mem_buf_.InputBuffer();
+    auto cb = mem_buf_->InputBuffer();
 
     if (memcmp(cb.data(), "REDIS", 5) != 0) {
       return RdbError(errc::wrong_signature);
@@ -1505,7 +1565,7 @@ error_code RdbLoader::Load(io::Source* src) {
       return RdbError(errc::bad_version);
     }
 
-    mem_buf_.ConsumeInput(9);
+    mem_buf_->ConsumeInput(9);
   }
 
   int type;
@@ -1606,6 +1666,20 @@ error_code RdbLoader::Load(io::Source* src) {
       return RdbError(errc::feature_not_supported);
     }
 
+    if (type == RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START) {
+      RETURN_ON_ERR(HandleCompressedBlob());
+      continue;
+    }
+    if (type == RDB_OPCODE_COMPRESSED_LZ4_BLOB_START) {
+      LOG(ERROR) << "LZ4 not supported yet";
+      return RdbError(errc::feature_not_supported);
+    }
+
+    if (type == RDB_OPCODE_COMPRESSED_BLOB_END) {
+      RETURN_ON_ERR(HandleCompressedBlobFinish());
+      continue;
+    }
+
     if (!rdbIsObjectType(type)) {
       return RdbError(errc::invalid_rdb_type);
     }
@@ -1639,10 +1713,23 @@ error_code RdbLoader::Load(io::Source* src) {
   return kOk;
 }
 
-error_code RdbLoaderBase::EnsureReadInternal(size_t min_sz) {
-  DCHECK_LT(mem_buf_.InputLen(), min_sz);
+std::error_code RdbLoaderBase::EnsureRead(size_t min_sz) {
+  // In the flow of reading compressed data, we store the uncompressed data to in uncompressed
+  // buffer. When parsing entries we call ensure read with 9 bytes to read the length of key/value.
+  // If the key/value is very small (less than 9 bytes) the remainded data in uncompressed buffer
+  // might contain less than 9 bytes. We need to make sure that we dont read from sink to the
+  // uncompressed buffer and therefor in this flow we return here.
+  if (mem_buf_ != &origin_mem_buf_)
+    return std::error_code{};
+  if (mem_buf_->InputLen() >= min_sz)
+    return std::error_code{};
+  return EnsureReadInternal(min_sz);
+}
 
-  auto out_buf = mem_buf_.AppendBuffer();
+error_code RdbLoaderBase::EnsureReadInternal(size_t min_sz) {
+  DCHECK_LT(mem_buf_->InputLen(), min_sz);
+
+  auto out_buf = mem_buf_->AppendBuffer();
   CHECK_GT(out_buf.size(), min_sz);
 
   // If limit was applied we do not want to read more than needed
@@ -1661,7 +1748,7 @@ error_code RdbLoaderBase::EnsureReadInternal(size_t min_sz) {
   bytes_read_ += *res;
 
   DCHECK_LE(bytes_read_, source_limit_);
-  mem_buf_.CommitWrite(*res);
+  mem_buf_->CommitWrite(*res);
 
   return kOk;
 }
@@ -1677,9 +1764,9 @@ auto RdbLoaderBase::LoadLen(bool* is_encoded) -> io::Result<uint64_t> {
     return make_unexpected(ec);
 
   uint64_t res = 0;
-  uint8_t first = mem_buf_.InputBuffer()[0];
+  uint8_t first = mem_buf_->InputBuffer()[0];
   int type = (first & 0xC0) >> 6;
-  mem_buf_.ConsumeInput(1);
+  mem_buf_->ConsumeInput(1);
   if (type == RDB_ENCVAL) {
     /* Read a 6 bit encoding type. */
     if (is_encoded)
@@ -1689,22 +1776,47 @@ auto RdbLoaderBase::LoadLen(bool* is_encoded) -> io::Result<uint64_t> {
     /* Read a 6 bit len. */
     res = first & 0x3F;
   } else if (type == RDB_14BITLEN) {
-    res = ((first & 0x3F) << 8) | mem_buf_.InputBuffer()[0];
-    mem_buf_.ConsumeInput(1);
+    res = ((first & 0x3F) << 8) | mem_buf_->InputBuffer()[0];
+    mem_buf_->ConsumeInput(1);
   } else if (first == RDB_32BITLEN) {
     /* Read a 32 bit len. */
-    res = absl::big_endian::Load32(mem_buf_.InputBuffer().data());
-    mem_buf_.ConsumeInput(4);
+    res = absl::big_endian::Load32(mem_buf_->InputBuffer().data());
+    mem_buf_->ConsumeInput(4);
   } else if (first == RDB_64BITLEN) {
     /* Read a 64 bit len. */
-    res = absl::big_endian::Load64(mem_buf_.InputBuffer().data());
-    mem_buf_.ConsumeInput(8);
+    res = absl::big_endian::Load64(mem_buf_->InputBuffer().data());
+    mem_buf_->ConsumeInput(8);
   } else {
     LOG(ERROR) << "Bad length encoding " << type << " in rdbLoadLen()";
     return Unexpected(errc::rdb_file_corrupted);
   }
 
   return res;
+}
+
+error_code RdbLoaderBase::HandleCompressedBlob() {
+  if (!zstd_decompress_) {
+    zstd_decompress_.reset(new ZstdDecompressImpl());
+  }
+
+  // Fetch uncompress blob
+  string res;
+  SET_OR_RETURN(FetchGenericString(), res);
+
+  // Decompress blob and switch membuf pointer
+  // Last type in the compressed blob is RDB_OPCODE_COMPRESSED_BLOB_END
+  // in which we will switch back to the origin membuf (HandleCompressedBlobFinish)
+  string_view uncompressed_blob;
+  SET_OR_RETURN(zstd_decompress_->Decompress(res), mem_buf_);
+
+  return kOk;
+}
+
+error_code RdbLoaderBase::HandleCompressedBlobFinish() {
+  CHECK_NE(&origin_mem_buf_, mem_buf_);
+  CHECK_EQ(mem_buf_->InputLen(), size_t(0));
+  mem_buf_ = &origin_mem_buf_;
+  return kOk;
 }
 
 error_code RdbLoader::HandleAux() {
@@ -1777,7 +1889,7 @@ error_code RdbLoader::VerifyChecksum() {
 
   SET_OR_RETURN(FetchInt<uint64_t>(), expected);
 
-  io::Bytes cur_buf = mem_buf_.InputBuffer();
+  io::Bytes cur_buf = mem_buf_->InputBuffer();
 
   VLOG(1) << "VerifyChecksum: input buffer len " << cur_buf.size() << ", expected " << expected;
 

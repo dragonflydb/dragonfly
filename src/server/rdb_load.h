@@ -21,9 +21,12 @@ class EngineShardSet;
 class ScriptMgr;
 class CompactObj;
 
+class ZstdDecompressImpl;
+
 class RdbLoaderBase {
  protected:
   RdbLoaderBase();
+  ~RdbLoaderBase();
 
   struct LoadTrace;
   using MutableBytes = ::io::MutableBytes;
@@ -124,24 +127,24 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadZSetZL();
   ::io::Result<OpaqueObj> ReadListQuicklist(int rdbtype);
   ::io::Result<OpaqueObj> ReadStreams();
+  std::error_code HandleCompressedBlob();
+  std::error_code HandleCompressedBlobFinish();
 
   static size_t StrLen(const RdbVariant& tset);
 
-  std::error_code EnsureRead(size_t min_sz) {
-    if (mem_buf_.InputLen() >= min_sz)
-      return std::error_code{};
-
-    return EnsureReadInternal(min_sz);
-  }
+  std::error_code EnsureRead(size_t min_sz);
 
   std::error_code EnsureReadInternal(size_t min_sz);
 
  protected:
-  base::IoBuf mem_buf_;
+  base::IoBuf* mem_buf_ = nullptr;
+  base::IoBuf origin_mem_buf_;
   ::io::Source* src_ = nullptr;
+
   size_t bytes_read_ = 0;
   size_t source_limit_ = SIZE_MAX;
   base::PODArray<uint8_t> compr_buf_;
+  std::unique_ptr<ZstdDecompressImpl> zstd_decompress_;
 };
 
 class RdbLoader : protected RdbLoaderBase {
@@ -156,7 +159,7 @@ class RdbLoader : protected RdbLoaderBase {
   }
 
   ::io::Bytes Leftover() const {
-    return mem_buf_.InputBuffer();
+    return mem_buf_->InputBuffer();
   }
 
   size_t bytes_read() const {

@@ -17,7 +17,7 @@ git clone --recursive https://github.com/dragonflydb/dragonfly && cd dragonfly
 ```bash
 # Install dependencies
 sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
-     autoconf-archive libtool cmake g++
+     autoconf-archive libtool cmake g++ libzstd-dev
 ```
 
 ## Step 3

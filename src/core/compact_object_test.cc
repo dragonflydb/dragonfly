@@ -3,9 +3,9 @@
 //
 #include "core/compact_object.h"
 
+#include <absl/strings/str_cat.h>
 #include <mimalloc.h>
 #include <xxhash.h>
-#include <absl/strings/str_cat.h>
 
 #include "base/gtest.h"
 #include "base/logging.h"
@@ -24,6 +24,9 @@ extern "C" {
 namespace dfly {
 
 XXH64_hash_t kSeed = 24061983;
+constexpr size_t kRandomStartIndex = 24;
+constexpr size_t kRandomStep = 26;
+constexpr float kUnderUtilizedRatio = 1.0f;  // ensure that we would detect
 using namespace std;
 
 void PrintTo(const CompactObj& cobj, std::ostream* os) {
@@ -32,6 +35,41 @@ void PrintTo(const CompactObj& cobj, std::ostream* os) {
     return;
   }
   *os << "cobj: [" << cobj.ObjType() << "]";
+}
+
+// This is for the mimalloc test - being able to find an address in memory
+// where we have memory underutilzation
+// see issue number 448 (https://github.com/dragonflydb/dragonfly/issues/448)
+std::vector<void*> AllocateForTest(int size, std::size_t allocate_size, int factor1 = 1,
+                                   int factor2 = 1) {
+  const int kAllocRandomChangeSize = 13;  // just some random value
+  std::vector<void*> ptrs;
+  for (int index = 0; index < size; index++) {
+    auto alloc_size =
+        index % kAllocRandomChangeSize == 0 ? allocate_size * factor1 : allocate_size * factor2;
+    auto heap_alloc = mi_heap_get_backing();
+    void* ptr = mi_heap_malloc(heap_alloc, alloc_size);
+    ptrs.push_back(ptr);
+  }
+  return ptrs;
+}
+
+bool HasUnderutilizedMemory(const std::vector<void*>& ptrs, float ratio) {
+  auto it = std::find_if(ptrs.begin(), ptrs.end(), [&](auto p) {
+    int r = p && zmalloc_page_is_underutilized(p, ratio);
+    return r > 0;
+  });
+  return it != ptrs.end();
+}
+
+// Go over ptrs vector and free memory at locations every "steps".
+// This is so that we will trigger the under utilization - some
+// pages will have "holes" in them and we are expecting to find these pages.
+void DeallocateAtRandom(size_t steps, std::vector<void*>* ptrs) {
+  for (size_t i = kRandomStartIndex; i < ptrs->size(); i += steps) {
+    mi_free(ptrs->at(i));
+    ptrs->at(i) = nullptr;
+  }
 }
 
 class CompactObjectTest : public ::testing::Test {
@@ -109,7 +147,6 @@ TEST_F(CompactObjectTest, InlineAsciiEncoded) {
   EXPECT_EQ(expected_val, obj.HashCode());
   EXPECT_EQ(s.size(), obj.Size());
 }
-
 
 TEST_F(CompactObjectTest, Int) {
   cobj_.SetString("0");
@@ -211,13 +248,13 @@ TEST_F(CompactObjectTest, FlatSet) {
   size_t allocated2, resident2, active2;
 
   zmalloc_get_allocator_info(&allocated1, &active1, &resident1);
-  dict *d = dictCreate(&setDictType);
+  dict* d = dictCreate(&setDictType);
   constexpr size_t kTestSize = 2000;
 
   for (size_t i = 0; i < kTestSize; ++i) {
     sds key = sdsnew("key:000000000000");
     key = sdscatfmt(key, "%U", i);
-    dictEntry *de = dictAddRaw(d, key,NULL);
+    dictEntry* de = dictAddRaw(d, key, NULL);
     de->v.val = NULL;
   }
 
@@ -257,6 +294,69 @@ TEST_F(CompactObjectTest, StreamObj) {
   EXPECT_EQ(OBJ_STREAM, cobj_.ObjType());
   EXPECT_EQ(OBJ_ENCODING_STREAM, cobj_.Encoding());
   EXPECT_FALSE(cobj_.IsInline());
+}
+
+TEST_F(CompactObjectTest, MimallocUnderutilzation) {
+  // We are testing with the same object size allocation here
+  // This test is for https://github.com/dragonflydb/dragonfly/issues/448
+  size_t allocation_size = 94;
+  int count = 2000;
+  std::vector<void*> ptrs = AllocateForTest(count, allocation_size);
+  bool found = HasUnderutilizedMemory(ptrs, kUnderUtilizedRatio);
+  ASSERT_FALSE(found);
+  DeallocateAtRandom(kRandomStep, &ptrs);
+  found = HasUnderutilizedMemory(ptrs, kUnderUtilizedRatio);
+  ASSERT_TRUE(found);
+  for (auto* ptr : ptrs) {
+    mi_free(ptr);
+  }
+}
+
+TEST_F(CompactObjectTest, MimallocUnderutilzationDifferentSizes) {
+  // This test uses different objects sizes to cover more use cases
+  // related to issue https://github.com/dragonflydb/dragonfly/issues/448
+  size_t allocation_size = 97;
+  int count = 2000;
+  int mem_factor_1 = 3;
+  int mem_factor_2 = 2;
+  std::vector<void*> ptrs = AllocateForTest(count, allocation_size, mem_factor_1, mem_factor_2);
+  bool found = HasUnderutilizedMemory(ptrs, kUnderUtilizedRatio);
+  ASSERT_FALSE(found);
+  DeallocateAtRandom(kRandomStep, &ptrs);
+  found = HasUnderutilizedMemory(ptrs, kUnderUtilizedRatio);
+  ASSERT_TRUE(found);
+  for (auto* ptr : ptrs) {
+    mi_free(ptr);
+  }
+}
+
+TEST_F(CompactObjectTest, MimallocUnderutilzationWithRealloc) {
+  // This test is checking underutilzation with reallocation as well as deallocation
+  // of the memory - see issue https://github.com/dragonflydb/dragonfly/issues/448
+  size_t allocation_size = 102;
+  int count = 2000;
+  int mem_factor_1 = 4;
+  int mem_factor_2 = 1;
+
+  std::vector<void*> ptrs = AllocateForTest(count, allocation_size, mem_factor_1, mem_factor_2);
+  bool found = HasUnderutilizedMemory(ptrs, kUnderUtilizedRatio);
+  ASSERT_FALSE(found);
+  DeallocateAtRandom(kRandomStep, &ptrs);
+
+  //  This is another case, where we are filling the "gaps" by doing re-allocations
+  //  in this case, since we are not setting all the values back it should still have
+  //  places that are not used. Plus since we are not looking at the first page
+  //  other pages should be underutilized.
+  for (size_t i = kRandomStartIndex; i < ptrs.size(); i += kRandomStep) {
+    if (!ptrs[i]) {
+      ptrs[i] = mi_heap_malloc(mi_heap_get_backing(), allocation_size);
+    }
+  }
+  found = HasUnderutilizedMemory(ptrs, kUnderUtilizedRatio);
+  ASSERT_TRUE(found);
+  for (auto* ptr : ptrs) {
+    mi_free(ptr);
+  }
 }
 
 }  // namespace dfly

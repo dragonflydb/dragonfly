@@ -27,19 +27,38 @@ class TieredStorage {
 
   std::error_code Read(size_t offset, size_t len, char* dest);
 
+  // Schedules unloading of the item, pointed by the iterator.
   std::error_code UnloadItem(DbIndex db_index, PrimeIterator it);
-  void Free(DbIndex db_indx, size_t offset, size_t len);
+
+  void Free(size_t offset, size_t len);
 
   void Shutdown();
 
   TieredStats GetStats() const;
 
  private:
-  struct ActiveIoRequest;
+  class ActiveIoRequest;
 
-  bool ShouldFlush();
+  struct Hasher {
+    size_t operator()(const PrimeKey& o) const {
+      return o.HashCode();
+    }
+  };
 
-  void FlushPending();
+  struct PerDb {
+    base::RingBuffer<uint64_t> bucket_cursors;  // buckets cursors pending for unloading.
+    absl::flat_hash_map<PrimeKey, ActiveIoRequest*, Hasher> active_requests;
+
+    PerDb(const PerDb&) = delete;
+    PerDb& operator=(const PerDb&) = delete;
+
+    PerDb() : bucket_cursors(256) {
+    }
+
+    bool ShouldFlush() const;
+  };
+
+  void FlushPending(DbIndex db_index);
   void InitiateGrow(size_t size);
   void SendIoRequest(ActiveIoRequest* req);
   void FinishIoRequest(int io_res, ActiveIoRequest* req);
@@ -54,24 +73,12 @@ class TieredStorage {
   uint32_t num_active_requests_ = 0;
   util::fibers_ext::EventCount active_req_sem_;
 
-  struct Hasher {
-    size_t operator()(const PrimeKey& o) const {
-      return o.HashCode();
-    }
-  };
-
-  struct PerDb {
-    absl::flat_hash_map<PrimeKey, ActiveIoRequest*, Hasher> active_requests;
-  };
-
   std::vector<PerDb*> db_arr_;
 
-  struct PendingReq {
+  /*struct PendingReq {
     uint64_t cursor;
     DbIndex db_indx = kInvalidDbId;
-  };
-
-  base::RingBuffer<PendingReq> pending_req_;
+  };*/
 
   // map of cursor -> pending size
   // absl::flat_hash_map<uint64_t, size_t> pending_upload;

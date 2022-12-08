@@ -29,11 +29,9 @@ void InitRedisTables() {
   server.hash_max_listpack_entries = 512;
   server.hash_max_listpack_value = 32;  // decreased from redis default 64.
 
-  server.rdb_compression = 1;
-
   server.stream_node_max_bytes = 4096;
   server.stream_node_max_entries = 100;
- }
+}
 
 // These functions are moved here from server.c
 int htNeedsResize(dict* dict) {
@@ -73,7 +71,7 @@ int dictPtrKeyCompare(dict* privdata, const void* key1, const void* key2) {
   return key1 == key2;
 }
 
-int dictSdsKeyCompare(dict *d, const void* key1, const void* key2) {
+int dictSdsKeyCompare(dict* d, const void* key1, const void* key2) {
   int l1, l2;
   DICT_NOTUSED(d);
 
@@ -84,7 +82,7 @@ int dictSdsKeyCompare(dict *d, const void* key1, const void* key2) {
   return memcmp(key1, key2, l1) == 0;
 }
 
-void dictSdsDestructor(dict *d, void* val) {
+void dictSdsDestructor(dict* d, void* val) {
   DICT_NOTUSED(d);
 
   sdsfree(val);
@@ -100,28 +98,27 @@ size_t sdsZmallocSize(sds s) {
 
 /* Toggle the 64 bit unsigned integer pointed by *p from little endian to
  * big endian */
-void memrev64(void *p) {
-    unsigned char *x = p, t;
+void memrev64(void* p) {
+  unsigned char *x = p, t;
 
-    t = x[0];
-    x[0] = x[7];
-    x[7] = t;
-    t = x[1];
-    x[1] = x[6];
-    x[6] = t;
-    t = x[2];
-    x[2] = x[5];
-    x[5] = t;
-    t = x[3];
-    x[3] = x[4];
-    x[4] = t;
+  t = x[0];
+  x[0] = x[7];
+  x[7] = t;
+  t = x[1];
+  x[1] = x[6];
+  x[6] = t;
+  t = x[2];
+  x[2] = x[5];
+  x[5] = t;
+  t = x[3];
+  x[3] = x[4];
+  x[4] = t;
 }
 
 uint64_t intrev64(uint64_t v) {
-    memrev64(&v);
-    return v;
+  memrev64(&v);
+  return v;
 }
-
 
 /* Set dictionary type. Keys are SDS strings, values are not used. */
 dictType setDictType = {
@@ -147,11 +144,11 @@ dictType zsetDictType = {
 
 /* Hash type hash table (note that small hashes are represented with listpacks) */
 dictType hashDictType = {
-    dictSdsHash,                /* hash function */
-    NULL,                       /* key dup */
-    NULL,                       /* val dup */
-    dictSdsKeyCompare,          /* key compare */
-    dictSdsDestructor,          /* key destructor */
-    dictSdsDestructor,          /* val destructor */
-    NULL                        /* allow to expand */
+    dictSdsHash,       /* hash function */
+    NULL,              /* key dup */
+    NULL,              /* val dup */
+    dictSdsKeyCompare, /* key compare */
+    dictSdsDestructor, /* key destructor */
+    dictSdsDestructor, /* val destructor */
+    NULL               /* allow to expand */
 };
