@@ -242,6 +242,14 @@ bool ScanOpts::Matches(std::string_view val_name) const {
   return stringmatchlen(pattern.data(), pattern.size(), val_name.data(), val_name.size(), 0) == 1;
 }
 
+GenericError::operator std::error_code() const {
+  return ec_;
+}
+
+GenericError::operator bool() const {
+  return bool(ec_);
+}
+
 std::string GenericError::Format() const {
   if (!ec_)
     return "";
@@ -252,17 +260,12 @@ std::string GenericError::Format() const {
     return absl::StrCat(ec_.message(), ":", details_);
 }
 
-Context::operator dfly::GenericError() {
+GenericError Context::GetError() {
   std::lock_guard lk(mu_);
   return err_;
 }
 
-Context::operator std::error_code() {
-  std::lock_guard lk(mu_);
-  return err_.GetError();
-}
-
-Context::operator const dfly::Cancellation*() {
+const Cancellation* Context::GetCancellation() const {
   return this;
 }
 
@@ -277,13 +280,11 @@ void Context::Reset(ErrHandler handler) {
   Cancellation::flag_.store(false, std::memory_order_relaxed);
 }
 
-bool Context::Switch(ErrHandler handler) {
+GenericError Context::Switch(ErrHandler handler) {
   std::lock_guard lk{mu_};
-  if (Cancellation::IsCancelled())
-    return true;
-
-  err_handler_ = std::move(handler);
-  return false;
+  if (!err_)
+    err_handler_ = std::move(handler);
+  return err_;
 }
 
 }  // namespace dfly

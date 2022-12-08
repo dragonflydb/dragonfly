@@ -439,8 +439,7 @@ error_code Replica::InitiateDflySync() {
     sync_block->Add(num_df_flows_);  // Unblock sync_block.
     DefaultErrorHandler(ge);         // Close sockets to unblock flows.
   };
-  if (cntx_.Switch(std::move(err_handler)))
-    return cntx_;
+  RETURN_ON_ERR(cntx_.Switch(std::move(err_handler)));
 
   // Start full sync flows.
   auto partition = Partition(num_df_flows_);
@@ -451,12 +450,11 @@ error_code Replica::InitiateDflySync() {
         cntx_.Error(ec);
     }
   });
-  RETURN_ON_ERR(cntx_);
+  RETURN_ON_ERR(cntx_.GetError());
 
   // Send DFLY SYNC.
   if (auto ec = SendNextPhaseRequest(); ec) {
-    cntx_.Error(ec);
-    return cntx_;
+    return cntx_.Error(ec);
   }
   // Wait for all flows to receive full sync cut.
   // In case of an error, this is unblocked by the error handler.
@@ -465,7 +463,7 @@ error_code Replica::InitiateDflySync() {
   sync_block->cv_.wait(lk, [&]() { return sync_block->flows_done >= num_df_flows_; });
 
   LOG(INFO) << "Full sync finished";
-  return cntx_;
+  return cntx_.GetError();
 }
 
 error_code Replica::ConsumeRedisStream() {
@@ -517,15 +515,13 @@ error_code Replica::ConsumeRedisStream() {
 error_code Replica::ConsumeDflyStream() {
   // Send DFLY STARTSTABLE.
   if (auto ec = SendNextPhaseRequest(); ec) {
-    cntx_.Error(ec);
-    return cntx_;
+    return cntx_.Error(ec);
   }
 
   // Wait for all flows to finish full sync.
   JoinAllFlows();
 
-  if (cntx_.Switch(absl::bind_front(&Replica::DefaultErrorHandler, this)))
-    return cntx_;
+  RETURN_ON_ERR(cntx_.Switch(absl::bind_front(&Replica::DefaultErrorHandler, this)));
 
   vector<vector<unsigned>> partition = Partition(num_df_flows_);
   shard_set->pool()->AwaitFiberOnAll([&](unsigned index, auto*) {
@@ -537,7 +533,7 @@ error_code Replica::ConsumeDflyStream() {
     }
   });
 
-  return cntx_;
+  return cntx_.GetError();
 }
 
 void Replica::CloseAllSockets() {
@@ -658,8 +654,10 @@ void Replica::FullSyncDflyFb(string eof_token, SyncBlock* sb, Context* cntx) {
   });
 
   // Load incoming rdb stream.
-  if (std::error_code ec = loader.Load(&ps); ec)
-    return cntx->Error(ec, "Error loading rdb format");
+  if (std::error_code ec = loader.Load(&ps); ec) {
+    cntx->Error(ec, "Error loading rdb format");
+    return;
+  }
 
   // Try finding eof token.
   io::PrefixSource chained_tail{loader.Leftover(), &ps};
@@ -670,8 +668,8 @@ void Replica::FullSyncDflyFb(string eof_token, SyncBlock* sb, Context* cntx) {
         chained_tail.ReadAtLeast(io::MutableBytes{buf.get(), eof_token.size()}, eof_token.size());
 
     if (!res || *res != eof_token.size()) {
-      return cntx->Error(std::make_error_code(errc::protocol_error),
-                         "Error finding eof token in stream");
+      cntx->Error(std::make_error_code(errc::protocol_error), "Error finding eof token in stream");
+      return;
     }
   }
 
@@ -706,16 +704,20 @@ void Replica::StableSyncDflyFb(Context* cntx) {
   while (!cntx->IsCancelled()) {
     io::MutableBytes buf = io_buf.AppendBuffer();
     io::Result<size_t> size_res = sock_->Recv(buf);
-    if (!size_res)
-      return cntx->Error(size_res.error());
+    if (!size_res) {
+      cntx->Error(size_res.error());
+      return;
+    }
 
     last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
 
     io_buf.CommitWrite(*size_res);
     repl_offs_ += *size_res;
 
-    if (auto ec = ParseAndExecute(&io_buf); ec)
-      return cntx->Error(ec);
+    if (auto ec = ParseAndExecute(&io_buf); ec) {
+      cntx->Error(ec);
+      return;
+    }
   }
 }
 
@@ -908,12 +910,17 @@ Replica::Info Replica::GetInfo() const {
   CHECK(sock_);
 
   return sock_->proactor()->AwaitBrief([this] {
+    auto last_io_time = last_io_time_;
+    for (const auto& flow : shard_flows_) {  // Get last io time from all sub flows.
+      last_io_time = std::max(last_io_time, flow->last_io_time_);
+    }
+
     Info res;
     res.host = master_context_.host;
     res.port = master_context_.port;
     res.master_link_established = (state_mask_ & R_TCP_CONNECTED);
     res.sync_in_progress = (state_mask_ & R_SYNCING);
-    res.master_last_io_sec = (ProactorBase::GetMonotonicTimeNs() - last_io_time_) / 1000000000UL;
+    res.master_last_io_sec = (ProactorBase::GetMonotonicTimeNs() - last_io_time) / 1000000000UL;
     return res;
   });
 }

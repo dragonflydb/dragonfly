@@ -250,6 +250,7 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
     TransactionGuard tg{cntx->transaction};
     AggregateStatus status;
 
+    // Use explicit assignment for replica_ptr, because capturing structured bindings is C++20.
     auto cb = [this, &status, replica_ptr = replica_ptr](unsigned index, auto*) {
       status = StartFullSyncInThread(&replica_ptr->flows[index], &replica_ptr->cntx,
                                      EngineShard::tlocal());
@@ -325,7 +326,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
   // Shard can be null for io thread.
   if (shard != nullptr) {
     CHECK(!sf_->journal()->OpenInThread(false, ""sv));  // can only happen in persistent mode.
-    flow->saver->StartSnapshotInShard(true, *cntx, shard);
+    flow->saver->StartSnapshotInShard(true, cntx->GetCancellation(), shard);
   }
 
   flow->full_sync_fb = ::boost::fibers::fiber(&DflyCmd::FullSyncFb, this, flow, cntx);
@@ -380,16 +381,19 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
   }
 
   if (ec) {
-    return cntx->Error(ec);
+    cntx->Error(ec);
+    return;
   }
 
-  if (ec = saver->SaveBody(*cntx, nullptr); ec) {
-    return cntx->Error(ec);
+  if (ec = saver->SaveBody(cntx->GetCancellation(), nullptr); ec) {
+    cntx->Error(ec);
+    return;
   }
 
   ec = flow->conn->socket()->Write(io::Buffer(flow->eof_token));
   if (ec) {
-    return cntx->Error(ec);
+    cntx->Error(ec);
+    return;
   }
 }
 
@@ -533,13 +537,10 @@ void DflyCmd::BreakOnShutdown() {
 }
 
 void DflyCmd::Shutdown() {
-  vector<pair<uint32_t, shared_ptr<ReplicaInfo>>> pending;
-
-  // Copy all sync infos to prevent blocking.
+  ReplicaInfoMap pending;
   {
     std::lock_guard lk(mu_);
-    pending.resize(replica_infos_.size());
-    std::copy(replica_infos_.begin(), replica_infos_.end(), pending.begin());
+    pending = std::move(replica_infos_);
   }
 
   for (auto [sync_id, replica_ptr] : pending) {
