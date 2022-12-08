@@ -148,7 +148,7 @@ TEST_F(RdbTest, Stream) {
 TEST_F(RdbTest, ComressionModeSaveDragonflyAndReload) {
   Run({"debug", "populate", "500000"});
 
-  for (int i = 0; i <= 2; ++i) {
+  for (int i = 0; i <= 3; ++i) {
     SetFlag(&FLAGS_compression_mode, i);
     RespExpr resp = Run({"save", "df"});
     ASSERT_EQ(resp, "OK");
@@ -156,7 +156,21 @@ TEST_F(RdbTest, ComressionModeSaveDragonflyAndReload) {
     auto save_info = service_->server_family().GetLastSaveInfo();
     resp = Run({"debug", "load", save_info->file_name});
     ASSERT_EQ(resp, "OK");
+    ASSERT_EQ(500000, CheckedInt({"dbsize"}));
   }
+}
+
+TEST_F(RdbTest, RdbLoaderOnReadCompressedDataShouldNotEnterEnsureReadFlow) {
+  SetFlag(&FLAGS_compression_mode, 2);
+  for (int i = 0; i < 1000; ++i) {
+    Run({"set", StrCat(i), "1"});
+  }
+  RespExpr resp = Run({"save", "df"});
+  ASSERT_EQ(resp, "OK");
+
+  auto save_info = service_->server_family().GetLastSaveInfo();
+  resp = Run({"debug", "load", save_info->file_name});
+  ASSERT_EQ(resp, "OK");
 }
 
 TEST_F(RdbTest, Reload) {

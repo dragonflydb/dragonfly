@@ -52,14 +52,9 @@ spec:
             - name: dragonfly
               containerPort: 6379
               protocol: TCP
-          livenessProbe:
-            httpGet:
-              path: /
-              port: dragonfly
-          readinessProbe:
-            httpGet:
-              path: /
-              port: dragonfly
+        {{- with .Values.probes }}
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
           {{- if .Values.command.cmd }}
           command:
             {{ toYaml .Values.command.cmd | nindent 12 }}

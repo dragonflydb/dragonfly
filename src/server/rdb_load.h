@@ -21,7 +21,7 @@ class EngineShardSet;
 class ScriptMgr;
 class CompactObj;
 
-class ZstdDecompressImpl;
+class DecompressImpl;
 
 class RdbLoaderBase {
  protected:
@@ -127,17 +127,13 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadZSetZL();
   ::io::Result<OpaqueObj> ReadListQuicklist(int rdbtype);
   ::io::Result<OpaqueObj> ReadStreams();
-  std::error_code HandleCompressedBlob();
+  std::error_code HandleCompressedBlob(int op_type);
   std::error_code HandleCompressedBlobFinish();
+  void AlocateDecompressOnce(int op_type);
 
   static size_t StrLen(const RdbVariant& tset);
 
-  std::error_code EnsureRead(size_t min_sz) {
-    if (mem_buf_->InputLen() >= min_sz)
-      return std::error_code{};
-
-    return EnsureReadInternal(min_sz);
-  }
+  std::error_code EnsureRead(size_t min_sz);
 
   std::error_code EnsureReadInternal(size_t min_sz);
 
@@ -149,7 +145,7 @@ class RdbLoaderBase {
   size_t bytes_read_ = 0;
   size_t source_limit_ = SIZE_MAX;
   base::PODArray<uint8_t> compr_buf_;
-  std::unique_ptr<ZstdDecompressImpl> zstd_decompress_;
+  std::unique_ptr<DecompressImpl> decompress_impl_;
 };
 
 class RdbLoader : protected RdbLoaderBase {

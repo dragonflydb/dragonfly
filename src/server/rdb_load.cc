@@ -18,6 +18,7 @@ extern "C" {
 }
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
+#include <lz4frame.h>
 #include <zstd.h>
 
 #include "base/endian.h"
@@ -38,12 +39,14 @@ ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 ABSL_DECLARE_FLAG(bool, use_set2);
 
-#define SET_OR_RETURN(expr, dest) \
-  do {                            \
-    auto exp_val = (expr);        \
-    if (!exp_val)                 \
-      return exp_val.error();     \
-    dest = exp_val.value();       \
+#define SET_OR_RETURN(expr, dest)              \
+  do {                                         \
+    auto exp_val = (expr);                     \
+    if (!exp_val) {                            \
+      VLOG(1) << "Error while calling " #expr; \
+      return exp_val.error();                  \
+    }                                          \
+    dest = exp_val.value();                    \
   } while (0)
 
 #define SET_OR_UNEXPECT(expr, dest)            \
@@ -203,12 +206,24 @@ bool resizeStringSet(robj* set, size_t size, bool use_set2) {
 
 }  // namespace
 
-class ZstdDecompressImpl {
+class DecompressImpl {
  public:
-  ZstdDecompressImpl() : uncompressed_mem_buf_{16_KB} {
+  DecompressImpl() : uncompressed_mem_buf_{16_KB} {
+  }
+  ~DecompressImpl() {
+  }
+  virtual io::Result<base::IoBuf*> Decompress(std::string_view str) = 0;
+
+ protected:
+  base::IoBuf uncompressed_mem_buf_;
+};
+
+class ZstdDecompress : public DecompressImpl {
+ public:
+  ZstdDecompress() {
     dctx_ = ZSTD_createDCtx();
   }
-  ~ZstdDecompressImpl() {
+  ~ZstdDecompress() {
     ZSTD_freeDCtx(dctx_);
   }
 
@@ -216,12 +231,11 @@ class ZstdDecompressImpl {
 
  private:
   ZSTD_DCtx* dctx_;
-  base::IoBuf uncompressed_mem_buf_;
 };
 
-io::Result<base::IoBuf*> ZstdDecompressImpl::Decompress(std::string_view str) {
+io::Result<base::IoBuf*> ZstdDecompress::Decompress(std::string_view str) {
   // Prepare membuf memory to uncompressed string.
-  unsigned long long const uncomp_size = ZSTD_getFrameContentSize(str.data(), str.size());
+  auto uncomp_size = ZSTD_getFrameContentSize(str.data(), str.size());
   if (uncomp_size == ZSTD_CONTENTSIZE_UNKNOWN) {
     LOG(ERROR) << "Zstd compression missing frame content size";
     return Unexpected(errc::invalid_encoding);
@@ -230,6 +244,7 @@ io::Result<base::IoBuf*> ZstdDecompressImpl::Decompress(std::string_view str) {
     LOG(ERROR) << "Invalid ZSTD compressed string";
     return Unexpected(errc::invalid_encoding);
   }
+
   uncompressed_mem_buf_.Reserve(uncomp_size + 1);
 
   // Uncompress string to membuf
@@ -244,6 +259,87 @@ io::Result<base::IoBuf*> ZstdDecompressImpl::Decompress(std::string_view str) {
     return Unexpected(errc::rdb_file_corrupted);
   }
   uncompressed_mem_buf_.CommitWrite(d_size);
+
+  // Add opcode of compressed blob end to membuf.
+  dest = uncompressed_mem_buf_.AppendBuffer();
+  if (dest.size() < 1) {
+    return Unexpected(errc::out_of_memory);
+  }
+  dest[0] = RDB_OPCODE_COMPRESSED_BLOB_END;
+  uncompressed_mem_buf_.CommitWrite(1);
+
+  return &uncompressed_mem_buf_;
+}
+
+class Lz4Decompress : public DecompressImpl {
+ public:
+  Lz4Decompress() {
+    auto result = LZ4F_createDecompressionContext(&dctx_, LZ4F_VERSION);
+    CHECK(!LZ4F_isError(result));
+  }
+  ~Lz4Decompress() {
+    auto result = LZ4F_freeDecompressionContext(dctx_);
+    CHECK(!LZ4F_isError(result));
+  }
+
+  io::Result<base::IoBuf*> Decompress(std::string_view str);
+
+ private:
+  LZ4F_dctx* dctx_;
+};
+
+io::Result<base::IoBuf*> Lz4Decompress::Decompress(std::string_view data) {
+  LZ4F_frameInfo_t frame_info;
+  size_t frame_size = data.size();
+
+  // Get content size from frame data
+  size_t consumed = frame_size;  // The nb of bytes consumed from data will be written into consumed
+  size_t res = LZ4F_getFrameInfo(dctx_, &frame_info, data.data(), &consumed);
+  if (LZ4F_isError(res)) {
+    return make_unexpected(error_code{int(res), generic_category()});
+  }
+  if (frame_info.contentSize == 0) {
+    LOG(ERROR) << "Missing frame content size";
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+
+  // reserve place for uncompressed data and end opcode
+  size_t reserve = frame_info.contentSize + 1;
+  uncompressed_mem_buf_.Reserve(reserve);
+  IoBuf::Bytes dest = uncompressed_mem_buf_.AppendBuffer();
+  if (dest.size() < reserve) {
+    return Unexpected(errc::out_of_memory);
+  }
+
+  // Uncompress data to membuf
+  string_view src = data.substr(consumed);
+  size_t src_size = src.size();
+
+  size_t ret = 1;
+  while (ret != 0) {
+    IoBuf::Bytes dest = uncompressed_mem_buf_.AppendBuffer();
+    size_t dest_capacity = dest.size();
+
+    // It will read up to src_size bytes from src,
+    // and decompress data into dest, of capacity dest_capacity
+    // The nb of bytes consumed from src will be written into src_size
+    // The nb of bytes decompressed into dest will be written into dest_capacity
+    ret = LZ4F_decompress(dctx_, dest.data(), &dest_capacity, src.data(), &src_size, nullptr);
+    if (LZ4F_isError(ret)) {
+      return make_unexpected(error_code{int(ret), generic_category()});
+    }
+    consumed += src_size;
+
+    uncompressed_mem_buf_.CommitWrite(dest_capacity);
+    src = src.substr(src_size);
+    src_size = src.size();
+  }
+  if (consumed != frame_size) {
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+  if (uncompressed_mem_buf_.InputLen() != frame_info.contentSize) {
+    return Unexpected(errc::rdb_file_corrupted);
+  }
 
   // Add opcode of compressed blob end to membuf.
   dest = uncompressed_mem_buf_.AppendBuffer();
@@ -1663,10 +1759,12 @@ error_code RdbLoader::Load(io::Source* src) {
       return RdbError(errc::feature_not_supported);
     }
 
-    if (type == RDB_OPCODE_COMPRESSED_BLOB_START) {
-      RETURN_ON_ERR(HandleCompressedBlob());
+    if (type == RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START ||
+        type == RDB_OPCODE_COMPRESSED_LZ4_BLOB_START) {
+      RETURN_ON_ERR(HandleCompressedBlob(type));
       continue;
     }
+
     if (type == RDB_OPCODE_COMPRESSED_BLOB_END) {
       RETURN_ON_ERR(HandleCompressedBlobFinish());
       continue;
@@ -1703,6 +1801,19 @@ error_code RdbLoader::Load(io::Source* src) {
   keys_loaded_ = keys_loaded;
 
   return kOk;
+}
+
+std::error_code RdbLoaderBase::EnsureRead(size_t min_sz) {
+  // In the flow of reading compressed data, we store the uncompressed data to in uncompressed
+  // buffer. When parsing entries we call ensure read with 9 bytes to read the length of key/value.
+  // If the key/value is very small (less than 9 bytes) the remainded data in uncompressed buffer
+  // might contain less than 9 bytes. We need to make sure that we dont read from sink to the
+  // uncompressed buffer and therefor in this flow we return here.
+  if (mem_buf_ != &origin_mem_buf_)
+    return std::error_code{};
+  if (mem_buf_->InputLen() >= min_sz)
+    return std::error_code{};
+  return EnsureReadInternal(min_sz);
 }
 
 error_code RdbLoaderBase::EnsureReadInternal(size_t min_sz) {
@@ -1773,11 +1884,21 @@ auto RdbLoaderBase::LoadLen(bool* is_encoded) -> io::Result<uint64_t> {
   return res;
 }
 
-error_code RdbLoaderBase::HandleCompressedBlob() {
-  if (!zstd_decompress_) {
-    zstd_decompress_.reset(new ZstdDecompressImpl());
+void RdbLoaderBase::AlocateDecompressOnce(int op_type) {
+  if (decompress_impl_) {
+    return;
   }
+  if (op_type == RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START) {
+    decompress_impl_.reset(new ZstdDecompress());
+  } else if (op_type == RDB_OPCODE_COMPRESSED_LZ4_BLOB_START) {
+    decompress_impl_.reset(new Lz4Decompress());
+  } else {
+    CHECK(false) << "Decompressor allocation should not be done";
+  }
+}
 
+error_code RdbLoaderBase::HandleCompressedBlob(int op_type) {
+  AlocateDecompressOnce(op_type);
   // Fetch uncompress blob
   string res;
   SET_OR_RETURN(FetchGenericString(), res);
@@ -1786,13 +1907,14 @@ error_code RdbLoaderBase::HandleCompressedBlob() {
   // Last type in the compressed blob is RDB_OPCODE_COMPRESSED_BLOB_END
   // in which we will switch back to the origin membuf (HandleCompressedBlobFinish)
   string_view uncompressed_blob;
-  SET_OR_RETURN(zstd_decompress_->Decompress(res), mem_buf_);
+  SET_OR_RETURN(decompress_impl_->Decompress(res), mem_buf_);
 
   return kOk;
 }
 
 error_code RdbLoaderBase::HandleCompressedBlobFinish() {
-  // TODO validate that all uncompressed data was fetched
+  CHECK_NE(&origin_mem_buf_, mem_buf_);
+  CHECK_EQ(mem_buf_->InputLen(), size_t(0));
   mem_buf_ = &origin_mem_buf_;
   return kOk;
 }

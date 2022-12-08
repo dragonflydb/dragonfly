@@ -51,7 +51,8 @@ using absl::GetFlag;
 
 namespace {
 
-constexpr DbIndex DEFAULT_DB_INDEX = 0;
+constexpr DbIndex kDefaultDbIndex = 0;
+constexpr uint64_t kCursorDoneState = 0u;
 
 vector<EngineShardSet::CachedStats> cached_stats;  // initialized in EngineShardSet::Init
 
@@ -66,6 +67,9 @@ uint64_t TEST_current_time_ms = 0;
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
   ooo_runs += o.ooo_runs;
   quick_runs += o.quick_runs;
+  defrag_attempt_total += o.defrag_attempt_total;
+  defrag_realloc_total += o.defrag_realloc_total;
+  defrag_task_invocation_total += o.defrag_task_invocation_total;
 
   return *this;
 }
@@ -76,11 +80,11 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
 // 2. That we had change in memory usage - to prevent endless loop - out of scope for now
 // 3. in case the above is OK, make sure that we have a "gap" between usage and commited memory
 // (control by commit_use_threshold flag)
-bool EngineShard::DefragTaskState::IsRequired() {
+bool EngineShard::DefragTaskState::IsRequired() const {
   const uint64_t threshold_mem = max_memory_limit * GetFlag(FLAGS_mem_defrag_threshold);
   const double commit_use_threshold = GetFlag(FLAGS_commit_use_threshold);
 
-  if (cursor > 0) {
+  if (cursor > kCursorDoneState) {
     return true;
   }
 
@@ -100,34 +104,75 @@ bool EngineShard::DefragTaskState::IsRequired() {
 
 // for now this does nothing
 bool EngineShard::DoDefrag() {
-  // TODO - Impl!!
-  return defrag_state_.cursor > 0;
-}
+  // --------------------------------------------------------------------------
+  // NOTE: This task is running with exclusive access to the shard.
+  // i.e. - Since we are using shared noting access here, and all access
+  // are done using fibers, This fiber is run only when no other fiber in the
+  // context of the controlling thread will access this shard!
+  // --------------------------------------------------------------------------
 
-void EngineShard::DefragTaskState::Init() {
-  cursor = 0u;
+  constexpr size_t kMaxTraverses = 50;
+  const float threshold = GetFlag(FLAGS_mem_utilization_threshold);
+
+  auto& slice = db_slice();
+  DCHECK(slice.IsDbValid(kDefaultDbIndex));
+  auto [prime_table, expire_table] = slice.GetTables(kDefaultDbIndex);
+  PrimeTable::Cursor cur = defrag_state_.cursor;
+  uint64_t reallocations = 0;
+  unsigned traverses_count = 0;
+  uint64_t attempts = 0;
+
+  do {
+    cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
+      // for each value check whether we should move it because it
+      // seats on underutilized page of memory, and if so, do it.
+      bool did = it->second.DefragIfNeeded(threshold);
+      attempts++;
+      if (did) {
+        reallocations++;
+      }
+    });
+    traverses_count++;
+  } while (traverses_count < kMaxTraverses && cur);
+
+  defrag_state_.cursor = cur.value();
+  if (reallocations > 0) {
+    VLOG(1) << "shard " << slice.shard_id() << ": successfully defrag  " << reallocations
+            << " times, did it in " << traverses_count << " cursor is at the "
+            << (defrag_state_.cursor == 0 ? "end" : "in progress");
+  } else {
+    VLOG(1) << "shard " << slice.shard_id() << ": run the defrag " << traverses_count
+            << " times out of maximum " << kMaxTraverses << ", with cursor at "
+            << (defrag_state_.cursor == 0 ? "end" : "in progress")
+            << " but no location for defrag were found";
+  }
+  stats_.defrag_realloc_total += reallocations;
+  stats_.defrag_task_invocation_total++;
+  stats_.defrag_attempt_total += attempts;
+  return defrag_state_.cursor > kCursorDoneState;
 }
 
 // the memory defragmentation task is as follow:
 //  1. Check if memory usage is high enough
 //  2. Check if diff between commited and used memory is high enough
 //  3. Check if we have memory changes (to ensure that we not running endlessly). - TODO
-//  4. if all the above pass -> run on the shard and try to defragmented memory by re-allocating
-//  values
-//     if the cursor for this is signal that we are not done, schedule the task to run at high
-//     priority otherwise lower the task priority so that it would not use the CPU when not required
+//  4. if all the above pass -> scan this shard and try to find whether we can move pointer to
+//  underutilized pages values
+//     if the cursor returned from scan is not in done state, schedule the task to run at high
+//     priority.
+//     otherwise lower the task priority so that it would not use the CPU when not required
 uint32_t EngineShard::DefragTask() {
+  constexpr uint32_t kRunAtLowPriority = 0u;
   const auto shard_id = db_slice().shard_id();
-  bool required_state = defrag_state_.IsRequired();
-  if (required_state) {
+  if (defrag_state_.IsRequired()) {
     VLOG(1) << shard_id << ": need to run defrag memory cursor state: " << defrag_state_.cursor;
     if (DoDefrag()) {
       // we didn't finish the scan
       return util::ProactorBase::kOnIdleMaxLevel;
     }
   }
-  // by default we just want to not get in the way..
-  return 0u;
+
+  return kRunAtLowPriority;
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap)
@@ -150,7 +195,6 @@ EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t*
 
   db_slice_.UpdateExpireBase(absl::GetCurrentTimeNanos() / 1000000, 0);
   // start the defragmented task here
-  defrag_state_.Init();
   defrag_task_ = pb->AddOnIdleTask([this]() { return this->DefragTask(); });
 }
 
@@ -170,9 +214,7 @@ void EngineShard::Shutdown() {
     ProactorBase::me()->CancelPeriodic(periodic_task_);
   }
 
-  if (defrag_task_ != 0) {
-    ProactorBase::me()->RemoveOnIdleTask(defrag_task_);
-  }
+  ProactorBase::me()->RemoveOnIdleTask(defrag_task_);
 }
 
 void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {

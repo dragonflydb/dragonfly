@@ -19,7 +19,8 @@ class DebugCmd {
 
  private:
   void Populate(CmdArgList args);
-  void PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view prefix, unsigned value_len);
+  void PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view prefix, unsigned value_len,
+                          bool populate_random_values);
   void Reload(CmdArgList args);
   void Replica(CmdArgList args);
   void Load(std::string_view filename);

@@ -26,6 +26,15 @@ ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to 
 
 namespace dfly {
 
+std::ostream& operator<<(std::ostream& os, ArgSlice& list) {
+  os << "[";
+  if (!list.empty()) {
+    std::for_each(list.begin(), list.end() - 1, [&os](const auto& val) { os << val << ", "; });
+    os << (*(list.end() - 1));
+  }
+  return os << "]";
+}
+
 extern unsigned kInitSegmentLog;
 
 using MP = MemcacheParser;
@@ -267,7 +276,7 @@ auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::stri
   return conn->SplitLines();
 }
 
-int64_t BaseFamilyTest::CheckedInt(std::initializer_list<std::string_view> list) {
+int64_t BaseFamilyTest::CheckedInt(ArgSlice list) {
   RespExpr resp = Run(list);
   if (resp.type == RespExpr::INT64) {
     return get<int64_t>(resp.u);

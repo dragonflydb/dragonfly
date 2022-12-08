@@ -758,21 +758,67 @@ TEST_F(DflyEngineTest, Bug496) {
 TEST_F(DefragDflyEngineTest, TestDefragOption) {
   // Fill data into dragonfly and then check if we have
   // any location in memory to defrag. See issue #448 for details about this.
-  EXPECT_GE(max_memory_limit, 100'000);
-  const int NUMBER_OF_KEYS = 184000;
+  max_memory_limit = 300'000;             // control memory size so no need for too many keys
+  constexpr int kNumberOfKeys = 100'000;  // this fill the memory
+  constexpr int kKeySize = 137;
+  constexpr int kMaxDefragTriesForTests = 10;
 
-  RespExpr resp = Run({"DEBUG", "POPULATE", std::to_string(NUMBER_OF_KEYS), "key-name", "130"});
+  std::vector<std::string> keys2delete;
+  keys2delete.push_back("del");
+
+  // Generate a list of keys that would be deleted
+  // The keys that we will delete are all in the form of "key-name:1<other digits>"
+  // This is because we are populating keys that has this format, but we don't want
+  // to delete all keys, only some random keys so we deleting those that start with 1
+  constexpr int kFactor = 10;
+  int kMaxNumKeysToDelete = 10'000;
+  int current_step = kFactor;
+  for (int i = 1; i < kMaxNumKeysToDelete; current_step *= kFactor) {
+    for (; i < current_step; i++) {
+      int j = i - 1 + current_step;
+      keys2delete.push_back("key-name:" + std::to_string(j));
+    }
+  }
+
+  std::vector<std::string_view> keys(keys2delete.begin(), keys2delete.end());
+
+  RespExpr resp = Run(
+      {"DEBUG", "POPULATE", std::to_string(kNumberOfKeys), "key-name", std::to_string(kKeySize)});
   ASSERT_EQ(resp, "OK");
   resp = Run({"DBSIZE"});
-  EXPECT_THAT(resp, IntArg(NUMBER_OF_KEYS));
+  EXPECT_THAT(resp, IntArg(kNumberOfKeys));
 
   shard_set->pool()->AwaitFiberOnAll([&](unsigned index, ProactorBase* base) {
     EngineShard* shard = EngineShard::tlocal();
     ASSERT_FALSE(shard == nullptr);  // we only have one and its should not be empty!
-    EXPECT_EQ(shard->GetDefragStats().success_count, 0);
-    // we are not running stats yet
-    EXPECT_EQ(shard->GetDefragStats().tries, 0);
-    EXPECT_GT(GetMallocCurrentCommitted(), NUMBER_OF_KEYS);
+    this_fiber::sleep_for(100ms);
+    EXPECT_EQ(shard->stats().defrag_realloc_total, 0);
+    // we are expecting to have at least one try by now
+    EXPECT_GT(shard->stats().defrag_task_invocation_total, 0);
+  });
+
+  ArgSlice delete_cmd(keys);
+  auto r = CheckedInt(delete_cmd);
+  // the first element in this is the command del so size is one less
+  ASSERT_EQ(r, keys2delete.size() - 1);
+
+  // At this point we need to see whether we did running the task and whether the task did something
+  shard_set->pool()->AwaitFiberOnAll([&](unsigned index, ProactorBase* base) {
+    EngineShard* shard = EngineShard::tlocal();
+    ASSERT_FALSE(shard == nullptr);  // we only have one and its should not be empty!
+    // a "busy wait" to ensure that memory defragmentations was successful:
+    // the task ran and did it work
+    auto stats = shard->stats();
+    for (int i = 0; i < kMaxDefragTriesForTests; i++) {
+      stats = shard->stats();
+      if (stats.defrag_realloc_total > 0) {
+        break;
+      }
+      this_fiber::sleep_for(220ms);
+    }
+    // make sure that we successfully found places to defrag in memory
+    EXPECT_GT(stats.defrag_realloc_total, 0);
+    EXPECT_GE(stats.defrag_attempt_total, stats.defrag_realloc_total);
   });
 }
 

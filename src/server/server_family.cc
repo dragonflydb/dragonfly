@@ -1304,6 +1304,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("total_writes_processed", m.conn_stats.io_write_cnt);
     append("async_writes_count", m.conn_stats.async_writes_cnt);
     append("parser_err_count", m.conn_stats.parser_err_cnt);
+    append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
+    append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
+    append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
   }
 
   if (should_enter("TIERED", true)) {
