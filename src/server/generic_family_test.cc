@@ -93,8 +93,8 @@ TEST_F(GenericFamilyTest, Del) {
     }
   });
 
-  exist_fb.join();
-  del_fb.join();
+  exist_fb.Join();
+  del_fb.Join();
 }
 
 TEST_F(GenericFamilyTest, TTL) {
@@ -160,8 +160,8 @@ TEST_F(GenericFamilyTest, Rename) {
     }
   });
 
-  exist_fb.join();
-  ren_fb.join();
+  exist_fb.Join();
+  ren_fb.Join();
 }
 
 TEST_F(GenericFamilyTest, RenameNonString) {
@@ -275,7 +275,7 @@ TEST_F(GenericFamilyTest, Move) {
     Run({"move", "l", "1"});
   });
 
-  fb_blpop.join();
+  fb_blpop.Join();
 }
 
 using testing::AnyOf;

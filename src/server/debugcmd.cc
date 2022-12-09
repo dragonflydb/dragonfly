@@ -21,6 +21,7 @@
 #include "server/string_family.h"
 #include "server/transaction.h"
 #include "util/fiber_sched_algo.h"
+#include "util/fibers/fiber.h"
 
 using namespace std;
 
@@ -30,7 +31,6 @@ ABSL_DECLARE_FLAG(string, dbfilename);
 namespace dfly {
 
 using namespace util;
-namespace this_fiber = ::boost::this_fiber;
 using boost::intrusive_ptr;
 using boost::fibers::fiber;
 using namespace facade;
@@ -275,7 +275,7 @@ void DebugCmd::Populate(CmdArgList args) {
   }
   ranges.emplace_back(from, total_count - from);
 
-  vector<fiber> fb_arr(ranges.size());
+  vector<fibers_ext::Fiber> fb_arr(ranges.size());
   for (size_t i = 0; i < ranges.size(); ++i) {
     auto range = ranges[i];
 
@@ -285,14 +285,14 @@ void DebugCmd::Populate(CmdArgList args) {
     });
   }
   for (auto& fb : fb_arr)
-    fb.join();
+    fb.Join();
 
   (*cntx_)->SendOk();
 }
 
 void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view prefix,
                                   unsigned value_len, bool populate_random_values) {
-  this_fiber::properties<FiberProps>().set_name("populate_range");
+  FiberProps::SetName("populate_range");
   VLOG(1) << "PopulateRange: " << from << "-" << (from + len - 1);
 
   string key = absl::StrCat(prefix, ":");
@@ -313,7 +313,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view 
       ess.Add(sid, [=] {
         DoPopulateBatch(prefix, value_len, populate_random_values, params, shard_batch);
         if (i % 50 == 0) {
-          this_fiber::yield();
+          fibers_ext::Yield();
         }
       });
 

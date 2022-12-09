@@ -226,7 +226,7 @@ TEST_F(RdbTest, SaveFlush) {
   } while (!service_->server_family().IsSaving());
 
   Run({"flushdb"});
-  save_fb.join();
+  save_fb.Join();
   auto save_info = service_->server_family().GetLastSaveInfo();
   ASSERT_EQ(1, save_info->freq_map.size());
   auto& k_v = save_info->freq_map.front();
@@ -261,7 +261,7 @@ TEST_F(RdbTest, SaveManyDbs) {
     }
   });
 
-  save_fb.join();
+  save_fb.Join();
 
   auto save_info = service_->server_family().GetLastSaveInfo();
   ASSERT_EQ(1, save_info->freq_map.size());

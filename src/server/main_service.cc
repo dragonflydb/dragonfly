@@ -56,7 +56,6 @@ using namespace util;
 using base::VarzValue;
 using ::boost::intrusive_ptr;
 namespace fibers = ::boost::fibers;
-namespace this_fiber = ::boost::this_fiber;
 using absl::GetFlag;
 using absl::StrCat;
 using namespace facade;
@@ -510,7 +509,7 @@ void Service::Shutdown() {
   shard_set->Shutdown();
 
   // wait for all the pending callbacks to stop.
-  boost::this_fiber::sleep_for(10ms);
+  fibers_ext::SleepFor(10ms);
 }
 
 static void MultiSetError(ConnectionContext* cntx) {
