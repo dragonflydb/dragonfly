@@ -13,7 +13,6 @@ class Transaction;
 
 namespace journal {
 
-
 class Journal {
  public:
   using Span = absl::Span<const std::string_view>;
@@ -31,7 +30,6 @@ class Journal {
   std::error_code OpenInThread(bool persistent, std::string_view dir);
 
   //******* The following functions must be called in the context of the owning shard *********//
-
 
   uint32_t RegisterOnChange(ChangeCallback cb);
   void Unregister(uint32_t id);
@@ -55,10 +53,9 @@ class Journal {
 */
   LSN GetLsn() const;
 
-  void RecordEntry(const Entry& entry);
+  void Record(TxId txid, DbIndex dbid, Entry::Payload payload);
 
  private:
-
   mutable boost::fibers::mutex state_mu_;
 
   std::atomic_bool lameduck_{false};

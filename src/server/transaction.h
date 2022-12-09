@@ -238,6 +238,10 @@ class Transaction {
     return use_count_.load(std::memory_order_relaxed);
   }
 
+  // If needed, notify the jounral of the executed command
+  // on the given shard after running the transaction.
+  void LogJournalOnShard(EngineShard* shard);
+
   struct PerShardData {
     uint32_t arg_start = 0;  // Indices into args_ array.
     uint16_t arg_count = 0;
@@ -278,7 +282,10 @@ class Transaction {
   // scheduled transaction is accessed between operations as well.
   absl::InlinedVector<PerShardData, 4> shard_data_;  // length = shard_count
 
-  //! Stores arguments of the transaction (i.e. keys + values) partitioned by shards.
+  // Stores the full arguments.
+  CmdArgList full_args_;
+
+  // Stores arguments of the transaction (i.e. keys + values) partitioned by shards.
   absl::InlinedVector<std::string_view, 4> args_;
 
   // Reverse argument mapping. Allows to reconstruct responses according to the original order of

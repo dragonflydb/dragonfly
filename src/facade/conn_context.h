@@ -51,6 +51,7 @@ class ConnectionContext {
   bool replica_conn : 1;
   bool authenticated : 1;
   bool force_dispatch : 1;  // whether we should route all requests to the dispatch fiber.
+  bool journal_emulated : 1;
 
  private:
   Connection* owner_;

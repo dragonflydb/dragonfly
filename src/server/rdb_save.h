@@ -16,6 +16,7 @@ extern "C" {
 #include "base/pod_array.h"
 #include "io/io.h"
 #include "server/common.h"
+#include "server/journal/types.h"
 #include "server/table.h"
 
 typedef struct rax rax;
@@ -120,21 +121,22 @@ class RdbSerializer {
 
   ~RdbSerializer();
 
-  std::error_code WriteOpcode(uint8_t opcode) {
-    return WriteRaw(::io::Bytes{&opcode, 1});
-  }
-
   std::error_code SelectDb(uint32_t dbid);
 
   // Must be called in the thread to which `it` belongs.
   // Returns the serialized rdb_type or the error.
   // expire_ms = 0 means no expiry.
   io::Result<uint8_t> SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms);
+
   std::error_code WriteRaw(const ::io::Bytes& buf);
   std::error_code SaveString(std::string_view val);
 
   std::error_code SaveString(const uint8_t* buf, size_t len) {
     return SaveString(std::string_view{reinterpret_cast<const char*>(buf), len});
+  }
+
+  std::error_code WriteOpcode(uint8_t opcode) {
+    return WriteRaw(::io::Bytes{&opcode, 1});
   }
 
   std::error_code FlushToSink(io::Sink* s);
@@ -146,8 +148,12 @@ class RdbSerializer {
   // for the dump command - thus it is public function
   std::error_code SaveValue(const PrimeValue& pv);
 
-  std::error_code SendFullSyncCut(io::Sink* s);
   size_t SerializedLen() const;
+
+  // TODO: Declarations above are chaotic.
+  std::error_code WriteJournalEntries(absl::Span<const journal::Entry> entries);
+
+  std::error_code SendFullSyncCut(io::Sink* s);
 
  private:
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);

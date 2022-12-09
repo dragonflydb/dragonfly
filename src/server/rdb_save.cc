@@ -26,6 +26,7 @@ extern "C" {
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/journal/serializer.h"
 #include "server/rdb_extensions.h"
 #include "server/snapshot.h"
 #include "util/fibers/simple_channel.h"
@@ -635,6 +636,20 @@ error_code RdbSerializer::SaveStreamConsumers(streamCG* cg) {
 error_code RdbSerializer::SendFullSyncCut(io::Sink* s) {
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_FULLSYNC_END));
   return FlushToSink(s);
+}
+
+error_code RdbSerializer::WriteJournalEntries(absl::Span<const journal::Entry> entries) {
+  // TODO: a base::IoBuf shold be really a sink...
+  io::StringSink ss{};
+  JournalWriter writer{&ss};
+  for (const auto& entry : entries) {
+    RETURN_ON_ERR(writer.Write(entry));
+  }
+
+  // TOOD: OPCODE + LEN should instead allow inline parsing
+  RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_JOURNAL_BLOB));
+  RETURN_ON_ERR(SaveLen(entries.size()));
+  return SaveString(ss.str());
 }
 
 error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {

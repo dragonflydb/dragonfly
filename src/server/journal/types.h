@@ -3,6 +3,9 @@
 //
 #pragma once
 
+#include <string>
+#include <variant>
+
 #include "server/common.h"
 #include "server/table.h"
 
@@ -11,37 +14,59 @@ namespace journal {
 
 enum class Op : uint8_t {
   NOOP = 0,
-  LOCK = 1,
-  UNLOCK = 2,
-  LOCK_SHARD = 3,
-  UNLOCK_SHARD = 4,
-  SCHED = 5,
-  VAL = 10,
-  DEL,
-  MSET,
+  SELECT = 1,
+  COMMAND = 2,
 };
 
 // TODO: to pass all the attributes like ttl, stickiness etc.
 struct Entry {
-  Entry(Op op, DbIndex did, TxId tid, std::string_view skey)
-      : opcode(op), db_ind(did), txid(tid), key(skey) {
+  using Payload = std::variant<std::monostate,
+                               CmdArgList,                            // Full single key command.
+                               std::pair<std::string_view, ArgSlice>  // Command + shard parts.
+                               >;
+
+  using OwnedPayload = std::optional<CmdArgVec>;
+
+  Entry(TxId txid, DbIndex dbid, Payload pl)
+      : txid{txid}, opcode{Op::COMMAND}, dbid{dbid}, payload{pl}, owned_payload{} {
   }
 
-  Entry(DbIndex did, TxId tid, std::string_view skey, const PrimeValue& pval)
-      : Entry(Op::VAL, did, tid, skey) {
-    pval_ptr = &pval;
+  Entry(journal::Op opcode, TxId txid)
+      : txid{txid}, opcode{opcode}, dbid{0}, payload{}, owned_payload{} {
   }
 
-  static Entry Sched(TxId tid) {
-    return Entry{Op::SCHED, 0, tid, {}};
+  std::string Print() const {
+    struct f {
+      std::string operator()(CmdArgList args) {
+        std::string out;
+        for (auto arg : args) {
+          out += std::string_view{arg.begin(), arg.size()};
+          out += " ";
+        };
+        return out;
+      }
+      std::string operator()(std::pair<std::string_view, ArgSlice> args) {
+        std::string out{args.first};
+        out += " ";
+        for (auto arg : args.second) {
+          out += arg;
+          out += " ";
+        }
+        return out;
+      }
+      std::string operator()(std::monostate) {
+        return "";
+      }
+    };
+    return std::visit(f{}, payload);
   }
 
-  Op opcode;
-  DbIndex db_ind;
   TxId txid;
-  std::string_view key;
-  const PrimeValue* pval_ptr = nullptr;
-  uint64_t expire_ms = 0;  // 0 means no expiry.
+  Op opcode;
+  DbIndex dbid;
+
+  Payload payload;
+  OwnedPayload owned_payload;
 };
 
 using ChangeCallback = std::function<void(const Entry&)>;

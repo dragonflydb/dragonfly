@@ -27,6 +27,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/hset_family.h"
+#include "server/journal/serializer.h"
 #include "server/rdb_extensions.h"
 #include "server/script_mgr.h"
 #include "server/server_state.h"
@@ -1524,7 +1525,8 @@ struct RdbLoader::ObjSettings {
   ObjSettings() = default;
 };
 
-RdbLoader::RdbLoader(ScriptMgr* script_mgr) : script_mgr_(script_mgr) {
+RdbLoader::RdbLoader(Service* service)
+    : service_{service}, script_mgr_{service == nullptr ? nullptr : service->script_mgr()} {
   shard_buf_.reset(new ItemsBuf[shard_set->size()]);
 }
 
@@ -1670,8 +1672,19 @@ error_code RdbLoader::Load(io::Source* src) {
       RETURN_ON_ERR(HandleCompressedBlob());
       continue;
     }
+
     if (type == RDB_OPCODE_COMPRESSED_BLOB_END) {
       RETURN_ON_ERR(HandleCompressedBlobFinish());
+      continue;
+    }
+
+    // TODO: Shouldn't this all be a switch really?
+    if (type == RDB_OPCODE_JOURNAL_BLOB) {
+      // We should flush all changes on the current db before applying incremental changes.
+      for (unsigned i = 0; i < shard_set->size(); ++i) {
+        FlushShardAsync(i);
+      }
+      RETURN_ON_ERR(HandleJournalEntries(service_));
       continue;
     }
 
@@ -1814,6 +1827,32 @@ error_code RdbLoaderBase::HandleCompressedBlobFinish() {
   return kOk;
 }
 
+error_code RdbLoaderBase::HandleJournalEntries(Service* service) {
+  size_t len;
+  bool _encoded;
+  SET_OR_RETURN(LoadLen(&_encoded), len);
+
+  // TODO: Do this inline into buffer
+  string res;
+  SET_OR_RETURN(FetchGenericString(), res);
+
+  io::BytesSource bs{io::Buffer(res)};
+  JournalReader rd{&bs};
+  JournalExecutor ex{service};
+
+  size_t parsed = 0;
+  while (parsed < len) {
+    auto res = rd.ReadEntry();
+    if (!res)
+      return res.error();
+
+    ex.Execute(std::move(res.value()));
+    parsed++;
+  }
+
+  return std::error_code{};
+}
+
 error_code RdbLoader::HandleAux() {
   /* AUX: generic string-string fields. Use to add state to RDB
    * which is backward compatible. Implementations of RDB loading
@@ -1902,7 +1941,7 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
     delete ib;
   };
 
-  shard_set->Add(sid, std::move(cb));
+  shard_set->Await(sid, std::move(cb));
 }
 
 std::error_code RdbLoaderBase::Visit(const Item& item, CompactObj* pv) {

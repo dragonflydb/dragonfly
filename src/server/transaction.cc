@@ -80,6 +80,7 @@ Transaction::~Transaction() {
 
 OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   db_index_ = index;
+  full_args_ = args;
 
   if (IsGlobal()) {
     unique_shard_cnt_ = shard_set->size();
@@ -129,6 +130,7 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
         reverse_index_[j] = j + key_index.start - 1;
       }
     }
+
     return OpStatus::OK;
   }
 
@@ -371,6 +373,9 @@ bool Transaction::RunInShard(EngineShard* shard) {
   }
 
   /*************************************************************************/
+
+  if (!was_suspended && should_release)  // run only on final hop
+    LogJournalOnShard(shard);
 
   // at least the coordinator thread owns the reference.
   DCHECK_GE(use_count(), 1u);
@@ -771,6 +776,9 @@ void Transaction::RunQuickie(EngineShard* shard) {
     LOG(FATAL) << "Unexpected exception " << e.what();
   }
 
+  // Check journal
+  LogJournalOnShard(shard);
+
   sd.local_mask &= ~ARMED;
   cb_ = nullptr;  // We can do it because only a single shard runs the callback.
 }
@@ -1149,6 +1157,29 @@ inline uint32_t Transaction::DecreaseRunCnt() {
     run_ec_.notify();
   }
   return res;
+}
+
+void Transaction::LogJournalOnShard(EngineShard* shard) {
+  // For now, we ignore non shard coordination. TODO: implement.
+  if (shard == nullptr)
+    return;
+
+  if ((cid_->opt_mask() & CO::WRITE) == 0)
+    return;
+
+  auto journal = shard->journal();
+  if (journal == nullptr)
+    return;
+
+  // TODO: Handle complex commands like LMPOP once they are implemented.
+  if (unique_shard_cnt_ == 1) {
+    journal->Record(txid_, db_index_, full_args_);
+  } else if (args_.empty()) {
+    journal->Record(txid_, db_index_, make_pair(facade::ToSV(full_args_.front()), ArgSlice{}));
+  } else {
+    auto args = make_pair(facade::ToSV(full_args_.front()), ShardArgsInShard(shard->shard_id()));
+    journal->Record(txid_, db_index_, args);
+  }
 }
 
 bool Transaction::IsGlobal() const {

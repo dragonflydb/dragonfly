@@ -41,11 +41,11 @@ error_code Journal::OpenInThread(bool persistent, string_view dir) {
     }
   }
 
-      ServerState::tlocal()->set_journal(this);
-      EngineShard* shard = EngineShard::tlocal();
-      if (shard) {
-        shard->set_journal(this);
-      }
+  ServerState::tlocal()->set_journal(this);
+  EngineShard* shard = EngineShard::tlocal();
+  if (shard) {
+    shard->set_journal(this);
+  }
 
   return ec;
 }
@@ -92,7 +92,7 @@ bool Journal::SchedStartTx(TxId txid, unsigned num_keys, unsigned num_shards) {
     return false;
 
   // TODO: to complete the metadata.
-  journal_slice.AddLogRecord(Entry::Sched(txid));
+  // journal_slice.AddLogRecord(Entry::Sched(txid));
 
   return true;
 }
@@ -111,8 +111,8 @@ bool Journal::EnterLameDuck() {
   return res;
 }
 
-void Journal::RecordEntry(const Entry& entry) {
-  journal_slice.AddLogRecord(entry);
+void Journal::Record(TxId txid, DbIndex dbid, Entry::Payload payload) {
+  journal_slice.AddLogRecord(journal::Entry{txid, dbid, payload});
 }
 
 /*

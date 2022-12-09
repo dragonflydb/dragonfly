@@ -17,6 +17,7 @@ extern "C" {
 #include "facade/dragonfly_connection.h"
 #include "facade/redis_parser.h"
 #include "server/error.h"
+#include "server/journal/serializer.h"
 #include "server/main_service.h"
 #include "server/rdb_load.h"
 #include "util/proactor_base.h"
@@ -386,7 +387,7 @@ error_code Replica::InitiatePSync() {
     SocketSource ss{sock_.get()};
     io::PrefixSource ps{io_buf.InputBuffer(), &ss};
 
-    RdbLoader loader(NULL);
+    RdbLoader loader(nullptr);
     loader.set_source_limit(snapshot_size);
     // TODO: to allow registering callbacks within loader to send '\n' pings back to master.
     // Also to allow updating last_io_time_.
@@ -618,12 +619,14 @@ void Replica::FullSyncDflyFb(SyncBlock* sb, string eof_token) {
   SocketSource ss{sock_.get()};
   io::PrefixSource ps{leftover_buf_->InputBuffer(), &ss};
 
-  RdbLoader loader(NULL);
+  RdbLoader loader(&service_);
   loader.SetFullSyncCutCb([sb, ran = false]() mutable {
     if (!ran) {
-      std::unique_lock lk(sb->mu_);
-      sb->flows_left--;
-      ran = true;
+      {
+        std::unique_lock lk(sb->mu_);
+        sb->flows_left--;
+        ran = true;
+      }
       sb->cv_.notify_all();
     }
   });
@@ -657,34 +660,24 @@ void Replica::FullSyncDflyFb(SyncBlock* sb, string eof_token) {
 }
 
 void Replica::StableSyncDflyFb() {
-  base::IoBuf io_buf(16_KB);
-  parser_.reset(new RedisParser);
+  io::Bytes prefix{};
 
-  // Check leftover from stable state.
+  // Check leftover from full sync.
   if (leftover_buf_ && leftover_buf_->InputLen() > 0) {
-    size_t len = leftover_buf_->InputLen();
-    leftover_buf_->ReadAndConsume(len, io_buf.AppendBuffer().data());
-    io_buf.CommitWrite(len);
-    leftover_buf_.reset();
+    prefix = leftover_buf_->InputBuffer();
   }
 
-  error_code ec;
-  string ack_cmd;
+  SocketSource ss{sock_.get()};
+  io::PrefixSource ps{prefix, &ss};
 
-  while (!ec) {
-    io::MutableBytes buf = io_buf.AppendBuffer();
-    io::Result<size_t> size_res = sock_->Recv(buf);
-    if (!size_res)
+  JournalReader reader{&ps};
+  JournalExecutor executor{&service_};
+  while (true) {
+    auto res = reader.ReadEntry();
+    if (!res)
       return;
-
-    last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
-
-    io_buf.CommitWrite(*size_res);
-    repl_offs_ += *size_res;
-
-    ec = ParseAndExecute(&io_buf);
+    executor.Execute(std::move(res.value()));
   }
-
   return;
 }
 

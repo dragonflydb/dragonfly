@@ -273,11 +273,11 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 }
 
 void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
-  CHECK(journal::Op::VAL == entry.opcode);
+  //VLOG(0) << "Interrupted by " << entry.Print();
 
   optional<RdbSerializer> tmp_serializer;
   RdbSerializer* serializer_ptr = default_serializer_.get();
-  if (entry.db_ind != current_db_) {
+  if (entry.dbid != current_db_) {
     CompressionMode compression_mode = compression_mode_ == CompressionMode::NONE
                                            ? CompressionMode::NONE
                                            : CompressionMode::SINGLE_ENTRY;
@@ -285,11 +285,13 @@ void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
     serializer_ptr = &*tmp_serializer;
   }
 
-  PrimeKey pkey{entry.key};
-  SerializeEntry(entry.db_ind, pkey, *entry.pval_ptr, entry.expire_ms, serializer_ptr);
+  CHECK(entry.opcode == journal::Op::COMMAND);
+  serializer_ptr->WriteJournalEntries(absl::Span{&entry, 1});
 
   if (tmp_serializer) {
-    FlushTmpSerializer(entry.db_ind, &*tmp_serializer);
+    FlushTmpSerializer(entry.dbid, &*tmp_serializer);
+  } else {
+    FlushDefaultBuffer(true); // ONLY FOR TESTING
   }
 }
 

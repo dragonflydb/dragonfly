@@ -546,8 +546,9 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     return;
   }
 
-  if ((etl.gstate() == GlobalState::LOADING && (cid->opt_mask() & CO::LOADING) == 0) ||
-      etl.gstate() == GlobalState::SHUTTING_DOWN) {
+  bool blocked_by_loading = !cntx->journal_emulated && etl.gstate() == GlobalState::LOADING &&
+                            (cid->opt_mask() & CO::LOADING) == 0;
+  if (blocked_by_loading || etl.gstate() == GlobalState::SHUTTING_DOWN) {
     string err = StrCat("Can not execute during ", GlobalStateName(etl.gstate()));
     (*cntx)->SendError(err);
     return;
