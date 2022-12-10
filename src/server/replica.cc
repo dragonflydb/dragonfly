@@ -29,7 +29,6 @@ using namespace util;
 using namespace boost::asio;
 using namespace facade;
 using absl::StrCat;
-namespace this_fiber = ::boost::this_fiber;
 
 namespace {
 
@@ -172,7 +171,7 @@ void Replica::MainReplicationFb() {
   while (state_mask_ & R_ENABLED) {
     // 1. Connect socket.
     if ((state_mask_ & R_TCP_CONNECTED) == 0) {
-      this_fiber::sleep_for(500ms);
+      fibers_ext::SleepFor(500ms);
       if (is_paused_)
         continue;
 
@@ -211,7 +210,7 @@ void Replica::MainReplicationFb() {
         // triggered
         // before Redis is ready to transition to the streaming state and it silenty ignores "ACK
         // 0". We reduce the chance it happens with this delay.
-        this_fiber::sleep_for(50ms);
+        fibers_ext::SleepFor(50ms);
       }
 
       service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);

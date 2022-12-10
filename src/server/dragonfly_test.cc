@@ -27,7 +27,6 @@ using absl::StrCat;
 using ::io::Result;
 using testing::ElementsAre;
 using testing::HasSubstr;
-namespace this_fiber = boost::this_fiber;
 
 namespace {
 
@@ -178,7 +177,7 @@ TEST_F(DflyEngineTest, MultiConsistent) {
   auto fb = pp_->at(1)->LaunchFiber([&] {
     RespExpr resp = Run({"multi"});
     ASSERT_EQ(resp, "OK");
-    this_fiber::sleep_for(1ms);
+    fibers_ext::SleepFor(1ms);
 
     resp = Run({"get", kKey1});
     ASSERT_EQ(resp, "QUEUED");
@@ -201,8 +200,8 @@ TEST_F(DflyEngineTest, MultiConsistent) {
     EXPECT_EQ(sub_arr[0].GetBuf(), resp_arr[0].GetBuf());
   });
 
-  mset_fb.join();
-  fb.join();
+  mset_fb.Join();
+  fb.Join();
   ASSERT_FALSE(service_->IsLocked(0, kKey1));
   ASSERT_FALSE(service_->IsLocked(0, kKey4));
   ASSERT_FALSE(service_->IsShardSetLocked());
@@ -271,8 +270,8 @@ TEST_F(DflyEngineTest, MultiHop) {
     }
   });
 
-  p1_fb.join();
-  p2_fb.join();
+  p1_fb.Join();
+  p2_fb.Join();
 }
 
 TEST_F(DflyEngineTest, FlushDb) {
@@ -294,7 +293,7 @@ TEST_F(DflyEngineTest, FlushDb) {
     }
   });
 
-  fb0.join();
+  fb0.Join();
 
   ASSERT_FALSE(service_->IsLocked(0, kKey1));
   ASSERT_FALSE(service_->IsLocked(0, kKey4));
@@ -472,12 +471,12 @@ TEST_F(DflyEngineTest, FlushAll) {
     for (size_t i = 1; i < 100; ++i) {
       RespExpr resp = Run({"set", "foo", "bar"});
       ASSERT_EQ(resp, "OK");
-      this_fiber::yield();
+      fibers_ext::Yield();
     }
   });
 
-  fb0.join();
-  fb1.join();
+  fb0.Join();
+  fb1.Join();
 }
 
 TEST_F(DflyEngineTest, OOM) {
@@ -791,7 +790,7 @@ TEST_F(DefragDflyEngineTest, TestDefragOption) {
   shard_set->pool()->AwaitFiberOnAll([&](unsigned index, ProactorBase* base) {
     EngineShard* shard = EngineShard::tlocal();
     ASSERT_FALSE(shard == nullptr);  // we only have one and its should not be empty!
-    this_fiber::sleep_for(100ms);
+    fibers_ext::SleepFor(100ms);
     EXPECT_EQ(shard->stats().defrag_realloc_total, 0);
     // we are expecting to have at least one try by now
     EXPECT_GT(shard->stats().defrag_task_invocation_total, 0);
@@ -814,7 +813,7 @@ TEST_F(DefragDflyEngineTest, TestDefragOption) {
       if (stats.defrag_realloc_total > 0) {
         break;
       }
-      this_fiber::sleep_for(220ms);
+      fibers_ext::SleepFor(220ms);
     }
     // make sure that we successfully found places to defrag in memory
     EXPECT_GT(stats.defrag_realloc_total, 0);

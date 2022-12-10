@@ -62,11 +62,7 @@ enum class SaveMode {
   RDB,           // Save .rdb file. Expected to read all shards.
 };
 
-enum class CompressionMode {
-  NONE,
-  SINGLE_ENTRY,
-  MULTY_ENTRY,
-};
+enum class CompressionMode { NONE, SINGLE_ENTRY, MULTY_ENTRY_ZSTD, MULTY_ENTRY_LZ4 };
 
 class RdbSaver {
  public:
@@ -113,7 +109,7 @@ class RdbSaver {
   CompressionMode compression_mode_;
 };
 
-class ZstdCompressImpl;
+class CompressorImpl;
 
 class RdbSerializer {
  public:
@@ -170,6 +166,7 @@ class RdbSerializer {
   std::error_code SaveStreamConsumers(streamCG* cg);
   // If membuf data is compressable use compression impl to compress the data and write it to membuf
   void CompressBlob();
+  void AllocateCompressorOnce();
 
   std::unique_ptr<LZF_HSLOT[]> lzf_;
   base::IoBuf mem_buf_;
@@ -177,13 +174,15 @@ class RdbSerializer {
   std::string tmp_str_;
   CompressionMode compression_mode_;
   // TODO : This compressor impl should support different compression algorithms zstd/lz4 etc.
-  std::unique_ptr<ZstdCompressImpl> compressor_impl_;
+  std::unique_ptr<CompressorImpl> compressor_impl_;
 
   static constexpr size_t kMinStrSizeToCompress = 256;
   static constexpr double kMinCompressionReductionPrecentage = 0.95;
   struct CompressionStats {
     uint32_t compression_no_effective = 0;
     uint32_t small_str_count = 0;
+    uint32_t compression_failed = 0;
+    uint32_t compressed_blobs = 0;
   };
   std::optional<CompressionStats> compression_stats_;
 };

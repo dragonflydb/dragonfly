@@ -108,7 +108,7 @@ void SliceSnapshot::Join() {
 void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
   {
     auto fiber_name = absl::StrCat("SliceSnapshot-", ProactorBase::GetIndex());
-    this_fiber::properties<FiberProps>().set_name(std::move(fiber_name));
+    FiberProps::SetName(std::move(fiber_name));
   }
 
   PrimeTable::Cursor cursor;
@@ -138,7 +138,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
 
       if (stats_.serialized >= last_yield + 100) {
         DVLOG(2) << "Before sleep " << this_fiber::properties<FiberProps>().name();
-        this_fiber::yield();
+        fibers_ext::Yield();
         DVLOG(2) << "After sleep";
 
         last_yield = stats_.serialized;

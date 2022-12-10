@@ -21,7 +21,6 @@ using namespace util;
 using namespace facade;
 using uring::FiberCall;
 using uring::Proactor;
-namespace this_fiber = ::boost::this_fiber;
 
 namespace {
 
@@ -137,7 +136,7 @@ error_code IoMgr::Read(size_t offset, io::MutableBytes dest) {
 
 void IoMgr::Shutdown() {
   while (flags_val) {
-    this_fiber::sleep_for(200us);  // TODO: hacky for now.
+    fibers_ext::SleepFor(200us);  // TODO: hacky for now.
   }
 }
 

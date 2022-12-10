@@ -223,8 +223,8 @@ TEST_F(StringFamilyTest, MGetSet) {
     }
   });
 
-  mget_fb.join();
-  set_fb.join();
+  mget_fb.Join();
+  set_fb.Join();
 }
 
 TEST_F(StringFamilyTest, MSetGet) {
@@ -260,8 +260,8 @@ TEST_F(StringFamilyTest, MSetGet) {
     }
   });
 
-  mset_fb.join();
-  get_fb.join();
+  mset_fb.Join();
+  get_fb.Join();
 }
 
 TEST_F(StringFamilyTest, MSetDel) {
@@ -277,8 +277,8 @@ TEST_F(StringFamilyTest, MSetDel) {
     }
   });
 
-  mset_fb.join();
-  del_fb.join();
+  mset_fb.Join();
+  del_fb.Join();
 }
 
 TEST_F(StringFamilyTest, IntKey) {
@@ -310,8 +310,8 @@ TEST_F(StringFamilyTest, SingleShard) {
       Run({"mget", "x", "b", "y"});
     }
   });
-  mset_fb.join();
-  mget_fb.join();
+  mset_fb.Join();
+  mget_fb.Join();
 }
 
 TEST_F(StringFamilyTest, MSetIncr) {
@@ -352,8 +352,8 @@ TEST_F(StringFamilyTest, MSetIncr) {
       ASSERT_LE(a, c);
     }
   });
-  mset_fb.join();
-  get_fb.join();
+  mset_fb.Join();
+  get_fb.Join();
 }
 
 TEST_F(StringFamilyTest, SetEx) {
