@@ -417,7 +417,7 @@ error_code Replica::InitiatePSync() {
   // There is a data race condition in Redis-master code, where "ACK 0" handler may be
   // triggered before Redis is ready to transition to the streaming state and it silenty ignores
   // "ACK 0". We reduce the chance it happens with this delay.
-  this_fiber::sleep_for(50ms);
+  fibers_ext::SleepFor(50ms);
 
   return error_code{};
 }
@@ -431,12 +431,12 @@ error_code Replica::InitiateDflySync() {
     shard_flows_[i].reset(new Replica(master_context_, i, &service_));
   }
 
-  // Allocate shared, because the error handler might outlive the function scope.
-  auto sync_block = std::make_shared<SyncBlock>();
+  // Blocked on untill all flows got full sync cut.
+  fibers_ext::BlockingCounter sync_block{num_df_flows_};
 
-  auto err_handler = [this, sync_block](const auto& ge) {
-    sync_block->Add(num_df_flows_);  // Unblock sync_block.
-    DefaultErrorHandler(ge);         // Close sockets to unblock flows.
+  auto err_handler = [this, sync_block](const auto& ge) mutable {
+    sync_block.Cancel();      // Unblock this function.
+    DefaultErrorHandler(ge);  // Close sockets to unblock flows.
   };
   RETURN_ON_ERR(cntx_.Switch(std::move(err_handler)));
 
@@ -444,7 +444,7 @@ error_code Replica::InitiateDflySync() {
   auto partition = Partition(num_df_flows_);
   shard_set->pool()->AwaitFiberOnAll([&](unsigned index, auto*) {
     for (auto id : partition[index]) {
-      auto ec = shard_flows_[id]->StartFullSyncFlow(sync_block.get(), &cntx_);
+      auto ec = shard_flows_[id]->StartFullSyncFlow(sync_block, &cntx_);
       if (ec)
         cntx_.Error(ec);
     }
@@ -458,8 +458,7 @@ error_code Replica::InitiateDflySync() {
   // Wait for all flows to receive full sync cut.
   // In case of an error, this is unblocked by the error handler.
   LOG(INFO) << "Waiting for all full sync cut confirmations";
-  std::unique_lock lk(sync_block->mu_);
-  sync_block->cv_.wait(lk, [&]() { return sync_block->flows_done >= num_df_flows_; });
+  sync_block.Wait();
 
   LOG(INFO) << "Full sync finished";
   return cntx_.GetError();
@@ -579,7 +578,7 @@ error_code Replica::SendNextPhaseRequest() {
   return std::error_code{};
 }
 
-error_code Replica::StartFullSyncFlow(SyncBlock* sb, Context* cntx) {
+error_code Replica::StartFullSyncFlow(fibers_ext::BlockingCounter sb, Context* cntx) {
   CHECK(!sock_);
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
 
@@ -639,15 +638,15 @@ error_code Replica::StartStableSyncFlow(Context* cntx) {
   return std::error_code{};
 }
 
-void Replica::FullSyncDflyFb(string eof_token, SyncBlock* sb, Context* cntx) {
+void Replica::FullSyncDflyFb(string eof_token, fibers_ext::BlockingCounter bc, Context* cntx) {
   DCHECK(leftover_buf_);
   SocketSource ss{sock_.get()};
   io::PrefixSource ps{leftover_buf_->InputBuffer(), &ss};
 
   RdbLoader loader(NULL);
-  loader.SetFullSyncCutCb([sb, ran = false]() mutable {
+  loader.SetFullSyncCutCb([bc, ran = false]() mutable {
     if (!ran) {
-      sb->Add(1);
+      bc.Dec();
       ran = true;
     }
   });
@@ -946,14 +945,6 @@ error_code Replica::SendCommand(string_view command, ReqSerializer* serializer) 
     last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
   }
   return ec;
-}
-
-void Replica::SyncBlock::Add(unsigned delta) {
-  {
-    lock_guard lk(mu_);
-    flows_done += delta;
-  }
-  cv_.notify_all();
 }
 
 }  // namespace dfly

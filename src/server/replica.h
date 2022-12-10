@@ -3,9 +3,7 @@
 //
 #pragma once
 
-#include <boost/fiber/condition_variable.hpp>
 #include <boost/fiber/fiber.hpp>
-#include <boost/fiber/mutex.hpp>
 #include <variant>
 
 #include "base/io_buf.h"
@@ -13,6 +11,7 @@
 #include "facade/redis_parser.h"
 #include "server/common.h"
 #include "util/fiber_socket_base.h"
+#include "util/fibers/fibers_ext.h"
 
 namespace facade {
 class ReqSerializer;
@@ -45,16 +44,6 @@ class Replica {
     R_GREETED = 4,
     R_SYNCING = 8,
     R_SYNC_OK = 0x10,
-  };
-
-  // A generic barrier that is used for waiting for
-  // flow fibers to become ready for the stable state switch.
-  struct SyncBlock {
-    unsigned flows_done{0};
-    ::boost::fibers::mutex mu_;
-    ::boost::fibers::condition_variable cv_;
-
-    void Add(unsigned delta);
   };
 
  public:
@@ -95,13 +84,14 @@ class Replica {
   Replica(const MasterContext& context, uint32_t dfly_flow_id, Service* service);
 
   // Start replica initialized as dfly flow.
-  std::error_code StartFullSyncFlow(SyncBlock* block, Context* cntx);
+  std::error_code StartFullSyncFlow(util::fibers_ext::BlockingCounter block, Context* cntx);
 
   // Transition into stable state mode as dfly flow.
   std::error_code StartStableSyncFlow(Context* cntx);
 
   // Single flow full sync fiber spawned by StartFullSyncFlow.
-  void FullSyncDflyFb(std::string eof_token, SyncBlock* block, Context* cntx);
+  void FullSyncDflyFb(std::string eof_token, util::fibers_ext::BlockingCounter block,
+                      Context* cntx);
 
   // Single flow stable state sync fiber spawned by StartStableSyncFlow.
   void StableSyncDflyFb(Context* cntx);
