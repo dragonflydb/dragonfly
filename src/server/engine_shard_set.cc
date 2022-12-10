@@ -45,7 +45,6 @@ ABSL_FLAG(float, mem_utilization_threshold, 0.8,
 namespace dfly {
 
 using namespace util;
-namespace this_fiber = ::boost::this_fiber;
 namespace fibers = ::boost::fibers;
 using absl::GetFlag;
 
@@ -179,7 +178,7 @@ EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t*
     : queue_(kQueueLen), txq_([](const Transaction* t) { return t->txid(); }), mi_resource_(heap),
       db_slice_(pb->GetIndex(), GetFlag(FLAGS_cache_mode), this) {
   fiber_q_ = fibers::fiber([this, index = pb->GetIndex()] {
-    this_fiber::properties<FiberProps>().set_name(absl::StrCat("shard_queue", index));
+    FiberProps::SetName(absl::StrCat("shard_queue", index));
     queue_.Run();
   });
 

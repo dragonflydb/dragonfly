@@ -17,6 +17,7 @@
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
 #include "util/fiber_sched_algo.h"
+#include "util/fibers/fiber.h"
 
 #ifdef DFLY_USE_SSL
 #include "util/tls/tls_socket.h"
@@ -29,7 +30,7 @@ ABSL_FLAG(bool, http_admin_console, true, "If true allows accessing http console
 using namespace util;
 using namespace std;
 using nonstd::make_unexpected;
-namespace this_fiber = boost::this_fiber;
+
 namespace fibers = boost::fibers;
 
 namespace facade {
@@ -267,7 +268,7 @@ void Connection::UnregisterShutdownHook(ShutdownHandle id) {
 }
 
 void Connection::HandleRequests() {
-  this_fiber::properties<FiberProps>().set_name("DflyConnection");
+  FiberProps::SetName("DflyConnection");
 
   LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
 
@@ -508,7 +509,7 @@ auto Connection::ParseRedis() -> ParserStatus {
         if (dispatch_q_.size() == 1) {
           evc_.notify();
         } else if (dispatch_q_.size() > 10) {
-          this_fiber::yield();
+          fibers_ext::Yield();
         }
       }
     }
@@ -715,7 +716,7 @@ void Connection::DispatchOperations::operator()(Request::PipelineMsg& msg) {
 // InputLoop. Note: in some cases, InputLoop may decide to dispatch directly and bypass the
 // DispatchFiber.
 void Connection::DispatchFiber(util::FiberSocketBase* peer) {
-  this_fiber::properties<FiberProps>().set_name("DispatchFiber");
+  FiberProps::SetName("DispatchFiber");
 
   SinkReplyBuilder* builder = cc_->reply_builder();
   DispatchOperations dispatch_op{builder, this};

@@ -29,7 +29,6 @@ using namespace util;
 using namespace boost::asio;
 using namespace facade;
 using absl::StrCat;
-namespace this_fiber = ::boost::this_fiber;
 
 namespace {
 
@@ -171,7 +170,7 @@ void Replica::MainReplicationFb() {
 
     // 1. Connect socket.
     if ((state_mask_ & R_TCP_CONNECTED) == 0) {
-      this_fiber::sleep_for(500ms);
+      fibers_ext::SleepFor(500ms);
       if (is_paused_)
         continue;
 

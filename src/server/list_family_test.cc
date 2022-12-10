@@ -19,7 +19,6 @@
 using namespace testing;
 using namespace std;
 using namespace util;
-namespace this_fiber = ::boost::this_fiber;
 namespace fibers = ::boost::fibers;
 
 namespace dfly {
@@ -94,17 +93,17 @@ TEST_F(ListFamilyTest, BLPopBlocking) {
     LOG(INFO) << "pop0";
   });
 
-  this_fiber::sleep_for(50us);
+  fibers_ext::SleepFor(50us);
   auto fb1 = pp_->at(1)->LaunchFiber([&] {
     resp1 = Run({"blpop", "x", "0"});
     LOG(INFO) << "pop1";
   });
-  this_fiber::sleep_for(30us);
+  fibers_ext::SleepFor(30us);
 
   pp_->at(1)->Await([&] { Run("B1", {"lpush", "x", "2", "1"}); });
 
-  fb0.join();
-  fb1.join();
+  fb0.Join();
+  fb1.Join();
 
   // fb0 should start first and be the first transaction blocked. Therefore, it should pop '1'.
   // sometimes order is switched, need to think how to fix it.
@@ -131,7 +130,7 @@ TEST_F(ListFamilyTest, BLPopMultiple) {
   });
 
   pp_->at(1)->Await([&] { Run({"lpush", kKey1, "1", "2", "3"}); });
-  fb1.join();
+  fb1.Join();
 
   ASSERT_THAT(resp0, ArrLen(2));
   EXPECT_THAT(resp0.GetVec(), ElementsAre(kKey1, "3"));
@@ -202,10 +201,10 @@ TEST_F(ListFamilyTest, BLPopMultiPush) {
     ASSERT_THAT(resp, ArrLen(6));
   });
 
-  p1_fb.join();
-  p2_fb.join();
+  p1_fb.Join();
+  p2_fb.Join();
 
-  pop_fb.join();
+  pop_fb.Join();
 
   ASSERT_THAT(blpop_resp, ArrLen(2));
   auto resp_arr = blpop_resp.GetVec();
@@ -267,10 +266,10 @@ TEST_F(ListFamilyTest, BLPopSerialize) {
     LOG(INFO) << "push2 ts: " << cl2;
   });
 
-  p1_fb.join();
-  p2_fb.join();
+  p1_fb.Join();
+  p2_fb.Join();
 
-  pop_fb.join();
+  pop_fb.Join();
   ASSERT_THAT(blpop_resp, ArrLen(2));
   auto resp_arr = blpop_resp.GetVec();
   EXPECT_THAT(resp_arr, ElementsAre(kKey1, ArgType(RespExpr::STRING)));
@@ -303,8 +302,8 @@ TEST_F(ListFamilyTest, WrongTypeDoesNotWake) {
     Run({"lpush", kKey1, "B"});
   });
 
-  p1_fb.join();
-  pop_fb.join();
+  p1_fb.Join();
+  pop_fb.Join();
   ASSERT_THAT(blpop_resp, ArrLen(2));
   EXPECT_THAT(blpop_resp.GetVec(), ElementsAre(kKey1, "B"));
 }
@@ -321,7 +320,7 @@ TEST_F(ListFamilyTest, BPopSameKeyTwice) {
   WaitUntilLocked(0, kKey1);
 
   pp_->at(1)->Await([&] { EXPECT_EQ(1, CheckedInt({"lpush", kKey1, "bar"})); });
-  pop_fb.join();
+  pop_fb.Join();
 
   ASSERT_THAT(blpop_resp, ArrLen(2));
   EXPECT_THAT(blpop_resp.GetVec(), ElementsAre(kKey1, "bar"));
@@ -333,7 +332,7 @@ TEST_F(ListFamilyTest, BPopSameKeyTwice) {
   WaitUntilLocked(0, kKey1);
 
   pp_->at(1)->Await([&] { EXPECT_EQ(1, CheckedInt({"lpush", kKey2, "bar"})); });
-  pop_fb.join();
+  pop_fb.Join();
 
   ASSERT_THAT(blpop_resp, ArrLen(2));
   EXPECT_THAT(blpop_resp.GetVec(), ElementsAre(kKey2, "bar"));
@@ -355,7 +354,7 @@ TEST_F(ListFamilyTest, BPopTwoKeysSameShard) {
   WaitUntilLocked(0, "x");
 
   pp_->at(1)->Await([&] { EXPECT_EQ(1, CheckedInt({"lpush", "x", "bar"})); });
-  pop_fb.join();
+  pop_fb.Join();
 
   ASSERT_THAT(blpop_resp, ArrLen(2));
   EXPECT_THAT(blpop_resp.GetVec(), ElementsAre("x", "bar"));
@@ -377,7 +376,7 @@ TEST_F(ListFamilyTest, BPopRename) {
     EXPECT_EQ(1, CheckedInt({"lpush", "a", "bar"}));
     Run({"rename", "a", kKey1});
   });
-  pop_fb.join();
+  pop_fb.Join();
 
   ASSERT_THAT(blpop_resp, ArrLen(2));
   EXPECT_THAT(blpop_resp.GetVec(), ElementsAre(kKey1, "bar"));
@@ -395,7 +394,7 @@ TEST_F(ListFamilyTest, BPopFlush) {
     Run({"flushdb"});
     EXPECT_EQ(1, CheckedInt({"lpush", kKey1, "bar"}));
   });
-  pop_fb.join();
+  pop_fb.Join();
 }
 
 TEST_F(ListFamilyTest, LRem) {
@@ -641,24 +640,23 @@ TEST_F(ListFamilyTest, TwoQueueBug451) {
     for (int i = 0; i < 1000; i++) {
       Run(id, {"rpush", "a", "DATA"});
     }
-    ::boost::this_fiber::sleep_for(100ms);
+    fibers_ext::SleepFor(100ms);
     running = false;
   };
 
-  vector<boost::fibers::fiber> fbs;
+  vector<fibers_ext::Fiber> fbs;
 
   // more likely to reproduce the bug if we start pop_fiber first.
   for (int i = 0; i < 2; i++) {
     fbs.push_back(pp_->at(i)->LaunchFiber(pop_fiber));
   }
 
-
   for (int i = 0; i < 2; i++) {
     fbs.push_back(pp_->at(i)->LaunchFiber(push_fiber));
   }
 
   for (auto& f : fbs)
-    f.join();
+    f.Join();
 }
 
 }  // namespace dfly
