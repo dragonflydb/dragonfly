@@ -27,7 +27,7 @@ replication_cases = [
     (4, [1] * 12, 10000, 4000),
 ]
 
-@dfly_args({"logtostdout":""})
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replicas, n_keys, n_stream_keys", replication_cases)
 async def test_replication_all(df_local_factory, t_master, t_replicas, n_keys, n_stream_keys):
@@ -82,7 +82,7 @@ async def test_replication_all(df_local_factory, t_master, t_replicas, n_keys, n
 
     # Check stable state streaming
     await batch_fill_data_async(c_master, gen_test_data(n_keys, seed=3))
-    
+
     await asyncio.sleep(0.5)
     await asyncio.gather(*(batch_check_data_async(c, gen_test_data(n_keys, seed=3))
                            for c in c_replicas))

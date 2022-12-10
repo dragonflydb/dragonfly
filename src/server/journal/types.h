@@ -31,34 +31,12 @@ struct Entry {
       : txid{txid}, opcode{Op::COMMAND}, dbid{dbid}, payload{pl}, owned_payload{} {
   }
 
-  Entry(journal::Op opcode, TxId txid)
-      : txid{txid}, opcode{opcode}, dbid{0}, payload{}, owned_payload{} {
+  Entry(journal::Op opcode, DbIndex dbid)
+      : txid{0}, opcode{opcode}, dbid{dbid}, payload{}, owned_payload{} {
   }
 
-  std::string Print() const {
-    struct f {
-      std::string operator()(CmdArgList args) {
-        std::string out;
-        for (auto arg : args) {
-          out += std::string_view{arg.begin(), arg.size()};
-          out += " ";
-        };
-        return out;
-      }
-      std::string operator()(std::pair<std::string_view, ArgSlice> args) {
-        std::string out{args.first};
-        out += " ";
-        for (auto arg : args.second) {
-          out += arg;
-          out += " ";
-        }
-        return out;
-      }
-      std::string operator()(std::monostate) {
-        return "";
-      }
-    };
-    return std::visit(f{}, payload);
+  Entry(DbIndex dbid)
+      : txid{0}, opcode{journal::Op::SELECT}, dbid{dbid}, payload{}, owned_payload{} {
   }
 
   TxId txid;

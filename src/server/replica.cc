@@ -669,12 +669,14 @@ void Replica::StableSyncDflyFb() {
   SocketSource ss{sock_.get()};
   io::PrefixSource ps{prefix, &ss};
 
-  JournalReader reader{&ps};
+  JournalReader reader{&ps, 0};
   JournalExecutor executor{&service_};
   while (true) {
     auto res = reader.ReadEntry();
     if (!res)
       return;
+
+    last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
     executor.Execute(std::move(res.value()));
   }
   return;

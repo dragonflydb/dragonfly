@@ -48,11 +48,13 @@ def batch_check_data(client: redis.Redis, gen):
         gvals = [v for _, v in group]
         assert vals == gvals
 
+
 async def batch_check_data_async(client: aioredis.Redis, gen):
     for group in grouper(BATCH_SIZE, gen):
         vals = [as_str_val(v) for v in await client.mget(k for k, _ in group)]
         gvals = [v for _, v in group]
         assert vals == gvals
+
 
 def wait_available(client: redis.Redis):
     its = 0

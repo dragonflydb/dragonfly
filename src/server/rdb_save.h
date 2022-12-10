@@ -146,7 +146,6 @@ class RdbSerializer {
 
   size_t SerializedLen() const;
 
-  // TODO: Declarations above are chaotic.
   std::error_code WriteJournalEntries(absl::Span<const journal::Entry> entries);
 
   std::error_code SendFullSyncCut(io::Sink* s);

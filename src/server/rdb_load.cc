@@ -1778,7 +1778,7 @@ error_code RdbLoader::Load(io::Source* src) {
       for (unsigned i = 0; i < shard_set->size(); ++i) {
         FlushShardAsync(i);
       }
-      RETURN_ON_ERR(HandleJournalEntries(service_));
+      RETURN_ON_ERR(HandleJournalEntries(service_, cur_db_index_));
       continue;
     }
 
@@ -1931,17 +1931,16 @@ error_code RdbLoaderBase::HandleCompressedBlobFinish() {
   return kOk;
 }
 
-error_code RdbLoaderBase::HandleJournalEntries(Service* service) {
+error_code RdbLoaderBase::HandleJournalEntries(Service* service, DbIndex dbid) {
   size_t len;
   bool _encoded;
   SET_OR_RETURN(LoadLen(&_encoded), len);
 
-  // TODO: Do this inline into buffer
   string res;
   SET_OR_RETURN(FetchGenericString(), res);
 
   io::BytesSource bs{io::Buffer(res)};
-  JournalReader rd{&bs};
+  JournalReader rd{&bs, dbid};
   JournalExecutor ex{service};
 
   size_t parsed = 0;

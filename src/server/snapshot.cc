@@ -273,8 +273,6 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 }
 
 void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
-  //VLOG(0) << "Interrupted by " << entry.Print();
-
   optional<RdbSerializer> tmp_serializer;
   RdbSerializer* serializer_ptr = default_serializer_.get();
   if (entry.dbid != current_db_) {
@@ -290,8 +288,6 @@ void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
 
   if (tmp_serializer) {
     FlushTmpSerializer(entry.dbid, &*tmp_serializer);
-  } else {
-    FlushDefaultBuffer(true); // ONLY FOR TESTING
   }
 }
 

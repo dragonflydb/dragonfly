@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 
 #include "base/io_buf.h"
@@ -11,7 +12,7 @@
 namespace dfly {
 
 struct JournalWriter {
-  JournalWriter(io::Sink* sink);
+  JournalWriter(io::Sink* sink, std::optional<DbIndex> dbid = std::nullopt);
   std::error_code Write(const journal::Entry& entry);
 
  private:
@@ -27,10 +28,11 @@ struct JournalWriter {
 
  private:
   io::Sink* sink_;
+  std::optional<DbIndex> cur_dbid_;
 };
 
 struct JournalReader {
-  JournalReader(io::Source* source);
+  JournalReader(io::Source* source, DbIndex dbid);
 
   io::Result<journal::Entry> ReadEntry();
 
@@ -50,6 +52,7 @@ struct JournalReader {
  private:
   io::Source* source_;
   base::IoBuf buf_;
+  DbIndex dbid_;
 };
 
 struct JournalExecutor {
@@ -58,7 +61,6 @@ struct JournalExecutor {
 
  private:
   Service* service_;
-  DbIndex dbid_;
 };
 
 }  // namespace dfly

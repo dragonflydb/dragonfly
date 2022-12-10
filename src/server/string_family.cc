@@ -64,13 +64,6 @@ string_view GetSlice(EngineShard* shard, const PrimeValue& pv, string* tmp) {
   return pv.GetSlice(tmp);
 }
 
-inline void RecordJournal(const OpArgs& op_args, string_view key, const PrimeKey& pvalue) {
-  /*if (op_args.shard->journal()) {
-    journal::Entry entry{op_args.db_cntx.db_index, op_args.txid, key, pvalue};
-    op_args.shard->journal()->RecordEntry(entry);
-  }*/
-}
-
 OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t start,
                               string_view value) {
   auto& db_slice = op_args.shard->db_slice();
@@ -105,7 +98,6 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
   memcpy(s.data() + start, value.data(), value.size());
   it->second.SetString(s);
   db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, !added);
-  RecordJournal(op_args, key, it->second);
 
   return it->second.Size();
 }
@@ -156,7 +148,6 @@ size_t ExtendExisting(const OpArgs& op_args, PrimeIterator it, string_view key, 
   db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   it->second.SetString(new_val);
   db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, true);
-  RecordJournal(op_args, key, it->second);
 
   return new_val.size();
 }
@@ -170,7 +161,6 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
   if (inserted) {
     it->second.SetString(val);
     db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, false);
-    RecordJournal(op_args, key, it->second);
 
     return val.size();
   }
@@ -239,7 +229,6 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
     char* str = RedisReplyBuilder::FormatDouble(val, buf, sizeof(buf));
     it->second.SetString(str);
     db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, false);
-    RecordJournal(op_args, key, it->second);
 
     return val;
   }
@@ -271,7 +260,6 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
   db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   it->second.SetString(str);
   db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, true);
-  RecordJournal(op_args, key, it->second);
 
   return base;
 }
@@ -298,8 +286,6 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
       return OpStatus::OUT_OF_MEMORY;
     }
 
-    RecordJournal(op_args, key, it->second);
-
     return incr;
   }
 
@@ -323,7 +309,6 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
   db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   it->second.SetInt(new_val);
   db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
-  RecordJournal(op_args, key, it->second);
 
   return new_val;
 }
@@ -432,7 +417,6 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
     }
   }
 
-  RecordJournal(op_args_, key, it->second);
   return OpStatus::OK;
 }
 
@@ -487,7 +471,6 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
   }
 
   db_slice.PostUpdate(op_args_.db_cntx.db_index, it, key);
-  RecordJournal(op_args_, key, it->second);
 
   return OpStatus::OK;
 }

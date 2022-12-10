@@ -353,11 +353,9 @@ OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, EngineShard* shard) {
   // Register journal listener and cleanup.
   uint32_t cb_id = 0;
   if (shard != nullptr) {
-    cb_id = sf_->journal()->RegisterOnChange([flow](const journal::Entry& je) {
-      // VLOG(0) << "Writing stable state " << je.Print();
-      JournalWriter writer{flow->conn->socket()};
-      writer.Write(je);
-    });
+    JournalWriter writer{flow->conn->socket()};
+    cb_id = sf_->journal()->RegisterOnChange(
+        [flow, writer = std::move(writer)](const journal::Entry& je) mutable { writer.Write(je); });
   }
 
   flow->cleanup = [flow, this, cb_id]() {

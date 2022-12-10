@@ -54,13 +54,6 @@ string GetString(EngineShard* shard, const PrimeValue& pv) {
   return res;
 }
 
-inline void RecordJournal(const OpArgs& op_args, string_view key, const PrimeKey& pvalue) {
-  /*if (op_args.shard->journal()) {
-    journal::Entry entry{op_args.db_cntx.db_index, op_args.txid, key, pvalue};
-    op_args.shard->journal()->RecordEntry(entry);
-  }*/
-}
-
 void SetString(const OpArgs& op_args, string_view key, const string& value) {
   auto& db_slice = op_args.shard->db_slice();
   DbIndex db_index = op_args.db_cntx.db_index;
@@ -68,7 +61,6 @@ void SetString(const OpArgs& op_args, string_view key, const string& value) {
   db_slice.PreUpdate(db_index, it_output);
   it_output->second.SetString(value);
   db_slice.PostUpdate(db_index, it_output, key);
-  RecordJournal(op_args, key, it_output->second);
 }
 
 string JsonType(const json& val) {

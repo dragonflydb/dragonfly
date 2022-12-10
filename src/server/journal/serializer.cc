@@ -39,7 +39,8 @@ using nonstd::make_unexpected;
 
 namespace dfly {
 
-JournalWriter::JournalWriter(io::Sink* sink) : sink_{sink} {
+JournalWriter::JournalWriter(io::Sink* sink, std::optional<DbIndex> dbid)
+    : sink_{sink}, cur_dbid_{dbid} {
 }
 
 error_code JournalWriter::Write(uint8_t v) {
@@ -86,22 +87,27 @@ error_code JournalWriter::Write(std::monostate) {
 }
 
 error_code JournalWriter::Write(const journal::Entry& entry) {
-  // VLOG(0) << "Writing " << entry.Print();
-
-  RETURN_ON_ERR(Write(entry.txid));
-  RETURN_ON_ERR(Write(uint8_t(entry.opcode)));
-
-  if (entry.opcode == journal::Op::SELECT) {
-    return Write(entry.dbid);
-  } else if (entry.opcode == journal::Op::COMMAND) {
-    auto cb = [this](const auto& payload) { return Write(payload); };
-    return std::visit(cb, entry.payload);
+  if (entry.opcode != journal::Op::SELECT && (!cur_dbid_ || entry.dbid != *cur_dbid_)) {
+    RETURN_ON_ERR(Write(journal::Entry{entry.dbid}));
+    cur_dbid_ = entry.dbid;
   }
 
+  RETURN_ON_ERR(Write(uint8_t(entry.opcode)));
+
+  switch (entry.opcode) {
+    case journal::Op::SELECT:
+      return Write(entry.dbid);
+    case journal::Op::COMMAND:
+      RETURN_ON_ERR(Write(entry.txid));
+      return std::visit([this](const auto& payload) { return Write(payload); }, entry.payload);
+    default:
+      break;
+  };
   return std::error_code{};
 }
 
-JournalReader::JournalReader(io::Source* source) : source_{source}, buf_{} {
+JournalReader::JournalReader(io::Source* source, DbIndex dbid)
+    : source_{source}, buf_{}, dbid_{dbid} {
 }
 
 io::Result<uint8_t> JournalReader::ReadU8() {
@@ -170,33 +176,28 @@ std::error_code JournalReader::Read(CmdArgVec* vec) {
     offset += len;
   }
 
-  std::string out;
-  for (auto& span : *vec) {
-    out += facade::ToSV(span);
-    out += " ";
-  }
-  // VLOG(0) << "Read payload:" << out;
-
   return std::error_code{};
 }
 
 io::Result<journal::Entry> JournalReader::ReadEntry() {
-  uint64_t txid;
-  SET_OR_UNEXPECT(ReadU64(), txid);
-
   uint8_t opcode;
   SET_OR_UNEXPECT(ReadU8(), opcode);
 
-  journal::Entry entry{static_cast<journal::Op>(opcode), txid};
+  journal::Entry entry{static_cast<journal::Op>(opcode), dbid_};
 
-  if (entry.opcode == journal::Op::COMMAND) {
-    entry.owned_payload = CmdArgVec{};
-    if (auto ec = Read(&*entry.owned_payload); ec)
-      return make_unexpected(ec);
-  } else {
-    SET_OR_UNEXPECT(ReadU16(), entry.dbid);
-  }
-
+  switch (entry.opcode) {
+    case journal::Op::COMMAND:
+      SET_OR_UNEXPECT(ReadU64(), entry.txid);
+      entry.owned_payload = CmdArgVec{};
+      if (auto ec = Read(&*entry.owned_payload); ec)
+        return make_unexpected(ec);
+      break;
+    case journal::Op::SELECT:
+      SET_OR_UNEXPECT(ReadU16(), dbid_);
+      return ReadEntry();
+    default:
+      break;
+  };
   return entry;
 }
 
@@ -211,16 +212,10 @@ void JournalExecutor::Execute(journal::Entry&& entry) {
     ConnectionContext conn_context{&null_sink, nullptr};
     conn_context.is_replicating = true;
     conn_context.journal_emulated = true;
-    // TODO: conn_context.dbid = dbid_;!!!
-
-    // std::string printout;
-    // for (auto arg: payload) printout += std::string{facade::ToSV(arg)} + " ";
-    // VLOG(0) << "            EXECUTE: " << printout;
+    conn_context.conn_state.db_index = entry.dbid;
 
     auto span = CmdArgList{payload.data(), payload.size()};
     service_->DispatchCommand(span, &conn_context);
-  } else if (entry.opcode == journal::Op::SELECT) {
-    dbid_ = entry.dbid;
   }
 }
 

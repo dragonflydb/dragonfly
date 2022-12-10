@@ -80,7 +80,7 @@ error_code Journal::Close() {
 }
 
 uint32_t Journal::RegisterOnChange(ChangeCallback cb) {
-  return journal_slice.RegisterOnChange(cb);
+  return journal_slice.RegisterOnChange(std::move(cb));
 }
 
 void Journal::Unregister(uint32_t id) {

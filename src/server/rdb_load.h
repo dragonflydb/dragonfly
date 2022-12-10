@@ -132,7 +132,7 @@ class RdbLoaderBase {
   std::error_code HandleCompressedBlobFinish();
   void AlocateDecompressOnce(int op_type);
 
-  std::error_code HandleJournalEntries(Service* service);
+  std::error_code HandleJournalEntries(Service* service, DbIndex dbid);
 
   static size_t StrLen(const RdbVariant& tset);
 
