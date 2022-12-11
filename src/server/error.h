@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <string>
+#include <system_error>
 
 #include "facade/error.h"
 
@@ -21,7 +22,7 @@ using facade::kWrongTypeErr;
 
 #define RETURN_ON_ERR(x)                                      \
   do {                                                        \
-    auto __ec = (x);                                          \
+    std::error_code __ec = (x);                               \
     if (__ec) {                                               \
       LOG(ERROR) << "Error " << __ec << " while calling " #x; \
       return __ec;                                            \

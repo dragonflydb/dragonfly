@@ -7,6 +7,7 @@ extern "C" {
 #include "redis/rdb.h"
 }
 
+#include <absl/functional/bind_front.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
@@ -133,7 +134,10 @@ bool Replica::Start(ConnectionContext* cntx) {
     return false;
   }
 
-  // 3. Spawn main coordination fiber.
+  // 3. Init basic context.
+  cntx_.Reset(absl::bind_front(&Replica::DefaultErrorHandler, this));
+
+  // 4. Spawn main coordination fiber.
   sync_fb_ = ::boost::fibers::fiber(&Replica::MainReplicationFb, this);
 
   (*cntx)->SendOk();
@@ -141,24 +145,17 @@ bool Replica::Start(ConnectionContext* cntx) {
 }
 
 void Replica::Stop() {
+  // Mark disabled, prevent from retrying.
   if (sock_) {
     sock_->proactor()->Await([this] {
       state_mask_ = 0;  // Specifically ~R_ENABLED.
-      auto ec = sock_->Shutdown(SHUT_RDWR);
-      LOG_IF(ERROR, ec) << "Could not shutdown socket " << ec;
+      cntx_.Cancel();   // Context is fully resposible for cleanup.
     });
   }
 
-  // Close sub flows.
-  auto partition = Partition(num_df_flows_);
-  shard_set->pool()->AwaitFiberOnAll([&](unsigned index, auto*) {
-    for (auto id : partition[index]) {
-      shard_flows_[id]->Stop();
-    }
-  });
-
-  if (sync_fb_.joinable())
-    sync_fb_.join();
+  // Make sure the replica fully stopped and did all cleanup,
+  // so we can freely release resources (connections).
+  sync_fb_.join();
 }
 
 void Replica::Pause(bool pause) {
@@ -168,6 +165,9 @@ void Replica::Pause(bool pause) {
 void Replica::MainReplicationFb() {
   error_code ec;
   while (state_mask_ & R_ENABLED) {
+    // Discard all previous errors and set default error handler.
+    cntx_.Reset(absl::bind_front(&Replica::DefaultErrorHandler, this));
+
     // 1. Connect socket.
     if ((state_mask_ & R_TCP_CONNECTED) == 0) {
       fibers_ext::SleepFor(500ms);
@@ -201,25 +201,21 @@ void Replica::MainReplicationFb() {
         continue;
       }
 
-      if (HasDflyMaster()) {
+      if (HasDflyMaster())
         ec = InitiateDflySync();
-      } else {
+      else
         ec = InitiatePSync();
-        // There is a data race condition in Redis-master code, where "ACK 0" handler may be
-        // triggered
-        // before Redis is ready to transition to the streaming state and it silenty ignores "ACK
-        // 0". We reduce the chance it happens with this delay.
-        fibers_ext::SleepFor(50ms);
-      }
 
       service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+
       if (ec) {
         LOG(WARNING) << "Error syncing " << ec << " " << ec.message();
         state_mask_ &= R_ENABLED;  // reset all flags besides R_ENABLED
+        JoinAllFlows();
         continue;
       }
 
-      VLOG(1) << "Replica greet ok";
+      state_mask_ |= R_SYNC_OK;
     }
 
     // 4. Start stable state sync.
@@ -230,7 +226,7 @@ void Replica::MainReplicationFb() {
     else
       ec = ConsumeRedisStream();
 
-    LOG_IF(ERROR, !FiberSocketBase::IsConnClosed(ec)) << "Replica socket error " << ec;
+    JoinAllFlows();
     state_mask_ &= ~R_SYNC_OK;
   }
 
@@ -418,6 +414,11 @@ error_code Replica::InitiatePSync() {
   state_mask_ &= ~R_SYNCING;
   state_mask_ |= R_SYNC_OK;
 
+  // There is a data race condition in Redis-master code, where "ACK 0" handler may be
+  // triggered before Redis is ready to transition to the streaming state and it silenty ignores
+  // "ACK 0". We reduce the chance it happens with this delay.
+  fibers_ext::SleepFor(50ms);
+
   return error_code{};
 }
 
@@ -430,43 +431,37 @@ error_code Replica::InitiateDflySync() {
     shard_flows_[i].reset(new Replica(master_context_, i, &service_));
   }
 
-  SyncBlock sb{num_df_flows_};
+  // Blocked on untill all flows got full sync cut.
+  fibers_ext::BlockingCounter sync_block{num_df_flows_};
 
-  AggregateError ec;
+  auto err_handler = [this, sync_block](const auto& ge) mutable {
+    sync_block.Cancel();      // Unblock this function.
+    DefaultErrorHandler(ge);  // Close sockets to unblock flows.
+  };
+  RETURN_ON_ERR(cntx_.Switch(std::move(err_handler)));
+
+  // Start full sync flows.
   auto partition = Partition(num_df_flows_);
   shard_set->pool()->AwaitFiberOnAll([&](unsigned index, auto*) {
     for (auto id : partition[index]) {
-      if ((ec = shard_flows_[id]->StartFullSyncFlow(&sb)))
-        break;
+      auto ec = shard_flows_[id]->StartFullSyncFlow(sync_block, &cntx_);
+      if (ec)
+        cntx_.Error(ec);
     }
   });
+  RETURN_ON_ERR(cntx_.GetError());
 
-  RETURN_ON_ERR(*ec);
-
-  ReqSerializer serializer{sock_.get()};
-
-  // Master waits for this command in order to start sending replication stream.
-  RETURN_ON_ERR(SendCommand(StrCat("DFLY SYNC ", master_context_.dfly_session_id), &serializer));
-
-  base::IoBuf io_buf{128};
-  unsigned consumed = 0;
-  RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
-  if (!CheckRespIsSimpleReply("OK")) {
-    LOG(ERROR) << "Sync failed " << ToSV(io_buf.InputBuffer());
-    return make_error_code(errc::bad_message);
+  // Send DFLY SYNC.
+  if (auto ec = SendNextPhaseRequest(); ec) {
+    return cntx_.Error(ec);
   }
-
   // Wait for all flows to receive full sync cut.
-  {
-    VLOG(1) << "Blocking before full sync cut";
-    std::unique_lock lk(sb.mu_);
-    sb.cv_.wait(lk, [&]() { return sb.flows_left == 0; });
-  }
+  // In case of an error, this is unblocked by the error handler.
+  LOG(INFO) << "Waiting for all full sync cut confirmations";
+  sync_block.Wait();
 
   LOG(INFO) << "Full sync finished";
-  state_mask_ |= R_SYNC_OK;
-
-  return error_code{};
+  return cntx_.GetError();
 }
 
 error_code Replica::ConsumeRedisStream() {
@@ -516,43 +511,74 @@ error_code Replica::ConsumeRedisStream() {
 }
 
 error_code Replica::ConsumeDflyStream() {
-  // Request master to transition to stable sync.
-  {
-    ReqSerializer serializer{sock_.get()};
-    serializer.SendCommand(StrCat("DFLY STARTSTABLE ", master_context_.dfly_session_id));
-    RETURN_ON_ERR(serializer.ec());
+  // Send DFLY STARTSTABLE.
+  if (auto ec = SendNextPhaseRequest(); ec) {
+    return cntx_.Error(ec);
   }
 
   // Wait for all flows to finish full sync.
-  for (auto& sub_repl : shard_flows_)
-    sub_repl->sync_fb_.join();
+  JoinAllFlows();
 
-  AggregateError all_ec;
+  RETURN_ON_ERR(cntx_.Switch(absl::bind_front(&Replica::DefaultErrorHandler, this)));
+
   vector<vector<unsigned>> partition = Partition(num_df_flows_);
   shard_set->pool()->AwaitFiberOnAll([&](unsigned index, auto*) {
     const auto& local_ids = partition[index];
     for (unsigned id : local_ids) {
-      all_ec = shard_flows_[id]->StartStableSyncFlow();
-      if (all_ec)
-        break;
+      auto ec = shard_flows_[id]->StartStableSyncFlow(&cntx_);
+      if (ec)
+        cntx_.Error(ec);
     }
   });
 
-  RETURN_ON_ERR(*all_ec);
-
-  base::IoBuf io_buf(16_KB);
-  std::error_code ec;
-  while (!ec) {
-    io::MutableBytes buf = io_buf.AppendBuffer();
-    io::Result<size_t> size_res = sock_->Recv(buf);
-    if (!size_res)
-      return size_res.error();
-  }
-
-  return error_code{};
+  return cntx_.GetError();
 }
 
-error_code Replica::StartFullSyncFlow(SyncBlock* sb) {
+void Replica::CloseAllSockets() {
+  if (sock_) {
+    sock_->proactor()->Await([this] {
+      auto ec = sock_->Shutdown(SHUT_RDWR);
+      LOG_IF(ERROR, ec) << "Could not shutdown socket " << ec;
+    });
+  }
+
+  for (auto& flow : shard_flows_) {
+    flow->CloseAllSockets();
+  }
+}
+
+void Replica::JoinAllFlows() {
+  for (auto& flow : shard_flows_) {
+    if (flow->sync_fb_.joinable()) {
+      flow->sync_fb_.join();
+    }
+  }
+}
+
+void Replica::DefaultErrorHandler(const GenericError& err) {
+  CloseAllSockets();
+}
+
+error_code Replica::SendNextPhaseRequest() {
+  ReqSerializer serializer{sock_.get()};
+
+  // Ask master to start sending replication stream
+  string request = (state_mask_ & R_SYNC_OK) ? "STARTSTABLE" : "SYNC";
+  RETURN_ON_ERR(
+      SendCommand(StrCat("DFLY ", request, " ", master_context_.dfly_session_id), &serializer));
+
+  base::IoBuf io_buf{128};
+  unsigned consumed = 0;
+  RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
+  if (!CheckRespIsSimpleReply("OK")) {
+    LOG(ERROR) << "Phase transition failed " << ToSV(io_buf.InputBuffer());
+    return make_error_code(errc::bad_message);
+  }
+
+  return std::error_code{};
+}
+
+error_code Replica::StartFullSyncFlow(fibers_ext::BlockingCounter sb, Context* cntx) {
   CHECK(!sock_);
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
 
@@ -594,12 +620,12 @@ error_code Replica::StartFullSyncFlow(SyncBlock* sb) {
 
   // We can not discard io_buf because it may contain data
   // besides the response we parsed. Therefore we pass it further to ReplicateDFFb.
-  sync_fb_ = ::boost::fibers::fiber(&Replica::FullSyncDflyFb, this, sb, move(eof_token));
+  sync_fb_ = ::boost::fibers::fiber(&Replica::FullSyncDflyFb, this, move(eof_token), sb, cntx);
 
   return error_code{};
 }
 
-error_code Replica::StartStableSyncFlow() {
+error_code Replica::StartStableSyncFlow(Context* cntx) {
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
@@ -607,26 +633,29 @@ error_code Replica::StartStableSyncFlow() {
   CHECK(sock_->IsOpen());
   // sock_.reset(mythread->CreateSocket());
   // RETURN_ON_ERR(sock_->Connect(master_context_.master_ep));
-  sync_fb_ = ::boost::fibers::fiber(&Replica::StableSyncDflyFb, this);
+  sync_fb_ = ::boost::fibers::fiber(&Replica::StableSyncDflyFb, this, cntx);
 
   return std::error_code{};
 }
 
-void Replica::FullSyncDflyFb(SyncBlock* sb, string eof_token) {
+void Replica::FullSyncDflyFb(string eof_token, fibers_ext::BlockingCounter bc, Context* cntx) {
   DCHECK(leftover_buf_);
   SocketSource ss{sock_.get()};
   io::PrefixSource ps{leftover_buf_->InputBuffer(), &ss};
 
   RdbLoader loader(NULL);
-  loader.SetFullSyncCutCb([sb, ran = false]() mutable {
+  loader.SetFullSyncCutCb([bc, ran = false]() mutable {
     if (!ran) {
-      std::unique_lock lk(sb->mu_);
-      sb->flows_left--;
+      bc.Dec();
       ran = true;
-      sb->cv_.notify_all();
     }
   });
-  loader.Load(&ps);
+
+  // Load incoming rdb stream.
+  if (std::error_code ec = loader.Load(&ps); ec) {
+    cntx->Error(ec, "Error loading rdb format");
+    return;
+  }
 
   // Try finding eof token.
   io::PrefixSource chained_tail{loader.Leftover(), &ps};
@@ -637,7 +666,8 @@ void Replica::FullSyncDflyFb(SyncBlock* sb, string eof_token) {
         chained_tail.ReadAtLeast(io::MutableBytes{buf.get(), eof_token.size()}, eof_token.size());
 
     if (!res || *res != eof_token.size()) {
-      LOG(ERROR) << "Error finding eof token in the stream";
+      cntx->Error(std::make_error_code(errc::protocol_error), "Error finding eof token in stream");
+      return;
     }
   }
 
@@ -655,7 +685,7 @@ void Replica::FullSyncDflyFb(SyncBlock* sb, string eof_token) {
   VLOG(1) << "FullSyncDflyFb finished after reading " << loader.bytes_read() << " bytes";
 }
 
-void Replica::StableSyncDflyFb() {
+void Replica::StableSyncDflyFb(Context* cntx) {
   base::IoBuf io_buf(16_KB);
   parser_.reset(new RedisParser);
 
@@ -667,24 +697,26 @@ void Replica::StableSyncDflyFb() {
     leftover_buf_.reset();
   }
 
-  error_code ec;
   string ack_cmd;
 
-  while (!ec) {
+  while (!cntx->IsCancelled()) {
     io::MutableBytes buf = io_buf.AppendBuffer();
     io::Result<size_t> size_res = sock_->Recv(buf);
-    if (!size_res)
+    if (!size_res) {
+      cntx->Error(size_res.error());
       return;
+    }
 
     last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
 
     io_buf.CommitWrite(*size_res);
     repl_offs_ += *size_res;
 
-    ec = ParseAndExecute(&io_buf);
+    if (auto ec = ParseAndExecute(&io_buf); ec) {
+      cntx->Error(ec);
+      return;
+    }
   }
-
-  return;
 }
 
 error_code Replica::ReadRespReply(base::IoBuf* io_buf, uint32_t* consumed) {
@@ -876,12 +908,17 @@ Replica::Info Replica::GetInfo() const {
   CHECK(sock_);
 
   return sock_->proactor()->AwaitBrief([this] {
+    auto last_io_time = last_io_time_;
+    for (const auto& flow : shard_flows_) {  // Get last io time from all sub flows.
+      last_io_time = std::max(last_io_time, flow->last_io_time_);
+    }
+
     Info res;
     res.host = master_context_.host;
     res.port = master_context_.port;
     res.master_link_established = (state_mask_ & R_TCP_CONNECTED);
     res.sync_in_progress = (state_mask_ & R_SYNCING);
-    res.master_last_io_sec = (ProactorBase::GetMonotonicTimeNs() - last_io_time_) / 1000000000UL;
+    res.master_last_io_sec = (ProactorBase::GetMonotonicTimeNs() - last_io_time) / 1000000000UL;
     return res;
   });
 }

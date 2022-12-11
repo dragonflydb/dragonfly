@@ -168,14 +168,14 @@ template <typename RandGen> std::string GetRandomHex(RandGen& gen, size_t len) {
 }
 
 // AggregateValue is a thread safe utility to store the first
-// non-default value.
+// truthy value;
 template <typename T> struct AggregateValue {
   bool operator=(T val) {
     std::lock_guard l{mu_};
-    if (current_ == T{} && val != T{}) {
+    if (!bool(current_) && bool(val)) {
       current_ = val;
     }
-    return val != T{};
+    return bool(val);
   }
 
   T operator*() {
@@ -184,7 +184,7 @@ template <typename T> struct AggregateValue {
   }
 
   operator bool() {
-    return **this != T{};
+    return bool(**this);
   }
 
  private:
@@ -192,15 +192,19 @@ template <typename T> struct AggregateValue {
   T current_{};
 };
 
+// Thread safe utility to store the first non null error.
 using AggregateError = AggregateValue<std::error_code>;
 
+// Thread safe utility to store the first non OK status.
 using AggregateStatus = AggregateValue<facade::OpStatus>;
-static_assert(facade::OpStatus::OK == facade::OpStatus{},
-              "Default intitialization should be OK value");
+static_assert(bool(facade::OpStatus::OK) == false,
+              "Default intitialization should be a falsy OK value");
 
-// Re-usable component for signaling cancellation.
-// Simple wrapper around atomic flag.
+// Simple wrapper interface around atomic cancellation flag.
 struct Cancellation {
+  Cancellation() : flag_{false} {
+  }
+
   void Cancel() {
     flag_.store(true, std::memory_order_relaxed);
   }
@@ -209,7 +213,7 @@ struct Cancellation {
     return flag_.load(std::memory_order_relaxed);
   }
 
- private:
+ protected:
   std::atomic_bool flag_;
 };
 
@@ -222,50 +226,72 @@ class GenericError {
   GenericError(std::error_code ec, std::string details) : ec_{ec}, details_{std::move(details)} {
   }
 
-  std::error_code GetError() const {
-    return ec_;
-  }
+  operator std::error_code() const;
+  operator bool() const;
 
-  const std::string& GetDetails() const {
-    return details_;
-  }
-
-  operator bool() const {
-    return bool(ec_);
-  }
-
-  // Get string representation of error.
-  std::string Format() const;
+  std::string Format() const;  // Get string representation of error.
 
  private:
   std::error_code ec_;
   std::string details_;
 };
 
+// Thread safe utility to store the first non null generic error.
 using AggregateGenericError = AggregateValue<GenericError>;
 
-// Contest combines Cancellation and AggregateGenericError in one class.
-// Allows setting an error_handler to run on errors.
-class Context : public Cancellation {
+// Context is a utility for managing error reporting and cancellation for complex tasks.
+//
+// When submitting an error with `Error`, only the first is stored (as in aggregate values).
+// Then a special error handler is run, if present, and the context is cancelled.
+//
+// Manual cancellation with `Cancel` is simulated by reporting an `errc::operation_canceled` error.
+// This allows running the error handler and representing this scenario as an error.
+class Context : protected Cancellation {
  public:
-  // The error handler should return false if this error is ignored.
-  using ErrHandler = std::function<bool(const GenericError&)>;
+  using ErrHandler = std::function<void(const GenericError&)>;
 
   Context() = default;
-  Context(ErrHandler err_handler) : Cancellation{}, err_handler_{std::move(err_handler)} {
+  Context(ErrHandler err_handler) : Cancellation{}, err_{}, err_handler_{std::move(err_handler)} {
   }
 
-  template <typename... T> void Error(T... ts) {
+  // Cancels the context by submitting an `errc::operation_canceled` error.
+  void Cancel();
+  using Cancellation::IsCancelled;
+
+  const Cancellation* GetCancellation() const;
+
+  GenericError GetError();
+
+  // Report an error by submitting arguments for GenericError.
+  // If this is the first error that occured, then the error handler is run
+  // and the context is cancelled.
+  //
+  // Note: this function blocks when called from inside an error handler.
+  template <typename... T> GenericError Error(T... ts) {
     std::lock_guard lk{mu_};
     if (err_)
-      return;
+      return err_;
 
     GenericError new_err{std::forward<T>(ts)...};
-    if (!err_handler_ || err_handler_(new_err)) {
-      err_ = std::move(new_err);
-      Cancel();
-    }
+    if (err_handler_)
+      err_handler_(new_err);
+
+    err_ = std::move(new_err);
+    Cancellation::Cancel();
+
+    return err_;
   }
+
+  // Reset error and cancellation flag, assign new error handler.
+  void Reset(ErrHandler handler);
+
+  // Atomically replace the error handler if no error is present, and return the
+  // current stored error. This function can be used to transfer cleanup responsibility safely
+  //
+  // Beware, never do this manually in two steps. If you check for cancellation,
+  // set the error handler and initialize resources, then the new error handler
+  // will never run if the context was cancelled between the first two steps.
+  GenericError Switch(ErrHandler handler);
 
  private:
   GenericError err_;

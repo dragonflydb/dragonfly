@@ -11,6 +11,10 @@ from . import dfly_args
 
 BASE_PORT = 1111
 
+DISCONNECT_CRASH_FULL_SYNC = 0
+DISCONNECT_CRASH_STABLE_SYNC = 1
+DISCONNECT_NORMAL_STABLE_SYNC = 2
+
 """
 Test full replication pipeline. Test full sync with streaming changes and stable state streaming.
 """
@@ -87,7 +91,11 @@ async def test_replication_all(df_local_factory, t_master, t_replicas, n_keys, n
 
 
 """
-Test disconnecting replicas during different phases with constantly streaming changes to master.
+Test disconnecting replicas during different phases while constantly streaming changes to master.
+
+This test is targeted at the master cancellation mechanism that should qickly stop operations for a
+disconnected replica.
+
 Three types are tested:
 1. Replicas crashing during full sync state
 2. Replicas crashing during stable sync state
@@ -116,16 +124,16 @@ disconnect_cases = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys", disconnect_cases)
-async def test_disconnect(df_local_factory, t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys):
+async def test_disconnect_replica(df_local_factory, t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys):
     master = df_local_factory.create(port=BASE_PORT, proactor_threads=t_master)
     replicas = [
         (df_local_factory.create(
             port=BASE_PORT+i+1, proactor_threads=t), crash_fs)
         for i, (t, crash_fs) in enumerate(
             chain(
-                zip(t_crash_fs, repeat(0)),
-                zip(t_crash_ss, repeat(1)),
-                zip(t_disonnect, repeat(2))
+                zip(t_crash_fs, repeat(DISCONNECT_CRASH_FULL_SYNC)),
+                zip(t_crash_ss, repeat(DISCONNECT_CRASH_STABLE_SYNC)),
+                zip(t_disonnect, repeat(DISCONNECT_NORMAL_STABLE_SYNC))
             )
         )
     ]
@@ -226,3 +234,88 @@ async def test_disconnect(df_local_factory, t_master, t_crash_fs, t_crash_ss, t_
 
     # Check master survived all disconnects
     assert await c_master.ping()
+
+
+"""
+Test stopping master during different phases.
+
+This test is targeted at the replica cancellation mechanism that should quickly abort a failed operation
+and revert to connection retry state.
+
+Three types are tested:
+1. Master crashing during full sync state
+2. Master crashing in a random state.
+3. Master crashing during stable sync state
+
+"""
+
+# 1. Number of master threads
+# 2. Number of threads for each replica
+# 3. Number of times a random crash happens
+# 4. Number of keys transferred (the more, the higher the propability to not miss full sync)
+master_crash_cases = [
+    (4, [4], 3, 1000),
+    (8, [8], 3, 5000),
+    (6, [6, 6, 6], 3, 5000),
+    (4, [2] * 8, 3, 5000),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("t_master, t_replicas, n_random_crashes, n_keys", master_crash_cases)
+async def test_disconnect_master(df_local_factory, t_master, t_replicas, n_random_crashes, n_keys):
+    master = df_local_factory.create(port=1111, proactor_threads=t_master)
+    replicas = [
+        df_local_factory.create(
+            port=BASE_PORT+i+1, proactor_threads=t)
+        for i, t in enumerate(t_replicas)
+    ]
+
+    for replica in replicas:
+        replica.start()
+
+    c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
+
+    async def full_sync(c_replica):
+        try:
+            await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
+            await wait_available_async(c_replica)
+        except aioredis.ResponseError as e:
+            # This should mean master crashed during greet phase
+            pass
+
+    async def crash_master_fs():
+        await asyncio.sleep(random.random() / 10 + 0.01)
+        master.stop(kill=True)
+
+    async def start_master():
+        master.start()
+        c_master = aioredis.Redis(port=master.port)
+        assert await c_master.ping()
+        await batch_fill_data_async(c_master, gen_test_data(n_keys, seed=0))
+
+    await start_master()
+
+    # Crash master during full sync
+    await asyncio.gather(*(full_sync(c) for c in c_replicas), crash_master_fs())
+
+    for _ in range(n_random_crashes):
+        await start_master()
+        await asyncio.sleep(random.random() + len(replicas) * random.random() / 10)
+        # Crash master in some random state for each replica
+        master.stop(kill=True)
+
+    await start_master()
+    await asyncio.sleep(1 + len(replicas) * 0.5)  # Replicas check every 500ms.
+    for c_replica in c_replicas:
+        await wait_available_async(c_replica)
+        await batch_check_data_async(c_replica, gen_test_data(n_keys, seed=0))
+
+    # Crash master during stable state
+    master.stop(kill=True)
+
+    await start_master()
+    await asyncio.sleep(1 + len(replicas) * 0.5)
+    for c_replica in c_replicas:
+        await wait_available_async(c_replica)
+        await batch_check_data_async(c_replica, gen_test_data(n_keys, seed=0))

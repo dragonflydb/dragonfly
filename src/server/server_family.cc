@@ -420,6 +420,8 @@ void ServerFamily::Shutdown() {
     if (replica_) {
       replica_->Stop();
     }
+
+    dfly_cmd_->Shutdown();
   });
 }
 
@@ -1532,6 +1534,11 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
 
         string sync_id = absl::StrCat("SYNC", sid);
         cntx->conn_state.repl_session_id = sid;
+
+        if (!cntx->replica_conn) {
+          ServerState::tl_connection_stats()->num_replicas += 1;
+        }
+        cntx->replica_conn = true;
 
         // The response for 'capa dragonfly' is: <masterid> <syncid> <numthreads>
         (*cntx)->StartArray(3);
