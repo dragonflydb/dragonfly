@@ -7,9 +7,6 @@ on:
     branches: [main]
   workflow_dispatch:
 
-env:
-  # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
-  BUILD_TYPE: Debug
 jobs:
   pre-commit:
     runs-on: ubuntu-latest
@@ -39,6 +36,7 @@ jobs:
       matrix:
         # Test of these containers
         container: ["ubuntu-dev:20", "alpine-dev:latest"]
+        build-type: [Debug, Release]
     timeout-minutes: 30
     container:
       image: ghcr.io/romange/${{ matrix.container }}
@@ -69,7 +67,7 @@ jobs:
         # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
         # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
         run: |
-          cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -GNinja -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cd ${{github.workspace}}/build && pwd
           du -hcs _deps/
       - name: Build & Test
@@ -77,7 +75,6 @@ jobs:
           cd ${{github.workspace}}/build
           ninja src/all
           ccache --show-stats
-          GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1 ctest -V -R rdb_test
           echo Run ctest -V -L DFLY
           #GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1
           GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=2,snapshot=2 ctest -V -L DFLY
