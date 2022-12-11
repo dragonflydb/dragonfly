@@ -125,8 +125,12 @@ In addition, it has Dragonfly specific arguments options:
  * `hz` - key expiry evaluation frequency. Default is 100. Lower frequency uses less cpu when
    idle at the expense of slower eviction rate.
  * `save_schedule` - glob spec for the UTC time to save a snapshot which matches HH:MM (24h time). default: ""
- * `keys_output_limit` -  Maximum number of keys output by keys command. default: 8192
 
+### Example Start Script, with all options:
+
+```bash
+./dragonfly-x86_64 --logtostderr --requirepass=youshallnotpass --cache_mode=true -dbnum 1 --bind localhost --port 5555 --hz=100 --save_schedule "*:30" --maxmemory=12gb --keys_output_limit=12288 --dbfilename dump.rdb
+```
 
 for more options like logs management or tls support, run `dragonfly --help`.
 
