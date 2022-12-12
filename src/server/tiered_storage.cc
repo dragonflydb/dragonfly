@@ -334,10 +334,13 @@ void TieredStorage::FinishIoRequest(int io_res, ActiveIoRequest* req) {
 error_code TieredStorage::UnloadItem(DbIndex db_index, PrimeIterator it) {
   CHECK_EQ(OBJ_STRING, it->second.ObjType());
 
+  // Relevant only for OBJ_STRING, see CHECK above.
   size_t blob_len = it->second.Size();
+
   if (blob_len >= kBatchSize / 2 &&
       num_active_requests_ < GetFlag(FLAGS_tiered_storage_max_pending_writes)) {
-    LOG(FATAL) << "TBD: schedule unload for large values that spawn 1+ 4k pages.";
+    WriteSingle(db_index, it, blob_len);
+    return error_code{};
   }
 
   if (db_arr_.size() <= db_index) {
@@ -370,6 +373,60 @@ error_code TieredStorage::UnloadItem(DbIndex db_index, PrimeIterator it) {
 bool IsObjFitToUnload(const PrimeValue& pv) {
   return pv.ObjType() == OBJ_STRING && !pv.IsExternal() && pv.Size() >= 64 && !pv.HasIoPending();
 };
+
+void TieredStorage::WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_len) {
+  DCHECK(!it->second.HasIoPending());
+
+  int64_t res = alloc_.Malloc(blob_len);
+  if (res < 0) {
+    InitiateGrow(-res);
+    return;
+  }
+
+  constexpr size_t kMask = kPageAlignment - 1;
+  size_t page_size = (blob_len + kMask) & (~kMask);
+
+  DCHECK_GE(page_size, blob_len);
+  DCHECK_EQ(0u, page_size % kPageAlignment);
+
+  struct SingleRequest {
+    char* block_ptr = nullptr;
+    PrimeTable* pt = nullptr;
+    size_t blob_len = 0;
+    off_t offset = 0;
+    string key;
+  } req;
+
+  char* block_ptr = (char*)mi_malloc_aligned(page_size, kPageAlignment);
+
+  req.blob_len = blob_len;
+  req.offset = res;
+  req.key = it->first.ToString();
+  req.pt = db_slice_.GetTables(db_index).first;
+  req.block_ptr = block_ptr;
+
+  it->second.GetString(block_ptr);
+  it->second.SetIoPending(true);
+
+  auto cb = [req = std::move(req)](int io_res) {
+    PrimeIterator it = req.pt->Find(req.key);
+    CHECK(!it.is_done());
+
+    // TODO: what happens when if the entry was deleted meanwhile
+    // or it has been serialized again?
+    CHECK(it->second.HasIoPending()) << "TBD: fix inconsistencies";
+    it->second.SetIoPending(false);
+
+    if (io_res < 0) {
+      LOG(ERROR) << "Error writing to ssd storage " << util::detail::SafeErrorMessage(-io_res);
+      return;
+    }
+    it->second.SetExternal(req.offset, req.blob_len);
+    mi_free(req.block_ptr);
+  };
+
+  io_mgr_.WriteAsync(res, string_view{block_ptr, page_size}, std::move(cb));
+}
 
 void TieredStorage::FlushPending(DbIndex db_index) {
   PerDb* db = db_arr_[db_index];

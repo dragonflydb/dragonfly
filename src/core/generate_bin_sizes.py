@@ -1,19 +1,36 @@
 #!/usr/bin/env python3
 
 import argparse
-import random 
+import random
 from array import array
 
 # We print in 64 bit words.
 ALIGN = 1 << 10  # 1KB alignment
 
 
+def print_small_bins():
+    prev_val = 0
+    for i in range(64, 1, -1):
+        val = 4096 // i
+        val = (val // 16)*16  # make it 16 bytes aligned
+        if val != prev_val:
+            print(val, end=', ')
+            prev_val = val
+
+    print()
+
+
 def main():
     parser = argparse.ArgumentParser(description='')
-    parser.add_argument('-n', type=int, dest='num', 
+    parser.add_argument('-n', type=int, dest='num',
                         help='number of quadruplets', default=9)
+    parser.add_argument('-small', action='store_true')
 
     args = parser.parse_args()
+    if args.small:
+        print("small")
+        print_small_bins()
+        return
 
     size = 512*4
     print ('{512, 512*2, 512*3, ', end=' ')
