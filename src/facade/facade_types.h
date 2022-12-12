@@ -4,19 +4,22 @@
 
 #pragma once
 
-#include <absl/types/span.h>
 #include <absl/container/flat_hash_map.h>
+#include <absl/types/span.h>
+
+#include <string>
 
 namespace facade {
 
-enum class Protocol : uint8_t {
-  MEMCACHE = 1,
-  REDIS = 2
-};
+enum class Protocol : uint8_t { MEMCACHE = 1, REDIS = 2 };
 
 using MutableSlice = absl::Span<char>;
 using CmdArgList = absl::Span<MutableSlice>;
 using CmdArgVec = std::vector<MutableSlice>;
+
+inline std::string_view ToSV(MutableSlice slice) {
+  return std::string_view{slice.data(), slice.size()};
+}
 
 struct CmdArgListFormatter {
   void operator()(std::string* out, MutableSlice arg) const {
@@ -65,7 +68,6 @@ constexpr inline unsigned long long operator""_KB(unsigned long long x) {
 }
 
 }  // namespace facade
-
 
 namespace std {
 ostream& operator<<(ostream& os, facade::CmdArgList args);
