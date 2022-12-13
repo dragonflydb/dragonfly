@@ -424,12 +424,11 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
   if (params.memcache_flags)
     db_slice.SetMCFlag(op_args_.db_cntx.db_index, it->first.AsRef(), params.memcache_flags);
 
-  if (shard->tiered_storage()) {  // external storage enabled.
+  if (shard->tiered_storage() &&
+      TieredStorage::EligibleForOffload(value)) {  // external storage enabled.
     // TODO: we may have a bug if we block the fiber inside UnloadItem - "it" may be invalid
     // afterwards.
-    if (value.size() >= kMinTieredLen) {
-      shard->tiered_storage()->UnloadItem(op_args_.db_cntx.db_index, it);
-    }
+    shard->tiered_storage()->UnloadItem(op_args_.db_cntx.db_index, it);
   }
 
   RecordJournal(op_args_, key, it->second);

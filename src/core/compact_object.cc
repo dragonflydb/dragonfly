@@ -16,8 +16,9 @@ extern "C" {
 #include "redis/zmalloc.h"  // for non-string objects.
 #include "redis/zset.h"
 }
-
 #include <absl/strings/str_cat.h>
+
+#include <jsoncons/json.hpp>
 
 #include "base/flags.h"
 #include "base/logging.h"
@@ -577,8 +578,9 @@ size_t CompactObj::Size() const {
 }
 
 uint64_t CompactObj::HashCode() const {
-  uint8_t encoded = (mask_ & kEncMask);
+  DCHECK(taglen_ != JSON_TAG) << "JSON type cannot be used for keys!";
 
+  uint8_t encoded = (mask_ & kEncMask);
   if (IsInline()) {
     if (encoded) {
       char buf[kInlineLen * 2];
@@ -620,6 +622,10 @@ unsigned CompactObj::ObjType() const {
 
   if (taglen_ == ROBJ_TAG)
     return u_.r_obj.type();
+
+  if (taglen_ == JSON_TAG) {
+    return OBJ_JSON;
+  }
 
   LOG(FATAL) << "TBD " << int(taglen_);
   return 0;
@@ -724,6 +730,24 @@ std::optional<int64_t> CompactObj::TryGetInt() const {
     return std::nullopt;
   int64_t val = u_.ival;
   return val;
+}
+
+auto CompactObj::GetJson() const -> JsonType* {
+  if (ObjType() == OBJ_JSON) {
+    return u_.json_obj.json_ptr;
+  }
+  return nullptr;
+}
+
+void CompactObj::SetJson(JsonType&& j) {
+  if (taglen_ == JSON_TAG) {                  // already json
+    DCHECK(u_.json_obj.json_ptr != nullptr);  // must be allocated
+    *u_.json_obj.json_ptr = std::move(j);
+  } else {
+    SetMeta(JSON_TAG);
+    void* ptr = tl.local_mr->allocate(sizeof(JsonType), kAlignSize);
+    u_.json_obj.json_ptr = new (ptr) JsonType(std::move(j));
+  }
 }
 
 void CompactObj::SetString(std::string_view str) {
@@ -894,7 +918,7 @@ bool CompactObj::HasAllocated() const {
       (taglen_ == ROBJ_TAG && u_.r_obj.inner_obj() == nullptr))
     return false;
 
-  DCHECK(taglen_ == ROBJ_TAG || taglen_ == SMALL_TAG);
+  DCHECK(taglen_ == ROBJ_TAG || taglen_ == SMALL_TAG || taglen_ == JSON_TAG);
   return true;
 }
 
@@ -1004,6 +1028,10 @@ void CompactObj::Free() {
   } else if (taglen_ == SMALL_TAG) {
     tl.small_str_bytes -= u_.small_str.MallocUsed();
     u_.small_str.Free();
+  } else if (taglen_ == JSON_TAG) {
+    VLOG(1) << "Freeing JSON object";
+    u_.json_obj.json_ptr->~JsonType();
+    tl.local_mr->deallocate(u_.json_obj.json_ptr, kAlignSize);
   } else {
     LOG(FATAL) << "Unsupported tag " << int(taglen_);
   }
@@ -1019,6 +1047,11 @@ size_t CompactObj::MallocUsed() const {
     return u_.r_obj.MallocUsed();
   }
 
+  if (taglen_ == JSON_TAG) {
+    DCHECK(u_.json_obj.json_ptr != nullptr);
+    return zmalloc_size(u_.json_obj.json_ptr);
+  }
+
   if (taglen_ == SMALL_TAG) {
     return u_.small_str.MallocUsed();
   }
@@ -1028,6 +1061,8 @@ size_t CompactObj::MallocUsed() const {
 }
 
 bool CompactObj::operator==(const CompactObj& o) const {
+  DCHECK(taglen_ != JSON_TAG && o.taglen_ != JSON_TAG) << "cannot use JSON type to check equal";
+
   uint8_t m1 = mask_ & kEncMask;
   uint8_t m2 = mask_ & kEncMask;
   if (m1 != m2)
@@ -1094,6 +1129,10 @@ bool CompactObj::CmpEncoded(string_view sv) const {
       return false;
 
     return detail::compare_packed(to_byte(u_.r_obj.inner_obj()), sv.data(), sv.size());
+  }
+
+  if (taglen_ == JSON_TAG) {
+    return false;  // cannot compare json with string
   }
 
   if (taglen_ == SMALL_TAG) {

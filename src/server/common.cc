@@ -9,14 +9,16 @@
 #include <absl/strings/str_cat.h>
 #include <mimalloc.h>
 
+#include <system_error>
+
 extern "C" {
 #include "redis/object.h"
 #include "redis/rdb.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"
 }
-
 #include "base/logging.h"
+#include "core/compact_object.h"
 #include "server/error.h"
 #include "server/server_state.h"
 
@@ -87,6 +89,8 @@ const char* ObjTypeName(int type) {
       return "hash";
     case OBJ_STREAM:
       return "stream";
+    case OBJ_JSON:
+      return "ReJSON-RL";
     default:
       LOG(ERROR) << "Unsupported type " << type;
   }
@@ -240,6 +244,14 @@ bool ScanOpts::Matches(std::string_view val_name) const {
   return stringmatchlen(pattern.data(), pattern.size(), val_name.data(), val_name.size(), 0) == 1;
 }
 
+GenericError::operator std::error_code() const {
+  return ec_;
+}
+
+GenericError::operator bool() const {
+  return bool(ec_);
+}
+
 std::string GenericError::Format() const {
   if (!ec_)
     return "";
@@ -248,6 +260,33 @@ std::string GenericError::Format() const {
     return ec_.message();
   else
     return absl::StrCat(ec_.message(), ":", details_);
+}
+
+GenericError Context::GetError() {
+  std::lock_guard lk(mu_);
+  return err_;
+}
+
+const Cancellation* Context::GetCancellation() const {
+  return this;
+}
+
+void Context::Cancel() {
+  Error(std::make_error_code(errc::operation_canceled), "Context cancelled");
+}
+
+void Context::Reset(ErrHandler handler) {
+  std::lock_guard lk{mu_};
+  err_ = {};
+  err_handler_ = std::move(handler);
+  Cancellation::flag_.store(false, std::memory_order_relaxed);
+}
+
+GenericError Context::Switch(ErrHandler handler) {
+  std::lock_guard lk{mu_};
+  if (!err_)
+    err_handler_ = std::move(handler);
+  return err_;
 }
 
 }  // namespace dfly

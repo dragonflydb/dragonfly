@@ -7,9 +7,13 @@
 #include <mimalloc.h>
 #include <xxhash.h>
 
+#include <jsoncons/json.hpp>
+#include <jsoncons_ext/jsonpath/jsonpath.hpp>
+
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/flat_set.h"
+#include "core/json_object.h"
 #include "core/mi_memory_resource.h"
 
 extern "C" {
@@ -28,6 +32,8 @@ constexpr size_t kRandomStartIndex = 24;
 constexpr size_t kRandomStep = 26;
 constexpr float kUnderUtilizedRatio = 1.0f;  // ensure that we would detect
 using namespace std;
+using namespace jsoncons;
+using namespace jsoncons::jsonpath;
 
 void PrintTo(const CompactObj& cobj, std::ostream* os) {
   if (cobj.ObjType() == OBJ_STRING) {
@@ -356,6 +362,94 @@ TEST_F(CompactObjectTest, MimallocUnderutilzationWithRealloc) {
   ASSERT_TRUE(found);
   for (auto* ptr : ptrs) {
     mi_free(ptr);
+  }
+}
+
+TEST_F(CompactObjectTest, JsonTypeTest) {
+  using namespace jsoncons;
+  // This test verify that we can set a json type
+  // and that we "know", it JSON and not a string
+  std::string_view json_str = R"(
+    {"firstName":"John","lastName":"Smith","age":27,"weight":135.25,"isAlive":true,
+    "address":{"street":"21 2nd Street","city":"New York","state":"NY","zipcode":"10021-3100"},
+    "phoneNumbers":[{"type":"home","number":"212 555-1234"},{"type":"office","number":"646 555-4567"}],
+    "children":[],"spouse":null}
+  )";
+  std::optional<JsonType> json_option2 =
+      JsonFromString(R"({"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}})");
+
+  cobj_.SetString(json_str);
+  ASSERT_TRUE(cobj_.ObjType() == OBJ_STRING);  // we set this as a string
+  JsonType* failed_json = cobj_.GetJson();
+  ASSERT_TRUE(failed_json == nullptr);
+  ASSERT_TRUE(cobj_.ObjType() == OBJ_STRING);
+  std::optional<JsonType> json_option = JsonFromString(json_str);
+  ASSERT_TRUE(json_option.has_value());
+  cobj_.SetJson(std::move(json_option.value()));
+  ASSERT_TRUE(cobj_.ObjType() == OBJ_JSON);  // and now this is a JSON type
+  JsonType* json = cobj_.GetJson();
+  ASSERT_TRUE(json != nullptr);
+  ASSERT_TRUE(json->contains("firstName"));
+  // set second object make sure that we don't have any memory issue
+  ASSERT_TRUE(json_option2.has_value());
+  cobj_.SetJson(std::move(json_option2.value()));
+  ASSERT_TRUE(cobj_.ObjType() == OBJ_JSON);  // still is a JSON type
+  json = cobj_.GetJson();
+  ASSERT_TRUE(json != nullptr);
+  ASSERT_TRUE(json->contains("b"));
+  ASSERT_FALSE(json->contains("firstName"));
+  std::optional<JsonType> set_array = JsonFromString("");
+  // now set it to string again
+  cobj_.SetString(R"({"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}})");
+  ASSERT_TRUE(cobj_.ObjType() == OBJ_STRING);  // we set this as a string
+  failed_json = cobj_.GetJson();
+  ASSERT_TRUE(failed_json == nullptr);
+}
+
+TEST_F(CompactObjectTest, JsonTypeWithPathTest) {
+  std::string_view books_json =
+      R"({"books":[{
+            "category": "fiction",
+            "title" : "A Wild Sheep Chase",
+            "author" : "Haruki Murakami"
+        },{
+            "category": "fiction",
+            "title" : "The Night Watch",
+            "author" : "Sergei Lukyanenko"
+        },{
+            "category": "fiction",
+            "title" : "The Comedians",
+            "author" : "Graham Greene"
+        },{
+            "category": "memoir",
+            "title" : "The Night Watch",
+            "author" : "Phillips, David Atlee"
+        }]})";
+  std::optional<JsonType> json_array = JsonFromString(books_json);
+  ASSERT_TRUE(json_array.has_value());
+  cobj_.SetJson(std::move(json_array.value()));
+  ASSERT_TRUE(cobj_.ObjType() == OBJ_JSON);  // and now this is a JSON type
+  auto f = [](const std::string& /*path*/, JsonType& book) {
+    if (book.at("category") == "memoir" && !book.contains("price")) {
+      book.try_emplace("price", 140.0);
+    }
+  };
+  JsonType* json = cobj_.GetJson();
+  ASSERT_TRUE(json != nullptr);
+  jsonpath::json_replace(*json, "$.books[*]", f);
+
+  // Check whether we've changed the entry for json in place
+  // we should have prices only for memoir books
+  JsonType* json2 = cobj_.GetJson();
+  ASSERT_TRUE(json != nullptr);
+  ASSERT_TRUE(json->contains("books"));
+  for (auto&& book : (*json2)["books"].array_range()) {
+    // make sure that we add prices only to "memoir"
+    if (book.at("category") == "memoir") {
+      ASSERT_TRUE(book.contains("price"));
+    } else {
+      ASSERT_FALSE(book.contains("price"));
+    }
   }
 }
 

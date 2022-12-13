@@ -403,8 +403,8 @@ void ServerFamily::Shutdown() {
     load_result_.wait();
 
   is_snapshot_done_.Notify();
-  if (snapshot_fiber_.joinable()) {
-    snapshot_fiber_.join();
+  if (snapshot_fiber_.IsJoinable()) {
+    snapshot_fiber_.Join();
   }
 
   pb_task_->Await([this] {
@@ -420,6 +420,8 @@ void ServerFamily::Shutdown() {
     if (replica_) {
       replica_->Stop();
     }
+
+    dfly_cmd_->Shutdown();
   });
 }
 
@@ -479,7 +481,7 @@ fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path)
 
   auto& pool = service_.proactor_pool();
 
-  std::vector<::boost::fibers::fiber> load_fibers;
+  vector<util::fibers_ext::Fiber> load_fibers;
   load_fibers.reserve(paths.size());
 
   auto first_error = std::make_shared<AggregateError>();
@@ -507,7 +509,7 @@ fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path)
   auto load_join_fiber = [this, first_error, load_fibers = std::move(load_fibers),
                           ec_promise = std::move(ec_promise)]() mutable {
     for (auto& fiber : load_fibers) {
-      fiber.join();
+      fiber.Join();
     }
 
     VLOG(1) << "Load finished";
@@ -1532,6 +1534,11 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
 
         string sync_id = absl::StrCat("SYNC", sid);
         cntx->conn_state.repl_session_id = sid;
+
+        if (!cntx->replica_conn) {
+          ServerState::tl_connection_stats()->num_replicas += 1;
+        }
+        cntx->replica_conn = true;
 
         // The response for 'capa dragonfly' is: <masterid> <syncid> <numthreads>
         (*cntx)->StartArray(3);

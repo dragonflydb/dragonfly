@@ -118,8 +118,10 @@ class DflyCmd {
 
   void OnClose(ConnectionContext* cntx);
 
-  // Stop all background processes so we can exit in orderly manner.
   void BreakOnShutdown();
+
+  // Stop all background processes so we can exit in orderly manner.
+  void Shutdown();
 
   // Create new sync session.
   uint32_t CreateSyncSession();
@@ -185,7 +187,9 @@ class DflyCmd {
   TxId journal_txid_ = 0;
 
   uint32_t next_sync_id_ = 1;
-  absl::btree_map<uint32_t, std::shared_ptr<ReplicaInfo>> replica_infos_;
+
+  using ReplicaInfoMap = absl::btree_map<uint32_t, std::shared_ptr<ReplicaInfo>>;
+  ReplicaInfoMap replica_infos_;
 
   ::boost::fibers::mutex mu_;  // Guard global operations. See header top for locking levels.
 };

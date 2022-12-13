@@ -9,6 +9,7 @@
 #include "facade/conn_context.h"
 #include "facade/redis_parser.h"
 #include "server/engine_shard_set.h"
+#include "util/fibers/fiber.h"
 #include "util/proactor_pool.h"
 
 namespace util {
@@ -148,7 +149,7 @@ class ServerFamily {
 
   void SnapshotScheduling(const SnapshotSpec& time);
 
-  boost::fibers::fiber snapshot_fiber_;
+  util::fibers_ext::Fiber snapshot_fiber_;
   boost::fibers::future<std::error_code> load_result_;
 
   uint32_t stats_caching_task_ = 0;

@@ -3,15 +3,15 @@
 //
 #pragma once
 
-#include <boost/fiber/condition_variable.hpp>
 #include <boost/fiber/fiber.hpp>
-#include <boost/fiber/mutex.hpp>
 #include <variant>
 
 #include "base/io_buf.h"
 #include "facade/facade_types.h"
 #include "facade/redis_parser.h"
+#include "server/common.h"
 #include "util/fiber_socket_base.h"
+#include "util/fibers/fibers_ext.h"
 
 namespace facade {
 class ReqSerializer;
@@ -46,16 +46,6 @@ class Replica {
     R_SYNC_OK = 0x10,
   };
 
-  // A generic barrier that is used for waiting for
-  // flow fibers to become ready for the stable state switch.
-  struct SyncBlock {
-    SyncBlock(unsigned flows) : flows_left{flows} {
-    }
-    unsigned flows_left;
-    ::boost::fibers::mutex mu_;
-    ::boost::fibers::condition_variable cv_;
-  };
-
  public:
   Replica(std::string master_host, uint16_t port, Service* se);
   ~Replica();
@@ -82,21 +72,29 @@ class Replica {
   std::error_code ConsumeRedisStream();  // Redis stable state.
   std::error_code ConsumeDflyStream();   // Dragonfly stable state.
 
+  void CloseAllSockets();  // Close all sockets.
+  void JoinAllFlows();     // Join all flows if possible.
+
+  std::error_code SendNextPhaseRequest();  // Send DFLY SYNC or DFLY STARTSTABLE.
+
+  void DefaultErrorHandler(const GenericError& err);
+
  private: /* Main dlfly flow mode functions */
   // Initialize as single dfly flow.
   Replica(const MasterContext& context, uint32_t dfly_flow_id, Service* service);
 
   // Start replica initialized as dfly flow.
-  std::error_code StartFullSyncFlow(SyncBlock* block);
+  std::error_code StartFullSyncFlow(util::fibers_ext::BlockingCounter block, Context* cntx);
 
   // Transition into stable state mode as dfly flow.
-  std::error_code StartStableSyncFlow();
+  std::error_code StartStableSyncFlow(Context* cntx);
 
   // Single flow full sync fiber spawned by StartFullSyncFlow.
-  void FullSyncDflyFb(SyncBlock* block, std::string eof_token);
+  void FullSyncDflyFb(std::string eof_token, util::fibers_ext::BlockingCounter block,
+                      Context* cntx);
 
   // Single flow stable state sync fiber spawned by StartStableSyncFlow.
-  void StableSyncDflyFb();
+  void StableSyncDflyFb(Context* cntx);
 
  private: /* Utility */
   struct PSyncResponse {
@@ -164,6 +162,8 @@ class Replica {
   std::unique_ptr<facade::RedisParser> parser_;
   facade::RespVec resp_args_;
   facade::CmdArgVec cmd_str_args_;
+
+  Context cntx_;  // context for tasks in replica.
 
   // repl_offs - till what offset we've already read from the master.
   // ack_offs_ last acknowledged offset.
