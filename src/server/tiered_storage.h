@@ -30,6 +30,10 @@ class TieredStorage {
   // Schedules unloading of the item, pointed by the iterator.
   std::error_code UnloadItem(DbIndex db_index, PrimeIterator it);
 
+  static bool EligibleForOffload(std::string_view val) {
+    return val.size() >= kMinBlobLen;
+  }
+
   void Free(size_t offset, size_t len);
 
   void Shutdown();
@@ -57,6 +61,8 @@ class TieredStorage {
 
     bool ShouldFlush() const;
   };
+
+  void WriteSingle(DbIndex db_index, PrimeIterator it, size_t blob_len);
 
   void FlushPending(DbIndex db_index);
   void InitiateGrow(size_t size);

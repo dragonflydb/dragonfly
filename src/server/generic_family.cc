@@ -665,7 +665,7 @@ void GenericFamily::Exists(CmdArgList args, ConnectionContext* cntx) {
   OpStatus status = transaction->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, status);
 
-  return (*cntx)->SendLong(result.load(memory_order_release));
+  return (*cntx)->SendLong(result.load(memory_order_acquire));
 }
 
 void GenericFamily::Persist(CmdArgList args, ConnectionContext* cntx) {
