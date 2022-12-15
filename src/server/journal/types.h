@@ -48,9 +48,16 @@ struct Entry {
   uint64_t expire_ms = 0;  // 0 means no expiry.
 };
 
+struct EntryBase {
+  TxId txid;
+  Op opcode;
+  DbIndex dbid;
+};
+
 // This struct represents a single journal entry.
 // Those are either control instructions or commands.
-struct EntryNew {  // Called this "New" because I can't delete the old neither replace it partially
+struct EntryNew : public EntryBase {  // Called this "New" because I can't delete the old neither
+                                      // replace it partially
   // Payload represents a non-owning view into a command executed on the shard.
   using Payload =
       std::variant<std::monostate,                        // No payload.
@@ -58,23 +65,27 @@ struct EntryNew {  // Called this "New" because I can't delete the old neither r
                    std::pair<std::string_view, ArgSlice>  // Command and its shard parts.
                    >;
 
-  // Owned version of Payload.
-  using OwnedPayload = std::optional<CmdArgVec>;
-
   EntryNew(TxId txid, DbIndex dbid, Payload pl)
-      : txid{txid}, opcode{Op::VAL}, dbid{dbid}, payload{pl}, owned_payload{} {
+      : EntryBase{txid, journal::Op::VAL, dbid}, payload{pl} {
   }
 
-  EntryNew(journal::Op opcode, DbIndex dbid)
-      : txid{0}, opcode{opcode}, dbid{dbid}, payload{}, owned_payload{} {
+  EntryNew(journal::Op opcode, DbIndex dbid) : EntryBase{0, opcode, dbid}, payload{} {
   }
-
-  TxId txid;
-  Op opcode;
-  DbIndex dbid;
 
   Payload payload;
-  OwnedPayload owned_payload;
+};
+
+struct ParsedEntry : public EntryBase {
+  using Payload = std::optional<CmdArgVec>;
+
+  ParsedEntry(journal::Op opcode, DbIndex dbid) : EntryBase{0, opcode, dbid}, payload{} {
+  }
+
+  ParsedEntry(TxId txid, DbIndex dbid, Payload pl)
+      : EntryBase{txid, journal::Op::VAL, dbid}, payload{pl} {
+  }
+
+  Payload payload;
 };
 
 using ChangeCallback = std::function<void(const Entry&)>;

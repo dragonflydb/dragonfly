@@ -11,13 +11,13 @@
 #include "io/io.h"
 #include "server/common.h"
 #include "server/journal/types.h"
-#include "server/main_service.h"
 
 namespace dfly {
 
 // JournalWriter serializes journal entries to a sink.
 // It automatically keeps track of the current database index.
-struct JournalWriter {
+class JournalWriter {
+ public:
   // Initialize with sink and optional start database index. If no start index is set,
   // a SELECT will be issued before the first entry.
   JournalWriter(io::Sink* sink, std::optional<DbIndex> dbid = std::nullopt);
@@ -26,13 +26,10 @@ struct JournalWriter {
   std::error_code Write(const journal::EntryNew& entry);
 
  private:
-  std::error_code WriteU8(uint8_t v);
-  std::error_code WriteU16(uint16_t v);
-  std::error_code WriteU64(uint64_t v);
-
-  std::error_code Write(std::string_view sv);
-  std::error_code Write(std::pair<std::string_view, ArgSlice> args);
+  std::error_code Write(uint64_t v);           // Write packed unsigned integer.
+  std::error_code Write(std::string_view sv);  // Write string.
   std::error_code Write(CmdArgList args);
+  std::error_code Write(std::pair<std::string_view, ArgSlice> args);
 
   std::error_code Write(std::monostate);  // Overload for empty std::variant
 
@@ -44,11 +41,12 @@ struct JournalWriter {
 // JournalReader allows deserializing journal entries from a source.
 // Like the writer, it automatically keeps track of the database index.
 struct JournalReader {
+ public:
   // Initialize with source and start database index.
   JournalReader(io::Source* source, DbIndex dbid);
 
   // Try reading entry from source.
-  io::Result<journal::EntryNew> ReadEntry();
+  io::Result<journal::ParsedEntry> ReadEntry();
 
  private:
   // TODO: Templated endian encoding to not repeat...?

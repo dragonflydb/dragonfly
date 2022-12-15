@@ -43,15 +43,22 @@ struct EntryPayloadVisitor {
 };
 
 // Extract payload from entry in string form.
+std::string ExtractPayload(journal::ParsedEntry& entry) {
+  std::string out;
+  EntryPayloadVisitor visitor{&out};
+  CmdArgList list{entry.payload->data(), entry.payload->size()};
+  visitor(list);
+
+  if (out.size() > 0 && out.back() == ' ')
+    out.pop_back();
+
+  return out;
+}
+
 std::string ExtractPayload(journal::EntryNew& entry) {
   std::string out;
   EntryPayloadVisitor visitor{&out};
-  if (entry.owned_payload) {
-    CmdArgList list{entry.owned_payload->data(), entry.owned_payload->size()};
-    visitor(list);
-  } else {
-    std::visit(visitor, entry.payload);
-  }
+  std::visit(visitor, entry.payload);
 
   if (out.size() > 0 && out.back() == ' ')
     out.pop_back();

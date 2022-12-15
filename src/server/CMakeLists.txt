@@ -19,7 +19,7 @@ add_library(dragonfly_lib  channel_slice.cc command_registry.cc
             snapshot.cc script_mgr.cc server_family.cc malloc_stats.cc
             set_family.cc stream_family.cc string_family.cc
             zset_family.cc version.cc bitops_family.cc container_utils.cc
-            journal/serializer.cc)
+            serializer_commons.cc journal/serializer.cc)
 
 cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib strings_lib html_lib
          absl::random_random TRDP::jsoncons zstd TRDP::lz4)
