@@ -18,7 +18,8 @@ add_library(dragonfly_lib  channel_slice.cc command_registry.cc
             list_family.cc main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc
             snapshot.cc script_mgr.cc server_family.cc malloc_stats.cc
             set_family.cc stream_family.cc string_family.cc
-            zset_family.cc version.cc bitops_family.cc container_utils.cc)
+            zset_family.cc version.cc bitops_family.cc container_utils.cc
+            serializer_commons.cc journal/serializer.cc)
 
 cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib strings_lib html_lib
          absl::random_random TRDP::jsoncons zstd TRDP::lz4)
@@ -40,9 +41,10 @@ cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
 cxx_test(blocking_controller_test dragonfly_lib LABELS DFLY)
 cxx_test(snapshot_test dragonfly_lib LABELS DFLY)
 cxx_test(json_family_test dfly_test_lib LABELS DFLY)
+cxx_test(journal_test dfly_test_lib LABELS DFLY)
 
 
 add_custom_target(check_dfly WORKING_DIRECTORY .. COMMAND ctest -L DFLY)
 add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
-                 generic_family_test memcache_parser_test rdb_test
+                 generic_family_test memcache_parser_test rdb_test journal_test
                  redis_parser_test snapshot_test stream_family_test string_family_test bitops_family_test set_family_test zset_family_test)

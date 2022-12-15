@@ -28,6 +28,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/rdb_extensions.h"
+#include "server/serializer_commons.h"
 #include "server/snapshot.h"
 #include "util/fibers/simple_channel.h"
 
@@ -43,7 +44,6 @@ namespace dfly {
 using namespace std;
 using base::IoBuf;
 using io::Bytes;
-using nonstd::make_unexpected;
 
 namespace {
 
@@ -95,37 +95,6 @@ unsigned TryIntegerEncoding(string_view input, uint8_t* dest) {
     return 0;
 
   return EncodeInteger(value, dest);
-}
-
-/* Saves an encoded length. The first two bits in the first byte are used to
- * hold the encoding type. See the RDB_* definitions for more information
- * on the types of encoding. buf must be at least 9 bytes.
- * */
-
-inline unsigned SerializeLen(uint64_t len, uint8_t* buf) {
-  if (len < (1 << 6)) {
-    /* Save a 6 bit len */
-    buf[0] = (len & 0xFF) | (RDB_6BITLEN << 6);
-    return 1;
-  }
-  if (len < (1 << 14)) {
-    /* Save a 14 bit len */
-    buf[0] = ((len >> 8) & 0xFF) | (RDB_14BITLEN << 6);
-    buf[1] = len & 0xFF;
-    return 2;
-  }
-
-  if (len <= UINT32_MAX) {
-    /* Save a 32 bit len */
-    buf[0] = RDB_32BITLEN;
-    absl::big_endian::Store32(buf + 1, len);
-    return 1 + 4;
-  }
-
-  /* Save a 64 bit len */
-  buf[0] = RDB_64BITLEN;
-  absl::big_endian::Store64(buf + 1, len);
-  return 1 + 8;
 }
 
 constexpr size_t kBufLen = 64_KB;
@@ -283,7 +252,7 @@ std::error_code RdbSerializer::SaveValue(const PrimeValue& pv) {
 error_code RdbSerializer::SelectDb(uint32_t dbid) {
   uint8_t buf[16];
   buf[0] = RDB_OPCODE_SELECTDB;
-  unsigned enclen = SerializeLen(dbid, buf + 1);
+  unsigned enclen = WritePackedUInt(dbid, buf + 1);
   return WriteRaw(Bytes{buf, enclen + 1});
 }
 
@@ -763,7 +732,7 @@ error_code RdbSerializer::SaveString(string_view val) {
 
 error_code RdbSerializer::SaveLen(size_t len) {
   uint8_t buf[16];
-  unsigned enclen = SerializeLen(len, buf);
+  unsigned enclen = WritePackedUInt(len, buf);
   return WriteRaw(Bytes{buf, enclen});
 }
 
@@ -928,7 +897,7 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
         continue;
 
       if (record.db_index != last_db_index) {
-        unsigned enclen = SerializeLen(record.db_index, buf + 1);
+        unsigned enclen = WritePackedUInt(record.db_index, buf + 1);
         string_view str{(char*)buf, enclen + 1};
 
         io_error = sink_->Write(io::Buffer(str));
@@ -1197,7 +1166,7 @@ void RdbSerializer::CompressBlob() {
 
   // Write encoded compressed blob len
   dest = mem_buf_.AppendBuffer();
-  unsigned enclen = SerializeLen(compressed_blob.length(), dest.data());
+  unsigned enclen = WritePackedUInt(compressed_blob.length(), dest.data());
   mem_buf_.CommitWrite(enclen);
 
   // Write compressed blob

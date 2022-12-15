@@ -30,6 +30,7 @@ extern "C" {
 #include "server/hset_family.h"
 #include "server/rdb_extensions.h"
 #include "server/script_mgr.h"
+#include "server/serializer_commons.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
 #include "strings/human_readable.h"
@@ -38,24 +39,6 @@ ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 ABSL_DECLARE_FLAG(bool, use_set2);
-
-#define SET_OR_RETURN(expr, dest)              \
-  do {                                         \
-    auto exp_val = (expr);                     \
-    if (!exp_val) {                            \
-      VLOG(1) << "Error while calling " #expr; \
-      return exp_val.error();                  \
-    }                                          \
-    dest = exp_val.value();                    \
-  } while (0)
-
-#define SET_OR_UNEXPECT(expr, dest)            \
-  {                                            \
-    auto exp_res = (expr);                     \
-    if (!exp_res)                              \
-      return make_unexpected(exp_res.error()); \
-    dest = std::move(exp_res.value());         \
-  }
 
 namespace dfly {
 
