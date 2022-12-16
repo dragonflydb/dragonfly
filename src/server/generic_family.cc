@@ -134,13 +134,15 @@ class RdbRestoreValue : protected RdbLoaderBase {
 std::optional<RdbLoaderBase::OpaqueObj> RdbRestoreValue::Parse(std::string_view payload) {
   InMemSource source(payload);
   src_ = &source;
-  if (auto type_id = FetchType(); type_id && rdbIsObjectType(type_id.value())) {
-    io::Result<OpaqueObj> io_res = ReadObj(type_id.value());  // load the type from the input stream
-    if (!io_res) {
+  if (io::Result<uint8_t> type_id = FetchType(); type_id && rdbIsObjectType(type_id.value())) {
+    OpaqueObj obj;
+    error_code ec = ReadObj(type_id.value(), &obj);  // load the type from the input stream
+    if (ec) {
       LOG(ERROR) << "failed to load data for type id " << (unsigned int)type_id.value();
       return std::nullopt;
     }
-    return std::optional<OpaqueObj>(std::move(io_res.value()));
+
+    return std::optional<OpaqueObj>(std::move(obj));
   } else {
     LOG(ERROR) << "failed to load type id from the input stream or type id is invalid";
     return std::nullopt;
@@ -149,20 +151,20 @@ std::optional<RdbLoaderBase::OpaqueObj> RdbRestoreValue::Parse(std::string_view 
 
 bool RdbRestoreValue::Add(std::string_view data, std::string_view key, DbSlice& db_slice,
                           DbIndex index, uint64_t expire_ms) {
-  auto value_to_load = Parse(data);
-  if (!value_to_load) {
+  auto opaque_res = Parse(data);
+  if (!opaque_res) {
     return false;
   }
-  Item item{
-      .key = std::string(key), .val = std::move(value_to_load.value()), .expire_ms = expire_ms};
+
   PrimeValue pv;
-  if (auto ec = Visit(item, &pv); ec) {
+  if (auto ec = FromOpaque(*opaque_res, &pv); ec) {
     // we failed - report and exit
     LOG(WARNING) << "error while trying to save data: " << ec;
     return false;
   }
+
   DbContext context{.db_index = index, .time_now_ms = GetCurrentTimeMs()};
-  auto [it, added] = db_slice.AddOrSkip(context, key, std::move(pv), item.expire_ms);
+  auto [it, added] = db_slice.AddOrSkip(context, key, std::move(pv), expire_ms);
   return added;
 }
 
