@@ -87,20 +87,13 @@ class RdbLoaderBase {
 
   class OpaqueObjLoader;
 
-  struct Item {
-    std::string key;
-    OpaqueObj val;
-    uint64_t expire_ms;
-  };
-  using ItemsBuf = std::vector<Item>;
-
   ::io::Result<uint8_t> FetchType() {
     return FetchInt<uint8_t>();
   }
 
   template <typename T> io::Result<T> FetchInt();
 
-  std::error_code Visit(const Item& item, CompactObj* pv);
+  static std::error_code FromOpaque(const OpaqueObj& opaque, CompactObj* pv);
 
   io::Result<uint64_t> LoadLen(bool* is_encoded);
   std::error_code FetchBuf(size_t size, void* dest);
@@ -114,8 +107,8 @@ class RdbLoaderBase {
 
   ::io::Result<std::string> ReadKey();
 
-  ::io::Result<OpaqueObj> ReadObj(int rdbtype);
-  ::io::Result<RdbVariant> ReadStringObj();
+  std::error_code ReadObj(int rdbtype, OpaqueObj* dest);
+  std::error_code ReadStringObj(RdbVariant* rdb_variant);
   ::io::Result<long long> ReadIntObj(int encoding);
   ::io::Result<LzfString> ReadLzf();
 
@@ -184,6 +177,23 @@ class RdbLoader : protected RdbLoaderBase {
   }
 
  private:
+  struct Item {
+    std::string key;
+    OpaqueObj val;
+    uint64_t expire_ms;
+    std::atomic<Item*> next;
+
+    friend void MPSC_intrusive_store_next(Item* dest, Item* nxt) {
+      dest->next.store(nxt, std::memory_order_release);
+    }
+
+    friend Item* MPSC_intrusive_load_next(const Item& src) {
+      return src.next.load(std::memory_order_acquire);
+    }
+  };
+
+  using ItemsBuf = std::vector<Item*>;
+
   struct ObjSettings;
   std::error_code LoadKeyValPair(int type, ObjSettings* settings);
   void ResizeDb(size_t key_num, size_t expire_num);
