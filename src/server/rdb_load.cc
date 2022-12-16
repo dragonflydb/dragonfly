@@ -1644,6 +1644,12 @@ RdbLoader::RdbLoader(ScriptMgr* script_mgr) : script_mgr_(script_mgr) {
 }
 
 RdbLoader::~RdbLoader() {
+  while (true) {
+    Item* item = item_queue_.Pop();
+    if (item == nullptr)
+      break;
+    delete item;
+  }
 }
 
 error_code RdbLoader::Load(io::Source* src) {
@@ -2058,7 +2064,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   }
 
   for (auto* item : ib) {
-    delete item;
+    item_queue_.Push(item);
   }
 }
 
@@ -2068,14 +2074,18 @@ void RdbLoader::ResizeDb(size_t key_num, size_t expire_num) {
 }
 
 error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
-  Item* item = new Item;
+  // We return the item in LoadItemsBuffer.
+  Item* item = item_queue_.Pop();
+
+  if (item == nullptr) {
+    item = new Item;
+  }
 
   // Read key
-  // We free item in LoadItemsBuffer.
   SET_OR_RETURN(ReadKey(), item->key);
 
+  // Read value
   error_code ec = ReadObj(type, &item->val);
-
   if (ec) {
     VLOG(1) << "ReadObj error " << ec << " for key " << item->key;
     return ec;
