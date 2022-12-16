@@ -29,7 +29,9 @@ jobs:
 
       - name: Configure & Build
         run: |
-          apt update && apt install -y pip
+          apt update && apt install -y pip curl
+          curl -fsSL https://get.docker.com -o get-docker.sh
+          sh get-docker.sh
           cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -GNinja \
                 -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
@@ -46,6 +48,13 @@ jobs:
           export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
 
           pytest -xv dragonfly
+
+      - name: Integration Tests
+        run: |
+          cd ${GITHUB_WORKSPACE}/tests/integration/
+          ./run_ioredis_on_docker.sh --build
+          docker build -t jedis-test -f ${GITHUB_WORKSPACE}/tests/integration/jedis.Dockerfile .
+          docker run --network=host jedis-test
 
       - name: Send notification on failure
         if: failure()
