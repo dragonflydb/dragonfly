@@ -77,6 +77,6 @@ jobs:
           ccache --show-stats
           echo Run ctest -V -L DFLY
           #GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1
-          GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=2,snapshot=2 ctest -V -L DFLY
+          GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 ctest -V -L DFLY
           ./dragonfly_test  --mem_defrag_threshold=0.05 # trying to catch issue with defrag
           # GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1 CTEST_OUTPUT_ON_FAILURE=1 ninja server/test

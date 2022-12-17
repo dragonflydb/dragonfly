@@ -140,7 +140,7 @@ TEST_F(GenericFamilyTest, Rename) {
   int64_t val = CheckedInt({"get", "x"});
   ASSERT_EQ(kint64min, val);  // does not exist
 
-  ASSERT_EQ(Run({"get", "b"}), x_val);  // swapped.
+  ASSERT_EQ(x_val, Run({"get", "b"}));  // swapped.
 
   EXPECT_EQ(CheckedInt({"exists", "x", "b"}), 1);
 
