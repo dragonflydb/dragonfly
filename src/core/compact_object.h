@@ -76,16 +76,6 @@ class RobjWrapper {
 
 } __attribute__((packed));
 
-// unpacks 8->7 encoded blob back to ascii.
-// generally, we can not unpack inplace because ascii (dest) buffer is 8/7 bigger than
-// the source buffer.
-// however, if binary data is positioned on the right of the ascii buffer with empty space on the
-// left than we can unpack inplace.
-void ascii_unpack(const uint8_t* bin, size_t ascii_len, char* ascii);
-
-// packs ascii string (does not verify) into binary form saving 1 bit per byte on average (12.5%).
-void ascii_pack(const char* ascii, size_t len, uint8_t* bin);
-
 }  // namespace detail
 
 class CompactObj {

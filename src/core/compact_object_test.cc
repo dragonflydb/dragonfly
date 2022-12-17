@@ -12,6 +12,7 @@
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/detail/bitpacking.h"
 #include "core/flat_set.h"
 #include "core/json_object.h"
 #include "core/mi_memory_resource.h"
@@ -189,13 +190,24 @@ TEST_F(CompactObjectTest, AsciiUtil) {
   std::string_view data{"aaaaaabb"};
   uint8_t buf[32];
 
-  char ascii2[] = "xxxxxxxxxxxxxx";
-  detail::ascii_pack(data.data(), 7, buf);
-  detail::ascii_unpack(buf, 7, ascii2);
+  char outbuf[32] = "xxxxxxxxxxxxxx";
+  detail::ascii_pack_simd(data.data(), 7, buf);
+  detail::ascii_unpack(buf, 7, outbuf);
 
-  ASSERT_EQ('x', ascii2[7]) << ascii2;
-  std::string_view actual{ascii2, 7};
+  ASSERT_EQ('x', outbuf[7]) << outbuf;
+  std::string_view actual{outbuf, 7};
   ASSERT_EQ(data.substr(0, 7), actual);
+
+  string data3;
+  for (unsigned i = 0; i < 97; ++i) {
+    data3.append("12345678910");
+  }
+  string act_str(data3.size(), 'y');
+  std::vector<uint8_t> binvec(detail::binpacked_len(data3.size()));
+  detail::ascii_pack_simd(data3.data(), data3.size(), binvec.data());
+  detail::ascii_unpack(binvec.data(), data3.size(), act_str.data());
+
+  ASSERT_EQ(data3, act_str);
 }
 
 TEST_F(CompactObjectTest, IntSet) {
@@ -452,5 +464,63 @@ TEST_F(CompactObjectTest, JsonTypeWithPathTest) {
     }
   }
 }
+
+static void ascii_pack_naive(const char* ascii, size_t len, uint8_t* bin) {
+  const char* end = ascii + len;
+
+  unsigned i = 0;
+  while (ascii + 8 <= end) {
+    for (i = 0; i < 7; ++i) {
+      *bin++ = (ascii[0] >> i) | (ascii[1] << (7 - i));
+      ++ascii;
+    }
+    ++ascii;
+  }
+
+  // epilog - we do not pack since we have less than 8 bytes.
+  while (ascii < end) {
+    *bin++ = *ascii++;
+  }
+}
+
+static void BM_PackNaive(benchmark::State& state) {
+  string val(1024, 'a');
+  uint8_t buf[1024];
+
+  while (state.KeepRunning()) {
+    ascii_pack_naive(val.data(), val.size(), buf);
+  }
+}
+BENCHMARK(BM_PackNaive);
+
+static void BM_Pack(benchmark::State& state) {
+  string val(1024, 'a');
+  uint8_t buf[1024];
+
+  while (state.KeepRunning()) {
+    detail::ascii_pack(val.data(), val.size(), buf);
+  }
+}
+BENCHMARK(BM_Pack);
+
+static void BM_Pack2(benchmark::State& state) {
+  string val(1024, 'a');
+  uint8_t buf[1024];
+
+  while (state.KeepRunning()) {
+    detail::ascii_pack(val.data(), val.size(), buf);
+  }
+}
+BENCHMARK(BM_Pack2);
+
+static void BM_PackSimd(benchmark::State& state) {
+  string val(1024, 'a');
+  uint8_t buf[1024];
+
+  while (state.KeepRunning()) {
+    detail::ascii_pack_simd(val.data(), val.size(), buf);
+  }
+}
+BENCHMARK(BM_PackSimd);
 
 }  // namespace dfly
