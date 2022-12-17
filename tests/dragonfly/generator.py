@@ -3,9 +3,12 @@ import aioredis
 import random
 import string
 import itertools
+import time
 from collections import deque
 from enum import Enum
-from utility import grouper
+
+from utility import grouper, batch_fill_data_async, gen_test_data
+
 
 class Action(Enum):
     SHRINK = 0
@@ -16,6 +19,7 @@ class Action(Enum):
 class ValueType(Enum):
     STRING = 0
     LIST = 1
+    SET = 2
 
 
 class TestingGenerator:
@@ -32,8 +36,13 @@ class TestingGenerator:
         self.str_filler = ''.join(random.choices(
             string.ascii_letters, k=val_size))
 
-        self.list_filler = ''.join(random.choices(
-            string.ascii_letters + 13 * ' ', k=val_size))
+        self.list_filler = ' '.join(
+            random.choices(string.ascii_letters, k=val_size//2))
+
+        self.set_filler = ' '.join(
+            (''.join(random.choices(string.ascii_letters, k=3))
+             for _ in range(val_size//4))
+        )
 
     def action_weigts(self):
         diff = self.key_cnt_target - self.key_cnt
@@ -96,15 +105,18 @@ class TestingGenerator:
 
     def make_no_change(self):
         NO_CHANGE_ACTIONS = [
+            ('APPEND {k} {val}', ValueType.STRING),
+            ('SETRANGE {k} 10 {val}', ValueType.STRING),
             ('LPUSH {k} {val}', ValueType.LIST),
             ('LPOP {k}', ValueType.LIST),
-            ('APPEND {k} {val}', ValueType.STRING),
-            ('SETRANGE {k} 10 {val}', ValueType.STRING)
+            ('SADD {k} {val}', ValueType.SET),
+            ('SPOP {k}', ValueType.SET)
         ]
 
         cmd, t = random.choice(NO_CHANGE_ACTIONS)
         k = self.randomize_key(t)
-        return cmd.format(k=str(k), val="--delta--") if k is not None else None, 0
+        val = ''.join(random.choices(string.ascii_letters, k=4))
+        return cmd.format(k=str(k), val=val) if k is not None else None, 0
 
     def make_grow(self):
         t = self.randomize_type()
@@ -113,9 +125,12 @@ class TestingGenerator:
                     for _ in range(random.randint(1, self.max_multikey)))
             pairs = [str(k) + " " + self.str_filler for k in keys]
             return "MSET " + " ".join(pairs), len(pairs)
-        else:
+        elif t == ValueType.LIST:
             k = self.add_key(t)
             return f"LPUSH {k} {self.list_filler}", 1
+        else:
+            k = self.add_key(t)
+            return f"SADD {k} {self.set_filler}", 1
 
     def make(self, action):
         if action == Action.SHRINK:
@@ -126,76 +141,84 @@ class TestingGenerator:
             return self.make_grow()
 
     def generate(self):
-        actions = random.choices(
-            list(Action), weights=self.action_weigts(), k=self.batch_size)
+        actions = []
 
         cmds = []
-        sum_delta = 0
-        for action in actions:
-            cmd, delta = self.make(action)
+        while len(cmds) < self.batch_size:
+            if len(actions) == 0:
+                actions = random.choices(
+                    list(Action), weights=self.action_weigts(), k=50)
+
+            cmd, delta = self.make(actions.pop())
             if cmd is not None:
                 cmds.append(cmd)
                 self.key_cnt += delta
-                sum_delta += delta
 
-        #print(sum_delta, self.key_cnt, self.key_cnt/self.key_cnt_target)
         return cmds, self.key_cnt/self.key_cnt_target
 
 
 class TestingExecutor:
-    def __init__(self, client, target_bytes):
-        self.client = client
+    def __init__(self, pool, target_bytes, dbcount):
+        self.pool = pool
 
-        # Count number of expected keys. Account for memory overhead.
         max_multikey = 5
-        batch_size = 500
-        val_size = 500
-        target_keys = target_bytes // val_size
-        print("target keys", target_keys)
+        batch_size = 1_000
+        val_size = 50
+        target_keys = 500_000
+
+        print(target_keys * dbcount)
+
         self.gen = TestingGenerator(
             val_size, batch_size, target_keys, max_multikey)
+        self.dbcount = dbcount
 
-        self.task = None
-        self.task_target_rel = None
-        self.batches = deque()
-        self.max_batches = 5
+    async def run(self, **kwargs):
+        queues = [asyncio.Queue(maxsize=30) for _ in range(self.dbcount)]
+        producer = asyncio.create_task(self.generator_task(queues, **kwargs))
+        consumers = [
+            asyncio.create_task(self.cosumer_task(i, queue))
+            for i, queue in enumerate(queues)
+        ]
 
-    def prefill(self):
-        while len(self.batches) < self.max_batches:
-            self.batches.append(tuple(self.gen.generate()))
+        await producer
+        for consumer in consumers:
+            consumer.cancel()
 
-    async def run(self, target_times=None, target_devitation=None):
+    async def generator_task(self, queues, target_times=None, target_deviation=None):
+        cpu_time = 0
+
         submitted = 0
         while True:
-            # While we're waiting lets pre-generate data
-            while self.task is not None and not self.task.done() and len(self.batches) < self.max_batches:
-                self.batches.append(tuple(self.gen.generate()))
+            start_time = time.time()
+            blob, deviation = self.gen.generate()
+            cpu_time += (time.time() - start_time)
 
-            # Await task
-            if self.task is not None:
-                await self.task
-                submitted += 1
-                #print("Submitted", self.task_target_rel)
-                if target_times is not None and submitted >= target_times:
-                    return
-                if target_devitation is not None and abs(1-self.task_target_rel) < target_devitation:
-                    print("deviation is ",  self.task_target_rel)
-                    return
+            await asyncio.gather(*(q.put(blob) for q in queues))
+            submitted += 1
 
-            # Generate or fetch new data
-            if len(self.batches) > 0:
-                cmds, target_rel = self.batches.popleft()
-            else:
-                print("generating on demand :(")
-                cmds, target_rel = self.gen.generate()
+            if target_times is not None and submitted >= target_times:
+                break
+            if target_deviation is not None and abs(1-deviation) < target_deviation:
+                break
 
-            # Schedule task
-            pipe = self.client.pipeline()
+            await asyncio.sleep(0.0)
+
+        print("done")
+
+        for q in queues:
+            await q.join()
+
+        print("cpu time", cpu_time)
+
+    async def cosumer_task(self, db, queue):
+        client = aioredis.Redis(db=db)
+        while True:
+            cmds = await queue.get()
+            pipe = client.pipeline(transaction=False)
             for cmd in cmds:
                 pipe.execute_command(cmd)
-
-            self.task = asyncio.create_task(pipe.execute())
-            self.task_target_rel = target_rel
+            await pipe.execute()
+            queue.task_done()
 
     async def checkhash(self, client=None):
         if client is None:
@@ -205,7 +228,7 @@ class TestingExecutor:
         hashes = []
 
         for chunk in grouper(self.gen.batch_size, all_keys):
-            pipe = client.pipeline()
+            pipe = client.pipeline(transaction=False)
             for k in chunk:
                 pipe.execute_command(f"DUMP {k}")
             res = await pipe.execute()
@@ -213,26 +236,25 @@ class TestingExecutor:
 
         return hash(tuple(hashes))
 
-
 async def main():
     client = aioredis.Redis()
     await client.flushall()
 
-    random.seed(11111)
+    pool = aioredis.ConnectionPool()
 
-    # Ask for 100mb
-    ex = TestingExecutor(client, 100_000_000)
-    ex.prefill()
+    #random.seed(11111)
+
+    # Ask for 20 mb
+    ex = TestingExecutor(pool, 1000, 16)
 
     # Fill with max target deviation of 10%
-    await ex.run(target_devitation=0.1)
+    await ex.run(target_deviation=0.1)
 
     # Run a few times
-    await ex.run(target_times=5)
+    # await ex.run(target_times=5)
 
-    print("hash: ", await ex.checkhash())
+    # print("hash: ", await ex.checkhash())
 
     print((await client.info("MEMORY"))['used_memory_human'])
-    print("Target key count", ex.gen.key_cnt_target, ex.gen.key_cnt, (await client.dbsize()))
 
 asyncio.run(main())
