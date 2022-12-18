@@ -147,7 +147,7 @@ uint32_t JournalSlice::RegisterOnChange(ChangeCallback cb) {
   return id;
 }
 
-void JournalSlice::Unregister(uint32_t id) {
+void JournalSlice::UnregisterOnChange(uint32_t id) {
   CHECK(!iterating_cb_arr_);
 
   auto it = find_if(change_cb_arr_.begin(), change_cb_arr_.end(),

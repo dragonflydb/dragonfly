@@ -56,10 +56,10 @@ error_code JournalWriter::Write(std::monostate) {
   return std::error_code{};
 }
 
-error_code JournalWriter::Write(const journal::EntryNew& entry) {
+error_code JournalWriter::Write(const journal::Entry& entry) {
   // Check if entry has a new db index and we need to emit a SELECT entry.
   if (entry.opcode != journal::Op::SELECT && (!cur_dbid_ || entry.dbid != *cur_dbid_)) {
-    RETURN_ON_ERR(Write(journal::EntryNew{journal::Op::SELECT, entry.dbid}));
+    RETURN_ON_ERR(Write(journal::Entry{journal::Op::SELECT, entry.dbid}));
     cur_dbid_ = entry.dbid;
   }
 
@@ -68,7 +68,7 @@ error_code JournalWriter::Write(const journal::EntryNew& entry) {
   switch (entry.opcode) {
     case journal::Op::SELECT:
       return Write(entry.dbid);
-    case journal::Op::VAL:
+    case journal::Op::COMMAND:
       RETURN_ON_ERR(Write(entry.txid));
       return std::visit([this](const auto& payload) { return Write(payload); }, entry.payload);
     default:
@@ -148,7 +148,7 @@ io::Result<journal::ParsedEntry> JournalReader::ReadEntry() {
   journal::ParsedEntry entry{static_cast<journal::Op>(opcode), dbid_};
 
   switch (entry.opcode) {
-    case journal::Op::VAL:
+    case journal::Op::COMMAND:
       SET_OR_UNEXPECT(ReadU64(), entry.txid);
       entry.payload = CmdArgVec{};
       if (auto ec = Read(&*entry.payload); ec)

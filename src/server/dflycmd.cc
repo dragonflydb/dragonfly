@@ -13,6 +13,7 @@
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
+#include "server/journal/serializer.h"
 #include "server/rdb_save.h"
 #include "server/script_mgr.h"
 #include "server/server_family.h"
@@ -353,16 +354,16 @@ OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, EngineShard* shard) {
   // Register journal listener and cleanup.
   uint32_t cb_id = 0;
   if (shard != nullptr) {
-    cb_id = sf_->journal()->RegisterOnChange([flow](const journal::Entry& je) {
-      // TODO: Serialize event.
-      ReqSerializer serializer{flow->conn->socket()};
-      serializer.SendCommand(absl::StrCat("SET ", je.key, " ", je.pval_ptr->ToString()));
-    });
+    JournalWriter writer{flow->conn->socket()};
+    auto journal_cb = [flow, writer = std::move(writer)](const journal::Entry& je) mutable {
+      writer.Write(je);
+    };
+    cb_id = sf_->journal()->RegisterOnChange(std::move(journal_cb));
   }
 
   flow->cleanup = [flow, this, cb_id]() {
     if (cb_id)
-      sf_->journal()->Unregister(cb_id);
+      sf_->journal()->UnregisterOnChange(cb_id);
     flow->TryShutdownSocket();
   };
 

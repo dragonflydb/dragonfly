@@ -23,7 +23,7 @@ class JournalWriter {
   JournalWriter(io::Sink* sink, std::optional<DbIndex> dbid = std::nullopt);
 
   // Write single entry.
-  std::error_code Write(const journal::EntryNew& entry);
+  std::error_code Write(const journal::Entry& entry);
 
  private:
   std::error_code Write(uint64_t v);           // Write packed unsigned integer.

@@ -570,7 +570,7 @@ error_code ServerFamily::LoadRdb(const std::string& rdb_file) {
   if (res) {
     io::FileSource fs(*res);
 
-    RdbLoader loader(script_mgr());
+    RdbLoader loader{&service_};
     ec = loader.Load(&fs);
     if (!ec) {
       LOG(INFO) << "Done loading RDB, keys loaded: " << loader.keys_loaded();

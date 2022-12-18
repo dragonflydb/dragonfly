@@ -16,6 +16,7 @@ extern "C" {
 #include "base/pod_array.h"
 #include "io/io.h"
 #include "server/common.h"
+#include "server/journal/types.h"
 #include "server/table.h"
 
 typedef struct rax rax;
@@ -142,8 +143,13 @@ class RdbSerializer {
   // for the dump command - thus it is public function
   std::error_code SaveValue(const PrimeValue& pv);
 
-  std::error_code SendFullSyncCut(io::Sink* s);
   size_t SerializedLen() const;
+
+  // Write journal entries as an embedded journal blob.
+  std::error_code WriteJournalEntries(absl::Span<const journal::Entry> entries);
+
+  // Send FULL_SYNC_CUT opcode to notify that all static data was sent.
+  std::error_code SendFullSyncCut(io::Sink* s);
 
  private:
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);

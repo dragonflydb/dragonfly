@@ -80,6 +80,7 @@ Transaction::~Transaction() {
 
 OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   db_index_ = index;
+  full_args_ = args;
 
   if (IsGlobal()) {
     unique_shard_cnt_ = shard_set->size();
@@ -371,6 +372,9 @@ bool Transaction::RunInShard(EngineShard* shard) {
   }
 
   /*************************************************************************/
+
+  if (!was_suspended && should_release)  // Check last hop & non suspended.
+    LogJournalOnShard(shard);
 
   // at least the coordinator thread owns the reference.
   DCHECK_GE(use_count(), 1u);
@@ -770,6 +774,8 @@ void Transaction::RunQuickie(EngineShard* shard) {
   } catch (std::exception& e) {
     LOG(FATAL) << "Unexpected exception " << e.what();
   }
+
+  LogJournalOnShard(shard);
 
   sd.local_mask &= ~ARMED;
   cb_ = nullptr;  // We can do it because only a single shard runs the callback.
@@ -1192,6 +1198,32 @@ bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid) {
 
   CHECK(sd.local_mask & AWAKED_Q);
   return false;
+}
+
+void Transaction::LogJournalOnShard(EngineShard* shard) {
+  // TODO: For now, we ignore non shard coordination.
+  if (shard == nullptr)
+    return;
+
+  if ((cid_->opt_mask() & CO::WRITE) == 0)
+    return;
+
+  auto journal = shard->journal();
+  if (journal == nullptr)
+    return;
+
+  // TODO: Handle complex commands like LMPOP correctly once they are implemented.
+  journal::Entry::Payload entry_payload;
+  if (unique_shard_cnt_ == 1) {
+    CHECK(!full_args_.empty());
+    entry_payload = full_args_;
+  } else if (args_.empty()) {
+    entry_payload = make_pair(facade::ToSV(full_args_.front()), ArgSlice{});
+  } else {
+    entry_payload =
+        make_pair(facade::ToSV(full_args_.front()), ShardArgsInShard(shard->shard_id()));
+  }
+  journal->RecordEntry(journal::Entry{txid_, db_index_, entry_payload});
 }
 
 void Transaction::BreakOnShutdown() {
