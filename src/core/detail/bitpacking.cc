@@ -98,8 +98,6 @@ void ascii_pack2(const char* ascii, size_t len, uint8_t* bin) {
 
 // The algo - do in parallel what ascii_pack does on two uint64_t integers
 void ascii_pack_simd(const char* ascii, size_t len, uint8_t* bin) {
-  __m128i val;
-
   // I leave out 16 bytes in addition to 16 that we load in the loop
   // because we store into bin full 16 bytes instead of 14. To prevent data
   // overwrite we finish loop one iteration earlier.
@@ -108,7 +106,7 @@ void ascii_pack_simd(const char* ascii, size_t len, uint8_t* bin) {
   // Skips 8th byte (indexc 7) in the lower 8-byte part.
   const __m128i control = _mm_set_epi8(-1, -1, 14, 13, 12, 11, 10, 9, 8, 6, 5, 4, 3, 2, 1, 0);
 
-  __m128i rpart, lpart;
+  __m128i val, rpart, lpart;
 
   // Based on the question I asked here: https://stackoverflow.com/q/74831843/2280111
   while (ascii <= end) {
@@ -149,26 +147,60 @@ void ascii_pack_simd(const char* ascii, size_t len, uint8_t* bin) {
 // however, if binary data is positioned on the right of the ascii buffer with empty space on the
 // left than we can unpack inplace.
 void ascii_unpack(const uint8_t* bin, size_t ascii_len, char* ascii) {
-  constexpr uint8_t kM = 0x7F;
-  uint8_t p = 0;
-  unsigned i = 0;
+  uint64_t val;
 
-  while (ascii_len >= 8) {
-    for (i = 0; i < 7; ++i) {
-      uint8_t src = *bin;  // keep on stack in case we unpack inplace.
-      *ascii++ = (p >> (8 - i)) | ((src << i) & kM);
-      p = src;
-      ++bin;
-    }
+  const char* end = ascii + ascii_len - 8;
+  while (ascii <= end) {
+    memcpy(&val, bin, 8);
 
-    ascii_len -= 8;
-    *ascii++ = p >> 1;
+    val = ((val & 0x00FFFFFFF0000000) << 4) | (val & 0x000000000FFFFFFF);
+    val = ((val & 0xFFFFC000FFFFC000) << 2) | (val & 0x00003FFF00003FFF);
+    val = ((val & 0x7F807F807F807F80) << 1) | (val & 0x007F007F007F007F);
+    memcpy(ascii, &val, 8);
+
+    ascii += 8;
+    bin += 7;
   }
 
-  DCHECK_LT(ascii_len, 8u);
-  for (i = 0; i < ascii_len; ++i) {
+  end += 8;
+  while (ascii < end) {
     *ascii++ = *bin++;
   }
+}
+
+void ascii_unpack_simd(const uint8_t* bin, size_t ascii_len, char* ascii) {
+  __m128i val, rpart, lpart;
+
+  size_t round_down_len = (ascii_len & ~size_t(0x0F));
+  const char* end = ascii + round_down_len;
+
+  // shifts the second 7-byte blob to the left.
+  const __m128i control = _mm_set_epi8(14, 13, 12, 11, 10, 9, 8, 7, -1, 6, 5, 4, 3, 2, 1, 0);
+
+  while (ascii < end) {
+    val = _mm_loadu_si128(reinterpret_cast<const __m128i*>(bin));
+    val = _mm_shuffle_epi8(val, control);
+
+    rpart = _mm_and_si128(val, _mm_set1_epi64x(0x000000000FFFFFFF));
+    lpart = _mm_and_si128(val, _mm_set1_epi64x(0x00FFFFFFF0000000));
+    val = _mm_or_si128(_mm_slli_epi64(lpart, 4), rpart);
+
+    rpart = _mm_and_si128(val, _mm_set1_epi64x(0x00003FFF00003FFF));
+    lpart = _mm_and_si128(val, _mm_set1_epi64x(0xFFFFC000FFFFC000));
+    val = _mm_or_si128(_mm_slli_epi64(lpart, 2), rpart);
+
+    rpart = _mm_and_si128(val, _mm_set1_epi64x(0x007F007F007F007F));
+    lpart = _mm_and_si128(val, _mm_set1_epi64x(0x7F807F807F807F80));
+    val = _mm_or_si128(_mm_slli_epi64(lpart, 1), rpart);
+
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(ascii), val);
+    ascii += 16;
+    bin += 14;
+  }
+
+  ascii_len -= round_down_len;
+  if (ascii_len)
+    ascii_unpack(bin, ascii_len, ascii);
 }
 
 // compares packed and unpacked strings. packed must be of length = binpacked_len(ascii_len).
