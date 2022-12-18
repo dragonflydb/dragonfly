@@ -674,7 +674,7 @@ void CompactObj::SetString(std::string_view str) {
     }
 
     tl.tmp_buf.resize(encode_len);
-    detail::ascii_pack_simd(str.data(), str.size(), tl.tmp_buf.data());
+    detail::ascii_pack_simd2(str.data(), str.size(), tl.tmp_buf.data());
     encoded = string_view{reinterpret_cast<char*>(tl.tmp_buf.data()), encode_len};
 
     if (encoded.size() <= kInlineLen) {
