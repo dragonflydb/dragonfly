@@ -18,6 +18,8 @@ extern "C" {
 #include "facade/dragonfly_connection.h"
 #include "facade/redis_parser.h"
 #include "server/error.h"
+#include "server/journal/executor.h"
+#include "server/journal/serializer.h"
 #include "server/main_service.h"
 #include "server/rdb_load.h"
 #include "util/proactor_base.h"
@@ -686,37 +688,29 @@ void Replica::FullSyncDflyFb(string eof_token, fibers_ext::BlockingCounter bc, C
 }
 
 void Replica::StableSyncDflyFb(Context* cntx) {
-  base::IoBuf io_buf(16_KB);
-  parser_.reset(new RedisParser);
-
-  // Check leftover from stable state.
+  // Check leftover from full sync.
+  io::Bytes prefix{};
   if (leftover_buf_ && leftover_buf_->InputLen() > 0) {
-    size_t len = leftover_buf_->InputLen();
-    leftover_buf_->ReadAndConsume(len, io_buf.AppendBuffer().data());
-    io_buf.CommitWrite(len);
-    leftover_buf_.reset();
+    prefix = leftover_buf_->InputBuffer();
   }
 
-  string ack_cmd;
+  SocketSource ss{sock_.get()};
+  io::PrefixSource ps{prefix, &ss};
 
+  JournalReader reader{&ps, 0};
+  JournalExecutor executor{&service_};
   while (!cntx->IsCancelled()) {
-    io::MutableBytes buf = io_buf.AppendBuffer();
-    io::Result<size_t> size_res = sock_->Recv(buf);
-    if (!size_res) {
-      cntx->Error(size_res.error());
+    auto res = reader.ReadEntry();
+    if (!res) {
+      cntx->Error(res.error(), "Journal format error");
       return;
     }
+
+    executor.Execute(std::move(res.value()));
 
     last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
-
-    io_buf.CommitWrite(*size_res);
-    repl_offs_ += *size_res;
-
-    if (auto ec = ParseAndExecute(&io_buf); ec) {
-      cntx->Error(ec);
-      return;
-    }
   }
+  return;
 }
 
 error_code Replica::ReadRespReply(base::IoBuf* io_buf, uint32_t* consumed) {

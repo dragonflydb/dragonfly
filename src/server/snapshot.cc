@@ -273,15 +273,9 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 }
 
 // For any key any journal entry must arrive at the replica strictly after its first original rdb
-// value.
-// TODO: We should skip it if on db change was called - possible bug!
-// For example: l =  {v1, v2}, LPUSH l v3 writes {v1, v2, v3} in rdb, and sends LPUSH l v3
-// -> duplicate l3
-// Soltuion: Compare snapshot versions?
-//
-// TODO: Possible bug when value is in default buffer and we switch db, then receive journal event
-// and write it to tmp serializer and flush it.
-// Soltion: Impossible because we force flush after iterating the db?
+// value. This is guaranteed by the fact that OnJournalEntry runs always after OnDbChange, and
+// no database switch can be performed between those two calls, because they are part of one
+// transaction.
 void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
   optional<RdbSerializer> tmp_serializer;
   RdbSerializer* serializer_ptr = default_serializer_.get();

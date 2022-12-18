@@ -285,8 +285,8 @@ class Transaction {
   // Stores arguments of the transaction (i.e. keys + values) partitioned by shards.
   absl::InlinedVector<std::string_view, 4> args_;
 
-  // Stores the full command.
-  CmdArgList full_args_;
+  // Stores the full undivided command.
+  CmdArgList cmd_with_full_args_;
 
   // Reverse argument mapping. Allows to reconstruct responses according to the original order of
   // keys.

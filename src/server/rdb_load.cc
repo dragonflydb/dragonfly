@@ -28,6 +28,9 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/hset_family.h"
+#include "server/journal/executor.h"
+#include "server/journal/serializer.h"
+#include "server/main_service.h"
 #include "server/rdb_extensions.h"
 #include "server/script_mgr.h"
 #include "server/serializer_commons.h"
@@ -1600,7 +1603,8 @@ struct RdbLoader::ObjSettings {
   ObjSettings() = default;
 };
 
-RdbLoader::RdbLoader(ScriptMgr* script_mgr) : script_mgr_(script_mgr) {
+RdbLoader::RdbLoader(Service* service)
+    : service_{service}, script_mgr_{service == nullptr ? nullptr : service->script_mgr()} {
   shard_buf_.reset(new ItemsBuf[shard_set->size()]);
 }
 
@@ -1753,6 +1757,15 @@ error_code RdbLoader::Load(io::Source* src) {
       continue;
     }
 
+    if (type == RDB_OPCODE_JOURNAL_BLOB) {
+      // We should flush all changes on the current db before applying incremental changes.
+      for (unsigned i = 0; i < shard_set->size(); ++i) {
+        FlushShardAsync(i);
+      }
+      RETURN_ON_ERR(HandleJournalBlob(service_, cur_db_index_));
+      continue;
+    }
+
     if (!rdbIsObjectType(type)) {
       return RdbError(errc::invalid_rdb_type);
     }
@@ -1867,7 +1880,7 @@ auto RdbLoaderBase::LoadLen(bool* is_encoded) -> io::Result<uint64_t> {
   return res;
 }
 
-void RdbLoaderBase::AlocateDecompressOnce(int op_type) {
+void RdbLoaderBase::AllocateDecompressOnce(int op_type) {
   if (decompress_impl_) {
     return;
   }
@@ -1881,7 +1894,7 @@ void RdbLoaderBase::AlocateDecompressOnce(int op_type) {
 }
 
 error_code RdbLoaderBase::HandleCompressedBlob(int op_type) {
-  AlocateDecompressOnce(op_type);
+  AllocateDecompressOnce(op_type);
   // Fetch uncompress blob
   string res;
   SET_OR_RETURN(FetchGenericString(), res);
@@ -1900,6 +1913,32 @@ error_code RdbLoaderBase::HandleCompressedBlobFinish() {
   CHECK_EQ(mem_buf_->InputLen(), size_t(0));
   mem_buf_ = &origin_mem_buf_;
   return kOk;
+}
+
+error_code RdbLoaderBase::HandleJournalBlob(Service* service, DbIndex dbid) {
+  // Read the number of entries in the journal blob.
+  size_t num_entries;
+  bool _encoded;
+  SET_OR_RETURN(LoadLen(&_encoded), num_entries);
+
+  // Read the journal blob.
+  string journal_blob;
+  SET_OR_RETURN(FetchGenericString(), journal_blob);
+
+  io::BytesSource bs{io::Buffer(journal_blob)};
+  JournalReader rd{&bs, dbid};
+
+  // Parse and exectue in loop.
+  size_t done = 0;
+  JournalExecutor ex{service};
+  while (done < num_entries) {
+    journal::ParsedEntry entry{};
+    SET_OR_RETURN(rd.ReadEntry(), entry);
+    ex.Execute(std::move(entry));
+    done++;
+  }
+
+  return std::error_code{};
 }
 
 error_code RdbLoader::HandleAux() {

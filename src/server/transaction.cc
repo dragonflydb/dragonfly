@@ -80,7 +80,7 @@ Transaction::~Transaction() {
 
 OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   db_index_ = index;
-  full_args_ = args;
+  cmd_with_full_args_ = args;
 
   if (IsGlobal()) {
     unique_shard_cnt_ = shard_set->size();
@@ -1214,14 +1214,12 @@ void Transaction::LogJournalOnShard(EngineShard* shard) {
 
   // TODO: Handle complex commands like LMPOP correctly once they are implemented.
   journal::Entry::Payload entry_payload;
-  if (unique_shard_cnt_ == 1) {
-    CHECK(!full_args_.empty());
-    entry_payload = full_args_;
-  } else if (args_.empty()) {
-    entry_payload = make_pair(facade::ToSV(full_args_.front()), ArgSlice{});
+  if (unique_shard_cnt_ == 1 || args_.empty()) {
+    CHECK(!cmd_with_full_args_.empty());
+    entry_payload = cmd_with_full_args_;
   } else {
     entry_payload =
-        make_pair(facade::ToSV(full_args_.front()), ShardArgsInShard(shard->shard_id()));
+        make_pair(facade::ToSV(cmd_with_full_args_.front()), ShardArgsInShard(shard->shard_id()));
   }
   journal->RecordEntry(journal::Entry{txid_, db_index_, entry_payload});
 }
