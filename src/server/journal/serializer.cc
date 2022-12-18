@@ -77,8 +77,7 @@ error_code JournalWriter::Write(const journal::Entry& entry) {
   return std::error_code{};
 }
 
-JournalReader::JournalReader(io::Source* source, DbIndex dbid)
-    : source_{source}, buf_{}, dbid_{dbid} {
+JournalReader::JournalReader(DbIndex dbid) : buf_{}, dbid_{dbid} {
 }
 
 template <typename UT> io::Result<UT> ReadPackedUIntTyped(io::Source* source) {
@@ -89,26 +88,26 @@ template <typename UT> io::Result<UT> ReadPackedUIntTyped(io::Source* source) {
   return static_cast<UT>(v);
 }
 
-io::Result<uint8_t> JournalReader::ReadU8() {
-  return ReadPackedUIntTyped<uint8_t>(source_);
+io::Result<uint8_t> JournalReader::ReadU8(io::Source* source) {
+  return ReadPackedUIntTyped<uint8_t>(source);
 }
 
-io::Result<uint16_t> JournalReader::ReadU16() {
-  return ReadPackedUIntTyped<uint16_t>(source_);
+io::Result<uint16_t> JournalReader::ReadU16(io::Source* source) {
+  return ReadPackedUIntTyped<uint16_t>(source);
 }
 
-io::Result<uint64_t> JournalReader::ReadU64() {
-  return ReadPackedUIntTyped<uint64_t>(source_);
+io::Result<uint64_t> JournalReader::ReadU64(io::Source* source) {
+  return ReadPackedUIntTyped<uint64_t>(source);
 }
 
-io::Result<size_t> JournalReader::ReadString() {
+io::Result<size_t> JournalReader::ReadString(io::Source* source) {
   size_t size = 0;
-  SET_OR_UNEXPECT(ReadU64(), size);
+  SET_OR_UNEXPECT(ReadU64(source), size);
 
   buf_.EnsureCapacity(size);
   auto dest = buf_.AppendBuffer().first(size);
   uint64_t read = 0;
-  SET_OR_UNEXPECT(source_->Read(dest), read);
+  SET_OR_UNEXPECT(source->Read(dest), read);
 
   buf_.CommitWrite(read);
   if (read != size)
@@ -117,16 +116,16 @@ io::Result<size_t> JournalReader::ReadString() {
   return size;
 }
 
-std::error_code JournalReader::Read(CmdArgVec* vec) {
+std::error_code JournalReader::Read(io::Source* source, CmdArgVec* vec) {
   buf_.ConsumeInput(buf_.InputBuffer().size());
 
   size_t size = 0;
-  SET_OR_RETURN(ReadU64(), size);
+  SET_OR_RETURN(ReadU64(source), size);
 
   vec->resize(size);
   for (auto& span : *vec) {
     size_t len;
-    SET_OR_RETURN(ReadString(), len);
+    SET_OR_RETURN(ReadString(source), len);
     span = MutableSlice{nullptr, len};
   }
 
@@ -141,22 +140,22 @@ std::error_code JournalReader::Read(CmdArgVec* vec) {
   return std::error_code{};
 }
 
-io::Result<journal::ParsedEntry> JournalReader::ReadEntry() {
+io::Result<journal::ParsedEntry> JournalReader::ReadEntry(io::Source* source) {
   uint8_t opcode;
-  SET_OR_UNEXPECT(ReadU8(), opcode);
+  SET_OR_UNEXPECT(ReadU8(source), opcode);
 
   journal::ParsedEntry entry{static_cast<journal::Op>(opcode), dbid_};
 
   switch (entry.opcode) {
     case journal::Op::COMMAND:
-      SET_OR_UNEXPECT(ReadU64(), entry.txid);
+      SET_OR_UNEXPECT(ReadU64(source), entry.txid);
       entry.payload = CmdArgVec{};
-      if (auto ec = Read(&*entry.payload); ec)
+      if (auto ec = Read(source, &*entry.payload); ec)
         return make_unexpected(ec);
       break;
     case journal::Op::SELECT:
-      SET_OR_UNEXPECT(ReadU16(), dbid_);
-      return ReadEntry();
+      SET_OR_UNEXPECT(ReadU16(source), dbid_);
+      return ReadEntry(source);
     default:
       break;
   };

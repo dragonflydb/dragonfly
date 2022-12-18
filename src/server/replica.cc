@@ -558,7 +558,9 @@ void Replica::JoinAllFlows() {
 }
 
 void Replica::DefaultErrorHandler(const GenericError& err) {
-  CloseAllSockets();
+  // Call inside another fiber to allow calling context's error handler
+  // and avoid deadlocking.
+  util::fibers_ext::Fiber{&Replica::CloseAllSockets, this}.Detach();
 }
 
 error_code Replica::SendNextPhaseRequest() {
@@ -645,7 +647,7 @@ void Replica::FullSyncDflyFb(string eof_token, fibers_ext::BlockingCounter bc, C
   SocketSource ss{sock_.get()};
   io::PrefixSource ps{leftover_buf_->InputBuffer(), &ss};
 
-  RdbLoader loader(NULL);
+  RdbLoader loader(&service_);
   loader.SetFullSyncCutCb([bc, ran = false]() mutable {
     if (!ran) {
       bc.Dec();
@@ -697,10 +699,10 @@ void Replica::StableSyncDflyFb(Context* cntx) {
   SocketSource ss{sock_.get()};
   io::PrefixSource ps{prefix, &ss};
 
-  JournalReader reader{&ps, 0};
+  JournalReader reader{0};
   JournalExecutor executor{&service_};
   while (!cntx->IsCancelled()) {
-    auto res = reader.ReadEntry();
+    auto res = reader.ReadEntry(&ps);
     if (!res) {
       cntx->Error(res.error(), "Journal format error");
       return;

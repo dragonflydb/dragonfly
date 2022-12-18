@@ -112,12 +112,12 @@ TEST(Journal, WriteRead) {
 
   // Read them back.
   io::BytesSource bs{io::Buffer(ss.str())};
-  JournalReader reader{&bs, 0};
+  JournalReader reader{0};
 
   for (unsigned i = 0; i < test_entries.size(); i++) {
     auto& expected = test_entries[i];
 
-    auto res = reader.ReadEntry();
+    auto res = reader.ReadEntry(&bs);
     ASSERT_TRUE(res.has_value());
 
     ASSERT_EQ(expected.opcode, res->opcode);
