@@ -26,6 +26,8 @@ void ascii_pack(const char* ascii, size_t len, uint8_t* bin);
 void ascii_pack2(const char* ascii, size_t len, uint8_t* bin);
 
 void ascii_pack_simd(const char* ascii, size_t len, uint8_t* bin);
+void ascii_pack_simd2(const char* ascii, size_t len, uint8_t* bin);
+
 bool compare_packed(const uint8_t* packed, const char* ascii, size_t ascii_len);
 
 // maps ascii len to 7-bit packed length. Each 8 bytes are converted to 7 bytes.

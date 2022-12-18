@@ -204,7 +204,7 @@ TEST_F(CompactObjectTest, AsciiUtil) {
   }
   string act_str(data3.size(), 'y');
   std::vector<uint8_t> binvec(detail::binpacked_len(data3.size()));
-  detail::ascii_pack_simd(data3.data(), data3.size(), binvec.data());
+  detail::ascii_pack_simd2(data3.data(), data3.size(), binvec.data());
   detail::ascii_unpack_simd(binvec.data(), data3.size(), act_str.data());
 
   ASSERT_EQ(data3, act_str);
@@ -545,6 +545,16 @@ static void BM_PackSimd(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_PackSimd);
+
+static void BM_PackSimd2(benchmark::State& state) {
+  string val(1024, 'a');
+  uint8_t buf[1024];
+
+  while (state.KeepRunning()) {
+    detail::ascii_pack_simd2(val.data(), val.size(), buf);
+  }
+}
+BENCHMARK(BM_PackSimd2);
 
 static void BM_UnpackNaive(benchmark::State& state) {
   string val(1024, 'a');
