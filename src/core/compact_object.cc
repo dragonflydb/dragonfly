@@ -736,7 +736,7 @@ string_view CompactObj::GetSlice(string* scratch) const {
       DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
       size_t decoded_len = DecodedLen(u_.r_obj.Size());
       scratch->resize(decoded_len);
-      detail::ascii_unpack(to_byte(u_.r_obj.inner_obj()), decoded_len, scratch->data());
+      detail::ascii_unpack_simd(to_byte(u_.r_obj.inner_obj()), decoded_len, scratch->data());
     } else if (taglen_ == SMALL_TAG) {
       size_t decoded_len = DecodedLen(u_.small_str.size());
       size_t space_left = decoded_len - u_.small_str.size();
@@ -749,8 +749,8 @@ string_view CompactObj::GetSlice(string* scratch) const {
       memcpy(next, slices[0].data(), slices[0].size());
       next += slices[0].size();
       memcpy(next, slices[1].data(), slices[1].size());
-      detail::ascii_unpack(reinterpret_cast<uint8_t*>(scratch->data() + space_left), decoded_len,
-                           scratch->data());
+      detail::ascii_unpack_simd(reinterpret_cast<uint8_t*>(scratch->data() + space_left),
+                                decoded_len, scratch->data());
     } else {
       LOG(FATAL) << "Unsupported tag " << int(taglen_);
     }
@@ -839,7 +839,7 @@ void CompactObj::GetString(char* dest) const {
       CHECK_EQ(OBJ_STRING, u_.r_obj.type());
       DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
       size_t decoded_len = DecodedLen(u_.r_obj.Size());
-      detail::ascii_unpack(to_byte(u_.r_obj.inner_obj()), decoded_len, dest);
+      detail::ascii_unpack_simd(to_byte(u_.r_obj.inner_obj()), decoded_len, dest);
     } else if (taglen_ == SMALL_TAG) {
       size_t decoded_len = DecodedLen(u_.small_str.size());
 
@@ -853,7 +853,7 @@ void CompactObj::GetString(char* dest) const {
       memcpy(next, slices[0].data(), slices[0].size());
       next += slices[0].size();
       memcpy(next, slices[1].data(), slices[1].size());
-      detail::ascii_unpack(reinterpret_cast<uint8_t*>(dest + space_left), decoded_len, dest);
+      detail::ascii_unpack_simd(reinterpret_cast<uint8_t*>(dest + space_left), decoded_len, dest);
     } else {
       LOG(FATAL) << "Unsupported tag " << int(taglen_);
     }
