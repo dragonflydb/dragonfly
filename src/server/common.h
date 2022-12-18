@@ -268,7 +268,10 @@ class Context : protected Cancellation {
   //
   // Note: this function blocks when called from inside an error handler.
   template <typename... T> GenericError Error(T... ts) {
-    std::lock_guard lk{mu_};
+    if (!mu_.try_lock())  // TODO: Maybe use two separate locks.
+      return GenericError{std::forward<T>(ts)...};
+
+    std::lock_guard lk{mu_, std::adopt_lock};
     if (err_)
       return err_;
 

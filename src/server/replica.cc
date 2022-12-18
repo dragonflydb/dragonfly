@@ -558,9 +558,7 @@ void Replica::JoinAllFlows() {
 }
 
 void Replica::DefaultErrorHandler(const GenericError& err) {
-  // Call inside another fiber to allow calling context's error handler
-  // and avoid deadlocking.
-  util::fibers_ext::Fiber{&Replica::CloseAllSockets, this}.Detach();
+  CloseAllSockets();
 }
 
 error_code Replica::SendNextPhaseRequest() {
