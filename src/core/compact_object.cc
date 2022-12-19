@@ -23,19 +23,15 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "base/pod_array.h"
+#include "core/detail/bitpacking.h"
 #include "core/string_set.h"
-
-#if defined(__aarch64__)
-#include "base/sse2neon.h"
-#else
-#include <emmintrin.h>
-#endif
 
 ABSL_FLAG(bool, use_set2, true, "If true use DenseSet for an optimized set data structure");
 
 namespace dfly {
 using namespace std;
 using absl::GetFlag;
+using detail::binpacked_len;
 
 namespace {
 
@@ -152,35 +148,6 @@ inline void FreeObjZset(unsigned encoding, void* ptr) {
 
 inline void FreeObjStream(void* ptr) {
   freeStream((stream*)ptr);
-}
-
-// Daniel Lemire's function validate_ascii_fast() - under Apache/MIT license.
-// See https://github.com/lemire/fastvalidate-utf-8/
-// The function returns true (1) if all chars passed in src are
-// 7-bit values (0x00..0x7F). Otherwise, it returns false (0).
-bool validate_ascii_fast(const char* src, size_t len) {
-  size_t i = 0;
-  __m128i has_error = _mm_setzero_si128();
-  if (len >= 16) {
-    for (; i <= len - 16; i += 16) {
-      __m128i current_bytes = _mm_loadu_si128((const __m128i*)(src + i));
-      has_error = _mm_or_si128(has_error, current_bytes);
-    }
-  }
-  int error_mask = _mm_movemask_epi8(has_error);
-
-  char tail_has_error = 0;
-  for (; i < len; i++) {
-    tail_has_error |= src[i];
-  }
-  error_mask |= (tail_has_error & 0x80);
-
-  return !error_mask;
-}
-
-// maps ascii len to 7-bit packed length. Each 8 bytes are converted to 7 bytes.
-inline constexpr size_t binpacked_len(size_t ascii_len) {
-  return (ascii_len * 7 + 7) / 8; /* rounded up */
 }
 
 // converts 7-bit packed length back to ascii length. Note that this conversion
@@ -427,91 +394,6 @@ void RobjWrapper::MakeInnerRoom(size_t current_cap, size_t desired, pmr::memory_
   }
   inner_obj_ = newp;
 }
-
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC push_options
-#pragma GCC optimize("Ofast")
-#endif
-
-// len must be at least 16
-void ascii_pack(const char* ascii, size_t len, uint8_t* bin) {
-  const char* end = ascii + len;
-
-  unsigned i = 0;
-  while (ascii + 8 <= end) {
-    for (i = 0; i < 7; ++i) {
-      *bin++ = (ascii[0] >> i) | (ascii[1] << (7 - i));
-      ++ascii;
-    }
-    ++ascii;
-  }
-
-  // epilog - we do not pack since we have less than 8 bytes.
-  while (ascii < end) {
-    *bin++ = *ascii++;
-  }
-}
-
-// unpacks 8->7 encoded blob back to ascii.
-// generally, we can not unpack inplace because ascii (dest) buffer is 8/7 bigger than
-// the source buffer.
-// however, if binary data is positioned on the right of the ascii buffer with empty space on the
-// left than we can unpack inplace.
-void ascii_unpack(const uint8_t* bin, size_t ascii_len, char* ascii) {
-  constexpr uint8_t kM = 0x7F;
-  uint8_t p = 0;
-  unsigned i = 0;
-
-  while (ascii_len >= 8) {
-    for (i = 0; i < 7; ++i) {
-      uint8_t src = *bin;  // keep on stack in case we unpack inplace.
-      *ascii++ = (p >> (8 - i)) | ((src << i) & kM);
-      p = src;
-      ++bin;
-    }
-
-    ascii_len -= 8;
-    *ascii++ = p >> 1;
-  }
-
-  DCHECK_LT(ascii_len, 8u);
-  for (i = 0; i < ascii_len; ++i) {
-    *ascii++ = *bin++;
-  }
-}
-
-// compares packed and unpacked strings. packed must be of length = binpacked_len(ascii_len).
-bool compare_packed(const uint8_t* packed, const char* ascii, size_t ascii_len) {
-  unsigned i = 0;
-  bool res = true;
-  const char* end = ascii + ascii_len;
-
-  while (ascii + 8 <= end) {
-    for (i = 0; i < 7; ++i) {
-      uint8_t conv = (ascii[0] >> i) | (ascii[1] << (7 - i));
-      res &= (conv == *packed);
-      ++ascii;
-      ++packed;
-    }
-
-    if (!res)
-      return false;
-
-    ++ascii;
-  }
-
-  while (ascii < end) {
-    if (*ascii++ != *packed++) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC pop_options
-#endif
 
 }  // namespace detail
 
@@ -777,7 +659,7 @@ void CompactObj::SetString(std::string_view str) {
   DCHECK_GT(str.size(), kInlineLen);
 
   string_view encoded = str;
-  bool is_ascii = kUseAsciiEncoding && validate_ascii_fast(str.data(), str.size());
+  bool is_ascii = kUseAsciiEncoding && detail::validate_ascii_fast(str.data(), str.size());
 
   if (is_ascii) {
     size_t encode_len = binpacked_len(str.size());
@@ -792,7 +674,7 @@ void CompactObj::SetString(std::string_view str) {
     }
 
     tl.tmp_buf.resize(encode_len);
-    detail::ascii_pack(str.data(), str.size(), tl.tmp_buf.data());
+    detail::ascii_pack_simd2(str.data(), str.size(), tl.tmp_buf.data());
     encoded = string_view{reinterpret_cast<char*>(tl.tmp_buf.data()), encode_len};
 
     if (encoded.size() <= kInlineLen) {
@@ -854,7 +736,7 @@ string_view CompactObj::GetSlice(string* scratch) const {
       DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
       size_t decoded_len = DecodedLen(u_.r_obj.Size());
       scratch->resize(decoded_len);
-      detail::ascii_unpack(to_byte(u_.r_obj.inner_obj()), decoded_len, scratch->data());
+      detail::ascii_unpack_simd(to_byte(u_.r_obj.inner_obj()), decoded_len, scratch->data());
     } else if (taglen_ == SMALL_TAG) {
       size_t decoded_len = DecodedLen(u_.small_str.size());
       size_t space_left = decoded_len - u_.small_str.size();
@@ -867,8 +749,8 @@ string_view CompactObj::GetSlice(string* scratch) const {
       memcpy(next, slices[0].data(), slices[0].size());
       next += slices[0].size();
       memcpy(next, slices[1].data(), slices[1].size());
-      detail::ascii_unpack(reinterpret_cast<uint8_t*>(scratch->data() + space_left), decoded_len,
-                           scratch->data());
+      detail::ascii_unpack_simd(reinterpret_cast<uint8_t*>(scratch->data() + space_left),
+                                decoded_len, scratch->data());
     } else {
       LOG(FATAL) << "Unsupported tag " << int(taglen_);
     }
@@ -957,7 +839,7 @@ void CompactObj::GetString(char* dest) const {
       CHECK_EQ(OBJ_STRING, u_.r_obj.type());
       DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
       size_t decoded_len = DecodedLen(u_.r_obj.Size());
-      detail::ascii_unpack(to_byte(u_.r_obj.inner_obj()), decoded_len, dest);
+      detail::ascii_unpack_simd(to_byte(u_.r_obj.inner_obj()), decoded_len, dest);
     } else if (taglen_ == SMALL_TAG) {
       size_t decoded_len = DecodedLen(u_.small_str.size());
 
@@ -971,7 +853,7 @@ void CompactObj::GetString(char* dest) const {
       memcpy(next, slices[0].data(), slices[0].size());
       next += slices[0].size();
       memcpy(next, slices[1].data(), slices[1].size());
-      detail::ascii_unpack(reinterpret_cast<uint8_t*>(dest + space_left), decoded_len, dest);
+      detail::ascii_unpack_simd(reinterpret_cast<uint8_t*>(dest + space_left), decoded_len, dest);
     } else {
       LOG(FATAL) << "Unsupported tag " << int(taglen_);
     }
@@ -1125,7 +1007,7 @@ bool CompactObj::CmpEncoded(string_view sv) const {
     if (u_.r_obj.Size() != encode_len)
       return false;
 
-    if (!validate_ascii_fast(sv.data(), sv.size()))
+    if (!detail::validate_ascii_fast(sv.data(), sv.size()))
       return false;
 
     return detail::compare_packed(to_byte(u_.r_obj.inner_obj()), sv.data(), sv.size());
@@ -1139,7 +1021,7 @@ bool CompactObj::CmpEncoded(string_view sv) const {
     if (u_.small_str.size() != encode_len)
       return false;
 
-    if (!validate_ascii_fast(sv.data(), sv.size()))
+    if (!detail::validate_ascii_fast(sv.data(), sv.size()))
       return false;
 
     // We need to compare an unpacked sv with 2 packed parts.

@@ -31,9 +31,8 @@ ABSL_FLAG(bool, cache_mode, false,
           "by evicting entries when getting close to maxmemory limit");
 
 // memory defragmented related flags
-ABSL_FLAG(float, mem_defrag_threshold,
-          1,  // The default now is to disable the task from running! change this to 0.05!!
-          "Minimum percentage of used memory relative to total available memory before running "
+ABSL_FLAG(float, mem_defrag_threshold, 0.7,
+          "Minimum percentage of used memory relative to maxmemory cap before running "
           "defragmentation");
 
 ABSL_FLAG(float, commit_use_threshold, 1.3,
@@ -80,20 +79,22 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
 // 3. in case the above is OK, make sure that we have a "gap" between usage and commited memory
 // (control by commit_use_threshold flag)
 bool EngineShard::DefragTaskState::IsRequired() const {
-  const uint64_t threshold_mem = max_memory_limit * GetFlag(FLAGS_mem_defrag_threshold);
+  const int64_t threshold_mem = max_memory_limit * GetFlag(FLAGS_mem_defrag_threshold);
   const double commit_use_threshold = GetFlag(FLAGS_commit_use_threshold);
 
   if (cursor > kCursorDoneState) {
     return true;
   }
 
-  uint64_t commited = GetMallocCurrentCommitted();
+  // can be negative due to weird accounting of mimalloc.
+  int64_t commited = GetMallocCurrentCommitted();
+
   uint64_t mem_in_use = used_mem_current.load(memory_order_relaxed);
 
   // we want to make sure that we are not running this to many times - i.e.
   // if there was no change to the memory, don't run this
   if (threshold_mem < commited && mem_in_use > 0 &&
-      (uint64_t(mem_in_use * commit_use_threshold) < commited)) {
+      (uint64_t(mem_in_use * commit_use_threshold) < uint64_t(commited))) {
     // we have way more commited then actual usage
     return true;
   }
