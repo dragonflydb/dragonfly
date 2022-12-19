@@ -14,6 +14,7 @@ extern "C" {
 #include "base/pod_array.h"
 #include "io/io.h"
 #include "server/common.h"
+#include "server/journal/serializer.h"
 
 namespace dfly {
 
@@ -150,6 +151,7 @@ class RdbLoaderBase {
   size_t source_limit_ = SIZE_MAX;
   base::PODArray<uint8_t> compr_buf_;
   std::unique_ptr<DecompressImpl> decompress_impl_;
+  JournalReader journal_reader_{0};
 };
 
 class RdbLoader : protected RdbLoaderBase {

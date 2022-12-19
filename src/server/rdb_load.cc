@@ -1926,14 +1926,14 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service, DbIndex dbid) {
   SET_OR_RETURN(FetchGenericString(), journal_blob);
 
   io::BytesSource bs{io::Buffer(journal_blob)};
-  JournalReader rd{dbid};
+  journal_reader_.SetDb(dbid);
 
   // Parse and exectue in loop.
   size_t done = 0;
   JournalExecutor ex{service};
   while (done < num_entries) {
     journal::ParsedEntry entry{};
-    SET_OR_RETURN(rd.ReadEntry(&bs), entry);
+    SET_OR_RETURN(journal_reader_.ReadEntry(&bs), entry);
     ex.Execute(std::move(entry));
     done++;
   }

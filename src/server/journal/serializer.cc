@@ -80,6 +80,10 @@ error_code JournalWriter::Write(const journal::Entry& entry) {
 JournalReader::JournalReader(DbIndex dbid) : buf_{}, dbid_{dbid} {
 }
 
+void JournalReader::SetDb(DbIndex dbid) {
+  dbid_ = dbid;
+}
+
 template <typename UT> io::Result<UT> ReadPackedUIntTyped(io::Source* source) {
   uint64_t v;
   SET_OR_UNEXPECT(ReadPackedUInt(source), v);
