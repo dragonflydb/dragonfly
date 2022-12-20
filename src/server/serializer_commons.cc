@@ -47,22 +47,31 @@ unsigned WritePackedUInt(uint64_t value, uint8_t* buf) {
 
 io::Result<uint64_t> ReadPackedUInt(io::Source* source) {
   uint8_t buf[10];
+  size_t read = 0;
 
   uint8_t first = 0;
-  source->Read(io::MutableBytes{&first, 1});
+  SET_OR_UNEXPECT(source->Read(io::MutableBytes{&first, 1}), read);
+  if (read != 1)
+    return make_unexpected(make_error_code(errc::bad_message));
 
   int type = (first & 0xC0) >> 6;
   switch (type) {
     case RDB_6BITLEN:
       return first & 0x3F;
     case RDB_14BITLEN:
-      source->Read(io::MutableBytes{buf, 1});
+      SET_OR_UNEXPECT(source->Read(io::MutableBytes{buf, 1}), read);
+      if (read != 1)
+        return make_unexpected(make_error_code(errc::bad_message));
       return ((first & 0x3F) << 8) | buf[0];
     case RDB_32BITLEN:
-      source->Read(io::MutableBytes{buf, 4});
+      SET_OR_UNEXPECT(source->Read(io::MutableBytes{buf, 4}), read);
+      if (read != 4)
+        return make_unexpected(make_error_code(errc::bad_message));
       return absl::big_endian::Load32(buf);
     case RDB_64BITLEN:
-      source->Read(io::MutableBytes{buf, 8});
+      SET_OR_UNEXPECT(source->Read(io::MutableBytes{buf, 8}), read);
+      if (read != 8)
+        return make_unexpected(make_error_code(errc::bad_message));
       return absl::big_endian::Load64(buf);
     default:
       return make_unexpected(make_error_code(errc::illegal_byte_sequence));

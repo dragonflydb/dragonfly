@@ -72,7 +72,7 @@ void SliceSnapshot::Stop() {
   Join();
 
   if (journal_cb_id_) {
-    db_slice_->shard_owner()->journal()->Unregister(journal_cb_id_);
+    db_slice_->shard_owner()->journal()->UnregisterOnChange(journal_cb_id_);
   }
 
   FlushDefaultBuffer(true);
@@ -82,7 +82,7 @@ void SliceSnapshot::Stop() {
 void SliceSnapshot::Cancel() {
   CloseRecordChannel();
   if (journal_cb_id_) {
-    db_slice_->shard_owner()->journal()->Unregister(journal_cb_id_);
+    db_slice_->shard_owner()->journal()->UnregisterOnChange(journal_cb_id_);
     journal_cb_id_ = 0;
   }
 }
@@ -272,12 +272,14 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
   }
 }
 
+// For any key any journal entry must arrive at the replica strictly after its first original rdb
+// value. This is guaranteed by the fact that OnJournalEntry runs always after OnDbChange, and
+// no database switch can be performed between those two calls, because they are part of one
+// transaction.
 void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
-  CHECK(journal::Op::VAL == entry.opcode);
-
   optional<RdbSerializer> tmp_serializer;
   RdbSerializer* serializer_ptr = default_serializer_.get();
-  if (entry.db_ind != current_db_) {
+  if (entry.dbid != current_db_) {
     CompressionMode compression_mode = compression_mode_ == CompressionMode::NONE
                                            ? CompressionMode::NONE
                                            : CompressionMode::SINGLE_ENTRY;
@@ -285,11 +287,15 @@ void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
     serializer_ptr = &*tmp_serializer;
   }
 
-  PrimeKey pkey{entry.key};
-  SerializeEntry(entry.db_ind, pkey, *entry.pval_ptr, entry.expire_ms, serializer_ptr);
+  CHECK(entry.opcode == journal::Op::COMMAND);
+  serializer_ptr->WriteJournalEntries(absl::Span{&entry, 1});
 
   if (tmp_serializer) {
-    FlushTmpSerializer(entry.db_ind, &*tmp_serializer);
+    FlushTmpSerializer(entry.dbid, &*tmp_serializer);
+  } else {
+    // This is the only place that flushes in streaming mode
+    // once the iterate buckets fiber finished.
+    FlushDefaultBuffer(false);
   }
 }
 

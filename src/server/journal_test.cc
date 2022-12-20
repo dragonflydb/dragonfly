@@ -55,7 +55,7 @@ std::string ExtractPayload(journal::ParsedEntry& entry) {
   return out;
 }
 
-std::string ExtractPayload(journal::EntryNew& entry) {
+std::string ExtractPayload(journal::Entry& entry) {
   std::string out;
   EntryPayloadVisitor visitor{&out};
   std::visit(visitor, entry.payload);
@@ -95,14 +95,13 @@ TEST(Journal, WriteRead) {
   auto slice = [v = &slices](auto... ss) { return StoreSlice(v, ss...); };
   auto list = [v = &lists](auto... ss) { return StoreList(v, ss...); };
 
-  std::vector<journal::EntryNew> test_entries = {
-      {0, 0, make_pair("MSET", slice("A", "1", "B", "2"))},
-      {1, 0, make_pair("MSET", slice("C", "3"))},
-      {2, 0, list("DEL", "A", "B")},
-      {3, 1, list("LPUSH", "l", "v1", "v2")},
-      {4, 0, make_pair("MSET", slice("D", "4"))},
-      {5, 1, list("DEL", "l1")},
-      {6, 2, list("SET", "E", "2")}};
+  std::vector<journal::Entry> test_entries = {{0, 0, make_pair("MSET", slice("A", "1", "B", "2"))},
+                                              {1, 0, make_pair("MSET", slice("C", "3"))},
+                                              {2, 0, list("DEL", "A", "B")},
+                                              {3, 1, list("LPUSH", "l", "v1", "v2")},
+                                              {4, 0, make_pair("MSET", slice("D", "4"))},
+                                              {5, 1, list("DEL", "l1")},
+                                              {6, 2, list("SET", "E", "2")}};
 
   // Write all entries to string file.
   io::StringSink ss;
@@ -113,12 +112,12 @@ TEST(Journal, WriteRead) {
 
   // Read them back.
   io::BytesSource bs{io::Buffer(ss.str())};
-  JournalReader reader{&bs, 0};
+  JournalReader reader{0};
 
   for (unsigned i = 0; i < test_entries.size(); i++) {
     auto& expected = test_entries[i];
 
-    auto res = reader.ReadEntry();
+    auto res = reader.ReadEntry(&bs);
     ASSERT_TRUE(res.has_value());
 
     ASSERT_EQ(expected.opcode, res->opcode);
@@ -129,3 +128,5 @@ TEST(Journal, WriteRead) {
 }
 
 }  // namespace dfly
+
+// TODO: extend test.

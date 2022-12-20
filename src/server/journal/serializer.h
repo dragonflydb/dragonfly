@@ -23,7 +23,7 @@ class JournalWriter {
   JournalWriter(io::Sink* sink, std::optional<DbIndex> dbid = std::nullopt);
 
   // Write single entry.
-  std::error_code Write(const journal::EntryNew& entry);
+  std::error_code Write(const journal::Entry& entry);
 
  private:
   std::error_code Write(uint64_t v);           // Write packed unsigned integer.
@@ -42,27 +42,29 @@ class JournalWriter {
 // Like the writer, it automatically keeps track of the database index.
 struct JournalReader {
  public:
-  // Initialize with source and start database index.
-  JournalReader(io::Source* source, DbIndex dbid);
+  // Initialize start database index.
+  JournalReader(DbIndex dbid);
+
+  // Overwrite current db index.
+  void SetDb(DbIndex dbid);
 
   // Try reading entry from source.
-  io::Result<journal::ParsedEntry> ReadEntry();
+  io::Result<journal::ParsedEntry> ReadEntry(io::Source* source);
 
  private:
   // TODO: Templated endian encoding to not repeat...?
-  io::Result<uint8_t> ReadU8();
-  io::Result<uint16_t> ReadU16();
-  io::Result<uint64_t> ReadU64();
+  io::Result<uint8_t> ReadU8(io::Source* source);
+  io::Result<uint16_t> ReadU16(io::Source* source);
+  io::Result<uint64_t> ReadU64(io::Source* source);
 
   // Read string into internal buffer and return size.
-  io::Result<size_t> ReadString();
+  io::Result<size_t> ReadString(io::Source* source);
 
   // Read argument array into internal buffer and build slice.
   // TODO: Inline store span data inside buffer to avoid alloaction
-  std::error_code Read(CmdArgVec* vec);
+  std::error_code Read(io::Source* source, CmdArgVec* vec);
 
  private:
-  io::Source* source_;
   base::IoBuf buf_;
   DbIndex dbid_;
 };

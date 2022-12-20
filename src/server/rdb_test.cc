@@ -84,7 +84,7 @@ TEST_F(RdbTest, LoadEmpty) {
 
 TEST_F(RdbTest, LoadSmall6) {
   io::FileSource fs = GetSource("redis6_small.rdb");
-  RdbLoader loader(service_->script_mgr());
+  RdbLoader loader{service_.get()};
 
   // must run in proactor thread in order to avoid polluting the serverstate
   // in the main, testing thread.
@@ -121,7 +121,7 @@ TEST_F(RdbTest, LoadSmall6) {
 
 TEST_F(RdbTest, Stream) {
   io::FileSource fs = GetSource("redis6_stream.rdb");
-  RdbLoader loader(service_->script_mgr());
+  RdbLoader loader{service_.get()};
 
   // must run in proactor thread in order to avoid polluting the serverstate
   // in the main, testing thread.
