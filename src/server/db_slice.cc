@@ -194,7 +194,7 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 56, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 72, "You should update this function with new fields");
 
   ADD(evicted_keys);
   ADD(hard_evictions);
@@ -203,6 +203,8 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
   ADD(stash_unloaded);
   ADD(bumpups);
   ADD(garbage_checked);
+  ADD(hits);
+  ADD(misses);
 
   return *this;
 }
@@ -282,6 +284,7 @@ pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string
   res.first = db.prime.Find(key);
 
   if (!IsValid(res.first)) {
+    events_.misses++;
     return res;
   }
 
@@ -305,6 +308,7 @@ pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string
     ++events_.bumpups;
   }
 
+  events_.hits++;
   return res;
 }
 

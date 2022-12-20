@@ -50,6 +50,10 @@ struct SliceEvents {
   size_t stash_unloaded = 0;
   size_t bumpups = 0;  // how many bump-upds we did.
 
+  // hits/misses on keys
+  size_t hits = 0;
+  size_t misses = 0;
+
   SliceEvents& operator+=(const SliceEvents& o);
 };
 
