@@ -10,13 +10,12 @@ ALIGN = 1 << 10  # 1KB alignment
 
 def print_small_bins():
     prev_val = 0
-    for i in range(64, 1, -1):
-        val = 4096 // i
-        val = (val // 16)*16  # make it 16 bytes aligned
-        if val != prev_val:
-            print(val, end=', ')
-            prev_val = val
-
+    for i in range(56, 1, -1):
+        len = (4096 - i*8)  # reduce by size of hashes
+        len = (len // 8)*8  # make it 8 bytes aligned
+        if len != prev_val:
+            print(i, len)
+            prev_val = len
     print()
 
 

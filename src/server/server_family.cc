@@ -1313,12 +1313,13 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
   if (should_enter("TIERED", true)) {
     ADD_HEADER("# TIERED");
-    append("external_entries", total.external_entries);
-    append("external_bytes", total.external_size);
-    append("external_reads", m.tiered_stats.external_reads);
-    append("external_writes", m.tiered_stats.external_writes);
-    append("external_reserved", m.tiered_stats.storage_reserved);
-    append("external_capacity", m.tiered_stats.storage_capacity);
+    append("tiered_entries", total.tiered_entries);
+    append("tiered_bytes", total.tiered_size);
+    append("tiered_reads", m.tiered_stats.tiered_reads);
+    append("tiered_writes", m.tiered_stats.tiered_writes);
+    append("tiered_reserved", m.tiered_stats.storage_reserved);
+    append("tiered_capacity", m.tiered_stats.storage_capacity);
+    append("tiered_aborted_writes", m.tiered_stats.aborted_offloads);
   }
 
   if (should_enter("PERSISTENCE", true)) {
