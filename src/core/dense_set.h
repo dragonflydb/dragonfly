@@ -245,7 +245,9 @@ class DenseSet {
     return false;
   }
 
-  bool AddInternal(void* obj, bool has_ttl);
+  // Returns previous object if the object with such key already exists,
+  // Returns null if obj was added.
+  void* AddOrFind(void* obj, bool has_ttl);
 
   void* FindInternal(const void* obj, uint32_t cookie) const {
     DensePtr* ptr = const_cast<DenseSet*>(this)->Find(obj, BucketId(obj, cookie), cookie).second;
@@ -258,6 +260,14 @@ class DenseSet {
   // in the set may point to. This function only frees the allocated DenseLinkKeys created by
   // DenseSet. All data allocated by a derived class should be freed before calling this
   void ClearInternal();
+
+  void IncreaseMallocUsed(size_t delta) {
+    obj_malloc_used_ += delta;
+  }
+
+  void DecreaseMallocUsed(size_t delta) {
+    obj_malloc_used_ -= delta;
+  }
 
  private:
   DenseSet(const DenseSet&) = delete;

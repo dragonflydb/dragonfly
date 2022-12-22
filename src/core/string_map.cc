@@ -19,9 +19,9 @@ namespace dfly {
 
 namespace {
 
-sds GetValue(sds key) {
-  char* from = key + sdslen(key) + 1;
-  return (char*)absl::little_endian::Load64(from);
+inline sds GetValue(sds key) {
+  char* valptr = key + sdslen(key) + 1;
+  return (char*)absl::little_endian::Load64(valptr);
 }
 
 }  // namespace
@@ -41,11 +41,18 @@ bool StringMap::AddOrSet(string_view field, string_view value, uint32_t ttl_sec)
 
   sds val = sdsnewlen(value.data(), value.size());
   absl::little_endian::Store64(newkey + field.size() + 1, uint64_t(val));
-  bool has_ttl = false;
 
-  if (!AddInternal(newkey, has_ttl)) {
-    ObjDelete(newkey, has_ttl);
-    LOG(FATAL) << "TBD:ORSET";
+  bool has_ttl = false;
+  sds prev_entry = (sds)AddOrFind(newkey, has_ttl);
+  if (prev_entry) {
+    sdsfree(newkey);
+    char* valptr = prev_entry + sdslen(prev_entry) + 1;
+    sds prev_val = (sds)absl::little_endian::Load64(valptr);
+    DecreaseMallocUsed(zmalloc_usable_size(sdsAllocPtr(prev_val)));
+    sdsfree(prev_val);
+
+    absl::little_endian::Store64(valptr, uint64_t(val));
+    IncreaseMallocUsed(zmalloc_usable_size(sdsAllocPtr(val)));
 
     return false;
   }
@@ -53,7 +60,8 @@ bool StringMap::AddOrSet(string_view field, string_view value, uint32_t ttl_sec)
   return true;
 }
 
-bool StringMap::Erase(string_view field) {
+bool StringMap::Erase(string_view key) {
+  LOG(FATAL) << "TBD";
   return false;
 }
 
@@ -71,9 +79,7 @@ sds StringMap::Find(std::string_view key) {
   if (!str)
     return nullptr;
 
-  char* valptr = str + sdslen(str) + 1;
-  sds res = (sds)absl::little_endian::Load64(valptr);
-  return res;
+  return GetValue(str);
 }
 
 uint64_t StringMap::Hash(const void* obj, uint32_t cookie) const {
@@ -126,6 +132,11 @@ void StringMap::ObjDelete(void* obj, bool has_ttl) const {
   sds value = GetValue(s1);
   sdsfree(value);
   sdsfree(s1);
+}
+
+detail::SdsPair StringMap::iterator::BreakToPair(void* obj) {
+  sds f = (sds)obj;
+  return detail::SdsPair(f, GetValue(f));
 }
 
 }  // namespace dfly

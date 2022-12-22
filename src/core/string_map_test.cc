@@ -73,6 +73,23 @@ TEST_F(StringMapTest, Basic) {
   EXPECT_TRUE(sm_->AddOrSet("foo", "bar"));
   EXPECT_TRUE(sm_->Contains("foo"));
   EXPECT_STREQ("bar", sm_->Find("foo"));
+
+  auto it = sm_->begin();
+  EXPECT_STREQ("foo", it->first);
+  EXPECT_STREQ("bar", it->second);
+  ++it;
+  EXPECT_TRUE(it == sm_->end());
+
+  for (const auto& k_v : *sm_) {
+    EXPECT_STREQ("foo", k_v.first);
+    EXPECT_STREQ("bar", k_v.second);
+  }
+
+  size_t sz = sm_->ObjMallocUsed();
+  EXPECT_FALSE(sm_->AddOrSet("foo", "baraaaaaaaaaaaa2"));
+  EXPECT_GT(sm_->ObjMallocUsed(), sz);
+  it = sm_->begin();
+  EXPECT_STREQ("baraaaaaaaaaaaa2", it->second);
 }
 
 }  // namespace dfly
