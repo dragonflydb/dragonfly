@@ -91,13 +91,14 @@ struct OpArgs {
 };
 
 struct TieredStats {
-  size_t external_reads = 0;
-  size_t external_writes = 0;
+  size_t tiered_reads = 0;
+  size_t tiered_writes = 0;
 
   size_t storage_capacity = 0;
 
   // how much was reserved by actively stored items.
   size_t storage_reserved = 0;
+  size_t aborted_offloads = 0;
 
   TieredStats& operator+=(const TieredStats&);
 };

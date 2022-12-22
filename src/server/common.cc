@@ -193,12 +193,13 @@ bool ParseDouble(string_view src, double* value) {
 #define ADD(x) (x) += o.x
 
 TieredStats& TieredStats::operator+=(const TieredStats& o) {
-  static_assert(sizeof(TieredStats) == 32);
+  static_assert(sizeof(TieredStats) == 40);
 
-  ADD(external_reads);
-  ADD(external_writes);
+  ADD(tiered_reads);
+  ADD(tiered_writes);
   ADD(storage_capacity);
   ADD(storage_reserved);
+  ADD(aborted_offloads);
   return *this;
 }
 

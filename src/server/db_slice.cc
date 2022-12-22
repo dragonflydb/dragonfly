@@ -703,8 +703,11 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
       tiered->Free(offset, size);
       it->second.Reset();
 
-      stats->external_entries -= 1;
-      stats->external_size -= size;
+      stats->tiered_entries -= 1;
+      stats->tiered_size -= size;
+    } else if (it->second.HasIoPending()) {
+      TieredStorage* tiered = shard_owner()->tiered_storage();
+      tiered->CancelIo(db_ind, it);
     }
   }
 

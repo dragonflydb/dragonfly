@@ -413,7 +413,7 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
       TieredStorage::EligibleForOffload(value)) {  // external storage enabled.
     // TODO: we may have a bug if we block the fiber inside UnloadItem - "it" may be invalid
     // afterwards.
-    shard->tiered_storage()->UnloadItem(op_args_.db_cntx.db_index, it);
+    shard->tiered_storage()->ScheduleOffload(op_args_.db_cntx.db_index, it);
   }
 
   return OpStatus::OK;
@@ -458,14 +458,14 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
 
   // overwrite existing entry.
   prime_value.SetString(value);
+  DCHECK(!prime_value.HasIoPending());
 
   if (value.size() >= kMinTieredLen) {  // external storage enabled.
-
     // TODO: if UnloadItem can block the calling fiber, then we have the bug because then "it"
     // can be invalid after the function returns and the functions that follow may access invalid
     // entry.
     if (shard->tiered_storage()) {
-      shard->tiered_storage()->UnloadItem(op_args_.db_cntx.db_index, it);
+      shard->tiered_storage()->ScheduleOffload(op_args_.db_cntx.db_index, it);
     }
   }
 
