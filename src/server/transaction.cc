@@ -1221,7 +1221,7 @@ void Transaction::LogJournalOnShard(EngineShard* shard) {
     entry_payload =
         make_pair(facade::ToSV(cmd_with_full_args_.front()), ShardArgsInShard(shard->shard_id()));
   }
-  journal->RecordEntry(journal::Entry{txid_, db_index_, entry_payload});
+  journal->RecordEntry(journal::Entry{txid_, db_index_, entry_payload, unique_shard_cnt_});
 }
 
 void Transaction::BreakOnShutdown() {

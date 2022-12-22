@@ -55,6 +55,7 @@ struct JournalReader {
   // TODO: Templated endian encoding to not repeat...?
   io::Result<uint8_t> ReadU8(io::Source* source);
   io::Result<uint16_t> ReadU16(io::Source* source);
+  io::Result<uint32_t> ReadU32(io::Source* source);
   io::Result<uint64_t> ReadU64(io::Source* source);
 
   // Read string into internal buffer and return size.

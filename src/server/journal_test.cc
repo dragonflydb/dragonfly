@@ -95,13 +95,14 @@ TEST(Journal, WriteRead) {
   auto slice = [v = &slices](auto... ss) { return StoreSlice(v, ss...); };
   auto list = [v = &lists](auto... ss) { return StoreList(v, ss...); };
 
-  std::vector<journal::Entry> test_entries = {{0, 0, make_pair("MSET", slice("A", "1", "B", "2"))},
-                                              {1, 0, make_pair("MSET", slice("C", "3"))},
-                                              {2, 0, list("DEL", "A", "B")},
-                                              {3, 1, list("LPUSH", "l", "v1", "v2")},
-                                              {4, 0, make_pair("MSET", slice("D", "4"))},
-                                              {5, 1, list("DEL", "l1")},
-                                              {6, 2, list("SET", "E", "2")}};
+  std::vector<journal::Entry> test_entries = {
+      {0, 0, make_pair("MSET", slice("A", "1", "B", "2")), 2},
+      {0, 0, make_pair("MSET", slice("C", "3")), 2},
+      {1, 0, list("DEL", "A", "B"), 2},
+      {2, 1, list("LPUSH", "l", "v1", "v2"), 1},
+      {3, 0, make_pair("MSET", slice("D", "4")), 1},
+      {4, 1, list("DEL", "l1"), 1},
+      {5, 2, list("SET", "E", "2"), 1}};
 
   // Write all entries to string file.
   io::StringSink ss;

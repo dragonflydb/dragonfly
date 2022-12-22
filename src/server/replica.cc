@@ -97,9 +97,11 @@ Replica::Replica(string host, uint16_t port, Service* se) : service_(*se) {
   master_context_.port = port;
 }
 
-Replica::Replica(const MasterContext& context, uint32_t dfly_flow_id, Service* service)
+Replica::Replica(const MasterContext& context, uint32_t dfly_flow_id, Service* service,
+                 std::shared_ptr<Replica::MultiShardExecution> shared_exe_data)
     : service_(*service), master_context_(context) {
   master_context_.dfly_flow_id = dfly_flow_id;
+  multi_shard_exe_ = shared_exe_data;
 }
 
 Replica::~Replica() {
@@ -427,10 +429,10 @@ error_code Replica::InitiatePSync() {
 // Initialize and start sub-replica for each flow.
 error_code Replica::InitiateDflySync() {
   DCHECK_GT(num_df_flows_, 0u);
-
+  multi_shard_exe_.reset(new MultiShardExecution());
   shard_flows_.resize(num_df_flows_);
   for (unsigned i = 0; i < num_df_flows_; ++i) {
-    shard_flows_[i].reset(new Replica(master_context_, i, &service_));
+    shard_flows_[i].reset(new Replica(master_context_, i, &service_, multi_shard_exe_));
   }
 
   // Blocked on untill all flows got full sync cut.
@@ -705,12 +707,59 @@ void Replica::StableSyncDflyFb(Context* cntx) {
       cntx->Error(res.error(), "Journal format error");
       return;
     }
-
-    executor.Execute(std::move(res.value()));
-
+    ExecuteEntry(&executor, std::move(res.value()));
     last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
   }
   return;
+}
+
+void Replica::ExecuteEntry(JournalExecutor* executor, journal::ParsedEntry&& entry) {
+  if (entry.shard_cnt <= 1) {  // not multi shard cmd
+    executor->Execute(std::move(entry));
+    return;
+  }
+
+  // Multi shard command flow:
+  // step 1: Fiber wait untill all the fibers that should execute this tranaction got
+  // to the journal entry of the transaction.
+  // step 2: execute the command (All fibers)
+  // step 3: Fiber wait untill all fibers finished the execution
+  // By step 1 we enforce that replica will execute multi shard commands that finished on master
+  // Step 3 ensures the correctness of flushall/flushdb commands
+  // TODO: this implemantaion does not support atomicity in replica
+  // Although multi shard transaction happen in step 2 very close to each other,
+  // user can query replica between executions.
+  // To support atomisity we should have one fiber which will excute all the entries of the
+  // transaction together. In case of global comand such as flushdb the command can be executed
+  // by only one fiber.
+  // TODO: support error handler in this flow
+
+  // Only the first fiber to reach the transaction will create data for transaction in map
+  multi_shard_exe_->map_mu.lock();
+  auto [it, was_insert] = multi_shard_exe_->tx_sync_execution.emplace(entry.txid, entry.shard_cnt);
+
+  // Note: we must release the mutex befor calling wait on berrier
+  multi_shard_exe_->map_mu.unlock();
+
+  VLOG(2) << "txid: " << entry.txid << " unique_shard_cnt_: " << entry.shard_cnt
+          << " was_insert: " << was_insert;
+
+  // step 1
+  it->second.berrier_before_exe.wait();
+  // step 2
+  executor->Execute(std::move(entry));
+  // step 3
+  it->second.berrier_after_exe.wait();
+
+  // Note: erase from map can be done only after all fibers returned from wait.
+  // The last fiber which will decrease the counter to 0 will be the one to erase the data from map
+  auto val = --it->second.counter;
+  VLOG(2) << "txid: " << entry.txid << " unique_shard_cnt_: " << entry.shard_cnt
+          << " counter: " << val;
+  if (val == 0) {
+    std::lock_guard lg{multi_shard_exe_->map_mu};
+    multi_shard_exe_->tx_sync_execution.erase(entry.txid);
+  }
 }
 
 error_code Replica::ReadRespReply(base::IoBuf* io_buf, uint32_t* consumed) {

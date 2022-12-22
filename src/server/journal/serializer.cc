@@ -70,6 +70,7 @@ error_code JournalWriter::Write(const journal::Entry& entry) {
       return Write(entry.dbid);
     case journal::Op::COMMAND:
       RETURN_ON_ERR(Write(entry.txid));
+      RETURN_ON_ERR(Write(entry.shard_cnt));
       return std::visit([this](const auto& payload) { return Write(payload); }, entry.payload);
     default:
       break;
@@ -98,6 +99,10 @@ io::Result<uint8_t> JournalReader::ReadU8(io::Source* source) {
 
 io::Result<uint16_t> JournalReader::ReadU16(io::Source* source) {
   return ReadPackedUIntTyped<uint16_t>(source);
+}
+
+io::Result<uint32_t> JournalReader::ReadU32(io::Source* source) {
+  return ReadPackedUIntTyped<uint32_t>(source);
 }
 
 io::Result<uint64_t> JournalReader::ReadU64(io::Source* source) {
@@ -153,6 +158,7 @@ io::Result<journal::ParsedEntry> JournalReader::ReadEntry(io::Source* source) {
   switch (entry.opcode) {
     case journal::Op::COMMAND:
       SET_OR_UNEXPECT(ReadU64(source), entry.txid);
+      SET_OR_UNEXPECT(ReadU32(source), entry.shard_cnt);
       entry.payload = CmdArgVec{};
       if (auto ec = Read(source, &*entry.payload); ec)
         return make_unexpected(ec);
