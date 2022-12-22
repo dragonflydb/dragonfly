@@ -745,11 +745,11 @@ void Replica::ExecuteEntry(JournalExecutor* executor, journal::ParsedEntry&& ent
           << " was_insert: " << was_insert;
 
   // step 1
-  it->second.berrier_before_exe.wait();
+  it->second.berrier.wait();
   // step 2
   executor->Execute(std::move(entry));
   // step 3
-  it->second.berrier_after_exe.wait();
+  it->second.berrier.wait();
 
   // Note: erase from map can be done only after all fibers returned from wait.
   // The last fiber which will decrease the counter to 0 will be the one to erase the data from map

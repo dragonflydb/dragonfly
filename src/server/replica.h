@@ -88,11 +88,9 @@ class Replica {
     boost::fibers::mutex map_mu;
 
     struct TxExecutionSync {
-      boost::fibers::barrier berrier_before_exe;
-      boost::fibers::barrier berrier_after_exe;
+      boost::fibers::barrier berrier;
       std::atomic_uint32_t counter;
-      TxExecutionSync(uint32_t counter)
-          : berrier_before_exe(counter), berrier_after_exe(counter), counter(counter) {
+      TxExecutionSync(uint32_t counter) : berrier(counter), counter(counter) {
       }
     };
 
