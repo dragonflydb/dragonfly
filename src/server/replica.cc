@@ -729,8 +729,8 @@ void Replica::ExecuteEntry(JournalExecutor* executor, journal::ParsedEntry&& ent
   // TODO: this implemantaion does not support atomicity in replica
   // Although multi shard transaction happen in step 2 very close to each other,
   // user can query replica between executions.
-  // To support atomisity we should have one fiber which will excute all the entries of the
-  // transaction together. In case of global comand such as flushdb the command can be executed
+  // To support atomicity we should have one fiber in step 2 which will excute all the entries of
+  // the transaction together. In case of global comand such as flushdb the command can be executed
   // by only one fiber.
   // TODO: support error handler in this flow
 
