@@ -1505,7 +1505,7 @@ bool SetFamily::ConvertToStrSet(const intset* is, size_t expected_len, robj* des
     }
 
     dest->ptr = ss;
-    dest->encoding = OBJ_ENCODING_HT;
+    dest->encoding = kEncodingStrMap2;
   } else {
     dict* ds = dictCreate(&setDictType);
 
