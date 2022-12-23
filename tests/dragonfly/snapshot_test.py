@@ -7,7 +7,7 @@ import glob
 from pathlib import Path
 
 from . import dfly_args
-from .utility import batch_check_data, batch_fill_data, gen_test_data
+from .generator import DflySeeder
 
 BASIC_ARGS = {"dir": "{DRAGONFLY_TMP}/"}
 NUM_KEYS = 100
@@ -33,15 +33,19 @@ class TestRdbSnapshot(SnapshotTestBase):
     def setup(self, tmp_dir: Path):
         super().setup(tmp_dir)
 
-    def test_snapshot(self, client: redis.Redis):
-        batch_fill_data(client, gen_test_data(NUM_KEYS))
+    @pytest.mark.asyncio
+    async def test_snapshot(self, async_client, df_server):
+        seeder = DflySeeder(port=df_server.port, keys=2_000, dbcount=5)
+        await seeder.run(target_deviation=0.1)
+
+        start_capture = await seeder.capture()
 
         # save + flush + load
-        client.execute_command("SAVE")
-        assert client.flushall()
-        client.execute_command("DEBUG LOAD " + super().get_main_file("rdb"))
+        await async_client.execute_command("SAVE")
+        assert await async_client.flushall()
+        await async_client.execute_command("DEBUG LOAD " + super().get_main_file("rdb"))
 
-        batch_check_data(client, gen_test_data(NUM_KEYS))
+        assert await seeder.compare(start_capture)
 
 
 @dfly_args({**BASIC_ARGS, "dbfilename": "test"})
@@ -54,15 +58,19 @@ class TestDflySnapshot(SnapshotTestBase):
         for file in files:
             os.remove(file)
 
-    def test_snapshot(self, client: redis.Redis):
-        batch_fill_data(client, gen_test_data(NUM_KEYS))
+    @pytest.mark.asyncio
+    async def test_snapshot(self, async_client, df_server):
+        seeder = DflySeeder(port=df_server.port, keys=2_000, dbcount=5)
+        await seeder.run(target_deviation=0.1)
+
+        start_capture = await seeder.capture()
 
         # save + flush + load
-        client.execute_command("SAVE DF")
-        assert client.flushall()
-        client.execute_command("DEBUG LOAD " + super().get_main_file("dfs"))
+        await async_client.execute_command("SAVE DF")
+        assert await async_client.flushall()
+        await async_client.execute_command("DEBUG LOAD " + super().get_main_file("dfs"))
 
-        batch_check_data(client, gen_test_data(NUM_KEYS))
+        assert await seeder.compare(start_capture)
 
 
 @dfly_args({**BASIC_ARGS, "dbfilename": "test.rdb", "save_schedule": "*:*"})
@@ -72,8 +80,10 @@ class TestPeriodicSnapshot(SnapshotTestBase):
     def setup(self, tmp_dir: Path):
         super().setup(tmp_dir)
 
-    def test_snapshot(self, client: redis.Redis):
-        batch_fill_data(client, gen_test_data(NUM_KEYS))
+    @pytest.mark.asyncio
+    async def test_snapshot(self, df_server):
+        seeder = DflySeeder(port=df_server.port, keys=5_000, dbcount=5)
+        await seeder.run(target_deviation=0.1)
 
         time.sleep(60)
 
