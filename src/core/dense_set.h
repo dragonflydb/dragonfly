@@ -249,11 +249,7 @@ class DenseSet {
   // Returns null if obj was added.
   void* AddOrFind(void* obj, bool has_ttl);
 
-  void* FindInternal(const void* obj, uint32_t cookie) const {
-    DensePtr* ptr = const_cast<DenseSet*>(this)->Find(obj, BucketId(obj, cookie), cookie).second;
-    return ptr ? ptr->GetObject() : nullptr;
-  }
-
+  void* FindInternal(const void* obj, uint32_t cookie) const;
   void* PopInternal();
 
   // Note this does not free any dynamic allocations done by derived classes, that a DensePtr
@@ -330,5 +326,13 @@ class DenseSet {
 
   uint32_t time_now_ = 0;
 };
+
+inline void* DenseSet::FindInternal(const void* obj, uint32_t cookie) const {
+  if (entries_.empty())
+    return nullptr;
+
+  DensePtr* ptr = const_cast<DenseSet*>(this)->Find(obj, BucketId(obj, cookie), cookie).second;
+  return ptr ? ptr->GetObject() : nullptr;
+}
 
 }  // namespace dfly

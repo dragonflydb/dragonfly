@@ -24,6 +24,7 @@ extern "C" {
 #include "base/endian.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/string_map.h"
 #include "core/string_set.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -534,8 +535,6 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
     }
   }
 
-  robj* res = nullptr;
-
   if (keep_lp) {
     uint8_t* lp = lpNew(lp_size);
 
@@ -554,44 +553,30 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
     }
 
     lp = lpShrinkToFit(lp);
-    res = createObject(OBJ_HASH, lp);
-    res->encoding = OBJ_ENCODING_LISTPACK;
+    pv_->InitRobj(OBJ_HASH, kEncodingListPack, lp);
   } else {
-    dict* hmap = dictCreate(&hashDictType);
+    StringMap* string_map = new StringMap;
 
-    auto cleanup = absl::MakeCleanup([&] { dictRelease(hmap); });
-
-    if (len > DICT_HT_INITIAL_SIZE) {
-      if (dictTryExpand(hmap, len) != DICT_OK) {
-        LOG(ERROR) << "OOM in dictTryExpand " << len;
-        ec_ = RdbError(errc::out_of_memory);
-        return;
-      }
-    }
-
+    auto cleanup = absl::MakeCleanup([&] { delete string_map; });
+    string_map->Reserve(len);
     for (size_t i = 0; i < len; ++i) {
-      sds key = ToSds(ltrace->arr[i * 2].rdb_var);
-      sds val = ToSds(ltrace->arr[i * 2 + 1].rdb_var);
+      // ToSV may reference an internal buffer, therefore we can use only before the
+      // next call to ToSV. To workaround, I copy the key to string.
+      string key(ToSV(ltrace->arr[i * 2].rdb_var));
+      string_view val = ToSV(ltrace->arr[i * 2 + 1].rdb_var);
 
-      if (!key || !val)
+      if (ec_)
         return;
 
-      /* Add pair to hash table */
-      int ret = dictAdd(hmap, key, val);
-      if (ret == DICT_ERR) {
+      if (!string_map->AddOrSkip(key, val)) {
         LOG(ERROR) << "Duplicate hash fields detected";
         ec_ = RdbError(errc::rdb_file_corrupted);
         return;
       }
     }
-
-    res = createObject(OBJ_HASH, hmap);
-    res->encoding = OBJ_ENCODING_HT;
+    pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, string_map);
     std::move(cleanup).Cancel();
   }
-
-  DCHECK(res);
-  pv_->ImportRObj(res);
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
@@ -871,13 +856,15 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       return;
     }
 
-    res = createObject(OBJ_HASH, lp);
-    res->encoding = OBJ_ENCODING_LISTPACK;
-
-    if (lpBytes(lp) > HSetFamily::MaxListPackLen())
-      hashTypeConvert(res, OBJ_ENCODING_HT);
-    else
-      res->ptr = lpShrinkToFit((uint8_t*)res->ptr);
+    if (lpBytes(lp) > HSetFamily::MaxListPackLen()) {
+      StringMap* sm = HSetFamily::ConvertToStrMap(lp);
+      lpFree(lp);
+      pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
+    } else {
+      lp = lpShrinkToFit(lp);
+      pv_->InitRobj(OBJ_HASH, kEncodingListPack, lp);
+    }
+    return;
   } else if (rdb_type_ == RDB_TYPE_ZSET_ZIPLIST) {
     unsigned char* lp = lpNew(blob.size());
     if (!ziplistPairsConvertAndValidateIntegrity((uint8_t*)blob.data(), blob.size(), &lp)) {

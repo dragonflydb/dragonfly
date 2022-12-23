@@ -229,23 +229,6 @@ TEST_F(CompactObjectTest, IntSet) {
   EXPECT_GT(cobj_.MallocUsed(), 0);
 }
 
-TEST_F(CompactObjectTest, HSet) {
-  robj* src = createHashObject();
-  cobj_.ImportRObj(src);
-
-  EXPECT_EQ(OBJ_HASH, cobj_.ObjType());
-  EXPECT_EQ(kEncodingListPack, cobj_.Encoding());
-
-  robj* os = cobj_.AsRObj();
-
-  sds key1 = sdsnew("key1");
-  sds val1 = sdsnew("val1");
-
-  // returns 0 on insert.
-  EXPECT_EQ(0, hashTypeSet(os, key1, val1, HASH_SET_TAKE_FIELD | HASH_SET_TAKE_VALUE));
-  cobj_.SyncRObj();
-}
-
 TEST_F(CompactObjectTest, ZSet) {
   // unrelated, checking that sds static encoding works.
   // it is used in zset special strings.

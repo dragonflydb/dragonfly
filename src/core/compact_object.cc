@@ -548,11 +548,7 @@ void CompactObj::ImportRObj(robj* o) {
         enc = GetFlag(FLAGS_use_set2) ? kEncodingStrMap2 : kEncodingStrMap;
       }
     } else if (o->type == OBJ_HASH) {
-      if (o->encoding == OBJ_ENCODING_HT) {
-        enc = kEncodingStrMap2;
-      } else {
-        enc = kEncodingListPack;
-      }
+      LOG(FATAL) << "Should not reach";
     }
     u_.r_obj.Init(type, enc, o->ptr);
     if (o->refcount == 1)
@@ -564,15 +560,14 @@ robj* CompactObj::AsRObj() const {
   CHECK_EQ(ROBJ_TAG, taglen_);
 
   robj* res = &tl.tmp_robj;
+  unsigned enc = u_.r_obj.encoding();
   res->type = u_.r_obj.type();
 
-  if (res->type == OBJ_SET) {
+  if (res->type == OBJ_SET || res->type == OBJ_HASH) {
     LOG(DFATAL) << "Should not call AsRObj for type " << res->type;
   }
 
-  if (res->type == OBJ_HASH) {
-    LOG(DFATAL) << "Should not call AsRObj for type " << res->type;
-  }
+  res->encoding = enc;
   res->lru = 0;  // u_.r_obj.unneeded;
   res->ptr = u_.r_obj.inner_obj();
 
