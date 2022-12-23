@@ -24,6 +24,7 @@ extern "C" {
 #include "base/logging.h"
 #include "base/pod_array.h"
 #include "core/detail/bitpacking.h"
+#include "core/string_map.h"
 #include "core/string_set.h"
 
 ABSL_FLAG(bool, use_set2, true, "If true use DenseSet for an optimized set data structure");
@@ -91,8 +92,10 @@ size_t MallocUsedHSet(unsigned encoding, void* ptr) {
   switch (encoding) {
     case kEncodingListPack:
       return lpBytes(reinterpret_cast<uint8_t*>(ptr));
-    case kEncodingStrMap:
-      return DictMallocSize((dict*)ptr);
+    case kEncodingStrMap2: {
+      StringMap* sm = (StringMap*)ptr;
+      return sm->ObjMallocUsed() + sm->SetMallocUsed();
+    }
   }
   LOG(DFATAL) << "Unknown set encoding type " << encoding;
   return 0;
@@ -118,8 +121,8 @@ size_t MallocUsedStream(unsigned encoding, void* streamv) {
 
 inline void FreeObjHash(unsigned encoding, void* ptr) {
   switch (encoding) {
-    case kEncodingStrMap:
-      dictRelease((dict*)ptr);
+    case kEncodingStrMap2:
+      delete ((StringMap*)ptr);
       break;
     case kEncodingListPack:
       lpFree((uint8_t*)ptr);
@@ -546,7 +549,7 @@ void CompactObj::ImportRObj(robj* o) {
       }
     } else if (o->type == OBJ_HASH) {
       if (o->encoding == OBJ_ENCODING_HT) {
-        enc = kEncodingStrMap;
+        enc = kEncodingStrMap2;
       } else {
         enc = kEncodingListPack;
       }
@@ -561,17 +564,14 @@ robj* CompactObj::AsRObj() const {
   CHECK_EQ(ROBJ_TAG, taglen_);
 
   robj* res = &tl.tmp_robj;
-  unsigned enc = u_.r_obj.encoding();
   res->type = u_.r_obj.type();
 
   if (res->type == OBJ_SET) {
-    LOG(FATAL) << "Should not call AsRObj for type " << res->type;
+    LOG(DFATAL) << "Should not call AsRObj for type " << res->type;
   }
 
   if (res->type == OBJ_HASH) {
-    res->encoding = (enc == kEncodingListPack) ? OBJ_ENCODING_LISTPACK : OBJ_ENCODING_HT;
-  } else {
-    res->encoding = enc;
+    LOG(DFATAL) << "Should not call AsRObj for type " << res->type;
   }
   res->lru = 0;  // u_.r_obj.unneeded;
   res->ptr = u_.r_obj.inner_obj();
@@ -593,9 +593,6 @@ void CompactObj::SyncRObj() {
   CHECK_NE(OBJ_SET, obj->type) << "sets should be handled without robj";
 
   unsigned enc = obj->encoding;
-  if (obj->type == OBJ_HASH) {
-    enc = (obj->encoding == OBJ_ENCODING_LISTPACK) ? kEncodingListPack : kEncodingStrMap;
-  }
   u_.r_obj.Init(obj->type, enc, obj->ptr);
 }
 

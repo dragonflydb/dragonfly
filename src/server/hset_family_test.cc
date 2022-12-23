@@ -153,7 +153,7 @@ TEST_F(HSetFamilyTest, HScan) {
   vec = StrArray(resp.GetVec()[1]);
 
   // See https://redis.io/commands/scan/ --> "The COUNT option", for why this cannot be exact
-  EXPECT_GT(vec.size(), 40);  // This should be larger than (20 * 2) and less than about 50
+  EXPECT_GE(vec.size(), 40);  // This should be larger than (20 * 2) and less than about 50
   EXPECT_LT(vec.size(), 60);
 }
 
@@ -161,6 +161,34 @@ TEST_F(HSetFamilyTest, HScanLpMatchBug) {
   Run({"HSET", "key", "1", "2"});
   auto resp = Run({"hscan", "key", "0", "match", "1"});
   EXPECT_THAT(resp, ArrLen(2));
+}
+
+TEST_F(HSetFamilyTest, HincrbyFloat) {
+  Run({"hincrbyfloat", "k", "a", "1.5"});
+  EXPECT_EQ(Run({"hget", "k", "a"}), "1.5");
+
+  Run({"hincrbyfloat", "k", "a", "1.5"});
+  EXPECT_EQ(Run({"hget", "k", "a"}), "3");
+
+  for (size_t i = 0; i < 500; ++i) {
+    Run({"hincrbyfloat", "k", absl::StrCat("v", i), "1.5"});
+  }
+
+  for (size_t i = 0; i < 500; ++i) {
+    EXPECT_EQ(Run({"hget", "k", absl::StrCat("v", i)}), "1.5");
+  }
+}
+
+TEST_F(HSetFamilyTest, HRandFloat) {
+  Run({"HSET", "k", "1", "2"});
+
+  EXPECT_EQ(Run({"hrandfield", "k"}), "1");
+
+  for (size_t i = 0; i < 500; ++i) {
+    Run({"hincrbyfloat", "k", absl::StrCat("v", i), "1.1"});
+  }
+
+  Run({"hrandfield", "k"});
 }
 
 }  // namespace dfly

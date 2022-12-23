@@ -30,7 +30,7 @@ StringMap::~StringMap() {
   Clear();
 }
 
-bool StringMap::AddOrSet(string_view field, string_view value, uint32_t ttl_sec) {
+bool StringMap::AddOrUpdate(string_view field, string_view value, uint32_t ttl_sec) {
   CHECK_EQ(ttl_sec, UINT32_MAX);  // TBD
 
   // 8 additional bytes for a pointer to value.
@@ -60,9 +60,32 @@ bool StringMap::AddOrSet(string_view field, string_view value, uint32_t ttl_sec)
   return true;
 }
 
+bool StringMap::AddOrSkip(std::string_view field, std::string_view value, uint32_t ttl_sec) {
+  CHECK_EQ(ttl_sec, UINT32_MAX);  // TBD
+
+  void* obj = FindInternal(&field, 1);  // 1 - string_view
+
+  if (obj)
+    return false;
+
+  // 8 additional bytes for a pointer to value.
+  sds newkey = AllocSdsWithSpace(field.size(), 8);
+  if (!field.empty()) {
+    memcpy(newkey, field.data(), field.size());
+  }
+
+  sds val = sdsnewlen(value.data(), value.size());
+  absl::little_endian::Store64(newkey + field.size() + 1, uint64_t(val));
+
+  bool has_ttl = false;
+  sds prev_entry = (sds)AddOrFind(newkey, has_ttl);
+  DCHECK(!prev_entry);
+
+  return true;
+}
+
 bool StringMap::Erase(string_view key) {
-  LOG(FATAL) << "TBD";
-  return false;
+  return EraseInternal(&key, 1);
 }
 
 bool StringMap::Contains(string_view field) const {

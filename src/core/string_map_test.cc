@@ -70,7 +70,7 @@ class StringMapTest : public ::testing::Test {
 };
 
 TEST_F(StringMapTest, Basic) {
-  EXPECT_TRUE(sm_->AddOrSet("foo", "bar"));
+  EXPECT_TRUE(sm_->AddOrUpdate("foo", "bar"));
   EXPECT_TRUE(sm_->Contains("foo"));
   EXPECT_STREQ("bar", sm_->Find("foo"));
 
@@ -86,7 +86,7 @@ TEST_F(StringMapTest, Basic) {
   }
 
   size_t sz = sm_->ObjMallocUsed();
-  EXPECT_FALSE(sm_->AddOrSet("foo", "baraaaaaaaaaaaa2"));
+  EXPECT_FALSE(sm_->AddOrUpdate("foo", "baraaaaaaaaaaaa2"));
   EXPECT_GT(sm_->ObjMallocUsed(), sz);
   it = sm_->begin();
   EXPECT_STREQ("baraaaaaaaaaaaa2", it->second);

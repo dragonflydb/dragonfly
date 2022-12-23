@@ -76,11 +76,19 @@ class StringMap : public DenseSet {
 
   // Returns true if field was added
   // otherwise updates its value and returns false.
-  bool AddOrSet(std::string_view field, std::string_view value, uint32_t ttl_sec = UINT32_MAX);
+  bool AddOrUpdate(std::string_view field, std::string_view value, uint32_t ttl_sec = UINT32_MAX);
+
+  // Returns true if field was added
+  // false, if already exists. In that case no update is done.
+  bool AddOrSkip(std::string_view field, std::string_view value, uint32_t ttl_sec = UINT32_MAX);
 
   bool Erase(std::string_view s1);
 
   bool Contains(std::string_view s1) const;
+
+  /// @brief  Returns value of the key or nullptr if key not found.
+  /// @param key
+  /// @return sds
   sds Find(std::string_view key);
 
   void Clear();
