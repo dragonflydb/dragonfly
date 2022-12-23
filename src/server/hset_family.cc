@@ -117,31 +117,6 @@ pair<uint8_t*, bool> LpInsert(uint8_t* lp, string_view field, string_view val, b
   return make_pair(lp, !updated);
 }
 
-StringMap* ConvertToStrMap(uint8_t* lp) {
-  StringMap* sm = new StringMap(CompactObj::memory_resource());
-  size_t lplen = lpLength(lp);
-  if (lplen == 0)
-    return sm;
-
-  sm->Reserve(lplen / 2);
-
-  uint8_t* lp_elem = lpFirst(lp);
-  uint8_t intbuf[LP_INTBUF_SIZE];
-
-  DCHECK(lp_elem);  // empty containers are not allowed.
-
-  do {
-    string_view key = LpGetView(lp_elem, intbuf);
-    lp_elem = lpNext(lp, lp_elem);  // switch to value
-    DCHECK(lp_elem);
-    string_view value = LpGetView(lp_elem, intbuf);
-    lp_elem = lpNext(lp, lp_elem);       // switch to next key
-    CHECK(sm->AddOrUpdate(key, value));  // must be unique
-  } while (lp_elem);
-
-  return sm;
-}
-
 size_t HMapLength(const CompactObj& co) {
   void* ptr = co.RObjPtr();
   if (co.Encoding() == kEncodingStrMap2) {
@@ -217,7 +192,7 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
 
       if (lpb >= kMaxListPackLen) {
         stats->listpack_blob_cnt--;
-        StringMap* sm = ConvertToStrMap(lp);
+        StringMap* sm = HSetFamily::ConvertToStrMap(lp);
         pv.InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
       }
     }
@@ -651,7 +626,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
 
     if (!IsGoodForListpack(values, lp)) {
       stats->listpack_blob_cnt--;
-      StringMap* sm = ConvertToStrMap(lp);
+      StringMap* sm = HSetFamily::ConvertToStrMap(lp);
       pv.InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
       lp = nullptr;
     }
@@ -1052,4 +1027,28 @@ uint32_t HSetFamily::MaxListPackLen() {
   return kMaxListPackLen;
 }
 
+StringMap* HSetFamily::ConvertToStrMap(uint8_t* lp) {
+  StringMap* sm = new StringMap(CompactObj::memory_resource());
+  size_t lplen = lpLength(lp);
+  if (lplen == 0)
+    return sm;
+
+  sm->Reserve(lplen / 2);
+
+  uint8_t* lp_elem = lpFirst(lp);
+  uint8_t intbuf[LP_INTBUF_SIZE];
+
+  DCHECK(lp_elem);  // empty containers are not allowed.
+
+  do {
+    string_view key = LpGetView(lp_elem, intbuf);
+    lp_elem = lpNext(lp, lp_elem);  // switch to value
+    DCHECK(lp_elem);
+    string_view value = LpGetView(lp_elem, intbuf);
+    lp_elem = lpNext(lp, lp_elem);       // switch to next key
+    CHECK(sm->AddOrUpdate(key, value));  // must be unique
+  } while (lp_elem);
+
+  return sm;
+}
 }  // namespace dfly

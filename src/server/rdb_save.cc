@@ -10,8 +10,6 @@
 #include <lz4frame.h>
 #include <zstd.h>
 
-#include "core/string_set.h"
-
 extern "C" {
 #include "redis/intset.h"
 #include "redis/listpack.h"
@@ -25,6 +23,8 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/string_map.h"
+#include "core/string_set.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/serializer.h"
@@ -103,30 +103,30 @@ constexpr size_t kAmask = 4_KB - 1;
 
 }  // namespace
 
-uint8_t RdbObjectType(unsigned type, unsigned encoding) {
+uint8_t RdbObjectType(unsigned type, unsigned compact_enc) {
   switch (type) {
     case OBJ_STRING:
       return RDB_TYPE_STRING;
     case OBJ_LIST:
-      if (encoding == OBJ_ENCODING_QUICKLIST)
+      if (compact_enc == OBJ_ENCODING_QUICKLIST)
         return RDB_TYPE_LIST_QUICKLIST;
       break;
     case OBJ_SET:
-      if (encoding == kEncodingIntSet)
+      if (compact_enc == kEncodingIntSet)
         return RDB_TYPE_SET_INTSET;
-      else if (encoding == kEncodingStrMap || encoding == kEncodingStrMap2)
+      else if (compact_enc == kEncodingStrMap || compact_enc == kEncodingStrMap2)
         return RDB_TYPE_SET;
       break;
     case OBJ_ZSET:
-      if (encoding == OBJ_ENCODING_LISTPACK)
+      if (compact_enc == OBJ_ENCODING_LISTPACK)
         return RDB_TYPE_ZSET_ZIPLIST;  // we save using the old ziplist encoding.
-      else if (encoding == OBJ_ENCODING_SKIPLIST)
+      else if (compact_enc == OBJ_ENCODING_SKIPLIST)
         return RDB_TYPE_ZSET_2;
       break;
     case OBJ_HASH:
-      if (encoding == kEncodingListPack)
+      if (compact_enc == kEncodingListPack)
         return RDB_TYPE_HASH_ZIPLIST;
-      else if (encoding == kEncodingStrMap)
+      else if (compact_enc == kEncodingStrMap2)
         return RDB_TYPE_HASH;
       break;
     case OBJ_STREAM:
@@ -134,7 +134,7 @@ uint8_t RdbObjectType(unsigned type, unsigned encoding) {
     case OBJ_MODULE:
       return RDB_TYPE_MODULE_2;
   }
-  LOG(FATAL) << "Unknown encoding " << encoding << " for type " << type;
+  LOG(FATAL) << "Unknown encoding " << compact_enc << " for type " << type;
   return 0; /* avoid warning */
 }
 
@@ -304,7 +304,7 @@ error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
   }
 
   if (obj_type == OBJ_HASH) {
-    return SaveHSetObject(pv.AsRObj());
+    return SaveHSetObject(pv);
   }
 
   if (obj_type == OBJ_ZSET) {
@@ -402,31 +402,22 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
   return error_code{};
 }
 
-error_code RdbSerializer::SaveHSetObject(const robj* obj) {
-  DCHECK_EQ(OBJ_HASH, obj->type);
-  if (obj->encoding == OBJ_ENCODING_HT) {
-    dict* set = (dict*)obj->ptr;
+error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
+  DCHECK_EQ(OBJ_HASH, pv.ObjType());
 
-    RETURN_ON_ERR(SaveLen(dictSize(set)));
+  if (pv.Encoding() == kEncodingStrMap2) {
+    StringMap* string_map = (StringMap*)pv.RObjPtr();
 
-    dictIterator* di = dictGetIterator(set);
-    dictEntry* de;
-    auto cleanup = absl::MakeCleanup([di] { dictReleaseIterator(di); });
+    RETURN_ON_ERR(SaveLen(string_map->Size()));
 
-    while ((de = dictNext(di)) != NULL) {
-      sds key = (sds)de->key;
-      sds value = (sds)de->v.val;
-
-      RETURN_ON_ERR(SaveString(string_view{key, sdslen(key)}));
-      RETURN_ON_ERR(SaveString(string_view{value, sdslen(value)}));
+    for (const auto& k_v : *string_map) {
+      RETURN_ON_ERR(SaveString(string_view{k_v.first, sdslen(k_v.first)}));
+      RETURN_ON_ERR(SaveString(string_view{k_v.second, sdslen(k_v.second)}));
     }
   } else {
-    CHECK_EQ(unsigned(OBJ_ENCODING_LISTPACK), obj->encoding);
+    CHECK_EQ(kEncodingListPack, pv.Encoding());
 
-    uint8_t* lp = (uint8_t*)obj->ptr;
-    size_t lplen = lpLength(lp);
-    CHECK(lplen > 0 && lplen % 2 == 0);  // has (key,value) pairs.
-
+    uint8_t* lp = (uint8_t*)pv.RObjPtr();
     RETURN_ON_ERR(SaveListPackAsZiplist(lp));
   }
 

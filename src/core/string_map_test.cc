@@ -92,4 +92,8 @@ TEST_F(StringMapTest, Basic) {
   EXPECT_STREQ("baraaaaaaaaaaaa2", it->second);
 }
 
+TEST_F(StringMapTest, EmptyFind) {
+  sm_->Find("bar");
+}
+
 }  // namespace dfly

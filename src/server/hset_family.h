@@ -13,6 +13,8 @@ namespace dfly {
 
 class ConnectionContext;
 class CommandRegistry;
+class StringMap;
+
 using facade::OpResult;
 using facade::OpStatus;
 
@@ -21,8 +23,10 @@ class HSetFamily {
   static void Register(CommandRegistry* registry);
   static uint32_t MaxListPackLen();
 
- private:
+  // Does not free lp.
+  static StringMap* ConvertToStrMap(uint8_t* lp);
 
+ private:
   static void HDel(CmdArgList args, ConnectionContext* cntx);
   static void HLen(CmdArgList args, ConnectionContext* cntx);
   static void HExists(CmdArgList args, ConnectionContext* cntx);
