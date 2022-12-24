@@ -1,16 +1,15 @@
 import time
 import pytest
-import redis
-import string
 import os
 import glob
 from pathlib import Path
 
 from . import dfly_args
-from .generator import DflySeeder
+from .utility import DflySeeder
 
 BASIC_ARGS = {"dir": "{DRAGONFLY_TMP}/"}
-NUM_KEYS = 100
+
+SEEDER_ARGS = dict(keys=12_000, dbcount=5)
 
 
 class SnapshotTestBase:
@@ -35,7 +34,7 @@ class TestRdbSnapshot(SnapshotTestBase):
 
     @pytest.mark.asyncio
     async def test_snapshot(self, async_client, df_server):
-        seeder = DflySeeder(port=df_server.port, keys=2_000, dbcount=5)
+        seeder = DflySeeder(port=df_server.port, **SEEDER_ARGS)
         await seeder.run(target_deviation=0.1)
 
         start_capture = await seeder.capture()
@@ -60,7 +59,7 @@ class TestDflySnapshot(SnapshotTestBase):
 
     @pytest.mark.asyncio
     async def test_snapshot(self, async_client, df_server):
-        seeder = DflySeeder(port=df_server.port, keys=2_000, dbcount=5)
+        seeder = DflySeeder(port=df_server.port, **SEEDER_ARGS)
         await seeder.run(target_deviation=0.1)
 
         start_capture = await seeder.capture()
@@ -82,8 +81,8 @@ class TestPeriodicSnapshot(SnapshotTestBase):
 
     @pytest.mark.asyncio
     async def test_snapshot(self, df_server):
-        seeder = DflySeeder(port=df_server.port, keys=5_000, dbcount=5)
-        await seeder.run(target_deviation=0.1)
+        seeder = DflySeeder(port=df_server.port, keys=10)
+        await seeder.run(target_deviation=0.5)
 
         time.sleep(60)
 

@@ -1,5 +1,4 @@
 import pytest
-import typing
 import time
 import subprocess
 
@@ -7,6 +6,9 @@ import time
 import subprocess
 
 from dataclasses import dataclass
+
+START_DELAY = 0.4
+START_GDB_DELAY = 3.0
 
 
 @dataclass
@@ -29,24 +31,13 @@ class DflyInstance:
         self.proc = None
 
     def start(self):
-        arglist = DflyInstance.format_args(self.args)
-
-        print(f"Starting instance on {self.port} with arguments {arglist}")
-
-        args = [self.params.path, *arglist]
-        if self.params.gdb:
-            args = ["gdb", "--ex", "r", "--args"] + args
-
-        self.proc = subprocess.Popen(args, cwd=self.params.cwd)
+        self._start()
 
         # Give Dragonfly time to start and detect possible failure causes
         # Gdb starts slowly
-        time.sleep(0.4 if not self.params.gdb else 3.0)
+        time.sleep(START_DELAY if not self.params.gdb else START_GDB_DELAY)
 
-        return_code = self.proc.poll()
-        if return_code is not None:
-            raise Exception(
-                f"Failed to start instance, return code {return_code}")
+        self._check_started()
 
     def stop(self, kill=False):
         proc, self.proc = self.proc, None
@@ -59,11 +50,26 @@ class DflyInstance:
                 proc.kill()
             else:
                 proc.terminate()
-            outs, errs = proc.communicate(timeout=15)
+            proc.communicate(timeout=15)
         except subprocess.TimeoutExpired:
             print("Unable to terminate DragonflyDB gracefully, it was killed")
-            outs, errs = proc.communicate()
-            print(outs, errs)
+            proc.kill()
+
+    def _start(self):
+        arglist = DflyInstance.format_args(self.args)
+        print(f"Starting instance on {self.port} with arguments {arglist}")
+
+        args = [self.params.path, *arglist]
+        if self.params.gdb:
+            args = ["gdb", "--ex", "r", "--args"] + args
+
+        self.proc = subprocess.Popen(args, cwd=self.params.cwd)
+
+    def _check_started(self):
+        return_code = self.proc.poll()
+        if return_code is not None:
+            raise Exception(
+                f"Failed to start instance, return code {return_code}")
 
     def __getitem__(self, k):
         return self.args.get(k)
@@ -98,6 +104,16 @@ class DflyInstanceFactory:
         instance = DflyInstance(self.params, args)
         self.instances.append(instance)
         return instance
+
+    def start_all(self, instances):
+        for instance in instances:
+            instance._start()
+
+        delay = START_DELAY if not self.params.gdb else START_GDB_DELAY
+        time.sleep(delay * (1 + len(instances) / 2))
+
+        for instance in instances:
+            instance._check_started()
 
     def stop_all(self):
         """Stop all lanched instances."""

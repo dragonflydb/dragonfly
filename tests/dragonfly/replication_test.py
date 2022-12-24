@@ -3,10 +3,9 @@ import pytest
 import asyncio
 import aioredis
 import random
-from itertools import count, chain, repeat
+from itertools import chain, repeat
 
 from .utility import *
-from .generator import DflySeeder
 
 
 BASE_PORT = 1111
@@ -21,19 +20,19 @@ Test full replication pipeline. Test full sync with streaming changes and stable
 
 # 1. Number of master threads
 # 2. Number of threads for each replica
-# 3. Number of keys stored and sent in full sync
-# 4. Number of databases
+# 3. Seeder config
 replication_cases = [
-    (8, [8], 5_000, 5),
-    (8, [2, 2, 2, 2], 5_000, 5),
-    (6, [6, 6, 6], 5_000, 5),
-    (4, [1] * 12, 1_000, 5),
+    (8, [8], dict(keys=10_000, dbcount=4)),
+    (6, [6, 6, 6], dict(keys=4_000, dbcount=4)),
+    (8, [2, 2, 2, 2], dict(keys=4_000, dbcount=4)),
+    (4, [8, 8], dict(keys=4_000, dbcount=4)),
+    (4, [1] * 10, dict(keys=500, dbcount=2)),
 ]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("t_master, t_replicas, n_keys, n_dbs", replication_cases)
-async def test_replication_all(df_local_factory, t_master, t_replicas, n_keys, n_dbs):
+@pytest.mark.parametrize("t_master, t_replicas, seeder_config", replication_cases)
+async def test_replication_all(df_local_factory, t_master, t_replicas, seeder_config):
     master = df_local_factory.create(port=1111, proactor_threads=t_master)
     replicas = [
         df_local_factory.create(port=BASE_PORT+i+1, proactor_threads=t)
@@ -44,17 +43,16 @@ async def test_replication_all(df_local_factory, t_master, t_replicas, n_keys, n
     master.start()
 
     # Fill master with test data
-    seeder = DflySeeder(port=master.port, keys=n_keys, dbcount=n_dbs)
+    seeder = DflySeeder(port=master.port, **seeder_config)
     await seeder.run(target_deviation=0.1)
 
     # Start replicas
-    for replica in replicas:
-        replica.start()
+    df_local_factory.start_all(replicas)
 
     c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
 
     # Start data stream
-    stream_task = asyncio.create_task(seeder.run(target_times=5))
+    stream_task = asyncio.create_task(seeder.run(target_times=3))
 
     # Start replication
     async def run_replication(c_replica):
@@ -69,16 +67,26 @@ async def test_replication_all(df_local_factory, t_master, t_replicas, n_keys, n
     await stream_task
 
     # Check data after full sync
-    capture = await seeder.capture()
-    for (replica, c_replica) in zip(replicas, c_replicas):
-        await wait_available_async(c_replica)
-        assert await seeder.compare(capture, port=replica.port)
+    await asyncio.sleep(0.1)
+    await check_data(seeder, replicas, c_replicas)
 
     # Stream more data in stable state
     await seeder.run(target_times=2)
 
     # Check data after stable state stream
     await asyncio.sleep(0.5)
+    await check_data(seeder, replicas, c_replicas)
+
+    # Issue lots of deletes
+    seeder.target(100)
+    await seeder.run(target_deviation=0.1)
+
+    # Check data after deletes
+    await asyncio.sleep(0.5)
+    await check_data(seeder, replicas, c_replicas)
+
+
+async def check_data(seeder, replicas, c_replicas):
     capture = await seeder.capture()
     for (replica, c_replica) in zip(replicas, c_replicas):
         await wait_available_async(c_replica)
@@ -104,16 +112,14 @@ Three types are tested:
 # 5. Number of distinct keys that are constantly streamed
 disconnect_cases = [
     # balanced
-    (8, [4, 4], [4, 4], [4], 10_000),
-    (8, [2] * 6, [2] * 6, [2, 2], 10_000),
+    (8, [4, 4], [4, 4], [4], 4_000),
+    (8, [2] * 6, [2] * 6, [2, 2], 2_000),
     # full sync heavy
-    (8, [4] * 6, [], [], 10_000),
-    (8, [2] * 12, [], [], 10_000),
+    (8, [4] * 6, [], [], 4_000),
     # stable state heavy
-    (8, [], [4] * 6, [], 10_000),
-    (8, [], [2] * 12, [], 10_000),
+    (8, [], [4] * 6, [], 4_000),
     # disconnect only
-    (8, [], [], [2] * 6, 10_000)
+    (8, [], [], [2] * 6, 4_000)
 ]
 
 
@@ -140,8 +146,7 @@ async def test_disconnect_replica(df_local_factory, t_master, t_crash_fs, t_cras
     seeder = DflySeeder(port=master.port, keys=n_keys, dbcount=2)
 
     # Start replicas and create clients
-    for replica, _ in replicas:
-        replica.start()
+    df_local_factory.start_all([replica for replica, _ in replicas])
 
     c_replicas = [
         (replica, aioredis.Redis(port=replica.port), crash_type)
@@ -202,8 +207,6 @@ async def test_disconnect_replica(df_local_factory, t_master, t_crash_fs, t_cras
     assert await c_master.ping()
 
     # Check phase 3 replicas are up-to-date and there is no gap or lag
-    def check_gen(): return gen_test_data(n_keys//5, seed=0)
-
     await seeder.run(target_times=2)
     await asyncio.sleep(1.0)
 
@@ -248,10 +251,10 @@ Three types are tested:
 # 3. Number of times a random crash happens
 # 4. Number of keys transferred (the more, the higher the propability to not miss full sync)
 master_crash_cases = [
-    (4, [4], 3, 1000),
-    (8, [8], 3, 5000),
-    (6, [6, 6, 6], 3, 5000),
-    (4, [2] * 8, 3, 5000),
+    (4, [4], 3, 2_000),
+    (8, [8], 3, 2_000),
+    (6, [6, 6, 6], 3, 2_000),
+    (4, [2] * 8, 3, 2_000),
 ]
 
 
@@ -265,10 +268,9 @@ async def test_disconnect_master(df_local_factory, t_master, t_replicas, n_rando
         for i, t in enumerate(t_replicas)
     ]
 
-    seeder = DflySeeder(port=master.port, keys=n_keys)
+    seeder = DflySeeder(port=master.port, keys=n_keys, dbcount=2)
 
-    for replica in replicas:
-        replica.start()
+    df_local_factory.start_all(replicas)
 
     c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
 

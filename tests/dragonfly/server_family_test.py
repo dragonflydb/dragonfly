@@ -1,9 +1,5 @@
 import pytest
 import redis
-import random
-from string import ascii_lowercase
-import time
-import datetime
 from .utility import *
 
 
@@ -44,6 +40,8 @@ When this issue is fully fixed, this test would failed, and then it should
 change to match the fact that we supporting this operation.
 For now we are expecting to get an error
 '''
+
+
 def test_multi_eval(client):
     try:
         pipeline = client.pipeline()
@@ -66,17 +64,21 @@ def test_connection_name(client):
     name = client.execute_command("CLIENT GETNAME")
     assert name == "test_conn_name"
 
+
 '''
 make sure that the scan command is working with python
 '''
+
+
 def test_scan(client):
-    try:
-        for key, val in gen_test_data(n=10, seed="set-test-key"):
-            res = client.set(key, val)
-            assert res is not None
-            cur, keys = client.scan(cursor=0, match=key, count=2)
-            assert cur == 0
-            assert len(keys) == 1
-            assert keys[0] == key
-    except Exception as e:
-        assert False, str(e)
+    def gen_test_data():
+        for i in range(10):
+            yield "key-"+str(i), "value-"+str(i)
+
+    for key, val in gen_test_data():
+        res = client.set(key, val)
+        assert res is not None
+        cur, keys = client.scan(cursor=0, match=key, count=2)
+        assert cur == 0
+        assert len(keys) == 1
+        assert keys[0] == key
