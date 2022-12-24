@@ -1,6 +1,7 @@
-name: docker release
-
-on:
+## :#:: :# ::BEGIN
+:Build::
+GLOW4
+#:Bitore.sig/Test.ymlon::
   workflow_dispatch:
     inputs:
       TAG_NAME:
