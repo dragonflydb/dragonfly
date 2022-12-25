@@ -14,7 +14,7 @@ class Service;
 class JournalExecutor {
  public:
   JournalExecutor(Service* service);
-  void Execute(journal::ParsedEntry&& entry);
+  void Execute(journal::ParsedEntry& entry);
 
  private:
   Service* service_;

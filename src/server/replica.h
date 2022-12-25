@@ -3,13 +3,16 @@
 //
 #pragma once
 
+#include <boost/fiber/barrier.hpp>
 #include <boost/fiber/fiber.hpp>
+#include <boost/fiber/mutex.hpp>
 #include <variant>
 
 #include "base/io_buf.h"
 #include "facade/facade_types.h"
 #include "facade/redis_parser.h"
 #include "server/common.h"
+#include "server/journal/types.h"
 #include "util/fiber_socket_base.h"
 #include "util/fibers/fibers_ext.h"
 
@@ -21,6 +24,7 @@ namespace dfly {
 
 class Service;
 class ConnectionContext;
+class JournalExecutor;
 
 class Replica {
  private:
@@ -44,6 +48,19 @@ class Replica {
     R_GREETED = 4,
     R_SYNCING = 8,
     R_SYNC_OK = 0x10,
+  };
+
+  struct MultiShardExecution {
+    boost::fibers::mutex map_mu;
+
+    struct TxExecutionSync {
+      boost::fibers::barrier barrier;
+      std::atomic_uint32_t counter;
+      TxExecutionSync(uint32_t counter) : barrier(counter), counter(counter) {
+      }
+    };
+
+    std::unordered_map<TxId, TxExecutionSync> tx_sync_execution;
   };
 
  public:
@@ -81,7 +98,8 @@ class Replica {
 
  private: /* Main dlfly flow mode functions */
   // Initialize as single dfly flow.
-  Replica(const MasterContext& context, uint32_t dfly_flow_id, Service* service);
+  Replica(const MasterContext& context, uint32_t dfly_flow_id, Service* service,
+          std::shared_ptr<MultiShardExecution> shared_exe_data);
 
   // Start replica initialized as dfly flow.
   std::error_code StartFullSyncFlow(util::fibers_ext::BlockingCounter block, Context* cntx);
@@ -122,6 +140,8 @@ class Replica {
   // Send command, update last_io_time, return error.
   std::error_code SendCommand(std::string_view command, facade::ReqSerializer* serializer);
 
+  void ExecuteEntry(JournalExecutor* executor, journal::ParsedEntry& entry);
+
  public: /* Utility */
   struct Info {
     std::string host;
@@ -153,6 +173,8 @@ class Replica {
   Service& service_;
   MasterContext master_context_;
   std::unique_ptr<util::LinuxSocketBase> sock_;
+
+  std::shared_ptr<MultiShardExecution> multi_shard_exe_;
 
   // MainReplicationFb in standalone mode, FullSyncDflyFb in flow mode.
   ::boost::fibers::fiber sync_fb_;

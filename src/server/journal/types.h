@@ -22,6 +22,7 @@ struct EntryBase {
   TxId txid;
   Op opcode;
   DbIndex dbid;
+  uint32_t shard_cnt;
 };
 
 // This struct represents a single journal entry.
@@ -34,11 +35,11 @@ struct Entry : public EntryBase {
                    std::pair<std::string_view, ArgSlice>  // Command and its shard parts.
                    >;
 
-  Entry(TxId txid, DbIndex dbid, Payload pl)
-      : EntryBase{txid, journal::Op::COMMAND, dbid}, payload{pl} {
+  Entry(TxId txid, DbIndex dbid, Payload pl, uint32_t shard_cnt)
+      : EntryBase{txid, journal::Op::COMMAND, dbid, shard_cnt}, payload{pl} {
   }
 
-  Entry(journal::Op opcode, DbIndex dbid) : EntryBase{0, opcode, dbid}, payload{} {
+  Entry(journal::Op opcode, DbIndex dbid) : EntryBase{0, opcode, dbid, 0}, payload{} {
   }
 
   Payload payload;
@@ -50,11 +51,11 @@ struct ParsedEntry : public EntryBase {
 
   ParsedEntry() = default;
 
-  ParsedEntry(journal::Op opcode, DbIndex dbid) : EntryBase{0, opcode, dbid}, payload{} {
+  ParsedEntry(journal::Op opcode, DbIndex dbid) : EntryBase{0, opcode, dbid, 0}, payload{} {
   }
 
-  ParsedEntry(TxId txid, DbIndex dbid, Payload pl)
-      : EntryBase{txid, journal::Op::COMMAND, dbid}, payload{pl} {
+  ParsedEntry(TxId txid, DbIndex dbid, Payload pl, uint32_t shard_cnt)
+      : EntryBase{txid, journal::Op::COMMAND, dbid, shard_cnt}, payload{pl} {
   }
 
   Payload payload;

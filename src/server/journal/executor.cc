@@ -12,7 +12,7 @@ namespace dfly {
 JournalExecutor::JournalExecutor(Service* service) : service_{service} {
 }
 
-void JournalExecutor::Execute(journal::ParsedEntry&& entry) {
+void JournalExecutor::Execute(journal::ParsedEntry& entry) {
   if (entry.payload) {
     io::NullSink null_sink;
     ConnectionContext conn_context{&null_sink, nullptr};
