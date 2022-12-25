@@ -50,6 +50,19 @@ class Replica {
     R_SYNC_OK = 0x10,
   };
 
+  struct MultiShardExecution {
+    boost::fibers::mutex map_mu;
+
+    struct TxExecutionSync {
+      boost::fibers::barrier barrier;
+      std::atomic_uint32_t counter;
+      TxExecutionSync(uint32_t counter) : barrier(counter), counter(counter) {
+      }
+    };
+
+    std::unordered_map<TxId, TxExecutionSync> tx_sync_execution;
+  };
+
  public:
   Replica(std::string master_host, uint16_t port, Service* se);
   ~Replica();
@@ -84,27 +97,12 @@ class Replica {
   void DefaultErrorHandler(const GenericError& err);
 
  private: /* Main dlfly flow mode functions */
-  struct MultiShardExecution {
-    boost::fibers::mutex map_mu;
-
-    struct TxExecutionSync {
-      boost::fibers::barrier berrier;
-      std::atomic_uint32_t counter;
-      TxExecutionSync(uint32_t counter) : berrier(counter), counter(counter) {
-      }
-    };
-
-    std::unordered_map<TxId, TxExecutionSync> tx_sync_execution;
-  };
-
   // Initialize as single dfly flow.
   Replica(const MasterContext& context, uint32_t dfly_flow_id, Service* service,
           std::shared_ptr<MultiShardExecution> shared_exe_data);
 
   // Start replica initialized as dfly flow.
   std::error_code StartFullSyncFlow(util::fibers_ext::BlockingCounter block, Context* cntx);
-
-  std::shared_ptr<MultiShardExecution> multi_shard_exe_;
 
   // Transition into stable state mode as dfly flow.
   std::error_code StartStableSyncFlow(Context* cntx);
@@ -142,7 +140,7 @@ class Replica {
   // Send command, update last_io_time, return error.
   std::error_code SendCommand(std::string_view command, facade::ReqSerializer* serializer);
 
-  void ExecuteEntry(JournalExecutor* executor, journal::ParsedEntry&& entry);
+  void ExecuteEntry(JournalExecutor* executor, journal::ParsedEntry& entry);
 
  public: /* Utility */
   struct Info {
@@ -175,6 +173,8 @@ class Replica {
   Service& service_;
   MasterContext master_context_;
   std::unique_ptr<util::LinuxSocketBase> sock_;
+
+  std::shared_ptr<MultiShardExecution> multi_shard_exe_;
 
   // MainReplicationFb in standalone mode, FullSyncDflyFb in flow mode.
   ::boost::fibers::fiber sync_fb_;
