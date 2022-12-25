@@ -63,7 +63,7 @@ struct JournalReader {
 
   // Read argument array into internal buffer and build slice.
   // TODO: Inline store span data inside buffer to avoid alloaction
-  std::error_code Read(io::Source* source, CmdArgVec* vec);
+  std::error_code Read(io::Source* source, journal::ParsedEntry::OwnedCommand* vec);
 
  private:
   base::IoBuf buf_;

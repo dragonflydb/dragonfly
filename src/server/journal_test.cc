@@ -46,7 +46,7 @@ struct EntryPayloadVisitor {
 std::string ExtractPayload(journal::ParsedEntry& entry) {
   std::string out;
   EntryPayloadVisitor visitor{&out};
-  CmdArgList list{entry.payload->data(), entry.payload->size()};
+  CmdArgList list{entry.payload->parts.data(), entry.payload->parts.size()};
   visitor(list);
 
   if (out.size() > 0 && out.back() == ' ')

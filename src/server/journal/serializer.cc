@@ -125,24 +125,34 @@ io::Result<size_t> JournalReader::ReadString(io::Source* source) {
   return size;
 }
 
-std::error_code JournalReader::Read(io::Source* source, CmdArgVec* vec) {
+std::error_code JournalReader::Read(io::Source* source, journal::ParsedEntry::OwnedCommand* cmd) {
+  auto& [cmd_buffer, cmd_arg_vec] = *cmd;
+
+  // Clear all previous data.
   buf_.ConsumeInput(buf_.InputBuffer().size());
 
-  size_t size = 0;
-  SET_OR_RETURN(ReadU64(source), size);
+  // Get number of parts.
+  size_t parts = 0;
+  SET_OR_RETURN(ReadU64(source), parts);
 
-  vec->resize(size);
-  for (auto& span : *vec) {
+  // Read the strings into the internal buffer and store span sizes.
+  cmd_arg_vec.resize(parts);
+  for (auto& span : cmd_arg_vec) {
     size_t len;
     SET_OR_RETURN(ReadString(source), len);
     span = MutableSlice{nullptr, len};
   }
 
+  // Copy the buffer into the entry buffer.
+  unsigned total_len = buf_.InputLen();
+  cmd_buffer = make_unique<char[]>(total_len);
+  memcpy(cmd_buffer.get(), buf_.InputBuffer().begin(), total_len);
+
+  // Initialize span pointers.
   size_t offset = 0;
-  for (auto& span : *vec) {
+  for (auto& span : cmd_arg_vec) {
     size_t len = span.size();
-    auto ptr = buf_.InputBuffer().subspan(offset).data();
-    span = MutableSlice{reinterpret_cast<char*>(ptr), len};
+    span = MutableSlice{cmd_buffer.get() + offset, len};
     offset += len;
   }
 
@@ -159,7 +169,7 @@ io::Result<journal::ParsedEntry> JournalReader::ReadEntry(io::Source* source) {
     case journal::Op::COMMAND:
       SET_OR_UNEXPECT(ReadU64(source), entry.txid);
       SET_OR_UNEXPECT(ReadU32(source), entry.shard_cnt);
-      entry.payload = CmdArgVec{};
+      entry.payload = journal::ParsedEntry::OwnedCommand{};
       if (auto ec = Read(source, &*entry.payload); ec)
         return make_unexpected(ec);
       break;

@@ -20,7 +20,8 @@ void JournalExecutor::Execute(journal::ParsedEntry& entry) {
     conn_context.journal_emulated = true;
     conn_context.conn_state.db_index = entry.dbid;
 
-    auto span = CmdArgList{entry.payload->data(), entry.payload->size()};
+    auto& [cmd_buffer, cmd_arg_vec] = *entry.payload;
+    auto span = CmdArgList{cmd_arg_vec.data(), cmd_arg_vec.size()};
 
     service_->DispatchCommand(span, &conn_context);
   }

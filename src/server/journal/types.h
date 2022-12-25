@@ -46,8 +46,14 @@ struct Entry : public EntryBase {
 };
 
 struct ParsedEntry : public EntryBase {
+  // Represents an owned version of a command.
+  struct OwnedCommand {
+    std::unique_ptr<char[]> buffer;
+    CmdArgVec parts;
+  };
+
   // Payload represents the parsed command.
-  using Payload = std::optional<CmdArgVec>;
+  using Payload = std::optional<OwnedCommand>;
 
   ParsedEntry() = default;
 
@@ -55,7 +61,7 @@ struct ParsedEntry : public EntryBase {
   }
 
   ParsedEntry(TxId txid, DbIndex dbid, Payload pl, uint32_t shard_cnt)
-      : EntryBase{txid, journal::Op::COMMAND, dbid, shard_cnt}, payload{pl} {
+      : EntryBase{txid, journal::Op::COMMAND, dbid, shard_cnt}, payload{std::move(pl)} {
   }
 
   Payload payload;

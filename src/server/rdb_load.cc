@@ -1968,9 +1968,11 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service, DbIndex dbid) {
   size_t done = 0;
   JournalExecutor ex{service};
   while (done < num_entries) {
-    journal::ParsedEntry entry{};
-    SET_OR_RETURN(journal_reader_.ReadEntry(&bs), entry);
-    ex.Execute(entry);
+    auto res = journal_reader_.ReadEntry(&bs);
+    if (!res)
+      return res.error();
+
+    ex.Execute(res.value());
     done++;
   }
 
