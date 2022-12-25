@@ -7,9 +7,13 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
 
+#include <boost/fiber/condition_variable.hpp>
+#include <boost/fiber/mutex.hpp>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
+#include "io/file.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
@@ -28,6 +32,7 @@ namespace dfly {
 
 using namespace facade;
 using namespace std;
+using namespace util::fibers_ext;
 using util::ProactorBase;
 
 namespace {
@@ -58,6 +63,92 @@ struct TransactionGuard {
 
   Transaction* t;
 };
+
+// Buffered single-shard journal streamer that listens for journal changes with a
+// journal listener and writes them to a destination sink in a separate fiber.
+class JournalStreamer {
+ public:
+  JournalStreamer(io::Sink* dest, journal::Journal* journal, Context* cntx)
+      : cntx_{cntx}, journal_{journal}, mu_{}, cv_{}, buffer_{}, dest_{dest}, write_fb_{},
+        writer_{&buffer_}, journal_cb_id_{0} {
+  }
+
+  // Register journal listener and start writer in fiber.
+  void Start();
+
+  // Must be called on context cancellation for unblocking
+  // and manual cleanup.
+  void Cancel();
+
+ private:
+  // Writer fiber that steals buffer contents and writes them to dest.
+  void WriterFb();
+
+ private:
+  Context* cntx_;
+  journal::Journal* journal_;
+
+  ::boost::fibers::mutex mu_;               // guard buffer and condvar wakeups
+  ::boost::fibers::condition_variable cv_;  // notify new data is available or cancelled
+
+  io::StringFile buffer_;
+  io::Sink* dest_;
+
+  Fiber write_fb_;
+  JournalWriter writer_;
+
+  uint32_t journal_cb_id_;
+};
+
+void JournalStreamer::Start() {
+  write_fb_ = Fiber(&JournalStreamer::WriterFb, this);
+
+  journal_cb_id_ = journal_->RegisterOnChange([this](const journal::Entry& entry) {
+    error_code ec;
+    {
+      lock_guard lk(mu_);
+      ec = writer_.Write(entry);
+    }
+
+    if (ec)
+      cntx_->Error(ec);
+
+    cv_.notify_all();
+  });
+}
+
+void JournalStreamer::Cancel() {
+  DCHECK(cntx_->IsCancelled());  // The writer exits only in this case
+
+  journal_->UnregisterOnChange(journal_cb_id_);
+  cv_.notify_all();
+
+  if (write_fb_.IsJoinable())
+    write_fb_.Join();
+}
+
+void JournalStreamer::WriterFb() {
+  // Stash and buffer are swapped in turns.
+  std::string stash;
+
+  while (true) {
+    {
+      std::unique_lock lk(mu_);
+      cv_.wait(lk);
+      std::swap(buffer_.val, stash);
+    }
+
+    if (cntx_->IsCancelled())
+      break;
+
+    if (auto ec = dest_->Write(io::Buffer(stash)); ec) {
+      cntx_->Error(ec);
+    }
+
+    // TODO: shrink big stash.
+    stash.clear();
+  }
+}
 
 }  // namespace
 
@@ -290,7 +381,7 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
       FlowInfo* flow = &replica_ptr->flows[index];
 
       StopFullSyncInThread(flow, shard);
-      status = StartStableSyncInThread(flow, shard);
+      status = StartStableSyncInThread(flow, &replica_ptr->cntx, shard);
       return OpStatus::OK;
     };
     shard_set->pool()->AwaitFiberOnAll(std::move(cb));
@@ -314,7 +405,7 @@ void DflyCmd::Expire(CmdArgList args, ConnectionContext* cntx) {
 }
 
 OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
-  DCHECK(!flow->full_sync_fb.joinable());
+  DCHECK(!flow->full_sync_fb.IsJoinable());
 
   SaveMode save_mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
   flow->saver.reset(new RdbSaver(flow->conn->socket(), save_mode, false));
@@ -341,8 +432,8 @@ void DflyCmd::StopFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
   }
 
   // Wait for full sync to finish.
-  if (flow->full_sync_fb.joinable()) {
-    flow->full_sync_fb.join();
+  if (flow->full_sync_fb.IsJoinable()) {
+    flow->full_sync_fb.Join();
   }
 
   // Reset cleanup and saver
@@ -350,20 +441,16 @@ void DflyCmd::StopFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
   flow->saver.reset();
 }
 
-OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, EngineShard* shard) {
-  // Register journal listener and cleanup.
-  uint32_t cb_id = 0;
+OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
+  shared_ptr<JournalStreamer> streamer;
   if (shard != nullptr) {
-    JournalWriter writer{flow->conn->socket()};
-    auto journal_cb = [flow, writer = std::move(writer)](const journal::Entry& je) mutable {
-      writer.Write(je);
-    };
-    cb_id = sf_->journal()->RegisterOnChange(std::move(journal_cb));
+    streamer.reset(new JournalStreamer(flow->conn->socket(), sf_->journal(), cntx));
+    streamer->Start();
   }
 
-  flow->cleanup = [flow, this, cb_id]() {
-    if (cb_id)
-      sf_->journal()->UnregisterOnChange(cb_id);
+  flow->cleanup = [this, flow, streamer = std::move(streamer)]() {
+    if (streamer)
+      streamer->Cancel();
     flow->TryShutdownSocket();
   };
 
@@ -473,8 +560,8 @@ void DflyCmd::CancelReplication(uint32_t sync_id, shared_ptr<ReplicaInfo> replic
       }
     }
 
-    if (flow->full_sync_fb.joinable()) {
-      flow->full_sync_fb.join();
+    if (flow->full_sync_fb.IsJoinable()) {
+      flow->full_sync_fb.Join();
     }
   });
 

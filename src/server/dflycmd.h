@@ -12,6 +12,7 @@
 #include <memory>
 
 #include "server/conn_context.h"
+#include "util/fibers/fiber.h"
 
 namespace facade {
 class RedisReplyBuilder;
@@ -91,8 +92,8 @@ class DflyCmd {
 
     facade::Connection* conn;
 
-    ::boost::fibers::fiber full_sync_fb;  // Full sync fiber.
-    std::unique_ptr<RdbSaver> saver;      // Saver used by the full sync phase.
+    ::util::fibers_ext::Fiber full_sync_fb;  // Full sync fiber.
+    std::unique_ptr<RdbSaver> saver;         // Saver used by the full sync phase.
     std::string eof_token;
 
     std::function<void()> cleanup;  // Optional cleanup for cancellation.
@@ -158,7 +159,7 @@ class DflyCmd {
   void StopFullSyncInThread(FlowInfo* flow, EngineShard* shard);
 
   // Start stable sync in thread. Called for each flow.
-  facade::OpStatus StartStableSyncInThread(FlowInfo* flow, EngineShard* shard);
+  facade::OpStatus StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard);
 
   // Fiber that runs full sync for each flow.
   void FullSyncFb(FlowInfo* flow, Context* cntx);
