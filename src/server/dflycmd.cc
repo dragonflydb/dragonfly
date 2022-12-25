@@ -314,7 +314,7 @@ void DflyCmd::Expire(CmdArgList args, ConnectionContext* cntx) {
 }
 
 OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
-  DCHECK(!flow->full_sync_fb.joinable());
+  DCHECK(!flow->full_sync_fb.IsJoinable());
 
   SaveMode save_mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
   flow->saver.reset(new RdbSaver(flow->conn->socket(), save_mode, false));
@@ -341,8 +341,8 @@ void DflyCmd::StopFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
   }
 
   // Wait for full sync to finish.
-  if (flow->full_sync_fb.joinable()) {
-    flow->full_sync_fb.join();
+  if (flow->full_sync_fb.IsJoinable()) {
+    flow->full_sync_fb.Join();
   }
 
   // Reset cleanup and saver
@@ -406,9 +406,8 @@ uint32_t DflyCmd::CreateSyncSession() {
   auto err_handler = [this, sync_id](const GenericError& err) {
     LOG(INFO) << "Replication error: " << err.Format();
 
-    // Stop replication in case of error.
-    // StopReplication needs to run async to prevent blocking
-    // the error handler.
+    // Spawn external fiber to allow destructing the context from outside
+    // and return from the handler immediately.
     ::boost::fibers::fiber{&DflyCmd::StopReplication, this, sync_id}.detach();
   };
 
@@ -473,8 +472,8 @@ void DflyCmd::CancelReplication(uint32_t sync_id, shared_ptr<ReplicaInfo> replic
       }
     }
 
-    if (flow->full_sync_fb.joinable()) {
-      flow->full_sync_fb.join();
+    if (flow->full_sync_fb.IsJoinable()) {
+      flow->full_sync_fb.Join();
     }
   });
 
@@ -483,6 +482,9 @@ void DflyCmd::CancelReplication(uint32_t sync_id, shared_ptr<ReplicaInfo> replic
     lock_guard lk(mu_);
     replica_infos_.erase(sync_id);
   }
+
+  // Wait for error handler to quit.
+  replica_ptr->cntx.Stop();
 
   LOG(INFO) << "Evicted sync session " << sync_id;
 }
