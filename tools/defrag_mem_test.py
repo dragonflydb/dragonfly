@@ -7,13 +7,17 @@ import argparse
 '''
 To install: pip install -r requirements.txt
 
+Run
+dragonfly --mem_defrag_threshold=0.01 --commit_use_threshold=1.2 --mem_utilization_threshold=0.8
+defrag_mem_test.py -k 800000 -v 645
+
 This program would try to re-create the issue with memory defragmentation.
 See issue number 448 for more details.
 To run this:
     You can just execute this from the command line without any arguemnts.
     Or you can run with --help to see the options.
     The defaults are:
-    number of keys: 4,023,467
+    number of keys: 800,000
     value size: 64 bytes
     key name pattern: key-for-testing
     host: localhost
@@ -153,8 +157,8 @@ def connect_and_run(key_name, value_size, keys_count, host="localhost", port=637
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='active memory testing', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('-k', '--keys', type=int, default=4023467, help='total number of keys')
-    parser.add_argument('-v', '--value_size', type=int, default=64, help='size of the values')
+    parser.add_argument('-k', '--keys', type=int, default=800000, help='total number of keys')
+    parser.add_argument('-v', '--value_size', type=int, default=645, help='size of the values')
     parser.add_argument('-n', '--key_name', type=str, default="key-for-testing", help='the base key name')
     parser.add_argument('-s', '--server', type=str, default="localhost", help='server host name')
     parser.add_argument('-p', '--port', type=int, default=6379, help='server port number')
