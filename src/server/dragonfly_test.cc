@@ -12,6 +12,7 @@ extern "C" {
 #include <absl/strings/strip.h>
 #include <gmock/gmock.h>
 
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
@@ -19,10 +20,13 @@ extern "C" {
 #include "server/main_service.h"
 #include "server/test_utils.h"
 
+ABSL_DECLARE_FLAG(float, commit_use_threshold);
+
 namespace dfly {
 
 using namespace std;
 using namespace util;
+using absl::SetFlag;
 using absl::StrCat;
 using ::io::Result;
 using testing::ElementsAre;
@@ -755,12 +759,18 @@ TEST_F(DflyEngineTest, Bug496) {
 }
 
 TEST_F(DefragDflyEngineTest, TestDefragOption) {
+  absl::SetFlag(&FLAGS_commit_use_threshold, 1.1);
   // Fill data into dragonfly and then check if we have
   // any location in memory to defrag. See issue #448 for details about this.
-  max_memory_limit = 300'000;             // control memory size so no need for too many keys
-  constexpr int kNumberOfKeys = 100'000;  // this fill the memory
-  constexpr int kKeySize = 137;
+  constexpr size_t kMaxMemoryForTest = 1'100'000;
+  constexpr int kNumberOfKeys = 1'000;  // this fill the memory
+  constexpr int kKeySize = 637;
   constexpr int kMaxDefragTriesForTests = 10;
+  constexpr int kFactor = 10;
+  constexpr int kMaxNumKeysToDelete = 100;
+
+  max_memory_limit = kMaxMemoryForTest;  // control memory size so no need for too many keys
+  shard_set->TEST_EnableHeartBeat();     // enable use memory update (used_mem_current)
 
   std::vector<std::string> keys2delete;
   keys2delete.push_back("del");
@@ -769,8 +779,6 @@ TEST_F(DefragDflyEngineTest, TestDefragOption) {
   // The keys that we will delete are all in the form of "key-name:1<other digits>"
   // This is because we are populating keys that has this format, but we don't want
   // to delete all keys, only some random keys so we deleting those that start with 1
-  constexpr int kFactor = 10;
-  int kMaxNumKeysToDelete = 10'000;
   int current_step = kFactor;
   for (int i = 1; i < kMaxNumKeysToDelete; current_step *= kFactor) {
     for (; i < current_step; i++) {
@@ -784,23 +792,28 @@ TEST_F(DefragDflyEngineTest, TestDefragOption) {
   RespExpr resp = Run(
       {"DEBUG", "POPULATE", std::to_string(kNumberOfKeys), "key-name", std::to_string(kKeySize)});
   ASSERT_EQ(resp, "OK");
-  resp = Run({"DBSIZE"});
-  EXPECT_THAT(resp, IntArg(kNumberOfKeys));
+  auto r = CheckedInt({"DBSIZE"});
+
+  ASSERT_EQ(r, kNumberOfKeys);
 
   shard_set->pool()->AwaitFiberOnAll([&](unsigned index, ProactorBase* base) {
     EngineShard* shard = EngineShard::tlocal();
     ASSERT_FALSE(shard == nullptr);  // we only have one and its should not be empty!
     fibers_ext::SleepFor(100ms);
-    EXPECT_EQ(shard->stats().defrag_realloc_total, 0);
-    // we are expecting to have at least one try by now
-    EXPECT_GT(shard->stats().defrag_task_invocation_total, 0);
+    auto mem_used = 0;
+    // make sure that the task that collect memory usage from all shard ran
+    // for at least once, and that no defrag was done yet.
+    for (int i = 0; i < 3 && mem_used == 0; i++) {
+      fibers_ext::SleepFor(100ms);
+      EXPECT_EQ(shard->stats().defrag_realloc_total, 0);
+      mem_used = used_mem_current.load(memory_order_relaxed);
+    }
   });
 
   ArgSlice delete_cmd(keys);
-  auto r = CheckedInt(delete_cmd);
+  r = CheckedInt(delete_cmd);
   // the first element in this is the command del so size is one less
-  ASSERT_EQ(r, keys2delete.size() - 1);
-
+  ASSERT_EQ(r, kMaxNumKeysToDelete - 1);
   // At this point we need to see whether we did running the task and whether the task did something
   shard_set->pool()->AwaitFiberOnAll([&](unsigned index, ProactorBase* base) {
     EngineShard* shard = EngineShard::tlocal();
