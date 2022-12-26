@@ -428,10 +428,14 @@ error_code Replica::InitiatePSync() {
 
 // Initialize and start sub-replica for each flow.
 error_code Replica::InitiateDflySync() {
-  multi_shard_exe_.reset(new MultiShardExecution());
+  absl::Cleanup cleanup = [this]() {
+    // We do the following operations regardless of outcome.
+    JoinAllFlows();
+    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+  };
 
-  // Check this is the first run or the previous one finished cleaning up.
-  CHECK(shard_flows_.size() == 0);
+  // Initialize MultiShardExecution.
+  multi_shard_exe_.reset(new MultiShardExecution());
 
   // Initialize shard flows.
   shard_flows_.resize(num_df_flows_);
@@ -442,11 +446,18 @@ error_code Replica::InitiateDflySync() {
   // Blocked on until all flows got full sync cut.
   fibers_ext::BlockingCounter sync_block{num_df_flows_};
 
-  // Atomically switch to new error handler.
+  // Switch to new error handler that closes flow sockets.
   auto err_handler = [this, sync_block](const auto& ge) mutable {
-    sync_block.Cancel();      // Unblock this function.
-    DefaultErrorHandler(ge);  // Close sockets to unblock flows.
-    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);  // Reset global state.
+    // Unblock this function.
+    sync_block.Cancel();
+
+    // Make sure the flows are not in a state transition
+    lock_guard lk{flows_op_mu_};
+
+    // Unblock all sockets.
+    DefaultErrorHandler(ge);
+    for (auto& flow : shard_flows_)
+      flow->CloseSocket();
   };
   RETURN_ON_ERR(cntx_.Switch(std::move(err_handler)));
 
@@ -492,11 +503,7 @@ error_code Replica::InitiateDflySync() {
     return cntx_.Error(ec);
   }
 
-  // Wait for all flows to finish full sync.
-  JoinAllFlows();
-
-  // Revert from LOADING state.
-  service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+  // Joining flows and resetting state is done by cleanup.
 
   LOG(INFO) << "Full sync finished ";
   return cntx_.GetError();
@@ -549,7 +556,15 @@ error_code Replica::ConsumeRedisStream() {
 }
 
 error_code Replica::ConsumeDflyStream() {
-  RETURN_ON_ERR(cntx_.Switch(absl::bind_front(&Replica::DefaultErrorHandler, this)));
+  // Set new error handler that closes flow sockets.
+  auto err_handler = [this](const auto& ge) {
+    // Make sure the flows are not in a state transition
+    lock_guard lk{flows_op_mu_};
+    DefaultErrorHandler(ge);
+    for (auto& flow : shard_flows_)
+      flow->CloseSocket();
+  };
+  RETURN_ON_ERR(cntx_.Switch(std::move(err_handler)));
 
   // Transition flows into stable sync.
   {
@@ -576,16 +591,12 @@ error_code Replica::ConsumeDflyStream() {
   return cntx_.GetError();
 }
 
-void Replica::CloseAllSockets() {
+void Replica::CloseSocket() {
   if (sock_) {
     sock_->proactor()->Await([this] {
       auto ec = sock_->Shutdown(SHUT_RDWR);
       LOG_IF(ERROR, ec) << "Could not shutdown socket " << ec;
     });
-  }
-
-  for (auto& flow : shard_flows_) {
-    flow->CloseAllSockets();
   }
 }
 
@@ -598,12 +609,7 @@ void Replica::JoinAllFlows() {
 }
 
 void Replica::DefaultErrorHandler(const GenericError& err) {
-  // Make sure the flows are not in a state transition
-  lock_guard lk{flows_op_mu_};
-
-  CloseAllSockets();
-  JoinAllFlows();
-  shard_flows_.clear();
+  CloseSocket();
 }
 
 error_code Replica::SendNextPhaseRequest(bool stable) {

@@ -89,8 +89,8 @@ class Replica {
   std::error_code ConsumeRedisStream();  // Redis stable state.
   std::error_code ConsumeDflyStream();   // Dragonfly stable state.
 
-  void CloseAllSockets();  // Close all sockets.
-  void JoinAllFlows();     // Join all flows if possible.
+  void CloseSocket();   // Close replica sockets.
+  void JoinAllFlows();  // Join all flows if possible.
 
   // Send DFLY SYNC or DFLY STARTSTABLE if stable is true.
   std::error_code SendNextPhaseRequest(bool stable);
