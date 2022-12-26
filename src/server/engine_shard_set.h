@@ -150,10 +150,13 @@ class EngineShard {
   struct DefragTaskState {
     // we will add more data members later
     uint64_t cursor = 0u;
+    bool underutilized_found = false;
 
     // check the current threshold and return true if
     // we need to do the de-fermentation
-    bool IsRequired() const;
+    bool CheckRequired();
+
+    void UpdateScanState(uint64_t cursor_val);
   };
 
   EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap);

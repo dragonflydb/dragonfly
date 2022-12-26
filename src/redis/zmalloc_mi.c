@@ -108,6 +108,13 @@ typedef struct Sum_s {
   size_t comitted;
 } Sum_t;
 
+typedef struct {
+  size_t allocated;
+  size_t comitted;
+  size_t wasted;
+  float ratio;
+} MemUtilized_t;
+
 bool heap_visit_cb(const mi_heap_t* heap, const mi_heap_area_t* area, void* block,
                    size_t block_size, void* arg) {
   assert(area->used < (1u << 31));
@@ -117,7 +124,23 @@ bool heap_visit_cb(const mi_heap_t* heap, const mi_heap_area_t* area, void* bloc
   // mimalloc mistakenly exports used in blocks instead of bytes.
   sum->allocated += block_size * area->used;
   sum->comitted += area->committed;
+  return true;  // continue iteration
+};
 
+bool heap_count_wasted_blocks(const mi_heap_t* heap, const mi_heap_area_t* area, void* block,
+                              size_t block_size, void* arg) {
+  assert(area->used < (1u << 31));
+
+  MemUtilized_t* sum = (MemUtilized_t*)arg;
+
+  // mimalloc mistakenly exports used in blocks instead of bytes.
+  size_t used = block_size * area->used;
+  sum->allocated += used;
+  sum->comitted += area->committed;
+
+  if (used < area->committed * sum->ratio) {
+    sum->wasted += (area->committed - used);
+  }
   return true;  // continue iteration
 };
 
@@ -128,6 +151,18 @@ int zmalloc_get_allocator_info(size_t* allocated, size_t* active, size_t* reside
   *allocated = sum.allocated;
   *resident = sum.comitted;
   *active = 0;
+
+  return 1;
+}
+
+int zmalloc_get_allocator_wasted_blocks(float ratio, size_t* allocated, size_t* commited,
+                                        size_t* wasted) {
+  MemUtilized_t sum = {.allocated = 0, .comitted = 0, .wasted = 0, .ratio = ratio};
+
+  mi_heap_visit_blocks(zmalloc_heap, false /* visit all blocks*/, heap_count_wasted_blocks, &sum);
+  *allocated = sum.allocated;
+  *commited = sum.comitted;
+  *wasted = sum.wasted;
 
   return 1;
 }
