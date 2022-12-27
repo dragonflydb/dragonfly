@@ -772,6 +772,21 @@ TEST_F(DflyEngineTest, Bug496) {
   });
 }
 
+TEST_F(DflyEngineTest, Issue706) {
+  // https://github.com/dragonflydb/dragonfly/issues/607
+
+  Run({"SET", "key", "value1"});
+  EXPECT_EQ(Run({"GET", "key"}), "value1");
+
+  Run({"SET", "key", "value2"});
+  EXPECT_EQ(Run({"GET", "key"}), "value2");
+
+  Run({"EXPIRE", "key", "1000"});
+
+  Run({"SET", "key", "value3"});
+  EXPECT_EQ(Run({"GET", "key"}), "value3");
+}
+
 TEST_F(DefragDflyEngineTest, TestDefragOption) {
   absl::SetFlag(&FLAGS_commit_use_threshold, 1.1);
   // Fill data into dragonfly and then check if we have

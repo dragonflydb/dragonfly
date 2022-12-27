@@ -506,21 +506,29 @@ void DbSlice::FlushDb(DbIndex db_ind) {
   }).detach();
 }
 
+void DbSlice::AddExpire(DbIndex db_ind, PrimeIterator main_it, uint64_t at) {
+  uint64_t delta = at - expire_base_[0];  // TODO: employ multigen expire updates.
+  CHECK(db_arr_[db_ind]->expire.Insert(main_it->first.AsRef(), ExpirePeriod(delta)).second);
+  main_it->second.SetExpire(true);
+}
+
+bool DbSlice::RemoveExpire(DbIndex db_ind, PrimeIterator main_it) {
+  if (main_it->second.HasExpire()) {
+    CHECK_EQ(1u, db_arr_[db_ind]->expire.Erase(main_it->first));
+    main_it->second.SetExpire(false);
+    return true;
+  }
+  return false;
+}
+
 // Returns true if a state has changed, false otherwise.
 bool DbSlice::UpdateExpire(DbIndex db_ind, PrimeIterator it, uint64_t at) {
-  auto& db = *db_arr_[db_ind];
-  if (at == 0 && it->second.HasExpire()) {
-    CHECK_EQ(1u, db.expire.Erase(it->first));
-    it->second.SetExpire(false);
-
-    return true;
+  if (at == 0) {
+    return RemoveExpire(db_ind, it);
   }
 
   if (!it->second.HasExpire() && at) {
-    uint64_t delta = at - expire_base_[0];  // TODO: employ multigen expire updates.
-    CHECK(db.expire.Insert(it->first.AsRef(), ExpirePeriod(delta)).second);
-    it->second.SetExpire(true);
-
+    AddExpire(db_ind, it, at);
     return true;
   }
 

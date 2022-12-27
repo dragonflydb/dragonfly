@@ -174,6 +174,13 @@ class DbSlice {
   facade::OpStatus UpdateExpire(const Context& cntx, PrimeIterator prime_it, ExpireIterator exp_it,
                                 const ExpireParams& params);
 
+  // Adds expiry information.
+  void AddExpire(DbIndex db_ind, PrimeIterator main_it, uint64_t at);
+
+  // Removes the corresponing expiry information if exists.
+  // Returns true if expiry existed (and removed).
+  bool RemoveExpire(DbIndex db_ind, PrimeIterator main_it);
+
   // Either adds or removes (if at == 0) expiry. Returns true if a change was made.
   // Does not change expiry if at != 0 and expiry already exists.
   bool UpdateExpire(DbIndex db_ind, PrimeIterator main_it, uint64_t at);

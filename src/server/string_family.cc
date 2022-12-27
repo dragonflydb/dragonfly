@@ -313,16 +313,17 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
   return new_val;
 }
 
-int64_t CalculateAbsTime(int64_t unix_time, bool as_milli) {
+int64_t AbsExpiryToTtl(int64_t abs_expiry_time, bool as_milli) {
   using std::chrono::duration_cast;
   using std::chrono::milliseconds;
   using std::chrono::seconds;
   using std::chrono::system_clock;
 
   if (as_milli) {
-    return unix_time - duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+    return abs_expiry_time -
+           duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
   } else {
-    return unix_time - duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
+    return abs_expiry_time - duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
   }
 }
 
@@ -438,13 +439,19 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
   DbSlice& db_slice = shard->db_slice();
   uint64_t at_ms =
       params.expire_after_ms ? params.expire_after_ms + op_args_.db_cntx.time_now_ms : 0;
-  if (IsValid(e_it) && at_ms) {
-    e_it->second = db_slice.FromAbsoluteTime(at_ms);
-  } else if (!(params.flags & SET_KEEP_EXPIRE)) {
-    // We need to update expiry, or maybe erase the object if it was expired.
-    bool changed = db_slice.UpdateExpire(op_args_.db_cntx.db_index, it, at_ms);
-    if (changed && at_ms == 0)  // erased.
-      return OpStatus::OK;      // TODO: to update journal with deletion.
+
+  if (!(params.flags & SET_KEEP_EXPIRE)) {
+    if (at_ms) {  // Command has an expiry paramater.
+      if (IsValid(e_it)) {
+        // Updated exisitng expiry information.
+        e_it->second = db_slice.FromAbsoluteTime(at_ms);
+      } else {
+        // Add new expiry information.
+        db_slice.AddExpire(op_args_.db_cntx.db_index, it, at_ms);
+      }
+    } else {
+      db_slice.RemoveExpire(op_args_.db_cntx.db_index, it);
+    }
   }
 
   db_slice.PreUpdate(op_args_.db_cntx.db_index, it);
@@ -513,7 +520,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       // check here and if the time is in the past, return OK but don't set it
       // Note that the time pass here for PXAT is in milliseconds, we must not change it!
       if (cur_arg == "EXAT" || cur_arg == "PXAT") {
-        int_arg = CalculateAbsTime(int_arg, is_ms);
+        int_arg = AbsExpiryToTtl(int_arg, is_ms);
         if (int_arg < 0) {
           // this happened in the past, just return, for some reason Redis reports OK in this case
           return builder->SendStored();
