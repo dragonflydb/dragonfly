@@ -20,10 +20,18 @@ class JournalWriter {
  public:
   // Initialize with sink and optional start database index. If no start index is set,
   // a SELECT will be issued before the first entry.
-  JournalWriter(io::Sink* sink, std::optional<DbIndex> dbid = std::nullopt);
+  JournalWriter(std::optional<DbIndex> dbid = std::nullopt);
 
   // Write single entry.
   std::error_code Write(const journal::Entry& entry);
+
+  void Flush(io::Sink* sink_);
+
+  void Steal(base::IoBuf* other);
+
+  unsigned BufSize() {
+    return buf_.InputLen();
+  }
 
  private:
   std::error_code Write(uint64_t v);           // Write packed unsigned integer.
@@ -34,7 +42,7 @@ class JournalWriter {
   std::error_code Write(std::monostate);  // Overload for empty std::variant
 
  private:
-  io::Sink* sink_;
+  base::IoBuf buf_;
   std::optional<DbIndex> cur_dbid_;
 };
 

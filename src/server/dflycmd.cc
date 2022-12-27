@@ -69,8 +69,8 @@ struct TransactionGuard {
 class JournalStreamer {
  public:
   JournalStreamer(io::Sink* dest, journal::Journal* journal, Context* cntx)
-      : cntx_{cntx}, journal_{journal}, mu_{}, cv_{}, buffer_{}, dest_{dest}, write_fb_{},
-        writer_{&buffer_}, journal_cb_id_{0} {
+      : cntx_{cntx}, journal_{journal}, mu_{}, cv_{}, dest_{dest}, write_fb_{}, writer_{},
+        journal_cb_id_{0} {
   }
 
   // Register journal listener and start writer in fiber.
@@ -91,7 +91,6 @@ class JournalStreamer {
   ::boost::fibers::mutex mu_;               // guard buffer and condvar wakeups
   ::boost::fibers::condition_variable cv_;  // notify new data is available or cancelled
 
-  io::StringFile buffer_;
   io::Sink* dest_;
 
   Fiber write_fb_;
@@ -105,15 +104,20 @@ void JournalStreamer::Start() {
 
   journal_cb_id_ = journal_->RegisterOnChange([this](const journal::Entry& entry) {
     error_code ec;
+    bool wake = false;
     {
       lock_guard lk(mu_);
       ec = writer_.Write(entry);
+
+      if (writer_.BufSize() > 5)
+        wake = true;
     }
 
     if (ec)
       cntx_->Error(ec);
 
-    cv_.notify_all();
+    if (wake)
+      cv_.notify_all();
   });
 }
 
@@ -129,24 +133,24 @@ void JournalStreamer::Cancel() {
 
 void JournalStreamer::WriterFb() {
   // Stash and buffer are swapped in turns.
-  std::string stash;
+  base::IoBuf stash;
 
   while (true) {
     {
       std::unique_lock lk(mu_);
       cv_.wait(lk);
-      std::swap(buffer_.val, stash);
+      writer_.Steal(&stash);
     }
 
     if (cntx_->IsCancelled())
       break;
 
-    if (auto ec = dest_->Write(io::Buffer(stash)); ec) {
+    if (auto ec = dest_->Write(stash.InputBuffer()); ec) {
       cntx_->Error(ec);
     }
 
     // TODO: shrink big stash.
-    stash.clear();
+    stash.Clear();
   }
 }
 

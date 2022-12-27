@@ -18,19 +18,36 @@ using namespace std;
 
 namespace dfly {
 
-JournalWriter::JournalWriter(io::Sink* sink, std::optional<DbIndex> dbid)
-    : sink_{sink}, cur_dbid_{dbid} {
+JournalWriter::JournalWriter(std::optional<DbIndex> dbid) : cur_dbid_{dbid} {
+}
+
+void JournalWriter::Flush(io::Sink* sink) {
+  sink->Write(buf_.InputBuffer());
+  buf_.Clear();
+}
+
+void JournalWriter::Steal(base::IoBuf* other) {
+  unsigned size = buf_.InputLen();
+  other->EnsureCapacity(size);
+  buf_.ReadAndConsume(size, other->AppendBuffer().data());
+  other->CommitWrite(size);
 }
 
 error_code JournalWriter::Write(uint64_t v) {
   uint8_t buf[10];
   unsigned len = WritePackedUInt(v, buf);
-  return sink_->Write(io::Bytes{buf, len});
+  buf_.EnsureCapacity(10);
+  memcpy(buf_.AppendBuffer().data(), buf, len);
+  buf_.CommitWrite(len);
+  return {};
 }
 
 error_code JournalWriter::Write(std::string_view sv) {
   RETURN_ON_ERR(Write(sv.size()));
-  return sink_->Write(io::Buffer(sv));
+  buf_.EnsureCapacity(sv.size());
+  memcpy(buf_.AppendBuffer().data(), sv.data(), sv.size());
+  buf_.CommitWrite(sv.size());
+  return {};
 }
 
 error_code JournalWriter::Write(CmdArgList args) {

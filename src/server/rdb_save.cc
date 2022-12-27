@@ -685,11 +685,12 @@ size_t RdbSerializer::SerializedLen() const {
 error_code RdbSerializer::WriteJournalEntries(absl::Span<const journal::Entry> entries) {
   // Write journal blob to string file.
   io::StringSink ss{};
-  JournalWriter writer{&ss};
+  JournalWriter writer{};
   for (const auto& entry : entries) {
     RETURN_ON_ERR(writer.Write(entry));
   }
 
+  writer.Flush(&ss);
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_JOURNAL_BLOB));
   RETURN_ON_ERR(SaveLen(entries.size()));
   return SaveString(ss.str());
