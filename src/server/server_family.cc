@@ -1300,8 +1300,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("stash_unloaded", m.events.stash_unloaded);
     append("traverse_ttl_sec", m.traverse_ttl_per_sec);
     append("delete_ttl_sec", m.delete_ttl_per_sec);
-    append("keyspace_hits", -1);
-    append("keyspace_misses", -1);
+    append("keyspace_hits", m.events.hits);
+    append("keyspace_misses", m.events.misses);
     append("total_reads_processed", m.conn_stats.io_read_cnt);
     append("total_writes_processed", m.conn_stats.io_write_cnt);
     append("async_writes_count", m.conn_stats.async_writes_cnt);

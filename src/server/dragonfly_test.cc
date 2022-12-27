@@ -131,6 +131,20 @@ TEST_F(DflyEngineTest, Multi) {
   ASSERT_FALSE(service_->IsShardSetLocked());
 }
 
+TEST_F(DflyEngineTest, HitMissStats) {
+  RespExpr resp = Run({"set", "Key1", "VAL"});
+  ASSERT_EQ(resp, "OK");
+
+  resp = Run({"get", "Key1"});
+  ASSERT_EQ(resp, "VAL");
+
+  resp = Run({"get", "Key2"});
+  ASSERT_THAT(resp, ArgType(RespExpr::NIL));
+
+  EXPECT_THAT(service_->server_family().GetMetrics().events.hits, 1);
+  EXPECT_THAT(service_->server_family().GetMetrics().events.misses, 1);
+}
+
 TEST_F(DflyEngineTest, MultiEmpty) {
   RespExpr resp = Run({"multi"});
   ASSERT_EQ(resp, "OK");
