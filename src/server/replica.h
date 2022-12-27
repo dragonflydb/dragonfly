@@ -89,10 +89,11 @@ class Replica {
   std::error_code ConsumeRedisStream();  // Redis stable state.
   std::error_code ConsumeDflyStream();   // Dragonfly stable state.
 
-  void CloseAllSockets();  // Close all sockets.
-  void JoinAllFlows();     // Join all flows if possible.
+  void CloseSocket();   // Close replica sockets.
+  void JoinAllFlows();  // Join all flows if possible.
 
-  std::error_code SendNextPhaseRequest();  // Send DFLY SYNC or DFLY STARTSTABLE.
+  // Send DFLY SYNC or DFLY STARTSTABLE if stable is true.
+  std::error_code SendNextPhaseRequest(bool stable);
 
   void DefaultErrorHandler(const GenericError& err);
 
@@ -179,6 +180,9 @@ class Replica {
   // MainReplicationFb in standalone mode, FullSyncDflyFb in flow mode.
   ::boost::fibers::fiber sync_fb_;
   std::vector<std::unique_ptr<Replica>> shard_flows_;
+
+  // Guard operations where flows might be in a mixed state (transition/setup)
+  ::boost::fibers::mutex flows_op_mu_;
 
   std::unique_ptr<base::IoBuf> leftover_buf_;
   std::unique_ptr<facade::RedisParser> parser_;
