@@ -42,7 +42,7 @@ cxx_test(blocking_controller_test dragonfly_lib LABELS DFLY)
 cxx_test(snapshot_test dragonfly_lib LABELS DFLY)
 cxx_test(json_family_test dfly_test_lib LABELS DFLY)
 cxx_test(journal_test dfly_test_lib LABELS DFLY)
-
+cxx_test(tiered_storage_test dfly_test_lib LABELS DFLY)
 
 add_custom_target(check_dfly WORKING_DIRECTORY .. COMMAND ctest -L DFLY)
 add_dependencies(check_dfly dragonfly_test json_family_test list_family_test

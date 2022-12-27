@@ -95,6 +95,9 @@ TEST_F(GenericFamilyTest, Del) {
 
   exist_fb.Join();
   del_fb.Join();
+
+  Run({"setex", "k1", "10", "bar"});
+  Run({"del", "k1"});
 }
 
 TEST_F(GenericFamilyTest, TTL) {

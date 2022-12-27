@@ -52,9 +52,9 @@ class DflyEngineTest : public BaseFamilyTest {
   }
 };
 
-class DefragDflyEngineTest : public DflyEngineTest {
+class DefragDflyEngineTest : public BaseFamilyTest {
  protected:
-  DefragDflyEngineTest() : DflyEngineTest() {
+  DefragDflyEngineTest() : BaseFamilyTest() {
     num_threads_ = 1;
   }
 };
@@ -141,8 +141,8 @@ TEST_F(DflyEngineTest, HitMissStats) {
   resp = Run({"get", "Key2"});
   ASSERT_THAT(resp, ArgType(RespExpr::NIL));
 
-  EXPECT_THAT(service_->server_family().GetMetrics().events.hits, 1);
-  EXPECT_THAT(service_->server_family().GetMetrics().events.misses, 1);
+  EXPECT_THAT(GetMetrics().events.hits, 1);
+  EXPECT_THAT(GetMetrics().events.misses, 1);
 }
 
 TEST_F(DflyEngineTest, MultiEmpty) {

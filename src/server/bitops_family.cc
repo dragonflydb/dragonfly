@@ -631,7 +631,7 @@ std::string GetString(const PrimeValue& pv, EngineShard* shard) {
   std::string res;
   if (pv.IsExternal()) {
     auto* tiered = shard->tiered_storage();
-    auto [offset, size] = pv.GetExternalPtr();
+    auto [offset, size] = pv.GetExternalSlice();
     res.resize(size);
 
     std::error_code ec = tiered->Read(offset, size, res.data());

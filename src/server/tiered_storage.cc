@@ -340,13 +340,13 @@ void TieredStorage::FinishIoRequest(int io_res, InflightWriteRequest* req) {
     LOG(ERROR) << "Error writing into ssd file: " << util::detail::SafeErrorMessage(-io_res);
     alloc_.Free(req->page_index() * kBlockLen, kBlockLen);
     req->Undo(&bin_record, &db_slice_);
-    ++stats_.aborted_offloads;
+    ++stats_.aborted_write_cnt;
   } else {
     // Also removes the entries from bin_record.
     uint16_t entries_serialized = req->ExternalizeEntries(&bin_record, &db_slice_);
 
     if (entries_serialized == 0) {  // aborted
-      ++stats_.aborted_offloads;
+      ++stats_.aborted_write_cnt;
       alloc_.Free(req->page_index() * kBlockLen, kBlockLen);
     } else {  // succeeded.
       VLOG(2) << "page_refcnt emplace " << req->page_index();
@@ -413,6 +413,7 @@ error_code TieredStorage::ScheduleOffload(DbIndex db_index, PrimeIterator it) {
   if (!flush_succeeded) {
     // we could not flush because I/O is saturated, so lets remove the last item.
     bin_record.pending_entries.erase(it->first.AsRef());
+    ++stats_.flush_skip_cnt;
   }
 
   return error_code{};

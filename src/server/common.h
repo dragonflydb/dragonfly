@@ -99,7 +99,8 @@ struct TieredStats {
 
   // how much was reserved by actively stored items.
   size_t storage_reserved = 0;
-  size_t aborted_offloads = 0;
+  size_t aborted_write_cnt = 0;
+  size_t flush_skip_cnt = 0;
 
   TieredStats& operator+=(const TieredStats&);
 };

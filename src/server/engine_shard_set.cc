@@ -20,7 +20,7 @@ extern "C" {
 
 using namespace std;
 
-ABSL_FLAG(string, backing_prefix, "", "");
+ABSL_FLAG(string, spill_file_prefix, "", "");
 
 ABSL_FLAG(uint32_t, hz, 100,
           "Base frequency at which the server performs other background tasks. "
@@ -227,7 +227,7 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
   CompactObj::InitThreadLocal(shard_->memory_resource());
   SmallString::InitThreadLocal(data_heap);
 
-  string backing_prefix = GetFlag(FLAGS_backing_prefix);
+  string backing_prefix = GetFlag(FLAGS_spill_file_prefix);
   if (!backing_prefix.empty()) {
     if (pb->GetKind() != ProactorBase::IOURING) {
       LOG(ERROR) << "Only ioring based backing storage is supported. Exiting...";
