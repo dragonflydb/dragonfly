@@ -759,13 +759,13 @@ void Replica::StableSyncDflyFb(Context* cntx) {
       cntx->ReportError(res.error(), "Journal format error");
       return;
     }
-    ExecuteEntry(&executor, res.value());
+    ExecuteEntry(&executor, std::move(res.value()));
     last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
   }
   return;
 }
 
-void Replica::ExecuteEntry(JournalExecutor* executor, journal::ParsedEntry& entry) {
+void Replica::ExecuteEntry(JournalExecutor* executor, journal::ParsedEntry&& entry) {
   if (entry.shard_cnt <= 1) {  // not multi shard cmd
     executor->Execute(entry);
     return;
@@ -773,46 +773,53 @@ void Replica::ExecuteEntry(JournalExecutor* executor, journal::ParsedEntry& entr
 
   // Multi shard command flow:
   //  step 1: Fiber wait until all the fibers that should execute this tranaction got
-  //    to the journal entry of the transaction.
-  //  step 2: execute the command (All fibers)
-  //  step 3: Fiber wait until all fibers finished the execution
-  //  By step 1 we enforce that replica will execute multi shard commands that finished on master
-  //  By step 3 we ensures the correctness of flushall/flushdb commands
-
-  // TODO: this implemantaion does not support atomicity in replica
-  // Although multi shard transaction happen in step 2 very close to each other,
-  // user can query replica between executions.
-  // To support atomicity we should have one fiber in step 2 which will excute all the entries of
-  // the transaction together. In case of global comand such as flushdb the command can be executed
-  // by only one fiber.
+  //    to the journal entry of the transaction. This step enforces that replica will execute multi
+  //    shard commands that finished on master.
+  //  step 2: Execute the commands from one fiber. This step ensures atomicity of replica.
+  //  step 3: Fiber wait until all fibers finished the execution. This step ensures atomicity of
+  //    operations on replica.
 
   // TODO: support error handler in this flow
 
   // Only the first fiber to reach the transaction will create data for transaction in map
   multi_shard_exe_->map_mu.lock();
   auto [it, was_insert] = multi_shard_exe_->tx_sync_execution.emplace(entry.txid, entry.shard_cnt);
+  VLOG(2) << "txid: " << entry.txid << " unique_shard_cnt_: " << entry.shard_cnt
+          << " was_insert: " << was_insert;
+
+  TxId txid = entry.txid;
+  // entries_vec will store all entries of trasaction and will be executed by the fiber that
+  // inserted the txid to map. In case of global command the inserting fiber will executed his
+  // entry.
+  bool global_cmd = (entry.payload.value().size() == 1);
+  if (!global_cmd) {
+    it->second.entries_vec.push_back(std::move(entry));
+  }
+  auto& tx_sync = it->second;
 
   // Note: we must release the mutex befor calling wait on barrier
   multi_shard_exe_->map_mu.unlock();
 
-  VLOG(2) << "txid: " << entry.txid << " unique_shard_cnt_: " << entry.shard_cnt
-          << " was_insert: " << was_insert;
-
   // step 1
-  it->second.barrier.wait();
+  tx_sync.barrier.wait();
   // step 2
-  executor->Execute(entry);
+  if (was_insert) {
+    if (global_cmd) {
+      executor->Execute(entry);
+    } else {
+      executor->Execute(tx_sync.entries_vec);
+    }
+  }
   // step 3
-  it->second.barrier.wait();
+  tx_sync.barrier.wait();
 
   // Note: erase from map can be done only after all fibers returned from wait.
   // The last fiber which will decrease the counter to 0 will be the one to erase the data from map
-  auto val = it->second.counter.fetch_sub(1, std::memory_order_relaxed);
-  VLOG(2) << "txid: " << entry.txid << " unique_shard_cnt_: " << entry.shard_cnt
-          << " counter: " << val;
+  auto val = tx_sync.counter.fetch_sub(1, std::memory_order_relaxed);
+  VLOG(2) << "txid: " << txid << " counter: " << val;
   if (val == 1) {
     std::lock_guard lg{multi_shard_exe_->map_mu};
-    multi_shard_exe_->tx_sync_execution.erase(entry.txid);
+    multi_shard_exe_->tx_sync_execution.erase(txid);
   }
 }
 

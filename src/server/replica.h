@@ -58,6 +58,7 @@ class Replica {
       std::atomic_uint32_t counter;
       TxExecutionSync(uint32_t counter) : barrier(counter), counter(counter) {
       }
+      std::vector<journal::ParsedEntry> entries_vec;
     };
 
     std::unordered_map<TxId, TxExecutionSync> tx_sync_execution;
@@ -141,7 +142,7 @@ class Replica {
   // Send command, update last_io_time, return error.
   std::error_code SendCommand(std::string_view command, facade::ReqSerializer* serializer);
 
-  void ExecuteEntry(JournalExecutor* executor, journal::ParsedEntry& entry);
+  void ExecuteEntry(JournalExecutor* executor, journal::ParsedEntry&& entry);
 
  public: /* Utility */
   struct Info {
