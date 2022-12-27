@@ -721,11 +721,11 @@ void Replica::ExecuteEntry(JournalExecutor* executor, journal::ParsedEntry&& ent
 
   // Multi shard command flow:
   //  step 1: Fiber wait until all the fibers that should execute this tranaction got
-  //    to the journal entry of the transaction. This step enforce that replica will execute multi
-  //    shard commands that finished on master
+  //    to the journal entry of the transaction. This step enforces that replica will execute multi
+  //    shard commands that finished on master.
   //  step 2: Execute the commands from one fiber. This step ensures atomicity of replica.
-  //  step 3: Fiber wait until all fibers finished the execution. This step ensures correctness of
-  //    order executions.
+  //  step 3: Fiber wait until all fibers finished the execution. This step ensures atomicity of
+  //    operations on replica.
 
   // TODO: support error handler in this flow
 

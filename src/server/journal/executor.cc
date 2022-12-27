@@ -16,7 +16,7 @@ JournalExecutor::JournalExecutor(Service* service)
 }
 
 void JournalExecutor::Execute(std::vector<journal::ParsedEntry>& entries) {
-  DCHECK_GT(entries.size(), 1);
+  DCHECK_GT(entries.size(), 1U);
   conn_context_.conn_state.db_index = entries.front().dbid;
 
   std::string multi_cmd = {"MULTI"};
