@@ -264,7 +264,7 @@ std::string GenericError::Format() const {
 }
 
 Context::~Context() {
-  CheckHandlerFb();
+  JoinErrorHandler();
 }
 
 GenericError Context::GetError() {
@@ -277,18 +277,18 @@ const Cancellation* Context::GetCancellation() const {
 }
 
 void Context::Cancel() {
-  Error(std::make_error_code(errc::operation_canceled), "Context cancelled");
+  ReportError(std::make_error_code(errc::operation_canceled), "Context cancelled");
 }
 
 void Context::Reset(ErrHandler handler) {
   std::lock_guard lk{mu_};
-  CheckHandlerFb();
+  JoinErrorHandler();
   err_ = {};
   err_handler_ = std::move(handler);
   Cancellation::flag_.store(false, std::memory_order_relaxed);
 }
 
-GenericError Context::Switch(ErrHandler handler) {
+GenericError Context::SwitchErrorHandler(ErrHandler handler) {
   std::lock_guard lk{mu_};
   if (!err_) {
     // No need to check for the error handler - it can't be running
@@ -298,27 +298,25 @@ GenericError Context::Switch(ErrHandler handler) {
   return err_;
 }
 
-void Context::Stop() {
-  CheckHandlerFb();
+void Context::JoinErrorHandler() {
+  if (err_handler_fb_.IsJoinable())
+    err_handler_fb_.Join();
 }
 
-GenericError Context::ReportInternal(GenericError&& err) {
+GenericError Context::ReportErrorInternal(GenericError&& err) {
   std::lock_guard lk{mu_};
   if (err_)
     return err_;
   err_ = std::move(err);
 
-  CheckHandlerFb();
+  // This context is either new or was Reset, where the handler was joined
+  CHECK(!err_handler_fb_.IsJoinable());
+
   if (err_handler_)
     err_handler_fb_ = util::fibers_ext::Fiber{err_handler_, err_};
 
   Cancellation::Cancel();
   return err_;
-}
-
-void Context::CheckHandlerFb() {
-  if (err_handler_fb_.IsJoinable())
-    err_handler_fb_.Join();
 }
 
 }  // namespace dfly

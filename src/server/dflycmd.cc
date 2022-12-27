@@ -382,18 +382,18 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
   }
 
   if (ec) {
-    cntx->Error(ec);
+    cntx->ReportError(ec);
     return;
   }
 
   if (ec = saver->SaveBody(cntx->GetCancellation(), nullptr); ec) {
-    cntx->Error(ec);
+    cntx->ReportError(ec);
     return;
   }
 
   ec = flow->conn->socket()->Write(io::Buffer(flow->eof_token));
   if (ec) {
-    cntx->Error(ec);
+    cntx->ReportError(ec);
     return;
   }
 }
@@ -484,7 +484,7 @@ void DflyCmd::CancelReplication(uint32_t sync_id, shared_ptr<ReplicaInfo> replic
   }
 
   // Wait for error handler to quit.
-  replica_ptr->cntx.Stop();
+  replica_ptr->cntx.JoinErrorHandler();
 
   LOG(INFO) << "Evicted sync session " << sync_id;
 }

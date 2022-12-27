@@ -225,7 +225,7 @@ void Replica::MainReplicationFb() {
     state_mask_ &= ~R_SYNC_OK;
   }
 
-  cntx_.Stop();
+  cntx_.JoinErrorHandler();
 
   VLOG(1) << "Main replication fiber finished";
 }
@@ -459,7 +459,7 @@ error_code Replica::InitiateDflySync() {
     for (auto& flow : shard_flows_)
       flow->CloseSocket();
   };
-  RETURN_ON_ERR(cntx_.Switch(std::move(err_handler)));
+  RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
   // Make sure we're in LOADING state.
   // TODO: Flush db on retry.
@@ -472,7 +472,7 @@ error_code Replica::InitiateDflySync() {
       for (auto id : partition[index]) {
         auto ec = shard_flows_[id]->StartFullSyncFlow(sync_block, &cntx_);
         if (ec)
-          cntx_.Error(ec);
+          cntx_.ReportError(ec);
       }
     };
 
@@ -486,7 +486,7 @@ error_code Replica::InitiateDflySync() {
 
   // Send DFLY SYNC.
   if (auto ec = SendNextPhaseRequest(false); ec) {
-    return cntx_.Error(ec);
+    return cntx_.ReportError(ec);
   }
 
   // Wait for all flows to receive full sync cut.
@@ -500,7 +500,7 @@ error_code Replica::InitiateDflySync() {
 
   // Send DFLY STARTSTABLE.
   if (auto ec = SendNextPhaseRequest(true); ec) {
-    return cntx_.Error(ec);
+    return cntx_.ReportError(ec);
   }
 
   // Joining flows and resetting state is done by cleanup.
@@ -564,7 +564,7 @@ error_code Replica::ConsumeDflyStream() {
     for (auto& flow : shard_flows_)
       flow->CloseSocket();
   };
-  RETURN_ON_ERR(cntx_.Switch(std::move(err_handler)));
+  RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
   // Transition flows into stable sync.
   {
@@ -574,7 +574,7 @@ error_code Replica::ConsumeDflyStream() {
       for (unsigned id : local_ids) {
         auto ec = shard_flows_[id]->StartStableSyncFlow(&cntx_);
         if (ec)
-          cntx_.Error(ec);
+          cntx_.ReportError(ec);
       }
     };
 
@@ -708,7 +708,7 @@ void Replica::FullSyncDflyFb(string eof_token, fibers_ext::BlockingCounter bc, C
 
   // Load incoming rdb stream.
   if (std::error_code ec = loader.Load(&ps); ec) {
-    cntx->Error(ec, "Error loading rdb format");
+    cntx->ReportError(ec, "Error loading rdb format");
     return;
   }
 
@@ -721,7 +721,8 @@ void Replica::FullSyncDflyFb(string eof_token, fibers_ext::BlockingCounter bc, C
         chained_tail.ReadAtLeast(io::MutableBytes{buf.get(), eof_token.size()}, eof_token.size());
 
     if (!res || *res != eof_token.size()) {
-      cntx->Error(std::make_error_code(errc::protocol_error), "Error finding eof token in stream");
+      cntx->ReportError(std::make_error_code(errc::protocol_error),
+                        "Error finding eof token in stream");
       return;
     }
   }
@@ -755,7 +756,7 @@ void Replica::StableSyncDflyFb(Context* cntx) {
   while (!cntx->IsCancelled()) {
     auto res = reader.ReadEntry(&ps);
     if (!res) {
-      cntx->Error(res.error(), "Journal format error");
+      cntx->ReportError(res.error(), "Journal format error");
       return;
     }
     ExecuteEntry(&executor, res.value());

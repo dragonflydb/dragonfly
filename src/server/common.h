@@ -268,8 +268,8 @@ class Context : protected Cancellation {
   // Report an error by submitting arguments for GenericError.
   // If this is the first error that occured, then the error handler is run
   // and the context is cancelled.
-  template <typename... T> GenericError Error(T... ts) {
-    return ReportInternal(GenericError{std::forward<T>(ts)...});
+  template <typename... T> GenericError ReportError(T... ts) {
+    return ReportErrorInternal(GenericError{std::forward<T>(ts)...});
   }
 
   // Wait for error handler to stop, reset error and cancellation flag, assign new error handler.
@@ -281,17 +281,14 @@ class Context : protected Cancellation {
   // Beware, never do this manually in two steps. If you check for cancellation,
   // set the error handler and initialize resources, then the new error handler
   // will never run if the context was cancelled between the first two steps.
-  GenericError Switch(ErrHandler handler);
+  GenericError SwitchErrorHandler(ErrHandler handler);
 
   // If any error handler is running, wait for it to stop.
-  void Stop();
+  void JoinErrorHandler();
 
  private:
   // Report error.
-  GenericError ReportInternal(GenericError&& err);
-
-  // Wait until the error handler finished running.
-  void CheckHandlerFb();
+  GenericError ReportErrorInternal(GenericError&& err);
 
  private:
   GenericError err_;
