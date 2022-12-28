@@ -1875,7 +1875,7 @@ error_code RdbLoaderBase::EnsureReadInternal(size_t min_sz) {
   return kOk;
 }
 
-auto RdbLoaderBase::LoadLen(bool* is_encoded) -> io::Result<uint64_t> {
+io::Result<uint64_t> RdbLoaderBase::LoadLen(bool* is_encoded) {
   if (is_encoded)
     *is_encoded = false;
 
@@ -1885,33 +1885,19 @@ auto RdbLoaderBase::LoadLen(bool* is_encoded) -> io::Result<uint64_t> {
   if (ec)
     return make_unexpected(ec);
 
-  uint64_t res = 0;
-  uint8_t first = mem_buf_->InputBuffer()[0];
-  int type = (first & 0xC0) >> 6;
-  mem_buf_->ConsumeInput(1);
-  if (type == RDB_ENCVAL) {
-    /* Read a 6 bit encoding type. */
-    if (is_encoded)
-      *is_encoded = true;
-    res = first & 0x3F;
-  } else if (type == RDB_6BITLEN) {
-    /* Read a 6 bit len. */
-    res = first & 0x3F;
-  } else if (type == RDB_14BITLEN) {
-    res = ((first & 0x3F) << 8) | mem_buf_->InputBuffer()[0];
-    mem_buf_->ConsumeInput(1);
-  } else if (first == RDB_32BITLEN) {
-    /* Read a 32 bit len. */
-    res = absl::big_endian::Load32(mem_buf_->InputBuffer().data());
-    mem_buf_->ConsumeInput(4);
-  } else if (first == RDB_64BITLEN) {
-    /* Read a 64 bit len. */
-    res = absl::big_endian::Load64(mem_buf_->InputBuffer().data());
-    mem_buf_->ConsumeInput(8);
-  } else {
-    LOG(ERROR) << "Bad length encoding " << type << " in rdbLoadLen()";
-    return Unexpected(errc::rdb_file_corrupted);
-  }
+  // Read integer meta info.
+  auto bytes = mem_buf_->InputBuffer();
+  PackedUIntMeta meta{bytes[0]};
+  bytes.remove_prefix(1);
+
+  // Read integer.
+  uint64_t res;
+  SET_OR_UNEXPECT(ReadPackedUInt(meta, bytes), res);
+
+  if (meta.Type() == RDB_ENCVAL && is_encoded)
+    *is_encoded = true;
+
+  mem_buf_->ConsumeInput(1 + meta.ByteSize());
 
   return res;
 }
@@ -1963,13 +1949,14 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service, DbIndex dbid) {
 
   io::BytesSource bs{io::Buffer(journal_blob)};
   journal_reader_.SetDb(dbid);
+  journal_reader_.SetSource(&bs);
 
   // Parse and exectue in loop.
   size_t done = 0;
   JournalExecutor ex{service};
   while (done < num_entries) {
     journal::ParsedEntry entry{};
-    SET_OR_RETURN(journal_reader_.ReadEntry(&bs), entry);
+    SET_OR_RETURN(journal_reader_.ReadEntry(), entry);
     ex.Execute(std::move(entry));
     done++;
   }

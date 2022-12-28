@@ -30,12 +30,28 @@ using nonstd::make_unexpected;
     dest = std::move(exp_res.value());         \
   }
 
+// Represents meta information for an encoded packed unsigned integer.
+struct PackedUIntMeta {
+  // Initialize by first byte in sequence.
+  PackedUIntMeta(uint8_t first_byte) : first_byte{first_byte} {
+  }
+
+  // Get underlying RDB type.
+  int Type() const;
+
+  // Get addintiinal size in bytes (excluding first one).
+  unsigned ByteSize() const;
+
+  uint8_t first_byte;
+};
+
 // Saves an packed unsigned integer. The first two bits in the first byte are used to
 // hold the encoding type. See the RDB_* definitions for more information
 // on the types of encoding. buf must be at least 9 bytes.
-unsigned WritePackedUInt(uint64_t value, uint8_t* buf);
+// Returns number of encoded bytes.
+unsigned WritePackedUInt(uint64_t value, io::MutableBytes dest);
 
 // Deserialize packed unsigned integer.
-io::Result<uint64_t> ReadPackedUInt(io::Source* source);
+io::Result<uint64_t> ReadPackedUInt(PackedUIntMeta meta, io::Bytes source);
 
 }  // namespace dfly

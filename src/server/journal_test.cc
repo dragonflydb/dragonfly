@@ -103,21 +103,19 @@ TEST(Journal, WriteRead) {
                                               {5, 1, list("DEL", "l1")},
                                               {6, 2, list("SET", "E", "2")}};
 
-  // Write all entries to string file.
-  io::StringSink ss;
-  JournalWriter writer{&ss};
+  JournalWriter writer{};
   for (const auto& entry : test_entries) {
     writer.Write(entry);
   }
 
   // Read them back.
-  io::BytesSource bs{io::Buffer(ss.str())};
-  JournalReader reader{0};
+  io::BytesSource bs{writer.Accumulated().InputBuffer()};
+  JournalReader reader{&bs, 0};
 
   for (unsigned i = 0; i < test_entries.size(); i++) {
     auto& expected = test_entries[i];
 
-    auto res = reader.ReadEntry(&bs);
+    auto res = reader.ReadEntry();
     ASSERT_TRUE(res.has_value());
 
     ASSERT_EQ(expected.opcode, res->opcode);

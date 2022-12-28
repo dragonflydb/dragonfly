@@ -697,10 +697,10 @@ void Replica::StableSyncDflyFb(Context* cntx) {
   SocketSource ss{sock_.get()};
   io::PrefixSource ps{prefix, &ss};
 
-  JournalReader reader{0};
+  JournalReader reader{&ps, 0};
   JournalExecutor executor{&service_};
   while (!cntx->IsCancelled()) {
-    auto res = reader.ReadEntry(&ps);
+    auto res = reader.ReadEntry();
     if (!res) {
       cntx->Error(res.error(), "Journal format error");
       return;

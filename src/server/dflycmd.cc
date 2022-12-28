@@ -107,7 +107,7 @@ void JournalStreamer::Start() {
     bool wake = false;
     {
       lock_guard lk(mu_);
-      ec = writer_.Write(entry);
+      writer_.Write(entry);
 
       if (writer_.BufSize() > 5)
         wake = true;
