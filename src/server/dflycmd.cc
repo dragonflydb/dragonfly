@@ -95,6 +95,7 @@ class JournalStreamer {
 
   io::Sink* dest_;
 
+  int submitted = 0;
   Fiber write_fb_;
   JournalWriter writer_;
 
@@ -106,20 +107,17 @@ void JournalStreamer::Start() {
 
   journal_cb_id_ = journal_->RegisterOnChange([this](const journal::Entry& entry) {
     error_code ec;
-    bool wake = false;
-    {
-      lock_guard lk(mu_);
-      writer_.Write(entry);
-
-      if (writer_.BufSize() > 5)
-        wake = true;
-    }
+    writer_.Write(entry);
 
     if (ec)
       cntx_->Error(ec);
 
-    if (wake)
-      cv_.notify_all();
+    // Provide backpressure if we accumulated to much.
+    // Wait for writer to finish last blob.
+    if (submitted > 10)
+      lock_guard lk{mu_};
+
+    cv_.notify_all();
   });
 }
 
@@ -138,11 +136,10 @@ void JournalStreamer::WriterFb() {
   base::IoBuf stash;
 
   while (true) {
-    {
-      std::unique_lock lk(mu_);
-      cv_.wait(lk);
-      writer_.Steal(&stash);
-    }
+    std::unique_lock lk(mu_);
+    cv_.wait(lk);
+    writer_.Steal(&stash);
+    submitted = 0;
 
     if (cntx_->IsCancelled())
       break;
