@@ -23,12 +23,11 @@
 #include "server/server_family.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
+#include "util/fibers/event_count.h"
 
 using namespace std;
 
 ABSL_DECLARE_FLAG(string, dir);
-
-ABSL_FLAG(bool, asyncstream, false, "use async streamer");
 
 namespace dfly {
 
@@ -71,7 +70,7 @@ struct TransactionGuard {
 class JournalStreamer {
  public:
   JournalStreamer(io::Sink* dest, journal::Journal* journal, Context* cntx)
-      : cntx_{cntx}, journal_{journal}, mu_{}, cv_{}, dest_{dest}, write_fb_{}, writer_{},
+      : cntx_{cntx}, journal_{journal}, waker_{}, dest_{dest}, write_fb_{}, writer_{},
         journal_cb_id_{0} {
   }
 
@@ -86,16 +85,18 @@ class JournalStreamer {
   // Writer fiber that steals buffer contents and writes them to dest.
   void WriterFb();
 
+  // Common condition for both sides to check that consumer is blocked
+  // because it buffered too much and waits for the writer to finish writing.
+  bool IsStalled() const;
+
  private:
   Context* cntx_;
   journal::Journal* journal_;
 
-  ::boost::fibers::mutex mu_;               // guard buffer and condvar wakeups
-  ::boost::fibers::condition_variable cv_;  // notify new data is available or cancelled
+  unsigned buffered_ = 0;                 // how many entries are buffered
+  ::util::fibers_ext::EventCount waker_;  // two sided waker
 
   io::Sink* dest_;
-
-  int submitted = 0;
   Fiber write_fb_;
   JournalWriter writer_;
 
@@ -106,26 +107,27 @@ void JournalStreamer::Start() {
   write_fb_ = Fiber(&JournalStreamer::WriterFb, this);
 
   journal_cb_id_ = journal_->RegisterOnChange([this](const journal::Entry& entry) {
-    error_code ec;
     writer_.Write(entry);
+    buffered_++;
 
-    if (ec)
-      cntx_->Error(ec);
-
-    // Provide backpressure if we accumulated to much.
-    // Wait for writer to finish last blob.
-    if (submitted > 10)
-      lock_guard lk{mu_};
-
-    cv_.notify_all();
+    // Stall and wait for writer to finish if too much data is accumulated.
+    // Otherwise, notify writer if it is waiting for data.
+    if (IsStalled()) {
+      // TODO: If 0->stalled cannot happen at once, then this wake is redundand.
+      // NOTE: Before removing, don't forget about this when switching to byte estimation.
+      waker_.notify();
+      waker_.await([this]() { return !IsStalled() || cntx_->IsCancelled(); });
+    } else {
+      waker_.notify();
+    }
   });
 }
 
 void JournalStreamer::Cancel() {
-  DCHECK(cntx_->IsCancelled());  // The writer exits only in this case
-
   journal_->UnregisterOnChange(journal_cb_id_);
-  cv_.notify_all();
+
+  DCHECK(cntx_->IsCancelled());  // Make sure it returns on wakeup
+  waker_.notifyAll();
 
   if (write_fb_.IsJoinable())
     write_fb_.Join();
@@ -136,13 +138,22 @@ void JournalStreamer::WriterFb() {
   base::IoBuf stash;
 
   while (true) {
-    std::unique_lock lk(mu_);
-    cv_.wait(lk);
-    writer_.Steal(&stash);
-    submitted = 0;
+    // If the producer is stalled, wake it up after stealing the buffer.
+    // Otherwise, wait for any data to appear.
+    bool stalled = IsStalled();
+    if (!stalled) {
+      waker_.await([this]() { return buffered_ > 0 || cntx_->IsCancelled(); });
+      stalled = IsStalled();
+    }
 
     if (cntx_->IsCancelled())
       break;
+
+    writer_.Steal(&stash);
+    buffered_ = 0;
+
+    if (stalled)
+      waker_.notify();
 
     if (auto ec = dest_->Write(stash.InputBuffer()); ec) {
       cntx_->Error(ec);
@@ -151,6 +162,11 @@ void JournalStreamer::WriterFb() {
     // TODO: shrink big stash.
     stash.Clear();
   }
+}
+
+bool JournalStreamer::IsStalled() const {
+  // TODO: Maybe look at bytes size and not on number of records instead.
+  return buffered_ >= 5;
 }
 
 }  // namespace
@@ -445,38 +461,19 @@ void DflyCmd::StopFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
 }
 
 OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
-  if (absl::GetFlag(FLAGS_asyncstream)) {
-    shared_ptr<JournalStreamer> streamer;
-    if (shard != nullptr) {
-      streamer.reset(new JournalStreamer(flow->conn->socket(), sf_->journal(), cntx));
-      streamer->Start();
-    }
-
-    flow->cleanup = [this, flow, streamer = std::move(streamer)]() {
-      if (streamer)
-        streamer->Cancel();
-      flow->TryShutdownSocket();
-    };
-  } else {
-    uint32_t cb_id = 0;
-    JournalWriter* writer = nullptr;
-
-    if (shard != nullptr) {
-      writer = new JournalWriter{};
-      auto journal_cb = [flow, writer](const journal::Entry& je) mutable {
-        writer->Write(je);
-        writer->Flush(flow->conn->socket());
-      };
-      cb_id = sf_->journal()->RegisterOnChange(std::move(journal_cb));
-    }
-
-    flow->cleanup = [this, flow, writer, cb_id]() {
-      if (cb_id)
-        sf_->journal()->UnregisterOnChange(cb_id);
-      delete writer;
-      flow->TryShutdownSocket();
-    };
+  JournalStreamer* streamer = nullptr;
+  if (shard != nullptr) {
+    streamer = new JournalStreamer{flow->conn->socket(), sf_->journal(), cntx};
+    streamer->Start();
   }
+
+  flow->cleanup = [this, flow, streamer]() {
+    if (streamer) {
+      streamer->Cancel();
+      delete streamer;
+    }
+    flow->TryShutdownSocket();
+  };
 
   return OpStatus::OK;
 }

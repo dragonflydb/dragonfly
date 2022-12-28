@@ -125,7 +125,8 @@ std::error_code JournalReader::EnsureRead(size_t num) {
 
 template <typename UT> io::Result<UT> JournalReader::ReadUInt() {
   // Determine type and number of following bytes.
-  EnsureRead(1);
+  if (auto ec = EnsureRead(1); ec)
+    return make_unexpected(ec);
   PackedUIntMeta meta{buf_.InputBuffer()[0]};
   buf_.ConsumeInput(1);
 
