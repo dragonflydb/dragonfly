@@ -96,6 +96,7 @@ void JournalWriter::Write(const journal::Entry& entry) {
 
 JournalReader::JournalReader(io::Source* source, DbIndex dbid)
     : source_{source}, buf_{}, str_buf_{}, dbid_{dbid} {
+  buf_.EnsureCapacity(4096);
 }
 
 void JournalReader::SetDb(DbIndex dbid) {
