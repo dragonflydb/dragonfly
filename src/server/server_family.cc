@@ -1319,7 +1319,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("tiered_writes", m.tiered_stats.tiered_writes);
     append("tiered_reserved", m.tiered_stats.storage_reserved);
     append("tiered_capacity", m.tiered_stats.storage_capacity);
-    append("tiered_aborted_writes", m.tiered_stats.aborted_offloads);
+    append("tiered_aborted_write_total", m.tiered_stats.aborted_write_cnt);
+    append("tiered_flush_skip_total", m.tiered_stats.flush_skip_cnt);
   }
 
   if (should_enter("PERSISTENCE", true)) {

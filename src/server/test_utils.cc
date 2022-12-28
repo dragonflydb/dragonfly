@@ -179,6 +179,14 @@ RespExpr BaseFamilyTest::Run(ArgSlice list) {
   return Run(GetId(), list);
 }
 
+RespExpr BaseFamilyTest::Run(absl::Span<std::string> span) {
+  vector<string_view> sv_vec(span.size());
+  for (unsigned i = 0; i < span.size(); ++i) {
+    sv_vec[i] = span[i];
+  }
+  return Run(sv_vec);
+}
+
 RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
   TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, id);
 
@@ -290,6 +298,12 @@ int64_t BaseFamilyTest::CheckedInt(ArgSlice list) {
   int64_t res;
   CHECK(absl::SimpleAtoi(sv, &res)) << "|" << sv << "|";
   return res;
+}
+
+string BaseFamilyTest::CheckedString(ArgSlice list) {
+  RespExpr resp = Run(list);
+  CHECK_EQ(RespExpr::STRING, int(resp.type)) << list;
+  return string{ToSV(resp.GetBuf())};
 }
 
 CmdArgVec BaseFamilyTest::TestConnWrapper::Args(ArgSlice list) {

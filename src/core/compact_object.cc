@@ -876,13 +876,15 @@ void CompactObj::GetString(char* dest) const {
 void CompactObj::SetExternal(size_t offset, size_t sz) {
   SetMeta(EXTERNAL_TAG, mask_ & ~kEncMask);
 
-  u_.ext_ptr.offset = offset;
+  u_.ext_ptr.page_index = offset / 4096;
+  u_.ext_ptr.page_offset = offset % 4096;
   u_.ext_ptr.size = sz;
 }
 
-std::pair<size_t, size_t> CompactObj::GetExternalPtr() const {
+std::pair<size_t, size_t> CompactObj::GetExternalSlice() const {
   DCHECK_EQ(EXTERNAL_TAG, taglen_);
-  return pair<size_t, size_t>(size_t(u_.ext_ptr.offset), size_t(u_.ext_ptr.size));
+  size_t offset = size_t(u_.ext_ptr.page_index) * 4096 + u_.ext_ptr.page_offset;
+  return pair<size_t, size_t>(offset, size_t(u_.ext_ptr.size));
 }
 
 void CompactObj::Reset() {

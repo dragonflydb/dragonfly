@@ -202,7 +202,7 @@ class DbSlice {
    */
   void FlushDb(DbIndex db_ind);
 
-  EngineShard* shard_owner() {
+  EngineShard* shard_owner() const {
     return owner_;
   }
 
