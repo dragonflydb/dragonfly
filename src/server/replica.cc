@@ -14,6 +14,7 @@ extern "C" {
 
 #include <boost/asio/ip/tcp.hpp>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/redis_parser.h"
@@ -23,6 +24,8 @@ extern "C" {
 #include "server/main_service.h"
 #include "server/rdb_load.h"
 #include "util/proactor_base.h"
+
+ABSL_FLAG(bool, skipexec, false, "Ignore stable state commands");
 
 namespace dfly {
 
@@ -697,6 +700,8 @@ void Replica::StableSyncDflyFb(Context* cntx) {
   SocketSource ss{sock_.get()};
   io::PrefixSource ps{prefix, &ss};
 
+  bool exec = !absl::GetFlag(FLAGS_skipexec);
+
   JournalReader reader{&ps, 0};
   JournalExecutor executor{&service_};
   while (!cntx->IsCancelled()) {
@@ -706,7 +711,8 @@ void Replica::StableSyncDflyFb(Context* cntx) {
       return;
     }
 
-    executor.Execute(std::move(res.value()));
+    if (exec)
+      executor.Execute(std::move(res.value()));
 
     last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
   }

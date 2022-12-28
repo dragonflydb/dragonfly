@@ -28,6 +28,8 @@ using namespace std;
 
 ABSL_DECLARE_FLAG(string, dir);
 
+ABSL_FLAG(bool, asyncstream, false, "use async streamer");
+
 namespace dfly {
 
 using namespace facade;
@@ -446,39 +448,38 @@ void DflyCmd::StopFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
 }
 
 OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
-  /*
-  shared_ptr<JournalStreamer> streamer;
-  if (shard != nullptr) {
-    streamer.reset(new JournalStreamer(flow->conn->socket(), sf_->journal(), cntx));
-    streamer->Start();
-  }
+  if (absl::GetFlag(FLAGS_asyncstream)) {
+    shared_ptr<JournalStreamer> streamer;
+    if (shard != nullptr) {
+      streamer.reset(new JournalStreamer(flow->conn->socket(), sf_->journal(), cntx));
+      streamer->Start();
+    }
 
-  flow->cleanup = [this, flow, streamer = std::move(streamer)]() {
-    if (streamer)
-      streamer->Cancel();
-    flow->TryShutdownSocket();
-  };
-
-  */
-  // Register journal listener and cleanup.
-  uint32_t cb_id = 0;
-  JournalWriter* writer = nullptr;
-
-  if (shard != nullptr) {
-    writer = new JournalWriter{};
-    auto journal_cb = [flow, writer](const journal::Entry& je) mutable {
-      writer->Write(je);
-      writer->Flush(flow->conn->socket());
+    flow->cleanup = [this, flow, streamer = std::move(streamer)]() {
+      if (streamer)
+        streamer->Cancel();
+      flow->TryShutdownSocket();
     };
-    cb_id = sf_->journal()->RegisterOnChange(std::move(journal_cb));
-  }
+  } else {
+    uint32_t cb_id = 0;
+    JournalWriter* writer = nullptr;
 
-  flow->cleanup = [this, flow, writer, cb_id]() {
-    if (cb_id)
-      sf_->journal()->UnregisterOnChange(cb_id);
-    delete writer;
-    flow->TryShutdownSocket();
-  };
+    if (shard != nullptr) {
+      writer = new JournalWriter{};
+      auto journal_cb = [flow, writer](const journal::Entry& je) mutable {
+        writer->Write(je);
+        writer->Flush(flow->conn->socket());
+      };
+      cb_id = sf_->journal()->RegisterOnChange(std::move(journal_cb));
+    }
+
+    flow->cleanup = [this, flow, writer, cb_id]() {
+      if (cb_id)
+        sf_->journal()->UnregisterOnChange(cb_id);
+      delete writer;
+      flow->TryShutdownSocket();
+    };
+  }
 
   return OpStatus::OK;
 }
