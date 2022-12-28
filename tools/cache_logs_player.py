@@ -44,7 +44,7 @@ class TwitterCacheTraceParser:
         elif operation == 'cas':
             cmd.args = ["SET", key, synthetic_value]
         elif operation == 'append':
-            cmd.args = ["SET", key, synthetic_value]
+            cmd.args = ["APPEND", key, synthetic_value]
         elif operation == 'prepend':
             cmd.args = ["SET", key, synthetic_value]
         elif operation == 'delete':
