@@ -88,6 +88,7 @@ void JournalWriter::Write(const journal::Entry& entry) {
       return Write(entry.dbid);
     case journal::Op::COMMAND:
       Write(entry.txid);
+      Write(entry.shard_cntx);
       std::visit([this](const auto& payload) { return Write(payload); }, entry.payload);
     default:
       break;
@@ -144,6 +145,7 @@ template <typename UT> io::Result<UT> JournalReader::ReadUInt() {
 
 template io::Result<uint8_t> JournalReader::ReadUInt<uint8_t>();
 template io::Result<uint16_t> JournalReader::ReadUInt<uint16_t>();
+template io::Result<uint32_t> JournalReader::ReadUInt<uint32_t>();
 template io::Result<uint64_t> JournalReader::ReadUInt<uint64_t>();
 
 io::Result<size_t> JournalReader::ReadString() {
@@ -192,6 +194,7 @@ io::Result<journal::ParsedEntry> JournalReader::ReadEntry() {
   switch (entry.opcode) {
     case journal::Op::COMMAND:
       SET_OR_UNEXPECT(ReadUInt<uint64_t>(), entry.txid);
+      SET_OR_UNEXPECT(ReadUInt<uint32_t>(), entry.shard_cnt);
       entry.payload = CmdArgVec{};
       if (auto ec = Read(&*entry.payload); ec)
         return make_unexpected(ec);

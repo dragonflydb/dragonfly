@@ -490,18 +490,18 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
   }
 
   if (ec) {
-    cntx->Error(ec);
+    cntx->ReportError(ec);
     return;
   }
 
   if (ec = saver->SaveBody(cntx->GetCancellation(), nullptr); ec) {
-    cntx->Error(ec);
+    cntx->ReportError(ec);
     return;
   }
 
   ec = flow->conn->socket()->Write(io::Buffer(flow->eof_token));
   if (ec) {
-    cntx->Error(ec);
+    cntx->ReportError(ec);
     return;
   }
 }
@@ -514,9 +514,8 @@ uint32_t DflyCmd::CreateSyncSession() {
   auto err_handler = [this, sync_id](const GenericError& err) {
     LOG(INFO) << "Replication error: " << err.Format();
 
-    // Stop replication in case of error.
-    // StopReplication needs to run async to prevent blocking
-    // the error handler.
+    // Spawn external fiber to allow destructing the context from outside
+    // and return from the handler immediately.
     ::boost::fibers::fiber{&DflyCmd::StopReplication, this, sync_id}.detach();
   };
 
@@ -591,6 +590,9 @@ void DflyCmd::CancelReplication(uint32_t sync_id, shared_ptr<ReplicaInfo> replic
     lock_guard lk(mu_);
     replica_infos_.erase(sync_id);
   }
+
+  // Wait for error handler to quit.
+  replica_ptr->cntx.JoinErrorHandler();
 
   LOG(INFO) << "Evicted sync session " << sync_id;
 }

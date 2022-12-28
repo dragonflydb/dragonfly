@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1
+FROM gcr.io/cadvisor/cadvisor:v0.46.0 as libpfm_donor
+
+FROM alpine:3.17.0 as builder
+
+# "openssl-libs-static" fixes "Could NOT find OpenSSL, try to set the path to OpenSSL root folder in the"
+RUN apk add autoconf-archive automake bash bison boost-dev cmake coreutils \
+        curl ccache git gcc gdb g++ libunwind-dev libtool libxml2-dev make ninja \
+        openssl-dev openssl-libs-static patch zip zstd-dev
+
+# This is required to make static linking work
+RUN ls -1 /usr/lib/libboost_*.so | while read -r _file; do ln -sfv ${_file} ${_file//.so/.a}; done
+
+# Borrow libpfm from cadvisor, so we don't have to build it ourselves
+# https://github.com/google/cadvisor/blob/master/deploy/Dockerfile
+COPY --from=libpfm_donor /usr/local/lib/libpfm.so* /usr/local/lib/
+
+WORKDIR /build
+
+COPY . ./
+
+RUN make HELIO_RELEASE=y release
+
+RUN build-opt/dragonfly --version
+
+FROM alpine:3.17.0
+
+RUN apk --no-cache add libgcc libstdc++ libunwind boost1.80-fiber zstd-dev su-exec netcat-openbsd
+
+RUN addgroup -S -g 1000 dfly && adduser -S -G dfly -u 999 dfly
+RUN mkdir /data && chown dfly:dfly /data
+
+VOLUME /data
+WORKDIR /data
+COPY tools/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY tools/docker/healthcheck.sh /usr/local/bin/healthcheck.sh
+COPY --from=builder /build/build-opt/dragonfly /usr/local/bin/
+
+HEALTHCHECK CMD /usr/local/bin/healthcheck.sh
+ENTRYPOINT ["entrypoint.sh"]
+
+EXPOSE 6379
+
+CMD ["dragonfly", "--logtostderr"]

@@ -21,7 +21,7 @@ add_library(dragonfly_lib  channel_slice.cc command_registry.cc
             zset_family.cc version.cc bitops_family.cc container_utils.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc)
 
-cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib strings_lib html_lib
+cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib strings_lib html_lib http_client_lib
          absl::random_random TRDP::jsoncons zstd TRDP::lz4)
 
 add_library(dfly_test_lib test_utils.cc)
@@ -42,7 +42,7 @@ cxx_test(blocking_controller_test dragonfly_lib LABELS DFLY)
 cxx_test(snapshot_test dragonfly_lib LABELS DFLY)
 cxx_test(json_family_test dfly_test_lib LABELS DFLY)
 cxx_test(journal_test dfly_test_lib LABELS DFLY)
-
+cxx_test(tiered_storage_test dfly_test_lib LABELS DFLY)
 
 add_custom_target(check_dfly WORKING_DIRECTORY .. COMMAND ctest -L DFLY)
 add_dependencies(check_dfly dragonfly_test json_family_test list_family_test

@@ -268,7 +268,7 @@ class CompactObj {
   }
 
   void SetExternal(size_t offset, size_t sz);
-  std::pair<size_t, size_t> GetExternalPtr() const;
+  std::pair<size_t, size_t> GetExternalSlice() const;
 
   // In case this object a single blob, returns number of bytes allocated on heap
   // for that blob. Otherwise returns 0.
@@ -317,9 +317,12 @@ class CompactObj {
   }
 
   struct ExternalPtr {
-    size_t offset;
+    uint32_t type : 8;
+    uint32_t reserved : 24;
+    uint32_t page_index;
+    uint16_t page_offset;  // 0 for multi-page blobs. != 0 for small blobs.
+    uint16_t reserved2;
     uint32_t size;
-    uint32_t unneeded;
   } __attribute__((packed));
 
   struct JsonWrapper {

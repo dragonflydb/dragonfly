@@ -55,6 +55,8 @@ struct ObjInfo {
   enum LockStatus { NONE, S, X } lock_status = NONE;
 
   int64_t ttl = INT64_MAX;
+  optional<uint32_t> external_len;
+
   bool has_sec_precision = false;
   bool found = false;
 };
@@ -338,11 +340,17 @@ void DebugCmd::Inspect(string_view key) {
     PrimeIterator it = pt->Find(key);
     ObjInfo oinfo;
     if (IsValid(it)) {
+      const PrimeValue& pv = it->second;
+
       oinfo.found = true;
-      oinfo.encoding = it->second.Encoding();
+      oinfo.encoding = pv.Encoding();
       oinfo.bucket_id = it.bucket_id();
       oinfo.slot_id = it.slot_id();
-      if (it->second.HasExpire()) {
+      if (pv.IsExternal()) {
+        oinfo.external_len.emplace(pv.GetExternalSlice().second);
+      }
+
+      if (pv.HasExpire()) {
         ExpireIterator exp_it = exp_t->Find(it->first);
         CHECK(!exp_it.is_done());
 
@@ -366,13 +374,20 @@ void DebugCmd::Inspect(string_view key) {
   ObjInfo res = ess.Await(sid, cb);
   string resp;
 
-  if (res.found) {
-    StrAppend(&resp, "encoding:", strEncoding(res.encoding), " bucket_id:", res.bucket_id);
-    StrAppend(&resp, " slot:", res.slot_id, " shard:", sid);
+  if (!res.found) {
+    (*cntx_)->SendError(kKeyNotFoundErr);
+    return;
+  }
 
-    if (res.ttl != INT64_MAX) {
-      StrAppend(&resp, " ttl:", res.ttl, res.has_sec_precision ? "s" : "ms");
-    }
+  StrAppend(&resp, "encoding:", strEncoding(res.encoding), " bucket_id:", res.bucket_id);
+  StrAppend(&resp, " slot:", res.slot_id, " shard:", sid);
+
+  if (res.ttl != INT64_MAX) {
+    StrAppend(&resp, " ttl:", res.ttl, res.has_sec_precision ? "s" : "ms");
+  }
+
+  if (res.external_len) {
+    StrAppend(&resp, " spill_len:", *res.external_len);
   }
 
   if (res.lock_status != ObjInfo::NONE) {

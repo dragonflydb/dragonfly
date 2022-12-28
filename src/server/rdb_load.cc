@@ -1957,7 +1957,7 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service, DbIndex dbid) {
   while (done < num_entries) {
     journal::ParsedEntry entry{};
     SET_OR_RETURN(journal_reader_.ReadEntry(), entry);
-    ex.Execute(std::move(entry));
+    ex.Execute(entry);
     done++;
   }
 

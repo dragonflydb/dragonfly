@@ -276,16 +276,8 @@ async def test_disconnect_master(df_local_factory, t_master, t_replicas, n_rando
 
     c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
 
-    async def full_sync(c_replica):
-        try:
-            await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
-            await wait_available_async(c_replica)
-        except aioredis.ResponseError as e:
-            # This should mean master crashed during greet phase
-            pass
-
     async def crash_master_fs():
-        await asyncio.sleep(random.random() / 10 + 0.01)
+        await asyncio.sleep(random.random() / 10 + 0.1 * len(replicas))
         master.stop(kill=True)
 
     async def start_master():
@@ -296,8 +288,11 @@ async def test_disconnect_master(df_local_factory, t_master, t_replicas, n_rando
 
     await start_master()
 
-    # Crash master during full sync
-    await asyncio.gather(*(full_sync(c) for c in c_replicas), crash_master_fs())
+    # Crash master during full sync, but with all passing initial connection phase
+    await asyncio.gather(*(c_replica.execute_command("REPLICAOF localhost " + str(master.port))
+                           for c_replica in c_replicas), crash_master_fs())
+
+    await asyncio.sleep(1 + len(replicas) * 0.5)
 
     for _ in range(n_random_crashes):
         await start_master()

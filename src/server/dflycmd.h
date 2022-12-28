@@ -92,8 +92,10 @@ class DflyCmd {
 
     facade::Connection* conn;
 
-    ::util::fibers_ext::Fiber full_sync_fb;  // Full sync fiber.
-    std::unique_ptr<RdbSaver> saver;         // Saver used by the full sync phase.
+
+    util::fibers_ext::Fiber full_sync_fb;  // Full sync fiber.
+    std::unique_ptr<RdbSaver> saver;       // Saver used by the full sync phase.
+
     std::string eof_token;
 
     std::function<void()> cleanup;  // Optional cleanup for cancellation.
