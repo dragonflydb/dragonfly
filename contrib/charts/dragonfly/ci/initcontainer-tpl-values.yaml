@@ -1,0 +1,5 @@
+initContainers: |
+  - name: initcontainer-tpl
+    image: {{ .Values.image.repository }}:latest
+    command: ["/bin/sh"]
+    args: ["-c", "date; sleep 1;"]

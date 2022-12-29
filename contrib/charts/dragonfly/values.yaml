@@ -52,6 +52,10 @@ service:
   type: ClusterIP
   # -- Dragonfly service port
   port: 6379
+  # -- Extra annotations for the service
+  annotations: {}
+  # -- Extra labels for the service
+  lablels: {}
   metrics:
     # -- name for the metrics port
     portName: metrics
@@ -65,6 +69,8 @@ serviceMonitor:
   namespace: ""
   # -- additional labels to apply to the metrics
   labels: {}
+  # -- additional annotations to apply to the metrics
+  annotations: {}
   # -- scrape interval
   interval: 10s
   # -- scrape timeout
@@ -130,9 +136,8 @@ probes:
     failureThreshold: 3
     successThreshold: 1
 
-command:
-  # -- Allow overriding the container's command
-  set: []
+# -- Allow overriding the container's command
+command: []
 
 # -- Extra arguments to pass to the dragonfly binary
 extraArgs: []
@@ -145,6 +150,12 @@ extraVolumeMounts: []
 
 # -- A list of initContainers to run before each pod starts
 initContainers: []
+
+# -- Additional sidecar containers
+extraContainers: []
+
+# -- extra K8s manifests to deploy
+extraObjects: []
 
 resources:
   # -- The requested resources for the containers

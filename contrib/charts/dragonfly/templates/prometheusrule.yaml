@@ -5,16 +5,10 @@ metadata:
   name: {{ template "dragonfly.fullname" . }}-metrics
   namespace: {{ .Release.Namespace }}
   labels:
-    chart: {{ template "dragonfly.chart" . }}
-    app: {{ template "dragonfly.name" . }}
-    release: "{{ .Release.Name }}"
-    heritage: "{{ .Release.Service }}"
-    {{- if .Values.serviceMonitor.labels }}
-    {{- toYaml .Values.serviceMonitor.labels | nindent 4 }}
-    {{- end }}
+    {{- include "dragonfly.labels" . | nindent 4 }}
 spec:
   groups:
   - name: {{ template "dragonfly.name" . }}
     rules:
-{{- toYaml .Values.prometheusRule.spec | nindent 4 }}
+    {{- toYaml .Values.prometheusRule.spec | nindent 4 }}
 {{- end }}
