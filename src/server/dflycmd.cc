@@ -353,15 +353,19 @@ void DflyCmd::StopFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
 OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, EngineShard* shard) {
   // Register journal listener and cleanup.
   uint32_t cb_id = 0;
+  JournalWriter* writer = nullptr;
   if (shard != nullptr) {
-    JournalWriter writer{flow->conn->socket()};
-    auto journal_cb = [flow, writer = std::move(writer)](const journal::Entry& je) mutable {
-      writer.Write(je);
+    writer = new JournalWriter{};
+    auto journal_cb = [flow, writer](const journal::Entry& je) mutable {
+      writer->Write(je);
+      writer->Flush(flow->conn->socket());
     };
     cb_id = sf_->journal()->RegisterOnChange(std::move(journal_cb));
   }
 
-  flow->cleanup = [flow, this, cb_id]() {
+  flow->cleanup = [this, cb_id, writer, flow]() {
+    if (writer)
+      delete writer;
     if (cb_id)
       sf_->journal()->UnregisterOnChange(cb_id);
     flow->TryShutdownSocket();
