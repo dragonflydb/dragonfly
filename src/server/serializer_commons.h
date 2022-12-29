@@ -39,7 +39,7 @@ struct PackedUIntMeta {
   // Get underlying RDB type.
   int Type() const;
 
-  // Get addintiinal size in bytes (excluding first one).
+  // Get additional size in bytes (excluding first one).
   unsigned ByteSize() const;
 
   uint8_t first_byte;

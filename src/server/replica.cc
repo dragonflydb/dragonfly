@@ -748,7 +748,6 @@ void Replica::StableSyncDflyFb(Context* cntx) {
     prefix = leftover_buf_->InputBuffer();
   }
 
-  VLOG(0) << "LEFTOVER SIZE" << prefix.size();
   SocketSource ss{sock_.get()};
   io::PrefixSource ps{prefix, &ss};
 
