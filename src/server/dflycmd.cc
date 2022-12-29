@@ -290,7 +290,7 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
       FlowInfo* flow = &replica_ptr->flows[index];
 
       StopFullSyncInThread(flow, shard);
-      status = StartStableSyncInThread(flow, shard);
+      status = StartStableSyncInThread(flow, &replica_ptr->cntx, shard);
       return OpStatus::OK;
     };
     shard_set->pool()->AwaitFiberOnAll(std::move(cb));
@@ -350,15 +350,16 @@ void DflyCmd::StopFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
   flow->saver.reset();
 }
 
-OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, EngineShard* shard) {
+OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
   // Register journal listener and cleanup.
   uint32_t cb_id = 0;
   JournalWriter* writer = nullptr;
   if (shard != nullptr) {
     writer = new JournalWriter{};
-    auto journal_cb = [flow, writer](const journal::Entry& je) mutable {
+    auto journal_cb = [flow, cntx, writer](const journal::Entry& je) mutable {
       writer->Write(je);
-      writer->Flush(flow->conn->socket());
+      if (auto ec = writer->Flush(flow->conn->socket()); ec)
+        cntx->ReportError(ec);
     };
     cb_id = sf_->journal()->RegisterOnChange(std::move(journal_cb));
   }

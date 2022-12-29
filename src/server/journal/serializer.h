@@ -18,18 +18,14 @@ namespace dfly {
 // It automatically keeps track of the current database index.
 class JournalWriter {
  public:
-  // Initialize with sink and optional start database index. If no start index is set,
-  // a SELECT will be issued before the first entry.
-  JournalWriter(std::optional<DbIndex> dbid = std::nullopt);
-
   // Write single entry to internal buffer.
   void Write(const journal::Entry& entry);
 
   // Flush internal buffer to sink.
   std::error_code Flush(io::Sink* sink_);
 
-  // Get read access to internal buffer.
-  io::Bytes Accumulated();
+  // Return reference to internal buffer.
+  base::IoBuf& Accumulated();
 
  private:
   void Write(uint64_t v);           // Write packed unsigned integer.
@@ -40,8 +36,8 @@ class JournalWriter {
   void Write(std::monostate);  // Overload for empty std::variant
 
  private:
-  base::IoBuf buf_;
-  std::optional<DbIndex> cur_dbid_;
+  base::IoBuf buf_{};
+  std::optional<DbIndex> cur_dbid_{};
 };
 
 // JournalReader allows deserializing journal entries from a source.
@@ -61,7 +57,7 @@ struct JournalReader {
   io::Result<journal::ParsedEntry> ReadEntry();
 
  private:
-  // Ensure internal buffer has at least num bytes.
+  // Read from source until buffer contains at least num bytes.
   std::error_code EnsureRead(size_t num);
 
   // Read unsigned integer in packed encoding.

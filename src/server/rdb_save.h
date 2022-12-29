@@ -16,6 +16,7 @@ extern "C" {
 #include "base/pod_array.h"
 #include "io/io.h"
 #include "server/common.h"
+#include "server/journal/serializer.h"
 #include "server/journal/types.h"
 #include "server/table.h"
 
@@ -168,10 +169,13 @@ class RdbSerializer {
   void CompressBlob();
   void AllocateCompressorOnce();
 
+  JournalWriter journal_writer_;
+
   std::unique_ptr<LZF_HSLOT[]> lzf_;
   base::IoBuf mem_buf_;
   base::PODArray<uint8_t> tmp_buf_;
   std::string tmp_str_;
+
   CompressionMode compression_mode_;
   // TODO : This compressor impl should support different compression algorithms zstd/lz4 etc.
   std::unique_ptr<CompressorImpl> compressor_impl_;

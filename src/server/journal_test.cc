@@ -112,7 +112,7 @@ TEST(Journal, WriteRead) {
   }
 
   // Read them back.
-  io::BytesSource bs{writer.Accumulated()};
+  io::BytesSource bs{writer.Accumulated().InputBuffer()};
   JournalReader reader{&bs, 0};
 
   for (unsigned i = 0; i < test_entries.size(); i++) {

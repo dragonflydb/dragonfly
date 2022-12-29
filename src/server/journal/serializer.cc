@@ -18,9 +18,6 @@ using namespace std;
 
 namespace dfly {
 
-JournalWriter::JournalWriter(std::optional<DbIndex> dbid) : cur_dbid_{dbid} {
-}
-
 std::error_code JournalWriter::Flush(io::Sink* sink) {
   if (auto ec = sink->Write(buf_.InputBuffer()); ec)
     return ec;
@@ -28,14 +25,14 @@ std::error_code JournalWriter::Flush(io::Sink* sink) {
   return {};
 }
 
-io::Bytes JournalWriter::Accumulated() {
-  return buf_.InputBuffer();
+base::IoBuf& JournalWriter::Accumulated() {
+  return buf_;
 }
 
 void JournalWriter::Write(uint64_t v) {
   uint8_t buf[10];
   unsigned len = WritePackedUInt(v, buf);
-  buf_.EnsureCapacity(10);
+  buf_.EnsureCapacity(sizeof(buf));
   memcpy(buf_.AppendBuffer().data(), buf, len);
   buf_.CommitWrite(len);
 }
@@ -87,7 +84,7 @@ void JournalWriter::Write(const journal::Entry& entry) {
 }
 
 JournalReader::JournalReader(io::Source* source, DbIndex dbid)
-    : str_buf_{}, source_{source}, buf_{}, dbid_{dbid} {
+    : str_buf_{}, source_{source}, buf_{4096}, dbid_{dbid} {
 }
 
 void JournalReader::SetDb(DbIndex dbid) {
@@ -129,6 +126,7 @@ template <typename UT> io::Result<UT> JournalReader::ReadUInt() {
   // Read and check intenger.
   uint64_t res;
   SET_OR_UNEXPECT(ReadPackedUInt(meta, buf_.InputBuffer()), res);
+  buf_.ConsumeInput(meta.ByteSize());
 
   if (res > std::numeric_limits<UT>::max())
     return make_unexpected(make_error_code(errc::result_out_of_range));
