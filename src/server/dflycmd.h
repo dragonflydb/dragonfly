@@ -159,7 +159,7 @@ class DflyCmd {
   void StopFullSyncInThread(FlowInfo* flow, EngineShard* shard);
 
   // Start stable sync in thread. Called for each flow.
-  facade::OpStatus StartStableSyncInThread(FlowInfo* flow, EngineShard* shard);
+  facade::OpStatus StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard);
 
   // Fiber that runs full sync for each flow.
   void FullSyncFb(FlowInfo* flow, Context* cntx);

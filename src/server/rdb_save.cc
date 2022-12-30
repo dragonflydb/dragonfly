@@ -27,7 +27,6 @@ extern "C" {
 #include "core/string_set.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
-#include "server/journal/serializer.h"
 #include "server/rdb_extensions.h"
 #include "server/serializer_commons.h"
 #include "server/snapshot.h"
@@ -253,7 +252,7 @@ std::error_code RdbSerializer::SaveValue(const PrimeValue& pv) {
 error_code RdbSerializer::SelectDb(uint32_t dbid) {
   uint8_t buf[16];
   buf[0] = RDB_OPCODE_SELECTDB;
-  unsigned enclen = WritePackedUInt(dbid, buf + 1);
+  unsigned enclen = WritePackedUInt(dbid, io::MutableBytes{buf}.subspan(1));
   return WriteRaw(Bytes{buf, enclen + 1});
 }
 
@@ -683,16 +682,19 @@ size_t RdbSerializer::SerializedLen() const {
 }
 
 error_code RdbSerializer::WriteJournalEntries(absl::Span<const journal::Entry> entries) {
-  // Write journal blob to string file.
-  io::StringSink ss{};
-  JournalWriter writer{&ss};
   for (const auto& entry : entries) {
-    RETURN_ON_ERR(writer.Write(entry));
+    journal_writer_.Write(entry);
   }
 
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_JOURNAL_BLOB));
   RETURN_ON_ERR(SaveLen(entries.size()));
-  return SaveString(ss.str());
+
+  auto& buf = journal_writer_.Accumulated();
+  auto bytes = buf.InputBuffer();
+  RETURN_ON_ERR(SaveString(string_view{reinterpret_cast<const char*>(bytes.data()), bytes.size()}));
+  buf.Clear();
+
+  return error_code{};
 }
 
 error_code RdbSerializer::SaveString(string_view val) {
@@ -902,7 +904,7 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
         continue;
 
       if (record.db_index != last_db_index) {
-        unsigned enclen = WritePackedUInt(record.db_index, buf + 1);
+        unsigned enclen = WritePackedUInt(record.db_index, io::MutableBytes{buf}.subspan(1));
         string_view str{(char*)buf, enclen + 1};
 
         io_error = sink_->Write(io::Buffer(str));
@@ -1171,7 +1173,7 @@ void RdbSerializer::CompressBlob() {
 
   // Write encoded compressed blob len
   dest = mem_buf_.AppendBuffer();
-  unsigned enclen = WritePackedUInt(compressed_blob.length(), dest.data());
+  unsigned enclen = WritePackedUInt(compressed_blob.length(), dest);
   mem_buf_.CommitWrite(enclen);
 
   // Write compressed blob
