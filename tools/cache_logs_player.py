@@ -155,12 +155,14 @@ class AsyncPlayer:
             # handle the remaining lines
             await self.dispatch_batches()
 
-    async def report_stats(self):
-        while True:
+    async def print_stats(self):
             info = await self.redis_client.execute_command("info", "stats")
             print(f"{datetime.now()}: {info}")
-            await asyncio.sleep(10)
 
+    async def report_stats(self):
+        while True:
+            await self.print_stats()
+            await asyncio.sleep(10)
 
     async def play(self, csv_file, parser) -> None:
         print(f"pinging {self.redis_uri} successful?")
@@ -175,6 +177,7 @@ class AsyncPlayer:
         await self.worker_pool.stop()
         stats_task.cancel()
         print("all done")
+        await self.print_stats()
 
 def main():
     parser = argparse.ArgumentParser(description='Cache Logs Player')
