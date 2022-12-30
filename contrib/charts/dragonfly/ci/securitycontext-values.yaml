@@ -1,0 +1,5 @@
+podSecurityContext:
+  allowPrivilegeEscalation: false
+
+securityContext:
+  readOnlyRootFilesystem: true

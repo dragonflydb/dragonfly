@@ -1,0 +1,5 @@
+extraContainers:
+  - name: sidecar-string
+    image: busybox:latest
+    command: ["/bin/sh"]
+    args: ["-c", "date; sleep 3600;"]

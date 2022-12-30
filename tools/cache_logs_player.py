@@ -156,8 +156,12 @@ class AsyncPlayer:
             await self.dispatch_batches()
 
     async def print_stats(self):
-            info = await self.redis_client.execute_command("info", "stats")
-            print(f"{datetime.now()}: {info}")
+        info = await self.redis_client.execute_command("info", "stats")
+        print(f"{datetime.now()}: {info}")
+
+    async def report_stats(self):
+        while True:
+            self.print_stats()
 
     async def report_stats(self):
         while True:
