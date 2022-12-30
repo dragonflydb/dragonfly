@@ -32,16 +32,12 @@ base::IoBuf& JournalWriter::Accumulated() {
 void JournalWriter::Write(uint64_t v) {
   uint8_t buf[10];
   unsigned len = WritePackedUInt(v, buf);
-  buf_.EnsureCapacity(sizeof(buf));
-  memcpy(buf_.AppendBuffer().data(), buf, len);
-  buf_.CommitWrite(len);
+  buf_.WriteAndCommit(buf, len);
 }
 
 void JournalWriter::Write(std::string_view sv) {
   Write(sv.size());
-  buf_.EnsureCapacity(sv.size());
-  memcpy(buf_.AppendBuffer().data(), sv.data(), sv.size());
-  buf_.CommitWrite(sv.size());
+  buf_.WriteAndCommit(sv.data(), sv.size());
 }
 
 void JournalWriter::Write(CmdArgList args) {

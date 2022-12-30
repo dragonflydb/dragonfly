@@ -185,7 +185,7 @@ class Replica {
   // Guard operations where flows might be in a mixed state (transition/setup)
   ::boost::fibers::mutex flows_op_mu_;
 
-  std::unique_ptr<base::IoBuf> leftover_buf_;
+  std::optional<base::IoBuf> leftover_buf_;
   std::unique_ptr<facade::RedisParser> parser_;
   facade::RespVec resp_args_;
   facade::CmdArgVec cmd_str_args_;

@@ -22,27 +22,27 @@ struct Entry;
 
 class RdbSerializer;
 
-//┌────────────────┐   ┌─────────────┐
-//│IterateBucketsFb│   │  OnDbChange │
-//└──────┬─────────┘   └─┬───────────┘
-//       │               │            OnDbChange forces whole bucket to be
-//       ▼               ▼            serialized if iterate didn't reach it yet
-//┌──────────────────────────┐
-//│     SerializeBucket      │        Both might fall back to a temporary serializer
-//└────────────┬─────────────┘        if default is used on another db index
-//             │
-//             |                      Channel is left open in journal streaming mode
-//             ▼
-//┌──────────────────────────┐          ┌─────────────────────────┐
-//│     SerializeEntry       │ ◄────────┤     OnJournalEntry      │
-//└─────────────┬────────────┘          └─────────────────────────┘
+// ┌────────────────┐   ┌─────────────┐
+// │IterateBucketsFb│   │  OnDbChange │
+// └──────┬─────────┘   └─┬───────────┘
+//        │               │            OnDbChange forces whole bucket to be
+//        ▼               ▼            serialized if iterate didn't reach it yet
+// ┌──────────────────────────┐
+// │     SerializeBucket      │        Both might fall back to a temporary serializer
+// └────────────┬─────────────┘        if default is used on another db index
 //              │
-//        PushFileToChannel         Default buffer gets flushed on iteration,
-//              │                   temporary on destruction
+//              |                      Channel is left open in journal streaming mode
 //              ▼
-//┌──────────────────────────────┐
-//│     dest->Push(buffer)       │
-//└──────────────────────────────┘
+// ┌──────────────────────────┐          ┌─────────────────────────┐
+// │     SerializeEntry       │ ◄────────┤     OnJournalEntry      │
+// └─────────────┬────────────┘          └─────────────────────────┘
+//               │
+//         PushBytesToChannel        Default buffer gets flushed on iteration,
+//               │                   temporary on destruction
+//               ▼
+// ┌──────────────────────────────┐
+// │     dest->Push(buffer)       │
+// └──────────────────────────────┘
 
 // SliceSnapshot is used for iterating over a shard at a specified point-in-time
 // and submitting all values to an output channel.
@@ -95,8 +95,8 @@ class SliceSnapshot {
   void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
                       std::optional<uint64_t> expire, RdbSerializer* serializer);
 
-  // Push StringFile buffer to channel.
-  void PushFileToChannel(DbIndex db_index, io::StringFile* sfile);
+  // Push byte slice to channel.
+  void PushBytesToChannel(DbIndex db_index, io::Bytes bytes);
 
   // DbChange listener
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
@@ -114,9 +114,6 @@ class SliceSnapshot {
 
   // Convert value into DbRecord.
   DbRecord GetDbRecord(DbIndex db_index, std::string value);
-
-  // Flush internals of a temporary serializer.
-  void FlushTmpSerializer(DbIndex db_index, RdbSerializer* serializer);
 
  public:
   uint64_t snapshot_version() const {
@@ -144,8 +141,6 @@ class SliceSnapshot {
 
   DbIndex current_db_;
 
-  // TODO : drop default_buffer from this class, we dont realy need it.
-  std::unique_ptr<io::StringFile> default_buffer_;  // filled by default_serializer_
   std::unique_ptr<RdbSerializer> default_serializer_;
 
   ::boost::fibers::mutex mu_;
