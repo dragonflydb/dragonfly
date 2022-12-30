@@ -1,0 +1,5 @@
+extraContainers: |
+  - name: sidecar-tpl
+    image: {{ .Values.image.repository }}:latest
+    command: ["/bin/sh"]
+    args: ["-c", "date; sleep 3600;"]

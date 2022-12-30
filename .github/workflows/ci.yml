@@ -124,5 +124,5 @@ jobs:
             install \
             --config .ct.yaml \
             --debug \
-            --helm-extra-set-args "--set=image.repository=ghcr.io/${{ github.repository }}" \
+            --helm-extra-set-args "--set=image.repository=ghcr.io/${{ github.repository }},probes=null" \
             ${{github.event_name == 'workflow_dispatch' && '--all'}} ;

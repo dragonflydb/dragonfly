@@ -1,0 +1,6 @@
+command:
+  - /usr/local/bin/dragonfly
+  - --logtostderr
+
+extraArgs:
+  - --cache_mode=true
