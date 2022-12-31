@@ -118,9 +118,17 @@ class RdbSerializer {
 
   ~RdbSerializer();
 
-  std::error_code WriteOpcode(uint8_t opcode) {
-    return WriteRaw(::io::Bytes{&opcode, 1});
-  }
+  // Get access to internal buffer, compressed, if enabled.
+  io::Bytes Flush();
+
+  // Internal buffer size. Might shrink after flush due to compression.
+  size_t SerializedLen() const;
+
+  // Flush internal buffer to sink.
+  std::error_code FlushToSink(io::Sink* s);
+
+  // Clear internal buffer contents.
+  void Clear();
 
   std::error_code SelectDb(uint32_t dbid);
 
@@ -128,15 +136,12 @@ class RdbSerializer {
   // Returns the serialized rdb_type or the error.
   // expire_ms = 0 means no expiry.
   io::Result<uint8_t> SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms);
-  std::error_code WriteRaw(const ::io::Bytes& buf);
-  std::error_code SaveString(std::string_view val);
 
-  std::error_code SaveString(const uint8_t* buf, size_t len) {
-    return SaveString(std::string_view{reinterpret_cast<const char*>(buf), len});
-  }
-
-  std::error_code FlushToSink(io::Sink* s);
   std::error_code SaveLen(size_t len);
+  std::error_code SaveString(std::string_view val);
+  std::error_code SaveString(const uint8_t* buf, size_t len) {
+    return SaveString(io::View(io::Bytes{buf, len}));
+  }
 
   // This would work for either string or an object.
   // The arg pv is taken from it->second if accessing
@@ -144,13 +149,16 @@ class RdbSerializer {
   // for the dump command - thus it is public function
   std::error_code SaveValue(const PrimeValue& pv);
 
-  size_t SerializedLen() const;
+  std::error_code WriteRaw(const ::io::Bytes& buf);
+  std::error_code WriteOpcode(uint8_t opcode) {
+    return WriteRaw(::io::Bytes{&opcode, 1});
+  }
 
   // Write journal entries as an embedded journal blob.
   std::error_code WriteJournalEntries(absl::Span<const journal::Entry> entries);
 
   // Send FULL_SYNC_CUT opcode to notify that all static data was sent.
-  std::error_code SendFullSyncCut(io::Sink* s);
+  std::error_code SendFullSyncCut();
 
  private:
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);

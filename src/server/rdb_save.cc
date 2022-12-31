@@ -643,9 +643,8 @@ error_code RdbSerializer::SaveStreamConsumers(streamCG* cg) {
   return error_code{};
 }
 
-error_code RdbSerializer::SendFullSyncCut(io::Sink* s) {
-  RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_FULLSYNC_END));
-  return FlushToSink(s);
+error_code RdbSerializer::SendFullSyncCut() {
+  return WriteOpcode(RDB_OPCODE_FULLSYNC_END);
 }
 
 error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
@@ -656,12 +655,10 @@ error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
   return error_code{};
 }
 
-error_code RdbSerializer::FlushToSink(io::Sink* s) {
+io::Bytes RdbSerializer::Flush() {
   size_t sz = mem_buf_.InputLen();
   if (sz == 0)
-    return error_code{};
-
-  DVLOG(2) << "FlushToSink " << sz << " bytes";
+    return mem_buf_.InputBuffer();
 
   if (compression_mode_ == CompressionMode::MULTY_ENTRY_ZSTD ||
       compression_mode_ == CompressionMode::MULTY_ENTRY_LZ4) {
@@ -670,15 +667,28 @@ error_code RdbSerializer::FlushToSink(io::Sink* s) {
     sz = mem_buf_.InputLen();
   }
 
-  // interrupt point.
-  RETURN_ON_ERR(s->Write(mem_buf_.InputBuffer()));
-  mem_buf_.ConsumeInput(sz);
+  return mem_buf_.InputBuffer();
+}
 
+error_code RdbSerializer::FlushToSink(io::Sink* s) {
+  auto bytes = Flush();
+  if (bytes.empty())
+    return error_code{};
+
+  DVLOG(2) << "FlushToSink " << bytes.size() << " bytes";
+
+  // interrupt point.
+  RETURN_ON_ERR(s->Write(bytes));
+  mem_buf_.ConsumeInput(bytes.size());
   return error_code{};
 }
 
 size_t RdbSerializer::SerializedLen() const {
   return mem_buf_.InputLen();
+}
+
+void RdbSerializer::Clear() {
+  mem_buf_.Clear();
 }
 
 error_code RdbSerializer::WriteJournalEntries(absl::Span<const journal::Entry> entries) {
@@ -1045,7 +1055,7 @@ error_code RdbSaver::SaveBody(const Cancellation* cll, RdbTypeFreqMap* freq_map)
   RETURN_ON_ERR(impl_->serializer()->FlushToSink(impl_->sink()));
 
   if (save_mode_ == SaveMode::SUMMARY) {
-    impl_->serializer()->SendFullSyncCut(impl_->sink());
+    impl_->serializer()->SendFullSyncCut();
   } else {
     VLOG(1) << "SaveBody , snapshots count: " << impl_->Size();
     error_code io_error = impl_->ConsumeChannel(cll);
