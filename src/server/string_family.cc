@@ -44,7 +44,7 @@ string GetString(EngineShard* shard, const PrimeValue& pv) {
   string res;
   if (pv.IsExternal()) {
     auto* tiered = shard->tiered_storage();
-    auto [offset, size] = pv.GetExternalPtr();
+    auto [offset, size] = pv.GetExternalSlice();
     res.resize(size);
 
     error_code ec = tiered->Read(offset, size, res.data());
@@ -62,13 +62,6 @@ string_view GetSlice(EngineShard* shard, const PrimeValue& pv, string* tmp) {
     return *tmp;
   }
   return pv.GetSlice(tmp);
-}
-
-inline void RecordJournal(const OpArgs& op_args, string_view key, const PrimeKey& pvalue) {
-  if (op_args.shard->journal()) {
-    journal::Entry entry{op_args.db_cntx.db_index, op_args.txid, key, pvalue};
-    op_args.shard->journal()->RecordEntry(entry);
-  }
 }
 
 OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t start,
@@ -105,7 +98,6 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
   memcpy(s.data() + start, value.data(), value.size());
   it->second.SetString(s);
   db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, !added);
-  RecordJournal(op_args, key, it->second);
 
   return it->second.Size();
 }
@@ -156,7 +148,6 @@ size_t ExtendExisting(const OpArgs& op_args, PrimeIterator it, string_view key, 
   db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   it->second.SetString(new_val);
   db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, true);
-  RecordJournal(op_args, key, it->second);
 
   return new_val.size();
 }
@@ -170,7 +161,6 @@ OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_vi
   if (inserted) {
     it->second.SetString(val);
     db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, false);
-    RecordJournal(op_args, key, it->second);
 
     return val.size();
   }
@@ -239,7 +229,6 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
     char* str = RedisReplyBuilder::FormatDouble(val, buf, sizeof(buf));
     it->second.SetString(str);
     db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, false);
-    RecordJournal(op_args, key, it->second);
 
     return val;
   }
@@ -271,7 +260,6 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
   db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   it->second.SetString(str);
   db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, true);
-  RecordJournal(op_args, key, it->second);
 
   return base;
 }
@@ -298,8 +286,6 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
       return OpStatus::OUT_OF_MEMORY;
     }
 
-    RecordJournal(op_args, key, it->second);
-
     return incr;
   }
 
@@ -323,21 +309,21 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
   db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   it->second.SetInt(new_val);
   db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
-  RecordJournal(op_args, key, it->second);
 
   return new_val;
 }
 
-int64_t CalculateAbsTime(int64_t unix_time, bool as_milli) {
+int64_t AbsExpiryToTtl(int64_t abs_expiry_time, bool as_milli) {
   using std::chrono::duration_cast;
   using std::chrono::milliseconds;
   using std::chrono::seconds;
   using std::chrono::system_clock;
 
   if (as_milli) {
-    return unix_time - duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+    return abs_expiry_time -
+           duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
   } else {
-    return unix_time - duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
+    return abs_expiry_time - duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
   }
 }
 
@@ -428,10 +414,9 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
       TieredStorage::EligibleForOffload(value)) {  // external storage enabled.
     // TODO: we may have a bug if we block the fiber inside UnloadItem - "it" may be invalid
     // afterwards.
-    shard->tiered_storage()->UnloadItem(op_args_.db_cntx.db_index, it);
+    shard->tiered_storage()->ScheduleOffload(op_args_.db_cntx.db_index, it);
   }
 
-  RecordJournal(op_args_, key, it->second);
   return OpStatus::OK;
 }
 
@@ -454,13 +439,19 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
   DbSlice& db_slice = shard->db_slice();
   uint64_t at_ms =
       params.expire_after_ms ? params.expire_after_ms + op_args_.db_cntx.time_now_ms : 0;
-  if (IsValid(e_it) && at_ms) {
-    e_it->second = db_slice.FromAbsoluteTime(at_ms);
-  } else if (!(params.flags & SET_KEEP_EXPIRE)) {
-    // We need to update expiry, or maybe erase the object if it was expired.
-    bool changed = db_slice.UpdateExpire(op_args_.db_cntx.db_index, it, at_ms);
-    if (changed && at_ms == 0)  // erased.
-      return OpStatus::OK;      // TODO: to update journal with deletion.
+
+  if (!(params.flags & SET_KEEP_EXPIRE)) {
+    if (at_ms) {  // Command has an expiry paramater.
+      if (IsValid(e_it)) {
+        // Updated exisitng expiry information.
+        e_it->second = db_slice.FromAbsoluteTime(at_ms);
+      } else {
+        // Add new expiry information.
+        db_slice.AddExpire(op_args_.db_cntx.db_index, it, at_ms);
+      }
+    } else {
+      db_slice.RemoveExpire(op_args_.db_cntx.db_index, it);
+    }
   }
 
   db_slice.PreUpdate(op_args_.db_cntx.db_index, it);
@@ -474,20 +465,18 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
 
   // overwrite existing entry.
   prime_value.SetString(value);
+  DCHECK(!prime_value.HasIoPending());
 
   if (value.size() >= kMinTieredLen) {  // external storage enabled.
-
     // TODO: if UnloadItem can block the calling fiber, then we have the bug because then "it"
     // can be invalid after the function returns and the functions that follow may access invalid
     // entry.
     if (shard->tiered_storage()) {
-      shard->tiered_storage()->UnloadItem(op_args_.db_cntx.db_index, it);
+      shard->tiered_storage()->ScheduleOffload(op_args_.db_cntx.db_index, it);
     }
   }
 
   db_slice.PostUpdate(op_args_.db_cntx.db_index, it, key);
-  RecordJournal(op_args_, key, it->second);
-
   return OpStatus::OK;
 }
 
@@ -531,7 +520,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       // check here and if the time is in the past, return OK but don't set it
       // Note that the time pass here for PXAT is in milliseconds, we must not change it!
       if (cur_arg == "EXAT" || cur_arg == "PXAT") {
-        int_arg = CalculateAbsTime(int_arg, is_ms);
+        int_arg = AbsExpiryToTtl(int_arg, is_ms);
         if (int_arg < 0) {
           // this happened in the past, just return, for some reason Redis reports OK in this case
           return builder->SendStored();

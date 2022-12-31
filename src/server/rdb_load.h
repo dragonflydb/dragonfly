@@ -12,14 +12,17 @@ extern "C" {
 
 #include "base/io_buf.h"
 #include "base/pod_array.h"
+#include "core/mpsc_intrusive_queue.h"
 #include "io/io.h"
 #include "server/common.h"
+#include "server/journal/serializer.h"
 
 namespace dfly {
 
 class EngineShardSet;
 class ScriptMgr;
 class CompactObj;
+class Service;
 
 class DecompressImpl;
 
@@ -87,9 +90,7 @@ class RdbLoaderBase {
 
   class OpaqueObjLoader;
 
-  ::io::Result<uint8_t> FetchType() {
-    return FetchInt<uint8_t>();
-  }
+  io::Result<uint8_t> FetchType();
 
   template <typename T> io::Result<T> FetchInt();
 
@@ -120,9 +121,12 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadZSetZL();
   ::io::Result<OpaqueObj> ReadListQuicklist(int rdbtype);
   ::io::Result<OpaqueObj> ReadStreams();
+
   std::error_code HandleCompressedBlob(int op_type);
   std::error_code HandleCompressedBlobFinish();
-  void AlocateDecompressOnce(int op_type);
+  void AllocateDecompressOnce(int op_type);
+
+  std::error_code HandleJournalBlob(Service* service, DbIndex dbid);
 
   static size_t StrLen(const RdbVariant& tset);
 
@@ -139,11 +143,12 @@ class RdbLoaderBase {
   size_t source_limit_ = SIZE_MAX;
   base::PODArray<uint8_t> compr_buf_;
   std::unique_ptr<DecompressImpl> decompress_impl_;
+  JournalReader journal_reader_{nullptr, 0};
 };
 
 class RdbLoader : protected RdbLoaderBase {
  public:
-  explicit RdbLoader(ScriptMgr* script_mgr);
+  explicit RdbLoader(Service* service);
 
   ~RdbLoader();
 
@@ -195,15 +200,19 @@ class RdbLoader : protected RdbLoaderBase {
   using ItemsBuf = std::vector<Item*>;
 
   struct ObjSettings;
+
   std::error_code LoadKeyValPair(int type, ObjSettings* settings);
   void ResizeDb(size_t key_num, size_t expire_num);
   std::error_code HandleAux();
 
   std::error_code VerifyChecksum();
-  void FlushShardAsync(ShardId sid);
 
+  void FinishLoad(absl::Time start_time, size_t* keys_loaded);
+
+  void FlushShardAsync(ShardId sid);
   void LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib);
 
+  Service* service_;
   ScriptMgr* script_mgr_;
   std::unique_ptr<ItemsBuf[]> shard_buf_;
 
@@ -217,6 +226,7 @@ class RdbLoader : protected RdbLoaderBase {
 
   // Callback when receiving RDB_OPCODE_FULLSYNC_END
   std::function<void()> full_sync_cut_cb;
+  detail::MPSCIntrusiveQueue<Item> item_queue_;
 };
 
 }  // namespace dfly

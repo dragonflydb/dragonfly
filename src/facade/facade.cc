@@ -118,6 +118,7 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : ow
   replica_conn = false;
   authenticated = false;
   force_dispatch = false;
+  journal_emulated = false;
 }
 
 RedisReplyBuilder* ConnectionContext::operator->() {

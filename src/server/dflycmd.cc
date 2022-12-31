@@ -13,6 +13,7 @@
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
+#include "server/journal/serializer.h"
 #include "server/rdb_save.h"
 #include "server/script_mgr.h"
 #include "server/server_family.h"
@@ -289,7 +290,7 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
       FlowInfo* flow = &replica_ptr->flows[index];
 
       StopFullSyncInThread(flow, shard);
-      status = StartStableSyncInThread(flow, shard);
+      status = StartStableSyncInThread(flow, &replica_ptr->cntx, shard);
       return OpStatus::OK;
     };
     shard_set->pool()->AwaitFiberOnAll(std::move(cb));
@@ -313,7 +314,7 @@ void DflyCmd::Expire(CmdArgList args, ConnectionContext* cntx) {
 }
 
 OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
-  DCHECK(!flow->full_sync_fb.joinable());
+  DCHECK(!flow->full_sync_fb.IsJoinable());
 
   SaveMode save_mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
   flow->saver.reset(new RdbSaver(flow->conn->socket(), save_mode, false));
@@ -340,8 +341,8 @@ void DflyCmd::StopFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
   }
 
   // Wait for full sync to finish.
-  if (flow->full_sync_fb.joinable()) {
-    flow->full_sync_fb.join();
+  if (flow->full_sync_fb.IsJoinable()) {
+    flow->full_sync_fb.Join();
   }
 
   // Reset cleanup and saver
@@ -349,20 +350,25 @@ void DflyCmd::StopFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
   flow->saver.reset();
 }
 
-OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, EngineShard* shard) {
+OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
   // Register journal listener and cleanup.
   uint32_t cb_id = 0;
+  JournalWriter* writer = nullptr;
   if (shard != nullptr) {
-    cb_id = sf_->journal()->RegisterOnChange([flow](const journal::Entry& je) {
-      // TODO: Serialize event.
-      ReqSerializer serializer{flow->conn->socket()};
-      serializer.SendCommand(absl::StrCat("SET ", je.key, " ", je.pval_ptr->ToString()));
-    });
+    writer = new JournalWriter{};
+    auto journal_cb = [flow, cntx, writer](const journal::Entry& je) mutable {
+      writer->Write(je);
+      if (auto ec = writer->Flush(flow->conn->socket()); ec)
+        cntx->ReportError(ec);
+    };
+    cb_id = sf_->journal()->RegisterOnChange(std::move(journal_cb));
   }
 
-  flow->cleanup = [flow, this, cb_id]() {
+  flow->cleanup = [this, cb_id, writer, flow]() {
+    if (writer)
+      delete writer;
     if (cb_id)
-      sf_->journal()->Unregister(cb_id);
+      sf_->journal()->UnregisterOnChange(cb_id);
     flow->TryShutdownSocket();
   };
 
@@ -381,18 +387,18 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
   }
 
   if (ec) {
-    cntx->Error(ec);
+    cntx->ReportError(ec);
     return;
   }
 
   if (ec = saver->SaveBody(cntx->GetCancellation(), nullptr); ec) {
-    cntx->Error(ec);
+    cntx->ReportError(ec);
     return;
   }
 
   ec = flow->conn->socket()->Write(io::Buffer(flow->eof_token));
   if (ec) {
-    cntx->Error(ec);
+    cntx->ReportError(ec);
     return;
   }
 }
@@ -405,9 +411,8 @@ uint32_t DflyCmd::CreateSyncSession() {
   auto err_handler = [this, sync_id](const GenericError& err) {
     LOG(INFO) << "Replication error: " << err.Format();
 
-    // Stop replication in case of error.
-    // StopReplication needs to run async to prevent blocking
-    // the error handler.
+    // Spawn external fiber to allow destructing the context from outside
+    // and return from the handler immediately.
     ::boost::fibers::fiber{&DflyCmd::StopReplication, this, sync_id}.detach();
   };
 
@@ -472,8 +477,8 @@ void DflyCmd::CancelReplication(uint32_t sync_id, shared_ptr<ReplicaInfo> replic
       }
     }
 
-    if (flow->full_sync_fb.joinable()) {
-      flow->full_sync_fb.join();
+    if (flow->full_sync_fb.IsJoinable()) {
+      flow->full_sync_fb.Join();
     }
   });
 
@@ -482,6 +487,9 @@ void DflyCmd::CancelReplication(uint32_t sync_id, shared_ptr<ReplicaInfo> replic
     lock_guard lk(mu_);
     replica_infos_.erase(sync_id);
   }
+
+  // Wait for error handler to quit.
+  replica_ptr->cntx.JoinErrorHandler();
 
   LOG(INFO) << "Evicted sync session " << sync_id;
 }

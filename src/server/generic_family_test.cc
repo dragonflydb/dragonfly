@@ -95,6 +95,9 @@ TEST_F(GenericFamilyTest, Del) {
 
   exist_fb.Join();
   del_fb.Join();
+
+  Run({"setex", "k1", "10", "bar"});
+  Run({"del", "k1"});
 }
 
 TEST_F(GenericFamilyTest, TTL) {
@@ -140,7 +143,7 @@ TEST_F(GenericFamilyTest, Rename) {
   int64_t val = CheckedInt({"get", "x"});
   ASSERT_EQ(kint64min, val);  // does not exist
 
-  ASSERT_EQ(Run({"get", "b"}), x_val);  // swapped.
+  ASSERT_EQ(x_val, Run({"get", "b"}));  // swapped.
 
   EXPECT_EQ(CheckedInt({"exists", "x", "b"}), 1);
 

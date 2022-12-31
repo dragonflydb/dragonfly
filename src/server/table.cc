@@ -23,16 +23,15 @@ DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
   ADD(update_value_amount);
   ADD(listpack_blob_cnt);
   ADD(listpack_bytes);
-  ADD(external_entries);
-  ADD(external_size);
+  ADD(tiered_entries);
+  ADD(tiered_size);
 
   return *this;
 }
 
 DbTable::DbTable(std::pmr::memory_resource* mr)
     : prime(kInitSegmentLog, detail::PrimeTablePolicy{}, mr),
-      expire(0, detail::ExpireTablePolicy{}, mr),
-      mcflag(0, detail::ExpireTablePolicy{}, mr) {
+      expire(0, detail::ExpireTablePolicy{}, mr), mcflag(0, detail::ExpireTablePolicy{}, mr) {
 }
 
 DbTable::~DbTable() {

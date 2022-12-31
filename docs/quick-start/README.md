@@ -14,8 +14,18 @@ If you do not have docker on your machine, [Install Docker](https://docs.docker.
 
 ## Step 1
 
+### On linux
+
 ```bash
 docker run --network=host --ulimit memlock=-1 docker.dragonflydb.io/dragonflydb/dragonfly
+```
+
+### On macOS
+
+_`network=host` doesn't work well on macOS, see [this issue](https://github.com/docker/for-mac/issues/1031)_
+
+```bash
+docker run --p 6379:6379 --ulimit memlock=-1 docker.dragonflydb.io/dragonflydb/dragonfly
 ```
 
 Dragonfly DB will answer to both `http` and `redis` requests out of the box!

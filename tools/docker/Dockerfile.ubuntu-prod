@@ -19,11 +19,7 @@ FROM ubuntu:20.04
 # ARG in fact change the env vars during the build process
 # ENV persist the env vars for the built image as well.
 ARG QEMU_CPU
-ARG ORG_NAME=dragonflydb
 ARG DEBIAN_FRONTEND=noninteractive
-
-LABEL org.opencontainers.image.title Dragonfly
-LABEL org.opencontainers.image.source https://github.com/${ORG_NAME}/dragonfly
 
 RUN apt clean && apt update && apt -y install netcat-openbsd
 

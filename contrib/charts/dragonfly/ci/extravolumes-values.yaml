@@ -1,0 +1,8 @@
+extraVolumes:
+  - name: tmp
+    emptyDir:
+      sizeLimit: 500Mi
+
+extraVolumeMounts:
+  - mountPath: /tmp
+    name: tmp
