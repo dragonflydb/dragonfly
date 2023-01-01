@@ -24,10 +24,39 @@ env:
   IS_PRERELEASE: ${{ github.event.release.prerelease || github.event.inputs.PRERELEASE }}
 
 jobs:
-# ===============================================================
-#   Building Dev Images
-# ===============================================================
+  # This workaround is needed, as it's not possible to reference env.FOOBAR directly at this stage
+  # - for ex. https://github.com/actions/runner/issues/1189
+  release-container-prereq:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release-param.outputs.tag }}
+      tag_latest: ${{ steps.release-param.outputs.tag_latest }}
+    steps:
+    - id: release-param
+      run: |
+        # If env.IS_PRERELEASE is true, set tag to alpha and do not enable tag_latest
+        # If env.IS_PRERELEASE is not true (aka false), don't set an extra tag and enable tag_latest
+        echo "::set-output name=tag::${{ env.IS_PRERELEASE == 'true' && 'alpha' }}"
+        echo "::set-output name=tag_latest::${{ env.IS_PRERELEASE == 'true' && 'false' || 'true' }}"
+
+  release-container:
+    needs: release-container-prereq
+    uses: ./.github/workflows/reusable-container-workflow.yaml
+    with:
+      build_type: prod
+      tag: ${{ needs.release-container-prereq.outputs.tag }}
+      tag_latest: ${{ needs.release-container-prereq.outputs.tag_latest == 'true' }}
+      image: ghcr.io/${{ github.repository }}
+      registry: ghcr.io
+      registry_username: ${{ github.repository_owner }}
+      fetch_release: true
+      release_version: ${{ github.event.inputs.TAG_NAME || github.event.release.tag_name }}
+    secrets:
+      registry_password: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   release:
+    needs: [release-container-prereq, release-container]
     runs-on: ubuntu-latest
     steps:
     - name: print_env
@@ -40,76 +69,6 @@ jobs:
 
     - name: Install helm
       uses: azure/setup-helm@v3
-
-    - uses: dsaltares/fetch-gh-release-asset@master
-      with:
-        version: 'tags/${{ env.TAG_NAME }}'
-        regex: true
-        file: "dragonfly-.*\\.tar\\.gz"
-        target: 'releases/'
-        token: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Set up QEMU
-      id: qemu
-      uses: docker/setup-qemu-action@v1
-      with:
-          platforms: arm64,amd64
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v1
-
-    - name: Login to GitHub Container Registry
-      uses: docker/login-action@v2
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Extract artifacts
-      run: |
-        echo "Event prerelease ${{ github.event.release.prerelease }}"
-        echo "Input prerelease ${{ github.event.inputs.PRERELEASE }}"
-        ls -l
-        ls -l releases
-        for f in releases/*.tar.gz; do tar xvfz $f -C releases; done
-        rm releases/*.tar.gz
-
-    - name: Build release image
-      if: env.IS_PRERELEASE != 'true'
-      uses: docker/build-push-action@v3
-      with:
-        context: .
-        platforms: linux/amd64,linux/arm64
-
-        # Define QEMU settings inside the builder
-        build-args: |
-          QEMU_CPU=max,pauth-impdef=on
-
-        push: ${{ github.event_name != 'pull_request' }}
-        tags: |
-          ghcr.io/${{ github.repository }}:ubuntu
-          ghcr.io/${{ github.repository }}:latest
-          ghcr.io/${{ github.repository }}:${{ env.TAG_NAME }}
-          ghcr.io/${{ github.repository }}:${{ env.TAG_NAME }}-ubuntu
-
-        file: tools/docker/Dockerfile.ubuntu-prod
-        cache-from: type=registry,ref=${{ github.repository }}:latest
-        cache-to: type=inline
-
-    - name: Build pre-release image
-      if: env.IS_PRERELEASE == 'true'
-      uses: docker/build-push-action@v3
-      with:
-        context: .
-        platforms: linux/amd64,linux/arm64
-
-        push: ${{ github.event_name != 'pull_request' }}
-        tags: |
-          ghcr.io/${{ github.repository }}:alpha
-          ghcr.io/${{ github.repository }}:${{ env.TAG_NAME }}
-        file: tools/docker/Dockerfile.ubuntu-prod
-        cache-from: type=registry,ref=${{ github.repository }}:latest
-        cache-to: type=inline
 
     - name: Configure Git
       if: env.IS_PRERELEASE != 'true'

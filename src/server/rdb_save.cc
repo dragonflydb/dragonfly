@@ -10,8 +10,6 @@
 #include <lz4frame.h>
 #include <zstd.h>
 
-#include "core/string_set.h"
-
 extern "C" {
 #include "redis/intset.h"
 #include "redis/listpack.h"
@@ -25,9 +23,12 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/string_map.h"
+#include "core/string_set.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/rdb_extensions.h"
+#include "server/serializer_commons.h"
 #include "server/snapshot.h"
 #include "util/fibers/simple_channel.h"
 
@@ -43,7 +44,6 @@ namespace dfly {
 using namespace std;
 using base::IoBuf;
 using io::Bytes;
-using nonstd::make_unexpected;
 
 namespace {
 
@@ -97,66 +97,35 @@ unsigned TryIntegerEncoding(string_view input, uint8_t* dest) {
   return EncodeInteger(value, dest);
 }
 
-/* Saves an encoded length. The first two bits in the first byte are used to
- * hold the encoding type. See the RDB_* definitions for more information
- * on the types of encoding. buf must be at least 9 bytes.
- * */
-
-inline unsigned SerializeLen(uint64_t len, uint8_t* buf) {
-  if (len < (1 << 6)) {
-    /* Save a 6 bit len */
-    buf[0] = (len & 0xFF) | (RDB_6BITLEN << 6);
-    return 1;
-  }
-  if (len < (1 << 14)) {
-    /* Save a 14 bit len */
-    buf[0] = ((len >> 8) & 0xFF) | (RDB_14BITLEN << 6);
-    buf[1] = len & 0xFF;
-    return 2;
-  }
-
-  if (len <= UINT32_MAX) {
-    /* Save a 32 bit len */
-    buf[0] = RDB_32BITLEN;
-    absl::big_endian::Store32(buf + 1, len);
-    return 1 + 4;
-  }
-
-  /* Save a 64 bit len */
-  buf[0] = RDB_64BITLEN;
-  absl::big_endian::Store64(buf + 1, len);
-  return 1 + 8;
-}
-
 constexpr size_t kBufLen = 64_KB;
 constexpr size_t kAmask = 4_KB - 1;
 
 }  // namespace
 
-uint8_t RdbObjectType(unsigned type, unsigned encoding) {
+uint8_t RdbObjectType(unsigned type, unsigned compact_enc) {
   switch (type) {
     case OBJ_STRING:
       return RDB_TYPE_STRING;
     case OBJ_LIST:
-      if (encoding == OBJ_ENCODING_QUICKLIST)
+      if (compact_enc == OBJ_ENCODING_QUICKLIST)
         return RDB_TYPE_LIST_QUICKLIST;
       break;
     case OBJ_SET:
-      if (encoding == kEncodingIntSet)
+      if (compact_enc == kEncodingIntSet)
         return RDB_TYPE_SET_INTSET;
-      else if (encoding == kEncodingStrMap || encoding == kEncodingStrMap2)
+      else if (compact_enc == kEncodingStrMap || compact_enc == kEncodingStrMap2)
         return RDB_TYPE_SET;
       break;
     case OBJ_ZSET:
-      if (encoding == OBJ_ENCODING_LISTPACK)
+      if (compact_enc == OBJ_ENCODING_LISTPACK)
         return RDB_TYPE_ZSET_ZIPLIST;  // we save using the old ziplist encoding.
-      else if (encoding == OBJ_ENCODING_SKIPLIST)
+      else if (compact_enc == OBJ_ENCODING_SKIPLIST)
         return RDB_TYPE_ZSET_2;
       break;
     case OBJ_HASH:
-      if (encoding == kEncodingListPack)
+      if (compact_enc == kEncodingListPack)
         return RDB_TYPE_HASH_ZIPLIST;
-      else if (encoding == kEncodingStrMap)
+      else if (compact_enc == kEncodingStrMap2)
         return RDB_TYPE_HASH;
       break;
     case OBJ_STREAM:
@@ -164,7 +133,7 @@ uint8_t RdbObjectType(unsigned type, unsigned encoding) {
     case OBJ_MODULE:
       return RDB_TYPE_MODULE_2;
   }
-  LOG(FATAL) << "Unknown encoding " << encoding << " for type " << type;
+  LOG(FATAL) << "Unknown encoding " << compact_enc << " for type " << type;
   return 0; /* avoid warning */
 }
 
@@ -283,7 +252,7 @@ std::error_code RdbSerializer::SaveValue(const PrimeValue& pv) {
 error_code RdbSerializer::SelectDb(uint32_t dbid) {
   uint8_t buf[16];
   buf[0] = RDB_OPCODE_SELECTDB;
-  unsigned enclen = SerializeLen(dbid, buf + 1);
+  unsigned enclen = WritePackedUInt(dbid, io::MutableBytes{buf}.subspan(1));
   return WriteRaw(Bytes{buf, enclen + 1});
 }
 
@@ -334,7 +303,7 @@ error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
   }
 
   if (obj_type == OBJ_HASH) {
-    return SaveHSetObject(pv.AsRObj());
+    return SaveHSetObject(pv);
   }
 
   if (obj_type == OBJ_ZSET) {
@@ -432,31 +401,22 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
   return error_code{};
 }
 
-error_code RdbSerializer::SaveHSetObject(const robj* obj) {
-  DCHECK_EQ(OBJ_HASH, obj->type);
-  if (obj->encoding == OBJ_ENCODING_HT) {
-    dict* set = (dict*)obj->ptr;
+error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
+  DCHECK_EQ(OBJ_HASH, pv.ObjType());
 
-    RETURN_ON_ERR(SaveLen(dictSize(set)));
+  if (pv.Encoding() == kEncodingStrMap2) {
+    StringMap* string_map = (StringMap*)pv.RObjPtr();
 
-    dictIterator* di = dictGetIterator(set);
-    dictEntry* de;
-    auto cleanup = absl::MakeCleanup([di] { dictReleaseIterator(di); });
+    RETURN_ON_ERR(SaveLen(string_map->Size()));
 
-    while ((de = dictNext(di)) != NULL) {
-      sds key = (sds)de->key;
-      sds value = (sds)de->v.val;
-
-      RETURN_ON_ERR(SaveString(string_view{key, sdslen(key)}));
-      RETURN_ON_ERR(SaveString(string_view{value, sdslen(value)}));
+    for (const auto& k_v : *string_map) {
+      RETURN_ON_ERR(SaveString(string_view{k_v.first, sdslen(k_v.first)}));
+      RETURN_ON_ERR(SaveString(string_view{k_v.second, sdslen(k_v.second)}));
     }
   } else {
-    CHECK_EQ(unsigned(OBJ_ENCODING_LISTPACK), obj->encoding);
+    CHECK_EQ(kEncodingListPack, pv.Encoding());
 
-    uint8_t* lp = (uint8_t*)obj->ptr;
-    size_t lplen = lpLength(lp);
-    CHECK(lplen > 0 && lplen % 2 == 0);  // has (key,value) pairs.
-
+    uint8_t* lp = (uint8_t*)pv.RObjPtr();
     RETURN_ON_ERR(SaveListPackAsZiplist(lp));
   }
 
@@ -683,9 +643,8 @@ error_code RdbSerializer::SaveStreamConsumers(streamCG* cg) {
   return error_code{};
 }
 
-error_code RdbSerializer::SendFullSyncCut(io::Sink* s) {
-  RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_FULLSYNC_END));
-  return FlushToSink(s);
+error_code RdbSerializer::SendFullSyncCut() {
+  return WriteOpcode(RDB_OPCODE_FULLSYNC_END);
 }
 
 error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
@@ -696,12 +655,10 @@ error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
   return error_code{};
 }
 
-error_code RdbSerializer::FlushToSink(io::Sink* s) {
+io::Bytes RdbSerializer::Flush() {
   size_t sz = mem_buf_.InputLen();
   if (sz == 0)
-    return error_code{};
-
-  DVLOG(2) << "FlushToSink " << sz << " bytes";
+    return mem_buf_.InputBuffer();
 
   if (compression_mode_ == CompressionMode::MULTY_ENTRY_ZSTD ||
       compression_mode_ == CompressionMode::MULTY_ENTRY_LZ4) {
@@ -710,15 +667,44 @@ error_code RdbSerializer::FlushToSink(io::Sink* s) {
     sz = mem_buf_.InputLen();
   }
 
-  // interrupt point.
-  RETURN_ON_ERR(s->Write(mem_buf_.InputBuffer()));
-  mem_buf_.ConsumeInput(sz);
+  return mem_buf_.InputBuffer();
+}
 
+error_code RdbSerializer::FlushToSink(io::Sink* s) {
+  auto bytes = Flush();
+  if (bytes.empty())
+    return error_code{};
+
+  DVLOG(2) << "FlushToSink " << bytes.size() << " bytes";
+
+  // interrupt point.
+  RETURN_ON_ERR(s->Write(bytes));
+  mem_buf_.ConsumeInput(bytes.size());
   return error_code{};
 }
 
 size_t RdbSerializer::SerializedLen() const {
   return mem_buf_.InputLen();
+}
+
+void RdbSerializer::Clear() {
+  mem_buf_.Clear();
+}
+
+error_code RdbSerializer::WriteJournalEntries(absl::Span<const journal::Entry> entries) {
+  for (const auto& entry : entries) {
+    journal_writer_.Write(entry);
+  }
+
+  RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_JOURNAL_BLOB));
+  RETURN_ON_ERR(SaveLen(entries.size()));
+
+  auto& buf = journal_writer_.Accumulated();
+  auto bytes = buf.InputBuffer();
+  RETURN_ON_ERR(SaveString(string_view{reinterpret_cast<const char*>(bytes.data()), bytes.size()}));
+  buf.Clear();
+
+  return error_code{};
 }
 
 error_code RdbSerializer::SaveString(string_view val) {
@@ -763,7 +749,7 @@ error_code RdbSerializer::SaveString(string_view val) {
 
 error_code RdbSerializer::SaveLen(size_t len) {
   uint8_t buf[16];
-  unsigned enclen = SerializeLen(len, buf);
+  unsigned enclen = WritePackedUInt(len, buf);
   return WriteRaw(Bytes{buf, enclen});
 }
 
@@ -928,7 +914,7 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
         continue;
 
       if (record.db_index != last_db_index) {
-        unsigned enclen = SerializeLen(record.db_index, buf + 1);
+        unsigned enclen = WritePackedUInt(record.db_index, io::MutableBytes{buf}.subspan(1));
         string_view str{(char*)buf, enclen + 1};
 
         io_error = sink_->Write(io::Buffer(str));
@@ -1069,7 +1055,7 @@ error_code RdbSaver::SaveBody(const Cancellation* cll, RdbTypeFreqMap* freq_map)
   RETURN_ON_ERR(impl_->serializer()->FlushToSink(impl_->sink()));
 
   if (save_mode_ == SaveMode::SUMMARY) {
-    impl_->serializer()->SendFullSyncCut(impl_->sink());
+    impl_->serializer()->SendFullSyncCut();
   } else {
     VLOG(1) << "SaveBody , snapshots count: " << impl_->Size();
     error_code io_error = impl_->ConsumeChannel(cll);
@@ -1197,7 +1183,7 @@ void RdbSerializer::CompressBlob() {
 
   // Write encoded compressed blob len
   dest = mem_buf_.AppendBuffer();
-  unsigned enclen = SerializeLen(compressed_blob.length(), dest.data());
+  unsigned enclen = WritePackedUInt(compressed_blob.length(), dest);
   mem_buf_.CommitWrite(enclen);
 
   // Write compressed blob

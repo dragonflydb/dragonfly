@@ -7,6 +7,7 @@ extern "C" {
 #include "redis/rdb.h"
 }
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/functional/bind_front.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
@@ -18,6 +19,8 @@ extern "C" {
 #include "facade/dragonfly_connection.h"
 #include "facade/redis_parser.h"
 #include "server/error.h"
+#include "server/journal/executor.h"
+#include "server/journal/serializer.h"
 #include "server/main_service.h"
 #include "server/rdb_load.h"
 #include "util/proactor_base.h"
@@ -95,9 +98,11 @@ Replica::Replica(string host, uint16_t port, Service* se) : service_(*se) {
   master_context_.port = port;
 }
 
-Replica::Replica(const MasterContext& context, uint32_t dfly_flow_id, Service* service)
+Replica::Replica(const MasterContext& context, uint32_t dfly_flow_id, Service* service,
+                 std::shared_ptr<Replica::MultiShardExecution> shared_exe_data)
     : service_(*service), master_context_(context) {
   master_context_.dfly_flow_id = dfly_flow_id;
+  multi_shard_exe_ = shared_exe_data;
 }
 
 Replica::~Replica() {
@@ -195,23 +200,14 @@ void Replica::MainReplicationFb() {
 
     // 3. Initiate full sync
     if ((state_mask_ & R_SYNC_OK) == 0) {
-      // Make sure we're in LOADING state.
-      if (service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) != GlobalState::LOADING) {
-        state_mask_ = 0;
-        continue;
-      }
-
       if (HasDflyMaster())
         ec = InitiateDflySync();
       else
         ec = InitiatePSync();
 
-      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-
       if (ec) {
         LOG(WARNING) << "Error syncing " << ec << " " << ec.message();
         state_mask_ &= R_ENABLED;  // reset all flags besides R_ENABLED
-        JoinAllFlows();
         continue;
       }
 
@@ -226,9 +222,10 @@ void Replica::MainReplicationFb() {
     else
       ec = ConsumeRedisStream();
 
-    JoinAllFlows();
     state_mask_ &= ~R_SYNC_OK;
   }
+
+  cntx_.JoinErrorHandler();
 
   VLOG(1) << "Main replication fiber finished";
 }
@@ -381,6 +378,13 @@ error_code Replica::InitiatePSync() {
     SocketSource ss{sock_.get()};
     io::PrefixSource ps{io_buf.InputBuffer(), &ss};
 
+    // Set LOADING state.
+    // TODO: Flush db on retry.
+    CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) == GlobalState::LOADING);
+    absl::Cleanup cleanup = [this]() {
+      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+    };
+
     RdbLoader loader(NULL);
     loader.set_source_limit(snapshot_size);
     // TODO: to allow registering callbacks within loader to send '\n' pings back to master.
@@ -400,13 +404,13 @@ error_code Replica::InitiatePSync() {
 
       // TODO: handle gracefully...
       CHECK_EQ(0, memcmp(token->data(), buf, kRdbEofMarkSize));
-      CHECK(chained.unused_prefix().empty());
+      CHECK(chained.UnusedPrefix().empty());
     } else {
       CHECK_EQ(0u, loader.Leftover().size());
       CHECK_EQ(snapshot_size, loader.bytes_read());
     }
 
-    CHECK(ps.unused_prefix().empty());
+    CHECK(ps.UnusedPrefix().empty());
     io_buf.ConsumeInput(io_buf.InputLen());
     last_io_time_ = sock_thread->GetMonotonicTimeNs();
   }
@@ -424,43 +428,84 @@ error_code Replica::InitiatePSync() {
 
 // Initialize and start sub-replica for each flow.
 error_code Replica::InitiateDflySync() {
-  DCHECK_GT(num_df_flows_, 0u);
+  absl::Cleanup cleanup = [this]() {
+    // We do the following operations regardless of outcome.
+    JoinAllFlows();
+    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+  };
 
+  // Initialize MultiShardExecution.
+  multi_shard_exe_.reset(new MultiShardExecution());
+
+  // Initialize shard flows.
   shard_flows_.resize(num_df_flows_);
   for (unsigned i = 0; i < num_df_flows_; ++i) {
-    shard_flows_[i].reset(new Replica(master_context_, i, &service_));
+    shard_flows_[i].reset(new Replica(master_context_, i, &service_, multi_shard_exe_));
   }
 
-  // Blocked on untill all flows got full sync cut.
+  // Blocked on until all flows got full sync cut.
   fibers_ext::BlockingCounter sync_block{num_df_flows_};
 
+  // Switch to new error handler that closes flow sockets.
   auto err_handler = [this, sync_block](const auto& ge) mutable {
-    sync_block.Cancel();      // Unblock this function.
-    DefaultErrorHandler(ge);  // Close sockets to unblock flows.
+    // Unblock this function.
+    sync_block.Cancel();
+
+    // Make sure the flows are not in a state transition
+    lock_guard lk{flows_op_mu_};
+
+    // Unblock all sockets.
+    DefaultErrorHandler(ge);
+    for (auto& flow : shard_flows_)
+      flow->CloseSocket();
   };
-  RETURN_ON_ERR(cntx_.Switch(std::move(err_handler)));
+  RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
+
+  // Make sure we're in LOADING state.
+  // TODO: Flush db on retry.
+  CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) == GlobalState::LOADING);
 
   // Start full sync flows.
-  auto partition = Partition(num_df_flows_);
-  shard_set->pool()->AwaitFiberOnAll([&](unsigned index, auto*) {
-    for (auto id : partition[index]) {
-      auto ec = shard_flows_[id]->StartFullSyncFlow(sync_block, &cntx_);
-      if (ec)
-        cntx_.Error(ec);
-    }
-  });
+  {
+    auto partition = Partition(num_df_flows_);
+    auto shard_cb = [&](unsigned index, auto*) {
+      for (auto id : partition[index]) {
+        auto ec = shard_flows_[id]->StartFullSyncFlow(sync_block, &cntx_);
+        if (ec)
+          cntx_.ReportError(ec);
+      }
+    };
+
+    // Lock to prevent the error handler from running instantly
+    // while the flows are in a mixed state.
+    lock_guard lk{flows_op_mu_};
+    shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
+  }
+
   RETURN_ON_ERR(cntx_.GetError());
 
   // Send DFLY SYNC.
-  if (auto ec = SendNextPhaseRequest(); ec) {
-    return cntx_.Error(ec);
+  if (auto ec = SendNextPhaseRequest(false); ec) {
+    return cntx_.ReportError(ec);
   }
+
   // Wait for all flows to receive full sync cut.
   // In case of an error, this is unblocked by the error handler.
   LOG(INFO) << "Waiting for all full sync cut confirmations";
   sync_block.Wait();
 
-  LOG(INFO) << "Full sync finished";
+  // Check if we woke up due to cancellation.
+  if (cntx_.IsCancelled())
+    return cntx_.GetError();
+
+  // Send DFLY STARTSTABLE.
+  if (auto ec = SendNextPhaseRequest(true); ec) {
+    return cntx_.ReportError(ec);
+  }
+
+  // Joining flows and resetting state is done by cleanup.
+
+  LOG(INFO) << "Full sync finished ";
   return cntx_.GetError();
 }
 
@@ -511,39 +556,47 @@ error_code Replica::ConsumeRedisStream() {
 }
 
 error_code Replica::ConsumeDflyStream() {
-  // Send DFLY STARTSTABLE.
-  if (auto ec = SendNextPhaseRequest(); ec) {
-    return cntx_.Error(ec);
+  // Set new error handler that closes flow sockets.
+  auto err_handler = [this](const auto& ge) {
+    // Make sure the flows are not in a state transition
+    lock_guard lk{flows_op_mu_};
+    DefaultErrorHandler(ge);
+    for (auto& flow : shard_flows_)
+      flow->CloseSocket();
+  };
+  RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
+
+  // Transition flows into stable sync.
+  {
+    auto partition = Partition(num_df_flows_);
+    auto shard_cb = [&](unsigned index, auto*) {
+      const auto& local_ids = partition[index];
+      for (unsigned id : local_ids) {
+        auto ec = shard_flows_[id]->StartStableSyncFlow(&cntx_);
+        if (ec)
+          cntx_.ReportError(ec);
+      }
+    };
+
+    // Lock to prevent error handler from running on mixed state.
+    lock_guard lk{flows_op_mu_};
+    shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
   }
 
-  // Wait for all flows to finish full sync.
   JoinAllFlows();
 
-  RETURN_ON_ERR(cntx_.Switch(absl::bind_front(&Replica::DefaultErrorHandler, this)));
-
-  vector<vector<unsigned>> partition = Partition(num_df_flows_);
-  shard_set->pool()->AwaitFiberOnAll([&](unsigned index, auto*) {
-    const auto& local_ids = partition[index];
-    for (unsigned id : local_ids) {
-      auto ec = shard_flows_[id]->StartStableSyncFlow(&cntx_);
-      if (ec)
-        cntx_.Error(ec);
-    }
-  });
+  // The only option to unblock is to cancel the context.
+  CHECK(cntx_.GetError());
 
   return cntx_.GetError();
 }
 
-void Replica::CloseAllSockets() {
+void Replica::CloseSocket() {
   if (sock_) {
     sock_->proactor()->Await([this] {
       auto ec = sock_->Shutdown(SHUT_RDWR);
       LOG_IF(ERROR, ec) << "Could not shutdown socket " << ec;
     });
-  }
-
-  for (auto& flow : shard_flows_) {
-    flow->CloseAllSockets();
   }
 }
 
@@ -556,16 +609,18 @@ void Replica::JoinAllFlows() {
 }
 
 void Replica::DefaultErrorHandler(const GenericError& err) {
-  CloseAllSockets();
+  CloseSocket();
 }
 
-error_code Replica::SendNextPhaseRequest() {
+error_code Replica::SendNextPhaseRequest(bool stable) {
   ReqSerializer serializer{sock_.get()};
 
   // Ask master to start sending replication stream
-  string request = (state_mask_ & R_SYNC_OK) ? "STARTSTABLE" : "SYNC";
-  RETURN_ON_ERR(
-      SendCommand(StrCat("DFLY ", request, " ", master_context_.dfly_session_id), &serializer));
+  string_view kind = (stable) ? "STARTSTABLE"sv : "SYNC"sv;
+  string request = StrCat("DFLY ", kind, " ", master_context_.dfly_session_id);
+
+  LOG(INFO) << "Sending: " << request;
+  RETURN_ON_ERR(SendCommand(request, &serializer));
 
   base::IoBuf io_buf{128};
   unsigned consumed = 0;
@@ -598,9 +653,9 @@ error_code Replica::StartFullSyncFlow(fibers_ext::BlockingCounter sb, Context* c
 
   parser_.reset(new RedisParser{false});  // client mode
 
-  leftover_buf_.reset(new base::IoBuf(128));
+  leftover_buf_.emplace(128);
   unsigned consumed = 0;
-  RETURN_ON_ERR(ReadRespReply(leftover_buf_.get(), &consumed));  // uses parser_
+  RETURN_ON_ERR(ReadRespReply(&*leftover_buf_, &consumed));  // uses parser_
 
   if (!CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING})) {
     LOG(ERROR) << "Bad FLOW response " << ToSV(leftover_buf_->InputBuffer());
@@ -643,7 +698,7 @@ void Replica::FullSyncDflyFb(string eof_token, fibers_ext::BlockingCounter bc, C
   SocketSource ss{sock_.get()};
   io::PrefixSource ps{leftover_buf_->InputBuffer(), &ss};
 
-  RdbLoader loader(NULL);
+  RdbLoader loader(&service_);
   loader.SetFullSyncCutCb([bc, ran = false]() mutable {
     if (!ran) {
       bc.Dec();
@@ -653,7 +708,7 @@ void Replica::FullSyncDflyFb(string eof_token, fibers_ext::BlockingCounter bc, C
 
   // Load incoming rdb stream.
   if (std::error_code ec = loader.Load(&ps); ec) {
-    cntx->Error(ec, "Error loading rdb format");
+    cntx->ReportError(ec, "Error loading rdb format");
     return;
   }
 
@@ -666,18 +721,17 @@ void Replica::FullSyncDflyFb(string eof_token, fibers_ext::BlockingCounter bc, C
         chained_tail.ReadAtLeast(io::MutableBytes{buf.get(), eof_token.size()}, eof_token.size());
 
     if (!res || *res != eof_token.size()) {
-      cntx->Error(std::make_error_code(errc::protocol_error), "Error finding eof token in stream");
+      cntx->ReportError(std::make_error_code(errc::protocol_error),
+                        "Error finding eof token in stream");
       return;
     }
   }
 
   // Keep loader leftover.
-  io::Bytes unused = chained_tail.unused_prefix();
+  io::Bytes unused = chained_tail.UnusedPrefix();
   if (unused.size() > 0) {
-    leftover_buf_.reset(new base::IoBuf{unused.size()});
-    auto mut_bytes = leftover_buf_->AppendBuffer();
-    memcpy(mut_bytes.data(), unused.data(), unused.size());
-    leftover_buf_->CommitWrite(unused.size());
+    leftover_buf_.emplace(unused.size());
+    leftover_buf_->WriteAndCommit(unused.data(), unused.size());
   } else {
     leftover_buf_.reset();
   }
@@ -686,36 +740,84 @@ void Replica::FullSyncDflyFb(string eof_token, fibers_ext::BlockingCounter bc, C
 }
 
 void Replica::StableSyncDflyFb(Context* cntx) {
-  base::IoBuf io_buf(16_KB);
-  parser_.reset(new RedisParser);
-
-  // Check leftover from stable state.
+  // Check leftover from full sync.
+  io::Bytes prefix{};
   if (leftover_buf_ && leftover_buf_->InputLen() > 0) {
-    size_t len = leftover_buf_->InputLen();
-    leftover_buf_->ReadAndConsume(len, io_buf.AppendBuffer().data());
-    io_buf.CommitWrite(len);
-    leftover_buf_.reset();
+    prefix = leftover_buf_->InputBuffer();
   }
 
-  string ack_cmd;
+  SocketSource ss{sock_.get()};
+  io::PrefixSource ps{prefix, &ss};
 
+  JournalReader reader{&ps, 0};
+  JournalExecutor executor{&service_};
   while (!cntx->IsCancelled()) {
-    io::MutableBytes buf = io_buf.AppendBuffer();
-    io::Result<size_t> size_res = sock_->Recv(buf);
-    if (!size_res) {
-      cntx->Error(size_res.error());
+    auto res = reader.ReadEntry();
+    if (!res) {
+      cntx->ReportError(res.error(), "Journal format error");
       return;
     }
-
+    ExecuteEntry(&executor, std::move(res.value()));
     last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
+  }
+  return;
+}
 
-    io_buf.CommitWrite(*size_res);
-    repl_offs_ += *size_res;
+void Replica::ExecuteEntry(JournalExecutor* executor, journal::ParsedEntry&& entry) {
+  if (entry.shard_cnt <= 1) {  // not multi shard cmd
+    executor->Execute(entry);
+    return;
+  }
 
-    if (auto ec = ParseAndExecute(&io_buf); ec) {
-      cntx->Error(ec);
-      return;
+  // Multi shard command flow:
+  //  step 1: Fiber wait until all the fibers that should execute this tranaction got
+  //    to the journal entry of the transaction. This step enforces that replica will execute multi
+  //    shard commands that finished on master.
+  //  step 2: Execute the commands from one fiber. This step ensures atomicity of replica.
+  //  step 3: Fiber wait until all fibers finished the execution. This step ensures atomicity of
+  //    operations on replica.
+
+  // TODO: support error handler in this flow
+
+  // Only the first fiber to reach the transaction will create data for transaction in map
+  multi_shard_exe_->map_mu.lock();
+  auto [it, was_insert] = multi_shard_exe_->tx_sync_execution.emplace(entry.txid, entry.shard_cnt);
+  VLOG(2) << "txid: " << entry.txid << " unique_shard_cnt_: " << entry.shard_cnt
+          << " was_insert: " << was_insert;
+
+  TxId txid = entry.txid;
+  // entries_vec will store all entries of trasaction and will be executed by the fiber that
+  // inserted the txid to map. In case of global command the inserting fiber will executed his
+  // entry.
+  bool global_cmd = (entry.payload.value().size() == 1);
+  if (!global_cmd) {
+    it->second.entries_vec.push_back(std::move(entry));
+  }
+  auto& tx_sync = it->second;
+
+  // Note: we must release the mutex befor calling wait on barrier
+  multi_shard_exe_->map_mu.unlock();
+
+  // step 1
+  tx_sync.barrier.wait();
+  // step 2
+  if (was_insert) {
+    if (global_cmd) {
+      executor->Execute(entry);
+    } else {
+      executor->Execute(tx_sync.entries_vec);
     }
+  }
+  // step 3
+  tx_sync.barrier.wait();
+
+  // Note: erase from map can be done only after all fibers returned from wait.
+  // The last fiber which will decrease the counter to 0 will be the one to erase the data from map
+  auto val = tx_sync.counter.fetch_sub(1, std::memory_order_relaxed);
+  VLOG(2) << "txid: " << txid << " counter: " << val;
+  if (val == 1) {
+    std::lock_guard lg{multi_shard_exe_->map_mu};
+    multi_shard_exe_->tx_sync_execution.erase(txid);
   }
 }
 

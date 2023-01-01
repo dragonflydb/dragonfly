@@ -51,7 +51,6 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
     journal_cb_id_ = journal->RegisterOnChange(move(journal_cb));
   }
 
-  default_buffer_.reset(new io::StringFile);
   default_serializer_.reset(new RdbSerializer(compression_mode_));
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
@@ -72,7 +71,7 @@ void SliceSnapshot::Stop() {
   Join();
 
   if (journal_cb_id_) {
-    db_slice_->shard_owner()->journal()->Unregister(journal_cb_id_);
+    db_slice_->shard_owner()->journal()->UnregisterOnChange(journal_cb_id_);
   }
 
   FlushDefaultBuffer(true);
@@ -82,7 +81,7 @@ void SliceSnapshot::Stop() {
 void SliceSnapshot::Cancel() {
   CloseRecordChannel();
   if (journal_cb_id_) {
-    db_slice_->shard_owner()->journal()->Unregister(journal_cb_id_);
+    db_slice_->shard_owner()->journal()->UnregisterOnChange(journal_cb_id_);
     journal_cb_id_ = 0;
   }
 }
@@ -158,7 +157,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
 
   // TODO: investigate why a single byte gets stuck and does not arrive to replica
   for (unsigned i = 10; i > 1; i--)
-    CHECK(!default_serializer_->SendFullSyncCut(default_buffer_.get()));
+    CHECK(!default_serializer_->SendFullSyncCut());
   FlushDefaultBuffer(true);
 
   VLOG(1) << "Exit SnapshotSerializer (serialized/side_saved/cbcalls): " << stats_.serialized << "/"
@@ -216,7 +215,7 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
   }
 
   if (tmp_serializer) {
-    FlushTmpSerializer(db_index, &*tmp_serializer);
+    PushBytesToChannel(db_index, tmp_serializer->Flush());
   }
 
   return result;
@@ -237,22 +236,21 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
   ++type_freq_map_[*res];
 }
 
-void SliceSnapshot::PushFileToChannel(DbIndex db_index, io::StringFile* sfile) {
-  dest_->Push(GetDbRecord(db_index, std::move(sfile->val)));
+void SliceSnapshot::PushBytesToChannel(DbIndex db_index, io::Bytes bytes) {
+  dest_->Push(GetDbRecord(db_index, std::string{io::View(bytes)}));
 }
 
 bool SliceSnapshot::FlushDefaultBuffer(bool force) {
   if (!force && default_serializer_->SerializedLen() < 4096)
     return false;
 
-  CHECK(!default_serializer_->FlushToSink(default_buffer_.get()));
-
-  if (default_buffer_->val.empty())
+  auto bytes = default_serializer_->Flush();
+  if (bytes.empty())
     return false;
 
-  VLOG(2) << "FlushDefaultBuffer " << default_buffer_->val.size() << " bytes";
-
-  PushFileToChannel(current_db_, default_buffer_.get());
+  VLOG(2) << "FlushDefaultBuffer " << bytes.size() << " bytes";
+  PushBytesToChannel(current_db_, bytes);
+  default_serializer_->Clear();
   return true;
 }
 
@@ -272,12 +270,14 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
   }
 }
 
+// For any key any journal entry must arrive at the replica strictly after its first original rdb
+// value. This is guaranteed by the fact that OnJournalEntry runs always after OnDbChange, and
+// no database switch can be performed between those two calls, because they are part of one
+// transaction.
 void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
-  CHECK(journal::Op::VAL == entry.opcode);
-
   optional<RdbSerializer> tmp_serializer;
   RdbSerializer* serializer_ptr = default_serializer_.get();
-  if (entry.db_ind != current_db_) {
+  if (entry.dbid != current_db_) {
     CompressionMode compression_mode = compression_mode_ == CompressionMode::NONE
                                            ? CompressionMode::NONE
                                            : CompressionMode::SINGLE_ENTRY;
@@ -285,11 +285,15 @@ void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
     serializer_ptr = &*tmp_serializer;
   }
 
-  PrimeKey pkey{entry.key};
-  SerializeEntry(entry.db_ind, pkey, *entry.pval_ptr, entry.expire_ms, serializer_ptr);
+  CHECK(entry.opcode == journal::Op::COMMAND);
+  serializer_ptr->WriteJournalEntries(absl::Span{&entry, 1});
 
   if (tmp_serializer) {
-    FlushTmpSerializer(entry.db_ind, &*tmp_serializer);
+    PushBytesToChannel(entry.dbid, tmp_serializer->Flush());
+  } else {
+    // This is the only place that flushes in streaming mode
+    // once the iterate buckets fiber finished.
+    FlushDefaultBuffer(false);
   }
 }
 
@@ -314,10 +318,4 @@ SliceSnapshot::DbRecord SliceSnapshot::GetDbRecord(DbIndex db_index, std::string
   return DbRecord{.db_index = db_index, .id = id, .value = std::move(value)};
 }
 
-void SliceSnapshot::FlushTmpSerializer(DbIndex db_index, RdbSerializer* serializer) {
-  io::StringFile sfile{};
-  error_code ec = serializer->FlushToSink(&sfile);
-  CHECK(!ec && !sfile.val.empty());
-  PushFileToChannel(db_index, &sfile);
-}
 }  // namespace dfly

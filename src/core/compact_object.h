@@ -76,16 +76,6 @@ class RobjWrapper {
 
 } __attribute__((packed));
 
-// unpacks 8->7 encoded blob back to ascii.
-// generally, we can not unpack inplace because ascii (dest) buffer is 8/7 bigger than
-// the source buffer.
-// however, if binary data is positioned on the right of the ascii buffer with empty space on the
-// left than we can unpack inplace.
-void ascii_unpack(const uint8_t* bin, size_t ascii_len, char* ascii);
-
-// packs ascii string (does not verify) into binary form saving 1 bit per byte on average (12.5%).
-void ascii_pack(const char* ascii, size_t len, uint8_t* bin);
-
 }  // namespace detail
 
 class CompactObj {
@@ -99,8 +89,8 @@ class CompactObj {
 
   enum MaskBit {
     REF_BIT = 1,
-    EXPIRE_BIT = 2,
-    FLAG_BIT = 4,
+    EXPIRE_BIT = 2,  // Mark objects that have expiry timestamp assigned.
+    FLAG_BIT = 4,    // Used to mark keys that have memcache flags assigned.
 
     // ascii encoding is not an injective function. it compresses 8 bytes to 7 but also 7 to 7.
     // therefore, in order to know the original length we introduce 2 flags that
@@ -276,14 +266,15 @@ class CompactObj {
   bool IsExternal() const {
     return taglen_ == EXTERNAL_TAG;
   }
+
   void SetExternal(size_t offset, size_t sz);
-  std::pair<size_t, size_t> GetExternalPtr() const;
+  std::pair<size_t, size_t> GetExternalSlice() const;
 
   // In case this object a single blob, returns number of bytes allocated on heap
   // for that blob. Otherwise returns 0.
   size_t MallocUsed() const;
 
-  // Resets the object to empty state.
+  // Resets the object to empty state (string).
   void Reset();
 
   bool IsInline() const {
@@ -326,9 +317,12 @@ class CompactObj {
   }
 
   struct ExternalPtr {
-    size_t offset;
+    uint32_t type : 8;
+    uint32_t reserved : 24;
+    uint32_t page_index;
+    uint16_t page_offset;  // 0 for multi-page blobs. != 0 for small blobs.
+    uint16_t reserved2;
     uint32_t size;
-    uint32_t unneeded;
   } __attribute__((packed));
 
   struct JsonWrapper {
@@ -356,9 +350,9 @@ class CompactObj {
   //
   static_assert(sizeof(u_) == 16, "");
 
-  // Maybe it's possible to merge those 2 together and gain another byte
-  // but lets postpone it to 2023.
   mutable uint8_t mask_ = 0;
+
+  // We currently reserve 5 bits for tags and 3 bits for extending the mask. currently reserved.
   uint8_t taglen_ = 0;
 };
 
@@ -371,5 +365,46 @@ inline bool CompactObj::operator==(std::string_view sv) const {
   }
   return EqualNonInline(sv);
 }
+
+class CompactObjectView {
+ public:
+  CompactObjectView(const CompactObj& src) : obj_(src.AsRef()) {
+  }
+  CompactObjectView(const CompactObjectView& o) : obj_(o.obj_.AsRef()) {
+  }
+  CompactObjectView(CompactObjectView&& o) = default;
+
+  operator CompactObj() const {
+    return obj_.AsRef();
+  }
+
+  const CompactObj* operator->() const {
+    return &obj_;
+  }
+
+  bool operator==(const CompactObjectView& o) const {
+    return obj_ == o.obj_;
+  }
+
+  uint64_t Hash() const {
+    return obj_.HashCode();
+  }
+
+  CompactObjectView& operator=(const CompactObjectView& o) {
+    obj_ = o.obj_.AsRef();
+    return *this;
+  }
+
+  bool defined() const {
+    return obj_.IsRef();
+  }
+
+  void Reset() {
+    obj_.Reset();
+  }
+
+ private:
+  CompactObj obj_;
+};
 
 }  // namespace dfly

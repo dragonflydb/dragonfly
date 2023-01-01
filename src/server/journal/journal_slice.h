@@ -45,7 +45,7 @@ class JournalSlice {
   void AddLogRecord(const Entry& entry);
 
   uint32_t RegisterOnChange(ChangeCallback cb);
-  void Unregister(uint32_t);
+  void UnregisterOnChange(uint32_t);
 
  private:
   struct RingItem;

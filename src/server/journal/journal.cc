@@ -41,11 +41,11 @@ error_code Journal::OpenInThread(bool persistent, string_view dir) {
     }
   }
 
-      ServerState::tlocal()->set_journal(this);
-      EngineShard* shard = EngineShard::tlocal();
-      if (shard) {
-        shard->set_journal(this);
-      }
+  ServerState::tlocal()->set_journal(this);
+  EngineShard* shard = EngineShard::tlocal();
+  if (shard) {
+    shard->set_journal(this);
+  }
 
   return ec;
 }
@@ -83,16 +83,16 @@ uint32_t Journal::RegisterOnChange(ChangeCallback cb) {
   return journal_slice.RegisterOnChange(cb);
 }
 
-void Journal::Unregister(uint32_t id) {
-  journal_slice.Unregister(id);
+void Journal::UnregisterOnChange(uint32_t id) {
+  journal_slice.UnregisterOnChange(id);
 }
 
 bool Journal::SchedStartTx(TxId txid, unsigned num_keys, unsigned num_shards) {
   if (!journal_slice.IsOpen() || lameduck_.load(memory_order_relaxed))
     return false;
 
-  // TODO: to complete the metadata.
-  journal_slice.AddLogRecord(Entry::Sched(txid));
+  // TODO: Handle tx entries.
+  // journal_slice.AddLogRecord(Entry::Sched(txid));
 
   return true;
 }

@@ -24,12 +24,17 @@ extern "C" {
 #include "base/endian.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/string_map.h"
 #include "core/string_set.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/hset_family.h"
+#include "server/journal/executor.h"
+#include "server/journal/serializer.h"
+#include "server/main_service.h"
 #include "server/rdb_extensions.h"
 #include "server/script_mgr.h"
+#include "server/serializer_commons.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
 #include "strings/human_readable.h"
@@ -38,24 +43,6 @@ ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 ABSL_DECLARE_FLAG(bool, use_set2);
-
-#define SET_OR_RETURN(expr, dest)              \
-  do {                                         \
-    auto exp_val = (expr);                     \
-    if (!exp_val) {                            \
-      VLOG(1) << "Error while calling " #expr; \
-      return exp_val.error();                  \
-    }                                          \
-    dest = exp_val.value();                    \
-  } while (0)
-
-#define SET_OR_UNEXPECT(expr, dest)            \
-  {                                            \
-    auto exp_res = (expr);                     \
-    if (!exp_res)                              \
-      return make_unexpected(exp_res.error()); \
-    dest = std::move(exp_res.value());         \
-  }
 
 namespace dfly {
 
@@ -548,8 +535,6 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
     }
   }
 
-  robj* res = nullptr;
-
   if (keep_lp) {
     uint8_t* lp = lpNew(lp_size);
 
@@ -568,44 +553,30 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
     }
 
     lp = lpShrinkToFit(lp);
-    res = createObject(OBJ_HASH, lp);
-    res->encoding = OBJ_ENCODING_LISTPACK;
+    pv_->InitRobj(OBJ_HASH, kEncodingListPack, lp);
   } else {
-    dict* hmap = dictCreate(&hashDictType);
+    StringMap* string_map = new StringMap;
 
-    auto cleanup = absl::MakeCleanup([&] { dictRelease(hmap); });
-
-    if (len > DICT_HT_INITIAL_SIZE) {
-      if (dictTryExpand(hmap, len) != DICT_OK) {
-        LOG(ERROR) << "OOM in dictTryExpand " << len;
-        ec_ = RdbError(errc::out_of_memory);
-        return;
-      }
-    }
-
+    auto cleanup = absl::MakeCleanup([&] { delete string_map; });
+    string_map->Reserve(len);
     for (size_t i = 0; i < len; ++i) {
-      sds key = ToSds(ltrace->arr[i * 2].rdb_var);
-      sds val = ToSds(ltrace->arr[i * 2 + 1].rdb_var);
+      // ToSV may reference an internal buffer, therefore we can use only before the
+      // next call to ToSV. To workaround, I copy the key to string.
+      string key(ToSV(ltrace->arr[i * 2].rdb_var));
+      string_view val = ToSV(ltrace->arr[i * 2 + 1].rdb_var);
 
-      if (!key || !val)
+      if (ec_)
         return;
 
-      /* Add pair to hash table */
-      int ret = dictAdd(hmap, key, val);
-      if (ret == DICT_ERR) {
+      if (!string_map->AddOrSkip(key, val)) {
         LOG(ERROR) << "Duplicate hash fields detected";
         ec_ = RdbError(errc::rdb_file_corrupted);
         return;
       }
     }
-
-    res = createObject(OBJ_HASH, hmap);
-    res->encoding = OBJ_ENCODING_HT;
+    pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, string_map);
     std::move(cleanup).Cancel();
   }
-
-  DCHECK(res);
-  pv_->ImportRObj(res);
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
@@ -885,13 +856,15 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       return;
     }
 
-    res = createObject(OBJ_HASH, lp);
-    res->encoding = OBJ_ENCODING_LISTPACK;
-
-    if (lpBytes(lp) > HSetFamily::MaxListPackLen())
-      hashTypeConvert(res, OBJ_ENCODING_HT);
-    else
-      res->ptr = lpShrinkToFit((uint8_t*)res->ptr);
+    if (lpBytes(lp) > HSetFamily::MaxListPackLen()) {
+      StringMap* sm = HSetFamily::ConvertToStrMap(lp);
+      lpFree(lp);
+      pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
+    } else {
+      lp = lpShrinkToFit(lp);
+      pv_->InitRobj(OBJ_HASH, kEncodingListPack, lp);
+    }
+    return;
   } else if (rdb_type_ == RDB_TYPE_ZSET_ZIPLIST) {
     unsigned char* lp = lpNew(blob.size());
     if (!ziplistPairsConvertAndValidateIntegrity((uint8_t*)blob.data(), blob.size(), &lp)) {
@@ -1200,69 +1173,90 @@ auto RdbLoaderBase::ReadKey() -> io::Result<string> {
   return FetchGenericString();
 }
 
-auto RdbLoaderBase::ReadObj(int rdbtype) -> io::Result<OpaqueObj> {
+error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
+  io::Result<OpaqueObj> iores;
+
   switch (rdbtype) {
     case RDB_TYPE_STRING: {
+      dest->rdb_type = RDB_TYPE_STRING;
+
       /* Read string value */
-      auto fetch = ReadStringObj();
-      if (!fetch)
-        return make_unexpected(fetch.error());
-      return OpaqueObj{std::move(*fetch), RDB_TYPE_STRING};
+      return ReadStringObj(&dest->obj);
     }
     case RDB_TYPE_SET:
-      return ReadSet();
+      iores = ReadSet();
+      break;
     case RDB_TYPE_SET_INTSET:
-      return ReadIntSet();
+      iores = ReadIntSet();
+      break;
     case RDB_TYPE_HASH_ZIPLIST:
-      return ReadHZiplist();
+      iores = ReadHZiplist();
+      break;
     case RDB_TYPE_HASH:
-      return ReadHMap();
+      iores = ReadHMap();
+      break;
     case RDB_TYPE_ZSET:
     case RDB_TYPE_ZSET_2:
-      return ReadZSet(rdbtype);
+      iores = ReadZSet(rdbtype);
+      break;
     case RDB_TYPE_ZSET_ZIPLIST:
-      return ReadZSetZL();
+      iores = ReadZSetZL();
+      break;
     case RDB_TYPE_LIST_QUICKLIST:
     case RDB_TYPE_LIST_QUICKLIST_2:
-      return ReadListQuicklist(rdbtype);
-    case RDB_TYPE_STREAM_LISTPACKS:
-      return ReadStreams();
+      iores = ReadListQuicklist(rdbtype);
       break;
+    case RDB_TYPE_STREAM_LISTPACKS:
+      iores = ReadStreams();
+      break;
+      break;
+    default:
+      LOG(ERROR) << "Unsupported rdb type " << rdbtype;
+
+      return RdbError(errc::invalid_encoding);
   }
 
-  LOG(ERROR) << "Unsupported rdb type " << rdbtype;
-
-  return Unexpected(errc::invalid_encoding);
+  if (!iores)
+    return iores.error();
+  *dest = std::move(*iores);
+  return error_code{};
 }
 
-auto RdbLoaderBase::ReadStringObj() -> io::Result<RdbVariant> {
+error_code RdbLoaderBase::ReadStringObj(RdbVariant* dest) {
   bool isencoded;
   size_t len;
 
-  SET_OR_UNEXPECT(LoadLen(&isencoded), len);
+  SET_OR_RETURN(LoadLen(&isencoded), len);
 
   if (isencoded) {
     switch (len) {
       case RDB_ENC_INT8:
       case RDB_ENC_INT16:
-      case RDB_ENC_INT32:
-        return ReadIntObj(len);
-      case RDB_ENC_LZF:
-        return ReadLzf();
+      case RDB_ENC_INT32: {
+        io::Result<long long> io_int = ReadIntObj(len);
+        if (!io_int)
+          return io_int.error();
+        dest->emplace<long long>(*io_int);
+        return error_code{};
+      }
+      case RDB_ENC_LZF: {
+        io::Result<LzfString> lzf = ReadLzf();
+        if (!lzf)
+          return lzf.error();
+
+        dest->emplace<LzfString>(std::move(lzf.value()));
+        return error_code{};
+      }
       default:
         LOG(ERROR) << "Unknown RDB string encoding " << len;
-        return Unexpected(errc::rdb_file_corrupted);
+        return RdbError(errc::rdb_file_corrupted);
     }
   }
 
-  base::PODArray<char> blob;
+  auto& blob = dest->emplace<base::PODArray<char>>();
   blob.resize(len);
   error_code ec = FetchBuf(len, blob.data());
-  if (ec) {
-    return make_unexpected(ec);
-  }
-
-  return blob;
+  return ec;
 }
 
 io::Result<long long> RdbLoaderBase::ReadIntObj(int enctype) {
@@ -1312,24 +1306,24 @@ auto RdbLoaderBase::ReadSet() -> io::Result<OpaqueObj> {
   unique_ptr<LoadTrace> res(new LoadTrace);
   res->arr.resize(len);
   for (size_t i = 0; i < len; i++) {
-    io::Result<RdbVariant> fetch = ReadStringObj();
-    if (!fetch) {
-      return make_unexpected(fetch.error());
+    error_code ec = ReadStringObj(&res->arr[i].rdb_var);
+    if (ec) {
+      return make_unexpected(ec);
     }
-    res->arr[i].rdb_var = std::move(fetch.value());
   }
 
   return OpaqueObj{std::move(res), RDB_TYPE_SET};
 }
 
 auto RdbLoaderBase::ReadIntSet() -> io::Result<OpaqueObj> {
-  io::Result<RdbVariant> fetch = ReadStringObj();
-  if (!fetch) {
-    return make_unexpected(fetch.error());
+  RdbVariant obj;
+  error_code ec = ReadStringObj(&obj);
+  if (ec) {
+    return make_unexpected(ec);
   }
 
-  const LzfString* lzf = get_if<LzfString>(&fetch.value());
-  const base::PODArray<char>* arr = get_if<base::PODArray<char>>(&fetch.value());
+  const LzfString* lzf = get_if<LzfString>(&obj);
+  const base::PODArray<char>* arr = get_if<base::PODArray<char>>(&obj);
 
   if (lzf) {
     if (lzf->uncompressed_len == 0 || lzf->compressed_blob.empty())
@@ -1341,12 +1335,14 @@ auto RdbLoaderBase::ReadIntSet() -> io::Result<OpaqueObj> {
     return Unexpected(errc::rdb_file_corrupted);
   }
 
-  return OpaqueObj{std::move(*fetch), RDB_TYPE_SET_INTSET};
+  return OpaqueObj{std::move(obj), RDB_TYPE_SET_INTSET};
 }
 
 auto RdbLoaderBase::ReadHZiplist() -> io::Result<OpaqueObj> {
   RdbVariant str_obj;
-  SET_OR_UNEXPECT(ReadStringObj(), str_obj);
+  error_code ec = ReadStringObj(&str_obj);
+  if (ec)
+    return make_unexpected(ec);
 
   if (StrLen(str_obj) == 0) {
     return Unexpected(errc::rdb_file_corrupted);
@@ -1366,7 +1362,9 @@ auto RdbLoaderBase::ReadHMap() -> io::Result<OpaqueObj> {
   load_trace->arr.resize(len * 2);
 
   for (size_t i = 0; i < load_trace->arr.size(); ++i) {
-    SET_OR_UNEXPECT(ReadStringObj(), load_trace->arr[i].rdb_var);
+    error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var);
+    if (ec)
+      return make_unexpected(ec);
   }
 
   return OpaqueObj{std::move(load_trace), RDB_TYPE_HASH};
@@ -1386,7 +1384,9 @@ auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
   double score;
 
   for (size_t i = 0; i < load_trace->arr.size(); ++i) {
-    SET_OR_UNEXPECT(ReadStringObj(), load_trace->arr[i].rdb_var);
+    error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var);
+    if (ec)
+      return make_unexpected(ec);
     if (rdbtype == RDB_TYPE_ZSET_2) {
       SET_OR_UNEXPECT(FetchBinaryDouble(), score);
     } else {
@@ -1405,7 +1405,9 @@ auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
 
 auto RdbLoaderBase::ReadZSetZL() -> io::Result<OpaqueObj> {
   RdbVariant str_obj;
-  SET_OR_UNEXPECT(ReadStringObj(), str_obj);
+  error_code ec = ReadStringObj(&str_obj);
+  if (ec)
+    return make_unexpected(ec);
 
   if (StrLen(str_obj) == 0) {
     return Unexpected(errc::rdb_file_corrupted);
@@ -1437,7 +1439,10 @@ auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
     }
 
     RdbVariant var;
-    SET_OR_UNEXPECT(ReadStringObj(), var);
+    error_code ec = ReadStringObj(&var);
+    if (ec)
+      return make_unexpected(ec);
+
     if (StrLen(var) == 0) {
       return Unexpected(errc::rdb_file_corrupted);
     }
@@ -1455,21 +1460,24 @@ auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
   load_trace->arr.resize(listpacks * 2);
 
+  error_code ec;
   for (size_t i = 0; i < listpacks; ++i) {
     /* Get the master ID, the one we'll use as key of the radix tree
      * node: the entries inside the listpack itself are delta-encoded
      * relatively to this ID. */
     RdbVariant stream_id, blob;
-    SET_OR_UNEXPECT(ReadStringObj(), stream_id);
-
+    ec = ReadStringObj(&stream_id);
+    if (ec)
+      return make_unexpected(ec);
     if (StrLen(stream_id) != sizeof(streamID)) {
       LOG(ERROR) << "Stream node key entry is not the size of a stream ID";
 
       return Unexpected(errc::rdb_file_corrupted);
     }
 
-    SET_OR_UNEXPECT(ReadStringObj(), blob);
-
+    ec = ReadStringObj(&blob);
+    if (ec)
+      return make_unexpected(ec);
     if (StrLen(blob) == 0) {
       LOG(ERROR) << "Stream listpacks loading failed";
       return Unexpected(errc::rdb_file_corrupted);
@@ -1501,7 +1509,9 @@ auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
 
     // sds cgname;
     RdbVariant cgname;
-    SET_OR_UNEXPECT(ReadStringObj(), cgname);
+    ec = ReadStringObj(&cgname);
+    if (ec)
+      return make_unexpected(ec);
     cgroup.name = std::move(cgname);
 
     SET_OR_UNEXPECT(LoadLen(nullptr), cgroup.ms);
@@ -1546,7 +1556,9 @@ auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
 
     for (size_t j = 0; j < consumers_num; ++j) {
       auto& consumer = cgroup.cons_arr[j];
-      SET_OR_UNEXPECT(ReadStringObj(), consumer.name);
+      ec = ReadStringObj(&consumer.name);
+      if (ec)
+        return make_unexpected(ec);
 
       SET_OR_UNEXPECT(FetchInt<int64_t>(), consumer.seen_time);
 
@@ -1596,6 +1608,10 @@ template <typename T> io::Result<T> RdbLoaderBase::FetchInt() {
   return base::LE::LoadT<std::make_unsigned_t<T>>(buf);
 }
 
+io::Result<uint8_t> RdbLoaderBase::FetchType() {
+  return FetchInt<uint8_t>();
+}
+
 // -------------- RdbLoader   ----------------------------
 
 struct RdbLoader::ObjSettings {
@@ -1617,11 +1633,18 @@ struct RdbLoader::ObjSettings {
   ObjSettings() = default;
 };
 
-RdbLoader::RdbLoader(ScriptMgr* script_mgr) : script_mgr_(script_mgr) {
+RdbLoader::RdbLoader(Service* service)
+    : service_{service}, script_mgr_{service == nullptr ? nullptr : service->script_mgr()} {
   shard_buf_.reset(new ItemsBuf[shard_set->size()]);
 }
 
 RdbLoader::~RdbLoader() {
+  while (true) {
+    Item* item = item_queue_.Pop();
+    if (item == nullptr)
+      break;
+    delete item;
+  }
 }
 
 error_code RdbLoader::Load(io::Source* src) {
@@ -1667,6 +1690,8 @@ error_code RdbLoader::Load(io::Source* src) {
   ObjSettings settings;
   settings.now = mstime();
   size_t keys_loaded = 0;
+
+  auto cleanup = absl::Cleanup([&] { FinishLoad(start, &keys_loaded); });
 
   while (!stop_early_.load(memory_order_relaxed)) {
     /* Read type. */
@@ -1770,6 +1795,15 @@ error_code RdbLoader::Load(io::Source* src) {
       continue;
     }
 
+    if (type == RDB_OPCODE_JOURNAL_BLOB) {
+      // We should flush all changes on the current db before applying incremental changes.
+      for (unsigned i = 0; i < shard_set->size(); ++i) {
+        FlushShardAsync(i);
+      }
+      RETURN_ON_ERR(HandleJournalBlob(service_, cur_db_index_));
+      continue;
+    }
+
     if (!rdbIsObjectType(type)) {
       return RdbError(errc::invalid_rdb_type);
     }
@@ -1786,6 +1820,10 @@ error_code RdbLoader::Load(io::Source* src) {
   /* Verify the checksum if RDB version is >= 5 */
   RETURN_ON_ERR(VerifyChecksum());
 
+  return kOk;
+}
+
+void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
   fibers_ext::BlockingCounter bc(shard_set->size());
   for (unsigned i = 0; i < shard_set->size(); ++i) {
     // Flush the remaining items.
@@ -1796,19 +1834,17 @@ error_code RdbLoader::Load(io::Source* src) {
   }
   bc.Wait();  // wait for sentinels to report.
 
-  absl::Duration dur = absl::Now() - start;
+  absl::Duration dur = absl::Now() - start_time;
   load_time_ = double(absl::ToInt64Milliseconds(dur)) / 1000;
-  keys_loaded_ = keys_loaded;
-
-  return kOk;
+  keys_loaded_ = *keys_loaded;
 }
 
 std::error_code RdbLoaderBase::EnsureRead(size_t min_sz) {
   // In the flow of reading compressed data, we store the uncompressed data to in uncompressed
-  // buffer. When parsing entries we call ensure read with 9 bytes to read the length of key/value.
-  // If the key/value is very small (less than 9 bytes) the remainded data in uncompressed buffer
-  // might contain less than 9 bytes. We need to make sure that we dont read from sink to the
-  // uncompressed buffer and therefor in this flow we return here.
+  // buffer. When parsing entries we call ensure read with 9 bytes to read the length of
+  // key/value. If the key/value is very small (less than 9 bytes) the remainded data in
+  // uncompressed buffer might contain less than 9 bytes. We need to make sure that we dont read
+  // from sink to the uncompressed buffer and therefor in this flow we return here.
   if (mem_buf_ != &origin_mem_buf_)
     return std::error_code{};
   if (mem_buf_->InputLen() >= min_sz)
@@ -1843,7 +1879,7 @@ error_code RdbLoaderBase::EnsureReadInternal(size_t min_sz) {
   return kOk;
 }
 
-auto RdbLoaderBase::LoadLen(bool* is_encoded) -> io::Result<uint64_t> {
+io::Result<uint64_t> RdbLoaderBase::LoadLen(bool* is_encoded) {
   if (is_encoded)
     *is_encoded = false;
 
@@ -1853,38 +1889,24 @@ auto RdbLoaderBase::LoadLen(bool* is_encoded) -> io::Result<uint64_t> {
   if (ec)
     return make_unexpected(ec);
 
-  uint64_t res = 0;
-  uint8_t first = mem_buf_->InputBuffer()[0];
-  int type = (first & 0xC0) >> 6;
-  mem_buf_->ConsumeInput(1);
-  if (type == RDB_ENCVAL) {
-    /* Read a 6 bit encoding type. */
-    if (is_encoded)
-      *is_encoded = true;
-    res = first & 0x3F;
-  } else if (type == RDB_6BITLEN) {
-    /* Read a 6 bit len. */
-    res = first & 0x3F;
-  } else if (type == RDB_14BITLEN) {
-    res = ((first & 0x3F) << 8) | mem_buf_->InputBuffer()[0];
-    mem_buf_->ConsumeInput(1);
-  } else if (first == RDB_32BITLEN) {
-    /* Read a 32 bit len. */
-    res = absl::big_endian::Load32(mem_buf_->InputBuffer().data());
-    mem_buf_->ConsumeInput(4);
-  } else if (first == RDB_64BITLEN) {
-    /* Read a 64 bit len. */
-    res = absl::big_endian::Load64(mem_buf_->InputBuffer().data());
-    mem_buf_->ConsumeInput(8);
-  } else {
-    LOG(ERROR) << "Bad length encoding " << type << " in rdbLoadLen()";
-    return Unexpected(errc::rdb_file_corrupted);
-  }
+  // Read integer meta info.
+  auto bytes = mem_buf_->InputBuffer();
+  PackedUIntMeta meta{bytes[0]};
+  bytes.remove_prefix(1);
+
+  // Read integer.
+  uint64_t res;
+  SET_OR_UNEXPECT(ReadPackedUInt(meta, bytes), res);
+
+  if (meta.Type() == RDB_ENCVAL && is_encoded)
+    *is_encoded = true;
+
+  mem_buf_->ConsumeInput(1 + meta.ByteSize());
 
   return res;
 }
 
-void RdbLoaderBase::AlocateDecompressOnce(int op_type) {
+void RdbLoaderBase::AllocateDecompressOnce(int op_type) {
   if (decompress_impl_) {
     return;
   }
@@ -1898,7 +1920,7 @@ void RdbLoaderBase::AlocateDecompressOnce(int op_type) {
 }
 
 error_code RdbLoaderBase::HandleCompressedBlob(int op_type) {
-  AlocateDecompressOnce(op_type);
+  AllocateDecompressOnce(op_type);
   // Fetch uncompress blob
   string res;
   SET_OR_RETURN(FetchGenericString(), res);
@@ -1917,6 +1939,33 @@ error_code RdbLoaderBase::HandleCompressedBlobFinish() {
   CHECK_EQ(mem_buf_->InputLen(), size_t(0));
   mem_buf_ = &origin_mem_buf_;
   return kOk;
+}
+
+error_code RdbLoaderBase::HandleJournalBlob(Service* service, DbIndex dbid) {
+  // Read the number of entries in the journal blob.
+  size_t num_entries;
+  bool _encoded;
+  SET_OR_RETURN(LoadLen(&_encoded), num_entries);
+
+  // Read the journal blob.
+  string journal_blob;
+  SET_OR_RETURN(FetchGenericString(), journal_blob);
+
+  io::BytesSource bs{io::Buffer(journal_blob)};
+  journal_reader_.SetDb(dbid);
+  journal_reader_.SetSource(&bs);
+
+  // Parse and exectue in loop.
+  size_t done = 0;
+  JournalExecutor ex{service};
+  while (done < num_entries) {
+    journal::ParsedEntry entry{};
+    SET_OR_RETURN(journal_reader_.ReadEntry(), entry);
+    ex.Execute(entry);
+    done++;
+  }
+
+  return std::error_code{};
 }
 
 error_code RdbLoader::HandleAux() {
@@ -2001,18 +2050,17 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
   if (out_buf.empty())
     return;
 
-  ItemsBuf* ib = new ItemsBuf{std::move(out_buf)};
-  auto cb = [indx = this->cur_db_index_, ib, this] {
-    this->LoadItemsBuffer(indx, *ib);
-    delete ib;
+  auto cb = [indx = this->cur_db_index_, this, ib = std::move(out_buf)] {
+    this->LoadItemsBuffer(indx, ib);
   };
 
   shard_set->Add(sid, std::move(cb));
 }
 
-std::error_code RdbLoaderBase::Visit(const Item& item, CompactObj* pv) {
-  OpaqueObjLoader visitor(item.val.rdb_type, pv);
-  std::visit(visitor, item.val.obj);
+std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, CompactObj* pv) {
+  OpaqueObjLoader visitor(opaque.rdb_type, pv);
+  std::visit(visitor, opaque.obj);
+
   return visitor.ec();
 }
 
@@ -2020,20 +2068,24 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   DbSlice& db_slice = EngineShard::tlocal()->db_slice();
   DbContext db_cntx{.db_index = db_ind, .time_now_ms = GetCurrentTimeMs()};
 
-  for (const auto& item : ib) {
+  for (const auto* item : ib) {
     PrimeValue pv;
-    if (ec_ = Visit(item, &pv); ec_) {
+    if (ec_ = FromOpaque(item->val, &pv); ec_) {
       stop_early_ = true;
       break;
     }
 
-    if (item.expire_ms > 0 && db_cntx.time_now_ms >= item.expire_ms)
+    if (item->expire_ms > 0 && db_cntx.time_now_ms >= item->expire_ms)
       continue;
 
-    auto [it, added] = db_slice.AddOrUpdate(db_cntx, item.key, std::move(pv), item.expire_ms);
+    auto [it, added] = db_slice.AddOrUpdate(db_cntx, item->key, std::move(pv), item->expire_ms);
     if (!added) {
-      LOG(WARNING) << "RDB has duplicated key '" << item.key << "' in DB " << db_ind;
+      LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
     }
+  }
+
+  for (auto* item : ib) {
+    item_queue_.Push(item);
   }
 }
 
@@ -2043,21 +2095,22 @@ void RdbLoader::ResizeDb(size_t key_num, size_t expire_num) {
 }
 
 error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
-  /* Read key */
-  string key;
-  OpaqueObj val;
+  // We return the item in LoadItemsBuffer.
+  Item* item = item_queue_.Pop();
 
-  // We free key in LoadItemsBuffer.
-  SET_OR_RETURN(ReadKey(), key);
-
-  io::Result<OpaqueObj> io_res = ReadObj(type);
-
-  if (!io_res) {
-    VLOG(1) << "ReadObj error " << io_res.error() << " for key " << key;
-    return io_res.error();
+  if (item == nullptr) {
+    item = new Item;
   }
 
-  val = std::move(io_res.value());
+  // Read key
+  SET_OR_RETURN(ReadKey(), item->key);
+
+  // Read value
+  error_code ec = ReadObj(type, &item->val);
+  if (ec) {
+    VLOG(1) << "ReadObj error " << ec << " for key " << item->key;
+    return ec;
+  }
 
   /* Check if the key already expired. This function is used when loading
    * an RDB file from disk, either at startup, or when an RDB was
@@ -2072,12 +2125,12 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   if (should_expire) {
     // decrRefCount(val);
   } else {
-    ShardId sid = Shard(key, shard_set->size());
-    uint64_t expire_at_ms = settings->expiretime;
+    ShardId sid = Shard(item->key, shard_set->size());
+    item->expire_ms = settings->expiretime;
 
     auto& out_buf = shard_buf_[sid];
 
-    out_buf.emplace_back(Item{std::move(key), std::move(val), expire_at_ms});
+    out_buf.emplace_back(item);
 
     constexpr size_t kBufSize = 128;
     if (out_buf.size() >= kBufSize) {

@@ -15,6 +15,7 @@
 
 #include "facade/facade_types.h"
 #include "facade/op_status.h"
+#include "util/fibers/fiber.h"
 
 namespace dfly {
 
@@ -91,13 +92,15 @@ struct OpArgs {
 };
 
 struct TieredStats {
-  size_t external_reads = 0;
-  size_t external_writes = 0;
+  size_t tiered_reads = 0;
+  size_t tiered_writes = 0;
 
   size_t storage_capacity = 0;
 
   // how much was reserved by actively stored items.
   size_t storage_reserved = 0;
+  size_t aborted_write_cnt = 0;
+  size_t flush_skip_cnt = 0;
 
   TieredStats& operator+=(const TieredStats&);
 };
@@ -242,7 +245,8 @@ using AggregateGenericError = AggregateValue<GenericError>;
 // Context is a utility for managing error reporting and cancellation for complex tasks.
 //
 // When submitting an error with `Error`, only the first is stored (as in aggregate values).
-// Then a special error handler is run, if present, and the context is cancelled.
+// Then a special error handler is run, if present, and the context is cancelled. The error handler
+// is run in a separate handler to free up the caller.
 //
 // Manual cancellation with `Cancel` is simulated by reporting an `errc::operation_canceled` error.
 // This allows running the error handler and representing this scenario as an error.
@@ -254,10 +258,10 @@ class Context : protected Cancellation {
   Context(ErrHandler err_handler) : Cancellation{}, err_{}, err_handler_{std::move(err_handler)} {
   }
 
-  // Cancels the context by submitting an `errc::operation_canceled` error.
-  void Cancel();
-  using Cancellation::IsCancelled;
+  ~Context();
 
+  void Cancel();  // Cancels the context by submitting an `errc::operation_canceled` error.
+  using Cancellation::IsCancelled;
   const Cancellation* GetCancellation() const;
 
   GenericError GetError();
@@ -265,24 +269,11 @@ class Context : protected Cancellation {
   // Report an error by submitting arguments for GenericError.
   // If this is the first error that occured, then the error handler is run
   // and the context is cancelled.
-  //
-  // Note: this function blocks when called from inside an error handler.
-  template <typename... T> GenericError Error(T... ts) {
-    std::lock_guard lk{mu_};
-    if (err_)
-      return err_;
-
-    GenericError new_err{std::forward<T>(ts)...};
-    if (err_handler_)
-      err_handler_(new_err);
-
-    err_ = std::move(new_err);
-    Cancellation::Cancel();
-
-    return err_;
+  template <typename... T> GenericError ReportError(T... ts) {
+    return ReportErrorInternal(GenericError{std::forward<T>(ts)...});
   }
 
-  // Reset error and cancellation flag, assign new error handler.
+  // Wait for error handler to stop, reset error and cancellation flag, assign new error handler.
   void Reset(ErrHandler handler);
 
   // Atomically replace the error handler if no error is present, and return the
@@ -291,12 +282,21 @@ class Context : protected Cancellation {
   // Beware, never do this manually in two steps. If you check for cancellation,
   // set the error handler and initialize resources, then the new error handler
   // will never run if the context was cancelled between the first two steps.
-  GenericError Switch(ErrHandler handler);
+  GenericError SwitchErrorHandler(ErrHandler handler);
+
+  // If any error handler is running, wait for it to stop.
+  void JoinErrorHandler();
+
+ private:
+  // Report error.
+  GenericError ReportErrorInternal(GenericError&& err);
 
  private:
   GenericError err_;
-  ErrHandler err_handler_;
   ::boost::fibers::mutex mu_;
+
+  ErrHandler err_handler_;
+  ::util::fibers_ext::Fiber err_handler_fb_;
 };
 
 struct ScanOpts {

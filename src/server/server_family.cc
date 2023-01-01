@@ -570,7 +570,7 @@ error_code ServerFamily::LoadRdb(const std::string& rdb_file) {
   if (res) {
     io::FileSource fs(*res);
 
-    RdbLoader loader(script_mgr());
+    RdbLoader loader{&service_};
     ec = loader.Load(&fs);
     if (!ec) {
       LOG(INFO) << "Done loading RDB, keys loaded: " << loader.keys_loaded();
@@ -1300,8 +1300,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("stash_unloaded", m.events.stash_unloaded);
     append("traverse_ttl_sec", m.traverse_ttl_per_sec);
     append("delete_ttl_sec", m.delete_ttl_per_sec);
-    append("keyspace_hits", -1);
-    append("keyspace_misses", -1);
+    append("keyspace_hits", m.events.hits);
+    append("keyspace_misses", m.events.misses);
     append("total_reads_processed", m.conn_stats.io_read_cnt);
     append("total_writes_processed", m.conn_stats.io_write_cnt);
     append("async_writes_count", m.conn_stats.async_writes_cnt);
@@ -1313,12 +1313,14 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
   if (should_enter("TIERED", true)) {
     ADD_HEADER("# TIERED");
-    append("external_entries", total.external_entries);
-    append("external_bytes", total.external_size);
-    append("external_reads", m.tiered_stats.external_reads);
-    append("external_writes", m.tiered_stats.external_writes);
-    append("external_reserved", m.tiered_stats.storage_reserved);
-    append("external_capacity", m.tiered_stats.storage_capacity);
+    append("tiered_entries", total.tiered_entries);
+    append("tiered_bytes", total.tiered_size);
+    append("tiered_reads", m.tiered_stats.tiered_reads);
+    append("tiered_writes", m.tiered_stats.tiered_writes);
+    append("tiered_reserved", m.tiered_stats.storage_reserved);
+    append("tiered_capacity", m.tiered_stats.storage_capacity);
+    append("tiered_aborted_write_total", m.tiered_stats.aborted_write_cnt);
+    append("tiered_flush_skip_total", m.tiered_stats.flush_skip_cnt);
   }
 
   if (should_enter("PERSISTENCE", true)) {

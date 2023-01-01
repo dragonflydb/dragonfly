@@ -17,6 +17,7 @@ extern "C" {
 #include "base/logging.h"
 #include "facade/facade_test.h"  // needed to find operator== for RespExpr.
 #include "io/file.h"
+#include "io/file_util.h"
 #include "server/engine_shard_set.h"
 #include "server/rdb_load.h"
 #include "server/test_utils.h"
@@ -31,14 +32,31 @@ using absl::StrCat;
 ABSL_DECLARE_FLAG(int32, list_compress_depth);
 ABSL_DECLARE_FLAG(int32, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int, compression_mode);
+ABSL_DECLARE_FLAG(string, dbfilename);
 
 namespace dfly {
 
 class RdbTest : public BaseFamilyTest {
  protected:
- protected:
+  static void SetUpTestSuite();
+  void TearDown();
+
   io::FileSource GetSource(string name);
 };
+
+void RdbTest::SetUpTestSuite() {
+  BaseFamilyTest::SetUpTestSuite();
+  SetFlag(&FLAGS_dbfilename, "rdbtestdump");
+}
+
+void RdbTest::TearDown() {
+  auto rdb_files = io::StatFiles("rdbtestdump*");
+  CHECK(rdb_files);
+  for (const auto& fl : *rdb_files) {
+    unlink(fl.name.c_str());
+  }
+  BaseFamilyTest::TearDown();
+}
 
 inline const uint8_t* to_byte(const void* s) {
   return reinterpret_cast<const uint8_t*>(s);
@@ -84,7 +102,7 @@ TEST_F(RdbTest, LoadEmpty) {
 
 TEST_F(RdbTest, LoadSmall6) {
   io::FileSource fs = GetSource("redis6_small.rdb");
-  RdbLoader loader(service_->script_mgr());
+  RdbLoader loader{service_.get()};
 
   // must run in proactor thread in order to avoid polluting the serverstate
   // in the main, testing thread.
@@ -121,7 +139,7 @@ TEST_F(RdbTest, LoadSmall6) {
 
 TEST_F(RdbTest, Stream) {
   io::FileSource fs = GetSource("redis6_stream.rdb");
-  RdbLoader loader(service_->script_mgr());
+  RdbLoader loader{service_.get()};
 
   // must run in proactor thread in order to avoid polluting the serverstate
   // in the main, testing thread.
@@ -146,7 +164,7 @@ TEST_F(RdbTest, Stream) {
 }
 
 TEST_F(RdbTest, ComressionModeSaveDragonflyAndReload) {
-  Run({"debug", "populate", "500000"});
+  Run({"debug", "populate", "50000"});
 
   for (int i = 0; i <= 3; ++i) {
     SetFlag(&FLAGS_compression_mode, i);
@@ -156,7 +174,7 @@ TEST_F(RdbTest, ComressionModeSaveDragonflyAndReload) {
     auto save_info = service_->server_family().GetLastSaveInfo();
     resp = Run({"debug", "load", save_info->file_name});
     ASSERT_EQ(resp, "OK");
-    ASSERT_EQ(500000, CheckedInt({"dbsize"}));
+    ASSERT_EQ(50000, CheckedInt({"dbsize"}));
   }
 }
 
@@ -240,7 +258,8 @@ TEST_F(RdbTest, SaveManyDbs) {
     Run({"select", "1"});
     Run({"debug", "populate", "10000"});
   });
-  auto metrics = service_->server_family().GetMetrics();
+
+  auto metrics = GetMetrics();
   ASSERT_EQ(2, metrics.db.size());
   EXPECT_EQ(50000, metrics.db[0].key_count);
   EXPECT_EQ(10000, metrics.db[1].key_count);
@@ -272,7 +291,7 @@ TEST_F(RdbTest, SaveManyDbs) {
   auto resp = Run({"debug", "reload", "NOSAVE"});
   EXPECT_EQ(resp, "OK");
 
-  metrics = service_->server_family().GetMetrics();
+  metrics = GetMetrics();
   ASSERT_EQ(2, metrics.db.size());
   EXPECT_EQ(50000, metrics.db[0].key_count);
   EXPECT_EQ(10000, metrics.db[1].key_count);

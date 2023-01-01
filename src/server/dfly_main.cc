@@ -16,6 +16,8 @@
 #include <mimalloc.h>
 #include <signal.h>
 
+#include <regex>
+
 #include "base/init.h"
 #include "base/proc_util.h"  // for GetKernelVersion
 #include "facade/dragonfly_listener.h"
@@ -28,6 +30,7 @@
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
 #include "util/epoll/epoll_pool.h"
+#include "util/http/http_client.h"
 #include "util/uring/uring_pool.h"
 #include "util/varz.h"
 
@@ -85,6 +88,9 @@ ABSL_FLAG(MaxMemoryFlag, maxmemory, MaxMemoryFlag(0),
           "0 - means the program will automatically determine its maximum memory usage. "
           "default: 0");
 
+ABSL_FLAG(bool, version_check, true,
+          "If true, Will monitor for new releases on Dragonfly servers once a day.");
+
 using namespace util;
 using namespace facade;
 using namespace io;
@@ -95,6 +101,117 @@ using strings::HumanReadableNumBytes;
 namespace dfly {
 
 namespace {
+
+using util::http::TlsClient;
+
+const std::string_view kInvalidVersion{"unknown version"};
+
+std::string GetVersionString(const std::string& from) {
+  // The server sends a message such as {"latest": "0.12.0"}
+  const auto reg_match_expr = R"(\{\"latest"\:[ \t]*\"([0-9]+\.[0-9]+\.[0-9]+)\"\})";
+  VLOG(1) << "checking version '" << from << "'";
+  auto const regex = std::regex(reg_match_expr);
+  std::smatch match;
+  if (std::regex_match(from, match, regex) && match.size() > 1) {
+    // the second entry is the match to the group that holds the version string
+    return match[1].str();
+  } else {
+    return std::string{kInvalidVersion};
+  }
+}
+
+std::string GetRemoteVersion(ProactorBase* proactor, SSL_CTX* ssl_context, const std::string host,
+                             std::string_view service, const std::string& resource,
+                             const std::string& ver_header) {
+  namespace bh = boost::beast::http;
+  using ResponseType = bh::response<bh::string_body>;
+
+  bh::request<bh::string_body> req{bh::verb::get, resource, 11 /*http 1.1*/};
+  req.set(bh::field::host, host);
+  req.set(bh::field::user_agent, ver_header);
+  ResponseType res;
+  TlsClient http_client{proactor};
+  http_client.set_connect_timeout_ms(2000);
+
+  auto ec = http_client.Connect(host, service, ssl_context);
+  if (!ec) {
+    ec = http_client.Send(req, &res);
+    if (!ec) {
+      VLOG(1) << "successfully got response from HTTP GET for host " << host << ":" << service
+              << "/" << resource << " response code is " << res.result();
+
+      if (res.result() == bh::status::ok) {
+        return GetVersionString(res.body());
+      }
+    } else {
+      VLOG(1) << "failed to process send HTTP GET to " << host << "@" << service << " at resource '"
+              << resource << "', error: " << ec.message();
+    }
+  } else {
+    VLOG(1) << "failed to connect: " << ec.message();
+  }
+  return std::string{kInvalidVersion};
+}
+
+struct VersionMonitor {
+  fibers_ext::Fiber version_fiber_;
+  fibers_ext::Done monitor_ver_done_;
+
+  void Run(ProactorPool* proactor_pool) {
+    if (GetFlag(FLAGS_version_check)) {
+      version_fiber_ = proactor_pool->GetNextProactor()->LaunchFiber([this] { RunTask(); });
+    }
+  }
+
+  void Shutdown() {
+    monitor_ver_done_.Notify();
+    if (version_fiber_.IsJoinable()) {
+      version_fiber_.Join();
+    }
+  }
+
+ private:
+  void RunTask();
+};
+
+void VersionMonitor::RunTask() {
+  const auto loop_sleep_time = std::chrono::hours(24);  // every 24 hours
+
+  const std::string host_name = "version.dragonflydb.io";
+  const std::string_view port = "443";
+  const std::string resource = "/v1";
+  const std::string dev_version_name = "dev";
+  const std::string version_header = std::string("DragonflyDB/") + kGitTag;
+
+  // Don't run in dev environment - i.e. where we don't build with
+  // real version number
+  if (kGitTag == dev_version_name) {
+    return;
+  }
+
+  SSL_CTX* context = TlsClient::CreateSslContext();
+  if (!context) {
+    VLOG(1) << "failed to create SSL context - cannot run version monitoring";
+    return;
+  }
+
+  ProactorBase* my_pb = ProactorBase::me();
+  while (true) {
+    const std::string remote_version =
+        GetRemoteVersion(my_pb, context, host_name, port, resource, version_header);
+
+    if (remote_version != kGitTag) {
+      LOG_FIRST_N(INFO, 1) << "Your current version '" << kGitTag
+                           << "' is not the latest version. A newer version '" << remote_version
+                           << "' is now available. Please consider an update.";
+    }
+    if (monitor_ver_done_.WaitFor(loop_sleep_time)) {
+      TlsClient::FreeContext(context);
+      VLOG(1) << "finish running version monitor task";
+      return;
+    }
+  }
+}
 
 enum class TermColor { kDefault, kRed, kGreen, kYellow };
 // Returns the ANSI color code for the given color. TermColor::kDefault is
@@ -195,9 +312,12 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     acceptor->AddListener(mc_port, new Listener{Protocol::MEMCACHE, &service});
   }
 
-  acceptor->Run();
-  acceptor->Wait();
+  VersionMonitor version_monitor;
 
+  acceptor->Run();
+  version_monitor.Run(pool);
+  acceptor->Wait();
+  version_monitor.Shutdown();
   service.Shutdown();
 
   if (unlink_uds) {

@@ -3,6 +3,9 @@
 //
 #pragma once
 
+#include <string>
+#include <variant>
+
 #include "server/common.h"
 #include "server/table.h"
 
@@ -11,37 +14,51 @@ namespace journal {
 
 enum class Op : uint8_t {
   NOOP = 0,
-  LOCK = 1,
-  UNLOCK = 2,
-  LOCK_SHARD = 3,
-  UNLOCK_SHARD = 4,
-  SCHED = 5,
-  VAL = 10,
-  DEL,
-  MSET,
+  SELECT = 6,
+  COMMAND = 10,
 };
 
-// TODO: to pass all the attributes like ttl, stickiness etc.
-struct Entry {
-  Entry(Op op, DbIndex did, TxId tid, std::string_view skey)
-      : opcode(op), db_ind(did), txid(tid), key(skey) {
-  }
-
-  Entry(DbIndex did, TxId tid, std::string_view skey, const PrimeValue& pval)
-      : Entry(Op::VAL, did, tid, skey) {
-    pval_ptr = &pval;
-  }
-
-  static Entry Sched(TxId tid) {
-    return Entry{Op::SCHED, 0, tid, {}};
-  }
-
-  Op opcode;
-  DbIndex db_ind;
+struct EntryBase {
   TxId txid;
-  std::string_view key;
-  const PrimeValue* pval_ptr = nullptr;
-  uint64_t expire_ms = 0;  // 0 means no expiry.
+  Op opcode;
+  DbIndex dbid;
+  uint32_t shard_cnt;
+};
+
+// This struct represents a single journal entry.
+// Those are either control instructions or commands.
+struct Entry : public EntryBase {
+  // Payload represents a non-owning view into a command executed on the shard.
+  using Payload =
+      std::variant<std::monostate,                        // No payload.
+                   CmdArgList,                            // Parts of a full command.
+                   std::pair<std::string_view, ArgSlice>  // Command and its shard parts.
+                   >;
+
+  Entry(TxId txid, DbIndex dbid, Payload pl, uint32_t shard_cnt)
+      : EntryBase{txid, journal::Op::COMMAND, dbid, shard_cnt}, payload{pl} {
+  }
+
+  Entry(journal::Op opcode, DbIndex dbid) : EntryBase{0, opcode, dbid, 0}, payload{} {
+  }
+
+  Payload payload;
+};
+
+struct ParsedEntry : public EntryBase {
+  // Payload represents the parsed command.
+  using Payload = std::optional<CmdArgVec>;
+
+  ParsedEntry() = default;
+
+  ParsedEntry(journal::Op opcode, DbIndex dbid) : EntryBase{0, opcode, dbid, 0}, payload{} {
+  }
+
+  ParsedEntry(TxId txid, DbIndex dbid, Payload pl, uint32_t shard_cnt)
+      : EntryBase{txid, journal::Op::COMMAND, dbid, shard_cnt}, payload{pl} {
+  }
+
+  Payload payload;
 };
 
 using ChangeCallback = std::function<void(const Entry&)>;

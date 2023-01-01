@@ -1,0 +1,9 @@
+aioredis==2.0.1
+async_timeout==4.0.2
+pytoml==0.1.21
+PyYAML==6.0
+railroad==0.5.0
+redis==4.3.4
+requests==2.28.1
+aiocsv==1.2.3
+aiofiles==22.1.0

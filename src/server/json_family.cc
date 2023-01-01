@@ -17,6 +17,7 @@ extern "C" {
 #include <jsoncons_ext/jsonpointer/jsonpointer.hpp>
 
 #include "base/logging.h"
+#include "core/json_object.h"
 #include "server/command_registry.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
@@ -28,67 +29,50 @@ namespace dfly {
 using namespace std;
 using namespace jsoncons;
 
-using JsonExpression = jsonpath::jsonpath_expression<json>;
+using JsonExpression = jsonpath::jsonpath_expression<JsonType>;
 using OptBool = optional<bool>;
 using OptLong = optional<long>;
 using OptSizeT = optional<size_t>;
 using OptString = optional<string>;
-using JsonReplaceCb = function<void(const string&, json&)>;
+using JsonReplaceCb = function<void(const string&, JsonType&)>;
+using JsonReplaceVerify = std::function<OpStatus()>;
 using CI = CommandId;
 
 namespace {
 
-string GetString(EngineShard* shard, const PrimeValue& pv) {
-  string res;
-  if (pv.IsExternal()) {
-    auto* tiered = shard->tiered_storage();
-    auto [offset, size] = pv.GetExternalPtr();
-    res.resize(size);
-
-    error_code ec = tiered->Read(offset, size, res.data());
-    CHECK(!ec) << "TBD: " << ec;
-  } else {
-    pv.GetString(&res);
-  }
-
-  return res;
+inline OpStatus JsonReplaceVerifyNoOp() {
+  return OpStatus::OK;
 }
 
-inline void RecordJournal(const OpArgs& op_args, string_view key, const PrimeKey& pvalue) {
-  if (op_args.shard->journal()) {
-    journal::Entry entry{op_args.db_cntx.db_index, op_args.txid, key, pvalue};
-    op_args.shard->journal()->RecordEntry(entry);
-  }
-}
-
-void SetString(const OpArgs& op_args, string_view key, const string& value) {
+void SetJson(const OpArgs& op_args, string_view key, JsonType&& value) {
   auto& db_slice = op_args.shard->db_slice();
   DbIndex db_index = op_args.db_cntx.db_index;
   auto [it_output, added] = db_slice.AddOrFind(op_args.db_cntx, key);
   db_slice.PreUpdate(db_index, it_output);
-  it_output->second.SetString(value);
+  it_output->second.SetJson(std::move(value));
   db_slice.PostUpdate(db_index, it_output, key);
-  RecordJournal(op_args, key, it_output->second);
 }
 
-string JsonType(const json& val) {
+string JsonTypeToName(const JsonType& val) {
+  using namespace std::string_literals;
+
   if (val.is_null()) {
-    return "null";
+    return "null"s;
   } else if (val.is_bool()) {
-    return "boolean";
+    return "boolean"s;
   } else if (val.is_string()) {
-    return "string";
+    return "string"s;
   } else if (val.is_int64() || val.is_uint64()) {
-    return "integer";
+    return "integer"s;
   } else if (val.is_number()) {
-    return "number";
+    return "number"s;
   } else if (val.is_object()) {
-    return "object";
+    return "object"s;
   } else if (val.is_array()) {
-    return "array";
+    return "array"s;
   }
 
-  return "";
+  return std::string{};
 }
 
 template <typename T>
@@ -112,13 +96,13 @@ void PrintOptVec(ConnectionContext* cntx, const OpResult<vector<optional<T>>>& r
   }
 }
 
-error_code JsonReplace(json& instance, string_view& path, JsonReplaceCb callback) {
-  using evaluator_t = jsoncons::jsonpath::detail::jsonpath_evaluator<json, json&>;
+error_code JsonReplace(JsonType& instance, string_view path, JsonReplaceCb callback) {
+  using evaluator_t = jsoncons::jsonpath::detail::jsonpath_evaluator<JsonType, JsonType&>;
   using value_type = evaluator_t::value_type;
   using reference = evaluator_t::reference;
   using json_selector_t = evaluator_t::path_expression_type;
   using json_location_type = evaluator_t::json_location_type;
-  jsonpath::custom_functions<json> funcs = jsonpath::custom_functions<json>();
+  jsonpath::custom_functions<JsonType> funcs = jsonpath::custom_functions<JsonType>();
 
   error_code ec;
   jsoncons::jsonpath::detail::static_resources<value_type, reference> static_resources(funcs);
@@ -138,40 +122,47 @@ error_code JsonReplace(json& instance, string_view& path, JsonReplaceCb callback
   return ec;
 }
 
-bool JsonErrorHandler(json_errc ec, const ser_context&) {
-  VLOG(1) << "Error while decode JSON: " << make_error_code(ec).message();
-  return false;
-}
-
-optional<json> ConstructJsonFromString(string_view val) {
-  error_code ec;
-  json_decoder<json> decoder;
-  basic_json_parser<char> parser(basic_json_decode_options<char>{}, &JsonErrorHandler);
-
-  parser.update(val);
-  parser.finish_parse(decoder, ec);
-
-  if (!decoder.is_valid()) {
-    return nullopt;
+OpStatus UpdateEntry(const OpArgs& op_args, std::string_view key, std::string_view path,
+                     JsonReplaceCb callback, JsonReplaceVerify verify_op = JsonReplaceVerifyNoOp) {
+  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_JSON);
+  if (!it_res.ok()) {
+    return it_res.status();
   }
 
-  return decoder.get_result();
-}
+  PrimeIterator entry_it = it_res.value();
+  auto& db_slice = op_args.shard->db_slice();
+  auto db_index = op_args.db_cntx.db_index;
+  JsonType* json_val = entry_it->second.GetJson();
+  DCHECK(json_val) << "should have a valid JSON object for key '" << key << "' the type for it is '"
+                   << entry_it->second.ObjType() << "'";
+  JsonType& json_entry = *json_val;
+  db_slice.PreUpdate(db_index, entry_it);
 
-OpResult<json> GetJson(const OpArgs& op_args, string_view key) {
-  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_STRING);
-  if (!it_res.ok())
-    return it_res.status();
-
-  const PrimeValue& pv = it_res.value()->second;
-
-  string val = GetString(op_args.shard, pv);
-  optional<json> j = ConstructJsonFromString(val);
-  if (!j) {
+  // Run the update operation on this entry
+  error_code ec = JsonReplace(json_entry, path, callback);
+  if (ec) {
+    VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
     return OpStatus::SYNTAX_ERR;
   }
 
-  return *j;
+  // Make sure that we don't have other internal issue with the operation
+  OpStatus res = verify_op();
+  if (res == OpStatus::OK) {
+    db_slice.PostUpdate(db_index, entry_it, key);
+  }
+
+  return res;
+}
+
+OpResult<JsonType*> GetJson(const OpArgs& op_args, string_view key) {
+  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_JSON);
+  if (!it_res.ok())
+    return it_res.status();
+
+  JsonType* json_val = it_res.value()->second.GetJson();
+  DCHECK(json_val) << "should have a valid JSON object for key " << key;
+
+  return json_val;
 }
 
 // Returns the index of the next right bracket
@@ -287,7 +278,7 @@ string ConvertToJsonPointer(string_view json_path) {
   return result;
 }
 
-size_t CountJsonFields(const json& j) {
+size_t CountJsonFields(const JsonType& j) {
   size_t res = 0;
   json_type type = j.type();
   if (type == json_type::array_value) {
@@ -314,7 +305,7 @@ size_t CountJsonFields(const json& j) {
   return res;
 }
 
-void SendJsonValue(ConnectionContext* cntx, const json& j) {
+void SendJsonValue(ConnectionContext* cntx, const JsonType& j) {
   if (j.is_double()) {
     (*cntx)->SendDouble(j.as_double());
   } else if (j.is_number()) {
@@ -344,19 +335,25 @@ void SendJsonValue(ConnectionContext* cntx, const json& j) {
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key,
                        vector<pair<string_view, JsonExpression>> expressions) {
-  OpResult<json> result = GetJson(op_args, key);
+  OpResult<JsonType*> result = GetJson(op_args, key);
   if (!result) {
     return result.status();
   }
 
+  const JsonType& json_entry = *(result.value());
+  if (expressions.empty()) {
+    // this implicitly means that we're using $ which
+    // means we just brings all values
+    return json_entry.to_string();
+  }
   if (expressions.size() == 1) {
-    json out = expressions[0].second.evaluate(*result);
+    json out = expressions[0].second.evaluate(json_entry);
     return out.as<string>();
   }
 
   json out;
   for (auto& expr : expressions) {
-    json eval = expr.second.evaluate(*result);
+    json eval = expr.second.evaluate(json_entry);
     out[expr.first] = eval;
   }
 
@@ -364,27 +361,30 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key,
 }
 
 OpResult<vector<string>> OpType(const OpArgs& op_args, string_view key, JsonExpression expression) {
-  OpResult<json> result = GetJson(op_args, key);
+  OpResult<JsonType*> result = GetJson(op_args, key);
   if (!result) {
     return result.status();
   }
 
+  const JsonType& json_entry = *(result.value());
   vector<string> vec;
-  auto cb = [&vec](const string_view& path, const json& val) { vec.emplace_back(JsonType(val)); };
+  auto cb = [&vec](const string_view& path, const JsonType& val) {
+    vec.emplace_back(JsonTypeToName(val));
+  };
 
-  expression.evaluate(*result, cb);
+  expression.evaluate(json_entry, cb);
   return vec;
 }
 
 OpResult<vector<OptSizeT>> OpStrLen(const OpArgs& op_args, string_view key,
                                     JsonExpression expression) {
-  OpResult<json> result = GetJson(op_args, key);
+  OpResult<JsonType*> result = GetJson(op_args, key);
   if (!result) {
     return result.status();
   }
-
+  const JsonType& json_entry = *(result.value());
   vector<OptSizeT> vec;
-  auto cb = [&vec](const string_view& path, const json& val) {
+  auto cb = [&vec](const string_view& path, const JsonType& val) {
     if (val.is_string()) {
       vec.emplace_back(val.as_string_view().size());
     } else {
@@ -392,19 +392,20 @@ OpResult<vector<OptSizeT>> OpStrLen(const OpArgs& op_args, string_view key,
     }
   };
 
-  expression.evaluate(*result, cb);
+  expression.evaluate(json_entry, cb);
   return vec;
 }
 
 OpResult<vector<OptSizeT>> OpObjLen(const OpArgs& op_args, string_view key,
                                     JsonExpression expression) {
-  OpResult<json> result = GetJson(op_args, key);
+  OpResult<JsonType*> result = GetJson(op_args, key);
   if (!result) {
     return result.status();
   }
 
+  const JsonType& json_entry = *(result.value());
   vector<OptSizeT> vec;
-  auto cb = [&vec](const string_view& path, const json& val) {
+  auto cb = [&vec](const string_view& path, const JsonType& val) {
     if (val.is_object()) {
       vec.emplace_back(val.object_value().size());
     } else {
@@ -412,19 +413,20 @@ OpResult<vector<OptSizeT>> OpObjLen(const OpArgs& op_args, string_view key,
     }
   };
 
-  expression.evaluate(*result, cb);
+  expression.evaluate(json_entry, cb);
   return vec;
 }
 
 OpResult<vector<OptSizeT>> OpArrLen(const OpArgs& op_args, string_view key,
                                     JsonExpression expression) {
-  OpResult<json> result = GetJson(op_args, key);
+  OpResult<JsonType*> result = GetJson(op_args, key);
   if (!result) {
     return result.status();
   }
 
+  const JsonType& json_entry = *(result.value());
   vector<OptSizeT> vec;
-  auto cb = [&vec](const string_view& path, const json& val) {
+  auto cb = [&vec](const string_view& path, const JsonType& val) {
     if (val.is_array()) {
       vec.emplace_back(val.array_value().size());
     } else {
@@ -432,18 +434,13 @@ OpResult<vector<OptSizeT>> OpArrLen(const OpArgs& op_args, string_view key,
     }
   };
 
-  expression.evaluate(*result, cb);
+  expression.evaluate(json_entry, cb);
   return vec;
 }
 
 OpResult<vector<OptBool>> OpToggle(const OpArgs& op_args, string_view key, string_view path) {
-  OpResult<json> result = GetJson(op_args, key);
-  if (!result) {
-    return result.status();
-  }
-
   vector<OptBool> vec;
-  auto cb = [&vec](const string& path, json& val) {
+  auto cb = [&vec](const string& path, JsonType& val) {
     if (val.is_bool()) {
       bool current_val = val.as_bool() ^ true;
       val = current_val;
@@ -453,31 +450,23 @@ OpResult<vector<OptBool>> OpToggle(const OpArgs& op_args, string_view key, strin
     }
   };
 
-  json j = move(result.value());
-  error_code ec = JsonReplace(j, path, cb);
-  if (ec) {
-    VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
-    return OpStatus::SYNTAX_ERR;
+  OpStatus status = UpdateEntry(op_args, key, path, cb);
+  if (status != OpStatus::OK) {
+    return status;
   }
 
-  SetString(op_args, key, j.as_string());
   return vec;
 }
 
 template <typename Op>
 OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key, string_view path,
                                     double num, Op arithmetic_op) {
-  OpResult<json> result = GetJson(op_args, key);
-  if (!result) {
-    return result.status();
-  }
-
   bool is_result_overflow = false;
   double int_part;
   bool has_fractional_part = (modf(num, &int_part) != 0);
   json output(json_array_arg);
 
-  auto cb = [&](const string& path, json& val) {
+  auto cb = [&](const string& path, JsonType& val) {
     if (val.is_number()) {
       double result = arithmetic_op(val.as<double>(), num);
       if (isinf(result)) {
@@ -496,18 +485,18 @@ OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key, stri
     }
   };
 
-  json j = move(result.value());
-  error_code ec = JsonReplace(j, path, cb);
-  if (ec) {
-    VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
-    return OpStatus::SYNTAX_ERR;
+  auto verifier = [&is_result_overflow]() {
+    if (is_result_overflow) {
+      return OpStatus::INVALID_NUMERIC_RESULT;
+    }
+    return OpStatus::OK;
+  };
+
+  OpStatus status = UpdateEntry(op_args, key, path, cb, verifier);
+  if (status != OpStatus::OK) {
+    return status;
   }
 
-  if (is_result_overflow) {
-    return OpStatus::INVALID_NUMERIC_RESULT;
-  }
-
-  SetString(op_args, key, j.as_string());
   return output.as_string();
 }
 
@@ -520,18 +509,19 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path) {
     return total_deletions;
   }
 
-  OpResult<json> result = GetJson(op_args, key);
+  OpResult<JsonType*> result = GetJson(op_args, key);
   if (!result) {
     return total_deletions;
   }
 
   vector<string> deletion_items;
-  auto cb = [&](const string& path, json& val) { deletion_items.emplace_back(path); };
+  auto cb = [&](const string& path, JsonType& val) { deletion_items.emplace_back(path); };
 
-  json j = move(result.value());
-  error_code ec = JsonReplace(j, path, cb);
+  // json j = move(result.value());
+  JsonType& json_entry = *(result.value());
+  error_code ec = JsonReplace(json_entry, path, cb);
   if (ec) {
-    VLOG(1) << "Failed to evaulate expression on json with error: " << ec.message();
+    VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
     return total_deletions;
   }
 
@@ -548,13 +538,13 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path) {
     patch.emplace_back(patch_item);
   }
 
-  jsonpatch::apply_patch(j, patch, ec);
+  jsonpatch::apply_patch(json_entry, patch, ec);
   if (ec) {
     VLOG(1) << "Failed to apply patch on json with error: " << ec.message();
     return 0;
   }
 
-  SetString(op_args, key, j.as_string());
+  // SetString(op_args, key, j.as_string());
   return total_deletions;
 }
 
@@ -562,13 +552,13 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path) {
 // keys within the same object are stored in the same string vector.
 OpResult<vector<StringVec>> OpObjKeys(const OpArgs& op_args, string_view key,
                                       JsonExpression expression) {
-  OpResult<json> result = GetJson(op_args, key);
+  OpResult<JsonType*> result = GetJson(op_args, key);
   if (!result) {
     return result.status();
   }
 
   vector<StringVec> vec;
-  auto cb = [&vec](const string_view& path, const json& val) {
+  auto cb = [&vec](const string_view& path, const JsonType& val) {
     // Aligned with ElastiCache flavor.
     if (!val.is_object()) {
       vec.emplace_back();
@@ -580,21 +570,17 @@ OpResult<vector<StringVec>> OpObjKeys(const OpArgs& op_args, string_view key,
       current_object.emplace_back(member.key());
     }
   };
+  JsonType& json_entry = *(result.value());
 
-  expression.evaluate(*result, cb);
+  expression.evaluate(json_entry, cb);
   return vec;
 }
 
 // Retruns array of string lengths after a successful operation.
 OpResult<vector<OptSizeT>> OpStrAppend(const OpArgs& op_args, string_view key, string_view path,
                                        const vector<string_view>& strs) {
-  OpResult<json> result = GetJson(op_args, key);
-  if (!result) {
-    return result.status();
-  }
-
   vector<OptSizeT> vec;
-  auto cb = [&](const string& path, json& val) {
+  auto cb = [&](const string& path, JsonType& val) {
     if (val.is_string()) {
       string new_val = val.as_string();
       for (auto& str : strs) {
@@ -608,27 +594,19 @@ OpResult<vector<OptSizeT>> OpStrAppend(const OpArgs& op_args, string_view key, s
     }
   };
 
-  json j = move(result.value());
-  error_code ec = JsonReplace(j, path, cb);
-  if (ec) {
-    VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
-    return OpStatus::SYNTAX_ERR;
+  OpStatus status = UpdateEntry(op_args, key, path, cb);
+  if (status != OpStatus::OK) {
+    return status;
   }
 
-  SetString(op_args, key, j.as_string());
   return vec;
 }
 
 // Returns the numbers of values cleared.
 // Clears containers(arrays or objects) and zeroing numbers.
 OpResult<long> OpClear(const OpArgs& op_args, string_view key, string_view path) {
-  OpResult<json> result = GetJson(op_args, key);
-  if (!result) {
-    return result.status();
-  }
-
   long clear_items = 0;
-  auto cb = [&clear_items](const string& path, json& val) {
+  auto cb = [&clear_items](const string& path, JsonType& val) {
     if (!(val.is_object() || val.is_array() || val.is_number())) {
       return;
     }
@@ -644,27 +622,18 @@ OpResult<long> OpClear(const OpArgs& op_args, string_view key, string_view path)
     clear_items += 1;
   };
 
-  json j = move(result.value());
-  error_code ec = JsonReplace(j, path, cb);
-  if (ec) {
-    VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
-    return OpStatus::SYNTAX_ERR;
+  OpStatus status = UpdateEntry(op_args, key, path, cb);
+  if (status != OpStatus::OK) {
+    return status;
   }
-
-  SetString(op_args, key, j.as_string());
   return clear_items;
 }
 
 // Returns string vector that represents the pop out values.
 OpResult<vector<OptString>> OpArrPop(const OpArgs& op_args, string_view key, string_view path,
                                      int index) {
-  OpResult<json> result = GetJson(op_args, key);
-  if (!result) {
-    return result.status();
-  }
-
   vector<OptString> vec;
-  auto cb = [&](const string& path, json& val) {
+  auto cb = [&](const string& path, JsonType& val) {
     if (!val.is_array() || val.empty()) {
       vec.emplace_back(nullopt);
       return;
@@ -695,27 +664,19 @@ OpResult<vector<OptString>> OpArrPop(const OpArgs& op_args, string_view key, str
     val.erase(it);
   };
 
-  json j = move(result.value());
-  error_code ec = JsonReplace(j, path, cb);
-  if (ec) {
-    VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
-    return OpStatus::SYNTAX_ERR;
+  OpStatus status = UpdateEntry(op_args, key, path, cb);
+  if (status != OpStatus::OK) {
+    return status;
   }
 
-  SetString(op_args, key, j.as_string());
   return vec;
 }
 
 // Returns numeric vector that represents the new length of the array at each path.
 OpResult<vector<OptSizeT>> OpArrTrim(const OpArgs& op_args, string_view key, string_view path,
                                      int start_index, int stop_index) {
-  OpResult<json> result = GetJson(op_args, key);
-  if (!result) {
-    return result.status();
-  }
-
   vector<OptSizeT> vec;
-  auto cb = [&](const string& path, json& val) {
+  auto cb = [&](const string& path, JsonType& val) {
     if (!val.is_array() || val.empty()) {
       vec.emplace_back(nullopt);
       return;
@@ -753,31 +714,22 @@ OpResult<vector<OptSizeT>> OpArrTrim(const OpArgs& op_args, string_view key, str
     vec.emplace_back(val.size());
   };
 
-  json j = move(result.value());
-  error_code ec = JsonReplace(j, path, cb);
-  if (ec) {
-    VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
-    return OpStatus::SYNTAX_ERR;
+  OpStatus status = UpdateEntry(op_args, key, path, cb);
+  if (status != OpStatus::OK) {
+    return status;
   }
-
-  SetString(op_args, key, j.as_string());
   return vec;
 }
 
 // Returns numeric vector that represents the new length of the array at each path.
 OpResult<vector<OptSizeT>> OpArrInsert(const OpArgs& op_args, string_view key, string_view path,
-                                       int index, const vector<json>& new_values) {
-  OpResult<json> result = GetJson(op_args, key);
-  if (!result) {
-    return result.status();
-  }
-
+                                       int index, const vector<JsonType>& new_values) {
   bool out_of_boundaries_encountered = false;
   vector<OptSizeT> vec;
   // Insert user-supplied value into the supplied index that should be valid.
   // If at least one index isn't valid within an array in the json doc, the operation is discarded.
   // Negative indexes start from the end of the array.
-  auto cb = [&](const string& path, json& val) {
+  auto cb = [&](const string& path, JsonType& val) {
     if (out_of_boundaries_encountered) {
       return;
     }
@@ -819,33 +771,30 @@ OpResult<vector<OptSizeT>> OpArrInsert(const OpArgs& op_args, string_view key, s
     vec.emplace_back(val.size());
   };
 
-  json j = move(result.value());
-  error_code ec = JsonReplace(j, path, cb);
-  if (ec) {
-    VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
-    return OpStatus::SYNTAX_ERR;
+  OpStatus status = UpdateEntry(op_args, key, path, cb);
+  if (status != OpStatus::OK) {
+    return status;
   }
 
   if (out_of_boundaries_encountered) {
     return OpStatus::OUT_OF_RANGE;
   }
 
-  SetString(op_args, key, j.as_string());
   return vec;
 }
 
 // Returns numeric vector that represents the new length of the array at each path, or Null reply
 // if the matching JSON value is not an array.
 OpResult<vector<OptSizeT>> OpArrAppend(const OpArgs& op_args, string_view key, string_view path,
-                                       const vector<json>& append_values) {
+                                       const vector<JsonType>& append_values) {
   vector<OptSizeT> vec;
 
-  OpResult<json> result = GetJson(op_args, key);
+  OpResult<JsonType*> result = GetJson(op_args, key);
   if (!result) {
     return result.status();
   }
 
-  auto cb = [&](const string& path, json& val) {
+  auto cb = [&](const string& path, JsonType& val) {
     if (!val.is_array()) {
       vec.emplace_back(nullopt);
       return;
@@ -856,14 +805,11 @@ OpResult<vector<OptSizeT>> OpArrAppend(const OpArgs& op_args, string_view key, s
     vec.emplace_back(val.size());
   };
 
-  json j = move(result.value());
-  error_code ec = JsonReplace(j, path, cb);
-  if (ec) {
-    VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
-    return OpStatus::SYNTAX_ERR;
+  OpStatus status = UpdateEntry(op_args, key, path, cb);
+  if (status != OpStatus::OK) {
+    return status;
   }
 
-  SetString(op_args, key, j.as_string());
   return vec;
 }
 
@@ -871,15 +817,15 @@ OpResult<vector<OptSizeT>> OpArrAppend(const OpArgs& op_args, string_view key, s
 // An index value of -1 represents unfound in the array.
 // JSON scalar has types of string, boolean, null, and number.
 OpResult<vector<OptLong>> OpArrIndex(const OpArgs& op_args, string_view key,
-                                     JsonExpression expression, const json& search_val,
+                                     JsonExpression expression, const JsonType& search_val,
                                      int start_index, int end_index) {
-  OpResult<json> result = GetJson(op_args, key);
+  OpResult<JsonType*> result = GetJson(op_args, key);
   if (!result) {
     return result.status();
   }
 
   vector<OptLong> vec;
-  auto cb = [&](const string_view& path, const json& val) {
+  auto cb = [&](const string_view& path, const JsonType& val) {
     if (!val.is_array()) {
       vec.emplace_back(nullopt);
       return;
@@ -927,8 +873,8 @@ OpResult<vector<OptLong>> OpArrIndex(const OpArgs& op_args, string_view key,
 
     vec.emplace_back(pos);
   };
-
-  expression.evaluate(*result, cb);
+  JsonType& json_entry = *(result.value());
+  expression.evaluate(json_entry, cb);
   return vec;
 }
 
@@ -937,13 +883,14 @@ OpResult<vector<OptString>> OpMGet(const OpArgs& op_args, const vector<string_vi
                                    JsonExpression expression) {
   vector<OptString> vec;
   for (auto& it : keys) {
-    OpResult<json> result = GetJson(op_args, it);
+    // OpResult<JsonType> result = GetJson(op_args, it);
+    OpResult<JsonType*> result = GetJson(op_args, it);
     if (!result) {
       vec.emplace_back();
       continue;
     }
 
-    auto cb = [&vec](const string_view& path, const json& val) {
+    auto cb = [&vec](const string_view& path, const JsonType& val) {
       string str;
       error_code ec;
       val.dump(str, {}, ec);
@@ -954,8 +901,8 @@ OpResult<vector<OptString>> OpMGet(const OpArgs& op_args, const vector<string_vi
 
       vec.push_back(move(str));
     };
-
-    expression.evaluate(*result, cb);
+    const JsonType& json_entry = *(result.value());
+    expression.evaluate(json_entry, cb);
   }
 
   return vec;
@@ -964,74 +911,70 @@ OpResult<vector<OptString>> OpMGet(const OpArgs& op_args, const vector<string_vi
 // Returns numeric vector that represents the number of fields of JSON value at each path.
 OpResult<vector<OptSizeT>> OpFields(const OpArgs& op_args, string_view key,
                                     JsonExpression expression) {
-  OpResult<json> result = GetJson(op_args, key);
+  OpResult<JsonType*> result = GetJson(op_args, key);
   if (!result) {
     return result.status();
   }
 
   vector<OptSizeT> vec;
-  auto cb = [&vec](const string_view& path, const json& val) {
+  auto cb = [&vec](const string_view& path, const JsonType& val) {
     vec.emplace_back(CountJsonFields(val));
   };
-
-  expression.evaluate(*result, cb);
+  const JsonType& json_entry = *(result.value());
+  expression.evaluate(json_entry, cb);
   return vec;
 }
 
 // Returns json vector that represents the result of the json query.
-OpResult<vector<json>> OpResp(const OpArgs& op_args, string_view key, JsonExpression expression) {
-  OpResult<json> result = GetJson(op_args, key);
+OpResult<vector<JsonType>> OpResp(const OpArgs& op_args, string_view key,
+                                  JsonExpression expression) {
+  OpResult<JsonType*> result = GetJson(op_args, key);
   if (!result) {
     return result.status();
   }
 
-  vector<json> vec;
-  auto cb = [&vec](const string_view& path, const json& val) { vec.emplace_back(val); };
-
-  expression.evaluate(*result, cb);
+  vector<JsonType> vec;
+  auto cb = [&vec](const string_view& path, const JsonType& val) { vec.emplace_back(val); };
+  const JsonType& json_entry = *(result.value());
+  expression.evaluate(json_entry, cb);
   return vec;
 }
 
 // Returns boolean that represents the result of the operation.
 OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
-                     string_view json_str) {
-  // Check if the supplied JSON is valid.
-  optional<json> j = ConstructJsonFromString(json_str);
-  if (!j) {
+                     std::string_view json_str) {
+  std::optional<JsonType> parsed_json = JsonFromString(json_str);
+  if (!parsed_json) {
+    LOG(WARNING) << "got invalid JSON string '" << json_str << "' cannot be saved";
     return OpStatus::SYNTAX_ERR;
   }
 
   // The whole key should be replaced.
+  // NOTE: unlike in Redis, we are overriding the value when the path is "$"
+  // this is regardless of the current key type. In redis if the key exists
+  // and its not JSON, it would return an error.
   if (path == "." || path == "$") {
-    SetString(op_args, key, j->as_string());
+    SetJson(op_args, key, std::move(parsed_json.value()));
     return true;
   }
 
-  // Update the existing JSON.
-  OpResult<json> result = GetJson(op_args, key);
-  if (!result) {
-    return result.status();
-  }
-
-  json existing_json = move(result.value());
+  // Note that this operation would use copy and not move!
+  // The reason being, that we are applying this multiple times
+  // For each match we found. So for example if we have
+  // an array that this expression will match each entry in it
+  // then the assign here is called N times, where N == array.size().
   bool path_exists = false;
-  auto cb = [&](const string& path, json& val) {
+  const JsonType& new_json = parsed_json.value();
+  auto cb = [&](const string& path, JsonType& val) {
     path_exists = true;
-    val = *j;
+    val = new_json;
   };
 
-  error_code ec = JsonReplace(existing_json, path, cb);
-  if (ec) {
-    VLOG(1) << "Failed to evaluate expression on json with error: " << ec.message();
-    return OpStatus::SYNTAX_ERR;
+  OpStatus status = UpdateEntry(op_args, key, path, cb);
+  if (status != OpStatus::OK) {
+    return status;
   }
-
-  if (!path_exists) {
-    return false;
-  }
-
-  SetString(op_args, key, existing_json.as_string());
-  return true;
+  return path_exists;
 }
 
 }  // namespace
@@ -1064,7 +1007,7 @@ void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
   string_view path = ArgS(args, 2);
 
   error_code ec;
-  JsonExpression expression = jsonpath::make_expression<json>(path, ec);
+  JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
@@ -1077,7 +1020,7 @@ void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<json>> result = trans->ScheduleSingleHopT(move(cb));
+  OpResult<vector<JsonType>> result = trans->ScheduleSingleHopT(move(cb));
 
   if (result) {
     (*cntx)->StartArray(result->size());
@@ -1117,7 +1060,7 @@ void JsonFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
   error_code ec;
   string_view key = ArgS(args, 2);
   string_view path = ArgS(args, 3);
-  JsonExpression expression = jsonpath::make_expression<json>(path, ec);
+  JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
@@ -1142,7 +1085,7 @@ void JsonFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
 void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
   error_code ec;
   string_view path = ArgS(args, args.size() - 1);
-  JsonExpression expression = jsonpath::make_expression<json>(path, ec);
+  JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
@@ -1181,7 +1124,7 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
   string_view path = ArgS(args, 2);
 
   error_code ec;
-  JsonExpression expression = jsonpath::make_expression<json>(path, ec);
+  JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
@@ -1189,7 +1132,7 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  optional<json> search_value = ConstructJsonFromString(ArgS(args, 3));
+  optional<JsonType> search_value = JsonFromString(ArgS(args, 3));
   if (!search_value) {
     (*cntx)->SendError(kSyntaxErr);
     return;
@@ -1244,9 +1187,9 @@ void JsonFamily::ArrInsert(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  vector<json> new_values;
+  vector<JsonType> new_values;
   for (size_t i = 4; i < args.size(); i++) {
-    optional<json> val = ConstructJsonFromString(ArgS(args, i));
+    optional<JsonType> val = JsonFromString(ArgS(args, i));
     if (!val) {
       (*cntx)->SendError(kSyntaxErr);
       return;
@@ -1271,9 +1214,9 @@ void JsonFamily::ArrInsert(CmdArgList args, ConnectionContext* cntx) {
 void JsonFamily::ArrAppend(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
   string_view path = ArgS(args, 2);
-  vector<json> append_values;
+  vector<JsonType> append_values;
   for (size_t i = 3; i < args.size(); ++i) {
-    optional<json> converted_val = ConstructJsonFromString(ArgS(args, i));
+    optional<JsonType> converted_val = JsonFromString(ArgS(args, i));
     if (!converted_val) {
       (*cntx)->SendError(kSyntaxErr);
       return;
@@ -1349,7 +1292,7 @@ void JsonFamily::ArrPop(CmdArgList args, ConnectionContext* cntx) {
   }
 
   error_code ec;
-  JsonExpression expression = jsonpath::make_expression<json>(path, ec);
+  JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
@@ -1423,7 +1366,7 @@ void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
   string_view path = ArgS(args, 2);
 
   error_code ec;
-  JsonExpression expression = jsonpath::make_expression<json>(path, ec);
+  JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
@@ -1541,7 +1484,7 @@ void JsonFamily::Type(CmdArgList args, ConnectionContext* cntx) {
   string_view path = ArgS(args, 2);
 
   error_code ec;
-  JsonExpression expression = jsonpath::make_expression<json>(path, ec);
+  JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
@@ -1577,7 +1520,7 @@ void JsonFamily::ArrLen(CmdArgList args, ConnectionContext* cntx) {
   string_view path = ArgS(args, 2);
 
   error_code ec;
-  JsonExpression expression = jsonpath::make_expression<json>(path, ec);
+  JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
@@ -1604,7 +1547,7 @@ void JsonFamily::ObjLen(CmdArgList args, ConnectionContext* cntx) {
   string_view path = ArgS(args, 2);
 
   error_code ec;
-  JsonExpression expression = jsonpath::make_expression<json>(path, ec);
+  JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
@@ -1631,7 +1574,7 @@ void JsonFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
   string_view path = ArgS(args, 2);
 
   error_code ec;
-  JsonExpression expression = jsonpath::make_expression<json>(path, ec);
+  JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
@@ -1654,22 +1597,20 @@ void JsonFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
-  DCHECK_GE(args.size(), 3U);
+  DCHECK_GE(args.size(), 2U);
   string_view key = ArgS(args, 1);
 
   vector<pair<string_view, JsonExpression>> expressions;
+
   for (size_t i = 2; i < args.size(); ++i) {
     string_view path = ArgS(args, i);
-
     error_code ec;
-    JsonExpression expr = jsonpath::make_expression<json>(path, ec);
+    JsonExpression expr = jsonpath::make_expression<JsonType>(path, ec);
 
     if (ec) {
-      VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
-      (*cntx)->SendError(kSyntaxErr);
-      return;
+      LOG(WARNING) << "path '" << path << "': Invalid JSONPath syntax: " << ec.message();
+      return (*cntx)->SendError(kSyntaxErr);
     }
-
     expressions.emplace_back(path, move(expr));
   }
 
@@ -1683,14 +1624,19 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     (*cntx)->SendBulkString(*result);
   } else {
-    (*cntx)->SendError(result.status());
+    if (result == facade::OpStatus::KEY_NOTFOUND) {
+      // Match what Redis returning
+      (*cntx)->SendNull();
+    } else {
+      (*cntx)->SendError(result.status());
+    }
   }
 }
 
 #define HFUNC(x) SetHandler(&JsonFamily::x)
 
 void JsonFamily::Register(CommandRegistry* registry) {
-  *registry << CI{"JSON.GET", CO::READONLY | CO::FAST, -3, 1, 1, 1}.HFUNC(Get);
+  *registry << CI{"JSON.GET", CO::READONLY | CO::FAST, -2, 1, 1, 1}.HFUNC(Get);
   *registry << CI{"JSON.MGET", CO::READONLY | CO::FAST, -3, 1, 1, 1}.HFUNC(MGet);
   *registry << CI{"JSON.TYPE", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(Type);
   *registry << CI{"JSON.STRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(StrLen);

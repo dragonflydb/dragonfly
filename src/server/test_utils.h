@@ -47,6 +47,7 @@ class BaseFamilyTest : public ::testing::Test {
   }
 
   RespExpr Run(ArgSlice list);
+  RespExpr Run(absl::Span<std::string> list);
 
   RespExpr Run(std::string_view id, ArgSlice list);
 
@@ -60,6 +61,7 @@ class BaseFamilyTest : public ::testing::Test {
     return CheckedInt(ArgSlice{list.begin(), list.size()});
   }
   int64_t CheckedInt(ArgSlice list);
+  std::string CheckedString(ArgSlice list);
 
   bool IsLocked(DbIndex db_index, std::string_view key) const;
   ConnectionContext::DebugInfo GetDebugInfo(const std::string& id) const;
@@ -70,6 +72,10 @@ class BaseFamilyTest : public ::testing::Test {
 
   TestConnWrapper* AddFindConn(Protocol proto, std::string_view id);
   static std::vector<std::string> StrArray(const RespExpr& expr);
+
+  Metrics GetMetrics() const {
+    return service_->server_family().GetMetrics();
+  }
 
   void AdvanceTime(int64_t ms) {
     TEST_current_time_ms += ms;

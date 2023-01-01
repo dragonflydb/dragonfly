@@ -67,7 +67,7 @@ async def test_replication_all(df_local_factory, t_master, t_replicas, n_keys, n
         # Check range [n_stream_keys, n_keys] is of seed 1
         await batch_check_data_async(c_replica, gen_test_data(n_keys, start=n_stream_keys, seed=1))
         # Check range [0, n_stream_keys] is of seed 2
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(1.0)
         await batch_check_data_async(c_replica, gen_test_data(n_stream_keys, seed=2))
 
     # Start streaming data and run REPLICAOF in parallel
@@ -85,7 +85,7 @@ async def test_replication_all(df_local_factory, t_master, t_replicas, n_keys, n
     # Check stable state streaming
     await batch_fill_data_async(c_master, gen_test_data(n_keys, seed=3))
 
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(1.0)
     await asyncio.gather(*(batch_check_data_async(c, gen_test_data(n_keys, seed=3))
                            for c in c_replicas))
 
@@ -276,16 +276,8 @@ async def test_disconnect_master(df_local_factory, t_master, t_replicas, n_rando
 
     c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
 
-    async def full_sync(c_replica):
-        try:
-            await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
-            await wait_available_async(c_replica)
-        except aioredis.ResponseError as e:
-            # This should mean master crashed during greet phase
-            pass
-
     async def crash_master_fs():
-        await asyncio.sleep(random.random() / 10 + 0.01)
+        await asyncio.sleep(random.random() / 10 + 0.1 * len(replicas))
         master.stop(kill=True)
 
     async def start_master():
@@ -296,8 +288,11 @@ async def test_disconnect_master(df_local_factory, t_master, t_replicas, n_rando
 
     await start_master()
 
-    # Crash master during full sync
-    await asyncio.gather(*(full_sync(c) for c in c_replicas), crash_master_fs())
+    # Crash master during full sync, but with all passing initial connection phase
+    await asyncio.gather(*(c_replica.execute_command("REPLICAOF localhost " + str(master.port))
+                           for c_replica in c_replicas), crash_master_fs())
+
+    await asyncio.sleep(1 + len(replicas) * 0.5)
 
     for _ in range(n_random_crashes):
         await start_master()

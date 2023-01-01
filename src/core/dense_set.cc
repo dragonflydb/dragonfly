@@ -26,8 +26,8 @@ constexpr size_t kMinSize = 1 << kMinSizeShift;
 constexpr bool kAllowDisplacements = true;
 
 DenseSet::IteratorBase::IteratorBase(const DenseSet* owner, bool is_end)
-    : owner_(const_cast<DenseSet&>(*owner)), curr_entry_(nullptr) {
-  curr_list_ = is_end ? owner_.entries_.end() : owner_.entries_.begin();
+    : owner_(const_cast<DenseSet*>(owner)), curr_entry_(nullptr) {
+  curr_list_ = is_end ? owner_->entries_.end() : owner_->entries_.begin();
   if (curr_list_ != owner->entries_.end()) {
     curr_entry_ = &(*curr_list_);
     owner->ExpireIfNeeded(nullptr, curr_entry_);
@@ -45,23 +45,23 @@ void DenseSet::IteratorBase::Advance() {
 
   if (curr_entry_->IsLink()) {
     DenseLinkKey* plink = curr_entry_->AsLink();
-    if (!owner_.ExpireIfNeeded(curr_entry_, &plink->next) || curr_entry_->IsLink()) {
+    if (!owner_->ExpireIfNeeded(curr_entry_, &plink->next) || curr_entry_->IsLink()) {
       curr_entry_ = &plink->next;
       step_link = true;
     }
   }
 
   if (!step_link) {
-    DCHECK(curr_list_ != owner_.entries_.end());
+    DCHECK(curr_list_ != owner_->entries_.end());
     do {
       ++curr_list_;
-      if (curr_list_ == owner_.entries_.end()) {
+      if (curr_list_ == owner_->entries_.end()) {
         curr_entry_ = nullptr;
         return;
       }
-      owner_.ExpireIfNeeded(nullptr, &(*curr_list_));
+      owner_->ExpireIfNeeded(nullptr, &(*curr_list_));
     } while (curr_list_->IsEmpty());
-    DCHECK(curr_list_ != owner_.entries_.end());
+    DCHECK(curr_list_ != owner_->entries_.end());
     curr_entry_ = &(*curr_list_);
   }
   DCHECK(!curr_entry_->IsEmpty());
@@ -71,7 +71,9 @@ DenseSet::DenseSet(pmr::memory_resource* mr) : entries_(mr) {
 }
 
 DenseSet::~DenseSet() {
-  ClearInternal();
+  // We can not call Clear from the base class because it internally calls ObjDelete which is
+  // a virtual function. Therefore, destructor of the derived classes must clean up the table.
+  CHECK(entries_.empty());
 }
 
 size_t DenseSet::PushFront(DenseSet::ChainVectorIterator it, void* data, bool has_ttl) {
@@ -311,7 +313,7 @@ void DenseSet::Grow() {
   }
 }
 
-bool DenseSet::AddInternal(void* ptr, bool has_ttl) {
+void* DenseSet::AddOrFind(void* ptr, bool has_ttl) {
   uint64_t hc = Hash(ptr, 0);
 
   if (entries_.empty()) {
@@ -323,13 +325,14 @@ bool DenseSet::AddInternal(void* ptr, bool has_ttl) {
     ++size_;
     ++num_used_buckets_;
 
-    return true;
+    return nullptr;
   }
 
   // if the value is already in the set exit early
   uint32_t bucket_id = BucketId(hc);
-  if (Find(ptr, bucket_id, 0).second != nullptr) {
-    return false;
+  DensePtr* dptr = Find(ptr, bucket_id, 0).second;
+  if (dptr != nullptr) {
+    return dptr->GetObject();
   }
 
   DCHECK_LT(bucket_id, entries_.size());
@@ -345,7 +348,7 @@ bool DenseSet::AddInternal(void* ptr, bool has_ttl) {
       }
       ++num_used_buckets_;
       ++size_;
-      return true;
+      return nullptr;
     }
 
     if (size_ < entries_.size()) {
@@ -390,7 +393,7 @@ bool DenseSet::AddInternal(void* ptr, bool has_ttl) {
   DCHECK(!entries_[bucket_id].IsDisplaced());
 
   ++size_;
-  return true;
+  return nullptr;
 }
 
 auto DenseSet::Find(const void* ptr, uint32_t bid, uint32_t cookie) -> pair<DensePtr*, DensePtr*> {

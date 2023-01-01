@@ -3,13 +3,16 @@
 //
 #pragma once
 
+#include <boost/fiber/barrier.hpp>
 #include <boost/fiber/fiber.hpp>
+#include <boost/fiber/mutex.hpp>
 #include <variant>
 
 #include "base/io_buf.h"
 #include "facade/facade_types.h"
 #include "facade/redis_parser.h"
 #include "server/common.h"
+#include "server/journal/types.h"
 #include "util/fiber_socket_base.h"
 #include "util/fibers/fibers_ext.h"
 
@@ -21,6 +24,7 @@ namespace dfly {
 
 class Service;
 class ConnectionContext;
+class JournalExecutor;
 
 class Replica {
  private:
@@ -44,6 +48,20 @@ class Replica {
     R_GREETED = 4,
     R_SYNCING = 8,
     R_SYNC_OK = 0x10,
+  };
+
+  struct MultiShardExecution {
+    boost::fibers::mutex map_mu;
+
+    struct TxExecutionSync {
+      boost::fibers::barrier barrier;
+      std::atomic_uint32_t counter;
+      TxExecutionSync(uint32_t counter) : barrier(counter), counter(counter) {
+      }
+      std::vector<journal::ParsedEntry> entries_vec;
+    };
+
+    std::unordered_map<TxId, TxExecutionSync> tx_sync_execution;
   };
 
  public:
@@ -72,16 +90,18 @@ class Replica {
   std::error_code ConsumeRedisStream();  // Redis stable state.
   std::error_code ConsumeDflyStream();   // Dragonfly stable state.
 
-  void CloseAllSockets();  // Close all sockets.
-  void JoinAllFlows();     // Join all flows if possible.
+  void CloseSocket();   // Close replica sockets.
+  void JoinAllFlows();  // Join all flows if possible.
 
-  std::error_code SendNextPhaseRequest();  // Send DFLY SYNC or DFLY STARTSTABLE.
+  // Send DFLY SYNC or DFLY STARTSTABLE if stable is true.
+  std::error_code SendNextPhaseRequest(bool stable);
 
   void DefaultErrorHandler(const GenericError& err);
 
  private: /* Main dlfly flow mode functions */
   // Initialize as single dfly flow.
-  Replica(const MasterContext& context, uint32_t dfly_flow_id, Service* service);
+  Replica(const MasterContext& context, uint32_t dfly_flow_id, Service* service,
+          std::shared_ptr<MultiShardExecution> shared_exe_data);
 
   // Start replica initialized as dfly flow.
   std::error_code StartFullSyncFlow(util::fibers_ext::BlockingCounter block, Context* cntx);
@@ -122,6 +142,8 @@ class Replica {
   // Send command, update last_io_time, return error.
   std::error_code SendCommand(std::string_view command, facade::ReqSerializer* serializer);
 
+  void ExecuteEntry(JournalExecutor* executor, journal::ParsedEntry&& entry);
+
  public: /* Utility */
   struct Info {
     std::string host;
@@ -154,11 +176,16 @@ class Replica {
   MasterContext master_context_;
   std::unique_ptr<util::LinuxSocketBase> sock_;
 
+  std::shared_ptr<MultiShardExecution> multi_shard_exe_;
+
   // MainReplicationFb in standalone mode, FullSyncDflyFb in flow mode.
   ::boost::fibers::fiber sync_fb_;
   std::vector<std::unique_ptr<Replica>> shard_flows_;
 
-  std::unique_ptr<base::IoBuf> leftover_buf_;
+  // Guard operations where flows might be in a mixed state (transition/setup)
+  ::boost::fibers::mutex flows_op_mu_;
+
+  std::optional<base::IoBuf> leftover_buf_;
   std::unique_ptr<facade::RedisParser> parser_;
   facade::RespVec resp_args_;
   facade::CmdArgVec cmd_str_args_;

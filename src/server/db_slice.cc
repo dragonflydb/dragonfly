@@ -37,24 +37,40 @@ static_assert(kPrimeSegmentSize == 32288);
 // 24576
 static_assert(kExpireSegmentSize == 23528);
 
-void UpdateStatsOnDeletion(PrimeIterator it, DbTableStats* stats) {
-  size_t value_heap_size = it->second.MallocUsed();
-  stats->inline_keys -= it->first.IsInline();
-  stats->obj_memory_usage -= (it->first.MallocUsed() + value_heap_size);
-  if (it->second.ObjType() == OBJ_STRING)
-    stats->strval_memory_usage -= value_heap_size;
-}
-
-void EvictItemFun(PrimeIterator del_it, DbTable* table) {
-  if (del_it->second.HasExpire()) {
-    CHECK_EQ(1u, table->expire.Erase(del_it->first));
+void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* shard,
+                     DbTable* table) {
+  if (!exp_it.is_done()) {
+    table->expire.Erase(exp_it);
   }
 
-  UpdateStatsOnDeletion(del_it, &table->stats);
+  DbTableStats& stats = table->stats;
+  const PrimeValue& pv = del_it->second;
+  if (pv.IsExternal()) {
+    auto [offset, size] = pv.GetExternalSlice();
 
-  DVLOG(2) << "Evicted from bucket " << del_it.bucket_id() << " " << del_it->first.ToString();
+    stats.tiered_entries--;
+    stats.tiered_size -= size;
+    TieredStorage* tiered = shard->tiered_storage();
+    tiered->Free(offset, size);
+  }
+
+  size_t value_heap_size = pv.MallocUsed();
+  stats.inline_keys -= del_it->first.IsInline();
+  stats.obj_memory_usage -= (del_it->first.MallocUsed() + value_heap_size);
+  if (pv.ObjType() == OBJ_STRING)
+    stats.strval_memory_usage -= value_heap_size;
 
   table->prime.Erase(del_it);
+}
+
+inline void PerformDeletion(PrimeIterator del_it, EngineShard* shard, DbTable* table) {
+  ExpireIterator exp_it;
+  if (del_it->second.HasExpire()) {
+    exp_it = table->expire.Find(del_it->first);
+    DCHECK(!exp_it.is_done());
+  }
+
+  PerformDeletion(del_it, exp_it, shard, table);
 };
 
 class PrimeEvictionPolicy {
@@ -167,7 +183,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
     }
 
     DbTable* table = db_slice_->GetDBTable(cntx_.db_index);
-    EvictItemFun(last_slot_it, table);
+    PerformDeletion(last_slot_it, db_slice_->shard_owner(), table);
     ++evicted_;
   }
   me->ShiftRight(bucket_it);
@@ -194,7 +210,7 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 56, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 72, "You should update this function with new fields");
 
   ADD(evicted_keys);
   ADD(hard_evictions);
@@ -203,6 +219,8 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
   ADD(stash_unloaded);
   ADD(bumpups);
   ADD(garbage_checked);
+  ADD(hits);
+  ADD(misses);
 
   return *this;
 }
@@ -282,6 +300,7 @@ pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string
   res.first = db.prime.Find(key);
 
   if (!IsValid(res.first)) {
+    events_.misses++;
     return res;
   }
 
@@ -305,6 +324,7 @@ pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string
     ++events_.bumpups;
   }
 
+  events_.hits++;
   return res;
 }
 
@@ -442,16 +462,11 @@ bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
   }
 
   auto& db = db_arr_[db_ind];
-  if (it->second.HasExpire()) {
-    CHECK_EQ(1u, db->expire.Erase(it->first));
-  }
-
   if (it->second.HasFlag()) {
     CHECK_EQ(1u, db->mcflag.Erase(it->first));
   }
 
-  UpdateStatsOnDeletion(it, &db->stats);
-  db->prime.Erase(it);
+  PerformDeletion(it, shard_owner(), db.get());
 
   return true;
 }
@@ -470,7 +485,17 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     CreateDb(db_ind);
     db_arr_[db_ind]->trans_locks.swap(db_ptr->trans_locks);
 
-    auto cb = [db_ptr = std::move(db_ptr)]() mutable {
+    auto cb = [this, db_ptr = std::move(db_ptr)]() mutable {
+      if (db_ptr->stats.tiered_entries > 0) {
+        for (auto it = db_ptr->prime.begin(); it != db_ptr->prime.end(); ++it) {
+          if (it->second.IsExternal()) {
+            PerformDeletion(it, shard_owner(), db_ptr.get());
+          }
+        }
+      }
+
+      DCHECK_EQ(0u, db_ptr->stats.tiered_entries);
+
       db_ptr.reset();
       mi_heap_collect(ServerState::tlocal()->data_heap(), true);
     };
@@ -502,21 +527,29 @@ void DbSlice::FlushDb(DbIndex db_ind) {
   }).detach();
 }
 
+void DbSlice::AddExpire(DbIndex db_ind, PrimeIterator main_it, uint64_t at) {
+  uint64_t delta = at - expire_base_[0];  // TODO: employ multigen expire updates.
+  CHECK(db_arr_[db_ind]->expire.Insert(main_it->first.AsRef(), ExpirePeriod(delta)).second);
+  main_it->second.SetExpire(true);
+}
+
+bool DbSlice::RemoveExpire(DbIndex db_ind, PrimeIterator main_it) {
+  if (main_it->second.HasExpire()) {
+    CHECK_EQ(1u, db_arr_[db_ind]->expire.Erase(main_it->first));
+    main_it->second.SetExpire(false);
+    return true;
+  }
+  return false;
+}
+
 // Returns true if a state has changed, false otherwise.
 bool DbSlice::UpdateExpire(DbIndex db_ind, PrimeIterator it, uint64_t at) {
-  auto& db = *db_arr_[db_ind];
-  if (at == 0 && it->second.HasExpire()) {
-    CHECK_EQ(1u, db.expire.Erase(it->first));
-    it->second.SetExpire(false);
-
-    return true;
+  if (at == 0) {
+    return RemoveExpire(db_ind, it);
   }
 
   if (!it->second.HasExpire() && at) {
-    uint64_t delta = at - expire_base_[0];  // TODO: employ multigen expire updates.
-    CHECK(db.expire.Insert(it->first.AsRef(), ExpirePeriod(delta)).second);
-    it->second.SetExpire(true);
-
+    AddExpire(db_ind, it, at);
     return true;
   }
 
@@ -699,12 +732,15 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
       // before calling to PreUpdate or it does not need to read it at all.
       // After this code executes, the external blob is lost.
       TieredStorage* tiered = shard_owner()->tiered_storage();
-      auto [offset, size] = it->second.GetExternalPtr();
+      auto [offset, size] = it->second.GetExternalSlice();
       tiered->Free(offset, size);
       it->second.Reset();
 
-      stats->external_entries -= 1;
-      stats->external_size -= size;
+      stats->tiered_entries -= 1;
+      stats->tiered_size -= size;
+    } else if (it->second.HasIoPending()) {
+      TieredStorage* tiered = shard_owner()->tiered_storage();
+      tiered->CancelIo(db_ind, it);
     }
   }
 
@@ -749,9 +785,7 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
   if (time_t(cntx.time_now_ms) < expire_time)
     return make_pair(it, expire_it);
 
-  db->expire.Erase(expire_it);
-  UpdateStatsOnDeletion(it, &db->stats);
-  db->prime.Erase(it);
+  PerformDeletion(it, expire_it, shard_owner(), db.get());
   ++events_.expired_keys;
 
   return make_pair(PrimeIterator{}, ExpireIterator{});
@@ -877,7 +911,7 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
       if (evict_it == it || evict_it->first.IsSticky())
         continue;
 
-      EvictItemFun(evict_it, table);
+      PerformDeletion(evict_it, shard_owner(), table);
       ++evicted;
       if (freed_memory_fun() > memory_to_free) {
         evict_succeeded = true;
@@ -903,7 +937,7 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
       if (evict_it == it || evict_it->first.IsSticky())
         continue;
 
-      EvictItemFun(evict_it, table);
+      PerformDeletion(evict_it, shard_owner(), table);
       ++evicted;
 
       if (freed_memory_fun() > memory_to_free) {

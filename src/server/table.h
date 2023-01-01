@@ -48,8 +48,8 @@ struct DbTableStats {
   ssize_t update_value_amount = 0;
   size_t listpack_blob_cnt = 0;
   size_t listpack_bytes = 0;
-  size_t external_entries = 0;
-  size_t external_size = 0;
+  size_t tiered_entries = 0;
+  size_t tiered_size = 0;
 
   DbTableStats& operator+=(const DbTableStats& o);
 };

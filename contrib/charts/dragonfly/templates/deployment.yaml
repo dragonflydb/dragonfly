@@ -13,98 +13,14 @@ spec:
   template:
     metadata:
       annotations:
-{{- if .Values.tls.enabled }}
-{{- if not .Values.tls.existing_secret }}
+        {{- if and (.Values.tls.enabled) (not .Values.tls.existing_secret) }}
         checksum/tls-secret: {{ include (print $.Template.BasePath "/tls-secret.yaml") . | sha256sum }}
-{{- end }}
-{{- end }}
-      {{- with .Values.podAnnotations }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
       labels:
         {{- include "dragonfly.selectorLabels" . | nindent 8 }}
     spec:
-      {{- with .Values.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      serviceAccountName: {{ include "dragonfly.serviceAccountName" . }}
-      securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
-{{- if .Values.initContainers }}
-      initContainers: {{- toYaml .Values.initContainers | nindent 6 }}
-  {{- if .Values.resources }}
-        resources:
-    {{- toYaml .Values.resources | nindent 10 }}
-  {{- end }}
-  {{- if .Values.extraVolumeMounts }}
-        volumeMounts:
-    {{- toYaml .Values.extraVolumeMounts | nindent 10 }}
-  {{- end }}
-{{- end }}
-      containers:
-        - name: {{ .Chart.Name }}
-          securityContext:
-            {{- toYaml .Values.securityContext | nindent 12 }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          ports:
-            - name: dragonfly
-              containerPort: 6379
-              protocol: TCP
-        {{- with .Values.probes }}
-          {{- toYaml . | nindent 10 }}
-        {{- end }}
-          {{- if .Values.command.cmd }}
-          command:
-            {{ toYaml .Values.command.cmd | nindent 12 }}
-          {{- end }}
-          args:
-            - "--alsologtostderr"
-          {{- if .Values.extraArgs }}
-            {{- toYaml .Values.extraArgs | nindent 12 }}
-          {{- end }}
-{{- if .Values.tls.enabled }}
-            - "--tls"
-            - "--tls_cert_file=/etc/dragonfly/tls/tls.crt"
-            - "--tls_key_file=/etc/dragonfly/tls/tls.key"
-{{- end }}
-          resources:
-            {{- toYaml .Values.resources | nindent 12 }}
-          volumeMounts:
-            {{- if .Values.tls.enabled }}
-            - mountPath: /etc/dragonfly/tls
-              name: tls
-            {{- end }}
-{{- if .Values.extraVolumeMounts }}
-            {{- toYaml .Values.extraVolumeMounts | nindent 12 }}
-{{- end }}
-      {{- with .Values.nodeSelector }}
-      nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.affinity }}
-      affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.tolerations }}
-      tolerations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      volumes:
-{{- if .Values.tls.enabled }}
-  {{- if .Values.tls.existing_secret }}
-        - name: tls
-          secret:
-            secretName: {{ .Values.tls.existing_secret }}
-        {{- else }}
-        - name: tls
-          secret:
-            secretName: {{ include "dragonfly.fullname" . }}-tls
-  {{- end }}
-{{- end }}
-{{- if .Values.extraVolumes }}
-        {{- toYaml .Values.extraVolumes | nindent 8 }}
-{{- end }}
-
+      {{- include "dragonfly.pod" . | nindent 6 }}
 {{- end }}
