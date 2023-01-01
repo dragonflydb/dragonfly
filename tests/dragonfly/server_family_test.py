@@ -73,7 +73,7 @@ make sure that the scan command is working with python
 def test_scan(client):
     def gen_test_data():
         for i in range(10):
-            yield "key-"+str(i), "value-"+str(i)
+            yield f"key-{i}", f"value-{i}"
 
     for key, val in gen_test_data():
         res = client.set(key, val)
