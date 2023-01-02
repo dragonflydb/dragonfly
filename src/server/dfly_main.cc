@@ -14,6 +14,7 @@
 #include <absl/strings/strip.h>
 #include <liburing.h>
 #include <mimalloc.h>
+#include <openssl/err.h>
 #include <signal.h>
 
 #include <regex>
@@ -134,40 +135,43 @@ std::optional<std::string> GetRemoteVersion(ProactorBase* proactor, SSL_CTX* ssl
   http_client.set_connect_timeout_ms(2000);
 
   auto ec = http_client.Connect(host, service, ssl_context);
-  if (!ec) {
-    ec = http_client.Send(req, &res);
-    if (!ec) {
-      VLOG(1) << "successfully got response from HTTP GET for host " << host << ":" << service
-              << "/" << resource << " response code is " << res.result();
 
-      if (res.result() == bh::status::ok) {
-        return GetVersionString(res.body());
-      }
-    } else {
-      LOG_FIRST_N(WARNING, 1) << "Remote version - HTTP GET error [" << host << ":" << service
-                              << resource << "], error: " << ec.message();
-    }
-  } else {
+  if (ec) {
     LOG_FIRST_N(WARNING, 1) << "Remote version - connection error [" << host << ":" << service
                             << "] : " << ec.message();
+    return nullopt;
   }
-  return std::nullopt;
-  ;
+
+  ec = http_client.Send(req, &res);
+  if (!ec) {
+    VLOG(1) << "successfully got response from HTTP GET for host " << host << ":" << service << "/"
+            << resource << " response code is " << res.result();
+
+    if (res.result() == bh::status::ok) {
+      return GetVersionString(res.body());
+    }
+  } else {
+    static bool is_logged{false};
+    if (!is_logged) {
+      is_logged = true;
+      // Unfortunately AsioStreamAdapter looses the original error category
+      // because std::error_code can not be converted into boost::system::error_code.
+      // It's fixed in later versions of Boost, but for now we assume it's from TLS.
+      LOG(WARNING) << "Remote version - HTTP GET error [" << host << ":" << service << resource
+                   << "], error: " << ec.value();
+      LOG(WARNING) << "ssl error: " << ERR_func_error_string(ec.value()) << "/"
+                   << ERR_reason_error_string(ec.value());
+    }
+  }
+
+  return nullopt;
 }
 
 struct VersionMonitor {
   fibers_ext::Fiber version_fiber_;
   fibers_ext::Done monitor_ver_done_;
 
-  void Run(ProactorPool* proactor_pool) {
-    const std::string dev_version_name = "dev";
-
-    // Don't run in dev environment - i.e. where we don't build with
-    // real version number
-    if (GetFlag(FLAGS_version_check) && kGitTag != dev_version_name) {
-      version_fiber_ = proactor_pool->GetNextProactor()->LaunchFiber([this] { RunTask(); });
-    }
-  }
+  void Run(ProactorPool* proactor_pool);
 
   void Shutdown() {
     monitor_ver_done_.Notify();
@@ -177,37 +181,50 @@ struct VersionMonitor {
   }
 
  private:
-  void RunTask();
+  void RunTask(SSL_CTX* ssl_ctx);
 };
 
-void VersionMonitor::RunTask() {
+void VersionMonitor::Run(ProactorPool* proactor_pool) {
+  // Don't run in dev environment - i.e. where we don't build with
+  // real version number
+  if (!GetFlag(FLAGS_version_check) || kGitTag[0] != 'v')
+    return;
+
+  SSL_CTX* ssl_ctx = TlsClient::CreateSslContext();
+  if (!ssl_ctx) {
+    VLOG(1) << "Remote version - failed to create SSL context - cannot run version monitoring";
+    return;
+  }
+
+  version_fiber_ =
+      proactor_pool->GetNextProactor()->LaunchFiber([ssl_ctx, this] { RunTask(ssl_ctx); });
+}
+
+void VersionMonitor::RunTask(SSL_CTX* ssl_ctx) {
   const auto loop_sleep_time = std::chrono::hours(24);  // every 24 hours
 
   const std::string host_name = "version.dragonflydb.io";
   const std::string_view port = "443";
   const std::string resource = "/v1";
-  const std::string version_header = std::string("DragonflyDB/") + kGitTag;
+  string_view current_version(kGitTag);
 
-  SSL_CTX* context = TlsClient::CreateSslContext();
-  if (!context) {
-    VLOG(1) << "Remote version - failed to create SSL context - cannot run version monitoring";
-    return;
-  }
+  current_version.remove_prefix(1);
+  const std::string version_header = absl::StrCat("DragonflyDB/", current_version);
 
   ProactorBase* my_pb = ProactorBase::me();
   while (true) {
     const std::optional<std::string> remote_version =
-        GetRemoteVersion(my_pb, context, host_name, port, resource, version_header);
+        GetRemoteVersion(my_pb, ssl_ctx, host_name, port, resource, version_header);
     if (remote_version) {
       const std::string rv = remote_version.value();
-      if (rv != kGitTag) {
-        LOG_FIRST_N(INFO, 1) << "Your current version '" << kGitTag
+      if (rv != current_version) {
+        LOG_FIRST_N(INFO, 1) << "Your current version '" << current_version
                              << "' is not the latest version. A newer version '" << rv
                              << "' is now available. Please consider an update.";
       }
     }
     if (monitor_ver_done_.WaitFor(loop_sleep_time)) {
-      TlsClient::FreeContext(context);
+      TlsClient::FreeContext(ssl_ctx);
       VLOG(1) << "finish running version monitor task";
       return;
     }
