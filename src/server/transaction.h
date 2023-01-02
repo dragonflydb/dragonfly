@@ -123,6 +123,7 @@ class Transaction {
   }
 
   void UnlockMulti();
+  void SetMultiUniqueShardCount();
 
   TxId txid() const {
     return txid_;

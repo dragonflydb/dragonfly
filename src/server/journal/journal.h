@@ -54,6 +54,7 @@ class Journal {
   LSN GetLsn() const;
 
   void RecordEntry(const Entry& entry);
+  TxId GetLastTxId();
 
  private:
   mutable boost::fibers::mutex state_mu_;

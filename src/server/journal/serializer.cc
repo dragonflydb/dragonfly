@@ -71,16 +71,20 @@ void JournalWriter::Write(const journal::Entry& entry) {
     case journal::Op::SELECT:
       return Write(entry.dbid);
     case journal::Op::COMMAND:
+    case journal::Op::MULTI_COMMAND:
       Write(entry.txid);
       Write(entry.shard_cnt);
       return std::visit([this](const auto& payload) { return Write(payload); }, entry.payload);
+    case journal::Op::EXEC:
+      Write(entry.txid);
+      return Write(entry.shard_cnt);
     default:
       break;
   };
 }
 
 JournalReader::JournalReader(io::Source* source, DbIndex dbid)
-    : str_buf_{}, source_{source}, buf_{4096}, dbid_{dbid} {
+    : source_{source}, buf_{4_KB}, dbid_{dbid} {
 }
 
 void JournalReader::SetDb(DbIndex dbid) {
@@ -134,36 +138,36 @@ template io::Result<uint16_t> JournalReader::ReadUInt<uint16_t>();
 template io::Result<uint32_t> JournalReader::ReadUInt<uint32_t>();
 template io::Result<uint64_t> JournalReader::ReadUInt<uint64_t>();
 
-io::Result<size_t> JournalReader::ReadString() {
+io::Result<size_t> JournalReader::ReadString(std::string* command_buf) {
   size_t size = 0;
   SET_OR_UNEXPECT(ReadUInt<uint64_t>(), size);
 
   if (auto ec = EnsureRead(size); ec)
     return make_unexpected(ec);
 
-  unsigned offset = str_buf_.size();
-  str_buf_.resize(offset + size);
-  buf_.ReadAndConsume(size, str_buf_.data() + offset);
+  unsigned offset = command_buf->size();
+  command_buf->resize(offset + size);
+  buf_.ReadAndConsume(size, command_buf->data() + offset);
 
   return size;
 }
 
-std::error_code JournalReader::Read(CmdArgVec* vec) {
+std::error_code JournalReader::ReadCommand(journal::ParsedEntry::CmdData* data) {
   size_t num_strings = 0;
   SET_OR_RETURN(ReadUInt<uint64_t>(), num_strings);
-  vec->resize(num_strings);
+  data->cmd_args.resize(num_strings);
 
   // Read all strings consecutively.
-  str_buf_.clear();
-  for (auto& span : *vec) {
+  data->command_buf = make_unique<std::string>();
+  for (auto& span : data->cmd_args) {
     size_t size;
-    SET_OR_RETURN(ReadString(), size);
+    SET_OR_RETURN(ReadString(data->command_buf.get()), size);
     span = MutableSlice{nullptr, size};
   }
 
   // Set span pointers, now that string buffer won't reallocate.
-  char* ptr = str_buf_.data();
-  for (auto& span : *vec) {
+  char* ptr = data->command_buf->data();
+  for (auto& span : data->cmd_args) {
     span = {ptr, span.size()};
     ptr += span.size();
   }
@@ -172,25 +176,30 @@ std::error_code JournalReader::Read(CmdArgVec* vec) {
 }
 
 io::Result<journal::ParsedEntry> JournalReader::ReadEntry() {
-  uint8_t opcode;
-  SET_OR_UNEXPECT(ReadUInt<uint8_t>(), opcode);
+  uint8_t int_op;
+  SET_OR_UNEXPECT(ReadUInt<uint8_t>(), int_op);
+  journal::Op opcode = static_cast<journal::Op>(int_op);
 
-  journal::ParsedEntry entry{static_cast<journal::Op>(opcode), dbid_};
+  if (opcode == journal::Op::SELECT) {
+    SET_OR_UNEXPECT(ReadUInt<uint16_t>(), dbid_);
+    return ReadEntry();
+  }
 
-  switch (entry.opcode) {
-    case journal::Op::COMMAND:
-      SET_OR_UNEXPECT(ReadUInt<uint64_t>(), entry.txid);
-      SET_OR_UNEXPECT(ReadUInt<uint32_t>(), entry.shard_cnt);
-      entry.payload = CmdArgVec{};
-      if (auto ec = Read(&*entry.payload); ec)
-        return make_unexpected(ec);
-      break;
-    case journal::Op::SELECT:
-      SET_OR_UNEXPECT(ReadUInt<uint16_t>(), dbid_);
-      return ReadEntry();
-    default:
-      break;
-  };
+  journal::ParsedEntry entry;
+  entry.dbid = dbid_;
+  entry.opcode = opcode;
+
+  SET_OR_UNEXPECT(ReadUInt<uint64_t>(), entry.txid);
+  SET_OR_UNEXPECT(ReadUInt<uint32_t>(), entry.shard_cnt);
+
+  if (opcode == journal::Op::EXEC) {
+    return entry;
+  }
+
+  auto ec = ReadCommand(&entry.cmd);
+  if (ec)
+    return make_unexpected(ec);
+
   return entry;
 }
 

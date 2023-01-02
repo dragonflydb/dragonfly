@@ -751,21 +751,34 @@ void Replica::StableSyncDflyFb(Context* cntx) {
 
   JournalReader reader{&ps, 0};
   JournalExecutor executor{&service_};
-  while (!cntx->IsCancelled()) {
-    auto res = reader.ReadEntry();
-    if (!res) {
-      cntx->ReportError(res.error(), "Journal format error");
-      return;
+
+  while (true) {
+    TranactionData tx_data;
+    bool cancelled = cntx->IsCancelled();
+    while (!cancelled) {
+      auto res = reader.ReadEntry();
+      if (!res) {
+        cntx->ReportError(res.error(), "Journal format error");
+        return;
+      }
+      tx_data.UpdateFromParsedEntry(std::move(*res));
+      if (tx_data.execute == true) {
+        break;
+      }
+      cancelled = cntx->IsCancelled();
     }
-    ExecuteEntry(&executor, std::move(res.value()));
+    if (cancelled) {
+      break;
+    }
+    ExecuteEntry(&executor, std::move(tx_data));
     last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
   }
   return;
 }
 
-void Replica::ExecuteEntry(JournalExecutor* executor, journal::ParsedEntry&& entry) {
-  if (entry.shard_cnt <= 1) {  // not multi shard cmd
-    executor->Execute(entry);
+void Replica::ExecuteEntry(JournalExecutor* executor, TranactionData&& tx_data) {
+  if (tx_data.shard_cnt <= 1) {  // not multi shard cmd
+    executor->Execute(tx_data.dbid, tx_data.commands.front());
     return;
   }
 
@@ -781,17 +794,20 @@ void Replica::ExecuteEntry(JournalExecutor* executor, journal::ParsedEntry&& ent
 
   // Only the first fiber to reach the transaction will create data for transaction in map
   multi_shard_exe_->map_mu.lock();
-  auto [it, was_insert] = multi_shard_exe_->tx_sync_execution.emplace(entry.txid, entry.shard_cnt);
-  VLOG(2) << "txid: " << entry.txid << " unique_shard_cnt_: " << entry.shard_cnt
+  auto [it, was_insert] =
+      multi_shard_exe_->tx_sync_execution.emplace(tx_data.txid, tx_data.shard_cnt);
+  VLOG(2) << "txid: " << tx_data.txid << " unique_shard_cnt_: " << tx_data.shard_cnt
           << " was_insert: " << was_insert;
 
-  TxId txid = entry.txid;
+  TxId txid = tx_data.txid;
   // entries_vec will store all entries of trasaction and will be executed by the fiber that
   // inserted the txid to map. In case of global command the inserting fiber will executed his
   // entry.
-  bool global_cmd = (entry.payload.value().size() == 1);
+  bool global_cmd = (tx_data.commands.size() == 1 && tx_data.commands.front().cmd_args.size() == 1);
   if (!global_cmd) {
-    it->second.entries_vec.push_back(std::move(entry));
+    for (auto& cmd : tx_data.commands) {
+      it->second.commands.push_back(std::move(cmd));
+    }
   }
   auto& tx_sync = it->second;
 
@@ -800,14 +816,17 @@ void Replica::ExecuteEntry(JournalExecutor* executor, journal::ParsedEntry&& ent
 
   // step 1
   tx_sync.barrier.wait();
+
   // step 2
   if (was_insert) {
     if (global_cmd) {
-      executor->Execute(entry);
+      executor->Execute(tx_data.dbid, tx_data.commands.front());
+
     } else {
-      executor->Execute(tx_sync.entries_vec);
+      executor->Execute(tx_data.dbid, tx_sync.commands);
     }
   }
+
   // step 3
   tx_sync.barrier.wait();
 
@@ -1047,6 +1066,25 @@ error_code Replica::SendCommand(string_view command, ReqSerializer* serializer) 
     last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
   }
   return ec;
+}
+
+void Replica::TranactionData::UpdateFromParsedEntry(journal::ParsedEntry&& entry) {
+  if (entry.opcode == journal::Op::EXEC) {
+    shard_cnt = entry.shard_cnt;
+    dbid = entry.dbid;
+    txid = entry.txid;
+    execute = true;
+  } else if (entry.opcode == journal::Op::COMMAND) {
+    txid = entry.txid;
+    shard_cnt = entry.shard_cnt;
+    dbid = entry.dbid;
+    commands.push_back(std::move(entry.cmd));
+    execute = true;
+  } else if (entry.opcode == journal::Op::MULTI_COMMAND) {
+    commands.push_back(std::move(entry.cmd));
+  } else {
+    DCHECK(false) << "Unsupported opcode";
+  }
 }
 
 }  // namespace dfly

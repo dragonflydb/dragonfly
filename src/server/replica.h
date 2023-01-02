@@ -50,6 +50,17 @@ class Replica {
     R_SYNC_OK = 0x10,
   };
 
+  // This class holds the commands of transaction in single shard.
+  // Once all commands recieved the command can be executed.
+  struct TranactionData {
+    TxId txid;
+    uint32_t shard_cnt;
+    DbIndex dbid;
+    std::vector<journal::ParsedEntry::CmdData> commands;
+    bool execute = false;
+    void UpdateFromParsedEntry(journal::ParsedEntry&& entry);
+  };
+
   struct MultiShardExecution {
     boost::fibers::mutex map_mu;
 
@@ -58,7 +69,7 @@ class Replica {
       std::atomic_uint32_t counter;
       TxExecutionSync(uint32_t counter) : barrier(counter), counter(counter) {
       }
-      std::vector<journal::ParsedEntry> entries_vec;
+      std::vector<journal::ParsedEntry::CmdData> commands;
     };
 
     std::unordered_map<TxId, TxExecutionSync> tx_sync_execution;
@@ -142,7 +153,7 @@ class Replica {
   // Send command, update last_io_time, return error.
   std::error_code SendCommand(std::string_view command, facade::ReqSerializer* serializer);
 
-  void ExecuteEntry(JournalExecutor* executor, journal::ParsedEntry&& entry);
+  void ExecuteEntry(JournalExecutor* executor, TranactionData&& tx_data);
 
  public: /* Utility */
   struct Info {
