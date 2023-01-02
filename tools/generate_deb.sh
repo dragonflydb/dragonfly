@@ -41,5 +41,7 @@ EOF
                 dpkg-deb --build --root-owner-group dragonfly_"$DF_VERSION"_amd64 >> /dev/null
                 cp dragonfly_"$DF_VERSION"_amd64.deb ../
                 echo "Deb package generrated"
+                echo "CLeaning build dir"
+                rm -rf dragonfly_"$DF_VERSION"_amd64
                 echo "Exiting ..."
 ~                                     
