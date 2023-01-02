@@ -404,13 +404,13 @@ error_code Replica::InitiatePSync() {
 
       // TODO: handle gracefully...
       CHECK_EQ(0, memcmp(token->data(), buf, kRdbEofMarkSize));
-      CHECK(chained.unused_prefix().empty());
+      CHECK(chained.UnusedPrefix().empty());
     } else {
       CHECK_EQ(0u, loader.Leftover().size());
       CHECK_EQ(snapshot_size, loader.bytes_read());
     }
 
-    CHECK(ps.unused_prefix().empty());
+    CHECK(ps.UnusedPrefix().empty());
     io_buf.ConsumeInput(io_buf.InputLen());
     last_io_time_ = sock_thread->GetMonotonicTimeNs();
   }
@@ -653,9 +653,9 @@ error_code Replica::StartFullSyncFlow(fibers_ext::BlockingCounter sb, Context* c
 
   parser_.reset(new RedisParser{false});  // client mode
 
-  leftover_buf_.reset(new base::IoBuf(128));
+  leftover_buf_.emplace(128);
   unsigned consumed = 0;
-  RETURN_ON_ERR(ReadRespReply(leftover_buf_.get(), &consumed));  // uses parser_
+  RETURN_ON_ERR(ReadRespReply(&*leftover_buf_, &consumed));  // uses parser_
 
   if (!CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING})) {
     LOG(ERROR) << "Bad FLOW response " << ToSV(leftover_buf_->InputBuffer());
@@ -728,12 +728,10 @@ void Replica::FullSyncDflyFb(string eof_token, fibers_ext::BlockingCounter bc, C
   }
 
   // Keep loader leftover.
-  io::Bytes unused = chained_tail.unused_prefix();
+  io::Bytes unused = chained_tail.UnusedPrefix();
   if (unused.size() > 0) {
-    leftover_buf_.reset(new base::IoBuf{unused.size()});
-    auto mut_bytes = leftover_buf_->AppendBuffer();
-    memcpy(mut_bytes.data(), unused.data(), unused.size());
-    leftover_buf_->CommitWrite(unused.size());
+    leftover_buf_.emplace(unused.size());
+    leftover_buf_->WriteAndCommit(unused.data(), unused.size());
   } else {
     leftover_buf_.reset();
   }

@@ -90,9 +90,7 @@ class RdbLoaderBase {
 
   class OpaqueObjLoader;
 
-  ::io::Result<uint8_t> FetchType() {
-    return FetchInt<uint8_t>();
-  }
+  io::Result<uint8_t> FetchType();
 
   template <typename T> io::Result<T> FetchInt();
 

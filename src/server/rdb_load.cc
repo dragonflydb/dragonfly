@@ -1608,6 +1608,10 @@ template <typename T> io::Result<T> RdbLoaderBase::FetchInt() {
   return base::LE::LoadT<std::make_unsigned_t<T>>(buf);
 }
 
+io::Result<uint8_t> RdbLoaderBase::FetchType() {
+  return FetchInt<uint8_t>();
+}
+
 // -------------- RdbLoader   ----------------------------
 
 struct RdbLoader::ObjSettings {

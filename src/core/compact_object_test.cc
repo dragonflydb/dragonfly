@@ -108,6 +108,146 @@ class CompactObjectTest : public ::testing::Test {
   string tmp_;
 };
 
+TEST_F(CompactObjectTest, WastedMemoryDetection) {
+  mi_option_set(mi_option_decommit_delay, 0);
+
+  size_t allocated = 0, commited = 0, wasted = 0;
+  // By setting the threshold to high value we are expecting
+  // To find locations where we have wasted memory
+  float ratio = 0.8;
+  zmalloc_get_allocator_wasted_blocks(ratio, &allocated, &commited, &wasted);
+  EXPECT_EQ(allocated, 0);
+  EXPECT_EQ(commited, 0);
+  EXPECT_EQ(wasted, (commited - allocated));
+
+  std::size_t allocated_mem = 64;
+  auto* myheap = mi_heap_get_backing();
+
+  void* p1 = mi_heap_malloc(myheap, 64);
+
+  void* ptrs_end[50];
+  for (size_t i = 0; i < 50; ++i) {
+    ptrs_end[i] = mi_heap_malloc(myheap, 128);
+    allocated_mem += 128;
+  }
+
+  allocated = commited = wasted = 0;
+  zmalloc_get_allocator_wasted_blocks(ratio, &allocated, &commited, &wasted);
+  EXPECT_EQ(allocated, allocated_mem);
+  EXPECT_GT(commited, allocated_mem);
+  EXPECT_EQ(wasted, (commited - allocated));
+  void* ptr[50];
+  // allocate 50
+  for (size_t i = 0; i < 50; ++i) {
+    ptr[i] = mi_heap_malloc(myheap, 256);
+    allocated_mem += 256;
+  }
+
+  // At this point all the blocks has committed > 0 and used > 0
+  // and since we expecting to find these locations, the size of
+  // wasted == commited memory - allocated memory.
+  allocated = commited = wasted = 0;
+  zmalloc_get_allocator_wasted_blocks(ratio, &allocated, &commited, &wasted);
+  EXPECT_EQ(allocated, allocated_mem);
+  EXPECT_GT(commited, allocated_mem);
+  EXPECT_EQ(wasted, (commited - allocated));
+
+  // free 50/50 -
+  for (size_t i = 0; i < 50; ++i) {
+    mi_free(ptr[i]);
+    allocated_mem -= 256;
+  }
+
+  // After all the memory at block size 256 is free, we would have commited there
+  // but the used is expected to be 0, so the number now is different from the
+  // case above
+  allocated = commited = wasted = 0;
+  zmalloc_get_allocator_wasted_blocks(ratio, &allocated, &commited, &wasted);
+  EXPECT_EQ(allocated, allocated_mem);
+  EXPECT_GT(commited, allocated_mem);
+  // since we release all 256 memory block, it should not be counted
+  EXPECT_EQ(wasted, (commited - allocated));
+  for (size_t i = 0; i < 50; ++i) {
+    mi_free(ptrs_end[i]);
+  }
+  mi_free(p1);
+
+  // Now that its all freed, we are not expecting to have any wasted memory any more
+  allocated = commited = wasted = 0;
+  zmalloc_get_allocator_wasted_blocks(ratio, &allocated, &commited, &wasted);
+  EXPECT_EQ(allocated, 0);
+  EXPECT_GT(commited, allocated);
+  EXPECT_EQ(wasted, (commited - allocated));
+
+  mi_collect(false);
+}
+
+TEST_F(CompactObjectTest, WastedMemoryDontCount) {
+  // The commited memory per blocks are:
+  // 64bit => 4K
+  // 128bit => 8k
+  // 256 => 16k
+  // and so on, which mean every n * sizeof(ptr) ^ 2 == 2^11*2*(n-1) (where n starts with 1)
+  constexpr std::size_t kExpectedFor256MemWasted = 0x4000;  // memory block 256
+  mi_option_set(mi_option_decommit_delay, 0);
+  auto* myheap = mi_heap_get_backing();
+
+  size_t allocated = 0, commited = 0, wasted = 0;
+  // By setting the threshold to a very low number
+  // we don't expect to find and locations where memory is wasted
+  float ratio = 0.01;
+  zmalloc_get_allocator_wasted_blocks(ratio, &allocated, &commited, &wasted);
+  EXPECT_EQ(allocated, 0);
+  EXPECT_EQ(commited, 0);
+  EXPECT_EQ(wasted, (commited - allocated));
+
+  std::size_t allocated_mem = 64;
+
+  void* p1 = mi_heap_malloc(myheap, 64);
+
+  void* ptrs_end[50];
+  for (size_t i = 0; i < 50; ++i) {
+    ptrs_end[i] = mi_heap_malloc(myheap, 128);
+    (void)p1;
+    allocated_mem += 128;
+  }
+
+  void* ptr[50];
+
+  // allocate 50
+  for (size_t i = 0; i < 50; ++i) {
+    ptr[i] = mi_heap_malloc(myheap, 256);
+    allocated_mem += 256;
+  }
+  allocated = commited = wasted = 0;
+  zmalloc_get_allocator_wasted_blocks(ratio, &allocated, &commited, &wasted);
+  // Threshold is low so we are not expecting any wasted memory to be found.
+  EXPECT_EQ(allocated, allocated_mem);
+  EXPECT_GT(commited, allocated_mem);
+  EXPECT_EQ(wasted, 0);
+
+  // free 50/50 -
+  for (size_t i = 0; i < 50; ++i) {
+    mi_free(ptr[i]);
+    allocated_mem -= 256;
+  }
+  allocated = commited = wasted = 0;
+  zmalloc_get_allocator_wasted_blocks(ratio, &allocated, &commited, &wasted);
+
+  EXPECT_EQ(allocated, allocated_mem);
+  EXPECT_GT(commited, allocated_mem);
+  // We will detect only wasted memory for block size of
+  // 256 - and all of it is wasted.
+  EXPECT_EQ(wasted, kExpectedFor256MemWasted);
+  // Threshold is low so we are not expecting any wasted memory to be found.
+  for (size_t i = 0; i < 50; ++i) {
+    mi_free(ptrs_end[i]);
+  }
+  mi_free(p1);
+
+  mi_collect(false);
+}
+
 TEST_F(CompactObjectTest, Basic) {
   robj* rv = createRawStringObject("foo", 3);
   cobj_.ImportRObj(rv);
