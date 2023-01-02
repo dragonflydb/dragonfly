@@ -104,6 +104,7 @@ services:
     image: docker.dragonflydb.io/dragonflydb/dragonfly
     command:
       - "--save_schedule=*:*" # save for every 1 minute
+      - "--dir=/data"
       - "--dbfilename=/data/dump.rdb"
     ports:
       - '6379:6379'
