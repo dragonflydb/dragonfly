@@ -123,6 +123,11 @@ class Transaction {
   }
 
   void UnlockMulti();
+  // In multi transaciton command we calculate the unique shard count of the trasaction
+  // after all transaciton commands where executed, by checking the last txid writen to
+  // all journals.
+  // This value is writen to journal so that replica we be able to apply the multi command
+  // atomicaly.
   void SetMultiUniqueShardCount();
 
   TxId txid() const {

@@ -57,8 +57,8 @@ class Replica {
     uint32_t shard_cnt;
     DbIndex dbid;
     std::vector<journal::ParsedEntry::CmdData> commands;
-    bool execute = false;
-    void UpdateFromParsedEntry(journal::ParsedEntry&& entry);
+    // Update the data from ParsedEntry and return if its ready for execution.
+    bool UpdateFromParsedEntry(journal::ParsedEntry&& entry);
   };
 
   struct MultiShardExecution {
@@ -153,7 +153,7 @@ class Replica {
   // Send command, update last_io_time, return error.
   std::error_code SendCommand(std::string_view command, facade::ReqSerializer* serializer);
 
-  void ExecuteEntry(JournalExecutor* executor, TranactionData&& tx_data);
+  void ExecuteCmd(JournalExecutor* executor, TranactionData&& tx_data, Context* cntx);
 
  public: /* Utility */
   struct Info {

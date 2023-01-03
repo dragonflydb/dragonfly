@@ -52,7 +52,7 @@ struct Entry : public EntryBase {
 
 struct ParsedEntry : public EntryBase {
   struct CmdData {
-    std::unique_ptr<std::string> command_buf;
+    std::unique_ptr<char[]> command_buf;
     CmdArgVec cmd_args;  // represents the parsed command.
   };
   CmdData cmd;

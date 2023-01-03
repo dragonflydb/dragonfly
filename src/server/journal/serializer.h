@@ -63,8 +63,8 @@ struct JournalReader {
   // Read unsigned integer in packed encoding.
   template <typename UT> io::Result<UT> ReadUInt();
 
-  // Read and append string to string buffer, return size.
-  io::Result<size_t> ReadString(std::string* command_buf);
+  // Read and copy to buffer, return size.
+  io::Result<size_t> ReadString(char* buffer);
 
   // Read argument array into string buffer.
   std::error_code ReadCommand(journal::ParsedEntry::CmdData* entry);

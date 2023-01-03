@@ -752,31 +752,29 @@ void Replica::StableSyncDflyFb(Context* cntx) {
   JournalReader reader{&ps, 0};
   JournalExecutor executor{&service_};
 
-  while (true) {
+  while (!cntx->IsCancelled()) {
     TranactionData tx_data;
-    bool cancelled = cntx->IsCancelled();
-    while (!cancelled) {
+    while (!cntx->IsCancelled()) {
       auto res = reader.ReadEntry();
       if (!res) {
         cntx->ReportError(res.error(), "Journal format error");
         return;
       }
-      tx_data.UpdateFromParsedEntry(std::move(*res));
-      if (tx_data.execute == true) {
+      bool should_execute = tx_data.UpdateFromParsedEntry(std::move(*res));
+      if (should_execute == true) {
         break;
       }
-      cancelled = cntx->IsCancelled();
     }
-    if (cancelled) {
-      break;
-    }
-    ExecuteEntry(&executor, std::move(tx_data));
+    ExecuteCmd(&executor, std::move(tx_data), cntx);
     last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
   }
   return;
 }
 
-void Replica::ExecuteEntry(JournalExecutor* executor, TranactionData&& tx_data) {
+void Replica::ExecuteCmd(JournalExecutor* executor, TranactionData&& tx_data, Context* cntx) {
+  if (cntx->IsCancelled()) {
+    return;
+  }
   if (tx_data.shard_cnt <= 1) {  // not multi shard cmd
     executor->Execute(tx_data.dbid, tx_data.commands.front());
     return;
@@ -1068,23 +1066,25 @@ error_code Replica::SendCommand(string_view command, ReqSerializer* serializer) 
   return ec;
 }
 
-void Replica::TranactionData::UpdateFromParsedEntry(journal::ParsedEntry&& entry) {
+bool Replica::TranactionData::UpdateFromParsedEntry(journal::ParsedEntry&& entry) {
   if (entry.opcode == journal::Op::EXEC) {
     shard_cnt = entry.shard_cnt;
     dbid = entry.dbid;
     txid = entry.txid;
-    execute = true;
+    return true;
   } else if (entry.opcode == journal::Op::COMMAND) {
     txid = entry.txid;
     shard_cnt = entry.shard_cnt;
     dbid = entry.dbid;
     commands.push_back(std::move(entry.cmd));
-    execute = true;
+    return true;
   } else if (entry.opcode == journal::Op::MULTI_COMMAND) {
     commands.push_back(std::move(entry.cmd));
+    return false;
   } else {
     DCHECK(false) << "Unsupported opcode";
   }
+  return false;
 }
 
 }  // namespace dfly

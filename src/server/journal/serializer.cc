@@ -42,6 +42,11 @@ void JournalWriter::Write(std::string_view sv) {
 
 void JournalWriter::Write(CmdArgList args) {
   Write(args.size());
+  size_t cmd_size = 0;
+  for (auto v : args) {
+    cmd_size += v.size();
+  }
+  Write(cmd_size);
   for (auto v : args)
     Write(facade::ToSV(v));
 }
@@ -50,6 +55,13 @@ void JournalWriter::Write(std::pair<std::string_view, ArgSlice> args) {
   auto [cmd, tail_args] = args;
 
   Write(1 + tail_args.size());
+
+  size_t cmd_size = cmd.size();
+  for (auto v : tail_args) {
+    cmd_size += v.size();
+  }
+  Write(cmd_size);
+
   Write(cmd);
   for (auto v : tail_args)
     Write(v);
@@ -72,12 +84,10 @@ void JournalWriter::Write(const journal::Entry& entry) {
       return Write(entry.dbid);
     case journal::Op::COMMAND:
     case journal::Op::MULTI_COMMAND:
+    case journal::Op::EXEC:
       Write(entry.txid);
       Write(entry.shard_cnt);
       return std::visit([this](const auto& payload) { return Write(payload); }, entry.payload);
-    case journal::Op::EXEC:
-      Write(entry.txid);
-      return Write(entry.shard_cnt);
     default:
       break;
   };
@@ -138,16 +148,14 @@ template io::Result<uint16_t> JournalReader::ReadUInt<uint16_t>();
 template io::Result<uint32_t> JournalReader::ReadUInt<uint32_t>();
 template io::Result<uint64_t> JournalReader::ReadUInt<uint64_t>();
 
-io::Result<size_t> JournalReader::ReadString(std::string* command_buf) {
+io::Result<size_t> JournalReader::ReadString(char* buffer) {
   size_t size = 0;
   SET_OR_UNEXPECT(ReadUInt<uint64_t>(), size);
 
   if (auto ec = EnsureRead(size); ec)
     return make_unexpected(ec);
 
-  unsigned offset = command_buf->size();
-  command_buf->resize(offset + size);
-  buf_.ReadAndConsume(size, command_buf->data() + offset);
+  buf_.ReadAndConsume(size, buffer);
 
   return size;
 }
@@ -157,21 +165,18 @@ std::error_code JournalReader::ReadCommand(journal::ParsedEntry::CmdData* data) 
   SET_OR_RETURN(ReadUInt<uint64_t>(), num_strings);
   data->cmd_args.resize(num_strings);
 
+  size_t cmd_size = 0;
+  SET_OR_RETURN(ReadUInt<uint64_t>(), cmd_size);
+
   // Read all strings consecutively.
-  data->command_buf = make_unique<std::string>();
+  data->command_buf = make_unique<char[]>(cmd_size);
+  char* ptr = data->command_buf.get();
   for (auto& span : data->cmd_args) {
     size_t size;
-    SET_OR_RETURN(ReadString(data->command_buf.get()), size);
-    span = MutableSlice{nullptr, size};
+    SET_OR_RETURN(ReadString(ptr), size);
+    span = MutableSlice{ptr, size};
+    ptr += size;
   }
-
-  // Set span pointers, now that string buffer won't reallocate.
-  char* ptr = data->command_buf->data();
-  for (auto& span : data->cmd_args) {
-    span = {ptr, span.size()};
-    ptr += span.size();
-  }
-
   return std::error_code{};
 }
 

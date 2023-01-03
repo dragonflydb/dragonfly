@@ -632,7 +632,9 @@ void Transaction::UnlockMulti() {
     sharded_keys[sid].push_back(k_v);
   }
 
-  SetMultiUniqueShardCount();
+  if (ServerState::tlocal()->journal()) {
+    SetMultiUniqueShardCount();
+  }
 
   uint32_t prev = run_count_.fetch_add(shard_data_.size(), memory_order_relaxed);
   DCHECK_EQ(prev, 0u);
