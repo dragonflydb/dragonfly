@@ -105,7 +105,7 @@ services:
     command:
       - "--save_schedule=*:*" # save for every 1 minute
       - "--dir=/data"
-      - "--dbfilename=/data/dump.rdb"
+      - "--dbfilename=dump.rdb"
     ports:
       - '6379:6379'
     volumes:
