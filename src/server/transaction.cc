@@ -328,7 +328,8 @@ bool Transaction::RunInShard(EngineShard* shard) {
   // runnable concludes current operation, and should_release which tells
   // whether we should unlock the keys. should_release is false for multi and
   // equal to concluding otherwise.
-  bool should_release = (coordinator_state_ & COORD_EXEC_CONCLUDING) && !multi_;
+  bool is_concluding = (coordinator_state_ & COORD_EXEC_CONCLUDING);
+  bool should_release = is_concluding && !multi_;
   IntentLock::Mode mode = Mode();
 
   // We make sure that we lock exactly once for each (multi-hop) transaction inside
@@ -373,7 +374,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
 
   /*************************************************************************/
 
-  if (!was_suspended && should_release)  // Check last hop & non suspended.
+  if (!was_suspended && is_concluding)  // Check last hop & non suspended.
     LogJournalOnShard(shard);
 
   // at least the coordinator thread owns the reference.
@@ -631,6 +632,10 @@ void Transaction::UnlockMulti() {
     sharded_keys[sid].push_back(k_v);
   }
 
+  if (ServerState::tlocal()->journal()) {
+    SetMultiUniqueShardCount();
+  }
+
   uint32_t prev = run_count_.fetch_add(shard_data_.size(), memory_order_relaxed);
   DCHECK_EQ(prev, 0u);
 
@@ -641,6 +646,33 @@ void Transaction::UnlockMulti() {
   DCHECK_GE(use_count(), 1u);
 
   VLOG(1) << "UnlockMultiEnd " << DebugId();
+}
+
+void Transaction::SetMultiUniqueShardCount() {
+  uint32_t prev = run_count_.fetch_add(shard_data_.size(), memory_order_relaxed);
+  DCHECK_EQ(prev, 0u);
+
+  std::atomic<uint32_t> unique_shard_cnt = 0;
+
+  auto update_shard_cnd = [&] {
+    EngineShard* shard = EngineShard::tlocal();
+    auto journal = shard->journal();
+
+    if (journal != nullptr) {
+      TxId last_tx = journal->GetLastTxId();
+      if (last_tx == txid_) {
+        unique_shard_cnt.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    this->DecreaseRunCnt();
+  };
+
+  for (ShardId i = 0; i < shard_data_.size(); ++i) {
+    shard_set->Add(i, std::move(update_shard_cnd));
+  }
+  WaitForShardCallbacks();
+
+  unique_shard_cnt_ = unique_shard_cnt.load(std::memory_order_release);
 }
 
 void Transaction::Schedule() {
@@ -1080,6 +1112,11 @@ void Transaction::ExpireShardCb(EngineShard* shard) {
 }
 
 void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard) {
+  auto journal = shard->journal();
+  if (journal != nullptr && journal->GetLastTxId() == txid_) {
+    journal->RecordEntry(journal::Entry{txid_, journal::Op::EXEC, db_index_, unique_shard_cnt_});
+  }
+
   if (multi_->multi_opts & CO::GLOBAL_TRANS) {
     shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
   }
@@ -1221,7 +1258,12 @@ void Transaction::LogJournalOnShard(EngineShard* shard) {
     entry_payload =
         make_pair(facade::ToSV(cmd_with_full_args_.front()), ShardArgsInShard(shard->shard_id()));
   }
-  journal->RecordEntry(journal::Entry{txid_, db_index_, entry_payload, unique_shard_cnt_});
+  journal::Op opcode = journal::Op::COMMAND;
+  if (multi_) {
+    opcode = journal::Op::MULTI_COMMAND;
+  }
+
+  journal->RecordEntry(journal::Entry{txid_, opcode, db_index_, unique_shard_cnt_, entry_payload});
 }
 
 void Transaction::BreakOnShutdown() {
