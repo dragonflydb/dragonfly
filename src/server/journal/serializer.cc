@@ -18,26 +18,18 @@ using namespace std;
 
 namespace dfly {
 
-std::error_code JournalWriter::Flush(io::Sink* sink) {
-  if (auto ec = sink->Write(buf_.InputBuffer()); ec)
-    return ec;
-  buf_.Clear();
-  return {};
-}
-
-base::IoBuf& JournalWriter::Accumulated() {
-  return buf_;
+JournalWriter::JournalWriter(io::Sink* sink) : sink_{sink} {
 }
 
 void JournalWriter::Write(uint64_t v) {
   uint8_t buf[10];
   unsigned len = WritePackedUInt(v, buf);
-  buf_.WriteAndCommit(buf, len);
+  sink_->Write(io::Bytes{buf}.first(len));
 }
 
 void JournalWriter::Write(std::string_view sv) {
   Write(sv.size());
-  buf_.WriteAndCommit(sv.data(), sv.size());
+  sink_->Write(io::Buffer(sv));
 }
 
 void JournalWriter::Write(CmdArgList args) {

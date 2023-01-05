@@ -18,14 +18,10 @@ namespace dfly {
 // It automatically keeps track of the current database index.
 class JournalWriter {
  public:
-  // Write single entry to internal buffer.
+  JournalWriter(io::Sink* sink);
+
+  // Write single entry to sink.
   void Write(const journal::Entry& entry);
-
-  // Flush internal buffer to sink.
-  std::error_code Flush(io::Sink* sink_);
-
-  // Return reference to internal buffer.
-  base::IoBuf& Accumulated();
 
  private:
   void Write(uint64_t v);           // Write packed unsigned integer.
@@ -36,7 +32,7 @@ class JournalWriter {
   void Write(std::monostate);  // Overload for empty std::variant
 
  private:
-  base::IoBuf buf_{};
+  io::Sink* sink_;
   std::optional<DbIndex> cur_dbid_{};
 };
 

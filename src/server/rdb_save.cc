@@ -692,18 +692,17 @@ void RdbSerializer::Clear() {
 }
 
 error_code RdbSerializer::WriteJournalEntries(absl::Span<const journal::Entry> entries) {
+  io::BufSink buf_sink{&journal_mem_buf_};
+  JournalWriter writer{&buf_sink};
   for (const auto& entry : entries) {
-    journal_writer_.Write(entry);
+    writer.Write(entry);
   }
 
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_JOURNAL_BLOB));
   RETURN_ON_ERR(SaveLen(entries.size()));
+  RETURN_ON_ERR(SaveString(io::View(journal_mem_buf_.InputBuffer())));
 
-  auto& buf = journal_writer_.Accumulated();
-  auto bytes = buf.InputBuffer();
-  RETURN_ON_ERR(SaveString(string_view{reinterpret_cast<const char*>(bytes.data()), bytes.size()}));
-  buf.Clear();
-
+  journal_mem_buf_.Clear();
   return error_code{};
 }
 

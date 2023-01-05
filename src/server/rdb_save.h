@@ -177,12 +177,12 @@ class RdbSerializer {
   void CompressBlob();
   void AllocateCompressorOnce();
 
-  JournalWriter journal_writer_;
+  base::IoBuf mem_buf_;
+  base::IoBuf journal_mem_buf_;
+  std::string tmp_str_;
+  base::PODArray<uint8_t> tmp_buf_;
 
   std::unique_ptr<LZF_HSLOT[]> lzf_;
-  base::IoBuf mem_buf_;
-  base::PODArray<uint8_t> tmp_buf_;
-  std::string tmp_str_;
 
   CompressionMode compression_mode_;
   // TODO : This compressor impl should support different compression algorithms zstd/lz4 etc.

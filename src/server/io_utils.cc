@@ -8,41 +8,46 @@
 #include "base/logging.h"
 #include "server/error.h"
 
+using namespace std;
+
 namespace dfly {
 
-void BufferedStreamerBase::ReportWritten() {
+io::Result<size_t> BufferedStreamerBase::WriteSome(const iovec* vec, uint32_t len) {
+  // Write data to producer buffer.
   buffered_++;
-  // Check and possibly wait for consumer to keep up.
-  waker_.await([this]() { return !IsStalled() || IsStopped(); });
-  // Notify consumer we have new data.
-  waker_.notify();
+  return io::BufSink{&producer_buf_}.WriteSome(vec, len);
 }
 
-std::error_code BufferedStreamerBase::WriteAll(io::Sink* dest) {
-  CHECK_NE(buf_ptr_, nullptr);
+void BufferedStreamerBase::NotifyWritten() {
+  // Wake up the consumer.
+  waker_.notify();
+  // Block if we're stalled because the consumer is not keeping up.
+  waker_.await([this]() { return !IsStalled() || IsStopped(); });
+}
 
+error_code BufferedStreamerBase::ConsumeIntoSink(io::Sink* dest) {
   while (!IsStopped()) {
     // Wait for more data or stop signal.
     waker_.await([this]() { return buffered_ > 0 || IsStopped(); });
     if (IsStopped())
       break;
 
-    // Steal-swap producer buffer.
-    std::swap(buf_stash_, *buf_ptr_);
+    // Swap producer and consumer buffers
+    std::swap(producer_buf_, consumer_buf_);
     buffered_ = 0;
 
     // If producer stalled, notify we consumed data and it can unblock.
     waker_.notify();
-    RETURN_ON_ERR(dest->Write(buf_stash_.InputBuffer()));
+    RETURN_ON_ERR(dest->Write(consumer_buf_.InputBuffer()));
 
     // TODO: shrink big stash.
-    buf_stash_.Clear();
+    consumer_buf_.Clear();
   }
 
   return std::error_code{};
 }
 
-void BufferedStreamerBase::ReportDone() {
+void BufferedStreamerBase::Finalize() {
   producer_done_ = true;
   waker_.notifyAll();
 }
@@ -52,6 +57,6 @@ bool BufferedStreamerBase::IsStopped() {
 }
 
 bool BufferedStreamerBase::IsStalled() {
-  return buffered_ > max_buffered_cnt_ || buf_ptr_->InputLen() > max_buffered_mem_;
+  return buffered_ > max_buffered_cnt_ || producer_buf_.InputLen() > max_buffered_mem_;
 }
 }  // namespace dfly

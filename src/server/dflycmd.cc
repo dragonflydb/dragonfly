@@ -67,11 +67,10 @@ class JournalStreamer : protected BufferedStreamerBase {
  public:
   JournalStreamer(journal::Journal* journal, Context* cntx)
       : BufferedStreamerBase{cntx->GetCancellation()}, cntx_{cntx},
-        journal_cb_id_{0}, journal_{journal}, write_fb_{}, writer_{} {
-    buf_ptr_ = &writer_.Accumulated();
+        journal_cb_id_{0}, journal_{journal}, write_fb_{}, writer_{this} {
   }
 
-  // Self referential because buf reference pointr to writer.
+  // Self referential.
   JournalStreamer(const JournalStreamer& other) = delete;
   JournalStreamer(JournalStreamer&& other) = delete;
 
@@ -100,20 +99,20 @@ void JournalStreamer::Start(io::Sink* dest) {
   write_fb_ = Fiber(&JournalStreamer::WriterFb, this, dest);
   journal_cb_id_ = journal_->RegisterOnChange([this](const journal::Entry& entry) {
     writer_.Write(entry);
-    ReportWritten();
+    NotifyWritten();
   });
 }
 
 void JournalStreamer::Cancel() {
   journal_->UnregisterOnChange(journal_cb_id_);
-  ReportDone();
+  Finalize();
 
   if (write_fb_.IsJoinable())
     write_fb_.Join();
 }
 
 void JournalStreamer::WriterFb(io::Sink* dest) {
-  if (auto ec = WriteAll(dest); ec)
+  if (auto ec = ConsumeIntoSink(dest); ec)
     cntx_->ReportError(ec);
 }
 
