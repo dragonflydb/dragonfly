@@ -1,0 +1,29 @@
+{{- if and .Values.tls.enabled .Values.tls.createCerts }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "dragonfly.fullname" . }}
+  labels:
+    {{- include "dragonfly.labels" . | nindent 4 }}
+spec:
+  commonName: '{{ include "dragonfly.fullname" . }}'
+  dnsNames:
+  - '*.{{ include "dragonfly.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local'
+  - '{{ include "dragonfly.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local'
+  - '{{ include "dragonfly.fullname" . }}.{{ .Release.Namespace }}.svc'
+  - '{{ include "dragonfly.fullname" . }}.{{ .Release.Namespace }}'
+  - '{{ include "dragonfly.fullname" . }}'
+  - localhost
+  duration: {{ required "tls.duration is required, if createCerts is enabled" .Values.tls.duration }}
+  ipAddresses:
+  - 127.0.0.1
+  issuerRef:
+    kind: {{ required "tls.issuer.kind is required, if createCerts is enabled" .Values.tls.issuer.kind }}
+    name: {{ required "tls.issuer.name is required, if createCerts is enabled" .Values.tls.issuer.name }}
+  secretName: '{{ include "dragonfly.fullname" . }}-server-tls'
+  usages:
+  - client auth
+  - server auth
+  - signing
+  - key encipherment
+{{- end }}
