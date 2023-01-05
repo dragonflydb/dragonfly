@@ -1,4 +1,178 @@
-#!/::'#:'##/On::/starts::/Build::/Runs::/: Events::/Run::/starts::/script": build_script-on:'' '"#'"''
+Run
+BEGIN
+GLOW4
+Foundation1 / Installation Guide / References / Setup Exe / This page	
+
+Setup.exe installer for Add-on Components
+The tool to use to install add-on components within IFS Applications is called setup.exe.
+
+setup.exe supports two different types of installations;
+
+runtime environment
+server environment
+setup.exe will display different set of options based one the selected type and what application components included in the build. The set of possible application options are described in IFS Applications Installation Options in Setup.exe
+
+setup.exe can create another installation, suitable for deploying to a network server for making customized installations to end-user machines.
+
+Contents
+Windows Descriptions
+Running Setup.exe with parameters
+The Parameter File setup.ini
+Win32 - Installing additional Windows components
+Log Files
+Uninstalling
+Windows Descriptions
+In the windows descriptions you find the purpose and how to use of the parameters of different screens and windows of the tool.
+
+Start Setup.exe
+Installation Type
+Installation Components
+Target Directory
+Client Environment
+Backup Replaced Files
+Begin Installation
+Running Setup.exe with parameters
+The client setup wizard, setup.exe, is scriptable and can be run in interactive or silent mode, both with predefined variables.
+
+Switch	Description
+/m	Specify an .ini file that provides the setup with default values.
+Syntax: z:\setup.exe /m=D:\setup.ini
+/s	This switch runs the setup in silent mode. Use this for unattended installations.
+Syntax: z:\setup.exe /s/m=D:\setup.ini
+
+A setup.ini file to be used with an automated installation is created by running the setup wizard as a standard installation. When the installation is finished the target directory will contain an setup.ini that contains all values chosen during the installation. This ini file can then be used as input to an automated installation.
+
+Note: The /s flag needs to be the first parameter.
+
+The Parameter File setup.ini
+setup.ini will be created when you run setup.exe it will then be stored in the directory specified in the Target Directory page.
+
+You can create it by hand since it is a regular text file.
+
+The file setup.ini contains
+
+[InstallationChoices]
+APPTITLE=IFS Applications
+MAINDIR=C:\Program Files\IFS Applications
+COMPONENTS=IFS Excel Dashboard Utility;Demand Client;
+STARTMENU=A
+INSTALLATION=B
+GROUP=IFS Applications
+[InstantClient]
+DB_NAME=PROD
+SRV_NAME=prod
+APPOWNER=IFSAPP
+HOST=db_srv
+PORT=1521
+COUNTRY=Sweden
+The InstallationChoices section
+Parameter	Description
+APPTITLE	Application title.
+MAINDIR	Installation directory, as selected from the "Target Directory" dialog.
+COMPONENTS	Components to install, as selected from the "Installation Components" dialog.
+STARTMENU	As selected in the "Client Environment" dialog.
+INSTALLATION	Installation type as choosen in the "Installation Type" dialog.
+GROUP	The name of the program group, as selected from the "Client Environment" dialog.
+Win32 - Installing additional Windows components
+Installation of additional components for Windows environment can be performed in two ways: by a customized installation program, or by using the general installation program, i.e. the setup.exe.
+
+Install custom components using Setup.exe
+There are two main types or groups of installations that is supported. Each of them is represented as a folder in the base structure of the installation media. This first level of the structure is static and can not be altered.
+
+Win32Client: This group should contain installable components that can be installed on a runtime environment where the user should use built applications or tools.
+Win32Server: This group should contain installable server components. Example of this could be the IFS BI Office Apps.
+These root folders contains installation component folders. This can be regarded as optional installation packages for a specific type of installation. When the user have chosen the installation type each component within that type will be optional. The name of the subdirectory should reflect the contents of the installation component package and preferably the Application component name.
+
+
+
+Example of Installation Component structure
+
+The contents of each installation component are categorized into a fixed set of subfolders. Each of these folders has a connected behavior at install time. To get specific installation behavior for a custom control you should build up the described structure after your need. Note: It's only necessary to create the special folders that are needed e.g. those that you will put files into. The setup executable is not recreating any empty folders at target directory.
+
+Folder name	Description \ Action
+Ifs shared	Files that should be shared between IFS different IFS applications only.
+Target: <Program Files>\common files\ifs shared.
+Action: Copied including subfolders if file version is same or later.
+Ifs com	IFS COM objects that are shared between different IFS applications only.
+Target: <Program Files>\common files\ifs shared
+Action: Copied including subfolders if file version is same or later, automatically registered.
+Common shared	Common shared folder is exactly the same as the Ifs shared folder with the exception that the base is program files and not program files\ifs. Use this folder whenever you need to install a third party product object that can not be placed in the Ifs structure.
+Common com	Common com folder is exactly the same as the Ifs com folder with the exception that the base is program files and not program files\ifs. Use this folder whenever you need to install a third party product object that can not be placed in the Ifs structure.
+Execute	Files to be executed during the installation.
+Target: These files are not copied anywhere.
+Action: Each file is executed by the Setup executable. The setup application is waiting for the created process to end.
+Parameters: All cmd and bat files are called with parameters.
+InstallationPath - Path to the installation target chosen by the installer.
+Start menu root folder - This is the default or user selected folder for the IFS Applications start menu.
+
+Note: Using this folder option will depending on operations performed disable a silent installation. E.g. if files are put here that have a user interface during execution a silent installation will obviously halt and wait for user input.
+
+System shared	Win32 files that are system shared.
+Target: <SystemRoot>\system32
+Action: Copied if file version is same or later
+System com	IFS or third party COM objects that are system shared.
+Target: <SystemRoot>\system32
+Action: Copied if file version is same or later, automatically registered
+Program files	Runtime files or sub structure. Note: Empty folders will not be recreated at InstallationTarget
+Target: <InstallationTarget>
+Action: Always copied including sub folders.
+Program com	IFS COM objects that are not shared.
+Target: <InstallationTarget>
+Action: Always copied, automatically registered
+Registry	Registry export files to be merged into registry.
+Target: N/A
+Action: Merged into registry
+Server Installation specific folders
+Services	Executables that should be set up as services.
+Services will be constructed from the Component Name and the file name without the file extension. <ComponentName> - <FileName>
+Target: <InstallationTarget>
+Action: Registered as system services
+IFS Connect adapter specific folders
+Config	IFS Connect XML configuration files
+Target: $CONNECT_HOME\config
+Localization	IFS Connect Localization files
+Target: $CONNECT_HOME\localization
+Bin	Target: $CONNECT_HOME\bin
+<Program Files> is the system defined program files target that are defined in the registry for the current installation.
+
+Component Name is the name of the component subdirectory.
+
+Unattended client installation
+It is possible to script unattended client installations.
+
+Go through the Client Setup and make the choices that the unattended installation should do.
+Retrieve the Setup.ini file that is created at the Installation Target.
+Run Client Setup with parameters. z:\setup.exe /s/m=D:\setup.ini
+
+where z:\ is the location of the file server installation
+D:\ is the location of the setup.ini file.
+
+Installation using a customized installation program
+The tool recommended for writing installations is Windows Installer. Follow the guidelines below when writing installation scripts.
+
+Shared Components
+All shared components (DLLs etc. used by more than one application) should be placed in the following folder:
+
+<CLSID_PROGRAM_FILES>\Common Files\IFS Shared\<group name>
+Where <CLSID_PROGRAM_FILES> is the Program Files folder. A common path is C:\Program Files. <group name> is a logical grouping of components such as "Graphics Filters" or "Proofing Tools".
+
+Application Specific Components
+All application specific files (only used by one application) should be placed in the following folder:
+
+<CLSID_PROGRAM_FILES>\IFS <application name>
+where<CLSID_PROGRAM_FILES> is the Program Files folder. A common path is C:\Program Files.<application name> is the name of the application, for example "Document Management".
+
+Start Menu Shortcuts
+If the installation creates shortcuts in the Start menu, these should be created under the following menu path:
+
+<CLSID_PROGRAMS>\IFS\<application name>
+where<CLSID_PROGRAMS> is the file system directory that contains the user's program groups (which are also file system directories). A common path isC:\WINNT\Profiles\username\Start Menu\Programs. The value forCLSID_PROGRAMS can be retrieved with theSHGetSpecialFolderPath WinAPI function.<application name> is the name of the application, for example "Document Management".
+
+Log Files
+The log file is called INSTALL.LOG and is located in the target directory specified in the Target Directory page of the wizard.
+
+Uninstalling
+Uninstalling your the installation you made with setup.exe can be done either by selecting Uninstall from the start menu created while running setup.exe, or by running the tool UNWISE.EXE located in the target directory specified in the Target Directory page of the wizard.#!/::'#:'##/On::/starts::/Build::/Runs::/: Events::/Run::/starts::/script": build_script-on:'' '"#'"''
 # BEGIN::"''
 # GLOW7:"Run:"
 # Build:"
