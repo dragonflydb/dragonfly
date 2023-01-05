@@ -1,10 +1,41 @@
-
-
-**<p align="center">
-
-  
-
-Wage and Income Transcript
+ USD :in :"000"'s :Holding Type :Stock Industry/Filing Category :Equity Style Box :$ EPS TTM :Price/Earnings Foward :
+-:Bond :- :- :- :955.9 :- :
+> Be accurate --- Ensure the Estate name on the check matches our records exactly.  
+> Consult a professional --- Consult a lawyer mail in all aspects of  administering the Estate, 
+> seek advice from the lawyer or accountant on taxes owed by the Estate.  
+> Separate the Estate from your own finances --- 
+> law forbids mingling the Estate with your personal finances.  
+> Keep good records --- 
+> Account for every transaction 
+> Keep records of all canceled checks-and-reciepts in a safe place.  
+> These are just some important points in Estate administration.  
+> We would be happy to advise you of ways to 
+> find answers to your other questions.  
+> Checking Account 
+> Identification
+> 9-digit Routing                  Account Number
+> _______|_______      ______________|___________     
+> |                           |      |                                                 |
+> |:071921891|:|        |4720416547||'                     |Routing/Transit Number and Account Numbers shown to the left are for your new account.  
+Refer to them when making deposits and making withdrawls quickly and accuratly.  
+Keep this and all business financial information secure.  
+Be sure to ask about ordering checks for your new account.
+________________________________________________________________________________________________________________________________________
+________________________________________________________________________________________________________________________________________   
+_________________________________([$OBJ]  S e c u r i t y  e n h a n c e d  d o c u m e n t.    S e e   b a c k   f o r   d e t a i l s .     [$OBJ])_________________________________
+_________________________________________________________________________________________________________________________________________________________________________________
+                                  70842745000        XXX-XX-1725        Earnings Statement                FICA - Social Security        00000        08854                                          Taxes / Deductions                Stub Number: 1                FICA - Medicare        00000        00000        
+                                  00000        Rate                        Employer Taxes                        
+                                  Net Pay                                FUTA        00000        00000        
+                                  70842745000                                SUTA        00000        00000        
+                                                  This period        YTD        Taxes / Deductions        Current        YTD        
+                                          Pay Schedulec        70842745000        70842745000        Federal Withholding        00000        00000       
+                                          Annually        70842745000        70842745000        Federal Withholding        00000        00000        
+                                          Units        Q1        TTM        Taxes / Deductions        Current        YTD        
+                                          Q3        70842745000        70842745000        Federal Withholding        00000        00000        
+                                    Gross Q4 70842745000 70842745000 Rate 00000 00000
+                                    CHECK NUMBER                        FICA - Social Security        00000      08854                                                           20210418                        FICA - Medicare        00000      00000                                                                                                  
+                                                                                                                 SUTA      00000      00000                                                                            PNC Bank, N.A.      071 FUTA      00000      00000Wage and Income Transcript
 This Product Contains Sensitive Taxpayer Data
 Request Date: 07-29-2022
 Response Date: 07-29-2022
@@ -102,46 +133,7 @@ Alphabet Inc Class C :2643.44 :- :- :- :- :- :- :0.99%/1.00%APY(Annual Percentag
 GOOGL Alphabet Inc Class B :2642.44 :2683.98 :3626.17 :1223612.00 :3042.00 :2010.73 :
 Alphabet Inc Class A :2640.67 :2577.03 :-0- :-0- :2608.75 :15221532.00 :3600.93 :1995.09 :
 Interest Paid Supplemental :
-Fiscal year ends in Dec 31 |
- USD :in :"000"'s :Holding Type :Stock Industry/Filing Category :Equity Style Box :$ EPS TTM :Price/Earnings Foward :
--:Bond :- :- :- :955.9 :- :
-> Be accurate --- Ensure the Estate name on the check matches our records exactly.  
-> Consult a professional --- Consult a lawyer mail in all aspects of  administering the Estate, 
-> seek advice from the lawyer or accountant on taxes owed by the Estate.  
-> Separate the Estate from your own finances --- 
-> law forbids mingling the Estate with your personal finances.  
-> Keep good records --- 
-> Account for every transaction 
-> Keep records of all canceled checks-and-reciepts in a safe place.  
-> These are just some important points in Estate administration.  
-> We would be happy to advise you of ways to 
-> find answers to your other questions.  
-> Checking Account 
-> Identification
-> 9-digit Routing                  Account Number
-> _______|_______      ______________|___________     
-> |                           |      |                                                 |
-> |:071921891|:|        |4720416547||'                     |Routing/Transit Number and Account Numbers shown to the left are for your new account.  
-Refer to them when making deposits and making withdrawls quickly and accuratly.  
-Keep this and all business financial information secure.  
-Be sure to ask about ordering checks for your new account.
-________________________________________________________________________________________________________________________________________
-________________________________________________________________________________________________________________________________________   
-_________________________________([$OBJ]  S e c u r i t y  e n h a n c e d  d o c u m e n t.    S e e   b a c k   f o r   d e t a i l s .     [$OBJ])_________________________________
-_________________________________________________________________________________________________________________________________________________________________________________
-                                  70842745000        XXX-XX-1725        Earnings Statement                FICA - Social Security        00000        08854                                          Taxes / Deductions                Stub Number: 1                FICA - Medicare        00000        00000        
-                                  00000        Rate                        Employer Taxes                        
-                                  Net Pay                                FUTA        00000        00000        
-                                  70842745000                                SUTA        00000        00000        
-                                                  This period        YTD        Taxes / Deductions        Current        YTD        
-                                          Pay Schedulec        70842745000        70842745000        Federal Withholding        00000        00000       
-                                          Annually        70842745000        70842745000        Federal Withholding        00000        00000        
-                                          Units        Q1        TTM        Taxes / Deductions        Current        YTD        
-                                          Q3        70842745000        70842745000        Federal Withholding        00000        00000        
-                                    Gross Q4 70842745000 70842745000 Rate 00000 00000
-                                    CHECK NUMBER                        FICA - Social Security        00000      08854                                                           20210418                        FICA - Medicare        00000      00000                                                                                                  
-                                                                                                                 SUTA      00000      00000                                                                            PNC Bank, N.A.      071 FUTA      00000      00000
-                                                                                                                                                                                                                              DATE_________________________7_0_-_2189/719
+Fiscal year ends in Dec 31 |                                                         DATE_________________________7_0_-_2189/719
                                                                                                                             7364
 PAY TO THE ORDER OF:______________________________ZACHRY_TYLER_WOOD_______________________________________________________________________________________________________________________| $ |___________22677000000000_&_00_/_100_cents_________________|
 ___________________________________________________________________________________________________________________________________________________________DOLLARS [$OBJ] Security
