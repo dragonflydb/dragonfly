@@ -1,17 +1,555 @@
-BEGIN:
-GLOW4:
-#!/Users/bin/Bash/ :ENV :RUNS AUTOMATES AUTOMATE ALL 
-ON
-BEGIN 
-RUN 
-RUNS 
-RUN 
-RUN 
-RUNS 
-RUN
-RUN-ON 
-RUN 
-zRUNS :'Run''
+diff --git a/GitHub/doc/packages/javascriptbitore.sig b/GitHub/doc/packages/javascript/bitore.sig
+/BITCORE
+$ map :charset= key== new
+new= $ Obj== ((c)(r)):
+\commits :#New filings.., :  
+'Run'' 'mode'' 'Run'' 100644
+index 000000000000..350f5e63a762
+--- /dev/null
++++ b/GitHub/doc/packages/javascriptbitore.sig
+@@ -0,0 +1,122 @@
++From 59f5fcbd7035f2be3c6553699eb350ee3b4206b3 Mon Sep 17 00:00:00 2001
++From: "ZACHRY T WOODzachryiixixiiwood@gmail.com"
++ <109656750+zakwarlord7@users.noreply.github.com>
++Date: Mon, 19 Dec 2022 10:43:55 -0600
++Subject: [PATCH] Update CONTRIBUTING.md
++
++---
++ CONTRIBUTING.md | 103 +++++++++++++++++++++++++++++++++++++++++++++++-
++ 1 file changed, 102 insertions(+), 1 deletion(-)
++
++diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
++index 5a054100f..6603a67e9 100644
++--- a/CONTRIBUTING.md
+++++ b/CONTRIBUTING.md
++@@ -1,5 +1,106 @@
++ ## Contributing to The Art of Command Line
++-
+++From 542f610e9d88ead9d45c6122d79638d78a777f58 Mon Sep 17 00:00:00 2001
+++From: "ZACHRY T WOODzachryiixixiiwood@gmail.com"
+++ <109656750+zakwarlord7@users.noreply.github.com>
+++Date: Mon, 19 Dec 2022 10:33:50 -0600
+++Subject: [PATCH] Update creating-new-files.md
+++
+++---
+++ .../managing-files/creating-new-files.md      | 77 +++++++++++++++++--
+++ 1 file changed, 72 insertions(+), 5 deletions(-)
+++
+++diff --git a/content/repositories/working-with-files/managing-files/creating-new-files.md b/content/repositories/working-with-files/managing-files/creating-new-files.md
+++index 7c08d3008631..907307028ca8 100644
+++--- a/content/repositories/working-with-files/managing-files/creating-new-files.md
++++++ b/content/repositories/working-with-files/managing-files/creating-new-files.md
+++@@ -11,15 +11,82 @@ versions:
+++   ghae: '*'
+++   ghec: '*'
+++ topics:
+++-  - Repositories
+++----
+++-When creating a file on {% data variables.product.product_name %}, consider the following:
++++ - Repositories
++++  - When creating a file on {% data variables.product.product_name %}, consider the following:
++++  -    - #!/::'#:'##/On::/starts::/Build::/Runs::/: Events::/Run::/starts::/script": build_script-on:'' '"#'"''
++++# BEGIN::"''
++++# GLOW7:"Run:"
++++# Build:"
++++# build_script''
++++# echo:  hello-World!-bug-#138
++++# name": "my-electron-app",
++++ # versioning": "1.0.0",
++++ # description: "Hello World!",
++++const: "token"''
++++token: "((c)(r))"''
++++"[Volume].deno]": [12753750].00],
++++ITEM_ID: "BITORE_34173"''
++++"name": "🪁",
++++  "version": "0.0.0",
++++    branches:'  [' TrunkBase' ]
++++  pull_request:
++++    # The branches below must be a subset of the branches above
++++    branches: [ MainBranch]
++++jobs:
++++  analyze:
++++    name: Analyze
++++    runs-on: ubuntu-latest
++++    permissions:
++++      actions: read
++++      contents: read
++++      security-events: write
++++        language: [ 'javascript' ]
++++  package-on: python.js
++++ bundle-with:  rake.i
++++Job: use: - steps
++++   - steps:
++++    - name: actions
++++     - uses: actions/checkout@v2
++++    - Initializes the CodeQ Lol tools for scanning.
++++    - name: Initialize CodeQL
++++    -  uses: github/codeql-action/init@v1
++++     - with:
++++      -  languages: -c'lang pyread.org/co  # Automate: build languages  (C/C++, C#, or Java).
++++  -  run the build manually (see below)
++++    - name: Autobuild
++++      uses: github/codeql-action/autobuild@v2
++++    #  Command-line programs to runm
++++    #  If the Autobuild fails above, remove it and uncomment the following three lines
++++    #    and modify them (or add more) to build your code if your project
++++    #   make bootstrap
++++    #   make release
++++
++++    - name: Perform CodeQL Analysis
++++      uses: github/codeql-action/analyze@v1
++++version:1:on:
++++ownership:Zachry T WooD III:on:
++++name:docs-internal:on:
++++  long_name:GitHub Help Docs:on:
++++  kind:heroku:on:
++++  repo:https://github.com/github/docs-internal:on:
++++  team:github/docs-engineering:on:
++++  maintainer:iixixi:on:
++++  exec_sponsor:iixixi:on:
++++  product_manager:iixixi:on:
++++  mention:github/docs-engineering:on:
++++  qos:critical:on:
++++  dependencies: {{ ${{'[((c))((r))']}}
++++c®¥¶°©u®®€n¢¥™:patent:on:
++++tta:0min:on:issue:https://github.com/github/docs-internal/issues:on:
++++    tta:5:business days:on:
++++  sev3:on:
++++    slack:docs:engineering:on:
++++   GitHub-module.exports{.env= 12753750.00BITORE_34173
++++  block: {
+++ 
+++ - If you try to create a new file in a repository that you don’t have access to, we will fork the project to your personal account and help you send [a pull request](/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/about-pull-requests) to the original repository after you commit your change.
+++ - File names created via the web interface can only contain alphanumeric characters and hyphens (`-`). To use other characters, [create and commit the files locally, then push them to the repository on {% data variables.product.product_name %}](/articles/adding-a-file-to-a-repository-using-the-command-line).
+++-
+++ {% data reusables.repositories.sensitive-info-warning %}
+++-
+++ {% data reusables.repositories.navigate-to-repo %}
+++ 2. In your repository, browse to the folder where you want to create a file.
+++ {% data reusables.files.add-file %}
++ This guide is a [collaborative effort](AUTHORS.md), based on the generous work of many contributors.
++ From 59f5fcbd7035f2be3c6553699eb350ee3b4206b3 Mon Sep 17 00:00:00 2001
+From: "ZACHRY T WOODzachryiixixiiwood@gmail.com"
+ <109656750+zakwarlord7@users.noreply.github.com>
+Date: Mon, 19 Dec 2022 10:43:55 -0600
+Subject: [PATCH] Update CONTRIBUTING.md
+
+---
+ CONTRIBUTING.md | 103 +++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 102 insertions(+), 1 deletion(-)
+
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 5a054100f..6603a67e9 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -1,5 +1,106 @@
+ ## Contributing to The Art of Command Line
+-
++From 542f610e9d88ead9d45c6122d79638d78a777f58 Mon Sep 17 00:00:00 2001
++From: "ZACHRY T WOODzachryiixixiiwood@gmail.com"
++ <109656750+zakwarlord7@users.noreply.github.com>
++Date: Mon, 19 Dec 2022 10:33:50 -0600
++Subject: [PATCH] Update creating-new-files.md
++
++---
++ .../managing-files/creating-new-files.md      | 77 +++++++++++++++++--
++ 1 file changed, 72 insertions(+), 5 deletions(-)
++
++diff --git a/content/repositories/working-with-files/managing-files/creating-new-files.md b/content/repositories/working-with-files/managing-files/creating-new-files.md
++index 7c08d3008631..907307028ca8 100644
++--- a/content/repositories/working-with-files/managing-files/creating-new-files.md
+++++ b/content/repositories/working-with-files/managing-files/creating-new-files.md
++@@ -11,15 +11,82 @@ versions:
++   ghae: '*'
++   ghec: '*'
++ topics:
++-  - Repositories
++----
++-When creating a file on {% data variables.product.product_name %}, consider the following:
+++ - Repositories
+++  - When creating a file on {% data variables.product.product_name %}, consider the following:
+++  -    - #!/::'#:'##/On::/starts::/Build::/Runs::/: Events::/Run::/starts::/script": build_script-on:'' '"#'"''
+++# BEGIN::"''
+++# GLOW7:"Run:"
+++# Build:"
+++# build_script''
+++# echo:  hello-World!-bug-#138
+++# name": "my-electron-app",
+++ # versioning": "1.0.0",
+++ # description: "Hello World!",
+++const: "token"''
+++token: "((c)(r))"''
+++"[Volume].deno]": [12753750].00],
+++ITEM_ID: "BITORE_34173"''
+++"name": "🪁",
+++  "version": "0.0.0",
+++    branches:'  [' TrunkBase' ]
+++  pull_request:
+++    # The branches below must be a subset of the branches above
+++    branches: [ MainBranch]
+++jobs:
+++  analyze:
+++    name: Analyze
+++    runs-on: ubuntu-latest
+++    permissions:
+++      actions: read
+++      contents: read
+++      security-events: write
+++        language: [ 'javascript' ]
+++  package-on: python.js
+++ bundle-with:  rake.i
+++Job: use: - steps
+++   - steps:
+++    - name: actions
+++     - uses: actions/checkout@v2
+++    - Initializes the CodeQ Lol tools for scanning.
+++    - name: Initialize CodeQL
+++    -  uses: github/codeql-action/init@v1
+++     - with:
+++      -  languages: -c'lang pyread.org/co  # Automate: build languages  (C/C++, C#, or Java).
+++  -  run the build manually (see below)
+++    - name: Autobuild
+++      uses: github/codeql-action/autobuild@v2
+++    #  Command-line programs to runm
+++    #  If the Autobuild fails above, remove it and uncomment the following three lines
+++    #    and modify them (or add more) to build your code if your project
+++    #   make bootstrap
+++    #   make release
+++
+++    - name: Perform CodeQL Analysis
+++      uses: github/codeql-action/analyze@v1
+++version:1:on:
+++ownership:Zachry T WooD III:on:
+++name:docs-internal:on:
+++  long_name:GitHub Help Docs:on:
+++  kind:heroku:on:
+++  repo:https://github.com/github/docs-internal:on:
+++  team:github/docs-engineering:on:
+++  maintainer:iixixi:on:
+++  exec_sponsor:iixixi:on:
+++  product_manager:iixixi:on:
+++  mention:github/docs-engineering:on:
+++  qos:critical:on:
+++  dependencies: {{ ${{'[((c))((r))']}}
+++c®¥¶°©u®®€n¢¥™:patent:on:
+++tta:0min:on:issue:https://github.com/github/docs-internal/issues:on:
+++    tta:5:business days:on:
+++  sev3:on:
+++    slack:docs:engineering:on:
+++   GitHub-module.exports{.env= 12753750.00BITORE_34173
+++  block: {
++ 
++ - If you try to create a new file in a repository that you don’t have access to, we will fork the project to your personal account and help you send [a pull request](/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/about-pull-requests) to the original repository after you commit your change.
++ - File names created via the web interface can only contain alphanumeric characters and hyphens (`-`). To use other characters, [create and commit the files locally, then push them to the repository on {% data variables.product.product_name %}](/articles/adding-a-file-to-a-repository-using-the-command-line).
++-
++ {% data reusables.repositories.sensitive-info-warning %}
++-
++ {% data reusables.repositories.navigate-to-repo %}
++ 2. In your repository, browse to the folder where you want to create a file.
++ {% data reusables.files.add-file %}
+ This guide is a [collaborative effort](AUTHORS.md), based on the generous work of many contributors.
+ From 1d6dbb3719b48ed54e3bb61d858c4b80324a15f0 Mon Sep 17 00:00:00 2001
+From: "ZACHRY T WOODzachryiixixiiwood@gmail.com"
+ <109656750+zakwarlord7@users.noreply.github.com>
+Date: Tue, 20 Dec 2022 01:39:13 -0600
+Subject: [PATCH] Create bitore.sig
+
+---
+ bitore.sig | 99 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 99 insertions(+)
+ create mode 100644 bitore.sig
+
+diff --git a/bitore.sig b/bitore.sig
+new file mode 100644
+index 000000000000..a7ea41b779af
+--- /dev/null
++++ b/bitore.sig
+@@ -0,0 +1,99 @@
++This Product Contains Sensitive Taxpayer Data  
++ Request Date: 08-02-2022  Response Date: 08-02-2022  Tracking Number: 102398244811
++ Account Transcript  
++ FORM NUMBER: 1040 TAX PERIOD: Dec. 31, 2020
++ TAXPAYER IDENTIFICATION NUMBER: XXX-XX-1725
++ ZACH T WOO
++ 3050 R
++ --- ANY MINUS SIGN SHOWN BELOW SIGNIFIES A CREDIT AMOUNT ---  
++
++ ACCOUNT BALANCE: 0.00
++ ACCRUED INTEREST: 0.00 AS OF: Mar. 28, 2022  ACCRUED PENALTY: 0.00 AS OF: Mar. 28, 2022
++ ACCOUNT BALANCE
++ PLUS ACCRUALS
++ (this is not a
++ payoff amount): 0.00
++ ** INFORMATION FROM THE RETURN OR AS ADJUSTED **  
++ EXEMPTIONS: 00
++ FILING STATUS: Single
++ ADJUSTED GROSS
++ INCOME:  
++ TAXABLE INCOME:  
++ TAX PER RETURN:  
++ SE TAXABLE INCOME
++ TAXPAYER:  
++ SE TAXABLE INCOME
++ SPOUSE:  
++ TOTAL SELF
++ EMPLOYMENT TAX:  
++ RETURN NOT PRESENT FOR THIS ACCOUNT
++ TRANSACTIONS  
++ CODE EXPLANATION OF TRANSACTION CYCLE DATE AMOUNT  No tax return filed  
++ 766 Tax relief credit 06-15-2020 -$1,200.00  846 Refund issued 06-05-2020 $1,200.00
++ 290 Additional tax assessed 20202205 06-15-2020 $0.00  76254-999-05099-0
++ 971 Notice issued 06-15-2020 $0.00  766 Tax relief credit 01-18-2021 -$600.00  846 Refund issued 01-06-2021 $600.00
++ 290 Additional tax assessed 20205302 01-18-2021 $0.00  76254-999-05055-0
++ 663 Estimated tax payment 01-05-2021 -$9,000,000.00  662 Removed estimated tax payment 01-05-2021 $9,000,000.00  740 Undelivered refund returned to IRS 01-18-2021 -$600.00
++ 767 Reduced or removed tax relief 01-18-2021 $600.00  credit
++ 971 Notice issued 03-28-2022 $0.00
++ This Product Contains Sensitive Taxpayer Data
++Department of the Treasury --- Internal Revenue Service (99) OMB No.  1545-0074 IRS Use Only --- Do not write or staple in this space
++U.S. Individual Income Tax Return 1 Earnings Statement
++        Period Beginning:2019-09-28
++DR Period Ending: 2021-09-29
++Pay Day: 2022-01-31
++Married ZACHRY T.
++5323
++DALLAS
++TX :NO State Income Tax :
++rate units year to date Other Benefits and
++112.2 674678000 75698871600 Information
++        Pto Balance
++        Total Work Hrs
++75698871600         Important Notes
++COMPANY PH Y: 650-253-0000
++BASIS OF PAY: BASIC/DILUTED EPS
++
++
++YOUR BASIC/DILUTED EPS RATE HAS BEEN CHANGED FROM 0.001 TO 112.20 PAR SHARE VALUE
++
++
++70842743866 70842743866
++
++70842743866        
++
++CHECK NO.
++
++
++Zachry T.  Wood S.R.
++Checks and Other Deductions Amount
++Description I Items 5.41
++Debit Card Purchases 1 15.19
++POS Purchases 2 2,269,894.11
++ACH Deductions 5 82
++Service Charges and Fees 3 5.2
++Other Deductions 1 2,270,001.91
++Total 12
++
++
++
++
++Ledger balance Date Ledger balance Date Ledger balance
++107.8 8/3 2,267,621.92- 8/8 41.2
++78.08 8/4 42.08 8/10 2150.19- SEC-commissions. fee's 2,267,700.00 ACH Web Usataxpymt IRS 240461564036618 00022214903782823 Corporate ACH Acctverify Roll By ADP 00022217906234115 ACH Web Businessform Deluxeforbusiness 5072270 00022222905832355 Corporate Ach Veryifyqbw Intuit 00022222909296656 Corporate Ach Veryifyqbw Intuit 00022223912710109 Reference number 10 Service Charge Period Ending 07/29.2022 36 Returned ItemFee (nsf) 00022214903782823 36 Returned ItemFee (nsf) 00022222905832355  Q4 2021 Q3 2021 Q2 2021 Q1 2021 Q4 2020 Q3 2020 Q2 2020 GROSS :1.46698E+11 42337000000 37497000000 35653000000 31211000000 30818000000 25056000000 19744000000 NET 2.57637E+11 75325000000 65118000000 61880000000 55314000000 56898000000 46173000000 38297000000 YTD 2.57637E+11 75325000000 65118000000 61880000000 55314000000 56898000000 46173000000 38297000000 Fed 941 West Subsidiary 2021-09-29 24934000000 25539000000 37497000000 31211000000 30818000000 24934000000 25539000000 21890000000 19289000000 22677000000 24934000000 25539000000 21890000000 19289000000 22677000000 Q4 2020 Q4  2019 Dec. 31, 2020 Dec. 31, 2019 182527 161857 84732 71896 27573 26018 17946 18464  11052 9551 0 1697 141303 127626 41224 34231 6858000000 5394 22677000000 19289000000 22677000000 19289000000 22677000000 19289000000 IRS RECIEVED 37 26-Apr LB Charlotte, NC
++
++
++
++
++
++
++
++
++
++
++
++
++
++Because of that, your profile is hidden from the public. If you believe this is a mistake, contact support to have your account status reviewed.
+zakwarlord7
+/
+GitHub-doc
+Public
+forked from github/docs
+Code
+Pull requests
+Actions
+Projects
+Security
+1
+Insights
+Settings
+README.md (#77)
+ 071921891-31000053-47-20411-6547 (#111, #112, #113) Master-1 (github/docs#20918) master-1 test trunk-2
+@zakwarlord7
+zakwarlord7 committed on Sep 2 
+1 parent 50df706 commit bcee78ac1e3f33d23c961a04f8c219312122a25f
+Showing 1 changed file with 14 additions and 2 deletions.
+  16  
+.devcontainer/devcontainer.json → git pull origin main
+@@ -1,4 +1,16 @@
+POST :// :Author :ZACHRY :T :WOOD :<zachryiixixiiwood@gmail.com> :        POST :// :Author :ZACHRY :T :WOOD :<zachryiixixiiwood@gmail.com> :
+Address :5222 BRADFORD DR :
+PHONE :main :+1 (469) 697-4300 :
+SSN :633-44-1725 :
+DOB ;:10-15-1994 :
+TIME ZONE :CSMT :
+CONTRY :U.S.A. :
+notifications :
+document :
+e-mail :zachryiixixiiwood'@gmail'.com :
+e-mail :josephabanksfedralreserve'@gmail'.com :
+e-mail :nasdaqgoogcoo'@gmail'.com :
+e-mail :josephabanksfederalreserve'@gmail'.com
+For :format :details, :see :https://aka.ms/devcontainer.json. For config options, see the README at:        For :format :details, :see :https://aka.ms/devcontainer.json. For config options, see the README at:
+// https://github.com/microsoft/vscode-dev-containers/tree/v0.177.0/containers/javascript-node        // https://github.com/microsoft/vscode-dev-containers/tree/v0.177.0/containers/javascript-node
+// -        // -
+{        {
+        "name": "docs.github.com",                "name": "docs.github.com",
+        "build": {                "build": {
+                "dockerfile": "Dockerfile",                        "dockerfile": "Dockerfile",
+                // Update 'VARIANT' to pick a Node version: 12, 14, 16                        // Update 'VARIANT' to pick a Node version: 12, 14, 16
+                "args": { "VARIANT": "16" }                        "args": { "VARIANT": "16" }
+        },                },
+        // Set *default* container specific settings.json values on container create.                // Set *default* container specific settings.json values on container create.
+        "settings": {                "settings": {
+                "terminal.integrated.shell.linux": "/bin/bash",                        "terminal.integrated.shell.linux": "/bin/bash",
+                "cSpell.language": ",en"                        "cSpell.language": ",en/es"
+        },                },
+
+
+        // Install features. Type 'feature' in the VS Code command palette for a full list.                // Install features. Type 'feature' in the VS Code command palette for a full list.
+        "features": {                "features": {
+                "git-lfs": "latest",                        "git-lfs": "latest",
+                "sshd": "latest"                        "sshd": "latest"
+         },                 }":,
+
+
+        // Visual Studio Code extensions which help authoring for docs.github.com.                // Visual Studio Code extensions which help authoring for docs.github.com.
+        "extensions": [                "extensions": [
+                "dbaeumer.vscode-eslint",                        "dbaeumer.vscode-eslint",
+                "sissel.shopify-liquid",                        "sissel.shopify-liquid",
+                "davidanson.vscode-markdownlint",                        "davidanson.vscode-markdownlint",
+                "bierner.markdown-preview-github-styles",                        "bierner.markdown-preview-github-styles",
+                "streetsidesoftware.code-spell-checker",                        "streetsidesoftware.code-spell-checker",
+                "alistairchristie.open-reusables"                        "alistairchristie.open-reusables"
+        ],                ],
+        // Use 'forwardPorts' to make a list of ports inside the container available locally.                // Use 'forwardPorts' to make a list of ports inside the container available locally.
+        '"Port :":,' :(4999;: 8333)":,'                '"Port :":,' :(4999;: 8333)":,'
+        // Use 'postCreateCommand' to run commands after the container is created.                // Use 'postCreateCommand' to run commands after the container is created.
+        "postCreateCommand": "git lfs pull && npm ci",                "postCreateCommand": "git lfs pull && npm ci",
+        // Comment out connect as root instead. More info: https://aka.ms/vscode-remote/containers/non-root.                // Comment out connect as root instead. More info: https://aka.ms/vscode-remote/containers/non-root.
+        "remoteUser": "node"                "remoteUser": "node"
+,        ,
+        "hostRequirements": {                "hostRequirements": {
+                "memory": "8gb"                        "memory": "8gb"
+         }                 }
+}        }
+1 comment on commit bcee78a
+@zakwarlord7
+Owner
+Author
+zakwarlord7 commented on bcee78a now
+From 1d6dbb3 Mon Sep 17 00:00:00 2001
+From: "ZACHRY T WOODzachryiixixiiwood@gmail.com"
+109656750+zakwarlord7@users.noreply.github.com
+Date: Tue, 20 Dec 2022 01:39:13 -0600
+Subject: [PATCH] Create bitore.sig
+
+bitore.sig | 99 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+1 file changed, 99 insertions(+)
+create mode 100644 bitore.sig
+
+diff --git a/bitore.sig b/bitore.sig
+new file mode 100644
+index 000000000000..a7ea41b779af
+--- /dev/null
++++ b/bitore.sig
+@@ -0,0 +1,99 @@
++This Product Contains Sensitive Taxpayer Data
+
+Request Date: 08-02-2022 Response Date: 08-02-2022 Tracking Number: 102398244811
+Account Transcript
+FORM NUMBER: 1040 TAX PERIOD: Dec. 31, 2020
+TAXPAYER IDENTIFICATION NUMBER: XXX-XX-1725
+ZACH T WOO
+3050 R
+--- ANY MINUS SIGN SHOWN BELOW SIGNIFIES A CREDIT AMOUNT ---
+ACCOUNT BALANCE: 0.00
+ACCRUED INTEREST: 0.00 AS OF: Mar. 28, 2022 ACCRUED PENALTY: 0.00 AS OF: Mar. 28, 2022
+ACCOUNT BALANCE
+PLUS ACCRUALS
+(this is not a
+payoff amount): 0.00
+** INFORMATION FROM THE RETURN OR AS ADJUSTED **
+EXEMPTIONS: 00
+FILING STATUS: Single
+ADJUSTED GROSS
+INCOME:
+TAXABLE INCOME:
+TAX PER RETURN:
+SE TAXABLE INCOME
+TAXPAYER:
+SE TAXABLE INCOME
+SPOUSE:
+TOTAL SELF
+EMPLOYMENT TAX:
+RETURN NOT PRESENT FOR THIS ACCOUNT
+TRANSACTIONS
+CODE EXPLANATION OF TRANSACTION CYCLE DATE AMOUNT No tax return filed
+766 Tax relief credit 06-15-2020 -$1,200.00 846 Refund issued 06-05-2020 $1,200.00
+290 Additional tax assessed 20202205 06-15-2020 $0.00 76254-999-05099-0
+971 Notice issued 06-15-2020 $0.00 766 Tax relief credit 01-18-2021 -$600.00 846 Refund issued 01-06-2021 $600.00
+290 Additional tax assessed 20205302 01-18-2021 $0.00 76254-999-05055-0
+663 Estimated tax payment 01-05-2021 -$9,000,000.00 662 Removed estimated tax payment 01-05-2021 $9,000,000.00 740 Undelivered refund returned to IRS 01-18-2021 -$600.00
+767 Reduced or removed tax relief 01-18-2021 $600.00 credit
+971 Notice issued 03-28-2022 $0.00
+This Product Contains Sensitive Taxpayer Data
++Department of the Treasury --- Internal Revenue Service (99) OMB No. 1545-0074 IRS Use Only --- Do not write or staple in this space
++U.S. Individual Income Tax Return 1 Earnings Statement
+   Period Beginning:2019-09-28
++DR Period Ending: 2021-09-29
++Pay Day: 2022-01-31
++Married ZACHRY T.
++5323
++DALLAS
++TX :NO State Income Tax :
++rate units year to date Other Benefits and
++112.2 674678000 75698871600 Information
+
+   Pto Balance
+   Total Work Hrs
++75698871600 Important Notes
++COMPANY PH Y: 650-253-0000
++BASIS OF PAY: BASIC/DILUTED EPS
++
++
++YOUR BASIC/DILUTED EPS RATE HAS BEEN CHANGED FROM 0.001 TO 112.20 PAR SHARE VALUE
++
++
++70842743866 70842743866
++
++70842743866
++
++CHECK NO.
++
++
++Zachry T. Wood S.R.
++Checks and Other Deductions Amount
++Description I Items 5.41
++Debit Card Purchases 1 15.19
++POS Purchases 2 2,269,894.11
++ACH Deductions 5 82
++Service Charges and Fees 3 5.2
++Other Deductions 1 2,270,001.91
++Total 12
++
++
++
++
++Ledger balance Date Ledger balance Date Ledger balance
++107.8 8/3 2,267,621.92- 8/8 41.2
++78.08 8/4 42.08 8/10 2150.19- SEC-commissions. fee's 2,267,700.00 ACH Web Usataxpymt IRS 240461564036618 00022214903782823 Corporate ACH Acctverify Roll By ADP 00022217906234115 ACH Web Businessform Deluxeforbusiness 5072270 00022222905832355 Corporate Ach Veryifyqbw Intuit 00022222909296656 Corporate Ach Veryifyqbw Intuit 00022223912710109 Reference number 10 Service Charge Period Ending 07/29.2022 36 Returned ItemFee (nsf) 00022214903782823 36 Returned ItemFee (nsf) 00022222905832355 Q4 2021 Q3 2021 Q2 2021 Q1 2021 Q4 2020 Q3 2020 Q2 2020 GROSS :1.46698E+11 42337000000 37497000000 35653000000 31211000000 30818000000 25056000000 19744000000 NET 2.57637E+11 75325000000 65118000000 61880000000 55314000000 56898000000 46173000000 38297000000 YTD 2.57637E+11 75325000000 65118000000 61880000000 55314000000 56898000000 46173000000 38297000000 Fed 941 West Subsidiary 2021-09-29 24934000000 25539000000 37497000000 31211000000 30818000000 24934000000 25539000000 21890000000 19289000000 22677000000 24934000000 25539000000 21890000000 19289000000 22677000000 Q4 2020 Q4 2019 Dec. 31, 2020 Dec. 31, 2019 182527 161857 84732 71896 27573 26018 17946 18464 11052 9551 0 1697 141303 127626 41224 34231 6858000000 5394 22677000000 19289000000 22677000000 19289000000 22677000000 19289000000 IRS RECIEVED 37 26-Apr LB Charlotte, NC
++
++
+++
++ ## Questions+ ## Questions
 Department of the Treasury															
 Internal Revenue Service															
 Q4 2020 Q4  2019															
