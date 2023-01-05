@@ -74,8 +74,12 @@ Kubernetes: `>=1.23.0-0`
 | storage.requests | string | `"128Mi"` | Volume size to request for the PVC |
 | storage.storageClassName | string | `""` | Global StorageClass for Persistent Volume(s) |
 | tls.cert | string | `""` | TLS certificate |
+| tls.createCerts | bool | `false` | use cert-manager to automatically create the certificate |
+| tls.duration | string | `"87600h0m0s"` | duration or ttl of the validity of the created certificate |
 | tls.enabled | bool | `false` | enable TLS |
 | tls.existing_secret | string | `""` | use TLS certificates from existing secret |
+| tls.issuer.kind | string | `"ClusterIssuer"` | cert-manager issuer kind. Usually Issuer or ClusterIssuer |
+| tls.issuer.name | string | `"selfsigned"` | name of the referenced issuer |
 | tls.key | string | `""` | TLS private key |
 | tolerations | list | `[]` | Tolerations for pod assignment |
 
