@@ -1,6 +1,17 @@
-BEGIN
-GLOW4
-#!.User.bin.BAsh// ENV :
+BEGIN:
+GLOW4:
+#!/Users/bin/Bash/ :ENV :RUNS AUTOMATES AUTOMATE ALL 
+ON
+BEGIN 
+RUN 
+RUNS 
+RUN 
+RUN 
+RUNS 
+RUN
+RUN-ON 
+RUN 
+zRUNS :'Run''
 Department of the Treasury															
 Internal Revenue Service															
 Q4 2020 Q4  2019															
@@ -31,7 +42,6 @@ Based on facts as set forth in. Based on facts as set forth in. 6551 6550
 IRS RECIEVED 															
 Returned for Signature															
 Date.                                                               2022-09-01															
-															
 Reported Normalized and Operating Income/Expense Supplemental Section															
 Total Revenue as Reported, Supplemental 257637000000 75325000000 65118000000 61880000000 55314000000 56898000000 46173000000 38297000000 41159000000 46075000000 40499000000															
 Total Operating Profit/Loss as Reported, Supplemental 78714000000 21885000000 21031000000 19361000000 16437000000 15651000000 11213000000 6383000000 7977000000 9266000000 9177000000															
@@ -275,7 +285,7 @@ post '/payload' do
 # -pattern = "test/test*.rb" if @pattern.nil? && @test_files.nil?
 # -define: name=:ci
 dependencies(list):
-# -runs-on:' '[Masterbranch']
+# -runs-on:' '[trunk']
 #jobs:
 # -build:
 # -runs-on: ubuntu-latest
@@ -286,7 +296,7 @@ dependencies(list):
 #    - name: Run a multi-line script
 #      run=:name: echo: hello.World!
 #        echo test, and deploy your project'@'#'!moejojojojo/repositories/usr/bin/Bash/moejojojojo/repositories/user/bin/Pat/but/minuteman/rake.i/rust.u/pom.XML/Rakefil.IU/package.json/pkg.yml/package.yam/pkg.js/Runestone.xslmnvs line 86
-# def initialize(name=:test)
+'# def initialize('require':'' 'test')'':
 # name = ci
 # libs = Bash
 # pattern = list
