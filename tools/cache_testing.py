@@ -88,11 +88,11 @@ if __name__ == '__main__':
     misses = 0
     hits = 0
 
-    distribution_values_generator = rand_zipf_generator(args.number, args.alpha, args.count, args.pipeline)
+    distribution_keys_generator = rand_zipf_generator(args.number, args.alpha, args.count, args.pipeline)
 
     if args.pipeline == 0:
-        for idx, val in enumerate(distribution_values_generator):
-            result = r.set(str(val), 'x' * args.length, nx=True)
+        for idx, key in enumerate(distribution_keys_generator):
+            result = r.set(str(key), 'x' * args.length, nx=True)
             if result:
                 misses += 1
             else:
@@ -101,11 +101,11 @@ if __name__ == '__main__':
                 update_stats(r, hits, misses, idx, args.count)
     else:
         total_count = 0
-        for idx, values in enumerate(distribution_values_generator):
-            total_count += len(values)
-            p = r.pipeline()
-            for val in values:
-                p.set(str(val), 'x' * args.length, nx=True)
+        for idx, keys in enumerate(distribution_keys_generator):
+            total_count += len(keys)
+            p = r.pipeline(transaction=False)
+            for key in keys:
+                p.set(str(key), 'x' * args.length, nx=True)
             responses = p.execute()
             for resp in responses:
                 if resp:
