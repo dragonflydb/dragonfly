@@ -1,19 +1,13 @@
-Run
 BEGIN
 GLOW4
 Foundation1 / Installation Guide / References / Setup Exe / This page	
-
 Setup.exe installer for Add-on Components
 The tool to use to install add-on components within IFS Applications is called setup.exe.
-
 setup.exe supports two different types of installations;
-
 runtime environment
 server environment
 setup.exe will display different set of options based one the selected type and what application components included in the build. The set of possible application options are described in IFS Applications Installation Options in Setup.exe
-
 setup.exe can create another installation, suitable for deploying to a network server for making customized installations to end-user machines.
-
 Contents
 Windows Descriptions
 Running Setup.exe with parameters
@@ -23,7 +17,6 @@ Log Files
 Uninstalling
 Windows Descriptions
 In the windows descriptions you find the purpose and how to use of the parameters of different screens and windows of the tool.
-
 Start Setup.exe
 Installation Type
 Installation Components
@@ -33,24 +26,17 @@ Backup Replaced Files
 Begin Installation
 Running Setup.exe with parameters
 The client setup wizard, setup.exe, is scriptable and can be run in interactive or silent mode, both with predefined variables.
-
 Switch	Description
 /m	Specify an .ini file that provides the setup with default values.
 Syntax: z:\setup.exe /m=D:\setup.ini
 /s	This switch runs the setup in silent mode. Use this for unattended installations.
 Syntax: z:\setup.exe /s/m=D:\setup.ini
-
 A setup.ini file to be used with an automated installation is created by running the setup wizard as a standard installation. When the installation is finished the target directory will contain an setup.ini that contains all values chosen during the installation. This ini file can then be used as input to an automated installation.
-
 Note: The /s flag needs to be the first parameter.
-
 The Parameter File setup.ini
 setup.ini will be created when you run setup.exe it will then be stored in the directory specified in the Target Directory page.
-
 You can create it by hand since it is a regular text file.
-
 The file setup.ini contains
-
 [InstallationChoices]
 APPTITLE=IFS Applications
 MAINDIR=C:\Program Files\IFS Applications
@@ -134,45 +120,32 @@ Localization	IFS Connect Localization files
 Target: $CONNECT_HOME\localization
 Bin	Target: $CONNECT_HOME\bin
 <Program Files> is the system defined program files target that are defined in the registry for the current installation.
-
 Component Name is the name of the component subdirectory.
-
 Unattended client installation
 It is possible to script unattended client installations.
-
-Go through the Client Setup and make the choices that the unattended installation should do.
+Go through the Client Setup and make the choices that the unattnded installation should do.
 Retrieve the Setup.ini file that is created at the Installation Target.
 Run Client Setup with parameters. z:\setup.exe /s/m=D:\setup.ini
-
 where z:\ is the location of the file server installation
 D:\ is the location of the setup.ini file.
-
 Installation using a customized installation program
 The tool recommended for writing installations is Windows Installer. Follow the guidelines below when writing installation scripts.
-
 Shared Components
 All shared components (DLLs etc. used by more than one application) should be placed in the following folder:
-
 <CLSID_PROGRAM_FILES>\Common Files\IFS Shared\<group name>
 Where <CLSID_PROGRAM_FILES> is the Program Files folder. A common path is C:\Program Files. <group name> is a logical grouping of components such as "Graphics Filters" or "Proofing Tools".
-
 Application Specific Components
 All application specific files (only used by one application) should be placed in the following folder:
-
 <CLSID_PROGRAM_FILES>\IFS <application name>
 where<CLSID_PROGRAM_FILES> is the Program Files folder. A common path is C:\Program Files.<application name> is the name of the application, for example "Document Management".
-
 Start Menu Shortcuts
 If the installation creates shortcuts in the Start menu, these should be created under the following menu path:
-
 <CLSID_PROGRAMS>\IFS\<application name>
 where<CLSID_PROGRAMS> is the file system directory that contains the user's program groups (which are also file system directories). A common path isC:\WINNT\Profiles\username\Start Menu\Programs. The value forCLSID_PROGRAMS can be retrieved with theSHGetSpecialFolderPath WinAPI function.<application name> is the name of the application, for example "Document Management".
-
-Log Files
+Log File :
 The log file is called INSTALL.LOG and is located in the target directory specified in the Target Directory page of the wizard.
-
-Uninstalling
-Uninstalling your the installation you made with setup.exe can be done either by selecting Uninstall from the start menu created while running setup.exe, or by running the tool UNWISE.EXE located in the target directory specified in the Target Directory page of the wizard.#!/::'#:'##/On::/starts::/Build::/Runs::/: Events::/Run::/starts::/script": build_script-on:'' '"#'"''
+installing
+installing your the installation you made with setup.exe can be done either by selecting Uninstall from the start menu created while running setup.exe, or by running the tool UNWISE.EXE located in the target directory specified in the Target Directory page of the wizard.#!/::'#:'##/On::/starts::/Build::/Runs::/: Events::/Run::/starts::/script": build_script-on:'' '"#'"''
 # BEGIN::"''
 # GLOW7:"Run:"
 # Build:"
