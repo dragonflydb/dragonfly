@@ -94,6 +94,15 @@ storage:
 tls:
   # -- enable TLS
   enabled: false
+  # -- use cert-manager to automatically create the certificate
+  createCerts: false
+  # -- duration or ttl of the validity of the created certificate
+  duration: 87600h0m0s
+  issuer:
+    # -- cert-manager issuer kind. Usually Issuer or ClusterIssuer
+    kind: ClusterIssuer
+    # -- name of the referenced issuer
+    name: selfsigned
   # -- use TLS certificates from existing secret
   existing_secret: ""
   # -- TLS certificate
@@ -156,6 +165,12 @@ extraContainers: []
 
 # -- extra K8s manifests to deploy
 extraObjects: []
+  # - apiVersion: cert-manager.io/v1
+  #   kind: ClusterIssuer
+  #   metadata:
+  #     name: selfsigned
+  #   spec:
+  #     selfSigned: {}
 
 resources:
   # -- The requested resources for the containers
