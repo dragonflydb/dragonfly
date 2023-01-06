@@ -275,11 +275,11 @@ class DataCapture:
         diff = difflib.ndiff(self.entries, other.entries)
         for line in diff:
             if line.startswith(' '):
-                if printed >= 20:
-                    eprint("... omitted ...")
-                    break
                 continue
             eprint(line)
+            if printed >= 20:
+                eprint("... omitted ...")
+                break
             printed += 1
         eprint("=== END DIFF ===")
 
