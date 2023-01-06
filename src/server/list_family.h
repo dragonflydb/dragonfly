@@ -36,33 +36,13 @@ class ListFamily {
   static void LRange(CmdArgList args, ConnectionContext* cntx);
   static void LRem(CmdArgList args, ConnectionContext* cntx);
   static void LSet(CmdArgList args, ConnectionContext* cntx);
-  static void RPopLPush(CmdArgList args, ConnectionContext* cntx);
   static void LMove(CmdArgList args, ConnectionContext* cntx);
 
   static void PopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cntx);
   static void PushGeneric(ListDir dir, bool skip_notexist, CmdArgList args,
                           ConnectionContext* cntx);
-  static void MoveGeneric(ConnectionContext* cntx, std::string_view src, std::string_view dest,
-                          ListDir src_dir, ListDir dest_dir);
 
   static void BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cntx);
-
-  static OpResult<uint32_t> OpLen(const OpArgs& op_args, std::string_view key);
-  static OpResult<std::string> OpIndex(const OpArgs& op_args, std::string_view key, long index);
-  static OpResult<std::vector<uint32_t>> OpPos(const OpArgs& op_args, std::string_view key,
-                                               std::string_view element, int rank = 0, int count = -1,
-                                               int max_len = 0);
-  static OpResult<int> OpInsert(const OpArgs& op_args, std::string_view key, std::string_view pivot,
-                                std::string_view elem, int insert_param);
-
-  static OpResult<uint32_t> OpRem(const OpArgs& op_args, std::string_view key,
-                                  std::string_view elem, long count);
-  static facade::OpStatus OpSet(const OpArgs& op_args, std::string_view key, std::string_view elem,
-                                long count);
-  static facade::OpStatus OpTrim(const OpArgs& op_args, std::string_view key, long start, long end);
-
-  static OpResult<StringVec> OpRange(const OpArgs& op_args, std::string_view key, long start,
-                                     long end);
 };
 
 }  // namespace dfly
