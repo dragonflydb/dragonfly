@@ -16,6 +16,7 @@ class DflyParams:
     path: str
     cwd: str
     gdb: bool
+    args: list
     env: any
 
 
@@ -56,7 +57,7 @@ class DflyInstance:
             proc.kill()
 
     def _start(self):
-        arglist = DflyInstance.format_args(self.args)
+        arglist = DflyInstance.format_args(self.args) + [f"--{v}" for v in self.params.args]
         print(f"Starting instance on {self.port} with arguments {arglist}")
 
         args = [self.params.path, *arglist]

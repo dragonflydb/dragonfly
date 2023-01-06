@@ -310,9 +310,15 @@ class DflySeeder:
             for i, queue in enumerate(queues)
         ]
 
-        await producer
+        time_start = time.time()
+
+        cmdcount = await producer
         for consumer in consumers:
             await consumer
+
+        took = time.time() - time_start
+        qps = round(cmdcount * self.dbcount / took, 2)
+        print(f"Filling took: {took}, QPS: {qps}")
 
     def stop(self):
         """Stop all invocations to run"""
@@ -371,17 +377,19 @@ class DflySeeder:
             await asyncio.gather(*(q.put(blob) for q in queues))
             submitted += 1
 
+            print('.', end='', flush=True)
             await asyncio.sleep(0.0)
 
-        print("cpu time", cpu_time, "batches", submitted)
+        print("\ncpu time", cpu_time, "batches", submitted)
 
         await asyncio.gather(*(q.put(None) for q in queues))
         for q in queues:
             await q.join()
 
+        return submitted * self.gen.batch_size
+
     async def _consumer_task(self, db, queue):
         client = aioredis.Redis(port=self.port, db=db)
-        pipe_time = 0
         while True:
             cmds = await queue.get()
             if cmds is None:
@@ -392,12 +400,8 @@ class DflySeeder:
             for cmd in cmds:
                 pipe.execute_command(cmd)
 
-            s = time.time()
             await pipe.execute()
-            pipe_time += (time.time() - s)
             queue.task_done()
-
-        print("pipe time", str(pipe_time))
 
     CAPTURE_COMMANDS = {
         ValueType.STRING: lambda pipe, k: pipe.get(k),

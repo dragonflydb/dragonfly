@@ -30,7 +30,6 @@ replication_cases = [
     (4, [1] * 10, dict(keys=500, dbcount=2)),
 ]
 
-@dfly_args({"logtostdout":""})
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replicas, seeder_config", replication_cases)
 async def test_replication_all(df_local_factory, t_master, t_replicas, seeder_config):

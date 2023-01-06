@@ -44,6 +44,9 @@ def pytest_addoption(parser):
     parser.addoption(
         '--gdb', action='store_true', default=False, help='Run instances in gdb'
     )
+    parser.addoption(
+        '--df', action='append', default=[], help='Add arguments to dragonfly'
+    )
 
 
 @pytest.fixture(scope="session", params=[{}])
@@ -61,6 +64,7 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
         path=path,
         cwd=tmp_dir,
         gdb=request.config.getoption("--gdb"),
+        args=request.config.getoption("--df"),
         env=test_env
     )
 
