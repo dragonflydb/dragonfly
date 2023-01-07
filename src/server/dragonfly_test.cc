@@ -349,6 +349,12 @@ TEST_F(DflyEngineTest, Eval) {
   resp = Run({"eval", "return redis.call('exists', KEYS[2])", "2", "a", "b"});
   EXPECT_EQ(2, GetDebugInfo().shards_count);
   EXPECT_THAT(resp, IntArg(0));
+
+  resp = Run({"eval", "return redis.call('hmset', KEYS[1], 'f1', '2222')", "1", "hmap"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"hvals", "hmap"});
+  EXPECT_EQ(resp, "2222");
 }
 
 TEST_F(DflyEngineTest, EvalResp) {
