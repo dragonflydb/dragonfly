@@ -161,7 +161,7 @@ class Transaction {
   // or b) tp is reached. If tp is time_point::max() then waits indefinitely.
   // Expects that the transaction had been scheduled before, and uses Execute(.., true) to register.
   // Returns false if timeout occurred, true if was notified by one of the keys.
-  bool WaitOnWatch(const time_point& tp);
+  bool WaitOnWatch(const time_point& tp, RunnableType cb);
 
   // Returns true if transaction is awaked, false if it's timed-out and can be removed from the
   // blocking queue. NotifySuspended may be called from (multiple) shard threads and
@@ -190,6 +190,9 @@ class Transaction {
   DbIndex db_index() const {
     return db_index_;
   }
+
+  // Adds itself to watched queue in the shard. Must run in that shard thread.
+  OpStatus WatchInShard(ArgSlice keys, EngineShard* shard);
 
  private:
   struct LockCnt {
@@ -222,9 +225,6 @@ class Transaction {
 
   // Returns true if we need to follow up with PollExecution on this shard.
   bool CancelShardCb(EngineShard* shard);
-
-  // Shard callbacks used within Execute calls
-  OpStatus AddToWatchedShardCb(EngineShard* shard);
 
   void ExpireShardCb(EngineShard* shard);
   void UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard);

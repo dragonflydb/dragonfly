@@ -659,4 +659,45 @@ TEST_F(ListFamilyTest, TwoQueueBug451) {
     f.Join();
 }
 
+TEST_F(ListFamilyTest, BRPopLPushSingleShard) {
+  EXPECT_THAT(Run({"brpoplpush", "x", "y", "0.05"}), ArgType(RespExpr::NIL));
+
+  EXPECT_THAT(Run({"lpush", "x", "val1"}), IntArg(1));
+  EXPECT_EQ(Run({"brpoplpush", "x", "y", "0.01"}), "val1");
+  ASSERT_EQ(1, GetDebugInfo().shards_count);
+
+  EXPECT_THAT(Run({
+                  "exists",
+                  "x",
+              }),
+              IntArg(0));
+  Run({"set", "x", "str"});
+  EXPECT_THAT(Run({"brpoplpush", "y", "x", "0.01"}), ErrArg("wrong kind of value"));
+
+  Run({"del", "x", "y"});
+  Run({"multi"});
+  Run({"brpoplpush", "y", "x", "0"});
+  RespExpr resp = Run({"exec"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+}
+
+TEST_F(ListFamilyTest, BRPopLPushSingleShardBlocking) {
+  RespExpr resp0, resp1;
+
+  // Run the fiber at creation.
+  auto fb0 = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
+    resp0 = Run({"brpoplpush", "x", "y", "0"});
+  });
+  fibers_ext::SleepFor(30us);
+  pp_->at(1)->Await([&] { Run("B1", {"lpush", "y", "2"}); });
+
+  pp_->at(1)->Await([&] { Run("B1", {"lpush", "x", "1"}); });
+  fb0.Join();
+  ASSERT_EQ(resp0, "1");
+}
+
+TEST_F(ListFamilyTest, BRPopLPushTwoShards) {
+  EXPECT_THAT(Run({"brpoplpush", "x", "z", "0.05"}), ArgType(RespExpr::NIL));
+}
+
 }  // namespace dfly

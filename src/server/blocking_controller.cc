@@ -136,7 +136,7 @@ void BlockingController::RunStep(Transaction* completed_t) {
   awakened_indices_.clear();
 }
 
-void BlockingController::AddWatched(Transaction* trans) {
+void BlockingController::AddWatched(ArgSlice keys, Transaction* trans) {
   VLOG(1) << "AddWatched [" << owner_->shard_id() << "] " << trans->DebugId();
 
   auto [dbit, added] = watched_dbs_.emplace(trans->db_index(), nullptr);
@@ -146,8 +146,7 @@ void BlockingController::AddWatched(Transaction* trans) {
 
   DbWatchTable& wt = *dbit->second;
 
-  auto args = trans->ShardArgsInShard(owner_->shard_id());
-  for (auto key : args) {
+  for (auto key : keys) {
     auto [res, inserted] = wt.queue_map.emplace(key, nullptr);
     if (inserted) {
       res->second.reset(new WatchQueue);
@@ -167,7 +166,7 @@ void BlockingController::AddWatched(Transaction* trans) {
 }
 
 // Runs in O(N) complexity in the worst case.
-void BlockingController::RemoveWatched(Transaction* trans) {
+void BlockingController::RemoveWatched(ArgSlice keys, Transaction* trans) {
   VLOG(1) << "RemoveWatched [" << owner_->shard_id() << "] " << trans->DebugId();
 
   auto dbit = watched_dbs_.find(trans->db_index());
@@ -175,11 +174,13 @@ void BlockingController::RemoveWatched(Transaction* trans) {
     return;
 
   DbWatchTable& wt = *dbit->second;
-  auto args = trans->ShardArgsInShard(owner_->shard_id());
-  for (auto key : args) {
+  for (auto key : keys) {
     auto watch_it = wt.queue_map.find(key);
+
+    // that can happen in case of duplicate keys or when we do not watch on all the argument keys
+    // like with BLPOPRPUSH.
     if (watch_it == wt.queue_map.end())
-      continue;  // that can happen in case of duplicate keys
+      continue;
 
     WatchQueue& wq = *watch_it->second;
     for (auto items_it = wq.items.begin(); items_it != wq.items.end(); ++items_it) {

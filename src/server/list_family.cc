@@ -63,6 +63,7 @@ namespace dfly {
 using namespace std;
 using namespace facade;
 using absl::GetFlag;
+using time_point = Transaction::time_point;
 
 namespace {
 
@@ -200,12 +201,26 @@ class BPopper {
   string value_;
 };
 
+class BPopPusher {
+ public:
+  BPopPusher(string_view pop_key, string_view push_key, ListDir popdir, ListDir pushdir);
+
+  // Returns WRONG_TYPE, OK.
+  // If OK is returned then use result() to fetch the value.
+  OpResult<string> Run(Transaction* t, unsigned msec);
+
+ private:
+  OpResult<string> RunSingle(Transaction* t, time_point tp);
+  OpResult<string> RunPair(Transaction* t, time_point tp);
+
+  string_view pop_key_, push_key_;
+  ListDir popdir_, pushdir_;
+};
+
 BPopper::BPopper(ListDir dir) : dir_(dir) {
 }
 
 OpStatus BPopper::Run(Transaction* t, unsigned msec) {
-  using time_point = Transaction::time_point;
-
   time_point tp =
       msec ? chrono::steady_clock::now() + chrono::milliseconds(msec) : time_point::max();
   bool is_multi = t->IsMulti();
@@ -225,8 +240,13 @@ OpStatus BPopper::Run(Transaction* t, unsigned msec) {
     }
 
     // Block
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      auto keys = t->ShardArgsInShard(shard->shard_id());
+      return t->WatchInShard(keys, shard);
+    };
+
     ++stats->num_blocked_clients;
-    bool wait_succeeded = t->WaitOnWatch(tp);
+    bool wait_succeeded = t->WaitOnWatch(tp, std::move(cb));
     --stats->num_blocked_clients;
 
     if (!wait_succeeded)
@@ -359,6 +379,64 @@ OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool 
     return string(reinterpret_cast<char*>(entry.value), entry.sz);
   else
     return absl::StrCat(entry.longval);
+}
+
+BPopPusher::BPopPusher(string_view pop_key, string_view push_key, ListDir popdir, ListDir pushdir)
+    : pop_key_(pop_key), push_key_(push_key), popdir_(popdir), pushdir_(pushdir) {
+}
+
+OpResult<string> BPopPusher::Run(Transaction* t, unsigned msec) {
+  time_point tp =
+      msec ? chrono::steady_clock::now() + chrono::milliseconds(msec) : time_point::max();
+
+  t->Schedule();
+
+  if (t->unique_shard_cnt() == 1) {
+    return RunSingle(t, tp);
+  }
+
+  return RunPair(t, tp);
+}
+
+OpResult<string> BPopPusher::RunSingle(Transaction* t, time_point tp) {
+  OpResult<string> op_res;
+  bool is_multi = t->IsMulti();
+  auto cb_move = [&](Transaction* t, EngineShard* shard) {
+    op_res = OpMoveSingleShard(t->GetOpArgs(shard), pop_key_, push_key_, popdir_, pushdir_);
+    return OpStatus::OK;
+  };
+  t->Execute(cb_move, false);
+
+  if (is_multi || op_res.status() != OpStatus::KEY_NOTFOUND) {
+    if (op_res.status() == OpStatus::KEY_NOTFOUND) {
+      op_res = OpStatus::TIMED_OUT;
+    }
+    auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
+    t->Execute(std::move(cb), true);
+    return op_res;
+  }
+
+  auto* stats = ServerState::tl_connection_stats();
+  auto wcb = [&](Transaction* t, EngineShard* shard) {
+    ArgSlice keys{&this->pop_key_, 1};
+    return t->WatchInShard(keys, shard);
+  };
+
+  // Block
+  ++stats->num_blocked_clients;
+
+  bool wait_succeeded = t->WaitOnWatch(tp, std::move(wcb));
+  --stats->num_blocked_clients;
+
+  if (!wait_succeeded)
+    return OpStatus::TIMED_OUT;
+
+  t->Execute(cb_move, true);
+  return op_res;
+}
+
+OpResult<string> BPopPusher::RunPair(Transaction* t, time_point tp) {
+  return OpStatus::TIMED_OUT;
 }
 
 OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,
@@ -705,6 +783,56 @@ OpResult<StringVec> OpRange(const OpArgs& op_args, std::string_view key, long st
   return str_vec;
 }
 
+OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view dest,
+                               ListDir src_dir, ListDir dest_dir) {
+  DCHECK_EQ(2u, trans->unique_shard_cnt());
+
+  OpResult<string> find_res[2];
+  OpResult<string> result;
+
+  // Transaction is comprised of 2 hops:
+  // 1 - check for entries existence, their types and if possible -
+  //     read the value we may move from the source list.
+  // 2.  If everything is ok, pop from source and push the peeked value into
+  //     the destination.
+  //
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    auto args = t->ShardArgsInShard(shard->shard_id());
+    DCHECK_EQ(1u, args.size());
+    bool is_dest = args.front() == dest;
+    find_res[is_dest] = Peek(t->GetOpArgs(shard), args.front(), src_dir, !is_dest);
+    return OpStatus::OK;
+  };
+
+  trans->Execute(move(cb), false);
+
+  if (!find_res[0] || find_res[1].status() == OpStatus::WRONG_TYPE) {
+    auto cb = [&](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
+    trans->Execute(move(cb), true);
+    result = find_res[0] ? find_res[1] : find_res[0];
+  } else {
+    // Everything is ok, lets proceed with the mutations.
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      auto args = t->ShardArgsInShard(shard->shard_id());
+      bool is_dest = args.front() == dest;
+      OpArgs op_args = t->GetOpArgs(shard);
+
+      if (is_dest) {
+        string_view val{find_res[0].value()};
+        absl::Span<string_view> span{&val, 1};
+        OpPush(op_args, args.front(), dest_dir, false, span);
+      } else {
+        OpPop(op_args, args.front(), src_dir, 1, false);
+      }
+      return OpStatus::OK;
+    };
+    trans->Execute(move(cb), true);
+    result = std::move(find_res[0].value());
+  }
+
+  return result;
+}
+
 void MoveGeneric(ConnectionContext* cntx, string_view src, string_view dest, ListDir src_dir,
                  ListDir dest_dir) {
   OpResult<string> result;
@@ -716,50 +844,8 @@ void MoveGeneric(ConnectionContext* cntx, string_view src, string_view dest, Lis
 
     result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   } else {
-    CHECK_EQ(2u, cntx->transaction->unique_shard_cnt());
-
-    OpResult<string> find_res[2];
-
-    // Transaction is comprised of 2 hops:
-    // 1 - check for entries existence, their types and if possible -
-    //     read the value we may move from the source list.
-    // 2.  If everything is ok, pop from source and push the peeked value into
-    //     the destination.
-    //
     cntx->transaction->Schedule();
-    auto cb = [&](Transaction* t, EngineShard* shard) {
-      auto args = t->ShardArgsInShard(shard->shard_id());
-      DCHECK_EQ(1u, args.size());
-      bool is_dest = args.front() == dest;
-      find_res[is_dest] = Peek(t->GetOpArgs(shard), args.front(), src_dir, !is_dest);
-      return OpStatus::OK;
-    };
-
-    cntx->transaction->Execute(move(cb), false);
-
-    if (!find_res[0] || find_res[1].status() == OpStatus::WRONG_TYPE) {
-      auto cb = [&](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
-      cntx->transaction->Execute(move(cb), true);
-      result = find_res[0] ? find_res[1] : find_res[0];
-    } else {
-      // Everything is ok, lets proceed with the mutations.
-      auto cb = [&](Transaction* t, EngineShard* shard) {
-        auto args = t->ShardArgsInShard(shard->shard_id());
-        bool is_dest = args.front() == dest;
-        OpArgs op_args = t->GetOpArgs(shard);
-
-        if (is_dest) {
-          string_view val{find_res[0].value()};
-          absl::Span<string_view> span{&val, 1};
-          OpPush(op_args, args.front(), dest_dir, false, span);
-        } else {
-          OpPop(op_args, args.front(), src_dir, 1, false);
-        }
-        return OpStatus::OK;
-      };
-      cntx->transaction->Execute(move(cb), true);
-      result = std::move(find_res[0].value());
-    }
+    result = MoveTwoShards(cntx->transaction, src, dest, src_dir, dest_dir);
   }
 
   if (result) {
@@ -798,7 +884,22 @@ void BRPopLPush(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError("timeout is negative");
   }
 
-  return (*cntx)->SendNull();
+  BPopPusher bpop_pusher(src, dest, ListDir::RIGHT, ListDir::LEFT);
+  OpResult<string> op_res = bpop_pusher.Run(cntx->transaction, unsigned(timeout * 1000));
+
+  if (op_res) {
+    return (*cntx)->SendBulkString(*op_res);
+  }
+
+  switch (op_res.status()) {
+    case OpStatus::TIMED_OUT:
+      return (*cntx)->SendNull();
+      break;
+
+    default:
+      return (*cntx)->SendError(op_res.status());
+      break;
+  }
 }
 
 }  // namespace
