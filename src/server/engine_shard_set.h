@@ -118,8 +118,7 @@ class EngineShard {
     return tiered_storage_.get();
   }
 
-  // Adds blocked transaction to the watch-list.
-  void AddBlocked(Transaction* trans);
+  BlockingController* EnsureBlockingController();
 
   BlockingController* blocking_controller() {
     return blocking_controller_.get();

@@ -502,11 +502,12 @@ size_t EngineShard::UsedMemory() const {
   return mi_resource_.used() + zmalloc_used_memory_tl + SmallString::UsedThreadLocal();
 }
 
-void EngineShard::AddBlocked(Transaction* trans) {
+BlockingController* EngineShard::EnsureBlockingController() {
   if (!blocking_controller_) {
     blocking_controller_.reset(new BlockingController(this));
   }
-  blocking_controller_->AddWatched(trans);
+
+  return blocking_controller_.get();
 }
 
 void EngineShard::TEST_EnableHeartbeat() {

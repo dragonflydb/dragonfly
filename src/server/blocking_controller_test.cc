@@ -66,11 +66,13 @@ void BlockingControllerTest::TearDown() {
 
 TEST_F(BlockingControllerTest, Basic) {
   shard_set->Await(0, [&] {
-    BlockingController bc(EngineShard::tlocal());
-    bc.AddWatched(trans_.get());
+    EngineShard* shard = EngineShard::tlocal();
+    BlockingController bc(shard);
+    auto keys = trans_->ShardArgsInShard(shard->shard_id());
+    bc.AddWatched(keys, trans_.get());
     EXPECT_EQ(1, bc.NumWatched(0));
 
-    bc.RemoveWatched(trans_.get());
+    bc.RemoveWatched(keys, trans_.get());
     EXPECT_EQ(0, bc.NumWatched(0));
   });
 }
@@ -79,8 +81,10 @@ TEST_F(BlockingControllerTest, Timeout) {
   time_point tp = steady_clock::now() + chrono::milliseconds(10);
 
   trans_->Schedule();
+  auto keys = trans_->ShardArgsInShard(0);
+  auto cb = [&](Transaction* t, EngineShard* shard) { return t->WatchInShard(keys, shard); };
 
-  bool res = trans_->WaitOnWatch(tp);
+  bool res = trans_->WaitOnWatch(tp, cb);
 
   EXPECT_FALSE(res);
   unsigned num_watched = shard_set->Await(
