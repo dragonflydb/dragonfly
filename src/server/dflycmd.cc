@@ -358,8 +358,14 @@ OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineS
     writer = new JournalWriter{};
     auto journal_cb = [flow, cntx, writer](const journal::Entry& je) mutable {
       writer->Write(je);
-      if (auto ec = writer->Flush(flow->conn->socket()); ec)
-        cntx->ReportError(ec);
+
+      // REMOVE THIS AFTER ASYNC STREAMER IS MERGED.
+      ::boost::fibers::fiber{[writer, flow, cntx]() {
+        if (auto ec = writer->Flush(flow->conn->socket()); ec) {
+          VLOG(0) << "Failed to flush???";
+          // cntx->ReportError(ec);
+        }
+      }}.detach();
     };
     cb_id = sf_->journal()->RegisterOnChange(std::move(journal_cb));
   }

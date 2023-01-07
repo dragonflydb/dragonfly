@@ -314,3 +314,64 @@ async def test_disconnect_master(df_local_factory, t_master, t_replicas, n_rando
     for c_replica in c_replicas:
         await wait_available_async(c_replica)
         await batch_check_data_async(c_replica, gen_test_data(n_keys, seed=0))
+
+
+"""
+Test key expiration.
+"""
+
+expiration_cases = [
+    (100)
+]
+
+
+# TODO: Replica with v2 when merged
+@dfly_args({"logtostdout":""})
+@pytest.mark.asyncio
+@pytest.mark.parametrize("n_keys", expiration_cases)
+async def test_expiration(df_local_factory, n_keys):
+    master = df_local_factory.create(port=BASE_PORT, proactor_threads=4)
+    replica = df_local_factory.create(port=BASE_PORT+1, proactor_threads=4)
+
+    master.start()
+    replica.start()
+
+    # Connect replica to master
+    c_replica = aioredis.Redis(port=replica.port)
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    # Set simple keys 1..n_keys on master with 100 second expire
+    c_master = aioredis.Redis(port=master.port)
+    pipe = c_master.pipeline(transaction=False)
+    for i in range(n_keys):
+        pipe.set(f"{i}", "v", ex=100)
+    await pipe.execute()
+
+    # Wait for replica to receive them
+    await asyncio.sleep(0.5)
+
+    # Check replica has them and their ttl are set
+    pipe = c_replica.pipeline(transaction=False)
+    for i in range(n_keys):
+        pipe.ttl(f"{i}")
+    vals = await pipe.execute()
+    assert all(t > 0 for t in vals), vals
+
+    # Update the expires to very small values (or 0)
+    pipe = c_master.pipeline(transaction=False)
+    for i in range(n_keys):
+        pipe.pexpire(f"{i}", random.randint(0, 100))
+    await pipe.execute()
+
+    # Wait for expires to occur
+    await asyncio.sleep(0.15)
+
+    # Trigger expires on master with just a GET
+    await c_master.mget(f"{i}" for i in range(n_keys))
+
+    # Wait for expires to be transferred
+    await asyncio.sleep(0.5)
+
+    # Check keys expired on replica
+    vals = await c_replica.mget(f"{i}" for i in range(n_keys))
+    assert all(v is None for v in vals), vals

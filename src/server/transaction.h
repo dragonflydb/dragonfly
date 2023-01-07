@@ -173,7 +173,7 @@ class Transaction {
   //! Runs in the shard thread.
   KeyLockArgs GetLockArgs(ShardId sid) const;
 
-  OpArgs GetOpArgs(EngineShard* shard) const {
+  OpArgs GetOpArgs(EngineShard* shard) {
     return OpArgs{shard, txid_, db_context()};
   }
 
@@ -259,6 +259,7 @@ class Transaction {
 
     PerShardData() = default;
   };
+
   enum { kPerShardSize = sizeof(PerShardData) };
 
   struct Multi {

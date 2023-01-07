@@ -1205,7 +1205,8 @@ void Transaction::LogJournalOnShard(EngineShard* shard) {
   if (shard == nullptr)
     return;
 
-  if ((cid_->opt_mask() & CO::WRITE) == 0)
+  // Ignore custom journal or non-write commands.
+  if ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) > 0 || (cid_->opt_mask() & CO::WRITE) == 0)
     return;
 
   auto journal = shard->journal();
@@ -1218,10 +1219,10 @@ void Transaction::LogJournalOnShard(EngineShard* shard) {
     CHECK(!cmd_with_full_args_.empty());
     entry_payload = cmd_with_full_args_;
   } else {
-    entry_payload =
-        make_pair(facade::ToSV(cmd_with_full_args_.front()), ShardArgsInShard(shard->shard_id()));
+    auto cmd = facade::ToSV(cmd_with_full_args_.front());
+    entry_payload = make_pair(cmd, ShardArgsInShard(shard->shard_id()));
   }
-  journal->RecordEntry(journal::Entry{txid_, db_index_, entry_payload, unique_shard_cnt_});
+  journal->RecordEntry(txid_, db_index_, std::move(entry_payload), unique_shard_cnt_);
 }
 
 void Transaction::BreakOnShutdown() {

@@ -19,6 +19,7 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/journal/journal.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
 #include "server/transaction.h"
@@ -562,7 +563,6 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
   do {
     ess->Await(sid, [&] {
       OpArgs op_args{EngineShard::tlocal(), 0, db_cntx};
-
       OpScan(op_args, scan_opts, &cursor, keys);
     });
     if (cursor == 0) {
@@ -587,7 +587,23 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
 
-  return db_slice.UpdateExpire(op_args.db_cntx, it, expire_it, params);
+  auto res = db_slice.UpdateExpire(op_args.db_cntx, it, expire_it, params);
+
+  // If the value was deleted, replicate as DEL.
+  // Else, replicate as PEXPIREAT with exact time.
+  if (auto journal = op_args.shard->journal(); journal && res.ok()) {
+    if (res.value() == -1) {
+      journal->RecordEntry(op_args.txid, op_args.db_cntx.db_index,
+                           make_pair("DEL"sv, ArgSlice{key}), 1);
+    } else {
+      auto time = absl::StrCat(res.value());
+      // TODO: Don't forget to change this when adding arguments to expire commands.
+      journal->RecordEntry(op_args.txid, op_args.db_cntx.db_index,
+                           make_pair("PEXPIREAT"sv, ArgSlice{time}), 1);
+    }
+  }
+
+  return res.status();
 }
 
 }  // namespace
@@ -605,7 +621,7 @@ void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
   atomic_uint32_t result{0};
   bool is_mc = cntx->protocol() == Protocol::MEMCACHE;
 
-  auto cb = [&result](const Transaction* t, EngineShard* shard) {
+  auto cb = [&result](Transaction* t, EngineShard* shard) {
     ArgSlice args = t->ShardArgsInShard(shard->shard_id());
     auto res = OpDel(t->GetOpArgs(shard), args);
     result.fetch_add(res.value_or(0), memory_order_relaxed);
@@ -801,7 +817,7 @@ void GenericFamily::Stick(CmdArgList args, ConnectionContext* cntx) {
 
   atomic_uint32_t result{0};
 
-  auto cb = [&result](const Transaction* t, EngineShard* shard) {
+  auto cb = [&result](Transaction* t, EngineShard* shard) {
     ArgSlice args = t->ShardArgsInShard(shard->shard_id());
     auto res = OpStick(t->GetOpArgs(shard), args);
     result.fetch_add(res.value_or(0), memory_order_relaxed);
@@ -1397,12 +1413,13 @@ void GenericFamily::Register(CommandRegistry* registry) {
             << CI{"ECHO", CO::LOADING | CO::FAST, 2, 0, 0, 0}.HFUNC(Echo)
             << CI{"EXISTS", CO::READONLY | CO::FAST, -2, 1, -1, 1}.HFUNC(Exists)
             << CI{"TOUCH", CO::READONLY | CO::FAST, -2, 1, -1, 1}.HFUNC(Exists)
-            << CI{"EXPIRE", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Expire)
-            << CI{"EXPIREAT", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(ExpireAt)
+            << CI{"EXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1}.HFUNC(Expire)
+            << CI{"EXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1}.HFUNC(ExpireAt)
             << CI{"PERSIST", CO::WRITE | CO::FAST, 2, 1, 1, 1}.HFUNC(Persist)
             << CI{"KEYS", CO::READONLY, 2, 0, 0, 0}.HFUNC(Keys)
-            << CI{"PEXPIREAT", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(PexpireAt)
-            << CI{"PEXPIRE", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Pexpire)
+            << CI{"PEXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1}.HFUNC(
+                   PexpireAt)
+            << CI{"PEXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1}.HFUNC(Pexpire)
             << CI{"RENAME", CO::WRITE, 3, 1, 2, 1}.HFUNC(Rename)
             << CI{"RENAMENX", CO::WRITE, 3, 1, 2, 1}.HFUNC(RenameNx)
             << CI{"SELECT", kSelectOpts, 2, 0, 0, 0}.HFUNC(Select)

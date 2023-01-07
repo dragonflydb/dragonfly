@@ -19,20 +19,21 @@ class ConnectionContext;
 namespace CO {
 
 enum CommandOpt : uint32_t {
-  READONLY = 1,
-  FAST = 2,
-  WRITE = 4,
-  LOADING = 8,
-  DENYOOM = 0x10,  // use-memory in redis.
-  REVERSE_MAPPING = 0x20,
+  READONLY = 1U << 0,
+  FAST = 1U << 1,
+  WRITE = 1U << 2,
+  LOADING = 1U << 3,
+  DENYOOM = 1U << 4,  // use-memory in redis.
+  REVERSE_MAPPING = 1U << 5,
 
-  // arg 2 determines number of keys. Relevant for ZUNIONSTORE, EVAL etc.
-  VARIADIC_KEYS = 0x40,
+  VARIADIC_KEYS = 1U << 6,  // arg 2 determines number of keys. Relevant for ZUNIONSTORE, EVAL etc.
 
-  ADMIN = 0x80,  // implies NOSCRIPT,
-  NOSCRIPT = 0x100,
-  BLOCKING = 0x200,  // implies REVERSE_MAPPING
-  GLOBAL_TRANS = 0x1000,
+  ADMIN = 1U << 7,  // implies NOSCRIPT,
+  NOSCRIPT = 1U << 8,
+  BLOCKING = 1U << 9,  // implies REVERSE_MAPPING
+  GLOBAL_TRANS = 1U << 12,
+
+  NO_AUTOJOURNAL = 1U << 15,  // Skip automatically logging command to journal inside transaction.
 };
 
 const char* OptName(CommandOpt fl);

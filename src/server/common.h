@@ -87,7 +87,7 @@ struct OpArgs {
   OpArgs() : shard(nullptr), txid(0) {
   }
 
-  OpArgs(EngineShard* s, TxId i, const DbContext& cntx) : shard(s), txid(i), db_cntx(cntx) {
+  OpArgs(EngineShard* s, TxId, const DbContext& cntx) : shard(s), txid(0), db_cntx(cntx) {
   }
 };
 

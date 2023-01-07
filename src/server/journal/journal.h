@@ -53,7 +53,7 @@ class Journal {
 */
   LSN GetLsn() const;
 
-  void RecordEntry(const Entry& entry);
+  void RecordEntry(TxId txid, DbIndex dbid, Entry::Payload payload, unsigned shard_cnt);
 
  private:
   mutable boost::fibers::mutex state_mu_;

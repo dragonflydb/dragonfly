@@ -111,8 +111,8 @@ bool Journal::EnterLameDuck() {
   return res;
 }
 
-void Journal::RecordEntry(const Entry& entry) {
-  journal_slice.AddLogRecord(entry);
+void Journal::RecordEntry(TxId txid, DbIndex dbid, Entry::Payload payload, unsigned shard_cnt) {
+  journal_slice.AddLogRecord(Entry{txid, dbid, std::move(payload), shard_cnt});
 }
 
 /*
