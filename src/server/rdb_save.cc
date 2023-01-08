@@ -655,23 +655,8 @@ error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
   return error_code{};
 }
 
-io::Bytes RdbSerializer::Flush() {
-  size_t sz = mem_buf_.InputLen();
-  if (sz == 0)
-    return mem_buf_.InputBuffer();
-
-  if (compression_mode_ == CompressionMode::MULTY_ENTRY_ZSTD ||
-      compression_mode_ == CompressionMode::MULTY_ENTRY_LZ4) {
-    CompressBlob();
-    // After blob was compressed membuf was overwirten with compressed data
-    sz = mem_buf_.InputLen();
-  }
-
-  return mem_buf_.InputBuffer();
-}
-
 error_code RdbSerializer::FlushToSink(io::Sink* s) {
-  auto bytes = Flush();
+  auto bytes = PrepareFlush();
   if (bytes.empty())
     return error_code{};
 
@@ -687,8 +672,19 @@ size_t RdbSerializer::SerializedLen() const {
   return mem_buf_.InputLen();
 }
 
-void RdbSerializer::Clear() {
-  mem_buf_.Clear();
+io::Bytes RdbSerializer::PrepareFlush() {
+  size_t sz = mem_buf_.InputLen();
+  if (sz == 0)
+    return mem_buf_.InputBuffer();
+
+  if (compression_mode_ == CompressionMode::MULTY_ENTRY_ZSTD ||
+      compression_mode_ == CompressionMode::MULTY_ENTRY_LZ4) {
+    CompressBlob();
+    // After blob was compressed membuf was overwirten with compressed data
+    sz = mem_buf_.InputLen();
+  }
+
+  return mem_buf_.InputBuffer();
 }
 
 error_code RdbSerializer::WriteJournalEntries(absl::Span<const journal::Entry> entries) {

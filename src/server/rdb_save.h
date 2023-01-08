@@ -118,17 +118,11 @@ class RdbSerializer {
 
   ~RdbSerializer();
 
-  // Get access to internal buffer, compressed, if enabled.
-  io::Bytes Flush();
-
   // Internal buffer size. Might shrink after flush due to compression.
   size_t SerializedLen() const;
 
   // Flush internal buffer to sink.
   std::error_code FlushToSink(io::Sink* s);
-
-  // Clear internal buffer contents.
-  void Clear();
 
   std::error_code SelectDb(uint32_t dbid);
 
@@ -161,6 +155,9 @@ class RdbSerializer {
   std::error_code SendFullSyncCut();
 
  private:
+  // Prepare internal buffer for flush. Compress it.
+  io::Bytes PrepareFlush();
+
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
   std::error_code SaveObject(const PrimeValue& pv);
   std::error_code SaveListObject(const robj* obj);
