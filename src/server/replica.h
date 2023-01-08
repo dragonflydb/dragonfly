@@ -6,6 +6,7 @@
 #include <boost/fiber/barrier.hpp>
 #include <boost/fiber/fiber.hpp>
 #include <boost/fiber/mutex.hpp>
+#include <queue>
 #include <variant>
 
 #include "base/io_buf.h"
@@ -57,7 +58,7 @@ class Replica {
     uint32_t shard_cnt;
     DbIndex dbid;
     std::vector<journal::ParsedEntry::CmdData> commands;
-    // Update the data from ParsedEntry and return if its ready for execution.
+    // Update the data from ParsedEntry and return if all shard transaction commands were recieved.
     bool UpdateFromParsedEntry(journal::ParsedEntry&& entry);
   };
 
@@ -65,11 +66,13 @@ class Replica {
     boost::fibers::mutex map_mu;
 
     struct TxExecutionSync {
-      boost::fibers::barrier barrier;
+      util::fibers_ext::Barrier barrier;
       std::atomic_uint32_t counter;
-      TxExecutionSync(uint32_t counter) : barrier(counter), counter(counter) {
+      util::fibers_ext::BlockingCounter block;
+      bool is_global_cmd;
+      TxExecutionSync(uint32_t counter, bool is_global)
+          : barrier(counter), counter(counter), block(counter), is_global_cmd(is_global) {
       }
-      std::vector<journal::ParsedEntry::CmdData> commands;
     };
 
     std::unordered_map<TxId, TxExecutionSync> tx_sync_execution;
@@ -125,7 +128,9 @@ class Replica {
                       Context* cntx);
 
   // Single flow stable state sync fiber spawned by StartStableSyncFlow.
-  void StableSyncDflyFb(Context* cntx);
+  void StableSyncDflyReadFb(Context* cntx);
+
+  void StableSyncDflyExecFb(Context* cntx);
 
  private: /* Utility */
   struct PSyncResponse {
@@ -153,7 +158,9 @@ class Replica {
   // Send command, update last_io_time, return error.
   std::error_code SendCommand(std::string_view command, facade::ReqSerializer* serializer);
 
-  void ExecuteCmd(JournalExecutor* executor, TranactionData&& tx_data, Context* cntx);
+  void ExecuteTx(JournalExecutor* executor, TranactionData&& tx_data, bool inserted_by_me,
+                 Context* cntx);
+  void InsertTxDataToShardResource(TranactionData&& tx_data, Context* cntx);
 
  public: /* Utility */
   struct Info {
@@ -189,8 +196,14 @@ class Replica {
 
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;
 
+  std::queue<std::pair<TranactionData, bool>> trans_data_queue_;
+  static constexpr size_t kYieldAfterItemsInQueue = 50;
+  ::util::fibers_ext::EventCount waker_;
+
   // MainReplicationFb in standalone mode, FullSyncDflyFb in flow mode.
   ::boost::fibers::fiber sync_fb_;
+  ::boost::fibers::fiber execution_fb_;
+
   std::vector<std::unique_ptr<Replica>> shard_flows_;
 
   // Guard operations where flows might be in a mixed state (transition/setup)
