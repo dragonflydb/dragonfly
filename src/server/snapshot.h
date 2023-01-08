@@ -95,8 +95,8 @@ class SliceSnapshot {
   void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
                       std::optional<uint64_t> expire, RdbSerializer* serializer);
 
-  // Push byte slice to channel.
-  void PushBytesToChannel(DbIndex db_index, io::Bytes bytes);
+  // Push rdb serializer's internal buffer to channel. Return now many bytes were written.
+  size_t PushBytesToChannel(DbIndex db_index, RdbSerializer* serializer);
 
   // DbChange listener
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
