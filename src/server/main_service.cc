@@ -610,6 +610,16 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
       (*cntx)->SendError("WATCH inside MULTI is not allowed");
       return;
     }
+
+    if (cmd_name == "FLUSHALL") {
+      (*cntx)->SendError("FLUSHALL inside MULTI is not allowed");
+      return;
+    }
+
+    if (cmd_name == "FLUSHDB") {
+      (*cntx)->SendError("FLUSHALL inside MULTI is not allowed");
+      return;
+    }
   }
 
   std::move(multi_error).Cancel();
