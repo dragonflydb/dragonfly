@@ -680,8 +680,6 @@ io::Bytes RdbSerializer::PrepareFlush() {
   if (compression_mode_ == CompressionMode::MULTY_ENTRY_ZSTD ||
       compression_mode_ == CompressionMode::MULTY_ENTRY_LZ4) {
     CompressBlob();
-    // After blob was compressed membuf was overwirten with compressed data
-    sz = mem_buf_.InputLen();
   }
 
   return mem_buf_.InputBuffer();
