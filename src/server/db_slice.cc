@@ -704,7 +704,6 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
 
 bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) const {
   DCHECK(!lock_args.args.empty());
-
   const auto& lt = db_arr_[lock_args.db_index]->trans_locks;
   for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
     auto s = lock_args.args[i];
