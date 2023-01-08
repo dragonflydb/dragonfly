@@ -29,8 +29,6 @@ error_code BufferedStreamerBase::ConsumeIntoSink(io::Sink* dest) {
   while (!IsStopped()) {
     // Wait for more data or stop signal.
     waker_.await([this]() { return buffered_ > 0 || IsStopped(); });
-    if (IsStopped())
-      break;
 
     // Swap producer and consumer buffers
     std::swap(producer_buf_, consumer_buf_);
@@ -39,6 +37,9 @@ error_code BufferedStreamerBase::ConsumeIntoSink(io::Sink* dest) {
     // If producer stalled, notify we consumed data and it can unblock.
     waker_.notify();
     RETURN_ON_ERR(dest->Write(consumer_buf_.InputBuffer()));
+
+    if (IsStopped())
+      break;
 
     // TODO: shrink big stash.
     consumer_buf_.Clear();
