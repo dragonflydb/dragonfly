@@ -16,21 +16,10 @@ JournalExecutor::JournalExecutor(Service* service)
 }
 
 void JournalExecutor::Execute(DbIndex dbid, std::vector<journal::ParsedEntry::CmdData>& cmds) {
-  DCHECK_GT(cmds.size(), 1U);
   conn_context_.conn_state.db_index = dbid;
-  std::string multi_cmd = {"MULTI"};
-  auto ms = MutableSlice{&multi_cmd[0], multi_cmd.size()};
-  auto span = CmdArgList{&ms, 1};
-  service_->DispatchCommand(span, &conn_context_);
-
   for (auto& cmd : cmds) {
     Execute(cmd);
   }
-
-  std::string exec_cmd = {"EXEC"};
-  ms = {&exec_cmd[0], exec_cmd.size()};
-  span = {&ms, 1};
-  service_->DispatchCommand(span, &conn_context_);
 }
 
 void JournalExecutor::Execute(DbIndex dbid, journal::ParsedEntry::CmdData& cmd) {
