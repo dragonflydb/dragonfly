@@ -31,11 +31,12 @@ async def wait_available_async(client: aioredis.Redis):
     while True:
         try:
             await client.get('key')
-            print("wait available iterations:", its)
             return
         except aioredis.ResponseError as e:
             assert "Can not execute during LOADING" in str(e)
 
+        # Print W to indicate test is waiting for replica
+        print('W', end='', flush=True)
         await asyncio.sleep(0.01)
         its += 1
 
@@ -87,11 +88,13 @@ class CommandGenerator:
         return self.key_sets[t.value]
 
     def add_key(self, t: ValueType):
+        """Add new key of type t"""
         k, self.key_cursor = self.key_cursor, self.key_cursor + 1
         self.set_for_type(t).add(k)
         return k
 
     def randomize_nonempty_set(self):
+        """Return random non-empty set and its type"""
         if not any(self.key_sets):
             return None, None
 
@@ -104,6 +107,7 @@ class CommandGenerator:
             return s, t
 
     def randomize_key(self, t=None, pop=False):
+        """Return random key and its type"""
         if t is None:
             s, t = self.randomize_nonempty_set()
         else:
@@ -119,6 +123,7 @@ class CommandGenerator:
         return k, t
 
     def generate_val(self, t: ValueType):
+        """Generate filler value of configured size for type t"""
         def rand_str(k=3, s=''):
             # Use small k value to reduce mem usage and increase number of ops
             return s.join(random.choices(string.ascii_letters, k=k))
@@ -144,7 +149,9 @@ class CommandGenerator:
                             for _ in range(self.val_size//4))
 
     def make_shrink(self):
-        # Simulate shrinking by deleting a few random keys
+        """
+        Generate command that shrinks data: DEL of random keys.
+        """
         keys_gen = (self.randomize_key(pop=True)
                     for _ in range(random.randint(1, self.max_multikey)))
         keys = [f"k{k}" for k, _ in keys_gen if k is not None]
@@ -167,7 +174,9 @@ class CommandGenerator:
     ]
 
     def make_no_change(self):
-        # Simulate no changes to memory size by issuing one of commands listed above
+        """
+        Generate command that makes no change to keyset: random of NO_CHANGE_ACTIONS.
+        """
         cmd, t = random.choice(self.NO_CHANGE_ACTIONS)
         k, _ = self.randomize_key(t)
         val = ''.join(random.choices(string.ascii_letters, k=4))
@@ -182,7 +191,9 @@ class CommandGenerator:
     }
 
     def make_grow(self):
-        # Simulate growing memory usage by using MSET, LPUSH, SADD, HMSET or ZADD with large values
+        """
+        Generate command that grows keyset: Initialize key of random type with filler value.
+        """
         # TODO: Implement COPY in Dragonfly.
         t = ValueType.randomize()
         if t == ValueType.STRING:
@@ -240,23 +251,7 @@ class CommandGenerator:
 
 class DataCapture:
     """
-    Captured state of single database
-
-    Create seeder with target number of keys (100k) of specified size (200) and work on 5 dbs
-
-        seeder = new DflySeeder(keys=100_000, value_size=200, dbcount=5)
-
-    Stop when we are in 5% of target number of keys (i.e. above 95_000)
-    Because its probabilistic we might never reach exactly 100_000
-
-        await seeder.run(target_deviation=0.05)
-
-    Run 3 iterations (full batches) in stable state, crate a capture and compare it to
-    replica on port 1112
-
-        await seeder.run(target_times=3)
-        capture = await seeder.capture()
-        assert await seeder.compare(capture, port=1112)
+    Captured state of single database.
     """
 
     def __init__(self, entries):
@@ -285,15 +280,39 @@ class DataCapture:
 
 
 class DflySeeder:
-    """Data seeder that supports all main data types"""
+    """
+    Data seeder with support for multiple types and commands.
 
-    def __init__(self, port=6379, keys=1000, val_size=50, batch_size=1000, max_multikey=5, dbcount=1):
+    Usage:
+
+    Create a seeder with target number of keys (100k) of specified size (200) and work on 5 dbs,
+
+        seeder = new DflySeeder(keys=100_000, value_size=200, dbcount=5)
+
+    Stop when we are in 5% of target number of keys (i.e. above 95_000)
+    Because its probabilistic we might never reach exactly 100_000.
+
+        await seeder.run(target_deviation=0.05)
+
+    Run 3 iterations (full batches) in stable state, crate a capture and compare it to
+    replica on port 1112
+
+        await seeder.run(target_times=3)
+        capture = await seeder.capture()
+        assert await seeder.compare(capture, port=1112)
+    """
+
+    def __init__(self, port=6379, keys=1000, val_size=50, batch_size=1000, max_multikey=5, dbcount=1, log_file=None):
         self.gen = CommandGenerator(
             keys, val_size, batch_size, max_multikey
         )
         self.port = port
         self.dbcount = dbcount
         self.stop_flag = False
+
+        self.log_file = log_file
+        if self.log_file is not None:
+            open(self.log_file, 'w').close()
 
     async def run(self, target_times=None, target_deviation=None):
         """
@@ -360,6 +379,10 @@ class DflySeeder:
         submitted = 0
         deviation = 0.0
 
+        file = None
+        if self.log_file:
+            file = open(self.log_file, 'a')
+
         def should_run():
             if self.stop_flag:
                 return False
@@ -377,6 +400,9 @@ class DflySeeder:
             await asyncio.gather(*(q.put(blob) for q in queues))
             submitted += 1
 
+            if file is not None:
+                file.write('\n'.join(blob))
+
             print('.', end='', flush=True)
             await asyncio.sleep(0.0)
 
@@ -385,6 +411,9 @@ class DflySeeder:
         await asyncio.gather(*(q.put(None) for q in queues))
         for q in queues:
             await q.join()
+
+        if file is not None:
+            file.flush()
 
         return submitted * self.gen.batch_size
 
@@ -438,3 +467,15 @@ class DflySeeder:
                 entries.append(out)
 
         return entries
+
+
+class DflySeederFactory:
+    """
+    Used to pass params to a DflySeeder.
+    """
+
+    def __init__(self, log_file=None):
+        self.log_file = log_file
+
+    def create(self, **kwargs):
+        return DflySeeder(log_file=self.log_file, **kwargs)

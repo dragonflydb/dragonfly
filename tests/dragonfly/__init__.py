@@ -2,9 +2,6 @@ import pytest
 import time
 import subprocess
 
-import time
-import subprocess
-
 from dataclasses import dataclass
 
 START_DELAY = 0.4
@@ -38,7 +35,7 @@ class DflyInstance:
         # Gdb starts slowly
         time.sleep(START_DELAY if not self.params.gdb else START_GDB_DELAY)
 
-        self._check_started()
+        self._check_status()
 
     def stop(self, kill=False):
         proc, self.proc = self.proc, None
@@ -57,16 +54,16 @@ class DflyInstance:
             proc.kill()
 
     def _start(self):
-        arglist = DflyInstance.format_args(self.args) + [f"--{v}" for v in self.params.args]
-        print(f"Starting instance on {self.port} with arguments {arglist}")
+        base_args = [f"--{v}" for v in self.params.args]
+        all_args = self.format_args(self.args) + base_args
+        print(f"Starting instance on {self.port} with arguments {all_args}")
 
-        args = [self.params.path, *arglist]
+        run_cmd = [self.params.path, *all_args]
         if self.params.gdb:
-            args = ["gdb", "--ex", "r", "--args"] + args
+            run_cmd = ["gdb", "--ex", "r", "--args"] + run_cmd
+        self.proc = subprocess.Popen(run_cmd, cwd=self.params.cwd)
 
-        self.proc = subprocess.Popen(args, cwd=self.params.cwd)
-
-    def _check_started(self):
+    def _check_status(self):
         return_code = self.proc.poll()
         if return_code is not None:
             raise Exception(
@@ -107,6 +104,7 @@ class DflyInstanceFactory:
         return instance
 
     def start_all(self, instances):
+        """ Start multiple instances in parallel """
         for instance in instances:
             instance._start()
 
@@ -114,7 +112,7 @@ class DflyInstanceFactory:
         time.sleep(delay * (1 + len(instances) / 2))
 
         for instance in instances:
-            instance._check_started()
+            instance._check_status()
 
     def stop_all(self):
         """Stop all lanched instances."""

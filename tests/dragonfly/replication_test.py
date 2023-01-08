@@ -30,9 +30,10 @@ replication_cases = [
     (4, [1] * 10, dict(keys=500, dbcount=2)),
 ]
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replicas, seeder_config", replication_cases)
-async def test_replication_all(df_local_factory, t_master, t_replicas, seeder_config):
+async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_replicas, seeder_config):
     master = df_local_factory.create(port=1111, proactor_threads=t_master)
     replicas = [
         df_local_factory.create(port=BASE_PORT+i+1, proactor_threads=t)
@@ -43,7 +44,7 @@ async def test_replication_all(df_local_factory, t_master, t_replicas, seeder_co
     master.start()
 
     # Fill master with test data
-    seeder = DflySeeder(port=master.port, **seeder_config)
+    seeder = df_seeder_factory.create(port=master.port, **seeder_config)
     await seeder.run(target_deviation=0.1)
 
     # Start replicas
@@ -80,12 +81,12 @@ async def test_replication_all(df_local_factory, t_master, t_replicas, seeder_co
 
     # Issue lots of deletes
     # TODO: Enable after stable state is faster
-    #seeder.target(100)
-    #await seeder.run(target_deviation=0.1)
+    # seeder.target(100)
+    # await seeder.run(target_deviation=0.1)
 
     # Check data after deletes
-    #await asyncio.sleep(2.0)
-    #await check_data(seeder, replicas, c_replicas)
+    # await asyncio.sleep(2.0)
+    # await check_data(seeder, replicas, c_replicas)
 
 
 async def check_data(seeder, replicas, c_replicas):
@@ -127,7 +128,7 @@ disconnect_cases = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys", disconnect_cases)
-async def test_disconnect_replica(df_local_factory, t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys):
+async def test_disconnect_replica(df_local_factory, df_seeder_factory, t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys):
     master = df_local_factory.create(port=BASE_PORT, proactor_threads=t_master)
     replicas = [
         (df_local_factory.create(
@@ -145,8 +146,6 @@ async def test_disconnect_replica(df_local_factory, t_master, t_crash_fs, t_cras
     master.start()
     c_master = aioredis.Redis(port=master.port, single_connection_client=True)
 
-    seeder = DflySeeder(port=master.port, keys=n_keys, dbcount=2)
-
     # Start replicas and create clients
     df_local_factory.start_all([replica for replica, _ in replicas])
 
@@ -162,6 +161,7 @@ async def test_disconnect_replica(df_local_factory, t_master, t_crash_fs, t_cras
         ]
 
     # Start data fill loop
+    seeder = df_seeder_factory.create(port=master.port, keys=n_keys, dbcount=2)
     fill_task = asyncio.create_task(seeder.run())
 
     # Run full sync
@@ -262,7 +262,7 @@ master_crash_cases = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replicas, n_random_crashes, n_keys", master_crash_cases)
-async def test_disconnect_master(df_local_factory, t_master, t_replicas, n_random_crashes, n_keys):
+async def test_disconnect_master(df_local_factory, df_seeder_factory, t_master, t_replicas, n_random_crashes, n_keys):
     master = df_local_factory.create(port=1111, proactor_threads=t_master)
     replicas = [
         df_local_factory.create(
@@ -270,11 +270,10 @@ async def test_disconnect_master(df_local_factory, t_master, t_replicas, n_rando
         for i, t in enumerate(t_replicas)
     ]
 
-    seeder = DflySeeder(port=master.port, keys=n_keys, dbcount=2)
-
     df_local_factory.start_all(replicas)
-
     c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
+
+    seeder = df_seeder_factory.create(port=master.port, keys=n_keys, dbcount=2)
 
     async def crash_master_fs():
         await asyncio.sleep(random.random() / 10 + 0.1 * len(replicas))
