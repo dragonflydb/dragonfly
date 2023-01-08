@@ -79,6 +79,8 @@ void SliceSnapshot::Stop() {
 }
 
 void SliceSnapshot::Cancel() {
+  VLOG(1) << "SliceSnapshot::Cancel";
+
   CloseRecordChannel();
   if (journal_cb_id_) {
     db_slice_->shard_owner()->journal()->UnregisterOnChange(journal_cb_id_);
@@ -125,7 +127,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
       current_db_ = db_indx;
     }
 
-    VLOG(1) << "Start traversing " << pt->size() << " items";
+    VLOG(1) << "Start traversing " << pt->size() << " items for index " << db_indx;
     do {
       if (cll->IsCancelled())
         return;
@@ -135,12 +137,12 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
       cursor = next;
       FlushDefaultBuffer(false);
 
-      if (stats_.serialized >= last_yield + 100) {
+      if (stats_.loop_serialized >= last_yield + 100) {
         DVLOG(2) << "Before sleep " << this_fiber::properties<FiberProps>().name();
         fibers_ext::Yield();
         DVLOG(2) << "After sleep";
 
-        last_yield = stats_.serialized;
+        last_yield = stats_.loop_serialized;
         // flush in case other fibers (writes commands that pushed previous values)
         // filled the buffer.
         FlushDefaultBuffer(false);
@@ -160,20 +162,12 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
     CHECK(!default_serializer_->SendFullSyncCut());
   FlushDefaultBuffer(true);
 
-  VLOG(1) << "Exit SnapshotSerializer (serialized/side_saved/cbcalls): " << stats_.serialized << "/"
-          << stats_.side_saved << "/" << stats_.savecb_calls;
+  // serialized + side_saved must be equal to the total saved.
+  VLOG(1) << "Exit SnapshotSerializer (loop_serialized/side_saved/cbcalls): "
+          << stats_.loop_serialized << "/" << stats_.side_saved << "/" << stats_.savecb_calls;
 }
 
 bool SliceSnapshot::BucketSaveCb(PrimeIterator it) {
-  // if we touched that physical bucket - skip it.
-  // We must make sure we TraverseBucket exactly once for each physical bucket.
-  // This test is the first one because it's likely to be the fastest one:
-  // physical_mask_ is likely to be loaded in L1 and bucket_id() does not require accesing the
-  // prime_table.
-  /*if (physical_mask_.test(it.bucket_id())) {
-    return false;
-  }*/
-
   ++stats_.savecb_calls;
 
   uint64_t v = it.GetVersion();
@@ -185,7 +179,7 @@ bool SliceSnapshot::BucketSaveCb(PrimeIterator it) {
     return false;
   }
 
-  ++stats_.serialized += SerializeBucket(current_db_, it);
+  stats_.loop_serialized += SerializeBucket(current_db_, it);
   return false;
 }
 
@@ -216,6 +210,7 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
 
   if (tmp_serializer) {
     PushBytesToChannel(db_index, tmp_serializer->Flush());
+    VLOG(1) << "Pushed " << result << " entries via tmp_serializer";
   }
 
   return result;
@@ -237,7 +232,13 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
 }
 
 void SliceSnapshot::PushBytesToChannel(DbIndex db_index, io::Bytes bytes) {
-  dest_->Push(GetDbRecord(db_index, std::string{io::View(bytes)}));
+  auto id = rec_id_++;
+  DVLOG(2) << "Pushed " << id;
+
+  stats_.channel_bytes += bytes.size();
+  DbRecord db_rec{.db_index = db_index, .id = id, .value = string(io::View(bytes))};
+
+  dest_->Push(std::move(db_rec));
 }
 
 bool SliceSnapshot::FlushDefaultBuffer(bool force) {
@@ -308,14 +309,6 @@ void SliceSnapshot::CloseRecordChannel() {
   if (closed_chan_.compare_exchange_strong(expected, true)) {
     dest_->StartClosing();
   }
-}
-
-SliceSnapshot::DbRecord SliceSnapshot::GetDbRecord(DbIndex db_index, std::string value) {
-  auto id = rec_id_++;
-  DVLOG(2) << "Pushed " << id;
-
-  stats_.channel_bytes += value.size();
-  return DbRecord{.db_index = db_index, .id = id, .value = std::move(value)};
 }
 
 }  // namespace dfly
