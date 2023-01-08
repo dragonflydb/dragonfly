@@ -593,13 +593,11 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
   // Else, replicate as PEXPIREAT with exact time.
   if (auto journal = op_args.shard->journal(); journal && res.ok()) {
     if (res.value() == -1) {
-      journal->RecordEntry(op_args.txid, op_args.db_cntx.db_index,
-                           make_pair("DEL"sv, ArgSlice{key}), 1);
+      op_args.RecordJournal("DEL"sv, ArgSlice{key});
     } else {
       auto time = absl::StrCat(res.value());
       // TODO: Don't forget to change this when adding arguments to expire commands.
-      journal->RecordEntry(op_args.txid, op_args.db_cntx.db_index,
-                           make_pair("PEXPIREAT"sv, ArgSlice{time}), 1);
+      op_args.RecordJournal("PEXPIREAT"sv, ArgSlice{time});
     }
   }
 
@@ -621,7 +619,7 @@ void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
   atomic_uint32_t result{0};
   bool is_mc = cntx->protocol() == Protocol::MEMCACHE;
 
-  auto cb = [&result](Transaction* t, EngineShard* shard) {
+  auto cb = [&result](const Transaction* t, EngineShard* shard) {
     ArgSlice args = t->ShardArgsInShard(shard->shard_id());
     auto res = OpDel(t->GetOpArgs(shard), args);
     result.fetch_add(res.value_or(0), memory_order_relaxed);
@@ -817,7 +815,7 @@ void GenericFamily::Stick(CmdArgList args, ConnectionContext* cntx) {
 
   atomic_uint32_t result{0};
 
-  auto cb = [&result](Transaction* t, EngineShard* shard) {
+  auto cb = [&result](const Transaction* t, EngineShard* shard) {
     ArgSlice args = t->ShardArgsInShard(shard->shard_id());
     auto res = OpStick(t->GetOpArgs(shard), args);
     result.fetch_add(res.value_or(0), memory_order_relaxed);

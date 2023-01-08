@@ -757,7 +757,6 @@ void Replica::StableSyncDflyFb(Context* cntx) {
       cntx->ReportError(res.error(), "Journal format error");
       return;
     }
-
     ExecuteEntry(&executor, std::move(res.value()));
     last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
   }

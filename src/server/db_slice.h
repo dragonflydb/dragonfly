@@ -304,15 +304,7 @@ class DbSlice {
 
   // Invalidate all watched keys in database. Used on FLUSH.
   void InvalidateDbWatches(DbIndex db_indx);
-  /*
-    void SetDeleteCallback(std::function<void(std::string_view)>&& cb) {
-      jorunal_delete_cb_ = std::move(cb);
-    }
 
-    void ResetDeleteCallback() {
-      jorunal_delete_cb_ = std::function<void(std::string_view)>{};
-    }
-  */
  private:
   std::pair<PrimeIterator, bool> AddOrUpdateInternal(const Context& cntx, std::string_view key,
                                                      PrimeValue obj, uint64_t expire_at_ms,

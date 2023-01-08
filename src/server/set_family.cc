@@ -965,8 +965,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
 
     // Replicate as DEL.
     if (auto journal = op_args.shard->journal(); journal) {
-      journal->RecordEntry(op_args.txid, op_args.db_cntx.db_index,
-                           make_pair("DEL"sv, ArgSlice{key}), 1);
+      op_args.RecordJournal("DEL"sv, ArgSlice{key});
     }
   } else {
     SetType st{it->second.RObjPtr(), it->second.Encoding()};
@@ -992,7 +991,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
       vector<string_view> mapped(result.size() + 1);
       mapped[0] = key;
       std::copy(result.begin(), result.end(), mapped.begin() + 1);
-      journal->RecordEntry(op_args.txid, op_args.db_cntx.db_index, make_pair("SREM"sv, mapped), 1);
+      op_args.RecordJournal("SREM"sv, mapped);
     }
 
     db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);

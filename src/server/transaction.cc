@@ -1205,8 +1205,8 @@ void Transaction::LogJournalOnShard(EngineShard* shard) {
   if (shard == nullptr)
     return;
 
-  // Ignore custom journal or non-write commands.
-  if ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) > 0 || (cid_->opt_mask() & CO::WRITE) == 0)
+  // Ignore non-write commands or ones with disabled autojournal.
+  if ((cid_->opt_mask() & CO::WRITE) == 0 || (cid_->opt_mask() & CO::NO_AUTOJOURNAL) > 0)
     return;
 
   auto journal = shard->journal();

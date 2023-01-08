@@ -87,8 +87,11 @@ struct OpArgs {
   OpArgs() : shard(nullptr), txid(0) {
   }
 
-  OpArgs(EngineShard* s, TxId, const DbContext& cntx) : shard(s), txid(0), db_cntx(cntx) {
+  OpArgs(EngineShard* s, TxId txid, const DbContext& cntx) : shard(s), txid(txid), db_cntx(cntx) {
   }
+
+  // Log single-shard journal command with own txid and dbid.
+  void RecordJournal(std::string_view cmd, ArgSlice args) const;
 };
 
 struct TieredStats {
