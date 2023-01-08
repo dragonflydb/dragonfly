@@ -164,16 +164,8 @@ void Replica::Stop() {
 
   // Make sure the replica fully stopped and did all cleanup,
   // so we can freely release resources (connections).
-
-  // TODO: Vlad, shouldnt we call here Replica::JoinAllFlows()?
-  // can it be that sync_fb_ of execution_fb_ are valid? Stop is called from server family
-  // not for replica flows
-  if (sync_fb_.joinable()) {
+  if (sync_fb_.joinable())
     sync_fb_.join();
-  }
-  if (execution_fb_.joinable()) {
-    execution_fb_.join();
-  }
 }
 
 void Replica::Pause(bool pause) {
@@ -574,8 +566,11 @@ error_code Replica::ConsumeDflyStream() {
     // Make sure the flows are not in a state transition
     lock_guard lk{flows_op_mu_};
     DefaultErrorHandler(ge);
-    for (auto& flow : shard_flows_)
+    for (auto& flow : shard_flows_) {
       flow->CloseSocket();
+      flow->waker_.notifyAll();
+    }
+
     // Iterate over map and cancle all blocking entities
     {
       lock_guard{multi_shard_exe_->map_mu};
@@ -605,10 +600,6 @@ error_code Replica::ConsumeDflyStream() {
   }
 
   JoinAllFlows();
-
-  // TODO: Vlad I want to make sure we dont need cleanup here of shared map and flow queues
-  // If I understand the reason we dont have cleanup is because after we exit here replica class
-  // is distroyed?
 
   // The only option to unblock is to cancel the context.
   CHECK(cntx_.GetError());
