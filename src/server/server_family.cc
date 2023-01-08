@@ -645,7 +645,8 @@ void AppendMetricWithoutLabels(string_view name, string_view help, const absl::A
 
 void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   // Server metrics
-  AppendMetricWithoutLabels("up", "", 1, MetricType::GAUGE, &resp->body());
+  AppendMetricHeader("version", "", MetricType::GAUGE, &resp->body());
+  AppendMetricValue("version", 1, {"version"}, {GetVersion()}, &resp->body());
   AppendMetricWithoutLabels("uptime_in_seconds", "", m.uptime, MetricType::GAUGE, &resp->body());
 
   // Clients metrics
@@ -657,6 +658,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             MetricType::GAUGE, &resp->body());
 
   // Memory metrics
+  auto sdata_res = io::ReadStatusInfo();
   AppendMetricWithoutLabels("memory_used_bytes", "", m.heap_used_bytes, MetricType::GAUGE,
                             &resp->body());
   AppendMetricWithoutLabels("memory_used_peak_bytes", "", used_mem_peak.load(memory_order_relaxed),
@@ -665,9 +667,21 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             &resp->body());
   AppendMetricWithoutLabels("memory_max_bytes", "", max_memory_limit, MetricType::GAUGE,
                             &resp->body());
+  if (sdata_res.has_value()) {
+    AppendMetricWithoutLabels("used_memory_rss_bytes", "", sdata_res->vm_rss, MetricType::GAUGE,
+                              &resp->body());
+  } else {
+    LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
+                           << sdata_res.error().message();
+  }
 
+  // Stats metrics
   AppendMetricWithoutLabels("commands_processed_total", "", m.conn_stats.command_cnt,
                             MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("keyspace_hits_total", "", m.events.hits, MetricType::COUNTER,
+                            &resp->body());
+  AppendMetricWithoutLabels("keyspace_misses_total", "", m.events.misses, MetricType::COUNTER,
+                            &resp->body());
 
   // Net metrics
   AppendMetricWithoutLabels("net_input_bytes_total", "", m.conn_stats.io_read_bytes,

@@ -97,6 +97,10 @@ volumes:
   - name: tls
     secret:
       secretName: {{ .Values.tls.existing_secret }}
+  {{- else if .Values.tls.createCerts }}
+  - name: tls
+    secret:
+      secretName: '{{ include "dragonfly.fullname" . }}-server-tls'
   {{- else }}
   - name: tls
     secret:

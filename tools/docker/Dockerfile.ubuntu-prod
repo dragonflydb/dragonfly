@@ -21,7 +21,7 @@ FROM ubuntu:20.04
 ARG QEMU_CPU
 ARG DEBIAN_FRONTEND=noninteractive
 
-RUN apt clean && apt update && apt -y install netcat-openbsd
+RUN apt clean && apt update && apt -y install netcat-openbsd ca-certificates
 
 
 RUN groupadd -r -g 999 dfly && useradd -r -g dfly -u 999 dfly

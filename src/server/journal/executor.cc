@@ -15,37 +15,21 @@ JournalExecutor::JournalExecutor(Service* service)
   conn_context_.journal_emulated = true;
 }
 
-void JournalExecutor::Execute(std::vector<journal::ParsedEntry>& entries) {
-  DCHECK_GT(entries.size(), 1U);
-  conn_context_.conn_state.db_index = entries.front().dbid;
-
-  std::string multi_cmd = {"MULTI"};
-  auto ms = MutableSlice{&multi_cmd[0], multi_cmd.size()};
-  auto span = CmdArgList{&ms, 1};
-  service_->DispatchCommand(span, &conn_context_);
-
-  for (auto& entry : entries) {
-    if (entry.payload) {
-      DCHECK_EQ(entry.dbid, conn_context_.conn_state.db_index);
-      span = CmdArgList{entry.payload->data(), entry.payload->size()};
-
-      service_->DispatchCommand(span, &conn_context_);
-    }
+void JournalExecutor::Execute(DbIndex dbid, std::vector<journal::ParsedEntry::CmdData>& cmds) {
+  conn_context_.conn_state.db_index = dbid;
+  for (auto& cmd : cmds) {
+    Execute(cmd);
   }
-
-  std::string exec_cmd = {"EXEC"};
-  ms = {&exec_cmd[0], exec_cmd.size()};
-  span = {&ms, 1};
-  service_->DispatchCommand(span, &conn_context_);
 }
 
-void JournalExecutor::Execute(journal::ParsedEntry& entry) {
-  conn_context_.conn_state.db_index = entry.dbid;
-  if (entry.payload) {  // TODO - when this is false?
-    auto span = CmdArgList{entry.payload->data(), entry.payload->size()};
+void JournalExecutor::Execute(DbIndex dbid, journal::ParsedEntry::CmdData& cmd) {
+  conn_context_.conn_state.db_index = dbid;
+  Execute(cmd);
+}
 
-    service_->DispatchCommand(span, &conn_context_);
-  }
+void JournalExecutor::Execute(journal::ParsedEntry::CmdData& cmd) {
+  auto span = CmdArgList{cmd.cmd_args.data(), cmd.cmd_args.size()};
+  service_->DispatchCommand(span, &conn_context_);
 }
 
 }  // namespace dfly

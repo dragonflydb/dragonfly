@@ -95,6 +95,24 @@ redis-cli PING  # redis-cli can be installed with "apt install -y redis-tools"
 
 *You need `--ulimit memlock=-1` because some Linux distros configure the default memlock limit for containers as 64m and Dragonfly requires more.*
 
+### With docker-compose:
+```yaml
+version: "3.9"
+
+services:
+  dragonfly: # the new redis
+    image: docker.dragonflydb.io/dragonflydb/dragonfly
+    command:
+      - "--save_schedule=*:*" # save for every 1 minute
+      - "--dir=/data"
+      - "--dbfilename=dump.rdb"
+    ports:
+      - '6379:6379'
+    volumes:
+      - "./dragonfly_data:/data"
+    restart: unless-stopped
+```
+
 ### Releases
 We maintain [binary releases](https://github.com/dragonflydb/dragonfly/releases) for x86 and arm64 architectures. You will need to install `libunwind8` lib to run the binaries.
 

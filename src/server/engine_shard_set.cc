@@ -35,10 +35,10 @@ ABSL_FLAG(float, mem_defrag_threshold, 0.7,
           "Minimum percentage of used memory relative to maxmemory cap before running "
           "defragmentation");
 
-ABSL_FLAG(float, commit_use_threshold, 1.3,
-          "The ratio of commited/used memory above which we run defragmentation");
+ABSL_FLAG(float, mem_defrag_waste_threshold, 0.2,
+          "The ratio of wasted/commited memory above which we run defragmentation");
 
-ABSL_FLAG(float, mem_utilization_threshold, 0.8,
+ABSL_FLAG(float, mem_defrag_page_utilization_threshold, 0.8,
           "memory page under utilization threshold. Ratio between used and commited size, below "
           "this, memory in this page will defragmented");
 namespace dfly {
@@ -53,6 +53,24 @@ constexpr DbIndex kDefaultDbIndex = 0;
 constexpr uint64_t kCursorDoneState = 0u;
 
 vector<EngineShardSet::CachedStats> cached_stats;  // initialized in EngineShardSet::Init
+
+struct ShardMemUsage {
+  std::size_t commited = 0;
+  std::size_t used = 0;
+  std::size_t wasted_mem = 0;
+};
+
+std::ostream& operator<<(std::ostream& os, const ShardMemUsage& mem) {
+  return os << "commited: " << mem.commited << " vs used " << mem.used << ", wasted memory "
+            << mem.wasted_mem;
+}
+
+ShardMemUsage ReadShardMemUsage(float wasted_ratio) {
+  ShardMemUsage usage;
+  zmalloc_get_allocator_wasted_blocks(wasted_ratio, &usage.used, &usage.commited,
+                                      &usage.wasted_mem);
+  return usage;
+}
 
 }  // namespace
 
@@ -72,37 +90,39 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
   return *this;
 }
 
+void EngineShard::DefragTaskState::UpdateScanState(uint64_t cursor_val) {
+  cursor = cursor_val;
+  underutilized_found = false;
+}
+
 // This function checks 3 things:
 // 1. Don't try memory fragmentation if we don't use "enough" memory (control by
 // mem_defrag_threshold flag)
-// 2. That we had change in memory usage - to prevent endless loop - out of scope for now
+// 2. We have memory blocks that can be better utilized (there is a "wasted memory" in them).
 // 3. in case the above is OK, make sure that we have a "gap" between usage and commited memory
-// (control by commit_use_threshold flag)
-bool EngineShard::DefragTaskState::IsRequired() const {
-  const int64_t threshold_mem = max_memory_limit * GetFlag(FLAGS_mem_defrag_threshold);
-  const double commit_use_threshold = GetFlag(FLAGS_commit_use_threshold);
-
-  if (cursor > kCursorDoneState) {
+// (control by mem_defrag_waste_threshold flag)
+bool EngineShard::DefragTaskState::CheckRequired() {
+  if (cursor > kCursorDoneState || underutilized_found) {
+    VLOG(1) << "Already found memory utilization issue - cursor: " << cursor
+            << " and underutilized_found " << underutilized_found;
     return true;
   }
+  const std::size_t memory_per_shard = max_memory_limit / shard_set->size();
 
-  // can be negative due to weird accounting of mimalloc.
-  int64_t commited = GetMallocCurrentCommitted();
+  const std::size_t threshold_mem = memory_per_shard * GetFlag(FLAGS_mem_defrag_threshold);
+  const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
 
-  uint64_t mem_in_use = used_mem_current.load(memory_order_relaxed);
+  ShardMemUsage usage = ReadShardMemUsage(GetFlag(FLAGS_mem_defrag_page_utilization_threshold));
 
-  // we want to make sure that we are not running this to many times - i.e.
-  // if there was no change to the memory, don't run this
-  if (threshold_mem < commited && mem_in_use > 0 &&
-      (uint64_t(mem_in_use * commit_use_threshold) < uint64_t(commited))) {
-    // we have way more commited then actual usage
-    return true;
+  if (threshold_mem < usage.commited &&
+      usage.wasted_mem > (uint64_t(usage.commited * waste_threshold))) {
+    VLOG(1) << "memory issue found for memory " << usage;
+    underutilized_found = true;
   }
 
   return false;
 }
 
-// for now this does nothing
 bool EngineShard::DoDefrag() {
   // --------------------------------------------------------------------------
   // NOTE: This task is running with exclusive access to the shard.
@@ -111,8 +131,8 @@ bool EngineShard::DoDefrag() {
   // context of the controlling thread will access this shard!
   // --------------------------------------------------------------------------
 
-  constexpr size_t kMaxTraverses = 50;
-  const float threshold = GetFlag(FLAGS_mem_utilization_threshold);
+  constexpr size_t kMaxTraverses = 40;
+  const float threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
 
   auto& slice = db_slice();
   DCHECK(slice.IsDbValid(kDefaultDbIndex));
@@ -135,15 +155,15 @@ bool EngineShard::DoDefrag() {
     traverses_count++;
   } while (traverses_count < kMaxTraverses && cur);
 
-  defrag_state_.cursor = cur.value();
+  defrag_state_.UpdateScanState(cur.value());
   if (reallocations > 0) {
     VLOG(1) << "shard " << slice.shard_id() << ": successfully defrag  " << reallocations
             << " times, did it in " << traverses_count << " cursor is at the "
-            << (defrag_state_.cursor == 0 ? "end" : "in progress");
+            << (defrag_state_.cursor == kCursorDoneState ? "end" : "in progress");
   } else {
     VLOG(1) << "shard " << slice.shard_id() << ": run the defrag " << traverses_count
             << " times out of maximum " << kMaxTraverses << ", with cursor at "
-            << (defrag_state_.cursor == 0 ? "end" : "in progress")
+            << (defrag_state_.cursor == kCursorDoneState ? "end" : "in progress")
             << " but no location for defrag were found";
   }
   stats_.defrag_realloc_total += reallocations;
@@ -155,8 +175,7 @@ bool EngineShard::DoDefrag() {
 // the memory defragmentation task is as follow:
 //  1. Check if memory usage is high enough
 //  2. Check if diff between commited and used memory is high enough
-//  3. Check if we have memory changes (to ensure that we not running endlessly). - TODO
-//  4. if all the above pass -> scan this shard and try to find whether we can move pointer to
+//  3. if all the above pass -> scan this shard and try to find whether we can move pointer to
 //  underutilized pages values
 //     if the cursor returned from scan is not in done state, schedule the task to run at high
 //     priority.
@@ -164,14 +183,15 @@ bool EngineShard::DoDefrag() {
 uint32_t EngineShard::DefragTask() {
   constexpr uint32_t kRunAtLowPriority = 0u;
   const auto shard_id = db_slice().shard_id();
-  if (defrag_state_.IsRequired()) {
-    VLOG(1) << shard_id << ": need to run defrag memory cursor state: " << defrag_state_.cursor;
+
+  if (defrag_state_.CheckRequired()) {
+    VLOG(1) << shard_id << ": need to run defrag memory cursor state: " << defrag_state_.cursor
+            << ", underutilzation found: " << defrag_state_.underutilized_found;
     if (DoDefrag()) {
       // we didn't finish the scan
       return util::ProactorBase::kOnIdleMaxLevel;
     }
   }
-
   return kRunAtLowPriority;
 }
 

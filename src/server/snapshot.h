@@ -112,9 +112,6 @@ class SliceSnapshot {
   // Return if flushed.
   bool FlushDefaultBuffer(bool force);
 
-  // Convert value into DbRecord.
-  DbRecord GetDbRecord(DbIndex db_index, std::string value);
-
  public:
   uint64_t snapshot_version() const {
     return snapshot_version_;
@@ -156,7 +153,7 @@ class SliceSnapshot {
 
   struct Stats {
     size_t channel_bytes = 0;
-    size_t serialized = 0, skipped = 0, side_saved = 0;
+    size_t loop_serialized = 0, skipped = 0, side_saved = 0;
     size_t savecb_calls = 0;
   } stats_;
 };

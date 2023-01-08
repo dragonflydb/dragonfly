@@ -14,6 +14,7 @@
 #include <absl/strings/strip.h>
 #include <liburing.h>
 #include <mimalloc.h>
+#include <openssl/err.h>
 #include <signal.h>
 
 #include <regex>
@@ -104,25 +105,25 @@ namespace {
 
 using util::http::TlsClient;
 
-const std::string_view kInvalidVersion{"unknown version"};
-
-std::string GetVersionString(const std::string& from) {
+std::optional<std::string> GetVersionString(const std::string& version_str) {
   // The server sends a message such as {"latest": "0.12.0"}
   const auto reg_match_expr = R"(\{\"latest"\:[ \t]*\"([0-9]+\.[0-9]+\.[0-9]+)\"\})";
-  VLOG(1) << "checking version '" << from << "'";
+  VLOG(1) << "checking version '" << version_str << "'";
   auto const regex = std::regex(reg_match_expr);
   std::smatch match;
-  if (std::regex_match(from, match, regex) && match.size() > 1) {
+  if (std::regex_match(version_str, match, regex) && match.size() > 1) {
     // the second entry is the match to the group that holds the version string
     return match[1].str();
   } else {
-    return std::string{kInvalidVersion};
+    LOG_FIRST_N(WARNING, 1) << "Remote version - invalid version number: '" << version_str << "'";
+    return std::nullopt;
   }
 }
 
-std::string GetRemoteVersion(ProactorBase* proactor, SSL_CTX* ssl_context, const std::string host,
-                             std::string_view service, const std::string& resource,
-                             const std::string& ver_header) {
+std::optional<std::string> GetRemoteVersion(ProactorBase* proactor, SSL_CTX* ssl_context,
+                                            const std::string host, std::string_view service,
+                                            const std::string& resource,
+                                            const std::string& ver_header) {
   namespace bh = boost::beast::http;
   using ResponseType = bh::response<bh::string_body>;
 
@@ -134,34 +135,43 @@ std::string GetRemoteVersion(ProactorBase* proactor, SSL_CTX* ssl_context, const
   http_client.set_connect_timeout_ms(2000);
 
   auto ec = http_client.Connect(host, service, ssl_context);
-  if (!ec) {
-    ec = http_client.Send(req, &res);
-    if (!ec) {
-      VLOG(1) << "successfully got response from HTTP GET for host " << host << ":" << service
-              << "/" << resource << " response code is " << res.result();
 
-      if (res.result() == bh::status::ok) {
-        return GetVersionString(res.body());
-      }
-    } else {
-      VLOG(1) << "failed to process send HTTP GET to " << host << "@" << service << " at resource '"
-              << resource << "', error: " << ec.message();
+  if (ec) {
+    LOG_FIRST_N(WARNING, 1) << "Remote version - connection error [" << host << ":" << service
+                            << "] : " << ec.message();
+    return nullopt;
+  }
+
+  ec = http_client.Send(req, &res);
+  if (!ec) {
+    VLOG(1) << "successfully got response from HTTP GET for host " << host << ":" << service << "/"
+            << resource << " response code is " << res.result();
+
+    if (res.result() == bh::status::ok) {
+      return GetVersionString(res.body());
     }
   } else {
-    VLOG(1) << "failed to connect: " << ec.message();
+    static bool is_logged{false};
+    if (!is_logged) {
+      is_logged = true;
+      // Unfortunately AsioStreamAdapter looses the original error category
+      // because std::error_code can not be converted into boost::system::error_code.
+      // It's fixed in later versions of Boost, but for now we assume it's from TLS.
+      LOG(WARNING) << "Remote version - HTTP GET error [" << host << ":" << service << resource
+                   << "], error: " << ec.value();
+      LOG(WARNING) << "ssl error: " << ERR_func_error_string(ec.value()) << "/"
+                   << ERR_reason_error_string(ec.value());
+    }
   }
-  return std::string{kInvalidVersion};
+
+  return nullopt;
 }
 
 struct VersionMonitor {
   fibers_ext::Fiber version_fiber_;
   fibers_ext::Done monitor_ver_done_;
 
-  void Run(ProactorPool* proactor_pool) {
-    if (GetFlag(FLAGS_version_check)) {
-      version_fiber_ = proactor_pool->GetNextProactor()->LaunchFiber([this] { RunTask(); });
-    }
-  }
+  void Run(ProactorPool* proactor_pool);
 
   void Shutdown() {
     monitor_ver_done_.Notify();
@@ -171,42 +181,50 @@ struct VersionMonitor {
   }
 
  private:
-  void RunTask();
+  void RunTask(SSL_CTX* ssl_ctx);
 };
 
-void VersionMonitor::RunTask() {
+void VersionMonitor::Run(ProactorPool* proactor_pool) {
+  // Don't run in dev environment - i.e. where we don't build with
+  // real version number
+  if (!GetFlag(FLAGS_version_check) || kGitTag[0] != 'v')
+    return;
+
+  SSL_CTX* ssl_ctx = TlsClient::CreateSslContext();
+  if (!ssl_ctx) {
+    VLOG(1) << "Remote version - failed to create SSL context - cannot run version monitoring";
+    return;
+  }
+
+  version_fiber_ =
+      proactor_pool->GetNextProactor()->LaunchFiber([ssl_ctx, this] { RunTask(ssl_ctx); });
+}
+
+void VersionMonitor::RunTask(SSL_CTX* ssl_ctx) {
   const auto loop_sleep_time = std::chrono::hours(24);  // every 24 hours
 
   const std::string host_name = "version.dragonflydb.io";
   const std::string_view port = "443";
   const std::string resource = "/v1";
-  const std::string dev_version_name = "dev";
-  const std::string version_header = std::string("DragonflyDB/") + kGitTag;
+  string_view current_version(kGitTag);
 
-  // Don't run in dev environment - i.e. where we don't build with
-  // real version number
-  if (kGitTag == dev_version_name) {
-    return;
-  }
-
-  SSL_CTX* context = TlsClient::CreateSslContext();
-  if (!context) {
-    VLOG(1) << "failed to create SSL context - cannot run version monitoring";
-    return;
-  }
+  current_version.remove_prefix(1);
+  const std::string version_header = absl::StrCat("DragonflyDB/", current_version);
 
   ProactorBase* my_pb = ProactorBase::me();
   while (true) {
-    const std::string remote_version =
-        GetRemoteVersion(my_pb, context, host_name, port, resource, version_header);
-
-    if (remote_version != kGitTag) {
-      LOG_FIRST_N(INFO, 1) << "Your current version '" << kGitTag
-                           << "' is not the latest version. A newer version '" << remote_version
-                           << "' is now available. Please consider an update.";
+    const std::optional<std::string> remote_version =
+        GetRemoteVersion(my_pb, ssl_ctx, host_name, port, resource, version_header);
+    if (remote_version) {
+      const std::string rv = remote_version.value();
+      if (rv != current_version) {
+        LOG_FIRST_N(INFO, 1) << "Your current version '" << current_version
+                             << "' is not the latest version. A newer version '" << rv
+                             << "' is now available. Please consider an update.";
+      }
     }
     if (monitor_ver_done_.WaitFor(loop_sleep_time)) {
-      TlsClient::FreeContext(context);
+      TlsClient::FreeContext(ssl_ctx);
       VLOG(1) << "finish running version monitor task";
       return;
     }

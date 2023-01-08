@@ -20,7 +20,7 @@ extern "C" {
 #include "server/main_service.h"
 #include "server/test_utils.h"
 
-ABSL_DECLARE_FLAG(float, commit_use_threshold);
+ABSL_DECLARE_FLAG(float, mem_defrag_threshold);
 
 namespace dfly {
 
@@ -349,6 +349,12 @@ TEST_F(DflyEngineTest, Eval) {
   resp = Run({"eval", "return redis.call('exists', KEYS[2])", "2", "a", "b"});
   EXPECT_EQ(2, GetDebugInfo().shards_count);
   EXPECT_THAT(resp, IntArg(0));
+
+  resp = Run({"eval", "return redis.call('hmset', KEYS[1], 'f1', '2222')", "1", "hmap"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"hvals", "hmap"});
+  EXPECT_EQ(resp, "2222");
 }
 
 TEST_F(DflyEngineTest, EvalResp) {
@@ -788,32 +794,22 @@ TEST_F(DflyEngineTest, Issue706) {
 }
 
 TEST_F(DefragDflyEngineTest, TestDefragOption) {
-  absl::SetFlag(&FLAGS_commit_use_threshold, 1.1);
-  // Fill data into dragonfly and then check if we have
-  // any location in memory to defrag. See issue #448 for details about this.
+  absl::SetFlag(&FLAGS_mem_defrag_threshold, 0.02);
+  //  Fill data into dragonfly and then check if we have
+  //  any location in memory to defrag. See issue #448 for details about this.
   constexpr size_t kMaxMemoryForTest = 1'100'000;
   constexpr int kNumberOfKeys = 1'000;  // this fill the memory
   constexpr int kKeySize = 637;
-  constexpr int kMaxDefragTriesForTests = 10;
-  constexpr int kFactor = 10;
-  constexpr int kMaxNumKeysToDelete = 100;
+  constexpr int kMaxDefragTriesForTests = 30;
+  constexpr int kFactor = 4;
 
   max_memory_limit = kMaxMemoryForTest;  // control memory size so no need for too many keys
-  shard_set->TEST_EnableHeartBeat();     // enable use memory update (used_mem_current)
-
   std::vector<std::string> keys2delete;
   keys2delete.push_back("del");
 
-  // Generate a list of keys that would be deleted
-  // The keys that we will delete are all in the form of "key-name:1<other digits>"
-  // This is because we are populating keys that has this format, but we don't want
-  // to delete all keys, only some random keys so we deleting those that start with 1
-  int current_step = kFactor;
-  for (int i = 1; i < kMaxNumKeysToDelete; current_step *= kFactor) {
-    for (; i < current_step; i++) {
-      int j = i - 1 + current_step;
-      keys2delete.push_back("key-name:" + std::to_string(j));
-    }
+  // create keys that we would like to remove, try to make it none adjusting locations
+  for (int i = 0; i < kNumberOfKeys; i += kFactor) {
+    keys2delete.push_back("key-name:" + std::to_string(i));
   }
 
   std::vector<std::string_view> keys(keys2delete.begin(), keys2delete.end());
@@ -829,20 +825,21 @@ TEST_F(DefragDflyEngineTest, TestDefragOption) {
     EngineShard* shard = EngineShard::tlocal();
     ASSERT_FALSE(shard == nullptr);  // we only have one and its should not be empty!
     fibers_ext::SleepFor(100ms);
-    auto mem_used = 0;
+
     // make sure that the task that collect memory usage from all shard ran
     // for at least once, and that no defrag was done yet.
-    for (int i = 0; i < 3 && mem_used == 0; i++) {
+    auto stats = shard->stats();
+    for (int i = 0; i < 3; i++) {
       fibers_ext::SleepFor(100ms);
-      EXPECT_EQ(shard->stats().defrag_realloc_total, 0);
-      mem_used = used_mem_current.load(memory_order_relaxed);
+      EXPECT_EQ(stats.defrag_realloc_total, 0);
     }
   });
 
   ArgSlice delete_cmd(keys);
   r = CheckedInt(delete_cmd);
+  LOG(WARNING) << "finish deleting memory entries " << r;
   // the first element in this is the command del so size is one less
-  ASSERT_EQ(r, kMaxNumKeysToDelete - 1);
+  ASSERT_EQ(r, keys2delete.size() - 1);
   // At this point we need to see whether we did running the task and whether the task did something
   shard_set->pool()->AwaitFiberOnAll([&](unsigned index, ProactorBase* base) {
     EngineShard* shard = EngineShard::tlocal();
@@ -850,11 +847,8 @@ TEST_F(DefragDflyEngineTest, TestDefragOption) {
     // a "busy wait" to ensure that memory defragmentations was successful:
     // the task ran and did it work
     auto stats = shard->stats();
-    for (int i = 0; i < kMaxDefragTriesForTests; i++) {
+    for (int i = 0; i < kMaxDefragTriesForTests && stats.defrag_realloc_total == 0; i++) {
       stats = shard->stats();
-      if (stats.defrag_realloc_total > 0) {
-        break;
-      }
       fibers_ext::SleepFor(220ms);
     }
     // make sure that we successfully found places to defrag in memory

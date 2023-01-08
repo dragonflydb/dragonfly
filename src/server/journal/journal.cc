@@ -115,6 +115,10 @@ void Journal::RecordEntry(const Entry& entry) {
   journal_slice.AddLogRecord(entry);
 }
 
+TxId Journal::GetLastTxId() {
+  return journal_slice.GetLastTxId();
+}
+
 /*
 void Journal::OpArgs(TxId txid, Op opcode, Span keys) {
   DCHECK(journal_slice.IsOpen());

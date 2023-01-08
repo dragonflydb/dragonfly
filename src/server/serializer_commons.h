@@ -19,7 +19,7 @@ using nonstd::make_unexpected;
       VLOG(1) << "Error while calling " #expr; \
       return exp_val.error();                  \
     }                                          \
-    dest = exp_val.value();                    \
+    dest = std::move(exp_val.value());         \
   } while (0)
 
 #define SET_OR_UNEXPECT(expr, dest)            \

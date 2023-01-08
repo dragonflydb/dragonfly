@@ -111,6 +111,13 @@ size_t zmalloc_get_smap_bytes_by_field(char *field, long pid);
 size_t zmalloc_get_memory_size(void);
 size_t zmalloc_usable_size(const void* p);
 
+/* get the memory usage + the number of wasted locations of memory
+Based on a given threshold (ratio < 1).
+Note that if a block is not used, it would not counted as wasted
+*/
+int zmalloc_get_allocator_wasted_blocks(float ratio, size_t* allocated, size_t* commited,
+                                        size_t* wasted);
+
 /*
  * checks whether a page that the pointer ptr located at is underutilized.
  * This uses the current local thread heap.
