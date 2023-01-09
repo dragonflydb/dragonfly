@@ -60,6 +60,7 @@ class Replica {
     std::vector<journal::ParsedEntry::CmdData> commands;
     // Update the data from ParsedEntry and return if all shard transaction commands were recieved.
     bool UpdateFromParsedEntry(journal::ParsedEntry&& entry);
+    bool IsGlobalCmd() const;
   };
 
   struct MultiShardExecution {
@@ -69,9 +70,8 @@ class Replica {
       util::fibers_ext::Barrier barrier;
       std::atomic_uint32_t counter;
       util::fibers_ext::BlockingCounter block;
-      bool is_global_cmd;
-      TxExecutionSync(uint32_t counter, bool is_global)
-          : barrier(counter), counter(counter), block(counter), is_global_cmd(is_global) {
+
+      TxExecutionSync(uint32_t counter) : barrier(counter), counter(counter), block(counter) {
       }
     };
 
@@ -158,9 +158,10 @@ class Replica {
   // Send command, update last_io_time, return error.
   std::error_code SendCommand(std::string_view command, facade::ReqSerializer* serializer);
 
-  void ExecuteTx(JournalExecutor* executor, TranactionData&& tx_data, bool inserted_by_me,
-                 Context* cntx);
-  void InsertTxDataToShardResource(TranactionData&& tx_data, Context* cntx);
+  void ExecuteTx(TranactionData&& tx_data, bool inserted_by_me, Context* cntx);
+  void InsertTxDataToShardResource(TranactionData&& tx_data);
+  void ExecuteTxWithNoShardSync(TranactionData&& tx_data, Context* cntx);
+  bool InsertTxToSharedMap(const TranactionData& tx_data);
 
  public: /* Utility */
   struct Info {
@@ -199,6 +200,8 @@ class Replica {
   std::queue<std::pair<TranactionData, bool>> trans_data_queue_;
   static constexpr size_t kYieldAfterItemsInQueue = 50;
   ::util::fibers_ext::EventCount waker_;
+  bool use_multi_shard_exe_sync_;
+  std::unique_ptr<JournalExecutor> executor_;
 
   // MainReplicationFb in standalone mode, FullSyncDflyFb in flow mode.
   ::boost::fibers::fiber sync_fb_;
