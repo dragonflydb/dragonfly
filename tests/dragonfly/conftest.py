@@ -142,6 +142,7 @@ def pytest_addoption(parser):
     Custom pytest options:
         --gdb - start all instances inside gdb
         --df arg - pass arg to all instances, can be used multiple times
+        --log-seeder file - to log commands of last seeder run
     """
     parser.addoption(
         '--gdb', action='store_true', default=False, help='Run instances in gdb'

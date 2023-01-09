@@ -25,6 +25,17 @@ def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
 
 
+def gen_test_data(n, start=0, seed=None):
+    for i in range(start, n):
+        yield "k-"+str(i), "v-"+str(i) + ("-"+str(seed) if seed else "")
+
+
+def batch_fill_data(client, gen):
+    BATCH_SIZE = 100
+    for group in chunked(BATCH_SIZE, gen):
+        client.mset({k: v for k, v, in group})
+
+
 async def wait_available_async(client: aioredis.Redis):
     """Block until instance exits loading phase"""
     its = 0
@@ -148,7 +159,7 @@ class CommandGenerator:
             return ' '.join(str(random.randint(0, self.val_size)) + ' ' + rand_str()
                             for _ in range(self.val_size//4))
 
-    def make_shrink(self):
+    def gen_shrink_cmd(self):
         """
         Generate command that shrinks data: DEL of random keys.
         """
@@ -160,7 +171,7 @@ class CommandGenerator:
             return None, 0
         return "DEL " + " ".join(keys), -len(keys)
 
-    NO_CHANGE_ACTIONS = [
+    UPDATE_ACTIONS = [
         ('APPEND {k} {val}', ValueType.STRING),
         ('SETRANGE {k} 10 {val}', ValueType.STRING),
         ('LPUSH {k} {val}', ValueType.LIST),
@@ -173,11 +184,11 @@ class CommandGenerator:
         #('ZADD {k} 0 {val}', ValueType.ZSET)
     ]
 
-    def make_no_change(self):
+    def gen_update_cmd(self):
         """
-        Generate command that makes no change to keyset: random of NO_CHANGE_ACTIONS.
+        Generate command that makes no change to keyset: random of UPDATE_ACTIONS.
         """
-        cmd, t = random.choice(self.NO_CHANGE_ACTIONS)
+        cmd, t = random.choice(self.UPDATE_ACTIONS)
         k, _ = self.randomize_key(t)
         val = ''.join(random.choices(string.ascii_letters, k=4))
         return cmd.format(k=f"k{k}", val=val) if k is not None else None, 0
@@ -190,7 +201,7 @@ class CommandGenerator:
         ValueType.ZSET: 'ZADD'
     }
 
-    def make_grow(self):
+    def gen_grow_cmd(self):
         """
         Generate command that grows keyset: Initialize key of random type with filler value.
         """
@@ -208,11 +219,11 @@ class CommandGenerator:
     def make(self, action):
         """ Create command for action and return it together with number of keys added (removed)"""
         if action == SizeChange.SHRINK:
-            return self.make_shrink()
+            return self.gen_shrink_cmd()
         elif action == SizeChange.NO_CHANGE:
-            return self.make_no_change()
+            return self.gen_update_cmd()
         else:
-            return self.make_grow()
+            return self.gen_grow_cmd()
 
     def reset(self):
         self.key_sets = [set() for _ in ValueType]
@@ -325,7 +336,7 @@ class DflySeeder:
         producer = asyncio.create_task(self._generator_task(
             queues, target_times=target_times, target_deviation=target_deviation))
         consumers = [
-            asyncio.create_task(self._consumer_task(i, queue))
+            asyncio.create_task(self._executor_task(i, queue))
             for i, queue in enumerate(queues)
         ]
 
@@ -356,7 +367,9 @@ class DflySeeder:
             keys = sorted(list(self.gen.keys_and_types()))
 
         client = aioredis.Redis(port=port, db=target_db)
-        return DataCapture(await self._capture_entries(client, keys))
+        capture = DataCapture(await self._capture_entries(client, keys))
+        await client.connection_pool.disconnect()
+        return capture
 
     async def compare(self, initial_capture, port=6379):
         """Compare data capture with all dbs of instance and return True if all dbs are correct"""
@@ -417,7 +430,7 @@ class DflySeeder:
 
         return submitted * self.gen.batch_size
 
-    async def _consumer_task(self, db, queue):
+    async def _executor_task(self, db, queue):
         client = aioredis.Redis(port=self.port, db=db)
         while True:
             cmds = await queue.get()
@@ -431,6 +444,7 @@ class DflySeeder:
 
             await pipe.execute()
             queue.task_done()
+        await client.connection_pool.disconnect()
 
     CAPTURE_COMMANDS = {
         ValueType.STRING: lambda pipe, k: pipe.get(k),

@@ -5,7 +5,7 @@ import glob
 from pathlib import Path
 
 from . import dfly_args
-from .utility import DflySeeder
+from .utility import DflySeeder, wait_available_async
 
 BASIC_ARGS = {"dir": "{DRAGONFLY_TMP}/"}
 
@@ -15,9 +15,6 @@ SEEDER_ARGS = dict(keys=12_000, dbcount=5)
 class SnapshotTestBase:
     def setup(self, tmp_dir: Path):
         self.tmp_dir = tmp_dir
-        self.rdb_out = tmp_dir / "test.rdb"
-        if self.rdb_out.exists():
-            self.rdb_out.unlink()
 
     def get_main_file(self, suffix):
         def is_main(f): return "summary" in f if suffix == "dfs" else True
@@ -25,7 +22,7 @@ class SnapshotTestBase:
         return next(f for f in sorted(files) if is_main(f))
 
 
-@dfly_args({**BASIC_ARGS, "dbfilename": "test"})
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-rdb"})
 class TestRdbSnapshot(SnapshotTestBase):
     """Test single file rdb snapshot"""
     @pytest.fixture(autouse=True)
@@ -33,8 +30,8 @@ class TestRdbSnapshot(SnapshotTestBase):
         super().setup(tmp_dir)
 
     @pytest.mark.asyncio
-    async def test_snapshot(self, async_client, df_server):
-        seeder = DflySeeder(port=df_server.port, **SEEDER_ARGS)
+    async def test_snapshot(self, df_seeder_factory, async_client, df_server):
+        seeder = df_seeder_factory.create(port=df_server.port, **SEEDER_ARGS)
         await seeder.run(target_deviation=0.1)
 
         start_capture = await seeder.capture()
@@ -47,19 +44,16 @@ class TestRdbSnapshot(SnapshotTestBase):
         assert await seeder.compare(start_capture)
 
 
-@dfly_args({**BASIC_ARGS, "dbfilename": "test"})
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-dfs"})
 class TestDflySnapshot(SnapshotTestBase):
     """Test multi file snapshot"""
     @pytest.fixture(autouse=True)
     def setup(self, tmp_dir: Path):
         self.tmp_dir = tmp_dir
-        files = glob.glob(str(tmp_dir.absolute()) + 'test-*.dfs')
-        for file in files:
-            os.remove(file)
 
     @pytest.mark.asyncio
-    async def test_snapshot(self, async_client, df_server):
-        seeder = DflySeeder(port=df_server.port, **SEEDER_ARGS)
+    async def test_snapshot(self, df_seeder_factory, async_client, df_server):
+        seeder = df_seeder_factory.create(port=df_server.port, **SEEDER_ARGS)
         await seeder.run(target_deviation=0.1)
 
         start_capture = await seeder.capture()
@@ -72,7 +66,7 @@ class TestDflySnapshot(SnapshotTestBase):
         assert await seeder.compare(start_capture)
 
 
-@dfly_args({**BASIC_ARGS, "dbfilename": "test.rdb", "save_schedule": "*:*"})
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-periodic.rdb", "save_schedule": "*:*"})
 class TestPeriodicSnapshot(SnapshotTestBase):
     """Test periodic snapshotting"""
     @pytest.fixture(autouse=True)
@@ -80,10 +74,10 @@ class TestPeriodicSnapshot(SnapshotTestBase):
         super().setup(tmp_dir)
 
     @pytest.mark.asyncio
-    async def test_snapshot(self, df_server):
-        seeder = DflySeeder(port=df_server.port, keys=10)
+    async def test_snapshot(self, df_seeder_factory, df_server):
+        seeder = df_seeder_factory.create(port=df_server.port, keys=10)
         await seeder.run(target_deviation=0.5)
 
         time.sleep(60)
 
-        assert self.rdb_out.exists()
+        assert (self.tmp_dir / "test-periodic.rdb").exists()
