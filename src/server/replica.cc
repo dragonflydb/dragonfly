@@ -8,6 +8,7 @@ extern "C" {
 }
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/flags/flag.h>
 #include <absl/functional/bind_front.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
@@ -25,12 +26,16 @@ extern "C" {
 #include "server/rdb_load.h"
 #include "util/proactor_base.h"
 
+ABSL_FLAG(bool, enable_multi_shard_sync, true,
+          "Execute multi shards commands on replica syncrhonized");
+
 namespace dfly {
 
 using namespace std;
 using namespace util;
 using namespace boost::asio;
 using namespace facade;
+using absl::GetFlag;
 using absl::StrCat;
 
 namespace {
@@ -103,11 +108,17 @@ Replica::Replica(const MasterContext& context, uint32_t dfly_flow_id, Service* s
     : service_(*service), master_context_(context) {
   master_context_.dfly_flow_id = dfly_flow_id;
   multi_shard_exe_ = shared_exe_data;
+  use_multi_shard_exe_sync_ = GetFlag(FLAGS_enable_multi_shard_sync);
+  executor_.reset(new JournalExecutor(service));
 }
 
 Replica::~Replica() {
-  if (sync_fb_.joinable())
+  if (sync_fb_.joinable()) {
     sync_fb_.join();
+  }
+  if (execution_fb_.joinable()) {
+    execution_fb_.join();
+  }
 
   if (sock_) {
     auto ec = sock_->Close();
@@ -160,7 +171,8 @@ void Replica::Stop() {
 
   // Make sure the replica fully stopped and did all cleanup,
   // so we can freely release resources (connections).
-  sync_fb_.join();
+  if (sync_fb_.joinable())
+    sync_fb_.join();
 }
 
 void Replica::Pause(bool pause) {
@@ -462,8 +474,10 @@ error_code Replica::InitiateDflySync() {
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
   // Make sure we're in LOADING state.
-  // TODO: Flush db on retry.
   CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) == GlobalState::LOADING);
+
+  // Flush dbs.
+  JournalExecutor{&service_}.FlushAll();
 
   // Start full sync flows.
   {
@@ -561,8 +575,19 @@ error_code Replica::ConsumeDflyStream() {
     // Make sure the flows are not in a state transition
     lock_guard lk{flows_op_mu_};
     DefaultErrorHandler(ge);
-    for (auto& flow : shard_flows_)
+    for (auto& flow : shard_flows_) {
       flow->CloseSocket();
+      flow->waker_.notifyAll();
+    }
+
+    // Iterate over map and cancle all blocking entities
+    {
+      lock_guard{multi_shard_exe_->map_mu};
+      for (auto& tx_data : multi_shard_exe_->tx_sync_execution) {
+        tx_data.second.barrier.Cancel();
+        tx_data.second.block.Cancel();
+      }
+    }
   };
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
@@ -604,6 +629,9 @@ void Replica::JoinAllFlows() {
   for (auto& flow : shard_flows_) {
     if (flow->sync_fb_.joinable()) {
       flow->sync_fb_.join();
+    }
+    if (flow->execution_fb_.joinable()) {
+      flow->execution_fb_.join();
     }
   }
 }
@@ -688,7 +716,10 @@ error_code Replica::StartStableSyncFlow(Context* cntx) {
   CHECK(sock_->IsOpen());
   // sock_.reset(mythread->CreateSocket());
   // RETURN_ON_ERR(sock_->Connect(master_context_.master_ep));
-  sync_fb_ = ::boost::fibers::fiber(&Replica::StableSyncDflyFb, this, cntx);
+  sync_fb_ = ::boost::fibers::fiber(&Replica::StableSyncDflyReadFb, this, cntx);
+  if (use_multi_shard_exe_sync_) {
+    execution_fb_ = ::boost::fibers::fiber(&Replica::StableSyncDflyExecFb, this, cntx);
+  }
 
   return std::error_code{};
 }
@@ -739,7 +770,7 @@ void Replica::FullSyncDflyFb(string eof_token, fibers_ext::BlockingCounter bc, C
   VLOG(1) << "FullSyncDflyFb finished after reading " << loader.bytes_read() << " bytes";
 }
 
-void Replica::StableSyncDflyFb(Context* cntx) {
+void Replica::StableSyncDflyReadFb(Context* cntx) {
   // Check leftover from full sync.
   io::Bytes prefix{};
   if (leftover_buf_ && leftover_buf_->InputLen() > 0) {
@@ -750,91 +781,146 @@ void Replica::StableSyncDflyFb(Context* cntx) {
   io::PrefixSource ps{prefix, &ss};
 
   JournalReader reader{&ps, 0};
-  JournalExecutor executor{&service_};
 
   while (!cntx->IsCancelled()) {
     TranactionData tx_data;
     while (!cntx->IsCancelled()) {
+      waker_.await([&]() {
+        return ((trans_data_queue_.size() < kYieldAfterItemsInQueue) || cntx->IsCancelled());
+      });
+      if (cntx->IsCancelled()) {
+        return;
+      }
       auto res = reader.ReadEntry();
       if (!res) {
         cntx->ReportError(res.error(), "Journal format error");
         return;
       }
-      bool should_execute = tx_data.UpdateFromParsedEntry(std::move(*res));
-      if (should_execute == true) {
+      last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
+      bool tx_data_full = tx_data.UpdateFromParsedEntry(std::move(*res));
+      if (tx_data_full == true) {
         break;
       }
     }
-    ExecuteCmd(&executor, std::move(tx_data), cntx);
-    last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
+    if (use_multi_shard_exe_sync_) {
+      InsertTxDataToShardResource(std::move(tx_data));
+    } else {
+      ExecuteTxWithNoShardSync(std::move(tx_data), cntx);
+    }
+
+    waker_.notify();
   }
   return;
 }
 
-void Replica::ExecuteCmd(JournalExecutor* executor, TranactionData&& tx_data, Context* cntx) {
+void Replica::ExecuteTxWithNoShardSync(TranactionData&& tx_data, Context* cntx) {
   if (cntx->IsCancelled()) {
     return;
   }
-  if (tx_data.shard_cnt <= 1) {  // not multi shard cmd
-    executor->Execute(tx_data.dbid, tx_data.commands.front());
-    return;
+
+  bool was_insert = false;
+  if (tx_data.IsGlobalCmd()) {
+    was_insert = InsertTxToSharedMap(tx_data);
   }
 
-  // Multi shard command flow:
-  //  step 1: Fiber wait until all the fibers that should execute this tranaction got
-  //    to the journal entry of the transaction. This step enforces that replica will execute multi
-  //    shard commands that finished on master.
-  //  step 2: Execute the commands from one fiber. This step ensures atomicity of replica.
-  //  step 3: Fiber wait until all fibers finished the execution. This step ensures atomicity of
-  //    operations on replica.
+  ExecuteTx(std::move(tx_data), was_insert, cntx);
+}
 
-  // TODO: support error handler in this flow
+bool Replica::InsertTxToSharedMap(const TranactionData& tx_data) {
+  std::lock_guard lg{multi_shard_exe_->map_mu};
 
-  // Only the first fiber to reach the transaction will create data for transaction in map
-  multi_shard_exe_->map_mu.lock();
   auto [it, was_insert] =
       multi_shard_exe_->tx_sync_execution.emplace(tx_data.txid, tx_data.shard_cnt);
   VLOG(2) << "txid: " << tx_data.txid << " unique_shard_cnt_: " << tx_data.shard_cnt
           << " was_insert: " << was_insert;
+  it->second.block.Dec();
 
-  TxId txid = tx_data.txid;
-  // entries_vec will store all entries of trasaction and will be executed by the fiber that
-  // inserted the txid to map. In case of global command the inserting fiber will executed his
-  // entry.
-  bool global_cmd = (tx_data.commands.size() == 1 && tx_data.commands.front().cmd_args.size() == 1);
-  if (!global_cmd) {
-    for (auto& cmd : tx_data.commands) {
-      it->second.commands.push_back(std::move(cmd));
-    }
+  return was_insert;
+}
+
+void Replica::InsertTxDataToShardResource(TranactionData&& tx_data) {
+  bool was_insert = false;
+  if (tx_data.shard_cnt > 1) {
+    was_insert = InsertTxToSharedMap(tx_data);
   }
-  auto& tx_sync = it->second;
 
-  // Note: we must release the mutex befor calling wait on barrier
+  VLOG(2) << "txid: " << tx_data.txid << " pushed to queue";
+  trans_data_queue_.push(std::make_pair(std::move(tx_data), was_insert));
+}
+
+void Replica::StableSyncDflyExecFb(Context* cntx) {
+  while (!cntx->IsCancelled()) {
+    waker_.await([&]() { return (!trans_data_queue_.empty() || cntx->IsCancelled()); });
+    if (cntx->IsCancelled()) {
+      return;
+    }
+    DCHECK(!trans_data_queue_.empty());
+    auto& data = trans_data_queue_.front();
+    ExecuteTx(std::move(data.first), data.second, cntx);
+    trans_data_queue_.pop();
+    waker_.notify();
+  }
+
+  return;
+}
+
+void Replica::ExecuteTx(TranactionData&& tx_data, bool inserted_by_me, Context* cntx) {
+  if (cntx->IsCancelled()) {
+    return;
+  }
+  if (tx_data.shard_cnt <= 1 || (!use_multi_shard_exe_sync_ && !tx_data.IsGlobalCmd())) {
+    VLOG(2) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
+    executor_->Execute(tx_data.dbid, tx_data.commands);
+    return;
+  }
+
+  VLOG(2) << "Execute txid: " << tx_data.txid;
+  multi_shard_exe_->map_mu.lock();
+  auto it = multi_shard_exe_->tx_sync_execution.find(tx_data.txid);
+  DCHECK(it != multi_shard_exe_->tx_sync_execution.end());
+  auto& multi_shard_data = it->second;
   multi_shard_exe_->map_mu.unlock();
 
-  // step 1
-  tx_sync.barrier.wait();
+  VLOG(2) << "Execute txid: " << tx_data.txid << " waiting for data in all shards";
+  // Wait until shards flows got transaction data and inserted to map.
+  // This step enforces that replica will execute multi shard commands that finished on master
+  // and replica recieved all the commands from all shards.
+  multi_shard_data.block.Wait();
+  // Check if we woke up due to cancellation.
+  if (cntx_.IsCancelled())
+    return;
+  VLOG(2) << "Execute txid: " << tx_data.txid << " block wait finished";
 
-  // step 2
-  if (was_insert) {
-    if (global_cmd) {
-      executor->Execute(tx_data.dbid, tx_data.commands.front());
-
-    } else {
-      executor->Execute(tx_data.dbid, tx_sync.commands);
+  if (tx_data.IsGlobalCmd()) {
+    VLOG(2) << "Execute txid: " << tx_data.txid << " global command execution";
+    // Wait until all shards flows get to execution step of this transaction.
+    multi_shard_data.barrier.Wait();
+    // Check if we woke up due to cancellation.
+    if (cntx_.IsCancelled())
+      return;
+    // Global command will be executed only from one flow fiber. This ensure corectness of data in
+    // replica.
+    if (inserted_by_me) {
+      executor_->Execute(tx_data.dbid, tx_data.commands);
     }
+    // Wait until exection is done, to make sure we done execute next commands while the global is
+    // executed.
+    multi_shard_data.barrier.Wait();
+    // Check if we woke up due to cancellation.
+    if (cntx_.IsCancelled())
+      return;
+  } else {  // Non gloabl command will be executed by each the flow fiber
+    VLOG(2) << "Execute txid: " << tx_data.txid << " executing shard transaction commands";
+    executor_->Execute(tx_data.dbid, tx_data.commands);
   }
 
-  // step 3
-  tx_sync.barrier.wait();
-
-  // Note: erase from map can be done only after all fibers returned from wait.
+  // Erase from map can be done only after all flow fibers executed the transaction commands.
   // The last fiber which will decrease the counter to 0 will be the one to erase the data from map
-  auto val = tx_sync.counter.fetch_sub(1, std::memory_order_relaxed);
-  VLOG(2) << "txid: " << txid << " counter: " << val;
+  auto val = multi_shard_data.counter.fetch_sub(1, std::memory_order_relaxed);
+  VLOG(2) << "txid: " << tx_data.txid << " counter: " << val;
   if (val == 1) {
     std::lock_guard lg{multi_shard_exe_->map_mu};
-    multi_shard_exe_->tx_sync_execution.erase(txid);
+    multi_shard_exe_->tx_sync_execution.erase(tx_data.txid);
   }
 }
 
@@ -1085,6 +1171,10 @@ bool Replica::TranactionData::UpdateFromParsedEntry(journal::ParsedEntry&& entry
     DCHECK(false) << "Unsupported opcode";
   }
   return false;
+}
+
+bool Replica::TranactionData::IsGlobalCmd() const {
+  return commands.size() == 1 && commands.front().cmd_args.size() == 1;
 }
 
 }  // namespace dfly

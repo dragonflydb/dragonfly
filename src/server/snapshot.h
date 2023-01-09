@@ -95,8 +95,8 @@ class SliceSnapshot {
   void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
                       std::optional<uint64_t> expire, RdbSerializer* serializer);
 
-  // Push byte slice to channel.
-  void PushBytesToChannel(DbIndex db_index, io::Bytes bytes);
+  // Push rdb serializer's internal buffer to channel. Return now many bytes were written.
+  size_t PushBytesToChannel(DbIndex db_index, RdbSerializer* serializer);
 
   // DbChange listener
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
@@ -111,9 +111,6 @@ class SliceSnapshot {
   // Flush regradless of size if force is true.
   // Return if flushed.
   bool FlushDefaultBuffer(bool force);
-
-  // Convert value into DbRecord.
-  DbRecord GetDbRecord(DbIndex db_index, std::string value);
 
  public:
   uint64_t snapshot_version() const {
@@ -156,7 +153,7 @@ class SliceSnapshot {
 
   struct Stats {
     size_t channel_bytes = 0;
-    size_t serialized = 0, skipped = 0, side_saved = 0;
+    size_t loop_serialized = 0, skipped = 0, side_saved = 0;
     size_t savecb_calls = 0;
   } stats_;
 };
