@@ -26,7 +26,8 @@ extern "C" {
 #include "server/rdb_load.h"
 #include "util/proactor_base.h"
 
-ABSL_FLAG(bool, enable_multi_shard_sync, true, "Enable sync flows of multi shard commands");
+ABSL_FLAG(bool, enable_multi_shard_sync, true,
+          "Execute multi shards commands on replica syncrhonized");
 
 namespace dfly {
 
