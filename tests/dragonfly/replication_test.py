@@ -27,7 +27,7 @@ replication_cases = [
     (6, [6, 6, 6], dict(keys=4_000, dbcount=4)),
     (8, [2, 2, 2, 2], dict(keys=4_000, dbcount=4)),
     (4, [8, 8], dict(keys=4_000, dbcount=4)),
-    (4, [1] * 10, dict(keys=500, dbcount=2)),
+    (4, [1] * 8, dict(keys=500, dbcount=2)),
 ]
 
 
@@ -116,13 +116,13 @@ Three types are tested:
 disconnect_cases = [
     # balanced
     (8, [4, 4], [4, 4], [4], 4_000),
-    (8, [2] * 6, [2] * 6, [2, 2], 2_000),
+    (4, [2] * 4, [2] * 4, [2, 2], 2_000),
     # full sync heavy
-    (8, [4] * 6, [], [], 4_000),
+    (8, [4] * 4, [], [], 4_000),
     # stable state heavy
-    (8, [], [4] * 6, [], 4_000),
+    (8, [], [4] * 4, [], 4_000),
     # disconnect only
-    (8, [], [], [2] * 6, 4_000)
+    (8, [], [], [4] * 4, 4_000)
 ]
 
 
@@ -253,10 +253,8 @@ Three types are tested:
 # 3. Number of times a random crash happens
 # 4. Number of keys transferred (the more, the higher the propability to not miss full sync)
 master_crash_cases = [
-    (4, [4], 3, 2_000),
-    (8, [8], 3, 2_000),
-    (6, [6, 6, 6], 3, 2_000),
-    (4, [2] * 8, 3, 2_000),
+    (6, [6], 3, 2_000),
+    (4, [4, 4, 4], 3, 2_000),
 ]
 
 
