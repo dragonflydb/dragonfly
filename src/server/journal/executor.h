@@ -17,6 +17,8 @@ class JournalExecutor {
   void Execute(DbIndex dbid, std::vector<journal::ParsedEntry::CmdData>& cmds);
   void Execute(DbIndex dbid, journal::ParsedEntry::CmdData& cmd);
 
+  void FlushAll();  // Execute FLUSHALL.
+
  private:
   void Execute(journal::ParsedEntry::CmdData& cmd);
 

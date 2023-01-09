@@ -55,6 +55,11 @@ void JournalExecutor::Execute(DbIndex dbid, journal::ParsedEntry::CmdData& cmd) 
   Execute(cmd);
 }
 
+void JournalExecutor::FlushAll() {
+  auto cmd = BuildFromParts("FLUSHALL");
+  Execute(cmd);
+}
+
 void JournalExecutor::Execute(journal::ParsedEntry::CmdData& cmd) {
   auto span = CmdArgList{cmd.cmd_args.data(), cmd.cmd_args.size()};
   service_->DispatchCommand(span, &conn_context_);
