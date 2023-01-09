@@ -606,19 +606,9 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
       return;
     }
 
-    if (cmd_name == "WATCH") {
-      (*cntx)->SendError("WATCH inside MULTI is not allowed");
-      return;
-    }
-
-    if (cmd_name == "FLUSHALL") {
-      (*cntx)->SendError("FLUSHALL inside MULTI is not allowed");
-      return;
-    }
-
-    if (cmd_name == "FLUSHDB") {
-      (*cntx)->SendError("FLUSHALL inside MULTI is not allowed");
-      return;
+    if (cmd_name == "WATCH" || cmd_name == "FLUSHALL" || cmd_name == "FLUSHDB") {
+      auto error = absl::StrCat("'", cmd_name, "' inside MULTI is not allowed");
+      return (*cntx)->SendError(error);
     }
   }
 

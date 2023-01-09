@@ -101,6 +101,16 @@ TEST_F(DflyEngineTest, MultiAndEval) {
                      "transaction block"));
 }
 
+TEST_F(DflyEngineTest, MultiAndFlush) {
+  RespExpr resp = Run({"multi"});
+  ASSERT_EQ(resp, "OK");
+
+  resp = Run({"get", kKey1});
+  ASSERT_EQ(resp, "QUEUED");
+
+  EXPECT_THAT(Run({"FLUSHALL"}), ErrArg("'FLUSHALL' inside MULTI is not allowed"));
+}
+
 TEST_F(DflyEngineTest, Multi) {
   RespExpr resp = Run({"multi"});
   ASSERT_EQ(resp, "OK");
@@ -650,7 +660,7 @@ TEST_F(DflyEngineTest, Watch) {
 
   // Check watch doesn't run in multi.
   Run({"multi"});
-  ASSERT_THAT(Run({"watch", "a"}), ErrArg("WATCH inside MULTI is not allowed"));
+  ASSERT_THAT(Run({"watch", "a"}), ErrArg("'WATCH' inside MULTI is not allowed"));
   Run({"discard"});
 
   // Check watch on existing key.
