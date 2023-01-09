@@ -209,7 +209,7 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
   }
 
   if (tmp_serializer) {
-    PushBytesToChannel(db_index, tmp_serializer->Flush());
+    PushBytesToChannel(db_index, &*tmp_serializer);
     VLOG(1) << "Pushed " << result << " entries via tmp_serializer";
   }
 
@@ -231,27 +231,30 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
   ++type_freq_map_[*res];
 }
 
-void SliceSnapshot::PushBytesToChannel(DbIndex db_index, io::Bytes bytes) {
+size_t SliceSnapshot::PushBytesToChannel(DbIndex db_index, RdbSerializer* serializer) {
   auto id = rec_id_++;
   DVLOG(2) << "Pushed " << id;
 
-  stats_.channel_bytes += bytes.size();
-  DbRecord db_rec{.db_index = db_index, .id = id, .value = string(io::View(bytes))};
+  io::StringFile sfile;
+  serializer->FlushToSink(&sfile);
+
+  size_t serialized = sfile.val.size();
+  if (serialized == 0)
+    return 0;
+  stats_.channel_bytes += serialized;
+
+  DbRecord db_rec{.db_index = db_index, .id = id, .value = std::move(sfile.val)};
 
   dest_->Push(std::move(db_rec));
+  return serialized;
 }
 
 bool SliceSnapshot::FlushDefaultBuffer(bool force) {
   if (!force && default_serializer_->SerializedLen() < 4096)
     return false;
 
-  auto bytes = default_serializer_->Flush();
-  if (bytes.empty())
-    return false;
-
-  VLOG(2) << "FlushDefaultBuffer " << bytes.size() << " bytes";
-  PushBytesToChannel(current_db_, bytes);
-  default_serializer_->Clear();
+  size_t written = PushBytesToChannel(current_db_, default_serializer_.get());
+  VLOG(2) << "FlushDefaultBuffer " << written << " bytes";
   return true;
 }
 
@@ -290,7 +293,7 @@ void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
   serializer_ptr->WriteJournalEntries(absl::Span{&entry, 1});
 
   if (tmp_serializer) {
-    PushBytesToChannel(entry.dbid, tmp_serializer->Flush());
+    PushBytesToChannel(entry.dbid, &*tmp_serializer);
   } else {
     // This is the only place that flushes in streaming mode
     // once the iterate buckets fiber finished.

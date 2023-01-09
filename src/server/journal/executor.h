@@ -19,9 +19,15 @@ class JournalExecutor {
 
  private:
   void Execute(journal::ParsedEntry::CmdData& cmd);
+
+  // Select database. Ensure it exists if accessed for first time.
+  void SelectDb(DbIndex dbid);
+
   Service* service_;
   ConnectionContext conn_context_;
   io::NullSink null_sink_;
+
+  std::vector<bool> ensured_dbs_;
 };
 
 }  // namespace dfly
