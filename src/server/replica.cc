@@ -869,8 +869,8 @@ void Replica::ExecuteTx(TranactionData&& tx_data, bool inserted_by_me, Context* 
     return;
   }
   if (tx_data.shard_cnt <= 1 || (!use_multi_shard_exe_sync_ && !tx_data.IsGlobalCmd())) {
-    VLOG(2) << "Execute cmd without sync between shards. shard_cnt: " << tx_data.shard_cnt;
-    executor_->Execute(tx_data.dbid, tx_data.commands.front());
+    VLOG(2) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
+    executor_->Execute(tx_data.dbid, tx_data.commands);
     return;
   }
 
