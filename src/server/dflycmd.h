@@ -101,15 +101,43 @@ class DflyCmd {
 
   // Stores information related to a single replica.
   struct ReplicaInfo {
-    ReplicaInfo(unsigned flow_count, Context::ErrHandler err_handler)
-        : state{SyncState::PREPARATION}, cntx{std::move(err_handler)}, flows{flow_count} {
+    ReplicaInfo(unsigned flow_count, std::string address, std::string port,
+                Context::ErrHandler err_handler)
+        : state{SyncState::PREPARATION}, address{address}, port{port}, cntx{std::move(err_handler)},
+          flows{flow_count} {
     }
 
     SyncState state;
+    std::string address;
+    std::string port;
     Context cntx;
 
     std::vector<FlowInfo> flows;
     ::boost::fibers::mutex mu;  // See top of header for locking levels.
+  };
+  struct ReplicaData {
+    ReplicaData(std::string address, std::string port, SyncState sync_state)
+        : address(address), port(port) {
+      switch (sync_state) {
+        case SyncState::PREPARATION:
+          state = "preparation";
+          break;
+        case SyncState::FULL_SYNC:
+          state = "full sync";
+          break;
+        case SyncState::STABLE_SYNC:
+          state = "stable sync";
+          break;
+        case SyncState::CANCELLED:
+          state = "cancelled";
+          break;
+        default:
+          break;
+      }
+    }
+    std::string address;
+    std::string port;
+    std::string state;
   };
 
  public:
@@ -125,7 +153,9 @@ class DflyCmd {
   void Shutdown();
 
   // Create new sync session.
-  uint32_t CreateSyncSession();
+  uint32_t CreateSyncSession(ConnectionContext* cntx);
+
+  std::vector<ReplicaData> GetReplicasData();
 
  private:
   // JOURNAL [START/STOP]

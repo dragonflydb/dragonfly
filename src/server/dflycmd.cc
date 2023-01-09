@@ -403,7 +403,8 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
   }
 }
 
-uint32_t DflyCmd::CreateSyncSession() {
+uint32_t DflyCmd::CreateSyncSession(ConnectionContext* cntx) {
+  ;
   unique_lock lk(mu_);
   unsigned sync_id = next_sync_id_++;
 
@@ -416,7 +417,9 @@ uint32_t DflyCmd::CreateSyncSession() {
     ::boost::fibers::fiber{&DflyCmd::StopReplication, this, sync_id}.detach();
   };
 
-  auto replica_ptr = make_shared<ReplicaInfo>(flow_count, std::move(err_handler));
+  auto replica_ptr =
+      make_shared<ReplicaInfo>(flow_count, cntx->owner()->RemoteEndpointAddress(),
+                               cntx->owner()->RemoteEndpointIp(), std::move(err_handler));
   auto [it, inserted] = replica_infos_.emplace(sync_id, std::move(replica_ptr));
   CHECK(inserted);
 
@@ -501,6 +504,15 @@ shared_ptr<DflyCmd::ReplicaInfo> DflyCmd::GetReplicaInfo(uint32_t sync_id) {
   if (it != replica_infos_.end())
     return it->second;
   return {};
+}
+
+std::vector<DflyCmd::ReplicaData> DflyCmd::GetReplicasData() {
+  std::vector<ReplicaData> vec;
+  unique_lock lk(mu_);
+  for (const auto& info : replica_infos_) {
+    vec.emplace_back(info.second->address, info.second->port, info.second->state);
+  }
+  return vec;
 }
 
 pair<uint32_t, shared_ptr<DflyCmd::ReplicaInfo>> DflyCmd::GetReplicaInfoOrReply(

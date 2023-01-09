@@ -789,4 +789,19 @@ std::string Connection::RemoteEndpointStr() const {
   return connection_str;
 }
 
+std::string Connection::RemoteEndpointAddress() const {
+  LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
+  auto re = lsb->RemoteEndpoint();
+  return re.address().to_string();
+}
+
+std::string Connection::RemoteEndpointIp() const {
+  LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
+  auto re = lsb->RemoteEndpoint();
+  // TODO: roman port is this the right property of re? I get wrong values
+  // f.e when creating replica on localhost and port 6380 I see re.port value
+  // differnt i.e 44206 or differet.
+  return absl::StrCat(re.port());
+}
+
 }  // namespace facade
