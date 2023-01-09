@@ -61,6 +61,27 @@ struct TransactionGuard {
 
 }  // namespace
 
+DflyCmd::ReplicaRoleInfo::ReplicaRoleInfo(std::string address, std::string port,
+                                          SyncState sync_state)
+    : address(address), port(port) {
+  switch (sync_state) {
+    case SyncState::PREPARATION:
+      state = "preparation";
+      break;
+    case SyncState::FULL_SYNC:
+      state = "full sync";
+      break;
+    case SyncState::STABLE_SYNC:
+      state = "stable sync";
+      break;
+    case SyncState::CANCELLED:
+      state = "cancelled";
+      break;
+    default:
+      break;
+  }
+}
+
 DflyCmd::DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family)
     : sf_(server_family), listener_(listener) {
 }
@@ -506,8 +527,8 @@ shared_ptr<DflyCmd::ReplicaInfo> DflyCmd::GetReplicaInfo(uint32_t sync_id) {
   return {};
 }
 
-std::vector<DflyCmd::ReplicaData> DflyCmd::GetReplicasData() {
-  std::vector<ReplicaData> vec;
+std::vector<DflyCmd::ReplicaRoleInfo> DflyCmd::GetReplicasData() {
+  std::vector<ReplicaRoleInfo> vec;
   unique_lock lk(mu_);
   for (const auto& info : replica_infos_) {
     vec.emplace_back(info.second->address, info.second->port, info.second->state);

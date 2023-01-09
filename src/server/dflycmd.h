@@ -115,26 +115,8 @@ class DflyCmd {
     std::vector<FlowInfo> flows;
     ::boost::fibers::mutex mu;  // See top of header for locking levels.
   };
-  struct ReplicaData {
-    ReplicaData(std::string address, std::string port, SyncState sync_state)
-        : address(address), port(port) {
-      switch (sync_state) {
-        case SyncState::PREPARATION:
-          state = "preparation";
-          break;
-        case SyncState::FULL_SYNC:
-          state = "full sync";
-          break;
-        case SyncState::STABLE_SYNC:
-          state = "stable sync";
-          break;
-        case SyncState::CANCELLED:
-          state = "cancelled";
-          break;
-        default:
-          break;
-      }
-    }
+  struct ReplicaRoleInfo {
+    ReplicaRoleInfo(std::string address, std::string port, SyncState sync_state);
     std::string address;
     std::string port;
     std::string state;
@@ -155,7 +137,7 @@ class DflyCmd {
   // Create new sync session.
   uint32_t CreateSyncSession(ConnectionContext* cntx);
 
-  std::vector<ReplicaData> GetReplicasData();
+  std::vector<ReplicaRoleInfo> GetReplicasData();
 
  private:
   // JOURNAL [START/STOP]
