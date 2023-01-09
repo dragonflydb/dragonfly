@@ -467,8 +467,10 @@ error_code Replica::InitiateDflySync() {
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
   // Make sure we're in LOADING state.
-  // TODO: Flush db on retry.
   CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) == GlobalState::LOADING);
+
+  // Flush dbs.
+  JournalExecutor{&service_}.FlushAll();
 
   // Start full sync flows.
   {
