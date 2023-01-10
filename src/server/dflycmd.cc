@@ -112,8 +112,9 @@ void JournalStreamer::Cancel() {
 }
 
 void JournalStreamer::WriterFb(io::Sink* dest) {
-  if (auto ec = ConsumeIntoSink(dest); ec)
+  if (auto ec = ConsumeIntoSink(dest); ec) {
     cntx_->ReportError(ec);
+  }
 }
 
 }  // namespace
@@ -417,11 +418,11 @@ OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineS
 
   // Register cleanup.
   flow->cleanup = [this, streamer, flow]() {
+    flow->TryShutdownSocket();
     if (streamer) {
       streamer->Cancel();
       delete streamer;
     }
-    flow->TryShutdownSocket();
   };
 
   return OpStatus::OK;

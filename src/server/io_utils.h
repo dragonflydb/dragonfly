@@ -20,15 +20,24 @@ namespace dfly {
 class BufferedStreamerBase : public io::Sink {
  protected:
   // Initialize with global cancellation and optional stall conditions.
-  // Pointer to external buffer is set separatly because of sub-intialization order.
   BufferedStreamerBase(const Cancellation* cll, unsigned max_buffered_cnt = 5,
                        unsigned max_buffered_mem = 512)
       : cll_{cll}, max_buffered_cnt_{max_buffered_cnt}, max_buffered_mem_{max_buffered_mem} {
   }
 
   // Write some data into the internal buffer.
+  //
   // Consumer needs to be woken up manually with NotifyWritten to avoid waking it up for small
-  // writes.
+  // writes:
+  //
+  // while (should_write()) {
+  //  bsb->WriteSome(...);   <- Write some data
+  //  bsb->WriteSome(...);
+  //  ...
+  //  bsb->NotifyWritten();  <- Wake up consumer after writes
+  // }
+  // bsb->Finalize();        <- Finalize to unblock consumer
+  //
   io::Result<size_t> WriteSome(const iovec* vec, uint32_t len) override;
 
   // Report that a batch of data has been written and the consumer can be woken up.
