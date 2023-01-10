@@ -313,13 +313,13 @@ class DflySeeder:
         assert await seeder.compare(capture, port=1112)
     """
 
-    def __init__(self, port=6379, keys=1000, val_size=50, batch_size=100, max_multikey=5, dbcount=1, multi_transaction_ratio=20 , log_file=None):
+    def __init__(self, port=6379, keys=1000, val_size=50, batch_size=100, max_multikey=5, dbcount=1, multi_transaction_probability=0.3 , log_file=None):
         self.gen = CommandGenerator(
             keys, val_size, batch_size, max_multikey
         )
         self.port = port
         self.dbcount = dbcount
-        self.multi_transaction_ratio = multi_transaction_ratio
+        self.multi_transaction_probability = multi_transaction_probability
         self.stop_flag = False
 
         self.log_file = log_file
@@ -409,13 +409,22 @@ class DflySeeder:
         while should_run():
             start_time = time.time()
             blob, deviation = self.gen.generate()
+            is_multi_transaction = False
+            if random.random() < self.multi_transaction_probability:
+                is_multi_transaction = True
+            tx_data = (blob, is_multi_transaction)
             cpu_time += (time.time() - start_time)
 
-            await asyncio.gather(*(q.put(blob) for q in queues))
+            await asyncio.gather(*(q.put(tx_data) for q in queues))
             submitted += 1
 
             if file is not None:
+                if is_multi_transaction:
+                    file.write('MULTI\n')
                 file.write('\n'.join(blob))
+                file.write('\n')
+                if is_multi_transaction:
+                    file.write('EXEC\n')
 
             print('.', end='', flush=True)
             await asyncio.sleep(0.0)
@@ -433,22 +442,19 @@ class DflySeeder:
 
     async def _executor_task(self, db, queue):
         client = aioredis.Redis(port=self.port, db=db)
-        command_count = 0
+
         while True:
-            cmds = await queue.get()
-            if cmds is None:
+            tx_data = await queue.get()
+            if tx_data is None:
                 queue.task_done()
                 break
-            is_multi_transaction = False
-            if command_count == self.multi_transaction_ratio:
-                is_multi_transaction = True
-            pipe = client.pipeline(transaction=is_multi_transaction)
-            for cmd in cmds:
+
+            pipe = client.pipeline(transaction=tx_data[1])
+            for cmd in tx_data[0]:
                 pipe.execute_command(cmd)
 
             await pipe.execute()
             queue.task_done()
-            ++command_count
         await client.connection_pool.disconnect()
 
     CAPTURE_COMMANDS = {
