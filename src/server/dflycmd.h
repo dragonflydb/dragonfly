@@ -101,24 +101,21 @@ class DflyCmd {
 
   // Stores information related to a single replica.
   struct ReplicaInfo {
-    ReplicaInfo(unsigned flow_count, std::string address, std::string port,
-                Context::ErrHandler err_handler)
-        : state{SyncState::PREPARATION}, address{address}, port{port}, cntx{std::move(err_handler)},
+    ReplicaInfo(unsigned flow_count, std::string address, Context::ErrHandler err_handler)
+        : state{SyncState::PREPARATION}, address{address}, cntx{std::move(err_handler)},
           flows{flow_count} {
     }
 
     SyncState state;
     std::string address;
-    std::string port;
     Context cntx;
 
     std::vector<FlowInfo> flows;
     ::boost::fibers::mutex mu;  // See top of header for locking levels.
   };
   struct ReplicaRoleInfo {
-    ReplicaRoleInfo(std::string address, std::string port, SyncState sync_state);
+    ReplicaRoleInfo(std::string address, SyncState sync_state);
     std::string address;
-    std::string port;
     std::string state;
   };
 

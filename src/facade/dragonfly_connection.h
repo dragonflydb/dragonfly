@@ -84,7 +84,6 @@ class Connection : public util::Connection {
   std::string GetClientInfo() const;
   std::string RemoteEndpointStr() const;
   std::string RemoteEndpointAddress() const;
-  std::string RemoteEndpointIp() const;
   uint32 GetClientId() const;
 
   void ShutdownSelf();

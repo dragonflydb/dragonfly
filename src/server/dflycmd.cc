@@ -61,9 +61,8 @@ struct TransactionGuard {
 
 }  // namespace
 
-DflyCmd::ReplicaRoleInfo::ReplicaRoleInfo(std::string address, std::string port,
-                                          SyncState sync_state)
-    : address(address), port(port) {
+DflyCmd::ReplicaRoleInfo::ReplicaRoleInfo(std::string address, SyncState sync_state)
+    : address(address) {
   switch (sync_state) {
     case SyncState::PREPARATION:
       state = "preparation";
@@ -438,9 +437,8 @@ uint32_t DflyCmd::CreateSyncSession(ConnectionContext* cntx) {
     ::boost::fibers::fiber{&DflyCmd::StopReplication, this, sync_id}.detach();
   };
 
-  auto replica_ptr =
-      make_shared<ReplicaInfo>(flow_count, cntx->owner()->RemoteEndpointAddress(),
-                               cntx->owner()->RemoteEndpointIp(), std::move(err_handler));
+  auto replica_ptr = make_shared<ReplicaInfo>(flow_count, cntx->owner()->RemoteEndpointAddress(),
+                                              std::move(err_handler));
   auto [it, inserted] = replica_infos_.emplace(sync_id, std::move(replica_ptr));
   CHECK(inserted);
 
@@ -531,7 +529,7 @@ std::vector<DflyCmd::ReplicaRoleInfo> DflyCmd::GetReplicasData() {
   std::vector<ReplicaRoleInfo> vec;
   unique_lock lk(mu_);
   for (const auto& info : replica_infos_) {
-    vec.emplace_back(info.second->address, info.second->port, info.second->state);
+    vec.emplace_back(info.second->address, info.second->state);
   }
   return vec;
 }

@@ -1583,9 +1583,8 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
     auto vec = dfly_cmd_->GetReplicasData();
     (*cntx)->StartArray(vec.size());
     for (auto& data : vec) {
-      (*cntx)->StartArray(3);
+      (*cntx)->StartArray(2);
       (*cntx)->SendBulkString(data.address);
-      (*cntx)->SendBulkString(data.port);
       (*cntx)->SendBulkString(data.state);
     }
 
