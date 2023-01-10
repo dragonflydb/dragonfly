@@ -313,12 +313,13 @@ class DflySeeder:
         assert await seeder.compare(capture, port=1112)
     """
 
-    def __init__(self, port=6379, keys=1000, val_size=50, batch_size=1000, max_multikey=5, dbcount=1, log_file=None):
+    def __init__(self, port=6379, keys=1000, val_size=50, batch_size=100, max_multikey=5, dbcount=1, multi_transaction_ratio=20 , log_file=None):
         self.gen = CommandGenerator(
             keys, val_size, batch_size, max_multikey
         )
         self.port = port
         self.dbcount = dbcount
+        self.multi_transaction_ratio = multi_transaction_ratio
         self.stop_flag = False
 
         self.log_file = log_file
@@ -432,18 +433,22 @@ class DflySeeder:
 
     async def _executor_task(self, db, queue):
         client = aioredis.Redis(port=self.port, db=db)
+        command_count = 0
         while True:
             cmds = await queue.get()
             if cmds is None:
                 queue.task_done()
                 break
-
-            pipe = client.pipeline(transaction=False)
+            is_multi_transaction = False
+            if command_count == self.multi_transaction_ratio:
+                is_multi_transaction = True
+            pipe = client.pipeline(transaction=is_multi_transaction)
             for cmd in cmds:
                 pipe.execute_command(cmd)
 
             await pipe.execute()
             queue.task_done()
+            ++command_count
         await client.connection_pool.disconnect()
 
     CAPTURE_COMMANDS = {
