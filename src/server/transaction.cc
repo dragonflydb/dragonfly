@@ -350,9 +350,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
     // if transaction is suspended (blocked in watched queue), then it's a noop.
     OpStatus status = OpStatus::OK;
 
-    if (!was_suspended) {
-      status = cb_(this, shard);
-    }
+    status = cb_(this, shard);
 
     if (unique_shard_cnt_ == 1) {
       cb_ = nullptr;  // We can do it because only a single thread runs the callback.
