@@ -314,3 +314,45 @@ async def test_disconnect_master(df_local_factory, df_seeder_factory, t_master, 
     for c_replica in c_replicas:
         await wait_available_async(c_replica)
         assert await seeder.compare(capture, port=replica.port)
+
+@dfly_args({"logtostdout":"", "vmodule":"replica=2"})
+@pytest.mark.asyncio
+async def test_flushdb(df_local_factory):
+    master = df_local_factory.create(port=BASE_PORT, proactor_threads=4)
+    replica = df_local_factory.create(port=BASE_PORT+1, proactor_threads=2)
+
+    master.start()
+    replica.start()
+
+    # Connect replica to master
+    c_replica = aioredis.Redis(port=replica.port)
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    n_keys = 1000
+    c_master = aioredis.Redis(port=master.port)
+    pipe = c_master.pipeline(transaction=False)
+    # Set simple keys 0..n_keys on master
+    for i in range(n_keys):
+        pipe.mset({f"{i}": "v", f"{i+1}": "v"})
+    # flushall
+    pipe.flushall()
+    # Set simple keys n_keys..n_keys*2 on master
+    for i in range(n_keys, n_keys*2):
+        pipe.mset({f"{i}": "v", f"{i+1}": "v"})
+    await pipe.execute()
+
+    # Wait for replica to receive them
+    await asyncio.sleep(1)
+
+    # Check replica keys 0..n_keys-1 dont exist
+    pipe = c_replica.pipeline(transaction=False)
+    for i in range(n_keys):
+        pipe.get(f"{i}")
+    vals = await pipe.execute()
+    assert all(v is None for v in vals)
+
+    # Check replica keys n_keys..n_keys*2-1 exist
+    for i in range(n_keys, n_keys*2):
+        pipe.get(f"{i}")
+    vals = await pipe.execute()
+    assert all(v is not None for v in vals)
