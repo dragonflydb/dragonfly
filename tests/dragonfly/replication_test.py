@@ -315,9 +315,16 @@ async def test_disconnect_master(df_local_factory, df_seeder_factory, t_master, 
         await wait_available_async(c_replica)
         assert await seeder.compare(capture, port=replica.port)
 
+
+
+"""
+Test flushall command. Set data to master send flashall and set more data.
+Check replica keys at the end.
+"""
+
 @dfly_args({"logtostdout":"", "vmodule":"replica=2"})
 @pytest.mark.asyncio
-async def test_flushdb(df_local_factory):
+async def test_flushall(df_local_factory):
     master = df_local_factory.create(port=BASE_PORT, proactor_threads=4)
     replica = df_local_factory.create(port=BASE_PORT+1, proactor_threads=2)
 
