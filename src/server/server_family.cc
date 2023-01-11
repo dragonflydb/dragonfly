@@ -1580,7 +1580,7 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
   if (etl.is_master) {
     (*cntx)->StartArray(2);
     (*cntx)->SendBulkString("master");
-    auto vec = dfly_cmd_->GetReplicasData();
+    auto vec = dfly_cmd_->GetReplicasRoleInfo();
     (*cntx)->StartArray(vec.size());
     for (auto& data : vec) {
       (*cntx)->StartArray(2);

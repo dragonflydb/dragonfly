@@ -106,7 +106,7 @@ class DflyCmd {
           flows{flow_count} {
     }
 
-    SyncState state;
+    std::atomic<SyncState> state;
     std::string address;
     Context cntx;
 
@@ -134,7 +134,7 @@ class DflyCmd {
   // Create new sync session.
   uint32_t CreateSyncSession(ConnectionContext* cntx);
 
-  std::vector<ReplicaRoleInfo> GetReplicasData();
+  std::vector<ReplicaRoleInfo> GetReplicasRoleInfo();
 
  private:
   // JOURNAL [START/STOP]

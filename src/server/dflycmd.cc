@@ -233,7 +233,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
     return;
 
   unique_lock lk(replica_ptr->mu);
-  if (replica_ptr->state != SyncState::PREPARATION)
+  if (replica_ptr->state.load(std::memory_order::relaxed) != SyncState::PREPARATION)
     return rb->SendError(kInvalidState);
 
   // Set meta info on connection.
@@ -283,7 +283,7 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
       return rb->SendError(kInvalidState);
   }
 
-  replica_ptr->state = SyncState::FULL_SYNC;
+  replica_ptr->state.store(SyncState::FULL_SYNC, std::memory_order::relaxed);
   return rb->SendOk();
 }
 
@@ -319,7 +319,7 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
       return rb->SendError(kInvalidState);
   }
 
-  replica_ptr->state = SyncState::STABLE_SYNC;
+  replica_ptr->state.store(SyncState::STABLE_SYNC, std::memory_order::relaxed);
   return rb->SendOk();
 }
 
@@ -470,14 +470,14 @@ void DflyCmd::StopReplication(uint32_t sync_id) {
 
 void DflyCmd::CancelReplication(uint32_t sync_id, shared_ptr<ReplicaInfo> replica_ptr) {
   lock_guard lk(replica_ptr->mu);
-  if (replica_ptr->state == SyncState::CANCELLED) {
+  if (replica_ptr->state.load(std::memory_order::relaxed) == SyncState::CANCELLED) {
     return;
   }
 
   LOG(INFO) << "Cancelling sync session " << sync_id;
 
   // Update replica_ptr state and cancel context.
-  replica_ptr->state = SyncState::CANCELLED;
+  replica_ptr->state.store(SyncState::CANCELLED, std::memory_order::release);
   replica_ptr->cntx.Cancel();
 
   // Run cleanup for shard threads.
@@ -525,11 +525,11 @@ shared_ptr<DflyCmd::ReplicaInfo> DflyCmd::GetReplicaInfo(uint32_t sync_id) {
   return {};
 }
 
-std::vector<DflyCmd::ReplicaRoleInfo> DflyCmd::GetReplicasData() {
+std::vector<DflyCmd::ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() {
   std::vector<ReplicaRoleInfo> vec;
   unique_lock lk(mu_);
   for (const auto& info : replica_infos_) {
-    vec.emplace_back(info.second->address, info.second->state);
+    vec.emplace_back(info.second->address, info.second->state.load(std::memory_order::relaxed));
   }
   return vec;
 }
