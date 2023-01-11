@@ -305,10 +305,10 @@ class DflySeeder:
 
         await seeder.run(target_deviation=0.05)
 
-    Run 3 iterations (full batches) in stable state, crate a capture and compare it to
+    Run 3000 commands in stable state, crate a capture and compare it to
     replica on port 1112
 
-        await seeder.run(target_times=3)
+        await seeder.run(target_op=3000)
         capture = await seeder.capture()
         assert await seeder.compare(capture, port=1112)
     """
@@ -326,16 +326,16 @@ class DflySeeder:
         if self.log_file is not None:
             open(self.log_file, 'w').close()
 
-    async def run(self, target_times=None, target_deviation=None):
+    async def run(self, target_ops=None, target_deviation=None):
         """
-        Run a seeding cycle on all dbs either until stop(), a fixed number of batches (target_times)
+        Run a seeding cycle on all dbs either until stop(), a fixed number of commands (target_ops)
         or until reaching an allowed deviation from the target number of keys (target_deviation)
         """
-        print(f"Running times:{target_times} deviation:{target_deviation}")
+        print(f"Running ops:{target_ops} deviation:{target_deviation}")
         self.stop_flag = False
         queues = [asyncio.Queue(maxsize=3) for _ in range(self.dbcount)]
         producer = asyncio.create_task(self._generator_task(
-            queues, target_times=target_times, target_deviation=target_deviation))
+            queues, target_ops=target_ops, target_deviation=target_deviation))
         consumers = [
             asyncio.create_task(self._executor_task(i, queue))
             for i, queue in enumerate(queues)
@@ -388,9 +388,10 @@ class DflySeeder:
     def target(self, key_cnt):
         self.gen.key_cnt_target = key_cnt
 
-    async def _generator_task(self, queues, target_times=None, target_deviation=None):
+    async def _generator_task(self, queues, target_ops=None, target_deviation=None):
         cpu_time = 0
         submitted = 0
+        batches = 0
         deviation = 0.0
 
         file = None
@@ -400,7 +401,7 @@ class DflySeeder:
         def should_run():
             if self.stop_flag:
                 return False
-            if target_times is not None and submitted >= target_times:
+            if target_ops is not None and submitted >= target_ops:
                 return False
             if target_deviation is not None and abs(1-deviation) < target_deviation:
                 return False
@@ -409,14 +410,13 @@ class DflySeeder:
         while should_run():
             start_time = time.time()
             blob, deviation = self.gen.generate()
-            is_multi_transaction = False
-            if random.random() < self.multi_transaction_probability:
-                is_multi_transaction = True
+            is_multi_transaction = random.random() < self.multi_transaction_probability
             tx_data = (blob, is_multi_transaction)
             cpu_time += (time.time() - start_time)
 
             await asyncio.gather(*(q.put(tx_data) for q in queues))
-            submitted += 1
+            submitted += len(blob)
+            batches += 1
 
             if file is not None:
                 if is_multi_transaction:
@@ -429,7 +429,7 @@ class DflySeeder:
             print('.', end='', flush=True)
             await asyncio.sleep(0.0)
 
-        print("\ncpu time", cpu_time, "batches", submitted)
+        print("\ncpu time", cpu_time, "batches", batches, "commands", submitted)
 
         await asyncio.gather(*(q.put(None) for q in queues))
         for q in queues:
