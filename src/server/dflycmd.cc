@@ -345,8 +345,8 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
   };
 
   // Shard can be null for io thread.
+  CHECK(!sf_->journal()->OpenInThread(false, ""sv));  // can only happen in persistent mode.
   if (shard != nullptr) {
-    CHECK(!sf_->journal()->OpenInThread(false, ""sv));  // can only happen in persistent mode.
     flow->saver->StartSnapshotInShard(true, cntx->GetCancellation(), shard);
   }
 

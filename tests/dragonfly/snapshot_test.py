@@ -9,7 +9,7 @@ from .utility import DflySeeder, wait_available_async
 
 BASIC_ARGS = {"dir": "{DRAGONFLY_TMP}/"}
 
-SEEDER_ARGS = dict(keys=12_000, dbcount=5)
+SEEDER_ARGS = dict(keys=12_000, dbcount=5, multi_transaction_probability=0)
 
 
 class SnapshotTestBase:
@@ -75,7 +75,7 @@ class TestPeriodicSnapshot(SnapshotTestBase):
 
     @pytest.mark.asyncio
     async def test_snapshot(self, df_seeder_factory, df_server):
-        seeder = df_seeder_factory.create(port=df_server.port, keys=10)
+        seeder = df_seeder_factory.create(port=df_server.port, keys=10, multi_transaction_probability=0)
         await seeder.run(target_deviation=0.5)
 
         time.sleep(60)

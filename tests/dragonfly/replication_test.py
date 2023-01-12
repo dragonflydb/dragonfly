@@ -30,7 +30,6 @@ replication_cases = [
     (4, [1] * 8, dict(keys=500, dbcount=2)),
 ]
 
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replicas, seeder_config", replication_cases)
 async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_replicas, seeder_config):
@@ -53,7 +52,7 @@ async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_
     c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
 
     # Start data stream
-    stream_task = asyncio.create_task(seeder.run(target_times=3))
+    stream_task = asyncio.create_task(seeder.run(target_ops=3000))
     await asyncio.sleep(0.0)
 
     # Start replication
@@ -73,7 +72,7 @@ async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_
     await check_data(seeder, replicas, c_replicas)
 
     # Stream more data in stable state
-    await seeder.run(target_times=2)
+    await seeder.run(target_ops=2000)
 
     # Check data after stable state stream
     await asyncio.sleep(3.0)
@@ -209,7 +208,7 @@ async def test_disconnect_replica(df_local_factory, df_seeder_factory, t_master,
     assert await c_master.ping()
 
     # Check phase 3 replicas are up-to-date and there is no gap or lag
-    await seeder.run(target_times=2)
+    await seeder.run(target_ops=2000)
     await asyncio.sleep(1.0)
 
     capture = await seeder.capture()
