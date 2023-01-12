@@ -61,6 +61,26 @@ struct TransactionGuard {
 
 }  // namespace
 
+DflyCmd::ReplicaRoleInfo::ReplicaRoleInfo(std::string address, SyncState sync_state)
+    : address(address) {
+  switch (sync_state) {
+    case SyncState::PREPARATION:
+      state = "preparation";
+      break;
+    case SyncState::FULL_SYNC:
+      state = "full sync";
+      break;
+    case SyncState::STABLE_SYNC:
+      state = "stable sync";
+      break;
+    case SyncState::CANCELLED:
+      state = "cancelled";
+      break;
+    default:
+      break;
+  }
+}
+
 DflyCmd::DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family)
     : sf_(server_family), listener_(listener) {
 }
@@ -213,7 +233,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
     return;
 
   unique_lock lk(replica_ptr->mu);
-  if (replica_ptr->state != SyncState::PREPARATION)
+  if (replica_ptr->state.load(memory_order_relaxed) != SyncState::PREPARATION)
     return rb->SendError(kInvalidState);
 
   // Set meta info on connection.
@@ -263,7 +283,7 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
       return rb->SendError(kInvalidState);
   }
 
-  replica_ptr->state = SyncState::FULL_SYNC;
+  replica_ptr->state.store(SyncState::FULL_SYNC, memory_order_relaxed);
   return rb->SendOk();
 }
 
@@ -299,7 +319,7 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
       return rb->SendError(kInvalidState);
   }
 
-  replica_ptr->state = SyncState::STABLE_SYNC;
+  replica_ptr->state.store(SyncState::STABLE_SYNC, memory_order_relaxed);
   return rb->SendOk();
 }
 
@@ -403,7 +423,8 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
   }
 }
 
-uint32_t DflyCmd::CreateSyncSession() {
+uint32_t DflyCmd::CreateSyncSession(ConnectionContext* cntx) {
+  ;
   unique_lock lk(mu_);
   unsigned sync_id = next_sync_id_++;
 
@@ -416,7 +437,8 @@ uint32_t DflyCmd::CreateSyncSession() {
     ::boost::fibers::fiber{&DflyCmd::StopReplication, this, sync_id}.detach();
   };
 
-  auto replica_ptr = make_shared<ReplicaInfo>(flow_count, std::move(err_handler));
+  auto replica_ptr = make_shared<ReplicaInfo>(flow_count, cntx->owner()->RemoteEndpointAddress(),
+                                              std::move(err_handler));
   auto [it, inserted] = replica_infos_.emplace(sync_id, std::move(replica_ptr));
   CHECK(inserted);
 
@@ -448,14 +470,14 @@ void DflyCmd::StopReplication(uint32_t sync_id) {
 
 void DflyCmd::CancelReplication(uint32_t sync_id, shared_ptr<ReplicaInfo> replica_ptr) {
   lock_guard lk(replica_ptr->mu);
-  if (replica_ptr->state == SyncState::CANCELLED) {
+  if (replica_ptr->state.load(memory_order_relaxed) == SyncState::CANCELLED) {
     return;
   }
 
   LOG(INFO) << "Cancelling sync session " << sync_id;
 
   // Update replica_ptr state and cancel context.
-  replica_ptr->state = SyncState::CANCELLED;
+  replica_ptr->state.store(SyncState::CANCELLED, memory_order_release);
   replica_ptr->cntx.Cancel();
 
   // Run cleanup for shard threads.
@@ -501,6 +523,15 @@ shared_ptr<DflyCmd::ReplicaInfo> DflyCmd::GetReplicaInfo(uint32_t sync_id) {
   if (it != replica_infos_.end())
     return it->second;
   return {};
+}
+
+std::vector<DflyCmd::ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() {
+  std::vector<ReplicaRoleInfo> vec;
+  unique_lock lk(mu_);
+  for (const auto& info : replica_infos_) {
+    vec.emplace_back(info.second->address, info.second->state.load(memory_order_relaxed));
+  }
+  return vec;
 }
 
 pair<uint32_t, shared_ptr<DflyCmd::ReplicaInfo>> DflyCmd::GetReplicaInfoOrReply(
