@@ -322,7 +322,6 @@ Test flushall command. Set data to master send flashall and set more data.
 Check replica keys at the end.
 """
 
-@dfly_args({"logtostdout":"", "vmodule":"replica=2"})
 @pytest.mark.asyncio
 async def test_flushall(df_local_factory):
     master = df_local_factory.create(port=BASE_PORT, proactor_threads=4)
@@ -336,16 +335,19 @@ async def test_flushall(df_local_factory):
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
 
     n_keys = 1000
+    def gen_test_data(start, end):
+        for i in range(start, end):
+            yield f"key-{i}", f"value-{i}"
+
     c_master = aioredis.Redis(port=master.port)
     pipe = c_master.pipeline(transaction=False)
     # Set simple keys 0..n_keys on master
-    for i in range(n_keys):
-        pipe.mset({f"{i}": "v", f"{i+1}": "v"})
+    batch_fill_data(client=pipe, gen=gen_test_data(0, n_keys), batch_size=3)
     # flushall
     pipe.flushall()
     # Set simple keys n_keys..n_keys*2 on master
-    for i in range(n_keys, n_keys*2):
-        pipe.mset({f"{i}": "v", f"{i+1}": "v"})
+    batch_fill_data(client=pipe, gen=gen_test_data(n_keys, n_keys*2), batch_size=3)
+
     await pipe.execute()
 
     # Wait for replica to receive them
@@ -354,12 +356,12 @@ async def test_flushall(df_local_factory):
     # Check replica keys 0..n_keys-1 dont exist
     pipe = c_replica.pipeline(transaction=False)
     for i in range(n_keys):
-        pipe.get(f"{i}")
+        pipe.get(f"key-{i}")
     vals = await pipe.execute()
     assert all(v is None for v in vals)
 
     # Check replica keys n_keys..n_keys*2-1 exist
     for i in range(n_keys, n_keys*2):
-        pipe.get(f"{i}")
+        pipe.get(f"key-{i}")
     vals = await pipe.execute()
     assert all(v is not None for v in vals)
