@@ -249,7 +249,7 @@ class Transaction {
 
     absl::flat_hash_map<std::string_view, LockCnt> lock_counts;
     std::vector<std::string_view> keys;
-
+    absl::InlinedVector<bool, 4> shard_journal_write;
     uint32_t multi_opts = 0;  // options of the parent transaction.
 
     // Whether this transaction can lock more keys during its progress.

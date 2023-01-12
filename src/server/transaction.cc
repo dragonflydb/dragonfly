@@ -46,6 +46,7 @@ Transaction::Transaction(const CommandId* cid) : cid_(cid) {
   if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA") {
     multi_.reset(new MultiData);
     multi_->multi_opts = cid->opt_mask();
+    multi_->shard_journal_write.resize(shard_set->size(), false);
 
     if (cmd_name == "EVAL" || cmd_name == "EVALSHA") {
       multi_->is_expanding = false;  // we lock all the keys at once.
@@ -641,31 +642,13 @@ void Transaction::UnlockMulti() {
   VLOG(1) << "UnlockMultiEnd " << DebugId();
 }
 
-void Transaction::CalculateUnqiueShardCntForMulti() {
-  uint32_t prev = run_count_.fetch_add(shard_data_.size(), memory_order_relaxed);
-  DCHECK_EQ(prev, 0u);
-
-  std::atomic<uint32_t> unique_shard_cnt = 0;
-
-  auto update_shard_cnd = [&] {
-    EngineShard* shard = EngineShard::tlocal();
-    auto journal = shard->journal();
-
-    if (journal != nullptr) {
-      TxId last_tx = journal->GetLastTxId();
-      if (last_tx == txid_) {
-        unique_shard_cnt.fetch_add(1, std::memory_order_relaxed);
-      }
+void Transaction::SetMultiUniqueShardCount() {
+  unique_shard_cnt_ = 0;
+  for (auto& was_shard_write : multi_->shard_journal_write) {
+    if (true == was_shard_write) {
+      ++unique_shard_cnt_;
     }
-    this->DecreaseRunCnt();
-  };
-
-  for (ShardId i = 0; i < shard_data_.size(); ++i) {
-    shard_set->Add(i, std::move(update_shard_cnd));
   }
-  WaitForShardCallbacks();
-
-  unique_shard_cnt_ = unique_shard_cnt.load(std::memory_order_release);
 }
 
 void Transaction::Schedule() {
@@ -1091,7 +1074,8 @@ void Transaction::UnwatchShardCb(ArgSlice wkeys, bool should_expire, EngineShard
 
 void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard) {
   auto journal = shard->journal();
-  if (journal != nullptr && journal->GetLastTxId() == txid_) {
+
+  if (journal != nullptr && multi_->shard_journal_write[shard->shard_id()] == true) {
     journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, unique_shard_cnt_, {});
   }
 
@@ -1237,7 +1221,6 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
     auto cmd = facade::ToSV(cmd_with_full_args_.front());
     entry_payload = make_pair(cmd, GetShardArgs(shard->shard_id()));
   }
-
   LogJournalOnShard(shard, std::move(entry_payload), unique_shard_cnt_, false);
 }
 
@@ -1245,6 +1228,9 @@ void Transaction::LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&
                                     uint32_t shard_cnt, bool multi_commands) const {
   auto journal = shard->journal();
   CHECK(journal);
+  if (multi_) {
+    multi_->shard_journal_write[shard->shard_id()] = true;
+  }
   auto opcode = (multi_ || multi_commands) ? journal::Op::MULTI_COMMAND : journal::Op::COMMAND;
   journal->RecordEntry(txid_, opcode, db_index_, shard_cnt, std::move(payload));
 }

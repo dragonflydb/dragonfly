@@ -47,10 +47,6 @@ class JournalSlice {
   uint32_t RegisterOnChange(ChangeCallback cb);
   void UnregisterOnChange(uint32_t);
 
-  TxId GetLastTxId() {
-    return last_txid_;
-  }
-
  private:
   struct RingItem;
 
@@ -66,7 +62,6 @@ class JournalSlice {
 
   uint32_t slice_index_ = UINT32_MAX;
   uint32_t next_cb_id_ = 1;
-  TxId last_txid_ = 0;
   std::error_code status_ec_;
 
   bool lameduck_ = false;
