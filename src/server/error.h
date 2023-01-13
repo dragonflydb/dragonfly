@@ -45,6 +45,7 @@ enum errc {
   invalid_encoding = 9,
   empty_key = 10,
   out_of_memory = 11,
+  bad_json_string = 12,
 };
 
 }  // namespace rdb
