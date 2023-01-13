@@ -250,7 +250,7 @@ class CommandGenerator:
             # Re-calculating changes in small groups
             if len(changes) == 0:
                 changes = random.choices(
-                    list(SizeChange), weights=self.size_change_probs(), k=50)
+                    list(SizeChange), weights=self.size_change_probs(), k=20)
 
             cmd, delta = self.make(changes.pop())
             if cmd is not None:
@@ -313,7 +313,7 @@ class DflySeeder:
         assert await seeder.compare(capture, port=1112)
     """
 
-    def __init__(self, port=6379, keys=1000, val_size=50, batch_size=100, max_multikey=5, dbcount=1, multi_transaction_probability=0.3 , log_file=None):
+    def __init__(self, port=6379, keys=1000, val_size=50, batch_size=100, max_multikey=5, dbcount=1, multi_transaction_probability=0.3, log_file=None):
         self.gen = CommandGenerator(
             keys, val_size, batch_size, max_multikey
         )
@@ -419,17 +419,14 @@ class DflySeeder:
             batches += 1
 
             if file is not None:
-                if is_multi_transaction:
-                    file.write('MULTI\n')
-                file.write('\n'.join(blob))
-                file.write('\n')
-                if is_multi_transaction:
-                    file.write('EXEC\n')
+                pattern = "MULTI\n{}\nEXEC\n" if is_multi_transaction else "{}\n"
+                file.write(pattern.format('\n'.join(blob)))
 
             print('.', end='', flush=True)
             await asyncio.sleep(0.0)
 
-        print("\ncpu time", cpu_time, "batches", batches, "commands", submitted)
+        print("\ncpu time", cpu_time, "batches",
+              batches, "commands", submitted)
 
         await asyncio.gather(*(q.put(None) for q in queues))
         for q in queues:
@@ -438,7 +435,7 @@ class DflySeeder:
         if file is not None:
             file.flush()
 
-        return submitted * self.gen.batch_size
+        return submitted
 
     async def _executor_task(self, db, queue):
         client = aioredis.Redis(port=self.port, db=db)
