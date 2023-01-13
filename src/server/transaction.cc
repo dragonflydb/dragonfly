@@ -350,9 +350,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
     // if transaction is suspended (blocked in watched queue), then it's a noop.
     OpStatus status = OpStatus::OK;
 
-    if (!was_suspended) {
-      status = cb_(this, shard);
-    }
+    status = cb_(this, shard);
 
     if (unique_shard_cnt_ == 1) {
       cb_ = nullptr;  // We can do it because only a single thread runs the callback.
@@ -406,7 +404,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
         sd.local_mask &= ~KEYLOCK_ACQUIRED;
 
         if (was_suspended || (sd.local_mask & AWAKED_Q)) {
-          shard->blocking_controller()->RemoveWatched(this);
+          shard->blocking_controller()->RemoveWatched(ShardArgsInShard(shard->shard_id()), this);
         }
       }
       sd.local_mask &= ~OUT_OF_ORDER;
@@ -1011,12 +1009,12 @@ size_t Transaction::ReverseArgIndex(ShardId shard_id, size_t arg_index) const {
   return reverse_index_[sd.arg_start + arg_index];
 }
 
-bool Transaction::WaitOnWatch(const time_point& tp) {
+bool Transaction::WaitOnWatch(const time_point& tp, RunnableType cb) {
   // Assumes that transaction is pending and scheduled. TODO: To verify it with state machine.
   VLOG(2) << "WaitOnWatch Start use_count(" << use_count() << ")";
   using namespace chrono;
 
-  Execute([](Transaction* t, EngineShard* shard) { return t->AddToWatchedShardCb(shard); }, true);
+  Execute(cb, true);
 
   coordinator_state_ |= COORD_BLOCKED;
 
@@ -1077,14 +1075,16 @@ bool Transaction::WaitOnWatch(const time_point& tp) {
 }
 
 // Runs only in the shard thread.
-OpStatus Transaction::AddToWatchedShardCb(EngineShard* shard) {
+OpStatus Transaction::WatchInShard(ArgSlice keys, EngineShard* shard) {
   ShardId idx = SidToId(shard->shard_id());
 
   auto& sd = shard_data_[idx];
   CHECK_EQ(0, sd.local_mask & SUSPENDED_Q);
   DCHECK_EQ(0, sd.local_mask & ARMED);
 
-  shard->AddBlocked(this);
+  auto* bc = shard->EnsureBlockingController();
+  bc->AddWatched(keys, this);
+
   sd.local_mask |= SUSPENDED_Q;
   DVLOG(1) << "AddWatched " << DebugId() << " local_mask:" << sd.local_mask;
 
@@ -1100,7 +1100,7 @@ void Transaction::ExpireShardCb(EngineShard* shard) {
   sd.local_mask |= EXPIRED_Q;
   sd.local_mask &= ~KEYLOCK_ACQUIRED;
 
-  shard->blocking_controller()->RemoveWatched(this);
+  shard->blocking_controller()->RemoveWatched(ShardArgsInShard(shard->shard_id()), this);
 
   // Need to see why I decided to call this.
   // My guess - probably to trigger the run of stalled transactions in case

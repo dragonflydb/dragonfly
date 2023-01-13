@@ -1,4 +1,6 @@
-#!/bin/sh
+#!/usr/bin/env sh
+
+APP_PATH=build-opt/dragonfly
 
 set -e
 
@@ -14,6 +16,18 @@ pwd
 
 make HELIO_RELEASE=y release
 
-build-opt/dragonfly --version
+if ! [ -f ${APP_PATH} ]; then
+   echo "ERROR"
+   echo "Failed to generate new dragonfly binary."
+   exit 1
+fi
+
+${APP_PATH} --version
+
+if readelf -a ${APP_PATH} | grep GLIBC_PRIVATE >/dev/null 2>&1 ; then
+   echo "ERROR"
+   echo "The generated binary contain invalid GLIBC version entries."
+   exit 1
+fi
 
 make package

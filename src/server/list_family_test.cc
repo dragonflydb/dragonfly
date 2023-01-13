@@ -100,7 +100,8 @@ TEST_F(ListFamilyTest, BLPopBlocking) {
   });
   fibers_ext::SleepFor(30us);
 
-  pp_->at(1)->Await([&] { Run("B1", {"lpush", "x", "2", "1"}); });
+  RespExpr resp = pp_->at(1)->Await([&] { return Run("B1", {"lpush", "x", "2", "1"}); });
+  ASSERT_THAT(resp, IntArg(2));
 
   fb0.Join();
   fb1.Join();
@@ -657,6 +658,83 @@ TEST_F(ListFamilyTest, TwoQueueBug451) {
 
   for (auto& f : fbs)
     f.Join();
+}
+
+TEST_F(ListFamilyTest, BRPopLPushSingleShard) {
+  EXPECT_THAT(Run({"brpoplpush", "x", "y", "0.05"}), ArgType(RespExpr::NIL));
+
+  EXPECT_THAT(Run({"lpush", "x", "val1"}), IntArg(1));
+  EXPECT_EQ(Run({"brpoplpush", "x", "y", "0.01"}), "val1");
+  ASSERT_EQ(1, GetDebugInfo().shards_count);
+
+  EXPECT_THAT(Run({
+                  "exists",
+                  "x",
+              }),
+              IntArg(0));
+  Run({"set", "x", "str"});
+  EXPECT_THAT(Run({"brpoplpush", "y", "x", "0.01"}), ErrArg("wrong kind of value"));
+
+  Run({"del", "x", "y"});
+  Run({"multi"});
+  Run({"brpoplpush", "y", "x", "0"});
+  RespExpr resp = Run({"exec"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  ASSERT_FALSE(IsLocked(0, "x"));
+  ASSERT_FALSE(IsLocked(0, "y"));
+}
+
+TEST_F(ListFamilyTest, BRPopLPushSingleShardBlocking) {
+  RespExpr resp;
+
+  // Run the fiber at creation.
+  auto fb0 = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
+    resp = Run({"brpoplpush", "x", "y", "0"});
+  });
+  fibers_ext::SleepFor(30us);
+  pp_->at(1)->Await([&] { Run("B1", {"lpush", "y", "2"}); });
+
+  pp_->at(1)->Await([&] { Run("B1", {"lpush", "x", "1"}); });
+  fb0.Join();
+  ASSERT_EQ(resp, "1");
+  ASSERT_FALSE(IsLocked(0, "x"));
+  ASSERT_FALSE(IsLocked(0, "y"));
+}
+
+TEST_F(ListFamilyTest, BRPopLPushTwoShards) {
+  RespExpr resp;
+
+  EXPECT_THAT(Run({"brpoplpush", "x", "z", "0.05"}), ArgType(RespExpr::NIL));
+  Run({"lpush", "x", "val"});
+  EXPECT_EQ(Run({"brpoplpush", "x", "z", "0"}), "val");
+  resp = Run({"lrange", "z", "0", "-1"});
+  ASSERT_EQ(resp, "val");
+  Run({"del", "z"});
+
+  // Run the fiber at creation.
+  auto fb0 = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
+    resp = Run({"brpoplpush", "x", "z", "0"});
+  });
+
+  fibers_ext::SleepFor(30us);
+  RespExpr resp_push = pp_->at(1)->Await([&] { return Run("B1", {"lpush", "z", "val2"}); });
+  ASSERT_THAT(resp_push, IntArg(1));
+
+  resp_push = pp_->at(1)->Await([&] { return Run("B1", {"lpush", "x", "val1"}); });
+  ASSERT_THAT(resp_push, IntArg(1));
+  fb0.Join();
+
+  // Result of brpoplpush above.
+  ASSERT_EQ(resp, "val1");
+
+  resp = Run({"lrange", "z", "0", "-1"});
+  ASSERT_THAT(resp, ArrLen(2));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("val1", "val2"));
+  ASSERT_FALSE(IsLocked(0, "x"));
+  ASSERT_FALSE(IsLocked(0, "z"));
+  // TODO: there is a bug here.
+  // we do not wake the dest shard, when source is awaked which prevents
+  // the atomicity and causes the first bug as well.
 }
 
 }  // namespace dfly

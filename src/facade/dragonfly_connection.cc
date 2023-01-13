@@ -789,4 +789,10 @@ std::string Connection::RemoteEndpointStr() const {
   return connection_str;
 }
 
+std::string Connection::RemoteEndpointAddress() const {
+  LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
+  auto re = lsb->RemoteEndpoint();
+  return re.address().to_string();
+}
+
 }  // namespace facade

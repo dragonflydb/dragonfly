@@ -1364,7 +1364,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       append("connected_slaves", m.conn_stats.num_replicas);
       append("master_replid", master_id_);
     } else {
-      append("role", "slave");
+      append("role", "replica");
 
       // it's safe to access replica_ because replica_ is created before etl.is_master set to
       // false and cleared after etl.is_master is set to true. And since the code here that checks
@@ -1545,7 +1545,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
     std::string_view arg = ArgS(args, i + 1);
     if (cmd == "CAPA") {
       if (arg == "dragonfly" && args.size() == 3 && i == 1) {
-        uint32_t sid = dfly_cmd_->CreateSyncSession();
+        uint32_t sid = dfly_cmd_->CreateSyncSession(cntx);
         cntx->owner()->SetName(absl::StrCat("repl_ctrl_", sid));
 
         string sync_id = absl::StrCat("SYNC", sid);
@@ -1576,7 +1576,33 @@ err:
 }
 
 void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
-  (*cntx)->SendRaw("*3\r\n$6\r\nmaster\r\n:0\r\n*0\r\n");
+  ServerState& etl = *ServerState::tlocal();
+  if (etl.is_master) {
+    (*cntx)->StartArray(2);
+    (*cntx)->SendBulkString("master");
+    auto vec = dfly_cmd_->GetReplicasRoleInfo();
+    (*cntx)->StartArray(vec.size());
+    for (auto& data : vec) {
+      (*cntx)->StartArray(2);
+      (*cntx)->SendBulkString(data.address);
+      (*cntx)->SendBulkString(data.state);
+    }
+
+  } else {
+    auto replica_ptr = replica_;
+    Replica::Info rinfo = replica_ptr->GetInfo();
+    (*cntx)->StartArray(4);
+    (*cntx)->SendBulkString("replica");
+    (*cntx)->SendBulkString(rinfo.host);
+    (*cntx)->SendBulkString(absl::StrCat(rinfo.port));
+    if (rinfo.sync_in_progress) {
+      (*cntx)->SendBulkString("full sync");
+    } else if (!rinfo.master_link_established) {
+      (*cntx)->SendBulkString("connecting");
+    } else {
+      (*cntx)->SendBulkString("stable sync");
+    }
+  }
 }
 
 void ServerFamily::Script(CmdArgList args, ConnectionContext* cntx) {
