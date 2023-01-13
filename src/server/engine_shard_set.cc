@@ -292,8 +292,11 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 
     CHECK_EQ(committed_txid_, trans->notify_txid());
     bool keep = trans->RunInShard(this);
-    if (keep)
+    if (keep) {
       return;
+    } else {
+      blocking_controller_->RemoveAwaked(trans);
+    }
   }
 
   if (continuation_trans_) {

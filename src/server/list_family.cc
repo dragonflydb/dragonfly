@@ -240,13 +240,12 @@ OpStatus BPopper::Run(Transaction* t, unsigned msec) {
     }
 
     // Block
-    auto cb = [&](Transaction* t, EngineShard* shard) {
-      auto keys = t->ShardArgsInShard(shard->shard_id());
-      return t->WatchInShard(keys, shard);
+    auto wcb = [&](Transaction* t, EngineShard* shard) {
+      return t->ShardArgsInShard(shard->shard_id());
     };
 
     ++stats->num_blocked_clients;
-    bool wait_succeeded = t->WaitOnWatch(tp, std::move(cb));
+    bool wait_succeeded = t->WaitOnWatch(tp, std::move(wcb));
     --stats->num_blocked_clients;
 
     if (!wait_succeeded)
@@ -884,10 +883,8 @@ OpResult<string> BPopPusher::RunSingle(Transaction* t, time_point tp) {
   }
 
   auto* stats = ServerState::tl_connection_stats();
-  auto wcb = [&](Transaction* t, EngineShard* shard) {
-    ArgSlice keys{&this->pop_key_, 1};
-    return t->WatchInShard(keys, shard);
-  };
+
+  auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice{&this->pop_key_, 1}; };
 
   // Block
   ++stats->num_blocked_clients;
@@ -919,10 +916,7 @@ OpResult<string> BPopPusher::RunPair(Transaction* t, time_point tp) {
   // Therefore we follow the regular flow of watching the key but for the destination shard it
   // will never be triggerred.
   // This allows us to run Transaction::Execute on watched transactions in both shards.
-  auto wcb = [&](Transaction* t, EngineShard* shard) {
-    ArgSlice keys{&this->pop_key_, 1};
-    return t->WatchInShard(keys, shard);
-  };
+  auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice{&this->pop_key_, 1}; };
 
   ++stats->num_blocked_clients;
 
