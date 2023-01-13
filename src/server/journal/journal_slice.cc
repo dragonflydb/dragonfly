@@ -117,7 +117,7 @@ error_code JournalSlice::Close() {
 
 void JournalSlice::AddLogRecord(const Entry& entry) {
   DCHECK(ring_buffer_);
-
+  last_txid_ = entry.txid;
   iterating_cb_arr_ = true;
   for (const auto& k_v : change_cb_arr_) {
     k_v.second(entry);

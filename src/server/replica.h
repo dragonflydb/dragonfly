@@ -6,6 +6,7 @@
 #include <boost/fiber/barrier.hpp>
 #include <boost/fiber/fiber.hpp>
 #include <boost/fiber/mutex.hpp>
+#include <queue>
 #include <variant>
 
 #include "base/io_buf.h"
@@ -50,15 +51,28 @@ class Replica {
     R_SYNC_OK = 0x10,
   };
 
+  // This class holds the commands of transaction in single shard.
+  // Once all commands recieved the command can be executed.
+  struct TranactionData {
+    TxId txid;
+    uint32_t shard_cnt;
+    DbIndex dbid;
+    std::vector<journal::ParsedEntry::CmdData> commands;
+    // Update the data from ParsedEntry and return if all shard transaction commands were recieved.
+    bool UpdateFromParsedEntry(journal::ParsedEntry&& entry);
+    bool IsGlobalCmd() const;
+  };
+
   struct MultiShardExecution {
     boost::fibers::mutex map_mu;
 
     struct TxExecutionSync {
-      boost::fibers::barrier barrier;
+      util::fibers_ext::Barrier barrier;
       std::atomic_uint32_t counter;
-      TxExecutionSync(uint32_t counter) : barrier(counter), counter(counter) {
+      util::fibers_ext::BlockingCounter block;
+
+      TxExecutionSync(uint32_t counter) : barrier(counter), counter(counter), block(counter) {
       }
-      std::vector<journal::ParsedEntry> entries_vec;
     };
 
     std::unordered_map<TxId, TxExecutionSync> tx_sync_execution;
@@ -114,7 +128,9 @@ class Replica {
                       Context* cntx);
 
   // Single flow stable state sync fiber spawned by StartStableSyncFlow.
-  void StableSyncDflyFb(Context* cntx);
+  void StableSyncDflyReadFb(Context* cntx);
+
+  void StableSyncDflyExecFb(Context* cntx);
 
  private: /* Utility */
   struct PSyncResponse {
@@ -142,7 +158,10 @@ class Replica {
   // Send command, update last_io_time, return error.
   std::error_code SendCommand(std::string_view command, facade::ReqSerializer* serializer);
 
-  void ExecuteEntry(JournalExecutor* executor, journal::ParsedEntry&& entry);
+  void ExecuteTx(TranactionData&& tx_data, bool inserted_by_me, Context* cntx);
+  void InsertTxDataToShardResource(TranactionData&& tx_data);
+  void ExecuteTxWithNoShardSync(TranactionData&& tx_data, Context* cntx);
+  bool InsertTxToSharedMap(const TranactionData& tx_data);
 
  public: /* Utility */
   struct Info {
@@ -178,8 +197,16 @@ class Replica {
 
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;
 
+  std::queue<std::pair<TranactionData, bool>> trans_data_queue_;
+  static constexpr size_t kYieldAfterItemsInQueue = 50;
+  ::util::fibers_ext::EventCount waker_;
+  bool use_multi_shard_exe_sync_;
+  std::unique_ptr<JournalExecutor> executor_;
+
   // MainReplicationFb in standalone mode, FullSyncDflyFb in flow mode.
   ::boost::fibers::fiber sync_fb_;
+  ::boost::fibers::fiber execution_fb_;
+
   std::vector<std::unique_ptr<Replica>> shard_flows_;
 
   // Guard operations where flows might be in a mixed state (transition/setup)

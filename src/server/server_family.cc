@@ -645,7 +645,8 @@ void AppendMetricWithoutLabels(string_view name, string_view help, const absl::A
 
 void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   // Server metrics
-  AppendMetricWithoutLabels("up", "", 1, MetricType::GAUGE, &resp->body());
+  AppendMetricHeader("version", "", MetricType::GAUGE, &resp->body());
+  AppendMetricValue("version", 1, {"version"}, {GetVersion()}, &resp->body());
   AppendMetricWithoutLabels("uptime_in_seconds", "", m.uptime, MetricType::GAUGE, &resp->body());
 
   // Clients metrics
@@ -657,6 +658,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             MetricType::GAUGE, &resp->body());
 
   // Memory metrics
+  auto sdata_res = io::ReadStatusInfo();
   AppendMetricWithoutLabels("memory_used_bytes", "", m.heap_used_bytes, MetricType::GAUGE,
                             &resp->body());
   AppendMetricWithoutLabels("memory_used_peak_bytes", "", used_mem_peak.load(memory_order_relaxed),
@@ -665,9 +667,21 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             &resp->body());
   AppendMetricWithoutLabels("memory_max_bytes", "", max_memory_limit, MetricType::GAUGE,
                             &resp->body());
+  if (sdata_res.has_value()) {
+    AppendMetricWithoutLabels("used_memory_rss_bytes", "", sdata_res->vm_rss, MetricType::GAUGE,
+                              &resp->body());
+  } else {
+    LOG_FIRST_N(ERROR, 10) << "Error fetching /proc/self/status stats. error "
+                           << sdata_res.error().message();
+  }
 
+  // Stats metrics
   AppendMetricWithoutLabels("commands_processed_total", "", m.conn_stats.command_cnt,
                             MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("keyspace_hits_total", "", m.events.hits, MetricType::COUNTER,
+                            &resp->body());
+  AppendMetricWithoutLabels("keyspace_misses_total", "", m.events.misses, MetricType::COUNTER,
+                            &resp->body());
 
   // Net metrics
   AppendMetricWithoutLabels("net_input_bytes_total", "", m.conn_stats.io_read_bytes,
@@ -1350,7 +1364,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       append("connected_slaves", m.conn_stats.num_replicas);
       append("master_replid", master_id_);
     } else {
-      append("role", "slave");
+      append("role", "replica");
 
       // it's safe to access replica_ because replica_ is created before etl.is_master set to
       // false and cleared after etl.is_master is set to true. And since the code here that checks
@@ -1531,7 +1545,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
     std::string_view arg = ArgS(args, i + 1);
     if (cmd == "CAPA") {
       if (arg == "dragonfly" && args.size() == 3 && i == 1) {
-        uint32_t sid = dfly_cmd_->CreateSyncSession();
+        uint32_t sid = dfly_cmd_->CreateSyncSession(cntx);
         cntx->owner()->SetName(absl::StrCat("repl_ctrl_", sid));
 
         string sync_id = absl::StrCat("SYNC", sid);
@@ -1562,7 +1576,33 @@ err:
 }
 
 void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
-  (*cntx)->SendRaw("*3\r\n$6\r\nmaster\r\n:0\r\n*0\r\n");
+  ServerState& etl = *ServerState::tlocal();
+  if (etl.is_master) {
+    (*cntx)->StartArray(2);
+    (*cntx)->SendBulkString("master");
+    auto vec = dfly_cmd_->GetReplicasRoleInfo();
+    (*cntx)->StartArray(vec.size());
+    for (auto& data : vec) {
+      (*cntx)->StartArray(2);
+      (*cntx)->SendBulkString(data.address);
+      (*cntx)->SendBulkString(data.state);
+    }
+
+  } else {
+    auto replica_ptr = replica_;
+    Replica::Info rinfo = replica_ptr->GetInfo();
+    (*cntx)->StartArray(4);
+    (*cntx)->SendBulkString("replica");
+    (*cntx)->SendBulkString(rinfo.host);
+    (*cntx)->SendBulkString(absl::StrCat(rinfo.port));
+    if (rinfo.sync_in_progress) {
+      (*cntx)->SendBulkString("full sync");
+    } else if (!rinfo.master_link_established) {
+      (*cntx)->SendBulkString("connecting");
+    } else {
+      (*cntx)->SendBulkString("stable sync");
+    }
+  }
 }
 
 void ServerFamily::Script(CmdArgList args, ConnectionContext* cntx) {

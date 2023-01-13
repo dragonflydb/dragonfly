@@ -225,12 +225,12 @@ RdbSerializer::RdbSerializer(CompressionMode compression_mode)
 }
 
 RdbSerializer::~RdbSerializer() {
-  VLOG(1) << "compression mode: " << uint32_t(compression_mode_);
+  VLOG(2) << "compression mode: " << uint32_t(compression_mode_);
   if (compression_stats_) {
-    VLOG(1) << "compression not effective: " << compression_stats_->compression_no_effective;
-    VLOG(1) << "small string none compression applied: " << compression_stats_->small_str_count;
-    VLOG(1) << "compression failed: " << compression_stats_->compression_failed;
-    VLOG(1) << "compressed blobs:" << compression_stats_->compressed_blobs;
+    VLOG(2) << "compression not effective: " << compression_stats_->compression_no_effective;
+    VLOG(2) << "small string none compression applied: " << compression_stats_->small_str_count;
+    VLOG(2) << "compression failed: " << compression_stats_->compression_failed;
+    VLOG(2) << "compressed blobs:" << compression_stats_->compressed_blobs;
   }
 }
 
@@ -655,23 +655,8 @@ error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
   return error_code{};
 }
 
-io::Bytes RdbSerializer::Flush() {
-  size_t sz = mem_buf_.InputLen();
-  if (sz == 0)
-    return mem_buf_.InputBuffer();
-
-  if (compression_mode_ == CompressionMode::MULTY_ENTRY_ZSTD ||
-      compression_mode_ == CompressionMode::MULTY_ENTRY_LZ4) {
-    CompressBlob();
-    // After blob was compressed membuf was overwirten with compressed data
-    sz = mem_buf_.InputLen();
-  }
-
-  return mem_buf_.InputBuffer();
-}
-
 error_code RdbSerializer::FlushToSink(io::Sink* s) {
-  auto bytes = Flush();
+  auto bytes = PrepareFlush();
   if (bytes.empty())
     return error_code{};
 
@@ -687,8 +672,17 @@ size_t RdbSerializer::SerializedLen() const {
   return mem_buf_.InputLen();
 }
 
-void RdbSerializer::Clear() {
-  mem_buf_.Clear();
+io::Bytes RdbSerializer::PrepareFlush() {
+  size_t sz = mem_buf_.InputLen();
+  if (sz == 0)
+    return mem_buf_.InputBuffer();
+
+  if (compression_mode_ == CompressionMode::MULTY_ENTRY_ZSTD ||
+      compression_mode_ == CompressionMode::MULTY_ENTRY_LZ4) {
+    CompressBlob();
+  }
+
+  return mem_buf_.InputBuffer();
 }
 
 error_code RdbSerializer::WriteJournalEntries(absl::Span<const journal::Entry> entries) {

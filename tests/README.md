@@ -15,6 +15,8 @@ You can override the location of the binary using `DRAGONFLY_PATH` environment v
 ### Custom arguments
 
 - use `--gdb` to start all instances inside gdb.
+- use `--df arg=val` to pass custom arguments to all dragonfly instances. Can be used multiple times.
+- use `--log-seeder file` to store all single-db commands from the lastest tests seeder inside file.
 
 ### Before you start
 Please make sure that you have python 3 installed on you local host.

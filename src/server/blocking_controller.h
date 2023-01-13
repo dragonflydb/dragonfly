@@ -38,8 +38,8 @@ class BlockingController {
   // TODO: consider moving all watched functions to
   // EngineShard with separate per db map.
   //! AddWatched adds a transaction to the blocking queue.
-  void AddWatched(Transaction* me);
-  void RemoveWatched(Transaction* me);
+  void AddWatched(ArgSlice watch_keys, Transaction* me);
+  void RemoveWatched(ArgSlice watch_keys, Transaction* me);
 
   // Called from operations that create keys like lpush, rename etc.
   void AwakeWatched(DbIndex db_index, std::string_view db_key);

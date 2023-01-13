@@ -328,7 +328,8 @@ bool Transaction::RunInShard(EngineShard* shard) {
   // runnable concludes current operation, and should_release which tells
   // whether we should unlock the keys. should_release is false for multi and
   // equal to concluding otherwise.
-  bool should_release = (coordinator_state_ & COORD_EXEC_CONCLUDING) && !multi_;
+  bool is_concluding = (coordinator_state_ & COORD_EXEC_CONCLUDING);
+  bool should_release = is_concluding && !multi_;
   IntentLock::Mode mode = Mode();
 
   // We make sure that we lock exactly once for each (multi-hop) transaction inside
@@ -349,9 +350,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
     // if transaction is suspended (blocked in watched queue), then it's a noop.
     OpStatus status = OpStatus::OK;
 
-    if (!was_suspended) {
-      status = cb_(this, shard);
-    }
+    status = cb_(this, shard);
 
     if (unique_shard_cnt_ == 1) {
       cb_ = nullptr;  // We can do it because only a single thread runs the callback.
@@ -373,7 +372,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
 
   /*************************************************************************/
 
-  if (!was_suspended && should_release)  // Check last hop & non suspended.
+  if (!was_suspended && is_concluding)  // Check last hop & non suspended.
     LogJournalOnShard(shard);
 
   // at least the coordinator thread owns the reference.
@@ -405,7 +404,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
         sd.local_mask &= ~KEYLOCK_ACQUIRED;
 
         if (was_suspended || (sd.local_mask & AWAKED_Q)) {
-          shard->blocking_controller()->RemoveWatched(this);
+          shard->blocking_controller()->RemoveWatched(ShardArgsInShard(shard->shard_id()), this);
         }
       }
       sd.local_mask &= ~OUT_OF_ORDER;
@@ -631,6 +630,10 @@ void Transaction::UnlockMulti() {
     sharded_keys[sid].push_back(k_v);
   }
 
+  if (ServerState::tlocal()->journal()) {
+    SetMultiUniqueShardCount();
+  }
+
   uint32_t prev = run_count_.fetch_add(shard_data_.size(), memory_order_relaxed);
   DCHECK_EQ(prev, 0u);
 
@@ -641,6 +644,33 @@ void Transaction::UnlockMulti() {
   DCHECK_GE(use_count(), 1u);
 
   VLOG(1) << "UnlockMultiEnd " << DebugId();
+}
+
+void Transaction::SetMultiUniqueShardCount() {
+  uint32_t prev = run_count_.fetch_add(shard_data_.size(), memory_order_relaxed);
+  DCHECK_EQ(prev, 0u);
+
+  std::atomic<uint32_t> unique_shard_cnt = 0;
+
+  auto update_shard_cnd = [&] {
+    EngineShard* shard = EngineShard::tlocal();
+    auto journal = shard->journal();
+
+    if (journal != nullptr) {
+      TxId last_tx = journal->GetLastTxId();
+      if (last_tx == txid_) {
+        unique_shard_cnt.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    this->DecreaseRunCnt();
+  };
+
+  for (ShardId i = 0; i < shard_data_.size(); ++i) {
+    shard_set->Add(i, std::move(update_shard_cnd));
+  }
+  WaitForShardCallbacks();
+
+  unique_shard_cnt_ = unique_shard_cnt.load(std::memory_order_release);
 }
 
 void Transaction::Schedule() {
@@ -979,12 +1009,12 @@ size_t Transaction::ReverseArgIndex(ShardId shard_id, size_t arg_index) const {
   return reverse_index_[sd.arg_start + arg_index];
 }
 
-bool Transaction::WaitOnWatch(const time_point& tp) {
+bool Transaction::WaitOnWatch(const time_point& tp, RunnableType cb) {
   // Assumes that transaction is pending and scheduled. TODO: To verify it with state machine.
   VLOG(2) << "WaitOnWatch Start use_count(" << use_count() << ")";
   using namespace chrono;
 
-  Execute([](Transaction* t, EngineShard* shard) { return t->AddToWatchedShardCb(shard); }, true);
+  Execute(cb, true);
 
   coordinator_state_ |= COORD_BLOCKED;
 
@@ -1045,14 +1075,16 @@ bool Transaction::WaitOnWatch(const time_point& tp) {
 }
 
 // Runs only in the shard thread.
-OpStatus Transaction::AddToWatchedShardCb(EngineShard* shard) {
+OpStatus Transaction::WatchInShard(ArgSlice keys, EngineShard* shard) {
   ShardId idx = SidToId(shard->shard_id());
 
   auto& sd = shard_data_[idx];
   CHECK_EQ(0, sd.local_mask & SUSPENDED_Q);
   DCHECK_EQ(0, sd.local_mask & ARMED);
 
-  shard->AddBlocked(this);
+  auto* bc = shard->EnsureBlockingController();
+  bc->AddWatched(keys, this);
+
   sd.local_mask |= SUSPENDED_Q;
   DVLOG(1) << "AddWatched " << DebugId() << " local_mask:" << sd.local_mask;
 
@@ -1068,7 +1100,7 @@ void Transaction::ExpireShardCb(EngineShard* shard) {
   sd.local_mask |= EXPIRED_Q;
   sd.local_mask &= ~KEYLOCK_ACQUIRED;
 
-  shard->blocking_controller()->RemoveWatched(this);
+  shard->blocking_controller()->RemoveWatched(ShardArgsInShard(shard->shard_id()), this);
 
   // Need to see why I decided to call this.
   // My guess - probably to trigger the run of stalled transactions in case
@@ -1080,6 +1112,11 @@ void Transaction::ExpireShardCb(EngineShard* shard) {
 }
 
 void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard) {
+  auto journal = shard->journal();
+  if (journal != nullptr && journal->GetLastTxId() == txid_) {
+    journal->RecordEntry(journal::Entry{txid_, journal::Op::EXEC, db_index_, unique_shard_cnt_});
+  }
+
   if (multi_->multi_opts & CO::GLOBAL_TRANS) {
     shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
   }
@@ -1222,7 +1259,13 @@ void Transaction::LogJournalOnShard(EngineShard* shard) {
     auto cmd = facade::ToSV(cmd_with_full_args_.front());
     entry_payload = make_pair(cmd, ShardArgsInShard(shard->shard_id()));
   }
-  journal->RecordEntry(txid_, db_index_, std::move(entry_payload), unique_shard_cnt_);
+
+  journal::Op opcode = journal::Op::COMMAND;
+  if (multi_) {
+    opcode = journal::Op::MULTI_COMMAND;
+  }
+  journal->RecordEntry(txid_, opcode, db_index_, std::move(entry_payload), unique_shard_cnt_);
+
 }
 
 void Transaction::BreakOnShutdown() {

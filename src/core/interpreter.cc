@@ -15,10 +15,10 @@ extern "C" {
 #include <lua.h>
 #include <lualib.h>
 
-LUALIB_API int (luaopen_cjson) (lua_State *L);
-LUALIB_API int (luaopen_struct) (lua_State *L);
-LUALIB_API int (luaopen_cmsgpack) (lua_State *L);
-LUALIB_API int (luaopen_bit) (lua_State *L);
+LUALIB_API int(luaopen_cjson)(lua_State* L);
+LUALIB_API int(luaopen_struct)(lua_State* L);
+LUALIB_API int(luaopen_cmsgpack)(lua_State* L);
+LUALIB_API int(luaopen_bit)(lua_State* L);
 }
 
 #include <absl/strings/str_format.h>
@@ -201,7 +201,7 @@ int RaiseError(lua_State* lua) {
   return lua_error(lua);
 }
 
-void LoadLibrary(lua_State *lua, const char *libname, lua_CFunction luafunc) {
+void LoadLibrary(lua_State* lua, const char* libname, lua_CFunction luafunc) {
   lua_pushcfunction(lua, luafunc);
   lua_pushstring(lua, libname);
   lua_call(lua, 1, 0);
@@ -218,7 +218,6 @@ void InitLua(lua_State* lua) {
   LoadLibrary(lua, "struct", luaopen_struct);
   LoadLibrary(lua, "cmsgpack", luaopen_cmsgpack);
   LoadLibrary(lua, "bit", luaopen_bit);
-
 
   /* Add a helper function we use for pcall error reporting.
    * Note that when the error is in the C function we want to report the
@@ -667,12 +666,14 @@ int Interpreter::RedisGenericCommand(bool raise_error) {
       char* next = absl::numbers_internal::FastIntToBuffer(lua_tointeger(lua_, idx), cur);
       len = next - cur;
     } else if (lua_isnumber(lua_, idx)) {
-      int fmt_len = absl::SNPrintF(cur, end - cur, "%.17g", lua_tonumber(lua_, idx));
+      // we pass `end - cur + 1` because we do not want to skip the last character
+      // if it's the last argument.
+      int fmt_len = absl::SNPrintF(cur, end - cur + 1, "%.17g", lua_tonumber(lua_, idx));
       CHECK_GT(fmt_len, 0);
       len = fmt_len;
     } else if (lua_isstring(lua_, idx)) {
       len = lua_rawlen(lua_, idx);
-      memcpy(cur, lua_tostring(lua_, idx), len);  // copy \0 as well.
+      memcpy(cur, lua_tostring(lua_, idx), len + 1);  // copy \0 as well.
     }
 
     cmdargs.emplace_back(cur, len);
