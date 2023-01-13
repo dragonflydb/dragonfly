@@ -795,8 +795,8 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
   // TODO: Pass optional key to skip decoding.
   if (auto journal = owner_->journal(); journal) {
     string scratch;
-    journal->RecordEntry(0, cntx.db_index,
-                         make_pair("DEL"sv, ArgSlice{it->first.GetSlice(&scratch)}), 1);
+    auto payload = make_pair("DEL"sv, ArgSlice{it->first.GetSlice(&scratch)});
+    journal->RecordEntry(0, journal::Op::COMMAND, cntx.db_index, 1, payload);
   }
 
   PerformDeletion(it, expire_it, shard_owner(), db.get());

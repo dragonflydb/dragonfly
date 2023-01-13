@@ -30,6 +30,7 @@ replication_cases = [
     (4, [1] * 8, dict(keys=500, dbcount=2)),
 ]
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replicas, seeder_config", replication_cases)
 async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_replicas, seeder_config):
@@ -384,4 +385,3 @@ async def test_expiration(df_local_factory, n_keys):
     # Check odd keys expired on replica
     vals = await c_replica.mget(f"{i}" for i in range(n_keys))
     assert all(v is None for v in vals)
-

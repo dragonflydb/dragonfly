@@ -179,7 +179,7 @@ class Transaction {
   //! Runs in the shard thread.
   KeyLockArgs GetLockArgs(ShardId sid) const;
 
-  OpArgs GetOpArgs(EngineShard* shard) {
+  OpArgs GetOpArgs(EngineShard* shard) const {
     return OpArgs{shard, txid_, db_context()};
   }
 

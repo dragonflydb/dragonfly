@@ -195,7 +195,7 @@ bool ParseDouble(string_view src, double* value) {
 void OpArgs::RecordJournal(string_view key, ArgSlice args) const {
   auto journal = shard->journal();
   CHECK(journal);
-  journal->RecordEntry(txid, db_cntx.db_index, make_pair(key, args), 1);
+  journal->RecordEntry(txid, journal::Op::COMMAND, db_cntx.db_index, 1, make_pair(key, args));
 }
 
 #define ADD(x) (x) += o.x

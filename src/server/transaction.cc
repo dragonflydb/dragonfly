@@ -1114,7 +1114,7 @@ void Transaction::ExpireShardCb(EngineShard* shard) {
 void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard) {
   auto journal = shard->journal();
   if (journal != nullptr && journal->GetLastTxId() == txid_) {
-    journal->RecordEntry(journal::Entry{txid_, journal::Op::EXEC, db_index_, unique_shard_cnt_});
+    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, unique_shard_cnt_, {});
   }
 
   if (multi_->multi_opts & CO::GLOBAL_TRANS) {
@@ -1260,12 +1260,8 @@ void Transaction::LogJournalOnShard(EngineShard* shard) {
     entry_payload = make_pair(cmd, ShardArgsInShard(shard->shard_id()));
   }
 
-  journal::Op opcode = journal::Op::COMMAND;
-  if (multi_) {
-    opcode = journal::Op::MULTI_COMMAND;
-  }
-  journal->RecordEntry(txid_, opcode, db_index_, std::move(entry_payload), unique_shard_cnt_);
-
+  auto opcode = multi_ ? journal::Op::MULTI_COMMAND : journal::Op::COMMAND;
+  journal->RecordEntry(txid_, opcode, db_index_, unique_shard_cnt_, std::move(entry_payload));
 }
 
 void Transaction::BreakOnShutdown() {
