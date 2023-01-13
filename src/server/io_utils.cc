@@ -13,14 +13,13 @@ using namespace std;
 namespace dfly {
 
 io::Result<size_t> BufferedStreamerBase::WriteSome(const iovec* vec, uint32_t len) {
-  // Write data to producer buffer.
-  buffered_++;
   return io::BufSink{&producer_buf_}.WriteSome(vec, len);
 }
 
 void BufferedStreamerBase::NotifyWritten() {
   if (IsStopped())
     return;
+  buffered_++;
   // Wake up the consumer.
   waker_.notify();
   // Block if we're stalled because the consumer is not keeping up.
