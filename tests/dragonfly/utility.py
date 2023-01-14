@@ -271,7 +271,7 @@ class CommandGenerator:
             # Re-calculating changes in small groups
             if len(changes) == 0:
                 changes = random.choices(
-                    list(SizeChange), weights=self.size_change_probs(), k=50)
+                    list(SizeChange), weights=self.size_change_probs(), k=20)
 
             cmd, delta = self.make(changes.pop())
             if cmd is not None:
@@ -446,12 +446,8 @@ class DflySeeder:
             batches += 1
 
             if file is not None:
-                if is_multi_transaction:
-                    file.write('MULTI\n')
-                file.write('\n'.join(stringify_cmd(cmd) for cmd in blob))
-                file.write('\n')
-                if is_multi_transaction:
-                    file.write('EXEC\n')
+                pattern = "MULTI\n{}\nEXEC\n" if is_multi_transaction else "{}\n"
+                file.write(pattern.format('\n'.join(stringify_cmd(cmd) for cmd in blob)))
 
             print('.', end='', flush=True)
             await asyncio.sleep(0.0)
