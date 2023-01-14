@@ -4,6 +4,7 @@
 #pragma once
 
 #include <boost/fiber/mutex.hpp>
+#include <jsoncons/json.hpp>
 #include <system_error>
 
 extern "C" {
@@ -12,6 +13,7 @@ extern "C" {
 
 #include "base/io_buf.h"
 #include "base/pod_array.h"
+#include "core/json_object.h"
 #include "core/mpsc_intrusive_queue.h"
 #include "io/io.h"
 #include "server/common.h"
@@ -39,8 +41,8 @@ class RdbLoaderBase {
     uint64_t uncompressed_len;
   };
 
-  using RdbVariant =
-      std::variant<long long, base::PODArray<char>, LzfString, std::unique_ptr<LoadTrace>>;
+  using RdbVariant = std::variant<long long, base::PODArray<char>, LzfString,
+                                  std::unique_ptr<LoadTrace>, JsonType>;
 
   struct OpaqueObj {
     RdbVariant obj;
@@ -121,6 +123,7 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadZSetZL();
   ::io::Result<OpaqueObj> ReadListQuicklist(int rdbtype);
   ::io::Result<OpaqueObj> ReadStreams();
+  ::io::Result<OpaqueObj> ReadJson();
 
   std::error_code HandleCompressedBlob(int op_type);
   std::error_code HandleCompressedBlobFinish();

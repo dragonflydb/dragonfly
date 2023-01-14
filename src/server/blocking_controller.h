@@ -48,6 +48,10 @@ class BlockingController {
   size_t NumWatched(DbIndex db_indx) const;
   std::vector<std::string> GetWatchedKeys(DbIndex db_indx) const;
 
+  void RemoveAwaked(Transaction* trans) {
+    awakened_transactions_.erase(trans);
+  }
+
  private:
   struct WatchQueue;
   struct DbWatchTable;
@@ -70,7 +74,5 @@ class BlockingController {
   // There can be multiple transactions like this because a transaction
   // could awaken arbitrary number of keys.
   absl::flat_hash_set<Transaction*> awakened_transactions_;
-
-  // absl::btree_multimap<TxId, Transaction*> waiting_convergence_;
 };
 }  // namespace dfly
