@@ -498,13 +498,13 @@ void Service::Shutdown() {
   // rejected
   pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Shutdown(); });
 
-  engine_varz.reset();
-  request_latency_usec.Shutdown();
-
   // to shutdown all the runtime components that depend on EngineShard.
   server_family_.Shutdown();
   StringFamily::Shutdown();
   GenericFamily::Shutdown();
+
+  engine_varz.reset();
+  request_latency_usec.Shutdown();
 
   shard_set->Shutdown();
 
