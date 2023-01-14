@@ -101,7 +101,7 @@
 /* NOTE: WHEN ADDING NEW RDB TYPE, UPDATE rdbIsObjectType() BELOW */
 
 /* Test if a type is an object type. */
-#define rdbIsObjectType(t) ((t >= 0 && t <= 7) || (t >= 9 && t <= 18))
+#define __rdbIsObjectType(t) ((t >= 0 && t <= 7) || (t >= 9 && t <= 18))
 
 /* Range 200-240 is used by Dragonfly specific opcodes */
 

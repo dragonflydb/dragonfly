@@ -165,6 +165,8 @@ class RdbSerializer {
   std::error_code SaveHSetObject(const PrimeValue& pv);
   std::error_code SaveZSetObject(const robj* obj);
   std::error_code SaveStreamObject(const robj* obj);
+  std::error_code SaveJsonObject(const PrimeValue& pv);
+
   std::error_code SaveLongLongAsString(int64_t value);
   std::error_code SaveBinaryDouble(double val);
   std::error_code SaveListPackAsZiplist(uint8_t* lp);
