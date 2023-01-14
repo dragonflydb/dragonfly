@@ -199,8 +199,6 @@ void BlockingController::RemoveWatched(ArgSlice keys, Transaction* trans) {
   if (wt.queue_map.empty()) {
     watched_dbs_.erase(dbit);
   }
-
-  awakened_transactions_.erase(trans);
 }
 
 // Called from commands like lpush.
