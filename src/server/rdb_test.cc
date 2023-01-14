@@ -330,7 +330,7 @@ TEST_F(RdbTest, JsonTest) {
     Run({"del", "doc"});
     Run({"restore", "doc", "0", facade::ToSV(dump.GetBuf())});
     auto res = Run({"json.get", "doc"});
-    CHECK_EQ(res, test);
+    ASSERT_EQ(res, test);
   }
 }
 
