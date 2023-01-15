@@ -576,7 +576,7 @@ robj* CompactObj::AsRObj() const {
 
 void CompactObj::InitRobj(unsigned type, unsigned encoding, void* obj) {
   DCHECK_NE(type, OBJ_STRING);
-  SetMeta(ROBJ_TAG);
+  SetMeta(ROBJ_TAG, mask_);
   u_.r_obj.Init(type, encoding, obj);
 }
 

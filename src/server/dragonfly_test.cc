@@ -788,7 +788,7 @@ TEST_F(DflyEngineTest, Bug496) {
   });
 }
 
-TEST_F(DflyEngineTest, Issue706) {
+TEST_F(DflyEngineTest, Issue607) {
   // https://github.com/dragonflydb/dragonfly/issues/607
 
   Run({"SET", "key", "value1"});
@@ -801,6 +801,15 @@ TEST_F(DflyEngineTest, Issue706) {
 
   Run({"SET", "key", "value3"});
   EXPECT_EQ(Run({"GET", "key"}), "value3");
+}
+
+TEST_F(DflyEngineTest, Issue679) {
+  // https://github.com/dragonflydb/dragonfly/issues/679
+
+  Run({"HMSET", "a", "key", "val"});
+  Run({"EXPIRE", "a", "1000"});
+  Run({"HMSET", "a", "key", "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"});
+  Run({"EXPIRE", "a", "1001"});
 }
 
 TEST_F(DefragDflyEngineTest, TestDefragOption) {
