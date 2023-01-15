@@ -7,6 +7,7 @@ import string
 import itertools
 import time
 import difflib
+import json
 from enum import Enum
 
 
@@ -30,9 +31,8 @@ def gen_test_data(n, start=0, seed=None):
         yield "k-"+str(i), "v-"+str(i) + ("-"+str(seed) if seed else "")
 
 
-def batch_fill_data(client, gen):
-    BATCH_SIZE = 100
-    for group in chunked(BATCH_SIZE, gen):
+def batch_fill_data(client, gen, batch_size=100):
+    for group in chunked(batch_size, gen):
         client.mset({k: v for k, v, in group})
 
 
@@ -64,6 +64,7 @@ class ValueType(Enum):
     SET = 2
     HSET = 3
     ZSET = 4
+    JSON = 5
 
     @staticmethod
     def randomize():
@@ -141,23 +142,35 @@ class CommandGenerator:
 
         if t == ValueType.STRING:
             # Random string for MSET
-            return rand_str(self.val_size)
+            return (rand_str(self.val_size),)
         elif t == ValueType.LIST:
             # Random sequence k-letter elements for LPUSH
-            return ' '.join(rand_str() for _ in range(self.val_size//4))
+            return tuple(rand_str() for _ in range(self.val_size//4))
         elif t == ValueType.SET:
             # Random sequence of k-letter elements for SADD
-            return ' '.join(rand_str() for _ in range(self.val_size//4))
+            return tuple(rand_str() for _ in range(self.val_size//4))
         elif t == ValueType.HSET:
             # Random sequence of k-letter keys + int and two start values for HSET
-            return 'v0 0 v1 0 ' + ' '.join(
-                rand_str() + ' ' + str(random.randint(0, self.val_size))
-                for _ in range(self.val_size//5)
-            )
-        else:
+            elements = ((rand_str(), random.randint(0, self.val_size))
+                        for _ in range(self.val_size//5))
+            return ('v0', 0.0, 'v1', 0.0) + tuple(itertools.chain(*elements))
+        elif t == ValueType.ZSET:
             # Random sequnce of k-letter keys and int score for ZSET
-            return ' '.join(str(random.randint(0, self.val_size)) + ' ' + rand_str()
-                            for _ in range(self.val_size//4))
+            elements = ((random.randint(0, self.val_size), rand_str())
+                        for _ in range(self.val_size//4))
+            return tuple(itertools.chain(*elements))
+
+        elif t == ValueType.JSON:
+            # Json object with keys:
+            # - arr (array of random strings)
+            # - ints (array of objects {i:random integer})
+            # - i (random integer)
+            ints = [{"i": random.randint(0, 100)}
+                    for i in range(self.val_size//6)]
+            strs = [rand_str() for _ in range(self.val_size//6)]
+            return "$", json.dumps({"arr": strs, "ints": ints, "i": random.randint(0, 100)})
+        else:
+            assert False, "Invalid ValueType"
 
     def gen_shrink_cmd(self):
         """
@@ -176,12 +189,15 @@ class CommandGenerator:
         ('SETRANGE {k} 10 {val}', ValueType.STRING),
         ('LPUSH {k} {val}', ValueType.LIST),
         ('LPOP {k}', ValueType.LIST),
-        #('SADD {k} {val}', ValueType.SET),
-        #('SPOP {k}', ValueType.SET),
-        #('HSETNX {k} v0 {val}', ValueType.HSET),
-        #('HINCRBY {k} v1 1', ValueType.HSET),
-        #('ZPOPMIN {k} 1', ValueType.ZSET),
-        #('ZADD {k} 0 {val}', ValueType.ZSET)
+        # ('SADD {k} {val}', ValueType.SET),
+        # ('SPOP {k}', ValueType.SET),
+        # ('HSETNX {k} v0 {val}', ValueType.HSET),
+        # ('HINCRBY {k} v1 1', ValueType.HSET),
+        # ('ZPOPMIN {k} 1', ValueType.ZSET),
+        # ('ZADD {k} 0 {val}', ValueType.ZSET)
+        ('JSON.NUMINCRBY {k} $..i 1', ValueType.JSON),
+        ('JSON.ARRPOP {k} $.arr', ValueType.JSON),
+        ('JSON.ARRAPPEND {k} $.arr "{val}"', ValueType.JSON)
     ]
 
     def gen_update_cmd(self):
@@ -190,7 +206,7 @@ class CommandGenerator:
         """
         cmd, t = random.choice(self.UPDATE_ACTIONS)
         k, _ = self.randomize_key(t)
-        val = ''.join(random.choices(string.ascii_letters, k=4))
+        val = ''.join(random.choices(string.ascii_letters, k=3))
         return cmd.format(k=f"k{k}", val=val) if k is not None else None, 0
 
     GROW_ACTINONS = {
@@ -198,7 +214,8 @@ class CommandGenerator:
         ValueType.LIST: 'LPUSH',
         ValueType.SET: 'SADD',
         ValueType.HSET: 'HMSET',
-        ValueType.ZSET: 'ZADD'
+        ValueType.ZSET: 'ZADD',
+        ValueType.JSON: 'JSON.SET'
     }
 
     def gen_grow_cmd(self):
@@ -213,8 +230,11 @@ class CommandGenerator:
             count = 1
 
         keys = (self.add_key(t) for _ in range(count))
-        payload = " ".join(f"k{k}" + " " + self.generate_val(t) for k in keys)
-        return self.GROW_ACTINONS[t] + " " + payload, count
+        payload = itertools.chain(
+            *((f"k{k}",) + self.generate_val(t) for k in keys))
+        filtered_payload = filter(lambda p: p is not None, payload)
+
+        return (self.GROW_ACTINONS[t],) + tuple(filtered_payload), count
 
     def make(self, action):
         """ Create command for action and return it together with number of keys added (removed)"""
@@ -250,7 +270,7 @@ class CommandGenerator:
             # Re-calculating changes in small groups
             if len(changes) == 0:
                 changes = random.choices(
-                    list(SizeChange), weights=self.size_change_probs(), k=50)
+                    list(SizeChange), weights=self.size_change_probs(), k=20)
 
             cmd, delta = self.make(changes.pop())
             if cmd is not None:
@@ -313,7 +333,7 @@ class DflySeeder:
         assert await seeder.compare(capture, port=1112)
     """
 
-    def __init__(self, port=6379, keys=1000, val_size=50, batch_size=100, max_multikey=5, dbcount=1, multi_transaction_probability=0.3 , log_file=None):
+    def __init__(self, port=6379, keys=1000, val_size=50, batch_size=100, max_multikey=5, dbcount=1, multi_transaction_probability=0.3, log_file=None):
         self.gen = CommandGenerator(
             keys, val_size, batch_size, max_multikey
         )
@@ -407,6 +427,12 @@ class DflySeeder:
                 return False
             return True
 
+        def stringify_cmd(cmd):
+            if isinstance(cmd, tuple):
+                return " ".join(str(c) for c in cmd)
+            else:
+                return str(cmd)
+
         while should_run():
             start_time = time.time()
             blob, deviation = self.gen.generate()
@@ -419,17 +445,14 @@ class DflySeeder:
             batches += 1
 
             if file is not None:
-                if is_multi_transaction:
-                    file.write('MULTI\n')
-                file.write('\n'.join(blob))
-                file.write('\n')
-                if is_multi_transaction:
-                    file.write('EXEC\n')
+                pattern = "MULTI\n{}\nEXEC\n" if is_multi_transaction else "{}\n"
+                file.write(pattern.format('\n'.join(stringify_cmd(cmd) for cmd in blob)))
 
             print('.', end='', flush=True)
             await asyncio.sleep(0.0)
 
-        print("\ncpu time", cpu_time, "batches", batches, "commands", submitted)
+        print("\ncpu time", cpu_time, "batches",
+              batches, "commands", submitted)
 
         await asyncio.gather(*(q.put(None) for q in queues))
         for q in queues:
@@ -438,7 +461,7 @@ class DflySeeder:
         if file is not None:
             file.flush()
 
-        return submitted * self.gen.batch_size
+        return submitted
 
     async def _executor_task(self, db, queue):
         client = aioredis.Redis(port=self.port, db=db)
@@ -451,9 +474,16 @@ class DflySeeder:
 
             pipe = client.pipeline(transaction=tx_data[1])
             for cmd in tx_data[0]:
-                pipe.execute_command(cmd)
+                if isinstance(cmd, str):
+                    pipe.execute_command(cmd)
+                else:
+                    pipe.execute_command(*cmd)
 
-            await pipe.execute()
+            try:
+                await pipe.execute()
+            except Exception as e:
+                raise SystemExit(e)
+
             queue.task_done()
         await client.connection_pool.disconnect()
 
@@ -463,7 +493,9 @@ class DflySeeder:
         ValueType.SET: lambda pipe, k: pipe.smembers(k),
         ValueType.HSET: lambda pipe, k: pipe.hgetall(k),
         ValueType.ZSET: lambda pipe, k: pipe.zrange(
-            k, start=0, end=-1, withscores=True)
+            k, start=0, end=-1, withscores=True),
+        ValueType.JSON: lambda pipe, k: pipe.execute_command(
+            "JSON.GET", k, "$")
     }
 
     CAPTURE_EXTRACTORS = {
@@ -472,7 +504,8 @@ class DflySeeder:
         ValueType.SET: lambda res, tostr: sorted(tostr(s) for s in res),
         ValueType.HSET: lambda res, tostr: sorted(tostr(k)+"="+tostr(v) for k, v in res.items()),
         ValueType.ZSET: lambda res, tostr: (
-            tostr(s)+"-"+str(f) for (s, f) in res)
+            tostr(s)+"-"+str(f) for (s, f) in res),
+        ValueType.JSON: lambda res, tostr: (tostr(res),)
     }
 
     async def _capture_entries(self, client, keys):

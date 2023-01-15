@@ -28,6 +28,7 @@ replication_cases = [
     (8, [2, 2, 2, 2], dict(keys=4_000, dbcount=4)),
     (4, [8, 8], dict(keys=4_000, dbcount=4)),
     (4, [1] * 8, dict(keys=500, dbcount=2)),
+    (1, [1], dict(keys=100, dbcount=2)),
 ]
 
 
@@ -316,6 +317,7 @@ async def test_disconnect_master(df_local_factory, df_seeder_factory, t_master, 
         assert await seeder.compare(capture, port=replica.port)
 
 
+
 """
 Test key expiration. Test propagation from both eviction on access and garbage collection.
 """
@@ -331,6 +333,18 @@ async def test_expiration(df_local_factory, n_keys):
     master = df_local_factory.create(port=BASE_PORT, proactor_threads=4)
     replica = df_local_factory.create(port=BASE_PORT+1, proactor_threads=4)
 
+
+"""
+Test flushall command. Set data to master send flashall and set more data.
+Check replica keys at the end.
+"""
+
+@pytest.mark.asyncio
+async def test_flushall(df_local_factory):
+    master = df_local_factory.create(port=BASE_PORT, proactor_threads=4)
+    replica = df_local_factory.create(port=BASE_PORT+1, proactor_threads=2)
+
+
     master.start()
     replica.start()
 
@@ -338,15 +352,33 @@ async def test_expiration(df_local_factory, n_keys):
     c_replica = aioredis.Redis(port=replica.port)
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
 
+
     # Set simple keys 1..n_keys on master with 100 second expire
     c_master = aioredis.Redis(port=master.port)
     pipe = c_master.pipeline(transaction=False)
     for i in range(n_keys):
         pipe.set(f"{i}", "v", ex=100)
+
+    n_keys = 1000
+    def gen_test_data(start, end):
+        for i in range(start, end):
+            yield f"key-{i}", f"value-{i}"
+
+    c_master = aioredis.Redis(port=master.port)
+    pipe = c_master.pipeline(transaction=False)
+    # Set simple keys 0..n_keys on master
+    batch_fill_data(client=pipe, gen=gen_test_data(0, n_keys), batch_size=3)
+    # flushall
+    pipe.flushall()
+    # Set simple keys n_keys..n_keys*2 on master
+    batch_fill_data(client=pipe, gen=gen_test_data(n_keys, n_keys*2), batch_size=3)
+
+
     await pipe.execute()
 
     # Wait for replica to receive them
     await asyncio.sleep(1)
+
 
     # Check replica has them and their ttl are set
     pipe = c_replica.pipeline(transaction=False)
@@ -385,3 +417,17 @@ async def test_expiration(df_local_factory, n_keys):
     # Check odd keys expired on replica
     vals = await c_replica.mget(f"{i}" for i in range(n_keys))
     assert all(v is None for v in vals)
+
+    # Check replica keys 0..n_keys-1 dont exist
+    pipe = c_replica.pipeline(transaction=False)
+    for i in range(n_keys):
+        pipe.get(f"key-{i}")
+    vals = await pipe.execute()
+    assert all(v is None for v in vals)
+
+    # Check replica keys n_keys..n_keys*2-1 exist
+    for i in range(n_keys, n_keys*2):
+        pipe.get(f"key-{i}")
+    vals = await pipe.execute()
+    assert all(v is not None for v in vals)
+

@@ -165,6 +165,8 @@ class RdbSerializer {
   std::error_code SaveHSetObject(const PrimeValue& pv);
   std::error_code SaveZSetObject(const robj* obj);
   std::error_code SaveStreamObject(const robj* obj);
+  std::error_code SaveJsonObject(const PrimeValue& pv);
+
   std::error_code SaveLongLongAsString(int64_t value);
   std::error_code SaveBinaryDouble(double val);
   std::error_code SaveListPackAsZiplist(uint8_t* lp);
@@ -174,12 +176,12 @@ class RdbSerializer {
   void CompressBlob();
   void AllocateCompressorOnce();
 
-  JournalWriter journal_writer_;
+  base::IoBuf mem_buf_;
+  base::IoBuf journal_mem_buf_;
+  std::string tmp_str_;
+  base::PODArray<uint8_t> tmp_buf_;
 
   std::unique_ptr<LZF_HSLOT[]> lzf_;
-  base::IoBuf mem_buf_;
-  base::PODArray<uint8_t> tmp_buf_;
-  std::string tmp_str_;
 
   CompressionMode compression_mode_;
   // TODO : This compressor impl should support different compression algorithms zstd/lz4 etc.
