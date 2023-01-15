@@ -108,15 +108,18 @@ TEST(Journal, WriteRead) {
       {6, journal::Op::MULTI_COMMAND, 2, 1, list("SET", "E", "2")},
       {6, journal::Op::EXEC, 2, 1}};
 
-  // Write all entries to string file.
-  JournalWriter writer{};
+  // Write all entries to a buffer.
+  base::IoBuf buf;
+  io::BufSink sink{&buf};
+
+  JournalWriter writer{&sink};
   for (const auto& entry : test_entries) {
     writer.Write(entry);
   }
 
   // Read them back.
-  io::BytesSource bs{writer.Accumulated().InputBuffer()};
-  JournalReader reader{&bs, 0};
+  io::BufSource source{&buf};
+  JournalReader reader{&source, 0};
 
   for (unsigned i = 0; i < test_entries.size(); i++) {
     auto& expected = test_entries[i];
