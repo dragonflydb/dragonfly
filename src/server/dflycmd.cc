@@ -428,7 +428,7 @@ uint32_t DflyCmd::CreateSyncSession(ConnectionContext* cntx) {
   unique_lock lk(mu_);
   unsigned sync_id = next_sync_id_++;
 
-  unsigned flow_count = shard_set->size() + 1;
+  unsigned flow_count = shard_set->pool()->size();
   auto err_handler = [this, sync_id](const GenericError& err) {
     LOG(INFO) << "Replication error: " << err.Format();
 

@@ -28,6 +28,7 @@ replication_cases = [
     (8, [2, 2, 2, 2], dict(keys=4_000, dbcount=4)),
     (4, [8, 8], dict(keys=4_000, dbcount=4)),
     (4, [1] * 8, dict(keys=500, dbcount=2)),
+    (1, [1], dict(keys=100, dbcount=2)),
 ]
 
 @pytest.mark.asyncio
