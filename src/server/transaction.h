@@ -161,7 +161,8 @@ class Transaction {
   // or b) tp is reached. If tp is time_point::max() then waits indefinitely.
   // Expects that the transaction had been scheduled before, and uses Execute(.., true) to register.
   // Returns false if timeout occurred, true if was notified by one of the keys.
-  bool WaitOnWatch(const time_point& tp, RunnableType cb);
+  using WaitKeysPovider = std::function<ArgSlice(Transaction*, EngineShard* shard)>;
+  bool WaitOnWatch(const time_point& tp, WaitKeysPovider cb);
 
   // Returns true if transaction is awaked, false if it's timed-out and can be removed from the
   // blocking queue. NotifySuspended may be called from (multiple) shard threads and
@@ -191,9 +192,6 @@ class Transaction {
     return db_index_;
   }
 
-  // Adds itself to watched queue in the shard. Must run in that shard thread.
-  OpStatus WatchInShard(ArgSlice keys, EngineShard* shard);
-
  private:
   struct LockCnt {
     unsigned cnt[2] = {0, 0};
@@ -208,7 +206,7 @@ class Transaction {
   void ScheduleInternal();
   void LockMulti();
 
-  void ExpireBlocking();
+  void UnwatchBlocking(bool should_expire, WaitKeysPovider wcb);
   void ExecuteAsync();
 
   // Optimized version of RunInShard for single shard uncontended cases.
@@ -226,8 +224,11 @@ class Transaction {
   // Returns true if we need to follow up with PollExecution on this shard.
   bool CancelShardCb(EngineShard* shard);
 
-  void ExpireShardCb(EngineShard* shard);
+  void UnwatchShardCb(ArgSlice wkeys, bool should_expire, EngineShard* shard);
   void UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard);
+
+  // Adds itself to watched queue in the shard. Must run in that shard thread.
+  OpStatus WatchInShard(ArgSlice keys, EngineShard* shard);
 
   void WaitForShardCallbacks() {
     run_ec_.await([this] { return 0 == run_count_.load(std::memory_order_relaxed); });

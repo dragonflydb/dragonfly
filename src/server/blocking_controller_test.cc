@@ -81,8 +81,7 @@ TEST_F(BlockingControllerTest, Timeout) {
   time_point tp = steady_clock::now() + chrono::milliseconds(10);
 
   trans_->Schedule();
-  auto keys = trans_->ShardArgsInShard(0);
-  auto cb = [&](Transaction* t, EngineShard* shard) { return t->WatchInShard(keys, shard); };
+  auto cb = [&](Transaction* t, EngineShard* shard) { return trans_->ShardArgsInShard(0); };
 
   bool res = trans_->WaitOnWatch(tp, cb);
 

@@ -202,6 +202,7 @@ class EngineShard {
 
   uint32_t periodic_task_ = 0;
   uint32_t defrag_task_ = 0;
+
   DefragTaskState defrag_state_;
   std::unique_ptr<TieredStorage> tiered_storage_;
   std::unique_ptr<BlockingController> blocking_controller_;
