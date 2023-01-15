@@ -31,9 +31,8 @@ def gen_test_data(n, start=0, seed=None):
         yield "k-"+str(i), "v-"+str(i) + ("-"+str(seed) if seed else "")
 
 
-def batch_fill_data(client, gen):
-    BATCH_SIZE = 100
-    for group in chunked(BATCH_SIZE, gen):
+def batch_fill_data(client, gen, batch_size=100):
+    for group in chunked(batch_size, gen):
         client.mset({k: v for k, v, in group})
 
 
