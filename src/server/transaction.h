@@ -249,6 +249,11 @@ class Transaction {
 
     absl::flat_hash_map<std::string_view, LockCnt> lock_counts;
     std::vector<std::string_view> keys;
+
+    // The shard_journal_write vector variable is used to determine the number of shards
+    // involved in a multi-command transaction. This information is utilized by replicas when
+    // executing multi-command. For every write to a shard journal, the corresponding index in the
+    // vector is marked as true.
     absl::InlinedVector<bool, 4> shard_journal_write;
     uint32_t multi_opts = 0;  // options of the parent transaction.
 
@@ -298,11 +303,15 @@ class Transaction {
 
   void UnwatchShardCb(ArgSlice wkeys, bool should_expire, EngineShard* shard);
 
-  void UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard);
+  void UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard,
+                          uint32_t shard_journals_cnt);
 
-  // Calculate number of unqiue shards for multi transaction after alll commands were executed.
-  // This value is used in stable state replication to allow applying the command atomically.
-  void CalculateUnqiueShardCntForMulti();
+  // In a multi-command transaction, we determine the number of shard journals that we wrote entries
+  // to by updating the shard_journal_write vector during command execution. The total number of
+  // shard journals written to can be found by summing the true values in the vector. This value is
+  // then written to each shard journal with the journal EXEC op, enabling replication to
+  // synchronize the multi-shard transaction.
+  uint32_t CalcMultiNumOfShardJournals() const;
 
   void WaitForShardCallbacks() {
     run_ec_.await([this] { return 0 == run_count_.load(std::memory_order_relaxed); });

@@ -626,15 +626,17 @@ void Transaction::UnlockMulti() {
     sharded_keys[sid].push_back(k_v);
   }
 
+  uint32_t shard_journals_cnt = 0;
   if (ServerState::tlocal()->journal()) {
-    CalculateUnqiueShardCntForMulti();
+    shard_journals_cnt = CalcMultiNumOfShardJournals();
   }
 
   uint32_t prev = run_count_.fetch_add(shard_data_.size(), memory_order_relaxed);
   DCHECK_EQ(prev, 0u);
 
   for (ShardId i = 0; i < shard_data_.size(); ++i) {
-    shard_set->Add(i, [&] { UnlockMultiShardCb(sharded_keys, EngineShard::tlocal()); });
+    shard_set->Add(
+        i, [&] { UnlockMultiShardCb(sharded_keys, EngineShard::tlocal(), shard_journals_cnt); });
   }
   WaitForShardCallbacks();
   DCHECK_GE(GetUseCount(), 1u);
@@ -642,13 +644,14 @@ void Transaction::UnlockMulti() {
   VLOG(1) << "UnlockMultiEnd " << DebugId();
 }
 
-void Transaction::SetMultiUniqueShardCount() {
-  unique_shard_cnt_ = 0;
-  for (auto& was_shard_write : multi_->shard_journal_write) {
-    if (true == was_shard_write) {
-      ++unique_shard_cnt_;
+uint32_t Transaction::CalcMultiNumOfShardJournals() const {
+  uint32_t shard_journals_cnt = 0;
+  for (bool was_shard_write : multi_->shard_journal_write) {
+    if (was_shard_write) {
+      ++shard_journals_cnt;
     }
   }
+  return shard_journals_cnt;
 }
 
 void Transaction::Schedule() {
@@ -1072,11 +1075,12 @@ void Transaction::UnwatchShardCb(ArgSlice wkeys, bool should_expire, EngineShard
   CHECK_GE(DecreaseRunCnt(), 1u);
 }
 
-void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard) {
+void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard,
+                                     uint32_t shard_journals_cnt) {
   auto journal = shard->journal();
 
   if (journal != nullptr && multi_->shard_journal_write[shard->shard_id()] == true) {
-    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, unique_shard_cnt_, {});
+    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_journals_cnt, {});
   }
 
   if (multi_->multi_opts & CO::GLOBAL_TRANS) {
