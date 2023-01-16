@@ -111,20 +111,38 @@ struct Connection::Request {
   using MonitorMessage = std::string;
 
   struct PipelineMsg {
-    absl::FixedArray<MutableSlice, 6> args;
+    absl::InlinedVector<MutableSlice, 6> args;
 
     // I do not use mi_heap_t explicitly but mi_stl_allocator at the end does the same job
     // of using the thread's heap.
     // The capacity is chosen so that we allocate a fully utilized (256 bytes) block.
-    absl::FixedArray<char, kReqStorageSize, mi_stl_allocator<char>> storage;
+    using StorageType = absl::InlinedVector<char, kReqStorageSize, mi_stl_allocator<char>>;
+
+    StorageType storage;
 
     PipelineMsg(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
     }
   };
 
- private:
+  static constexpr size_t kSizeOfPipelineMsg = sizeof(PipelineMsg);
+
+ public:
   using MessagePayload = std::variant<PipelineMsg, PubMsgRecord, MonitorMessage>;
 
+  // Overload to create the a new pipeline message
+  static RequestPtr New(mi_heap_t* heap, const RespVec& args, size_t capacity);
+
+  // Overload to create a new pubsub message
+  static RequestPtr New(const PubMessage& pub_msg);
+
+  // Overload to create a new the monitor message
+  static RequestPtr New(MonitorMessage msg);
+
+  void Emplace(const RespVec& args, size_t capacity);
+
+  MessagePayload payload;
+
+ private:
   Request(size_t nargs, size_t capacity) : payload(PipelineMsg{nargs, capacity}) {
   }
 
@@ -135,18 +153,7 @@ struct Connection::Request {
   }
 
   Request(const Request&) = delete;
-
- public:
-  // Overload to create the a new pipeline message
-  static RequestPtr New(mi_heap_t* heap, RespVec args, size_t capacity);
-
-  // Overload to create a new pubsub message
-  static RequestPtr New(const PubMessage& pub_msg);
-
-  // Overload to create a new the monitor message
-  static RequestPtr New(MonitorMessage msg);
-
-  MessagePayload payload;
+  void SetArgs(const RespVec& args);
 };
 
 Connection::RequestPtr Connection::Request::New(std::string msg) {
@@ -155,14 +162,21 @@ Connection::RequestPtr Connection::Request::New(std::string msg) {
   return Connection::RequestPtr{req, Connection::RequestDeleter{}};
 }
 
-Connection::RequestPtr Connection::Request::New(mi_heap_t* heap, RespVec args, size_t capacity) {
+Connection::RequestPtr Connection::Request::New(mi_heap_t* heap, const RespVec& args,
+                                                size_t capacity) {
   constexpr auto kReqSz = sizeof(Request);
   void* ptr = mi_heap_malloc_small(heap, kReqSz);
 
   // We must construct in place here, since there is a slice that uses memory locations
   Request* req = new (ptr) Request(args.size(), capacity);
+  req->SetArgs(args);
+
+  return Connection::RequestPtr{req, Connection::RequestDeleter{}};
+}
+
+void Connection::Request::SetArgs(const RespVec& args) {
   // At this point we know that we have PipelineMsg in Request so next op is safe.
-  Request::PipelineMsg& pipeline_msg = std::get<Request::PipelineMsg>(req->payload);
+  PipelineMsg& pipeline_msg = std::get<PipelineMsg>(payload);
   auto* next = pipeline_msg.storage.data();
   for (size_t i = 0; i < args.size(); ++i) {
     auto buf = args[i].GetBuf();
@@ -171,8 +185,6 @@ Connection::RequestPtr Connection::Request::New(mi_heap_t* heap, RespVec args, s
     pipeline_msg.args[i] = MutableSlice(next, s);
     next += s;
   }
-
-  return Connection::RequestPtr{req, Connection::RequestDeleter{}};
 }
 
 Connection::RequestPtr Connection::Request::New(const PubMessage& pub_msg) {
@@ -190,6 +202,18 @@ Connection::RequestPtr Connection::Request::New(const PubMessage& pub_msg) {
 void Connection::RequestDeleter::operator()(Request* req) const {
   req->~Request();
   mi_free(req);
+}
+
+void Connection::Request::Emplace(const RespVec& args, size_t capacity) {
+  PipelineMsg* msg = get_if<PipelineMsg>(&payload);
+  if (msg) {
+    if (msg->storage.size() < capacity) {
+      msg->storage.resize(capacity);
+    }
+  } else {
+    payload = PipelineMsg{args.size(), capacity};
+  }
+  SetArgs(args);
 }
 
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
@@ -497,6 +521,10 @@ auto Connection::ParseRedis() -> ParserStatus {
       // fiber enters the condition below and executes out of order.
       bool is_sync_dispatch = !cc_->async_dispatch && !cc_->force_dispatch;
       if (dispatch_q_.empty() && is_sync_dispatch && consumed >= io_buf_.InputLen()) {
+        // Gradually release the request pool.
+        if (!free_req_pool_.empty()) {
+          free_req_pool_.pop_back();
+        }
         RespToArgList(parse_args_, &cmd_vec_);
         CmdArgList cmd_list{cmd_vec_.data(), cmd_vec_.size()};
         service_->DispatchCommand(cmd_list, cc_.get());
@@ -729,6 +757,10 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     RequestPtr req{std::move(dispatch_q_.front())};
     dispatch_q_.pop_front();
     std::visit(dispatch_op, req->payload);
+
+    // Do not cache more than K items.
+    if (free_req_pool_.size() < 16)
+      free_req_pool_.push_back(std::move(req));
   }
 
   cc_->conn_closing = true;
@@ -750,8 +782,15 @@ auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> RequestPtr {
   static_assert(kReqSz < MI_SMALL_SIZE_MAX);
   static_assert(alignof(Request) == 8);
 
-  RequestPtr req = Request::New(heap, args, backed_sz);
+  RequestPtr req;
 
+  if (free_req_pool_.empty()) {
+    req = Request::New(heap, args, backed_sz);
+  } else {
+    req = move(free_req_pool_.back());
+    free_req_pool_.pop_back();
+    req->Emplace(move(args), backed_sz);
+  }
   return req;
 }
 void Connection::ShutdownSelf() {

@@ -137,9 +137,10 @@ class Connection : public util::Connection {
   using RequestPtr = std::unique_ptr<Request, RequestDeleter>;
 
   // args are passed deliberately by value - to pass the ownership.
-  static RequestPtr FromArgs(RespVec args, mi_heap_t* heap);
+  RequestPtr FromArgs(RespVec args, mi_heap_t* heap);
 
   std::deque<RequestPtr> dispatch_q_;  // coordinated via evc_.
+  std::vector<RequestPtr> free_req_pool_;
   util::fibers_ext::EventCount evc_;
 
   RespVec parse_args_;
