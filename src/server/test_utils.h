@@ -103,4 +103,6 @@ class BaseFamilyTest : public ::testing::Test {
   bool single_response_ = true;
 };
 
+std::ostream& operator<<(std::ostream& os, const DbStats& stats);
+
 }  // namespace dfly

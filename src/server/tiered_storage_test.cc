@@ -6,6 +6,7 @@
 #include <gmock/gmock.h>
 
 #include "base/flags.h"
+#include "base/logging.h"
 #include "server/test_utils.h"
 
 using namespace std;
@@ -62,12 +63,19 @@ TEST_F(TieredStorageTest, Basic) {
   EXPECT_GT(m.db[0].tiered_entries, 0u);
 
   FillExternalKeys(5000);
+  usleep(20000);  // 0.02 milliseconds
 
   m = GetMetrics();
+  DbStats stats = m.db[0];
+
+  LOG(INFO) << stats;
   unsigned tiered_entries = m.db[0].tiered_entries;
   EXPECT_GT(tiered_entries, 0u);
   string resp = CheckedString({"debug", "object", "k1"});
   EXPECT_THAT(resp, HasSubstr("spill_len"));
+  m = GetMetrics();
+  LOG(INFO) << m.db[0];
+  ASSERT_EQ(tiered_entries, m.db[0].tiered_entries);
 
   Run({"del", "k1"});
   m = GetMetrics();
