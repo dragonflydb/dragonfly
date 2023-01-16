@@ -194,7 +194,7 @@ bool ParseDouble(string_view src, double* value) {
 }
 
 void OpArgs::RecordJournal(string_view cmd, ArgSlice args) const {
-  tx->LogJournalOnShard(shard, make_pair(cmd, args));
+  tx->LogJournalOnShard(shard, make_pair(cmd, args), 1);
 }
 
 #define ADD(x) (x) += o.x
