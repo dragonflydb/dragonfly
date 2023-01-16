@@ -87,7 +87,7 @@ class PrimeEvictionPolicy {
   // A hook function that is called every time a segment is full and requires splitting.
   void RecordSplit(PrimeTable::Segment_t* segment) {
     mem_budget_ -= PrimeTable::kSegBytes;
-    DVLOG(1) << "split: " << segment->SlowSize() << "/" << segment->capacity();
+    DVLOG(2) << "split: " << segment->SlowSize() << "/" << segment->capacity();
   }
 
   bool CanGrow(const PrimeTable& tbl) const;
@@ -139,8 +139,11 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
   // we estimate how much memory we will take with the current capacity
   // even though we may currently use less memory.
   // see https://github.com/dragonflydb/dragonfly/issues/256#issuecomment-1227095503
-  size_t available = tbl.capacity() - tbl.size();
-  return mem_budget_ > int64_t(PrimeTable::kSegBytes + db_slice_->bytes_per_object() * available);
+  size_t new_available = (tbl.capacity() - tbl.size()) + PrimeTable::kSegCapacity;
+  bool res = mem_budget_ >
+             int64_t(PrimeTable::kSegBytes + db_slice_->bytes_per_object() * new_available * 1.1);
+  VLOG(1) << "available: " << new_available << ", res: " << res;
+  return res;
 }
 
 unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& eb, PrimeTable* me) {
@@ -232,7 +235,7 @@ DbSlice::DbSlice(uint32_t index, bool caching_mode, EngineShard* owner)
   db_arr_.emplace_back();
   CreateDb(0);
   expire_base_[0] = expire_base_[1] = 0;
-  soft_budget_limit_ = (0.1 * max_memory_limit / shard_set->size());
+  soft_budget_limit_ = (0.3 * max_memory_limit / shard_set->size());
 }
 
 DbSlice::~DbSlice() {
