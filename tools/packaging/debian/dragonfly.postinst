@@ -1,0 +1,26 @@
+#!/bin/sh
+
+# Script to run at the end of the installation
+set -eu
+
+USER="dfly"
+DIR_NAME="dragonfly"
+GROUP="$USER"
+CONFFILE="/etc/${DIR_NAME}/${DIR_NAME}.conf"
+
+if [ "$1" = "configure" ]
+then
+	if ! dpkg-statoverride --list ${CONFFILE} >/dev/null 2>&1
+	then
+		dpkg-statoverride --update --add ${USER} ${GROUP} 640 ${CONFFILE}
+	fi
+fi
+
+#DEBHELPER#
+
+if [ "$1" = "configure" ]
+then
+	find /etc/${DIR_NAME} -maxdepth 1 -type d -name '${DIR_NAME}.*.d' -empty -delete
+fi
+
+exit 0

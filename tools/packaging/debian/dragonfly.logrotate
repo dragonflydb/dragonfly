@@ -1,0 +1,7 @@
+/var/log/dragonfly/dragonfly* {
+        weekly
+        missingok
+        rotate 12
+        compress
+        notifempty
+}
