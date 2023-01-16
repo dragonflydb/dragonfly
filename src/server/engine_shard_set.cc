@@ -208,7 +208,10 @@ EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t*
     if (clock_cycle_ms == 0)
       clock_cycle_ms = 1;
 
-    periodic_task_ = pb->AddPeriodic(clock_cycle_ms, [this] { Heartbeat(); });
+    fiber_periodic_ = fibers::fiber([this, index = pb->GetIndex(), period_ms = clock_cycle_ms] {
+      FiberProps::SetName(absl::StrCat("shard_periodic", index));
+      RunPeriodic(std::chrono::milliseconds(period_ms));
+    });
   }
 
   tmp_str1 = sdsempty();
@@ -230,8 +233,9 @@ void EngineShard::Shutdown() {
     tiered_storage_->Shutdown();
   }
 
-  if (periodic_task_) {
-    ProactorBase::me()->CancelPeriodic(periodic_task_);
+  fiber_periodic_done_.Notify();
+  if (fiber_periodic_.joinable()) {
+    fiber_periodic_.join();
   }
 
   ProactorBase::me()->RemoveOnIdleTask(defrag_task_);
@@ -477,6 +481,16 @@ void EngineShard::Heartbeat() {
   }
 }
 
+void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
+  while (true) {
+    Heartbeat();
+    if (fiber_periodic_done_.WaitFor(period_ms)) {
+      VLOG(1) << "finished running engine shard periodic task";
+      return;
+    }
+  }
+}
+
 void EngineShard::CacheStats() {
   // mi_heap_visit_blocks(tlh, false /* visit all blocks*/, visit_cb, &sum);
   mi_stats_merge();
@@ -514,8 +528,10 @@ BlockingController* EngineShard::EnsureBlockingController() {
 }
 
 void EngineShard::TEST_EnableHeartbeat() {
-  auto* pb = ProactorBase::me();
-  periodic_task_ = pb->AddPeriodic(1, [this] { Heartbeat(); });
+  fiber_periodic_ = fibers::fiber([this, period_ms = 1] {
+    FiberProps::SetName("shard_periodic_TEST");
+    RunPeriodic(std::chrono::milliseconds(period_ms));
+  });
 }
 
 /**

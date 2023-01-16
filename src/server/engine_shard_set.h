@@ -164,6 +164,7 @@ class EngineShard {
   void Shutdown();  // called before destructing EngineShard.
 
   void Heartbeat();
+  void RunPeriodic(std::chrono::milliseconds period_ms);
 
   void CacheStats();
 
@@ -200,8 +201,9 @@ class EngineShard {
   journal::Journal* journal_ = nullptr;
   IntentLock shard_lock_;
 
-  uint32_t periodic_task_ = 0;
   uint32_t defrag_task_ = 0;
+  ::boost::fibers::fiber fiber_periodic_;
+  ::util::fibers_ext::Done fiber_periodic_done_;
 
   DefragTaskState defrag_state_;
   std::unique_ptr<TieredStorage> tiered_storage_;
