@@ -1,0 +1,3 @@
+debian/dragonfly.service /lib/systemd/system
+debian/dragonfly.conf	/etc/dragonfly
+debian/bin/dragonfly /usr/bin

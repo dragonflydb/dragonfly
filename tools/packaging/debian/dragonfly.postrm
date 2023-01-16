@@ -1,0 +1,18 @@
+#!/bin/sh
+# Script to run at the end of remove
+set -eu
+DIR_NAME="dragonfly"
+USER_NAME="dfly"
+CONFFILE="/etc/${DIR_NAME}/${DIR_NAME}.conf"
+
+# When purging the package, remove all trances
+if [ "${1}" = "purge" ]
+then
+	userdel ${USER_NAME} || true
+	rm -rf /var/lib/${DIR_NAME} /var/log/${DIR_NAME} /etc/${DIR_NAME} /var/run/${DIR_NAME}
+	dpkg-statoverride --remove ${CONFFILE} || test $? -eq 2
+fi
+
+#DEBHELPER#
+
+exit 0

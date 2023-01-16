@@ -1,0 +1,42 @@
+[Unit]
+Description=Modern and fast key-value store
+After=network.target
+Documentation=
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/dragonfly --flagfile=/etc/dragonfly/dragonfly.conf
+PIDFile=/var/run/dragonfly/dragonfly.pid
+TimeoutStopSec=0
+Restart=always
+User=dfly
+Group=dfly
+RuntimeDirectory=dragonfly
+RuntimeDirectoryMode=2755
+
+UMask=007
+PrivateTmp=yes
+LimitNOFILE=65535
+PrivateDevices=yes
+ProtectHome=yes
+ReadOnlyDirectories=/
+ReadWritePaths=-/var/lib/dragonfly
+ReadWritePaths=-/var/log/dragonfly
+ReadWritePaths=-/var/run/dragonfly
+
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_SETGID CAP_SETUID CAP_SYS_RESOURCE
+MemoryDenyWriteExecute=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+ProtectSystem=true
+ReadWriteDirectories=-/etc/dragonfly
+
+[Install]
+WantedBy=multi-user.target
+Alias=dragonfly.service

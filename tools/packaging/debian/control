@@ -1,0 +1,12 @@
+Source: dragonfly
+Maintainer: DragonflyDB authors  <dragonfly@dragonflydb.io>
+Standards-Version:  4.2.1
+Priority: optional
+Section: database
+Vcs-Git: https://github.com/dragonflydb/dragonfly
+
+Package: dragonfly
+Architecture: amd64 arm64
+Depends: libc6, openssl, adduser, systemctl
+Homepage: https://dragonflydb.io
+Description: A fast in-memory store that is fully compatible with Redis™* and Memcached.

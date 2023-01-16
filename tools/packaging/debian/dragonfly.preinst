@@ -1,0 +1,50 @@
+#!/bin/sh
+
+set -eu
+# Script to run before the installation starts.
+# We are creating a user "dragonfly", and the directories that
+# would be used by the application
+
+USER="dfly"
+DIR_NAME="dragonfly"
+
+setup_dir () {
+	DIR="${1}"
+	MODE="${2}"
+	GROUP="${3}"
+
+	mkdir -p ${DIR} || {
+		echo "failed to create dir ${DIR}"
+		return 1
+	}
+
+	if ! dpkg-statoverride --list ${DIR} >/dev/null 2>&1
+	then
+		echo "changing owner for ${DIR} to user ${USER}"
+		chown ${USER}:${GROUP} ${DIR}
+		chmod ${MODE} ${DIR}
+	fi
+}
+
+if [ "$1" = "install" ]; then
+	if ! id ${USER} >/dev/null 2>&1 ; then
+		echo "trying to create user ${USER}"
+		adduser \
+			--system \
+			--home /var/lib/${DIR_NAME} \
+			--quiet \
+			--group \
+			${USER} || {
+			echo "failed to add user ${USER}"
+			exit 1
+		}
+
+		setup_dir /var/log/${DIR_NAME} 2755 adm
+		setup_dir /var/lib/${DIR_NAME} 755 ${USER}
+		setup_dir /var/run/${DIR_NAME} 755 ${USER}
+		setup_dir /etc/${DIR_NAME} 2775 ${USER}
+	fi
+fi
+#DEBHELPER#
+
+exit 0
