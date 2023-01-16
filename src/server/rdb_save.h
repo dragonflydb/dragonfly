@@ -118,17 +118,11 @@ class RdbSerializer {
 
   ~RdbSerializer();
 
-  // Get access to internal buffer, compressed, if enabled.
-  io::Bytes Flush();
-
   // Internal buffer size. Might shrink after flush due to compression.
   size_t SerializedLen() const;
 
   // Flush internal buffer to sink.
   std::error_code FlushToSink(io::Sink* s);
-
-  // Clear internal buffer contents.
-  void Clear();
 
   std::error_code SelectDb(uint32_t dbid);
 
@@ -161,6 +155,9 @@ class RdbSerializer {
   std::error_code SendFullSyncCut();
 
  private:
+  // Prepare internal buffer for flush. Compress it.
+  io::Bytes PrepareFlush();
+
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
   std::error_code SaveObject(const PrimeValue& pv);
   std::error_code SaveListObject(const robj* obj);
@@ -168,6 +165,8 @@ class RdbSerializer {
   std::error_code SaveHSetObject(const PrimeValue& pv);
   std::error_code SaveZSetObject(const robj* obj);
   std::error_code SaveStreamObject(const robj* obj);
+  std::error_code SaveJsonObject(const PrimeValue& pv);
+
   std::error_code SaveLongLongAsString(int64_t value);
   std::error_code SaveBinaryDouble(double val);
   std::error_code SaveListPackAsZiplist(uint8_t* lp);
@@ -177,12 +176,12 @@ class RdbSerializer {
   void CompressBlob();
   void AllocateCompressorOnce();
 
-  JournalWriter journal_writer_;
+  base::IoBuf mem_buf_;
+  base::IoBuf journal_mem_buf_;
+  std::string tmp_str_;
+  base::PODArray<uint8_t> tmp_buf_;
 
   std::unique_ptr<LZF_HSLOT[]> lzf_;
-  base::IoBuf mem_buf_;
-  base::PODArray<uint8_t> tmp_buf_;
-  std::string tmp_str_;
 
   CompressionMode compression_mode_;
   // TODO : This compressor impl should support different compression algorithms zstd/lz4 etc.

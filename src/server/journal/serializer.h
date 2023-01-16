@@ -18,14 +18,10 @@ namespace dfly {
 // It automatically keeps track of the current database index.
 class JournalWriter {
  public:
-  // Write single entry to internal buffer.
+  JournalWriter(io::Sink* sink);
+
+  // Write single entry to sink.
   void Write(const journal::Entry& entry);
-
-  // Flush internal buffer to sink.
-  std::error_code Flush(io::Sink* sink_);
-
-  // Return reference to internal buffer.
-  base::IoBuf& Accumulated();
 
  private:
   void Write(uint64_t v);           // Write packed unsigned integer.
@@ -36,7 +32,7 @@ class JournalWriter {
   void Write(std::monostate);  // Overload for empty std::variant
 
  private:
-  base::IoBuf buf_{};
+  io::Sink* sink_;
   std::optional<DbIndex> cur_dbid_{};
 };
 
@@ -63,14 +59,13 @@ struct JournalReader {
   // Read unsigned integer in packed encoding.
   template <typename UT> io::Result<UT> ReadUInt();
 
-  // Read and append string to string buffer, return size.
-  io::Result<size_t> ReadString();
+  // Read and copy to buffer, return size.
+  io::Result<size_t> ReadString(char* buffer);
 
   // Read argument array into string buffer.
-  std::error_code Read(CmdArgVec* vec);
+  std::error_code ReadCommand(journal::ParsedEntry::CmdData* entry);
 
  private:
-  std::string str_buf_;  // last parsed entry points here
   io::Source* source_;
   base::IoBuf buf_;
   DbIndex dbid_;

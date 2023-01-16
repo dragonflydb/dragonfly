@@ -19,6 +19,7 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/rdb_extensions.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
 #include "server/transaction.h"
@@ -134,7 +135,7 @@ class RdbRestoreValue : protected RdbLoaderBase {
 std::optional<RdbLoaderBase::OpaqueObj> RdbRestoreValue::Parse(std::string_view payload) {
   InMemSource source(payload);
   src_ = &source;
-  if (io::Result<uint8_t> type_id = FetchType(); type_id && rdbIsObjectType(type_id.value())) {
+  if (io::Result<uint8_t> type_id = FetchType(); type_id && rdbIsObjectTypeDF(type_id.value())) {
     OpaqueObj obj;
     error_code ec = ReadObj(type_id.value(), &obj);  // load the type from the input stream
     if (ec) {

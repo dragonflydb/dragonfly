@@ -21,9 +21,12 @@ extern "C" {
 #include <lz4frame.h>
 #include <zstd.h>
 
+#include <jsoncons/json.hpp>
+
 #include "base/endian.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/json_object.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
 #include "server/engine_shard_set.h"
@@ -353,9 +356,9 @@ class RdbLoaderBase::OpaqueObjLoader {
   }
 
   void operator()(const base::PODArray<char>& str);
-
   void operator()(const LzfString& lzfstr);
   void operator()(const unique_ptr<LoadTrace>& ptr);
+  void operator()(const JsonType& jt);
 
   std::error_code ec() const {
     return ec_;
@@ -424,6 +427,10 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr
     default:
       LOG(FATAL) << "Unsupported rdb type " << rdb_type_;
   }
+}
+
+void RdbLoaderBase::OpaqueObjLoader::operator()(const JsonType& json) {
+  pv_->SetJson(JsonType{json});
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
@@ -1209,6 +1216,8 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_STREAM_LISTPACKS:
       iores = ReadStreams();
       break;
+    case RDB_TYPE_JSON:
+      iores = ReadJson();
       break;
     default:
       LOG(ERROR) << "Unsupported rdb type " << rdbtype;
@@ -1597,6 +1606,17 @@ auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(load_trace), RDB_TYPE_STREAM_LISTPACKS};
 }
 
+auto RdbLoaderBase::ReadJson() -> io::Result<OpaqueObj> {
+  string json_str;
+  SET_OR_UNEXPECT(FetchGenericString(), json_str);
+
+  auto json = JsonFromString(json_str);
+  if (!json)
+    return Unexpected(errc::bad_json_string);
+
+  return OpaqueObj{std::move(*json), RDB_TYPE_JSON};
+}
+
 template <typename T> io::Result<T> RdbLoaderBase::FetchInt() {
   auto ec = EnsureRead(sizeof(T));
   if (ec)
@@ -1804,7 +1824,7 @@ error_code RdbLoader::Load(io::Source* src) {
       continue;
     }
 
-    if (!rdbIsObjectType(type)) {
+    if (!rdbIsObjectTypeDF(type)) {
       return RdbError(errc::invalid_rdb_type);
     }
 
@@ -1961,7 +1981,9 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service, DbIndex dbid) {
   while (done < num_entries) {
     journal::ParsedEntry entry{};
     SET_OR_RETURN(journal_reader_.ReadEntry(), entry);
-    ex.Execute(entry);
+    if (entry.opcode == journal::Op::COMMAND || entry.opcode == journal::Op::MULTI_COMMAND) {
+      ex.Execute(entry.dbid, entry.cmd);
+    }
     done++;
   }
 

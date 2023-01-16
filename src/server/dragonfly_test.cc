@@ -101,6 +101,16 @@ TEST_F(DflyEngineTest, MultiAndEval) {
                      "transaction block"));
 }
 
+TEST_F(DflyEngineTest, MultiAndFlush) {
+  RespExpr resp = Run({"multi"});
+  ASSERT_EQ(resp, "OK");
+
+  resp = Run({"get", kKey1});
+  ASSERT_EQ(resp, "QUEUED");
+
+  EXPECT_THAT(Run({"FLUSHALL"}), ErrArg("'FLUSHALL' inside MULTI is not allowed"));
+}
+
 TEST_F(DflyEngineTest, Multi) {
   RespExpr resp = Run({"multi"});
   ASSERT_EQ(resp, "OK");
@@ -349,6 +359,12 @@ TEST_F(DflyEngineTest, Eval) {
   resp = Run({"eval", "return redis.call('exists', KEYS[2])", "2", "a", "b"});
   EXPECT_EQ(2, GetDebugInfo().shards_count);
   EXPECT_THAT(resp, IntArg(0));
+
+  resp = Run({"eval", "return redis.call('hmset', KEYS[1], 'f1', '2222')", "1", "hmap"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"hvals", "hmap"});
+  EXPECT_EQ(resp, "2222");
 }
 
 TEST_F(DflyEngineTest, EvalResp) {
@@ -644,7 +660,7 @@ TEST_F(DflyEngineTest, Watch) {
 
   // Check watch doesn't run in multi.
   Run({"multi"});
-  ASSERT_THAT(Run({"watch", "a"}), ErrArg("WATCH inside MULTI is not allowed"));
+  ASSERT_THAT(Run({"watch", "a"}), ErrArg("'WATCH' inside MULTI is not allowed"));
   Run({"discard"});
 
   // Check watch on existing key.
@@ -772,7 +788,7 @@ TEST_F(DflyEngineTest, Bug496) {
   });
 }
 
-TEST_F(DflyEngineTest, Issue706) {
+TEST_F(DflyEngineTest, Issue607) {
   // https://github.com/dragonflydb/dragonfly/issues/607
 
   Run({"SET", "key", "value1"});
@@ -785,6 +801,15 @@ TEST_F(DflyEngineTest, Issue706) {
 
   Run({"SET", "key", "value3"});
   EXPECT_EQ(Run({"GET", "key"}), "value3");
+}
+
+TEST_F(DflyEngineTest, Issue679) {
+  // https://github.com/dragonflydb/dragonfly/issues/679
+
+  Run({"HMSET", "a", "key", "val"});
+  Run({"EXPIRE", "a", "1000"});
+  Run({"HMSET", "a", "key", "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"});
+  Run({"EXPIRE", "a", "1001"});
 }
 
 TEST_F(DefragDflyEngineTest, TestDefragOption) {

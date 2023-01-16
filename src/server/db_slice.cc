@@ -396,7 +396,10 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
   // do not add new segments. For example, we have half full segments
   // and we add new objects or update the existing ones and our memory usage grows.
   if (evp.mem_budget() < 0) {
-    evicted_obj_bytes = EvictObjects(-evp.mem_budget(), it, &db);
+    // TODO(roman): EvictObjects is too aggressive and it's messing with cache hit-rate.
+    // The regular eviction policy does a decent job though it may cross the passed limit
+    // a little bit. I do not consider it as a serious bug.
+    // evicted_obj_bytes = EvictObjects(-evp.mem_budget(), it, &db);
   }
 
   if (inserted) {  // new entry
@@ -704,7 +707,6 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
 
 bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) const {
   DCHECK(!lock_args.args.empty());
-
   const auto& lt = db_arr_[lock_args.db_index]->trans_locks;
   for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
     auto s = lock_args.args[i];

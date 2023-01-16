@@ -63,6 +63,7 @@ namespace dfly {
 using namespace std;
 using namespace facade;
 using absl::GetFlag;
+using time_point = Transaction::time_point;
 
 namespace {
 
@@ -200,12 +201,26 @@ class BPopper {
   string value_;
 };
 
+class BPopPusher {
+ public:
+  BPopPusher(string_view pop_key, string_view push_key, ListDir popdir, ListDir pushdir);
+
+  // Returns WRONG_TYPE, OK.
+  // If OK is returned then use result() to fetch the value.
+  OpResult<string> Run(Transaction* t, unsigned msec);
+
+ private:
+  OpResult<string> RunSingle(Transaction* t, time_point tp);
+  OpResult<string> RunPair(Transaction* t, time_point tp);
+
+  string_view pop_key_, push_key_;
+  ListDir popdir_, pushdir_;
+};
+
 BPopper::BPopper(ListDir dir) : dir_(dir) {
 }
 
 OpStatus BPopper::Run(Transaction* t, unsigned msec) {
-  using time_point = Transaction::time_point;
-
   time_point tp =
       msec ? chrono::steady_clock::now() + chrono::milliseconds(msec) : time_point::max();
   bool is_multi = t->IsMulti();
@@ -225,8 +240,12 @@ OpStatus BPopper::Run(Transaction* t, unsigned msec) {
     }
 
     // Block
+    auto wcb = [&](Transaction* t, EngineShard* shard) {
+      return t->ShardArgsInShard(shard->shard_id());
+    };
+
     ++stats->num_blocked_clients;
-    bool wait_succeeded = t->WaitOnWatch(tp);
+    bool wait_succeeded = t->WaitOnWatch(tp, std::move(wcb));
     --stats->num_blocked_clients;
 
     if (!wait_succeeded)
@@ -363,6 +382,8 @@ OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool 
 
 OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,
                           bool skip_notexist, absl::Span<std::string_view> vals) {
+  DVLOG(1) << "OpPush " << key;
+
   EngineShard* es = op_args.shard;
   PrimeIterator it;
   bool new_key = false;
@@ -452,6 +473,462 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
   return res;
 }
 
+OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view dest,
+                               ListDir src_dir, ListDir dest_dir, bool conclude_on_error) {
+  DCHECK_EQ(2u, trans->unique_shard_cnt());
+
+  OpResult<string> find_res[2];
+  OpResult<string> result;
+
+  // Transaction is comprised of 2 hops:
+  // 1 - check for entries existence, their types and if possible -
+  //     read the value we may move from the source list.
+  // 2.  If everything is ok, pop from source and push the peeked value into
+  //     the destination.
+  //
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    auto args = t->ShardArgsInShard(shard->shard_id());
+    DCHECK_EQ(1u, args.size());
+    bool is_dest = args.front() == dest;
+    find_res[is_dest] = Peek(t->GetOpArgs(shard), args.front(), src_dir, !is_dest);
+    return OpStatus::OK;
+  };
+
+  trans->Execute(move(cb), false);
+
+  if (!find_res[0] || find_res[1].status() == OpStatus::WRONG_TYPE) {
+    result = find_res[0] ? find_res[1] : find_res[0];
+    if (conclude_on_error) {
+      auto cb = [&](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
+      trans->Execute(move(cb), true);
+    }
+  } else {
+    // Everything is ok, lets proceed with the mutations.
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      auto args = t->ShardArgsInShard(shard->shard_id());
+      bool is_dest = args.front() == dest;
+      OpArgs op_args = t->GetOpArgs(shard);
+
+      if (is_dest) {
+        string_view val{find_res[0].value()};
+        absl::Span<string_view> span{&val, 1};
+        OpPush(op_args, args.front(), dest_dir, false, span);
+      } else {
+        OpPop(op_args, args.front(), src_dir, 1, false);
+      }
+      return OpStatus::OK;
+    };
+    trans->Execute(move(cb), true);
+    result = std::move(find_res[0].value());
+  }
+
+  return result;
+}
+
+OpResult<uint32_t> OpLen(const OpArgs& op_args, std::string_view key) {
+  auto res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
+  if (!res)
+    return res.status();
+
+  quicklist* ql = GetQL(res.value()->second);
+
+  return quicklistCount(ql);
+}
+
+OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index) {
+  auto res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
+  if (!res)
+    return res.status();
+  quicklist* ql = GetQL(res.value()->second);
+  quicklistEntry entry = container_utils::QLEntry();
+  quicklistIter* iter = quicklistGetIteratorAtIdx(ql, AL_START_TAIL, index);
+  if (!iter)
+    return OpStatus::KEY_NOTFOUND;
+
+  quicklistNext(iter, &entry);
+  string str;
+
+  if (entry.value) {
+    str.assign(reinterpret_cast<char*>(entry.value), entry.sz);
+  } else {
+    str = absl::StrCat(entry.longval);
+  }
+  quicklistReleaseIterator(iter);
+
+  return str;
+}
+
+OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, std::string_view key,
+                                 std::string_view element, int rank, int count, int max_len) {
+  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
+  if (!it_res.ok())
+    return it_res.status();
+
+  int direction = AL_START_HEAD;
+  if (rank < 0) {
+    rank = -rank;
+    direction = AL_START_TAIL;
+  }
+
+  quicklist* ql = GetQL(it_res.value()->second);
+  quicklistIter* ql_iter = quicklistGetIterator(ql, direction);
+  quicklistEntry entry;
+
+  int index = 0;
+  int matched = 0;
+  vector<uint32_t> matches;
+  string str;
+
+  while (quicklistNext(ql_iter, &entry) && (max_len == 0 || index < max_len)) {
+    if (entry.value) {
+      str.assign(reinterpret_cast<char*>(entry.value), entry.sz);
+    } else {
+      str = absl::StrCat(entry.longval);
+    }
+    if (str == element) {
+      matched++;
+      auto k = (direction == AL_START_TAIL) ? ql->count - index - 1 : index;
+      if (matched >= rank) {
+        matches.push_back(k);
+        if (count && matched - rank + 1 >= count) {
+          break;
+        }
+      }
+    }
+    index++;
+  }
+  quicklistReleaseIterator(ql_iter);
+  return matches;
+}
+
+OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot, string_view elem,
+                       int insert_param) {
+  auto& db_slice = op_args.shard->db_slice();
+  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_LIST);
+  if (!it_res)
+    return it_res.status();
+
+  quicklist* ql = GetQL(it_res.value()->second);
+  quicklistEntry entry = container_utils::QLEntry();
+  quicklistIter* qiter = quicklistGetIterator(ql, AL_START_HEAD);
+  bool found = false;
+
+  while (quicklistNext(qiter, &entry)) {
+    if (ElemCompare(entry, pivot)) {
+      found = true;
+      break;
+    }
+  }
+
+  int res = -1;
+  if (found) {
+    db_slice.PreUpdate(op_args.db_cntx.db_index, *it_res);
+    if (insert_param == LIST_TAIL) {
+      quicklistInsertAfter(qiter, &entry, elem.data(), elem.size());
+    } else {
+      DCHECK_EQ(LIST_HEAD, insert_param);
+      quicklistInsertBefore(qiter, &entry, elem.data(), elem.size());
+    }
+    db_slice.PostUpdate(op_args.db_cntx.db_index, *it_res, key);
+    res = quicklistCount(ql);
+  }
+  quicklistReleaseIterator(qiter);
+  return res;
+}
+
+OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view elem, long count) {
+  DCHECK(!elem.empty());
+  auto& db_slice = op_args.shard->db_slice();
+  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_LIST);
+  if (!it_res)
+    return it_res.status();
+
+  PrimeIterator it = *it_res;
+  quicklist* ql = GetQL(it->second);
+
+  int iter_direction = AL_START_HEAD;
+  long long index = 0;
+  if (count < 0) {
+    count = -count;
+    iter_direction = AL_START_TAIL;
+    index = -1;
+  }
+
+  quicklistIter* qiter = quicklistGetIteratorAtIdx(ql, iter_direction, index);
+  quicklistEntry entry;
+  unsigned removed = 0;
+  const uint8_t* elem_ptr = reinterpret_cast<const uint8_t*>(elem.data());
+
+  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
+  while (quicklistNext(qiter, &entry)) {
+    if (quicklistCompare(&entry, elem_ptr, elem.size())) {
+      quicklistDelEntry(qiter, &entry);
+      removed++;
+      if (count && removed == count)
+        break;
+    }
+  }
+  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
+
+  quicklistReleaseIterator(qiter);
+
+  if (quicklistCount(ql) == 0) {
+    CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
+  }
+
+  return removed;
+}
+
+OpStatus OpSet(const OpArgs& op_args, string_view key, string_view elem, long index) {
+  DCHECK(!elem.empty());
+  auto& db_slice = op_args.shard->db_slice();
+  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_LIST);
+  if (!it_res)
+    return it_res.status();
+
+  PrimeIterator it = *it_res;
+  quicklist* ql = GetQL(it->second);
+
+  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
+  int replaced = quicklistReplaceAtIndex(ql, index, elem.data(), elem.size());
+  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
+
+  if (!replaced) {
+    return OpStatus::OUT_OF_RANGE;
+  }
+  return OpStatus::OK;
+}
+
+OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
+  auto& db_slice = op_args.shard->db_slice();
+  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_LIST);
+  if (!it_res)
+    return it_res.status();
+
+  PrimeIterator it = *it_res;
+  quicklist* ql = GetQL(it->second);
+  long llen = quicklistCount(ql);
+
+  /* convert negative indexes */
+  if (start < 0)
+    start = llen + start;
+  if (end < 0)
+    end = llen + end;
+  if (start < 0)
+    start = 0;
+
+  long ltrim, rtrim;
+
+  /* Invariant: start >= 0, so this test will be true when end < 0.
+   * The range is empty when start > end or start >= length. */
+  if (start > end || start >= llen) {
+    /* Out of range start or start > end result in empty list */
+    ltrim = llen;
+    rtrim = 0;
+  } else {
+    if (end >= llen)
+      end = llen - 1;
+    ltrim = start;
+    rtrim = llen - end - 1;
+  }
+
+  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
+  quicklistDelRange(ql, 0, ltrim);
+  quicklistDelRange(ql, -rtrim, rtrim);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
+
+  if (quicklistCount(ql) == 0) {
+    CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
+  }
+  return OpStatus::OK;
+}
+
+OpResult<StringVec> OpRange(const OpArgs& op_args, std::string_view key, long start, long end) {
+  auto res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
+  if (!res)
+    return res.status();
+
+  quicklist* ql = GetQL(res.value()->second);
+  long llen = quicklistCount(ql);
+
+  /* convert negative indexes */
+  if (start < 0)
+    start = llen + start;
+  if (end < 0)
+    end = llen + end;
+  if (start < 0)
+    start = 0;
+
+  /* Invariant: start >= 0, so this test will be true when end < 0.
+   * The range is empty when start > end or start >= length. */
+  if (start > end || start >= llen) {
+    /* Out of range start or start > end result in empty list */
+    return StringVec{};
+  }
+
+  StringVec str_vec;
+  container_utils::IterateList(
+      res.value()->second,
+      [&str_vec](container_utils::ContainerEntry ce) {
+        str_vec.emplace_back(ce.ToString());
+        return true;
+      },
+      start, end);
+
+  return str_vec;
+}
+
+void MoveGeneric(ConnectionContext* cntx, string_view src, string_view dest, ListDir src_dir,
+                 ListDir dest_dir) {
+  OpResult<string> result;
+
+  if (cntx->transaction->unique_shard_cnt() == 1) {
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      return OpMoveSingleShard(t->GetOpArgs(shard), src, dest, src_dir, dest_dir);
+    };
+
+    result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  } else {
+    cntx->transaction->Schedule();
+    result = MoveTwoShards(cntx->transaction, src, dest, src_dir, dest_dir, true);
+  }
+
+  if (result) {
+    return (*cntx)->SendBulkString(*result);
+  }
+
+  switch (result.status()) {
+    case OpStatus::KEY_NOTFOUND:
+      (*cntx)->SendNull();
+      break;
+
+    default:
+      (*cntx)->SendError(result.status());
+      break;
+  }
+}
+
+void RPopLPush(CmdArgList args, ConnectionContext* cntx) {
+  string_view src = ArgS(args, 1);
+  string_view dest = ArgS(args, 2);
+
+  MoveGeneric(cntx, src, dest, ListDir::RIGHT, ListDir::LEFT);
+}
+
+void BRPopLPush(CmdArgList args, ConnectionContext* cntx) {
+  string_view src = ArgS(args, 1);
+  string_view dest = ArgS(args, 2);
+  string_view timeout_str = ArgS(args, 3);
+
+  float timeout;
+  if (!absl::SimpleAtof(timeout_str, &timeout)) {
+    return (*cntx)->SendError("timeout is not a float or out of range");
+  }
+
+  if (timeout < 0) {
+    return (*cntx)->SendError("timeout is negative");
+  }
+
+  BPopPusher bpop_pusher(src, dest, ListDir::RIGHT, ListDir::LEFT);
+  OpResult<string> op_res = bpop_pusher.Run(cntx->transaction, unsigned(timeout * 1000));
+
+  if (op_res) {
+    return (*cntx)->SendBulkString(*op_res);
+  }
+
+  switch (op_res.status()) {
+    case OpStatus::TIMED_OUT:
+      return (*cntx)->SendNull();
+      break;
+
+    default:
+      return (*cntx)->SendError(op_res.status());
+      break;
+  }
+}
+
+BPopPusher::BPopPusher(string_view pop_key, string_view push_key, ListDir popdir, ListDir pushdir)
+    : pop_key_(pop_key), push_key_(push_key), popdir_(popdir), pushdir_(pushdir) {
+}
+
+OpResult<string> BPopPusher::Run(Transaction* t, unsigned msec) {
+  time_point tp =
+      msec ? chrono::steady_clock::now() + chrono::milliseconds(msec) : time_point::max();
+
+  t->Schedule();
+
+  if (t->unique_shard_cnt() == 1) {
+    return RunSingle(t, tp);
+  }
+
+  return RunPair(t, tp);
+}
+
+OpResult<string> BPopPusher::RunSingle(Transaction* t, time_point tp) {
+  OpResult<string> op_res;
+  bool is_multi = t->IsMulti();
+  auto cb_move = [&](Transaction* t, EngineShard* shard) {
+    op_res = OpMoveSingleShard(t->GetOpArgs(shard), pop_key_, push_key_, popdir_, pushdir_);
+    return OpStatus::OK;
+  };
+  t->Execute(cb_move, false);
+
+  if (is_multi || op_res.status() != OpStatus::KEY_NOTFOUND) {
+    if (op_res.status() == OpStatus::KEY_NOTFOUND) {
+      op_res = OpStatus::TIMED_OUT;
+    }
+    auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
+    t->Execute(std::move(cb), true);
+    return op_res;
+  }
+
+  auto* stats = ServerState::tl_connection_stats();
+
+  auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice{&this->pop_key_, 1}; };
+
+  // Block
+  ++stats->num_blocked_clients;
+
+  bool wait_succeeded = t->WaitOnWatch(tp, std::move(wcb));
+  --stats->num_blocked_clients;
+
+  if (!wait_succeeded)
+    return OpStatus::TIMED_OUT;
+
+  t->Execute(cb_move, true);
+  return op_res;
+}
+
+OpResult<string> BPopPusher::RunPair(Transaction* t, time_point tp) {
+  bool is_multi = t->IsMulti();
+  OpResult<string> op_res = MoveTwoShards(t, pop_key_, push_key_, popdir_, pushdir_, false);
+
+  if (is_multi || op_res.status() != OpStatus::KEY_NOTFOUND) {
+    if (op_res.status() == OpStatus::KEY_NOTFOUND) {
+      op_res = OpStatus::TIMED_OUT;
+    }
+    return op_res;
+  }
+
+  auto* stats = ServerState::tl_connection_stats();
+
+  // a hack: we watch in both shards for pop_key but only in the source shard it's relevant.
+  // Therefore we follow the regular flow of watching the key but for the destination shard it
+  // will never be triggerred.
+  // This allows us to run Transaction::Execute on watched transactions in both shards.
+  auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice{&this->pop_key_, 1}; };
+
+  ++stats->num_blocked_clients;
+
+  bool wait_succeeded = t->WaitOnWatch(tp, std::move(wcb));
+  --stats->num_blocked_clients;
+
+  if (!wait_succeeded)
+    return OpStatus::TIMED_OUT;
+
+  return MoveTwoShards(t, pop_key_, push_key_, popdir_, pushdir_, true);
+}
+
 }  // namespace
 
 void ListFamily::LPush(CmdArgList args, ConnectionContext* cntx) {
@@ -476,13 +953,6 @@ void ListFamily::RPushX(CmdArgList args, ConnectionContext* cntx) {
 
 void ListFamily::RPop(CmdArgList args, ConnectionContext* cntx) {
   return PopGeneric(ListDir::RIGHT, std::move(args), cntx);
-}
-
-void ListFamily::RPopLPush(CmdArgList args, ConnectionContext* cntx) {
-  string_view src = ArgS(args, 1);
-  string_view dest = ArgS(args, 2);
-
-  MoveGeneric(cntx, src, dest, ListDir::RIGHT, ListDir::LEFT);
 }
 
 void ListFamily::LLen(CmdArgList args, ConnectionContext* cntx) {
@@ -840,334 +1310,6 @@ void ListFamily::PopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cnt
   }
 }
 
-void ListFamily::MoveGeneric(ConnectionContext* cntx, string_view src, string_view dest,
-                             ListDir src_dir, ListDir dest_dir) {
-  OpResult<string> result;
-
-  if (cntx->transaction->unique_shard_cnt() == 1) {
-    auto cb = [&](Transaction* t, EngineShard* shard) {
-      return OpMoveSingleShard(t->GetOpArgs(shard), src, dest, src_dir, dest_dir);
-    };
-
-    result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  } else {
-    CHECK_EQ(2u, cntx->transaction->unique_shard_cnt());
-
-    OpResult<string> find_res[2];
-
-    // Transaction is comprised of 2 hops:
-    // 1 - check for entries existence, their types and if possible -
-    //     read the value we may move from the source list.
-    // 2.  If everything is ok, pop from source and push the peeked value into
-    //     the destination.
-    //
-    cntx->transaction->Schedule();
-    auto cb = [&](Transaction* t, EngineShard* shard) {
-      auto args = t->ShardArgsInShard(shard->shard_id());
-      DCHECK_EQ(1u, args.size());
-      bool is_dest = args.front() == dest;
-      find_res[is_dest] = Peek(t->GetOpArgs(shard), args.front(), src_dir, !is_dest);
-      return OpStatus::OK;
-    };
-
-    cntx->transaction->Execute(move(cb), false);
-
-    if (!find_res[0] || find_res[1].status() == OpStatus::WRONG_TYPE) {
-      auto cb = [&](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
-      cntx->transaction->Execute(move(cb), true);
-      result = find_res[0] ? find_res[1] : find_res[0];
-    } else {
-      // Everything is ok, lets proceed with the mutations.
-      auto cb = [&](Transaction* t, EngineShard* shard) {
-        auto args = t->ShardArgsInShard(shard->shard_id());
-        bool is_dest = args.front() == dest;
-        OpArgs op_args = t->GetOpArgs(shard);
-
-        if (is_dest) {
-          string_view val{find_res[0].value()};
-          absl::Span<string_view> span{&val, 1};
-          OpPush(op_args, args.front(), dest_dir, false, span);
-        } else {
-          OpPop(op_args, args.front(), src_dir, 1, false);
-        }
-        return OpStatus::OK;
-      };
-      cntx->transaction->Execute(move(cb), true);
-      result = std::move(find_res[0].value());
-    }
-  }
-
-  if (result) {
-    return (*cntx)->SendBulkString(*result);
-  }
-
-  switch (result.status()) {
-    case OpStatus::KEY_NOTFOUND:
-      (*cntx)->SendNull();
-      break;
-
-    default:
-      (*cntx)->SendError(result.status());
-      break;
-  }
-}
-
-OpResult<uint32_t> ListFamily::OpLen(const OpArgs& op_args, std::string_view key) {
-  auto res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
-  if (!res)
-    return res.status();
-
-  quicklist* ql = GetQL(res.value()->second);
-
-  return quicklistCount(ql);
-}
-
-OpResult<string> ListFamily::OpIndex(const OpArgs& op_args, std::string_view key, long index) {
-  auto res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
-  if (!res)
-    return res.status();
-  quicklist* ql = GetQL(res.value()->second);
-  quicklistEntry entry = container_utils::QLEntry();
-  quicklistIter* iter = quicklistGetIteratorAtIdx(ql, AL_START_TAIL, index);
-  if (!iter)
-    return OpStatus::KEY_NOTFOUND;
-
-  quicklistNext(iter, &entry);
-  string str;
-
-  if (entry.value) {
-    str.assign(reinterpret_cast<char*>(entry.value), entry.sz);
-  } else {
-    str = absl::StrCat(entry.longval);
-  }
-  quicklistReleaseIterator(iter);
-
-  return str;
-}
-
-OpResult<vector<uint32_t>> ListFamily::OpPos(const OpArgs& op_args, std::string_view key,
-                                             std::string_view element, int rank, int count,
-                                             int max_len) {
-  OpResult<PrimeIterator> it_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
-  if (!it_res.ok())
-    return it_res.status();
-
-  int direction = AL_START_HEAD;
-  if (rank < 0) {
-    rank = -rank;
-    direction = AL_START_TAIL;
-  }
-
-  quicklist* ql = GetQL(it_res.value()->second);
-  quicklistIter* ql_iter = quicklistGetIterator(ql, direction);
-  quicklistEntry entry;
-
-  int index = 0;
-  int matched = 0;
-  vector<uint32_t> matches;
-  string str;
-
-  while (quicklistNext(ql_iter, &entry) && (max_len == 0 || index < max_len)) {
-    if (entry.value) {
-      str.assign(reinterpret_cast<char*>(entry.value), entry.sz);
-    } else {
-      str = absl::StrCat(entry.longval);
-    }
-    if (str == element) {
-      matched++;
-      auto k = (direction == AL_START_TAIL) ? ql->count - index - 1 : index;
-      if (matched >= rank) {
-        matches.push_back(k);
-        if (count && matched - rank + 1 >= count) {
-          break;
-        }
-      }
-    }
-    index++;
-  }
-  quicklistReleaseIterator(ql_iter);
-  return matches;
-}
-
-OpResult<int> ListFamily::OpInsert(const OpArgs& op_args, string_view key, string_view pivot,
-                                   string_view elem, int insert_param) {
-  auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_LIST);
-  if (!it_res)
-    return it_res.status();
-
-  quicklist* ql = GetQL(it_res.value()->second);
-  quicklistEntry entry = container_utils::QLEntry();
-  quicklistIter* qiter = quicklistGetIterator(ql, AL_START_HEAD);
-  bool found = false;
-
-  while (quicklistNext(qiter, &entry)) {
-    if (ElemCompare(entry, pivot)) {
-      found = true;
-      break;
-    }
-  }
-
-  int res = -1;
-  if (found) {
-    db_slice.PreUpdate(op_args.db_cntx.db_index, *it_res);
-    if (insert_param == LIST_TAIL) {
-      quicklistInsertAfter(qiter, &entry, elem.data(), elem.size());
-    } else {
-      DCHECK_EQ(LIST_HEAD, insert_param);
-      quicklistInsertBefore(qiter, &entry, elem.data(), elem.size());
-    }
-    db_slice.PostUpdate(op_args.db_cntx.db_index, *it_res, key);
-    res = quicklistCount(ql);
-  }
-  quicklistReleaseIterator(qiter);
-  return res;
-}
-
-OpResult<uint32_t> ListFamily::OpRem(const OpArgs& op_args, string_view key, string_view elem,
-                                     long count) {
-  DCHECK(!elem.empty());
-  auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_LIST);
-  if (!it_res)
-    return it_res.status();
-
-  PrimeIterator it = *it_res;
-  quicklist* ql = GetQL(it->second);
-
-  int iter_direction = AL_START_HEAD;
-  long long index = 0;
-  if (count < 0) {
-    count = -count;
-    iter_direction = AL_START_TAIL;
-    index = -1;
-  }
-
-  quicklistIter* qiter = quicklistGetIteratorAtIdx(ql, iter_direction, index);
-  quicklistEntry entry;
-  unsigned removed = 0;
-  const uint8_t* elem_ptr = reinterpret_cast<const uint8_t*>(elem.data());
-
-  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
-  while (quicklistNext(qiter, &entry)) {
-    if (quicklistCompare(&entry, elem_ptr, elem.size())) {
-      quicklistDelEntry(qiter, &entry);
-      removed++;
-      if (count && removed == count)
-        break;
-    }
-  }
-  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
-
-  quicklistReleaseIterator(qiter);
-
-  if (quicklistCount(ql) == 0) {
-    CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
-  }
-
-  return removed;
-}
-
-OpStatus ListFamily::OpSet(const OpArgs& op_args, string_view key, string_view elem, long index) {
-  DCHECK(!elem.empty());
-  auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_LIST);
-  if (!it_res)
-    return it_res.status();
-
-  PrimeIterator it = *it_res;
-  quicklist* ql = GetQL(it->second);
-
-  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
-  int replaced = quicklistReplaceAtIndex(ql, index, elem.data(), elem.size());
-  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
-
-  if (!replaced) {
-    return OpStatus::OUT_OF_RANGE;
-  }
-  return OpStatus::OK;
-}
-
-OpStatus ListFamily::OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
-  auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_LIST);
-  if (!it_res)
-    return it_res.status();
-
-  PrimeIterator it = *it_res;
-  quicklist* ql = GetQL(it->second);
-  long llen = quicklistCount(ql);
-
-  /* convert negative indexes */
-  if (start < 0)
-    start = llen + start;
-  if (end < 0)
-    end = llen + end;
-  if (start < 0)
-    start = 0;
-
-  long ltrim, rtrim;
-
-  /* Invariant: start >= 0, so this test will be true when end < 0.
-   * The range is empty when start > end or start >= length. */
-  if (start > end || start >= llen) {
-    /* Out of range start or start > end result in empty list */
-    ltrim = llen;
-    rtrim = 0;
-  } else {
-    if (end >= llen)
-      end = llen - 1;
-    ltrim = start;
-    rtrim = llen - end - 1;
-  }
-
-  db_slice.PreUpdate(op_args.db_cntx.db_index, it);
-  quicklistDelRange(ql, 0, ltrim);
-  quicklistDelRange(ql, -rtrim, rtrim);
-  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
-
-  if (quicklistCount(ql) == 0) {
-    CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
-  }
-  return OpStatus::OK;
-}
-
-OpResult<StringVec> ListFamily::OpRange(const OpArgs& op_args, std::string_view key, long start,
-                                        long end) {
-  auto res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
-  if (!res)
-    return res.status();
-
-  quicklist* ql = GetQL(res.value()->second);
-  long llen = quicklistCount(ql);
-
-  /* convert negative indexes */
-  if (start < 0)
-    start = llen + start;
-  if (end < 0)
-    end = llen + end;
-  if (start < 0)
-    start = 0;
-
-  /* Invariant: start >= 0, so this test will be true when end < 0.
-   * The range is empty when start > end or start >= length. */
-  if (start > end || start >= llen) {
-    /* Out of range start or start > end result in empty list */
-    return StringVec{};
-  }
-
-  StringVec str_vec;
-  container_utils::IterateList(
-      res.value()->second,
-      [&str_vec](container_utils::ContainerEntry ce) {
-        str_vec.emplace_back(ce.ToString());
-        return true;
-      },
-      start, end);
-
-  return str_vec;
-}
-
 using CI = CommandId;
 
 #define HFUNC(x) SetHandler(&ListFamily::x)
@@ -1179,7 +1321,9 @@ void ListFamily::Register(CommandRegistry* registry) {
             << CI{"RPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(RPush)
             << CI{"RPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(RPushX)
             << CI{"RPOP", CO::WRITE | CO::FAST | CO::DENYOOM, -2, 1, 1, 1}.HFUNC(RPop)
-            << CI{"RPOPLPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, 3, 1, 2, 1}.HFUNC(RPopLPush)
+            << CI{"RPOPLPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, 3, 1, 2, 1}.SetHandler(RPopLPush)
+            << CI{"BRPOPLPUSH", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING, 4, 1, 2, 1}.SetHandler(
+                   BRPopLPush)
             << CI{"BLPOP", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING, -3, 1, -2, 1}.HFUNC(BLPop)
             << CI{"BRPOP", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING, -3, 1, -2, 1}.HFUNC(BRPop)
             << CI{"LLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(LLen)

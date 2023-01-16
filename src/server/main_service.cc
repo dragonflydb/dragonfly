@@ -498,13 +498,13 @@ void Service::Shutdown() {
   // rejected
   pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Shutdown(); });
 
-  engine_varz.reset();
-  request_latency_usec.Shutdown();
-
   // to shutdown all the runtime components that depend on EngineShard.
   server_family_.Shutdown();
   StringFamily::Shutdown();
   GenericFamily::Shutdown();
+
+  engine_varz.reset();
+  request_latency_usec.Shutdown();
 
   shard_set->Shutdown();
 
@@ -606,9 +606,9 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
       return;
     }
 
-    if (cmd_name == "WATCH") {
-      (*cntx)->SendError("WATCH inside MULTI is not allowed");
-      return;
+    if (cmd_name == "WATCH" || cmd_name == "FLUSHALL" || cmd_name == "FLUSHDB") {
+      auto error = absl::StrCat("'", cmd_name, "' inside MULTI is not allowed");
+      return (*cntx)->SendError(error);
     }
   }
 

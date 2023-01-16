@@ -38,8 +38,8 @@ class BlockingController {
   // TODO: consider moving all watched functions to
   // EngineShard with separate per db map.
   //! AddWatched adds a transaction to the blocking queue.
-  void AddWatched(Transaction* me);
-  void RemoveWatched(Transaction* me);
+  void AddWatched(ArgSlice watch_keys, Transaction* me);
+  void RemoveWatched(ArgSlice watch_keys, Transaction* me);
 
   // Called from operations that create keys like lpush, rename etc.
   void AwakeWatched(DbIndex db_index, std::string_view db_key);
@@ -47,6 +47,10 @@ class BlockingController {
   // Used in tests and debugging functions.
   size_t NumWatched(DbIndex db_indx) const;
   std::vector<std::string> GetWatchedKeys(DbIndex db_indx) const;
+
+  void RemoveAwaked(Transaction* trans) {
+    awakened_transactions_.erase(trans);
+  }
 
  private:
   struct WatchQueue;
@@ -70,7 +74,5 @@ class BlockingController {
   // There can be multiple transactions like this because a transaction
   // could awaken arbitrary number of keys.
   absl::flat_hash_set<Transaction*> awakened_transactions_;
-
-  // absl::btree_multimap<TxId, Transaction*> waiting_convergence_;
 };
 }  // namespace dfly

@@ -13,6 +13,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from . import DflyInstance, DflyInstanceFactory, DflyParams
+from .utility import DflySeederFactory
 
 DATABASE_INDEX = 1
 
@@ -39,12 +40,9 @@ def test_env(tmp_dir: Path):
     env["DRAGONFLY_TMP"] = str(tmp_dir)
     return env
 
-
-def pytest_addoption(parser):
-    parser.addoption(
-        '--gdb', action='store_true', default=False, help='Run instances in gdb'
-    )
-
+@pytest.fixture(scope="session", params=[{}])
+def df_seeder_factory(request) -> DflySeederFactory:
+    return DflySeederFactory(request.config.getoption("--log-seeder"))
 
 @pytest.fixture(scope="session", params=[{}])
 def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
@@ -61,6 +59,7 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
         path=path,
         cwd=tmp_dir,
         gdb=request.config.getoption("--gdb"),
+        args=request.config.getoption("--df"),
         env=test_env
     )
 
@@ -136,3 +135,21 @@ async def async_client(async_pool):
     client = aioredis.Redis(connection_pool=async_pool)
     await client.flushall()
     return client
+
+
+def pytest_addoption(parser):
+    """
+    Custom pytest options:
+        --gdb - start all instances inside gdb
+        --df arg - pass arg to all instances, can be used multiple times
+        --log-seeder file - to log commands of last seeder run
+    """
+    parser.addoption(
+        '--gdb', action='store_true', default=False, help='Run instances in gdb'
+    )
+    parser.addoption(
+        '--df', action='append', default=[], help='Add arguments to dragonfly'
+    )
+    parser.addoption(
+        '--log-seeder', action='store', default=None, help='Store last generator commands in file'
+    )

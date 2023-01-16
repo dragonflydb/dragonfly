@@ -12,6 +12,7 @@
 #include "facade/dragonfly_connection.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/io_utils.h"
 #include "server/journal/journal.h"
 #include "server/journal/serializer.h"
 #include "server/rdb_save.h"
@@ -28,6 +29,7 @@ namespace dfly {
 
 using namespace facade;
 using namespace std;
+using namespace util::fibers_ext;
 using util::ProactorBase;
 
 namespace {
@@ -59,7 +61,83 @@ struct TransactionGuard {
   Transaction* t;
 };
 
+// Buffered single-shard journal streamer that listens for journal changes with a
+// journal listener and writes them to a destination sink in a separate fiber.
+class JournalStreamer : protected BufferedStreamerBase {
+ public:
+  JournalStreamer(journal::Journal* journal, Context* cntx)
+      : BufferedStreamerBase{cntx->GetCancellation()}, cntx_{cntx},
+        journal_cb_id_{0}, journal_{journal}, write_fb_{}, writer_{this} {
+  }
+
+  // Self referential.
+  JournalStreamer(const JournalStreamer& other) = delete;
+  JournalStreamer(JournalStreamer&& other) = delete;
+
+  // Register journal listener and start writer in fiber.
+  void Start(io::Sink* dest);
+
+  // Must be called on context cancellation for unblocking
+  // and manual cleanup.
+  void Cancel();
+
+ private:
+  // Writer fiber that steals buffer contents and writes them to dest.
+  void WriterFb(io::Sink* dest);
+
+ private:
+  Context* cntx_;
+
+  uint32_t journal_cb_id_;
+  journal::Journal* journal_;
+
+  Fiber write_fb_;
+  JournalWriter writer_;
+};
+
+void JournalStreamer::Start(io::Sink* dest) {
+  write_fb_ = Fiber(&JournalStreamer::WriterFb, this, dest);
+  journal_cb_id_ = journal_->RegisterOnChange([this](const journal::Entry& entry) {
+    writer_.Write(entry);
+    NotifyWritten();
+  });
+}
+
+void JournalStreamer::Cancel() {
+  journal_->UnregisterOnChange(journal_cb_id_);
+  Finalize();
+
+  if (write_fb_.IsJoinable())
+    write_fb_.Join();
+}
+
+void JournalStreamer::WriterFb(io::Sink* dest) {
+  if (auto ec = ConsumeIntoSink(dest); ec) {
+    cntx_->ReportError(ec);
+  }
+}
+
 }  // namespace
+
+DflyCmd::ReplicaRoleInfo::ReplicaRoleInfo(std::string address, SyncState sync_state)
+    : address(address) {
+  switch (sync_state) {
+    case SyncState::PREPARATION:
+      state = "preparation";
+      break;
+    case SyncState::FULL_SYNC:
+      state = "full sync";
+      break;
+    case SyncState::STABLE_SYNC:
+      state = "stable sync";
+      break;
+    case SyncState::CANCELLED:
+      state = "cancelled";
+      break;
+    default:
+      break;
+  }
+}
 
 DflyCmd::DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family)
     : sf_(server_family), listener_(listener) {
@@ -213,7 +291,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
     return;
 
   unique_lock lk(replica_ptr->mu);
-  if (replica_ptr->state != SyncState::PREPARATION)
+  if (replica_ptr->state.load(memory_order_relaxed) != SyncState::PREPARATION)
     return rb->SendError(kInvalidState);
 
   // Set meta info on connection.
@@ -263,7 +341,7 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
       return rb->SendError(kInvalidState);
   }
 
-  replica_ptr->state = SyncState::FULL_SYNC;
+  replica_ptr->state.store(SyncState::FULL_SYNC, memory_order_relaxed);
   return rb->SendOk();
 }
 
@@ -299,7 +377,7 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
       return rb->SendError(kInvalidState);
   }
 
-  replica_ptr->state = SyncState::STABLE_SYNC;
+  replica_ptr->state.store(SyncState::STABLE_SYNC, memory_order_relaxed);
   return rb->SendOk();
 }
 
@@ -325,8 +403,8 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
   };
 
   // Shard can be null for io thread.
+  CHECK(!sf_->journal()->OpenInThread(false, ""sv));  // can only happen in persistent mode.
   if (shard != nullptr) {
-    CHECK(!sf_->journal()->OpenInThread(false, ""sv));  // can only happen in persistent mode.
     flow->saver->StartSnapshotInShard(true, cntx->GetCancellation(), shard);
   }
 
@@ -351,25 +429,20 @@ void DflyCmd::StopFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
 }
 
 OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
-  // Register journal listener and cleanup.
-  uint32_t cb_id = 0;
-  JournalWriter* writer = nullptr;
+  // Create streamer for shard flows.
+  JournalStreamer* streamer = nullptr;
   if (shard != nullptr) {
-    writer = new JournalWriter{};
-    auto journal_cb = [flow, cntx, writer](const journal::Entry& je) mutable {
-      writer->Write(je);
-      if (auto ec = writer->Flush(flow->conn->socket()); ec)
-        cntx->ReportError(ec);
-    };
-    cb_id = sf_->journal()->RegisterOnChange(std::move(journal_cb));
+    streamer = new JournalStreamer{sf_->journal(), cntx};
+    streamer->Start(flow->conn->socket());
   }
 
-  flow->cleanup = [this, cb_id, writer, flow]() {
-    if (writer)
-      delete writer;
-    if (cb_id)
-      sf_->journal()->UnregisterOnChange(cb_id);
+  // Register cleanup.
+  flow->cleanup = [this, streamer, flow]() {
     flow->TryShutdownSocket();
+    if (streamer) {
+      streamer->Cancel();
+      delete streamer;
+    }
   };
 
   return OpStatus::OK;
@@ -403,11 +476,12 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
   }
 }
 
-uint32_t DflyCmd::CreateSyncSession() {
+uint32_t DflyCmd::CreateSyncSession(ConnectionContext* cntx) {
+  ;
   unique_lock lk(mu_);
   unsigned sync_id = next_sync_id_++;
 
-  unsigned flow_count = shard_set->size() + 1;
+  unsigned flow_count = shard_set->pool()->size();
   auto err_handler = [this, sync_id](const GenericError& err) {
     LOG(INFO) << "Replication error: " << err.Format();
 
@@ -416,7 +490,8 @@ uint32_t DflyCmd::CreateSyncSession() {
     ::boost::fibers::fiber{&DflyCmd::StopReplication, this, sync_id}.detach();
   };
 
-  auto replica_ptr = make_shared<ReplicaInfo>(flow_count, std::move(err_handler));
+  auto replica_ptr = make_shared<ReplicaInfo>(flow_count, cntx->owner()->RemoteEndpointAddress(),
+                                              std::move(err_handler));
   auto [it, inserted] = replica_infos_.emplace(sync_id, std::move(replica_ptr));
   CHECK(inserted);
 
@@ -448,14 +523,14 @@ void DflyCmd::StopReplication(uint32_t sync_id) {
 
 void DflyCmd::CancelReplication(uint32_t sync_id, shared_ptr<ReplicaInfo> replica_ptr) {
   lock_guard lk(replica_ptr->mu);
-  if (replica_ptr->state == SyncState::CANCELLED) {
+  if (replica_ptr->state.load(memory_order_relaxed) == SyncState::CANCELLED) {
     return;
   }
 
   LOG(INFO) << "Cancelling sync session " << sync_id;
 
   // Update replica_ptr state and cancel context.
-  replica_ptr->state = SyncState::CANCELLED;
+  replica_ptr->state.store(SyncState::CANCELLED, memory_order_release);
   replica_ptr->cntx.Cancel();
 
   // Run cleanup for shard threads.
@@ -501,6 +576,15 @@ shared_ptr<DflyCmd::ReplicaInfo> DflyCmd::GetReplicaInfo(uint32_t sync_id) {
   if (it != replica_infos_.end())
     return it->second;
   return {};
+}
+
+std::vector<DflyCmd::ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() {
+  std::vector<ReplicaRoleInfo> vec;
+  unique_lock lk(mu_);
+  for (const auto& info : replica_infos_) {
+    vec.emplace_back(info.second->address, info.second->state.load(memory_order_relaxed));
+  }
+  return vec;
 }
 
 pair<uint32_t, shared_ptr<DflyCmd::ReplicaInfo>> DflyCmd::GetReplicaInfoOrReply(

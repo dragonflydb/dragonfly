@@ -10,6 +10,8 @@
 #include <lz4frame.h>
 #include <zstd.h>
 
+#include <jsoncons/json.hpp>
+
 extern "C" {
 #include "redis/intset.h"
 #include "redis/listpack.h"
@@ -23,6 +25,7 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/json_object.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
 #include "server/engine_shard_set.h"
@@ -132,6 +135,8 @@ uint8_t RdbObjectType(unsigned type, unsigned compact_enc) {
       return RDB_TYPE_STREAM_LISTPACKS;
     case OBJ_MODULE:
       return RDB_TYPE_MODULE_2;
+    case OBJ_JSON:
+      return RDB_TYPE_JSON;
   }
   LOG(FATAL) << "Unknown encoding " << compact_enc << " for type " << type;
   return 0; /* avoid warning */
@@ -225,12 +230,12 @@ RdbSerializer::RdbSerializer(CompressionMode compression_mode)
 }
 
 RdbSerializer::~RdbSerializer() {
-  VLOG(1) << "compression mode: " << uint32_t(compression_mode_);
+  VLOG(2) << "compression mode: " << uint32_t(compression_mode_);
   if (compression_stats_) {
-    VLOG(1) << "compression not effective: " << compression_stats_->compression_no_effective;
-    VLOG(1) << "small string none compression applied: " << compression_stats_->small_str_count;
-    VLOG(1) << "compression failed: " << compression_stats_->compression_failed;
-    VLOG(1) << "compressed blobs:" << compression_stats_->compressed_blobs;
+    VLOG(2) << "compression not effective: " << compression_stats_->compression_no_effective;
+    VLOG(2) << "small string none compression applied: " << compression_stats_->small_str_count;
+    VLOG(2) << "compression failed: " << compression_stats_->compression_failed;
+    VLOG(2) << "compressed blobs:" << compression_stats_->compressed_blobs;
   }
 }
 
@@ -284,9 +289,11 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
   ec = SaveString(key);
   if (ec)
     return make_unexpected(ec);
+
   ec = SaveValue(pv);
   if (ec)
     return make_unexpected(ec);
+
   return rdb_type;
 }
 
@@ -312,6 +319,10 @@ error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
 
   if (obj_type == OBJ_STREAM) {
     return SaveStreamObject(pv.AsRObj());
+  }
+
+  if (obj_type == OBJ_JSON) {
+    return SaveJsonObject(pv);
   }
 
   LOG(ERROR) << "Not implemented " << obj_type;
@@ -529,6 +540,11 @@ error_code RdbSerializer::SaveStreamObject(const robj* obj) {
   return error_code{};
 }
 
+error_code RdbSerializer::SaveJsonObject(const PrimeValue& pv) {
+  auto json_string = pv.GetJson()->to_string();
+  return SaveString(json_string);
+}
+
 /* Save a long long value as either an encoded string or a string. */
 error_code RdbSerializer::SaveLongLongAsString(int64_t value) {
   uint8_t buf[32];
@@ -655,23 +671,8 @@ error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {
   return error_code{};
 }
 
-io::Bytes RdbSerializer::Flush() {
-  size_t sz = mem_buf_.InputLen();
-  if (sz == 0)
-    return mem_buf_.InputBuffer();
-
-  if (compression_mode_ == CompressionMode::MULTY_ENTRY_ZSTD ||
-      compression_mode_ == CompressionMode::MULTY_ENTRY_LZ4) {
-    CompressBlob();
-    // After blob was compressed membuf was overwirten with compressed data
-    sz = mem_buf_.InputLen();
-  }
-
-  return mem_buf_.InputBuffer();
-}
-
 error_code RdbSerializer::FlushToSink(io::Sink* s) {
-  auto bytes = Flush();
+  auto bytes = PrepareFlush();
   if (bytes.empty())
     return error_code{};
 
@@ -687,23 +688,31 @@ size_t RdbSerializer::SerializedLen() const {
   return mem_buf_.InputLen();
 }
 
-void RdbSerializer::Clear() {
-  mem_buf_.Clear();
+io::Bytes RdbSerializer::PrepareFlush() {
+  size_t sz = mem_buf_.InputLen();
+  if (sz == 0)
+    return mem_buf_.InputBuffer();
+
+  if (compression_mode_ == CompressionMode::MULTY_ENTRY_ZSTD ||
+      compression_mode_ == CompressionMode::MULTY_ENTRY_LZ4) {
+    CompressBlob();
+  }
+
+  return mem_buf_.InputBuffer();
 }
 
 error_code RdbSerializer::WriteJournalEntries(absl::Span<const journal::Entry> entries) {
+  io::BufSink buf_sink{&journal_mem_buf_};
+  JournalWriter writer{&buf_sink};
   for (const auto& entry : entries) {
-    journal_writer_.Write(entry);
+    writer.Write(entry);
   }
 
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_JOURNAL_BLOB));
   RETURN_ON_ERR(SaveLen(entries.size()));
+  RETURN_ON_ERR(SaveString(io::View(journal_mem_buf_.InputBuffer())));
 
-  auto& buf = journal_writer_.Accumulated();
-  auto bytes = buf.InputBuffer();
-  RETURN_ON_ERR(SaveString(string_view{reinterpret_cast<const char*>(bytes.data()), bytes.size()}));
-  buf.Clear();
-
+  journal_mem_buf_.Clear();
   return error_code{};
 }
 

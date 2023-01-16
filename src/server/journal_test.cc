@@ -47,7 +47,8 @@ struct EntryPayloadVisitor {
 std::string ExtractPayload(journal::ParsedEntry& entry) {
   std::string out;
   EntryPayloadVisitor visitor{&out};
-  CmdArgList list{entry.payload->data(), entry.payload->size()};
+
+  CmdArgList list{entry.cmd.cmd_args.data(), entry.cmd.cmd_args.size()};
   visitor(list);
 
   if (out.size() > 0 && out.back() == ' ')
@@ -97,23 +98,28 @@ TEST(Journal, WriteRead) {
   auto list = [v = &lists](auto... ss) { return StoreList(v, ss...); };
 
   std::vector<journal::Entry> test_entries = {
-      {0, 0, make_pair("MSET", slice("A", "1", "B", "2")), 2},
-      {0, 0, make_pair("MSET", slice("C", "3")), 2},
-      {1, 0, list("DEL", "A", "B"), 2},
-      {2, 1, list("LPUSH", "l", "v1", "v2"), 1},
-      {3, 0, make_pair("MSET", slice("D", "4")), 1},
-      {4, 1, list("DEL", "l1"), 1},
-      {5, 2, list("SET", "E", "2"), 1}};
+      {0, journal::Op::COMMAND, 0, 2, make_pair("MSET", slice("A", "1", "B", "2"))},
+      {0, journal::Op::COMMAND, 0, 2, make_pair("MSET", slice("C", "3"))},
+      {1, journal::Op::COMMAND, 0, 2, list("DEL", "A", "B")},
+      {2, journal::Op::COMMAND, 1, 1, list("LPUSH", "l", "v1", "v2")},
+      {3, journal::Op::COMMAND, 0, 1, make_pair("MSET", slice("D", "4"))},
+      {4, journal::Op::COMMAND, 1, 1, list("DEL", "l1")},
+      {5, journal::Op::COMMAND, 2, 1, list("SET", "E", "2")},
+      {6, journal::Op::MULTI_COMMAND, 2, 1, list("SET", "E", "2")},
+      {6, journal::Op::EXEC, 2, 1}};
 
-  // Write all entries to string file.
-  JournalWriter writer{};
+  // Write all entries to a buffer.
+  base::IoBuf buf;
+  io::BufSink sink{&buf};
+
+  JournalWriter writer{&sink};
   for (const auto& entry : test_entries) {
     writer.Write(entry);
   }
 
   // Read them back.
-  io::BytesSource bs{writer.Accumulated().InputBuffer()};
-  JournalReader reader{&bs, 0};
+  io::BufSource source{&buf};
+  JournalReader reader{&source, 0};
 
   for (unsigned i = 0; i < test_entries.size(); i++) {
     auto& expected = test_entries[i];

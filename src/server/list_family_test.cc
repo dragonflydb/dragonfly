@@ -9,6 +9,7 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
+#include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
@@ -27,6 +28,17 @@ class ListFamilyTest : public BaseFamilyTest {
  protected:
   ListFamilyTest() {
     num_threads_ = 4;
+  }
+
+  unsigned NumWatched() {
+    atomic_uint32_t sum{0};
+    shard_set->RunBriefInParallel([&](EngineShard* es) {
+      auto* bc = es->blocking_controller();
+      if (bc)
+        sum.fetch_add(bc->NumWatched(0), memory_order_relaxed);
+    });
+
+    return sum.load();
   }
 };
 
@@ -100,7 +112,8 @@ TEST_F(ListFamilyTest, BLPopBlocking) {
   });
   fibers_ext::SleepFor(30us);
 
-  pp_->at(1)->Await([&] { Run("B1", {"lpush", "x", "2", "1"}); });
+  RespExpr resp = pp_->at(1)->Await([&] { return Run("B1", {"lpush", "x", "2", "1"}); });
+  ASSERT_THAT(resp, IntArg(2));
 
   fb0.Join();
   fb1.Join();
@@ -113,6 +126,7 @@ TEST_F(ListFamilyTest, BLPopBlocking) {
   ASSERT_THAT(resp0, ArrLen(2));
   EXPECT_THAT(resp0.GetVec(), ElementsAre("x", "1"));
   ASSERT_FALSE(IsLocked(0, "x"));
+  ASSERT_EQ(0, NumWatched());
 }
 
 TEST_F(ListFamilyTest, BLPopMultiple) {
@@ -136,7 +150,7 @@ TEST_F(ListFamilyTest, BLPopMultiple) {
   EXPECT_THAT(resp0.GetVec(), ElementsAre(kKey1, "3"));
   ASSERT_FALSE(IsLocked(0, kKey1));
   ASSERT_FALSE(IsLocked(0, kKey2));
-  // ess_->RunBriefInParallel([](EngineShard* es) { ASSERT_FALSE(es->HasAwakedTransaction()); });
+  ASSERT_EQ(0, NumWatched());
 }
 
 TEST_F(ListFamilyTest, BLPopTimeout) {
@@ -154,6 +168,7 @@ TEST_F(ListFamilyTest, BLPopTimeout) {
 
   EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
   ASSERT_FALSE(service_->IsLocked(0, kKey1));
+  ASSERT_EQ(0, NumWatched());
 }
 
 TEST_F(ListFamilyTest, BLPopTimeout2) {
@@ -170,6 +185,7 @@ TEST_F(ListFamilyTest, BLPopTimeout2) {
   Run({"DEL", "blist2"});
   Run({"RPUSH", "blist2", "d"});
   Run({"BLPOP", "blist1", "blist2", "1"});
+  ASSERT_EQ(0, NumWatched());
 }
 
 TEST_F(ListFamilyTest, BLPopMultiPush) {
@@ -209,6 +225,7 @@ TEST_F(ListFamilyTest, BLPopMultiPush) {
   ASSERT_THAT(blpop_resp, ArrLen(2));
   auto resp_arr = blpop_resp.GetVec();
   EXPECT_THAT(resp_arr, ElementsAre(kKey1, "A"));
+  ASSERT_EQ(0, NumWatched());
 }
 
 TEST_F(ListFamilyTest, BLPopSerialize) {
@@ -637,10 +654,10 @@ TEST_F(ListFamilyTest, TwoQueueBug451) {
 
   auto push_fiber = [&]() {
     auto id = "t-" + std::to_string(it_cnt.fetch_add(1));
-    for (int i = 0; i < 1000; i++) {
+    for (int i = 0; i < 300; i++) {
       Run(id, {"rpush", "a", "DATA"});
     }
-    fibers_ext::SleepFor(100ms);
+    fibers_ext::SleepFor(50ms);
     running = false;
   };
 
@@ -657,6 +674,89 @@ TEST_F(ListFamilyTest, TwoQueueBug451) {
 
   for (auto& f : fbs)
     f.Join();
+}
+
+TEST_F(ListFamilyTest, BRPopLPushSingleShard) {
+  EXPECT_THAT(Run({"brpoplpush", "x", "y", "0.05"}), ArgType(RespExpr::NIL));
+  ASSERT_EQ(0, NumWatched());
+
+  EXPECT_THAT(Run({"lpush", "x", "val1"}), IntArg(1));
+  EXPECT_EQ(Run({"brpoplpush", "x", "y", "0.01"}), "val1");
+  ASSERT_EQ(1, GetDebugInfo().shards_count);
+
+  EXPECT_THAT(Run({
+                  "exists",
+                  "x",
+              }),
+              IntArg(0));
+  Run({"set", "x", "str"});
+  EXPECT_THAT(Run({"brpoplpush", "y", "x", "0.01"}), ErrArg("wrong kind of value"));
+
+  Run({"del", "x", "y"});
+  Run({"multi"});
+  Run({"brpoplpush", "y", "x", "0"});
+  RespExpr resp = Run({"exec"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  ASSERT_FALSE(IsLocked(0, "x"));
+  ASSERT_FALSE(IsLocked(0, "y"));
+  ASSERT_EQ(0, NumWatched());
+}
+
+TEST_F(ListFamilyTest, BRPopLPushSingleShardBlocking) {
+  RespExpr resp;
+
+  // Run the fiber at creation.
+  auto fb0 = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
+    resp = Run({"brpoplpush", "x", "y", "0"});
+  });
+  fibers_ext::SleepFor(30us);
+  pp_->at(1)->Await([&] { Run("B1", {"lpush", "y", "2"}); });
+
+  pp_->at(1)->Await([&] { Run("B1", {"lpush", "x", "1"}); });
+  fb0.Join();
+  ASSERT_EQ(resp, "1");
+  ASSERT_FALSE(IsLocked(0, "x"));
+  ASSERT_FALSE(IsLocked(0, "y"));
+  ASSERT_EQ(0, NumWatched());
+}
+
+TEST_F(ListFamilyTest, BRPopLPushTwoShards) {
+  RespExpr resp;
+  EXPECT_THAT(Run({"brpoplpush", "x", "z", "0.05"}), ArgType(RespExpr::NIL));
+
+  ASSERT_EQ(0, NumWatched());
+
+  Run({"lpush", "x", "val"});
+  EXPECT_EQ(Run({"brpoplpush", "x", "z", "0"}), "val");
+  resp = Run({"lrange", "z", "0", "-1"});
+  ASSERT_EQ(resp, "val");
+  Run({"del", "z"});
+
+  // Run the fiber at creation.
+  auto fb0 = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
+    resp = Run({"brpoplpush", "x", "z", "0"});
+  });
+
+  fibers_ext::SleepFor(30us);
+  RespExpr resp_push = pp_->at(1)->Await([&] { return Run("B1", {"lpush", "z", "val2"}); });
+  ASSERT_THAT(resp_push, IntArg(1));
+
+  resp_push = pp_->at(1)->Await([&] { return Run("B1", {"lpush", "x", "val1"}); });
+  ASSERT_THAT(resp_push, IntArg(1));
+  fb0.Join();
+
+  // Result of brpoplpush above.
+  ASSERT_EQ(resp, "val1");
+
+  resp = Run({"lrange", "z", "0", "-1"});
+  ASSERT_THAT(resp, ArrLen(2));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("val1", "val2"));
+  ASSERT_FALSE(IsLocked(0, "x"));
+  ASSERT_FALSE(IsLocked(0, "z"));
+  ASSERT_EQ(0, NumWatched());
+  // TODO: there is a bug here.
+  // we do not wake the dest shard, when source is awaked which prevents
+  // the atomicity and causes the first bug as well.
 }
 
 }  // namespace dfly

@@ -316,4 +316,22 @@ TEST_F(RdbTest, HMapBugs) {
   EXPECT_EQ(2, CheckedInt({"hlen", "hmap1"}));
 }
 
+TEST_F(RdbTest, JsonTest) {
+  string_view data[] = {
+      R"({"a":1})"sv,                          //
+      R"([1,2,3,4,5,6])"sv,                    //
+      R"({"a":1.0,"b":[1,2],"c":"value"})"sv,  //
+      R"({"a":{"a":{"a":{"a":1}}}})"sv         //
+  };
+
+  for (auto test : data) {
+    Run({"json.set", "doc", "$", test});
+    auto dump = Run({"dump", "doc"});
+    Run({"del", "doc"});
+    Run({"restore", "doc", "0", facade::ToSV(dump.GetBuf())});
+    auto res = Run({"json.get", "doc"});
+    ASSERT_EQ(res, test);
+  }
+}
+
 }  // namespace dfly
