@@ -303,6 +303,13 @@ TEST_F(ZSetFamilyTest, ZUnion) {
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "b", "2", "c", "2", "d", "2"));
 
   resp =
+      Run({"zunion", "z1", "z2", "z3", "withscores", "weights", "1", "1", "2", "aggregate", "min"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "b", "2", "c", "2", "d", "2"));
+
+  resp = Run({"zunion", "none1", "none2", "z3", "withscores", "weights", "1", "1", "2"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("c", "2", "d", "2"));
+
+  resp =
       Run({"zunion", "z1", "z2", "z3", "weights", "1", "1", "2", "aggregate", "max", "withscores"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "d", "2", "b", "3", "c", "3"));
 }

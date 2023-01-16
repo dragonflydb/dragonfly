@@ -690,15 +690,16 @@ void InterScoredMap(ScoredMap* dest, ScoredMap* src, AggType agg_type) {
     dest->swap(*src);
 }
 
-template <typename SliceIt>
-ScoredMap UnionSliceResultScore(SliceIt start, SliceIt end, AggType agg_type) {
+using KeyIterWeightVec = vector<pair<PrimeIterator, double>>;
+
+ScoredMap UnionShardKeysWithScore(const KeyIterWeightVec& key_iter_weight_vec, AggType agg_type) {
   ScoredMap result;
-  for (auto it = start; it != end; ++it) {
-    if (it->first.is_done()) {
+  for (const auto& key_iter_wieght : key_iter_weight_vec) {
+    if (key_iter_wieght.first.is_done()) {
       continue;
     }
 
-    ScoredMap sm = FromObject(it->first->second, it->second);
+    ScoredMap sm = FromObject(key_iter_wieght.first->second, key_iter_wieght.second);
     if (result.empty()) {
       result.swap(sm);
     } else {
@@ -708,22 +709,20 @@ ScoredMap UnionSliceResultScore(SliceIt start, SliceIt end, AggType agg_type) {
   return result;
 }
 
-using ScoredPI = pair<PrimeIterator, double>;
-using ScoredPIVec = vector<ScoredPI>;
-
-double SliceResultWeight(EngineShard* shard, Transaction* t, const vector<double>& weights,
-                         unsigned key_index, unsigned offset) {
-  unsigned windex = t->ReverseArgIndex(shard->shard_id(), key_index) - offset;
+double GetKeyWeight(EngineShard* shard, Transaction* t, const vector<double>& weights,
+                    unsigned key_index, unsigned cmdargs_keys_offset) {
+  unsigned windex = t->ReverseArgIndex(shard->shard_id(), key_index) - cmdargs_keys_offset;
   DCHECK_LT(windex, weights.size());
   return weights[windex];
 }
 
-OpResult<ScoredPIVec> FindSliceResult(EngineShard* shard, Transaction* t, const ArgSlice& keys,
-                                      const vector<double>& weights, unsigned start,
-                                      unsigned offset) {
+OpResult<KeyIterWeightVec> FindShardKeysAndWeights(EngineShard* shard, Transaction* t,
+                                                   ArgSlice keys, const vector<double>& weights,
+                                                   unsigned src_keys_offset,
+                                                   unsigned cmdargs_keys_offset) {
   auto& db_slice = shard->db_slice();
-  vector<pair<PrimeIterator, double>> it_arr(keys.size() - start);
-  for (unsigned j = start; j < keys.size(); ++j) {
+  KeyIterWeightVec key_weight_vec(keys.size() - src_keys_offset);
+  for (unsigned j = src_keys_offset; j < keys.size(); ++j) {
     auto it_res = db_slice.Find(t->db_context(), keys[j], OBJ_ZSET);
     if (it_res == OpStatus::WRONG_TYPE)  // TODO: support sets with default score 1.
       return it_res.status();
@@ -731,9 +730,10 @@ OpResult<ScoredPIVec> FindSliceResult(EngineShard* shard, Transaction* t, const 
       continue;
 
     // first global index is 2 after {destkey, numkeys}
-    it_arr[j - start] = {*it_res, SliceResultWeight(shard, t, weights, j, offset)};
+    key_weight_vec[j - src_keys_offset] = {*it_res,
+                                           GetKeyWeight(shard, t, weights, j, cmdargs_keys_offset)};
   }
-  return it_arr;
+  return key_weight_vec;
 }
 
 OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
@@ -742,27 +742,29 @@ OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest
   DVLOG(1) << "shard:" << shard->shard_id() << ", keys " << vector(keys.begin(), keys.end());
   DCHECK(!keys.empty());
 
-  unsigned start = 0;
-  unsigned offset = 0;
+  unsigned src_keys_offset = 0;
+  unsigned cmdargs_keys_offset = 0;
 
   if (!dest.empty()) {
     // first global index is 2 after {destkey, numkeys}
-    offset = 2;
+    cmdargs_keys_offset = 2;
     if (keys.front() == dest) {
-      ++start;
+      ++src_keys_offset;
     }
 
-    // could be when only the dest key is hosted in this shard
-    if (start >= keys.size()) {
+    // In case ONLY the destination key is hosted in this shard no work on this shard should be done
+    // in this step
+    if (src_keys_offset >= keys.size()) {
       return OpStatus::OK;
     }
   }
-  const auto& scored = FindSliceResult(shard, t, keys, weights, start, offset);
-  if (scored == OpStatus::WRONG_TYPE) {
-    return scored.status();
+  auto keys_and_weights =
+      FindShardKeysAndWeights(shard, t, keys, weights, src_keys_offset, cmdargs_keys_offset);
+  if (!keys_and_weights) {
+    return keys_and_weights.status();
   }
 
-  return UnionSliceResultScore(scored->begin(), scored->end(), agg_type);
+  return UnionShardKeysWithScore(*keys_and_weights, agg_type);
 }
 
 OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
@@ -919,15 +921,12 @@ OpResult<void> FillAggType(string_view agg, SetOpArgs* op_args) {
 }
 
 OpResult<unsigned> ParseAggregate(CmdArgList args, bool store, SetOpArgs* op_args) {
-  if (store && args.size() != 2) {
-    return OpStatus::SYNTAX_ERR;
-  }
-  if (!store && args.size() < 2) {
+  if (args.size() < 2) {
     return OpStatus::SYNTAX_ERR;
   }
 
   ToUpper(&args[1]);
-  const auto filled = FillAggType(ArgS(args, 1), op_args);
+  auto filled = FillAggType(ArgS(args, 1), op_args);
   if (!filled) {
     return filled.status();
   }
@@ -948,65 +947,60 @@ OpResult<unsigned> ParseWeights(CmdArgList args, SetOpArgs* op_args) {
   return op_args->num_keys;
 }
 
-OpResult<unsigned> ValidateKeyCount(string_view arg_num_keys) {
+OpResult<void> ParseKeyCount(string_view arg_num_keys, SetOpArgs* op_args) {
   // we parsed the structure before, when transaction has been initialized.
-  unsigned num_keys;
-  if (!absl::SimpleAtoi(arg_num_keys, &num_keys)) {
+  if (!absl::SimpleAtoi(arg_num_keys, &op_args->num_keys)) {
     return OpStatus::SYNTAX_ERR;
   }
-  return num_keys;
+  return OpStatus::OK;
 }
 
 OpResult<unsigned> ParseWithScores(CmdArgList args, SetOpArgs* op_args) {
-  if (args.size() != 1) {
-    return OpStatus::SYNTAX_ERR;
-  }
   op_args->with_scores = true;
   return 0;
 }
 
 OpResult<SetOpArgs> ParseSetOpArgs(CmdArgList args, bool store) {
   // TODO: support variadic key for ZUNION command (now fixed to 3)
-  string_view num_str = store ? ArgS(args, 2) : "3";
+  string_view num_keys_str = store ? ArgS(args, 2) : "3";
   SetOpArgs op_args;
 
-  const auto parsed = ValidateKeyCount(num_str);
+  auto parsed = ParseKeyCount(num_keys_str, &op_args);
   if (!parsed) {
     return parsed.status();
   }
-  op_args.num_keys = *parsed;
-  unsigned key_start = store ? 3 + op_args.num_keys : 1 + op_args.num_keys;
+
+  unsigned opt_args_start = store ? 3 + op_args.num_keys : 1 + op_args.num_keys;
   // TODO: modify this check when there is variadic key support for ZUNION command
-  DCHECK_GE(args.size(), key_start);
+  DCHECK_GE(args.size(), opt_args_start);
 
   op_args.weights.resize(op_args.num_keys, 1);
 
-  for (size_t i = key_start; i < args.size(); ++i) {
+  for (size_t i = opt_args_start; i < args.size(); ++i) {
     ToUpper(&args[i]);
     string_view arg = ArgS(args, i);
     if (arg == "WEIGHTS") {
-      const auto parsed = ParseWeights(args.subspan(i), &op_args);
-      if (!parsed) {
-        return parsed.status();
+      auto parsed_cnt = ParseWeights(args.subspan(i), &op_args);
+      if (!parsed_cnt) {
+        return parsed_cnt.status();
       }
-      i += *parsed;
+      i += *parsed_cnt;
     } else if (arg == "AGGREGATE") {
-      const auto parsed = ParseAggregate(args.subspan(i), store, &op_args);
-      if (!parsed) {
-        return parsed.status();
+      auto parsed_cnt = ParseAggregate(args.subspan(i), store, &op_args);
+      if (!parsed_cnt) {
+        return parsed_cnt.status();
       }
-      i += *parsed;
+      i += *parsed_cnt;
+    } else if (arg == "WITHSCORES") {
       // Commands with store capability does not offer WITHSCORES option
       if (store) {
-        break;
+        return OpStatus::SYNTAX_ERR;
       }
-    } else if (!store && arg == "WITHSCORES") {
-      const auto parsed = ParseWithScores(args.subspan(i), &op_args);
-      if (!parsed) {
-        return parsed.status();
+      auto parsed_cnt = ParseWithScores(args.subspan(i), &op_args);
+      if (!parsed_cnt) {
+        return parsed_cnt.status();
       }
-      i += *parsed;
-      break;
+      i += *parsed_cnt;
     } else {
       return OpStatus::SYNTAX_ERR;
     }
