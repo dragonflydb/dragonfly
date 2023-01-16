@@ -13,6 +13,7 @@ extern "C" {
 
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
+#include "server/journal/journal.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
 #include "util/fiber_sched_algo.h"
@@ -587,27 +588,33 @@ PrimeIterator DbSlice::AddNew(const Context& cntx, string_view key, PrimeValue o
   return it;
 }
 
-OpStatus DbSlice::UpdateExpire(const Context& cntx, PrimeIterator prime_it,
-                               ExpireIterator expire_it, const ExpireParams& params) {
+pair<int64_t, int64_t> DbSlice::ExpireParams::Calculate(int64_t now_ms) const {
+  int64_t msec = (unit == TimeUnit::SEC) ? value * 1000 : value;
+  int64_t now_msec = now_ms;
+  int64_t rel_msec = absolute ? msec - now_msec : msec;
+  return make_pair(rel_msec, now_msec + rel_msec);
+}
+
+OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, PrimeIterator prime_it,
+                                        ExpireIterator expire_it, const ExpireParams& params) {
   DCHECK(params.IsDefined());
   DCHECK(IsValid(prime_it));
 
-  int64_t msec = (params.unit == TimeUnit::SEC) ? params.value * 1000 : params.value;
-  int64_t now_msec = cntx.time_now_ms;
-  int64_t rel_msec = params.absolute ? msec - now_msec : msec;
+  auto [rel_msec, abs_msec] = params.Calculate(cntx.time_now_ms);
   if (rel_msec > kMaxExpireDeadlineSec * 1000) {
     return OpStatus::OUT_OF_RANGE;
   }
 
   if (rel_msec <= 0 && !params.persist) {
     CHECK(Del(cntx.db_index, prime_it));
+    return -1;
   } else if (IsValid(expire_it)) {
-    expire_it->second = FromAbsoluteTime(now_msec + rel_msec);
+    expire_it->second = FromAbsoluteTime(abs_msec);
+    return abs_msec;
   } else {
-    UpdateExpire(cntx.db_index, prime_it, params.persist ? 0 : rel_msec + now_msec);
+    UpdateExpire(cntx.db_index, prime_it, params.persist ? 0 : abs_msec);
+    return params.persist ? 0 : abs_msec;
   }
-
-  return OpStatus::OK;
 }
 
 std::pair<PrimeIterator, bool> DbSlice::AddOrUpdateInternal(const Context& cntx,

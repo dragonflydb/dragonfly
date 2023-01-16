@@ -211,7 +211,7 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key, bool del_hit = fa
   if (exp_params.IsDefined()) {
     DVLOG(1) << "Expire: " << key;
     auto& db_slice = op_args.shard->db_slice();
-    OpStatus status = db_slice.UpdateExpire(op_args.db_cntx, it, it_expire, exp_params);
+    OpStatus status = db_slice.UpdateExpire(op_args.db_cntx, it, it_expire, exp_params).status();
     if (status != OpStatus::OK)
       return status;
   }

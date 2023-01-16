@@ -81,14 +81,18 @@ struct DbContext {
 
 struct OpArgs {
   EngineShard* shard;
-  TxId txid;
+  const Transaction* tx;
   DbContext db_cntx;
 
-  OpArgs() : shard(nullptr), txid(0) {
+  OpArgs() : shard(nullptr), tx(nullptr) {
   }
 
-  OpArgs(EngineShard* s, TxId i, const DbContext& cntx) : shard(s), txid(i), db_cntx(cntx) {
+  OpArgs(EngineShard* s, const Transaction* tx, const DbContext& cntx)
+      : shard(s), tx(tx), db_cntx(cntx) {
   }
+
+  // Log single-shard journal command with own txid and dbid.
+  void RecordJournal(std::string_view cmd, ArgSlice args) const;
 };
 
 struct TieredStats {

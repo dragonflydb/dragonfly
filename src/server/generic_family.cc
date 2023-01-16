@@ -19,6 +19,7 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/journal/journal.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
@@ -563,7 +564,6 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
   do {
     ess->Await(sid, [&] {
       OpArgs op_args{EngineShard::tlocal(), 0, db_cntx};
-
       OpScan(op_args, scan_opts, &cursor, keys);
     });
     if (cursor == 0) {
@@ -588,7 +588,21 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
 
-  return db_slice.UpdateExpire(op_args.db_cntx, it, expire_it, params);
+  auto res = db_slice.UpdateExpire(op_args.db_cntx, it, expire_it, params);
+
+  // If the value was deleted, replicate as DEL.
+  // Else, replicate as PEXPIREAT with exact time.
+  if (auto journal = op_args.shard->journal(); journal && res.ok()) {
+    if (res.value() == -1) {
+      op_args.RecordJournal("DEL"sv, ArgSlice{key});
+    } else {
+      auto time = absl::StrCat(res.value());
+      // Note: Don't forget to change this when adding arguments to expire commands.
+      op_args.RecordJournal("PEXPIREAT"sv, ArgSlice{time});
+    }
+  }
+
+  return res.status();
 }
 
 }  // namespace
@@ -1398,12 +1412,13 @@ void GenericFamily::Register(CommandRegistry* registry) {
             << CI{"ECHO", CO::LOADING | CO::FAST, 2, 0, 0, 0}.HFUNC(Echo)
             << CI{"EXISTS", CO::READONLY | CO::FAST, -2, 1, -1, 1}.HFUNC(Exists)
             << CI{"TOUCH", CO::READONLY | CO::FAST, -2, 1, -1, 1}.HFUNC(Exists)
-            << CI{"EXPIRE", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Expire)
-            << CI{"EXPIREAT", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(ExpireAt)
+            << CI{"EXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1}.HFUNC(Expire)
+            << CI{"EXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1}.HFUNC(ExpireAt)
             << CI{"PERSIST", CO::WRITE | CO::FAST, 2, 1, 1, 1}.HFUNC(Persist)
             << CI{"KEYS", CO::READONLY, 2, 0, 0, 0}.HFUNC(Keys)
-            << CI{"PEXPIREAT", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(PexpireAt)
-            << CI{"PEXPIRE", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Pexpire)
+            << CI{"PEXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1}.HFUNC(
+                   PexpireAt)
+            << CI{"PEXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1}.HFUNC(Pexpire)
             << CI{"RENAME", CO::WRITE, 3, 1, 2, 1}.HFUNC(Rename)
             << CI{"RENAMENX", CO::WRITE, 3, 1, 2, 1}.HFUNC(RenameNx)
             << CI{"SELECT", kSelectOpts, 2, 0, 0, 0}.HFUNC(Select)

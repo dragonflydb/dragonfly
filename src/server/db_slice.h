@@ -97,6 +97,9 @@ class DbSlice {
     bool IsDefined() const {
       return persist || value > INT64_MIN;
     }
+
+    // Calculate relative and absolue timepoints.
+    std::pair<int64_t, int64_t> Calculate(int64_t now_msec) const;
   };
 
   DbSlice(uint32_t index, bool caching_mode, EngineShard* owner);
@@ -171,8 +174,10 @@ class DbSlice {
   PrimeIterator AddNew(const Context& cntx, std::string_view key, PrimeValue obj,
                        uint64_t expire_at_ms) noexcept(false);
 
-  facade::OpStatus UpdateExpire(const Context& cntx, PrimeIterator prime_it, ExpireIterator exp_it,
-                                const ExpireParams& params);
+  // Update entry expiration. Return epxiration timepoint in abs milliseconds, or -1 if the entry
+  // already expired and was deleted;
+  facade::OpResult<int64_t> UpdateExpire(const Context& cntx, PrimeIterator prime_it,
+                                         ExpireIterator exp_it, const ExpireParams& params);
 
   // Adds expiry information.
   void AddExpire(DbIndex db_ind, PrimeIterator main_it, uint64_t at);

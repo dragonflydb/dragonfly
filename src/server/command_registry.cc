@@ -111,6 +111,8 @@ const char* OptName(CO::CommandOpt fl) {
       return "global-trans";
     case VARIADIC_KEYS:
       return "variadic-keys";
+    case NO_AUTOJOURNAL:
+      return "custom-journal";
   }
   return "unknown";
 }

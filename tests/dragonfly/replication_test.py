@@ -31,6 +31,7 @@ replication_cases = [
     (1, [1], dict(keys=100, dbcount=2)),
 ]
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replicas, seeder_config", replication_cases)
 async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_replicas, seeder_config):
@@ -316,11 +317,11 @@ async def test_disconnect_master(df_local_factory, df_seeder_factory, t_master, 
         assert await seeder.compare(capture, port=replica.port)
 
 
-
 """
 Test flushall command. Set data to master send flashall and set more data.
 Check replica keys at the end.
 """
+
 
 @pytest.mark.asyncio
 async def test_flushall(df_local_factory):
@@ -335,6 +336,7 @@ async def test_flushall(df_local_factory):
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
 
     n_keys = 1000
+
     def gen_test_data(start, end):
         for i in range(start, end):
             yield f"key-{i}", f"value-{i}"
@@ -346,7 +348,8 @@ async def test_flushall(df_local_factory):
     # flushall
     pipe.flushall()
     # Set simple keys n_keys..n_keys*2 on master
-    batch_fill_data(client=pipe, gen=gen_test_data(n_keys, n_keys*2), batch_size=3)
+    batch_fill_data(client=pipe, gen=gen_test_data(
+        n_keys, n_keys*2), batch_size=3)
 
     await pipe.execute()
 

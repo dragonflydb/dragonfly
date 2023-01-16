@@ -373,7 +373,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
   /*************************************************************************/
 
   if (!was_suspended && is_concluding)  // Check last hop & non suspended.
-    LogJournalOnShard(shard);
+    LogAutoJournalOnShard(shard);
 
   // at least the coordinator thread owns the reference.
   DCHECK_GE(use_count(), 1u);
@@ -801,7 +801,7 @@ void Transaction::RunQuickie(EngineShard* shard) {
     LOG(FATAL) << "Unexpected exception " << e.what();
   }
 
-  LogJournalOnShard(shard);
+  LogAutoJournalOnShard(shard);
 
   sd.local_mask &= ~ARMED;
   cb_ = nullptr;  // We can do it because only a single shard runs the callback.
@@ -1093,7 +1093,7 @@ void Transaction::UnwatchShardCb(ArgSlice wkeys, bool should_expire, EngineShard
 void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard) {
   auto journal = shard->journal();
   if (journal != nullptr && journal->GetLastTxId() == txid_) {
-    journal->RecordEntry(journal::Entry{txid_, journal::Op::EXEC, db_index_, unique_shard_cnt_});
+    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, unique_shard_cnt_, {});
   }
 
   if (multi_->multi_opts & CO::GLOBAL_TRANS) {
@@ -1216,12 +1216,13 @@ bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid) {
   return false;
 }
 
-void Transaction::LogJournalOnShard(EngineShard* shard) {
+void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
   // TODO: For now, we ignore non shard coordination.
   if (shard == nullptr)
     return;
 
-  if ((cid_->opt_mask() & CO::WRITE) == 0)
+  // Ignore non-write commands or ones with disabled autojournal.
+  if ((cid_->opt_mask() & CO::WRITE) == 0 || (cid_->opt_mask() & CO::NO_AUTOJOURNAL) > 0)
     return;
 
   auto journal = shard->journal();
@@ -1234,15 +1235,18 @@ void Transaction::LogJournalOnShard(EngineShard* shard) {
     CHECK(!cmd_with_full_args_.empty());
     entry_payload = cmd_with_full_args_;
   } else {
-    entry_payload =
-        make_pair(facade::ToSV(cmd_with_full_args_.front()), ShardArgsInShard(shard->shard_id()));
-  }
-  journal::Op opcode = journal::Op::COMMAND;
-  if (multi_) {
-    opcode = journal::Op::MULTI_COMMAND;
+    auto cmd = facade::ToSV(cmd_with_full_args_.front());
+    entry_payload = make_pair(cmd, ShardArgsInShard(shard->shard_id()));
   }
 
-  journal->RecordEntry(journal::Entry{txid_, opcode, db_index_, unique_shard_cnt_, entry_payload});
+  LogJournalOnShard(shard, std::move(entry_payload));
+}
+
+void Transaction::LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload) const {
+  auto journal = shard->journal();
+  CHECK(journal);
+  auto opcode = multi_ ? journal::Op::MULTI_COMMAND : journal::Op::COMMAND;
+  journal->RecordEntry(txid_, opcode, db_index_, unique_shard_cnt_, std::move(payload));
 }
 
 void Transaction::BreakOnShutdown() {

@@ -19,8 +19,11 @@ extern "C" {
 }
 #include "base/logging.h"
 #include "core/compact_object.h"
+#include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/journal/journal.h"
 #include "server/server_state.h"
+#include "server/transaction.h"
 
 namespace dfly {
 
@@ -188,6 +191,10 @@ bool ParseDouble(string_view src, double* value) {
       return false;
   }
   return true;
+}
+
+void OpArgs::RecordJournal(string_view cmd, ArgSlice args) const {
+  tx->LogJournalOnShard(shard, make_pair(cmd, args));
 }
 
 #define ADD(x) (x) += o.x

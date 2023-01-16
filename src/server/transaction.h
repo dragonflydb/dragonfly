@@ -16,6 +16,7 @@
 #include "core/tx_queue.h"
 #include "facade/op_status.h"
 #include "server/common.h"
+#include "server/journal/types.h"
 #include "server/table.h"
 #include "util/fibers/fibers_ext.h"
 
@@ -181,7 +182,7 @@ class Transaction {
   KeyLockArgs GetLockArgs(ShardId sid) const;
 
   OpArgs GetOpArgs(EngineShard* shard) const {
-    return OpArgs{shard, txid_, db_context()};
+    return OpArgs{shard, this, db_context()};
   }
 
   DbContext db_context() const {
@@ -191,6 +192,9 @@ class Transaction {
   DbIndex db_index() const {
     return db_index_;
   }
+
+  // Log a journal entry on shard with payload.
+  void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload) const;
 
  private:
   struct LockCnt {
@@ -245,9 +249,9 @@ class Transaction {
     return use_count_.load(std::memory_order_relaxed);
   }
 
-  // If needed, notify the jounral of the executed command on the given shard.
+  // Log command in the journal of a shard for write commands with auto-journaling enabled.
   // Should be called immediately after the last phase (hop).
-  void LogJournalOnShard(EngineShard* shard);
+  void LogAutoJournalOnShard(EngineShard* shard);
 
   struct PerShardData {
     uint32_t arg_start = 0;  // Indices into args_ array.
@@ -266,6 +270,7 @@ class Transaction {
 
     PerShardData() = default;
   };
+
   enum { kPerShardSize = sizeof(PerShardData) };
 
   struct Multi {

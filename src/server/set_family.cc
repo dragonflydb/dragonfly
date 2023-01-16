@@ -20,6 +20,7 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/journal/journal.h"
 #include "server/transaction.h"
 
 ABSL_DECLARE_FLAG(bool, use_set2);
@@ -959,8 +960,13 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
       return true;
     });
 
-    /* Delete the set as it is now empty */
+    // Delete the set as it is now empty
     CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
+
+    // Replicate as DEL.
+    if (auto journal = op_args.shard->journal(); journal) {
+      op_args.RecordJournal("DEL"sv, ArgSlice{key});
+    }
   } else {
     SetType st{it->second.RObjPtr(), it->second.Encoding()};
     db_slice.PreUpdate(op_args.db_cntx.db_index, it);
@@ -979,6 +985,15 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     } else {
       result = PopStrSet(op_args.db_cntx, count, st);
     }
+
+    // Replicate as SREM with removed keys, because SPOP is not deterministic.
+    if (auto journal = op_args.shard->journal(); journal) {
+      vector<string_view> mapped(result.size() + 1);
+      mapped[0] = key;
+      std::copy(result.begin(), result.end(), mapped.begin() + 1);
+      op_args.RecordJournal("SREM"sv, mapped);
+    }
+
     db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
   }
   return result;
@@ -1545,7 +1560,7 @@ void SetFamily::Register(CommandRegistry* registry) {
             << CI{"SMOVE", CO::FAST | CO::WRITE, 4, 1, 2, 1}.HFUNC(SMove)
             << CI{"SREM", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(SRem)
             << CI{"SCARD", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(SCard)
-            << CI{"SPOP", CO::WRITE | CO::FAST, -2, 1, 1, 1}.HFUNC(SPop)
+            << CI{"SPOP", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1, 1}.HFUNC(SPop)
             << CI{"SUNION", CO::READONLY, -2, 1, -1, 1}.HFUNC(SUnion)
             << CI{"SUNIONSTORE", CO::WRITE | CO::DENYOOM, -3, 1, -1, 1}.HFUNC(SUnionStore)
             << CI{"SSCAN", CO::READONLY, -3, 1, 1, 1}.HFUNC(SScan);
