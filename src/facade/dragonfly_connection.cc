@@ -111,17 +111,18 @@ struct Connection::Request {
   using MonitorMessage = std::string;
 
   struct PipelineMsg {
-    absl::InlinedVector<MutableSlice, 6> args;
-
     // I do not use mi_heap_t explicitly but mi_stl_allocator at the end does the same job
     // of using the thread's heap.
     // The capacity is chosen so that we allocate a fully utilized (256 bytes) block.
     using StorageType = absl::InlinedVector<char, kReqStorageSize, mi_stl_allocator<char>>;
 
-    StorageType storage;
-
     PipelineMsg(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
     }
+
+    void Reset(size_t nargs, size_t capacity);
+
+    absl::InlinedVector<MutableSlice, 6> args;
+    StorageType storage;
   };
 
   static constexpr size_t kSizeOfPipelineMsg = sizeof(PipelineMsg);
@@ -207,13 +208,16 @@ void Connection::RequestDeleter::operator()(Request* req) const {
 void Connection::Request::Emplace(const RespVec& args, size_t capacity) {
   PipelineMsg* msg = get_if<PipelineMsg>(&payload);
   if (msg) {
-    if (msg->storage.size() < capacity) {
-      msg->storage.resize(capacity);
-    }
+    msg->Reset(args.size(), capacity);
   } else {
     payload = PipelineMsg{args.size(), capacity};
   }
   SetArgs(args);
+}
+
+void Connection::Request::PipelineMsg::Reset(size_t nargs, size_t capacity) {
+  storage.resize(capacity);
+  args.resize(nargs);
 }
 
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
