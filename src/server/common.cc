@@ -194,10 +194,7 @@ bool ParseDouble(string_view src, double* value) {
 }
 
 void OpArgs::RecordJournal(string_view cmd, ArgSlice args) const {
-  auto journal = shard->journal();
-  CHECK(journal);
-  auto opcode = tx->IsMulti() ? journal::Op::MULTI_COMMAND : journal::Op::COMMAND;
-  journal->RecordEntry(tx->txid(), opcode, db_cntx.db_index, 1, make_pair(cmd, args));
+  tx->LogJournalOnShard(shard, make_pair(cmd, args));
 }
 
 #define ADD(x) (x) += o.x

@@ -16,6 +16,7 @@
 #include "core/tx_queue.h"
 #include "facade/op_status.h"
 #include "server/common.h"
+#include "server/journal/types.h"
 #include "server/table.h"
 #include "util/fibers/fibers_ext.h"
 
@@ -192,6 +193,9 @@ class Transaction {
     return db_index_;
   }
 
+  // Log a journal entry on shard with payload.
+  void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload) const;
+
  private:
   struct LockCnt {
     unsigned cnt[2] = {0, 0};
@@ -245,9 +249,9 @@ class Transaction {
     return use_count_.load(std::memory_order_relaxed);
   }
 
-  // If needed, notify the jounral of the executed command on the given shard.
+  // Log command in the journal of a shard for write commands with auto-journaling enabled.
   // Should be called immediately after the last phase (hop).
-  void LogJournalOnShard(EngineShard* shard);
+  void LogAutoJournalOnShard(EngineShard* shard);
 
   struct PerShardData {
     uint32_t arg_start = 0;  // Indices into args_ array.
