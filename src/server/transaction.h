@@ -194,7 +194,8 @@ class Transaction {
   }
 
   // Log a journal entry on shard with payload.
-  void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload) const;
+  void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload,
+                         uint32_t shard_cnt) const;
 
  private:
   struct LockCnt {
