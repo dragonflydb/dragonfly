@@ -181,7 +181,7 @@ class Transaction {
   KeyLockArgs GetLockArgs(ShardId sid) const;
 
   OpArgs GetOpArgs(EngineShard* shard) const {
-    return OpArgs{shard, txid_, db_context()};
+    return OpArgs{shard, this, db_context()};
   }
 
   DbContext db_context() const {

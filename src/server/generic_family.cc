@@ -597,7 +597,7 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
       op_args.RecordJournal("DEL"sv, ArgSlice{key});
     } else {
       auto time = absl::StrCat(res.value());
-      // TODO: Don't forget to change this when adding arguments to expire commands.
+      // Note: Don't forget to change this when adding arguments to expire commands.
       op_args.RecordJournal("PEXPIREAT"sv, ArgSlice{time});
     }
   }

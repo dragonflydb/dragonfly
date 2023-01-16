@@ -794,14 +794,6 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
   if (time_t(cntx.time_now_ms) < expire_time)
     return make_pair(it, expire_it);
 
-  // Replicate any expiration as DEL command.
-  // TODO: Pass optional key to skip decoding.
-  if (auto journal = owner_->journal(); journal) {
-    string scratch;
-    auto payload = make_pair("DEL"sv, ArgSlice{it->first.GetSlice(&scratch)});
-    journal->RecordEntry(0, journal::Op::COMMAND, cntx.db_index, 1, payload);
-  }
-
   PerformDeletion(it, expire_it, shard_owner(), db.get());
   ++events_.expired_keys;
 
