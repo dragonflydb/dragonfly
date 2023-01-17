@@ -79,6 +79,7 @@ class ZSetFamily {
   static void ZRevRangeByScore(CmdArgList args, ConnectionContext* cntx);
   static void ZRevRank(CmdArgList args, ConnectionContext* cntx);
   static void ZScan(CmdArgList args, ConnectionContext* cntx);
+  static void ZUnion(CmdArgList args, ConnectionContext* cntx);
   static void ZUnionStore(CmdArgList args, ConnectionContext* cntx);
 
   static void ZRangeByScoreInternal(CmdArgList args, bool reverse, ConnectionContext* cntx);
