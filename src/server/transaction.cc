@@ -183,7 +183,7 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
       if (multi_->is_expanding) {
         multi_->keys.push_back(key);
       } else {
-        multi_->locks[key].cnt[int(mode)]++;
+        multi_->lock_counts[key][mode]++;
       }
     };
 
@@ -533,14 +533,13 @@ void Transaction::ScheduleInternal() {
   }
 }
 
-void Transaction::LockMulti() {
-  DCHECK(multi_ && multi_->is_expanding);
+void Transaction::MultiData::AddLocks(IntentLock::Mode mode) {
+  DCHECK(is_expanding);
 
-  IntentLock::Mode mode = Mode();
-  for (auto key : multi_->keys) {
-    multi_->locks[key].cnt[int(mode)]++;
+  for (auto key : keys) {
+    lock_counts[key][mode]++;
   }
-  multi_->keys.clear();
+  keys.clear();
 }
 
 // Optimized "Schedule and execute" function for the most common use-case of a single hop
@@ -593,7 +592,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     // Note that the logic here is a bit different from the public Schedule() function.
     if (multi_) {
       if (multi_->is_expanding)
-        LockMulti();
+        multi_->AddLocks(Mode());
     } else {
       ScheduleInternal();
     }
@@ -621,7 +620,7 @@ void Transaction::UnlockMulti() {
   // It's LE and not EQ because there may be callbacks in progress that increase use_count_.
   DCHECK_LE(1u, GetUseCount());
 
-  for (const auto& k_v : multi_->locks) {
+  for (const auto& k_v : multi_->lock_counts) {
     ShardId sid = Shard(k_v.first, sharded_keys.size());
     sharded_keys[sid].push_back(k_v);
   }
@@ -671,7 +670,7 @@ void Transaction::CalculateUnqiueShardCntForMulti() {
 
 void Transaction::Schedule() {
   if (multi_ && multi_->is_expanding) {
-    LockMulti();
+    multi_->AddLocks(Mode());
   } else {
     ScheduleInternal();
   }
@@ -1103,8 +1102,8 @@ void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, E
   ShardId sid = shard->shard_id();
   for (const auto& k_v : sharded_keys[sid]) {
     auto release = [&](IntentLock::Mode mode) {
-      if (k_v.second.cnt[mode]) {
-        shard->db_slice().Release(mode, db_index_, k_v.first, k_v.second.cnt[mode]);
+      if (k_v.second[mode]) {
+        shard->db_slice().Release(mode, db_index_, k_v.first, k_v.second[mode]);
       }
     };
 

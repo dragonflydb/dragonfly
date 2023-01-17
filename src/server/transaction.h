@@ -201,6 +201,15 @@ class Transaction {
  private:
   // Holds number of locks for each IntentLock::Mode: shared and exlusive.
   struct LockCnt {
+    unsigned& operator[](IntentLock::Mode mode) {
+      return cnt[int(mode)];
+    }
+
+    unsigned operator[](IntentLock::Mode mode) const {
+      return cnt[int(mode)];
+    }
+
+   private:
     unsigned cnt[2] = {0, 0};
   };
 
@@ -226,7 +235,10 @@ class Transaction {
 
   // State of a multi transaction.
   struct MultiData {
-    absl::flat_hash_map<std::string_view, LockCnt> locks;
+    // Increase lock counts for all current keys for mode. Clear keys.
+    void AddLocks(IntentLock::Mode mode);
+
+    absl::flat_hash_map<std::string_view, LockCnt> lock_counts;
     std::vector<std::string_view> keys;
 
     uint32_t multi_opts = 0;  // options of the parent transaction.
@@ -266,8 +278,6 @@ class Transaction {
   void RunQuickie(EngineShard* shard);
 
   void ExecuteAsync();
-
-  void LockMulti();
 
   // Adds itself to watched queue in the shard. Must run in that shard thread.
   OpStatus WatchInShard(ArgSlice keys, EngineShard* shard);
