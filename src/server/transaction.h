@@ -70,9 +70,9 @@ class Transaction {
   std::string DebugId() const;
 
   // Runs in engine thread
-  ArgSlice ShardArgsInShard(ShardId sid) const;
+  ArgSlice GetShardArgs(ShardId sid) const;
 
-  // Maps the index in ShardArgsInShard(shard_id) slice back to the index
+  // Maps the index in GetShardArgs(shard_id) slice back to the index
   // in the original array passed to InitByArgs.
   size_t ReverseArgIndex(ShardId shard_id, size_t arg_index) const;
 
@@ -140,11 +140,11 @@ class Transaction {
 
   const char* Name() const;
 
-  uint32_t unique_shard_cnt() const {
+  uint32_t GetUniqueShardCnt() const {
     return unique_shard_cnt_;
   }
 
-  TxId notify_txid() const {
+  TxId GetNotifyTxid() const {
     return notify_txid_.load(std::memory_order_relaxed);
   }
 
@@ -182,14 +182,14 @@ class Transaction {
   KeyLockArgs GetLockArgs(ShardId sid) const;
 
   OpArgs GetOpArgs(EngineShard* shard) const {
-    return OpArgs{shard, this, db_context()};
+    return OpArgs{shard, this, GetDbContext()};
   }
 
-  DbContext db_context() const {
+  DbContext GetDbContext() const {
     return DbContext{.db_index = db_index_, .time_now_ms = time_now_ms_};
   }
 
-  DbIndex db_index() const {
+  DbIndex GetDbIndex() const {
     return db_index_;
   }
 
@@ -273,7 +273,7 @@ class Transaction {
 
   enum { kPerShardSize = sizeof(PerShardData) };
 
-  struct Multi {
+  struct MultiData {
     absl::flat_hash_map<std::string_view, LockCnt> locks;
     std::vector<std::string_view> keys;
 
@@ -305,7 +305,7 @@ class Transaction {
   std::vector<uint32_t> reverse_index_;
 
   RunnableType cb_;
-  std::unique_ptr<Multi> multi_;  // Initialized when the transaction is multi/exec.
+  std::unique_ptr<MultiData> multi_;  // Initialized when the transaction is multi/exec.
 
   const CommandId* cid_;
 

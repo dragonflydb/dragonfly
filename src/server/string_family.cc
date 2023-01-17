@@ -935,7 +935,7 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
       continue;
 
     MGetResponse& results = mget_resp[sid];
-    ArgSlice slice = transaction->ShardArgsInShard(sid);
+    ArgSlice slice = transaction->GetShardArgs(sid);
 
     DCHECK(!slice.empty());
     DCHECK_EQ(slice.size(), results.size());
@@ -966,11 +966,11 @@ void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
     for (size_t i = 1; i < args.size(); ++i) {
       absl::StrAppend(&str, " ", ArgS(args, i));
     }
-    LOG(INFO) << "MSET/" << transaction->unique_shard_cnt() << str;
+    LOG(INFO) << "MSET/" << transaction->GetUniqueShardCnt() << str;
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    auto args = t->ShardArgsInShard(shard->shard_id());
+    auto args = t->GetShardArgs(shard->shard_id());
     return OpMSet(t->GetOpArgs(shard), args);
   };
 
@@ -990,9 +990,9 @@ void StringFamily::MSetNx(CmdArgList args, ConnectionContext* cntx) {
   atomic_bool exists{false};
 
   auto cb = [&](Transaction* t, EngineShard* es) {
-    auto args = t->ShardArgsInShard(es->shard_id());
+    auto args = t->GetShardArgs(es->shard_id());
     for (size_t i = 0; i < args.size(); i += 2) {
-      auto it = es->db_slice().FindExt(t->db_context(), args[i]).first;
+      auto it = es->db_slice().FindExt(t->GetDbContext(), args[i]).first;
       if (IsValid(it)) {
         exists.store(true, memory_order_relaxed);
         break;
@@ -1009,7 +1009,7 @@ void StringFamily::MSetNx(CmdArgList args, ConnectionContext* cntx) {
     if (to_skip)
       return OpStatus::OK;
 
-    auto args = t->ShardArgsInShard(shard->shard_id());
+    auto args = t->GetShardArgs(shard->shard_id());
     return OpMSet(t->GetOpArgs(shard), std::move(args));
   };
 
@@ -1022,7 +1022,7 @@ void StringFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<size_t> {
-    OpResult<PrimeIterator> it_res = shard->db_slice().Find(t->db_context(), key, OBJ_STRING);
+    OpResult<PrimeIterator> it_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 
@@ -1102,14 +1102,14 @@ void StringFamily::PSetEx(CmdArgList args, ConnectionContext* cntx) {
 
 auto StringFamily::OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction* t,
                           EngineShard* shard) -> MGetResponse {
-  auto args = t->ShardArgsInShard(shard->shard_id());
+  auto args = t->GetShardArgs(shard->shard_id());
   DCHECK(!args.empty());
 
   MGetResponse response(args.size());
 
   auto& db_slice = shard->db_slice();
   for (size_t i = 0; i < args.size(); ++i) {
-    OpResult<PrimeIterator> it_res = db_slice.Find(t->db_context(), args[i], OBJ_STRING);
+    OpResult<PrimeIterator> it_res = db_slice.Find(t->GetDbContext(), args[i], OBJ_STRING);
     if (!it_res)
       continue;
 
@@ -1118,7 +1118,7 @@ auto StringFamily::OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction
 
     dest.value = GetString(shard, it->second);
     if (fetch_mcflag) {
-      dest.mc_flag = db_slice.GetMCFlag(t->db_index(), it->first);
+      dest.mc_flag = db_slice.GetMCFlag(t->GetDbIndex(), it->first);
       if (fetch_mcver) {
         dest.mc_ver = it.GetVersion();
       }

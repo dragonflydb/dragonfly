@@ -543,7 +543,7 @@ void BitOp(CmdArgList args, ConnectionContext* cntx) {
   ShardId dest_shard = Shard(dest_key, result_set.size());
 
   auto shard_bitop = [&](Transaction* t, EngineShard* shard) {
-    ArgSlice largs = t->ShardArgsInShard(shard->shard_id());
+    ArgSlice largs = t->GetShardArgs(shard->shard_id());
     DCHECK(!largs.empty());
 
     if (shard->shard_id() == dest_shard) {

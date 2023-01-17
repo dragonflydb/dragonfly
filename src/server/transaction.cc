@@ -44,7 +44,7 @@ IntentLock::Mode Transaction::Mode() const {
 Transaction::Transaction(const CommandId* cid) : cid_(cid) {
   string_view cmd_name(cid_->name());
   if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA") {
-    multi_.reset(new Multi);
+    multi_.reset(new MultiData);
     multi_->multi_opts = cid->opt_mask();
 
     if (cmd_name == "EVAL" || cmd_name == "EVALSHA") {
@@ -376,7 +376,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
     LogAutoJournalOnShard(shard);
 
   // at least the coordinator thread owns the reference.
-  DCHECK_GE(use_count(), 1u);
+  DCHECK_GE(GetUseCount(), 1u);
 
   // we remove tx from tx-queue upon first invocation.
   // if it needs to run again it runs via a dedicated continuation_trans_ state in EngineShard.
@@ -619,7 +619,7 @@ void Transaction::UnlockMulti() {
   vector<KeyList> sharded_keys(shard_set->size());
 
   // It's LE and not EQ because there may be callbacks in progress that increase use_count_.
-  DCHECK_LE(1u, use_count());
+  DCHECK_LE(1u, GetUseCount());
 
   for (const auto& k_v : multi_->locks) {
     ShardId sid = Shard(k_v.first, sharded_keys.size());
@@ -637,7 +637,7 @@ void Transaction::UnlockMulti() {
     shard_set->Add(i, [&] { UnlockMultiShardCb(sharded_keys, EngineShard::tlocal()); });
   }
   WaitForShardCallbacks();
-  DCHECK_GE(use_count(), 1u);
+  DCHECK_GE(GetUseCount(), 1u);
 
   VLOG(1) << "UnlockMultiEnd " << DebugId();
 }
@@ -849,7 +849,7 @@ KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
   KeyLockArgs res;
   res.db_index = db_index_;
   res.key_step = cid_->key_arg_step();
-  res.args = ShardArgsInShard(sid);
+  res.args = GetShardArgs(sid);
 
   return res;
 }
@@ -987,7 +987,7 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
 }
 
 // runs in engine-shard thread.
-ArgSlice Transaction::ShardArgsInShard(ShardId sid) const {
+ArgSlice Transaction::GetShardArgs(ShardId sid) const {
   DCHECK(!args_.empty());
 
   // We can read unique_shard_cnt_  only because ShardArgsInShard is called after IsArmedInShard
@@ -1012,7 +1012,7 @@ size_t Transaction::ReverseArgIndex(ShardId shard_id, size_t arg_index) const {
 
 bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysPovider wkeys_provider) {
   // Assumes that transaction is pending and scheduled. TODO: To verify it with state machine.
-  VLOG(2) << "WaitOnWatch Start use_count(" << use_count() << ")";
+  VLOG(2) << "WaitOnWatch Start use_count(" << GetUseCount() << ")";
   using namespace chrono;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1236,7 +1236,7 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
     entry_payload = cmd_with_full_args_;
   } else {
     auto cmd = facade::ToSV(cmd_with_full_args_.front());
-    entry_payload = make_pair(cmd, ShardArgsInShard(shard->shard_id()));
+    entry_payload = make_pair(cmd, GetShardArgs(shard->shard_id()));
   }
 
   LogJournalOnShard(shard, std::move(entry_payload));

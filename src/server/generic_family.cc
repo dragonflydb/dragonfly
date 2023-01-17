@@ -307,14 +307,14 @@ class Renamer {
 
 void Renamer::Find(Transaction* t) {
   auto cb = [this](Transaction* t, EngineShard* shard) {
-    auto args = t->ShardArgsInShard(shard->shard_id());
+    auto args = t->GetShardArgs(shard->shard_id());
     CHECK_EQ(1u, args.size());
 
     FindResult* res = (shard->shard_id() == src_sid_) ? &src_res_ : &dest_res_;
 
     res->key = args.front();
     auto& db_slice = EngineShard::tlocal()->db_slice();
-    auto [it, exp_it] = db_slice.FindExt(t->db_context(), res->key);
+    auto [it, exp_it] = db_slice.FindExt(t->GetDbContext(), res->key);
 
     res->found = IsValid(it);
     if (IsValid(it)) {
@@ -357,7 +357,7 @@ void Renamer::Finalize(Transaction* t, bool skip_exist_dest) {
 OpStatus Renamer::MoveSrc(Transaction* t, EngineShard* es) {
   if (es->shard_id() == src_sid_) {  // Handle source key.
     // TODO: to call PreUpdate/PostUpdate.
-    auto it = es->db_slice().FindExt(t->db_context(), src_res_.key).first;
+    auto it = es->db_slice().FindExt(t->GetDbContext(), src_res_.key).first;
     CHECK(IsValid(it));
 
     // We distinguish because of the SmallString that is pinned to its thread by design,
@@ -370,7 +370,7 @@ OpStatus Renamer::MoveSrc(Transaction* t, EngineShard* es) {
       pv_ = std::move(it->second);
       it->second.SetExpire(has_expire);
     }
-    CHECK(es->db_slice().Del(t->db_index(), it));  // delete the entry with empty value in it.
+    CHECK(es->db_slice().Del(t->GetDbIndex(), it));  // delete the entry with empty value in it.
   }
 
   return OpStatus::OK;
@@ -380,7 +380,7 @@ OpStatus Renamer::UpdateDest(Transaction* t, EngineShard* es) {
   if (es->shard_id() != src_sid_) {
     auto& db_slice = es->db_slice();
     string_view dest_key = dest_res_.key;
-    PrimeIterator dest_it = db_slice.FindExt(t->db_context(), dest_key).first;
+    PrimeIterator dest_it = db_slice.FindExt(t->GetDbContext(), dest_key).first;
     bool is_prior_list = false;
 
     if (IsValid(dest_it)) {
@@ -393,18 +393,18 @@ OpStatus Renamer::UpdateDest(Transaction* t, EngineShard* es) {
         dest_it->second = std::move(pv_);
       }
       dest_it->second.SetExpire(has_expire);  // preserve expire flag.
-      db_slice.UpdateExpire(t->db_index(), dest_it, src_res_.expire_ts);
+      db_slice.UpdateExpire(t->GetDbIndex(), dest_it, src_res_.expire_ts);
     } else {
       if (src_res_.ref_val.ObjType() == OBJ_STRING) {
         pv_.SetString(str_val_);
       }
-      dest_it = db_slice.AddNew(t->db_context(), dest_key, std::move(pv_), src_res_.expire_ts);
+      dest_it = db_slice.AddNew(t->GetDbContext(), dest_key, std::move(pv_), src_res_.expire_ts);
     }
 
     dest_it->first.SetSticky(src_res_.sticky);
 
     if (!is_prior_list && dest_it->second.ObjType() == OBJ_LIST && es->blocking_controller()) {
-      es->blocking_controller()->AwakeWatched(t->db_index(), dest_key);
+      es->blocking_controller()->AwakeWatched(t->GetDbIndex(), dest_key);
     }
   }
 
@@ -621,7 +621,7 @@ void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
   bool is_mc = cntx->protocol() == Protocol::MEMCACHE;
 
   auto cb = [&result](const Transaction* t, EngineShard* shard) {
-    ArgSlice args = t->ShardArgsInShard(shard->shard_id());
+    ArgSlice args = t->GetShardArgs(shard->shard_id());
     auto res = OpDel(t->GetOpArgs(shard), args);
     result.fetch_add(res.value_or(0), memory_order_relaxed);
 
@@ -672,7 +672,7 @@ void GenericFamily::Exists(CmdArgList args, ConnectionContext* cntx) {
   atomic_uint32_t result{0};
 
   auto cb = [&result](Transaction* t, EngineShard* shard) {
-    ArgSlice args = t->ShardArgsInShard(shard->shard_id());
+    ArgSlice args = t->GetShardArgs(shard->shard_id());
     auto res = OpExists(t->GetOpArgs(shard), args);
     result.fetch_add(res.value_or(0), memory_order_relaxed);
 
@@ -817,7 +817,7 @@ void GenericFamily::Stick(CmdArgList args, ConnectionContext* cntx) {
   atomic_uint32_t result{0};
 
   auto cb = [&result](const Transaction* t, EngineShard* shard) {
-    ArgSlice args = t->ShardArgsInShard(shard->shard_id());
+    ArgSlice args = t->GetShardArgs(shard->shard_id());
     auto res = OpStick(t->GetOpArgs(shard), args);
     result.fetch_add(res.value_or(0), memory_order_relaxed);
 
@@ -1159,7 +1159,7 @@ void GenericFamily::Type(CmdArgList args, ConnectionContext* cntx) {
   std::string_view key = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<int> {
-    auto it = shard->db_slice().FindExt(t->db_context(), key).first;
+    auto it = shard->db_slice().FindExt(t->GetDbContext(), key).first;
     if (!it.is_done()) {
       return it->second.ObjType();
     } else {
@@ -1177,7 +1177,7 @@ void GenericFamily::Type(CmdArgList args, ConnectionContext* cntx) {
 void GenericFamily::Time(CmdArgList args, ConnectionContext* cntx) {
   uint64_t now_usec;
   if (cntx->transaction) {
-    now_usec = cntx->transaction->db_context().time_now_ms * 1000;
+    now_usec = cntx->transaction->GetDbContext().time_now_ms * 1000;
   } else {
     now_usec = absl::GetCurrentTimeNanos() / 1000;
   }
@@ -1193,7 +1193,7 @@ OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool skip_exist_des
 
   Transaction* transaction = cntx->transaction;
 
-  if (transaction->unique_shard_cnt() == 1) {
+  if (transaction->GetUniqueShardCnt() == 1) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return OpRen(t->GetOpArgs(shard), key[0], key[1], skip_exist_dest);
     };
@@ -1249,14 +1249,14 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
 
 OpResult<uint64_t> GenericFamily::OpTtl(Transaction* t, EngineShard* shard, string_view key) {
   auto& db_slice = shard->db_slice();
-  auto [it, expire_it] = db_slice.FindExt(t->db_context(), key);
+  auto [it, expire_it] = db_slice.FindExt(t->GetDbContext(), key);
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
 
   if (!IsValid(expire_it))
     return OpStatus::SKIPPED;
 
-  int64_t ttl_ms = db_slice.ExpireTime(expire_it) - t->db_context().time_now_ms;
+  int64_t ttl_ms = db_slice.ExpireTime(expire_it) - t->GetDbContext().time_now_ms;
   DCHECK_GT(ttl_ms, 0);  // Otherwise FindExt would return null.
   return ttl_ms;
 }
