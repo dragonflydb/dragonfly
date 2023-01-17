@@ -723,7 +723,7 @@ OpResult<KeyIterWeightVec> FindShardKeysAndWeights(EngineShard* shard, Transacti
   auto& db_slice = shard->db_slice();
   KeyIterWeightVec key_weight_vec(keys.size() - src_keys_offset);
   for (unsigned j = src_keys_offset; j < keys.size(); ++j) {
-    auto it_res = db_slice.Find(t->db_context(), keys[j], OBJ_ZSET);
+    auto it_res = db_slice.Find(t->GetDbContext(), keys[j], OBJ_ZSET);
     if (it_res == OpStatus::WRONG_TYPE)  // TODO: support sets with default score 1.
       return it_res.status();
     if (!it_res)
@@ -738,7 +738,7 @@ OpResult<KeyIterWeightVec> FindShardKeysAndWeights(EngineShard* shard, Transacti
 
 OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
                             const vector<double>& weights, bool store) {
-  ArgSlice keys = t->ShardArgsInShard(shard->shard_id());
+  ArgSlice keys = t->GetShardArgs(shard->shard_id());
   DVLOG(1) << "shard:" << shard->shard_id() << ", keys " << vector(keys.begin(), keys.end());
   DCHECK(!keys.empty());
 
@@ -769,7 +769,7 @@ OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest
 
 OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
                             const vector<double>& weights, bool store) {
-  ArgSlice keys = t->ShardArgsInShard(shard->shard_id());
+  ArgSlice keys = t->GetShardArgs(shard->shard_id());
   DVLOG(1) << "shard:" << shard->shard_id() << ", keys " << vector(keys.begin(), keys.end());
   DCHECK(!keys.empty());
 
@@ -785,7 +785,7 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
     return OpStatus::SKIPPED;  // return noop
 
   for (unsigned j = start; j < keys.size(); ++j) {
-    auto it_res = db_slice.Find(t->db_context(), keys[j], OBJ_ZSET);
+    auto it_res = db_slice.Find(t->GetDbContext(), keys[j], OBJ_ZSET);
     if (it_res == OpStatus::WRONG_TYPE)  // TODO: support sets with default score 1.
       return it_res.status();
 
@@ -1177,7 +1177,7 @@ void ZSetFamily::ZCard(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
-    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->db_context(), key, OBJ_ZSET);
+    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_ZSET);
     if (!find_res) {
       return find_res.status();
     }

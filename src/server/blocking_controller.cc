@@ -90,7 +90,7 @@ void BlockingController::RunStep(Transaction* completed_t) {
   if (completed_t) {
     awakened_transactions_.erase(completed_t);
 
-    auto dbit = watched_dbs_.find(completed_t->db_index());
+    auto dbit = watched_dbs_.find(completed_t->GetDbIndex());
     if (dbit != watched_dbs_.end()) {
       DbWatchTable& wt = *dbit->second;
 
@@ -100,7 +100,7 @@ void BlockingController::RunStep(Transaction* completed_t) {
       for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
         string_view key = lock_args.args[i];
         if (wt.AddAwakeEvent(WatchQueue::ACTIVE, key)) {
-          awakened_indices_.emplace(completed_t->db_index());
+          awakened_indices_.emplace(completed_t->GetDbIndex());
         }
       }
     }
@@ -139,7 +139,7 @@ void BlockingController::RunStep(Transaction* completed_t) {
 void BlockingController::AddWatched(ArgSlice keys, Transaction* trans) {
   VLOG(1) << "AddWatched [" << owner_->shard_id() << "] " << trans->DebugId();
 
-  auto [dbit, added] = watched_dbs_.emplace(trans->db_index(), nullptr);
+  auto [dbit, added] = watched_dbs_.emplace(trans->GetDbIndex(), nullptr);
   if (added) {
     dbit->second.reset(new DbWatchTable);
   }
@@ -154,7 +154,7 @@ void BlockingController::AddWatched(ArgSlice keys, Transaction* trans) {
 
     if (!res->second->items.empty()) {
       Transaction* last = res->second->items.back().get();
-      DCHECK_GT(last->use_count(), 0u);
+      DCHECK_GT(last->GetUseCount(), 0u);
 
       // Duplicate keys case. We push only once per key.
       if (last == trans)
@@ -169,7 +169,7 @@ void BlockingController::AddWatched(ArgSlice keys, Transaction* trans) {
 void BlockingController::RemoveWatched(ArgSlice keys, Transaction* trans) {
   VLOG(1) << "RemoveWatched [" << owner_->shard_id() << "] " << trans->DebugId();
 
-  auto dbit = watched_dbs_.find(trans->db_index());
+  auto dbit = watched_dbs_.find(trans->GetDbIndex());
   if (dbit == watched_dbs_.end())
     return;
 

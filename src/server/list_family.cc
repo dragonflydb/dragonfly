@@ -124,10 +124,10 @@ OpResult<ShardFFResult> FindFirst(Transaction* trans) {
   fill(find_res.begin(), find_res.end(), OpStatus::KEY_NOTFOUND);
 
   auto cb = [&find_res](auto* t, EngineShard* shard) {
-    auto args = t->ShardArgsInShard(shard->shard_id());
+    auto args = t->GetShardArgs(shard->shard_id());
 
     OpResult<pair<PrimeIterator, unsigned>> ff_res =
-        shard->db_slice().FindFirst(t->db_context(), args);
+        shard->db_slice().FindFirst(t->GetDbContext(), args);
 
     if (ff_res) {
       FFResult ff_result(ff_res->first->first.AsRef(), ff_res->second);
@@ -241,7 +241,7 @@ OpStatus BPopper::Run(Transaction* t, unsigned msec) {
 
     // Block
     auto wcb = [&](Transaction* t, EngineShard* shard) {
-      return t->ShardArgsInShard(shard->shard_id());
+      return t->GetShardArgs(shard->shard_id());
     };
 
     ++stats->num_blocked_clients;
@@ -277,16 +277,16 @@ OpStatus BPopper::Pop(Transaction* t, EngineShard* shard) {
   if (shard->shard_id() == ff_result_.sid) {
     ff_result_.key.GetString(&key_);
     auto& db_slice = shard->db_slice();
-    auto it_res = db_slice.Find(t->db_context(), key_, OBJ_LIST);
+    auto it_res = db_slice.Find(t->GetDbContext(), key_, OBJ_LIST);
     CHECK(it_res);  // must exist and must be ok.
     PrimeIterator it = *it_res;
     quicklist* ql = GetQL(it->second);
 
-    db_slice.PreUpdate(t->db_index(), it);
+    db_slice.PreUpdate(t->GetDbIndex(), it);
     value_ = ListPop(dir_, ql);
-    db_slice.PostUpdate(t->db_index(), it, key_);
+    db_slice.PostUpdate(t->GetDbIndex(), it, key_);
     if (quicklistCount(ql) == 0) {
-      CHECK(shard->db_slice().Del(t->db_index(), it));
+      CHECK(shard->db_slice().Del(t->GetDbIndex(), it));
     }
   }
 
@@ -475,7 +475,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
 
 OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view dest,
                                ListDir src_dir, ListDir dest_dir, bool conclude_on_error) {
-  DCHECK_EQ(2u, trans->unique_shard_cnt());
+  DCHECK_EQ(2u, trans->GetUniqueShardCnt());
 
   OpResult<string> find_res[2];
   OpResult<string> result;
@@ -487,7 +487,7 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
   //     the destination.
   //
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    auto args = t->ShardArgsInShard(shard->shard_id());
+    auto args = t->GetShardArgs(shard->shard_id());
     DCHECK_EQ(1u, args.size());
     bool is_dest = args.front() == dest;
     find_res[is_dest] = Peek(t->GetOpArgs(shard), args.front(), src_dir, !is_dest);
@@ -505,7 +505,7 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
   } else {
     // Everything is ok, lets proceed with the mutations.
     auto cb = [&](Transaction* t, EngineShard* shard) {
-      auto args = t->ShardArgsInShard(shard->shard_id());
+      auto args = t->GetShardArgs(shard->shard_id());
       bool is_dest = args.front() == dest;
       OpArgs op_args = t->GetOpArgs(shard);
 
@@ -782,7 +782,7 @@ void MoveGeneric(ConnectionContext* cntx, string_view src, string_view dest, Lis
                  ListDir dest_dir) {
   OpResult<string> result;
 
-  if (cntx->transaction->unique_shard_cnt() == 1) {
+  if (cntx->transaction->GetUniqueShardCnt() == 1) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return OpMoveSingleShard(t->GetOpArgs(shard), src, dest, src_dir, dest_dir);
     };
@@ -857,7 +857,7 @@ OpResult<string> BPopPusher::Run(Transaction* t, unsigned msec) {
 
   t->Schedule();
 
-  if (t->unique_shard_cnt() == 1) {
+  if (t->GetUniqueShardCnt() == 1) {
     return RunSingle(t, tp);
   }
 

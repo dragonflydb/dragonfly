@@ -44,7 +44,7 @@ IntentLock::Mode Transaction::Mode() const {
 Transaction::Transaction(const CommandId* cid) : cid_(cid) {
   string_view cmd_name(cid_->name());
   if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA") {
-    multi_.reset(new Multi);
+    multi_.reset(new MultiData);
     multi_->multi_opts = cid->opt_mask();
 
     if (cmd_name == "EVAL" || cmd_name == "EVALSHA") {
@@ -183,7 +183,7 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
       if (multi_->is_expanding) {
         multi_->keys.push_back(key);
       } else {
-        multi_->locks[key].cnt[int(mode)]++;
+        multi_->lock_counts[key][mode]++;
       }
     };
 
@@ -376,7 +376,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
     LogAutoJournalOnShard(shard);
 
   // at least the coordinator thread owns the reference.
-  DCHECK_GE(use_count(), 1u);
+  DCHECK_GE(GetUseCount(), 1u);
 
   // we remove tx from tx-queue upon first invocation.
   // if it needs to run again it runs via a dedicated continuation_trans_ state in EngineShard.
@@ -533,14 +533,13 @@ void Transaction::ScheduleInternal() {
   }
 }
 
-void Transaction::LockMulti() {
-  DCHECK(multi_ && multi_->is_expanding);
+void Transaction::MultiData::AddLocks(IntentLock::Mode mode) {
+  DCHECK(is_expanding);
 
-  IntentLock::Mode mode = Mode();
-  for (auto key : multi_->keys) {
-    multi_->locks[key].cnt[int(mode)]++;
+  for (auto key : keys) {
+    lock_counts[key][mode]++;
   }
-  multi_->keys.clear();
+  keys.clear();
 }
 
 // Optimized "Schedule and execute" function for the most common use-case of a single hop
@@ -593,7 +592,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     // Note that the logic here is a bit different from the public Schedule() function.
     if (multi_) {
       if (multi_->is_expanding)
-        LockMulti();
+        multi_->AddLocks(Mode());
     } else {
       ScheduleInternal();
     }
@@ -619,15 +618,15 @@ void Transaction::UnlockMulti() {
   vector<KeyList> sharded_keys(shard_set->size());
 
   // It's LE and not EQ because there may be callbacks in progress that increase use_count_.
-  DCHECK_LE(1u, use_count());
+  DCHECK_LE(1u, GetUseCount());
 
-  for (const auto& k_v : multi_->locks) {
+  for (const auto& k_v : multi_->lock_counts) {
     ShardId sid = Shard(k_v.first, sharded_keys.size());
     sharded_keys[sid].push_back(k_v);
   }
 
   if (ServerState::tlocal()->journal()) {
-    SetMultiUniqueShardCount();
+    CalculateUnqiueShardCntForMulti();
   }
 
   uint32_t prev = run_count_.fetch_add(shard_data_.size(), memory_order_relaxed);
@@ -637,12 +636,12 @@ void Transaction::UnlockMulti() {
     shard_set->Add(i, [&] { UnlockMultiShardCb(sharded_keys, EngineShard::tlocal()); });
   }
   WaitForShardCallbacks();
-  DCHECK_GE(use_count(), 1u);
+  DCHECK_GE(GetUseCount(), 1u);
 
   VLOG(1) << "UnlockMultiEnd " << DebugId();
 }
 
-void Transaction::SetMultiUniqueShardCount() {
+void Transaction::CalculateUnqiueShardCntForMulti() {
   uint32_t prev = run_count_.fetch_add(shard_data_.size(), memory_order_relaxed);
   DCHECK_EQ(prev, 0u);
 
@@ -671,7 +670,7 @@ void Transaction::SetMultiUniqueShardCount() {
 
 void Transaction::Schedule() {
   if (multi_ && multi_->is_expanding) {
-    LockMulti();
+    multi_->AddLocks(Mode());
   } else {
     ScheduleInternal();
   }
@@ -809,7 +808,7 @@ void Transaction::RunQuickie(EngineShard* shard) {
 
 // runs in coordinator thread.
 // Marks the transaction as expired and removes it from the waiting queue.
-void Transaction::UnwatchBlocking(bool should_expire, WaitKeysPovider wcb) {
+void Transaction::UnwatchBlocking(bool should_expire, WaitKeysProvider wcb) {
   DVLOG(1) << "UnwatchBlocking " << DebugId();
   DCHECK(!IsGlobal());
 
@@ -849,7 +848,7 @@ KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
   KeyLockArgs res;
   res.db_index = db_index_;
   res.key_step = cid_->key_arg_step();
-  res.args = ShardArgsInShard(sid);
+  res.args = GetShardArgs(sid);
 
   return res;
 }
@@ -987,7 +986,7 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
 }
 
 // runs in engine-shard thread.
-ArgSlice Transaction::ShardArgsInShard(ShardId sid) const {
+ArgSlice Transaction::GetShardArgs(ShardId sid) const {
   DCHECK(!args_.empty());
 
   // We can read unique_shard_cnt_  only because ShardArgsInShard is called after IsArmedInShard
@@ -1010,9 +1009,9 @@ size_t Transaction::ReverseArgIndex(ShardId shard_id, size_t arg_index) const {
   return reverse_index_[sd.arg_start + arg_index];
 }
 
-bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysPovider wkeys_provider) {
+bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provider) {
   // Assumes that transaction is pending and scheduled. TODO: To verify it with state machine.
-  VLOG(2) << "WaitOnWatch Start use_count(" << use_count() << ")";
+  VLOG(2) << "WaitOnWatch Start use_count(" << GetUseCount() << ")";
   using namespace chrono;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1103,8 +1102,8 @@ void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, E
   ShardId sid = shard->shard_id();
   for (const auto& k_v : sharded_keys[sid]) {
     auto release = [&](IntentLock::Mode mode) {
-      if (k_v.second.cnt[mode]) {
-        shard->db_slice().Release(mode, db_index_, k_v.first, k_v.second.cnt[mode]);
+      if (k_v.second[mode]) {
+        shard->db_slice().Release(mode, db_index_, k_v.first, k_v.second[mode]);
       }
     };
 
@@ -1236,7 +1235,7 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
     entry_payload = cmd_with_full_args_;
   } else {
     auto cmd = facade::ToSV(cmd_with_full_args_.front());
-    entry_payload = make_pair(cmd, ShardArgsInShard(shard->shard_id()));
+    entry_payload = make_pair(cmd, GetShardArgs(shard->shard_id()));
   }
 
   LogJournalOnShard(shard, std::move(entry_payload), unique_shard_cnt_);

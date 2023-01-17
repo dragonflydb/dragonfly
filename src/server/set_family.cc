@@ -717,19 +717,19 @@ class Mover {
 };
 
 OpStatus Mover::OpFind(Transaction* t, EngineShard* es) {
-  ArgSlice largs = t->ShardArgsInShard(es->shard_id());
+  ArgSlice largs = t->GetShardArgs(es->shard_id());
 
   // In case both src and dest are in the same shard, largs size will be 2.
   DCHECK_LE(largs.size(), 2u);
 
   for (auto k : largs) {
     unsigned index = (k == src_) ? 0 : 1;
-    OpResult<PrimeIterator> res = es->db_slice().Find(t->db_context(), k, OBJ_SET);
+    OpResult<PrimeIterator> res = es->db_slice().Find(t->GetDbContext(), k, OBJ_SET);
     if (res && index == 0) {  // successful src find.
       DCHECK(!res->is_done());
       const CompactObj& val = res.value()->second;
       SetType st{val.RObjPtr(), val.Encoding()};
-      found_[0] = IsInSet(t->db_context(), st, member_);
+      found_[0] = IsInSet(t->GetDbContext(), st, member_);
     } else {
       found_[index] = res.status();
     }
@@ -739,7 +739,7 @@ OpStatus Mover::OpFind(Transaction* t, EngineShard* es) {
 }
 
 OpStatus Mover::OpMutate(Transaction* t, EngineShard* es) {
-  ArgSlice largs = t->ShardArgsInShard(es->shard_id());
+  ArgSlice largs = t->GetShardArgs(es->shard_id());
   DCHECK_LE(largs.size(), 2u);
 
   OpArgs op_args = t->GetOpArgs(es);
@@ -868,7 +868,7 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ArgSlice keys) {
 
 // Read-only OpInter op on sets.
 OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_first) {
-  ArgSlice keys = t->ShardArgsInShard(es->shard_id());
+  ArgSlice keys = t->GetShardArgs(es->shard_id());
   if (remove_first) {
     keys.remove_prefix(1);
   }
@@ -876,14 +876,15 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
 
   StringVec result;
   if (keys.size() == 1) {
-    OpResult<PrimeIterator> find_res = es->db_slice().Find(t->db_context(), keys.front(), OBJ_SET);
+    OpResult<PrimeIterator> find_res =
+        es->db_slice().Find(t->GetDbContext(), keys.front(), OBJ_SET);
     if (!find_res)
       return find_res.status();
 
     PrimeValue& pv = find_res.value()->second;
     if (IsDenseEncoding(pv)) {
       StringSet* ss = (StringSet*)pv.RObjPtr();
-      ss->set_time(TimeNowSecRel(t->db_context().time_now_ms));
+      ss->set_time(TimeNowSecRel(t->GetDbContext().time_now_ms));
     }
 
     container_utils::IterateSet(find_res.value()->second,
@@ -900,7 +901,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
   OpStatus status = OpStatus::OK;
 
   for (size_t i = 0; i < keys.size(); ++i) {
-    OpResult<PrimeIterator> find_res = es->db_slice().Find(t->db_context(), keys[i], OBJ_SET);
+    OpResult<PrimeIterator> find_res = es->db_slice().Find(t->GetDbContext(), keys[i], OBJ_SET);
     if (!find_res) {
       if (status == OpStatus::OK || status == OpStatus::KEY_NOTFOUND ||
           find_res.status() != OpStatus::KEY_NOTFOUND) {
@@ -916,7 +917,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
   if (status != OpStatus::OK)
     return status;
 
-  auto comp = [db_contx = t->db_context()](const SetType& left, const SetType& right) {
+  auto comp = [db_contx = t->GetDbContext()](const SetType& left, const SetType& right) {
     return SetTypeLen(db_contx, left) < SetTypeLen(db_contx, right);
   };
 
@@ -931,7 +932,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
     while (intsetGet(is, ii++, &intele)) {
       size_t j = 1;
       for (j = 1; j < sets.size(); j++) {
-        if (sets[j].first != is && !IsInSet(t->db_context(), sets[j], intele))
+        if (sets[j].first != is && !IsInSet(t->GetDbContext(), sets[j], intele))
           break;
       }
 
@@ -941,7 +942,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
       }
     }
   } else {
-    InterStrSet(t->db_context(), sets, &result);
+    InterStrSet(t->GetDbContext(), sets, &result);
   }
 
   return result;
@@ -1068,11 +1069,11 @@ void SIsMember(CmdArgList args, ConnectionContext* cntx) {
   string_view val = ArgS(args, 2);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->db_context(), key, OBJ_SET);
+    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_SET);
 
     if (find_res) {
       SetType st{find_res.value()->second.RObjPtr(), find_res.value()->second.Encoding()};
-      return IsInSet(t->db_context(), st, val) ? OpStatus::OK : OpStatus::KEY_NOTFOUND;
+      return IsInSet(t->GetDbContext(), st, val) ? OpStatus::OK : OpStatus::KEY_NOTFOUND;
     }
 
     return find_res.status();
@@ -1099,10 +1100,10 @@ void SMIsMember(CmdArgList args, ConnectionContext* cntx) {
   memberships.reserve(vals.size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->db_context(), key, OBJ_SET);
+    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_SET);
     if (find_res) {
       SetType st{find_res.value()->second.RObjPtr(), find_res.value()->second.Encoding()};
-      FindInSet(memberships, t->db_context(), st, vals);
+      FindInSet(memberships, t->GetDbContext(), st, vals);
       return OpStatus::OK;
     }
     return find_res.status();
@@ -1164,7 +1165,7 @@ void SCard(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
-    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->db_context(), key, OBJ_SET);
+    OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_SET);
     if (!find_res) {
       return find_res.status();
     }
@@ -1223,7 +1224,7 @@ void SDiff(CmdArgList args, ConnectionContext* cntx) {
   ShardId src_shard = Shard(src_key, result_set.size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    ArgSlice largs = t->ShardArgsInShard(shard->shard_id());
+    ArgSlice largs = t->GetShardArgs(shard->shard_id());
     if (shard->shard_id() == src_shard) {
       CHECK_EQ(src_key, largs.front());
       result_set[shard->shard_id()] = OpDiff(t->GetOpArgs(shard), largs);
@@ -1259,7 +1260,7 @@ void SDiffStore(CmdArgList args, ConnectionContext* cntx) {
 
   // read-only op
   auto diff_cb = [&](Transaction* t, EngineShard* shard) {
-    ArgSlice largs = t->ShardArgsInShard(shard->shard_id());
+    ArgSlice largs = t->GetShardArgs(shard->shard_id());
     DCHECK(!largs.empty());
 
     if (shard->shard_id() == dest_shard) {
@@ -1329,7 +1330,7 @@ void SInter(CmdArgList args, ConnectionContext* cntx) {
   };
 
   cntx->transaction->ScheduleSingleHop(std::move(cb));
-  OpResult<SvArray> result = InterResultVec(result_set, cntx->transaction->unique_shard_cnt());
+  OpResult<SvArray> result = InterResultVec(result_set, cntx->transaction->GetUniqueShardCnt());
   if (result) {
     SvArray arr = std::move(*result);
     if (cntx->conn_state.script_info) {  // sort under script
@@ -1348,7 +1349,7 @@ void SInterStore(CmdArgList args, ConnectionContext* cntx) {
   atomic_uint32_t inter_shard_cnt{0};
 
   auto inter_cb = [&](Transaction* t, EngineShard* shard) {
-    ArgSlice largs = t->ShardArgsInShard(shard->shard_id());
+    ArgSlice largs = t->GetShardArgs(shard->shard_id());
     if (shard->shard_id() == dest_shard) {
       CHECK_EQ(largs.front(), dest_key);
       if (largs.size() == 1)
@@ -1385,7 +1386,7 @@ void SUnion(CmdArgList args, ConnectionContext* cntx) {
   ResultStringVec result_set(shard_set->size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    ArgSlice largs = t->ShardArgsInShard(shard->shard_id());
+    ArgSlice largs = t->GetShardArgs(shard->shard_id());
     result_set[shard->shard_id()] = OpUnion(t->GetOpArgs(shard), largs);
     return OpStatus::OK;
   };
@@ -1410,7 +1411,7 @@ void SUnionStore(CmdArgList args, ConnectionContext* cntx) {
   ShardId dest_shard = Shard(dest_key, result_set.size());
 
   auto union_cb = [&](Transaction* t, EngineShard* shard) {
-    ArgSlice largs = t->ShardArgsInShard(shard->shard_id());
+    ArgSlice largs = t->GetShardArgs(shard->shard_id());
     if (shard->shard_id() == dest_shard) {
       CHECK_EQ(largs.front(), dest_key);
       largs.remove_prefix(1);

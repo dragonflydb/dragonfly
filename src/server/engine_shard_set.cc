@@ -294,7 +294,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     DCHECK(continuation_trans_ == nullptr)
         << continuation_trans_->DebugId() << " when polling " << trans->DebugId();
 
-    CHECK_EQ(committed_txid_, trans->notify_txid());
+    CHECK_EQ(committed_txid_, trans->GetNotifyTxid());
     bool keep = trans->RunInShard(this);
     if (keep) {
       return;

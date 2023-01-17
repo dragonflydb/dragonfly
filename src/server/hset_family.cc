@@ -953,7 +953,7 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
     auto& db_slice = shard->db_slice();
-    auto it_res = db_slice.Find(t->db_context(), key, OBJ_HASH);
+    auto it_res = db_slice.Find(t->GetDbContext(), key, OBJ_HASH);
 
     if (!it_res)
       return it_res.status();

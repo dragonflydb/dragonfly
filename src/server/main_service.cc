@@ -674,7 +674,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
         return (*cntx)->SendError(st);
 
       dfly_cntx->transaction = dist_trans.get();
-      dfly_cntx->last_command_debug.shards_count = dfly_cntx->transaction->unique_shard_cnt();
+      dfly_cntx->last_command_debug.shards_count = dfly_cntx->transaction->GetUniqueShardCnt();
     } else {
       dfly_cntx->transaction = nullptr;
     }
@@ -887,7 +887,7 @@ void Service::Watch(CmdArgList args, ConnectionContext* cntx) {
 
   atomic_uint32_t keys_existed = 0;
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    ArgSlice largs = t->ShardArgsInShard(shard->shard_id());
+    ArgSlice largs = t->GetShardArgs(shard->shard_id());
     for (auto k : largs) {
       shard->db_slice().RegisterWatchedKey(cntx->db_index(), k, &exec_info);
     }
@@ -1081,7 +1081,7 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandRegistry& regis
 
   atomic_uint32_t watch_exist_count{0};
   auto cb = [&watch_exist_count](Transaction* t, EngineShard* shard) {
-    ArgSlice args = t->ShardArgsInShard(shard->shard_id());
+    ArgSlice args = t->GetShardArgs(shard->shard_id());
     auto res = GenericFamily::OpExists(t->GetOpArgs(shard), args);
     watch_exist_count.fetch_add(res.value_or(0), memory_order_relaxed);
 

@@ -68,7 +68,7 @@ TEST_F(BlockingControllerTest, Basic) {
   shard_set->Await(0, [&] {
     EngineShard* shard = EngineShard::tlocal();
     BlockingController bc(shard);
-    auto keys = trans_->ShardArgsInShard(shard->shard_id());
+    auto keys = trans_->GetShardArgs(shard->shard_id());
     bc.AddWatched(keys, trans_.get());
     EXPECT_EQ(1, bc.NumWatched(0));
 
@@ -81,7 +81,7 @@ TEST_F(BlockingControllerTest, Timeout) {
   time_point tp = steady_clock::now() + chrono::milliseconds(10);
 
   trans_->Schedule();
-  auto cb = [&](Transaction* t, EngineShard* shard) { return trans_->ShardArgsInShard(0); };
+  auto cb = [&](Transaction* t, EngineShard* shard) { return trans_->GetShardArgs(0); };
 
   bool res = trans_->WaitOnWatch(tp, cb);
 
