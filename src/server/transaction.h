@@ -120,8 +120,9 @@ class Transaction {
   // Cancel all blocking watches on shutdown. Set COORD_CANCELLED.
   void BreakOnShutdown();
 
-  // Log a journal entry on shard with payload.
-  void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload) const;
+  // Log a journal entry on shard with payload and shard count.
+  void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload,
+                         uint32_t shard_cnt) const;
 
   // Unlock key locks of a multi transaction.
   void UnlockMulti();
