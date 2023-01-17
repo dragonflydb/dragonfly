@@ -332,7 +332,7 @@ OpStatus OpMSet(const OpArgs& op_args, ArgSlice args) {
   DCHECK(!args.empty() && args.size() % 2 == 0);
 
   SetCmd::SetParams params;
-  SetCmd sg(op_args);
+  SetCmd sg(op_args, false);
 
   for (size_t i = 0; i < args.size(); i += 2) {
     DVLOG(1) << "MSet " << args[i] << ":" << args[i + 1];
@@ -346,11 +346,11 @@ OpStatus OpMSet(const OpArgs& op_args, ArgSlice args) {
 }
 
 OpResult<void> SetGeneric(ConnectionContext* cntx, const SetCmd::SetParams& sparams,
-                          string_view key, string_view value) {
+                          string_view key, string_view value, bool manual_journal) {
   DCHECK(cntx->transaction);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    SetCmd sg(t->GetOpArgs(shard));
+    SetCmd sg(t->GetOpArgs(shard), manual_journal);
     return sg.Set(sparams, key, value);
   };
   return cntx->transaction->ScheduleSingleHop(std::move(cb));
@@ -363,6 +363,8 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
   auto& db_slice = shard->db_slice();
 
   DCHECK(db_slice.IsDbValid(op_args_.db_cntx.db_index));
+
+  VLOG(0) << "MJ " << manual_journal_ << " on " << key << " to " << value;
 
   VLOG(2) << "Set " << key << "(" << db_slice.shard_id() << ") ";
 
@@ -415,6 +417,10 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
     // TODO: we may have a bug if we block the fiber inside UnloadItem - "it" may be invalid
     // afterwards.
     shard->tiered_storage()->ScheduleOffload(op_args_.db_cntx.db_index, it);
+  }
+
+  if (manual_journal_ && op_args_.shard->journal()) {
+    RecordJournal(params, key, value);
   }
 
   return OpStatus::OK;
@@ -477,7 +483,32 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
   }
 
   db_slice.PostUpdate(op_args_.db_cntx.db_index, it, key);
+
+  if (manual_journal_ && op_args_.shard->journal()) {
+    RecordJournal(params, key, value);
+  }
+
   return OpStatus::OK;
+}
+
+void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view value) {
+  absl::InlinedVector<string_view, 5> cmds{};  // 4 is theoretical maximum;
+  cmds.insert(cmds.end(), {key, value});
+
+  std::string exp_str;
+  if (params.flags & SET_EXPIRE_AFTER_MS) {
+    exp_str = absl::StrCat(params.expire_after_ms + op_args_.db_cntx.time_now_ms);
+    cmds.insert(cmds.end(), {"PXAT", exp_str});
+  } else if (params.flags & SET_KEEP_EXPIRE) {
+    cmds.push_back("KEEPTTL");
+  }
+
+  VLOG(0) << "Recording";
+
+  // Skip NX/XX because SET operation was exectued.
+  // Skip GET, because its not important on replica.
+
+  dfly::RecordJournal(op_args_, "SET", ArgSlice{cmds});
 }
 
 void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
@@ -550,7 +581,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  const auto result{SetGeneric(cntx, sparams, key, value)};
+  const auto result{SetGeneric(cntx, sparams, key, value, true)};
 
   if (result == OpStatus::OK) {
     return builder->SendStored();
@@ -569,6 +600,10 @@ void StringFamily::SetEx(CmdArgList args, ConnectionContext* cntx) {
   SetExGeneric(true, std::move(args), cntx);
 }
 
+void StringFamily::PSetEx(CmdArgList args, ConnectionContext* cntx) {
+  SetExGeneric(false, std::move(args), cntx);
+}
+
 void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
   // This is the same as calling the "Set" function, only in this case we are
   // change the value only if the key does not exist. Otherwise the function
@@ -580,7 +615,7 @@ void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_IF_NOTEXIST;
   sparams.memcache_flags = cntx->conn_state.memcache_flag;
-  const auto results{SetGeneric(cntx, std::move(sparams), key, value)};
+  const auto results{SetGeneric(cntx, std::move(sparams), key, value, false)};
   SinkReplyBuilder* builder = cntx->reply_builder();
   if (results == OpStatus::OK) {
     return builder->SendLong(1);  // this means that we successfully set the value
@@ -657,7 +692,7 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
   sparams.prev_val = &prev_val;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    SetCmd cmd(t->GetOpArgs(shard));
+    SetCmd cmd(t->GetOpArgs(shard), false);
 
     return cmd.Set(sparams, key, value);
   };
@@ -888,13 +923,14 @@ void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext
   }
 
   SetCmd::SetParams sparams;
+  sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
   if (seconds)
     sparams.expire_after_ms = uint64_t(unit_vals) * 1000;
   else
     sparams.expire_after_ms = unit_vals;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    SetCmd sg(t->GetOpArgs(shard));
+    SetCmd sg(t->GetOpArgs(shard), true);
     return sg.Set(sparams, key, value);
   };
 
@@ -1096,10 +1132,6 @@ void StringFamily::SetRange(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
-void StringFamily::PSetEx(CmdArgList args, ConnectionContext* cntx) {
-  SetExGeneric(false, std::move(args), cntx);
-}
-
 auto StringFamily::OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction* t,
                           EngineShard* shard) -> MGetResponse {
   auto args = t->GetShardArgs(shard->shard_id());
@@ -1141,10 +1173,10 @@ void StringFamily::Shutdown() {
 #define HFUNC(x) SetHandler(&StringFamily::x)
 
 void StringFamily::Register(CommandRegistry* registry) {
-  *registry << CI{"SET", CO::WRITE | CO::DENYOOM, -3, 1, 1, 1}.HFUNC(Set)
-            << CI{"SETEX", CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(SetEx)
+  *registry << CI{"SET", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1, 1}.HFUNC(Set)
+            << CI{"SETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1}.HFUNC(SetEx)
+            << CI{"PSETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1}.HFUNC(PSetEx)
             << CI{"SETNX", CO::WRITE | CO::DENYOOM, 3, 1, 1, 1}.HFUNC(SetNx)
-            << CI{"PSETEX", CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(PSetEx)
             << CI{"APPEND", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Append)
             << CI{"PREPEND", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Prepend)
             << CI{"INCR", CO::WRITE | CO::DENYOOM | CO::FAST, 2, 1, 1, 1}.HFUNC(Incr)

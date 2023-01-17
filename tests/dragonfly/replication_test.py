@@ -4,6 +4,7 @@ import asyncio
 import aioredis
 import random
 from itertools import chain, repeat
+import re
 
 from .utility import *
 from . import dfly_args
@@ -368,3 +369,73 @@ async def test_flushall(df_local_factory):
         pipe.get(f"key-{i}")
     vals = await pipe.execute()
     assert all(v is not None for v in vals)
+
+"""
+Test journal rewrites.
+"""
+
+
+@dfly_args({"proactor_threads": 1})
+@pytest.mark.asyncio
+async def test_rewrites(df_local_factory):
+    CLOSE_TIMESTAMP = (int(time.time()) + 100)
+    CLOSE_TIMESTAMP_MS = CLOSE_TIMESTAMP * 1000
+
+    master = df_local_factory.create(port=BASE_PORT)
+    replica = df_local_factory.create(port=BASE_PORT+1)
+
+    master.start()
+    replica.start()
+
+    # Connect clients, connect replica to master
+    c_master = aioredis.Redis(port=master.port)
+    c_replica = aioredis.Redis(port=replica.port)
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    # Make sure journal writer sends its first SELECT command on its only shard
+    await c_master.set("no-select-please", "ok")
+    await asyncio.sleep(0.5)
+
+    # Create monitor and bind utility functions
+    m_replica = c_replica.monitor()
+
+    async def check_rsp(rx):
+        print("waiting on", rx)
+        mcmd = (await m_replica.next_command())['command']
+        print("Got:", mcmd, "Regex", rx)
+        assert re.match(rx, mcmd)
+
+    async def skip_cmd():
+        await check_rsp(r".*")
+
+    async def check(cmd, rx):
+        await c_master.execute_command(cmd)
+        await check_rsp(rx)
+
+    async with m_replica:
+        # CHECK EXPIRE, PEXPIRE, PEXPIRE turn into EXPIREAT
+        await c_master.set("k-exp", "v")
+        await skip_cmd()
+        await check("EXPIRE k-exp 100", r"PEXPIREAT k-exp (.*?)")
+        await check("PEXPIRE k-exp 100", r"PEXPIREAT k-exp (.*?)")
+        await check(f"EXPIREAT k-exp {CLOSE_TIMESTAMP}", rf"PEXPIREAT k-exp {CLOSE_TIMESTAMP_MS}")
+
+        # Check SPOP turns into SREM or SDEL
+        await c_master.sadd("k-set", "v1", "v2", "v3")
+        await skip_cmd()
+        await check("SPOP k-set 1", r"SREM k-set (v1|v2|v3)")
+        await check("SPOP k-set 2", r"DEL k-set")
+
+        # Check SET + {EX/PX/EXAT} + {XX/NX/GET} arguments turns into SET PXAT
+        await check(f"SET k v EX 100 NX GET", r"SET k v PXAT (.*?)")
+        await check(f"SET k v PX 10000", r"SET k v PXAT (.*?)")
+        # Exact expiry is skewed
+        # await check(f"SET k v XX EXAT {CLOSE_TIMESTAMP}", rf"SET k v PXAT {CLOSE_TIMESTAMP_MS}")
+
+        # Check SET + KEEPTTL doesn't loose KEEPTTL
+        await check(f"SET k v KEEPTTL", r"SET k v KEEPTTL")
+
+        # Check SETEX/PSETEX turn into SET PXAT
+        await check("SETEX k 100 v", r"SET k v PXAT (.*?)")
+        await check("PSETEX k 100000 v", r"SET k v PXAT (.*?)")

@@ -17,9 +17,11 @@ using facade::OpStatus;
 
 class SetCmd {
   const OpArgs op_args_;
+  bool manual_journal_;
 
  public:
-  explicit SetCmd(const OpArgs& op_args) : op_args_(op_args) {
+  explicit SetCmd(const OpArgs& op_args, bool manual_journal)
+      : op_args_(op_args), manual_journal_{manual_journal} {
   }
 
   enum SetFlags {
@@ -48,6 +50,8 @@ class SetCmd {
  private:
   OpStatus SetExisting(const SetParams& params, PrimeIterator it, ExpireIterator e_it,
                        std::string_view key, std::string_view value);
+
+  void RecordJournal(const SetParams& params, std::string_view key, std::string_view value);
 };
 
 class StringFamily {

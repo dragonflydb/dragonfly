@@ -150,7 +150,8 @@ std::string MakeMonitorMessage(const ConnectionState& conn_state,
   if (conn_state.script_info.has_value()) {
     absl::StrAppend(&message, " lua] ");
   } else {
-    absl::StrAppend(&message, " ", connection->RemoteEndpointStr(), "] ");
+    auto endpoint = connection == nullptr ? "REPLICATION:0" : connection->RemoteEndpointStr();
+    absl::StrAppend(&message, " ", endpoint, "] ");
   }
   if (args.empty()) {
     absl::StrAppend(&message, "error - empty cmd list!");

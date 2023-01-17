@@ -46,6 +46,10 @@ JournalExecutor::JournalExecutor(Service* service)
 void JournalExecutor::Execute(DbIndex dbid, std::vector<journal::ParsedEntry::CmdData>& cmds) {
   SelectDb(dbid);
   for (auto& cmd : cmds) {
+    VLOG(0) << "EXEC";
+    for (auto part : cmd.cmd_args) {
+      VLOG(0) << facade::ToSV(part);
+    }
     Execute(cmd);
   }
 }
