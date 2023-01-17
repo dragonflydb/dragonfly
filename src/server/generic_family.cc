@@ -370,7 +370,11 @@ OpStatus Renamer::MoveSrc(Transaction* t, EngineShard* es) {
       pv_ = std::move(it->second);
       it->second.SetExpire(has_expire);
     }
+
     CHECK(es->db_slice().Del(t->GetDbIndex(), it));  // delete the entry with empty value in it.
+    if (es->journal()) {
+      RecordJournal(t->GetOpArgs(es), "DEL", ArgSlice{src_res_.key}, 2);
+    }
   }
 
   return OpStatus::OK;
@@ -405,6 +409,21 @@ OpStatus Renamer::UpdateDest(Transaction* t, EngineShard* es) {
 
     if (!is_prior_list && dest_it->second.ObjType() == OBJ_LIST && es->blocking_controller()) {
       es->blocking_controller()->AwakeWatched(t->GetDbIndex(), dest_key);
+    }
+    if (es->journal()) {
+      OpArgs op_args = t->GetOpArgs(es);
+      string scratch;
+      // todo insert under multi exec
+      RecordJournal(op_args, "SET"sv, ArgSlice{dest_key, dest_it->second.GetSlice(&scratch)}, 2,
+                    true);
+      if (dest_it->first.IsSticky()) {
+        RecordJournal(op_args, "STICK"sv, ArgSlice{dest_key}, 2, true);
+      }
+      if (dest_it->second.HasExpire()) {
+        auto time = absl::StrCat(src_res_.expire_ts);
+        RecordJournal(op_args, "PEXPIREAT"sv, ArgSlice{time}, 2, true);
+      }
+      RecordJournalFinish(op_args, 2);
     }
   }
 
@@ -592,13 +611,13 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
 
   // If the value was deleted, replicate as DEL.
   // Else, replicate as PEXPIREAT with exact time.
-  if (auto journal = op_args.shard->journal(); journal && res.ok()) {
+  if (op_args.shard->journal() && res.ok()) {
     if (res.value() == -1) {
-      op_args.RecordJournal("DEL"sv, ArgSlice{key});
+      RecordJournal(op_args, "DEL"sv, ArgSlice{key});
     } else {
       auto time = absl::StrCat(res.value());
       // Note: Don't forget to change this when adding arguments to expire commands.
-      op_args.RecordJournal("PEXPIREAT"sv, ArgSlice{time});
+      RecordJournal(op_args, "PEXPIREAT"sv, ArgSlice{time});
     }
   }
 
@@ -1195,7 +1214,12 @@ OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool skip_exist_des
 
   if (transaction->GetUniqueShardCnt() == 1) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
-      return OpRen(t->GetOpArgs(shard), key[0], key[1], skip_exist_dest);
+      auto ec = OpRen(t->GetOpArgs(shard), key[0], key[1], skip_exist_dest);
+      // Incase of uniqe shard count we can use rename command in replica.
+      if (ec.ok() && shard->journal()) {
+        RecordJournal(t->GetOpArgs(shard), "RENAME", {key[0], key[1]});
+      }
+      return ec;
     };
     OpResult<void> result = transaction->ScheduleSingleHopT(std::move(cb));
 
@@ -1419,8 +1443,8 @@ void GenericFamily::Register(CommandRegistry* registry) {
             << CI{"PEXPIREAT", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1}.HFUNC(
                    PexpireAt)
             << CI{"PEXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, 1}.HFUNC(Pexpire)
-            << CI{"RENAME", CO::WRITE, 3, 1, 2, 1}.HFUNC(Rename)
-            << CI{"RENAMENX", CO::WRITE, 3, 1, 2, 1}.HFUNC(RenameNx)
+            << CI{"RENAME", CO::WRITE | CO::NO_AUTOJOURNAL, 3, 1, 2, 1}.HFUNC(Rename)
+            << CI{"RENAMENX", CO::WRITE | CO::NO_AUTOJOURNAL, 3, 1, 2, 1}.HFUNC(RenameNx)
             << CI{"SELECT", kSelectOpts, 2, 0, 0, 0}.HFUNC(Select)
             << CI{"SCAN", CO::READONLY | CO::FAST | CO::LOADING, -2, 0, 0, 0}.HFUNC(Scan)
             << CI{"TTL", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Ttl)

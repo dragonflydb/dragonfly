@@ -90,10 +90,14 @@ struct OpArgs {
   OpArgs(EngineShard* s, const Transaction* tx, const DbContext& cntx)
       : shard(s), tx(tx), db_cntx(cntx) {
   }
-
-  // Log single-shard journal command with own txid and dbid.
-  void RecordJournal(std::string_view cmd, ArgSlice args) const;
 };
+
+// Record non auto journal command with own txid and dbid.
+void RecordJournal(const OpArgs& op_args, std::string_view cmd, ArgSlice args,
+                   uint32_t shard_cnt = 1, bool multi_commands = false);
+
+// Record non auto journal command finish. Call only when command translates to multi commands.
+void RecordJournalFinish(const OpArgs& op_args, uint32_t shard_cnt);
 
 struct TieredStats {
   size_t tiered_reads = 0;
