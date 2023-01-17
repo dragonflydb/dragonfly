@@ -28,15 +28,23 @@ class BlockingController;
 using facade::OpResult;
 using facade::OpStatus;
 
+// Central building block of the transactional framework.
+//
+// Use it to run callbacks on the shard threads - such dispatches are called hops.
+// The shards to run on are determined by the keys of the underlying command.
+// Global transactions run on all shards.
+//
+// Use ScheduleSingleHop() if only a single hop is needed.
+// Otherwise, schedule the transaction with Schedule() and run successive hops
+// with Execute().
 class Transaction {
   friend class BlockingController;
 
   Transaction(const Transaction&);
   void operator=(const Transaction&) = delete;
 
-  ~Transaction();
+  ~Transaction();  // Transactions are reference counted with intrusive_ptr.
 
-  // Transactions are reference counted.
   friend void intrusive_ptr_add_ref(Transaction* trans) noexcept {
     trans->use_count_.fetch_add(1, std::memory_order_relaxed);
   }
@@ -50,56 +58,48 @@ class Transaction {
 
  public:
   using time_point = ::std::chrono::steady_clock::time_point;
+  // Runnable that is run on shards during hop executions (often named callback).
   using RunnableType = std::function<OpStatus(Transaction* t, EngineShard*)>;
-  using WaitKeysPovider = std::function<ArgSlice(Transaction*, EngineShard* shard)>;
+  // Provides keys to block on for specific shard.
+  using WaitKeysProvider = std::function<ArgSlice(Transaction*, EngineShard* shard)>;
 
+  // State on specific shard.
   enum LocalMask : uint16_t {
-    ARMED = 1,  // Transaction was armed with the callback
-    OUT_OF_ORDER = 2,
-    KEYLOCK_ACQUIRED = 4,
-    SUSPENDED_Q = 0x10,  // added by the coordination flow (via WaitBlocked()).
-    AWAKED_Q = 0x20,     // awaked by condition (lpush etc)
-    EXPIRED_Q = 0x40,    // timed-out and should be garbage collected from the blocking queue.
+    ARMED = 1,                  // Whether callback cb_ is set
+    OUT_OF_ORDER = 1 << 1,      // Whether its running out of order
+    KEYLOCK_ACQUIRED = 1 << 2,  // Whether its key locks are acquired
+    SUSPENDED_Q = 1 << 3,       // Whether is suspened (by WatchInShard())
+    AWAKED_Q = 1 << 4,          // Whether it was awakened (by NotifySuspended())
+    EXPIRED_Q = 1 << 5,         // Whether it timed out and should be dropped
   };
 
  public:
   explicit Transaction(const CommandId* cid);
 
+  // Initialize from command (args) on specific db.
   OpStatus InitByArgs(DbIndex index, CmdArgList args);
 
-  void SetExecCmd(const CommandId* cid);
-
-  std::string DebugId() const;
-
-  // Runs in engine thread
+  // Get command arguments for specific shard. Called from shard thread.
   ArgSlice GetShardArgs(ShardId sid) const;
 
-  // Maps the index in GetShardArgs(shard_id) slice back to the index
-  // in the original array passed to InitByArgs.
+  // Map arg_index from GetShardArgs slice to index in original command slice from InitByArgs.
   size_t ReverseArgIndex(ShardId shard_id, size_t arg_index) const;
 
-  // Schedules a transaction. Usually used for multi-hop transactions like Rename or BLPOP.
-  // For single hop, use ScheduleSingleHop instead.
+  // Schedule transaction.
+  // Usually used for multi hop transactions like RENAME or BLPOP.
+  // For single hop transactions use ScheduleSingleHop instead.
   void Schedule();
 
-  // if conclude is true, removes the transaction from the pending queue.
+  // Execute transaction hop. If conclude is true, it is removed from the pending queue.
   void Execute(RunnableType cb, bool conclude);
 
-  // for multi-key scenarios cb should return Status::Ok since otherwise the return value
-  // will be ill-defined.
+  // Execute single hop and conclude.
+  // Callback should return OK for multi key invocations, otherwise return value is ill-defined.
   OpStatus ScheduleSingleHop(RunnableType cb);
 
-  // Fits only for single key scenarios because it writes into shared variable res from
-  // potentially multiple threads.
-  template <typename F> auto ScheduleSingleHopT(F&& f) -> decltype(f(this, nullptr)) {
-    decltype(f(this, nullptr)) res;
-
-    ScheduleSingleHop([&res, f = std::forward<F>(f)](Transaction* t, EngineShard* shard) {
-      res = f(t, shard);
-      return res.status();
-    });
-    return res;
-  }
+  // Execute single hop with return value and conclude.
+  // Can be used only for single key invocations, because it writes a into shared variable.
+  template <typename F> auto ScheduleSingleHopT(F&& f) -> decltype(f(this, nullptr));
 
   // Called by EngineShard when performing Execute over the tx queue.
   // Returns true if transaction should be kept in the queue.
@@ -109,7 +109,7 @@ class Transaction {
   // or b) tp is reached. If tp is time_point::max() then waits indefinitely.
   // Expects that the transaction had been scheduled before, and uses Execute(.., true) to register.
   // Returns false if timeout occurred, true if was notified by one of the keys.
-  bool WaitOnWatch(const time_point& tp, WaitKeysPovider cb);
+  bool WaitOnWatch(const time_point& tp, WaitKeysProvider cb);
 
   // Returns true if transaction is awaked, false if it's timed-out and can be removed from the
   // blocking queue. NotifySuspended may be called from (multiple) shard threads and
@@ -117,19 +117,21 @@ class Transaction {
   // this transaction has been awaked.
   bool NotifySuspended(TxId committed_ts, ShardId sid);
 
+  // Cancel all blocking watches on shutdown. Set COORD_CANCELLED.
   void BreakOnShutdown();
-
-  void UnlockMulti();
-
-  // In multi transaciton command we calculate the unique shard count of the trasaction
-  // after all transaciton commands where executed, by checking the last txid writen to
-  // all journals.
-  // This value is writen to journal so that replica we be able to apply the multi command
-  // atomicaly.
-  void SetMultiUniqueShardCount();
 
   // Log a journal entry on shard with payload.
   void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload) const;
+
+  // Unlock key locks of a multi transaction.
+  void UnlockMulti();
+
+  // Reset CommandId to be executed when executing MULTI/EXEC or from script.
+  void SetExecCmd(const CommandId* cid);
+
+  // Returns locking arguments needed for DbSlice to Acquire/Release transactional locks.
+  // Runs in the shard thread.
+  KeyLockArgs GetLockArgs(ShardId sid) const;
 
  public:
   //! Returns true if the transaction spans this shard_id.
@@ -160,10 +162,9 @@ class Transaction {
     return txid_;
   }
 
-  // based on cid_->opt_mask.
-  IntentLock::Mode Mode() const;
+  IntentLock::Mode Mode() const;  // Based on command mask
 
-  const char* Name() const;
+  const char* Name() const;  // Based on command name
 
   uint32_t GetUniqueShardCnt() const {
     return unique_shard_cnt_;
@@ -183,10 +184,6 @@ class Transaction {
     return coordinator_state_ & COORD_OOO;
   }
 
-  //! Returns locking arguments needed for DbSlice to Acquire/Release transactional locks.
-  //! Runs in the shard thread.
-  KeyLockArgs GetLockArgs(ShardId sid) const;
-
   OpArgs GetOpArgs(EngineShard* shard) const {
     return OpArgs{shard, this, GetDbContext()};
   }
@@ -199,7 +196,10 @@ class Transaction {
     return db_index_;
   }
 
+  std::string DebugId() const;
+
  private:
+  // Holds number of locks for each IntentLock::Mode: shared and exlusive.
   struct LockCnt {
     unsigned cnt[2] = {0, 0};
   };
@@ -207,6 +207,11 @@ class Transaction {
   using KeyList = std::vector<std::pair<std::string_view, LockCnt>>;
 
   struct PerShardData {
+    PerShardData(PerShardData&&) noexcept {
+    }
+
+    PerShardData() = default;
+
     uint32_t arg_start = 0;  // Indices into args_ array.
     uint16_t arg_count = 0;
 
@@ -217,15 +222,9 @@ class Transaction {
     // Needed to rollback inconsistent schedulings or remove OOO transactions from
     // tx queue.
     uint32_t pq_pos = TxQueue::kEnd;
-
-    PerShardData(PerShardData&&) noexcept {
-    }
-
-    PerShardData() = default;
   };
 
-  enum { kPerShardSize = sizeof(PerShardData) };
-
+  // State of a multi transaction.
   struct MultiData {
     absl::flat_hash_map<std::string_view, LockCnt> locks;
     std::vector<std::string_view> keys;
@@ -249,32 +248,42 @@ class Transaction {
   };
 
  private:
+  // Generic schedule used from Schedule() and ScheduleSingleHop() on slow path.
   void ScheduleInternal();
-  void LockMulti();
 
-  void UnwatchBlocking(bool should_expire, WaitKeysPovider wcb);
-  void ExecuteAsync();
+  // Schedule if only one shard is active.
+  // Returns true if transaction ran out-of-order during the scheduling phase.
+  bool ScheduleUniqueShard(EngineShard* shard);
+
+  // Schedule on shards transaction queue.
+  // Returns pair(schedule_success, lock_granted)
+  // schedule_success is true if transaction was scheduled on db_slice.
+  // lock_granted is true if lock was granted for all the keys on this shard.
+  // Runs in the shard thread.
+  std::pair<bool, bool> ScheduleInShard(EngineShard* shard);
 
   // Optimized version of RunInShard for single shard uncontended cases.
   void RunQuickie(EngineShard* shard);
 
-  //! Returns true if transaction run out-of-order during the scheduling phase.
-  bool ScheduleUniqueShard(EngineShard* shard);
+  void ExecuteAsync();
 
-  /// Returns pair(schedule_success, lock_granted)
-  /// schedule_success is true if transaction was scheduled on db_slice.
-  /// lock_granted is true if lock was granted for all the keys on this shard.
-  /// Runs in the shard thread.
-  std::pair<bool, bool> ScheduleInShard(EngineShard* shard);
+  void LockMulti();
+
+  // Adds itself to watched queue in the shard. Must run in that shard thread.
+  OpStatus WatchInShard(ArgSlice keys, EngineShard* shard);
+
+  void UnwatchBlocking(bool should_expire, WaitKeysProvider wcb);
 
   // Returns true if we need to follow up with PollExecution on this shard.
   bool CancelShardCb(EngineShard* shard);
 
   void UnwatchShardCb(ArgSlice wkeys, bool should_expire, EngineShard* shard);
+
   void UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard);
 
-  // Adds itself to watched queue in the shard. Must run in that shard thread.
-  OpStatus WatchInShard(ArgSlice keys, EngineShard* shard);
+  // Calculate number of unqiue shards for multi transaction after alll commands were executed.
+  // This value is used in stable state replication to allow applying the command atomically.
+  void CalculateUnqiueShardCntForMulti();
 
   void WaitForShardCallbacks() {
     run_ec_.await([this] { return 0 == run_count_.load(std::memory_order_relaxed); });
@@ -284,16 +293,16 @@ class Transaction {
     seqlock_.fetch_add(1, std::memory_order_relaxed);
   }
 
+  // Log command in shard's journal, if this is a write command with auto-journaling enabled.
+  // Should be called immediately after the last phase (hop).
+  void LogAutoJournalOnShard(EngineShard* shard);
+
   // Returns the previous value of run count.
   uint32_t DecreaseRunCnt();
 
   uint32_t GetUseCount() const {
     return use_count_.load(std::memory_order_relaxed);
   }
-
-  // Log command in the journal of a shard for write commands with auto-journaling enabled.
-  // Should be called immediately after the last phase (hop).
-  void LogAutoJournalOnShard(EngineShard* shard);
 
   unsigned SidToId(ShardId sid) const {
     return sid < shard_data_.size() ? sid : 0;
@@ -313,12 +322,11 @@ class Transaction {
   // Stores the full undivided command.
   CmdArgList cmd_with_full_args_;
 
-  // Reverse argument mapping. Allows to reconstruct responses according to the original order of
-  // keys.
+  // Reverse argument mapping for ReverseArgIndex to convert from shard index to original index.
   std::vector<uint32_t> reverse_index_;
 
-  RunnableType cb_;
-  const CommandId* cid_;
+  RunnableType cb_;                   // Run on shard threads
+  const CommandId* cid_;              // Underlying command
   std::unique_ptr<MultiData> multi_;  // Initialized when the transaction is multi/exec.
 
   TxId txid_{0};
@@ -327,13 +335,12 @@ class Transaction {
   std::atomic<TxId> notify_txid_{kuint64max};
   std::atomic_uint32_t use_count_{0}, run_count_{0}, seqlock_{0};
 
-  // unique_shard_cnt_ and unique_shard_id_ is accessed only by coordinator thread.
+  // unique_shard_cnt_ and unique_shard_id_ are accessed only by coordinator thread.
   uint32_t unique_shard_cnt_{0};  // number of unique shards span by args_
-
   ShardId unique_shard_id_{kInvalidSid};
 
-  util::fibers_ext::EventCount blocking_ec_;  // used to wake blocking transactions.
-  util::fibers_ext::EventCount run_ec_;
+  util::fibers_ext::EventCount blocking_ec_;  // Used to wake blocking transactions.
+  util::fibers_ext::EventCount run_ec_;       // Used to wait for shard callbacks
 
   // Transaction coordinator state, written and read by coordinator thread.
   // Can be read by shard threads as long as we respect ordering rules, i.e. when
@@ -362,6 +369,16 @@ class Transaction {
 
   static thread_local TLTmpSpace tmp_space;
 };
+
+template <typename F> auto Transaction::ScheduleSingleHopT(F&& f) -> decltype(f(this, nullptr)) {
+  decltype(f(this, nullptr)) res;
+
+  ScheduleSingleHop([&res, f = std::forward<F>(f)](Transaction* t, EngineShard* shard) {
+    res = f(t, shard);
+    return res.status();
+  });
+  return res;
+}
 
 inline uint16_t trans_id(const Transaction* ptr) {
   return (intptr_t(ptr) >> 8) & 0xFFFF;

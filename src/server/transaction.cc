@@ -627,7 +627,7 @@ void Transaction::UnlockMulti() {
   }
 
   if (ServerState::tlocal()->journal()) {
-    SetMultiUniqueShardCount();
+    CalculateUnqiueShardCntForMulti();
   }
 
   uint32_t prev = run_count_.fetch_add(shard_data_.size(), memory_order_relaxed);
@@ -642,7 +642,7 @@ void Transaction::UnlockMulti() {
   VLOG(1) << "UnlockMultiEnd " << DebugId();
 }
 
-void Transaction::SetMultiUniqueShardCount() {
+void Transaction::CalculateUnqiueShardCntForMulti() {
   uint32_t prev = run_count_.fetch_add(shard_data_.size(), memory_order_relaxed);
   DCHECK_EQ(prev, 0u);
 
@@ -809,7 +809,7 @@ void Transaction::RunQuickie(EngineShard* shard) {
 
 // runs in coordinator thread.
 // Marks the transaction as expired and removes it from the waiting queue.
-void Transaction::UnwatchBlocking(bool should_expire, WaitKeysPovider wcb) {
+void Transaction::UnwatchBlocking(bool should_expire, WaitKeysProvider wcb) {
   DVLOG(1) << "UnwatchBlocking " << DebugId();
   DCHECK(!IsGlobal());
 
@@ -1010,7 +1010,7 @@ size_t Transaction::ReverseArgIndex(ShardId shard_id, size_t arg_index) const {
   return reverse_index_[sd.arg_start + arg_index];
 }
 
-bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysPovider wkeys_provider) {
+bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provider) {
   // Assumes that transaction is pending and scheduled. TODO: To verify it with state machine.
   VLOG(2) << "WaitOnWatch Start use_count(" << GetUseCount() << ")";
   using namespace chrono;
