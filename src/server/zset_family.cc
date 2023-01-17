@@ -723,7 +723,7 @@ OpResult<KeyIterWeightVec> FindShardKeysAndWeights(EngineShard* shard, Transacti
   auto& db_slice = shard->db_slice();
   KeyIterWeightVec key_weight_vec(keys.size() - src_keys_offset);
   for (unsigned j = src_keys_offset; j < keys.size(); ++j) {
-    auto it_res = db_slice.Find(t->db_context(), keys[j], OBJ_ZSET);
+    auto it_res = db_slice.Find(t->GetDbContext(), keys[j], OBJ_ZSET);
     if (it_res == OpStatus::WRONG_TYPE)  // TODO: support sets with default score 1.
       return it_res.status();
     if (!it_res)
