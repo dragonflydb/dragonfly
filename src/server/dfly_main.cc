@@ -72,6 +72,8 @@ std::string AbslUnparseFlag(const MaxMemoryFlag& flag) {
 ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 ABSL_DECLARE_FLAG(uint32_t, memcache_port);
+ABSL_DECLARE_FLAG(uint16_t, admin_port);
+ABSL_DECLARE_FLAG(std::string, admin_bind);
 
 ABSL_FLAG(bool, use_large_pages, false, "If true - uses large memory pages for allocations");
 ABSL_FLAG(string, bind, "",
@@ -316,6 +318,25 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     } else {
       LOG(INFO) << "Listening on unix socket " << unix_sock;
       unlink_uds = true;
+    }
+  }
+
+  std::uint16_t admin_port = GetFlag(FLAGS_admin_port);
+  if (admin_port != 0) {
+    const std::string& admin_bind = GetFlag(FLAGS_admin_bind);
+    // Note passing the result of c_str() for empty string in optimized mode don't work, we must
+    // explicitly set this to null in this case
+    const char* interface_addr = admin_bind.empty() ? nullptr : admin_bind.c_str();
+    const std::string printable_addr =
+        absl::StrCat("admin socket ", interface_addr ? interface_addr : "any", ":", admin_port);
+    Listener* admin_listener = new Listener{Protocol::REDIS, &service};
+    error_code ec = acceptor->AddListener(interface_addr, admin_port, admin_listener);
+
+    if (ec) {
+      LOG(ERROR) << "Failed to open " << printable_addr << ", error: " << ec.message();
+      delete admin_listener;
+    } else {
+      LOG(INFO) << "Listening on " << printable_addr;
     }
   }
 

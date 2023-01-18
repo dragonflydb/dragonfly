@@ -25,7 +25,17 @@
 
 ABSL_FLAG(bool, tcp_nodelay, false,
           "Configures dragonfly connections with socket option TCP_NODELAY");
-ABSL_FLAG(bool, http_admin_console, true, "If true allows accessing http console on main TCP port");
+ABSL_FLAG(bool, primary_port_http_enabled, true,
+          "If true allows accessing http console on main TCP port");
+
+ABSL_FLAG(
+    std::uint16_t, admin_port, 0,
+    "If set, would enable admin access to console on the assigned port. This supports both HTTP "
+    "and RESP protocols");
+ABSL_FLAG(std::string, admin_bind, "",
+          "If set, the admin consol TCP connection would be bind the given address. "
+          "This supports both HTTP and RESP "
+          "protocols");
 
 using namespace util;
 using namespace std;
@@ -326,8 +336,8 @@ void Connection::HandleRequests() {
 #endif
 
   io::Result<bool> http_res{false};
-  if (absl::GetFlag(FLAGS_http_admin_console))
-    http_res = CheckForHttpProto(peer);
+
+  http_res = CheckForHttpProto(peer);
 
   if (http_res) {
     if (*http_res) {
@@ -404,6 +414,18 @@ uint32 Connection::GetClientId() const {
 }
 
 io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
+  bool enabled = absl::GetFlag(FLAGS_primary_port_http_enabled);
+  if (!enabled) {
+    uint16_t admin_port = absl::GetFlag(FLAGS_admin_port);
+    if (admin_port != 0) {
+      // check if this connection is from the admin port, if so, override primary_port_http_enabled
+      LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
+      enabled = lsb->LocalEndpoint().port() == admin_port;
+    }
+    if (!enabled) {
+      return false;
+    }
+  }
   size_t last_len = 0;
   do {
     auto buf = io_buf_.AppendBuffer();
