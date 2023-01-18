@@ -539,7 +539,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
     auto it = db_slice.FindExt(op_args.db_cntx, key).first;
     db_slice.Del(op_args.db_cntx.db_index, it);
     if (journal_update && op_args.shard->journal()) {
-      op_args.RecordJournal("DEL"sv, ArgSlice{key});
+      RecordJournal(op_args, "DEL"sv, ArgSlice{key});
     }
     return 0;
   }
@@ -612,11 +612,11 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
 
   db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, !new_key);
   if (journal_update && op_args.shard->journal()) {
-    op_args.RecordJournal("DEL"sv, ArgSlice{key});
+    RecordJournal(op_args, "DEL"sv, ArgSlice{key});
     vector<string_view> mapped(vals.size() + 1);
     mapped[0] = key;
     std::copy(vals.begin(), vals.end(), mapped.begin() + 1);
-    op_args.RecordJournal("SADD"sv, mapped);
+    RecordJournal(op_args, "SADD"sv, mapped);
   }
   return res;
 }
@@ -689,7 +689,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, const ArgSlice&
     vector<string_view> mapped(vals.size() + 1);
     mapped[0] = key;
     std::copy(vals.begin(), vals.end(), mapped.begin() + 1);
-    op_args.RecordJournal("SREM"sv, mapped);
+    RecordJournal(op_args, "SREM"sv, mapped);
   }
 
   return removed;
@@ -981,8 +981,8 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
 
     // Replicate as DEL.
-    if (auto journal = op_args.shard->journal(); journal) {
-      op_args.RecordJournal("DEL"sv, ArgSlice{key});
+    if (op_args.shard->journal()) {
+      RecordJournal(op_args, "DEL"sv, ArgSlice{key});
     }
   } else {
     SetType st{it->second.RObjPtr(), it->second.Encoding()};
@@ -1004,11 +1004,11 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     }
 
     // Replicate as SREM with removed keys, because SPOP is not deterministic.
-    if (auto journal = op_args.shard->journal(); journal) {
+    if (op_args.shard->journal()) {
       vector<string_view> mapped(result.size() + 1);
       mapped[0] = key;
       std::copy(result.begin(), result.end(), mapped.begin() + 1);
-      op_args.RecordJournal("SREM"sv, mapped);
+      RecordJournal(op_args, "SREM"sv, mapped);
     }
 
     db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);

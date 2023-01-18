@@ -199,6 +199,14 @@ class Transaction {
 
   std::string DebugId() const;
 
+  // Write a journal entry to a shard journal with the given payload. When logging a non-automatic
+  // journal command, multiple journal entries may be necessary. In this case, call with set
+  // multi_commands to true and  call the FinishLogJournalOnShard function after logging the final
+  // entry.
+  void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload, uint32_t shard_cnt,
+                         bool multi_commands) const;
+  void FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt) const;
+
  private:
   // Holds number of locks for each IntentLock::Mode: shared and exlusive.
   struct LockCnt {

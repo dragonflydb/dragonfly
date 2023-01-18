@@ -577,6 +577,10 @@ void BitOp(CmdArgList args, ConnectionContext* cntx) {
         if (find_res == OpStatus::OK) {
           operation.Commit(op_result);
         }
+
+        if (shard->journal()) {
+          RecordJournal(t->GetOpArgs(shard), "SET", {dest_key, op_result});
+        }
       }
       return OpStatus::OK;
     };
@@ -690,7 +694,7 @@ void BitOpsFamily::Register(CommandRegistry* registry) {
             << CI{"BITCOUNT", CO::READONLY, -2, 1, 1, 1}.SetHandler(&BitCount)
             << CI{"BITFIELD", CO::WRITE, -3, 1, 1, 1}.SetHandler(&BitField)
             << CI{"BITFIELD_RO", CO::READONLY, -5, 1, 1, 1}.SetHandler(&BitFieldRo)
-            << CI{"BITOP", CO::WRITE, -4, 2, -1, 1}.SetHandler(&BitOp)
+            << CI{"BITOP", CO::WRITE | CO::NO_AUTOJOURNAL, -4, 2, -1, 1}.SetHandler(&BitOp)
             << CI{"GETBIT", CO::READONLY | CO::FAST | CO::FAST, 3, 1, 1, 1}.SetHandler(&GetBit)
             << CI{"SETBIT", CO::WRITE, 4, 1, 1, 1}.SetHandler(&SetBit);
 }

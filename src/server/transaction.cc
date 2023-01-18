@@ -1238,15 +1238,24 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
     entry_payload = make_pair(cmd, GetShardArgs(shard->shard_id()));
   }
 
-  LogJournalOnShard(shard, std::move(entry_payload), unique_shard_cnt_);
+  LogJournalOnShard(shard, std::move(entry_payload), unique_shard_cnt_, false);
 }
 
 void Transaction::LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload,
-                                    uint32_t shard_cnt) const {
+                                    uint32_t shard_cnt, bool multi_commands) const {
   auto journal = shard->journal();
   CHECK(journal);
-  auto opcode = multi_ ? journal::Op::MULTI_COMMAND : journal::Op::COMMAND;
+  auto opcode = (multi_ || multi_commands) ? journal::Op::MULTI_COMMAND : journal::Op::COMMAND;
   journal->RecordEntry(txid_, opcode, db_index_, shard_cnt, std::move(payload));
+}
+
+void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt) const {
+  if (multi_) {
+    return;
+  }
+  auto journal = shard->journal();
+  CHECK(journal);
+  journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_cnt, {});
 }
 
 void Transaction::BreakOnShutdown() {

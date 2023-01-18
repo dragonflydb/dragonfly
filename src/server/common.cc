@@ -193,8 +193,13 @@ bool ParseDouble(string_view src, double* value) {
   return true;
 }
 
-void OpArgs::RecordJournal(string_view cmd, ArgSlice args) const {
-  tx->LogJournalOnShard(shard, make_pair(cmd, args), 1);
+void RecordJournal(const OpArgs& op_args, string_view cmd, ArgSlice args, uint32_t shard_cnt,
+                   bool multi_commands) {
+  op_args.tx->LogJournalOnShard(op_args.shard, make_pair(cmd, args), shard_cnt, multi_commands);
+}
+
+void RecordJournalFinish(const OpArgs& op_args, uint32_t shard_cnt) {
+  op_args.tx->FinishLogJournalOnShard(op_args.shard, shard_cnt);
 }
 
 #define ADD(x) (x) += o.x
