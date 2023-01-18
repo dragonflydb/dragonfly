@@ -116,10 +116,6 @@ void Journal::RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt
   journal_slice.AddLogRecord(Entry{txid, opcode, dbid, shard_cnt, std::move(payload)});
 }
 
-TxId Journal::GetLastTxId() {
-  return journal_slice.GetLastTxId();
-}
-
 /*
 void Journal::OpArgs(TxId txid, Op opcode, Span keys) {
   DCHECK(journal_slice.IsOpen());
