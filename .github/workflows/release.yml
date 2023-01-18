@@ -100,7 +100,7 @@ jobs:
         submodules: true
     - name: Configure
       run: |
-          apt update && apt install -y debhelper
+          apt update && apt install -y debhelper moreutils
     - name: Build artifacts
       run: |
           # Work around https://github.com/actions/checkout/issues/766
