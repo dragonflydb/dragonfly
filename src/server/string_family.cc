@@ -364,8 +364,6 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
 
   DCHECK(db_slice.IsDbValid(op_args_.db_cntx.db_index));
 
-  VLOG(0) << "MJ " << manual_journal_ << " on " << key << " to " << value;
-
   VLOG(2) << "Set " << key << "(" << db_slice.shard_id() << ") ";
 
   if (params.IsConditionalSet()) {
@@ -502,8 +500,6 @@ void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view
   } else if (params.flags & SET_KEEP_EXPIRE) {
     cmds.push_back("KEEPTTL");
   }
-
-  VLOG(0) << "Recording";
 
   // Skip NX/XX because SET operation was exectued.
   // Skip GET, because its not important on replica.
@@ -755,7 +751,21 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpGet(t->GetOpArgs(shard), key, false, exp_params);
+    auto op_args = t->GetOpArgs(shard);
+    auto result = OpGet(op_args, key, false, exp_params);
+
+    // Replicate GETEX as PEXPIREAT or PERSIST
+    if (result.ok() && shard->journal()) {
+      if (exp_params.persist) {
+        RecordJournal(op_args, "PERSIST", {key});
+      } else {
+        auto [ignore, abs_time] = exp_params.Calculate(op_args.db_cntx.time_now_ms);
+        auto abs_time_str = absl::StrCat(abs_time);
+        RecordJournal(op_args, "PEXPIREAT", {key, abs_time_str});
+      }
+    }
+
+    return result;
   };
 
   DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
@@ -1173,29 +1183,30 @@ void StringFamily::Shutdown() {
 #define HFUNC(x) SetHandler(&StringFamily::x)
 
 void StringFamily::Register(CommandRegistry* registry) {
-  *registry << CI{"SET", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1, 1}.HFUNC(Set)
-            << CI{"SETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1}.HFUNC(SetEx)
-            << CI{"PSETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1}.HFUNC(PSetEx)
-            << CI{"SETNX", CO::WRITE | CO::DENYOOM, 3, 1, 1, 1}.HFUNC(SetNx)
-            << CI{"APPEND", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Append)
-            << CI{"PREPEND", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Prepend)
-            << CI{"INCR", CO::WRITE | CO::DENYOOM | CO::FAST, 2, 1, 1, 1}.HFUNC(Incr)
-            << CI{"DECR", CO::WRITE | CO::DENYOOM | CO::FAST, 2, 1, 1, 1}.HFUNC(Decr)
-            << CI{"INCRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(IncrBy)
-            << CI{"INCRBYFLOAT", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(IncrByFloat)
-            << CI{"DECRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(DecrBy)
-            << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Get)
-            << CI{"GETDEL", CO::WRITE | CO::DENYOOM | CO::FAST, 2, 1, 1, 1}.HFUNC(GetDel)
-            << CI{"GETEX", CO::WRITE | CO::DENYOOM | CO::FAST, -1, 1, 1, 1}.HFUNC(GetEx)
-            << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(GetSet)
-            << CI{"MGET", CO::READONLY | CO::FAST | CO::REVERSE_MAPPING, -2, 1, -1, 1}.HFUNC(MGet)
-            << CI{"MSET", CO::WRITE | CO::DENYOOM, -3, 1, -1, 2}.HFUNC(MSet)
-            << CI{"MSETNX", CO::WRITE | CO::DENYOOM, -3, 1, -1, 2}.HFUNC(MSetNx)
-            << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(StrLen)
-            << CI{"GETRANGE", CO::READONLY | CO::FAST, 4, 1, 1, 1}.HFUNC(GetRange)
-            << CI{"SUBSTR", CO::READONLY | CO::FAST, 4, 1, 1, 1}.HFUNC(
-                   GetRange)  // Alias for GetRange
-            << CI{"SETRANGE", CO::WRITE | CO::FAST | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(SetRange);
+  *registry
+      << CI{"SET", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1, 1}.HFUNC(Set)
+      << CI{"SETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1}.HFUNC(SetEx)
+      << CI{"PSETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1}.HFUNC(PSetEx)
+      << CI{"SETNX", CO::WRITE | CO::DENYOOM, 3, 1, 1, 1}.HFUNC(SetNx)
+      << CI{"APPEND", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Append)
+      << CI{"PREPEND", CO::WRITE | CO::FAST, 3, 1, 1, 1}.HFUNC(Prepend)
+      << CI{"INCR", CO::WRITE | CO::DENYOOM | CO::FAST, 2, 1, 1, 1}.HFUNC(Incr)
+      << CI{"DECR", CO::WRITE | CO::DENYOOM | CO::FAST, 2, 1, 1, 1}.HFUNC(Decr)
+      << CI{"INCRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(IncrBy)
+      << CI{"INCRBYFLOAT", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(IncrByFloat)
+      << CI{"DECRBY", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(DecrBy)
+      << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(Get)
+      << CI{"GETDEL", CO::WRITE | CO::DENYOOM | CO::FAST, 2, 1, 1, 1}.HFUNC(GetDel)
+      << CI{"GETEX", CO::WRITE | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -1, 1, 1, 1}.HFUNC(
+             GetEx)
+      << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, 1}.HFUNC(GetSet)
+      << CI{"MGET", CO::READONLY | CO::FAST | CO::REVERSE_MAPPING, -2, 1, -1, 1}.HFUNC(MGet)
+      << CI{"MSET", CO::WRITE | CO::DENYOOM, -3, 1, -1, 2}.HFUNC(MSet)
+      << CI{"MSETNX", CO::WRITE | CO::DENYOOM, -3, 1, -1, 2}.HFUNC(MSetNx)
+      << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(StrLen)
+      << CI{"GETRANGE", CO::READONLY | CO::FAST, 4, 1, 1, 1}.HFUNC(GetRange)
+      << CI{"SUBSTR", CO::READONLY | CO::FAST, 4, 1, 1, 1}.HFUNC(GetRange)  // Alias for GetRange
+      << CI{"SETRANGE", CO::WRITE | CO::FAST | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(SetRange);
 }
 
 }  // namespace dfly

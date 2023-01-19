@@ -589,6 +589,8 @@ PrimeIterator DbSlice::AddNew(const Context& cntx, string_view key, PrimeValue o
 }
 
 pair<int64_t, int64_t> DbSlice::ExpireParams::Calculate(int64_t now_ms) const {
+  if (persist)
+    return {0, 0};
   int64_t msec = (unit == TimeUnit::SEC) ? value * 1000 : value;
   int64_t now_msec = now_ms;
   int64_t rel_msec = absolute ? msec - now_msec : msec;
@@ -608,7 +610,7 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, PrimeIterator prime
   if (rel_msec <= 0 && !params.persist) {
     CHECK(Del(cntx.db_index, prime_it));
     return -1;
-  } else if (IsValid(expire_it)) {
+  } else if (IsValid(expire_it) && !params.persist) {
     expire_it->second = FromAbsoluteTime(abs_msec);
     return abs_msec;
   } else {

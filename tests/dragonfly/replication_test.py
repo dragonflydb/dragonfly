@@ -413,12 +413,20 @@ async def test_rewrites(df_local_factory):
         await c_master.execute_command(cmd)
         await check_rsp(rx)
 
+    async def check_expire(key):
+        ttl1 = await c_master.ttl(key)
+        ttl2 = await c_replica.ttl(key)
+        await skip_cmd()
+        assert abs(ttl1-ttl2) <= 1
+
     async with m_replica:
         # CHECK EXPIRE, PEXPIRE, PEXPIRE turn into EXPIREAT
         await c_master.set("k-exp", "v")
         await skip_cmd()
         await check("EXPIRE k-exp 100", r"PEXPIREAT k-exp (.*?)")
-        await check("PEXPIRE k-exp 100", r"PEXPIREAT k-exp (.*?)")
+        await check_expire("k-exp")
+        await check("PEXPIRE k-exp 50000", r"PEXPIREAT k-exp (.*?)")
+        await check_expire("k-exp")
         await check(f"EXPIREAT k-exp {CLOSE_TIMESTAMP}", rf"PEXPIREAT k-exp {CLOSE_TIMESTAMP_MS}")
 
         # Check SPOP turns into SREM or SDEL
@@ -429,13 +437,24 @@ async def test_rewrites(df_local_factory):
 
         # Check SET + {EX/PX/EXAT} + {XX/NX/GET} arguments turns into SET PXAT
         await check(f"SET k v EX 100 NX GET", r"SET k v PXAT (.*?)")
-        await check(f"SET k v PX 10000", r"SET k v PXAT (.*?)")
+        await check_expire("k")
+        await check(f"SET k v PX 50000", r"SET k v PXAT (.*?)")
+        await check_expire("k")
         # Exact expiry is skewed
-        # await check(f"SET k v XX EXAT {CLOSE_TIMESTAMP}", rf"SET k v PXAT {CLOSE_TIMESTAMP_MS}")
+        await check(f"SET k v XX EXAT {CLOSE_TIMESTAMP}", rf"SET k v PXAT (.*?)")
+        await check_expire("k")
 
         # Check SET + KEEPTTL doesn't loose KEEPTTL
         await check(f"SET k v KEEPTTL", r"SET k v KEEPTTL")
 
         # Check SETEX/PSETEX turn into SET PXAT
         await check("SETEX k 100 v", r"SET k v PXAT (.*?)")
-        await check("PSETEX k 100000 v", r"SET k v PXAT (.*?)")
+        await check_expire("k")
+        await check("PSETEX k 500000 v", r"SET k v PXAT (.*?)")
+        await check_expire("k")
+
+        # Check GETEX turns into PEXPIREAT or PERSIST
+        await check("GETEX k PERSIST", r"PERSIST k")
+        await check_expire("k")
+        await check("GETEX k EX 100", r"PEXPIREAT k (.*?)")
+        await check_expire("k")

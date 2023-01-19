@@ -602,12 +602,9 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
 }
 
 OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireParams& params) {
-  VLOG(0) << "OPEXPIRE";
-
   auto& db_slice = op_args.shard->db_slice();
   auto [it, expire_it] = db_slice.FindExt(op_args.db_cntx, key);
   if (!IsValid(it)) {
-    VLOG(0) << "OPEXPIREKEYNOTFOUND";
     return OpStatus::KEY_NOTFOUND;
   }
 
@@ -616,7 +613,6 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
   // If the value was deleted, replicate as DEL.
   // Else, replicate as PEXPIREAT with exact time.
   if (op_args.shard->journal() && res.ok()) {
-    VLOG(0) << "About to replica expire";
     if (res.value() == -1) {
       RecordJournal(op_args, "DEL"sv, ArgSlice{key});
     } else {
@@ -624,7 +620,6 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
       // Note: Don't forget to change this when adding arguments to expire commands.
       RecordJournal(op_args, "PEXPIREAT"sv, ArgSlice{key, time});
     }
-    VLOG(0) << "Replicated EXPIRE";
   }
 
   return res.status();
