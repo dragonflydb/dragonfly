@@ -599,23 +599,29 @@ pair<int64_t, int64_t> DbSlice::ExpireParams::Calculate(int64_t now_ms) const {
 
 OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, PrimeIterator prime_it,
                                         ExpireIterator expire_it, const ExpireParams& params) {
+  constexpr uint64_t kPersistValue = 0;
   DCHECK(params.IsDefined());
   DCHECK(IsValid(prime_it));
+  // If this need to persist, then only set persist value and return
+  if (params.persist) {
+    RemoveExpire(cntx.db_index, prime_it);
+    return kPersistValue;
+  }
 
   auto [rel_msec, abs_msec] = params.Calculate(cntx.time_now_ms);
   if (rel_msec > kMaxExpireDeadlineSec * 1000) {
     return OpStatus::OUT_OF_RANGE;
   }
 
-  if (rel_msec <= 0 && !params.persist) {
+  if (rel_msec <= 0) {  // implicit - don't persist
     CHECK(Del(cntx.db_index, prime_it));
     return -1;
   } else if (IsValid(expire_it) && !params.persist) {
     expire_it->second = FromAbsoluteTime(abs_msec);
     return abs_msec;
   } else {
-    UpdateExpire(cntx.db_index, prime_it, params.persist ? 0 : abs_msec);
-    return params.persist ? 0 : abs_msec;
+    AddExpire(cntx.db_index, prime_it, abs_msec);
+    return abs_msec;
   }
 }
 
