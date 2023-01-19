@@ -403,15 +403,20 @@ async def test_rewrites(df_local_factory):
     async def check_rsp(rx):
         print("waiting on", rx)
         mcmd = (await m_replica.next_command())['command']
-        print("Got:", mcmd, "Regex", rx)
+        print("Got:", mcmd, "Regex:", rx)
         assert re.match(rx, mcmd)
 
     async def skip_cmd():
         await check_rsp(r".*")
 
     async def check(cmd, rx):
+        print("master cmd:", cmd)
         await c_master.execute_command(cmd)
-        await check_rsp(rx)
+        if isinstance(rx,str):
+            await check_rsp(rx)
+        elif isinstance(rx,list):
+            for v in rx:
+                await check_rsp(v)
 
     async def check_expire(key):
         ttl1 = await c_master.ttl(key)
@@ -458,3 +463,19 @@ async def test_rewrites(df_local_factory):
         await check_expire("k")
         await check("GETEX k EX 100", r"PEXPIREAT k (.*?)")
         await check_expire("k")
+
+        # Check SDIFFSTORE turns into DEL and SADD
+        await c_master.sadd("set1", "v1", "v2", "v3")
+        await c_master.sadd("set2", "v1", "v2")
+        await skip_cmd()
+        await skip_cmd()
+        await check("SDIFFSTORE k set1 set2", [r"DEL k", r"SADD k v3"])
+
+        # Check SINTERSTORE turns into DEL and SADD
+        await check("SINTERSTORE k set1 set2", [r"DEL k", r"SADD k (.*?)"])
+
+        # Check SMOVE turns into SREM and SADD
+        await check("SMOVE set1 set2 v3", [r"SREM set1 v3", r"SADD set2 v3"])
+
+        # Check SUNIONSTORE turns into DEL and SADD
+        await check("SUNIONSTORE k set1 set2", [r"DEL k", r"SADD k (.*?)"])

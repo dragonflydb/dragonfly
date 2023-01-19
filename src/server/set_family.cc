@@ -612,7 +612,9 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
 
   db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, !new_key);
   if (journal_update && op_args.shard->journal()) {
-    RecordJournal(op_args, "DEL"sv, ArgSlice{key});
+    if (overwrite) {
+      RecordJournal(op_args, "DEL"sv, ArgSlice{key});
+    }
     vector<string_view> mapped(vals.size() + 1);
     mapped[0] = key;
     std::copy(vals.begin(), vals.end(), mapped.begin() + 1);
