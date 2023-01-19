@@ -143,6 +143,9 @@ In addition, it has Dragonfly specific arguments options:
  * `hz` - key expiry evaluation frequency. Default is 100. Lower frequency uses less cpu when
    idle at the expense of slower eviction rate.
  * `save_schedule` - glob spec for the UTC time to save a snapshot which matches HH:MM (24h time). default: ""
+ * `primary_port_http_enabled` - If true allows accessing http console on main TCP port, default: true
+ * `admin_port` - If set, would enable admin access to console on the assigned port. This supports both HTTP and RESP protocols. default disabled
+ * `admin_bind` - If set, the admin consol TCP connection would be bind the given address. This supports both HTTP and RESP protocols. default any
 
 ### Example Start Script, with popular options:
 
