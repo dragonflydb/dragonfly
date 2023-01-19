@@ -1059,9 +1059,10 @@ void GenericFamily::Restore(CmdArgList args, ConnectionContext* cntx) {
 
 void GenericFamily::Move(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
+  string_view target_db_sv = ArgS(args, 2);
   int64_t target_db;
 
-  if (!absl::SimpleAtoi(ArgS(args, 2), &target_db)) {
+  if (!absl::SimpleAtoi(target_db_sv, &target_db)) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
 
@@ -1078,7 +1079,13 @@ void GenericFamily::Move(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     // MOVE runs as a global transaction and is therefore scheduled on every shard.
     if (target_shard == shard->shard_id()) {
-      res = OpMove(t->GetOpArgs(shard), key, target_db);
+      auto op_args = t->GetOpArgs(shard);
+      res = OpMove(op_args, key, target_db);
+      // MOVE runs as global command but we want to write the
+      // command to only one journal.
+      if (op_args.shard->journal()) {
+        RecordJournal(op_args, "MOVE"sv, ArgSlice{key, target_db_sv});
+      }
     }
     return OpStatus::OK;
   };
@@ -1455,7 +1462,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
             << CI{"UNLINK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Del)
             << CI{"STICK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Stick)
             << CI{"SORT", CO::READONLY, -2, 1, 1, 1}.HFUNC(Sort)
-            << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS, 3, 1, 1, 1}.HFUNC(Move)
+            << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, 1}.HFUNC(Move)
             << CI{"RESTORE", CO::WRITE, -4, 1, 1, 1}.HFUNC(Restore);
 }
 
