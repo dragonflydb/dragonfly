@@ -417,14 +417,12 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
   bool enabled = absl::GetFlag(FLAGS_primary_port_http_enabled);
   if (!enabled) {
     uint16_t admin_port = absl::GetFlag(FLAGS_admin_port);
-    if (admin_port != 0) {
-      // check if this connection is from the admin port, if so, override primary_port_http_enabled
-      LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
-      enabled = lsb->LocalEndpoint().port() == admin_port;
-    }
-    if (!enabled) {
-      return false;
-    }
+    // check if this connection is from the admin port, if so, override primary_port_http_enabled
+    LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
+    enabled = lsb->LocalEndpoint().port() == admin_port;
+  }
+  if (!enabled) {
+    return false;
   }
   size_t last_len = 0;
   do {
