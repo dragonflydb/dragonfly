@@ -19,9 +19,13 @@ namespace dfly {
 
 namespace {
 
+constexpr uint64_t kValTtlBit = 1ULL << 63;
+constexpr uint64_t kValMask = ~kValTtlBit;
+
 inline sds GetValue(sds key) {
   char* valptr = key + sdslen(key) + 1;
-  return (char*)absl::little_endian::Load64(valptr);
+  uint64_t val = absl::little_endian::Load64(valptr);
+  return (sds)(kValMask & val);
 }
 
 }  // namespace
@@ -31,29 +35,36 @@ StringMap::~StringMap() {
 }
 
 bool StringMap::AddOrUpdate(string_view field, string_view value, uint32_t ttl_sec) {
-  CHECK_EQ(ttl_sec, UINT32_MAX);  // TBD
-
   // 8 additional bytes for a pointer to value.
-  sds newkey = AllocSdsWithSpace(field.size(), 8);
+  sds newkey;
+  size_t meta_offset = field.size() + 1;
+  sds sdsval = sdsnewlen(value.data(), value.size());
+  uint64_t sdsval_tag = uint64_t(sdsval);
+
+  if (ttl_sec == UINT32_MAX) {
+    // The layout is:
+    // key, '\0', 8-byte pointer to value
+    newkey = AllocSdsWithSpace(field.size(), 8);
+  } else {
+    // The layout is:
+    // key, '\0', 8-byte pointer to value, 4-byte absolute time.
+    // the value pointer it tagged.
+    newkey = AllocSdsWithSpace(field.size(), 8 + 4);
+    uint32_t at = time_now() + ttl_sec;
+    absl::little_endian::Store32(newkey + meta_offset + 8, at);  // skip the value pointer.
+    sdsval_tag |= kValTtlBit;
+  }
+
   if (!field.empty()) {
     memcpy(newkey, field.data(), field.size());
   }
 
-  sds val = sdsnewlen(value.data(), value.size());
-  absl::little_endian::Store64(newkey + field.size() + 1, uint64_t(val));
+  absl::little_endian::Store64(newkey + meta_offset, sdsval_tag);
 
-  bool has_ttl = false;
-  sds prev_entry = (sds)AddOrFind(newkey, has_ttl);
+  // Replace the whole entry.
+  sds prev_entry = (sds)AddOrReplaceObj(newkey, sdsval_tag & kValTtlBit);
   if (prev_entry) {
-    sdsfree(newkey);
-    char* valptr = prev_entry + sdslen(prev_entry) + 1;
-    sds prev_val = (sds)absl::little_endian::Load64(valptr);
-    DecreaseMallocUsed(zmalloc_usable_size(sdsAllocPtr(prev_val)));
-    sdsfree(prev_val);
-
-    absl::little_endian::Store64(valptr, uint64_t(val));
-    IncreaseMallocUsed(zmalloc_usable_size(sdsAllocPtr(val)));
-
+    ObjDelete(prev_entry, false);
     return false;
   }
 
@@ -61,27 +72,12 @@ bool StringMap::AddOrUpdate(string_view field, string_view value, uint32_t ttl_s
 }
 
 bool StringMap::AddOrSkip(std::string_view field, std::string_view value, uint32_t ttl_sec) {
-  CHECK_EQ(ttl_sec, UINT32_MAX);  // TBD
-
   void* obj = FindInternal(&field, 1);  // 1 - string_view
 
   if (obj)
     return false;
 
-  // 8 additional bytes for a pointer to value.
-  sds newkey = AllocSdsWithSpace(field.size(), 8);
-  if (!field.empty()) {
-    memcpy(newkey, field.data(), field.size());
-  }
-
-  sds val = sdsnewlen(value.data(), value.size());
-  absl::little_endian::Store64(newkey + field.size() + 1, uint64_t(val));
-
-  bool has_ttl = false;
-  sds prev_entry = (sds)AddOrFind(newkey, has_ttl);
-  DCHECK(!prev_entry);
-
-  return true;
+  return AddOrUpdate(field, value, ttl_sec);
 }
 
 bool StringMap::Erase(string_view key) {
@@ -146,8 +142,17 @@ size_t StringMap::ObjectAllocSize(const void* obj) const {
 }
 
 uint32_t StringMap::ObjExpireTime(const void* obj) const {
-  LOG(FATAL) << "TBD";
-  return 0;
+  sds str = (sds)obj;
+  const char* valptr = str + sdslen(str) + 1;
+
+  uint64_t val = absl::little_endian::Load64(valptr);
+  DCHECK(val & kValTtlBit);
+  if (val & kValTtlBit) {
+    return absl::little_endian::Load32(valptr + 8);
+  }
+
+  // Should not reach.
+  return UINT32_MAX;
 }
 
 void StringMap::ObjDelete(void* obj, bool has_ttl) const {

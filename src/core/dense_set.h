@@ -106,8 +106,11 @@ class DenseSet {
       return (uptr() & kDisplaceDirectionBit) == kDisplaceDirectionBit ? 1 : -1;
     }
 
-    void SetTtl() {
-      ptr_ = (void*)(uptr() | kTtlBit);
+    void SetTtl(bool b) {
+      if (b)
+        ptr_ = (void*)(uptr() | kTtlBit);
+      else
+        ptr_ = (void*)(uptr() & (~kTtlBit));
     }
 
     void Reset() {
@@ -245,10 +248,6 @@ class DenseSet {
     return false;
   }
 
-  // Returns previous object if the object with such key already exists,
-  // Returns null if obj was added.
-  void* AddOrFind(void* obj, bool has_ttl);
-
   void* FindInternal(const void* obj, uint32_t cookie) const;
   void* PopInternal();
 
@@ -264,6 +263,17 @@ class DenseSet {
   void DecreaseMallocUsed(size_t delta) {
     obj_malloc_used_ -= delta;
   }
+
+  // Returns previous if the equivalent object already exists,
+  // Returns nullptr if obj was added.
+  void* AddOrFindObj(void* obj, bool has_ttl) {
+    DensePtr* ptr = AddOrFindDense(obj, has_ttl);
+    return ptr ? ptr->GetObject() : nullptr;
+  }
+
+  // Returns the previous object if it has been replaced.
+  // nullptr, if obj was added.
+  void* AddOrReplaceObj(void* obj, bool has_ttl);
 
  private:
   DenseSet(const DenseSet&) = delete;
@@ -296,6 +306,10 @@ class DenseSet {
 
   void* PopDataFront(ChainVectorIterator);
   DensePtr PopPtrFront(ChainVectorIterator);
+
+  // Returns DensePtr if the object with such key already exists,
+  // Returns null if obj was added.
+  DensePtr* AddOrFindDense(void* obj, bool has_ttl);
 
   // ============ Pseudo Linked List in DenseSet end ==================
 
