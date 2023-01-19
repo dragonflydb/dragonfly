@@ -124,6 +124,11 @@ class Transaction {
   void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload,
                          uint32_t shard_cnt) const;
 
+  // In some cases for non auto-journaling commands we want to enable the auto journal flow.
+  void SetAutoJournal() {
+    no_auto_enable_auto_journal_ = true;
+  }
+
   // Unlock key locks of a multi transaction.
   void UnlockMulti();
 
@@ -349,6 +354,7 @@ class Transaction {
 
   // Stores the full undivided command.
   CmdArgList cmd_with_full_args_;
+  bool no_auto_enable_auto_journal_ = false;
 
   // Reverse argument mapping for ReverseArgIndex to convert from shard index to original index.
   std::vector<uint32_t> reverse_index_;
