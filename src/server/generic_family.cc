@@ -421,7 +421,7 @@ OpStatus Renamer::UpdateDest(Transaction* t, EngineShard* es) {
       }
       if (dest_it->second.HasExpire()) {
         auto time = absl::StrCat(src_res_.expire_ts);
-        RecordJournal(op_args, "PEXPIREAT"sv, ArgSlice{time}, 2, true);
+        RecordJournal(op_args, "PEXPIREAT"sv, ArgSlice{dest_key, time}, 2, true);
       }
       RecordJournalFinish(op_args, 2);
     }
@@ -604,8 +604,9 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
 OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireParams& params) {
   auto& db_slice = op_args.shard->db_slice();
   auto [it, expire_it] = db_slice.FindExt(op_args.db_cntx, key);
-  if (!IsValid(it))
+  if (!IsValid(it)) {
     return OpStatus::KEY_NOTFOUND;
+  }
 
   auto res = db_slice.UpdateExpire(op_args.db_cntx, it, expire_it, params);
 
@@ -617,7 +618,7 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
     } else {
       auto time = absl::StrCat(res.value());
       // Note: Don't forget to change this when adding arguments to expire commands.
-      RecordJournal(op_args, "PEXPIREAT"sv, ArgSlice{time});
+      RecordJournal(op_args, "PEXPIREAT"sv, ArgSlice{key, time});
     }
   }
 

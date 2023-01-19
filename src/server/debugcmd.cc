@@ -65,7 +65,7 @@ void DoPopulateBatch(std::string_view prefix, size_t val_size, bool random_value
                      const SetCmd::SetParams& params, const PopulateBatch& batch) {
   DbContext db_cntx{batch.dbid, 0};
   OpArgs op_args(EngineShard::tlocal(), 0, db_cntx);
-  SetCmd sg(op_args);
+  SetCmd sg(op_args, false);
 
   absl::InsecureBitGen gen;
   for (unsigned i = 0; i < batch.sz; ++i) {
