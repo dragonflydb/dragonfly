@@ -126,7 +126,7 @@ class Transaction {
 
   // In some cases for non auto-journaling commands we want to enable the auto journal flow.
   void RenableAutoJournal() {
-    renabled_auto_journal_ = true;
+    renabled_auto_journal_.store(true, std::memory_order_relaxed);
   }
 
   // Unlock key locks of a multi transaction.
@@ -354,7 +354,7 @@ class Transaction {
 
   // Stores the full undivided command.
   CmdArgList cmd_with_full_args_;
-  bool renabled_auto_journal_ =
+  std::atomic<bool> renabled_auto_journal_ =
       false;  // True if NO_AUTOJOURNAL command asked to enable auto journal
 
   // Reverse argument mapping for ReverseArgIndex to convert from shard index to original index.

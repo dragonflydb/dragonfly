@@ -1209,8 +1209,8 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
     return;
 
   // Ignore non-write commands or ones with disabled autojournal.
-  if ((cid_->opt_mask() & CO::WRITE) == 0 ||
-      ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) > 0 && !renabled_auto_journal_))
+  if ((cid_->opt_mask() & CO::WRITE) == 0 || ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) > 0 &&
+                                              !renabled_auto_journal_.load(memory_order_relaxed)))
     return;
 
   auto journal = shard->journal();
