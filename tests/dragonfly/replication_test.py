@@ -412,11 +412,11 @@ async def test_rewrites(df_local_factory):
     async def check(cmd, rx):
         print("master cmd:", cmd)
         await c_master.execute_command(cmd)
-        if isinstance(rx,str):
+        if isinstance(rx, str):
             await check_rsp(rx)
-        elif isinstance(rx,list):
-            for v in rx:
-                await check_rsp(v)
+        elif isinstance(rx, list):
+            for s_rx in rx:
+                await check_rsp(s_rx)
 
     async def check_expire(key):
         ttl1 = await c_master.ttl(key)
