@@ -797,7 +797,7 @@ void MoveGeneric(ConnectionContext* cntx, string_view src, string_view dest, Lis
     auto cb = [&](Transaction* t, EngineShard* shard) {
       auto ec = OpMoveSingleShard(t->GetOpArgs(shard), src, dest, src_dir, dest_dir);
       // On single shard we can use the auto journal flow.
-      t->SetAutoJournal();
+      t->RenableAutoJournal();
       return ec;
     };
 
@@ -883,7 +883,7 @@ OpResult<string> BPopPusher::RunSingle(Transaction* t, time_point tp) {
   bool is_multi = t->IsMulti();
   auto cb_move = [&](Transaction* t, EngineShard* shard) {
     op_res = OpMoveSingleShard(t->GetOpArgs(shard), pop_key_, push_key_, popdir_, pushdir_);
-    t->SetAutoJournal();  // With single shard run auto journal flow.
+    t->RenableAutoJournal();  // With single shard run auto journal flow.
     return OpStatus::OK;
   };
   t->Execute(cb_move, false);
