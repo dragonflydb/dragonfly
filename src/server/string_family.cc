@@ -403,8 +403,8 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
   db_slice.PostUpdate(op_args_.db_cntx.db_index, it, key, false);
 
   if (params.expire_after_ms) {
-    db_slice.UpdateExpire(op_args_.db_cntx.db_index, it,
-                          params.expire_after_ms + op_args_.db_cntx.time_now_ms);
+    db_slice.AddExpire(op_args_.db_cntx.db_index, it,
+                       params.expire_after_ms + op_args_.db_cntx.time_now_ms);
   }
 
   if (params.memcache_flags)
@@ -447,7 +447,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
   if (!(params.flags & SET_KEEP_EXPIRE)) {
     if (at_ms) {  // Command has an expiry paramater.
       if (IsValid(e_it)) {
-        // Updated exisitng expiry information.
+        // Updated existing expiry information.
         e_it->second = db_slice.FromAbsoluteTime(at_ms);
       } else {
         // Add new expiry information.
