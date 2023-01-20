@@ -11,7 +11,10 @@ extern "C" {
 #include <absl/container/inlined_vector.h>
 #include <double-conversion/string-to-double.h>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
+#include <tuple>
 
 #include "base/logging.h"
 #include "redis/util.h"
@@ -354,6 +357,92 @@ OpResult<void> SetGeneric(ConnectionContext* cntx, const SetCmd::SetParams& spar
     return sg.Set(sparams, key, value);
   };
   return cntx->transaction->ScheduleSingleHop(std::move(cb));
+}
+
+OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, string_view key, int64_t max_burst,
+                                       int64_t count, int64_t period_s, int64_t quantity) {
+  using namespace chrono_literals;
+
+  auto& db_slice = op_args.shard->db_slice();
+
+  const int64_t limit = max_burst + 1;
+  const int64_t emission_interval_ms = period_s * 1000 / count;
+  const int64_t delay_variation_tolerance_ms = emission_interval_ms * limit;
+
+  if (emission_interval_ms == 0) {
+    return OpStatus::OUT_OF_RANGE;
+  }
+
+  int64_t remaining = 0;
+  int64_t reset_after_ms = -1000;
+  int64_t retry_after_ms = -1000;
+
+  const int64_t increment_ms = emission_interval_ms * quantity;
+
+  auto [it, expire_it] = db_slice.FindExt(op_args.db_cntx, key);
+  const int64_t now_ms = op_args.db_cntx.time_now_ms;
+
+  int64_t tat_ms = now_ms;
+  if (IsValid(it)) {
+    if (it->second.ObjType() != OBJ_STRING) {
+      return OpStatus::WRONG_TYPE;
+    }
+
+    auto opt_prev = it->second.TryGetInt();
+    if (!opt_prev) {
+      return OpStatus::INVALID_VALUE;
+    }
+    tat_ms = *opt_prev;
+  }
+  const int64_t new_tat_ms = max(tat_ms, now_ms) + increment_ms;
+
+  const int64_t allow_at_ms = new_tat_ms - delay_variation_tolerance_ms;
+  const int64_t diff_ms = now_ms - allow_at_ms;
+
+  const bool limited = diff_ms < 0;
+  int64_t ttl_ms;
+  if (limited) {
+    if (increment_ms <= delay_variation_tolerance_ms) {
+      retry_after_ms = -diff_ms;
+    }
+    ttl_ms = tat_ms - now_ms;
+  } else {
+    ttl_ms = new_tat_ms - now_ms;
+
+    if (IsValid(it)) {
+      db_slice.PreUpdate(op_args.db_cntx.db_index, it);
+      it->second.SetInt(new_tat_ms);
+      db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
+    } else {
+      CompactObj cobj;
+      cobj.SetInt(new_tat_ms);
+
+      // AddNew calls PostUpdate inside.
+      try {
+        it = db_slice.AddNew(op_args.db_cntx, key, std::move(cobj), 0);
+      } catch (bad_alloc&) {
+        return OpStatus::OUT_OF_MEMORY;
+      }
+    }
+  }
+
+  const int64_t next_ms = delay_variation_tolerance_ms - ttl_ms;
+  if (next_ms > -emission_interval_ms) {
+    remaining = next_ms / emission_interval_ms;
+  }
+  reset_after_ms = ttl_ms;
+
+  int64_t retry_after_s = retry_after_ms / 1000;
+  if (retry_after_ms > 0) {
+    retry_after_s += 1;
+  }
+
+  int64_t reset_after_s = reset_after_ms / 1000;
+  if (reset_after_ms > 0) {
+    reset_after_s += 1;
+  }
+
+  return array<int64_t, 5>{limited ? 1 : 0, limit, remaining, retry_after_s, reset_after_s};
 }
 
 }  // namespace
@@ -1170,6 +1259,63 @@ auto StringFamily::OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction
   return response;
 }
 
+void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 1);
+
+  int64_t max_burst;
+  string_view max_burst_str = ArgS(args, 2);
+  if (!absl::SimpleAtoi(max_burst_str, &max_burst)) {
+    return (*cntx)->SendError(kInvalidIntErr);
+  }
+
+  int64_t count;
+  string_view count_str = ArgS(args, 3);
+  if (!absl::SimpleAtoi(count_str, &count)) {
+    return (*cntx)->SendError(kInvalidIntErr);
+  }
+
+  int64_t period;
+  string_view period_str = ArgS(args, 4);
+  if (!absl::SimpleAtoi(period_str, &period)) {
+    return (*cntx)->SendError(kInvalidIntErr);
+  }
+
+  int64_t quantity = 1;
+  if (args.size() > 5) {
+    string_view quantity_str = ArgS(args, 5);
+
+    if (!absl::SimpleAtoi(quantity_str, &quantity)) {
+      return (*cntx)->SendError(kInvalidIntErr);
+    }
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<array<int64_t, 5>> {
+    return OpThrottle(t->GetOpArgs(shard), key, max_burst, count, period, quantity);
+  };
+
+  Transaction* trans = cntx->transaction;
+  OpResult<array<int64_t, 5>> result = trans->ScheduleSingleHopT(std::move(cb));
+
+  switch (result.status()) {
+    case OpStatus::WRONG_TYPE:
+      (*cntx)->SendError(result.status());
+      break;
+    case OpStatus::INVALID_VALUE:
+      (*cntx)->SendError(kInvalidIntErr);
+      break;
+    case OpStatus::OUT_OF_RANGE:
+      (*cntx)->SendError(kIncrOverflow);
+      break;
+    default:
+      (*cntx)->StartArray(result->size());
+      const auto& array = result.value();
+      for (const auto& v : array) {
+        (*cntx)->SendLong(v);
+      }
+      break;
+  }
+}
+
 void StringFamily::Init(util::ProactorPool* pp) {
   set_qps.Init(pp);
   get_qps.Init(pp);
@@ -1206,7 +1352,8 @@ void StringFamily::Register(CommandRegistry* registry) {
       << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(StrLen)
       << CI{"GETRANGE", CO::READONLY | CO::FAST, 4, 1, 1, 1}.HFUNC(GetRange)
       << CI{"SUBSTR", CO::READONLY | CO::FAST, 4, 1, 1, 1}.HFUNC(GetRange)  // Alias for GetRange
-      << CI{"SETRANGE", CO::WRITE | CO::FAST | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(SetRange);
+      << CI{"SETRANGE", CO::WRITE | CO::FAST | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(SetRange)
+      << CI{"CL.THROTTLE", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, 1}.HFUNC(ClThrottle);
 }
 
 }  // namespace dfly
