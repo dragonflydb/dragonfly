@@ -1362,6 +1362,12 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     if (etl.is_master) {
       append("role", "master");
       append("connected_slaves", m.conn_stats.num_replicas);
+      auto replicas = dfly_cmd_->GetReplicasRoleInfo();
+      for (auto i = 0; i < replicas.size(); i++) {
+        auto& r = replicas[i];
+        // e.g. slave0:ip=172.19.0.3,port=6379
+        append(StrCat("slave", i), StrCat("ip=", r.address, ",port=", r.listening_port));
+      }
       append("master_replid", master_id_);
     } else {
       append("role", "replica");
@@ -1549,7 +1555,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
         cntx->owner()->SetName(absl::StrCat("repl_ctrl_", sid));
 
         string sync_id = absl::StrCat("SYNC", sid);
-        cntx->conn_state.repl_session_id = sid;
+        cntx->conn_state.replicaiton_info.repl_session_id = sid;
 
         if (!cntx->replica_conn) {
           ServerState::tl_connection_stats()->num_replicas += 1;
@@ -1563,6 +1569,12 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
         (*cntx)->SendLong(shard_set->pool()->size());
         return;
       }
+    } else if (cmd == "LISTENING-PORT") {
+      uint32_t replica_listening_port;
+      if (!absl::SimpleAtoi(arg, &replica_listening_port)) {
+        (*cntx)->SendError(kInvalidIntErr);
+      }
+      cntx->conn_state.replicaiton_info.repl_listening_port = replica_listening_port;
     } else {
       VLOG(1) << cmd << " " << arg;
     }
