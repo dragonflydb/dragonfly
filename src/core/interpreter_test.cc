@@ -321,4 +321,13 @@ TEST_F(InterpreterTest, Modules) {
   EXPECT_EQ("str(\x1\x2test)", ser_.res);
 }
 
+// Since Lua 5.2 global functions were moved to separate namespaces.
+// We need to register them globally to maintain 5.1 compatibility.
+TEST_F(InterpreterTest, OutdatedGlobals) {
+  // table.unpack is used in Laravel:
+  // https://github.com/laravel/framework/blob/6a5c2ec92200cc485983f26b284f7e78470b885f/src/Illuminate/Queue/LuaScripts.php#L118
+  EXPECT_TRUE(Execute("return unpack{1,2,3}"));
+  EXPECT_EQ("i(1)", ser_.res);
+}
+
 }  // namespace dfly

@@ -86,6 +86,10 @@ TEST_F(ZSetFamilyTest, ZRangeRank) {
   ASSERT_THAT(resp, ArrLen(2));
   ASSERT_THAT(resp.GetVec(), ElementsAre("a", "1.1"));
 
+  resp = Run({"zrangebyscore", "x", "-inf", "+inf", "LIMIT", "0", "-1"});
+  ASSERT_THAT(resp, ArrLen(2));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("a", "b"));
+
   resp = Run({"zrevrangebyscore", "x", "+inf", "-inf", "limit", "0", "5"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   ASSERT_THAT(resp.GetVec(), ElementsAre("b", "a"));
@@ -189,6 +193,10 @@ TEST_F(ZSetFamilyTest, ZRange) {
 
   resp = Run({"zrange", "key", "-", "d", "BYLEX", "BYSCORE"});
   EXPECT_THAT(resp, ErrArg("BYSCORE and BYLEX options are not compatible"));
+
+  resp = Run({"zrange", "key", "0", "-1", "LIMIT", "3", "-1"});
+  ASSERT_THAT(resp, ArrLen(2));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("c", "e"));
 
   Run({"zremrangebyscore", "key", "0", "4"});
 
