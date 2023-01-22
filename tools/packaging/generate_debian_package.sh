@@ -12,10 +12,22 @@
 # Please note that is must run from main branch.
 # Best running this from inside a container.
 # The result are writing to the location from which you would execute the script (not where the script is located).
-# Version number is the tag number. Currently this would only generate a package for amd64.
+# Version number is the tag number.
+# Params:
+#	* optional location to the binary to place at the package
 
 
 set -eu
+
+ARCH_VAL=amd64
+if [ "$(uname -m)" = "x86_64" ]; then
+	ARCH_VAL="amd64"
+elif [ "$(uname -m)" = "aarch64" ]; then
+	ARCH_VAL="aarch64"
+else
+	echo "Unknown architecture: $(uname -m). Only x86_64 and aarch64 are supported."
+        exit 1
+fi
 
 SCRIPT_ABS_PATH=$(realpath $0)
 SCRIPT_PATH=$(dirname ${SCRIPT_ABS_PATH})
@@ -26,7 +38,6 @@ ROOT_ABS_PATH=$(cd ${SCRIPT_PATH}; while [ ! -d ${BUILD_DIR} ]; do cd ..; done ;
 REPO_PATH=${ROOT_ABS_PATH}
 TEMP_WORK_DIR=$(mktemp -d)
 BASE_DIR=${TEMP_WORK_DIR}/packges
-ARCH_VAL=amd64
 BASE_PATH=${BASE_DIR}/dragonfly_${ARCH_VAL}
 BINARY_TARGET_DIR=${BASE_PATH}/debian/bin
 
@@ -48,7 +59,7 @@ fi
 
 mkdir -p ${BASE_PATH} || cleanup "failed to create working directory for building the package"
 
-cp -r ${PACKAGES_PATH} ${BASE_PATH} || cleanup "failed to copy required for the package build from ${PACKAGES_PATH}"
+cp -r ${PACKAGES_PATH} ${BASE_PATH} || cleanup "failed to copy required files for the package build from ${PACKAGES_PATH}"
 
 cp ${SCRIPT_PATH}/${CHANGELOG_SCRIPT} ${BASE_PATH} || cleanup "failed to copy changelog script to ${BASE_PATH}"
 

@@ -77,6 +77,8 @@ jobs:
               done
             fi
             ./tools/release.sh
+            ./tools/packaging/generate_debian_package.sh build-opt/dragonfly-aarch64
+            mv dragonfly_*.deb build-opt/
     - name: Show the artifact
       # Items placed in /src/build-opt in the container will be in
       # ${PWD}/build-opt on the host.
@@ -87,7 +89,7 @@ jobs:
       uses: actions/upload-artifact@v3
       with:
         name: dragonfly-aarch64
-        path: build-opt/dragonfly-*tar.gz
+        path: build-opt/dragonfly-*tar.gz, build-opt/dragonfly_*.deb
 
   build-native:
     runs-on: ubuntu-latest
