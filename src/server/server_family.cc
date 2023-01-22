@@ -1573,6 +1573,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
       uint32_t replica_listening_port;
       if (!absl::SimpleAtoi(arg, &replica_listening_port)) {
         (*cntx)->SendError(kInvalidIntErr);
+        return;
       }
       cntx->conn_state.replicaiton_info.repl_listening_port = replica_listening_port;
     } else {
