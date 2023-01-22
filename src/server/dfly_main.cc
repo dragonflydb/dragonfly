@@ -156,13 +156,19 @@ std::optional<std::string> GetRemoteVersion(ProactorBase* proactor, SSL_CTX* ssl
     static bool is_logged{false};
     if (!is_logged) {
       is_logged = true;
+
+#if (OPENSSL_VERSION_NUMBER >= 0x30000000L)
+      const char* func_err = "ssl_internal_error";
+#else
+      const char* func_err = ERR_func_error_string(ec.value());
+#endif
+
       // Unfortunately AsioStreamAdapter looses the original error category
       // because std::error_code can not be converted into boost::system::error_code.
       // It's fixed in later versions of Boost, but for now we assume it's from TLS.
       LOG(WARNING) << "Remote version - HTTP GET error [" << host << ":" << service << resource
                    << "], error: " << ec.value();
-      LOG(WARNING) << "ssl error: " << ERR_func_error_string(ec.value()) << "/"
-                   << ERR_reason_error_string(ec.value());
+      LOG(WARNING) << "ssl error: " << func_err << "/" << ERR_reason_error_string(ec.value());
     }
   }
 

@@ -264,54 +264,73 @@ TEST_F(ZSetFamilyTest, ZScan) {
   EXPECT_EQ(100 * 2, scan_len);
 }
 
-TEST_F(ZSetFamilyTest, ZUnion) {
+TEST_F(ZSetFamilyTest, ZUnionError) {
   RespExpr resp;
 
   resp = Run({"zunion", "0"});
   EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
 
+  resp = Run({"zunion", "3", "z1", "z2", "z3", "weights", "1", "1", "k"});
+  EXPECT_THAT(resp, ErrArg("weight value is not a float"));
+
+  resp = Run({"zunion", "3", "z1", "z2", "z3", "weights", "1", "1", "2", "aggregate", "something"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"zunion", "3", "z1", "z2", "z3", "weights", "1", "2", "aggregate", "something"});
+  EXPECT_THAT(resp, ErrArg("weight value is not a float"));
+
+  resp = Run({"zunion", "3", "z1", "z2", "z3", "aggregate", "sum", "somescore"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"zunion", "3", "z1", "z2", "z3", "withscores", "someargs"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"zunion", "1"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  resp = Run({"zunion", "2", "z1"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"zunion", "2", "z1", "z2", "z3"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"zunion", "2", "z1", "z2", "weights", "1", "2", "3"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+}
+
+TEST_F(ZSetFamilyTest, ZUnion) {
+  RespExpr resp;
+
   EXPECT_EQ(2, CheckedInt({"zadd", "z1", "1", "a", "3", "b"}));
   EXPECT_EQ(2, CheckedInt({"zadd", "z2", "3", "c", "2", "b"}));
   EXPECT_EQ(2, CheckedInt({"zadd", "z3", "1", "c", "1", "d"}));
 
-  resp = Run({"zunion", "z1", "z2", "z3", "weights", "1", "1", "k"});
-  EXPECT_THAT(resp, ErrArg("weight value is not a float"));
-
-  resp = Run({"zunion", "z1", "z2", "z3", "weights", "1", "1", "2", "aggregate", "something"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
-
-  resp = Run({"zunion", "z1", "z2", "z3", "weights", "1", "2", "aggregate", "something"});
-  EXPECT_THAT(resp, ErrArg("weight value is not a float"));
-
-  resp = Run({"zunion", "z1", "z2", "z3", "aggregate", "sum", "somescore"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
-
-  resp = Run({"zunion", "z1", "z2", "z3", "withscores", "someargs"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
-
-  resp = Run({"zunion", "z1", "z2", "z3"});
+  resp = Run({"zunion", "3", "z1", "z2", "z3"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "d", "c", "b"));
 
-  resp = Run({"zunion", "z1", "z2", "z3", "weights", "1", "1", "2"});
+  resp = Run({"zunion", "3", "z1", "z2", "z3", "weights", "1", "1", "2"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "d", "b", "c"));
 
-  resp = Run({"zunion", "z1", "z2", "z3", "weights", "1", "1", "2", "withscores"});
+  resp = Run({"zunion", "3", "z1", "z2", "z3", "weights", "1", "1", "2", "withscores"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "d", "2", "b", "5", "c", "5"));
 
-  resp =
-      Run({"zunion", "z1", "z2", "z3", "weights", "1", "1", "2", "aggregate", "min", "withscores"});
+  resp = Run({"zunion", "3", "z1", "z2", "z3", "weights", "1", "1", "2", "aggregate", "min",
+              "withscores"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "b", "2", "c", "2", "d", "2"));
 
-  resp =
-      Run({"zunion", "z1", "z2", "z3", "withscores", "weights", "1", "1", "2", "aggregate", "min"});
+  resp = Run({"zunion", "3", "z1", "z2", "z3", "withscores", "weights", "1", "1", "2", "aggregate",
+              "min"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "b", "2", "c", "2", "d", "2"));
 
-  resp = Run({"zunion", "none1", "none2", "z3", "withscores", "weights", "1", "1", "2"});
+  resp = Run({"zunion", "3", "none1", "none2", "z3", "withscores", "weights", "1", "1", "2"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("c", "2", "d", "2"));
 
-  resp =
-      Run({"zunion", "z1", "z2", "z3", "weights", "1", "1", "2", "aggregate", "max", "withscores"});
+  resp = Run({"zunion", "3", "z1", "z2", "z3", "weights", "1", "1", "2", "aggregate", "max",
+              "withscores"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "d", "2", "b", "3", "c", "3"));
+
+  resp = Run({"zunion", "1", "z1", "weights", "2", "aggregate", "max", "withscores"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "2", "b", "6"));
 }
 
 TEST_F(ZSetFamilyTest, ZUnionStore) {

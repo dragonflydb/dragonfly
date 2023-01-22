@@ -988,7 +988,7 @@ ArgSlice Transaction::GetShardArgs(ShardId sid) const {
 // from local index back to original arg index skipping the command.
 // i.e. returns (first_key_pos -1) or bigger.
 size_t Transaction::ReverseArgIndex(ShardId shard_id, size_t arg_index) const {
-  if (unique_shard_cnt_ == 1)  // mget: 0->0, 1->1. zunionstore has 0->2
+  if (unique_shard_cnt_ == 1)
     return reverse_index_[arg_index];
 
   const auto& sd = shard_data_[shard_id];
@@ -1264,20 +1264,25 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
   int num_custom_keys = -1;
 
   if (cid->opt_mask() & CO::VARIADIC_KEYS) {
+    // ZUNION/INTER <num_keys> <key1> [<key2> ...]
+    // EVAL <script> <num_keys>
     if (args.size() < 3) {
       return OpStatus::SYNTAX_ERR;
     }
 
     string_view name{cid->name()};
 
-    if (!absl::StartsWith(name, "EVAL")) {
+    if (absl::EndsWith(name, "STORE")) {
       key_index.bonus = 1;  // Z<xxx>STORE commands
     }
-    string_view num(ArgS(args, 2));
+
+    unsigned num_keys_index = absl::StartsWith(name, "EVAL") ? 2 : key_index.bonus + 1;
+
+    string_view num = ArgS(args, num_keys_index);
     if (!absl::SimpleAtoi(num, &num_custom_keys) || num_custom_keys < 0)
       return OpStatus::INVALID_INT;
 
-    if (size_t(num_custom_keys) + 3 > args.size())
+    if (args.size() < size_t(num_custom_keys) + num_keys_index + 1)
       return OpStatus::SYNTAX_ERR;
   }
 
