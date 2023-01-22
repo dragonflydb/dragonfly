@@ -271,6 +271,8 @@ debug = nil
   lua_pushnil(lua);
   lua_setglobal(lua, "dofile");
 
+  // unpack was a global function until Lua 5.2, but was moved into the table module.
+  // Register it globally to maintain compatibility.
   lua_getglobal(lua, "table");
   lua_getfield(lua, -1, "unpack");
   lua_remove(lua, -2);

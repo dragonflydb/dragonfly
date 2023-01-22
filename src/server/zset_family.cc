@@ -267,8 +267,10 @@ void IntervalVisitor::operator()(ZSetFamily::TopNScored sc) {
 void IntervalVisitor::ActionRange(unsigned start, unsigned end) {
   if (params_.limit == 0)
     return;
+  // Calculate new start and end given offset and limit.
   start += params_.offset;
   end = static_cast<uint32_t>(min(1ULL * start + params_.limit - 1, 1ULL * end));
+
   container_utils::IterateSortedSet(
       zobj_,
       [this](container_utils::ContainerEntry ce, double score) {
