@@ -119,8 +119,9 @@ void JournalStreamer::WriterFb(io::Sink* dest) {
 
 }  // namespace
 
-DflyCmd::ReplicaRoleInfo::ReplicaRoleInfo(std::string address, SyncState sync_state)
-    : address(address) {
+DflyCmd::ReplicaRoleInfo::ReplicaRoleInfo(std::string address, uint32_t listening_port,
+                                          SyncState sync_state)
+    : address(address), listening_port(listening_port) {
   switch (sync_state) {
     case SyncState::PREPARATION:
       state = "preparation";
@@ -296,8 +297,8 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
 
   // Set meta info on connection.
   cntx->owner()->SetName(absl::StrCat("repl_flow_", sync_id));
-  cntx->conn_state.repl_session_id = sync_id;
-  cntx->conn_state.repl_flow_id = flow_id;
+  cntx->conn_state.replicaiton_info.repl_session_id = sync_id;
+  cntx->conn_state.replicaiton_info.repl_flow_id = flow_id;
 
   absl::InsecureBitGen gen;
   string eof_token = GetRandomHex(gen, 40);
@@ -491,6 +492,7 @@ uint32_t DflyCmd::CreateSyncSession(ConnectionContext* cntx) {
   };
 
   auto replica_ptr = make_shared<ReplicaInfo>(flow_count, cntx->owner()->RemoteEndpointAddress(),
+                                              cntx->conn_state.replicaiton_info.repl_listening_port,
                                               std::move(err_handler));
   auto [it, inserted] = replica_infos_.emplace(sync_id, std::move(replica_ptr));
   CHECK(inserted);
@@ -499,7 +501,7 @@ uint32_t DflyCmd::CreateSyncSession(ConnectionContext* cntx) {
 }
 
 void DflyCmd::OnClose(ConnectionContext* cntx) {
-  unsigned session_id = cntx->conn_state.repl_session_id;
+  unsigned session_id = cntx->conn_state.replicaiton_info.repl_session_id;
   if (!session_id)
     return;
 
@@ -582,7 +584,8 @@ std::vector<DflyCmd::ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() {
   std::vector<ReplicaRoleInfo> vec;
   unique_lock lk(mu_);
   for (const auto& info : replica_infos_) {
-    vec.emplace_back(info.second->address, info.second->state.load(memory_order_relaxed));
+    vec.emplace_back(info.second->address, info.second->listening_port,
+                     info.second->state.load(memory_order_relaxed));
   }
   return vec;
 }
