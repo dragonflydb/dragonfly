@@ -15,6 +15,7 @@ namespace journal {
 enum class Op : uint8_t {
   NOOP = 0,
   SELECT = 6,
+  EXPIRED = 9,
   COMMAND = 10,
   MULTI_COMMAND = 11,
   EXEC = 12,

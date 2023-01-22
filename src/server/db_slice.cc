@@ -802,8 +802,16 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
   // TODO: to employ multi-generation update of expire-base and the underlying values.
   time_t expire_time = ExpireTime(expire_it);
 
-  if (time_t(cntx.time_now_ms) < expire_time)
+  // Never do expiration on replica.
+  if (time_t(cntx.time_now_ms) < expire_time || owner_->IsReplica())
     return make_pair(it, expire_it);
+
+  // Replicate expiry
+  if (auto journal = EngineShard::tlocal()->journal(); journal) {
+    std::string stash;
+    it->first.GetString(&stash);
+    RecordExpiry(cntx.db_index, stash);
+  }
 
   PerformDeletion(it, expire_it, shard_owner(), db.get());
   ++events_.expired_keys;

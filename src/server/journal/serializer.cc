@@ -75,6 +75,7 @@ void JournalWriter::Write(const journal::Entry& entry) {
     case journal::Op::SELECT:
       return Write(entry.dbid);
     case journal::Op::COMMAND:
+    case journal::Op::EXPIRED:
     case journal::Op::MULTI_COMMAND:
     case journal::Op::EXEC:
       Write(entry.txid);

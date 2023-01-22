@@ -99,6 +99,9 @@ void RecordJournal(const OpArgs& op_args, std::string_view cmd, ArgSlice args,
 // Record non auto journal command finish. Call only when command translates to multi commands.
 void RecordJournalFinish(const OpArgs& op_args, uint32_t shard_cnt);
 
+// Record expiry in journal with independent transaction.
+void RecordExpiry(DbIndex dbid, std::string_view key);
+
 struct TieredStats {
   size_t tiered_reads = 0;
   size_t tiered_writes = 0;

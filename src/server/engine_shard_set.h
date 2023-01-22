@@ -143,6 +143,14 @@ class EngineShard {
     journal_ = j;
   }
 
+  void SetReplica(bool replica) {
+    is_replica_ = replica;
+  }
+
+  bool IsReplica() const {
+    return is_replica_;
+  }
+
   void TEST_EnableHeartbeat();
 
  private:
@@ -194,6 +202,9 @@ class EngineShard {
   ChannelSlice channel_slice_;
 
   Stats stats_;
+
+  // Become passive if replica: don't automatially evict expired items.
+  bool is_replica_ = false;
 
   // Logical ts used to order distributed transactions.
   TxId committed_txid_ = 0;

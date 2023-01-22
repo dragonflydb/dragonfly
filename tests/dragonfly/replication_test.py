@@ -458,3 +458,60 @@ async def test_rewrites(df_local_factory):
         await check_expire("k")
         await check("GETEX k EX 100", r"PEXPIREAT k (.*?)")
         await check_expire("k")
+
+
+"""
+Test automatic replication of expiry.
+"""
+
+
+@dfly_args({"proactor_threads": 4})
+@pytest.mark.asyncio
+async def test_expiry(df_local_factory, n_keys=1000):
+    master = df_local_factory.create(port=BASE_PORT)
+    replica = df_local_factory.create(port=BASE_PORT+1, logtostdout=True)
+
+    df_local_factory.start_all([master, replica])
+
+    c_master = aioredis.Redis(port=master.port)
+    c_replica = aioredis.Redis(port=replica.port)
+
+    # Connect replica to master
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    # Set keys
+    pipe = c_master.pipeline(transaction=False)
+    batch_fill_data(pipe, gen_test_data(n_keys))
+    await pipe.execute()
+
+    # Check keys are on replica
+    res = await c_replica.mget(k for k, _ in gen_test_data(n_keys))
+    assert all(v is not None for v in res)
+
+    # Set key expries in 500ms
+    pipe = c_master.pipeline(transaction=True)
+    for k, _ in gen_test_data(n_keys):
+        pipe.pexpire(k, 500)
+    await pipe.execute()
+
+    # Wait two seconds for heatbeat to pick them up
+    await asyncio.sleep(2.0)
+
+    assert len(await c_master.keys()) == 0
+    assert len(await c_replica.keys()) == 0
+
+    # Set keys
+    pipe = c_master.pipeline(transaction=False)
+    batch_fill_data(pipe, gen_test_data(n_keys))
+    for k, _ in gen_test_data(n_keys):
+        pipe.pexpire(k, 500)
+    await pipe.execute()
+
+    await asyncio.sleep(1.0)
+
+    # Disconnect master
+    master.stop(kill=True)
+
+    # Check replica evicts keys on its own
+    await asyncio.sleep(1.0)
+    assert len(await c_replica.keys()) == 0

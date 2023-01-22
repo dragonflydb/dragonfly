@@ -470,14 +470,18 @@ error_code Replica::InitiateDflySync() {
     DefaultErrorHandler(ge);
     for (auto& flow : shard_flows_)
       flow->CloseSocket();
+
+    // Reset all shard states from replica state to normal.
+    SetShardStates(false);
   };
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
   // Make sure we're in LOADING state.
   CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) == GlobalState::LOADING);
 
-  // Flush dbs.
+  // Flush dbs and set shard states to replica state.
   JournalExecutor{&service_}.FlushAll();
+  SetShardStates(true);
 
   // Start full sync flows.
   {
@@ -577,7 +581,7 @@ error_code Replica::ConsumeDflyStream() {
     DefaultErrorHandler(ge);
     for (auto& flow : shard_flows_) {
       flow->CloseSocket();
-      flow->waker_.notifyAll();
+      flow->txd_queue_.Cancel();
     }
 
     // Iterate over map and cancle all blocking entities
@@ -588,6 +592,9 @@ error_code Replica::ConsumeDflyStream() {
         tx_data.second.block.Cancel();
       }
     }
+
+    // Reset shard states from replica state to normal.
+    SetShardStates(false);
   };
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
@@ -634,6 +641,10 @@ void Replica::JoinAllFlows() {
       flow->execution_fb_.join();
     }
   }
+}
+
+void Replica::SetShardStates(bool replica) {
+  shard_set->RunBriefInParallel([replica](EngineShard* shard) { shard->SetReplica(replica); });
 }
 
 void Replica::DefaultErrorHandler(const GenericError& err) {
@@ -781,39 +792,25 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
   io::PrefixSource ps{prefix, &ss};
 
   JournalReader reader{&ps, 0};
+  TransactionReader tx_reader{};
 
   while (!cntx->IsCancelled()) {
-    TranactionData tx_data;
-    while (!cntx->IsCancelled()) {
-      waker_.await([&]() {
-        return ((trans_data_queue_.size() < kYieldAfterItemsInQueue) || cntx->IsCancelled());
-      });
-      if (cntx->IsCancelled()) {
-        return;
-      }
-      auto res = reader.ReadEntry();
-      if (!res) {
-        cntx->ReportError(res.error(), "Journal format error");
-        return;
-      }
-      last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
-      bool tx_data_full = tx_data.UpdateFromParsedEntry(std::move(*res));
-      if (tx_data_full == true) {
-        break;
-      }
-    }
-    if (use_multi_shard_exe_sync_) {
-      InsertTxDataToShardResource(std::move(tx_data));
-    } else {
-      ExecuteTxWithNoShardSync(std::move(tx_data), cntx);
-    }
+    auto tx_data = tx_reader.Next(&reader, cntx);
+    if (!tx_data)
+      break;
 
-    waker_.notify();
+    last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
+
+    if (use_multi_shard_exe_sync_) {
+      InsertTxDataToShardResource(std::move(*tx_data), cntx->GetCancellation());
+    } else {
+      ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
+    }
   }
   return;
 }
 
-void Replica::ExecuteTxWithNoShardSync(TranactionData&& tx_data, Context* cntx) {
+void Replica::ExecuteTxWithNoShardSync(TransactionData&& tx_data, Context* cntx) {
   if (cntx->IsCancelled()) {
     return;
   }
@@ -826,8 +823,8 @@ void Replica::ExecuteTxWithNoShardSync(TranactionData&& tx_data, Context* cntx) 
   ExecuteTx(std::move(tx_data), was_insert, cntx);
 }
 
-bool Replica::InsertTxToSharedMap(const TranactionData& tx_data) {
-  std::lock_guard lg{multi_shard_exe_->map_mu};
+bool Replica::InsertTxToSharedMap(const TransactionData& tx_data) {
+  std::lock_guard lk{multi_shard_exe_->map_mu};
 
   auto [it, was_insert] =
       multi_shard_exe_->tx_sync_execution.emplace(tx_data.txid, tx_data.shard_cnt);
@@ -838,33 +835,25 @@ bool Replica::InsertTxToSharedMap(const TranactionData& tx_data) {
   return was_insert;
 }
 
-void Replica::InsertTxDataToShardResource(TranactionData&& tx_data) {
+void Replica::InsertTxDataToShardResource(TransactionData&& tx_data, const Cancellation* cll) {
   bool was_insert = false;
   if (tx_data.shard_cnt > 1) {
     was_insert = InsertTxToSharedMap(tx_data);
   }
 
   VLOG(2) << "txid: " << tx_data.txid << " pushed to queue";
-  trans_data_queue_.push(std::make_pair(std::move(tx_data), was_insert));
+  txd_queue_.Push(std::move(tx_data), was_insert, cll);
 }
 
 void Replica::StableSyncDflyExecFb(Context* cntx) {
   while (!cntx->IsCancelled()) {
-    waker_.await([&]() { return (!trans_data_queue_.empty() || cntx->IsCancelled()); });
-    if (cntx->IsCancelled()) {
-      return;
+    if (auto data = txd_queue_.Pop(cntx->GetCancellation()); data) {
+      ExecuteTx(std::move(data->first), data->second, cntx);
     }
-    DCHECK(!trans_data_queue_.empty());
-    auto& data = trans_data_queue_.front();
-    ExecuteTx(std::move(data.first), data.second, cntx);
-    trans_data_queue_.pop();
-    waker_.notify();
   }
-
-  return;
 }
 
-void Replica::ExecuteTx(TranactionData&& tx_data, bool inserted_by_me, Context* cntx) {
+void Replica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context* cntx) {
   if (cntx->IsCancelled()) {
     return;
   }
@@ -1152,29 +1141,73 @@ error_code Replica::SendCommand(string_view command, ReqSerializer* serializer) 
   return ec;
 }
 
-bool Replica::TranactionData::UpdateFromParsedEntry(journal::ParsedEntry&& entry) {
-  if (entry.opcode == journal::Op::EXEC) {
-    shard_cnt = entry.shard_cnt;
-    dbid = entry.dbid;
-    txid = entry.txid;
-    return true;
-  } else if (entry.opcode == journal::Op::COMMAND) {
-    txid = entry.txid;
-    shard_cnt = entry.shard_cnt;
-    dbid = entry.dbid;
-    commands.push_back(std::move(entry.cmd));
-    return true;
-  } else if (entry.opcode == journal::Op::MULTI_COMMAND) {
-    commands.push_back(std::move(entry.cmd));
-    return false;
-  } else {
-    DCHECK(false) << "Unsupported opcode";
+bool Replica::TransactionData::AddEntry(journal::ParsedEntry&& entry) {
+  switch (entry.opcode) {
+    case journal::Op::COMMAND:
+    case journal::Op::EXPIRED:
+      commands.push_back(std::move(entry.cmd));
+      [[fallthrough]];
+    case journal::Op::EXEC:
+      shard_cnt = entry.shard_cnt;
+      dbid = entry.dbid;
+      txid = entry.txid;
+      return true;
+    case journal::Op::MULTI_COMMAND:
+      commands.push_back(std::move(entry.cmd));
+      return false;
+    default:
+      DCHECK(false) << "Unsupported opcode";
   }
   return false;
 }
 
-bool Replica::TranactionData::IsGlobalCmd() const {
+bool Replica::TransactionData::IsGlobalCmd() const {
   return commands.size() == 1 && commands.front().cmd_args.size() == 1;
+}
+
+auto Replica::TransactionReader::Next(JournalReader* reader, Context* cntx)
+    -> optional<TransactionData> {
+  io::Result<journal::ParsedEntry> res;
+  do {
+    if (res = reader->ReadEntry(); !res) {
+      cntx->ReportError(res.error());
+      return std::nullopt;
+    }
+
+    // Expiration is preceding to a MULTI...EXEC sequence, even if it was issued within it.
+    if (res->opcode == journal::Op::EXPIRED) {
+      TransactionData tmp_tx;
+      CHECK(tmp_tx.AddEntry(std::move(*res)));
+      return tmp_tx;
+    }
+
+  } while (!cntx->IsCancelled() && !current_.AddEntry(std::move(*res)));
+
+  return cntx->IsCancelled() ? std::nullopt : make_optional(std::move(current_));
+}
+
+void Replica::TransactionDataQueue::Push(Replica::TransactionData&& tx_data, bool was_inserted,
+                                         const Cancellation* cll) {
+  waker_.await([&]() { return ((queue_.size() < capacity_) || cll->IsCancelled()); });
+  queue_.emplace(std::move(tx_data), was_inserted);
+  waker_.notifyAll();
+}
+
+auto Replica::TransactionDataQueue::Pop(const Cancellation* cll) -> optional<Item> {
+  waker_.await([&]() { return (!queue_.empty() || cll->IsCancelled()); });
+  if (cll->IsCancelled())
+    return std::nullopt;
+
+  DCHECK(!queue_.empty());
+  auto data = std::move(queue_.front());
+  queue_.pop();
+  waker_.notify();  // TODO: maybe notify only after processing?
+
+  return data;
+}
+
+void Replica::TransactionDataQueue::Cancel() {
+  waker_.notifyAll();
 }
 
 }  // namespace dfly

@@ -443,6 +443,10 @@ bool EngineShard::HasResultConverged(TxId notifyid) const {
 
 void EngineShard::Heartbeat() {
   CacheStats();
+
+  if (IsReplica())  // Never run expiration on replica.
+    return;
+
   constexpr double kTtlDeleteLimit = 200;
   constexpr double kRedLimitFactor = 0.1;
 
