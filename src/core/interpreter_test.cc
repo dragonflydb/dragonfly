@@ -321,4 +321,9 @@ TEST_F(InterpreterTest, Modules) {
   EXPECT_EQ("str(\x1\x2test)", ser_.res);
 }
 
+TEST_F(InterpreterTest, OutdatedGlobals) {
+  // Check table.unpack is accessable as a global.
+  EXPECT_TRUE(Execute("return unpack{1,2,3}"));
+}
+
 }  // namespace dfly

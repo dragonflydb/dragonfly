@@ -265,6 +265,10 @@ void IntervalVisitor::operator()(ZSetFamily::TopNScored sc) {
 }
 
 void IntervalVisitor::ActionRange(unsigned start, unsigned end) {
+  if (params_.limit == 0)
+    return;
+  start += params_.offset;
+  end = static_cast<uint32_t>(min(1ULL * start + params_.limit - 1, 1ULL * end));
   container_utils::IterateSortedSet(
       zobj_,
       [this](container_utils::ContainerEntry ce, double score) {
@@ -1075,6 +1079,16 @@ void ZUnionFamilyInternal(CmdArgList args, bool store, ConnectionContext* cntx) 
   }
 }
 
+bool ParseLimit(string_view offset_str, string_view limit_str, ZSetFamily::RangeParams* params) {
+  int64_t limit_arg;
+  if (!SimpleAtoi(offset_str, &params->offset) || !SimpleAtoi(limit_str, &limit_arg) ||
+      limit_arg > UINT32_MAX) {
+    return false;
+  }
+  params->limit = limit_arg < 0 ? UINT32_MAX : static_cast<uint32_t>(limit_arg);
+  return true;
+}
+
 }  // namespace
 
 void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
@@ -1376,9 +1390,7 @@ void ZSetFamily::ZRange(CmdArgList args, ConnectionContext* cntx) {
       if (i + 3 > args.size()) {
         return (*cntx)->SendError(kSyntaxErr);
       }
-      string_view os = ArgS(args, i + 1);
-      string_view cs = ArgS(args, i + 2);
-      if (!SimpleAtoi(os, &range_params.offset) || !SimpleAtoi(cs, &range_params.limit)) {
+      if (!ParseLimit(ArgS(args, i + 1), ArgS(args, i + 2), &range_params)) {
         return (*cntx)->SendError(kInvalidIntErr);
       }
       i += 2;
@@ -1441,11 +1453,9 @@ void ZSetFamily::ZRangeByLexInternal(CmdArgList args, bool reverse, ConnectionCo
     ToUpper(&args[4]);
     if (ArgS(args, 4) != "LIMIT")
       return (*cntx)->SendError(kSyntaxErr);
-    string_view os = ArgS(args, 5);
-    string_view cs = ArgS(args, 6);
-    if (!SimpleAtoi(os, &offset) || !SimpleAtoi(cs, &count)) {
+
+    if (!ParseLimit(ArgS(args, 5), ArgS(args, 6), &range_params))
       return (*cntx)->SendError(kInvalidIntErr);
-    }
   }
   range_params.offset = offset;
   range_params.limit = count;
@@ -1728,12 +1738,9 @@ bool ZSetFamily::ParseRangeByScoreParams(CmdArgList args, RangeParams* params) {
     } else if (cur_arg == "LIMIT") {
       if (i + 3 > args.size())
         return false;
-
-      string_view os = ArgS(args, i + 1);
-      string_view cs = ArgS(args, i + 2);
-
-      if (!SimpleAtoi(os, &params->offset) || !SimpleAtoi(cs, &params->limit))
+      if (!ParseLimit(ArgS(args, i + 1), ArgS(args, i + 2), params))
         return false;
+
       i += 2;
     } else {
       return false;
