@@ -1110,7 +1110,7 @@ void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, E
     TxQueue* txq = shard->txq();
     DCHECK(!txq->Empty());
     Transaction* trans = absl::get<Transaction*>(txq->Front());
-    DCHECK(trans == this);
+    DCHECK(trans == this) << "Front: " << trans->DebugId();
     txq->PopFront();
     sd.pq_pos = TxQueue::kEnd;
   }
