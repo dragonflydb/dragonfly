@@ -359,19 +359,12 @@ OpResult<void> SetGeneric(ConnectionContext* cntx, const SetCmd::SetParams& spar
   return cntx->transaction->ScheduleSingleHop(std::move(cb));
 }
 
-OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, string_view key, int64_t max_burst,
-                                       int64_t count, int64_t period_s, int64_t quantity) {
-  using namespace chrono_literals;
-
+OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view key,
+                                       const uint64_t limit, const int64_t emission_interval_ms,
+                                       const uint64_t quantity) {
   auto& db_slice = op_args.shard->db_slice();
 
-  const int64_t limit = max_burst + 1;
-  const int64_t emission_interval_ms = period_s * 1000 / count;
   const int64_t delay_variation_tolerance_ms = emission_interval_ms * limit;
-
-  if (emission_interval_ms == 0) {
-    return OpStatus::OUT_OF_RANGE;
-  }
 
   int64_t remaining = 0;
   int64_t reset_after_ms = -1000;
@@ -1265,38 +1258,50 @@ auto StringFamily::OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction
   return response;
 }
 
+/* CL.THROTTLE <key> <max_burst> <count per period> <period> [<quantity>] */
 void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  const string_view key = ArgS(args, 1);
 
-  int64_t max_burst;
-  string_view max_burst_str = ArgS(args, 2);
+  // Allow max burst in number of tokens
+  uint64_t max_burst;
+  const string_view max_burst_str = ArgS(args, 2);
   if (!absl::SimpleAtoi(max_burst_str, &max_burst)) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
 
-  int64_t count;
-  string_view count_str = ArgS(args, 3);
+  // Emit count of tokens per period
+  uint64_t count;
+  const string_view count_str = ArgS(args, 3);
   if (!absl::SimpleAtoi(count_str, &count)) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
 
-  int64_t period;
-  string_view period_str = ArgS(args, 4);
+  // Period of emitting count of tockens
+  uint64_t period;
+  const string_view period_str = ArgS(args, 4);
   if (!absl::SimpleAtoi(period_str, &period)) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
 
-  int64_t quantity = 1;
+  // Apply quantity of tokens now
+  uint64_t quantity = 1;
   if (args.size() > 5) {
-    string_view quantity_str = ArgS(args, 5);
+    const string_view quantity_str = ArgS(args, 5);
 
     if (!absl::SimpleAtoi(quantity_str, &quantity)) {
       return (*cntx)->SendError(kInvalidIntErr);
     }
   }
 
+  const uint64_t limit = max_burst + 1;
+  const int64_t emission_interval_ms = period * 1000 / count;
+
+  if (emission_interval_ms == 0) {
+    return (*cntx)->SendError("Zero rates are not supported");
+  }
+
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<array<int64_t, 5>> {
-    return OpThrottle(t->GetOpArgs(shard), key, max_burst, count, period, quantity);
+    return OpThrottle(t->GetOpArgs(shard), key, limit, emission_interval_ms, quantity);
   };
 
   Transaction* trans = cntx->transaction;
@@ -1304,13 +1309,13 @@ void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
 
   switch (result.status()) {
     case OpStatus::WRONG_TYPE:
-      (*cntx)->SendError(result.status());
+      (*cntx)->SendError(kWrongTypeErr);
       break;
     case OpStatus::INVALID_VALUE:
       (*cntx)->SendError(kInvalidIntErr);
       break;
-    case OpStatus::OUT_OF_RANGE:
-      (*cntx)->SendError(kIncrOverflow);
+    case OpStatus::OUT_OF_MEMORY:
+      (*cntx)->SendError(kOutOfMemory);
       break;
     default:
       (*cntx)->StartArray(result->size());
