@@ -1276,7 +1276,7 @@ void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
 
-  // Period of emitting count of tockens
+  // Period of emitting count of tokens
   uint64_t period;
   const string_view period_str = ArgS(args, 4);
   if (!absl::SimpleAtoi(period_str, &period)) {
