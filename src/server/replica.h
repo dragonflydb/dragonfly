@@ -74,26 +74,6 @@ class Replica {
     TransactionData current_{};
   };
 
-  // Queue for passing transaction data entries from reader to executor fiber with backpressure
-  // by maximum allowed capacity.
-  struct TransactionDataQueue {
-    using Item = std::pair<TransactionData, bool>;
-
-    TransactionDataQueue(unsigned capacity) : capacity_{capacity}, queue_{}, waker_{} {
-    }
-
-    void Push(TransactionData&& tx_data, bool was_inserted, const Cancellation* cll);
-
-    std::optional<Item> Pop(const Cancellation* cll);
-
-    void Cancel();
-
-   private:
-    unsigned capacity_;
-    std::queue<Item> queue_;
-    ::util::fibers_ext::EventCount waker_;
-  };
-
   // Coorindator for multi shard execution.
   struct MultiShardExecution {
     boost::fibers::mutex map_mu;
@@ -192,7 +172,7 @@ class Replica {
   std::error_code SendCommand(std::string_view command, facade::ReqSerializer* serializer);
 
   void ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context* cntx);
-  void InsertTxDataToShardResource(TransactionData&& tx_data, const Cancellation* cll);
+  void InsertTxDataToShardResource(TransactionData&& tx_data);
   void ExecuteTxWithNoShardSync(TransactionData&& tx_data, Context* cntx);
   bool InsertTxToSharedMap(const TransactionData& tx_data);
 
@@ -230,10 +210,10 @@ class Replica {
 
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;
 
-  bool use_multi_shard_exe_sync_;
+  std::queue<std::pair<TransactionData, bool>> trans_data_queue_;
   static constexpr size_t kYieldAfterItemsInQueue = 50;
-  // Pass entries from StableSyncDflyReadFb to StableSyncDflyExecFb.
-  TransactionDataQueue txd_queue_{kYieldAfterItemsInQueue};
+  ::util::fibers_ext::EventCount waker_;  // waker for trans_data_queue_
+  bool use_multi_shard_exe_sync_;
 
   std::unique_ptr<JournalExecutor> executor_;
 

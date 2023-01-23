@@ -581,7 +581,7 @@ error_code Replica::ConsumeDflyStream() {
     DefaultErrorHandler(ge);
     for (auto& flow : shard_flows_) {
       flow->CloseSocket();
-      flow->txd_queue_.Cancel();
+      flow->waker_.notifyAll();
     }
 
     // Iterate over map and cancle all blocking entities
@@ -795,6 +795,12 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
   TransactionReader tx_reader{};
 
   while (!cntx->IsCancelled()) {
+    waker_.await([&]() {
+      return ((trans_data_queue_.size() < kYieldAfterItemsInQueue) || cntx->IsCancelled());
+    });
+    if (cntx->IsCancelled())
+      break;
+
     auto tx_data = tx_reader.Next(&reader, cntx);
     if (!tx_data)
       break;
@@ -802,12 +808,13 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
     last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
 
     if (use_multi_shard_exe_sync_) {
-      InsertTxDataToShardResource(std::move(*tx_data), cntx->GetCancellation());
+      InsertTxDataToShardResource(std::move(*tx_data));
     } else {
       ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
     }
+
+    waker_.notify();
   }
-  return;
 }
 
 void Replica::ExecuteTxWithNoShardSync(TransactionData&& tx_data, Context* cntx) {
@@ -835,21 +842,27 @@ bool Replica::InsertTxToSharedMap(const TransactionData& tx_data) {
   return was_insert;
 }
 
-void Replica::InsertTxDataToShardResource(TransactionData&& tx_data, const Cancellation* cll) {
+void Replica::InsertTxDataToShardResource(TransactionData&& tx_data) {
   bool was_insert = false;
   if (tx_data.shard_cnt > 1) {
     was_insert = InsertTxToSharedMap(tx_data);
   }
 
   VLOG(2) << "txid: " << tx_data.txid << " pushed to queue";
-  txd_queue_.Push(std::move(tx_data), was_insert, cll);
+  trans_data_queue_.push(std::make_pair(std::move(tx_data), was_insert));
 }
 
 void Replica::StableSyncDflyExecFb(Context* cntx) {
   while (!cntx->IsCancelled()) {
-    if (auto data = txd_queue_.Pop(cntx->GetCancellation()); data) {
-      ExecuteTx(std::move(data->first), data->second, cntx);
+    waker_.await([&]() { return (!trans_data_queue_.empty() || cntx->IsCancelled()); });
+    if (cntx->IsCancelled()) {
+      return;
     }
+    DCHECK(!trans_data_queue_.empty());
+    auto& data = trans_data_queue_.front();
+    ExecuteTx(std::move(data.first), data.second, cntx);
+    trans_data_queue_.pop();
+    waker_.notify();
   }
 }
 
@@ -904,7 +917,8 @@ void Replica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context*
   }
 
   // Erase from map can be done only after all flow fibers executed the transaction commands.
-  // The last fiber which will decrease the counter to 0 will be the one to erase the data from map
+  // The last fiber which will decrease the counter to 0 will be the one to erase the data from
+  // map
   auto val = multi_shard_data.counter.fetch_sub(1, std::memory_order_relaxed);
   VLOG(2) << "txid: " << tx_data.txid << " counter: " << val;
   if (val == 1) {
@@ -1184,30 +1198,6 @@ auto Replica::TransactionReader::Next(JournalReader* reader, Context* cntx)
   } while (!cntx->IsCancelled() && !current_.AddEntry(std::move(*res)));
 
   return cntx->IsCancelled() ? std::nullopt : make_optional(std::move(current_));
-}
-
-void Replica::TransactionDataQueue::Push(Replica::TransactionData&& tx_data, bool was_inserted,
-                                         const Cancellation* cll) {
-  waker_.await([&]() { return ((queue_.size() < capacity_) || cll->IsCancelled()); });
-  queue_.emplace(std::move(tx_data), was_inserted);
-  waker_.notifyAll();
-}
-
-auto Replica::TransactionDataQueue::Pop(const Cancellation* cll) -> optional<Item> {
-  waker_.await([&]() { return (!queue_.empty() || cll->IsCancelled()); });
-  if (cll->IsCancelled())
-    return std::nullopt;
-
-  DCHECK(!queue_.empty());
-  auto data = std::move(queue_.front());
-  queue_.pop();
-  waker_.notify();  // TODO: maybe notify only after processing?
-
-  return data;
-}
-
-void Replica::TransactionDataQueue::Cancel() {
-  waker_.notifyAll();
 }
 
 }  // namespace dfly
