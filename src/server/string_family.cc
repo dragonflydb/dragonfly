@@ -379,7 +379,7 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, string_view key, i
 
   const int64_t increment_ms = emission_interval_ms * quantity;
 
-  auto [it, expire_it] = db_slice.FindExt(op_args.db_cntx, key);
+  auto [it, e_it] = db_slice.FindExt(op_args.db_cntx, key);
   const int64_t now_ms = op_args.db_cntx.time_now_ms;
 
   int64_t tat_ms = now_ms;
@@ -410,6 +410,12 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, string_view key, i
     ttl_ms = new_tat_ms - now_ms;
 
     if (IsValid(it)) {
+      if (IsValid(e_it)) {
+        e_it->second = db_slice.FromAbsoluteTime(new_tat_ms);
+      } else {
+        db_slice.AddExpire(op_args.db_cntx.db_index, it, new_tat_ms);
+      }
+
       db_slice.PreUpdate(op_args.db_cntx.db_index, it);
       it->second.SetInt(new_tat_ms);
       db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
@@ -419,7 +425,7 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, string_view key, i
 
       // AddNew calls PostUpdate inside.
       try {
-        it = db_slice.AddNew(op_args.db_cntx, key, std::move(cobj), 0);
+        it = db_slice.AddNew(op_args.db_cntx, key, std::move(cobj), new_tat_ms);
       } catch (bad_alloc&) {
         return OpStatus::OUT_OF_MEMORY;
       }
