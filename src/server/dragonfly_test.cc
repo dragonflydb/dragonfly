@@ -141,6 +141,25 @@ TEST_F(DflyEngineTest, Multi) {
   ASSERT_FALSE(service_->IsShardSetLocked());
 }
 
+TEST_F(DflyEngineTest, MultiGlobalCommands) {
+  ASSERT_THAT(Run({"set", "key", "val"}), "OK");
+
+  ASSERT_THAT(Run({"multi"}), "OK");
+  ASSERT_THAT(Run({"move", "key", "2"}), "QUEUED");
+  ASSERT_THAT(Run({"save"}), "QUEUED");
+
+  RespExpr resp = Run({"exec"});
+  ASSERT_THAT(resp, ArrLen(2));
+
+  ASSERT_THAT(Run({"get", "key"}), ArgType(RespExpr::NIL));
+
+  ASSERT_THAT(Run({"select", "2"}), "OK");
+  ASSERT_THAT(Run({"get", "key"}), "val");
+
+  ASSERT_FALSE(service_->IsLocked(0, "key"));
+  ASSERT_FALSE(service_->IsLocked(2, "key"));
+}
+
 TEST_F(DflyEngineTest, HitMissStats) {
   RespExpr resp = Run({"set", "Key1", "VAL"});
   ASSERT_EQ(resp, "OK");
