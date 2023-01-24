@@ -1307,23 +1307,27 @@ void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
   Transaction* trans = cntx->transaction;
   OpResult<array<int64_t, 5>> result = trans->ScheduleSingleHopT(std::move(cb));
 
-  switch (result.status()) {
-    case OpStatus::WRONG_TYPE:
-      (*cntx)->SendError(kWrongTypeErr);
-      break;
-    case OpStatus::INVALID_VALUE:
-      (*cntx)->SendError(kInvalidIntErr);
-      break;
-    case OpStatus::OUT_OF_MEMORY:
-      (*cntx)->SendError(kOutOfMemory);
-      break;
-    default:
-      (*cntx)->StartArray(result->size());
-      const auto& array = result.value();
-      for (const auto& v : array) {
-        (*cntx)->SendLong(v);
-      }
-      break;
+  if (result) {
+    (*cntx)->StartArray(result->size());
+    const auto& array = result.value();
+    for (const auto& v : array) {
+      (*cntx)->SendLong(v);
+    }
+  } else {
+    switch (result.status()) {
+      case OpStatus::WRONG_TYPE:
+        (*cntx)->SendError(kWrongTypeErr);
+        break;
+      case OpStatus::INVALID_VALUE:
+        (*cntx)->SendError(kInvalidIntErr);
+        break;
+      case OpStatus::OUT_OF_MEMORY:
+        (*cntx)->SendError(kOutOfMemory);
+        break;
+      default:
+        (*cntx)->SendError(result.status());
+        break;
+    }
   }
 }
 
