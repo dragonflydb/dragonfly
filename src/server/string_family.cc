@@ -1285,6 +1285,18 @@ auto StringFamily::OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction
 }
 
 /* CL.THROTTLE <key> <max_burst> <count per period> <period> [<quantity>] */
+/* Response is array of 5 integers. The meaning of each array item is:
+ *  1. Whether the action was limited:
+ *   - 0 indicates the action is allowed.
+ *   - 1 indicates that the action was limited/blocked.
+ *  2. The total limit of the key (max_burst + 1). This is equivalent to the common
+ * X-RateLimit-Limit HTTP header.
+ *  3. The remaining limit of the key. Equivalent to X-RateLimit-Remaining.
+ *  4. The number of seconds until the user should retry, and always -1 if the action was allowed.
+ * Equivalent to Retry-After.
+ *  5. The number of seconds until the limit will reset to its maximum capacity. Equivalent to
+ * X-RateLimit-Reset.
+ */
 void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
   const string_view key = ArgS(args, 1);
 
