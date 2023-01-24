@@ -604,8 +604,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
 }
 
 void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view value) {
-  absl::InlinedVector<string_view, 5> cmds{};  // 4 is theoretical maximum;
-  cmds.insert(cmds.end(), {key, value});
+  absl::InlinedVector<string_view, 5> cmds({key, value});  // 4 is theoretical maximum;
 
   std::string exp_str;
   if (params.flags & SET_EXPIRE_AFTER_MS) {
