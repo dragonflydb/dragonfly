@@ -14,6 +14,7 @@ extern "C" {
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <tuple>
 
 #include "base/logging.h"
@@ -359,18 +360,26 @@ OpResult<void> SetGeneric(ConnectionContext* cntx, const SetCmd::SetParams& spar
   return cntx->transaction->ScheduleSingleHop(std::move(cb));
 }
 
+// emission_interval_ms assumed to be positive
+// limit is assumed to be positive
 OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view key,
-                                       const uint64_t limit, const int64_t emission_interval_ms,
+                                       const int64_t limit, const int64_t emission_interval_ms,
                                        const uint64_t quantity) {
   auto& db_slice = op_args.shard->db_slice();
 
-  const int64_t delay_variation_tolerance_ms = emission_interval_ms * limit;
+  if (emission_interval_ms > INT64_MAX / limit) {
+    return OpStatus::INVALID_INT;
+  }
+  const int64_t delay_variation_tolerance_ms = emission_interval_ms * limit;  // should be positive
 
   int64_t remaining = 0;
   int64_t reset_after_ms = -1000;
   int64_t retry_after_ms = -1000;
 
-  const int64_t increment_ms = emission_interval_ms * quantity;
+  if (quantity != 0 && static_cast<uint64_t>(emission_interval_ms) > INT64_MAX / quantity) {
+    return OpStatus::INVALID_INT;
+  }
+  const int64_t increment_ms = emission_interval_ms * quantity;  // should be nonnegative
 
   auto [it, e_it] = db_slice.FindExt(op_args.db_cntx, key);
   const int64_t now_ms = op_args.db_cntx.time_now_ms;
@@ -387,21 +396,54 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
     }
     tat_ms = *opt_prev;
   }
-  const int64_t new_tat_ms = max(tat_ms, now_ms) + increment_ms;
 
+  int64_t new_tat_ms = max(tat_ms, now_ms);
+  if (new_tat_ms > INT64_MAX - increment_ms) {
+    return OpStatus::INVALID_INT;
+  }
+  new_tat_ms += increment_ms;
+
+  if (new_tat_ms < INT64_MIN + delay_variation_tolerance_ms) {
+    return OpStatus::INVALID_INT;
+  }
   const int64_t allow_at_ms = new_tat_ms - delay_variation_tolerance_ms;
+
+  if (allow_at_ms >= 0 ? now_ms < INT64_MIN + allow_at_ms : now_ms > INT64_MAX + allow_at_ms) {
+    return OpStatus::INVALID_INT;
+  }
   const int64_t diff_ms = now_ms - allow_at_ms;
 
   const bool limited = diff_ms < 0;
   int64_t ttl_ms;
   if (limited) {
     if (increment_ms <= delay_variation_tolerance_ms) {
+      if (diff_ms == INT64_MIN) {
+        return OpStatus::INVALID_INT;
+      }
       retry_after_ms = -diff_ms;
+    }
+
+    if (now_ms >= 0 ? tat_ms < INT64_MIN + now_ms : tat_ms > INT64_MAX + now_ms) {
+      return OpStatus::INVALID_INT;
     }
     ttl_ms = tat_ms - now_ms;
   } else {
+    if (now_ms >= 0 ? new_tat_ms < INT64_MIN + now_ms : new_tat_ms > INT64_MAX + now_ms) {
+      return OpStatus::INVALID_INT;
+    }
     ttl_ms = new_tat_ms - now_ms;
+  }
 
+  if (ttl_ms < delay_variation_tolerance_ms - INT64_MAX) {
+    return OpStatus::INVALID_INT;
+  }
+  const int64_t next_ms = delay_variation_tolerance_ms - ttl_ms;
+  if (next_ms > -emission_interval_ms) {
+    remaining = next_ms / emission_interval_ms;
+  }
+  reset_after_ms = ttl_ms;
+
+  if (!limited) {
     if (IsValid(it)) {
       if (IsValid(e_it)) {
         e_it->second = db_slice.FromAbsoluteTime(new_tat_ms);
@@ -425,23 +467,7 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
     }
   }
 
-  const int64_t next_ms = delay_variation_tolerance_ms - ttl_ms;
-  if (next_ms > -emission_interval_ms) {
-    remaining = next_ms / emission_interval_ms;
-  }
-  reset_after_ms = ttl_ms;
-
-  int64_t retry_after_s = retry_after_ms / 1000;
-  if (retry_after_ms > 0) {
-    retry_after_s += 1;
-  }
-
-  int64_t reset_after_s = reset_after_ms / 1000;
-  if (reset_after_ms > 0) {
-    reset_after_s += 1;
-  }
-
-  return array<int64_t, 5>{limited ? 1 : 0, limit, remaining, retry_after_s, reset_after_s};
+  return array<int64_t, 5>{limited ? 1 : 0, limit, remaining, retry_after_ms, reset_after_ms};
 }
 
 }  // namespace
@@ -1293,7 +1319,14 @@ void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  const uint64_t limit = max_burst + 1;
+  if (max_burst > INT64_MAX - 1) {
+    return (*cntx)->SendError(kInvalidIntErr);
+  }
+  const int64_t limit = max_burst + 1;
+
+  if (period > UINT64_MAX / 1000 || count == 0 || period * 1000 / count > INT64_MAX) {
+    return (*cntx)->SendError(kInvalidIntErr);
+  }
   const int64_t emission_interval_ms = period * 1000 / count;
 
   if (emission_interval_ms == 0) {
@@ -1309,7 +1342,20 @@ void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
 
   if (result) {
     (*cntx)->StartArray(result->size());
-    const auto& array = result.value();
+    auto& array = result.value();
+
+    int64_t retry_after_s = array[3] / 1000;
+    if (array[3] > 0) {
+      retry_after_s += 1;
+    }
+    array[3] = retry_after_s;
+
+    int64_t reset_after_s = array[4] / 1000;
+    if (array[4] > 0) {
+      reset_after_s += 1;
+    }
+    array[4] = reset_after_s;
+
     for (const auto& v : array) {
       (*cntx)->SendLong(v);
     }
@@ -1318,6 +1364,7 @@ void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
       case OpStatus::WRONG_TYPE:
         (*cntx)->SendError(kWrongTypeErr);
         break;
+      case OpStatus::INVALID_INT:
       case OpStatus::INVALID_VALUE:
         (*cntx)->SendError(kInvalidIntErr);
         break;

@@ -566,76 +566,98 @@ TEST_F(StringFamilyTest, ClThrottle) {
 
   // You can never make a request larger than the maximum.
   auto resp = Run({"cl.throttle", key, max_burst, count, period, "6"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
               ElementsAre(IntArg(1), IntArg(limit), IntArg(5), IntArg(-1), IntArg(0)));
 
   // Rate limit normal requests appropriately.
   resp = Run({"cl.throttle", key, max_burst, count, period});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
               ElementsAre(IntArg(0), IntArg(limit), IntArg(4), IntArg(-1), IntArg(11)));
 
   resp = Run({"cl.throttle", key, max_burst, count, period});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
               ElementsAre(IntArg(0), IntArg(limit), IntArg(3), IntArg(-1), IntArg(21)));
 
   resp = Run({"cl.throttle", key, max_burst, count, period});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
               ElementsAre(IntArg(0), IntArg(limit), IntArg(2), IntArg(-1), IntArg(31)));
 
   resp = Run({"cl.throttle", key, max_burst, count, period});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
               ElementsAre(IntArg(0), IntArg(limit), IntArg(1), IntArg(-1), IntArg(41)));
 
   resp = Run({"cl.throttle", key, max_burst, count, period});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
               ElementsAre(IntArg(0), IntArg(limit), IntArg(0), IntArg(-1), IntArg(51)));
 
   resp = Run({"cl.throttle", key, max_burst, count, period});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
               ElementsAre(IntArg(1), IntArg(limit), IntArg(0), IntArg(11), IntArg(51)));
 
   AdvanceTime(30000);
   resp = Run({"cl.throttle", key, max_burst, count, period, "1"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
               ElementsAre(IntArg(0), IntArg(limit), IntArg(2), IntArg(-1), IntArg(31)));
 
   AdvanceTime(1000);
   resp = Run({"cl.throttle", key, max_burst, count, period, "1"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
               ElementsAre(IntArg(0), IntArg(limit), IntArg(1), IntArg(-1), IntArg(40)));
 
   AdvanceTime(9000);
   resp = Run({"cl.throttle", key, max_burst, count, period, "1"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
               ElementsAre(IntArg(0), IntArg(limit), IntArg(1), IntArg(-1), IntArg(41)));
 
   AdvanceTime(40000);
   resp = Run({"cl.throttle", key, max_burst, count, period, "1"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
               ElementsAre(IntArg(0), IntArg(limit), IntArg(4), IntArg(-1), IntArg(11)));
 
   AdvanceTime(15000);
   resp = Run({"cl.throttle", key, max_burst, count, period, "1"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
               ElementsAre(IntArg(0), IntArg(limit), IntArg(4), IntArg(-1), IntArg(11)));
 
   // Zero-volume request just peeks at the state.
   resp = Run({"cl.throttle", key, max_burst, count, period, "0"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
               ElementsAre(IntArg(0), IntArg(limit), IntArg(4), IntArg(-1), IntArg(11)));
 
   // High-volume request uses up more of the limit.
   resp = Run({"cl.throttle", key, max_burst, count, period, "2"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
               ElementsAre(IntArg(0), IntArg(limit), IntArg(2), IntArg(-1), IntArg(31)));
 
   // Large requests cannot exceed limits
   resp = Run({"cl.throttle", key, max_burst, count, period, "5"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
               ElementsAre(IntArg(1), IntArg(limit), IntArg(2), IntArg(31), IntArg(31)));
 
   // Zero rates aren't supported
-  EXPECT_THAT(Run({"cl.throttle", "bar", "10", "1", "0"}), ErrArg("zero rates are not supported"));
+  resp = Run({"cl.throttle", "bar", "10", "1", "0"});
+  ASSERT_EQ(RespExpr::ERROR, resp.type);
+  EXPECT_THAT(resp, ErrArg("zero rates are not supported"));
+
+  // count == 0
+  resp = Run({"cl.throttle", "bar", "10", "0", "1"});
+  ASSERT_EQ(RespExpr::ERROR, resp.type);
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
 }
 
 }  // namespace dfly
