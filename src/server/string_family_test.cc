@@ -633,6 +633,9 @@ TEST_F(StringFamilyTest, ClThrottle) {
   resp = Run({"cl.throttle", key, max_burst, count, period, "5"});
   ASSERT_THAT(resp.GetVec(),
               ElementsAre(IntArg(1), IntArg(limit), IntArg(2), IntArg(31), IntArg(31)));
+
+  // Zero rates aren't supported
+  EXPECT_THAT(Run({"cl.throttle", "bar", "10", "1", "0"}), ErrArg("zero rates are not supported"));
 }
 
 }  // namespace dfly

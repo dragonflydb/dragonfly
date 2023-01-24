@@ -1297,7 +1297,7 @@ void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
   const int64_t emission_interval_ms = period * 1000 / count;
 
   if (emission_interval_ms == 0) {
-    return (*cntx)->SendError("Zero rates are not supported");
+    return (*cntx)->SendError("zero rates are not supported");
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<array<int64_t, 5>> {
