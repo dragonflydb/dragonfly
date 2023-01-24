@@ -180,6 +180,9 @@ void Replica::Pause(bool pause) {
 }
 
 void Replica::MainReplicationFb() {
+  // Switch shard states to replication.
+  SetShardStates(true);
+
   error_code ec;
   while (state_mask_ & R_ENABLED) {
     // Discard all previous errors and set default error handler.
@@ -237,7 +240,11 @@ void Replica::MainReplicationFb() {
     state_mask_ &= ~R_SYNC_OK;
   }
 
+  // Wait for unblocking cleanup to finish.
   cntx_.JoinErrorHandler();
+
+  // Revert shard states to normal state.
+  SetShardStates(false);
 
   VLOG(1) << "Main replication fiber finished";
 }
@@ -470,18 +477,14 @@ error_code Replica::InitiateDflySync() {
     DefaultErrorHandler(ge);
     for (auto& flow : shard_flows_)
       flow->CloseSocket();
-
-    // Reset all shard states from replica state to normal.
-    SetShardStates(false);
   };
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
   // Make sure we're in LOADING state.
   CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) == GlobalState::LOADING);
 
-  // Flush dbs and set shard states to replica state.
+  // Flush dbs.
   JournalExecutor{&service_}.FlushAll();
-  SetShardStates(true);
 
   // Start full sync flows.
   {
@@ -592,9 +595,6 @@ error_code Replica::ConsumeDflyStream() {
         tx_data.second.block.Cancel();
       }
     }
-
-    // Reset shard states from replica state to normal.
-    SetShardStates(false);
   };
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
@@ -792,7 +792,6 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
   io::PrefixSource ps{prefix, &ss};
 
   JournalReader reader{&ps, 0};
-  TransactionReader tx_reader{};
 
   while (!cntx->IsCancelled()) {
     waker_.await([&]() {
@@ -801,7 +800,7 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
     if (cntx->IsCancelled())
       break;
 
-    auto tx_data = tx_reader.Next(&reader, cntx);
+    auto tx_data = TransactionData::ReadNext(&reader, cntx);
     if (!tx_data)
       break;
 
@@ -1156,9 +1155,13 @@ error_code Replica::SendCommand(string_view command, ReqSerializer* serializer) 
 }
 
 bool Replica::TransactionData::AddEntry(journal::ParsedEntry&& entry) {
+  // Expiry joins multi transaction or runs standalone.
+  if (entry.opcode == journal::Op::EXPIRED) {
+    entry.opcode = commands.empty() ? journal::Op::COMMAND : journal::Op::MULTI_COMMAND;
+  }
+
   switch (entry.opcode) {
     case journal::Op::COMMAND:
-    case journal::Op::EXPIRED:
       commands.push_back(std::move(entry.cmd));
       [[fallthrough]];
     case journal::Op::EXEC:
@@ -1179,25 +1182,18 @@ bool Replica::TransactionData::IsGlobalCmd() const {
   return commands.size() == 1 && commands.front().cmd_args.size() == 1;
 }
 
-auto Replica::TransactionReader::Next(JournalReader* reader, Context* cntx)
+auto Replica::TransactionData::ReadNext(JournalReader* reader, Context* cntx)
     -> optional<TransactionData> {
+  TransactionData out;
   io::Result<journal::ParsedEntry> res;
   do {
     if (res = reader->ReadEntry(); !res) {
       cntx->ReportError(res.error());
       return std::nullopt;
     }
+  } while (!cntx->IsCancelled() && !out.AddEntry(std::move(*res)));
 
-    // Expiration is preceding to a MULTI...EXEC sequence, even if it was issued within it.
-    if (res->opcode == journal::Op::EXPIRED) {
-      TransactionData tmp_tx;
-      CHECK(tmp_tx.AddEntry(std::move(*res)));
-      return tmp_tx;
-    }
-
-  } while (!cntx->IsCancelled() && !current_.AddEntry(std::move(*res)));
-
-  return cntx->IsCancelled() ? std::nullopt : make_optional(std::move(current_));
+  return cntx->IsCancelled() ? std::nullopt : make_optional(std::move(out));
 }
 
 }  // namespace dfly
