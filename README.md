@@ -102,6 +102,8 @@ version: "3.9"
 services:
   dragonfly: # the new redis
     image: docker.dragonflydb.io/dragonflydb/dragonfly
+    ulimits:
+      memlock: -1
     command:
       - "--save_schedule=*:*" # save for every 1 minute
       - "--dir=/data"
