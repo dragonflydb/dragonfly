@@ -19,15 +19,15 @@ struct StoredCmd {
   const CommandId* descr;
 
  private:
-  std::vector<std::string> stored_args;
-  CmdArgVec arg_vec;
-  CmdArgList arg_list;
+  std::vector<std::string> stored_args_;
+  CmdArgVec arg_vec_;
+  CmdArgList arg_list_;
 
  public:
   StoredCmd(const CommandId* d, CmdArgList args);
 
-  CmdArgList& ArgList() {
-    return arg_list;
+  CmdArgList ArgList() const {
+    return arg_list_;
   }
 
   void Invoke(ConnectionContext* ctx);

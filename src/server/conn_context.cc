@@ -17,17 +17,17 @@ namespace dfly {
 using namespace std;
 
 StoredCmd::StoredCmd(const CommandId* d, CmdArgList args) : descr(d) {
-  stored_args.reserve(args.size());
-  arg_vec.resize(args.size());
+  stored_args_.reserve(args.size());
+  arg_vec_.resize(args.size());
   for (size_t i = 0; i < args.size(); ++i) {
-    stored_args.emplace_back(ArgS(args, i));
-    arg_vec[i] = MutableSlice{stored_args[i].data(), stored_args[i].size()};
+    stored_args_.emplace_back(ArgS(args, i));
+    arg_vec_[i] = MutableSlice{stored_args_[i].data(), stored_args_[i].size()};
   }
-  arg_list = {arg_vec.data(), arg_vec.size()};
+  arg_list_ = {arg_vec_.data(), arg_vec_.size()};
 }
 
 void StoredCmd::Invoke(ConnectionContext* ctx) {
-  descr->Invoke(arg_list, ctx);
+  descr->Invoke(arg_list_, ctx);
 }
 
 void ConnectionContext::SendMonitorMsg(std::string msg) {
