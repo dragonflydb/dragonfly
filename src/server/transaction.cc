@@ -335,7 +335,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
 
   // We make sure that we lock exactly once for each (multi-hop) transaction inside
   // transactions that lock incrementally.
-  if (incremental_lock && ((sd.local_mask & KEYLOCK_ACQUIRED) == 0)) {
+  if (!IsGlobal() && incremental_lock && ((sd.local_mask & KEYLOCK_ACQUIRED) == 0)) {
     DCHECK(!awaked_prerun);  // we should not have blocking transaction inside multi block.
 
     sd.local_mask |= KEYLOCK_ACQUIRED;

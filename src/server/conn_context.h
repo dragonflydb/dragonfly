@@ -13,13 +13,24 @@
 namespace dfly {
 
 class EngineShardSet;
+class ConnectionContext;
 
 struct StoredCmd {
   const CommandId* descr;
-  std::vector<std::string> cmd;
 
-  StoredCmd(const CommandId* d = nullptr) : descr(d) {
+ private:
+  std::vector<std::string> stored_args;
+  CmdArgVec arg_vec;
+  CmdArgList arg_list;
+
+ public:
+  StoredCmd(const CommandId* d, CmdArgList args);
+
+  CmdArgList& ArgList() {
+    return arg_list;
   }
+
+  void Invoke(ConnectionContext* ctx);
 };
 
 struct ConnectionState {

@@ -5,6 +5,7 @@
 #include "server/conn_context.h"
 
 #include "base/logging.h"
+#include "server/command_registry.h"
 #include "server/engine_shard_set.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
@@ -14,6 +15,20 @@
 namespace dfly {
 
 using namespace std;
+
+StoredCmd::StoredCmd(const CommandId* d, CmdArgList args) : descr(d) {
+  stored_args.reserve(args.size());
+  arg_vec.resize(args.size());
+  for (size_t i = 0; i < args.size(); ++i) {
+    stored_args.emplace_back(ArgS(args, i));
+    arg_vec[i] = MutableSlice{stored_args[i].data(), stored_args[i].size()};
+  }
+  arg_list = {arg_vec.data(), arg_vec.size()};
+}
+
+void StoredCmd::Invoke(ConnectionContext* ctx) {
+  descr->Invoke(arg_list, ctx);
+}
 
 void ConnectionContext::SendMonitorMsg(std::string msg) {
   CHECK(owner());
