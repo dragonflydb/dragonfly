@@ -265,6 +265,12 @@ void IntervalVisitor::operator()(ZSetFamily::TopNScored sc) {
 }
 
 void IntervalVisitor::ActionRange(unsigned start, unsigned end) {
+  if (params_.limit == 0)
+    return;
+  // Calculate new start and end given offset and limit.
+  start += params_.offset;
+  end = static_cast<uint32_t>(min(1ULL * start + params_.limit - 1, 1ULL * end));
+
   container_utils::IterateSortedSet(
       zobj_,
       [this](container_utils::ContainerEntry ce, double score) {
@@ -709,31 +715,15 @@ ScoredMap UnionShardKeysWithScore(const KeyIterWeightVec& key_iter_weight_vec, A
   return result;
 }
 
-double GetKeyWeight(EngineShard* shard, Transaction* t, const vector<double>& weights,
+double GetKeyWeight(Transaction* t, ShardId shard_id, const vector<double>& weights,
                     unsigned key_index, unsigned cmdargs_keys_offset) {
-  unsigned windex = t->ReverseArgIndex(shard->shard_id(), key_index) - cmdargs_keys_offset;
+  if (weights.empty()) {
+    return 1;
+  }
+
+  unsigned windex = t->ReverseArgIndex(shard_id, key_index) - cmdargs_keys_offset;
   DCHECK_LT(windex, weights.size());
   return weights[windex];
-}
-
-OpResult<KeyIterWeightVec> FindShardKeysAndWeights(EngineShard* shard, Transaction* t,
-                                                   ArgSlice keys, const vector<double>& weights,
-                                                   unsigned src_keys_offset,
-                                                   unsigned cmdargs_keys_offset) {
-  auto& db_slice = shard->db_slice();
-  KeyIterWeightVec key_weight_vec(keys.size() - src_keys_offset);
-  for (unsigned j = src_keys_offset; j < keys.size(); ++j) {
-    auto it_res = db_slice.Find(t->GetDbContext(), keys[j], OBJ_ZSET);
-    if (it_res == OpStatus::WRONG_TYPE)  // TODO: support sets with default score 1.
-      return it_res.status();
-    if (!it_res)
-      continue;
-
-    // first global index is 2 after {destkey, numkeys}
-    key_weight_vec[j - src_keys_offset] = {*it_res,
-                                           GetKeyWeight(shard, t, weights, j, cmdargs_keys_offset)};
-  }
-  return key_weight_vec;
 }
 
 OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
@@ -742,29 +732,38 @@ OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest
   DVLOG(1) << "shard:" << shard->shard_id() << ", keys " << vector(keys.begin(), keys.end());
   DCHECK(!keys.empty());
 
-  unsigned src_keys_offset = 0;
-  unsigned cmdargs_keys_offset = 0;
+  unsigned cmdargs_keys_offset = 1;  // after {numkeys} for ZUNION
+  unsigned removed_keys = 0;
 
-  if (!dest.empty()) {
-    // first global index is 2 after {destkey, numkeys}
-    cmdargs_keys_offset = 2;
+  if (store) {
+    // first global index is 2 after {destkey, numkeys}.
+    ++cmdargs_keys_offset;
     if (keys.front() == dest) {
-      ++src_keys_offset;
+      keys.remove_prefix(1);
+      ++removed_keys;
     }
 
-    // In case ONLY the destination key is hosted in this shard no work on this shard should be done
-    // in this step
-    if (src_keys_offset >= keys.size()) {
+    // In case ONLY the destination key is hosted in this shard no work on this shard should be
+    // done in this step
+    if (keys.empty()) {
       return OpStatus::OK;
     }
   }
-  auto keys_and_weights =
-      FindShardKeysAndWeights(shard, t, keys, weights, src_keys_offset, cmdargs_keys_offset);
-  if (!keys_and_weights) {
-    return keys_and_weights.status();
+
+  auto& db_slice = shard->db_slice();
+  KeyIterWeightVec key_weight_vec(keys.size());
+  for (unsigned j = 0; j < keys.size(); ++j) {
+    auto it_res = db_slice.Find(t->GetDbContext(), keys[j], OBJ_ZSET);
+    if (it_res == OpStatus::WRONG_TYPE)  // TODO: support sets with default score 1.
+      return it_res.status();
+    if (!it_res)
+      continue;
+
+    key_weight_vec[j] = {*it_res, GetKeyWeight(t, shard->shard_id(), weights, j + removed_keys,
+                                               cmdargs_keys_offset)};
   }
 
-  return UnionShardKeysWithScore(*keys_and_weights, agg_type);
+  return UnionShardKeysWithScore(key_weight_vec, agg_type);
 }
 
 OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
@@ -773,18 +772,31 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
   DVLOG(1) << "shard:" << shard->shard_id() << ", keys " << vector(keys.begin(), keys.end());
   DCHECK(!keys.empty());
 
-  unsigned start = 0;
+  unsigned removed_keys = 0;
+  unsigned cmdargs_keys_offset = 1;
 
-  if (keys.front() == dest) {
-    ++start;
+  if (store) {
+    // first global index is 2 after {destkey, numkeys}.
+    ++cmdargs_keys_offset;
+
+    if (keys.front() == dest) {
+      keys.remove_prefix(1);
+      ++removed_keys;
+    }
+
+    // In case ONLY the destination key is hosted in this shard no work on this shard should be
+    // done in this step
+    if (keys.empty()) {
+      return OpStatus::OK;
+    }
   }
 
   auto& db_slice = shard->db_slice();
-  vector<pair<PrimeIterator, double>> it_arr(keys.size() - start);
+  vector<pair<PrimeIterator, double>> it_arr(keys.size());
   if (it_arr.empty())          // could be when only the dest key is hosted in this shard
     return OpStatus::SKIPPED;  // return noop
 
-  for (unsigned j = start; j < keys.size(); ++j) {
+  for (unsigned j = 0; j < keys.size(); ++j) {
     auto it_res = db_slice.Find(t->GetDbContext(), keys[j], OBJ_ZSET);
     if (it_res == OpStatus::WRONG_TYPE)  // TODO: support sets with default score 1.
       return it_res.status();
@@ -792,11 +804,8 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
     if (!it_res)
       continue;  // we exit in the next loop
 
-    // first global index is 2 after {destkey, numkeys}
-    unsigned src_indx = j - start;
-    unsigned windex = t->ReverseArgIndex(shard->shard_id(), j) - 2;
-    DCHECK_LT(windex, weights.size());
-    it_arr[src_indx] = {*it_res, weights[windex]};
+    it_arr[j] = {*it_res, GetKeyWeight(t, shard->shard_id(), weights, j + removed_keys,
+                                       cmdargs_keys_offset)};
   }
 
   ScoredMap result;
@@ -939,12 +948,14 @@ OpResult<unsigned> ParseWeights(CmdArgList args, SetOpArgs* op_args) {
     return OpStatus::SYNTAX_ERR;
   }
 
+  op_args->weights.resize(op_args->num_keys, 1);
   for (unsigned i = 0; i < op_args->num_keys; ++i) {
     string_view weight = ArgS(args, i + 1);
-    if (!absl::SimpleAtod(weight, &(op_args->weights[i]))) {
+    if (!absl::SimpleAtod(weight, &op_args->weights[i])) {
       return OpStatus::INVALID_FLOAT;
     }
   }
+
   return op_args->num_keys;
 }
 
@@ -962,8 +973,7 @@ OpResult<unsigned> ParseWithScores(CmdArgList args, SetOpArgs* op_args) {
 }
 
 OpResult<SetOpArgs> ParseSetOpArgs(CmdArgList args, bool store) {
-  // TODO: support variadic key for ZUNION command (now fixed to 3)
-  string_view num_keys_str = store ? ArgS(args, 2) : "3";
+  string_view num_keys_str = store ? ArgS(args, 2) : ArgS(args, 1);
   SetOpArgs op_args;
 
   auto parsed = ParseKeyCount(num_keys_str, &op_args);
@@ -971,11 +981,8 @@ OpResult<SetOpArgs> ParseSetOpArgs(CmdArgList args, bool store) {
     return parsed.status();
   }
 
-  unsigned opt_args_start = store ? 3 + op_args.num_keys : 1 + op_args.num_keys;
-  // TODO: modify this check when there is variadic key support for ZUNION command
-  DCHECK_GE(args.size(), opt_args_start);
-
-  op_args.weights.resize(op_args.num_keys, 1);
+  unsigned opt_args_start = op_args.num_keys + (store ? 3 : 2);
+  DCHECK_LE(opt_args_start, args.size());  // Checked inside DetermineKeys
 
   for (size_t i = opt_args_start; i < args.size(); ++i) {
     ToUpper(&args[i]);
@@ -1026,9 +1033,10 @@ void ZUnionFamilyInternal(CmdArgList args, bool store, ConnectionContext* cntx) 
 
   vector<OpResult<ScoredMap>> maps(shard_set->size());
 
-  string_view dest_key = store ? ArgS(args, 1) : "";
+  string_view dest_key = ArgS(args, 1);
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    maps[shard->shard_id()] = OpUnion(shard, t, dest_key, op_args.agg_type, op_args.weights, false);
+    maps[shard->shard_id()] = OpUnion(shard, t, dest_key, op_args.agg_type, op_args.weights, store);
     return OpStatus::OK;
   };
 
@@ -1073,6 +1081,16 @@ void ZUnionFamilyInternal(CmdArgList args, bool store, ConnectionContext* cntx) 
       }
     }
   }
+}
+
+bool ParseLimit(string_view offset_str, string_view limit_str, ZSetFamily::RangeParams* params) {
+  int64_t limit_arg;
+  if (!SimpleAtoi(offset_str, &params->offset) || !SimpleAtoi(limit_str, &limit_arg) ||
+      limit_arg > UINT32_MAX) {
+    return false;
+  }
+  params->limit = limit_arg < 0 ? UINT32_MAX : static_cast<uint32_t>(limit_arg);
+  return true;
 }
 
 }  // namespace
@@ -1276,7 +1294,7 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
   vector<OpResult<ScoredMap>> maps(shard_set->size(), OpStatus::SKIPPED);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    maps[shard->shard_id()] = OpInter(shard, t, dest_key, op_args.agg_type, op_args.weights, false);
+    maps[shard->shard_id()] = OpInter(shard, t, dest_key, op_args.agg_type, op_args.weights, true);
     return OpStatus::OK;
   };
 
@@ -1291,10 +1309,12 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
     if (!op_res)
       return (*cntx)->SendError(op_res.status());
 
-    if (result.empty())
+    if (result.empty()) {
       result.swap(op_res.value());
-    else
+    } else {
       InterScoredMap(&result, &op_res.value(), op_args.agg_type);
+    }
+
     if (result.empty())
       break;
   }
@@ -1376,9 +1396,7 @@ void ZSetFamily::ZRange(CmdArgList args, ConnectionContext* cntx) {
       if (i + 3 > args.size()) {
         return (*cntx)->SendError(kSyntaxErr);
       }
-      string_view os = ArgS(args, i + 1);
-      string_view cs = ArgS(args, i + 2);
-      if (!SimpleAtoi(os, &range_params.offset) || !SimpleAtoi(cs, &range_params.limit)) {
+      if (!ParseLimit(ArgS(args, i + 1), ArgS(args, i + 2), &range_params)) {
         return (*cntx)->SendError(kInvalidIntErr);
       }
       i += 2;
@@ -1441,11 +1459,9 @@ void ZSetFamily::ZRangeByLexInternal(CmdArgList args, bool reverse, ConnectionCo
     ToUpper(&args[4]);
     if (ArgS(args, 4) != "LIMIT")
       return (*cntx)->SendError(kSyntaxErr);
-    string_view os = ArgS(args, 5);
-    string_view cs = ArgS(args, 6);
-    if (!SimpleAtoi(os, &offset) || !SimpleAtoi(cs, &count)) {
+
+    if (!ParseLimit(ArgS(args, 5), ArgS(args, 6), &range_params))
       return (*cntx)->SendError(kInvalidIntErr);
-    }
   }
   range_params.offset = offset;
   range_params.limit = count;
@@ -1728,12 +1744,9 @@ bool ZSetFamily::ParseRangeByScoreParams(CmdArgList args, RangeParams* params) {
     } else if (cur_arg == "LIMIT") {
       if (i + 3 > args.size())
         return false;
-
-      string_view os = ArgS(args, i + 1);
-      string_view cs = ArgS(args, i + 2);
-
-      if (!SimpleAtoi(os, &params->offset) || !SimpleAtoi(cs, &params->limit))
+      if (!ParseLimit(ArgS(args, i + 1), ArgS(args, i + 2), params))
         return false;
+
       i += 2;
     } else {
       return false;
@@ -2110,13 +2123,13 @@ OpResult<unsigned> ZSetFamily::OpLexCount(const OpArgs& op_args, string_view key
 #define HFUNC(x) SetHandler(&ZSetFamily::x)
 
 void ZSetFamily::Register(CommandRegistry* registry) {
-  constexpr uint32_t kUnionMask = CO::WRITE | CO::VARIADIC_KEYS | CO::REVERSE_MAPPING;
+  constexpr uint32_t kStoreMask = CO::WRITE | CO::VARIADIC_KEYS | CO::REVERSE_MAPPING;
 
   *registry << CI{"ZADD", CO::FAST | CO::WRITE | CO::DENYOOM, -4, 1, 1, 1}.HFUNC(ZAdd)
             << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1, 1}.HFUNC(ZCard)
             << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1, 1}.HFUNC(ZCount)
             << CI{"ZINCRBY", CO::FAST | CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(ZIncrBy)
-            << CI{"ZINTERSTORE", kUnionMask, -4, 3, 3, 1}.HFUNC(ZInterStore)
+            << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3, 1}.HFUNC(ZInterStore)
             << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1, 1}.HFUNC(ZLexCount)
             << CI{"ZPOPMAX", CO::READONLY, 3, 1, 1, 1}.HFUNC(ZPopMax)
             << CI{"ZPOPMIN", CO::READONLY, 3, 1, 1, 1}.HFUNC(ZPopMin)
@@ -2135,8 +2148,9 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZREVRANGEBYSCORE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRevRangeByScore)
             << CI{"ZREVRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZRevRank)
             << CI{"ZSCAN", CO::READONLY, -3, 1, 1, 1}.HFUNC(ZScan)
-            << CI{"ZUNION", CO::READONLY | CO::REVERSE_MAPPING, -4, 1, 3, 1}.HFUNC(ZUnion)
-            << CI{"ZUNIONSTORE", kUnionMask, -4, 3, 3, 1}.HFUNC(ZUnionStore);
+            << CI{"ZUNION", CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 2, 2, 1}
+                   .HFUNC(ZUnion)
+            << CI{"ZUNIONSTORE", kStoreMask, -4, 3, 3, 1}.HFUNC(ZUnionStore);
 }
 
 }  // namespace dfly

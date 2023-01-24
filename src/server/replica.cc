@@ -29,6 +29,8 @@ extern "C" {
 ABSL_FLAG(bool, enable_multi_shard_sync, true,
           "Execute multi shards commands on replica syncrhonized");
 
+ABSL_DECLARE_FLAG(uint32_t, port);
+
 namespace dfly {
 
 using namespace std;
@@ -288,8 +290,16 @@ error_code Replica::Greet() {
 
   io_buf.ConsumeInput(consumed);
 
-  // TODO: we may also send REPLCONF listening-port, ip-address
-  // See server.repl_state == REPL_STATE_SEND_PORT condition in replication.c
+  // Corresponds to server.repl_state == REPL_STATE_SEND_HANDSHAKE condition in replication.c
+  auto port = absl::GetFlag(FLAGS_port);
+  RETURN_ON_ERR(SendCommand(StrCat("REPLCONF listening-port ", port), &serializer));
+  RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
+  if (!CheckRespIsSimpleReply("OK")) {
+    LOG(ERROR) << "Bad REPLCONF response " << ToSV(io_buf.InputBuffer());
+    return make_error_code(errc::bad_message);
+  }
+
+  io_buf.ConsumeInput(consumed);
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_CAPA
   RETURN_ON_ERR(SendCommand("REPLCONF capa eof capa psync2", &serializer));
