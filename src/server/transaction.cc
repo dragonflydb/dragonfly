@@ -1103,15 +1103,15 @@ void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, E
 
   // It does not have to be that all shards in multi transaction execute this tx.
   // Hence it could stay in the tx queue. We perform the necessary cleanup and remove it from
-  // there.
+  // there. The transaction is not guaranteed to be at front.
   if (sd.pq_pos != TxQueue::kEnd) {
-    DVLOG(1) << "unlockmulti: TxPopFront " << DebugId();
+    DVLOG(1) << "unlockmulti: TxRemove " << DebugId();
 
     TxQueue* txq = shard->txq();
     DCHECK(!txq->Empty());
-    Transaction* trans = absl::get<Transaction*>(txq->Front());
-    DCHECK(trans == this);
-    txq->PopFront();
+    DCHECK_EQ(absl::get<Transaction*>(txq->At(sd.pq_pos)), this);
+
+    txq->Remove(sd.pq_pos);
     sd.pq_pos = TxQueue::kEnd;
   }
 
