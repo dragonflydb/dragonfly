@@ -471,6 +471,33 @@ TEST_F(DflyEngineTest, EvalBug713) {
   fb0.Join();
 }
 
+// Tests deadlock that happenned due to a fact that trans->Schedule was called
+// before interpreter->Lock().
+//
+// The problematic scenario:
+// 1. transaction 1 schedules itself and blocks on an interpreter lock
+// 2. transaction 2 schedules itself, but meanwhile an interpreter unlocks itself and
+//    transaction 2 grabs the lock but can not progress due to transaction 1 already
+//    scheduled before.
+TEST_F(DflyEngineTest, EvalBug713b) {
+  const char* script = "return redis.call('get', KEYS[1])";
+
+  const uint32_t kNumFibers = 20;
+  fibers_ext::Fiber fibers[kNumFibers];
+
+  for (unsigned j = 0; j < kNumFibers; ++j) {
+    fibers[j] = pp_->at(1)->LaunchFiber([=, this] {
+      for (unsigned i = 0; i < 50; ++i) {
+        Run(StrCat("fb", j), {"eval", script, "3", kKeySid0, kKeySid1, kKeySid2});
+      }
+    });
+  }
+
+  for (unsigned j = 0; j < kNumFibers; ++j) {
+    fibers[j].Join();
+  }
+}
+
 TEST_F(DflyEngineTest, EvalSha) {
   auto resp = Run({"script", "load", "return 5"});
   EXPECT_THAT(resp, ArgType(RespExpr::STRING));

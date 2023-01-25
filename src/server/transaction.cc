@@ -904,7 +904,7 @@ pair<bool, bool> Transaction::ScheduleInShard(EngineShard* shard) {
     // All transactions in the queue must acquire the intent lock.
     lock_granted = shard->db_slice().Acquire(mode, lock_args) && shard_unlocked;
     sd.local_mask |= KEYLOCK_ACQUIRED;
-    DVLOG(1) << "Lock granted " << lock_granted << " for trans " << DebugId();
+    DVLOG(2) << "Lock granted " << lock_granted << " for trans " << DebugId();
   }
 
   if (!txq->Empty()) {
