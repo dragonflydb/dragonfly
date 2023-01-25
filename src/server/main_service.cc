@@ -906,6 +906,8 @@ void Service::Unwatch(CmdArgList args, ConnectionContext* cntx) {
 
 void Service::CallFromScript(CmdArgList args, ObjectExplorer* reply, ConnectionContext* cntx) {
   DCHECK(cntx->transaction);
+  DVLOG(1) << "CallFromScript " << cntx->transaction->DebugId() << " " << ArgS(args, 0);
+
   InterpreterReplier replier(reply);
   facade::SinkReplyBuilder* orig = cntx->Inject(&replier);
 
@@ -1013,10 +1015,10 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   }
   DCHECK(cntx->transaction);
 
+  auto lk = interpreter->Lock();
+
   if (!eval_args.keys.empty())
     cntx->transaction->Schedule();
-
-  auto lk = interpreter->Lock();
 
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
@@ -1039,12 +1041,12 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   CHECK(result == Interpreter::RUN_OK);
 
   EvalSerializer ser{static_cast<RedisReplyBuilder*>(cntx->reply_builder())};
-
   if (!interpreter->IsResultSafe()) {
     (*cntx)->SendError("reached lua stack limit");
   } else {
     interpreter->SerializeResult(&ser);
   }
+
   interpreter->ResetStack();
 }
 
