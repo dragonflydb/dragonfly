@@ -410,6 +410,9 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
     db.stats.inline_keys += it->first.IsInline();
     db.stats.obj_memory_usage += it->first.MallocUsed();
 
+    // Update the type stats here.
+    db.stats.typez_freq[it -> first.ObjType()]++;
+
     events_.garbage_collected = db.prime.garbage_collected();
     events_.stash_unloaded = db.prime.stash_unloaded();
     events_.evicted_keys += evp.evicted();

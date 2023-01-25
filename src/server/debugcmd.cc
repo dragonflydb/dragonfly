@@ -12,6 +12,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "redis/object.h"
 #include "server/blocking_controller.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -112,6 +113,8 @@ void DebugCmd::Run(CmdArgList args) {
         "    If <size> is specified then X character is concatenated multiple times to value:<num>",
         "    to meet value size.",
         "    If RAND is specified than value will be set to random hex string in specified size.",
+        "TYPEZ",
+        "    Prints the distribution of types in the database.",
         "HELP",
         "    Prints this help.",
     };
@@ -143,6 +146,10 @@ void DebugCmd::Run(CmdArgList args) {
   if (subcmd == "OBJECT" && args.size() == 3) {
     string_view key = ArgS(args, 2);
     return Inspect(key);
+  }
+
+  if (subcmd == "TYPEZ") {
+    return Typez();
   }
 
   string reply = UnknownSubCmd(subcmd, "DEBUG");
@@ -412,6 +419,25 @@ void DebugCmd::Watched() {
 
   shard_set->RunBlockingInParallel(cb);
   (*cntx_)->SendStringArr(watched_keys);
+}
+
+void DebugCmd::Typez() {
+  vector<string> type_counts;
+
+  DbSlice& db_slice = EngineShard::tlocal()->db_slice();
+  DbTable& db = db_slice.GetDBTable(cntx_ -> db_index());
+
+  string resp;
+
+  StrAppend(&resp, "STRING count: ", db.stats.typez_freq[OBJ_STRING]);
+  StrAppend(&resp, "LIST count: ", db.stats.typez_freq[OBJ_LIST]);
+  StrAppend(&resp, "SET count: ", db.stats.typez_freq[OBJ_SET]);
+  StrAppend(&resp, "ZSET count: ", db.stats.typez_freq[OBJ_ZSET]);
+  StrAppend(&resp, "HASH count: ", db.stats.typez_freq[OBJ_HASH]);
+  StrAppend(&resp, "MODULE count: ", db.stats.typez_freq[OBJ_MODULE]);
+  StrAppend(&resp, "STREAM count: ", db.stats.typez_freq[OBJ_STREAM]);
+
+  (*cntx_) -> SendSimpleString(resp);
 }
 
 }  // namespace dfly
