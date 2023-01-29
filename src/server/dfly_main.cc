@@ -195,7 +195,7 @@ struct VersionMonitor {
 void VersionMonitor::Run(ProactorPool* proactor_pool) {
   // Don't run in dev environment - i.e. where we don't build with
   // real version number
-  if (!GetFlag(FLAGS_version_check) || kGitTag[0] != 'v')
+  if (!GetFlag(FLAGS_version_check) || kGitTag[0] != 'v' || strchr(kGitTag, '-') != NULL)
     return;
 
   SSL_CTX* ssl_ctx = TlsClient::CreateSslContext();
