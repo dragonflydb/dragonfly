@@ -60,7 +60,7 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           apt update && apt install -q -y autoconf-archive cmake curl git libssl-dev \
               libunwind-dev ninja-build libtool gcc-9 g++-9 libboost-fiber-dev \
-              libxml2-dev zip libzstd-dev
+              libxml2-dev zip libzstd-dev debhelper moreutils
           update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 40  \
                               --slave /usr/bin/g++ g++ /usr/bin/g++-9
         run: |
@@ -89,7 +89,9 @@ jobs:
       uses: actions/upload-artifact@v3
       with:
         name: dragonfly-aarch64
-        path: build-opt/dragonfly-*tar.gz, build-opt/dragonfly_*.deb
+        path: |
+          build-opt/dragonfly-*tar.gz
+          build-opt/dragonfly_*.deb
 
   build-native:
     runs-on: ubuntu-latest
