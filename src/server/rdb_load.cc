@@ -1981,9 +1981,7 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service, DbIndex dbid) {
   while (done < num_entries) {
     journal::ParsedEntry entry{};
     SET_OR_RETURN(journal_reader_.ReadEntry(), entry);
-    if (entry.opcode == journal::Op::COMMAND || entry.opcode == journal::Op::MULTI_COMMAND) {
-      ex.Execute(entry.dbid, entry.cmd);
-    }
+    ex.Execute(entry.dbid, entry.cmd);
     done++;
   }
 
