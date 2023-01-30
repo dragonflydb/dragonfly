@@ -71,7 +71,7 @@ async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_
     await stream_task
 
     # Check data after full sync
-    await asyncio.sleep(3.0)
+    await asyncio.sleep(4.0)
     await check_data(seeder, replicas, c_replicas)
 
     # Stream more data in stable state
