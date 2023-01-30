@@ -41,6 +41,11 @@ const char kKey2[] = "b";
 const char kKey3[] = "c";
 const char kKey4[] = "y";
 
+const char kKeySid0[] = "x";
+const char kKeySid1[] = "c";
+const char kKeySid2[] = "b";
+const char kKey2Sid0[] = "y";
+
 }  // namespace
 
 // This test is responsible for server and main service
@@ -88,6 +93,15 @@ TEST_F(DflyEngineTest, Sds) {
 }
 
 TEST_F(DflyEngineTest, MultiAndEval) {
+  ShardId sid1 = Shard(kKey1, num_threads_ - 1);
+  ShardId sid2 = Shard(kKey2, num_threads_ - 1);
+  ShardId sid3 = Shard(kKey3, num_threads_ - 1);
+  ShardId sid4 = Shard(kKey4, num_threads_ - 1);
+  EXPECT_EQ(0, sid1);
+  EXPECT_EQ(2, sid2);
+  EXPECT_EQ(1, sid3);
+  EXPECT_EQ(0, sid4);
+
   RespExpr resp = Run({"multi"});
   ASSERT_EQ(resp, "OK");
 
@@ -139,6 +153,25 @@ TEST_F(DflyEngineTest, Multi) {
   ASSERT_FALSE(service_->IsLocked(0, kKey1));
   ASSERT_FALSE(service_->IsLocked(0, kKey4));
   ASSERT_FALSE(service_->IsShardSetLocked());
+}
+
+TEST_F(DflyEngineTest, MultiGlobalCommands) {
+  ASSERT_THAT(Run({"set", "key", "val"}), "OK");
+
+  ASSERT_THAT(Run({"multi"}), "OK");
+  ASSERT_THAT(Run({"move", "key", "2"}), "QUEUED");
+  ASSERT_THAT(Run({"save"}), "QUEUED");
+
+  RespExpr resp = Run({"exec"});
+  ASSERT_THAT(resp, ArrLen(2));
+
+  ASSERT_THAT(Run({"get", "key"}), ArgType(RespExpr::NIL));
+
+  ASSERT_THAT(Run({"select", "2"}), "OK");
+  ASSERT_THAT(Run({"get", "key"}), "val");
+
+  ASSERT_FALSE(service_->IsLocked(0, "key"));
+  ASSERT_FALSE(service_->IsLocked(2, "key"));
 }
 
 TEST_F(DflyEngineTest, HitMissStats) {
@@ -410,6 +443,59 @@ return {offset, epoch}
                    "2", "x", "y", "1", "2", "3", "4", "5", "6"});
   ASSERT_THAT(resp, ArrLen(2));
   EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(1), "6"));
+}
+
+// Scenario: 1. a lua call A schedules itself on shards 0, 1, 2.
+//           2. another lua call B schedules itself on shards 1,2 but on shard 1 (or 2) it
+//              schedules itself before A.
+//              the order of scheduling: shard 0: A, shard 1: B, A. shard 2: B, A.
+//           3. A is executes its first command first, which coincendently runs only on shard 0,
+//              hence A finishes before B and then it tries to cleanup.
+//           4. There was an incorrect cleanup of multi-transactions that breaks for shard 1 (or 2)
+//              because it assume the A is at front of the queue.
+TEST_F(DflyEngineTest, EvalBug713) {
+  const char* script = "return redis.call('get', KEYS[1])";
+
+  // A
+  auto fb0 = pp_->at(1)->LaunchFiber([&] {
+    fibers_ext::Yield();
+    for (unsigned i = 0; i < 50; ++i) {
+      Run({"eval", script, "3", kKeySid0, kKeySid1, kKeySid2});
+    }
+  });
+
+  // B
+  for (unsigned j = 0; j < 50; ++j) {
+    Run({"eval", script, "2", kKeySid1, kKeySid2});
+  }
+  fb0.Join();
+}
+
+// Tests deadlock that happenned due to a fact that trans->Schedule was called
+// before interpreter->Lock().
+//
+// The problematic scenario:
+// 1. transaction 1 schedules itself and blocks on an interpreter lock
+// 2. transaction 2 schedules itself, but meanwhile an interpreter unlocks itself and
+//    transaction 2 grabs the lock but can not progress due to transaction 1 already
+//    scheduled before.
+TEST_F(DflyEngineTest, EvalBug713b) {
+  const char* script = "return redis.call('get', KEYS[1])";
+
+  const uint32_t kNumFibers = 20;
+  fibers_ext::Fiber fibers[kNumFibers];
+
+  for (unsigned j = 0; j < kNumFibers; ++j) {
+    fibers[j] = pp_->at(1)->LaunchFiber([=, this] {
+      for (unsigned i = 0; i < 50; ++i) {
+        Run(StrCat("fb", j), {"eval", script, "3", kKeySid0, kKeySid1, kKeySid2});
+      }
+    });
+  }
+
+  for (unsigned j = 0; j < kNumFibers; ++j) {
+    fibers[j].Join();
+  }
 }
 
 TEST_F(DflyEngineTest, EvalSha) {

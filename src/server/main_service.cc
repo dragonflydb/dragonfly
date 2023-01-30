@@ -597,11 +597,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   }
 
   if (under_multi) {
-    if (cid->opt_mask() & CO::ADMIN) {
-      (*cntx)->SendError("Can not run admin commands under transactions");
-      return;
-    }
-
     if (cmd_name == "SELECT") {
       (*cntx)->SendError("Can not call SELECT within a transaction");
       return;
@@ -628,11 +623,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
       return (*cntx)->SendError(error);
     }
     // TODO: protect against aggregating huge transactions.
-    StoredCmd stored_cmd{cid};
-    stored_cmd.cmd.reserve(args.size());
-    for (size_t i = 0; i < args.size(); ++i) {
-      stored_cmd.cmd.emplace_back(ArgS(args, i));
-    }
+    StoredCmd stored_cmd{cid, args};
     dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
 
     return (*cntx)->SendSimpleString("QUEUED");
@@ -915,6 +906,8 @@ void Service::Unwatch(CmdArgList args, ConnectionContext* cntx) {
 
 void Service::CallFromScript(CmdArgList args, ObjectExplorer* reply, ConnectionContext* cntx) {
   DCHECK(cntx->transaction);
+  DVLOG(1) << "CallFromScript " << cntx->transaction->DebugId() << " " << ArgS(args, 0);
+
   InterpreterReplier replier(reply);
   facade::SinkReplyBuilder* orig = cntx->Inject(&replier);
 
@@ -1022,10 +1015,10 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   }
   DCHECK(cntx->transaction);
 
+  auto lk = interpreter->Lock();
+
   if (!eval_args.keys.empty())
     cntx->transaction->Schedule();
-
-  auto lk = interpreter->Lock();
 
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
@@ -1048,12 +1041,12 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   CHECK(result == Interpreter::RUN_OK);
 
   EvalSerializer ser{static_cast<RedisReplyBuilder*>(cntx->reply_builder())};
-
   if (!interpreter->IsResultSafe()) {
     (*cntx)->SendError("reached lua stack limit");
   } else {
     interpreter->SerializeResult(&ser);
   }
+
   interpreter->ResetStack();
 }
 
@@ -1148,22 +1141,15 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     CmdArgVec str_list;
 
     for (auto& scmd : exec_info.body) {
-      str_list.resize(scmd.cmd.size());
-      for (size_t i = 0; i < scmd.cmd.size(); ++i) {
-        string& s = scmd.cmd[i];
-        str_list[i] = MutableSlice{s.data(), s.size()};
-      }
-
       cntx->transaction->SetExecCmd(scmd.descr);
-      CmdArgList cmd_arg_list{str_list.data(), str_list.size()};
       if (IsTransactional(scmd.descr)) {
-        OpStatus st = cntx->transaction->InitByArgs(cntx->conn_state.db_index, cmd_arg_list);
+        OpStatus st = cntx->transaction->InitByArgs(cntx->conn_state.db_index, scmd.ArgList());
         if (st != OpStatus::OK) {
           (*cntx)->SendError(st);
           break;
         }
       }
-      scmd.descr->Invoke(cmd_arg_list, cntx);
+      scmd.Invoke(cntx);
       if (rb->GetError())  // checks for i/o error, not logical error.
         break;
     }

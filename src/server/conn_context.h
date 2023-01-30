@@ -13,13 +13,24 @@
 namespace dfly {
 
 class EngineShardSet;
+class ConnectionContext;
 
 struct StoredCmd {
   const CommandId* descr;
-  std::vector<std::string> cmd;
 
-  StoredCmd(const CommandId* d = nullptr) : descr(d) {
+ private:
+  std::vector<std::string> stored_args_;
+  CmdArgVec arg_vec_;
+  CmdArgList arg_list_;
+
+ public:
+  StoredCmd(const CommandId* d, CmdArgList args);
+
+  CmdArgList ArgList() const {
+    return arg_list_;
   }
+
+  void Invoke(ConnectionContext* ctx);
 };
 
 struct ConnectionState {
@@ -75,6 +86,14 @@ struct ConnectionState {
     util::fibers_ext::BlockingCounter borrow_token{0};
   };
 
+  struct ReplicationInfo {
+    // If this server is master, and this connection is from a secondary replica,
+    // then it holds positive sync session id.
+    uint32_t repl_session_id = 0;
+    uint32_t repl_flow_id = kuint32max;
+    uint32_t repl_listening_port = 0;
+  };
+
   enum MCGetMask {
     FETCH_CAS_VER = 1,
   };
@@ -86,12 +105,9 @@ struct ConnectionState {
   // For get op - we use it as a mask of MCGetMask values.
   uint32_t memcache_flag = 0;
 
-  // If this server is master, and this connection is from a secondary replica,
-  // then it holds positive sync session id.
-  uint32_t repl_session_id = 0;
-  uint32_t repl_flow_id = kuint32max;
-
   ExecInfo exec_info;
+  ReplicationInfo replicaiton_info;
+
   std::optional<ScriptInfo> script_info;
   std::unique_ptr<SubscribeInfo> subscribe_info;
 };
