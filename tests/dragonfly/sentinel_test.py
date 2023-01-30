@@ -1,5 +1,5 @@
-import inspect
 import subprocess
+from typing import Awaitable
 import aioredis
 import pytest
 import time
@@ -31,12 +31,11 @@ def wait_for(func, pred, timeout_sec, timeout_msg=""):
         time.sleep(1)
 
 async def await_for(func, pred, timeout_sec, timeout_msg=""):
-    is_func_async = inspect.iscoroutinefunction(func)
     done = False
     while not done:
-        val = None
-        if is_func_async: val = await func()
-        else: val = func()
+        val = func()
+        if isinstance(val, Awaitable):
+            val = await val
         done = pred(val)
         assert timeout_sec > 0, timeout_msg
         timeout_sec = timeout_sec - 1
@@ -152,9 +151,8 @@ async def test_failover(df_local_factory, sentinel):
 
     # Verify we can now write to replica and read replicated value from master.
     await replica_client.set("key", "value")
-    async def get(): return await master_client.get("key") # There is no async lambda
     await await_for(
-        get,
+        lambda: master_client.get("key"),
         lambda val: val == b"value",
         10, "Timeout waiting for key to exist in replica."
     )
