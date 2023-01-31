@@ -10,7 +10,7 @@ import asyncio
 # Output is expected be of even number of lines where each pair of consecutive lines results in a single key value pair.
 # If new_dict_key is not empty, encountering it in the output will start a new dictionary, this let us return multiple
 # dictionaries, for example in the 'slaves' command, one dictionary for each slave.
-def stdout_as_list_of_dicts(cp: subprocess.CompletedProcess, new_dict_key ="") -> list[dict]:
+def stdout_as_list_of_dicts(cp: subprocess.CompletedProcess, new_dict_key =""):
     lines = cp.stdout.splitlines()
     res = []
     d = None
