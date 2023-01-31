@@ -45,7 +45,7 @@ jobs:
           pip install -r dragonfly/requirements.txt
           export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
 
-          pytest -xv dragonfly
+          pytest -xvr dragonfly
 
       - name: Send notification on failure
         if: failure()
