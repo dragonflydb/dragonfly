@@ -279,9 +279,12 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 // no database switch can be performed between those two calls, because they are part of one
 // transaction.
 void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
-  if (entry.opcode != journal::Op::COMMAND && entry.opcode != journal::Op::MULTI_COMMAND) {
+  // We ignore non payload entries like EXEC because we have no transactional ordering during
+  // LOAD phase on replica.
+  if (!entry.HasPayload()) {
     return;
   }
+
   optional<RdbSerializer> tmp_serializer;
   RdbSerializer* serializer_ptr = default_serializer_.get();
   if (entry.dbid != current_db_) {

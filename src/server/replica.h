@@ -26,6 +26,7 @@ namespace dfly {
 class Service;
 class ConnectionContext;
 class JournalExecutor;
+class JournalReader;
 
 class Replica {
  private:
@@ -53,16 +54,22 @@ class Replica {
 
   // This class holds the commands of transaction in single shard.
   // Once all commands recieved the command can be executed.
-  struct TranactionData {
-    TxId txid;
-    uint32_t shard_cnt;
-    DbIndex dbid;
-    std::vector<journal::ParsedEntry::CmdData> commands;
+  struct TransactionData {
     // Update the data from ParsedEntry and return if all shard transaction commands were recieved.
-    bool UpdateFromParsedEntry(journal::ParsedEntry&& entry);
+    bool AddEntry(journal::ParsedEntry&& entry);
+
     bool IsGlobalCmd() const;
+
+    // Collect next complete transaction data from journal reader.
+    static std::optional<TransactionData> ReadNext(JournalReader* reader, Context* cntx);
+
+    TxId txid;
+    DbIndex dbid;
+    uint32_t shard_cnt;
+    std::vector<journal::ParsedEntry::CmdData> commands;
   };
 
+  // Coorindator for multi shard execution.
   struct MultiShardExecution {
     boost::fibers::mutex map_mu;
 
@@ -104,8 +111,9 @@ class Replica {
   std::error_code ConsumeRedisStream();  // Redis stable state.
   std::error_code ConsumeDflyStream();   // Dragonfly stable state.
 
-  void CloseSocket();   // Close replica sockets.
-  void JoinAllFlows();  // Join all flows if possible.
+  void CloseSocket();                 // Close replica sockets.
+  void JoinAllFlows();                // Join all flows if possible.
+  void SetShardStates(bool replica);  // Call SetReplica(replica) on all shards.
 
   // Send DFLY SYNC or DFLY STARTSTABLE if stable is true.
   std::error_code SendNextPhaseRequest(bool stable);
@@ -158,10 +166,10 @@ class Replica {
   // Send command, update last_io_time, return error.
   std::error_code SendCommand(std::string_view command, facade::ReqSerializer* serializer);
 
-  void ExecuteTx(TranactionData&& tx_data, bool inserted_by_me, Context* cntx);
-  void InsertTxDataToShardResource(TranactionData&& tx_data);
-  void ExecuteTxWithNoShardSync(TranactionData&& tx_data, Context* cntx);
-  bool InsertTxToSharedMap(const TranactionData& tx_data);
+  void ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context* cntx);
+  void InsertTxDataToShardResource(TransactionData&& tx_data);
+  void ExecuteTxWithNoShardSync(TransactionData&& tx_data, Context* cntx);
+  bool InsertTxToSharedMap(const TransactionData& tx_data);
 
  public: /* Utility */
   struct Info {
@@ -197,10 +205,11 @@ class Replica {
 
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;
 
-  std::queue<std::pair<TranactionData, bool>> trans_data_queue_;
+  std::queue<std::pair<TransactionData, bool>> trans_data_queue_;
   static constexpr size_t kYieldAfterItemsInQueue = 50;
-  ::util::fibers_ext::EventCount waker_;
+  ::util::fibers_ext::EventCount waker_;  // waker for trans_data_queue_
   bool use_multi_shard_exe_sync_;
+
   std::unique_ptr<JournalExecutor> executor_;
 
   // MainReplicationFb in standalone mode, FullSyncDflyFb in flow mode.

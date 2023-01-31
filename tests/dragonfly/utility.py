@@ -174,15 +174,21 @@ class CommandGenerator:
 
     def gen_shrink_cmd(self):
         """
-        Generate command that shrinks data: DEL of random keys.
+        Generate command that shrinks data: DEL of random keys or almost immediate <=50ms PEXPIRE.
         """
-        keys_gen = (self.randomize_key(pop=True)
+        if random.random() < 0.3:
+            key, _ = self.randomize_key(pop=True)
+            if key == None:
+                return None, 0
+            return f"PEXPIRE k{key} {random.randint(0, 50)}", -1
+        else:
+            keys_gen = (self.randomize_key(pop=True)
                     for _ in range(random.randint(1, self.max_multikey)))
-        keys = [f"k{k}" for k, _ in keys_gen if k is not None]
+            keys = [f"k{k}" for k, _ in keys_gen if k is not None]
 
-        if len(keys) == 0:
-            return None, 0
-        return "DEL " + " ".join(keys), -len(keys)
+            if len(keys) == 0:
+                return None, 0
+            return "DEL " + " ".join(keys), -len(keys)
 
     UPDATE_ACTIONS = [
         ('APPEND {k} {val}', ValueType.STRING),

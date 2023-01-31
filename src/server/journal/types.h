@@ -15,6 +15,7 @@ namespace journal {
 enum class Op : uint8_t {
   NOOP = 0,
   SELECT = 6,
+  EXPIRED = 9,
   COMMAND = 10,
   MULTI_COMMAND = 11,
   EXEC = 12,
@@ -43,8 +44,13 @@ struct Entry : public EntryBase {
 
   Entry(journal::Op opcode, DbIndex dbid) : EntryBase{0, opcode, dbid, 0}, payload{} {
   }
+
   Entry(TxId txid, journal::Op opcode, DbIndex dbid, uint32_t shard_cnt)
       : EntryBase{txid, opcode, dbid, shard_cnt}, payload{} {
+  }
+
+  bool HasPayload() const {
+    return !std::holds_alternative<std::monostate>(payload);
   }
 
   Payload payload;

@@ -182,6 +182,9 @@ void Replica::Pause(bool pause) {
 }
 
 void Replica::MainReplicationFb() {
+  // Switch shard states to replication.
+  SetShardStates(true);
+
   error_code ec;
   while (state_mask_ & R_ENABLED) {
     // Discard all previous errors and set default error handler.
@@ -239,7 +242,11 @@ void Replica::MainReplicationFb() {
     state_mask_ &= ~R_SYNC_OK;
   }
 
+  // Wait for unblocking cleanup to finish.
   cntx_.JoinErrorHandler();
+
+  // Revert shard states to normal state.
+  SetShardStates(false);
 
   VLOG(1) << "Main replication fiber finished";
 }
@@ -646,6 +653,10 @@ void Replica::JoinAllFlows() {
   }
 }
 
+void Replica::SetShardStates(bool replica) {
+  shard_set->RunBriefInParallel([replica](EngineShard* shard) { shard->SetReplica(replica); });
+}
+
 void Replica::DefaultErrorHandler(const GenericError& err) {
   CloseSocket();
 }
@@ -793,37 +804,29 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
   JournalReader reader{&ps, 0};
 
   while (!cntx->IsCancelled()) {
-    TranactionData tx_data;
-    while (!cntx->IsCancelled()) {
-      waker_.await([&]() {
-        return ((trans_data_queue_.size() < kYieldAfterItemsInQueue) || cntx->IsCancelled());
-      });
-      if (cntx->IsCancelled()) {
-        return;
-      }
-      auto res = reader.ReadEntry();
-      if (!res) {
-        cntx->ReportError(res.error(), "Journal format error");
-        return;
-      }
-      last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
-      bool tx_data_full = tx_data.UpdateFromParsedEntry(std::move(*res));
-      if (tx_data_full == true) {
-        break;
-      }
-    }
+    waker_.await([&]() {
+      return ((trans_data_queue_.size() < kYieldAfterItemsInQueue) || cntx->IsCancelled());
+    });
+    if (cntx->IsCancelled())
+      break;
+
+    auto tx_data = TransactionData::ReadNext(&reader, cntx);
+    if (!tx_data)
+      break;
+
+    last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
+
     if (use_multi_shard_exe_sync_) {
-      InsertTxDataToShardResource(std::move(tx_data));
+      InsertTxDataToShardResource(std::move(*tx_data));
     } else {
-      ExecuteTxWithNoShardSync(std::move(tx_data), cntx);
+      ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
     }
 
     waker_.notify();
   }
-  return;
 }
 
-void Replica::ExecuteTxWithNoShardSync(TranactionData&& tx_data, Context* cntx) {
+void Replica::ExecuteTxWithNoShardSync(TransactionData&& tx_data, Context* cntx) {
   if (cntx->IsCancelled()) {
     return;
   }
@@ -836,8 +839,8 @@ void Replica::ExecuteTxWithNoShardSync(TranactionData&& tx_data, Context* cntx) 
   ExecuteTx(std::move(tx_data), was_insert, cntx);
 }
 
-bool Replica::InsertTxToSharedMap(const TranactionData& tx_data) {
-  std::lock_guard lg{multi_shard_exe_->map_mu};
+bool Replica::InsertTxToSharedMap(const TransactionData& tx_data) {
+  std::lock_guard lk{multi_shard_exe_->map_mu};
 
   auto [it, was_insert] =
       multi_shard_exe_->tx_sync_execution.emplace(tx_data.txid, tx_data.shard_cnt);
@@ -848,7 +851,7 @@ bool Replica::InsertTxToSharedMap(const TranactionData& tx_data) {
   return was_insert;
 }
 
-void Replica::InsertTxDataToShardResource(TranactionData&& tx_data) {
+void Replica::InsertTxDataToShardResource(TransactionData&& tx_data) {
   bool was_insert = false;
   if (tx_data.shard_cnt > 1) {
     was_insert = InsertTxToSharedMap(tx_data);
@@ -870,11 +873,9 @@ void Replica::StableSyncDflyExecFb(Context* cntx) {
     trans_data_queue_.pop();
     waker_.notify();
   }
-
-  return;
 }
 
-void Replica::ExecuteTx(TranactionData&& tx_data, bool inserted_by_me, Context* cntx) {
+void Replica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context* cntx) {
   if (cntx->IsCancelled()) {
     return;
   }
@@ -925,7 +926,8 @@ void Replica::ExecuteTx(TranactionData&& tx_data, bool inserted_by_me, Context* 
   }
 
   // Erase from map can be done only after all flow fibers executed the transaction commands.
-  // The last fiber which will decrease the counter to 0 will be the one to erase the data from map
+  // The last fiber which will decrease the counter to 0 will be the one to erase the data from
+  // map
   auto val = multi_shard_data.counter.fetch_sub(1, std::memory_order_relaxed);
   VLOG(2) << "txid: " << tx_data.txid << " counter: " << val;
   if (val == 1) {
@@ -1162,29 +1164,46 @@ error_code Replica::SendCommand(string_view command, ReqSerializer* serializer) 
   return ec;
 }
 
-bool Replica::TranactionData::UpdateFromParsedEntry(journal::ParsedEntry&& entry) {
-  if (entry.opcode == journal::Op::EXEC) {
-    shard_cnt = entry.shard_cnt;
-    dbid = entry.dbid;
-    txid = entry.txid;
-    return true;
-  } else if (entry.opcode == journal::Op::COMMAND) {
-    txid = entry.txid;
-    shard_cnt = entry.shard_cnt;
-    dbid = entry.dbid;
-    commands.push_back(std::move(entry.cmd));
-    return true;
-  } else if (entry.opcode == journal::Op::MULTI_COMMAND) {
-    commands.push_back(std::move(entry.cmd));
-    return false;
-  } else {
-    DCHECK(false) << "Unsupported opcode";
+bool Replica::TransactionData::AddEntry(journal::ParsedEntry&& entry) {
+  // Expiry joins multi transaction or runs standalone.
+  if (entry.opcode == journal::Op::EXPIRED) {
+    entry.opcode = commands.empty() ? journal::Op::COMMAND : journal::Op::MULTI_COMMAND;
+  }
+
+  switch (entry.opcode) {
+    case journal::Op::COMMAND:
+      commands.push_back(std::move(entry.cmd));
+      [[fallthrough]];
+    case journal::Op::EXEC:
+      shard_cnt = entry.shard_cnt;
+      dbid = entry.dbid;
+      txid = entry.txid;
+      return true;
+    case journal::Op::MULTI_COMMAND:
+      commands.push_back(std::move(entry.cmd));
+      return false;
+    default:
+      DCHECK(false) << "Unsupported opcode";
   }
   return false;
 }
 
-bool Replica::TranactionData::IsGlobalCmd() const {
+bool Replica::TransactionData::IsGlobalCmd() const {
   return commands.size() == 1 && commands.front().cmd_args.size() == 1;
+}
+
+auto Replica::TransactionData::ReadNext(JournalReader* reader, Context* cntx)
+    -> optional<TransactionData> {
+  TransactionData out;
+  io::Result<journal::ParsedEntry> res;
+  do {
+    if (res = reader->ReadEntry(); !res) {
+      cntx->ReportError(res.error());
+      return std::nullopt;
+    }
+  } while (!cntx->IsCancelled() && !out.AddEntry(std::move(*res)));
+
+  return cntx->IsCancelled() ? std::nullopt : make_optional(std::move(out));
 }
 
 }  // namespace dfly
