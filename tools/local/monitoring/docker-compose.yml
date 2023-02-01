@@ -46,7 +46,9 @@ services:
     restart: always
     environment:
       # do not really need it, just to leave it as an example on how to install plugins here
-      GF_INSTALL_PLUGINS: 'grafana-clock-panel'
+      - GF_INSTALL_PLUGINS=grafana-clock-panel
+      - GF_RENDERING_SERVER_URL=http://renderer:8081/render
+      - GF_RENDERING_CALLBACK_URL=http://grafana:3000/
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning/:/etc/grafana/provisioning/
@@ -56,3 +58,8 @@ services:
       - 3000:3000
     depends_on:
       - prometheus
+
+  renderer:
+    image: grafana/grafana-image-renderer:latest
+    ports:
+      - 8081
