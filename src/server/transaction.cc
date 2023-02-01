@@ -320,7 +320,6 @@ bool Transaction::RunInShard(EngineShard* shard) {
   DCHECK(sd.local_mask & ARMED);
   sd.local_mask &= ~ARMED;
 
-  bool was_suspended = sd.local_mask & SUSPENDED_Q;
   bool awaked_prerun = (sd.local_mask & AWAKED_Q) != 0;
   bool incremental_lock = multi_ && multi_->is_expanding;
 
@@ -373,7 +372,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
 
   /*************************************************************************/
 
-  if (!was_suspended && is_concluding)  // Check last hop & non suspended.
+  if (is_concluding)  // Check last hop
     LogAutoJournalOnShard(shard);
 
   // at least the coordinator thread owns the reference.
@@ -400,7 +399,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
       // If a transaction has been suspended, we keep the lock so that future transaction
       // touching those keys will be ordered via TxQueue. It's necessary because we preserve
       // the atomicity of awaked transactions by halting the TxQueue.
-      if (was_suspended || !become_suspended) {
+      if (!become_suspended) {
         shard->db_slice().Release(mode, largs);
         sd.local_mask &= ~KEYLOCK_ACQUIRED;
       }
