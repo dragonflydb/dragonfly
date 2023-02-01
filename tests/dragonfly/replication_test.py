@@ -513,8 +513,12 @@ async def test_rewrites(df_local_factory):
 
         # Check there is no rewrite for RPOPLPUSH on single shard
         await check("RPOPLPUSH list list", r"RPOPLPUSH list list")
-        # Check there is no rewrite for BRPOPLPUSH on single shard
-        await check("BRPOPLPUSH list list 0", r"BRPOPLPUSH list list 0")
+        # Check BRPOPLPUSH on single shard turns into RPOPLPUSH
+        await check("BRPOPLPUSH list list 0", r"RPOPLPUSH list list")
+        # Check BLPOP turns into LPOP
+        await check("BLPOP list 0", r"LPOP list")
+        # Check BRPOP turns into RPOP
+        await check("BRPOP list 0", r"RPOP list")
 
 
         await c_master.lpush("list1s", "v1", "v2", "v3", "v4")
