@@ -461,6 +461,7 @@ error_code Replica::InitiateDflySync() {
     // We do the following operations regardless of outcome.
     JoinAllFlows();
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+    state_mask_ &= ~R_SYNCING;
   };
 
   // Initialize MultiShardExecution.
@@ -497,6 +498,7 @@ error_code Replica::InitiateDflySync() {
   JournalExecutor{&service_}.FlushAll();
 
   // Start full sync flows.
+  state_mask_ |= R_SYNCING;
   {
     auto partition = Partition(num_df_flows_);
     auto shard_cb = [&](unsigned index, auto*) {
