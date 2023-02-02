@@ -48,7 +48,7 @@ jobs:
           pytest -xvr dragonfly
 
       - name: Send notification on failure
-        if: failure()
+        if: failure() || cancelled()
         run: |
           curl -s \
             -X POST \
