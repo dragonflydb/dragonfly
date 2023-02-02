@@ -24,6 +24,7 @@ extern "C" {
 #include "server/journal/serializer.h"
 #include "server/main_service.h"
 #include "server/rdb_load.h"
+#include "strings/human_readable.h"
 #include "util/proactor_base.h"
 
 ABSL_FLAG(bool, enable_multi_shard_sync, true,
@@ -457,6 +458,8 @@ error_code Replica::InitiatePSync() {
 
 // Initialize and start sub-replica for each flow.
 error_code Replica::InitiateDflySync() {
+  auto start_time = absl::Now();
+
   absl::Cleanup cleanup = [this]() {
     // We do the following operations regardless of outcome.
     JoinAllFlows();
@@ -536,7 +539,8 @@ error_code Replica::InitiateDflySync() {
 
   // Joining flows and resetting state is done by cleanup.
 
-  LOG(INFO) << "Full sync finished ";
+  double seconds = double(absl::ToInt64Milliseconds(absl::Now() - start_time)) / 1000;
+  LOG(INFO) << "Full sync finished in " << strings::HumanReadableElapsedTime(seconds);
   return cntx_.GetError();
 }
 
