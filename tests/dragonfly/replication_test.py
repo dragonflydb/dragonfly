@@ -70,25 +70,33 @@ async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_
     ), "Weak testcase. Increase number of streamed iterations to surpass full sync"
     await stream_task
 
+    async def check_replica_finished_exec(c_replica):
+        info_stats = await c_replica.execute_command("INFO")
+        tc1 = info_stats['total_commands_processed']
+        await asyncio.sleep(0.1)
+        info_stats = await c_replica.execute_command("INFO")
+        tc2 = info_stats['total_commands_processed']
+        return tc1+1 == tc2 # Replica processed only the info command on above sleep.
+
+    async def check_all_replicas_finished():
+        while True:
+            await asyncio.sleep(1.0)
+            is_finished_arr = await asyncio.gather(*(asyncio.create_task(check_replica_finished_exec(c))
+                                                     for c in c_replicas))
+            all_replicas_finished = all(is_finished_arr)
+            if all_replicas_finished:
+                break
+
     # Check data after full sync
-    await asyncio.sleep(4.0)
+    await check_all_replicas_finished()
     await check_data(seeder, replicas, c_replicas)
 
     # Stream more data in stable state
     await seeder.run(target_ops=2000)
 
     # Check data after stable state stream
-    await asyncio.sleep(3.0)
+    await check_all_replicas_finished()
     await check_data(seeder, replicas, c_replicas)
-
-    # Issue lots of deletes
-    # TODO: Enable after stable state is faster
-    # seeder.target(100)
-    # await seeder.run(target_deviation=0.1)
-
-    # Check data after deletes
-    # await asyncio.sleep(2.0)
-    # await check_data(seeder, replicas, c_replicas)
 
 
 async def check_data(seeder, replicas, c_replicas):

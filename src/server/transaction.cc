@@ -373,7 +373,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
 
   /*************************************************************************/
 
-  if (!was_suspended && is_concluding)  // Check last hop & non suspended.
+  if (is_concluding)  // Check last hop
     LogAutoJournalOnShard(shard);
 
   // at least the coordinator thread owns the reference.
