@@ -373,8 +373,8 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
     }
   }
 
-  PrimeEvictionPolicy evp{cntx, bool(caching_mode_), int64_t(memory_budget_ - key.size()),
-                          ssize_t(soft_budget_limit_), this};
+  PrimeEvictionPolicy evp{cntx, (bool(caching_mode_) && !owner_->IsReplica()),
+                          int64_t(memory_budget_ - key.size()), ssize_t(soft_budget_limit_), this};
 
   // If we are over limit in non-cache scenario, just be conservative and throw.
   if (!caching_mode_ && evp.mem_budget() < 0) {
@@ -906,6 +906,9 @@ void DbSlice::CreateDb(DbIndex db_ind) {
 // "it" is the iterator that we just added/updated and it should not be deleted.
 // "table" is the instance where we should delete the objects from.
 size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* table) {
+  if (owner_->IsReplica()) {
+    return 0;
+  }
   PrimeTable::Segment_t* segment = table->prime.GetSegment(it.segment_id());
   DCHECK(segment);
 
