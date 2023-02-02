@@ -1026,6 +1026,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
       [cntx, this](CmdArgList args, ObjectExplorer* reply) { CallFromScript(args, reply, cntx); });
 
   Interpreter::RunResult result = interpreter->RunFunction(eval_args.sha, &error);
+  absl::Cleanup clean = [interpreter]() { interpreter->ResetStack(); };
 
   cntx->conn_state.script_info.reset();  // reset script_info
 
@@ -1046,8 +1047,6 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   } else {
     interpreter->SerializeResult(&ser);
   }
-
-  interpreter->ResetStack();
 }
 
 void Service::Discard(CmdArgList args, ConnectionContext* cntx) {
