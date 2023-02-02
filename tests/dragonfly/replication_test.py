@@ -83,8 +83,7 @@ async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_
             await asyncio.sleep(1.0)
             is_finished_arr = await asyncio.gather(*(asyncio.create_task(check_replica_finished_exec(c))
                                                      for c in c_replicas))
-            all_replicas_finished = all(is_finished_arr)
-            if all_replicas_finished:
+            if all(is_finished_arr):
                 break
 
     # Check data after full sync
