@@ -486,7 +486,7 @@ TEST_F(DflyEngineTest, EvalBug713b) {
   fibers_ext::Fiber fibers[kNumFibers];
 
   for (unsigned j = 0; j < kNumFibers; ++j) {
-    fibers[j] = pp_->at(1)->LaunchFiber([=, this] {
+    fibers[j] = pp_->at(1)->LaunchFiber([=] {
       for (unsigned i = 0; i < 50; ++i) {
         Run(StrCat("fb", j), {"eval", script, "3", kKeySid0, kKeySid1, kKeySid2});
       }
@@ -896,6 +896,15 @@ TEST_F(DflyEngineTest, Issue679) {
   Run({"EXPIRE", "a", "1000"});
   Run({"HMSET", "a", "key", "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"});
   Run({"EXPIRE", "a", "1001"});
+}
+
+TEST_F(DflyEngineTest, Issue742) {
+  // https://github.com/dragonflydb/dragonfly/issues/607
+  // The stack was not cleaned in case of an error and it blew up.
+  for (int i = 0; i < 3'000; i++) {
+    Run({"EVAL", "redis.get(KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5])", "5", "k1", "k2", "k3",
+         "k4", "k5"});
+  }
 }
 
 TEST_F(DefragDflyEngineTest, TestDefragOption) {
