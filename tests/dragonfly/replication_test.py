@@ -602,6 +602,6 @@ async def test_expiry(df_local_factory, n_keys=1000):
     # Disconnect from master
     await c_replica.execute_command("REPLICAOF NO ONE")
 
-    # Check replica evicts keys on its own
+    # Check replica expires keys on its own
     await asyncio.sleep(1.0)
     assert len(await c_replica.keys()) == 0
