@@ -455,7 +455,11 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
 
   if (saver->Mode() == SaveMode::SUMMARY) {
     auto scripts = sf_->script_mgr()->GetLuaScripts();
-    ec = saver->SaveHeader(scripts);
+    StringVec script_bodies;
+    for (auto& script : scripts) {
+      script_bodies.push_back(move(script.second));
+    }
+    ec = saver->SaveHeader(script_bodies);
   } else {
     ec = saver->SaveHeader({});
   }

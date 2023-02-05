@@ -945,7 +945,12 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   eval_args.sha = result;
   eval_args.keys = args.subspan(3, num_keys);
   eval_args.args = args.subspan(3 + num_keys);
+
+  uint64_t start = absl::GetCurrentTimeNanos();
   EvalInternal(eval_args, &script, cntx);
+
+  uint64_t end = absl::GetCurrentTimeNanos();
+  ss->RecordCallLatency(result, (end - start) / 1000);
 }
 
 void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
@@ -977,7 +982,11 @@ void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
   ev_args.keys = args.subspan(3, num_keys);
   ev_args.args = args.subspan(3 + num_keys);
 
+  uint64_t start = absl::GetCurrentTimeNanos();
   EvalInternal(ev_args, &script, cntx);
+
+  uint64_t end = absl::GetCurrentTimeNanos();
+  ss->RecordCallLatency(sha, (end - start) / 1000);
 }
 
 void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,

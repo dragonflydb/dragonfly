@@ -7,6 +7,7 @@
 #include <optional>
 #include <vector>
 
+#include "base/histogram.h"
 #include "core/interpreter.h"
 #include "server/common.h"
 #include "util/sliding_counter.h"
@@ -152,6 +153,14 @@ class ServerState {  // public struct - to allow initialization.
     return monitors_;
   }
 
+  const absl::flat_hash_map<std::string, base::Histogram>& call_latency_histos() const {
+    return call_latency_histos_;
+  }
+
+  void RecordCallLatency(std::string_view sha, uint64_t latency_usec) {
+    call_latency_histos_[sha].Add(latency_usec);
+  }
+
  private:
   int64_t live_transactions_ = 0;
   mi_heap_t* data_heap_;
@@ -164,6 +173,8 @@ class ServerState {  // public struct - to allow initialization.
   Counter qps_;
 
   MonitorsRepo monitors_;
+
+  absl::flat_hash_map<std::string, base::Histogram> call_latency_histos_;
 
   static thread_local ServerState state_;
 };
