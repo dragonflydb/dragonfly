@@ -1,3 +1,4 @@
+import pathlib
 import subprocess
 from typing import Awaitable
 import aioredis
@@ -43,32 +44,29 @@ async def await_for(func, pred, timeout_sec, timeout_msg=""):
 
 
 class Sentinel:
-    def __init__(self) -> None:
+    def __init__(self, config_dir) -> None:
+        self.config_file = pathlib.Path(config_dir).joinpath("sentinel.conf")
         self.port = 5555
         self.image = "bitnami/redis-sentinel:latest"
         self.container_name = "sentinel_test_py_sentinel"
         self.default_deployment = "my_deployment"
         self.initial_master_port = 1111
+        self.proc = None
 
     def start(self):
-        self.stop() # cleanup potential zombies
+        config = [
+            f"port {self.port}",
+            f"sentinel monitor {self.default_deployment} 127.0.01 {self.initial_master_port} 1",
+            f"sentinel down-after-milliseconds {self.default_deployment} 3000"
+            ]
+        self.config_file.write_text("\n".join(config))
 
-        cmd = [
-            "docker", "run",
-            "--network=host",
-            "-d",
-            f"--name={self.container_name}",
-            "-e", "REDIS_MASTER_HOST=localhost",
-            "-e", f"REDIS_MASTER_PORT_NUMBER={self.initial_master_port}",
-            "-e", f"REDIS_MASTER_SET={self.default_deployment}",
-            "-e", f"REDIS_SENTINEL_PORT_NUMBER={self.port}",
-            "-e", "REDIS_SENTINEL_QUORUM=1",
-            "-e", "REDIS_SENTINEL_DOWN_AFTER_MILLISECONDS=3000",
-            "bitnami/redis-sentinel:latest"]
-        assert subprocess.run(cmd).returncode == 0, "docker run failed."
+        print(self.config_file.read_text())
+
+        self.proc = subprocess.Popen(["redis-server", f"{self.config_file.absolute()}", "--sentinel"])
 
     def stop(self):
-        assert subprocess.run(["docker", "rm", "-f", "-v", f"{self.container_name}"]).returncode == 0, "docker rm failed."
+        self.proc.terminate()
 
     def run_cmd(self, args, sentinel_cmd=True, capture_output=False, assert_ok=True) -> subprocess.CompletedProcess:
         run_args = ["redis-cli", "-p", f"{self.port}"]
@@ -110,8 +108,8 @@ class Sentinel:
 
 
 @pytest.fixture(scope="function") # Sentinel has state which we don't want carried over form test to test.
-def sentinel() -> Sentinel:
-    s = Sentinel()
+def sentinel(tmp_dir) -> Sentinel:
+    s = Sentinel(tmp_dir)
     s.start()
     s.wait_ready()
     yield s
@@ -119,7 +117,6 @@ def sentinel() -> Sentinel:
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason="Fails on CI")
 async def test_failover(df_local_factory, sentinel):
     master = df_local_factory.create(port=sentinel.initial_master_port)
     replica = df_local_factory.create(port=master.port + 1)
@@ -146,7 +143,7 @@ async def test_failover(df_local_factory, sentinel):
     await await_for(
         lambda: sentinel.live_master_port(),
         lambda p: p == replica.port,
-        timeout_sec=3, timeout_msg="Timeout waiting for sentinel to report replica as master."
+        timeout_sec=10, timeout_msg="Timeout waiting for sentinel to report replica as master."
     )
     assert sentinel.slaves()[0]["port"] == str(master.port)
 
@@ -160,7 +157,6 @@ async def test_failover(df_local_factory, sentinel):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason="Fails on CI")
 async def test_master_failure(df_local_factory, sentinel):
     master = df_local_factory.create(port=sentinel.initial_master_port)
     replica = df_local_factory.create(port=master.port + 1)
@@ -187,7 +183,7 @@ async def test_master_failure(df_local_factory, sentinel):
     await await_for(
         lambda: sentinel.live_master_port(),
         lambda p: p == replica.port,
-        timeout_sec=1000, timeout_msg="Timeout waiting for sentinel to report replica as master."
+        timeout_sec=300, timeout_msg="Timeout waiting for sentinel to report replica as master."
     )
 
     # Verify we can now write to replica.
