@@ -111,7 +111,7 @@ with respect to Memcached and Redis APIs.
 - [X] List Family
   - [X] BLPOP
   - [X] BRPOP
-  - [ ] BRPOPLPUSH
+  - [X] BRPOPLPUSH
   - [X] LINSERT
   - [X] LPUSHX
   - [X] RPUSHX
@@ -250,12 +250,13 @@ with respect to Memcached and Redis APIs.
 - [X] List Family
   - [X] LMOVE
   - [X] LPOS
+  - [X] BLMOVE
 
 - [ ] Stream Family
   - [ ] XAUTOCLAIM
 
-- [ ] Sorted Set Family
-  - [ ] ZUNION
+- [X] Sorted Set Family
+  - [X] ZUNION
 
 ## Notes
 Some commands were implemented as decorators along the way:
