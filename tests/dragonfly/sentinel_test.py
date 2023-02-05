@@ -56,7 +56,7 @@ class Sentinel:
     def start(self):
         config = [
             f"port {self.port}",
-            f"sentinel monitor {self.default_deployment} 127.0.01 {self.initial_master_port} 1",
+            f"sentinel monitor {self.default_deployment} 127.0.0.1 {self.initial_master_port} 1",
             f"sentinel down-after-milliseconds {self.default_deployment} 3000"
             ]
         self.config_file.write_text("\n".join(config))
