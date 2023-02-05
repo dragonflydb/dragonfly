@@ -9,6 +9,7 @@
 #include "base/logging.h"
 #include "core/interpreter.h"
 #include "facade/error.h"
+#include "server/engine_shard_set.h"
 #include "server/server_state.h"
 
 namespace dfly {
@@ -30,6 +31,10 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
         "   Return information about the existence of the scripts in the script cache.",
         "LOAD <script>",
         "   Load a script into the scripts cache without executing it.",
+        "LIST",
+        "   Lists loaded scripts.",
+        "LATENCY",
+        "   Prints latency histograms in usec for every called function.",
         "HELP"
         "   Prints this help."};
     return (*cntx)->SendSimpleStrArr(kHelp, ABSL_ARRAYSIZE(kHelp));
@@ -49,6 +54,14 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
       (*cntx)->SendLong(v);
     }
     return;
+  }
+
+  if (subcmd == "LIST") {
+    return ListScripts(cntx);
+  }
+
+  if (subcmd == "LATENCY") {
+    return PrintLatency(cntx);
   }
 
   if (subcmd == "LOAD" && args.size() == 2) {
@@ -111,16 +124,49 @@ const char* ScriptMgr::Find(std::string_view sha) const {
   return it->second.get();
 }
 
-vector<string> ScriptMgr::GetLuaScripts() const {
-  vector<string> res;
+vector<pair<string, string>> ScriptMgr::GetLuaScripts() const {
+  vector<pair<string, string>> res;
 
   lock_guard lk(mu_);
   res.reserve(db_.size());
   for (const auto& k_v : db_) {
-    res.emplace_back(k_v.second.get());
+    string key(k_v.first.data(), k_v.first.size());
+
+    res.emplace_back(move(key), k_v.second.get());
   }
 
   return res;
+}
+
+void ScriptMgr::ListScripts(ConnectionContext* cntx) {
+  vector<pair<string, string>> scripts = GetLuaScripts();
+  (*cntx)->StartArray(scripts.size());
+  for (const auto& k_v : scripts) {
+    (*cntx)->StartArray(2);
+    (*cntx)->SendBulkString(k_v.first);
+    (*cntx)->SendBulkString(k_v.second);
+  }
+}
+
+void ScriptMgr::PrintLatency(ConnectionContext* cntx) {
+  absl::flat_hash_map<std::string, base::Histogram> result;
+  boost::fibers::mutex mu;
+
+  shard_set->pool()->AwaitFiberOnAll([&](auto* pb) {
+    auto* ss = ServerState::tlocal();
+    mu.lock();
+    for (const auto& k_v : ss->call_latency_histos()) {
+      result[k_v.first].Merge(k_v.second);
+    }
+    mu.unlock();
+  });
+
+  (*cntx)->StartArray(result.size());
+  for (const auto& k_v : result) {
+    (*cntx)->StartArray(2);
+    (*cntx)->SendBulkString(k_v.first);
+    (*cntx)->SendBulkString(k_v.second.ToString());
+  }
 }
 
 }  // namespace dfly

@@ -5,6 +5,7 @@
 #include "core/interpreter.h"
 
 #include <absl/strings/str_cat.h>
+#include <absl/time/clock.h>
 #include <openssl/evp.h>
 
 #include <cstring>

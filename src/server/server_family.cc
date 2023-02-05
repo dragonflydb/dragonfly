@@ -876,6 +876,15 @@ GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
     }
   };
 
+  auto get_scripts = [this] {
+    auto scripts = script_mgr_->GetLuaScripts();
+    StringVec script_bodies;
+    for (const auto& script : scripts) {
+      script_bodies.push_back(move(script.second));
+    }
+    return script_bodies;
+  };
+
   // Start snapshots.
   if (new_version) {
     auto file_opts = make_tuple(cref(filename), cref(path), start);
@@ -886,9 +895,10 @@ GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
 
     // Save summary file.
     {
-      const auto scripts = script_mgr_->GetLuaScripts();
+      auto scripts = get_scripts();
       auto& snapshot = snapshots[shard_set->size()];
       snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
+
       if (auto local_ec = DoPartialSave(file_opts, scripts, snapshot.get(), nullptr); local_ec) {
         ec = local_ec;
         snapshot.reset();
@@ -914,7 +924,8 @@ GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
     path /= filename;  // use / operator to concatenate paths.
 
     snapshots[0].reset(new RdbSnapshot(fq_threadpool_.get()));
-    const auto lua_scripts = script_mgr_->GetLuaScripts();
+    auto lua_scripts = get_scripts();
+
     ec = snapshots[0]->Start(SaveMode::RDB, path.generic_string(), lua_scripts);
 
     if (!ec) {
