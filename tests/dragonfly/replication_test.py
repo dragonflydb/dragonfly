@@ -523,7 +523,7 @@ async def test_rewrites(df_local_factory):
         # Check BRPOPLPUSH on single shard turns into RPOPLPUSH
         await check("BRPOPLPUSH list list 0", r"LMOVE list list RIGHT LEFT")
         # Check BLPOP turns into LPOP
-        await check("BLPOP list 0", r"LPOP list")
+        await check("BLPOP list list1 0", r"LPOP list")
         # Check BRPOP turns into RPOP
         await check("BRPOP list 0", r"RPOP list")
 
