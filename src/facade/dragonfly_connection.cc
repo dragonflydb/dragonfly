@@ -451,7 +451,8 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
 void Connection::ConnectionFlow(FiberSocketBase* peer) {
   auto dispatch_fb = fibers::fiber(fibers::launch::dispatch, [&] { DispatchFiber(peer); });
   ConnectionStats* stats = service_->GetThreadLocalConnectionStats();
-  stats->num_conns++;
+  ++stats->num_conns;
+  ++stats->conn_received_cnt;
   stats->read_buf_capacity += io_buf_.Capacity();
 
   ParserStatus parse_status = OK;

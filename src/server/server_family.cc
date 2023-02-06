@@ -676,6 +676,9 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   }
 
   // Stats metrics
+  AppendMetricWithoutLabels("connections_received_total", "", m.conn_stats.conn_received_cnt,
+                            MetricType::COUNTER, &resp->body());
+
   AppendMetricWithoutLabels("commands_processed_total", "", m.conn_stats.command_cnt,
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("keyspace_hits_total", "", m.events.hits, MetricType::COUNTER,
@@ -1308,8 +1311,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (should_enter("STATS")) {
     ADD_HEADER("# Stats");
 
-    append("instantaneous_ops_per_sec", m.qps);
+    append("total_connections_received", m.conn_stats.conn_received_cnt);
     append("total_commands_processed", m.conn_stats.command_cnt);
+    append("instantaneous_ops_per_sec", m.qps);
     append("total_pipelined_commands", m.conn_stats.pipelined_cmd_cnt);
     append("total_net_input_bytes", m.conn_stats.io_read_bytes);
     append("total_net_output_bytes", m.conn_stats.io_write_bytes);
@@ -1403,13 +1407,23 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
     auto unknown_cmd = service_.UknownCmdMap();
 
-    for (const auto& k_v : unknown_cmd) {
-      append(StrCat("unknown_", k_v.first), k_v.second);
-    }
+    auto append_sorted = [&append](string_view prefix, const auto& map) {
+      vector<pair<string_view, uint64_t>> display;
+      display.reserve(map.size());
 
-    for (const auto& k_v : m.conn_stats.cmd_count_map) {
-      append(StrCat("cmd_", k_v.first), k_v.second);
-    }
+      for (const auto& k_v : map) {
+        display.push_back(k_v);
+      };
+
+      sort(display.begin(), display.end());
+
+      for (const auto& k_v : display) {
+        append(StrCat(prefix, k_v.first), k_v.second);
+      }
+    };
+
+    append_sorted("unknown_", unknown_cmd);
+    append_sorted("cmd_", m.conn_stats.cmd_count_map);
   }
 
   if (should_enter("ERRORSTATS", true)) {

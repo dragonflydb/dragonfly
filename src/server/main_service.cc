@@ -525,7 +525,13 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   ToUpper(&args[0]);
 
-  VLOG(2) << "Got: " << args;
+  ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
+  bool under_script = dfly_cntx->conn_state.script_info.has_value();
+
+  if (VLOG_IS_ON(2)) {
+    const char* lua = under_script ? "LUA " : "";
+    LOG(INFO) << "Got (" << cntx->owner()->GetClientId() << "): " << lua << args;
+  }
 
   string_view cmd_str = ArgS(args, 0);
   bool is_trans_cmd = (cmd_str == "EXEC" || cmd_str == "MULTI" || cmd_str == "DISCARD");
@@ -534,7 +540,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   etl.RecordCmd();
 
-  ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   absl::Cleanup multi_error([dfly_cntx] { MultiSetError(dfly_cntx); });
 
   if (cid == nullptr) {
@@ -566,8 +571,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   if (dfly_cntx->monitor && (cmd_name != "RESET" && cmd_name != "QUIT")) {
     return (*cntx)->SendError("Replica can't interact with the keyspace");
   }
-
-  bool under_script = dfly_cntx->conn_state.script_info.has_value();
 
   if (under_script && (cid->opt_mask() & CO::NOSCRIPT)) {
     return (*cntx)->SendError("This Redis command is not allowed from script");
