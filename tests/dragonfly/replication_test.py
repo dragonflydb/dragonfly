@@ -70,33 +70,33 @@ async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_
     ), "Weak testcase. Increase number of streamed iterations to surpass full sync"
     await stream_task
 
-    async def check_replica_finished_exec(c_replica):
-        info_stats = await c_replica.execute_command("INFO")
-        tc1 = info_stats['total_commands_processed']
-        await asyncio.sleep(0.1)
-        info_stats = await c_replica.execute_command("INFO")
-        tc2 = info_stats['total_commands_processed']
-        return tc1+1 == tc2 # Replica processed only the info command on above sleep.
-
-    async def check_all_replicas_finished():
-        while True:
-            await asyncio.sleep(1.0)
-            is_finished_arr = await asyncio.gather(*(asyncio.create_task(check_replica_finished_exec(c))
-                                                     for c in c_replicas))
-            if all(is_finished_arr):
-                break
-
     # Check data after full sync
-    await check_all_replicas_finished()
+    await check_all_replicas_finished(c_replicas)
     await check_data(seeder, replicas, c_replicas)
 
     # Stream more data in stable state
     await seeder.run(target_ops=2000)
 
     # Check data after stable state stream
-    await check_all_replicas_finished()
+    await check_all_replicas_finished(c_replicas)
     await check_data(seeder, replicas, c_replicas)
 
+
+async def check_replica_finished_exec(c_replica):
+    info_stats = await c_replica.execute_command("INFO")
+    tc1 = info_stats['total_commands_processed']
+    await asyncio.sleep(0.1)
+    info_stats = await c_replica.execute_command("INFO")
+    tc2 = info_stats['total_commands_processed']
+    return tc1+1 == tc2 # Replica processed only the info command on above sleep.
+
+async def check_all_replicas_finished(c_replicas):
+    while True:
+        await asyncio.sleep(1.0)
+        is_finished_arr = await asyncio.gather(*(asyncio.create_task(check_replica_finished_exec(c))
+                                                    for c in c_replicas))
+        if all(is_finished_arr):
+            break
 
 async def check_data(seeder, replicas, c_replicas):
     capture = await seeder.capture()
