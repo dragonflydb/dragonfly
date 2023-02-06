@@ -12,7 +12,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
-#include "redis/object.h"
+// #include "redis/object.h"
 #include "server/blocking_controller.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -425,19 +425,19 @@ void DebugCmd::Typez() {
   vector<string> type_counts;
 
   DbSlice& db_slice = EngineShard::tlocal()->db_slice();
-  DbTable& db = db_slice.GetDBTable(cntx_ -> db_index());
+  DbTable* db = db_slice.GetDBTable(cntx_->db_index());
 
   string resp;
 
-  StrAppend(&resp, "STRING count: ", db.stats.typez_freq[OBJ_STRING]);
-  StrAppend(&resp, "LIST count: ", db.stats.typez_freq[OBJ_LIST]);
-  StrAppend(&resp, "SET count: ", db.stats.typez_freq[OBJ_SET]);
-  StrAppend(&resp, "ZSET count: ", db.stats.typez_freq[OBJ_ZSET]);
-  StrAppend(&resp, "HASH count: ", db.stats.typez_freq[OBJ_HASH]);
-  StrAppend(&resp, "MODULE count: ", db.stats.typez_freq[OBJ_MODULE]);
-  StrAppend(&resp, "STREAM count: ", db.stats.typez_freq[OBJ_STREAM]);
+  StrAppend(&resp, "STRING count: ", db->stats.typez_freq[0]);
+  StrAppend(&resp, "\nLIST count: ", db->stats.typez_freq[1]);
+  StrAppend(&resp, "\nSET count: ", db->stats.typez_freq[2]);
+  StrAppend(&resp, "\nZSET count: ", db->stats.typez_freq[3]);
+  StrAppend(&resp, "\nHASH count: ", db->stats.typez_freq[4]);
+  StrAppend(&resp, "\nMODULE count: ", db->stats.typez_freq[5]);
+  StrAppend(&resp, "\nSTREAM count: ", db->stats.typez_freq[6]);
 
-  (*cntx_) -> SendSimpleString(resp);
+  (*cntx_)->SendSimpleString(resp);
 }
 
 }  // namespace dfly

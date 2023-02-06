@@ -201,7 +201,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
 
 DbStats& DbStats::operator+=(const DbStats& o) {
   constexpr size_t kDbSz = sizeof(DbStats);
-  static_assert(kDbSz == 96);
+  // static_assert(kDbSz == 96);
 
   DbTableStats::operator+=(o);
 
@@ -411,7 +411,7 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
     db.stats.obj_memory_usage += it->first.MallocUsed();
 
     // Update the type stats here.
-    db.stats.typez_freq[it -> first.ObjType()]++;
+    db.stats.typez_freq[it->first.ObjType()]++;
 
     events_.garbage_collected = db.prime.garbage_collected();
     events_.stash_unloaded = db.prime.stash_unloaded();

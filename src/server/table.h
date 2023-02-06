@@ -40,7 +40,7 @@ struct DbTableStats {
   uint64_t inline_keys = 0;
 
   // Distribution of keys being stored in the table
-  std::vector<size_t> typez_freq(7, 0);
+  size_t typez_freq[7] = {0, 0, 0, 0, 0, 0, 0};
 
   // Object memory usage besides hash-table capacity.
   // Applies for any non-inline objects.
