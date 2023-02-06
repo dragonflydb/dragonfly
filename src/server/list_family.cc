@@ -290,11 +290,6 @@ OpStatus BPopper::Run(Transaction* t, unsigned msec) {
 
   auto cb = [this](Transaction* t, EngineShard* shard) {
     Pop(t, shard);
-    OpArgs op_args = t->GetOpArgs(shard);
-    if (op_args.shard->journal()) {
-      string command = dir_ == ListDir::LEFT ? "LPOP" : "RPOP";
-      RecordJournal(op_args, command, ArgSlice{key_}, 1);
-    }
     return OpStatus::OK;
   };
   t->Execute(std::move(cb), true);
@@ -316,6 +311,11 @@ void BPopper::Pop(Transaction* t, EngineShard* shard) {
     db_slice.PostUpdate(t->GetDbIndex(), it, key_);
     if (quicklistCount(ql) == 0) {
       CHECK(shard->db_slice().Del(t->GetDbIndex(), it));
+    }
+    OpArgs op_args = t->GetOpArgs(shard);
+    if (op_args.shard->journal()) {
+      string command = dir_ == ListDir::LEFT ? "LPOP" : "RPOP";
+      RecordJournal(op_args, command, ArgSlice{key_}, 1);
     }
   }
 }
