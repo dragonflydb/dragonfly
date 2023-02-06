@@ -971,6 +971,19 @@ TEST_F(DefragDflyEngineTest, TestDefragOption) {
   });
 }
 
+TEST_F(DflyEngineTest, Issue752) {
+  // https://github.com/dragonflydb/dragonfly/issues/752
+  // local_result_ member was not reset between commands
+  Run({"multi"});
+  auto resp = Run({"llen", kKey1});
+  ASSERT_EQ(resp, "QUEUED");
+  resp = Run({"del", kKey1, kKey2});
+  ASSERT_EQ(resp, "QUEUED");
+  resp = Run({"exec"});
+  ASSERT_THAT(resp, ArrLen(2));
+  ASSERT_THAT(resp.GetVec(), ElementsAre(IntArg(0), IntArg(0)));
+}
+
 // TODO: to test transactions with a single shard since then all transactions become local.
 // To consider having a parameter in dragonfly engine controlling number of shards
 // unconditionally from number of cpus. TO TEST BLPOP under multi for single/multi argument case.

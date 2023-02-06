@@ -82,6 +82,7 @@ Transaction::~Transaction() {
 OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   db_index_ = index;
   cmd_with_full_args_ = args;
+  local_result_ = OpStatus::OK;
 
   if (IsGlobal()) {
     unique_shard_cnt_ = shard_set->size();
