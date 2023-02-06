@@ -40,14 +40,15 @@ vector<int64_t> ToIntArr(const RespExpr& e) {
 }
 
 TEST_F(StringFamilyTest, SetGet) {
-  auto resp = Run({"set", "key", "val"});
-
-  EXPECT_EQ(resp, "OK");
+  EXPECT_EQ(Run({"set", "key", "val"}), "OK");
   EXPECT_EQ(Run({"get", "key"}), "val");
   EXPECT_EQ(Run({"set", "key1", "1"}), "OK");
   EXPECT_EQ(Run({"get", "key1"}), "1");
   EXPECT_EQ(Run({"set", "key", "2"}), "OK");
   EXPECT_EQ(Run({"get", "key"}), "2");
+
+  auto metrics = GetMetrics();
+  EXPECT_EQ(6, metrics.ooo_tx_transaction_cnt);
 }
 
 TEST_F(StringFamilyTest, Incr) {

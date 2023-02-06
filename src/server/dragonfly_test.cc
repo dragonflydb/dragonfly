@@ -184,8 +184,9 @@ TEST_F(DflyEngineTest, HitMissStats) {
   resp = Run({"get", "Key2"});
   ASSERT_THAT(resp, ArgType(RespExpr::NIL));
 
-  EXPECT_THAT(GetMetrics().events.hits, 1);
-  EXPECT_THAT(GetMetrics().events.misses, 1);
+  auto metrics = GetMetrics();
+  EXPECT_THAT(metrics.events.hits, 1);
+  EXPECT_THAT(metrics.events.misses, 1);
 }
 
 TEST_F(DflyEngineTest, MultiEmpty) {
@@ -828,6 +829,32 @@ TEST_F(DflyEngineTest, Watch) {
   Run({"select", "0"});
   Run({"multi"});
   ASSERT_THAT(Run({"exec"}), kExecSuccess);
+}
+
+TEST_F(DflyEngineTest, MultiOOO) {
+  auto fb0 = pp_->at(0)->LaunchFiber([&] {
+    for (unsigned i = 0; i < 100; i++) {
+      Run({"multi"});
+      Run({"rpush", "a", "bar"});
+      Run({"exec"});
+    }
+  });
+
+  pp_->at(1)->Await([&] {
+    for (unsigned i = 0; i < 100; ++i) {
+      Run({"multi"});
+      Run({"rpush", "b", "bar"});
+      Run({"exec"});
+    }
+  });
+
+  fb0.Join();
+  auto metrics = GetMetrics();
+
+  // TODO: This is a performance bug that causes substantial latency penatly when
+  // running multi-transactions or lua scripts.
+  // We should be able to allow OOO multi-transactions.
+  EXPECT_EQ(0, metrics.ooo_tx_transaction_cnt);
 }
 
 TEST_F(DflyEngineTest, Bug468) {

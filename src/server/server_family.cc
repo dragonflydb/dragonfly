@@ -1190,6 +1190,7 @@ Metrics ServerFamily::GetMetrics() const {
     result.uptime = time(NULL) - this->start_time_;
     result.conn_stats += ss->connection_stats;
     result.qps += uint64_t(ss->MovingSum6());
+    result.ooo_tx_transaction_cnt += ss->stats.ooo_tx_cnt;
 
     if (shard) {
       MergeInto(shard->db_slice().GetStats(), &result);
