@@ -644,6 +644,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   uint64_t start_usec = ProactorBase::GetMonotonicTimeNs(), end_usec;
 
+  DispatchMonitorIfNeeded(cid->opt_mask() & CO::ADMIN, dfly_cntx, args);
   // Create command transaction
   intrusive_ptr<Transaction> dist_trans;
 
@@ -694,8 +695,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->reply_builder()->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
   }
-
-  DispatchMonitorIfNeeded(cid->opt_mask() & CO::ADMIN, dfly_cntx, args);
 
   end_usec = ProactorBase::GetMonotonicTimeNs();
 
