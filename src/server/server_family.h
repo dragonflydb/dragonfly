@@ -42,6 +42,7 @@ struct Metrics {
   size_t heap_used_bytes = 0;
   size_t heap_comitted_bytes = 0;
   size_t small_string_bytes = 0;
+  uint64_t ooo_tx_transaction_cnt = 0;
   uint32_t traverse_ttl_per_sec = 0;
   uint32_t delete_ttl_per_sec = 0;
 

@@ -691,8 +691,10 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   request_latency_usec.IncBy(cmd_str, (end_usec - start_usec) / 1000);
   if (dist_trans) {
+    bool is_ooo = dist_trans->IsOOO();
     dfly_cntx->last_command_debug.clock = dist_trans->txid();
-    dfly_cntx->last_command_debug.is_ooo = dist_trans->IsOOO();
+    dfly_cntx->last_command_debug.is_ooo = is_ooo;
+    etl.stats.ooo_tx_cnt += is_ooo;
   }
 
   if (!under_script) {

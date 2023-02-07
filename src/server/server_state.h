@@ -85,6 +85,10 @@ class ServerState {  // public struct - to allow initialization.
   void operator=(const ServerState&) = delete;
 
  public:
+  struct Stats {
+    uint64_t ooo_tx_cnt = 0;
+  };
+
   static ServerState* tlocal() {
     return &state_;
   }
@@ -160,6 +164,8 @@ class ServerState {  // public struct - to allow initialization.
   void RecordCallLatency(std::string_view sha, uint64_t latency_usec) {
     call_latency_histos_[sha].Add(latency_usec);
   }
+
+  Stats stats;
 
  private:
   int64_t live_transactions_ = 0;

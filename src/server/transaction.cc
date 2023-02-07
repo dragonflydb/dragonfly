@@ -560,6 +560,8 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   }
 
   bool schedule_fast = (unique_shard_cnt_ == 1) && !IsGlobal() && !multi_;
+  bool run_eager = false;
+
   if (schedule_fast) {  // Single shard (local) optimization.
     // We never resize shard_data because that would affect MULTI transaction correctness.
     DCHECK_EQ(1u, shard_data_.size());
@@ -572,15 +574,20 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     run_count_.fetch_add(1, memory_order_release);
     time_now_ms_ = GetCurrentTimeMs();
 
-    // Please note that schedule_cb can not update any data on ScheduleSingleHop stack
-    // since the latter can exit before ScheduleUniqueShard returns.
-    // The problematic flow is as follows: ScheduleUniqueShard schedules into TxQueue and then
-    // call PollExecute that runs the callback which calls DecreaseRunCnt.
-    // As a result WaitForShardCallbacks below is unblocked.
-    auto schedule_cb = [this] {
-      bool run_eager = ScheduleUniqueShard(EngineShard::tlocal());
-      if (run_eager) {
-        // it's important to DecreaseRunCnt only for run_eager and after run_eager was assigned.
+    // Please note that schedule_cb can not update any data on ScheduleSingleHop stack when
+    // run_fast is false.
+    // since ScheduleSingleHop can finish before ScheduleUniqueShard returns.
+    // The problematic flow is as follows: ScheduleUniqueShard schedules into TxQueue
+    // (hence run_fast is false), and then calls PollExecute that in turn runs
+    // the callback which calls DecreaseRunCnt.
+    // As a result WaitForShardCallbacks below is unblocked before schedule_cb returns.
+    // However, if run_fast is true, then we may mutate stack variables, but only
+    // before DecreaseRunCnt is called.
+    auto schedule_cb = [&] {
+      bool run_fast = ScheduleUniqueShard(EngineShard::tlocal());
+      if (run_fast) {
+        run_eager = true;
+        // it's important to DecreaseRunCnt only for run_fast and after run_eager is assigned.
         // If DecreaseRunCnt were called before ScheduleUniqueShard finishes
         // then WaitForShardCallbacks below could exit before schedule_cb assigns return value
         // to run_eager and cause stack corruption.
@@ -605,6 +612,9 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   DVLOG(1) << "ScheduleSingleHop before Wait " << DebugId() << " " << run_count_.load();
   WaitForShardCallbacks();
   DVLOG(1) << "ScheduleSingleHop after Wait " << DebugId();
+  if (run_eager) {
+    coordinator_state_ |= COORD_OOO;
+  }
 
   cb_ = nullptr;
 
