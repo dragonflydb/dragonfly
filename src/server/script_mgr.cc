@@ -4,6 +4,7 @@
 
 #include "server/script_mgr.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 
 #include "base/logging.h"
@@ -73,10 +74,14 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
       return (*cntx)->SendBulkString(sha);
     }
 
-    Interpreter& interpreter = ServerState::tlocal()->GetInterpreter();
+    ServerState* ss = ServerState::tlocal();
+    auto interpreter = ss->BorrowInterpreter();
+    absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
+
     // no need to lock the interpreter since we do not mess the stack.
     string error_or_id;
-    Interpreter::AddResult add_result = interpreter.AddFunction(body, &error_or_id);
+    Interpreter::AddResult add_result = interpreter->AddFunction(body, &error_or_id);
+
     if (add_result == Interpreter::ALREADY_EXISTS) {
       return (*cntx)->SendBulkString(error_or_id);
     }

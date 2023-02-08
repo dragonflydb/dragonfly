@@ -17,6 +17,8 @@ extern "C" {
 #include "redis/util.h"
 #include "redis/zmalloc.h"
 }
+
+#include "base/flags.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
 #include "server/engine_shard_set.h"
@@ -24,6 +26,8 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
+
+ABSL_FLAG(uint32_t, interpreter_per_thread, 10, "Lua interpreters per thread");
 
 namespace dfly {
 
@@ -36,7 +40,7 @@ atomic_uint64_t used_mem_current(0);
 unsigned kernel_version = 0;
 size_t max_memory_limit = 0;
 
-ServerState::ServerState() {
+ServerState::ServerState() : interpreter_mgr_{absl::GetFlag(FLAGS_interpreter_per_thread)} {
   CHECK(mi_heap_get_backing() == mi_heap_get_default());
 
   mi_heap_t* tlh = mi_heap_new();
@@ -53,15 +57,14 @@ void ServerState::Init() {
 
 void ServerState::Shutdown() {
   gstate_ = GlobalState::SHUTTING_DOWN;
-  interpreter_.reset();
 }
 
-Interpreter& ServerState::GetInterpreter() {
-  if (!interpreter_) {
-    interpreter_.emplace();
-  }
+Interpreter* ServerState::BorrowInterpreter() {
+  return interpreter_mgr_.Get();
+}
 
-  return interpreter_.value();
+void ServerState::ReturnInterpreter(Interpreter* ir) {
+  interpreter_mgr_.Return(ir);
 }
 
 const char* GlobalStateName(GlobalState s) {
