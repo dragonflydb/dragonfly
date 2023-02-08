@@ -697,19 +697,7 @@ void Transaction::ExecuteAsync() {
   // safely.
   use_count_.fetch_add(unique_shard_cnt_, memory_order_relaxed);
 
-  bool is_global = IsGlobal();
-
-  if (unique_shard_cnt_ == 1) {
-    shard_data_[SidToId(unique_shard_id_)].local_mask |= ARMED;
-  } else {
-    for (ShardId i = 0; i < shard_data_.size(); ++i) {
-      auto& sd = shard_data_[i];
-      if (!is_global && sd.arg_count == 0)
-        continue;
-      DCHECK_LT(sd.arg_count, 1u << 15);
-      sd.local_mask |= ARMED;
-    }
-  }
+  RunOnActiveShards([](PerShardData& sd, auto i) { sd.local_mask |= ARMED; });
 
   uint32_t seq = seqlock_.load(memory_order_relaxed);
 
@@ -750,16 +738,7 @@ void Transaction::ExecuteAsync() {
   };
 
   // IsArmedInShard is the protector of non-thread safe data.
-  if (!is_global && unique_shard_cnt_ == 1) {
-    shard_set->Add(unique_shard_id_, std::move(cb));  // serves as a barrier.
-  } else {
-    for (ShardId i = 0; i < shard_data_.size(); ++i) {
-      auto& sd = shard_data_[i];
-      if (!is_global && sd.arg_count == 0)
-        continue;
-      shard_set->Add(i, cb);  // serves as a barrier.
-    }
-  }
+  RunOnActiveShards([&cb](PerShardData& sd, auto i) { shard_set->Add(i, cb); });
 }
 
 void Transaction::RunQuickie(EngineShard* shard) {
@@ -799,26 +778,17 @@ void Transaction::UnwatchBlocking(bool should_expire, WaitKeysProvider wcb) {
 
   run_count_.store(unique_shard_cnt_, memory_order_release);
 
-  auto expire_cb = [&] {
+  auto expire_cb = [this, &wcb, should_expire] {
     EngineShard* es = EngineShard::tlocal();
     ArgSlice wkeys = wcb(this, es);
 
     UnwatchShardCb(wkeys, should_expire, es);
   };
 
-  if (unique_shard_cnt_ == 1) {
-    DCHECK_LT(unique_shard_id_, shard_set->size());
-    shard_set->Add(unique_shard_id_, move(expire_cb));
-  } else {
-    for (ShardId i = 0; i < shard_data_.size(); ++i) {
-      auto& sd = shard_data_[i];
-      DCHECK_EQ(0, sd.local_mask & ARMED);
-      if (sd.arg_count == 0)
-        continue;
-
-      shard_set->Add(i, expire_cb);
-    }
-  }
+  RunOnActiveShards([&expire_cb](PerShardData& sd, auto i) {
+    DCHECK_EQ(0, sd.local_mask & ARMED);
+    shard_set->Add(i, expire_cb);
+  });
 
   // Wait for all callbacks to conclude.
   WaitForShardCallbacks();
