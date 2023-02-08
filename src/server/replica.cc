@@ -808,7 +808,7 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
   io::PrefixSource ps{prefix, &ss};
 
   JournalReader reader{&ps, 0};
-
+  TransactionReader tx_reader{};
   while (!cntx->IsCancelled()) {
     waker_.await([&]() {
       return ((trans_data_queue_.size() < kYieldAfterItemsInQueue) || cntx->IsCancelled());
@@ -816,7 +816,7 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
     if (cntx->IsCancelled())
       break;
 
-    auto tx_data = TransactionData::ReadNext(&reader, cntx);
+    auto tx_data = tx_reader.NextTxData(&reader, cntx);
     if (!tx_data)
       break;
 
@@ -1187,6 +1187,7 @@ bool Replica::TransactionData::AddEntry(journal::ParsedEntry&& entry) {
       return true;
     case journal::Op::MULTI_COMMAND:
       commands.push_back(std::move(entry.cmd));
+      dbid = entry.dbid;
       return false;
     default:
       DCHECK(false) << "Unsupported opcode";
@@ -1198,18 +1199,31 @@ bool Replica::TransactionData::IsGlobalCmd() const {
   return commands.size() == 1 && commands.front().cmd_args.size() == 1;
 }
 
-auto Replica::TransactionData::ReadNext(JournalReader* reader, Context* cntx)
+// Expired entries within MULTI...EXEC sequence which belong to different database
+// should be executed outside the multi transaciton.
+bool Replica::TransactionReader::ReturnEntryOOO(const journal::ParsedEntry& entry) {
+  return !tx_data_.commands.empty() && entry.opcode == journal::Op::EXPIRED &&
+         tx_data_.dbid != entry.dbid;
+}
+
+auto Replica::TransactionReader::NextTxData(JournalReader* reader, Context* cntx)
     -> optional<TransactionData> {
-  TransactionData out;
   io::Result<journal::ParsedEntry> res;
   do {
     if (res = reader->ReadEntry(); !res) {
       cntx->ReportError(res.error());
       return std::nullopt;
     }
-  } while (!cntx->IsCancelled() && !out.AddEntry(std::move(*res)));
 
-  return cntx->IsCancelled() ? std::nullopt : make_optional(std::move(out));
+    if (ReturnEntryOOO(*res)) {
+      TransactionData tmp_tx;
+      CHECK(tmp_tx.AddEntry(std::move(*res)));
+      return tmp_tx;
+    }
+
+  } while (!cntx->IsCancelled() && !tx_data_.AddEntry(std::move(*res)));
+
+  return cntx->IsCancelled() ? std::nullopt : make_optional(std::move(tx_data_));
 }
 
 }  // namespace dfly

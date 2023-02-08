@@ -59,14 +59,19 @@ class Replica {
     bool AddEntry(journal::ParsedEntry&& entry);
 
     bool IsGlobalCmd() const;
-
-    // Collect next complete transaction data from journal reader.
-    static std::optional<TransactionData> ReadNext(JournalReader* reader, Context* cntx);
-
     TxId txid;
     DbIndex dbid;
     uint32_t shard_cnt;
     std::vector<journal::ParsedEntry::CmdData> commands;
+  };
+
+  // Utility for reading TransactionData from a journal reader.
+  struct TransactionReader {
+    std::optional<TransactionData> NextTxData(JournalReader* reader, Context* cntx);
+    bool ReturnEntryOOO(const journal::ParsedEntry& entry);
+
+   private:
+    TransactionData tx_data_{};
   };
 
   // Coorindator for multi shard execution.
