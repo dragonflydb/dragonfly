@@ -27,7 +27,7 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/transaction.h"
 
-ABSL_FLAG(uint32_t, interpreter_per_thread, 5, "Lua interpreters per thread");
+ABSL_FLAG(uint32_t, interpreter_per_thread, 10, "Lua interpreters per thread");
 
 namespace dfly {
 
