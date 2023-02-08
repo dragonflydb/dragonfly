@@ -684,7 +684,7 @@ void Transaction::ExecuteAsync() {
   // safely.
   use_count_.fetch_add(unique_shard_cnt_, memory_order_relaxed);
 
-  RunOnActiveShards([](PerShardData& sd, auto i) { sd.local_mask |= ARMED; });
+  IterateActiveShards([](PerShardData& sd, auto i) { sd.local_mask |= ARMED; });
 
   uint32_t seq = seqlock_.load(memory_order_relaxed);
 
@@ -725,7 +725,7 @@ void Transaction::ExecuteAsync() {
   };
 
   // IsArmedInShard is the protector of non-thread safe data.
-  RunOnActiveShards([&cb](PerShardData& sd, auto i) { shard_set->Add(i, cb); });
+  IterateActiveShards([&cb](PerShardData& sd, auto i) { shard_set->Add(i, cb); });
 }
 
 void Transaction::RunQuickie(EngineShard* shard) {
@@ -772,7 +772,7 @@ void Transaction::UnwatchBlocking(bool should_expire, WaitKeysProvider wcb) {
     UnwatchShardCb(wkeys, should_expire, es);
   };
 
-  RunOnActiveShards([&expire_cb](PerShardData& sd, auto i) {
+  IterateActiveShards([&expire_cb](PerShardData& sd, auto i) {
     DCHECK_EQ(0, sd.local_mask & ARMED);
     shard_set->Add(i, expire_cb);
   });
