@@ -576,6 +576,9 @@ async def test_expiry(df_local_factory, n_keys=1000):
     batch_fill_data(pipe, gen_test_data(n_keys))
     await pipe.execute()
 
+    # Wait for replica to load data
+    await asyncio.sleep(3.0)
+
     # Check keys are on replica
     res = await c_replica.mget(k for k, _ in gen_test_data(n_keys))
     assert all(v is not None for v in res)
@@ -583,7 +586,7 @@ async def test_expiry(df_local_factory, n_keys=1000):
     # Set key differnt expries times in ms
     pipe = c_master.pipeline(transaction=True)
     for k, _ in gen_test_data(n_keys):
-        ms = random.randint(100, 500)
+        ms = random.randint(20, 500)
         pipe.pexpire(k, ms)
     await pipe.execute()
 

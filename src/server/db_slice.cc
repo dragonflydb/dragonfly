@@ -807,13 +807,16 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
     return make_pair(it, expire_it);
 
   // Replicate expiry
-  if (auto journal = EngineShard::tlocal()->journal(); journal) {
-    std::string stash;
+  auto journal = EngineShard::tlocal()->journal();
+  std::string stash;
+  if (journal) {
     it->first.GetString(&stash);
+  }
+  PerformDeletion(it, expire_it, shard_owner(), db.get());
+  // RecordExpiry can switch fiber, therefore iterators after this call might not be valid.
+  if (journal) {
     RecordExpiry(cntx.db_index, stash);
   }
-
-  PerformDeletion(it, expire_it, shard_owner(), db.get());
   ++events_.expired_keys;
 
   return make_pair(PrimeIterator{}, ExpireIterator{});
