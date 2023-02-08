@@ -1216,7 +1216,6 @@ auto Replica::TransactionReader::NextTxData(JournalReader* reader, Context* cntx
     }
 
     if (ReturnEntryOOO(*res)) {
-      LOG(INFO) << "OOO";
       TransactionData tmp_tx;
       CHECK(tmp_tx.AddEntry(std::move(*res)));
       return tmp_tx;
