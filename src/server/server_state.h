@@ -123,7 +123,11 @@ class ServerState {  // public struct - to allow initialization.
     gstate_ = s;
   }
 
-  Interpreter& GetInterpreter();
+  // Borrow interpreter from internal manager. Return int with ReturnInterpreter.
+  Interpreter* BorrowInterpreter();
+
+  // Return interpreter to internal manager to be re-used.
+  void ReturnInterpreter(Interpreter*);
 
   // Returns sum of all requests in the last 6 seconds
   // (not including the current one).
@@ -166,7 +170,7 @@ class ServerState {  // public struct - to allow initialization.
   mi_heap_t* data_heap_;
   journal::Journal* journal_ = nullptr;
 
-  std::optional<Interpreter> interpreter_;
+  InterpreterManager interpreter_mgr_;
   GlobalState gstate_ = GlobalState::ACTIVE;
 
   using Counter = util::SlidingCounter<7>;

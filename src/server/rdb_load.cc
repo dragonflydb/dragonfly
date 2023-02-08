@@ -2012,10 +2012,12 @@ error_code RdbLoader::HandleAux() {
     // TODO
   } else if (auxkey == "lua") {
     ServerState* ss = ServerState::tlocal();
-    Interpreter& script = ss->GetInterpreter();
+    auto script = ss->BorrowInterpreter();
+    absl::Cleanup clean = [ss, script]() { ss->ReturnInterpreter(script); };
+
     string_view body{auxval};
     string result;
-    Interpreter::AddResult add_result = script.AddFunction(body, &result);
+    Interpreter::AddResult add_result = script->AddFunction(body, &result);
     if (add_result == Interpreter::ADD_OK) {
       if (script_mgr_)
         script_mgr_->InsertFunction(result, body);

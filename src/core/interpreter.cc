@@ -710,4 +710,22 @@ int Interpreter::RedisPCallCommand(lua_State* lua) {
   return reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(false);
 }
 
+Interpreter* InterpreterManager::Get() {
+  // Grow if none is available and we have unused capacity left.
+  if (available_.empty() && storage_.size() < storage_.capacity()) {
+    storage_.emplace_back();
+    return &storage_.back();
+  }
+
+  waker_.await([this]() { return available_.size() > 0; });
+  Interpreter* ir = available_.back();
+  available_.pop_back();
+  return ir;
+}
+
+void InterpreterManager::Return(Interpreter* ir) {
+  available_.push_back(ir);
+  waker_.notify();
+}
+
 }  // namespace dfly

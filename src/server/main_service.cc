@@ -932,10 +932,11 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   }
 
   ServerState* ss = ServerState::tlocal();
-  Interpreter& script = ss->GetInterpreter();
+  auto script = ss->BorrowInterpreter();
+  absl::Cleanup clean = [ss, script]() { ss->ReturnInterpreter(script); };
 
   string result;
-  Interpreter::AddResult add_result = script.AddFunction(body, &result);
+  Interpreter::AddResult add_result = script->AddFunction(body, &result);
   if (add_result == Interpreter::COMPILE_ERR) {
     return (*cntx)->SendError(result, facade::kScriptErrType);
   }
@@ -950,7 +951,7 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   eval_args.args = args.subspan(3 + num_keys);
 
   uint64_t start = absl::GetCurrentTimeNanos();
-  EvalInternal(eval_args, &script, cntx);
+  EvalInternal(eval_args, script, cntx);
 
   uint64_t end = absl::GetCurrentTimeNanos();
   ss->RecordCallLatency(result, (end - start) / 1000);
@@ -966,8 +967,10 @@ void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
 
   string_view sha = ArgS(args, 1);
   ServerState* ss = ServerState::tlocal();
-  Interpreter& script = ss->GetInterpreter();
-  bool exists = script.Exists(sha);
+  auto script = ss->BorrowInterpreter();
+  absl::Cleanup clean = [ss, script]() { ss->ReturnInterpreter(script); };
+
+  bool exists = script->Exists(sha);
 
   if (!exists) {
     const char* body = (sha.size() == 40) ? server_family_.script_mgr()->Find(sha) : nullptr;
@@ -976,7 +979,7 @@ void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
     }
 
     string res;
-    CHECK_EQ(Interpreter::ADD_OK, script.AddFunction(body, &res));
+    CHECK_EQ(Interpreter::ADD_OK, script->AddFunction(body, &res));
     CHECK_EQ(res, sha);
   }
 
@@ -986,7 +989,7 @@ void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
   ev_args.args = args.subspan(3 + num_keys);
 
   uint64_t start = absl::GetCurrentTimeNanos();
-  EvalInternal(ev_args, &script, cntx);
+  EvalInternal(ev_args, script, cntx);
 
   uint64_t end = absl::GetCurrentTimeNanos();
   ss->RecordCallLatency(sha, (end - start) / 1000);
@@ -1026,8 +1029,6 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
     cntx->conn_state.script_info->keys.insert(ArgS(eval_args.keys, i));
   }
   DCHECK(cntx->transaction);
-
-  auto lk = interpreter->Lock();
 
   if (!eval_args.keys.empty())
     cntx->transaction->Schedule();
