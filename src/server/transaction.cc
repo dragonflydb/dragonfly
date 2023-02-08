@@ -429,7 +429,6 @@ void Transaction::ScheduleInternal() {
   DCHECK_EQ(0, coordinator_state_ & (COORD_SCHED | COORD_OOO));
 
   bool span_all = IsGlobal();
-  bool single_hop = (coordinator_state_ & COORD_EXEC_CONCLUDING);
 
   uint32_t num_shards;
   std::function<bool(uint32_t)> is_active;
@@ -456,57 +455,45 @@ void Transaction::ScheduleInternal() {
     };
   }
 
+  // Loop until successfully scheduled in all shards.
   while (true) {
     txid_ = op_seq.fetch_add(1, memory_order_relaxed);
+    time_now_ms_ = GetCurrentTimeMs();
 
     atomic_uint32_t lock_granted_cnt{0};
     atomic_uint32_t success{0};
 
-    time_now_ms_ = GetCurrentTimeMs();
-
     auto cb = [&](EngineShard* shard) {
-      pair<bool, bool> res = ScheduleInShard(shard);
-      success.fetch_add(res.first, memory_order_relaxed);
-      lock_granted_cnt.fetch_add(res.second, memory_order_relaxed);
+      auto [is_success, is_granted] = ScheduleInShard(shard);
+      success.fetch_add(is_success, memory_order_relaxed);
+      lock_granted_cnt.fetch_add(is_granted, memory_order_relaxed);
     };
-
     shard_set->RunBriefInParallel(std::move(cb), is_active);
 
     if (success.load(memory_order_acquire) == num_shards) {
-      // We allow out of order execution only for single hop transactions.
-      // It might be possible to do it for multi-hop transactions as well but currently is
-      // too complicated to reason about.
-      if (single_hop && lock_granted_cnt.load(memory_order_relaxed) == num_shards) {
-        // OOO can not happen with span-all transactions. We ensure it in ScheduleInShard when we
-        // refuse to acquire locks for these transactions..
-        DCHECK(!span_all);
+      coordinator_state_ |= COORD_SCHED;
+      // If we granted all locks, we can run out of order.
+      if (!span_all && lock_granted_cnt.load(memory_order_relaxed) == num_shards) {
+        // Currently we don't support OOO for incremental locking. Sp far they are global.
+        DCHECK(!(multi_ && multi_->is_expanding));
         coordinator_state_ |= COORD_OOO;
       }
       VLOG(2) << "Scheduled " << DebugId()
               << " OutOfOrder: " << bool(coordinator_state_ & COORD_OOO)
               << " num_shards: " << num_shards;
 
-      if (mode == IntentLock::EXCLUSIVE) {
-        journal::Journal* j = ServerState::tlocal()->journal();
-        // TODO: we may want to pass custom command name into journal.
-        if (j && j->SchedStartTx(txid_, 0, num_shards)) {
-        }
-      }
-      coordinator_state_ |= COORD_SCHED;
       break;
     }
 
     VLOG(2) << "Cancelling " << DebugId();
 
     atomic_bool should_poll_execution{false};
-
     auto cancel = [&](EngineShard* shard) {
       bool res = CancelShardCb(shard);
       if (res) {
         should_poll_execution.store(true, memory_order_relaxed);
       }
     };
-
     shard_set->RunBriefInParallel(std::move(cancel), is_active);
 
     // We must follow up with PollExecution because in rare cases with multi-trans
