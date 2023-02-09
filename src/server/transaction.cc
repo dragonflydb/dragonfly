@@ -544,8 +544,9 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   bool was_ooo = false;
 
   // If we run only on one shard and conclude, we can avoid scheduling at all
-  // and dispatch a single task to the its shard set.
-  if ((unique_shard_cnt_ == 1) && !IsGlobal() && !multi_) {
+  // and directly dispatch the task to its destination shard.
+  bool schedule_fast = (unique_shard_cnt_ == 1) && !IsGlobal() && !multi_;
+  if (schedule_fast) {
     DCHECK_EQ(1u, shard_data_.size());
 
     // IsArmedInShard() first checks run_count_ before shard_data, so use release ordering.
@@ -555,7 +556,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     time_now_ms_ = GetCurrentTimeMs();
 
     // NOTE: schedule_cb cannot update data on stack when run_fast is false.
-    // This is because this function can finish before the callback returns.
+    // This is because ScheduleSingleHop can finish before the callback returns.
 
     // This happens when ScheduleUniqueShard schedules into TxQueue (hence run_fast is false), and
     // then calls PollExecute that in turn runs the callback which calls DecreaseRunCnt. As a result
