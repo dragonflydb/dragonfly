@@ -341,6 +341,21 @@ class Transaction {
     return sid < shard_data_.size() ? sid : 0;
   }
 
+  // Iterate over shards and run function accepting (PerShardData&, ShardId) on all active ones.
+  template <typename F> void IterateActiveShards(F&& f) {
+    bool is_global = IsGlobal();
+    if (unique_shard_cnt_ == 1) {
+      auto i = unique_shard_id_;
+      f(shard_data_[SidToId(i)], i);
+    } else {
+      for (ShardId i = 0; i < shard_data_.size(); ++i) {
+        if (auto& sd = shard_data_[i]; is_global || sd.arg_count > 0) {
+          f(sd, i);
+        }
+      }
+    }
+  }
+
  private:
   // shard_data spans all the shards in ess_.
   // I wish we could use a dense array of size [0..uniq_shards] but since

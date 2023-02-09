@@ -34,10 +34,6 @@ class Journal {
   uint32_t RegisterOnChange(ChangeCallback cb);
   void UnregisterOnChange(uint32_t id);
 
-  // Returns true if transaction was scheduled, false if journal is inactive
-  // or in lameduck mode and does not log new transactions.
-  bool SchedStartTx(TxId txid, unsigned num_keys, unsigned num_shards);
-
   /*
   void AddCmd(TxId txid, Op opcode, Span args) {
     OpArgs(txid, opcode, args);

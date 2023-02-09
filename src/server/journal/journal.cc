@@ -87,16 +87,6 @@ void Journal::UnregisterOnChange(uint32_t id) {
   journal_slice.UnregisterOnChange(id);
 }
 
-bool Journal::SchedStartTx(TxId txid, unsigned num_keys, unsigned num_shards) {
-  if (!journal_slice.IsOpen() || lameduck_.load(memory_order_relaxed))
-    return false;
-
-  // TODO: Handle tx entries.
-  // journal_slice.AddLogRecord(Entry::Sched(txid));
-
-  return true;
-}
-
 LSN Journal::GetLsn() const {
   return journal_slice.cur_lsn();
 }
