@@ -2,10 +2,10 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/base/macros.h>
+
 #include "base/logging.h"
 #include "core/intent_lock.h"
-
-#include <absl/base/macros.h>
 
 namespace dfly {
 
@@ -16,7 +16,8 @@ const char* IntentLock::ModeName(Mode m) {
     case IntentLock::EXCLUSIVE:
       return "EXCLUSIVE";
   }
-  ABSL_INTERNAL_UNREACHABLE;
+
+  ABSL_UNREACHABLE();
 }
 
 void IntentLock::VerifyDebug() {

@@ -96,7 +96,7 @@ const char* RespExpr::TypeName(Type t) {
     case ERROR:
       return "error";
   }
-  ABSL_INTERNAL_UNREACHABLE;
+  ABSL_UNREACHABLE();
 }
 
 ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : owner_(owner) {

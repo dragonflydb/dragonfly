@@ -267,6 +267,21 @@ void ExtendFilenameWithShard(absl::Time now, int shard, fs::path* filename) {
   }
 }
 
+void SlowLog(CmdArgList args, ConnectionContext* cntx) {
+  ToUpper(&args[1]);
+  string_view sub_cmd = ArgS(args, 1);
+
+  if (sub_cmd == "LEN") {
+    return (*cntx)->SendLong(0);
+  }
+
+  if (sub_cmd == "GET") {
+    return (*cntx)->SendEmptyArray();
+  }
+
+  (*cntx)->SendError(UnknownSubCmd(sub_cmd, "SLOWLOG"), kSyntaxErrType);
+}
+
 }  // namespace
 
 std::optional<SnapshotSpec> ParseSaveSchedule(string_view time) {
@@ -1728,10 +1743,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, 0}.HFUNC(ReplConf)
             << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, 0}.HFUNC(Role)
-            // We won't support DF->REDIS replication for now, hence we do not need to support
-            // these commands.
-            // << CI{"SYNC", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Sync)
-            // << CI{"PSYNC", CO::ADMIN | CO::GLOBAL_TRANS, 3, 0, 0, 0}.HFUNC(Psync)
+            << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, 0}.SetHandler(SlowLog)
             << CI{"SCRIPT", CO::NOSCRIPT, -2, 0, 0, 0}.HFUNC(Script)
             << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS, -2, 0, 0, 0}.HFUNC(Dfly);
 }

@@ -78,7 +78,7 @@ const char* GlobalStateName(GlobalState s) {
     case GlobalState::SHUTTING_DOWN:
       return "SHUTTING DOWN";
   }
-  ABSL_INTERNAL_UNREACHABLE;
+  ABSL_UNREACHABLE();
 }
 
 const char* ObjTypeName(int type) {
