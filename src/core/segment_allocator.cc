@@ -3,7 +3,14 @@
 //
 #include "core/segment_allocator.h"
 
+#include <mimalloc-types.h>
+
 #include "base/logging.h"
+
+constexpr size_t kSegmentSize = MI_SEGMENT_SIZE;
+
+// mimalloc uses 32MiB segments and we might need change this code if it changes.
+static_assert(kSegmentSize == 1 << 25);
 
 namespace dfly {
 
@@ -11,12 +18,11 @@ SegmentAllocator::SegmentAllocator(mi_heap_t* heap) : heap_(heap) {
 }
 
 void SegmentAllocator::ValidateMapSize() {
-  CHECK_LT(address_table_.size(), 1u << 12)
-      << "TODO: to monitor address_table_ map, it should not grow to such sizes";
-
-  // TODO: we should learn how large this maps can grow for very large databases.
-  // We should learn if mimalloc drops (deallocates) segments and we need to perform GC
-  // to protect ourselves from bloated address table.
+  if (address_table_.size() > 1u << 12) {
+    // This can happen if we restrict dragonfly to small number of threads on high-memory machine,
+    // for example.
+    LOG(WARNING) << "address_table_ map is growing too large: " << address_table_.size();
+  }
 }
 
 }  // namespace dfly
