@@ -36,32 +36,7 @@ bool MiArenaVisit(const mi_heap_t* heap, const mi_heap_area_t* area, void* block
   return true;
 };
 
-}  // namespace
-
-MemoryCmd::MemoryCmd(ServerFamily* owner, ConnectionContext* cntx) : sf_(*owner), cntx_(cntx) {
-}
-
-void MemoryCmd::Run(CmdArgList args) {
-  string_view sub_cmd = ArgS(args, 1);
-  if (sub_cmd == "USAGE") {
-    // dummy output, in practice not implemented yet.
-    return (*cntx_)->SendLong(1);
-  } else if (sub_cmd == "MALLOC-STATS") {
-    uint32_t tid = 0;
-    if (args.size() >= 3 && !absl::SimpleAtoi(ArgS(args, 2), &tid)) {
-      return (*cntx_)->SendError(kInvalidIntErr);
-    }
-    tid = tid % shard_set->pool()->size();
-    string res = shard_set->pool()->at(tid)->AwaitBrief([&] { return MallocStats(tid); });
-
-    return (*cntx_)->SendBulkString(res);
-  }
-
-  string err = UnknownSubCmd(sub_cmd, "MEMORY");
-  return (*cntx_)->SendError(err, kSyntaxErrType);
-}
-
-string MemoryCmd::MallocStats(unsigned tid) {
+std::string MallocStats(bool backing, unsigned tid) {
   string str;
 
   uint64_t start = absl::GetCurrentTimeNanos();
@@ -71,7 +46,7 @@ string MemoryCmd::MallocStats(unsigned tid) {
   absl::StrAppend(&str, "\nArena statistics from thread:", tid, "\n");
   absl::StrAppend(&str, "Count BlockSize Reserved Committed Used\n");
 
-  mi_heap_t* data_heap = ServerState::tlocal()->data_heap();
+  mi_heap_t* data_heap = backing ? mi_heap_get_backing() : ServerState::tlocal()->data_heap();
   BlockMap block_map;
 
   mi_heap_visit_blocks(data_heap, false /* visit all blocks*/, MiArenaVisit, &block_map);
@@ -90,6 +65,58 @@ string MemoryCmd::MallocStats(unsigned tid) {
                   "\n");
 
   return str;
+}
+
+}  // namespace
+
+MemoryCmd::MemoryCmd(ServerFamily* owner, ConnectionContext* cntx) : sf_(*owner), cntx_(cntx) {
+}
+
+void MemoryCmd::Run(CmdArgList args) {
+  string_view sub_cmd = ArgS(args, 1);
+
+  if (sub_cmd == "HELP") {
+    string_view help_arr[] = {
+        "MEMORY <subcommand> [<arg> ...]. Subcommands are:",
+        "MALLOC-STATS [BACKING] [thread-id]",
+        "    Show malloc stats for a heap residing in specified thread-id. 0 by default.",
+        "    If BACKING is specified, show stats for the backing heap.",
+        "USAGE",
+        "    (not implemented).",
+    };
+    return (*cntx_)->SendSimpleStrArr(help_arr, ABSL_ARRAYSIZE(help_arr));
+  };
+
+  if (sub_cmd == "USAGE") {
+    // dummy output, in practice not implemented yet.
+    return (*cntx_)->SendLong(1);
+  }
+
+  if (sub_cmd == "MALLOC-STATS") {
+    uint32_t tid = 0;
+    bool backing = false;
+    if (args.size() >= 3) {
+      ToUpper(&args[2]);
+
+      unsigned tid_indx = 2;
+      if (ArgS(args, tid_indx) == "BACKING") {
+        ++tid_indx;
+        backing = true;
+      }
+
+      if (args.size() > tid_indx && !absl::SimpleAtoi(ArgS(args, tid_indx), &tid)) {
+        return (*cntx_)->SendError(kInvalidIntErr);
+      }
+    }
+
+    tid = tid % shard_set->pool()->size();
+    string res = shard_set->pool()->at(tid)->AwaitBrief([=] { return MallocStats(backing, tid); });
+
+    return (*cntx_)->SendBulkString(res);
+  }
+
+  string err = UnknownSubCmd(sub_cmd, "MEMORY");
+  return (*cntx_)->SendError(err, kSyntaxErrType);
 }
 
 }  // namespace dfly
