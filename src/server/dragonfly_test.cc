@@ -140,7 +140,6 @@ TEST_F(DflyEngineTest, Multi) {
   ASSERT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::NIL), ArgType(RespExpr::NIL)));
 
   atomic_bool tx_empty = true;
-
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
     if (!shard->txq()->Empty())
       tx_empty.store(false);
@@ -264,6 +263,7 @@ TEST_F(DflyEngineTest, MultiConsistent) {
 
   mset_fb.Join();
   fb.Join();
+
   ASSERT_FALSE(service_->IsLocked(0, kKey1));
   ASSERT_FALSE(service_->IsLocked(0, kKey4));
   ASSERT_FALSE(service_->IsShardSetLocked());
@@ -865,6 +865,7 @@ TEST_F(DflyEngineTest, Bug468) {
 
   resp = Run({"exec"});
   ASSERT_THAT(resp, ErrArg("not an integer"));
+
   ASSERT_FALSE(service_->IsLocked(0, "foo"));
 
   resp = Run({"eval", "return redis.call('set', 'foo', 'bar', 'EX', 'moo')", "1", "foo"});

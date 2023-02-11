@@ -600,33 +600,28 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
 // Runs in the coordinator fiber.
 void Transaction::UnlockMulti() {
   VLOG(1) << "UnlockMulti " << DebugId();
-
   DCHECK(multi_);
-  using KeyList = vector<pair<std::string_view, LockCnt>>;
-  vector<KeyList> sharded_keys(shard_set->size());
+  DCHECK_GE(GetUseCount(), 1u);  // Greater-equal because there may be callbacks in progress.
 
-  // It's LE and not EQ because there may be callbacks in progress that increase use_count_.
-  DCHECK_LE(1u, GetUseCount());
-
-  for (const auto& k_v : multi_->lock_counts) {
-    ShardId sid = Shard(k_v.first, sharded_keys.size());
-    sharded_keys[sid].push_back(k_v);
+  auto sharded_keys = make_shared<vector<KeyList>>(shard_set->size());
+  for (const auto& [key, cnt] : multi_->lock_counts) {
+    ShardId sid = Shard(key, sharded_keys->size());
+    (*sharded_keys)[sid].emplace_back(key, cnt);
   }
 
-  uint32_t shard_journals_cnt = 0;
-  if (ServerState::tlocal()->journal()) {
-    shard_journals_cnt = CalcMultiNumOfShardJournals();
-  }
+  unsigned shard_journals_cnt =
+      ServerState::tlocal()->journal() ? CalcMultiNumOfShardJournals() : 0;
 
   uint32_t prev = run_count_.fetch_add(shard_data_.size(), memory_order_relaxed);
   DCHECK_EQ(prev, 0u);
 
+  use_count_.fetch_add(shard_data_.size(), std::memory_order_relaxed);
   for (ShardId i = 0; i < shard_data_.size(); ++i) {
-    shard_set->Add(
-        i, [&] { UnlockMultiShardCb(sharded_keys, EngineShard::tlocal(), shard_journals_cnt); });
+    shard_set->Add(i, [this, sharded_keys, shard_journals_cnt]() {
+      this->UnlockMultiShardCb(*sharded_keys, EngineShard::tlocal(), shard_journals_cnt);
+      intrusive_ptr_release(this);
+    });
   }
-  WaitForShardCallbacks();
-  DCHECK_GE(GetUseCount(), 1u);
 
   VLOG(1) << "UnlockMultiEnd " << DebugId();
 }
