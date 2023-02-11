@@ -30,12 +30,6 @@ void StoredCmd::Invoke(ConnectionContext* ctx) {
   descr->Invoke(arg_list_, ctx);
 }
 
-void ConnectionContext::SendMonitorMsg(std::string msg) {
-  CHECK(owner());
-
-  owner()->SendMonitorMsg(std::move(msg));
-}
-
 void ConnectionContext::ChangeMonitor(bool start) {
   // This will either remove or register a new connection
   // at the "top level" thread --> ServerState context
@@ -43,11 +37,11 @@ void ConnectionContext::ChangeMonitor(bool start) {
   // then notify all other threads that there is a change in the number of monitors
   auto& my_monitors = ServerState::tlocal()->Monitors();
   if (start) {
-    my_monitors.Add(this);
+    my_monitors.Add(owner());
   } else {
     VLOG(1) << "connection " << owner()->GetClientInfo()
-            << " no longer needs to be monitored - removing 0x" << std::hex << (const void*)this;
-    my_monitors.Remove(this);
+            << " no longer needs to be monitored - removing 0x" << std::hex << this;
+    my_monitors.Remove(owner());
   }
   // Tell other threads that about the change in the number of connection that we monitor
   shard_set->pool()->Await(

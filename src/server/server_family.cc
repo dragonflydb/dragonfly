@@ -1319,6 +1319,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("listpack_blobs", total.listpack_blob_cnt);
     append("listpack_bytes", total.listpack_bytes);
     append("small_string_bytes", m.small_string_bytes);
+    append("pipeline_cache_bytes", m.conn_stats.pipeline_cache_capacity);
     append("maxmemory", max_memory_limit);
     append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
     append("cache_mode", GetFlag(FLAGS_cache_mode) ? "cache" : "store");
