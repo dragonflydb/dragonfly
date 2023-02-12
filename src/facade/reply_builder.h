@@ -145,8 +145,11 @@ class RedisReplyBuilder : public SinkReplyBuilder {
 
   static char* FormatDouble(double val, char* dest, unsigned dest_len);
 
- private:
+  // You normally should not call this - maps the status
+  // into the string that would be sent
+  static std::string_view StatusToMsg(OpStatus status);
 
+ private:
   using StrPtr = std::variant<const std::string_view*, const std::string*>;
   void SendStringArr(StrPtr str_ptr, uint32_t len);
 };

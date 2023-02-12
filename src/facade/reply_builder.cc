@@ -218,42 +218,39 @@ void RedisReplyBuilder::SendBulkString(std::string_view str) {
   return Send(v, ABSL_ARRAYSIZE(v));
 }
 
-void RedisReplyBuilder::SendError(OpStatus status) {
+std::string_view RedisReplyBuilder::StatusToMsg(OpStatus status) {
   switch (status) {
     case OpStatus::OK:
-      SendOk();
-      break;
+      return "OK";
     case OpStatus::KEY_NOTFOUND:
-      SendError(kKeyNotFoundErr);
-      break;
+      return kKeyNotFoundErr;
     case OpStatus::WRONG_TYPE:
-      SendError(kWrongTypeErr);
-      break;
+      return kWrongTypeErr;
     case OpStatus::OUT_OF_RANGE:
-      SendError(kIndexOutOfRange);
-      break;
+      return kIndexOutOfRange;
     case OpStatus::INVALID_FLOAT:
-      SendError(kInvalidFloatErr);
-      break;
+      return kInvalidFloatErr;
     case OpStatus::INVALID_INT:
-      SendError(kInvalidIntErr);
-      break;
+      return kInvalidIntErr;
     case OpStatus::SYNTAX_ERR:
-      SendError(kSyntaxErr);
-      break;
+      return kSyntaxErr;
     case OpStatus::OUT_OF_MEMORY:
-      SendError(kOutOfMemory);
-      break;
+      return kOutOfMemory;
     case OpStatus::BUSY_GROUP:
-      SendError("-BUSYGROUP Consumer Group name already exists");
-      break;
+      return "-BUSYGROUP Consumer Group name already exists";
     case OpStatus::INVALID_NUMERIC_RESULT:
-      SendError(kInvalidNumericResult);
-      break;
+      return kInvalidNumericResult;
     default:
       LOG(ERROR) << "Unsupported status " << status;
-      SendError("Internal error");
-      break;
+      return "Internal error";
+  }
+}
+
+void RedisReplyBuilder::SendError(OpStatus status) {
+  if (status == OpStatus::OK) {
+    SendOk();
+  } else {
+    SendError(StatusToMsg(status));
   }
 }
 
