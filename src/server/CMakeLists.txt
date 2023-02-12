@@ -4,16 +4,18 @@ cxx_link(dragonfly base dragonfly_lib epoll_fiber_lib)
 if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_BUILD_TYPE STREQUAL "Release")
   # Add core2 only to this file, thus avoiding instructions in this object file that
   # can cause SIGILL.
-  set_source_files_properties(dfly_main.cc PROPERTIES COMPILE_FLAGS -march=core2 COMPILE_DEFINITIONS SOURCE_PATH_FROM_BUILD_ENV=${CMAKE_SOURCE_DIR})
+  set_source_files_properties(dfly_main.cc PROPERTIES COMPILE_FLAGS -march=core2 COMPILE_DEFINITIONS
+                              SOURCE_PATH_FROM_BUILD_ENV=${CMAKE_SOURCE_DIR})
 endif()
 
-add_library(dfly_transaction db_slice.cc malloc_stats.cc engine_shard_set.cc blocking_controller.cc common.cc
-            io_mgr.cc journal/journal.cc journal/journal_slice.cc table.cc
+add_library(dfly_transaction db_slice.cc malloc_stats.cc engine_shard_set.cc blocking_controller.cc
+            common.cc
+            io_mgr.cc journal/journal.cc journal/journal_slice.cc server_state.cc table.cc
             tiered_storage.cc transaction.cc)
 cxx_link(dfly_transaction uring_fiber_lib dfly_core strings_lib)
 
 add_library(dragonfly_lib  channel_slice.cc command_registry.cc
-            config_flags.cc conn_context.cc debugcmd.cc server_state.cc dflycmd.cc
+            config_flags.cc conn_context.cc debugcmd.cc dflycmd.cc
             generic_family.cc hset_family.cc json_family.cc
             list_family.cc main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc
             snapshot.cc script_mgr.cc server_family.cc malloc_stats.cc

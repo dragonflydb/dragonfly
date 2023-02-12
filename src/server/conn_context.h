@@ -135,12 +135,6 @@ class ConnectionContext : public facade::ConnectionContext {
     return conn_state.db_index;
   }
 
-  // Note that this is accepted by value for lifetime reasons
-  // we want to have our own copy since we are assuming that
-  // 1. there will be not to many connections that we in monitor state
-  // 2. we need to have for each of them each own copy for thread safe reasons
-  void SendMonitorMsg(std::string msg);
-
   void ChangeSubscription(bool to_add, bool to_reply, CmdArgList args);
   void ChangePSub(bool to_add, bool to_reply, CmdArgList args);
   void UnsubscribeAll(bool to_reply);

@@ -167,6 +167,20 @@ std::string MakeMonitorMessage(const ConnectionState& conn_state,
   return message;
 }
 
+void SendMonitor(const std::string& msg) {
+  const auto& monitor_repo = ServerState::tlocal()->Monitors();
+  const auto& monitors = monitor_repo.monitors();
+  if (!monitors.empty()) {
+    VLOG(1) << "thread " << util::ProactorBase::GetIndex() << " sending monitor message '" << msg
+            << "' for " << monitors.size();
+
+    for (auto monitor_conn : monitors) {
+      // never preempts, so we can iterate safely.
+      monitor_conn->SendMonitorMsg(msg);
+    }
+  }
+}
+
 void DispatchMonitorIfNeeded(bool admin_cmd, ConnectionContext* connection, CmdArgList args) {
   // We are not sending any admin command in the monitor, and we do not want to
   // do any processing if we don't have any waiting connections with monitor
@@ -175,15 +189,11 @@ void DispatchMonitorIfNeeded(bool admin_cmd, ConnectionContext* connection, CmdA
   if (!(my_monitors.Empty() || admin_cmd)) {
     //  We have connections waiting to get the info on the last command, send it to them
     auto monitor_msg = MakeMonitorMessage(connection->conn_state, connection->owner(), args);
-    // Note that this is accepted by value for lifetime reasons
-    // we want to have our own copy since we are assuming that
-    // 1. there will be not to many connections that we in monitor state
-    // 2. we need to have for each of them each own copy for thread safe reasons
+
     VLOG(1) << "sending command '" << monitor_msg << "' to the clients that registered on it";
+
     shard_set->pool()->DispatchBrief(
-        [msg = std::move(monitor_msg)](unsigned idx, util::ProactorBase*) {
-          ServerState::tlocal()->Monitors().Send(msg);
-        });
+        [msg = std::move(monitor_msg)](unsigned idx, util::ProactorBase*) { SendMonitor(msg); });
   }
 }
 

@@ -63,10 +63,7 @@ class Connection : public util::Connection {
   // this function is overriden at test_utils TestConnection
   virtual void SendMsgVecAsync(const PubMessage& pub_msg);
 
-  // Please note, this accept the message by value, since we really want to
-  // create a new copy here, so that we would not need to "worry" about memory
-  // management, we are assuming that we would not have many copy for this, and that
-  // we would not need in this way to sync on the lifetime of the message
+  // Note that this is accepted by value because the message is processed asynchronously.
   void SendMonitorMsg(std::string monitor_msg);
 
   void SetName(std::string_view name) {
@@ -129,7 +126,7 @@ class Connection : public util::Connection {
 
   std::unique_ptr<ConnectionContext> cc_;
 
-  struct Request;
+  class Request;
   struct DispatchOperations;
   struct DispatchCleanup;
   struct RequestDeleter;
@@ -149,6 +146,7 @@ class Connection : public util::Connection {
   unsigned parser_error_ = 0;
   uint32_t id_;
   uint32_t break_poll_id_ = UINT32_MAX;
+  ConnectionStats* stats_ = nullptr;
 
   Protocol protocol_;
 

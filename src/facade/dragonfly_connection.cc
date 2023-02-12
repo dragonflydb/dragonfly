@@ -117,7 +117,8 @@ struct Connection::RequestDeleter {
 
 // Please note: The call to the Dtor is mandatory for this!!
 // This class contain types that don't have trivial destructed objects
-struct Connection::Request {
+class Connection::Request {
+ public:
   using MonitorMessage = std::string;
 
   struct PipelineMsg {
@@ -135,9 +136,6 @@ struct Connection::Request {
     StorageType storage;
   };
 
-  static constexpr size_t kSizeOfPipelineMsg = sizeof(PipelineMsg);
-
- public:
   using MessagePayload = std::variant<PipelineMsg, PubMsgRecord, MonitorMessage>;
 
   // Overload to create the a new pipeline message
@@ -153,7 +151,11 @@ struct Connection::Request {
 
   MessagePayload payload;
 
+  size_t StorageCapacity() const;
+
  private:
+  static constexpr size_t kSizeOfPipelineMsg = sizeof(PipelineMsg);
+
   Request(size_t nargs, size_t capacity) : payload(PipelineMsg{nargs, capacity}) {
   }
 
@@ -165,6 +167,20 @@ struct Connection::Request {
 
   Request(const Request&) = delete;
   void SetArgs(const RespVec& args);
+};
+
+struct Connection::DispatchOperations {
+  DispatchOperations(SinkReplyBuilder* b, Connection* me)
+      : stats{me->service_->GetThreadLocalConnectionStats()}, builder{b}, self(me) {
+  }
+
+  void operator()(const PubMsgRecord& msg);
+  void operator()(Request::PipelineMsg& msg);
+  void operator()(const Request::MonitorMessage& msg);
+
+  ConnectionStats* stats = nullptr;
+  SinkReplyBuilder* builder = nullptr;
+  Connection* self = nullptr;
 };
 
 Connection::RequestPtr Connection::Request::New(std::string msg) {
@@ -228,6 +244,52 @@ void Connection::Request::Emplace(const RespVec& args, size_t capacity) {
 void Connection::Request::PipelineMsg::Reset(size_t nargs, size_t capacity) {
   storage.resize(capacity);
   args.resize(nargs);
+}
+
+template <class... Ts> struct Overloaded : Ts... { using Ts::operator()...; };
+template <class... Ts> Overloaded(Ts...) -> Overloaded<Ts...>;
+
+size_t Connection::Request::StorageCapacity() const {
+  return std::visit(Overloaded{[](const PubMsgRecord& msg) -> size_t { return 0; },
+                               [](const PipelineMsg& arg) -> size_t {
+                                 return arg.storage.capacity() + arg.args.capacity();
+                               },
+                               [](const MonitorMessage& arg) -> size_t { return arg.capacity(); }},
+                    payload);
+}
+
+void Connection::DispatchOperations::operator()(const Request::MonitorMessage& msg) {
+  RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
+  rbuilder->SendSimpleString(msg);
+}
+
+void Connection::DispatchOperations::operator()(const PubMsgRecord& msg) {
+  RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
+  ++stats->async_writes_cnt;
+  const PubMessage& pub_msg = msg.pub_msg;
+  string_view arr[4];
+  if (pub_msg.pattern.empty()) {
+    arr[0] = "message";
+    arr[1] = pub_msg.channel;
+    arr[2] = *pub_msg.message;
+    rbuilder->SendStringArr(absl::Span<string_view>{arr, 3});
+  } else {
+    arr[0] = "pmessage";
+    arr[1] = pub_msg.pattern;
+    arr[2] = pub_msg.channel;
+    arr[3] = *pub_msg.message;
+    rbuilder->SendStringArr(absl::Span<string_view>{arr, 4});
+  }
+}
+
+void Connection::DispatchOperations::operator()(Request::PipelineMsg& msg) {
+  ++stats->pipelined_cmd_cnt;
+  bool empty = self->dispatch_q_.empty();
+  builder->SetBatchMode(!empty);
+  self->cc_->async_dispatch = true;
+  self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()}, self->cc_.get());
+  self->last_interaction_ = time(nullptr);
+  self->cc_->async_dispatch = false;
 }
 
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
@@ -449,11 +511,13 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
 }
 
 void Connection::ConnectionFlow(FiberSocketBase* peer) {
+  stats_ = service_->GetThreadLocalConnectionStats();
+
   auto dispatch_fb = fibers::fiber(fibers::launch::dispatch, [&] { DispatchFiber(peer); });
-  ConnectionStats* stats = service_->GetThreadLocalConnectionStats();
-  ++stats->num_conns;
-  ++stats->conn_received_cnt;
-  stats->read_buf_capacity += io_buf_.Capacity();
+
+  ++stats_->num_conns;
+  ++stats_->conn_received_cnt;
+  stats_->read_buf_capacity += io_buf_.Capacity();
 
   ParserStatus parse_status = OK;
 
@@ -490,18 +554,18 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   VLOG(1) << "After dispatch_fb.join()";
   service_->OnClose(cc_.get());
 
-  stats->read_buf_capacity -= io_buf_.Capacity();
+  stats_->read_buf_capacity -= io_buf_.Capacity();
 
   // Update num_replicas if this was a replica connection.
   if (cc_->replica_conn) {
-    --stats->num_replicas;
+    --stats_->num_replicas;
   }
 
   // We wait for dispatch_fb to finish writing the previous replies before replying to the last
   // offending request.
   if (parse_status == ERROR) {
     VLOG(1) << "Error parser status " << parser_error_;
-    ++stats->parser_err_cnt;
+    ++stats_->parser_err_cnt;
 
     if (redis_parser_) {
       SendProtocolError(RedisParser::Result(parser_error_), peer);
@@ -521,7 +585,7 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
     LOG(WARNING) << "Socket error " << ec << " " << ec.message();
   }
 
-  --stats->num_conns;
+  --stats_->num_conns;
 }
 
 auto Connection::ParseRedis() -> ParserStatus {
@@ -649,12 +713,11 @@ void Connection::OnBreakCb(int32_t mask) {
 
 auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, ParserStatus> {
   SinkReplyBuilder* builder = cc_->reply_builder();
-  ConnectionStats* stats = service_->GetThreadLocalConnectionStats();
   error_code ec;
   ParserStatus parse_status = OK;
 
   do {
-    FetchBuilderStats(stats, builder);
+    FetchBuilderStats(stats_, builder);
 
     io::MutableBytes append_buf = io_buf_.AppendBuffer();
     SetPhase("readsock");
@@ -669,8 +732,8 @@ auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, Pars
     }
 
     io_buf_.CommitWrite(*recv_sz);
-    stats->io_read_bytes += *recv_sz;
-    ++stats->io_read_cnt;
+    stats_->io_read_bytes += *recv_sz;
+    ++stats_->io_read_cnt;
     SetPhase("process");
 
     if (redis_parser_) {
@@ -698,7 +761,7 @@ auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, Pars
 
         if (capacity < io_buf_.Capacity()) {
           VLOG(1) << "Growing io_buf to " << io_buf_.Capacity();
-          stats->read_buf_capacity += (io_buf_.Capacity() - capacity);
+          stats_->read_buf_capacity += (io_buf_.Capacity() - capacity);
         }
       }
     } else if (parse_status != OK) {
@@ -707,60 +770,12 @@ auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, Pars
     ec = builder->GetError();
   } while (peer->IsOpen() && !ec);
 
-  FetchBuilderStats(stats, builder);
+  FetchBuilderStats(stats_, builder);
 
   if (ec)
     return ec;
 
   return parse_status;
-}
-
-struct Connection::DispatchOperations {
-  DispatchOperations(SinkReplyBuilder* b, Connection* me)
-      : stats{me->service_->GetThreadLocalConnectionStats()}, builder{b}, self(me) {
-  }
-
-  void operator()(const PubMsgRecord& msg);
-  void operator()(Request::PipelineMsg& msg);
-  void operator()(const Request::MonitorMessage& msg);
-
-  ConnectionStats* stats = nullptr;
-  SinkReplyBuilder* builder = nullptr;
-  Connection* self = nullptr;
-};
-
-void Connection::DispatchOperations::operator()(const Request::MonitorMessage& msg) {
-  RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
-  rbuilder->SendSimpleString(msg);
-}
-
-void Connection::DispatchOperations::operator()(const PubMsgRecord& msg) {
-  RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
-  ++stats->async_writes_cnt;
-  const PubMessage& pub_msg = msg.pub_msg;
-  string_view arr[4];
-  if (pub_msg.pattern.empty()) {
-    arr[0] = "message";
-    arr[1] = pub_msg.channel;
-    arr[2] = *pub_msg.message;
-    rbuilder->SendStringArr(absl::Span<string_view>{arr, 3});
-  } else {
-    arr[0] = "pmessage";
-    arr[1] = pub_msg.pattern;
-    arr[2] = pub_msg.channel;
-    arr[3] = *pub_msg.message;
-    rbuilder->SendStringArr(absl::Span<string_view>{arr, 4});
-  }
-}
-
-void Connection::DispatchOperations::operator()(Request::PipelineMsg& msg) {
-  ++stats->pipelined_cmd_cnt;
-  bool empty = self->dispatch_q_.empty();
-  builder->SetBatchMode(!empty);
-  self->cc_->async_dispatch = true;
-  self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()}, self->cc_.get());
-  self->last_interaction_ = time(nullptr);
-  self->cc_->async_dispatch = false;
 }
 
 // DispatchFiber handles commands coming from the InputLoop.
@@ -784,8 +799,10 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     std::visit(dispatch_op, req->payload);
 
     // Do not cache more than K items.
-    if (free_req_pool_.size() < 16)
+    if (free_req_pool_.size() < 16) {
+      stats_->pipeline_cache_capacity += req->StorageCapacity();
       free_req_pool_.push_back(std::move(req));
+    }
   }
 
   cc_->conn_closing = true;
@@ -813,6 +830,8 @@ auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> RequestPtr {
     req = Request::New(heap, args, backed_sz);
   } else {
     req = move(free_req_pool_.back());
+    stats_->pipeline_cache_capacity -= req->StorageCapacity();
+
     free_req_pool_.pop_back();
     req->Emplace(move(args), backed_sz);
   }
