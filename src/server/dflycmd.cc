@@ -12,9 +12,8 @@
 #include "facade/dragonfly_connection.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
-#include "server/io_utils.h"
 #include "server/journal/journal.h"
-#include "server/journal/serializer.h"
+#include "server/journal/journal_streamer.h"
 #include "server/rdb_save.h"
 #include "server/script_mgr.h"
 #include "server/server_family.h"
@@ -29,7 +28,6 @@ namespace dfly {
 
 using namespace facade;
 using namespace std;
-using namespace util::fibers_ext;
 using util::ProactorBase;
 
 namespace {
@@ -60,63 +58,6 @@ struct TransactionGuard {
 
   Transaction* t;
 };
-
-// Buffered single-shard journal streamer that listens for journal changes with a
-// journal listener and writes them to a destination sink in a separate fiber.
-class JournalStreamer : protected BufferedStreamerBase {
- public:
-  JournalStreamer(journal::Journal* journal, Context* cntx)
-      : BufferedStreamerBase{cntx->GetCancellation()}, cntx_{cntx},
-        journal_cb_id_{0}, journal_{journal}, write_fb_{}, writer_{this} {
-  }
-
-  // Self referential.
-  JournalStreamer(const JournalStreamer& other) = delete;
-  JournalStreamer(JournalStreamer&& other) = delete;
-
-  // Register journal listener and start writer in fiber.
-  void Start(io::Sink* dest);
-
-  // Must be called on context cancellation for unblocking
-  // and manual cleanup.
-  void Cancel();
-
- private:
-  // Writer fiber that steals buffer contents and writes them to dest.
-  void WriterFb(io::Sink* dest);
-
- private:
-  Context* cntx_;
-
-  uint32_t journal_cb_id_;
-  journal::Journal* journal_;
-
-  Fiber write_fb_;
-  JournalWriter writer_;
-};
-
-void JournalStreamer::Start(io::Sink* dest) {
-  write_fb_ = Fiber(&JournalStreamer::WriterFb, this, dest);
-  journal_cb_id_ = journal_->RegisterOnChange([this](const journal::Entry& entry) {
-    writer_.Write(entry);
-    NotifyWritten();
-  });
-}
-
-void JournalStreamer::Cancel() {
-  journal_->UnregisterOnChange(journal_cb_id_);
-  Finalize();
-
-  if (write_fb_.IsJoinable())
-    write_fb_.Join();
-}
-
-void JournalStreamer::WriterFb(io::Sink* dest) {
-  if (auto ec = ConsumeIntoSink(dest); ec) {
-    cntx_->ReportError(ec);
-  }
-}
-
 }  // namespace
 
 DflyCmd::ReplicaRoleInfo::ReplicaRoleInfo(std::string address, uint32_t listening_port,
@@ -173,6 +114,10 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
 
   if (sub_cmd == "EXPIRE") {
     return Expire(args, cntx);
+  }
+
+  if (sub_cmd == "REPLICAOFFSET" && args.size() == 3) {
+    return ReplicaOffset(args, cntx);
   }
 
   rb->SendError(kSyntaxErr);
@@ -303,7 +248,8 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
   absl::InsecureBitGen gen;
   string eof_token = GetRandomHex(gen, 40);
 
-  replica_ptr->flows[flow_id] = FlowInfo{cntx->owner(), eof_token};
+  replica_ptr->flows[flow_id].conn = cntx->owner();
+  replica_ptr->flows[flow_id].eof_token = eof_token;
   listener_->Migrate(cntx->owner(), shard_set->pool()->at(flow_id));
 
   rb->StartArray(2);
@@ -392,6 +338,26 @@ void DflyCmd::Expire(CmdArgList args, ConnectionContext* cntx) {
   return rb->SendOk();
 }
 
+void DflyCmd::ReplicaOffset(CmdArgList args, ConnectionContext* cntx) {
+  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  string_view sync_id_str = ArgS(args, 2);
+
+  VLOG(1) << "Got DFLY REPLICAOFFSET " << sync_id_str;
+  auto [sync_id, replica_ptr] = GetReplicaInfoOrReply(sync_id_str, rb);
+  if (!sync_id)
+    return;
+
+  string result;
+  unique_lock lk(replica_ptr->mu);
+  for (size_t flow_id = 0; flow_id < replica_ptr->flows.size(); ++flow_id) {
+    const auto& streamer = replica_ptr->flows[flow_id].streamer.get();
+    if (streamer) {
+      result = absl::StrCat(result, flow_id, streamer->GetRecordCount());
+    }
+  }
+  rb->SendBulkString(result);
+}
+
 OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
   DCHECK(!flow->full_sync_fb.IsJoinable());
 
@@ -431,18 +397,17 @@ void DflyCmd::StopFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
 
 OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
   // Create streamer for shard flows.
-  JournalStreamer* streamer = nullptr;
+
   if (shard != nullptr) {
-    streamer = new JournalStreamer{sf_->journal(), cntx};
-    streamer->Start(flow->conn->socket());
+    flow->streamer.reset(new JournalStreamer(sf_->journal(), cntx));
+    flow->streamer->Start(flow->conn->socket());
   }
 
   // Register cleanup.
-  flow->cleanup = [this, streamer, flow]() {
+  flow->cleanup = [this, flow]() {
     flow->TryShutdownSocket();
-    if (streamer) {
-      streamer->Cancel();
-      delete streamer;
+    if (flow->streamer) {
+      flow->streamer->Cancel();
     }
   };
 
@@ -652,6 +617,12 @@ void DflyCmd::FlowInfo::TryShutdownSocket() {
   if (conn->socket()->IsOpen()) {
     conn->socket()->Shutdown(SHUT_RDWR);
   }
+}
+
+DflyCmd::FlowInfo::~FlowInfo() {
+}
+
+DflyCmd::FlowInfo::FlowInfo() {
 }
 
 }  // namespace dfly
