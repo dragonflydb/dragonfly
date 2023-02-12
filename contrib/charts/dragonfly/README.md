@@ -14,6 +14,17 @@ Dragonfly is a modern in-memory datastore, fully compatible with Redis and Memca
 
 Kubernetes: `>=1.23.0-0`
 
+
+## Installing from pre-packaged OCI 
+
+Pick a version from https://github.com/dragonflydb/dragonfly/pkgs/container/dragonfly/helm/dragonfly
+
+
+E.g. VERSION=v0.15.0
+
+helm upgrade --install dragonfly oci://ghcr.io/dragonflydb/dragonfly/helm/dragonfly --version $VERSION
+
+
 ## Values
 
 | Key | Type | Default | Description |
