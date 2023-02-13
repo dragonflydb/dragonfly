@@ -345,7 +345,7 @@ class Transaction {
   // Iterate over shards and run function accepting (PerShardData&, ShardId) on all active ones.
   template <typename F> void IterateActiveShards(F&& f) {
     bool is_global = IsGlobal();
-    if (unique_shard_cnt_ == 1) {
+    if (!is_global && unique_shard_cnt_ == 1) {  // unique_shard_id_ is set only for non-global.
       auto i = unique_shard_id_;
       f(shard_data_[SidToId(i)], i);
     } else {
