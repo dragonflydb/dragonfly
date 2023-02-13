@@ -349,15 +349,15 @@ void DflyCmd::ReplicaOffset(CmdArgList args, ConnectionContext* cntx) {
 
   string result;
   unique_lock lk(replica_ptr->mu);
+  rb->StartArray(replica_ptr->flows.size());
   for (size_t flow_id = 0; flow_id < replica_ptr->flows.size(); ++flow_id) {
     JournalStreamer* streamer = replica_ptr->flows[flow_id].streamer.get();
     if (streamer) {
-      absl::StrAppend(&result, flow_id, streamer->GetRecordCount(), ",");
+      rb->SendLong(streamer->GetRecordCount());
     } else {
-      absl::StrAppend(&result, flow_id, "0", ",");
+      rb->SendLong(0);
     }
   }
-  rb->SendBulkString(result);
 }
 
 OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
