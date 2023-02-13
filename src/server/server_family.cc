@@ -755,6 +755,18 @@ void ServerFamily::PauseReplication(bool pause) {
   }
 }
 
+std::optional<ReplicaOffsetInfo> ServerFamily::GetReplicaOffsetInfo() {
+  unique_lock lk(replicaof_mu_);
+
+  // Switch to primary mode.
+  if (!ServerState::tlocal()->is_master) {
+    auto repl_ptr = replica_;
+    CHECK(repl_ptr);
+    return ReplicaOffsetInfo{repl_ptr->GetSyncId(), repl_ptr->GetReplicaOffset()};
+  }
+  return nullopt;
+}
+
 void ServerFamily::OnClose(ConnectionContext* cntx) {
   dfly_cmd_->OnClose(cntx);
 }
@@ -1519,7 +1531,6 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
     // use this lock as critical section to prevent concurrent replicaof commands running.
     unique_lock lk(replicaof_mu_);
 
-    // Switch to primary mode.
     if (!ServerState::tlocal()->is_master) {
       auto repl_ptr = replica_;
       CHECK(repl_ptr);
