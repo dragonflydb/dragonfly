@@ -42,6 +42,7 @@ extern "C" {
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "server/version.h"
+#include "server_family.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
 #include "util/fibers/fiber_file.h"
@@ -51,7 +52,9 @@ using namespace std;
 
 ABSL_FLAG(string, dir, "", "working directory");
 ABSL_FLAG(string, dbfilename, "dump", "the filename to save/load the DB");
-ABSL_FLAG(string, requirepass, "", "password for AUTH authentication");
+ABSL_FLAG(string, requirepass, "",
+          "password for AUTH authentication. if DFLY_PASSWORD env var is set, "
+          "it will override this flag");
 ABSL_FLAG(string, save_schedule, "",
           "glob spec for the UTC time to save a snapshot which matches HH:MM 24h time");
 
@@ -1047,6 +1050,14 @@ void ServerFamily::BreakOnShutdown() {
   dfly_cmd_->BreakOnShutdown();
 }
 
+const char* GetPassword() {
+  const char* env_var = getenv("DFLY_PASSWORD");
+  if (env_var) {
+    return env_var;
+  }
+  return GetFlag(FLAGS_requirepass).c_str();
+}
+
 void ServerFamily::FlushDb(CmdArgList args, ConnectionContext* cntx) {
   DCHECK(cntx->transaction);
   Drakarys(cntx->transaction, cntx->transaction->GetDbIndex());
@@ -1080,7 +1091,7 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
   }
 
   string_view pass = ArgS(args, 1);
-  if (pass == GetFlag(FLAGS_requirepass)) {
+  if (pass == GetPassword()) {
     cntx->authenticated = true;
     (*cntx)->SendOk();
   } else {

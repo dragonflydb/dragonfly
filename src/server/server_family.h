@@ -20,6 +20,12 @@ class HttpListenerBase;
 
 namespace dfly {
 
+const char* GetPassword();
+
+bool inline IsPasswordSet() {
+  return strlen(GetPassword()) > 0;
+}
+
 namespace journal {
 class Journal;
 }  // namespace journal

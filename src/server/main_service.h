@@ -59,8 +59,6 @@ class Service : public facade::ServiceInterface {
     return pp_;
   }
 
-  bool IsPassProtected() const;
-
   absl::flat_hash_map<std::string, unsigned> UknownCmdMap() const;
 
   const CommandId* FindCmd(std::string_view cmd) const {
@@ -79,7 +77,7 @@ class Service : public facade::ServiceInterface {
   // if from equals the old state then the switch is performed "to" is returned.
   // Otherwise, does not switch and returns the current state in the system.
   // Upon switch, updates cached global state in threadlocal ServerState struct.
-  GlobalState SwitchState(GlobalState from , GlobalState to);
+  GlobalState SwitchState(GlobalState from, GlobalState to);
 
   void ConfigureHttpHandlers(util::HttpListenerBase* base) final;
   void OnClose(facade::ConnectionContext* cntx) final;
