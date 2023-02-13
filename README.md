@@ -17,7 +17,7 @@ Dragonfly is an in-memory database built for modern application workloads. It is
 ## Contents
 
 - [Benchmarks](#benchmarks)
-- [Quick Start]([#quick-start](https://github.com/dragonflydb/dragonfly/tree/main/docs/quick-start))
+- [Quick Start](https://github.com/dragonflydb/dragonfly/tree/main/docs/quick-start)
 - [Configuration](#configuration)
 - [Roadmap and Status](#roadmap-status)
 - [Design Decisions](#design-decisions)
