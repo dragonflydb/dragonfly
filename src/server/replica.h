@@ -63,6 +63,7 @@ class Replica {
     DbIndex dbid;
     uint32_t shard_cnt;
     std::vector<journal::ParsedEntry::CmdData> commands;
+    // Counting the number of journal records in specific transaction in specific shard.
     uint32_t journal_rec_count = 0;
   };
 
@@ -220,6 +221,7 @@ class Replica {
   bool use_multi_shard_exe_sync_;
 
   std::unique_ptr<JournalExecutor> executor_;
+  // Count the number of journal records executed in specific flow
   std::atomic_uint64_t journal_rec_executed_ = 0;
 
   // MainReplicationFb in standalone mode, FullSyncDflyFb in flow mode.
