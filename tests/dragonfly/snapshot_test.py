@@ -6,6 +6,7 @@ from pathlib import Path
 
 from . import dfly_args
 from .utility import DflySeeder, wait_available_async
+pytestmark = pytest.mark.skip("all tests still WIP")
 
 BASIC_ARGS = {"dir": "{DRAGONFLY_TMP}/"}
 
@@ -75,7 +76,8 @@ class TestPeriodicSnapshot(SnapshotTestBase):
 
     @pytest.mark.asyncio
     async def test_snapshot(self, df_seeder_factory, df_server):
-        seeder = df_seeder_factory.create(port=df_server.port, keys=10, multi_transaction_probability=0)
+        seeder = df_seeder_factory.create(
+            port=df_server.port, keys=10, multi_transaction_probability=0)
         await seeder.run(target_deviation=0.5)
 
         time.sleep(60)

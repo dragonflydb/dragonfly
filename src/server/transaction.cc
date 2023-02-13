@@ -510,7 +510,8 @@ void Transaction::ScheduleInternal() {
         if (!is_active(i))
           continue;
 
-        shard_set->Add(i, [] { EngineShard::tlocal()->PollExecution("cancel_cleanup", nullptr); });
+        shard_set->RunOnQueue(
+            i, [] { EngineShard::tlocal()->PollExecution("cancel_cleanup", nullptr); });
       }
     }
   }
@@ -573,7 +574,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
         CHECK_GE(DecreaseRunCnt(), 1u);
       }
     };
-    shard_set->Add(unique_shard_id_, std::move(schedule_cb));  // serves as a barrier.
+    shard_set->RunOnQueue(unique_shard_id_, std::move(schedule_cb));  // serves as a barrier.
   } else {
     // This transaction either spans multiple shards and/or is multi.
 
@@ -617,7 +618,7 @@ void Transaction::UnlockMulti() {
 
   use_count_.fetch_add(shard_data_.size(), std::memory_order_relaxed);
   for (ShardId i = 0; i < shard_data_.size(); ++i) {
-    shard_set->Add(i, [this, sharded_keys, shard_journals_cnt]() {
+    shard_set->RunOnQueue(i, [this, sharded_keys, shard_journals_cnt]() {
       this->UnlockMultiShardCb(*sharded_keys, EngineShard::tlocal(), shard_journals_cnt);
       intrusive_ptr_release(this);
     });
@@ -721,7 +722,7 @@ void Transaction::ExecuteAsync() {
   };
 
   // IsArmedInShard is the protector of non-thread safe data.
-  IterateActiveShards([&cb](PerShardData& sd, auto i) { shard_set->Add(i, cb); });
+  IterateActiveShards([&cb](PerShardData& sd, auto i) { shard_set->RunOnQueue(i, cb); });
 }
 
 void Transaction::RunQuickie(EngineShard* shard) {
@@ -770,7 +771,7 @@ void Transaction::UnwatchBlocking(bool should_expire, WaitKeysProvider wcb) {
 
   IterateActiveShards([&expire_cb](PerShardData& sd, auto i) {
     DCHECK_EQ(0, sd.local_mask & ARMED);
-    shard_set->Add(i, expire_cb);
+    shard_set->RunOnQueue(i, expire_cb);
   });
 
   // Wait for all callbacks to conclude.

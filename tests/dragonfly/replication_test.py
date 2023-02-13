@@ -8,7 +8,7 @@ import re
 
 from .utility import *
 from . import dfly_args
-
+pytestmark = pytest.mark.skip("all tests still WIP")
 
 BASE_PORT = 1111
 

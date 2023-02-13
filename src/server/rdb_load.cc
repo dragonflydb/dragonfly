@@ -1776,7 +1776,7 @@ error_code RdbLoader::Load(io::Source* src) {
         FlushShardAsync(i);
 
         // Active database if not existed before.
-        shard_set->Add(i, [dbid] { EngineShard::tlocal()->db_slice().ActivateDb(dbid); });
+        shard_set->RunOnQueue(i, [dbid] { EngineShard::tlocal()->db_slice().ActivateDb(dbid); });
       }
 
       cur_db_index_ = dbid;
@@ -1850,7 +1850,7 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
     FlushShardAsync(i);
 
     // Send sentinel callbacks to ensure that all previous messages have been processed.
-    shard_set->Add(i, [bc]() mutable { bc.Dec(); });
+    shard_set->RunOnQueue(i, [bc]() mutable { bc.Dec(); });
   }
   bc.Wait();  // wait for sentinels to report.
 
@@ -2076,7 +2076,7 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
     this->LoadItemsBuffer(indx, ib);
   };
 
-  shard_set->Add(sid, std::move(cb));
+  shard_set->RunOnQueue(sid, std::move(cb));
 }
 
 std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, CompactObj* pv) {

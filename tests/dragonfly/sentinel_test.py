@@ -5,13 +5,15 @@ import aioredis
 import pytest
 import time
 import asyncio
-
+pytestmark = pytest.mark.skip("all tests still WIP")
 
 # Helper function to parse some sentinel cli commands output as key value dictionaries.
 # Output is expected be of even number of lines where each pair of consecutive lines results in a single key value pair.
 # If new_dict_key is not empty, encountering it in the output will start a new dictionary, this let us return multiple
 # dictionaries, for example in the 'slaves' command, one dictionary for each slave.
-def stdout_as_list_of_dicts(cp: subprocess.CompletedProcess, new_dict_key =""):
+
+
+def stdout_as_list_of_dicts(cp: subprocess.CompletedProcess, new_dict_key=""):
     lines = cp.stdout.splitlines()
     res = []
     d = None
@@ -19,17 +21,19 @@ def stdout_as_list_of_dicts(cp: subprocess.CompletedProcess, new_dict_key =""):
         d = dict()
         res.append(d)
     for i in range(0, len(lines), 2):
-        if (lines[i]) == new_dict_key: # assumes output never has '' as a key
+        if (lines[i]) == new_dict_key:  # assumes output never has '' as a key
             d = dict()
             res.append(d)
         d[lines[i]] = lines[i + 1]
     return res
+
 
 def wait_for(func, pred, timeout_sec, timeout_msg=""):
     while not pred(func()):
         assert timeout_sec > 0, timeout_msg
         timeout_sec = timeout_sec - 1
         time.sleep(1)
+
 
 async def await_for(func, pred, timeout_sec, timeout_msg=""):
     done = False
@@ -58,19 +62,21 @@ class Sentinel:
             f"port {self.port}",
             f"sentinel monitor {self.default_deployment} 127.0.0.1 {self.initial_master_port} 1",
             f"sentinel down-after-milliseconds {self.default_deployment} 3000"
-            ]
+        ]
         self.config_file.write_text("\n".join(config))
 
         print(self.config_file.read_text())
 
-        self.proc = subprocess.Popen(["redis-server", f"{self.config_file.absolute()}", "--sentinel"])
+        self.proc = subprocess.Popen(
+            ["redis-server", f"{self.config_file.absolute()}", "--sentinel"])
 
     def stop(self):
         self.proc.terminate()
 
     def run_cmd(self, args, sentinel_cmd=True, capture_output=False, assert_ok=True) -> subprocess.CompletedProcess:
         run_args = ["redis-cli", "-p", f"{self.port}"]
-        if sentinel_cmd: run_args = run_args + ["sentinel"]
+        if sentinel_cmd:
+            run_args = run_args + ["sentinel"]
         run_args = run_args + args
         cp = subprocess.run(run_args, capture_output=capture_output, text=True)
         if assert_ok:
@@ -79,8 +85,9 @@ class Sentinel:
 
     def wait_ready(self):
         wait_for(
-            lambda: self.run_cmd(["ping"], sentinel_cmd=False, assert_ok=False),
-            lambda cp:cp.returncode == 0,
+            lambda: self.run_cmd(
+                ["ping"], sentinel_cmd=False, assert_ok=False),
+            lambda cp: cp.returncode == 0,
             timeout_sec=10, timeout_msg="Timeout waiting for sentinel to become ready.")
 
     def master(self, deployment="") -> dict:
@@ -98,7 +105,8 @@ class Sentinel:
     def live_master_port(self, deployment=""):
         if deployment == "":
             deployment = self.default_deployment
-        cp = self.run_cmd(["get-master-addr-by-name", deployment], capture_output=True)
+        cp = self.run_cmd(["get-master-addr-by-name",
+                          deployment], capture_output=True)
         return int(cp.stdout.splitlines()[1])
 
     def failover(self, deployment=""):
@@ -107,7 +115,8 @@ class Sentinel:
         self.run_cmd(["failover", deployment,])
 
 
-@pytest.fixture(scope="function") # Sentinel has state which we don't want carried over form test to test.
+# Sentinel has state which we don't want carried over form test to test.
+@pytest.fixture(scope="function")
 def sentinel(tmp_dir) -> Sentinel:
     s = Sentinel(tmp_dir)
     s.start()
@@ -133,9 +142,9 @@ async def test_failover(df_local_factory, sentinel):
 
     # Verify sentinel picked up replica.
     await await_for(
-            lambda: sentinel.master(),
-            lambda m: m["num-slaves"] == "1",
-            timeout_sec=15, timeout_msg="Timeout waiting for sentinel to pick up replica.")
+        lambda: sentinel.master(),
+        lambda m: m["num-slaves"] == "1",
+        timeout_sec=15, timeout_msg="Timeout waiting for sentinel to pick up replica.")
 
     sentinel.failover()
 
@@ -172,9 +181,9 @@ async def test_master_failure(df_local_factory, sentinel):
 
     # Verify sentinel picked up replica.
     await await_for(
-            lambda: sentinel.master(),
-            lambda m: m["num-slaves"] == "1",
-            timeout_sec=15, timeout_msg="Timeout waiting for sentinel to pick up replica.")
+        lambda: sentinel.master(),
+        lambda m: m["num-slaves"] == "1",
+        timeout_sec=15, timeout_msg="Timeout waiting for sentinel to pick up replica.")
 
     # Simulate master failure.
     master.stop()

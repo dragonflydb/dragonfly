@@ -327,7 +327,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view 
     auto& shard_batch = ps[sid];
     shard_batch.index[shard_batch.sz++] = i;
     if (shard_batch.sz == 32) {  // TODO what is this 32?
-      ess.Add(sid, [=] {
+      ess.RunOnQueue(sid, [=] {
         DoPopulateBatch(prefix, value_len, populate_random_values, params, shard_batch);
         if (i % 50 == 0) {
           fibers_ext::Yield();

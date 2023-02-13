@@ -12,6 +12,7 @@ extern "C" {
 #include <absl/container/flat_hash_map.h>
 #include <xxhash.h>
 
+#include "base/logging.h"
 #include "base/string_view_sso.h"
 #include "core/external_alloc.h"
 #include "core/mi_memory_resource.h"
@@ -262,9 +263,13 @@ class EngineShardSet {
   }
 
   // Uses a shard queue to dispatch. Callback runs in a dedicated fiber.
-  template <typename F> auto Add(ShardId sid, F&& f) {
-    assert(sid < shard_queue_.size());
-    return shard_queue_[sid]->Add(std::forward<F>(f));
+  template <typename F> auto RunOnQueue(ShardId sid, F&& f) {
+    if (sid < shard_queue_.size()) {
+      return shard_queue_[sid]->Add(std::forward<F>(f));
+    } else {
+      LOG(FATAL) << "sid " << sid << " >= " << shard_queue_.size();
+      return false;
+    }
   }
 
   // Runs a brief function on all shards. Waits for it to complete.
@@ -283,7 +288,7 @@ class EngineShardSet {
   template <typename U> void AwaitRunningOnShardQueue(U&& func) {
     util::fibers_ext::BlockingCounter bc{unsigned(shard_queue_.size())};
     for (size_t i = 0; i < shard_queue_.size(); ++i) {
-      Add(i, [&func, bc]() mutable {
+      RunOnQueue(i, [&func, bc]() mutable {
         func(EngineShard::tlocal());
         bc.Dec();
       });

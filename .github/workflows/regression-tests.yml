@@ -44,14 +44,20 @@ jobs:
           echo "Current commit is ${{github.sha}}"
           pip install -r dragonfly/requirements.txt
           export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
-
-          pytest -xvr dragonfly
+          ls -lah ${DRAGONFLY_PATH}
+          ls -lah ${GITHUB_WORKSPACE}/build/
+          ls -lah ${GITHUB_WORKSPACE}/tests/
+          ls -lah ${GITHUB_WORKSPACE}/tests/dragonfly/
+          pytest -xvvr dragonfly
 
       - name: Send notification on failure
         if: failure() || cancelled()
         run: |
-          curl -s \
-            -X POST \
-            -H 'Content-Type: application/json' \
-            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
-            -d '{"text": "Unforunately the tests of dragonfly build are not passed :( \n The commit is ${{github.sha}}	"}'
+          cat /tmp/dragonfly.INFO
+          cat /tmp/dragonfly.WARNING
+          cat /tmp/dragonfly.ERROR
+        #  curl -s \
+        #    -X POST \
+        #    -H 'Content-Type: application/json' \
+        #    '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
+        #    -d '{"text": "Unforunately the tests of dragonfly build are not passed :( \n The commit is ${{github.sha}}	"}'

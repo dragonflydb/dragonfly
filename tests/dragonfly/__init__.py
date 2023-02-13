@@ -55,6 +55,9 @@ class DflyInstance:
 
     def _start(self):
         base_args = [f"--{v}" for v in self.params.args]
+        base_args.append("--vmodule=main_service=2")
+        base_args.append("--logbuflevel=-1")
+        base_args.append("--bind=0.0.0.0")
         all_args = self.format_args(self.args) + base_args
         print(f"Starting instance on {self.port} with arguments {all_args}")
 

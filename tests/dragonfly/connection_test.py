@@ -3,6 +3,7 @@ import pytest
 import asyncio
 import aioredis
 import async_timeout
+#pytestmark = pytest.mark.skip("all tests still WIP")
 
 
 async def run_monitor_eval(monitor, expected):
@@ -31,9 +32,9 @@ Monitor command do not return when we have lua script issue
 '''
 
 
+@pytest.mark.skip(reason="We have an issue with this test")
 @pytest.mark.asyncio
 async def test_monitor_command_lua(async_pool):
-    pytest.skip("issue running this - fixme")
     expected = ["EVAL return redis", "GET bar",
                 "EVAL return redis", "SET foo2"]
 
@@ -68,9 +69,9 @@ Make sure that we are getting the commands in the monitor context
 '''
 
 
+@pytest.mark.skip(reason="We have an issue with this test")
 @pytest.mark.asyncio
 async def test_monitor_command(async_pool):
-    pytest.skip("issue running this - fixme")
 
     def generate(max):
         for i in range(max):
@@ -151,14 +152,13 @@ the connections is running all commands in its context
 
 @pytest.mark.asyncio
 async def test_pipeline_support(async_client):
-    pytest.skip("issue running this - fixme")
-
     def generate(max):
         for i in range(max):
             yield f"key{i}", f"value={i}"
 
     messages = {a: b for a, b in generate(5)}
     assert await run_pipeline_mode(async_client, messages)
+    assert False
 
 
 async def reader(channel: aioredis.client.PubSub, messages, max: int):
@@ -202,8 +202,6 @@ expected results on the subscriber side
 
 @pytest.mark.asyncio
 async def test_pubsub_command(async_client):
-    pytest.skip("issue running this - fixme")
-
     def generate(max):
         for i in range(max):
             yield f"message number {i}"
@@ -276,8 +274,6 @@ across multiple connections internally
 
 @pytest.mark.asyncio
 async def test_multi_pubsub(async_client):
-    pytest.skip("issue running this - fixme")
-
     def generate(max):
         for i in range(max):
             yield f"this is message number {i} from the publisher on the channel"
