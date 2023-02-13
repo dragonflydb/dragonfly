@@ -299,7 +299,7 @@ class Transaction {
   // Init with a set of keys.
   void InitByKeys(KeyIndex keys);
 
-  // Build shard index from key index.
+  // Build shard index by distributing the arguments by shards based on the key index.
   void BuildShardIndex(KeyIndex keys, bool rev_mapping, std::vector<PerShardCache>* out);
 
   // Init shard data from shard index.

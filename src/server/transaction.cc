@@ -99,7 +99,7 @@ void Transaction::BuildShardIndex(KeyIndex key_index, bool rev_mapping,
     add(sid, i);
 
     DCHECK_LE(key_index.step, 2u);
-    if (key_index.step == 2) {  // value
+    if (key_index.step == 2) {  // Handle value associated with preceding key.
       add(sid, ++i);
     }
   }
@@ -110,11 +110,11 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
   bool incremental_locking = multi_ && multi_->is_expanding;
 
   args_.reserve(num_args);
-  if (rev_mapping)  // we need reverse index only for some commands (MSET etc).
+  if (rev_mapping)
     reverse_index_.reserve(args_.size());
 
-  // slice.arg_start/arg_count point to args_ array which is sorted according to shard of each key.
-  // reverse_index_[i] says what's the original position of args_[i] in args.
+  // Store the concatenated per-shard arguments from the shard index inside args_
+  // and make each shard data point to its own sub-span inside args_.
   for (size_t i = 0; i < shard_data_.size(); ++i) {
     auto& sd = shard_data_[i];
     auto& si = shard_index[i];
@@ -124,9 +124,7 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
     sd.arg_count = si.args.size();
     sd.arg_start = args_.size();
 
-    // We reset the local_mask for incremental locking to allow locking of arguments
-    // for each operation within the same transaction. For instant locking we lock at
-    // the beginning all the keys so we must preserve the mask to avoid double locking.
+    // Reset mask to allow locking multiple times.
     if (incremental_locking)
       sd.local_mask = 0;
 
@@ -150,8 +148,7 @@ void Transaction::InitMultiData(KeyIndex key_index) {
   DCHECK(multi_);
   auto args = cmd_with_full_args_;
 
-  // TODO: to determine correctly locking mode for transactions, scripts
-  // and regular commands.
+  // TODO: determine correct locking mode for transactions, scripts and regular commands.
   IntentLock::Mode mode = Mode();
   multi_->keys.clear();
 
@@ -230,29 +227,31 @@ void Transaction::InitByKeys(KeyIndex key_index) {
   DCHECK_GT(key_index.start, 0u);
 
   bool needs_reverse_mapping = cid_->opt_mask() & CO::REVERSE_MAPPING;
-
   bool single_key = !multi_ && key_index.HasSingleKey();
+
   if (single_key) {
     DCHECK_GT(key_index.step, 0u);
 
+    // We don't have to split the arguments by shards, so we can copy them directly.
     StoreKeysInArgs(key_index, needs_reverse_mapping);
 
-    shard_data_.resize(1);  // Single key optimization
+    shard_data_.resize(1);
     unique_shard_cnt_ = 1;
     unique_shard_id_ = Shard(args_.front(), shard_set->size());
 
     return;
   }
 
-  // Our shard_data is not sparse, so we must allocate for all threads :(
-  shard_data_.resize(shard_set->size());
+  shard_data_.resize(shard_set->size());  // shard_data isn't sparse, so we must allocate for all :(
   CHECK(key_index.step == 1 || key_index.step == 2);
   DCHECK(key_index.step == 1 || (args.size() % 2) == 1);
 
-  // Reuse thread-local temporary storage. Since this code is atomic we can use it here.
-  auto& shard_index = tmp_space.shard_cache;
+  auto& shard_index = tmp_space.shard_cache;  // Safe, because flow below is not preemptive.
+
+  // Distribute all the arguments by shards.
   BuildShardIndex(key_index, needs_reverse_mapping, &shard_index);
 
+  // Initialize shard data based on distributed arguments.
   InitShardData(shard_index, key_index.num_args(), needs_reverse_mapping);
 
   if (multi_)
@@ -260,6 +259,7 @@ void Transaction::InitByKeys(KeyIndex key_index) {
 
   DVLOG(1) << "InitByArgs " << DebugId() << " " << args_.front();
 
+  // Compress shard data, if we occupy only one shard.
   if (unique_shard_cnt_ == 1) {
     PerShardData* sd;
     if (multi_) {
@@ -272,7 +272,7 @@ void Transaction::InitByKeys(KeyIndex key_index) {
     sd->arg_start = -1;
   }
 
-  // validation
+  // Validation. Check reverse mapping was built correctly.
   if (needs_reverse_mapping) {
     for (size_t i = 0; i < args_.size(); ++i) {
       DCHECK_EQ(args_[i], ArgS(args, 1 + reverse_index_[i]));  // 1 for the commandname.
