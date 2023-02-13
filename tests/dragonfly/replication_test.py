@@ -36,7 +36,7 @@ replication_cases = [
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replicas, seeder_config", replication_cases)
 async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_replicas, seeder_config):
-    master = df_local_factory.create(port=1111, proactor_threads=t_master)
+    master = df_local_factory.create(port=BASE_PORT, proactor_threads=t_master)
     replicas = [
         df_local_factory.create(port=BASE_PORT+i+1, proactor_threads=t)
         for i, t in enumerate(t_replicas)
@@ -44,6 +44,7 @@ async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_
 
     # Start master
     master.start()
+    c_master = aioredis.Redis(port=master.port)
 
     # Fill master with test data
     seeder = df_seeder_factory.create(port=master.port, **seeder_config)
@@ -71,31 +72,28 @@ async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_
     await stream_task
 
     # Check data after full sync
-    await check_all_replicas_finished(c_replicas)
+    await check_all_replicas_finished(c_replicas, c_master)
     await check_data(seeder, replicas, c_replicas)
 
     # Stream more data in stable state
     await seeder.run(target_ops=2000)
 
     # Check data after stable state stream
-    await check_all_replicas_finished(c_replicas)
+    await check_all_replicas_finished(c_replicas, c_master)
     await check_data(seeder, replicas, c_replicas)
 
 
-async def check_replica_finished_exec(c_replica):
-    info_stats = await c_replica.execute_command("INFO")
-    tc1 = info_stats['total_commands_processed']
-    await asyncio.sleep(0.5)
-    info_stats = await c_replica.execute_command("INFO")
-    tc2 = info_stats['total_commands_processed']
-    # Replica processed only the info command on above sleep.
-    return tc1+1 == tc2
+async def check_replica_finished_exec(c_replica, c_master):
+    r_offset = await c_replica.execute_command("DEBUG REPLICA OFFSET")
+    command = "DFLY REPLICAOFFSET " + r_offset[0].decode()
+    m_offset = await c_master.execute_command(command)
+    return r_offset[1:] == m_offset
 
 
-async def check_all_replicas_finished(c_replicas):
+async def check_all_replicas_finished(c_replicas, c_master):
     while True:
         await asyncio.sleep(1.0)
-        is_finished_arr = await asyncio.gather(*(asyncio.create_task(check_replica_finished_exec(c))
+        is_finished_arr = await asyncio.gather(*(asyncio.create_task(check_replica_finished_exec(c, c_master))
                                                  for c in c_replicas))
         if all(is_finished_arr):
             break
@@ -576,6 +574,8 @@ async def test_expiry(df_local_factory, n_keys=1000):
     batch_fill_data(pipe, gen_test_data(n_keys))
     await pipe.execute()
 
+    # Check replica finished executing the replicated commands
+    await check_all_replicas_finished([c_replica], c_master)
     # Check keys are on replica
     res = await c_replica.mget(k for k, _ in gen_test_data(n_keys))
     assert all(v is not None for v in res)
@@ -607,7 +607,7 @@ async def test_expiry(df_local_factory, n_keys=1000):
     res = await c_master.mget(k for k, _ in gen_test_data(n_keys))
     assert all(v is None for v in res)
     # Check replica finished executing the replicated commands
-    await check_all_replicas_finished([c_replica])
+    await check_all_replicas_finished([c_replica], c_master)
     res = await c_replica.mget(k for k, _ in gen_test_data(n_keys))
     assert all(v is None for v in res)
 

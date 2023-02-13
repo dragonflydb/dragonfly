@@ -104,6 +104,8 @@ void DebugCmd::Run(CmdArgList args) {
         "      existing RDB file.",
         "REPLICA PAUSE/RESUME",
         "    Stops replica from reconnecting to master, or resumes",
+        "REPLICA OFFSET",
+        "    Get number of journal commands executed for each replica flow",
         "WATCHED",
         "    Shows the watched keys as a result of BLPOP and similar operations.",
         "POPULATE <count> [<prefix>] [<size>] [RAND]",
@@ -190,6 +192,18 @@ void DebugCmd::Replica(CmdArgList args) {
   if (opt == "PAUSE" || opt == "RESUME") {
     sf_.PauseReplication(opt == "PAUSE");
     return (*cntx_)->SendOk();
+  } else if (opt == "OFFSET") {
+    const auto& offset_info = sf_.GetReplicaOffsetInfo();
+    if (offset_info) {
+      (*cntx_)->StartArray(offset_info.value().flow_offsets.size() + 1);
+      (*cntx_)->SendBulkString(offset_info.value().sync_id);
+      for (uint64_t offset : offset_info.value().flow_offsets) {
+        (*cntx_)->SendLong(offset);
+      }
+      return;
+    } else {
+      return (*cntx_)->SendError("I am master");
+    }
   }
   return (*cntx_)->SendError(UnknownSubCmd("replica", "DEBUG"));
 }

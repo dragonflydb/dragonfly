@@ -61,6 +61,11 @@ struct SnapshotSpec {
   std::string minute_spec;
 };
 
+struct ReplicaOffsetInfo {
+  std::string sync_id;
+  std::vector<uint64_t> flow_offsets;
+};
+
 class ServerFamily {
  public:
   ServerFamily(Service* service);
@@ -103,6 +108,7 @@ class ServerFamily {
   void ConfigureMetrics(util::HttpListenerBase* listener);
 
   void PauseReplication(bool pause);
+  std::optional<ReplicaOffsetInfo> GetReplicaOffsetInfo();
 
   const std::string& master_id() const {
     return master_id_;
