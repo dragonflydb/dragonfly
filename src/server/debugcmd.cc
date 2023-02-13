@@ -105,7 +105,7 @@ void DebugCmd::Run(CmdArgList args) {
         "REPLICA PAUSE/RESUME",
         "    Stops replica from reconnecting to master, or resumes",
         "REPLICA OFFSET",
-        "    Get number of journal commands executed for each replica flow",
+        "    Return sync id and array of number of journal commands executed for each replica flow",
         "WATCHED",
         "    Shows the watched keys as a result of BLPOP and similar operations.",
         "POPULATE <count> [<prefix>] [<size>] [RAND]",
