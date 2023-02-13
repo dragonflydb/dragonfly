@@ -75,37 +75,32 @@ void Transaction::InitGlobal() {
 void Transaction::BuildShardIndex(KeyIndex key_index, bool rev_mapping,
                                   std::vector<PerShardCache>* out) {
   auto args = cmd_with_full_args_;
-  auto& shard_index = *out;
 
+  auto& shard_index = *out;
   shard_index.resize(shard_data_.size());
   for (auto& v : shard_index)
     v.Clear();
 
-  if (key_index.bonus) {  // additional one-of key.
-    DCHECK(key_index.step == 1);
-
-    string_view key = ArgS(args, key_index.bonus);
-    uint32_t sid = Shard(key, shard_data_.size());
-    shard_index[sid].args.push_back(key);
+  auto add = [this, rev_mapping, &shard_index](uint32_t sid, uint32_t i) {
+    string_view val = ArgS(cmd_with_full_args_, i);
+    shard_index[sid].args.push_back(val);
     if (rev_mapping)
-      shard_index[sid].original_index.push_back(key_index.bonus - 1);
+      shard_index[sid].original_index.push_back(i - 1);
+  };
+
+  if (key_index.bonus) {
+    DCHECK(key_index.step == 1);
+    uint32_t sid = Shard(ArgS(args, key_index.bonus), shard_data_.size());
+    add(sid, key_index.bonus);
   }
 
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
-    string_view key = ArgS(args, i);
-    uint32_t sid = Shard(key, shard_data_.size());
+    uint32_t sid = Shard(ArgS(args, i), shard_data_.size());
+    add(sid, i);
 
-    shard_index[sid].args.push_back(key);
-    if (rev_mapping)
-      shard_index[sid].original_index.push_back(i - 1);
-
+    DCHECK_LE(key_index.step, 2u);
     if (key_index.step == 2) {  // value
-      ++i;
-
-      string_view val = ArgS(args, i);
-      shard_index[sid].args.push_back(val);
-      if (rev_mapping)
-        shard_index[sid].original_index.push_back(i - 1);
+      add(sid, ++i);
     }
   }
 }
