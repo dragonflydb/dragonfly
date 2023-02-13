@@ -27,10 +27,7 @@ namespace dfly {
 class EngineShardSet;
 class ServerFamily;
 class RdbSaver;
-
-namespace journal {
-class Journal;
-}  // namespace journal
+class JournalStreamer;
 
 // DflyCmd is responsible for managing replication. A master instance can be connected
 // to many replica instances, what is more, each of them can open multiple connections.
@@ -83,10 +80,8 @@ class DflyCmd {
 
   // Stores information related to a single flow.
   struct FlowInfo {
-    FlowInfo() = default;
-    FlowInfo(facade::Connection* conn, const std::string& eof_token)
-        : conn{conn}, eof_token{eof_token} {};
-
+    FlowInfo();
+    ~FlowInfo();
     // Shutdown associated socket if its still open.
     void TryShutdownSocket();
 
@@ -94,6 +89,7 @@ class DflyCmd {
 
     util::fibers_ext::Fiber full_sync_fb;  // Full sync fiber.
     std::unique_ptr<RdbSaver> saver;       // Saver used by the full sync phase.
+    std::unique_ptr<JournalStreamer> streamer;
     std::string eof_token;
 
     std::function<void()> cleanup;  // Optional cleanup for cancellation.
@@ -163,6 +159,10 @@ class DflyCmd {
   // EXPIRE
   // Check all keys for expiry.
   void Expire(CmdArgList args, ConnectionContext* cntx);
+
+  // REPLICAOFFSET
+  // Return journal records num sent for each flow of replication.
+  void ReplicaOffset(CmdArgList args, ConnectionContext* cntx);
 
   // Start full sync in thread. Start FullSyncFb. Called for each flow.
   facade::OpStatus StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard);
