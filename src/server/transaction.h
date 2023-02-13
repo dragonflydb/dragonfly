@@ -121,8 +121,9 @@ class Transaction {
   void BreakOnShutdown();
 
   // Log a journal entry on shard with payload and shard count.
-  void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload,
-                         uint32_t shard_cnt) const;
+  // void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload, uint32_t
+  // shard_cnt,
+  //                       bool flag) const;
 
   // In some cases for non auto-journaling commands we want to enable the auto journal flow.
   void RenableAutoJournal() {
@@ -209,7 +210,7 @@ class Transaction {
   // multi_commands to true and  call the FinishLogJournalOnShard function after logging the final
   // entry.
   void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload, uint32_t shard_cnt,
-                         bool multi_commands) const;
+                         bool multi_commands, bool flag) const;
   void FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt) const;
 
  private:

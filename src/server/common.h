@@ -103,6 +103,10 @@ void RecordJournalFinish(const OpArgs& op_args, uint32_t shard_cnt);
 // key.
 void RecordExpiry(DbIndex dbid, std::string_view key);
 
+// Trigger journal write to sink, no journal record will be added to journal.
+// Must be called from shard thread of journal to sink.
+void TriggerJournalWriteToSink();
+
 struct TieredStats {
   size_t tiered_reads = 0;
   size_t tiered_writes = 0;

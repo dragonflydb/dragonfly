@@ -115,11 +115,18 @@ error_code JournalSlice::Close() {
   return ec;
 }
 
-void JournalSlice::AddLogRecord(const Entry& entry) {
+template <class... Ts> struct Overloaded : Ts... { using Ts::operator()...; };
+template <class... Ts> Overloaded(Ts...) -> Overloaded<Ts...>;
+
+void JournalSlice::AddLogRecord(const Entry& entry, bool flag_val) {
   DCHECK(ring_buffer_);
   iterating_cb_arr_ = true;
   for (const auto& k_v : change_cb_arr_) {
-    k_v.second(entry);
+    std::visit(Overloaded{[entry](std::function<void(const Entry&)> cb) { cb(entry); },
+                          [entry, flag_val](std::function<void(const Entry&, bool flag)> cb) {
+                            cb(entry, flag_val);
+                          }},
+               k_v.second);
   }
   iterating_cb_arr_ = false;
 

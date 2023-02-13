@@ -583,7 +583,7 @@ async def test_expiry(df_local_factory, n_keys=1000):
     # Set key differnt expries times in ms
     pipe = c_master.pipeline(transaction=True)
     for k, _ in gen_test_data(n_keys):
-        ms = random.randint(100, 500)
+        ms = random.randint(20, 500)
         pipe.pexpire(k, ms)
     await pipe.execute()
 

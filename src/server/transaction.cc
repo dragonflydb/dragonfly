@@ -1032,7 +1032,7 @@ void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, E
   auto journal = shard->journal();
 
   if (journal != nullptr && multi_->shard_journal_write[shard->shard_id()] == true) {
-    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_journals_cnt, {});
+    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_journals_cnt, {}, true);
   }
 
   if (multi_->multi_opts & CO::GLOBAL_TRANS) {
@@ -1178,18 +1178,18 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
     auto cmd = facade::ToSV(cmd_with_full_args_.front());
     entry_payload = make_pair(cmd, GetShardArgs(shard->shard_id()));
   }
-  LogJournalOnShard(shard, std::move(entry_payload), unique_shard_cnt_, false);
+  LogJournalOnShard(shard, std::move(entry_payload), unique_shard_cnt_, false, true);
 }
 
 void Transaction::LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload,
-                                    uint32_t shard_cnt, bool multi_commands) const {
+                                    uint32_t shard_cnt, bool multi_commands, bool flag) const {
   auto journal = shard->journal();
   CHECK(journal);
   if (multi_) {
     multi_->shard_journal_write[shard->shard_id()] = true;
   }
   auto opcode = (multi_ || multi_commands) ? journal::Op::MULTI_COMMAND : journal::Op::COMMAND;
-  journal->RecordEntry(txid_, opcode, db_index_, shard_cnt, std::move(payload));
+  journal->RecordEntry(txid_, opcode, db_index_, shard_cnt, std::move(payload), false);
 }
 
 void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt) const {
@@ -1198,7 +1198,7 @@ void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt
   }
   auto journal = shard->journal();
   CHECK(journal);
-  journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_cnt, {});
+  journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_cnt, {}, false);
 }
 
 void Transaction::BreakOnShutdown() {

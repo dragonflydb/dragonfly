@@ -8,11 +8,15 @@ namespace dfly {
 
 void JournalStreamer::Start(io::Sink* dest) {
   write_fb_ = util::fibers_ext::Fiber(&JournalStreamer::WriterFb, this, dest);
-  journal_cb_id_ = journal_->RegisterOnChange([this](const journal::Entry& entry) {
-    writer_.Write(entry);
-    record_cnt_.fetch_add(1, std::memory_order_relaxed);
-    NotifyWritten();
-  });
+  journal_cb_id_ =
+      journal_->RegisterOnChange([this](const journal::Entry& entry, bool allow_await) {
+        if (entry.opcode == journal::Op::NOOP) {
+          return WakeIfWritten();  // No recode to write, just wake the consumer if needed.
+        }
+        writer_.Write(entry);
+        record_cnt_.fetch_add(1, std::memory_order_relaxed);
+        NotifyWritten(allow_await);
+      });
 }
 
 uint64_t JournalStreamer::GetRecordCount() const {

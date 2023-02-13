@@ -16,14 +16,22 @@ io::Result<size_t> BufferedStreamerBase::WriteSome(const iovec* vec, uint32_t le
   return io::BufSink{&producer_buf_}.WriteSome(vec, len);
 }
 
-void BufferedStreamerBase::NotifyWritten() {
+void BufferedStreamerBase::NotifyWritten(bool allow_await) {
   if (IsStopped())
     return;
   buffered_++;
   // Wake up the consumer.
   waker_.notify();
   // Block if we're stalled because the consumer is not keeping up.
-  waker_.await([this]() { return !IsStalled() || IsStopped(); });
+  waker_.await([this, allow_await]() { return !allow_await || !IsStalled() || IsStopped(); });
+}
+
+void BufferedStreamerBase::WakeIfWritten() {
+  if (IsStopped())
+    return;
+  if (buffered_) {
+    waker_.await([this]() { return !IsStalled() || IsStopped(); });
+  }
 }
 
 error_code BufferedStreamerBase::ConsumeIntoSink(io::Sink* dest) {

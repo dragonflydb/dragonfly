@@ -41,8 +41,11 @@ class BufferedStreamerBase : public io::Sink {
   io::Result<size_t> WriteSome(const iovec* vec, uint32_t len) override;
 
   // Report that a batch of data has been written and the consumer can be woken up.
-  // Blocks if the consumer if not keeping up.
-  void NotifyWritten();
+  // Blocks if the consumer if not keeping up, if allow_await is set to true.
+  void NotifyWritten(bool allow_await);
+
+  // Blocks the if the consumer if not keeping up.
+  void WakeIfWritten();
 
   // Report producer finished.
   void Finalize();
