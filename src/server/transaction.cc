@@ -109,12 +109,9 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
                                 bool rev_mapping) {
   bool incremental_locking = multi_ && multi_->is_expanding;
 
-  args_.resize(num_args);
+  args_.reserve(num_args);
   if (rev_mapping)  // we need reverse index only for some commands (MSET etc).
-    reverse_index_.resize(args_.size());
-
-  auto next_arg = args_.begin();
-  auto rev_indx_it = reverse_index_.begin();
+    reverse_index_.reserve(args_.size());
 
   // slice.arg_start/arg_count point to args_ array which is sorted according to shard of each key.
   // reverse_index_[i] says what's the original position of args_[i] in args.
@@ -125,31 +122,28 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
     CHECK_LT(si.args.size(), 1u << 15);
 
     sd.arg_count = si.args.size();
-    sd.arg_start = next_arg - args_.begin();
+    sd.arg_start = args_.size();
 
     // We reset the local_mask for incremental locking to allow locking of arguments
     // for each operation within the same transaction. For instant locking we lock at
     // the beginning all the keys so we must preserve the mask to avoid double locking.
-    if (incremental_locking) {
+    if (incremental_locking)
       sd.local_mask = 0;
-    }
 
     if (!sd.arg_count)
       continue;
 
-    ++unique_shard_cnt_;
+    unique_shard_cnt_++;
     unique_shard_id_ = i;
 
     for (size_t j = 0; j < si.args.size(); ++j) {
-      *next_arg = si.args[j];
-      if (rev_mapping) {
-        *rev_indx_it++ = si.original_index[j];
-      }
-      ++next_arg;
+      args_.push_back(si.args[j]);
+      if (rev_mapping)
+        reverse_index_.push_back(si.original_index[j]);
     }
   }
 
-  CHECK(next_arg == args_.end());
+  CHECK(args_.size() == num_args);
 }
 
 void Transaction::InitMultiData(KeyIndex key_index) {
