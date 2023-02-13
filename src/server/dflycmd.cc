@@ -13,7 +13,7 @@
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
-#include "server/journal/journal_streamer.h"
+#include "server/journal/streamer.h"
 #include "server/rdb_save.h"
 #include "server/script_mgr.h"
 #include "server/server_family.h"
@@ -350,9 +350,11 @@ void DflyCmd::ReplicaOffset(CmdArgList args, ConnectionContext* cntx) {
   string result;
   unique_lock lk(replica_ptr->mu);
   for (size_t flow_id = 0; flow_id < replica_ptr->flows.size(); ++flow_id) {
-    const auto& streamer = replica_ptr->flows[flow_id].streamer.get();
+    JournalStreamer* streamer = replica_ptr->flows[flow_id].streamer.get();
     if (streamer) {
-      result = absl::StrCat(result, flow_id, streamer->GetRecordCount());
+      absl::StrAppend(&result, flow_id, streamer->GetRecordCount(), ",");
+    } else {
+      absl::StrAppend(&result, flow_id, "0", ",");
     }
   }
   rb->SendBulkString(result);

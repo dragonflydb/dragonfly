@@ -2,7 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/journal/journal_streamer.h"
+#include "server/journal/streamer.h"
 
 namespace dfly {
 
@@ -15,7 +15,7 @@ void JournalStreamer::Start(io::Sink* dest) {
   });
 }
 
-uint32_t JournalStreamer::GetRecordCount() {
+uint64_t JournalStreamer::GetRecordCount() const {
   return record_cnt_.load(std::memory_order_relaxed);
 }
 
