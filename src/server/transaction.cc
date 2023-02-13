@@ -41,7 +41,7 @@ IntentLock::Mode Transaction::Mode() const {
  * @param ess
  * @param cs
  */
-Transaction::Transaction(const CommandId* cid) : cid_(cid) {
+Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   string_view cmd_name(cid_->name());
   if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA") {
     multi_.reset(new MultiData);
@@ -57,6 +57,19 @@ Transaction::Transaction(const CommandId* cid) : cid_(cid) {
 Transaction::~Transaction() {
   DVLOG(2) << "Transaction " << StrCat(Name(), "@", txid_, "/", unique_shard_cnt_, ")")
            << " destroyed";
+}
+
+void Transaction::InitBase(DbIndex dbid, CmdArgList args) {
+  global_ = false;
+  db_index_ = dbid;
+  cmd_with_full_args_ = args;
+  local_result_ = OpStatus::OK;
+}
+
+void Transaction::InitGlobal() {
+  global_ = true;
+  unique_shard_cnt_ = shard_set->size();
+  shard_data_.resize(unique_shard_cnt_);
 }
 
 /**
@@ -79,30 +92,12 @@ Transaction::~Transaction() {
  *
  **/
 
-OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
-  db_index_ = index;
-  cmd_with_full_args_ = args;
-  local_result_ = OpStatus::OK;
-
-  if (IsGlobal()) {
-    unique_shard_cnt_ = shard_set->size();
-    shard_data_.resize(unique_shard_cnt_);
-    return OpStatus::OK;
-  }
-
-  CHECK_GT(args.size(), 1U);  // first entry is the command name.
-  DCHECK_EQ(unique_shard_cnt_, 0u);
-  DCHECK(args_.empty());
-
-  OpResult<KeyIndex> key_index_res = DetermineKeys(cid_, args);
-  if (!key_index_res)
-    return key_index_res.status();
-
-  const auto& key_index = *key_index_res;
+void Transaction::InitByKeys(KeyIndex key_index) {
+  auto args = cmd_with_full_args_;
 
   if (key_index.start == args.size()) {  // eval with 0 keys.
     CHECK(absl::StartsWith(cid_->name(), "EVAL"));
-    return OpStatus::OK;
+    return;
   }
 
   DCHECK_LT(key_index.start, args.size());
@@ -115,16 +110,14 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   if (single_key) {
     DCHECK_GT(key_index.step, 0u);
 
-    shard_data_.resize(1);  // Single key optimization
-
     // even for a single key we may have multiple arguments per key (MSET).
     for (unsigned j = key_index.start; j < key_index.start + key_index.step; ++j) {
       args_.push_back(ArgS(args, j));
     }
-    string_view key = args_.front();
 
+    shard_data_.resize(1);  // Single key optimization
     unique_shard_cnt_ = 1;
-    unique_shard_id_ = Shard(key, shard_set->size());
+    unique_shard_id_ = Shard(args_.front(), shard_set->size());
 
     if (needs_reverse_mapping) {
       reverse_index_.resize(args_.size());
@@ -132,7 +125,7 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
         reverse_index_[j] = j + key_index.start - 1;
       }
     }
-    return OpStatus::OK;
+    return;
   }
 
   // Our shard_data is not sparse, so we must allocate for all threads :(
@@ -275,7 +268,25 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
       DCHECK_EQ(TxQueue::kEnd, sd.pq_pos);
     }
   }
+}
 
+OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
+  InitBase(index, args);
+
+  if ((cid_->opt_mask() & CO::GLOBAL_TRANS) > 0) {
+    InitGlobal();
+    return OpStatus::OK;
+  }
+
+  CHECK_GT(args.size(), 1U);  // first entry is the command name.
+  DCHECK_EQ(unique_shard_cnt_, 0u);
+  DCHECK(args_.empty());
+
+  OpResult<KeyIndex> key_index = DetermineKeys(cid_, args);
+  if (!key_index)
+    return key_index.status();
+
+  InitByKeys(*key_index);
   return OpStatus::OK;
 }
 
@@ -1113,7 +1124,7 @@ inline uint32_t Transaction::DecreaseRunCnt() {
 }
 
 bool Transaction::IsGlobal() const {
-  return (cid_->opt_mask() & CO::GLOBAL_TRANS) != 0;
+  return global_;
 }
 
 // Runs only in the shard thread.
