@@ -193,7 +193,7 @@ void DebugCmd::Replica(CmdArgList args) {
     sf_.PauseReplication(opt == "PAUSE");
     return (*cntx_)->SendOk();
   } else if (opt == "OFFSET") {
-    const auto& offset_info = sf_.GetReplicaOffsetInfo();
+    const auto offset_info = sf_.GetReplicaOffsetInfo();
     if (offset_info) {
       (*cntx_)->StartArray(2);
       (*cntx_)->SendBulkString(offset_info.value().sync_id);
