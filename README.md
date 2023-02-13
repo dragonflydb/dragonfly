@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://dragonflydb.io">
-    <img  src="/.github/images/logo.svg"
+    <img  src="/.github/images/logo-full.svg"
       width="284" border="0" alt="Dragonfly">
   </a>
 </p>
