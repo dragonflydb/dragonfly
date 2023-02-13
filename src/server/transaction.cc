@@ -154,15 +154,17 @@ void Transaction::InitMultiData(KeyIndex key_index) {
   // and regular commands.
   IntentLock::Mode mode = Mode();
   multi_->keys.clear();
-  tmp_space.uniq_keys.clear();
 
-  auto lock_func = [this, mode](auto key) {
-    if (tmp_space.uniq_keys.insert(key).second) {
-      if (multi_->is_expanding) {
-        multi_->keys.push_back(key);
-      } else {
-        multi_->lock_counts[key][mode]++;
-      }
+  auto& tmp_uniques = tmp_space.uniq_keys;
+  tmp_uniques.clear();
+
+  auto lock_key = [this, mode, &tmp_uniques](auto key) {
+    if (auto [_, inserted] = tmp_uniques.insert(key); !inserted)
+      return;
+    if (multi_->is_expanding) {
+      multi_->keys.push_back(key);
+    } else {
+      multi_->lock_counts[key][mode]++;
     }
   };
 
@@ -170,9 +172,9 @@ void Transaction::InitMultiData(KeyIndex key_index) {
   // for eval. currently, we lock everything only during the eval call.
   if (multi_->is_expanding || !multi_->locks_recorded) {
     for (size_t i = key_index.start; i < key_index.end; i += key_index.step)
-      lock_func(ArgS(args, i));
+      lock_key(ArgS(args, i));
     if (key_index.bonus > 0)
-      lock_func(ArgS(args, key_index.bonus));
+      lock_key(ArgS(args, key_index.bonus));
   }
 
   multi_->locks_recorded = true;
