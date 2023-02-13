@@ -195,8 +195,9 @@ void DebugCmd::Replica(CmdArgList args) {
   } else if (opt == "OFFSET") {
     const auto& offset_info = sf_.GetReplicaOffsetInfo();
     if (offset_info) {
-      (*cntx_)->StartArray(offset_info.value().flow_offsets.size() + 1);
+      (*cntx_)->StartArray(2);
       (*cntx_)->SendBulkString(offset_info.value().sync_id);
+      (*cntx_)->StartArray(offset_info.value().flow_offsets.size());
       for (uint64_t offset : offset_info.value().flow_offsets) {
         (*cntx_)->SendLong(offset);
       }

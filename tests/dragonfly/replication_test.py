@@ -87,7 +87,8 @@ async def check_replica_finished_exec(c_replica, c_master):
     r_offset = await c_replica.execute_command("DEBUG REPLICA OFFSET")
     command = "DFLY REPLICAOFFSET " + r_offset[0].decode()
     m_offset = await c_master.execute_command(command)
-    return r_offset[1:] == m_offset
+    print(r_offset[1])
+    return r_offset[1] == m_offset
 
 
 async def check_all_replicas_finished(c_replicas, c_master):
