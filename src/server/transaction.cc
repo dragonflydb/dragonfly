@@ -110,6 +110,85 @@ void Transaction::BuildShardIndex(KeyIndex key_index, bool rev_mapping,
   }
 }
 
+void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, size_t num_args,
+                                bool rev_mapping) {
+  bool incremental_locking = multi_ && multi_->is_expanding;
+
+  args_.resize(num_args);
+  if (rev_mapping)  // we need reverse index only for some commands (MSET etc).
+    reverse_index_.resize(args_.size());
+
+  auto next_arg = args_.begin();
+  auto rev_indx_it = reverse_index_.begin();
+
+  // slice.arg_start/arg_count point to args_ array which is sorted according to shard of each key.
+  // reverse_index_[i] says what's the original position of args_[i] in args.
+  for (size_t i = 0; i < shard_data_.size(); ++i) {
+    auto& sd = shard_data_[i];
+    auto& si = shard_index[i];
+
+    CHECK_LT(si.args.size(), 1u << 15);
+
+    sd.arg_count = si.args.size();
+    sd.arg_start = next_arg - args_.begin();
+
+    // We reset the local_mask for incremental locking to allow locking of arguments
+    // for each operation within the same transaction. For instant locking we lock at
+    // the beginning all the keys so we must preserve the mask to avoid double locking.
+    if (incremental_locking) {
+      sd.local_mask = 0;
+    }
+
+    if (!sd.arg_count)
+      continue;
+
+    ++unique_shard_cnt_;
+    unique_shard_id_ = i;
+
+    for (size_t j = 0; j < si.args.size(); ++j) {
+      *next_arg = si.args[j];
+      if (rev_mapping) {
+        *rev_indx_it++ = si.original_index[j];
+      }
+      ++next_arg;
+    }
+  }
+
+  CHECK(next_arg == args_.end());
+}
+
+void Transaction::InitMultiData(KeyIndex key_index) {
+  DCHECK(multi_);
+  auto args = cmd_with_full_args_;
+
+  // TODO: to determine correctly locking mode for transactions, scripts
+  // and regular commands.
+  IntentLock::Mode mode = Mode();
+  multi_->keys.clear();
+  tmp_space.uniq_keys.clear();
+
+  auto lock_func = [this, mode](auto key) {
+    if (tmp_space.uniq_keys.insert(key).second) {
+      if (multi_->is_expanding) {
+        multi_->keys.push_back(key);
+      } else {
+        multi_->lock_counts[key][mode]++;
+      }
+    }
+  };
+
+  // With EVAL, we call this function for EVAL itself as well as for each command
+  // for eval. currently, we lock everything only during the eval call.
+  if (multi_->is_expanding || !multi_->locks_recorded) {
+    for (size_t i = key_index.start; i < key_index.end; i += key_index.step)
+      lock_func(ArgS(args, i));
+    if (key_index.bonus > 0)
+      lock_func(ArgS(args, key_index.bonus));
+  }
+
+  multi_->locks_recorded = true;
+}
+
 /**
  *
  * There are 4 options that we consider here:
@@ -175,86 +254,11 @@ void Transaction::InitByKeys(KeyIndex key_index) {
   auto& shard_index = tmp_space.shard_cache;
   BuildShardIndex(key_index, needs_reverse_mapping, &shard_index);
 
-  // TODO: to determine correctly locking mode for transactions, scripts
-  // and regular commands.
-  IntentLock::Mode mode = IntentLock::EXCLUSIVE;
-  bool should_record_locks = false;
+  InitShardData(shard_index, key_index.num_args(), needs_reverse_mapping);
 
-  if (multi_) {
-    mode = Mode();
-    multi_->keys.clear();
-    tmp_space.uniq_keys.clear();
-    DCHECK_LT(int(mode), 2);
+  if (multi_)
+    InitMultiData(key_index);
 
-    // With EVAL, we call this function for EVAL itself as well as for each command
-    // for eval. currently, we lock everything only during the eval call.
-    should_record_locks = incremental_locking || !multi_->locks_recorded;
-  }
-
-  auto lock_func = [this, mode](auto key) {
-    if (tmp_space.uniq_keys.insert(key).second) {
-      if (multi_->is_expanding) {
-        multi_->keys.push_back(key);
-      } else {
-        multi_->lock_counts[key][mode]++;
-      }
-    }
-  };
-
-  if (should_record_locks) {
-    for (size_t i = key_index.start; i < key_index.end; i += key_index.step)
-      lock_func(ArgS(args, i));
-    if (key_index.bonus > 0)
-      lock_func(ArgS(args, key_index.bonus));
-  }
-
-  args_.resize(key_index.num_args());
-
-  // we need reverse index only for some commands (MSET etc).
-  if (needs_reverse_mapping)
-    reverse_index_.resize(args_.size());
-
-  auto next_arg = args_.begin();
-  auto rev_indx_it = reverse_index_.begin();
-
-  // slice.arg_start/arg_count point to args_ array which is sorted according to shard of each key.
-  // reverse_index_[i] says what's the original position of args_[i] in args.
-  for (size_t i = 0; i < shard_data_.size(); ++i) {
-    auto& sd = shard_data_[i];
-    auto& si = shard_index[i];
-
-    CHECK_LT(si.args.size(), 1u << 15);
-
-    sd.arg_count = si.args.size();
-    sd.arg_start = next_arg - args_.begin();
-
-    // We reset the local_mask for incremental locking to allow locking of arguments
-    // for each operation within the same transaction. For instant locking we lock at
-    // the beginning all the keys so we must preserve the mask to avoid double locking.
-    if (incremental_locking) {
-      sd.local_mask = 0;
-    }
-
-    if (!sd.arg_count)
-      continue;
-
-    ++unique_shard_cnt_;
-    unique_shard_id_ = i;
-
-    for (size_t j = 0; j < si.args.size(); ++j) {
-      *next_arg = si.args[j];
-      if (needs_reverse_mapping) {
-        *rev_indx_it++ = si.original_index[j];
-      }
-      ++next_arg;
-    }
-  }
-
-  if (multi_) {
-    multi_->locks_recorded = true;
-  }
-
-  CHECK(next_arg == args_.end());
   DVLOG(1) << "InitByArgs " << DebugId() << " " << args_.front();
 
   // validation

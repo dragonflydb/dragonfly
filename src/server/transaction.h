@@ -302,6 +302,13 @@ class Transaction {
   // Build shard index from key index.
   void BuildShardIndex(KeyIndex keys, bool rev_mapping, std::vector<PerShardCache>* out);
 
+  // Init shard data from shard index.
+  void InitShardData(absl::Span<const PerShardCache> shard_index, size_t num_args,
+                     bool rev_mapping);
+
+  // Init multi. Record locks if needed.
+  void InitMultiData(KeyIndex keys);
+
   // Generic schedule used from Schedule() and ScheduleSingleHop() on slow path.
   void ScheduleInternal();
 
