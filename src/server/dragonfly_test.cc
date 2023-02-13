@@ -57,12 +57,14 @@ class DflyEngineTest : public BaseFamilyTest {
   }
 };
 
-class DefragDflyEngineTest : public BaseFamilyTest {
+class SingleThreadDflyEngineTest : public BaseFamilyTest {
  protected:
-  DefragDflyEngineTest() : BaseFamilyTest() {
+  SingleThreadDflyEngineTest() : BaseFamilyTest() {
     num_threads_ = 1;
   }
 };
+
+class DefragDflyEngineTest : public SingleThreadDflyEngineTest {};
 
 // TODO: to implement equivalent parsing in redis parser.
 TEST_F(DflyEngineTest, Sds) {
@@ -90,6 +92,11 @@ TEST_F(DflyEngineTest, Sds) {
   EXPECT_STREQ("abc\xf0", argv[0]);
   EXPECT_STREQ("oops\n", argv[1]);
   sdsfreesplitres(argv, argc);
+}
+
+TEST_F(SingleThreadDflyEngineTest, GlobalSingleThread) {
+  Run({"set", "a", "1"});
+  Run({"move", "a", "1"});
 }
 
 TEST_F(DflyEngineTest, MultiAndEval) {
