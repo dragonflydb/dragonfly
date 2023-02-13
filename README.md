@@ -17,7 +17,7 @@ Dragonfly is an in-memory database built for modern application workloads. It is
 ## Contents
 
 - [Benchmarks](#benchmarks)
-- [Quick Start](#quick-start)
+- [Quick Start]([#quick-start](https://github.com/dragonflydb/dragonfly/tree/main/docs/quick-start))
 - [Configuration](#configuration)
 - [Roadmap and Status](#roadmap-status)
 - [Design Decisions](#design-decisions)
@@ -85,49 +85,7 @@ Meanwhile, Redis reached almost x3 memory increase at peak compared to Dragonfly
 Dragonfly also finished the snapshot much faster, just a few seconds after it started.
 For more info about memory efficiency in Dragonfly see [dashtable doc](/docs/dashtable.md)
 
-## <a name="quick-start"><a/>Quick Start
 
-Dragonfly runs on Linux. We advise running it on Linux version 5.11 or later
-but you can also run Dragonfly on older kernels as well.
-
-
-### With docker:
-
-```bash
-docker run --network=host --ulimit memlock=-1 docker.dragonflydb.io/dragonflydb/dragonfly
-
-redis-cli PING  # redis-cli can be installed with "apt install -y redis-tools"
-```
-
-*You need `--ulimit memlock=-1` because some Linux distros configure the default memlock limit for containers as 64m and Dragonfly requires more.*
-
-### With docker-compose:
-```yaml
-version: "3.9"
-
-services:
-  dragonfly: # the new redis
-    image: docker.dragonflydb.io/dragonflydb/dragonfly
-    ulimits:
-      memlock: -1
-    command:
-      - "--save_schedule=*:*" # save for every 1 minute
-      - "--dir=/data"
-      - "--dbfilename=dump.rdb"
-    ports:
-      - '6379:6379'
-    volumes:
-      - "./dragonfly_data:/data"
-    restart: unless-stopped
-```
-
-### Releases
-We maintain [binary releases](https://github.com/dragonflydb/dragonfly/releases) for x86 and arm64 architectures. You will need to install `libunwind8` lib to run the binaries.
-
-
-### Building from source
-
-See [building from source](./docs/build-from-source.md) for details.
 
 ## <a name="configuration"><a/>Configuration
 Dragonfly supports common Redis arguments where applicable.
