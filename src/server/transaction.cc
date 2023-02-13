@@ -189,6 +189,22 @@ void Transaction::InitMultiData(KeyIndex key_index) {
   multi_->locks_recorded = true;
 }
 
+void Transaction::StoreKeysInArgs(KeyIndex key_index, bool rev_mapping) {
+  auto args = cmd_with_full_args_;
+
+  // even for a single key we may have multiple arguments per key (MSET).
+  for (unsigned j = key_index.start; j < key_index.start + key_index.step; ++j) {
+    args_.push_back(ArgS(args, j));
+  }
+
+  if (rev_mapping) {
+    reverse_index_.resize(args_.size());
+    for (unsigned j = 0; j < reverse_index_.size(); ++j) {
+      reverse_index_[j] = j + key_index.start - 1;
+    }
+  }
+}
+
 /**
  *
  * There are 4 options that we consider here:
@@ -220,28 +236,18 @@ void Transaction::InitByKeys(KeyIndex key_index) {
   DCHECK_LT(key_index.start, args.size());
   DCHECK_GT(key_index.start, 0u);
 
-  bool incremental_locking = multi_ && multi_->is_expanding;
   bool single_key = !multi_ && key_index.HasSingleKey();
   bool needs_reverse_mapping = cid_->opt_mask() & CO::REVERSE_MAPPING;
 
   if (single_key) {
     DCHECK_GT(key_index.step, 0u);
 
-    // even for a single key we may have multiple arguments per key (MSET).
-    for (unsigned j = key_index.start; j < key_index.start + key_index.step; ++j) {
-      args_.push_back(ArgS(args, j));
-    }
+    StoreKeysInArgs(key_index, needs_reverse_mapping);
 
     shard_data_.resize(1);  // Single key optimization
     unique_shard_cnt_ = 1;
     unique_shard_id_ = Shard(args_.front(), shard_set->size());
 
-    if (needs_reverse_mapping) {
-      reverse_index_.resize(args_.size());
-      for (unsigned j = 0; j < reverse_index_.size(); ++j) {
-        reverse_index_[j] = j + key_index.start - 1;
-      }
-    }
     return;
   }
 

@@ -309,6 +309,9 @@ class Transaction {
   // Init multi. Record locks if needed.
   void InitMultiData(KeyIndex keys);
 
+  // Store all key index keys in args_. Used only for single shard initialization.
+  void StoreKeysInArgs(KeyIndex keys, bool rev_mapping);
+
   // Generic schedule used from Schedule() and ScheduleSingleHop() on slow path.
   void ScheduleInternal();
 
