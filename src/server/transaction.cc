@@ -72,6 +72,44 @@ void Transaction::InitGlobal() {
   shard_data_.resize(unique_shard_cnt_);
 }
 
+void Transaction::BuildShardIndex(KeyIndex key_index, bool rev_mapping,
+                                  std::vector<PerShardCache>* out) {
+  auto args = cmd_with_full_args_;
+  auto& shard_index = *out;
+
+  shard_index.resize(shard_data_.size());
+  for (auto& v : shard_index)
+    v.Clear();
+
+  if (key_index.bonus) {  // additional one-of key.
+    DCHECK(key_index.step == 1);
+
+    string_view key = ArgS(args, key_index.bonus);
+    uint32_t sid = Shard(key, shard_data_.size());
+    shard_index[sid].args.push_back(key);
+    if (rev_mapping)
+      shard_index[sid].original_index.push_back(key_index.bonus - 1);
+  }
+
+  for (unsigned i = key_index.start; i < key_index.end; ++i) {
+    string_view key = ArgS(args, i);
+    uint32_t sid = Shard(key, shard_data_.size());
+
+    shard_index[sid].args.push_back(key);
+    if (rev_mapping)
+      shard_index[sid].original_index.push_back(i - 1);
+
+    if (key_index.step == 2) {  // value
+      ++i;
+
+      string_view val = ArgS(args, i);
+      shard_index[sid].args.push_back(val);
+      if (rev_mapping)
+        shard_index[sid].original_index.push_back(i - 1);
+    }
+  }
+}
+
 /**
  *
  * There are 4 options that we consider here:
@@ -135,10 +173,7 @@ void Transaction::InitByKeys(KeyIndex key_index) {
 
   // Reuse thread-local temporary storage. Since this code is atomic we can use it here.
   auto& shard_index = tmp_space.shard_cache;
-  shard_index.resize(shard_data_.size());
-  for (auto& v : shard_index) {
-    v.Clear();
-  }
+  BuildShardIndex(key_index, needs_reverse_mapping, &shard_index);
 
   // TODO: to determine correctly locking mode for transactions, scripts
   // and regular commands.
@@ -156,44 +191,21 @@ void Transaction::InitByKeys(KeyIndex key_index) {
     should_record_locks = incremental_locking || !multi_->locks_recorded;
   }
 
-  if (key_index.bonus) {  // additional one-of key.
-    DCHECK(key_index.step == 1);
-
-    string_view key = ArgS(args, key_index.bonus);
-    uint32_t sid = Shard(key, shard_data_.size());
-    shard_index[sid].args.push_back(key);
-    if (needs_reverse_mapping)
-      shard_index[sid].original_index.push_back(key_index.bonus - 1);
-  }
-
-  for (unsigned i = key_index.start; i < key_index.end; ++i) {
-    string_view key = ArgS(args, i);
-    uint32_t sid = Shard(key, shard_data_.size());
-
-    shard_index[sid].args.push_back(key);
-    if (needs_reverse_mapping)
-      shard_index[sid].original_index.push_back(i - 1);
-
-    if (should_record_locks && tmp_space.uniq_keys.insert(key).second) {
+  auto lock_func = [this, mode](auto key) {
+    if (tmp_space.uniq_keys.insert(key).second) {
       if (multi_->is_expanding) {
         multi_->keys.push_back(key);
       } else {
         multi_->lock_counts[key][mode]++;
       }
-    };
-
-    if (key_index.step == 2) {  // value
-      ++i;
-
-      string_view val = ArgS(args, i);
-      shard_index[sid].args.push_back(val);
-      if (needs_reverse_mapping)
-        shard_index[sid].original_index.push_back(i - 1);
     }
-  }
+  };
 
-  if (multi_) {
-    multi_->locks_recorded = true;
+  if (should_record_locks) {
+    for (size_t i = key_index.start; i < key_index.end; i += key_index.step)
+      lock_func(ArgS(args, i));
+    if (key_index.bonus > 0)
+      lock_func(ArgS(args, key_index.bonus));
   }
 
   args_.resize(key_index.num_args());
@@ -228,6 +240,7 @@ void Transaction::InitByKeys(KeyIndex key_index) {
 
     ++unique_shard_cnt_;
     unique_shard_id_ = i;
+
     for (size_t j = 0; j < si.args.size(); ++j) {
       *next_arg = si.args[j];
       if (needs_reverse_mapping) {
@@ -235,6 +248,10 @@ void Transaction::InitByKeys(KeyIndex key_index) {
       }
       ++next_arg;
     }
+  }
+
+  if (multi_) {
+    multi_->locks_recorded = true;
   }
 
   CHECK(next_arg == args_.end());

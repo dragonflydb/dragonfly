@@ -299,7 +299,8 @@ class Transaction {
   // Init with a set of keys.
   void InitByKeys(KeyIndex keys);
 
-  // void BuildShardIndex(KeyIndex keys, bool rev_mapping, std::vector<PerShardCache>* out);
+  // Build shard index from key index.
+  void BuildShardIndex(KeyIndex keys, bool rev_mapping, std::vector<PerShardCache>* out);
 
   // Generic schedule used from Schedule() and ScheduleSingleHop() on slow path.
   void ScheduleInternal();
