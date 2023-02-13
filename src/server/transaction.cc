@@ -181,6 +181,8 @@ void Transaction::InitMultiData(KeyIndex key_index) {
 }
 
 void Transaction::StoreKeysInArgs(KeyIndex key_index, bool rev_mapping) {
+  DCHECK_EQ(key_index.bonus, 0);
+
   auto args = cmd_with_full_args_;
 
   // even for a single key we may have multiple arguments per key (MSET).
@@ -227,9 +229,9 @@ void Transaction::InitByKeys(KeyIndex key_index) {
   DCHECK_LT(key_index.start, args.size());
   DCHECK_GT(key_index.start, 0u);
 
-  bool single_key = !multi_ && key_index.HasSingleKey();
   bool needs_reverse_mapping = cid_->opt_mask() & CO::REVERSE_MAPPING;
 
+  bool single_key = !multi_ && key_index.HasSingleKey();
   if (single_key) {
     DCHECK_GT(key_index.step, 0u);
 
@@ -258,13 +260,6 @@ void Transaction::InitByKeys(KeyIndex key_index) {
 
   DVLOG(1) << "InitByArgs " << DebugId() << " " << args_.front();
 
-  // validation
-  if (needs_reverse_mapping) {
-    for (size_t i = 0; i < args_.size(); ++i) {
-      DCHECK_EQ(args_[i], ArgS(args, 1 + reverse_index_[i]));  // 1 for the commandname.
-    }
-  }
-
   if (unique_shard_cnt_ == 1) {
     PerShardData* sd;
     if (multi_) {
@@ -275,6 +270,13 @@ void Transaction::InitByKeys(KeyIndex key_index) {
     }
     sd->arg_count = -1;
     sd->arg_start = -1;
+  }
+
+  // validation
+  if (needs_reverse_mapping) {
+    for (size_t i = 0; i < args_.size(); ++i) {
+      DCHECK_EQ(args_[i], ArgS(args, 1 + reverse_index_[i]));  // 1 for the commandname.
+    }
   }
 
   // Validation.
