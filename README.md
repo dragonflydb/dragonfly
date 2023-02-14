@@ -10,9 +10,9 @@
 
 [Website](https://dragonflydb.io/) • [Quick Start](https://github.com/dragonflydb/dragonfly/tree/main/docs/quick-start) • [Community Discord](https://discord.gg/HsPjXGVH85) • [GitHub Discussions](https://github.com/dragonflydb/dragonfly/discussions) | [GitHub Issues](https://github.com/dragonflydb/dragonfly/issues) | [Contributing](https://github.com/dragonflydb/dragonfly/blob/main/CONTRIBUTING.md)
 
-## The world's fastest in-memory database 
+## The world's fastest in-memory data store
 
-Dragonfly is an in-memory database built for modern application workloads. It is fully compatible with the Redis and Memcached APIs, required no code changes to adopt. When compared to these legacy in-memory datastores, Dragonfly delivers 25X more throughput, higher cache hit rates, with lower tail latency, and effortless vertical scalability.  
+Dragonfly is an in-memory data store built for modern application workloads. It is fully compatible with the Redis and Memcached APIs, required no code changes to adopt. When compared to these legacy in-memory datastores, Dragonfly delivers 25X more throughput, higher cache hit rates, with lower tail latency, and effortless vertical scalability. 
 
 ## Contents
 
