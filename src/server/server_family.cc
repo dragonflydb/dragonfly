@@ -56,6 +56,8 @@ ABSL_FLAG(string, requirepass, "",
           "If empty can also be set with DFLY_PASSWORD environment variable.");
 ABSL_FLAG(string, save_schedule, "",
           "glob spec for the UTC time to save a snapshot which matches HH:MM 24h time");
+ABSL_FLAG(bool, df_snapshot_format, true,
+          "if true, save in dragonfly-specific snapshotting format");
 
 ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
@@ -567,7 +569,7 @@ void ServerFamily::SnapshotScheduling(const SnapshotSpec& spec) {
     boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
     trans->InitByArgs(0, {});
 
-    GenericError ec = DoSave(false, trans.get());
+    GenericError ec = DoSave(absl::GetFlag(FLAGS_df_snapshot_format), trans.get());
     if (ec) {
       LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
     }
@@ -1185,7 +1187,7 @@ void ServerFamily::Memory(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
   string err_detail;
-  bool new_version = false;
+  bool new_version = absl::GetFlag(FLAGS_df_snapshot_format);
   if (args.size() > 2) {
     return (*cntx)->SendError(kSyntaxErr);
   }
@@ -1195,6 +1197,8 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
     string_view sub_cmd = ArgS(args, 1);
     if (sub_cmd == "DF") {
       new_version = true;
+    } else if (sub_cmd == "RDB") {
+      new_version = false;
     } else {
       return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "SAVE"), kSyntaxErrType);
     }
