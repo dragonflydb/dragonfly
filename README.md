@@ -12,7 +12,7 @@
 
 ## The world's fastest in-memory data store
 
-Dragonfly is an in-memory data store built for modern application workloads. It is fully compatible with the Redis and Memcached APIs, required no code changes to adopt. When compared to these legacy in-memory datastores, Dragonfly delivers 25X more throughput, higher cache hit rates, with lower tail latency, and effortless vertical scalability. 
+Dragonfly is an in-memory data store built for modern application workloads. It is fully compatible with the Redis and Memcached APIs, required no code changes to adopt. When compared to these legacy in-memory datastores, Dragonfly delivers 25X more throughput, higher cache hit rates, with lower tail latency, and effortless vertical scalability.
 
 ## Contents
 
@@ -22,7 +22,6 @@ Dragonfly is an in-memory data store built for modern application workloads. It 
 - [Roadmap and Status](#roadmap-status)
 - [Design Decisions](#design-decisions)
 - [Background](#background)
-
 
 ## <a name="benchmarks"><a/>Benchmarks
 
