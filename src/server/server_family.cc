@@ -42,7 +42,6 @@ extern "C" {
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "server/version.h"
-#include "server_family.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
 #include "util/fibers/fiber_file.h"
@@ -53,8 +52,8 @@ using namespace std;
 ABSL_FLAG(string, dir, "", "working directory");
 ABSL_FLAG(string, dbfilename, "dump", "the filename to save/load the DB");
 ABSL_FLAG(string, requirepass, "",
-          "password for AUTH authentication. if DFLY_PASSWORD env var is set, "
-          "it will override this flag");
+          "password for AUTH authentication. "
+          "If empty can also be set with DFLY_PASSWORD environment variable.");
 ABSL_FLAG(string, save_schedule, "",
           "glob spec for the UTC time to save a snapshot which matches HH:MM 24h time");
 
@@ -1050,12 +1049,18 @@ void ServerFamily::BreakOnShutdown() {
   dfly_cmd_->BreakOnShutdown();
 }
 
-const char* GetPassword() {
+string GetPassword() {
+  string flag = GetFlag(FLAGS_requirepass);
+  if (!flag.empty()) {
+    return flag;
+  }
+
   const char* env_var = getenv("DFLY_PASSWORD");
   if (env_var) {
     return env_var;
   }
-  return GetFlag(FLAGS_requirepass).c_str();
+
+  return "";
 }
 
 void ServerFamily::FlushDb(CmdArgList args, ConnectionContext* cntx) {

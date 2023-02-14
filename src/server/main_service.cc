@@ -28,7 +28,6 @@ extern "C" {
 #include "server/json_family.h"
 #include "server/list_family.h"
 #include "server/script_mgr.h"
-#include "server/server_family.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
 #include "server/stream_family.h"
@@ -812,7 +811,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
 facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
                                                   facade::Connection* owner) {
   ConnectionContext* res = new ConnectionContext{peer, owner};
-  res->req_auth = IsPasswordSet();
+  res->req_auth = !GetPassword().empty();
 
   // a bit of a hack. I set up breaker callback here for the owner.
   // Should work though it's confusing to have it here.

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <boost/fiber/future.hpp>
+#include <string>
 
 #include "facade/conn_context.h"
 #include "facade/redis_parser.h"
@@ -20,11 +21,7 @@ class HttpListenerBase;
 
 namespace dfly {
 
-const char* GetPassword();
-
-bool inline IsPasswordSet() {
-  return strlen(GetPassword()) > 0;
-}
+std::string GetPassword();
 
 namespace journal {
 class Journal;
