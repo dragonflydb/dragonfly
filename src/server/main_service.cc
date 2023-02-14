@@ -505,7 +505,10 @@ void Service::Shutdown() {
 
   // We mark that we are shutting down. After this incoming requests will be
   // rejected
-  pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Shutdown(); });
+  pp_.AwaitFiberOnAll([](ProactorBase* pb) {
+    ServerState::tlocal()->Shutdown();
+    facade::Connection::ShutdownThreadLocal();
+  });
 
   // to shutdown all the runtime components that depend on EngineShard.
   server_family_.Shutdown();

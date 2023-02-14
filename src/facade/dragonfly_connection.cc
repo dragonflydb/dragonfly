@@ -37,6 +37,9 @@ ABSL_FLAG(std::string, admin_bind, "",
           "This supports both HTTP and RESP "
           "protocols");
 
+ABSL_FLAG(std::uint64_t, request_cache_limit, 1ULL << 26,  // 64MB
+          "Amount of memory to use for request cache in bytes - per IO thread.");
+
 using namespace util;
 using namespace std;
 using nonstd::make_unexpected;
@@ -94,7 +97,11 @@ constexpr size_t kReqStorageSize = 88;
 constexpr size_t kReqStorageSize = 120;
 #endif
 
+thread_local uint32_t free_req_release_weight = 0;
+
 }  // namespace
+
+thread_local vector<Connection::RequestPtr> Connection::free_req_pool_;
 
 struct Connection::Shutdown {
   absl::flat_hash_map<ShutdownHandle, ShutdownCb> map;
@@ -611,8 +618,17 @@ auto Connection::ParseRedis() -> ParserStatus {
       bool is_sync_dispatch = !cc_->async_dispatch && !cc_->force_dispatch;
       if (dispatch_q_.empty() && is_sync_dispatch && consumed >= io_buf_.InputLen()) {
         // Gradually release the request pool.
+        // The request pool is shared by all the connections in the thread so we do not want
+        // to release it aggressively just because some connection is running in
+        // non-pipelined mode. So we wait at least N times,
+        // where N is the number of connections in the thread.
         if (!free_req_pool_.empty()) {
-          free_req_pool_.pop_back();
+          ++free_req_release_weight;
+          if (free_req_release_weight > stats_->num_conns) {
+            free_req_release_weight = 0;
+            stats_->pipeline_cache_capacity -= free_req_pool_.back()->StorageCapacity();
+            free_req_pool_.pop_back();
+          }
         }
         RespToArgList(parse_args_, &cmd_vec_);
         CmdArgList cmd_list{cmd_vec_.data(), cmd_vec_.size()};
@@ -788,6 +804,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
   SinkReplyBuilder* builder = cc_->reply_builder();
   DispatchOperations dispatch_op{builder, this};
+  uint64_t request_cache_limit = absl::GetFlag(FLAGS_request_cache_limit);
 
   while (!builder->GetError()) {
     evc_.await([this] { return cc_->conn_closing || !dispatch_q_.empty(); });
@@ -798,8 +815,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     dispatch_q_.pop_front();
     std::visit(dispatch_op, req->payload);
 
-    // Do not cache more than K items.
-    if (free_req_pool_.size() < 16) {
+    if (stats_->pipeline_cache_capacity < request_cache_limit) {
       stats_->pipeline_cache_capacity += req->StorageCapacity();
       free_req_pool_.push_back(std::move(req));
     }
@@ -829,6 +845,7 @@ auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> RequestPtr {
   if (free_req_pool_.empty()) {
     req = Request::New(heap, args, backed_sz);
   } else {
+    free_req_release_weight = 0;  // Reset the release weight.
     req = move(free_req_pool_.back());
     stats_->pipeline_cache_capacity -= req->StorageCapacity();
 
@@ -837,8 +854,13 @@ auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> RequestPtr {
   }
   return req;
 }
+
 void Connection::ShutdownSelf() {
   util::Connection::Shutdown();
+}
+
+void Connection::ShutdownThreadLocal() {
+  free_req_pool_.clear();
 }
 
 void RespToArgList(const RespVec& src, CmdArgVec* dest) {
