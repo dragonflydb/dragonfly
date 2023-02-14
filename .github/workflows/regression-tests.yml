@@ -4,8 +4,8 @@ env:
   BUILD_TYPE: Debug
 
 on:
-  schedule:
-    - cron: '0 0/6 * * *'
+  #schedule:
+  #  - cron: '0 0/6 * * *'
   workflow_dispatch:
 
 jobs:
