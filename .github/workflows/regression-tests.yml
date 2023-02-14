@@ -4,9 +4,15 @@ env:
   BUILD_TYPE: Debug
 
 on:
-  #schedule:
-  #  - cron: '0 0/6 * * *'
+  schedule:
+    - cron: '0 0/6 * * *'
   workflow_dispatch:
+    inputs:
+      run_replication:
+        description: 'Whether to run replication pytests'
+        type: boolean
+        required: true
+
 
 jobs:
   build-n-test:
@@ -45,7 +51,11 @@ jobs:
           pip install -r dragonfly/requirements.txt
           export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
 
-          pytest -xvr dragonfly
+          pytest -xvr dragonfly --ignore=dragonfly/replication_test.py
+
+      - name: Run PyTests replication test
+        if:  ${{ inputs.run_replication == 'true' }}
+        run: pytest -xvr dragonfly/replication_test.py
 
       - name: Send notification on failure
         if: failure() || cancelled()
