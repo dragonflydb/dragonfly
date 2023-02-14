@@ -64,8 +64,7 @@ struct ParsedEntry : public EntryBase {
   CmdData cmd;
 };
 
-using ChangeCallback =
-    std::variant<std::function<void(const Entry&)>, std::function<void(const Entry&, bool flag)>>;
+using ChangeCallback = std::function<void(const Entry&, bool await)>;
 
 }  // namespace journal
 }  // namespace dfly

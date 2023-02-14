@@ -23,10 +23,12 @@ void BufferedStreamerBase::NotifyWritten(bool allow_await) {
   // Wake up the consumer.
   waker_.notify();
   // Block if we're stalled because the consumer is not keeping up.
-  waker_.await([this, allow_await]() { return !allow_await || !IsStalled() || IsStopped(); });
+  if (allow_await) {
+    waker_.await([this]() { return !IsStalled() || IsStopped(); });
+  }
 }
 
-void BufferedStreamerBase::WakeIfWritten() {
+void BufferedStreamerBase::AwaitIfWritten() {
   if (IsStopped())
     return;
   if (buffered_) {

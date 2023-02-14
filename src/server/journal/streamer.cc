@@ -11,7 +11,8 @@ void JournalStreamer::Start(io::Sink* dest) {
   journal_cb_id_ =
       journal_->RegisterOnChange([this](const journal::Entry& entry, bool allow_await) {
         if (entry.opcode == journal::Op::NOOP) {
-          return WakeIfWritten();  // No recode to write, just wake the consumer if needed.
+          // No recode to write, just await if data was written so consumer will read the data.
+          return AwaitIfWritten();
         }
         writer_.Write(entry);
         record_cnt_.fetch_add(1, std::memory_order_relaxed);

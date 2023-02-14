@@ -45,7 +45,7 @@ class BufferedStreamerBase : public io::Sink {
   void NotifyWritten(bool allow_await);
 
   // Blocks the if the consumer if not keeping up.
-  void WakeIfWritten();
+  void AwaitIfWritten();
 
   // Report producer finished.
   void Finalize();

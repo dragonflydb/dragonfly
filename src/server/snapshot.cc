@@ -278,7 +278,9 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 // value. This is guaranteed by the fact that OnJournalEntry runs always after OnDbChange, and
 // no database switch can be performed between those two calls, because they are part of one
 // transaction.
-void SliceSnapshot::OnJournalEntry(const journal::Entry& entry) {
+// OnJournalEntry registers for changes in journal, the journal change function signature is
+// (const journal::Entry& entry, bool await) In snapshot flow we dont use the await argument.
+void SliceSnapshot::OnJournalEntry(const journal::Entry& entry, bool unused_await_arg) {
   // We ignore non payload entries like EXEC because we have no transactional ordering during
   // LOAD phase on replica.
   if (!entry.HasPayload()) {

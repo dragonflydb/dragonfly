@@ -102,7 +102,7 @@ class SliceSnapshot {
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
 
   // Journal listener
-  void OnJournalEntry(const journal::Entry& entry);
+  void OnJournalEntry(const journal::Entry& entry, bool unused_await_arg);
 
   // Close dest channel if not closed yet.
   void CloseRecordChannel();
