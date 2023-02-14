@@ -57,6 +57,7 @@ jobs:
         if:  ${{ inputs.run_replication }}
         run: |
           cd ${GITHUB_WORKSPACE}/tests
+          export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
           pytest -xvs dragonfly/replication_test.py --df alsologtostderr --df vmodule=replica=2
 
       - name: Send notification on failure
