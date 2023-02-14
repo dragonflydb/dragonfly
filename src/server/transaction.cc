@@ -178,7 +178,7 @@ void Transaction::InitMultiData(KeyIndex key_index) {
 }
 
 void Transaction::StoreKeysInArgs(KeyIndex key_index, bool rev_mapping) {
-  DCHECK_EQ(key_index.bonus, 0);
+  DCHECK_EQ(key_index.bonus, 0U);
 
   auto args = cmd_with_full_args_;
 

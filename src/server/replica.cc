@@ -27,7 +27,7 @@ extern "C" {
 #include "strings/human_readable.h"
 #include "util/proactor_base.h"
 
-ABSL_FLAG(bool, enable_multi_shard_sync, true,
+ABSL_FLAG(bool, enable_multi_shard_sync, false,
           "Execute multi shards commands on replica syncrhonized");
 
 ABSL_DECLARE_FLAG(uint32_t, port);
