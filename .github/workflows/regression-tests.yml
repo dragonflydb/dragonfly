@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       run_replication:
-        description: 'Whether to run replication pytests'
+        description: 'run replication pytests'
         type: boolean
         required: true
 
