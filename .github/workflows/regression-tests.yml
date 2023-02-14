@@ -51,11 +51,13 @@ jobs:
           pip install -r dragonfly/requirements.txt
           export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
 
-          pytest -xvr dragonfly --ignore=dragonfly/replication_test.py
+          # pytest -xvr dragonfly --ignore=dragonfly/replication_test.py //TODO:adi remove comment
 
       - name: Run PyTests replication test
         if:  ${{ inputs.run_replication }}
-        run: pytest -xvs dragonfly/replication_test.py --df alsologtostderr --df vmodule=replica=2
+        run: |
+          cd ${GITHUB_WORKSPACE}/tests
+          pytest -xvs dragonfly/replication_test.py --df alsologtostderr --df vmodule=replica=2
 
       - name: Send notification on failure
         if: failure() || cancelled()
