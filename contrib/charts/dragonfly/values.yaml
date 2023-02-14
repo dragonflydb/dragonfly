@@ -123,6 +123,13 @@ tls:
   #   HLunol88AeTOcKfD6hBYGvcRfu5NV29jJxZCOBfbFQXjnNlnrhRCag==
   #   -----END RSA PRIVATE KEY-----
 
+# If enabled will set DFLY_PASSOWRD environment variable with the specified secret value
+passwordFromSecret:
+  enable: false
+  secretName: ""
+  secretKey: ""
+
+
 probes:
   livenessProbe:
     exec:
