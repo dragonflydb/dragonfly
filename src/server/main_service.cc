@@ -43,8 +43,6 @@ using namespace std;
 ABSL_FLAG(uint32_t, port, 6379, "Redis port");
 ABSL_FLAG(uint32_t, memcache_port, 0, "Memcached port");
 
-ABSL_DECLARE_FLAG(string, requirepass);
-
 namespace dfly {
 
 #if __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
@@ -813,7 +811,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
 facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
                                                   facade::Connection* owner) {
   ConnectionContext* res = new ConnectionContext{peer, owner};
-  res->req_auth = IsPassProtected();
+  res->req_auth = !GetPassword().empty();
 
   // a bit of a hack. I set up breaker callback here for the owner.
   // Should work though it's confusing to have it here.
@@ -851,10 +849,6 @@ bool Service::IsShardSetLocked() const {
   });
 
   return res.load() != 0;
-}
-
-bool Service::IsPassProtected() const {
-  return !GetFlag(FLAGS_requirepass).empty();
 }
 
 absl::flat_hash_map<std::string, unsigned> Service::UknownCmdMap() const {
