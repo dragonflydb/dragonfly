@@ -16,8 +16,7 @@ namespace dfly {
 class JournalStreamer : protected BufferedStreamerBase {
  public:
   JournalStreamer(journal::Journal* journal, Context* cntx)
-      : BufferedStreamerBase{cntx->GetCancellation()}, cntx_{cntx},
-        journal_cb_id_{0}, journal_{journal}, write_fb_{}, writer_{this} {
+      : BufferedStreamerBase{cntx->GetCancellation()}, cntx_{cntx}, journal_{journal} {
   }
 
   // Self referential.
@@ -39,12 +38,13 @@ class JournalStreamer : protected BufferedStreamerBase {
  private:
   Context* cntx_;
 
-  uint32_t journal_cb_id_;
+  uint32_t journal_cb_id_{0};
   journal::Journal* journal_;
 
-  util::fibers_ext::Fiber write_fb_;
-  JournalWriter writer_;
-  std::atomic_uint64_t record_cnt_;
+  util::fibers_ext::Fiber write_fb_{};
+  JournalWriter writer_{this};
+
+  std::atomic_uint64_t record_cnt_{0};
 };
 
 }  // namespace dfly

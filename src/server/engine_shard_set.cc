@@ -382,7 +382,6 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   // after trans in the queue, hence it's safe to run trans out of order.
   if (trans && should_run) {
     DCHECK(trans != head);
-    DCHECK(!trans->IsMulti());  // multi, global transactions can not be OOO.
     DCHECK(trans_mask & Transaction::ARMED);
 
     dbg_id.clear();
