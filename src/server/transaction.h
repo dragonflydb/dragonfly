@@ -205,7 +205,7 @@ class Transaction {
   // multi_commands to true and  call the FinishLogJournalOnShard function after logging the final
   // entry.
   void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload, uint32_t shard_cnt,
-                         bool multi_commands, bool flag) const;
+                         bool multi_commands, bool allow_await) const;
   void FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt) const;
 
  private:

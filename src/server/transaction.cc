@@ -1182,14 +1182,15 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
 }
 
 void Transaction::LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload,
-                                    uint32_t shard_cnt, bool multi_commands, bool flag) const {
+                                    uint32_t shard_cnt, bool multi_commands,
+                                    bool allow_await) const {
   auto journal = shard->journal();
   CHECK(journal);
   if (multi_) {
     multi_->shard_journal_write[shard->shard_id()] = true;
   }
   auto opcode = (multi_ || multi_commands) ? journal::Op::MULTI_COMMAND : journal::Op::COMMAND;
-  journal->RecordEntry(txid_, opcode, db_index_, shard_cnt, std::move(payload), false);
+  journal->RecordEntry(txid_, opcode, db_index_, shard_cnt, std::move(payload), allow_await);
 }
 
 void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt) const {
