@@ -54,8 +54,8 @@ jobs:
           pytest -xvr dragonfly --ignore=dragonfly/replication_test.py
 
       - name: Run PyTests replication test
-        if:  ${{ inputs.run_replication == 'true' }}
-        run: pytest -xvr dragonfly/replication_test.py
+        if:  ${{ inputs.run_replication }}
+        run: pytest -xvs dragonfly/replication_test.py --df alsologtostderr --df vmodule=replica=2
 
       - name: Send notification on failure
         if: failure() || cancelled()
