@@ -84,19 +84,26 @@ async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_
 
 
 async def check_replica_finished_exec(c_replica, c_master):
-    r_offset = await c_replica.execute_command("DEBUG REPLICA OFFSET")
-    command = "DFLY REPLICAOFFSET " + r_offset[0].decode()
+    syncid, r_offset = await c_replica.execute_command("DEBUG REPLICA OFFSET")
+    command = "DFLY REPLICAOFFSET " + syncid.decode()
     m_offset = await c_master.execute_command(command)
-    return r_offset[1] == m_offset
+
+    print("  offset", syncid.decode(),  r_offset, m_offset)
+    return r_offset == m_offset
 
 
 async def check_all_replicas_finished(c_replicas, c_master):
-    while True:
+    print("Waiting for replicas to finish")
+
+    waiting_for = list(c_replicas)
+    while len(waiting_for) > 0:
         await asyncio.sleep(1.0)
-        is_finished_arr = await asyncio.gather(*(asyncio.create_task(check_replica_finished_exec(c, c_master))
-                                                 for c in c_replicas))
-        if all(is_finished_arr):
-            break
+
+        tasks = (asyncio.create_task(check_replica_finished_exec(c, c_master)) for c in waiting_for)
+        finished_list = await asyncio.gather(*tasks)
+
+        # Remove clients that finished from waiting list
+        waiting_for = [c for (c, finished) in zip(waiting_for, finished_list) if not finished]
 
 
 async def check_data(seeder, replicas, c_replicas):
