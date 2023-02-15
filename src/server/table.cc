@@ -10,14 +10,6 @@ namespace dfly {
 
 #define ADD(x) (x) += o.x
 
-// const size_t* add_vectors(const size_t* v1, const size_t* v2) {
-//     size_t result[7] = {0, 0, 0, 0, 0, 0, 0};
-//     for (int i = 0; i < 7; i++) {
-//         result[i] = v1[i] + v2[i];
-//     }
-//     return result;
-// }
-
 // It should be const, but we override this variable in our tests so that they run faster.
 unsigned kInitSegmentLog = 3;
 
