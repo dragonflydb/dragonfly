@@ -37,7 +37,7 @@ class TestRdbSnapshot(SnapshotTestBase):
         start_capture = await seeder.capture()
 
         # save + flush + load
-        await async_client.execute_command("SAVE")
+        await async_client.execute_command("SAVE RDB")
         assert await async_client.flushall()
         await async_client.execute_command("DEBUG LOAD " + super().get_main_file("rdb"))
 
