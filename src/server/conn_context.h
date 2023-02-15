@@ -19,7 +19,7 @@ struct StoredCmd {
   const CommandId* descr;
 
  private:
-  std::vector<std::string> stored_args_;
+  std::unique_ptr<char[]> backing_storage_;
   CmdArgVec arg_vec_;
   CmdArgList arg_list_;
 
