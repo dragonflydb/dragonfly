@@ -5,7 +5,7 @@ env:
 
 on:
   schedule:
-    - cron: '0 0/6 * * *'
+    - cron: '0 0/3 * * *'
   workflow_dispatch:
     inputs:
       run_replication:
@@ -51,7 +51,7 @@ jobs:
           pip install -r dragonfly/requirements.txt
           export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
 
-          pytest -xvr dragonfly --ignore=dragonfly/replication_test.py
+          pytest -xvrs dragonfly --ignore=dragonfly/replication_test.py
 
       - name: Run PyTests replication test
         if:  ${{ inputs.run_replication }}
