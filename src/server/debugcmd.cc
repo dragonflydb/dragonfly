@@ -27,6 +27,7 @@ using namespace std;
 
 ABSL_DECLARE_FLAG(string, dir);
 ABSL_DECLARE_FLAG(string, dbfilename);
+ABSL_DECLARE_FLAG(bool, df_snapshot_format);
 
 namespace dfly {
 
@@ -174,7 +175,7 @@ void DebugCmd::Reload(CmdArgList args) {
     trans->InitByArgs(0, {});
     VLOG(1) << "Performing save";
 
-    GenericError ec = sf_.DoSave(false, trans.get());
+    GenericError ec = sf_.DoSave(absl::GetFlag(FLAGS_df_snapshot_format), trans.get());
     if (ec) {
       return (*cntx_)->SendError(ec.Format());
     }
