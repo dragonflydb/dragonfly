@@ -115,11 +115,11 @@ error_code JournalSlice::Close() {
   return ec;
 }
 
-void JournalSlice::AddLogRecord(const Entry& entry) {
+void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
   DCHECK(ring_buffer_);
   iterating_cb_arr_ = true;
   for (const auto& k_v : change_cb_arr_) {
-    k_v.second(entry);
+    k_v.second(entry, await);
   }
   iterating_cb_arr_ = false;
 

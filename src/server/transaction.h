@@ -120,10 +120,6 @@ class Transaction {
   // Cancel all blocking watches on shutdown. Set COORD_CANCELLED.
   void BreakOnShutdown();
 
-  // Log a journal entry on shard with payload and shard count.
-  void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload,
-                         uint32_t shard_cnt) const;
-
   // In some cases for non auto-journaling commands we want to enable the auto journal flow.
   void RenableAutoJournal() {
     renabled_auto_journal_.store(true, std::memory_order_relaxed);
@@ -209,7 +205,7 @@ class Transaction {
   // multi_commands to true and  call the FinishLogJournalOnShard function after logging the final
   // entry.
   void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload, uint32_t shard_cnt,
-                         bool multi_commands) const;
+                         bool multi_commands, bool allow_await) const;
   void FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt) const;
 
  private:

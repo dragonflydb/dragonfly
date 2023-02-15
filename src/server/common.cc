@@ -164,7 +164,8 @@ bool ParseDouble(string_view src, double* value) {
 
 void RecordJournal(const OpArgs& op_args, string_view cmd, ArgSlice args, uint32_t shard_cnt,
                    bool multi_commands) {
-  op_args.tx->LogJournalOnShard(op_args.shard, make_pair(cmd, args), shard_cnt, multi_commands);
+  op_args.tx->LogJournalOnShard(op_args.shard, make_pair(cmd, args), shard_cnt, multi_commands,
+                                false);
 }
 
 void RecordJournalFinish(const OpArgs& op_args, uint32_t shard_cnt) {
@@ -174,7 +175,13 @@ void RecordJournalFinish(const OpArgs& op_args, uint32_t shard_cnt) {
 void RecordExpiry(DbIndex dbid, string_view key) {
   auto journal = EngineShard::tlocal()->journal();
   CHECK(journal);
-  journal->RecordEntry(0, journal::Op::EXPIRED, dbid, 1, make_pair("DEL", ArgSlice{key}));
+  journal->RecordEntry(0, journal::Op::EXPIRED, dbid, 1, make_pair("DEL", ArgSlice{key}), false);
+}
+
+void TriggerJournalWriteToSink() {
+  auto journal = EngineShard::tlocal()->journal();
+  CHECK(journal);
+  journal->RecordEntry(0, journal::Op::NOOP, 0, 0, {}, true);
 }
 
 #define ADD(x) (x) += o.x

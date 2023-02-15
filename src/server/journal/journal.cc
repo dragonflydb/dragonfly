@@ -102,8 +102,8 @@ bool Journal::EnterLameDuck() {
 }
 
 void Journal::RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt,
-                          Entry::Payload payload) {
-  journal_slice.AddLogRecord(Entry{txid, opcode, dbid, shard_cnt, std::move(payload)});
+                          Entry::Payload payload, bool await) {
+  journal_slice.AddLogRecord(Entry{txid, opcode, dbid, shard_cnt, std::move(payload)}, await);
 }
 
 /*

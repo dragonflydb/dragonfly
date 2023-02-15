@@ -49,7 +49,8 @@ class Journal {
 */
   LSN GetLsn() const;
 
-  void RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt, Entry::Payload payload);
+  void RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt, Entry::Payload payload,
+                   bool await);
 
  private:
   mutable boost::fibers::mutex state_mu_;

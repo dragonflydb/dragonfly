@@ -42,7 +42,7 @@ class JournalSlice {
     return bool(shard_file_);
   }
 
-  void AddLogRecord(const Entry& entry);
+  void AddLogRecord(const Entry& entry, bool await);
 
   uint32_t RegisterOnChange(ChangeCallback cb);
   void UnregisterOnChange(uint32_t);
