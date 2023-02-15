@@ -66,7 +66,7 @@ class TestDflySnapshot(SnapshotTestBase):
         assert await seeder.compare(start_capture)
 
 
-@dfly_args({**BASIC_ARGS, "dbfilename": "test-periodic.rdb", "save_schedule": "*:*"})
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-periodic.dfs", "save_schedule": "*:*"})
 class TestPeriodicSnapshot(SnapshotTestBase):
     """Test periodic snapshotting"""
     @pytest.fixture(autouse=True)
@@ -80,4 +80,5 @@ class TestPeriodicSnapshot(SnapshotTestBase):
 
         time.sleep(60)
 
-        assert (self.tmp_dir / "test-periodic.rdb").exists()
+        files = [f for f in os.listdir(self.tmp_dir) if f.startswith('test-periodic')]
+        assert len(files) > 0 and any(f.endswith('summary.dfs') for f in files)
