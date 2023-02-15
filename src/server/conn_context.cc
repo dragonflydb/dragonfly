@@ -17,11 +17,19 @@ namespace dfly {
 using namespace std;
 
 StoredCmd::StoredCmd(const CommandId* d, CmdArgList args) : descr(d) {
-  stored_args_.reserve(args.size());
+  size_t total_size = 0;
+  for (auto args : args) {
+    total_size += args.size();
+  }
+
+  backing_storage_.reset(new char[total_size]);
   arg_vec_.resize(args.size());
+  char* next = backing_storage_.get();
   for (size_t i = 0; i < args.size(); ++i) {
-    stored_args_.emplace_back(ArgS(args, i));
-    arg_vec_[i] = MutableSlice{stored_args_[i].data(), stored_args_[i].size()};
+    auto src = args[i];
+    memcpy(next, src.data(), src.size());
+    arg_vec_[i] = MutableSlice{next, src.size()};
+    next += src.size();
   }
   arg_list_ = {arg_vec_.data(), arg_vec_.size()};
 }
