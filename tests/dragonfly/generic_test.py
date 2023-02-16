@@ -24,7 +24,7 @@ def export_dfly_password() -> str:
 
 @pytest.mark.asyncio
 async def test_password(df_local_factory, export_dfly_password):
-    dfly = df_local_factory.create()
+    dfly = df_local_factory.create(proactor_threads=1)
     dfly.start()
 
     # Expect password form environment variable

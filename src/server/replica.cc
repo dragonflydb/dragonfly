@@ -1229,7 +1229,7 @@ bool Replica::TransactionReader::ReturnEntryOOO(const TransactionData& tx_data,
 auto Replica::TransactionReader::NextTxData(JournalReader* reader, Context* cntx)
     -> optional<TransactionData> {
   io::Result<journal::ParsedEntry> res;
-  TransactionData next_tx;
+  TransactionData next_tx{};
   std::swap(saved_data_, next_tx);
   do {
     if (res = reader->ReadEntry(); !res) {
