@@ -30,6 +30,7 @@ add_library(dfly_test_lib test_utils.cc)
 cxx_link(dfly_test_lib dragonfly_lib epoll_fiber_lib facade_test gtest_main_ext)
 
 cxx_test(dragonfly_test dfly_test_lib LABELS DFLY)
+cxx_test(multi_test dfly_test_lib LABELS DFLY)
 cxx_test(generic_family_test dfly_test_lib LABELS DFLY)
 cxx_test(hset_family_test dfly_test_lib LABELS DFLY)
 cxx_test(list_family_test dfly_test_lib LABELS DFLY)
