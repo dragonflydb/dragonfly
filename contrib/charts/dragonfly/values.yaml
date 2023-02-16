@@ -123,11 +123,13 @@ tls:
   #   HLunol88AeTOcKfD6hBYGvcRfu5NV29jJxZCOBfbFQXjnNlnrhRCag==
   #   -----END RSA PRIVATE KEY-----
 
-# If enabled will set DFLY_PASSOWRD environment variable with the specified secret value
+# If enabled will set DFLY_PASSOWRD environment variable with the specified existing secret value
+# Nothe that if enabled and the secret does not exist pods will not start
 passwordFromSecret:
   enable: false
-  secretName: ""
-  secretKey: ""
+  existingSecret:
+    name: ""
+    key: ""
 
 
 probes:

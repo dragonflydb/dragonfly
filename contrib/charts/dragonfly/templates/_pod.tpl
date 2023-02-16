@@ -72,8 +72,8 @@ containers:
       - name: DFLY_PASSWORD
         valueFrom:
           secretKeyRef:
-            name: {{ .Values.passwordFromSecret.secretName }}
-            key: {{ .Values.passwordFromSecret.secretKey }}
+            name: {{ .Values.passwordFromSecret.existingSecret.name }}
+            key: {{ .Values.passwordFromSecret.existingSecret.key }}
     {{- end }}
   {{- with .Values.extraContainers }}
   {{- if eq (typeOf .) "string" }}
