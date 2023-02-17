@@ -55,7 +55,8 @@ class Replica {
   // This class holds the commands of transaction in single shard.
   // Once all commands recieved the command can be executed.
   struct TransactionData {
-    // Update the data from ParsedEntry and return if all shard transaction commands were recieved.
+    // Update the data from ParsedEntry and return true if all shard transaction commands were
+    // recieved.
     bool AddEntry(journal::ParsedEntry&& entry);
 
     bool IsGlobalCmd() const;
@@ -71,7 +72,7 @@ class Replica {
 
   // Utility for reading TransactionData from a journal reader.
   // The journal stream can contain interleaved data for multiple multi transactions,
-  // expiries and out of order exectued transactions that need to be grouped on the replica side.
+  // expiries and out of order executed transactions that need to be grouped on the replica side.
   struct TransactionReader {
     std::optional<TransactionData> NextTxData(JournalReader* reader, Context* cntx);
 
