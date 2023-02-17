@@ -90,10 +90,31 @@ TEST_F(StringMapTest, Basic) {
   EXPECT_GT(sm_->ObjMallocUsed(), sz);
   it = sm_->begin();
   EXPECT_STREQ("baraaaaaaaaaaaa2", it->second);
+
+  EXPECT_FALSE(sm_->AddOrSkip("foo", "bar2"));
+  EXPECT_STREQ("baraaaaaaaaaaaa2", it->second);
 }
 
 TEST_F(StringMapTest, EmptyFind) {
   sm_->Find("bar");
+}
+
+TEST_F(StringMapTest, Ttl) {
+  EXPECT_TRUE(sm_->AddOrUpdate("bla", "val1", 1));
+  EXPECT_FALSE(sm_->AddOrUpdate("bla", "val2", 1));
+  sm_->set_time(1);
+  EXPECT_TRUE(sm_->AddOrUpdate("bla", "val2", 1));
+  EXPECT_EQ(1u, sm_->Size());
+
+  EXPECT_FALSE(sm_->AddOrSkip("bla", "val3", 2));
+
+  // set ttl to 2, meaning that the key will expire at time 3.
+  EXPECT_TRUE(sm_->AddOrSkip("bla2", "val3", 2));
+  EXPECT_TRUE(sm_->Contains("bla2"));
+
+  sm_->set_time(3);
+  auto it = sm_->begin();
+  EXPECT_TRUE(it == sm_->end());
 }
 
 }  // namespace dfly
