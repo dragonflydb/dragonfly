@@ -67,6 +67,7 @@ class Sentinel:
 
     def stop(self):
         self.proc.terminate()
+        self.proc.wait(timeout=10)
 
     def run_cmd(self, args, sentinel_cmd=True, capture_output=False, assert_ok=True) -> subprocess.CompletedProcess:
         run_args = ["redis-cli", "-p", f"{self.port}"]
