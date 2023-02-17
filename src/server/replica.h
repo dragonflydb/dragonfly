@@ -55,25 +55,30 @@ class Replica {
   // This class holds the commands of transaction in single shard.
   // Once all commands recieved the command can be executed.
   struct TransactionData {
-    // Update the data from ParsedEntry and return if all shard transaction commands were recieved.
+    // Update the data from ParsedEntry and return true if all shard transaction commands were
+    // recieved.
     bool AddEntry(journal::ParsedEntry&& entry);
 
     bool IsGlobalCmd() const;
-    TxId txid;
-    DbIndex dbid;
-    uint32_t shard_cnt;
-    std::vector<journal::ParsedEntry::CmdData> commands;
-    // Counting the number of journal records in specific transaction in specific shard.
-    uint32_t journal_rec_count = 0;
+
+    static TransactionData FromSingle(journal::ParsedEntry&& entry);
+
+    TxId txid{0};
+    DbIndex dbid{0};
+    uint32_t shard_cnt{0};
+    std::vector<journal::ParsedEntry::CmdData> commands{0};
+    uint32_t journal_rec_count{0};  // Count number of source entries to check offset.
   };
 
   // Utility for reading TransactionData from a journal reader.
+  // The journal stream can contain interleaved data for multiple multi transactions,
+  // expiries and out of order executed transactions that need to be grouped on the replica side.
   struct TransactionReader {
     std::optional<TransactionData> NextTxData(JournalReader* reader, Context* cntx);
-    static bool ReturnEntryOOO(const TransactionData& tx_data, const journal::ParsedEntry& entry);
 
    private:
-    TransactionData saved_data_{};
+    // Stores ongoing multi transaction data.
+    absl::flat_hash_map<TxId, TransactionData> current_;
   };
 
   // Coorindator for multi shard execution.

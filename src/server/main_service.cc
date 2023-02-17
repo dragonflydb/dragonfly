@@ -834,12 +834,9 @@ facade::ConnectionStats* Service::GetThreadLocalConnectionStats() {
 
 bool Service::IsLocked(DbIndex db_index, std::string_view key) const {
   ShardId sid = Shard(key, shard_count());
-  KeyLockArgs args;
-  args.db_index = db_index;
-  args.args = ArgSlice{&key, 1};
-  args.key_step = 1;
-  bool is_open = pp_.at(sid)->AwaitBrief(
-      [args] { return EngineShard::tlocal()->db_slice().CheckLock(IntentLock::EXCLUSIVE, args); });
+  bool is_open = pp_.at(sid)->AwaitBrief([db_index, key] {
+    return EngineShard::tlocal()->db_slice().CheckLock(IntentLock::EXCLUSIVE, db_index, key);
+  });
   return !is_open;
 }
 

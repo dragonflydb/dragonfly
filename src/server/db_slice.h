@@ -223,7 +223,10 @@ class DbSlice {
     db_arr_[db_index]->Release(m, key, count);
   }
 
-  // Returns true if all keys can be locked under m. Does not lock them though.
+  // Returns true if the key can be locked under m. Does not lock.
+  bool CheckLock(IntentLock::Mode m, DbIndex dbid, std::string_view key) const;
+
+  // Returns true if all keys can be locked under m. Does not lock.
   bool CheckLock(IntentLock::Mode m, const KeyLockArgs& lock_args) const;
 
   size_t db_array_size() const {

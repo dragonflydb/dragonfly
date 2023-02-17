@@ -723,6 +723,14 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   }
 }
 
+bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, string_view key) const {
+  KeyLockArgs args;
+  args.db_index = dbid;
+  args.args = ArgSlice{&key, 1};
+  args.key_step = 1;
+  return CheckLock(mode, args);
+}
+
 bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) const {
   DCHECK(!lock_args.args.empty());
   const auto& lt = db_arr_[lock_args.db_index]->trans_locks;
@@ -862,7 +870,13 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
   auto& db = *db_arr_[cntx.db_index];
   DeleteExpiredStats result;
 
+  std::string stash;
+
   auto cb = [&](ExpireIterator it) {
+    auto key = it->first.GetSlice(&stash);
+    if (!CheckLock(IntentLock::EXCLUSIVE, cntx.db_index, key))
+      return;
+
     result.traversed++;
     time_t ttl = ExpireTime(it) - cntx.time_now_ms;
     if (ttl <= 0) {
