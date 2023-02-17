@@ -1190,12 +1190,9 @@ error_code Replica::SendCommand(string_view command, ReqSerializer* serializer) 
 
 bool Replica::TransactionData::AddEntry(journal::ParsedEntry&& entry) {
   ++journal_rec_count;
-  // Expiry joins multi transaction or runs standalone.
-  if (entry.opcode == journal::Op::EXPIRED) {
-    entry.opcode = commands.empty() ? journal::Op::COMMAND : journal::Op::MULTI_COMMAND;
-  }
 
   switch (entry.opcode) {
+    case journal::Op::EXPIRED:
     case journal::Op::COMMAND:
       commands.push_back(std::move(entry.cmd));
       [[fallthrough]];
@@ -1218,32 +1215,40 @@ bool Replica::TransactionData::IsGlobalCmd() const {
   return commands.size() == 1 && commands.front().cmd_args.size() == 1;
 }
 
-// Expired entries within MULTI...EXEC sequence which belong to different database
-// should be executed outside the multi transaciton.
-bool Replica::TransactionReader::ReturnEntryOOO(const TransactionData& tx_data,
-                                                const journal::ParsedEntry& entry) {
-  return !tx_data.commands.empty() && entry.opcode == journal::Op::EXPIRED &&
-         tx_data.dbid != entry.dbid;
+Replica::TransactionData Replica::TransactionData::FromSingle(journal::ParsedEntry&& entry) {
+  TransactionData data;
+  DCHECK(data.AddEntry(std::move(entry)));
+  return data;
 }
 
 auto Replica::TransactionReader::NextTxData(JournalReader* reader, Context* cntx)
     -> optional<TransactionData> {
   io::Result<journal::ParsedEntry> res;
-  TransactionData next_tx;
-  std::swap(saved_data_, next_tx);
-  do {
+  while (true) {
     if (res = reader->ReadEntry(); !res) {
       cntx->ReportError(res.error());
       return std::nullopt;
     }
 
-    if (ReturnEntryOOO(next_tx, *res)) {
-      std::swap(saved_data_, next_tx);
+    // Check if journal command can be executed right away.
+    // Expiration checks lock on master, so it never conflicts with running multi transactions.
+    if (res->opcode == journal::Op::EXPIRED || res->opcode == journal::Op::COMMAND)
+      return TransactionData::FromSingle(std::move(res.value()));
+
+    // Otherwise, continue building multi command.
+    DCHECK(res->opcode == journal::Op::MULTI_COMMAND || res->opcode == journal::Op::EXEC);
+    DCHECK(res->txid > 0);
+
+    auto txid = res->txid;
+    auto& txdata = current_[txid];
+    if (txdata.AddEntry(std::move(res.value()))) {
+      auto out = std::move(txdata);
+      current_.erase(txid);
+      return out;
     }
+  }
 
-  } while (!cntx->IsCancelled() && !next_tx.AddEntry(std::move(*res)));
-
-  return cntx->IsCancelled() ? std::nullopt : make_optional(std::move(next_tx));
+  return std::nullopt;
 }
 
 }  // namespace dfly
