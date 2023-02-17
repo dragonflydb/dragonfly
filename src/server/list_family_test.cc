@@ -759,4 +759,17 @@ TEST_F(ListFamilyTest, BRPopLPushTwoShards) {
   // the atomicity and causes the first bug as well.
 }
 
+TEST_F(ListFamilyTest, BLMove) {
+  EXPECT_THAT(Run({"blmove", "x", "y", "right", "right", "0.05"}), ArgType(RespExpr::NIL));
+  ASSERT_EQ(0, NumWatched());
+
+  EXPECT_THAT(Run({"lpush", "x", "val1"}), IntArg(1));
+  EXPECT_THAT(Run({"lpush", "y", "val2"}), IntArg(1));
+
+  EXPECT_EQ(Run({"blmove", "x", "y", "right", "left", "0.01"}), "val1");
+  auto resp = Run({"lrange", "y", "0", "-1"});
+  ASSERT_THAT(resp, ArrLen(2));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("val1", "val2"));
+}
+
 }  // namespace dfly

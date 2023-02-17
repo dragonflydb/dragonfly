@@ -207,6 +207,11 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
 
   DCHECK(context->transaction == nullptr);
 
+  auto cmd = absl::AsciiStrToUpper(slice.front());
+  if (cmd == "EVAL" || cmd == "EVALSHA" || cmd == "EXEC") {
+    shard_set->AwaitRunningOnShardQueue([](auto*) {});  // Wait for async UnlockMulti.
+  }
+
   unique_lock lk(mu_);
   last_cmd_dbg_info_ = context->last_command_debug;
 

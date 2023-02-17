@@ -41,7 +41,7 @@ IntentLock::Mode Transaction::Mode() const {
  * @param ess
  * @param cs
  */
-Transaction::Transaction(const CommandId* cid) : cid_(cid) {
+Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   string_view cmd_name(cid_->name());
   if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA") {
     multi_.reset(new MultiData);
@@ -57,6 +57,142 @@ Transaction::Transaction(const CommandId* cid) : cid_(cid) {
 Transaction::~Transaction() {
   DVLOG(2) << "Transaction " << StrCat(Name(), "@", txid_, "/", unique_shard_cnt_, ")")
            << " destroyed";
+}
+
+void Transaction::InitBase(DbIndex dbid, CmdArgList args) {
+  global_ = false;
+  db_index_ = dbid;
+  cmd_with_full_args_ = args;
+  local_result_ = OpStatus::OK;
+}
+
+void Transaction::InitGlobal() {
+  global_ = true;
+  unique_shard_cnt_ = shard_set->size();
+  shard_data_.resize(unique_shard_cnt_);
+}
+
+void Transaction::BuildShardIndex(KeyIndex key_index, bool rev_mapping,
+                                  std::vector<PerShardCache>* out) {
+  auto args = cmd_with_full_args_;
+
+  auto& shard_index = *out;
+  shard_index.resize(shard_data_.size());
+  for (auto& v : shard_index)
+    v.Clear();
+
+  auto add = [this, rev_mapping, &shard_index](uint32_t sid, uint32_t i) {
+    string_view val = ArgS(cmd_with_full_args_, i);
+    shard_index[sid].args.push_back(val);
+    if (rev_mapping)
+      shard_index[sid].original_index.push_back(i - 1);
+  };
+
+  if (key_index.bonus) {
+    DCHECK(key_index.step == 1);
+    uint32_t sid = Shard(ArgS(args, key_index.bonus), shard_data_.size());
+    add(sid, key_index.bonus);
+  }
+
+  for (unsigned i = key_index.start; i < key_index.end; ++i) {
+    uint32_t sid = Shard(ArgS(args, i), shard_data_.size());
+    add(sid, i);
+
+    DCHECK_LE(key_index.step, 2u);
+    if (key_index.step == 2) {  // Handle value associated with preceding key.
+      add(sid, ++i);
+    }
+  }
+}
+
+void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, size_t num_args,
+                                bool rev_mapping) {
+  bool incremental_locking = multi_ && multi_->is_expanding;
+
+  args_.reserve(num_args);
+  if (rev_mapping)
+    reverse_index_.reserve(args_.size());
+
+  // Store the concatenated per-shard arguments from the shard index inside args_
+  // and make each shard data point to its own sub-span inside args_.
+  for (size_t i = 0; i < shard_data_.size(); ++i) {
+    auto& sd = shard_data_[i];
+    auto& si = shard_index[i];
+
+    CHECK_LT(si.args.size(), 1u << 15);
+
+    sd.arg_count = si.args.size();
+    sd.arg_start = args_.size();
+
+    // Reset mask to allow locking multiple times.
+    if (incremental_locking)
+      sd.local_mask = 0;
+
+    if (!sd.arg_count)
+      continue;
+
+    unique_shard_cnt_++;
+    unique_shard_id_ = i;
+
+    for (size_t j = 0; j < si.args.size(); ++j) {
+      args_.push_back(si.args[j]);
+      if (rev_mapping)
+        reverse_index_.push_back(si.original_index[j]);
+    }
+  }
+
+  CHECK(args_.size() == num_args);
+}
+
+void Transaction::InitMultiData(KeyIndex key_index) {
+  DCHECK(multi_);
+  auto args = cmd_with_full_args_;
+
+  // TODO: determine correct locking mode for transactions, scripts and regular commands.
+  IntentLock::Mode mode = Mode();
+  multi_->keys.clear();
+
+  auto& tmp_uniques = tmp_space.uniq_keys;
+  tmp_uniques.clear();
+
+  auto lock_key = [this, mode, &tmp_uniques](auto key) {
+    if (auto [_, inserted] = tmp_uniques.insert(key); !inserted)
+      return;
+    if (multi_->is_expanding) {
+      multi_->keys.push_back(key);
+    } else {
+      multi_->lock_counts[key][mode]++;
+    }
+  };
+
+  // With EVAL, we call this function for EVAL itself as well as for each command
+  // for eval. currently, we lock everything only during the eval call.
+  if (multi_->is_expanding || !multi_->locks_recorded) {
+    for (size_t i = key_index.start; i < key_index.end; i += key_index.step)
+      lock_key(ArgS(args, i));
+    if (key_index.bonus > 0)
+      lock_key(ArgS(args, key_index.bonus));
+  }
+
+  multi_->locks_recorded = true;
+}
+
+void Transaction::StoreKeysInArgs(KeyIndex key_index, bool rev_mapping) {
+  DCHECK_EQ(key_index.bonus, 0U);
+
+  auto args = cmd_with_full_args_;
+
+  // even for a single key we may have multiple arguments per key (MSET).
+  for (unsigned j = key_index.start; j < key_index.start + key_index.step; ++j) {
+    args_.push_back(ArgS(args, j));
+  }
+
+  if (rev_mapping) {
+    reverse_index_.resize(args_.size());
+    for (unsigned j = 0; j < reverse_index_.size(); ++j) {
+      reverse_index_[j] = j + key_index.start - 1;
+    }
+  }
 }
 
 /**
@@ -79,180 +215,51 @@ Transaction::~Transaction() {
  *
  **/
 
-OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
-  db_index_ = index;
-  cmd_with_full_args_ = args;
-
-  if (IsGlobal()) {
-    unique_shard_cnt_ = shard_set->size();
-    shard_data_.resize(unique_shard_cnt_);
-    return OpStatus::OK;
-  }
-
-  CHECK_GT(args.size(), 1U);  // first entry is the command name.
-  DCHECK_EQ(unique_shard_cnt_, 0u);
-  DCHECK(args_.empty());
-
-  OpResult<KeyIndex> key_index_res = DetermineKeys(cid_, args);
-  if (!key_index_res)
-    return key_index_res.status();
-
-  const auto& key_index = *key_index_res;
+void Transaction::InitByKeys(KeyIndex key_index) {
+  auto args = cmd_with_full_args_;
 
   if (key_index.start == args.size()) {  // eval with 0 keys.
     CHECK(absl::StartsWith(cid_->name(), "EVAL"));
-    return OpStatus::OK;
+    return;
   }
 
   DCHECK_LT(key_index.start, args.size());
   DCHECK_GT(key_index.start, 0u);
 
-  bool incremental_locking = multi_ && multi_->is_expanding;
-  bool single_key = !multi_ && key_index.HasSingleKey();
   bool needs_reverse_mapping = cid_->opt_mask() & CO::REVERSE_MAPPING;
+  bool single_key = !multi_ && key_index.HasSingleKey();
 
   if (single_key) {
     DCHECK_GT(key_index.step, 0u);
 
-    shard_data_.resize(1);  // Single key optimization
+    // We don't have to split the arguments by shards, so we can copy them directly.
+    StoreKeysInArgs(key_index, needs_reverse_mapping);
 
-    // even for a single key we may have multiple arguments per key (MSET).
-    for (unsigned j = key_index.start; j < key_index.start + key_index.step; ++j) {
-      args_.push_back(ArgS(args, j));
-    }
-    string_view key = args_.front();
-
+    shard_data_.resize(1);
     unique_shard_cnt_ = 1;
-    unique_shard_id_ = Shard(key, shard_set->size());
+    unique_shard_id_ = Shard(args_.front(), shard_set->size());
 
-    if (needs_reverse_mapping) {
-      reverse_index_.resize(args_.size());
-      for (unsigned j = 0; j < reverse_index_.size(); ++j) {
-        reverse_index_[j] = j + key_index.start - 1;
-      }
-    }
-    return OpStatus::OK;
+    return;
   }
 
-  // Our shard_data is not sparse, so we must allocate for all threads :(
-  shard_data_.resize(shard_set->size());
+  shard_data_.resize(shard_set->size());  // shard_data isn't sparse, so we must allocate for all :(
   CHECK(key_index.step == 1 || key_index.step == 2);
   DCHECK(key_index.step == 1 || (args.size() % 2) == 1);
 
-  // Reuse thread-local temporary storage. Since this code is atomic we can use it here.
-  auto& shard_index = tmp_space.shard_cache;
-  shard_index.resize(shard_data_.size());
-  for (auto& v : shard_index) {
-    v.Clear();
-  }
+  auto& shard_index = tmp_space.shard_cache;  // Safe, because flow below is not preemptive.
 
-  // TODO: to determine correctly locking mode for transactions, scripts
-  // and regular commands.
-  IntentLock::Mode mode = IntentLock::EXCLUSIVE;
-  bool should_record_locks = false;
+  // Distribute all the arguments by shards.
+  BuildShardIndex(key_index, needs_reverse_mapping, &shard_index);
 
-  if (multi_) {
-    mode = Mode();
-    multi_->keys.clear();
-    tmp_space.uniq_keys.clear();
-    DCHECK_LT(int(mode), 2);
+  // Initialize shard data based on distributed arguments.
+  InitShardData(shard_index, key_index.num_args(), needs_reverse_mapping);
 
-    // With EVAL, we call this function for EVAL itself as well as for each command
-    // for eval. currently, we lock everything only during the eval call.
-    should_record_locks = incremental_locking || !multi_->locks_recorded;
-  }
+  if (multi_)
+    InitMultiData(key_index);
 
-  if (key_index.bonus) {  // additional one-of key.
-    DCHECK(key_index.step == 1);
-
-    string_view key = ArgS(args, key_index.bonus);
-    uint32_t sid = Shard(key, shard_data_.size());
-    shard_index[sid].args.push_back(key);
-    if (needs_reverse_mapping)
-      shard_index[sid].original_index.push_back(key_index.bonus - 1);
-  }
-
-  for (unsigned i = key_index.start; i < key_index.end; ++i) {
-    string_view key = ArgS(args, i);
-    uint32_t sid = Shard(key, shard_data_.size());
-
-    shard_index[sid].args.push_back(key);
-    if (needs_reverse_mapping)
-      shard_index[sid].original_index.push_back(i - 1);
-
-    if (should_record_locks && tmp_space.uniq_keys.insert(key).second) {
-      if (multi_->is_expanding) {
-        multi_->keys.push_back(key);
-      } else {
-        multi_->lock_counts[key][mode]++;
-      }
-    };
-
-    if (key_index.step == 2) {  // value
-      ++i;
-
-      string_view val = ArgS(args, i);
-      shard_index[sid].args.push_back(val);
-      if (needs_reverse_mapping)
-        shard_index[sid].original_index.push_back(i - 1);
-    }
-  }
-
-  if (multi_) {
-    multi_->locks_recorded = true;
-  }
-
-  args_.resize(key_index.num_args());
-
-  // we need reverse index only for some commands (MSET etc).
-  if (needs_reverse_mapping)
-    reverse_index_.resize(args_.size());
-
-  auto next_arg = args_.begin();
-  auto rev_indx_it = reverse_index_.begin();
-
-  // slice.arg_start/arg_count point to args_ array which is sorted according to shard of each key.
-  // reverse_index_[i] says what's the original position of args_[i] in args.
-  for (size_t i = 0; i < shard_data_.size(); ++i) {
-    auto& sd = shard_data_[i];
-    auto& si = shard_index[i];
-
-    CHECK_LT(si.args.size(), 1u << 15);
-
-    sd.arg_count = si.args.size();
-    sd.arg_start = next_arg - args_.begin();
-
-    // We reset the local_mask for incremental locking to allow locking of arguments
-    // for each operation within the same transaction. For instant locking we lock at
-    // the beginning all the keys so we must preserve the mask to avoid double locking.
-    if (incremental_locking) {
-      sd.local_mask = 0;
-    }
-
-    if (!sd.arg_count)
-      continue;
-
-    ++unique_shard_cnt_;
-    unique_shard_id_ = i;
-    for (size_t j = 0; j < si.args.size(); ++j) {
-      *next_arg = si.args[j];
-      if (needs_reverse_mapping) {
-        *rev_indx_it++ = si.original_index[j];
-      }
-      ++next_arg;
-    }
-  }
-
-  CHECK(next_arg == args_.end());
   DVLOG(1) << "InitByArgs " << DebugId() << " " << args_.front();
 
-  // validation
-  if (needs_reverse_mapping) {
-    for (size_t i = 0; i < args_.size(); ++i) {
-      DCHECK_EQ(args_[i], ArgS(args, 1 + reverse_index_[i]));  // 1 for the commandname.
-    }
-  }
-
+  // Compress shard data, if we occupy only one shard.
   if (unique_shard_cnt_ == 1) {
     PerShardData* sd;
     if (multi_) {
@@ -265,6 +272,13 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
     sd->arg_start = -1;
   }
 
+  // Validation. Check reverse mapping was built correctly.
+  if (needs_reverse_mapping) {
+    for (size_t i = 0; i < args_.size(); ++i) {
+      DCHECK_EQ(args_[i], ArgS(args, 1 + reverse_index_[i]));  // 1 for the commandname.
+    }
+  }
+
   // Validation.
   for (const auto& sd : shard_data_) {
     // sd.local_mask may be non-zero for multi transactions with instant locking.
@@ -274,7 +288,25 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
       DCHECK_EQ(TxQueue::kEnd, sd.pq_pos);
     }
   }
+}
 
+OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
+  InitBase(index, args);
+
+  if ((cid_->opt_mask() & CO::GLOBAL_TRANS) > 0) {
+    InitGlobal();
+    return OpStatus::OK;
+  }
+
+  CHECK_GT(args.size(), 1U);  // first entry is the command name.
+  DCHECK_EQ(unique_shard_cnt_, 0u);
+  DCHECK(args_.empty());
+
+  OpResult<KeyIndex> key_index = DetermineKeys(cid_, args);
+  if (!key_index)
+    return key_index.status();
+
+  InitByKeys(*key_index);
   return OpStatus::OK;
 }
 
@@ -428,7 +460,6 @@ void Transaction::ScheduleInternal() {
   DCHECK_EQ(0, coordinator_state_ & (COORD_SCHED | COORD_OOO));
 
   bool span_all = IsGlobal();
-  bool single_hop = (coordinator_state_ & COORD_EXEC_CONCLUDING);
 
   uint32_t num_shards;
   std::function<bool(uint32_t)> is_active;
@@ -455,57 +486,45 @@ void Transaction::ScheduleInternal() {
     };
   }
 
+  // Loop until successfully scheduled in all shards.
   while (true) {
     txid_ = op_seq.fetch_add(1, memory_order_relaxed);
+    time_now_ms_ = GetCurrentTimeMs();
 
     atomic_uint32_t lock_granted_cnt{0};
     atomic_uint32_t success{0};
 
-    time_now_ms_ = GetCurrentTimeMs();
-
     auto cb = [&](EngineShard* shard) {
-      pair<bool, bool> res = ScheduleInShard(shard);
-      success.fetch_add(res.first, memory_order_relaxed);
-      lock_granted_cnt.fetch_add(res.second, memory_order_relaxed);
+      auto [is_success, is_granted] = ScheduleInShard(shard);
+      success.fetch_add(is_success, memory_order_relaxed);
+      lock_granted_cnt.fetch_add(is_granted, memory_order_relaxed);
     };
-
     shard_set->RunBriefInParallel(std::move(cb), is_active);
 
     if (success.load(memory_order_acquire) == num_shards) {
-      // We allow out of order execution only for single hop transactions.
-      // It might be possible to do it for multi-hop transactions as well but currently is
-      // too complicated to reason about.
-      if (single_hop && lock_granted_cnt.load(memory_order_relaxed) == num_shards) {
-        // OOO can not happen with span-all transactions. We ensure it in ScheduleInShard when we
-        // refuse to acquire locks for these transactions..
-        DCHECK(!span_all);
+      coordinator_state_ |= COORD_SCHED;
+      // If we granted all locks, we can run out of order.
+      if (!span_all && lock_granted_cnt.load(memory_order_relaxed) == num_shards) {
+        // Currently we don't support OOO for incremental locking. Sp far they are global.
+        DCHECK(!(multi_ && multi_->is_expanding));
         coordinator_state_ |= COORD_OOO;
       }
       VLOG(2) << "Scheduled " << DebugId()
               << " OutOfOrder: " << bool(coordinator_state_ & COORD_OOO)
               << " num_shards: " << num_shards;
 
-      if (mode == IntentLock::EXCLUSIVE) {
-        journal::Journal* j = ServerState::tlocal()->journal();
-        // TODO: we may want to pass custom command name into journal.
-        if (j && j->SchedStartTx(txid_, 0, num_shards)) {
-        }
-      }
-      coordinator_state_ |= COORD_SCHED;
       break;
     }
 
     VLOG(2) << "Cancelling " << DebugId();
 
     atomic_bool should_poll_execution{false};
-
     auto cancel = [&](EngineShard* shard) {
       bool res = CancelShardCb(shard);
       if (res) {
         should_poll_execution.store(true, memory_order_relaxed);
       }
     };
-
     shard_set->RunBriefInParallel(std::move(cancel), is_active);
 
     // We must follow up with PollExecution because in rare cases with multi-trans
@@ -548,55 +567,52 @@ void Transaction::MultiData::AddLocks(IntentLock::Mode mode) {
 // BLPOP where a data must be read from multiple shards before performing another hop.
 OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   DCHECK(!cb_);
-
   cb_ = std::move(cb);
 
-  // single hop -> concluding.
-  coordinator_state_ |= (COORD_EXEC | COORD_EXEC_CONCLUDING);
+  DCHECK(multi_ || (coordinator_state_ & COORD_SCHED) == 0);   // Only multi schedule in advance.
+  coordinator_state_ |= (COORD_EXEC | COORD_EXEC_CONCLUDING);  // Single hop means we conclude.
 
-  if (!multi_) {  // for non-multi transactions we schedule exactly once.
-    DCHECK_EQ(0, coordinator_state_ & COORD_SCHED);
-  }
+  bool was_ooo = false;
 
+  // If we run only on one shard and conclude, we can avoid scheduling at all
+  // and directly dispatch the task to its destination shard.
   bool schedule_fast = (unique_shard_cnt_ == 1) && !IsGlobal() && !multi_;
-  if (schedule_fast) {  // Single shard (local) optimization.
-    // We never resize shard_data because that would affect MULTI transaction correctness.
+  if (schedule_fast) {
     DCHECK_EQ(1u, shard_data_.size());
 
+    // IsArmedInShard() first checks run_count_ before shard_data, so use release ordering.
     shard_data_[0].local_mask |= ARMED;
-
-    // memory_order_release because we do not want it to be reordered with shard_data writes
-    // above.
-    // IsArmedInShard() first checks run_count_ before accessing shard_data.
     run_count_.fetch_add(1, memory_order_release);
+
     time_now_ms_ = GetCurrentTimeMs();
 
-    // Please note that schedule_cb can not update any data on ScheduleSingleHop stack
-    // since the latter can exit before ScheduleUniqueShard returns.
-    // The problematic flow is as follows: ScheduleUniqueShard schedules into TxQueue and then
-    // call PollExecute that runs the callback which calls DecreaseRunCnt.
-    // As a result WaitForShardCallbacks below is unblocked.
-    auto schedule_cb = [this] {
-      bool run_eager = ScheduleUniqueShard(EngineShard::tlocal());
-      if (run_eager) {
-        // it's important to DecreaseRunCnt only for run_eager and after run_eager was assigned.
+    // NOTE: schedule_cb cannot update data on stack when run_fast is false.
+    // This is because ScheduleSingleHop can finish before the callback returns.
+
+    // This happens when ScheduleUniqueShard schedules into TxQueue (hence run_fast is false), and
+    // then calls PollExecute that in turn runs the callback which calls DecreaseRunCnt. As a result
+    // WaitForShardCallbacks below is unblocked before schedule_cb returns. However, if run_fast is
+    // true, then we may mutate stack variables, but only before DecreaseRunCnt is called.
+    auto schedule_cb = [this, &was_ooo] {
+      bool run_fast = ScheduleUniqueShard(EngineShard::tlocal());
+      if (run_fast) {
+        was_ooo = true;
+        // it's important to DecreaseRunCnt only for run_fast and after run_eager is assigned.
         // If DecreaseRunCnt were called before ScheduleUniqueShard finishes
         // then WaitForShardCallbacks below could exit before schedule_cb assigns return value
         // to run_eager and cause stack corruption.
         CHECK_GE(DecreaseRunCnt(), 1u);
       }
     };
-
     shard_set->Add(unique_shard_id_, std::move(schedule_cb));  // serves as a barrier.
   } else {
-    // Transaction spans multiple shards or it's global (like flushdb) or multi.
-    // Note that the logic here is a bit different from the public Schedule() function.
-    if (multi_) {
-      if (multi_->is_expanding)
-        multi_->AddLocks(Mode());
-    } else {
+    // This transaction either spans multiple shards and/or is multi.
+
+    if (!multi_)  // Multi schedule in advance.
       ScheduleInternal();
-    }
+
+    if (multi_ && multi_->is_expanding)
+      multi_->AddLocks(Mode());
 
     ExecuteAsync();
   }
@@ -605,41 +621,38 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   WaitForShardCallbacks();
   DVLOG(1) << "ScheduleSingleHop after Wait " << DebugId();
 
-  cb_ = nullptr;
+  if (was_ooo)
+    coordinator_state_ |= COORD_OOO;
 
+  cb_ = nullptr;
   return local_result_;
 }
 
 // Runs in the coordinator fiber.
 void Transaction::UnlockMulti() {
   VLOG(1) << "UnlockMulti " << DebugId();
-
   DCHECK(multi_);
-  using KeyList = vector<pair<std::string_view, LockCnt>>;
-  vector<KeyList> sharded_keys(shard_set->size());
+  DCHECK_GE(GetUseCount(), 1u);  // Greater-equal because there may be callbacks in progress.
 
-  // It's LE and not EQ because there may be callbacks in progress that increase use_count_.
-  DCHECK_LE(1u, GetUseCount());
-
-  for (const auto& k_v : multi_->lock_counts) {
-    ShardId sid = Shard(k_v.first, sharded_keys.size());
-    sharded_keys[sid].push_back(k_v);
+  auto sharded_keys = make_shared<vector<KeyList>>(shard_set->size());
+  for (const auto& [key, cnt] : multi_->lock_counts) {
+    ShardId sid = Shard(key, sharded_keys->size());
+    (*sharded_keys)[sid].emplace_back(key, cnt);
   }
 
-  uint32_t shard_journals_cnt = 0;
-  if (ServerState::tlocal()->journal()) {
-    shard_journals_cnt = CalcMultiNumOfShardJournals();
-  }
+  unsigned shard_journals_cnt =
+      ServerState::tlocal()->journal() ? CalcMultiNumOfShardJournals() : 0;
 
   uint32_t prev = run_count_.fetch_add(shard_data_.size(), memory_order_relaxed);
   DCHECK_EQ(prev, 0u);
 
+  use_count_.fetch_add(shard_data_.size(), std::memory_order_relaxed);
   for (ShardId i = 0; i < shard_data_.size(); ++i) {
-    shard_set->Add(
-        i, [&] { UnlockMultiShardCb(sharded_keys, EngineShard::tlocal(), shard_journals_cnt); });
+    shard_set->Add(i, [this, sharded_keys, shard_journals_cnt]() {
+      this->UnlockMultiShardCb(*sharded_keys, EngineShard::tlocal(), shard_journals_cnt);
+      intrusive_ptr_release(this);
+    });
   }
-  WaitForShardCallbacks();
-  DCHECK_GE(GetUseCount(), 1u);
 
   VLOG(1) << "UnlockMultiEnd " << DebugId();
 }
@@ -698,19 +711,7 @@ void Transaction::ExecuteAsync() {
   // safely.
   use_count_.fetch_add(unique_shard_cnt_, memory_order_relaxed);
 
-  bool is_global = IsGlobal();
-
-  if (unique_shard_cnt_ == 1) {
-    shard_data_[SidToId(unique_shard_id_)].local_mask |= ARMED;
-  } else {
-    for (ShardId i = 0; i < shard_data_.size(); ++i) {
-      auto& sd = shard_data_[i];
-      if (!is_global && sd.arg_count == 0)
-        continue;
-      DCHECK_LT(sd.arg_count, 1u << 15);
-      sd.local_mask |= ARMED;
-    }
-  }
+  IterateActiveShards([](PerShardData& sd, auto i) { sd.local_mask |= ARMED; });
 
   uint32_t seq = seqlock_.load(memory_order_relaxed);
 
@@ -751,16 +752,7 @@ void Transaction::ExecuteAsync() {
   };
 
   // IsArmedInShard is the protector of non-thread safe data.
-  if (!is_global && unique_shard_cnt_ == 1) {
-    shard_set->Add(unique_shard_id_, std::move(cb));  // serves as a barrier.
-  } else {
-    for (ShardId i = 0; i < shard_data_.size(); ++i) {
-      auto& sd = shard_data_[i];
-      if (!is_global && sd.arg_count == 0)
-        continue;
-      shard_set->Add(i, cb);  // serves as a barrier.
-    }
-  }
+  IterateActiveShards([&cb](PerShardData& sd, auto i) { shard_set->Add(i, cb); });
 }
 
 void Transaction::RunQuickie(EngineShard* shard) {
@@ -800,26 +792,17 @@ void Transaction::UnwatchBlocking(bool should_expire, WaitKeysProvider wcb) {
 
   run_count_.store(unique_shard_cnt_, memory_order_release);
 
-  auto expire_cb = [&] {
+  auto expire_cb = [this, &wcb, should_expire] {
     EngineShard* es = EngineShard::tlocal();
     ArgSlice wkeys = wcb(this, es);
 
     UnwatchShardCb(wkeys, should_expire, es);
   };
 
-  if (unique_shard_cnt_ == 1) {
-    DCHECK_LT(unique_shard_id_, shard_set->size());
-    shard_set->Add(unique_shard_id_, move(expire_cb));
-  } else {
-    for (ShardId i = 0; i < shard_data_.size(); ++i) {
-      auto& sd = shard_data_[i];
-      DCHECK_EQ(0, sd.local_mask & ARMED);
-      if (sd.arg_count == 0)
-        continue;
-
-      shard_set->Add(i, expire_cb);
-    }
-  }
+  IterateActiveShards([&expire_cb](PerShardData& sd, auto i) {
+    DCHECK_EQ(0, sd.local_mask & ARMED);
+    shard_set->Add(i, expire_cb);
+  });
 
   // Wait for all callbacks to conclude.
   WaitForShardCallbacks();
@@ -1080,7 +1063,7 @@ void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, E
   auto journal = shard->journal();
 
   if (journal != nullptr && multi_->shard_journal_write[shard->shard_id()] == true) {
-    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_journals_cnt, {});
+    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_journals_cnt, {}, true);
   }
 
   if (multi_->multi_opts & CO::GLOBAL_TRANS) {
@@ -1161,7 +1144,7 @@ inline uint32_t Transaction::DecreaseRunCnt() {
 }
 
 bool Transaction::IsGlobal() const {
-  return (cid_->opt_mask() & CO::GLOBAL_TRANS) != 0;
+  return global_;
 }
 
 // Runs only in the shard thread.
@@ -1226,18 +1209,19 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
     auto cmd = facade::ToSV(cmd_with_full_args_.front());
     entry_payload = make_pair(cmd, GetShardArgs(shard->shard_id()));
   }
-  LogJournalOnShard(shard, std::move(entry_payload), unique_shard_cnt_, false);
+  LogJournalOnShard(shard, std::move(entry_payload), unique_shard_cnt_, false, true);
 }
 
 void Transaction::LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload,
-                                    uint32_t shard_cnt, bool multi_commands) const {
+                                    uint32_t shard_cnt, bool multi_commands,
+                                    bool allow_await) const {
   auto journal = shard->journal();
   CHECK(journal);
   if (multi_) {
     multi_->shard_journal_write[shard->shard_id()] = true;
   }
   auto opcode = (multi_ || multi_commands) ? journal::Op::MULTI_COMMAND : journal::Op::COMMAND;
-  journal->RecordEntry(txid_, opcode, db_index_, shard_cnt, std::move(payload));
+  journal->RecordEntry(txid_, opcode, db_index_, shard_cnt, std::move(payload), allow_await);
 }
 
 void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt) const {
@@ -1246,7 +1230,7 @@ void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt
   }
   auto journal = shard->journal();
   CHECK(journal);
-  journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_cnt, {});
+  journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_cnt, {}, false);
 }
 
 void Transaction::BreakOnShutdown() {

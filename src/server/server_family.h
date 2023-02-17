@@ -5,6 +5,7 @@
 #pragma once
 
 #include <boost/fiber/future.hpp>
+#include <string>
 
 #include "facade/conn_context.h"
 #include "facade/redis_parser.h"
@@ -19,6 +20,8 @@ class HttpListenerBase;
 }  // namespace util
 
 namespace dfly {
+
+std::string GetPassword();
 
 namespace journal {
 class Journal;
@@ -42,6 +45,7 @@ struct Metrics {
   size_t heap_used_bytes = 0;
   size_t heap_comitted_bytes = 0;
   size_t small_string_bytes = 0;
+  uint64_t ooo_tx_transaction_cnt = 0;
   uint32_t traverse_ttl_per_sec = 0;
   uint32_t delete_ttl_per_sec = 0;
 
@@ -58,6 +62,11 @@ struct LastSaveInfo {
 struct SnapshotSpec {
   std::string hour_spec;
   std::string minute_spec;
+};
+
+struct ReplicaOffsetInfo {
+  std::string sync_id;
+  std::vector<uint64_t> flow_offsets;
 };
 
 class ServerFamily {
@@ -102,6 +111,7 @@ class ServerFamily {
   void ConfigureMetrics(util::HttpListenerBase* listener);
 
   void PauseReplication(bool pause);
+  std::optional<ReplicaOffsetInfo> GetReplicaOffsetInfo();
 
   const std::string& master_id() const {
     return master_id_;

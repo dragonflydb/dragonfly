@@ -59,14 +59,21 @@ class Replica {
     bool AddEntry(journal::ParsedEntry&& entry);
 
     bool IsGlobalCmd() const;
-
-    // Collect next complete transaction data from journal reader.
-    static std::optional<TransactionData> ReadNext(JournalReader* reader, Context* cntx);
-
     TxId txid;
     DbIndex dbid;
     uint32_t shard_cnt;
     std::vector<journal::ParsedEntry::CmdData> commands;
+    // Counting the number of journal records in specific transaction in specific shard.
+    uint32_t journal_rec_count = 0;
+  };
+
+  // Utility for reading TransactionData from a journal reader.
+  struct TransactionReader {
+    std::optional<TransactionData> NextTxData(JournalReader* reader, Context* cntx);
+    static bool ReturnEntryOOO(const TransactionData& tx_data, const journal::ParsedEntry& entry);
+
+   private:
+    TransactionData saved_data_{};
   };
 
   // Coorindator for multi shard execution.
@@ -198,6 +205,9 @@ class Replica {
     return master_context_.port;
   }
 
+  std::vector<uint64_t> GetReplicaOffset() const;
+  std::string GetSyncId() const;
+
  private:
   Service& service_;
   MasterContext master_context_;
@@ -211,6 +221,8 @@ class Replica {
   bool use_multi_shard_exe_sync_;
 
   std::unique_ptr<JournalExecutor> executor_;
+  // Count the number of journal records executed in specific flow
+  std::atomic_uint64_t journal_rec_executed_ = 0;
 
   // MainReplicationFb in standalone mode, FullSyncDflyFb in flow mode.
   ::boost::fibers::fiber sync_fb_;

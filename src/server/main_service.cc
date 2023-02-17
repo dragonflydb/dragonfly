@@ -43,8 +43,6 @@ using namespace std;
 ABSL_FLAG(uint32_t, port, 6379, "Redis port");
 ABSL_FLAG(uint32_t, memcache_port, 0, "Memcached port");
 
-ABSL_DECLARE_FLAG(string, requirepass);
-
 namespace dfly {
 
 #if __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
@@ -167,6 +165,20 @@ std::string MakeMonitorMessage(const ConnectionState& conn_state,
   return message;
 }
 
+void SendMonitor(const std::string& msg) {
+  const auto& monitor_repo = ServerState::tlocal()->Monitors();
+  const auto& monitors = monitor_repo.monitors();
+  if (!monitors.empty()) {
+    VLOG(1) << "thread " << util::ProactorBase::GetIndex() << " sending monitor message '" << msg
+            << "' for " << monitors.size();
+
+    for (auto monitor_conn : monitors) {
+      // never preempts, so we can iterate safely.
+      monitor_conn->SendMonitorMsg(msg);
+    }
+  }
+}
+
 void DispatchMonitorIfNeeded(bool admin_cmd, ConnectionContext* connection, CmdArgList args) {
   // We are not sending any admin command in the monitor, and we do not want to
   // do any processing if we don't have any waiting connections with monitor
@@ -175,15 +187,11 @@ void DispatchMonitorIfNeeded(bool admin_cmd, ConnectionContext* connection, CmdA
   if (!(my_monitors.Empty() || admin_cmd)) {
     //  We have connections waiting to get the info on the last command, send it to them
     auto monitor_msg = MakeMonitorMessage(connection->conn_state, connection->owner(), args);
-    // Note that this is accepted by value for lifetime reasons
-    // we want to have our own copy since we are assuming that
-    // 1. there will be not to many connections that we in monitor state
-    // 2. we need to have for each of them each own copy for thread safe reasons
+
     VLOG(1) << "sending command '" << monitor_msg << "' to the clients that registered on it";
+
     shard_set->pool()->DispatchBrief(
-        [msg = std::move(monitor_msg)](unsigned idx, util::ProactorBase*) {
-          ServerState::tlocal()->Monitors().Send(msg);
-        });
+        [msg = std::move(monitor_msg)](unsigned idx, util::ProactorBase*) { SendMonitor(msg); });
   }
 }
 
@@ -497,7 +505,10 @@ void Service::Shutdown() {
 
   // We mark that we are shutting down. After this incoming requests will be
   // rejected
-  pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Shutdown(); });
+  pp_.AwaitFiberOnAll([](ProactorBase* pb) {
+    ServerState::tlocal()->Shutdown();
+    facade::Connection::ShutdownThreadLocal();
+  });
 
   // to shutdown all the runtime components that depend on EngineShard.
   server_family_.Shutdown();
@@ -525,7 +536,13 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   ToUpper(&args[0]);
 
-  VLOG(2) << "Got: " << args;
+  ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
+  bool under_script = dfly_cntx->conn_state.script_info.has_value();
+
+  if (VLOG_IS_ON(2)) {
+    const char* lua = under_script ? "LUA " : "";
+    LOG(INFO) << "Got (" << cntx->owner()->GetClientId() << "): " << lua << args;
+  }
 
   string_view cmd_str = ArgS(args, 0);
   bool is_trans_cmd = (cmd_str == "EXEC" || cmd_str == "MULTI" || cmd_str == "DISCARD");
@@ -534,7 +551,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   etl.RecordCmd();
 
-  ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   absl::Cleanup multi_error([dfly_cntx] { MultiSetError(dfly_cntx); });
 
   if (cid == nullptr) {
@@ -566,8 +582,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   if (dfly_cntx->monitor && (cmd_name != "RESET" && cmd_name != "QUIT")) {
     return (*cntx)->SendError("Replica can't interact with the keyspace");
   }
-
-  bool under_script = dfly_cntx->conn_state.script_info.has_value();
 
   if (under_script && (cid->opt_mask() & CO::NOSCRIPT)) {
     return (*cntx)->SendError("This Redis command is not allowed from script");
@@ -631,6 +645,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   uint64_t start_usec = ProactorBase::GetMonotonicTimeNs(), end_usec;
 
+  DispatchMonitorIfNeeded(cid->opt_mask() & CO::ADMIN, dfly_cntx, args);
   // Create command transaction
   intrusive_ptr<Transaction> dist_trans;
 
@@ -682,14 +697,14 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->reply_builder()->CloseConnection();
   }
 
-  DispatchMonitorIfNeeded(cid->opt_mask() & CO::ADMIN, dfly_cntx, args);
-
   end_usec = ProactorBase::GetMonotonicTimeNs();
 
   request_latency_usec.IncBy(cmd_str, (end_usec - start_usec) / 1000);
   if (dist_trans) {
+    bool is_ooo = dist_trans->IsOOO();
     dfly_cntx->last_command_debug.clock = dist_trans->txid();
-    dfly_cntx->last_command_debug.is_ooo = dist_trans->IsOOO();
+    dfly_cntx->last_command_debug.is_ooo = is_ooo;
+    etl.stats.ooo_tx_cnt += is_ooo;
   }
 
   if (!under_script) {
@@ -799,7 +814,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
 facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
                                                   facade::Connection* owner) {
   ConnectionContext* res = new ConnectionContext{peer, owner};
-  res->req_auth = IsPassProtected();
+  res->req_auth = !GetPassword().empty();
 
   // a bit of a hack. I set up breaker callback here for the owner.
   // Should work though it's confusing to have it here.
@@ -837,10 +852,6 @@ bool Service::IsShardSetLocked() const {
   });
 
   return res.load() != 0;
-}
-
-bool Service::IsPassProtected() const {
-  return !GetFlag(FLAGS_requirepass).empty();
 }
 
 absl::flat_hash_map<std::string, unsigned> Service::UknownCmdMap() const {
@@ -929,10 +940,11 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   }
 
   ServerState* ss = ServerState::tlocal();
-  Interpreter& script = ss->GetInterpreter();
+  auto script = ss->BorrowInterpreter();
+  absl::Cleanup clean = [ss, script]() { ss->ReturnInterpreter(script); };
 
   string result;
-  Interpreter::AddResult add_result = script.AddFunction(body, &result);
+  Interpreter::AddResult add_result = script->AddFunction(body, &result);
   if (add_result == Interpreter::COMPILE_ERR) {
     return (*cntx)->SendError(result, facade::kScriptErrType);
   }
@@ -945,7 +957,12 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   eval_args.sha = result;
   eval_args.keys = args.subspan(3, num_keys);
   eval_args.args = args.subspan(3 + num_keys);
-  EvalInternal(eval_args, &script, cntx);
+
+  uint64_t start = absl::GetCurrentTimeNanos();
+  EvalInternal(eval_args, script, cntx);
+
+  uint64_t end = absl::GetCurrentTimeNanos();
+  ss->RecordCallLatency(result, (end - start) / 1000);
 }
 
 void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
@@ -958,8 +975,10 @@ void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
 
   string_view sha = ArgS(args, 1);
   ServerState* ss = ServerState::tlocal();
-  Interpreter& script = ss->GetInterpreter();
-  bool exists = script.Exists(sha);
+  auto script = ss->BorrowInterpreter();
+  absl::Cleanup clean = [ss, script]() { ss->ReturnInterpreter(script); };
+
+  bool exists = script->Exists(sha);
 
   if (!exists) {
     const char* body = (sha.size() == 40) ? server_family_.script_mgr()->Find(sha) : nullptr;
@@ -968,7 +987,7 @@ void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
     }
 
     string res;
-    CHECK_EQ(Interpreter::ADD_OK, script.AddFunction(body, &res));
+    CHECK_EQ(Interpreter::ADD_OK, script->AddFunction(body, &res));
     CHECK_EQ(res, sha);
   }
 
@@ -977,7 +996,11 @@ void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
   ev_args.keys = args.subspan(3, num_keys);
   ev_args.args = args.subspan(3 + num_keys);
 
-  EvalInternal(ev_args, &script, cntx);
+  uint64_t start = absl::GetCurrentTimeNanos();
+  EvalInternal(ev_args, script, cntx);
+
+  uint64_t end = absl::GetCurrentTimeNanos();
+  ss->RecordCallLatency(sha, (end - start) / 1000);
 }
 
 void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
@@ -1014,8 +1037,6 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
     cntx->conn_state.script_info->keys.insert(ArgS(eval_args.keys, i));
   }
   DCHECK(cntx->transaction);
-
-  auto lk = interpreter->Lock();
 
   if (!eval_args.keys.empty())
     cntx->transaction->Schedule();

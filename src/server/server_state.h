@@ -7,15 +7,19 @@
 #include <optional>
 #include <vector>
 
+#include "base/histogram.h"
 #include "core/interpreter.h"
 #include "server/common.h"
 #include "util/sliding_counter.h"
 
 typedef struct mi_heap_s mi_heap_t;
 
+namespace facade {
+class Connection;
+}
+
 namespace dfly {
 
-class ConnectionContext;
 namespace journal {
 class Journal;
 }  // namespace journal
@@ -35,21 +39,17 @@ class Journal;
 // at which this would run. It also minimized the number of copied for this list.
 class MonitorsRepo {
  public:
+  using MonitorVec = std::vector<facade::Connection*>;
+
   // This function adds a new connection to be monitored. This function only add
   // new connection that belong to this thread! Must not be called outside of this
   // thread context
-  void Add(ConnectionContext* info);
-
-  // Note that this is accepted by value for lifetime reasons
-  // we want to have our own copy since we are assuming that
-  // 1. there will be not to many connections that we in monitor state
-  // 2. we need to have for each of them each own copy for thread safe reasons
-  void Send(const std::string& msg);
+  void Add(facade::Connection* conn);
 
   // This function remove a connection what was monitored. This function only removes
   // a connection that belong to this thread! Must not be called outside of this
   // thread context
-  void Remove(const ConnectionContext* conn);
+  void Remove(const facade::Connection* conn);
 
   // We have for each thread the total number of monitors in the application.
   // So this call is thread safe since we hold a copy of this for each thread.
@@ -67,8 +67,11 @@ class MonitorsRepo {
     return monitors_.size();
   }
 
+  const MonitorVec& monitors() const {
+    return monitors_;
+  }
+
  private:
-  using MonitorVec = std::vector<ConnectionContext*>;
   MonitorVec monitors_;            // save connections belonging to this thread only!
   unsigned int global_count_ = 0;  // by global its means that we count the monitor for all threads
 };
@@ -84,6 +87,10 @@ class ServerState {  // public struct - to allow initialization.
   void operator=(const ServerState&) = delete;
 
  public:
+  struct Stats {
+    uint64_t ooo_tx_cnt = 0;
+  };
+
   static ServerState* tlocal() {
     return &state_;
   }
@@ -122,7 +129,11 @@ class ServerState {  // public struct - to allow initialization.
     gstate_ = s;
   }
 
-  Interpreter& GetInterpreter();
+  // Borrow interpreter from internal manager. Return int with ReturnInterpreter.
+  Interpreter* BorrowInterpreter();
+
+  // Return interpreter to internal manager to be re-used.
+  void ReturnInterpreter(Interpreter*);
 
   // Returns sum of all requests in the last 6 seconds
   // (not including the current one).
@@ -152,18 +163,30 @@ class ServerState {  // public struct - to allow initialization.
     return monitors_;
   }
 
+  const absl::flat_hash_map<std::string, base::Histogram>& call_latency_histos() const {
+    return call_latency_histos_;
+  }
+
+  void RecordCallLatency(std::string_view sha, uint64_t latency_usec) {
+    call_latency_histos_[sha].Add(latency_usec);
+  }
+
+  Stats stats;
+
  private:
   int64_t live_transactions_ = 0;
   mi_heap_t* data_heap_;
   journal::Journal* journal_ = nullptr;
 
-  std::optional<Interpreter> interpreter_;
+  InterpreterManager interpreter_mgr_;
   GlobalState gstate_ = GlobalState::ACTIVE;
 
   using Counter = util::SlidingCounter<7>;
   Counter qps_;
 
   MonitorsRepo monitors_;
+
+  absl::flat_hash_map<std::string, base::Histogram> call_latency_histos_;
 
   static thread_local ServerState state_;
 };

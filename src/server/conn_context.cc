@@ -17,23 +17,25 @@ namespace dfly {
 using namespace std;
 
 StoredCmd::StoredCmd(const CommandId* d, CmdArgList args) : descr(d) {
-  stored_args_.reserve(args.size());
+  size_t total_size = 0;
+  for (auto args : args) {
+    total_size += args.size();
+  }
+
+  backing_storage_.reset(new char[total_size]);
   arg_vec_.resize(args.size());
+  char* next = backing_storage_.get();
   for (size_t i = 0; i < args.size(); ++i) {
-    stored_args_.emplace_back(ArgS(args, i));
-    arg_vec_[i] = MutableSlice{stored_args_[i].data(), stored_args_[i].size()};
+    auto src = args[i];
+    memcpy(next, src.data(), src.size());
+    arg_vec_[i] = MutableSlice{next, src.size()};
+    next += src.size();
   }
   arg_list_ = {arg_vec_.data(), arg_vec_.size()};
 }
 
 void StoredCmd::Invoke(ConnectionContext* ctx) {
   descr->Invoke(arg_list_, ctx);
-}
-
-void ConnectionContext::SendMonitorMsg(std::string msg) {
-  CHECK(owner());
-
-  owner()->SendMonitorMsg(std::move(msg));
 }
 
 void ConnectionContext::ChangeMonitor(bool start) {
@@ -43,11 +45,11 @@ void ConnectionContext::ChangeMonitor(bool start) {
   // then notify all other threads that there is a change in the number of monitors
   auto& my_monitors = ServerState::tlocal()->Monitors();
   if (start) {
-    my_monitors.Add(this);
+    my_monitors.Add(owner());
   } else {
     VLOG(1) << "connection " << owner()->GetClientInfo()
-            << " no longer needs to be monitored - removing 0x" << std::hex << (const void*)this;
-    my_monitors.Remove(this);
+            << " no longer needs to be monitored - removing 0x" << std::hex << this;
+    my_monitors.Remove(owner());
   }
   // Tell other threads that about the change in the number of connection that we monitor
   shard_set->pool()->Await(

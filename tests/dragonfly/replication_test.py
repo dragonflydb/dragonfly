@@ -29,14 +29,14 @@ replication_cases = [
     (8, [2, 2, 2, 2], dict(keys=4_000, dbcount=4)),
     (4, [8, 8], dict(keys=4_000, dbcount=4)),
     (4, [1] * 8, dict(keys=500, dbcount=2)),
-    #(1, [1], dict(keys=100, dbcount=2)),
+    (1, [1], dict(keys=100, dbcount=2)),
 ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replicas, seeder_config", replication_cases)
 async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_replicas, seeder_config):
-    master = df_local_factory.create(port=1111, proactor_threads=t_master)
+    master = df_local_factory.create(port=BASE_PORT, proactor_threads=t_master)
     replicas = [
         df_local_factory.create(port=BASE_PORT+i+1, proactor_threads=t)
         for i, t in enumerate(t_replicas)
@@ -44,6 +44,7 @@ async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_
 
     # Start master
     master.start()
+    c_master = aioredis.Redis(port=master.port)
 
     # Fill master with test data
     seeder = df_seeder_factory.create(port=master.port, **seeder_config)
@@ -70,32 +71,39 @@ async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_
     ), "Weak testcase. Increase number of streamed iterations to surpass full sync"
     await stream_task
 
-    async def check_replica_finished_exec(c_replica):
-        info_stats = await c_replica.execute_command("INFO")
-        tc1 = info_stats['total_commands_processed']
-        await asyncio.sleep(0.1)
-        info_stats = await c_replica.execute_command("INFO")
-        tc2 = info_stats['total_commands_processed']
-        return tc1+1 == tc2 # Replica processed only the info command on above sleep.
-
-    async def check_all_replicas_finished():
-        while True:
-            await asyncio.sleep(1.0)
-            is_finished_arr = await asyncio.gather(*(asyncio.create_task(check_replica_finished_exec(c))
-                                                     for c in c_replicas))
-            if all(is_finished_arr):
-                break
-
     # Check data after full sync
-    await check_all_replicas_finished()
+    await check_all_replicas_finished(c_replicas, c_master)
     await check_data(seeder, replicas, c_replicas)
 
     # Stream more data in stable state
     await seeder.run(target_ops=2000)
 
     # Check data after stable state stream
-    await check_all_replicas_finished()
+    await check_all_replicas_finished(c_replicas, c_master)
     await check_data(seeder, replicas, c_replicas)
+
+
+async def check_replica_finished_exec(c_replica, c_master):
+    syncid, r_offset = await c_replica.execute_command("DEBUG REPLICA OFFSET")
+    command = "DFLY REPLICAOFFSET " + syncid.decode()
+    m_offset = await c_master.execute_command(command)
+
+    print("  offset", syncid.decode(),  r_offset, m_offset)
+    return r_offset == m_offset
+
+
+async def check_all_replicas_finished(c_replicas, c_master):
+    print("Waiting for replicas to finish")
+
+    waiting_for = list(c_replicas)
+    while len(waiting_for) > 0:
+        await asyncio.sleep(1.0)
+
+        tasks = (asyncio.create_task(check_replica_finished_exec(c, c_master)) for c in waiting_for)
+        finished_list = await asyncio.gather(*tasks)
+
+        # Remove clients that finished from waiting list
+        waiting_for = [c for (c, finished) in zip(waiting_for, finished_list) if not finished]
 
 
 async def check_data(seeder, replicas, c_replicas):
@@ -439,7 +447,7 @@ async def test_rewrites(df_local_factory):
         expected_cmds = len(rx_list)
         for i in range(expected_cmds):
             mcmd = (await get_next_command())
-            #check command matches one regex from list
+            # check command matches one regex from list
             match_rx = list(filter(lambda rx: re.match(rx, mcmd), rx_list))
             assert len(match_rx) == 1
             rx_list.remove(match_rx[0])
@@ -520,13 +528,12 @@ async def test_rewrites(df_local_factory):
 
         # Check there is no rewrite for RPOPLPUSH on single shard
         await check("RPOPLPUSH list list", r"RPOPLPUSH list list")
-        # Check BRPOPLPUSH on single shard turns into RPOPLPUSH
-        await check("BRPOPLPUSH list list 0", r"RPOPLPUSH list list")
+        # Check BRPOPLPUSH on single shard turns into LMOVE
+        await check("BRPOPLPUSH list list 0", r"LMOVE list list RIGHT LEFT")
         # Check BLPOP turns into LPOP
-        await check("BLPOP list 0", r"LPOP list")
+        await check("BLPOP list list1 0", r"LPOP list")
         # Check BRPOP turns into RPOP
         await check("BRPOP list 0", r"RPOP list")
-
 
         await c_master.lpush("list1s", "v1", "v2", "v3", "v4")
         await skip_cmd()
@@ -574,34 +581,53 @@ async def test_expiry(df_local_factory, n_keys=1000):
     batch_fill_data(pipe, gen_test_data(n_keys))
     await pipe.execute()
 
+    # Check replica finished executing the replicated commands
+    await check_all_replicas_finished([c_replica], c_master)
     # Check keys are on replica
     res = await c_replica.mget(k for k, _ in gen_test_data(n_keys))
     assert all(v is not None for v in res)
 
-    # Set key expries in 500ms
+    # Set key differnt expries times in ms
     pipe = c_master.pipeline(transaction=True)
     for k, _ in gen_test_data(n_keys):
-        pipe.pexpire(k, 500)
+        ms = random.randint(20, 500)
+        pipe.pexpire(k, ms)
     await pipe.execute()
 
-    # Wait two seconds for heatbeat to pick them up
-    await asyncio.sleep(2.0)
+    # send more traffic for differnt dbs while keys are expired
+    for i in range(8):
+        is_multi = i % 2
+        c_master_db = aioredis.Redis(port=master.port, db=i)
+        pipe = c_master_db.pipeline(transaction=is_multi)
+        # Set simple keys n_keys..n_keys*2 on master
+        start_key = n_keys*(i+1)
+        end_key = start_key + n_keys
+        batch_fill_data(client=pipe, gen=gen_test_data(
+            end_key, start_key), batch_size=20)
 
-    assert len(await c_master.keys()) == 0
-    assert len(await c_replica.keys()) == 0
+        await pipe.execute()
 
-    # Set keys
+    # Wait for master to expire keys
+    await asyncio.sleep(3.0)
+
+    # Check all keys with expiry has be deleted
+    res = await c_master.mget(k for k, _ in gen_test_data(n_keys))
+    assert all(v is None for v in res)
+    # Check replica finished executing the replicated commands
+    await check_all_replicas_finished([c_replica], c_master)
+    res = await c_replica.mget(k for k, _ in gen_test_data(n_keys))
+    assert all(v is None for v in res)
+
+    # Set expired keys again
     pipe = c_master.pipeline(transaction=False)
     batch_fill_data(pipe, gen_test_data(n_keys))
     for k, _ in gen_test_data(n_keys):
         pipe.pexpire(k, 500)
     await pipe.execute()
-
     await asyncio.sleep(1.0)
-
     # Disconnect from master
     await c_replica.execute_command("REPLICAOF NO ONE")
-
     # Check replica expires keys on its own
     await asyncio.sleep(1.0)
-    assert len(await c_replica.keys()) == 0
+    res = await c_replica.mget(k for k, _ in gen_test_data(n_keys))
+    assert all(v is None for v in res)

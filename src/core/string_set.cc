@@ -39,7 +39,7 @@ StringSet::~StringSet() {
 }
 
 bool StringSet::AddSds(sds s1) {
-  return AddOrFind(s1, false) == nullptr;
+  return AddOrFindObj(s1, false) == nullptr;
 }
 
 bool StringSet::Add(string_view src, uint32_t ttl_sec) {
@@ -60,7 +60,7 @@ bool StringSet::Add(string_view src, uint32_t ttl_sec) {
     has_ttl = true;
   }
 
-  if (AddOrFind(newsds, has_ttl) != nullptr) {
+  if (AddOrFindObj(newsds, has_ttl) != nullptr) {
     sdsfree(newsds);
     return false;
   }

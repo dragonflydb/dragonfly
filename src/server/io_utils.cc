@@ -16,21 +16,30 @@ io::Result<size_t> BufferedStreamerBase::WriteSome(const iovec* vec, uint32_t le
   return io::BufSink{&producer_buf_}.WriteSome(vec, len);
 }
 
-void BufferedStreamerBase::NotifyWritten() {
+void BufferedStreamerBase::NotifyWritten(bool allow_await) {
   if (IsStopped())
     return;
   buffered_++;
   // Wake up the consumer.
   waker_.notify();
   // Block if we're stalled because the consumer is not keeping up.
-  waker_.await([this]() { return !IsStalled() || IsStopped(); });
+  if (allow_await) {
+    waker_.await([this]() { return !IsStalled() || IsStopped(); });
+  }
+}
+
+void BufferedStreamerBase::AwaitIfWritten() {
+  if (IsStopped())
+    return;
+  if (buffered_) {
+    waker_.await([this]() { return !IsStalled() || IsStopped(); });
+  }
 }
 
 error_code BufferedStreamerBase::ConsumeIntoSink(io::Sink* dest) {
   while (!IsStopped()) {
     // Wait for more data or stop signal.
     waker_.await([this]() { return buffered_ > 0 || IsStopped(); });
-
     // Break immediately on cancellation.
     if (cll_->IsCancelled()) {
       waker_.notifyAll();  // Wake consumer if it missed it.
@@ -42,7 +51,7 @@ error_code BufferedStreamerBase::ConsumeIntoSink(io::Sink* dest) {
     buffered_ = 0;
 
     // If producer stalled, notify we consumed data and it can unblock.
-    waker_.notify();
+    waker_.notifyAll();
 
     // Write data and check for errors.
     if (auto ec = dest->Write(consumer_buf_.InputBuffer()); ec) {

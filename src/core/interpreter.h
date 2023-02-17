@@ -9,6 +9,7 @@
 #include <string_view>
 
 #include "core/core_types.h"
+#include "util/fibers/event_count.h"
 
 typedef struct lua_State lua_State;
 
@@ -39,6 +40,9 @@ class Interpreter {
 
   Interpreter(const Interpreter&) = delete;
   void operator=(const Interpreter&) = delete;
+
+  Interpreter(Interpreter&&) = default;
+  Interpreter& operator=(Interpreter&&) = default;
 
   // Note: We leak the state for now.
   // Production code should not access this method.
@@ -90,15 +94,6 @@ class Interpreter {
     redis_func_ = std::forward<U>(u);
   }
 
-  // We have interpreter per thread, not per connection.
-  // Since we might preempt into different fibers when operating on interpreter
-  // we must lock it until we finish using it per request.
-  // Only RunFunction with companions require locking since other functions perform atomically
-  // without preemptions.
-  std::lock_guard<::boost::fibers::mutex> Lock() {
-    return std::lock_guard<::boost::fibers::mutex>{mu_};
-  }
-
  private:
   // Returns true if function was successfully added,
   // otherwise returns false and sets the error.
@@ -113,11 +108,28 @@ class Interpreter {
   lua_State* lua_;
   unsigned cmd_depth_ = 0;
   RedisFunc redis_func_;
+};
 
-  // We have interpreter per thread, not per connection.
-  // Since we might preempt into different fibers when operating on interpreter
-  // we must lock it until we finish using it per request.
-  ::boost::fibers::mutex mu_;
+// Manages an internal interpreter pool. This allows multiple connections residing on the same
+// thread to run multiple lua scripts in parallel.
+class InterpreterManager {
+ public:
+  InterpreterManager(unsigned num) : waker_{}, available_{}, storage_{} {
+    // We pre-allocate the backing storage during initialization and
+    // start storing pointers to slots in the available vector.
+    storage_.reserve(num);
+    available_.reserve(num);
+  }
+
+  // Borrow interpreter. Always return it after usage.
+  Interpreter* Get();
+
+  void Return(Interpreter*);
+
+ private:
+  ::util::fibers_ext::EventCount waker_;
+  std::vector<Interpreter*> available_;
+  std::vector<Interpreter> storage_;
 };
 
 }  // namespace dfly

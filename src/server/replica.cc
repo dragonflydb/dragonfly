@@ -27,7 +27,7 @@ extern "C" {
 #include "strings/human_readable.h"
 #include "util/proactor_base.h"
 
-ABSL_FLAG(bool, enable_multi_shard_sync, true,
+ABSL_FLAG(bool, enable_multi_shard_sync, false,
           "Execute multi shards commands on replica syncrhonized");
 
 ABSL_DECLARE_FLAG(uint32_t, port);
@@ -808,7 +808,7 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
   io::PrefixSource ps{prefix, &ss};
 
   JournalReader reader{&ps, 0};
-
+  TransactionReader tx_reader{};
   while (!cntx->IsCancelled()) {
     waker_.await([&]() {
       return ((trans_data_queue_.size() < kYieldAfterItemsInQueue) || cntx->IsCancelled());
@@ -816,7 +816,7 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
     if (cntx->IsCancelled())
       break;
 
-    auto tx_data = TransactionData::ReadNext(&reader, cntx);
+    auto tx_data = tx_reader.NextTxData(&reader, cntx);
     if (!tx_data)
       break;
 
@@ -888,6 +888,7 @@ void Replica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context*
   if (tx_data.shard_cnt <= 1 || (!use_multi_shard_exe_sync_ && !tx_data.IsGlobalCmd())) {
     VLOG(2) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
     executor_->Execute(tx_data.dbid, tx_data.commands);
+    journal_rec_executed_.fetch_add(tx_data.journal_rec_count, std::memory_order_relaxed);
     return;
   }
 
@@ -930,6 +931,7 @@ void Replica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context*
     VLOG(2) << "Execute txid: " << tx_data.txid << " executing shard transaction commands";
     executor_->Execute(tx_data.dbid, tx_data.commands);
   }
+  journal_rec_executed_.fetch_add(tx_data.journal_rec_count, std::memory_order_relaxed);
 
   // Erase from map can be done only after all flow fibers executed the transaction commands.
   // The last fiber which will decrease the counter to 0 will be the one to erase the data from
@@ -1146,6 +1148,22 @@ Replica::Info Replica::GetInfo() const {
   });
 }
 
+std::vector<uint64_t> Replica::GetReplicaOffset() const {
+  std::vector<uint64_t> flow_rec_count;
+  flow_rec_count.resize(shard_flows_.size());
+  for (const auto& flow : shard_flows_) {
+    uint32_t flow_id = flow->master_context_.dfly_flow_id;
+    uint64_t rec_count = flow->journal_rec_executed_.load(std::memory_order_relaxed);
+    DCHECK_LT(flow_id, shard_flows_.size());
+    flow_rec_count[flow_id] = rec_count;
+  }
+  return flow_rec_count;
+}
+
+std::string Replica::GetSyncId() const {
+  return master_context_.dfly_session_id;
+}
+
 bool Replica::CheckRespIsSimpleReply(string_view reply) const {
   return resp_args_.size() == 1 || resp_args_.front().type == RespExpr::STRING ||
          ToSV(resp_args_.front().GetBuf()) == reply;
@@ -1171,6 +1189,7 @@ error_code Replica::SendCommand(string_view command, ReqSerializer* serializer) 
 }
 
 bool Replica::TransactionData::AddEntry(journal::ParsedEntry&& entry) {
+  ++journal_rec_count;
   // Expiry joins multi transaction or runs standalone.
   if (entry.opcode == journal::Op::EXPIRED) {
     entry.opcode = commands.empty() ? journal::Op::COMMAND : journal::Op::MULTI_COMMAND;
@@ -1187,6 +1206,7 @@ bool Replica::TransactionData::AddEntry(journal::ParsedEntry&& entry) {
       return true;
     case journal::Op::MULTI_COMMAND:
       commands.push_back(std::move(entry.cmd));
+      dbid = entry.dbid;
       return false;
     default:
       DCHECK(false) << "Unsupported opcode";
@@ -1198,18 +1218,32 @@ bool Replica::TransactionData::IsGlobalCmd() const {
   return commands.size() == 1 && commands.front().cmd_args.size() == 1;
 }
 
-auto Replica::TransactionData::ReadNext(JournalReader* reader, Context* cntx)
+// Expired entries within MULTI...EXEC sequence which belong to different database
+// should be executed outside the multi transaciton.
+bool Replica::TransactionReader::ReturnEntryOOO(const TransactionData& tx_data,
+                                                const journal::ParsedEntry& entry) {
+  return !tx_data.commands.empty() && entry.opcode == journal::Op::EXPIRED &&
+         tx_data.dbid != entry.dbid;
+}
+
+auto Replica::TransactionReader::NextTxData(JournalReader* reader, Context* cntx)
     -> optional<TransactionData> {
-  TransactionData out;
   io::Result<journal::ParsedEntry> res;
+  TransactionData next_tx;
+  std::swap(saved_data_, next_tx);
   do {
     if (res = reader->ReadEntry(); !res) {
       cntx->ReportError(res.error());
       return std::nullopt;
     }
-  } while (!cntx->IsCancelled() && !out.AddEntry(std::move(*res)));
 
-  return cntx->IsCancelled() ? std::nullopt : make_optional(std::move(out));
+    if (ReturnEntryOOO(next_tx, *res)) {
+      std::swap(saved_data_, next_tx);
+    }
+
+  } while (!cntx->IsCancelled() && !next_tx.AddEntry(std::move(*res)));
+
+  return cntx->IsCancelled() ? std::nullopt : make_optional(std::move(next_tx));
 }
 
 }  // namespace dfly

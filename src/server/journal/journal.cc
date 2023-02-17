@@ -87,16 +87,6 @@ void Journal::UnregisterOnChange(uint32_t id) {
   journal_slice.UnregisterOnChange(id);
 }
 
-bool Journal::SchedStartTx(TxId txid, unsigned num_keys, unsigned num_shards) {
-  if (!journal_slice.IsOpen() || lameduck_.load(memory_order_relaxed))
-    return false;
-
-  // TODO: Handle tx entries.
-  // journal_slice.AddLogRecord(Entry::Sched(txid));
-
-  return true;
-}
-
 LSN Journal::GetLsn() const {
   return journal_slice.cur_lsn();
 }
@@ -112,8 +102,8 @@ bool Journal::EnterLameDuck() {
 }
 
 void Journal::RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt,
-                          Entry::Payload payload) {
-  journal_slice.AddLogRecord(Entry{txid, opcode, dbid, shard_cnt, std::move(payload)});
+                          Entry::Payload payload, bool await) {
+  journal_slice.AddLogRecord(Entry{txid, opcode, dbid, shard_cnt, std::move(payload)}, await);
 }
 
 /*

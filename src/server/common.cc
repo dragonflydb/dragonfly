@@ -7,7 +7,6 @@
 #include <absl/strings/charconv.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
-#include <mimalloc.h>
 
 #include <system_error>
 
@@ -15,8 +14,8 @@ extern "C" {
 #include "redis/object.h"
 #include "redis/rdb.h"
 #include "redis/util.h"
-#include "redis/zmalloc.h"
 }
+
 #include "base/logging.h"
 #include "core/compact_object.h"
 #include "server/engine_shard_set.h"
@@ -29,40 +28,10 @@ namespace dfly {
 
 using namespace std;
 
-thread_local ServerState ServerState::state_;
-
 atomic_uint64_t used_mem_peak(0);
 atomic_uint64_t used_mem_current(0);
 unsigned kernel_version = 0;
 size_t max_memory_limit = 0;
-
-ServerState::ServerState() {
-  CHECK(mi_heap_get_backing() == mi_heap_get_default());
-
-  mi_heap_t* tlh = mi_heap_new();
-  init_zmalloc_threadlocal(tlh);
-  data_heap_ = tlh;
-}
-
-ServerState::~ServerState() {
-}
-
-void ServerState::Init() {
-  gstate_ = GlobalState::ACTIVE;
-}
-
-void ServerState::Shutdown() {
-  gstate_ = GlobalState::SHUTTING_DOWN;
-  interpreter_.reset();
-}
-
-Interpreter& ServerState::GetInterpreter() {
-  if (!interpreter_) {
-    interpreter_.emplace();
-  }
-
-  return interpreter_.value();
-}
 
 const char* GlobalStateName(GlobalState s) {
   switch (s) {
@@ -75,7 +44,7 @@ const char* GlobalStateName(GlobalState s) {
     case GlobalState::SHUTTING_DOWN:
       return "SHUTTING DOWN";
   }
-  ABSL_INTERNAL_UNREACHABLE;
+  ABSL_UNREACHABLE();
 }
 
 const char* ObjTypeName(int type) {
@@ -195,7 +164,8 @@ bool ParseDouble(string_view src, double* value) {
 
 void RecordJournal(const OpArgs& op_args, string_view cmd, ArgSlice args, uint32_t shard_cnt,
                    bool multi_commands) {
-  op_args.tx->LogJournalOnShard(op_args.shard, make_pair(cmd, args), shard_cnt, multi_commands);
+  op_args.tx->LogJournalOnShard(op_args.shard, make_pair(cmd, args), shard_cnt, multi_commands,
+                                false);
 }
 
 void RecordJournalFinish(const OpArgs& op_args, uint32_t shard_cnt) {
@@ -205,7 +175,13 @@ void RecordJournalFinish(const OpArgs& op_args, uint32_t shard_cnt) {
 void RecordExpiry(DbIndex dbid, string_view key) {
   auto journal = EngineShard::tlocal()->journal();
   CHECK(journal);
-  journal->RecordEntry(0, journal::Op::EXPIRED, dbid, 1, make_pair("DEL", ArgSlice{key}));
+  journal->RecordEntry(0, journal::Op::EXPIRED, dbid, 1, make_pair("DEL", ArgSlice{key}), false);
+}
+
+void TriggerJournalWriteToSink() {
+  auto journal = EngineShard::tlocal()->journal();
+  CHECK(journal);
+  journal->RecordEntry(0, journal::Op::NOOP, 0, 0, {}, true);
 }
 
 #define ADD(x) (x) += o.x

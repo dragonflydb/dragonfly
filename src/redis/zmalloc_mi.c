@@ -12,6 +12,8 @@
 __thread ssize_t zmalloc_used_memory_tl = 0;
 __thread mi_heap_t* zmalloc_heap = NULL;
 
+bool mi_heap_page_is_underutilized(mi_heap_t* heap, void* p, float ratio);
+
 /* Allocate memory or panic */
 void* zmalloc(size_t size) {
   assert(zmalloc_heap);

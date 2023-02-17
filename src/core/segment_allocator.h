@@ -47,7 +47,9 @@ class SegmentAllocator {
     return heap_;
   }
 
-  size_t used() const { return used_; }
+  size_t used() const {
+    return used_;
+  }
 
  private:
   static uint32_t Offset(Ptr p) {
@@ -77,7 +79,8 @@ inline auto SegmentAllocator::Allocate(uint32_t size) -> std::pair<Ptr, uint8_t*
     address_table_.push_back((uint8_t*)seg_ptr);
   }
 
-  Ptr res = (((iptr - seg_ptr) / 8) << kSegmentIdBits) | it->second;
+  uint32_t seg_offset = (iptr - seg_ptr) / 8;
+  Ptr res = (seg_offset << kSegmentIdBits) | it->second;
   used_ += mi_good_size(size);
 
   return std::make_pair(res, (uint8_t*)ptr);

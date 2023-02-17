@@ -120,10 +120,6 @@ class Transaction {
   // Cancel all blocking watches on shutdown. Set COORD_CANCELLED.
   void BreakOnShutdown();
 
-  // Log a journal entry on shard with payload and shard count.
-  void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload,
-                         uint32_t shard_cnt) const;
-
   // In some cases for non auto-journaling commands we want to enable the auto journal flow.
   void RenableAutoJournal() {
     renabled_auto_journal_.store(true, std::memory_order_relaxed);
@@ -209,7 +205,7 @@ class Transaction {
   // multi_commands to true and  call the FinishLogJournalOnShard function after logging the final
   // entry.
   void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload, uint32_t shard_cnt,
-                         bool multi_commands) const;
+                         bool multi_commands, bool allow_await) const;
   void FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt) const;
 
  private:
@@ -227,7 +223,8 @@ class Transaction {
     unsigned cnt[2] = {0, 0};
   };
 
-  using KeyList = std::vector<std::pair<std::string_view, LockCnt>>;
+  // owned std::string because callbacks its used in run fully async and can outlive the entries.
+  using KeyList = std::vector<std::pair<std::string, LockCnt>>;
 
   struct PerShardData {
     PerShardData(PerShardData&&) noexcept {
@@ -278,7 +275,39 @@ class Transaction {
     COORD_OOO = 0x20,
   };
 
+  struct PerShardCache {
+    std::vector<std::string_view> args;
+    std::vector<uint32_t> original_index;
+
+    void Clear() {
+      args.clear();
+      original_index.clear();
+    }
+  };
+
  private:
+  // Init basic fields and reset re-usable.
+  void InitBase(DbIndex dbid, CmdArgList args);
+
+  // Init as a global transaction.
+  void InitGlobal();
+
+  // Init with a set of keys.
+  void InitByKeys(KeyIndex keys);
+
+  // Build shard index by distributing the arguments by shards based on the key index.
+  void BuildShardIndex(KeyIndex keys, bool rev_mapping, std::vector<PerShardCache>* out);
+
+  // Init shard data from shard index.
+  void InitShardData(absl::Span<const PerShardCache> shard_index, size_t num_args,
+                     bool rev_mapping);
+
+  // Init multi. Record locks if needed.
+  void InitMultiData(KeyIndex keys);
+
+  // Store all key index keys in args_. Used only for single shard initialization.
+  void StoreKeysInArgs(KeyIndex keys, bool rev_mapping);
+
   // Generic schedule used from Schedule() and ScheduleSingleHop() on slow path.
   void ScheduleInternal();
 
@@ -341,6 +370,20 @@ class Transaction {
     return sid < shard_data_.size() ? sid : 0;
   }
 
+  // Iterate over shards and run function accepting (PerShardData&, ShardId) on all active ones.
+  template <typename F> void IterateActiveShards(F&& f) {
+    if (!global_ && unique_shard_cnt_ == 1) {  // unique_shard_id_ is set only for non-global.
+      auto i = unique_shard_id_;
+      f(shard_data_[SidToId(i)], i);
+    } else {
+      for (ShardId i = 0; i < shard_data_.size(); ++i) {
+        if (auto& sd = shard_data_[i]; global_ || sd.arg_count > 0) {
+          f(sd, i);
+        }
+      }
+    }
+  }
+
  private:
   // shard_data spans all the shards in ess_.
   // I wish we could use a dense array of size [0..uniq_shards] but since
@@ -354,8 +397,9 @@ class Transaction {
 
   // Stores the full undivided command.
   CmdArgList cmd_with_full_args_;
-  std::atomic<bool> renabled_auto_journal_ =
-      false;  // True if NO_AUTOJOURNAL command asked to enable auto journal
+
+  // True if NO_AUTOJOURNAL command asked to enable auto journal
+  std::atomic<bool> renabled_auto_journal_ = false;
 
   // Reverse argument mapping for ReverseArgIndex to convert from shard index to original index.
   std::vector<uint32_t> reverse_index_;
@@ -365,8 +409,10 @@ class Transaction {
   std::unique_ptr<MultiData> multi_;  // Initialized when the transaction is multi/exec.
 
   TxId txid_{0};
+  bool global_{false};
   DbIndex db_index_{0};
   uint64_t time_now_ms_{0};
+
   std::atomic<TxId> notify_txid_{kuint64max};
   std::atomic_uint32_t use_count_{0}, run_count_{0}, seqlock_{0};
 
@@ -387,16 +433,6 @@ class Transaction {
   OpStatus local_result_ = OpStatus::OK;
 
  private:
-  struct PerShardCache {
-    std::vector<std::string_view> args;
-    std::vector<uint32_t> original_index;
-
-    void Clear() {
-      args.clear();
-      original_index.clear();
-    }
-  };
-
   struct TLTmpSpace {
     std::vector<PerShardCache> shard_cache;
     absl::flat_hash_set<std::string_view> uniq_keys;

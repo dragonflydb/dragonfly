@@ -51,9 +51,13 @@ using namespace std;
 
 ABSL_FLAG(string, dir, "", "working directory");
 ABSL_FLAG(string, dbfilename, "dump", "the filename to save/load the DB");
-ABSL_FLAG(string, requirepass, "", "password for AUTH authentication");
+ABSL_FLAG(string, requirepass, "",
+          "password for AUTH authentication. "
+          "If empty can also be set with DFLY_PASSWORD environment variable.");
 ABSL_FLAG(string, save_schedule, "",
           "glob spec for the UTC time to save a snapshot which matches HH:MM 24h time");
+ABSL_FLAG(bool, df_snapshot_format, true,
+          "if true, save in dragonfly-specific snapshotting format");
 
 ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
@@ -265,6 +269,21 @@ void ExtendFilenameWithShard(absl::Time now, int shard, fs::path* filename) {
     // dragonfly snapshot.
     ExtendFilename(now, absl::Dec(shard, absl::kZeroPad4), filename);
   }
+}
+
+void SlowLog(CmdArgList args, ConnectionContext* cntx) {
+  ToUpper(&args[1]);
+  string_view sub_cmd = ArgS(args, 1);
+
+  if (sub_cmd == "LEN") {
+    return (*cntx)->SendLong(0);
+  }
+
+  if (sub_cmd == "GET") {
+    return (*cntx)->SendEmptyArray();
+  }
+
+  (*cntx)->SendError(UnknownSubCmd(sub_cmd, "SLOWLOG"), kSyntaxErrType);
 }
 
 }  // namespace
@@ -550,7 +569,7 @@ void ServerFamily::SnapshotScheduling(const SnapshotSpec& spec) {
     boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
     trans->InitByArgs(0, {});
 
-    GenericError ec = DoSave(false, trans.get());
+    GenericError ec = DoSave(absl::GetFlag(FLAGS_df_snapshot_format), trans.get());
     if (ec) {
       LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
     }
@@ -676,6 +695,9 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   }
 
   // Stats metrics
+  AppendMetricWithoutLabels("connections_received_total", "", m.conn_stats.conn_received_cnt,
+                            MetricType::COUNTER, &resp->body());
+
   AppendMetricWithoutLabels("commands_processed_total", "", m.conn_stats.command_cnt,
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("keyspace_hits_total", "", m.events.hits, MetricType::COUNTER,
@@ -735,6 +757,18 @@ void ServerFamily::PauseReplication(bool pause) {
     CHECK(repl_ptr);
     repl_ptr->Pause(pause);
   }
+}
+
+std::optional<ReplicaOffsetInfo> ServerFamily::GetReplicaOffsetInfo() {
+  unique_lock lk(replicaof_mu_);
+
+  // Switch to primary mode.
+  if (!ServerState::tlocal()->is_master) {
+    auto repl_ptr = replica_;
+    CHECK(repl_ptr);
+    return ReplicaOffsetInfo{repl_ptr->GetSyncId(), repl_ptr->GetReplicaOffset()};
+  }
+  return nullopt;
 }
 
 void ServerFamily::OnClose(ConnectionContext* cntx) {
@@ -876,6 +910,15 @@ GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
     }
   };
 
+  auto get_scripts = [this] {
+    auto scripts = script_mgr_->GetLuaScripts();
+    StringVec script_bodies;
+    for (const auto& script : scripts) {
+      script_bodies.push_back(move(script.second));
+    }
+    return script_bodies;
+  };
+
   // Start snapshots.
   if (new_version) {
     auto file_opts = make_tuple(cref(filename), cref(path), start);
@@ -886,9 +929,10 @@ GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
 
     // Save summary file.
     {
-      const auto scripts = script_mgr_->GetLuaScripts();
+      auto scripts = get_scripts();
       auto& snapshot = snapshots[shard_set->size()];
       snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
+
       if (auto local_ec = DoPartialSave(file_opts, scripts, snapshot.get(), nullptr); local_ec) {
         ec = local_ec;
         snapshot.reset();
@@ -914,7 +958,8 @@ GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
     path /= filename;  // use / operator to concatenate paths.
 
     snapshots[0].reset(new RdbSnapshot(fq_threadpool_.get()));
-    const auto lua_scripts = script_mgr_->GetLuaScripts();
+    auto lua_scripts = get_scripts();
+
     ec = snapshots[0]->Start(SaveMode::RDB, path.generic_string(), lua_scripts);
 
     if (!ec) {
@@ -1006,6 +1051,20 @@ void ServerFamily::BreakOnShutdown() {
   dfly_cmd_->BreakOnShutdown();
 }
 
+string GetPassword() {
+  string flag = GetFlag(FLAGS_requirepass);
+  if (!flag.empty()) {
+    return flag;
+  }
+
+  const char* env_var = getenv("DFLY_PASSWORD");
+  if (env_var) {
+    return env_var;
+  }
+
+  return "";
+}
+
 void ServerFamily::FlushDb(CmdArgList args, ConnectionContext* cntx) {
   DCHECK(cntx->transaction);
   Drakarys(cntx->transaction, cntx->transaction->GetDbIndex());
@@ -1039,7 +1098,7 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
   }
 
   string_view pass = ArgS(args, 1);
-  if (pass == GetFlag(FLAGS_requirepass)) {
+  if (pass == GetPassword()) {
     cntx->authenticated = true;
     (*cntx)->SendOk();
   } else {
@@ -1128,7 +1187,7 @@ void ServerFamily::Memory(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
   string err_detail;
-  bool new_version = false;
+  bool new_version = absl::GetFlag(FLAGS_df_snapshot_format);
   if (args.size() > 2) {
     return (*cntx)->SendError(kSyntaxErr);
   }
@@ -1138,6 +1197,8 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
     string_view sub_cmd = ArgS(args, 1);
     if (sub_cmd == "DF") {
       new_version = true;
+    } else if (sub_cmd == "RDB") {
+      new_version = false;
     } else {
       return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "SAVE"), kSyntaxErrType);
     }
@@ -1176,6 +1237,7 @@ Metrics ServerFamily::GetMetrics() const {
     result.uptime = time(NULL) - this->start_time_;
     result.conn_stats += ss->connection_stats;
     result.qps += uint64_t(ss->MovingSum6());
+    result.ooo_tx_transaction_cnt += ss->stats.ooo_tx_cnt;
 
     if (shard) {
       MergeInto(shard->db_slice().GetStats(), &result);
@@ -1289,6 +1351,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("listpack_blobs", total.listpack_blob_cnt);
     append("listpack_bytes", total.listpack_bytes);
     append("small_string_bytes", m.small_string_bytes);
+    append("pipeline_cache_bytes", m.conn_stats.pipeline_cache_capacity);
     append("maxmemory", max_memory_limit);
     append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
     append("cache_mode", GetFlag(FLAGS_cache_mode) ? "cache" : "store");
@@ -1297,8 +1360,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (should_enter("STATS")) {
     ADD_HEADER("# Stats");
 
-    append("instantaneous_ops_per_sec", m.qps);
+    append("total_connections_received", m.conn_stats.conn_received_cnt);
     append("total_commands_processed", m.conn_stats.command_cnt);
+    append("instantaneous_ops_per_sec", m.qps);
     append("total_pipelined_commands", m.conn_stats.pipelined_cmd_cnt);
     append("total_net_input_bytes", m.conn_stats.io_read_bytes);
     append("total_net_output_bytes", m.conn_stats.io_write_bytes);
@@ -1392,13 +1456,23 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
     auto unknown_cmd = service_.UknownCmdMap();
 
-    for (const auto& k_v : unknown_cmd) {
-      append(StrCat("unknown_", k_v.first), k_v.second);
-    }
+    auto append_sorted = [&append](string_view prefix, const auto& map) {
+      vector<pair<string_view, uint64_t>> display;
+      display.reserve(map.size());
 
-    for (const auto& k_v : m.conn_stats.cmd_count_map) {
-      append(StrCat("cmd_", k_v.first), k_v.second);
-    }
+      for (const auto& k_v : map) {
+        display.push_back(k_v);
+      };
+
+      sort(display.begin(), display.end());
+
+      for (const auto& k_v : display) {
+        append(StrCat(prefix, k_v.first), k_v.second);
+      }
+    };
+
+    append_sorted("unknown_", unknown_cmd);
+    append_sorted("cmd_", m.conn_stats.cmd_count_map);
   }
 
   if (should_enter("ERRORSTATS", true)) {
@@ -1477,7 +1551,6 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
     // use this lock as critical section to prevent concurrent replicaof commands running.
     unique_lock lk(replicaof_mu_);
 
-    // Switch to primary mode.
     if (!ServerState::tlocal()->is_master) {
       auto repl_ptr = replica_;
       CHECK(repl_ptr);
@@ -1702,10 +1775,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, 0}.HFUNC(ReplConf)
             << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, 0}.HFUNC(Role)
-            // We won't support DF->REDIS replication for now, hence we do not need to support
-            // these commands.
-            // << CI{"SYNC", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Sync)
-            // << CI{"PSYNC", CO::ADMIN | CO::GLOBAL_TRANS, 3, 0, 0, 0}.HFUNC(Psync)
+            << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, 0}.SetHandler(SlowLog)
             << CI{"SCRIPT", CO::NOSCRIPT, -2, 0, 0, 0}.HFUNC(Script)
             << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS, -2, 0, 0, 0}.HFUNC(Dfly);
 }

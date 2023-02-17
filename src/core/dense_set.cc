@@ -86,7 +86,7 @@ size_t DenseSet::PushFront(DenseSet::ChainVectorIterator it, void* data, bool ha
   }
 
   if (has_ttl)
-    it->SetTtl();
+    it->SetTtl(true);
   return ObjectAllocSize(data);
 }
 
@@ -97,7 +97,7 @@ void DenseSet::PushFront(DenseSet::ChainVectorIterator it, DenseSet::DensePtr pt
   if (it->IsEmpty()) {
     it->SetObject(ptr.GetObject());
     if (ptr.HasTtl())
-      it->SetTtl();
+      it->SetTtl(true);
     if (ptr.IsLink()) {
       FreeLink(ptr.AsLink());
     }
@@ -112,7 +112,7 @@ void DenseSet::PushFront(DenseSet::ChainVectorIterator it, DenseSet::DensePtr pt
     // allocate a new link if needed and copy the pointer to the new link
     it->SetLink(NewLink(ptr.Raw(), *it));
     if (ptr.HasTtl())
-      it->SetTtl();
+      it->SetTtl(true);
     DCHECK(!it->AsLink()->next.IsEmpty());
   }
 }
@@ -313,7 +313,7 @@ void DenseSet::Grow() {
   }
 }
 
-void* DenseSet::AddOrFind(void* ptr, bool has_ttl) {
+auto DenseSet::AddOrFindDense(void* ptr, bool has_ttl) -> DensePtr* {
   uint64_t hc = Hash(ptr, 0);
 
   if (entries_.empty()) {
@@ -332,7 +332,7 @@ void* DenseSet::AddOrFind(void* ptr, bool has_ttl) {
   uint32_t bucket_id = BucketId(hc);
   DensePtr* dptr = Find(ptr, bucket_id, 0).second;
   if (dptr != nullptr) {
-    return dptr->GetObject();
+    return dptr;
   }
 
   DCHECK_LT(bucket_id, entries_.size());
@@ -373,7 +373,7 @@ void* DenseSet::AddOrFind(void* ptr, bool has_ttl) {
 
   DensePtr to_insert(ptr);
   if (has_ttl)
-    to_insert.SetTtl();
+    to_insert.SetTtl(true);
 
   while (!entries_[bucket_id].IsEmpty() && entries_[bucket_id].IsDisplaced()) {
     DensePtr unlinked = PopPtrFront(entries_.begin() + bucket_id);
@@ -495,6 +495,25 @@ void* DenseSet::PopInternal() {
 
   --size_;
   return ret;
+}
+
+void* DenseSet::AddOrReplaceObj(void* obj, bool has_ttl) {
+  DensePtr* ptr = AddOrFindDense(obj, has_ttl);
+  if (!ptr)
+    return nullptr;
+
+  if (ptr->IsLink()) {
+    ptr = ptr->AsLink();
+  }
+
+  void* res = ptr->Raw();
+  obj_malloc_used_ -= ObjectAllocSize(res);
+  obj_malloc_used_ += ObjectAllocSize(obj);
+
+  ptr->SetObject(obj);
+  ptr->SetTtl(has_ttl);
+
+  return res;
 }
 
 /**

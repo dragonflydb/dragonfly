@@ -382,7 +382,6 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   // after trans in the queue, hence it's safe to run trans out of order.
   if (trans && should_run) {
     DCHECK(trans != head);
-    DCHECK(!trans->IsMulti());  // multi, global transactions can not be OOO.
     DCHECK(trans_mask & Transaction::ARMED);
 
     dbg_id.clear();
@@ -482,6 +481,11 @@ void EngineShard::Heartbeat() {
     if (db_slice_.memory_budget() < redline) {
       db_slice_.FreeMemWithEvictionStep(i, redline - db_slice_.memory_budget());
     }
+  }
+  // Journal entries for expired entries are not writen to socket in the loop above.
+  // Trigger write to socket when loop finishes.
+  if (auto journal = EngineShard::tlocal()->journal(); journal) {
+    TriggerJournalWriteToSink();
   }
 }
 

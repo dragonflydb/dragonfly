@@ -19,7 +19,7 @@ struct StoredCmd {
   const CommandId* descr;
 
  private:
-  std::vector<std::string> stored_args_;
+  std::unique_ptr<char[]> backing_storage_;
   CmdArgVec arg_vec_;
   CmdArgList arg_list_;
 
@@ -134,12 +134,6 @@ class ConnectionContext : public facade::ConnectionContext {
   DbIndex db_index() const {
     return conn_state.db_index;
   }
-
-  // Note that this is accepted by value for lifetime reasons
-  // we want to have our own copy since we are assuming that
-  // 1. there will be not to many connections that we in monitor state
-  // 2. we need to have for each of them each own copy for thread safe reasons
-  void SendMonitorMsg(std::string msg);
 
   void ChangeSubscription(bool to_add, bool to_reply, CmdArgList args);
   void ChangePSub(bool to_add, bool to_reply, CmdArgList args);

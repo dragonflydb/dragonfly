@@ -5,8 +5,14 @@ env:
 
 on:
   schedule:
-    - cron: '0 0/6 * * *'
+    - cron: '0 0/3 * * *'
   workflow_dispatch:
+    inputs:
+      run_replication:
+        description: 'run replication pytests'
+        type: boolean
+        required: true
+
 
 jobs:
   build-n-test:
@@ -15,7 +21,7 @@ jobs:
       matrix:
         # Test of these containers
         container: ["ubuntu-dev:20"]
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     container:
       image: ghcr.io/romange/${{ matrix.container }}
@@ -38,6 +44,7 @@ jobs:
           ls -l ..
 
       - name: Run PyTests
+        timeout-minutes: 10
         run: |
           ls -l ${GITHUB_WORKSPACE}/
           cd ${GITHUB_WORKSPACE}/tests
@@ -45,7 +52,16 @@ jobs:
           pip install -r dragonfly/requirements.txt
           export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
 
-          pytest -xvr dragonfly
+          pytest -sxvr dragonfly --ignore=dragonfly/replication_test.py
+
+      - name: Run PyTests replication test
+        timeout-minutes: 15
+        if:  ${{ inputs.run_replication }}
+        run: |
+          cd ${GITHUB_WORKSPACE}/tests
+          export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
+          pytest -xvs dragonfly/replication_test.py --df alsologtostderr --df vmodule=replica=2 --df enable_multi_shard_sync=true
+          pytest -xvs dragonfly/replication_test.py --df alsologtostderr --df vmodule=replica=2 --df enable_multi_shard_sync=false
 
       - name: Send notification on failure
         if: failure() || cancelled()

@@ -8,17 +8,22 @@
 [![ci-tests](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml) [![Twitter URL](https://img.shields.io/twitter/follow/dragonflydbio?style=social)](https://twitter.com/dragonflydbio)
 
 
-[Quick Start](https://github.com/dragonflydb/dragonfly/tree/main/docs/quick-start) | [Discord Chat](https://discord.gg/HsPjXGVH85) | [GitHub Discussions](https://github.com/dragonflydb/dragonfly/discussions) | [GitHub Issues](https://github.com/dragonflydb/dragonfly/issues) | [Contributing](https://github.com/dragonflydb/dragonfly/blob/main/CONTRIBUTING.md)
+[Website](https://dragonflydb.io/) • [Quick Start](https://github.com/dragonflydb/dragonfly/tree/main/docs/quick-start) • [Community Discord](https://discord.gg/HsPjXGVH85) • [GitHub Discussions](https://github.com/dragonflydb/dragonfly/discussions) | [GitHub Issues](https://github.com/dragonflydb/dragonfly/issues) | [Contributing](https://github.com/dragonflydb/dragonfly/blob/main/CONTRIBUTING.md)
 
-### Probably, the fastest in-memory store in the universe!
+## The world's fastest in-memory data store
 
-Dragonfly is a modern in-memory datastore, fully compatible with Redis and Memcached APIs. Dragonfly implements novel algorithms and data structures on top of a multi-threaded, shared-nothing architecture. As a result, Dragonfly reaches x25 performance
-compared to Redis and supports millions of QPS on a single instance.
+Dragonfly is an in-memory data store built for modern application workloads. It is fully compatible with the Redis and Memcached APIs, required no code changes to adopt. When compared to these legacy in-memory datastores, Dragonfly delivers 25X more throughput, higher cache hit rates, with lower tail latency, and effortless vertical scalability.
 
-Dragonfly's core properties make it a cost-effective, high-performing, and easy-to-use Redis replacement.
+## Contents
 
+- [Benchmarks](#benchmarks)
+- [Quick Start](https://github.com/dragonflydb/dragonfly/tree/main/docs/quick-start)
+- [Configuration](#configuration)
+- [Roadmap and Status](#roadmap-status)
+- [Design Decisions](#design-decisions)
+- [Background](#background)
 
-## Benchmarks
+## <a name="benchmarks"><a/>Benchmarks
 
 <img src="http://static.dragonflydb.io/repo-assets/aws-throughput.svg" width="80%" border="0"/>
 
@@ -79,51 +84,9 @@ Meanwhile, Redis reached almost x3 memory increase at peak compared to Dragonfly
 Dragonfly also finished the snapshot much faster, just a few seconds after it started.
 For more info about memory efficiency in Dragonfly see [dashtable doc](/docs/dashtable.md)
 
-## Running the server
-
-Dragonfly runs on Linux. We advise running it on Linux version 5.11 or later
-but you can also run Dragonfly on older kernels as well.
 
 
-### With docker:
-
-```bash
-docker run --network=host --ulimit memlock=-1 docker.dragonflydb.io/dragonflydb/dragonfly
-
-redis-cli PING  # redis-cli can be installed with "apt install -y redis-tools"
-```
-
-*You need `--ulimit memlock=-1` because some Linux distros configure the default memlock limit for containers as 64m and Dragonfly requires more.*
-
-### With docker-compose:
-```yaml
-version: "3.9"
-
-services:
-  dragonfly: # the new redis
-    image: docker.dragonflydb.io/dragonflydb/dragonfly
-    ulimits:
-      memlock: -1
-    command:
-      - "--save_schedule=*:*" # save for every 1 minute
-      - "--dir=/data"
-      - "--dbfilename=dump.rdb"
-    ports:
-      - '6379:6379'
-    volumes:
-      - "./dragonfly_data:/data"
-    restart: unless-stopped
-```
-
-### Releases
-We maintain [binary releases](https://github.com/dragonflydb/dragonfly/releases) for x86 and arm64 architectures. You will need to install `libunwind8` lib to run the binaries.
-
-
-### Building from source
-
-See [building from source](./docs/build-from-source.md) for details.
-
-## Configuration
+## <a name="configuration"><a/>Configuration
 Dragonfly supports common Redis arguments where applicable.
 For example, you can run: `dragonfly --requirepass=foo --bind localhost`.
 
@@ -157,7 +120,7 @@ In addition, it has Dragonfly specific arguments options:
 
 for more options like logs management or tls support, run `dragonfly --help`.
 
-## Roadmap and status
+## <a name="roadmap-status"><a/>Roadmap and status
 
 Currently, Dragonfly supports ~185 Redis commands and all memcache commands besides `cas`.
 We are almost on par with Redis 5 API. Our next milestone will be to stabilize basic
@@ -171,7 +134,7 @@ APIs 3-6.
 
 Please see [API readiness doc](docs/api_status.md) for the current status of Dragonfly.
 
-## Design decisions
+## <a name="design-decisions"><a/> Design decisions
 
 ### Novel cache design
 Dragonfly has a single unified adaptive caching algorithm that is very simple and memory efficient.
@@ -204,7 +167,7 @@ If you expose Dragonfly's TCP port externally, it is advised to disable the cons
 with `--http_admin_console=false` or `--nohttp_admin_console`.
 
 
-## Background
+## <a name="background"><a/>Background
 
 Dragonfly started as an experiment to see how an in-memory datastore could look like if it was designed in 2022. Based on  lessons learned from our experience as users of memory stores and as engineers who worked for cloud companies, we knew that we need to preserve two key properties for Dragonfly: a) to provide atomicity guarantees for all its operations, and b) to guarantee low, sub-millisecond latency over very high throughput.
 
