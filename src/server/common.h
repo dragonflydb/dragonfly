@@ -325,4 +325,11 @@ struct ScanOpts {
   static OpResult<ScanOpts> TryFrom(CmdArgList args);
 };
 
+// I use relative time from Feb 1, 2023 in seconds.
+constexpr uint64_t kMemberExpiryBase = 1675209600;
+
+inline uint32_t MemberTimeSeconds(uint64_t now_ms) {
+  return (now_ms / 1000) - kMemberExpiryBase;
+}
+
 }  // namespace dfly

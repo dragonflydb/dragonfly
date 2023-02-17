@@ -191,4 +191,16 @@ TEST_F(HSetFamilyTest, HRandFloat) {
   Run({"hrandfield", "k"});
 }
 
+TEST_F(HSetFamilyTest, HSetEx) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;  // to reset to test time.
+
+  EXPECT_THAT(Run({"HSETEX", "k", "1", "f", "v"}), IntArg(1));
+
+  AdvanceTime(500);
+  EXPECT_THAT(Run({"HGET", "k", "f"}), "v");
+
+  AdvanceTime(500);
+  EXPECT_THAT(Run({"HGET", "k", "f"}), ArgType(RespExpr::NIL));
+}
+
 }  // namespace dfly
