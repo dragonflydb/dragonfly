@@ -537,6 +537,31 @@ static void MultiSetError(ConnectionContext* cntx) {
   }
 }
 
+bool CheckEvalKeys(const ConnectionState::ScriptInfo& eval_info, const CommandId* cid,
+                   CmdArgList args, Transaction* trans) {
+  auto multi_mode = trans->GetMultiMode();
+
+  // We allow any keys in GLOBAL and NON_ATOMIC mode.
+  if (multi_mode == Transaction::GLOBAL || multi_mode == Transaction::NON_ATOMIC)
+    return true;
+
+  OpResult<KeyIndex> key_index_res = DetermineKeys(cid, args);
+  if (!key_index_res)
+    return false;  // TODO: Propagate error
+
+  const auto& key_index = *key_index_res;
+  for (unsigned i = key_index.start; i < key_index.end; ++i) {
+    if (!eval_info.keys.contains(ArgS(args, i))) {
+      return false;
+    }
+  }
+
+  if (unsigned i = key_index.bonus; i && !eval_info.keys.contains(ArgS(args, i)))
+    return false;
+
+  return true;
+}
+
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
   CHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
@@ -659,17 +684,8 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   if (under_script) {
     DCHECK(dfly_cntx->transaction);
     if (IsTransactional(cid)) {
-      OpResult<KeyIndex> key_index_res = DetermineKeys(cid, args);
-      if (!key_index_res)
-        return (*cntx)->SendError(key_index_res.status());
-
-      const auto& key_index = *key_index_res;
-      for (unsigned i = key_index.start; i < key_index.end; ++i) {
-        string_view key = ArgS(args, i);
-        if (!dfly_cntx->conn_state.script_info->keys.contains(key)) {
-          return (*cntx)->SendError("script tried accessing undeclared key");
-        }
-      }
+      if (!CheckEvalKeys(*dfly_cntx->conn_state.script_info, cid, args, dfly_cntx->transaction))
+        return (*cntx)->SendError("script tried accessing undeclared key");
 
       dfly_cntx->transaction->MultiSwitchCmd(cid);
       OpStatus st = dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args);

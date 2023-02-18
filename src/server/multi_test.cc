@@ -332,6 +332,10 @@ TEST_F(MultiTest, FlushDb) {
 }
 
 TEST_F(MultiTest, Eval) {
+  int multi_mode = absl::GetFlag(FLAGS_multi_eval_mode);
+  if (multi_mode == Transaction::GLOBAL || multi_mode == Transaction::NON_ATOMIC)
+    absl::SetFlag(&FLAGS_multi_eval_mode, Transaction::LOCK_AHEAD);
+
   RespExpr resp;
 
   resp = Run({"incrby", "foo", "42"});
@@ -368,6 +372,8 @@ TEST_F(MultiTest, Eval) {
 
   resp = Run({"hvals", "hmap"});
   EXPECT_EQ(resp, "2222");
+
+  absl::SetFlag(&FLAGS_multi_eval_mode, multi_mode);
 }
 
 TEST_F(MultiTest, Watch) {
@@ -578,6 +584,22 @@ TEST_F(MultiTest, MultiCauseUnblocking) {
 
   f1.Join();
   f2.Join();
+}
+
+TEST_F(MultiTest, EvalUndeclared) {
+  int start_mode = absl::GetFlag(FLAGS_multi_eval_mode);
+  int allowed_modes[] = {Transaction::GLOBAL, Transaction::NON_ATOMIC};
+
+  Run({"set", "undeclared-k", "works"});
+  const char* kScript = "return redis.call('GET', 'undeclared-k')";
+
+  for (int multi_mode : allowed_modes) {
+    absl::SetFlag(&FLAGS_multi_eval_mode, multi_mode);
+    auto res = Run({"eval", kScript, "0"});
+    EXPECT_EQ(res, "works");
+  }
+
+  absl::SetFlag(&FLAGS_multi_eval_mode, start_mode);
 }
 
 }  // namespace dfly
