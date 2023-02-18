@@ -15,6 +15,7 @@
 #include "server/transaction.h"
 
 ABSL_DECLARE_FLAG(int, multi_exec_mode);
+ABSL_DECLARE_FLAG(int, multi_eval_mode);
 
 namespace dfly {
 
@@ -340,9 +341,13 @@ TEST_F(MultiTest, Eval) {
 
   ASSERT_FALSE(service_->IsLocked(0, "foo"));
 
+  VLOG(0) << "p1";
+
   resp = Run({"eval", "return redis.call('get', 'foo')", "1", "foo"});
   EXPECT_THAT(resp, "42");
   ASSERT_FALSE(service_->IsLocked(0, "foo"));
+
+  VLOG(0) << "p2";
 
   resp = Run({"eval", "return redis.call('get', KEYS[1])", "1", "foo"});
   EXPECT_THAT(resp, "42");
@@ -490,9 +495,6 @@ TEST_F(MultiTest, EvalOOO) {
   {
     auto resp = Run({"eval", kScript, "3", kKey1, kKey2, kKey3});
     ASSERT_EQ(resp, "OK");
-
-    auto metrics = GetMetrics();
-    EXPECT_EQ(1, metrics.ooo_tx_transaction_cnt);
   }
 
   const int kTimes = 10;
@@ -508,10 +510,13 @@ TEST_F(MultiTest, EvalOOO) {
 
     f1.Join();
     f2.Join();
-
-    auto metrics = GetMetrics();
-    EXPECT_EQ(1 + 2 * kTimes, metrics.ooo_tx_transaction_cnt);
   }
+
+  auto metrics = GetMetrics();
+  if (absl::GetFlag(FLAGS_multi_eval_mode) == Transaction::LOCK_AHEAD)
+    EXPECT_EQ(1 + 2 * kTimes, metrics.ooo_tx_transaction_cnt);
+  else
+    EXPECT_EQ(0, metrics.ooo_tx_transaction_cnt);
 }
 
 // Run MULTI/EXEC commands in parallel, where each command is:

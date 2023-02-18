@@ -205,6 +205,10 @@ class Transaction {
     return bool(multi_);
   }
 
+  MultiMode GetMultiMode() const {
+    return multi_->mode;
+  }
+
   bool IsGlobal() const;
 
   bool IsOOO() const {
@@ -279,8 +283,8 @@ class Transaction {
 
     MultiMode mode;
 
-    absl::flat_hash_map<std::string_view, LockCnt> lock_counts;
-    std::vector<std::string_view> keys;
+    absl::flat_hash_map<std::string, LockCnt> lock_counts;
+    std::vector<std::string> keys;
 
     // The shard_journal_write vector variable is used to determine the number of shards
     // involved in a multi-command transaction. This information is utilized by replicas when

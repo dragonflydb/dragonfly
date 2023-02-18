@@ -156,11 +156,12 @@ void Transaction::InitMultiData(KeyIndex key_index) {
   auto& tmp_uniques = tmp_space.uniq_keys;
   tmp_uniques.clear();
 
-  auto lock_key = [this, mode, &tmp_uniques](auto key) {
+  auto lock_key = [this, mode, &tmp_uniques](string_view key) {
     if (auto [_, inserted] = tmp_uniques.insert(key); !inserted)
       return;
+
     if (multi_->IsIncrLocks()) {
-      multi_->keys.push_back(key);
+      multi_->keys.emplace_back(key);
     } else {
       multi_->lock_counts[key][mode]++;
     }
@@ -591,9 +592,8 @@ void Transaction::ScheduleInternal() {
 
 void Transaction::MultiData::AddLocks(IntentLock::Mode mode) {
   DCHECK(IsIncrLocks());
-
-  for (auto key : keys) {
-    lock_counts[key][mode]++;
+  for (auto& key : keys) {
+    lock_counts[std::move(key)][mode]++;
   }
   keys.clear();
 }
@@ -675,9 +675,10 @@ void Transaction::UnlockMulti() {
   DCHECK_GE(GetUseCount(), 1u);  // Greater-equal because there may be callbacks in progress.
 
   auto sharded_keys = make_shared<vector<KeyList>>(shard_set->size());
-  for (const auto& [key, cnt] : multi_->lock_counts) {
-    ShardId sid = Shard(key, sharded_keys->size());
-    (*sharded_keys)[sid].emplace_back(key, cnt);
+  while (!multi_->lock_counts.empty()) {
+    auto entry = multi_->lock_counts.extract(multi_->lock_counts.begin());
+    ShardId sid = Shard(entry.key(), sharded_keys->size());
+    (*sharded_keys)[sid].emplace_back(std::move(entry.key()), entry.mapped());
   }
 
   unsigned shard_journals_cnt =

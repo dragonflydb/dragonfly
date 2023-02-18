@@ -46,6 +46,9 @@ ABSL_FLAG(uint32_t, memcache_port, 0, "Memcached port");
 ABSL_FLAG(int, multi_exec_mode, 1,
           "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for locking "
           "incrementally");
+ABSL_FLAG(int, multi_eval_mode, 2,
+          "Set EVAL atomicity mode: 1 for global, 2 for locking ahead, 3 for locking "
+          "incrementally");
 
 namespace dfly {
 
@@ -1007,6 +1010,13 @@ void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
   ss->RecordCallLatency(sha, (end - start) / 1000);
 }
 
+vector<bool> DetermineKeyShards(CmdArgList keys) {
+  vector<bool> out(shard_set->size());
+  for (auto k : keys)
+    out[Shard(facade::ToSV(k), out.size())] = true;
+  return out;
+}
+
 void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
                            ConnectionContext* cntx) {
   DCHECK(!eval_args.sha.empty());
@@ -1042,8 +1052,20 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   }
   DCHECK(cntx->transaction);
 
-  if (!eval_args.keys.empty())
+  bool scheduled = false;
+  int multi_mode = absl::GetFlag(FLAGS_multi_eval_mode);
+
+  if (multi_mode == Transaction::GLOBAL) {
+    scheduled = true;
+    cntx->transaction->StartMultiGlobal(cntx->db_index());
+  } else if (multi_mode == Transaction::LOCK_INCREMENTAL && !eval_args.keys.empty()) {
+    scheduled = true;
+    vector<bool> shards = DetermineKeyShards(eval_args.keys);
+    cntx->transaction->StartMultiLockedIncr(cntx->db_index(), shards);
+  } else if (multi_mode == Transaction::LOCK_AHEAD && !eval_args.keys.empty()) {
+    scheduled = true;
     cntx->transaction->StartMultiLockedAhead(cntx->db_index(), eval_args.keys);
+  }
 
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
@@ -1056,7 +1078,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   cntx->conn_state.script_info.reset();  // reset script_info
 
   // Conclude the transaction.
-  if (!eval_args.keys.empty())
+  if (scheduled)
     cntx->transaction->UnlockMulti();
 
   if (result == Interpreter::RUN_ERR) {
