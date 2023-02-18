@@ -45,10 +45,10 @@ ABSL_FLAG(uint32_t, memcache_port, 0, "Memcached port");
 
 ABSL_FLAG(int, multi_exec_mode, 1,
           "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for locking "
-          "incrementally");
+          "incrementally, 4 for non atomic");
 ABSL_FLAG(int, multi_eval_mode, 2,
           "Set EVAL atomicity mode: 1 for global, 2 for locking ahead, 3 for locking "
-          "incrementally");
+          "incrementally, 4 for non atomic");
 
 namespace dfly {
 
@@ -1054,6 +1054,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
 
   bool scheduled = false;
   int multi_mode = absl::GetFlag(FLAGS_multi_eval_mode);
+  DCHECK(multi_mode >= Transaction::GLOBAL && multi_mode <= Transaction::NON_ATOMIC);
 
   if (multi_mode == Transaction::GLOBAL) {
     scheduled = true;
@@ -1065,7 +1066,10 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   } else if (multi_mode == Transaction::LOCK_AHEAD && !eval_args.keys.empty()) {
     scheduled = true;
     cntx->transaction->StartMultiLockedAhead(cntx->db_index(), eval_args.keys);
-  }
+  } else if (multi_mode == Transaction::NON_ATOMIC) {
+    scheduled = true;
+    cntx->transaction->StartMultiNonAtomic();
+  };
 
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
@@ -1209,18 +1213,21 @@ bool StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo*
     return false;
 
   int multi_mode = absl::GetFlag(FLAGS_multi_exec_mode);
-  CHECK(multi_mode >= 1 && multi_mode <= 3);
+  DCHECK(multi_mode >= Transaction::GLOBAL && multi_mode <= Transaction::NON_ATOMIC);
 
   if (global || multi_mode == Transaction::GLOBAL) {
     trans->StartMultiGlobal(dbid);
   } else if (multi_mode == Transaction::LOCK_AHEAD) {
     *tmp_keys = CollectAllKeys(exec_info);
     trans->StartMultiLockedAhead(dbid, CmdArgList{*tmp_keys});
-  } else {
+  } else if (multi_mode == Transaction::LOCK_INCREMENTAL) {
     vector<bool> shards = DetermineKeyShards(exec_info);
     DCHECK(std::any_of(shards.begin(), shards.end(), [](bool s) { return s; }));
     trans->StartMultiLockedIncr(dbid, shards);
-  }
+  } else if (multi_mode == Transaction::NON_ATOMIC) {
+    trans->StartMultiNonAtomic();
+  } else
+    DCHECK(false) << "Invalid multi_exec_mode";
   return true;
 }
 

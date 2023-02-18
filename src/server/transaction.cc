@@ -149,6 +149,9 @@ void Transaction::InitMultiData(KeyIndex key_index) {
   DCHECK(multi_);
   auto args = cmd_with_full_args_;
 
+  if (multi_->mode == Transaction::NON_ATOMIC)
+    return;
+
   // TODO: determine correct locking mode for transactions, scripts and regular commands.
   IntentLock::Mode mode = Mode();
   multi_->keys.clear();
@@ -228,7 +231,8 @@ void Transaction::InitByKeys(KeyIndex key_index) {
   DCHECK_LT(key_index.start, args.size());
 
   bool needs_reverse_mapping = cid_->opt_mask() & CO::REVERSE_MAPPING;
-  bool single_key = !multi_ && key_index.HasSingleKey();
+  bool single_key =
+      key_index.HasSingleKey() && (!multi_ || multi_->mode == Transaction::NON_ATOMIC);
 
   if (single_key) {
     DCHECK_GT(key_index.step, 0u);
@@ -266,7 +270,7 @@ void Transaction::InitByKeys(KeyIndex key_index) {
   // Compress shard data, if we occupy only one shard.
   if (unique_shard_cnt_ == 1) {
     PerShardData* sd;
-    if (multi_) {
+    if (multi_ && multi_->mode != NON_ATOMIC) {
       sd = &shard_data_[unique_shard_id_];
     } else {
       shard_data_.resize(1);
@@ -353,14 +357,25 @@ void Transaction::StartMultiLockedIncr(DbIndex dbid, const vector<bool>& shards)
   ScheduleInternal();
 }
 
+void Transaction::StartMultiNonAtomic() {
+  DCHECK(multi_);
+  multi_->mode = NON_ATOMIC;
+}
+
 void Transaction::MultiSwitchCmd(const CommandId* cid) {
   DCHECK(multi_);
   DCHECK(!cb_);
 
+  unique_shard_id_ = 0;
   unique_shard_cnt_ = 0;
   args_.clear();
   cid_ = cid;
   cb_ = nullptr;
+
+  if (multi_->mode == NON_ATOMIC) {
+    shard_data_.resize(0);
+    txid_ = 0;
+  }
 }
 
 string Transaction::DebugId() const {
@@ -397,7 +412,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
   // whether we should unlock the keys. should_release is false for multi and
   // equal to concluding otherwise.
   bool is_concluding = (coordinator_state_ & COORD_EXEC_CONCLUDING);
-  bool should_release = is_concluding && !multi_;
+  bool should_release = is_concluding && !IsRunningMulti();
   IntentLock::Mode mode = Mode();
 
   // We make sure that we lock exactly once for each (multi-hop) transaction inside
@@ -609,14 +624,15 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   DCHECK(!cb_);
   cb_ = std::move(cb);
 
-  DCHECK(multi_ || (coordinator_state_ & COORD_SCHED) == 0);   // Only multi schedule in advance.
+  DCHECK(IsRunningMulti() ||
+         (coordinator_state_ & COORD_SCHED) == 0);             // Only multi schedule in advance.
   coordinator_state_ |= (COORD_EXEC | COORD_EXEC_CONCLUDING);  // Single hop means we conclude.
 
   bool was_ooo = false;
 
   // If we run only on one shard and conclude, we can avoid scheduling at all
   // and directly dispatch the task to its destination shard.
-  bool schedule_fast = (unique_shard_cnt_ == 1) && !IsGlobal() && !multi_;
+  bool schedule_fast = (unique_shard_cnt_ == 1) && !IsGlobal() && !IsRunningMulti();
   if (schedule_fast) {
     DCHECK_EQ(1u, shard_data_.size());
 
@@ -648,7 +664,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   } else {
     // This transaction either spans multiple shards and/or is multi.
 
-    if (!multi_)  // Multi schedule in advance.
+    if (!IsRunningMulti())  // Multi schedule in advance.
       ScheduleInternal();
 
     if (multi_ && multi_->IsIncrLocks())
@@ -673,6 +689,9 @@ void Transaction::UnlockMulti() {
   VLOG(1) << "UnlockMulti " << DebugId();
   DCHECK(multi_);
   DCHECK_GE(GetUseCount(), 1u);  // Greater-equal because there may be callbacks in progress.
+
+  if (multi_->mode == NON_ATOMIC)
+    return;
 
   auto sharded_keys = make_shared<vector<KeyList>>(shard_set->size());
   while (!multi_->lock_counts.empty()) {
@@ -712,7 +731,7 @@ void Transaction::Schedule() {
   if (multi_ && multi_->IsIncrLocks())
     multi_->AddLocks(Mode());
 
-  if (!multi_)
+  if (!IsRunningMulti())
     ScheduleInternal();
 }
 
@@ -797,7 +816,7 @@ void Transaction::ExecuteAsync() {
 }
 
 void Transaction::RunQuickie(EngineShard* shard) {
-  DCHECK(!multi_);
+  DCHECK(!IsRunningMulti());
   DCHECK_EQ(1u, shard_data_.size());
   DCHECK_EQ(0u, txid_);
 
@@ -867,7 +886,7 @@ KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
 // Optimized path that schedules and runs transactions out of order if possible.
 // Returns true if was eagerly executed, false if it was scheduled into queue.
 bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
-  DCHECK(!multi_);
+  DCHECK(!IsRunningMulti());
   DCHECK_EQ(0u, txid_);
   DCHECK_EQ(1u, shard_data_.size());
 
@@ -1258,10 +1277,12 @@ void Transaction::LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&
                                     bool allow_await) const {
   auto journal = shard->journal();
   CHECK(journal);
-  if (multi_) {
+  if (multi_)
     multi_->shard_journal_write[shard->shard_id()] = true;
-  }
-  auto opcode = (multi_ || multi_commands) ? journal::Op::MULTI_COMMAND : journal::Op::COMMAND;
+
+  bool is_multi = multi_commands || IsRunningMulti();
+
+  auto opcode = is_multi ? journal::Op::MULTI_COMMAND : journal::Op::COMMAND;
   journal->RecordEntry(txid_, opcode, db_index_, shard_cnt, std::move(payload), allow_await);
 }
 

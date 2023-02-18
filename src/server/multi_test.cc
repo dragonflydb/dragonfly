@@ -192,6 +192,10 @@ TEST_F(MultiTest, MultiSeq) {
 }
 
 TEST_F(MultiTest, MultiConsistent) {
+  int multi_mode = absl::GetFlag(FLAGS_multi_exec_mode);
+  if (multi_mode == Transaction::NON_ATOMIC)
+    return;
+
   auto mset_fb = pp_->at(0)->LaunchFiber([&] {
     for (size_t i = 1; i < 10; ++i) {
       string base = StrCat(i * 900);
@@ -341,13 +345,9 @@ TEST_F(MultiTest, Eval) {
 
   ASSERT_FALSE(service_->IsLocked(0, "foo"));
 
-  VLOG(0) << "p1";
-
   resp = Run({"eval", "return redis.call('get', 'foo')", "1", "foo"});
   EXPECT_THAT(resp, "42");
   ASSERT_FALSE(service_->IsLocked(0, "foo"));
-
-  VLOG(0) << "p2";
 
   resp = Run({"eval", "return redis.call('get', KEYS[1])", "1", "foo"});
   EXPECT_THAT(resp, "42");
@@ -481,7 +481,8 @@ TEST_F(MultiTest, MultiOOO) {
   auto metrics = GetMetrics();
 
   // OOO works in LOCK_AHEAD mode.
-  if (absl::GetFlag(FLAGS_multi_exec_mode) == Transaction::LOCK_AHEAD)
+  int mode = absl::GetFlag(FLAGS_multi_exec_mode);
+  if (mode == Transaction::LOCK_AHEAD || mode == Transaction::NON_ATOMIC)
     EXPECT_EQ(200, metrics.ooo_tx_transaction_cnt);
   else
     EXPECT_EQ(0, metrics.ooo_tx_transaction_cnt);
@@ -513,7 +514,8 @@ TEST_F(MultiTest, EvalOOO) {
   }
 
   auto metrics = GetMetrics();
-  if (absl::GetFlag(FLAGS_multi_eval_mode) == Transaction::LOCK_AHEAD)
+  int mode = absl::GetFlag(FLAGS_multi_eval_mode);
+  if (mode == Transaction::LOCK_AHEAD || mode == Transaction::NON_ATOMIC)
     EXPECT_EQ(1 + 2 * kTimes, metrics.ooo_tx_transaction_cnt);
   else
     EXPECT_EQ(0, metrics.ooo_tx_transaction_cnt);

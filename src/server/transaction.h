@@ -75,7 +75,7 @@ class Transaction {
     // The shards to schedule on are detemined ahead and remain fixed.
     LOCK_INCREMENTAL = 3,
     // Each command is executed separately. Equivalent to a pipeline.
-    NOT_ATOMIC = 4,
+    NON_ATOMIC = 4,
   };
 
   // State on specific shard.
@@ -150,6 +150,9 @@ class Transaction {
   // Start multi in LOCK_INCREMENTAL mode on given shards.
   void StartMultiLockedIncr(DbIndex dbid, const std::vector<bool>& shards);
 
+  // Start multi in NON_ATOMIC mode.
+  void StartMultiNonAtomic();
+
   // Unlock key locks of a multi transaction.
   void UnlockMulti();
 
@@ -203,6 +206,10 @@ class Transaction {
 
   bool IsMulti() const {
     return bool(multi_);
+  }
+
+  bool IsRunningMulti() const {
+    return multi_ && multi_->mode != NON_ATOMIC;
   }
 
   MultiMode GetMultiMode() const {
