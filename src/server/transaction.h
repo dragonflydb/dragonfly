@@ -63,14 +63,30 @@ class Transaction {
   // Provides keys to block on for specific shard.
   using WaitKeysProvider = std::function<ArgSlice(Transaction*, EngineShard* shard)>;
 
+  // Modes in which a multi transaction can run.
+  enum MultiMode {
+    // Invalid state.
+    NOT_DETERMINED = 0,
+    // Global transaction.
+    GLOBAL = 1,
+    // Keys are locked ahead during Schedule.
+    LOCK_AHEAD = 2,
+    // Keys are locked incrementally during each new command.
+    // The shards to schedule on are detemined ahead and remain fixed.
+    LOCK_INCREMENTAL = 3,
+    // Each command is executed separately. Equivalent to a pipeline.
+    NOT_ATOMIC = 4,
+  };
+
   // State on specific shard.
   enum LocalMask : uint16_t {
-    ARMED = 1,                  // Whether callback cb_ is set
-    OUT_OF_ORDER = 1 << 1,      // Whether its running out of order
-    KEYLOCK_ACQUIRED = 1 << 2,  // Whether its key locks are acquired
-    SUSPENDED_Q = 1 << 3,       // Whether is suspened (by WatchInShard())
-    AWAKED_Q = 1 << 4,          // Whether it was awakened (by NotifySuspended())
-    EXPIRED_Q = 1 << 5,         // Whether it timed out and should be dropped
+    ACTIVE = 1,                 // Set on all active shards.
+    ARMED = 1 << 1,             // Whether callback cb_ is set
+    OUT_OF_ORDER = 1 << 2,      // Whether its running out of order
+    KEYLOCK_ACQUIRED = 1 << 3,  // Whether its key locks are acquired
+    SUSPENDED_Q = 1 << 4,       // Whether is suspened (by WatchInShard())
+    AWAKED_Q = 1 << 5,          // Whether it was awakened (by NotifySuspended())
+    EXPIRED_Q = 1 << 6,         // Whether it timed out and should be dropped
   };
 
  public:
@@ -125,11 +141,20 @@ class Transaction {
     renabled_auto_journal_.store(true, std::memory_order_relaxed);
   }
 
+  // Start multi in GLOBAL mode.
+  void StartMultiGlobal(DbIndex dbid);
+
+  // Start multi in LOCK_AHEAD mode with given keys.
+  void StartMultiLockedAhead(DbIndex dbid, CmdArgList keys);
+
+  // Start multi in LOCK_INCREMENTAL mode on given shards.
+  void StartMultiLockedIncr(DbIndex dbid, const std::vector<bool>& shards);
+
   // Unlock key locks of a multi transaction.
   void UnlockMulti();
 
-  // Reset CommandId to be executed when executing MULTI/EXEC or from script.
-  void SetExecCmd(const CommandId* cid);
+  // Set new command for multi transaction.
+  void MultiSwitchCmd(const CommandId* cid);
 
   // Returns locking arguments needed for DbSlice to Acquire/Release transactional locks.
   // Runs in the shard thread.
@@ -249,6 +274,11 @@ class Transaction {
     // Increase lock counts for all current keys for mode. Clear keys.
     void AddLocks(IntentLock::Mode mode);
 
+    // Whether it locks incrementally.
+    bool IsIncrLocks() const;
+
+    MultiMode mode;
+
     absl::flat_hash_map<std::string_view, LockCnt> lock_counts;
     std::vector<std::string_view> keys;
 
@@ -257,10 +287,7 @@ class Transaction {
     // executing multi-command. For every write to a shard journal, the corresponding index in the
     // vector is marked as true.
     absl::InlinedVector<bool, 4> shard_journal_write;
-    uint32_t multi_opts = 0;  // options of the parent transaction.
 
-    // Whether this transaction can lock more keys during its progress.
-    bool is_expanding = true;
     bool locks_recorded = false;
   };
 
@@ -276,10 +303,12 @@ class Transaction {
   };
 
   struct PerShardCache {
+    bool requested_active = false;  // Activate on shard geradless of presence of keys.
     std::vector<std::string_view> args;
     std::vector<uint32_t> original_index;
 
     void Clear() {
+      requested_active = false;
       args.clear();
       original_index.clear();
     }
@@ -377,7 +406,7 @@ class Transaction {
       f(shard_data_[SidToId(i)], i);
     } else {
       for (ShardId i = 0; i < shard_data_.size(); ++i) {
-        if (auto& sd = shard_data_[i]; global_ || sd.arg_count > 0) {
+        if (auto& sd = shard_data_[i]; global_ || (sd.local_mask & ACTIVE)) {
           f(sd, i);
         }
       }
@@ -434,8 +463,12 @@ class Transaction {
 
  private:
   struct TLTmpSpace {
-    std::vector<PerShardCache> shard_cache;
     absl::flat_hash_set<std::string_view> uniq_keys;
+
+    std::vector<PerShardCache>& GetShardIndex(unsigned size);
+
+   private:
+    std::vector<PerShardCache> shard_cache;
   };
 
   static thread_local TLTmpSpace tmp_space;

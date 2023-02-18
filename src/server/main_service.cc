@@ -43,6 +43,10 @@ using namespace std;
 ABSL_FLAG(uint32_t, port, 6379, "Redis port");
 ABSL_FLAG(uint32_t, memcache_port, 0, "Memcached port");
 
+ABSL_FLAG(int, multi_exec_mode, 1,
+          "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for locking "
+          "incrementally");
+
 namespace dfly {
 
 #if __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
@@ -399,7 +403,7 @@ bool IsTransactional(const CommandId* cid) {
 
   string_view name{cid->name()};
 
-  if (name == "EVAL" || name == "EVALSHA")
+  if (name == "EVAL" || name == "EVALSHA" || name == "EXEC")
     return true;
 
   return false;
@@ -664,7 +668,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
         }
       }
 
-      dfly_cntx->transaction->SetExecCmd(cid);
+      dfly_cntx->transaction->MultiSwitchCmd(cid);
       OpStatus st = dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args);
 
       if (st != OpStatus::OK) {
@@ -676,9 +680,12 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
     if (IsTransactional(cid)) {
       dist_trans.reset(new Transaction{cid});
-      OpStatus st = dist_trans->InitByArgs(dfly_cntx->conn_state.db_index, args);
-      if (st != OpStatus::OK)
-        return (*cntx)->SendError(st);
+
+      if (!dist_trans->IsMulti()) {  // Multi command initialize themself based on their mode.
+        if (auto st = dist_trans->InitByArgs(dfly_cntx->conn_state.db_index, args);
+            st != OpStatus::OK)
+          return (*cntx)->SendError(st);
+      }
 
       dfly_cntx->transaction = dist_trans.get();
       dfly_cntx->last_command_debug.shards_count = dfly_cntx->transaction->GetUniqueShardCnt();
@@ -1036,7 +1043,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   DCHECK(cntx->transaction);
 
   if (!eval_args.keys.empty())
-    cntx->transaction->Schedule();
+    cntx->transaction->StartMultiLockedAhead(cntx->db_index(), eval_args.keys);
 
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
@@ -1099,9 +1106,7 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandRegistry& regis
     return OpStatus::OK;
   };
 
-  VLOG(1) << "Checking expired watch keys";
-
-  cntx->transaction->SetExecCmd(registry.Find(EXISTS));
+  cntx->transaction->MultiSwitchCmd(registry.Find(EXISTS));
   cntx->transaction->InitByArgs(cntx->conn_state.db_index,
                                 CmdArgList{str_list.data(), str_list.size()});
   OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
@@ -1121,6 +1126,80 @@ bool IsWatchingOtherDbs(DbIndex db_indx, const ConnectionState::ExecInfo& exec_i
     }
   }
   return false;
+}
+
+template <typename F> void IterateAllKeys(ConnectionState::ExecInfo* exec_info, F&& f) {
+  for (auto& [dbid, key] : exec_info->watched_keys)
+    f(MutableSlice{key.data(), key.size()});
+
+  for (const auto& scmd : exec_info->body) {
+    if (!IsTransactional(scmd.descr))
+      continue;
+
+    auto args = scmd.ArgList();
+
+    auto key_res = DetermineKeys(scmd.descr, args);
+    if (!key_res.ok())
+      continue;
+
+    auto key_index = key_res.value();
+
+    for (unsigned i = key_index.start; i < key_index.end; i += key_index.step)
+      f(args[i]);
+
+    if (key_index.bonus)
+      f(args[key_index.bonus]);
+  }
+}
+
+CmdArgVec CollectAllKeys(ConnectionState::ExecInfo* exec_info) {
+  CmdArgVec out;
+  out.reserve(exec_info->watched_keys.size() + exec_info->body.size());
+
+  IterateAllKeys(exec_info, [&out](MutableSlice key) { out.push_back(key); });
+
+  return out;
+}
+
+vector<bool> DetermineKeyShards(ConnectionState::ExecInfo* exec_info) {
+  vector<bool> out(shard_set->size());
+
+  IterateAllKeys(exec_info, [&out](MutableSlice key) {
+    ShardId sid = Shard(facade::ToSV(key), shard_set->size());
+    out[sid] = true;
+  });
+  return out;
+}
+
+// Return true if transaction was scheduled, false if scheduling was not required.
+bool StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo* exec_info,
+                    CmdArgVec* tmp_keys) {
+  bool global = false;
+  bool transactional = false;
+  for (const auto& scmd : exec_info->body) {
+    transactional |= IsTransactional(scmd.descr);
+    global |= scmd.descr->opt_mask() & CO::GLOBAL_TRANS;
+    if (global)
+      break;
+  }
+
+  if (!transactional && exec_info->watched_keys.empty())
+    return false;
+
+  int multi_mode = absl::GetFlag(FLAGS_multi_exec_mode);
+  CHECK(multi_mode >= 1 && multi_mode <= 3);
+
+  if (global || multi_mode == Transaction::GLOBAL) {
+    trans->StartMultiGlobal(dbid);
+  } else if (multi_mode == Transaction::LOCK_AHEAD) {
+    *tmp_keys = CollectAllKeys(exec_info);
+    trans->StartMultiLockedAhead(dbid, CmdArgList{*tmp_keys});
+  } else {
+    vector<bool> shards = DetermineKeyShards(exec_info);
+    DCHECK(std::any_of(shards.begin(), shards.end(), [](bool s) { return s; }));
+    trans->StartMultiLockedIncr(dbid, shards);
+  }
+  return true;
 }
 
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
@@ -1145,6 +1224,9 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     return rb->SendNull();
   }
 
+  CmdArgVec tmp_keys;
+  bool scheduled = StartMultiExec(cntx->db_index(), cntx->transaction, &exec_info, &tmp_keys);
+
   // EXEC should not run if any of the watched keys expired.
   if (!exec_info.watched_keys.empty() && !CheckWatchedKeyExpiry(cntx, registry_)) {
     cntx->transaction->UnlockMulti();
@@ -1158,7 +1240,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     CmdArgVec str_list;
 
     for (auto& scmd : exec_info.body) {
-      cntx->transaction->SetExecCmd(scmd.descr);
+      cntx->transaction->MultiSwitchCmd(scmd.descr);
       if (IsTransactional(scmd.descr)) {
         OpStatus st = cntx->transaction->InitByArgs(cntx->conn_state.db_index, scmd.ArgList());
         if (st != OpStatus::OK) {
@@ -1170,7 +1252,9 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
       if (rb->GetError())  // checks for i/o error, not logical error.
         break;
     }
+  }
 
+  if (scheduled) {
     VLOG(1) << "Exec unlocking " << exec_info.body.size() << " commands";
     cntx->transaction->UnlockMulti();
   }
@@ -1433,8 +1517,6 @@ using ServiceFunc = void (Service::*)(CmdArgList, ConnectionContext* cntx);
 void Service::RegisterCommands() {
   using CI = CommandId;
 
-  constexpr auto kExecMask = CO::LOADING | CO::NOSCRIPT | CO::GLOBAL_TRANS;
-
   registry_
       << CI{"QUIT", CO::READONLY | CO::FAST, 1, 0, 0, 0}.HFUNC(Quit)
       << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(Multi)
@@ -1445,7 +1527,7 @@ void Service::RegisterCommands() {
              &EvalValidator)
       << CI{"EVALSHA", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, 1}.MFUNC(EvalSha).SetValidator(
              &EvalValidator)
-      << CI{"EXEC", kExecMask, 1, 0, 0, 0}.MFUNC(Exec)
+      << CI{"EXEC", CO::LOADING | CO::NOSCRIPT, 1, 0, 0, 1}.MFUNC(Exec)
       << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, 0}.MFUNC(Publish)
       << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.MFUNC(Subscribe)
       << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(Unsubscribe)
