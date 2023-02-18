@@ -45,12 +45,9 @@ Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   string_view cmd_name(cid_->name());
   if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA") {
     multi_.reset(new MultiData);
-    multi_->multi_opts = cid->opt_mask();
     multi_->shard_journal_write.resize(shard_set->size(), false);
 
-    if (cmd_name == "EVAL" || cmd_name == "EVALSHA") {
-      multi_->is_expanding = false;  // we lock all the keys at once.
-    }
+    multi_->mode = NOT_DETERMINED;
   }
 }
 
@@ -70,6 +67,8 @@ void Transaction::InitGlobal() {
   global_ = true;
   unique_shard_cnt_ = shard_set->size();
   shard_data_.resize(unique_shard_cnt_);
+  for (auto& sd : shard_data_)
+    sd.local_mask = ACTIVE;
 }
 
 void Transaction::BuildShardIndex(KeyIndex key_index, bool rev_mapping,
@@ -77,9 +76,6 @@ void Transaction::BuildShardIndex(KeyIndex key_index, bool rev_mapping,
   auto args = cmd_with_full_args_;
 
   auto& shard_index = *out;
-  shard_index.resize(shard_data_.size());
-  for (auto& v : shard_index)
-    v.Clear();
 
   auto add = [this, rev_mapping, &shard_index](uint32_t sid, uint32_t i) {
     string_view val = ArgS(cmd_with_full_args_, i);
@@ -107,8 +103,6 @@ void Transaction::BuildShardIndex(KeyIndex key_index, bool rev_mapping,
 
 void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, size_t num_args,
                                 bool rev_mapping) {
-  bool incremental_locking = multi_ && multi_->is_expanding;
-
   args_.reserve(num_args);
   if (rev_mapping)
     reverse_index_.reserve(args_.size());
@@ -124,12 +118,19 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
     sd.arg_count = si.args.size();
     sd.arg_start = args_.size();
 
-    // Reset mask to allow locking multiple times.
-    if (incremental_locking)
-      sd.local_mask = 0;
+    if (multi_) {
+      // Multi transactions can re-intitialize on different shards, so clear ACTIVE flag.
+      sd.local_mask &= ~ACTIVE;
 
-    if (!sd.arg_count)
+      // If we increase locks, clear KEYLOCK_ACQUIRED to track new locks.
+      if (multi_->IsIncrLocks())
+        sd.local_mask &= ~KEYLOCK_ACQUIRED;
+    }
+
+    if (sd.arg_count == 0 && !si.requested_active)
       continue;
+
+    sd.local_mask |= ACTIVE;
 
     unique_shard_cnt_++;
     unique_shard_id_ = i;
@@ -158,7 +159,7 @@ void Transaction::InitMultiData(KeyIndex key_index) {
   auto lock_key = [this, mode, &tmp_uniques](auto key) {
     if (auto [_, inserted] = tmp_uniques.insert(key); !inserted)
       return;
-    if (multi_->is_expanding) {
+    if (multi_->IsIncrLocks()) {
       multi_->keys.push_back(key);
     } else {
       multi_->lock_counts[key][mode]++;
@@ -167,7 +168,7 @@ void Transaction::InitMultiData(KeyIndex key_index) {
 
   // With EVAL, we call this function for EVAL itself as well as for each command
   // for eval. currently, we lock everything only during the eval call.
-  if (multi_->is_expanding || !multi_->locks_recorded) {
+  if (multi_->IsIncrLocks() || !multi_->locks_recorded) {
     for (size_t i = key_index.start; i < key_index.end; i += key_index.step)
       lock_key(ArgS(args, i));
     if (key_index.bonus > 0)
@@ -224,7 +225,6 @@ void Transaction::InitByKeys(KeyIndex key_index) {
   }
 
   DCHECK_LT(key_index.start, args.size());
-  DCHECK_GT(key_index.start, 0u);
 
   bool needs_reverse_mapping = cid_->opt_mask() & CO::REVERSE_MAPPING;
   bool single_key = !multi_ && key_index.HasSingleKey();
@@ -236,6 +236,8 @@ void Transaction::InitByKeys(KeyIndex key_index) {
     StoreKeysInArgs(key_index, needs_reverse_mapping);
 
     shard_data_.resize(1);
+    shard_data_.front().local_mask |= ACTIVE;
+
     unique_shard_cnt_ = 1;
     unique_shard_id_ = Shard(args_.front(), shard_set->size());
 
@@ -246,7 +248,8 @@ void Transaction::InitByKeys(KeyIndex key_index) {
   CHECK(key_index.step == 1 || key_index.step == 2);
   DCHECK(key_index.step == 1 || (args.size() % 2) == 1);
 
-  auto& shard_index = tmp_space.shard_cache;  // Safe, because flow below is not preemptive.
+  // Safe, because flow below is not preemptive.
+  auto& shard_index = tmp_space.GetShardIndex(shard_data_.size());
 
   // Distribute all the arguments by shards.
   BuildShardIndex(key_index, needs_reverse_mapping, &shard_index);
@@ -310,17 +313,48 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
   return OpStatus::OK;
 }
 
-void Transaction::SetExecCmd(const CommandId* cid) {
+void Transaction::StartMultiGlobal(DbIndex dbid) {
+  CHECK(multi_);
+  CHECK(shard_data_.empty());  // Make sure default InitByArgs didn't run.
+
+  multi_->mode = GLOBAL;
+  InitBase(dbid, {});
+  InitGlobal();
+
+  ScheduleInternal();
+}
+
+void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgList keys) {
+  DCHECK(multi_);
+  DCHECK(shard_data_.empty());  // Make sure default InitByArgs didn't run.
+
+  multi_->mode = LOCK_AHEAD;
+  InitBase(dbid, keys);
+  InitByKeys(KeyIndex::Range(0, keys.size()));
+
+  ScheduleInternal();
+}
+
+void Transaction::StartMultiLockedIncr(DbIndex dbid, const vector<bool>& shards) {
+  DCHECK(multi_);
+  DCHECK(shard_data_.empty());  // Make sure default InitByArgs didn't run.
+
+  multi_->mode = LOCK_INCREMENTAL;
+  InitBase(dbid, {});
+
+  auto& shard_index = tmp_space.GetShardIndex(shard_set->size());
+  for (size_t i = 0; i < shards.size(); i++)
+    shard_index[i].requested_active = shards[i];
+
+  shard_data_.resize(shard_index.size());
+  InitShardData(shard_index, 0, false);
+
+  ScheduleInternal();
+}
+
+void Transaction::MultiSwitchCmd(const CommandId* cid) {
   DCHECK(multi_);
   DCHECK(!cb_);
-
-  // The order is important, we call Schedule for multi transaction before overriding cid_.
-  // TODO: The flow is ugly. Consider introducing a proper interface for Multi transactions
-  // like SetupMulti/TurndownMulti. We already have UnlockMulti that should be part of
-  // TurndownMulti.
-  if (txid_ == 0) {
-    ScheduleInternal();
-  }
 
   unique_shard_cnt_ = 0;
   args_.clear();
@@ -354,7 +388,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
 
   bool was_suspended = sd.local_mask & SUSPENDED_Q;
   bool awaked_prerun = (sd.local_mask & AWAKED_Q) != 0;
-  bool incremental_lock = multi_ && multi_->is_expanding;
+  bool incremental_lock = multi_ && multi_->IsIncrLocks();
 
   // For multi we unlock transaction (i.e. its keys) in UnlockMulti() call.
   // Therefore we differentiate between concluding, which says that this specific
@@ -374,7 +408,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
     shard->db_slice().Acquire(mode, GetLockArgs(idx));
   }
 
-  DCHECK(IsGlobal() || (sd.local_mask & KEYLOCK_ACQUIRED));
+  DCHECK(IsGlobal() || (sd.local_mask & KEYLOCK_ACQUIRED) || (multi_ && multi_->mode == GLOBAL));
 
   /*************************************************************************/
   // Actually running the callback.
@@ -482,7 +516,7 @@ void Transaction::ScheduleInternal() {
     DCHECK_GT(num_shards, 0u);
 
     is_active = [&](uint32_t i) {
-      return num_shards == 1 ? (i == unique_shard_id_) : shard_data_[i].arg_count > 0;
+      return num_shards == 1 ? (i == unique_shard_id_) : shard_data_[i].local_mask & ACTIVE;
     };
   }
 
@@ -501,12 +535,14 @@ void Transaction::ScheduleInternal() {
     };
     shard_set->RunBriefInParallel(std::move(cb), is_active);
 
+    bool ooo_disabled = IsGlobal() || (multi_ && multi_->IsIncrLocks());
+
     if (success.load(memory_order_acquire) == num_shards) {
       coordinator_state_ |= COORD_SCHED;
       // If we granted all locks, we can run out of order.
-      if (!span_all && lock_granted_cnt.load(memory_order_relaxed) == num_shards) {
+      if (!ooo_disabled && lock_granted_cnt.load(memory_order_relaxed) == num_shards) {
         // Currently we don't support OOO for incremental locking. Sp far they are global.
-        DCHECK(!(multi_ && multi_->is_expanding));
+        // DCHECK(!(multi_ && multi_->IsIncrLocks()));
         coordinator_state_ |= COORD_OOO;
       }
       VLOG(2) << "Scheduled " << DebugId()
@@ -554,12 +590,16 @@ void Transaction::ScheduleInternal() {
 }
 
 void Transaction::MultiData::AddLocks(IntentLock::Mode mode) {
-  DCHECK(is_expanding);
+  DCHECK(IsIncrLocks());
 
   for (auto key : keys) {
     lock_counts[key][mode]++;
   }
   keys.clear();
+}
+
+bool Transaction::MultiData::IsIncrLocks() const {
+  return mode == LOCK_INCREMENTAL;
 }
 
 // Optimized "Schedule and execute" function for the most common use-case of a single hop
@@ -611,7 +651,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     if (!multi_)  // Multi schedule in advance.
       ScheduleInternal();
 
-    if (multi_ && multi_->is_expanding)
+    if (multi_ && multi_->IsIncrLocks())
       multi_->AddLocks(Mode());
 
     ExecuteAsync();
@@ -668,11 +708,11 @@ uint32_t Transaction::CalcMultiNumOfShardJournals() const {
 }
 
 void Transaction::Schedule() {
-  if (multi_ && multi_->is_expanding) {
+  if (multi_ && multi_->IsIncrLocks())
     multi_->AddLocks(Mode());
-  } else {
+
+  if (!multi_)
     ScheduleInternal();
-  }
 }
 
 // Runs in coordinator thread.
@@ -943,6 +983,7 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
   if (sd.local_mask & KEYLOCK_ACQUIRED) {
     auto mode = Mode();
     auto lock_args = GetLockArgs(shard->shard_id());
+    DCHECK(lock_args.args.size() > 0 || (multi_ && multi_->mode == LOCK_INCREMENTAL));
     shard->db_slice().Release(mode, lock_args);
     sd.local_mask &= ~KEYLOCK_ACQUIRED;
   }
@@ -956,7 +997,7 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
 
 // runs in engine-shard thread.
 ArgSlice Transaction::GetShardArgs(ShardId sid) const {
-  DCHECK(!args_.empty());
+  DCHECK(!args_.empty() || (multi_ && multi_->IsIncrLocks()));
 
   // We can read unique_shard_cnt_  only because ShardArgsInShard is called after IsArmedInShard
   // barrier.
@@ -1061,25 +1102,24 @@ void Transaction::UnwatchShardCb(ArgSlice wkeys, bool should_expire, EngineShard
 void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard,
                                      uint32_t shard_journals_cnt) {
   auto journal = shard->journal();
-
   if (journal != nullptr && multi_->shard_journal_write[shard->shard_id()] == true) {
     journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_journals_cnt, {}, true);
   }
 
-  if (multi_->multi_opts & CO::GLOBAL_TRANS) {
+  if (multi_->mode == GLOBAL) {
     shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
-  }
+  } else {
+    ShardId sid = shard->shard_id();
+    for (const auto& k_v : sharded_keys[sid]) {
+      auto release = [&](IntentLock::Mode mode) {
+        if (k_v.second[mode]) {
+          shard->db_slice().Release(mode, db_index_, k_v.first, k_v.second[mode]);
+        }
+      };
 
-  ShardId sid = shard->shard_id();
-  for (const auto& k_v : sharded_keys[sid]) {
-    auto release = [&](IntentLock::Mode mode) {
-      if (k_v.second[mode]) {
-        shard->db_slice().Release(mode, db_index_, k_v.first, k_v.second[mode]);
-      }
-    };
-
-    release(IntentLock::SHARED);
-    release(IntentLock::EXCLUSIVE);
+      release(IntentLock::SHARED);
+      release(IntentLock::EXCLUSIVE);
+    }
   }
 
   auto& sd = shard_data_[SidToId(shard->shard_id())];
@@ -1241,7 +1281,8 @@ void Transaction::BreakOnShutdown() {
 }
 
 OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
-  DCHECK_EQ(0u, cid->opt_mask() & CO::GLOBAL_TRANS);
+  if (cid->opt_mask() & CO::GLOBAL_TRANS)
+    return KeyIndex::Empty();
 
   KeyIndex key_index;
 
@@ -1286,6 +1327,13 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
   LOG(FATAL) << "TBD: Not supported " << cid->name();
 
   return key_index;
+}
+
+std::vector<Transaction::PerShardCache>& Transaction::TLTmpSpace::GetShardIndex(unsigned size) {
+  shard_cache.resize(size);
+  for (auto& v : shard_cache)
+    v.Clear();
+  return shard_cache;
 }
 
 }  // namespace dfly

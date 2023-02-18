@@ -58,12 +58,21 @@ struct KeyLockArgs {
 
 // Describes key indices.
 struct KeyIndex {
-  // if index is non-zero then adds another key index (usually 1).
-  // relevant for for commands like ZUNIONSTORE/ZINTERSTORE for destination key.
-  unsigned bonus = 0;
   unsigned start;
   unsigned end;   // does not include this index (open limit).
   unsigned step;  // 1 for commands like mget. 2 for commands like mset.
+
+  // if index is non-zero then adds another key index (usually 1).
+  // relevant for for commands like ZUNIONSTORE/ZINTERSTORE for destination key.
+  unsigned bonus = 0;
+
+  static KeyIndex Empty() {
+    return KeyIndex{0, 0, 0, 0};
+  }
+
+  static KeyIndex Range(unsigned start, unsigned end, unsigned step = 1) {
+    return KeyIndex{start, end, step, 0};
+  }
 
   bool HasSingleKey() const {
     return bonus == 0 && (start + step >= end);

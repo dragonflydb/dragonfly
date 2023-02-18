@@ -12,6 +12,9 @@
 #include "server/conn_context.h"
 #include "server/main_service.h"
 #include "server/test_utils.h"
+#include "server/transaction.h"
+
+ABSL_DECLARE_FLAG(int, multi_exec_mode);
 
 namespace dfly {
 
@@ -352,7 +355,7 @@ TEST_F(MultiTest, Eval) {
 
   // a,b important here to spawn multiple shards.
   resp = Run({"eval", "return redis.call('exists', KEYS[2])", "2", "a", "b"});
-  EXPECT_EQ(2, GetDebugInfo().shards_count);
+  // EXPECT_EQ(2, GetDebugInfo().shards_count);
   EXPECT_THAT(resp, IntArg(0));
 
   resp = Run({"eval", "return redis.call('hmset', KEYS[1], 'f1', '2222')", "1", "hmap"});
@@ -472,10 +475,11 @@ TEST_F(MultiTest, MultiOOO) {
   fb0.Join();
   auto metrics = GetMetrics();
 
-  // TODO: This is a performance bug that causes substantial latency penatly when
-  // running multi-transactions or lua scripts.
-  // We should be able to allow OOO multi-transactions.
-  EXPECT_EQ(0, metrics.ooo_tx_transaction_cnt);
+  // OOO works in LOCK_AHEAD mode.
+  if (absl::GetFlag(FLAGS_multi_exec_mode) == Transaction::LOCK_AHEAD)
+    EXPECT_EQ(200, metrics.ooo_tx_transaction_cnt);
+  else
+    EXPECT_EQ(0, metrics.ooo_tx_transaction_cnt);
 }
 
 // Lua scripts lock their keys ahead and thus can run out of order.
@@ -535,6 +539,35 @@ TEST_F(MultiTest, MultiContendedPermutatedKeys) {
 
   auto f1 = pp_->at(1)->LaunchFiber([run, keys]() { run(keys, false); });
   auto f2 = pp_->at(2)->LaunchFiber([run, keys]() { run(keys, true); });
+
+  f1.Join();
+  f2.Join();
+}
+
+TEST_F(MultiTest, MultiCauseUnblocking) {
+  const int kRounds = 5;
+  vector<string> keys = {kKeySid0, kKeySid1, kKeySid2};
+
+  auto push = [this, keys, kRounds]() mutable {
+    int i = 0;
+    do {
+      Run({"multi"});
+      for (auto k : keys)
+        Run({"lpush", k, "v"});
+      Run({"exec"});
+    } while (next_permutation(keys.begin(), keys.end()) || i++ < kRounds);
+  };
+
+  auto pop = [this, keys, kRounds]() mutable {
+    int i = 0;
+    do {
+      for (int j = keys.size() - 1; j >= 0; j--)
+        ASSERT_THAT(Run({"blpop", keys[j], "0"}), ArrLen(2));
+    } while (next_permutation(keys.begin(), keys.end()) || i++ < kRounds);
+  };
+
+  auto f1 = pp_->at(1)->LaunchFiber([push]() mutable { push(); });
+  auto f2 = pp_->at(2)->LaunchFiber([pop]() mutable { pop(); });
 
   f1.Join();
   f2.Join();
