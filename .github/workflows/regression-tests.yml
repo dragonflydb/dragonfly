@@ -63,11 +63,11 @@ jobs:
           pytest -xvs dragonfly/replication_test.py --df alsologtostderr --df vmodule=replica=2 --df enable_multi_shard_sync=true
           pytest -xvs dragonfly/replication_test.py --df alsologtostderr --df vmodule=replica=2 --df enable_multi_shard_sync=false
 
-      - name: Send notification on failure
-        if: failure() || cancelled()
-        run: |
-          curl -s \
-            -X POST \
-            -H 'Content-Type: application/json' \
-            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
-            -d '{"text": "Unforunately the tests of dragonfly build are not passed :( \n The commit is ${{github.sha}}	"}'
+      # - name: Send notification on failure
+      #   if: failure() || cancelled()
+      #   run: |
+      #     curl -s \
+      #       -X POST \
+      #       -H 'Content-Type: application/json' \
+      #       '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
+      #       -d '{"text": "Unforunately the tests of dragonfly build are not passed :( \n The commit is ${{github.sha}}	"}'
