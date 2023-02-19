@@ -1758,16 +1758,18 @@ bool ZSetFamily::ParseRangeByScoreParams(CmdArgList args, RangeParams* params) {
 
 void ZSetFamily::ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
-  string_view count = ArgS(args, 2);
 
   RangeParams range_params;
   range_params.reverse = reverse;
   ZRangeSpec range_spec;
   range_spec.params = range_params;
-  TopNScored sc;
 
-  if (!SimpleAtoi(count, &sc)) {
-    return (*cntx)->SendError(kUintErr);
+  TopNScored sc = 1;
+  if (args.size() > 2) {
+    string_view count = ArgS(args, 2);
+    if (!SimpleAtoi(count, &sc)) {
+      return (*cntx)->SendError(kUintErr);
+    }
   }
 
   range_spec.interval = sc;
@@ -2131,8 +2133,8 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZINCRBY", CO::FAST | CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(ZIncrBy)
             << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3, 1}.HFUNC(ZInterStore)
             << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1, 1}.HFUNC(ZLexCount)
-            << CI{"ZPOPMAX", CO::READONLY, 3, 1, 1, 1}.HFUNC(ZPopMax)
-            << CI{"ZPOPMIN", CO::READONLY, 3, 1, 1, 1}.HFUNC(ZPopMin)
+            << CI{"ZPOPMAX", CO::FAST | CO::WRITE, -2, 1, 1, 1}.HFUNC(ZPopMax)
+            << CI{"ZPOPMIN", CO::FAST | CO::WRITE, -2, 1, 1, 1}.HFUNC(ZPopMin)
             << CI{"ZREM", CO::FAST | CO::WRITE, -3, 1, 1, 1}.HFUNC(ZRem)
             << CI{"ZRANGE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRange)
             << CI{"ZRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZRank)
