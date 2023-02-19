@@ -154,7 +154,7 @@ async def test_failover(df_local_factory, sentinel):
     try:
         await await_for(
             lambda: master_client.get("key"),
-            lambda val: val == b"valueX",
+            lambda val: val == b"value",
             10, "Timeout waiting for key to exist in replica."
         )
     except AssertionError:
