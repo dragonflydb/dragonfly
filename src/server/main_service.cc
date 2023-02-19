@@ -723,7 +723,11 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   dfly_cntx->cid = cid;
 
-  if (!InvokeCmd(args, cid, dfly_cntx, bool(dist_trans))) {
+  // Collect stats for all regular transactions and all multi transactions from scripts, except EVAL
+  // itself. EXEC does not use DispatchCommand for dispatching.
+  bool collect_stats =
+      dfly_cntx->transaction && (!dfly_cntx->transaction->IsMulti() || under_script);
+  if (!InvokeCmd(args, cid, dfly_cntx, collect_stats)) {
     dfly_cntx->reply_builder()->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
   }
