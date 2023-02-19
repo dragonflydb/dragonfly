@@ -128,6 +128,7 @@ async def test_failover(df_local_factory, sentinel):
 
     master_client = aioredis.Redis(port=master.port)
     replica_client = aioredis.Redis(port=replica.port)
+    print("master: " + str(master.port) + " replica: " + str(replica.port), flush=True)
 
     await replica_client.execute_command("REPLICAOF localhost " + str(master.port))
 
@@ -151,6 +152,7 @@ async def test_failover(df_local_factory, sentinel):
 
     # Verify we can now write to replica and read replicated value from master.
     await replica_client.set("key", "value")
+    print("verifying write: " + await replica_client.get("key").decode(), flush=True)
     try:
         await await_for(
             lambda: master_client.get("key"),
