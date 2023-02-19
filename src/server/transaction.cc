@@ -279,6 +279,7 @@ void Transaction::InitByKeys(KeyIndex key_index) {
       shard_data_.resize(1);
       sd = &shard_data_.front();
     }
+    sd->local_mask |= ACTIVE;
     sd->arg_count = -1;
     sd->arg_start = -1;
   }
