@@ -118,7 +118,7 @@ def sentinel(tmp_dir) -> Sentinel:
 
 
 @pytest.mark.asyncio
-@pytest.mark.repeat(10)
+@pytest.mark.repeat(100)
 async def test_failover(df_local_factory, sentinel):
     master = df_local_factory.create(port=sentinel.initial_master_port, vmodule="replica*=2")
     replica = df_local_factory.create(port=master.port + 1, vmodule="replica*=2")
