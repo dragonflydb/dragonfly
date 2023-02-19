@@ -26,6 +26,7 @@ class DebugCmd {
   void Load(std::string_view filename);
   void Inspect(std::string_view key);
   void Watched();
+  void TxAnalysis();
 
   ServerFamily& sf_;
   ConnectionContext* cntx_;

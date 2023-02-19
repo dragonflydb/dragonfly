@@ -148,6 +148,10 @@ void DebugCmd::Run(CmdArgList args) {
     return Inspect(key);
   }
 
+  if (subcmd == "TRANSACTION") {
+    return TxAnalysis();
+  }
+
   string reply = UnknownSubCmd(subcmd, "DEBUG");
   return (*cntx_)->SendError(reply, kSyntaxErrType);
 }
@@ -428,6 +432,63 @@ void DebugCmd::Watched() {
 
   shard_set->RunBlockingInParallel(cb);
   (*cntx_)->SendStringArr(watched_keys);
+}
+
+void DebugCmd::TxAnalysis() {
+  atomic_uint32_t queue_len{0}, free_cnt{0}, armed_cnt{0};
+
+  using SvLockTable = absl::flat_hash_map<string_view, IntentLock>;
+  vector<SvLockTable> lock_table_arr(shard_set->size());
+
+  auto cb = [&](EngineShard* shard) {
+    ShardId sid = shard->shard_id();
+
+    TxQueue* queue = shard->txq();
+
+    if (queue->Empty())
+      return;
+
+    auto cur = queue->Head();
+    do {
+      auto value = queue->At(cur);
+      Transaction* trx = std::get<Transaction*>(value);
+      queue_len.fetch_add(1, std::memory_order_relaxed);
+
+      if (trx->IsArmedInShard(sid)) {
+        armed_cnt.fetch_add(1, std::memory_order_relaxed);
+
+        IntentLock::Mode mode = trx->Mode();
+
+        // We consider keys from the currently assigned command inside the transaction.
+        // Meaning that for multi-tx it does not take into account all the keys.
+        KeyLockArgs lock_args = trx->GetLockArgs(sid);
+        auto& lock_table = lock_table_arr[sid];
+
+        // We count locks ourselves and do not rely on the lock table inside dbslice.
+        // The reason for this - to account for ordering information.
+        // For example, consider T1, T2 both residing in the queue and both lock 'x' exclusively.
+        // DbSlice::CheckLock returns false for both transactions, but T1 in practice owns the lock.
+        bool can_take = true;
+        for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
+          string_view s = lock_args.args[i];
+          bool was_ack = lock_table[s].Acquire(mode);
+          if (!was_ack) {
+            can_take = false;
+          }
+        }
+
+        if (can_take) {
+          free_cnt.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+      cur = queue->Next(cur);
+    } while (cur != queue->Head());
+  };
+
+  shard_set->RunBriefInParallel(cb);
+
+  (*cntx_)->SendSimpleString(absl::StrCat("queue_len:", queue_len.load(),
+                                          "armed: ", armed_cnt.load(), " free:", free_cnt.load()));
 }
 
 }  // namespace dfly
