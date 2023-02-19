@@ -558,7 +558,7 @@ TEST_F(MultiTest, MultiContendedPermutatedKeys) {
 }
 
 TEST_F(MultiTest, MultiCauseUnblocking) {
-  const int kRounds = 5;
+  const int kRounds = 10;
   vector<string> keys = {kKeySid0, kKeySid1, kKeySid2};
 
   auto push = [this, keys, kRounds]() mutable {
@@ -618,6 +618,46 @@ TEST_F(MultiTest, GlobalFallback) {
   Run({"move", "a", "1"});
   Run({"exec"});
   EXPECT_EQ(1, GetMetrics().ooo_tx_transaction_cnt);
+}
+
+// Run multi-exec transactions that move values from a source list
+// to destination list through two contended channels.
+TEST_F(MultiTest, ContendedList) {
+  if (absl::GetFlag(FLAGS_multi_exec_mode) == Transaction::NON_ATOMIC)
+    return;
+
+  const int listSize = 50;
+  const int stepSize = 5;
+
+  auto run = [this, listSize, stepSize](string_view src, string_view dest) {
+    for (int i = 0; i < listSize / stepSize; i++) {
+      Run({"multi"});
+      Run({"sort", src});
+      for (int j = 0; j < stepSize; j++)
+        Run({"lmove", src, j % 2 ? "chan-1" : "chan-2", "RIGHT", "RIGHT"});
+      for (int j = 0; j < stepSize; j++)
+        Run({"lmove", j % 2 ? "chan-1" : "chan-2", dest, "LEFT", "RIGHT"});
+      Run({"exec"});
+    }
+  };
+
+  for (int i = 0; i < listSize; i++) {
+    Run({"lpush", "l1", "a"});
+    Run({"lpush", "l2", "b"});
+  }
+
+  auto f1 = pp_->at(1)->LaunchFiber([run]() mutable { run("l1", "l1-out"); });
+  auto f2 = pp_->at(2)->LaunchFiber([run]() mutable { run("l2", "l2-out"); });
+
+  f1.Join();
+  f2.Join();
+
+  for (int i = 0; i < listSize; i++) {
+    EXPECT_EQ(Run({"lpop", "l1"}), "a");
+    EXPECT_EQ(Run({"lpop", "l2"}), "b");
+  }
+  EXPECT_EQ(Run({"llen", "chan-1"}), "0");
+  EXPECT_EQ(Run({"llen", "chan-2"}), "0");
 }
 
 }  // namespace dfly
