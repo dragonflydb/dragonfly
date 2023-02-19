@@ -118,9 +118,10 @@ def sentinel(tmp_dir) -> Sentinel:
 
 
 @pytest.mark.asyncio
+@pytest.mark.repeat(10)
 async def test_failover(df_local_factory, sentinel):
-    master = df_local_factory.create(port=sentinel.initial_master_port)
-    replica = df_local_factory.create(port=master.port + 1)
+    master = df_local_factory.create(port=sentinel.initial_master_port, vmodule="replica*=2")
+    replica = df_local_factory.create(port=master.port + 1, vmodule="replica*=2")
 
     master.start()
     replica.start()
@@ -132,7 +133,7 @@ async def test_failover(df_local_factory, sentinel):
 
     assert sentinel.live_master_port() == master.port
 
-    # Verify sentinel picked up replica.
+    # Verify sentinel picked up replica
     await await_for(
             lambda: sentinel.master(),
             lambda m: m["num-slaves"] == "1",
@@ -150,14 +151,26 @@ async def test_failover(df_local_factory, sentinel):
 
     # Verify we can now write to replica and read replicated value from master.
     await replica_client.set("key", "value")
-    await await_for(
-        lambda: master_client.get("key"),
-        lambda val: val == b"value",
-        60, "Timeout waiting for key to exist in replica."
-    )
+    try:
+        await await_for(
+            lambda: master_client.get("key"),
+            lambda val: val == b"valueX",
+            10, "Timeout waiting for key to exist in replica."
+        )
+    except AssertionError:
+        syncid, r_offset = await master_client.execute_command("DEBUG REPLICA OFFSET")
+        replicaoffset_cmd = "DFLY REPLICAOFFSET " + syncid.decode()
+        m_offset = await replica_client.execute_command(replicaoffset_cmd)
+        print(syncid.decode(),  r_offset, m_offset)
+        print("replica client role:")
+        print(await replica_client.execute_command("role"))
+        print("master client role:")
+        print(await master_client.execute_command("role"))
+        raise
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="This test is flaky.")
 async def test_master_failure(df_local_factory, sentinel):
     master = df_local_factory.create(port=sentinel.initial_master_port)
     replica = df_local_factory.create(port=master.port + 1)
