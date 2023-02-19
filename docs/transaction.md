@@ -124,11 +124,11 @@ There are four modes called "multi modes" in which a multi transaction can be ex
 
 __1. Global mode__
 
-The transaction is equivalent to a global transaction with multiple hops. It is scheduled globally and the commands are executed as a series of consequitive hops. This mode is required for global commands and for accessing undeclared keys in Lua scripts. Otherwise, it should be avoided, because it prevents Dragonfly from running concurrently and thus greatly decreases throughput.
+The transaction is equivalent to a global transaction with multiple hops. It is scheduled globally and the commands are executed as a series of consequitive hops. This mode is required for global commands (like MOVE) and for accessing undeclared keys in Lua scripts. Otherwise, it should be avoided, because it prevents Dragonfly from running concurrently and thus greatly decreases throughput.
 
 __2. Lock ahead mode__
 
-The transaction is equivalent to a regular transaction with multiple hops. It is scheduled once likwise to a regular on all keys used by the Redis transaction or Lua script and the commands are executed as a series of consecutive hops.
+The transaction is equivalent to a regular transaction with multiple hops. It is scheduled on all keys used by the commands in the transaction block, or Lua script, and the commands are executed as a series of consecutive hops.
 
 __3. Incremental lock mode__
 
