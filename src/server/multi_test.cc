@@ -602,4 +602,22 @@ TEST_F(MultiTest, EvalUndeclared) {
   absl::SetFlag(&FLAGS_multi_eval_mode, start_mode);
 }
 
+TEST_F(MultiTest, GlobalFallback) {
+  // Check global command MOVE falls back to global mode from lock ahead.
+  absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::LOCK_AHEAD);
+  Run({"multi"});
+  Run({"set", "a", "1"});  // won't run ooo, because it became part of global
+  Run({"move", "a", "1"});
+  Run({"exec"});
+  EXPECT_EQ(0, GetMetrics().ooo_tx_transaction_cnt);
+
+  // Check non atomic mode does not fall back to global.
+  absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::NON_ATOMIC);
+  Run({"multi"});
+  Run({"set", "a", "1"});  // will run ooo
+  Run({"move", "a", "1"});
+  Run({"exec"});
+  EXPECT_EQ(1, GetMetrics().ooo_tx_transaction_cnt);
+}
+
 }  // namespace dfly

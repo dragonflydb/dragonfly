@@ -723,27 +723,39 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   dfly_cntx->cid = cid;
 
-  try {
-    cid->Invoke(args, dfly_cntx);
-  } catch (std::exception& e) {
-    LOG(ERROR) << "Internal error, system probably unstable " << e.what();
+  if (!InvokeCmd(args, cid, dfly_cntx, bool(dist_trans))) {
     dfly_cntx->reply_builder()->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
   }
 
   end_usec = ProactorBase::GetMonotonicTimeNs();
-
   request_latency_usec.IncBy(cmd_str, (end_usec - start_usec) / 1000);
-  if (dist_trans) {
-    bool is_ooo = dist_trans->IsOOO();
-    dfly_cntx->last_command_debug.clock = dist_trans->txid();
-    dfly_cntx->last_command_debug.is_ooo = is_ooo;
-    etl.stats.ooo_tx_cnt += is_ooo;
-  }
 
   if (!under_script) {
     dfly_cntx->transaction = nullptr;
   }
+}
+
+bool Service::InvokeCmd(CmdArgList args, const CommandId* cid, ConnectionContext* cntx,
+                        bool record_stats) {
+  try {
+    cid->Invoke(args, cntx);
+  } catch (std::exception& e) {
+    LOG(ERROR) << "Internal error, system probably unstable " << e.what();
+    return false;
+  }
+
+  if (record_stats) {
+    DCHECK(cntx->transaction);
+    ServerState& etl = *ServerState::tlocal();
+    bool is_ooo = cntx->transaction->IsOOO();
+
+    cntx->last_command_debug.clock = cntx->transaction->txid();
+    cntx->last_command_debug.is_ooo = is_ooo;
+    etl.stats.ooo_tx_cnt += is_ooo;
+  }
+
+  return true;
 }
 
 void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
@@ -1239,19 +1251,28 @@ bool StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo*
   int multi_mode = absl::GetFlag(FLAGS_multi_exec_mode);
   DCHECK(multi_mode >= Transaction::GLOBAL && multi_mode <= Transaction::NON_ATOMIC);
 
-  if (global || multi_mode == Transaction::GLOBAL) {
-    trans->StartMultiGlobal(dbid);
-  } else if (multi_mode == Transaction::LOCK_AHEAD) {
-    *tmp_keys = CollectAllKeys(exec_info);
-    trans->StartMultiLockedAhead(dbid, CmdArgList{*tmp_keys});
-  } else if (multi_mode == Transaction::LOCK_INCREMENTAL) {
-    vector<bool> shards = DetermineKeyShards(exec_info);
-    DCHECK(std::any_of(shards.begin(), shards.end(), [](bool s) { return s; }));
-    trans->StartMultiLockedIncr(dbid, shards);
-  } else if (multi_mode == Transaction::NON_ATOMIC) {
-    trans->StartMultiNonAtomic();
-  } else
-    DCHECK(false) << "Invalid multi_exec_mode";
+  // Atomic modes fall back to GLOBAL if they contain global commands.
+  if (global &&
+      (multi_mode == Transaction::LOCK_AHEAD || multi_mode == Transaction::LOCK_INCREMENTAL))
+    multi_mode = Transaction::GLOBAL;
+
+  switch ((Transaction::MultiMode)multi_mode) {
+    case Transaction::GLOBAL:
+      trans->StartMultiGlobal(dbid);
+      break;
+    case Transaction::LOCK_AHEAD:
+      *tmp_keys = CollectAllKeys(exec_info);
+      trans->StartMultiLockedAhead(dbid, CmdArgList{*tmp_keys});
+      break;
+    case Transaction::LOCK_INCREMENTAL:
+      trans->StartMultiLockedIncr(dbid, DetermineKeyShards(exec_info));
+      break;
+    case Transaction::NON_ATOMIC:
+      trans->StartMultiNonAtomic();
+      break;
+    case Transaction::NOT_DETERMINED:
+      DCHECK(false);
+  };
   return true;
 }
 
@@ -1301,8 +1322,8 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
           break;
         }
       }
-      scmd.Invoke(cntx);
-      if (rb->GetError())  // checks for i/o error, not logical error.
+      bool ok = InvokeCmd(scmd.ArgList(), scmd.descr, cntx, true);
+      if (!ok || rb->GetError())  // checks for i/o error, not logical error.
         break;
     }
   }

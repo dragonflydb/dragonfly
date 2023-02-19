@@ -64,6 +64,8 @@ void Transaction::InitBase(DbIndex dbid, CmdArgList args) {
 }
 
 void Transaction::InitGlobal() {
+  DCHECK(!multi_ || (multi_->mode == GLOBAL || multi_->mode == NON_ATOMIC));
+
   global_ = true;
   unique_shard_cnt_ = shard_set->size();
   shard_data_.resize(unique_shard_cnt_);
@@ -345,6 +347,7 @@ void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgList keys) {
 void Transaction::StartMultiLockedIncr(DbIndex dbid, const vector<bool>& shards) {
   DCHECK(multi_);
   DCHECK(shard_data_.empty());  // Make sure default InitByArgs didn't run.
+  DCHECK(std::any_of(shards.begin(), shards.end(), [](bool s) { return s; }));
 
   multi_->mode = LOCK_INCREMENTAL;
   InitBase(dbid, {});
@@ -377,6 +380,7 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
   if (multi_->mode == NON_ATOMIC) {
     shard_data_.resize(0);
     txid_ = 0;
+    coordinator_state_ = 0;
   }
 }
 
@@ -553,14 +557,13 @@ void Transaction::ScheduleInternal() {
     };
     shard_set->RunBriefInParallel(std::move(cb), is_active);
 
-    bool ooo_disabled = IsGlobal() || (multi_ && multi_->IsIncrLocks());
+    bool ooo_disabled = IsGlobal() || (IsAtomicMulti() && multi_->mode != LOCK_AHEAD);
 
     if (success.load(memory_order_acquire) == num_shards) {
       coordinator_state_ |= COORD_SCHED;
       // If we granted all locks, we can run out of order.
       if (!ooo_disabled && lock_granted_cnt.load(memory_order_relaxed) == num_shards) {
         // Currently we don't support OOO for incremental locking. Sp far they are global.
-        // DCHECK(!(multi_ && multi_->IsIncrLocks()));
         coordinator_state_ |= COORD_OOO;
       }
       VLOG(2) << "Scheduled " << DebugId()

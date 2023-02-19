@@ -29,8 +29,6 @@ struct StoredCmd {
   CmdArgList ArgList() const {
     return arg_list_;
   }
-
-  void Invoke(ConnectionContext* ctx);
 };
 
 struct ConnectionState {
