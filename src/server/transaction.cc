@@ -149,7 +149,7 @@ void Transaction::InitMultiData(KeyIndex key_index) {
   DCHECK(multi_);
   auto args = cmd_with_full_args_;
 
-  if (multi_->mode == Transaction::NON_ATOMIC)
+  if (multi_->mode == NON_ATOMIC)
     return;
 
   // TODO: determine correct locking mode for transactions, scripts and regular commands.
@@ -231,8 +231,7 @@ void Transaction::InitByKeys(KeyIndex key_index) {
   DCHECK_LT(key_index.start, args.size());
 
   bool needs_reverse_mapping = cid_->opt_mask() & CO::REVERSE_MAPPING;
-  bool single_key =
-      key_index.HasSingleKey() && (!multi_ || multi_->mode == Transaction::NON_ATOMIC);
+  bool single_key = key_index.HasSingleKey() && !IsAtomicMulti();
 
   if (single_key) {
     DCHECK_GT(key_index.step, 0u);
@@ -270,7 +269,7 @@ void Transaction::InitByKeys(KeyIndex key_index) {
   // Compress shard data, if we occupy only one shard.
   if (unique_shard_cnt_ == 1) {
     PerShardData* sd;
-    if (multi_ && multi_->mode != NON_ATOMIC) {
+    if (IsAtomicMulti()) {
       sd = &shard_data_[unique_shard_id_];
     } else {
       shard_data_.resize(1);
@@ -412,7 +411,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
   // whether we should unlock the keys. should_release is false for multi and
   // equal to concluding otherwise.
   bool is_concluding = (coordinator_state_ & COORD_EXEC_CONCLUDING);
-  bool should_release = is_concluding && !IsRunningMulti();
+  bool should_release = is_concluding && !IsAtomicMulti();
   IntentLock::Mode mode = Mode();
 
   // We make sure that we lock exactly once for each (multi-hop) transaction inside
@@ -624,7 +623,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   DCHECK(!cb_);
   cb_ = std::move(cb);
 
-  DCHECK(IsRunningMulti() ||
+  DCHECK(IsAtomicMulti() ||
          (coordinator_state_ & COORD_SCHED) == 0);             // Only multi schedule in advance.
   coordinator_state_ |= (COORD_EXEC | COORD_EXEC_CONCLUDING);  // Single hop means we conclude.
 
@@ -632,7 +631,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
 
   // If we run only on one shard and conclude, we can avoid scheduling at all
   // and directly dispatch the task to its destination shard.
-  bool schedule_fast = (unique_shard_cnt_ == 1) && !IsGlobal() && !IsRunningMulti();
+  bool schedule_fast = (unique_shard_cnt_ == 1) && !IsGlobal() && !IsAtomicMulti();
   if (schedule_fast) {
     DCHECK_EQ(1u, shard_data_.size());
 
@@ -664,7 +663,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   } else {
     // This transaction either spans multiple shards and/or is multi.
 
-    if (!IsRunningMulti())  // Multi schedule in advance.
+    if (!IsAtomicMulti())  // Multi schedule in advance.
       ScheduleInternal();
 
     if (multi_ && multi_->IsIncrLocks())
@@ -731,7 +730,7 @@ void Transaction::Schedule() {
   if (multi_ && multi_->IsIncrLocks())
     multi_->AddLocks(Mode());
 
-  if (!IsRunningMulti())
+  if (!IsAtomicMulti())
     ScheduleInternal();
 }
 
@@ -816,7 +815,7 @@ void Transaction::ExecuteAsync() {
 }
 
 void Transaction::RunQuickie(EngineShard* shard) {
-  DCHECK(!IsRunningMulti());
+  DCHECK(!IsAtomicMulti());
   DCHECK_EQ(1u, shard_data_.size());
   DCHECK_EQ(0u, txid_);
 
@@ -886,7 +885,7 @@ KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
 // Optimized path that schedules and runs transactions out of order if possible.
 // Returns true if was eagerly executed, false if it was scheduled into queue.
 bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
-  DCHECK(!IsRunningMulti());
+  DCHECK(!IsAtomicMulti());
   DCHECK_EQ(0u, txid_);
   DCHECK_EQ(1u, shard_data_.size());
 
@@ -1280,7 +1279,7 @@ void Transaction::LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&
   if (multi_)
     multi_->shard_journal_write[shard->shard_id()] = true;
 
-  bool is_multi = multi_commands || IsRunningMulti();
+  bool is_multi = multi_commands || IsAtomicMulti();
 
   auto opcode = is_multi ? journal::Op::MULTI_COMMAND : journal::Op::COMMAND;
   journal->RecordEntry(txid_, opcode, db_index_, shard_cnt, std::move(payload), allow_await);

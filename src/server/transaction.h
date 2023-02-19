@@ -208,10 +208,6 @@ class Transaction {
     return bool(multi_);
   }
 
-  bool IsRunningMulti() const {
-    return multi_ && multi_->mode != NON_ATOMIC;
-  }
-
   MultiMode GetMultiMode() const {
     return multi_->mode;
   }
@@ -404,6 +400,14 @@ class Transaction {
 
   uint32_t GetUseCount() const {
     return use_count_.load(std::memory_order_relaxed);
+  }
+
+  // Whether the transaction is multi and runs in an atomic mode.
+  // This, instead of just IsMulti(), should be used to check for the possibility of
+  // different optimizations, because they can safely be applied to non-atomic multi
+  // transactions as well.
+  bool IsAtomicMulti() const {
+    return multi_ && multi_->mode != NON_ATOMIC;
   }
 
   unsigned SidToId(ShardId sid) const {

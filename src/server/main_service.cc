@@ -537,29 +537,32 @@ static void MultiSetError(ConnectionContext* cntx) {
   }
 }
 
-bool CheckEvalKeys(const ConnectionState::ScriptInfo& eval_info, const CommandId* cid,
-                   CmdArgList args, Transaction* trans) {
-  auto multi_mode = trans->GetMultiMode();
+// Return OK if all keys are allowed to be accessed: either declared in EVAL or
+// transaction is running in global or non-atomic mode.
+OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const CommandId* cid,
+                           CmdArgList args, Transaction* trans) {
+  Transaction::MultiMode multi_mode = trans->GetMultiMode();
 
-  // We allow any keys in GLOBAL and NON_ATOMIC mode.
+  // We either scheduled on all shards or re-schedule for each operation,
+  // so we are not restricted to any keys.
   if (multi_mode == Transaction::GLOBAL || multi_mode == Transaction::NON_ATOMIC)
-    return true;
+    return OpStatus::OK;
 
   OpResult<KeyIndex> key_index_res = DetermineKeys(cid, args);
   if (!key_index_res)
-    return false;  // TODO: Propagate error
+    return key_index_res.status();
 
   const auto& key_index = *key_index_res;
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
     if (!eval_info.keys.contains(ArgS(args, i))) {
-      return false;
+      return OpStatus::KEY_NOTFOUND;
     }
   }
 
   if (unsigned i = key_index.bonus; i && !eval_info.keys.contains(ArgS(args, i)))
-    return false;
+    return OpStatus::KEY_NOTFOUND;
 
-  return true;
+  return OpStatus::OK;
 }
 
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
@@ -684,15 +687,20 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   if (under_script) {
     DCHECK(dfly_cntx->transaction);
     if (IsTransactional(cid)) {
-      if (!CheckEvalKeys(*dfly_cntx->conn_state.script_info, cid, args, dfly_cntx->transaction))
+      OpStatus status =
+          CheckKeysDeclared(*dfly_cntx->conn_state.script_info, cid, args, dfly_cntx->transaction);
+
+      if (status == OpStatus::KEY_NOTFOUND)
         return (*cntx)->SendError("script tried accessing undeclared key");
 
-      dfly_cntx->transaction->MultiSwitchCmd(cid);
-      OpStatus st = dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args);
+      if (status != OpStatus::OK)
+        return (*cntx)->SendError(status);
 
-      if (st != OpStatus::OK) {
-        return (*cntx)->SendError(st);
-      }
+      dfly_cntx->transaction->MultiSwitchCmd(cid);
+      status = dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args);
+
+      if (status != OpStatus::OK)
+        return (*cntx)->SendError(status);
     }
   } else {
     DCHECK(dfly_cntx->transaction == nullptr);
