@@ -180,6 +180,8 @@ void Transaction::InitMultiData(KeyIndex key_index) {
   }
 
   multi_->locks_recorded = true;
+  DCHECK(IsAtomicMulti());
+  DCHECK(multi_->mode == GLOBAL || !multi_->keys.empty() || !multi_->lock_counts.empty());
 }
 
 void Transaction::StoreKeysInArgs(KeyIndex key_index, bool rev_mapping) {
@@ -324,6 +326,7 @@ void Transaction::StartMultiGlobal(DbIndex dbid) {
   multi_->mode = GLOBAL;
   InitBase(dbid, {});
   InitGlobal();
+  multi_->locks_recorded = true;
 
   ScheduleInternal();
 }
@@ -623,8 +626,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   DCHECK(!cb_);
   cb_ = std::move(cb);
 
-  DCHECK(IsAtomicMulti() ||
-         (coordinator_state_ & COORD_SCHED) == 0);             // Only multi schedule in advance.
+  DCHECK(IsAtomicMulti() || (coordinator_state_ & COORD_SCHED) == 0);  // Multi schedule in advance.
   coordinator_state_ |= (COORD_EXEC | COORD_EXEC_CONCLUDING);  // Single hop means we conclude.
 
   bool was_ooo = false;
@@ -762,6 +764,7 @@ void Transaction::ExecuteAsync() {
 
   DCHECK_GT(unique_shard_cnt_, 0u);
   DCHECK_GT(use_count_.load(memory_order_relaxed), 0u);
+  DCHECK(!IsAtomicMulti() || multi_->locks_recorded);
 
   // We do not necessarily Execute this transaction in 'cb' below. It well may be that it will be
   // executed by the engine shard once it has been armed and coordinator thread will finish the
@@ -920,6 +923,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
 // This function should not block since it's run via RunBriefInParallel.
 pair<bool, bool> Transaction::ScheduleInShard(EngineShard* shard) {
   DCHECK(!shard_data_.empty());
+  DCHECK(shard_data_[SidToId(shard->shard_id())].local_mask & ACTIVE);
 
   // schedule_success, lock_granted.
   pair<bool, bool> result{false, false};
