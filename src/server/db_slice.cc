@@ -674,7 +674,6 @@ size_t DbSlice::DbSize(DbIndex db_ind) const {
 }
 
 bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
-  DCHECK(!lock_args.args.empty());
   DCHECK_GT(lock_args.key_step, 0u);
 
   auto& lt = db_arr_[lock_args.db_index]->trans_locks;
@@ -701,8 +700,6 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
 }
 
 void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
-  DCHECK(!lock_args.args.empty());
-
   DVLOG(2) << "Release " << IntentLock::ModeName(mode) << " for " << lock_args.args[0];
   if (lock_args.args.size() == 1) {
     Release(mode, lock_args.db_index, lock_args.args.front(), 1);
@@ -721,6 +718,14 @@ void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
       }
     }
   }
+}
+
+bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, string_view key) const {
+  KeyLockArgs args;
+  args.db_index = dbid;
+  args.args = ArgSlice{&key, 1};
+  args.key_step = 1;
+  return CheckLock(mode, args);
 }
 
 bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) const {
@@ -862,7 +867,13 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
   auto& db = *db_arr_[cntx.db_index];
   DeleteExpiredStats result;
 
+  std::string stash;
+
   auto cb = [&](ExpireIterator it) {
+    auto key = it->first.GetSlice(&stash);
+    if (!CheckLock(IntentLock::EXCLUSIVE, cntx.db_index, key))
+      return;
+
     result.traversed++;
     time_t ttl = ExpireTime(it) - cntx.time_now_ms;
     if (ttl <= 0) {
