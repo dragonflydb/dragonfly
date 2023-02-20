@@ -99,11 +99,13 @@ async def check_all_replicas_finished(c_replicas, c_master):
     while len(waiting_for) > 0:
         await asyncio.sleep(1.0)
 
-        tasks = (asyncio.create_task(check_replica_finished_exec(c, c_master)) for c in waiting_for)
+        tasks = (asyncio.create_task(check_replica_finished_exec(c, c_master))
+                 for c in waiting_for)
         finished_list = await asyncio.gather(*tasks)
 
         # Remove clients that finished from waiting list
-        waiting_for = [c for (c, finished) in zip(waiting_for, finished_list) if not finished]
+        waiting_for = [c for (c, finished) in zip(
+            waiting_for, finished_list) if not finished]
 
 
 async def check_data(seeder, replicas, c_replicas):
@@ -332,6 +334,51 @@ async def test_disconnect_master(df_local_factory, df_seeder_factory, t_master, 
         await wait_available_async(c_replica)
         assert await seeder.compare(capture, port=replica.port)
 
+"""
+Test re-connecting replica to different masters.
+"""
+
+rotating_master_cases = [
+    (4, [4, 4, 4, 4], dict(keys=2_000, dbcount=4))
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("t_replica, t_masters, seeder_config", rotating_master_cases)
+async def test_rotating_masters(df_local_factory, df_seeder_factory, t_replica, t_masters, seeder_config):
+    replica = df_local_factory.create(
+        port=BASE_PORT, proactor_threads=t_replica)
+    masters = [df_local_factory.create(
+        port=BASE_PORT+i+1, proactor_threads=t) for i, t in enumerate(t_masters)]
+    seeders = [df_seeder_factory.create(
+        port=m.port, **seeder_config) for m in masters]
+
+    df_local_factory.start_all([replica] + masters)
+
+    c_replica = aioredis.Redis(port=replica.port)
+
+    await asyncio.gather(*(seeder.run(target_deviation=0.1) for seeder in seeders))
+
+    fill_seeder = None
+    fill_task = None
+
+    for master, seeder in zip(masters, seeders):
+        if fill_task is not None:
+            fill_seeder.stop()
+            fill_task.cancel()
+
+        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+        await wait_available_async(c_replica)
+
+        capture = await seeder.capture()
+        assert await seeder.compare(capture, port=replica.port)
+
+        fill_task = asyncio.create_task(seeder.run())
+        fill_seeder = seeder
+
+    if fill_task is not None:
+        fill_seeder.stop()
+        fill_task.cancel()
 
 """
 Test flushall command. Set data to master send flashall and set more data.
