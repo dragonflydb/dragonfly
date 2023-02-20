@@ -278,6 +278,8 @@ class DbSlice {
   //! at a time of the call.
   uint64_t RegisterOnChange(ChangeCallback cb);
 
+  void CallChangeOnAllLessThanVersion(DbIndex db_ind, PrimeIterator it, uint64_t version);
+
   //! Unregisters the callback.
   void UnregisterOnChange(uint64_t id);
 
