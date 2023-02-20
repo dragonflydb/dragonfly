@@ -12,4 +12,4 @@ tomli==2.0.1
 wrapt==1.14.1
 aioredis==2.0.1
 pytest-asyncio==0.20.1
-
+pytest-repeat==0.9.1

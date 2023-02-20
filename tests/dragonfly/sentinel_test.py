@@ -127,6 +127,7 @@ async def test_failover(df_local_factory, sentinel):
 
     master_client = aioredis.Redis(port=master.port)
     replica_client = aioredis.Redis(port=replica.port)
+    print("master: " + str(master.port) + " replica: " + str(replica.port), flush=True)
 
     await replica_client.execute_command("REPLICAOF localhost " + str(master.port))
 
@@ -149,12 +150,27 @@ async def test_failover(df_local_factory, sentinel):
     assert sentinel.slaves()[0]["port"] == str(master.port)
 
     # Verify we can now write to replica and read replicated value from master.
-    await replica_client.set("key", "value")
-    await await_for(
-        lambda: master_client.get("key"),
-        lambda val: val == b"value",
-        10, "Timeout waiting for key to exist in replica."
-    )
+    assert await replica_client.set("key", "value"), "Failed to set key promoted replica."
+    try:
+        await await_for(
+            lambda: master_client.get("key"),
+            lambda val: val == b"value",
+            10, "Timeout waiting for key to exist in replica."
+        )
+    except AssertionError:
+        syncid, r_offset = await master_client.execute_command("DEBUG REPLICA OFFSET")
+        replicaoffset_cmd = "DFLY REPLICAOFFSET " + syncid.decode()
+        m_offset = await replica_client.execute_command(replicaoffset_cmd)
+        print(syncid.decode(),  r_offset, m_offset)
+        print("replica client role:")
+        print(await replica_client.execute_command("role"))
+        print("master client role:")
+        print(await master_client.execute_command("role"))
+        print("replica client info:")
+        print(await replica_client.info())
+        print("master client info:")
+        print(await master_client.info())
+        raise
 
 
 @pytest.mark.asyncio
