@@ -178,7 +178,7 @@ bool SliceSnapshot::BucketSaveCb(PrimeIterator it) {
     ++stats_.skipped;
     return false;
   }
-  db_slice_->CallChangeOnAllLessThanVersion(current_db_, it, snapshot_version_);
+  db_slice_->FlushChangeToEarlierCallbacks(current_db_, it, snapshot_version_);
 
   stats_.loop_serialized += SerializeBucket(current_db_, it);
   return false;

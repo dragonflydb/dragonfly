@@ -852,13 +852,14 @@ uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
   return ver;
 }
 
-void DbSlice::CallChangeOnAllLessThanVersion(DbIndex db_ind, PrimeIterator it, uint64_t version) {
+void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, PrimeIterator it,
+                                            uint64_t upper_bound) {
   uint64_t bucket_version = it.GetVersion();
-  // change_cb_ is ordered by version.
+  // change_cb_ is ordered by vesion.
   for (const auto& ccb : change_cb_) {
     uint64_t cb_vesrion = ccb.first;
-    DCHECK_LE(cb_vesrion, version);
-    if (cb_vesrion == version) {
+    DCHECK_LE(cb_vesrion, upper_bound);
+    if (cb_vesrion == upper_bound) {
       return;
     }
     if (bucket_version < cb_vesrion) {
