@@ -852,6 +852,22 @@ uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
   return ver;
 }
 
+void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, PrimeIterator it,
+                                            uint64_t upper_bound) {
+  uint64_t bucket_version = it.GetVersion();
+  // change_cb_ is ordered by vesion.
+  for (const auto& ccb : change_cb_) {
+    uint64_t cb_vesrion = ccb.first;
+    DCHECK_LE(cb_vesrion, upper_bound);
+    if (cb_vesrion == upper_bound) {
+      return;
+    }
+    if (bucket_version < cb_vesrion) {
+      ccb.second(db_ind, ChangeReq{it});
+    }
+  }
+}
+
 //! Unregisters the callback.
 void DbSlice::UnregisterOnChange(uint64_t id) {
   for (auto it = change_cb_.begin(); it != change_cb_.end(); ++it) {

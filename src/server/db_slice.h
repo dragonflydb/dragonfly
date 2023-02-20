@@ -278,6 +278,9 @@ class DbSlice {
   //! at a time of the call.
   uint64_t RegisterOnChange(ChangeCallback cb);
 
+  // Call registered callbacks with vesrion less than upper_bound.
+  void FlushChangeToEarlierCallbacks(DbIndex db_ind, PrimeIterator it, uint64_t upper_bound);
+
   //! Unregisters the callback.
   void UnregisterOnChange(uint64_t id);
 
