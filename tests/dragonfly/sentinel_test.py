@@ -118,10 +118,9 @@ def sentinel(tmp_dir) -> Sentinel:
 
 
 @pytest.mark.asyncio
-@pytest.mark.repeat(300)
 async def test_failover(df_local_factory, sentinel):
-    master = df_local_factory.create(port=sentinel.initial_master_port, vmodule="replica*=2")
-    replica = df_local_factory.create(port=master.port + 1, vmodule="replica*=2")
+    master = df_local_factory.create(port=sentinel.initial_master_port)
+    replica = df_local_factory.create(port=master.port + 1)
 
     master.start()
     replica.start()
@@ -134,7 +133,7 @@ async def test_failover(df_local_factory, sentinel):
 
     assert sentinel.live_master_port() == master.port
 
-    # Verify sentinel picked up replica
+    # Verify sentinel picked up replica.
     await await_for(
             lambda: sentinel.master(),
             lambda m: m["num-slaves"] == "1",
@@ -151,7 +150,7 @@ async def test_failover(df_local_factory, sentinel):
     assert sentinel.slaves()[0]["port"] == str(master.port)
 
     # Verify we can now write to replica and read replicated value from master.
-    assert await replica_client.set("key", "value"), "Failed to set key on replica (which is now master)."
+    assert await replica_client.set("key", "value"), "Failed to set key promoted replica."
     try:
         await await_for(
             lambda: master_client.get("key"),
