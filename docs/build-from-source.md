@@ -5,22 +5,30 @@
 Dragonfly runs on linux. We advice running it on linux version 5.11 or later
 but you can also run Dragonfly on older kernels as well.
 
-### WARNING: Building from source on older kernels WILL NOT WORK.
 
-## Step 1
+## Step 1 - install dependencies
+
+On Debian/Ubuntu:
+
+```bash
+sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
+     autoconf-archive libtool cmake g++ libzstd-dev
+```
+
+On Fedora:
+
+```bash
+sudo yum install automake boost-devel g++ git cmake libtool ninja-build libzstd-devel  \
+     openssl-devel libunwind-devel autoconf-archive patch
+```
+
+## Step 2 - clone the project
 
 ```bash
 git clone --recursive https://github.com/dragonflydb/dragonfly && cd dragonfly
 ```
 
-## Step 2
-```bash
-# Install dependencies
-sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
-     autoconf-archive libtool cmake g++ libzstd-dev
-```
-
-## Step 3
+## Step 3 - configure & build it
 
 ```bash
 # Configure the build
@@ -31,7 +39,8 @@ cd build-opt && ninja dragonfly
 
 ```
 
-## Step 4
+## Step 4 - voilà
+
 ```bash
 # Run
 ./dragonfly --alsologtostderr
