@@ -2,7 +2,7 @@ Dragonfly Business Source License 1.1
 
 <u>License</u>: BSL 1.1
 
-<u>Licensor</u>: Attos Technologies, Ltd.
+<u>Licensor</u>: DragonflyDB, Ltd.
 
 <u>Licensed Work</u>: Dragonfly including the software components, or any portion of them, and any modification.
 
