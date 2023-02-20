@@ -118,7 +118,7 @@ def sentinel(tmp_dir) -> Sentinel:
 
 
 @pytest.mark.asyncio
-@pytest.mark.repeat(100)
+@pytest.mark.repeat(300)
 async def test_failover(df_local_factory, sentinel):
     master = df_local_factory.create(port=sentinel.initial_master_port, vmodule="replica*=2")
     replica = df_local_factory.create(port=master.port + 1, vmodule="replica*=2")
@@ -151,8 +151,7 @@ async def test_failover(df_local_factory, sentinel):
     assert sentinel.slaves()[0]["port"] == str(master.port)
 
     # Verify we can now write to replica and read replicated value from master.
-    await replica_client.set("key", "value")
-    print("verifying write: " + (await replica_client.get("key")).decode(), flush=True)
+    assert await replica_client.set("key", "value"), "Failed to set key on replica (which is now master)."
     try:
         await await_for(
             lambda: master_client.get("key"),
@@ -168,11 +167,14 @@ async def test_failover(df_local_factory, sentinel):
         print(await replica_client.execute_command("role"))
         print("master client role:")
         print(await master_client.execute_command("role"))
+        print("replica client info:")
+        print(await replica_client.info())
+        print("master client info:")
+        print(await master_client.info())
         raise
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason="This test is flaky.")
 async def test_master_failure(df_local_factory, sentinel):
     master = df_local_factory.create(port=sentinel.initial_master_port)
     replica = df_local_factory.create(port=master.port + 1)
