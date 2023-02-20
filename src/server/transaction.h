@@ -75,7 +75,7 @@ class Transaction {
     // The shards to schedule on are detemined ahead and remain fixed.
     LOCK_INCREMENTAL = 3,
     // Each command is executed separately. Equivalent to a pipeline.
-    NOT_ATOMIC = 4,
+    NON_ATOMIC = 4,
   };
 
   // State on specific shard.
@@ -150,6 +150,9 @@ class Transaction {
   // Start multi in LOCK_INCREMENTAL mode on given shards.
   void StartMultiLockedIncr(DbIndex dbid, const std::vector<bool>& shards);
 
+  // Start multi in NON_ATOMIC mode.
+  void StartMultiNonAtomic();
+
   // Unlock key locks of a multi transaction.
   void UnlockMulti();
 
@@ -203,6 +206,10 @@ class Transaction {
 
   bool IsMulti() const {
     return bool(multi_);
+  }
+
+  MultiMode GetMultiMode() const {
+    return multi_->mode;
   }
 
   bool IsGlobal() const;
@@ -279,8 +286,8 @@ class Transaction {
 
     MultiMode mode;
 
-    absl::flat_hash_map<std::string_view, LockCnt> lock_counts;
-    std::vector<std::string_view> keys;
+    absl::flat_hash_map<std::string, LockCnt> lock_counts;
+    std::vector<std::string> keys;
 
     // The shard_journal_write vector variable is used to determine the number of shards
     // involved in a multi-command transaction. This information is utilized by replicas when
@@ -393,6 +400,14 @@ class Transaction {
 
   uint32_t GetUseCount() const {
     return use_count_.load(std::memory_order_relaxed);
+  }
+
+  // Whether the transaction is multi and runs in an atomic mode.
+  // This, instead of just IsMulti(), should be used to check for the possibility of
+  // different optimizations, because they can safely be applied to non-atomic multi
+  // transactions as well.
+  bool IsAtomicMulti() const {
+    return multi_ && multi_->mode != NON_ATOMIC;
   }
 
   unsigned SidToId(ShardId sid) const {

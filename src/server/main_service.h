@@ -39,6 +39,10 @@ class Service : public facade::ServiceInterface {
   void Shutdown();
 
   void DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) final;
+
+  // Returns true if command was executed successfully.
+  bool InvokeCmd(CmdArgList args, const CommandId* cid, ConnectionContext* cntx, bool record_stats);
+
   void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
                   facade::ConnectionContext* cntx) final;
 

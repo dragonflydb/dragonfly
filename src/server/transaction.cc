@@ -64,6 +64,8 @@ void Transaction::InitBase(DbIndex dbid, CmdArgList args) {
 }
 
 void Transaction::InitGlobal() {
+  DCHECK(!multi_ || (multi_->mode == GLOBAL || multi_->mode == NON_ATOMIC));
+
   global_ = true;
   unique_shard_cnt_ = shard_set->size();
   shard_data_.resize(unique_shard_cnt_);
@@ -149,6 +151,9 @@ void Transaction::InitMultiData(KeyIndex key_index) {
   DCHECK(multi_);
   auto args = cmd_with_full_args_;
 
+  if (multi_->mode == NON_ATOMIC)
+    return;
+
   // TODO: determine correct locking mode for transactions, scripts and regular commands.
   IntentLock::Mode mode = Mode();
   multi_->keys.clear();
@@ -156,11 +161,12 @@ void Transaction::InitMultiData(KeyIndex key_index) {
   auto& tmp_uniques = tmp_space.uniq_keys;
   tmp_uniques.clear();
 
-  auto lock_key = [this, mode, &tmp_uniques](auto key) {
+  auto lock_key = [this, mode, &tmp_uniques](string_view key) {
     if (auto [_, inserted] = tmp_uniques.insert(key); !inserted)
       return;
+
     if (multi_->IsIncrLocks()) {
-      multi_->keys.push_back(key);
+      multi_->keys.emplace_back(key);
     } else {
       multi_->lock_counts[key][mode]++;
     }
@@ -176,6 +182,8 @@ void Transaction::InitMultiData(KeyIndex key_index) {
   }
 
   multi_->locks_recorded = true;
+  DCHECK(IsAtomicMulti());
+  DCHECK(multi_->mode == GLOBAL || !multi_->keys.empty() || !multi_->lock_counts.empty());
 }
 
 void Transaction::StoreKeysInArgs(KeyIndex key_index, bool rev_mapping) {
@@ -227,7 +235,7 @@ void Transaction::InitByKeys(KeyIndex key_index) {
   DCHECK_LT(key_index.start, args.size());
 
   bool needs_reverse_mapping = cid_->opt_mask() & CO::REVERSE_MAPPING;
-  bool single_key = !multi_ && key_index.HasSingleKey();
+  bool single_key = key_index.HasSingleKey() && !IsAtomicMulti();
 
   if (single_key) {
     DCHECK_GT(key_index.step, 0u);
@@ -265,12 +273,13 @@ void Transaction::InitByKeys(KeyIndex key_index) {
   // Compress shard data, if we occupy only one shard.
   if (unique_shard_cnt_ == 1) {
     PerShardData* sd;
-    if (multi_) {
+    if (IsAtomicMulti()) {
       sd = &shard_data_[unique_shard_id_];
     } else {
       shard_data_.resize(1);
       sd = &shard_data_.front();
     }
+    sd->local_mask |= ACTIVE;
     sd->arg_count = -1;
     sd->arg_start = -1;
   }
@@ -320,6 +329,7 @@ void Transaction::StartMultiGlobal(DbIndex dbid) {
   multi_->mode = GLOBAL;
   InitBase(dbid, {});
   InitGlobal();
+  multi_->locks_recorded = true;
 
   ScheduleInternal();
 }
@@ -338,6 +348,7 @@ void Transaction::StartMultiLockedAhead(DbIndex dbid, CmdArgList keys) {
 void Transaction::StartMultiLockedIncr(DbIndex dbid, const vector<bool>& shards) {
   DCHECK(multi_);
   DCHECK(shard_data_.empty());  // Make sure default InitByArgs didn't run.
+  DCHECK(std::any_of(shards.begin(), shards.end(), [](bool s) { return s; }));
 
   multi_->mode = LOCK_INCREMENTAL;
   InitBase(dbid, {});
@@ -352,14 +363,26 @@ void Transaction::StartMultiLockedIncr(DbIndex dbid, const vector<bool>& shards)
   ScheduleInternal();
 }
 
+void Transaction::StartMultiNonAtomic() {
+  DCHECK(multi_);
+  multi_->mode = NON_ATOMIC;
+}
+
 void Transaction::MultiSwitchCmd(const CommandId* cid) {
   DCHECK(multi_);
   DCHECK(!cb_);
 
+  unique_shard_id_ = 0;
   unique_shard_cnt_ = 0;
   args_.clear();
   cid_ = cid;
   cb_ = nullptr;
+
+  if (multi_->mode == NON_ATOMIC) {
+    shard_data_.resize(0);
+    txid_ = 0;
+    coordinator_state_ = 0;
+  }
 }
 
 string Transaction::DebugId() const {
@@ -396,7 +419,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
   // whether we should unlock the keys. should_release is false for multi and
   // equal to concluding otherwise.
   bool is_concluding = (coordinator_state_ & COORD_EXEC_CONCLUDING);
-  bool should_release = is_concluding && !multi_;
+  bool should_release = is_concluding && !IsAtomicMulti();
   IntentLock::Mode mode = Mode();
 
   // We make sure that we lock exactly once for each (multi-hop) transaction inside
@@ -535,14 +558,13 @@ void Transaction::ScheduleInternal() {
     };
     shard_set->RunBriefInParallel(std::move(cb), is_active);
 
-    bool ooo_disabled = IsGlobal() || (multi_ && multi_->IsIncrLocks());
+    bool ooo_disabled = IsGlobal() || (IsAtomicMulti() && multi_->mode != LOCK_AHEAD);
 
     if (success.load(memory_order_acquire) == num_shards) {
       coordinator_state_ |= COORD_SCHED;
       // If we granted all locks, we can run out of order.
       if (!ooo_disabled && lock_granted_cnt.load(memory_order_relaxed) == num_shards) {
         // Currently we don't support OOO for incremental locking. Sp far they are global.
-        // DCHECK(!(multi_ && multi_->IsIncrLocks()));
         coordinator_state_ |= COORD_OOO;
       }
       VLOG(2) << "Scheduled " << DebugId()
@@ -591,9 +613,8 @@ void Transaction::ScheduleInternal() {
 
 void Transaction::MultiData::AddLocks(IntentLock::Mode mode) {
   DCHECK(IsIncrLocks());
-
-  for (auto key : keys) {
-    lock_counts[key][mode]++;
+  for (auto& key : keys) {
+    lock_counts[std::move(key)][mode]++;
   }
   keys.clear();
 }
@@ -609,14 +630,14 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   DCHECK(!cb_);
   cb_ = std::move(cb);
 
-  DCHECK(multi_ || (coordinator_state_ & COORD_SCHED) == 0);   // Only multi schedule in advance.
+  DCHECK(IsAtomicMulti() || (coordinator_state_ & COORD_SCHED) == 0);  // Multi schedule in advance.
   coordinator_state_ |= (COORD_EXEC | COORD_EXEC_CONCLUDING);  // Single hop means we conclude.
 
   bool was_ooo = false;
 
   // If we run only on one shard and conclude, we can avoid scheduling at all
   // and directly dispatch the task to its destination shard.
-  bool schedule_fast = (unique_shard_cnt_ == 1) && !IsGlobal() && !multi_;
+  bool schedule_fast = (unique_shard_cnt_ == 1) && !IsGlobal() && !IsAtomicMulti();
   if (schedule_fast) {
     DCHECK_EQ(1u, shard_data_.size());
 
@@ -648,7 +669,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   } else {
     // This transaction either spans multiple shards and/or is multi.
 
-    if (!multi_)  // Multi schedule in advance.
+    if (!IsAtomicMulti())  // Multi schedule in advance.
       ScheduleInternal();
 
     if (multi_ && multi_->IsIncrLocks())
@@ -674,10 +695,14 @@ void Transaction::UnlockMulti() {
   DCHECK(multi_);
   DCHECK_GE(GetUseCount(), 1u);  // Greater-equal because there may be callbacks in progress.
 
+  if (multi_->mode == NON_ATOMIC)
+    return;
+
   auto sharded_keys = make_shared<vector<KeyList>>(shard_set->size());
-  for (const auto& [key, cnt] : multi_->lock_counts) {
-    ShardId sid = Shard(key, sharded_keys->size());
-    (*sharded_keys)[sid].emplace_back(key, cnt);
+  while (!multi_->lock_counts.empty()) {
+    auto entry = multi_->lock_counts.extract(multi_->lock_counts.begin());
+    ShardId sid = Shard(entry.key(), sharded_keys->size());
+    (*sharded_keys)[sid].emplace_back(std::move(entry.key()), entry.mapped());
   }
 
   unsigned shard_journals_cnt =
@@ -711,7 +736,7 @@ void Transaction::Schedule() {
   if (multi_ && multi_->IsIncrLocks())
     multi_->AddLocks(Mode());
 
-  if (!multi_)
+  if (!IsAtomicMulti())
     ScheduleInternal();
 }
 
@@ -743,6 +768,7 @@ void Transaction::ExecuteAsync() {
 
   DCHECK_GT(unique_shard_cnt_, 0u);
   DCHECK_GT(use_count_.load(memory_order_relaxed), 0u);
+  DCHECK(!IsAtomicMulti() || multi_->locks_recorded);
 
   // We do not necessarily Execute this transaction in 'cb' below. It well may be that it will be
   // executed by the engine shard once it has been armed and coordinator thread will finish the
@@ -796,7 +822,7 @@ void Transaction::ExecuteAsync() {
 }
 
 void Transaction::RunQuickie(EngineShard* shard) {
-  DCHECK(!multi_);
+  DCHECK(!IsAtomicMulti());
   DCHECK_EQ(1u, shard_data_.size());
   DCHECK_EQ(0u, txid_);
 
@@ -866,7 +892,7 @@ KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
 // Optimized path that schedules and runs transactions out of order if possible.
 // Returns true if was eagerly executed, false if it was scheduled into queue.
 bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
-  DCHECK(!multi_);
+  DCHECK(!IsAtomicMulti());
   DCHECK_EQ(0u, txid_);
   DCHECK_EQ(1u, shard_data_.size());
 
@@ -901,6 +927,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
 // This function should not block since it's run via RunBriefInParallel.
 pair<bool, bool> Transaction::ScheduleInShard(EngineShard* shard) {
   DCHECK(!shard_data_.empty());
+  DCHECK(shard_data_[SidToId(shard->shard_id())].local_mask & ACTIVE);
 
   // schedule_success, lock_granted.
   pair<bool, bool> result{false, false};
@@ -1257,10 +1284,12 @@ void Transaction::LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&
                                     bool allow_await) const {
   auto journal = shard->journal();
   CHECK(journal);
-  if (multi_) {
+  if (multi_)
     multi_->shard_journal_write[shard->shard_id()] = true;
-  }
-  auto opcode = (multi_ || multi_commands) ? journal::Op::MULTI_COMMAND : journal::Op::COMMAND;
+
+  bool is_multi = multi_commands || IsAtomicMulti();
+
+  auto opcode = is_multi ? journal::Op::MULTI_COMMAND : journal::Op::COMMAND;
   journal->RecordEntry(txid_, opcode, db_index_, shard_cnt, std::move(payload), allow_await);
 }
 

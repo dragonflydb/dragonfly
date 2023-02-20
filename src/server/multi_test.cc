@@ -15,6 +15,7 @@
 #include "server/transaction.h"
 
 ABSL_DECLARE_FLAG(int, multi_exec_mode);
+ABSL_DECLARE_FLAG(int, multi_eval_mode);
 
 namespace dfly {
 
@@ -191,6 +192,10 @@ TEST_F(MultiTest, MultiSeq) {
 }
 
 TEST_F(MultiTest, MultiConsistent) {
+  int multi_mode = absl::GetFlag(FLAGS_multi_exec_mode);
+  if (multi_mode == Transaction::NON_ATOMIC)
+    return;
+
   auto mset_fb = pp_->at(0)->LaunchFiber([&] {
     for (size_t i = 1; i < 10; ++i) {
       string base = StrCat(i * 900);
@@ -327,6 +332,10 @@ TEST_F(MultiTest, FlushDb) {
 }
 
 TEST_F(MultiTest, Eval) {
+  int multi_mode = absl::GetFlag(FLAGS_multi_eval_mode);
+  if (multi_mode == Transaction::GLOBAL || multi_mode == Transaction::NON_ATOMIC)
+    absl::SetFlag(&FLAGS_multi_eval_mode, Transaction::LOCK_AHEAD);
+
   RespExpr resp;
 
   resp = Run({"incrby", "foo", "42"});
@@ -363,6 +372,8 @@ TEST_F(MultiTest, Eval) {
 
   resp = Run({"hvals", "hmap"});
   EXPECT_EQ(resp, "2222");
+
+  absl::SetFlag(&FLAGS_multi_eval_mode, multi_mode);
 }
 
 TEST_F(MultiTest, Watch) {
@@ -476,7 +487,8 @@ TEST_F(MultiTest, MultiOOO) {
   auto metrics = GetMetrics();
 
   // OOO works in LOCK_AHEAD mode.
-  if (absl::GetFlag(FLAGS_multi_exec_mode) == Transaction::LOCK_AHEAD)
+  int mode = absl::GetFlag(FLAGS_multi_exec_mode);
+  if (mode == Transaction::LOCK_AHEAD || mode == Transaction::NON_ATOMIC)
     EXPECT_EQ(200, metrics.ooo_tx_transaction_cnt);
   else
     EXPECT_EQ(0, metrics.ooo_tx_transaction_cnt);
@@ -490,9 +502,6 @@ TEST_F(MultiTest, EvalOOO) {
   {
     auto resp = Run({"eval", kScript, "3", kKey1, kKey2, kKey3});
     ASSERT_EQ(resp, "OK");
-
-    auto metrics = GetMetrics();
-    EXPECT_EQ(1, metrics.ooo_tx_transaction_cnt);
   }
 
   const int kTimes = 10;
@@ -508,10 +517,14 @@ TEST_F(MultiTest, EvalOOO) {
 
     f1.Join();
     f2.Join();
-
-    auto metrics = GetMetrics();
-    EXPECT_EQ(1 + 2 * kTimes, metrics.ooo_tx_transaction_cnt);
   }
+
+  auto metrics = GetMetrics();
+  int mode = absl::GetFlag(FLAGS_multi_eval_mode);
+  if (mode == Transaction::LOCK_AHEAD || mode == Transaction::NON_ATOMIC)
+    EXPECT_EQ(1 + 2 * kTimes, metrics.ooo_tx_transaction_cnt);
+  else
+    EXPECT_EQ(0, metrics.ooo_tx_transaction_cnt);
 }
 
 // Run MULTI/EXEC commands in parallel, where each command is:
@@ -545,7 +558,7 @@ TEST_F(MultiTest, MultiContendedPermutatedKeys) {
 }
 
 TEST_F(MultiTest, MultiCauseUnblocking) {
-  const int kRounds = 5;
+  const int kRounds = 10;
   vector<string> keys = {kKeySid0, kKeySid1, kKeySid2};
 
   auto push = [this, keys, kRounds]() mutable {
@@ -571,6 +584,80 @@ TEST_F(MultiTest, MultiCauseUnblocking) {
 
   f1.Join();
   f2.Join();
+}
+
+TEST_F(MultiTest, EvalUndeclared) {
+  int start_mode = absl::GetFlag(FLAGS_multi_eval_mode);
+  int allowed_modes[] = {Transaction::GLOBAL, Transaction::NON_ATOMIC};
+
+  Run({"set", "undeclared-k", "works"});
+  const char* kScript = "return redis.call('GET', 'undeclared-k')";
+
+  for (int multi_mode : allowed_modes) {
+    absl::SetFlag(&FLAGS_multi_eval_mode, multi_mode);
+    auto res = Run({"eval", kScript, "0"});
+    EXPECT_EQ(res, "works");
+  }
+
+  absl::SetFlag(&FLAGS_multi_eval_mode, start_mode);
+}
+
+TEST_F(MultiTest, GlobalFallback) {
+  // Check global command MOVE falls back to global mode from lock ahead.
+  absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::LOCK_AHEAD);
+  Run({"multi"});
+  Run({"set", "a", "1"});  // won't run ooo, because it became part of global
+  Run({"move", "a", "1"});
+  Run({"exec"});
+  EXPECT_EQ(0, GetMetrics().ooo_tx_transaction_cnt);
+
+  // Check non atomic mode does not fall back to global.
+  absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::NON_ATOMIC);
+  Run({"multi"});
+  Run({"set", "a", "1"});  // will run ooo
+  Run({"move", "a", "1"});
+  Run({"exec"});
+  EXPECT_EQ(1, GetMetrics().ooo_tx_transaction_cnt);
+}
+
+// Run multi-exec transactions that move values from a source list
+// to destination list through two contended channels.
+TEST_F(MultiTest, ContendedList) {
+  if (absl::GetFlag(FLAGS_multi_exec_mode) == Transaction::NON_ATOMIC)
+    return;
+
+  const int listSize = 50;
+  const int stepSize = 5;
+
+  auto run = [this, listSize, stepSize](string_view src, string_view dest) {
+    for (int i = 0; i < listSize / stepSize; i++) {
+      Run({"multi"});
+      Run({"sort", src});
+      for (int j = 0; j < stepSize; j++)
+        Run({"lmove", src, j % 2 ? "chan-1" : "chan-2", "RIGHT", "RIGHT"});
+      for (int j = 0; j < stepSize; j++)
+        Run({"lmove", j % 2 ? "chan-1" : "chan-2", dest, "LEFT", "RIGHT"});
+      Run({"exec"});
+    }
+  };
+
+  for (int i = 0; i < listSize; i++) {
+    Run({"lpush", "l1", "a"});
+    Run({"lpush", "l2", "b"});
+  }
+
+  auto f1 = pp_->at(1)->LaunchFiber([run]() mutable { run("l1", "l1-out"); });
+  auto f2 = pp_->at(2)->LaunchFiber([run]() mutable { run("l2", "l2-out"); });
+
+  f1.Join();
+  f2.Join();
+
+  for (int i = 0; i < listSize; i++) {
+    EXPECT_EQ(Run({"lpop", "l1"}), "a");
+    EXPECT_EQ(Run({"lpop", "l2"}), "b");
+  }
+  EXPECT_EQ(Run({"llen", "chan-1"}), "0");
+  EXPECT_EQ(Run({"llen", "chan-2"}), "0");
 }
 
 }  // namespace dfly

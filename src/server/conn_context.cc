@@ -34,10 +34,6 @@ StoredCmd::StoredCmd(const CommandId* d, CmdArgList args) : descr(d) {
   arg_list_ = {arg_vec_.data(), arg_vec_.size()};
 }
 
-void StoredCmd::Invoke(ConnectionContext* ctx) {
-  descr->Invoke(arg_list_, ctx);
-}
-
 void ConnectionContext::ChangeMonitor(bool start) {
   // This will either remove or register a new connection
   // at the "top level" thread --> ServerState context
