@@ -715,10 +715,10 @@ TEST_F(JsonFamilyTest, ArrTrim) {
 
   resp = Run({"JSON.ARRTRIM", "json", "$[*]", "0", "1"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
-  EXPECT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::NIL), IntArg(0), IntArg(1), IntArg(2)));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(0), IntArg(1), IntArg(2), IntArg(2)));
 
   resp = Run({"JSON.GET", "json"});
-  EXPECT_EQ(resp, R"([[],[],["b"],["b","c"]])");
+  EXPECT_EQ(resp, R"([[],["a"],["a","b"],["a","b"]])");
 
   json = R"(
     {"a":[], "nested": {"a": [1,4]}}
@@ -729,10 +729,10 @@ TEST_F(JsonFamilyTest, ArrTrim) {
 
   resp = Run({"JSON.ARRTRIM", "json", "$..a", "0", "1"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
-  EXPECT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::NIL), IntArg(1)));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(0), IntArg(2)));
 
   resp = Run({"JSON.GET", "json"});
-  EXPECT_EQ(resp, R"({"a":[],"nested":{"a":[4]}})");
+  EXPECT_EQ(resp, R"({"a":[],"nested":{"a":[1,4]}})");
 
   json = R"(
     {"a":[1,2,3,2], "nested": {"a": false}}
@@ -743,10 +743,23 @@ TEST_F(JsonFamilyTest, ArrTrim) {
 
   resp = Run({"JSON.ARRTRIM", "json", "$..a", "1", "2"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
-  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(3), ArgType(RespExpr::NIL)));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(2), ArgType(RespExpr::NIL)));
 
   resp = Run({"JSON.GET", "json"});
-  EXPECT_EQ(resp, R"({"a":[1,3,2],"nested":{"a":false}})");
+  EXPECT_EQ(resp, R"({"a":[2,3],"nested":{"a":false}})");
+
+  json = R"(
+    [1,2,3,4,5,6,7]
+  )";
+
+  resp = Run({"JSON.SET", "json", "$", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRTRIM", "json", "$", "2", "3"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"([3,4])");
 }
 
 TEST_F(JsonFamilyTest, ArrInsert) {
