@@ -38,6 +38,8 @@ using JsonReplaceCb = function<void(const string&, JsonType&)>;
 using JsonReplaceVerify = std::function<OpStatus()>;
 using CI = CommandId;
 
+static const char DefaultJsonPath[] = "$";
+
 namespace {
 
 inline OpStatus JsonReplaceVerifyNoOp() {
@@ -1004,7 +1006,10 @@ void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
 
 void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
-  string_view path = ArgS(args, 2);
+  string_view path = DefaultJsonPath;
+  if (args.size() > 2) {
+    path = ArgS(args, 2);
+  }
 
   error_code ec;
   JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
@@ -1661,7 +1666,7 @@ void JsonFamily::Register(CommandRegistry* registry) {
       ArrAppend);
   *registry << CI{"JSON.ARRINDEX", CO::READONLY | CO::FAST, -4, 1, 1, 1}.HFUNC(ArrIndex);
   *registry << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -2, 1, 1, 1}.HFUNC(Debug);
-  *registry << CI{"JSON.RESP", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(Resp);
+  *registry << CI{"JSON.RESP", CO::READONLY | CO::FAST, -2, 1, 1, 1}.HFUNC(Resp);
   *registry << CI{"JSON.SET", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1}.HFUNC(Set);
 }
 
