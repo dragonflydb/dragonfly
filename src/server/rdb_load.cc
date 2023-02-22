@@ -1820,7 +1820,7 @@ error_code RdbLoader::Load(io::Source* src) {
       for (unsigned i = 0; i < shard_set->size(); ++i) {
         FlushShardAsync(i);
       }
-      RETURN_ON_ERR(HandleJournalBlob(service_, cur_db_index_));
+      RETURN_ON_ERR(HandleJournalBlob(service_));
       continue;
     }
 
@@ -1961,7 +1961,7 @@ error_code RdbLoaderBase::HandleCompressedBlobFinish() {
   return kOk;
 }
 
-error_code RdbLoaderBase::HandleJournalBlob(Service* service, DbIndex dbid) {
+error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
   // Read the number of entries in the journal blob.
   size_t num_entries;
   bool _encoded;
@@ -1972,7 +1972,6 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service, DbIndex dbid) {
   SET_OR_RETURN(FetchGenericString(), journal_blob);
 
   io::BytesSource bs{io::Buffer(journal_blob)};
-  journal_reader_.SetDb(dbid);
   journal_reader_.SetSource(&bs);
 
   // Parse and exectue in loop.

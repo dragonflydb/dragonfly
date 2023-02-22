@@ -129,7 +129,8 @@ class RdbSerializer {
   // Must be called in the thread to which `it` belongs.
   // Returns the serialized rdb_type or the error.
   // expire_ms = 0 means no expiry.
-  io::Result<uint8_t> SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms);
+  io::Result<uint8_t> SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms,
+                                DbIndex dbid);
 
   std::error_code SaveLen(size_t len);
   std::error_code SaveString(std::string_view val);
@@ -149,7 +150,7 @@ class RdbSerializer {
   }
 
   // Write journal entries as an embedded journal blob.
-  std::error_code WriteJournalEntries(absl::Span<const journal::Entry> entries);
+  std::error_code WriteJournalEntries(const journal::Entry& entry);
 
   // Send FULL_SYNC_CUT opcode to notify that all static data was sent.
   std::error_code SendFullSyncCut();
@@ -180,6 +181,7 @@ class RdbSerializer {
   base::IoBuf journal_mem_buf_;
   std::string tmp_str_;
   base::PODArray<uint8_t> tmp_buf_;
+  DbIndex last_entry_db_index_ = kInvalidDbId;
 
   std::unique_ptr<LZF_HSLOT[]> lzf_;
 

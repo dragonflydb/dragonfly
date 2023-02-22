@@ -50,10 +50,7 @@ class RdbSerializer;
 // over the channel until explicitly stopped.
 class SliceSnapshot {
  public:
-  // Each dbrecord should belong to exactly one db.
-  // RdbSaver adds "select" opcodes when necessary in order to maintain consistency.
   struct DbRecord {
-    DbIndex db_index;
     uint64_t id;
     std::string value;
   };
@@ -95,9 +92,6 @@ class SliceSnapshot {
   void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
                       std::optional<uint64_t> expire, RdbSerializer* serializer);
 
-  // Push rdb serializer's internal buffer to channel. Return now many bytes were written.
-  size_t PushBytesToChannel(DbIndex db_index, RdbSerializer* serializer);
-
   // DbChange listener
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
 
@@ -107,18 +101,14 @@ class SliceSnapshot {
   // Close dest channel if not closed yet.
   void CloseRecordChannel();
 
-  // Call PushFileToChannel on default buffer if needed.
-  // Flush regradless of size if force is true.
-  // Return if flushed.
-  bool FlushDefaultBuffer(bool force);
+  // Push serializer's internal buffer to channel.
+  // Push regradless of buffer size if force is true.
+  // Return if pushed.
+  bool PushSerializedToChannel(bool force);
 
  public:
   uint64_t snapshot_version() const {
     return snapshot_version_;
-  }
-
-  RdbSerializer* serializer() {
-    return default_serializer_.get();
   }
 
   size_t channel_bytes() const {
@@ -138,7 +128,7 @@ class SliceSnapshot {
 
   DbIndex current_db_;
 
-  std::unique_ptr<RdbSerializer> default_serializer_;
+  std::unique_ptr<RdbSerializer> serializer_;
 
   ::boost::fibers::mutex mu_;
   ::boost::fibers::fiber snapshot_fb_;  // IterateEntriesFb

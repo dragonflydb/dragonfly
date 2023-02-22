@@ -51,7 +51,7 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
     journal_cb_id_ = journal->RegisterOnChange(move(journal_cb));
   }
 
-  default_serializer_.reset(new RdbSerializer(compression_mode_));
+  serializer_.reset(new RdbSerializer(compression_mode_));
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
@@ -74,7 +74,7 @@ void SliceSnapshot::Stop() {
     db_slice_->shard_owner()->journal()->UnregisterOnChange(journal_cb_id_);
   }
 
-  FlushDefaultBuffer(true);
+  PushSerializedToChannel(true);
   CloseRecordChannel();
 }
 
@@ -135,7 +135,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
       PrimeTable::Cursor next =
           pt->Traverse(cursor, absl::bind_front(&SliceSnapshot::BucketSaveCb, this));
       cursor = next;
-      FlushDefaultBuffer(false);
+      PushSerializedToChannel(false);
 
       if (stats_.loop_serialized >= last_yield + 100) {
         DVLOG(2) << "Before sleep " << this_fiber::properties<FiberProps>().name();
@@ -143,14 +143,14 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
         DVLOG(2) << "After sleep";
 
         last_yield = stats_.loop_serialized;
-        // flush in case other fibers (writes commands that pushed previous values)
+        // Push in case other fibers (writes commands that pushed previous values)
         // filled the buffer.
-        FlushDefaultBuffer(false);
+        PushSerializedToChannel(false);
       }
     } while (cursor);
 
     DVLOG(2) << "after loop " << this_fiber::properties<FiberProps>().name();
-    FlushDefaultBuffer(true);
+    PushSerializedToChannel(true);
   }  // for (dbindex)
 
   // Wait for SerializePhysicalBucket to finish.
@@ -159,8 +159,8 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
 
   // TODO: investigate why a single byte gets stuck and does not arrive to replica
   for (unsigned i = 10; i > 1; i--)
-    CHECK(!default_serializer_->SendFullSyncCut());
-  FlushDefaultBuffer(true);
+    CHECK(!serializer_->SendFullSyncCut());
+  PushSerializedToChannel(true);
 
   // serialized + side_saved must be equal to the total saved.
   VLOG(1) << "Exit SnapshotSerializer (loop_serialized/side_saved/cbcalls): "
@@ -192,33 +192,16 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
   unsigned result = 0;
 
   lock_guard lk(mu_);
-
-  optional<RdbSerializer> tmp_serializer;
-  RdbSerializer* serializer_ptr = default_serializer_.get();
-  if (db_index != current_db_) {
-    CompressionMode compression_mode = compression_mode_ == CompressionMode::NONE
-                                           ? CompressionMode::NONE
-                                           : CompressionMode::SINGLE_ENTRY;
-    tmp_serializer.emplace(compression_mode);
-    serializer_ptr = &*tmp_serializer;
-  }
-
   while (!it.is_done()) {
     ++result;
-    SerializeEntry(db_index, it->first, it->second, nullopt, serializer_ptr);
+    SerializeEntry(db_index, it->first, it->second, nullopt, serializer_.get());
     ++it;
   }
-
-  if (tmp_serializer) {
-    PushBytesToChannel(db_index, &*tmp_serializer);
-    VLOG(1) << "Pushed " << result << " entries via tmp_serializer";
-  }
-
   return result;
 }
 
 // This function should not block and should not preempt because it's called
-// from SerializePhysicalBucket which should execute atomically.
+// from SerializeBucket which should execute atomically.
 void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv,
                                    optional<uint64_t> expire, RdbSerializer* serializer) {
   time_t expire_time = expire.value_or(0);
@@ -227,35 +210,30 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
     expire_time = db_slice_->ExpireTime(eit);
   }
 
-  io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time);
+  io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time, db_indx);
   CHECK(res);
   ++type_freq_map_[*res];
 }
 
-size_t SliceSnapshot::PushBytesToChannel(DbIndex db_index, RdbSerializer* serializer) {
-  auto id = rec_id_++;
-  DVLOG(2) << "Pushed " << id;
+bool SliceSnapshot::PushSerializedToChannel(bool force) {
+  if (!force && serializer_->SerializedLen() < 4096)
+    return false;
 
   io::StringFile sfile;
-  serializer->FlushToSink(&sfile);
+  serializer_->FlushToSink(&sfile);
 
   size_t serialized = sfile.val.size();
   if (serialized == 0)
     return 0;
   stats_.channel_bytes += serialized;
 
-  DbRecord db_rec{.db_index = db_index, .id = id, .value = std::move(sfile.val)};
+  auto id = rec_id_++;
+  DVLOG(2) << "Pushed " << id;
+  DbRecord db_rec{.id = id, .value = std::move(sfile.val)};
 
   dest_->Push(std::move(db_rec));
-  return serialized;
-}
 
-bool SliceSnapshot::FlushDefaultBuffer(bool force) {
-  if (!force && default_serializer_->SerializedLen() < 4096)
-    return false;
-
-  size_t written = PushBytesToChannel(current_db_, default_serializer_.get());
-  VLOG(2) << "FlushDefaultBuffer " << written << " bytes";
+  VLOG(2) << "PushSerializedToChannel " << serialized << " bytes";
   return true;
 }
 
@@ -288,25 +266,11 @@ void SliceSnapshot::OnJournalEntry(const journal::Entry& entry, bool unused_awai
     return;
   }
 
-  optional<RdbSerializer> tmp_serializer;
-  RdbSerializer* serializer_ptr = default_serializer_.get();
-  if (entry.dbid != current_db_) {
-    CompressionMode compression_mode = compression_mode_ == CompressionMode::NONE
-                                           ? CompressionMode::NONE
-                                           : CompressionMode::SINGLE_ENTRY;
-    tmp_serializer.emplace(compression_mode);
-    serializer_ptr = &*tmp_serializer;
-  }
+  serializer_->WriteJournalEntries(entry);
 
-  serializer_ptr->WriteJournalEntries(absl::Span{&entry, 1});
-
-  if (tmp_serializer) {
-    PushBytesToChannel(entry.dbid, &*tmp_serializer);
-  } else {
-    // This is the only place that flushes in streaming mode
-    // once the iterate buckets fiber finished.
-    FlushDefaultBuffer(false);
-  }
+  // This is the only place that flushes in streaming mode
+  // once the iterate buckets fiber finished.
+  PushSerializedToChannel(false);
 }
 
 void SliceSnapshot::CloseRecordChannel() {
