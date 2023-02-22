@@ -116,48 +116,27 @@ the serializability of operations across multiple shards.
 
 ## Multi-op transactions (Redis transactions)
 
-Redis transactions (MULTI/EXEC sequences) are modelled as `N` commands within a Dragonfly transaction. In order to avoid ambiguity with terms, we call a Redis transaction -  multi-transaction in Dragonfly.
+Redis transactions (MULTI/EXEC sequences) and commands produced by Lua scripts are modelled as consecutive commands within a Dragonfly transaction. In order to avoid ambiguity with terms, we call a Redis transaction - a multi-transaction in Dragonfly.
 
-Dragonfly transactional framework allows running any command as standalone transaction or within a multi-transaction. The complexity of handling both cases is pushed into the transactional framework and a command implementation is not aware of a transaction context. Take for example, redis transaction consisting of 2 commands:
+The multi feature of the transactional framework allows running consecutive commands without rescheduling the transaction for each command as if they are part of one single transaction. This feature is transparent to the commands itself, so no changes are required for them to be used in a multi-transaction.
 
-```
-MULTI
-SET x foo
-SET y bar
-EXEC
-```
+There are four modes called "multi modes" in which a multi transaction can be executed, each with its own benefits and drawbacks.
 
-`SET` command can be implemented with two hops (below is a pseudo-code):
+__1. Global mode__
 
-```cpp
-trans->Schedule();   // Hop1
+The transaction is equivalent to a global transaction with multiple hops. It is scheduled globally and the commands are executed as a series of consequitive hops. This mode is required for global commands (like MOVE) and for accessing undeclared keys in Lua scripts. Otherwise, it should be avoided, because it prevents Dragonfly from running concurrently and thus greatly decreases throughput.
 
-trans->Exec(trans, [](key, val) {
-  dict[key] = val;
-});   // Hop2
-```
+__2. Lock ahead mode__
 
-The commands implementation layer does not differentiate between muti-tx and regular txs.
-Therefore, we have the following hard-coded flow:
+The transaction is equivalent to a regular transaction with multiple hops. It is scheduled on all keys used by the commands in the transaction block, or Lua script, and the commands are executed as a series of consecutive hops.
 
-```cpp
-// set x foo
-trans->Schedule();
+__3. Incremental lock mode__
 
-trans->Exec([](key, val) {
-  dict[key] = val;    // x <- foo
-});
+The transaction schedules itself on all the shards that are accessed by the Redis transaction or Lua script, but does not lock any keys ahead. Only when it executes and occupies all the predetermined shards, it starts locking the keys it accesses. This mode _can_ be useful for delaying the acquisition of locks for contended keys and thus allowing other transactions to run in parallel for a longer period of time, however this mode disabled a wide range of optimizations for the multi-transaction itself, such as running out of order.
 
-// set y bar
-trans->Schedule();     // noop for multi-tx.
-trans->Exec([](key, val) {
-  dict[key] = val;    // y <- bar
-});
-```
+__4. Non atomic mode__
 
-However, we need to keep the same tx for both `SET` operations and schedule it only once.
-The transactional framework maintains an internal state underneath such that it avoids rescheduling
-a multi-tx for the second command "set y bar" and makes the second call to `Schedule()` effectively a noop.
+All commands are executed as separate transactions making the multi-transaction not atomic. It vastly improves the throughput with contended keys, as locks are acquired only for single commands. This mode is useful for Lua scripts without atomicity requirements.
 
 ## Optimizations
 Out of order transactions - TBD

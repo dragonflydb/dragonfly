@@ -37,6 +37,18 @@ using facade::OpStatus;
 // Use ScheduleSingleHop() if only a single hop is needed.
 // Otherwise, schedule the transaction with Schedule() and run successive hops
 // with Execute().
+//
+// Multi transactions are handled by a single transaction, which internally avoids
+// rescheduling. The flow of EXEC and EVAL is as follows:
+//
+// trans->StartMulti_MultiMode_()
+// for ([cmd, args]) {
+//   trans->MultiSwitchCmd(cmd)  // 1. Set new command
+//   trans->InitByArgs(args)     // 2. Re-initialize with arguments
+//   cmd->Invoke(trans)          // 3. Run
+// }
+// trans->UnlockMulti()
+//
 class Transaction {
   friend class BlockingController;
 
