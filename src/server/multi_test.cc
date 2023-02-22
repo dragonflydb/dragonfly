@@ -373,6 +373,13 @@ TEST_F(MultiTest, Eval) {
   resp = Run({"hvals", "hmap"});
   EXPECT_EQ(resp, "2222");
 
+  Run({"sadd", "s1", "a", "b"});
+  Run({"sadd", "s2", "a", "c"});
+  resp = Run({"eval", "return redis.call('SUNION', KEYS[1], KEYS[2])", "2", "s1", "s2"});
+  ASSERT_THAT(resp, ArrLen(3));
+  const auto& arr = resp.GetVec();
+  EXPECT_THAT(arr, ElementsAre("a", "b", "c"));
+
   absl::SetFlag(&FLAGS_multi_eval_mode, multi_mode);
 }
 
