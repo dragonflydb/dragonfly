@@ -43,6 +43,13 @@ bool IsGoodForListpack(CmdArgList args, const uint8_t* lp) {
   return lpBytes(const_cast<uint8_t*>(lp)) + sum < kMaxListPackLen;
 }
 
+inline StringMap* GetStringMap(const PrimeValue& pv, const DbContext& db_context) {
+  StringMap* res = (StringMap*)pv.RObjPtr();
+  uint32_t map_time = MemberTimeSeconds(db_context.time_now_ms);
+  res->set_time(map_time);
+  return res;
+}
+
 inline string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]) {
   int64_t ele_len = 0;
   uint8_t* elem = lpGet(lp_it, &ele_len, int_buf);
@@ -117,12 +124,13 @@ pair<uint8_t*, bool> LpInsert(uint8_t* lp, string_view field, string_view val, b
   return make_pair(lp, !updated);
 }
 
-size_t HMapLength(const CompactObj& co) {
+size_t HMapLength(const DbContext& db_cntx, const CompactObj& co) {
   void* ptr = co.RObjPtr();
   if (co.Encoding() == kEncodingStrMap2) {
-    StringMap* sm = (StringMap*)ptr;
+    StringMap* sm = GetStringMap(co, db_cntx);
     return sm->Size();
   }
+
   DCHECK_EQ(kEncodingListPack, co.Encoding());
   return lpLength((uint8_t*)ptr) / 2;
 }
@@ -229,7 +237,8 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
     stats->listpack_bytes += lpBytes(lp);
   } else {
     DCHECK_EQ(enc, kEncodingStrMap2);
-    StringMap* sm = (StringMap*)pv.RObjPtr();
+    StringMap* sm = GetStringMap(pv, op_args.db_cntx);
+
     sds val = nullptr;
     if (!inserted) {
       val = sm->Find(field);
@@ -309,7 +318,8 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
     *cursor = 0;
   } else {
     DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
-    StringMap* sm = (StringMap*)pv.RObjPtr();
+    StringMap* sm = GetStringMap(pv, op_args.db_cntx);
+
     long max_iterations = count * INTERATION_FACTOR;
 
     // note about this lambda - don't capture here! it should be convertible to C function!
@@ -365,7 +375,8 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
     pv.SetRObjPtr(lp);
   } else {
     DCHECK_EQ(enc, kEncodingStrMap2);
-    StringMap* sm = (StringMap*)pv.RObjPtr();
+    StringMap* sm = GetStringMap(pv, op_args.db_cntx);
+
     for (auto s : values) {
       bool res = sm->Erase(ToSV(s));
       if (res) {
@@ -438,7 +449,7 @@ OpResult<vector<OptStr>> OpMGet(const OpArgs& op_args, std::string_view key, Cmd
     } while (lp_elem);
   } else {
     DCHECK_EQ(kEncodingStrMap2, pv.Encoding());
-    StringMap* sm = (StringMap*)pv.RObjPtr();
+    StringMap* sm = GetStringMap(pv, op_args.db_cntx);
 
     for (size_t i = 0; i < fields.size(); ++i) {
       sds val = sm->Find(ToSV(fields[i]));
@@ -456,8 +467,9 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
   auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_HASH);
 
   if (it_res) {
-    return HMapLength((*it_res)->second);
+    return HMapLength(op_args.db_cntx, (*it_res)->second);
   }
+
   if (it_res.status() == OpStatus::KEY_NOTFOUND)
     return 0;
   return it_res.status();
@@ -482,7 +494,8 @@ OpResult<int> OpExist(const OpArgs& op_args, string_view key, string_view field)
   }
 
   DCHECK_EQ(kEncodingStrMap2, pv.Encoding());
-  StringMap* sm = (StringMap*)ptr;
+  StringMap* sm = GetStringMap(pv, op_args.db_cntx);
+
   return sm->Find(field) ? 1 : 0;
 };
 
@@ -505,8 +518,9 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key, string_view field
   }
 
   DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
-  StringMap* sm = (StringMap*)ptr;
+  StringMap* sm = GetStringMap(pv, op_args.db_cntx);
   sds val = sm->Find(field);
+
   if (!val)
     return OpStatus::KEY_NOTFOUND;
 
@@ -547,7 +561,8 @@ OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_
     }
   } else {
     DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
-    StringMap* sm = (StringMap*)pv.RObjPtr();
+    StringMap* sm = GetStringMap(pv, op_args.db_cntx);
+
     res.resize(sm->Size() * (keyval ? 2 : 1));
     for (const auto& k_v : *sm) {
       if (mask & FIELDS) {
@@ -583,14 +598,19 @@ OpResult<size_t> OpStrLen(const OpArgs& op_args, string_view key, string_view fi
   }
 
   DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
-  StringMap* sm = (StringMap*)ptr;
-  sds res = sm->Find(field);
+  StringMap* sm = GetStringMap(pv, op_args.db_cntx);
 
+  sds res = sm->Find(field);
   return res ? sdslen(res) : 0;
 }
 
+struct OpSetParams {
+  bool skip_if_exists = false;
+  uint32_t ttl = UINT32_MAX;
+};
+
 OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList values,
-                         bool skip_if_exists) {
+                         const OpSetParams& op_sp = OpSetParams{}) {
   DCHECK(!values.empty() && 0 == values.size() % 2);
 
   auto& db_slice = op_args.shard->db_slice();
@@ -608,11 +628,16 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   PrimeValue& pv = it->second;
 
   if (add_res.second) {  // new key
-    lp = lpNew(0);
-    pv.InitRobj(OBJ_HASH, kEncodingListPack, lp);
+    if (op_sp.ttl == UINT32_MAX) {
+      lp = lpNew(0);
+      pv.InitRobj(OBJ_HASH, kEncodingListPack, lp);
 
-    stats->listpack_blob_cnt++;
-    stats->listpack_bytes += lpBytes(lp);
+      stats->listpack_blob_cnt++;
+      stats->listpack_bytes += lpBytes(lp);
+    } else {
+      StringMap* sm = new StringMap(CompactObj::memory_resource());
+      pv.InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
+    }
   } else {
     if (pv.ObjType() != OBJ_HASH)
       return OpStatus::WRONG_TYPE;
@@ -624,7 +649,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
     lp = (uint8_t*)pv.RObjPtr();
     stats->listpack_bytes -= lpBytes(lp);
 
-    if (!IsGoodForListpack(values, lp)) {
+    if (op_sp.ttl != UINT32_MAX || !IsGoodForListpack(values, lp)) {
       stats->listpack_blob_cnt--;
       StringMap* sm = HSetFamily::ConvertToStrMap(lp);
       pv.InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
@@ -637,21 +662,22 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   if (lp) {
     bool inserted;
     for (size_t i = 0; i < values.size(); i += 2) {
-      tie(lp, inserted) = LpInsert(lp, ArgS(values, i), ArgS(values, i + 1), skip_if_exists);
+      tie(lp, inserted) = LpInsert(lp, ArgS(values, i), ArgS(values, i + 1), op_sp.skip_if_exists);
       created += inserted;
     }
     pv.SetRObjPtr(lp);
     stats->listpack_bytes += lpBytes(lp);
   } else {
     DCHECK_EQ(kEncodingStrMap2, pv.Encoding());  // Dictionary
-    StringMap* sm = (StringMap*)pv.RObjPtr();
+    StringMap* sm = GetStringMap(pv, op_args.db_cntx);
+
     bool added;
 
     for (size_t i = 0; i < values.size(); i += 2) {
-      if (skip_if_exists)
-        added = sm->AddOrSkip(ToSV(values[i]), ToSV(values[i + 1]));
+      if (op_sp.skip_if_exists)
+        added = sm->AddOrSkip(ToSV(values[i]), ToSV(values[i + 1]), op_sp.ttl);
       else
-        added = sm->AddOrUpdate(ToSV(values[i]), ToSV(values[i + 1]));
+        added = sm->AddOrUpdate(ToSV(values[i]), ToSV(values[i + 1]), op_sp.ttl);
 
       created += unsigned(added);
     }
@@ -659,6 +685,57 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
 
   return created;
+}
+
+void HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t getall_mask) {
+  string_view key = ArgS(args, 1);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpGetAll(t->GetOpArgs(shard), key, getall_mask);
+  };
+
+  OpResult<vector<string>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+
+  if (result) {
+    (*cntx)->SendStringArr(absl::Span<const string>{*result});
+  } else {
+    (*cntx)->SendError(result.status());
+  }
+}
+
+// HSETEX key tll_sec field value field value ...
+void HSetEx(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() % 2 != 1) {
+    ToLower(&args[0]);
+
+    string_view cmd = ArgS(args, 0);
+
+    return (*cntx)->SendError(facade::WrongNumArgsError(cmd), kSyntaxErrType);
+  }
+
+  string_view key = ArgS(args, 1);
+  string_view ttl_str = ArgS(args, 2);
+  uint32_t ttl_sec;
+  constexpr uint32_t kMaxTtl = (1UL << 26);
+
+  if (!absl::SimpleAtoi(ttl_str, &ttl_sec) || ttl_sec == 0 || ttl_sec > kMaxTtl) {
+    return (*cntx)->SendError(kInvalidIntErr);
+  }
+
+  args.remove_prefix(3);
+  OpSetParams op_sp;
+  op_sp.ttl = ttl_sec;
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpSet(t->GetOpArgs(shard), key, args, op_sp);
+  };
+
+  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (result) {
+    (*cntx)->SendLong(*result);
+  } else {
+    (*cntx)->SendError(result.status());
+  }
 }
 
 }  // namespace
@@ -836,22 +913,6 @@ void HSetFamily::HGetAll(CmdArgList args, ConnectionContext* cntx) {
   HGetGeneric(args, cntx, GetAllMode::FIELDS | GetAllMode::VALUES);
 }
 
-void HSetFamily::HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t getall_mask) {
-  string_view key = ArgS(args, 1);
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpGetAll(t->GetOpArgs(shard), key, getall_mask);
-  };
-
-  OpResult<vector<string>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-
-  if (result) {
-    (*cntx)->SendStringArr(absl::Span<const string>{*result});
-  } else {
-    (*cntx)->SendError(result.status());
-  }
-}
-
 void HSetFamily::HScan(CmdArgList args, ConnectionContext* cntx) {
   std::string_view key = ArgS(args, 1);
   std::string_view token = ArgS(args, 2);
@@ -905,7 +966,7 @@ void HSetFamily::HSet(CmdArgList args, ConnectionContext* cntx) {
 
   args.remove_prefix(2);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(t->GetOpArgs(shard), key, args, false);
+    return OpSet(t->GetOpArgs(shard), key, args);
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -921,7 +982,7 @@ void HSetFamily::HSetNx(CmdArgList args, ConnectionContext* cntx) {
 
   args.remove_prefix(2);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(t->GetOpArgs(shard), key, args, true);
+    return OpSet(t->GetOpArgs(shard), key, args, OpSetParams{.skip_if_exists = true});
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -953,7 +1014,8 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
     auto& db_slice = shard->db_slice();
-    auto it_res = db_slice.Find(t->GetDbContext(), key, OBJ_HASH);
+    DbContext db_context = t->GetDbContext();
+    auto it_res = db_slice.Find(db_context, key, OBJ_HASH);
 
     if (!it_res)
       return it_res.status();
@@ -1018,6 +1080,7 @@ void HSetFamily::Register(CommandRegistry* registry) {
             << CI{"HRANDFIELD", CO::READONLY, 2, 1, 1, 1}.HFUNC(HRandField)
             << CI{"HSCAN", CO::READONLY, -3, 1, 1, 1}.HFUNC(HScan)
             << CI{"HSET", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, 1}.HFUNC(HSet)
+            << CI{"HSETEX", CO::WRITE | CO::FAST | CO::DENYOOM, -5, 1, 1, 1}.SetHandler(HSetEx)
             << CI{"HSETNX", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, 1}.HFUNC(HSetNx)
             << CI{"HSTRLEN", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(HStrLen)
             << CI{"HVALS", CO::READONLY, 2, 1, 1, 1}.HFUNC(HVals);

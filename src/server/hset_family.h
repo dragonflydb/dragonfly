@@ -27,6 +27,8 @@ class HSetFamily {
   static StringMap* ConvertToStrMap(uint8_t* lp);
 
  private:
+  // TODO: to move it to anonymous namespace in cc file.
+
   static void HDel(CmdArgList args, ConnectionContext* cntx);
   static void HLen(CmdArgList args, ConnectionContext* cntx);
   static void HExists(CmdArgList args, ConnectionContext* cntx);
@@ -42,8 +44,6 @@ class HSetFamily {
   static void HSetNx(CmdArgList args, ConnectionContext* cntx);
   static void HStrLen(CmdArgList args, ConnectionContext* cntx);
   static void HRandField(CmdArgList args, ConnectionContext* cntx);
-
-  static void HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t getall_mask);
 };
 
 }  // namespace dfly

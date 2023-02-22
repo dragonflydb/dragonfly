@@ -39,13 +39,6 @@ namespace {
 
 constexpr uint32_t kMaxIntSetEntries = 256;
 
-// I use relative time from Oct 1, 2022
-constexpr uint64_t kNowBase = 1664582400ULL;
-
-uint32_t TimeNowSecRel(uint64_t now_ms) {
-  return (now_ms / 1000) - kNowBase;
-}
-
 bool IsDenseEncoding(const CompactObj& co) {
   return co.Encoding() == kEncodingStrMap2;
 }
@@ -130,7 +123,7 @@ unsigned AddStrSet(const DbContext& db_context, ArgSlice vals, uint32_t ttl_sec,
 
   if (IsDenseEncoding(*dest)) {
     StringSet* ss = (StringSet*)dest->RObjPtr();
-    uint32_t time_now = TimeNowSecRel(db_context.time_now_ms);
+    uint32_t time_now = MemberTimeSeconds(db_context.time_now_ms);
 
     ss->set_time(time_now);
 
@@ -186,7 +179,7 @@ pair<unsigned, bool> RemoveSet(const DbContext& db_context, ArgSlice vals, Compa
     isempty = (intsetLen(is) == 0);
     set->SetRObjPtr(is);
   } else {
-    return RemoveStrSet(TimeNowSecRel(db_context.time_now_ms), vals, set);
+    return RemoveStrSet(MemberTimeSeconds(db_context.time_now_ms), vals, set);
   }
   return make_pair(removed, isempty);
 }
@@ -217,7 +210,7 @@ uint64_t ScanStrSet(const DbContext& db_context, const CompactObj& co, uint64_t 
 
   if (IsDenseEncoding(co)) {
     StringSet* set = (StringSet*)co.RObjPtr();
-    set->set_time(TimeNowSecRel(db_context.time_now_ms));
+    set->set_time(MemberTimeSeconds(db_context.time_now_ms));
 
     do {
       auto scan_callback = [&](const sds ptr) {
@@ -263,7 +256,7 @@ uint32_t SetTypeLen(const DbContext& db_context, const SetType& set) {
 
   if (IsDenseEncoding(set)) {
     StringSet* ss = (StringSet*)set.first;
-    ss->set_time(TimeNowSecRel(db_context.time_now_ms));
+    ss->set_time(MemberTimeSeconds(db_context.time_now_ms));
     return ss->Size();
   }
 
@@ -281,7 +274,7 @@ bool IsInSet(const DbContext& db_context, const SetType& st, int64_t val) {
 
   if (IsDenseEncoding(st)) {
     StringSet* ss = (StringSet*)st.first;
-    ss->set_time(TimeNowSecRel(db_context.time_now_ms));
+    ss->set_time(MemberTimeSeconds(db_context.time_now_ms));
     return ss->Contains(str);
   }
 
@@ -300,7 +293,7 @@ bool IsInSet(const DbContext& db_context, const SetType& st, string_view member)
 
   if (IsDenseEncoding(st)) {
     StringSet* ss = (StringSet*)st.first;
-    ss->set_time(TimeNowSecRel(db_context.time_now_ms));
+    ss->set_time(MemberTimeSeconds(db_context.time_now_ms));
 
     return ss->Contains(member);
   } else {
@@ -322,7 +315,7 @@ void DiffStrSet(const DbContext& db_context, const SetType& st,
                 absl::flat_hash_set<string>* result) {
   if (IsDenseEncoding(st)) {
     StringSet* ss = (StringSet*)st.first;
-    ss->set_time(TimeNowSecRel(db_context.time_now_ms));
+    ss->set_time(MemberTimeSeconds(db_context.time_now_ms));
     for (sds ptr : *ss) {
       result->erase(string_view{ptr, sdslen(ptr)});
     }
@@ -342,7 +335,7 @@ void DiffStrSet(const DbContext& db_context, const SetType& st,
 void InterStrSet(const DbContext& db_context, const vector<SetType>& vec, StringVec* result) {
   if (IsDenseEncoding(vec.front())) {
     StringSet* ss = (StringSet*)vec.front().first;
-    ss->set_time(TimeNowSecRel(db_context.time_now_ms));
+    ss->set_time(MemberTimeSeconds(db_context.time_now_ms));
     for (const sds ptr : *ss) {
       std::string_view str{ptr, sdslen(ptr)};
       size_t j = 1;
@@ -385,7 +378,7 @@ StringVec PopStrSet(const DbContext& db_context, unsigned count, const SetType& 
 
   if (IsDenseEncoding(st)) {
     StringSet* ss = (StringSet*)st.first;
-    ss->set_time(TimeNowSecRel(db_context.time_now_ms));
+    ss->set_time(MemberTimeSeconds(db_context.time_now_ms));
 
     // TODO: this loop is inefficient because Pop searches again and again an occupied bucket.
     for (unsigned i = 0; i < count && !ss->Empty(); ++i) {
@@ -798,7 +791,7 @@ OpResult<StringVec> OpUnion(const OpArgs& op_args, ArgSlice keys) {
       PrimeValue& pv = find_res.value()->second;
       if (IsDenseEncoding(pv)) {
         StringSet* ss = (StringSet*)pv.RObjPtr();
-        ss->set_time(TimeNowSecRel(op_args.db_cntx.time_now_ms));
+        ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
       }
       container_utils::IterateSet(pv, [&uniques](container_utils::ContainerEntry ce) {
         uniques.emplace(ce.ToString());
@@ -830,7 +823,7 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ArgSlice keys) {
   PrimeValue& pv = find_res.value()->second;
   if (IsDenseEncoding(pv)) {
     StringSet* ss = (StringSet*)pv.RObjPtr();
-    ss->set_time(TimeNowSecRel(op_args.db_cntx.time_now_ms));
+    ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
   }
 
   container_utils::IterateSet(pv, [&uniques](container_utils::ContainerEntry ce) {
@@ -886,7 +879,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
     PrimeValue& pv = find_res.value()->second;
     if (IsDenseEncoding(pv)) {
       StringSet* ss = (StringSet*)pv.RObjPtr();
-      ss->set_time(TimeNowSecRel(t->GetDbContext().time_now_ms));
+      ss->set_time(MemberTimeSeconds(t->GetDbContext().time_now_ms));
     }
 
     container_utils::IterateSet(find_res.value()->second,
@@ -971,7 +964,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
     PrimeValue& pv = it->second;
     if (IsDenseEncoding(pv)) {
       StringSet* ss = (StringSet*)pv.RObjPtr();
-      ss->set_time(TimeNowSecRel(op_args.db_cntx.time_now_ms));
+      ss->set_time(MemberTimeSeconds(op_args.db_cntx.time_now_ms));
     }
 
     container_utils::IterateSet(it->second, [&result](container_utils::ContainerEntry ce) {
