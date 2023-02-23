@@ -7,17 +7,9 @@ import time
 import asyncio
 from datetime import datetime
 from sys import stderr
+import logging
 
-# logs messages to stderr, including a timestamp.
-# use log() instead of print().
-def log(*args, **kwargs):
-    ''' 
-    logs messages to stderr, including a timestamp.
-    use log() instead of print().
-    '''
-    kwargs['file'] = stderr
-    print(f"[{datetime.now()}]", *args, **kwargs)
-
+log = logging.info
 
 # Helper function to parse some sentinel cli commands output as key value dictionaries.
 # Output is expected be of even number of lines where each pair of consecutive lines results in a single key value pair.
@@ -139,7 +131,7 @@ async def test_failover(df_local_factory, sentinel):
 
     master_client = aioredis.Redis(port=master.port)
     replica_client = aioredis.Redis(port=replica.port)
-    log("master: " + str(master.port) + " replica: " + str(replica.port), flush=True)
+    log("master: " + str(master.port) + " replica: " + str(replica.port))
 
     await replica_client.execute_command("REPLICAOF localhost " + str(master.port))
 
