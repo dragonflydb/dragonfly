@@ -899,6 +899,9 @@ TEST_F(JsonFamilyTest, Resp) {
   auto resp = Run({"JSON.SET", "json", ".", PhonebookJson});
   ASSERT_THAT(resp, "OK");
 
+  resp = Run({"JSON.RESP", "json"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+
   resp = Run({"JSON.RESP", "json", "$.address.*"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   EXPECT_THAT(resp.GetVec(), ElementsAre("New York", "NY", "21 2nd Street", "10021-3100"));
