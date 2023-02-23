@@ -338,7 +338,6 @@ void InterpreterReplier::SendSimpleStrArr(const string_view* arr, uint32_t count
     explr_->OnString(arr[i]);
   }
   explr_->OnArrayEnd();
-  PostItem();
 }
 
 void InterpreterReplier::SendNullArray() {
