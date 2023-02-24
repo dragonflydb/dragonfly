@@ -13,6 +13,7 @@
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
 #include "server/server_state.h"
+#include "util/proactor_base.h"
 
 namespace dfly {
 
@@ -665,7 +666,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
         CHECK_GE(DecreaseRunCnt(), 1u);
       }
     };
-    shard_set->Add(unique_shard_id_, std::move(schedule_cb));  // serves as a barrier.
+    shard_set->Add(unique_shard_id_, std::move(schedule_cb), true);  // serves as a barrier.
   } else {
     // This transaction either spans multiple shards and/or is multi.
 
