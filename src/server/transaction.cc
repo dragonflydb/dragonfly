@@ -791,12 +791,8 @@ void Transaction::ExecuteAsync() {
   auto cb = [seq, this] {
     EngineShard* shard = EngineShard::tlocal();
 
-    uint16_t local_mask = GetLocalMask(shard->shard_id());
-
-    // we use fetch_add with release trick to make sure that local_mask is loaded before
-    // we load seq_after. We could gain similar result with "atomic_thread_fence(acquire)"
-    uint32_t seq_after = seqlock_.fetch_add(0, memory_order_release);
-    bool should_poll = (seq_after == seq) && (local_mask & ARMED);
+    uint32_t seq_after = seqlock_.load(memory_order_acquire);
+    bool should_poll = (seq_after == seq) && (GetLocalMask(shard->shard_id()) & ARMED);
 
     DVLOG(2) << "PollExecCb " << DebugId() << " sid(" << shard->shard_id() << ") "
              << run_count_.load(memory_order_relaxed) << ", should_poll: " << should_poll;
