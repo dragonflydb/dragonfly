@@ -679,8 +679,13 @@ OpResult<vector<OptSizeT>> OpArrTrim(const OpArgs& op_args, string_view key, str
                                      int start_index, int stop_index) {
   vector<OptSizeT> vec;
   auto cb = [&](const string& path, JsonType& val) {
-    if (!val.is_array() || val.empty()) {
+    if (!val.is_array()) {
       vec.emplace_back(nullopt);
+      return;
+    }
+
+    if (val.empty()) {
+      vec.emplace_back(0);
       return;
     }
 
@@ -691,28 +696,26 @@ OpResult<vector<OptSizeT>> OpArrTrim(const OpArgs& op_args, string_view key, str
       trim_start_index = start_index;
     }
 
-    size_t trim_stop_index;
+    size_t trim_end_index;
     if ((size_t)stop_index >= val.size()) {
-      trim_stop_index = val.size();
+      trim_end_index = val.size();
     } else {
-      trim_stop_index = stop_index;
+      trim_end_index = stop_index;
     }
 
-    if (trim_start_index >= val.size() || trim_start_index > trim_stop_index) {
+    if (trim_start_index >= val.size() || trim_start_index > trim_end_index) {
       val.erase(val.array_range().begin(), val.array_range().end());
-      vec.emplace_back(val.size());
+      vec.emplace_back(0);
       return;
     }
 
-    auto it = std::next(val.array_range().begin(), trim_start_index);
-    while (it != val.array_range().end()) {
-      if (trim_start_index++ == trim_stop_index) {
-        break;
-      }
-
-      it = val.erase(it);
+    auto trim_start_it = std::next(val.array_range().begin(), trim_start_index);
+    auto trim_end_it = val.array_range().end();
+    if (trim_end_index < val.size()) {
+      trim_end_it = std::next(val.array_range().begin(), trim_end_index + 1);
     }
 
+    val = json_array<JsonType>(trim_start_it, trim_end_it);
     vec.emplace_back(val.size());
   };
 
