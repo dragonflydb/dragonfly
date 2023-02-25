@@ -119,6 +119,9 @@ class DflyInstanceFactory:
         for instance in self.instances:
             instance.stop()
 
+    def __str__(self):
+        return f"Factory({self.args})"
+
 
 def dfly_args(*args):
     """ Used to define a singular set of arguments for dragonfly test """

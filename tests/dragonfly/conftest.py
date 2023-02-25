@@ -122,7 +122,7 @@ def client(sync_pool):
 @pytest_asyncio.fixture(scope="function")
 async def async_pool(df_server: DflyInstance):
     pool = aioredis.ConnectionPool(host="localhost", port=df_server.port,
-                                   db=DATABASE_INDEX, decode_responses=True, max_connections=16)
+                                   db=DATABASE_INDEX, decode_responses=True, max_connections=32)
     yield pool
     await pool.disconnect()
 
