@@ -258,6 +258,7 @@ error_code RdbSerializer::SelectDb(uint32_t dbid) {
   if (dbid == last_entry_db_index_) {
     return error_code{};
   }
+  last_entry_db_index_ = dbid;
   uint8_t buf[16];
   buf[0] = RDB_OPCODE_SELECTDB;
   unsigned enclen = WritePackedUInt(dbid, io::MutableBytes{buf}.subspan(1));
@@ -268,7 +269,6 @@ error_code RdbSerializer::SelectDb(uint32_t dbid) {
 io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValue& pv,
                                              uint64_t expire_ms, DbIndex dbid) {
   SelectDb(dbid);
-  last_entry_db_index_ = dbid;
   uint8_t buf[16];
   error_code ec;
   /* Save the expire time */
@@ -686,7 +686,11 @@ error_code RdbSerializer::FlushToSink(io::Sink* s) {
   // interrupt point.
   RETURN_ON_ERR(s->Write(bytes));
   mem_buf_.ConsumeInput(bytes.size());
-  last_entry_db_index_ = kInvalidDbId;  // After every flash we should write the DB index again.
+  // After every flush we should write the DB index again because the blobs in the channel are
+  // interleaved and multiple savers can correspond to a single writer (in case of single file rdb
+  // snapshot)
+  last_entry_db_index_ = kInvalidDbId;
+
   return error_code{};
 }
 
@@ -707,7 +711,7 @@ io::Bytes RdbSerializer::PrepareFlush() {
   return mem_buf_.InputBuffer();
 }
 
-error_code RdbSerializer::WriteJournalEntries(const journal::Entry& entry) {
+error_code RdbSerializer::WriteJournalEntry(const journal::Entry& entry) {
   io::BufSink buf_sink{&journal_mem_buf_};
   JournalWriter writer{&buf_sink};
   writer.Write(entry);
@@ -715,12 +719,6 @@ error_code RdbSerializer::WriteJournalEntries(const journal::Entry& entry) {
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_JOURNAL_BLOB));
   RETURN_ON_ERR(SaveLen(1));
   RETURN_ON_ERR(SaveString(io::View(journal_mem_buf_.InputBuffer())));
-  // SELECTDB is serialized inside journal writer. In rdb loader when parsing journal blob
-  // the journal reader parses the entry db index, and we dont use the main flow of
-  // updating the current db index. Unless we change the flow in the loader, we must
-  // update last_entry_db_index_ to invalid so that the next snapshot entry to be serialized
-  // will update the db index.
-  last_entry_db_index_ = kInvalidDbId;
   journal_mem_buf_.Clear();
   return error_code{};
 }

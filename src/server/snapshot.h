@@ -102,7 +102,7 @@ class SliceSnapshot {
   void CloseRecordChannel();
 
   // Push serializer's internal buffer to channel.
-  // Push regradless of buffer size if force is true.
+  // Push regardless of buffer size if force is true.
   // Return if pushed.
   bool PushSerializedToChannel(bool force);
 

@@ -149,8 +149,8 @@ class RdbSerializer {
     return WriteRaw(::io::Bytes{&opcode, 1});
   }
 
-  // Write journal entries as an embedded journal blob.
-  std::error_code WriteJournalEntries(const journal::Entry& entry);
+  // Write journal entry as an embedded journal blob.
+  std::error_code WriteJournalEntry(const journal::Entry& entry);
 
   // Send FULL_SYNC_CUT opcode to notify that all static data was sent.
   std::error_code SendFullSyncCut();
