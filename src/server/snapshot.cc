@@ -157,7 +157,9 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
   mu_.lock();
   mu_.unlock();
 
-  serializer_->SendFullSyncCut();
+  // TODO: investigate why a single byte gets stuck and does not arrive to replica
+  for (unsigned i = 10; i > 1; i--)
+    CHECK(!serializer_->SendFullSyncCut());
   PushSerializedToChannel(true);
 
   // serialized + side_saved must be equal to the total saved.
