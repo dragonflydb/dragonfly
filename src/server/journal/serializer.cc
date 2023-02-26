@@ -90,10 +90,6 @@ JournalReader::JournalReader(io::Source* source, DbIndex dbid)
     : source_{source}, buf_{4_KB}, dbid_{dbid} {
 }
 
-void JournalReader::SetDb(DbIndex dbid) {
-  dbid_ = dbid;
-}
-
 void JournalReader::SetSource(io::Source* source) {
   CHECK_EQ(buf_.InputLen(), 0ULL);
   source_ = source;

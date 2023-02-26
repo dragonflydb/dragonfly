@@ -43,9 +43,6 @@ struct JournalReader {
   // Initialize start database index.
   JournalReader(io::Source* source, DbIndex dbid);
 
-  // Overwrite current db index.
-  void SetDb(DbIndex dbid);
-
   // Overwrite current source and ensure there is no leftover from previous.
   void SetSource(io::Source* source);
 
