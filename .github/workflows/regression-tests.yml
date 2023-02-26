@@ -55,7 +55,7 @@ jobs:
           pytest -sxvr dragonfly --ignore=dragonfly/replication_test.py
       - name: Run PyTests replication test
         timeout-minutes: 15
-        if:  ${{ inputs.run_replication }}
+        #if:  ${{ inputs.run_replication }}
         run: |
           cd ${GITHUB_WORKSPACE}/tests
           export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests

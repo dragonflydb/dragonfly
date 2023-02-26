@@ -302,7 +302,7 @@ pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string
 
   auto& db = *db_arr_[cntx.db_index];
   res.first = db.prime.Find(key);
-
+  FiberAtomicGuard fg;
   if (!IsValid(res.first)) {
     events_.misses++;
     return res;
@@ -366,7 +366,6 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
     if (IsValid(res.first)) {
       return tuple_cat(res, make_tuple(false));
     }
-
     // It's a new entry.
     for (const auto& ccb : change_cb_) {
       ccb.second(cntx.db_index, key);
@@ -742,6 +741,7 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) con
 }
 
 void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
+  FiberAtomicGuard fg;
   for (const auto& ccb : change_cb_) {
     ccb.second(db_ind, ChangeReq{it});
   }
@@ -854,6 +854,7 @@ uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
 
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, PrimeIterator it,
                                             uint64_t upper_bound) {
+  FiberAtomicGuard fg;
   uint64_t bucket_version = it.GetVersion();
   // change_cb_ is ordered by vesion.
   for (const auto& ccb : change_cb_) {
