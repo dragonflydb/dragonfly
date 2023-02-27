@@ -531,7 +531,7 @@ error_code Replica::InitiateDflySync() {
 
   // Wait for all flows to receive full sync cut.
   // In case of an error, this is unblocked by the error handler.
-  DLOG(INFO) << "Waiting for all full sync cut confirmations";
+  VLOG(1) << "Waiting for all full sync cut confirmations";
   sync_block.Wait();
 
   // Check if we woke up due to cancellation.
@@ -682,7 +682,7 @@ error_code Replica::SendNextPhaseRequest(bool stable) {
   string_view kind = (stable) ? "STARTSTABLE"sv : "SYNC"sv;
   string request = StrCat("DFLY ", kind, " ", master_context_.dfly_session_id);
 
-  DLOG(INFO) << "Sending: " << request;
+  VLOG(1) << "Sending: " << request;
   RETURN_ON_ERR(SendCommand(request, &serializer));
 
   base::IoBuf io_buf{128};
