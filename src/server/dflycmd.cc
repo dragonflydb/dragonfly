@@ -288,6 +288,9 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
       return rb->SendError(kInvalidState);
   }
 
+  LOG(INFO) << "Started full sync with replica " << replica_ptr->address << ":"
+            << replica_ptr->listening_port;
+
   replica_ptr->state.store(SyncState::FULL_SYNC, memory_order_relaxed);
   return rb->SendOk();
 }
@@ -323,6 +326,9 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
     if (*status != OpStatus::OK)
       return rb->SendError(kInvalidState);
   }
+
+  LOG(INFO) << "Transitioned into stable sync with replica " << replica_ptr->address << ":"
+            << replica_ptr->listening_port;
 
   replica_ptr->state.store(SyncState::STABLE_SYNC, memory_order_relaxed);
   return rb->SendOk();
@@ -462,9 +468,13 @@ uint32_t DflyCmd::CreateSyncSession(ConnectionContext* cntx) {
     ::boost::fibers::fiber{&DflyCmd::StopReplication, this, sync_id}.detach();
   };
 
-  auto replica_ptr = make_shared<ReplicaInfo>(flow_count, cntx->owner()->RemoteEndpointAddress(),
-                                              cntx->conn_state.replicaiton_info.repl_listening_port,
-                                              std::move(err_handler));
+  string address = cntx->owner()->RemoteEndpointAddress();
+  uint32_t port = cntx->conn_state.replicaiton_info.repl_listening_port;
+
+  LOG(INFO) << "Registered replica " << address << ":" << port;
+
+  auto replica_ptr =
+      make_shared<ReplicaInfo>(flow_count, std::move(address), port, std::move(err_handler));
   auto [it, inserted] = replica_infos_.emplace(sync_id, std::move(replica_ptr));
   CHECK(inserted);
 
@@ -500,7 +510,8 @@ void DflyCmd::CancelReplication(uint32_t sync_id, shared_ptr<ReplicaInfo> replic
     return;
   }
 
-  LOG(INFO) << "Cancelling sync session " << sync_id;
+  LOG(INFO) << "Disconnecting from replica " << replica_ptr->address << ":"
+            << replica_ptr->listening_port;
 
   // Update replica_ptr state and cancel context.
   replica_ptr->state.store(SyncState::CANCELLED, memory_order_release);
@@ -538,8 +549,6 @@ void DflyCmd::CancelReplication(uint32_t sync_id, shared_ptr<ReplicaInfo> replic
 
   // Wait for error handler to quit.
   replica_ptr->cntx.JoinErrorHandler();
-
-  LOG(INFO) << "Evicted sync session " << sync_id;
 }
 
 shared_ptr<DflyCmd::ReplicaInfo> DflyCmd::GetReplicaInfo(uint32_t sync_id) {
