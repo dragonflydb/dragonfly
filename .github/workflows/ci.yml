@@ -98,6 +98,11 @@ jobs:
           python-version: '3.9'
           check-latest: true
 
+      - name: Chart Rendering Tests
+        run: |
+          cd contrib/charts/dragonfly
+          go test -v ./...
+
       - name: Set up chart-testing
         uses: helm/chart-testing-action@v2.3.1
 

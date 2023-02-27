@@ -1,0 +1,116 @@
+---
+# Source: dragonfly/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: test-dragonfly
+  labels:
+    app.kubernetes.io/name: dragonfly
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "v0.15.0"
+    app.kubernetes.io/managed-by: Helm
+---
+# Source: dragonfly/templates/tls-secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: test-dragonfly-tls
+  labels:
+    app.kubernetes.io/name: dragonfly
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "v0.15.0"
+    app.kubernetes.io/managed-by: Helm
+type: kubernetes.io/tls
+data:
+  tls.crt: "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUI4ekNDQVpxZ0F3SUJBZ0lFYmIyWjJqQUtCZ2dxaGtqT1BRUURBekJaTVFzd0NRWURWUVFHRXdKR1R6RWcKTUI0R0ExVUVBd3dYWkhKaFoyOXVabXg1TG1SeVlXZHZibVpzZVM1emRtTXhEREFLQmdOVkJBZ01BMlp2YnpFTQpNQW9HQTFVRUJ3d0RabTl2TVF3d0NnWURWUVFLREFObWIyOHdIaGNOTWpJeE1qSTVNVEl3TXpJM1doY05Nekl4Ck1qSTJNVEl3TXpJM1dqQlpNUXN3Q1FZRFZRUUdFd0pHVHpFZ01CNEdBMVVFQXd3WFpISmhaMjl1Wm14NUxtUnkKWVdkdmJtWnNlUzV6ZG1NeEREQUtCZ05WQkFnTUEyWnZiekVNTUFvR0ExVUVCd3dEWm05dk1Rd3dDZ1lEVlFRSwpEQU5tYjI4d1dUQVRCZ2NxaGtqT1BRSUJCZ2dxaGtqT1BRTUJCd05DQUFRV05mVHVOamhQRWk3aDFjaUNTMEl0CmZLZ2lCaHhMR2xGM010amxGVGpDcnpreW5TU0FCb010TmxqY0RFMGhtL2l6YlJVb2dBY0RGY3ZrbnZDaHp4YXEKbzFBd1RqQWRCZ05WSFE0RUZnUVVTTjZGYnNKWjJFVWZYM2JlQ2g1Y0VvNmNrdFF3SHdZRFZSMGpCQmd3Rm9BVQpTTjZGYnNKWjJFVWZYM2JlQ2g1Y0VvNmNrdFF3REFZRFZSMFRCQVV3QXdFQi96QUtCZ2dxaGtqT1BRUURBd05ICkFEQkVBaUI2dEc1eHp5ajRpVC9lMHdwQ01SSE92bFFLUWV4QnloeU5QQWhybzlaQ1JnSWdhRGNkOXZNOHJDYmIKSlBSeXptMGlOOU9XTS9BMjRubW0zaXRuM0k0cmNEMD0KLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo="
+  tls.key: "LS0tLS1CRUdJTiBFQyBQUklWQVRFIEtFWS0tLS0tCk1IY0NBUUVFSU5oNmVNRHJCbEFpVDY4VDhvdnpHbjZKWmJKZXZVZWZZa0lJWU5Xd3c1NXlvQW9HQ0NxR1NNNDkKQXdFSG9VUURRZ0FFRmpYMDdqWTRUeEl1NGRYSWdrdENMWHlvSWdZY1N4cFJkekxZNVJVNHdxODVNcDBrZ0FhRApMVFpZM0F4TkladjRzMjBWS0lBSEF4WEw1Sjd3b2M4V3FnPT0KLS0tLS1FTkQgRUMgUFJJVkFURSBLRVktLS0tLQo="
+---
+# Source: dragonfly/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-dragonfly
+  labels:
+    app.kubernetes.io/name: dragonfly
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "v0.15.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+    - port: 6379
+      targetPort: dragonfly
+      protocol: TCP
+      name: dragonfly
+  selector:
+    app.kubernetes.io/name: dragonfly
+    app.kubernetes.io/instance: test
+---
+# Source: dragonfly/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-dragonfly
+  labels:
+    app.kubernetes.io/name: dragonfly
+    app.kubernetes.io/instance: test
+    app.kubernetes.io/version: "v0.15.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dragonfly
+      app.kubernetes.io/instance: test
+  template:
+    metadata:
+      annotations:
+        checksum/tls-secret: ff929f88966be27e210398f2d89e55aff290936daade804b9e8d2c3a864cf7d7
+      labels:
+        app.kubernetes.io/name: dragonfly
+        app.kubernetes.io/instance: test
+    spec:
+      serviceAccountName: test-dragonfly
+      containers:
+        - name: dragonfly
+          image: "docker.dragonflydb.io/dragonflydb/dragonfly:v0.15.0"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: dragonfly
+              containerPort: 6379
+              protocol: TCP
+          livenessProbe:
+            exec:
+              command:
+              - /bin/sh
+              - /usr/local/bin/healthcheck.sh
+            failureThreshold: 3
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
+          readinessProbe:
+            exec:
+              command:
+              - /bin/sh
+              - /usr/local/bin/healthcheck.sh
+            failureThreshold: 3
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
+          args:
+            - "--alsologtostderr"
+            - "--tls"
+            - "--tls_cert_file=/etc/dragonfly/tls/tls.crt"
+            - "--tls_key_file=/etc/dragonfly/tls/tls.key"
+          resources:
+            limits: {}
+            requests: {}
+          volumeMounts:
+            - mountPath: /etc/dragonfly/tls
+              name: tls
+      volumes:
+        - name: tls
+          secret:
+            secretName: test-dragonfly-tls
