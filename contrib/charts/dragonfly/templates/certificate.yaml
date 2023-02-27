@@ -3,6 +3,7 @@ apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
   name: {{ include "dragonfly.fullname" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "dragonfly.labels" . | nindent 4 }}
 spec:

@@ -3,6 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "dragonfly.fullname" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "dragonfly.labels" . | nindent 4 }}
 spec:

@@ -3,6 +3,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "dragonfly.fullname" . }}-metrics
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "dragonfly.labels" . | nindent 4 }}
     type: metrics

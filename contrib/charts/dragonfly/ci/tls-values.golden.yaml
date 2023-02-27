@@ -4,6 +4,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: test-dragonfly
+  namespace: default
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
@@ -15,6 +16,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: test-dragonfly-tls
+  namespace: default
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
@@ -30,6 +32,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: test-dragonfly
+  namespace: default
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
@@ -51,6 +54,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: test-dragonfly
+  namespace: default
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
@@ -65,7 +69,7 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/tls-secret: ff929f88966be27e210398f2d89e55aff290936daade804b9e8d2c3a864cf7d7
+        checksum/tls-secret: aa19e66107bd65d211f8a06a017cfb875c4403d3ea018111c7d2a43333f6b6c6
       labels:
         app.kubernetes.io/name: dragonfly
         app.kubernetes.io/instance: test
