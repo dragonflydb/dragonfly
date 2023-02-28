@@ -10,34 +10,53 @@ volumeMounts:
     name: tls
   {{- end }}
   {{- with .Values.extraVolumeMounts }}
-    {{- toYaml . | nindent 2 }}
+    {{- toYaml . | trim | nindent 2 }}
   {{- end }}
 {{- end }}
 {{- end }}
 
 {{- define "dragonfly.pod" -}}
+{{- with .Values.tolerations -}}
+tolerations:
+  {{- toYaml . | trim | nindent 2 -}}
+{{- end }}
+{{- with .Values.nodeSelector -}}
+nodeSelector:
+  {{- toYaml . | trim | nindent 2 -}}
+{{- end }}
+{{- with .Values.affinity -}}
+affinity:
+  {{- toYaml . | trim | nindent 2 -}}
+{{- end }}
 serviceAccountName: {{ include "dragonfly.serviceAccountName" . }}
 {{- with .Values.imagePullSecrets }}
 imagePullSecrets:
-  {{- toYaml . | nindent 2 }}
+  {{- toYaml . | trim | nindent 2 }}
 {{- end }}
 {{- with .Values.podSecurityContext }}
 securityContext:
-  {{- toYaml . | nindent 2 }}
+  {{- toYaml . | trim | nindent 2 }}
 {{- end }}
 {{- with .Values.initContainers }}
 initContainers:
   {{- if eq (typeOf .) "string" }}
-  {{- tpl . $ | nindent 2 }}
+  {{- tpl . $ | trim | nindent 2 }}
   {{- else }}
-  {{- toYaml . | nindent 2 }}
+  {{- toYaml . | trim | nindent 2 }}
   {{- end }}
 {{- end }}
 containers:
+  {{- with .Values.extraContainers }}
+  {{- if eq (typeOf .) "string" -}}
+  {{- tpl . $ | trim | nindent 2 }}
+  {{- else }}
+  {{- toYaml . | trim | nindent 2 }}
+  {{- end }}
+  {{- end }}
   - name: {{ .Chart.Name }}
     {{- with .Values.securityContext }}
     securityContext:
-      {{- toYaml . | nindent 6 }}
+      {{- toYaml . | trim | nindent 6 }}
     {{- end }}
     image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
     imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -46,16 +65,16 @@ containers:
         containerPort: 6379
         protocol: TCP
     {{- with .Values.probes }}
-    {{- toYaml . | nindent 4 }}
+    {{- toYaml . | trim | nindent 4 }}
     {{- end }}
     {{- with .Values.command }}
     command:
-      {{- toYaml . | nindent 6 }}
+      {{- toYaml . | trim | nindent 6 }}
     {{- end }}
     args:
       - "--alsologtostderr"
     {{- with .Values.extraArgs }}
-      {{- toYaml . | nindent 6 }}
+      {{- toYaml . | trim | nindent 6 }}
     {{- end }}
     {{- if .Values.tls.enabled }}
       - "--tls"
@@ -64,39 +83,17 @@ containers:
     {{- end }}
     {{- with .Values.resources }}
     resources:
-      {{- toYaml . | nindent 6 }}
+      {{- toYaml . | trim | nindent 6 }}
     {{- end }}
-    {{- include "dragonfly.volumemounts" . | nindent 4 }}
+    {{- include "dragonfly.volumemounts" . | trim | nindent 4 }}
+    {{- if .Values.passwordFromSecret.enable -}}
     env:
-    {{- if .Values.passwordFromSecret.enable }}
       - name: DFLY_PASSWORD
         valueFrom:
           secretKeyRef:
             name: {{ .Values.passwordFromSecret.existingSecret.name }}
             key: {{ .Values.passwordFromSecret.existingSecret.key }}
     {{- end }}
-  {{- with .Values.extraContainers }}
-  {{- if eq (typeOf .) "string" }}
-  {{- tpl . $ | nindent 2 }}
-  {{- else }}
-  {{- toYaml . | nindent 2 }}
-  {{- end }}
-  {{- end }}
-
-{{- with .Values.nodeSelector }}
-nodeSelector:
-  {{- toYaml . | nindent 2 }}
-{{- end }}
-
-{{- with .Values.affinity }}
-affinity:
-  {{- toYaml . | nindent 2 }}
-{{- end }}
-
-{{- with .Values.tolerations }}
-tolerations:
-  {{- toYaml . | nindent 2 }}
-{{- end }}
 
 {{- if or (.Values.tls.enabled) (.Values.extraVolumes) }}
 volumes:
@@ -116,7 +113,7 @@ volumes:
   {{- end }}
 {{- end }}
 {{- with .Values.extraVolumes }}
-  {{- toYaml . | nindent 2 }}
+  {{- toYaml . | trim | nindent 2 }}
 {{- end }}
 {{- end }}
 {{- end }}

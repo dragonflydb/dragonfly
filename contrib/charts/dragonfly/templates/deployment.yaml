@@ -22,5 +22,5 @@ spec:
       labels:
         {{- include "dragonfly.selectorLabels" . | nindent 8 }}
     spec:
-      {{- include "dragonfly.pod" . | nindent 6 }}
+      {{- include "dragonfly.pod" . | trim | nindent 6 }}
 {{- end }}
