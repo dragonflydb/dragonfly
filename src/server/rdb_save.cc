@@ -834,27 +834,39 @@ error_code AlignedBuffer::Flush() {
 
 class RdbSaver::Impl {
  private:
-  // This struct will be used when we need to push DbRecord to sink by order of record id.
-  // Add to q_records when record came out of order, try to pop from queue the next recode id.
-  struct RecordsQueue {
-    // Try pop from queue recode with given id. If the record is in queue top return the record and
-    // true.
-    bool TryPop(uint64_t id, SliceSnapshot::DbRecord& record) {
-      if (!q_records.empty() && q_records.top().id == id) {
-        record = q_records.top();
-        q_records.pop();
-        return true;
-      }
-      return false;
+  // This is a helper struct to pop records from channel while enfocing returned records order.
+  struct RecordsPopper {
+    RecordsPopper(bool enforce_order, SliceSnapshot::RecordChannel* c)
+        : enforce_order(enforce_order), channel(c) {
     }
+
+    // Blocking function, pops from channel.
+    // If enforce_order is enabled return the records by order.
+    // returns nullopt if channel was closed.
+    std::optional<SliceSnapshot::DbRecord> Pop();
+
+    // Non blocking function, trys to pop from channel.
+    // If enforce_order is enabled return the records by order.
+    // returns nullopt if nothing in channel.
+    std::optional<SliceSnapshot::DbRecord> TryPop();
+
+   private:
+    // Checks if next record is in queue, if so set record_holder and return true, otherwise return
+    // false.
+    bool TryPopFromQueue();
+
     struct Compare {
       bool operator()(const SliceSnapshot::DbRecord& a, const SliceSnapshot::DbRecord& b) {
         return a.id > b.id;
       }
     };
-    // min heap holds the DbRecord that came OOO
+    // min heap holds the DbRecord that poped from channel OOO
     std::priority_queue<SliceSnapshot::DbRecord, std::vector<SliceSnapshot::DbRecord>, Compare>
         q_records;
+    uint64_t next_record_id = 0;
+    bool enforce_order;
+    SliceSnapshot::RecordChannel* channel;
+    SliceSnapshot::DbRecord record_holder;
   };
 
  public:
@@ -937,20 +949,66 @@ error_code RdbSaver::Impl::SaveAuxFieldStrStr(string_view key, string_view val) 
   return error_code{};
 }
 
+bool RdbSaver::Impl::RecordsPopper::TryPopFromQueue() {
+  if (enforce_order && !q_records.empty() && q_records.top().id == next_record_id) {
+    record_holder = q_records.top();
+    q_records.pop();
+    ++next_record_id;
+    return true;
+  }
+  return false;
+}
+
+std::optional<SliceSnapshot::DbRecord> RdbSaver::Impl::RecordsPopper::Pop() {
+  if (TryPopFromQueue()) {
+    return record_holder;
+  }
+  // pop from channel
+  while (channel->Pop(record_holder)) {
+    if (!enforce_order) {
+      return record_holder;
+    }
+    if (record_holder.id == next_record_id) {
+      ++next_record_id;
+      return record_holder;
+    }
+    // record popped from channel is ooo, push to queue
+    q_records.emplace(std::move(record_holder));
+  }
+  return std::nullopt;  // Channel was closed
+}
+
+std::optional<SliceSnapshot::DbRecord> RdbSaver::Impl::RecordsPopper::TryPop() {
+  if (TryPopFromQueue()) {
+    return record_holder;
+  }
+
+  while (channel->TryPop(record_holder)) {
+    if (!enforce_order) {
+      return record_holder;
+    }
+    if (record_holder.id == next_record_id) {
+      ++next_record_id;
+      return record_holder;
+    }
+    // record popped from channel is ooo, push to queue
+    q_records.emplace(std::move(record_holder));
+  }
+  return std::nullopt;  // Nothing in channel.
+}
+
 error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
   error_code io_error;
 
   size_t channel_bytes = 0;
-  SliceSnapshot::DbRecord record;
+  std::optional<SliceSnapshot::DbRecord> record;
 
-  RecordsQueue records_queue;
-  uint64_t next_record_id = 0;
+  RecordsPopper records_popper(push_to_sink_with_order_, &channel_);
 
   // we can not exit on io-error since we spawn fibers that push data.
   // TODO: we may signal them to stop processing and exit asap in case of the error.
 
-  auto& channel = channel_;
-  while (channel.Pop(record)) {
+  while (record = records_popper.Pop()) {
     if (io_error || cll->IsCancelled())
       continue;
 
@@ -958,23 +1016,15 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
       if (cll->IsCancelled())
         continue;
 
-      if (push_to_sink_with_order_ && record.id != next_record_id) {
-        DVLOG(2) << "Pulled unordered" << record.id;
-        records_queue.q_records.emplace(std::move(record));
-        continue;
-      }
+      DVLOG(2) << "Pulled " << (*record).id;
+      channel_bytes += (*record).value.size();
 
-      DVLOG(2) << "Pulled " << record.id;
-      channel_bytes += record.value.size();
-
-      io_error = sink_->Write(io::Buffer(record.value));
-      ++next_record_id;
+      io_error = sink_->Write(io::Buffer((*record).value));
       if (io_error) {
         break;
       }
-    } while ((push_to_sink_with_order_ && records_queue.TryPop(next_record_id, record)) ||
-             channel.TryPop(record));
-  }  // while (channel.pop)
+    } while (record = records_popper.TryPop());
+  }  // while (records_popper.Pop())
 
   size_t pushed_bytes = 0;
   for (auto& ptr : shard_snapshots_) {
@@ -982,7 +1032,7 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
     pushed_bytes += ptr->channel_bytes();
   }
 
-  DCHECK(!channel.TryPop(record));
+  DCHECK(!channel_.TryPop(*record));
 
   VLOG(1) << "Channel pulled bytes: " << channel_bytes << " pushed bytes: " << pushed_bytes;
 
