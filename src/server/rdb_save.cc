@@ -11,6 +11,7 @@
 #include <zstd.h>
 
 #include <jsoncons/json.hpp>
+#include <queue>
 
 extern "C" {
 #include "redis/intset.h"
@@ -832,10 +833,35 @@ error_code AlignedBuffer::Flush() {
 }
 
 class RdbSaver::Impl {
+ private:
+  // This struct will be used when we need to push DbRecord to sink by order of record id.
+  // Add to q_records when record came out of order, try to pop from queue the next recode id.
+  struct RecordsQueue {
+    // Try pop from queue recode with given id. If the record is in queue top return the record and
+    // true.
+    bool TryPop(uint64_t id, SliceSnapshot::DbRecord& record) {
+      if (!q_records.empty() && q_records.top().id == id) {
+        record = q_records.top();
+        q_records.pop();
+        return true;
+      }
+      return false;
+    }
+    struct Compare {
+      bool operator()(const SliceSnapshot::DbRecord& a, const SliceSnapshot::DbRecord& b) {
+        return a.id > b.id;
+      }
+    };
+    // min heap holds the DbRecord that came OOO
+    std::priority_queue<SliceSnapshot::DbRecord, std::vector<SliceSnapshot::DbRecord>, Compare>
+        q_records;
+  };
+
  public:
   // We pass K=sz to say how many producers are pushing data in order to maintain
   // correct closing semantics - channel is closing when K producers marked it as closed.
-  Impl(bool align_writes, unsigned producers_len, CompressionMode compression_mode, io::Sink* sink);
+  Impl(bool align_writes, unsigned producers_len, CompressionMode compression_mode,
+       SaveMode save_mode, io::Sink* sink);
 
   void StartSnapshotting(bool stream_journal, const Cancellation* cll, EngineShard* shard);
 
@@ -875,6 +901,7 @@ class RdbSaver::Impl {
   // used for serializing non-body components in the calling fiber.
   RdbSerializer meta_serializer_;
   SliceSnapshot::RecordChannel channel_;
+  bool push_to_sink_with_order_ = false;
   std::optional<AlignedBuffer> aligned_buf_;
   CompressionMode
       compression_mode_;  // Single entry compression is compatible with redis rdb snapshot
@@ -885,7 +912,7 @@ class RdbSaver::Impl {
 // We pass K=sz to say how many producers are pushing data in order to maintain
 // correct closing semantics - channel is closing when K producers marked it as closed.
 RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, CompressionMode compression_mode,
-                     io::Sink* sink)
+                     SaveMode sm, io::Sink* sink)
     : sink_(sink), shard_snapshots_(producers_len),
       meta_serializer_(CompressionMode::NONE),  // Note: I think there is not need for compression
                                                 // at all in meta serializer
@@ -893,6 +920,9 @@ RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, CompressionMode 
   if (align_writes) {
     aligned_buf_.emplace(kBufLen, sink);
     sink_ = &aligned_buf_.value();
+  }
+  if (sm == SaveMode::SINGLE_SHARD) {
+    push_to_sink_with_order_ = true;
   }
 
   DCHECK(producers_len > 0 || channel_.IsClosing());
@@ -913,6 +943,9 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
   size_t channel_bytes = 0;
   SliceSnapshot::DbRecord record;
 
+  RecordsQueue records_queue;
+  uint64_t next_record_id = 0;
+
   // we can not exit on io-error since we spawn fibers that push data.
   // TODO: we may signal them to stop processing and exit asap in case of the error.
 
@@ -925,13 +958,22 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
       if (cll->IsCancelled())
         continue;
 
+      if (push_to_sink_with_order_ && record.id != next_record_id) {
+        DVLOG(2) << "Pulled unordered" << record.id;
+        records_queue.q_records.emplace(std::move(record));
+        continue;
+      }
+
       DVLOG(2) << "Pulled " << record.id;
       channel_bytes += record.value.size();
 
       io_error = sink_->Write(io::Buffer(record.value));
-
-      record.value.clear();
-    } while (!io_error && channel.TryPop(record));
+      ++next_record_id;
+      if (io_error) {
+        break;
+      }
+    } while ((push_to_sink_with_order_ && records_queue.TryPop(next_record_id, record)) ||
+             channel.TryPop(record));
   }  // while (channel.pop)
 
   size_t pushed_bytes = 0;
@@ -1026,7 +1068,7 @@ RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes) {
       break;
   }
   VLOG(1) << "Rdb save using compression mode:" << uint32_t(compression_mode_);
-  impl_.reset(new Impl(align_writes, producer_count, compression_mode_, sink));
+  impl_.reset(new Impl(align_writes, producer_count, compression_mode_, save_mode, sink));
   save_mode_ = save_mode;
 }
 
