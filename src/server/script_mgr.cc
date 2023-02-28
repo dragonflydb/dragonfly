@@ -5,13 +5,24 @@
 #include "server/script_mgr.h"
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/strings/ascii.h>
+#include <absl/strings/match.h>
+#include <absl/strings/numbers.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_split.h>
 
+#include <string>
+
+#include "base/flags.h"
 #include "base/logging.h"
 #include "core/interpreter.h"
 #include "facade/error.h"
 #include "server/engine_shard_set.h"
 #include "server/server_state.h"
+
+ABSL_FLAG(std::string, default_script_config, "",
+          "Default config for scripts: non-atomic to disable atomicity, undeclared-keys to allow "
+          "undeclared keys");
 
 namespace dfly {
 
@@ -19,6 +30,21 @@ using namespace std;
 using namespace facade;
 
 ScriptMgr::ScriptMgr() {
+  // Build default script config
+  std::string config = absl::GetFlag(FLAGS_default_script_config);
+
+  static_assert(ScriptParams{}.atomic && !ScriptParams{}.undeclared_keys);
+
+  auto parts = absl::StrSplit(config, absl::ByAnyChar(",; "), absl::SkipEmpty());
+  for (auto pragma : parts) {
+    CHECK(ScriptParams::ApplyPragma(pragma, &default_params_))
+        << "Bad format of default_script_config flag";
+  }
+}
+
+ScriptMgr::ScriptKey::ScriptKey(string_view sha) : array{} {
+  DCHECK_EQ(sha.size(), size());
+  memcpy(data(), sha.data(), size());
 }
 
 void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
@@ -32,6 +58,8 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
         "   Return information about the existence of the scripts in the script cache.",
         "LOAD <script>",
         "   Load a script into the scripts cache without executing it.",
+        "CONFIGURE <sha> [configs]",
+        "   Configure scripts parameters",
         "LIST",
         "   Lists loaded scripts.",
         "LATENCY",
@@ -52,6 +80,9 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
 
   if (subcmd == "LOAD" && args.size() == 2)
     return LoadCmd(args, cntx);
+
+  if (subcmd == "CONFIG" && args.size() > 2)
+    return ConfigCmd(args, cntx);
 
   string err = absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd,
                             "'. Try SCRIPT HELP.");
@@ -102,6 +133,21 @@ void ScriptMgr::LoadCmd(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendBulkString(error_or_id);
 }
 
+void ScriptMgr::ConfigCmd(CmdArgList args, ConnectionContext* cntx) {
+  lock_guard lk{mu_};
+  ScriptKey key{ArgS(args, 1)};
+  auto& data = db_[key];
+
+  for (auto pragma : args.subspan(2)) {
+    if (!ScriptParams::ApplyPragma(facade::ToSV(pragma), &data))
+      return (*cntx)->SendError("Invalid config format");
+  }
+
+  UpdateScriptCaches(key, data);
+
+  return (*cntx)->SendOk();
+}
+
 void ScriptMgr::ListCmd(ConnectionContext* cntx) const {
   vector<pair<string, string>> scripts = GetAll();
   (*cntx)->StartArray(scripts.size());
@@ -134,47 +180,65 @@ void ScriptMgr::LatencyCmd(ConnectionContext* cntx) const {
 }
 
 bool ScriptMgr::Insert(std::string_view id, std::string_view body) {
-  ScriptKey key;
-  CHECK_EQ(key.size(), id.size());
-  memcpy(key.data(), id.data(), key.size());
+  bool updated = false;
 
-  lock_guard lk(mu_);
-  auto [it, inserted] = db_.emplace(key, nullptr);
-  if (inserted) {
-    it->second.reset(new char[body.size() + 1]);
-    memcpy(it->second.get(), body.data(), body.size());
-    it->second[body.size()] = '\0';
+  lock_guard lk{mu_};
+  auto [it, _] = db_.emplace(id, InternalScriptData{default_params_, nullptr});
+
+  if (auto& body_ptr = it->second.body; !body_ptr) {
+    updated = true;
+
+    body_ptr.reset(new char[body.size() + 1]);
+    memcpy(body_ptr.get(), body.data(), body.size());
+    body_ptr[body.size()] = '\0';
   }
-  return inserted;
+
+  UpdateScriptCaches(id, it->second);
+
+  return updated;
 }
 
-const char* ScriptMgr::Find(std::string_view sha) const {
-  if (sha.size() != 40)
-    return nullptr;
+optional<ScriptMgr::ScriptData> ScriptMgr::Find(std::string_view sha) const {
+  if (sha.size() != ScriptKey{}.size())
+    return std::nullopt;
 
-  ScriptKey key;
-  memcpy(key.data(), sha.data(), key.size());
+  lock_guard lk{mu_};
+  if (auto it = db_.find(sha); it != db_.end() && it->second.body)
+    return ScriptData{it->second, it->second.body.get()};
 
-  lock_guard lk(mu_);
-  auto it = db_.find(key);
-  if (it == db_.end())
-    return nullptr;
-
-  return it->second.get();
+  return std::nullopt;
 }
 
 vector<pair<string, string>> ScriptMgr::GetAll() const {
   vector<pair<string, string>> res;
 
-  lock_guard lk(mu_);
+  lock_guard lk{mu_};
   res.reserve(db_.size());
-  for (const auto& k_v : db_) {
-    string key(k_v.first.data(), k_v.first.size());
-
-    res.emplace_back(move(key), k_v.second.get());
+  for (const auto& [sha, data] : db_) {
+    res.emplace_back(string{sha.data(), sha.size()}, data.body.get());
   }
 
   return res;
+}
+
+void ScriptMgr::UpdateScriptCaches(ScriptKey sha, ScriptParams params) const {
+  shard_set->pool()->Await([&sha, &params](auto index, auto* pb) {
+    ServerState::tlocal()->SetScriptParams(sha, params);
+  });
+}
+
+bool ScriptMgr::ScriptParams::ApplyPragma(string_view pragma, ScriptParams* params) {
+  if (pragma == "non-atomic") {
+    params->atomic = false;
+    return true;
+  }
+
+  if (pragma == "allow-undeclared-keys") {
+    params->undeclared_keys = true;
+    return true;
+  }
+
+  return false;
 }
 
 }  // namespace dfly

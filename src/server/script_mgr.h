@@ -8,6 +8,7 @@
 
 #include <array>
 #include <boost/fiber/mutex.hpp>
+#include <optional>
 
 #include "server/conn_context.h"
 
@@ -18,6 +19,24 @@ class EngineShardSet;
 // This class has a state through the lifetime of a server because it manipulates scripts
 class ScriptMgr {
  public:
+  struct ScriptParams {
+    bool atomic = true;            // Whether script must run atomically.
+    bool undeclared_keys = false;  // Whether script accesses undeclared keys.
+
+    // Return true if pragma was valid, false otherwise.
+    static bool ApplyPragma(std::string_view pragma, ScriptParams* params);
+  };
+
+  struct ScriptData : public ScriptParams {
+    const char* body = nullptr;
+  };
+
+  struct ScriptKey : public std::array<char, 40> {
+    ScriptKey() = default;
+    ScriptKey(std::string_view sha);
+  };
+
+ public:
   ScriptMgr();
 
   void Run(CmdArgList args, ConnectionContext* cntx);
@@ -26,7 +45,7 @@ class ScriptMgr {
   bool Insert(std::string_view sha, std::string_view body);
 
   // Get script body by sha, returns nullptr if not found.
-  const char* Find(std::string_view sha) const;
+  std::optional<ScriptData> Find(std::string_view sha) const;
 
   // Returns a list of all scripts in the database with their sha and body.
   std::vector<std::pair<std::string, std::string>> GetAll() const;
@@ -34,12 +53,20 @@ class ScriptMgr {
  private:
   void ExistsCmd(CmdArgList args, ConnectionContext* cntx) const;
   void LoadCmd(CmdArgList args, ConnectionContext* cntx);
+  void ConfigCmd(CmdArgList args, ConnectionContext* cntx);
   void ListCmd(ConnectionContext* cntx) const;
   void LatencyCmd(ConnectionContext* cntx) const;
 
+  void UpdateScriptCaches(ScriptKey sha, ScriptParams params) const;
+
  private:
-  using ScriptKey = std::array<char, 40>;
-  absl::flat_hash_map<ScriptKey, std::unique_ptr<char[]>> db_;  // protected by mu_
+  struct InternalScriptData : public ScriptParams {
+    std::unique_ptr<char[]> body{};
+  };
+
+  ScriptParams default_params_;
+
+  absl::flat_hash_map<ScriptKey, InternalScriptData> db_;
   mutable ::boost::fibers::mutex mu_;
 };
 

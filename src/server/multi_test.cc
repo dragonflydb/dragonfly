@@ -8,6 +8,7 @@
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/interpreter.h"
 #include "facade/facade_test.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
@@ -15,7 +16,7 @@
 #include "server/transaction.h"
 
 ABSL_DECLARE_FLAG(int, multi_exec_mode);
-ABSL_DECLARE_FLAG(int, multi_eval_mode);
+ABSL_DECLARE_FLAG(std::string, default_script_config);
 
 namespace dfly {
 
@@ -332,9 +333,10 @@ TEST_F(MultiTest, FlushDb) {
 }
 
 TEST_F(MultiTest, Eval) {
-  int multi_mode = absl::GetFlag(FLAGS_multi_eval_mode);
-  if (multi_mode == Transaction::GLOBAL || multi_mode == Transaction::NON_ATOMIC)
-    absl::SetFlag(&FLAGS_multi_eval_mode, Transaction::LOCK_AHEAD);
+  if (auto config = absl::GetFlag(FLAGS_default_script_config); config != "") {
+    LOG(WARNING) << "Skipped Eval test because default_script_config is set";
+    return;
+  }
 
   RespExpr resp;
 
@@ -379,8 +381,6 @@ TEST_F(MultiTest, Eval) {
   ASSERT_THAT(resp, ArrLen(3));
   const auto& arr = resp.GetVec();
   EXPECT_THAT(arr, ElementsAre("a", "b", "c"));
-
-  absl::SetFlag(&FLAGS_multi_eval_mode, multi_mode);
 }
 
 TEST_F(MultiTest, Watch) {
@@ -503,6 +503,11 @@ TEST_F(MultiTest, MultiOOO) {
 
 // Lua scripts lock their keys ahead and thus can run out of order.
 TEST_F(MultiTest, EvalOOO) {
+  if (auto config = absl::GetFlag(FLAGS_default_script_config); config != "") {
+    LOG(WARNING) << "Skipped Eval test because default_script_config is set";
+    return;
+  }
+
   const char* kScript = "redis.call('MGET', unpack(KEYS)); return 'OK'";
 
   // Check single call.
@@ -527,11 +532,7 @@ TEST_F(MultiTest, EvalOOO) {
   }
 
   auto metrics = GetMetrics();
-  int mode = absl::GetFlag(FLAGS_multi_eval_mode);
-  if (mode == Transaction::LOCK_AHEAD || mode == Transaction::NON_ATOMIC)
-    EXPECT_EQ(1 + 2 * kTimes, metrics.ooo_tx_transaction_cnt);
-  else
-    EXPECT_EQ(0, metrics.ooo_tx_transaction_cnt);
+  EXPECT_EQ(1 + 2 * kTimes, metrics.ooo_tx_transaction_cnt);
 }
 
 // Run MULTI/EXEC commands in parallel, where each command is:
@@ -593,23 +594,7 @@ TEST_F(MultiTest, MultiCauseUnblocking) {
   f2.Join();
 }
 
-TEST_F(MultiTest, EvalUndeclared) {
-  int start_mode = absl::GetFlag(FLAGS_multi_eval_mode);
-  int allowed_modes[] = {Transaction::GLOBAL, Transaction::NON_ATOMIC};
-
-  Run({"set", "undeclared-k", "works"});
-  const char* kScript = "return redis.call('GET', 'undeclared-k')";
-
-  for (int multi_mode : allowed_modes) {
-    absl::SetFlag(&FLAGS_multi_eval_mode, multi_mode);
-    auto res = Run({"eval", kScript, "0"});
-    EXPECT_EQ(res, "works");
-  }
-
-  absl::SetFlag(&FLAGS_multi_eval_mode, start_mode);
-}
-
-TEST_F(MultiTest, GlobalFallback) {
+TEST_F(MultiTest, ExecGlobalFallback) {
   // Check global command MOVE falls back to global mode from lock ahead.
   absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::LOCK_AHEAD);
   Run({"multi"});
@@ -625,6 +610,41 @@ TEST_F(MultiTest, GlobalFallback) {
   Run({"move", "a", "1"});
   Run({"exec"});
   EXPECT_EQ(1, GetMetrics().ooo_tx_transaction_cnt);
+}
+
+TEST_F(MultiTest, ScriptConfigTest) {
+  if (auto config = absl::GetFlag(FLAGS_default_script_config); config != "") {
+    LOG(WARNING) << "Skipped Eval test because default_script_config is set";
+    return;
+  }
+
+  const char* kUndeclared1 = "return redis.call('GET', 'random-key-1');";
+  const char* kUndeclared2 = "return redis.call('GET', 'random-key-2');";
+
+  Run({"set", "random-key-1", "works"});
+  Run({"set", "random-key-2", "works"});
+
+  // Check SCRIPT CONFIG is applied correctly to loaded scripts.
+  {
+    auto sha_resp = Run({"script", "load", kUndeclared1});
+    auto sha = facade::ToSV(sha_resp.GetBuf());
+
+    EXPECT_THAT(Run({"evalsha", sha, "0"}), ErrArg("undeclared"));
+
+    EXPECT_THAT(Run({"script", "config", sha, "allow-undeclared-keys"}), "OK");
+    EXPECT_THAT(Run({"evalsha", sha, "0"}), "works");
+  }
+
+  // Check SCRIPT CONFIG can be applied by sha before loading.
+  {
+    char sha_buf[41];
+    Interpreter::FuncSha1(kUndeclared2, sha_buf);
+    string_view sha{sha_buf, 40};
+
+    EXPECT_THAT(Run({"script", "config", sha, "allow-undeclared-keys"}), "OK");
+
+    EXPECT_THAT(Run({"eval", kUndeclared2, "0"}), "works");
+  }
 }
 
 // Run multi-exec transactions that move values from a source list
