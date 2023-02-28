@@ -99,18 +99,20 @@ class DflyCmd {
   struct ReplicaInfo {
     ReplicaInfo(unsigned flow_count, std::string address, uint32_t listening_port,
                 Context::ErrHandler err_handler)
-        : state{SyncState::PREPARATION}, address{address},
-          listening_port(listening_port), cntx{std::move(err_handler)}, flows{flow_count} {
+        : state{SyncState::PREPARATION}, cntx{std::move(err_handler)}, address{address},
+          listening_port(listening_port), flows{flow_count} {
     }
 
     std::atomic<SyncState> state;
+    Context cntx;
+
     std::string address;
     uint32_t listening_port;
-    Context cntx;
 
     std::vector<FlowInfo> flows;
     ::boost::fibers::mutex mu;  // See top of header for locking levels.
   };
+
   struct ReplicaRoleInfo {
     ReplicaRoleInfo(std::string address, uint32_t listening_port, SyncState sync_state);
     std::string address;

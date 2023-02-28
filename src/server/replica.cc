@@ -386,6 +386,8 @@ error_code Replica::InitiatePSync() {
 
   RETURN_ON_ERR(SendCommand(StrCat("PSYNC ", id, " ", offs), &serializer));
 
+  LOG(INFO) << "Starting full sync";
+
   // Master may delay sync response with "repl_diskless_sync_delay"
   PSyncResponse repl_header;
 
@@ -525,9 +527,11 @@ error_code Replica::InitiateDflySync() {
     return cntx_.ReportError(ec);
   }
 
+  LOG(INFO) << "Started full sync";
+
   // Wait for all flows to receive full sync cut.
   // In case of an error, this is unblocked by the error handler.
-  LOG(INFO) << "Waiting for all full sync cut confirmations";
+  VLOG(1) << "Waiting for all full sync cut confirmations";
   sync_block.Wait();
 
   // Check if we woke up due to cancellation.
@@ -564,6 +568,8 @@ error_code Replica::ConsumeRedisStream() {
   error_code ec;
   time_t last_ack = time(nullptr);
   string ack_cmd;
+
+  LOG(INFO) << "Transitioned into stable sync";
 
   // basically reflection of dragonfly_connection IoLoop function.
   while (!ec) {
@@ -631,6 +637,8 @@ error_code Replica::ConsumeDflyStream() {
     shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
   }
 
+  LOG(INFO) << "Transitioned into stable sync";
+
   JoinAllFlows();
 
   // The only option to unblock is to cancel the context.
@@ -674,7 +682,7 @@ error_code Replica::SendNextPhaseRequest(bool stable) {
   string_view kind = (stable) ? "STARTSTABLE"sv : "SYNC"sv;
   string request = StrCat("DFLY ", kind, " ", master_context_.dfly_session_id);
 
-  LOG(INFO) << "Sending: " << request;
+  VLOG(1) << "Sending: " << request;
   RETURN_ON_ERR(SendCommand(request, &serializer));
 
   base::IoBuf io_buf{128};

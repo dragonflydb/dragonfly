@@ -2024,24 +2024,24 @@ error_code RdbLoader::HandleAux() {
       LOG(ERROR) << "Error when compiling lua scripts";
     }
   } else if (auxkey == "redis-ver") {
-    LOG(INFO) << "Loading RDB produced by version " << auxval;
+    VLOG(1) << "Loading RDB produced by version " << auxval;
   } else if (auxkey == "ctime") {
     int64_t ctime;
     if (absl::SimpleAtoi(auxval, &ctime)) {
       time_t age = time(NULL) - ctime;
       if (age < 0)
         age = 0;
-      LOG(INFO) << "RDB age " << strings::HumanReadableElapsedTime(age);
+      VLOG(1) << "RDB age " << strings::HumanReadableElapsedTime(age);
     }
   } else if (auxkey == "used-mem") {
     long long usedmem;
     if (absl::SimpleAtoi(auxval, &usedmem)) {
-      LOG(INFO) << "RDB memory usage when created " << strings::HumanReadableNumBytes(usedmem);
+      VLOG(1) << "RDB memory usage when created " << strings::HumanReadableNumBytes(usedmem);
     }
   } else if (auxkey == "aof-preamble") {
     long long haspreamble;
     if (absl::SimpleAtoi(auxval, &haspreamble) && haspreamble) {
-      LOG(INFO) << "RDB has an AOF tail";
+      VLOG(1) << "RDB has an AOF tail";
     }
   } else if (auxkey == "redis-bits") {
     /* Just ignored. */

@@ -256,7 +256,7 @@ std::string GenericError::Format() const {
   if (details_.empty())
     return ec_.message();
   else
-    return absl::StrCat(ec_.message(), ":", details_);
+    return absl::StrCat(ec_.message(), ": ", details_);
 }
 
 Context::~Context() {
