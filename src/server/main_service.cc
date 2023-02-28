@@ -996,7 +996,7 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (add_result == Interpreter::ADD_OK) {
-    server_family_.script_mgr()->InsertFunction(result, body);
+    server_family_.script_mgr()->Insert(result, body);
   }
 
   EvalArgs eval_args;

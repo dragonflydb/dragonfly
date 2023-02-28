@@ -2019,7 +2019,7 @@ error_code RdbLoader::HandleAux() {
     Interpreter::AddResult add_result = script->AddFunction(body, &result);
     if (add_result == Interpreter::ADD_OK) {
       if (script_mgr_)
-        script_mgr_->InsertFunction(result, body);
+        script_mgr_->Insert(result, body);
     } else if (add_result == Interpreter::COMPILE_ERR) {
       LOG(ERROR) << "Error when compiling lua scripts";
     }

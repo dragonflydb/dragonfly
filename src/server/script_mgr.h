@@ -22,18 +22,22 @@ class ScriptMgr {
 
   void Run(CmdArgList args, ConnectionContext* cntx);
 
-  bool InsertFunction(std::string_view sha, std::string_view body);
+  // Insert script. Returns true if inserted new script.
+  bool Insert(std::string_view sha, std::string_view body);
 
-  // Returns body as null-terminated c-string. NULL if sha is not found.
+  // Get script body by sha, returns nullptr if not found.
   const char* Find(std::string_view sha) const;
 
   // Returns a list of all scripts in the database with their sha and body.
-  std::vector<std::pair<std::string, std::string>> GetLuaScripts() const;
+  std::vector<std::pair<std::string, std::string>> GetAll() const;
 
  private:
-  void ListScripts(ConnectionContext* cntx);
-  void PrintLatency(ConnectionContext* cntx);
+  void ExistsCmd(CmdArgList args, ConnectionContext* cntx) const;
+  void LoadCmd(CmdArgList args, ConnectionContext* cntx);
+  void ListCmd(ConnectionContext* cntx) const;
+  void LatencyCmd(ConnectionContext* cntx) const;
 
+ private:
   using ScriptKey = std::array<char, 40>;
   absl::flat_hash_map<ScriptKey, std::unique_ptr<char[]>> db_;  // protected by mu_
   mutable ::boost::fibers::mutex mu_;
