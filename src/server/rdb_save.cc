@@ -851,8 +851,9 @@ class RdbSaver::Impl {
     std::optional<SliceSnapshot::DbRecord> TryPop();
 
    private:
-    // Checks if next record is in queue, if so set record_holder and return true, otherwise return
-    // false.
+    std::optional<SliceSnapshot::DbRecord> InternalPop(bool blocking);
+    // Checks if next record is in queue, if so set record_holder and return true, otherwise
+    // return false.
     bool TryPopFromQueue();
 
     struct Compare {
@@ -951,7 +952,7 @@ error_code RdbSaver::Impl::SaveAuxFieldStrStr(string_view key, string_view val) 
 
 bool RdbSaver::Impl::RecordsPopper::TryPopFromQueue() {
   if (enforce_order && !q_records.empty() && q_records.top().id == next_record_id) {
-    record_holder = q_records.top();
+    record_holder = std::move(const_cast<SliceSnapshot::DbRecord&>(q_records.top()));
     q_records.pop();
     ++next_record_id;
     return true;
@@ -960,41 +961,37 @@ bool RdbSaver::Impl::RecordsPopper::TryPopFromQueue() {
 }
 
 std::optional<SliceSnapshot::DbRecord> RdbSaver::Impl::RecordsPopper::Pop() {
-  if (TryPopFromQueue()) {
-    return record_holder;
-  }
-  // pop from channel
-  while (channel->Pop(record_holder)) {
-    if (!enforce_order) {
-      return record_holder;
-    }
-    if (record_holder.id == next_record_id) {
-      ++next_record_id;
-      return record_holder;
-    }
-    // record popped from channel is ooo, push to queue
-    q_records.emplace(std::move(record_holder));
-  }
-  return std::nullopt;  // Channel was closed
+  return InternalPop(true);
 }
 
 std::optional<SliceSnapshot::DbRecord> RdbSaver::Impl::RecordsPopper::TryPop() {
+  return InternalPop(false);
+}
+
+std::optional<SliceSnapshot::DbRecord> RdbSaver::Impl::RecordsPopper::InternalPop(bool blocking) {
   if (TryPopFromQueue()) {
-    return record_holder;
+    return std::move(record_holder);
   }
 
-  while (channel->TryPop(record_holder)) {
+  std::function<bool(SliceSnapshot::DbRecord&)> pop_function;
+  if (blocking) {
+    pop_function = std::bind(&SliceSnapshot::RecordChannel::Pop, channel, std::placeholders::_1);
+  } else {
+    pop_function = std::bind(&SliceSnapshot::RecordChannel::TryPop, channel, std::placeholders::_1);
+  }
+
+  while (pop_function(record_holder)) {
     if (!enforce_order) {
-      return record_holder;
+      return std::move(record_holder);
     }
     if (record_holder.id == next_record_id) {
       ++next_record_id;
-      return record_holder;
+      return std::move(record_holder);
     }
     // record popped from channel is ooo, push to queue
     q_records.emplace(std::move(record_holder));
   }
-  return std::nullopt;  // Nothing in channel.
+  return std::nullopt;
 }
 
 error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
@@ -1016,10 +1013,10 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
       if (cll->IsCancelled())
         continue;
 
-      DVLOG(2) << "Pulled " << (*record).id;
-      channel_bytes += (*record).value.size();
+      DVLOG(2) << "Pulled " << record->id;
+      channel_bytes += record->value.size();
 
-      io_error = sink_->Write(io::Buffer((*record).value));
+      io_error = sink_->Write(io::Buffer(record->value));
       if (io_error) {
         break;
       }
