@@ -973,14 +973,10 @@ std::optional<SliceSnapshot::DbRecord> RdbSaver::Impl::RecordsPopper::InternalPo
     return std::move(record_holder);
   }
 
-  std::function<bool(SliceSnapshot::DbRecord&)> pop_function;
-  if (blocking) {
-    pop_function = std::bind(&SliceSnapshot::RecordChannel::Pop, channel, std::placeholders::_1);
-  } else {
-    pop_function = std::bind(&SliceSnapshot::RecordChannel::TryPop, channel, std::placeholders::_1);
-  }
+  auto pop_fn =
+      blocking ? &SliceSnapshot::RecordChannel::Pop : &SliceSnapshot::RecordChannel::TryPop;
 
-  while (pop_function(record_holder)) {
+  while ((channel->*pop_fn)(record_holder)) {
     if (!enforce_order) {
       return std::move(record_holder);
     }
