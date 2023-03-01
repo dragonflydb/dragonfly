@@ -276,3 +276,16 @@ async def test_multi_pubsub(async_client):
     state, message = await run_multi_pubsub(async_client, messages, "my-channel")
 
     assert state, message
+
+
+@pytest.mark.asyncio
+async def test_big_command(df_server, size=8 * 1024):
+    reader, writer = await asyncio.open_connection('127.0.0.1', df_server.port)
+
+    writer.write(f"SET a {'v'*size}\n".encode())
+    await writer.drain()
+
+    assert 'OK' in (await reader.readline()).decode()
+
+    writer.close()
+    await writer.wait_closed()
