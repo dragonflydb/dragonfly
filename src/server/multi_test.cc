@@ -16,7 +16,7 @@
 #include "server/transaction.h"
 
 ABSL_DECLARE_FLAG(int, multi_exec_mode);
-ABSL_DECLARE_FLAG(std::string, default_script_config);
+ABSL_DECLARE_FLAG(std::string, default_lua_config);
 
 namespace dfly {
 
@@ -333,8 +333,8 @@ TEST_F(MultiTest, FlushDb) {
 }
 
 TEST_F(MultiTest, Eval) {
-  if (auto config = absl::GetFlag(FLAGS_default_script_config); config != "") {
-    LOG(WARNING) << "Skipped Eval test because default_script_config is set";
+  if (auto config = absl::GetFlag(FLAGS_default_lua_config); config != "") {
+    LOG(WARNING) << "Skipped Eval test because default_lua_config is set";
     return;
   }
 
@@ -503,8 +503,8 @@ TEST_F(MultiTest, MultiOOO) {
 
 // Lua scripts lock their keys ahead and thus can run out of order.
 TEST_F(MultiTest, EvalOOO) {
-  if (auto config = absl::GetFlag(FLAGS_default_script_config); config != "") {
-    LOG(WARNING) << "Skipped Eval test because default_script_config is set";
+  if (auto config = absl::GetFlag(FLAGS_default_lua_config); config != "") {
+    LOG(WARNING) << "Skipped Eval test because default_lua_config is set";
     return;
   }
 
@@ -613,8 +613,8 @@ TEST_F(MultiTest, ExecGlobalFallback) {
 }
 
 TEST_F(MultiTest, ScriptConfigTest) {
-  if (auto config = absl::GetFlag(FLAGS_default_script_config); config != "") {
-    LOG(WARNING) << "Skipped Eval test because default_script_config is set";
+  if (auto config = absl::GetFlag(FLAGS_default_lua_config); config != "") {
+    LOG(WARNING) << "Skipped Eval test because default_lua_config is set";
     return;
   }
 

@@ -24,6 +24,9 @@ class ScriptMgr {
     bool undeclared_keys = false;  // Whether script accesses undeclared keys.
 
     // Return true if pragma was valid, false otherwise.
+    // Valid pragmas are:
+    // - allow-undeclared-keys -> undeclared_keys=true
+    // - disable-atomicity     -> atomic=false
     static bool ApplyPragma(std::string_view pragma, ScriptParams* params);
   };
 

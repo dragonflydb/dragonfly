@@ -20,9 +20,12 @@
 #include "server/engine_shard_set.h"
 #include "server/server_state.h"
 
-ABSL_FLAG(std::string, default_script_config, "",
-          "Default config for scripts: non-atomic to disable atomicity, undeclared-keys to allow "
-          "undeclared keys");
+ABSL_FLAG(std::string, default_lua_config, "",
+          "Configure default mode for running Lua scripts: \n - Use 'allow-undeclared-keys' to "
+          "allow accessing undeclared keys, \n - Use 'disable-atomicity' to allow "
+          "running scripts non-atomically. \nSpecify multiple values "
+          "separated by space, for example 'allow-undeclared-keys disable-atomicity' runs scripts "
+          "non-atomically and allows accessing undeclared keys");
 
 namespace dfly {
 
@@ -31,14 +34,14 @@ using namespace facade;
 
 ScriptMgr::ScriptMgr() {
   // Build default script config
-  std::string config = absl::GetFlag(FLAGS_default_script_config);
+  std::string config = absl::GetFlag(FLAGS_default_lua_config);
 
   static_assert(ScriptParams{}.atomic && !ScriptParams{}.undeclared_keys);
 
   auto parts = absl::StrSplit(config, absl::ByAnyChar(",; "), absl::SkipEmpty());
   for (auto pragma : parts) {
     CHECK(ScriptParams::ApplyPragma(pragma, &default_params_))
-        << "Bad format of default_script_config flag";
+        << "Bad format of default_lua_config flag";
   }
 }
 
@@ -58,8 +61,11 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
         "   Return information about the existence of the scripts in the script cache.",
         "LOAD <script>",
         "   Load a script into the scripts cache without executing it.",
-        "CONFIGURE <sha> [configs]",
-        "   Configure scripts parameters",
+        "CONFIGURE <sha> [options ...]",
+        "   The following options are possible: ",
+        "      - Use 'allow-undeclared-keys' to allow accessing undeclared keys",
+        "      - Use 'disable-atomicity' to allow running scripts non-atomically to improve "
+        "performance",
         "LIST",
         "   Lists loaded scripts.",
         "LATENCY",
@@ -228,7 +234,7 @@ void ScriptMgr::UpdateScriptCaches(ScriptKey sha, ScriptParams params) const {
 }
 
 bool ScriptMgr::ScriptParams::ApplyPragma(string_view pragma, ScriptParams* params) {
-  if (pragma == "non-atomic") {
+  if (pragma == "disable-atomicity") {
     params->atomic = false;
     return true;
   }

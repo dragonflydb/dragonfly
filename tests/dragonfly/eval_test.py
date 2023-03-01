@@ -61,7 +61,6 @@ for db_table, disj in pairs(dnfs) do
         --       so we strip next section from this script.
         -- TOSTRIP
         local conj_ttl = redis.call('ttl', conj_key)
-        -- print(conj_ttl, timeout)
         if conj_ttl < timeout then
             -- We set conj_key life with a margin over key life to call expire rarer
             -- And add few extra seconds to be extra safe
@@ -92,8 +91,8 @@ so Dragonfly must run in global (1) or non-atomic (4) multi eval mode.
 """
 
 
-@dfly_multi_test_args({'default_script_config': 'allow-undeclared-keys', 'proactor_threads': 4},
-                      {'default_script_config': 'allow-undeclared-keys non-atomic', 'proactor_threads': 4})
+@dfly_multi_test_args({'default_lua_config': 'allow-undeclared-keys', 'proactor_threads': 4},
+                      {'default_lua_config': 'allow-undeclared-keys disable-atomicity', 'proactor_threads': 4})
 @pytest.mark.asyncio
 async def test_django_cacheops_script(async_client, num_keys=500):
     script = async_client.register_script(DJANGO_CACHEOPS_SCRIPT)
@@ -160,8 +159,8 @@ the task system should work reliably.
 """
 
 
-@dfly_multi_test_args({'default_script_config': 'allow-undeclared-keys', 'proactor_threads': 4},
-                      {'default_script_config': 'allow-undeclared-keys non-atomic', 'proactor_threads': 4})
+@dfly_multi_test_args({'default_lua_config': 'allow-undeclared-keys', 'proactor_threads': 4},
+                      {'default_lua_config': 'allow-undeclared-keys disable-atomicity', 'proactor_threads': 4})
 @pytest.mark.asyncio
 async def test_golang_asynq_script(async_pool, num_queues=10, num_tasks=100):
     async def enqueue_worker(queue):

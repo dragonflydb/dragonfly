@@ -986,11 +986,11 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   }
 
   ServerState* ss = ServerState::tlocal();
-  auto script = ss->BorrowInterpreter();
-  absl::Cleanup clean = [ss, script]() { ss->ReturnInterpreter(script); };
+  auto interpreter = ss->BorrowInterpreter();
+  absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
 
   string result;
-  Interpreter::AddResult add_result = script->AddFunction(body, &result);
+  Interpreter::AddResult add_result = interpreter->AddFunction(body, &result);
   if (add_result == Interpreter::COMPILE_ERR) {
     return (*cntx)->SendError(result, facade::kScriptErrType);
   }
@@ -1005,7 +1005,7 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   eval_args.args = args.subspan(3 + num_keys);
 
   uint64_t start = absl::GetCurrentTimeNanos();
-  EvalInternal(eval_args, script, cntx);
+  EvalInternal(eval_args, interpreter, cntx);
 
   uint64_t end = absl::GetCurrentTimeNanos();
   ss->RecordCallLatency(result, (end - start) / 1000);
@@ -1021,8 +1021,8 @@ void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
 
   string_view sha = ArgS(args, 1);
   ServerState* ss = ServerState::tlocal();
-  auto script = ss->BorrowInterpreter();
-  absl::Cleanup clean = [ss, script]() { ss->ReturnInterpreter(script); };
+  auto interpreter = ss->BorrowInterpreter();
+  absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
 
   EvalArgs ev_args;
   ev_args.sha = sha;
@@ -1030,7 +1030,7 @@ void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
   ev_args.args = args.subspan(3 + num_keys);
 
   uint64_t start = absl::GetCurrentTimeNanos();
-  EvalInternal(ev_args, script, cntx);
+  EvalInternal(ev_args, interpreter, cntx);
 
   uint64_t end = absl::GetCurrentTimeNanos();
   ss->RecordCallLatency(sha, (end - start) / 1000);
@@ -1048,15 +1048,15 @@ optional<ScriptMgr::ScriptParams> LoadScipt(string_view sha, ScriptMgr* script_m
   auto ss = ServerState::tlocal();
 
   if (!interpreter->Exists(sha)) {
-    auto script = script_mgr->Find(sha);
-    if (!script)
+    auto script_data = script_mgr->Find(sha);
+    if (!script_data)
       return std::nullopt;
 
     string res;
-    CHECK_EQ(Interpreter::ADD_OK, interpreter->AddFunction(script->body, &res));
+    CHECK_EQ(Interpreter::ADD_OK, interpreter->AddFunction(script_data->body, &res));
     CHECK_EQ(res, sha);
 
-    return script;
+    return script_data;
   }
 
   auto params = ss->GetScriptParams(sha);
