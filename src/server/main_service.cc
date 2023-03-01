@@ -46,7 +46,7 @@ ABSL_FLAG(uint32_t, memcache_port, 0, "Memcached port");
 ABSL_FLAG(int, multi_exec_mode, 1,
           "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for locking "
           "incrementally, 4 for non atomic");
-ABSL_FLAG(int, multi_eval_mode, 2,
+ABSL_FLAG(int, multi_eval_mode, 1,
           "Set EVAL atomicity mode: 1 for global, 2 for locking ahead, 3 for locking "
           "incrementally, 4 for non atomic");
 
@@ -987,17 +987,17 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   }
 
   ServerState* ss = ServerState::tlocal();
-  auto script = ss->BorrowInterpreter();
-  absl::Cleanup clean = [ss, script]() { ss->ReturnInterpreter(script); };
+  auto interpreter = ss->BorrowInterpreter();
+  absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
 
   string result;
-  Interpreter::AddResult add_result = script->AddFunction(body, &result);
+  Interpreter::AddResult add_result = interpreter->AddFunction(body, &result);
   if (add_result == Interpreter::COMPILE_ERR) {
     return (*cntx)->SendError(result, facade::kScriptErrType);
   }
 
   if (add_result == Interpreter::ADD_OK) {
-    server_family_.script_mgr()->InsertFunction(result, body);
+    server_family_.script_mgr()->Insert(result, body);
   }
 
   EvalArgs eval_args;
@@ -1006,7 +1006,7 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   eval_args.args = args.subspan(3 + num_keys);
 
   uint64_t start = absl::GetCurrentTimeNanos();
-  EvalInternal(eval_args, script, cntx);
+  EvalInternal(eval_args, interpreter, cntx);
 
   uint64_t end = absl::GetCurrentTimeNanos();
   ss->RecordCallLatency(result, (end - start) / 1000);
@@ -1022,21 +1022,8 @@ void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
 
   string_view sha = ArgS(args, 1);
   ServerState* ss = ServerState::tlocal();
-  auto script = ss->BorrowInterpreter();
-  absl::Cleanup clean = [ss, script]() { ss->ReturnInterpreter(script); };
-
-  bool exists = script->Exists(sha);
-
-  if (!exists) {
-    const char* body = (sha.size() == 40) ? server_family_.script_mgr()->Find(sha) : nullptr;
-    if (!body) {
-      return (*cntx)->SendError(facade::kScriptNotFound);
-    }
-
-    string res;
-    CHECK_EQ(Interpreter::ADD_OK, script->AddFunction(body, &res));
-    CHECK_EQ(res, sha);
-  }
+  auto interpreter = ss->BorrowInterpreter();
+  absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
 
   EvalArgs ev_args;
   ev_args.sha = sha;
@@ -1044,7 +1031,7 @@ void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
   ev_args.args = args.subspan(3 + num_keys);
 
   uint64_t start = absl::GetCurrentTimeNanos();
-  EvalInternal(ev_args, script, cntx);
+  EvalInternal(ev_args, interpreter, cntx);
 
   uint64_t end = absl::GetCurrentTimeNanos();
   ss->RecordCallLatency(sha, (end - start) / 1000);
@@ -1057,6 +1044,67 @@ vector<bool> DetermineKeyShards(CmdArgList keys) {
   return out;
 }
 
+optional<ScriptMgr::ScriptParams> LoadScipt(string_view sha, ScriptMgr* script_mgr,
+                                            Interpreter* interpreter) {
+  auto ss = ServerState::tlocal();
+
+  if (!interpreter->Exists(sha)) {
+    auto script_data = script_mgr->Find(sha);
+    if (!script_data)
+      return std::nullopt;
+
+    string res;
+    CHECK_EQ(Interpreter::ADD_OK, interpreter->AddFunction(script_data->body, &res));
+    CHECK_EQ(res, sha);
+
+    return script_data;
+  }
+
+  auto params = ss->GetScriptParams(sha);
+  CHECK(params);  // We update all caches from script manager
+  return params;
+}
+
+// Determine multi mode based on script params.
+Transaction::MultiMode DetermineMultiMode(ScriptMgr::ScriptParams params) {
+  if (params.atomic && params.undeclared_keys)
+    return Transaction::GLOBAL;
+  else if (params.atomic)
+    return Transaction::LOCK_AHEAD;
+  else
+    return Transaction::NON_ATOMIC;
+}
+
+// Start multi transaction for eval. Returns true if transaction was scheduled.
+// Skips scheduling if multi mode requies declaring keys, but no keys were declared.
+bool StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptParams params,
+                    Transaction* trans) {
+  Transaction::MultiMode multi_mode = DetermineMultiMode(params);
+
+  if (keys.empty() &&
+      (multi_mode == Transaction::LOCK_AHEAD || multi_mode == Transaction::LOCK_INCREMENTAL))
+    return false;
+
+  switch (multi_mode) {
+    case Transaction::GLOBAL:
+      trans->StartMultiGlobal(dbid);
+      return true;
+    case Transaction::LOCK_AHEAD:
+      trans->StartMultiLockedAhead(dbid, keys);
+      return true;
+    case Transaction::LOCK_INCREMENTAL:
+      trans->StartMultiLockedIncr(dbid, DetermineKeyShards(keys));
+      return true;
+    case Transaction::NON_ATOMIC:
+      trans->StartMultiNonAtomic();
+      return true;
+    default:
+      CHECK(false) << "Invalid mode";
+  };
+
+  return false;
+}
+
 void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
                            ConnectionContext* cntx) {
   DCHECK(!eval_args.sha.empty());
@@ -1066,18 +1114,9 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
     return (*cntx)->SendError(facade::kScriptNotFound);
   }
 
-  bool exists = interpreter->Exists(eval_args.sha);
-
-  if (!exists) {
-    const char* body = server_family_.script_mgr()->Find(eval_args.sha);
-    if (!body) {
-      return (*cntx)->SendError(facade::kScriptNotFound);
-    }
-
-    string res;
-    CHECK_EQ(Interpreter::ADD_OK, interpreter->AddFunction(body, &res));
-    CHECK_EQ(res, eval_args.sha);
-  }
+  auto params = LoadScipt(eval_args.sha, server_family_.script_mgr(), interpreter);
+  if (!params)
+    return (*cntx)->SendError(facade::kScriptNotFound);
 
   string error;
 
@@ -1092,24 +1131,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   }
   DCHECK(cntx->transaction);
 
-  bool scheduled = false;
-  int multi_mode = absl::GetFlag(FLAGS_multi_eval_mode);
-  DCHECK(multi_mode >= Transaction::GLOBAL && multi_mode <= Transaction::NON_ATOMIC);
-
-  if (multi_mode == Transaction::GLOBAL) {
-    scheduled = true;
-    cntx->transaction->StartMultiGlobal(cntx->db_index());
-  } else if (multi_mode == Transaction::LOCK_INCREMENTAL && !eval_args.keys.empty()) {
-    scheduled = true;
-    vector<bool> shards = DetermineKeyShards(eval_args.keys);
-    cntx->transaction->StartMultiLockedIncr(cntx->db_index(), shards);
-  } else if (multi_mode == Transaction::LOCK_AHEAD && !eval_args.keys.empty()) {
-    scheduled = true;
-    cntx->transaction->StartMultiLockedAhead(cntx->db_index(), eval_args.keys);
-  } else if (multi_mode == Transaction::NON_ATOMIC) {
-    scheduled = true;
-    cntx->transaction->StartMultiNonAtomic();
-  };
+  bool scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, *params, cntx->transaction);
 
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);

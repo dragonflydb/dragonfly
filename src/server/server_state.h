@@ -10,6 +10,7 @@
 #include "base/histogram.h"
 #include "core/interpreter.h"
 #include "server/common.h"
+#include "server/script_mgr.h"
 #include "util/sliding_counter.h"
 
 typedef struct mi_heap_s mi_heap_t;
@@ -172,6 +173,15 @@ class ServerState {  // public struct - to allow initialization.
     call_latency_histos_[sha].Add(latency_usec);
   }
 
+  void SetScriptParams(const ScriptMgr::ScriptKey& key, ScriptMgr::ScriptParams params) {
+    cached_script_params_[key] = params;
+  }
+
+  std::optional<ScriptMgr::ScriptParams> GetScriptParams(const ScriptMgr::ScriptKey& key) {
+    auto it = cached_script_params_.find(key);
+    return it != cached_script_params_.end() ? std::optional{it->second} : std::nullopt;
+  }
+
   Stats stats;
 
  private:
@@ -180,6 +190,8 @@ class ServerState {  // public struct - to allow initialization.
   journal::Journal* journal_ = nullptr;
 
   InterpreterManager interpreter_mgr_;
+  absl::flat_hash_map<ScriptMgr::ScriptKey, ScriptMgr::ScriptParams> cached_script_params_;
+
   GlobalState gstate_ = GlobalState::ACTIVE;
 
   using Counter = util::SlidingCounter<7>;

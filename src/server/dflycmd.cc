@@ -427,7 +427,7 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
   RdbSaver* saver = flow->saver.get();
 
   if (saver->Mode() == SaveMode::SUMMARY) {
-    auto scripts = sf_->script_mgr()->GetLuaScripts();
+    auto scripts = sf_->script_mgr()->GetAll();
     StringVec script_bodies;
     for (auto& script : scripts) {
       script_bodies.push_back(move(script.second));
