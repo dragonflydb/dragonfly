@@ -1599,12 +1599,15 @@ void ZSetFamily::ZScan(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError("invalid cursor");
   }
 
-  if (args.size() > 3) {
-    return (*cntx)->SendError("scan options are not supported yet");
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(3));
+  if (!ops) {
+    DVLOG(1) << "Scan invalid args - return " << ops << " to the user";
+    return (*cntx)->SendError(ops.status());
   }
+  ScanOpts scan_op = ops.value();
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpScan(t->GetOpArgs(shard), key, &cursor);
+    return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
   };
 
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1783,7 +1786,7 @@ void ZSetFamily::ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cn
 }
 
 OpResult<StringVec> ZSetFamily::OpScan(const OpArgs& op_args, std::string_view key,
-                                       uint64_t* cursor) {
+                                       uint64_t* cursor, const ScanOpts& scan_op) {
   OpResult<PrimeIterator> find_res = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_ZSET);
 
   if (!find_res)
@@ -1800,18 +1803,19 @@ OpResult<StringVec> ZSetFamily::OpScan(const OpArgs& op_args, std::string_view k
 
     iv(IndexInterval{0, kuint32max});
     ScoredArray arr = iv.PopResult();
-    res.resize(arr.size() * 2);
 
     for (size_t i = 0; i < arr.size(); ++i) {
+      if (!scan_op.Matches(arr[i].first)) {
+        continue;
+      }
+      res.emplace_back(std::move(arr[i].first));
       char* str = RedisReplyBuilder::FormatDouble(arr[i].second, buf, sizeof(buf));
-
-      res[2 * i] = std::move(arr[i].first);
-      res[2 * i + 1].assign(str);
+      res.emplace_back(str);
     }
     *cursor = 0;
   } else {
     CHECK_EQ(unsigned(OBJ_ENCODING_SKIPLIST), zobj->encoding);
-    uint32_t count = 20;
+    uint32_t count = scan_op.limit;
     zset* zs = (zset*)zobj->ptr;
 
     dict* ht = zs->dict;
@@ -1820,12 +1824,17 @@ OpResult<StringVec> ZSetFamily::OpScan(const OpArgs& op_args, std::string_view k
     struct ScanArgs {
       char* sbuf;
       StringVec* res;
-    } sargs = {buf, &res};
+      const ScanOpts* scan_op;
+    } sargs = {buf, &res, &scan_op};
 
     auto scanCb = [](void* privdata, const dictEntry* de) {
       ScanArgs* sargs = (ScanArgs*)privdata;
 
       sds key = (sds)de->key;
+      if (!sargs->scan_op->Matches(key)) {
+        return;
+      }
+
       double score = *(double*)dictGetVal(de);
 
       sargs->res->emplace_back(key, sdslen(key));

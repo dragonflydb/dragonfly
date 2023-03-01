@@ -270,6 +270,19 @@ TEST_F(ZSetFamilyTest, ZScan) {
   } while (cursor != 0);
 
   EXPECT_EQ(100 * 2, scan_len);
+
+  // Check scan with count and match params
+  scan_len = 0;
+  do {
+    auto resp = Run({"zscan", "key", absl::StrCat(cursor), "count", "5", "match", "*0"});
+    ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+    ASSERT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::STRING), ArgType(RespExpr::ARRAY)));
+    string_view token = ToSV(resp.GetVec()[0].GetBuf());
+    ASSERT_TRUE(absl::SimpleAtoi(token, &cursor));
+    auto sub_arr = resp.GetVec()[1].GetVec();
+    scan_len += sub_arr.size();
+  } while (cursor != 0);
+  EXPECT_EQ(10 * 2, scan_len);  // expected members a0,a10,a20..,a90
 }
 
 TEST_F(ZSetFamilyTest, ZUnionError) {
