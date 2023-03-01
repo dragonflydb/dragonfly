@@ -21,7 +21,7 @@ cd build-dbg && ninja dragonfly
 ```sh
 cd dragonfly   # project root
 
-# Make sure you have 'pre-commit' e 'clang-format' installed
+# Make sure you have 'pre-commit' and 'clang-format' installed
 pip install pre-commit clang-format
 
 # IMPORTANT! Enable our pre-commit message hooks

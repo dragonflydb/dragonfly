@@ -98,7 +98,7 @@ class Replica {
   };
 
  public:
-  Replica(std::string master_host, uint16_t port, Service* se);
+  Replica(std::string master_host, uint16_t port, Service* se, std::string_view id);
   ~Replica();
 
   // Spawns a fiber that runs until link with master is broken or the replication is stopped.
@@ -109,6 +109,10 @@ class Replica {
   void Stop();  // thread-safe
 
   void Pause(bool pause);
+
+  std::string_view MasterId() const {
+    return master_context_.master_repl_id;
+  }
 
  private: /* Main standalone mode functions */
   // Coordinate state transitions. Spawned by start.
@@ -253,6 +257,7 @@ class Replica {
   unsigned num_df_flows_ = 0;
 
   bool is_paused_ = false;
+  std::string id_;
 };
 
 }  // namespace dfly

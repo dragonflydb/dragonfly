@@ -130,8 +130,11 @@ class ServerFamily {
     return shard_set->size();
   }
 
+  std::string BuildClusterNodeReply(ConnectionContext* cntx) const;
+
   void Auth(CmdArgList args, ConnectionContext* cntx);
   void Client(CmdArgList args, ConnectionContext* cntx);
+  void Cluster(CmdArgList args, ConnectionContext* cntx);
   void Config(CmdArgList args, ConnectionContext* cntx);
   void DbSize(CmdArgList args, ConnectionContext* cntx);
   void Debug(CmdArgList args, ConnectionContext* cntx);
@@ -178,6 +181,7 @@ class ServerFamily {
   std::string master_id_;
 
   time_t start_time_ = 0;  // in seconds, epoch time.
+  bool is_emulated_cluster_ = false;
 
   std::shared_ptr<LastSaveInfo> last_save_info_;  // protected by save_mu_;
   std::atomic_bool is_saving_{false};

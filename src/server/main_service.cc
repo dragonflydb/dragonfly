@@ -573,7 +573,8 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   bool under_script = dfly_cntx->conn_state.script_info.has_value();
 
-  if (VLOG_IS_ON(2)) {
+  if (VLOG_IS_ON(2) &&
+      cntx->owner()) {  // owner may not exists in case of this being called from replica context
     const char* lua = under_script ? "LUA " : "";
     LOG(INFO) << "Got (" << cntx->owner()->GetClientId() << "): " << lua << args;
   }

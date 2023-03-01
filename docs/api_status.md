@@ -210,6 +210,9 @@ with respect to Memcached and Redis APIs.
   - [ ] CLIENT REPLY
   - [X] REPLCONF
   - [ ] WAIT
+  - [X] CLUSTER SLOTS
+  - [X] CLUSTER NODES
+  - [X] CLUSTER INFO
 
 ### API 4
 - [X] Generic Family
@@ -257,6 +260,10 @@ with respect to Memcached and Redis APIs.
 
 - [X] Sorted Set Family
   - [X] ZUNION
+
+### API 7
+- [ ] Server Family
+  - [ ] CLUSTER SHARDS
 
 ## Notes
 Some commands were implemented as decorators along the way:

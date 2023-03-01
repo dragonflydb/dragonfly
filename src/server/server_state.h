@@ -106,6 +106,7 @@ class ServerState {  // public struct - to allow initialization.
   void Shutdown();
 
   bool is_master = true;
+  std::string remote_client_id_;  // for cluster support
 
   facade::ConnectionStats connection_stats;
 

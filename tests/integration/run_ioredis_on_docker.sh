@@ -8,7 +8,7 @@ if [ "$1" = "--build" ]; then
 fi
 
 # run the tests
-echo "runniing ioredis tess"
+echo "running ioredis tests"
 docker run --rm -i --network=host ioredis-test ./run_tests.sh
 if [ $? -ne 0 ];then
 	echo "some tests failed - please look at the output from this run"

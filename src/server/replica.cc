@@ -101,7 +101,8 @@ vector<vector<unsigned>> Partition(unsigned num_flows) {
 
 }  // namespace
 
-Replica::Replica(string host, uint16_t port, Service* se) : service_(*se) {
+Replica::Replica(string host, uint16_t port, Service* se, std::string_view id)
+    : service_(*se), id_{id} {
   master_context_.host = std::move(host);
   master_context_.port = port;
 }
@@ -287,7 +288,7 @@ error_code Replica::Greet() {
   base::IoBuf io_buf{128};
   ReqSerializer serializer{sock_.get()};
   uint32_t consumed = 0;
-
+  VLOG(1) << "greeting message handling";
   // Corresponds to server.repl_state == REPL_STATE_CONNECTING state in redis
   RETURN_ON_ERR(SendCommand("PING", &serializer));  // optional.
   RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
@@ -334,7 +335,7 @@ error_code Replica::Greet() {
       return make_error_code(errc::bad_message);
     }
   } else if (resp_args_.size() == 3) {  // it's dragonfly master.
-    // Reponse is: <master_repl_id, syncid, num_shards>
+    // Response is: <master_repl_id, syncid, num_shards>
     if (!CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING, RespExpr::INT64}) ||
         resp_args_[0].GetBuf().size() != CONFIG_RUN_ID_SIZE) {
       LOG(ERROR) << "Unexpected response " << ToSV(io_buf.InputBuffer());
@@ -356,7 +357,14 @@ error_code Replica::Greet() {
     master_context_.master_repl_id = param0;
     master_context_.dfly_session_id = param1;
     num_df_flows_ = param2;
-
+    // We need to send this because we may require to use this for cluster commands.
+    // this reason to send this here is that in other context we can get an error reply
+    // since we are budy with the replication
+    RETURN_ON_ERR(SendCommand(StrCat("REPLCONF CLIENT-ID ", id_), &serializer));
+    RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
+    if (!CheckRespIsSimpleReply("OK")) {
+      LOG(WARNING) << "master did not return OK on id message";
+    }
     VLOG(1) << "Master id: " << param0 << ", sync id: " << param1 << ", num journals "
             << num_df_flows_;
   } else {
@@ -367,7 +375,6 @@ error_code Replica::Greet() {
 
   io_buf.ConsumeInput(consumed);
   state_mask_ |= R_GREETED;
-
   return error_code{};
 }
 
