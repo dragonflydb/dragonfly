@@ -40,9 +40,10 @@ jobs:
     timeout-minutes: 30
     container:
       image: ghcr.io/romange/${{ matrix.container }}
-      # credentials:
-      #  username: ${{ github.repository_owner }}
-      #  password: ${{ secrets.GITHUB_TOKEN }}
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
     steps:
       - uses: actions/checkout@v3
         with:
