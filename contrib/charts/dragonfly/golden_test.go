@@ -52,7 +52,7 @@ func TestHelmRender(t *testing.T) {
 			}
 
 			if string(expected) != output {
-				t.Fatalf("Expected %s, but got %s", string(expected), output)
+				t.Fatalf("Expected %s, but got %s\n. Update golden files by running `go test -v ./... -update`", string(expected), output)
 			}
 		}
 
