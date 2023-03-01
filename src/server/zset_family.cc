@@ -1799,6 +1799,7 @@ OpResult<StringVec> ZSetFamily::OpScan(const OpArgs& op_args, std::string_view k
 
   if (zobj->encoding == OBJ_ENCODING_LISTPACK) {
     RangeParams params;
+    params.with_scores = true;
     IntervalVisitor iv{Action::RANGE, params, zobj};
 
     iv(IndexInterval{0, kuint32max});
