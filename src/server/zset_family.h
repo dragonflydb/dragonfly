@@ -91,7 +91,8 @@ class ZSetFamily {
   static void ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx);
   static bool ParseRangeByScoreParams(CmdArgList args, RangeParams* params);
   static void ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cntx);
-  static OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t* cursor);
+  static OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t* cursor,
+                                    const ScanOpts& scan_op);
 
   static OpResult<unsigned> OpRem(const OpArgs& op_args, std::string_view key, ArgSlice members);
   static OpResult<double> OpScore(const OpArgs& op_args, std::string_view key,
