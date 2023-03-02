@@ -1,17 +1,10 @@
 name: Regression Tests
 
-env:
-  BUILD_TYPE: Debug
+
 
 on:
   schedule:
     - cron: '0 0/3 * * *'
-  workflow_dispatch:
-    inputs:
-      run_replication:
-        description: 'run replication pytests'
-        type: boolean
-        required: true
 
 
 jobs:
@@ -21,6 +14,7 @@ jobs:
       matrix:
         # Test of these containers
         container: ["ubuntu-dev:20"]
+        build-type: [Debug, Release]
     timeout-minutes: 30
 
     container:
@@ -36,7 +30,7 @@ jobs:
       - name: Configure & Build
         run: |
           apt update && apt install -y pip
-          cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -GNinja \
+          cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
                 -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
           cd ${GITHUB_WORKSPACE}/build  && ninja dragonfly
@@ -55,7 +49,6 @@ jobs:
           pytest -sxvr dragonfly --ignore=dragonfly/replication_test.py
       - name: Run PyTests replication test
         timeout-minutes: 15
-        #if:  ${{ inputs.run_replication }}
         run: |
           cd ${GITHUB_WORKSPACE}/tests
           export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
