@@ -10,6 +10,7 @@ extern "C" {
 }
 
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_replace.h>
 #include <gmock/gmock.h>
 
 #include "base/gtest.h"
@@ -321,13 +322,33 @@ TEST_F(InterpreterTest, Modules) {
   EXPECT_EQ("str(\x1\x2test)", ser_.res);
 }
 
-// Since Lua 5.2 global functions were moved to separate namespaces.
-// We need to register them globally to maintain 5.1 compatibility.
-TEST_F(InterpreterTest, OutdatedGlobals) {
-  // table.unpack is used in Laravel:
-  // https://github.com/laravel/framework/blob/6a5c2ec92200cc485983f26b284f7e78470b885f/src/Illuminate/Queue/LuaScripts.php#L118
+// Check compatibility with Lua 5.1
+TEST_F(InterpreterTest, Compatibiliry) {
+  // unpack is no longer global
   EXPECT_TRUE(Execute("return unpack{1,2,3}"));
   EXPECT_EQ("i(1)", ser_.res);
+
+  string_view test_foreach_template =
+      "local t = {1,'two',3;four='yes'}; local out = {};"
+      "table.{TESTF} (t, function(k, v) table.insert(out, {k, v}) end); "
+      "return out; ";
+
+  // table.foreach was removed
+  string test_foreach = absl::StrReplaceAll(test_foreach_template, {{"{TESTF}", "foreach"}});
+  EXPECT_TRUE(Execute(test_foreach));
+  EXPECT_EQ("[[i(1) i(1)] [i(2) str(two)] [i(3) i(3)] [str(four) str(yes)]]", ser_.res);
+
+  // table.foreachi was removed
+  string test_foreachi = absl::StrReplaceAll(test_foreach_template, {{"{TESTF}", "foreachi"}});
+  EXPECT_TRUE(Execute(test_foreachi));
+  EXPECT_EQ("[[i(1) i(1)] [i(2) str(two)] [i(3) i(3)]]", ser_.res);
+
+  // table.getn was replaced with length operator
+  EXPECT_TRUE(Execute("return table.getn{1, 2, 3};"));
+  EXPECT_EQ("i(3)", ser_.res);
+
+  // table.setn was removed, resizing is no longer needed, it thows an error
+  EXPECT_FALSE(Execute("local t = {}; local a = 1; table.setn(t, 100); return a+123;"));
 }
 
 }  // namespace dfly
