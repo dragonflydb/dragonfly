@@ -16,7 +16,6 @@ std::string UnknownSubCmd(std::string_view subcmd, std::string_view cmd);
 extern const char kSyntaxErr[];
 extern const char kWrongTypeErr[];
 extern const char kKeyNotFoundErr[];
-extern const char kKeyExists[];
 extern const char kInvalidIntErr[];
 extern const char kInvalidFloatErr[];
 extern const char kUintErr[];

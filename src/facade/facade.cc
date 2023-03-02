@@ -67,7 +67,6 @@ string UnknownSubCmd(string_view subcmd, string_view cmd) {
 const char kSyntaxErr[] = "syntax error";
 const char kWrongTypeErr[] = "-WRONGTYPE Operation against a key holding the wrong kind of value";
 const char kKeyNotFoundErr[] = "no such key";
-const char kKeyExists[] = "key exists";
 const char kInvalidIntErr[] = "value is not an integer or out of range";
 const char kInvalidFloatErr[] = "value is not a valid float";
 const char kUintErr[] = "value is out of range, must be positive";
