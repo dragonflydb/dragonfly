@@ -1232,7 +1232,8 @@ bool Replica::TransactionData::IsGlobalCmd() const {
 
 Replica::TransactionData Replica::TransactionData::FromSingle(journal::ParsedEntry&& entry) {
   TransactionData data;
-  DCHECK(data.AddEntry(std::move(entry)));
+  bool res = data.AddEntry(std::move(entry));
+  DCHECK(res);
   return data;
 }
 
