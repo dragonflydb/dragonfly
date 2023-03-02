@@ -953,8 +953,8 @@ OpResult<string> BPopPusher::RunSingle(Transaction* t, time_point tp) {
     OpArgs op_args = t->GetOpArgs(shard);
     op_res = OpMoveSingleShard(op_args, pop_key_, push_key_, popdir_, pushdir_);
     if (op_res && op_args.shard->journal()) {
-      ArgSlice args{pop_key_, push_key_, DirToSv(popdir_), DirToSv(pushdir_)};
-      RecordJournal(op_args, "LMOVE", args, 1);
+      RecordJournal(op_args, "LMOVE",
+                    ArgSlice{pop_key_, push_key_, DirToSv(popdir_), DirToSv(pushdir_)}, 1);
     }
     return OpStatus::OK;
   };
