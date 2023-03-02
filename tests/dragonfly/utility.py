@@ -66,19 +66,16 @@ class ValueType(Enum):
     ZSET = 4
     JSON = 5
 
-    @staticmethod
-    def randomize():
-        return random.choice([t for t in ValueType])
-
 
 class CommandGenerator:
     """Class for generating complex command sequences"""
 
-    def __init__(self, target_keys, val_size, batch_size, max_multikey):
+    def __init__(self, target_keys, val_size, batch_size, max_multikey, unsupported_types=[]):
         self.key_cnt_target = target_keys
         self.val_size = val_size
         self.batch_size = min(batch_size, target_keys)
         self.max_multikey = max_multikey
+        self.unsupported_types = unsupported_types
 
         # Key management
         self.key_sets = [set() for _ in ValueType]
@@ -105,12 +102,15 @@ class CommandGenerator:
         self.set_for_type(t).add(k)
         return k
 
+    def random_type(self):
+        return random.choice([t for t in ValueType if (t not in self.unsupported_types)])
+
     def randomize_nonempty_set(self):
         """Return random non-empty set and its type"""
         if not any(self.key_sets):
             return None, None
 
-        t = ValueType.randomize()
+        t = self.random_type()
         s = self.set_for_type(t)
 
         if len(s) == 0:
@@ -229,7 +229,7 @@ class CommandGenerator:
         Generate command that grows keyset: Initialize key of random type with filler value.
         """
         # TODO: Implement COPY in Dragonfly.
-        t = ValueType.randomize()
+        t = self.random_type()
         if t == ValueType.STRING:
             count = random.randint(1, self.max_multikey)
         else:
@@ -339,9 +339,9 @@ class DflySeeder:
         assert await seeder.compare(capture, port=1112)
     """
 
-    def __init__(self, port=6379, keys=1000, val_size=50, batch_size=100, max_multikey=5, dbcount=1, multi_transaction_probability=0.3, log_file=None):
+    def __init__(self, port=6379, keys=1000, val_size=50, batch_size=100, max_multikey=5, dbcount=1, multi_transaction_probability=0.3, log_file=None, unsupported_types=[]):
         self.gen = CommandGenerator(
-            keys, val_size, batch_size, max_multikey
+            keys, val_size, batch_size, max_multikey, unsupported_types
         )
         self.port = port
         self.dbcount = dbcount
