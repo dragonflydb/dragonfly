@@ -164,7 +164,7 @@ async def test_failover(df_local_factory, sentinel):
         syncid, r_offset = await master_client.execute_command("DEBUG REPLICA OFFSET")
         replicaoffset_cmd = "DFLY REPLICAOFFSET " + syncid.decode()
         m_offset = await replica_client.execute_command(replicaoffset_cmd)
-        logging.info(syncid.decode(),  r_offset, m_offset)
+        logging.info(f"{syncid.decode()} {r_offset} {m_offset}")
         logging.info("replica client role:")
         logging.info(await replica_client.execute_command("role"))
         logging.info("master client role:")
