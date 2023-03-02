@@ -201,10 +201,11 @@ TEST_F(GenericFamilyTest, RenameNx) {
 
 TEST_F(GenericFamilyTest, RenameSameName) {
   const char kKey[] = "key";
-  Run({"set", kKey, "value"});
 
-  auto resp = Run({"rename", kKey, kKey});
-  EXPECT_EQ(resp, "OK");
+  ASSERT_THAT(Run({"rename", kKey, kKey}), ErrArg("no such key"));
+
+  ASSERT_EQ(Run({"set", kKey, "value"}), "OK");
+  EXPECT_EQ(Run({"rename", kKey, kKey}), "OK");
 }
 
 TEST_F(GenericFamilyTest, Stick) {
