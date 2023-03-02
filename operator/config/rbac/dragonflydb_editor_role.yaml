@@ -1,0 +1,31 @@
+# permissions for end users to edit dragonflydbs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/instance: dragonflydb-editor-role
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: operator
+    app.kubernetes.io/part-of: operator
+    app.kubernetes.io/managed-by: kustomize
+  name: dragonflydb-editor-role
+rules:
+- apiGroups:
+  - dragonflydb.io
+  resources:
+  - dragonflydbs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - dragonflydb.io
+  resources:
+  - dragonflydbs/status
+  verbs:
+  - get

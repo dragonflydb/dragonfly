@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- _v1alpha1_dragonflydb.yaml
+#+kubebuilder:scaffold:manifestskustomizesamples

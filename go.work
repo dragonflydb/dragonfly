@@ -1,3 +1,6 @@
 go 1.20
 
-use ./contrib/charts/dragonfly
+use (
+	./contrib/charts/dragonfly
+	./operator
+)

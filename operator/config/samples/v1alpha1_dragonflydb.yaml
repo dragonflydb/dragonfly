@@ -1,0 +1,12 @@
+apiVersion: dragonflydb.io/v1alpha1
+kind: DragonflyDb
+metadata:
+  labels:
+    app.kubernetes.io/name: dragonflydb
+    app.kubernetes.io/instance: dragonflydb-sample
+    app.kubernetes.io/part-of: operator
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: operator
+  name: dragonflydb-sample
+spec:
+  replicas: 2
