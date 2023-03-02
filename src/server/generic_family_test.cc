@@ -203,7 +203,8 @@ TEST_F(GenericFamilyTest, RenameSameName) {
   const char kKey[] = "key";
   Run({"set", kKey, "value"});
 
-  ASSERT_THAT(Run({"rename", kKey, kKey}), ErrArg("key exists"));
+  auto resp = Run({"rename", kKey, kKey});
+  EXPECT_EQ(resp, "OK");
 }
 
 TEST_F(GenericFamilyTest, Stick) {

@@ -1322,7 +1322,7 @@ OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, ArgSlice keys)
 OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key, string_view to_key,
                                     bool skip_exists) {
   if (from_key == to_key)
-    return OpStatus::KEY_EXISTS;
+    return OpStatus::OK;
 
   auto* es = op_args.shard;
   auto& db_slice = es->db_slice();
