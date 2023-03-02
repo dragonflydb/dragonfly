@@ -224,6 +224,8 @@ std::string_view RedisReplyBuilder::StatusToMsg(OpStatus status) {
       return "OK";
     case OpStatus::KEY_NOTFOUND:
       return kKeyNotFoundErr;
+    case OpStatus::KEY_EXISTS:
+      return kKeyExists;
     case OpStatus::WRONG_TYPE:
       return kWrongTypeErr;
     case OpStatus::OUT_OF_RANGE:
