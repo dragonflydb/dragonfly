@@ -59,8 +59,9 @@ ServerState::ServerState() : interpreter_mgr_{absl::GetFlag(FLAGS_interpreter_pe
 ServerState::~ServerState() {
 }
 
-void ServerState::Init() {
+void ServerState::Init(uint32_t thread_index) {
   gstate_ = GlobalState::ACTIVE;
+  thread_index_ = thread_index;
 }
 
 void ServerState::Shutdown() {

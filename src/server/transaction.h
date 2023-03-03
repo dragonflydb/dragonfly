@@ -102,7 +102,7 @@ class Transaction {
   };
 
  public:
-  explicit Transaction(const CommandId* cid);
+  explicit Transaction(const CommandId* cid, uint32_t thread_index);
 
   // Initialize from command (args) on specific db.
   OpStatus InitByArgs(DbIndex index, CmdArgList args);
@@ -175,7 +175,6 @@ class Transaction {
   // Runs in the shard thread.
   KeyLockArgs GetLockArgs(ShardId sid) const;
 
- public:
   //! Returns true if the transaction spans this shard_id.
   //! Runs from the coordinator thread.
   bool IsActive(ShardId shard_id) const {
@@ -484,6 +483,7 @@ class Transaction {
   // they read this variable the coordinator thread is stalled and can not cause data races.
   // If COORDINATOR_XXX has been set, it means we passed or crossed stage XXX.
   uint8_t coordinator_state_ = 0;
+  uint32_t coordinator_index_;  // thread_index of the coordinator thread.
 
   // Used for single-hop transactions with unique_shards_ == 1, hence no data-race.
   OpStatus local_result_ = OpStatus::OK;

@@ -103,7 +103,7 @@ class ServerState {  // public struct - to allow initialization.
   ServerState();
   ~ServerState();
 
-  void Init();
+  void Init(uint32_t thread_index);
   void Shutdown();
 
   bool is_master = true;
@@ -182,6 +182,10 @@ class ServerState {  // public struct - to allow initialization.
     return it != cached_script_params_.end() ? std::optional{it->second} : std::nullopt;
   }
 
+  uint32_t thread_index() const {
+    return thread_index_;
+  }
+
   Stats stats;
 
  private:
@@ -200,6 +204,7 @@ class ServerState {  // public struct - to allow initialization.
   MonitorsRepo monitors_;
 
   absl::flat_hash_map<std::string, base::Histogram> call_latency_histos_;
+  uint32_t thread_index_ = 0;
 
   static thread_local ServerState state_;
 };
