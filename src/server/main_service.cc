@@ -495,7 +495,8 @@ void Service::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_i
                    const InitOpts& opts) {
   InitRedisTables();
 
-  pp_.AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) { ServerState::tlocal()->Init(); });
+  pp_.AwaitFiberOnAll(
+      [&](uint32_t index, ProactorBase* pb) { ServerState::tlocal()->Init(index); });
 
   uint32_t shard_num = pp_.size() > 1 ? pp_.size() - 1 : pp_.size();
   shard_set->Init(shard_num, !opts.disable_time_update);
@@ -706,7 +707,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     DCHECK(dfly_cntx->transaction == nullptr);
 
     if (IsTransactional(cid)) {
-      dist_trans.reset(new Transaction{cid});
+      dist_trans.reset(new Transaction{cid, etl.thread_index()});
 
       if (!dist_trans->IsMulti()) {  // Multi command initialize themself based on their mode.
         if (auto st = dist_trans->InitByArgs(dfly_cntx->conn_state.db_index, args);

@@ -175,7 +175,7 @@ void DebugCmd::Reload(CmdArgList args) {
     string err_details;
     const CommandId* cid = sf_.service().FindCmd("SAVE");
     CHECK_NOTNULL(cid);
-    intrusive_ptr<Transaction> trans(new Transaction{cid});
+    intrusive_ptr<Transaction> trans(new Transaction{cid, ServerState::tlocal()->thread_index()});
     trans->InitByArgs(0, {});
     VLOG(1) << "Performing save";
 
@@ -226,7 +226,8 @@ void DebugCmd::Load(string_view filename) {
   };
 
   const CommandId* cid = sf_.service().FindCmd("FLUSHALL");
-  intrusive_ptr<Transaction> flush_trans(new Transaction{cid});
+  intrusive_ptr<Transaction> flush_trans(
+      new Transaction{cid, ServerState::tlocal()->thread_index()});
   flush_trans->InitByArgs(0, {});
   VLOG(1) << "Performing flush";
   error_code ec = sf_.Drakarys(flush_trans.get(), DbSlice::kDbAll);

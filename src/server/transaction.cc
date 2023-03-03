@@ -41,7 +41,8 @@ IntentLock::Mode Transaction::Mode() const {
  * @param ess
  * @param cs
  */
-Transaction::Transaction(const CommandId* cid) : cid_{cid} {
+Transaction::Transaction(const CommandId* cid, uint32_t thread_index)
+    : cid_{cid}, coordinator_index_(thread_index) {
   string_view cmd_name(cid_->name());
   if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA") {
     multi_.reset(new MultiData);

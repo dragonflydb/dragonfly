@@ -589,7 +589,8 @@ void ServerFamily::SnapshotScheduling(const SnapshotSpec& spec) {
 
     const CommandId* cid = service().FindCmd("SAVE");
     CHECK_NOTNULL(cid);
-    boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
+    boost::intrusive_ptr<Transaction> trans(
+        new Transaction{cid, ServerState::tlocal()->thread_index()});
     trans->InitByArgs(0, {});
 
     GenericError ec = DoSave(absl::GetFlag(FLAGS_df_snapshot_format), trans.get());
