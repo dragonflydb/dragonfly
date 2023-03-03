@@ -13,7 +13,6 @@ std::string WrongNumArgsError(std::string_view cmd);
 std::string InvalidExpireTime(std::string_view cmd);
 std::string UnknownSubCmd(std::string_view subcmd, std::string_view cmd);
 
-
 extern const char kSyntaxErr[];
 extern const char kWrongTypeErr[];
 extern const char kKeyNotFoundErr[];
@@ -32,4 +31,4 @@ extern const char kIndexOutOfRange[];
 extern const char kOutOfMemory[];
 extern const char kInvalidNumericResult[];
 
-}  // namespace dfly
+}  // namespace facade

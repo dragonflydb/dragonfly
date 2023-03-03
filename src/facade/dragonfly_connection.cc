@@ -502,6 +502,8 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
   size_t last_len = 0;
   do {
     auto buf = io_buf_.AppendBuffer();
+    DCHECK(!buf.empty());
+
     ::io::Result<size_t> recv_sz = peer->Recv(buf);
     if (!recv_sz) {
       return make_unexpected(recv_sz.error());
@@ -518,6 +520,7 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
       return MatchHttp11Line(ib);
     }
     last_len = io_buf_.InputLen();
+    io_buf_.EnsureCapacity(io_buf_.Capacity());
   } while (last_len < 1024);
 
   return false;

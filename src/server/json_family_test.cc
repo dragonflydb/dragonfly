@@ -864,6 +864,12 @@ TEST_F(JsonFamilyTest, MGet) {
   )",
       R"(
     {"address":{"street":"Oranienburger Str. 27","city":"Berlin","country":"Germany","zipcode":"10117"}}
+  )",
+      R"(
+    {"a":1, "b": 2, "nested": {"a": 3}, "c": null}
+  )",
+      R"(
+    {"a":4, "b": 5, "nested": {"a": 6}, "c": null}
   )"};
 
   auto resp = Run({"JSON.SET", "json1", ".", json[0]});
@@ -874,7 +880,18 @@ TEST_F(JsonFamilyTest, MGet) {
 
   resp = Run({"JSON.MGET", "json1", "json2", "json3", "$.address.country"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
-  EXPECT_THAT(resp.GetVec(), ElementsAre(R"("Israel")", R"("Germany")", ArgType(RespExpr::NIL)));
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre(R"(["Israel"])", R"(["Germany"])", ArgType(RespExpr::NIL)));
+
+  resp = Run({"JSON.SET", "json3", ".", json[2]});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "json4", ".", json[3]});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.MGET", "json3", "json4", "$..a"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(R"([1,3])", R"([4,6])"));
 }
 
 TEST_F(JsonFamilyTest, DebugFields) {

@@ -199,6 +199,15 @@ TEST_F(GenericFamilyTest, RenameNx) {
   ASSERT_EQ(Run({"get", "y"}), x_val);
 }
 
+TEST_F(GenericFamilyTest, RenameSameName) {
+  const char kKey[] = "key";
+
+  ASSERT_THAT(Run({"rename", kKey, kKey}), ErrArg("no such key"));
+
+  ASSERT_EQ(Run({"set", kKey, "value"}), "OK");
+  EXPECT_EQ(Run({"rename", kKey, kKey}), "OK");
+}
+
 TEST_F(GenericFamilyTest, Stick) {
   // check stick returns zero on non-existent keys
   ASSERT_THAT(Run({"stick", "a", "b"}), IntArg(0));

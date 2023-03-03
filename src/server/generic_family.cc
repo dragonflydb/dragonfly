@@ -1327,6 +1327,9 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
   if (!IsValid(from_it))
     return OpStatus::KEY_NOTFOUND;
 
+  if (from_key == to_key)
+    return OpStatus::OK;
+
   bool is_prior_list = false;
   auto [to_it, to_expire] = db_slice.FindExt(op_args.db_cntx, to_key);
   if (IsValid(to_it)) {
