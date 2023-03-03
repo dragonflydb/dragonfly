@@ -46,6 +46,7 @@ static int polyfill_table_foreach(lua_State* L) {
 }
 
 static int polyfill_table_foreachi(lua_State* L) {
+  luaL_checktype(L, 1, LUA_TTABLE);  // Check type here because aux_getn is stripped
   // From Lua 5.1, ltablib.c
   int i;
   int n = aux_getn(L, 1, 0b11);

@@ -323,7 +323,7 @@ TEST_F(InterpreterTest, Modules) {
 }
 
 // Check compatibility with Lua 5.1
-TEST_F(InterpreterTest, Compatibiliry) {
+TEST_F(InterpreterTest, Compatibility) {
   // unpack is no longer global
   EXPECT_TRUE(Execute("return unpack{1,2,3}"));
   EXPECT_EQ("i(1)", ser_.res);
@@ -342,6 +342,8 @@ TEST_F(InterpreterTest, Compatibiliry) {
   string test_foreachi = absl::StrReplaceAll(test_foreach_template, {{"{TESTF}", "foreachi"}});
   EXPECT_TRUE(Execute(test_foreachi));
   EXPECT_EQ("[[i(1) i(1)] [i(2) str(two)] [i(3) i(3)]]", ser_.res);
+
+  EXPECT_FALSE(Execute("table.foreachi('not-a-table', print);"));  // check invalid args
 
   // table.getn was replaced with length operator
   EXPECT_TRUE(Execute("return table.getn{1, 2, 3};"));
