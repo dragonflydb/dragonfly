@@ -420,4 +420,115 @@ TEST_F(BitOpsFamilyTest, BitOpsNot) {
   EXPECT_EQ(res, NOT_RESULTS);
 }
 
+TEST_F(BitOpsFamilyTest, BitPos) {
+  ASSERT_EQ(Run({"set", "a", "\x00\x00\x06\xff\xf0"_b}), "OK");
+
+  // Find clear bits
+  EXPECT_EQ(0, CheckedInt({"bitpos", "a", "0"}));
+  EXPECT_EQ(8, CheckedInt({"bitpos", "a", "0", "1"}));
+  EXPECT_EQ(16, CheckedInt({"bitpos", "a", "0", "2"}));
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "a", "0", "100"}));
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "a", "0", "100", "103"}));
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "a", "0", "100", "0"}));
+  EXPECT_EQ(0, CheckedInt({"bitpos", "a", "0", "0", "100"}));
+  EXPECT_EQ(8, CheckedInt({"bitpos", "a", "0", "1", "100"}));
+  EXPECT_EQ(0, CheckedInt({"bitpos", "a", "0", "0", "-3"}));
+  EXPECT_EQ(8, CheckedInt({"bitpos", "a", "0", "1", "-2"}));
+  EXPECT_EQ(36, CheckedInt({"bitpos", "a", "0", "3"}));
+  EXPECT_EQ(36, CheckedInt({"bitpos", "a", "0", "4"}));
+  EXPECT_EQ(36, CheckedInt({"bitpos", "a", "0", "-2"}));
+  EXPECT_EQ(36, CheckedInt({"bitpos", "a", "0", "-2", "-1"}));
+  EXPECT_EQ(36, CheckedInt({"bitpos", "a", "0", "-1"}));
+  EXPECT_EQ(0, CheckedInt({"bitpos", "a", "0", "-100"}));
+
+  // Find clear bits, explicitly mention "BYTE"
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "a", "0", "100", "103", "BYTE"}));
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "a", "0", "100", "0", "BYTE"}));
+  EXPECT_EQ(0, CheckedInt({"bitpos", "a", "0", "0", "100", "BYTE"}));
+  EXPECT_EQ(8, CheckedInt({"bitpos", "a", "0", "1", "100", "BYTE"}));
+  EXPECT_EQ(0, CheckedInt({"bitpos", "a", "0", "0", "-3", "BYTE"}));
+  EXPECT_EQ(8, CheckedInt({"bitpos", "a", "0", "1", "-2", "BYTE"}));
+  EXPECT_EQ(36, CheckedInt({"bitpos", "a", "0", "-2", "-1", "BYTE"}));
+
+  // Find clear bits using "BIT"
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "a", "0", "100", "103", "BIT"}));
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "a", "0", "100", "0", "BIT"}));
+  EXPECT_EQ(0, CheckedInt({"bitpos", "a", "0", "0", "100", "BIT"}));
+  EXPECT_EQ(1, CheckedInt({"bitpos", "a", "0", "1", "100", "BIT"}));
+  EXPECT_EQ(2, CheckedInt({"bitpos", "a", "0", "2", "100", "BIT"}));
+  EXPECT_EQ(16, CheckedInt({"bitpos", "a", "0", "16", "100", "BIT"}));
+  EXPECT_EQ(23, CheckedInt({"bitpos", "a", "0", "21", "100", "BIT"}));
+  EXPECT_EQ(36, CheckedInt({"bitpos", "a", "0", "24", "100", "BIT"}));
+  EXPECT_EQ(0, CheckedInt({"bitpos", "a", "0", "0", "-3", "BIT"}));
+  EXPECT_EQ(1, CheckedInt({"bitpos", "a", "0", "1", "-2", "BIT"}));
+  EXPECT_EQ(38, CheckedInt({"bitpos", "a", "0", "-2", "-1", "BIT"}));
+
+  // Find set bits
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1"}));
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1", "0"}));
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1", "1"}));
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1", "2"}));
+  EXPECT_EQ(24, CheckedInt({"bitpos", "a", "1", "3"}));
+  EXPECT_EQ(32, CheckedInt({"bitpos", "a", "1", "4"}));
+  EXPECT_EQ(32, CheckedInt({"bitpos", "a", "1", "-1"}));
+  EXPECT_EQ(24, CheckedInt({"bitpos", "a", "1", "-2"}));
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1", "-3"}));
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1", "-4"}));
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1", "-5"}));
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1", "-6"}));
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1", "-100"}));
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "a", "1", "0", "0"}));
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "a", "1", "0", "1"}));
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1", "0", "3"}));
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1", "0", "100"}));
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1", "2", "2"}));
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1", "2", "3"}));
+  EXPECT_EQ(32, CheckedInt({"bitpos", "a", "1", "-1", "-1"}));
+  EXPECT_EQ(24, CheckedInt({"bitpos", "a", "1", "-2", "-1"}));
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "a", "1", "-1", "-2"}));
+
+  // Find set bits, explicitly mention "BYTE"
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "a", "1", "0", "0", "BYTE"}));
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "a", "1", "0", "1", "BYTE"}));
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1", "0", "3", "BYTE"}));
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1", "0", "100", "BYTE"}));
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1", "2", "2", "BYTE"}));
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1", "2", "3", "BYTE"}));
+  EXPECT_EQ(32, CheckedInt({"bitpos", "a", "1", "-1", "-1", "BYTE"}));
+  EXPECT_EQ(24, CheckedInt({"bitpos", "a", "1", "-2", "-1", "BYTE"}));
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "a", "1", "-1", "-2", "BYTE"}));
+
+  // Find set bits using "BIT"
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "a", "1", "0", "0", "BIT"}));
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "a", "1", "0", "1", "BIT"}));
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1", "0", "21", "BIT"}));
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1", "21", "21", "BIT"}));
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1", "21", "100", "BIT"}));
+  EXPECT_EQ(21, CheckedInt({"bitpos", "a", "1", "0", "100", "BIT"}));
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "a", "1", "-1", "-1", "BIT"}));
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "a", "1", "-4", "-1", "BIT"}));
+  EXPECT_EQ(35, CheckedInt({"bitpos", "a", "1", "-5", "-1", "BIT"}));
+  EXPECT_EQ(34, CheckedInt({"bitpos", "a", "1", "-6", "-1", "BIT"}));
+
+  // Test weird return value spec, specifically when looking for clear bits in
+  // an all-set string.
+  ASSERT_EQ(Run({"set", "b", "\xff\xff\xff"_b}), "OK");
+  EXPECT_EQ(24, CheckedInt({"bitpos", "b", "0"}));
+  EXPECT_EQ(24, CheckedInt({"bitpos", "b", "0", "0"}));
+  EXPECT_EQ(24, CheckedInt({"bitpos", "b", "0", "1"}));
+  EXPECT_EQ(24, CheckedInt({"bitpos", "b", "0", "2"}));
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "b", "0", "3"}));
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "b", "0", "0", "1"}));
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "b", "0", "0", "1", "BYTE"}));
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "b", "0", "0", "3"}));
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "b", "0", "0", "3", "BYTE"}));
+
+  ASSERT_EQ(Run({"set", "c", ""_b}), "OK");
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "c", "0"}));
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "c", "0", "1"}));
+
+  // Non-existent key should be treated like an empty string.
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "d", "0"}));
+}
+
 }  // end of namespace dfly
