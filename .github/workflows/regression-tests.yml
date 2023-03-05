@@ -24,7 +24,7 @@ jobs:
           submodules: true
 
       - name: Print cpu info
-          cat /proc/cpuinfo
+        run:  cat /proc/cpuinfo
 
       - name: Configure & Build
         run: |
