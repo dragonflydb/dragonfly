@@ -52,6 +52,7 @@ class DflyInstance:
         except subprocess.TimeoutExpired:
             print("Unable to terminate DragonflyDB gracefully, it was killed")
             proc.kill()
+            proc.communicate()
 
     def _start(self):
         base_args = [f"--{v}" for v in self.params.args]
