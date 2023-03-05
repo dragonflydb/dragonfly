@@ -1,7 +1,5 @@
 name: Regression Tests
 
-
-
 on:
   schedule:
     - cron: '0 0/3 * * *'
@@ -25,8 +23,8 @@ jobs:
         with:
           submodules: true
 
-        name: Print cpu info
-          cat /proc/cpuinfo
+      - name: Print cpu info
+        run:  cat /proc/cpuinfo
 
       - name: Configure & Build
         run: |
