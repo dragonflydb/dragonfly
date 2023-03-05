@@ -297,6 +297,7 @@ async def test_disconnect_master(df_local_factory, df_seeder_factory, t_master, 
         master.stop(kill=True)
 
     async def start_master():
+        await asyncio.sleep(0.2)
         master.start()
         c_master = aioredis.Redis(port=master.port)
         assert await c_master.ping()
