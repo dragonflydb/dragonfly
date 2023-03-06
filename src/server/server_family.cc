@@ -494,7 +494,7 @@ fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path)
   // Check all paths are valid.
   for (const auto& path : paths) {
     error_code ec;
-    fs::canonical(path, ec);
+    auto canonical_path = fs::canonical(path, ec);
     if (ec) {
       LOG(ERROR) << "Error loading " << load_path << " " << ec.message();
       fibers::promise<std::error_code> ec_promise;

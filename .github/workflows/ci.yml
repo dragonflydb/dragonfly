@@ -77,7 +77,7 @@ jobs:
           ninja src/all
           ccache --show-stats
           echo Run ctest -V -L DFLY
-          #GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1
+          GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1 ./tiered_storage_test
           GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 ctest -V -L DFLY
           ./dragonfly_test  --gtest_repeat=10
           ./multi_test --multi_exec_mode=2 --gtest_repeat=10

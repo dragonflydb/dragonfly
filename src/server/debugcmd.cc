@@ -353,6 +353,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view 
 void DebugCmd::Inspect(string_view key) {
   EngineShardSet& ess = *shard_set;
   ShardId sid = Shard(key, ess.size());
+  VLOG(1) << "DebugCmd::Inspect " << key;
 
   auto cb = [&]() -> ObjInfo {
     auto& db_slice = EngineShard::tlocal()->db_slice();
@@ -383,7 +384,9 @@ void DebugCmd::Inspect(string_view key) {
 
     KeyLockArgs lock_args;
     lock_args.args = ArgSlice{&key, 1};
+    lock_args.key_step = 1;
     lock_args.db_index = cntx_->db_index();
+
     if (!db_slice.CheckLock(IntentLock::EXCLUSIVE, lock_args)) {
       oinfo.lock_status =
           db_slice.CheckLock(IntentLock::SHARED, lock_args) ? ObjInfo::S : ObjInfo::X;
