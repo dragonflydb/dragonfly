@@ -688,7 +688,12 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
         CHECK_GE(DecreaseRunCnt(), 1u);
       }
     };
-    shard_set->Add(unique_shard_id_, std::move(schedule_cb));  // serves as a barrier.
+
+    if (coordinator_index_ == unique_shard_id_) {
+      schedule_cb();
+    } else {
+      shard_set->Add(unique_shard_id_, std::move(schedule_cb));  // serves as a barrier.
+    }
   } else {
     // This transaction either spans multiple shards and/or is multi.
 
