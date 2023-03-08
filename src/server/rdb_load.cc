@@ -1717,6 +1717,8 @@ error_code RdbLoader::Load(io::Source* src) {
     /* Read type. */
     SET_OR_RETURN(FetchType(), type);
 
+    DVLOG(2) << "Opcode type: " << type;
+
     /* Handle special types. */
     if (type == RDB_OPCODE_EXPIRETIME) {
       LOG(ERROR) << "opcode RDB_OPCODE_EXPIRETIME not supported";
@@ -1753,6 +1755,9 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_FULLSYNC_END) {
+      VLOG(1) << "Read RDB_OPCODE_FULLSYNC_END";
+      RETURN_ON_ERR(EnsureRead(8));
+      mem_buf_->ConsumeInput(8);  // ignore 8 bytes
       if (full_sync_cut_cb)
         full_sync_cut_cb();
       continue;
@@ -1832,6 +1837,8 @@ error_code RdbLoader::Load(io::Source* src) {
     RETURN_ON_ERR(LoadKeyValPair(type, &settings));
     settings.Reset();
   }  // main load loop
+
+  DVLOG(1) << "RdbLoad loop finished";
 
   if (stop_early_) {
     return *ec_;
