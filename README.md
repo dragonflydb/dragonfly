@@ -134,7 +134,7 @@ For dragonfly-native replication, we are designing a distributed log format that
 After the replication feature we will continue with other Redis missing commands from
 APIs 3-6.
 
-Please see [API readiness doc](docs/api_status.md) for the current status of Dragonfly.
+Please see [The Command Reference](https://dragonflydb.io/docs/category/command-reference) for the current commands supported by Dragonfly.
 
 ## <a name="design-decisions"><a/> Design decisions
 
