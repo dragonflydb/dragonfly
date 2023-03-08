@@ -381,6 +381,16 @@ TEST_F(MultiTest, Eval) {
   ASSERT_THAT(resp, ArrLen(3));
   const auto& arr = resp.GetVec();
   EXPECT_THAT(arr, ElementsAre("a", "b", "c"));
+
+  Run({"zadd", "z1", "123", "a", "12345678912345", "b", "12.5", "c"});
+  const char* kGetScore = "return redis.call('ZSCORE', KEYS[1], ARGV[1]) .. '-works'";
+
+  resp = Run({"eval", kGetScore, "1", "z1", "a"});
+  EXPECT_EQ(resp, "123-works");
+  resp = Run({"eval", kGetScore, "1", "z1", "b"});
+  EXPECT_EQ(resp, "12345678912345-works");
+  resp = Run({"eval", kGetScore, "1", "z1", "c"});
+  EXPECT_EQ(resp, "12.5-works");
 }
 
 TEST_F(MultiTest, Watch) {
