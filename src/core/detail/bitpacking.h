@@ -25,7 +25,10 @@ void ascii_unpack_simd(const uint8_t* bin, size_t ascii_len, char* ascii);
 void ascii_pack(const char* ascii, size_t len, uint8_t* bin);
 void ascii_pack2(const char* ascii, size_t len, uint8_t* bin);
 
+// SIMD implementation 1 of ascii_pack.
 void ascii_pack_simd(const char* ascii, size_t len, uint8_t* bin);
+
+// SIMD implementation 2 of ascii_pack.
 void ascii_pack_simd2(const char* ascii, size_t len, uint8_t* bin);
 
 bool compare_packed(const uint8_t* packed, const char* ascii, size_t ascii_len);
