@@ -27,6 +27,8 @@ class RedisServer:
         except Exception as e:
             pass
 
+# Checks that master and redis are synced by writing a random key to master
+# and waiting for it to exist in replica. Foreach db in 0..dbcount-1.
 async def await_synced(master_port, replica_port, dbcount=1):
     rnd_str = "".join(random.choices(string.ascii_letters, k=10))
     key = "sync_key/" + rnd_str
@@ -97,17 +99,17 @@ async def test_replication_full_sync(df_local_factory, df_seeder_factory, redis_
     capture = await seeder.capture()
     assert await seeder.compare(capture, port=replica.port)
 
-
 stable_sync_replication_specs = [
-    # ALL THESE FAILS
-    #([1], dict(keys=100, dbcount=1, unsupported_types=[ValueType.JSON])),
-    #([1], dict(keys=10_000, dbcount=2, unsupported_types=[ValueType.JSON, ValueType.SET])),
-    #([2], dict(keys=10_000, dbcount=1, unsupported_types=[ValueType.JSON])),
-    #([2], dict(keys=10_000, dbcount=2, unsupported_types=[ValueType.JSON, ValueType.SET])),
-    #([8], dict(keys=10_000, dbcount=4, unsupported_types=[ValueType.JSON, ValueType.SET])),
+    ([1], dict(keys=100, dbcount=1, unsupported_types=[ValueType.JSON])),
+    ([1], dict(keys=10_000, dbcount=2, unsupported_types=[ValueType.JSON, ValueType.SET])),
+    ([2], dict(keys=10_000, dbcount=1, unsupported_types=[ValueType.JSON])),
+    ([2], dict(keys=10_000, dbcount=2, unsupported_types=[ValueType.JSON, ValueType.SET])),
+    ([8], dict(keys=10_000, dbcount=4, unsupported_types=[ValueType.JSON, ValueType.SET])),
 ]
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_replicas, seeder_config", stable_sync_replication_specs)
+@pytest.mark.skip(reason="Skipping until we fix replication from redis")
 async def test_replication_stable_sync(df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config):
     master = redis_server
     c_master = aioredis.Redis(port=master.port)
@@ -133,11 +135,11 @@ async def test_replication_stable_sync(df_local_factory, df_seeder_factory, redi
 # Threads for each dragonfly replica, Seeder Config.
 replication_specs = [
     ([1], dict(keys=1000, dbcount=1, unsupported_types=[ValueType.JSON])),
-    # ([6, 6, 6], dict(keys=4_000, dbcount=4, unsupported_types=[ValueType.JSON])),
-    # ([2, 2, 2, 2], dict(keys=4_000, dbcount=4, unsupported_types=[ValueType.JSON])),
-    # ([8, 8], dict(keys=4_000, dbcount=4, unsupported_types=[ValueType.JSON])),
-    # ([1] * 8, dict(keys=500, dbcount=2, unsupported_types=[ValueType.JSON])),
-    # ([1], dict(keys=100, dbcount=2, unsupported_types=[ValueType.JSON])),
+    ([6, 6, 6], dict(keys=4_000, dbcount=4, unsupported_types=[ValueType.JSON])),
+    ([2, 2, 2, 2], dict(keys=4_000, dbcount=4, unsupported_types=[ValueType.JSON])),
+    ([8, 8], dict(keys=4_000, dbcount=4, unsupported_types=[ValueType.JSON])),
+    ([1] * 8, dict(keys=500, dbcount=2, unsupported_types=[ValueType.JSON])),
+    ([1], dict(keys=100, dbcount=2, unsupported_types=[ValueType.JSON])),
 ]
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_replicas, seeder_config", replication_specs)
