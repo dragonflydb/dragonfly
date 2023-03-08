@@ -70,6 +70,9 @@ jobs:
     - name: Install helm
       uses: azure/setup-helm@v3
 
+    - name: Setup Go
+      uses: actions/setup-go@v3
+
     - name: Configure Git
       if: env.IS_PRERELEASE != 'true'
       run: |
@@ -85,9 +88,12 @@ jobs:
             -e 's/^(appVersion\:) .*/\1 "'${{ env.TAG_NAME }}'"/g' \
             contrib/charts/dragonfly/Chart.yaml
 
+        go test ./contrib/charts/dragonfly/... -update
+
         git commit \
           -m 'chore(helm-chart): update to ${{ env.TAG_NAME }}' \
-          contrib/charts/dragonfly/Chart.yaml
+          contrib/charts/dragonfly/Chart.yaml \
+          contrib/charts/dragonfly/ci
 
     - name: Push Helm chart as OCI to Github
       if: env.IS_PRERELEASE != 'true'

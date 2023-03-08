@@ -21,3 +21,7 @@
 .idea/
 *.tmproj
 .vscode/
+ci/
+*.go
+go.mod
+go.sum
