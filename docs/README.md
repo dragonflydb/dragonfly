@@ -12,7 +12,7 @@ The easiest way to get started with Dragonfly is with Docker.
 
 ## Deployment Method
 
-First, choose a deployment method. 
+First, choose a deployment method.
 
 If you are new to Dragonfly, we recommend the [DragonflyDB Docker Quick Start Guide](/docs/quick-start/)
 
@@ -28,6 +28,4 @@ Other options:
 
 ## [Differences Between DragonflyDB and Redis](/docs/differences.md)
 
-## [API Command Status](/docs/api_status.md)
-
-
+## [API Commands Reference](https://dragonflydb.io/docs/category/command-reference)
