@@ -816,11 +816,9 @@ OpResult<int64_t> FindFirstBitWithValue(const OpArgs& op_args, std::string_view 
 
   int64_t position;
   if (as_bit) {
-    position =
-        FindFirstBitWithValueAsBit(value_str, bit_value, normalized_start, normalized_end);
+    position = FindFirstBitWithValueAsBit(value_str, bit_value, normalized_start, normalized_end);
   } else {
-    position =
-        FindFirstBitWithValueAsByte(value_str, bit_value, normalized_start, normalized_end);
+    position = FindFirstBitWithValueAsByte(value_str, bit_value, normalized_start, normalized_end);
   }
 
   if (position == -1 && !bit_value && static_cast<size_t>(start) < value_str.size() &&
