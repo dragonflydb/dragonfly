@@ -758,13 +758,13 @@ std::size_t GetFirstBitWithValueInByte(uint8_t byte, bool value) {
   }
 }
 
-int64_t FindFirstBitWithValueAsBit(std::string_view result_value, bool bit_value, int64_t start,
+int64_t FindFirstBitWithValueAsBit(std::string_view value_str, bool bit_value, int64_t start,
                                    int64_t end) {
   for (int64_t i = start; i <= end; ++i) {
-    if (static_cast<size_t>(GetByteIndex(i)) >= result_value.size()) {
+    if (static_cast<size_t>(GetByteIndex(i)) >= value_str.size()) {
       break;
     }
-    const uint8_t current_byte = GetByteValue(result_value, i);
+    const uint8_t current_byte = GetByteValue(value_str, i);
     bool current_bit = CheckBitStatus(current_byte, GetNormalizedBitIndex(i));
     if (current_bit != bit_value) {
       continue;
@@ -776,13 +776,13 @@ int64_t FindFirstBitWithValueAsBit(std::string_view result_value, bool bit_value
   return -1;
 }
 
-int64_t FindFirstBitWithValueAsByte(std::string_view result_value, bool bit_value, int64_t start,
+int64_t FindFirstBitWithValueAsByte(std::string_view value_str, bool bit_value, int64_t start,
                                     int64_t end) {
   for (int64_t i = start; i <= end; ++i) {
-    if (static_cast<size_t>(i) >= result_value.size()) {
+    if (static_cast<size_t>(i) >= value_str.size()) {
       break;
     }
-    const uint8_t current_byte = result_value[i];
+    const uint8_t current_byte = value_str[i];
     const uint8_t kNotFoundByte = bit_value ? 0 : std::numeric_limits<uint8_t>::max();
     if (current_byte == kNotFoundByte) {
       continue;
@@ -796,14 +796,14 @@ int64_t FindFirstBitWithValueAsByte(std::string_view result_value, bool bit_valu
 
 OpResult<int64_t> FindFirstBitWithValue(const OpArgs& op_args, std::string_view key, bool bit_value,
                                         int64_t start, int64_t end, bool as_bit) {
-  OpResult<std::string> result = ReadValue(op_args.db_cntx, key, op_args.shard);
+  OpResult<std::string> value = ReadValue(op_args.db_cntx, key, op_args.shard);
 
-  std::string_view result_value;
-  if (result) {  // non-existent keys are treated as empty strings, per Redis
-    result_value = result.value();
+  std::string_view value_str;
+  if (value) {  // non-existent keys are treated as empty strings, per Redis
+    value_str = value.value();
   }
 
-  int64_t size = result_value.size();
+  int64_t size = value_str.size();
   if (as_bit) {
     size *= OFFSET_FACTOR;
   }
@@ -817,16 +817,16 @@ OpResult<int64_t> FindFirstBitWithValue(const OpArgs& op_args, std::string_view 
   int64_t position;
   if (as_bit) {
     position =
-        FindFirstBitWithValueAsBit(result_value, bit_value, normalized_start, normalized_end);
+        FindFirstBitWithValueAsBit(value_str, bit_value, normalized_start, normalized_end);
   } else {
     position =
-        FindFirstBitWithValueAsByte(result_value, bit_value, normalized_start, normalized_end);
+        FindFirstBitWithValueAsByte(value_str, bit_value, normalized_start, normalized_end);
   }
 
-  if (position == -1 && !bit_value && static_cast<size_t>(start) < result_value.size() &&
+  if (position == -1 && !bit_value && static_cast<size_t>(start) < value_str.size() &&
       end == std::numeric_limits<int64_t>::max()) {
-    // Not-found return value is compatible with Redis, but is subtle.
-    return result_value.size() * OFFSET_FACTOR;
+    // Returning bit-size of the value, compatible with Redis (but is a weird API).
+    return value_str.size() * OFFSET_FACTOR;
   } else {
     return position;
   }

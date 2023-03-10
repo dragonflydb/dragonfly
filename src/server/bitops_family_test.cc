@@ -510,8 +510,7 @@ TEST_F(BitOpsFamilyTest, BitPos) {
   EXPECT_EQ(35, CheckedInt({"bitpos", "a", "1", "-5", "-1", "BIT"}));
   EXPECT_EQ(34, CheckedInt({"bitpos", "a", "1", "-6", "-1", "BIT"}));
 
-  // Test weird return value spec, specifically when looking for clear bits in
-  // an all-set string.
+  // Make sure we behave like Redis does when looking for clear bits in an all-set string.
   ASSERT_EQ(Run({"set", "b", "\xff\xff\xff"_b}), "OK");
   EXPECT_EQ(24, CheckedInt({"bitpos", "b", "0"}));
   EXPECT_EQ(24, CheckedInt({"bitpos", "b", "0", "0"}));
