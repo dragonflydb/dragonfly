@@ -101,8 +101,7 @@ jobs:
 
       - name: Chart Rendering Tests
         run: |
-          cd contrib/charts/dragonfly
-          go test -v ./...
+          go test -v ./contrib/charts/dragonfly/...
 
       - name: Set up chart-testing
         uses: helm/chart-testing-action@v2.3.1

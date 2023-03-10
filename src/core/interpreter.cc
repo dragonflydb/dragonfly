@@ -84,13 +84,20 @@ void RedisTranslator::OnString(std::string_view str) {
   ArrayPost();
 }
 
-// Doubles are not supported by Redis, however we can support them.
-// Here is the use-case:
-// local foo = redis.call('zscore', 'myzset', 'one')
-// assert(type(foo) == "number")
 void RedisTranslator::OnDouble(double d) {
+  static constexpr double kConvertEps = std::numeric_limits<double>::epsilon();
+
+  double fractpart, intpart;
+  fractpart = modf(d, &intpart);
+
   ArrayPre();
-  lua_pushnumber(lua_, d);
+
+  // Convert to integer when possible to allow converting to string without trailing zeros.
+  if (abs(fractpart) < kConvertEps && intpart < std::numeric_limits<lua_Integer>::max() &&
+      intpart > std::numeric_limits<lua_Integer>::min())
+    lua_pushinteger(lua_, static_cast<lua_Integer>(d));
+  else
+    lua_pushnumber(lua_, d);
   ArrayPost();
 }
 

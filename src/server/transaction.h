@@ -397,9 +397,7 @@ class Transaction {
   void WaitForShardCallbacks() {
     run_ec_.await([this] { return 0 == run_count_.load(std::memory_order_relaxed); });
 
-    // store operations below can not be ordered above the fence
-    std::atomic_thread_fence(std::memory_order_release);
-    seqlock_.fetch_add(1, std::memory_order_relaxed);
+    seqlock_.fetch_add(1, std::memory_order_acq_rel);
   }
 
   // Log command in shard's journal, if this is a write command with auto-journaling enabled.

@@ -666,7 +666,14 @@ error_code RdbSerializer::SaveStreamConsumers(streamCG* cg) {
 }
 
 error_code RdbSerializer::SendFullSyncCut() {
-  return WriteOpcode(RDB_OPCODE_FULLSYNC_END);
+  RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_FULLSYNC_END));
+
+  // RDB_OPCODE_FULLSYNC_END followed by 8 bytes of 0.
+  // The reason for this is that some opcodes require to have at least 8 bytes of data
+  // in the read buffer when consuming the rdb data, and since RDB_OPCODE_FULLSYNC_END is one of
+  // the last opcodes sent to replica, we respect this requirement by sending a blob of 8 bytes.
+  uint8_t buf[8] = {0};
+  return WriteRaw(buf);
 }
 
 error_code RdbSerializer::WriteRaw(const io::Bytes& buf) {

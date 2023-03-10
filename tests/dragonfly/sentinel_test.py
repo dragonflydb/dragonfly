@@ -5,6 +5,9 @@ import aioredis
 import pytest
 import time
 import asyncio
+from datetime import datetime
+from sys import stderr
+import logging
 
 
 # Helper function to parse some sentinel cli commands output as key value dictionaries.
@@ -61,7 +64,7 @@ class Sentinel:
             ]
         self.config_file.write_text("\n".join(config))
 
-        print(self.config_file.read_text())
+        logging.info(self.config_file.read_text())
 
         self.proc = subprocess.Popen(["redis-server", f"{self.config_file.absolute()}", "--sentinel"])
 
@@ -127,7 +130,7 @@ async def test_failover(df_local_factory, sentinel):
 
     master_client = aioredis.Redis(port=master.port)
     replica_client = aioredis.Redis(port=replica.port)
-    print("master: " + str(master.port) + " replica: " + str(replica.port), flush=True)
+    logging.info("master: " + str(master.port) + " replica: " + str(replica.port))
 
     await replica_client.execute_command("REPLICAOF localhost " + str(master.port))
 
@@ -161,15 +164,15 @@ async def test_failover(df_local_factory, sentinel):
         syncid, r_offset = await master_client.execute_command("DEBUG REPLICA OFFSET")
         replicaoffset_cmd = "DFLY REPLICAOFFSET " + syncid.decode()
         m_offset = await replica_client.execute_command(replicaoffset_cmd)
-        print(syncid.decode(),  r_offset, m_offset)
-        print("replica client role:")
-        print(await replica_client.execute_command("role"))
-        print("master client role:")
-        print(await master_client.execute_command("role"))
-        print("replica client info:")
-        print(await replica_client.info())
-        print("master client info:")
-        print(await master_client.info())
+        logging.info(f"{syncid.decode()} {r_offset} {m_offset}")
+        logging.info("replica client role:")
+        logging.info(await replica_client.execute_command("role"))
+        logging.info("master client role:")
+        logging.info(await master_client.execute_command("role"))
+        logging.info("replica client info:")
+        logging.info(await replica_client.info())
+        logging.info("master client info:")
+        logging.info(await master_client.info())
         raise
 
 
