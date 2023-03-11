@@ -135,20 +135,14 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
   }
 
   if (to_reply) {
-    const char* action[2] = {"unsubscribe", "subscribe"};
-    facade::RedisReplyBuilder* rbuilder = this->operator->();
-    DCHECK(!rbuilder->is_sending);
-    rbuilder->is_sending = true;
+    using PubMessage = facade::Connection::PubMessage;
     for (size_t i = 0; i < result.size(); ++i) {
-      rbuilder->StartArray(3);
-      rbuilder->SendBulkString(action[to_add]);
-      rbuilder->SendBulkString(ArgS(args, i));  // channel
-
-      // number of subscribed channels for this connection *right after*
-      // we subscribe.
-      rbuilder->SendLong(result[i]);
+      PubMessage msg;
+      msg.type = to_add ? PubMessage::kSubscribe : PubMessage::kUnsubscribe;
+      msg.channel = make_shared<string>(ArgS(args, i));
+      msg.channel_cnt = result[i];
+      owner()->SendMsgVecAsync(move(msg));
     }
-    rbuilder->is_sending = false;
   }
 }
 

@@ -1391,6 +1391,7 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
     // by DispatchOperations.
     shared_ptr<string> msg_ptr = make_shared<string>(ArgS(args, 2));
     shared_ptr<string> channel_ptr = make_shared<string>(channel);
+    using PubMessage = facade::Connection::PubMessage;
 
     // We run publish_cb in each subscriber's thread.
     auto publish_cb = [&](unsigned idx, util::ProactorBase*) mutable {
@@ -1405,10 +1406,13 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
 
         facade::Connection* conn = subscriber_arr[i].conn_cntx->owner();
         DCHECK(conn);
-        facade::Connection::PubMessage pmsg;
+
+        PubMessage pmsg;
         pmsg.channel = channel_ptr;
         pmsg.message = msg_ptr;
         pmsg.pattern = move(subscriber.pattern);
+        pmsg.type = PubMessage::kPublish;
+
         conn->SendMsgVecAsync(move(pmsg));
       }
     };
