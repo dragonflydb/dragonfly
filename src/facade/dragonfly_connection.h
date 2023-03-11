@@ -58,6 +58,8 @@ class Connection : public util::Connection {
     std::shared_ptr<std::string> channel;
     std::shared_ptr<std::string> message;  // ensure that this message would out live passing
                                            // between different threads/fibers
+    enum Type { kSubscribe, kUnsubscribe, kPublish } type;
+    uint32_t channel_cnt;  // relevant only for kSubscribe and kUnsubscribe
 
     PubMessage() = default;
     PubMessage(const PubMessage&) = delete;
