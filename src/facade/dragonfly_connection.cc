@@ -275,7 +275,10 @@ void Connection::DispatchOperations::operator()(const PubMsgRecord& msg) {
   ++stats->async_writes_cnt;
   const PubMessage& pub_msg = msg.pub_msg;
   string_view arr[4];
+  DCHECK(!rbuilder->is_sending);
+  rbuilder->is_sending = true;
   if (pub_msg.pattern.empty()) {
+    DVLOG(1) << "Sending message, from channel: " << pub_msg.channel << " " << *pub_msg.message;
     arr[0] = "message";
     arr[1] = pub_msg.channel;
     arr[2] = *pub_msg.message;
@@ -287,6 +290,7 @@ void Connection::DispatchOperations::operator()(const PubMsgRecord& msg) {
     arr[3] = *pub_msg.message;
     rbuilder->SendStringArr(absl::Span<string_view>{arr, 4});
   }
+  rbuilder->is_sending = false;
 }
 
 void Connection::DispatchOperations::operator()(Request::PipelineMsg& msg) {

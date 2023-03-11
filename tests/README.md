@@ -38,6 +38,10 @@ pip install -r dragonfly/requirements.txt
 to run pytest, run:
 `pytest -xv dragonfly`
 
+to run selectively, use:
+`pytest -xv dragonfly -k <substring>`
+For more pytest flags [check here](https://fig.io/manual/pytest).
+
 ## Writing tests
 The [Getting Started](https://docs.pytest.org/en/7.1.x/getting-started.html) guide is a great resource to become familiar with writing pytest test cases.
 
