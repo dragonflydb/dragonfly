@@ -622,7 +622,7 @@ TEST_F(MultiTest, ExecGlobalFallback) {
   EXPECT_EQ(1, GetMetrics().ooo_tx_transaction_cnt);
 }
 
-TEST_F(MultiTest, ScriptConfigTest) {
+TEST_F(MultiTest, ScriptConfig) {
   if (auto config = absl::GetFlag(FLAGS_default_lua_config); config != "") {
     LOG(WARNING) << "Skipped Eval test because default_lua_config is set";
     return;
@@ -655,6 +655,24 @@ TEST_F(MultiTest, ScriptConfigTest) {
 
     EXPECT_THAT(Run({"eval", kUndeclared2, "0"}), "works");
   }
+}
+
+TEST_F(MultiTest, ScriptPragmas) {
+  const char* s1 = R"(
+  -- pragma: allow-undeclared-keys
+  return redis.call('GET', 'random-key');
+)";
+
+  // Check eval finds script pragmas.
+  Run({"set", "random-key", "works"});
+  EXPECT_EQ(Run({"eval", s1, "0"}), "works");
+
+  const char* s2 = R"(
+  -- pragma: this-is-an-error
+  redis.call('SET', 'random-key', 'failed')
+  )";
+
+  EXPECT_THAT(Run({"eval", s2, "0"}), ErrArg("Invalid argument: Invalid pragma: this-is-an-error"));
 }
 
 // Run multi-exec transactions that move values from a source list
