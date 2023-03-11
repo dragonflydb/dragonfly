@@ -54,14 +54,19 @@ class Connection : public util::Connection {
 
   struct PubMessage {
     // if empty - means its a regular message, otherwise it's pmessage.
-    std::string_view pattern;
-    std::string_view channel;
-    std::shared_ptr<const std::string> message;  // ensure that this message would out live passing
-                                                 // between different threads/fibers
+    std::string pattern;
+    std::shared_ptr<std::string> channel;
+    std::shared_ptr<std::string> message;  // ensure that this message would out live passing
+                                           // between different threads/fibers
+
+    PubMessage() = default;
+    PubMessage(const PubMessage&) = delete;
+    PubMessage& operator=(const PubMessage&) = delete;
+    PubMessage(PubMessage&&) = default;
   };
 
   // this function is overriden at test_utils TestConnection
-  virtual void SendMsgVecAsync(const PubMessage& pub_msg);
+  virtual void SendMsgVecAsync(PubMessage pub_msg);
 
   // Note that this is accepted by value because the message is processed asynchronously.
   void SendMonitorMsg(std::string monitor_msg);

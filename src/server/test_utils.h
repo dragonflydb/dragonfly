@@ -19,14 +19,14 @@ using namespace facade;
 
 class TestConnection : public facade::Connection {
  public:
-  TestConnection(Protocol protocol);
+  TestConnection(Protocol protocol, io::StringSink* sink);
 
-  void SendMsgVecAsync(const PubMessage& pmsg) final;
+  void SendMsgVecAsync(PubMessage pmsg) final;
 
   std::vector<PubMessage> messages;
 
  private:
-  std::vector<std::unique_ptr<std::string>> backing_str_;
+  io::StringSink* sink_;
 };
 
 class BaseFamilyTest : public ::testing::Test {
@@ -87,9 +87,8 @@ class BaseFamilyTest : public ::testing::Test {
   std::string GetId() const;
   size_t SubscriberMessagesLen(std::string_view conn_id) const;
 
-  // Returns message parts as returned by RESP:
-  // pmessage, pattern, channel, message
-  facade::Connection::PubMessage GetPublishedMessage(std::string_view conn_id, size_t index) const;
+  const facade::Connection::PubMessage& GetPublishedMessage(std::string_view conn_id,
+                                                            size_t index) const;
 
   std::unique_ptr<util::ProactorPool> pp_;
   std::unique_ptr<Service> service_;

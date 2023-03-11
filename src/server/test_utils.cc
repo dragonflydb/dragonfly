@@ -58,23 +58,21 @@ static vector<string> SplitLines(const std::string& src) {
   return res;
 }
 
-TestConnection::TestConnection(Protocol protocol)
-    : facade::Connection(protocol, nullptr, nullptr, nullptr) {
+TestConnection::TestConnection(Protocol protocol, io::StringSink* sink)
+    : facade::Connection(protocol, nullptr, nullptr, nullptr), sink_(sink) {
 }
 
-void TestConnection::SendMsgVecAsync(const PubMessage& pmsg) {
-  backing_str_.emplace_back(new string(pmsg.channel));
-  PubMessage dest;
-  dest.channel = *backing_str_.back();
-
-  backing_str_.emplace_back(new string(*pmsg.message));
-  dest.message = pmsg.message;
-
-  if (!pmsg.pattern.empty()) {
-    backing_str_.emplace_back(new string(pmsg.pattern));
-    dest.pattern = *backing_str_.back();
+void TestConnection::SendMsgVecAsync(PubMessage pmsg) {
+  if (pmsg.type == PubMessage::kPublish) {
+    messages.push_back(move(pmsg));
+  } else {
+    RedisReplyBuilder builder(sink_);
+    const char* action[2] = {"unsubscribe", "subscribe"};
+    builder.StartArray(3);
+    builder.SendBulkString(action[pmsg.type == PubMessage::kSubscribe]);
+    builder.SendBulkString(*pmsg.channel);
+    builder.SendLong(pmsg.channel_cnt);
   }
-  messages.push_back(dest);
 }
 
 class BaseFamilyTest::TestConnWrapper {
@@ -87,7 +85,7 @@ class BaseFamilyTest::TestConnWrapper {
   RespVec ParseResponse(bool fully_consumed);
 
   // returns: type(pmessage), pattern, channel, message.
-  facade::Connection::PubMessage GetPubMessage(size_t index) const;
+  const facade::Connection::PubMessage& GetPubMessage(size_t index) const;
 
   ConnectionContext* cmd_cntx() {
     return &cmd_cntx_;
@@ -117,7 +115,7 @@ class BaseFamilyTest::TestConnWrapper {
 };
 
 BaseFamilyTest::TestConnWrapper::TestConnWrapper(Protocol proto)
-    : dummy_conn_(new TestConnection(proto)), cmd_cntx_(&sink_, dummy_conn_.get()) {
+    : dummy_conn_(new TestConnection(proto, &sink_)), cmd_cntx_(&sink_, dummy_conn_.get()) {
 }
 
 BaseFamilyTest::TestConnWrapper::~TestConnWrapper() {
@@ -359,7 +357,8 @@ RespVec BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
   return res;
 }
 
-facade::Connection::PubMessage BaseFamilyTest::TestConnWrapper::GetPubMessage(size_t index) const {
+const facade::Connection::PubMessage& BaseFamilyTest::TestConnWrapper::GetPubMessage(
+    size_t index) const {
   CHECK_LT(index, dummy_conn_->messages.size());
   return dummy_conn_->messages[index];
 }
@@ -389,13 +388,10 @@ size_t BaseFamilyTest::SubscriberMessagesLen(string_view conn_id) const {
   return it->second->conn()->messages.size();
 }
 
-facade::Connection::PubMessage BaseFamilyTest::GetPublishedMessage(string_view conn_id,
-                                                                   size_t index) const {
-  facade::Connection::PubMessage res;
-
+const facade::Connection::PubMessage& BaseFamilyTest::GetPublishedMessage(string_view conn_id,
+                                                                          size_t index) const {
   auto it = connections_.find(conn_id);
-  if (it == connections_.end())
-    return res;
+  CHECK(it != connections_.end());
 
   return it->second->GetPubMessage(index);
 }

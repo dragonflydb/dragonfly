@@ -398,9 +398,9 @@ TEST_F(DflyEngineTest, PSubscribe) {
 
   ASSERT_EQ(1, SubscriberMessagesLen("IO1"));
 
-  facade::Connection::PubMessage msg = GetPublishedMessage("IO1", 0);
+  const facade::Connection::PubMessage& msg = GetPublishedMessage("IO1", 0);
   EXPECT_EQ("foo", *msg.message);
-  EXPECT_EQ("ab", msg.channel);
+  EXPECT_EQ("ab", *msg.channel);
   EXPECT_EQ("a*", msg.pattern);
 }
 
