@@ -82,6 +82,8 @@ class SinkReplyBuilder {
   virtual void SendStored() = 0;
   virtual void SendSetSkipped() = 0;
 
+  bool is_sending = false;
+
  protected:
   void Send(const iovec* v, uint32_t len);
 

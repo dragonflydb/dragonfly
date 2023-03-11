@@ -4,6 +4,8 @@ import asyncio
 import aioredis
 import async_timeout
 
+from . import DflyInstance
+
 
 async def run_monitor_eval(monitor, expected):
     async with monitor as mon:
@@ -276,6 +278,42 @@ async def test_multi_pubsub(async_client):
     state, message = await run_multi_pubsub(async_client, messages, "my-channel")
 
     assert state, message
+
+
+@pytest.mark.asyncio
+async def test_subsribers_with_active_publisher(df_server: DflyInstance, max_connections=100):
+    # TODO: I am not how to customize the max connections for the pool.
+    async_pool = aioredis.ConnectionPool(host="localhost", port=df_server.port,
+                                         db=0, decode_responses=True, max_connections=max_connections)
+
+    async def publish_worker():
+        client = aioredis.Redis(connection_pool=async_pool)
+        for i in range(0, 2000):
+            await client.publish("channel", f"message-{i}")
+        await client.close()
+
+    async def channel_reader(channel: aioredis.client.PubSub):
+        for i in range(0, 150):
+            try:
+                async with async_timeout.timeout(1):
+                    message = await channel.get_message(ignore_subscribe_messages=True)
+            except asyncio.TimeoutError:
+                break
+
+    async def subscribe_worker():
+        client = aioredis.Redis(connection_pool=async_pool)
+        pubsub = client.pubsub()
+        async with pubsub as p:
+            await pubsub.subscribe("channel")
+            await channel_reader(pubsub)
+            await pubsub.unsubscribe("channel")
+
+    # Create a publisher that sends constantly messages to the channel
+    # Then create subscribers that will subscribe to already active channel
+    pub_task = asyncio.create_task(publish_worker())
+    await asyncio.gather(*(subscribe_worker() for _ in range(max_connections - 10)))
+    await pub_task
+    await async_pool.disconnect()
 
 
 @pytest.mark.asyncio
