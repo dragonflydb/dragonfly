@@ -193,10 +193,19 @@ struct VersionMonitor {
 };
 
 void VersionMonitor::Run(ProactorPool* proactor_pool) {
-  // Don't run in dev environment - i.e. where we don't build with
-  // real version number
-  if (!GetFlag(FLAGS_version_check) || kGitTag[0] != 'v' || strchr(kGitTag, '-') != NULL)
+  // Avoid running dev environments.
+  bool is_dev_env = false;
+  const char* env_var = getenv("DFLY_DEV_ENV");
+  if (env_var) {
+    LOG(WARNING) << "Running in dev environment (DFLY_DEV_ENV is set) - version monitoring is "
+                    "disabled";
+    is_dev_env = true;
+  }
+  if (!GetFlag(FLAGS_version_check) || is_dev_env ||
+      // not a production release tag.
+      kGitTag[0] != 'v' || strchr(kGitTag, '-') != NULL) {
     return;
+  }
 
   SSL_CTX* ssl_ctx = TlsClient::CreateSslContext();
   if (!ssl_ctx) {
