@@ -522,9 +522,9 @@ TEST_F(BitOpsFamilyTest, BitPos) {
   EXPECT_EQ(-1, CheckedInt({"bitpos", "b", "0", "0", "3"}));
   EXPECT_EQ(-1, CheckedInt({"bitpos", "b", "0", "0", "3", "BYTE"}));
 
-  ASSERT_EQ(Run({"set", "c", ""_b}), "OK");
-  EXPECT_EQ(-1, CheckedInt({"bitpos", "c", "0"}));
-  EXPECT_EQ(-1, CheckedInt({"bitpos", "c", "0", "1"}));
+  ASSERT_EQ(Run({"set", "empty", ""_b}), "OK");
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "empty", "0"}));
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "empty", "0", "1"}));
 
   // Non-existent key should be treated like an empty string.
   EXPECT_EQ(-1, CheckedInt({"bitpos", "d", "0"}));
