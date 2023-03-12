@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2023, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -9,6 +9,7 @@
 #include "base/logging.h"
 #include "server/command_registry.h"
 #include "server/engine_shard_set.h"
+#include "server/server_state.h"
 #include "server/transaction.h"
 #include "util/uring/uring_pool.h"
 
@@ -38,6 +39,8 @@ constexpr size_t kNumThreads = 3;
 void BlockingControllerTest::SetUp() {
   pp_.reset(new uring::UringPool(16, kNumThreads));
   pp_->Run();
+  pp_->Await([](unsigned index, ProactorBase* p) { ServerState::Init(index); });
+
   shard_set = new EngineShardSet(pp_.get());
   shard_set->Init(kNumThreads, false);
 

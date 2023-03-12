@@ -495,8 +495,7 @@ void Service::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_i
                    const InitOpts& opts) {
   InitRedisTables();
 
-  pp_.AwaitFiberOnAll(
-      [&](uint32_t index, ProactorBase* pb) { ServerState::tlocal()->Init(index); });
+  pp_.Await([](uint32_t index, ProactorBase* pb) { ServerState::Init(index); });
 
   uint32_t shard_num = pp_.size() > 1 ? pp_.size() - 1 : pp_.size();
   shard_set->Init(shard_num, !opts.disable_time_update);
@@ -513,7 +512,7 @@ void Service::Shutdown() {
   // We mark that we are shutting down. After this incoming requests will be
   // rejected
   pp_.AwaitFiberOnAll([](ProactorBase* pb) {
-    ServerState::tlocal()->Shutdown();
+    ServerState::tlocal()->EnterLameDuck();
     facade::Connection::ShutdownThreadLocal();
   });
 
@@ -526,6 +525,7 @@ void Service::Shutdown() {
   request_latency_usec.Shutdown();
 
   shard_set->Shutdown();
+  pp_.Await([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });
 
   // wait for all the pending callbacks to stop.
   fibers_ext::SleepFor(10ms);

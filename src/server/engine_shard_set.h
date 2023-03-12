@@ -225,7 +225,7 @@ class EngineShard {
   Counter counter_[COUNTER_TOTAL];
   std::vector<Counter> ttl_survivor_sum_;  // we need it per db.
 
-  static thread_local EngineShard* shard_;
+  static __thread EngineShard* shard_;
 };
 
 class EngineShardSet {
