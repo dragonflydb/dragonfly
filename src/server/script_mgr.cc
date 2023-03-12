@@ -11,6 +11,7 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
 
+#include <regex>
 #include <string>
 
 #include "base/flags.h"
@@ -38,11 +39,8 @@ ScriptMgr::ScriptMgr() {
 
   static_assert(ScriptParams{}.atomic && !ScriptParams{}.undeclared_keys);
 
-  auto parts = absl::StrSplit(config, absl::ByAnyChar(",; "), absl::SkipEmpty());
-  for (auto pragma : parts) {
-    CHECK(ScriptParams::ApplyPragma(pragma, &default_params_))
-        << "Bad format of default_lua_config flag";
-  }
+  auto err = ScriptParams::ApplyPragmas(config, &default_params_);
+  CHECK(!err) << err.Format();
 }
 
 ScriptMgr::ScriptKey::ScriptKey(string_view sha) : array{} {
@@ -134,7 +132,9 @@ void ScriptMgr::LoadCmd(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(error_or_id);
   }
 
-  Insert(error_or_id, body);
+  if (auto err = Insert(error_or_id, body); err) {
+    return (*cntx)->SendError(err.Format());
+  }
 
   return (*cntx)->SendBulkString(error_or_id);
 }
@@ -145,8 +145,8 @@ void ScriptMgr::ConfigCmd(CmdArgList args, ConnectionContext* cntx) {
   auto& data = db_[key];
 
   for (auto pragma : args.subspan(2)) {
-    if (!ScriptParams::ApplyPragma(facade::ToSV(pragma), &data))
-      return (*cntx)->SendError("Invalid config format");
+    if (auto err = ScriptParams::ApplyPragmas(facade::ToSV(pragma), &data); err)
+      return (*cntx)->SendError("Invalid config format: " + err.Format());
   }
 
   UpdateScriptCaches(key, data);
@@ -185,15 +185,30 @@ void ScriptMgr::LatencyCmd(ConnectionContext* cntx) const {
   }
 }
 
-bool ScriptMgr::Insert(std::string_view id, std::string_view body) {
-  bool updated = false;
+// Search for pragmas in script body
+io::Result<optional<ScriptMgr::ScriptParams>, GenericError> DeduceParams(string_view body) {
+  static const regex kRegex{"^\\s*?--\\s*?pragma\\s*?:(.*)"};
+  cmatch matches;
+
+  if (!regex_search(body.data(), matches, kRegex))
+    return nullopt;
+
+  ScriptMgr::ScriptParams params;
+  if (auto err = ScriptMgr::ScriptParams::ApplyPragmas(matches.str(1), &params); err)
+    return nonstd::make_unexpected(err);
+
+  return params;
+}
+
+GenericError ScriptMgr::Insert(string_view id, string_view body) {
+  auto params = DeduceParams(body);
+  if (!params)
+    return params.get_unexpected().value();
 
   lock_guard lk{mu_};
-  auto [it, _] = db_.emplace(id, InternalScriptData{default_params_, nullptr});
+  auto [it, _] = db_.emplace(id, InternalScriptData{params->value_or(default_params_), nullptr});
 
   if (auto& body_ptr = it->second.body; !body_ptr) {
-    updated = true;
-
     body_ptr.reset(new char[body.size() + 1]);
     memcpy(body_ptr.get(), body.data(), body.size());
     body_ptr[body.size()] = '\0';
@@ -201,7 +216,7 @@ bool ScriptMgr::Insert(std::string_view id, std::string_view body) {
 
   UpdateScriptCaches(id, it->second);
 
-  return updated;
+  return {};
 }
 
 optional<ScriptMgr::ScriptData> ScriptMgr::Find(std::string_view sha) const {
@@ -233,18 +248,24 @@ void ScriptMgr::UpdateScriptCaches(ScriptKey sha, ScriptParams params) const {
   });
 }
 
-bool ScriptMgr::ScriptParams::ApplyPragma(string_view pragma, ScriptParams* params) {
-  if (pragma == "disable-atomicity") {
-    params->atomic = false;
-    return true;
+GenericError ScriptMgr::ScriptParams::ApplyPragmas(string_view config, ScriptParams* params) {
+  auto parts = absl::StrSplit(config, absl::ByAnyChar(",; "), absl::SkipEmpty());
+  for (auto pragma : parts) {
+    if (pragma == "disable-atomicity") {
+      params->atomic = false;
+      continue;
+    }
+
+    if (pragma == "allow-undeclared-keys") {
+      params->undeclared_keys = true;
+      continue;
+    }
+
+    return GenericError{make_error_code(errc::invalid_argument),
+                        "Invalid pragma: "s + string{pragma}};
   }
 
-  if (pragma == "allow-undeclared-keys") {
-    params->undeclared_keys = true;
-    return true;
-  }
-
-  return false;
+  return {};
 }
 
 }  // namespace dfly

@@ -998,7 +998,8 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (add_result == Interpreter::ADD_OK) {
-    server_family_.script_mgr()->Insert(result, body);
+    if (auto err = server_family_.script_mgr()->Insert(result, body); err)
+      return (*cntx)->SendError(err.Format(), facade::kScriptErrType);
   }
 
   EvalArgs eval_args;

@@ -23,11 +23,11 @@ class ScriptMgr {
     bool atomic = true;            // Whether script must run atomically.
     bool undeclared_keys = false;  // Whether script accesses undeclared keys.
 
-    // Return true if pragma was valid, false otherwise.
+    // Return GenericError if some pragma was invalid.
     // Valid pragmas are:
     // - allow-undeclared-keys -> undeclared_keys=true
     // - disable-atomicity     -> atomic=false
-    static bool ApplyPragma(std::string_view pragma, ScriptParams* params);
+    static GenericError ApplyPragmas(std::string_view pragma, ScriptParams* params);
   };
 
   struct ScriptData : public ScriptParams {
@@ -44,8 +44,8 @@ class ScriptMgr {
 
   void Run(CmdArgList args, ConnectionContext* cntx);
 
-  // Insert script. Returns true if inserted new script.
-  bool Insert(std::string_view sha, std::string_view body);
+  // Insert script. Get possible error from parsing script pragmas.
+  GenericError Insert(std::string_view sha, std::string_view body);
 
   // Get script body by sha, returns nullptr if not found.
   std::optional<ScriptData> Find(std::string_view sha) const;
