@@ -183,7 +183,7 @@ class CommandGenerator:
             return f"PEXPIRE k{key} {random.randint(0, 50)}", -1
         else:
             keys_gen = (self.randomize_key(pop=True)
-                    for _ in range(random.randint(1, self.max_multikey)))
+                        for _ in range(random.randint(1, self.max_multikey)))
             keys = [f"k{k}" for k, _ in keys_gen if k is not None]
 
             if len(keys) == 0:
@@ -387,6 +387,7 @@ class DflySeeder:
 
     async def capture(self, port=None, target_db=0, keys=None):
         """Create DataCapture for selected db"""
+        eprint(f"Capture data on port {port}, db {target_db}")
         if port is None:
             port = self.port
 
@@ -398,12 +399,15 @@ class DflySeeder:
         await client.connection_pool.disconnect()
         return capture
 
-    async def compare(self, initial_capture, port=6379):
+    async def compare(self, initial_capture, port=6379, target_db=None):
         """Compare data capture with all dbs of instance and return True if all dbs are correct"""
-        print(f"comparing capture to {port}")
+        print(f"comparing capture to {port} db {target_db}")
         keys = sorted(list(self.gen.keys_and_types()))
+        db_list = list(range(self.dbcount))
+        if target_db is not None:
+            db_list = [target_db]
         captures = await asyncio.gather(*(
-            self.capture(port=port, target_db=db, keys=keys) for db in range(self.dbcount)
+            self.capture(port=port, target_db=db, keys=keys) for db in db_list
         ))
         for db, capture in zip(range(self.dbcount), captures):
             if not initial_capture.compare(capture):
@@ -452,7 +456,8 @@ class DflySeeder:
 
             if file is not None:
                 pattern = "MULTI\n{}\nEXEC\n" if is_multi_transaction else "{}\n"
-                file.write(pattern.format('\n'.join(stringify_cmd(cmd) for cmd in blob)))
+                file.write(pattern.format('\n'.join(stringify_cmd(cmd)
+                           for cmd in blob)))
 
             print('.', end='', flush=True)
             await asyncio.sleep(0.0)
