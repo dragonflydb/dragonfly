@@ -76,7 +76,7 @@ ShardMemUsage ReadShardMemUsage(float wasted_ratio) {
 
 constexpr size_t kQueueLen = 64;
 
-thread_local EngineShard* EngineShard::shard_ = nullptr;
+__thread EngineShard* EngineShard::shard_ = nullptr;
 EngineShardSet* shard_set = nullptr;
 uint64_t TEST_current_time_ms = 0;
 

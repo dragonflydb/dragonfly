@@ -18,7 +18,7 @@ ABSL_FLAG(uint32_t, interpreter_per_thread, 10, "Lua interpreters per thread");
 
 namespace dfly {
 
-thread_local ServerState ServerState::state_;
+__thread ServerState* ServerState::state_ = nullptr;
 
 void MonitorsRepo::Add(facade::Connection* connection) {
   VLOG(1) << "register connection "
@@ -60,12 +60,14 @@ ServerState::~ServerState() {
 }
 
 void ServerState::Init(uint32_t thread_index) {
-  gstate_ = GlobalState::ACTIVE;
-  thread_index_ = thread_index;
+  state_ = new ServerState();
+  state_->gstate_ = GlobalState::ACTIVE;
+  state_->thread_index_ = thread_index;
 }
 
-void ServerState::Shutdown() {
-  gstate_ = GlobalState::SHUTTING_DOWN;
+void ServerState::Destroy() {
+  delete state_;
+  state_ = nullptr;
 }
 
 Interpreter* ServerState::BorrowInterpreter() {

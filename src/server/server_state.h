@@ -93,18 +93,22 @@ class ServerState {  // public struct - to allow initialization.
   };
 
   static ServerState* tlocal() {
-    return &state_;
+    return state_;
   }
 
   static facade::ConnectionStats* tl_connection_stats() {
-    return &state_.connection_stats;
+    return &state_->connection_stats;
   }
 
   ServerState();
   ~ServerState();
 
-  void Init(uint32_t thread_index);
-  void Shutdown();
+  static void Init(uint32_t thread_index);
+  static void Destroy();
+
+  void EnterLameDuck() {
+    state_->gstate_ = GlobalState::SHUTTING_DOWN;
+  }
 
   bool is_master = true;
   std::string remote_client_id_;  // for cluster support
@@ -206,7 +210,7 @@ class ServerState {  // public struct - to allow initialization.
   absl::flat_hash_map<std::string, base::Histogram> call_latency_histos_;
   uint32_t thread_index_ = 0;
 
-  static thread_local ServerState state_;
+  static __thread ServerState* state_;
 };
 
 }  // namespace dfly
