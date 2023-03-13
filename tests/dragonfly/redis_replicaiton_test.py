@@ -12,7 +12,7 @@ class RedisServer:
         self.proc = None
 
     def start(self):
-        self.proc = subprocess.Popen(["redis-server",
+        self.proc = subprocess.Popen(["redis-server-6.2.11",
                                       f"--port {self.port}",
                                       "--save ''",
                                       "--appendonly no",
@@ -59,11 +59,10 @@ async def await_synced_all(c_master, c_replicas):
 
 
 async def check_data(seeder, replicas, c_replicas, db_count):
-    for db in range(db_count):
-        capture = await seeder.capture(target_db=db)
-        for (replica, c_replica) in zip(replicas, c_replicas):
-            await wait_available_async(c_replica)
-            assert await seeder.compare(capture, port=replica.port, target_db=db)
+    capture = await seeder.capture()
+    for (replica, c_replica) in zip(replicas, c_replicas):
+        await wait_available_async(c_replica)
+        assert await seeder.compare(capture, port=replica.port)
 
 
 @pytest.fixture(scope="function")
@@ -102,9 +101,8 @@ async def test_replication_full_sync(df_local_factory, df_seeder_factory, redis_
     await wait_available_async(c_replica)
     await await_synced(master.port, replica.port, seeder_config["dbcount"])
 
-    for db in range(seeder_config["dbcount"]):
-        capture = await seeder.capture(target_db=db)
-        assert await seeder.compare(capture, port=replica.port, target_db=db)
+    capture = await seeder.capture()
+    assert await seeder.compare(capture, port=replica.port)
 
 stable_sync_replication_specs = [
     ([1], dict(keys=100, dbcount=1, unsupported_types=[ValueType.JSON])),
@@ -137,9 +135,8 @@ async def test_replication_stable_sync(df_local_factory, df_seeder_factory, redi
 
     await await_synced(master.port, replica.port, seeder_config["dbcount"])
 
-    for db in range(seeder_config["dbcount"]):
-        capture = await seeder.capture(target_db=db)
-        assert await seeder.compare(capture, port=replica.port, target_db=db)
+    capture = await seeder.capture()
+    assert await seeder.compare(capture, port=replica.port)
 
 
 # Threads for each dragonfly replica, Seeder Config.
