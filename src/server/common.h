@@ -22,7 +22,7 @@ namespace dfly {
 enum class ListDir : uint8_t { LEFT, RIGHT };
 
 // Dependent on ExpirePeriod representation of the value.
-constexpr int64_t kMaxExpireDeadlineSec = (1u << 27) - 1;
+constexpr int64_t kMaxExpireDeadlineSec = (1u << 28) - 1;
 
 using DbIndex = uint16_t;
 using ShardId = uint16_t;

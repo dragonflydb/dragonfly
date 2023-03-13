@@ -30,8 +30,12 @@ class GenericFamilyTest : public BaseFamilyTest {};
 
 TEST_F(GenericFamilyTest, Expire) {
   Run({"set", "key", "val"});
-  auto resp = Run({"expire", "key", "1"});
 
+  // sideqik expiry limit
+  auto resp = Run({"expire", "key", absl::StrCat(5 * 365 * 24 * 3600)});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"expire", "key", "1"});
   EXPECT_THAT(resp, IntArg(1));
   AdvanceTime(1000);
   resp = Run({"get", "key"});
