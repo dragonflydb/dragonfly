@@ -495,7 +495,6 @@ class DflySeeder:
                 await pipe.execute()
             except Exception as e:
                 raise SystemExit(e)
-
             queue.task_done()
         await client.connection_pool.disconnect()
 
