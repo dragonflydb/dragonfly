@@ -119,6 +119,6 @@ jobs:
         args: 'DragonflyDB version [${{ env.TAG_NAME }}](https://github.com/dragonflydb/dragonfly/releases/tag/${{ env.TAG_NAME }}) has been released 🎉'
 
     - name: Re-build Docs
-        if: env.IS_PRERELEASE != 'true'
-        run: |
-          curl -s -X POST '${{ secrets.VERCEL_DOCS_WEBHOOK }}'
+      if: env.IS_PRERELEASE != 'true'
+      run: |
+        curl -s -X POST '${{ secrets.VERCEL_DOCS_WEBHOOK }}'
