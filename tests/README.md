@@ -18,6 +18,11 @@ You can override the location of the binary using `DRAGONFLY_PATH` environment v
 - use `--df arg=val` to pass custom arguments to all dragonfly instances. Can be used multiple times.
 - use `--log-seeder file` to store all single-db commands from the lastest tests seeder inside file.
 
+for example,
+
+```sh
+pytest dragonfly/connection_test.py -s  --df logtostdout --df vmodule=dragonfly_connection=2 -k test_subscribe
+```
 ### Before you start
 Please make sure that you have python 3 installed on you local host.
 If have more both python 2 and python 3 installed on you host, you can run the tests with the following command:

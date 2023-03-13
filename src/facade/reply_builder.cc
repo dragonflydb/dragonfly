@@ -47,13 +47,19 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   DCHECK(sink_);
 
   if (should_batch_) {
-    // TODO: to introduce flushing when too much data is batched.
+    size_t total_size = batch_.size();
     for (unsigned i = 0; i < len; ++i) {
-      std::string_view src((char*)v[i].iov_base, v[i].iov_len);
-      DVLOG(2) << "Appending to stream " << sink_ << " " << src;
-      batch_.append(src.data(), src.size());
+      total_size += v[i].iov_len;
     }
-    return;
+
+    if (total_size < 8192) {  // Allow batching with up to 8K of data.
+      for (unsigned i = 0; i < len; ++i) {
+        std::string_view src((char*)v[i].iov_base, v[i].iov_len);
+        DVLOG(2) << "Appending to stream " << src;
+        batch_.append(src.data(), src.size());
+      }
+      return;
+    }
   }
 
   error_code ec;
@@ -327,6 +333,8 @@ void RedisReplyBuilder::StartArray(unsigned len) {
 }
 
 void RedisReplyBuilder::SendStringArr(StrPtr str_ptr, uint32_t len) {
+  DVLOG(2) << "Sending array of " << len << " strings.";
+
   // When vector length is too long, Send returns EMSGSIZE.
   size_t vec_len = std::min<size_t>(256u, len);
 

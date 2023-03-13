@@ -147,6 +147,8 @@ class Connection : public util::Connection {
   RequestPtr FromArgs(RespVec args, mi_heap_t* heap);
 
   std::deque<RequestPtr> dispatch_q_;  // coordinated via evc_.
+  uint32_t pipeline_msg_cnt_ = 0;
+
   static thread_local std::vector<RequestPtr> free_req_pool_;
   util::fibers_ext::EventCount evc_;
 
