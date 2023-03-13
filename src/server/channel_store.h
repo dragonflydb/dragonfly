@@ -4,6 +4,7 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <base/RWSpinLock.h>
 
 #include <string_view>
 
@@ -11,8 +12,8 @@
 
 namespace dfly {
 
-// Database holding pubsub subscribers.
-class ChannelSlice {
+// Centralized store holding pubsub subscribers. All public functions are thread safe.
+class ChannelStore {
  public:
   struct Subscriber {
     ConnectionContext* conn_cntx;
@@ -23,6 +24,7 @@ class ChannelSlice {
     std::string pattern;
 
     Subscriber(ConnectionContext* cntx, uint32_t tid);
+    Subscriber(uint32_t tid);
     // Subscriber() : borrow_token(0) {}
 
     Subscriber(Subscriber&&) noexcept = default;
@@ -30,9 +32,14 @@ class ChannelSlice {
 
     Subscriber(const Subscriber&) = delete;
     void operator=(const Subscriber&) = delete;
-  };
 
-  std::vector<Subscriber> FetchSubscribers(std::string_view channel);
+    // Sort by thread-id. Subscriber without owner comes first.
+    static bool ByThread(const Subscriber& lhs, const Subscriber& rhs) {
+      if (lhs.thread_id == rhs.thread_id)
+        return (lhs.conn_cntx != nullptr) < (rhs.conn_cntx != nullptr);
+      return lhs.thread_id < rhs.thread_id;
+    }
+  };
 
   void AddSubscription(std::string_view channel, ConnectionContext* me, uint32_t thread_id);
   void RemoveSubscription(std::string_view channel, ConnectionContext* me);
@@ -40,28 +47,30 @@ class ChannelSlice {
   void AddGlobPattern(std::string_view pattern, ConnectionContext* me, uint32_t thread_id);
   void RemoveGlobPattern(std::string_view pattern, ConnectionContext* me);
 
+  std::vector<Subscriber> FetchSubscribers(std::string_view channel);
+
   std::vector<std::string> ListChannels(const std::string_view pattern) const;
   size_t PatternCount() const;
 
  private:
-  struct SubscriberInternal {
-    uint32_t thread_id;  // proactor thread id.
+  using SubscribeMap = absl::flat_hash_map<ConnectionContext*, unsigned>;
 
-    SubscriberInternal(uint32_t tid) : thread_id(tid) {
-    }
+  struct ChannelMap : absl::flat_hash_map<std::string, SubscribeMap> {
+    void Add(std::string_view key, ConnectionContext* me, uint32_t thread_id);
+    void Remove(std::string_view key, ConnectionContext* me);
   };
 
-  using SubscribeMap = absl::flat_hash_map<ConnectionContext*, SubscriberInternal>;
+  static void Fill(const SubscribeMap& src, const std::string& pattern,
+                   std::vector<Subscriber>* out);
 
-  static void CopySubscribers(const SubscribeMap& src, const std::string& pattern,
-                             std::vector<Subscriber>* dest);
-
-  struct Channel {
-    SubscribeMap subscribers;
+  struct SubInfo {
+    unsigned thread_id;
+    ConnectionContext* conn_cntx;
   };
 
-  absl::flat_hash_map<std::string, std::unique_ptr<Channel>> channels_;
-  absl::flat_hash_map<std::string, std::unique_ptr<Channel>> patterns_;
+  mutable folly::RWSpinLock lock_;
+  ChannelMap channels_;
+  ChannelMap patterns_;
 };
 
 }  // namespace dfly

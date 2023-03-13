@@ -53,7 +53,8 @@ void ConnectionContext::ChangeMonitor(bool start) {
   EnableMonitoring(start);
 }
 
-void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgList args) {
+void ConnectionContext::ChangeSubscription(ChannelStore* store, bool to_add, bool to_reply,
+                                           CmdArgList args) {
   vector<unsigned> result(to_reply ? args.size() : 0, 0);
 
   if (to_add || conn_state.subscribe_info) {
@@ -87,45 +88,14 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
       }
     }
 
-    sort(channels.begin(), channels.end());
-
-    // prepare the array in order to distribute the updates to the shards.
-    vector<unsigned> shard_idx(shard_set->size() + 1, 0);
-    for (const auto& k_v : channels) {
-      shard_idx[k_v.first]++;
-    }
-    unsigned prev = shard_idx[0];
-    shard_idx[0] = 0;
-
-    // compute cumulative sum, or in other words a beginning index in channels for each shard.
-    for (size_t i = 1; i < shard_idx.size(); ++i) {
-      unsigned cur = shard_idx[i];
-      shard_idx[i] = shard_idx[i - 1] + prev;
-      prev = cur;
-    }
-
     int32_t tid = util::ProactorBase::GetIndex();
     DCHECK_GE(tid, 0);
-
-    // Update the subscribers on publisher's side.
-    auto cb = [&](EngineShard* shard) {
-      ChannelSlice& cs = shard->channel_slice();
-      unsigned start = shard_idx[shard->shard_id()];
-      unsigned end = shard_idx[shard->shard_id() + 1];
-
-      DCHECK_LT(start, end);
-      for (unsigned i = start; i < end; ++i) {
-        if (to_add) {
-          cs.AddSubscription(channels[i].second, this, tid);
-        } else {
-          cs.RemoveSubscription(channels[i].second, this);
-        }
-      }
-    };
-
-    // Update subscription
-    shard_set->RunBriefInParallel(move(cb),
-                                  [&](ShardId sid) { return shard_idx[sid + 1] > shard_idx[sid]; });
+    for (const auto& chan : channels) {
+      if (to_add)
+        store->AddSubscription(chan.second, this, tid);
+      else
+        store->RemoveSubscription(chan.second, this);
+    }
 
     // It's important to reset
     if (!to_add && conn_state.subscribe_info->IsEmpty()) {
@@ -146,7 +116,8 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
   }
 }
 
-void ConnectionContext::ChangePSub(bool to_add, bool to_reply, CmdArgList args) {
+void ConnectionContext::ChangePSub(ChannelStore* store, bool to_add, bool to_reply,
+                                   CmdArgList args) {
   vector<unsigned> result(to_reply ? args.size() : 0, 0);
 
   if (to_add || conn_state.subscribe_info) {
@@ -181,20 +152,12 @@ void ConnectionContext::ChangePSub(bool to_add, bool to_reply, CmdArgList args) 
     int32_t tid = util::ProactorBase::GetIndex();
     DCHECK_GE(tid, 0);
 
-    // Update the subscribers on channel-slice side.
-    auto cb = [&](EngineShard* shard) {
-      ChannelSlice& cs = shard->channel_slice();
-      for (string_view pattern : patterns) {
-        if (to_add) {
-          cs.AddGlobPattern(pattern, this, tid);
-        } else {
-          cs.RemoveGlobPattern(pattern, this);
-        }
-      }
-    };
-
-    // Update pattern subscription. Run on all shards.
-    shard_set->RunBriefInParallel(move(cb));
+    for (string_view pattern : patterns) {
+      if (to_add)
+        store->AddGlobPattern(pattern, this, tid);
+      else
+        store->RemoveGlobPattern(pattern, this);
+    }
 
     // Important to reset conn_state.subscribe_info only after all references to it were
     // removed from channel slices.
@@ -215,7 +178,8 @@ void ConnectionContext::ChangePSub(bool to_add, bool to_reply, CmdArgList args) 
     }
   }
 }
-void ConnectionContext::UnsubscribeAll(bool to_reply) {
+
+void ConnectionContext::UnsubscribeAll(ChannelStore* store, bool to_reply) {
   if (to_reply && (!conn_state.subscribe_info || conn_state.subscribe_info->channels.empty())) {
     return SendSubscriptionChangedResponse("unsubscribe", std::nullopt, 0);
   }
@@ -223,10 +187,10 @@ void ConnectionContext::UnsubscribeAll(bool to_reply) {
                      conn_state.subscribe_info->channels.end());
   CmdArgVec arg_vec(channels.begin(), channels.end());
 
-  ChangeSubscription(false, to_reply, CmdArgList{arg_vec});
+  ChangeSubscription(store, false, to_reply, CmdArgList{arg_vec});
 }
 
-void ConnectionContext::PUnsubscribeAll(bool to_reply) {
+void ConnectionContext::PUnsubscribeAll(ChannelStore* store, bool to_reply) {
   if (to_reply && (!conn_state.subscribe_info || conn_state.subscribe_info->patterns.empty())) {
     return SendSubscriptionChangedResponse("punsubscribe", std::nullopt, 0);
   }
@@ -234,7 +198,7 @@ void ConnectionContext::PUnsubscribeAll(bool to_reply) {
   StringVec patterns(conn_state.subscribe_info->patterns.begin(),
                      conn_state.subscribe_info->patterns.end());
   CmdArgVec arg_vec(patterns.begin(), patterns.end());
-  ChangePSub(false, to_reply, CmdArgList{arg_vec});
+  ChangePSub(store, false, to_reply, CmdArgList{arg_vec});
 }
 
 void ConnectionContext::SendSubscriptionChangedResponse(string_view action,

@@ -14,6 +14,7 @@ namespace dfly {
 
 class EngineShardSet;
 class ConnectionContext;
+class ChannelStore;
 
 struct StoredCmd {
   const CommandId* descr;
@@ -133,10 +134,10 @@ class ConnectionContext : public facade::ConnectionContext {
     return conn_state.db_index;
   }
 
-  void ChangeSubscription(bool to_add, bool to_reply, CmdArgList args);
-  void ChangePSub(bool to_add, bool to_reply, CmdArgList args);
-  void UnsubscribeAll(bool to_reply);
-  void PUnsubscribeAll(bool to_reply);
+  void ChangeSubscription(ChannelStore* store, bool to_add, bool to_reply, CmdArgList args);
+  void ChangePSub(ChannelStore* store, bool to_add, bool to_reply, CmdArgList args);
+  void UnsubscribeAll(ChannelStore* store, bool to_reply);
+  void PUnsubscribeAll(ChannelStore* store, bool to_reply);
   void ChangeMonitor(bool start);  // either start or stop monitor on a given connection
 
   bool is_replicating = false;

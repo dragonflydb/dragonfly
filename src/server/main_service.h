@@ -119,6 +119,7 @@ class Service : public facade::ServiceInterface {
   void CallFromScript(CmdArgList args, ObjectExplorer* reply, ConnectionContext* cntx);
 
   void RegisterCommands();
+
   base::VarzValue::Map GetVarzStats();
 
   util::ProactorPool& pp_;
@@ -128,7 +129,6 @@ class Service : public facade::ServiceInterface {
   absl::flat_hash_map<std::string, unsigned> unknown_cmds_;
 
   mutable ::boost::fibers::mutex mu_;
-
   GlobalState global_state_ = GlobalState::ACTIVE;  // protected by mu_;
 };
 
