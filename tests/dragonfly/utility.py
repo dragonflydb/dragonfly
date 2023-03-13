@@ -183,7 +183,7 @@ class CommandGenerator:
             return f"PEXPIRE k{key} {random.randint(0, 50)}", -1
         else:
             keys_gen = (self.randomize_key(pop=True)
-                    for _ in range(random.randint(1, self.max_multikey)))
+                        for _ in range(random.randint(1, self.max_multikey)))
             keys = [f"k{k}" for k, _ in keys_gen if k is not None]
 
             if len(keys) == 0:
@@ -385,34 +385,39 @@ class DflySeeder:
         """ Reset internal state. Needs to be called after flush or restart"""
         self.gen.reset()
 
-    async def capture(self, port=None, target_db=0, keys=None):
-        """Create DataCapture for selected db"""
+    async def capture(self, port=None):
+        """Create DataCapture for all dbs"""
+
         if port is None:
             port = self.port
+        keys = sorted(list(self.gen.keys_and_types()))
 
-        if keys is None:
-            keys = sorted(list(self.gen.keys_and_types()))
+        captures = await asyncio.gather(*(
+            self._capture_db(port=port, target_db=db, keys=keys) for db in range(self.dbcount)
+        ))
+        return captures
 
-        client = aioredis.Redis(port=port, db=target_db)
-        capture = DataCapture(await self._capture_entries(client, keys))
-        await client.connection_pool.disconnect()
-        return capture
-
-    async def compare(self, initial_capture, port=6379):
+    async def compare(self, initial_captures, port=6379):
         """Compare data capture with all dbs of instance and return True if all dbs are correct"""
         print(f"comparing capture to {port}")
-        keys = sorted(list(self.gen.keys_and_types()))
-        captures = await asyncio.gather(*(
-            self.capture(port=port, target_db=db, keys=keys) for db in range(self.dbcount)
-        ))
-        for db, capture in zip(range(self.dbcount), captures):
-            if not initial_capture.compare(capture):
+        target_captures = await self.capture(port=port)
+
+        for db, target_capture, initial_capture in zip(range(self.dbcount), target_captures, initial_captures):
+            print(f"comparing capture to {port}, db: {db}")
+            if not initial_capture.compare(target_capture):
                 eprint(f">>> Inconsistent data on port {port}, db {db}")
                 return False
         return True
 
     def target(self, key_cnt):
         self.gen.key_cnt_target = key_cnt
+
+    async def _capture_db(self, port, target_db, keys):
+        eprint(f"Capture data on port {port}, db {target_db}")
+        client = aioredis.Redis(port=port, db=target_db)
+        capture = DataCapture(await self._capture_entries(client, keys))
+        await client.connection_pool.disconnect()
+        return capture
 
     async def _generator_task(self, queues, target_ops=None, target_deviation=None):
         cpu_time = 0
@@ -452,7 +457,8 @@ class DflySeeder:
 
             if file is not None:
                 pattern = "MULTI\n{}\nEXEC\n" if is_multi_transaction else "{}\n"
-                file.write(pattern.format('\n'.join(stringify_cmd(cmd) for cmd in blob)))
+                file.write(pattern.format('\n'.join(stringify_cmd(cmd)
+                           for cmd in blob)))
 
             print('.', end='', flush=True)
             await asyncio.sleep(0.0)

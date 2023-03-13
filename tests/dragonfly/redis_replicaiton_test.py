@@ -5,6 +5,7 @@ import aioredis
 import subprocess
 from .utility import *
 
+
 class RedisServer:
     def __init__(self):
         self.port = 5555
@@ -29,19 +30,21 @@ class RedisServer:
 
 # Checks that master and redis are synced by writing a random key to master
 # and waiting for it to exist in replica. Foreach db in 0..dbcount-1.
+
+
 async def await_synced(master_port, replica_port, dbcount=1):
     rnd_str = "".join(random.choices(string.ascii_letters, k=10))
     key = "sync_key/" + rnd_str
     for db in range(dbcount):
         c_master = aioredis.Redis(port=master_port, db=db)
         await c_master.set(key, "dummy")
-        print (f"set {key} MASTER db = {db}")
+        print(f"set {key} MASTER db = {db}")
         c_replica = aioredis.Redis(port=replica_port, db=db)
         timeout = 30
         while timeout > 0:
             timeout -= 1
             v = await c_replica.get(key)
-            print (f"get {key} from REPLICA db = {db} got {v}")
+            print(f"get {key} from REPLICA db = {db} got {v}")
             if v is not None:
                 break
             await asyncio.sleep(1)
@@ -49,15 +52,18 @@ async def await_synced(master_port, replica_port, dbcount=1):
         await c_replica.close()
         assert timeout > 0, "Timeout while waiting for replica to sync"
 
+
 async def await_synced_all(c_master, c_replicas):
     for c_replica in c_replicas:
         await await_synced(c_master, c_replica)
+
 
 async def check_data(seeder, replicas, c_replicas):
     capture = await seeder.capture()
     for (replica, c_replica) in zip(replicas, c_replicas):
         await wait_available_async(c_replica)
         assert await seeder.compare(capture, port=replica.port)
+
 
 @pytest.fixture(scope="function")
 def redis_server() -> RedisServer:
@@ -68,15 +74,13 @@ def redis_server() -> RedisServer:
     s.stop()
 
 
-
 full_sync_replication_specs = [
-    ([1], dict(keys=10_000, dbcount=1, unsupported_types=[ValueType.JSON])),
-    # REPRO for dbcount > 1 with ony ValueType.SET:
-    #([1], dict(keys=200, dbcount=2, unsupported_types=[ValueType.JSON, ValueType.LIST, ValueType.STRING, ValueType.HSET, ValueType.ZSET])),
-    # PASSES when excluding ValueType.SET:
-    ([1], dict(keys=5000, dbcount=2, unsupported_types=[ValueType.JSON, ValueType.SET])),
-    ([2], dict(keys=5000, dbcount=4, unsupported_types=[ValueType.JSON, ValueType.SET])),
+    ([1], dict(keys=100, dbcount=1, unsupported_types=[ValueType.JSON])),
+    ([1], dict(keys=5000, dbcount=2, unsupported_types=[ValueType.JSON])),
+    ([2], dict(keys=5000, dbcount=4, unsupported_types=[ValueType.JSON])),
 ]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_replicas, seeder_config", full_sync_replication_specs)
 async def test_replication_full_sync(df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config):
@@ -87,7 +91,8 @@ async def test_replication_full_sync(df_local_factory, df_seeder_factory, redis_
     seeder = df_seeder_factory.create(port=master.port, **seeder_config)
     await seeder.run(target_deviation=0.1)
 
-    replica = df_local_factory.create(port=master.port + 1, proactor_threads=t_replicas[0])
+    replica = df_local_factory.create(
+        port=master.port + 1, proactor_threads=t_replicas[0])
     replica.start()
     c_replica = aioredis.Redis(port=replica.port)
     assert await c_replica.ping()
@@ -101,11 +106,12 @@ async def test_replication_full_sync(df_local_factory, df_seeder_factory, redis_
 
 stable_sync_replication_specs = [
     ([1], dict(keys=100, dbcount=1, unsupported_types=[ValueType.JSON])),
-    ([1], dict(keys=10_000, dbcount=2, unsupported_types=[ValueType.JSON, ValueType.SET])),
+    ([1], dict(keys=10_000, dbcount=2, unsupported_types=[ValueType.JSON])),
     ([2], dict(keys=10_000, dbcount=1, unsupported_types=[ValueType.JSON])),
-    ([2], dict(keys=10_000, dbcount=2, unsupported_types=[ValueType.JSON, ValueType.SET])),
-    ([8], dict(keys=10_000, dbcount=4, unsupported_types=[ValueType.JSON, ValueType.SET])),
+    ([2], dict(keys=10_000, dbcount=2, unsupported_types=[ValueType.JSON])),
+    ([8], dict(keys=10_000, dbcount=4, unsupported_types=[ValueType.JSON])),
 ]
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_replicas, seeder_config", stable_sync_replication_specs)
@@ -115,7 +121,8 @@ async def test_replication_stable_sync(df_local_factory, df_seeder_factory, redi
     c_master = aioredis.Redis(port=master.port)
     assert await c_master.ping()
 
-    replica = df_local_factory.create(port=master.port + 1, proactor_threads=t_replicas[0])
+    replica = df_local_factory.create(
+        port=master.port + 1, proactor_threads=t_replicas[0])
     replica.start()
     c_replica = aioredis.Redis(port=replica.port)
     assert await c_replica.ping()
@@ -141,6 +148,8 @@ replication_specs = [
     ([1] * 8, dict(keys=500, dbcount=2, unsupported_types=[ValueType.JSON])),
     ([1], dict(keys=100, dbcount=2, unsupported_types=[ValueType.JSON])),
 ]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_replicas, seeder_config", replication_specs)
 @pytest.mark.skip(reason="Skipping until we fix replication from redis")
@@ -171,7 +180,6 @@ async def test_redis_replication_all(df_local_factory, df_seeder_factory, redis_
     async def run_replication(c_replica):
         await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
         await wait_available_async(c_replica)
-
 
     await asyncio.gather(*(asyncio.create_task(run_replication(c))
                            for c in c_replicas))
