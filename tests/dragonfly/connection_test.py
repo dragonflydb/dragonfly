@@ -174,8 +174,8 @@ async def reader(channel: aioredis.client.PubSub, messages, max: int):
     return True, "success"
 
 
-async def run_pipeline_mode(async_client, messages):
-    pipe = async_client.pipeline()
+async def run_pipeline_mode(async_client: aioredis.Redis, messages):
+    pipe = async_client.pipeline(transaction=False)
     for key, val in messages.items():
         pipe.set(key, val)
     result = await pipe.execute()
@@ -327,3 +327,9 @@ async def test_big_command(df_server, size=8 * 1024):
 
     writer.close()
     await writer.wait_closed()
+
+@pytest.mark.asyncio
+async def test_subscribe_pipelined(async_client: aioredis.Redis):
+    pipe = async_client.pipeline(transaction=False)
+    pipe.execute_command('subscribe channel').execute_command('subscribe channel')
+    await pipe.echo('bye bye').execute()
