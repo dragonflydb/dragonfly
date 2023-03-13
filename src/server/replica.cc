@@ -559,6 +559,9 @@ error_code Replica::InitiateDflySync() {
 
 error_code Replica::ConsumeRedisStream() {
   base::IoBuf io_buf(16_KB);
+  io::NullSink null_sink;  // we never reply back on the commands.
+  ConnectionContext conn_context{&null_sink, nullptr};
+  conn_context.is_replicating = true;
   parser_.reset(new RedisParser);
 
   ReqSerializer serializer{sock_.get()};
@@ -598,7 +601,7 @@ error_code Replica::ConsumeRedisStream() {
       RETURN_ON_ERR(SendCommand(ack_cmd, &serializer));
     }
 
-    ec = ParseAndExecute(&io_buf);
+    ec = ParseAndExecute(&io_buf, &conn_context);
   }
 
   VLOG(1) << "ConsumeRedisStream finished";
@@ -1103,7 +1106,7 @@ error_code Replica::ReadLine(base::IoBuf* io_buf, string_view* line) {
   return std::make_error_code(std::errc::illegal_byte_sequence);
 }
 
-error_code Replica::ParseAndExecute(base::IoBuf* io_buf) {
+error_code Replica::ParseAndExecute(base::IoBuf* io_buf, ConnectionContext* cntx) {
   VLOG(1) << "ParseAndExecute: input len " << io_buf->InputLen();
   if (parser_->stash_size() > 0) {
     DVLOG(1) << "Stash " << *parser_->stash()[0];
@@ -1112,21 +1115,16 @@ error_code Replica::ParseAndExecute(base::IoBuf* io_buf) {
   uint32_t consumed = 0;
   RedisParser::Result result = RedisParser::OK;
 
-  io::NullSink null_sink;  // we never reply back on the commands.
-  ConnectionContext conn_context{&null_sink, nullptr};
-  conn_context.is_replicating = true;
-
   do {
     result = parser_->Parse(io_buf->InputBuffer(), &consumed, &resp_args_);
 
     switch (result) {
       case RedisParser::OK:
         if (!resp_args_.empty()) {
-          VLOG(2) << "Got command " << ToSV(resp_args_[0].GetBuf()) << ToSV(resp_args_[1].GetBuf())
-                  << "\n consumed: " << consumed;
+          VLOG(2) << "Got command " << ToSV(resp_args_[0].GetBuf()) << "\n consumed: " << consumed;
           facade::RespToArgList(resp_args_, &cmd_str_args_);
           CmdArgList arg_list{cmd_str_args_.data(), cmd_str_args_.size()};
-          service_.DispatchCommand(arg_list, &conn_context);
+          service_.DispatchCommand(arg_list, cntx);
         }
         io_buf->ConsumeInput(consumed);
         break;

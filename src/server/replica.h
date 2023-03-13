@@ -171,7 +171,7 @@ class Replica {
   std::error_code ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* header);
   std::error_code ReadLine(base::IoBuf* io_buf, std::string_view* line);
 
-  std::error_code ParseAndExecute(base::IoBuf* io_buf);
+  std::error_code ParseAndExecute(base::IoBuf* io_buf, ConnectionContext* cntx);
 
   // Check if reps_args contains a simple reply.
   bool CheckRespIsSimpleReply(std::string_view reply) const;

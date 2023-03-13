@@ -115,7 +115,6 @@ stable_sync_replication_specs = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_replicas, seeder_config", stable_sync_replication_specs)
-@pytest.mark.skip(reason="Skipping until we fix replication from redis")
 async def test_replication_stable_sync(df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config):
     master = redis_server
     c_master = aioredis.Redis(port=master.port)
@@ -152,7 +151,7 @@ replication_specs = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_replicas, seeder_config", replication_specs)
-@pytest.mark.skip(reason="Skipping until we fix replication from redis")
+# @pytest.mark.skip(reason="Skipping until we fix replication from redis")
 async def test_redis_replication_all(df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config):
     master = redis_server
     c_master = aioredis.Redis(port=master.port)
@@ -173,7 +172,7 @@ async def test_redis_replication_all(df_local_factory, df_seeder_factory, redis_
     c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
 
     # Start data stream
-    stream_task = asyncio.create_task(seeder.run(target_ops=6000))
+    stream_task = asyncio.create_task(seeder.run())
     await asyncio.sleep(0.0)
 
     # Start replication
@@ -187,6 +186,7 @@ async def test_redis_replication_all(df_local_factory, df_seeder_factory, redis_
     # Wait for streaming to finish
     assert not stream_task.done(
     ), "Weak testcase. Increase number of streamed iterations to surpass full sync"
+    seeder.stop()
     await stream_task
 
     # Check data after full sync
