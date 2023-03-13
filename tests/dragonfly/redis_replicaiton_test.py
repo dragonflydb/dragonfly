@@ -58,7 +58,7 @@ async def await_synced_all(c_master, c_replicas):
         await await_synced(c_master, c_replica)
 
 
-async def check_data(seeder, replicas, c_replicas, db_count):
+async def check_data(seeder, replicas, c_replicas):
     capture = await seeder.capture()
     for (replica, c_replica) in zip(replicas, c_replicas):
         await wait_available_async(c_replica)
@@ -191,11 +191,11 @@ async def test_redis_replication_all(df_local_factory, df_seeder_factory, redis_
 
     # Check data after full sync
     await await_synced_all(master.port, [replica.port for replica in replicas])
-    await check_data(seeder, replicas, c_replicas, seeder_config["dbcount"])
+    await check_data(seeder, replicas, c_replicas)
 
     # Stream more data in stable state
     await seeder.run(target_ops=2000)
 
     # Check data after stable state stream
     await await_synced_all(master.port, [replica.port for replica in replicas])
-    await check_data(seeder, replicas, c_replicas, seeder_config["dbcount"])
+    await check_data(seeder, replicas, c_replicas)
