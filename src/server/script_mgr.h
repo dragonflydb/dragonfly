@@ -15,6 +15,7 @@
 namespace dfly {
 
 class EngineShardSet;
+class Interpreter;
 
 // This class has a state through the lifetime of a server because it manipulates scripts
 class ScriptMgr {
@@ -23,11 +24,11 @@ class ScriptMgr {
     bool atomic = true;            // Whether script must run atomically.
     bool undeclared_keys = false;  // Whether script accesses undeclared keys.
 
-    // Return GenericError if some pragma was invalid.
-    // Valid pragmas are:
+    // Return GenericError if some flag was invalid.
+    // Valid flags are:
     // - allow-undeclared-keys -> undeclared_keys=true
     // - disable-atomicity     -> atomic=false
-    static GenericError ApplyPragmas(std::string_view pragma, ScriptParams* params);
+    static GenericError ApplyFlags(std::string_view flags, ScriptParams* params);
   };
 
   struct ScriptData : public ScriptParams {
@@ -44,8 +45,8 @@ class ScriptMgr {
 
   void Run(CmdArgList args, ConnectionContext* cntx);
 
-  // Insert script. Get possible error from parsing script pragmas.
-  GenericError Insert(std::string_view sha, std::string_view body);
+  // Insert script and return sha. Get possible error from compilation or parsing script flags.
+  io::Result<std::string, GenericError> Insert(std::string_view body, Interpreter* interpreter);
 
   // Get script body by sha, returns nullptr if not found.
   std::optional<ScriptData> Find(std::string_view sha) const;
