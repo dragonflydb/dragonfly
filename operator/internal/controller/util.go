@@ -55,14 +55,14 @@ func isStatefulSetReady(ctx context.Context, c client.Client, name, namespace st
 	return false, nil
 }
 
-func findHealthyAndMarkActive(ctx context.Context, c client.Client, db *resourcesv1.DragonflyDb) error {
+func findHealthyAndMarkActive(ctx context.Context, c client.Client, db *resourcesv1.Dragonfly) error {
 	log := log.FromContext(ctx)
 	log.Info(fmt.Sprintf("Finding healthy and marking active for %s", db.Name))
 
 	pods := corev1.PodList{}
 	if err := c.List(ctx, &pods, client.InNamespace(db.Namespace), client.MatchingLabels{
 		"app":                              db.Name,
-		resources.KubernetesPartOfLabelKey: "dragonflydb",
+		resources.KubernetesPartOfLabelKey: "dragonfly",
 	},
 	); err != nil {
 		log.Error(err, "could not list Pods")

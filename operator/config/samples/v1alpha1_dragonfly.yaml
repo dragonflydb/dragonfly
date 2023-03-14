@@ -1,5 +1,5 @@
 apiVersion: dragonflydb.io/v1alpha1
-kind: DragonflyDb
+kind: Dragonfly
 metadata:
   labels:
     app.kubernetes.io/name: dragonflydb

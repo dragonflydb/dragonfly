@@ -5,20 +5,20 @@ metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.11.1
   creationTimestamp: null
-  name: dragonflydbs.dragonflydb.io
+  name: dragonflies.dragonflydb.io
 spec:
   group: dragonflydb.io
   names:
-    kind: DragonflyDb
-    listKind: DragonflyDbList
-    plural: dragonflydbs
-    singular: dragonflydb
+    kind: Dragonfly
+    listKind: DragonflyList
+    plural: dragonflies
+    singular: dragonfly
   scope: Namespaced
   versions:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: DragonflyDb is the Schema for the dragonflydbs API
+        description: Dragonfly is the Schema for the dragonflies API
         properties:
           apiVersion:
             description: 'APIVersion defines the versioned schema of this representation
@@ -33,7 +33,7 @@ spec:
           metadata:
             type: object
           spec:
-            description: DragonflyDbSpec defines the desired state of DragonflyDb
+            description: DragonflySpec defines the desired state of Dragonfly
             properties:
               image:
                 description: Image is the image of the database to use
@@ -44,7 +44,7 @@ spec:
                 type: integer
             type: object
           status:
-            description: DragonflyDbStatus defines the observed state of DragonflyDb
+            description: DragonflyStatus defines the observed state of Dragonfly
             properties:
               created:
                 description: Created is true if the database resources have been created

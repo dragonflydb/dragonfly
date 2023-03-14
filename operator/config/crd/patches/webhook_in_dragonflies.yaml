@@ -2,7 +2,7 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: dragonflydbs.dragonflydb.io
+  name: dragonflies.dragonflydb.io
 spec:
   conversion:
     strategy: Webhook

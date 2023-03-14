@@ -5,20 +5,21 @@
 package resources
 
 const (
-	// DragonflyDbPort is the port on which the database listens
-	DragonflyDbPort = 6379
+	// DragonflyPort is the port on which the database listens
+	DragonflyPort = 6379
 
-	// DragonflyDbPortName is the name of the port on which the database listens
-	DragonflyDbPortName = "database"
+	// DragonflyPortName is the name of the port on which the database listens
+	DragonflyPortName = "database"
 
-	// DragonflyDbOperatorName is the name of the operator
-	DragonflyDbOperatorName = "dragonflydb-operator"
+	// DragonflyOperatorName is the name of the operator
+	DragonflyOperatorName = "dragonfly-operator"
 
-	// DragonflyDbImage is the default image of the database to use
-	DragonflyDbImage = "docker.dragonflydb.io/dragonflydb/dragonfly"
+	// DragonflyImage is the default image of the database to use
+	// TODO: Change this
+	DragonflyImage = "docker.dragonflydb.io/dragonflydb/dragonfly"
 
-	// DragonflyDbHealthCheckPath is the path on which the database exposes its health check
-	DragonflyDbHealthCheckPath = "/health"
+	// DragonflyHealthCheckPath is the path on which the database exposes its health check
+	DragonflyHealthCheckPath = "/health"
 
 	// Recommended Kubernetes Application Labels
 	// KubernetesAppNameLabel is the name of the application

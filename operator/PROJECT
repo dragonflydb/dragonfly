@@ -13,7 +13,7 @@ resources:
     namespaced: true
   controller: true
   domain: dragonflydb.io
-  kind: DragonflyDb
+  kind: Dragonfly
   path: dragonflydb.io/dragonfly/api/v1alpha1
   version: v1alpha1
 version: "3"

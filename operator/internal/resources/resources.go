@@ -16,9 +16,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// GetDatabaseResources returns the resources required for a DragonflyDb
+// GetDatabaseResources returns the resources required for a Dragonfly
 // Instance
-func GetDatabaseResources(ctx context.Context, db *resourcesv1.DragonflyDb) ([]client.Object, error) {
+func GetDatabaseResources(ctx context.Context, db *resourcesv1.Dragonfly) ([]client.Object, error) {
 	log := log.FromContext(ctx)
 	log.Info(fmt.Sprintf("Creating resources for %s", db.Name))
 
@@ -26,7 +26,7 @@ func GetDatabaseResources(ctx context.Context, db *resourcesv1.DragonflyDb) ([]c
 
 	image := db.Spec.Image
 	if image == "" {
-		image = fmt.Sprintf("%s:%s", DragonflyDbImage, Version)
+		image = fmt.Sprintf("%s:%s", DragonflyImage, Version)
 	}
 
 	// Master + Replicas
@@ -49,10 +49,10 @@ func GetDatabaseResources(ctx context.Context, db *resourcesv1.DragonflyDb) ([]c
 			Labels: map[string]string{
 				KubernetesAppComponentLabelKey: "database",
 				KubernetesAppInstanceNameLabel: db.Name,
-				KubernetesAppNameLabelKey:      "dragonflydb",
+				KubernetesAppNameLabelKey:      "dragonfly",
 				KubernetesAppVersionLabelKey:   Version,
-				KubernetesPartOfLabelKey:       "dragonflydb",
-				KubernetesManagedByLabelKey:    DragonflyDbOperatorName,
+				KubernetesPartOfLabelKey:       "dragonfly",
+				KubernetesManagedByLabelKey:    DragonflyOperatorName,
 				"app":                          db.Name,
 			},
 		},
@@ -62,27 +62,27 @@ func GetDatabaseResources(ctx context.Context, db *resourcesv1.DragonflyDb) ([]c
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					"app":                     db.Name,
-					KubernetesPartOfLabelKey:  "dragonflydb",
-					KubernetesAppNameLabelKey: "dragonflydb",
+					KubernetesPartOfLabelKey:  "dragonfly",
+					KubernetesAppNameLabelKey: "dragonfly",
 				},
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
 						"app":                     db.Name,
-						KubernetesPartOfLabelKey:  "dragonflydb",
-						KubernetesAppNameLabelKey: "dragonflydb",
+						KubernetesPartOfLabelKey:  "dragonfly",
+						KubernetesAppNameLabelKey: "dragonfly",
 					},
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name:  "dragonflydb",
+							Name:  "dragonfly",
 							Image: image,
 							Ports: []corev1.ContainerPort{
 								{
-									Name:          DragonflyDbPortName,
-									ContainerPort: DragonflyDbPort,
+									Name:          DragonflyPortName,
+									ContainerPort: DragonflyPort,
 								},
 							},
 							Args: []string{
@@ -144,10 +144,10 @@ func GetDatabaseResources(ctx context.Context, db *resourcesv1.DragonflyDb) ([]c
 			Labels: map[string]string{
 				KubernetesAppComponentLabelKey: "database",
 				KubernetesAppInstanceNameLabel: db.Name,
-				KubernetesAppNameLabelKey:      "dragonflydb",
+				KubernetesAppNameLabelKey:      "dragonfly",
 				KubernetesAppVersionLabelKey:   Version,
-				KubernetesPartOfLabelKey:       "dragonflydb",
-				KubernetesManagedByLabelKey:    DragonflyDbOperatorName,
+				KubernetesPartOfLabelKey:       "dragonfly",
+				KubernetesManagedByLabelKey:    DragonflyOperatorName,
 				"app":                          db.Name,
 			},
 		},
@@ -155,13 +155,13 @@ func GetDatabaseResources(ctx context.Context, db *resourcesv1.DragonflyDb) ([]c
 			ClusterIP: "None",
 			Selector: map[string]string{
 				"app":                     db.Name,
-				KubernetesAppNameLabelKey: "dragonflydb",
+				KubernetesAppNameLabelKey: "dragonfly",
 				"role":                    "master",
 			},
 			Ports: []corev1.ServicePort{
 				{
-					Name: DragonflyDbPortName,
-					Port: DragonflyDbPort,
+					Name: DragonflyPortName,
+					Port: DragonflyPort,
 				},
 			},
 		},

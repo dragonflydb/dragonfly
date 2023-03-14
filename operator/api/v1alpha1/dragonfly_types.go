@@ -11,8 +11,8 @@ import (
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
-// DragonflyDbSpec defines the desired state of DragonflyDb
-type DragonflyDbSpec struct {
+// DragonflySpec defines the desired state of Dragonfly
+type DragonflySpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
@@ -29,8 +29,8 @@ type DragonflyDbSpec struct {
 	// Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
-// DragonflyDbStatus defines the observed state of DragonflyDb
-type DragonflyDbStatus struct {
+// DragonflyStatus defines the observed state of Dragonfly
+type DragonflyStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
@@ -41,24 +41,24 @@ type DragonflyDbStatus struct {
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
 
-// DragonflyDb is the Schema for the dragonflydbs API
-type DragonflyDb struct {
+// Dragonfly is the Schema for the dragonflies API
+type Dragonfly struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   DragonflyDbSpec   `json:"spec,omitempty"`
-	Status DragonflyDbStatus `json:"status,omitempty"`
+	Spec   DragonflySpec   `json:"spec,omitempty"`
+	Status DragonflyStatus `json:"status,omitempty"`
 }
 
 //+kubebuilder:object:root=true
 
-// DragonflyDbList contains a list of DragonflyDb
-type DragonflyDbList struct {
+// DragonflyList contains a list of Dragonfly
+type DragonflyList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []DragonflyDb `json:"items"`
+	Items           []Dragonfly `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(&DragonflyDb{}, &DragonflyDbList{})
+	SchemeBuilder.Register(&Dragonfly{}, &DragonflyList{})
 }
