@@ -92,8 +92,8 @@ class Transaction {
 
   // State on specific shard.
   enum LocalMask : uint16_t {
-    ACTIVE = 1,                 // Set on all active shards.
-    ARMED = 1 << 1,             // Whether callback cb_ is set
+    ACTIVE = 1,  // Set on all active shards.
+    // UNUSED = 1 << 1,
     OUT_OF_ORDER = 1 << 2,      // Whether its running out of order
     KEYLOCK_ACQUIRED = 1 << 3,  // Whether its key locks are acquired
     SUSPENDED_Q = 1 << 4,       // Whether is suspened (by WatchInShard())
@@ -191,7 +191,8 @@ class Transaction {
       sid = 0;
 
     // We use acquire so that no reordering will move before this load.
-    return run_count_.load(std::memory_order_acquire) > 0 && shard_data_[sid].local_mask & ARMED;
+    return run_count_.load(std::memory_order_acquire) > 0 &&
+           shard_data_[sid].is_armed.load(std::memory_order_relaxed);
   }
 
   // Called from engine set shard threads.
@@ -275,6 +276,12 @@ class Transaction {
 
     PerShardData() = default;
 
+    // this is the only variable that is accessed by both shard and coordinator threads.
+    std::atomic_bool is_armed{false};
+
+    // We pad with some memory so that atomic loads won't cause false sharing betweem threads.
+    char pad[48];  // to make sure PerShardData is 64 bytes and takes full cacheline.
+
     uint32_t arg_start = 0;  // Indices into args_ array.
     uint16_t arg_count = 0;
 
@@ -286,6 +293,8 @@ class Transaction {
     // tx queue.
     uint32_t pq_pos = TxQueue::kEnd;
   };
+
+  static_assert(sizeof(PerShardData) == 64);  // cacheline
 
   // State of a multi transaction.
   struct MultiData {
@@ -397,7 +406,7 @@ class Transaction {
   void WaitForShardCallbacks() {
     run_ec_.await([this] { return 0 == run_count_.load(std::memory_order_relaxed); });
 
-    seqlock_.fetch_add(1, std::memory_order_acq_rel);
+    seqlock_.fetch_add(1, std::memory_order_release);
   }
 
   // Log command in shard's journal, if this is a write command with auto-journaling enabled.
