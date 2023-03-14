@@ -176,6 +176,15 @@ class Connection::Request {
   void SetArgs(const RespVec& args);
 };
 
+Connection::PubMessage::PubMessage(string pattern, shared_ptr<string> channel,
+                                   shared_ptr<string> message)
+    : type{kPublish}, pattern{move(pattern)}, channel{move(channel)}, message{move(message)} {
+}
+
+Connection::PubMessage::PubMessage(bool add, shared_ptr<string> channel, uint32_t channel_cnt)
+    : type{add ? kSubscribe : kUnsubscribe}, channel{move(channel)}, channel_cnt{channel_cnt} {
+}
+
 struct Connection::DispatchOperations {
   DispatchOperations(SinkReplyBuilder* b, Connection* me)
       : stats{me->service_->GetThreadLocalConnectionStats()}, builder{b}, self(me) {

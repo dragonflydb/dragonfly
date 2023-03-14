@@ -1380,8 +1380,7 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
       facade::Connection* conn = it->conn_cntx->owner();
       DCHECK(conn);
 
-      conn->SendMsgVecAsync({facade::Connection::PubMessage::kPublish, move(it->pattern),
-                             move(channel_ptr), move(msg_ptr), 0});
+      conn->SendMsgVecAsync({move(it->pattern), move(channel_ptr), move(msg_ptr)});
       published.fetch_add(1, memory_order_relaxed);
       it++;
     }
@@ -1408,7 +1407,7 @@ void Service::Unsubscribe(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() == 0) {
     cntx->UnsubscribeAll(server_family_.channel_store(), true);
   } else {
-    cntx->ChangeSubscription(server_family_.channel_store(), false, true, std::move(args));
+    cntx->ChangeSubscription(server_family_.channel_store(), false, true, args);
   }
 }
 
