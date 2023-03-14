@@ -222,13 +222,14 @@ TEST_F(DflyEngineTest, EvalSha) {
 
 TEST_F(DflyEngineTest, Hello) {
   auto resp = Run({"hello"});
-  ASSERT_THAT(resp, ArrLen(12));
+  ASSERT_THAT(resp, ArrLen(14));
   resp = Run({"hello", "2"});
-  ASSERT_THAT(resp, ArrLen(12));
+  ASSERT_THAT(resp, ArrLen(14));
 
-  EXPECT_THAT(resp.GetVec(), ElementsAre("server", "redis", "version", ArgType(RespExpr::STRING),
-                                         "proto", IntArg(2), "id", ArgType(RespExpr::INT64), "mode",
-                                         "standalone", "role", "master"));
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("server", "redis", "version", "6.2.11", "dfly_version",
+                          ArgType(RespExpr::STRING), "proto", IntArg(2), "id",
+                          ArgType(RespExpr::INT64), "mode", "standalone", "role", "master"));
 
   // These are valid arguments to HELLO, however as they are not yet supported the implementation
   // is degraded to 'unknown command'.

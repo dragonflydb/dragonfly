@@ -83,6 +83,8 @@ using util::http::StringResponse;
 
 namespace {
 
+const auto kRedisVersion = "6.2.11";
+
 const auto kRdbWriteFlags = O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC | O_DIRECT;
 
 using EngineFunc = void (ServerFamily::*)(CmdArgList args, ConnectionContext* cntx);
@@ -1456,7 +1458,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
     ADD_HEADER("# Server");
 
-    append("redis_version", GetVersion());
+    append("redis_version", kRedisVersion);
+    append("dfly_version", GetVersion());
     append("redis_mode", "standalone");
     append("arch_bits", 64);
     append("multiplexing_api", multiplex_api);
@@ -1515,7 +1518,13 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("pipeline_cache_bytes", m.conn_stats.pipeline_cache_capacity);
     append("maxmemory", max_memory_limit);
     append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
-    append("cache_mode", GetFlag(FLAGS_cache_mode) ? "cache" : "store");
+    if (GetFlag(FLAGS_cache_mode)) {
+      append("cache_mode", "cache");
+    } else {
+      append("cache_mode", "store");
+      // Compatible with redis based frameworks.
+      append("maxmemory_policy", "noeviction");
+    }
   }
 
   if (should_enter("STATS")) {
@@ -1693,10 +1702,12 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  (*cntx)->StartArray(12);
+  (*cntx)->StartArray(14);
   (*cntx)->SendBulkString("server");
   (*cntx)->SendBulkString("redis");
   (*cntx)->SendBulkString("version");
+  (*cntx)->SendBulkString(kRedisVersion);
+  (*cntx)->SendBulkString("dfly_version");
   (*cntx)->SendBulkString(GetVersion());
   (*cntx)->SendBulkString("proto");
   (*cntx)->SendLong(2);
