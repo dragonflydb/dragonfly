@@ -2129,6 +2129,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   if (item == nullptr) {
     item = new Item;
   }
+  auto cleanup = absl::Cleanup([item] { delete item; });
 
   // Read key
   SET_OR_RETURN(ReadKey(), item->key);
@@ -2148,22 +2149,23 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
    * Similarly if the RDB is the preamble of an AOF file, we want to
    * load all the keys as they are, since the log of operations later
    * assume to work in an exact keyspace state. */
-  // TODO: check rdbflags&RDBFLAGS_AOF_PREAMBLE logic in rdb.c
-  bool should_expire = settings->has_expired;  // TODO: to implement
-  if (should_expire) {
-    // decrRefCount(val);
-  } else {
-    ShardId sid = Shard(item->key, shard_set->size());
-    item->expire_ms = settings->expiretime;
 
-    auto& out_buf = shard_buf_[sid];
+  if (ServerState::tlocal()->is_master && settings->has_expired) {
+    VLOG(1) << "Expire key: " << item->key;
+    return kOk;
+  }
 
-    out_buf.emplace_back(item);
+  ShardId sid = Shard(item->key, shard_set->size());
+  item->expire_ms = settings->expiretime;
 
-    constexpr size_t kBufSize = 128;
-    if (out_buf.size() >= kBufSize) {
-      FlushShardAsync(sid);
-    }
+  auto& out_buf = shard_buf_[sid];
+
+  out_buf.emplace_back(item);
+  std::move(cleanup).Cancel();
+
+  constexpr size_t kBufSize = 128;
+  if (out_buf.size() >= kBufSize) {
+    FlushShardAsync(sid);
   }
 
   return kOk;

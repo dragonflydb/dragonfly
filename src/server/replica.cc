@@ -43,8 +43,6 @@ using absl::StrCat;
 
 namespace {
 
-// TODO: 2. Use time-out on socket-reads so that we would not deadlock on unresponsive master.
-//       3. Support ipv6 at some point.
 int ResolveDns(std::string_view host, char* dest) {
   struct addrinfo hints, *servinfo;
 

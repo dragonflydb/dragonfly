@@ -231,6 +231,15 @@ TEST_F(RdbTest, ReloadTtl) {
   EXPECT_LT(990, CheckedInt({"ttl", "key"}));
 }
 
+TEST_F(RdbTest, ReloadExpired) {
+  Run({"set", "key", "val"});
+  Run({"expire", "key", "2"});
+  sleep(2);
+  Run({"debug", "reload"});
+  auto resp = Run({"get", "key"});
+  ASSERT_THAT(resp, ArgType(RespExpr::NIL));
+}
+
 TEST_F(RdbTest, SaveFlush) {
   Run({"debug", "populate", "500000"});
 
