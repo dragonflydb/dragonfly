@@ -186,7 +186,6 @@ class RdbSerializer {
   std::unique_ptr<LZF_HSLOT[]> lzf_;
 
   CompressionMode compression_mode_;
-  // TODO : This compressor impl should support different compression algorithms zstd/lz4 etc.
   std::unique_ptr<CompressorImpl> compressor_impl_;
 
   static constexpr size_t kMinStrSizeToCompress = 256;
