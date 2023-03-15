@@ -418,12 +418,12 @@ error_code Replica::InitiatePSync() {
     io::PrefixSource ps{io_buf.InputBuffer(), &ss};
 
     // Set LOADING state.
-    // TODO: Flush db on retry.
     CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) == GlobalState::LOADING);
     absl::Cleanup cleanup = [this]() {
       service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     };
 
+    JournalExecutor{&service_}.FlushAll();
     RdbLoader loader(NULL);
     loader.set_source_limit(snapshot_size);
     // TODO: to allow registering callbacks within loader to send '\n' pings back to master.
@@ -1122,6 +1122,7 @@ error_code Replica::ParseAndExecute(base::IoBuf* io_buf, ConnectionContext* cntx
       case RedisParser::OK:
         if (!resp_args_.empty()) {
           VLOG(2) << "Got command " << ToSV(resp_args_[0].GetBuf()) << "\n consumed: " << consumed;
+
           facade::RespToArgList(resp_args_, &cmd_str_args_);
           CmdArgList arg_list{cmd_str_args_.data(), cmd_str_args_.size()};
           service_.DispatchCommand(arg_list, cntx);
