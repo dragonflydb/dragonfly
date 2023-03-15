@@ -1413,7 +1413,7 @@ void Service::Unsubscribe(CmdArgList args, ConnectionContext* cntx) {
 
 void Service::PSubscribe(CmdArgList args, ConnectionContext* cntx) {
   args.remove_prefix(1);
-  cntx->ChangePSub(server_family_.channel_store(), true, true, args);
+  cntx->ChangePSubscription(server_family_.channel_store(), true, true, args);
 }
 
 void Service::PUnsubscribe(CmdArgList args, ConnectionContext* cntx) {
@@ -1422,7 +1422,7 @@ void Service::PUnsubscribe(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() == 0) {
     cntx->PUnsubscribeAll(server_family_.channel_store(), true);
   } else {
-    cntx->ChangePSub(server_family_.channel_store(), false, true, args);
+    cntx->ChangePSubscription(server_family_.channel_store(), false, true, args);
   }
 }
 

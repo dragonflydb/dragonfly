@@ -41,11 +41,11 @@ class ChannelStore {
     }
   };
 
-  void AddSubscription(std::string_view channel, ConnectionContext* me, uint32_t thread_id);
-  void RemoveSubscription(std::string_view channel, ConnectionContext* me);
+  void AddSub(std::string_view channel, ConnectionContext* me, uint32_t thread_id);
+  void RemoveSub(std::string_view channel, ConnectionContext* me);
 
-  void AddGlobPattern(std::string_view pattern, ConnectionContext* me, uint32_t thread_id);
-  void RemoveGlobPattern(std::string_view pattern, ConnectionContext* me);
+  void AddPatternSub(std::string_view pattern, ConnectionContext* me, uint32_t thread_id);
+  void RemovePatternSub(std::string_view pattern, ConnectionContext* me);
 
   std::vector<Subscriber> FetchSubscribers(std::string_view channel);
 
@@ -53,20 +53,16 @@ class ChannelStore {
   size_t PatternCount() const;
 
  private:
-  using SubscribeMap = absl::flat_hash_map<ConnectionContext*, unsigned>;
+  using ThreadId = unsigned;
+  using SubscribeMap = absl::flat_hash_map<ConnectionContext*, ThreadId>;
 
-  struct ChannelMap : absl::flat_hash_map<std::string, SubscribeMap> {
+  struct ChannelMap : absl::flat_hash_map<std::string, std::unique_ptr<SubscribeMap>> {
     void Add(std::string_view key, ConnectionContext* me, uint32_t thread_id);
     void Remove(std::string_view key, ConnectionContext* me);
   };
 
   static void Fill(const SubscribeMap& src, const std::string& pattern,
                    std::vector<Subscriber>* out);
-
-  struct SubInfo {
-    unsigned thread_id;
-    ConnectionContext* conn_cntx;
-  };
 
   mutable folly::RWSpinLock lock_;
   ChannelMap channels_;

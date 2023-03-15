@@ -71,8 +71,8 @@ vector<unsigned> ChangeSubscriptions(bool pattern, CmdArgList args, bool to_add,
   auto& sinfo = *conn->conn_state.subscribe_info.get();
   auto& local_store = pattern ? sinfo.patterns : sinfo.channels;
 
-  auto sadd = pattern ? &ChannelStore::AddGlobPattern : &ChannelStore::AddSubscription;
-  auto sremove = pattern ? &ChannelStore::RemoveGlobPattern : &ChannelStore::RemoveSubscription;
+  auto sadd = pattern ? &ChannelStore::AddPatternSub : &ChannelStore::AddSub;
+  auto sremove = pattern ? &ChannelStore::RemovePatternSub : &ChannelStore::RemoveSub;
 
   int32_t tid = util::ProactorBase::GetIndex();
   DCHECK_GE(tid, 0);
@@ -113,8 +113,8 @@ void ConnectionContext::ChangeSubscription(ChannelStore* store, bool to_add, boo
   }
 }
 
-void ConnectionContext::ChangePSub(ChannelStore* store, bool to_add, bool to_reply,
-                                   CmdArgList args) {
+void ConnectionContext::ChangePSubscription(ChannelStore* store, bool to_add, bool to_reply,
+                                            CmdArgList args) {
   vector<unsigned> result = ChangeSubscriptions(true, args, to_add, to_reply, this, store);
 
   if (to_reply) {
@@ -147,7 +147,7 @@ void ConnectionContext::PUnsubscribeAll(ChannelStore* store, bool to_reply) {
   StringVec patterns(conn_state.subscribe_info->patterns.begin(),
                      conn_state.subscribe_info->patterns.end());
   CmdArgVec arg_vec(patterns.begin(), patterns.end());
-  ChangePSub(store, false, to_reply, CmdArgList{arg_vec});
+  ChangePSubscription(store, false, to_reply, CmdArgList{arg_vec});
 }
 
 void ConnectionContext::SendSubscriptionChangedResponse(string_view action,

@@ -135,7 +135,7 @@ class ConnectionContext : public facade::ConnectionContext {
   }
 
   void ChangeSubscription(ChannelStore* store, bool to_add, bool to_reply, CmdArgList args);
-  void ChangePSub(ChannelStore* store, bool to_add, bool to_reply, CmdArgList args);
+  void ChangePSubscription(ChannelStore* store, bool to_add, bool to_reply, CmdArgList args);
   void UnsubscribeAll(ChannelStore* store, bool to_reply);
   void PUnsubscribeAll(ChannelStore* store, bool to_reply);
   void ChangeMonitor(bool start);  // either start or stop monitor on a given connection
