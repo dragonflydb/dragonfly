@@ -16,12 +16,12 @@ type DragonflySpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
-	// Replicas is the number of replicas of the database
+	// Replicas is the number of read-only Dragonfly replicas to deploy
 	Replicas int32 `json:"replicas,omitempty"`
-	// Image is the image of the database to use
+	// Image is the Dragonfly image to use
 	Image string `json:"image,omitempty"`
 
-	// (Optional) Database container resource limits. Any container limits
+	// (Optional) Dragonfly container resource limits. Any container limits
 	// can be specified.
 	// Default: (not specified)
 	// +optional
@@ -34,7 +34,7 @@ type DragonflyStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
-	// Created is true if the database resources have been created
+	// Created is true if the Dragonfly resources have been created
 	Created bool `json:"created,omitempty"`
 }
 

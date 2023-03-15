@@ -16,9 +16,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// GetDatabaseResources returns the resources required for a Dragonfly
+// GetDragonflyResources returns the resources required for a Dragonfly
 // Instance
-func GetDatabaseResources(ctx context.Context, db *resourcesv1.Dragonfly) ([]client.Object, error) {
+func GetDragonflyResources(ctx context.Context, db *resourcesv1.Dragonfly) ([]client.Object, error) {
 	log := log.FromContext(ctx)
 	log.Info(fmt.Sprintf("Creating resources for %s", db.Name))
 
@@ -37,7 +37,7 @@ func GetDatabaseResources(ctx context.Context, db *resourcesv1.Dragonfly) ([]cli
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      db.Name,
 			Namespace: db.Namespace,
-			// Useful for automatically deleting the resources when the Database object is deleted
+			// Useful for automatically deleting the resources when the Dragonfly object is deleted
 			OwnerReferences: []metav1.OwnerReference{
 				{
 					APIVersion: db.APIVersion,
@@ -47,7 +47,7 @@ func GetDatabaseResources(ctx context.Context, db *resourcesv1.Dragonfly) ([]cli
 				},
 			},
 			Labels: map[string]string{
-				KubernetesAppComponentLabelKey: "database",
+				KubernetesAppComponentLabelKey: "dragonfly",
 				KubernetesAppInstanceNameLabel: db.Name,
 				KubernetesAppNameLabelKey:      "dragonfly",
 				KubernetesAppVersionLabelKey:   Version,
@@ -132,7 +132,7 @@ func GetDatabaseResources(ctx context.Context, db *resourcesv1.Dragonfly) ([]cli
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      db.Name,
 			Namespace: db.Namespace,
-			// Useful for automatically deleting the resources when the Database object is deleted
+			// Useful for automatically deleting the resources when the Dragonfly object is deleted
 			OwnerReferences: []metav1.OwnerReference{
 				{
 					APIVersion: db.APIVersion,
@@ -142,7 +142,7 @@ func GetDatabaseResources(ctx context.Context, db *resourcesv1.Dragonfly) ([]cli
 				},
 			},
 			Labels: map[string]string{
-				KubernetesAppComponentLabelKey: "database",
+				KubernetesAppComponentLabelKey: "Dragonfly",
 				KubernetesAppInstanceNameLabel: db.Name,
 				KubernetesAppNameLabelKey:      "dragonfly",
 				KubernetesAppVersionLabelKey:   Version,

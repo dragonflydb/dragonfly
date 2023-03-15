@@ -70,7 +70,7 @@ spec:
         - /manager
         args:
         - --leader-elect
-        image: ghcr.io/pothulapati/flydragon/operator:latest
+        image: controller:latest
         imagePullPolicy: Always
         name: manager
         securityContext:

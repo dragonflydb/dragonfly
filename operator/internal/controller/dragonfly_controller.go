@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"time"
 
-	dfdb "dragonflydb.io/dragonfly/api/v1alpha1"
+	dfv1alpha1 "dragonflydb.io/dragonfly/api/v1alpha1"
 	"dragonflydb.io/dragonfly/internal/resources"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -44,18 +44,18 @@ type DragonflyReconciler struct {
 func (r *DragonflyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 
-	var db dfdb.Dragonfly
-	if err := r.Get(ctx, req.NamespacedName, &db); err != nil {
-		log.Info(fmt.Sprintf("could not get the Database object: %s", req.NamespacedName))
+	var df dfv1alpha1.Dragonfly
+	if err := r.Get(ctx, req.NamespacedName, &df); err != nil {
+		log.Info(fmt.Sprintf("could not get the Dragonfly object: %s", req.NamespacedName))
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	log.Info("Reconciling Database object")
+	log.Info("Reconciling Dragonfly object")
 	// Ignore if resource is already created
-	// TODO: Handle updates to the Database object
-	if !db.Status.Created {
+	// TODO: Handle updates to the Dragonfly object
+	if !df.Status.Created {
 		log.Info("Creating resources")
-		resources, err := resources.GetDatabaseResources(ctx, &db)
+		resources, err := resources.GetDragonflyResources(ctx, &df)
 		if err != nil {
 			log.Error(err, "could not get resources")
 			return ctrl.Result{}, err
@@ -70,21 +70,21 @@ func (r *DragonflyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 
 		log.Info("Waiting for the statefulset to be ready")
-		if err := waitForStatefulSetReady(ctx, r.Client, db.Name, db.Namespace, 2*time.Minute); err != nil {
+		if err := waitForStatefulSetReady(ctx, r.Client, df.Name, df.Namespace, 2*time.Minute); err != nil {
 			log.Error(err, "could not wait for statefulset to be ready")
 			return ctrl.Result{}, err
 		}
 
-		if err := findHealthyAndMarkActive(ctx, r.Client, &db); err != nil {
+		if err := findHealthyAndMarkActive(ctx, r.Client, &df); err != nil {
 			log.Error(err, "could not find healthy and mark active")
 			return ctrl.Result{}, err
 		}
 
 		// Update Status
-		db.Status.Created = true
+		df.Status.Created = true
 		log.Info("Created resources for object")
-		if err := r.Status().Update(ctx, &db); err != nil {
-			log.Error(err, "could not update the Database object")
+		if err := r.Status().Update(ctx, &df); err != nil {
+			log.Error(err, "could not update the Dragonfly object")
 			return ctrl.Result{}, err
 		}
 	}
@@ -95,7 +95,7 @@ func (r *DragonflyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 // SetupWithManager sets up the controller with the Manager.
 func (r *DragonflyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&dfdb.Dragonfly{}).
+		For(&dfv1alpha1.Dragonfly{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Complete(r)

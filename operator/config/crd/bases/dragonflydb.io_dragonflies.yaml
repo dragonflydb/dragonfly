@@ -36,10 +36,11 @@ spec:
             description: DragonflySpec defines the desired state of Dragonfly
             properties:
               image:
-                description: Image is the image of the database to use
+                description: Image is the Dragonfly image to use
                 type: string
               replicas:
-                description: Replicas is the number of replicas of the database
+                description: Replicas is the number of read-only Dragonfly replicas
+                  to deploy
                 format: int32
                 type: integer
             type: object
@@ -47,7 +48,8 @@ spec:
             description: DragonflyStatus defines the observed state of Dragonfly
             properties:
               created:
-                description: Created is true if the database resources have been created
+                description: Created is true if the Dragonfly resources have been
+                  created
                 type: boolean
             type: object
         type: object
