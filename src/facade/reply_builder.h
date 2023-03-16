@@ -96,6 +96,22 @@ class SinkReplyBuilder {
   bool should_batch_ = false;
 };
 
+enum Resp3Type {
+  NONE = 0,
+  BOOLEAN,
+  DOUBLE,
+  LONG,
+  BLOB,
+  STRING,
+  ARRAY,
+  SET,
+  MAP,
+  ATTRIBUTE,
+  PUSH,
+  ERROR,
+  UNKNOWN,
+};
+
 class MCReplyBuilder : public SinkReplyBuilder {
  public:
   MCReplyBuilder(::io::Sink* stream);
@@ -118,6 +134,8 @@ class RedisReplyBuilder : public SinkReplyBuilder {
  public:
   RedisReplyBuilder(::io::Sink* stream);
 
+  void SetResp3(bool is_resp3);
+
   void SendError(std::string_view str, std::string_view type = std::string_view{}) override;
   void SendMGetResponse(const OptResp* resp, uint32_t count) override;
   void SendSimpleString(std::string_view str) override;
@@ -133,8 +151,8 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   // Send *0
   virtual void SendEmptyArray();
 
-  virtual void SendStringArr(absl::Span<const std::string_view> arr);
-  virtual void SendStringArr(absl::Span<const std::string> arr);
+  virtual void SendStringArr(absl::Span<const std::string_view> arr, Resp3Type type);
+  virtual void SendStringArr(absl::Span<const std::string> arr, Resp3Type type);
   virtual void SendNull();
 
   virtual void SendDouble(double val);
@@ -142,6 +160,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   virtual void SendBulkString(std::string_view str);
 
   virtual void StartArray(unsigned len);
+  virtual void StartMap(unsigned len);
 
   static char* FormatDouble(double val, char* dest, unsigned dest_len);
 
@@ -151,7 +170,10 @@ class RedisReplyBuilder : public SinkReplyBuilder {
 
  private:
   using StrPtr = std::variant<const std::string_view*, const std::string*>;
-  void SendStringArr(StrPtr str_ptr, uint32_t len);
+  void SendStringArr(StrPtr str_ptr, uint32_t len, Resp3Type type);
+
+  bool is_resp3_ = false;
+  const char* NullString();
 };
 
 class ReqSerializer {

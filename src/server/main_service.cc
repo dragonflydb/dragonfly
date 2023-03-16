@@ -215,8 +215,8 @@ class InterpreterReplier : public RedisReplyBuilder {
   void SendSimpleStrArr(const string_view* arr, uint32_t count) final;
   void SendNullArray() final;
 
-  void SendStringArr(absl::Span<const string_view> arr) final;
-  void SendStringArr(absl::Span<const string> arr) final;
+  void SendStringArr(absl::Span<const string_view> arr, Resp3Type type) final;
+  void SendStringArr(absl::Span<const string> arr, Resp3Type type) final;
   void SendNull() final;
 
   void SendLong(long val) final;
@@ -345,12 +345,12 @@ void InterpreterReplier::SendNullArray() {
   PostItem();
 }
 
-void InterpreterReplier::SendStringArr(absl::Span<const string_view> arr) {
+void InterpreterReplier::SendStringArr(absl::Span<const string_view> arr, Resp3Type type) {
   SendSimpleStrArr(arr.data(), arr.size());
   PostItem();
 }
 
-void InterpreterReplier::SendStringArr(absl::Span<const string> arr) {
+void InterpreterReplier::SendStringArr(absl::Span<const string> arr, Resp3Type type) {
   explr_->OnArrayStart(arr.size());
   for (uint32_t i = 0; i < arr.size(); ++i) {
     explr_->OnString(arr[i]);
@@ -1488,7 +1488,7 @@ void Service::PubsubChannels(string_view pattern, ConnectionContext* cntx) {
     union_set.insert(union_set.end(), v.begin(), v.end());
   }
 
-  (*cntx)->SendStringArr(union_set);
+  (*cntx)->SendStringArr(union_set, Resp3Type::ARRAY);
 }
 
 void Service::PubsubPatterns(ConnectionContext* cntx) {

@@ -383,7 +383,7 @@ TEST_F(RedisReplyBuilderTest, SendStringViewArr) {
   const std::vector<std::string_view> kArrayMessage{
       // random values
       "(((", "}}}", "&&&&", "####", "___", "+++", "0.1234", "bar"};
-  builder_->SendStringArr(kArrayMessage);
+  builder_->SendStringArr(kArrayMessage, Resp3Type::ARRAY);
   ASSERT_TRUE(builder_->err_count().empty());
   // verify content
   std::vector<std::string_view> message_tokens = TokenizeMessage();
@@ -414,7 +414,7 @@ TEST_F(RedisReplyBuilderTest, SendBulkStringArr) {
   const std::vector<std::string> kArrayMessage{
       // Test this one with large values
       std::string(1024, '.'), std::string(2048, ','), std::string(4096, ' ')};
-  builder_->SendStringArr(kArrayMessage);
+  builder_->SendStringArr(kArrayMessage, Resp3Type::ARRAY);
   ASSERT_TRUE(builder_->err_count().empty());
   std::vector<std::string_view> message_tokens = TokenizeMessage();
   // the form of this is *<array size>\r\n$<string1 size>\r\n<string1>..$<stringN

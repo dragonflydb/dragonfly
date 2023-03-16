@@ -27,6 +27,8 @@ ABSL_DECLARE_FLAG(bool, use_set2);
 
 namespace dfly {
 
+using facade::Resp3Type;
+
 using namespace std;
 using absl::GetFlag;
 
@@ -1107,9 +1109,9 @@ void SMIsMember(CmdArgList args, ConnectionContext* cntx) {
   OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
   if (result == OpStatus::KEY_NOTFOUND) {
     memberships.assign(vals.size(), "0");
-    return (*cntx)->SendStringArr(memberships);
+    return (*cntx)->SendStringArr(memberships, Resp3Type::ARRAY);
   } else if (result == OpStatus::OK) {
-    return (*cntx)->SendStringArr(memberships);
+    return (*cntx)->SendStringArr(memberships, Resp3Type::ARRAY);
   }
   (*cntx)->SendError(result.status());
 }
@@ -1205,7 +1207,7 @@ void SPop(CmdArgList args, ConnectionContext* cntx) {
         (*cntx)->SendBulkString(result.value().front());
       }
     } else {  // SPOP key cnt
-      (*cntx)->SendStringArr(*result);
+      (*cntx)->SendStringArr(*result, Resp3Type::SET);
     }
     return;
   }
@@ -1241,7 +1243,7 @@ void SDiff(CmdArgList args, ConnectionContext* cntx) {
   if (cntx->conn_state.script_info) {  // sort under script
     sort(arr.begin(), arr.end());
   }
-  (*cntx)->SendStringArr(arr);
+  (*cntx)->SendStringArr(arr, Resp3Type::SET);
 }
 
 void SDiffStore(CmdArgList args, ConnectionContext* cntx) {
@@ -1309,7 +1311,7 @@ void SMembers(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(svec.begin(), svec.end());
     }
-    (*cntx)->SendStringArr(*result);
+    (*cntx)->SendStringArr(*result, Resp3Type::SET);
   } else {
     (*cntx)->SendError(result.status());
   }
@@ -1331,7 +1333,7 @@ void SInter(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(arr.begin(), arr.end());
     }
-    (*cntx)->SendStringArr(arr);
+    (*cntx)->SendStringArr(arr, Resp3Type::SET);
   } else {
     (*cntx)->SendError(result.status());
   }
@@ -1394,7 +1396,7 @@ void SUnion(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(arr.begin(), arr.end());
     }
-    (*cntx)->SendStringArr(arr);
+    (*cntx)->SendStringArr(arr, Resp3Type::SET);
   } else {
     (*cntx)->SendError(unionset.status());
   }

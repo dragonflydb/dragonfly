@@ -163,6 +163,10 @@ char* RedisReplyBuilder::FormatDouble(double val, char* dest, unsigned dest_len)
 RedisReplyBuilder::RedisReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
 }
 
+void RedisReplyBuilder::SetResp3(bool is_resp3) {
+  is_resp3_ = is_resp3;
+}
+
 void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
   if (err_type.empty()) {
     err_type = str;
@@ -195,10 +199,15 @@ void RedisReplyBuilder::SendSetSkipped() {
   SendNull();
 }
 
-void RedisReplyBuilder::SendNull() {
-  constexpr char kNullStr[] = "$-1\r\n";
+const char* RedisReplyBuilder::NullString() {
+  if (is_resp3_) {
+    return "_\r\n";
+  }
+  return "$-1\r\n";
+}
 
-  iovec v[] = {IoVec(kNullStr)};
+void RedisReplyBuilder::SendNull() {
+  iovec v[] = {IoVec(NullString())};
 
   Send(v, ABSL_ARRAYSIZE(v));
 }
@@ -265,7 +274,13 @@ void RedisReplyBuilder::SendDouble(double val) {
   StringBuilder sb(buf, sizeof(buf));
   CHECK(dfly_conv.ToShortest(val, &sb));
 
-  SendBulkString(sb.Finalize());
+  if (!is_resp3_) {
+    SendBulkString(sb.Finalize());
+  } else {
+    // RESP3
+    string str = absl::StrCat(":", sb.Finalize(), kCRLF);
+    SendRaw(str);
+  }
 }
 
 void RedisReplyBuilder::SendMGetResponse(const OptResp* resp, uint32_t count) {
@@ -300,13 +315,13 @@ void RedisReplyBuilder::SendEmptyArray() {
   StartArray(0);
 }
 
-void RedisReplyBuilder::SendStringArr(absl::Span<const std::string_view> arr) {
+void RedisReplyBuilder::SendStringArr(absl::Span<const std::string_view> arr, Resp3Type type) {
   if (arr.empty()) {
     SendRaw("*0\r\n");
     return;
   }
 
-  SendStringArr(arr.data(), arr.size());
+  SendStringArr(arr.data(), arr.size(), type);
 }
 
 // This implementation a bit complicated because it uses vectorized
@@ -314,19 +329,23 @@ void RedisReplyBuilder::SendStringArr(absl::Span<const std::string_view> arr) {
 // to low numbers (around 1024). Therefore, to make it robust we send the array in batches.
 // We limit the vector length to 256 and when it fills up we flush it to the socket and continue
 // iterating.
-void RedisReplyBuilder::SendStringArr(absl::Span<const string> arr) {
+void RedisReplyBuilder::SendStringArr(absl::Span<const string> arr, Resp3Type type) {
   if (arr.empty()) {
     SendRaw("*0\r\n");
     return;
   }
-  SendStringArr(arr.data(), arr.size());
+  SendStringArr(arr.data(), arr.size(), type);
 }
 
 void RedisReplyBuilder::StartArray(unsigned len) {
   SendRaw(absl::StrCat("*", len, kCRLF));
 }
 
-void RedisReplyBuilder::SendStringArr(StrPtr str_ptr, uint32_t len) {
+void RedisReplyBuilder::StartMap(unsigned len) {
+  SendRaw(absl::StrCat("%", len, kCRLF));
+}
+
+void RedisReplyBuilder::SendStringArr(StrPtr str_ptr, uint32_t len, Resp3Type type) {
   // When vector length is too long, Send returns EMSGSIZE.
   size_t vec_len = std::min<size_t>(256u, len);
 
@@ -334,7 +353,20 @@ void RedisReplyBuilder::SendStringArr(StrPtr str_ptr, uint32_t len) {
   absl::FixedArray<char, 64> meta((vec_len + 1) * 16);
   char* next = meta.data();
 
-  *next++ = '*';
+  char type_char = '*';
+  if (is_resp3_) {
+    switch (type) {
+      case Resp3Type::MAP:
+        type_char = '%';
+        len = 0.5 * len;  // Each key value pair counts as one.
+        break;
+      case Resp3Type::SET:
+        type_char = '~';
+        break;
+    }
+  }
+
+  *next++ = type_char;
   next = absl::numbers_internal::FastIntToBuffer(len, next);
   *next++ = '\r';
   *next++ = '\n';

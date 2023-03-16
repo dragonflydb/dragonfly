@@ -697,7 +697,11 @@ void HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t getall_mask) 
   OpResult<vector<string>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    (*cntx)->SendStringArr(absl::Span<const string>{*result});
+    auto resp3Type = Resp3Type::ARRAY;
+    if (getall_mask == (VALUES | FIELDS))
+      resp3Type = Resp3Type::MAP;
+
+    (*cntx)->SendStringArr(absl::Span<const string>{*result}, resp3Type);
   } else {
     (*cntx)->SendError(result.status());
   }

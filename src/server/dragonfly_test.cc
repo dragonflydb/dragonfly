@@ -231,10 +231,15 @@ TEST_F(DflyEngineTest, Hello) {
                           ArgType(RespExpr::STRING), "proto", IntArg(2), "id",
                           ArgType(RespExpr::INT64), "mode", "standalone", "role", "master"));
 
+  resp = Run({"hello", "3"});
+  ASSERT_THAT(resp, ArrLen(14));
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("server", "redis", "version", "6.2.11", "dfly_version",
+                          ArgType(RespExpr::STRING), "proto", IntArg(3), "id",
+                          ArgType(RespExpr::INT64), "mode", "standalone", "role", "master"));
+
   // These are valid arguments to HELLO, however as they are not yet supported the implementation
   // is degraded to 'unknown command'.
-  EXPECT_THAT(Run({"hello", "3"}),
-              ErrArg("ERR unknown command 'HELLO' with args beginning with: `3`"));
   EXPECT_THAT(
       Run({"hello", "2", "AUTH", "uname", "pwd"}),
       ErrArg("ERR unknown command 'HELLO' with args beginning with: `2`, `AUTH`, `uname`, `pwd`"));
