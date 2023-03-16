@@ -17,7 +17,7 @@ jobs:
     strategy:
       matrix:
         # Build with these flags
-        flags: ["-DMARCH_OPT=-march=x86_64"]
+        flags: ["-DMARCH_OPT=-march=x86-64"]
     timeout-minutes: 30
 
     container:
