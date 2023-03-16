@@ -11,7 +11,7 @@ endif()
 add_library(dfly_transaction db_slice.cc malloc_stats.cc engine_shard_set.cc blocking_controller.cc
             common.cc
             io_mgr.cc journal/journal.cc journal/journal_slice.cc server_state.cc table.cc
-            tiered_storage.cc transaction.cc)
+            tiered_storage.cc top_keys.cc transaction.cc)
 cxx_link(dfly_transaction uring_fiber_lib dfly_core strings_lib)
 
 add_library(dragonfly_lib  channel_slice.cc command_registry.cc
