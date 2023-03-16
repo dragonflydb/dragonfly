@@ -77,7 +77,9 @@ absl::flat_hash_map<std::string, uint64_t> TopKeys::GetTopKeys() const {
   return results;
 }
 
-bool TopKeys::IsEnabled() const { return options_.enabled; }
+bool TopKeys::IsEnabled() const {
+  return options_.enabled;
+}
 
 TopKeys::Cell& TopKeys::GetCell(uint64_t array, uint64_t bucket) {
   DCHECK(array < options_.arrays);
