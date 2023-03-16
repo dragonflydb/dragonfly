@@ -437,15 +437,15 @@ void Topkeys(const http::QueryArgs& args, HttpContext* send) {
     vector<string> rows(shard_set->size());
 
     shard_set->RunBriefInParallel([&](EngineShard* shard) {
-        for (const auto& db : shard->db_slice().databases()) {
-          if (db->top_keys.IsEnabled()) {
-            is_enabled = true;
-            for (const auto& [key, count] : db->top_keys.GetTopKeys()) {
-              absl::StrAppend(&resp.body(), key, ":\t", count, "\n");
-            }
+      for (const auto& db : shard->db_slice().databases()) {
+        if (db->top_keys.IsEnabled()) {
+          is_enabled = true;
+          for (const auto& [key, count] : db->top_keys.GetTopKeys()) {
+            absl::StrAppend(&resp.body(), key, ":\t", count, "\n");
           }
         }
-      });
+      }
+    });
   }
 
   resp.body() += "</pre>";
