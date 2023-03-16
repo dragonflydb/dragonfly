@@ -329,6 +329,7 @@ pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string
   }
 
   events_.hits++;
+  db.top_keys.Touch(key);
   return res;
 }
 

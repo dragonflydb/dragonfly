@@ -4,7 +4,11 @@
 
 #include "server/table.h"
 
+#include "base/flags.h"
 #include "base/logging.h"
+
+ABSL_FLAG(bool, enable_top_keys_tracking, false,
+          "Enables / disables tracking of hot keys debugging feature");
 
 namespace dfly {
 
@@ -31,7 +35,8 @@ DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
 
 DbTable::DbTable(std::pmr::memory_resource* mr)
     : prime(kInitSegmentLog, detail::PrimeTablePolicy{}, mr),
-      expire(0, detail::ExpireTablePolicy{}, mr), mcflag(0, detail::ExpireTablePolicy{}, mr) {
+      expire(0, detail::ExpireTablePolicy{}, mr), mcflag(0, detail::ExpireTablePolicy{}, mr),
+      top_keys({.enabled = absl::GetFlag(FLAGS_enable_top_keys_tracking)}) {
 }
 
 DbTable::~DbTable() {

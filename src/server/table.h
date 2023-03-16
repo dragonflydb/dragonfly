@@ -13,6 +13,7 @@
 #include "core/intent_lock.h"
 #include "server/conn_context.h"
 #include "server/detail/table.h"
+#include "server/top_keys.h"
 
 namespace dfly {
 
@@ -71,6 +72,8 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   mutable DbTableStats stats;
   ExpireTable::Cursor expire_cursor;
   PrimeTable::Cursor prime_cursor;
+
+  TopKeys top_keys;
 
   explicit DbTable(std::pmr::memory_resource* mr);
   ~DbTable();

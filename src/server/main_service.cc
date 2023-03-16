@@ -428,6 +428,34 @@ bool EvalValidator(CmdArgList args, ConnectionContext* cntx) {
   return true;
 }
 
+void Topkeys(const http::QueryArgs& args, HttpContext* send) {
+  http::StringResponse resp = http::MakeStringResponse(h2::status::ok);
+  resp.body() = "<h1>Detected top keys</h1>\n<pre>\n";
+
+  bool is_enabled = false;
+  if (shard_set) {
+    vector<string> rows(shard_set->size());
+
+    shard_set->RunBriefInParallel([&](EngineShard* shard) {
+        for (const auto& db : shard->db_slice().databases()) {
+          if (db->top_keys.IsEnabled()) {
+            is_enabled = true;
+            for (const auto& [key, count] : db->top_keys.GetTopKeys()) {
+              absl::StrAppend(&resp.body(), key, ":\t", count, "\n");
+            }
+          }
+        }
+      });
+  }
+
+  resp.body() += "</pre>";
+
+  if (!is_enabled) {
+    resp.body() += "<i>TopKeys are disabled.</i>";
+  }
+  send->Invoke(std::move(resp));
+}
+
 void TxTable(const http::QueryArgs& args, HttpContext* send) {
   using html::SortedTable;
 
@@ -1566,6 +1594,7 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
 void Service::ConfigureHttpHandlers(util::HttpListenerBase* base) {
   server_family_.ConfigureMetrics(base);
   base->RegisterCb("/txz", TxTable);
+  base->RegisterCb("/topkeys", Topkeys);
 }
 
 void Service::OnClose(facade::ConnectionContext* cntx) {
