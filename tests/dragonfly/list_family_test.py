@@ -34,7 +34,7 @@ class TestBlPop:
         assert wt_blpop.wait(2)
         assert wt_blpop.result[1] == 'a'
         watched = client.execute_command('DEBUG WATCHED')
-        assert watched == []
+        assert watched == ['awaked', [], 'watched', []]
 
         wt_blpop.async_blpop(client)
         client.lpush('list2{t}', 'b')

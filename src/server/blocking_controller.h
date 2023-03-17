@@ -24,6 +24,10 @@ class BlockingController {
     return !awakened_transactions_.empty();
   }
 
+  const auto& awakened_transactions() const {
+    return awakened_transactions_;
+  }
+
   // Iterates over awakened key candidates in each db and moves verified ones into
   // global verified_awakened_ array.
   // Returns true if there are active awakened keys, false otherwise.

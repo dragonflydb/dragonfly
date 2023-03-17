@@ -38,6 +38,7 @@ using namespace facade;
 namespace fs = std::filesystem;
 using absl::GetFlag;
 using absl::StrAppend;
+using absl::StrCat;
 
 struct PopulateBatch {
   DbIndex dbid;
@@ -418,8 +419,10 @@ void DebugCmd::Inspect(string_view key) {
 }
 
 void DebugCmd::Watched() {
-  vector<string> watched_keys;
   boost::fibers::mutex mu;
+
+  vector<string> watched_keys;
+  vector<string> awaked_trans;
 
   auto cb = [&](EngineShard* shard) {
     auto* bc = shard->blocking_controller();
@@ -428,10 +431,17 @@ void DebugCmd::Watched() {
 
       lock_guard lk(mu);
       watched_keys.insert(watched_keys.end(), keys.begin(), keys.end());
+      for (auto* tx : bc->awakened_transactions()) {
+        awaked_trans.push_back(StrCat("[", shard->shard_id(), "] ", tx->DebugId()));
+      }
     }
   };
 
   shard_set->RunBlockingInParallel(cb);
+  (*cntx_)->StartArray(4);
+  (*cntx_)->SendBulkString("awaked");
+  (*cntx_)->SendStringArr(awaked_trans);
+  (*cntx_)->SendBulkString("watched");
   (*cntx_)->SendStringArr(watched_keys);
 }
 

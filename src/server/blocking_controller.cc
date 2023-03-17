@@ -21,7 +21,7 @@ using namespace std;
 struct WatchItem {
   Transaction* trans;
 
-  Transaction* get() {
+  Transaction* get() const {
     return trans;
   }
 
@@ -64,7 +64,7 @@ BlockingController::~BlockingController() {
 }
 
 void BlockingController::DbWatchTable::RemoveEntry(WatchQueueMap::iterator it) {
-  DVLOG(1) << "Erasing watchqueue key " << it->first;
+  DVLOG(2) << "Erasing watchqueue key " << it->first;
 
   awakened_keys.erase(it->first);
   queue_map.erase(it);
@@ -137,8 +137,6 @@ void BlockingController::RunStep(Transaction* completed_t) {
 }
 
 void BlockingController::AddWatched(ArgSlice keys, Transaction* trans) {
-  VLOG(1) << "AddWatched [" << owner_->shard_id() << "] " << trans->DebugId();
-
   auto [dbit, added] = watched_dbs_.emplace(trans->GetDbIndex(), nullptr);
   if (added) {
     dbit->second.reset(new DbWatchTable);
@@ -160,7 +158,7 @@ void BlockingController::AddWatched(ArgSlice keys, Transaction* trans) {
       if (last == trans)
         continue;
     }
-    DVLOG(2) << "Emplace " << trans << " " << trans->DebugId() << " to watch " << key;
+    DVLOG(2) << "Emplace " << trans->DebugId() << " to watch " << key;
     res->second->items.emplace_back(trans);
   }
 }
@@ -219,7 +217,6 @@ void BlockingController::AwakeWatched(DbIndex db_index, string_view db_key) {
   }
 }
 
-// Internal function called from RunStep().
 // Marks the queue as active and notifies the first transaction in the queue.
 void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueueMap* wqm) {
   auto w_it = wqm->find(key);
