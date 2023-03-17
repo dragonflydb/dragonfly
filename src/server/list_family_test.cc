@@ -730,6 +730,35 @@ TEST_F(ListFamilyTest, BRPopLPushSingleShardBlocking) {
   ASSERT_EQ(0, NumWatched());
 }
 
+TEST_F(ListFamilyTest, BRPopContended) {
+  RespExpr resp;
+  atomic_bool done{false};
+  constexpr auto kNumFibers = 4;
+
+  // Run the fiber at creation.
+  fibers_ext::Fiber fb[kNumFibers];
+  for (int i = 0; i < kNumFibers; i++) {
+    fb[i] = pp_->at(1)->LaunchFiber(fibers::launch::dispatch, [&] {
+      string id = StrCat("id", i);
+      while (!done) {
+        Run(id, {"brpop", "k0", "k1", "k2", "k3", "k4", "0.1"});
+      };
+    });
+  }
+
+  for (int i = 0; i < 500; i++) {
+    string key = absl::StrCat("k", i % 3);
+    Run({"lpush", key, "foo"});
+  }
+
+  done = true;
+  for (int i = 0; i < kNumFibers; i++) {
+    fb[i].Join();
+  }
+  ASSERT_EQ(0, NumWatched());
+  ASSERT_FALSE(HasAwakened());
+}
+
 TEST_F(ListFamilyTest, BRPopLPushTwoShards) {
   RespExpr resp;
   EXPECT_THAT(Run({"brpoplpush", "x", "z", "0.05"}), ArgType(RespExpr::NIL));
