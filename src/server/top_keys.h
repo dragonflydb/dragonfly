@@ -41,8 +41,8 @@ class TopKeys {
     // low value for high load is frequent string copying and memory allocation.
     uint64_t min_key_count_to_record = 100;
 
-    // Disabled by default, as this is a debug feature with runtime and memory overhead.
-    bool enabled = false;
+    // Pass false to disable, making this class no-op.
+    bool enabled = true;
   };
 
   explicit TopKeys(Options options);
