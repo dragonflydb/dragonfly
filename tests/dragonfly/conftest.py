@@ -40,9 +40,11 @@ def test_env(tmp_dir: Path):
     env["DRAGONFLY_TMP"] = str(tmp_dir)
     return env
 
+
 @pytest.fixture(scope="session", params=[{}])
 def df_seeder_factory(request) -> DflySeederFactory:
     return DflySeederFactory(request.config.getoption("--log-seeder"))
+
 
 @pytest.fixture(scope="session", params=[{}])
 def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
@@ -54,12 +56,13 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
         scripts_dir, '../../build-dbg/dragonfly'))
 
     args = request.param if request.param else {}
-
+    existing = request.config.getoption("--existing-port")
     params = DflyParams(
         path=path,
         cwd=tmp_dir,
         gdb=request.config.getoption("--gdb"),
         args=request.config.getoption("--df"),
+        existing_port=int(existing) if existing else None,
         env=test_env
     )
 
@@ -166,3 +169,5 @@ def pytest_addoption(parser):
     parser.addoption(
         '--log-seeder', action='store', default=None, help='Store last generator commands in file'
     )
+    parser.addoption(
+        '--existing-port', action='store', default=None, help='Provide a port to the existing process for the test')

@@ -199,7 +199,7 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
 
   auto* context = conn_wrapper->cmd_cntx();
 
-  DCHECK(context->transaction == nullptr);
+  DCHECK(context->transaction == nullptr) << id;
 
   service_->DispatchCommand(CmdArgList{args}, context);
 

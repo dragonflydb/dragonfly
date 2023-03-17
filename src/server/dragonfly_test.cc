@@ -185,7 +185,7 @@ TEST_F(DflyEngineTest, EvalBug713b) {
   fibers_ext::Fiber fibers[kNumFibers];
 
   for (unsigned j = 0; j < kNumFibers; ++j) {
-    fibers[j] = pp_->at(1)->LaunchFiber([=, this] {
+    fibers[j] = pp_->at(1)->LaunchFiber([j, script, this] {
       for (unsigned i = 0; i < 50; ++i) {
         Run(StrCat("fb", j), {"eval", script, "3", kKeySid0, kKeySid1, kKeySid2});
       }

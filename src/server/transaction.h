@@ -278,7 +278,7 @@ class Transaction {
     uint32_t arg_start = 0;  // Indices into args_ array.
     uint16_t arg_count = 0;
 
-    // Accessed only within the engine-shard thread.
+    // Accessed within shard thread.
     // Bitmask of LocalState enums.
     uint16_t local_mask{0};
 
@@ -321,7 +321,7 @@ class Transaction {
   };
 
   struct PerShardCache {
-    bool requested_active = false;  // Activate on shard geradless of presence of keys.
+    bool requested_active = false;  // Activate on shard regardless of presence of keys.
     std::vector<std::string_view> args;
     std::vector<uint32_t> original_index;
 

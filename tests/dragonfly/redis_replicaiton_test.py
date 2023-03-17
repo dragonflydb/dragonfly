@@ -68,7 +68,11 @@ async def check_data(seeder, replicas, c_replicas):
 @pytest.fixture(scope="function")
 def redis_server() -> RedisServer:
     s = RedisServer()
-    s.start()
+    try:
+        s.start()
+    except FileNotFoundError as e:
+        pytest.skip("Redis server not found")
+        return None
     time.sleep(1)
     yield s
     s.stop()

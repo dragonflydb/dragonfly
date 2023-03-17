@@ -53,7 +53,7 @@ Transaction::Transaction(const CommandId* cid, uint32_t thread_index)
 }
 
 Transaction::~Transaction() {
-  DVLOG(2) << "Transaction " << StrCat(Name(), "@", txid_, "/", unique_shard_cnt_, ")")
+  DVLOG(3) << "Transaction " << StrCat(Name(), "@", txid_, "/", unique_shard_cnt_, ")")
            << " destroyed";
 }
 
@@ -402,16 +402,16 @@ bool Transaction::RunInShard(EngineShard* shard) {
   // because Scheduling is done before multi-exec batch is executed. Therefore we
   // lock keys right before the execution of each statement.
 
-  VLOG(2) << "RunInShard: " << DebugId() << " sid:" << shard->shard_id();
-
   unsigned idx = SidToId(shard->shard_id());
   auto& sd = shard_data_[idx];
 
   DCHECK(sd.local_mask & ARMED);
   sd.local_mask &= ~ARMED;
 
+  VLOG(2) << "RunInShard: " << DebugId() << " sid:" << shard->shard_id() << " " << sd.local_mask;
+
   bool was_suspended = sd.local_mask & SUSPENDED_Q;
-  bool awaked_prerun = (sd.local_mask & AWAKED_Q) != 0;
+  bool awaked_prerun = sd.local_mask & AWAKED_Q;
   bool incremental_lock = multi_ && multi_->IsIncrLocks();
 
   // For multi we unlock transaction (i.e. its keys) in UnlockMulti() call.
@@ -426,7 +426,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
   // We make sure that we lock exactly once for each (multi-hop) transaction inside
   // transactions that lock incrementally.
   if (!IsGlobal() && incremental_lock && ((sd.local_mask & KEYLOCK_ACQUIRED) == 0)) {
-    DCHECK(!awaked_prerun);  // we should not have blocking transaction inside multi block.
+    DCHECK(!awaked_prerun);  // we should not have a blocking transaction inside multi block.
 
     sd.local_mask |= KEYLOCK_ACQUIRED;
     shard->db_slice().Acquire(mode, GetLockArgs(idx));
@@ -438,9 +438,10 @@ bool Transaction::RunInShard(EngineShard* shard) {
   // Actually running the callback.
   // If you change the logic here, also please change the logic
   try {
-    // if transaction is suspended (blocked in watched queue), then it's a noop.
     OpStatus status = OpStatus::OK;
 
+    // if a transaction is suspended, we still run it because of brpoplpush/blmove case
+    // that needs to run lpush on its suspended shard.
     status = cb_(this, shard);
 
     if (unique_shard_cnt_ == 1) {
@@ -478,24 +479,26 @@ bool Transaction::RunInShard(EngineShard* shard) {
 
   // If it's a final hop we should release the locks.
   if (should_release) {
-    bool become_suspended = sd.local_mask & SUSPENDED_Q;
+    bool became_suspended = sd.local_mask & SUSPENDED_Q;
+    KeyLockArgs largs;
 
     if (IsGlobal()) {
-      DCHECK(!awaked_prerun && !become_suspended);  // Global transactions can not be blocking.
+      DCHECK(!awaked_prerun && !became_suspended);  // Global transactions can not be blocking.
       shard->shard_lock()->Release(Mode());
     } else {  // not global.
-      KeyLockArgs largs = GetLockArgs(idx);
+      largs = GetLockArgs(idx);
       DCHECK(sd.local_mask & KEYLOCK_ACQUIRED);
 
       // If a transaction has been suspended, we keep the lock so that future transaction
       // touching those keys will be ordered via TxQueue. It's necessary because we preserve
       // the atomicity of awaked transactions by halting the TxQueue.
-      if (was_suspended || !become_suspended) {
+      if (was_suspended || !became_suspended) {
         shard->db_slice().Release(mode, largs);
         sd.local_mask &= ~KEYLOCK_ACQUIRED;
       }
       sd.local_mask &= ~OUT_OF_ORDER;
     }
+
     // It has 2 responsibilities.
     // 1: to go over potential wakened keys, verify them and activate watch queues.
     // 2: if this transaction was notified and finished running - to remove it from the head
@@ -644,7 +647,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
 
     // IsArmedInShard() first checks run_count_ before shard_data, so use release ordering.
     shard_data_[0].local_mask |= ARMED;
-    run_count_.fetch_add(1, memory_order_release);
+    run_count_.store(1, memory_order_release);
 
     time_now_ms_ = GetCurrentTimeMs();
 
@@ -679,9 +682,9 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     ExecuteAsync();
   }
 
-  DVLOG(1) << "ScheduleSingleHop before Wait " << DebugId() << " " << run_count_.load();
+  DVLOG(2) << "ScheduleSingleHop before Wait " << DebugId() << " " << run_count_.load();
   WaitForShardCallbacks();
-  DVLOG(1) << "ScheduleSingleHop after Wait " << DebugId();
+  DVLOG(2) << "ScheduleSingleHop after Wait " << DebugId();
 
   if (was_ooo)
     coordinator_state_ |= COORD_OOO;
@@ -795,7 +798,7 @@ void Transaction::ExecuteAsync() {
     uint32_t seq_after = seqlock_.load(memory_order_acquire);
     bool should_poll = (seq_after == seq) && (GetLocalMask(shard->shard_id()) & ARMED);
 
-    DVLOG(2) << "PollExecCb " << DebugId() << " sid(" << shard->shard_id() << ") "
+    DVLOG(3) << "PollExecCb " << DebugId() << " sid(" << shard->shard_id() << ") "
              << run_count_.load(memory_order_relaxed) << ", should_poll: " << should_poll;
 
     // We verify that this callback is still relevant.
@@ -808,9 +811,11 @@ void Transaction::ExecuteAsync() {
       // Therefore, everything that should be handled during the callback execution
       // should go into RunInShard.
       shard->PollExecution("exec_cb", this);
+    } else {
+      VLOG(1) << "Skipping PollExecution " << DebugId() << " sid(" << shard->shard_id() << ")";
     }
 
-    DVLOG(2) << "ptr_release " << DebugId() << " " << seq;
+    DVLOG(3) << "ptr_release " << DebugId() << " " << seq;
     intrusive_ptr_release(this);  // against use_count_.fetch_add above.
   };
 
@@ -850,7 +855,7 @@ void Transaction::RunQuickie(EngineShard* shard) {
 // runs in coordinator thread.
 // Marks the transaction as expired and removes it from the waiting queue.
 void Transaction::UnwatchBlocking(bool should_expire, WaitKeysProvider wcb) {
-  DVLOG(1) << "UnwatchBlocking " << DebugId();
+  DVLOG(1) << "UnwatchBlocking " << DebugId() << " expire: " << should_expire;
   DCHECK(!IsGlobal());
 
   run_count_.store(unique_shard_cnt_, memory_order_release);
@@ -951,7 +956,7 @@ pair<bool, bool> Transaction::ScheduleInShard(EngineShard* shard) {
     // All transactions in the queue must acquire the intent lock.
     lock_granted = shard->db_slice().Acquire(mode, lock_args) && shard_unlocked;
     sd.local_mask |= KEYLOCK_ACQUIRED;
-    DVLOG(2) << "Lock granted " << lock_granted << " for trans " << DebugId();
+    DVLOG(3) << "Lock granted " << lock_granted << " for trans " << DebugId();
   }
 
   if (!txq->Empty()) {
@@ -1044,8 +1049,7 @@ size_t Transaction::ReverseArgIndex(ShardId shard_id, size_t arg_index) const {
 }
 
 bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provider) {
-  // Assumes that transaction is pending and scheduled. TODO: To verify it with state machine.
-  VLOG(2) << "WaitOnWatch Start use_count(" << GetUseCount() << ")";
+  DVLOG(2) << "WaitOnWatch " << DebugId();
   using namespace chrono;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1090,13 +1094,13 @@ OpStatus Transaction::WatchInShard(ArgSlice keys, EngineShard* shard) {
 
   auto& sd = shard_data_[idx];
   CHECK_EQ(0, sd.local_mask & SUSPENDED_Q);
-  DCHECK_EQ(0, sd.local_mask & ARMED);
 
   auto* bc = shard->EnsureBlockingController();
   bc->AddWatched(keys, this);
 
   sd.local_mask |= SUSPENDED_Q;
-  DVLOG(1) << "AddWatched " << DebugId() << " local_mask:" << sd.local_mask;
+  DVLOG(2) << "AddWatched " << DebugId() << " local_mask:" << sd.local_mask
+           << ", first_key:" << keys.front();
 
   return OpStatus::OK;
 }
@@ -1172,28 +1176,6 @@ void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, E
   this->DecreaseRunCnt();
 }
 
-#if 0
-// HasResultConverged has detailed documentation on how convergence is determined.
-void Transaction::CheckForConvergence(EngineShard* shard) {
-  unsigned idx = SidToId(shard->shard_id());
-  auto& sd = shard_data_[idx];
-
-  TxId notify = notify_txid();
-
-  if ((sd.local_mask & AWAKED_Q) || shard->HasResultConverged(notify)) {
-    CHECK_GE(DecreaseRunCnt(), 1u);
-    return;
-  }
-
-  LOG(DFATAL) << "TBD";
-
-  BlockingController* bc = shard->blocking_controller();
-  CHECK(bc);  // must be present because we have watched this shard before.
-
-  bc->RegisterAwaitForConverge(this);
-}
-#endif
-
 inline uint32_t Transaction::DecreaseRunCnt() {
   // to protect against cases where Transaction is destroyed before run_ec_.notify
   // finishes running. We can not put it inside the (res == 1) block because then it's too late.
@@ -1223,7 +1205,7 @@ bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid) {
     return false;
   }
 
-  DVLOG(1) << "NotifySuspended " << DebugId() << ", local_mask:" << local_mask << " by "
+  DVLOG(1) << "NotifySuspended " << DebugId() << ", local_mask:" << local_mask << " by commited_id "
            << committed_txid;
 
   // local_mask could be awaked (i.e. not suspended) if the transaction has been

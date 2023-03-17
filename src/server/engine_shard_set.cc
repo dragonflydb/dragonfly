@@ -294,7 +294,6 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     DCHECK(continuation_trans_ == nullptr)
         << continuation_trans_->DebugId() << " when polling " << trans->DebugId();
 
-    CHECK_EQ(committed_txid_, trans->GetNotifyTxid());
     bool keep = trans->RunInShard(this);
     if (keep) {
       return;
@@ -374,15 +373,13 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     DVLOG(1) << "Skipped TxQueue " << continuation_trans_;
   }
 
-  // we need to run trans if it's OOO or when trans is blocked in this shard and should
-  // be treated here as noop.
+  // we need to run trans if it's OOO or when trans is blocked in this shard.
   bool should_run = trans_mask & (Transaction::OUT_OF_ORDER | Transaction::SUSPENDED_Q);
 
   // It may be that there are other transactions that touch those keys but they necessary ordered
   // after trans in the queue, hence it's safe to run trans out of order.
   if (trans && should_run) {
     DCHECK(trans != head);
-    DCHECK(trans_mask & Transaction::ARMED);
 
     dbg_id.clear();
 
