@@ -200,7 +200,7 @@ class DecompressImpl {
  public:
   DecompressImpl() : uncompressed_mem_buf_{16_KB} {
   }
-  ~DecompressImpl() {
+  virtual ~DecompressImpl() {
   }
   virtual io::Result<base::IoBuf*> Decompress(std::string_view str) = 0;
 
@@ -1955,7 +1955,6 @@ error_code RdbLoaderBase::HandleCompressedBlob(int op_type) {
   // Decompress blob and switch membuf pointer
   // Last type in the compressed blob is RDB_OPCODE_COMPRESSED_BLOB_END
   // in which we will switch back to the origin membuf (HandleCompressedBlobFinish)
-  string_view uncompressed_blob;
   SET_OR_RETURN(decompress_impl_->Decompress(res), mem_buf_);
 
   return kOk;

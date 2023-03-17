@@ -38,13 +38,10 @@ constexpr unsigned kPoolThreadCount = 4;
 
 const char kKey1[] = "x";
 const char kKey2[] = "b";
-const char kKey3[] = "c";
-const char kKey4[] = "y";
 
 const char kKeySid0[] = "x";
 const char kKeySid1[] = "c";
 const char kKeySid2[] = "b";
-const char kKey2Sid0[] = "y";
 
 }  // namespace
 

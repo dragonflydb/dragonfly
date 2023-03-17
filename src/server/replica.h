@@ -26,7 +26,7 @@ namespace dfly {
 class Service;
 class ConnectionContext;
 class JournalExecutor;
-class JournalReader;
+struct JournalReader;
 
 class Replica {
  private:

@@ -29,7 +29,6 @@ namespace {
 
 constexpr auto kPrimeSegmentSize = PrimeTable::kSegBytes;
 constexpr auto kExpireSegmentSize = ExpireTable::kSegBytes;
-constexpr auto kTaxSize = PrimeTable::kTaxAmount;
 
 // mi_malloc good size is 32768. i.e. we have malloc waste of 1.5%.
 static_assert(kPrimeSegmentSize == 32288);

@@ -172,7 +172,6 @@ RedisReplyBuilderTest::ParsingResults RedisReplyBuilderTest::Parse() {
   auto* ptr = parser_buffer_.get();
   memcpy(ptr, str().data(), SinkSize());
   RedisParser parser(false);  // client side
-  std::string_view tmp_view{str()};
   result.result =
       parser.Parse(RedisParser::Buffer{ptr, SinkSize()}, &result.consumed, &result.args);
   return result;
