@@ -432,7 +432,7 @@ void Topkeys(const http::QueryArgs& args, HttpContext* send) {
   http::StringResponse resp = http::MakeStringResponse(h2::status::ok);
   resp.body() = "<h1>Detected top keys</h1>\n<pre>\n";
 
-  bool is_enabled = false;
+  std::atomic_bool is_enabled = false;
   if (shard_set) {
     vector<string> rows(shard_set->size());
 
