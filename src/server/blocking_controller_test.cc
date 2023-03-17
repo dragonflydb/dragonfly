@@ -75,7 +75,7 @@ TEST_F(BlockingControllerTest, Basic) {
     bc.AddWatched(keys, trans_.get());
     EXPECT_EQ(1, bc.NumWatched(0));
 
-    bc.RemoveWatched(keys, trans_.get());
+    bc.FinalizeWatched(keys, trans_.get());
     EXPECT_EQ(0, bc.NumWatched(0));
   });
 }

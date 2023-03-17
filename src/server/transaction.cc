@@ -505,7 +505,10 @@ bool Transaction::RunInShard(EngineShard* shard) {
     //    of the queue and notify the next one.
     // RunStep is also called for global transactions because of commands like MOVE.
     if (shard->blocking_controller()) {
-      shard->blocking_controller()->RunStep(awaked_prerun ? this : nullptr);
+      if (awaked_prerun || was_suspended) {
+        shard->blocking_controller()->FinalizeWatched(largs, this);
+      }
+      shard->blocking_controller()->NotifyPending();
     }
   }
 
@@ -1114,9 +1117,11 @@ void Transaction::UnwatchShardCb(ArgSlice wkeys, bool should_expire, EngineShard
     auto& sd = shard_data_[sd_idx];
     sd.local_mask |= EXPIRED_Q;
     sd.local_mask &= ~KEYLOCK_ACQUIRED;
-  }
+    shard->blocking_controller()->FinalizeWatched(wkeys, this);
+    DCHECK(!shard->blocking_controller()->awakened_transactions().contains(this));
 
-  shard->blocking_controller()->RemoveWatched(wkeys, this);
+    shard->blocking_controller()->NotifyPending();
+  }
 
   // Need to see why I decided to call this.
   // My guess - probably to trigger the run of stalled transactions in case
@@ -1168,9 +1173,10 @@ void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, E
 
   shard->ShutdownMulti(this);
 
-  // notify awakened transactions.
+  // notify awakened transactions, not sure we need it here because it's done after
+  // each operation
   if (shard->blocking_controller())
-    shard->blocking_controller()->RunStep(nullptr);
+    shard->blocking_controller()->NotifyPending();
   shard->PollExecution("unlockmulti", nullptr);
 
   this->DecreaseRunCnt();

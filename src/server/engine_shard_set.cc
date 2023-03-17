@@ -297,8 +297,6 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     bool keep = trans->RunInShard(this);
     if (keep) {
       return;
-    } else {
-      blocking_controller_->RemoveAwaked(trans);
     }
   }
 

@@ -135,7 +135,8 @@ struct ShardFFResult {
   ShardId sid = kInvalidSid;
 };
 
-OpResult<ShardFFResult> FindFirst(Transaction* trans) {
+// Used by bpopper.
+OpResult<ShardFFResult> FindFirst(bool awaked_only, Transaction* trans) {
   VLOG(2) << "FindFirst::Find " << trans->DebugId();
 
   // Holds Find results: (iterator to a found key, and its index in the passed arguments).
@@ -144,18 +145,33 @@ OpResult<ShardFFResult> FindFirst(Transaction* trans) {
   std::vector<OpResult<FFResult>> find_res(shard_set->size());
   fill(find_res.begin(), find_res.end(), OpStatus::KEY_NOTFOUND);
 
-  auto cb = [&find_res](auto* t, EngineShard* shard) {
+  // We must capture notify_txid before we spawn callbacks.
+  // Otherwise, consider the following scenario:
+  // 0. The key is added in shard 0, with notify_txid = 100
+  // 1. The cb runs first on shard1 and does not find anything.
+  // 2. A tx 99 runs on shard 1, adds a key, updates notify_txid to 99.
+  // 3. the cb on shard 0 runs and ignores the key due to lower notify_txid.
+  uint64_t notify_txid = trans->GetNotifyTxid();
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
     auto args = t->GetShardArgs(shard->shard_id());
-
-    OpResult<pair<PrimeIterator, unsigned>> ff_res =
-        shard->db_slice().FindFirst(t->GetDbContext(), args);
-
-    if (ff_res) {
-      FFResult ff_result(ff_res->first->first.AsRef(), ff_res->second);
-      find_res[shard->shard_id()] = move(ff_result);
-    } else {
-      find_res[shard->shard_id()] = ff_res.status();
+    // if requested to consider awaked shards only, we check the AWAKED_Q flag.
+    if (awaked_only && (t->GetLocalMask(shard->shard_id()) & Transaction::AWAKED_Q) == 0) {
+      return OpStatus::OK;
     }
+
+    if (shard->committed_txid() <= notify_txid) {
+      OpResult<pair<PrimeIterator, unsigned>> ff_res =
+          shard->db_slice().FindFirst(t->GetDbContext(), args);
+
+      if (ff_res) {
+        FFResult ff_result(ff_res->first->first.AsRef(), ff_res->second);
+        find_res[shard->shard_id()] = move(ff_result);
+      } else {
+        find_res[shard->shard_id()] = ff_res.status();
+      }
+    }
+
     return OpStatus::OK;
   };
 
@@ -249,7 +265,7 @@ OpStatus BPopper::Run(Transaction* trans, unsigned msec) {
 
   auto* stats = ServerState::tl_connection_stats();
 
-  OpResult<ShardFFResult> result = FindFirst(trans);
+  OpResult<ShardFFResult> result = FindFirst(false, trans);
 
   if (result.status() == OpStatus::KEY_NOTFOUND) {
     if (is_multi) {
@@ -261,7 +277,7 @@ OpStatus BPopper::Run(Transaction* trans, unsigned msec) {
     }
 
     // Block
-    auto wcb = [&](Transaction* t, EngineShard* shard) {
+    auto wcb = [](Transaction* t, EngineShard* shard) {
       return t->GetShardArgs(shard->shard_id());
     };
 
@@ -274,7 +290,7 @@ OpStatus BPopper::Run(Transaction* trans, unsigned msec) {
       return OpStatus::TIMED_OUT;
 
     // Now we have something for sure.
-    result = FindFirst(trans);  // retry - must find something.
+    result = FindFirst(true, trans);  // retry - must find something.
   }
 
   if (!result) {
@@ -557,6 +573,14 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
 
         ArgSlice span{&val, 1};
         OpPush(op_args, key, dest_dir, false, span, true);
+
+        // blocking_controller does not have to be set with non-blocking transactions.
+        if (shard->blocking_controller()) {
+          // hack, again. since we hacked which queue we are waiting on (see RunPair)
+          // we must clean-up src key here manually. See RunPair why we do this.
+          // in short- we suspended on "src" on both shards.
+          shard->blocking_controller()->FinalizeWatched(ArgSlice{&src, 1}, t);
+        }
       } else {
         DVLOG(1) << "Popping value from list: " << key;
         OpPop(op_args, key, src_dir, 1, false, true);
