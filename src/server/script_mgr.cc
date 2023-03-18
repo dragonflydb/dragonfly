@@ -262,6 +262,11 @@ GenericError ScriptMgr::ScriptParams::ApplyFlags(string_view config, ScriptParam
       continue;
     }
 
+    if (flag == "no-writes") {  // Used by Redis.
+      // TODO: lock read-only.
+      continue;
+    }
+
     return GenericError{"Invalid flag: "s + string{flag}};
   }
 
