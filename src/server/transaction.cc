@@ -383,7 +383,7 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
     for (auto& sd : shard_data_) {
       sd.arg_count = sd.arg_start = sd.local_mask = 0;
       sd.pq_pos = TxQueue::kEnd;
-      sd.is_armed.store(false, memory_order_relaxed);
+      DCHECK_EQ(sd.is_armed.load(memory_order_relaxed), false);
     }
     txid_ = 0;
     coordinator_state_ = 0;
