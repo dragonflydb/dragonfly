@@ -197,10 +197,10 @@ class CommandGenerator:
         ('LPOP {k}', ValueType.LIST),
         ('SADD {k} {val}', ValueType.SET),
         ('SPOP {k}', ValueType.SET),
-        # ('HSETNX {k} v0 {val}', ValueType.HSET),
-        # ('HINCRBY {k} v1 1', ValueType.HSET),
-        # ('ZPOPMIN {k} 1', ValueType.ZSET),
-        # ('ZADD {k} 0 {val}', ValueType.ZSET)
+        ('HSETNX {k} v0 {val}', ValueType.HSET),
+        ('HINCRBY {k} v1 1', ValueType.HSET),
+        ('ZPOPMIN {k} 1', ValueType.ZSET),
+        ('ZADD {k} 0 {val}', ValueType.ZSET)
         ('JSON.NUMINCRBY {k} $..i 1', ValueType.JSON),
         ('JSON.ARRPOP {k} $.arr', ValueType.JSON),
         ('JSON.ARRAPPEND {k} $.arr "{val}"', ValueType.JSON)
