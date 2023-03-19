@@ -200,7 +200,7 @@ class CommandGenerator:
         ('HSETNX {k} v0 {val}', ValueType.HSET),
         ('HINCRBY {k} v1 1', ValueType.HSET),
         ('ZPOPMIN {k} 1', ValueType.ZSET),
-        ('ZADD {k} 0 {val}', ValueType.ZSET)
+        ('ZADD {k} 0 {val}', ValueType.ZSET),
         ('JSON.NUMINCRBY {k} $..i 1', ValueType.JSON),
         ('JSON.ARRPOP {k} $.arr', ValueType.JSON),
         ('JSON.ARRAPPEND {k} $.arr "{val}"', ValueType.JSON)
