@@ -287,7 +287,7 @@ class Transaction {
 
     // Accessed within shard thread.
     // Bitmask of LocalState enums.
-    uint16_t local_mask{0};
+    uint16_t local_mask = 0;
 
     // Needed to rollback inconsistent schedulings or remove OOO transactions from
     // tx queue.
@@ -452,6 +452,11 @@ class Transaction {
   // multiple threads access this array to synchronize between themselves using
   // PerShardData.state, it can be tricky. The complication comes from multi_ transactions where
   // scheduled transaction is accessed between operations as well.
+
+  // Stores per-shard data.
+  // For non-multi transactions, it can be of size one in case only one shard is active
+  // (unique_shard_cnt_ = 1).
+  // Never access directly with index, always use SidToId.
   absl::InlinedVector<PerShardData, 4> shard_data_;  // length = shard_count
 
   // Stores arguments of the transaction (i.e. keys + values) partitioned by shards.
@@ -479,8 +484,8 @@ class Transaction {
   std::atomic_uint32_t use_count_{0}, run_count_{0}, seqlock_{0};
 
   // unique_shard_cnt_ and unique_shard_id_ are accessed only by coordinator thread.
-  uint32_t unique_shard_cnt_{0};  // number of unique shards span by args_
-  ShardId unique_shard_id_{kInvalidSid};
+  uint32_t unique_shard_cnt_{0};          // Number of unique shards active
+  ShardId unique_shard_id_{kInvalidSid};  // Set if unique_shard_cnt_ = 1
 
   util::fibers_ext::EventCount blocking_ec_;  // Used to wake blocking transactions.
   util::fibers_ext::EventCount run_ec_;       // Used to wait for shard callbacks
