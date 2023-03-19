@@ -1080,7 +1080,7 @@ optional<ScriptMgr::ScriptParams> LoadScipt(string_view sha, ScriptMgr* script_m
 
     string err;
     CHECK_EQ(Interpreter::ADD_OK, interpreter->AddFunction(sha, script_data->body, &err));
-    CHECK(err.empty());
+    CHECK(err.empty()) << err;
 
     return script_data;
   }
