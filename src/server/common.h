@@ -251,6 +251,8 @@ class GenericError {
   GenericError() = default;
   GenericError(std::error_code ec) : ec_{ec}, details_{} {
   }
+  GenericError(std::string details) : ec_{}, details_{std::move(details)} {
+  }
   GenericError(std::error_code ec, std::string details) : ec_{ec}, details_{std::move(details)} {
   }
 

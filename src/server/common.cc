@@ -246,15 +246,17 @@ GenericError::operator std::error_code() const {
 }
 
 GenericError::operator bool() const {
-  return bool(ec_);
+  return bool(ec_) || !details_.empty();
 }
 
 std::string GenericError::Format() const {
-  if (!ec_)
+  if (!ec_ && details_.empty())
     return "";
 
   if (details_.empty())
     return ec_.message();
+  else if (!ec_)
+    return details_;
   else
     return absl::StrCat(ec_.message(), ": ", details_);
 }

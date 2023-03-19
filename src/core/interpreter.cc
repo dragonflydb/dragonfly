@@ -395,11 +395,12 @@ void Interpreter::FuncSha1(string_view body, char* fp) {
   ToHex(digest, fp);
 }
 
-auto Interpreter::AddFunction(string_view body, string* result) -> AddResult {
+auto Interpreter::AddFunction(string_view sha, string_view body, string* result) -> AddResult {
   char funcname[43];
   funcname[0] = 'f';
   funcname[1] = '_';
-  FuncSha1(body, funcname + 2);
+  DCHECK(sha.size() == 40);
+  memcpy(funcname + 2, sha.data(), sha.size());
   funcname[42] = '\0';
 
   int type = lua_getglobal(lua_, funcname);

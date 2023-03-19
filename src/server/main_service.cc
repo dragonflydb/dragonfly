@@ -1019,19 +1019,14 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   auto interpreter = ss->BorrowInterpreter();
   absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
 
-  string result;
-  Interpreter::AddResult add_result = interpreter->AddFunction(body, &result);
-  if (add_result == Interpreter::COMPILE_ERR) {
-    return (*cntx)->SendError(result, facade::kScriptErrType);
-  }
+  auto res = server_family_.script_mgr()->Insert(body, interpreter);
+  if (!res)
+    return (*cntx)->SendError(res.error().Format(), facade::kScriptErrType);
 
-  if (add_result == Interpreter::ADD_OK) {
-    if (auto err = server_family_.script_mgr()->Insert(result, body); err)
-      return (*cntx)->SendError(err.Format(), facade::kScriptErrType);
-  }
+  string sha{move(res.value())};
 
   EvalArgs eval_args;
-  eval_args.sha = result;
+  eval_args.sha = sha;
   eval_args.keys = args.subspan(3, num_keys);
   eval_args.args = args.subspan(3 + num_keys);
 
@@ -1039,7 +1034,7 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   EvalInternal(eval_args, interpreter, cntx);
 
   uint64_t end = absl::GetCurrentTimeNanos();
-  ss->RecordCallLatency(result, (end - start) / 1000);
+  ss->RecordCallLatency(sha, (end - start) / 1000);
 }
 
 void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
@@ -1083,9 +1078,9 @@ optional<ScriptMgr::ScriptParams> LoadScipt(string_view sha, ScriptMgr* script_m
     if (!script_data)
       return std::nullopt;
 
-    string res;
-    CHECK_EQ(Interpreter::ADD_OK, interpreter->AddFunction(script_data->body, &res));
-    CHECK_EQ(res, sha);
+    string err;
+    CHECK_EQ(Interpreter::ADD_OK, interpreter->AddFunction(sha, script_data->body, &err));
+    CHECK(err.empty());
 
     return script_data;
   }

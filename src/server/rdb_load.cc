@@ -2017,17 +2017,14 @@ error_code RdbLoader::HandleAux() {
     // TODO
   } else if (auxkey == "lua") {
     ServerState* ss = ServerState::tlocal();
-    auto script = ss->BorrowInterpreter();
-    absl::Cleanup clean = [ss, script]() { ss->ReturnInterpreter(script); };
+    auto interpreter = ss->BorrowInterpreter();
+    absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
 
     string_view body{auxval};
-    string result;
-    Interpreter::AddResult add_result = script->AddFunction(body, &result);
-    if (add_result == Interpreter::ADD_OK) {
-      if (script_mgr_)
-        script_mgr_->Insert(result, body);
-    } else if (add_result == Interpreter::COMPILE_ERR) {
-      LOG(ERROR) << "Error when compiling lua scripts";
+    if (script_mgr_) {
+      auto res = script_mgr_->Insert(body, interpreter);
+      if (!res)
+        LOG(ERROR) << "Error compiling script";
     }
   } else if (auxkey == "redis-ver") {
     VLOG(1) << "Loading RDB produced by version " << auxval;
