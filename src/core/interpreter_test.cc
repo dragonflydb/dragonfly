@@ -106,7 +106,7 @@ bool InterpreterTest::Execute(string_view script) {
     return false;
   }
 
-  Interpreter::RunResult run_res = intptr_.RunFunction(result, &error_);
+  Interpreter::RunResult run_res = intptr_.RunFunction(sha, &error_);
   if (run_res != Interpreter::RUN_OK) {
     return false;
   }
