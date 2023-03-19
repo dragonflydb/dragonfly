@@ -18,6 +18,7 @@ extern "C" {
 #include <tuple>
 
 #include "base/logging.h"
+#include "helio/base/type_traits.h"
 #include "redis/util.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -25,6 +26,7 @@ extern "C" {
 #include "server/error.h"
 #include "server/io_mgr.h"
 #include "server/journal/journal.h"
+#include "server/responder.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "util/varz.h"
@@ -618,6 +620,17 @@ void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view
   // Skip GET, because its not important on replica.
 
   dfly::RecordJournal(op_args_, "SET", ArgSlice{cmds});
+}
+
+Responder* StringFamily::TestResponder1(CmdArgList args, ConnectionContext* cntx) {
+  SimpleResponder<long>* rsp = cntx->MakeResponder<SimpleResponder<long>>();
+
+  cntx->transaction->ScheduleSingleHop([rsp](Transaction* t, EngineShard* sd) {
+    *rsp << 1L;
+    return OpStatus::OK;
+  });
+
+  return rsp;
 }
 
 void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
@@ -1403,6 +1416,7 @@ void StringFamily::Shutdown() {
 
 void StringFamily::Register(CommandRegistry* registry) {
   *registry
+      << CI{"R1", CO::WRITE, 3, 1, 1, 1}.HFUNC(TestResponder1)
       << CI{"SET", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1, 1}.HFUNC(Set)
       << CI{"SETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1}.HFUNC(SetEx)
       << CI{"PSETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1}.HFUNC(PSetEx)

@@ -11,6 +11,7 @@
 
 #include "base/function2.hpp"
 #include "server/common.h"
+#include "server/responder.h"
 
 namespace dfly {
 
@@ -98,8 +99,25 @@ class CommandId {
     return step_key_;
   }
 
-  CommandId& SetHandler(Handler f) {
-    handler_ = std::move(f);
+  template <typename T> CommandId& AsyncHandler(T&& t) {
+    return *this;
+  }
+
+  template <typename F> CommandId& SetHandler(F&& f) {
+    using RET = std::invoke_result_t<F, CmdArgList, ConnectionContext*>;
+    if constexpr (std::is_void_v<RET>) {
+      handler_ = std::move(f);
+    } else {
+      static_assert(std::is_base_of_v<Responder, std::remove_pointer_t<RET>>);
+      handler_ = [f = std::move(f)](CmdArgList args, ConnectionContext* cntx) {
+        // we manage responders inline, but in the future we can do whatever we want with them
+        // like sending over a channel, etc.
+        Responder* rsp = f(args, cntx);
+        rsp->Respond(cntx);
+        rsp->~Responder();  // allocated inside cntx buffer
+      };
+    }
+
     return *this;
   }
 
@@ -132,6 +150,8 @@ class CommandId {
 
   Handler handler_;
   ArgValidator validator_;
+
+  Handler rsp_alloc_handler_;
 };
 
 class CommandRegistry {

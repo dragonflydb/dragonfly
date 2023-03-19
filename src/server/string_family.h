@@ -54,6 +54,8 @@ class SetCmd {
   void RecordJournal(const SetParams& params, std::string_view key, std::string_view value);
 };
 
+class Responder;
+
 class StringFamily {
  public:
   static void Init(util::ProactorPool* pp);
@@ -62,6 +64,8 @@ class StringFamily {
   static void Register(CommandRegistry* registry);
 
  private:
+  static Responder* TestResponder1(CmdArgList args, ConnectionContext* cntx);
+
   static void Append(CmdArgList args, ConnectionContext* cntx);
   static void Decr(CmdArgList args, ConnectionContext* cntx);
   static void DecrBy(CmdArgList args, ConnectionContext* cntx);

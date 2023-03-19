@@ -686,14 +686,16 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
     ExecuteAsync();
   }
 
-  DVLOG(2) << "ScheduleSingleHop before Wait " << DebugId() << " " << run_count_.load();
-  WaitForShardCallbacks();
-  DVLOG(2) << "ScheduleSingleHop after Wait " << DebugId();
-
   if (was_ooo)
     coordinator_state_ |= COORD_OOO;
 
-  cb_ = nullptr;
+  if (!non_blocking_) {
+    DVLOG(2) << "ScheduleSingleHop before Wait " << DebugId() << " " << run_count_.load();
+    WaitForShardCallbacks();
+    DVLOG(2) << "ScheduleSingleHop after Wait " << DebugId();
+
+    cb_ = nullptr;
+  }
   return local_result_;
 }
 

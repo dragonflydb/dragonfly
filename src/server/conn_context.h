@@ -8,6 +8,7 @@
 
 #include "facade/conn_context.h"
 #include "server/common.h"
+#include "server/responder.h"
 #include "util/fibers/fibers_ext.h"
 
 namespace dfly {
@@ -129,8 +130,14 @@ class ConnectionContext : public facade::ConnectionContext {
   const CommandId* cid = nullptr;
   ConnectionState conn_state;
 
+  char responder_buffer_[kResponderSizeLimit];
+
   DbIndex db_index() const {
     return conn_state.db_index;
+  }
+
+  template <typename RT, typename... Args> RT* MakeResponder(Args&&... args) {
+    return dfly::MakeResponder<RT>(responder_buffer_, std::forward<Args>(args)...);
   }
 
   void ChangeSubscription(bool to_add, bool to_reply, CmdArgList args);

@@ -195,6 +195,15 @@ class Transaction {
            shard_data_[sid].is_armed.load(std::memory_order_relaxed);
   }
 
+  // MVP
+  void Wait() {
+    WaitForShardCallbacks();
+  }
+
+  void NonBlock() {
+    non_blocking_ = true;
+  }
+
   // Called from engine set shard threads.
   uint16_t GetLocalMask(ShardId sid) const {
     return shard_data_[SidToId(sid)].local_mask;
@@ -484,6 +493,9 @@ class Transaction {
 
   util::fibers_ext::EventCount blocking_ec_;  // Used to wake blocking transactions.
   util::fibers_ext::EventCount run_ec_;       // Used to wait for shard callbacks
+
+  // MVP
+  bool non_blocking_;
 
   // Transaction coordinator state, written and read by coordinator thread.
   // Can be read by shard threads as long as we respect ordering rules, i.e. when
