@@ -409,8 +409,6 @@ auto Interpreter::AddFunction(string_view sha, string_view body, string* result)
   if (type == LUA_TNIL && !AddInternal(funcname, body, result))
     return COMPILE_ERR;
 
-  result->assign(funcname + 2);
-
   return type == LUA_TNIL ? ADD_OK : ALREADY_EXISTS;
 }
 
