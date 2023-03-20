@@ -19,7 +19,6 @@ constexpr int64_t kMaxBulkLen = 64 * (1ul << 20);  // 64MB.
 }  // namespace
 
 auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> Result {
-  LOG(ERROR) << "RedisParser::Parse " << ToSV(str);
   *consumed = 0;
   res->clear();
 
@@ -276,7 +275,6 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> Result {
     return OK;
   }
 
-  LOG(ERROR) << "PushStack: (" << len << ", " << cached_expr_ << ")";
   DVLOG(1) << "PushStack: (" << len << ", " << cached_expr_ << ")";
   parse_stack_.emplace_back(len, cached_expr_);
 
