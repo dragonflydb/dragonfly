@@ -66,6 +66,7 @@ class StringFamily {
  private:
   static Responder* TestResponder1(CmdArgList args, ConnectionContext* cntx);
   static Responder* TestResponder2(CmdArgList args, ConnectionContext* cntx);
+  static void TestResponder3(CmdArgList args, ConnectionContext* cntx);
 
   static void Append(CmdArgList args, ConnectionContext* cntx);
   static void Decr(CmdArgList args, ConnectionContext* cntx);

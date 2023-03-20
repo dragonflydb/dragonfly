@@ -646,6 +646,42 @@ Responder* StringFamily::TestResponder2(CmdArgList args, ConnectionContext* cntx
   return rsp;
 }
 
+void StringFamily::TestResponder3(CmdArgList args, ConnectionContext* cntx) {
+  Transaction* tx = cntx->transaction;
+  tx->StartMultiGlobal(tx->GetDbIndex());
+
+  // This example shows we can store responders and send their replies later.
+  // It also shows, how we can potentially stall for big responses.
+  vector<char[64]> bufs(10);
+  vector<Responder*> rsps;
+  for (int i = 0; i < 10; i++) {
+    cntx->SetResponderBuffer(bufs[i]);
+
+    tx->MultiSwitchCmd(tx->GetCId());
+    tx->InitByArgs(tx->GetDbIndex(), args);
+
+    auto* rsp = cntx->MakeResponder<AtomicCounterResponder>(tx);
+    tx->ScheduleSingleHop([rsp, i](Transaction* t, EngineShard* sd) {
+      *rsp += i;
+      return OpStatus::OK;
+    });
+
+    // in reality, as soon as it fails to wait, we need to send it,
+    // because we cannot afford to store it and need to stall.
+    // We cannot continue on failed wait, because the tx is still in use.
+    rsp->Wait();
+    rsps.push_back(rsp);  // or chan->send()
+  }
+
+  tx->UnlockMulti();
+
+  for (auto* rsp : rsps)
+    rsp->Respond(cntx);
+
+  for (auto* rsp : rsps)
+    rsp->~Responder();
+}
+
 void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   set_qps.Inc();
 
@@ -1431,6 +1467,7 @@ void StringFamily::Register(CommandRegistry* registry) {
   *registry
       << CI{"R1", CO::WRITE, 3, 1, 1, 1}.HFUNC(TestResponder1)
       << CI{"R2", CO::WRITE, -2, 1, -1, 1}.HFUNC(TestResponder2)
+      << CI{"R3", CO::WRITE, -2, 1, -1, 1}.HFUNC(TestResponder3)
       << CI{"SET", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1, 1}.HFUNC(Set)
       << CI{"SETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1}.HFUNC(SetEx)
       << CI{"PSETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1}.HFUNC(PSetEx)

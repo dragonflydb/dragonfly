@@ -83,6 +83,10 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   return *this;
 }
 
+void CommandId::SetBuf(ConnectionContext* cntx, char (&buf)[64]) {
+  cntx->SetResponderBuffer(buf);
+}
+
 namespace CO {
 
 const char* OptName(CO::CommandOpt fl) {

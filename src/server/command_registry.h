@@ -105,6 +105,8 @@ class CommandId {
     return *this;
   }
 
+  static void SetBuf(ConnectionContext* cntx, char (&arr)[64]);
+
   template <typename F> CommandId& SetHandler(F&& f) {
     using RET = std::invoke_result_t<F, CmdArgList, ConnectionContext*>;
     if constexpr (std::is_void_v<RET>) {
@@ -113,6 +115,8 @@ class CommandId {
       static_assert(std::is_base_of_v<Responder, std::remove_pointer_t<RET>>);
       opt_mask_ |= CO::ASYNC;
       handler_ = [f = std::move(f)](CmdArgList args, ConnectionContext* cntx) {
+        char buf[64];
+        SetBuf(cntx, buf);
         // we manage responders inline, but in the future we can do whatever we want with them
         // like sending over a channel, etc.
         Responder* rsp = f(args, cntx);

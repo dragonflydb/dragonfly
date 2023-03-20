@@ -44,7 +44,7 @@ IntentLock::Mode Transaction::Mode() const {
 Transaction::Transaction(const CommandId* cid, uint32_t thread_index)
     : cid_{cid}, coordinator_index_(thread_index) {
   string_view cmd_name(cid_->name());
-  if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA") {
+  if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA" || cmd_name == "R3") {
     multi_.reset(new MultiData);
     multi_->shard_journal_write.resize(shard_set->size(), false);
 

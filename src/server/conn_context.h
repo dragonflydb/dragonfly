@@ -130,10 +130,14 @@ class ConnectionContext : public facade::ConnectionContext {
   const CommandId* cid = nullptr;
   ConnectionState conn_state;
 
-  char responder_buffer_[kResponderSizeLimit];
+  absl::Span<char> responder_buffer_;
 
   DbIndex db_index() const {
     return conn_state.db_index;
+  }
+
+  void SetResponderBuffer(absl::Span<char> buf) {
+    responder_buffer_ = buf;
   }
 
   template <typename RT, typename... Args> RT* MakeResponder(Args&&... args) {

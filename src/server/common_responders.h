@@ -22,8 +22,8 @@ template <typename T> class SimpleResponder : public Responder {
  private:
   T value_;
 
-  std::atomic_bool ready_;
-  ::util::fibers_ext::EventCount ec_;
+  std::atomic_bool ready_{false};
+  ::util::fibers_ext::EventCount ec_{};
 };
 
 class AtomicCounterResponder : public Responder {

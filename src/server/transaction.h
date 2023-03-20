@@ -251,6 +251,10 @@ class Transaction {
     return db_index_;
   }
 
+  const CommandId* GetCId() const {
+    return cid_;
+  }
+
   std::string DebugId() const;
 
   // Write a journal entry to a shard journal with the given payload. When logging a non-automatic
