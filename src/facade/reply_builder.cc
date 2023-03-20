@@ -363,7 +363,7 @@ void RedisReplyBuilder::SendStringArr(absl::Span<const string> arr) {
   SendStringCollection(arr.data(), arr.size(), Resp3Type::ARRAY);
 }
 
-void RedisReplyBuilder::SendStringArraysAsMap(absl::Span<const std::string_view> arr) {
+void RedisReplyBuilder::SendStringArrayAsMap(absl::Span<const std::string_view> arr) {
   if (arr.empty()) {
     SendRaw("*0\r\n");
     return;
@@ -371,7 +371,7 @@ void RedisReplyBuilder::SendStringArraysAsMap(absl::Span<const std::string_view>
   SendStringCollection(arr.data(), arr.size(), Resp3Type::MAP);
 }
 
-void RedisReplyBuilder::SendStringArraysAsMap(absl::Span<const std::string> arr) {
+void RedisReplyBuilder::SendStringArrayAsMap(absl::Span<const std::string> arr) {
   if (arr.empty()) {
     SendRaw("*0\r\n");
     return;

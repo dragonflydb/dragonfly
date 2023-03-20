@@ -137,8 +137,8 @@ class RedisReplyBuilder : public SinkReplyBuilder {
 
   virtual void SendStringArr(absl::Span<const std::string_view> arr);
   virtual void SendStringArr(absl::Span<const std::string> arr);
-  virtual void SendStringArraysAsMap(absl::Span<const std::string_view> arr);
-  virtual void SendStringArraysAsMap(absl::Span<const std::string> arr);
+  virtual void SendStringArrayAsMap(absl::Span<const std::string_view> arr);
+  virtual void SendStringArrayAsMap(absl::Span<const std::string> arr);
   virtual void SendStringArrayAsSet(absl::Span<const std::string_view> arr);
 
   virtual void SendNull();
