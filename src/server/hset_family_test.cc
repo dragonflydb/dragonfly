@@ -32,6 +32,9 @@ class HestFamilyTestProtocolVersioned : public HSetFamilyTest,
  protected:
 };
 
+INSTANTIATE_TEST_CASE_P(HestFamilyTestProtocolVersioned, HestFamilyTestProtocolVersioned,
+                        ::testing::Values("2", "3"));
+
 TEST_F(HSetFamilyTest, Hash) {
   robj* obj = createHashObject();
   sds field = sdsnew("field");
@@ -74,9 +77,6 @@ TEST_F(HSetFamilyTest, HSet) {
 
   EXPECT_EQ(1, CheckedInt({"hset", "small", "", "565323349817"}));
 }
-
-INSTANTIATE_TEST_CASE_P(HestFamilyTestProtocolVersioned, HestFamilyTestProtocolVersioned,
-                        ::testing::Values("2", "3"));
 
 TEST_P(HestFamilyTestProtocolVersioned, Get) {
   auto resp = Run({"hello", GetParam()});
