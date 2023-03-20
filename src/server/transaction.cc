@@ -52,6 +52,9 @@ Transaction::Transaction(const CommandId* cid, uint32_t thread_index)
   }
 }
 
+Transaction::Transaction(Transaction* parent) : txid_{parent->txid_}, stub_{true}, cb_{nullptr} {
+}
+
 Transaction::~Transaction() {
   DVLOG(3) << "Transaction " << StrCat(Name(), "@", txid_, "/", unique_shard_cnt_, ")")
            << " destroyed";
@@ -371,7 +374,7 @@ void Transaction::StartMultiNonAtomic() {
 }
 
 void Transaction::MultiSwitchCmd(const CommandId* cid) {
-  DCHECK(multi_);
+  DCHECK(multi_ || stub_);
   DCHECK(!cb_);
 
   unique_shard_id_ = 0;
@@ -380,10 +383,11 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
   cid_ = cid;
   cb_ = nullptr;
 
-  if (multi_->mode == NON_ATOMIC) {
+  if (stub_ || multi_->mode == NON_ATOMIC) {
     shard_data_.resize(0);
-    txid_ = 0;
     coordinator_state_ = 0;
+    if (!stub_)
+      txid_ = 0;
   }
 }
 
@@ -636,6 +640,9 @@ bool Transaction::MultiData::IsIncrLocks() const {
 // transactions like set/mset/mget etc. Does not apply for more complicated cases like RENAME or
 // BLPOP where a data must be read from multiple shards before performing another hop.
 OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
+  if (stub_)
+    return cb(this, EngineShard::tlocal());
+
   DCHECK(!cb_);
   cb_ = std::move(cb);
 

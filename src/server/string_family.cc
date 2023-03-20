@@ -625,8 +625,10 @@ void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view
 Responder* StringFamily::TestResponder1(CmdArgList args, ConnectionContext* cntx) {
   SimpleResponder<long>* rsp = cntx->MakeResponder<SimpleResponder<long>>();
 
-  cntx->transaction->ScheduleSingleHop([rsp](Transaction* t, EngineShard* sd) {
-    *rsp << 1L;
+  cntx->transaction->ScheduleSingleHop([rsp, args](Transaction* t, EngineShard* sd) {
+    long l;
+    absl::SimpleAtoi(ArgS(args, 3), &l);
+    *rsp << l;
     return OpStatus::OK;
   });
 

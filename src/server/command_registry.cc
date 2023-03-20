@@ -88,6 +88,8 @@ void CommandId::SetBuf(ConnectionContext* cntx, char (&buf)[64]) {
 }
 
 void CommandId::Handle(ConnectionContext* cntx, Responder* rsp) {
+  if (cntx->KeepResponder(rsp))
+    return;
   bool done;
   do {
     done = rsp->Wait(cntx->transaction);

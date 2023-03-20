@@ -104,6 +104,8 @@ class Transaction {
  public:
   explicit Transaction(const CommandId* cid, uint32_t thread_index);
 
+  explicit Transaction(Transaction* parent);
+
   // Initialize from command (args) on specific db.
   OpStatus InitByArgs(DbIndex index, CmdArgList args);
 
@@ -500,6 +502,7 @@ class Transaction {
 
   // MVP
   bool non_blocking_;
+  bool stub_;
 
   // Transaction coordinator state, written and read by coordinator thread.
   // Can be read by shard threads as long as we respect ordering rules, i.e. when

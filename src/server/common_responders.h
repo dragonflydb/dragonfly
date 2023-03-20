@@ -13,7 +13,7 @@ template <typename T> class SimpleResponder : public Responder {
  public:
   virtual ~SimpleResponder() override = default;
 
-  void operator<<(T&& value);
+  void operator<<(T value);
 
   virtual void Respond(ConnectionContext* cntx) override;
 

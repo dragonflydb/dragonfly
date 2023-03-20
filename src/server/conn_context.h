@@ -117,6 +117,10 @@ class ConnectionContext : public facade::ConnectionContext {
       : facade::ConnectionContext(stream, owner) {
   }
 
+  ConnectionContext(Transaction* tx)
+      : transaction{tx}, keep_responder_{true}, facade::ConnectionContext{nullptr, nullptr} {
+  }
+
   struct DebugInfo {
     uint32_t shards_count = 0;
     TxClock clock = 0;
@@ -131,9 +135,23 @@ class ConnectionContext : public facade::ConnectionContext {
   ConnectionState conn_state;
 
   absl::Span<char> responder_buffer_;
+  Responder* responder_out_;
+  bool keep_responder_;
 
   DbIndex db_index() const {
     return conn_state.db_index;
+  }
+
+  Responder* GetResponder() const {
+    return responder_out_;
+  }
+
+  bool KeepResponder(Responder* rsp) {
+    if (keep_responder_) {
+      responder_out_ = rsp;
+      return true;
+    }
+    return false;
   }
 
   void SetResponderBuffer(absl::Span<char> buf) {

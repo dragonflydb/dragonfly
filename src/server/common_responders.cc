@@ -7,7 +7,7 @@ namespace dfly {
 
 using namespace std;
 
-template <typename T> void SimpleResponder<T>::operator<<(T&& value) {
+template <typename T> void SimpleResponder<T>::operator<<(T value) {
   value_ = move(value);
 }
 
