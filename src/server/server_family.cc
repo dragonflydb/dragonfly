@@ -1697,7 +1697,6 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   bool is_resp3 = false;
   if (args.size() > 1) {
     string_view proto_version = ArgS(args, 1);
-    LOG(ERROR) << "proto_version: " << proto_version;
     is_resp3 = proto_version == "3";
     bool valid_proto_version = proto_version == "2" || is_resp3;
     if (!valid_proto_version || args.size() > 2) {
