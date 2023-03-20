@@ -7,7 +7,7 @@ from itertools import chain, repeat
 import re
 
 from .utility import *
-from . import dfly_args
+from . import DflyInstanceFactory, dfly_args
 
 
 BASE_PORT = 1111
@@ -147,7 +147,7 @@ disconnect_cases = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys", disconnect_cases)
-async def test_disconnect_replica(df_local_factory, df_seeder_factory, t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys):
+async def test_disconnect_replica(df_local_factory: DflyInstanceFactory, df_seeder_factory, t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys):
     master = df_local_factory.create(port=BASE_PORT, proactor_threads=t_master)
     replicas = [
         (df_local_factory.create(
@@ -252,7 +252,7 @@ async def test_disconnect_replica(df_local_factory, df_seeder_factory, t_master,
 
     # Check master survived all disconnects
     assert await c_master.ping()
-
+    await c_master.close()
 
 """
 Test stopping master during different phases.
@@ -380,6 +380,7 @@ async def test_rotating_masters(df_local_factory, df_seeder_factory, t_replica, 
     if fill_task is not None:
         fill_seeder.stop()
         fill_task.cancel()
+
 
 """
 Test flushall command. Set data to master send flashall and set more data.
