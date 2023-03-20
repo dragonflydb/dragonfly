@@ -213,6 +213,10 @@ class InterpreterReplier : public RedisReplyBuilder {
   void SendSimpleString(std::string_view str) final;
   void SendMGetResponse(const OptResp* resp, uint32_t count) final;
   void SendSimpleStrArr(const string_view* arr, uint32_t count) final;
+  void SendStringArrayAsMap(absl::Span<const std::string_view> arr) final;
+  void SendStringArrayAsMap(absl::Span<const std::string> arr) final;
+  void SendStringArrayAsSet(absl::Span<const std::string_view> arr) final;
+  void SendStringArrayAsSet(absl::Span<const std::string> arr) final;
   void SendNullArray() final;
 
   void SendStringArr(absl::Span<const string_view> arr) final;
@@ -338,6 +342,22 @@ void InterpreterReplier::SendSimpleStrArr(const string_view* arr, uint32_t count
     explr_->OnString(arr[i]);
   }
   explr_->OnArrayEnd();
+}
+
+void InterpreterReplier::SendStringArrayAsMap(absl::Span<const string_view> arr) {
+  SendStringArr(arr);
+}
+
+void InterpreterReplier::SendStringArrayAsMap(absl::Span<const string> arr) {
+  SendStringArr(arr);
+}
+
+void InterpreterReplier::SendStringArrayAsSet(absl::Span<const string_view> arr) {
+  SendStringArr(arr);
+}
+
+void InterpreterReplier::SendStringArrayAsSet(absl::Span<const string> arr) {
+  SendStringArr(arr);
 }
 
 void InterpreterReplier::SendNullArray() {

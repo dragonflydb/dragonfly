@@ -698,7 +698,7 @@ void HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t getall_mask) 
 
   if (result) {
     if (getall_mask == (VALUES | FIELDS)) {
-      (*cntx)->SendStringArraysAsMap(absl::Span<const string>{*result});
+      (*cntx)->SendStringArrayAsMap(absl::Span<const string>{*result});
     } else {
       (*cntx)->SendStringArr(absl::Span<const string>{*result});
     }

@@ -734,7 +734,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
           string_view arr[8] = {"name",    ginfo.name,  "consumers",         an1.Piece(),
                                 "pending", an2.Piece(), "last-delivered-id", last_id};
 
-          (*cntx)->SendStringArraysAsMap(absl::Span<string_view>{arr, 8});
+          (*cntx)->SendStringArrayAsMap(absl::Span<string_view>{arr, 8});
         }
         return;
       }

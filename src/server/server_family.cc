@@ -1317,7 +1317,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
     string_view param = ArgS(args, 2);
     string_view res[2] = {param, "tbd"};
 
-    return (*cntx)->SendStringArraysAsMap(res);
+    return (*cntx)->SendStringArrayAsMap(res);
   } else if (sub_cmd == "RESETSTAT") {
     shard_set->pool()->Await([](auto*) {
       auto* stats = ServerState::tl_connection_stats();

@@ -334,7 +334,7 @@ void RedisReplyBuilder::SendSimpleStrArr(const std::string_view* arr, uint32_t c
 }
 
 void RedisReplyBuilder::SendNullArray() {
-  SendRaw(absl::StrCat("*", NullString()));
+  SendRaw("*-1\r\n");
 }
 
 void RedisReplyBuilder::SendEmptyArray() {
@@ -356,30 +356,22 @@ void RedisReplyBuilder::SendStringArr(absl::Span<const std::string_view> arr) {
 // We limit the vector length to 256 and when it fills up we flush it to the socket and continue
 // iterating.
 void RedisReplyBuilder::SendStringArr(absl::Span<const string> arr) {
-  if (arr.empty()) {
-    SendRaw("*0\r\n");
-    return;
-  }
   SendStringCollection(arr.data(), arr.size(), Resp3Type::ARRAY);
 }
 
 void RedisReplyBuilder::SendStringArrayAsMap(absl::Span<const std::string_view> arr) {
-  if (arr.empty()) {
-    SendRaw("*0\r\n");
-    return;
-  }
   SendStringCollection(arr.data(), arr.size(), Resp3Type::MAP);
 }
 
 void RedisReplyBuilder::SendStringArrayAsMap(absl::Span<const std::string> arr) {
-  if (arr.empty()) {
-    SendRaw("*0\r\n");
-    return;
-  }
   SendStringCollection(arr.data(), arr.size(), Resp3Type::MAP);
 }
 
 void RedisReplyBuilder::SendStringArrayAsSet(absl::Span<const std::string_view> arr) {
+  SendStringCollection(arr.data(), arr.size(), Resp3Type::SET);
+}
+
+void RedisReplyBuilder::SendStringArrayAsSet(absl::Span<const std::string> arr) {
   SendStringCollection(arr.data(), arr.size(), Resp3Type::SET);
 }
 
@@ -405,29 +397,35 @@ void RedisReplyBuilder::StartSet(unsigned num_elements) {
 }
 
 void RedisReplyBuilder::SendStringCollection(StrPtr str_ptr, uint32_t len, Resp3Type type) {
-  // When vector length is too long, Send returns EMSGSIZE.
-  size_t vec_len = std::min<size_t>(256u, len);
+  string type_char = "*";
   size_t header_len = len;
-  absl::FixedArray<iovec, 16> vec(vec_len * 2 + 2);
-  absl::FixedArray<char, 64> meta((vec_len + 1) * 16);
-  char* next = meta.data();
-
-  char type_char = '*';
   if (is_resp3_) {
     switch (type) {
       case Resp3Type::ARRAY:
         break;
       case Resp3Type::MAP:
-        type_char = '%';
+        type_char[0] = '%';
         header_len = 0.5 * len;  // Each key value pair counts as one.
         break;
       case Resp3Type::SET:
-        type_char = '~';
+        type_char[0] = '~';
         break;
     }
   }
 
-  *next++ = type_char;
+  if (header_len == 0) {
+    SendRaw(absl::StrCat(type_char, "0\r\n"));
+    return;
+  }
+
+  // When vector length is too long, Send returns EMSGSIZE.
+  size_t vec_len = std::min<size_t>(256u, len);
+
+  absl::FixedArray<iovec, 16> vec(vec_len * 2 + 2);
+  absl::FixedArray<char, 64> meta((vec_len + 1) * 16);
+  char* next = meta.data();
+
+  *next++ = type_char[0];
   next = absl::numbers_internal::FastIntToBuffer(header_len, next);
   *next++ = '\r';
   *next++ = '\n';
