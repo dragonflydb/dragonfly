@@ -21,12 +21,12 @@ extern "C" {
 #include "helio/base/type_traits.h"
 #include "redis/util.h"
 #include "server/command_registry.h"
+#include "server/common_responders.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/io_mgr.h"
 #include "server/journal/journal.h"
-#include "server/responder.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "util/varz.h"
@@ -627,6 +627,19 @@ Responder* StringFamily::TestResponder1(CmdArgList args, ConnectionContext* cntx
 
   cntx->transaction->ScheduleSingleHop([rsp](Transaction* t, EngineShard* sd) {
     *rsp << 1L;
+    return OpStatus::OK;
+  });
+
+  return rsp;
+}
+
+Responder* StringFamily::TestResponder2(CmdArgList args, ConnectionContext* cntx) {
+  Transaction* tx = cntx->transaction;
+
+  AtomicCounterResponder* rsp = cntx->MakeResponder<AtomicCounterResponder>(tx);
+
+  tx->ScheduleSingleHop([rsp](Transaction* tx, EngineShard* sd) {
+    *rsp += 1;
     return OpStatus::OK;
   });
 
@@ -1417,6 +1430,7 @@ void StringFamily::Shutdown() {
 void StringFamily::Register(CommandRegistry* registry) {
   *registry
       << CI{"R1", CO::WRITE, 3, 1, 1, 1}.HFUNC(TestResponder1)
+      << CI{"R2", CO::WRITE, -2, 1, -1, 1}.HFUNC(TestResponder2)
       << CI{"SET", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1, 1}.HFUNC(Set)
       << CI{"SETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1}.HFUNC(SetEx)
       << CI{"PSETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1, 1}.HFUNC(PSetEx)
