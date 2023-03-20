@@ -697,11 +697,11 @@ void HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t getall_mask) 
   OpResult<vector<string>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    auto resp3Type = Resp3Type::ARRAY;
-    if (getall_mask == (VALUES | FIELDS))
-      resp3Type = Resp3Type::MAP;
-
-    (*cntx)->SendStringArr(absl::Span<const string>{*result}, resp3Type);
+    if (getall_mask == (VALUES | FIELDS)) {
+      (*cntx)->SendStringArraysAsMap(absl::Span<const string>{*result});
+    } else {
+      (*cntx)->SendStringArr(absl::Span<const string>{*result});
+    }
   } else {
     (*cntx)->SendError(result.status());
   }
@@ -949,7 +949,7 @@ void HSetFamily::HScan(CmdArgList args, ConnectionContext* cntx) {
   if (result.status() != OpStatus::WRONG_TYPE) {
     (*cntx)->StartArray(2);
     (*cntx)->SendBulkString(absl::StrCat(cursor));
-    (*cntx)->StartArray(result->size());
+    (*cntx)->StartArray(result->size());  // Within scan the page type is array
     for (const auto& k : *result) {
       (*cntx)->SendBulkString(k);
     }

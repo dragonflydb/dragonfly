@@ -60,8 +60,6 @@ ABSL_FLAG(int32_t, list_compress_depth, 0, "Compress depth of the list. Default 
 
 namespace dfly {
 
-using facade::Resp3Type;
-
 using namespace std;
 using namespace facade;
 using absl::GetFlag;
@@ -1205,7 +1203,7 @@ void ListFamily::LRange(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(res.status());
   }
 
-  (*cntx)->SendStringArr(*res, Resp3Type::ARRAY);
+  (*cntx)->SendStringArr(*res);
 }
 
 // lrem key 5 foo, will remove foo elements from the list if exists at most 5 times.
@@ -1303,7 +1301,7 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
 
     std::string_view str_arr[2] = {res.first, res.second};
 
-    return (*cntx)->SendStringArr(str_arr, Resp3Type::ARRAY);
+    return (*cntx)->SendStringArr(str_arr);
   }
 
   switch (result) {

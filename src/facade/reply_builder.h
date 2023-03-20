@@ -96,22 +96,6 @@ class SinkReplyBuilder {
   bool should_batch_ = false;
 };
 
-enum Resp3Type {
-  NONE = 0,
-  BOOLEAN,
-  DOUBLE,
-  LONG,
-  BLOB,
-  STRING,
-  ARRAY,
-  SET,
-  MAP,
-  ATTRIBUTE,
-  PUSH,
-  ERROR,
-  UNKNOWN,
-};
-
 class MCReplyBuilder : public SinkReplyBuilder {
  public:
   MCReplyBuilder(::io::Sink* stream);
@@ -151,16 +135,24 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   // Send *0
   virtual void SendEmptyArray();
 
-  virtual void SendStringArr(absl::Span<const std::string_view> arr, Resp3Type type);
-  virtual void SendStringArr(absl::Span<const std::string> arr, Resp3Type type);
+  virtual void SendStringArr(absl::Span<const std::string_view> arr);
+  virtual void SendStringArr(absl::Span<const std::string> arr);
+  virtual void SendStringArraysAsMap(absl::Span<const std::string_view> arr);
+  virtual void SendStringArraysAsMap(absl::Span<const std::string> arr);
+  virtual void SendStringArrayAsSet(absl::Span<const std::string_view> arr);
+
   virtual void SendNull();
+
+  virtual void SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
+                               bool with_scores);
 
   virtual void SendDouble(double val);
 
   virtual void SendBulkString(std::string_view str);
 
   virtual void StartArray(unsigned len);
-  virtual void StartMap(unsigned len);
+  virtual void StartMap(unsigned num_pairs);
+  virtual void StartSet(unsigned num_elements);
 
   static char* FormatDouble(double val, char* dest, unsigned dest_len);
 
@@ -169,8 +161,14 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   static std::string_view StatusToMsg(OpStatus status);
 
  private:
+  enum Resp3Type {
+    ARRAY,
+    SET,
+    MAP,
+  };
+
   using StrPtr = std::variant<const std::string_view*, const std::string*>;
-  void SendStringArr(StrPtr str_ptr, uint32_t len, Resp3Type type);
+  void SendStringCollection(StrPtr str_ptr, uint32_t len, Resp3Type type);
 
   bool is_resp3_ = false;
   const char* NullString();

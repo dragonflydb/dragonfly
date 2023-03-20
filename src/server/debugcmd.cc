@@ -432,7 +432,7 @@ void DebugCmd::Watched() {
   };
 
   shard_set->RunBlockingInParallel(cb);
-  (*cntx_)->SendStringArr(watched_keys, Resp3Type::ARRAY);
+  (*cntx_)->SendStringArr(watched_keys);
 }
 
 void DebugCmd::TxAnalysis() {

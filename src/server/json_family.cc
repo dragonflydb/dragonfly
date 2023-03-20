@@ -26,8 +26,6 @@ extern "C" {
 
 namespace dfly {
 
-using facade::Resp3Type;
-
 using namespace std;
 using namespace jsoncons;
 
@@ -1433,7 +1431,7 @@ void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
       if (it.empty()) {
         (*cntx)->SendNullArray();
       } else {
-        (*cntx)->SendStringArr(it, Resp3Type::ARRAY);
+        (*cntx)->SendStringArr(it);
       }
     }
   } else {
@@ -1550,7 +1548,7 @@ void JsonFamily::Type(CmdArgList args, ConnectionContext* cntx) {
       // When vector is empty, the path doesn't exist in the corresponding json.
       (*cntx)->SendNull();
     } else {
-      (*cntx)->SendStringArr(*result, Resp3Type::ARRAY);
+      (*cntx)->SendStringArr(*result);
     }
   } else {
     if (result.status() == OpStatus::KEY_NOTFOUND) {

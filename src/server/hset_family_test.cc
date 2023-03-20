@@ -27,6 +27,11 @@ class HSetFamilyTest : public BaseFamilyTest {
  protected:
 };
 
+class HestFamilyTestProtocolVersioned : public HSetFamilyTest,
+                                        public ::testing::WithParamInterface<string> {
+ protected:
+};
+
 TEST_F(HSetFamilyTest, Hash) {
   robj* obj = createHashObject();
   sds field = sdsnew("field");
@@ -70,26 +75,40 @@ TEST_F(HSetFamilyTest, HSet) {
   EXPECT_EQ(1, CheckedInt({"hset", "small", "", "565323349817"}));
 }
 
-TEST_F(HSetFamilyTest, Get) {
-  auto resp = Run({"hset", "x", "a", "1", "b", "2", "c", "3"});
+INSTANTIATE_TEST_CASE_P(HestFamilyTestProtocolVersioned, HestFamilyTestProtocolVersioned,
+                        ::testing::Values("2", "3"));
+
+TEST_P(HestFamilyTestProtocolVersioned, Get) {
+  LOG(ERROR) << "HELLO";
+  auto resp = Run({"hello", GetParam()});
+  EXPECT_THAT(resp.GetVec()[6], "proto");
+  EXPECT_THAT(resp.GetVec()[7], IntArg(atoi(GetParam().c_str())));
+
+  LOG(ERROR) << "hset";
+  resp = Run({"hset", "x", "a", "1", "b", "2", "c", "3"});
   EXPECT_THAT(resp, IntArg(3));
 
+  LOG(ERROR) << "hmget";
   resp = Run({"hmget", "unkwn", "a", "c"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::NIL), ArgType(RespExpr::NIL)));
 
+  LOG(ERROR) << "hkeys";
   resp = Run({"hkeys", "x"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("a", "b", "c"));
 
+  LOG(ERROR) << "hvals";
   resp = Run({"hvals", "x"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("1", "2", "3"));
 
+  LOG(ERROR) << "hmget";
   resp = Run({"hmget", "x", "a", "c", "d"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), ElementsAre("1", "3", ArgType(RespExpr::NIL)));
 
+  LOG(ERROR) << "hgetall";
   resp = Run({"hgetall", "x"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "b", "2", "c", "3"));

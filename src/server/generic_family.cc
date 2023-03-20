@@ -929,8 +929,8 @@ template <typename F> bool Iterate(const PrimeValue& pv, F&& func) {
 }
 
 // Create a SortEntryList from given key
-OpResult<SortEntryList> OpFetchSortEntries(const OpArgs& op_args, std::string_view key,
-                                           bool alpha) {
+OpResultTyped<SortEntryList> OpFetchSortEntries(const OpArgs& op_args, std::string_view key,
+                                                bool alpha) {
   using namespace container_utils;
 
   auto [it, _] = op_args.shard->db_slice().FindExt(op_args.db_cntx, key);
@@ -947,7 +947,9 @@ OpResult<SortEntryList> OpFetchSortEntries(const OpArgs& op_args, std::string_vi
         });
       },
       result);
-  return success ? OpResult{std::move(result)} : OpStatus::WRONG_TYPE;
+  auto res = OpResultTyped{std::move(result)};
+  res.setType(it->second.ObjType());
+  return success ? res : OpStatus::WRONG_TYPE;
 }
 
 void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
@@ -978,18 +980,19 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  OpResult<SortEntryList> entries =
+  OpResultTyped<SortEntryList> fetch_result =
       cntx->transaction->ScheduleSingleHopT([&](Transaction* t, EngineShard* shard) {
         return OpFetchSortEntries(t->GetOpArgs(shard), key, alpha);
       });
 
-  if (entries.status() == OpStatus::WRONG_TYPE)
+  if (fetch_result.status() == OpStatus::WRONG_TYPE)
     return (*cntx)->SendError("One or more scores can't be converted into double");
 
-  if (!entries.ok())
+  if (!fetch_result.ok())
     return (*cntx)->SendEmptyArray();
 
-  auto sort_call = [cntx, bounds, reversed](auto& entries) {
+  auto result_type = fetch_result.type();
+  auto sort_call = [cntx, bounds, reversed, result_type](auto& entries) {
     if (bounds) {
       auto sort_it = entries.begin() + std::min(bounds->first + bounds->second, entries.size());
       std::partial_sort(entries.begin(), sort_it, entries.end(),
@@ -1009,12 +1012,16 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
       end_it = entries.begin() + std::min(bounds->first + bounds->second, entries.size());
     }
 
+    if (result_type == OBJ_SET || result_type == OBJ_ZSET) {
+      (*cntx)->StartMap(std::distance(start_it, end_it));
+    }
+
     (*cntx)->StartArray(std::distance(start_it, end_it));
     for (auto it = start_it; it != end_it; ++it) {
       (*cntx)->SendBulkString(it->key);
     }
   };
-  std::visit(std::move(sort_call), entries.value());
+  std::visit(std::move(sort_call), fetch_result.value());
 }
 
 void GenericFamily::Restore(CmdArgList args, ConnectionContext* cntx) {

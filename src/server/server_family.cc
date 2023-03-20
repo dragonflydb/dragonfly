@@ -1317,7 +1317,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
     string_view param = ArgS(args, 2);
     string_view res[2] = {param, "tbd"};
 
-    return (*cntx)->SendStringArr(res, Resp3Type::MAP);
+    return (*cntx)->SendStringArraysAsMap(res);
   } else if (sub_cmd == "RESETSTAT") {
     shard_set->pool()->Await([](auto*) {
       auto* stats = ServerState::tl_connection_stats();
@@ -1705,17 +1705,17 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
       return;
     }
   }
-  LOG(ERROR) << "is_resp3: " << is_resp3;
+
   int proto_version = 2;
   if (is_resp3) {
     proto_version = 3;
     (*cntx)->SetResp3(true);
-    (*cntx)->StartMap(7);
   } else {
-    (*cntx)->StartArray(14);
+    // Issuing hello 2 again is valid and should switch back to RESP2
+    (*cntx)->SetResp3(false);
   }
-  LOG(ERROR) << "proto_version: " << proto_version;
 
+  (*cntx)->StartMap(7);
   (*cntx)->SendBulkString("server");
   (*cntx)->SendBulkString("redis");
   (*cntx)->SendBulkString("version");
