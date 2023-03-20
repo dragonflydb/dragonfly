@@ -53,15 +53,18 @@ class Connection : public util::Connection {
   // virtual - to allow the testing code to override it.
 
   struct PubMessage {
-    // if empty - means its a regular message, otherwise it's pmessage.
-    std::string pattern;
-    std::shared_ptr<std::string> channel;
-    std::shared_ptr<std::string> message;  // ensure that this message would out live passing
-                                           // between different threads/fibers
     enum Type { kSubscribe, kUnsubscribe, kPublish } type;
-    uint32_t channel_cnt;  // relevant only for kSubscribe and kUnsubscribe
 
-    PubMessage() = default;
+    std::string pattern{};  // if empty - means its a regular message, otherwise it's pmessage.
+    std::shared_ptr<std::string> channel{};
+    std::shared_ptr<std::string> message{};  // ensure that this message would out live passing
+                                             // between different threads/fibers
+    uint32_t channel_cnt = 0;                // relevant only for kSubscribe and kUnsubscribe
+
+    PubMessage(bool add, std::shared_ptr<std::string> channel, uint32_t channel_cnt);
+    PubMessage(std::string pattern, std::shared_ptr<std::string> channel,
+               std::shared_ptr<std::string> message);
+
     PubMessage(const PubMessage&) = delete;
     PubMessage& operator=(const PubMessage&) = delete;
     PubMessage(PubMessage&&) = default;

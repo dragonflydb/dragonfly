@@ -16,7 +16,6 @@ extern "C" {
 #include "core/external_alloc.h"
 #include "core/mi_memory_resource.h"
 #include "core/tx_queue.h"
-#include "server/channel_slice.h"
 #include "server/db_slice.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/fibers_ext.h"
@@ -67,10 +66,6 @@ class EngineShard {
 
   const DbSlice& db_slice() const {
     return db_slice_;
-  }
-
-  ChannelSlice& channel_slice() {
-    return channel_slice_;
   }
 
   std::pmr::memory_resource* memory_resource() {
@@ -199,7 +194,6 @@ class EngineShard {
   TxQueue txq_;
   MiMemoryResource mi_resource_;
   DbSlice db_slice_;
-  ChannelSlice channel_slice_;
 
   Stats stats_;
 
