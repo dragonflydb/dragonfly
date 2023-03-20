@@ -13,12 +13,12 @@ template <typename T> void SimpleResponder<T>::operator<<(T&& value) {
   ec_.notifyAll();
 }
 
-template <typename T> void SimpleResponder<T>::Wait() {
+template <typename T> bool SimpleResponder<T>::Wait() {
   ec_.await([this] { return ready_.load(memory_order_relaxed); });
+  return true;
 }
 
 template <> void SimpleResponder<long>::Respond(ConnectionContext* cntx) {
-  Wait();
   (*cntx)->SendLong(value_);
 }
 

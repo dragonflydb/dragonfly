@@ -62,6 +62,7 @@ void Transaction::InitBase(DbIndex dbid, CmdArgList args) {
   db_index_ = dbid;
   cmd_with_full_args_ = args;
   local_result_ = OpStatus::OK;
+  non_blocking_ = (cid_->opt_mask()) & CO::ASYNC;
 }
 
 void Transaction::InitGlobal() {

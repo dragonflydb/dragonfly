@@ -14,6 +14,8 @@ class Responder {
  public:
   virtual ~Responder() = default;
 
+  virtual bool Wait() = 0;
+
   virtual void Respond(ConnectionContext* cntx) = 0;
 };
 
@@ -37,11 +39,11 @@ template <typename T> class SimpleResponder : public Responder {
 
   void operator<<(T&& value);
 
-  virtual void Respond(ConnectionContext* cntx) override;
+  virtual bool Wait() override;  // Return for result portion, returns true when done.
+
+  virtual void Respond(ConnectionContext* cntx) override;  // Send result portion.
 
  private:
-  void Wait();
-
   T value_;
 
   std::atomic_bool ready_;

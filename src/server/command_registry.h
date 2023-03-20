@@ -35,6 +35,8 @@ enum CommandOpt : uint32_t {
   GLOBAL_TRANS = 1U << 12,
 
   NO_AUTOJOURNAL = 1U << 15,  // Skip automatically logging command to journal inside transaction.
+
+  ASYNC = 16,
 };
 
 const char* OptName(CommandOpt fl);
@@ -109,11 +111,16 @@ class CommandId {
       handler_ = std::move(f);
     } else {
       static_assert(std::is_base_of_v<Responder, std::remove_pointer_t<RET>>);
+      opt_mask_ |= CO::ASYNC;
       handler_ = [f = std::move(f)](CmdArgList args, ConnectionContext* cntx) {
         // we manage responders inline, but in the future we can do whatever we want with them
         // like sending over a channel, etc.
         Responder* rsp = f(args, cntx);
-        rsp->Respond(cntx);
+        bool done;
+        do {
+          done = rsp->Wait();
+          rsp->Respond(cntx);
+        } while (!done);
         rsp->~Responder();  // allocated inside cntx buffer
       };
     }
