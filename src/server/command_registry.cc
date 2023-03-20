@@ -87,6 +87,15 @@ void CommandId::SetBuf(ConnectionContext* cntx, char (&buf)[64]) {
   cntx->SetResponderBuffer(buf);
 }
 
+void CommandId::Handle(ConnectionContext* cntx, Responder* rsp) {
+  bool done;
+  do {
+    done = rsp->Wait(cntx->transaction);
+    rsp->Respond(cntx);
+  } while (!done);
+  rsp->~Responder();  // allocated inside cntx buffer
+}
+
 namespace CO {
 
 const char* OptName(CO::CommandOpt fl) {

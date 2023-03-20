@@ -9,12 +9,13 @@
 namespace dfly {
 
 class ConnectionContext;
+class Transaction;
 
 class Responder {
  public:
   virtual ~Responder() = default;
 
-  virtual bool Wait() = 0;  // Return for result portion, returns true when done.
+  virtual bool Wait(Transaction* tx);  // Block until result portion, returns true when done.
 
   virtual void Respond(ConnectionContext* cntx) = 0;  // Send result portion.
 };

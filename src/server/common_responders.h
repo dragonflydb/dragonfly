@@ -15,33 +15,22 @@ template <typename T> class SimpleResponder : public Responder {
 
   void operator<<(T&& value);
 
-  virtual bool Wait() override;
-
   virtual void Respond(ConnectionContext* cntx) override;
 
  private:
   T value_;
-
-  std::atomic_bool ready_{false};
-  ::util::fibers_ext::EventCount ec_{};
 };
 
 class AtomicCounterResponder : public Responder {
  public:
   virtual ~AtomicCounterResponder() override = default;
 
-  AtomicCounterResponder(Transaction* tx);
-
   void operator+=(long sum);
-
-  virtual bool Wait() override;
 
   virtual void Respond(ConnectionContext* cntx) override;
 
  private:
-  std::atomic_long cnt_;
-  std::atomic_long left_;
-  ::util::fibers_ext::EventCount ec_;
+  std::atomic_long cnt_{0};
 };
 
 }  // namespace dfly

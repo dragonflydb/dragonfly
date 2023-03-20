@@ -36,7 +36,7 @@ enum CommandOpt : uint32_t {
 
   NO_AUTOJOURNAL = 1U << 15,  // Skip automatically logging command to journal inside transaction.
 
-  ASYNC = 16,
+  ASYNC = 1U << 16,
 };
 
 const char* OptName(CommandOpt fl);
@@ -107,6 +107,8 @@ class CommandId {
 
   static void SetBuf(ConnectionContext* cntx, char (&arr)[64]);
 
+  static void Handle(ConnectionContext* cntx, Responder* rsp);
+
   template <typename F> CommandId& SetHandler(F&& f) {
     using RET = std::invoke_result_t<F, CmdArgList, ConnectionContext*>;
     if constexpr (std::is_void_v<RET>) {
@@ -120,12 +122,7 @@ class CommandId {
         // we manage responders inline, but in the future we can do whatever we want with them
         // like sending over a channel, etc.
         Responder* rsp = f(args, cntx);
-        bool done;
-        do {
-          done = rsp->Wait();
-          rsp->Respond(cntx);
-        } while (!done);
-        rsp->~Responder();  // allocated inside cntx buffer
+        Handle(cntx, rsp);
       };
     }
 

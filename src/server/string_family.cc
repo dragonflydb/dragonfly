@@ -636,7 +636,7 @@ Responder* StringFamily::TestResponder1(CmdArgList args, ConnectionContext* cntx
 Responder* StringFamily::TestResponder2(CmdArgList args, ConnectionContext* cntx) {
   Transaction* tx = cntx->transaction;
 
-  AtomicCounterResponder* rsp = cntx->MakeResponder<AtomicCounterResponder>(tx);
+  AtomicCounterResponder* rsp = cntx->MakeResponder<AtomicCounterResponder>();
 
   tx->ScheduleSingleHop([rsp](Transaction* tx, EngineShard* sd) {
     *rsp += 1;
@@ -660,7 +660,7 @@ void StringFamily::TestResponder3(CmdArgList args, ConnectionContext* cntx) {
     tx->MultiSwitchCmd(tx->GetCId());
     tx->InitByArgs(tx->GetDbIndex(), args);
 
-    auto* rsp = cntx->MakeResponder<AtomicCounterResponder>(tx);
+    auto* rsp = cntx->MakeResponder<AtomicCounterResponder>();
     tx->ScheduleSingleHop([rsp, i](Transaction* t, EngineShard* sd) {
       *rsp += i;
       return OpStatus::OK;
@@ -669,7 +669,7 @@ void StringFamily::TestResponder3(CmdArgList args, ConnectionContext* cntx) {
     // in reality, as soon as it fails to wait, we need to send it,
     // because we cannot afford to store it and need to stall.
     // We cannot continue on failed wait, because the tx is still in use.
-    rsp->Wait();
+    rsp->Wait(tx);
     rsps.push_back(rsp);  // or chan->send()
   }
 
