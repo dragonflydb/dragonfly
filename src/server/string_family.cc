@@ -627,7 +627,7 @@ Responder* StringFamily::TestResponder1(CmdArgList args, ConnectionContext* cntx
 
   cntx->transaction->ScheduleSingleHop([rsp, args](Transaction* t, EngineShard* sd) {
     long l;
-    absl::SimpleAtoi(ArgS(args, 3), &l);
+    absl::SimpleAtoi(ArgS(args, 2), &l);
     *rsp << l;
     return OpStatus::OK;
   });
@@ -642,6 +642,7 @@ Responder* StringFamily::TestResponder2(CmdArgList args, ConnectionContext* cntx
 
   tx->ScheduleSingleHop([rsp](Transaction* tx, EngineShard* sd) {
     *rsp += 1;
+    VLOG(0) << "added " << uint64_t(rsp);
     return OpStatus::OK;
   });
 

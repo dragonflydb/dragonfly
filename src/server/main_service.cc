@@ -9,6 +9,7 @@ extern "C" {
 }
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/functional/bind_front.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_format.h>
 #include <xxhash.h>
@@ -1307,101 +1308,139 @@ bool StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo*
   return true;
 }
 
-/*
-void ExecShquashed(vector<StoredCmd>& cmds, ConnectionContext* cntx) {
-  using OrderEntry = variant<Responder*, size_t>;
-  using SubmitEntry = variant<StoredCmd*, Transaction*>;
-
-}*/
-
-void ExecSquashed(std::vector<StoredCmd>& cmds, ConnectionContext* cntx) {
+struct SquashedExecutor {
   using Chan = ::util::fibers_ext::SimpleChannel<Responder*, base::mpmc_bounded_queue<Responder*>>;
 
-  const int kChanSize = 16;
-  const int kBufSize = kChanSize + 3;
+  using ExecEntry = variant<StoredCmd*, Transaction*>;
+  using OrderEntry = variant<ShardId, Responder*>;
 
-  std::vector<Chan*> sharded_chans(shard_set->size());
-  for (int i = 0; i < shard_set->size(); i++)
-    sharded_chans[i] = new Chan{kChanSize, 1};
-  std::vector<std::vector<StoredCmd*>> sharded_cmds(shard_set->size());
-  std::vector<ShardId> order;
-  std::vector<std::vector<char*>> sharded_bufs(shard_set->size());
+  static constexpr int kChanSize = 16;
+  static constexpr int kBufSize = kChanSize + 3;
+  static constexpr int kResponderSize = kResponderSizeLimit;
 
-  for (auto& cmd : cmds) {
+  void Fill(std::vector<StoredCmd>& cmds, ConnectionContext* cntx) {
+    for (auto& cmd : cmds) {
+      AddCommand(cmd, cntx);
+    }
+  }
+
+  void AddCommand(StoredCmd& cmd, ConnectionContext* cntx) {
     auto args = cmd.ArgList();
     auto keys = DetermineKeys(cmd.descr, args);
-    CHECK(keys.ok());
-    CHECK(keys->HasSingleKey());
 
-    auto shard = Shard(facade::ToSV(args[keys->start]), shard_set->size());
-    sharded_cmds[shard].push_back(&cmd);
-    order.push_back(shard);
-  }
+    set<ShardId> cmd_shards;
+    for (int i = keys->start; i < keys->end; i += keys->step)
+      cmd_shards.insert(Shard(ArgS(args, i), shard_set->size()));
+    if (keys->bonus)
+      cmd_shards.insert(Shard(ArgS(args, keys->bonus), shard_set->size()));
 
-  for (int i = 0; i < shard_set->size(); i++) {
-    int total = min(sharded_cmds[i].size(), (size_t)kBufSize);
-    auto& bufs = sharded_bufs[i];
-    char* single_buf = new char[64 * total];
-    bufs.resize(total);
-    for (int j = 0; j < total; j++)
-      bufs[j] = single_buf + j * 64;
-  }
-
-  cntx->transaction->NonBlock();
-  cntx->transaction->ScheduleSingleHop([&](Transaction* tx, EngineShard* sd) {
-    int sid = sd->shard_id();
-    if (sharded_cmds[sid].empty()) {
-      sharded_chans[sid]->StartClosing();
-      return OpStatus::OK;
+    if (cmd_shards.size() == 1) {
+      ShardId sid = *cmd_shards.begin();
+      sharded_[sid].entries.push_back(&cmd);
+      sharded_[sid].stored_entries++;
+      order_.push_back(sid);
+      return;
     }
 
-    int cur_buf = 0;
-    auto& bufs = sharded_bufs[sid];
+    auto* parent_tx = cntx->transaction;
+    auto& tx = queued_txs_.emplace_back(new Transaction{parent_tx, Transaction::DELAYED});
+    tx->MultiSwitchCmd(cmd.descr);
+    tx->InitByArgs(parent_tx->GetDbIndex(), args);
+
+    auto* rsp_buf = queued_rspbuf_.emplace_back(new char[kResponderSize]);
+    cntx->SetResponderBuffer(absl::Span<char>{rsp_buf, kResponderSize});
+    cntx->KeepResponder(true);
+
+    cntx->transaction = tx.get();
+    cmd.descr->Invoke(args, cntx);
+    cntx->transaction = parent_tx;
+
+    for (auto sid : cmd_shards)
+      sharded_[sid].entries.push_back(tx.get());
+    order_.push_back(cntx->GetResponder());
+  }
+
+  OpStatus ShardCb(Transaction* tx, EngineShard* shard) {
+    auto& sd = sharded_[shard->shard_id()];
+    if (sd.entries.empty())
+      return OpStatus::OK;
 
     intrusive_ptr<Transaction> local_tx;
     local_tx.reset(new Transaction{tx, Transaction::INLINE});
+
     ConnectionContext local_cntx{local_tx.get()};
-    auto start = absl::GetCurrentTimeNanos();
 
-    for (auto cmd_ptr : sharded_cmds[sid]) {
-      local_tx->MultiSwitchCmd(cmd_ptr->descr);
-      local_tx->InitByArgs(tx->GetDbIndex(), cmd_ptr->ArgList());
+    int buf_index = 0;
+    for (auto& entry : sd.entries) {
+      if (auto rtx = get_if<Transaction*>(&entry); rtx != nullptr) {
+        (*rtx)->RunStub();
+        continue;
+      }
 
-      local_cntx.SetResponderBuffer({bufs[cur_buf], 64});
+      auto cmd = get<StoredCmd*>(entry);
+      CHECK(cmd != nullptr);
+      local_tx->MultiSwitchCmd(cmd->descr);
+      local_tx->InitByArgs(tx->GetDbIndex(), cmd->ArgList());
 
-      cmd_ptr->descr->Invoke(cmd_ptr->ArgList(), &local_cntx);
+      char* rspbuf = sd.rspbuf.data() + buf_index * kResponderSize;
+      local_cntx.SetResponderBuffer({rspbuf, kResponderSize});
+      buf_index = (buf_index + 1) % kBufSize;
+
+      cmd->descr->Invoke(cmd->ArgList(), &local_cntx);
       Responder* rsp = local_cntx.GetResponder();
       CHECK(rsp);
 
       CHECK(rsp->Wait(local_tx.get()));
-      sharded_chans[sid]->Push(rsp);
-      cur_buf = (cur_buf + 1) % bufs.size();
+      sd.chan.Push(rsp);
     }
-    auto end = absl::GetCurrentTimeNanos();
-    sharded_chans[sid]->StartClosing();
 
-    squash_hist.Add((end - start) / 1000);
-    VLOG(1) << "Squashed " << sharded_cmds[sid].size() << " commands in " << (end - start) / 1000
-            << " us";
     return OpStatus::OK;
-  });
-
-  Responder* rsp;
-  for (int sid : order) {
-    CHECK(sharded_chans[sid]->Pop(rsp));
-    rsp->Respond(cntx);
-    rsp->~Responder();
   }
 
-  cntx->transaction->Wait();
-  for (auto chan : sharded_chans)
-    delete chan;
+  void Execute(ConnectionContext* cntx) {
+    for (int i = 0; i < shard_set->size(); i++) {
+      int total = min(sharded_[i].stored_entries, kBufSize) * kResponderSize;
+      sharded_[i].rspbuf.resize(total);
+    }
 
-  for (auto bufs : sharded_bufs) {
-    if (!bufs.empty())
-      delete bufs.front();
+    cntx->transaction->NonBlock();
+    cntx->transaction->ScheduleSingleHop(
+        [this](auto* tx, auto* shard) { return ShardCb(tx, shard); });
+
+    int rsp_index = 0;
+    for (OrderEntry ord : order_) {
+      if (auto* rsp_ptr = get_if<Responder*>(&ord); rsp_ptr != nullptr) {
+        CHECK((*rsp_ptr)->Wait(queued_txs_[rsp_index++].get()));
+        (*rsp_ptr)->Respond(cntx);
+      } else {
+        ShardId sid = get<ShardId>(ord);
+        Responder* rsp;
+        sharded_[sid].chan.Pop(rsp);
+        rsp->Respond(cntx);
+        rsp->~Responder();
+      }
+    }
+
+    cntx->transaction->Wait();
+    for (auto buf : queued_rspbuf_)
+      delete[] buf;
   }
-}
+
+ private:
+  struct ShardData {
+    Chan chan{kChanSize, 1};
+    vector<ExecEntry> entries;
+
+    int stored_entries = 0;
+    vector<char> rspbuf;
+  };
+
+  std::vector<char*> queued_rspbuf_;
+  std::vector<intrusive_ptr<Transaction>> queued_txs_;
+
+  std::vector<ShardData> sharded_{shard_set->size()};
+  std::vector<OrderEntry> order_;
+};
 
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = (*cntx).operator->();
@@ -1453,7 +1492,9 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
       if (!ok || rb->GetError())  // checks for i/o error, not logical error.
         break;
     }*/
-    ExecSquashed(exec_info.body, cntx);
+    SquashedExecutor exec{};
+    exec.Fill(exec_info.body, cntx);
+    exec.Execute(cntx);
   }
 
   if (scheduled) {

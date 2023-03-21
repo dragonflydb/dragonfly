@@ -146,6 +146,10 @@ class ConnectionContext : public facade::ConnectionContext {
     return responder_out_;
   }
 
+  void KeepResponder(bool keep) {
+    keep_responder_ = keep;
+  }
+
   bool KeepResponder(Responder* rsp) {
     if (keep_responder_) {
       responder_out_ = rsp;

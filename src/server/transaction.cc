@@ -59,6 +59,7 @@ Transaction::Transaction(Transaction* parent, StubMode sm)
 void Transaction::RunStub() {
   CHECK(stub_ == DELAYED);
   cb_(this, EngineShard::tlocal());
+  DecreaseRunCnt();
 }
 
 Transaction::~Transaction() {
@@ -652,11 +653,13 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   DCHECK(!cb_);
   cb_ = std::move(cb);
 
-  if (stub_ == DELAYED)
-    return OpStatus::OK;
-
   DCHECK(IsAtomicMulti() || (coordinator_state_ & COORD_SCHED) == 0);  // Multi schedule in advance.
   coordinator_state_ |= (COORD_EXEC | COORD_EXEC_CONCLUDING);  // Single hop means we conclude.
+
+  if (stub_ == DELAYED) {
+    run_count_.store(unique_shard_cnt_, memory_order_relaxed);
+    return OpStatus::OK;
+  }
 
   bool was_ooo = false;
 
