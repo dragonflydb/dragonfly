@@ -38,6 +38,8 @@ void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* s
     table->expire.Erase(exp_it);
   }
 
+  table->types_count.Decrement(del_it->second.ObjType());
+
   DbTableStats& stats = table->stats;
   const PrimeValue& pv = del_it->second;
   if (pv.IsExternal()) {
@@ -772,10 +774,15 @@ void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
 
   size_t value_heap_size = it->second.MallocUsed();
   stats->obj_memory_usage += value_heap_size;
-  if (it->second.ObjType() == OBJ_STRING)
+  if (it->second.ObjType() == OBJ_STRING) {
     stats->strval_memory_usage += value_heap_size;
-  if (existing)
+  }
+
+  if (existing) {
     stats->update_value_amount += value_heap_size;
+  } else {
+    db_arr_[db_ind]->types_count.Increment(it->second.ObjType());
+  }
 
   auto& watched_keys = db_arr_[db_ind]->watched_keys;
   if (!watched_keys.empty()) {

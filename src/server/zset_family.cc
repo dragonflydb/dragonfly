@@ -84,7 +84,9 @@ struct ZParams {
 };
 
 OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args, string_view key,
-                                   size_t member_len) {
+                                   size_t member_len, bool& created) {
+  created = false;
+
   auto& db_slice = op_args.shard->db_slice();
   if (zparams.flags & ZADD_IN_XX) {
     return db_slice.Find(op_args.db_cntx, key, OBJ_ZSET);
@@ -99,6 +101,10 @@ OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args
   }
 
   PrimeIterator& it = add_res.first;
+  if (!add_res.second && it->second.ObjType() != OBJ_ZSET) {
+    return OpStatus::WRONG_TYPE;
+  }
+
   if (add_res.second || zparams.override) {
     robj* zobj = nullptr;
 
@@ -109,13 +115,13 @@ OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args
     }
 
     DVLOG(2) << "Created zset " << zobj->ptr;
-    if (!add_res.second) {
+    if (add_res.second) {
+      created = true;
+    } else {
       db_slice.PreUpdate(op_args.db_cntx.db_index, it);
     }
     it->second.ImportRObj(zobj);
   } else {
-    if (it->second.ObjType() != OBJ_ZSET)
-      return OpStatus::WRONG_TYPE;
     db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   }
 
@@ -848,7 +854,9 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
     return OpStatus::OK;
   }
 
-  OpResult<PrimeIterator> res_it = FindZEntry(zparams, op_args, key, members.front().second.size());
+  bool created;
+  OpResult<PrimeIterator> res_it =
+      FindZEntry(zparams, op_args, key, members.front().second.size(), created);
 
   if (!res_it)
     return res_it.status();
@@ -896,7 +904,8 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
   DVLOG(2) << "ZAdd " << zobj->ptr;
 
   res_it.value()->second.SyncRObj();
-  op_args.shard->db_slice().PostUpdate(op_args.db_cntx.db_index, *res_it, key);
+  op_args.shard->db_slice().PostUpdate(op_args.db_cntx.db_index, *res_it, key,
+                                       /*existing=*/!created);
 
   if (zparams.flags & ZADD_IN_INCR) {
     aresult.new_score = new_score;

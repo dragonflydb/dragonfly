@@ -4,6 +4,8 @@
 
 #include "server/table.h"
 
+#include <absl/strings/strip.h>
+
 #include "base/flags.h"
 #include "base/logging.h"
 
@@ -31,6 +33,50 @@ DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
   ADD(tiered_size);
 
   return *this;
+}
+
+void DbTableTypesCount::Increment(uint32_t type) {
+  IncrementBy(type, 1);
+}
+
+void DbTableTypesCount::Decrement(uint32_t type) {
+  IncrementBy(type, -1);
+}
+
+absl::flat_hash_map<std::string, uint64_t> DbTableTypesCount::GetCounts() const {
+  struct ObjectTypeNameAndCount {
+    std::string name;
+    std::atomic_uint64_t count = 0;
+  };
+  std::array<ObjectTypeNameAndCount, std::tuple_size<Array>::value> counts;
+
+#define REGISTER_OBJECT_TYPE(type) counts[type].name = absl::StripPrefix(#type, "OBJ_")
+  REGISTER_OBJECT_TYPE(OBJ_STRING);
+  REGISTER_OBJECT_TYPE(OBJ_LIST);
+  REGISTER_OBJECT_TYPE(OBJ_SET);
+  REGISTER_OBJECT_TYPE(OBJ_ZSET);
+  REGISTER_OBJECT_TYPE(OBJ_HASH);
+  REGISTER_OBJECT_TYPE(OBJ_MODULE);
+  REGISTER_OBJECT_TYPE(OBJ_STREAM);
+#undef REGISTER_OBJECT_TYPE
+
+  for (size_t i = 0; i < types_count_.size(); ++i) {
+    counts[i].count += types_count_[i];
+  }
+
+  absl::flat_hash_map<std::string, uint64_t> result;
+  for (const auto& c : counts) {
+    result[c.name] = c.count;
+  }
+  return result;
+}
+
+void DbTableTypesCount::IncrementBy(uint32_t type, int how_much) {
+  if (type < types_count_.size()) {
+    uint64_t& count = types_count_[type];
+    CHECK_GE(static_cast<int64_t>(count) + how_much, 0);
+    count += how_much;
+  }
 }
 
 DbTable::DbTable(std::pmr::memory_resource* mr)

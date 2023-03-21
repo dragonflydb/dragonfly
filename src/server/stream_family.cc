@@ -196,6 +196,8 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
     streamTrimByLength(stream_inst, opts.max_limit, opts.max_limit_approx);
     // TODO: when replicating, we should propagate it as exact limit in case of trimming.
   }
+
+  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, /*existing=*/!add_res.second);
   return result_id;
 }
 

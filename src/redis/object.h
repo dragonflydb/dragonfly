@@ -8,13 +8,14 @@
 #include "quicklist.h"
 
 /* The actual Redis Object */
-#define OBJ_STRING 0U    /* String object. */
-#define OBJ_LIST 1U      /* List object. */
-#define OBJ_SET 2U       /* Set object. */
-#define OBJ_ZSET 3U      /* Sorted set object. */
-#define OBJ_HASH 4U      /* Hash object. */
-#define OBJ_MODULE 5U    /* Module object. */
-#define OBJ_STREAM 6U    /* Stream object. */
+#define OBJ_STRING 0U       /* String object. */
+#define OBJ_LIST 1U         /* List object. */
+#define OBJ_SET 2U          /* Set object. */
+#define OBJ_ZSET 3U         /* Sorted set object. */
+#define OBJ_HASH 4U         /* Hash object. */
+#define OBJ_MODULE 5U       /* Module object. */
+#define OBJ_STREAM 6U       /* Stream object. */
+#define OBJ_TYPES_COUNT 7U  /* How many types of objects there are. */
 
 /* Objects encoding. Some kind of objects like Strings and Hashes can be
  * internally represented in multiple ways. The 'encoding' field of the object

@@ -6,8 +6,13 @@
 
 #include <absl/container/flat_hash_map.h>
 
+#include <array>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ref_counter.hpp>
+
+extern "C" {
+#include "redis/object.h"
+}
 
 #include "core/expire_period.h"
 #include "core/intent_lock.h"
@@ -55,6 +60,21 @@ struct DbTableStats {
   DbTableStats& operator+=(const DbTableStats& o);
 };
 
+class DbTableTypesCount {
+ public:
+  void Increment(uint32_t type);
+  void Decrement(uint32_t type);
+
+  absl::flat_hash_map<std::string, uint64_t> GetCounts() const;
+
+ private:
+  using Array = std::array<uint64_t, OBJ_TYPES_COUNT>;
+
+  void IncrementBy(uint32_t type, int how_much);
+
+  Array types_count_ = {};
+};
+
 using LockTable = absl::flat_hash_map<std::string, IntentLock>;
 
 // A single Db table that represents a table that can be chosen with "SELECT" command.
@@ -70,6 +90,7 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   absl::flat_hash_map<std::string, std::vector<ConnectionState::ExecInfo*>> watched_keys;
 
   mutable DbTableStats stats;
+  mutable DbTableTypesCount types_count;
   ExpireTable::Cursor expire_cursor;
   PrimeTable::Cursor prime_cursor;
 

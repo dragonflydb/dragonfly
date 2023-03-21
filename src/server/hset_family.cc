@@ -267,7 +267,7 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
     }
   }
 
-  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, /*existing=*/!inserted);
 
   return OpStatus::OK;
 }
@@ -682,7 +682,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
       created += unsigned(added);
     }
   }
-  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
+  db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, /*existing=*/!add_res.second);
 
   return created;
 }

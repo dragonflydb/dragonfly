@@ -477,9 +477,10 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
       string_view key = it->first.GetSlice(&tmp);
       es->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, key);
     }
-  } else {
-    es->db_slice().PostUpdate(op_args.db_cntx.db_index, it, key, true);
   }
+
+  es->db_slice().PostUpdate(op_args.db_cntx.db_index, it, key, /*existing=*/!new_key);
+
   if (journal_rewrite && op_args.shard->journal()) {
     string command = dir == ListDir::LEFT ? "LPUSH" : "RPUSH";
     vector<string_view> mapped(vals.size() + 1);
