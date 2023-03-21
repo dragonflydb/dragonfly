@@ -199,7 +199,7 @@ class CommandGenerator:
         ('SPOP {k}', ValueType.SET),
         ('HSETNX {k} v0 {val}', ValueType.HSET),
         ('HINCRBY {k} v1 1', ValueType.HSET),
-        ('ZPOPMIN {k} 1', ValueType.ZSET),
+        # ('ZPOPMIN {k} 1', ValueType.ZSET), https://github.com/dragonflydb/dragonfly/issues/949
         ('ZADD {k} 0 {val}', ValueType.ZSET),
         ('JSON.NUMINCRBY {k} $..i 1', ValueType.JSON),
         ('JSON.ARRPOP {k} $.arr', ValueType.JSON),
