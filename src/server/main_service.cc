@@ -1305,14 +1305,19 @@ bool StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo*
   return true;
 }
 
+/*
+void ExecShquashed(vector<StoredCmd>& cmds, ConnectionContext* cntx) {
+  using OrderEntry = variant<Responder*, size_t>;
+  using SubmitEntry = variant<StoredCmd*, Transaction*>;
+
+}*/
+
 void ExecSquashed(std::vector<StoredCmd>& cmds, ConnectionContext* cntx) {
   using Chan = ::util::fibers_ext::SimpleChannel<Responder*, base::mpmc_bounded_queue<Responder*>>;
 
-  VLOG(0) << "ExecSquashed";
-
   std::vector<Chan*> sharded_chans(shard_set->size());
   for (int i = 0; i < shard_set->size(); i++)
-    sharded_chans[i] = new Chan{4, 1};
+    sharded_chans[i] = new Chan{16, 1};
   std::vector<std::vector<StoredCmd*>> sharded_cmds(shard_set->size());
   std::vector<ShardId> order;
 
@@ -1327,17 +1332,20 @@ void ExecSquashed(std::vector<StoredCmd>& cmds, ConnectionContext* cntx) {
     order.push_back(shard);
   }
 
-  VLOG(0) << "Before sched";
-
   ::boost::fibers::mutex busy_flag;
   busy_flag.lock();
 
   cntx->transaction->NonBlock();
   cntx->transaction->ScheduleSingleHop([&](Transaction* tx, EngineShard* sd) {
     int sid = sd->shard_id();
+    if (sharded_cmds[sid].empty()) {
+      sharded_chans[sid]->StartClosing();
+      return OpStatus::OK;
+    }
+
     std::vector<char*> bufs;
     intrusive_ptr<Transaction> local_tx;
-    local_tx.reset(new Transaction{tx});
+    local_tx.reset(new Transaction{tx, Transaction::INLINE});
     ConnectionContext local_cntx{local_tx.get()};
 
     for (auto cmd_ptr : sharded_cmds[sid]) {
@@ -1357,8 +1365,6 @@ void ExecSquashed(std::vector<StoredCmd>& cmds, ConnectionContext* cntx) {
     }
     sharded_chans[sid]->StartClosing();
 
-    VLOG(0) << "done with sid " << sid;
-
     busy_flag.lock();
     busy_flag.unlock();
 
@@ -1368,20 +1374,15 @@ void ExecSquashed(std::vector<StoredCmd>& cmds, ConnectionContext* cntx) {
     return OpStatus::OK;
   });
 
-  VLOG(0) << "after sched";
-
   Responder* rsp;
   for (int sid : order) {
-    sharded_chans[sid]->Pop(rsp);
+    CHECK(sharded_chans[sid]->Pop(rsp));
     rsp->Respond(cntx);
     rsp->~Responder();
-    VLOG(0) << "Done one";
   }
 
   busy_flag.unlock();
-  VLOG(0) << "unlocked";
   cntx->transaction->Wait();
-  VLOG(0) << "after wait";
   for (auto chan : sharded_chans)
     delete chan;
 }
@@ -1421,9 +1422,9 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   rb->StartArray(exec_info.body.size());
 
   if (!exec_info.body.empty()) {
-    CmdArgVec str_list;
+    /*CmdArgVec str_list;
 
-    /*for (auto& scmd : exec_info.body) {
+    for (auto& scmd : exec_info.body) {
       cntx->transaction->MultiSwitchCmd(scmd.descr);
       if (IsTransactional(scmd.descr)) {
         OpStatus st = cntx->transaction->InitByArgs(cntx->conn_state.db_index, scmd.ArgList());

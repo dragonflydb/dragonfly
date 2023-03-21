@@ -134,7 +134,7 @@ class ConnectionContext : public facade::ConnectionContext {
   const CommandId* cid = nullptr;
   ConnectionState conn_state;
 
-  absl::Span<char> responder_buffer_;
+  absl::Span<char> responder_buffer_{nullptr, 0};
   Responder* responder_out_;
   bool keep_responder_;
 
@@ -151,11 +151,13 @@ class ConnectionContext : public facade::ConnectionContext {
       responder_out_ = rsp;
       return true;
     }
+    responder_buffer_ = {nullptr, 0};
     return false;
   }
 
   void SetResponderBuffer(absl::Span<char> buf) {
-    responder_buffer_ = buf;
+    if (responder_buffer_.data() == nullptr)
+      responder_buffer_ = buf;
   }
 
   template <typename RT, typename... Args> RT* MakeResponder(Args&&... args) {

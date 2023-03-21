@@ -101,10 +101,12 @@ class Transaction {
     EXPIRED_Q = 1 << 6,         // Whether it timed out and should be dropped
   };
 
+  enum StubMode { NONE, INLINE, DELAYED };
+
  public:
   explicit Transaction(const CommandId* cid, uint32_t thread_index);
 
-  explicit Transaction(Transaction* parent);
+  explicit Transaction(Transaction* parent, StubMode sm);
 
   // Initialize from command (args) on specific db.
   OpStatus InitByArgs(DbIndex index, CmdArgList args);
@@ -201,6 +203,8 @@ class Transaction {
   void Wait() {
     WaitForShardCallbacks();
   }
+
+  void RunStub();
 
   void NonBlock() {
     non_blocking_ = true;
@@ -502,7 +506,7 @@ class Transaction {
 
   // MVP
   bool non_blocking_;
-  bool stub_;
+  StubMode stub_;
 
   // Transaction coordinator state, written and read by coordinator thread.
   // Can be read by shard threads as long as we respect ordering rules, i.e. when

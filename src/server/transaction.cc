@@ -42,7 +42,7 @@ IntentLock::Mode Transaction::Mode() const {
  * @param cs
  */
 Transaction::Transaction(const CommandId* cid, uint32_t thread_index)
-    : cid_{cid}, coordinator_index_(thread_index) {
+    : cid_{cid}, coordinator_index_(thread_index), stub_(NONE) {
   string_view cmd_name(cid_->name());
   if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA" || cmd_name == "R3") {
     multi_.reset(new MultiData);
@@ -52,7 +52,13 @@ Transaction::Transaction(const CommandId* cid, uint32_t thread_index)
   }
 }
 
-Transaction::Transaction(Transaction* parent) : txid_{parent->txid_}, stub_{true}, cb_{nullptr} {
+Transaction::Transaction(Transaction* parent, StubMode sm)
+    : txid_{parent->txid_}, stub_{sm}, cb_{nullptr} {
+}
+
+void Transaction::RunStub() {
+  CHECK(stub_ == DELAYED);
+  cb_(this, EngineShard::tlocal());
 }
 
 Transaction::~Transaction() {
@@ -640,11 +646,14 @@ bool Transaction::MultiData::IsIncrLocks() const {
 // transactions like set/mset/mget etc. Does not apply for more complicated cases like RENAME or
 // BLPOP where a data must be read from multiple shards before performing another hop.
 OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
-  if (stub_)
+  if (stub_ == INLINE)
     return cb(this, EngineShard::tlocal());
 
   DCHECK(!cb_);
   cb_ = std::move(cb);
+
+  if (stub_ == DELAYED)
+    return OpStatus::OK;
 
   DCHECK(IsAtomicMulti() || (coordinator_state_ & COORD_SCHED) == 0);  // Multi schedule in advance.
   coordinator_state_ |= (COORD_EXEC | COORD_EXEC_CONCLUDING);  // Single hop means we conclude.

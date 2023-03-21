@@ -16,11 +16,13 @@ extern "C" {
 #include "base/stl_util.h"
 #include "core/string_set.h"
 #include "server/command_registry.h"
+#include "server/common_responders.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
+#include "server/responder.h"
 #include "server/transaction.h"
 
 ABSL_DECLARE_FLAG(bool, use_set2);
@@ -1039,6 +1041,7 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cur
   return res;
 }
 
+/*
 void SAdd(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 1);
   vector<string_view> vals(args.size() - 2);
@@ -1057,6 +1060,28 @@ void SAdd(CmdArgList args, ConnectionContext* cntx) {
   }
 
   (*cntx)->SendError(result.status());
+}
+*/
+
+Responder* SAdd(CmdArgList args, ConnectionContext* cntx) {
+  auto* rsp = cntx->MakeResponder<SimpleResponder<OpResult<long>>>();
+  auto cb = [args, rsp](Transaction* t, EngineShard* shard) {
+    string_view key = ArgS(args, 1);
+    vector<string_view> vals(args.size() - 2);
+    for (size_t i = 2; i < args.size(); ++i) {
+      vals[i - 2] = ArgS(args, i);
+    }
+
+    auto res = OpAdd(t->GetOpArgs(shard), key, {vals.data(), vals.size()}, false, false);
+    if (res)
+      *rsp << res.value();
+    else
+      *rsp << res.status();
+    return OpStatus::OK;
+  };
+
+  cntx->transaction->ScheduleSingleHop(std::move(cb));
+  return rsp;
 }
 
 void SIsMember(CmdArgList args, ConnectionContext* cntx) {
