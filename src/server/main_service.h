@@ -108,6 +108,7 @@ class Service : public facade::ServiceInterface {
   void Pubsub(CmdArgList args, ConnectionContext* cntx);
   void PubsubChannels(std::string_view pattern, ConnectionContext* cntx);
   void PubsubPatterns(ConnectionContext* cntx);
+  void Fck(CmdArgList args, ConnectionContext* cntx);
 
   struct EvalArgs {
     std::string_view sha;  // only one of them is defined.

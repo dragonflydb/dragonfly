@@ -69,6 +69,8 @@ namespace h2 = boost::beast::http;
 
 namespace {
 
+thread_local base::Histogram squash_hist;
+
 DEFINE_VARZ(VarzMapAverage, request_latency_usec);
 
 std::optional<VarzFunction> engine_varz;
@@ -1347,6 +1349,7 @@ void ExecSquashed(std::vector<StoredCmd>& cmds, ConnectionContext* cntx) {
     intrusive_ptr<Transaction> local_tx;
     local_tx.reset(new Transaction{tx, Transaction::INLINE});
     ConnectionContext local_cntx{local_tx.get()};
+    auto start = absl::GetCurrentTimeNanos();
 
     for (auto cmd_ptr : sharded_cmds[sid]) {
       local_tx->MultiSwitchCmd(cmd_ptr->descr);
@@ -1363,6 +1366,7 @@ void ExecSquashed(std::vector<StoredCmd>& cmds, ConnectionContext* cntx) {
       CHECK(rsp->Wait(local_tx.get()));
       sharded_chans[sid]->Push(rsp);
     }
+    auto end = absl::GetCurrentTimeNanos();
     sharded_chans[sid]->StartClosing();
 
     busy_flag.lock();
@@ -1371,6 +1375,9 @@ void ExecSquashed(std::vector<StoredCmd>& cmds, ConnectionContext* cntx) {
     for (auto buf : bufs)
       delete[] buf;
 
+    squash_hist.Add((end - start) / 1000);
+    VLOG(1) << "Squashed " << sharded_cmds[sid].size() << " commands in " << (end - start) / 1000
+            << " us";
     return OpStatus::OK;
   });
 
@@ -1700,6 +1707,19 @@ string Service::GetContextInfo(facade::ConnectionContext* cntx) {
   return index ? absl::StrCat("flags:", buf) : string();
 }
 
+void Service::Fck(CmdArgList args, ConnectionContext* cntx) {
+  base::Histogram hist;
+  fibers::mutex mu;
+  shard_set->RunBlockingInParallel([&](auto* shard) {
+    unique_lock lk(mu);
+    hist.Merge(squash_hist);
+  });
+
+  LOG(INFO) << hist.ToString();
+
+  (*cntx)->SendOk();
+}
+
 using ServiceFunc = void (Service::*)(CmdArgList, ConnectionContext* cntx);
 
 #define HFUNC(x) SetHandler(&Service::x)
@@ -1727,7 +1747,8 @@ void Service::RegisterCommands() {
       << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(PUnsubscribe)
       << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0}.MFUNC(Function)
       << CI{"MONITOR", CO::ADMIN, 1, 0, 0, 0}.MFUNC(Monitor)
-      << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, 0}.MFUNC(Pubsub);
+      << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, 0}.MFUNC(Pubsub)
+      << CI{"FCK", CO::LOADING | CO::FAST, -1, 0, 0, 0}.MFUNC(Fck);
 
   StreamFamily::Register(&registry_);
   StringFamily::Register(&registry_);
