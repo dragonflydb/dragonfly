@@ -1317,11 +1317,15 @@ void ExecShquashed(vector<StoredCmd>& cmds, ConnectionContext* cntx) {
 void ExecSquashed(std::vector<StoredCmd>& cmds, ConnectionContext* cntx) {
   using Chan = ::util::fibers_ext::SimpleChannel<Responder*, base::mpmc_bounded_queue<Responder*>>;
 
+  const int kChanSize = 16;
+  const int kBufSize = kChanSize + 3;
+
   std::vector<Chan*> sharded_chans(shard_set->size());
   for (int i = 0; i < shard_set->size(); i++)
-    sharded_chans[i] = new Chan{16, 1};
+    sharded_chans[i] = new Chan{kChanSize, 1};
   std::vector<std::vector<StoredCmd*>> sharded_cmds(shard_set->size());
   std::vector<ShardId> order;
+  std::vector<std::vector<char*>> sharded_bufs(shard_set->size());
 
   for (auto& cmd : cmds) {
     auto args = cmd.ArgList();
@@ -1334,8 +1338,14 @@ void ExecSquashed(std::vector<StoredCmd>& cmds, ConnectionContext* cntx) {
     order.push_back(shard);
   }
 
-  ::boost::fibers::mutex busy_flag;
-  busy_flag.lock();
+  for (int i = 0; i < shard_set->size(); i++) {
+    int total = min(sharded_cmds[i].size(), (size_t)kBufSize);
+    auto& bufs = sharded_bufs[i];
+    char* single_buf = new char[64 * total];
+    bufs.resize(total);
+    for (int j = 0; j < total; j++)
+      bufs[j] = single_buf + j * 64;
+  }
 
   cntx->transaction->NonBlock();
   cntx->transaction->ScheduleSingleHop([&](Transaction* tx, EngineShard* sd) {
@@ -1345,7 +1355,9 @@ void ExecSquashed(std::vector<StoredCmd>& cmds, ConnectionContext* cntx) {
       return OpStatus::OK;
     }
 
-    std::vector<char*> bufs;
+    int cur_buf = 0;
+    auto& bufs = sharded_bufs[sid];
+
     intrusive_ptr<Transaction> local_tx;
     local_tx.reset(new Transaction{tx, Transaction::INLINE});
     ConnectionContext local_cntx{local_tx.get()};
@@ -1355,9 +1367,7 @@ void ExecSquashed(std::vector<StoredCmd>& cmds, ConnectionContext* cntx) {
       local_tx->MultiSwitchCmd(cmd_ptr->descr);
       local_tx->InitByArgs(tx->GetDbIndex(), cmd_ptr->ArgList());
 
-      char* buf = new char[64];
-      local_cntx.SetResponderBuffer({buf, 64});
-      bufs.push_back(buf);
+      local_cntx.SetResponderBuffer({bufs[cur_buf], 64});
 
       cmd_ptr->descr->Invoke(cmd_ptr->ArgList(), &local_cntx);
       Responder* rsp = local_cntx.GetResponder();
@@ -1365,15 +1375,10 @@ void ExecSquashed(std::vector<StoredCmd>& cmds, ConnectionContext* cntx) {
 
       CHECK(rsp->Wait(local_tx.get()));
       sharded_chans[sid]->Push(rsp);
+      cur_buf = (cur_buf + 1) % bufs.size();
     }
     auto end = absl::GetCurrentTimeNanos();
     sharded_chans[sid]->StartClosing();
-
-    busy_flag.lock();
-    busy_flag.unlock();
-
-    for (auto buf : bufs)
-      delete[] buf;
 
     squash_hist.Add((end - start) / 1000);
     VLOG(1) << "Squashed " << sharded_cmds[sid].size() << " commands in " << (end - start) / 1000
@@ -1388,10 +1393,14 @@ void ExecSquashed(std::vector<StoredCmd>& cmds, ConnectionContext* cntx) {
     rsp->~Responder();
   }
 
-  busy_flag.unlock();
   cntx->transaction->Wait();
   for (auto chan : sharded_chans)
     delete chan;
+
+  for (auto bufs : sharded_bufs) {
+    if (!bufs.empty())
+      delete bufs.front();
+  }
 }
 
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
