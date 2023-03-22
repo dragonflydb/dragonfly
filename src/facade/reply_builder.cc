@@ -424,9 +424,6 @@ void RedisReplyBuilder::SendStringCollection(StrPtr str_ptr, uint32_t len, Resp3
     return;
   }
 
-void RedisReplyBuilder::SendStringArr(StrPtr str_ptr, uint32_t len) {
-  DVLOG(2) << "Sending array of " << len << " strings.";
-
   // When vector length is too long, Send returns EMSGSIZE.
   size_t vec_len = std::min<size_t>(256u, len);
 
