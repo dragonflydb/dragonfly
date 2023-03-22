@@ -9,6 +9,7 @@
 
 #include "facade/conn_context.h"
 #include "facade/redis_parser.h"
+#include "server/channel_store.h"
 #include "server/engine_shard_set.h"
 #include "util/fibers/fiber.h"
 #include "util/proactor_pool.h"
@@ -121,6 +122,10 @@ class ServerFamily {
     return journal_.get();
   }
 
+  ChannelStore* channel_store() {
+    return channel_store_.get();
+  }
+
   void OnClose(ConnectionContext* cntx);
 
   void BreakOnShutdown();
@@ -178,6 +183,8 @@ class ServerFamily {
   std::unique_ptr<ScriptMgr> script_mgr_;
   std::unique_ptr<journal::Journal> journal_;
   std::unique_ptr<DflyCmd> dfly_cmd_;
+  std::unique_ptr<ChannelStore> channel_store_;
+
   std::string master_id_;
 
   time_t start_time_ = 0;  // in seconds, epoch time.

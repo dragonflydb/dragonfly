@@ -39,7 +39,7 @@ ScriptMgr::ScriptMgr() {
 
   static_assert(ScriptParams{}.atomic && !ScriptParams{}.undeclared_keys);
 
-  auto err = ScriptParams::ApplyPragmas(config, &default_params_);
+  auto err = ScriptParams::ApplyFlags(config, &default_params_);
   CHECK(!err) << err.Format();
 }
 
@@ -121,22 +121,11 @@ void ScriptMgr::LoadCmd(CmdArgList args, ConnectionContext* cntx) {
   auto interpreter = ss->BorrowInterpreter();
   absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
 
-  // no need to lock the interpreter since we do not mess the stack.
-  string error_or_id;
-  Interpreter::AddResult add_result = interpreter->AddFunction(body, &error_or_id);
+  auto res = Insert(body, interpreter);
+  if (!res)
+    return (*cntx)->SendError(res.error().Format());
 
-  if (add_result == Interpreter::ALREADY_EXISTS) {
-    return (*cntx)->SendBulkString(error_or_id);
-  }
-  if (add_result == Interpreter::COMPILE_ERR) {
-    return (*cntx)->SendError(error_or_id);
-  }
-
-  if (auto err = Insert(error_or_id, body); err) {
-    return (*cntx)->SendError(err.Format());
-  }
-
-  return (*cntx)->SendBulkString(error_or_id);
+  return (*cntx)->SendBulkString(res.value());
 }
 
 void ScriptMgr::ConfigCmd(CmdArgList args, ConnectionContext* cntx) {
@@ -144,8 +133,8 @@ void ScriptMgr::ConfigCmd(CmdArgList args, ConnectionContext* cntx) {
   ScriptKey key{ArgS(args, 1)};
   auto& data = db_[key];
 
-  for (auto pragma : args.subspan(2)) {
-    if (auto err = ScriptParams::ApplyPragmas(facade::ToSV(pragma), &data); err)
+  for (auto flag : args.subspan(2)) {
+    if (auto err = ScriptParams::ApplyFlags(facade::ToSV(flag), &data); err)
       return (*cntx)->SendError("Invalid config format: " + err.Format());
   }
 
@@ -185,28 +174,40 @@ void ScriptMgr::LatencyCmd(ConnectionContext* cntx) const {
   }
 }
 
-// Search for pragmas in script body
-io::Result<optional<ScriptMgr::ScriptParams>, GenericError> DeduceParams(string_view body) {
-  static const regex kRegex{"^\\s*?--\\s*?pragma\\s*?:(.*)"};
+// Check if script starts with shebang (#!lua). If present, look for flags parameter and truncate
+// it.
+io::Result<optional<ScriptMgr::ScriptParams>, GenericError> DeduceParams(string_view* body) {
+  static const regex kRegex{"^\\s*?#!lua.*?flags=([^\\s\\n\\r]*).*[\\s\\r\\n]"};
   cmatch matches;
 
-  if (!regex_search(body.data(), matches, kRegex))
+  if (!regex_search(body->data(), matches, kRegex))
     return nullopt;
 
   ScriptMgr::ScriptParams params;
-  if (auto err = ScriptMgr::ScriptParams::ApplyPragmas(matches.str(1), &params); err)
+  if (auto err = ScriptMgr::ScriptParams::ApplyFlags(matches.str(1), &params); err)
     return nonstd::make_unexpected(err);
 
+  *body = body->substr(matches[0].length());
   return params;
 }
 
-GenericError ScriptMgr::Insert(string_view id, string_view body) {
-  auto params = DeduceParams(body);
+io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter* interpreter) {
+  // Calculate hash before removing shebang (#!lua).
+  char sha_buf[64];
+  Interpreter::FuncSha1(body, sha_buf);
+  string_view sha{sha_buf, std::strlen(sha_buf)};
+
+  auto params = DeduceParams(&body);
   if (!params)
-    return params.get_unexpected().value();
+    return params.get_unexpected();
+
+  string result;
+  Interpreter::AddResult add_result = interpreter->AddFunction(sha, body, &result);
+  if (add_result == Interpreter::COMPILE_ERR)
+    return nonstd::make_unexpected(GenericError{move(result)});
 
   lock_guard lk{mu_};
-  auto [it, _] = db_.emplace(id, InternalScriptData{params->value_or(default_params_), nullptr});
+  auto [it, _] = db_.emplace(sha, InternalScriptData{params->value_or(default_params_), nullptr});
 
   if (auto& body_ptr = it->second.body; !body_ptr) {
     body_ptr.reset(new char[body.size() + 1]);
@@ -214,9 +215,9 @@ GenericError ScriptMgr::Insert(string_view id, string_view body) {
     body_ptr[body.size()] = '\0';
   }
 
-  UpdateScriptCaches(id, it->second);
+  UpdateScriptCaches(sha, it->second);
 
-  return {};
+  return string{sha};
 }
 
 optional<ScriptMgr::ScriptData> ScriptMgr::Find(std::string_view sha) const {
@@ -248,21 +249,25 @@ void ScriptMgr::UpdateScriptCaches(ScriptKey sha, ScriptParams params) const {
   });
 }
 
-GenericError ScriptMgr::ScriptParams::ApplyPragmas(string_view config, ScriptParams* params) {
+GenericError ScriptMgr::ScriptParams::ApplyFlags(string_view config, ScriptParams* params) {
   auto parts = absl::StrSplit(config, absl::ByAnyChar(",; "), absl::SkipEmpty());
-  for (auto pragma : parts) {
-    if (pragma == "disable-atomicity") {
+  for (auto flag : parts) {
+    if (flag == "disable-atomicity") {
       params->atomic = false;
       continue;
     }
 
-    if (pragma == "allow-undeclared-keys") {
+    if (flag == "allow-undeclared-keys") {
       params->undeclared_keys = true;
       continue;
     }
 
-    return GenericError{make_error_code(errc::invalid_argument),
-                        "Invalid pragma: "s + string{pragma}};
+    if (flag == "no-writes") {  // Used by Redis.
+      // TODO: lock read-only.
+      continue;
+    }
+
+    return GenericError{"Invalid flag: "s + string{flag}};
   }
 
   return {};

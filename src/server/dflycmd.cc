@@ -412,7 +412,7 @@ OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineS
   }
 
   // Register cleanup.
-  flow->cleanup = [this, flow]() {
+  flow->cleanup = [flow]() {
     flow->TryShutdownSocket();
     if (flow->streamer) {
       flow->streamer->Cancel();
@@ -626,7 +626,7 @@ void DflyCmd::Shutdown() {
 void DflyCmd::FlowInfo::TryShutdownSocket() {
   // Close socket for clean disconnect.
   if (conn->socket()->IsOpen()) {
-    conn->socket()->Shutdown(SHUT_RDWR);
+    (void)conn->socket()->Shutdown(SHUT_RDWR);
   }
 }
 

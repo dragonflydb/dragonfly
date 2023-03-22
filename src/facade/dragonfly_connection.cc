@@ -176,6 +176,15 @@ class Connection::Request {
   void SetArgs(const RespVec& args);
 };
 
+Connection::PubMessage::PubMessage(string pattern, shared_ptr<string> channel,
+                                   shared_ptr<string> message)
+    : type{kPublish}, pattern{move(pattern)}, channel{move(channel)}, message{move(message)} {
+}
+
+Connection::PubMessage::PubMessage(bool add, shared_ptr<string> channel, uint32_t channel_cnt)
+    : type{add ? kSubscribe : kUnsubscribe}, channel{move(channel)}, channel_cnt{channel_cnt} {
+}
+
 struct Connection::DispatchOperations {
   DispatchOperations(SinkReplyBuilder* b, Connection* me)
       : stats{me->service_->GetThreadLocalConnectionStats()}, builder{b}, self(me) {
@@ -300,8 +309,12 @@ void Connection::DispatchOperations::operator()(const PubMsgRecord& msg) {
 
 void Connection::DispatchOperations::operator()(Request::PipelineMsg& msg) {
   ++stats->pipelined_cmd_cnt;
-  bool empty = self->dispatch_q_.empty();
-  builder->SetBatchMode(!empty);
+  self->pipeline_msg_cnt_--;
+
+  bool do_batch = (self->pipeline_msg_cnt_ > 0);
+  DVLOG(2) << "Dispatching pipeline: " << ToSV(msg.args.front()) << " " << do_batch;
+
+  builder->SetBatchMode(do_batch);
   self->cc_->async_dispatch = true;
   self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()}, self->cc_.get());
   self->last_interaction_ = time(nullptr);
@@ -650,13 +663,16 @@ auto Connection::ParseRedis() -> ParserStatus {
           }
         }
         RespToArgList(parse_args_, &cmd_vec_);
+
+        DVLOG(2) << "Sync dispatch " << ToSV(cmd_vec_.front());
+
         CmdArgList cmd_list{cmd_vec_.data(), cmd_vec_.size()};
         service_->DispatchCommand(cmd_list, cc_.get());
         last_interaction_ = time(nullptr);
       } else {
         // Dispatch via queue to speedup input reading.
         RequestPtr req = FromArgs(std::move(parse_args_), tlh);
-
+        ++pipeline_msg_cnt_;
         dispatch_q_.push_back(std::move(req));
         if (dispatch_q_.size() == 1) {
           evc_.notify();

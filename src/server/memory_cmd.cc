@@ -69,7 +69,7 @@ std::string MallocStats(bool backing, unsigned tid) {
 
 }  // namespace
 
-MemoryCmd::MemoryCmd(ServerFamily* owner, ConnectionContext* cntx) : sf_(*owner), cntx_(cntx) {
+MemoryCmd::MemoryCmd(ServerFamily* owner, ConnectionContext* cntx) : cntx_(cntx) {
 }
 
 void MemoryCmd::Run(CmdArgList args) {

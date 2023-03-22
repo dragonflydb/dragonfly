@@ -21,6 +21,7 @@ using namespace testing;
 using namespace std;
 using namespace util;
 namespace fibers = ::boost::fibers;
+using absl::StrCat;
 
 namespace dfly {
 
@@ -30,7 +31,7 @@ class ListFamilyTest : public BaseFamilyTest {
     num_threads_ = 4;
   }
 
-  unsigned NumWatched() {
+  static unsigned NumWatched() {
     atomic_uint32_t sum{0};
     shard_set->RunBriefInParallel([&](EngineShard* es) {
       auto* bc = es->blocking_controller();
@@ -39,6 +40,17 @@ class ListFamilyTest : public BaseFamilyTest {
     });
 
     return sum.load();
+  }
+
+  static bool HasAwakened() {
+    atomic_uint32_t sum{0};
+    shard_set->RunBriefInParallel([&](EngineShard* es) {
+      auto* bc = es->blocking_controller();
+      if (bc)
+        sum.fetch_add(bc->HasAwakedTransaction(), memory_order_relaxed);
+    });
+
+    return sum.load() > 0;
   }
 };
 
@@ -330,8 +342,7 @@ TEST_F(ListFamilyTest, BPopSameKeyTwice) {
 
   auto pop_fb = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
     blpop_resp = Run({"blpop", kKey1, kKey2, kKey2, kKey1, "0"});
-    auto watched = Run({"debug", "watched"});
-    ASSERT_THAT(watched, ArrLen(0));
+    EXPECT_EQ(0, NumWatched());
   });
 
   WaitUntilLocked(0, kKey1);
@@ -362,10 +373,8 @@ TEST_F(ListFamilyTest, BPopTwoKeysSameShard) {
 
   auto pop_fb = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
     blpop_resp = Run({"blpop", "x", "y", "0"});
-    auto watched = Run({"debug", "watched"});
-
     EXPECT_FALSE(IsLocked(0, "y"));
-    ASSERT_THAT(watched, ArrLen(0));
+    ASSERT_EQ(0, NumWatched());
   });
 
   WaitUntilLocked(0, "x");
@@ -674,6 +683,7 @@ TEST_F(ListFamilyTest, TwoQueueBug451) {
 
   for (auto& f : fbs)
     f.Join();
+  ASSERT_EQ(0, NumWatched());
 }
 
 TEST_F(ListFamilyTest, BRPopLPushSingleShard) {
@@ -720,6 +730,35 @@ TEST_F(ListFamilyTest, BRPopLPushSingleShardBlocking) {
   ASSERT_EQ(0, NumWatched());
 }
 
+TEST_F(ListFamilyTest, BRPopContended) {
+  RespExpr resp;
+  atomic_bool done{false};
+  constexpr auto kNumFibers = 4;
+
+  // Run the fiber at creation.
+  fibers_ext::Fiber fb[kNumFibers];
+  for (int i = 0; i < kNumFibers; i++) {
+    fb[i] = pp_->at(1)->LaunchFiber(fibers::launch::dispatch, [&] {
+      string id = StrCat("id", i);
+      while (!done) {
+        Run(id, {"brpop", "k0", "k1", "k2", "k3", "k4", "0.1"});
+      };
+    });
+  }
+
+  for (int i = 0; i < 500; i++) {
+    string key = absl::StrCat("k", i % 3);
+    Run({"lpush", key, "foo"});
+  }
+
+  done = true;
+  for (int i = 0; i < kNumFibers; i++) {
+    fb[i].Join();
+  }
+  ASSERT_EQ(0, NumWatched());
+  ASSERT_FALSE(HasAwakened());
+}
+
 TEST_F(ListFamilyTest, BRPopLPushTwoShards) {
   RespExpr resp;
   EXPECT_THAT(Run({"brpoplpush", "x", "z", "0.05"}), ArgType(RespExpr::NIL));
@@ -731,6 +770,7 @@ TEST_F(ListFamilyTest, BRPopLPushTwoShards) {
   resp = Run({"lrange", "z", "0", "-1"});
   ASSERT_EQ(resp, "val");
   Run({"del", "z"});
+  ASSERT_EQ(0, NumWatched());
 
   // Run the fiber at creation.
   auto fb0 = pp_->at(0)->LaunchFiber(fibers::launch::dispatch, [&] {
@@ -754,6 +794,8 @@ TEST_F(ListFamilyTest, BRPopLPushTwoShards) {
   ASSERT_FALSE(IsLocked(0, "x"));
   ASSERT_FALSE(IsLocked(0, "z"));
   ASSERT_EQ(0, NumWatched());
+  ASSERT_FALSE(HasAwakened());
+
   // TODO: there is a bug here.
   // we do not wake the dest shard, when source is awaked which prevents
   // the atomicity and causes the first bug as well.

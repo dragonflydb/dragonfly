@@ -38,13 +38,10 @@ constexpr unsigned kPoolThreadCount = 4;
 
 const char kKey1[] = "x";
 const char kKey2[] = "b";
-const char kKey3[] = "c";
-const char kKey4[] = "y";
 
 const char kKeySid0[] = "x";
 const char kKeySid1[] = "c";
 const char kKeySid2[] = "b";
-const char kKey2Sid0[] = "y";
 
 }  // namespace
 
@@ -185,7 +182,7 @@ TEST_F(DflyEngineTest, EvalBug713b) {
   fibers_ext::Fiber fibers[kNumFibers];
 
   for (unsigned j = 0; j < kNumFibers; ++j) {
-    fibers[j] = pp_->at(1)->LaunchFiber([=, this] {
+    fibers[j] = pp_->at(1)->LaunchFiber([j, script, this] {
       for (unsigned i = 0; i < 50; ++i) {
         Run(StrCat("fb", j), {"eval", script, "3", kKeySid0, kKeySid1, kKeySid2});
       }

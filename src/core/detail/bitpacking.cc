@@ -33,6 +33,7 @@ static inline uint64_t Compress8x7bit(uint64_t x) {
   return x;
 }
 
+#ifdef __SSE3__
 static inline pair<const char*, uint8_t*> simd_variant1_pack(const char* ascii, const char* end,
                                                              uint8_t* bin) {
   __m128i val, rpart, lpart;
@@ -102,6 +103,8 @@ static inline pair<const char*, uint8_t*> simd_variant2_pack(const char* ascii, 
   return make_pair(ascii, bin);
 }
 
+#endif
+
 // Daniel Lemire's function validate_ascii_fast() - under Apache/MIT license.
 // See https://github.com/lemire/fastvalidate-utf-8/
 // The function returns true (1) if all chars passed in src are
@@ -169,6 +172,7 @@ void ascii_pack2(const char* ascii, size_t len, uint8_t* bin) {
 
 // The algo - do in parallel what ascii_pack does on two uint64_t integers
 void ascii_pack_simd(const char* ascii, size_t len, uint8_t* bin) {
+#ifdef __SSE3__
   // I leave out 16 bytes in addition to 16 that we load in the loop
   // because we store into bin full 16 bytes instead of 14. To prevent data
   // overwrite we finish loop one iteration earlier.
@@ -179,9 +183,13 @@ void ascii_pack_simd(const char* ascii, size_t len, uint8_t* bin) {
   end += 32;  // Bring back end.
   DCHECK(ascii < end);
   ascii_pack(ascii, end - ascii, bin);
+#else
+  ascii_pack(ascii, len, bin);
+#endif
 }
 
 void ascii_pack_simd2(const char* ascii, size_t len, uint8_t* bin) {
+#ifdef __SSE3__
   // I leave out 16 bytes in addition to 16 that we load in the loop
   // because we store into bin full 16 bytes instead of 14. To prevent data
   // overwrite we finish loop one iteration earlier.
@@ -197,6 +205,9 @@ void ascii_pack_simd2(const char* ascii, size_t len, uint8_t* bin) {
   end += 32;  // Bring back end.
   DCHECK(ascii < end);
   ascii_pack(ascii, end - ascii, bin);
+#else
+  ascii_pack(ascii, len, bin);
+#endif
 }
 
 // unpacks 8->7 encoded blob back to ascii.
@@ -227,6 +238,8 @@ void ascii_unpack(const uint8_t* bin, size_t ascii_len, char* ascii) {
 }
 
 void ascii_unpack_simd(const uint8_t* bin, size_t ascii_len, char* ascii) {
+#ifdef __SSSE3__
+
   __m128i val, rpart, lpart;
 
   size_t round_down_len = (ascii_len & ~size_t(0x0F));
@@ -259,6 +272,9 @@ void ascii_unpack_simd(const uint8_t* bin, size_t ascii_len, char* ascii) {
   ascii_len -= round_down_len;
   if (ascii_len)
     ascii_unpack(bin, ascii_len, ascii);
+#else
+  ascii_unpack(bin, ascii_len, ascii);
+#endif
 }
 
 // compares packed and unpacked strings. packed must be of length = binpacked_len(ascii_len).

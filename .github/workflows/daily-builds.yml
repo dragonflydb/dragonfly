@@ -1,0 +1,60 @@
+name: daily-builds
+
+on:
+  # TODO: Remove this. This is for testing
+  schedule:
+    - cron: '0 6 * * *' # run at 6 AM UTC
+  workflow_dispatch:
+
+jobs:
+  build:
+    # The CMake configure and build commands are platform agnostic and should work equally
+    # well on Windows or Mac.  You can convert this to a matrix build if you need
+    # cross-platform coverage.
+    # See: https://docs.github.com/en/free-pro-team@latest/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
+    runs-on: ubuntu-latest
+    name: Build with ${{ matrix.flags }} flags
+    strategy:
+      matrix:
+        # Build with these flags
+        flags: ["-DMARCH_OPT=-march=x86-64"]
+    timeout-minutes: 30
+
+    container:
+      image: ghcr.io/romange/alpine-dev:latest
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: Install dependencies
+        run: |
+          uname -a
+          cmake --version
+          mkdir -p ${{github.workspace}}/build
+      - name: Cache build deps
+        id: cache-deps
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.ccache
+            ${{github.workspace}}/build/_deps
+          key: ${{ runner.os }}-deps-${{ github.base_ref }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-deps-${{ github.base_ref }}-
+
+      - name: Configure CMake
+        # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
+        # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
+        run: |
+          cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=Debug -GNinja -DCMAKE_CXX_COMPILER_LAUNCHER=ccache ${{ matrix.flags }}
+          cd ${{github.workspace}}/build && pwd
+          du -hcs _deps/
+      - name: Build
+        run: |
+          cd ${{github.workspace}}/build
+          ninja src/all
+          ccache --show-stats

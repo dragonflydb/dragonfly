@@ -17,7 +17,6 @@ class MemoryCmd {
   void Run(CmdArgList args);
 
  private:
-  ServerFamily& sf_;
   ConnectionContext* cntx_;
 };
 

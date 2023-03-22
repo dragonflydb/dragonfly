@@ -24,22 +24,22 @@ class BlockingController {
     return !awakened_transactions_.empty();
   }
 
-  // Iterates over awakened key candidates in each db and moves verified ones into
-  // global verified_awakened_ array.
-  // Returns true if there are active awakened keys, false otherwise.
-  // It has 2 responsibilities.
-  // 1: to go over potential wakened keys, verify them and activate watch queues.
-  // 2: if t is awaked and finished running - to remove it from the head
-  //    of the queue and notify the next one.
-  //    If t is null then second part is omitted.
-  void RunStep(Transaction* t);
+  const auto& awakened_transactions() const {
+    return awakened_transactions_;
+  }
+
+  void FinalizeWatched(KeyLockArgs lock_args, Transaction* tx);
+
+  // A mirror reflection but with ArgSlice. Yeah, I know....
+  void FinalizeWatched(ArgSlice args, Transaction* tx);
+  // go over potential wakened keys, verify them and activate watch queues.
+  void NotifyPending();
 
   // Blocking API
   // TODO: consider moving all watched functions to
   // EngineShard with separate per db map.
   //! AddWatched adds a transaction to the blocking queue.
   void AddWatched(ArgSlice watch_keys, Transaction* me);
-  void RemoveWatched(ArgSlice watch_keys, Transaction* me);
 
   // Called from operations that create keys like lpush, rename etc.
   void AwakeWatched(DbIndex db_index, std::string_view db_key);
@@ -47,10 +47,6 @@ class BlockingController {
   // Used in tests and debugging functions.
   size_t NumWatched(DbIndex db_indx) const;
   std::vector<std::string> GetWatchedKeys(DbIndex db_indx) const;
-
-  void RemoveAwaked(Transaction* trans) {
-    awakened_transactions_.erase(trans);
-  }
 
  private:
   struct WatchQueue;

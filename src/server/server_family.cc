@@ -358,7 +358,8 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
   last_save_info_ = make_shared<LastSaveInfo>();
   last_save_info_->save_time = start_time_;
   script_mgr_.reset(new ScriptMgr());
-  journal_.reset(new journal::Journal);
+  channel_store_.reset(new ChannelStore());
+  journal_.reset(new journal::Journal());
 
   {
     absl::InsecureBitGen eng;
@@ -496,7 +497,7 @@ fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path)
   // Check all paths are valid.
   for (const auto& path : paths) {
     error_code ec;
-    fs::canonical(path, ec);
+    (void)fs::canonical(path, ec);
     if (ec) {
       LOG(ERROR) << "Error loading " << load_path << " " << ec.message();
       fibers::promise<std::error_code> ec_promise;

@@ -92,8 +92,8 @@ class Transaction {
 
   // State on specific shard.
   enum LocalMask : uint16_t {
-    ACTIVE = 1,                 // Set on all active shards.
-    ARMED = 1 << 1,             // Whether callback cb_ is set
+    ACTIVE = 1,  // Set on all active shards.
+    // UNUSED = 1 << 1,
     OUT_OF_ORDER = 1 << 2,      // Whether its running out of order
     KEYLOCK_ACQUIRED = 1 << 3,  // Whether its key locks are acquired
     SUSPENDED_Q = 1 << 4,       // Whether is suspened (by WatchInShard())
@@ -191,7 +191,8 @@ class Transaction {
       sid = 0;
 
     // We use acquire so that no reordering will move before this load.
-    return run_count_.load(std::memory_order_acquire) > 0 && shard_data_[sid].local_mask & ARMED;
+    return run_count_.load(std::memory_order_acquire) > 0 &&
+           shard_data_[sid].is_armed.load(std::memory_order_relaxed);
   }
 
   // Called from engine set shard threads.
@@ -275,17 +276,25 @@ class Transaction {
 
     PerShardData() = default;
 
+    // this is the only variable that is accessed by both shard and coordinator threads.
+    std::atomic_bool is_armed{false};
+
+    // We pad with some memory so that atomic loads won't cause false sharing betweem threads.
+    char pad[48];  // to make sure PerShardData is 64 bytes and takes full cacheline.
+
     uint32_t arg_start = 0;  // Indices into args_ array.
     uint16_t arg_count = 0;
 
-    // Accessed only within the engine-shard thread.
+    // Accessed within shard thread.
     // Bitmask of LocalState enums.
-    uint16_t local_mask{0};
+    uint16_t local_mask = 0;
 
     // Needed to rollback inconsistent schedulings or remove OOO transactions from
     // tx queue.
     uint32_t pq_pos = TxQueue::kEnd;
   };
+
+  static_assert(sizeof(PerShardData) == 64);  // cacheline
 
   // State of a multi transaction.
   struct MultiData {
@@ -321,7 +330,7 @@ class Transaction {
   };
 
   struct PerShardCache {
-    bool requested_active = false;  // Activate on shard geradless of presence of keys.
+    bool requested_active = false;  // Activate on shard regardless of presence of keys.
     std::vector<std::string_view> args;
     std::vector<uint32_t> original_index;
 
@@ -397,7 +406,7 @@ class Transaction {
   void WaitForShardCallbacks() {
     run_ec_.await([this] { return 0 == run_count_.load(std::memory_order_relaxed); });
 
-    seqlock_.fetch_add(1, std::memory_order_acq_rel);
+    seqlock_.fetch_add(1, std::memory_order_release);
   }
 
   // Log command in shard's journal, if this is a write command with auto-journaling enabled.
@@ -443,6 +452,11 @@ class Transaction {
   // multiple threads access this array to synchronize between themselves using
   // PerShardData.state, it can be tricky. The complication comes from multi_ transactions where
   // scheduled transaction is accessed between operations as well.
+
+  // Stores per-shard data.
+  // For non-multi transactions, it can be of size one in case only one shard is active
+  // (unique_shard_cnt_ = 1).
+  // Never access directly with index, always use SidToId.
   absl::InlinedVector<PerShardData, 4> shard_data_;  // length = shard_count
 
   // Stores arguments of the transaction (i.e. keys + values) partitioned by shards.
@@ -470,8 +484,8 @@ class Transaction {
   std::atomic_uint32_t use_count_{0}, run_count_{0}, seqlock_{0};
 
   // unique_shard_cnt_ and unique_shard_id_ are accessed only by coordinator thread.
-  uint32_t unique_shard_cnt_{0};  // number of unique shards span by args_
-  ShardId unique_shard_id_{kInvalidSid};
+  uint32_t unique_shard_cnt_{0};          // Number of unique shards active
+  ShardId unique_shard_id_{kInvalidSid};  // Set if unique_shard_cnt_ = 1
 
   util::fibers_ext::EventCount blocking_ec_;  // Used to wake blocking transactions.
   util::fibers_ext::EventCount run_ec_;       // Used to wait for shard callbacks

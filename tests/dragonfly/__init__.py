@@ -14,6 +14,7 @@ class DflyParams:
     cwd: str
     gdb: bool
     args: list
+    existing_port: int
     env: any
 
 
@@ -55,9 +56,12 @@ class DflyInstance:
             proc.communicate()
 
     def _start(self):
+        if self.params.existing_port:
+            return
         base_args = [f"--{v}" for v in self.params.args]
         all_args = self.format_args(self.args) + base_args
-        print(f"Starting instance on {self.port} with arguments {all_args}")
+        print(
+            f"Starting instance on {self.port} with arguments {all_args} from {self.params.path}")
 
         run_cmd = [self.params.path, *all_args]
         if self.params.gdb:
@@ -65,16 +69,19 @@ class DflyInstance:
         self.proc = subprocess.Popen(run_cmd, cwd=self.params.cwd)
 
     def _check_status(self):
-        return_code = self.proc.poll()
-        if return_code is not None:
-            raise Exception(
-                f"Failed to start instance, return code {return_code}")
+        if not self.params.existing_port:
+            return_code = self.proc.poll()
+            if return_code is not None:
+                raise Exception(
+                    f"Failed to start instance, return code {return_code}")
 
     def __getitem__(self, k):
         return self.args.get(k)
 
     @property
     def port(self) -> int:
+        if self.params.existing_port:
+            return self.params.existing_port
         return int(self.args.get("port", "6379"))
 
     @staticmethod

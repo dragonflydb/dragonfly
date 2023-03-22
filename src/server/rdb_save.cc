@@ -148,7 +148,7 @@ class CompressorImpl {
   CompressorImpl() {
     compression_level_ = absl::GetFlag(FLAGS_compression_level);
   }
-  ~CompressorImpl() {
+  virtual ~CompressorImpl() {
     VLOG(1) << "compressed size: " << compressed_size_total_;
     VLOG(1) << "uncompressed size: " << uncompressed_size_total_;
   }
@@ -1241,7 +1241,7 @@ void RdbSerializer::AllocateCompressorOnce() {
 
 void RdbSerializer::CompressBlob() {
   if (!compression_stats_) {
-    compression_stats_.emplace();
+    compression_stats_.emplace(CompressionStats{});
   }
   Bytes blob_to_compress = mem_buf_.InputBuffer();
   size_t blob_size = blob_to_compress.size();

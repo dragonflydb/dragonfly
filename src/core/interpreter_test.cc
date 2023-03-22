@@ -95,14 +95,18 @@ void InterpreterTest::SetGlobalArray(const char* name, vector<string> vec) {
 }
 
 bool InterpreterTest::Execute(string_view script) {
+  char sha_buf[64];
+  Interpreter::FuncSha1(script, sha_buf);
+  string_view sha{sha_buf, std::strlen(sha_buf)};
+
   string result;
-  Interpreter::AddResult add_res = intptr_.AddFunction(script, &result);
+  Interpreter::AddResult add_res = intptr_.AddFunction(sha, script, &result);
   if (add_res == Interpreter::COMPILE_ERR) {
     error_ = result;
     return false;
   }
 
-  Interpreter::RunResult run_res = intptr_.RunFunction(result, &error_);
+  Interpreter::RunResult run_res = intptr_.RunFunction(sha, &error_);
   if (run_res != Interpreter::RUN_OK) {
     return false;
   }
@@ -198,14 +202,25 @@ return x
 }
 
 TEST_F(InterpreterTest, Add) {
-  string res1, res2;
+  const char* s1 = "return 0";
+  const char* s2 = "foobar";
 
-  EXPECT_EQ(Interpreter::ADD_OK, intptr_.AddFunction("return 0", &res1));
+  char sha_buf1[64], sha_buf2[64];
+  Interpreter::FuncSha1(s1, sha_buf1);
+  Interpreter::FuncSha1(s2, sha_buf2);
+  string_view sha1{sha_buf1, std::strlen(sha_buf1)};
+  string_view sha2{sha_buf2, std::strlen(sha_buf2)};
+
+  string err;
+
+  EXPECT_EQ(Interpreter::ADD_OK, intptr_.AddFunction(sha1, "return 0", &err));
   EXPECT_EQ(0, lua_gettop(lua()));
-  EXPECT_EQ(Interpreter::COMPILE_ERR, intptr_.AddFunction("foobar", &res2));
-  EXPECT_THAT(res2, testing::HasSubstr("syntax error"));
+
+  EXPECT_EQ(Interpreter::COMPILE_ERR, intptr_.AddFunction(sha2, "foobar", &err));
+  EXPECT_THAT(err, testing::HasSubstr("syntax error"));
   EXPECT_EQ(0, lua_gettop(lua()));
-  EXPECT_TRUE(intptr_.Exists(res1));
+
+  EXPECT_TRUE(intptr_.Exists(sha1));
 }
 
 // Test cases taken from scripting.tcl

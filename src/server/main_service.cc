@@ -448,6 +448,34 @@ bool EvalValidator(CmdArgList args, ConnectionContext* cntx) {
   return true;
 }
 
+void Topkeys(const http::QueryArgs& args, HttpContext* send) {
+  http::StringResponse resp = http::MakeStringResponse(h2::status::ok);
+  resp.body() = "<h1>Detected top keys</h1>\n<pre>\n";
+
+  std::atomic_bool is_enabled = false;
+  if (shard_set) {
+    vector<string> rows(shard_set->size());
+
+    shard_set->RunBriefInParallel([&](EngineShard* shard) {
+      for (const auto& db : shard->db_slice().databases()) {
+        if (db->top_keys.IsEnabled()) {
+          is_enabled = true;
+          for (const auto& [key, count] : db->top_keys.GetTopKeys()) {
+            absl::StrAppend(&resp.body(), key, ":\t", count, "\n");
+          }
+        }
+      }
+    });
+  }
+
+  resp.body() += "</pre>";
+
+  if (!is_enabled) {
+    resp.body() += "<i>TopKeys are disabled.</i>";
+  }
+  send->Invoke(std::move(resp));
+}
+
 void TxTable(const http::QueryArgs& args, HttpContext* send) {
   using html::SortedTable;
 
@@ -1011,19 +1039,14 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   auto interpreter = ss->BorrowInterpreter();
   absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
 
-  string result;
-  Interpreter::AddResult add_result = interpreter->AddFunction(body, &result);
-  if (add_result == Interpreter::COMPILE_ERR) {
-    return (*cntx)->SendError(result, facade::kScriptErrType);
-  }
+  auto res = server_family_.script_mgr()->Insert(body, interpreter);
+  if (!res)
+    return (*cntx)->SendError(res.error().Format(), facade::kScriptErrType);
 
-  if (add_result == Interpreter::ADD_OK) {
-    if (auto err = server_family_.script_mgr()->Insert(result, body); err)
-      return (*cntx)->SendError(err.Format(), facade::kScriptErrType);
-  }
+  string sha{move(res.value())};
 
   EvalArgs eval_args;
-  eval_args.sha = result;
+  eval_args.sha = sha;
   eval_args.keys = args.subspan(3, num_keys);
   eval_args.args = args.subspan(3 + num_keys);
 
@@ -1031,7 +1054,7 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   EvalInternal(eval_args, interpreter, cntx);
 
   uint64_t end = absl::GetCurrentTimeNanos();
-  ss->RecordCallLatency(result, (end - start) / 1000);
+  ss->RecordCallLatency(sha, (end - start) / 1000);
 }
 
 void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
@@ -1075,9 +1098,9 @@ optional<ScriptMgr::ScriptParams> LoadScipt(string_view sha, ScriptMgr* script_m
     if (!script_data)
       return std::nullopt;
 
-    string res;
-    CHECK_EQ(Interpreter::ADD_OK, interpreter->AddFunction(script_data->body, &res));
-    CHECK_EQ(res, sha);
+    string err;
+    CHECK_EQ(Interpreter::ADD_OK, interpreter->AddFunction(sha, script_data->body, &err));
+    CHECK(err.empty()) << err;
 
     return script_data;
   }
@@ -1385,67 +1408,30 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
+  auto* store = server_family_.channel_store();
   string_view channel = ArgS(args, 1);
 
-  ShardId sid = Shard(channel, shard_count());
+  shared_ptr<string> msg_ptr = make_shared<string>(ArgS(args, 2));
+  shared_ptr<string> channel_ptr = make_shared<string>(channel);
 
-  auto cb = [&] { return EngineShard::tlocal()->channel_slice().FetchSubscribers(channel); };
+  auto clients = store->FetchSubscribers(channel);
 
-  // How do we know that subscribers did not disappear after we fetched them?
-  // Each subscriber object hold a borrow_token.
-  // OnClose does not reset subscribe_info before all tokens are returned.
-  vector<ChannelSlice::Subscriber> subscriber_arr = shard_set->Await(sid, std::move(cb));
   atomic_uint32_t published{0};
+  auto cb = [&published, &clients, msg_ptr, channel_ptr](unsigned idx, util::ProactorBase*) {
+    auto it = lower_bound(clients.begin(), clients.end(), idx, ChannelStore::Subscriber::ByThread);
+    while (it != clients.end() && it->thread_id == idx) {
+      facade::Connection* conn = it->conn_cntx->owner();
+      DCHECK(conn);
 
-  if (!subscriber_arr.empty()) {
-    sort(subscriber_arr.begin(), subscriber_arr.end(),
-         [](const auto& left, const auto& right) { return left.thread_id < right.thread_id; });
-
-    vector<unsigned> slices(shard_set->pool()->size(), UINT_MAX);
-    for (size_t i = 0; i < subscriber_arr.size(); ++i) {
-      if (slices[subscriber_arr[i].thread_id] > i) {
-        slices[subscriber_arr[i].thread_id] = i;
-      }
+      conn->SendMsgVecAsync({move(it->pattern), move(channel_ptr), move(msg_ptr)});
+      published.fetch_add(1, memory_order_relaxed);
+      it++;
     }
+  };
+  shard_set->pool()->Await(std::move(cb));
 
-    // shared_ptr ensures that the message lives until it's been sent to all subscribers and handled
-    // by DispatchOperations.
-    shared_ptr<string> msg_ptr = make_shared<string>(ArgS(args, 2));
-    shared_ptr<string> channel_ptr = make_shared<string>(channel);
-    using PubMessage = facade::Connection::PubMessage;
-
-    // We run publish_cb in each subscriber's thread.
-    auto publish_cb = [&](unsigned idx, util::ProactorBase*) mutable {
-      unsigned start = slices[idx];
-
-      for (unsigned i = start; i < subscriber_arr.size(); ++i) {
-        ChannelSlice::Subscriber& subscriber = subscriber_arr[i];
-        if (subscriber.thread_id != idx)
-          break;
-
-        published.fetch_add(1, memory_order_relaxed);
-
-        facade::Connection* conn = subscriber_arr[i].conn_cntx->owner();
-        DCHECK(conn);
-
-        PubMessage pmsg;
-        pmsg.channel = channel_ptr;
-        pmsg.message = msg_ptr;
-        pmsg.pattern = move(subscriber.pattern);
-        pmsg.type = PubMessage::kPublish;
-
-        conn->SendMsgVecAsync(move(pmsg));
-      }
-    };
-
-    shard_set->pool()->Await(publish_cb);
-  }
-
-  // If subscriber connections are closing they will wait
-  // for the tokens to be reclaimed in OnClose(). This guarantees that subscribers we gathered
-  // still exist till we finish publishing.
-  for (auto& s : subscriber_arr) {
-    s.borrow_token.Dec();
+  for (auto& c : clients) {
+    c.borrow_token.Dec();
   }
 
   (*cntx)->SendLong(published.load(memory_order_relaxed));
@@ -1454,31 +1440,32 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
 void Service::Subscribe(CmdArgList args, ConnectionContext* cntx) {
   args.remove_prefix(1);
 
-  cntx->ChangeSubscription(true /*add*/, true /* reply*/, std::move(args));
+  cntx->ChangeSubscription(server_family_.channel_store(), true /*add*/, true /* reply*/,
+                           std::move(args));
 }
 
 void Service::Unsubscribe(CmdArgList args, ConnectionContext* cntx) {
   args.remove_prefix(1);
 
   if (args.size() == 0) {
-    cntx->UnsubscribeAll(true);
+    cntx->UnsubscribeAll(server_family_.channel_store(), true);
   } else {
-    cntx->ChangeSubscription(false, true, std::move(args));
+    cntx->ChangeSubscription(server_family_.channel_store(), false, true, args);
   }
 }
 
 void Service::PSubscribe(CmdArgList args, ConnectionContext* cntx) {
   args.remove_prefix(1);
-  cntx->ChangePSub(true, true, args);
+  cntx->ChangePSubscription(server_family_.channel_store(), true, true, args);
 }
 
 void Service::PUnsubscribe(CmdArgList args, ConnectionContext* cntx) {
   args.remove_prefix(1);
 
   if (args.size() == 0) {
-    cntx->PUnsubscribeAll(true);
+    cntx->PUnsubscribeAll(server_family_.channel_store(), true);
   } else {
-    cntx->ChangePSub(false, true, args);
+    cntx->ChangePSubscription(server_family_.channel_store(), false, true, args);
   }
 }
 
@@ -1497,23 +1484,11 @@ void Service::Function(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::PubsubChannels(string_view pattern, ConnectionContext* cntx) {
-  vector<vector<string>> result_set(shard_set->size());
-
-  shard_set->RunBriefInParallel([&](EngineShard* shard) {
-    result_set[shard->shard_id()] = shard->channel_slice().ListChannels(pattern);
-  });
-
-  vector<string> union_set;
-  for (auto&& v : result_set) {
-    union_set.insert(union_set.end(), v.begin(), v.end());
-  }
-
-  (*cntx)->SendStringArr(union_set);
+  (*cntx)->SendStringArr(server_family_.channel_store()->ListChannels(pattern));
 }
 
 void Service::PubsubPatterns(ConnectionContext* cntx) {
-  size_t pattern_count =
-      shard_set->Await(0, [&] { return EngineShard::tlocal()->channel_slice().PatternCount(); });
+  size_t pattern_count = server_family_.channel_store()->PatternCount();
 
   (*cntx)->SendLong(pattern_count);
 }
@@ -1593,6 +1568,7 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
 void Service::ConfigureHttpHandlers(util::HttpListenerBase* base) {
   server_family_.ConfigureMetrics(base);
   base->RegisterCb("/txz", TxTable);
+  base->RegisterCb("/topkeys", Topkeys);
 }
 
 void Service::OnClose(facade::ConnectionContext* cntx) {
@@ -1602,7 +1578,7 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
   if (conn_state.subscribe_info) {  // Clean-ups related to PUBSUB
     if (!conn_state.subscribe_info->channels.empty()) {
       auto token = conn_state.subscribe_info->borrow_token;
-      server_cntx->UnsubscribeAll(false);
+      server_cntx->UnsubscribeAll(server_family_.channel_store(), false);
 
       // Check that all borrowers finished processing.
       // token is increased in channel_slice (the publisher side).
@@ -1612,7 +1588,7 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
     if (conn_state.subscribe_info) {
       DCHECK(!conn_state.subscribe_info->patterns.empty());
       auto token = conn_state.subscribe_info->borrow_token;
-      server_cntx->PUnsubscribeAll(false);
+      server_cntx->PUnsubscribeAll(server_family_.channel_store(), false);
       // Check that all borrowers finished processing
       token.Wait();
       DCHECK(!conn_state.subscribe_info);

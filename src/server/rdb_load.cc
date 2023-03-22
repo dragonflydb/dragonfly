@@ -200,7 +200,7 @@ class DecompressImpl {
  public:
   DecompressImpl() : uncompressed_mem_buf_{16_KB} {
   }
-  ~DecompressImpl() {
+  virtual ~DecompressImpl() {
   }
   virtual io::Result<base::IoBuf*> Decompress(std::string_view str) = 0;
 
@@ -1955,7 +1955,6 @@ error_code RdbLoaderBase::HandleCompressedBlob(int op_type) {
   // Decompress blob and switch membuf pointer
   // Last type in the compressed blob is RDB_OPCODE_COMPRESSED_BLOB_END
   // in which we will switch back to the origin membuf (HandleCompressedBlobFinish)
-  string_view uncompressed_blob;
   SET_OR_RETURN(decompress_impl_->Decompress(res), mem_buf_);
 
   return kOk;
@@ -2018,17 +2017,14 @@ error_code RdbLoader::HandleAux() {
     // TODO
   } else if (auxkey == "lua") {
     ServerState* ss = ServerState::tlocal();
-    auto script = ss->BorrowInterpreter();
-    absl::Cleanup clean = [ss, script]() { ss->ReturnInterpreter(script); };
+    auto interpreter = ss->BorrowInterpreter();
+    absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
 
     string_view body{auxval};
-    string result;
-    Interpreter::AddResult add_result = script->AddFunction(body, &result);
-    if (add_result == Interpreter::ADD_OK) {
-      if (script_mgr_)
-        script_mgr_->Insert(result, body);
-    } else if (add_result == Interpreter::COMPILE_ERR) {
-      LOG(ERROR) << "Error when compiling lua scripts";
+    if (script_mgr_) {
+      auto res = script_mgr_->Insert(body, interpreter);
+      if (!res)
+        LOG(ERROR) << "Error compiling script";
     }
   } else if (auxkey == "redis-ver") {
     VLOG(1) << "Loading RDB produced by version " << auxval;
@@ -2129,6 +2125,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   if (item == nullptr) {
     item = new Item;
   }
+  auto cleanup = absl::Cleanup([item] { delete item; });
 
   // Read key
   SET_OR_RETURN(ReadKey(), item->key);
@@ -2148,22 +2145,23 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
    * Similarly if the RDB is the preamble of an AOF file, we want to
    * load all the keys as they are, since the log of operations later
    * assume to work in an exact keyspace state. */
-  // TODO: check rdbflags&RDBFLAGS_AOF_PREAMBLE logic in rdb.c
-  bool should_expire = settings->has_expired;  // TODO: to implement
-  if (should_expire) {
-    // decrRefCount(val);
-  } else {
-    ShardId sid = Shard(item->key, shard_set->size());
-    item->expire_ms = settings->expiretime;
 
-    auto& out_buf = shard_buf_[sid];
+  if (ServerState::tlocal()->is_master && settings->has_expired) {
+    VLOG(1) << "Expire key: " << item->key;
+    return kOk;
+  }
 
-    out_buf.emplace_back(item);
+  ShardId sid = Shard(item->key, shard_set->size());
+  item->expire_ms = settings->expiretime;
 
-    constexpr size_t kBufSize = 128;
-    if (out_buf.size() >= kBufSize) {
-      FlushShardAsync(sid);
-    }
+  auto& out_buf = shard_buf_[sid];
+
+  out_buf.emplace_back(item);
+  std::move(cleanup).Cancel();
+
+  constexpr size_t kBufSize = 128;
+  if (out_buf.size() >= kBufSize) {
+    FlushShardAsync(sid);
   }
 
   return kOk;

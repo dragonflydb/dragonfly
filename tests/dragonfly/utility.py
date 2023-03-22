@@ -153,7 +153,7 @@ class CommandGenerator:
             # Random sequence of k-letter keys + int and two start values for HSET
             elements = ((rand_str(), random.randint(0, self.val_size))
                         for _ in range(self.val_size//5))
-            return ('v0', 0.0, 'v1', 0.0) + tuple(itertools.chain(*elements))
+            return ('v0', 0, 'v1', 0) + tuple(itertools.chain(*elements))
         elif t == ValueType.ZSET:
             # Random sequnce of k-letter keys and int score for ZSET
             elements = ((random.randint(0, self.val_size), rand_str())
@@ -197,10 +197,10 @@ class CommandGenerator:
         ('LPOP {k}', ValueType.LIST),
         ('SADD {k} {val}', ValueType.SET),
         ('SPOP {k}', ValueType.SET),
-        # ('HSETNX {k} v0 {val}', ValueType.HSET),
-        # ('HINCRBY {k} v1 1', ValueType.HSET),
-        # ('ZPOPMIN {k} 1', ValueType.ZSET),
-        # ('ZADD {k} 0 {val}', ValueType.ZSET)
+        ('HSETNX {k} v0 {val}', ValueType.HSET),
+        ('HINCRBY {k} v1 1', ValueType.HSET),
+        # ('ZPOPMIN {k} 1', ValueType.ZSET), https://github.com/dragonflydb/dragonfly/issues/949
+        ('ZADD {k} 0 {val}', ValueType.ZSET),
         ('JSON.NUMINCRBY {k} $..i 1', ValueType.JSON),
         ('JSON.ARRPOP {k} $.arr', ValueType.JSON),
         ('JSON.ARRAPPEND {k} $.arr "{val}"', ValueType.JSON)

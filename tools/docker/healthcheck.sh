@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 HOST="localhost"
 PORT=6379

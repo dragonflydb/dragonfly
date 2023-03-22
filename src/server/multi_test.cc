@@ -657,22 +657,22 @@ TEST_F(MultiTest, ScriptConfig) {
   }
 }
 
-TEST_F(MultiTest, ScriptPragmas) {
+TEST_F(MultiTest, ScriptFlags) {
   const char* s1 = R"(
-  -- pragma: allow-undeclared-keys
+  #!lua flags=allow-undeclared-keys
   return redis.call('GET', 'random-key');
 )";
 
-  // Check eval finds script pragmas.
+  // Check eval finds script flags.
   Run({"set", "random-key", "works"});
   EXPECT_EQ(Run({"eval", s1, "0"}), "works");
 
   const char* s2 = R"(
-  -- pragma: this-is-an-error
+  #!lua flags=this-is-an-error
   redis.call('SET', 'random-key', 'failed')
   )";
 
-  EXPECT_THAT(Run({"eval", s2, "0"}), ErrArg("Invalid argument: Invalid pragma: this-is-an-error"));
+  EXPECT_THAT(Run({"eval", s2, "0"}), ErrArg("Invalid flag: this-is-an-error"));
 }
 
 // Run multi-exec transactions that move values from a source list
