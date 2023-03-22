@@ -71,26 +71,27 @@ vector<unsigned> ChangeSubscriptions(bool pattern, CmdArgList args, bool to_add,
   auto& sinfo = *conn->conn_state.subscribe_info.get();
   auto& local_store = pattern ? sinfo.patterns : sinfo.channels;
 
-  auto sadd = pattern ? &ChannelStore::AddPatternSub : &ChannelStore::AddSub;
-  auto sremove = pattern ? &ChannelStore::RemovePatternSub : &ChannelStore::RemoveSub;
-
   int32_t tid = util::ProactorBase::GetIndex();
   DCHECK_GE(tid, 0);
+
+  ChannelStoreUpdater csu{store, pattern, conn, uint32_t(tid)};
 
   // Gather all the channels we need to subscribe to / remove.
   for (size_t i = 0; i < args.size(); ++i) {
     string_view channel = ArgS(args, i);
     if (to_add) {
       if (local_store.emplace(channel).second)
-        (store->*sadd)(channel, conn, tid);
+        csu.Add(channel);
     } else {
       if (local_store.erase(channel) > 0)
-        (store->*sremove)(channel, conn);
+        csu.Remove(channel);
     }
 
     if (to_reply)
       result[i] = sinfo.SubscriptionCount();
   }
+
+  csu.Apply();
 
   // Important to reset conn_state.subscribe_info only after all references to it were
   // removed.

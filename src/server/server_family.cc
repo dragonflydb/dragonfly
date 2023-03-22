@@ -358,7 +358,6 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
   last_save_info_ = make_shared<LastSaveInfo>();
   last_save_info_->save_time = start_time_;
   script_mgr_.reset(new ScriptMgr());
-  channel_store_.reset(new ChannelStore());
   journal_.reset(new journal::Journal());
 
   {

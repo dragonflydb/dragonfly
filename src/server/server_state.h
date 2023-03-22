@@ -110,11 +110,6 @@ class ServerState {  // public struct - to allow initialization.
     state_->gstate_ = GlobalState::SHUTTING_DOWN;
   }
 
-  bool is_master = true;
-  std::string remote_client_id_;  // for cluster support
-
-  facade::ConnectionStats connection_stats;
-
   void TxCountInc() {
     ++live_transactions_;
   }
@@ -190,7 +185,21 @@ class ServerState {  // public struct - to allow initialization.
     return thread_index_;
   }
 
+  ChannelStore* channel_store() const {
+    return channel_store_;
+  }
+
+  void UpdateChannelStore(ChannelStore* replacement) {
+    channel_store_ = replacement;
+  }
+
+ public:
   Stats stats;
+
+  bool is_master = true;
+  std::string remote_client_id_;  // for cluster support
+
+  facade::ConnectionStats connection_stats;
 
  private:
   int64_t live_transactions_ = 0;
@@ -199,6 +208,8 @@ class ServerState {  // public struct - to allow initialization.
 
   InterpreterManager interpreter_mgr_;
   absl::flat_hash_map<ScriptMgr::ScriptKey, ScriptMgr::ScriptParams> cached_script_params_;
+
+  ChannelStore* channel_store_;
 
   GlobalState gstate_ = GlobalState::ACTIVE;
 
