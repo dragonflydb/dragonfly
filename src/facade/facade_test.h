@@ -18,6 +18,8 @@ class RespMatcher {
   RespMatcher(int64_t val, RespExpr::Type t = RespExpr::INT64) : type_(t), exp_int_(val) {
   }
 
+  RespMatcher(double_t val, RespExpr::Type t = RespExpr::DOUBLE) : type_(t), exp_double_(val) {
+  }
   using is_gtest_matcher = void;
 
   bool MatchAndExplain(const RespExpr& e, testing::MatchResultListener*) const;
@@ -31,6 +33,7 @@ class RespMatcher {
 
   std::string exp_str_;
   int64_t exp_int_;
+  double_t exp_double_;
 };
 
 class RespTypeMatcher {
@@ -58,8 +61,12 @@ inline ::testing::PolymorphicMatcher<RespMatcher> IntArg(int64_t ival) {
   return ::testing::MakePolymorphicMatcher(RespMatcher(ival));
 }
 
+inline ::testing::PolymorphicMatcher<RespMatcher> DoubleArg(double_t dval) {
+  return ::testing::MakePolymorphicMatcher(RespMatcher(dval));
+}
+
 inline ::testing::PolymorphicMatcher<RespMatcher> ArrLen(size_t len) {
-  return ::testing::MakePolymorphicMatcher(RespMatcher(len, RespExpr::ARRAY));
+  return ::testing::MakePolymorphicMatcher(RespMatcher((int64_t)len, RespExpr::ARRAY));
 }
 
 inline ::testing::PolymorphicMatcher<RespTypeMatcher> ArgType(RespExpr::Type t) {

@@ -16,13 +16,13 @@ class RespExpr {
  public:
   using Buffer = absl::Span<uint8_t>;
 
-  enum Type : uint8_t { STRING, ARRAY, INT64, NIL, NIL_ARRAY, ERROR };
+  enum Type : uint8_t { STRING, ARRAY, INT64, DOUBLE, NIL, NIL_ARRAY, ERROR };
 
   using Vec = std::vector<RespExpr>;
   Type type;
   bool has_support;  // whether pointers in this item are supported by the external storage.
 
-  std::variant<int64_t, Buffer, Vec*> u;
+  std::variant<int64_t, double, Buffer, Vec*> u;
 
   RespExpr(Type t = NIL) : type(t), has_support(false) {
   }

@@ -169,6 +169,10 @@ char* RedisReplyBuilder::FormatDouble(double val, char* dest, unsigned dest_len)
 RedisReplyBuilder::RedisReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
 }
 
+void RedisReplyBuilder::SetResp3(bool is_resp3) {
+  is_resp3_ = is_resp3;
+}
+
 void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
   if (err_type.empty()) {
     err_type = str;
@@ -201,10 +205,15 @@ void RedisReplyBuilder::SendSetSkipped() {
   SendNull();
 }
 
-void RedisReplyBuilder::SendNull() {
-  constexpr char kNullStr[] = "$-1\r\n";
+const char* RedisReplyBuilder::NullString() {
+  if (is_resp3_) {
+    return "_\r\n";
+  }
+  return "$-1\r\n";
+}
 
-  iovec v[] = {IoVec(kNullStr)};
+void RedisReplyBuilder::SendNull() {
+  iovec v[] = {IoVec(NullString())};
 
   Send(v, ABSL_ARRAYSIZE(v));
 }
@@ -265,13 +274,45 @@ void RedisReplyBuilder::SendLong(long num) {
   SendRaw(str);
 }
 
+void RedisReplyBuilder::SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
+                                        bool with_scores) {
+  if (!with_scores) {
+    StartArray(arr.size());
+    for (const auto& p : arr) {
+      SendBulkString(p.first);
+    }
+    return;
+  }
+  if (!is_resp3_) {  // RESP2 formats withscores as a flat array.
+    StartArray(arr.size() * 2);
+    for (const auto& p : arr) {
+      SendBulkString(p.first);
+      SendDouble(p.second);
+    }
+    return;
+  }
+  // Resp3 formats withscores as array of (key, score) pairs.
+  StartArray(arr.size());
+  for (const auto& p : arr) {
+    StartArray(2);
+    SendBulkString(p.first);
+    SendDouble(p.second);
+  }
+}
+
 void RedisReplyBuilder::SendDouble(double val) {
   char buf[64];
 
   StringBuilder sb(buf, sizeof(buf));
   CHECK(dfly_conv.ToShortest(val, &sb));
 
-  SendBulkString(sb.Finalize());
+  if (!is_resp3_) {
+    SendBulkString(sb.Finalize());
+  } else {
+    // RESP3
+    string str = absl::StrCat(",", sb.Finalize(), kCRLF);
+    SendRaw(str);
+  }
 }
 
 void RedisReplyBuilder::SendMGetResponse(const OptResp* resp, uint32_t count) {
@@ -281,7 +322,7 @@ void RedisReplyBuilder::SendMGetResponse(const OptResp* resp, uint32_t count) {
       StrAppend(&res, "$", resp[i]->value.size(), kCRLF);
       res.append(resp[i]->value).append(kCRLF);
     } else {
-      res.append("$-1\r\n");
+      res.append(NullString());
     }
   }
 
@@ -312,7 +353,7 @@ void RedisReplyBuilder::SendStringArr(absl::Span<const std::string_view> arr) {
     return;
   }
 
-  SendStringArr(arr.data(), arr.size());
+  SendStringCollection(arr.data(), arr.size(), CollectionType::ARRAY);
 }
 
 // This implementation a bit complicated because it uses vectorized
@@ -321,19 +362,67 @@ void RedisReplyBuilder::SendStringArr(absl::Span<const std::string_view> arr) {
 // We limit the vector length to 256 and when it fills up we flush it to the socket and continue
 // iterating.
 void RedisReplyBuilder::SendStringArr(absl::Span<const string> arr) {
-  if (arr.empty()) {
-    SendRaw("*0\r\n");
-    return;
-  }
-  SendStringArr(arr.data(), arr.size());
+  SendStringCollection(arr.data(), arr.size(), CollectionType::ARRAY);
+}
+
+void RedisReplyBuilder::SendStringArrayAsMap(absl::Span<const std::string_view> arr) {
+  SendStringCollection(arr.data(), arr.size(), CollectionType::MAP);
+}
+
+void RedisReplyBuilder::SendStringArrayAsMap(absl::Span<const std::string> arr) {
+  SendStringCollection(arr.data(), arr.size(), CollectionType::MAP);
+}
+
+void RedisReplyBuilder::SendStringArrayAsSet(absl::Span<const std::string_view> arr) {
+  SendStringCollection(arr.data(), arr.size(), CollectionType::SET);
+}
+
+void RedisReplyBuilder::SendStringArrayAsSet(absl::Span<const std::string> arr) {
+  SendStringCollection(arr.data(), arr.size(), CollectionType::SET);
 }
 
 void RedisReplyBuilder::StartArray(unsigned len) {
   SendRaw(absl::StrCat("*", len, kCRLF));
 }
 
-void RedisReplyBuilder::SendStringArr(StrPtr str_ptr, uint32_t len) {
-  DVLOG(2) << "Sending array of " << len << " strings.";
+void RedisReplyBuilder::StartMap(unsigned num_pairs) {
+  if (is_resp3_) {
+    SendRaw(absl::StrCat("%", num_pairs, kCRLF));
+    return;
+  }
+  // Flatten for Resp2.
+  StartArray(num_pairs * 2);
+}
+
+void RedisReplyBuilder::StartSet(unsigned num_elements) {
+  if (is_resp3_) {
+    SendRaw(absl::StrCat("~", num_elements, kCRLF));
+  }
+  // Flatten for Resp2.
+  StartArray(num_elements);
+}
+
+void RedisReplyBuilder::SendStringCollection(StrPtr str_ptr, uint32_t len, CollectionType type) {
+  string type_char = "*";
+  size_t header_len = len;
+  if (is_resp3_) {
+    switch (type) {
+      case CollectionType::ARRAY:
+        break;
+      case CollectionType::MAP:
+        type_char[0] = '%';
+        header_len = 0.5 * len;  // Each key value pair counts as one.
+        break;
+      case CollectionType::SET:
+        type_char[0] = '~';
+        break;
+    }
+  }
+
+  if (header_len == 0) {
+    SendRaw(absl::StrCat(type_char, "0\r\n"));
+    return;
+  }
 
   // When vector length is too long, Send returns EMSGSIZE.
   size_t vec_len = std::min<size_t>(256u, len);
@@ -342,8 +431,8 @@ void RedisReplyBuilder::SendStringArr(StrPtr str_ptr, uint32_t len) {
   absl::FixedArray<char, 64> meta((vec_len + 1) * 16);
   char* next = meta.data();
 
-  *next++ = '*';
-  next = absl::numbers_internal::FastIntToBuffer(len, next);
+  *next++ = type_char[0];
+  next = absl::numbers_internal::FastIntToBuffer(header_len, next);
   *next++ = '\r';
   *next++ = '\n';
   vec[0] = IoVec(string_view{meta.data(), size_t(next - meta.data())});

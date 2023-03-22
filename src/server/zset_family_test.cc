@@ -477,4 +477,14 @@ TEST_F(ZSetFamilyTest, ZPopMax) {
   resp = Run({"zpopmax", "key", "1"});
   ASSERT_THAT(resp, ArrLen(0));
 }
+
+TEST_F(ZSetFamilyTest, Resp3) {
+  Run({"hello", "3"});
+  Run({"zadd", "x", "1", "a", "2", "b"});
+  auto resp = Run({"zrange", "x", "0", "-1", "WITHSCORES"});
+  ASSERT_THAT(resp, ArrLen(2));
+  ASSERT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("a", DoubleArg(1)));
+  ASSERT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("b", DoubleArg(2)));
+}
+
 }  // namespace dfly
