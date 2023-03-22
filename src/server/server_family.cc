@@ -1689,12 +1689,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
-  // Allow calling this commands with no arguments or protover=2
-  // technically that is all that is supported at the moment.
-  // For all other cases degrade to 'unknown command' so that clients
-  // checking for the existence of the command to detect if RESP3 is
-  // supported or whether authentication can be performed using HELLO
-  // will gracefully fallback to RESP2 and using the AUTH command explicitly.
+  // If no arguments are provided default to RESP2.
+  // AUTH and SETNAME options are not supported.
   bool is_resp3 = false;
   if (args.size() > 1) {
     string_view proto_version = ArgS(args, 1);

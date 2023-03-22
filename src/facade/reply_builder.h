@@ -162,14 +162,14 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   static std::string_view StatusToMsg(OpStatus status);
 
  private:
-  enum Resp3Type {
+  enum CollectionType {
     ARRAY,
     SET,
     MAP,
   };
 
   using StrPtr = std::variant<const std::string_view*, const std::string*>;
-  void SendStringCollection(StrPtr str_ptr, uint32_t len, Resp3Type type);
+  void SendStringCollection(StrPtr str_ptr, uint32_t len, CollectionType type);
 
   bool is_resp3_ = false;
   const char* NullString();

@@ -353,7 +353,7 @@ void RedisReplyBuilder::SendStringArr(absl::Span<const std::string_view> arr) {
     return;
   }
 
-  SendStringCollection(arr.data(), arr.size(), Resp3Type::ARRAY);
+  SendStringCollection(arr.data(), arr.size(), CollectionType::ARRAY);
 }
 
 // This implementation a bit complicated because it uses vectorized
@@ -362,23 +362,23 @@ void RedisReplyBuilder::SendStringArr(absl::Span<const std::string_view> arr) {
 // We limit the vector length to 256 and when it fills up we flush it to the socket and continue
 // iterating.
 void RedisReplyBuilder::SendStringArr(absl::Span<const string> arr) {
-  SendStringCollection(arr.data(), arr.size(), Resp3Type::ARRAY);
+  SendStringCollection(arr.data(), arr.size(), CollectionType::ARRAY);
 }
 
 void RedisReplyBuilder::SendStringArrayAsMap(absl::Span<const std::string_view> arr) {
-  SendStringCollection(arr.data(), arr.size(), Resp3Type::MAP);
+  SendStringCollection(arr.data(), arr.size(), CollectionType::MAP);
 }
 
 void RedisReplyBuilder::SendStringArrayAsMap(absl::Span<const std::string> arr) {
-  SendStringCollection(arr.data(), arr.size(), Resp3Type::MAP);
+  SendStringCollection(arr.data(), arr.size(), CollectionType::MAP);
 }
 
 void RedisReplyBuilder::SendStringArrayAsSet(absl::Span<const std::string_view> arr) {
-  SendStringCollection(arr.data(), arr.size(), Resp3Type::SET);
+  SendStringCollection(arr.data(), arr.size(), CollectionType::SET);
 }
 
 void RedisReplyBuilder::SendStringArrayAsSet(absl::Span<const std::string> arr) {
-  SendStringCollection(arr.data(), arr.size(), Resp3Type::SET);
+  SendStringCollection(arr.data(), arr.size(), CollectionType::SET);
 }
 
 void RedisReplyBuilder::StartArray(unsigned len) {
@@ -402,18 +402,18 @@ void RedisReplyBuilder::StartSet(unsigned num_elements) {
   StartArray(num_elements);
 }
 
-void RedisReplyBuilder::SendStringCollection(StrPtr str_ptr, uint32_t len, Resp3Type type) {
+void RedisReplyBuilder::SendStringCollection(StrPtr str_ptr, uint32_t len, CollectionType type) {
   string type_char = "*";
   size_t header_len = len;
   if (is_resp3_) {
     switch (type) {
-      case Resp3Type::ARRAY:
+      case CollectionType::ARRAY:
         break;
-      case Resp3Type::MAP:
+      case CollectionType::MAP:
         type_char[0] = '%';
         header_len = 0.5 * len;  // Each key value pair counts as one.
         break;
-      case Resp3Type::SET:
+      case CollectionType::SET:
         type_char[0] = '~';
         break;
     }
