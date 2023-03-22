@@ -17,6 +17,14 @@ extern "C" {
 namespace dfly {
 using namespace std;
 
+namespace {
+
+bool Matches(string_view pattern, string_view channel) {
+  return stringmatchlen(pattern.data(), pattern.size(), channel.data(), channel.size(), 0) == 1;
+}
+
+}  // namespace
+
 ChannelStore::Subscriber::Subscriber(ConnectionContext* cntx, uint32_t tid)
     : conn_cntx(cntx), borrow_token(cntx->conn_state.subscribe_info->borrow_token), thread_id(tid) {
 }
@@ -90,23 +98,15 @@ void ChannelStore::ControlBlock::Destroy() {
   delete most_recent;
 }
 
-unsigned ChannelStore::SlotSize(bool pattern, string_view key) {
-  ChannelMap* map = pattern ? patterns_ : channels_;
-  auto it = map->find(key);
-  return it == map->end() ? 0 : it->second->size();
-}
-
 vector<ChannelStore::Subscriber> ChannelStore::FetchSubscribers(string_view channel) const {
   vector<Subscriber> res;
 
-  if (auto it = channels_->find(channel); it != channels_->end()) {
+  if (auto it = channels_->find(channel); it != channels_->end())
     Fill(*it->second, string{}, &res);
-  }
 
   for (const auto& [pat, subs] : *patterns_) {
-    if (stringmatchlen(pat.data(), pat.size(), channel.data(), channel.size(), 0) == 1) {
+    if (Matches(pat, channel))
       Fill(*subs, pat, &res);
-    }
   }
 
   sort(res.begin(), res.end(), Subscriber::ByThread);
@@ -129,10 +129,8 @@ void ChannelStore::Fill(const SubscribeMap& src, const string& pattern, vector<S
 std::vector<string> ChannelStore::ListChannels(const string_view pattern) const {
   vector<string> res;
   for (const auto& [channel, _] : *channels_) {
-    if (pattern.empty() ||
-        stringmatchlen(pattern.data(), pattern.size(), channel.data(), channel.size(), 0) == 1) {
+    if (pattern.empty() || Matches(pattern, channel))
       res.push_back(channel);
-    }
   }
   return res;
 }
@@ -148,72 +146,91 @@ ChannelStoreUpdater::ChannelStoreUpdater(ChannelStore* store, bool pattern, Conn
 
 void ChannelStoreUpdater::Add(string_view key) {
   ops_.emplace_back(key, true);
-  // If we insert the first entry, we need to add a new map slot
-  needs_copy_ = store_->SlotSize(pattern_, key) == 0;
 }
 
 void ChannelStoreUpdater::Remove(string_view key) {
   ops_.emplace_back(key, false);
-  // If we remove the last entry, we need to clear the map slot
-  needs_copy_ = store_->SlotSize(pattern_, key) == 1;
 }
 
-void ChannelStoreUpdater::Apply() {
-  using ChannelMap = ChannelStore::ChannelMap;
-  using SubscribeMap = ChannelStore::SubscribeMap;
-
-  ChannelStore::ControlBlock* cb = store_->control_block_;
-  cb->update_mu.lock();
-  store_ = cb->most_recent;
-
-  ChannelMap* target = pattern_ ? store_->patterns_ : store_->channels_;
-
-  if (needs_copy_)
-    target = new ChannelMap{*target};
+pair<ChannelStore::ChannelMap*, bool> ChannelStoreUpdater::GetTargetMap() {
+  auto* target = pattern_ ? store_->patterns_ : store_->channels_;
 
   for (auto [key, add] : ops_) {
     auto it = target->find(key);
     DCHECK(it != target->end() || add);
+    // We need to make a copy, if we are going to add or delete new map slot.
+    if ((add && it == target->end()) || (!add && it->second->size() == 1))
+      return {new ChannelStore::ChannelMap{*target}, true};
+  }
 
-    if (add && it == target->end()) {
-      DCHECK(needs_copy_);
-      target->emplace(key, new SubscribeMap{{cntx_, thread_id_}});
-      continue;
-    }
+  return {target, false};
+}
 
-    if (!add && it->second->size() == 1) {
-      DCHECK(it->second->begin()->first == cntx_);
-      freelist_.push_back(it->second.Get());
-      target->erase(it);
-      continue;
-    }
+void ChannelStoreUpdater::Modify(ChannelMap* target, string_view key, bool add) {
+  using SubscribeMap = ChannelStore::SubscribeMap;
 
-    DCHECK(it->second->size() > 0);
-    auto* replacement = new SubscribeMap{*it->second};
-    if (add)
-      replacement->emplace(cntx_, thread_id_);
-    else
-      replacement->erase(cntx_);
+  auto it = target->find(key);
 
+  // New key, add new slot.
+  if (add && it == target->end()) {
+    target->emplace(key, new SubscribeMap{{cntx_, thread_id_}});
+    return;
+  }
+
+  // Last entry for key, remove slot.
+  if (!add && it->second->size() == 1) {
+    DCHECK(it->second->begin()->first == cntx_);
     freelist_.push_back(it->second.Get());
-    it->second.Set(replacement);
+    target->erase(it);
+    return;
   }
 
+  // RCU update existing SubscribeMap entry.
+  DCHECK(it->second->size() > 0);
+  auto* replacement = new SubscribeMap{*it->second};
+  if (add)
+    replacement->emplace(cntx_, thread_id_);
+  else
+    replacement->erase(cntx_);
+
+  freelist_.push_back(it->second.Get());
+  it->second.Set(replacement);
+}
+
+void ChannelStoreUpdater::Apply() {
+  // Wait for other updates to finish, lock the control block and update store pointer.
+  ChannelStore::ControlBlock* cb = store_->control_block_;
+  cb->update_mu.lock();
+  store_ = cb->most_recent;
+
+  // Get target map (copied if needed) and apply operations.
+  auto [target, copied] = GetTargetMap();
+  for (auto [key, add] : ops_)
+    Modify(target, key, add);
+
+  // Prepare replacement.
   auto* replacement = store_;
-  if (needs_copy_) {
-    replacement = pattern_ ? new ChannelStore{store_->channels_, target, cb}
-                           : new ChannelStore{target, store_->patterns_, cb};
+  if (copied) {
+    auto* new_chans = pattern_ ? store_->channels_ : target;
+    auto* new_patterns = pattern_ ? target : store_->patterns_;
+    replacement = new ChannelStore{new_chans, new_patterns, cb};
   }
 
+  // Regardless of whether we need to replace, we dispatch to the shardset,
+  // to make sure all queued SubscribeMaps in the freelist are no longer in use.
   shard_set->pool()->Await([replacement](unsigned idx, util::ProactorBase*) {
     ServerState::tlocal()->UpdateChannelStore(replacement);
   });
 
+  // Update control block and unlock it.
   cb->most_recent = replacement;
   cb->update_mu.unlock();
 
-  if (needs_copy_)
+  // Delete previous map and channel store.
+  if (copied) {
+    delete (pattern_ ? store_->patterns_ : store_->channels_);
     delete store_;
+  }
 
   for (auto ptr : freelist_)
     delete ptr;

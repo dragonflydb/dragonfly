@@ -96,20 +96,17 @@ class ChannelStore {
     std::atomic<SubscribeMap*> ptr;
   };
 
-  // Subscriber maps for channels/pointers.
+  // SubscriberMaps for channels/patterns.
   struct ChannelMap : absl::flat_hash_map<std::string, UpdatablePointer> {
     void Add(std::string_view key, ConnectionContext* me, uint32_t thread_id);
     void Remove(std::string_view key, ConnectionContext* me);
 
-    // Delete stored all SubscribeMap pointers.
+    // Delete all stored SubscribeMap pointers.
     void DeleteAll();
   };
 
  private:
   ChannelStore(ChannelMap* channels, ChannelMap* patterns, ControlBlock*);
-
-  // Size of underlying SubscribeMapf or key, or 0 if not present.
-  unsigned SlotSize(bool pattern, std::string_view key);
 
   static void Fill(const SubscribeMap& src, const std::string& pattern,
                    std::vector<Subscriber>* out);
@@ -131,14 +128,25 @@ struct ChannelStoreUpdater {
   void Apply();
 
  private:
+  using ChannelMap = ChannelStore::ChannelMap;
+
+  // Get target map and flag whether it was copied.
+  std::pair<ChannelMap*, bool> GetTargetMap();
+
+  // Apply modifly operation to target map.
+  void Modify(ChannelMap* target, std::string_view key, bool add);
+
+ private:
   ChannelStore* store_;
 
   bool pattern_;
   ConnectionContext* cntx_;
   uint32_t thread_id_;
 
-  bool needs_copy_ = false;
+  // Pending operations.
   std::vector<std::pair<std::string_view, bool>> ops_;
+
+  // Replaced SubscribeMaps that need to be deleted safely.
   std::vector<ChannelStore::SubscribeMap*> freelist_;
 };
 
