@@ -85,10 +85,6 @@ struct __attribute__ ((__packed__)) sdshdr64 {
 #define SDS_TYPE_5_LEN(f) ((f)>>SDS_TYPE_BITS)
 
 static inline size_t sdslen(const sds s) {
-    if (s == 0) {
-      return 0;
-    }
-
     unsigned char flags = s[-1];
     switch(flags&SDS_TYPE_MASK) {
         case SDS_TYPE_5:

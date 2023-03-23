@@ -477,4 +477,14 @@ TEST_F(ZSetFamilyTest, ZPopMax) {
   resp = Run({"zpopmax", "key", "1"});
   ASSERT_THAT(resp, ArrLen(0));
 }
+
+TEST_F(ZSetFamilyTest, ZAddPopCrash) {
+  for (int i = 0; i < 129; ++i) {
+    auto resp = Run({"zadd", "key", absl::StrCat(i), absl::StrCat("element:", i)});
+    EXPECT_THAT(resp, IntArg(1));
+  }
+
+  auto resp = Run({"zpopmin", "key"});
+  EXPECT_THAT(resp, IntArg(1));
+}
 }  // namespace dfly
