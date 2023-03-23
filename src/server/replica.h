@@ -4,8 +4,6 @@
 #pragma once
 
 #include <boost/fiber/barrier.hpp>
-#include <boost/fiber/fiber.hpp>
-#include <boost/fiber/mutex.hpp>
 #include <queue>
 #include <variant>
 
@@ -83,7 +81,7 @@ class Replica {
 
   // Coorindator for multi shard execution.
   struct MultiShardExecution {
-    boost::fibers::mutex map_mu;
+    util::fibers_ext::Mutex map_mu;
 
     struct TxExecutionSync {
       util::fibers_ext::Barrier barrier;
@@ -234,13 +232,13 @@ class Replica {
   std::atomic_uint64_t journal_rec_executed_ = 0;
 
   // MainReplicationFb in standalone mode, FullSyncDflyFb in flow mode.
-  ::boost::fibers::fiber sync_fb_;
-  ::boost::fibers::fiber execution_fb_;
+  ::util::fibers_ext::Fiber sync_fb_;
+  ::util::fibers_ext::Fiber execution_fb_;
 
   std::vector<std::unique_ptr<Replica>> shard_flows_;
 
   // Guard operations where flows might be in a mixed state (transition/setup)
-  ::boost::fibers::mutex flows_op_mu_;
+  util::fibers_ext::Mutex flows_op_mu_;
 
   std::optional<base::IoBuf> leftover_buf_;
   std::unique_ptr<facade::RedisParser> parser_;

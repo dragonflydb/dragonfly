@@ -7,7 +7,6 @@
 #include <absl/random/random.h>
 #include <absl/strings/str_cat.h>
 
-#include <boost/fiber/operations.hpp>
 #include <filesystem>
 
 #include "base/flags.h"
@@ -33,7 +32,6 @@ namespace dfly {
 
 using namespace util;
 using boost::intrusive_ptr;
-using boost::fibers::fiber;
 using namespace facade;
 namespace fs = std::filesystem;
 using absl::GetFlag;
@@ -419,7 +417,7 @@ void DebugCmd::Inspect(string_view key) {
 }
 
 void DebugCmd::Watched() {
-  boost::fibers::mutex mu;
+  util::fibers_ext::Mutex mu;
 
   vector<string> watched_keys;
   vector<string> awaked_trans;

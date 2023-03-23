@@ -53,7 +53,7 @@ class Journal {
                    bool await);
 
  private:
-  mutable boost::fibers::mutex state_mu_;
+  mutable util::fibers_ext::Mutex state_mu_;
 
   std::atomic_bool lameduck_{false};
 };

@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include <boost/fiber/future.hpp>
 #include <string>
 
 #include "facade/conn_context.h"
@@ -102,7 +101,7 @@ class ServerFamily {
 
   // Load snapshot from file (.rdb file or summary.dfs file) and return
   // future with error_code.
-  boost::fibers::future<std::error_code> Load(const std::string& file_name);
+  util::fibers_ext::Future<std::error_code> Load(const std::string& file_name);
 
   // used within tests.
   bool IsSaving() const {
@@ -168,7 +167,7 @@ class ServerFamily {
   void SnapshotScheduling(const SnapshotSpec& time);
 
   util::fibers_ext::Fiber snapshot_fiber_;
-  boost::fibers::future<std::error_code> load_result_;
+  util::fibers_ext::Future<std::error_code> load_result_;
 
   uint32_t stats_caching_task_ = 0;
   Service& service_;
@@ -177,7 +176,7 @@ class ServerFamily {
   util::ListenerInterface* main_listener_ = nullptr;
   util::ProactorBase* pb_task_ = nullptr;
 
-  mutable ::boost::fibers::mutex replicaof_mu_, save_mu_;
+  mutable util::fibers_ext::Mutex replicaof_mu_, save_mu_;
   std::shared_ptr<Replica> replica_;  // protected by replica_of_mu_
 
   std::unique_ptr<ScriptMgr> script_mgr_;

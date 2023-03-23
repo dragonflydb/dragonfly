@@ -69,17 +69,16 @@ ABSL_DECLARE_FLAG(uint32_t, hz);
 
 namespace dfly {
 
-namespace fibers = ::boost::fibers;
 namespace fs = std::filesystem;
 namespace uring = util::uring;
 
 using absl::GetFlag;
 using absl::StrCat;
 using namespace facade;
+using namespace util;
+using fibers_ext::FiberQueueThreadPool;
+using http::StringResponse;
 using strings::HumanReadableNumBytes;
-using util::ProactorBase;
-using util::fibers_ext::FiberQueueThreadPool;
-using util::http::StringResponse;
 
 namespace {
 
@@ -473,7 +472,7 @@ void ServerFamily::Shutdown() {
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
-fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path) {
+fibers_ext::Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
   CHECK(absl::EndsWith(load_path, ".rdb") || absl::EndsWith(load_path, "summary.dfs"));
 
   vector<std::string> paths{{load_path}};
@@ -484,7 +483,7 @@ fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path)
     io::Result<io::StatShortVec> files = io::StatFiles(glob);
 
     if (files && files->size() == 0) {
-      fibers::promise<std::error_code> ec_promise;
+      fibers_ext::Promise<std::error_code> ec_promise;
       ec_promise.set_value(make_error_code(errc::no_such_file_or_directory));
       return ec_promise.get_future();
     }
@@ -500,7 +499,7 @@ fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path)
     (void)fs::canonical(path, ec);
     if (ec) {
       LOG(ERROR) << "Error loading " << load_path << " " << ec.message();
-      fibers::promise<std::error_code> ec_promise;
+      fibers_ext::Promise<std::error_code> ec_promise;
       ec_promise.set_value(ec);
       return ec_promise.get_future();
     }
@@ -916,7 +915,7 @@ GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
 
   vector<unique_ptr<RdbSnapshot>> snapshots;
   absl::flat_hash_map<string_view, size_t> rdb_name_map;
-  fibers::mutex mu;  // guards rdb_name_map
+  fibers_ext::Mutex mu;  // guards rdb_name_map
 
   auto save_cb = [&](unsigned index) {
     auto& snapshot = snapshots[index];
@@ -1153,7 +1152,7 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
 
   if (sub_cmd == "LIST") {
     vector<string> client_info;
-    fibers::mutex mu;
+    fibers_ext::Mutex mu;
     auto cb = [&](util::Connection* conn) {
       facade::Connection* dcon = static_cast<facade::Connection*>(conn);
       string info = dcon->GetClientInfo();
@@ -1390,13 +1389,13 @@ static void MergeInto(const DbSlice::Stats& src, Metrics* dest) {
 Metrics ServerFamily::GetMetrics() const {
   Metrics result;
 
-  fibers::mutex mu;
+  fibers_ext::Mutex mu;
 
   auto cb = [&](ProactorBase* pb) {
     EngineShard* shard = EngineShard::tlocal();
     ServerState* ss = ServerState::tlocal();
 
-    lock_guard<fibers::mutex> lk(mu);
+    lock_guard lk(mu);
 
     result.uptime = time(NULL) - this->start_time_;
     result.conn_stats += ss->connection_stats;

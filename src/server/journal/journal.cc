@@ -55,7 +55,7 @@ error_code Journal::Close() {
 
   VLOG(1) << "Journal::Close";
 
-  fibers::mutex ec_mu;
+  fibers_ext::Mutex ec_mu;
   error_code res;
 
   lock_guard lk(state_mu_);

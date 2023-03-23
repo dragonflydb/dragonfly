@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include <boost/fiber/mutex.hpp>
 #include <functional>
 #include <string_view>
 

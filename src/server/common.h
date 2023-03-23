@@ -9,7 +9,6 @@
 #include <absl/types/span.h>
 
 #include <atomic>
-#include <boost/fiber/mutex.hpp>
 #include <string_view>
 #include <vector>
 
@@ -216,7 +215,7 @@ template <typename T> struct AggregateValue {
   }
 
  private:
-  ::boost::fibers::mutex mu_{};
+  util::fibers_ext::Mutex mu_{};
   T current_{};
 };
 
@@ -320,7 +319,7 @@ class Context : protected Cancellation {
 
  private:
   GenericError err_;
-  ::boost::fibers::mutex mu_;
+  util::fibers_ext::Mutex mu_;
 
   ErrHandler err_handler_;
   ::util::fibers_ext::Fiber err_handler_fb_;

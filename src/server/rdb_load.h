@@ -3,7 +3,6 @@
 //
 #pragma once
 
-#include <boost/fiber/mutex.hpp>
 #include <jsoncons/json.hpp>
 #include <system_error>
 
