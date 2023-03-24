@@ -189,7 +189,7 @@ class EngineShard {
   bool DoDefrag();
 
   ::util::fibers_ext::FiberQueue queue_;
-  ::boost::fibers::fiber fiber_q_;
+  util::fibers_ext::Fiber fiber_q_;
 
   TxQueue txq_;
   MiMemoryResource mi_resource_;
@@ -207,7 +207,7 @@ class EngineShard {
   IntentLock shard_lock_;
 
   uint32_t defrag_task_ = 0;
-  ::boost::fibers::fiber fiber_periodic_;
+  ::util::fibers_ext::Fiber fiber_periodic_;
   ::util::fibers_ext::Done fiber_periodic_done_;
 
   DefragTaskState defrag_state_;

@@ -1205,7 +1205,7 @@ void SPop(CmdArgList args, ConnectionContext* cntx) {
         (*cntx)->SendBulkString(result.value().front());
       }
     } else {  // SPOP key cnt
-      (*cntx)->SendStringArr(*result);
+      (*cntx)->SendStringArrayAsSet(*result);
     }
     return;
   }
@@ -1241,7 +1241,7 @@ void SDiff(CmdArgList args, ConnectionContext* cntx) {
   if (cntx->conn_state.script_info) {  // sort under script
     sort(arr.begin(), arr.end());
   }
-  (*cntx)->SendStringArr(arr);
+  (*cntx)->SendStringArrayAsSet(arr);
 }
 
 void SDiffStore(CmdArgList args, ConnectionContext* cntx) {
@@ -1309,7 +1309,7 @@ void SMembers(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(svec.begin(), svec.end());
     }
-    (*cntx)->SendStringArr(*result);
+    (*cntx)->SendStringArrayAsSet(*result);
   } else {
     (*cntx)->SendError(result.status());
   }
@@ -1331,7 +1331,7 @@ void SInter(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(arr.begin(), arr.end());
     }
-    (*cntx)->SendStringArr(arr);
+    (*cntx)->SendStringArrayAsSet(arr);
   } else {
     (*cntx)->SendError(result.status());
   }
@@ -1394,7 +1394,7 @@ void SUnion(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(arr.begin(), arr.end());
     }
-    (*cntx)->SendStringArr(arr);
+    (*cntx)->SendStringArrayAsSet(arr);
   } else {
     (*cntx)->SendError(unionset.status());
   }
@@ -1473,7 +1473,7 @@ void SScan(CmdArgList args, ConnectionContext* cntx) {
   if (result.status() != OpStatus::WRONG_TYPE) {
     (*cntx)->StartArray(2);
     (*cntx)->SendBulkString(absl::StrCat(cursor));
-    (*cntx)->StartArray(result->size());
+    (*cntx)->StartArray(result->size());  // Within scan the return page is of type array
     for (const auto& k : *result) {
       (*cntx)->SendBulkString(k);
     }

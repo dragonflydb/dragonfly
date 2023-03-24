@@ -18,7 +18,7 @@ namespace facade {
  */
 class RedisParser {
  public:
-  enum Result { OK, INPUT_PENDING, BAD_ARRAYLEN, BAD_BULKLEN, BAD_STRING, BAD_INT };
+  enum Result { OK, INPUT_PENDING, BAD_ARRAYLEN, BAD_BULKLEN, BAD_STRING, BAD_INT, BAD_DOUBLE };
   using Buffer = RespExpr::Buffer;
 
   explicit RedisParser(bool server_mode = true) : server_mode_(server_mode) {
@@ -73,6 +73,7 @@ class RedisParser {
     INIT_S = 0,
     INLINE_S,
     ARRAY_LEN_S,
+    MAP_LEN_S,
     PARSE_ARG_S,  // Parse [$:+-]string\r\n
     BULK_STR_S,
     FINISH_ARG_S,

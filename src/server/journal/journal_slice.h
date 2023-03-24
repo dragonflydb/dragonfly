@@ -4,14 +4,13 @@
 
 #pragma once
 
-#include <boost/fiber/condition_variable.hpp>
-#include <boost/fiber/fiber.hpp>
 #include <optional>
 #include <string_view>
 
 #include "base/ring_buffer.h"
 #include "server/common.h"
 #include "server/journal/types.h"
+#include "util/fibers/fibers_ext.h"
 #include "util/uring/uring_file.h"
 
 namespace dfly {
@@ -54,7 +53,7 @@ class JournalSlice {
   std::unique_ptr<util::uring::LinuxFile> shard_file_;
   std::optional<base::RingBuffer<RingItem>> ring_buffer_;
 
-  bool iterating_cb_arr_ = false;
+  util::fibers_ext::SharedMutex cb_mu_;
   std::vector<std::pair<uint32_t, ChangeCallback>> change_cb_arr_;
 
   size_t file_offset_ = 0;

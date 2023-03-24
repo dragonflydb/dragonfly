@@ -92,6 +92,26 @@ template <> class OpResult<void> : public OpResultBase {
   using OpResultBase::OpResultBase;
 };
 
+template <typename V> class OpResultTyped : public OpResult<V> {
+ public:
+  OpResultTyped(V v) : OpResult<V>(std::move(v)) {
+  }
+
+  OpResultTyped(OpStatus st = OpStatus::OK) : OpResult<V>(st) {
+  }
+
+  void setType(int type) {
+    type_ = type;
+  }
+
+  int type() const {
+    return type_;
+  }
+
+ private:
+  int type_ = -1;
+};
+
 inline bool operator==(OpStatus st, const OpResultBase& ob) {
   return ob.operator==(st);
 }

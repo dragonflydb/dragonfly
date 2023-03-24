@@ -32,6 +32,7 @@ namespace dfly {
 
 using namespace std;
 using namespace facade;
+using namespace util;
 
 ScriptMgr::ScriptMgr() {
   // Build default script config
@@ -155,7 +156,7 @@ void ScriptMgr::ListCmd(ConnectionContext* cntx) const {
 
 void ScriptMgr::LatencyCmd(ConnectionContext* cntx) const {
   absl::flat_hash_map<std::string, base::Histogram> result;
-  boost::fibers::mutex mu;
+  fibers_ext::Mutex mu;
 
   shard_set->pool()->AwaitFiberOnAll([&](auto* pb) {
     auto* ss = ServerState::tlocal();

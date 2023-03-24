@@ -118,6 +118,8 @@ class RedisReplyBuilder : public SinkReplyBuilder {
  public:
   RedisReplyBuilder(::io::Sink* stream);
 
+  void SetResp3(bool is_resp3);
+
   void SendError(std::string_view str, std::string_view type = std::string_view{}) override;
   void SendMGetResponse(const OptResp* resp, uint32_t count) override;
   void SendSimpleString(std::string_view str) override;
@@ -135,13 +137,23 @@ class RedisReplyBuilder : public SinkReplyBuilder {
 
   virtual void SendStringArr(absl::Span<const std::string_view> arr);
   virtual void SendStringArr(absl::Span<const std::string> arr);
+  virtual void SendStringArrayAsMap(absl::Span<const std::string_view> arr);
+  virtual void SendStringArrayAsMap(absl::Span<const std::string> arr);
+  virtual void SendStringArrayAsSet(absl::Span<const std::string_view> arr);
+  virtual void SendStringArrayAsSet(absl::Span<const std::string> arr);
+
   virtual void SendNull();
+
+  virtual void SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
+                               bool with_scores);
 
   virtual void SendDouble(double val);
 
   virtual void SendBulkString(std::string_view str);
 
   virtual void StartArray(unsigned len);
+  virtual void StartMap(unsigned num_pairs);
+  virtual void StartSet(unsigned num_elements);
 
   static char* FormatDouble(double val, char* dest, unsigned dest_len);
 
@@ -150,8 +162,17 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   static std::string_view StatusToMsg(OpStatus status);
 
  private:
+  enum CollectionType {
+    ARRAY,
+    SET,
+    MAP,
+  };
+
   using StrPtr = std::variant<const std::string_view*, const std::string*>;
-  void SendStringArr(StrPtr str_ptr, uint32_t len);
+  void SendStringCollection(StrPtr str_ptr, uint32_t len, CollectionType type);
+
+  bool is_resp3_ = false;
+  const char* NullString();
 };
 
 class ReqSerializer {

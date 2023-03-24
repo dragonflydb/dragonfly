@@ -40,11 +40,12 @@ auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> R
   while (state_ != CMD_COMPLETE_S) {
     last_consumed_ = 0;
     switch (state_) {
+      case MAP_LEN_S:
       case ARRAY_LEN_S:
         last_result_ = ConsumeArrayLen(str);
         break;
       case PARSE_ARG_S:
-        if (str.size() < 4) {
+        if (str.size() == 0 || (str.size() < 4 && str[0] != '_')) {
           last_result_ = INPUT_PENDING;
         } else {
           last_result_ = ParseArg(str);
@@ -99,11 +100,17 @@ void RedisParser::InitStart(uint8_t prefix_b, RespExpr::Vec* res) {
     case ':':
     case '+':
     case '-':
+    case '_':  // Resp3 NULL
+    case ',':  // Resp3 DOUBLE
       state_ = PARSE_ARG_S;
       parse_stack_.emplace_back(1, cached_expr_);  // expression of length 1.
       break;
     case '*':
+    case '~':  // Resp3 SET
       state_ = ARRAY_LEN_S;
+      break;
+    case '%':  // Resp3 MAP
+      state_ = MAP_LEN_S;
       break;
     default:
       state_ = INLINE_S;
@@ -231,6 +238,11 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> Result {
   int64_t len;
 
   Result res = ParseNum(str, &len);
+  if (state_ == MAP_LEN_S) {
+    // Map starts with %N followed by an array of 2*N elements.
+    // Even elements are keys, odd elements are values.
+    len *= 2;
+  }
   switch (res) {
     case INPUT_PENDING:
       return INPUT_PENDING;
@@ -284,6 +296,15 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> Result {
 
 auto RedisParser::ParseArg(Buffer str) -> Result {
   char c = str[0];
+
+  if (c == '_') {  // Resp3 NIL
+    state_ = FINISH_ARG_S;
+    cached_expr_->emplace_back(RespExpr::NIL);
+    cached_expr_->back().u = Buffer{};
+    last_consumed_ += 3;  // '_','\r','\n'
+    return OK;
+  }
+
   if (c == '$') {
     int64_t len;
 
@@ -301,7 +322,7 @@ auto RedisParser::ParseArg(Buffer str) -> Result {
         LOG(ERROR) << "Unexpected result " << res;
     }
 
-    if (len < 0) {
+    if (len < 0) {  // Resp2 NIL
       state_ = FINISH_ARG_S;
       cached_expr_->emplace_back(RespExpr::NIL);
     } else {
@@ -349,6 +370,19 @@ auto RedisParser::ParseArg(Buffer str) -> Result {
 
     cached_expr_->emplace_back(RespExpr::INT64);
     cached_expr_->back().u = ival;
+  } else if (c == ',') {
+    DCHECK(!server_mode_);
+    if (!eol) {
+      return str.size() < 32 ? INPUT_PENDING : BAD_DOUBLE;
+    }
+    double_t dval;
+    std::string_view tok{s, size_t((eol - s) - 1)};
+
+    if (eol[-1] != '\r' || !absl::SimpleAtod(tok, &dval))
+      return BAD_INT;
+
+    cached_expr_->emplace_back(RespExpr::DOUBLE);
+    cached_expr_->back().u = dval;
   } else {
     return BAD_STRING;
   }
@@ -441,4 +475,4 @@ void RedisParser::ExtendLastString(Buffer str) {
   buf_stash_.back() = std::move(nb);
 }
 
-}  // namespace dfly
+}  // namespace facade

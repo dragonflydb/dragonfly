@@ -8,15 +8,13 @@ extern "C" {
 #include "redis/object.h"
 }
 
-#include <boost/fiber/fiber.hpp>
-#include <boost/fiber/operations.hpp>
-
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
 #include "util/fiber_sched_algo.h"
+#include "util/fibers/fiber.h"
 #include "util/proactor_base.h"
 
 namespace dfly {
@@ -506,7 +504,7 @@ void DbSlice::FlushDb(DbIndex db_ind) {
       mi_heap_collect(ServerState::tlocal()->data_heap(), true);
     };
 
-    boost::fibers::fiber(std::move(cb)).detach();
+    util::MakeFiber(std::move(cb)).Detach();
 
     return;
   }
@@ -526,11 +524,11 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     }
   }
 
-  boost::fibers::fiber([all_dbs = std::move(all_dbs)]() mutable {
+  MakeFiber([all_dbs = std::move(all_dbs)]() mutable {
     for (auto& db : all_dbs) {
       db.reset();
     }
-  }).detach();
+  }).Detach();
 }
 
 void DbSlice::AddExpire(DbIndex db_ind, PrimeIterator main_it, uint64_t at) {

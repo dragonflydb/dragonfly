@@ -281,7 +281,7 @@ async def test_multi_pubsub(async_client):
 
 
 @pytest.mark.asyncio
-async def test_subsribers_with_active_publisher(df_server: DflyInstance, max_connections=100):
+async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_connections=100):
     # TODO: I am not how to customize the max connections for the pool.
     async_pool = aioredis.ConnectionPool(host="localhost", port=df_server.port,
                                          db=0, decode_responses=True, max_connections=max_connections)
@@ -316,7 +316,6 @@ async def test_subsribers_with_active_publisher(df_server: DflyInstance, max_con
     await async_pool.disconnect()
 
 
-@pytest.mark.asyncio
 async def test_big_command(df_server, size=8 * 1024):
     reader, writer = await asyncio.open_connection('127.0.0.1', df_server.port)
 
@@ -328,7 +327,7 @@ async def test_big_command(df_server, size=8 * 1024):
     writer.close()
     await writer.wait_closed()
 
-@pytest.mark.asyncio
+
 async def test_subscribe_pipelined(async_client: aioredis.Redis):
     pipe = async_client.pipeline(transaction=False)
     pipe.execute_command('subscribe channel').execute_command('subscribe channel')

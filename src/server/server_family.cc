@@ -69,17 +69,16 @@ ABSL_DECLARE_FLAG(uint32_t, hz);
 
 namespace dfly {
 
-namespace fibers = ::boost::fibers;
 namespace fs = std::filesystem;
 namespace uring = util::uring;
 
 using absl::GetFlag;
 using absl::StrCat;
 using namespace facade;
+using namespace util;
+using fibers_ext::FiberQueueThreadPool;
+using http::StringResponse;
 using strings::HumanReadableNumBytes;
-using util::ProactorBase;
-using util::fibers_ext::FiberQueueThreadPool;
-using util::http::StringResponse;
 
 namespace {
 
@@ -472,7 +471,7 @@ void ServerFamily::Shutdown() {
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
-fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path) {
+fibers_ext::Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
   CHECK(absl::EndsWith(load_path, ".rdb") || absl::EndsWith(load_path, "summary.dfs"));
 
   vector<std::string> paths{{load_path}};
@@ -483,7 +482,7 @@ fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path)
     io::Result<io::StatShortVec> files = io::StatFiles(glob);
 
     if (files && files->size() == 0) {
-      fibers::promise<std::error_code> ec_promise;
+      fibers_ext::Promise<std::error_code> ec_promise;
       ec_promise.set_value(make_error_code(errc::no_such_file_or_directory));
       return ec_promise.get_future();
     }
@@ -499,7 +498,7 @@ fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path)
     (void)fs::canonical(path, ec);
     if (ec) {
       LOG(ERROR) << "Error loading " << load_path << " " << ec.message();
-      fibers::promise<std::error_code> ec_promise;
+      fibers_ext::Promise<std::error_code> ec_promise;
       ec_promise.set_value(ec);
       return ec_promise.get_future();
     }
@@ -915,7 +914,7 @@ GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
 
   vector<unique_ptr<RdbSnapshot>> snapshots;
   absl::flat_hash_map<string_view, size_t> rdb_name_map;
-  fibers::mutex mu;  // guards rdb_name_map
+  fibers_ext::Mutex mu;  // guards rdb_name_map
 
   auto save_cb = [&](unsigned index) {
     auto& snapshot = snapshots[index];
@@ -1152,7 +1151,7 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
 
   if (sub_cmd == "LIST") {
     vector<string> client_info;
-    fibers::mutex mu;
+    fibers_ext::Mutex mu;
     auto cb = [&](util::Connection* conn) {
       facade::Connection* dcon = static_cast<facade::Connection*>(conn);
       string info = dcon->GetClientInfo();
@@ -1317,7 +1316,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
     string_view param = ArgS(args, 2);
     string_view res[2] = {param, "tbd"};
 
-    return (*cntx)->SendStringArr(res);
+    return (*cntx)->SendStringArrayAsMap(res);
   } else if (sub_cmd == "RESETSTAT") {
     shard_set->pool()->Await([](auto*) {
       auto* stats = ServerState::tl_connection_stats();
@@ -1389,13 +1388,13 @@ static void MergeInto(const DbSlice::Stats& src, Metrics* dest) {
 Metrics ServerFamily::GetMetrics() const {
   Metrics result;
 
-  fibers::mutex mu;
+  fibers_ext::Mutex mu;
 
   auto cb = [&](ProactorBase* pb) {
     EngineShard* shard = EngineShard::tlocal();
     ServerState* ss = ServerState::tlocal();
 
-    lock_guard<fibers::mutex> lk(mu);
+    lock_guard lk(mu);
 
     result.uptime = time(NULL) - this->start_time_;
     result.conn_stats += ss->connection_stats;
@@ -1688,21 +1687,29 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
-  // Allow calling this commands with no arguments or protover=2
-  // technically that is all that is supported at the moment.
-  // For all other cases degrade to 'unknown command' so that clients
-  // checking for the existence of the command to detect if RESP3 is
-  // supported or whether authentication can be performed using HELLO
-  // will gracefully fallback to RESP2 and using the AUTH command explicitly.
+  // If no arguments are provided default to RESP2.
+  // AUTH and SETNAME options are not supported.
+  bool is_resp3 = false;
   if (args.size() > 1) {
     string_view proto_version = ArgS(args, 1);
-    if (proto_version != "2" || args.size() > 2) {
+    is_resp3 = proto_version == "3";
+    bool valid_proto_version = proto_version == "2" || is_resp3;
+    if (!valid_proto_version || args.size() > 2) {
       (*cntx)->SendError(UnknownCmd("HELLO", args.subspan(1)));
       return;
     }
   }
 
-  (*cntx)->StartArray(14);
+  int proto_version = 2;
+  if (is_resp3) {
+    proto_version = 3;
+    (*cntx)->SetResp3(true);
+  } else {
+    // Issuing hello 2 again is valid and should switch back to RESP2
+    (*cntx)->SetResp3(false);
+  }
+
+  (*cntx)->StartMap(7);
   (*cntx)->SendBulkString("server");
   (*cntx)->SendBulkString("redis");
   (*cntx)->SendBulkString("version");
@@ -1710,7 +1717,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendBulkString("dfly_version");
   (*cntx)->SendBulkString(GetVersion());
   (*cntx)->SendBulkString("proto");
-  (*cntx)->SendLong(2);
+  (*cntx)->SendLong(proto_version);
   (*cntx)->SendBulkString("id");
   (*cntx)->SendLong(cntx->owner()->GetClientId());
   (*cntx)->SendBulkString("mode");

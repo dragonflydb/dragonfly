@@ -88,6 +88,8 @@ const char* RespExpr::TypeName(Type t) {
       return "string";
     case INT64:
       return "int";
+    case DOUBLE:
+      return "double";
     case ARRAY:
       return "array";
     case NIL_ARRAY:
@@ -154,6 +156,9 @@ ostream& operator<<(ostream& os, const facade::RespExpr& e) {
   switch (e.type) {
     case RespExpr::INT64:
       os << "i" << get<int64_t>(e.u);
+      break;
+    case RespExpr::DOUBLE:
+      os << "d" << get<int64_t>(e.u);
       break;
     case RespExpr::STRING:
       os << "'" << ToSV(get<RespExpr::Buffer>(e.u)) << "'";
