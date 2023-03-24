@@ -1397,32 +1397,29 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
   string_view channel = ArgS(args, 1);
 
   auto clients = ServerState::tlocal()->channel_store()->FetchSubscribers(channel);
+  int num_published = clients.size();
 
-  atomic_uint32_t published{0};
   if (!clients.empty()) {
-    shared_ptr<string> msg_ptr = make_shared<string>(ArgS(args, 2));
-    shared_ptr<string> channel_ptr = make_shared<string>(channel);
+    auto clients_ptr = make_shared<decltype(clients)>(move(clients));
+    auto msg_ptr = make_shared<string>(ArgS(args, 2));
+    auto channel_ptr = make_shared<string>(channel);
 
-    auto cb = [&published, &clients, msg_ptr, channel_ptr](unsigned idx, util::ProactorBase*) {
-      auto it =
-          lower_bound(clients.begin(), clients.end(), idx, ChannelStore::Subscriber::ByThread);
-      while (it != clients.end() && it->thread_id == idx) {
+    auto cb = [clients_ptr, msg_ptr, channel_ptr](unsigned idx, util::ProactorBase*) {
+      auto it = lower_bound(clients_ptr->begin(), clients_ptr->end(), idx,
+                            ChannelStore::Subscriber::ByThread);
+
+      while (it != clients_ptr->end() && it->thread_id == idx) {
         facade::Connection* conn = it->conn_cntx->owner();
         DCHECK(conn);
-
         conn->SendMsgVecAsync({move(it->pattern), move(channel_ptr), move(msg_ptr)});
-        published.fetch_add(1, memory_order_relaxed);
+        it->borrow_token.Dec();
         it++;
       }
     };
-    shard_set->pool()->Await(std::move(cb));
+    shard_set->pool()->DispatchBrief(std::move(cb));
   }
 
-  for (auto& c : clients) {
-    c.borrow_token.Dec();
-  }
-
-  (*cntx)->SendLong(published.load(memory_order_relaxed));
+  (*cntx)->SendLong(num_published);
 }
 
 void Service::Subscribe(CmdArgList args, ConnectionContext* cntx) {
