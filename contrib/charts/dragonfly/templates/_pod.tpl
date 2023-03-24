@@ -86,7 +86,7 @@ containers:
       {{- toYaml . | trim | nindent 6 }}
     {{- end }}
     {{- include "dragonfly.volumemounts" . | trim | nindent 4 }}
-    {{- if .Values.passwordFromSecret.enable -}}
+    {{- if .Values.passwordFromSecret.enable }}
     env:
       - name: DFLY_PASSWORD
         valueFrom:
