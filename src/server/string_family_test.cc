@@ -663,4 +663,14 @@ TEST_F(StringFamilyTest, ClThrottle) {
   EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
 }
 
+TEST_F(StringFamilyTest, SetMGetWithNilResp3) {
+  Run({"hello", "3"});
+
+  EXPECT_EQ(Run({"set", "key", "val"}), "OK");
+  EXPECT_EQ(Run({"get", "key"}), "val");
+  RespExpr resp = Run({"mget", "key", "nonexist"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre("val", ArgType(RespExpr::NIL)));
+}
+
 }  // namespace dfly

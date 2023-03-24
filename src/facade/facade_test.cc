@@ -35,6 +35,12 @@ bool RespMatcher::MatchAndExplain(const RespExpr& e, MatchResultListener* listen
       *listener << "\nActual : " << actual << " expected: " << exp_int_;
       return false;
     }
+  } else if (type_ == RespExpr::DOUBLE) {
+    auto actual = get<double>(e.u);
+    if (exp_double_ != actual) {
+      *listener << "\nActual : " << actual << " expected: " << exp_double_;
+      return false;
+    }
   } else if (type_ == RespExpr::ARRAY) {
     size_t len = get<RespVec*>(e.u)->size();
     if (len != size_t(exp_int_)) {

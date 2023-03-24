@@ -117,11 +117,11 @@ error_code JournalSlice::Close() {
 
 void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
   DCHECK(ring_buffer_);
-  iterating_cb_arr_ = true;
+  cb_mu_.lock_shared();
   for (const auto& k_v : change_cb_arr_) {
     k_v.second(entry, await);
   }
-  iterating_cb_arr_ = false;
+  cb_mu_.unlock_shared();
 
   RingItem item;
   item.lsn = lsn_;
@@ -141,14 +141,14 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
 }
 
 uint32_t JournalSlice::RegisterOnChange(ChangeCallback cb) {
+  lock_guard lk(cb_mu_);
   uint32_t id = next_cb_id_++;
   change_cb_arr_.emplace_back(id, std::move(cb));
   return id;
 }
 
 void JournalSlice::UnregisterOnChange(uint32_t id) {
-  CHECK(!iterating_cb_arr_);
-
+  lock_guard lk(cb_mu_);
   auto it = find_if(change_cb_arr_.begin(), change_cb_arr_.end(),
                     [id](const auto& e) { return e.first == id; });
   CHECK(it != change_cb_arr_.end());

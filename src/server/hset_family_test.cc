@@ -27,6 +27,14 @@ class HSetFamilyTest : public BaseFamilyTest {
  protected:
 };
 
+class HestFamilyTestProtocolVersioned : public HSetFamilyTest,
+                                        public ::testing::WithParamInterface<string> {
+ protected:
+};
+
+INSTANTIATE_TEST_CASE_P(HestFamilyTestProtocolVersioned, HestFamilyTestProtocolVersioned,
+                        ::testing::Values("2", "3"));
+
 TEST_F(HSetFamilyTest, Hash) {
   robj* obj = createHashObject();
   sds field = sdsnew("field");
@@ -70,8 +78,12 @@ TEST_F(HSetFamilyTest, HSet) {
   EXPECT_EQ(1, CheckedInt({"hset", "small", "", "565323349817"}));
 }
 
-TEST_F(HSetFamilyTest, Get) {
-  auto resp = Run({"hset", "x", "a", "1", "b", "2", "c", "3"});
+TEST_P(HestFamilyTestProtocolVersioned, Get) {
+  auto resp = Run({"hello", GetParam()});
+  EXPECT_THAT(resp.GetVec()[6], "proto");
+  EXPECT_THAT(resp.GetVec()[7], IntArg(atoi(GetParam().c_str())));
+
+  resp = Run({"hset", "x", "a", "1", "b", "2", "c", "3"});
   EXPECT_THAT(resp, IntArg(3));
 
   resp = Run({"hmget", "unkwn", "a", "c"});

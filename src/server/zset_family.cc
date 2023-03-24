@@ -1578,7 +1578,7 @@ void ZSetFamily::ZMScore(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kWrongTypeErr);
   }
 
-  (*cntx)->StartArray(result->size());
+  (*cntx)->StartArray(result->size());  // Array return type.
   const MScoreResponse& array = result.value();
   for (const auto& p : array) {
     if (p) {
@@ -1614,7 +1614,7 @@ void ZSetFamily::ZScan(CmdArgList args, ConnectionContext* cntx) {
   if (result.status() != OpStatus::WRONG_TYPE) {
     (*cntx)->StartArray(2);
     (*cntx)->SendBulkString(absl::StrCat(cursor));
-    (*cntx)->StartArray(result->size());
+    (*cntx)->StartArray(result->size());  // Within scan the returned page is of type array.
     for (const auto& k : *result) {
       (*cntx)->SendBulkString(k);
     }
@@ -1649,16 +1649,7 @@ void ZSetFamily::OutputScoredArrayResult(const OpResult<ScoredArray>& result,
 
   LOG_IF(WARNING, !result && result.status() != OpStatus::KEY_NOTFOUND)
       << "Unexpected status " << result.status();
-
-  (*cntx)->StartArray(result->size() * (params.with_scores ? 2 : 1));
-  const ScoredArray& array = result.value();
-  for (const auto& p : array) {
-    (*cntx)->SendBulkString(p.first);
-
-    if (params.with_scores) {
-      (*cntx)->SendDouble(p.second);
-    }
-  }
+  (*cntx)->SendScoredArray(result.value(), params.with_scores);
 }
 
 void ZSetFamily::ZRemRangeGeneric(string_view key, const ZRangeSpec& range_spec,

@@ -656,4 +656,100 @@ TEST_F(RedisReplyBuilderTest, TestBatchMode) {
                           absl::StrCat(kBulkStringStart, "0"), std::string_view{}));
 }
 
+TEST_F(RedisReplyBuilderTest, TestResp3Double) {
+  builder_->SetResp3(true);
+  builder_->SendDouble(5.5);
+  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_EQ(str(), ",5.5\r\n");
+}
+
+TEST_F(RedisReplyBuilderTest, TestResp3NullString) {
+  builder_->SetResp3(true);
+  builder_->SendNull();
+  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_EQ(TakePayload(), "_\r\n");
+}
+
+TEST_F(RedisReplyBuilderTest, TestSendStringArrayAsMap) {
+  const std::vector<std::string> map_array{"k1", "v1", "k2", "v2"};
+
+  builder_->SetResp3(false);
+  builder_->SendStringArrayAsMap(map_array);
+  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_EQ(TakePayload(), "*4\r\n$2\r\nk1\r\n$2\r\nv1\r\n$2\r\nk2\r\n$2\r\nv2\r\n")
+      << "SendStringArrayAsMap Resp2 Failed.";
+
+  builder_->SetResp3(true);
+  builder_->SendStringArrayAsMap(map_array);
+  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_EQ(TakePayload(), "%2\r\n$2\r\nk1\r\n$2\r\nv1\r\n$2\r\nk2\r\n$2\r\nv2\r\n")
+      << "SendStringArrayAsMap Resp3 Failed.";
+}
+
+TEST_F(RedisReplyBuilderTest, TestSendStringArrayAsSet) {
+  const std::vector<std::string> set_array{"e1", "e2", "e3"};
+
+  builder_->SetResp3(false);
+  builder_->SendStringArrayAsSet(set_array);
+  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_EQ(TakePayload(), "*3\r\n$2\r\ne1\r\n$2\r\ne2\r\n$2\r\ne3\r\n")
+      << "SendStringArrayAsSet Resp2 Failed.";
+
+  builder_->SetResp3(true);
+  builder_->SendStringArrayAsSet(set_array);
+  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_EQ(TakePayload(), "~3\r\n$2\r\ne1\r\n$2\r\ne2\r\n$2\r\ne3\r\n")
+      << "SendStringArrayAsSet Resp3 Failed.";
+}
+
+TEST_F(RedisReplyBuilderTest, TestSendScoredArray) {
+  const std::vector<std::pair<std::string, double>> scored_array{
+      {"e1", 1.1}, {"e2", 2.2}, {"e3", 3.3}};
+
+  builder_->SetResp3(false);
+  builder_->SendScoredArray(scored_array, false);
+  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_EQ(TakePayload(), "*3\r\n$2\r\ne1\r\n$2\r\ne2\r\n$2\r\ne3\r\n")
+      << "Resp2 WITHOUT scores failed.";
+
+  builder_->SetResp3(true);
+  builder_->SendScoredArray(scored_array, false);
+  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_EQ(TakePayload(), "*3\r\n$2\r\ne1\r\n$2\r\ne2\r\n$2\r\ne3\r\n")
+      << "Resp3 WITHOUT scores failed.";
+
+  builder_->SetResp3(false);
+  builder_->SendScoredArray(scored_array, true);
+  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_EQ(TakePayload(),
+            "*6\r\n$2\r\ne1\r\n$3\r\n1.1\r\n$2\r\ne2\r\n$3\r\n2.2\r\n$2\r\ne3\r\n$3\r\n3.3\r\n")
+      << "Resp3 WITHSCORES failed.";
+
+  builder_->SetResp3(true);
+  builder_->SendScoredArray(scored_array, true);
+  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_EQ(TakePayload(),
+            "*3\r\n*2\r\n$2\r\ne1\r\n,1.1\r\n*2\r\n$2\r\ne2\r\n,2.2\r\n*2\r\n$2\r\ne3\r\n,3.3\r\n")
+      << "Resp3 WITHSCORES failed.";
+}
+
+TEST_F(RedisReplyBuilderTest, TestSendMGetResponse) {
+  std::vector<SinkReplyBuilder::OptResp> mget_res(3);
+  auto& v = mget_res[0].emplace();
+  v.value = "v1";
+  v = mget_res[2].emplace();
+  v.value = "v3";
+
+  builder_->SetResp3(false);
+  builder_->SendMGetResponse(&mget_res[0], 3);
+  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_EQ(TakePayload(), "*3\r\n$2\r\nv3\r\n$-1\r\n$0\r\n\r\n")
+      << "Resp2 SendMGetResponse failed.";
+
+  builder_->SetResp3(true);
+  builder_->SendMGetResponse(&mget_res[0], 3);
+  ASSERT_TRUE(builder_->err_count().empty());
+  ASSERT_EQ(TakePayload(), "*3\r\n$2\r\nv3\r\n_\r\n$0\r\n\r\n") << "Resp3 SendMGetResponse failed.";
+}
+
 }  // namespace facade

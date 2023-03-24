@@ -1318,7 +1318,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
     string_view param = ArgS(args, 2);
     string_view res[2] = {param, "tbd"};
 
-    return (*cntx)->SendStringArr(res);
+    return (*cntx)->SendStringArrayAsMap(res);
   } else if (sub_cmd == "RESETSTAT") {
     shard_set->pool()->Await([](auto*) {
       auto* stats = ServerState::tl_connection_stats();
@@ -1689,21 +1689,29 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
-  // Allow calling this commands with no arguments or protover=2
-  // technically that is all that is supported at the moment.
-  // For all other cases degrade to 'unknown command' so that clients
-  // checking for the existence of the command to detect if RESP3 is
-  // supported or whether authentication can be performed using HELLO
-  // will gracefully fallback to RESP2 and using the AUTH command explicitly.
+  // If no arguments are provided default to RESP2.
+  // AUTH and SETNAME options are not supported.
+  bool is_resp3 = false;
   if (args.size() > 1) {
     string_view proto_version = ArgS(args, 1);
-    if (proto_version != "2" || args.size() > 2) {
+    is_resp3 = proto_version == "3";
+    bool valid_proto_version = proto_version == "2" || is_resp3;
+    if (!valid_proto_version || args.size() > 2) {
       (*cntx)->SendError(UnknownCmd("HELLO", args.subspan(1)));
       return;
     }
   }
 
-  (*cntx)->StartArray(14);
+  int proto_version = 2;
+  if (is_resp3) {
+    proto_version = 3;
+    (*cntx)->SetResp3(true);
+  } else {
+    // Issuing hello 2 again is valid and should switch back to RESP2
+    (*cntx)->SetResp3(false);
+  }
+
+  (*cntx)->StartMap(7);
   (*cntx)->SendBulkString("server");
   (*cntx)->SendBulkString("redis");
   (*cntx)->SendBulkString("version");
@@ -1711,7 +1719,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendBulkString("dfly_version");
   (*cntx)->SendBulkString(GetVersion());
   (*cntx)->SendBulkString("proto");
-  (*cntx)->SendLong(2);
+  (*cntx)->SendLong(proto_version);
   (*cntx)->SendBulkString("id");
   (*cntx)->SendLong(cntx->owner()->GetClientId());
   (*cntx)->SendBulkString("mode");
