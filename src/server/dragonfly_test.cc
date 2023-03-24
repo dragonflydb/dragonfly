@@ -399,9 +399,9 @@ TEST_F(DflyEngineTest, PSubscribe) {
   resp = pp_->at(0)->Await([&] { return Run({"publish", "ab", "foo"}); });
   EXPECT_THAT(resp, IntArg(1));
 
-  ASSERT_EQ(1, SubscriberMessagesLen("IO1"));
-
   pp_->AwaitFiberOnAll([](ProactorBase* pb) {});
+
+  ASSERT_EQ(1, SubscriberMessagesLen("IO1"));
 
   const facade::Connection::PubMessage& msg = GetPublishedMessage("IO1", 0);
   EXPECT_EQ("foo", *msg.message);
