@@ -79,24 +79,26 @@ void ChannelStore::ChannelMap::DeleteAll() {
     delete ptr.Get();
 }
 
-ChannelStore::ChannelStore(ChannelStore::ControlBlock* cb)
-    : channels_{new ChannelMap{}}, patterns_{new ChannelMap{}}, control_block_{cb} {
-  cb->most_recent = this;
+ChannelStore::ChannelStore() : channels_{new ChannelMap{}}, patterns_{new ChannelMap{}} {
+  control_block.most_recent = this;
 }
 
-ChannelStore::ChannelStore(ChannelMap* channels, ChannelMap* patterns, ControlBlock* cb)
-    : channels_{channels}, patterns_{patterns}, control_block_{cb} {
+ChannelStore::ChannelStore(ChannelMap* channels, ChannelMap* patterns)
+    : channels_{channels}, patterns_{patterns} {
 }
 
-void ChannelStore::ControlBlock::Destroy() {
-  update_mu.lock();
-  update_mu.unlock();
-  for (auto* chan_map : {most_recent->channels_, most_recent->patterns_}) {
+void ChannelStore::Destroy() {
+  control_block.update_mu.lock();
+  control_block.update_mu.unlock();
+  for (auto* chan_map :
+       {control_block.most_recent->channels_, control_block.most_recent->patterns_}) {
     chan_map->DeleteAll();
     delete chan_map;
   }
-  delete most_recent;
+  delete control_block.most_recent;
 }
+
+ChannelStore::ControlBlock ChannelStore::control_block;
 
 vector<ChannelStore::Subscriber> ChannelStore::FetchSubscribers(string_view channel) const {
   vector<Subscriber> res;
@@ -139,46 +141,42 @@ size_t ChannelStore::PatternCount() const {
   return patterns_->size();
 }
 
-ChannelStoreUpdater::ChannelStoreUpdater(ChannelStore* store, bool pattern, ConnectionContext* cntx,
-                                         uint32_t thread_id)
-    : store_{store}, pattern_{pattern}, cntx_{cntx}, thread_id_{thread_id} {
+ChannelStoreUpdater::ChannelStoreUpdater(ChannelStore* store, bool pattern, bool to_add,
+                                         ConnectionContext* cntx, uint32_t thread_id)
+    : store_{store}, pattern_{pattern}, to_add_{to_add}, cntx_{cntx}, thread_id_{thread_id} {
 }
 
-void ChannelStoreUpdater::Add(string_view key) {
-  ops_.emplace_back(key, true);
-}
-
-void ChannelStoreUpdater::Remove(string_view key) {
-  ops_.emplace_back(key, false);
+void ChannelStoreUpdater::Record(string_view key) {
+  ops_.emplace_back(key);
 }
 
 pair<ChannelStore::ChannelMap*, bool> ChannelStoreUpdater::GetTargetMap() {
   auto* target = pattern_ ? store_->patterns_ : store_->channels_;
 
-  for (auto [key, add] : ops_) {
+  for (auto key : ops_) {
     auto it = target->find(key);
-    DCHECK(it != target->end() || add);
+    DCHECK(it != target->end() || to_add_);
     // We need to make a copy, if we are going to add or delete new map slot.
-    if ((add && it == target->end()) || (!add && it->second->size() == 1))
+    if ((to_add_ && it == target->end()) || (!to_add_ && it->second->size() == 1))
       return {new ChannelStore::ChannelMap{*target}, true};
   }
 
   return {target, false};
 }
 
-void ChannelStoreUpdater::Modify(ChannelMap* target, string_view key, bool add) {
+void ChannelStoreUpdater::Modify(ChannelMap* target, string_view key) {
   using SubscribeMap = ChannelStore::SubscribeMap;
 
   auto it = target->find(key);
 
   // New key, add new slot.
-  if (add && it == target->end()) {
+  if (to_add_ && it == target->end()) {
     target->emplace(key, new SubscribeMap{{cntx_, thread_id_}});
     return;
   }
 
   // Last entry for key, remove slot.
-  if (!add && it->second->size() == 1) {
+  if (!to_add_ && it->second->size() == 1) {
     DCHECK(it->second->begin()->first == cntx_);
     freelist_.push_back(it->second.Get());
     target->erase(it);
@@ -188,7 +186,7 @@ void ChannelStoreUpdater::Modify(ChannelMap* target, string_view key, bool add) 
   // RCU update existing SubscribeMap entry.
   DCHECK(it->second->size() > 0);
   auto* replacement = new SubscribeMap{*it->second};
-  if (add)
+  if (to_add_)
     replacement->emplace(cntx_, thread_id_);
   else
     replacement->erase(cntx_);
@@ -199,21 +197,21 @@ void ChannelStoreUpdater::Modify(ChannelMap* target, string_view key, bool add) 
 
 void ChannelStoreUpdater::Apply() {
   // Wait for other updates to finish, lock the control block and update store pointer.
-  ChannelStore::ControlBlock* cb = store_->control_block_;
-  cb->update_mu.lock();
-  store_ = cb->most_recent;
+  auto& cb = ChannelStore::control_block;
+  cb.update_mu.lock();
+  store_ = cb.most_recent;
 
   // Get target map (copied if needed) and apply operations.
   auto [target, copied] = GetTargetMap();
-  for (auto [key, add] : ops_)
-    Modify(target, key, add);
+  for (auto key : ops_)
+    Modify(target, key);
 
   // Prepare replacement.
   auto* replacement = store_;
   if (copied) {
     auto* new_chans = pattern_ ? store_->channels_ : target;
     auto* new_patterns = pattern_ ? target : store_->patterns_;
-    replacement = new ChannelStore{new_chans, new_patterns, cb};
+    replacement = new ChannelStore{new_chans, new_patterns};
   }
 
   // Regardless of whether we need to replace, we dispatch to the shardset,
@@ -223,8 +221,8 @@ void ChannelStoreUpdater::Apply() {
   });
 
   // Update control block and unlock it.
-  cb->most_recent = replacement;
-  cb->update_mu.unlock();
+  cb.most_recent = replacement;
+  cb.update_mu.unlock();
 
   // Delete previous map and channel store.
   if (copied) {

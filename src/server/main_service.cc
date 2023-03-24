@@ -533,7 +533,7 @@ void Service::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_i
   GenericFamily::Init(&pp_);
   server_family_.Init(acceptor, main_interface);
 
-  ChannelStore* cs = new ChannelStore{&channel_control_};
+  ChannelStore* cs = new ChannelStore{};
   pp_.Await(
       [cs](uint32_t index, ProactorBase* pb) { ServerState::tlocal()->UpdateChannelStore(cs); });
 }
@@ -556,7 +556,7 @@ void Service::Shutdown() {
   engine_varz.reset();
   request_latency_usec.Shutdown();
 
-  channel_control_.Destroy();
+  ChannelStore::Destroy();
 
   shard_set->Shutdown();
   pp_.Await([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });

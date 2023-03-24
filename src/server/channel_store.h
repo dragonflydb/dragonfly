@@ -31,6 +31,11 @@ struct ChannelStoreUpdater;
 //
 // To prevent parallel (and thus overlapping) updates, a centralized ControlBlock is used.
 // Update operations are carried out by the ChannelStoreUpdater.
+//
+// A centralized ChannelStore, contrary to sharded storage, avoids contention on a single shard
+// thread for heavy throughput on a single channel and thus seamlessly scales on multiple threads
+// even with a small number of channels. In general, it has a slightly lower latency, due to the
+// fact that no hop is required to fetch the subscribers.
 class ChannelStore {
   friend struct ChannelStoreUpdater;
 
@@ -54,22 +59,16 @@ class ChannelStore {
     std::string pattern;  // non-empty if registered via psubscribe
   };
 
-  // Centralized controller to prevent overlaping updates.
-  struct ControlBlock {
-    void Destroy();
-
-    ChannelStore* most_recent;
-    ::boost::fibers::mutex update_mu;  // locked during updates.
-  };
-
-  // Initialize ChannelStore bound to specific control block.
-  ChannelStore(ControlBlock* cb);
+  ChannelStore();
 
   // Fetch all subscribers for channel, including matching patterns.
   std::vector<Subscriber> FetchSubscribers(std::string_view channel) const;
 
   std::vector<std::string> ListChannels(const std::string_view pattern) const;
   size_t PatternCount() const;
+
+  // Destroy current instane and delete it.
+  static void Destroy();
 
  private:
   using ThreadId = unsigned;
@@ -105,26 +104,32 @@ class ChannelStore {
     void DeleteAll();
   };
 
+  // Centralized controller to prevent overlaping updates.
+  struct ControlBlock {
+    ChannelStore* most_recent;
+    ::boost::fibers::mutex update_mu;  // locked during updates.
+  };
+
  private:
-  ChannelStore(ChannelMap* channels, ChannelMap* patterns, ControlBlock*);
+  static ControlBlock control_block;
+
+  ChannelStore(ChannelMap* channels, ChannelMap* patterns);
 
   static void Fill(const SubscribeMap& src, const std::string& pattern,
                    std::vector<Subscriber>* out);
 
   ChannelMap* channels_;
   ChannelMap* patterns_;
-  ControlBlock* control_block_;
 };
 
 // Performs RCU (read-copy-update) updates to the channel store.
 // See ChannelStore header top for design details.
 // Queues operations and performs them with Apply().
 struct ChannelStoreUpdater {
-  ChannelStoreUpdater(ChannelStore* store, bool pattern, ConnectionContext* cntx,
+  ChannelStoreUpdater(ChannelStore* store, bool pattern, bool to_add, ConnectionContext* cntx,
                       uint32_t thread_id);
 
-  void Add(std::string_view key);
-  void Remove(std::string_view key);
+  void Record(std::string_view key);
   void Apply();
 
  private:
@@ -134,17 +139,18 @@ struct ChannelStoreUpdater {
   std::pair<ChannelMap*, bool> GetTargetMap();
 
   // Apply modifly operation to target map.
-  void Modify(ChannelMap* target, std::string_view key, bool add);
+  void Modify(ChannelMap* target, std::string_view key);
 
  private:
   ChannelStore* store_;
 
   bool pattern_;
+  bool to_add_;
   ConnectionContext* cntx_;
   uint32_t thread_id_;
 
   // Pending operations.
-  std::vector<std::pair<std::string_view, bool>> ops_;
+  std::vector<std::string_view> ops_;
 
   // Replaced SubscribeMaps that need to be deleted safely.
   std::vector<ChannelStore::SubscribeMap*> freelist_;

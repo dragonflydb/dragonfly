@@ -74,18 +74,15 @@ vector<unsigned> ChangeSubscriptions(bool pattern, CmdArgList args, bool to_add,
   int32_t tid = util::ProactorBase::GetIndex();
   DCHECK_GE(tid, 0);
 
-  ChannelStoreUpdater csu{store, pattern, conn, uint32_t(tid)};
+  ChannelStoreUpdater csu{store, pattern, to_add, conn, uint32_t(tid)};
 
   // Gather all the channels we need to subscribe to / remove.
   for (size_t i = 0; i < args.size(); ++i) {
     string_view channel = ArgS(args, i);
-    if (to_add) {
-      if (local_store.emplace(channel).second)
-        csu.Add(channel);
-    } else {
-      if (local_store.erase(channel) > 0)
-        csu.Remove(channel);
-    }
+    if (to_add && local_store.emplace(channel).second)
+      csu.Record(channel);
+    else if (!to_add && local_store.erase(channel) > 0)
+      csu.Record(channel);
 
     if (to_reply)
       result[i] = sinfo.SubscriptionCount();
