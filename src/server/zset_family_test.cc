@@ -485,6 +485,6 @@ TEST_F(ZSetFamilyTest, ZAddPopCrash) {
   }
 
   auto resp = Run({"zpopmin", "key"});
-  EXPECT_THAT(resp, IntArg(1));
+  EXPECT_EQ(resp, "element:0");
 }
 }  // namespace dfly

@@ -146,8 +146,6 @@ class IntervalVisitor {
     return removed_;
   }
 
-  void FindBadNull();
-
  private:
   void ExtractListPack(const zrangespec& range);
   void ExtractSkipList(const zrangespec& range);
@@ -395,22 +393,6 @@ void IntervalVisitor::ExtractListPack(const zrangespec& range) {
   }
 }
 
-void IntervalVisitor::FindBadNull() {
-  if (zobj_->encoding == OBJ_ENCODING_LISTPACK) {
-    // TODO!
-  } else {
-    DCHECK_EQ(OBJ_ENCODING_SKIPLIST, zobj_->encoding);
-    zset* zs = (zset*)zobj_->ptr;
-    zskiplist* zsl = zs->zsl;
-    zskiplistNode* ln = zsl->header;
-
-    while (ln) {
-      CHECK_NE(ln->ele, nullptr);
-      ln = Next(ln);
-    }
-  }
-}
-
 void IntervalVisitor::ExtractSkipList(const zrangespec& range) {
   zset* zs = (zset*)zobj_->ptr;
   zskiplist* zsl = zs->zsl;
@@ -576,7 +558,7 @@ void IntervalVisitor::PopSkipList(ZSetFamily::TopNScored sc) {
   if (params_.reverse) {
     ln = zsl->tail;
   } else {
-    ln = zsl->header;
+    ln = zsl->header->level[0].forward;
   }
 
   while (ln && sc--) {
@@ -888,21 +870,7 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
     const auto& m = members[j];
     tmp_str = sdscpylen(tmp_str, m.second.data(), m.second.size());
 
-    bool check = false;
-    if (check) {
-      ZSetFamily::RangeParams params;
-      IntervalVisitor iv{Action::RANGE, params, zobj};
-      iv.FindBadNull();
-    }
-
-    LOG(INFO) << "XXXX Adding " << tmp_str;
     int retval = zsetAdd(zobj, m.first, tmp_str, zparams.flags, &retflags, &new_score);
-
-    if (check) {
-      ZSetFamily::RangeParams params;
-      IntervalVisitor iv{Action::RANGE, params, zobj};
-      iv.FindBadNull();
-    }
 
     if (zparams.flags & ZADD_IN_INCR) {
       if (retval == 0) {
@@ -1128,7 +1096,6 @@ bool ParseLimit(string_view offset_str, string_view limit_str, ZSetFamily::Range
 }  // namespace
 
 void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
-  LOG(INFO) << "XXXXX ZADD " << args;
   string_view key = ArgS(args, 1);
 
   ZParams zparams;
@@ -1197,8 +1164,7 @@ void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
 
   absl::Span memb_sp{members.data(), members.size()};
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    auto r = OpAdd(t->GetOpArgs(shard), zparams, key, memb_sp);
-    return r;
+    return OpAdd(t->GetOpArgs(shard), zparams, key, memb_sp);
   };
 
   OpResult<AddResult> add_result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1379,7 +1345,6 @@ void ZSetFamily::ZPopMax(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZPopMin(CmdArgList args, ConnectionContext* cntx) {
-  LOG(INFO) << "XXXX ZPOPMIN " << args;
   ZPopMinMax(std::move(args), false, cntx);
 }
 
