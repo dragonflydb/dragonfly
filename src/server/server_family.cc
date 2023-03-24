@@ -1152,11 +1152,14 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
 
   if (sub_cmd == "LIST") {
     vector<string> client_info;
-    fibers_ext::Mutex mu;
-    auto cb = [&](util::Connection* conn) {
+    absl::base_internal::SpinLock mu;
+
+    // we can not preempt the connection traversal, so we need to use a spinlock.
+    // alternatively we could lock when mutating the connection list, but it seems not important.
+    auto cb = [&](unsigned thread_index, util::Connection* conn) {
       facade::Connection* dcon = static_cast<facade::Connection*>(conn);
-      string info = dcon->GetClientInfo();
-      lock_guard lk(mu);
+      string info = dcon->GetClientInfo(thread_index);
+      absl::base_internal::SpinLockHolder l(&mu);
       client_info.push_back(move(info));
     };
 

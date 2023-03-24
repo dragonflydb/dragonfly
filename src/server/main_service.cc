@@ -1493,7 +1493,7 @@ void Service::PubsubPatterns(ConnectionContext* cntx) {
 }
 
 void Service::Monitor(CmdArgList args, ConnectionContext* cntx) {
-  VLOG(1) << "starting monitor on this connection: " << cntx->owner()->GetClientInfo();
+  VLOG(1) << "starting monitor on this connection: " << cntx->owner()->GetClientId();
   // we are registering the current connection for all threads so they will be aware of
   // this connection, to send to it any command
   (*cntx)->SendOk();
