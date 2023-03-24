@@ -128,7 +128,7 @@ class Service : public facade::ServiceInterface {
   CommandRegistry registry_;
   absl::flat_hash_map<std::string, unsigned> unknown_cmds_;
 
-  mutable ::boost::fibers::mutex mu_;
+  mutable util::fibers_ext::Mutex mu_;
   GlobalState global_state_ = GlobalState::ACTIVE;  // protected by mu_;
 };
 

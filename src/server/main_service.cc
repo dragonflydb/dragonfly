@@ -13,7 +13,6 @@ extern "C" {
 #include <absl/strings/str_format.h>
 #include <xxhash.h>
 
-#include <boost/fiber/operations.hpp>
 #include <filesystem>
 
 #include "base/flags.h"

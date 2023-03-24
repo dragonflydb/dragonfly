@@ -115,11 +115,11 @@ Replica::Replica(const MasterContext& context, uint32_t dfly_flow_id, Service* s
 }
 
 Replica::~Replica() {
-  if (sync_fb_.joinable()) {
-    sync_fb_.join();
+  if (sync_fb_.IsJoinable()) {
+    sync_fb_.Join();
   }
-  if (execution_fb_.joinable()) {
-    execution_fb_.join();
+  if (execution_fb_.IsJoinable()) {
+    execution_fb_.Join();
   }
 
   if (sock_) {
@@ -156,7 +156,7 @@ bool Replica::Start(ConnectionContext* cntx) {
   cntx_.Reset(absl::bind_front(&Replica::DefaultErrorHandler, this));
 
   // 4. Spawn main coordination fiber.
-  sync_fb_ = ::boost::fibers::fiber(&Replica::MainReplicationFb, this);
+  sync_fb_ = fibers_ext::Fiber(&Replica::MainReplicationFb, this);
 
   (*cntx)->SendOk();
   return true;
@@ -173,8 +173,8 @@ void Replica::Stop() {
 
   // Make sure the replica fully stopped and did all cleanup,
   // so we can freely release resources (connections).
-  if (sync_fb_.joinable())
-    sync_fb_.join();
+  if (sync_fb_.IsJoinable())
+    sync_fb_.Join();
 }
 
 void Replica::Pause(bool pause) {
@@ -666,11 +666,11 @@ void Replica::CloseSocket() {
 
 void Replica::JoinAllFlows() {
   for (auto& flow : shard_flows_) {
-    if (flow->sync_fb_.joinable()) {
-      flow->sync_fb_.join();
+    if (flow->sync_fb_.IsJoinable()) {
+      flow->sync_fb_.Join();
     }
-    if (flow->execution_fb_.joinable()) {
-      flow->execution_fb_.join();
+    if (flow->execution_fb_.IsJoinable()) {
+      flow->execution_fb_.Join();
     }
   }
 }
@@ -746,7 +746,7 @@ error_code Replica::StartFullSyncFlow(fibers_ext::BlockingCounter sb, Context* c
 
   // We can not discard io_buf because it may contain data
   // besides the response we parsed. Therefore we pass it further to ReplicateDFFb.
-  sync_fb_ = ::boost::fibers::fiber(&Replica::FullSyncDflyFb, this, move(eof_token), sb, cntx);
+  sync_fb_ = fibers_ext::Fiber(&Replica::FullSyncDflyFb, this, move(eof_token), sb, cntx);
 
   return error_code{};
 }
@@ -759,9 +759,9 @@ error_code Replica::StartStableSyncFlow(Context* cntx) {
   CHECK(sock_->IsOpen());
   // sock_.reset(mythread->CreateSocket());
   // RETURN_ON_ERR(sock_->Connect(master_context_.master_ep));
-  sync_fb_ = ::boost::fibers::fiber(&Replica::StableSyncDflyReadFb, this, cntx);
+  sync_fb_ = fibers_ext::Fiber(&Replica::StableSyncDflyReadFb, this, cntx);
   if (use_multi_shard_exe_sync_) {
-    execution_fb_ = ::boost::fibers::fiber(&Replica::StableSyncDflyExecFb, this, cntx);
+    execution_fb_ = fibers_ext::Fiber(&Replica::StableSyncDflyExecFb, this, cntx);
   }
 
   return std::error_code{};

@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include <boost/fiber/condition_variable.hpp>
-#include <boost/fiber/fiber.hpp>
 #include <optional>
 #include <string_view>
 
