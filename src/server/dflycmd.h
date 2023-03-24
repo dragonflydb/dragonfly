@@ -7,8 +7,6 @@
 #include <absl/container/btree_map.h>
 
 #include <atomic>
-#include <boost/fiber/fiber.hpp>
-#include <boost/fiber/mutex.hpp>
 #include <memory>
 
 #include "server/conn_context.h"
@@ -110,7 +108,7 @@ class DflyCmd {
     uint32_t listening_port;
 
     std::vector<FlowInfo> flows;
-    ::boost::fibers::mutex mu;  // See top of header for locking levels.
+    util::fibers_ext::Mutex mu;  // See top of header for locking levels.
   };
 
   struct ReplicaRoleInfo {
@@ -206,7 +204,7 @@ class DflyCmd {
   using ReplicaInfoMap = absl::btree_map<uint32_t, std::shared_ptr<ReplicaInfo>>;
   ReplicaInfoMap replica_infos_;
 
-  ::boost::fibers::mutex mu_;  // Guard global operations. See header top for locking levels.
+  util::fibers_ext::Mutex mu_;  // Guard global operations. See header top for locking levels.
 };
 
 }  // namespace dfly

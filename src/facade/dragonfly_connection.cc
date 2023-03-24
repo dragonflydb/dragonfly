@@ -8,8 +8,6 @@
 #include <absl/strings/match.h>
 #include <mimalloc.h>
 
-#include <boost/fiber/operations.hpp>
-
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
@@ -43,8 +41,6 @@ ABSL_FLAG(std::uint64_t, request_cache_limit, 1ULL << 26,  // 64MB
 using namespace util;
 using namespace std;
 using nonstd::make_unexpected;
-
-namespace fibers = boost::fibers;
 
 namespace facade {
 namespace {
@@ -552,7 +548,7 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
 void Connection::ConnectionFlow(FiberSocketBase* peer) {
   stats_ = service_->GetThreadLocalConnectionStats();
 
-  auto dispatch_fb = fibers::fiber(fibers::launch::dispatch, [&] { DispatchFiber(peer); });
+  auto dispatch_fb = MakeFiber(fibers_ext::Launch::dispatch, [&] { DispatchFiber(peer); });
 
   ++stats_->num_conns;
   ++stats_->conn_received_cnt;
@@ -589,7 +585,7 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   cc_->conn_closing = true;  // Signal dispatch to close.
   evc_.notify();
   VLOG(1) << "Before dispatch_fb.join()";
-  dispatch_fb.join();
+  dispatch_fb.Join();
   VLOG(1) << "After dispatch_fb.join()";
   service_->OnClose(cc_.get());
 

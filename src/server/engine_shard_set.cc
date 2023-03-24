@@ -44,7 +44,6 @@ ABSL_FLAG(float, mem_defrag_page_utilization_threshold, 0.8,
 namespace dfly {
 
 using namespace util;
-namespace fibers = ::boost::fibers;
 using absl::GetFlag;
 
 namespace {
@@ -198,8 +197,8 @@ uint32_t EngineShard::DefragTask() {
 EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t* heap)
     : queue_(kQueueLen), txq_([](const Transaction* t) { return t->txid(); }), mi_resource_(heap),
       db_slice_(pb->GetIndex(), GetFlag(FLAGS_cache_mode), this) {
-  fiber_q_ = fibers::fiber([this, index = pb->GetIndex()] {
-    FiberProps::SetName(absl::StrCat("shard_queue", index));
+  fiber_q_ = MakeFiber([this, index = pb->GetIndex()] {
+    ThisFiber::SetName(absl::StrCat("shard_queue", index));
     queue_.Run();
   });
 
@@ -208,8 +207,8 @@ EngineShard::EngineShard(util::ProactorBase* pb, bool update_db_time, mi_heap_t*
     if (clock_cycle_ms == 0)
       clock_cycle_ms = 1;
 
-    fiber_periodic_ = fibers::fiber([this, index = pb->GetIndex(), period_ms = clock_cycle_ms] {
-      FiberProps::SetName(absl::StrCat("shard_periodic", index));
+    fiber_periodic_ = MakeFiber([this, index = pb->GetIndex(), period_ms = clock_cycle_ms] {
+      ThisFiber::SetName(absl::StrCat("shard_periodic", index));
       RunPeriodic(std::chrono::milliseconds(period_ms));
     });
   }
@@ -227,15 +226,15 @@ EngineShard::~EngineShard() {
 
 void EngineShard::Shutdown() {
   queue_.Shutdown();
-  fiber_q_.join();
+  fiber_q_.Join();
 
   if (tiered_storage_) {
     tiered_storage_->Shutdown();
   }
 
   fiber_periodic_done_.Notify();
-  if (fiber_periodic_.joinable()) {
-    fiber_periodic_.join();
+  if (fiber_periodic_.IsJoinable()) {
+    fiber_periodic_.Join();
   }
 
   ProactorBase::me()->RemoveOnIdleTask(defrag_task_);
@@ -532,7 +531,7 @@ BlockingController* EngineShard::EnsureBlockingController() {
 }
 
 void EngineShard::TEST_EnableHeartbeat() {
-  fiber_periodic_ = fibers::fiber([this, period_ms = 1] {
+  fiber_periodic_ = MakeFiber([this, period_ms = 1] {
     FiberProps::SetName("shard_periodic_TEST");
     RunPeriodic(std::chrono::milliseconds(period_ms));
   });
