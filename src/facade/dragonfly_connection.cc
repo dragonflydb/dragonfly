@@ -495,9 +495,13 @@ string Connection::GetClientInfo() const {
   absl::StrAppend(&res, " laddr=", le.address().to_string(), ":", le.port());
   absl::StrAppend(&res, " fd=", lsb->native_handle(), " name=", name_);
   absl::StrAppend(&res, " age=", now - creation_time_, " idle=", now - last_interaction_);
-  absl::StrAppend(&res, " phase=", phase_, " ");
+  absl::StrAppend(&res, " phase=", phase_);
+
   if (cc_) {
-    absl::StrAppend(&res, service_->GetContextInfo(cc_.get()));
+    string cc_info = service_->GetContextInfo(cc_.get());
+    if (!cc_info.empty()) {
+      absl::StrAppend(&res, " ", cc_info);
+    }
   }
 
   return res;

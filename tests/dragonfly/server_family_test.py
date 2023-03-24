@@ -12,7 +12,6 @@ def test_quit(connection):
 
 
 def test_quit_after_sub(connection):
-    connection = redis.Connection()
     connection.send_command("SUBSCRIBE", "foo")
     connection.read_response()
 
@@ -23,11 +22,11 @@ def test_quit_after_sub(connection):
         connection.read_response()
 
 
-def test_multi_exec(client):
-    pipeline = client.pipeline()
+async def test_multi_exec(async_client: aioredis.Redis):
+    pipeline = async_client.pipeline()
     pipeline.set("foo", "bar")
     pipeline.get("foo")
-    val = pipeline.execute()
+    val = await pipeline.execute()
     assert val == [True, "bar"]
 
 
@@ -42,43 +41,39 @@ For now we are expecting to get an error
 '''
 
 
-def test_multi_eval(client):
+async def test_multi_eval(async_client: aioredis.Redis):
     try:
-        pipeline = client.pipeline()
+        pipeline = async_client.pipeline()
         pipeline.set("foo", "bar")
         pipeline.get("foo")
         pipeline.eval("return 43", 0)
-        assert True, "This part should not executed due to issue #457"
-
-        val = pipeline.execute()
+        val = await pipeline.execute()
         assert val == "foo"
     except Exception as e:
         msg = str(e)
         assert "Dragonfly does not allow execution of" in msg
 
 
-def test_connection_name(client):
-    name = client.execute_command("CLIENT GETNAME")
-    assert not name
-    client.execute_command("CLIENT SETNAME test_conn_name")
-    name = client.execute_command("CLIENT GETNAME")
+async def test_connection_name(async_client: aioredis.Redis):
+    name = await async_client.execute_command("CLIENT GETNAME")
+    assert name == "test"
+    await async_client.execute_command("CLIENT SETNAME test_conn_name")
+    name = await async_client.execute_command("CLIENT GETNAME")
     assert name == "test_conn_name"
 
 
 '''
 make sure that the scan command is working with python
 '''
-
-
-def test_scan(client):
+async def test_scan(async_client: aioredis.Redis):
     def gen_test_data():
         for i in range(10):
             yield f"key-{i}", f"value-{i}"
 
     for key, val in gen_test_data():
-        res = client.set(key, val)
+        res = await async_client.set(key, val)
         assert res is not None
-        cur, keys = client.scan(cursor=0, match=key, count=2)
+        cur, keys = await async_client.scan(cursor=0, match=key, count=2)
         assert cur == 0
         assert len(keys) == 1
         assert keys[0] == key
