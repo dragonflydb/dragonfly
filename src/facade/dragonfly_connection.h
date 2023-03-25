@@ -88,7 +88,7 @@ class Connection : public util::Connection {
     CopyCharBuf(phase, sizeof(phase_), phase_);
   }
 
-  std::string GetClientInfo() const;
+  std::string GetClientInfo(unsigned thread_id) const;
   std::string RemoteEndpointStr() const;
   std::string RemoteEndpointAddress() const;
   std::string LocalBindAddress() const;

@@ -65,9 +65,8 @@ static SSL_CTX* CreateSslCntx() {
 
     // you can still connect with redis-cli with :
     // redis-cli --tls --insecure --tls-ciphers "ADH:@SECLEVEL=0"
-    LOG(WARNING)
-        << "tls-key-file not set, no keys are loaded and anonymous ciphers are enabled. "
-        << "Do not use in production!";
+    LOG(WARNING) << "tls-key-file not set, no keys are loaded and anonymous ciphers are enabled. "
+                 << "Do not use in production!";
   } else {  // tls_key_file is set.
     CHECK_EQ(1, SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM));
     const auto& tls_cert_file = GetFlag(FLAGS_tls_cert_file);
@@ -126,7 +125,6 @@ bool ConfigureKeepAlive(int fd, unsigned interval_sec) {
 }  // namespace
 
 Listener::Listener(Protocol protocol, ServiceInterface* si) : service_(si), protocol_(protocol) {
-
 #ifdef DFLY_USE_SSL
   if (GetFlag(FLAGS_tls)) {
     OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, NULL);
@@ -174,43 +172,111 @@ error_code Listener::ConfigureServerSocket(int fd) {
   return error_code{};
 }
 
+void Listener::PreAcceptLoop(util::ProactorBase* pb) {
+  per_thread_.resize(pool()->size());
+}
+
 void Listener::PreShutdown() {
 }
 
 void Listener::PostShutdown() {
 }
 
+void Listener::OnConnectionStart(util::Connection* conn) {
+  unsigned id = conn->socket()->proactor()->GetIndex();
+  DCHECK_LT(id, per_thread_.size());
+
+  facade::Connection* facade_conn = static_cast<facade::Connection*>(conn);
+  VLOG(1) << "Opening connection " << facade_conn->GetClientId();
+
+  absl::base_internal::SpinLockHolder lock{&mutex_};
+  int32_t prev_cnt = per_thread_[id].num_connections++;
+  ++conn_cnt_;
+
+  if (id == min_cnt_thread_id_) {
+    DCHECK_EQ(min_cnt_, prev_cnt);
+    ++min_cnt_;
+    for (unsigned i = 0; i < per_thread_.size(); ++i) {
+      auto cnt = per_thread_[i].num_connections;
+      if (cnt < min_cnt_) {
+        min_cnt_ = cnt;
+        min_cnt_thread_id_ = i;
+        break;
+      }
+    }
+  }
+}
+
+void Listener::OnConnectionClose(util::Connection* conn) {
+  // TODO: We do not account for connections migrated to other threads. This is a rare case.
+  unsigned id = conn->socket()->proactor()->GetIndex();
+  DCHECK_LT(id, per_thread_.size());
+  auto& pth = per_thread_[id];
+
+  facade::Connection* facade_conn = static_cast<facade::Connection*>(conn);
+  VLOG(1) << "Closing connection " << facade_conn->GetClientId();
+
+  absl::base_internal::SpinLockHolder lock{&mutex_};
+  int32_t cur_cnt = --pth.num_connections;
+  --conn_cnt_;
+
+  auto mincnt = min_cnt_;
+  if (mincnt > cur_cnt) {
+    min_cnt_ = cur_cnt;
+    min_cnt_thread_id_ = id;
+    return;
+  }
+}
+
 // We can limit number of threads handling dragonfly connections.
 ProactorBase* Listener::PickConnectionProactor(LinuxSocketBase* sock) {
   util::ProactorPool* pp = pool();
   uint32_t total = GetFlag(FLAGS_conn_threads);
-  uint32_t id = kuint32max;
+  uint32_t res_id = kuint32max;
 
   if (total == 0 || total > pp->size()) {
     total = pp->size();
   }
 
-  if (GetFlag(FLAGS_conn_use_incoming_cpu)) {
+  if (!sock->IsUDS()) {
     int fd = sock->native_handle();
 
     int cpu, napi_id;
     socklen_t len = sizeof(cpu);
 
+    // I suspect that the advantage of using SO_INCOMING_NAPI_ID is that
+    // we can also track the affinity changes during the lifetime of the process
+    // i.e. when a different CPU is assigned to handle the RX traffic.
     CHECK_EQ(0, getsockopt(fd, SOL_SOCKET, SO_INCOMING_CPU, &cpu, &len));
     CHECK_EQ(0, getsockopt(fd, SOL_SOCKET, SO_INCOMING_NAPI_ID, &napi_id, &len));
     VLOG(1) << "CPU/NAPI for connection " << fd << " is " << cpu << "/" << napi_id;
 
-    vector<unsigned> ids = pool()->MapCpuToThreads(cpu);
-    if (!ids.empty()) {
-      id = ids.front();
+    if (GetFlag(FLAGS_conn_use_incoming_cpu)) {
+      const vector<unsigned>& ids = pool()->MapCpuToThreads(cpu);
+
+      absl::base_internal::SpinLockHolder lock{&mutex_};
+      for (auto id : ids) {
+        DCHECK_LT(id, per_thread_.size());
+        if (per_thread_[id].num_connections < min_cnt_ + 5) {
+          VLOG(1) << "using thread " << id << " for cpu " << cpu;
+          res_id = id;
+          break;
+        }
+      }
+
+      if (res_id == kuint32max) {
+        VLOG(1) << "choosing a thread with minimum conns " << min_cnt_thread_id_ << " instead of "
+                << cpu;
+        res_id = min_cnt_thread_id_;
+      }
     }
   }
 
-  if (id == kuint32max) {
-    id = next_id_.fetch_add(1, std::memory_order_relaxed);
+  if (res_id == kuint32max) {
+    res_id = next_id_.fetch_add(1, std::memory_order_relaxed) % total;
   }
 
-  return pp->at(id % total);
+  return pp->at(res_id);
 }
 
 }  // namespace facade

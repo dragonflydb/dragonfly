@@ -483,7 +483,7 @@ std::string Connection::LocalBindAddress() const {
   return le.address().to_string();
 }
 
-string Connection::GetClientInfo() const {
+string Connection::GetClientInfo(unsigned thread_id) const {
   LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
 
   string res;
@@ -491,9 +491,15 @@ string Connection::GetClientInfo() const {
   auto re = lsb->RemoteEndpoint();
   time_t now = time(nullptr);
 
+  int cpu = 0;
+  socklen_t len = sizeof(cpu);
+  getsockopt(lsb->native_handle(), SOL_SOCKET, SO_INCOMING_CPU, &cpu, &len);
+  int my_cpu_id = sched_getcpu();
+
   absl::StrAppend(&res, "id=", id_, " addr=", re.address().to_string(), ":", re.port());
   absl::StrAppend(&res, " laddr=", le.address().to_string(), ":", le.port());
   absl::StrAppend(&res, " fd=", lsb->native_handle(), " name=", name_);
+  absl::StrAppend(&res, " tid=", thread_id, " irqmatch=", int(cpu == my_cpu_id));
   absl::StrAppend(&res, " age=", now - creation_time_, " idle=", now - last_interaction_);
   absl::StrAppend(&res, " phase=", phase_);
 

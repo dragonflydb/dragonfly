@@ -43,8 +43,7 @@ void ConnectionContext::ChangeMonitor(bool start) {
   if (start) {
     my_monitors.Add(owner());
   } else {
-    VLOG(1) << "connection " << owner()->GetClientInfo()
-            << " no longer needs to be monitored - removing 0x" << std::hex << this;
+    VLOG(1) << "connection " << owner()->GetClientId() << " no longer needs to be monitored";
     my_monitors.Remove(owner());
   }
   // Tell other threads that about the change in the number of connection that we monitor
