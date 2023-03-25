@@ -42,7 +42,7 @@ through all the process shards. Snapshotting may take time, during which, DF may
 These mutations won't be part of the snapshot, because the cut captures data up to the point
 **it has started**. This is perfect for backups. I call this variation - conservative snapshotting.
 
-However, when we peform snapshotting for replication, we would like to produce a snapshot
+However, when we perform snapshotting for replication, we would like to produce a snapshot
 that includes all the data upto point in time when the snapshotting **finishes**. I called
 this *relaxed snapshotting*. The reason for relaxed snapshotting is to avoid keeping the changelog
 of all mutations during the snapshot creation.
