@@ -478,6 +478,16 @@ TEST_F(ZSetFamilyTest, ZPopMax) {
   ASSERT_THAT(resp, ArrLen(0));
 }
 
+TEST_F(ZSetFamilyTest, ZAddPopCrash) {
+  for (int i = 0; i < 129; ++i) {
+    auto resp = Run({"zadd", "key", absl::StrCat(i), absl::StrCat("element:", i)});
+    EXPECT_THAT(resp, IntArg(1));
+  }
+
+  auto resp = Run({"zpopmin", "key"});
+  EXPECT_EQ(resp, "element:0");
+}
+
 TEST_F(ZSetFamilyTest, Resp3) {
   Run({"hello", "3"});
   Run({"zadd", "x", "1", "a", "2", "b"});

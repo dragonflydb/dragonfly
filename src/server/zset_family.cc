@@ -558,7 +558,7 @@ void IntervalVisitor::PopSkipList(ZSetFamily::TopNScored sc) {
   if (params_.reverse) {
     ln = zsl->tail;
   } else {
-    ln = zsl->header;
+    ln = zsl->header->level[0].forward;
   }
 
   while (ln && sc--) {
