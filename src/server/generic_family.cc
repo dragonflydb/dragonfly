@@ -1012,11 +1012,8 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
       end_it = entries.begin() + std::min(bounds->first + bounds->second, entries.size());
     }
 
-    if (result_type == OBJ_SET || result_type == OBJ_ZSET) {
-      (*cntx)->StartSet(std::distance(start_it, end_it));
-    } else {
-      (*cntx)->StartArray(std::distance(start_it, end_it));
-    }
+    auto type = (result_type == OBJ_SET || result_type == OBJ_ZSET) ? (*cntx)->SET : (*cntx)->ARRAY;
+    (*cntx)->StartCollection(std::distance(start_it, end_it), type);
 
     for (auto it = start_it; it != end_it; ++it) {
       (*cntx)->SendBulkString(it->key);

@@ -1205,7 +1205,7 @@ void SPop(CmdArgList args, ConnectionContext* cntx) {
         (*cntx)->SendBulkString(result.value().front());
       }
     } else {  // SPOP key cnt
-      (*cntx)->SendStringArrayAsSet(*result);
+      (*cntx)->SendStringArr(*result, (*cntx)->SET);
     }
     return;
   }
@@ -1241,7 +1241,7 @@ void SDiff(CmdArgList args, ConnectionContext* cntx) {
   if (cntx->conn_state.script_info) {  // sort under script
     sort(arr.begin(), arr.end());
   }
-  (*cntx)->SendStringArrayAsSet(arr);
+  (*cntx)->SendStringArr(arr, (*cntx)->SET);
 }
 
 void SDiffStore(CmdArgList args, ConnectionContext* cntx) {
@@ -1309,7 +1309,7 @@ void SMembers(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(svec.begin(), svec.end());
     }
-    (*cntx)->SendStringArrayAsSet(*result);
+    (*cntx)->SendStringArr(*result, (*cntx)->SET);
   } else {
     (*cntx)->SendError(result.status());
   }
@@ -1331,7 +1331,7 @@ void SInter(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(arr.begin(), arr.end());
     }
-    (*cntx)->SendStringArrayAsSet(arr);
+    (*cntx)->SendStringArr(arr, (*cntx)->SET);
   } else {
     (*cntx)->SendError(result.status());
   }
@@ -1394,7 +1394,7 @@ void SUnion(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(arr.begin(), arr.end());
     }
-    (*cntx)->SendStringArrayAsSet(arr);
+    (*cntx)->SendStringArr(arr, (*cntx)->SET);
   } else {
     (*cntx)->SendError(unionset.status());
   }

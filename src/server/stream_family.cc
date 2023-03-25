@@ -666,7 +666,7 @@ void StreamFamily::XGroup(CmdArgList args, ConnectionContext* cntx) {
         "SETID <key> <groupname> <id|$>",
         "    Set the current group ID.",
     };
-    return (*cntx)->SendSimpleStrArr(help_arr, ABSL_ARRAYSIZE(help_arr));
+    return (*cntx)->SendSimpleStrArr(help_arr);
   }
 
   if (args.size() >= 3) {
@@ -709,7 +709,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
         "STREAM <key> [FULL [COUNT <count>]",
         "    Show information about the stream.",
     };
-    return (*cntx)->SendSimpleStrArr(help_arr, ABSL_ARRAYSIZE(help_arr));
+    return (*cntx)->SendSimpleStrArr(help_arr);
   }
 
   if (args.size() >= 3) {
@@ -734,7 +734,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
           string_view arr[8] = {"name",    ginfo.name,  "consumers",         an1.Piece(),
                                 "pending", an2.Piece(), "last-delivered-id", last_id};
 
-          (*cntx)->SendStringArrayAsMap(absl::Span<string_view>{arr, 8});
+          (*cntx)->SendStringArr(absl::Span<string_view>{arr, 8}, (*cntx)->MAP);
         }
         return;
       }

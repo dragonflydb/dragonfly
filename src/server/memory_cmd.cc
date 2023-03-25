@@ -84,7 +84,7 @@ void MemoryCmd::Run(CmdArgList args) {
         "USAGE",
         "    (not implemented).",
     };
-    return (*cntx_)->SendSimpleStrArr(help_arr, ABSL_ARRAYSIZE(help_arr));
+    return (*cntx_)->SendSimpleStrArr(help_arr);
   };
 
   if (sub_cmd == "USAGE") {

@@ -71,7 +71,7 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
         "   Prints latency histograms in usec for every called function.",
         "HELP"
         "   Prints this help."};
-    return (*cntx)->SendSimpleStrArr(kHelp, ABSL_ARRAYSIZE(kHelp));
+    return (*cntx)->SendSimpleStrArr(kHelp);
   }
 
   if (subcmd == "EXISTS" && args.size() > 1)
