@@ -191,6 +191,8 @@ void ChannelStoreUpdater::Modify(ChannelMap* target, string_view key) {
   else
     replacement->erase(cntx_);
 
+  // The pointer can still be in use, so delay freeing it
+  // until the dispatch and update the slot atomically.
   freelist_.push_back(it->second.Get());
   it->second.Set(replacement);
 }

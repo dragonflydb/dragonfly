@@ -138,7 +138,7 @@ struct ChannelStoreUpdater {
   // Get target map and flag whether it was copied.
   std::pair<ChannelMap*, bool> GetTargetMap();
 
-  // Apply modifly operation to target map.
+  // Apply modify operation to target map.
   void Modify(ChannelMap* target, std::string_view key);
 
  private:
