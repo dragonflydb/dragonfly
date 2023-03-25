@@ -214,8 +214,7 @@ class InterpreterReplier : public RedisReplyBuilder {
   void SendSimpleStrArr(absl::Span<const string_view> arr) override final;
   void SendNullArray() override final;
 
-  void SendStringArr(absl::Span<const string_view> arr, CollectionType type) override final;
-  void SendStringArr(absl::Span<const string> arr, CollectionType type) override final;
+  void SendStringArr(StrSpan arr, CollectionType type) override final;
   void SendNull() override final;
 
   void SendLong(long val) override final;
@@ -343,15 +342,12 @@ void InterpreterReplier::SendNullArray() {
   PostItem();
 }
 
-void InterpreterReplier::SendStringArr(absl::Span<const string_view> arr, CollectionType) {
-  SendSimpleStrArr(arr);
-  PostItem();
-}
-
-void InterpreterReplier::SendStringArr(absl::Span<const string> arr, CollectionType) {
-  explr_->OnArrayStart(arr.size());
-  for (auto sv : arr)
-    explr_->OnString(sv);
+void InterpreterReplier::SendStringArr(StrSpan arr, CollectionType) {
+  WrappedStrSpan warr{arr};
+  size_t size = warr.Size();
+  explr_->OnArrayStart(size);
+  for (size_t i = 0; i < size; i++)
+    explr_->OnString(warr[i]);
   explr_->OnArrayEnd();
   PostItem();
 }

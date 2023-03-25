@@ -118,6 +118,8 @@ class RedisReplyBuilder : public SinkReplyBuilder {
  public:
   enum CollectionType { ARRAY, SET, MAP };
 
+  using StrSpan = std::variant<absl::Span<const std::string>, absl::Span<const std::string_view>>;
+
  public:
   RedisReplyBuilder(::io::Sink* stream);
 
@@ -128,21 +130,17 @@ class RedisReplyBuilder : public SinkReplyBuilder {
 
   void SendStored() override;
   void SendSetSkipped() override;
-
-  void SendLong(long val) override;
-  void SendSimpleString(std::string_view str) override;
-
   virtual void SendError(OpStatus status);
 
   virtual void SendNullArray();   // Send *-1
   virtual void SendEmptyArray();  // Send *0
   virtual void SendSimpleStrArr(absl::Span<const std::string_view> arr);
-
-  virtual void SendStringArr(absl::Span<const std::string_view> arr, CollectionType type = ARRAY);
-  virtual void SendStringArr(absl::Span<const std::string> arr, CollectionType type = ARRAY);
+  virtual void SendStringArr(StrSpan arr, CollectionType type = ARRAY);
 
   virtual void SendNull();
+  void SendLong(long val) override;
   virtual void SendDouble(double val);
+  void SendSimpleString(std::string_view str) override;
 
   virtual void SendBulkString(std::string_view str);
   virtual void SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
@@ -157,9 +155,14 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   // into the string that would be sent
   static std::string_view StatusToMsg(OpStatus status);
 
+ protected:
+  struct WrappedStrSpan : public StrSpan {
+    size_t Size() const;
+    std::string_view operator[](size_t index) const;
+  };
+
  private:
-  template <typename S>  // string or string_view
-  void SendStringCollection(absl::Span<const S> arr, CollectionType type);
+  void SendStringArrInternal(WrappedStrSpan arr, CollectionType type);
 
   const char* NullString();
 
