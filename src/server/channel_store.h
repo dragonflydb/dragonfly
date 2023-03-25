@@ -12,7 +12,7 @@
 
 namespace dfly {
 
-struct ChannelStoreUpdater;
+class ChannelStoreUpdater;
 
 // ChannelStore manages PUB/SUB subscriptions.
 //
@@ -37,7 +37,7 @@ struct ChannelStoreUpdater;
 // even with a small number of channels. In general, it has a slightly lower latency, due to the
 // fact that no hop is required to fetch the subscribers.
 class ChannelStore {
-  friend struct ChannelStoreUpdater;
+  friend class ChannelStoreUpdater;
 
  public:
   struct Subscriber {
@@ -67,7 +67,7 @@ class ChannelStore {
   std::vector<std::string> ListChannels(const std::string_view pattern) const;
   size_t PatternCount() const;
 
-  // Destroy current instane and delete it.
+  // Destroy current instance and delete it.
   static void Destroy();
 
  private:
@@ -106,7 +106,7 @@ class ChannelStore {
 
   // Centralized controller to prevent overlaping updates.
   struct ControlBlock {
-    ChannelStore* most_recent;
+    std::atomic<ChannelStore*> most_recent;
     ::boost::fibers::mutex update_mu;  // locked during updates.
   };
 
@@ -125,9 +125,9 @@ class ChannelStore {
 // Performs RCU (read-copy-update) updates to the channel store.
 // See ChannelStore header top for design details.
 // Queues operations and performs them with Apply().
-struct ChannelStoreUpdater {
-  ChannelStoreUpdater(ChannelStore* store, bool pattern, bool to_add, ConnectionContext* cntx,
-                      uint32_t thread_id);
+class ChannelStoreUpdater {
+ public:
+  ChannelStoreUpdater(bool pattern, bool to_add, ConnectionContext* cntx, uint32_t thread_id);
 
   void Record(std::string_view key);
   void Apply();
@@ -136,14 +136,13 @@ struct ChannelStoreUpdater {
   using ChannelMap = ChannelStore::ChannelMap;
 
   // Get target map and flag whether it was copied.
-  std::pair<ChannelMap*, bool> GetTargetMap();
+  // Must be called with locked control block.
+  std::pair<ChannelMap*, bool> GetTargetMap(ChannelStore* store);
 
   // Apply modify operation to target map.
   void Modify(ChannelMap* target, std::string_view key);
 
  private:
-  ChannelStore* store_;
-
   bool pattern_;
   bool to_add_;
   ConnectionContext* cntx_;

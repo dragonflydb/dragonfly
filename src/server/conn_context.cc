@@ -54,7 +54,7 @@ void ConnectionContext::ChangeMonitor(bool start) {
 }
 
 vector<unsigned> ChangeSubscriptions(bool pattern, CmdArgList args, bool to_add, bool to_reply,
-                                     ConnectionContext* conn, ChannelStore* store) {
+                                     ConnectionContext* conn) {
   vector<unsigned> result(to_reply ? args.size() : 0, 0);
 
   auto& conn_state = conn->conn_state;
@@ -74,7 +74,7 @@ vector<unsigned> ChangeSubscriptions(bool pattern, CmdArgList args, bool to_add,
   int32_t tid = util::ProactorBase::GetIndex();
   DCHECK_GE(tid, 0);
 
-  ChannelStoreUpdater csu{store, pattern, to_add, conn, uint32_t(tid)};
+  ChannelStoreUpdater csu{pattern, to_add, conn, uint32_t(tid)};
 
   // Gather all the channels we need to subscribe to / remove.
   for (size_t i = 0; i < args.size(); ++i) {
@@ -100,9 +100,8 @@ vector<unsigned> ChangeSubscriptions(bool pattern, CmdArgList args, bool to_add,
   return result;
 }
 
-void ConnectionContext::ChangeSubscription(ChannelStore* store, bool to_add, bool to_reply,
-                                           CmdArgList args) {
-  vector<unsigned> result = ChangeSubscriptions(false, args, to_add, to_reply, this, store);
+void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgList args) {
+  vector<unsigned> result = ChangeSubscriptions(false, args, to_add, to_reply, this);
 
   if (to_reply) {
     for (size_t i = 0; i < result.size(); ++i) {
@@ -111,9 +110,8 @@ void ConnectionContext::ChangeSubscription(ChannelStore* store, bool to_add, boo
   }
 }
 
-void ConnectionContext::ChangePSubscription(ChannelStore* store, bool to_add, bool to_reply,
-                                            CmdArgList args) {
-  vector<unsigned> result = ChangeSubscriptions(true, args, to_add, to_reply, this, store);
+void ConnectionContext::ChangePSubscription(bool to_add, bool to_reply, CmdArgList args) {
+  vector<unsigned> result = ChangeSubscriptions(true, args, to_add, to_reply, this);
 
   if (to_reply) {
     const char* action[2] = {"punsubscribe", "psubscribe"};
@@ -127,17 +125,17 @@ void ConnectionContext::ChangePSubscription(ChannelStore* store, bool to_add, bo
   }
 }
 
-void ConnectionContext::UnsubscribeAll(ChannelStore* store, bool to_reply) {
+void ConnectionContext::UnsubscribeAll(bool to_reply) {
   if (to_reply && (!conn_state.subscribe_info || conn_state.subscribe_info->channels.empty())) {
     return SendSubscriptionChangedResponse("unsubscribe", std::nullopt, 0);
   }
   StringVec channels(conn_state.subscribe_info->channels.begin(),
                      conn_state.subscribe_info->channels.end());
   CmdArgVec arg_vec(channels.begin(), channels.end());
-  ChangeSubscription(store, false, to_reply, CmdArgList{arg_vec});
+  ChangeSubscription(false, to_reply, CmdArgList{arg_vec});
 }
 
-void ConnectionContext::PUnsubscribeAll(ChannelStore* store, bool to_reply) {
+void ConnectionContext::PUnsubscribeAll(bool to_reply) {
   if (to_reply && (!conn_state.subscribe_info || conn_state.subscribe_info->patterns.empty())) {
     return SendSubscriptionChangedResponse("punsubscribe", std::nullopt, 0);
   }
@@ -145,7 +143,7 @@ void ConnectionContext::PUnsubscribeAll(ChannelStore* store, bool to_reply) {
   StringVec patterns(conn_state.subscribe_info->patterns.begin(),
                      conn_state.subscribe_info->patterns.end());
   CmdArgVec arg_vec(patterns.begin(), patterns.end());
-  ChangePSubscription(store, false, to_reply, CmdArgList{arg_vec});
+  ChangePSubscription(false, to_reply, CmdArgList{arg_vec});
 }
 
 void ConnectionContext::SendSubscriptionChangedResponse(string_view action,
