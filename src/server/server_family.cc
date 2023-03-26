@@ -1208,7 +1208,7 @@ void ServerFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
         "HELP",
         "    Prints this help.",
     };
-    return (*cntx)->SendSimpleStrArr(help_arr, ABSL_ARRAYSIZE(help_arr));
+    return (*cntx)->SendSimpleStrArr(help_arr);
   }
 
   if (sub_cmd == "SLOTS") {
@@ -1320,7 +1320,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
     string_view param = ArgS(args, 2);
     string_view res[2] = {param, "tbd"};
 
-    return (*cntx)->SendStringArrayAsMap(res);
+    return (*cntx)->SendStringArr(res, RedisReplyBuilder::MAP);
   } else if (sub_cmd == "RESETSTAT") {
     shard_set->pool()->Await([](auto*) {
       auto* stats = ServerState::tl_connection_stats();
@@ -1713,7 +1713,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
     (*cntx)->SetResp3(false);
   }
 
-  (*cntx)->StartMap(7);
+  (*cntx)->StartCollection(7, RedisReplyBuilder::MAP);
   (*cntx)->SendBulkString("server");
   (*cntx)->SendBulkString("redis");
   (*cntx)->SendBulkString("version");

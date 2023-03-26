@@ -206,20 +206,15 @@ class InterpreterReplier : public RedisReplyBuilder {
   InterpreterReplier(ObjectExplorer* explr) : RedisReplyBuilder(nullptr), explr_(explr) {
   }
 
-  void SendError(std::string_view str, std::string_view type = std::string_view{}) override;
-  void SendStored() override;
+  void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
+  void SendStored() final;
 
   void SendSimpleString(std::string_view str) final;
   void SendMGetResponse(const OptResp* resp, uint32_t count) final;
-  void SendSimpleStrArr(const string_view* arr, uint32_t count) final;
-  void SendStringArrayAsMap(absl::Span<const std::string_view> arr) final;
-  void SendStringArrayAsMap(absl::Span<const std::string> arr) final;
-  void SendStringArrayAsSet(absl::Span<const std::string_view> arr) final;
-  void SendStringArrayAsSet(absl::Span<const std::string> arr) final;
+  void SendSimpleStrArr(absl::Span<const string_view> arr) final;
   void SendNullArray() final;
 
-  void SendStringArr(absl::Span<const string_view> arr) final;
-  void SendStringArr(absl::Span<const string> arr) final;
+  void SendStringArr(StrSpan arr, CollectionType type) final;
   void SendNull() final;
 
   void SendLong(long val) final;
@@ -227,7 +222,7 @@ class InterpreterReplier : public RedisReplyBuilder {
 
   void SendBulkString(std::string_view str) final;
 
-  void StartArray(unsigned len) final;
+  void StartCollection(unsigned len, CollectionType type) final;
 
  private:
   void PostItem();
@@ -335,45 +330,24 @@ void InterpreterReplier::SendMGetResponse(const OptResp* resp, uint32_t count) {
   explr_->OnArrayEnd();
 }
 
-void InterpreterReplier::SendSimpleStrArr(const string_view* arr, uint32_t count) {
-  explr_->OnArrayStart(count);
-  for (uint32_t i = 0; i < count; ++i) {
-    explr_->OnString(arr[i]);
-  }
+void InterpreterReplier::SendSimpleStrArr(absl::Span<const string_view> arr) {
+  explr_->OnArrayStart(arr.size());
+  for (auto sv : arr)
+    explr_->OnString(sv);
   explr_->OnArrayEnd();
 }
 
-void InterpreterReplier::SendStringArrayAsMap(absl::Span<const string_view> arr) {
-  SendStringArr(arr);
-}
-
-void InterpreterReplier::SendStringArrayAsMap(absl::Span<const string> arr) {
-  SendStringArr(arr);
-}
-
-void InterpreterReplier::SendStringArrayAsSet(absl::Span<const string_view> arr) {
-  SendStringArr(arr);
-}
-
-void InterpreterReplier::SendStringArrayAsSet(absl::Span<const string> arr) {
-  SendStringArr(arr);
-}
-
 void InterpreterReplier::SendNullArray() {
-  SendSimpleStrArr(nullptr, 0);
+  SendSimpleStrArr({});
   PostItem();
 }
 
-void InterpreterReplier::SendStringArr(absl::Span<const string_view> arr) {
-  SendSimpleStrArr(arr.data(), arr.size());
-  PostItem();
-}
-
-void InterpreterReplier::SendStringArr(absl::Span<const string> arr) {
-  explr_->OnArrayStart(arr.size());
-  for (uint32_t i = 0; i < arr.size(); ++i) {
-    explr_->OnString(arr[i]);
-  }
+void InterpreterReplier::SendStringArr(StrSpan arr, CollectionType) {
+  WrappedStrSpan warr{arr};
+  size_t size = warr.Size();
+  explr_->OnArrayStart(size);
+  for (size_t i = 0; i < size; i++)
+    explr_->OnString(warr[i]);
   explr_->OnArrayEnd();
   PostItem();
 }
@@ -398,7 +372,7 @@ void InterpreterReplier::SendBulkString(string_view str) {
   PostItem();
 }
 
-void InterpreterReplier::StartArray(unsigned len) {
+void InterpreterReplier::StartCollection(unsigned len, CollectionType) {
   explr_->OnArrayStart(len);
 
   if (len == 0) {
@@ -1519,7 +1493,7 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
         "HELP",
         "\tPrints this help."};
 
-    (*cntx)->SendSimpleStrArr(help_arr, ABSL_ARRAYSIZE(help_arr));
+    (*cntx)->SendSimpleStrArr(help_arr);
     return;
   }
 
