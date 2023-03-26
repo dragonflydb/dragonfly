@@ -369,6 +369,10 @@ void RedisReplyBuilder::StartArray(unsigned len) {
   StartCollection(len, ARRAY);
 }
 
+constexpr static string_view START_SYMBOLS[] = {"*", "~", "%"};
+static_assert(START_SYMBOLS[RedisReplyBuilder::MAP] == "%" &&
+              START_SYMBOLS[RedisReplyBuilder::SET] == "~");
+
 void RedisReplyBuilder::StartCollection(unsigned len, CollectionType type) {
   if (!is_resp3_) {  // Flatten for Resp2
     if (type == MAP)
@@ -376,8 +380,6 @@ void RedisReplyBuilder::StartCollection(unsigned len, CollectionType type) {
     type = ARRAY;
   }
 
-  constexpr static string_view START_SYMBOLS[] = {"*", "~", "%"};
-  static_assert(START_SYMBOLS[MAP] == "%" && START_SYMBOLS[SET] == "~");
   SendRaw(absl::StrCat(START_SYMBOLS[type], len, kCRLF));
 }
 
@@ -387,21 +389,14 @@ void RedisReplyBuilder::StartCollection(unsigned len, CollectionType type) {
 // We limit the vector length to 256 and when it fills up we flush it to the socket and continue
 // iterating.
 void RedisReplyBuilder::SendStringArrInternal(WrappedStrSpan arr, CollectionType type) {
-  int size = arr.Size();
-  string type_char = "*";
+  size_t size = arr.Size();
+
   size_t header_len = size;
+  string_view type_char = "*";
   if (is_resp3_) {
-    switch (type) {
-      case CollectionType::ARRAY:
-        break;
-      case CollectionType::MAP:
-        type_char[0] = '%';
-        header_len = size / 2;  // Each key value pair counts as one.
-        break;
-      case CollectionType::SET:
-        type_char[0] = '~';
-        break;
-    }
+    type_char = START_SYMBOLS[type];
+    if (type == MAP)
+      header_len /= 2;  // Each key value pair counts as one.
   }
 
   if (header_len == 0) {
