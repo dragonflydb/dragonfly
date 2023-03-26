@@ -134,10 +134,10 @@ class ConnectionContext : public facade::ConnectionContext {
     return conn_state.db_index;
   }
 
-  void ChangeSubscription(ChannelStore* store, bool to_add, bool to_reply, CmdArgList args);
-  void ChangePSubscription(ChannelStore* store, bool to_add, bool to_reply, CmdArgList args);
-  void UnsubscribeAll(ChannelStore* store, bool to_reply);
-  void PUnsubscribeAll(ChannelStore* store, bool to_reply);
+  void ChangeSubscription(bool to_add, bool to_reply, CmdArgList args);
+  void ChangePSubscription(bool to_add, bool to_reply, CmdArgList args);
+  void UnsubscribeAll(bool to_reply);
+  void PUnsubscribeAll(bool to_reply);
   void ChangeMonitor(bool start);  // either start or stop monitor on a given connection
 
   bool is_replicating = false;

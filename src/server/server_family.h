@@ -121,10 +121,6 @@ class ServerFamily {
     return journal_.get();
   }
 
-  ChannelStore* channel_store() {
-    return channel_store_.get();
-  }
-
   void OnClose(ConnectionContext* cntx);
 
   void BreakOnShutdown();
@@ -182,7 +178,6 @@ class ServerFamily {
   std::unique_ptr<ScriptMgr> script_mgr_;
   std::unique_ptr<journal::Journal> journal_;
   std::unique_ptr<DflyCmd> dfly_cmd_;
-  std::unique_ptr<ChannelStore> channel_store_;
 
   std::string master_id_;
 

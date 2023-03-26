@@ -525,6 +525,10 @@ void Service::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_i
   StringFamily::Init(&pp_);
   GenericFamily::Init(&pp_);
   server_family_.Init(acceptor, main_interface);
+
+  ChannelStore* cs = new ChannelStore{};
+  pp_.Await(
+      [cs](uint32_t index, ProactorBase* pb) { ServerState::tlocal()->UpdateChannelStore(cs); });
 }
 
 void Service::Shutdown() {
@@ -544,6 +548,8 @@ void Service::Shutdown() {
 
   engine_varz.reset();
   request_latency_usec.Shutdown();
+
+  ChannelStore::Destroy();
 
   shard_set->Shutdown();
   pp_.Await([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });
@@ -1381,64 +1387,63 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
-  auto* store = server_family_.channel_store();
   string_view channel = ArgS(args, 1);
 
-  shared_ptr<string> msg_ptr = make_shared<string>(ArgS(args, 2));
-  shared_ptr<string> channel_ptr = make_shared<string>(channel);
+  auto* cs = ServerState::tlocal()->channel_store();
+  vector<ChannelStore::Subscriber> subscribers = cs->FetchSubscribers(channel);
+  int num_published = subscribers.size();
 
-  auto clients = store->FetchSubscribers(channel);
+  if (!subscribers.empty()) {
+    auto subscribers_ptr = make_shared<decltype(subscribers)>(move(subscribers));
+    auto msg_ptr = make_shared<string>(ArgS(args, 2));
+    auto channel_ptr = make_shared<string>(channel);
 
-  atomic_uint32_t published{0};
-  auto cb = [&published, &clients, msg_ptr, channel_ptr](unsigned idx, util::ProactorBase*) {
-    auto it = lower_bound(clients.begin(), clients.end(), idx, ChannelStore::Subscriber::ByThread);
-    while (it != clients.end() && it->thread_id == idx) {
-      facade::Connection* conn = it->conn_cntx->owner();
-      DCHECK(conn);
+    auto cb = [subscribers_ptr, msg_ptr, channel_ptr](unsigned idx, util::ProactorBase*) {
+      auto it = lower_bound(subscribers_ptr->begin(), subscribers_ptr->end(), idx,
+                            ChannelStore::Subscriber::ByThread);
 
-      conn->SendMsgVecAsync({move(it->pattern), move(channel_ptr), move(msg_ptr)});
-      published.fetch_add(1, memory_order_relaxed);
-      it++;
-    }
-  };
-  shard_set->pool()->Await(std::move(cb));
-
-  for (auto& c : clients) {
-    c.borrow_token.Dec();
+      while (it != subscribers_ptr->end() && it->thread_id == idx) {
+        facade::Connection* conn = it->conn_cntx->owner();
+        DCHECK(conn);
+        conn->SendMsgVecAsync({move(it->pattern), move(channel_ptr), move(msg_ptr)});
+        it->borrow_token.Dec();
+        it++;
+      }
+    };
+    shard_set->pool()->DispatchBrief(std::move(cb));
   }
 
-  (*cntx)->SendLong(published.load(memory_order_relaxed));
+  (*cntx)->SendLong(num_published);
 }
 
 void Service::Subscribe(CmdArgList args, ConnectionContext* cntx) {
   args.remove_prefix(1);
 
-  cntx->ChangeSubscription(server_family_.channel_store(), true /*add*/, true /* reply*/,
-                           std::move(args));
+  cntx->ChangeSubscription(true /*add*/, true /* reply*/, std::move(args));
 }
 
 void Service::Unsubscribe(CmdArgList args, ConnectionContext* cntx) {
   args.remove_prefix(1);
 
   if (args.size() == 0) {
-    cntx->UnsubscribeAll(server_family_.channel_store(), true);
+    cntx->UnsubscribeAll(true);
   } else {
-    cntx->ChangeSubscription(server_family_.channel_store(), false, true, args);
+    cntx->ChangeSubscription(false, true, args);
   }
 }
 
 void Service::PSubscribe(CmdArgList args, ConnectionContext* cntx) {
   args.remove_prefix(1);
-  cntx->ChangePSubscription(server_family_.channel_store(), true, true, args);
+  cntx->ChangePSubscription(true, true, args);
 }
 
 void Service::PUnsubscribe(CmdArgList args, ConnectionContext* cntx) {
   args.remove_prefix(1);
 
   if (args.size() == 0) {
-    cntx->PUnsubscribeAll(server_family_.channel_store(), true);
+    cntx->PUnsubscribeAll(true);
   } else {
-    cntx->ChangePSubscription(server_family_.channel_store(), false, true, args);
+    cntx->ChangePSubscription(false, true, args);
   }
 }
 
@@ -1457,11 +1462,11 @@ void Service::Function(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::PubsubChannels(string_view pattern, ConnectionContext* cntx) {
-  (*cntx)->SendStringArr(server_family_.channel_store()->ListChannels(pattern));
+  (*cntx)->SendStringArr(ServerState::tlocal()->channel_store()->ListChannels(pattern));
 }
 
 void Service::PubsubPatterns(ConnectionContext* cntx) {
-  size_t pattern_count = server_family_.channel_store()->PatternCount();
+  size_t pattern_count = ServerState::tlocal()->channel_store()->PatternCount();
 
   (*cntx)->SendLong(pattern_count);
 }
@@ -1551,7 +1556,7 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
   if (conn_state.subscribe_info) {  // Clean-ups related to PUBSUB
     if (!conn_state.subscribe_info->channels.empty()) {
       auto token = conn_state.subscribe_info->borrow_token;
-      server_cntx->UnsubscribeAll(server_family_.channel_store(), false);
+      server_cntx->UnsubscribeAll(false);
 
       // Check that all borrowers finished processing.
       // token is increased in channel_slice (the publisher side).
@@ -1561,7 +1566,7 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
     if (conn_state.subscribe_info) {
       DCHECK(!conn_state.subscribe_info->patterns.empty());
       auto token = conn_state.subscribe_info->borrow_token;
-      server_cntx->PUnsubscribeAll(server_family_.channel_store(), false);
+      server_cntx->PUnsubscribeAll(false);
       // Check that all borrowers finished processing
       token.Wait();
       DCHECK(!conn_state.subscribe_info);
