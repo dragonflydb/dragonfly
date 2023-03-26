@@ -1101,15 +1101,15 @@ StringMap* HSetFamily::ConvertToStrMap(uint8_t* lp) {
   sm->Reserve(lplen / 2);
 
   uint8_t* lp_elem = lpFirst(lp);
-  uint8_t intbuf[LP_INTBUF_SIZE];
+  uint8_t intbuf[2][LP_INTBUF_SIZE];
 
   DCHECK(lp_elem);  // empty containers are not allowed.
 
   do {
-    string_view key = LpGetView(lp_elem, intbuf);
+    string_view key = LpGetView(lp_elem, intbuf[0]);
     lp_elem = lpNext(lp, lp_elem);  // switch to value
     DCHECK(lp_elem);
-    string_view value = LpGetView(lp_elem, intbuf);
+    string_view value = LpGetView(lp_elem, intbuf[1]);
     lp_elem = lpNext(lp, lp_elem);       // switch to next key
     CHECK(sm->AddOrUpdate(key, value));  // must be unique
   } while (lp_elem);
