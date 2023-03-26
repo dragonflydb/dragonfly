@@ -120,7 +120,6 @@ class RedisReplyBuilder : public SinkReplyBuilder {
 
   using StrSpan = std::variant<absl::Span<const std::string>, absl::Span<const std::string_view>>;
 
- public:
   RedisReplyBuilder(::io::Sink* stream);
 
   void SetResp3(bool is_resp3);

@@ -697,8 +697,9 @@ void HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t getall_mask) 
   OpResult<vector<string>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    auto type = (getall_mask == (VALUES | FIELDS)) ? (*cntx)->MAP : (*cntx)->ARRAY;
-    (*cntx)->SendStringArr(absl::Span<const string>{*result}, type);
+    bool is_map = (getall_mask == (VALUES | FIELDS));
+    (*cntx)->SendStringArr(absl::Span<const string>{*result},
+                           is_map ? RedisReplyBuilder::MAP : RedisReplyBuilder::ARRAY);
   } else {
     (*cntx)->SendError(result.status());
   }

@@ -1317,7 +1317,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
     string_view param = ArgS(args, 2);
     string_view res[2] = {param, "tbd"};
 
-    return (*cntx)->SendStringArr(res, (*cntx)->MAP);
+    return (*cntx)->SendStringArr(res, RedisReplyBuilder::MAP);
   } else if (sub_cmd == "RESETSTAT") {
     shard_set->pool()->Await([](auto*) {
       auto* stats = ServerState::tl_connection_stats();
@@ -1710,7 +1710,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
     (*cntx)->SetResp3(false);
   }
 
-  (*cntx)->StartCollection(7, (*cntx)->MAP);
+  (*cntx)->StartCollection(7, RedisReplyBuilder::MAP);
   (*cntx)->SendBulkString("server");
   (*cntx)->SendBulkString("redis");
   (*cntx)->SendBulkString("version");

@@ -27,6 +27,8 @@ ABSL_DECLARE_FLAG(bool, use_set2);
 
 namespace dfly {
 
+using namespace facade;
+
 using namespace std;
 using absl::GetFlag;
 
@@ -1205,7 +1207,7 @@ void SPop(CmdArgList args, ConnectionContext* cntx) {
         (*cntx)->SendBulkString(result.value().front());
       }
     } else {  // SPOP key cnt
-      (*cntx)->SendStringArr(*result, (*cntx)->SET);
+      (*cntx)->SendStringArr(*result, RedisReplyBuilder::SET);
     }
     return;
   }
@@ -1241,7 +1243,7 @@ void SDiff(CmdArgList args, ConnectionContext* cntx) {
   if (cntx->conn_state.script_info) {  // sort under script
     sort(arr.begin(), arr.end());
   }
-  (*cntx)->SendStringArr(arr, (*cntx)->SET);
+  (*cntx)->SendStringArr(arr, RedisReplyBuilder::SET);
 }
 
 void SDiffStore(CmdArgList args, ConnectionContext* cntx) {
@@ -1309,7 +1311,7 @@ void SMembers(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(svec.begin(), svec.end());
     }
-    (*cntx)->SendStringArr(*result, (*cntx)->SET);
+    (*cntx)->SendStringArr(*result, RedisReplyBuilder::SET);
   } else {
     (*cntx)->SendError(result.status());
   }
@@ -1331,7 +1333,7 @@ void SInter(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(arr.begin(), arr.end());
     }
-    (*cntx)->SendStringArr(arr, (*cntx)->SET);
+    (*cntx)->SendStringArr(arr, RedisReplyBuilder::SET);
   } else {
     (*cntx)->SendError(result.status());
   }
@@ -1394,7 +1396,7 @@ void SUnion(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(arr.begin(), arr.end());
     }
-    (*cntx)->SendStringArr(arr, (*cntx)->SET);
+    (*cntx)->SendStringArr(arr, RedisReplyBuilder::SET);
   } else {
     (*cntx)->SendError(unionset.status());
   }

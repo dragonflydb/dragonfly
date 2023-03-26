@@ -206,23 +206,23 @@ class InterpreterReplier : public RedisReplyBuilder {
   InterpreterReplier(ObjectExplorer* explr) : RedisReplyBuilder(nullptr), explr_(explr) {
   }
 
-  void SendError(std::string_view str, std::string_view type = std::string_view{}) override final;
-  void SendStored() override final;
+  void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
+  void SendStored() final;
 
-  void SendSimpleString(std::string_view str) override final;
-  void SendMGetResponse(const OptResp* resp, uint32_t count) override final;
-  void SendSimpleStrArr(absl::Span<const string_view> arr) override final;
-  void SendNullArray() override final;
+  void SendSimpleString(std::string_view str) final;
+  void SendMGetResponse(const OptResp* resp, uint32_t count) final;
+  void SendSimpleStrArr(absl::Span<const string_view> arr) final;
+  void SendNullArray() final;
 
-  void SendStringArr(StrSpan arr, CollectionType type) override final;
-  void SendNull() override final;
+  void SendStringArr(StrSpan arr, CollectionType type) final;
+  void SendNull() final;
 
-  void SendLong(long val) override final;
-  void SendDouble(double val) override final;
+  void SendLong(long val) final;
+  void SendDouble(double val) final;
 
-  void SendBulkString(std::string_view str) override final;
+  void SendBulkString(std::string_view str) final;
 
-  void StartCollection(unsigned len, CollectionType type) override final;
+  void StartCollection(unsigned len, CollectionType type) final;
 
  private:
   void PostItem();
