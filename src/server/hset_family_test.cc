@@ -215,4 +215,14 @@ TEST_F(HSetFamilyTest, HSetEx) {
   EXPECT_THAT(Run({"HGET", "k", "f"}), ArgType(RespExpr::NIL));
 }
 
+TEST_F(HSetFamilyTest, TriggerConvertToStrMap) {
+  const int kElements = 200;
+  // Enough for IsGoodForListpack to become false
+  for (size_t i = 0; i < kElements; i++) {
+    auto k = absl::StrCat(100500700u + i);
+    Run({"HSET", "hk", k, "100500700"});
+  }
+  EXPECT_THAT(Run({"HLEN", "hk"}), IntArg(kElements));
+}
+
 }  // namespace dfly
