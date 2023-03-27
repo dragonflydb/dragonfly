@@ -337,11 +337,13 @@ void RedisReplyBuilder::SendMGetResponse(const OptResp* resp, uint32_t count) {
   SendRaw(res);
 }
 
-void RedisReplyBuilder::SendSimpleStrArr(absl::Span<const std::string_view> arr) {
-  string res = absl::StrCat("*", arr.size(), kCRLF);
+void RedisReplyBuilder::SendSimpleStrArr(StrSpan arr) {
+  WrappedStrSpan warr{arr};
 
-  for (auto sv : arr)
-    StrAppend(&res, "+", sv, kCRLF);
+  string res = absl::StrCat("*", warr.Size(), kCRLF);
+
+  for (unsigned i = 0; i < warr.Size(); i++)
+    StrAppend(&res, "+", warr[i], kCRLF);
 
   SendRaw(res);
 }

@@ -1,6 +1,8 @@
 // Copyright 2022, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
+#pragma once
+
 #include <absl/container/flat_hash_map.h>
 
 #include <optional>
@@ -133,7 +135,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
 
   virtual void SendNullArray();   // Send *-1
   virtual void SendEmptyArray();  // Send *0
-  virtual void SendSimpleStrArr(absl::Span<const std::string_view> arr);
+  virtual void SendSimpleStrArr(StrSpan arr);
   virtual void SendStringArr(StrSpan arr, CollectionType type = ARRAY);
 
   virtual void SendNull();

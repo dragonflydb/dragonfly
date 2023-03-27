@@ -6,6 +6,7 @@
 #include "facade/error.h"
 #include "facade/facade_test.h"
 #include "facade/redis_parser.h"
+#include "facade/reply_capture.h"
 
 // This will test the reply_builder RESP (Redis).
 
@@ -750,6 +751,10 @@ TEST_F(RedisReplyBuilderTest, TestSendMGetResponse) {
   builder_->SendMGetResponse(&mget_res[0], 3);
   ASSERT_TRUE(builder_->err_count().empty());
   ASSERT_EQ(TakePayload(), "*3\r\n$2\r\nv3\r\n_\r\n$0\r\n\r\n") << "Resp3 SendMGetResponse failed.";
+}
+
+TEST_F(RedisReplyBuilderTest, TestCapture) {
+  // TODO
 }
 
 }  // namespace facade
