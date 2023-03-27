@@ -33,12 +33,14 @@ static_assert(kPrimeSegmentSize == 32288);
 static_assert(kExpireSegmentSize == 23528);
 
 void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* shard,
-                     DbTable* table) {
+                     DbTable* table, bool update_types) {
   if (!exp_it.is_done()) {
     table->expire.Erase(exp_it);
   }
 
-  table->types_count.Decrement(del_it->second.ObjType());
+  if (update_types) {
+    table->types_count.Decrement(del_it->second.ObjType());
+  }
 
   DbTableStats& stats = table->stats;
   const PrimeValue& pv = del_it->second;
@@ -60,14 +62,15 @@ void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* s
   table->prime.Erase(del_it);
 }
 
-inline void PerformDeletion(PrimeIterator del_it, EngineShard* shard, DbTable* table) {
+inline void PerformDeletion(PrimeIterator del_it, EngineShard* shard, DbTable* table,
+                            bool update_types) {
   ExpireIterator exp_it;
   if (del_it->second.HasExpire()) {
     exp_it = table->expire.Find(del_it->first);
     DCHECK(!exp_it.is_done());
   }
 
-  PerformDeletion(del_it, exp_it, shard, table);
+  PerformDeletion(del_it, exp_it, shard, table, update_types);
 };
 
 class PrimeEvictionPolicy {
@@ -183,7 +186,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
     }
 
     DbTable* table = db_slice_->GetDBTable(cntx_.db_index);
-    PerformDeletion(last_slot_it, db_slice_->shard_owner(), table);
+    PerformDeletion(last_slot_it, db_slice_->shard_owner(), table, true);
     ++evicted_;
   }
   me->ShiftRight(bucket_it);
@@ -459,7 +462,7 @@ void DbSlice::ActivateDb(DbIndex db_ind) {
   CreateDb(db_ind);
 }
 
-bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
+bool DbSlice::Del(DbIndex db_ind, PrimeIterator it, bool update_types) {
   if (!IsValid(it)) {
     return false;
   }
@@ -469,7 +472,7 @@ bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
     CHECK_EQ(1u, db->mcflag.Erase(it->first));
   }
 
-  PerformDeletion(it, shard_owner(), db.get());
+  PerformDeletion(it, shard_owner(), db.get(), update_types);
 
   return true;
 }
@@ -492,7 +495,7 @@ void DbSlice::FlushDb(DbIndex db_ind) {
       if (db_ptr->stats.tiered_entries > 0) {
         for (auto it = db_ptr->prime.begin(); it != db_ptr->prime.end(); ++it) {
           if (it->second.IsExternal()) {
-            PerformDeletion(it, shard_owner(), db_ptr.get());
+            PerformDeletion(it, shard_owner(), db_ptr.get(), true);
           }
         }
       }
@@ -820,7 +823,7 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
     RecordExpiry(cntx.db_index, stash);
   }
 
-  PerformDeletion(it, expire_it, shard_owner(), db.get());
+  PerformDeletion(it, expire_it, shard_owner(), db.get(), true);
   ++events_.expired_keys;
 
   return make_pair(PrimeIterator{}, ExpireIterator{});
@@ -972,7 +975,7 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
       if (evict_it == it || evict_it->first.IsSticky())
         continue;
 
-      PerformDeletion(evict_it, shard_owner(), table);
+      PerformDeletion(evict_it, shard_owner(), table, true);
       ++evicted;
       if (freed_memory_fun() > memory_to_free) {
         evict_succeeded = true;
@@ -998,7 +1001,7 @@ size_t DbSlice::EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* t
       if (evict_it == it || evict_it->first.IsSticky())
         continue;
 
-      PerformDeletion(evict_it, shard_owner(), table);
+      PerformDeletion(evict_it, shard_owner(), table, true);
       ++evicted;
 
       if (freed_memory_fun() > memory_to_free) {

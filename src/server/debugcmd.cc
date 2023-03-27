@@ -3,6 +3,8 @@
 //
 #include "server/debugcmd.h"
 
+#include <map>
+
 #include <absl/cleanup/cleanup.h>
 #include <absl/random/random.h>
 #include <absl/strings/str_cat.h>
@@ -506,7 +508,7 @@ void DebugCmd::TxAnalysis() {
 
 void DebugCmd::TypesCount() {
   boost::fibers::mutex mu;  // guards counts
-  absl::flat_hash_map<std::string, uint64_t> counts;
+  std::map<std::string, uint64_t> counts;  // ordered-map for consistent output order
 
   auto cb = [&](EngineShard* shard) {
     lock_guard lk(mu);

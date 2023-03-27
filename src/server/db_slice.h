@@ -192,7 +192,9 @@ class DbSlice {
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);
 
-  bool Del(DbIndex db_ind, PrimeIterator it);
+  // Deletes a key. Returns `false` if `it` is invalid. `update_types` indicates whether to update
+  // table's `types_count` following this deletion.
+  bool Del(DbIndex db_ind, PrimeIterator it, bool update_types = true);
 
   constexpr static DbIndex kDbAll = 0xFFFF;
 

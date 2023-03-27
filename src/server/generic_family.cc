@@ -371,7 +371,8 @@ OpStatus Renamer::MoveSrc(Transaction* t, EngineShard* es) {
       it->second.SetExpire(has_expire);
     }
 
-    CHECK(es->db_slice().Del(t->GetDbIndex(), it));  // delete the entry with empty value in it.
+    // delete the entry with empty value in it.
+    CHECK(es->db_slice().Del(t->GetDbIndex(), it, /*update_types=*/false));
     if (es->journal()) {
       RecordJournal(t->GetOpArgs(es), "DEL", ArgSlice{src_res_.key}, 2);
     }

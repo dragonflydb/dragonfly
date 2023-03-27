@@ -599,6 +599,71 @@ TEST_F(DflyEngineTest, Issue752) {
   ASSERT_THAT(resp.GetVec(), ElementsAre(IntArg(0), IntArg(0)));
 }
 
+TEST_F(SingleThreadDflyEngineTest, Typez) {
+  EXPECT_THAT(Run({"debug", "typez"}).GetVec(), ElementsAre());
+
+  Run({"set", "x", "1"});
+  EXPECT_THAT(Run({"debug", "typez"}).GetVec(), ElementsAre("STRING", "1"));
+
+  Run({"rename", "x", "x2"});
+  EXPECT_THAT(Run({"debug", "typez"}).GetVec(), ElementsAre("STRING", "1"));
+
+  Run({"set", "y", "2"});
+  EXPECT_THAT(Run({"debug", "typez"}).GetVec(), ElementsAre("STRING", "2"));
+
+  Run({"hset", "hash", "key", "value"});
+  EXPECT_THAT(Run({"debug", "typez"}).GetVec(), ElementsAre("HASH", "1", "STRING", "2"));
+
+  Run({"xadd", "stream", "*", "key", "value"});
+  EXPECT_THAT(Run({"debug", "typez"}).GetVec(),
+              ElementsAre("HASH", "1", "STREAM", "1", "STRING", "2"));
+
+  Run({"sadd", "set", "u"});
+  EXPECT_THAT(Run({"debug", "typez"}).GetVec(),
+              ElementsAre("HASH", "1", "SET", "1", "STREAM", "1", "STRING", "2"));
+
+  Run({"lpush", "list", "42"});
+  EXPECT_THAT(Run({"debug", "typez"}).GetVec(),
+              ElementsAre("HASH", "1", "LIST", "1", "SET", "1", "STREAM", "1", "STRING", "2"));
+
+  Run({"zadd", "zset", "100", "u"});
+  EXPECT_THAT(
+      Run({"debug", "typez"}).GetVec(),
+      ElementsAre("HASH", "1", "LIST", "1", "SET", "1", "STREAM", "1", "STRING", "2", "ZSET", "1"));
+
+  // No change when 'deleting' a non-existing key
+  Run({"del", "x"});  // x was renamed to x2
+  EXPECT_THAT(
+      Run({"debug", "typez"}).GetVec(),
+      ElementsAre("HASH", "1", "LIST", "1", "SET", "1", "STREAM", "1", "STRING", "2", "ZSET", "1"));
+
+  Run({"del", "x2"});
+  EXPECT_THAT(
+      Run({"debug", "typez"}).GetVec(),
+      ElementsAre("HASH", "1", "LIST", "1", "SET", "1", "STREAM", "1", "STRING", "1", "ZSET", "1"));
+
+  Run({"del", "y"});
+  EXPECT_THAT(Run({"debug", "typez"}).GetVec(),
+              ElementsAre("HASH", "1", "LIST", "1", "SET", "1", "STREAM", "1", "ZSET", "1"));
+
+  Run({"srem", "set", "u"});
+  EXPECT_THAT(Run({"debug", "typez"}).GetVec(),
+              ElementsAre("HASH", "1", "LIST", "1", "STREAM", "1", "ZSET", "1"));
+
+  Run({"hdel", "hash", "key"});
+  EXPECT_THAT(Run({"debug", "typez"}).GetVec(),
+              ElementsAre("LIST", "1", "STREAM", "1", "ZSET", "1"));
+
+  Run({"zrem", "zset", "u"});
+  EXPECT_THAT(Run({"debug", "typez"}).GetVec(), ElementsAre("LIST", "1", "STREAM", "1"));
+
+  Run({"lpop", "list"});
+  EXPECT_THAT(Run({"debug", "typez"}).GetVec(), ElementsAre("STREAM", "1"));
+
+  Run({"del", "stream"});
+  EXPECT_THAT(Run({"debug", "typez"}).GetVec(), ElementsAre());
+}
+
 // TODO: to test transactions with a single shard since then all transactions become local.
 // To consider having a parameter in dragonfly engine controlling number of shards
 // unconditionally from number of cpus. TO TEST BLPOP under multi for single/multi argument case.
