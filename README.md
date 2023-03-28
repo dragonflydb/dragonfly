@@ -7,6 +7,7 @@
 
 [![ci-tests](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml) [![Twitter URL](https://img.shields.io/twitter/follow/dragonflydbio?style=social)](https://twitter.com/dragonflydbio)
 
+Other languages:  [简体中文](README.zh-CN.md) 
 
 [Website](https://dragonflydb.io/) • [Quick Start](https://github.com/dragonflydb/dragonfly/tree/main/docs/quick-start) • [Community Discord](https://discord.gg/HsPjXGVH85) • [GitHub Discussions](https://github.com/dragonflydb/dragonfly/discussions) | [GitHub Issues](https://github.com/dragonflydb/dragonfly/issues) | [Contributing](https://github.com/dragonflydb/dragonfly/blob/main/CONTRIBUTING.md)
 
@@ -31,12 +32,11 @@ Dragonfly is crossing 3.8M QPS on c6gn.16xlarge reaching x25 increase in through
 
 99th latency percentile of Dragonfly at its peak throughput:
 
-| op  |r6g | c6gn | c7g |
-|-----|-----|------|----|
-| set |0.8ms  | 1ms | 1ms   |
-| get | 0.9ms | 0.9ms |0.8ms |
-|setex| 0.9ms | 1.1ms | 1.3ms
-
+| op    | r6g   | c6gn  | c7g   |
+|-------|-------|-------|-------|
+| set   | 0.8ms | 1ms   | 1ms   |
+| get   | 0.9ms | 0.9ms | 0.8ms |
+| setex | 0.9ms | 1.1ms | 1.3ms |
 
 *All benchmarks were performed using `memtier_benchmark`  (see below) with number of threads tuned per server type and the instance type. `memtier` was running on a separate c6gn.16xlarge machine. For setex benchmark we used expiry-range of 500, so it would survive the end of the test.*
 
