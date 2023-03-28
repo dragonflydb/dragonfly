@@ -7,7 +7,7 @@ pluggy==1.0.0
 py==1.11.0
 pyparsing==3.0.9
 pytest==7.1.2
-redis==4.3.4
+redis==4.5.3
 tomli==2.0.1
 wrapt==1.14.1
 aioredis==2.0.1
