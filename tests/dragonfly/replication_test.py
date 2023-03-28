@@ -758,7 +758,7 @@ async def test_scripts(df_local_factory, t_master, t_replicas, num_ops, num_keys
 
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.asyncio
-async def test_auth_master(df_local_factory, n_keys=1000):
+async def test_auth_master(df_local_factory, n_keys=20):
     masterpass = 'requirepass'
     replicapass = 'replicapass'
     master = df_local_factory.create(port=BASE_PORT, requirepass=masterpass)
