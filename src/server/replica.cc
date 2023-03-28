@@ -29,7 +29,7 @@ extern "C" {
 
 ABSL_FLAG(bool, enable_multi_shard_sync, false,
           "Execute multi shards commands on replica syncrhonized");
-
+ABSL_FLAG(std::string, masterauth, "", "password for authentication with master");
 ABSL_DECLARE_FLAG(uint32_t, port);
 
 namespace dfly {
@@ -131,19 +131,23 @@ Replica::~Replica() {
 static const char kConnErr[] = "could not connect to master: ";
 
 bool Replica::Start(ConnectionContext* cntx) {
-  CHECK(!sock_);
-
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
 
-  // 1. Connect socket.
-  error_code ec = ConnectSocket();
+  // 1. Resolve dns.
+  error_code ec = ResolveMasterDns();
+  if (ec) {
+    (*cntx)->SendError(StrCat("could not resolve master dns", ec.message()));
+    return false;
+  }
+  // 2. Connect socket.
+  ec = ConnectAndAuth();
   if (ec) {
     (*cntx)->SendError(StrCat(kConnErr, ec.message()));
     return false;
   }
 
-  // 2. Greet.
+  // 3. Greet.
   state_mask_ = R_ENABLED | R_TCP_CONNECTED;
   last_io_time_ = mythread->GetMonotonicTimeNs();
   ec = Greet();
@@ -152,10 +156,10 @@ bool Replica::Start(ConnectionContext* cntx) {
     return false;
   }
 
-  // 3. Init basic context.
+  // 4. Init basic context.
   cntx_.Reset(absl::bind_front(&Replica::DefaultErrorHandler, this));
 
-  // 4. Spawn main coordination fiber.
+  // 5. Spawn main coordination fiber.
   sync_fb_ = fibers_ext::Fiber(&Replica::MainReplicationFb, this);
 
   (*cntx)->SendOk();
@@ -196,7 +200,13 @@ void Replica::MainReplicationFb() {
       if (is_paused_)
         continue;
 
-      ec = ConnectSocket();
+      ec = ResolveMasterDns();
+      if (ec) {
+        LOG(ERROR) << "Error resolving dns " << ec;
+        continue;
+      }
+
+      ec = ConnectAndAuth();
       if (ec) {
         LOG(ERROR) << "Error connecting " << ec;
         continue;
@@ -251,9 +261,7 @@ void Replica::MainReplicationFb() {
   VLOG(1) << "Main replication fiber finished";
 }
 
-error_code Replica::ConnectSocket() {
-  sock_.reset(ProactorBase::me()->CreateSocket());
-
+error_code Replica::ResolveMasterDns() {
   char ip_addr[INET6_ADDRSTRLEN];
   int resolve_res = ResolveDns(master_context_.host, ip_addr);
   if (resolve_res != 0) {
@@ -262,6 +270,15 @@ error_code Replica::ConnectSocket() {
   }
 
   master_context_.endpoint = {ip::make_address(ip_addr), master_context_.port};
+
+  return error_code{};
+}
+
+error_code Replica::ConnectAndAuth() {
+  ProactorBase* mythread = ProactorBase::me();
+  CHECK(mythread);
+  sock_.reset(mythread->CreateSocket());
+  RETURN_ON_ERR(sock_->Connect(master_context_.endpoint));
 
   /* These may help but require additional field testing to learn.
    int yes = 1;
@@ -277,8 +294,20 @@ error_code Replica::ConnectSocket() {
    intv = 3;
    CHECK_EQ(0, setsockopt(sock_->native_handle(), IPPROTO_TCP, TCP_KEEPCNT, &intv, sizeof(intv)));
   */
-
-  return sock_->Connect(master_context_.endpoint);
+  auto masterauth = absl::GetFlag(FLAGS_masterauth);
+  if (!masterauth.empty()) {
+    ReqSerializer serializer{sock_.get()};
+    uint32_t consumed = 0;
+    base::IoBuf io_buf{128};
+    parser_.reset(new RedisParser{false});
+    RETURN_ON_ERR(SendCommand(StrCat("AUTH ", masterauth), &serializer));
+    RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
+    if (!CheckRespIsSimpleReply("OK")) {
+      LOG(ERROR) << "Failed authentication with masters " << ToSV(io_buf.InputBuffer());
+      return make_error_code(errc::bad_message);
+    }
+  }
+  return error_code{};
 }
 
 error_code Replica::Greet() {
@@ -355,6 +384,7 @@ error_code Replica::Greet() {
     master_context_.master_repl_id = param0;
     master_context_.dfly_session_id = param1;
     num_df_flows_ = param2;
+    io_buf.ConsumeInput(consumed);
     // We need to send this because we may require to use this for cluster commands.
     // this reason to send this here is that in other context we can get an error reply
     // since we are budy with the replication
@@ -705,14 +735,9 @@ error_code Replica::SendNextPhaseRequest(bool stable) {
 }
 
 error_code Replica::StartFullSyncFlow(fibers_ext::BlockingCounter sb, Context* cntx) {
-  CHECK(!sock_);
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
 
-  ProactorBase* mythread = ProactorBase::me();
-  CHECK(mythread);
-
-  sock_.reset(mythread->CreateSocket());
-  RETURN_ON_ERR(sock_->Connect(master_context_.endpoint));
+  RETURN_ON_ERR(ConnectAndAuth());
 
   VLOG(1) << "Sending on flow " << master_context_.master_repl_id << " "
           << master_context_.dfly_session_id << " " << master_context_.dfly_flow_id;
@@ -1177,7 +1202,7 @@ std::string Replica::GetSyncId() const {
 }
 
 bool Replica::CheckRespIsSimpleReply(string_view reply) const {
-  return resp_args_.size() == 1 || resp_args_.front().type == RespExpr::STRING ||
+  return resp_args_.size() == 1 && resp_args_.front().type == RespExpr::STRING &&
          ToSV(resp_args_.front().GetBuf()) == reply;
 }
 

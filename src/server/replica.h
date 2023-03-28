@@ -116,8 +116,9 @@ class Replica {
   // Coordinate state transitions. Spawned by start.
   void MainReplicationFb();
 
-  std::error_code ConnectSocket();  // Connect to master.
-  std::error_code Greet();          // Send PING and REPLCONF.
+  std::error_code ResolveMasterDns();  // Resolve master dns
+  std::error_code ConnectAndAuth();    // Connect to master and authenticate if needed.
+  std::error_code Greet();             // Send PING and REPLCONF.
 
   std::error_code InitiatePSync();     // Redis full sync.
   std::error_code InitiateDflySync();  // Dragonfly full sync.
