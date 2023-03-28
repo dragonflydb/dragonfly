@@ -32,8 +32,8 @@ class RespMatcher {
   RespExpr::Type type_;
 
   std::string exp_str_;
-  int64_t exp_int_;
-  double_t exp_double_;
+  int64_t exp_int_ = 0;
+  double_t exp_double_ = 0;
 };
 
 class RespTypeMatcher {
