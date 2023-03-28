@@ -42,6 +42,7 @@ extern "C" {
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "server/version.h"
+#include "server_family.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
 #include "util/fibers/fiber_file.h"
@@ -1190,7 +1191,7 @@ void ServerFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
   string_view sub_cmd = ArgS(args, 1);
 
   if (!is_emulated_cluster_) {
-    return (*cntx)->SendError("CLUSTER commands demands the `cluster_mode` flag set to `emulated`");
+    return (*cntx)->SendError("CLUSTER commands requires --cluster_mode=emulated");
   }
 
   if (sub_cmd == "HELP") {
@@ -1203,7 +1204,7 @@ void ServerFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
         "   Return cluster configuration seen by node. Output format:",
         "   <id> <ip:port> <flags> <master> <pings> <pongs> <epoch> <link> <slot> ...",
         "INFO",
-        +"  Return information about the cluster",
+        "  Return information about the cluster",
         "HELP",
         "    Prints this help.",
     };
@@ -1933,6 +1934,13 @@ void ServerFamily::Psync(CmdArgList args, ConnectionContext* cntx) {
   SyncGeneric("?", 0, cntx);  // full sync, ignore the request.
 }
 
+void ServerFamily::ReadOnly(CmdArgList args, ConnectionContext* cntx) {
+  if (!is_emulated_cluster_) {
+    return (*cntx)->SendError("READONLY command requires --cluster_mode=emulated");
+  }
+  (*cntx)->SendOk();
+}
+
 void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
   time_t save_time;
   {
@@ -2000,6 +2008,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, 0}.HFUNC(Save)
             << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0}.HFUNC(_Shutdown)
             << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
+            << CI{"READONLY", CO::READONLY, 1, 0, 0, 0}.HFUNC(ReadOnly)
             << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, 0}.HFUNC(ReplConf)
             << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, 0}.HFUNC(Role)
