@@ -42,7 +42,6 @@ extern "C" {
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "server/version.h"
-#include "server_family.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
 #include "util/fibers/fiber_file.h"
