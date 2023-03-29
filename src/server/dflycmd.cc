@@ -517,23 +517,11 @@ void DflyCmd::CancelReplication(uint32_t sync_id, shared_ptr<ReplicaInfo> replic
   replica_ptr->state.store(SyncState::CANCELLED, memory_order_release);
   replica_ptr->cntx.Cancel();
 
-  // Run cleanup for shard threads.
-  shard_set->AwaitRunningOnShardQueue([replica_ptr](EngineShard* shard) {
-    FlowInfo* flow = &replica_ptr->flows[shard->shard_id()];
-    if (flow->cleanup) {
-      flow->cleanup();
-    }
-  });
-
   // Wait for tasks to finish.
   shard_set->pool()->AwaitFiberOnAll([replica_ptr](unsigned index, auto*) {
     FlowInfo* flow = &replica_ptr->flows[index];
-
-    // Cleanup hasn't been run for io-thread.
-    if (EngineShard::tlocal() == nullptr) {
-      if (flow->cleanup) {
-        flow->cleanup();
-      }
+    if (flow->cleanup) {
+      flow->cleanup();
     }
 
     if (flow->full_sync_fb.IsJoinable()) {
