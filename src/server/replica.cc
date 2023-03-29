@@ -249,7 +249,7 @@ void Replica::MainReplicationFb() {
     else
       ec = ConsumeRedisStream();
 
-    state_mask_ &= ~R_SYNC_OK;
+    state_mask_ &= ~R_ENABLED;
   }
 
   // Wait for unblocking cleanup to finish.
@@ -764,6 +764,7 @@ error_code Replica::StartFullSyncFlow(fibers_ext::BlockingCounter sb, Context* c
     eof_token = ToSV(resp_args_[1].GetBuf());
   } else {
     LOG(ERROR) << "Bad FLOW response " << ToSV(leftover_buf_->InputBuffer());
+    return make_error_code(errc::bad_message);
   }
   leftover_buf_->ConsumeInput(consumed);
 
