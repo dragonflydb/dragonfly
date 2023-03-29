@@ -189,6 +189,7 @@ async def test_disconnect_replica(df_local_factory: DflyInstanceFactory, df_seed
         await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
         if crash_type == 0:
             await asyncio.sleep(random.random()/100+0.01)
+            await c_replica.connection_pool.disconnect()
             replica.stop(kill=True)
         else:
             await wait_available_async(c_replica)
@@ -208,6 +209,7 @@ async def test_disconnect_replica(df_local_factory: DflyInstanceFactory, df_seed
     # Run stable state crashes
     async def stable_sync(replica, c_replica, crash_type):
         await asyncio.sleep(random.random() / 100)
+        await c_replica.connection_pool.disconnect()
         replica.stop(kill=True)
 
     await asyncio.gather(*(stable_sync(*args) for args
@@ -249,10 +251,12 @@ async def test_disconnect_replica(df_local_factory: DflyInstanceFactory, df_seed
     for replica, c_replica, _ in replicas_of_type(lambda t: t == 2):
         assert await c_replica.ping()
         assert await seeder.compare(capture, port=replica.port)
+        await c_replica.connection_pool.disconnect()
 
     # Check master survived all disconnects
     assert await c_master.ping()
     await c_master.close()
+
 
 """
 Test stopping master during different phases.

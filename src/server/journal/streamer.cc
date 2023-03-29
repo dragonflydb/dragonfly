@@ -25,11 +25,17 @@ uint64_t JournalStreamer::GetRecordCount() const {
 }
 
 void JournalStreamer::Cancel() {
+  Finalize();  // Finalize must be called before UnregisterOnChange because we first need to stop
+               // writing to buffer and notify the all the producers.
+               // Writing to journal holds mutex protecting change_cb_arr_, than the fiber can
+               // preemt when calling NotifyWritten and it will not run again till notified.
+               // UnregisterOnChange will try to lock the mutex therefor calling UnregisterOnChange
+               // before Finalize may cause deadlock.
   journal_->UnregisterOnChange(journal_cb_id_);
-  Finalize();
 
-  if (write_fb_.IsJoinable())
+  if (write_fb_.IsJoinable()) {
     write_fb_.Join();
+  }
 }
 
 void JournalStreamer::WriterFb(io::Sink* dest) {
