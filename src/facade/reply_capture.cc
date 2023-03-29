@@ -11,16 +11,8 @@ void CapturingReplyBuilder::SendError(std::string_view str, std::string_view typ
   Capture(Error{str, type});
 }
 
-void CapturingReplyBuilder::SendMGetResponse(const OptResp* resp, uint32_t count) {
-  // TODO
-}
-
-void CapturingReplyBuilder::SendStored() {
-  // TODO
-}
-
-void CapturingReplyBuilder::SendSetSkipped() {
-  // TODO
+void CapturingReplyBuilder::SendMGetResponse(absl::Span<const OptResp> arr) {
+  Capture(vector<OptResp>{arr.begin(), arr.end()});
 }
 
 void CapturingReplyBuilder::SendError(OpStatus status) {
@@ -80,16 +72,18 @@ void CapturingReplyBuilder::SendBulkString(std::string_view str) {
 
 void CapturingReplyBuilder::SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
                                             bool with_scores) {
-  CHECK(false) << "Not implemented";
+  Capture(ScoredArray{arr, with_scores});
 }
 
 void CapturingReplyBuilder::StartCollection(unsigned len, CollectionType type) {
   Capture(make_unique<CollectionPayload>(CollectionPayload{len, type, vector<Payload>{}}));
 }
 
-CapturingReplyBuilder::Payload CapturingReplyBuilder::Get() {
+CapturingReplyBuilder::Payload CapturingReplyBuilder::Take() {
   CHECK(stack_.empty());
-  return move(current_);
+  Payload pl = move(current_);
+  current_ = monostate{};
+  return pl;
 }
 
 struct CaptureVisitor {
@@ -143,6 +137,14 @@ struct CaptureVisitor {
     rb->StartCollection(cp->len, cp->type);
     for (auto& pl : cp->arr)
       visit(*this, pl);
+  }
+
+  void operator()(const vector<RedisReplyBuilder::OptResp>& mget) {
+    rb->SendMGetResponse(mget);
+  }
+
+  void operator()(const CapturingReplyBuilder::ScoredArray& sarr) {
+    rb->SendScoredArray(sarr.arr, sarr.with_scores);
   }
 
   RedisReplyBuilder* rb;

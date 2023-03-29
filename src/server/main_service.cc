@@ -210,8 +210,8 @@ class InterpreterReplier : public RedisReplyBuilder {
   void SendStored() final;
 
   void SendSimpleString(std::string_view str) final;
-  void SendMGetResponse(const OptResp* resp, uint32_t count) final;
-  void SendSimpleStrArr(absl::Span<const string_view> arr) final;
+  void SendMGetResponse(absl::Span<const OptResp>) final;
+  void SendSimpleStrArr(StrSpan arr) final;
   void SendNullArray() final;
 
   void SendStringArr(StrSpan arr, CollectionType type) final;
@@ -316,13 +316,13 @@ void InterpreterReplier::SendSimpleString(string_view str) {
   PostItem();
 }
 
-void InterpreterReplier::SendMGetResponse(const OptResp* resp, uint32_t count) {
+void InterpreterReplier::SendMGetResponse(absl::Span<const OptResp> arr) {
   DCHECK(array_len_.empty());
 
-  explr_->OnArrayStart(count);
-  for (uint32_t i = 0; i < count; ++i) {
-    if (resp[i].has_value()) {
-      explr_->OnString(resp[i]->value);
+  explr_->OnArrayStart(arr.size());
+  for (uint32_t i = 0; i < arr.size(); ++i) {
+    if (arr[i].has_value()) {
+      explr_->OnString(arr[i]->value);
     } else {
       explr_->OnNil();
     }
@@ -330,10 +330,11 @@ void InterpreterReplier::SendMGetResponse(const OptResp* resp, uint32_t count) {
   explr_->OnArrayEnd();
 }
 
-void InterpreterReplier::SendSimpleStrArr(absl::Span<const string_view> arr) {
-  explr_->OnArrayStart(arr.size());
-  for (auto sv : arr)
-    explr_->OnString(sv);
+void InterpreterReplier::SendSimpleStrArr(StrSpan arr) {
+  WrappedStrSpan warr{arr};
+  explr_->OnArrayStart(warr.Size());
+  for (unsigned i = 0; i < warr.Size(); i++)
+    explr_->OnString(warr[i]);
   explr_->OnArrayEnd();
 }
 

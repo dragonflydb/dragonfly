@@ -124,11 +124,11 @@ void MCReplyBuilder::SendLong(long val) {
   SendSimpleString(string_view(buf, next - buf));
 }
 
-void MCReplyBuilder::SendMGetResponse(const OptResp* resp, uint32_t count) {
+void MCReplyBuilder::SendMGetResponse(absl::Span<const OptResp> arr) {
   string header;
-  for (unsigned i = 0; i < count; ++i) {
-    if (resp[i]) {
-      const auto& src = *resp[i];
+  for (unsigned i = 0; i < arr.size(); ++i) {
+    if (arr[i]) {
+      const auto& src = *arr[i];
       absl::StrAppend(&header, "VALUE ", src.key, " ", src.mc_flag, " ", src.value.size());
       if (src.mc_ver) {
         absl::StrAppend(&header, " ", src.mc_ver);
@@ -323,12 +323,12 @@ void RedisReplyBuilder::SendDouble(double val) {
   }
 }
 
-void RedisReplyBuilder::SendMGetResponse(const OptResp* resp, uint32_t count) {
-  string res = absl::StrCat("*", count, kCRLF);
-  for (size_t i = 0; i < count; ++i) {
-    if (resp[i]) {
-      StrAppend(&res, "$", resp[i]->value.size(), kCRLF);
-      res.append(resp[i]->value).append(kCRLF);
+void RedisReplyBuilder::SendMGetResponse(absl::Span<const OptResp> arr) {
+  string res = absl::StrCat("*", arr.size(), kCRLF);
+  for (size_t i = 0; i < arr.size(); ++i) {
+    if (arr[i]) {
+      StrAppend(&res, "$", arr[i]->value.size(), kCRLF);
+      res.append(arr[i]->value).append(kCRLF);
     } else {
       res.append(NullString());
     }

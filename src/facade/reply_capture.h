@@ -15,15 +15,18 @@ namespace facade {
 
 struct CaptureVisitor;
 
+// CapturingReplyBuilder allows capturing replies and retrieveing them with Get().
+// Those replies can be stored standalone and sent with
+// CapturingReplyBuilder::Apply() to another reply builder.
 class CapturingReplyBuilder : public RedisReplyBuilder {
   friend struct CaptureVisitor;
 
  public:
   void SendError(std::string_view str, std::string_view type = {}) override;
-  void SendMGetResponse(const OptResp* resp, uint32_t count) override;
+  void SendMGetResponse(absl::Span<const OptResp>) override;
 
-  void SendStored() override;
-  void SendSetSkipped() override;
+  // SendStored -> SendSimpleString("OK")
+  // SendSetSkipped -> SendNull()
   void SendError(OpStatus status) override;
 
   void SendNullArray() override;
@@ -56,12 +59,23 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
 
   struct CollectionPayload;
 
+  struct ScoredArray {
+    std::vector<std::pair<std::string, double>> arr;
+    bool with_scores;
+  };
+
  public:
+  CapturingReplyBuilder() : RedisReplyBuilder{nullptr}, stack_{}, current_{} {
+  }
+
   using Payload = std::variant<std::monostate, Null, Error, OpStatus, long, double, SimpleString,
-                               BulkString, StrArrPayload, std::unique_ptr<CollectionPayload>>;
+                               BulkString, StrArrPayload, std::unique_ptr<CollectionPayload>,
+                               std::vector<OptResp>, ScoredArray>;
 
-  Payload Get();
+  // Take payload and clear state.
+  Payload Take();
 
+  // Send payload to builder.
   static void Apply(Payload&& pl, RedisReplyBuilder* builder);
 
  private:
@@ -72,6 +86,8 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   };
 
  private:
+  // Capture value and store eiter in current topmost collection or as a standalone value.
+  // The flag skip_collection indicates whether a collection should be treaded as a regular value.
   template <typename T> void Capture(T&& val, bool skip_collection = false) {
     // Try adding collection to stack if not skipping it.
     bool added = false;
@@ -86,7 +102,7 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
     // Add simple element to topmost collection or as standalone.
     if (!added) {
       if (!stack_.empty()) {
-        stack_.top().first->arr.push_back(Payload{});
+        stack_.top().first->arr.push_back(std::move(val));
         stack_.top().second--;
       } else {
         DCHECK_EQ(current_.index(), 0u);
@@ -94,6 +110,7 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
       }
     }
 
+    // Add full collections as elements.
     while (!stack_.empty() && stack_.top().second == 0) {
       auto pl = std::move(stack_.top());
       stack_.pop();

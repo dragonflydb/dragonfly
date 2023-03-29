@@ -16,7 +16,7 @@ namespace facade {
 class SinkReplyBuilder {
  public:
   struct ResponseValue {
-    std::string_view key;
+    std::string key;
     std::string value;
     uint64_t mc_ver = 0;  // 0 means we do not output it (i.e has not been requested).
     uint32_t mc_flag = 0;
@@ -38,7 +38,7 @@ class SinkReplyBuilder {
   virtual void SendStored() = 0;  // Reply for set commands.
   virtual void SendSetSkipped() = 0;
 
-  virtual void SendMGetResponse(const OptResp* resp, uint32_t count) = 0;
+  virtual void SendMGetResponse(absl::Span<const OptResp>) = 0;
 
   virtual void SendLong(long val) = 0;
   virtual void SendSimpleString(std::string_view str) = 0;
@@ -105,7 +105,7 @@ class MCReplyBuilder : public SinkReplyBuilder {
   void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
 
   // void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) final;
-  void SendMGetResponse(const OptResp* resp, uint32_t count) final;
+  void SendMGetResponse(absl::Span<const OptResp>) final;
 
   void SendStored() final;
   void SendLong(long val) final;
@@ -127,7 +127,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   void SetResp3(bool is_resp3);
 
   void SendError(std::string_view str, std::string_view type = {}) override;
-  void SendMGetResponse(const OptResp* resp, uint32_t count) override;
+  void SendMGetResponse(absl::Span<const OptResp>) override;
 
   void SendStored() override;
   void SendSetSkipped() override;

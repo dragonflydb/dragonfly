@@ -742,19 +742,90 @@ TEST_F(RedisReplyBuilderTest, TestSendMGetResponse) {
   v.value = "v3";
 
   builder_->SetResp3(false);
-  builder_->SendMGetResponse(&mget_res[0], 3);
+  builder_->SendMGetResponse(mget_res);
   ASSERT_TRUE(builder_->err_count().empty());
   ASSERT_EQ(TakePayload(), "*3\r\n$2\r\nv3\r\n$-1\r\n$0\r\n\r\n")
       << "Resp2 SendMGetResponse failed.";
 
   builder_->SetResp3(true);
-  builder_->SendMGetResponse(&mget_res[0], 3);
+  builder_->SendMGetResponse(mget_res);
   ASSERT_TRUE(builder_->err_count().empty());
   ASSERT_EQ(TakePayload(), "*3\r\n$2\r\nv3\r\n_\r\n$0\r\n\r\n") << "Resp3 SendMGetResponse failed.";
 }
 
-TEST_F(RedisReplyBuilderTest, TestCapture) {
-  // TODO
+TEST_F(RedisReplyBuilderTest, TestBasicCapture) {
+  using namespace std;
+  string_view kTestSws[] = {"a1"sv, "a2"sv, "a3"sv, "a4"sv};
+
+  CapturingReplyBuilder crb{};
+  using RRB = RedisReplyBuilder;
+
+  auto big_arr_cb = [kTestSws](RRB* r) {
+    r->StartArray(4);
+    {
+      r->StartArray(2);
+      r->SendLong(1);
+      r->StartArray(2);
+      {
+        r->SendLong(2);
+        r->SendLong(3);
+      }
+    }
+    r->SendLong(4);
+    {
+      r->StartArray(2);
+      {
+        r->StartArray(2);
+        r->SendLong(5);
+        r->SendLong(6);
+      }
+      r->SendLong(7);
+    }
+    r->SendLong(8);
+  };
+
+  function<void(RRB*)> funcs[] = {
+      [](RRB* r) { r->SendNull(); },
+      [](RRB* r) { r->SendLong(1L); },
+      [](RRB* r) { r->SendDouble(6.7); },
+      [](RRB* r) { r->SendSimpleString("ok"); },
+      [](RRB* r) { r->SendEmptyArray(); },
+      [](RRB* r) { r->SendNullArray(); },
+      [](RRB* r) { r->SendError("e1", "e2"); },
+      [kTestSws](RRB* r) { r->SendSimpleStrArr(kTestSws); },
+      [kTestSws](RRB* r) { r->SendStringArr(kTestSws); },
+      [kTestSws](RRB* r) { r->SendStringArr(kTestSws, RRB::SET); },
+      [kTestSws](RRB* r) { r->SendStringArr(kTestSws, RRB::MAP); },
+      [kTestSws](RRB* r) {
+        r->StartArray(3);
+        r->SendLong(1L);
+        r->SendDouble(2.5);
+        r->SendSimpleStrArr(kTestSws);
+      },
+      [kTestSws](RRB* r) {
+        vector<RRB::OptResp> v = {
+            RRB::ResponseValue{"key-1", "value-1", 0, 0},
+            nullopt,
+            RRB::ResponseValue{"key-2", "value-2", 0, 0},
+        };
+        r->SendMGetResponse(v);
+      },
+      big_arr_cb,
+  };
+
+  crb.SetResp3(true);
+  builder_->SetResp3(true);
+
+  for (auto& f : funcs) {
+    f(builder_.get());
+    auto c1 = TakePayload();
+    f(&crb);
+    CapturingReplyBuilder::Apply(crb.Take(), builder_.get());
+    auto c2 = TakePayload();
+    EXPECT_EQ(c1, c2);
+  }
+
+  builder_->SetResp3(false);
 }
 
 }  // namespace facade
