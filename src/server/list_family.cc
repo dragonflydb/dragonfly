@@ -437,7 +437,7 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   if (skip_notexist) {
     auto it_res = es->db_slice().Find(op_args.db_cntx, key, OBJ_LIST);
     if (!it_res)
-      return it_res.status();
+      return 0;  // Redis returns 0 for nonexisting keys for the *PUSHX actions.
     it = *it_res;
   } else {
     try {
