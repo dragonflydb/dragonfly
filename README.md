@@ -125,7 +125,7 @@ For more options like logs management or TLS support, run `dragonfly --help`.
 
 Dragonfly currently supports ~185 Redis commands and all Memcache commands besides `cas`. Almost on par with the Redis 5 API, Dragonfly's next milestone will be to stabilize basic functionality and implement the replication API. If there is a command you need that is not implemented yet, please open an issue.
 
-For Dragonfly-native replication, we are designing a distributed log format that will support exponentially higher speeds.
+For Dragonfly-native replication, we are designing a distributed log format that will support order-of-magnitude higher speeds.
 
 Following the replication feature, we will continue adding missing commands for Redis versions 3-6 APIs.
 
