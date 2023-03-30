@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/container/inlined_vector.h>
+#include <absl/functional/function_ref.h>
 
 #include <string_view>
 #include <variant>
@@ -71,7 +72,7 @@ class Transaction {
  public:
   using time_point = ::std::chrono::steady_clock::time_point;
   // Runnable that is run on shards during hop executions (often named callback).
-  using RunnableType = std::function<OpStatus(Transaction* t, EngineShard*)>;
+  using RunnableType = absl::FunctionRef<OpStatus(Transaction* t, EngineShard*)>;
   // Provides keys to block on for specific shard.
   using WaitKeysProvider = std::function<ArgSlice(Transaction*, EngineShard* shard)>;
 
@@ -406,7 +407,13 @@ class Transaction {
   void WaitForShardCallbacks() {
     run_ec_.await([this] { return 0 == run_count_.load(std::memory_order_relaxed); });
 
-    seqlock_.fetch_add(1, std::memory_order_release);
+    // no reads after this fence will be reordered before it, and if a store operation sequenced
+    // before some release operation that happened before the fence in another thread, this store
+    // will be visible after the fence.
+    // In this specific case we synchronize with DecreaseRunCnt that releases run_count_.
+    // See #997 before changing it.
+    std::atomic_thread_fence(std::memory_order_acquire);
+    seqlock_.fetch_add(1, std::memory_order_relaxed);
   }
 
   // Log command in shard's journal, if this is a write command with auto-journaling enabled.
@@ -471,7 +478,7 @@ class Transaction {
   // Reverse argument mapping for ReverseArgIndex to convert from shard index to original index.
   std::vector<uint32_t> reverse_index_;
 
-  RunnableType cb_;                   // Run on shard threads
+  RunnableType* cb_ptr_ = nullptr;    // Run on shard threads
   const CommandId* cid_;              // Underlying command
   std::unique_ptr<MultiData> multi_;  // Initialized when the transaction is multi/exec.
 
