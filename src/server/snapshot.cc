@@ -18,8 +18,6 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_save.h"
-#include "util/fiber_sched_algo.h"
-#include "util/proactor_base.h"
 
 namespace dfly {
 
@@ -107,7 +105,7 @@ void SliceSnapshot::Join() {
 void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
   {
     auto fiber_name = absl::StrCat("SliceSnapshot-", ProactorBase::GetIndex());
-    FiberProps::SetName(std::move(fiber_name));
+    ThisFiber::SetName(std::move(fiber_name));
   }
 
   PrimeTable::Cursor cursor;

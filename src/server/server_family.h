@@ -10,8 +10,6 @@
 #include "facade/redis_parser.h"
 #include "server/channel_store.h"
 #include "server/engine_shard_set.h"
-#include "util/fibers/fiber.h"
-#include "util/proactor_pool.h"
 
 namespace util {
 class AcceptServer;
@@ -189,7 +187,7 @@ class ServerFamily {
   std::atomic_bool is_saving_{false};
 
   Done is_snapshot_done_;
-  std::unique_ptr<util::fibers_ext::FiberQueueThreadPool> fq_threadpool_;
+  std::unique_ptr<FiberQueueThreadPool> fq_threadpool_;
 };
 
 }  // namespace dfly

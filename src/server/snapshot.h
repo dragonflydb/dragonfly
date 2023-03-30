@@ -12,7 +12,6 @@
 #include "server/db_slice.h"
 #include "server/rdb_save.h"
 #include "server/table.h"
-#include "util/fibers/simple_channel.h"
 
 namespace dfly {
 
@@ -55,8 +54,7 @@ class SliceSnapshot {
     std::string value;
   };
 
-  using RecordChannel =
-      ::util::fibers_ext::SimpleChannel<DbRecord, base::mpmc_bounded_queue<DbRecord>>;
+  using RecordChannel = SimpleChannel<DbRecord, base::mpmc_bounded_queue<DbRecord>>;
 
   SliceSnapshot(DbSlice* slice, RecordChannel* dest, CompressionMode compression_mode);
   ~SliceSnapshot();

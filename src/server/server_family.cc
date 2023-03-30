@@ -70,13 +70,11 @@ ABSL_DECLARE_FLAG(uint32_t, hz);
 namespace dfly {
 
 namespace fs = std::filesystem;
-namespace uring = util::uring;
 
 using absl::GetFlag;
 using absl::StrCat;
 using namespace facade;
 using namespace util;
-using fibers_ext::FiberQueueThreadPool;
 using http::StringResponse;
 using strings::HumanReadableNumBytes;
 
@@ -165,17 +163,17 @@ bool IsValidSaveScheduleNibble(string_view time, unsigned int max) {
 // takes ownership over the file.
 class LinuxWriteWrapper : public io::Sink {
  public:
-  LinuxWriteWrapper(uring::LinuxFile* lf) : lf_(lf) {
+  LinuxWriteWrapper(LinuxFile* lf) : lf_(lf) {
   }
 
   io::Result<size_t> WriteSome(const iovec* v, uint32_t len) final;
 
-  std::error_code Close() {
+  error_code Close() {
     return lf_->Close();
   }
 
  private:
-  std::unique_ptr<uring::LinuxFile> lf_;
+  unique_ptr<LinuxFile> lf_;
   off_t offset_ = 0;
 };
 
@@ -184,7 +182,7 @@ class RdbSnapshot {
   RdbSnapshot(FiberQueueThreadPool* fq_tp) : fq_tp_(fq_tp) {
   }
 
-  error_code Start(SaveMode save_mode, const std::string& path, const StringVec& lua_scripts);
+  error_code Start(SaveMode save_mode, const string& path, const StringVec& lua_scripts);
   void StartInShard(EngineShard* shard);
 
   error_code SaveBody();
@@ -201,8 +199,8 @@ class RdbSnapshot {
  private:
   bool started_ = false;
   FiberQueueThreadPool* fq_tp_;
-  std::unique_ptr<io::Sink> io_sink_;
-  std::unique_ptr<RdbSaver> saver_;
+  unique_ptr<io::Sink> io_sink_;
+  unique_ptr<RdbSaver> saver_;
   RdbTypeFreqMap freq_map_;
 
   Cancellation cll_{};
@@ -226,7 +224,7 @@ error_code RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
       return res.error();
     io_sink_.reset(*res);
   } else {
-    auto res = uring::OpenLinux(path, kRdbWriteFlags, 0666);
+    auto res = OpenLinux(path, kRdbWriteFlags, 0666);
     if (!res) {
       return res.error();
     }
@@ -608,7 +606,7 @@ error_code ServerFamily::LoadRdb(const std::string& rdb_file) {
   if (fq_threadpool_) {
     res = util::OpenFiberReadFile(rdb_file, fq_threadpool_.get());
   } else {
-    res = uring::OpenRead(rdb_file);
+    res = OpenRead(rdb_file);
   }
 
   if (res) {

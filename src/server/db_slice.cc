@@ -13,9 +13,6 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
-#include "util/fiber_sched_algo.h"
-#include "util/fibers/fiber.h"
-#include "util/proactor_base.h"
 
 namespace dfly {
 

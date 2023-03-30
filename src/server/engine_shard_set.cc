@@ -15,7 +15,6 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
-#include "util/fiber_sched_algo.h"
 #include "util/varz.h"
 
 using namespace std;
@@ -532,7 +531,7 @@ BlockingController* EngineShard::EnsureBlockingController() {
 
 void EngineShard::TEST_EnableHeartbeat() {
   fiber_periodic_ = MakeFiber([this, period_ms = 1] {
-    FiberProps::SetName("shard_periodic_TEST");
+    ThisFiber::SetName("shard_periodic_TEST");
     RunPeriodic(std::chrono::milliseconds(period_ms));
   });
 }

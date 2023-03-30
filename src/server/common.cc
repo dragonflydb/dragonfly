@@ -27,6 +27,7 @@ extern "C" {
 namespace dfly {
 
 using namespace std;
+using namespace util;
 
 atomic_uint64_t used_mem_peak(0);
 atomic_uint64_t used_mem_current(0);
@@ -311,7 +312,7 @@ GenericError Context::ReportErrorInternal(GenericError&& err) {
   CHECK(!err_handler_fb_.IsJoinable());
 
   if (err_handler_)
-    err_handler_fb_ = Fiber{err_handler_, err_};
+    err_handler_fb_ = MakeFiber(err_handler_, err_);
 
   Cancellation::Cancel();
   return err_;

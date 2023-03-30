@@ -7,14 +7,15 @@
 #include <functional>
 #include <string>
 
-#include "util/uring/uring_file.h"
+#include "core/uring.h"
 
 namespace dfly {
 
 class IoMgr {
  public:
   // first arg - io result.
-  // using WriteCb = fu2::function_base<true, false, fu2::capacity_default, false, false, void(int)>;
+  // using WriteCb = fu2::function_base<true, false, fu2::capacity_default, false, false,
+  // void(int)>;
   using WriteCb = std::function<void(int)>;
 
   // (io_res, )
@@ -46,7 +47,7 @@ class IoMgr {
   }
 
  private:
-  std::unique_ptr<util::uring::LinuxFile> backing_file_;
+  std::unique_ptr<LinuxFile> backing_file_;
   size_t sz_ = 0;
 
   union {

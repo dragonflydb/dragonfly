@@ -46,6 +46,8 @@ CONFIG_enum(tls_auth_clients, "yes", "", tls_auth_clients_enum, tls_auth_clients
 namespace facade {
 
 using namespace util;
+using util::detail::SafeErrorMessage;
+
 using absl::GetFlag;
 
 namespace {
@@ -152,7 +154,7 @@ error_code Listener::ConfigureServerSocket(int fd) {
   constexpr int kInterval = 300;  // 300 seconds is ok to start checking for liveness.
 
   if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val)) < 0) {
-    LOG(WARNING) << "Could not set reuse addr on socket " << detail::SafeErrorMessage(errno);
+    LOG(WARNING) << "Could not set reuse addr on socket " << SafeErrorMessage(errno);
   }
   bool success = ConfigureKeepAlive(fd, kInterval);
 
@@ -165,7 +167,7 @@ error_code Listener::ConfigureServerSocket(int fd) {
     // Ignore the error on UDS.
     if (getsockopt(fd, SOL_SOCKET, SO_DOMAIN, &socket_type, &length) != 0 ||
         socket_type != AF_UNIX) {
-      LOG(WARNING) << "Could not configure keep alive " << detail::SafeErrorMessage(myerr);
+      LOG(WARNING) << "Could not configure keep alive " << SafeErrorMessage(myerr);
     }
   }
 

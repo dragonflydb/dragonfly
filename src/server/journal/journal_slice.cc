@@ -11,6 +11,7 @@
 #include <filesystem>
 
 #include "base/logging.h"
+#include "util/uring/uring_file.h"
 
 namespace dfly {
 namespace journal {
@@ -84,8 +85,7 @@ std::error_code JournalSlice::Open(std::string_view dir) {
   // https://www.evanjones.ca/durability-filesystem.html
   // NOTE: O_DSYNC is omitted.
   constexpr auto kJournalFlags = O_CLOEXEC | O_CREAT | O_TRUNC | O_RDWR;
-  io::Result<std::unique_ptr<uring::LinuxFile>> res =
-      uring::OpenLinux(shard_path_, kJournalFlags, 0666);
+  io::Result<unique_ptr<LinuxFile>> res = OpenLinux(shard_path_, kJournalFlags, 0666);
   if (!res) {
     return res.error();
   }

@@ -5,10 +5,12 @@
 
 // An import header that centralizes all the imports from helio project regarding fibers
 
+#include "util/fiber_sched_algo.h"
 #include "util/fibers/event_count.h"
 #include "util/fibers/fiber.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/fibers_ext.h"
+#include "util/fibers/simple_channel.h"
 
 namespace dfly {
 
@@ -18,10 +20,12 @@ using util::fibers_ext::Done;
 using util::fibers_ext::EventCount;
 using util::fibers_ext::Fiber;
 using util::fibers_ext::FiberQueue;
+using util::fibers_ext::FiberQueueThreadPool;
 using util::fibers_ext::Future;
 using util::fibers_ext::Launch;
 using util::fibers_ext::Mutex;
 using util::fibers_ext::Promise;
+using util::fibers_ext::SimpleChannel;
 using CondVar = ::boost::fibers::condition_variable;
 
 }  // namespace dfly

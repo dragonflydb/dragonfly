@@ -11,10 +11,6 @@
 #include "server/conn_context.h"
 #include "server/table.h"
 
-namespace util {
-class ProactorBase;
-}
-
 namespace dfly {
 
 using facade::OpResult;

@@ -14,8 +14,6 @@
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
-#include "util/fiber_sched_algo.h"
-#include "util/fibers/fiber.h"
 
 #ifdef DFLY_USE_SSL
 #include "util/tls/tls_socket.h"
@@ -393,7 +391,7 @@ void Connection::UnregisterShutdownHook(ShutdownHandle id) {
 }
 
 void Connection::HandleRequests() {
-  FiberProps::SetName("DflyConnection");
+  ThisFiber::SetName("DflyConnection");
 
   LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
 
@@ -841,7 +839,7 @@ auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, Pars
 // InputLoop. Note: in some cases, InputLoop may decide to dispatch directly and bypass the
 // DispatchFiber.
 void Connection::DispatchFiber(util::FiberSocketBase* peer) {
-  FiberProps::SetName("DispatchFiber");
+  ThisFiber::SetName("DispatchFiber");
 
   SinkReplyBuilder* builder = cc_->reply_builder();
   DispatchOperations dispatch_op{builder, this};

@@ -10,7 +10,6 @@
 #include "server/server_family.h"
 #include "server/server_state.h"
 #include "src/facade/dragonfly_connection.h"
-#include "util/proactor_base.h"
 
 namespace dfly {
 
