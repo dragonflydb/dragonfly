@@ -7,7 +7,7 @@
 #include "facade/dragonfly_listener.h"
 #include "facade/service_interface.h"
 #include "util/accept_server.h"
-#include "util/uring/uring_pool.h"
+#include "util/fibers/pool.h"
 
 ABSL_FLAG(uint32_t, port, 6379, "server port");
 
@@ -59,13 +59,13 @@ int main(int argc, char* argv[]) {
 
   CHECK_GT(GetFlag(FLAGS_port), 0u);
 
-  uring::UringPool pp{1024};
-  pp.Run();
+  unique_ptr<util::ProactorPool> pp(fb2::Pool::IOUring(1024));
+  pp->Run();
 
-  AcceptServer acceptor(&pp);
-  facade::RunEngine(&pp, &acceptor);
+  AcceptServer acceptor(pp.get());
+  facade::RunEngine(pp.get(), &acceptor);
 
-  pp.Stop();
+  pp->Stop();
 
   return 0;
 }
