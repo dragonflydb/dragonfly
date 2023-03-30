@@ -1,5 +1,6 @@
 default_stages: [commit]
 exclude: 'src\/redis\/.*'
+exclude: 'contrib\/charts\/dragonfly\/ci\/.*'
 repos:
   - repo: local
     hooks:
