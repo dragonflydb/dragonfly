@@ -1755,6 +1755,7 @@ void ZSetFamily::ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cn
 
   RangeParams range_params;
   range_params.reverse = reverse;
+  range_params.with_scores = true;
   ZRangeSpec range_spec;
   range_spec.params = range_params;
 
