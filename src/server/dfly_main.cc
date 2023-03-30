@@ -438,6 +438,56 @@ bool ShouldUseEpollAPI(const base::sys::KernelVersion& kver) {
   return true;
 }
 
+bool InsideContainer() {
+  /**
+   * (attemps) to check whether we are running
+   * inside a container or not.
+   *
+   * We employ several tests, all of which
+   * are flawed, however together do cover a
+   * good portion of cases.
+   *
+   * 1. Checking '/.dockerenv': very simple, however
+   * only works for Docker, and this file may be moved
+   * in the future.
+   * 2. Checking '/sys/fs/cgroup/memory.max': This
+   * directory -cannot- be edited (not even using sudoedit),
+   * so users are not able to add files to there. The file
+   * 'memory.max' should contain a memory limit for processes.
+   *
+   * We also use this file to find out how much memory we can use.
+   * However, on LXC this is placed in a different directory:
+   * 3. Checking '/sys/fs/cgroup/memory/memory.limit_in_bytes':
+   * Same idea.
+   */
+
+  using io::Exists;
+
+  return Exists("/.dockerenv") || Exists("/sys/fs/cgroup/memory.max");
+}
+
+void ReadContainerLimits(io::MemInfoData& mdata) {
+  auto max = io::ReadFileToString("/sys/fs/cgroup/memory.max");
+
+  if (max.has_value()) {
+    auto max_val = max.value();
+    if (max_val.find("max") != max_val.npos)
+      return; /*use the host's settings. */
+    else
+      CHECK(absl::SimpleAtoi(max.value(), &mdata.mem_total));
+  }
+
+  auto high = io::ReadFileToString("/sys/fs/cgroup/memory.high");
+
+  if (high.has_value()) {
+    auto high_val = high.value();
+    if (high_val.find("max") != high_val.npos)
+      mdata.mem_avail = mdata.mem_total;
+    else
+      CHECK(absl::SimpleAtoi(high.value(), &mdata.mem_avail));
+  }
+}
+
 }  // namespace
 }  // namespace dfly
 
@@ -494,17 +544,30 @@ Usage: dragonfly [FLAGS]
     }
   }
 
+  auto memory = ReadMemInfo().value();
+  LOG(INFO) << "inside container: " << InsideContainer();
+
+  if (InsideContainer())
+    ReadContainerLimits(memory);
+
+  if (memory.swap_total != 0)
+    LOG(WARNING) << "SWAP is enabled. Consider disabling it when running Dragonfly.";
+
   if (GetFlag(FLAGS_maxmemory).value == 0) {
     LOG(INFO) << "maxmemory has not been specified. Deciding myself....";
 
-    Result<MemInfoData> res = ReadMemInfo();
-    size_t available = res->mem_avail;
+    size_t available = memory.mem_avail;
     size_t maxmemory = size_t(0.8 * available);
     LOG(INFO) << "Found " << HumanReadableNumBytes(available)
               << " available memory. Setting maxmemory to " << HumanReadableNumBytes(maxmemory);
     absl::SetFlag(&FLAGS_maxmemory, MaxMemoryFlag(maxmemory));
   } else {
-    LOG(INFO) << "Max memory limit is: " << HumanReadableNumBytes(GetFlag(FLAGS_maxmemory).value);
+    auto limit = GetFlag(FLAGS_maxmemory).value;
+    auto hr_limit = HumanReadableNumBytes(limit);
+    if (limit > memory.mem_avail)
+      LOG(WARNING) << "Got memory limit " << hr_limit << ", however only "
+                   << HumanReadableNumBytes(memory.mem_avail) << " was found.";
+    LOG(INFO) << "Max memory limit is: " << hr_limit;
   }
 
   dfly::max_memory_limit = GetFlag(FLAGS_maxmemory).value;
