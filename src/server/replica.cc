@@ -193,7 +193,6 @@ void Replica::MainReplicationFb() {
   while (state_mask_ & R_ENABLED) {
     // Discard all previous errors and set default error handler.
     cntx_.Reset(absl::bind_front(&Replica::DefaultErrorHandler, this));
-
     // 1. Connect socket.
     if ((state_mask_ & R_TCP_CONNECTED) == 0) {
       ThisFiber::SleepFor(500ms);
@@ -219,8 +218,8 @@ void Replica::MainReplicationFb() {
     if ((state_mask_ & R_GREETED) == 0) {
       ec = Greet();
       if (ec) {
-        LOG(INFO) << "Error greeting " << ec;
-        state_mask_ &= ~R_TCP_CONNECTED;
+        LOG(INFO) << "Error greeting " << ec << " " << ec.message();
+        state_mask_ &= R_ENABLED;
         continue;
       }
     }
@@ -237,7 +236,6 @@ void Replica::MainReplicationFb() {
         state_mask_ &= R_ENABLED;  // reset all flags besides R_ENABLED
         continue;
       }
-
       state_mask_ |= R_SYNC_OK;
     }
 
@@ -249,7 +247,8 @@ void Replica::MainReplicationFb() {
     else
       ec = ConsumeRedisStream();
 
-    state_mask_ &= ~R_SYNC_OK;
+    LOG(WARNING) << "Error full sync " << ec << " " << ec.message();
+    state_mask_ &= R_ENABLED;
   }
 
   // Wait for unblocking cleanup to finish.
@@ -658,6 +657,7 @@ error_code Replica::ConsumeDflyStream() {
   };
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
+  LOG(INFO) << "Transitioned into stable sync";
   // Transition flows into stable sync.
   {
     auto partition = Partition(num_df_flows_);
@@ -674,11 +674,9 @@ error_code Replica::ConsumeDflyStream() {
     lock_guard lk{flows_op_mu_};
     shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
   }
-
-  LOG(INFO) << "Transitioned into stable sync";
-
   JoinAllFlows();
 
+  LOG(INFO) << "Exit stable sync";
   // The only option to unblock is to cancel the context.
   CHECK(cntx_.GetError());
 
@@ -764,6 +762,7 @@ error_code Replica::StartFullSyncFlow(BlockingCounter sb, Context* cntx) {
     eof_token = ToSV(resp_args_[1].GetBuf());
   } else {
     LOG(ERROR) << "Bad FLOW response " << ToSV(leftover_buf_->InputBuffer());
+    return make_error_code(errc::bad_message);
   }
   leftover_buf_->ConsumeInput(consumed);
 
