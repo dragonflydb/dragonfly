@@ -433,21 +433,23 @@ TEST_F(ZSetFamilyTest, ZPopMin) {
   EXPECT_THAT(resp, IntArg(6));
 
   resp = Run({"zpopmin", "key"});
-  ASSERT_THAT(resp, "a");
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1"));
 
   resp = Run({"zpopmin", "key", "2"});
-  ASSERT_THAT(resp, ArrLen(2));
-  EXPECT_THAT(resp.GetVec(), ElementsAre("b", "c"));
+  ASSERT_THAT(resp, ArrLen(4));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("b", "2", "c", "3"));
 
   resp = Run({"zpopmin", "key", "-1"});
   ASSERT_THAT(resp, ErrArg("value is out of range, must be positive"));
 
   resp = Run({"zpopmin", "key", "1"});
-  ASSERT_THAT(resp, "d");
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("d", "4"));
 
   resp = Run({"zpopmin", "key", "3"});
-  ASSERT_THAT(resp, ArrLen(2));
-  EXPECT_THAT(resp.GetVec(), ElementsAre("e", "f"));
+  ASSERT_THAT(resp, ArrLen(4));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("e", "5", "f", "6"));
 
   resp = Run({"zpopmin", "key", "1"});
   ASSERT_THAT(resp, ArrLen(0));
@@ -458,24 +460,36 @@ TEST_F(ZSetFamilyTest, ZPopMax) {
   EXPECT_THAT(resp, IntArg(6));
 
   resp = Run({"zpopmax", "key"});
-  ASSERT_THAT(resp, "f");
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("f", "6"));
 
   resp = Run({"zpopmax", "key", "2"});
-  ASSERT_THAT(resp, ArrLen(2));
-  EXPECT_THAT(resp.GetVec(), ElementsAre("e", "d"));
+  ASSERT_THAT(resp, ArrLen(4));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("e", "5", "d", "4"));
 
   resp = Run({"zpopmax", "key", "-1"});
   ASSERT_THAT(resp, ErrArg("value is out of range, must be positive"));
 
   resp = Run({"zpopmax", "key", "1"});
-  ASSERT_THAT(resp, "c");
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("c", "3"));
 
   resp = Run({"zpopmax", "key", "3"});
-  ASSERT_THAT(resp, ArrLen(2));
-  EXPECT_THAT(resp.GetVec(), ElementsAre("b", "a"));
+  ASSERT_THAT(resp, ArrLen(4));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("b", "2", "a", "1"));
 
   resp = Run({"zpopmax", "key", "1"});
   ASSERT_THAT(resp, ArrLen(0));
+}
+
+TEST_F(ZSetFamilyTest, ZAddPopCrash) {
+  for (int i = 0; i < 129; ++i) {
+    auto resp = Run({"zadd", "key", absl::StrCat(i), absl::StrCat("element:", i)});
+    EXPECT_THAT(resp, IntArg(1));
+  }
+
+  auto resp = Run({"zpopmin", "key"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("element:0", "0"));
 }
 
 TEST_F(ZSetFamilyTest, Resp3) {

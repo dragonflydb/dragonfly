@@ -85,7 +85,6 @@ full_sync_replication_specs = [
 ]
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("t_replicas, seeder_config", full_sync_replication_specs)
 async def test_replication_full_sync(df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config):
     master = redis_server
@@ -117,7 +116,6 @@ stable_sync_replication_specs = [
 ]
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("t_replicas, seeder_config", stable_sync_replication_specs)
 async def test_replication_stable_sync(df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config):
     master = redis_server
@@ -153,7 +151,6 @@ replication_specs = [
 ]
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("t_replicas, seeder_config", replication_specs)
 async def test_redis_replication_all(df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config):
     master = redis_server
@@ -210,7 +207,6 @@ master_disconnect_cases = [
 ]
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("t_replicas, t_disconnect, seeder_config", master_disconnect_cases)
 async def test_disconnect_master(df_local_factory, df_seeder_factory, redis_server, t_replicas, t_disconnect, seeder_config):
 

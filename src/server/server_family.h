@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include <boost/fiber/future.hpp>
 #include <string>
 
 #include "facade/conn_context.h"
@@ -102,7 +101,7 @@ class ServerFamily {
 
   // Load snapshot from file (.rdb file or summary.dfs file) and return
   // future with error_code.
-  boost::fibers::future<std::error_code> Load(const std::string& file_name);
+  Future<std::error_code> Load(const std::string& file_name);
 
   // used within tests.
   bool IsSaving() const {
@@ -120,10 +119,6 @@ class ServerFamily {
 
   journal::Journal* journal() {
     return journal_.get();
-  }
-
-  ChannelStore* channel_store() {
-    return channel_store_.get();
   }
 
   void OnClose(ConnectionContext* cntx);
@@ -152,6 +147,7 @@ class ServerFamily {
   void LastSave(CmdArgList args, ConnectionContext* cntx);
   void Latency(CmdArgList args, ConnectionContext* cntx);
   void Psync(CmdArgList args, ConnectionContext* cntx);
+  void ReadOnly(CmdArgList args, ConnectionContext* cntx);
   void ReplicaOf(CmdArgList args, ConnectionContext* cntx);
   void ReplConf(CmdArgList args, ConnectionContext* cntx);
   void Role(CmdArgList args, ConnectionContext* cntx);
@@ -167,8 +163,8 @@ class ServerFamily {
 
   void SnapshotScheduling(const SnapshotSpec& time);
 
-  util::fibers_ext::Fiber snapshot_fiber_;
-  boost::fibers::future<std::error_code> load_result_;
+  Fiber snapshot_fiber_;
+  Future<std::error_code> load_result_;
 
   uint32_t stats_caching_task_ = 0;
   Service& service_;
@@ -177,13 +173,12 @@ class ServerFamily {
   util::ListenerInterface* main_listener_ = nullptr;
   util::ProactorBase* pb_task_ = nullptr;
 
-  mutable ::boost::fibers::mutex replicaof_mu_, save_mu_;
+  mutable Mutex replicaof_mu_, save_mu_;
   std::shared_ptr<Replica> replica_;  // protected by replica_of_mu_
 
   std::unique_ptr<ScriptMgr> script_mgr_;
   std::unique_ptr<journal::Journal> journal_;
   std::unique_ptr<DflyCmd> dfly_cmd_;
-  std::unique_ptr<ChannelStore> channel_store_;
 
   std::string master_id_;
 
@@ -193,7 +188,7 @@ class ServerFamily {
   std::shared_ptr<LastSaveInfo> last_save_info_;  // protected by save_mu_;
   std::atomic_bool is_saving_{false};
 
-  util::fibers_ext::Done is_snapshot_done_;
+  Done is_snapshot_done_;
   std::unique_ptr<util::fibers_ext::FiberQueueThreadPool> fq_threadpool_;
 };
 

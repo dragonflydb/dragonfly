@@ -154,7 +154,7 @@ TEST_F(DflyEngineTest, EvalBug713) {
 
   // A
   auto fb0 = pp_->at(1)->LaunchFiber([&] {
-    fibers_ext::Yield();
+    ThisFiber::Yield();
     for (unsigned i = 0; i < 50; ++i) {
       Run({"eval", script, "3", kKeySid0, kKeySid1, kKeySid2});
     }
@@ -179,7 +179,7 @@ TEST_F(DflyEngineTest, EvalBug713b) {
   const char* script = "return redis.call('get', KEYS[1])";
 
   const uint32_t kNumFibers = 20;
-  fibers_ext::Fiber fibers[kNumFibers];
+  Fiber fibers[kNumFibers];
 
   for (unsigned j = 0; j < kNumFibers; ++j) {
     fibers[j] = pp_->at(1)->LaunchFiber([j, script, this] {
@@ -293,7 +293,7 @@ TEST_F(DflyEngineTest, FlushAll) {
     for (size_t i = 1; i < 100; ++i) {
       RespExpr resp = Run({"set", "foo", "bar"});
       ASSERT_EQ(resp, "OK");
-      fibers_ext::Yield();
+      ThisFiber::Yield();
     }
   });
 
@@ -398,6 +398,8 @@ TEST_F(DflyEngineTest, PSubscribe) {
   EXPECT_THAT(resp, ArrLen(3));
   resp = pp_->at(0)->Await([&] { return Run({"publish", "ab", "foo"}); });
   EXPECT_THAT(resp, IntArg(1));
+
+  pp_->AwaitFiberOnAll([](ProactorBase* pb) {});
 
   ASSERT_EQ(1, SubscriberMessagesLen("IO1"));
 
@@ -551,13 +553,13 @@ TEST_F(DefragDflyEngineTest, TestDefragOption) {
   shard_set->pool()->AwaitFiberOnAll([&](unsigned index, ProactorBase* base) {
     EngineShard* shard = EngineShard::tlocal();
     ASSERT_FALSE(shard == nullptr);  // we only have one and its should not be empty!
-    fibers_ext::SleepFor(100ms);
+    ThisFiber::SleepFor(100ms);
 
     // make sure that the task that collect memory usage from all shard ran
     // for at least once, and that no defrag was done yet.
     auto stats = shard->stats();
     for (int i = 0; i < 3; i++) {
-      fibers_ext::SleepFor(100ms);
+      ThisFiber::SleepFor(100ms);
       EXPECT_EQ(stats.defrag_realloc_total, 0);
     }
   });
@@ -576,7 +578,7 @@ TEST_F(DefragDflyEngineTest, TestDefragOption) {
     auto stats = shard->stats();
     for (int i = 0; i < kMaxDefragTriesForTests && stats.defrag_realloc_total == 0; i++) {
       stats = shard->stats();
-      fibers_ext::SleepFor(220ms);
+      ThisFiber::SleepFor(220ms);
     }
     // make sure that we successfully found places to defrag in memory
     EXPECT_GT(stats.defrag_realloc_total, 0);

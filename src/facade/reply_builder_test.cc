@@ -357,7 +357,7 @@ TEST_F(RedisReplyBuilderTest, SendSimpleStrArr) {
       // random values
       "+++", "---", "$$$", "~~~~", "@@@", "^^^", "1234", "foo"};
   const std::size_t kArrayLen = sizeof(kArrayMessage) / sizeof(kArrayMessage[0]);
-  builder_->SendSimpleStrArr(kArrayMessage, kArrayLen);
+  builder_->SendSimpleStrArr(kArrayMessage);
   ASSERT_TRUE(builder_->err_count().empty());
   // Tokenize the message and verify content
   std::vector<std::string_view> message_tokens = TokenizeMessage();
@@ -674,13 +674,13 @@ TEST_F(RedisReplyBuilderTest, TestSendStringArrayAsMap) {
   const std::vector<std::string> map_array{"k1", "v1", "k2", "v2"};
 
   builder_->SetResp3(false);
-  builder_->SendStringArrayAsMap(map_array);
+  builder_->SendStringArr(map_array, builder_->MAP);
   ASSERT_TRUE(builder_->err_count().empty());
   ASSERT_EQ(TakePayload(), "*4\r\n$2\r\nk1\r\n$2\r\nv1\r\n$2\r\nk2\r\n$2\r\nv2\r\n")
       << "SendStringArrayAsMap Resp2 Failed.";
 
   builder_->SetResp3(true);
-  builder_->SendStringArrayAsMap(map_array);
+  builder_->SendStringArr(map_array, builder_->MAP);
   ASSERT_TRUE(builder_->err_count().empty());
   ASSERT_EQ(TakePayload(), "%2\r\n$2\r\nk1\r\n$2\r\nv1\r\n$2\r\nk2\r\n$2\r\nv2\r\n")
       << "SendStringArrayAsMap Resp3 Failed.";
@@ -690,13 +690,13 @@ TEST_F(RedisReplyBuilderTest, TestSendStringArrayAsSet) {
   const std::vector<std::string> set_array{"e1", "e2", "e3"};
 
   builder_->SetResp3(false);
-  builder_->SendStringArrayAsSet(set_array);
+  builder_->SendStringArr(set_array, builder_->SET);
   ASSERT_TRUE(builder_->err_count().empty());
   ASSERT_EQ(TakePayload(), "*3\r\n$2\r\ne1\r\n$2\r\ne2\r\n$2\r\ne3\r\n")
       << "SendStringArrayAsSet Resp2 Failed.";
 
   builder_->SetResp3(true);
-  builder_->SendStringArrayAsSet(set_array);
+  builder_->SendStringArr(set_array, builder_->SET);
   ASSERT_TRUE(builder_->err_count().empty());
   ASSERT_EQ(TakePayload(), "~3\r\n$2\r\ne1\r\n$2\r\ne2\r\n$2\r\ne3\r\n")
       << "SendStringArrayAsSet Resp3 Failed.";

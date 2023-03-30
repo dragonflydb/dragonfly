@@ -8,8 +8,6 @@
 #include <absl/strings/match.h>
 #include <mimalloc.h>
 
-#include <boost/fiber/operations.hpp>
-
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
@@ -43,8 +41,6 @@ ABSL_FLAG(std::uint64_t, request_cache_limit, 1ULL << 26,  // 64MB
 using namespace util;
 using namespace std;
 using nonstd::make_unexpected;
-
-namespace fibers = boost::fibers;
 
 namespace facade {
 namespace {
@@ -363,17 +359,17 @@ void Connection::OnShutdown() {
 
 void Connection::OnPreMigrateThread() {
   // If we migrating to another io_uring we should cancel any pending requests we have.
-  if (break_poll_id_ != kuint32max) {
+  if (break_poll_id_ != UINT32_MAX) {
     auto* ls = static_cast<LinuxSocketBase*>(socket_.get());
     ls->CancelPoll(break_poll_id_);
-    break_poll_id_ = kuint32max;
+    break_poll_id_ = UINT32_MAX;
   }
 }
 
 void Connection::OnPostMigrateThread() {
   // Once we migrated, we should rearm OnBreakCb callback.
   if (breaker_cb_) {
-    DCHECK_EQ(kuint32max, break_poll_id_);
+    DCHECK_EQ(UINT32_MAX, break_poll_id_);
 
     auto* ls = static_cast<LinuxSocketBase*>(socket_.get());
     break_poll_id_ =
@@ -452,7 +448,7 @@ void Connection::HandleRequests() {
 
       ConnectionFlow(peer);
 
-      if (break_poll_id_ != kuint32max) {
+      if (break_poll_id_ != UINT32_MAX) {
         us->CancelPoll(break_poll_id_);
       }
 
@@ -487,7 +483,7 @@ std::string Connection::LocalBindAddress() const {
   return le.address().to_string();
 }
 
-string Connection::GetClientInfo() const {
+string Connection::GetClientInfo(unsigned thread_id) const {
   LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
 
   string res;
@@ -495,19 +491,29 @@ string Connection::GetClientInfo() const {
   auto re = lsb->RemoteEndpoint();
   time_t now = time(nullptr);
 
+  int cpu = 0;
+  socklen_t len = sizeof(cpu);
+  getsockopt(lsb->native_handle(), SOL_SOCKET, SO_INCOMING_CPU, &cpu, &len);
+  int my_cpu_id = sched_getcpu();
+
   absl::StrAppend(&res, "id=", id_, " addr=", re.address().to_string(), ":", re.port());
   absl::StrAppend(&res, " laddr=", le.address().to_string(), ":", le.port());
   absl::StrAppend(&res, " fd=", lsb->native_handle(), " name=", name_);
+  absl::StrAppend(&res, " tid=", thread_id, " irqmatch=", int(cpu == my_cpu_id));
   absl::StrAppend(&res, " age=", now - creation_time_, " idle=", now - last_interaction_);
-  absl::StrAppend(&res, " phase=", phase_, " ");
+  absl::StrAppend(&res, " phase=", phase_);
+
   if (cc_) {
-    absl::StrAppend(&res, service_->GetContextInfo(cc_.get()));
+    string cc_info = service_->GetContextInfo(cc_.get());
+    if (!cc_info.empty()) {
+      absl::StrAppend(&res, " ", cc_info);
+    }
   }
 
   return res;
 }
 
-uint32 Connection::GetClientId() const {
+uint32_t Connection::GetClientId() const {
   return id_;
 }
 
@@ -552,7 +558,7 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
 void Connection::ConnectionFlow(FiberSocketBase* peer) {
   stats_ = service_->GetThreadLocalConnectionStats();
 
-  auto dispatch_fb = fibers::fiber(fibers::launch::dispatch, [&] { DispatchFiber(peer); });
+  auto dispatch_fb = MakeFiber(dfly::Launch::dispatch, [&] { DispatchFiber(peer); });
 
   ++stats_->num_conns;
   ++stats_->conn_received_cnt;
@@ -589,7 +595,7 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   cc_->conn_closing = true;  // Signal dispatch to close.
   evc_.notify();
   VLOG(1) << "Before dispatch_fb.join()";
-  dispatch_fb.join();
+  dispatch_fb.Join();
   VLOG(1) << "After dispatch_fb.join()";
   service_->OnClose(cc_.get());
 
@@ -677,7 +683,7 @@ auto Connection::ParseRedis() -> ParserStatus {
         if (dispatch_q_.size() == 1) {
           evc_.notify();
         } else if (dispatch_q_.size() > 10) {
-          fibers_ext::Yield();
+          ThisFiber::Yield();
         }
       }
     }
@@ -756,7 +762,7 @@ void Connection::OnBreakCb(int32_t mask) {
   VLOG(1) << "Got event " << mask;
   CHECK(cc_);
   cc_->conn_closing = true;
-  break_poll_id_ = kuint32max;  // do not attempt to cancel it.
+  break_poll_id_ = UINT32_MAX;  // do not attempt to cancel it.
 
   breaker_cb_(mask);
   evc_.notify();  // Notify dispatch fiber.

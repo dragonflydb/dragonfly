@@ -171,7 +171,7 @@ void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double t
   auto timeout_micro = chrono::duration_cast<chrono::microseconds>(1000ms * timeout);
   int64_t steps = timeout_micro.count() / step.count();
   do {
-    fibers_ext::SleepFor(step);
+    ThisFiber::SleepFor(step);
   } while (!IsLocked(db_index, key) && --steps > 0);
   CHECK(IsLocked(db_index, key));
 }

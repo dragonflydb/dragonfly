@@ -11,13 +11,11 @@
 #include <filesystem>
 
 #include "base/logging.h"
-#include "util/fibers/fibers_ext.h"
 
 namespace dfly {
 namespace journal {
 using namespace std;
 using namespace util;
-namespace fibers = boost::fibers;
 namespace fs = std::filesystem;
 
 namespace {

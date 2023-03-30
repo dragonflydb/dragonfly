@@ -4,15 +4,12 @@
 
 #pragma once
 
-#include <boost/fiber/condition_variable.hpp>
-#include <boost/fiber/fiber.hpp>
 #include <optional>
 #include <string_view>
 
 #include "base/ring_buffer.h"
 #include "server/common.h"
 #include "server/journal/types.h"
-#include "util/fibers/fibers_ext.h"
 #include "util/uring/uring_file.h"
 
 namespace dfly {

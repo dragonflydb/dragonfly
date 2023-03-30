@@ -60,9 +60,9 @@ class BufferedStreamerBase : public io::Sink {
   bool IsStopped();
 
  protected:
-  bool producer_done_ = false;              // whether producer is done
-  unsigned buffered_ = 0;                   // how many entries are buffered
-  ::util::fibers_ext::EventCount waker_{};  // two sided waker
+  bool producer_done_ = false;  // whether producer is done
+  unsigned buffered_ = 0;       // how many entries are buffered
+  EventCount waker_{};          // two sided waker
 
   const Cancellation* cll_;  // global cancellation
 

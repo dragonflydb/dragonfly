@@ -32,6 +32,7 @@ namespace dfly {
 
 using namespace std;
 using namespace facade;
+using namespace util;
 
 ScriptMgr::ScriptMgr() {
   // Build default script config
@@ -70,7 +71,7 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
         "   Prints latency histograms in usec for every called function.",
         "HELP"
         "   Prints this help."};
-    return (*cntx)->SendSimpleStrArr(kHelp, ABSL_ARRAYSIZE(kHelp));
+    return (*cntx)->SendSimpleStrArr(kHelp);
   }
 
   if (subcmd == "EXISTS" && args.size() > 1)
@@ -155,7 +156,7 @@ void ScriptMgr::ListCmd(ConnectionContext* cntx) const {
 
 void ScriptMgr::LatencyCmd(ConnectionContext* cntx) const {
   absl::flat_hash_map<std::string, base::Histogram> result;
-  boost::fibers::mutex mu;
+  Mutex mu;
 
   shard_set->pool()->AwaitFiberOnAll([&](auto* pb) {
     auto* ss = ServerState::tlocal();

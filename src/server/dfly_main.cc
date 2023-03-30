@@ -176,8 +176,8 @@ std::optional<std::string> GetRemoteVersion(ProactorBase* proactor, SSL_CTX* ssl
 }
 
 struct VersionMonitor {
-  fibers_ext::Fiber version_fiber_;
-  fibers_ext::Done monitor_ver_done_;
+  Fiber version_fiber_;
+  Done monitor_ver_done_;
 
   void Run(ProactorPool* proactor_pool);
 

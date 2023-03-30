@@ -26,8 +26,6 @@ namespace dfly {
 using namespace std;
 using namespace util;
 using namespace chrono_literals;
-namespace this_fiber = ::boost::this_fiber;
-using boost::fibers::fiber;
 
 SliceSnapshot::SliceSnapshot(DbSlice* slice, RecordChannel* dest, CompressionMode compression_mode)
 
@@ -39,7 +37,7 @@ SliceSnapshot::~SliceSnapshot() {
 }
 
 void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
-  DCHECK(!snapshot_fb_.joinable());
+  DCHECK(!snapshot_fb_.IsJoinable());
 
   auto db_cb = absl::bind_front(&SliceSnapshot::OnDbChange, this);
   snapshot_version_ = db_slice_->RegisterOnChange(move(db_cb));
@@ -55,7 +53,7 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
-  snapshot_fb_ = fiber([this, stream_journal, cll] {
+  snapshot_fb_ = MakeFiber([this, stream_journal, cll] {
     IterateBucketsFb(cll);
     if (cll->IsCancelled()) {
       Cancel();
@@ -90,8 +88,8 @@ void SliceSnapshot::Cancel() {
 
 void SliceSnapshot::Join() {
   // Fiber could have already been joined by Stop.
-  if (snapshot_fb_.joinable())
-    snapshot_fb_.join();
+  if (snapshot_fb_.IsJoinable())
+    snapshot_fb_.Join();
 }
 
 // The algorithm is to go over all the buckets and serialize those with
@@ -138,8 +136,8 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
       PushSerializedToChannel(false);
 
       if (stats_.loop_serialized >= last_yield + 100) {
-        DVLOG(2) << "Before sleep " << this_fiber::properties<FiberProps>().name();
-        fibers_ext::Yield();
+        DVLOG(2) << "Before sleep " << ThisFiber::GetName();
+        ThisFiber::Yield();
         DVLOG(2) << "After sleep";
 
         last_yield = stats_.loop_serialized;
@@ -149,7 +147,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
       }
     } while (cursor);
 
-    DVLOG(2) << "after loop " << this_fiber::properties<FiberProps>().name();
+    DVLOG(2) << "after loop " << ThisFiber::GetName();
     PushSerializedToChannel(true);
   }  // for (dbindex)
 

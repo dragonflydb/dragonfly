@@ -7,7 +7,6 @@
 #include <absl/container/flat_hash_map.h>
 
 #include <array>
-#include <boost/fiber/mutex.hpp>
 #include <optional>
 
 #include "server/conn_context.h"
@@ -71,7 +70,7 @@ class ScriptMgr {
   ScriptParams default_params_;
 
   absl::flat_hash_map<ScriptKey, InternalScriptData> db_;
-  mutable ::boost::fibers::mutex mu_;
+  mutable Mutex mu_;
 };
 
 }  // namespace dfly

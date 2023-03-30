@@ -136,7 +136,7 @@ error_code IoMgr::Read(size_t offset, io::MutableBytes dest) {
 
 void IoMgr::Shutdown() {
   while (flags_val) {
-    fibers_ext::SleepFor(200us);  // TODO: hacky for now.
+    ThisFiber::SleepFor(200us);  // TODO: hacky for now.
   }
 }
 

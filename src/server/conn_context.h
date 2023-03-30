@@ -6,9 +6,9 @@
 
 #include <absl/container/flat_hash_set.h>
 
+#include "core/fibers.h"
 #include "facade/conn_context.h"
 #include "server/common.h"
-#include "util/fibers/fibers_ext.h"
 
 namespace dfly {
 
@@ -82,7 +82,7 @@ struct ConnectionState {
     absl::flat_hash_set<std::string> channels;
     absl::flat_hash_set<std::string> patterns;
 
-    util::fibers_ext::BlockingCounter borrow_token{0};
+    BlockingCounter borrow_token{0};
   };
 
   struct ReplicationInfo {
@@ -134,10 +134,10 @@ class ConnectionContext : public facade::ConnectionContext {
     return conn_state.db_index;
   }
 
-  void ChangeSubscription(ChannelStore* store, bool to_add, bool to_reply, CmdArgList args);
-  void ChangePSubscription(ChannelStore* store, bool to_add, bool to_reply, CmdArgList args);
-  void UnsubscribeAll(ChannelStore* store, bool to_reply);
-  void PUnsubscribeAll(ChannelStore* store, bool to_reply);
+  void ChangeSubscription(bool to_add, bool to_reply, CmdArgList args);
+  void ChangePSubscription(bool to_add, bool to_reply, CmdArgList args);
+  void UnsubscribeAll(bool to_reply);
+  void PUnsubscribeAll(bool to_reply);
   void ChangeMonitor(bool start);  // either start or stop monitor on a given connection
 
   bool is_replicating = false;

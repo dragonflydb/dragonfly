@@ -19,7 +19,6 @@
 #include "server/server_family.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
-
 using namespace std;
 
 ABSL_DECLARE_FLAG(string, dir);
@@ -27,7 +26,8 @@ ABSL_DECLARE_FLAG(string, dir);
 namespace dfly {
 
 using namespace facade;
-using namespace std;
+using namespace util;
+
 using util::ProactorBase;
 
 namespace {
@@ -383,7 +383,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
     flow->saver->StartSnapshotInShard(true, cntx->GetCancellation(), shard);
   }
 
-  flow->full_sync_fb = ::boost::fibers::fiber(&DflyCmd::FullSyncFb, this, flow, cntx);
+  flow->full_sync_fb = Fiber(&DflyCmd::FullSyncFb, this, flow, cntx);
   return OpStatus::OK;
 }
 
@@ -465,7 +465,7 @@ uint32_t DflyCmd::CreateSyncSession(ConnectionContext* cntx) {
 
     // Spawn external fiber to allow destructing the context from outside
     // and return from the handler immediately.
-    ::boost::fibers::fiber{&DflyCmd::StopReplication, this, sync_id}.detach();
+    util::MakeFiber(&DflyCmd::StopReplication, this, sync_id).Detach();
   };
 
   string address = cntx->owner()->RemoteEndpointAddress();
@@ -517,23 +517,11 @@ void DflyCmd::CancelReplication(uint32_t sync_id, shared_ptr<ReplicaInfo> replic
   replica_ptr->state.store(SyncState::CANCELLED, memory_order_release);
   replica_ptr->cntx.Cancel();
 
-  // Run cleanup for shard threads.
-  shard_set->AwaitRunningOnShardQueue([replica_ptr](EngineShard* shard) {
-    FlowInfo* flow = &replica_ptr->flows[shard->shard_id()];
-    if (flow->cleanup) {
-      flow->cleanup();
-    }
-  });
-
   // Wait for tasks to finish.
   shard_set->pool()->AwaitFiberOnAll([replica_ptr](unsigned index, auto*) {
     FlowInfo* flow = &replica_ptr->flows[index];
-
-    // Cleanup hasn't been run for io-thread.
-    if (EngineShard::tlocal() == nullptr) {
-      if (flow->cleanup) {
-        flow->cleanup();
-      }
+    if (flow->cleanup) {
+      flow->cleanup();
     }
 
     if (flow->full_sync_fb.IsJoinable()) {

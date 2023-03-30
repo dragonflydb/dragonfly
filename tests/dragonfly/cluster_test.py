@@ -9,13 +9,13 @@ BASE_PORT = 30001
 
 @dfly_args({})
 class TestNotEmulated:
-    def test_cluster_commands_fails_when_not_emulate(self, client: redis.Redis):
-        with pytest.raises(redis.ResponseError) as respErr:
-            client.execute_command("CLUSTER HELP")
+    async def test_cluster_commands_fails_when_not_emulate(self, async_client: aioredis.Redis):
+        with pytest.raises(aioredis.ResponseError) as respErr:
+            await async_client.execute_command("CLUSTER HELP")
         assert "cluster_mode" in str(respErr.value)
 
-        with pytest.raises(redis.ResponseError) as respErr:
-            client.execute_command("CLUSTER SLOTS")
+        with pytest.raises(aioredis.ResponseError) as respErr:
+            await async_client.execute_command("CLUSTER SLOTS")
         assert "emulated" in str(respErr.value)
 
 
@@ -76,7 +76,6 @@ def verify_slots_result(ip: str, port: int, answer: list, rep_ip: str = None, re
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "emulated"})
-@pytest.mark.asyncio
 async def test_cluster_slots_in_replicas(df_local_factory):
     master = df_local_factory.create(port=BASE_PORT)
     replica = df_local_factory.create(port=BASE_PORT+1, logtostdout=True)
@@ -107,11 +106,8 @@ async def test_cluster_slots_in_replicas(df_local_factory):
 
 
 @dfly_args({"cluster_mode": "emulated", "cluster_announce_ip": "127.0.0.2"})
-@pytest.mark.asyncio
-async def test_cluster_info(async_pool):
-    conn = aioredis.Redis(connection_pool=async_pool)
-
-    res = await conn.execute_command("CLUSTER INFO")
+async def test_cluster_info(async_client):
+    res = await async_client.execute_command("CLUSTER INFO")
     assert len(res) == 16
     assert res == {'cluster_current_epoch': '1',
                    'cluster_known_nodes': '1',
@@ -134,10 +130,8 @@ async def test_cluster_info(async_pool):
 
 @dfly_args({"cluster_mode": "emulated", "cluster_announce_ip": "127.0.0.2"})
 @pytest.mark.asyncio
-async def test_cluster_nodes(async_pool):
-    conn = aioredis.Redis(connection_pool=async_pool)
-
-    res = await conn.execute_command("CLUSTER NODES")
+async def test_cluster_nodes(async_client):
+    res = await async_client.execute_command("CLUSTER NODES")
     assert len(res) == 1
     info = res['127.0.0.2:6379@6379']
     assert res is not None

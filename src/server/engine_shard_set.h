@@ -13,14 +13,15 @@ extern "C" {
 #include <xxhash.h>
 
 #include "base/string_view_sso.h"
+#include "util/proactor_pool.h"
+#include "util/sliding_counter.h"
+
+//
 #include "core/external_alloc.h"
+#include "core/fibers.h"
 #include "core/mi_memory_resource.h"
 #include "core/tx_queue.h"
 #include "server/db_slice.h"
-#include "util/fibers/fiberqueue_threadpool.h"
-#include "util/fibers/fibers_ext.h"
-#include "util/proactor_pool.h"
-#include "util/sliding_counter.h"
 
 namespace dfly {
 
@@ -72,7 +73,7 @@ class EngineShard {
     return &mi_resource_;
   }
 
-  ::util::fibers_ext::FiberQueue* GetFiberQueue() {
+  FiberQueue* GetFiberQueue() {
     return &queue_;
   }
 
@@ -188,8 +189,8 @@ class EngineShard {
   // return true if we did not complete the shard scan
   bool DoDefrag();
 
-  ::util::fibers_ext::FiberQueue queue_;
-  ::boost::fibers::fiber fiber_q_;
+  FiberQueue queue_;
+  Fiber fiber_q_;
 
   TxQueue txq_;
   MiMemoryResource mi_resource_;
@@ -207,8 +208,8 @@ class EngineShard {
   IntentLock shard_lock_;
 
   uint32_t defrag_task_ = 0;
-  ::boost::fibers::fiber fiber_periodic_;
-  ::util::fibers_ext::Done fiber_periodic_done_;
+  Fiber fiber_periodic_;
+  Done fiber_periodic_done_;
 
   DefragTaskState defrag_state_;
   std::unique_ptr<TieredStorage> tiered_storage_;
@@ -275,7 +276,7 @@ class EngineShardSet {
   // The functions running inside the shard queue run atomically (sequentially)
   // with respect each other on the same shard.
   template <typename U> void AwaitRunningOnShardQueue(U&& func) {
-    util::fibers_ext::BlockingCounter bc{unsigned(shard_queue_.size())};
+    BlockingCounter bc{unsigned(shard_queue_.size())};
     for (size_t i = 0; i < shard_queue_.size(); ++i) {
       Add(i, [&func, bc]() mutable {
         func(EngineShard::tlocal());
@@ -294,12 +295,12 @@ class EngineShardSet {
   void InitThreadLocal(util::ProactorBase* pb, bool update_db_time);
 
   util::ProactorPool* pp_;
-  std::vector<util::fibers_ext::FiberQueue*> shard_queue_;
+  std::vector<FiberQueue*> shard_queue_;
 };
 
 template <typename U, typename P>
 void EngineShardSet::RunBriefInParallel(U&& func, P&& pred) const {
-  util::fibers_ext::BlockingCounter bc{0};
+  BlockingCounter bc{0};
 
   for (uint32_t i = 0; i < size(); ++i) {
     if (!pred(i))
@@ -316,7 +317,7 @@ void EngineShardSet::RunBriefInParallel(U&& func, P&& pred) const {
 }
 
 template <typename U> void EngineShardSet::RunBlockingInParallel(U&& func) {
-  util::fibers_ext::BlockingCounter bc{size()};
+  BlockingCounter bc{size()};
 
   for (uint32_t i = 0; i < size(); ++i) {
     util::ProactorBase* dest = pp_->at(i);

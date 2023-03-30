@@ -17,7 +17,6 @@ namespace journal {
 namespace fs = std::filesystem;
 using namespace std;
 using namespace util;
-namespace fibers = boost::fibers;
 
 namespace {
 
@@ -55,7 +54,7 @@ error_code Journal::Close() {
 
   VLOG(1) << "Journal::Close";
 
-  fibers::mutex ec_mu;
+  Mutex ec_mu;
   error_code res;
 
   lock_guard lk(state_mu_);

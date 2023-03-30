@@ -13,12 +13,36 @@ namespace facade {
 
 class SinkReplyBuilder {
  public:
+  struct ResponseValue {
+    std::string_view key;
+    std::string value;
+    uint64_t mc_ver = 0;  // 0 means we do not output it (i.e has not been requested).
+    uint32_t mc_flag = 0;
+  };
+
+  using OptResp = std::optional<ResponseValue>;
+
+ public:
   SinkReplyBuilder(const SinkReplyBuilder&) = delete;
   void operator=(const SinkReplyBuilder&) = delete;
 
   SinkReplyBuilder(::io::Sink* sink);
 
   virtual ~SinkReplyBuilder() {
+  }
+
+  virtual void SendError(std::string_view str, std::string_view type = {}) = 0;  // MC and Redis
+
+  virtual void SendStored() = 0;  // Reply for set commands.
+  virtual void SendSetSkipped() = 0;
+
+  virtual void SendMGetResponse(const OptResp* resp, uint32_t count) = 0;
+
+  virtual void SendLong(long val) = 0;
+  virtual void SendSimpleString(std::string_view str) = 0;
+
+  void SendOk() {
+    SendSimpleString("OK");
   }
 
   // In order to reduce interrupt rate we allow coalescing responses together using
@@ -53,36 +77,10 @@ class SinkReplyBuilder {
     return err_count_;
   }
 
-  //! Sends a string as is without any formatting. raw should be encoded according to the protocol.
-  void SendRaw(std::string_view str);
+ protected:
+  void SendRaw(std::string_view str);  // Sends raw without any formatting.
   void SendRawVec(absl::Span<const std::string_view> msg_vec);
 
-  // Common for both MC and Redis.
-  virtual void SendError(std::string_view str, std::string_view type = std::string_view{}) = 0;
-
-  virtual void SendSimpleString(std::string_view str) = 0;
-
-  void SendOk() {
-    SendSimpleString("OK");
-  }
-
-  struct ResponseValue {
-    std::string_view key;
-    std::string value;
-    uint64_t mc_ver = 0;  // 0 means we do not output it (i.e has not been requested).
-    uint32_t mc_flag = 0;
-  };
-
-  using OptResp = std::optional<ResponseValue>;
-
-  virtual void SendMGetResponse(const OptResp* resp, uint32_t count) = 0;
-  virtual void SendLong(long val) = 0;
-
-  // Reply for set commands.
-  virtual void SendStored() = 0;
-  virtual void SendSetSkipped() = 0;
-
- protected:
   void Send(const iovec* v, uint32_t len);
 
   std::string batch_;
@@ -100,6 +98,8 @@ class MCReplyBuilder : public SinkReplyBuilder {
  public:
   MCReplyBuilder(::io::Sink* stream);
 
+  using SinkReplyBuilder::SendRaw;
+
   void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
 
   // void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) final;
@@ -116,44 +116,37 @@ class MCReplyBuilder : public SinkReplyBuilder {
 
 class RedisReplyBuilder : public SinkReplyBuilder {
  public:
+  enum CollectionType { ARRAY, SET, MAP };
+
+  using StrSpan = std::variant<absl::Span<const std::string>, absl::Span<const std::string_view>>;
+
   RedisReplyBuilder(::io::Sink* stream);
 
   void SetResp3(bool is_resp3);
 
-  void SendError(std::string_view str, std::string_view type = std::string_view{}) override;
+  void SendError(std::string_view str, std::string_view type = {}) override;
   void SendMGetResponse(const OptResp* resp, uint32_t count) override;
-  void SendSimpleString(std::string_view str) override;
+
   void SendStored() override;
-  void SendLong(long val) override;
   void SendSetSkipped() override;
+  virtual void SendError(OpStatus status);
 
-  void SendError(OpStatus status);
-
-  virtual void SendSimpleStrArr(const std::string_view* arr, uint32_t count);
-  // Send *-1
-  virtual void SendNullArray();
-  // Send *0
-  virtual void SendEmptyArray();
-
-  virtual void SendStringArr(absl::Span<const std::string_view> arr);
-  virtual void SendStringArr(absl::Span<const std::string> arr);
-  virtual void SendStringArrayAsMap(absl::Span<const std::string_view> arr);
-  virtual void SendStringArrayAsMap(absl::Span<const std::string> arr);
-  virtual void SendStringArrayAsSet(absl::Span<const std::string_view> arr);
-  virtual void SendStringArrayAsSet(absl::Span<const std::string> arr);
+  virtual void SendNullArray();   // Send *-1
+  virtual void SendEmptyArray();  // Send *0
+  virtual void SendSimpleStrArr(absl::Span<const std::string_view> arr);
+  virtual void SendStringArr(StrSpan arr, CollectionType type = ARRAY);
 
   virtual void SendNull();
+  void SendLong(long val) override;
+  virtual void SendDouble(double val);
+  void SendSimpleString(std::string_view str) override;
 
+  virtual void SendBulkString(std::string_view str);
   virtual void SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
                                bool with_scores);
 
-  virtual void SendDouble(double val);
-
-  virtual void SendBulkString(std::string_view str);
-
-  virtual void StartArray(unsigned len);
-  virtual void StartMap(unsigned num_pairs);
-  virtual void StartSet(unsigned num_elements);
+  void StartArray(unsigned len);  // StartCollection(len, ARRAY)
+  virtual void StartCollection(unsigned len, CollectionType type);
 
   static char* FormatDouble(double val, char* dest, unsigned dest_len);
 
@@ -161,18 +154,18 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   // into the string that would be sent
   static std::string_view StatusToMsg(OpStatus status);
 
- private:
-  enum CollectionType {
-    ARRAY,
-    SET,
-    MAP,
+ protected:
+  struct WrappedStrSpan : public StrSpan {
+    size_t Size() const;
+    std::string_view operator[](size_t index) const;
   };
 
-  using StrPtr = std::variant<const std::string_view*, const std::string*>;
-  void SendStringCollection(StrPtr str_ptr, uint32_t len, CollectionType type);
+ private:
+  void SendStringArrInternal(WrappedStrSpan arr, CollectionType type);
+
+  const char* NullString();
 
   bool is_resp3_ = false;
-  const char* NullString();
 };
 
 class ReqSerializer {

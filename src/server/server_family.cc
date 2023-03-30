@@ -69,17 +69,16 @@ ABSL_DECLARE_FLAG(uint32_t, hz);
 
 namespace dfly {
 
-namespace fibers = ::boost::fibers;
 namespace fs = std::filesystem;
 namespace uring = util::uring;
 
 using absl::GetFlag;
 using absl::StrCat;
 using namespace facade;
+using namespace util;
+using fibers_ext::FiberQueueThreadPool;
+using http::StringResponse;
 using strings::HumanReadableNumBytes;
-using util::ProactorBase;
-using util::fibers_ext::FiberQueueThreadPool;
-using util::http::StringResponse;
 
 namespace {
 
@@ -358,7 +357,6 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
   last_save_info_ = make_shared<LastSaveInfo>();
   last_save_info_->save_time = start_time_;
   script_mgr_.reset(new ScriptMgr());
-  channel_store_.reset(new ChannelStore());
   journal_.reset(new journal::Journal());
 
   {
@@ -473,7 +471,7 @@ void ServerFamily::Shutdown() {
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
-fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path) {
+Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
   CHECK(absl::EndsWith(load_path, ".rdb") || absl::EndsWith(load_path, "summary.dfs"));
 
   vector<std::string> paths{{load_path}};
@@ -484,7 +482,7 @@ fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path)
     io::Result<io::StatShortVec> files = io::StatFiles(glob);
 
     if (files && files->size() == 0) {
-      fibers::promise<std::error_code> ec_promise;
+      Promise<std::error_code> ec_promise;
       ec_promise.set_value(make_error_code(errc::no_such_file_or_directory));
       return ec_promise.get_future();
     }
@@ -500,7 +498,7 @@ fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path)
     (void)fs::canonical(path, ec);
     if (ec) {
       LOG(ERROR) << "Error loading " << load_path << " " << ec.message();
-      fibers::promise<std::error_code> ec_promise;
+      Promise<std::error_code> ec_promise;
       ec_promise.set_value(ec);
       return ec_promise.get_future();
     }
@@ -526,7 +524,7 @@ fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path)
 
   auto& pool = service_.proactor_pool();
 
-  vector<util::fibers_ext::Fiber> load_fibers;
+  vector<Fiber> load_fibers;
   load_fibers.reserve(paths.size());
 
   auto first_error = std::make_shared<AggregateError>();
@@ -547,8 +545,8 @@ fibers::future<std::error_code> ServerFamily::Load(const std::string& load_path)
     load_fibers.push_back(proactor->LaunchFiber(std::move(load_fiber)));
   }
 
-  boost::fibers::promise<std::error_code> ec_promise;
-  boost::fibers::future<std::error_code> ec_future = ec_promise.get_future();
+  Promise<std::error_code> ec_promise;
+  Future<std::error_code> ec_future = ec_promise.get_future();
 
   // Run fiber that empties the channel and sets ec_promise.
   auto load_join_fiber = [this, first_error, load_fibers = std::move(load_fibers),
@@ -916,7 +914,7 @@ GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
 
   vector<unique_ptr<RdbSnapshot>> snapshots;
   absl::flat_hash_map<string_view, size_t> rdb_name_map;
-  fibers::mutex mu;  // guards rdb_name_map
+  Mutex mu;  // guards rdb_name_map
 
   auto save_cb = [&](unsigned index) {
     auto& snapshot = snapshots[index];
@@ -1153,11 +1151,14 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
 
   if (sub_cmd == "LIST") {
     vector<string> client_info;
-    fibers::mutex mu;
-    auto cb = [&](util::Connection* conn) {
+    absl::base_internal::SpinLock mu;
+
+    // we can not preempt the connection traversal, so we need to use a spinlock.
+    // alternatively we could lock when mutating the connection list, but it seems not important.
+    auto cb = [&](unsigned thread_index, util::Connection* conn) {
       facade::Connection* dcon = static_cast<facade::Connection*>(conn);
-      string info = dcon->GetClientInfo();
-      lock_guard lk(mu);
+      string info = dcon->GetClientInfo(thread_index);
+      absl::base_internal::SpinLockHolder l(&mu);
       client_info.push_back(move(info));
     };
 
@@ -1189,7 +1190,7 @@ void ServerFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
   string_view sub_cmd = ArgS(args, 1);
 
   if (!is_emulated_cluster_) {
-    return (*cntx)->SendError("CLUSTER commands demands the `cluster_mode` flag set to `emulated`");
+    return (*cntx)->SendError("CLUSTER commands requires --cluster_mode=emulated");
   }
 
   if (sub_cmd == "HELP") {
@@ -1202,11 +1203,11 @@ void ServerFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
         "   Return cluster configuration seen by node. Output format:",
         "   <id> <ip:port> <flags> <master> <pings> <pongs> <epoch> <link> <slot> ...",
         "INFO",
-        +"  Return information about the cluster",
+        "  Return information about the cluster",
         "HELP",
         "    Prints this help.",
     };
-    return (*cntx)->SendSimpleStrArr(help_arr, ABSL_ARRAYSIZE(help_arr));
+    return (*cntx)->SendSimpleStrArr(help_arr);
   }
 
   if (sub_cmd == "SLOTS") {
@@ -1318,7 +1319,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
     string_view param = ArgS(args, 2);
     string_view res[2] = {param, "tbd"};
 
-    return (*cntx)->SendStringArrayAsMap(res);
+    return (*cntx)->SendStringArr(res, RedisReplyBuilder::MAP);
   } else if (sub_cmd == "RESETSTAT") {
     shard_set->pool()->Await([](auto*) {
       auto* stats = ServerState::tl_connection_stats();
@@ -1390,13 +1391,13 @@ static void MergeInto(const DbSlice::Stats& src, Metrics* dest) {
 Metrics ServerFamily::GetMetrics() const {
   Metrics result;
 
-  fibers::mutex mu;
+  Mutex mu;
 
   auto cb = [&](ProactorBase* pb) {
     EngineShard* shard = EngineShard::tlocal();
     ServerState* ss = ServerState::tlocal();
 
-    lock_guard<fibers::mutex> lk(mu);
+    lock_guard lk(mu);
 
     result.uptime = time(NULL) - this->start_time_;
     result.conn_stats += ss->connection_stats;
@@ -1711,7 +1712,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
     (*cntx)->SetResp3(false);
   }
 
-  (*cntx)->StartMap(7);
+  (*cntx)->StartCollection(7, RedisReplyBuilder::MAP);
   (*cntx)->SendBulkString("server");
   (*cntx)->SendBulkString("redis");
   (*cntx)->SendBulkString("version");
@@ -1932,6 +1933,13 @@ void ServerFamily::Psync(CmdArgList args, ConnectionContext* cntx) {
   SyncGeneric("?", 0, cntx);  // full sync, ignore the request.
 }
 
+void ServerFamily::ReadOnly(CmdArgList args, ConnectionContext* cntx) {
+  if (!is_emulated_cluster_) {
+    return (*cntx)->SendError("READONLY command requires --cluster_mode=emulated");
+  }
+  (*cntx)->SendOk();
+}
+
 void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
   time_t save_time;
   {
@@ -1999,6 +2007,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, 0}.HFUNC(Save)
             << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0}.HFUNC(_Shutdown)
             << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
+            << CI{"READONLY", CO::READONLY, 1, 0, 0, 0}.HFUNC(ReadOnly)
             << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, 0}.HFUNC(ReplConf)
             << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, 0}.HFUNC(Role)

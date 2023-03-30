@@ -4,8 +4,6 @@
 #pragma once
 
 #include <boost/fiber/barrier.hpp>
-#include <boost/fiber/fiber.hpp>
-#include <boost/fiber/mutex.hpp>
 #include <queue>
 #include <variant>
 
@@ -15,7 +13,6 @@
 #include "server/common.h"
 #include "server/journal/types.h"
 #include "util/fiber_socket_base.h"
-#include "util/fibers/fibers_ext.h"
 
 namespace facade {
 class ReqSerializer;
@@ -83,12 +80,12 @@ class Replica {
 
   // Coorindator for multi shard execution.
   struct MultiShardExecution {
-    boost::fibers::mutex map_mu;
+    Mutex map_mu;
 
     struct TxExecutionSync {
-      util::fibers_ext::Barrier barrier;
+      Barrier barrier;
       std::atomic_uint32_t counter;
-      util::fibers_ext::BlockingCounter block;
+      BlockingCounter block;
 
       TxExecutionSync(uint32_t counter) : barrier(counter), counter(counter), block(counter) {
       }
@@ -118,8 +115,9 @@ class Replica {
   // Coordinate state transitions. Spawned by start.
   void MainReplicationFb();
 
-  std::error_code ConnectSocket();  // Connect to master.
-  std::error_code Greet();          // Send PING and REPLCONF.
+  std::error_code ResolveMasterDns();  // Resolve master dns
+  std::error_code ConnectAndAuth();    // Connect to master and authenticate if needed.
+  std::error_code Greet();             // Send PING and REPLCONF.
 
   std::error_code InitiatePSync();     // Redis full sync.
   std::error_code InitiateDflySync();  // Dragonfly full sync.
@@ -142,14 +140,13 @@ class Replica {
           std::shared_ptr<MultiShardExecution> shared_exe_data);
 
   // Start replica initialized as dfly flow.
-  std::error_code StartFullSyncFlow(util::fibers_ext::BlockingCounter block, Context* cntx);
+  std::error_code StartFullSyncFlow(BlockingCounter block, Context* cntx);
 
   // Transition into stable state mode as dfly flow.
   std::error_code StartStableSyncFlow(Context* cntx);
 
   // Single flow full sync fiber spawned by StartFullSyncFlow.
-  void FullSyncDflyFb(std::string eof_token, util::fibers_ext::BlockingCounter block,
-                      Context* cntx);
+  void FullSyncDflyFb(std::string eof_token, BlockingCounter block, Context* cntx);
 
   // Single flow stable state sync fiber spawned by StartStableSyncFlow.
   void StableSyncDflyReadFb(Context* cntx);
@@ -226,7 +223,7 @@ class Replica {
 
   std::queue<std::pair<TransactionData, bool>> trans_data_queue_;
   static constexpr size_t kYieldAfterItemsInQueue = 50;
-  ::util::fibers_ext::EventCount waker_;  // waker for trans_data_queue_
+  EventCount waker_;  // waker for trans_data_queue_
   bool use_multi_shard_exe_sync_;
 
   std::unique_ptr<JournalExecutor> executor_;
@@ -234,13 +231,13 @@ class Replica {
   std::atomic_uint64_t journal_rec_executed_ = 0;
 
   // MainReplicationFb in standalone mode, FullSyncDflyFb in flow mode.
-  ::boost::fibers::fiber sync_fb_;
-  ::boost::fibers::fiber execution_fb_;
+  Fiber sync_fb_;
+  Fiber execution_fb_;
 
   std::vector<std::unique_ptr<Replica>> shard_flows_;
 
   // Guard operations where flows might be in a mixed state (transition/setup)
-  ::boost::fibers::mutex flows_op_mu_;
+  Mutex flows_op_mu_;
 
   std::optional<base::IoBuf> leftover_buf_;
   std::unique_ptr<facade::RedisParser> parser_;

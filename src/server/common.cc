@@ -311,7 +311,7 @@ GenericError Context::ReportErrorInternal(GenericError&& err) {
   CHECK(!err_handler_fb_.IsJoinable());
 
   if (err_handler_)
-    err_handler_fb_ = util::fibers_ext::Fiber{err_handler_, err_};
+    err_handler_fb_ = Fiber{err_handler_, err_};
 
   Cancellation::Cancel();
   return err_;

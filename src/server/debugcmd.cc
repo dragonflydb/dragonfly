@@ -7,7 +7,6 @@
 #include <absl/random/random.h>
 #include <absl/strings/str_cat.h>
 
-#include <boost/fiber/operations.hpp>
 #include <filesystem>
 
 #include "base/flags.h"
@@ -33,7 +32,6 @@ namespace dfly {
 
 using namespace util;
 using boost::intrusive_ptr;
-using boost::fibers::fiber;
 using namespace facade;
 namespace fs = std::filesystem;
 using absl::GetFlag;
@@ -119,7 +117,7 @@ void DebugCmd::Run(CmdArgList args) {
         "HELP",
         "    Prints this help.",
     };
-    return (*cntx_)->SendSimpleStrArr(help_arr, ABSL_ARRAYSIZE(help_arr));
+    return (*cntx_)->SendSimpleStrArr(help_arr);
   }
 
   VLOG(1) << "subcmd " << subcmd;
@@ -299,7 +297,7 @@ void DebugCmd::Populate(CmdArgList args) {
   }
   ranges.emplace_back(from, total_count - from);
 
-  vector<fibers_ext::Fiber> fb_arr(ranges.size());
+  vector<Fiber> fb_arr(ranges.size());
   for (size_t i = 0; i < ranges.size(); ++i) {
     auto range = ranges[i];
 
@@ -337,7 +335,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view 
       ess.Add(sid, [=] {
         DoPopulateBatch(prefix, value_len, populate_random_values, params, shard_batch);
         if (i % 50 == 0) {
-          fibers_ext::Yield();
+          ThisFiber::Yield();
         }
       });
 
@@ -419,7 +417,7 @@ void DebugCmd::Inspect(string_view key) {
 }
 
 void DebugCmd::Watched() {
-  boost::fibers::mutex mu;
+  Mutex mu;
 
   vector<string> watched_keys;
   vector<string> awaked_trans;

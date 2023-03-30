@@ -558,7 +558,7 @@ void IntervalVisitor::PopSkipList(ZSetFamily::TopNScored sc) {
   if (params_.reverse) {
     ln = zsl->tail;
   } else {
-    ln = zsl->header;
+    ln = zsl->header->level[0].forward;
   }
 
   while (ln && sc--) {
@@ -1755,6 +1755,7 @@ void ZSetFamily::ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cn
 
   RangeParams range_params;
   range_params.reverse = reverse;
+  range_params.with_scores = true;
   ZRangeSpec range_spec;
   range_spec.params = range_params;
 
