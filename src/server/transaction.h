@@ -19,7 +19,6 @@
 #include "server/common.h"
 #include "server/journal/types.h"
 #include "server/table.h"
-#include "util/fibers/fibers_ext.h"
 
 namespace dfly {
 
@@ -494,8 +493,8 @@ class Transaction {
   uint32_t unique_shard_cnt_{0};          // Number of unique shards active
   ShardId unique_shard_id_{kInvalidSid};  // Set if unique_shard_cnt_ = 1
 
-  util::fibers_ext::EventCount blocking_ec_;  // Used to wake blocking transactions.
-  util::fibers_ext::EventCount run_ec_;       // Used to wait for shard callbacks
+  EventCount blocking_ec_;  // Used to wake blocking transactions.
+  EventCount run_ec_;       // Used to wait for shard callbacks
 
   // Transaction coordinator state, written and read by coordinator thread.
   // Can be read by shard threads as long as we respect ordering rules, i.e. when

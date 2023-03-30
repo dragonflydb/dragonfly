@@ -276,7 +276,7 @@ TEST_F(GenericFamilyTest, Move) {
   ASSERT_THAT(Run({"get", "a"}), "test");
 
   // Check MOVE awakes blocking operations
-  auto fb_blpop = pp_->at(0)->LaunchFiber(fibers_ext::Launch::dispatch, [&] {
+  auto fb_blpop = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
     Run({"select", "1"});
     auto resp = Run({"blpop", "l", "0"});
     ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));

@@ -61,7 +61,7 @@ class TieredStorage {
   size_t submitted_io_write_size_ = 0;
   uint32_t num_active_requests_ = 0;
 
-  util::fibers_ext::EventCount active_req_sem_;
+  EventCount active_req_sem_;
 
   struct PerDb;
   std::vector<PerDb*> db_arr_;

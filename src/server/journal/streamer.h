@@ -41,7 +41,7 @@ class JournalStreamer : protected BufferedStreamerBase {
   uint32_t journal_cb_id_{0};
   journal::Journal* journal_;
 
-  util::fibers_ext::Fiber write_fb_{};
+  Fiber write_fb_{};
   JournalWriter writer_{this};
 
   std::atomic_uint64_t record_cnt_{0};

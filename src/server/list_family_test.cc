@@ -111,17 +111,17 @@ TEST_F(ListFamilyTest, BLPopBlocking) {
   RespExpr resp0, resp1;
 
   // Run the fiber at creation.
-  auto fb0 = pp_->at(0)->LaunchFiber(fibers_ext::Launch::dispatch, [&] {
+  auto fb0 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
     resp0 = Run({"blpop", "x", "0"});
     LOG(INFO) << "pop0";
   });
 
-  fibers_ext::SleepFor(50us);
+  ThisFiber::SleepFor(50us);
   auto fb1 = pp_->at(1)->LaunchFiber([&] {
     resp1 = Run({"blpop", "x", "0"});
     LOG(INFO) << "pop1";
   });
-  fibers_ext::SleepFor(30us);
+  ThisFiber::SleepFor(30us);
 
   RespExpr resp = pp_->at(1)->Await([&] { return Run("B1", {"lpush", "x", "2", "1"}); });
   ASSERT_THAT(resp, IntArg(2));
@@ -150,7 +150,7 @@ TEST_F(ListFamilyTest, BLPopMultiple) {
   ASSERT_FALSE(IsLocked(0, kKey1));
   ASSERT_FALSE(IsLocked(0, kKey2));
 
-  auto fb1 = pp_->at(0)->LaunchFiber(fibers_ext::Launch::dispatch, [&] {
+  auto fb1 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
     resp0 = Run({"blpop", kKey1, kKey2, "0"});
   });
 
@@ -203,7 +203,7 @@ TEST_F(ListFamilyTest, BLPopMultiPush) {
   Run({"exists", kKey1, kKey2, kKey3});
   ASSERT_EQ(3, GetDebugInfo().shards_count);
   RespExpr blpop_resp;
-  auto pop_fb = pp_->at(0)->LaunchFiber(fibers_ext::Launch::dispatch, [&] {
+  auto pop_fb = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
     blpop_resp = Run({"blpop", kKey1, kKey2, kKey3, "0"});
   });
 
@@ -242,7 +242,7 @@ TEST_F(ListFamilyTest, BLPopMultiPush) {
 TEST_F(ListFamilyTest, BLPopSerialize) {
   RespExpr blpop_resp;
 
-  auto pop_fb = pp_->at(0)->LaunchFiber(fibers_ext::Launch::dispatch, [&] {
+  auto pop_fb = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
     blpop_resp = Run({"blpop", kKey1, kKey2, kKey3, "0"});
   });
 
@@ -312,7 +312,7 @@ TEST_F(ListFamilyTest, BLPopSerialize) {
 TEST_F(ListFamilyTest, WrongTypeDoesNotWake) {
   RespExpr blpop_resp;
 
-  auto pop_fb = pp_->at(0)->LaunchFiber(fibers_ext::Launch::dispatch, [&] {
+  auto pop_fb = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
     blpop_resp = Run({"blpop", kKey1, "0"});
   });
 
@@ -339,7 +339,7 @@ TEST_F(ListFamilyTest, WrongTypeDoesNotWake) {
 TEST_F(ListFamilyTest, BPopSameKeyTwice) {
   RespExpr blpop_resp;
 
-  auto pop_fb = pp_->at(0)->LaunchFiber(fibers_ext::Launch::dispatch, [&] {
+  auto pop_fb = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
     blpop_resp = Run({"blpop", kKey1, kKey2, kKey2, kKey1, "0"});
     EXPECT_EQ(0, NumWatched());
   });
@@ -352,7 +352,7 @@ TEST_F(ListFamilyTest, BPopSameKeyTwice) {
   ASSERT_THAT(blpop_resp, ArrLen(2));
   EXPECT_THAT(blpop_resp.GetVec(), ElementsAre(kKey1, "bar"));
 
-  pop_fb = pp_->at(0)->LaunchFiber(fibers_ext::Launch::dispatch, [&] {
+  pop_fb = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
     blpop_resp = Run({"blpop", kKey1, kKey2, kKey2, kKey1, "0"});
   });
 
@@ -370,7 +370,7 @@ TEST_F(ListFamilyTest, BPopTwoKeysSameShard) {
   ASSERT_EQ(1, GetDebugInfo().shards_count);
   RespExpr blpop_resp;
 
-  auto pop_fb = pp_->at(0)->LaunchFiber(fibers_ext::Launch::dispatch, [&] {
+  auto pop_fb = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
     blpop_resp = Run({"blpop", "x", "y", "0"});
     EXPECT_FALSE(IsLocked(0, "y"));
     ASSERT_EQ(0, NumWatched());
@@ -391,7 +391,7 @@ TEST_F(ListFamilyTest, BPopRename) {
   Run({"exists", kKey1, kKey2});
   ASSERT_EQ(2, GetDebugInfo().shards_count);
 
-  auto pop_fb = pp_->at(0)->LaunchFiber(fibers_ext::Launch::dispatch, [&] {
+  auto pop_fb = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
     blpop_resp = Run({"blpop", kKey1, "0"});
   });
 
@@ -409,7 +409,7 @@ TEST_F(ListFamilyTest, BPopRename) {
 
 TEST_F(ListFamilyTest, BPopFlush) {
   RespExpr blpop_resp;
-  auto pop_fb = pp_->at(0)->LaunchFiber(fibers_ext::Launch::dispatch, [&] {
+  auto pop_fb = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
     blpop_resp = Run({"blpop", kKey1, "0"});
   });
 
@@ -665,11 +665,11 @@ TEST_F(ListFamilyTest, TwoQueueBug451) {
     for (int i = 0; i < 300; i++) {
       Run(id, {"rpush", "a", "DATA"});
     }
-    fibers_ext::SleepFor(50ms);
+    ThisFiber::SleepFor(50ms);
     running = false;
   };
 
-  vector<fibers_ext::Fiber> fbs;
+  vector<Fiber> fbs;
 
   // more likely to reproduce the bug if we start pop_fiber first.
   for (int i = 0; i < 2; i++) {
@@ -715,10 +715,10 @@ TEST_F(ListFamilyTest, BRPopLPushSingleShardBlocking) {
   RespExpr resp;
 
   // Run the fiber at creation.
-  auto fb0 = pp_->at(0)->LaunchFiber(fibers_ext::Launch::dispatch, [&] {
+  auto fb0 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
     resp = Run({"brpoplpush", "x", "y", "0"});
   });
-  fibers_ext::SleepFor(30us);
+  ThisFiber::SleepFor(30us);
   pp_->at(1)->Await([&] { Run("B1", {"lpush", "y", "2"}); });
 
   pp_->at(1)->Await([&] { Run("B1", {"lpush", "x", "1"}); });
@@ -735,9 +735,9 @@ TEST_F(ListFamilyTest, BRPopContended) {
   constexpr auto kNumFibers = 4;
 
   // Run the fiber at creation.
-  fibers_ext::Fiber fb[kNumFibers];
+  Fiber fb[kNumFibers];
   for (int i = 0; i < kNumFibers; i++) {
-    fb[i] = pp_->at(1)->LaunchFiber(fibers_ext::Launch::dispatch, [&] {
+    fb[i] = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
       string id = StrCat("id", i);
       while (!done) {
         Run(id, {"brpop", "k0", "k1", "k2", "k3", "k4", "0.1"});
@@ -772,11 +772,11 @@ TEST_F(ListFamilyTest, BRPopLPushTwoShards) {
   ASSERT_EQ(0, NumWatched());
 
   // Run the fiber at creation.
-  auto fb0 = pp_->at(0)->LaunchFiber(fibers_ext::Launch::dispatch, [&] {
+  auto fb0 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
     resp = Run({"brpoplpush", "x", "z", "0"});
   });
 
-  fibers_ext::SleepFor(30us);
+  ThisFiber::SleepFor(30us);
   RespExpr resp_push = pp_->at(1)->Await([&] { return Run("B1", {"lpush", "z", "val2"}); });
   ASSERT_THAT(resp_push, IntArg(1));
 

@@ -297,7 +297,7 @@ void DebugCmd::Populate(CmdArgList args) {
   }
   ranges.emplace_back(from, total_count - from);
 
-  vector<fibers_ext::Fiber> fb_arr(ranges.size());
+  vector<Fiber> fb_arr(ranges.size());
   for (size_t i = 0; i < ranges.size(); ++i) {
     auto range = ranges[i];
 
@@ -335,7 +335,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view 
       ess.Add(sid, [=] {
         DoPopulateBatch(prefix, value_len, populate_random_values, params, shard_batch);
         if (i % 50 == 0) {
-          fibers_ext::Yield();
+          ThisFiber::Yield();
         }
       });
 
@@ -417,7 +417,7 @@ void DebugCmd::Inspect(string_view key) {
 }
 
 void DebugCmd::Watched() {
-  util::fibers_ext::Mutex mu;
+  Mutex mu;
 
   vector<string> watched_keys;
   vector<string> awaked_trans;

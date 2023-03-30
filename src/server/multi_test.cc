@@ -208,7 +208,7 @@ TEST_F(MultiTest, MultiConsistent) {
   auto fb = pp_->at(1)->LaunchFiber([&] {
     RespExpr resp = Run({"multi"});
     ASSERT_EQ(resp, "OK");
-    fibers_ext::SleepFor(1ms);
+    ThisFiber::SleepFor(1ms);
 
     resp = Run({"get", kKey1});
     ASSERT_EQ(resp, "QUEUED");

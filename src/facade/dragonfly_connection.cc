@@ -359,17 +359,17 @@ void Connection::OnShutdown() {
 
 void Connection::OnPreMigrateThread() {
   // If we migrating to another io_uring we should cancel any pending requests we have.
-  if (break_poll_id_ != kuint32max) {
+  if (break_poll_id_ != UINT32_MAX) {
     auto* ls = static_cast<LinuxSocketBase*>(socket_.get());
     ls->CancelPoll(break_poll_id_);
-    break_poll_id_ = kuint32max;
+    break_poll_id_ = UINT32_MAX;
   }
 }
 
 void Connection::OnPostMigrateThread() {
   // Once we migrated, we should rearm OnBreakCb callback.
   if (breaker_cb_) {
-    DCHECK_EQ(kuint32max, break_poll_id_);
+    DCHECK_EQ(UINT32_MAX, break_poll_id_);
 
     auto* ls = static_cast<LinuxSocketBase*>(socket_.get());
     break_poll_id_ =
@@ -448,7 +448,7 @@ void Connection::HandleRequests() {
 
       ConnectionFlow(peer);
 
-      if (break_poll_id_ != kuint32max) {
+      if (break_poll_id_ != UINT32_MAX) {
         us->CancelPoll(break_poll_id_);
       }
 
@@ -513,7 +513,7 @@ string Connection::GetClientInfo(unsigned thread_id) const {
   return res;
 }
 
-uint32 Connection::GetClientId() const {
+uint32_t Connection::GetClientId() const {
   return id_;
 }
 
@@ -558,7 +558,7 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
 void Connection::ConnectionFlow(FiberSocketBase* peer) {
   stats_ = service_->GetThreadLocalConnectionStats();
 
-  auto dispatch_fb = MakeFiber(fibers_ext::Launch::dispatch, [&] { DispatchFiber(peer); });
+  auto dispatch_fb = MakeFiber(dfly::Launch::dispatch, [&] { DispatchFiber(peer); });
 
   ++stats_->num_conns;
   ++stats_->conn_received_cnt;
@@ -683,7 +683,7 @@ auto Connection::ParseRedis() -> ParserStatus {
         if (dispatch_q_.size() == 1) {
           evc_.notify();
         } else if (dispatch_q_.size() > 10) {
-          fibers_ext::Yield();
+          ThisFiber::Yield();
         }
       }
     }
@@ -762,7 +762,7 @@ void Connection::OnBreakCb(int32_t mask) {
   VLOG(1) << "Got event " << mask;
   CHECK(cc_);
   cc_->conn_closing = true;
-  break_poll_id_ = kuint32max;  // do not attempt to cancel it.
+  break_poll_id_ = UINT32_MAX;  // do not attempt to cancel it.
 
   breaker_cb_(mask);
   evc_.notify();  // Notify dispatch fiber.

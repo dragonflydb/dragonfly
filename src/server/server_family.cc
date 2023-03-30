@@ -471,7 +471,7 @@ void ServerFamily::Shutdown() {
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
-fibers_ext::Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
+Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
   CHECK(absl::EndsWith(load_path, ".rdb") || absl::EndsWith(load_path, "summary.dfs"));
 
   vector<std::string> paths{{load_path}};
@@ -482,7 +482,7 @@ fibers_ext::Future<std::error_code> ServerFamily::Load(const std::string& load_p
     io::Result<io::StatShortVec> files = io::StatFiles(glob);
 
     if (files && files->size() == 0) {
-      fibers_ext::Promise<std::error_code> ec_promise;
+      Promise<std::error_code> ec_promise;
       ec_promise.set_value(make_error_code(errc::no_such_file_or_directory));
       return ec_promise.get_future();
     }
@@ -498,7 +498,7 @@ fibers_ext::Future<std::error_code> ServerFamily::Load(const std::string& load_p
     (void)fs::canonical(path, ec);
     if (ec) {
       LOG(ERROR) << "Error loading " << load_path << " " << ec.message();
-      fibers_ext::Promise<std::error_code> ec_promise;
+      Promise<std::error_code> ec_promise;
       ec_promise.set_value(ec);
       return ec_promise.get_future();
     }
@@ -524,7 +524,7 @@ fibers_ext::Future<std::error_code> ServerFamily::Load(const std::string& load_p
 
   auto& pool = service_.proactor_pool();
 
-  vector<util::fibers_ext::Fiber> load_fibers;
+  vector<Fiber> load_fibers;
   load_fibers.reserve(paths.size());
 
   auto first_error = std::make_shared<AggregateError>();
@@ -545,8 +545,8 @@ fibers_ext::Future<std::error_code> ServerFamily::Load(const std::string& load_p
     load_fibers.push_back(proactor->LaunchFiber(std::move(load_fiber)));
   }
 
-  boost::fibers::promise<std::error_code> ec_promise;
-  boost::fibers::future<std::error_code> ec_future = ec_promise.get_future();
+  Promise<std::error_code> ec_promise;
+  Future<std::error_code> ec_future = ec_promise.get_future();
 
   // Run fiber that empties the channel and sets ec_promise.
   auto load_join_fiber = [this, first_error, load_fibers = std::move(load_fibers),
@@ -914,7 +914,7 @@ GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
 
   vector<unique_ptr<RdbSnapshot>> snapshots;
   absl::flat_hash_map<string_view, size_t> rdb_name_map;
-  fibers_ext::Mutex mu;  // guards rdb_name_map
+  Mutex mu;  // guards rdb_name_map
 
   auto save_cb = [&](unsigned index) {
     auto& snapshot = snapshots[index];
@@ -1391,7 +1391,7 @@ static void MergeInto(const DbSlice::Stats& src, Metrics* dest) {
 Metrics ServerFamily::GetMetrics() const {
   Metrics result;
 
-  fibers_ext::Mutex mu;
+  Mutex mu;
 
   auto cb = [&](ProactorBase* pb) {
     EngineShard* shard = EngineShard::tlocal();

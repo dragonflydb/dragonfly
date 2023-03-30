@@ -5,7 +5,6 @@
 
 #include <absl/container/flat_hash_map.h>
 
-#include <boost/fiber/mutex.hpp>
 #include <string_view>
 
 #include "server/conn_context.h"
@@ -54,7 +53,7 @@ class ChannelStore {
     static bool ByThread(const Subscriber& lhs, const Subscriber& rhs);
 
     ConnectionContext* conn_cntx;
-    util::fibers_ext::BlockingCounter borrow_token;  // to keep connection alive
+    BlockingCounter borrow_token;  // to keep connection alive
     uint32_t thread_id;
     std::string pattern;  // non-empty if registered via psubscribe
   };
@@ -107,7 +106,7 @@ class ChannelStore {
   // Centralized controller to prevent overlaping updates.
   struct ControlBlock {
     std::atomic<ChannelStore*> most_recent;
-    ::boost::fibers::mutex update_mu;  // locked during updates.
+    Mutex update_mu;  // locked during updates.
   };
 
  private:

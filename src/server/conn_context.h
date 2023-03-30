@@ -6,9 +6,9 @@
 
 #include <absl/container/flat_hash_set.h>
 
+#include "core/fibers.h"
 #include "facade/conn_context.h"
 #include "server/common.h"
-#include "util/fibers/fibers_ext.h"
 
 namespace dfly {
 
@@ -82,7 +82,7 @@ struct ConnectionState {
     absl::flat_hash_set<std::string> channels;
     absl::flat_hash_set<std::string> patterns;
 
-    util::fibers_ext::BlockingCounter borrow_token{0};
+    BlockingCounter borrow_token{0};
   };
 
   struct ReplicationInfo {

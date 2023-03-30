@@ -130,8 +130,8 @@ class SliceSnapshot {
 
   std::unique_ptr<RdbSerializer> serializer_;
 
-  util::fibers_ext::Mutex mu_;
-  ::util::fibers_ext::Fiber snapshot_fb_;  // IterateEntriesFb
+  Mutex mu_;
+  Fiber snapshot_fb_;  // IterateEntriesFb
 
   CompressionMode compression_mode_;
   RdbTypeFreqMap type_freq_map_;

@@ -1851,7 +1851,7 @@ error_code RdbLoader::Load(io::Source* src) {
 }
 
 void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
-  fibers_ext::BlockingCounter bc(shard_set->size());
+  BlockingCounter bc(shard_set->size());
   for (unsigned i = 0; i < shard_set->size(); ++i) {
     // Flush the remaining items.
     FlushShardAsync(i);

@@ -57,11 +57,10 @@ namespace dfly {
 #endif
 
 using namespace util;
-using base::VarzValue;
-using ::boost::intrusive_ptr;
-namespace fibers = ::boost::fibers;
 using absl::GetFlag;
 using absl::StrCat;
+using base::VarzValue;
+using ::boost::intrusive_ptr;
 using namespace facade;
 namespace h2 = boost::beast::http;
 
@@ -555,7 +554,7 @@ void Service::Shutdown() {
   pp_.Await([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });
 
   // wait for all the pending callbacks to stop.
-  fibers_ext::SleepFor(10ms);
+  ThisFiber::SleepFor(10ms);
 }
 
 static void MultiSetError(ConnectionContext* cntx) {
