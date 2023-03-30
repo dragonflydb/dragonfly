@@ -45,7 +45,8 @@ class SetCmd {
     }
   };
 
-  OpStatus Set(const SetParams& params, std::string_view key, std::string_view value);
+  OpResult<std::optional<std::string>> Set(const SetParams& params, std::string_view key,
+                                           std::string_view value);
 
  private:
   OpStatus SetExisting(const SetParams& params, PrimeIterator it, ExpireIterator e_it,
