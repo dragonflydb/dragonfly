@@ -137,7 +137,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
 
       if (stats_.loop_serialized >= last_yield + 100) {
         DVLOG(2) << "Before sleep " << ThisFiber::GetName();
-        fibers_ext::Yield();
+        ThisFiber::Yield();
         DVLOG(2) << "After sleep";
 
         last_yield = stats_.loop_serialized;

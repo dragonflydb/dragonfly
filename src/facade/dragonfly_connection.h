@@ -10,11 +10,13 @@
 #include <variant>
 
 #include "base/io_buf.h"
+#include "util/connection.h"
+#include "util/http/http_handler.h"
+
+//
+#include "core/fibers.h"
 #include "facade/facade_types.h"
 #include "facade/resp_expr.h"
-#include "util/connection.h"
-#include "util/fibers/fibers_ext.h"
-#include "util/http/http_handler.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
 typedef struct mi_heap_s mi_heap_t;
@@ -92,7 +94,7 @@ class Connection : public util::Connection {
   std::string RemoteEndpointStr() const;
   std::string RemoteEndpointAddress() const;
   std::string LocalBindAddress() const;
-  uint32 GetClientId() const;
+  uint32_t GetClientId() const;
 
   void ShutdownSelf();
 
@@ -153,7 +155,7 @@ class Connection : public util::Connection {
   uint32_t pipeline_msg_cnt_ = 0;
 
   static thread_local std::vector<RequestPtr> free_req_pool_;
-  util::fibers_ext::EventCount evc_;
+  dfly::EventCount evc_;
 
   RespVec parse_args_;
   CmdArgVec cmd_vec_;

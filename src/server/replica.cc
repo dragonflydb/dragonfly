@@ -160,7 +160,7 @@ bool Replica::Start(ConnectionContext* cntx) {
   cntx_.Reset(absl::bind_front(&Replica::DefaultErrorHandler, this));
 
   // 5. Spawn main coordination fiber.
-  sync_fb_ = fibers_ext::Fiber(&Replica::MainReplicationFb, this);
+  sync_fb_ = Fiber(&Replica::MainReplicationFb, this);
 
   (*cntx)->SendOk();
   return true;
@@ -196,7 +196,7 @@ void Replica::MainReplicationFb() {
 
     // 1. Connect socket.
     if ((state_mask_ & R_TCP_CONNECTED) == 0) {
-      fibers_ext::SleepFor(500ms);
+      ThisFiber::SleepFor(500ms);
       if (is_paused_)
         continue;
 
@@ -488,7 +488,7 @@ error_code Replica::InitiatePSync() {
   // There is a data race condition in Redis-master code, where "ACK 0" handler may be
   // triggered before Redis is ready to transition to the streaming state and it silenty ignores
   // "ACK 0". We reduce the chance it happens with this delay.
-  fibers_ext::SleepFor(50ms);
+  ThisFiber::SleepFor(50ms);
 
   return error_code{};
 }
@@ -514,7 +514,7 @@ error_code Replica::InitiateDflySync() {
   }
 
   // Blocked on until all flows got full sync cut.
-  fibers_ext::BlockingCounter sync_block{num_df_flows_};
+  BlockingCounter sync_block{num_df_flows_};
 
   // Switch to new error handler that closes flow sockets.
   auto err_handler = [this, sync_block](const auto& ge) mutable {
@@ -734,7 +734,7 @@ error_code Replica::SendNextPhaseRequest(bool stable) {
   return std::error_code{};
 }
 
-error_code Replica::StartFullSyncFlow(fibers_ext::BlockingCounter sb, Context* cntx) {
+error_code Replica::StartFullSyncFlow(BlockingCounter sb, Context* cntx) {
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
 
   RETURN_ON_ERR(ConnectAndAuth());
@@ -771,7 +771,7 @@ error_code Replica::StartFullSyncFlow(fibers_ext::BlockingCounter sb, Context* c
 
   // We can not discard io_buf because it may contain data
   // besides the response we parsed. Therefore we pass it further to ReplicateDFFb.
-  sync_fb_ = fibers_ext::Fiber(&Replica::FullSyncDflyFb, this, move(eof_token), sb, cntx);
+  sync_fb_ = Fiber(&Replica::FullSyncDflyFb, this, move(eof_token), sb, cntx);
 
   return error_code{};
 }
@@ -784,15 +784,15 @@ error_code Replica::StartStableSyncFlow(Context* cntx) {
   CHECK(sock_->IsOpen());
   // sock_.reset(mythread->CreateSocket());
   // RETURN_ON_ERR(sock_->Connect(master_context_.master_ep));
-  sync_fb_ = fibers_ext::Fiber(&Replica::StableSyncDflyReadFb, this, cntx);
+  sync_fb_ = Fiber(&Replica::StableSyncDflyReadFb, this, cntx);
   if (use_multi_shard_exe_sync_) {
-    execution_fb_ = fibers_ext::Fiber(&Replica::StableSyncDflyExecFb, this, cntx);
+    execution_fb_ = Fiber(&Replica::StableSyncDflyExecFb, this, cntx);
   }
 
   return std::error_code{};
 }
 
-void Replica::FullSyncDflyFb(string eof_token, fibers_ext::BlockingCounter bc, Context* cntx) {
+void Replica::FullSyncDflyFb(string eof_token, BlockingCounter bc, Context* cntx) {
   DCHECK(leftover_buf_);
   SocketSource ss{sock_.get()};
   io::PrefixSource ps{leftover_buf_->InputBuffer(), &ss};

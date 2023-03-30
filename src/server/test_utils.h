@@ -95,7 +95,7 @@ class BaseFamilyTest : public ::testing::Test {
   unsigned num_threads_ = 3;
 
   absl::flat_hash_map<std::string, std::unique_ptr<TestConnWrapper>> connections_;
-  util::fibers_ext::Mutex mu_;
+  Mutex mu_;
   ConnectionContext::DebugInfo last_cmd_dbg_info_;
 
   std::vector<RespVec*> resp_vec_;
