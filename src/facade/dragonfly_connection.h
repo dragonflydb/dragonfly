@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/container/fixed_array.h>
+#include <sys/socket.h>
 
 #include <deque>
 #include <variant>
@@ -20,6 +21,15 @@
 
 typedef struct ssl_ctx_st SSL_CTX;
 typedef struct mi_heap_s mi_heap_t;
+
+// need to declare for older linux distributions like CentOS 7
+#ifndef SO_INCOMING_CPU
+#define SO_INCOMING_CPU 49
+#endif
+
+#ifndef SO_INCOMING_NAPI_ID
+#define SO_INCOMING_NAPI_ID 56
+#endif
 
 namespace facade {
 
