@@ -15,7 +15,7 @@ namespace facade {
 
 struct CaptureVisitor;
 
-// CapturingReplyBuilder allows capturing replies and retrieveing them with Get().
+// CapturingReplyBuilder allows capturing replies and retrieveing them with Take().
 // Those replies can be stored standalone and sent with
 // CapturingReplyBuilder::Apply() to another reply builder.
 class CapturingReplyBuilder : public RedisReplyBuilder {
@@ -80,6 +80,8 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
 
  private:
   struct CollectionPayload {
+    CollectionPayload(unsigned len, CollectionType type);
+
     unsigned len;
     CollectionType type;
     std::vector<Payload> arr;
@@ -87,38 +89,15 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
 
  private:
   // Capture value and store eiter in current topmost collection or as a standalone value.
-  // The flag skip_collection indicates whether a collection should be treaded as a regular value.
-  template <typename T> void Capture(T&& val, bool skip_collection = false) {
-    // Try adding collection to stack if not skipping it.
-    bool added = false;
-    if constexpr (std::is_same_v<std::remove_reference_t<T>, std::unique_ptr<CollectionPayload>>) {
-      if (!skip_collection) {
-        int size = val ? (val->type == MAP ? val->len * 2 : val->len) : 0;
-        stack_.emplace(std::move(val), size);
-        added = true;
-      }
-    }
+  void Capture(Payload val);
 
-    // Add simple element to topmost collection or as standalone.
-    if (!added) {
-      if (!stack_.empty()) {
-        stack_.top().first->arr.push_back(std::move(val));
-        stack_.top().second--;
-      } else {
-        DCHECK_EQ(current_.index(), 0u);
-        current_ = std::move(val);
-      }
-    }
+  // While topmost collection in stack is full, finalize it and add it as a regular value.
+  void CollapseFilledCollections();
 
-    // Add full collections as elements.
-    while (!stack_.empty() && stack_.top().second == 0) {
-      auto pl = std::move(stack_.top());
-      stack_.pop();
-      Capture(std::move(pl.first), true);
-    }
-  }
-
+  // List of nested active collections that are being built.
   std::stack<std::pair<std::unique_ptr<CollectionPayload>, int>> stack_;
+
+  // Root payload.
   Payload current_;
 };
 

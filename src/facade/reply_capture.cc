@@ -1,3 +1,6 @@
+// Copyright 2023, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
 #include "facade/reply_capture.h"
 
 #include "base/logging.h"
@@ -24,7 +27,7 @@ void CapturingReplyBuilder::SendNullArray() {
 }
 
 void CapturingReplyBuilder::SendEmptyArray() {
-  Capture(make_unique<CollectionPayload>(CollectionPayload{0, ARRAY, vector<Payload>{}}));
+  Capture(make_unique<CollectionPayload>(0, ARRAY));
 }
 
 void CapturingReplyBuilder::SendSimpleStrArr(StrSpan arr) {
@@ -76,7 +79,10 @@ void CapturingReplyBuilder::SendScoredArray(const std::vector<std::pair<std::str
 }
 
 void CapturingReplyBuilder::StartCollection(unsigned len, CollectionType type) {
-  Capture(make_unique<CollectionPayload>(CollectionPayload{len, type, vector<Payload>{}}));
+  stack_.emplace(make_unique<CollectionPayload>(len, type), type == MAP ? len * 2 : len);
+
+  // If we added an empty collection, it must be collapsed immediately.
+  CollapseFilledCollections();
 }
 
 CapturingReplyBuilder::Payload CapturingReplyBuilder::Take() {
@@ -84,6 +90,32 @@ CapturingReplyBuilder::Payload CapturingReplyBuilder::Take() {
   Payload pl = move(current_);
   current_ = monostate{};
   return pl;
+}
+
+void CapturingReplyBuilder::Capture(Payload val) {
+  if (!stack_.empty()) {
+    stack_.top().first->arr.push_back(std::move(val));
+    stack_.top().second--;
+  } else {
+    DCHECK_EQ(current_.index(), 0u);
+    current_ = std::move(val);
+  }
+
+  // Check if we filled up a collection.
+  CollapseFilledCollections();
+}
+
+void CapturingReplyBuilder::CollapseFilledCollections() {
+  while (!stack_.empty() && stack_.top().second == 0) {
+    auto pl = move(stack_.top());
+    stack_.pop();
+    Capture(move(pl.first));
+  }
+}
+
+CapturingReplyBuilder::CollectionPayload::CollectionPayload(unsigned len, CollectionType type)
+    : len{len}, type{type}, arr{} {
+  arr.reserve(type == MAP ? len * 2 : len);
 }
 
 struct CaptureVisitor {

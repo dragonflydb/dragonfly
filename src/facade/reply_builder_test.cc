@@ -816,13 +816,15 @@ TEST_F(RedisReplyBuilderTest, TestBasicCapture) {
   crb.SetResp3(true);
   builder_->SetResp3(true);
 
+  // Run generator functions on both a regular redis builder
+  // and the capturing builder with its capture applied.
   for (auto& f : funcs) {
     f(builder_.get());
-    auto c1 = TakePayload();
+    auto expected = TakePayload();
     f(&crb);
     CapturingReplyBuilder::Apply(crb.Take(), builder_.get());
-    auto c2 = TakePayload();
-    EXPECT_EQ(c1, c2);
+    auto actual = TakePayload();
+    EXPECT_EQ(expected, actual);
   }
 
   builder_->SetResp3(false);
