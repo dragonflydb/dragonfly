@@ -14,7 +14,6 @@ extern "C" {
 #include "base/logging.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
-#include "util/proactor_base.h"
 
 ABSL_FLAG(uint32_t, tiered_storage_max_pending_writes, 32,
           "Maximal number of pending writes per thread");

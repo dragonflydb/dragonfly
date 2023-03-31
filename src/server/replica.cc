@@ -25,7 +25,6 @@ extern "C" {
 #include "server/main_service.h"
 #include "server/rdb_load.h"
 #include "strings/human_readable.h"
-#include "util/proactor_base.h"
 
 ABSL_FLAG(bool, enable_multi_shard_sync, false,
           "Execute multi shards commands on replica syncrhonized");
@@ -160,7 +159,7 @@ bool Replica::Start(ConnectionContext* cntx) {
   cntx_.Reset(absl::bind_front(&Replica::DefaultErrorHandler, this));
 
   // 5. Spawn main coordination fiber.
-  sync_fb_ = Fiber(&Replica::MainReplicationFb, this);
+  sync_fb_ = MakeFiber(&Replica::MainReplicationFb, this);
 
   (*cntx)->SendOk();
   return true;

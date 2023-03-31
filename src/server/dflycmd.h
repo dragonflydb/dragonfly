@@ -10,7 +10,6 @@
 #include <memory>
 
 #include "server/conn_context.h"
-#include "util/fibers/fiber.h"
 
 namespace facade {
 class RedisReplyBuilder;

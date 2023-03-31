@@ -8,9 +8,9 @@
 #include <string_view>
 
 #include "base/ring_buffer.h"
+#include "core/uring.h"
 #include "server/common.h"
 #include "server/journal/types.h"
-#include "util/uring/uring_file.h"
 
 namespace dfly {
 namespace journal {
@@ -49,10 +49,10 @@ class JournalSlice {
   struct RingItem;
 
   std::string shard_path_;
-  std::unique_ptr<util::uring::LinuxFile> shard_file_;
+  std::unique_ptr<LinuxFile> shard_file_;
   std::optional<base::RingBuffer<RingItem>> ring_buffer_;
 
-  util::fibers_ext::SharedMutex cb_mu_;
+  util::SharedMutex cb_mu_;
   std::vector<std::pair<uint32_t, ChangeCallback>> change_cb_arr_;
 
   size_t file_offset_ = 0;

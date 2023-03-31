@@ -7,7 +7,6 @@
 #include "server/io_utils.h"
 #include "server/journal/journal.h"
 #include "server/journal/serializer.h"
-#include "util/fibers/fiber.h"
 
 namespace dfly {
 

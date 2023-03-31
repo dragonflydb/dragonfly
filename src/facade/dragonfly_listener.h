@@ -7,7 +7,6 @@
 #include <absl/base/internal/spinlock.h>
 
 #include "facade/facade_types.h"
-#include "util/fibers/fiber.h"
 #include "util/http/http_handler.h"
 #include "util/listener_interface.h"
 

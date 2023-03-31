@@ -5,7 +5,6 @@
 #include "base/io_buf.h"
 #include "io/io.h"
 #include "server/common.h"
-#include "util/fibers/event_count.h"
 
 namespace dfly {
 
@@ -62,7 +61,7 @@ class BufferedStreamerBase : public io::Sink {
  protected:
   bool producer_done_ = false;  // whether producer is done
   unsigned buffered_ = 0;       // how many entries are buffered
-  EventCount waker_{};          // two sided waker
+  EventCount waker_;            // two sided waker
 
   const Cancellation* cll_;  // global cancellation
 

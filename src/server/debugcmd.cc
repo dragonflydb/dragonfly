@@ -19,8 +19,6 @@
 #include "server/server_state.h"
 #include "server/string_family.h"
 #include "server/transaction.h"
-#include "util/fiber_sched_algo.h"
-#include "util/fibers/fiber.h"
 
 using namespace std;
 
@@ -314,7 +312,7 @@ void DebugCmd::Populate(CmdArgList args) {
 
 void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view prefix,
                                   unsigned value_len, bool populate_random_values) {
-  FiberProps::SetName("populate_range");
+  ThisFiber::SetName("populate_range");
   VLOG(1) << "PopulateRange: " << from << "-" << (from + len - 1);
 
   string key = absl::StrCat(prefix, ":");

@@ -5,9 +5,10 @@
 #include "server/journal/streamer.h"
 
 namespace dfly {
+using namespace util;
 
 void JournalStreamer::Start(io::Sink* dest) {
-  write_fb_ = Fiber(&JournalStreamer::WriterFb, this, dest);
+  write_fb_ = MakeFiber(&JournalStreamer::WriterFb, this, dest);
   journal_cb_id_ =
       journal_->RegisterOnChange([this](const journal::Entry& entry, bool allow_await) {
         if (entry.opcode == journal::Op::NOOP) {

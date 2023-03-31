@@ -383,7 +383,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
     flow->saver->StartSnapshotInShard(true, cntx->GetCancellation(), shard);
   }
 
-  flow->full_sync_fb = Fiber(&DflyCmd::FullSyncFb, this, flow, cntx);
+  flow->full_sync_fb = MakeFiber(&DflyCmd::FullSyncFb, this, flow, cntx);
   return OpStatus::OK;
 }
 

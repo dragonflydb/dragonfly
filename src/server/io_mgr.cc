@@ -10,7 +10,6 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/facade_types.h"
-#include "util/uring/proactor.h"
 
 ABSL_FLAG(bool, backing_file_direct, false, "If true uses O_DIRECT to open backing files");
 
@@ -19,8 +18,12 @@ namespace dfly {
 using namespace std;
 using namespace util;
 using namespace facade;
-using uring::FiberCall;
+
+#ifdef USE_FB2
+#else
 using uring::Proactor;
+using uring::SubmitEntry;
+#endif
 
 namespace {
 
@@ -44,13 +47,13 @@ error_code IoMgr::Open(const string& path) {
   if (absl::GetFlag(FLAGS_backing_file_direct)) {
     kFlags |= O_DIRECT;
   }
-  auto res = uring::OpenLinux(path, kFlags, 0666);
+  auto res = OpenLinux(path, kFlags, 0666);
   if (!res)
     return res.error();
   backing_file_ = move(res.value());
   Proactor* proactor = (Proactor*)ProactorBase::me();
   {
-    uring::FiberCall fc(proactor);
+    FiberCall fc(proactor);
     fc->PrepFallocate(backing_file_->fd(), 0, 0, kInitialSize);
     FiberCall::IoResult io_res = fc.Get();
     if (io_res < 0) {
@@ -58,7 +61,7 @@ error_code IoMgr::Open(const string& path) {
     }
   }
   {
-    uring::FiberCall fc(proactor);
+    FiberCall fc(proactor);
     fc->PrepFadvise(backing_file_->fd(), 0, 0, POSIX_FADV_RANDOM);
     FiberCall::IoResult io_res = fc.Get();
     if (io_res < 0) {
@@ -78,7 +81,7 @@ error_code IoMgr::GrowAsync(size_t len, GrowCb cb) {
 
   Proactor* proactor = (Proactor*)ProactorBase::me();
 
-  uring::SubmitEntry entry = proactor->GetSubmitEntry(
+  SubmitEntry entry = proactor->GetSubmitEntry(
       [this, cb = move(cb)](Proactor::IoResult res, uint32_t, int64_t arg) {
         this->flags.grow_progress = 0;
         sz_ += (res == 0 ? arg : 0);
@@ -102,7 +105,7 @@ error_code IoMgr::WriteAsync(size_t offset, string_view blob, WriteCb cb) {
     cb(res);
   };
 
-  uring::SubmitEntry se = proactor->GetSubmitEntry(move(ring_cb), 0);
+  SubmitEntry se = proactor->GetSubmitEntry(move(ring_cb), 0);
   se.PrepWrite(backing_file_->fd(), blob.data(), blob.size(), offset);
 
   return error_code{};

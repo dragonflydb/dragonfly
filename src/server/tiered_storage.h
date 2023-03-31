@@ -9,7 +9,6 @@
 #include "server/common.h"
 #include "server/io_mgr.h"
 #include "server/table.h"
-#include "util/fibers/event_count.h"
 
 namespace dfly {
 
