@@ -813,4 +813,28 @@ TEST_F(ListFamilyTest, BLMove) {
   ASSERT_THAT(resp.GetVec(), ElementsAre("val1", "val2"));
 }
 
+TEST_F(ListFamilyTest, LPushX) {
+  // No push for 'lpushx' on nonexisting key.
+  EXPECT_THAT(Run({"lpushx", kKey1, "val1"}), IntArg(0));
+  EXPECT_THAT(Run({"llen", kKey1}), IntArg(0));
+
+  EXPECT_THAT(Run({"lpush", kKey1, "val1"}), IntArg(1));
+  EXPECT_THAT(Run({"lrange", kKey1, "0", "-1"}), "val1");
+
+  EXPECT_THAT(Run({"lpushx", kKey1, "val2"}), IntArg(2));
+  EXPECT_THAT(Run({"lrange", kKey1, "0", "-1"}).GetVec(), ElementsAre("val2", "val1"));
+}
+
+TEST_F(ListFamilyTest, RPushX) {
+  // No push for 'rpushx' on nonexisting key.
+  EXPECT_THAT(Run({"rpushx", kKey1, "val1"}), IntArg(0));
+  EXPECT_THAT(Run({"llen", kKey1}), IntArg(0));
+
+  EXPECT_THAT(Run({"rpush", kKey1, "val1"}), IntArg(1));
+  EXPECT_THAT(Run({"lrange", kKey1, "0", "-1"}), "val1");
+
+  EXPECT_THAT(Run({"rpushx", kKey1, "val2"}), IntArg(2));
+  EXPECT_THAT(Run({"lrange", kKey1, "0", "-1"}).GetVec(), ElementsAre("val1", "val2"));
+}
+
 }  // namespace dfly
