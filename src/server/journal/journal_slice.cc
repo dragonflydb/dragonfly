@@ -11,7 +11,6 @@
 #include <filesystem>
 
 #include "base/logging.h"
-#include "util/uring/uring_file.h"
 
 namespace dfly {
 namespace journal {

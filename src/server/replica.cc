@@ -769,7 +769,7 @@ error_code Replica::StartFullSyncFlow(BlockingCounter sb, Context* cntx) {
 
   // We can not discard io_buf because it may contain data
   // besides the response we parsed. Therefore we pass it further to ReplicateDFFb.
-  sync_fb_ = Fiber(&Replica::FullSyncDflyFb, this, move(eof_token), sb, cntx);
+  sync_fb_ = MakeFiber(&Replica::FullSyncDflyFb, this, move(eof_token), sb, cntx);
 
   return error_code{};
 }
@@ -782,9 +782,9 @@ error_code Replica::StartStableSyncFlow(Context* cntx) {
   CHECK(sock_->IsOpen());
   // sock_.reset(mythread->CreateSocket());
   // RETURN_ON_ERR(sock_->Connect(master_context_.master_ep));
-  sync_fb_ = Fiber(&Replica::StableSyncDflyReadFb, this, cntx);
+  sync_fb_ = MakeFiber(&Replica::StableSyncDflyReadFb, this, cntx);
   if (use_multi_shard_exe_sync_) {
-    execution_fb_ = Fiber(&Replica::StableSyncDflyExecFb, this, cntx);
+    execution_fb_ = MakeFiber(&Replica::StableSyncDflyExecFb, this, cntx);
   }
 
   return std::error_code{};
