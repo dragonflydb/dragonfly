@@ -8,7 +8,6 @@
 #include <stack>
 #include <variant>
 
-#include "base/logging.h"
 #include "facade/reply_builder.h"
 
 namespace facade {
