@@ -1114,7 +1114,7 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  return cntx->reply_builder()->SendMGetResponse(res.data(), res.size());
+  return cntx->reply_builder()->SendMGetResponse(res);
 }
 
 void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
