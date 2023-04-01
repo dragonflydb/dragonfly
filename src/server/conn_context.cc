@@ -157,11 +157,6 @@ void ConnectionContext::SendSubscriptionChangedResponse(string_view action,
   (*this)->SendLong(count);
 }
 
-CapturingReplyBuilder::Payload ConnectionContext::GetCapture() {
-  auto* crb = dynamic_cast<CapturingReplyBuilder*>(reply_builder());
-  return crb != nullptr ? crb->Take() : CapturingReplyBuilder::Payload{};
-}
-
 void ConnectionState::ExecInfo::Clear() {
   state = EXEC_INACTIVE;
   body.clear();

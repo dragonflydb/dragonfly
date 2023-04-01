@@ -118,9 +118,9 @@ class ConnectionContext : public facade::ConnectionContext {
       : facade::ConnectionContext(stream, owner) {
   }
 
-  ConnectionContext(Transaction* tx)
+  ConnectionContext(Transaction* tx, facade::CapturingReplyBuilder* crb)
       : facade::ConnectionContext(nullptr, nullptr), transaction{tx} {
-    delete Inject(new facade::CapturingReplyBuilder{});
+    delete Inject(crb);
   }
 
   struct DebugInfo {
@@ -145,8 +145,6 @@ class ConnectionContext : public facade::ConnectionContext {
   void UnsubscribeAll(bool to_reply);
   void PUnsubscribeAll(bool to_reply);
   void ChangeMonitor(bool start);  // either start or stop monitor on a given connection
-
-  facade::CapturingReplyBuilder::Payload GetCapture();
 
   bool is_replicating = false;
   bool monitor = false;  // when a monitor command is sent over a given connection, we need to aware

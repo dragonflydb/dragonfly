@@ -1336,7 +1336,8 @@ template <typename F> void IterateKeys(CmdArgList args, KeyIndex keys, F&& f) {
 // ExecutionSquasher allows executing a series of commands under a multi transaction
 // and squashing multiple consecutive single-shard commands into one hop whenever it's possible,
 // thus greatly decreasing the dispatch overhead for them.
-struct ExecutionSquasher {
+class ExecutionSquasher {
+ public:
   static void Execute(absl::Span<StoredCmd> cmds, ConnectionContext* cntx) {
     ExecutionSquasher{cmds, cntx}.Run();
   }
@@ -1363,7 +1364,7 @@ struct ExecutionSquasher {
   ShardExecInfo& PrepareShardInfo(ShardId sid);
 
   // Return true if command was squashed.
-  bool CheckSquashing(StoredCmd* cmd);
+  bool TrySquash(StoredCmd* cmd);
 
   // Execute separate non-squashed cmd.
   void ExecuteStandalone(StoredCmd* cmd);
@@ -1392,7 +1393,6 @@ struct ExecutionSquasher {
 
   absl::flat_hash_set<ShardId> tmp_shards_;
   std::vector<MutableSlice> tmp_keylist_;
-  std::vector<uint8_t> sharded_reuse_list_;
 };
 
 ExecutionSquasher::ExecutionSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx)
@@ -1415,7 +1415,7 @@ ExecutionSquasher::ShardExecInfo& ExecutionSquasher::PrepareShardInfo(ShardId si
   return sinfo;
 }
 
-bool ExecutionSquasher::CheckSquashing(StoredCmd* cmd) {
+bool ExecutionSquasher::TrySquash(StoredCmd* cmd) {
   if (!IsTransactional(cmd->descr) || (cmd->descr->opt_mask() & CO::BLOCKING) ||
       (cmd->descr->opt_mask() & CO::GLOBAL_TRANS))
     return false;
@@ -1459,16 +1459,18 @@ OpStatus ExecutionSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard* e
   DCHECK(!sinfo.cmds.empty());
 
   auto* local_tx = sinfo.local_tx.get();
-  ConnectionContext local_cntx{local_tx};
+  CapturingReplyBuilder crb;
+  ConnectionContext local_cntx{local_tx, &crb};
 
   for (auto* cmd : sinfo.cmds) {
     local_tx->MultiSwitchCmd(cmd->descr);
     local_tx->InitByArgs(parent_tx->GetDbIndex(), cmd->ArgList());
     cmd->descr->Invoke(cmd->ArgList(), &local_cntx);
 
-    sinfo.reply_chan->Push(local_cntx.GetCapture());
+    sinfo.reply_chan->Push(crb.Take());
   }
 
+  local_cntx.Inject(nullptr);
   return OpStatus::OK;
 }
 
@@ -1503,7 +1505,7 @@ void ExecutionSquasher::ExecuteSquashed() {
 
 void ExecutionSquasher::Run() {
   for (auto& cmd : cmds_) {
-    if (CheckSquashing(&cmd))
+    if (TrySquash(&cmd))
       continue;
 
     ExecuteSquashed();
