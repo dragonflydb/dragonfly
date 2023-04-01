@@ -9,6 +9,7 @@ extern "C" {
 }
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/functional/bind_front.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_format.h>
 #include <xxhash.h>
@@ -19,6 +20,7 @@ extern "C" {
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
+#include "facade/reply_capture.h"
 #include "server/bitops_family.h"
 #include "server/conn_context.h"
 #include "server/error.h"
@@ -44,9 +46,6 @@ ABSL_FLAG(uint32_t, memcache_port, 0, "Memcached port");
 
 ABSL_FLAG(int, multi_exec_mode, 1,
           "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for locking "
-          "incrementally, 4 for non atomic");
-ABSL_FLAG(int, multi_eval_mode, 1,
-          "Set EVAL atomicity mode: 1 for global, 2 for locking ahead, 3 for locking "
           "incrementally, 4 for non atomic");
 
 namespace dfly {
@@ -1326,6 +1325,123 @@ bool StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo*
   return true;
 }
 
+struct ExecutionSquasher {
+  static void Execute(absl::Span<StoredCmd> cmds, ConnectionContext* cntx) {
+    ExecutionSquasher es{cmds, cntx};
+    es.Iterate();
+  }
+
+ private:
+  ExecutionSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx)
+      : cmds_{cmds}, cntx_{cntx}, base_cid_{cntx->transaction->GetCId()} {
+  }
+
+  bool CheckSquashing(StoredCmd* cmd) {
+    auto args = cmd->ArgList();
+    auto keys = DetermineKeys(cmd->descr, args);
+    if (!keys.ok())
+      return false;
+
+    // Count number of shards.
+    tmp_shards_.clear();
+    for (unsigned i = keys->start; i < keys->end; i += keys->step)
+      tmp_shards_.insert(Shard(ArgS(args, i), shard_set->size()));
+
+    if (keys->bonus)
+      tmp_shards_.insert(Shard(ArgS(args, keys->bonus), shard_set->size()));
+
+    if (tmp_shards_.size() > 1)
+      return false;
+
+    if (sharded_.empty())
+      sharded_.resize(shard_set->size());
+
+    ShardId sid = *tmp_shards_.begin();
+    order_.push_back(sid);
+    sharded_[sid].cmds.push_back(cmd);
+    return true;
+  }
+
+  void ExecuteOne(StoredCmd* cmd) {
+    DCHECK(order_.empty());
+    cntx_->transaction->MultiSwitchCmd(cmd->descr);
+    if (IsTransactional(cmd->descr))
+      cntx_->transaction->InitByArgs(cntx_->conn_state.db_index, cmd->ArgList());
+    cmd->descr->Invoke(cmd->ArgList(), cntx_);
+  }
+
+  OpStatus ShardCb(Transaction* parent_tx, EngineShard* es) {
+    auto& sinfo = sharded_[es->shard_id()];
+    if (sinfo.cmds.empty())
+      return OpStatus::OK;
+
+    intrusive_ptr<Transaction> local_tx{new Transaction{parent_tx}};
+    ConnectionContext local_cntx{local_tx.get()};
+
+    for (auto* cmd : sinfo.cmds) {
+      local_tx->MultiSwitchCmd(cmd->descr);
+      local_tx->InitByArgs(parent_tx->GetDbIndex(), cmd->ArgList());
+      cmd->descr->Invoke(cmd->ArgList(), &local_cntx);
+
+      auto reply = local_cntx.GetCapture();
+      sinfo.replies.emplace_back(move(reply));
+    }
+
+    return OpStatus::OK;
+  }
+
+  void ExecuteSquashed() {
+    if (order_.empty())
+      return;
+
+    // TODO: Handle non atomic case
+    cntx_->transaction->PrepareSquashedMultiHop(
+        base_cid_, [this](ShardId sid) { return !sharded_[sid].cmds.empty(); });
+
+    cntx_->transaction->ScheduleSingleHop([this](auto* tx, auto* es) { return ShardCb(tx, es); });
+
+    for (auto& sinfo : sharded_)
+      reverse(sinfo.replies.begin(), sinfo.replies.end());
+
+    for (auto idx : order_) {
+      auto& replies = sharded_[idx].replies;
+      DCHECK(!replies.empty());
+      facade::CapturingReplyBuilder::Apply(move(replies.back()), cntx_->operator->());
+      replies.pop_back();
+    }
+
+    for (auto& sinfo : sharded_)
+      sinfo.cmds.clear();
+    order_.clear();
+  }
+
+  void Iterate() {
+    for (auto& cmd : cmds_) {
+      if (CheckSquashing(&cmd))
+        continue;
+
+      ExecuteSquashed();
+      ExecuteOne(&cmd);
+    }
+    ExecuteSquashed();
+  }
+
+ private:
+  absl::Span<StoredCmd> cmds_;
+  ConnectionContext* cntx_;
+  const CommandId* base_cid_;
+
+  struct ShardExecInfo {
+    std::vector<StoredCmd*> cmds;
+    std::vector<CapturingReplyBuilder::Payload> replies;
+  };
+
+  std::vector<ShardExecInfo> sharded_;
+  std::vector<ShardId> order_;
+
+  std::unordered_set<ShardId> tmp_shards_;
+};
+
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = (*cntx).operator->();
 
@@ -1361,7 +1477,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   rb->StartArray(exec_info.body.size());
 
   if (!exec_info.body.empty()) {
-    CmdArgVec str_list;
+    /*CmdArgVec str_list;
 
     for (auto& scmd : exec_info.body) {
       cntx->transaction->MultiSwitchCmd(scmd.descr);
@@ -1376,6 +1492,8 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
       if (!ok || rb->GetError())  // checks for i/o error, not logical error.
         break;
     }
+    */
+    ExecutionSquasher::Execute(absl::MakeSpan(exec_info.body), cntx);
   }
 
   if (scheduled) {

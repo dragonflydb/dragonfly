@@ -8,6 +8,7 @@
 
 #include "core/fibers.h"
 #include "facade/conn_context.h"
+#include "facade/reply_capture.h"
 #include "server/common.h"
 
 namespace dfly {
@@ -117,6 +118,11 @@ class ConnectionContext : public facade::ConnectionContext {
       : facade::ConnectionContext(stream, owner) {
   }
 
+  ConnectionContext(Transaction* tx)
+      : facade::ConnectionContext(nullptr, nullptr), transaction{tx} {
+    delete Inject(new facade::CapturingReplyBuilder{});
+  }
+
   struct DebugInfo {
     uint32_t shards_count = 0;
     TxClock clock = 0;
@@ -139,6 +145,8 @@ class ConnectionContext : public facade::ConnectionContext {
   void UnsubscribeAll(bool to_reply);
   void PUnsubscribeAll(bool to_reply);
   void ChangeMonitor(bool start);  // either start or stop monitor on a given connection
+
+  facade::CapturingReplyBuilder::Payload GetCapture();
 
   bool is_replicating = false;
   bool monitor = false;  // when a monitor command is sent over a given connection, we need to aware

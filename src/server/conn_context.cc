@@ -14,6 +14,7 @@
 namespace dfly {
 
 using namespace std;
+using namespace facade;
 
 StoredCmd::StoredCmd(const CommandId* d, CmdArgList args) : descr(d) {
   size_t total_size = 0;
@@ -154,6 +155,11 @@ void ConnectionContext::SendSubscriptionChangedResponse(string_view action,
   else
     (*this)->SendNull();
   (*this)->SendLong(count);
+}
+
+CapturingReplyBuilder::Payload ConnectionContext::GetCapture() {
+  auto* crb = dynamic_cast<CapturingReplyBuilder*>(reply_builder());
+  return crb != nullptr ? crb->Take() : CapturingReplyBuilder::Payload{};
 }
 
 void ConnectionState::ExecInfo::Clear() {

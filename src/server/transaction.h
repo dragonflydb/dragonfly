@@ -88,6 +88,9 @@ class Transaction {
     LOCK_INCREMENTAL = 3,
     // Each command is executed separately. Equivalent to a pipeline.
     NON_ATOMIC = 4,
+    //
+    //
+    SQUASHED_STUB = 5,
   };
 
   // State on specific shard.
@@ -103,6 +106,8 @@ class Transaction {
 
  public:
   explicit Transaction(const CommandId* cid, uint32_t thread_index);
+
+  explicit Transaction(const Transaction* parent);
 
   // Initialize from command (args) on specific db.
   OpStatus InitByArgs(DbIndex index, CmdArgList args);
@@ -152,6 +157,11 @@ class Transaction {
   void RenableAutoJournal() {
     renabled_auto_journal_.store(true, std::memory_order_relaxed);
   }
+
+  // Init on specific shards
+  void PrepareSquashedMultiHop(const CommandId* cid, CmdArgList keys);
+
+  void PrepareSquashedMultiHop(const CommandId* cid, std::function<bool(ShardId)> enabled);
 
   // Start multi in GLOBAL mode.
   void StartMultiGlobal(DbIndex dbid);
@@ -240,6 +250,10 @@ class Transaction {
 
   DbIndex GetDbIndex() const {
     return db_index_;
+  }
+
+  const CommandId* GetCId() const {
+    return cid_;
   }
 
   std::string DebugId() const;
@@ -432,6 +446,10 @@ class Transaction {
   // transactions as well.
   bool IsAtomicMulti() const {
     return multi_ && multi_->mode != NON_ATOMIC;
+  }
+
+  bool IsActiveMulti() const {
+    return multi_ && multi_->mode != SQUASHED_STUB;
   }
 
   unsigned SidToId(ShardId sid) const {
