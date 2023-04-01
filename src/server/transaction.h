@@ -88,9 +88,6 @@ class Transaction {
     LOCK_INCREMENTAL = 3,
     // Each command is executed separately. Equivalent to a pipeline.
     NON_ATOMIC = 4,
-    //
-    //
-    SQUASHED_STUB = 5,
   };
 
   // State on specific shard.
@@ -318,6 +315,10 @@ class Transaction {
     // Whether it locks incrementally.
     bool IsIncrLocks() const;
 
+    // True for transactions running in stub mode.
+    // Squashed parallel execution requires a separate transaction for each shard. Those "copies"
+    // perform no scheduling or real hops, but instead execute the handlers directly inline.
+    bool stub = false;
     MultiMode mode;
 
     absl::flat_hash_map<std::string, LockCnt> lock_counts;
@@ -449,7 +450,7 @@ class Transaction {
   }
 
   bool IsActiveMulti() const {
-    return multi_ && multi_->mode != SQUASHED_STUB;
+    return multi_ && !multi_->stub;
   }
 
   unsigned SidToId(ShardId sid) const {

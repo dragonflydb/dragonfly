@@ -54,7 +54,8 @@ Transaction::Transaction(const CommandId* cid, uint32_t thread_index)
 
 Transaction::Transaction(const Transaction* parent)
     : multi_{make_unique<MultiData>()}, txid_{parent->txid()} {
-  multi_->mode = SQUASHED_STUB;
+  multi_->mode = parent->multi_->mode;
+  multi_->stub = true;
 }
 
 Transaction::~Transaction() {
@@ -330,7 +331,9 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
 
 void Transaction::PrepareSquashedMultiHop(const CommandId* cid, CmdArgList keys) {
   MultiSwitchCmd(cid);
-  CHECK(false) << "TODO";
+
+  InitBase(db_index_, keys);
+  InitByKeys(KeyIndex::Range(0, keys.size()));
 }
 
 void Transaction::PrepareSquashedMultiHop(const CommandId* cid,
@@ -408,7 +411,7 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
   cid_ = cid;
   cb_ptr_ = nullptr;
 
-  if (multi_->mode == NON_ATOMIC || multi_->mode == SQUASHED_STUB) {
+  if (multi_->mode == NON_ATOMIC || multi_->stub) {
     // Reset shard data without resizing because armed might be read from cancelled callbacks.
     for (auto& sd : shard_data_) {
       sd.arg_count = sd.arg_start = sd.local_mask = 0;
@@ -673,7 +676,7 @@ bool Transaction::MultiData::IsIncrLocks() const {
 OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   DCHECK(!cb_ptr_);
 
-  if (multi_ && multi_->mode == SQUASHED_STUB) {
+  if (multi_ && multi_->stub) {
     return cb(this, EngineShard::tlocal());
   }
 
@@ -789,7 +792,7 @@ uint32_t Transaction::CalcMultiNumOfShardJournals() const {
 }
 
 void Transaction::Schedule() {
-  if (multi_ && multi_->mode == SQUASHED_STUB)
+  if (multi_ && multi_->stub)
     return;
 
   if (multi_ && multi_->IsIncrLocks())
@@ -801,7 +804,7 @@ void Transaction::Schedule() {
 
 // Runs in coordinator thread.
 void Transaction::Execute(RunnableType cb, bool conclude) {
-  if (multi_ && multi_->mode == SQUASHED_STUB) {
+  if (multi_ && multi_->stub) {
     cb(this, EngineShard::tlocal());
     return;
   }
