@@ -1894,8 +1894,9 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
     auto vec = dfly_cmd_->GetReplicasRoleInfo();
     (*cntx)->StartArray(vec.size());
     for (auto& data : vec) {
-      (*cntx)->StartArray(2);
+      (*cntx)->StartArray(3);
       (*cntx)->SendBulkString(data.address);
+      (*cntx)->SendBulkString(absl::StrCat(data.listening_port));
       (*cntx)->SendBulkString(data.state);
     }
 
