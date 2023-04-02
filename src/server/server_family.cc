@@ -50,7 +50,7 @@ extern "C" {
 using namespace std;
 
 ABSL_FLAG(string, dir, "", "working directory");
-ABSL_FLAG(string, dbfilename, "dump", "the filename to save/load the DB");
+ABSL_FLAG(string, dbfilename, "dump-{timestamp}", "the filename to save/load the DB");
 ABSL_FLAG(string, requirepass, "",
           "password for AUTH authentication. "
           "If empty can also be set with DFLY_PASSWORD environment variable.");
@@ -109,6 +109,11 @@ string UnknownCmd(string cmd, CmdArgList args) {
                       StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
 }
 
+// Replace "{timestamp}" with the current timestamp.
+void SubstituteFilenameTsPlaceholder(fs::path* filename, std::string_view replacement) {
+  *filename = absl::StrReplaceAll(filename->string(), {{"{timestamp}", replacement}});
+}
+
 string InferLoadFile(fs::path data_dir) {
   const auto& dbname = GetFlag(FLAGS_dbfilename);
   if (dbname.empty())
@@ -118,11 +123,14 @@ string InferLoadFile(fs::path data_dir) {
   if (fs::exists(fl_path))
     return fl_path.generic_string();
 
+  SubstituteFilenameTsPlaceholder(&fl_path, "*");
   if (!fl_path.has_extension()) {
     std::string glob = absl::StrCat(fl_path.generic_string(), "*");
     io::Result<io::StatShortVec> short_vec = io::StatFiles(glob);
 
     if (short_vec) {
+      // TODO: For the case of files with timestamps, we should sort the results
+      // and select the newest dump.
       auto it = std::find_if(short_vec->rbegin(), short_vec->rend(), [](const auto& stat) {
         return absl::EndsWith(stat.name, ".rdb") || absl::EndsWith(stat.name, "summary.dfs");
       });
@@ -258,19 +266,24 @@ string FormatTs(absl::Time now) {
   return absl::FormatTime("%Y-%m-%dT%H:%M:%S", now, absl::LocalTimeZone());
 }
 
-void ExtendFilename(absl::Time now, absl::AlphaNum postfix, fs::path* filename) {
+void ExtendDfsFilename(absl::AlphaNum postfix, fs::path* filename) {
   filename->replace_extension();  // clear if exists
-  *filename += StrCat("-", FormatTs(now), "-", postfix, ".dfs");
+  *filename += StrCat("-", postfix, ".dfs");
 }
 
-void ExtendFilenameWithShard(absl::Time now, int shard, fs::path* filename) {
-  if (shard < 0) {
-    if (!filename->has_extension()) {
-      *filename += StrCat("-", FormatTs(now), ".rdb");
-    }
+void ExtendDfsFilenameWithShard(int shard, fs::path* filename) {
+  // dragonfly snapshot.
+  ExtendDfsFilename(absl::Dec(shard, absl::kZeroPad4), filename);
+}
+
+bool ValidateFilenameExtension(const fs::path& filename, bool new_version) {
+  if (!filename.has_extension())
+    return true;
+
+  if (new_version) {
+    return absl::EqualsIgnoreCase(filename.extension().c_str(), ".dfs");
   } else {
-    // dragonfly snapshot.
-    ExtendFilename(now, absl::Dec(shard, absl::kZeroPad4), filename);
+    return absl::EqualsIgnoreCase(filename.extension().c_str(), ".rdb");
   }
 }
 
@@ -470,7 +483,12 @@ void ServerFamily::Shutdown() {
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
 Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
-  CHECK(absl::EndsWith(load_path, ".rdb") || absl::EndsWith(load_path, "summary.dfs"));
+  if (!(absl::EndsWith(load_path, ".rdb") || absl::EndsWith(load_path, "summary.dfs"))) {
+    LOG(ERROR) << "Bad filename extension \"" << load_path << "\"";
+    Promise<std::error_code> ec_promise;
+    ec_promise.set_value(make_error_code(errc::invalid_argument));
+    return ec_promise.get_future();
+  }
 
   vector<std::string> paths{{load_path}};
 
@@ -854,20 +872,19 @@ static void RunStage(bool new_version, std::function<void(unsigned)> cb) {
   }
 };
 
-using PartialSaveOpts =
-    tuple<const fs::path& /*filename*/, const fs::path& /*path*/, absl::Time /*start*/>;
+using PartialSaveOpts = tuple<const fs::path& /*filename*/, const fs::path& /*path*/>;
 
 // Start saving a single snapshot of a multi-file dfly snapshot.
 // If shard is null, then this is the summary file.
 error_code DoPartialSave(PartialSaveOpts opts, const dfly::StringVec& scripts,
                          RdbSnapshot* snapshot, EngineShard* shard) {
-  auto [filename, path, now] = opts;
+  auto [filename, path] = opts;
   // Construct resulting filename.
   fs::path full_filename = filename;
   if (shard == nullptr) {
-    ExtendFilename(now, "summary", &full_filename);
+    ExtendDfsFilename("summary", &full_filename);
   } else {
-    ExtendFilenameWithShard(now, shard->shard_id(), &full_filename);
+    ExtendDfsFilenameWithShard(shard->shard_id(), &full_filename);
   }
   fs::path full_path = path / full_filename;  // use / operator to concatenate paths.
 
@@ -903,11 +920,16 @@ GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
     service_.SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
   };
 
-  const auto& dbfilename = GetFlag(FLAGS_dbfilename);
-  fs::path filename = dbfilename.empty() ? "dump" : dbfilename;
+  absl::Time start = absl::Now();
+
+  fs::path filename = GetFlag(FLAGS_dbfilename);
+  if (!ValidateFilenameExtension(filename, new_version)) {
+    return {absl::StrCat("Bad filename extension ", filename.extension().c_str(),
+                         " for SAVE with type ", new_version ? "DF" : "RDB")};
+  }
+  SubstituteFilenameTsPlaceholder(&filename, FormatTs(start));
   fs::path path = dir_path;
 
-  absl::Time start = absl::Now();
   shared_ptr<LastSaveInfo> save_info;
 
   vector<unique_ptr<RdbSnapshot>> snapshots;
@@ -944,7 +966,7 @@ GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
 
   // Start snapshots.
   if (new_version) {
-    auto file_opts = make_tuple(cref(filename), cref(path), start);
+    auto file_opts = make_tuple(cref(filename), cref(path));
 
     // In the new version (.dfs) we store a file for every shard and one more summary file.
     // Summary file is always last in snapshots array.
@@ -977,7 +999,9 @@ GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
   } else {
     snapshots.resize(1);
 
-    ExtendFilenameWithShard(start, -1, &filename);
+    if (!filename.has_extension()) {
+      filename += ".rdb";
+    }
     path /= filename;  // use / operator to concatenate paths.
 
     snapshots[0].reset(new RdbSnapshot(fq_threadpool_.get()));
@@ -1008,7 +1032,7 @@ GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
   RunStage(new_version, close_cb);
 
   if (new_version) {
-    ExtendFilename(start, "summary", &filename);
+    ExtendDfsFilename("summary", &filename);
     path /= filename;
   }
 
