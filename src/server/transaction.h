@@ -160,7 +160,7 @@ class Transaction {
 
   // Prepare a squashed hop on given shards.
   // Only compatible with multi modes that acquire no locks - global and lock_ahead.
-  void PrepareSquashedMultiHop(const CommandId* cid, std::function<bool(ShardId)> enabled);
+  void PrepareSquashedMultiHop(const CommandId* cid, absl::FunctionRef<bool(ShardId)> enabled);
 
   // Start multi in GLOBAL mode.
   void StartMultiGlobal(DbIndex dbid);

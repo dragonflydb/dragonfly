@@ -337,7 +337,7 @@ void Transaction::PrepareSquashedMultiHop(const CommandId* cid, CmdArgList keys)
 }
 
 void Transaction::PrepareSquashedMultiHop(const CommandId* cid,
-                                          std::function<bool(ShardId)> enabled) {
+                                          absl::FunctionRef<bool(ShardId)> enabled) {
   CHECK(multi_->mode == GLOBAL || multi_->mode == LOCK_AHEAD);
 
   MultiSwitchCmd(cid);
@@ -681,8 +681,6 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   }
 
   cb_ptr_ = &cb;
-
-  VLOG(0) << "SSH " << unique_shard_cnt_;
 
   DCHECK(IsAtomicMulti() || (coordinator_state_ & COORD_SCHED) == 0);  // Multi schedule in advance.
   coordinator_state_ |= (COORD_EXEC | COORD_EXEC_CONCLUDING);  // Single hop means we conclude.
