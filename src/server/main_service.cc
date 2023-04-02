@@ -48,6 +48,9 @@ ABSL_FLAG(int, multi_exec_mode, 1,
           "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for locking "
           "incrementally, 4 for non atomic");
 
+ABSL_FLAG(bool, multi_exec_squash, true,
+          "Whether multi exec will squash single shard commands to optimize performance");
+
 namespace dfly {
 
 #if __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
@@ -1549,23 +1552,25 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   rb->StartArray(exec_info.body.size());
 
   if (!exec_info.body.empty()) {
-    /*CmdArgVec str_list;
+    if (absl::GetFlag(FLAGS_multi_exec_squash)) {
+      ExecutionSquasher::Execute(absl::MakeSpan(exec_info.body), cntx);
+    } else {
+      CmdArgVec str_list;
 
-    for (auto& scmd : exec_info.body) {
-      cntx->transaction->MultiSwitchCmd(scmd.descr);
-      if (IsTransactional(scmd.descr)) {
-        OpStatus st = cntx->transaction->InitByArgs(cntx->conn_state.db_index, scmd.ArgList());
-        if (st != OpStatus::OK) {
-          (*cntx)->SendError(st);
-          break;
+      for (auto& scmd : exec_info.body) {
+        cntx->transaction->MultiSwitchCmd(scmd.descr);
+        if (IsTransactional(scmd.descr)) {
+          OpStatus st = cntx->transaction->InitByArgs(cntx->conn_state.db_index, scmd.ArgList());
+          if (st != OpStatus::OK) {
+            (*cntx)->SendError(st);
+            break;
+          }
         }
+        bool ok = InvokeCmd(scmd.ArgList(), scmd.descr, cntx, true);
+        if (!ok || rb->GetError())  // checks for i/o error, not logical error.
+          break;
       }
-      bool ok = InvokeCmd(scmd.ArgList(), scmd.descr, cntx, true);
-      if (!ok || rb->GetError())  // checks for i/o error, not logical error.
-        break;
     }
-    */
-    ExecutionSquasher::Execute(absl::MakeSpan(exec_info.body), cntx);
   }
 
   if (scheduled) {
