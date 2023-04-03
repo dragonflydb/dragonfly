@@ -16,6 +16,40 @@ namespace facade {
 
 class ServiceInterface;
 
+namespace detail {
+
+// maps keys to counts, where keys must be indices in range [0, N].
+class CntMinHeap {
+  std::vector<unsigned> cnts_;  // keys -> counts
+  unsigned min_key_ = 0;
+
+ public:
+  using Key = unsigned;
+
+  CntMinHeap() = default;
+
+  void Init(unsigned N) {
+    cnts_.resize(N);
+  }
+
+  void Inc(Key key);
+  void Dec(Key key);
+
+  Key MinKey() const {
+    return min_key_;
+  }
+
+  unsigned MinCnt() const {
+    return cnts_[min_key_];
+  }
+
+  unsigned operator[](Key key) const {
+    return cnts_[key];
+  }
+};
+
+}  // namespace detail
+
 class Listener : public util::ListenerInterface {
  public:
   Listener(Protocol protocol, ServiceInterface*);
@@ -39,17 +73,9 @@ class Listener : public util::ListenerInterface {
 
   ServiceInterface* service_;
 
-  struct PerThread {
-    int32_t num_connections{0};
-    unsigned napi_id = 0;
-  };
-  std::vector<PerThread> per_thread_;
-
   std::atomic_uint32_t next_id_{0};
-
-  uint32_t conn_cnt_{0};
-  uint32_t min_cnt_thread_id_{0};
-  int32_t min_cnt_{0};
+  detail::CntMinHeap cnt_heap_;
+  std::atomic_uint32_t conn_cnt_{0};
   absl::base_internal::SpinLock mutex_;
 
   Protocol protocol_;

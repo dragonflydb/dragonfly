@@ -126,6 +126,36 @@ bool ConfigureKeepAlive(int fd, unsigned interval_sec) {
 
 }  // namespace
 
+namespace detail {
+
+void CntMinHeap::Inc(unsigned key) {
+  DCHECK_LT(key, cnts_.size());
+
+  unsigned prev = cnts_[key]++;
+
+  // Update min_key if needed.
+  // Note - it could be converted into a log(n) operation by using a sorted map but I do not
+  // see any point in doing that when our cnt_ is usually small.
+  if (key == min_key_) {
+    for (unsigned i = 0; i < cnts_.size(); ++i) {
+      if (cnts_[i] <= prev) {
+        min_key_ = i;
+        break;
+      }
+    }
+  }
+}
+
+void CntMinHeap::Dec(unsigned key) {
+  DCHECK_LT(key, cnts_.size());
+  unsigned cur = --cnts_[key];
+  if (cur < MinCnt()) {
+    min_key_ = key;
+  }
+}
+
+}  // namespace detail
+
 Listener::Listener(Protocol protocol, ServiceInterface* si) : service_(si), protocol_(protocol) {
 #ifdef DFLY_USE_SSL
   if (GetFlag(FLAGS_tls)) {
@@ -175,7 +205,7 @@ error_code Listener::ConfigureServerSocket(int fd) {
 }
 
 void Listener::PreAcceptLoop(util::ProactorBase* pb) {
-  per_thread_.resize(pool()->size());
+  cnt_heap_.Init(pool()->size());
 }
 
 void Listener::PreShutdown() {
@@ -185,49 +215,23 @@ void Listener::PostShutdown() {
 }
 
 void Listener::OnConnectionStart(util::Connection* conn) {
-  unsigned id = conn->socket()->proactor()->GetIndex();
-  DCHECK_LT(id, per_thread_.size());
-
   facade::Connection* facade_conn = static_cast<facade::Connection*>(conn);
   VLOG(1) << "Opening connection " << facade_conn->GetClientId();
 
-  absl::base_internal::SpinLockHolder lock{&mutex_};
-  int32_t prev_cnt = per_thread_[id].num_connections++;
-  ++conn_cnt_;
-
-  if (id == min_cnt_thread_id_) {
-    DCHECK_EQ(min_cnt_, prev_cnt);
-    ++min_cnt_;
-    for (unsigned i = 0; i < per_thread_.size(); ++i) {
-      auto cnt = per_thread_[i].num_connections;
-      if (cnt < min_cnt_) {
-        min_cnt_ = cnt;
-        min_cnt_thread_id_ = i;
-        break;
-      }
-    }
-  }
+  conn_cnt_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void Listener::OnConnectionClose(util::Connection* conn) {
   // TODO: We do not account for connections migrated to other threads. This is a rare case.
   unsigned id = conn->socket()->proactor()->GetIndex();
-  DCHECK_LT(id, per_thread_.size());
-  auto& pth = per_thread_[id];
 
   facade::Connection* facade_conn = static_cast<facade::Connection*>(conn);
   VLOG(1) << "Closing connection " << facade_conn->GetClientId();
 
-  absl::base_internal::SpinLockHolder lock{&mutex_};
-  int32_t cur_cnt = --pth.num_connections;
-  --conn_cnt_;
+  conn_cnt_.fetch_sub(1, std::memory_order_relaxed);
 
-  auto mincnt = min_cnt_;
-  if (mincnt > cur_cnt) {
-    min_cnt_ = cur_cnt;
-    min_cnt_thread_id_ = id;
-    return;
-  }
+  absl::base_internal::SpinLockHolder lock{&mutex_};
+  cnt_heap_.Dec(id);
 }
 
 // We can limit number of threads handling dragonfly connections.
@@ -257,9 +261,14 @@ ProactorBase* Listener::PickConnectionProactor(LinuxSocketBase* sock) {
       const vector<unsigned>& ids = pool()->MapCpuToThreads(cpu);
 
       absl::base_internal::SpinLockHolder lock{&mutex_};
+      unsigned cnt_cap = cnt_heap_.MinCnt();
+
+      // Allow 20% or 5 more connections for affinity-thread than another
+      // thread with smallest amount of connections.
+      cnt_cap = max<unsigned>(cnt_cap + 5, cnt_cap * 1.2);
+
       for (auto id : ids) {
-        DCHECK_LT(id, per_thread_.size());
-        if (per_thread_[id].num_connections < min_cnt_ + 5) {
+        if (cnt_heap_[id] < cnt_cap) {
           VLOG(1) << "using thread " << id << " for cpu " << cpu;
           res_id = id;
           break;
@@ -267,10 +276,11 @@ ProactorBase* Listener::PickConnectionProactor(LinuxSocketBase* sock) {
       }
 
       if (res_id == kuint32max) {
-        VLOG(1) << "choosing a thread with minimum conns " << min_cnt_thread_id_ << " instead of "
+        VLOG(1) << "choosing a thread with minimum conns " << cnt_heap_.MinKey() << " instead of "
                 << cpu;
-        res_id = min_cnt_thread_id_;
+        res_id = cnt_heap_.MinKey();
       }
+      cnt_heap_.Inc(res_id);
     }
   }
 
