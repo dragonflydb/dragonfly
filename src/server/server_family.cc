@@ -109,7 +109,6 @@ string UnknownCmd(string cmd, CmdArgList args) {
                       StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
 }
 
-// Replace "{timestamp}" with the current timestamp.
 void SubstituteFilenameTsPlaceholder(fs::path* filename, std::string_view replacement) {
   *filename = absl::StrReplaceAll(filename->string(), {{"{timestamp}", replacement}});
 }
@@ -125,20 +124,20 @@ string InferLoadFile(fs::path data_dir) {
 
   SubstituteFilenameTsPlaceholder(&fl_path, "*");
   if (!fl_path.has_extension()) {
-    std::string glob = absl::StrCat(fl_path.generic_string(), "*");
-    io::Result<io::StatShortVec> short_vec = io::StatFiles(glob);
+    fl_path += ".*";
+  }
+  io::Result<io::StatShortVec> short_vec = io::StatFiles(fl_path.generic_string());
 
-    if (short_vec) {
-      // TODO: For the case of files with timestamps, we should sort the results
-      // and select the newest dump.
-      auto it = std::find_if(short_vec->rbegin(), short_vec->rend(), [](const auto& stat) {
-        return absl::EndsWith(stat.name, ".rdb") || absl::EndsWith(stat.name, "summary.dfs");
-      });
-      if (it != short_vec->rend())
-        return it->name;
-    } else {
-      LOG(WARNING) << "Could not stat " << glob << ", error " << short_vec.error().message();
-    }
+  if (short_vec) {
+    // TODO: For the case of files with timestamps, we should sort the results
+    // and select the newest dump.
+    auto it = std::find_if(short_vec->rbegin(), short_vec->rend(), [](const auto& stat) {
+      return absl::EndsWith(stat.name, ".rdb") || absl::EndsWith(stat.name, "summary.dfs");
+    });
+    if (it != short_vec->rend())
+      return it->name;
+  } else {
+    LOG(WARNING) << "Could not stat " << fl_path << ", error " << short_vec.error().message();
   }
   return string{};
 }
@@ -276,15 +275,18 @@ void ExtendDfsFilenameWithShard(int shard, fs::path* filename) {
   ExtendDfsFilename(absl::Dec(shard, absl::kZeroPad4), filename);
 }
 
-bool ValidateFilenameExtension(const fs::path& filename, bool new_version) {
-  if (!filename.has_extension())
-    return true;
-
-  if (new_version) {
-    return absl::EqualsIgnoreCase(filename.extension().c_str(), ".dfs");
-  } else {
-    return absl::EqualsIgnoreCase(filename.extension().c_str(), ".rdb");
+GenericError ValidateFilenameExtension(const fs::path& filename, bool new_version) {
+  if (!filename.has_extension()) {
+    return {};
   }
+
+  const char* extension = new_version ? ".dfs" : ".rdb";
+
+  if (!absl::EqualsIgnoreCase(filename.extension().c_str(), extension)) {
+    return {absl::StrCat("Bad filename extension ", filename.extension().c_str(),
+                         " for SAVE with type ", new_version ? "DF" : "RDB")};
+  }
+  return {};
 }
 
 void SlowLog(CmdArgList args, ConnectionContext* cntx) {
@@ -923,9 +925,8 @@ GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
   absl::Time start = absl::Now();
 
   fs::path filename = GetFlag(FLAGS_dbfilename);
-  if (!ValidateFilenameExtension(filename, new_version)) {
-    return {absl::StrCat("Bad filename extension ", filename.extension().c_str(),
-                         " for SAVE with type ", new_version ? "DF" : "RDB")};
+  if (auto ec = ValidateFilenameExtension(filename, new_version); ec) {
+    return ec;
   }
   SubstituteFilenameTsPlaceholder(&filename, FormatTs(start));
   fs::path path = dir_path;

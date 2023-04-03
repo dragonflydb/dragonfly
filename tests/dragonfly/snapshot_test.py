@@ -16,15 +16,15 @@ class SnapshotTestBase:
     def setup(self, tmp_dir: Path):
         self.tmp_dir = tmp_dir
 
-    def get_main_file(self, prefix, extension):
-        def is_main(f): return "summary" in f if extension == "dfs" else True
-        files = glob.glob(str(self.tmp_dir.absolute()) + '/test-' + prefix + '*.' + extension)
+    def get_main_file(self, pattern):
+        def is_main(f): return "summary" in f if pattern.endswith("dfs") else True
+        files = glob.glob(str(self.tmp_dir.absolute()) + '/' + pattern)
         possible_mains = list(filter(is_main, files))
         assert len(possible_mains) == 1, possible_mains
         return possible_mains[0]
 
 
-@dfly_args({**BASIC_ARGS, "dbfilename": "test-rdb"})
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-rdb-{{timestamp}}"})
 class TestRdbSnapshot(SnapshotTestBase):
     """Test single file rdb snapshot"""
     @pytest.fixture(autouse=True)
@@ -41,7 +41,7 @@ class TestRdbSnapshot(SnapshotTestBase):
         # save + flush + load
         await async_client.execute_command("SAVE RDB")
         assert await async_client.flushall()
-        await async_client.execute_command("DEBUG LOAD " + super().get_main_file("rdb", "rdb"))
+        await async_client.execute_command("DEBUG LOAD " + super().get_main_file("test-rdb-*.rdb"))
 
         assert await seeder.compare(start_capture)
 
@@ -63,11 +63,10 @@ class TestRdbSnapshotExactFilename(SnapshotTestBase):
         # save + flush + load
         await async_client.execute_command("SAVE RDB")
         assert await async_client.flushall()
-        main_file = super().get_main_file("rdbexact", "rdb")
+        main_file = super().get_main_file("test-rdbexact.rdb")
         await async_client.execute_command("DEBUG LOAD " + main_file)
 
         assert await seeder.compare(start_capture)
-        assert main_file.endswith('/test-rdbexact.rdb')
 
 
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-dfs"})
@@ -87,7 +86,7 @@ class TestDflySnapshot(SnapshotTestBase):
         # save + flush + load
         await async_client.execute_command("SAVE DF")
         assert await async_client.flushall()
-        await async_client.execute_command("DEBUG LOAD " + super().get_main_file("dfs", "dfs"))
+        await async_client.execute_command("DEBUG LOAD " + super().get_main_file("test-dfs-summary.dfs"))
 
         assert await seeder.compare(start_capture)
 
@@ -128,4 +127,4 @@ class TestPeriodicSnapshot(SnapshotTestBase):
 
         time.sleep(60)
 
-        assert super().get_main_file("periodic", "dfs")
+        assert super().get_main_file("test-periodic-summary.dfs")
