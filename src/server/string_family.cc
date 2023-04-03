@@ -47,6 +47,8 @@ constexpr uint32_t kMinTieredLen = TieredStorage::kMinBlobLen;
 string GetString(EngineShard* shard, const PrimeValue& pv) {
   string res;
   if (pv.ObjType() != OBJ_STRING) {
+    // An attempt to read a non-string's string value can happen when overriding a non-string value
+    // with a string value.
     return "";
   }
 
@@ -353,6 +355,7 @@ OpStatus OpMSet(const OpArgs& op_args, ArgSlice args) {
   return OpStatus::OK;
 }
 
+// See comment for SetCmd::Set() for when and how OpResult's value (i.e. optional<string>) is set.
 OpResult<optional<string>> SetGeneric(ConnectionContext* cntx, const SetCmd::SetParams& sparams,
                                       string_view key, string_view value, bool manual_journal) {
   DCHECK(cntx->transaction);

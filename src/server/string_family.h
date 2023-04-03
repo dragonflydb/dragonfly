@@ -45,6 +45,9 @@ class SetCmd {
     }
   };
 
+  // OpResult's value (i.e. optional<string>) is set in the case `params.flags` has SET_GET bit on,
+  // in which case the previous value (or nullopt if none) is returned. Otherwise, OpResult only
+  // contains a status.
   OpResult<std::optional<std::string>> Set(const SetParams& params, std::string_view key,
                                            std::string_view value);
 
