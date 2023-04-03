@@ -154,6 +154,8 @@ class Connection::Request {
 
   size_t StorageCapacity() const;
 
+  bool IsPipelineMsg() const;
+
  private:
   static constexpr size_t kSizeOfPipelineMsg = sizeof(PipelineMsg);
 
@@ -266,6 +268,10 @@ size_t Connection::Request::StorageCapacity() const {
                                },
                                [](const MonitorMessage& arg) -> size_t { return arg.capacity(); }},
                     payload);
+}
+
+bool Connection::Request::IsPipelineMsg() const {
+  return std::get_if<PipelineMsg>(&payload) != nullptr;
 }
 
 void Connection::DispatchOperations::operator()(const Request::MonitorMessage& msg) {
@@ -854,7 +860,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
     dispatch_q_.pop_front();
     std::visit(dispatch_op, req->payload);
 
-    if (stats_->pipeline_cache_capacity < request_cache_limit) {
+    if (req->IsPipelineMsg() && stats_->pipeline_cache_capacity < request_cache_limit) {
       stats_->pipeline_cache_capacity += req->StorageCapacity();
       free_req_pool_.push_back(std::move(req));
     }
