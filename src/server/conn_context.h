@@ -89,7 +89,7 @@ struct ConnectionState {
     // If this server is master, and this connection is from a secondary replica,
     // then it holds positive sync session id.
     uint32_t repl_session_id = 0;
-    uint32_t repl_flow_id = kuint32max;
+    uint32_t repl_flow_id = UINT32_MAX;
     uint32_t repl_listening_port = 0;
   };
 

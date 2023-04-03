@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2023, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 #pragma once
@@ -6,6 +6,7 @@
 #include <absl/container/flat_hash_map.h>
 
 #include "core/external_alloc.h"
+#include "core/fibers.h"
 #include "server/common.h"
 #include "server/io_mgr.h"
 #include "server/table.h"
