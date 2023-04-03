@@ -13,11 +13,7 @@
 #include <cstring>
 #include <functional>
 
-#if defined(__aarch64__)
-#include "base/sse2neon.h"
-#else
-#include <emmintrin.h>
-#endif
+#include "core/sse_port.h"
 
 namespace dfly {
 namespace detail {
@@ -891,7 +887,7 @@ uint32_t BucketBase<NUM_SLOTS, NUM_OVR>::CompareFP(uint8_t fp) const {
   const __m128i key_data = _mm_set1_epi8(fp);
 
   // Loads 16 bytes of src into seg_data.
-  __m128i seg_data = _mm_loadu_si128(reinterpret_cast<const __m128i*>(finger_arr_.data()));
+  __m128i seg_data = mm_loadu_si128(reinterpret_cast<const __m128i*>(finger_arr_.data()));
 
   // compare 16-byte vectors seg_data and key_data, dst[i] := ( a[i] == b[i] ) ? 0xFF : 0.
   __m128i rv_mask = _mm_cmpeq_epi8(seg_data, key_data);
