@@ -90,6 +90,14 @@ class Transaction {
     NON_ATOMIC = 4,
   };
 
+  // Squashed parallel execution requires a separate transaction for each shard. Those "stubs"
+  // perform no scheduling or real hops, but instead execute the handlers directly inline.
+  enum MultiRole {
+    DEFAULT = 0,        // Regular multi transaction
+    SQUASHER = 1,       // Owner of stub transactions
+    SQUASHED_STUB = 2,  // Stub transaction
+  };
+
   // State on specific shard.
   enum LocalMask : uint16_t {
     ACTIVE = 1,  // Set on all active shards.
@@ -173,6 +181,10 @@ class Transaction {
 
   // Start multi in NON_ATOMIC mode.
   void StartMultiNonAtomic();
+
+  // Report which shards had write commands that executed on stub transactions
+  // and thus did not mark itself in MultiData::shard_journal_write.
+  void ReportWritesSquashedMulti(absl::FunctionRef<bool(ShardId)> had_write);
 
   // Unlock key locks of a multi transaction.
   void UnlockMulti();
@@ -317,10 +329,7 @@ class Transaction {
     // Whether it locks incrementally.
     bool IsIncrLocks() const;
 
-    // True for transactions running in stub mode.
-    // Squashed parallel execution requires a separate transaction for each shard. Those "copies"
-    // perform no scheduling or real hops, but instead execute the handlers directly inline.
-    bool stub = false;
+    MultiRole role;
     MultiMode mode;
 
     absl::flat_hash_map<std::string, LockCnt> lock_counts;
@@ -410,6 +419,9 @@ class Transaction {
 
   void UnwatchShardCb(ArgSlice wkeys, bool should_expire, EngineShard* shard);
 
+  // Run callback inline as part of multi stub.
+  OpStatus RunSquashedMultiCb(RunnableType cb);
+
   void UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard,
                           uint32_t shard_journals_cnt);
 
@@ -452,7 +464,7 @@ class Transaction {
   }
 
   bool IsActiveMulti() const {
-    return multi_ && !multi_->stub;
+    return multi_ && multi_->role != SQUASHED_STUB;
   }
 
   unsigned SidToId(ShardId sid) const {

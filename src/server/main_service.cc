@@ -1346,28 +1346,31 @@ class ExecutionSquasher {
   }
 
  private:
-  using ReplyChan = ::util::fibers_ext::SimpleChannel<CapturingReplyBuilder::Payload>;
+  using ReplyChan =
+      ::util::fibers_ext::SimpleChannel<CapturingReplyBuilder::Payload,
+                                        base::mpmc_bounded_queue<CapturingReplyBuilder::Payload>>;
 
   // Per-shard exection info.
   struct ShardExecInfo {
-    ShardExecInfo() : cmds{}, reply_chan{nullptr}, local_tx{nullptr} {
+    ShardExecInfo() : had_writes{false}, cmds{}, reply_chan{nullptr}, local_tx{nullptr} {
     }
 
+    bool had_writes;
     std::vector<StoredCmd*> cmds;  // accumulated commands
     unique_ptr<ReplyChan> reply_chan;
     intrusive_ptr<Transaction> local_tx;  // stub-mode tx for use inside shard
   };
 
-  static constexpr int kChanBufferSize = 16;
+  static constexpr int kChanBufferSize = 32;
 
  private:
   ExecutionSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx);
 
-  // Lazy initialize shard info
+  // Lazy initialize shard info.
   ShardExecInfo& PrepareShardInfo(ShardId sid);
 
-  // Return true if command was squashed.
-  bool TrySquash(StoredCmd* cmd);
+  // Return whether command was squashed and whether squashed commands need to be flushed.
+  pair<bool, bool> TrySquash(StoredCmd* cmd);
 
   // Execute separate non-squashed cmd.
   void ExecuteStandalone(StoredCmd* cmd);
@@ -1413,19 +1416,19 @@ ExecutionSquasher::ShardExecInfo& ExecutionSquasher::PrepareShardInfo(ShardId si
     sinfo.local_tx = new Transaction{cntx_->transaction};
 
   if (!sinfo.reply_chan)
-    sinfo.reply_chan = make_unique<ReplyChan>(kChanBufferSize);
+    sinfo.reply_chan = make_unique<ReplyChan>(kChanBufferSize, 1);
 
   return sinfo;
 }
 
-bool ExecutionSquasher::TrySquash(StoredCmd* cmd) {
+pair<bool, bool> ExecutionSquasher::TrySquash(StoredCmd* cmd) {
   if (!IsTransactional(cmd->descr) || (cmd->descr->opt_mask() & CO::BLOCKING) ||
       (cmd->descr->opt_mask() & CO::GLOBAL_TRANS))
-    return false;
+    return {false, false};
 
   auto keys = DetermineKeys(cmd->descr, cmd->ArgList());
   if (!keys.ok())
-    return false;
+    return {false, false};
 
   // Count number of unique shards.
   tmp_shards_.clear();
@@ -1434,7 +1437,7 @@ bool ExecutionSquasher::TrySquash(StoredCmd* cmd) {
   });
 
   if (tmp_shards_.size() != 1)
-    return false;
+    return {false, false};
 
   if (track_keys_)
     IterateKeys(cmd->ArgList(), *keys, [this](MutableSlice key) { collected_keys_.insert(key); });
@@ -1442,9 +1445,10 @@ bool ExecutionSquasher::TrySquash(StoredCmd* cmd) {
   ShardId sid = *tmp_shards_.begin();
   auto& sinfo = PrepareShardInfo(sid);
 
+  sinfo.had_writes |= (cmd->descr->opt_mask() & CO::WRITE);
   sinfo.cmds.push_back(cmd);
   order_.push_back(sid);
-  return true;
+  return {true, sinfo.cmds.size() >= kChanBufferSize - 1};
 }
 
 void ExecutionSquasher::ExecuteStandalone(StoredCmd* cmd) {
@@ -1481,6 +1485,8 @@ void ExecutionSquasher::ExecuteSquashed() {
   if (order_.empty())
     return;
 
+  VLOG(1) << "Executing " << order_.size() << " commands squashed";
+
   Transaction* tx = cntx_->transaction;
 
   if (track_keys_) {
@@ -1508,13 +1514,19 @@ void ExecutionSquasher::ExecuteSquashed() {
 
 void ExecutionSquasher::Run() {
   for (auto& cmd : cmds_) {
-    if (TrySquash(&cmd))
-      continue;
+    auto [squashed, flush] = TrySquash(&cmd);
 
-    ExecuteSquashed();
-    ExecuteStandalone(&cmd);
+    if (flush || !squashed)
+      ExecuteSquashed();
+
+    if (!squashed)
+      ExecuteStandalone(&cmd);
   }
   ExecuteSquashed();
+
+  if (!sharded_.empty())
+    cntx_->transaction->ReportWritesSquashedMulti(
+        [this](ShardId sid) { return sharded_[sid].had_writes; });
 }
 
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
