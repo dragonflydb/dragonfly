@@ -1768,8 +1768,11 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   std::string_view port_s = ArgS(args, 2);
   auto& pool = service_.proactor_pool();
 
+  LOG(INFO) << "Replicating " << host << ":" << port_s;
+
   if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_s, "one")) {
     // use this lock as critical section to prevent concurrent replicaof commands running.
+    VLOG(1) << "Acquire replica lock";
     unique_lock lk(replicaof_mu_);
 
     if (!ServerState::tlocal()->is_master) {
@@ -1794,6 +1797,7 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
   auto new_replica = make_shared<Replica>(string(host), port, &service_, master_id());
 
+  VLOG(1) << "Acquire replica lock";
   unique_lock lk(replicaof_mu_);
   if (replica_) {
     replica_->Stop();  // NOTE: consider introducing update API flow.
