@@ -29,6 +29,10 @@ extern "C" {
 ABSL_FLAG(bool, enable_multi_shard_sync, false,
           "Execute multi shards commands on replica syncrhonized");
 ABSL_FLAG(std::string, masterauth, "", "password for authentication with master");
+ABSL_FLAG(int, master_connect_timeout_ms, 20000,
+          "Timeout for establishing connection to a replication master");
+ABSL_FLAG(int, master_reconnect_timeout_ms, 1000,
+          "Timeout for re-establishing connection to a replication master");
 ABSL_DECLARE_FLAG(uint32_t, port);
 
 namespace dfly {
@@ -147,7 +151,7 @@ bool Replica::Start(ConnectionContext* cntx) {
   }
   // 2. Connect socket.
   VLOG(1) << "Connecting to master";
-  ec = ConnectAndAuth();
+  ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms);
   if (ec) {
     (*cntx)->SendError(StrCat(kConnErr, ec.message()));
     return false;
@@ -215,7 +219,8 @@ void Replica::MainReplicationFb() {
         continue;
       }
 
-      ec = ConnectAndAuth();
+      // Give a lower timeout for connect, because we're
+      ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_reconnect_timeout_ms) * 1ms);
       if (ec) {
         LOG(ERROR) << "Error connecting to " << master_context_.Description() << " " << ec;
         continue;
@@ -286,10 +291,12 @@ error_code Replica::ResolveMasterDns() {
   return error_code{};
 }
 
-error_code Replica::ConnectAndAuth() {
+error_code Replica::ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms) {
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
   sock_.reset(mythread->CreateSocket());
+  sock_->set_timeout(connect_timeout_ms.count());
+
   RETURN_ON_ERR(sock_->Connect(master_context_.endpoint));
 
   /* These may help but require additional field testing to learn.
@@ -748,7 +755,7 @@ error_code Replica::SendNextPhaseRequest(bool stable) {
 error_code Replica::StartFullSyncFlow(BlockingCounter sb, Context* cntx) {
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
 
-  RETURN_ON_ERR(ConnectAndAuth());
+  RETURN_ON_ERR(ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms));
 
   VLOG(1) << "Sending on flow " << master_context_.master_repl_id << " "
           << master_context_.dfly_session_id << " " << master_context_.dfly_flow_id;
