@@ -295,9 +295,15 @@ error_code Replica::ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms)
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
   sock_.reset(mythread->CreateSocket());
-  sock_->set_timeout(connect_timeout_ms.count());
 
-  RETURN_ON_ERR(sock_->Connect(master_context_.endpoint));
+  // We want a timeout for the initial connection because this stage might be blocking.
+  // We don't need it for the rest of the sync.
+  {
+    uint32_t timeout = sock_->timeout();
+    sock_->set_timeout(connect_timeout_ms.count());
+    RETURN_ON_ERR(sock_->Connect(master_context_.endpoint));
+    sock_->set_timeout(timeout);
+  }
 
   /* These may help but require additional field testing to learn.
    int yes = 1;
