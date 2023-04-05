@@ -1442,7 +1442,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
   constexpr auto kSelectOpts = CO::LOADING | CO::FAST | CO::NOSCRIPT;
 
   *registry << CI{"DEL", CO::WRITE, -2, 1, -1, 1}.HFUNC(Del)
-            /* Redis compaitibility:
+            /* Redis compatibility:
              * We don't allow PING during loading since in Redis PING is used as
              * failure detection, and a loading server is considered to be
              * not available. */

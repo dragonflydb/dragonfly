@@ -1815,6 +1815,21 @@ std::string ServerFamily::BuildClusterNodeReply(ConnectionContext* cntx) const {
   }
 }
 
+template <class Lock> bool try_lock_for(Lock& lock, absl::Duration duration) {
+  absl::Time start = absl::Now();
+  while (true) {
+    VLOG(1) << "Try acquire lock";
+    if (lock.try_lock()) {
+      VLOG(1) << "Acquired lock";
+      return true;
+    }
+    if (absl::Now() - start > duration) {
+      return false;
+    }
+    ThisFiber::SleepFor(200ms);
+  }
+}
+
 void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   std::string_view host = ArgS(args, 0);
   std::string_view port_s = ArgS(args, 1);
@@ -1822,11 +1837,17 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
   LOG(INFO) << "Replicating " << host << ":" << port_s;
 
-  if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_s, "one")) {
-    // use this lock as critical section to prevent concurrent replicaof commands running.
-    VLOG(1) << "Acquire replica lock";
-    unique_lock lk(replicaof_mu_);
+  // From here until the end of Replica::Start() it's a critical section. We don't want to wait
+  // for the lock too long because that hangs the client, so we try to acquire it for ~2 seconds and
+  // return an error if we can't. We should eventually break up the critical section so we don't
+  // have to hold the lock during the networking parts.
+  unique_lock lk(replicaof_mu_, std::defer_lock);
+  if (!try_lock_for(lk, absl::Seconds(2))) {
+    (*cntx)->SendError("Another replication command in progress");
+    return;
+  }
 
+  if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_s, "one")) {
     if (!ServerState::tlocal()->is_master) {
       auto repl_ptr = replica_;
       CHECK(repl_ptr);
@@ -1849,8 +1870,6 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
   auto new_replica = make_shared<Replica>(string(host), port, &service_, master_id());
 
-  VLOG(1) << "Acquire replica lock";
-  unique_lock lk(replicaof_mu_);
   if (replica_) {
     replica_->Stop();  // NOTE: consider introducing update API flow.
   } else {
@@ -2041,7 +2060,7 @@ void ServerFamily::Dfly(CmdArgList args, ConnectionContext* cntx) {
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ServerFamily::x))
 
 void ServerFamily::Register(CommandRegistry* registry) {
-  constexpr auto kReplicaOpts = CO::ADMIN | CO::GLOBAL_TRANS;
+  constexpr auto kReplicaOpts = CO::LOADING | CO::ADMIN | CO::GLOBAL_TRANS;
   constexpr auto kMemOpts = CO::LOADING | CO::READONLY | CO::FAST | CO::NOSCRIPT;
 
   *registry << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, 0}.HFUNC(Auth)

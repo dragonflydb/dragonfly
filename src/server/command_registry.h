@@ -22,7 +22,7 @@ enum CommandOpt : uint32_t {
   READONLY = 1U << 0,
   FAST = 1U << 1,
   WRITE = 1U << 2,
-  LOADING = 1U << 3,
+  LOADING = 1U << 3,  // Command allowed during LOADING state.
   DENYOOM = 1U << 4,  // use-memory in redis.
   REVERSE_MAPPING = 1U << 5,
 
