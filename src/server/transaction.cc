@@ -247,13 +247,13 @@ void Transaction::InitByKeys(KeyIndex key_index) {
 
   bool needs_reverse_mapping = cid_->opt_mask() & CO::REVERSE_MAPPING;
 
-  // Stub transactions always operate only on as single shard.
+  // Stub transactions always operate only on single shard.
   if ((key_index.HasSingleKey() && !IsAtomicMulti()) || (multi_ && multi_->role == SQUASHED_STUB)) {
     DCHECK_GT(key_index.step, 0u);
     // We don't have to split the arguments by shards, so we can copy them directly.
     StoreKeysInArgs(key_index, needs_reverse_mapping);
 
-    // Multi transactions that execute commands on their (active) own can't shrink the backing
+    // Multi transactions that execute commands on their own (not stubs) can't shrink the backing
     // array, as it still might be read by leftover callbacks.
     shard_data_.resize(IsActiveMulti() ? shard_set->size() : 1);
     shard_data_.front().local_mask |= ACTIVE;
