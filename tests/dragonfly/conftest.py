@@ -9,6 +9,7 @@ import pytest
 import pytest_asyncio
 import redis
 import aioredis
+import random
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -44,6 +45,14 @@ def test_env(tmp_dir: Path):
 
 @pytest.fixture(scope="session", params=[{}])
 def df_seeder_factory(request) -> DflySeederFactory:
+    seed = request.config.getoption("--rand-seed")
+    if seed is None:
+        seed = random.randrange(sys.maxsize)
+
+
+    random.seed(int(seed))
+    print(f"--- Random seed: {seed}, check: {random.randrange(100)} ---")
+
     return DflySeederFactory(request.config.getoption("--log-seeder"))
 
 
@@ -162,6 +171,8 @@ def pytest_addoption(parser):
         --gdb - start all instances inside gdb
         --df arg - pass arg to all instances, can be used multiple times
         --log-seeder file - to log commands of last seeder run
+        --existing-port - to provide a port to an existing process instead of starting a new instance
+        --rand-seed - to set the global random seed
     """
     parser.addoption(
         '--gdb', action='store_true', default=False, help='Run instances in gdb'
@@ -171,6 +182,9 @@ def pytest_addoption(parser):
     )
     parser.addoption(
         '--log-seeder', action='store', default=None, help='Store last generator commands in file'
+    )
+    parser.addoption(
+        '--rand-seed', action='store', default=None, help='Set seed for global random. Makes seeder predictable'
     )
     parser.addoption(
         '--existing-port', action='store', default=None, help='Provide a port to the existing process for the test')
