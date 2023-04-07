@@ -16,6 +16,7 @@
 #include "server/transaction.h"
 
 ABSL_DECLARE_FLAG(uint32_t, multi_exec_mode);
+ABSL_DECLARE_FLAG(bool, multi_exec_squash);
 ABSL_DECLARE_FLAG(std::string, default_lua_config);
 
 namespace dfly {
@@ -721,6 +722,7 @@ TEST_F(MultiTest, ContendedList) {
 // Test that squashing makes single-key ops atomic withing a non-atomic tx
 // because it runs them within one hop.
 TEST_F(MultiTest, TestSquashing) {
+  absl::SetFlag(&FLAGS_multi_exec_squash, true);
   absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::NON_ATOMIC);
 
   const char* keys[] = {kKeySid0, kKeySid1, kKeySid2};
