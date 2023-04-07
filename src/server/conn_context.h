@@ -120,7 +120,7 @@ class ConnectionContext : public facade::ConnectionContext {
 
   ConnectionContext(Transaction* tx, facade::CapturingReplyBuilder* crb)
       : facade::ConnectionContext(nullptr, nullptr), transaction{tx} {
-    delete Inject(crb);
+    delete Inject(crb);  // deletes the previous reply builder.
   }
 
   struct DebugInfo {

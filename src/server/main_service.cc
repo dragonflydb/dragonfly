@@ -28,6 +28,7 @@ extern "C" {
 #include "server/hset_family.h"
 #include "server/json_family.h"
 #include "server/list_family.h"
+#include "server/multi_command_squasher.h"
 #include "server/script_mgr.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
@@ -48,7 +49,7 @@ ABSL_FLAG(int, multi_exec_mode, 1,
           "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for locking "
           "incrementally, 4 for non atomic");
 
-ABSL_FLAG(bool, multi_exec_squash, true,
+ABSL_FLAG(bool, multi_exec_squash, false,
           "Whether multi exec will squash single shard commands to optimize performance");
 
 namespace dfly {
@@ -394,18 +395,6 @@ bool IsSHA(string_view str) {
   return true;
 }
 
-bool IsTransactional(const CommandId* cid) {
-  if (cid->first_key_pos() > 0 || (cid->opt_mask() & CO::GLOBAL_TRANS))
-    return true;
-
-  string_view name{cid->name()};
-
-  if (name == "EVAL" || name == "EVALSHA" || name == "EXEC")
-    return true;
-
-  return false;
-}
-
 bool EvalValidator(CmdArgList args, ConnectionContext* cntx) {
   string_view num_keys_str = ArgS(args, 2);
   int32_t num_keys;
@@ -716,7 +705,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   if (under_script) {
     DCHECK(dfly_cntx->transaction);
-    if (IsTransactional(cid)) {
+    if (cid->IsTransactional()) {
       OpStatus status =
           CheckKeysDeclared(*dfly_cntx->conn_state.script_info, cid, args, dfly_cntx->transaction);
 
@@ -735,7 +724,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   } else {
     DCHECK(dfly_cntx->transaction == nullptr);
 
-    if (IsTransactional(cid)) {
+    if (cid->IsTransactional()) {
       dist_trans.reset(new Transaction{cid, etl.thread_index()});
 
       if (!dist_trans->IsMulti()) {  // Multi command initialize themself based on their mode.
@@ -1247,7 +1236,7 @@ template <typename F> void IterateAllKeys(ConnectionState::ExecInfo* exec_info, 
     f(MutableSlice{key.data(), key.size()});
 
   for (const auto& scmd : exec_info->body) {
-    if (!IsTransactional(scmd.descr))
+    if (!scmd.descr->IsTransactional())
       continue;
 
     auto args = scmd.ArgList();
@@ -1291,7 +1280,7 @@ bool StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo*
   bool global = false;
   bool transactional = false;
   for (const auto& scmd : exec_info->body) {
-    transactional |= IsTransactional(scmd.descr);
+    transactional |= scmd.descr->IsTransactional();
     global |= scmd.descr->opt_mask() & CO::GLOBAL_TRANS;
     if (global)
       break;
@@ -1326,207 +1315,6 @@ bool StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo*
       DCHECK(false);
   };
   return true;
-}
-
-template <typename F> void IterateKeys(CmdArgList args, KeyIndex keys, F&& f) {
-  for (unsigned i = keys.start; i < keys.end; i += keys.step)
-    f(args[i]);
-
-  if (keys.bonus)
-    f(args[keys.bonus]);
-}
-
-// ExecutionSquasher allows executing a series of commands under a multi transaction
-// and squashing multiple consecutive single-shard commands into one hop whenever it's possible,
-// thus greatly decreasing the dispatch overhead for them.
-class ExecutionSquasher {
- public:
-  static void Execute(absl::Span<StoredCmd> cmds, ConnectionContext* cntx) {
-    ExecutionSquasher{cmds, cntx}.Run();
-  }
-
- private:
-  using ReplyChan =
-      ::util::fibers_ext::SimpleChannel<CapturingReplyBuilder::Payload,
-                                        base::mpmc_bounded_queue<CapturingReplyBuilder::Payload>>;
-
-  // Per-shard exection info.
-  struct ShardExecInfo {
-    ShardExecInfo() : had_writes{false}, cmds{}, reply_chan{nullptr}, local_tx{nullptr} {
-    }
-
-    bool had_writes;
-    std::vector<StoredCmd*> cmds;  // accumulated commands
-    unique_ptr<ReplyChan> reply_chan;
-    intrusive_ptr<Transaction> local_tx;  // stub-mode tx for use inside shard
-  };
-
-  static constexpr int kChanBufferSize = 32;
-
- private:
-  ExecutionSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx);
-
-  // Lazy initialize shard info.
-  ShardExecInfo& PrepareShardInfo(ShardId sid);
-
-  // Return whether command was squashed and whether squashed commands need to be flushed.
-  pair<bool, bool> TrySquash(StoredCmd* cmd);
-
-  // Execute separate non-squashed cmd.
-  void ExecuteStandalone(StoredCmd* cmd);
-
-  // Callback that runs on shards during squashed hop.
-  OpStatus SquashedHopCb(Transaction* parent_tx, EngineShard* es);
-
-  // Execute all currently squashed commands.
-  void ExecuteSquashed();
-
-  // Run all commands until completion.
-  void Run();
-
- private:
-  absl::Span<StoredCmd> cmds_;  // Input range of stored commands
-  ConnectionContext* cntx_;     // Underlying context
-  const CommandId* base_cid_;   // either EVAL or EXEC, used for squashed hops
-
-  std::vector<ShardExecInfo> sharded_;
-  std::vector<ShardId> order_;  // reply order for squashed cmds
-
-  // multi modes that lock on hops (non-atomic, incremental) need keys for squashed hops.
-  // track_keys_ stores whether to populate collected_keys_
-  bool track_keys_;
-  absl::flat_hash_set<MutableSlice> collected_keys_;
-
-  absl::flat_hash_set<ShardId> tmp_shards_;
-  std::vector<MutableSlice> tmp_keylist_;
-};
-
-ExecutionSquasher::ExecutionSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx)
-    : cmds_{cmds}, cntx_{cntx}, base_cid_{cntx->transaction->GetCId()} {
-  auto mode = cntx->transaction->GetMultiMode();
-  track_keys_ = (mode == Transaction::LOCK_INCREMENTAL) || (mode == Transaction::NON_ATOMIC);
-}
-
-ExecutionSquasher::ShardExecInfo& ExecutionSquasher::PrepareShardInfo(ShardId sid) {
-  if (sharded_.empty())
-    sharded_.resize(shard_set->size());
-
-  auto& sinfo = sharded_[sid];
-  if (!sinfo.local_tx)
-    sinfo.local_tx = new Transaction{cntx_->transaction};
-
-  if (!sinfo.reply_chan)
-    sinfo.reply_chan = make_unique<ReplyChan>(kChanBufferSize, 1);
-
-  return sinfo;
-}
-
-pair<bool, bool> ExecutionSquasher::TrySquash(StoredCmd* cmd) {
-  if (!IsTransactional(cmd->descr) || (cmd->descr->opt_mask() & CO::BLOCKING) ||
-      (cmd->descr->opt_mask() & CO::GLOBAL_TRANS))
-    return {false, false};
-
-  auto keys = DetermineKeys(cmd->descr, cmd->ArgList());
-  if (!keys.ok())
-    return {false, false};
-
-  // Count number of unique shards.
-  tmp_shards_.clear();
-  IterateKeys(cmd->ArgList(), *keys, [this](MutableSlice key) {
-    tmp_shards_.insert(Shard(facade::ToSV(key), shard_set->size()));
-  });
-
-  if (tmp_shards_.size() != 1)
-    return {false, false};
-
-  if (track_keys_)
-    IterateKeys(cmd->ArgList(), *keys, [this](MutableSlice key) { collected_keys_.insert(key); });
-
-  ShardId sid = *tmp_shards_.begin();
-  auto& sinfo = PrepareShardInfo(sid);
-
-  sinfo.had_writes |= (cmd->descr->opt_mask() & CO::WRITE);
-  sinfo.cmds.push_back(cmd);
-  order_.push_back(sid);
-  return {true, sinfo.cmds.size() >= kChanBufferSize - 1};
-}
-
-void ExecutionSquasher::ExecuteStandalone(StoredCmd* cmd) {
-  DCHECK(order_.empty());  // check no squashed chain is interrupted
-
-  auto* tx = cntx_->transaction;
-  tx->MultiSwitchCmd(cmd->descr);
-  if (IsTransactional(cmd->descr))
-    tx->InitByArgs(cntx_->conn_state.db_index, cmd->ArgList());
-  cmd->descr->Invoke(cmd->ArgList(), cntx_);
-}
-
-OpStatus ExecutionSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard* es) {
-  auto& sinfo = sharded_[es->shard_id()];
-  DCHECK(!sinfo.cmds.empty());
-
-  auto* local_tx = sinfo.local_tx.get();
-  CapturingReplyBuilder crb;
-  ConnectionContext local_cntx{local_tx, &crb};
-
-  for (auto* cmd : sinfo.cmds) {
-    local_tx->MultiSwitchCmd(cmd->descr);
-    local_tx->InitByArgs(parent_tx->GetDbIndex(), cmd->ArgList());
-    cmd->descr->Invoke(cmd->ArgList(), &local_cntx);
-
-    sinfo.reply_chan->Push(crb.Take());
-  }
-
-  local_cntx.Inject(nullptr);
-  return OpStatus::OK;
-}
-
-void ExecutionSquasher::ExecuteSquashed() {
-  if (order_.empty())
-    return;
-
-  VLOG(1) << "Executing " << order_.size() << " commands squashed";
-
-  Transaction* tx = cntx_->transaction;
-
-  if (track_keys_) {
-    tmp_keylist_.assign(collected_keys_.begin(), collected_keys_.end());
-    tx->PrepareSquashedMultiHop(base_cid_, CmdArgList{tmp_keylist_});
-  } else {
-    auto cb = [this](ShardId sid) { return !sharded_[sid].cmds.empty(); };
-    tx->PrepareSquashedMultiHop(base_cid_, cb);
-  }
-
-  tx->ScheduleSingleHop([this](auto* tx, auto* es) { return SquashedHopCb(tx, es); });
-
-  CapturingReplyBuilder::Payload payload;
-  for (auto idx : order_) {
-    CHECK(sharded_[idx].reply_chan->Pop(payload));
-    CapturingReplyBuilder::Apply(move(payload), cntx_->operator->());
-  }
-
-  for (auto& sinfo : sharded_)
-    sinfo.cmds.clear();
-
-  order_.clear();
-  collected_keys_.clear();
-}
-
-void ExecutionSquasher::Run() {
-  for (auto& cmd : cmds_) {
-    auto [squashed, flush] = TrySquash(&cmd);
-
-    if (flush || !squashed)
-      ExecuteSquashed();
-
-    if (!squashed)
-      ExecuteStandalone(&cmd);
-  }
-  ExecuteSquashed();
-
-  if (!sharded_.empty())
-    cntx_->transaction->ReportWritesSquashedMulti(
-        [this](ShardId sid) { return sharded_[sid].had_writes; });
 }
 
 void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
@@ -1565,13 +1353,13 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
   if (!exec_info.body.empty()) {
     if (absl::GetFlag(FLAGS_multi_exec_squash)) {
-      ExecutionSquasher::Execute(absl::MakeSpan(exec_info.body), cntx);
+      MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), cntx);
     } else {
       CmdArgVec str_list;
 
       for (auto& scmd : exec_info.body) {
         cntx->transaction->MultiSwitchCmd(scmd.descr);
-        if (IsTransactional(scmd.descr)) {
+        if (scmd.descr->IsTransactional()) {
           OpStatus st = cntx->transaction->InitByArgs(cntx->conn_state.db_index, scmd.ArgList());
           if (st != OpStatus::OK) {
             (*cntx)->SendError(st);
@@ -1853,7 +1641,7 @@ void Service::RegisterCommands() {
 
     LOG(INFO) << "Non-transactional commands are: ";
     registry_.Traverse([](std::string_view name, const CI& cid) {
-      if (!IsTransactional(&cid)) {
+      if (cid.IsTransactional()) {
         LOG(INFO) << "    " << name;
       }
     });

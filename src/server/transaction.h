@@ -38,9 +38,15 @@ using facade::OpStatus;
 // Otherwise, schedule the transaction with Schedule() and run successive hops
 // with Execute().
 //
-// Multi transactions are handled by a single transaction, which internally avoids
-// rescheduling. The flow of EXEC and EVAL is as follows:
+// 1. Multi transactions
 //
+// Multi transactions are handled by a single transaction, which exposes the same interface for
+// commands as regular transactions, but internally avoids rescheduling. There are multiple modes in
+// which a mutli-transaction can run, those are documented in the MultiMode enum.
+//
+// The flow of EXEC and EVAL is as follows:
+//
+// ```
 // trans->StartMulti_MultiMode_()
 // for ([cmd, args]) {
 //   trans->MultiSwitchCmd(cmd)  // 1. Set new command
@@ -48,7 +54,31 @@ using facade::OpStatus;
 //   cmd->Invoke(trans)          // 3. Run
 // }
 // trans->UnlockMulti()
+// ```
 //
+// 2. Multi squashing
+//
+// An important optimization for multi transactions is executing multiple single shard commands in
+// parallel. Because multiple commands are "squashed" into a single hop, its called multi squashing.
+// To mock the interface for commands, special "stub" transactions are created for each shard that
+// directly execute hop callbacks without any scheduling. Transaction roles are represented by the
+// MultiRole enum. See MultiCommandSquasher for the detailed squashing approach.
+//
+// The flow is as follows:
+//
+// ```
+// for (cmd in single_shard_sequence)
+//   sharded[shard].push_back(cmd)
+//
+// tx->PrepareSquashedMultiHop()
+// tx->ScheduleSingleHop({
+//   Transaction stub_tx {tx}
+//   for (cmd)
+//     // use stub_tx as regular multi tx, see 1. above
+// })
+//
+// ```
+
 class Transaction {
   friend class BlockingController;
 
@@ -167,7 +197,7 @@ class Transaction {
   void PrepareSquashedMultiHop(const CommandId* cid, CmdArgList keys);
 
   // Prepare a squashed hop on given shards.
-  // Only compatible with multi modes that acquire no locks - global and lock_ahead.
+  // Only compatible with multi modes that acquire all locks ahead - global and lock_ahead.
   void PrepareSquashedMultiHop(const CommandId* cid, absl::FunctionRef<bool(ShardId)> enabled);
 
   // Start multi in GLOBAL mode.
