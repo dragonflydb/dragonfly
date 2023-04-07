@@ -454,8 +454,7 @@ error_code Replica::InitiatePSync() {
     // Start full sync
     state_mask_ |= R_SYNCING;
 
-    SocketSource ss{sock_.get()};
-    io::PrefixSource ps{io_buf.InputBuffer(), &ss};
+    io::PrefixSource ps{io_buf.InputBuffer(), sock_.get()};
 
     // Set LOADING state.
     CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) == GlobalState::LOADING);
@@ -806,8 +805,7 @@ error_code Replica::StartStableSyncFlow(Context* cntx) {
 
 void Replica::FullSyncDflyFb(string eof_token, BlockingCounter bc, Context* cntx) {
   DCHECK(leftover_buf_);
-  SocketSource ss{sock_.get()};
-  io::PrefixSource ps{leftover_buf_->InputBuffer(), &ss};
+  io::PrefixSource ps{leftover_buf_->InputBuffer(), sock_.get()};
 
   RdbLoader loader(&service_);
   loader.SetFullSyncCutCb([bc, ran = false]() mutable {
@@ -857,8 +855,7 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
     prefix = leftover_buf_->InputBuffer();
   }
 
-  SocketSource ss{sock_.get()};
-  io::PrefixSource ps{prefix, &ss};
+  io::PrefixSource ps{prefix, sock_.get()};
 
   JournalReader reader{&ps, 0};
   TransactionReader tx_reader{};
