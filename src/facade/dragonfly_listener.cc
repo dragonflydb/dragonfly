@@ -16,7 +16,8 @@
 
 using namespace std;
 
-ABSL_FLAG(uint32_t, conn_threads, 0, "Number of threads used for handing server connections");
+ABSL_FLAG(uint32_t, conn_io_threads, 0, "Number of threads used for handing server connections");
+ABSL_FLAG(uint32_t, conn_io_thread_start, 0, "Starting thread id for handling server connections");
 ABSL_FLAG(bool, tls, false, "");
 ABSL_FLAG(bool, conn_use_incoming_cpu, false,
           "If true uses incoming cpu of a socket in order to distribute"
@@ -233,12 +234,8 @@ void Listener::OnConnectionClose(util::Connection* conn) {
 // We can limit number of threads handling dragonfly connections.
 ProactorBase* Listener::PickConnectionProactor(LinuxSocketBase* sock) {
   util::ProactorPool* pp = pool();
-  uint32_t total = GetFlag(FLAGS_conn_threads);
-  uint32_t res_id = kuint32max;
 
-  if (total == 0 || total > pp->size()) {
-    total = pp->size();
-  }
+  uint32_t res_id = kuint32max;
 
   if (!sock->IsUDS()) {
     int fd = sock->native_handle();
@@ -275,7 +272,14 @@ ProactorBase* Listener::PickConnectionProactor(LinuxSocketBase* sock) {
   }
 
   if (res_id == kuint32max) {
-    res_id = next_id_.fetch_add(1, std::memory_order_relaxed) % total;
+    uint32_t total = GetFlag(FLAGS_conn_io_threads);
+    uint32_t start = GetFlag(FLAGS_conn_io_thread_start) % pp->size();
+
+    if (total == 0 || total + start > pp->size()) {
+      total = pp->size() - start;
+    }
+
+    res_id = start + (next_id_.fetch_add(1, std::memory_order_relaxed) % total);
   }
 
   return pp->at(res_id);

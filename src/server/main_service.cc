@@ -45,12 +45,14 @@ using namespace std;
 ABSL_FLAG(uint32_t, port, 6379, "Redis port");
 ABSL_FLAG(uint32_t, memcache_port, 0, "Memcached port");
 
-ABSL_FLAG(int, multi_exec_mode, 1,
+ABSL_FLAG(uint32_t, multi_exec_mode, 1,
           "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for locking "
           "incrementally, 4 for non atomic");
 
 ABSL_FLAG(bool, multi_exec_squash, false,
           "Whether multi exec will squash single shard commands to optimize performance");
+
+ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose automatically");
 
 namespace dfly {
 
@@ -509,7 +511,13 @@ void Service::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_i
 
   pp_.Await([](uint32_t index, ProactorBase* pb) { ServerState::Init(index); });
 
-  uint32_t shard_num = pp_.size() > 1 ? pp_.size() - 1 : pp_.size();
+  uint32_t shard_num = GetFlag(FLAGS_num_shards);
+  if (shard_num == 0) {
+    shard_num = pp_.size() > 1 ? pp_.size() - 1 : pp_.size();
+  } else if (shard_num > pp_.size()) {
+    shard_num = pp_.size();
+  }
+
   shard_set->Init(shard_num, !opts.disable_time_update);
 
   request_latency_usec.Init(&pp_);

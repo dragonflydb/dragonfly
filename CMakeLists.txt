@@ -16,6 +16,8 @@ set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/helio/cmake" ${CMAKE_MODULE_P
 option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 option(DF_USE_SSL "Provide support for SSL connections" ON)
 
+find_package(OpenSSL)
+
 include(third_party)
 include(internal)
 

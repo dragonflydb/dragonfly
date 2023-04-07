@@ -673,4 +673,17 @@ TEST_F(StringFamilyTest, SetMGetWithNilResp3) {
   EXPECT_THAT(resp.GetVec(), ElementsAre("val", ArgType(RespExpr::NIL)));
 }
 
+TEST_F(StringFamilyTest, SetWithGetParam) {
+  EXPECT_THAT(Run({"set", "key1", "val1", "get"}), ArgType(RespExpr::NIL));
+  EXPECT_EQ(Run({"set", "key1", "val2", "get"}), "val1");
+
+  EXPECT_THAT(Run({"set", "key2", "val2", "nx", "get"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"set", "key2", "not used", "nx", "get"}), "val2");
+  EXPECT_EQ(Run({"get", "key2"}), "val2");
+
+  EXPECT_THAT(Run({"set", "key3", "not used", "xx", "get"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"set", "key2", "val3", "xx", "get"}), "val2");
+  EXPECT_EQ(Run({"get", "key2"}), "val3");
+}
+
 }  // namespace dfly

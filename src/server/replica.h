@@ -36,6 +36,8 @@ class Replica {
     std::string master_repl_id;
     std::string dfly_session_id;         // Sync session id for dfly sync.
     uint32_t dfly_flow_id = UINT32_MAX;  // Flow id if replica acts as a dfly flow.
+
+    std::string Description() const;
   };
 
   // The flow is : R_ENABLED -> R_TCP_CONNECTED -> (R_SYNCING) -> R_SYNC_OK.
@@ -50,10 +52,10 @@ class Replica {
   };
 
   // This class holds the commands of transaction in single shard.
-  // Once all commands recieved the command can be executed.
+  // Once all commands were received, the command can be executed.
   struct TransactionData {
     // Update the data from ParsedEntry and return true if all shard transaction commands were
-    // recieved.
+    // received.
     bool AddEntry(journal::ParsedEntry&& entry);
 
     bool IsGlobalCmd() const;

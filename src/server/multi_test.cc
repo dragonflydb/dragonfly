@@ -15,7 +15,7 @@
 #include "server/test_utils.h"
 #include "server/transaction.h"
 
-ABSL_DECLARE_FLAG(int, multi_exec_mode);
+ABSL_DECLARE_FLAG(uint32_t, multi_exec_mode);
 ABSL_DECLARE_FLAG(std::string, default_lua_config);
 
 namespace dfly {

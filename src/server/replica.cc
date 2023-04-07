@@ -98,6 +98,10 @@ vector<vector<unsigned>> Partition(unsigned num_flows) {
 
 }  // namespace
 
+std::string Replica::MasterContext::Description() const {
+  return absl::StrCat(host, ":", port);
+}
+
 Replica::Replica(string host, uint16_t port, Service* se, std::string_view id)
     : service_(*se), id_{id} {
   master_context_.host = std::move(host);
@@ -130,16 +134,19 @@ Replica::~Replica() {
 static const char kConnErr[] = "could not connect to master: ";
 
 bool Replica::Start(ConnectionContext* cntx) {
+  VLOG(1) << "Starting replication";
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
 
   // 1. Resolve dns.
+  VLOG(1) << "Resolving master DNS";
   error_code ec = ResolveMasterDns();
   if (ec) {
     (*cntx)->SendError(StrCat("could not resolve master dns", ec.message()));
     return false;
   }
   // 2. Connect socket.
+  VLOG(1) << "Connecting to master";
   ec = ConnectAndAuth();
   if (ec) {
     (*cntx)->SendError(StrCat(kConnErr, ec.message()));
@@ -147,6 +154,7 @@ bool Replica::Start(ConnectionContext* cntx) {
   }
 
   // 3. Greet.
+  VLOG(1) << "Greeting";
   state_mask_ = R_ENABLED | R_TCP_CONNECTED;
   last_io_time_ = mythread->GetMonotonicTimeNs();
   ec = Greet();
@@ -166,6 +174,7 @@ bool Replica::Start(ConnectionContext* cntx) {
 }
 
 void Replica::Stop() {
+  VLOG(1) << "Stopping replication";
   // Mark disabled, prevent from retrying.
   if (sock_) {
     sock_->proactor()->Await([this] {
@@ -181,10 +190,12 @@ void Replica::Stop() {
 }
 
 void Replica::Pause(bool pause) {
+  VLOG(1) << "Pausing replication";
   sock_->proactor()->Await([&] { is_paused_ = pause; });
 }
 
 void Replica::MainReplicationFb() {
+  VLOG(1) << "Main replication fiber started";
   // Switch shard states to replication.
   SetShardStates(true);
 
@@ -200,13 +211,13 @@ void Replica::MainReplicationFb() {
 
       ec = ResolveMasterDns();
       if (ec) {
-        LOG(ERROR) << "Error resolving dns " << ec;
+        LOG(ERROR) << "Error resolving dns to " << master_context_.host << " " << ec;
         continue;
       }
 
       ec = ConnectAndAuth();
       if (ec) {
-        LOG(ERROR) << "Error connecting " << ec;
+        LOG(ERROR) << "Error connecting to " << master_context_.Description() << " " << ec;
         continue;
       }
       VLOG(1) << "Replica socket connected";
@@ -217,7 +228,8 @@ void Replica::MainReplicationFb() {
     if ((state_mask_ & R_GREETED) == 0) {
       ec = Greet();
       if (ec) {
-        LOG(INFO) << "Error greeting " << ec << " " << ec.message();
+        LOG(INFO) << "Error greeting " << master_context_.Description() << " " << ec << " "
+                  << ec.message();
         state_mask_ &= R_ENABLED;
         continue;
       }
@@ -231,7 +243,8 @@ void Replica::MainReplicationFb() {
         ec = InitiatePSync();
 
       if (ec) {
-        LOG(WARNING) << "Error syncing " << ec << " " << ec.message();
+        LOG(WARNING) << "Error syncing with " << master_context_.Description() << " " << ec << " "
+                     << ec.message();
         state_mask_ &= R_ENABLED;  // reset all flags besides R_ENABLED
         continue;
       }
@@ -246,7 +259,8 @@ void Replica::MainReplicationFb() {
     else
       ec = ConsumeRedisStream();
 
-    LOG(WARNING) << "Error full sync " << ec << " " << ec.message();
+    LOG(WARNING) << "Error full sync with " << master_context_.Description() << " " << ec << " "
+                 << ec.message();
     state_mask_ &= R_ENABLED;
   }
 
@@ -440,8 +454,7 @@ error_code Replica::InitiatePSync() {
     // Start full sync
     state_mask_ |= R_SYNCING;
 
-    SocketSource ss{sock_.get()};
-    io::PrefixSource ps{io_buf.InputBuffer(), &ss};
+    io::PrefixSource ps{io_buf.InputBuffer(), sock_.get()};
 
     // Set LOADING state.
     CHECK(service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) == GlobalState::LOADING);
@@ -560,7 +573,7 @@ error_code Replica::InitiateDflySync() {
     return cntx_.ReportError(ec);
   }
 
-  LOG(INFO) << "Started full sync";
+  LOG(INFO) << absl::StrCat("Started full sync with ", master_context_.Description());
 
   // Wait for all flows to receive full sync cut.
   // In case of an error, this is unblocked by the error handler.
@@ -769,7 +782,7 @@ error_code Replica::StartFullSyncFlow(BlockingCounter sb, Context* cntx) {
 
   // We can not discard io_buf because it may contain data
   // besides the response we parsed. Therefore we pass it further to ReplicateDFFb.
-  sync_fb_ = Fiber(&Replica::FullSyncDflyFb, this, move(eof_token), sb, cntx);
+  sync_fb_ = MakeFiber(&Replica::FullSyncDflyFb, this, move(eof_token), sb, cntx);
 
   return error_code{};
 }
@@ -782,9 +795,9 @@ error_code Replica::StartStableSyncFlow(Context* cntx) {
   CHECK(sock_->IsOpen());
   // sock_.reset(mythread->CreateSocket());
   // RETURN_ON_ERR(sock_->Connect(master_context_.master_ep));
-  sync_fb_ = Fiber(&Replica::StableSyncDflyReadFb, this, cntx);
+  sync_fb_ = MakeFiber(&Replica::StableSyncDflyReadFb, this, cntx);
   if (use_multi_shard_exe_sync_) {
-    execution_fb_ = Fiber(&Replica::StableSyncDflyExecFb, this, cntx);
+    execution_fb_ = MakeFiber(&Replica::StableSyncDflyExecFb, this, cntx);
   }
 
   return std::error_code{};
@@ -792,8 +805,7 @@ error_code Replica::StartStableSyncFlow(Context* cntx) {
 
 void Replica::FullSyncDflyFb(string eof_token, BlockingCounter bc, Context* cntx) {
   DCHECK(leftover_buf_);
-  SocketSource ss{sock_.get()};
-  io::PrefixSource ps{leftover_buf_->InputBuffer(), &ss};
+  io::PrefixSource ps{leftover_buf_->InputBuffer(), sock_.get()};
 
   RdbLoader loader(&service_);
   loader.SetFullSyncCutCb([bc, ran = false]() mutable {
@@ -843,8 +855,7 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
     prefix = leftover_buf_->InputBuffer();
   }
 
-  SocketSource ss{sock_.get()};
-  io::PrefixSource ps{prefix, &ss};
+  io::PrefixSource ps{prefix, sock_.get()};
 
   JournalReader reader{&ps, 0};
   TransactionReader tx_reader{};
