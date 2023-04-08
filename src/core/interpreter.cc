@@ -646,49 +646,55 @@ int Interpreter::RedisGenericCommand(bool raise_error) {
   size_t blob_len = 0;
   char tmpbuf[64];
 
-  for (int j = 0; j < argc; j++) {
-    unsigned idx = j + 1;
-    if (lua_isinteger(lua_, idx)) {
-      absl::AlphaNum an(lua_tointeger(lua_, idx));
-      blob_len += an.size();
-    } else if (lua_isnumber(lua_, idx)) {
-      // fmt_len does not include '\0'.
-      int fmt_len = absl::SNPrintF(tmpbuf, sizeof(tmpbuf), "%.17g", lua_tonumber(lua_, idx));
-      CHECK_GT(fmt_len, 0);
-      blob_len += fmt_len;
-    } else if (lua_isstring(lua_, idx)) {
-      blob_len += lua_rawlen(lua_, idx);  // lua_rawlen does not include '\0'.
-    } else {
-      PushError(lua_, "Lua redis() command arguments must be strings or integers");
-      cmd_depth_--;
-      return raise_error ? RaiseError(lua_) : 1;
+  for (int idx = 1; idx <= argc; idx++) {
+    switch (lua_type(lua_, idx)) {
+      case LUA_TNUMBER:
+        if (lua_isinteger(lua_, idx)) {
+          blob_len += absl::AlphaNum{lua_tointeger(lua_, idx)}.size();
+        } else {
+          int fmt_len = absl::SNPrintF(tmpbuf, sizeof(tmpbuf), "%.17g", lua_tonumber(lua_, idx));
+          CHECK_GT(fmt_len, 0);
+          blob_len += fmt_len;
+        }
+        continue;
+      case LUA_TSTRING:
+        blob_len += lua_rawlen(lua_, idx);
+        continue;
+      default:
+        PushError(lua_, "Lua redis() command arguments must be strings or integers");
+        cmd_depth_--;
+        return raise_error ? RaiseError(lua_) : 1;
     }
   }
 
   // backing storage.
   unique_ptr<char[]> blob(new char[blob_len + 8]);  // 8 safety.
-  vector<absl::Span<char>> cmdargs;
+  vector<absl::Span<char>> cmdargs(argc);
   char* cur = blob.get();
   char* end = cur + blob_len;
 
   for (int j = 0; j < argc; j++) {
     unsigned idx = j + 1;
     size_t len = 0;
-    if (lua_isinteger(lua_, idx)) {
-      char* next = absl::numbers_internal::FastIntToBuffer(lua_tointeger(lua_, idx), cur);
-      len = next - cur;
-    } else if (lua_isnumber(lua_, idx)) {
-      // we pass `end - cur + 1` because we do not want to skip the last character
-      // if it's the last argument.
-      int fmt_len = absl::SNPrintF(cur, end - cur + 1, "%.17g", lua_tonumber(lua_, idx));
-      CHECK_GT(fmt_len, 0);
-      len = fmt_len;
-    } else if (lua_isstring(lua_, idx)) {
-      len = lua_rawlen(lua_, idx);
-      memcpy(cur, lua_tostring(lua_, idx), len + 1);  // copy \0 as well.
-    }
+    switch (lua_type(lua_, idx)) {
+      case LUA_TNUMBER:
+        if (lua_isinteger(lua_, idx)) {
+          char* next = absl::numbers_internal::FastIntToBuffer(lua_tointeger(lua_, idx), cur);
+          len = next - cur;
+        } else if (lua_isnumber(lua_, idx)) {
+          // we pass `end - cur + 1` because we do not want to skip the last character
+          // if it's the last argument.
+          int fmt_len = absl::SNPrintF(cur, end - cur + 1, "%.17g", lua_tonumber(lua_, idx));
+          CHECK_GT(fmt_len, 0);
+          len = fmt_len;
+        }
+        break;
+      case LUA_TSTRING:
+        len = lua_rawlen(lua_, idx);
+        memcpy(cur, lua_tostring(lua_, idx), len);
+    };
 
-    cmdargs.emplace_back(cur, len);
+    cmdargs[j] = {cur, len};
     cur += len;
   }
 
