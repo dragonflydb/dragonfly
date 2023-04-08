@@ -16,22 +16,48 @@ namespace dfly {
 using namespace std;
 using namespace facade;
 
-StoredCmd::StoredCmd(const CommandId* d, CmdArgList args) : descr(d) {
+StoredCmd::StoredCmd(const CommandId* cid, CmdArgList args)
+    : cid_{cid}, buffer_{}, sizes_(args.size() - 1) {
+  // The command name is not stored in the buffer, so start from 1.
   size_t total_size = 0;
-  for (auto args : args) {
+  for (auto args : args.subspan(1))
     total_size += args.size();
+
+  buffer_.resize(total_size);
+  char* next = buffer_.data();
+  for (unsigned i = 1; i < args.size(); i++) {
+    memcpy(next, args[i].data(), args[i].size());
+    sizes_[i - 1] = args[i].size();
+    next += args[i].size();
+  }
+}
+
+void StoredCmd::Fill(CmdArgList args, MutableSlice cmd_scratch) {
+  CHECK_GE(args.size(), sizes_.size() + 1);
+  unsigned i = 0;
+
+  // Extract the command name and place if first.
+  if (!cmd_scratch.empty()) {
+    DCHECK_GE(cmd_scratch.size(), strlen(cid_->name()));
+    strcpy(cmd_scratch.data(), cid_->name());
+    args[i++] = {cmd_scratch.data(), strlen(cid_->name())};
+  } else {
+    args[i++] = {nullptr, 0};
   }
 
-  backing_storage_.reset(new char[total_size]);
-  arg_vec_.resize(args.size());
-  char* next = backing_storage_.get();
-  for (size_t i = 0; i < args.size(); ++i) {
-    auto src = args[i];
-    memcpy(next, src.data(), src.size());
-    arg_vec_[i] = MutableSlice{next, src.size()};
-    next += src.size();
+  unsigned offset = 0;
+  for (auto sz : sizes_) {
+    args[i++] = MutableSlice{buffer_.data() + offset, sz};
+    offset += sz;
   }
-  arg_list_ = {arg_vec_.data(), arg_vec_.size()};
+}
+
+size_t StoredCmd::NumArgs() const {
+  return sizes_.size();
+}
+
+const CommandId* StoredCmd::Cid() const {
+  return cid_;
 }
 
 void ConnectionContext::ChangeMonitor(bool start) {

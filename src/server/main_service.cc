@@ -1241,20 +1241,23 @@ template <typename F> void IterateAllKeys(ConnectionState::ExecInfo* exec_info, 
   for (auto& [dbid, key] : exec_info->watched_keys)
     f(MutableSlice{key.data(), key.size()});
 
-  for (const auto& scmd : exec_info->body) {
-    if (!scmd.descr->IsTransactional())
+  CmdArgVec arg_vec{};
+
+  for (auto& scmd : exec_info->body) {
+    if (!scmd.Cid()->IsTransactional())
       continue;
 
-    auto args = scmd.ArgList();
+    arg_vec.resize(scmd.NumArgs() + 1);
+    scmd.Fill(absl::MakeSpan(arg_vec), {});
 
-    auto key_res = DetermineKeys(scmd.descr, args);
+    auto key_res = DetermineKeys(scmd.Cid(), absl::MakeSpan(arg_vec));
     if (!key_res.ok())
       continue;
 
     auto key_index = key_res.value();
 
     for (unsigned i = key_index.start; i < key_index.end; i += key_index.step)
-      f(args[i]);
+      f(arg_vec[i]);
 
     if (key_index.bonus)
       f(args[*key_index.bonus]);
@@ -1286,8 +1289,8 @@ bool StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo*
   bool global = false;
   bool transactional = false;
   for (const auto& scmd : exec_info->body) {
-    transactional |= scmd.descr->IsTransactional();
-    global |= scmd.descr->opt_mask() & CO::GLOBAL_TRANS;
+    transactional |= scmd.Cid()->IsTransactional();
+    global |= scmd.Cid()->opt_mask() & CO::GLOBAL_TRANS;
     if (global)
       break;
   }
@@ -1361,18 +1364,25 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     if (absl::GetFlag(FLAGS_multi_exec_squash)) {
       MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), cntx);
     } else {
-      CmdArgVec str_list;
+      CmdArgVec arg_vec{};
+      char buf[64];
 
       for (auto& scmd : exec_info.body) {
-        cntx->transaction->MultiSwitchCmd(scmd.descr);
-        if (scmd.descr->IsTransactional()) {
-          OpStatus st = cntx->transaction->InitByArgs(cntx->conn_state.db_index, scmd.ArgList());
+        cntx->transaction->MultiSwitchCmd(scmd.Cid());
+
+        arg_vec.resize(scmd.NumArgs() + 1);
+        CmdArgList args = absl::MakeSpan(arg_vec);
+        scmd.Fill(args, buf);
+
+        if (scmd.Cid()->IsTransactional()) {
+          OpStatus st = cntx->transaction->InitByArgs(cntx->conn_state.db_index, args);
           if (st != OpStatus::OK) {
             (*cntx)->SendError(st);
             break;
           }
         }
-        bool ok = InvokeCmd(scmd.ArgList(), scmd.descr, cntx, true);
+
+        bool ok = InvokeCmd(args, scmd.Cid(), cntx, true);
         if (!ok || rb->GetError())  // checks for i/o error, not logical error.
           break;
       }
