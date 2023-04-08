@@ -28,6 +28,17 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
     opt_mask_ |= CO::REVERSE_MAPPING;
 }
 
+bool CommandId::IsTransactional() const {
+  if (first_key_ > 0 || (opt_mask_ & CO::GLOBAL_TRANS))
+    return true;
+
+  string_view name{name_};
+  if (name == "EVAL" || name == "EVALSHA" || name == "EXEC")
+    return true;
+
+  return false;
+}
+
 uint32_t CommandId::OptCount(uint32_t mask) {
   return absl::popcount(mask);
 }

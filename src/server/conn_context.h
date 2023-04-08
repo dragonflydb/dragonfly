@@ -8,6 +8,7 @@
 
 #include "core/fibers.h"
 #include "facade/conn_context.h"
+#include "facade/reply_capture.h"
 #include "server/common.h"
 
 namespace dfly {
@@ -115,6 +116,11 @@ class ConnectionContext : public facade::ConnectionContext {
  public:
   ConnectionContext(::io::Sink* stream, facade::Connection* owner)
       : facade::ConnectionContext(stream, owner) {
+  }
+
+  ConnectionContext(Transaction* tx, facade::CapturingReplyBuilder* crb)
+      : facade::ConnectionContext(nullptr, nullptr), transaction{tx} {
+    delete Inject(crb);  // deletes the previous reply builder.
   }
 
   struct DebugInfo {

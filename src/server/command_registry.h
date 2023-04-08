@@ -113,6 +113,8 @@ class CommandId {
     handler_(std::move(args), cntx);
   }
 
+  bool IsTransactional() const;
+
   // Returns true if validation succeeded.
   bool Validate(CmdArgList args, ConnectionContext* cntx) const {
     return !validator_ || validator_(std::move(args), cntx);

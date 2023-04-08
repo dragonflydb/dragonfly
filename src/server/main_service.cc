@@ -9,6 +9,7 @@ extern "C" {
 }
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/functional/bind_front.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_format.h>
 #include <xxhash.h>
@@ -19,6 +20,7 @@ extern "C" {
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
+#include "facade/reply_capture.h"
 #include "server/bitops_family.h"
 #include "server/conn_context.h"
 #include "server/error.h"
@@ -26,6 +28,7 @@ extern "C" {
 #include "server/hset_family.h"
 #include "server/json_family.h"
 #include "server/list_family.h"
+#include "server/multi_command_squasher.h"
 #include "server/script_mgr.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
@@ -45,9 +48,10 @@ ABSL_FLAG(uint32_t, memcache_port, 0, "Memcached port");
 ABSL_FLAG(uint32_t, multi_exec_mode, 1,
           "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for locking "
           "incrementally, 4 for non atomic");
-ABSL_FLAG(uint32_t, multi_eval_mode, 1,
-          "Set EVAL atomicity mode: 1 for global, 2 for locking ahead, 3 for locking "
-          "incrementally, 4 for non atomic");
+
+ABSL_FLAG(bool, multi_exec_squash, false,
+          "Whether multi exec will squash single shard commands to optimize performance");
+
 ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose automatically");
 
 namespace dfly {
@@ -393,18 +397,6 @@ bool IsSHA(string_view str) {
   return true;
 }
 
-bool IsTransactional(const CommandId* cid) {
-  if (cid->first_key_pos() > 0 || (cid->opt_mask() & CO::GLOBAL_TRANS))
-    return true;
-
-  string_view name{cid->name()};
-
-  if (name == "EVAL" || name == "EVALSHA" || name == "EXEC")
-    return true;
-
-  return false;
-}
-
 bool EvalValidator(CmdArgList args, ConnectionContext* cntx) {
   string_view num_keys_str = ArgS(args, 2);
   int32_t num_keys;
@@ -721,7 +713,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   if (under_script) {
     DCHECK(dfly_cntx->transaction);
-    if (IsTransactional(cid)) {
+    if (cid->IsTransactional()) {
       OpStatus status =
           CheckKeysDeclared(*dfly_cntx->conn_state.script_info, cid, args, dfly_cntx->transaction);
 
@@ -740,7 +732,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   } else {
     DCHECK(dfly_cntx->transaction == nullptr);
 
-    if (IsTransactional(cid)) {
+    if (cid->IsTransactional()) {
       dist_trans.reset(new Transaction{cid, etl.thread_index()});
 
       if (!dist_trans->IsMulti()) {  // Multi command initialize themself based on their mode.
@@ -1252,7 +1244,7 @@ template <typename F> void IterateAllKeys(ConnectionState::ExecInfo* exec_info, 
     f(MutableSlice{key.data(), key.size()});
 
   for (const auto& scmd : exec_info->body) {
-    if (!IsTransactional(scmd.descr))
+    if (!scmd.descr->IsTransactional())
       continue;
 
     auto args = scmd.ArgList();
@@ -1296,7 +1288,7 @@ bool StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo*
   bool global = false;
   bool transactional = false;
   for (const auto& scmd : exec_info->body) {
-    transactional |= IsTransactional(scmd.descr);
+    transactional |= scmd.descr->IsTransactional();
     global |= scmd.descr->opt_mask() & CO::GLOBAL_TRANS;
     if (global)
       break;
@@ -1368,20 +1360,24 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   rb->StartArray(exec_info.body.size());
 
   if (!exec_info.body.empty()) {
-    CmdArgVec str_list;
+    if (absl::GetFlag(FLAGS_multi_exec_squash)) {
+      MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), cntx);
+    } else {
+      CmdArgVec str_list;
 
-    for (auto& scmd : exec_info.body) {
-      cntx->transaction->MultiSwitchCmd(scmd.descr);
-      if (IsTransactional(scmd.descr)) {
-        OpStatus st = cntx->transaction->InitByArgs(cntx->conn_state.db_index, scmd.ArgList());
-        if (st != OpStatus::OK) {
-          (*cntx)->SendError(st);
-          break;
+      for (auto& scmd : exec_info.body) {
+        cntx->transaction->MultiSwitchCmd(scmd.descr);
+        if (scmd.descr->IsTransactional()) {
+          OpStatus st = cntx->transaction->InitByArgs(cntx->conn_state.db_index, scmd.ArgList());
+          if (st != OpStatus::OK) {
+            (*cntx)->SendError(st);
+            break;
+          }
         }
+        bool ok = InvokeCmd(scmd.ArgList(), scmd.descr, cntx, true);
+        if (!ok || rb->GetError())  // checks for i/o error, not logical error.
+          break;
       }
-      bool ok = InvokeCmd(scmd.ArgList(), scmd.descr, cntx, true);
-      if (!ok || rb->GetError())  // checks for i/o error, not logical error.
-        break;
     }
   }
 
@@ -1653,7 +1649,7 @@ void Service::RegisterCommands() {
 
     LOG(INFO) << "Non-transactional commands are: ";
     registry_.Traverse([](std::string_view name, const CI& cid) {
-      if (!IsTransactional(&cid)) {
+      if (cid.IsTransactional()) {
         LOG(INFO) << "    " << name;
       }
     });

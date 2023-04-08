@@ -14,6 +14,7 @@
 namespace dfly {
 
 using namespace std;
+using namespace facade;
 
 StoredCmd::StoredCmd(const CommandId* d, CmdArgList args) : descr(d) {
   size_t total_size = 0;

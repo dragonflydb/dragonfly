@@ -49,7 +49,14 @@ Transaction::Transaction(const CommandId* cid, uint32_t thread_index)
     multi_->shard_journal_write.resize(shard_set->size(), false);
 
     multi_->mode = NOT_DETERMINED;
+    multi_->role = DEFAULT;
   }
+}
+
+Transaction::Transaction(const Transaction* parent)
+    : multi_{make_unique<MultiData>()}, txid_{parent->txid()} {
+  multi_->mode = parent->multi_->mode;
+  multi_->role = SQUASHED_STUB;
 }
 
 Transaction::~Transaction() {
@@ -191,10 +198,13 @@ void Transaction::StoreKeysInArgs(KeyIndex key_index, bool rev_mapping) {
   DCHECK_EQ(key_index.bonus, 0U);
 
   auto args = cmd_with_full_args_;
+  DCHECK(key_index.step == 1u || key_index.step == 2u);
 
   // even for a single key we may have multiple arguments per key (MSET).
-  for (unsigned j = key_index.start; j < key_index.start + key_index.step; ++j) {
+  for (unsigned j = key_index.start; j < key_index.end; j++) {
     args_.push_back(ArgS(args, j));
+    if (key_index.step == 2)
+      args_.push_back(ArgS(args, ++j));
   }
 
   if (rev_mapping) {
@@ -236,15 +246,16 @@ void Transaction::InitByKeys(KeyIndex key_index) {
   DCHECK_LT(key_index.start, args.size());
 
   bool needs_reverse_mapping = cid_->opt_mask() & CO::REVERSE_MAPPING;
-  bool single_key = key_index.HasSingleKey();
 
-  if (single_key && !IsAtomicMulti()) {
+  // Stub transactions always operate only on single shard.
+  if ((key_index.HasSingleKey() && !IsAtomicMulti()) || (multi_ && multi_->role == SQUASHED_STUB)) {
     DCHECK_GT(key_index.step, 0u);
-
     // We don't have to split the arguments by shards, so we can copy them directly.
     StoreKeysInArgs(key_index, needs_reverse_mapping);
 
-    shard_data_.resize(IsMulti() ? shard_set->size() : 1);
+    // Multi transactions that execute commands on their own (not stubs) can't shrink the backing
+    // array, as it still might be read by leftover callbacks.
+    shard_data_.resize(IsActiveMulti() ? shard_set->size() : 1);
     shard_data_.front().local_mask |= ACTIVE;
 
     unique_shard_cnt_ = 1;
@@ -274,7 +285,7 @@ void Transaction::InitByKeys(KeyIndex key_index) {
   // Compress shard data, if we occupy only one shard.
   if (unique_shard_cnt_ == 1) {
     PerShardData* sd;
-    if (IsMulti()) {
+    if (IsActiveMulti()) {
       sd = &shard_data_[unique_shard_id_];
     } else {
       shard_data_.resize(1);
@@ -321,6 +332,35 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
 
   InitByKeys(*key_index);
   return OpStatus::OK;
+}
+
+void Transaction::PrepareSquashedMultiHop(const CommandId* cid, CmdArgList keys) {
+  MultiSwitchCmd(cid);
+
+  multi_->role = SQUASHER;
+  InitBase(db_index_, keys);
+  InitByKeys(KeyIndex::Range(0, keys.size()));
+}
+
+void Transaction::PrepareSquashedMultiHop(const CommandId* cid,
+                                          absl::FunctionRef<bool(ShardId)> enabled) {
+  CHECK(multi_->mode == GLOBAL || multi_->mode == LOCK_AHEAD);
+
+  MultiSwitchCmd(cid);
+
+  multi_->role = SQUASHER;
+  InitBase(db_index_, {});
+
+  DCHECK_EQ(shard_data_.size(), shard_set->size());
+  for (unsigned i = 0; i < shard_data_.size(); i++) {
+    if (enabled(i)) {
+      shard_data_[i].local_mask |= ACTIVE;
+      unique_shard_cnt_++;
+      unique_shard_id_ = i;
+    } else {
+      shard_data_[i].local_mask &= ~ACTIVE;
+    }
+  }
 }
 
 void Transaction::StartMultiGlobal(DbIndex dbid) {
@@ -379,15 +419,21 @@ void Transaction::MultiSwitchCmd(const CommandId* cid) {
   cid_ = cid;
   cb_ptr_ = nullptr;
 
-  if (multi_->mode == NON_ATOMIC) {
+  if (multi_->mode == NON_ATOMIC || multi_->role == SQUASHED_STUB) {
+    // Reset shard data without resizing because armed might be read from cancelled callbacks.
     for (auto& sd : shard_data_) {
       sd.arg_count = sd.arg_start = sd.local_mask = 0;
       sd.pq_pos = TxQueue::kEnd;
       DCHECK_EQ(sd.is_armed.load(memory_order_relaxed), false);
     }
-    txid_ = 0;
     coordinator_state_ = 0;
   }
+
+  if (multi_->mode == NON_ATOMIC)
+    txid_ = 0;
+
+  if (multi_->role == SQUASHER)
+    multi_->role = DEFAULT;
 }
 
 string Transaction::DebugId() const {
@@ -640,6 +686,11 @@ bool Transaction::MultiData::IsIncrLocks() const {
 // BLPOP where a data must be read from multiple shards before performing another hop.
 OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   DCHECK(!cb_ptr_);
+
+  if (multi_ && multi_->role == SQUASHED_STUB) {
+    return RunSquashedMultiCb(cb);
+  }
+
   cb_ptr_ = &cb;
 
   DCHECK(IsAtomicMulti() || (coordinator_state_ & COORD_SCHED) == 0);  // Multi schedule in advance.
@@ -706,6 +757,12 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   return local_result_;
 }
 
+void Transaction::ReportWritesSquashedMulti(absl::FunctionRef<bool(ShardId)> had_write) {
+  DCHECK(multi_);
+  for (unsigned i = 0; i < multi_->shard_journal_write.size(); i++)
+    multi_->shard_journal_write[i] |= had_write(i);
+}
+
 // Runs in the coordinator fiber.
 void Transaction::UnlockMulti() {
   VLOG(1) << "UnlockMulti " << DebugId();
@@ -750,6 +807,9 @@ uint32_t Transaction::CalcMultiNumOfShardJournals() const {
 }
 
 void Transaction::Schedule() {
+  if (multi_ && multi_->role == SQUASHED_STUB)
+    return;
+
   if (multi_ && multi_->IsIncrLocks())
     multi_->AddLocks(Mode());
 
@@ -759,6 +819,11 @@ void Transaction::Schedule() {
 
 // Runs in coordinator thread.
 void Transaction::Execute(RunnableType cb, bool conclude) {
+  if (multi_ && multi_->role == SQUASHED_STUB) {
+    RunSquashedMultiCb(cb);
+    return;
+  }
+
   DCHECK(coordinator_state_ & COORD_SCHED);
   DCHECK(!cb_ptr_);
 
@@ -1155,10 +1220,20 @@ void Transaction::UnwatchShardCb(ArgSlice wkeys, bool should_expire, EngineShard
   CHECK_GE(DecreaseRunCnt(), 1u);
 }
 
+OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
+  DCHECK(multi_ && multi_->role == SQUASHED_STUB);
+  DCHECK_EQ(unique_shard_cnt_, 1u);
+  auto* shard = EngineShard::tlocal();
+  auto status = cb(this, shard);
+  LogAutoJournalOnShard(shard);
+  return status;
+}
+
 void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard,
                                      uint32_t shard_journals_cnt) {
   auto journal = shard->journal();
-  if (journal != nullptr && multi_->shard_journal_write[shard->shard_id()] == true) {
+
+  if (journal != nullptr && multi_->shard_journal_write[shard->shard_id()]) {
     journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_journals_cnt, {}, true);
   }
 
@@ -1270,6 +1345,10 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
   if (shard == nullptr)
     return;
 
+  // Ignore technical squasher hops.
+  if (multi_ && multi_->role == SQUASHER)
+    return;
+
   // Ignore non-write commands or ones with disabled autojournal.
   if ((cid_->opt_mask() & CO::WRITE) == 0 || ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) > 0 &&
                                               !renabled_auto_journal_.load(memory_order_relaxed)))
@@ -1296,7 +1375,7 @@ void Transaction::LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&
                                     bool allow_await) const {
   auto journal = shard->journal();
   CHECK(journal);
-  if (multi_)
+  if (multi_ && multi_->role != SQUASHED_STUB)
     multi_->shard_journal_write[shard->shard_id()] = true;
 
   bool is_multi = multi_commands || IsAtomicMulti();

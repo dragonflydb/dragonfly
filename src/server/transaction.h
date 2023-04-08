@@ -38,9 +38,15 @@ using facade::OpStatus;
 // Otherwise, schedule the transaction with Schedule() and run successive hops
 // with Execute().
 //
-// Multi transactions are handled by a single transaction, which internally avoids
-// rescheduling. The flow of EXEC and EVAL is as follows:
+// 1. Multi transactions
 //
+// Multi transactions are handled by a single transaction, which exposes the same interface for
+// commands as regular transactions, but internally avoids rescheduling. There are multiple modes in
+// which a mutli-transaction can run, those are documented in the MultiMode enum.
+//
+// The flow of EXEC and EVAL is as follows:
+//
+// ```
 // trans->StartMulti_MultiMode_()
 // for ([cmd, args]) {
 //   trans->MultiSwitchCmd(cmd)  // 1. Set new command
@@ -48,7 +54,31 @@ using facade::OpStatus;
 //   cmd->Invoke(trans)          // 3. Run
 // }
 // trans->UnlockMulti()
+// ```
 //
+// 2. Multi squashing
+//
+// An important optimization for multi transactions is executing multiple single shard commands in
+// parallel. Because multiple commands are "squashed" into a single hop, its called multi squashing.
+// To mock the interface for commands, special "stub" transactions are created for each shard that
+// directly execute hop callbacks without any scheduling. Transaction roles are represented by the
+// MultiRole enum. See MultiCommandSquasher for the detailed squashing approach.
+//
+// The flow is as follows:
+//
+// ```
+// for (cmd in single_shard_sequence)
+//   sharded[shard].push_back(cmd)
+//
+// tx->PrepareSquashedMultiHop()
+// tx->ScheduleSingleHop({
+//   Transaction stub_tx {tx}
+//   for (cmd)
+//     // use stub_tx as regular multi tx, see 1. above
+// })
+//
+// ```
+
 class Transaction {
   friend class BlockingController;
 
@@ -90,6 +120,14 @@ class Transaction {
     NON_ATOMIC = 4,
   };
 
+  // Squashed parallel execution requires a separate transaction for each shard. Those "stubs"
+  // perform no scheduling or real hops, but instead execute the handlers directly inline.
+  enum MultiRole {
+    DEFAULT = 0,        // Regular multi transaction
+    SQUASHER = 1,       // Owner of stub transactions
+    SQUASHED_STUB = 2,  // Stub transaction
+  };
+
   // State on specific shard.
   enum LocalMask : uint16_t {
     ACTIVE = 1,  // Set on all active shards.
@@ -103,6 +141,8 @@ class Transaction {
 
  public:
   explicit Transaction(const CommandId* cid, uint32_t thread_index);
+
+  explicit Transaction(const Transaction* parent);
 
   // Initialize from command (args) on specific db.
   OpStatus InitByArgs(DbIndex index, CmdArgList args);
@@ -153,6 +193,13 @@ class Transaction {
     renabled_auto_journal_.store(true, std::memory_order_relaxed);
   }
 
+  // Prepare a squashed hop on given keys.
+  void PrepareSquashedMultiHop(const CommandId* cid, CmdArgList keys);
+
+  // Prepare a squashed hop on given shards.
+  // Only compatible with multi modes that acquire all locks ahead - global and lock_ahead.
+  void PrepareSquashedMultiHop(const CommandId* cid, absl::FunctionRef<bool(ShardId)> enabled);
+
   // Start multi in GLOBAL mode.
   void StartMultiGlobal(DbIndex dbid);
 
@@ -164,6 +211,10 @@ class Transaction {
 
   // Start multi in NON_ATOMIC mode.
   void StartMultiNonAtomic();
+
+  // Report which shards had write commands that executed on stub transactions
+  // and thus did not mark itself in MultiData::shard_journal_write.
+  void ReportWritesSquashedMulti(absl::FunctionRef<bool(ShardId)> had_write);
 
   // Unlock key locks of a multi transaction.
   void UnlockMulti();
@@ -242,6 +293,10 @@ class Transaction {
     return db_index_;
   }
 
+  const CommandId* GetCId() const {
+    return cid_;
+  }
+
   std::string DebugId() const;
 
   // Write a journal entry to a shard journal with the given payload. When logging a non-automatic
@@ -304,6 +359,7 @@ class Transaction {
     // Whether it locks incrementally.
     bool IsIncrLocks() const;
 
+    MultiRole role;
     MultiMode mode;
 
     absl::flat_hash_map<std::string, LockCnt> lock_counts;
@@ -393,6 +449,9 @@ class Transaction {
 
   void UnwatchShardCb(ArgSlice wkeys, bool should_expire, EngineShard* shard);
 
+  // Run callback inline as part of multi stub.
+  OpStatus RunSquashedMultiCb(RunnableType cb);
+
   void UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, EngineShard* shard,
                           uint32_t shard_journals_cnt);
 
@@ -432,6 +491,10 @@ class Transaction {
   // transactions as well.
   bool IsAtomicMulti() const {
     return multi_ && multi_->mode != NON_ATOMIC;
+  }
+
+  bool IsActiveMulti() const {
+    return multi_ && multi_->role != SQUASHED_STUB;
   }
 
   unsigned SidToId(ShardId sid) const {
