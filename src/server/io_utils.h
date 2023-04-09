@@ -3,7 +3,6 @@
 //
 
 #include "base/io_buf.h"
-#include "core/fibers.h"
 #include "io/io.h"
 #include "server/common.h"
 

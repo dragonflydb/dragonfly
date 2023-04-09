@@ -4,7 +4,7 @@ add_library(dfly_core compact_object.cc dragonfly_core.cc extent_tree.cc
     string_set.cc string_map.cc detail/bitpacking.cc)
 
 cxx_link(dfly_core base absl::flat_hash_map absl::str_format redis_lib TRDP::lua lua_modules
-    fibers2 TRDP::jsoncons OpenSSL::Crypto)
+    Boost::fiber TRDP::jsoncons OpenSSL::Crypto)
 
 add_executable(dash_bench dash_bench.cc)
 cxx_link(dash_bench dfly_core)

@@ -1,5 +1,5 @@
 add_executable(dragonfly dfly_main.cc)
-cxx_link(dragonfly base dragonfly_lib)
+cxx_link(dragonfly base dragonfly_lib epoll_fiber_lib)
 
 if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_BUILD_TYPE STREQUAL "Release")
   # Add core2 only to this file, thus avoiding instructions in this object file that
@@ -12,7 +12,7 @@ add_library(dfly_transaction db_slice.cc malloc_stats.cc engine_shard_set.cc blo
             common.cc
             io_mgr.cc journal/journal.cc journal/journal_slice.cc server_state.cc table.cc
             tiered_storage.cc top_keys.cc transaction.cc)
-cxx_link(dfly_transaction dfly_core strings_lib)
+cxx_link(dfly_transaction uring_fiber_lib dfly_core strings_lib)
 
 add_library(dragonfly_lib channel_store.cc command_registry.cc
             config_flags.cc conn_context.cc debugcmd.cc dflycmd.cc
@@ -28,7 +28,7 @@ cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib strings_lib html_l
          absl::random_random TRDP::jsoncons zstd TRDP::lz4)
 
 add_library(dfly_test_lib test_utils.cc)
-cxx_link(dfly_test_lib dragonfly_lib facade_test gtest_main_ext)
+cxx_link(dfly_test_lib dragonfly_lib epoll_fiber_lib facade_test gtest_main_ext)
 
 cxx_test(dragonfly_test dfly_test_lib LABELS DFLY)
 cxx_test(multi_test dfly_test_lib LABELS DFLY)

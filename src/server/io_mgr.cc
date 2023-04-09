@@ -86,12 +86,12 @@ error_code IoMgr::GrowAsync(size_t len, GrowCb cb) {
   Proactor* proactor = (Proactor*)ProactorBase::me();
 
   SubmitEntry entry = proactor->GetSubmitEntry(
-      [this, len, cb = move(cb)](auto*, Proactor::IoResult res, uint32_t) {
+      [this, cb = move(cb)](Proactor::IoResult res, uint32_t, int64_t arg) {
         this->flags.grow_progress = 0;
-        sz_ += (res == 0 ? len : 0);
+        sz_ += (res == 0 ? arg : 0);
         cb(res);
       },
-      0);
+      len);
 
   entry.PrepFallocate(backing_file_->fd(), 0, sz_, len);
   flags.grow_progress = 1;
@@ -105,7 +105,9 @@ error_code IoMgr::WriteAsync(size_t offset, string_view blob, WriteCb cb) {
 
   Proactor* proactor = (Proactor*)ProactorBase::me();
 
-  auto ring_cb = [cb = move(cb)](auto*, Proactor::IoResult res, uint32_t flags) { cb(res); };
+  auto ring_cb = [cb = move(cb)](Proactor::IoResult res, uint32_t flags, int64_t payload) {
+    cb(res);
+  };
 
   SubmitEntry se = proactor->GetSubmitEntry(move(ring_cb), 0);
   se.PrepWrite(backing_file_->fd(), blob.data(), blob.size(), offset);

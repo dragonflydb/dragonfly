@@ -16,7 +16,8 @@ extern "C" {
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "facade/dragonfly_connection.h"
-#include "util/fibers/pool.h"
+#include "util/epoll/epoll_pool.h"
+#include "util/uring/uring_pool.h"
 
 using namespace std;
 
@@ -137,9 +138,9 @@ void BaseFamilyTest::SetUpTestSuite() {
 
 void BaseFamilyTest::SetUp() {
   if (absl::GetFlag(FLAGS_force_epoll)) {
-    pp_.reset(fb2::Pool::Epoll(num_threads_));
+    pp_.reset(new epoll::EpollPool(num_threads_));
   } else {
-    pp_.reset(fb2::Pool::IOUring(16, num_threads_));
+    pp_.reset(new uring::UringPool(16, num_threads_));
   }
   pp_->Run();
   service_.reset(new Service{pp_.get()});

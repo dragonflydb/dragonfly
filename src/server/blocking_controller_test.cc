@@ -11,7 +11,7 @@
 #include "server/engine_shard_set.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
-#include "util/fibers/pool.h"
+#include "util/uring/uring_pool.h"
 
 namespace dfly {
 
@@ -37,7 +37,7 @@ class BlockingControllerTest : public Test {
 constexpr size_t kNumThreads = 3;
 
 void BlockingControllerTest::SetUp() {
-  pp_.reset(fb2::Pool::IOUring(16, kNumThreads));
+  pp_.reset(new uring::UringPool(16, kNumThreads));
   pp_->Run();
   pp_->Await([](unsigned index, ProactorBase* p) { ServerState::Init(index); });
 
