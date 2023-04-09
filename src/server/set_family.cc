@@ -1042,10 +1042,10 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cur
 }
 
 void SAdd(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  vector<string_view> vals(args.size() - 2);
-  for (size_t i = 2; i < args.size(); ++i) {
-    vals[i - 2] = ArgS(args, i);
+  string_view key = ArgS(args, 0);
+  vector<string_view> vals(args.size() - 1);
+  for (size_t i = 1; i < args.size(); ++i) {
+    vals[i - 1] = ArgS(args, i);
   }
   ArgSlice arg_slice{vals.data(), vals.size()};
 
@@ -1062,8 +1062,8 @@ void SAdd(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void SIsMember(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view val = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view val = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_SET);
@@ -1086,11 +1086,11 @@ void SIsMember(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void SMIsMember(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
-  vector<string_view> vals(args.size() - 2);
-  for (size_t i = 2; i < args.size(); ++i) {
-    vals[i - 2] = ArgS(args, i);
+  vector<string_view> vals(args.size() - 1);
+  for (size_t i = 1; i < args.size(); ++i) {
+    vals[i - 1] = ArgS(args, i);
   }
 
   StringVec memberships;
@@ -1117,9 +1117,9 @@ void SMIsMember(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void SMove(CmdArgList args, ConnectionContext* cntx) {
-  string_view src = ArgS(args, 1);
-  string_view dest = ArgS(args, 2);
-  string_view member = ArgS(args, 3);
+  string_view src = ArgS(args, 0);
+  string_view dest = ArgS(args, 1);
+  string_view member = ArgS(args, 2);
 
   Mover mover{src, dest, member, true};
   cntx->transaction->Schedule();
@@ -1136,10 +1136,10 @@ void SMove(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void SRem(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  vector<string_view> vals(args.size() - 2);
-  for (size_t i = 2; i < args.size(); ++i) {
-    vals[i - 2] = ArgS(args, i);
+  string_view key = ArgS(args, 0);
+  vector<string_view> vals(args.size() - 1);
+  for (size_t i = 1; i < args.size(); ++i) {
+    vals[i - 1] = ArgS(args, i);
   }
   ArgSlice span{vals.data(), vals.size()};
 
@@ -1159,7 +1159,7 @@ void SRem(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void SCard(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
     OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_SET);
@@ -1183,10 +1183,10 @@ void SCard(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void SPop(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
   unsigned count = 1;
-  if (args.size() > 2) {
-    string_view arg = ArgS(args, 2);
+  if (args.size() > 1) {
+    string_view arg = ArgS(args, 1);
     if (!absl::SimpleAtoi(arg, &count)) {
       (*cntx)->SendError(kInvalidIntErr);
       return;
@@ -1199,7 +1199,7 @@ void SPop(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    if (args.size() == 2) {  // SPOP key
+    if (args.size() == 1) {  // SPOP key
       if (result.status() == OpStatus::KEY_NOTFOUND) {
         (*cntx)->SendNull();
       } else {
@@ -1217,7 +1217,7 @@ void SPop(CmdArgList args, ConnectionContext* cntx) {
 
 void SDiff(CmdArgList args, ConnectionContext* cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
-  string_view src_key = ArgS(args, 1);
+  string_view src_key = ArgS(args, 0);
   ShardId src_shard = Shard(src_key, result_set.size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1248,9 +1248,9 @@ void SDiff(CmdArgList args, ConnectionContext* cntx) {
 
 void SDiffStore(CmdArgList args, ConnectionContext* cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
-  string_view dest_key = ArgS(args, 1);
+  string_view dest_key = ArgS(args, 0);
   ShardId dest_shard = Shard(dest_key, result_set.size());
-  string_view src_key = ArgS(args, 2);
+  string_view src_key = ArgS(args, 1);
   ShardId src_shard = Shard(src_key, result_set.size());
 
   VLOG(1) << "SDiffStore " << src_key << " " << src_shard;
@@ -1341,7 +1341,7 @@ void SInter(CmdArgList args, ConnectionContext* cntx) {
 
 void SInterStore(CmdArgList args, ConnectionContext* cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
-  string_view dest_key = ArgS(args, 1);
+  string_view dest_key = ArgS(args, 0);
   ShardId dest_shard = Shard(dest_key, result_set.size());
   atomic_uint32_t inter_shard_cnt{0};
 
@@ -1404,7 +1404,7 @@ void SUnion(CmdArgList args, ConnectionContext* cntx) {
 
 void SUnionStore(CmdArgList args, ConnectionContext* cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
-  string_view dest_key = ArgS(args, 1);
+  string_view dest_key = ArgS(args, 0);
   ShardId dest_shard = Shard(dest_key, result_set.size());
 
   auto union_cb = [&](Transaction* t, EngineShard* shard) {
@@ -1444,8 +1444,8 @@ void SUnionStore(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void SScan(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view token = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view token = ArgS(args, 1);
 
   uint64_t cursor = 0;
 
@@ -1454,12 +1454,12 @@ void SScan(CmdArgList args, ConnectionContext* cntx) {
   }
 
   // SSCAN key cursor [MATCH pattern] [COUNT count]
-  if (args.size() > 7) {
+  if (args.size() > 6) {
     DVLOG(1) << "got " << args.size() << " this is more than it should be";
     return (*cntx)->SendError(kSyntaxErr);
   }
 
-  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(3));
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2));
   if (!ops) {
     DVLOG(1) << "SScan invalid args - return " << ops << " to the user";
     return (*cntx)->SendError(ops.status());
@@ -1486,8 +1486,8 @@ void SScan(CmdArgList args, ConnectionContext* cntx) {
 
 // Syntax: saddex key ttl_sec member [member...]
 void SAddEx(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view ttl_str = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view ttl_str = ArgS(args, 1);
   uint32_t ttl_sec;
   constexpr uint32_t kMaxTtl = (1UL << 26);
 

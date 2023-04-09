@@ -882,16 +882,16 @@ void MoveGeneric(ConnectionContext* cntx, string_view src, string_view dest, Lis
 }
 
 void RPopLPush(CmdArgList args, ConnectionContext* cntx) {
-  string_view src = ArgS(args, 1);
-  string_view dest = ArgS(args, 2);
+  string_view src = ArgS(args, 0);
+  string_view dest = ArgS(args, 1);
 
   MoveGeneric(cntx, src, dest, ListDir::RIGHT, ListDir::LEFT);
 }
 
 void BRPopLPush(CmdArgList args, ConnectionContext* cntx) {
-  string_view src = ArgS(args, 1);
-  string_view dest = ArgS(args, 2);
-  string_view timeout_str = ArgS(args, 3);
+  string_view src = ArgS(args, 0);
+  string_view dest = ArgS(args, 1);
+  string_view timeout_str = ArgS(args, 2);
 
   float timeout;
   if (!absl::SimpleAtof(timeout_str, &timeout)) {
@@ -921,9 +921,9 @@ void BRPopLPush(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void BLMove(CmdArgList args, ConnectionContext* cntx) {
-  string_view src = ArgS(args, 1);
-  string_view dest = ArgS(args, 2);
-  string_view timeout_str = ArgS(args, 5);
+  string_view src = ArgS(args, 0);
+  string_view dest = ArgS(args, 1);
+  string_view timeout_str = ArgS(args, 4);
 
   float timeout;
   if (!absl::SimpleAtof(timeout_str, &timeout)) {
@@ -934,11 +934,11 @@ void BLMove(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError("timeout is negative");
   }
 
+  ToUpper(&args[2]);
   ToUpper(&args[3]);
-  ToUpper(&args[4]);
 
-  optional<ListDir> src_dir = ParseDir(ArgS(args, 3));
-  optional<ListDir> dest_dir = ParseDir(ArgS(args, 4));
+  optional<ListDir> src_dir = ParseDir(ArgS(args, 2));
+  optional<ListDir> dest_dir = ParseDir(ArgS(args, 3));
   if (!src_dir || !dest_dir) {
     return (*cntx)->SendError(kSyntaxErr);
   }
@@ -1075,7 +1075,7 @@ void ListFamily::RPop(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ListFamily::LLen(CmdArgList args, ConnectionContext* cntx) {
-  auto key = ArgS(args, 1);
+  auto key = ArgS(args, 0);
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
@@ -1088,15 +1088,15 @@ void ListFamily::LLen(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ListFamily::LPos(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view elem = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view elem = ArgS(args, 1);
 
   int rank = 1;
   uint32_t count = 1;
   uint32_t max_len = 0;
   bool skip_count = true;
 
-  for (size_t i = 3; i < args.size(); i++) {
+  for (size_t i = 2; i < args.size(); i++) {
     ToUpper(&args[i]);
     const auto& arg_v = ArgS(args, i);
     if (arg_v == "RANK") {
@@ -1146,8 +1146,8 @@ void ListFamily::LPos(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ListFamily::LIndex(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
-  std::string_view index_str = ArgS(args, 2);
+  std::string_view key = ArgS(args, 0);
+  std::string_view index_str = ArgS(args, 1);
   int32_t index;
   if (!absl::SimpleAtoi(index_str, &index)) {
     (*cntx)->SendError(kInvalidIntErr);
@@ -1170,10 +1170,10 @@ void ListFamily::LIndex(CmdArgList args, ConnectionContext* cntx) {
 
 /* LINSERT <key> (BEFORE|AFTER) <pivot> <element> */
 void ListFamily::LInsert(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view param = ArgS(args, 2);
-  string_view pivot = ArgS(args, 3);
-  string_view elem = ArgS(args, 4);
+  string_view key = ArgS(args, 0);
+  string_view param = ArgS(args, 1);
+  string_view pivot = ArgS(args, 2);
+  string_view elem = ArgS(args, 3);
   int where;
 
   ToUpper(&args[2]);
@@ -1198,9 +1198,9 @@ void ListFamily::LInsert(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ListFamily::LTrim(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view s_str = ArgS(args, 2);
-  string_view e_str = ArgS(args, 3);
+  string_view key = ArgS(args, 0);
+  string_view s_str = ArgS(args, 1);
+  string_view e_str = ArgS(args, 2);
   int32_t start, end;
 
   if (!absl::SimpleAtoi(s_str, &start) || !absl::SimpleAtoi(e_str, &end)) {
@@ -1216,9 +1216,9 @@ void ListFamily::LTrim(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ListFamily::LRange(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
-  std::string_view s_str = ArgS(args, 2);
-  std::string_view e_str = ArgS(args, 3);
+  std::string_view key = ArgS(args, 0);
+  std::string_view s_str = ArgS(args, 1);
+  std::string_view e_str = ArgS(args, 2);
   int32_t start, end;
 
   if (!absl::SimpleAtoi(s_str, &start) || !absl::SimpleAtoi(e_str, &end)) {
@@ -1240,9 +1240,9 @@ void ListFamily::LRange(CmdArgList args, ConnectionContext* cntx) {
 
 // lrem key 5 foo, will remove foo elements from the list if exists at most 5 times.
 void ListFamily::LRem(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
-  std::string_view index_str = ArgS(args, 2);
-  std::string_view elem = ArgS(args, 3);
+  std::string_view key = ArgS(args, 0);
+  std::string_view index_str = ArgS(args, 1);
+  std::string_view elem = ArgS(args, 2);
   int32_t count;
 
   if (!absl::SimpleAtoi(index_str, &count)) {
@@ -1262,9 +1262,9 @@ void ListFamily::LRem(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ListFamily::LSet(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
-  std::string_view index_str = ArgS(args, 2);
-  std::string_view elem = ArgS(args, 3);
+  std::string_view key = ArgS(args, 0);
+  std::string_view index_str = ArgS(args, 1);
+  std::string_view elem = ArgS(args, 2);
   int32_t count;
 
   if (!absl::SimpleAtoi(index_str, &count)) {
@@ -1292,13 +1292,13 @@ void ListFamily::BRPop(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ListFamily::LMove(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view src = ArgS(args, 1);
-  std::string_view dest = ArgS(args, 2);
-  std::string_view src_dir_str = ArgS(args, 3);
-  std::string_view dest_dir_str = ArgS(args, 4);
+  std::string_view src = ArgS(args, 0);
+  std::string_view dest = ArgS(args, 1);
+  std::string_view src_dir_str = ArgS(args, 2);
+  std::string_view dest_dir_str = ArgS(args, 3);
 
+  ToUpper(&args[2]);
   ToUpper(&args[3]);
-  ToUpper(&args[4]);
 
   optional<ListDir> src_dir = ParseDir(src_dir_str);
   optional<ListDir> dest_dir = ParseDir(dest_dir_str);
@@ -1310,7 +1310,7 @@ void ListFamily::LMove(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cntx) {
-  DCHECK_GE(args.size(), 3u);
+  DCHECK_GE(args.size(), 2u);
 
   float timeout;
   auto timeout_str = ArgS(args, args.size() - 1);
@@ -1351,10 +1351,10 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
 
 void ListFamily::PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args,
                              ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
-  vector<std::string_view> vals(args.size() - 2);
-  for (size_t i = 2; i < args.size(); ++i) {
-    vals[i - 2] = ArgS(args, i);
+  std::string_view key = ArgS(args, 0);
+  vector<std::string_view> vals(args.size() - 1);
+  for (size_t i = 1; i < args.size(); ++i) {
+    vals[i - 1] = ArgS(args, i);
   }
   absl::Span<std::string_view> span{vals.data(), vals.size()};
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1370,17 +1370,16 @@ void ListFamily::PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args,
 }
 
 void ListFamily::PopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
   int32_t count = 1;
   bool return_arr = false;
 
-  if (args.size() > 2) {
-    if (args.size() > 3) {
-      ToLower(&args[0]);
-      return (*cntx)->SendError(WrongNumArgsError(ArgS(args, 0)));
+  if (args.size() > 1) {
+    if (args.size() > 2) {
+      return (*cntx)->SendError(WrongNumArgsError(cntx->cid->name()));
     }
 
-    string_view count_s = ArgS(args, 2);
+    string_view count_s = ArgS(args, 1);
     if (!absl::SimpleAtoi(count_s, &count)) {
       return (*cntx)->SendError(kInvalidIntErr);
     }

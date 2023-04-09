@@ -73,7 +73,7 @@ MemoryCmd::MemoryCmd(ServerFamily* owner, ConnectionContext* cntx) : cntx_(cntx)
 }
 
 void MemoryCmd::Run(CmdArgList args) {
-  string_view sub_cmd = ArgS(args, 1);
+  string_view sub_cmd = ArgS(args, 0);
 
   if (sub_cmd == "HELP") {
     string_view help_arr[] = {

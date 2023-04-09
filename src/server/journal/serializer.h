@@ -26,8 +26,9 @@ class JournalWriter {
  private:
   void Write(uint64_t v);           // Write packed unsigned integer.
   void Write(std::string_view sv);  // Write string.
-  void Write(CmdArgList args);
-  void Write(std::pair<std::string_view, ArgSlice> args);
+
+  template <typename C>  // CmdArgList or ArgSlice.
+  void Write(std::pair<std::string_view, C> args);
 
   void Write(std::monostate);  // Overload for empty std::variant
 

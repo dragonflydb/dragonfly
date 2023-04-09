@@ -931,7 +931,7 @@ OpResult<void> FillAggType(string_view agg, SetOpArgs* op_args) {
 
 // Parse functions return the number of arguments read from CmdArgList
 OpResult<unsigned> ParseAggregate(CmdArgList args, bool store, SetOpArgs* op_args) {
-  if (args.size() < 2) {
+  if (args.size() < 1) {
     return OpStatus::SYNTAX_ERR;
   }
 
@@ -973,7 +973,7 @@ OpResult<unsigned> ParseWithScores(CmdArgList args, SetOpArgs* op_args) {
 }
 
 OpResult<SetOpArgs> ParseSetOpArgs(CmdArgList args, bool store) {
-  string_view num_keys_str = store ? ArgS(args, 2) : ArgS(args, 1);
+  string_view num_keys_str = store ? ArgS(args, 1) : ArgS(args, 0);
   SetOpArgs op_args;
 
   auto parsed = ParseKeyCount(num_keys_str, &op_args);
@@ -981,7 +981,7 @@ OpResult<SetOpArgs> ParseSetOpArgs(CmdArgList args, bool store) {
     return parsed.status();
   }
 
-  unsigned opt_args_start = op_args.num_keys + (store ? 3 : 2);
+  unsigned opt_args_start = op_args.num_keys + (store ? 2 : 1);
   DCHECK_LE(opt_args_start, args.size());  // Checked inside DetermineKeys
 
   for (size_t i = opt_args_start; i < args.size(); ++i) {
@@ -1033,7 +1033,7 @@ void ZUnionFamilyInternal(CmdArgList args, bool store, ConnectionContext* cntx) 
 
   vector<OpResult<ScoredMap>> maps(shard_set->size());
 
-  string_view dest_key = ArgS(args, 1);
+  string_view dest_key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     maps[shard->shard_id()] = OpUnion(shard, t, dest_key, op_args.agg_type, op_args.weights, store);
@@ -1096,10 +1096,10 @@ bool ParseLimit(string_view offset_str, string_view limit_str, ZSetFamily::Range
 }  // namespace
 
 void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
   ZParams zparams;
-  size_t i = 2;
+  size_t i = 1;
   for (; i < args.size() - 1; ++i) {
     ToUpper(&args[i]);
 
@@ -1192,7 +1192,7 @@ void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZCard(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
     OpResult<PrimeIterator> find_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_ZSET);
@@ -1213,10 +1213,10 @@ void ZSetFamily::ZCard(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZCount(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
-  string_view min_s = ArgS(args, 2);
-  string_view max_s = ArgS(args, 3);
+  string_view min_s = ArgS(args, 1);
+  string_view max_s = ArgS(args, 2);
 
   ScoreInterval si;
   if (!ParseBound(min_s, &si.first) || !ParseBound(max_s, &si.second)) {
@@ -1236,11 +1236,11 @@ void ZSetFamily::ZCount(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZIncrBy(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view score_arg = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view score_arg = ArgS(args, 1);
 
   ScoredMemberView scored_member;
-  scored_member.second = ArgS(args, 3);
+  scored_member.second = ArgS(args, 2);
 
   if (!absl::SimpleAtod(score_arg, &scored_member.first)) {
     VLOG(1) << "Bad score:" << score_arg << "|";
@@ -1275,7 +1275,7 @@ void ZSetFamily::ZIncrBy(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
-  string_view dest_key = ArgS(args, 1);
+  string_view dest_key = ArgS(args, 0);
   OpResult<SetOpArgs> op_args_res = ParseSetOpArgs(args, true);
 
   if (!op_args_res) {
@@ -1349,10 +1349,10 @@ void ZSetFamily::ZPopMin(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZLexCount(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
-  string_view min_s = ArgS(args, 2);
-  string_view max_s = ArgS(args, 3);
+  string_view min_s = ArgS(args, 1);
+  string_view max_s = ArgS(args, 2);
 
   LexInterval li;
   if (!ParseLexBound(min_s, &li.first) || !ParseLexBound(max_s, &li.second)) {
@@ -1374,7 +1374,7 @@ void ZSetFamily::ZLexCount(CmdArgList args, ConnectionContext* cntx) {
 void ZSetFamily::ZRange(CmdArgList args, ConnectionContext* cntx) {
   RangeParams range_params;
 
-  for (size_t i = 4; i < args.size(); ++i) {
+  for (size_t i = 3; i < args.size(); ++i) {
     ToUpper(&args[i]);
 
     string_view cur_arg = ArgS(args, i);
@@ -1415,7 +1415,7 @@ void ZSetFamily::ZRevRange(CmdArgList args, ConnectionContext* cntx) {
   RangeParams range_params;
   range_params.reverse = true;
 
-  for (size_t i = 4; i < args.size(); ++i) {
+  for (size_t i = 3; i < args.size(); ++i) {
     ToUpper(&args[i]);
 
     string_view cur_arg = ArgS(args, i);
@@ -1452,15 +1452,15 @@ void ZSetFamily::ZRangeByLexInternal(CmdArgList args, bool reverse, ConnectionCo
   range_params.interval_type = RangeParams::IntervalType::LEX;
   range_params.reverse = reverse;
 
-  if (args.size() > 4) {
-    if (args.size() != 7)
+  if (args.size() > 3) {
+    if (args.size() != 6)
       return (*cntx)->SendError(kSyntaxErr);
 
-    ToUpper(&args[4]);
-    if (ArgS(args, 4) != "LIMIT")
+    ToUpper(&args[3]);
+    if (ArgS(args, 3) != "LIMIT")
       return (*cntx)->SendError(kSyntaxErr);
 
-    if (!ParseLimit(ArgS(args, 5), ArgS(args, 6), &range_params))
+    if (!ParseLimit(ArgS(args, 4), ArgS(args, 5), &range_params))
       return (*cntx)->SendError(kInvalidIntErr);
   }
   range_params.offset = offset;
@@ -1474,9 +1474,9 @@ void ZSetFamily::ZRangeByScore(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZRemRangeByRank(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view min_s = ArgS(args, 2);
-  string_view max_s = ArgS(args, 3);
+  string_view key = ArgS(args, 0);
+  string_view min_s = ArgS(args, 1);
+  string_view max_s = ArgS(args, 2);
 
   IndexInterval ii;
   if (!SimpleAtoi(min_s, &ii.first) || !SimpleAtoi(max_s, &ii.second)) {
@@ -1489,9 +1489,9 @@ void ZSetFamily::ZRemRangeByRank(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZRemRangeByScore(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view min_s = ArgS(args, 2);
-  string_view max_s = ArgS(args, 3);
+  string_view key = ArgS(args, 0);
+  string_view min_s = ArgS(args, 1);
+  string_view max_s = ArgS(args, 2);
 
   ScoreInterval si;
   if (!ParseBound(min_s, &si.first) || !ParseBound(max_s, &si.second)) {
@@ -1506,9 +1506,9 @@ void ZSetFamily::ZRemRangeByScore(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZRemRangeByLex(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view min_s = ArgS(args, 2);
-  string_view max_s = ArgS(args, 3);
+  string_view key = ArgS(args, 0);
+  string_view min_s = ArgS(args, 1);
+  string_view max_s = ArgS(args, 2);
 
   LexInterval li;
   if (!ParseLexBound(min_s, &li.first) || !ParseLexBound(max_s, &li.second)) {
@@ -1523,11 +1523,11 @@ void ZSetFamily::ZRemRangeByLex(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZRem(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
-  absl::InlinedVector<string_view, 8> members(args.size() - 2);
-  for (size_t i = 2; i < args.size(); ++i) {
-    members[i - 2] = ArgS(args, i);
+  absl::InlinedVector<string_view, 8> members(args.size() - 1);
+  for (size_t i = 1; i < args.size(); ++i) {
+    members[i - 1] = ArgS(args, i);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1543,8 +1543,8 @@ void ZSetFamily::ZRem(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZScore(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view member = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view member = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpScore(t->GetOpArgs(shard), key, member);
@@ -1561,11 +1561,11 @@ void ZSetFamily::ZScore(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZMScore(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
-  absl::InlinedVector<string_view, 8> members(args.size() - 2);
-  for (size_t i = 2; i < args.size(); ++i) {
-    members[i - 2] = ArgS(args, i);
+  absl::InlinedVector<string_view, 8> members(args.size() - 1);
+  for (size_t i = 1; i < args.size(); ++i) {
+    members[i - 1] = ArgS(args, i);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1590,8 +1590,8 @@ void ZSetFamily::ZMScore(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZScan(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view token = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view token = ArgS(args, 1);
 
   uint64_t cursor = 0;
 
@@ -1599,7 +1599,7 @@ void ZSetFamily::ZScan(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError("invalid cursor");
   }
 
-  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(3));
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2));
   if (!ops) {
     DVLOG(1) << "Scan invalid args - return " << ops << " to the user";
     return (*cntx)->SendError(ops.status());
@@ -1635,7 +1635,7 @@ void ZSetFamily::ZRangeByScoreInternal(CmdArgList args, bool reverse, Connection
   RangeParams range_params;
   range_params.interval_type = RangeParams::IntervalType::SCORE;
   range_params.reverse = reverse;
-  if (!ParseRangeByScoreParams(args.subspan(4), &range_params)) {
+  if (!ParseRangeByScoreParams(args.subspan(3), &range_params)) {
     return (*cntx)->SendError(kSyntaxErr);
   }
   ZRangeGeneric(args, range_params, cntx);
@@ -1667,9 +1667,9 @@ void ZSetFamily::ZRemRangeGeneric(string_view key, const ZRangeSpec& range_spec,
 }
 
 void ZSetFamily::ZRangeGeneric(CmdArgList args, RangeParams range_params, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view min_s = ArgS(args, 2);
-  string_view max_s = ArgS(args, 3);
+  string_view key = ArgS(args, 0);
+  string_view min_s = ArgS(args, 1);
+  string_view max_s = ArgS(args, 2);
 
   ZRangeSpec range_spec;
   range_spec.params = range_params;
@@ -1711,8 +1711,8 @@ void ZSetFamily::ZRangeGeneric(CmdArgList args, RangeParams range_params, Connec
 }
 
 void ZSetFamily::ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view member = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view member = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRank(t->GetOpArgs(shard), key, member, reverse);
@@ -1751,7 +1751,7 @@ bool ZSetFamily::ParseRangeByScoreParams(CmdArgList args, RangeParams* params) {
 }
 
 void ZSetFamily::ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
   RangeParams range_params;
   range_params.reverse = reverse;
@@ -1760,8 +1760,8 @@ void ZSetFamily::ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cn
   range_spec.params = range_params;
 
   TopNScored sc = 1;
-  if (args.size() > 2) {
-    string_view count = ArgS(args, 2);
+  if (args.size() > 1) {
+    string_view count = ArgS(args, 1);
     if (!SimpleAtoi(count, &sc)) {
       return (*cntx)->SendError(kUintErr);
     }

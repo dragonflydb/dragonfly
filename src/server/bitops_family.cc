@@ -508,32 +508,32 @@ void BitPos(CmdArgList args, ConnectionContext* cntx) {
   // Support for the command BITPOS
   // See details at https://redis.io/commands/bitpos/
 
-  if (args.size() < 2 || args.size() > 6) {
+  if (args.size() < 1 || args.size() > 5) {
     return (*cntx)->SendError(kSyntaxErr);
   }
 
-  std::string_view key = ArgS(args, 1);
+  std::string_view key = ArgS(args, 0);
 
   int32_t value{0};
   int64_t start = 0;
   int64_t end = std::numeric_limits<int64_t>::max();
   bool as_bit = false;
 
-  if (!absl::SimpleAtoi(ArgS(args, 2), &value)) {
+  if (!absl::SimpleAtoi(ArgS(args, 1), &value)) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
 
-  if (args.size() >= 4) {
-    if (!absl::SimpleAtoi(ArgS(args, 3), &start)) {
+  if (args.size() >= 3) {
+    if (!absl::SimpleAtoi(ArgS(args, 2), &start)) {
       return (*cntx)->SendError(kInvalidIntErr);
     }
-    if (args.size() >= 5) {
-      if (!absl::SimpleAtoi(ArgS(args, 4), &end)) {
+    if (args.size() >= 4) {
+      if (!absl::SimpleAtoi(ArgS(args, 3), &end)) {
         return (*cntx)->SendError(kInvalidIntErr);
       }
 
-      if (args.size() >= 6) {
-        if (!ToUpperAndGetAsBit(args, 5, &as_bit)) {
+      if (args.size() >= 5) {
+        if (!ToUpperAndGetAsBit(args, 4, &as_bit)) {
           return (*cntx)->SendError(kSyntaxErr);
         }
       }
@@ -553,21 +553,21 @@ void BitCount(CmdArgList args, ConnectionContext* cntx) {
   // See details at https://redis.io/commands/bitcount/
   // Please note that if the key don't exists, it would return 0
 
-  if (args.size() == 3 || args.size() > 5) {
+  if (args.size() == 2 || args.size() > 4) {
     return (*cntx)->SendError(kSyntaxErr);
   }
   // return (*cntx)->SendLong(0);
-  std::string_view key = ArgS(args, 1);
+  std::string_view key = ArgS(args, 0);
   bool as_bit = false;
   int64_t start = 0;
   int64_t end = std::numeric_limits<int64_t>::max();
-  if (args.size() >= 4) {
-    if (absl::SimpleAtoi(ArgS(args, 2), &start) == 0 ||
-        absl::SimpleAtoi(ArgS(args, 3), &end) == 0) {
+  if (args.size() >= 3) {
+    if (absl::SimpleAtoi(ArgS(args, 1), &start) == 0 ||
+        absl::SimpleAtoi(ArgS(args, 2), &end) == 0) {
       return (*cntx)->SendError(kInvalidIntErr);
     }
-    if (args.size() == 5) {
-      if (!ToUpperAndGetAsBit(args, 4, &as_bit)) {
+    if (args.size() == 4) {
+      if (!ToUpperAndGetAsBit(args, 3, &as_bit)) {
         return (*cntx)->SendError(kSyntaxErr);
       }
     }
@@ -591,13 +591,13 @@ void BitFieldRo(CmdArgList args, ConnectionContext* cntx) {
 void BitOp(CmdArgList args, ConnectionContext* cntx) {
   static const std::array<std::string_view, 4> BITOP_OP_NAMES{OR_OP_NAME, XOR_OP_NAME, AND_OP_NAME,
                                                               NOT_OP_NAME};
-  ToUpper(&args[1]);
-  std::string_view op = ArgS(args, 1);
-  std::string_view dest_key = ArgS(args, 2);
+  ToUpper(&args[0]);
+  std::string_view op = ArgS(args, 0);
+  std::string_view dest_key = ArgS(args, 1);
   bool illegal = std::none_of(BITOP_OP_NAMES.begin(), BITOP_OP_NAMES.end(),
                               [&op](auto val) { return op == val; });
 
-  if (illegal || (op == NOT_OP_NAME && args.size() > 4)) {
+  if (illegal || (op == NOT_OP_NAME && args.size() > 3)) {
     return (*cntx)->SendError(kSyntaxErr);  // too many arguments
   }
 
@@ -658,9 +658,9 @@ void GetBit(CmdArgList args, ConnectionContext* cntx) {
   // see https://redis.io/commands/getbit/
 
   uint32_t offset{0};
-  std::string_view key = ArgS(args, 1);
+  std::string_view key = ArgS(args, 0);
 
-  if (!absl::SimpleAtoi(ArgS(args, 2), &offset)) {
+  if (!absl::SimpleAtoi(ArgS(args, 1), &offset)) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -677,9 +677,9 @@ void SetBit(CmdArgList args, ConnectionContext* cntx) {
 
   uint32_t offset{0};
   int32_t value{0};
-  std::string_view key = ArgS(args, 1);
+  std::string_view key = ArgS(args, 0);
 
-  if (!absl::SimpleAtoi(ArgS(args, 2), &offset) || !absl::SimpleAtoi(ArgS(args, 3), &value)) {
+  if (!absl::SimpleAtoi(ArgS(args, 1), &offset) || !absl::SimpleAtoi(ArgS(args, 2), &value)) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
 

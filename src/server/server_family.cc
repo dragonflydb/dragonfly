@@ -275,8 +275,8 @@ void ExtendFilenameWithShard(absl::Time now, int shard, fs::path* filename) {
 }
 
 void SlowLog(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[1]);
-  string_view sub_cmd = ArgS(args, 1);
+  ToUpper(&args[0]);
+  string_view sub_cmd = ArgS(args, 0);
 
   if (sub_cmd == "LEN") {
     return (*cntx)->SendLong(0);
@@ -1106,7 +1106,7 @@ void ServerFamily::FlushAll(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() > 3) {
+  if (args.size() > 2) {
     return (*cntx)->SendError(kSyntaxErr);
   }
 
@@ -1120,7 +1120,7 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
         "default user. Are you sure your configuration is correct?");
   }
 
-  string_view pass = ArgS(args, 1);
+  string_view pass = ArgS(args, 0);
   if (pass == GetPassword()) {
     cntx->authenticated = true;
     (*cntx)->SendOk();
@@ -1130,11 +1130,11 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[1]);
-  string_view sub_cmd = ArgS(args, 1);
+  ToUpper(&args[0]);
+  string_view sub_cmd = ArgS(args, 0);
 
-  if (sub_cmd == "SETNAME" && args.size() == 3) {
-    cntx->owner()->SetName(ArgS(args, 2));
+  if (sub_cmd == "SETNAME" && args.size() == 2) {
+    cntx->owner()->SetName(ArgS(args, 1));
     return (*cntx)->SendOk();
   }
 
@@ -1184,8 +1184,8 @@ void ServerFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
   constexpr unsigned int kNoReplicaInfoSize = 3;
   constexpr unsigned int kWithReplicaInfoSize = 4;
 
-  ToUpper(&args[1]);
-  string_view sub_cmd = ArgS(args, 1);
+  ToUpper(&args[0]);
+  string_view sub_cmd = ArgS(args, 0);
 
   if (!is_emulated_cluster_) {
     return (*cntx)->SendError("CLUSTER commands requires --cluster_mode=emulated");
@@ -1308,13 +1308,13 @@ void ServerFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[1]);
-  string_view sub_cmd = ArgS(args, 1);
+  ToUpper(&args[0]);
+  string_view sub_cmd = ArgS(args, 0);
 
   if (sub_cmd == "SET") {
     return (*cntx)->SendOk();
-  } else if (sub_cmd == "GET" && args.size() == 3) {
-    string_view param = ArgS(args, 2);
+  } else if (sub_cmd == "GET" && args.size() == 2) {
+    string_view param = ArgS(args, 1);
     string_view res[2] = {param, "tbd"};
 
     return (*cntx)->SendStringArr(res, RedisReplyBuilder::MAP);
@@ -1333,7 +1333,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[1]);
+  ToUpper(&args[0]);
 
   DebugCmd dbg_cmd{this, cntx};
 
@@ -1341,7 +1341,7 @@ void ServerFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Memory(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[1]);
+  ToUpper(&args[0]);
 
   MemoryCmd mem_cmd{this, cntx};
 
@@ -1355,9 +1355,9 @@ void ServerFamily::Save(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kSyntaxErr);
   }
 
-  if (args.size() == 2) {
-    ToUpper(&args[1]);
-    string_view sub_cmd = ArgS(args, 1);
+  if (args.size() == 1) {
+    ToUpper(&args[0]);
+    string_view sub_cmd = ArgS(args, 0);
     if (sub_cmd == "DF") {
       new_version = true;
     } else if (sub_cmd == "RDB") {
@@ -1424,15 +1424,15 @@ Metrics ServerFamily::GetMetrics() const {
 }
 
 void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() > 2) {
+  if (args.size() > 1) {
     return (*cntx)->SendError(kSyntaxErr);
   }
 
   string_view section;
 
-  if (args.size() == 2) {
-    ToUpper(&args[1]);
-    section = ArgS(args, 1);
+  if (args.size() == 1) {
+    ToUpper(&args[0]);
+    section = ArgS(args, 0);
   }
 
   string info;
@@ -1691,12 +1691,12 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   // If no arguments are provided default to RESP2.
   // AUTH and SETNAME options are not supported.
   bool is_resp3 = false;
-  if (args.size() > 1) {
-    string_view proto_version = ArgS(args, 1);
+  if (args.size() > 0) {
+    string_view proto_version = ArgS(args, 0);
     is_resp3 = proto_version == "3";
     bool valid_proto_version = proto_version == "2" || is_resp3;
-    if (!valid_proto_version || args.size() > 2) {
-      (*cntx)->SendError(UnknownCmd("HELLO", args.subspan(1)));
+    if (!valid_proto_version || args.size() > 1) {
+      (*cntx)->SendError(UnknownCmd("HELLO", args));
       return;
     }
   }
@@ -1764,8 +1764,8 @@ std::string ServerFamily::BuildClusterNodeReply(ConnectionContext* cntx) const {
 }
 
 void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view host = ArgS(args, 1);
-  std::string_view port_s = ArgS(args, 2);
+  std::string_view host = ArgS(args, 0);
+  std::string_view port_s = ArgS(args, 1);
   auto& pool = service_.proactor_pool();
 
   LOG(INFO) << "Replicating " << host << ":" << port_s;
@@ -1838,16 +1838,16 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() % 2 == 0)
+  if (args.size() % 2 == 1)
     goto err;
-  for (unsigned i = 1; i < args.size(); i += 2) {
+  for (unsigned i = 0; i < args.size(); i += 2) {
     DCHECK_LT(i + 1, args.size());
     ToUpper(&args[i]);
 
     std::string_view cmd = ArgS(args, i);
     std::string_view arg = ArgS(args, i + 1);
     if (cmd == "CAPA") {
-      if (arg == "dragonfly" && args.size() == 3 && i == 1) {
+      if (arg == "dragonfly" && args.size() == 2 && i == 0) {
         uint32_t sid = dfly_cmd_->CreateSyncSession(cntx);
         cntx->owner()->SetName(absl::StrCat("repl_ctrl_", sid));
 
@@ -1922,7 +1922,6 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Script(CmdArgList args, ConnectionContext* cntx) {
-  args.remove_prefix(1);
   ToUpper(&args.front());
 
   script_mgr_->Run(std::move(args), cntx);
@@ -1953,8 +1952,8 @@ void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Latency(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[1]);
-  string_view sub_cmd = ArgS(args, 1);
+  ToUpper(&args[0]);
+  string_view sub_cmd = ArgS(args, 01);
 
   if (sub_cmd == "LATEST") {
     return (*cntx)->SendEmptyArray();

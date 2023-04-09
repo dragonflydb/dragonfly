@@ -398,7 +398,7 @@ bool IsSHA(string_view str) {
 }
 
 bool EvalValidator(CmdArgList args, ConnectionContext* cntx) {
-  string_view num_keys_str = ArgS(args, 2);
+  string_view num_keys_str = ArgS(args, 1);
   int32_t num_keys;
 
   if (!absl::SimpleAtoi(num_keys_str, &num_keys) || num_keys < 0) {
@@ -406,7 +406,7 @@ bool EvalValidator(CmdArgList args, ConnectionContext* cntx) {
     return false;
   }
 
-  if (unsigned(num_keys) > args.size() - 3) {
+  if (unsigned(num_keys) > args.size() - 2) {
     (*cntx)->SendError("Number of keys can't be greater than number of args", kSyntaxErrType);
     return false;
   }
@@ -585,7 +585,7 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
     }
   }
 
-  if (unsigned i = key_index.bonus; i && !eval_info.keys.contains(ArgS(args, i)))
+  if (key_index.bonus && !eval_info.keys.contains(ArgS(args, *key_index.bonus)))
     return OpStatus::KEY_NOTFOUND;
 
   return OpStatus::OK;
@@ -668,7 +668,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   }
 
   // Validate more complicated cases with custom validators.
-  if (!cid->Validate(args, dfly_cntx)) {
+  if (!cid->Validate(args.subspan(1), dfly_cntx)) {
     return;
   }
 
@@ -699,7 +699,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
       return (*cntx)->SendError(error);
     }
     // TODO: protect against aggregating huge transactions.
-    StoredCmd stored_cmd{cid, args};
+    StoredCmd stored_cmd{cid, args.subspan(1)};
     dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
 
     return (*cntx)->SendSimpleString("QUEUED");
@@ -714,8 +714,8 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   if (under_script) {
     DCHECK(dfly_cntx->transaction);
     if (cid->IsTransactional()) {
-      OpStatus status =
-          CheckKeysDeclared(*dfly_cntx->conn_state.script_info, cid, args, dfly_cntx->transaction);
+      OpStatus status = CheckKeysDeclared(*dfly_cntx->conn_state.script_info, cid, args.subspan(1),
+                                          dfly_cntx->transaction);
 
       if (status == OpStatus::KEY_NOTFOUND)
         return (*cntx)->SendError("script tried accessing undeclared key");
@@ -724,7 +724,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
         return (*cntx)->SendError(status);
 
       dfly_cntx->transaction->MultiSwitchCmd(cid);
-      status = dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args);
+      status = dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args.subspan(1));
 
       if (status != OpStatus::OK)
         return (*cntx)->SendError(status);
@@ -736,7 +736,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
       dist_trans.reset(new Transaction{cid, etl.thread_index()});
 
       if (!dist_trans->IsMulti()) {  // Multi command initialize themself based on their mode.
-        if (auto st = dist_trans->InitByArgs(dfly_cntx->conn_state.db_index, args);
+        if (auto st = dist_trans->InitByArgs(dfly_cntx->conn_state.db_index, args.subspan(1));
             st != OpStatus::OK)
           return (*cntx)->SendError(st);
       }
@@ -754,7 +754,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   // itself. EXEC does not use DispatchCommand for dispatching.
   bool collect_stats =
       dfly_cntx->transaction && (!dfly_cntx->transaction->IsMulti() || under_script);
-  if (!InvokeCmd(args, cid, dfly_cntx, collect_stats)) {
+  if (!InvokeCmd(args.subspan(1), cid, dfly_cntx, collect_stats)) {
     dfly_cntx->reply_builder()->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
   }
@@ -977,7 +977,7 @@ void Service::Watch(CmdArgList args, ConnectionContext* cntx) {
 
   // Duplicate keys are stored to keep correct count.
   exec_info.watched_existed += keys_existed.load(memory_order_relaxed);
-  for (size_t i = 1; i < args.size(); i++) {
+  for (size_t i = 0; i < args.size(); i++) {
     exec_info.watched_keys.emplace_back(cntx->db_index(), ArgS(args, i));
   }
 
@@ -1004,9 +1004,9 @@ void Service::CallFromScript(CmdArgList args, ObjectExplorer* reply, ConnectionC
 void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   uint32_t num_keys;
 
-  CHECK(absl::SimpleAtoi(ArgS(args, 2), &num_keys));  // we already validated this
+  CHECK(absl::SimpleAtoi(ArgS(args, 1), &num_keys));  // we already validated this
 
-  string_view body = ArgS(args, 1);
+  string_view body = ArgS(args, 0);
   // body = absl::StripAsciiWhitespace(body);
 
   if (body.empty()) {
@@ -1025,8 +1025,8 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
 
   EvalArgs eval_args;
   eval_args.sha = sha;
-  eval_args.keys = args.subspan(3, num_keys);
-  eval_args.args = args.subspan(3 + num_keys);
+  eval_args.keys = args.subspan(2, num_keys);
+  eval_args.args = args.subspan(2 + num_keys);
 
   uint64_t start = absl::GetCurrentTimeNanos();
   EvalInternal(eval_args, interpreter, cntx);
@@ -1036,22 +1036,22 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
-  string_view num_keys_str = ArgS(args, 2);
+  string_view num_keys_str = ArgS(args, 1);
   uint32_t num_keys;
 
   CHECK(absl::SimpleAtoi(num_keys_str, &num_keys));
 
-  ToLower(&args[1]);
+  ToLower(&args[0]);
 
-  string_view sha = ArgS(args, 1);
+  string_view sha = ArgS(args, 0);
   ServerState* ss = ServerState::tlocal();
   auto interpreter = ss->BorrowInterpreter();
   absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
 
   EvalArgs ev_args;
   ev_args.sha = sha;
-  ev_args.keys = args.subspan(3, num_keys);
-  ev_args.args = args.subspan(3 + num_keys);
+  ev_args.keys = args.subspan(2, num_keys);
+  ev_args.args = args.subspan(2 + num_keys);
 
   uint64_t start = absl::GetCurrentTimeNanos();
   EvalInternal(ev_args, interpreter, cntx);
@@ -1201,10 +1201,9 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandRegistry& regis
   static char EXISTS[] = "EXISTS";
   auto& exec_info = cntx->conn_state.exec_info;
 
-  CmdArgVec str_list(exec_info.watched_keys.size() + 1);
-  str_list[0] = MutableSlice{EXISTS, strlen(EXISTS)};
-  for (size_t i = 1; i < str_list.size(); i++) {
-    auto& [db, s] = exec_info.watched_keys[i - 1];
+  CmdArgVec str_list(exec_info.watched_keys.size());
+  for (size_t i = 0; i < str_list.size(); i++) {
+    auto& [db, s] = exec_info.watched_keys[i];
     str_list[i] = MutableSlice{s.data(), s.size()};
   }
 
@@ -1218,8 +1217,7 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandRegistry& regis
   };
 
   cntx->transaction->MultiSwitchCmd(registry.Find(EXISTS));
-  cntx->transaction->InitByArgs(cntx->conn_state.db_index,
-                                CmdArgList{str_list.data(), str_list.size()});
+  cntx->transaction->InitByArgs(cntx->conn_state.db_index, CmdArgList{str_list});
   OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, status);
 
@@ -1259,7 +1257,7 @@ template <typename F> void IterateAllKeys(ConnectionState::ExecInfo* exec_info, 
       f(args[i]);
 
     if (key_index.bonus)
-      f(args[key_index.bonus]);
+      f(args[*key_index.bonus]);
   }
 }
 
@@ -1390,7 +1388,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
-  string_view channel = ArgS(args, 1);
+  string_view channel = ArgS(args, 0);
 
   auto* cs = ServerState::tlocal()->channel_store();
   vector<ChannelStore::Subscriber> subscribers = cs->FetchSubscribers(channel);
@@ -1398,7 +1396,7 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
 
   if (!subscribers.empty()) {
     auto subscribers_ptr = make_shared<decltype(subscribers)>(move(subscribers));
-    auto msg_ptr = make_shared<string>(ArgS(args, 2));
+    auto msg_ptr = make_shared<string>(ArgS(args, 1));
     auto channel_ptr = make_shared<string>(channel);
 
     auto cb = [subscribers_ptr, msg_ptr, channel_ptr](unsigned idx, util::ProactorBase*) {
@@ -1420,14 +1418,10 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::Subscribe(CmdArgList args, ConnectionContext* cntx) {
-  args.remove_prefix(1);
-
   cntx->ChangeSubscription(true /*add*/, true /* reply*/, std::move(args));
 }
 
 void Service::Unsubscribe(CmdArgList args, ConnectionContext* cntx) {
-  args.remove_prefix(1);
-
   if (args.size() == 0) {
     cntx->UnsubscribeAll(true);
   } else {
@@ -1436,13 +1430,10 @@ void Service::Unsubscribe(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::PSubscribe(CmdArgList args, ConnectionContext* cntx) {
-  args.remove_prefix(1);
   cntx->ChangePSubscription(true, true, args);
 }
 
 void Service::PUnsubscribe(CmdArgList args, ConnectionContext* cntx) {
-  args.remove_prefix(1);
-
   if (args.size() == 0) {
     cntx->PUnsubscribeAll(true);
   } else {
@@ -1453,8 +1444,8 @@ void Service::PUnsubscribe(CmdArgList args, ConnectionContext* cntx) {
 // Not a real implementation. Serves as a decorator to accept some function commands
 // for testing.
 void Service::Function(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[1]);
-  string_view sub_cmd = ArgS(args, 1);
+  ToUpper(&args[0]);
+  string_view sub_cmd = ArgS(args, 0);
 
   if (sub_cmd == "FLUSH") {
     return (*cntx)->SendOk();
@@ -1483,13 +1474,13 @@ void Service::Monitor(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() < 2) {
-    (*cntx)->SendError(WrongNumArgsError(ArgS(args, 0)));
+  if (args.size() < 1) {
+    (*cntx)->SendError(WrongNumArgsError(cntx->cid->name()));
     return;
   }
 
-  ToUpper(&args[1]);
-  string_view subcmd = ArgS(args, 1);
+  ToUpper(&args[0]);
+  string_view subcmd = ArgS(args, 0);
 
   if (subcmd == "HELP") {
     string_view help_arr[] = {
@@ -1507,8 +1498,8 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
 
   if (subcmd == "CHANNELS") {
     string_view pattern;
-    if (args.size() > 2) {
-      pattern = ArgS(args, 2);
+    if (args.size() > 1) {
+      pattern = ArgS(args, 1);
     }
 
     PubsubChannels(pattern, cntx);

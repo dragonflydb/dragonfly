@@ -1002,9 +1002,9 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
 }  // namespace
 
 void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view path = ArgS(args, 2);
-  string_view json_str = ArgS(args, 3);
+  string_view key = ArgS(args, 0);
+  string_view path = ArgS(args, 1);
+  string_view json_str = ArgS(args, 2);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, path, json_str);
@@ -1025,10 +1025,10 @@ void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
   string_view path = DefaultJsonPath;
-  if (args.size() > 2) {
-    path = ArgS(args, 2);
+  if (args.size() > 1) {
+    path = ArgS(args, 1);
   }
 
   error_code ec;
@@ -1059,7 +1059,7 @@ void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
 
 void JsonFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
   function<decltype(OpFields)> func;
-  string_view command = ArgS(args, 1);
+  string_view command = ArgS(args, 0);
   // The 'MEMORY' sub-command is not supported yet, calling to operation function should be added
   // here.
   if (absl::EqualsIgnoreCase(command, "help")) {
@@ -1077,14 +1077,14 @@ void JsonFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  if (args.size() < 4) {
-    (*cntx)->SendError(facade::WrongNumArgsError(command), facade::kSyntaxErrType);
+  if (args.size() < 3) {
+    (*cntx)->SendError(facade::WrongNumArgsError(cntx->cid->name()), facade::kSyntaxErrType);
     return;
   }
 
   error_code ec;
-  string_view key = ArgS(args, 2);
-  string_view path = ArgS(args, 3);
+  string_view key = ArgS(args, 1);
+  string_view path = ArgS(args, 2);
   JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
 
   if (ec) {
@@ -1108,7 +1108,7 @@ void JsonFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
-  DCHECK_GE(args.size(), 2U);
+  DCHECK_GE(args.size(), 1U);
 
   error_code ec;
   string_view path = ArgS(args, args.size() - 1);
@@ -1133,7 +1133,7 @@ void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
   OpStatus result = transaction->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, result);
 
-  std::vector<OptString> results(args.size() - 2);
+  std::vector<OptString> results(args.size() - 1);
   for (ShardId sid = 0; sid < shard_count; ++sid) {
     if (!transaction->IsActive(sid))
       continue;
@@ -1164,8 +1164,8 @@ void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view path = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view path = ArgS(args, 1);
 
   error_code ec;
   JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
@@ -1176,7 +1176,7 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  optional<JsonType> search_value = JsonFromString(ArgS(args, 3));
+  optional<JsonType> search_value = JsonFromString(ArgS(args, 2));
   if (!search_value) {
     (*cntx)->SendError(kSyntaxErr);
     return;
@@ -1188,18 +1188,18 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
   }
 
   int start_index = 0;
-  if (args.size() >= 5) {
-    if (!absl::SimpleAtoi(ArgS(args, 4), &start_index)) {
-      VLOG(1) << "Failed to convert the start index to numeric" << ArgS(args, 4);
+  if (args.size() >= 4) {
+    if (!absl::SimpleAtoi(ArgS(args, 3), &start_index)) {
+      VLOG(1) << "Failed to convert the start index to numeric" << ArgS(args, 3);
       (*cntx)->SendError(kInvalidIntErr);
       return;
     }
   }
 
   int end_index = 0;
-  if (args.size() >= 6) {
-    if (!absl::SimpleAtoi(ArgS(args, 5), &end_index)) {
-      VLOG(1) << "Failed to convert the stop index to numeric" << ArgS(args, 5);
+  if (args.size() >= 5) {
+    if (!absl::SimpleAtoi(ArgS(args, 4), &end_index)) {
+      VLOG(1) << "Failed to convert the stop index to numeric" << ArgS(args, 4);
       (*cntx)->SendError(kInvalidIntErr);
       return;
     }
@@ -1221,18 +1221,18 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::ArrInsert(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view path = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view path = ArgS(args, 1);
   int index = -1;
 
-  if (!absl::SimpleAtoi(ArgS(args, 3), &index)) {
-    VLOG(1) << "Failed to convert the following value to numeric: " << ArgS(args, 3);
+  if (!absl::SimpleAtoi(ArgS(args, 2), &index)) {
+    VLOG(1) << "Failed to convert the following value to numeric: " << ArgS(args, 2);
     (*cntx)->SendError(kInvalidIntErr);
     return;
   }
 
   vector<JsonType> new_values;
-  for (size_t i = 4; i < args.size(); i++) {
+  for (size_t i = 3; i < args.size(); i++) {
     optional<JsonType> val = JsonFromString(ArgS(args, i));
     if (!val) {
       (*cntx)->SendError(kSyntaxErr);
@@ -1256,10 +1256,10 @@ void JsonFamily::ArrInsert(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::ArrAppend(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view path = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view path = ArgS(args, 1);
   vector<JsonType> append_values;
-  for (size_t i = 3; i < args.size(); ++i) {
+  for (size_t i = 2; i < args.size(); ++i) {
     optional<JsonType> converted_val = JsonFromString(ArgS(args, i));
     if (!converted_val) {
       (*cntx)->SendError(kSyntaxErr);
@@ -1288,18 +1288,18 @@ void JsonFamily::ArrAppend(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::ArrTrim(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view path = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view path = ArgS(args, 1);
   int start_index;
   int stop_index;
 
-  if (!absl::SimpleAtoi(ArgS(args, 3), &start_index)) {
+  if (!absl::SimpleAtoi(ArgS(args, 2), &start_index)) {
     VLOG(1) << "Failed to parse array start index";
     (*cntx)->SendError(kInvalidIntErr);
     return;
   }
 
-  if (!absl::SimpleAtoi(ArgS(args, 4), &stop_index)) {
+  if (!absl::SimpleAtoi(ArgS(args, 3), &stop_index)) {
     VLOG(1) << "Failed to parse array stop index";
     (*cntx)->SendError(kInvalidIntErr);
     return;
@@ -1324,14 +1324,14 @@ void JsonFamily::ArrTrim(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::ArrPop(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view path = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view path = ArgS(args, 1);
   int index = -1;
 
-  if (args.size() >= 4) {
-    if (!absl::SimpleAtoi(ArgS(args, 3), &index)) {
+  if (args.size() >= 3) {
+    if (!absl::SimpleAtoi(ArgS(args, 2), &index)) {
       VLOG(1) << "Failed to convert the following value to numeric, pop out the last item"
-              << ArgS(args, 3);
+              << ArgS(args, 2);
     }
   }
 
@@ -1365,8 +1365,8 @@ void JsonFamily::ArrPop(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::Clear(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view path = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view path = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpClear(t->GetOpArgs(shard), key, path);
@@ -1383,11 +1383,11 @@ void JsonFamily::Clear(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::StrAppend(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view path = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view path = ArgS(args, 1);
 
   vector<string_view> strs;
-  for (size_t i = 3; i < args.size(); ++i) {
+  for (size_t i = 2; i < args.size(); ++i) {
     strs.emplace_back(ArgS(args, i));
   }
 
@@ -1406,8 +1406,8 @@ void JsonFamily::StrAppend(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view path = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view path = ArgS(args, 1);
 
   error_code ec;
   JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
@@ -1440,10 +1440,10 @@ void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::Del(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
   string_view path;
-  if (args.size() > 2) {
-    path = ArgS(args, 2);
+  if (args.size() > 1) {
+    path = ArgS(args, 1);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1456,9 +1456,9 @@ void JsonFamily::Del(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::NumIncrBy(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view path = ArgS(args, 2);
-  string_view num = ArgS(args, 3);
+  string_view key = ArgS(args, 0);
+  string_view path = ArgS(args, 1);
+  string_view num = ArgS(args, 2);
 
   double dnum;
   if (!ParseDouble(num, &dnum)) {
@@ -1481,9 +1481,9 @@ void JsonFamily::NumIncrBy(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::NumMultBy(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view path = ArgS(args, 2);
-  string_view num = ArgS(args, 3);
+  string_view key = ArgS(args, 0);
+  string_view path = ArgS(args, 1);
+  string_view num = ArgS(args, 2);
 
   double dnum;
   if (!ParseDouble(num, &dnum)) {
@@ -1506,8 +1506,8 @@ void JsonFamily::NumMultBy(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::Toggle(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view path = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view path = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpToggle(t->GetOpArgs(shard), key, path);
@@ -1524,8 +1524,8 @@ void JsonFamily::Toggle(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::Type(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view path = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view path = ArgS(args, 1);
 
   error_code ec;
   JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
@@ -1560,8 +1560,8 @@ void JsonFamily::Type(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::ArrLen(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view path = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view path = ArgS(args, 1);
 
   error_code ec;
   JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
@@ -1587,8 +1587,8 @@ void JsonFamily::ArrLen(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::ObjLen(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view path = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view path = ArgS(args, 1);
 
   error_code ec;
   JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
@@ -1614,8 +1614,8 @@ void JsonFamily::ObjLen(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view path = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view path = ArgS(args, 1);
 
   error_code ec;
   JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
@@ -1641,12 +1641,12 @@ void JsonFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
-  DCHECK_GE(args.size(), 2U);
-  string_view key = ArgS(args, 1);
+  DCHECK_GE(args.size(), 1U);
+  string_view key = ArgS(args, 0);
 
   vector<pair<string_view, JsonExpression>> expressions;
 
-  for (size_t i = 2; i < args.size(); ++i) {
+  for (size_t i = 1; i < args.size(); ++i) {
     string_view path = ArgS(args, i);
     error_code ec;
     JsonExpression expr = jsonpath::make_expression<JsonType>(path, ec);

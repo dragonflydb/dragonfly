@@ -61,24 +61,24 @@ struct KeyIndex {
   unsigned end;   // does not include this index (open limit).
   unsigned step;  // 1 for commands like mget. 2 for commands like mset.
 
-  // if index is non-zero then adds another key index (usually 1).
+  // if index is non-zero then adds another key index (usually 0).
   // relevant for for commands like ZUNIONSTORE/ZINTERSTORE for destination key.
-  unsigned bonus = 0;
+  std::optional<uint16_t> bonus{};
 
   static KeyIndex Empty() {
-    return KeyIndex{0, 0, 0, 0};
+    return KeyIndex{0, 0, 0, std::nullopt};
   }
 
   static KeyIndex Range(unsigned start, unsigned end, unsigned step = 1) {
-    return KeyIndex{start, end, step, 0};
+    return KeyIndex{start, end, step, std::nullopt};
   }
 
   bool HasSingleKey() const {
-    return bonus == 0 && (start + step >= end);
+    return !bonus && (start + step >= end);
   }
 
   unsigned num_args() const {
-    return end - start + (bonus > 0);
+    return end - start + bool(bonus);
   }
 };
 

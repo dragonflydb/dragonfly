@@ -33,9 +33,9 @@ struct EntryBase {
 struct Entry : public EntryBase {
   // Payload represents a non-owning view into a command executed on the shard.
   using Payload =
-      std::variant<std::monostate,                        // No payload.
-                   CmdArgList,                            // Parts of a full command.
-                   std::pair<std::string_view, ArgSlice>  // Command and its shard parts.
+      std::variant<std::monostate,                           // No payload.
+                   std::pair<std::string_view, CmdArgList>,  // Parts of a full command.
+                   std::pair<std::string_view, ArgSlice>     // Command and its shard parts.
                    >;
 
   Entry(TxId txid, Op opcode, DbIndex dbid, uint32_t shard_cnt, Payload pl)

@@ -688,7 +688,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
 }
 
 void HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t getall_mask) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpGetAll(t->GetOpArgs(shard), key, getall_mask);
@@ -707,16 +707,12 @@ void HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t getall_mask) 
 
 // HSETEX key tll_sec field value field value ...
 void HSetEx(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() % 2 != 1) {
-    ToLower(&args[0]);
-
-    string_view cmd = ArgS(args, 0);
-
-    return (*cntx)->SendError(facade::WrongNumArgsError(cmd), kSyntaxErrType);
+  if (args.size() % 2 != 0) {
+    return (*cntx)->SendError(facade::WrongNumArgsError(cntx->cid->name()), kSyntaxErrType);
   }
 
-  string_view key = ArgS(args, 1);
-  string_view ttl_str = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view ttl_str = ArgS(args, 1);
   uint32_t ttl_sec;
   constexpr uint32_t kMaxTtl = (1UL << 26);
 
@@ -724,7 +720,7 @@ void HSetEx(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
 
-  args.remove_prefix(3);
+  args.remove_prefix(2);
   OpSetParams op_sp;
   op_sp.ttl = ttl_sec;
 
@@ -743,9 +739,9 @@ void HSetEx(CmdArgList args, ConnectionContext* cntx) {
 }  // namespace
 
 void HSetFamily::HDel(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
-  args.remove_prefix(2);
+  args.remove_prefix(1);
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpDel(t->GetOpArgs(shard), key, args);
   };
@@ -759,7 +755,7 @@ void HSetFamily::HDel(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void HSetFamily::HLen(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
 
@@ -772,8 +768,8 @@ void HSetFamily::HLen(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void HSetFamily::HExists(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view field = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view field = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<int> {
     return OpExist(t->GetOpArgs(shard), key, field);
@@ -788,9 +784,9 @@ void HSetFamily::HExists(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void HSetFamily::HMGet(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
-  args.remove_prefix(2);
+  args.remove_prefix(1);
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpMGet(t->GetOpArgs(shard), key, args);
   };
@@ -817,8 +813,8 @@ void HSetFamily::HMGet(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void HSetFamily::HGet(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view field = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view field = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpGet(t->GetOpArgs(shard), key, field);
@@ -837,9 +833,9 @@ void HSetFamily::HGet(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void HSetFamily::HIncrBy(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view field = ArgS(args, 2);
-  string_view incrs = ArgS(args, 3);
+  string_view key = ArgS(args, 0);
+  string_view field = ArgS(args, 1);
+  string_view incrs = ArgS(args, 2);
   int64_t ival = 0;
 
   if (!absl::SimpleAtoi(incrs, &ival)) {
@@ -872,9 +868,9 @@ void HSetFamily::HIncrBy(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void HSetFamily::HIncrByFloat(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view field = ArgS(args, 2);
-  string_view incrs = ArgS(args, 3);
+  string_view key = ArgS(args, 0);
+  string_view field = ArgS(args, 1);
+  string_view incrs = ArgS(args, 2);
   double dval = 0;
 
   if (!absl::SimpleAtod(incrs, &dval)) {
@@ -916,8 +912,8 @@ void HSetFamily::HGetAll(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void HSetFamily::HScan(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
-  std::string_view token = ArgS(args, 2);
+  std::string_view key = ArgS(args, 0);
+  std::string_view token = ArgS(args, 1);
 
   uint64_t cursor = 0;
 
@@ -926,12 +922,12 @@ void HSetFamily::HScan(CmdArgList args, ConnectionContext* cntx) {
   }
 
   // HSCAN key cursor [MATCH pattern] [COUNT count]
-  if (args.size() > 7) {
+  if (args.size() > 6) {
     DVLOG(1) << "got " << args.size() << " this is more than it should be";
     return (*cntx)->SendError(kSyntaxErr);
   }
 
-  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(3));
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2));
   if (!ops) {
     DVLOG(1) << "HScan invalid args - return " << ops << " to the user";
     return (*cntx)->SendError(ops.status());
@@ -957,22 +953,22 @@ void HSetFamily::HScan(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void HSetFamily::HSet(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
   ToLower(&args[0]);
 
-  string_view cmd = ArgS(args, 0);
-
-  if (args.size() % 2 != 0) {
-    return (*cntx)->SendError(facade::WrongNumArgsError(cmd), kSyntaxErrType);
+  if (args.size() % 2 != 1) {
+    return (*cntx)->SendError(facade::WrongNumArgsError("hset"), kSyntaxErrType);
   }
 
-  args.remove_prefix(2);
+  args.remove_prefix(1);
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, args);
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  if (result && cmd == "hset") {
+  string_view cmd{cntx->cid->name()};
+
+  if (result && cmd == "HSET") {
     (*cntx)->SendLong(*result);
   } else {
     (*cntx)->SendError(result.status());
@@ -980,9 +976,9 @@ void HSetFamily::HSet(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void HSetFamily::HSetNx(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
-  args.remove_prefix(2);
+  args.remove_prefix(1);
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, args, OpSetParams{.skip_if_exists = true});
   };
@@ -996,8 +992,8 @@ void HSetFamily::HSetNx(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void HSetFamily::HStrLen(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view field = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view field = ArgS(args, 1);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpStrLen(t->GetOpArgs(shard), key, field);
@@ -1012,7 +1008,7 @@ void HSetFamily::HStrLen(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
     auto& db_slice = shard->db_slice();

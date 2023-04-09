@@ -18,6 +18,13 @@ struct EntryPayloadVisitor {
     *out += ' ';
   }
 
+  void operator()(const CmdArgList list) {
+    for (auto arg : list) {
+      *out += facade::ToSV(arg);
+      *out += ' ';
+    }
+  }
+
   void operator()(const ArgSlice slice) {
     for (auto arg : slice) {
       *out += arg;
@@ -25,16 +32,9 @@ struct EntryPayloadVisitor {
     }
   }
 
-  void operator()(const pair<string_view, ArgSlice> p) {
+  template <typename C> void operator()(const pair<string_view, C> p) {
     (*this)(p.first);
     (*this)(p.second);
-  }
-
-  void operator()(const CmdArgList list) {
-    for (auto arg : list) {
-      *out += facade::ToSV(arg);
-      *out += ' ';
-    }
   }
 
   void operator()(monostate) {
@@ -100,12 +100,12 @@ TEST(Journal, WriteRead) {
   std::vector<journal::Entry> test_entries = {
       {0, journal::Op::COMMAND, 0, 2, make_pair("MSET", slice("A", "1", "B", "2"))},
       {0, journal::Op::COMMAND, 0, 2, make_pair("MSET", slice("C", "3"))},
-      {1, journal::Op::COMMAND, 0, 2, list("DEL", "A", "B")},
-      {2, journal::Op::COMMAND, 1, 1, list("LPUSH", "l", "v1", "v2")},
+      {1, journal::Op::COMMAND, 0, 2, make_pair("DEL", list("A", "B"))},
+      {2, journal::Op::COMMAND, 1, 1, make_pair("LPUSH", list("l", "v1", "v2"))},
       {3, journal::Op::COMMAND, 0, 1, make_pair("MSET", slice("D", "4"))},
-      {4, journal::Op::COMMAND, 1, 1, list("DEL", "l1")},
-      {5, journal::Op::COMMAND, 2, 1, list("SET", "E", "2")},
-      {6, journal::Op::MULTI_COMMAND, 2, 1, list("SET", "E", "2")},
+      {4, journal::Op::COMMAND, 1, 1, make_pair("DEL", list("l1"))},
+      {5, journal::Op::COMMAND, 2, 1, make_pair("DEL", list("E", "2"))},
+      {6, journal::Op::MULTI_COMMAND, 2, 1, make_pair("SET", list("E", "2"))},
       {6, journal::Op::EXEC, 2, 1}};
 
   // Write all entries to a buffer.

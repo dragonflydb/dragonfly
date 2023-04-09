@@ -17,7 +17,7 @@ template <typename F> void IterateKeys(CmdArgList args, KeyIndex keys, F&& f) {
     f(args[i]);
 
   if (keys.bonus)
-    f(args[keys.bonus]);
+    f(args[*keys.bonus]);
 }
 
 }  // namespace

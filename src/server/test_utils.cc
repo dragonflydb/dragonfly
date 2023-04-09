@@ -344,12 +344,16 @@ RespVec BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
   tmp_str_vec_.emplace_back(new string{sink_.str()});
   auto& s = *tmp_str_vec_.back();
   auto buf = RespExpr::buffer(&s);
-  uint32_t consumed = 0;
 
+  auto s_copy = s;
+
+  uint32_t consumed = 0;
   parser_.reset(new RedisParser{false});  // Client mode.
   RespVec res;
   RedisParser::Result st = parser_->Parse(buf, &consumed, &res);
-  CHECK_EQ(RedisParser::OK, st);
+
+  CHECK_EQ(RedisParser::OK, st) << " response: \"" << s_copy << "\" (" << s_copy.size()
+                                << " chars)";
   if (fully_consumed) {
     DCHECK_EQ(consumed, s.size()) << s;
   }

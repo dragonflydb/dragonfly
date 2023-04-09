@@ -532,7 +532,7 @@ class Transaction {
   absl::InlinedVector<std::string_view, 4> args_;
 
   // Stores the full undivided command.
-  CmdArgList cmd_with_full_args_;
+  CmdArgList full_args_;
 
   // True if NO_AUTOJOURNAL command asked to enable auto journal
   std::atomic<bool> renabled_auto_journal_ = false;
