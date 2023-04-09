@@ -1032,7 +1032,7 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
     pushed_bytes += ptr->channel_bytes();
   }
 
-  DCHECK(!channel_.TryPop(*record));
+  DCHECK(!record.has_value() || !channel_.TryPop(*record));
 
   VLOG(1) << "Channel pulled bytes: " << channel_bytes << " pushed bytes: " << pushed_bytes;
 

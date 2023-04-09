@@ -136,7 +136,7 @@ class SliceSnapshot {
 
   // version upper bound for entries that should be saved (not included).
   uint64_t snapshot_version_ = 0;
-  uint32_t journal_cb_id_ = 0;
+  atomic_uint32_t journal_cb_id_ = 0;
   uint64_t rec_id_ = 0;
 
   struct Stats {
