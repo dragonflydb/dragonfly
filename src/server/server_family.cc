@@ -129,8 +129,8 @@ string InferLoadFile(fs::path data_dir) {
   io::Result<io::StatShortVec> short_vec = io::StatFiles(fl_path.generic_string());
 
   if (short_vec) {
-    // TODO: For the case of files with timestamps, we should sort the results
-    // and select the newest dump.
+    // io::StatFiles returns a list of sorted files. Because our timestamp format has the same
+    // time order and lexicographic order we iterate from the end to find the latest snapshot.
     auto it = std::find_if(short_vec->rbegin(), short_vec->rend(), [](const auto& stat) {
       return absl::EndsWith(stat.name, ".rdb") || absl::EndsWith(stat.name, "summary.dfs");
     });
