@@ -5,6 +5,7 @@
 #pragma once
 
 #include "base/logging.h"
+#include "core/fibers.h"
 #include "facade/reply_capture.h"
 #include "server/conn_context.h"
 
@@ -20,9 +21,9 @@ class MultiCommandSquasher {
   }
 
  private:
-  using ReplyChan = ::util::fibers_ext::SimpleChannel<
-      facade::CapturingReplyBuilder::Payload,
-      base::mpmc_bounded_queue<facade::CapturingReplyBuilder::Payload>>;
+  using ReplyChan =
+      dfly::SimpleChannel<facade::CapturingReplyBuilder::Payload,
+                          base::mpmc_bounded_queue<facade::CapturingReplyBuilder::Payload>>;
 
   // Per-shard exection info.
   struct ShardExecInfo {
