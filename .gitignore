@@ -4,6 +4,7 @@ clang/*
 clang-*
 .vscode/*.db
 .vscode/settings.json
+.vscode/launch.json
 third_party
 genfiles/*
 *.sublime-*
