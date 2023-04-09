@@ -1453,7 +1453,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   Metrics m = GetMetrics();
 
   if (should_enter("SERVER")) {
-    ProactorBase::ProactorKind kind = ProactorBase::me()->GetKind();
+    auto kind = ProactorBase::me()->GetKind();
     const char* multiplex_api = (kind == ProactorBase::IOURING) ? "iouring" : "epoll";
 
     ADD_HEADER("# Server");

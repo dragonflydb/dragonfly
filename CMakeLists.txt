@@ -21,6 +21,8 @@ find_package(OpenSSL)
 include(third_party)
 include(internal)
 
+set(USE_FB2 ON CACHE BOOL "")
+
 include_directories(src)
 include_directories(helio)
 

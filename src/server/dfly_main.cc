@@ -30,9 +30,8 @@
 #include "server/version.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
-#include "util/epoll/epoll_pool.h"
+#include "util/fibers/pool.h"
 #include "util/http/http_client.h"
-#include "util/uring/uring_pool.h"
 #include "util/varz.h"
 
 #define STRING_PP_NX(A) #A
@@ -527,9 +526,9 @@ Usage: dragonfly [FLAGS]
 
   bool use_epoll = ShouldUseEpollAPI(kver);
   if (use_epoll) {
-    pool.reset(new epoll::EpollPool);
+    pool.reset(fb2::Pool::Epoll());
   } else {
-    pool.reset(new uring::UringPool(1024));  // 1024 - iouring queue size.
+    pool.reset(fb2::Pool::IOUring(1024));  // 1024 - iouring queue size.
   }
 
   pool->Run();
