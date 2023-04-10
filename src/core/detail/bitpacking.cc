@@ -4,15 +4,10 @@
 
 #include "src/core/detail/bitpacking.h"
 
-#include "base/logging.h"
-
-#if defined(__aarch64__)
-#include "base/sse2neon.h"
-#else
-#include <emmintrin.h>
-#include <tmmintrin.h>
-#endif
 #include <absl/base/internal/endian.h>
+
+#include "base/logging.h"
+#include "core/sse_port.h"
 
 using namespace std;
 
@@ -43,7 +38,7 @@ static inline pair<const char*, uint8_t*> simd_variant1_pack(const char* ascii, 
 
   // Based on the question I asked here: https://stackoverflow.com/q/74831843/2280111
   while (ascii <= end) {
-    val = _mm_loadu_si128(reinterpret_cast<const __m128i*>(ascii));
+    val = mm_loadu_si128(reinterpret_cast<const __m128i*>(ascii));
 
     /*
     x = ((x & 0x7F007F007F007F00) >> 1) | (x & 0x007F007F007F007F);
@@ -81,7 +76,7 @@ static inline pair<const char*, uint8_t*> simd_variant2_pack(const char* ascii, 
 
   // Based on the question I asked here: https://stackoverflow.com/q/74831843/2280111
   while (ascii <= end) {
-    val = _mm_loadu_si128(reinterpret_cast<const __m128i*>(ascii));
+    val = mm_loadu_si128(reinterpret_cast<const __m128i*>(ascii));
 
     /*
     x = ((x & 0x7F007F007F007F00) >> 1) | (x & 0x007F007F007F007F);
@@ -114,7 +109,7 @@ bool validate_ascii_fast(const char* src, size_t len) {
   __m128i has_error = _mm_setzero_si128();
   if (len >= 16) {
     for (; i <= len - 16; i += 16) {
-      __m128i current_bytes = _mm_loadu_si128((const __m128i*)(src + i));
+      __m128i current_bytes = mm_loadu_si128((const __m128i*)(src + i));
       has_error = _mm_or_si128(has_error, current_bytes);
     }
   }
@@ -249,7 +244,7 @@ void ascii_unpack_simd(const uint8_t* bin, size_t ascii_len, char* ascii) {
   const __m128i control = _mm_set_epi8(14, 13, 12, 11, 10, 9, 8, 7, -1, 6, 5, 4, 3, 2, 1, 0);
 
   while (ascii < end) {
-    val = _mm_loadu_si128(reinterpret_cast<const __m128i*>(bin));
+    val = mm_loadu_si128(reinterpret_cast<const __m128i*>(bin));
     val = _mm_shuffle_epi8(val, control);
 
     rpart = _mm_and_si128(val, _mm_set1_epi64x(0x000000000FFFFFFF));
