@@ -20,15 +20,15 @@ class ChannelStore;
 
 // Stores command id and arguments for delayed invocation.
 // Used for storing MULTI/EXEC commands.
-struct StoredCmd {
+class StoredCmd {
+ public:
   StoredCmd(const CommandId* cid, CmdArgList args);
 
   size_t NumArgs() const;
 
-  // Fill the arg list with stored arguments, it should be at least of size NumArgs() + 1.
-  // cmd_scratch is used for storing the command name in a mutable slice (can be null to skip).
-  // Between filling and invocation, the stored cmd and the scratch should NOT be moved.
-  void Fill(CmdArgList args, MutableSlice cmd_scratch);
+  // Fill the arg list with stored arguments, it should be at least of size NumArgs().
+  // Between filling and invocation, cmd should NOT be moved.
+  void Fill(CmdArgList args);
 
   const CommandId* Cid() const;
 

@@ -1247,8 +1247,8 @@ template <typename F> void IterateAllKeys(ConnectionState::ExecInfo* exec_info, 
     if (!scmd.Cid()->IsTransactional())
       continue;
 
-    arg_vec.resize(scmd.NumArgs() + 1);
-    scmd.Fill(absl::MakeSpan(arg_vec), {});
+    arg_vec.resize(scmd.NumArgs());
+    scmd.Fill(absl::MakeSpan(arg_vec));
 
     auto key_res = DetermineKeys(scmd.Cid(), absl::MakeSpan(arg_vec));
     if (!key_res.ok())
@@ -1260,7 +1260,7 @@ template <typename F> void IterateAllKeys(ConnectionState::ExecInfo* exec_info, 
       f(arg_vec[i]);
 
     if (key_index.bonus)
-      f(args[*key_index.bonus]);
+      f(arg_vec[*key_index.bonus]);
   }
 }
 
@@ -1365,14 +1365,13 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
       MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), cntx);
     } else {
       CmdArgVec arg_vec{};
-      char buf[64];
 
       for (auto& scmd : exec_info.body) {
         cntx->transaction->MultiSwitchCmd(scmd.Cid());
 
-        arg_vec.resize(scmd.NumArgs() + 1);
+        arg_vec.resize(scmd.NumArgs());
         CmdArgList args = absl::MakeSpan(arg_vec);
-        scmd.Fill(args, buf);
+        scmd.Fill(args);
 
         if (scmd.Cid()->IsTransactional()) {
           OpStatus st = cntx->transaction->InitByArgs(cntx->conn_state.db_index, args);

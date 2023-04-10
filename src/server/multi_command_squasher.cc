@@ -49,9 +49,9 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
       (cmd->Cid()->opt_mask() & CO::GLOBAL_TRANS))
     return SquashResult::NOT_SQUASHED;
 
-  tmp_keylist_.resize(cmd->NumArgs() + 1);
+  tmp_keylist_.resize(cmd->NumArgs());
   auto args = absl::MakeSpan(tmp_keylist_);
-  cmd->Fill(args, {});
+  cmd->Fill(args);
 
   auto keys = DetermineKeys(cmd->Cid(), args);
   if (!keys.ok())
@@ -95,10 +95,9 @@ void MultiCommandSquasher::ExecuteStandalone(StoredCmd* cmd) {
   auto* tx = cntx_->transaction;
   tx->MultiSwitchCmd(cmd->Cid());
 
-  char namebuf[32];
-  tmp_keylist_.resize(cmd->NumArgs() + 1);
+  tmp_keylist_.resize(cmd->NumArgs());
   auto args = absl::MakeSpan(tmp_keylist_);
-  cmd->Fill(args, namebuf);
+  cmd->Fill(args);
 
   if (cmd->Cid()->IsTransactional())
     tx->InitByArgs(cntx_->conn_state.db_index, args);
@@ -113,15 +112,14 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
   facade::CapturingReplyBuilder crb;
   ConnectionContext local_cntx{local_tx, &crb};
 
-  char cmdbuf[32];
   absl::InlinedVector<MutableSlice, 4> arg_vec;
 
   for (auto* cmd : sinfo.cmds) {
     local_tx->MultiSwitchCmd(cmd->Cid());
 
-    arg_vec.resize(cmd->NumArgs() + 1);
+    arg_vec.resize(cmd->NumArgs());
     auto args = absl::MakeSpan(arg_vec);
-    cmd->Fill(args, cmdbuf);
+    cmd->Fill(args);
 
     local_tx->InitByArgs(parent_tx->GetDbIndex(), args);
     cmd->Cid()->Invoke(args, &local_cntx);

@@ -17,38 +17,26 @@ using namespace std;
 using namespace facade;
 
 StoredCmd::StoredCmd(const CommandId* cid, CmdArgList args)
-    : cid_{cid}, buffer_{}, sizes_(args.size() - 1) {
-  // The command name is not stored in the buffer, so start from 1.
+    : cid_{cid}, buffer_{}, sizes_(args.size()) {
   size_t total_size = 0;
-  for (auto args : args.subspan(1))
+  for (auto args : args)
     total_size += args.size();
 
   buffer_.resize(total_size);
   char* next = buffer_.data();
-  for (unsigned i = 1; i < args.size(); i++) {
+  for (unsigned i = 0; i < args.size(); i++) {
     memcpy(next, args[i].data(), args[i].size());
-    sizes_[i - 1] = args[i].size();
+    sizes_[i] = args[i].size();
     next += args[i].size();
   }
 }
 
-void StoredCmd::Fill(CmdArgList args, MutableSlice cmd_scratch) {
-  CHECK_GE(args.size(), sizes_.size() + 1);
-  unsigned i = 0;
-
-  // Extract the command name and place if first.
-  if (!cmd_scratch.empty()) {
-    DCHECK_GE(cmd_scratch.size(), strlen(cid_->name()));
-    strcpy(cmd_scratch.data(), cid_->name());
-    args[i++] = {cmd_scratch.data(), strlen(cid_->name())};
-  } else {
-    args[i++] = {nullptr, 0};
-  }
-
+void StoredCmd::Fill(CmdArgList args) {
+  CHECK_GE(args.size(), sizes_.size());
   unsigned offset = 0;
-  for (auto sz : sizes_) {
-    args[i++] = MutableSlice{buffer_.data() + offset, sz};
-    offset += sz;
+  for (unsigned i = 0; i < sizes_.size(); i++) {
+    args[i] = MutableSlice{buffer_.data() + offset, sizes_[i]};
+    offset += sizes_[i];
   }
 }
 
