@@ -87,7 +87,7 @@ DebugCmd::DebugCmd(ServerFamily* owner, ConnectionContext* cntx) : sf_(*owner), 
 }
 
 void DebugCmd::Run(CmdArgList args) {
-  string_view subcmd = ArgS(args, 1);
+  string_view subcmd = ArgS(args, 0);
   if (subcmd == "HELP") {
     string_view help_arr[] = {
         "DEBUG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
@@ -128,7 +128,7 @@ void DebugCmd::Run(CmdArgList args) {
     return Reload(args);
   }
 
-  if (subcmd == "REPLICA" && args.size() == 3) {
+  if (subcmd == "REPLICA" && args.size() == 2) {
     return Replica(args);
   }
 
@@ -136,12 +136,12 @@ void DebugCmd::Run(CmdArgList args) {
     return Watched();
   }
 
-  if (subcmd == "LOAD" && args.size() == 3) {
-    return Load(ArgS(args, 2));
+  if (subcmd == "LOAD" && args.size() == 2) {
+    return Load(ArgS(args, 1));
   }
 
-  if (subcmd == "OBJECT" && args.size() == 3) {
-    string_view key = ArgS(args, 2);
+  if (subcmd == "OBJECT" && args.size() == 2) {
+    string_view key = ArgS(args, 1);
     return Inspect(key);
   }
 
@@ -156,7 +156,7 @@ void DebugCmd::Run(CmdArgList args) {
 void DebugCmd::Reload(CmdArgList args) {
   bool save = true;
 
-  for (size_t i = 2; i < args.size(); ++i) {
+  for (size_t i = 1; i < args.size(); ++i) {
     ToUpper(&args[i]);
     string_view opt = ArgS(args, i);
     VLOG(1) << "opt " << opt;
@@ -187,7 +187,7 @@ void DebugCmd::Reload(CmdArgList args) {
 }
 
 void DebugCmd::Replica(CmdArgList args) {
-  args.remove_prefix(2);
+  args.remove_prefix(1);
   ToUpper(&args[0]);
   string_view opt = ArgS(args, 0);
 
@@ -254,29 +254,29 @@ void DebugCmd::Load(string_view filename) {
 }
 
 void DebugCmd::Populate(CmdArgList args) {
-  if (args.size() < 3 || args.size() > 6) {
+  if (args.size() < 2 || args.size() > 5) {
     return (*cntx_)->SendError(UnknownSubCmd("populate", "DEBUG"));
   }
 
   uint64_t total_count = 0;
-  if (!absl::SimpleAtoi(ArgS(args, 2), &total_count))
+  if (!absl::SimpleAtoi(ArgS(args, 1), &total_count))
     return (*cntx_)->SendError(kUintErr);
   std::string_view prefix{"key"};
 
-  if (args.size() > 3) {
-    prefix = ArgS(args, 3);
+  if (args.size() > 2) {
+    prefix = ArgS(args, 2);
   }
   uint32_t val_size = 0;
-  if (args.size() > 4) {
-    std::string_view str = ArgS(args, 4);
+  if (args.size() > 3) {
+    std::string_view str = ArgS(args, 3);
     if (!absl::SimpleAtoi(str, &val_size))
       return (*cntx_)->SendError(kUintErr);
   }
 
   bool populate_random_values = false;
-  if (args.size() > 5) {
-    ToUpper(&args[5]);
-    std::string_view str = ArgS(args, 5);
+  if (args.size() > 4) {
+    ToUpper(&args[4]);
+    std::string_view str = ArgS(args, 4);
     if (str != "RAND") {
       return (*cntx_)->SendError(kSyntaxErr);
     }

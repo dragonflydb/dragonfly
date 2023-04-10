@@ -663,8 +663,8 @@ void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view
 void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   set_qps.Inc();
 
-  string_view key = ArgS(args, 1);
-  string_view value = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view value = ArgS(args, 1);
 
   SetCmd::SetParams sparams;
   sparams.memcache_flags = cntx->conn_state.memcache_flag;
@@ -672,7 +672,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   int64_t int_arg;
   SinkReplyBuilder* builder = cntx->reply_builder();
 
-  for (size_t i = 3; i < args.size(); ++i) {
+  for (size_t i = 2; i < args.size(); ++i) {
     ToUpper(&args[i]);
 
     string_view cur_arg = ArgS(args, i);
@@ -768,8 +768,8 @@ void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
   // change the value only if the key does not exist. Otherwise the function
   // will not modify it. in which case it would return 0
   // it would return to the caller 1 in case the key did not exists and was added
-  string_view key = ArgS(args, 1);
-  string_view value = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view value = ArgS(args, 1);
 
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_IF_NOTEXIST;
@@ -789,7 +789,7 @@ void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
 void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   get_qps.Inc();
 
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpGet(t->GetOpArgs(shard), key); };
 
@@ -815,7 +815,7 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 void StringFamily::GetDel(CmdArgList args, ConnectionContext* cntx) {
   get_qps.Inc();
 
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     bool run_del = true;
@@ -843,8 +843,8 @@ void StringFamily::GetDel(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view value = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view value = ArgS(args, 1);
   std::optional<string> prev_val;
 
   SetCmd::SetParams sparams;
@@ -871,12 +871,12 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
   DbSlice::ExpireParams exp_params;
   int64_t int_arg = 0;
 
-  for (size_t i = 2; i < args.size(); i++) {
+  for (size_t i = 1; i < args.size(); i++) {
     ToUpper(&args[i]);
 
     string_view cur_arg = ArgS(args, i);
@@ -949,15 +949,13 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StringFamily::Incr(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
   return IncrByGeneric(key, 1, cntx);
 }
 
 void StringFamily::IncrBy(CmdArgList args, ConnectionContext* cntx) {
-  DCHECK_EQ(3u, args.size());
-
-  string_view key = ArgS(args, 1);
-  string_view sval = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view sval = ArgS(args, 1);
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
@@ -967,8 +965,8 @@ void StringFamily::IncrBy(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StringFamily::IncrByFloat(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view sval = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view sval = ArgS(args, 1);
   double val;
 
   if (!absl::SimpleAtod(sval, &val)) {
@@ -991,13 +989,13 @@ void StringFamily::IncrByFloat(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StringFamily::Decr(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
   return IncrByGeneric(key, -1, cntx);
 }
 
 void StringFamily::DecrBy(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view sval = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view sval = ArgS(args, 1);
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
@@ -1050,8 +1048,8 @@ void StringFamily::IncrByGeneric(string_view key, int64_t val, ConnectionContext
 }
 
 void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view sval = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view sval = ArgS(args, 1);
 
   if (cntx->protocol() == Protocol::REDIS) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1081,9 +1079,9 @@ void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContex
 
 /// (P)SETEX key seconds value
 void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view ex = ArgS(args, 2);
-  string_view value = ArgS(args, 3);
+  string_view key = ArgS(args, 0);
+  string_view ex = ArgS(args, 1);
+  string_view value = ArgS(args, 2);
   int32_t unit_vals;
 
   if (!absl::SimpleAtoi(ex, &unit_vals)) {
@@ -1113,7 +1111,7 @@ void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext
 }
 
 void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
-  DCHECK_GT(args.size(), 1U);
+  DCHECK_GE(args.size(), 1U);
 
   Transaction* transaction = cntx->transaction;
   unsigned shard_count = shard_set->size();
@@ -1137,7 +1135,7 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
   CHECK_EQ(OpStatus::OK, result);
 
   // reorder the responses back according to the order of their corresponding keys.
-  vector<SinkReplyBuilder::OptResp> res(args.size() - 1);
+  vector<SinkReplyBuilder::OptResp> res(args.size());
 
   for (ShardId sid = 0; sid < shard_count; ++sid) {
     if (!transaction->IsActive(sid))
@@ -1157,7 +1155,7 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
 
       auto& dest = res[indx].emplace();
       auto& src = *results[j];
-      dest.key = ArgS(args, indx + 1);
+      dest.key = ArgS(args, indx);
       dest.value = std::move(src.value);
       dest.mc_flag = src.mc_flag;
       dest.mc_ver = src.mc_ver;
@@ -1228,7 +1226,7 @@ void StringFamily::MSetNx(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StringFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<size_t> {
     OpResult<PrimeIterator> it_res = shard->db_slice().Find(t->GetDbContext(), key, OBJ_STRING);
@@ -1249,9 +1247,9 @@ void StringFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StringFamily::GetRange(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view from = ArgS(args, 2);
-  string_view to = ArgS(args, 3);
+  string_view key = ArgS(args, 0);
+  string_view from = ArgS(args, 1);
+  string_view to = ArgS(args, 2);
   int32_t start, end;
 
   if (!absl::SimpleAtoi(from, &start) || !absl::SimpleAtoi(to, &end)) {
@@ -1273,9 +1271,9 @@ void StringFamily::GetRange(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StringFamily::SetRange(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view offset = ArgS(args, 2);
-  string_view value = ArgS(args, 3);
+  string_view key = ArgS(args, 0);
+  string_view offset = ArgS(args, 1);
+  string_view value = ArgS(args, 2);
   int32_t start;
 
   if (!absl::SimpleAtoi(offset, &start)) {
@@ -1347,33 +1345,33 @@ auto StringFamily::OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction
  * X-RateLimit-Reset.
  */
 void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
-  const string_view key = ArgS(args, 1);
+  const string_view key = ArgS(args, 0);
 
   // Allow max burst in number of tokens
   uint64_t max_burst;
-  const string_view max_burst_str = ArgS(args, 2);
+  const string_view max_burst_str = ArgS(args, 1);
   if (!absl::SimpleAtoi(max_burst_str, &max_burst)) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
 
   // Emit count of tokens per period
   uint64_t count;
-  const string_view count_str = ArgS(args, 3);
+  const string_view count_str = ArgS(args, 2);
   if (!absl::SimpleAtoi(count_str, &count)) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
 
   // Period of emitting count of tokens
   uint64_t period;
-  const string_view period_str = ArgS(args, 4);
+  const string_view period_str = ArgS(args, 3);
   if (!absl::SimpleAtoi(period_str, &period)) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
 
   // Apply quantity of tokens now
   uint64_t quantity = 1;
-  if (args.size() > 5) {
-    const string_view quantity_str = ArgS(args, 5);
+  if (args.size() > 4) {
+    const string_view quantity_str = ArgS(args, 4);
 
     if (!absl::SimpleAtoi(quantity_str, &quantity)) {
       return (*cntx)->SendError(kInvalidIntErr);

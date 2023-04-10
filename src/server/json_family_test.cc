@@ -855,6 +855,15 @@ TEST_F(JsonFamilyTest, ArrIndex) {
   resp = Run({"JSON.ARRINDEX", "json", "$..a", R"("b")"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(1), ArgType(RespExpr::NIL)));
+
+  resp = Run(
+      {"JSON.SET", "json", ".", R"({"key" : ["Alice", "Bob", "Carol", "David", "Eve", "Frank"]})"});
+  ASSERT_EQ(resp, "OK");
+  resp = Run({"JSON.ARRINDEX", "json", "$.key", R"("Bob")"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.ARRINDEX", "json", "$.key", R"("Bob")", "1", "2"});
+  EXPECT_THAT(resp, IntArg(1));
 }
 
 TEST_F(JsonFamilyTest, MGet) {

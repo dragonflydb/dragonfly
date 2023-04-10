@@ -88,11 +88,11 @@ DflyCmd::DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family)
 void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
 
-  DCHECK_GE(args.size(), 2u);
-  ToUpper(&args[1]);
-  string_view sub_cmd = ArgS(args, 1);
+  DCHECK_GE(args.size(), 1u);
+  ToUpper(&args[0]);
+  string_view sub_cmd = ArgS(args, 0);
 
-  if (sub_cmd == "JOURNAL" && args.size() >= 3) {
+  if (sub_cmd == "JOURNAL" && args.size() >= 2) {
     return Journal(args, cntx);
   }
 
@@ -100,15 +100,15 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
     return Thread(args, cntx);
   }
 
-  if (sub_cmd == "FLOW" && args.size() == 5) {
+  if (sub_cmd == "FLOW" && args.size() == 4) {
     return Flow(args, cntx);
   }
 
-  if (sub_cmd == "SYNC" && args.size() == 3) {
+  if (sub_cmd == "SYNC" && args.size() == 2) {
     return Sync(args, cntx);
   }
 
-  if (sub_cmd == "STARTSTABLE" && args.size() == 3) {
+  if (sub_cmd == "STARTSTABLE" && args.size() == 2) {
     return StartStable(args, cntx);
   }
 
@@ -116,7 +116,7 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
     return Expire(args, cntx);
   }
 
-  if (sub_cmd == "REPLICAOFFSET" && args.size() == 3) {
+  if (sub_cmd == "REPLICAOFFSET" && args.size() == 2) {
     return ReplicaOffset(args, cntx);
   }
 
@@ -124,10 +124,10 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void DflyCmd::Journal(CmdArgList args, ConnectionContext* cntx) {
-  DCHECK_GE(args.size(), 3u);
-  ToUpper(&args[2]);
+  DCHECK_GE(args.size(), 2u);
+  ToUpper(&args[1]);
 
-  std::string_view sub_cmd = ArgS(args, 2);
+  std::string_view sub_cmd = ArgS(args, 1);
   Transaction* trans = cntx->transaction;
   DCHECK(trans);
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
@@ -190,7 +190,7 @@ void DflyCmd::Thread(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   util::ProactorPool* pool = shard_set->pool();
 
-  if (args.size() == 2) {  // DFLY THREAD : returns connection thread index and number of threads.
+  if (args.size() == 1) {  // DFLY THREAD : returns connection thread index and number of threads.
     rb->StartArray(2);
     rb->SendLong(ProactorBase::GetIndex());
     rb->SendLong(long(pool->size()));
@@ -198,7 +198,7 @@ void DflyCmd::Thread(CmdArgList args, ConnectionContext* cntx) {
   }
 
   // DFLY THREAD to_thread : migrates current connection to a different thread.
-  string_view arg = ArgS(args, 2);
+  string_view arg = ArgS(args, 1);
   unsigned num_thread;
   if (!absl::SimpleAtoi(arg, &num_thread)) {
     return rb->SendError(kSyntaxErr);
@@ -217,9 +217,9 @@ void DflyCmd::Thread(CmdArgList args, ConnectionContext* cntx) {
 
 void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  string_view master_id = ArgS(args, 2);
-  string_view sync_id_str = ArgS(args, 3);
-  string_view flow_id_str = ArgS(args, 4);
+  string_view master_id = ArgS(args, 1);
+  string_view sync_id_str = ArgS(args, 2);
+  string_view flow_id_str = ArgS(args, 3);
 
   VLOG(1) << "Got DFLY FLOW " << master_id << " " << sync_id_str << " " << flow_id_str;
 
@@ -259,7 +259,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
 
 void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  string_view sync_id_str = ArgS(args, 2);
+  string_view sync_id_str = ArgS(args, 1);
 
   VLOG(1) << "Got DFLY SYNC " << sync_id_str;
 
@@ -297,7 +297,7 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
 
 void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  string_view sync_id_str = ArgS(args, 2);
+  string_view sync_id_str = ArgS(args, 1);
 
   VLOG(1) << "Got DFLY STARTSTABLE " << sync_id_str;
 
@@ -346,7 +346,7 @@ void DflyCmd::Expire(CmdArgList args, ConnectionContext* cntx) {
 
 void DflyCmd::ReplicaOffset(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  string_view sync_id_str = ArgS(args, 2);
+  string_view sync_id_str = ArgS(args, 1);
 
   VLOG(1) << "Got DFLY REPLICAOFFSET " << sync_id_str;
   auto [sync_id, replica_ptr] = GetReplicaInfoOrReply(sync_id_str, rb);

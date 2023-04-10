@@ -32,18 +32,7 @@ void JournalWriter::Write(std::string_view sv) {
   sink_->Write(io::Buffer(sv));
 }
 
-void JournalWriter::Write(CmdArgList args) {
-  Write(args.size());
-  size_t cmd_size = 0;
-  for (auto v : args) {
-    cmd_size += v.size();
-  }
-  Write(cmd_size);
-  for (auto v : args)
-    Write(facade::ToSV(v));
-}
-
-void JournalWriter::Write(std::pair<std::string_view, ArgSlice> args) {
+template <typename C> void JournalWriter::Write(std::pair<std::string_view, C> args) {
   auto [cmd, tail_args] = args;
 
   Write(1 + tail_args.size());
@@ -55,9 +44,16 @@ void JournalWriter::Write(std::pair<std::string_view, ArgSlice> args) {
   Write(cmd_size);
 
   Write(cmd);
-  for (auto v : tail_args)
-    Write(v);
+  for (auto v : tail_args) {
+    if constexpr (is_same_v<C, CmdArgList>)
+      Write(facade::ToSV(v));
+    else
+      Write(v);
+  }
 }
+
+template void JournalWriter::Write(pair<string_view, CmdArgList>);
+template void JournalWriter::Write(pair<string_view, ArgSlice>);
 
 void JournalWriter::Write(std::monostate) {
 }

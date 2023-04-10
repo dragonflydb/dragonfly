@@ -67,7 +67,7 @@ Transaction::~Transaction() {
 void Transaction::InitBase(DbIndex dbid, CmdArgList args) {
   global_ = false;
   db_index_ = dbid;
-  cmd_with_full_args_ = args;
+  full_args_ = args;
   local_result_ = OpStatus::OK;
 }
 
@@ -83,21 +83,21 @@ void Transaction::InitGlobal() {
 
 void Transaction::BuildShardIndex(KeyIndex key_index, bool rev_mapping,
                                   std::vector<PerShardCache>* out) {
-  auto args = cmd_with_full_args_;
+  auto args = full_args_;
 
   auto& shard_index = *out;
 
   auto add = [this, rev_mapping, &shard_index](uint32_t sid, uint32_t i) {
-    string_view val = ArgS(cmd_with_full_args_, i);
+    string_view val = ArgS(full_args_, i);
     shard_index[sid].args.push_back(val);
     if (rev_mapping)
-      shard_index[sid].original_index.push_back(i - 1);
+      shard_index[sid].original_index.push_back(i);
   };
 
   if (key_index.bonus) {
     DCHECK(key_index.step == 1);
-    uint32_t sid = Shard(ArgS(args, key_index.bonus), shard_data_.size());
-    add(sid, key_index.bonus);
+    uint32_t sid = Shard(ArgS(args, *key_index.bonus), shard_data_.size());
+    add(sid, *key_index.bonus);
   }
 
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
@@ -157,7 +157,6 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
 
 void Transaction::InitMultiData(KeyIndex key_index) {
   DCHECK(multi_);
-  auto args = cmd_with_full_args_;
 
   if (multi_->mode == NON_ATOMIC)
     return;
@@ -184,9 +183,9 @@ void Transaction::InitMultiData(KeyIndex key_index) {
   // for eval. currently, we lock everything only during the eval call.
   if (multi_->IsIncrLocks() || !multi_->locks_recorded) {
     for (size_t i = key_index.start; i < key_index.end; i += key_index.step)
-      lock_key(ArgS(args, i));
-    if (key_index.bonus > 0)
-      lock_key(ArgS(args, key_index.bonus));
+      lock_key(ArgS(full_args_, i));
+    if (key_index.bonus)
+      lock_key(ArgS(full_args_, *key_index.bonus));
   }
 
   multi_->locks_recorded = true;
@@ -195,22 +194,20 @@ void Transaction::InitMultiData(KeyIndex key_index) {
 }
 
 void Transaction::StoreKeysInArgs(KeyIndex key_index, bool rev_mapping) {
-  DCHECK_EQ(key_index.bonus, 0U);
-
-  auto args = cmd_with_full_args_;
+  DCHECK(!key_index.bonus);
   DCHECK(key_index.step == 1u || key_index.step == 2u);
 
   // even for a single key we may have multiple arguments per key (MSET).
   for (unsigned j = key_index.start; j < key_index.end; j++) {
-    args_.push_back(ArgS(args, j));
+    args_.push_back(ArgS(full_args_, j));
     if (key_index.step == 2)
-      args_.push_back(ArgS(args, ++j));
+      args_.push_back(ArgS(full_args_, ++j));
   }
 
   if (rev_mapping) {
     reverse_index_.resize(args_.size());
     for (unsigned j = 0; j < reverse_index_.size(); ++j) {
-      reverse_index_[j] = j + key_index.start - 1;
+      reverse_index_[j] = j + key_index.start;
     }
   }
 }
@@ -236,7 +233,7 @@ void Transaction::StoreKeysInArgs(KeyIndex key_index, bool rev_mapping) {
  **/
 
 void Transaction::InitByKeys(KeyIndex key_index) {
-  auto args = cmd_with_full_args_;
+  auto args = full_args_;
 
   if (key_index.start == args.size()) {  // eval with 0 keys.
     CHECK(absl::StartsWith(cid_->name(), "EVAL"));
@@ -266,7 +263,7 @@ void Transaction::InitByKeys(KeyIndex key_index) {
 
   shard_data_.resize(shard_set->size());  // shard_data isn't sparse, so we must allocate for all :(
   CHECK(key_index.step == 1 || key_index.step == 2);
-  DCHECK(key_index.step == 1 || (args.size() % 2) == 1);
+  DCHECK(key_index.step == 1 || (args.size() % 2) == 0);
 
   // Safe, because flow below is not preemptive.
   auto& shard_index = tmp_space.GetShardIndex(shard_data_.size());
@@ -299,7 +296,7 @@ void Transaction::InitByKeys(KeyIndex key_index) {
   // Validation. Check reverse mapping was built correctly.
   if (needs_reverse_mapping) {
     for (size_t i = 0; i < args_.size(); ++i) {
-      DCHECK_EQ(args_[i], ArgS(args, 1 + reverse_index_[i]));  // 1 for the commandname.
+      DCHECK_EQ(args_[i], ArgS(args, reverse_index_[i]));
     }
   }
 
@@ -322,7 +319,6 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
     return OpStatus::OK;
   }
 
-  CHECK_GT(args.size(), 1U);  // first entry is the command name.
   DCHECK_EQ(unique_shard_cnt_, 0u);
   DCHECK(args_.empty());
 
@@ -1360,11 +1356,11 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
 
   // TODO: Handle complex commands like LMPOP correctly once they are implemented.
   journal::Entry::Payload entry_payload;
+
+  string_view cmd{cid_->name()};
   if (unique_shard_cnt_ == 1 || args_.empty()) {
-    CHECK(!cmd_with_full_args_.empty());
-    entry_payload = cmd_with_full_args_;
+    entry_payload = make_pair(cmd, full_args_);
   } else {
-    auto cmd = facade::ToSV(cmd_with_full_args_.front());
     entry_payload = make_pair(cmd, GetShardArgs(shard->shard_id()));
   }
   LogJournalOnShard(shard, std::move(entry_payload), unique_shard_cnt_, false, true);
@@ -1411,17 +1407,20 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
   if (cid->opt_mask() & CO::VARIADIC_KEYS) {
     // ZUNION/INTER <num_keys> <key1> [<key2> ...]
     // EVAL <script> <num_keys>
-    if (args.size() < 3) {
+    if (args.size() < 2) {
       return OpStatus::SYNTAX_ERR;
     }
 
     string_view name{cid->name()};
 
-    if (absl::EndsWith(name, "STORE")) {
-      key_index.bonus = 1;  // Z<xxx>STORE commands
-    }
+    if (absl::EndsWith(name, "STORE"))
+      key_index.bonus = 0;  // Z<xxx>STORE <key> commands
 
-    unsigned num_keys_index = absl::StartsWith(name, "EVAL") ? 2 : key_index.bonus + 1;
+    unsigned num_keys_index;
+    if (absl::StartsWith(name, "EVAL"))
+      num_keys_index = 1;
+    else
+      num_keys_index = key_index.bonus ? *key_index.bonus + 1 : 0;
 
     string_view num = ArgS(args, num_keys_index);
     if (!absl::SimpleAtoi(num, &num_custom_keys) || num_custom_keys < 0)
@@ -1432,12 +1431,12 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
   }
 
   if (cid->first_key_pos() > 0) {
-    key_index.start = cid->first_key_pos();
+    key_index.start = cid->first_key_pos() - 1;
     int last = cid->last_key_pos();
     if (num_custom_keys >= 0) {
       key_index.end = key_index.start + num_custom_keys;
     } else {
-      key_index.end = last > 0 ? last + 1 : (int(args.size()) + 1 + last);
+      key_index.end = last > 0 ? last : (int(args.size()) + last + 1);
     }
     key_index.step = cid->key_arg_step();
 

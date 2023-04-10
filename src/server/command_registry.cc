@@ -53,9 +53,9 @@ CommandRegistry::CommandRegistry() {
 }
 
 void CommandRegistry::Command(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() > 1) {
-    ToUpper(&args[1]);
-    string_view subcmd = ArgS(args, 1);
+  if (args.size() > 0) {
+    ToUpper(&args[0]);
+    string_view subcmd = ArgS(args, 0);
     if (subcmd == "COUNT") {
       return (*cntx)->SendLong(cmd_map_.size());
     } else {

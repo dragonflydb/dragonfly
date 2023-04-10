@@ -566,8 +566,8 @@ void SetId(string_view key, string_view gname, CmdArgList args, ConnectionContex
 }  // namespace
 
 void StreamFamily::XAdd(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  unsigned id_indx = 2;
+  string_view key = ArgS(args, 0);
+  unsigned id_indx = 1;
   AddOpts add_opts;
 
   for (; id_indx < args.size(); ++id_indx) {
@@ -592,7 +592,7 @@ void StreamFamily::XAdd(CmdArgList args, ConnectionContext* cntx) {
   }
 
   args.remove_prefix(id_indx);
-  if (args.size() < 3 || args.size() % 2 == 0) {
+  if (args.size() < 2 || args.size() % 2 == 0) {
     return (*cntx)->SendError(WrongNumArgsError("XADD"), kSyntaxErrType);
   }
 
@@ -622,8 +622,8 @@ void StreamFamily::XAdd(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StreamFamily::XDel(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  args.remove_prefix(2);
+  string_view key = ArgS(args, 0);
+  args.remove_prefix(1);
 
   absl::InlinedVector<streamID, 8> ids(args.size());
 
@@ -649,8 +649,8 @@ void StreamFamily::XDel(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StreamFamily::XGroup(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[1]);
-  string_view sub_cmd = ArgS(args, 1);
+  ToUpper(&args[0]);
+  string_view sub_cmd = ArgS(args, 0);
   if (sub_cmd == "HELP") {
     string_view help_arr[] = {
         "CREATE <key> <groupname> <id|$> [option]",
@@ -669,27 +669,27 @@ void StreamFamily::XGroup(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendSimpleStrArr(help_arr);
   }
 
-  if (args.size() >= 3) {
-    string_view key = ArgS(args, 2);
+  if (args.size() >= 2) {
+    string_view key = ArgS(args, 1);
     if (sub_cmd == "CREATE") {
-      args.remove_prefix(3);
+      args.remove_prefix(2);
       return CreateGroup(std::move(args), key, cntx);
     }
 
-    if (sub_cmd == "DESTROY" && args.size() == 4) {
-      string_view gname = ArgS(args, 3);
+    if (sub_cmd == "DESTROY" && args.size() == 3) {
+      string_view gname = ArgS(args, 2);
       return DestroyGroup(key, gname, cntx);
     }
 
-    if (sub_cmd == "DELCONSUMER" && args.size() == 5) {
-      string_view gname = ArgS(args, 3);
-      string_view cname = ArgS(args, 4);
+    if (sub_cmd == "DELCONSUMER" && args.size() == 4) {
+      string_view gname = ArgS(args, 2);
+      string_view cname = ArgS(args, 3);
       return DelConsumer(key, gname, cname, cntx);
     }
 
-    if (sub_cmd == "SETID" && args.size() >= 5) {
-      string_view gname = ArgS(args, 3);
-      args.remove_prefix(4);
+    if (sub_cmd == "SETID" && args.size() >= 4) {
+      string_view gname = ArgS(args, 2);
+      args.remove_prefix(3);
       return SetId(key, gname, std::move(args), cntx);
     }
   }
@@ -698,8 +698,8 @@ void StreamFamily::XGroup(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[1]);
-  string_view sub_cmd = ArgS(args, 1);
+  ToUpper(&args[0]);
+  string_view sub_cmd = ArgS(args, 0);
   if (sub_cmd == "HELP") {
     string_view help_arr[] = {
         "CONSUMERS <key> <groupname>",
@@ -712,8 +712,8 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendSimpleStrArr(help_arr);
   }
 
-  if (args.size() >= 3) {
-    string_view key = ArgS(args, 2);
+  if (args.size() >= 2) {
+    string_view key = ArgS(args, 1);
     ShardId sid = Shard(key, shard_set->size());
 
     if (sub_cmd == "GROUPS") {
@@ -745,7 +745,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StreamFamily::XLen(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -765,8 +765,8 @@ void StreamFamily::XRevRange(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StreamFamily::XSetId(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view idstr = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view idstr = ArgS(args, 1);
 
   ParsedStreamId parsed_id;
   if (!ParseID(idstr, true, 0, &parsed_id)) {
@@ -792,9 +792,9 @@ void StreamFamily::XSetId(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StreamFamily::XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view start = ArgS(args, 2);
-  string_view end = ArgS(args, 3);
+  string_view key = ArgS(args, 0);
+  string_view start = ArgS(args, 1);
+  string_view end = ArgS(args, 2);
   RangeOpts range_opts;
   RangeId rs, re;
   if (!ParseRangeId(start, &rs) || !ParseRangeId(end, &re)) {
@@ -809,13 +809,13 @@ void StreamFamily::XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext
     return (*cntx)->SendError("invalid end ID for the interval", kSyntaxErrType);
   }
 
-  if (args.size() > 4) {
-    if (args.size() != 6) {
+  if (args.size() > 3) {
+    if (args.size() != 5) {
       return (*cntx)->SendError(WrongNumArgsError("XRANGE"), kSyntaxErrType);
     }
-    ToUpper(&args[4]);
-    string_view opt = ArgS(args, 4);
-    string_view val = ArgS(args, 5);
+    ToUpper(&args[3]);
+    string_view opt = ArgS(args, 3);
+    string_view val = ArgS(args, 4);
 
     if (opt != "COUNT" || !absl::SimpleAtoi(val, &range_opts.count)) {
       return (*cntx)->SendError(kSyntaxErr);

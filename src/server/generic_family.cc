@@ -214,15 +214,14 @@ class RestoreArgs {
 }
 
 // The structure that we are expecting is:
-// args[0] == "RESTORE"
-// args[1] == "key"
-// args[2] == "ttl"
-// args[3] == serialized value (list of chars that are used for the actual restore).
-// args[4] .. args[n]: optional arguments that can be [REPLACE] [ABSTTL] [IDLETIME seconds]
+// args[0] == "key"
+// args[1] == "ttl"
+// args[2] == serialized value (list of chars that are used for the actual restore).
+// args[3] .. args[n]: optional arguments that can be [REPLACE] [ABSTTL] [IDLETIME seconds]
 //            [FREQ frequency], in any order
 OpResult<RestoreArgs> RestoreArgs::TryFrom(const CmdArgList& args) {
   RestoreArgs out_args;
-  std::string_view cur_arg = ArgS(args, 2);  // extract ttl
+  std::string_view cur_arg = ArgS(args, 1);  // extract ttl
   if (!absl::SimpleAtoi(cur_arg, &out_args.expiration_) || (out_args.expiration_ < 0)) {
     return OpStatus::INVALID_INT;
   }
@@ -234,7 +233,7 @@ OpResult<RestoreArgs> RestoreArgs::TryFrom(const CmdArgList& args) {
   // we would parse them and ensure that they are correct, maybe later they will be used
   int64_t idle_time = 0;
 
-  for (size_t i = 4; i < args.size(); ++i) {
+  for (size_t i = 3; i < args.size(); ++i) {
     ToUpper(&args[i]);
     cur_arg = ArgS(args, i);
     bool additional = args.size() - i - 1 >= 1;
@@ -635,7 +634,7 @@ void GenericFamily::Shutdown() {
 
 void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
   Transaction* transaction = cntx->transaction;
-  VLOG(1) << "Del " << ArgS(args, 1);
+  VLOG(1) << "Del " << ArgS(args, 0);
 
   atomic_uint32_t result{0};
   bool is_mc = cntx->protocol() == Protocol::MEMCACHE;
@@ -669,16 +668,16 @@ void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void GenericFamily::Ping(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() > 2) {
+  if (args.size() > 1) {
     return (*cntx)->SendError(facade::WrongNumArgsError("ping"), kSyntaxErrType);
   }
 
   // We synchronously block here until the engine sends us the payload and notifies that
   // the I/O operation has been processed.
-  if (args.size() == 1) {
+  if (args.size() == 0) {
     return (*cntx)->SendSimpleString("PONG");
   } else {
-    string_view arg = ArgS(args, 1);
+    string_view arg = ArgS(args, 0);
     DVLOG(2) << "Ping " << arg;
 
     return (*cntx)->SendBulkString(arg);
@@ -687,7 +686,7 @@ void GenericFamily::Ping(CmdArgList args, ConnectionContext* cntx) {
 
 void GenericFamily::Exists(CmdArgList args, ConnectionContext* cntx) {
   Transaction* transaction = cntx->transaction;
-  VLOG(1) << "Exists " << ArgS(args, 1);
+  VLOG(1) << "Exists " << ArgS(args, 0);
 
   atomic_uint32_t result{0};
 
@@ -706,7 +705,7 @@ void GenericFamily::Exists(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void GenericFamily::Persist(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpPersist(t->GetOpArgs(shard), key); };
 
@@ -715,8 +714,8 @@ void GenericFamily::Persist(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view sec = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view sec = ArgS(args, 1);
   int64_t int_arg;
 
   if (!absl::SimpleAtoi(sec, &int_arg)) {
@@ -740,8 +739,8 @@ void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void GenericFamily::ExpireAt(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view sec = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view sec = ArgS(args, 1);
   int64_t int_arg;
 
   if (!absl::SimpleAtoi(sec, &int_arg)) {
@@ -764,7 +763,7 @@ void GenericFamily::ExpireAt(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void GenericFamily::Keys(CmdArgList args, ConnectionContext* cntx) {
-  string_view pattern(ArgS(args, 1));
+  string_view pattern(ArgS(args, 0));
   uint64_t cursor = 0;
 
   StringVec keys;
@@ -785,8 +784,8 @@ void GenericFamily::Keys(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void GenericFamily::PexpireAt(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view msec = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view msec = ArgS(args, 1);
   int64_t int_arg;
 
   if (!absl::SimpleAtoi(msec, &int_arg)) {
@@ -808,8 +807,8 @@ void GenericFamily::PexpireAt(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void GenericFamily::Pexpire(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view msec = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view msec = ArgS(args, 1);
   int64_t int_arg;
 
   if (!absl::SimpleAtoi(msec, &int_arg)) {
@@ -832,7 +831,7 @@ void GenericFamily::Pexpire(CmdArgList args, ConnectionContext* cntx) {
 
 void GenericFamily::Stick(CmdArgList args, ConnectionContext* cntx) {
   Transaction* transaction = cntx->transaction;
-  VLOG(1) << "Stick " << ArgS(args, 1);
+  VLOG(1) << "Stick " << ArgS(args, 0);
 
   atomic_uint32_t result{0};
 
@@ -953,12 +952,12 @@ OpResultTyped<SortEntryList> OpFetchSortEntries(const OpArgs& op_args, std::stri
 }
 
 void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
+  std::string_view key = ArgS(args, 0);
   bool alpha = false;
   bool reversed = false;
   std::optional<std::pair<size_t, size_t>> bounds;
 
-  for (size_t i = 2; i < args.size(); i++) {
+  for (size_t i = 1; i < args.size(); i++) {
     ToUpper(&args[i]);
 
     std::string_view arg = ArgS(args, i);
@@ -1024,8 +1023,8 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void GenericFamily::Restore(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
-  std::string_view serialized_value = ArgS(args, 3);
+  std::string_view key = ArgS(args, 0);
+  std::string_view serialized_value = ArgS(args, 2);
 
   if (!VerifyFooter(serialized_value)) {
     return (*cntx)->SendError("ERR DUMP payload version or checksum are wrong");
@@ -1065,8 +1064,8 @@ void GenericFamily::Restore(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void GenericFamily::Move(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
-  string_view target_db_sv = ArgS(args, 2);
+  string_view key = ArgS(args, 0);
+  string_view target_db_sv = ArgS(args, 1);
   int64_t target_db;
 
   if (!absl::SimpleAtoi(target_db_sv, &target_db)) {
@@ -1129,7 +1128,7 @@ void GenericFamily::Pttl(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void GenericFamily::TtlGeneric(CmdArgList args, ConnectionContext* cntx, TimeUnit unit) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpTtl(t, shard, key); };
   OpResult<uint64_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1153,7 +1152,7 @@ void GenericFamily::TtlGeneric(CmdArgList args, ConnectionContext* cntx, TimeUni
 }
 
 void GenericFamily::Select(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
   int64_t index;
   if (!absl::SimpleAtoi(key, &index)) {
     return (*cntx)->SendError(kInvalidDbIndErr);
@@ -1172,7 +1171,7 @@ void GenericFamily::Select(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void GenericFamily::Dump(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
+  std::string_view key = ArgS(args, 0);
   DVLOG(1) << "Dumping before ::ScheduleSingleHopT " << key;
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpDump(t->GetOpArgs(shard), key); };
 
@@ -1189,7 +1188,7 @@ void GenericFamily::Dump(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void GenericFamily::Type(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 1);
+  std::string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<int> {
     auto it = shard->db_slice().FindExt(t->GetDbContext(), key).first;
@@ -1222,7 +1221,7 @@ void GenericFamily::Time(CmdArgList args, ConnectionContext* cntx) {
 
 OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool skip_exist_dest,
                                             ConnectionContext* cntx) {
-  string_view key[2] = {ArgS(args, 1), ArgS(args, 2)};
+  string_view key[2] = {ArgS(args, 0), ArgS(args, 1)};
 
   Transaction* transaction = cntx->transaction;
 
@@ -1252,19 +1251,19 @@ OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool skip_exist_des
 }
 
 void GenericFamily::Echo(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 1);
+  string_view key = ArgS(args, 0);
   return (*cntx)->SendBulkString(key);
 }
 
 void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
-  string_view token = ArgS(args, 1);
+  string_view token = ArgS(args, 0);
   uint64_t cursor = 0;
 
   if (!absl::SimpleAtoi(token, &cursor)) {
     return (*cntx)->SendError("invalid cursor");
   }
 
-  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2));
+  OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(1));
   if (!ops) {
     DVLOG(1) << "Scan invalid args - return " << ops << " to the user";
     return (*cntx)->SendError(ops.status());
