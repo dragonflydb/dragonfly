@@ -246,27 +246,29 @@ ProactorBase* Listener::PickConnectionProactor(LinuxSocketBase* sock) {
     // I suspect that the advantage of using SO_INCOMING_NAPI_ID is that
     // we can also track the affinity changes during the lifetime of the process
     // i.e. when a different CPU is assigned to handle the RX traffic.
-    CHECK_EQ(0, getsockopt(fd, SOL_SOCKET, SO_INCOMING_CPU, &cpu, &len));
-    CHECK_EQ(0, getsockopt(fd, SOL_SOCKET, SO_INCOMING_NAPI_ID, &napi_id, &len));
-    VLOG(1) << "CPU/NAPI for connection " << fd << " is " << cpu << "/" << napi_id;
+    // On some distributions (WSL1, for example), SO_INCOMING_CPU is not supported.
+    if (0 == getsockopt(fd, SOL_SOCKET, SO_INCOMING_CPU, &cpu, &len)) {
+      CHECK_EQ(0, getsockopt(fd, SOL_SOCKET, SO_INCOMING_NAPI_ID, &napi_id, &len));
+      VLOG(1) << "CPU/NAPI for connection " << fd << " is " << cpu << "/" << napi_id;
 
-    if (GetFlag(FLAGS_conn_use_incoming_cpu)) {
-      const vector<unsigned>& ids = pool()->MapCpuToThreads(cpu);
+      if (GetFlag(FLAGS_conn_use_incoming_cpu)) {
+        const vector<unsigned>& ids = pool()->MapCpuToThreads(cpu);
 
-      absl::base_internal::SpinLockHolder lock{&mutex_};
-      for (auto id : ids) {
-        DCHECK_LT(id, per_thread_.size());
-        if (per_thread_[id].num_connections < min_cnt_ + 5) {
-          VLOG(1) << "using thread " << id << " for cpu " << cpu;
-          res_id = id;
-          break;
+        absl::base_internal::SpinLockHolder lock{&mutex_};
+        for (auto id : ids) {
+          DCHECK_LT(id, per_thread_.size());
+          if (per_thread_[id].num_connections < min_cnt_ + 5) {
+            VLOG(1) << "using thread " << id << " for cpu " << cpu;
+            res_id = id;
+            break;
+          }
         }
-      }
 
-      if (res_id == kuint32max) {
-        VLOG(1) << "choosing a thread with minimum conns " << min_cnt_thread_id_ << " instead of "
-                << cpu;
-        res_id = min_cnt_thread_id_;
+        if (res_id == kuint32max) {
+          VLOG(1) << "choosing a thread with minimum conns " << min_cnt_thread_id_ << " instead of "
+                  << cpu;
+          res_id = min_cnt_thread_id_;
+        }
       }
     }
   }
