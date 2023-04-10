@@ -155,18 +155,29 @@ bool Replica::Start(ConnectionContext* cntx) {
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
 
+  auto should_continue = [this, &cntx](const error_code& ec, const char* msg) {
+    if (state_mask_ & R_CANCELLED) {
+      (*cntx)->SendError("replication cancelled");
+      return false;
+    }
+    if (ec) {
+      (*cntx)->SendError(absl::StrCat(msg, ec.message()));
+      return false;
+    }
+    return true;
+  };
+
   // 1. Resolve dns.
   VLOG(1) << "Resolving master DNS";
   error_code ec = ResolveMasterDns();
-  if (ec) {
-    (*cntx)->SendError(StrCat("could not resolve master dns", ec.message()));
+  if (!should_continue(ec, "could not resolve master dns")) {
     return false;
   }
+
   // 2. Connect socket.
   VLOG(1) << "Connecting to master";
   ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms);
-  if (ec) {
-    (*cntx)->SendError(StrCat(kConnErr, ec.message()));
+  if (!should_continue(ec, kConnErr)) {
     return false;
   }
 
@@ -175,8 +186,7 @@ bool Replica::Start(ConnectionContext* cntx) {
   state_mask_ = R_ENABLED | R_TCP_CONNECTED;
   last_io_time_ = mythread->GetMonotonicTimeNs();
   ec = Greet();
-  if (ec) {
-    (*cntx)->SendError(StrCat("could not greet master ", ec.message()));
+  if (!should_continue(ec, "could not greet master ")) {
     return false;
   }
 
@@ -188,15 +198,15 @@ bool Replica::Start(ConnectionContext* cntx) {
 
   (*cntx)->SendOk();
   return true;
-}
+}  // namespace dfly
 
 void Replica::Stop() {
   VLOG(1) << "Stopping replication";
   // Mark disabled, prevent from retrying.
   if (sock_) {
     sock_->proactor()->Await([this] {
-      state_mask_ = 0;  // Specifically ~R_ENABLED.
-      cntx_.Cancel();   // Context is fully resposible for cleanup.
+      state_mask_ = R_CANCELLED;  // Specifically ~R_ENABLED.
+      cntx_.Cancel();             // Context is fully resposible for cleanup.
     });
   }
 
@@ -240,6 +250,7 @@ void Replica::MainReplicationFb() {
       }
       VLOG(1) << "Replica socket connected";
       state_mask_ |= R_TCP_CONNECTED;
+      continue;
     }
 
     // 2. Greet.
@@ -251,6 +262,8 @@ void Replica::MainReplicationFb() {
         state_mask_ &= R_ENABLED;
         continue;
       }
+      state_mask_ |= R_GREETED;
+      continue;
     }
 
     // 3. Initiate full sync
@@ -267,6 +280,7 @@ void Replica::MainReplicationFb() {
         continue;
       }
       state_mask_ |= R_SYNC_OK;
+      continue;
     }
 
     // 4. Start stable state sync.
@@ -804,7 +818,7 @@ error_code Replica::StartFullSyncFlow(BlockingCounter sb, Context* cntx) {
   }
   leftover_buf_->ConsumeInput(consumed);
 
-  state_mask_ = R_ENABLED | R_TCP_CONNECTED;
+  state_mask_ |= R_TCP_CONNECTED;
 
   // We can not discard io_buf because it may contain data
   // besides the response we parsed. Therefore we pass it further to ReplicateDFFb.

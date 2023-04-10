@@ -49,6 +49,7 @@ class Replica {
     R_GREETED = 4,
     R_SYNCING = 8,
     R_SYNC_OK = 0x10,
+    R_CANCELLED = 0x20,
   };
 
   // This class holds the commands of transaction in single shard.

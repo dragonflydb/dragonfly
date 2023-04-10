@@ -1815,21 +1815,6 @@ std::string ServerFamily::BuildClusterNodeReply(ConnectionContext* cntx) const {
   }
 }
 
-template <class Lock> bool try_lock_for(Lock& lock, absl::Duration duration) {
-  absl::Time start = absl::Now();
-  while (true) {
-    VLOG(1) << "Try acquire lock";
-    if (lock.try_lock()) {
-      VLOG(1) << "Acquired lock";
-      return true;
-    }
-    if (absl::Now() - start > duration) {
-      return false;
-    }
-    ThisFiber::SleepFor(200ms);
-  }
-}
-
 void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   std::string_view host = ArgS(args, 0);
   std::string_view port_s = ArgS(args, 1);
@@ -1837,17 +1822,10 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
   LOG(INFO) << "Replicating " << host << ":" << port_s;
 
-  // From here until the end of Replica::Start() it's a critical section. We don't want to wait
-  // for the lock too long because that hangs the client, so we try to acquire it for ~2 seconds and
-  // return an error if we can't. We should eventually break up the critical section so we don't
-  // have to hold the lock during the networking parts.
-  unique_lock lk(replicaof_mu_, std::defer_lock);
-  if (!try_lock_for(lk, absl::Seconds(2))) {
-    (*cntx)->SendError("Another replication command in progress");
-    return;
-  }
-
   if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_s, "one")) {
+    VLOG(1) << "Acquire replica lock";
+    unique_lock lk(replicaof_mu_);
+
     if (!ServerState::tlocal()->is_master) {
       auto repl_ptr = replica_;
       CHECK(repl_ptr);
@@ -1870,15 +1848,19 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
   auto new_replica = make_shared<Replica>(string(host), port, &service_, master_id());
 
-  if (replica_) {
-    replica_->Stop();  // NOTE: consider introducing update API flow.
-  } else {
-    // TODO: to disconnect all the blocked clients (pubsub, blpop etc)
+  {
+    VLOG(1) << "Acquire replica lock";
+    unique_lock lk(replicaof_mu_);
+    if (replica_) {
+      replica_->Stop();  // NOTE: consider introducing update API flow.
+    } else {
+      // TODO: to disconnect all the blocked clients (pubsub, blpop etc)
 
-    pool.AwaitFiberOnAll([&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = false; });
+      pool.AwaitFiberOnAll(
+          [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = false; });
+    }
+    replica_ = new_replica;
   }
-
-  replica_.swap(new_replica);
 
   GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
   if (new_state != GlobalState::LOADING) {
@@ -1898,14 +1880,21 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
   // Replica sends response in either case. No need to send response in this function.
   // It's a bit confusing but simpler.
-  if (!replica_->Start(cntx)) {
-    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-    replica_.reset();
+  bool Success = new_replica->Start(cntx);
+  {
+    VLOG(1) << "Acquire replica lock";
+    unique_lock lk(replicaof_mu_);
+    // Is this still the last replicaof command we got?
+    if (replica_ == new_replica) {
+      if (!Success) {
+        service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+        replica_.reset();
+      }
+      bool is_master = !replica_;
+      pool.AwaitFiberOnAll(
+          [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
+    }
   }
-
-  bool is_master = !replica_;
-  pool.AwaitFiberOnAll(
-      [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
 }
 
 void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
