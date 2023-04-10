@@ -981,6 +981,28 @@ TEST_F(JsonFamilyTest, Set) {
 
   resp = Run({"JSON.GET", "json2", "$"});
   EXPECT_EQ(resp, R"([{"a":[0,0,0,0,0]}])");
+
+  json = R"(
+    {"a": 2}
+  )";
+
+  resp = Run({"JSON.SET", "json3", "$", json});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "json3", "$.b", "8"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "json3", "$.c", "[1,2,3]"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "json3", "$.z", "3", "XX"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  resp = Run({"JSON.SET", "json3", "$.b", "4", "NX"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  resp = Run({"JSON.GET", "json3", "$"});
+  EXPECT_EQ(resp, R"([{"a":2,"b":8,"c":[1,2,3]}])");
 }
 
 }  // namespace dfly
