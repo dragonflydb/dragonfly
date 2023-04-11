@@ -35,7 +35,7 @@ Monitor command do not return when we have lua script issue
 
 @pytest.mark.asyncio
 async def test_monitor_command_lua(async_pool):
-    expected = ["EVAL return redis", "GET bar",
+    expected = ["EVAL return redis",
                 "EVAL return redis", "SET foo2"]
 
     conn = aioredis.Redis(connection_pool=async_pool)
@@ -45,16 +45,19 @@ async def test_monitor_command_lua(async_pool):
     future = asyncio.create_task(run_monitor_eval(
         monitor=monitor, expected=expected))
     await asyncio.sleep(0.1)
+
     try:
         res = await cmd1.eval(r'return redis.call("GET", "bar")', 0)
         assert False    # this will return an error
     except Exception as e:
         assert "script tried accessing undeclared key" in str(e)
+
     try:
         res = await cmd1.eval(r'return redis.call("SET", KEYS[1], ARGV[1])', 1, 'foo2', 'bar2')
     except Exception as e:
         print(f"EVAL error: {e}")
         assert False
+
     await asyncio.sleep(0.1)
     await future
     status = future.result()
@@ -330,5 +333,6 @@ async def test_big_command(df_server, size=8 * 1024):
 
 async def test_subscribe_pipelined(async_client: aioredis.Redis):
     pipe = async_client.pipeline(transaction=False)
-    pipe.execute_command('subscribe channel').execute_command('subscribe channel')
+    pipe.execute_command('subscribe channel').execute_command(
+        'subscribe channel')
     await pipe.echo('bye bye').execute()
