@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <absl/container/fixed_array.h>
 #include <absl/container/flat_hash_set.h>
 
 #include "core/fibers.h"
@@ -17,20 +18,24 @@ class EngineShardSet;
 class ConnectionContext;
 class ChannelStore;
 
-struct StoredCmd {
-  const CommandId* descr;
+// Stores command id and arguments for delayed invocation.
+// Used for storing MULTI/EXEC commands.
+class StoredCmd {
+ public:
+  StoredCmd(const CommandId* cid, CmdArgList args);
+
+  size_t NumArgs() const;
+
+  // Fill the arg list with stored arguments, it should be at least of size NumArgs().
+  // Between filling and invocation, cmd should NOT be moved.
+  void Fill(CmdArgList args);
+
+  const CommandId* Cid() const;
 
  private:
-  std::unique_ptr<char[]> backing_storage_;
-  CmdArgVec arg_vec_;
-  CmdArgList arg_list_;
-
- public:
-  StoredCmd(const CommandId* d, CmdArgList args);
-
-  CmdArgList ArgList() const {
-    return arg_list_;
-  }
+  const CommandId* cid_;                 // underlying command
+  std::string buffer_;                   // underlying buffer
+  absl::FixedArray<uint32_t, 4> sizes_;  // sizes of arg parts
 };
 
 struct ConnectionState {

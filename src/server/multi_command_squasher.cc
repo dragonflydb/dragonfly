@@ -1,5 +1,7 @@
 #include "server/multi_command_squasher.h"
 
+#include <absl/container/inlined_vector.h>
+
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
@@ -43,18 +45,22 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(Shar
 }
 
 MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cmd) {
-  if (!cmd->descr->IsTransactional() || (cmd->descr->opt_mask() & CO::BLOCKING) ||
-      (cmd->descr->opt_mask() & CO::GLOBAL_TRANS))
+  if (!cmd->Cid()->IsTransactional() || (cmd->Cid()->opt_mask() & CO::BLOCKING) ||
+      (cmd->Cid()->opt_mask() & CO::GLOBAL_TRANS))
     return SquashResult::NOT_SQUASHED;
 
-  auto keys = DetermineKeys(cmd->descr, cmd->ArgList());
+  tmp_keylist_.resize(cmd->NumArgs());
+  auto args = absl::MakeSpan(tmp_keylist_);
+  cmd->Fill(args);
+
+  auto keys = DetermineKeys(cmd->Cid(), args);
   if (!keys.ok())
     return SquashResult::ERROR;
 
   // Check if all commands belong to one shard
   bool found_more = false;
   ShardId last_sid = kInvalidSid;
-  IterateKeys(cmd->ArgList(), *keys, [&last_sid, &found_more](MutableSlice key) {
+  IterateKeys(args, *keys, [&last_sid, &found_more](MutableSlice key) {
     if (found_more)
       return;
     ShardId sid = Shard(facade::ToSV(key), shard_set->size());
@@ -69,11 +75,11 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
     return SquashResult::NOT_SQUASHED;
 
   if (track_keys_)
-    IterateKeys(cmd->ArgList(), *keys, [this](MutableSlice key) { collected_keys_.insert(key); });
+    IterateKeys(args, *keys, [this](MutableSlice key) { collected_keys_.insert(key); });
 
   auto& sinfo = PrepareShardInfo(last_sid);
 
-  sinfo.had_writes |= (cmd->descr->opt_mask() & CO::WRITE);
+  sinfo.had_writes |= (cmd->Cid()->opt_mask() & CO::WRITE);
   sinfo.cmds.push_back(cmd);
   order_.push_back(last_sid);
 
@@ -87,10 +93,15 @@ void MultiCommandSquasher::ExecuteStandalone(StoredCmd* cmd) {
   DCHECK(order_.empty());  // check no squashed chain is interrupted
 
   auto* tx = cntx_->transaction;
-  tx->MultiSwitchCmd(cmd->descr);
-  if (cmd->descr->IsTransactional())
-    tx->InitByArgs(cntx_->conn_state.db_index, cmd->ArgList());
-  cmd->descr->Invoke(cmd->ArgList(), cntx_);
+  tx->MultiSwitchCmd(cmd->Cid());
+
+  tmp_keylist_.resize(cmd->NumArgs());
+  auto args = absl::MakeSpan(tmp_keylist_);
+  cmd->Fill(args);
+
+  if (cmd->Cid()->IsTransactional())
+    tx->InitByArgs(cntx_->conn_state.db_index, args);
+  cmd->Cid()->Invoke(args, cntx_);
 }
 
 OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard* es) {
@@ -101,10 +112,17 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
   facade::CapturingReplyBuilder crb;
   ConnectionContext local_cntx{local_tx, &crb};
 
+  absl::InlinedVector<MutableSlice, 4> arg_vec;
+
   for (auto* cmd : sinfo.cmds) {
-    local_tx->MultiSwitchCmd(cmd->descr);
-    local_tx->InitByArgs(parent_tx->GetDbIndex(), cmd->ArgList());
-    cmd->descr->Invoke(cmd->ArgList(), &local_cntx);
+    local_tx->MultiSwitchCmd(cmd->Cid());
+
+    arg_vec.resize(cmd->NumArgs());
+    auto args = absl::MakeSpan(arg_vec);
+    cmd->Fill(args);
+
+    local_tx->InitByArgs(parent_tx->GetDbIndex(), args);
+    cmd->Cid()->Invoke(args, &local_cntx);
 
     sinfo.reply_chan->Push(crb.Take());
   }

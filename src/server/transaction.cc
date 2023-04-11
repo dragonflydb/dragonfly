@@ -236,7 +236,7 @@ void Transaction::InitByKeys(KeyIndex key_index) {
   auto args = full_args_;
 
   if (key_index.start == args.size()) {  // eval with 0 keys.
-    CHECK(absl::StartsWith(cid_->name(), "EVAL"));
+    CHECK(absl::StartsWith(cid_->name(), "EVAL")) << cid_->name();
     return;
   }
 

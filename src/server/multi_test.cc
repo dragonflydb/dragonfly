@@ -723,7 +723,7 @@ TEST_F(MultiTest, ContendedList) {
 // because it runs them within one hop.
 TEST_F(MultiTest, TestSquashing) {
   absl::SetFlag(&FLAGS_multi_exec_squash, true);
-  absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::NON_ATOMIC);
+  absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::LOCK_AHEAD);
 
   const char* keys[] = {kKeySid0, kKeySid1, kKeySid2};
 
