@@ -24,6 +24,9 @@ class StoredCmd {
  public:
   StoredCmd(const CommandId* cid, CmdArgList args);
 
+  // Create on top of already filled tightly-packed buffer.
+  StoredCmd(std::string&& buffer, const CommandId* cid, CmdArgList args);
+
   size_t NumArgs() const;
 
   // Fill the arg list with stored arguments, it should be at least of size NumArgs().
@@ -72,6 +75,8 @@ struct ConnectionState {
   struct ScriptInfo {
     bool is_write = true;
     absl::flat_hash_set<std::string_view> keys;
+
+    std::vector<StoredCmd> async_cmds;
   };
 
   // PUB-SUB messaging related data.

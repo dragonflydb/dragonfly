@@ -255,7 +255,9 @@ TEST_F(InterpreterTest, Execute) {
 }
 
 TEST_F(InterpreterTest, Call) {
-  auto cb = [](MutSliceSpan span, ObjectExplorer* reply) {
+  auto cb = [](auto ca) {
+    auto* reply = ca.translator;
+    auto span = ca.args;
     CHECK_GE(span.size(), 1u);
     string_view cmd{span[0].data(), span[0].size()};
     if (cmd == "string") {
@@ -291,7 +293,8 @@ TEST_F(InterpreterTest, Call) {
 }
 
 TEST_F(InterpreterTest, CallArray) {
-  auto cb = [](MutSliceSpan span, ObjectExplorer* reply) {
+  auto cb = [](auto ca) {
+    auto* reply = ca.translator;
     reply->OnArrayStart(2);
     reply->OnArrayStart(1);
     reply->OnArrayStart(2);

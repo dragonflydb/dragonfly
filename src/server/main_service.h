@@ -5,6 +5,7 @@
 #pragma once
 
 #include "base/varz_value.h"
+#include "core/interpreter.h"
 #include "facade/service_interface.h"
 #include "server/command_registry.h"
 #include "server/engine_shard_set.h"
@@ -119,7 +120,8 @@ class Service : public facade::ServiceInterface {
 
   void EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, ConnectionContext* cntx);
 
-  void CallFromScript(CmdArgList args, ObjectExplorer* reply, ConnectionContext* cntx);
+  void FlushEvalAsyncCmds(ConnectionContext* cntx, bool force = false);
+  void CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& args);
 
   void RegisterCommands();
 

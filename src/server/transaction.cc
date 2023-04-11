@@ -256,7 +256,7 @@ void Transaction::InitByKeys(KeyIndex key_index) {
     shard_data_.front().local_mask |= ACTIVE;
 
     unique_shard_cnt_ = 1;
-    unique_shard_id_ = Shard(args_.front(), shard_set->size());
+    unique_shard_id_ = Shard(args_.front(), shard_set->size());  // TODO: Squashed bug
 
     return;
   }

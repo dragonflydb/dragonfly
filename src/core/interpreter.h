@@ -32,7 +32,21 @@ class ObjectExplorer {
 
 class Interpreter {
  public:
-  using RedisFunc = std::function<void(MutSliceSpan, ObjectExplorer*)>;
+  // Arguments received from redis.call
+  struct CallArgs {
+    // Full arguments, including cmd name.
+    MutSliceSpan args;
+
+    // Backing storage for args (excluding cmd name).
+    // Can be moved out to efficiently store for async dispatch.
+    std::string&& buffer;
+
+    ObjectExplorer* translator;
+
+    bool async;  // async by redis.acall
+  };
+
+  using RedisFunc = std::function<void(CallArgs)>;
 
   Interpreter();
   ~Interpreter();
@@ -97,10 +111,11 @@ class Interpreter {
   bool AddInternal(const char* f_id, std::string_view body, std::string* error);
   bool IsTableSafe() const;
 
-  int RedisGenericCommand(bool raise_error);
+  int RedisGenericCommand(bool raise_error, bool async);
 
   static int RedisCallCommand(lua_State* lua);
   static int RedisPCallCommand(lua_State* lua);
+  static int RedisACallCommand(lua_State* lua);
 
   lua_State* lua_;
   unsigned cmd_depth_ = 0;

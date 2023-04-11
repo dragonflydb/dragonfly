@@ -137,8 +137,6 @@ void MultiCommandSquasher::ExecuteSquashed() {
   if (order_.empty())
     return;
 
-  VLOG(1) << "Executing " << order_.size() << " commands squashed";
-
   Transaction* tx = cntx_->transaction;
 
   if (track_keys_) {
