@@ -74,9 +74,8 @@ struct ConnectionState {
   // Lua-script related data.
   struct ScriptInfo {
     bool is_write = true;
-    absl::flat_hash_set<std::string_view> keys;
-
-    std::vector<StoredCmd> async_cmds;
+    absl::flat_hash_set<std::string_view> keys;  // declared keys
+    std::vector<StoredCmd> async_cmds;           // aggregated by acall
   };
 
   // PUB-SUB messaging related data.

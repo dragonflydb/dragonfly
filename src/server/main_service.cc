@@ -1016,24 +1016,32 @@ void Service::Unwatch(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendOk();
 }
 
+template <typename F> void WithoutReplies(ConnectionContext* cntx, F&& f) {
+  io::NullSink null_sink;
+  facade::RedisReplyBuilder rrb{&null_sink};
+  auto* old_rrb = cntx->Inject(&rrb);
+
+  f();
+
+  cntx->Inject(old_rrb);
+}
+
 void Service::FlushEvalAsyncCmds(ConnectionContext* cntx, bool force) {
+  const int kMaxAsyncCmds = 100;
+
   auto& info = cntx->conn_state.script_info;
 
-  if (!force || info->async_cmds.empty())
+  if ((!force && info->async_cmds.size() <= kMaxAsyncCmds) || info->async_cmds.empty())
     return;
 
   auto* eval_cid = registry_.Find("EVAL");
   DCHECK(eval_cid);
   cntx->transaction->MultiSwitchCmd(eval_cid);
 
-  io::NullSink null_sink;
-  facade::RedisReplyBuilder rrb{&null_sink};
-  auto* old_rrb = cntx->Inject(&rrb);
+  WithoutReplies(cntx,
+                 [&] { MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), cntx); });
 
-  MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), cntx);
   info->async_cmds.clear();
-
-  cntx->Inject(old_rrb);
 }
 
 void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca) {
@@ -1043,8 +1051,13 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
   if (ca.async) {
     auto& info = cntx->conn_state.script_info;
     auto* cid = registry_.Find(facade::ToSV(ca.args[0]));
-    // TODO: Validate cmd like DispatchCommand - move this logic out of big function
-    // TODO: Add limit on stored cmds
+
+    bool valid = true;
+    WithoutReplies(cntx, [&] { valid = VerifyCommand(cid, ca.args, cntx); });
+
+    if (!valid)  // TODO: collect errors with capturing reply builder.
+      return;
+
     info->async_cmds.emplace_back(move(ca.buffer), cid, ca.args.subspan(1));
     FlushEvalAsyncCmds(cntx, false);
     return;
