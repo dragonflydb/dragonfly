@@ -101,11 +101,14 @@ void EngineShard::DefragTaskState::UpdateScanState(uint64_t cursor_val) {
 // (control by mem_defrag_waste_threshold flag)
 bool EngineShard::DefragTaskState::CheckRequired() {
   if (cursor > kCursorDoneState || underutilized_found) {
-    VLOG(1) << "Already found memory utilization issue - cursor: " << cursor
-            << " and underutilized_found " << underutilized_found;
+    VLOG(1) << "cursor: " << cursor << " and underutilized_found " << underutilized_found;
     return true;
   }
+
   const std::size_t memory_per_shard = max_memory_limit / shard_set->size();
+  if (memory_per_shard < (1 << 16)) {  // Too small.
+    return false;
+  }
 
   const std::size_t threshold_mem = memory_per_shard * GetFlag(FLAGS_mem_defrag_threshold);
   const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);

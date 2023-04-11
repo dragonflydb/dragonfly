@@ -240,9 +240,6 @@ TEST_F(ListFamilyTest, BLPopMultiPush) {
 }
 
 TEST_F(ListFamilyTest, BLPopSerialize) {
-  // TODO: Fix squashed blocking handling
-  GTEST_SKIP() << "Skipped because squashing breaks seralization guarantees";
-
   RespExpr blpop_resp;
 
   auto pop_fb = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
