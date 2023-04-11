@@ -114,6 +114,9 @@ class Service : public facade::ServiceInterface {
     CmdArgList keys, args;
   };
 
+  // Return false if command is invalid and reply with error.
+  bool VerifyCommand(const CommandId* cid, CmdArgList args, facade::ConnectionContext* cntx);
+
   void EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, ConnectionContext* cntx);
 
   void CallFromScript(CmdArgList args, ObjectExplorer* reply, ConnectionContext* cntx);

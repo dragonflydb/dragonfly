@@ -557,7 +557,7 @@ void Service::Shutdown() {
   ThisFiber::SleepFor(10ms);
 }
 
-static void MultiSetError(ConnectionContext* cntx) {
+static void SetMultiExecErrorFlag(ConnectionContext* cntx) {
   if (cntx->conn_state.exec_info.IsActive()) {
     cntx->conn_state.exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
   }
@@ -591,6 +591,111 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
   return OpStatus::OK;
 }
 
+bool Service::VerifyCommand(const CommandId* cid, CmdArgList args,
+                            facade::ConnectionContext* cntx) {
+  ServerState& etl = *ServerState::tlocal();
+
+  string_view cmd_str = ArgS(args, 0);
+  ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
+
+  bool is_trans_cmd = (cmd_str == "EXEC" || cmd_str == "MULTI" || cmd_str == "DISCARD");
+  bool under_script = dfly_cntx->conn_state.script_info.has_value();
+
+  absl::Cleanup multi_error([dfly_cntx] { SetMultiExecErrorFlag(dfly_cntx); });
+
+  if (cid == nullptr) {
+    (*cntx)->SendError(StrCat("unknown command `", cmd_str, "`"), "unknown_cmd");
+
+    lock_guard lk(mu_);
+    if (unknown_cmds_.size() < 1024)
+      unknown_cmds_[cmd_str]++;
+    return false;
+  }
+
+  bool blocked_by_loading = !cntx->journal_emulated && etl.gstate() == GlobalState::LOADING &&
+                            (cid->opt_mask() & CO::LOADING) == 0;
+  if (blocked_by_loading || etl.gstate() == GlobalState::SHUTTING_DOWN) {
+    string err = StrCat("Can not execute during ", GlobalStateName(etl.gstate()));
+    (*cntx)->SendError(err);
+    return false;
+  }
+
+  string_view cmd_name{cid->name()};
+
+  if (cntx->req_auth && !cntx->authenticated) {
+    if (cmd_name != "AUTH" && cmd_name != "QUIT") {
+      (*cntx)->SendError("-NOAUTH Authentication required.");
+      return false;
+    }
+  }
+
+  // only reset and quit are allow if this connection is used for monitoring
+  if (dfly_cntx->monitor && (cmd_name != "RESET" && cmd_name != "QUIT")) {
+    (*cntx)->SendError("Replica can't interact with the keyspace");
+    return false;
+  }
+
+  if (under_script && (cid->opt_mask() & CO::NOSCRIPT)) {
+    (*cntx)->SendError("This Redis command is not allowed from script");
+    return false;
+  }
+
+  bool is_write_cmd = (cid->opt_mask() & CO::WRITE) ||
+                      (under_script && dfly_cntx->conn_state.script_info->is_write);
+  bool under_multi = dfly_cntx->conn_state.exec_info.IsActive() && !is_trans_cmd;
+
+  if (!etl.is_master && is_write_cmd && !dfly_cntx->is_replicating) {
+    (*cntx)->SendError("-READONLY You can't write against a read only replica.");
+    return false;
+  }
+
+  if ((cid->arity() > 0 && args.size() != size_t(cid->arity())) ||
+      (cid->arity() < 0 && args.size() < size_t(-cid->arity()))) {
+    (*cntx)->SendError(facade::WrongNumArgsError(cmd_str), kSyntaxErrType);
+    return false;
+  }
+
+  if (cid->key_arg_step() == 2 && (args.size() % 2) == 0) {
+    (*cntx)->SendError(facade::WrongNumArgsError(cmd_str), kSyntaxErrType);
+    return false;
+  }
+
+  // Validate more complicated cases with custom validators.
+  if (!cid->Validate(args.subspan(1), dfly_cntx)) {
+    return false;
+  }
+
+  if (under_multi) {
+    if (cmd_name == "SELECT") {
+      (*cntx)->SendError("Can not call SELECT within a transaction");
+      return false;
+    }
+
+    if (cmd_name == "WATCH" || cmd_name == "FLUSHALL" || cmd_name == "FLUSHDB") {
+      (*cntx)->SendError(absl::StrCat("'", cmd_name, "' inside MULTI is not allowed"));
+      return false;
+    }
+  }
+
+  if (under_script && cid->IsTransactional()) {
+    OpStatus status = CheckKeysDeclared(*dfly_cntx->conn_state.script_info, cid, args.subspan(1),
+                                        dfly_cntx->transaction);
+
+    if (status == OpStatus::KEY_NOTFOUND) {
+      (*cntx)->SendError("script tried accessing undeclared key");
+      return false;
+    }
+
+    if (status != OpStatus::OK) {
+      (*cntx)->SendError(status);
+      return false;
+    }
+  }
+
+  std::move(multi_error).Cancel();
+  return true;
+}
+
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
   CHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
@@ -613,80 +718,10 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   etl.RecordCmd();
 
-  absl::Cleanup multi_error([dfly_cntx] { MultiSetError(dfly_cntx); });
-
-  if (cid == nullptr) {
-    (*cntx)->SendError(StrCat("unknown command `", cmd_str, "`"), "unknown_cmd");
-
-    lock_guard lk(mu_);
-    if (unknown_cmds_.size() < 1024)
-      unknown_cmds_[cmd_str]++;
+  if (!VerifyCommand(cid, args, cntx))
     return;
-  }
 
-  bool blocked_by_loading = !cntx->journal_emulated && etl.gstate() == GlobalState::LOADING &&
-                            (cid->opt_mask() & CO::LOADING) == 0;
-  if (blocked_by_loading || etl.gstate() == GlobalState::SHUTTING_DOWN) {
-    string err = StrCat("Can not execute during ", GlobalStateName(etl.gstate()));
-    (*cntx)->SendError(err);
-    return;
-  }
-
-  string_view cmd_name{cid->name()};
-
-  if (cntx->req_auth && !cntx->authenticated) {
-    if (cmd_name != "AUTH" && cmd_name != "QUIT") {
-      return (*cntx)->SendError("-NOAUTH Authentication required.");
-    }
-  }
-
-  // only reset and quit are allow if this connection is used for monitoring
-  if (dfly_cntx->monitor && (cmd_name != "RESET" && cmd_name != "QUIT")) {
-    return (*cntx)->SendError("Replica can't interact with the keyspace");
-  }
-
-  if (under_script && (cid->opt_mask() & CO::NOSCRIPT)) {
-    return (*cntx)->SendError("This Redis command is not allowed from script");
-  }
-
-  bool is_write_cmd = (cid->opt_mask() & CO::WRITE) ||
-                      (under_script && dfly_cntx->conn_state.script_info->is_write);
-  bool under_multi = dfly_cntx->conn_state.exec_info.IsActive() && !is_trans_cmd;
-
-  if (!etl.is_master && is_write_cmd && !dfly_cntx->is_replicating) {
-    (*cntx)->SendError("-READONLY You can't write against a read only replica.");
-    return;
-  }
-
-  if ((cid->arity() > 0 && args.size() != size_t(cid->arity())) ||
-      (cid->arity() < 0 && args.size() < size_t(-cid->arity()))) {
-    return (*cntx)->SendError(facade::WrongNumArgsError(cmd_str), kSyntaxErrType);
-  }
-
-  if (cid->key_arg_step() == 2 && (args.size() % 2) == 0) {
-    return (*cntx)->SendError(facade::WrongNumArgsError(cmd_str), kSyntaxErrType);
-  }
-
-  // Validate more complicated cases with custom validators.
-  if (!cid->Validate(args.subspan(1), dfly_cntx)) {
-    return;
-  }
-
-  if (under_multi) {
-    if (cmd_name == "SELECT") {
-      (*cntx)->SendError("Can not call SELECT within a transaction");
-      return;
-    }
-
-    if (cmd_name == "WATCH" || cmd_name == "FLUSHALL" || cmd_name == "FLUSHDB") {
-      auto error = absl::StrCat("'", cmd_name, "' inside MULTI is not allowed");
-      return (*cntx)->SendError(error);
-    }
-  }
-
-  std::move(multi_error).Cancel();
-
-  etl.connection_stats.cmd_count_map[cmd_name]++;
+  etl.connection_stats.cmd_count_map[cid->name()]++;
 
   if (dfly_cntx->conn_state.exec_info.IsActive() && !is_trans_cmd) {
     auto cmd_name = ArgS(args, 0);
@@ -695,7 +730,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
           absl::StrCat("'", cmd_name,
                        "' Dragonfly does not allow execution of a server-side Lua script inside "
                        "transaction block");
-      MultiSetError(dfly_cntx);
+      SetMultiExecErrorFlag(dfly_cntx);
       return (*cntx)->SendError(error);
     }
     // TODO: protect against aggregating huge transactions.
@@ -714,17 +749,9 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   if (under_script) {
     DCHECK(dfly_cntx->transaction);
     if (cid->IsTransactional()) {
-      OpStatus status = CheckKeysDeclared(*dfly_cntx->conn_state.script_info, cid, args.subspan(1),
-                                          dfly_cntx->transaction);
-
-      if (status == OpStatus::KEY_NOTFOUND)
-        return (*cntx)->SendError("script tried accessing undeclared key");
-
-      if (status != OpStatus::OK)
-        return (*cntx)->SendError(status);
-
       dfly_cntx->transaction->MultiSwitchCmd(cid);
-      status = dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args.subspan(1));
+      OpStatus status =
+          dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args.subspan(1));
 
       if (status != OpStatus::OK)
         return (*cntx)->SendError(status);
