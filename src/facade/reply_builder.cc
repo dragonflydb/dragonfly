@@ -371,7 +371,7 @@ void RedisReplyBuilder::StartArray(unsigned len) {
   StartCollection(len, ARRAY);
 }
 
-constexpr static string_view START_SYMBOLS[] = {"*", "~", "%"};
+constexpr static string_view START_SYMBOLS[] = {"*", "~", "%", ">"};
 static_assert(START_SYMBOLS[RedisReplyBuilder::MAP] == "%" &&
               START_SYMBOLS[RedisReplyBuilder::SET] == "~");
 

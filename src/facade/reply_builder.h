@@ -118,7 +118,7 @@ class MCReplyBuilder : public SinkReplyBuilder {
 
 class RedisReplyBuilder : public SinkReplyBuilder {
  public:
-  enum CollectionType { ARRAY, SET, MAP };
+  enum CollectionType { ARRAY, SET, MAP, PUSH };
 
   using StrSpan = std::variant<absl::Span<const std::string>, absl::Span<const std::string_view>>;
 

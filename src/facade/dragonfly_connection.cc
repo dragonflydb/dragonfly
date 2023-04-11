@@ -290,17 +290,19 @@ void Connection::DispatchOperations::operator()(const PubMsgRecord& msg) {
       arr[0] = "message";
       arr[1] = *pub_msg.channel;
       arr[2] = *pub_msg.message;
-      rbuilder->SendStringArr(absl::Span<string_view>{arr, 3});
+      rbuilder->SendStringArr(absl::Span<string_view>{arr, 3},
+                              RedisReplyBuilder::CollectionType::PUSH);
     } else {
       arr[0] = "pmessage";
       arr[1] = pub_msg.pattern;
       arr[2] = *pub_msg.channel;
       arr[3] = *pub_msg.message;
-      rbuilder->SendStringArr(absl::Span<string_view>{arr, 4});
+      rbuilder->SendStringArr(absl::Span<string_view>{arr, 4},
+                              RedisReplyBuilder::CollectionType::PUSH);
     }
   } else {
     const char* action[2] = {"unsubscribe", "subscribe"};
-    rbuilder->StartArray(3);
+    rbuilder->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
     rbuilder->SendBulkString(action[pub_msg.type == PubMessage::kSubscribe]);
     rbuilder->SendBulkString(*pub_msg.channel);
     rbuilder->SendLong(pub_msg.channel_cnt);

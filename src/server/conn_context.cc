@@ -162,7 +162,7 @@ void ConnectionContext::PUnsubscribeAll(bool to_reply) {
 void ConnectionContext::SendSubscriptionChangedResponse(string_view action,
                                                         std::optional<string_view> topic,
                                                         unsigned count) {
-  (*this)->StartArray(3);
+  (*this)->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
   (*this)->SendBulkString(action);
   if (topic.has_value())
     (*this)->SendBulkString(topic.value());
