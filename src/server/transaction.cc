@@ -57,6 +57,8 @@ Transaction::Transaction(const Transaction* parent)
     : multi_{make_unique<MultiData>()}, txid_{parent->txid()} {
   multi_->mode = parent->multi_->mode;
   multi_->role = SQUASHED_STUB;
+
+  time_now_ms_ = parent->time_now_ms_;
 }
 
 Transaction::~Transaction() {

@@ -94,6 +94,7 @@ void MultiCommandSquasher::ExecuteStandalone(StoredCmd* cmd) {
 
   auto* tx = cntx_->transaction;
   tx->MultiSwitchCmd(cmd->Cid());
+  cntx_->cid = cmd->Cid();
 
   tmp_keylist_.resize(cmd->NumArgs());
   auto args = absl::MakeSpan(tmp_keylist_);
@@ -116,6 +117,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
 
   for (auto* cmd : sinfo.cmds) {
     local_tx->MultiSwitchCmd(cmd->Cid());
+    local_cntx.cid = cmd->Cid();
 
     arg_vec.resize(cmd->NumArgs());
     auto args = absl::MakeSpan(arg_vec);
@@ -149,6 +151,7 @@ void MultiCommandSquasher::ExecuteSquashed() {
     tx->PrepareSquashedMultiHop(base_cid_, cb);
   }
 
+  cntx_->cid = base_cid_;
   tx->ScheduleSingleHop([this](auto* tx, auto* es) { return SquashedHopCb(tx, es); });
 
   facade::CapturingReplyBuilder::Payload payload;

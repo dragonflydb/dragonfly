@@ -1395,6 +1395,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
       for (auto& scmd : exec_info.body) {
         cntx->transaction->MultiSwitchCmd(scmd.Cid());
+        cntx->cid = scmd.Cid();
 
         arg_vec.resize(scmd.NumArgs());
         CmdArgList args = absl::MakeSpan(arg_vec);
