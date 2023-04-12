@@ -640,7 +640,7 @@ async def test_expiry(df_local_factory, n_keys=1000):
     res = await c_replica.mget(k for k, _ in gen_test_data(n_keys))
     assert all(v is not None for v in res)
 
-    # Set key differnt expries times in ms
+    # Set key different expries times in ms
     pipe = c_master.pipeline(transaction=True)
     for k, _ in gen_test_data(n_keys):
         ms = random.randint(20, 500)
@@ -663,9 +663,10 @@ async def test_expiry(df_local_factory, n_keys=1000):
     # Wait for master to expire keys
     await asyncio.sleep(3.0)
 
-    # Check all keys with expiry has be deleted
+    # Check all keys with expiry have been deleted
     res = await c_master.mget(k for k, _ in gen_test_data(n_keys))
     assert all(v is None for v in res)
+
     # Check replica finished executing the replicated commands
     await check_all_replicas_finished([c_replica], c_master)
     res = await c_replica.mget(k for k, _ in gen_test_data(n_keys))
