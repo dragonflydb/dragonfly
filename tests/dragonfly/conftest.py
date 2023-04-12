@@ -14,7 +14,7 @@ import random
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from . import DflyInstance, DflyInstanceFactory, DflyParams, PortManager
+from . import DflyInstance, DflyInstanceFactory, DflyParams, PortPicker
 from .utility import DflySeederFactory
 
 DATABASE_INDEX = 1
@@ -191,5 +191,5 @@ def pytest_addoption(parser):
 
 
 @pytest.fixture(scope="session")
-def port_manager():
-    yield PortManager()
+def port_picker():
+    yield PortPicker()

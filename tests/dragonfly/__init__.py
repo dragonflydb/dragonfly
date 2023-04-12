@@ -141,7 +141,7 @@ def dfly_multi_test_args(*args):
     return pytest.mark.parametrize("df_factory", args, indirect=True)
 
 
-class PortManager():
+class PortPicker():
     """ A simple port manager to allocate available ports for tests """
 
     def __init__(self):
