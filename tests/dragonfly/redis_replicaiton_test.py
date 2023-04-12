@@ -7,8 +7,8 @@ from .utility import *
 
 
 class RedisServer:
-    def __init__(self):
-        self.port = 5555
+    def __init__(self, port):
+        self.port = port
         self.proc = None
 
     def start(self):
@@ -66,8 +66,8 @@ async def check_data(seeder, replicas, c_replicas):
 
 
 @pytest.fixture(scope="function")
-def redis_server() -> RedisServer:
-    s = RedisServer()
+def redis_server(port_manager) -> RedisServer:
+    s = RedisServer(port_manager.get_available_port())
     try:
         s.start()
     except FileNotFoundError as e:
@@ -86,7 +86,7 @@ full_sync_replication_specs = [
 
 
 @pytest.mark.parametrize("t_replicas, seeder_config", full_sync_replication_specs)
-async def test_replication_full_sync(df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config):
+async def test_replication_full_sync(df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config, port_manager):
     master = redis_server
     c_master = aioredis.Redis(port=master.port)
     assert await c_master.ping()
@@ -95,7 +95,7 @@ async def test_replication_full_sync(df_local_factory, df_seeder_factory, redis_
     await seeder.run(target_deviation=0.1)
 
     replica = df_local_factory.create(
-        port=master.port + 1, proactor_threads=t_replicas[0])
+        port=port_manager.get_available_port(), proactor_threads=t_replicas[0])
     replica.start()
     c_replica = aioredis.Redis(port=replica.port)
     assert await c_replica.ping()
@@ -117,13 +117,13 @@ stable_sync_replication_specs = [
 
 
 @pytest.mark.parametrize("t_replicas, seeder_config", stable_sync_replication_specs)
-async def test_replication_stable_sync(df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config):
+async def test_replication_stable_sync(df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config, port_manager):
     master = redis_server
     c_master = aioredis.Redis(port=master.port)
     assert await c_master.ping()
 
     replica = df_local_factory.create(
-        port=master.port + 1, proactor_threads=t_replicas[0])
+        port=port_manager.get_available_port(), proactor_threads=t_replicas[0])
     replica.start()
     c_replica = aioredis.Redis(port=replica.port)
     assert await c_replica.ping()
@@ -152,13 +152,13 @@ replication_specs = [
 
 
 @pytest.mark.parametrize("t_replicas, seeder_config", replication_specs)
-async def test_redis_replication_all(df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config):
+async def test_redis_replication_all(df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config, port_manager):
     master = redis_server
     c_master = aioredis.Redis(port=master.port)
     assert await c_master.ping()
 
     replicas = [
-        df_local_factory.create(port=master.port+i+1, proactor_threads=t)
+        df_local_factory.create(port=port_manager.get_available_port(), proactor_threads=t)
         for i, t in enumerate(t_replicas)
     ]
 
@@ -208,14 +208,13 @@ master_disconnect_cases = [
 
 
 @pytest.mark.parametrize("t_replicas, t_disconnect, seeder_config", master_disconnect_cases)
-async def test_disconnect_master(df_local_factory, df_seeder_factory, redis_server, t_replicas, t_disconnect, seeder_config):
-
+async def test_disconnect_master(df_local_factory, df_seeder_factory, redis_server, t_replicas, t_disconnect, seeder_config, port_manager):
     master = redis_server
     c_master = aioredis.Redis(port=master.port)
     assert await c_master.ping()
 
     replicas = [
-        df_local_factory.create(port=master.port+i+1, proactor_threads=t)
+        df_local_factory.create(port=port_manager.get_available_port(), proactor_threads=t)
         for i, t in enumerate(t_replicas)
     ]
 
