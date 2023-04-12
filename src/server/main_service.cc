@@ -1016,14 +1016,59 @@ void Service::Unwatch(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendOk();
 }
 
-void Service::CallFromScript(CmdArgList args, ObjectExplorer* reply, ConnectionContext* cntx) {
-  DCHECK(cntx->transaction);
-  DVLOG(1) << "CallFromScript " << cntx->transaction->DebugId() << " " << ArgS(args, 0);
+template <typename F> void WithoutReplies(ConnectionContext* cntx, F&& f) {
+  io::NullSink null_sink;
+  facade::RedisReplyBuilder rrb{&null_sink};
+  auto* old_rrb = cntx->Inject(&rrb);
 
-  InterpreterReplier replier(reply);
+  f();
+
+  cntx->Inject(old_rrb);
+}
+
+void Service::FlushEvalAsyncCmds(ConnectionContext* cntx, bool force) {
+  const int kMaxAsyncCmds = 100;
+
+  auto& info = cntx->conn_state.script_info;
+
+  if ((!force && info->async_cmds.size() <= kMaxAsyncCmds) || info->async_cmds.empty())
+    return;
+
+  auto* eval_cid = registry_.Find("EVAL");
+  DCHECK(eval_cid);
+  cntx->transaction->MultiSwitchCmd(eval_cid);
+
+  WithoutReplies(cntx,
+                 [&] { MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), cntx); });
+
+  info->async_cmds.clear();
+}
+
+void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca) {
+  DCHECK(cntx->transaction);
+  DVLOG(1) << "CallFromScript " << cntx->transaction->DebugId() << " " << ArgS(ca.args, 0);
+
+  if (ca.async) {
+    auto& info = cntx->conn_state.script_info;
+    auto* cid = registry_.Find(facade::ToSV(ca.args[0]));
+
+    bool valid = true;
+    WithoutReplies(cntx, [&] { valid = VerifyCommand(cid, ca.args, cntx); });
+
+    if (!valid)  // TODO: collect errors with capturing reply builder.
+      return;
+
+    info->async_cmds.emplace_back(move(*ca.buffer), cid, ca.args.subspan(1));
+    FlushEvalAsyncCmds(cntx, false);
+    return;
+  }
+
+  FlushEvalAsyncCmds(cntx, true);
+
+  InterpreterReplier replier(ca.translator);
   facade::SinkReplyBuilder* orig = cntx->Inject(&replier);
 
-  DispatchCommand(std::move(args), cntx);
+  DispatchCommand(ca.args, cntx);
 
   cntx->Inject(orig);
 }
@@ -1185,11 +1230,12 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
 
   interpreter->SetGlobalArray("KEYS", eval_args.keys);
   interpreter->SetGlobalArray("ARGV", eval_args.args);
-  interpreter->SetRedisFunc(
-      [cntx, this](CmdArgList args, ObjectExplorer* reply) { CallFromScript(args, reply, cntx); });
+  interpreter->SetRedisFunc([cntx, this](auto args) { CallFromScript(cntx, args); });
 
   Interpreter::RunResult result = interpreter->RunFunction(eval_args.sha, &error);
   absl::Cleanup clean = [interpreter]() { interpreter->ResetStack(); };
+
+  FlushEvalAsyncCmds(cntx, true);
 
   cntx->conn_state.script_info.reset();  // reset script_info
 

@@ -31,6 +31,15 @@ StoredCmd::StoredCmd(const CommandId* cid, CmdArgList args)
   }
 }
 
+StoredCmd::StoredCmd(string&& buffer, const CommandId* cid, CmdArgList args)
+    : cid_{cid}, buffer_{move(buffer)}, sizes_(args.size()) {
+  for (unsigned i = 0; i < args.size(); i++) {
+    // Assume tightly packed list.
+    DCHECK(i + 1 == args.size() || args[i].data() + args[i].size() == args[i + 1].data());
+    sizes_[i] = args[i].size();
+  }
+}
+
 void StoredCmd::Fill(CmdArgList args) {
   CHECK_GE(args.size(), sizes_.size());
   unsigned offset = 0;

@@ -4,6 +4,7 @@
 
 #include "core/interpreter.h"
 
+#include <absl/container/fixed_array.h>
 #include <absl/strings/str_cat.h>
 #include <absl/time/clock.h>
 #include <openssl/evp.h>
@@ -367,6 +368,11 @@ Interpreter::Interpreter() {
   lua_pushcfunction(lua_, RedisPCallCommand);
   lua_settable(lua_, -3);
 
+  /* redis.acall */
+  lua_pushstring(lua_, "acall");
+  lua_pushcfunction(lua_, RedisACallCommand);
+  lua_settable(lua_, -3);
+
   lua_pushstring(lua_, "sha1hex");
   lua_pushcfunction(lua_, RedisSha1Command);
   lua_settable(lua_, -3);
@@ -614,7 +620,7 @@ void Interpreter::ResetStack() {
 // Returns number of results, which is always 1 in this case.
 // Please note that lua resets the stack once the function returns so no need
 // to unwind the stack manually in the function (though lua allows doing this).
-int Interpreter::RedisGenericCommand(bool raise_error) {
+int Interpreter::RedisGenericCommand(bool raise_error, bool async) {
   /* By using Lua debug hooks it is possible to trigger a recursive call
    * to luaRedisGenericCommand(), which normally should never happen.
    * To make this function reentrant is futile and makes it slower, but
@@ -646,7 +652,9 @@ int Interpreter::RedisGenericCommand(bool raise_error) {
   size_t blob_len = 0;
   char tmpbuf[64];
 
-  for (int idx = 1; idx <= argc; idx++) {
+  // Determine size required for backing storage for all args.
+  // Skip command name (idx=1), as its stored in a separate buffer.
+  for (int idx = 2; idx <= argc; idx++) {
     switch (lua_type(lua_, idx)) {
       case LUA_TNUMBER:
         if (lua_isinteger(lua_, idx)) {
@@ -667,14 +675,20 @@ int Interpreter::RedisGenericCommand(bool raise_error) {
     }
   }
 
-  // backing storage.
-  unique_ptr<char[]> blob(new char[blob_len + 8]);  // 8 safety.
-  vector<absl::Span<char>> cmdargs(argc);
-  char* cur = blob.get();
+  char name_buffer[32];               // backing storage for cmd name
+  string buffer(blob_len + 4, '\0');  // backing storage for args
+  absl::FixedArray<absl::Span<char>, 4> args(argc);
+
+  char* cur = buffer.data();
   char* end = cur + blob_len;
 
-  for (int j = 0; j < argc; j++) {
-    unsigned idx = j + 1;
+  // Copy command name to name_buffer and set it as first arg.
+  unsigned len = lua_rawlen(lua_, 1);
+  DCHECK_LT(len, ABSL_ARRAYSIZE(name_buffer));
+  memcpy(name_buffer, lua_tostring(lua_, 1), len);
+  args[0] = {name_buffer, len};
+
+  for (int idx = 2; idx <= argc; idx++) {
     size_t len = 0;
     switch (lua_type(lua_, idx)) {
       case LUA_TNUMBER:
@@ -694,7 +708,7 @@ int Interpreter::RedisGenericCommand(bool raise_error) {
         memcpy(cur, lua_tostring(lua_, idx), len);
     };
 
-    cmdargs[j] = {cur, len};
+    args[idx - 1] = {cur, len};
     cur += len;
   }
 
@@ -702,8 +716,10 @@ int Interpreter::RedisGenericCommand(bool raise_error) {
    * and this way we guaranty we will have room on the stack for the result. */
   lua_pop(lua_, argc);
   RedisTranslator translator(lua_);
-  redis_func_(MutSliceSpan{cmdargs}, &translator);
-  DCHECK_EQ(1, lua_gettop(lua_));
+  redis_func_(CallArgs{MutSliceSpan{args}, &buffer, &translator, async});
+
+  if (!async)
+    DCHECK_EQ(1, lua_gettop(lua_));
 
   cmd_depth_--;
 
@@ -712,12 +728,17 @@ int Interpreter::RedisGenericCommand(bool raise_error) {
 
 int Interpreter::RedisCallCommand(lua_State* lua) {
   void** ptr = static_cast<void**>(lua_getextraspace(lua));
-  return reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(true);
+  return reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(true, false);
 }
 
 int Interpreter::RedisPCallCommand(lua_State* lua) {
   void** ptr = static_cast<void**>(lua_getextraspace(lua));
-  return reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(false);
+  return reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(false, false);
+}
+
+int Interpreter::RedisACallCommand(lua_State* lua) {
+  void** ptr = static_cast<void**>(lua_getextraspace(lua));
+  return reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(false, true);
 }
 
 Interpreter* InterpreterManager::Get() {
