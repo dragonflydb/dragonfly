@@ -14,7 +14,7 @@ import random
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from . import DflyInstance, DflyInstanceFactory, DflyParams
+from . import DflyInstance, DflyInstanceFactory, DflyParams, PortPicker
 from .utility import DflySeederFactory
 
 DATABASE_INDEX = 1
@@ -188,3 +188,8 @@ def pytest_addoption(parser):
     )
     parser.addoption(
         '--existing-port', action='store', default=None, help='Provide a port to the existing process for the test')
+
+
+@pytest.fixture(scope="session")
+def port_picker():
+    yield PortPicker()
