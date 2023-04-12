@@ -49,7 +49,7 @@ ABSL_FLAG(uint32_t, multi_exec_mode, 1,
           "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for locking "
           "incrementally, 4 for non atomic");
 
-ABSL_FLAG(bool, multi_exec_squash, false,
+ABSL_FLAG(bool, multi_exec_squash, true,
           "Whether multi exec will squash single shard commands to optimize performance");
 
 ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose automatically");

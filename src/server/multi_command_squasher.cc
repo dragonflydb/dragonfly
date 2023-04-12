@@ -181,6 +181,9 @@ void MultiCommandSquasher::Run() {
 
   ExecuteSquashed();  // Flush leftover
 
+  // Set last txid.
+  cntx_->last_command_debug.clock = cntx_->transaction->txid();
+
   if (!sharded_.empty())
     cntx_->transaction->ReportWritesSquashedMulti(
         [this](ShardId sid) { return sharded_[sid].had_writes; });
