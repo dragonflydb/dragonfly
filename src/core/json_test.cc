@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2023, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -100,20 +100,4 @@ TEST_F(JsonTest, Delete) {
   it->value().erase("a");
   EXPECT_EQ(R"({"c":{"a":1, "b":2}, "d":{"b":2, "c":3}, "e": [1,2]})"_json, j1);
 }
-
-TEST_F(JsonTest, DeleteExt) {
-  jsonpath::detail::static_resources<json, const json&> resources;
-  jsonpath::jsonpath_expression<json>::evaluator_t eval;
-  jsonpath::jsonpath_expression<json>::json_selector_t sel = eval.compile(resources, "$.d.*");
-  json j1 = R"({"c":{"a":1, "b":2}, "d":{"a":1, "b":2, "c":3}, "e": [1,2]})"_json;
-
-  jsoncons::jsonpath::detail::dynamic_resources<json, const json&> dyn_res;
-
-  auto f = [](const jsonpath::json_location<char>& path, const json& val) {
-    LOG(INFO) << path.to_string();
-  };
-
-  sel.evaluate(dyn_res, j1, dyn_res.root_path_node(), j1, f, jsonpath::result_options::path);
-}
-
 }  // namespace dfly
