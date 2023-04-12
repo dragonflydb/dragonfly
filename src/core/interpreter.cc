@@ -716,7 +716,7 @@ int Interpreter::RedisGenericCommand(bool raise_error, bool async) {
    * and this way we guaranty we will have room on the stack for the result. */
   lua_pop(lua_, argc);
   RedisTranslator translator(lua_);
-  redis_func_(CallArgs{MutSliceSpan{args}, move(buffer), &translator, async});
+  redis_func_(CallArgs{MutSliceSpan{args}, &buffer, &translator, async});
 
   if (!async)
     DCHECK_EQ(1, lua_gettop(lua_));

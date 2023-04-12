@@ -1058,7 +1058,7 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
     if (!valid)  // TODO: collect errors with capturing reply builder.
       return;
 
-    info->async_cmds.emplace_back(move(ca.buffer), cid, ca.args.subspan(1));
+    info->async_cmds.emplace_back(move(*ca.buffer), cid, ca.args.subspan(1));
     FlushEvalAsyncCmds(cntx, false);
     return;
   }

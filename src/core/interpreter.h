@@ -37,9 +37,9 @@ class Interpreter {
     // Full arguments, including cmd name.
     MutSliceSpan args;
 
-    // Reference to backing storage for args (excluding cmd name).
+    // Pointer to backing storage for args (excluding cmd name).
     // Moving can invalidate arg slice pointers. Moved by async to re-use buffer.
-    std::string&& buffer;
+    std::string* buffer;
 
     ObjectExplorer* translator;
 
