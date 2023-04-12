@@ -482,14 +482,11 @@ class SetResultBuilder {
   explicit SetResultBuilder(bool return_prev_value) : return_prev_value_(return_prev_value) {
   }
 
-  // Calling GetString() copies `it`'s value, which is unnecessary in most case
-  bool ShouldReturnPrevValue() const {
-    return return_prev_value_;
-  }
-
-  void CachePrevValue(string_view value) {
-    DCHECK(return_prev_value_);
-    prev_value_ = value;
+  void CachePrevValueIfNeeded(EngineShard* shard, const PrimeValue& pv) {
+    if (return_prev_value_) {
+      // We call lazily call GetString() here to save string copying when not needed.
+      prev_value_ = GetString(shard, pv);
+    }
   }
 
   // Returns either the previous value or `status`, depending on return_prev_value_.
@@ -521,8 +518,8 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
 
   if (params.IsConditionalSet()) {
     const auto [it, expire_it] = db_slice.FindExt(op_args_.db_cntx, key);
-    if (result_builder.ShouldReturnPrevValue() && IsValid(it)) {
-      result_builder.CachePrevValue(GetString(shard, it->second));
+    if (IsValid(it)) {
+      result_builder.CachePrevValueIfNeeded(shard, it->second);
     }
 
     // Make sure that we have this key, and only add it if it does exists
@@ -550,9 +547,7 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
 
   PrimeIterator it = get<0>(add_res);
   if (!get<2>(add_res)) {  // Existing.
-    if (result_builder.ShouldReturnPrevValue()) {
-      result_builder.CachePrevValue(GetString(shard, it->second));
-    }
+    result_builder.CachePrevValueIfNeeded(shard, it->second);
     return std::move(result_builder).Return(SetExisting(params, it, get<1>(add_res), key, value));
   }
 
