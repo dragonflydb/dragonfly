@@ -91,6 +91,10 @@ class ServerFamily {
   // if new_version is true, saves DF specific, non redis compatible snapshot.
   GenericError DoSave(bool new_version, Transaction* transaction);
 
+  // Calls DoSave with a default generated transaction and with the format
+  // specified in --df_snapshot_format
+  GenericError DoSave();
+
   // Burns down and destroy all the data from the database.
   // if kDbAll is passed, burns all the databases to the ground.
   std::error_code Drakarys(Transaction* transaction, DbIndex db_ind);

@@ -57,6 +57,7 @@ ABSL_FLAG(string, requirepass, "",
           "If empty can also be set with DFLY_PASSWORD environment variable.");
 ABSL_FLAG(string, save_schedule, "",
           "glob spec for the UTC time to save a snapshot which matches HH:MM 24h time");
+ABSL_FLAG(bool, save_on_shutdown, false, "Save database on server shutdown");
 ABSL_FLAG(bool, df_snapshot_format, true,
           "if true, save in dragonfly-specific snapshotting format");
 ABSL_FLAG(string, cluster_mode, "",
@@ -484,6 +485,15 @@ void ServerFamily::Shutdown() {
     snapshot_fiber_.Join();
   }
 
+  if (absl::GetFlag(FLAGS_save_on_shutdown)) {
+    pb_task_->Await([this] {
+      GenericError ec = DoSave();
+      if (ec) {
+        LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
+      }
+    });
+  }
+
   pb_task_->Await([this] {
     pb_task_->CancelPeriodic(stats_caching_task_);
     stats_caching_task_ = 0;
@@ -627,13 +637,7 @@ void ServerFamily::SnapshotScheduling(const SnapshotSpec& spec) {
       continue;
     }
 
-    const CommandId* cid = service().FindCmd("SAVE");
-    CHECK_NOTNULL(cid);
-    boost::intrusive_ptr<Transaction> trans(
-        new Transaction{cid, ServerState::tlocal()->thread_index()});
-    trans->InitByArgs(0, {});
-
-    GenericError ec = DoSave(absl::GetFlag(FLAGS_df_snapshot_format), trans.get());
+    GenericError ec = DoSave();
     if (ec) {
       LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
     }
@@ -920,6 +924,15 @@ error_code DoPartialSave(PartialSaveOpts opts, const dfly::StringVec& scripts,
   }
 
   return local_ec;
+}
+
+GenericError ServerFamily::DoSave() {
+  const CommandId* cid = service().FindCmd("SAVE");
+  CHECK_NOTNULL(cid);
+  boost::intrusive_ptr<Transaction> trans(
+      new Transaction{cid, ServerState::tlocal()->thread_index()});
+  trans->InitByArgs(0, {});
+  return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), trans.get());
 }
 
 GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {

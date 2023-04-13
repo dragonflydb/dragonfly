@@ -170,13 +170,9 @@ void DebugCmd::Reload(CmdArgList args) {
 
   if (save) {
     string err_details;
-    const CommandId* cid = sf_.service().FindCmd("SAVE");
-    CHECK_NOTNULL(cid);
-    intrusive_ptr<Transaction> trans(new Transaction{cid, ServerState::tlocal()->thread_index()});
-    trans->InitByArgs(0, {});
     VLOG(1) << "Performing save";
 
-    GenericError ec = sf_.DoSave(absl::GetFlag(FLAGS_df_snapshot_format), trans.get());
+    GenericError ec = sf_.DoSave();
     if (ec) {
       return (*cntx_)->SendError(ec.Format());
     }

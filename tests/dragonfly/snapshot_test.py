@@ -18,7 +18,8 @@ class SnapshotTestBase:
         self.tmp_dir = tmp_dir
 
     def get_main_file(self, pattern):
-        def is_main(f): return "summary" in f if pattern.endswith("dfs") else True
+        def is_main(f): return "summary" in f if pattern.endswith(
+            "dfs") else True
         files = glob.glob(str(self.tmp_dir.absolute()) + '/' + pattern)
         possible_mains = list(filter(is_main, files))
         assert len(possible_mains) == 1, possible_mains
@@ -92,6 +93,8 @@ class TestDflySnapshot(SnapshotTestBase):
         assert await seeder.compare(start_capture)
 
 # We spawn instances manually, so reduce memory usage of default to minimum
+
+
 @dfly_args({"proactor_threads": "1"})
 class TestDflyAutoLoadSnapshot(SnapshotTestBase):
     """Test automatic loading of dump files on startup with timestamp"""
@@ -138,7 +141,8 @@ class TestPeriodicSnapshot(SnapshotTestBase):
 
     @pytest.mark.asyncio
     async def test_snapshot(self, df_seeder_factory, df_server):
-        seeder = df_seeder_factory.create(port=df_server.port, keys=10, multi_transaction_probability=0)
+        seeder = df_seeder_factory.create(
+            port=df_server.port, keys=10, multi_transaction_probability=0)
         await seeder.run(target_deviation=0.5)
 
         time.sleep(60)
@@ -156,9 +160,31 @@ class TestPathEscapes(SnapshotTestBase):
 
     @pytest.mark.asyncio
     async def test_snapshot(self, df_local_factory):
-        df_server = df_local_factory.create(dbfilename="../../../../etc/passwd")
+        df_server = df_local_factory.create(
+            dbfilename="../../../../etc/passwd")
         try:
             df_server.start()
             assert False, "Server should not start correctly"
         except Exception as e:
             pass
+
+
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-shutdown", "save_on_shutdown": ""})
+class TestDflySnapshotOnShutdown(SnapshotTestBase):
+    """Test multi file snapshot"""
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_dir: Path):
+        self.tmp_dir = tmp_dir
+
+    @pytest.mark.asyncio
+    async def test_snapshot(self, df_seeder_factory, async_client, df_server):
+        seeder = df_seeder_factory.create(port=df_server.port, **SEEDER_ARGS)
+        await seeder.run(target_deviation=0.1)
+
+        start_capture = await seeder.capture()
+
+        df_server.stop()
+        df_server.start()
+        time.sleep(2)
+
+        assert await seeder.compare(start_capture)
