@@ -156,7 +156,7 @@ bool Replica::Start(ConnectionContext* cntx) {
   CHECK(mythread);
 
   auto should_continue = [this, &cntx](const error_code& ec, const char* msg) {
-    if (state_mask_ & R_CANCELLED) {
+    if (cntx_.IsCancelled()) {
       (*cntx)->SendError("replication cancelled");
       return false;
     }
@@ -205,8 +205,8 @@ void Replica::Stop() {
   // Mark disabled, prevent from retrying.
   if (sock_) {
     sock_->proactor()->Await([this] {
-      state_mask_ = R_CANCELLED;  // Specifically ~R_ENABLED.
-      cntx_.Cancel();             // Context is fully resposible for cleanup.
+      state_mask_ = 0;  // Specifically ~R_ENABLED.
+      cntx_.Cancel();   // Context is fully resposible for cleanup.
     });
   }
 
