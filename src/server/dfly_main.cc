@@ -467,7 +467,7 @@ bool InsideContainer() {
   return Exists("/.dockerenv") || Exists("/sys/fs/cgroup/memory.max");
 }
 
-void ReadContainerLimits(io::MemInfoData& mdata) {
+void ReadContainerMemoryLimits(io::MemInfoData& mdata) {
   auto max = io::ReadFileToString("/sys/fs/cgroup/memory.max");
 
   if (max.has_value()) {
@@ -548,8 +548,9 @@ Usage: dragonfly [FLAGS]
   auto memory = ReadMemInfo().value();
   LOG(INFO) << "inside container: " << InsideContainer();
 
-  if (InsideContainer())
-    ReadContainerLimits(memory);
+  auto inside_container = InsideContainer();
+  if (inside_container)
+    ReadContainerMemoryLimits(memory);
 
   if (memory.swap_total != 0)
     LOG(WARNING) << "SWAP is enabled. Consider disabling it when running Dragonfly.";
