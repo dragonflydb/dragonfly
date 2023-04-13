@@ -11,6 +11,7 @@
 #include <absl/flags/usage_config.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_split.h>
 #include <absl/strings/strip.h>
 #include <liburing.h>
 #include <mimalloc.h>
@@ -488,6 +489,43 @@ void ReadContainerMemoryLimits(io::MemInfoData& mdata) {
   }
 }
 
+size_t ReadContainerThreadLimits() {
+  using namespace io;
+
+  /**
+   * In order to check for CPU limits, we check two files:
+   * - /sys/fs/cgroup/cpu.max: this file contains two tokens:
+   *  <a> <b>
+   * where <a> is either max, or some number, and <b> is the size
+   * of a time share. If <a> is not max, then <a>/<b> is the number
+   * of useable CPUs (where a non-integer is treated as a CPU
+   * available for a fraction of a time share)
+   * - /sys/fs/cgroup/cpuset.cpus: this file is either empty,
+   * or otherwise holds a list of the physical CPUs allocated to the container.
+   * Since cpuset limits what physical cores the container can use,
+   * then we can skip reading this file as we get its value later, as
+   * such we return 0.
+   */
+
+  if (auto cpu = ReadFileToString("/sys/fs/cgroup/cpu.max"); cpu.has_value()) {
+    vector<string_view> res = absl::StrSplit(cpu.value(), ' ');
+
+    CHECK_EQ(res.size(), 2u);
+
+    if (res[0] == "max")
+      return 0;
+    else {
+      double count, timeshare;
+      CHECK(absl::SimpleAtod(res[0], &count));
+      CHECK(absl::SimpleAtod(res[1], &timeshare));
+
+      return static_cast<size_t>(ceil(count / timeshare));
+    }
+  }
+
+  return 0;
+}
+
 }  // namespace
 }  // namespace dfly
 
@@ -589,10 +627,15 @@ Usage: dragonfly [FLAGS]
   unique_ptr<util::ProactorPool> pool;
 
   bool use_epoll = ShouldUseEpollAPI(kver);
+  size_t max_available_threads{0};
+
+  if (inside_container)
+    max_available_threads = ReadContainerThreadLimits();
+
   if (use_epoll) {
-    pool.reset(fb2::Pool::Epoll());
+    pool.reset(fb2::Pool::Epoll(max_available_threads));
   } else {
-    pool.reset(fb2::Pool::IOUring(1024));  // 1024 - iouring queue size.
+    pool.reset(fb2::Pool::IOUring(1024, max_available_threads));  // 1024 - iouring queue size.
   }
 
   pool->Run();
