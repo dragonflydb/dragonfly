@@ -85,8 +85,17 @@ class RdbLoaderBase {
   };
 
   struct LoadTrace {
-    std::vector<LoadBlob> arr;
+    // Some traces are very long. We divide them into multiple segments.
+    std::vector<std::vector<LoadBlob>> arr;
     std::unique_ptr<StreamTrace> stream_trace;
+
+    size_t blob_count() const {
+      size_t count = 0;
+      for (const auto& seg : arr) {
+        count += seg.size();
+      }
+      return count;
+    }
   };
 
   class OpaqueObjLoader;
@@ -136,7 +145,6 @@ class RdbLoaderBase {
 
   std::error_code EnsureReadInternal(size_t min_sz);
 
- protected:
   base::IoBuf* mem_buf_ = nullptr;
   base::IoBuf origin_mem_buf_;
   ::io::Source* src_ = nullptr;
