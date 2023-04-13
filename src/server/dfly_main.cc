@@ -498,12 +498,13 @@ void ReadContainerMemoryLimits(io::MemInfoData& mdata) {
       CHECK(absl::SimpleAtoi(max.value(), &mdata.mem_total));
   }
 
+  mdata.mem_avail = mdata.mem_total;
   auto high = io::ReadFileToString(cgroup + "/memory.high");
 
   if (high.has_value()) {
     auto high_val = high.value();
     if (high_val.find("max") != high_val.npos)
-      mdata.mem_avail = mdata.mem_total;
+      return;
     else
       CHECK(absl::SimpleAtoi(high.value(), &mdata.mem_avail));
   }
@@ -603,7 +604,6 @@ Usage: dragonfly [FLAGS]
   }
 
   auto memory = ReadMemInfo().value();
-  LOG(INFO) << "inside container: " << InsideContainer();
 
   auto inside_container = InsideContainer();
   if (inside_container)
