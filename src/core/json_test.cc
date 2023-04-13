@@ -8,6 +8,8 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 
+#include <memory_resource>
+
 namespace dfly {
 using namespace std;
 using namespace jsoncons;
@@ -99,5 +101,44 @@ TEST_F(JsonTest, Delete) {
 
   it->value().erase("a");
   EXPECT_EQ(R"({"c":{"a":1, "b":2}, "d":{"b":2, "c":3}, "e": [1,2]})"_json, j1);
+}
+
+struct pmr_sorted_policy : public sorted_policy {
+  template<class T, class Allocator>
+  using vector = std::pmr::vector<T>;
+
+  template <class KeyT,class Json>
+  using sorted_json_object = sorted_json_object<KeyT,Json,vector>;
+
+  template <class Json>
+  using array = json_array<Json,vector>;
+
+  template <class CharT, class CharTraits, class Allocator>
+  using string = std::pmr::basic_string<CharT>;
+};
+
+TEST_F(JsonTest, CustomMemoryAllocator) {
+  using custom_json = basic_json<char, pmr_sorted_policy, std::pmr::polymorphic_allocator<char>>;
+  std::pmr::polymorphic_allocator<char> pa{std::pmr::new_delete_resource()};
+
+  std::string input = R"(
+{ "store": {
+    "book": [
+      { "category": "Roman",
+        "author": " Felix Lobrecht",
+        "title": "Sonne und Beton",
+        "price": 12.99
+      },
+      { "category": "Roman",
+        "author": "Thomas F. Schneider",
+        "title": "Im Westen nichts Neues",
+        "price": 10.00
+      }
+    ]
+  }
+}
+)";
+
+  custom_json j;
 }
 }  // namespace dfly
