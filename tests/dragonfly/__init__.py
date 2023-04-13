@@ -150,7 +150,8 @@ class PortPicker():
     def get_available_port(self):
         while not self.is_port_available(self.next_port):
             self.next_port += 1
-        return self.next_port
+        self.next_port += 1
+        return self.next_port - 1
 
     def is_port_available(self, port):
         import socket
