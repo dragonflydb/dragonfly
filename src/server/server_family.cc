@@ -124,7 +124,10 @@ string InferLoadFile(fs::path data_dir) {
 
   SubstituteFilenameTsPlaceholder(&fl_path, "*");
   if (!fl_path.has_extension()) {
-    fl_path += ".*";
+    fl_path += "*";
+  } else if (fl_path.extension() == ".dfs") {
+    auto s = fl_path.native();
+    fl_path = s.substr(0, s.size() - 4) + "-summary.dfs";
   }
   io::Result<io::StatShortVec> short_vec = io::StatFiles(fl_path.generic_string());
 
