@@ -439,6 +439,21 @@ bool ShouldUseEpollAPI(const base::sys::KernelVersion& kver) {
   return true;
 }
 
+string get_cgroup_path(void) {
+    // Begin by reading /proc/self/cgroup
+
+    auto cg = io::ReadFileToString("/proc/self/cgroup");
+    CHECK(cg.has_value());
+
+    // Here, we assume that CGroup v1 is being used. This
+    // is quite likely, as CGroup v1 was introduced back in 2015.
+
+    // strip 0::<path> into just <path>.
+    return cg.value().substr(3); 
+}
+
+const auto cgroup = get_cgroup_path();
+
 bool InsideContainer() {
   /**
    * (attemps) to check whether we are running
@@ -464,11 +479,11 @@ bool InsideContainer() {
 
   using io::Exists;
 
-  return Exists("/.dockerenv") || Exists("/sys/fs/cgroup/memory.max");
+  return Exists("/.dockerenv") || Exists(cgroup + "/memory.max");
 }
 
 void ReadContainerMemoryLimits(io::MemInfoData& mdata) {
-  auto max = io::ReadFileToString("/sys/fs/cgroup/memory.max");
+  auto max = io::ReadFileToString(cgroup + "/memory.max");
 
   if (max.has_value()) {
     auto max_val = max.value();
@@ -478,7 +493,7 @@ void ReadContainerMemoryLimits(io::MemInfoData& mdata) {
       CHECK(absl::SimpleAtoi(max.value(), &mdata.mem_total));
   }
 
-  auto high = io::ReadFileToString("/sys/fs/cgroup/memory.high");
+  auto high = io::ReadFileToString(cgroup + "/memory.high");
 
   if (high.has_value()) {
     auto high_val = high.value();
@@ -507,7 +522,7 @@ size_t ReadContainerThreadLimits() {
    * such we return 0.
    */
 
-  if (auto cpu = ReadFileToString("/sys/fs/cgroup/cpu.max"); cpu.has_value()) {
+  if (auto cpu = ReadFileToString(cgroup + "/cpu.max"); cpu.has_value()) {
     vector<string_view> res = absl::StrSplit(cpu.value(), ' ');
 
     CHECK_EQ(res.size(), 2u);
