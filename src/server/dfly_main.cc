@@ -449,11 +449,16 @@ string get_cgroup_path(void) {
     // Here, we assume that CGroup v1 is being used. This
     // is quite likely, as CGroup v1 was introduced back in 2015.
 
-    // strip 0::<path> into just <path>.
-    return cg.value().substr(3); 
+    // strip 0::<path> into just <path>, and newline.
+    auto cgv = std::move(cg.value());
+    return cgv.substr(3, cgv.length() - 3 - 1);
+    /**
+     * -3: we are skipping the first three characters
+     * -1: we discard the last character (a newline)
+    */
 }
 
-const auto cgroup = get_cgroup_path();
+const auto cgroup = "/sys/fs/cgroup/" + get_cgroup_path();
 
 bool InsideContainer() {
   /**
