@@ -26,6 +26,7 @@
 #include "io/file_util.h"
 #include "io/proc_reader.h"
 #include "server/common.h"
+#include "server/generic_family.h"
 #include "server/main_service.h"
 #include "server/version.h"
 #include "strings/human_readable.h"
@@ -69,7 +70,6 @@ std::string AbslUnparseFlag(const MaxMemoryFlag& flag) {
 }
 
 ABSL_DECLARE_FLAG(uint32_t, port);
-ABSL_DECLARE_FLAG(uint32_t, dbnum);
 ABSL_DECLARE_FLAG(uint32_t, memcache_port);
 ABSL_DECLARE_FLAG(uint16_t, admin_port);
 ABSL_DECLARE_FLAG(std::string, admin_bind);

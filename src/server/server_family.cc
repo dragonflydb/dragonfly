@@ -31,6 +31,7 @@ extern "C" {
 #include "server/dflycmd.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/generic_family.h"
 #include "server/journal/journal.h"
 #include "server/main_service.h"
 #include "server/memory_cmd.h"
@@ -1314,8 +1315,17 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
   if (sub_cmd == "SET") {
     return (*cntx)->SendOk();
   } else if (sub_cmd == "GET" && args.size() == 2) {
+    // Send empty response, like Redis does, unless the param is supported
+    std::vector<std::string> res;
+
     string_view param = ArgS(args, 1);
-    string_view res[2] = {param, "tbd"};
+    if (param == "databases") {
+      res.emplace_back(param);
+      res.push_back(absl::StrCat(absl::GetFlag(FLAGS_dbnum)));
+    } else if (param == "maxmemory") {
+      res.emplace_back(param);
+      res.push_back(absl::StrCat(max_memory_limit));
+    }
 
     return (*cntx)->SendStringArr(res, RedisReplyBuilder::MAP);
   } else if (sub_cmd == "RESETSTAT") {

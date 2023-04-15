@@ -4,9 +4,12 @@
 
 #pragma once
 
+#include "base/flags.h"
 #include "facade/op_status.h"
 #include "server/common.h"
 #include "server/table.h"
+
+ABSL_DECLARE_FLAG(uint32_t, dbnum);
 
 namespace util {
 class ProactorPool;
