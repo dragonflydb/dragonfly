@@ -1134,13 +1134,13 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   string_view sub_cmd = ArgS(args, 0);
 
   if (sub_cmd == "SETNAME" && args.size() == 2) {
-    cntx->owner()->SetName(ArgS(args, 1));
+    cntx->owner()->SetName(string{ArgS(args, 1)});
     return (*cntx)->SendOk();
   }
 
   if (sub_cmd == "GETNAME") {
-    const char* name = cntx->owner()->GetName();
-    if (*name != 0) {
+    auto name = cntx->owner()->GetName();
+    if (!name.empty()) {
       return (*cntx)->SendBulkString(name);
     } else {
       return (*cntx)->SendNull();

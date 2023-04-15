@@ -325,7 +325,7 @@ void Connection::DispatchOperations::operator()(Request::PipelineMsg& msg) {
 
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
                        ServiceInterface* service)
-    : io_buf_(kMinReadSize), http_listener_(http_listener), ctx_(ctx), service_(service) {
+    : io_buf_(kMinReadSize), http_listener_(http_listener), ctx_(ctx), service_(service), name_{} {
   static atomic_uint32_t next_id{1};
 
   protocol_ = protocol;
@@ -344,8 +344,6 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 
   creation_time_ = time(nullptr);
   last_interaction_ = creation_time_;
-  memset(name_, 0, sizeof(name_));
-  memset(phase_, 0, sizeof(phase_));
   id_ = next_id.fetch_add(1, memory_order_relaxed);
 }
 
@@ -502,12 +500,15 @@ string Connection::GetClientInfo(unsigned thread_id) const {
   getsockopt(lsb->native_handle(), SOL_SOCKET, SO_INCOMING_CPU, &cpu, &len);
   int my_cpu_id = sched_getcpu();
 
+  static constexpr string_view PHASE_NAMES[] = {"readsock", "process"};
+  static_assert(PHASE_NAMES[PROCESS] == "process");
+
   absl::StrAppend(&res, "id=", id_, " addr=", re.address().to_string(), ":", re.port());
   absl::StrAppend(&res, " laddr=", le.address().to_string(), ":", le.port());
   absl::StrAppend(&res, " fd=", lsb->native_handle(), " name=", name_);
   absl::StrAppend(&res, " tid=", thread_id, " irqmatch=", int(cpu == my_cpu_id));
   absl::StrAppend(&res, " age=", now - creation_time_, " idle=", now - last_interaction_);
-  absl::StrAppend(&res, " phase=", phase_);
+  absl::StrAppend(&res, " phase=", PHASE_NAMES[phase_]);
 
   if (cc_) {
     string cc_info = service_->GetContextInfo(cc_.get());
@@ -575,7 +576,7 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   // At the start we read from the socket to determine the HTTP/Memstore protocol.
   // Therefore we may already have some data in the buffer.
   if (io_buf_.InputLen() > 0) {
-    SetPhase("process");
+    phase_ = PROCESS;
     if (redis_parser_) {
       parse_status = ParseRedis();
     } else {
@@ -783,7 +784,7 @@ auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, Pars
     FetchBuilderStats(stats_, builder);
 
     io::MutableBytes append_buf = io_buf_.AppendBuffer();
-    SetPhase("readsock");
+    phase_ = READ_SOCKET;
 
     ::io::Result<size_t> recv_sz = peer->Recv(append_buf);
     last_interaction_ = time(nullptr);
@@ -797,7 +798,7 @@ auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, Pars
     io_buf_.CommitWrite(*recv_sz);
     stats_->io_read_bytes += *recv_sz;
     ++stats_->io_read_cnt;
-    SetPhase("process");
+    phase_ = PROCESS;
 
     if (redis_parser_) {
       parse_status = ParseRedis();
@@ -945,13 +946,6 @@ std::string Connection::RemoteEndpointAddress() const {
   LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
   auto re = lsb->RemoteEndpoint();
   return re.address().to_string();
-}
-
-void Connection::CopyCharBuf(std::string_view src, unsigned dest_len, char* dest) {
-  src = src.substr(0, dest_len - 1);
-  if (!src.empty())
-    memcpy(dest, src.data(), src.size());
-  dest[src.size()] = '\0';
 }
 
 }  // namespace facade

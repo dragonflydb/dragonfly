@@ -72,6 +72,8 @@ class Connection : public util::Connection {
     PubMessage(PubMessage&&) = default;
   };
 
+  enum Phase { READ_SOCKET, PROCESS };
+
  public:
   // Add PubMessage to dispatch queue.
   // Virtual because behaviour is overwritten in test_utils.
@@ -103,15 +105,11 @@ class Connection : public util::Connection {
     return protocol_;
   }
 
-  void SetPhase(std::string_view phase) {
-    CopyCharBuf(phase, sizeof(phase_), phase_);
+  void SetName(std::string name) {
+    name_ = name;
   }
 
-  void SetName(std::string_view name) {
-    CopyCharBuf(name, sizeof(name_), name_);
-  }
-
-  const char* GetName() const {
+  std::string_view GetName() const {
     return name_;
   }
 
@@ -156,8 +154,6 @@ class Connection : public util::Connection {
 
   void OnBreakCb(int32_t mask);
 
-  static void CopyCharBuf(std::string_view src, unsigned dest_len, char* dest);
-
  private:
   std::deque<RequestPtr> dispatch_q_;  // dispatch queue
   dfly::EventCount evc_;               // dispatch queue waker
@@ -176,8 +172,9 @@ class Connection : public util::Connection {
   ServiceInterface* service_;
 
   time_t creation_time_, last_interaction_;
-  char name_[16];
-  char phase_[16];
+
+  Phase phase_;
+  std::string name_;
 
   std::unique_ptr<ConnectionContext> cc_;
 
