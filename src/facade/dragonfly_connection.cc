@@ -88,7 +88,7 @@ thread_local uint32_t free_req_release_weight = 0;
 
 }  // namespace
 
-thread_local vector<Connection::RequestPtr> Connection::free_req_pool_;
+thread_local vector<Connection::RequestPtr> Connection::pipeline_req_pool_;
 
 struct Connection::Shutdown {
   absl::flat_hash_map<ShutdownHandle, ShutdownCb> map;
@@ -657,18 +657,8 @@ auto Connection::ParseRedis() -> ParserStatus {
       bool is_sync_dispatch = !cc_->async_dispatch && !cc_->force_dispatch;
       if (dispatch_q_.empty() && is_sync_dispatch && consumed >= io_buf_.InputLen()) {
         // Gradually release the request pool.
-        // The request pool is shared by all the connections in the thread so we do not want
-        // to release it aggressively just because some connection is running in
-        // non-pipelined mode. So we wait at least N times,
-        // where N is the number of connections in the thread.
-        if (!free_req_pool_.empty()) {
-          ++free_req_release_weight;
-          if (free_req_release_weight > stats_->num_conns) {
-            free_req_release_weight = 0;
-            stats_->pipeline_cache_capacity -= free_req_pool_.back()->StorageCapacity();
-            free_req_pool_.pop_back();
-          }
-        }
+        ShrinkPipelinePool();
+
         RespToArgList(tmp_parse_args_, &tmp_cmd_vec_);
 
         DVLOG(2) << "Sync dispatch " << ToSV(tmp_cmd_vec_.front());
@@ -859,7 +849,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
     if (req->IsPipelineMsg() && stats_->pipeline_cache_capacity < request_cache_limit) {
       stats_->pipeline_cache_capacity += req->StorageCapacity();
-      free_req_pool_.push_back(std::move(req));
+      pipeline_req_pool_.push_back(std::move(req));
     }
   }
 
@@ -884,16 +874,39 @@ auto Connection::FromArgs(RespVec args, mi_heap_t* heap) -> RequestPtr {
 
   RequestPtr req;
 
-  if (free_req_pool_.empty()) {
-    req = Request::New(heap, args, backed_sz);
-  } else {
-    free_req_release_weight = 0;  // Reset the release weight.
-    req = move(free_req_pool_.back());
-    stats_->pipeline_cache_capacity -= req->StorageCapacity();
-
-    free_req_pool_.pop_back();
+  if (req = GetFromPipelinePool(); req) {
     req->Emplace(move(args), backed_sz);
+  } else {
+    req = Request::New(heap, args, backed_sz);
   }
+  return req;
+}
+
+void Connection::ShrinkPipelinePool() {
+  if (pipeline_req_pool_.empty())
+    return;
+
+  // The request pool is shared by all the connections in the thread so we do not want
+  // to release it aggressively just because some connection is running in
+  // non-pipelined mode. So by using free_req_release_weight we wait at least N times,
+  // where N is the number of connections in the thread.
+  ++free_req_release_weight;
+
+  if (free_req_release_weight > stats_->num_conns) {
+    free_req_release_weight = 0;
+    stats_->pipeline_cache_capacity -= pipeline_req_pool_.back()->StorageCapacity();
+    pipeline_req_pool_.pop_back();
+  }
+}
+
+Connection::RequestPtr Connection::GetFromPipelinePool() {
+  if (pipeline_req_pool_.empty())
+    return {};
+
+  free_req_release_weight = 0;  // Reset the release weight.
+  RequestPtr req = move(pipeline_req_pool_.back());
+  stats_->pipeline_cache_capacity -= req->StorageCapacity();
+  pipeline_req_pool_.pop_back();
   return req;
 }
 
@@ -902,7 +915,7 @@ void Connection::ShutdownSelf() {
 }
 
 void Connection::ShutdownThreadLocal() {
-  free_req_pool_.clear();
+  pipeline_req_pool_.clear();
 }
 
 void RespToArgList(const RespVec& src, CmdArgVec* dest) {

@@ -154,6 +154,12 @@ class Connection : public util::Connection {
 
   void OnBreakCb(int32_t mask);
 
+  // Shrink pipeline pool by a little while handling regular commands.
+  void ShrinkPipelinePool();
+
+  // Returns non-null request ptr if pool has vacant entries.
+  RequestPtr GetFromPipelinePool();
+
  private:
   std::deque<RequestPtr> dispatch_q_;  // dispatch queue
   dfly::EventCount evc_;               // dispatch queue waker
@@ -189,7 +195,10 @@ class Connection : public util::Connection {
   RespVec tmp_parse_args_;
   CmdArgVec tmp_cmd_vec_;
 
-  static thread_local std::vector<RequestPtr> free_req_pool_;
+  // Pooled pipieline messages per-thread.
+  // Aggregated while handling pipelines,
+  // graudally released while handling regular commands.
+  static thread_local std::vector<RequestPtr> pipeline_req_pool_;
 };
 
 void RespToArgList(const RespVec& src, CmdArgVec* dest);
