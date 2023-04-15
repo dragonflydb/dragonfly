@@ -78,13 +78,6 @@ bool MatchHttp11Line(string_view line) {
 constexpr size_t kMinReadSize = 256;
 constexpr size_t kMaxReadSize = 32_KB;
 
-struct PubMsgRecord {
-  Connection::PubMessage pub_msg;
-
-  PubMsgRecord(Connection::PubMessage pmsg) : pub_msg(move(pmsg)) {
-  }
-};
-
 #ifdef ABSL_HAVE_ADDRESS_SANITIZER
 constexpr size_t kReqStorageSize = 88;
 #else
@@ -116,19 +109,19 @@ struct Connection::RequestDeleter {
   void operator()(Request* req) const;
 };
 
+using PubMessage = Connection::PubMessage;
+using MonitorMessage = std::string;
+
 // Please note: The call to the Dtor is mandatory for this!!
 // This class contain types that don't have trivial destructed objects
 class Connection::Request {
  public:
-  using MonitorMessage = std::string;
-
-  struct PipelineMsg {
-    // I do not use mi_heap_t explicitly but mi_stl_allocator at the end does the same job
-    // of using the thread's heap.
+  struct PipelineMessage {
+    // mi_stl_allocator uses mi heap internally.
     // The capacity is chosen so that we allocate a fully utilized (256 bytes) block.
     using StorageType = absl::InlinedVector<char, kReqStorageSize, mi_stl_allocator<char>>;
 
-    PipelineMsg(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
+    PipelineMessage(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
     }
 
     void Reset(size_t nargs, size_t capacity);
@@ -137,7 +130,7 @@ class Connection::Request {
     StorageType storage;
   };
 
-  using MessagePayload = std::variant<PipelineMsg, PubMsgRecord, MonitorMessage>;
+  using MessagePayload = std::variant<PipelineMessage, PubMessage, MonitorMessage>;
 
   // Overload to create the a new pipeline message
   static RequestPtr New(mi_heap_t* heap, const RespVec& args, size_t capacity);
@@ -150,26 +143,29 @@ class Connection::Request {
 
   void Emplace(const RespVec& args, size_t capacity);
 
-  MessagePayload payload;
-
   size_t StorageCapacity() const;
 
   bool IsPipelineMsg() const;
 
  private:
-  static constexpr size_t kSizeOfPipelineMsg = sizeof(PipelineMsg);
+  static constexpr size_t kSizeOfPipelineMsg = sizeof(PipelineMessage);
 
-  Request(size_t nargs, size_t capacity) : payload(PipelineMsg{nargs, capacity}) {
+  Request(size_t nargs, size_t capacity) : payload(PipelineMessage{nargs, capacity}) {
   }
 
-  Request(PubMsgRecord msg) : payload(std::move(msg)) {
+  Request(PubMessage msg) : payload(move(msg)) {
   }
 
-  Request(MonitorMessage msg) : payload(std::move(msg)) {
+  Request(MonitorMessage msg) : payload(move(msg)) {
   }
 
   Request(const Request&) = delete;
+
+  // Store arguments for pipeline message.
   void SetArgs(const RespVec& args);
+
+ public:
+  MessagePayload payload;
 };
 
 Connection::PubMessage::PubMessage(string pattern, shared_ptr<string> channel,
@@ -186,18 +182,18 @@ struct Connection::DispatchOperations {
       : stats{me->service_->GetThreadLocalConnectionStats()}, builder{b}, self(me) {
   }
 
-  void operator()(const PubMsgRecord& msg);
-  void operator()(Request::PipelineMsg& msg);
-  void operator()(const Request::MonitorMessage& msg);
+  void operator()(const PubMessage& msg);
+  void operator()(Request::PipelineMessage& msg);
+  void operator()(const MonitorMessage& msg);
 
   ConnectionStats* stats = nullptr;
   SinkReplyBuilder* builder = nullptr;
   Connection* self = nullptr;
 };
 
-Connection::RequestPtr Connection::Request::New(std::string msg) {
+Connection::RequestPtr Connection::Request::New(MonitorMessage msg) {
   void* ptr = mi_malloc(sizeof(Request));
-  Request* req = new (ptr) Request(std::move(msg));
+  Request* req = new (ptr) Request(move(msg));
   return Connection::RequestPtr{req, Connection::RequestDeleter{}};
 }
 
@@ -213,9 +209,20 @@ Connection::RequestPtr Connection::Request::New(mi_heap_t* heap, const RespVec& 
   return Connection::RequestPtr{req, Connection::RequestDeleter{}};
 }
 
+Connection::RequestPtr Connection::Request::New(PubMessage pub_msg) {
+  // This will generate a new request for pubsub message
+  // Please note that unlike the above case, we don't need to "protect", the internals here
+  // since we are currently using a borrow token for it - i.e. the BlockingCounter will
+  // ensure that the message is not deleted until we are finish sending it at the other
+  // side of the queue
+  void* ptr = mi_malloc(sizeof(Request));
+  Request* req = new (ptr) Request(move(pub_msg));
+  return Connection::RequestPtr{req, Connection::RequestDeleter{}};
+}
+
 void Connection::Request::SetArgs(const RespVec& args) {
-  // At this point we know that we have PipelineMsg in Request so next op is safe.
-  PipelineMsg& pipeline_msg = std::get<PipelineMsg>(payload);
+  // At this point we know that we have PipelineMessage in Request so next op is safe.
+  PipelineMessage& pipeline_msg = std::get<PipelineMessage>(payload);
   auto* next = pipeline_msg.storage.data();
   for (size_t i = 0; i < args.size(); ++i) {
     auto buf = args[i].GetBuf();
@@ -226,34 +233,22 @@ void Connection::Request::SetArgs(const RespVec& args) {
   }
 }
 
-Connection::RequestPtr Connection::Request::New(PubMessage pub_msg) {
-  // This will generate a new request for pubsub message
-  // Please note that unlike the above case, we don't need to "protect", the internals here
-  // since we are currently using a borrow token for it - i.e. the BlockingCounter will
-  // ensure that the message is not deleted until we are finish sending it at the other
-  // side of the queue
-  PubMsgRecord new_msg{move(pub_msg)};
-  void* ptr = mi_malloc(sizeof(Request));
-  Request* req = new (ptr) Request(std::move(new_msg));
-  return Connection::RequestPtr{req, Connection::RequestDeleter{}};
-}
-
 void Connection::RequestDeleter::operator()(Request* req) const {
   req->~Request();
   mi_free(req);
 }
 
 void Connection::Request::Emplace(const RespVec& args, size_t capacity) {
-  PipelineMsg* msg = get_if<PipelineMsg>(&payload);
+  PipelineMessage* msg = get_if<PipelineMessage>(&payload);
   if (msg) {
     msg->Reset(args.size(), capacity);
   } else {
-    payload = PipelineMsg{args.size(), capacity};
+    payload = PipelineMessage{args.size(), capacity};
   }
   SetArgs(args);
 }
 
-void Connection::Request::PipelineMsg::Reset(size_t nargs, size_t capacity) {
+void Connection::Request::PipelineMessage::Reset(size_t nargs, size_t capacity) {
   storage.resize(capacity);
   args.resize(nargs);
 }
@@ -262,8 +257,8 @@ template <class... Ts> struct Overloaded : Ts... { using Ts::operator()...; };
 template <class... Ts> Overloaded(Ts...) -> Overloaded<Ts...>;
 
 size_t Connection::Request::StorageCapacity() const {
-  return std::visit(Overloaded{[](const PubMsgRecord& msg) -> size_t { return 0; },
-                               [](const PipelineMsg& arg) -> size_t {
+  return std::visit(Overloaded{[](const PubMessage& msg) -> size_t { return 0; },
+                               [](const PipelineMessage& arg) -> size_t {
                                  return arg.storage.capacity() + arg.args.capacity();
                                },
                                [](const MonitorMessage& arg) -> size_t { return arg.capacity(); }},
@@ -271,18 +266,17 @@ size_t Connection::Request::StorageCapacity() const {
 }
 
 bool Connection::Request::IsPipelineMsg() const {
-  return std::get_if<PipelineMsg>(&payload) != nullptr;
+  return std::get_if<PipelineMessage>(&payload) != nullptr;
 }
 
-void Connection::DispatchOperations::operator()(const Request::MonitorMessage& msg) {
+void Connection::DispatchOperations::operator()(const MonitorMessage& msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
   rbuilder->SendSimpleString(msg);
 }
 
-void Connection::DispatchOperations::operator()(const PubMsgRecord& msg) {
+void Connection::DispatchOperations::operator()(const PubMessage& pub_msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
   ++stats->async_writes_cnt;
-  const PubMessage& pub_msg = msg.pub_msg;
   string_view arr[4];
   if (pub_msg.type == PubMessage::kPublish) {
     if (pub_msg.pattern.empty()) {
@@ -309,7 +303,7 @@ void Connection::DispatchOperations::operator()(const PubMsgRecord& msg) {
   }
 }
 
-void Connection::DispatchOperations::operator()(Request::PipelineMsg& msg) {
+void Connection::DispatchOperations::operator()(Request::PipelineMessage& msg) {
   ++stats->pipelined_cmd_cnt;
   self->pipeline_msg_cnt_--;
 
