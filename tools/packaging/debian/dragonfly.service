@@ -5,9 +5,10 @@ Documentation=
 
 [Service]
 Type=simple
+EnvironmentFile=-/etc/dragonfly/environment
 ExecStart=/usr/bin/dragonfly --flagfile=/etc/dragonfly/dragonfly.conf
 PIDFile=/var/run/dragonfly/dragonfly.pid
-TimeoutStopSec=0
+TimeoutStopSec=infinity
 Restart=always
 User=dfly
 Group=dfly
@@ -16,10 +17,11 @@ RuntimeDirectoryMode=2755
 
 UMask=007
 PrivateTmp=yes
-LimitNOFILE=65535
+LimitNOFILE=262144
 PrivateDevices=yes
 ProtectHome=yes
-ReadOnlyDirectories=/
+ProtectSystem=full
+
 ReadWritePaths=-/var/lib/dragonfly
 ReadWritePaths=-/var/log/dragonfly
 ReadWritePaths=-/var/run/dragonfly
@@ -34,8 +36,7 @@ RestrictRealtime=true
 RestrictNamespaces=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
-ProtectSystem=true
-ReadWriteDirectories=-/etc/dragonfly
+
 
 [Install]
 WantedBy=multi-user.target
