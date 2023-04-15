@@ -27,7 +27,7 @@ template <typename F> void IterateKeys(CmdArgList args, KeyIndex keys, F&& f) {
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx)
     : cmds_{cmds}, cntx_{cntx}, base_cid_{cntx->transaction->GetCId()} {
   auto mode = cntx->transaction->GetMultiMode();
-  track_keys_ = (mode == Transaction::LOCK_INCREMENTAL) || (mode == Transaction::NON_ATOMIC);
+  track_keys_ = mode == Transaction::NON_ATOMIC;
 }
 
 MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(ShardId sid) {

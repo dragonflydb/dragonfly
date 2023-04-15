@@ -113,11 +113,8 @@ class Transaction {
     GLOBAL = 1,
     // Keys are locked ahead during Schedule.
     LOCK_AHEAD = 2,
-    // Keys are locked incrementally during each new command.
-    // The shards to schedule on are detemined ahead and remain fixed.
-    LOCK_INCREMENTAL = 3,
     // Each command is executed separately. Equivalent to a pipeline.
-    NON_ATOMIC = 4,
+    NON_ATOMIC = 3,
   };
 
   // Squashed parallel execution requires a separate transaction for each shard. Those "stubs"
@@ -205,9 +202,6 @@ class Transaction {
 
   // Start multi in LOCK_AHEAD mode with given keys.
   void StartMultiLockedAhead(DbIndex dbid, CmdArgList keys);
-
-  // Start multi in LOCK_INCREMENTAL mode on given shards.
-  void StartMultiLockedIncr(DbIndex dbid, const std::vector<bool>& shards);
 
   // Start multi in NON_ATOMIC mode.
   void StartMultiNonAtomic();
@@ -353,17 +347,10 @@ class Transaction {
 
   // State of a multi transaction.
   struct MultiData {
-    // Increase lock counts for all current keys for mode. Clear keys.
-    void AddLocks(IntentLock::Mode mode);
-
-    // Whether it locks incrementally.
-    bool IsIncrLocks() const;
-
     MultiRole role;
     MultiMode mode;
 
     absl::flat_hash_map<std::string, LockCnt> lock_counts;
-    std::vector<std::string> keys;
 
     // The shard_journal_write vector variable is used to determine the number of shards
     // involved in a multi-command transaction. This information is utilized by replicas when
@@ -386,12 +373,10 @@ class Transaction {
   };
 
   struct PerShardCache {
-    bool requested_active = false;  // Activate on shard regardless of presence of keys.
     std::vector<std::string_view> args;
     std::vector<uint32_t> original_index;
 
     void Clear() {
-      requested_active = false;
       args.clear();
       original_index.clear();
     }

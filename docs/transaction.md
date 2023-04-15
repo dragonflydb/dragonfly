@@ -120,7 +120,7 @@ Redis transactions (MULTI/EXEC sequences) and commands produced by Lua scripts a
 
 The multi feature of the transactional framework allows running consecutive commands without rescheduling the transaction for each command as if they are part of one single transaction. This feature is transparent to the commands itself, so no changes are required for them to be used in a multi-transaction.
 
-There are four modes called "multi modes" in which a multi transaction can be executed, each with its own benefits and drawbacks.
+There are three modes called "multi modes" in which a multi transaction can be executed, each with its own benefits and drawbacks.
 
 __1. Global mode__
 
@@ -130,11 +130,7 @@ __2. Lock ahead mode__
 
 The transaction is equivalent to a regular transaction with multiple hops. It is scheduled on all keys used by the commands in the transaction block, or Lua script, and the commands are executed as a series of consecutive hops.
 
-__3. Incremental lock mode__
-
-The transaction schedules itself on all the shards that are accessed by the Redis transaction or Lua script, but does not lock any keys ahead. Only when it executes and occupies all the predetermined shards, it starts locking the keys it accesses. This mode _can_ be useful for delaying the acquisition of locks for contended keys and thus allowing other transactions to run in parallel for a longer period of time, however this mode disabled a wide range of optimizations for the multi-transaction itself, such as running out of order.
-
-__4. Non atomic mode__
+__3. Non atomic mode__
 
 All commands are executed as separate transactions making the multi-transaction not atomic. It vastly improves the throughput with contended keys, as locks are acquired only for single commands. This mode is useful for Lua scripts without atomicity requirements.
 
