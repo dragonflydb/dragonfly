@@ -50,6 +50,9 @@ struct SliceEvents {
   size_t hits = 0;
   size_t misses = 0;
 
+  // how many insertions were rejected due to OOM.
+  size_t insertion_rejections = 0;
+
   SliceEvents& operator+=(const SliceEvents& o);
 };
 

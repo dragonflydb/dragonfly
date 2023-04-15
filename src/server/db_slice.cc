@@ -208,7 +208,7 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 72, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 80, "You should update this function with new fields");
 
   ADD(evicted_keys);
   ADD(hard_evictions);
@@ -219,6 +219,7 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
   ADD(garbage_checked);
   ADD(hits);
   ADD(misses);
+  ADD(insertion_rejections);
 
   return *this;
 }
@@ -372,6 +373,8 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
 
   // If we are over limit in non-cache scenario, just be conservative and throw.
   if (!caching_mode_ && evp.mem_budget() < 0) {
+    VLOG(1) << "AddOrFind2: over limit, budget: " << evp.mem_budget();
+    events_.insertion_rejections++;
     throw bad_alloc();
   }
 
@@ -385,6 +388,9 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
   try {
     tie(it, inserted) = db.prime.Insert(std::move(co_key), PrimeValue{}, evp);
   } catch (bad_alloc& e) {
+    VLOG(1) << "AddOrFind2: bad alloc exception, budget: " << evp.mem_budget();
+    events_.insertion_rejections++;
+
     throw e;
   }
 
