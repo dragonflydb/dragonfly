@@ -61,7 +61,7 @@ TestConnection::TestConnection(Protocol protocol, io::StringSink* sink)
     : facade::Connection(protocol, nullptr, nullptr, nullptr), sink_(sink) {
 }
 
-void TestConnection::SendMsgVecAsync(PubMessage pmsg) {
+void TestConnection::SendPubMessageAsync(PubMessage pmsg) {
   if (pmsg.type == PubMessage::kPublish) {
     messages.push_back(move(pmsg));
   } else {

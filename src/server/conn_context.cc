@@ -127,7 +127,7 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
 
   if (to_reply) {
     for (size_t i = 0; i < result.size(); ++i) {
-      owner()->SendMsgVecAsync({to_add, make_shared<string>(ArgS(args, i)), result[i]});
+      owner()->SendPubMessageAsync({to_add, make_shared<string>(ArgS(args, i)), result[i]});
     }
   }
 }

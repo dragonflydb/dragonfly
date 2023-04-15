@@ -356,8 +356,8 @@ Connection::~Connection() {
 void Connection::OnShutdown() {
   VLOG(1) << "Connection::OnShutdown";
 
-  if (shutdown_) {
-    for (const auto& k_v : shutdown_->map) {
+  if (shutdown_cb_) {
+    for (const auto& k_v : shutdown_cb_->map) {
       k_v.second();
     }
   }
@@ -384,17 +384,17 @@ void Connection::OnPostMigrateThread() {
 }
 
 auto Connection::RegisterShutdownHook(ShutdownCb cb) -> ShutdownHandle {
-  if (!shutdown_) {
-    shutdown_ = make_unique<Shutdown>();
+  if (!shutdown_cb_) {
+    shutdown_cb_ = make_unique<Shutdown>();
   }
-  return shutdown_->Add(std::move(cb));
+  return shutdown_cb_->Add(std::move(cb));
 }
 
 void Connection::UnregisterShutdownHook(ShutdownHandle id) {
-  if (shutdown_) {
-    shutdown_->Remove(id);
-    if (shutdown_->map.empty())
-      shutdown_.reset();
+  if (shutdown_cb_) {
+    shutdown_cb_->Remove(id);
+    if (shutdown_cb_->map.empty())
+      shutdown_cb_.reset();
   }
 }
 
@@ -465,11 +465,11 @@ void Connection::HandleRequests() {
   VLOG(1) << "Closed connection for peer " << remote_ep;
 }
 
-void Connection::RegisterOnBreak(BreakerCb breaker_cb) {
+void Connection::RegisterBreakHook(BreakerCb breaker_cb) {
   breaker_cb_ = breaker_cb;
 }
 
-void Connection::SendMsgVecAsync(PubMessage pub_msg) {
+void Connection::SendPubMessageAsync(PubMessage pub_msg) {
   DCHECK(cc_);
 
   if (cc_->conn_closing) {
@@ -647,10 +647,10 @@ auto Connection::ParseRedis() -> ParserStatus {
   mi_heap_t* tlh = mi_heap_get_backing();
 
   do {
-    result = redis_parser_->Parse(io_buf_.InputBuffer(), &consumed, &parse_args_);
+    result = redis_parser_->Parse(io_buf_.InputBuffer(), &consumed, &tmp_parse_args_);
 
-    if (result == RedisParser::OK && !parse_args_.empty()) {
-      RespExpr& first = parse_args_.front();
+    if (result == RedisParser::OK && !tmp_parse_args_.empty()) {
+      RespExpr& first = tmp_parse_args_.front();
       if (first.type == RespExpr::STRING) {
         DVLOG(2) << "Got Args with first token " << ToSV(first.GetBuf());
       }
@@ -674,16 +674,16 @@ auto Connection::ParseRedis() -> ParserStatus {
             free_req_pool_.pop_back();
           }
         }
-        RespToArgList(parse_args_, &cmd_vec_);
+        RespToArgList(tmp_parse_args_, &tmp_cmd_vec_);
 
-        DVLOG(2) << "Sync dispatch " << ToSV(cmd_vec_.front());
+        DVLOG(2) << "Sync dispatch " << ToSV(tmp_cmd_vec_.front());
 
-        CmdArgList cmd_list{cmd_vec_.data(), cmd_vec_.size()};
+        CmdArgList cmd_list{tmp_cmd_vec_.data(), tmp_cmd_vec_.size()};
         service_->DispatchCommand(cmd_list, cc_.get());
         last_interaction_ = time(nullptr);
       } else {
         // Dispatch via queue to speedup input reading.
-        RequestPtr req = FromArgs(std::move(parse_args_), tlh);
+        RequestPtr req = FromArgs(std::move(tmp_parse_args_), tlh);
         ++pipeline_msg_cnt_;
         dispatch_q_.push_back(std::move(req));
         if (dispatch_q_.size() == 1) {
@@ -919,7 +919,7 @@ void RespToArgList(const RespVec& src, CmdArgVec* dest) {
   }
 }
 
-void Connection::SendMonitorMsg(std::string monitor_msg) {
+void Connection::SendMonitorMessageAsync(std::string monitor_msg) {
   DCHECK(cc_);
 
   if (!cc_->conn_closing) {
@@ -945,6 +945,13 @@ std::string Connection::RemoteEndpointAddress() const {
   LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
   auto re = lsb->RemoteEndpoint();
   return re.address().to_string();
+}
+
+void Connection::CopyCharBuf(std::string_view src, unsigned dest_len, char* dest) {
+  src = src.substr(0, dest_len - 1);
+  if (!src.empty())
+    memcpy(dest, src.data(), src.size());
+  dest[src.size()] = '\0';
 }
 
 }  // namespace facade
