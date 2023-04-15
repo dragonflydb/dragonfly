@@ -46,8 +46,7 @@ ABSL_FLAG(uint32_t, port, 6379, "Redis port");
 ABSL_FLAG(uint32_t, memcache_port, 0, "Memcached port");
 
 ABSL_FLAG(uint32_t, multi_exec_mode, 1,
-          "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for locking "
-          "incrementally, 4 for non atomic");
+          "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for non atomic");
 
 ABSL_FLAG(bool, multi_exec_squash, true,
           "Whether multi exec will squash single shard commands to optimize performance");
@@ -1132,13 +1131,6 @@ void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
   ss->RecordCallLatency(sha, (end - start) / 1000);
 }
 
-vector<bool> DetermineKeyShards(CmdArgList keys) {
-  vector<bool> out(shard_set->size());
-  for (auto k : keys)
-    out[Shard(facade::ToSV(k), out.size())] = true;
-  return out;
-}
-
 optional<ScriptMgr::ScriptParams> LoadScipt(string_view sha, ScriptMgr* script_mgr,
                                             Interpreter* interpreter) {
   auto ss = ServerState::tlocal();
@@ -1176,8 +1168,7 @@ bool StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptParams param
                     Transaction* trans) {
   Transaction::MultiMode multi_mode = DetermineMultiMode(params);
 
-  if (keys.empty() &&
-      (multi_mode == Transaction::LOCK_AHEAD || multi_mode == Transaction::LOCK_INCREMENTAL))
+  if (keys.empty() && multi_mode == Transaction::LOCK_AHEAD)
     return false;
 
   switch (multi_mode) {
@@ -1186,9 +1177,6 @@ bool StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptParams param
       return true;
     case Transaction::LOCK_AHEAD:
       trans->StartMultiLockedAhead(dbid, keys);
-      return true;
-    case Transaction::LOCK_INCREMENTAL:
-      trans->StartMultiLockedIncr(dbid, DetermineKeyShards(keys));
       return true;
     case Transaction::NON_ATOMIC:
       trans->StartMultiNonAtomic();
@@ -1346,16 +1334,6 @@ CmdArgVec CollectAllKeys(ConnectionState::ExecInfo* exec_info) {
   return out;
 }
 
-vector<bool> DetermineKeyShards(ConnectionState::ExecInfo* exec_info) {
-  vector<bool> out(shard_set->size());
-
-  IterateAllKeys(exec_info, [&out](MutableSlice key) {
-    ShardId sid = Shard(facade::ToSV(key), shard_set->size());
-    out[sid] = true;
-  });
-  return out;
-}
-
 // Return true if transaction was scheduled, false if scheduling was not required.
 bool StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo* exec_info,
                     CmdArgVec* tmp_keys) {
@@ -1375,8 +1353,7 @@ bool StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo*
   DCHECK(multi_mode >= Transaction::GLOBAL && multi_mode <= Transaction::NON_ATOMIC);
 
   // Atomic modes fall back to GLOBAL if they contain global commands.
-  if (global &&
-      (multi_mode == Transaction::LOCK_AHEAD || multi_mode == Transaction::LOCK_INCREMENTAL))
+  if (global && multi_mode == Transaction::LOCK_AHEAD)
     multi_mode = Transaction::GLOBAL;
 
   switch ((Transaction::MultiMode)multi_mode) {
@@ -1386,9 +1363,6 @@ bool StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo*
     case Transaction::LOCK_AHEAD:
       *tmp_keys = CollectAllKeys(exec_info);
       trans->StartMultiLockedAhead(dbid, CmdArgList{*tmp_keys});
-      break;
-    case Transaction::LOCK_INCREMENTAL:
-      trans->StartMultiLockedIncr(dbid, DetermineKeyShards(exec_info));
       break;
     case Transaction::NON_ATOMIC:
       trans->StartMultiNonAtomic();
