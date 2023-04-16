@@ -165,7 +165,7 @@ class ServerFamily {
 
   void SnapshotScheduling(const SnapshotSpec& time);
 
-  Fiber snapshot_fiber_;
+  Fiber snapshot_schedule_fb_;
   Future<std::error_code> load_result_;
 
   uint32_t stats_caching_task_ = 0;
@@ -190,7 +190,7 @@ class ServerFamily {
   std::shared_ptr<LastSaveInfo> last_save_info_;  // protected by save_mu_;
   std::atomic_bool is_saving_{false};
 
-  Done is_snapshot_done_;
+  Done schedule_done_;
   std::unique_ptr<FiberQueueThreadPool> fq_threadpool_;
 };
 

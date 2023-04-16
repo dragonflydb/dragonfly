@@ -466,7 +466,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
   if (!save_time.empty()) {
     std::optional<SnapshotSpec> spec = ParseSaveSchedule(save_time);
     if (spec) {
-      snapshot_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
+      snapshot_schedule_fb_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
           [save_spec = std::move(spec.value()), this] { SnapshotScheduling(save_spec); });
     } else {
       LOG(WARNING) << "Invalid snapshot time specifier " << save_time;
@@ -480,13 +480,13 @@ void ServerFamily::Shutdown() {
   if (load_result_.valid())
     load_result_.wait();
 
-  is_snapshot_done_.Notify();
-  if (snapshot_fiber_.IsJoinable()) {
-    snapshot_fiber_.Join();
+  schedule_done_.Notify();
+  if (snapshot_schedule_fb_.IsJoinable()) {
+    snapshot_schedule_fb_.Join();
   }
 
   if (absl::GetFlag(FLAGS_save_on_shutdown)) {
-    pb_task_->Await([this] {
+    shard_set->pool()->GetNextProactor()->Await([this] {
       GenericError ec = DoSave();
       if (ec) {
         LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
@@ -616,7 +616,7 @@ Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
 void ServerFamily::SnapshotScheduling(const SnapshotSpec& spec) {
   const auto loop_sleep_time = std::chrono::seconds(20);
   while (true) {
-    if (is_snapshot_done_.WaitFor(loop_sleep_time)) {
+    if (schedule_done_.WaitFor(loop_sleep_time)) {
       break;
     }
 
