@@ -1556,6 +1556,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("garbage_collected", m.events.garbage_collected);
     append("bump_ups", m.events.bumpups);
     append("stash_unloaded", m.events.stash_unloaded);
+    append("oom_rejections", m.events.insertion_rejections);
     append("traverse_ttl_sec", m.traverse_ttl_per_sec);
     append("delete_ttl_sec", m.delete_ttl_per_sec);
     append("keyspace_hits", m.events.hits);
