@@ -125,9 +125,6 @@ string InferLoadFile(fs::path data_dir) {
   SubstituteFilenameTsPlaceholder(&fl_path, "*");
   if (!fl_path.has_extension()) {
     fl_path += "*";
-  } else if (fl_path.extension() == ".dfs") {
-    auto s = fl_path.native();
-    fl_path = s.substr(0, s.size() - 4) + "-summary.dfs";
   }
   io::Result<io::StatShortVec> short_vec = io::StatFiles(fl_path.generic_string());
 
@@ -283,11 +280,19 @@ GenericError ValidateFilenameExtension(const fs::path& filename, bool new_versio
     return {};
   }
 
-  const char* extension = new_version ? ".dfs" : ".rdb";
-
-  if (!absl::EqualsIgnoreCase(filename.extension().c_str(), extension)) {
-    return {absl::StrCat("Bad filename extension ", filename.extension().c_str(),
-                         " for SAVE with type ", new_version ? "DF" : "RDB")};
+  if (new_version) {
+    if (absl::EqualsIgnoreCase(filename.extension().c_str(), ".rdb")) {
+      return {absl::StrCat(
+          "DF snapshot format is used but '.rdb' extension was given. Use --nodf_snapshot_format "
+          "or remove the filename extension.")};
+    } else {
+      return {absl::StrCat("DF snapshot format requires no filename extension. Got \"",
+                           filename.extension().c_str(), "\"")};
+    }
+  }
+  if (!new_version && !absl::EqualsIgnoreCase(filename.extension().c_str(), ".rdb")) {
+    return {absl::StrCat("Bad filename extension \"", filename.extension().c_str(),
+                         "\" for SAVE with type RDB")};
   }
   return {};
 }
@@ -387,7 +392,15 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
   } else if (cluster_mode == "emulated") {
     is_emulated_cluster_ = true;
   } else {
-    LOG(FATAL) << "invalid cluster_mode. Exiting...";
+    LOG(ERROR) << "invalid cluster_mode. Exiting...";
+    exit(1);
+  }
+
+  if (auto ec =
+          ValidateFilenameExtension(GetFlag(FLAGS_dbfilename), GetFlag(FLAGS_df_snapshot_format));
+      ec) {
+    LOG(ERROR) << ec.Format();
+    exit(1);
   }
 }
 

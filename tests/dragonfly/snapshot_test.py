@@ -47,7 +47,7 @@ class TestRdbSnapshot(SnapshotTestBase):
         assert await seeder.compare(start_capture)
 
 
-@dfly_args({**BASIC_ARGS, "dbfilename": "test-rdbexact.rdb"})
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-rdbexact.rdb", "nodf_snapshot_format": ""})
 class TestRdbSnapshotExactFilename(SnapshotTestBase):
     """Test single file rdb snapshot without a timestamp"""
     @pytest.fixture(autouse=True)
@@ -102,18 +102,18 @@ class TestDflyAutoLoadSnapshot(SnapshotTestBase):
         ("rdb", "test-autoload1-{{timestamp}}"),
         ("df", "test-autoload2-{{timestamp}}"),
         ("rdb", "test-autoload3-{{timestamp}}.rdb"),
-        ("df", "test-autoload4-{{timestamp}}.dfs"),
-        ("rdb", "test-autoload5"),
-        ("df", "test-autoload6"),
-        ("rdb", "test-autoload7.rdb"),
-        ("df", "test-autoload8.dfs"),
+        ("rdb", "test-autoload4"),
+        ("df", "test-autoload5"),
+        ("rdb", "test-autoload6.rdb"),
     ]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("save_type, dbfilename", cases)
     async def test_snapshot(self, df_local_factory, save_type, dbfilename):
-        df_server = df_local_factory.create(
-            dbfilename=dbfilename, **BASIC_ARGS)
+        df_args = {"dbfilename": dbfilename, **BASIC_ARGS}
+        if save_type == 'rdb':
+            df_args['nodf_snapshot_format'] = ""
+        df_server = df_local_factory.create(**df_args)
         df_server.start()
 
         client = aioredis.Redis(port=df_server.port)
@@ -121,15 +121,14 @@ class TestDflyAutoLoadSnapshot(SnapshotTestBase):
         await client.execute_command("SAVE " + save_type)
         df_server.stop()
 
-        df_server2 = df_local_factory.create(
-            dbfilename=dbfilename, **BASIC_ARGS)
+        df_server2 = df_local_factory.create(**df_args)
         df_server2.start()
         client = aioredis.Redis(port=df_server.port)
         response = await client.get("TEST")
         assert response.decode("utf-8") == str(hash(dbfilename))
 
 
-@dfly_args({**BASIC_ARGS, "dbfilename": "test-periodic.dfs", "save_schedule": "*:*"})
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-periodic", "save_schedule": "*:*"})
 class TestPeriodicSnapshot(SnapshotTestBase):
     """Test periodic snapshotting"""
     @pytest.fixture(autouse=True)
