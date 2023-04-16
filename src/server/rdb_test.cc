@@ -38,18 +38,21 @@ namespace dfly {
 
 class RdbTest : public BaseFamilyTest {
  protected:
-  static void SetUpTestSuite();
   void TearDown();
+  void SetUp();
 
   io::FileSource GetSource(string name);
 };
 
-void RdbTest::SetUpTestSuite() {
-  BaseFamilyTest::SetUpTestSuite();
+void RdbTest::SetUp() {
   SetFlag(&FLAGS_dbfilename, "rdbtestdump");
+  BaseFamilyTest::SetUp();
 }
 
 void RdbTest::TearDown() {
+  // Disable save on shutdown
+  SetFlag(&FLAGS_dbfilename, "");
+
   auto rdb_files = io::StatFiles("rdbtestdump*");
   CHECK(rdb_files);
   for (const auto& fl : *rdb_files) {

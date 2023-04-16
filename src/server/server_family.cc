@@ -484,7 +484,7 @@ void ServerFamily::Shutdown() {
     snapshot_schedule_fb_.Join();
   }
 
-  if (!absl::GetFlag(FLAGS_dbfilename).empty()) {
+  if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty()) {
     shard_set->pool()->GetNextProactor()->Await([this] {
       GenericError ec = DoSave();
       if (ec) {
@@ -2046,6 +2046,22 @@ void ServerFamily::Latency(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::_Shutdown(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() > 1) {
+    (*cntx)->SendError(kSyntaxErr);
+    return;
+  }
+
+  if (args.size() == 1) {
+    auto sub_cmd = ArgS(args, 0);
+    if (absl::EqualsIgnoreCase(sub_cmd, "SAVE")) {
+    } else if (absl::EqualsIgnoreCase(sub_cmd, "NOSAVE")) {
+      save_on_shutdown_ = false;
+    } else {
+      (*cntx)->SendError(kSyntaxErr);
+      return;
+    }
+  }
+
   CHECK_NOTNULL(acceptor_)->Stop();
   (*cntx)->SendOk();
 }
@@ -2089,7 +2105,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING | CO::FAST, -2, 0, 0, 0}.HFUNC(Latency)
             << CI{"MEMORY", kMemOpts, -2, 0, 0, 0}.HFUNC(Memory)
             << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, 0}.HFUNC(Save)
-            << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0}.HFUNC(_Shutdown)
+            << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.HFUNC(_Shutdown)
             << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"READONLY", CO::READONLY, 1, 0, 0, 0}.HFUNC(ReadOnly)
             << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)

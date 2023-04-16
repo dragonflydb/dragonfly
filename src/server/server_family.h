@@ -190,6 +190,10 @@ class ServerFamily {
   std::shared_ptr<LastSaveInfo> last_save_info_;  // protected by save_mu_;
   std::atomic_bool is_saving_{false};
 
+  // Used to override save on shutdown behavior that is usually set
+  // be --dbfilename.
+  bool save_on_shutdown_{true};
+
   Done schedule_done_;
   std::unique_ptr<FiberQueueThreadPool> fq_threadpool_;
 };
