@@ -57,7 +57,6 @@ ABSL_FLAG(string, requirepass, "",
           "If empty can also be set with DFLY_PASSWORD environment variable.");
 ABSL_FLAG(string, save_schedule, "",
           "glob spec for the UTC time to save a snapshot which matches HH:MM 24h time");
-ABSL_FLAG(bool, save_on_shutdown, false, "Save database on server shutdown");
 ABSL_FLAG(bool, df_snapshot_format, true,
           "if true, save in dragonfly-specific snapshotting format");
 ABSL_FLAG(string, cluster_mode, "",
@@ -485,7 +484,7 @@ void ServerFamily::Shutdown() {
     snapshot_schedule_fb_.Join();
   }
 
-  if (absl::GetFlag(FLAGS_save_on_shutdown)) {
+  if (!absl::GetFlag(FLAGS_dbfilename).empty()) {
     shard_set->pool()->GetNextProactor()->Await([this] {
       GenericError ec = DoSave();
       if (ec) {

@@ -169,7 +169,7 @@ class TestPathEscapes(SnapshotTestBase):
             pass
 
 
-@dfly_args({**BASIC_ARGS, "dbfilename": "test-shutdown", "save_on_shutdown": ""})
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-shutdown"})
 class TestDflySnapshotOnShutdown(SnapshotTestBase):
     """Test multi file snapshot"""
     @pytest.fixture(autouse=True)
