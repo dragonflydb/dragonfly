@@ -68,17 +68,17 @@ int ResolveDns(std::string_view host, char* dest) {
   bool found_ipv6 = false;
 
   for (addrinfo* p = servinfo; p != NULL; p = p->ai_next) {
-    void* addr = nullptr;
     CHECK(p->ai_family == AF_INET || p->ai_family == AF_INET6);
     if (p->ai_family == AF_INET && !found_ipv4) {
       struct sockaddr_in* ipv4 = (struct sockaddr_in*)p->ai_addr;
-      addr = (void*)&ipv4->sin_addr;
-      CHECK(nullptr != inet_ntop(p->ai_family, addr, ipv4_addr, INET6_ADDRSTRLEN));
+      CHECK(nullptr !=
+            inet_ntop(p->ai_family, (void*)&ipv4->sin_addr, ipv4_addr, INET6_ADDRSTRLEN));
       found_ipv4 = true;
+      break;
     } else if (!found_ipv6) {
       struct sockaddr_in6* ipv6 = (struct sockaddr_in6*)p->ai_addr;
-      addr = (void*)&ipv6->sin6_addr;
-      CHECK(nullptr != inet_ntop(p->ai_family, addr, ipv6_addr, INET6_ADDRSTRLEN));
+      CHECK(nullptr !=
+            inet_ntop(p->ai_family, (void*)&ipv6->sin6_addr, ipv6_addr, INET6_ADDRSTRLEN));
       found_ipv6 = true;
     }
   }
