@@ -4,6 +4,7 @@ import os
 import glob
 import aioredis
 from pathlib import Path
+import aioredis
 
 from . import dfly_args
 from .utility import DflySeeder, wait_available_async
@@ -177,7 +178,7 @@ class TestDflySnapshotOnShutdown(SnapshotTestBase):
         self.tmp_dir = tmp_dir
 
     @pytest.mark.asyncio
-    async def test_snapshot(self, df_seeder_factory, async_client, df_server):
+    async def test_snapshot(self, df_seeder_factory, df_server):
         seeder = df_seeder_factory.create(port=df_server.port, **SEEDER_ARGS)
         await seeder.run(target_deviation=0.1)
 
@@ -185,6 +186,9 @@ class TestDflySnapshotOnShutdown(SnapshotTestBase):
 
         df_server.stop()
         df_server.start()
-        time.sleep(2)
+
+        a_client = aioredis.Redis(port=df_server.port)
+        await wait_available_async(a_client)
+        await a_client.connection_pool.disconnect()
 
         assert await seeder.compare(start_capture)
