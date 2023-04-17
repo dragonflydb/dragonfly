@@ -21,7 +21,7 @@ class TestConnection : public facade::Connection {
  public:
   TestConnection(Protocol protocol, io::StringSink* sink);
 
-  void SendMsgVecAsync(PubMessage pmsg) final;
+  void SendPubMessageAsync(PubMessage pmsg) final;
 
   std::vector<PubMessage> messages;
 

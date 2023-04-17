@@ -183,7 +183,7 @@ void SendMonitor(const std::string& msg) {
 
     for (auto monitor_conn : monitors) {
       // never preempts, so we can iterate safely.
-      monitor_conn->SendMonitorMsg(msg);
+      monitor_conn->SendMonitorMessageAsync(msg);
     }
   }
 }
@@ -921,7 +921,7 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
 
   // a bit of a hack. I set up breaker callback here for the owner.
   // Should work though it's confusing to have it here.
-  owner->RegisterOnBreak([res, this](uint32_t) {
+  owner->RegisterBreakHook([res, this](uint32_t) {
     if (res->transaction) {
       res->transaction->BreakOnShutdown();
     }
@@ -1463,7 +1463,7 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
       while (it != subscribers_ptr->end() && it->thread_id == idx) {
         facade::Connection* conn = it->conn_cntx->owner();
         DCHECK(conn);
-        conn->SendMsgVecAsync({move(it->pattern), move(channel_ptr), move(msg_ptr)});
+        conn->SendPubMessageAsync({move(it->pattern), move(channel_ptr), move(msg_ptr)});
         it->borrow_token.Dec();
         it++;
       }
