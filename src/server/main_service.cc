@@ -1446,6 +1446,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
 void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
   string_view channel = ArgS(args, 0);
+  string_view msg = ArgS(args, 1);
 
   auto* cs = ServerState::tlocal()->channel_store();
   vector<ChannelStore::Subscriber> subscribers = cs->FetchSubscribers(channel);
@@ -1453,17 +1454,18 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
 
   if (!subscribers.empty()) {
     auto subscribers_ptr = make_shared<decltype(subscribers)>(move(subscribers));
-    auto msg_ptr = make_shared<string>(ArgS(args, 1));
-    auto channel_ptr = make_shared<string>(channel);
+    auto buf = shared_ptr<char[]>{new char[channel.size() + msg.size()]};
+    memcpy(buf.get(), channel.data(), channel.size());
+    memcpy(buf.get() + channel.size(), msg.data(), msg.size());
 
-    auto cb = [subscribers_ptr, msg_ptr, channel_ptr](unsigned idx, util::ProactorBase*) {
+    auto cb = [subscribers_ptr, buf, channel, msg](unsigned idx, util::ProactorBase*) {
       auto it = lower_bound(subscribers_ptr->begin(), subscribers_ptr->end(), idx,
                             ChannelStore::Subscriber::ByThread);
 
       while (it != subscribers_ptr->end() && it->thread_id == idx) {
         facade::Connection* conn = it->conn_cntx->owner();
         DCHECK(conn);
-        conn->SendPubMessageAsync({move(it->pattern), move(channel_ptr), move(msg_ptr)});
+        conn->SendPubMessageAsync({move(it->pattern), move(buf), channel.size(), msg.size()});
         it->borrow_token.Dec();
         it++;
       }

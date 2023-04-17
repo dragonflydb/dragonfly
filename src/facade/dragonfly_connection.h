@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/container/fixed_array.h>
+#include <mimalloc.h>
 #include <sys/socket.h>
 
 #include <deque>
@@ -31,6 +32,12 @@ typedef struct mi_heap_s mi_heap_t;
 #define SO_INCOMING_NAPI_ID 56
 #endif
 
+#ifdef ABSL_HAVE_ADDRESS_SANITIZER
+constexpr size_t kReqStorageSize = 88;
+#else
+constexpr size_t kReqStorageSize = 120;
+#endif
+
 namespace facade {
 
 class ConnectionContext;
@@ -55,21 +62,60 @@ class Connection : public util::Connection {
 
   // PubSub message, either incoming message for active subscription or reply for new subscription.
   struct PubMessage {
-    enum Type { kSubscribe, kUnsubscribe, kPublish } type;
+    // Represents incoming message.
+    struct MessageData {
+      std::string pattern{};              // non-empty for pattern subscriber
+      std::shared_ptr<char[]> buf;        // stores channel name and message
+      uint32_t channel_len, message_len;  // lengths in buf
+    };
 
-    std::string pattern{};  // non-empty for pattern subscriber
-    std::shared_ptr<std::string> channel{};
-    std::shared_ptr<std::string> message{};
+    // Represents reply for subscribe/unsubscribe.
+    struct SubscribeData {
+      bool add;
+      std::string channel;
+      uint32_t channel_cnt;
+    };
 
-    uint32_t channel_cnt = 0;
+    std::variant<MessageData, SubscribeData> data;
 
-    PubMessage(bool add, std::shared_ptr<std::string> channel, uint32_t channel_cnt);
-    PubMessage(std::string pattern, std::shared_ptr<std::string> channel,
-               std::shared_ptr<std::string> message);
+    PubMessage(bool add, std::string_view channel, uint32_t channel_cnt);
+    PubMessage(std::string pattern, std::shared_ptr<char[]> buf, uint32_t channel_len,
+               uint32_t message_len);
+  };
 
-    PubMessage(const PubMessage&) = delete;
-    PubMessage& operator=(const PubMessage&) = delete;
-    PubMessage(PubMessage&&) = default;
+  struct MonitorMessage : public std::string {};
+
+  struct PipelineMessage {
+    PipelineMessage(size_t nargs, size_t capacity) : args(nargs), storage(capacity) {
+    }
+
+    void Reset(size_t nargs, size_t capacity);
+
+    void SetArgs(const RespVec& args);
+
+    size_t StorageCapacity() const;
+
+    // mi_stl_allocator uses mi heap internally.
+    // The capacity is chosen so that we allocate a fully utilized (256 bytes) block.
+    using StorageType = absl::InlinedVector<char, kReqStorageSize, mi_stl_allocator<char>>;
+
+    absl::InlinedVector<MutableSlice, 6> args;
+    StorageType storage;
+  };
+
+  struct PipelineMessageDeleter {
+    void operator()(PipelineMessage* req) const;
+  };
+
+  // Requests are allocated on the mimalloc heap and thus require a custom deleter.
+  using PipelineMessagePtr = std::unique_ptr<PipelineMessage, PipelineMessageDeleter>;
+
+  struct MessageHandle {
+    size_t StorageCapacity() const;
+
+    bool IsPipelineMsg() const;
+
+    std::variant<MonitorMessage, PubMessage, PipelineMessagePtr> handle;
   };
 
   enum Phase { READ_SOCKET, PROCESS };
@@ -77,10 +123,10 @@ class Connection : public util::Connection {
  public:
   // Add PubMessage to dispatch queue.
   // Virtual because behaviour is overwritten in test_utils.
-  virtual void SendPubMessageAsync(PubMessage pub_msg);
+  virtual void SendPubMessageAsync(PubMessage);
 
   // Add monitor message to dispatch queue.
-  void SendMonitorMessageAsync(std::string monitor_msg);
+  void SendMonitorMessageAsync(std::string);
 
   // Register hook that is executed on connection shutdown.
   ShutdownHandle RegisterShutdownHook(ShutdownCb cb);
@@ -121,14 +167,9 @@ class Connection : public util::Connection {
  private:
   enum ParserStatus { OK, NEED_MORE, ERROR };
 
-  class Request;
   struct DispatchOperations;
   struct DispatchCleanup;
-  struct RequestDeleter;
   struct Shutdown;
-
-  // Requests are allocated on the mimalloc heap and thus require a custom deleter.
-  using RequestPtr = std::unique_ptr<Request, RequestDeleter>;
 
  private:
   // Check protocol and handle connection.
@@ -146,8 +187,10 @@ class Connection : public util::Connection {
   // Handles events from dispatch queue.
   void DispatchFiber(util::FiberSocketBase* peer);
 
+  void SendAsync(MessageHandle msg);
+
   // Create new pipeline request, re-use from pool when possible.
-  RequestPtr FromArgs(RespVec args, mi_heap_t* heap);
+  PipelineMessagePtr FromArgs(RespVec args, mi_heap_t* heap);
 
   ParserStatus ParseRedis();
   ParserStatus ParseMemcache();
@@ -158,11 +201,11 @@ class Connection : public util::Connection {
   void ShrinkPipelinePool();
 
   // Returns non-null request ptr if pool has vacant entries.
-  RequestPtr GetFromPipelinePool();
+  PipelineMessagePtr GetFromPipelinePool();
 
  private:
-  std::deque<RequestPtr> dispatch_q_;  // dispatch queue
-  dfly::EventCount evc_;               // dispatch queue waker
+  std::deque<MessageHandle> dispatch_q_;  // dispatch queue
+  dfly::EventCount evc_;                  // dispatch queue waker
 
   base::IoBuf io_buf_;  // used in io loop and parsers
   std::unique_ptr<RedisParser> redis_parser_;
@@ -198,7 +241,7 @@ class Connection : public util::Connection {
   // Pooled pipieline messages per-thread.
   // Aggregated while handling pipelines,
   // graudally released while handling regular commands.
-  static thread_local std::vector<RequestPtr> pipeline_req_pool_;
+  static thread_local std::vector<PipelineMessagePtr> pipeline_req_pool_;
 };
 
 void RespToArgList(const RespVec& src, CmdArgVec* dest);
