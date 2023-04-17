@@ -150,65 +150,58 @@ Replica::~Replica() {
 
 static const char kConnErr[] = "could not connect to master: ";
 
-bool Replica::Start(ConnectionContext* cntx) {
+error_code Replica::Start(ConnectionContext* cntx) {
   VLOG(1) << "Starting replication";
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
 
-  auto should_continue = [this, &cntx](const error_code& ec, const char* msg) {
+  RETURN_ON_ERR(cntx_.SwitchErrorHandler(absl::bind_front(&Replica::DefaultErrorHandler, this)));
+
+  auto check_connection_error = [this, &cntx](const error_code& ec, const char* msg) -> error_code {
     if (cntx_.IsCancelled()) {
       (*cntx)->SendError("replication cancelled");
-      return false;
+      return std::make_error_code(errc::operation_canceled);
     }
     if (ec) {
       (*cntx)->SendError(absl::StrCat(msg, ec.message()));
-      return false;
+      cntx_.Cancel();
+      return ec;
     }
-    return true;
+    return {};
   };
 
   // 1. Resolve dns.
   VLOG(1) << "Resolving master DNS";
   error_code ec = ResolveMasterDns();
-  if (!should_continue(ec, "could not resolve master dns")) {
-    return false;
-  }
+  RETURN_ON_ERR(check_connection_error(ec, "could not resolve master dns"));
 
   // 2. Connect socket.
   VLOG(1) << "Connecting to master";
   ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms);
-  if (!should_continue(ec, kConnErr)) {
-    return false;
-  }
+  RETURN_ON_ERR(check_connection_error(ec, kConnErr));
 
   // 3. Greet.
   VLOG(1) << "Greeting";
   state_mask_ = R_ENABLED | R_TCP_CONNECTED;
   last_io_time_ = mythread->GetMonotonicTimeNs();
   ec = Greet();
-  if (!should_continue(ec, "could not greet master ")) {
-    return false;
-  }
+  RETURN_ON_ERR(check_connection_error(ec, "could not greet master "));
 
   // 4. Init basic context.
-  cntx_.Reset(absl::bind_front(&Replica::DefaultErrorHandler, this));
+  RETURN_ON_ERR(cntx_.SwitchErrorHandler(absl::bind_front(&Replica::DefaultErrorHandler, this)));
 
   // 5. Spawn main coordination fiber.
   sync_fb_ = MakeFiber(&Replica::MainReplicationFb, this);
 
   (*cntx)->SendOk();
-  return true;
+  return {};
 }  // namespace dfly
 
 void Replica::Stop() {
   VLOG(1) << "Stopping replication";
   // Mark disabled, prevent from retrying.
-  if (sock_) {
-    sock_->proactor()->Await([this] {
-      state_mask_ = 0;  // Specifically ~R_ENABLED.
-      cntx_.Cancel();   // Context is fully resposible for cleanup.
-    });
-  }
+  state_mask_ = 0;  // Specifically ~R_ENABLED.
+  cntx_.Cancel();   // Context is fully resposible for cleanup.
 
   // Make sure the replica fully stopped and did all cleanup,
   // so we can freely release resources (connections).

@@ -1822,10 +1822,10 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
   LOG(INFO) << "Replicating " << host << ":" << port_s;
 
-  if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_s, "one")) {
-    VLOG(1) << "Acquire replica lock";
-    unique_lock lk(replicaof_mu_);
+  VLOG(1) << "Acquire replica lock";
+  unique_lock lk(replicaof_mu_);
 
+  if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_s, "one")) {
     if (!ServerState::tlocal()->is_master) {
       auto repl_ptr = replica_;
       CHECK(repl_ptr);
@@ -1848,19 +1848,14 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
   auto new_replica = make_shared<Replica>(string(host), port, &service_, master_id());
 
-  {
-    VLOG(1) << "Acquire replica lock";
-    unique_lock lk(replicaof_mu_);
-    if (replica_) {
-      replica_->Stop();  // NOTE: consider introducing update API flow.
-    } else {
-      // TODO: to disconnect all the blocked clients (pubsub, blpop etc)
+  if (replica_) {
+    replica_->Stop();  // NOTE: consider introducing update API flow.
+  } else {
+    // TODO: to disconnect all the blocked clients (pubsub, blpop etc)
 
-      pool.AwaitFiberOnAll(
-          [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = false; });
-    }
-    replica_ = new_replica;
+    pool.AwaitFiberOnAll([&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = false; });
   }
+  replica_ = new_replica;
 
   GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
   if (new_state != GlobalState::LOADING) {
@@ -1880,20 +1875,21 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
   // Replica sends response in either case. No need to send response in this function.
   // It's a bit confusing but simpler.
-  bool Success = new_replica->Start(cntx);
-  {
-    VLOG(1) << "Acquire replica lock";
-    unique_lock lk(replicaof_mu_);
-    // Is this still the last replicaof command we got?
-    if (replica_ == new_replica) {
-      if (!Success) {
-        service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-        replica_.reset();
-      }
-      bool is_master = !replica_;
-      pool.AwaitFiberOnAll(
-          [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
+  lk.unlock();
+  error_code ec = new_replica->Start(cntx);
+  VLOG(1) << "Acquire replica lock";
+  lk.lock();
+
+  // Since we released the replication lock during Start(..), we need to check if this still the
+  // last replicaof command we got. If it's not, then we were cancelled and just exit.
+  if (replica_ == new_replica) {
+    if (ec) {
+      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+      replica_.reset();
     }
+    bool is_master = !replica_;
+    pool.AwaitFiberOnAll(
+        [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
   }
 }
 

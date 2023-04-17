@@ -103,7 +103,7 @@ class Replica {
   // Spawns a fiber that runs until link with master is broken or the replication is stopped.
   // Returns true if initial link with master has been established or
   // false if it has failed.
-  bool Start(ConnectionContext* cntx);
+  std::error_code Start(ConnectionContext* cntx);
 
   void Stop();  // thread-safe
 
