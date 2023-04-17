@@ -666,9 +666,6 @@ error_code ServerFamily::LoadRdb(const std::string& rdb_file) {
   } else {
     ec = res.error();
   }
-
-  service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-
   return ec;
 }
 
