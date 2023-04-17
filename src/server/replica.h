@@ -221,6 +221,7 @@ class Replica {
   Service& service_;
   MasterContext master_context_;
   std::unique_ptr<util::LinuxSocketBase> sock_;
+  Mutex sock_mu_;
 
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;
 
@@ -253,7 +254,7 @@ class Replica {
   // ack_offs_ last acknowledged offset.
   size_t repl_offs_ = 0, ack_offs_ = 0;
   uint64_t last_io_time_ = 0;  // in ns, monotonic clock.
-  unsigned state_mask_ = 0;
+  std::atomic<unsigned> state_mask_ = 0;
   unsigned num_df_flows_ = 0;
 
   bool is_paused_ = false;

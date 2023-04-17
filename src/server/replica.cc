@@ -199,7 +199,7 @@ error_code Replica::Start(ConnectionContext* cntx) {
 
 void Replica::Stop() {
   VLOG(1) << "Stopping replication";
-  // Mark disabled, prevent from retrying.
+  // Stops the loop in MainReplicationFb.
   state_mask_ = 0;  // Specifically ~R_ENABLED.
   cntx_.Cancel();   // Context is fully resposible for cleanup.
 
@@ -242,7 +242,7 @@ void Replica::MainReplicationFb() {
         continue;
       }
       VLOG(1) << "Replica socket connected";
-      state_mask_ |= R_TCP_CONNECTED;
+      state_mask_.fetch_or(R_TCP_CONNECTED);
       continue;
     }
 
@@ -255,7 +255,7 @@ void Replica::MainReplicationFb() {
         state_mask_ &= R_ENABLED;
         continue;
       }
-      state_mask_ |= R_GREETED;
+      state_mask_.fetch_or(R_GREETED);
       continue;
     }
 
@@ -272,7 +272,7 @@ void Replica::MainReplicationFb() {
         state_mask_ &= R_ENABLED;  // reset all flags besides R_ENABLED
         continue;
       }
-      state_mask_ |= R_SYNC_OK;
+      state_mask_.fetch_or(R_SYNC_OK);
       continue;
     }
 
@@ -314,7 +314,16 @@ error_code Replica::ResolveMasterDns() {
 error_code Replica::ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms) {
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
-  sock_.reset(mythread->CreateSocket());
+  {
+    unique_lock lk(sock_mu_);
+    // The context closes sock_. So if the context error handler has already
+    // run we must not create a new socket. sock_mu_ syncs between the two
+    // functions.
+    if (!cntx_.IsCancelled())
+      sock_.reset(mythread->CreateSocket());
+    else
+      return cntx_.GetError();
+  }
 
   // We set this timeout because this call blocks other REPLICAOF commands. We don't need it for the
   // rest of the sync.
@@ -447,7 +456,7 @@ error_code Replica::Greet() {
   }
 
   io_buf.ConsumeInput(consumed);
-  state_mask_ |= R_GREETED;
+  state_mask_.fetch_or(R_GREETED);
   return error_code{};
 }
 
@@ -485,7 +494,7 @@ error_code Replica::InitiatePSync() {
   // we get the snapshot size.
   if (snapshot_size || token != nullptr) {  // full sync
     // Start full sync
-    state_mask_ |= R_SYNCING;
+    state_mask_.fetch_or(R_SYNCING);
 
     io::PrefixSource ps{io_buf.InputBuffer(), sock_.get()};
 
@@ -527,7 +536,7 @@ error_code Replica::InitiatePSync() {
   }
 
   state_mask_ &= ~R_SYNCING;
-  state_mask_ |= R_SYNC_OK;
+  state_mask_.fetch_or(R_SYNC_OK);
 
   // There is a data race condition in Redis-master code, where "ACK 0" handler may be
   // triggered before Redis is ready to transition to the streaming state and it silenty ignores
@@ -582,7 +591,7 @@ error_code Replica::InitiateDflySync() {
   JournalExecutor{&service_}.FlushAll();
 
   // Start full sync flows.
-  state_mask_ |= R_SYNCING;
+  state_mask_.fetch_or(R_SYNCING);
   {
     auto partition = Partition(num_df_flows_);
     auto shard_cb = [&](unsigned index, auto*) {
@@ -729,6 +738,7 @@ error_code Replica::ConsumeDflyStream() {
 }
 
 void Replica::CloseSocket() {
+  unique_lock lk(sock_mu_);
   if (sock_) {
     sock_->proactor()->Await([this] {
       auto ec = sock_->Shutdown(SHUT_RDWR);
@@ -811,7 +821,7 @@ error_code Replica::StartFullSyncFlow(BlockingCounter sb, Context* cntx) {
   }
   leftover_buf_->ConsumeInput(consumed);
 
-  state_mask_ |= R_TCP_CONNECTED;
+  state_mask_.fetch_or(R_TCP_CONNECTED);
 
   // We can not discard io_buf because it may contain data
   // besides the response we parsed. Therefore we pass it further to ReplicateDFFb.
