@@ -91,7 +91,8 @@ class TestDflySnapshot(SnapshotTestBase):
 
         assert await seeder.compare(start_capture)
 
-
+# We spawn instances manually, so reduce memory usage of default to minimum
+@dfly_args({"proactor_threads": "1"})
 class TestDflyAutoLoadSnapshot(SnapshotTestBase):
     """Test automatic loading of dump files on startup with timestamp"""
     @pytest.fixture(autouse=True)
@@ -110,7 +111,7 @@ class TestDflyAutoLoadSnapshot(SnapshotTestBase):
     @pytest.mark.asyncio
     @pytest.mark.parametrize("save_type, dbfilename", cases)
     async def test_snapshot(self, df_local_factory, save_type, dbfilename):
-        df_args = {"dbfilename": dbfilename, **BASIC_ARGS}
+        df_args = {"dbfilename": dbfilename, **BASIC_ARGS, "port": 1111}
         if save_type == 'rdb':
             df_args['nodf_snapshot_format'] = ""
         df_server = df_local_factory.create(**df_args)
