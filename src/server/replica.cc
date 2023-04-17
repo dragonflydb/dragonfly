@@ -61,21 +61,34 @@ int ResolveDns(std::string_view host, char* dest) {
 
   static_assert(INET_ADDRSTRLEN < INET6_ADDRSTRLEN, "");
 
-  res = EAI_FAMILY;
+  // If possible, we want to use an IPv4 address.
+  char ipv4_addr[INET6_ADDRSTRLEN];
+  bool found_ipv4 = false;
+  char ipv6_addr[INET6_ADDRSTRLEN];
+  bool found_ipv6 = false;
+
   for (addrinfo* p = servinfo; p != NULL; p = p->ai_next) {
-    if (p->ai_family == AF_INET) {
+    CHECK(p->ai_family == AF_INET || p->ai_family == AF_INET6);
+    if (p->ai_family == AF_INET && !found_ipv4) {
       struct sockaddr_in* ipv4 = (struct sockaddr_in*)p->ai_addr;
-      const char* inet_res = inet_ntop(p->ai_family, &ipv4->sin_addr, dest, INET6_ADDRSTRLEN);
-      CHECK_NOTNULL(inet_res);
-      res = 0;
+      CHECK(nullptr !=
+            inet_ntop(p->ai_family, (void*)&ipv4->sin_addr, ipv4_addr, INET6_ADDRSTRLEN));
+      found_ipv4 = true;
       break;
+    } else if (!found_ipv6) {
+      struct sockaddr_in6* ipv6 = (struct sockaddr_in6*)p->ai_addr;
+      CHECK(nullptr !=
+            inet_ntop(p->ai_family, (void*)&ipv6->sin6_addr, ipv6_addr, INET6_ADDRSTRLEN));
+      found_ipv6 = true;
     }
-    LOG(WARNING) << "Only IPv4 is supported";
   }
+
+  CHECK(found_ipv4 || found_ipv6);
+  memcpy(dest, found_ipv4 ? ipv4_addr : ipv6_addr, INET6_ADDRSTRLEN);
 
   freeaddrinfo(servinfo);
 
-  return res;
+  return 0;
 }
 
 error_code Recv(FiberSocketBase* input, base::IoBuf* dest) {
