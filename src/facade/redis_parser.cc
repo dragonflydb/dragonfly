@@ -215,6 +215,7 @@ auto RedisParser::ParseNum(Buffer str, int64_t* res) -> Result {
   if (str.size() < 4) {
     return INPUT_PENDING;
   }
+  DCHECK(str[0] == '$' || str[0] == '*' || str[0] == '%');
 
   char* s = reinterpret_cast<char*>(str.data() + 1);
   char* pos = reinterpret_cast<char*>(memchr(s, '\n', str.size() - 1));
@@ -250,7 +251,7 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> Result {
       return BAD_ARRAYLEN;
     case OK:
       if (len < -1 || len > kMaxArrayLen) {
-        VLOG_IF(1, len > kMaxArrayLen) << "Milti bulk len is too big " << len;
+        VLOG_IF(1, len > kMaxArrayLen) << "Multi bulk len is too big " << len;
 
         return BAD_ARRAYLEN;
       }
@@ -297,14 +298,6 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> Result {
 auto RedisParser::ParseArg(Buffer str) -> Result {
   char c = str[0];
 
-  if (c == '_') {  // Resp3 NIL
-    state_ = FINISH_ARG_S;
-    cached_expr_->emplace_back(RespExpr::NIL);
-    cached_expr_->back().u = Buffer{};
-    last_consumed_ += 3;  // '_','\r','\n'
-    return OK;
-  }
-
   if (c == '$') {
     int64_t len;
 
@@ -338,6 +331,15 @@ auto RedisParser::ParseArg(Buffer str) -> Result {
 
   if (server_mode_) {
     return BAD_BULKLEN;
+  }
+
+  if (c == '_') {  // Resp3 NIL
+    // TODO: Do we need to validate that str[1:2] == "\r\n"?
+    state_ = FINISH_ARG_S;
+    cached_expr_->emplace_back(RespExpr::NIL);
+    cached_expr_->back().u = Buffer{};
+    last_consumed_ += 3;  // '_','\r','\n'
+    return OK;
   }
 
   if (c == '*') {

@@ -191,4 +191,10 @@ TEST_F(RedisParserTest, LargeBulk) {
   ASSERT_EQ(RedisParser::OK, Parse("\r\n"));
 }
 
+TEST_F(RedisParserTest, NILs) {
+  ASSERT_EQ(RedisParser::BAD_BULKLEN, Parse("_\r\n"));
+  parser_.SetClientMode();
+  ASSERT_EQ(RedisParser::OK, Parse("_\r\n"));
+}
+
 }  // namespace facade
