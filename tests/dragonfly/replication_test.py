@@ -396,6 +396,8 @@ async def test_cancel_replication_immediately(df_local_factory, df_seeder_factor
     After we finish the 'fuzzing' part, replicate the first master and check that
     all the data is correct.
     """
+    COMMANDS_TO_ISSUE = 40
+
     replica = df_local_factory.create(port=BASE_PORT, v=1)
     masters = [df_local_factory.create(port=BASE_PORT+i+1) for i in range(4)]
     seeders = [df_seeder_factory.create(port=m.port) for m in masters]
@@ -417,12 +419,12 @@ async def test_cancel_replication_immediately(df_local_factory, df_seeder_factor
             assert e.args[0] == "replication cancelled"
             return False
 
-    for i in range(40):
+    for i in range(COMMANDS_TO_ISSUE):
         index = random.choice(range(len(masters)))
         replication_commands.append(replicate(index))
     results = await asyncio.gather(*replication_commands)
     num_successes = sum(results)
-    assert 40 > num_successes, "At least one REPLICAOF must be cancelled"
+    assert COMMANDS_TO_ISSUE > num_successes, "At least one REPLICAOF must be cancelled"
     assert num_successes > 0, "At least one REPLICAOF must be succeed"
 
 
