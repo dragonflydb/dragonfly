@@ -334,7 +334,7 @@ auto RedisParser::ParseArg(Buffer str) -> Result {
   }
 
   if (c == '_') {  // Resp3 NIL
-    // This is probably a bug?
+    // TODO: Do we need to validate that str[1:2] == "\r\n"?
     state_ = FINISH_ARG_S;
     cached_expr_->emplace_back(RespExpr::NIL);
     cached_expr_->back().u = Buffer{};
