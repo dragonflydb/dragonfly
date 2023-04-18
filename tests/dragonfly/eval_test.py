@@ -201,3 +201,21 @@ async def test_golang_asynq_script(async_pool, num_queues=10, num_tasks=100):
 
     for job in jobs:
         await job
+
+ERROR_CALL_SCRIPT = """
+redis.call('ECHO', 'I', 'want', 'an', 'error')
+"""
+
+ERROR_PCALL_SCRIPT = """
+redis.pcall('ECHO', 'I', 'want', 'an', 'error')
+"""
+
+@pytest.mark.asyncio
+async def test_eval_error_propagation(async_client):
+    assert await async_client.eval(ERROR_PCALL_SCRIPT, 0) is None
+
+    try:
+        await async_client.eval(ERROR_CALL_SCRIPT, 0)
+        assert False, "Eval must have thrown an error"
+    except aioredis.RedisError as e:
+        pass

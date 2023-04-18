@@ -276,19 +276,19 @@ TEST_F(InterpreterTest, Call) {
   };
 
   intptr_.SetRedisFunc(cb);
-  ASSERT_TRUE(Execute("local var = redis.call('string'); return {type(var), var}"));
+  ASSERT_TRUE(Execute("local var = redis.pcall('string'); return {type(var), var}"));
   EXPECT_EQ("[str(string) str(foo)]", ser_.res);
 
-  EXPECT_TRUE(Execute("local var = redis.call('double'); return {type(var), var}"));
+  EXPECT_TRUE(Execute("local var = redis.pcall('double'); return {type(var), var}"));
   EXPECT_EQ("[str(number) d(3.1415)]", ser_.res);
 
-  EXPECT_TRUE(Execute("local var = redis.call('int'); return {type(var), var}"));
+  EXPECT_TRUE(Execute("local var = redis.pcall('int'); return {type(var), var}"));
   EXPECT_EQ("[str(number) i(42)]", ser_.res);
 
-  EXPECT_TRUE(Execute("local var = redis.call('err'); return {type(var), var}"));
+  EXPECT_TRUE(Execute("local var = redis.pcall('err'); return {type(var), var}"));
   EXPECT_EQ("[str(table) err(myerr)]", ser_.res);
 
-  EXPECT_TRUE(Execute("local var = redis.call('status'); return {type(var), var}"));
+  EXPECT_TRUE(Execute("local var = redis.pcall('status'); return {type(var), var}"));
   EXPECT_EQ("[str(table) status(mystatus)]", ser_.res);
 }
 
