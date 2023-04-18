@@ -277,11 +277,9 @@ void ExtendDfsFilenameWithShard(int shard, fs::path* filename) {
 }
 
 GenericError ValidateFilename(const fs::path& filename, bool new_version) {
-  for (const auto& path_component : filename) {
-    if (path_component == "..") {
-      return {absl::StrCat("filename may not contain directory escaping sequences (Got \"",
-                           filename.c_str(), "\")")};
-    }
+  if (!filename.parent_path().empty()) {
+    return {absl::StrCat("filename may not contain directory separators (Got \"", filename.c_str(),
+                         "\")")};
   }
 
   if (!filename.has_extension()) {
