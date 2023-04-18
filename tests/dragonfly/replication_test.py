@@ -391,6 +391,8 @@ async def test_cancel_replication_immediately(df_local_factory, df_seeder_factor
     """
     Issue 40 replication commands randomally distributed over 10 seconds. This
     checks that the replication state machine can handle cancellation well.
+    We assert that at least one command was cancelled during start and at least
+    one command one successfull.
     After we finish the 'fuzzing' part, replicate the first master and check that
     all the data is correct.
     """
@@ -410,13 +412,19 @@ async def test_cancel_replication_immediately(df_local_factory, df_seeder_factor
             await c_replica.execute_command(f"REPLICAOF localhost {masters[index].port}")
             # Giving replication commands shouldn't hang.
             assert time.time() - start < 2.0
+            return True
         except aioredis.exceptions.ResponseError as e:
-            print(e)
+            assert e.args[0] == "replication cancelled"
+            return False
 
     for i in range(40):
         index = random.choice(range(len(masters)))
         replication_commands.append(replicate(index))
-    await asyncio.gather(*replication_commands)
+    results = await asyncio.gather(*replication_commands)
+    num_successes = sum(results)
+    assert 40 > num_successes, "At least one REPLICAOF must be cancelled"
+    assert num_successes > 0, "At least one REPLICAOF must be succeed"
+
 
     await c_replica.execute_command(f"REPLICAOF localhost {masters[0].port}")
 
