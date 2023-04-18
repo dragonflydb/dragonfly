@@ -150,55 +150,55 @@ Replica::~Replica() {
 
 static const char kConnErr[] = "could not connect to master: ";
 
-bool Replica::Start(ConnectionContext* cntx) {
+error_code Replica::Start(ConnectionContext* cntx) {
   VLOG(1) << "Starting replication";
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
 
+  RETURN_ON_ERR(cntx_.SwitchErrorHandler(absl::bind_front(&Replica::DefaultErrorHandler, this)));
+
+  auto check_connection_error = [this, &cntx](const error_code& ec, const char* msg) -> error_code {
+    if (cntx_.IsCancelled()) {
+      (*cntx)->SendError("replication cancelled");
+      return std::make_error_code(errc::operation_canceled);
+    }
+    if (ec) {
+      (*cntx)->SendError(absl::StrCat(msg, ec.message()));
+      cntx_.Cancel();
+      return ec;
+    }
+    return {};
+  };
+
   // 1. Resolve dns.
   VLOG(1) << "Resolving master DNS";
   error_code ec = ResolveMasterDns();
-  if (ec) {
-    (*cntx)->SendError(StrCat("could not resolve master dns", ec.message()));
-    return false;
-  }
+  RETURN_ON_ERR(check_connection_error(ec, "could not resolve master dns"));
+
   // 2. Connect socket.
   VLOG(1) << "Connecting to master";
   ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms);
-  if (ec) {
-    (*cntx)->SendError(StrCat(kConnErr, ec.message()));
-    return false;
-  }
+  RETURN_ON_ERR(check_connection_error(ec, kConnErr));
 
   // 3. Greet.
   VLOG(1) << "Greeting";
-  state_mask_ = R_ENABLED | R_TCP_CONNECTED;
+  state_mask_.store(R_ENABLED | R_TCP_CONNECTED);
   last_io_time_ = mythread->GetMonotonicTimeNs();
   ec = Greet();
-  if (ec) {
-    (*cntx)->SendError(StrCat("could not greet master ", ec.message()));
-    return false;
-  }
+  RETURN_ON_ERR(check_connection_error(ec, "could not greet master "));
 
-  // 4. Init basic context.
-  cntx_.Reset(absl::bind_front(&Replica::DefaultErrorHandler, this));
-
-  // 5. Spawn main coordination fiber.
+  // 4. Spawn main coordination fiber.
   sync_fb_ = MakeFiber(&Replica::MainReplicationFb, this);
 
   (*cntx)->SendOk();
-  return true;
-}
+  return {};
+}  // namespace dfly
 
 void Replica::Stop() {
   VLOG(1) << "Stopping replication";
-  // Mark disabled, prevent from retrying.
-  if (sock_) {
-    sock_->proactor()->Await([this] {
-      state_mask_ = 0;  // Specifically ~R_ENABLED.
-      cntx_.Cancel();   // Context is fully resposible for cleanup.
-    });
-  }
+  // Stops the loop in MainReplicationFb.
+  state_mask_.store(0);  // Specifically ~R_ENABLED.
+  cntx_.Cancel();        // Context is fully resposible for cleanup.
 
   // Make sure the replica fully stopped and did all cleanup,
   // so we can freely release resources (connections).
@@ -217,11 +217,11 @@ void Replica::MainReplicationFb() {
   SetShardStates(true);
 
   error_code ec;
-  while (state_mask_ & R_ENABLED) {
+  while (state_mask_.load() & R_ENABLED) {
     // Discard all previous errors and set default error handler.
     cntx_.Reset(absl::bind_front(&Replica::DefaultErrorHandler, this));
     // 1. Connect socket.
-    if ((state_mask_ & R_TCP_CONNECTED) == 0) {
+    if ((state_mask_.load() & R_TCP_CONNECTED) == 0) {
       ThisFiber::SleepFor(500ms);
       if (is_paused_)
         continue;
@@ -239,22 +239,25 @@ void Replica::MainReplicationFb() {
         continue;
       }
       VLOG(1) << "Replica socket connected";
-      state_mask_ |= R_TCP_CONNECTED;
+      state_mask_.fetch_or(R_TCP_CONNECTED);
+      continue;
     }
 
     // 2. Greet.
-    if ((state_mask_ & R_GREETED) == 0) {
+    if ((state_mask_.load() & R_GREETED) == 0) {
       ec = Greet();
       if (ec) {
         LOG(INFO) << "Error greeting " << master_context_.Description() << " " << ec << " "
                   << ec.message();
-        state_mask_ &= R_ENABLED;
+        state_mask_.fetch_and(R_ENABLED);
         continue;
       }
+      state_mask_.fetch_or(R_GREETED);
+      continue;
     }
 
     // 3. Initiate full sync
-    if ((state_mask_ & R_SYNC_OK) == 0) {
+    if ((state_mask_.load() & R_SYNC_OK) == 0) {
       if (HasDflyMaster())
         ec = InitiateDflySync();
       else
@@ -263,14 +266,15 @@ void Replica::MainReplicationFb() {
       if (ec) {
         LOG(WARNING) << "Error syncing with " << master_context_.Description() << " " << ec << " "
                      << ec.message();
-        state_mask_ &= R_ENABLED;  // reset all flags besides R_ENABLED
+        state_mask_.fetch_and(R_ENABLED);  // reset all flags besides R_ENABLED
         continue;
       }
-      state_mask_ |= R_SYNC_OK;
+      state_mask_.fetch_or(R_SYNC_OK);
+      continue;
     }
 
     // 4. Start stable state sync.
-    DCHECK(state_mask_ & R_SYNC_OK);
+    DCHECK(state_mask_.load() & R_SYNC_OK);
 
     if (HasDflyMaster())
       ec = ConsumeDflyStream();
@@ -279,7 +283,7 @@ void Replica::MainReplicationFb() {
 
     LOG(WARNING) << "Error full sync with " << master_context_.Description() << " " << ec << " "
                  << ec.message();
-    state_mask_ &= R_ENABLED;
+    state_mask_.fetch_and(R_ENABLED);
   }
 
   // Wait for unblocking cleanup to finish.
@@ -307,7 +311,16 @@ error_code Replica::ResolveMasterDns() {
 error_code Replica::ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms) {
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
-  sock_.reset(mythread->CreateSocket());
+  {
+    unique_lock lk(sock_mu_);
+    // The context closes sock_. So if the context error handler has already
+    // run we must not create a new socket. sock_mu_ syncs between the two
+    // functions.
+    if (!cntx_.IsCancelled())
+      sock_.reset(mythread->CreateSocket());
+    else
+      return cntx_.GetError();
+  }
 
   // We set this timeout because this call blocks other REPLICAOF commands. We don't need it for the
   // rest of the sync.
@@ -440,7 +453,7 @@ error_code Replica::Greet() {
   }
 
   io_buf.ConsumeInput(consumed);
-  state_mask_ |= R_GREETED;
+  state_mask_.fetch_or(R_GREETED);
   return error_code{};
 }
 
@@ -478,7 +491,7 @@ error_code Replica::InitiatePSync() {
   // we get the snapshot size.
   if (snapshot_size || token != nullptr) {  // full sync
     // Start full sync
-    state_mask_ |= R_SYNCING;
+    state_mask_.fetch_or(R_SYNCING);
 
     io::PrefixSource ps{io_buf.InputBuffer(), sock_.get()};
 
@@ -519,8 +532,8 @@ error_code Replica::InitiatePSync() {
     last_io_time_ = sock_thread->GetMonotonicTimeNs();
   }
 
-  state_mask_ &= ~R_SYNCING;
-  state_mask_ |= R_SYNC_OK;
+  state_mask_.fetch_and(~R_SYNCING);
+  state_mask_.fetch_or(R_SYNC_OK);
 
   // There is a data race condition in Redis-master code, where "ACK 0" handler may be
   // triggered before Redis is ready to transition to the streaming state and it silenty ignores
@@ -538,7 +551,7 @@ error_code Replica::InitiateDflySync() {
     // We do the following operations regardless of outcome.
     JoinAllFlows();
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-    state_mask_ &= ~R_SYNCING;
+    state_mask_.fetch_and(~R_SYNCING);
   };
 
   // Initialize MultiShardExecution.
@@ -575,7 +588,7 @@ error_code Replica::InitiateDflySync() {
   JournalExecutor{&service_}.FlushAll();
 
   // Start full sync flows.
-  state_mask_ |= R_SYNCING;
+  state_mask_.fetch_or(R_SYNCING);
   {
     auto partition = Partition(num_df_flows_);
     auto shard_cb = [&](unsigned index, auto*) {
@@ -722,6 +735,7 @@ error_code Replica::ConsumeDflyStream() {
 }
 
 void Replica::CloseSocket() {
+  unique_lock lk(sock_mu_);
   if (sock_) {
     sock_->proactor()->Await([this] {
       auto ec = sock_->Shutdown(SHUT_RDWR);
@@ -804,7 +818,7 @@ error_code Replica::StartFullSyncFlow(BlockingCounter sb, Context* cntx) {
   }
   leftover_buf_->ConsumeInput(consumed);
 
-  state_mask_ = R_ENABLED | R_TCP_CONNECTED;
+  state_mask_.fetch_or(R_TCP_CONNECTED);
 
   // We can not discard io_buf because it may contain data
   // besides the response we parsed. Therefore we pass it further to ReplicateDFFb.
@@ -1213,8 +1227,8 @@ Replica::Info Replica::GetInfo() const {
     Info res;
     res.host = master_context_.host;
     res.port = master_context_.port;
-    res.master_link_established = (state_mask_ & R_TCP_CONNECTED);
-    res.sync_in_progress = (state_mask_ & R_SYNCING);
+    res.master_link_established = (state_mask_.load() & R_TCP_CONNECTED);
+    res.sync_in_progress = (state_mask_.load() & R_SYNCING);
     res.master_last_io_sec = (ProactorBase::GetMonotonicTimeNs() - last_io_time) / 1000000000UL;
     return res;
   });

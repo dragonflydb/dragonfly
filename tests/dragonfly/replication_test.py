@@ -386,6 +386,54 @@ async def test_rotating_masters(df_local_factory, df_seeder_factory, t_replica, 
         fill_task.cancel()
 
 
+@pytest.mark.asyncio
+async def test_cancel_replication_immediately(df_local_factory, df_seeder_factory):
+    """
+    Issue 40 replication commands randomally distributed over 10 seconds. This
+    checks that the replication state machine can handle cancellation well.
+    We assert that at least one command was cancelled during start and at least
+    one command one successfull.
+    After we finish the 'fuzzing' part, replicate the first master and check that
+    all the data is correct.
+    """
+    COMMANDS_TO_ISSUE = 40
+
+    replica = df_local_factory.create(port=BASE_PORT, v=1)
+    masters = [df_local_factory.create(port=BASE_PORT+i+1) for i in range(4)]
+    seeders = [df_seeder_factory.create(port=m.port) for m in masters]
+
+    df_local_factory.start_all([replica] + masters)
+    c_replica = aioredis.Redis(port=replica.port)
+    await asyncio.gather(*(seeder.run(target_deviation=0.1) for seeder in seeders))
+
+    replication_commands = []
+    async def replicate(index):
+        await asyncio.sleep(10.0 * random.random())
+        try:
+            start = time.time()
+            await c_replica.execute_command(f"REPLICAOF localhost {masters[index].port}")
+            # Giving replication commands shouldn't hang.
+            assert time.time() - start < 2.0
+            return True
+        except aioredis.exceptions.ResponseError as e:
+            assert e.args[0] == "replication cancelled"
+            return False
+
+    for i in range(COMMANDS_TO_ISSUE):
+        index = random.choice(range(len(masters)))
+        replication_commands.append(replicate(index))
+    results = await asyncio.gather(*replication_commands)
+    num_successes = sum(results)
+    assert COMMANDS_TO_ISSUE > num_successes, "At least one REPLICAOF must be cancelled"
+    assert num_successes > 0, "At least one REPLICAOF must be succeed"
+
+
+    await c_replica.execute_command(f"REPLICAOF localhost {masters[0].port}")
+
+    capture = await seeders[0].capture()
+    assert await seeders[0].compare(capture, replica.port)
+
+
 """
 Test flushall command. Set data to master send flashall and set more data.
 Check replica keys at the end.

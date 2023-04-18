@@ -78,9 +78,12 @@ void SliceSnapshot::Cancel() {
   VLOG(1) << "SliceSnapshot::Cancel";
 
   CloseRecordChannel();
-  if (journal_cb_id_) {
-    db_slice_->shard_owner()->journal()->UnregisterOnChange(journal_cb_id_);
+  // Cancel() might be called multiple times from different fibers of the same thread, but we
+  // should unregister the callback only once.
+  uint32_t cb_id = journal_cb_id_;
+  if (cb_id) {
     journal_cb_id_ = 0;
+    db_slice_->shard_owner()->journal()->UnregisterOnChange(cb_id);
   }
 }
 

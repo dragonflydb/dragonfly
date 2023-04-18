@@ -1822,11 +1822,20 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
   LOG(INFO) << "Replicating " << host << ":" << port_s;
 
-  if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_s, "one")) {
-    // use this lock as critical section to prevent concurrent replicaof commands running.
-    VLOG(1) << "Acquire replica lock";
-    unique_lock lk(replicaof_mu_);
+  // We lock to protect global state changes that we perform during the replication setup:
+  // The replica_ pointer, GlobalState, and the DB itself (we do a flushall txn before syncing).
+  // The lock is only released during replica_->Start because we want to allow cancellation during
+  // the connection. If another replication command is received during Start() of an old
+  // replication, it will acquire the lock, call Stop() on the old replica_ and wait for Stop() to
+  // complete. So Replica::Stop() must
+  // 1. Be very responsive, as it is called while holding the lock.
+  // 2. Leave the DB in a consistent state after it is done.
+  // We have a relatively involved state machine inside Replica itself which handels cancellation
+  // with those requirements.
+  VLOG(1) << "Acquire replica lock";
+  unique_lock lk(replicaof_mu_);
 
+  if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_s, "one")) {
     if (!ServerState::tlocal()->is_master) {
       auto repl_ptr = replica_;
       CHECK(repl_ptr);
@@ -1849,8 +1858,6 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
   auto new_replica = make_shared<Replica>(string(host), port, &service_, master_id());
 
-  VLOG(1) << "Acquire replica lock";
-  unique_lock lk(replicaof_mu_);
   if (replica_) {
     replica_->Stop();  // NOTE: consider introducing update API flow.
   } else {
@@ -1858,8 +1865,7 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
     pool.AwaitFiberOnAll([&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = false; });
   }
-
-  replica_.swap(new_replica);
+  replica_ = new_replica;
 
   GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
   if (new_state != GlobalState::LOADING) {
@@ -1879,14 +1885,22 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
   // Replica sends response in either case. No need to send response in this function.
   // It's a bit confusing but simpler.
-  if (!replica_->Start(cntx)) {
-    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-    replica_.reset();
-  }
+  lk.unlock();
+  error_code ec = new_replica->Start(cntx);
+  VLOG(1) << "Acquire replica lock";
+  lk.lock();
 
-  bool is_master = !replica_;
-  pool.AwaitFiberOnAll(
-      [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
+  // Since we released the replication lock during Start(..), we need to check if this still the
+  // last replicaof command we got. If it's not, then we were cancelled and just exit.
+  if (replica_ == new_replica) {
+    if (ec) {
+      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+      replica_.reset();
+    }
+    bool is_master = !replica_;
+    pool.AwaitFiberOnAll(
+        [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
+  }
 }
 
 void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
@@ -2041,7 +2055,7 @@ void ServerFamily::Dfly(CmdArgList args, ConnectionContext* cntx) {
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ServerFamily::x))
 
 void ServerFamily::Register(CommandRegistry* registry) {
-  constexpr auto kReplicaOpts = CO::ADMIN | CO::GLOBAL_TRANS;
+  constexpr auto kReplicaOpts = CO::LOADING | CO::ADMIN | CO::GLOBAL_TRANS;
   constexpr auto kMemOpts = CO::LOADING | CO::READONLY | CO::FAST | CO::NOSCRIPT;
 
   *registry << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, 0}.HFUNC(Auth)
