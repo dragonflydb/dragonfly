@@ -44,6 +44,27 @@ int EVPDigest(const void* data, size_t datalen, unsigned char* md, size_t* mdlen
   return ret;
 }
 
+/* This function is used in order to push an error on the Lua stack in the
+ * format used by redis.pcall to return errors, which is a lua table
+ * with a single "err" field set to the error string. Note that this
+ * table is never a valid reply by proper commands, since the returned
+ * tables are otherwise always indexed by integers, never by strings. */
+void PushError(lua_State* lua, string_view error, bool trace = true) {
+  lua_Debug dbg;
+
+  lua_newtable(lua);
+  lua_pushstring(lua, "err");
+
+  /* Attempt to figure out where this function was called, if possible */
+  if (trace && lua_getstack(lua, 1, &dbg) && lua_getinfo(lua, "nSl", &dbg)) {
+    string msg = absl::StrCat(dbg.source, ": ", dbg.currentline, ": ", error);
+    lua_pushlstring(lua, msg.c_str(), msg.size());
+  } else {
+    lua_pushlstring(lua, error.data(), error.size());
+  }
+  lua_settable(lua, -3);
+}
+
 class RedisTranslator : public ObjectExplorer {
  public:
   RedisTranslator(lua_State* lua) : lua_(lua) {
@@ -58,6 +79,8 @@ class RedisTranslator : public ObjectExplorer {
   void OnStatus(std::string_view str) final;
   void OnError(std::string_view str) final;
 
+  bool HasError();
+
  private:
   void ArrayPre() {
   }
@@ -68,8 +91,9 @@ class RedisTranslator : public ObjectExplorer {
     }
   }
 
-  vector<unsigned> array_index_;
   lua_State* lua_;
+  bool has_error_{false};
+  vector<unsigned> array_index_{};
 };
 
 void RedisTranslator::OnBool(bool b) {
@@ -123,11 +147,8 @@ void RedisTranslator::OnStatus(std::string_view str) {
 }
 
 void RedisTranslator::OnError(std::string_view str) {
-  CHECK(array_index_.empty()) << "unexpected error";
-  lua_newtable(lua_);
-  lua_pushstring(lua_, "err");
-  lua_pushlstring(lua_, str.data(), str.size());
-  lua_settable(lua_, -3);
+  has_error_ = true;
+  PushError(lua_, str, false);
 }
 
 void RedisTranslator::OnArrayStart(unsigned len) {
@@ -142,6 +163,10 @@ void RedisTranslator::OnArrayEnd() {
 
   array_index_.pop_back();
   ArrayPost();
+}
+
+bool RedisTranslator::HasError() {
+  return has_error_;
 }
 
 void RunSafe(lua_State* lua, string_view buf, const char* name) {
@@ -179,27 +204,6 @@ void SetGlobalArrayInternal(lua_State* lua, const char* name, MutSliceSpan args)
     lua_rawseti(lua, -2, j + 1);
   }
   lua_setglobal(lua, name);
-}
-
-/* This function is used in order to push an error on the Lua stack in the
- * format used by redis.pcall to return errors, which is a lua table
- * with a single "err" field set to the error string. Note that this
- * table is never a valid reply by proper commands, since the returned
- * tables are otherwise always indexed by integers, never by strings. */
-void PushError(lua_State* lua, const char* error) {
-  lua_Debug dbg;
-
-  lua_newtable(lua);
-  lua_pushstring(lua, "err");
-
-  /* Attempt to figure out where this function was called, if possible */
-  if (lua_getstack(lua, 1, &dbg) && lua_getinfo(lua, "nSl", &dbg)) {
-    string msg = absl::StrCat(dbg.source, ": ", dbg.currentline, ": ", error);
-    lua_pushstring(lua, msg.c_str());
-  } else {
-    lua_pushstring(lua, error);
-  }
-  lua_settable(lua, -3);
 }
 
 /* In case the error set into the Lua stack by PushError() was generated
@@ -717,11 +721,16 @@ int Interpreter::RedisGenericCommand(bool raise_error, bool async) {
   lua_pop(lua_, argc);
   RedisTranslator translator(lua_);
   redis_func_(CallArgs{MutSliceSpan{args}, &buffer, &translator, async});
+  cmd_depth_--;
+
+  // Raise error for regular 'call' command if needed.
+  if (raise_error && translator.HasError()) {
+    // error is already on top of stack
+    return RaiseError(lua_);
+  }
 
   if (!async)
     DCHECK_EQ(1, lua_gettop(lua_));
-
-  cmd_depth_--;
 
   return 1;
 }
