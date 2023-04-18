@@ -88,7 +88,9 @@ class DflyInstance:
     def format_args(args):
         out = []
         for (k, v) in args.items():
-            out.extend((str(s) for s in ("--"+k, v) if s != ""))
+            out.append(f"--{k}")
+            if v is not None:
+                out.append(str(v))
         return out
 
 
