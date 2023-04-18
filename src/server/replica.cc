@@ -182,15 +182,12 @@ error_code Replica::Start(ConnectionContext* cntx) {
 
   // 3. Greet.
   VLOG(1) << "Greeting";
-  state_mask_ = R_ENABLED | R_TCP_CONNECTED;
+  state_mask_.store(R_ENABLED | R_TCP_CONNECTED);
   last_io_time_ = mythread->GetMonotonicTimeNs();
   ec = Greet();
   RETURN_ON_ERR(check_connection_error(ec, "could not greet master "));
 
-  // 4. Init basic context.
-  RETURN_ON_ERR(cntx_.SwitchErrorHandler(absl::bind_front(&Replica::DefaultErrorHandler, this)));
-
-  // 5. Spawn main coordination fiber.
+  // 4. Spawn main coordination fiber.
   sync_fb_ = MakeFiber(&Replica::MainReplicationFb, this);
 
   (*cntx)->SendOk();
@@ -200,8 +197,8 @@ error_code Replica::Start(ConnectionContext* cntx) {
 void Replica::Stop() {
   VLOG(1) << "Stopping replication";
   // Stops the loop in MainReplicationFb.
-  state_mask_ = 0;  // Specifically ~R_ENABLED.
-  cntx_.Cancel();   // Context is fully resposible for cleanup.
+  state_mask_.store(0);  // Specifically ~R_ENABLED.
+  cntx_.Cancel();        // Context is fully resposible for cleanup.
 
   // Make sure the replica fully stopped and did all cleanup,
   // so we can freely release resources (connections).
@@ -220,11 +217,11 @@ void Replica::MainReplicationFb() {
   SetShardStates(true);
 
   error_code ec;
-  while (state_mask_ & R_ENABLED) {
+  while (state_mask_.load() & R_ENABLED) {
     // Discard all previous errors and set default error handler.
     cntx_.Reset(absl::bind_front(&Replica::DefaultErrorHandler, this));
     // 1. Connect socket.
-    if ((state_mask_ & R_TCP_CONNECTED) == 0) {
+    if ((state_mask_.load() & R_TCP_CONNECTED) == 0) {
       ThisFiber::SleepFor(500ms);
       if (is_paused_)
         continue;
@@ -247,12 +244,12 @@ void Replica::MainReplicationFb() {
     }
 
     // 2. Greet.
-    if ((state_mask_ & R_GREETED) == 0) {
+    if ((state_mask_.load() & R_GREETED) == 0) {
       ec = Greet();
       if (ec) {
         LOG(INFO) << "Error greeting " << master_context_.Description() << " " << ec << " "
                   << ec.message();
-        state_mask_ &= R_ENABLED;
+        state_mask_.fetch_and(R_ENABLED);
         continue;
       }
       state_mask_.fetch_or(R_GREETED);
@@ -260,7 +257,7 @@ void Replica::MainReplicationFb() {
     }
 
     // 3. Initiate full sync
-    if ((state_mask_ & R_SYNC_OK) == 0) {
+    if ((state_mask_.load() & R_SYNC_OK) == 0) {
       if (HasDflyMaster())
         ec = InitiateDflySync();
       else
@@ -269,7 +266,7 @@ void Replica::MainReplicationFb() {
       if (ec) {
         LOG(WARNING) << "Error syncing with " << master_context_.Description() << " " << ec << " "
                      << ec.message();
-        state_mask_ &= R_ENABLED;  // reset all flags besides R_ENABLED
+        state_mask_.fetch_and(R_ENABLED);  // reset all flags besides R_ENABLED
         continue;
       }
       state_mask_.fetch_or(R_SYNC_OK);
@@ -277,7 +274,7 @@ void Replica::MainReplicationFb() {
     }
 
     // 4. Start stable state sync.
-    DCHECK(state_mask_ & R_SYNC_OK);
+    DCHECK(state_mask_.load() & R_SYNC_OK);
 
     if (HasDflyMaster())
       ec = ConsumeDflyStream();
@@ -286,7 +283,7 @@ void Replica::MainReplicationFb() {
 
     LOG(WARNING) << "Error full sync with " << master_context_.Description() << " " << ec << " "
                  << ec.message();
-    state_mask_ &= R_ENABLED;
+    state_mask_.fetch_and(R_ENABLED);
   }
 
   // Wait for unblocking cleanup to finish.
@@ -535,7 +532,7 @@ error_code Replica::InitiatePSync() {
     last_io_time_ = sock_thread->GetMonotonicTimeNs();
   }
 
-  state_mask_ &= ~R_SYNCING;
+  state_mask_.fetch_and(~R_SYNCING);
   state_mask_.fetch_or(R_SYNC_OK);
 
   // There is a data race condition in Redis-master code, where "ACK 0" handler may be
@@ -554,7 +551,7 @@ error_code Replica::InitiateDflySync() {
     // We do the following operations regardless of outcome.
     JoinAllFlows();
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-    state_mask_ &= ~R_SYNCING;
+    state_mask_.fetch_and(~R_SYNCING);
   };
 
   // Initialize MultiShardExecution.
@@ -1230,8 +1227,8 @@ Replica::Info Replica::GetInfo() const {
     Info res;
     res.host = master_context_.host;
     res.port = master_context_.port;
-    res.master_link_established = (state_mask_ & R_TCP_CONNECTED);
-    res.sync_in_progress = (state_mask_ & R_SYNCING);
+    res.master_link_established = (state_mask_.load() & R_TCP_CONNECTED);
+    res.sync_in_progress = (state_mask_.load() & R_SYNCING);
     res.master_last_io_sec = (ProactorBase::GetMonotonicTimeNs() - last_io_time) / 1000000000UL;
     return res;
   });

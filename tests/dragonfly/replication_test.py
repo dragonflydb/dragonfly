@@ -388,6 +388,12 @@ async def test_rotating_masters(df_local_factory, df_seeder_factory, t_replica, 
 
 @pytest.mark.asyncio
 async def test_cancel_replication_immediately(df_local_factory, df_seeder_factory):
+    """
+    Issue 40 replication commands randomally distributed over 10 seconds. This
+    checks that the replication state machine can handle cancellation well.
+    After we finish the 'fuzzing' part, replicate the first master and check that
+    all the data is correct.
+    """
     replica = df_local_factory.create(port=BASE_PORT, v=1)
     masters = [df_local_factory.create(port=BASE_PORT+i+1) for i in range(4)]
     seeders = [df_seeder_factory.create(port=m.port) for m in masters]
@@ -397,10 +403,6 @@ async def test_cancel_replication_immediately(df_local_factory, df_seeder_factor
     await asyncio.gather(*(seeder.run(target_deviation=0.1) for seeder in seeders))
 
     replication_commands = []
-    # Issue 40 replication commands randomally distributed over 10 seconds. This
-    # checks that the replication state machine can handle cancellation well.
-    # After we finish the 'fuzzing' part, replicate the first master and check that
-    # all the data is correct.
     async def replicate(index):
         await asyncio.sleep(10.0 * random.random())
         try:

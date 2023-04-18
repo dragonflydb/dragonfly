@@ -1822,6 +1822,16 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
   LOG(INFO) << "Replicating " << host << ":" << port_s;
 
+  // We lock to protect global state changes that we perform during the replication setup:
+  // The replica_ pointer, GlobalState, and the DB itself (we do a flushall txn before syncing).
+  // The lock is only released during replica_->Start because we want to allow cancellation during
+  // the connection. If another replication command is received during Start() of an old
+  // replication, it will acquire the lock, call Stop() on the old replica_ and wait for Stop() to
+  // complete. So Replica::Stop() must
+  // 1. Be very responsive, as it is called while holding the lock.
+  // 2. Leave the DB in a consistent state after it is done.
+  // We have a relatively involved state machine inside Replica itself which handels cancellation
+  // with those requirements.
   VLOG(1) << "Acquire replica lock";
   unique_lock lk(replicaof_mu_);
 
