@@ -47,7 +47,7 @@ class TestRdbSnapshot(SnapshotTestBase):
         assert await seeder.compare(start_capture)
 
 
-@dfly_args({**BASIC_ARGS, "dbfilename": "test-rdbexact.rdb", "nodf_snapshot_format": ""})
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-rdbexact.rdb", "nodf_snapshot_format": None})
 class TestRdbSnapshotExactFilename(SnapshotTestBase):
     """Test single file rdb snapshot without a timestamp"""
     @pytest.fixture(autouse=True)
