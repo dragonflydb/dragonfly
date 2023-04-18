@@ -10,5 +10,5 @@ spec:
   groups:
   - name: {{ template "dragonfly.name" . }}
     rules:
-    {{- toYaml .Values.prometheusRule.spec | nindent 4 }}
+      {{- toYaml .Values.prometheusRule.spec | nindent 6 }}
 {{- end }}
