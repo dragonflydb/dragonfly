@@ -482,6 +482,7 @@ class DflySeeder:
             tx_data = await queue.get()
             if tx_data is None:
                 queue.task_done()
+                print("finished _executor_task")
                 break
 
             pipe = client.pipeline(transaction=tx_data[1])
@@ -492,10 +493,13 @@ class DflySeeder:
                     pipe.execute_command(*cmd)
 
             try:
+                print("before exec")
                 await pipe.execute()
+                print("after exec")
             except Exception as e:
                 raise SystemExit(e)
             queue.task_done()
+
         await client.connection_pool.disconnect()
 
     CAPTURE_COMMANDS = {

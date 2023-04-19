@@ -5,6 +5,8 @@
 #include "server/io_utils.h"
 
 #include "base/flags.h"
+#include "base/logging.h"
+#include "server/engine_shard_set.h"
 #include "server/error.h"
 
 using namespace std;
@@ -23,7 +25,13 @@ void BufferedStreamerBase::NotifyWritten(bool allow_await) {
   waker_.notify();
   // Block if we're stalled because the consumer is not keeping up.
   if (allow_await) {
-    waker_.await([this]() { return !IsStalled() || IsStopped(); });
+    uint64 start_time = GetCurrentTimeMs();
+    waker_.await([this, start_time]() {
+      return !IsStalled() || IsStopped() || GetCurrentTimeMs() > start_time + 5000;
+    });
+    if (GetCurrentTimeMs() > start_time + 5000) {
+      CHECK(false);
+    }
   }
 }
 
@@ -31,7 +39,13 @@ void BufferedStreamerBase::AwaitIfWritten() {
   if (IsStopped())
     return;
   if (buffered_) {
-    waker_.await([this]() { return !IsStalled() || IsStopped(); });
+    uint64 start_time = GetCurrentTimeMs();
+    waker_.await([this, start_time]() {
+      return !IsStalled() || IsStopped() || GetCurrentTimeMs() > start_time + 5000;
+    });
+    if (GetCurrentTimeMs() > start_time + 5000) {
+      CHECK(false);
+    }
   }
 }
 
