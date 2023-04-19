@@ -42,10 +42,10 @@ class StoredCmd {
   facade::ReplyMode Replies() const;
 
  private:
-  facade::ReplyMode reply_mode_;         // reply mode
   const CommandId* cid_;                 // underlying command
   std::string buffer_;                   // underlying buffer
   absl::FixedArray<uint32_t, 4> sizes_;  // sizes of arg part
+  facade::ReplyMode reply_mode_;         // reply mode
 };
 
 struct ConnectionState {
@@ -86,7 +86,6 @@ struct ConnectionState {
     size_t async_cmds_heap_mem = 0;     // bytes used by async_cmds
     size_t async_cmds_heap_limit = 0;   // max bytes allowed for async_cmds
     std::vector<StoredCmd> async_cmds;  // aggregated by acall
-    GenericError async_error;
   };
 
   // PUB-SUB messaging related data.

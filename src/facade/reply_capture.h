@@ -82,6 +82,7 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   // Send payload to builder.
   static void Apply(Payload&& pl, RedisReplyBuilder* builder);
 
+  // If an error is stored inside payload, get a reference to it.
   static std::optional<ErrorRef> GetError(const Payload& pl);
 
  private:
@@ -94,6 +95,10 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   };
 
  private:
+  // Send payload directly, bypassing external interface. For efficient passing between two
+  // captures.
+  void SendDirect(Payload&& val);
+
   // Capture value and store eiter in current topmost collection or as a standalone value.
   void Capture(Payload val);
 

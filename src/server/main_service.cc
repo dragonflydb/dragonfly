@@ -1066,9 +1066,8 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
 
   InterpreterReplier replier(ca.translator);
 
-  auto err = FlushEvalAsyncCmds(cntx, true);
-  if (err) {
-    CapturingReplyBuilder::Apply(move(*err), &replier);
+  if (auto err = FlushEvalAsyncCmds(cntx, !ca.async); err) {
+    CapturingReplyBuilder::Apply(move(*err), &replier);  // forward error to lua
     *ca.requested_abort = true;
     return;
   }
@@ -1238,9 +1237,8 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
 
   if (auto err = FlushEvalAsyncCmds(cntx, true); err) {
     auto err_ref = CapturingReplyBuilder::GetError(*err);
-    auto [msg, kind] = *err_ref;
     result = Interpreter::RUN_ERR;
-    error = absl::StrCat(msg);
+    error = absl::StrCat(err_ref->first);
   }
 
   cntx->conn_state.script_info.reset();  // reset script_info

@@ -13,7 +13,12 @@
 
 namespace facade {
 
-enum class ReplyMode { NONE, ONLY_ERR, FULL };
+// Reply mode allows filtering replies.
+enum class ReplyMode {
+  NONE,      // No replies are recorded
+  ONLY_ERR,  // Only errors are recorded
+  FULL       // All replies are recorded
+};
 
 class SinkReplyBuilder {
  public:

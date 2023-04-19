@@ -43,9 +43,11 @@ class Interpreter {
 
     ObjectExplorer* translator;
 
-    bool async;  // async by redis.acall
-    bool error_abort;
+    bool async;        // async by acall
+    bool error_abort;  // abort on errors (not pcall)
 
+    // The function can request an abort due to an error, even if error_abort is false.
+    // It happens when async cmds are flushed and result in an uncatched error.
     bool* requested_abort;
   };
 

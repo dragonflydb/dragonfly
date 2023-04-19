@@ -111,6 +111,17 @@ CapturingReplyBuilder::Payload CapturingReplyBuilder::Take() {
   return pl;
 }
 
+void CapturingReplyBuilder::SendDirect(Payload&& val) {
+  bool is_err = holds_alternative<Error>(val) || holds_alternative<OpStatus>(val);
+  ReplyMode min_mode = is_err ? ReplyMode::ONLY_ERR : ReplyMode::FULL;
+  if (reply_mode_ >= min_mode) {
+    DCHECK_EQ(current_.index(), 0u);
+    current_ = move(val);
+  } else {
+    current_ = monostate{};
+  }
+}
+
 void CapturingReplyBuilder::Capture(Payload val) {
   if (!stack_.empty()) {
     stack_.top().first->arr.push_back(std::move(val));
@@ -202,6 +213,11 @@ struct CaptureVisitor {
 };
 
 void CapturingReplyBuilder::Apply(Payload&& pl, RedisReplyBuilder* rb) {
+  if (auto* crb = dynamic_cast<CapturingReplyBuilder*>(rb); crb != nullptr) {
+    crb->SendDirect(move(pl));
+    return;
+  }
+
   CaptureVisitor cv{rb};
   visit(cv, pl);
 }

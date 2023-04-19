@@ -57,17 +57,17 @@ ReplyMode StoredCmd::Replies() const {
   return reply_mode_;
 }
 
-template <typename C> size_t IsStoredInside(const C& c) {
-  const void* start = static_cast<const void*>(&c);
-  const void* end = start + sizeof(C);
-  const void* data = static_cast<const void*>(c.data());
+template <typename C> size_t IsStoredInlined(const C& c) {
+  const char* start = reinterpret_cast<const char*>(&c);
+  const char* end = start + sizeof(C);
+  const char* data = reinterpret_cast<const char*>(c.data());
   return data >= start && data <= end;
 }
 
 size_t StoredCmd::UsedHeapMemory() const {
-  return IsStoredInside(buffer_)                   ? 0
-         : buffer_.size() + IsStoredInside(sizes_) ? 0
-                                                   : sizes_.size() * sizeof(uint32_t);
+  size_t buffer_size = IsStoredInlined(buffer_) ? 0 : buffer_.size();
+  size_t sz_size = IsStoredInlined(sizes_) ? 0 : sizes_.size() * sizeof(uint32_t);
+  return buffer_size + sz_size;
 }
 
 const CommandId* StoredCmd::Cid() const {
