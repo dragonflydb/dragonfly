@@ -11,6 +11,7 @@
 #include <absl/flags/usage_config.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_split.h>
 #include <absl/strings/strip.h>
 #include <liburing.h>
 #include <mimalloc.h>
@@ -438,6 +439,114 @@ bool ShouldUseEpollAPI(const base::sys::KernelVersion& kver) {
   return true;
 }
 
+string get_cgroup_path(void) {
+    // Begin by reading /proc/self/cgroup
+
+    auto cg = io::ReadFileToString("/proc/self/cgroup");
+    CHECK(cg.has_value());
+
+    // Here, we assume that CGroup v1 is being used. This
+    // is quite likely, as CGroup v1 was introduced back in 2015.
+
+    // strip 0::<path> into just <path>, and newline.
+    auto cgv = std::move(cg.value());
+    return cgv.substr(3, cgv.length() - 3 - 1);
+    /**
+     * -3: we are skipping the first three characters
+     * -1: we discard the last character (a newline)
+    */
+}
+
+const auto cgroup = "/sys/fs/cgroup/" + get_cgroup_path();
+
+bool InsideContainer() {
+  /**
+   * (attemps) to check whether we are running
+   * inside a container or not.
+   *
+   * We employ several tests, all of which
+   * are flawed, however together do cover a
+   * good portion of cases.
+   *
+   * 1. Checking '/.dockerenv': very simple, however
+   * only works for Docker, and this file may be moved
+   * in the future.
+   * 2. Checking '/sys/fs/cgroup/memory.max': This
+   * directory -cannot- be edited (not even using sudoedit),
+   * so users are not able to add files to there. The file
+   * 'memory.max' should contain a memory limit for processes.
+   *
+   * We also use this file to find out how much memory we can use.
+   * However, on LXC this is placed in a different directory:
+   * 3. Checking '/sys/fs/cgroup/memory/memory.limit_in_bytes':
+   * Same idea.
+   */
+
+  using io::Exists;
+
+  return Exists("/.dockerenv") || Exists(cgroup + "/memory.max");
+}
+
+void ReadContainerMemoryLimits(io::MemInfoData& mdata) {
+  auto max = io::ReadFileToString(cgroup + "/memory.max");
+
+  if (max.has_value()) {
+    auto max_val = max.value();
+    if (max_val.find("max") != max_val.npos)
+      return; /*use the host's settings. */
+    else
+      CHECK(absl::SimpleAtoi(max.value(), &mdata.mem_total));
+  }
+
+  mdata.mem_avail = mdata.mem_total;
+  auto high = io::ReadFileToString(cgroup + "/memory.high");
+
+  if (high.has_value()) {
+    auto high_val = high.value();
+    if (high_val.find("max") != high_val.npos)
+      return;
+    else
+      CHECK(absl::SimpleAtoi(high.value(), &mdata.mem_avail));
+  }
+}
+
+size_t ReadContainerThreadLimits() {
+  using namespace io;
+
+  /**
+   * In order to check for CPU limits, we check two files:
+   * - /sys/fs/cgroup/cpu.max: this file contains two tokens:
+   *  <a> <b>
+   * where <a> is either max, or some number, and <b> is the size
+   * of a time share. If <a> is not max, then <a>/<b> is the number
+   * of useable CPUs (where a non-integer is treated as a CPU
+   * available for a fraction of a time share)
+   * - /sys/fs/cgroup/cpuset.cpus: this file is either empty,
+   * or otherwise holds a list of the physical CPUs allocated to the container.
+   * Since cpuset limits what physical cores the container can use,
+   * then we can skip reading this file as we get its value later, as
+   * such we return 0.
+   */
+
+  if (auto cpu = ReadFileToString(cgroup + "/cpu.max"); cpu.has_value()) {
+    vector<string_view> res = absl::StrSplit(cpu.value(), ' ');
+
+    CHECK_EQ(res.size(), 2u);
+
+    if (res[0] == "max")
+      return 0;
+    else {
+      double count, timeshare;
+      CHECK(absl::SimpleAtod(res[0], &count));
+      CHECK(absl::SimpleAtod(res[1], &timeshare));
+
+      return static_cast<size_t>(ceil(count / timeshare));
+    }
+  }
+
+  return 0;
+}
+
 }  // namespace
 }  // namespace dfly
 
@@ -494,17 +603,30 @@ Usage: dragonfly [FLAGS]
     }
   }
 
+  auto memory = ReadMemInfo().value();
+
+  auto inside_container = InsideContainer();
+  if (inside_container)
+    ReadContainerMemoryLimits(memory);
+
+  if (memory.swap_total != 0)
+    LOG(WARNING) << "SWAP is enabled. Consider disabling it when running Dragonfly.";
+
   if (GetFlag(FLAGS_maxmemory).value == 0) {
     LOG(INFO) << "maxmemory has not been specified. Deciding myself....";
 
-    Result<MemInfoData> res = ReadMemInfo();
-    size_t available = res->mem_avail;
+    size_t available = memory.mem_avail;
     size_t maxmemory = size_t(0.8 * available);
     LOG(INFO) << "Found " << HumanReadableNumBytes(available)
               << " available memory. Setting maxmemory to " << HumanReadableNumBytes(maxmemory);
     absl::SetFlag(&FLAGS_maxmemory, MaxMemoryFlag(maxmemory));
   } else {
-    LOG(INFO) << "Max memory limit is: " << HumanReadableNumBytes(GetFlag(FLAGS_maxmemory).value);
+    auto limit = GetFlag(FLAGS_maxmemory).value;
+    auto hr_limit = HumanReadableNumBytes(limit);
+    if (limit > memory.mem_avail)
+      LOG(WARNING) << "Got memory limit " << hr_limit << ", however only "
+                   << HumanReadableNumBytes(memory.mem_avail) << " was found.";
+    LOG(INFO) << "Max memory limit is: " << hr_limit;
   }
 
   dfly::max_memory_limit = GetFlag(FLAGS_maxmemory).value;
@@ -525,10 +647,15 @@ Usage: dragonfly [FLAGS]
   unique_ptr<util::ProactorPool> pool;
 
   bool use_epoll = ShouldUseEpollAPI(kver);
+  size_t max_available_threads{0};
+
+  if (inside_container)
+    max_available_threads = ReadContainerThreadLimits();
+
   if (use_epoll) {
-    pool.reset(fb2::Pool::Epoll());
+    pool.reset(fb2::Pool::Epoll(max_available_threads));
   } else {
-    pool.reset(fb2::Pool::IOUring(1024));  // 1024 - iouring queue size.
+    pool.reset(fb2::Pool::IOUring(1024, max_available_threads));  // 1024 - iouring queue size.
   }
 
   pool->Run();
