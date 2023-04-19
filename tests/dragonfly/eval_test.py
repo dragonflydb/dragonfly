@@ -177,7 +177,6 @@ async def test_golang_asynq_script(async_pool, num_queues=10, num_tasks=100):
     jobs = [asyncio.create_task(enqueue_worker(
         f"q-{queue}")) for queue in range(num_queues)]
 
-
     collected = 0
 
     async def dequeue_worker():
@@ -202,20 +201,23 @@ async def test_golang_asynq_script(async_pool, num_queues=10, num_tasks=100):
     for job in jobs:
         await job
 
-ERROR_CALL_SCRIPT = """
-redis.call('ECHO', 'I', 'want', 'an', 'error')
+
+ERROR_CALL_SCRIPT_TEMPLATE = """
+redis.{}('LTRIM', 'l', 'a', 'b')
 """
 
-ERROR_PCALL_SCRIPT = """
-redis.pcall('ECHO', 'I', 'want', 'an', 'error')
-"""
 
+@dfly_args({"proactor_threads": 1})
 @pytest.mark.asyncio
 async def test_eval_error_propagation(async_client):
-    assert await async_client.eval(ERROR_PCALL_SCRIPT, 0) is None
+    CMDS = ['call', 'pcall', 'acall', 'apcall']
 
-    try:
-        await async_client.eval(ERROR_CALL_SCRIPT, 0)
-        assert False, "Eval must have thrown an error"
-    except aioredis.RedisError as e:
-        pass
+    for cmd in CMDS:
+        does_abort = 'p' not in cmd
+        try:
+            await async_client.eval(ERROR_CALL_SCRIPT_TEMPLATE.format(cmd), 1, 'l')
+            if does_abort:
+                assert False, "Eval must have thrown an error: " + cmd
+        except aioredis.RedisError as e:
+            if not does_abort:
+                assert False, "Error should have been ignored: " + cmd
