@@ -70,7 +70,7 @@ class SliceSnapshot {
   void Join();
 
   // Force stop. Needs to be called together with cancelling the context.
-  // Snapshot can't always react to cancellation in streaming mode becuase the
+  // Snapshot can't always react to cancellation in streaming mode because the
   // iteration fiber might have finished running by then.
   void Cancel();
 
@@ -128,7 +128,8 @@ class SliceSnapshot {
 
   std::unique_ptr<RdbSerializer> serializer_;
 
-  Mutex mu_;
+  bool serialize_bucket_running_ = false;
+  EventCount serialize_bucket_evc_;
   Fiber snapshot_fb_;  // IterateEntriesFb
 
   CompressionMode compression_mode_;
