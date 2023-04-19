@@ -128,8 +128,8 @@ class SliceSnapshot {
 
   std::unique_ptr<RdbSerializer> serializer_;
 
+  // Used for sanity checks.
   bool serialize_bucket_running_ = false;
-  EventCount serialize_bucket_evc_;
   Fiber snapshot_fb_;  // IterateEntriesFb
 
   CompressionMode compression_mode_;

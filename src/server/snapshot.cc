@@ -52,12 +52,12 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
 
   snapshot_fb_ = MakeFiber([this, stream_journal, cll] {
     IterateBucketsFb(cll);
+    db_slice_->UnregisterOnChange(snapshot_version_);
     if (cll->IsCancelled()) {
       Cancel();
     } else if (!stream_journal) {
       CloseRecordChannel();
     }
-    db_slice_->UnregisterOnChange(snapshot_version_);
   });
 }
 
@@ -76,7 +76,6 @@ void SliceSnapshot::Stop() {
 void SliceSnapshot::Cancel() {
   VLOG(1) << "SliceSnapshot::Cancel";
 
-  CloseRecordChannel();
   // Cancel() might be called multiple times from different fibers of the same thread, but we
   // should unregister the callback only once.
   uint32_t cb_id = journal_cb_id_;
@@ -84,6 +83,8 @@ void SliceSnapshot::Cancel() {
     journal_cb_id_ = 0;
     db_slice_->shard_owner()->journal()->UnregisterOnChange(cb_id);
   }
+
+  CloseRecordChannel();
 }
 
 void SliceSnapshot::Join() {
@@ -120,10 +121,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
 
     uint64_t last_yield = 0;
     PrimeTable* pt = &db_array_[db_indx]->prime;
-    {
-      serialize_bucket_evc_.await([this]() { return !serialize_bucket_running_; });
-      current_db_ = db_indx;
-    }
+    current_db_ = db_indx;
 
     VLOG(1) << "Start traversing " << pt->size() << " items for index " << db_indx;
     do {
@@ -151,8 +149,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
     PushSerializedToChannel(true);
   }  // for (dbindex)
 
-  serialize_bucket_evc_.await([this]() { return !serialize_bucket_running_; });
-
+  CHECK(!serialize_bucket_running_);
   CHECK(!serializer_->SendFullSyncCut());
   PushSerializedToChannel(true);
 
@@ -198,7 +195,6 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
     ++it;
   }
   serialize_bucket_running_ = false;
-  serialize_bucket_evc_.notifyAll();
   return result;
 }
 
@@ -277,7 +273,7 @@ void SliceSnapshot::OnJournalEntry(const journal::Entry& entry, bool unused_awai
 }
 
 void SliceSnapshot::CloseRecordChannel() {
-  serialize_bucket_evc_.await([this]() { return !serialize_bucket_running_; });
+  CHECK(!serialize_bucket_running_);
   // Make sure we close the channel only once with a CAS check.
   bool expected = false;
   if (closed_chan_.compare_exchange_strong(expected, true)) {
