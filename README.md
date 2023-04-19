@@ -7,13 +7,13 @@
 
 [![ci-tests](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml) [![Twitter URL](https://img.shields.io/twitter/follow/dragonflydbio?style=social)](https://twitter.com/dragonflydbio)
 
-Other languages:  [简体中文](README.zh-CN.md) 
+Other languages:  [简体中文](README.zh-CN.md)
 
 [Website](https://dragonflydb.io/) • [Quick Start](https://github.com/dragonflydb/dragonfly/tree/main/docs/quick-start) • [Community Discord](https://discord.gg/HsPjXGVH85) • [GitHub Discussions](https://github.com/dragonflydb/dragonfly/discussions) | [GitHub Issues](https://github.com/dragonflydb/dragonfly/issues) | [Contributing](https://github.com/dragonflydb/dragonfly/blob/main/CONTRIBUTING.md)
 
 ## The world's fastest in-memory data store
 
-Dragonfly is an in-memory data store built for modern application workloads. 
+Dragonfly is an in-memory data store built for modern application workloads.
 
 Fully compatible with Redis and Memcached APIs, Dragonfly requires no code changes to adopt. Compared to legacy in-memory datastores, Dragonfly delivers 25X more throughput, higher cache hit rates with lower tail latency, and effortless vertical scalability.
 
@@ -74,8 +74,8 @@ Memcached exhibited lower latency for the read benchmark, but also lower through
 
 ### Memory efficiency
 
-To test memory efficiency, we filled Dragonfly and Redis with ~5GB of data using the `debug populate 5000000 key 1024` command, sent update traffic with `memtier`, and kicked off the snapshotting with the `bgsave` command. 
-  
+To test memory efficiency, we filled Dragonfly and Redis with ~5GB of data using the `debug populate 5000000 key 1024` command, sent update traffic with `memtier`, and kicked off the snapshotting with the `bgsave` command.
+
 This figure demonstrates how each server behaved in terms of memory efficiency.
 
 <img src="http://static.dragonflydb.io/repo-assets/bgsave-memusage.svg" width="70%" border="0"/>
@@ -83,13 +83,13 @@ This figure demonstrates how each server behaved in terms of memory efficiency.
 Dragonfly was 30% more memory efficient than Redis in the idle state and did not show any visible increase in memory use during the snapshot phase. At peak, Redis memory use increased to almost 3X that of Dragonfly.
 
 Dragonfly finished the snapshot faster, within a few seconds.
-  
+
 For more info about memory efficiency in Dragonfly, see our [Dashtable doc](/docs/dashtable.md).
 
 
 
 ## <a name="configuration"><a/>Configuration
-  
+
 Dragonfly supports common Redis arguments where applicable. For example, you can run: `dragonfly --requirepass=foo --bind localhost`.
 
 Dragonfly currently supports the following Redis-specific arguments:
@@ -109,8 +109,8 @@ There are also some Dragonfly-specific arguments:
  * `save_schedule`: Glob spec for the UTC to save a snapshot in HH:MM (24h time) format (`default: ""`).
  * `primary_port_http_enabled`: Allows accessing HTTP console on main TCP port if `true` (`default: true`).
  * `admin_port`: To enable admin access to the console on the assigned port (`default: disabled`). Supports both HTTP and RESP protocols.
- * `admin_bind`: To bind the admin console TCP connection to a given address (`default: any`). Supports both HTTP and RESP protocols. 
- * `cluster_mode`: Cluster mode supported (`default: ""`). Currently supports only `emulated`. 
+ * `admin_bind`: To bind the admin console TCP connection to a given address (`default: any`). Supports both HTTP and RESP protocols.
+ * `cluster_mode`: Cluster mode supported (`default: ""`). Currently supports only `emulated`.
  * `cluster_announce_ip`: The IP that cluster commands announce to the client.
 
 ### Example start script with popular options:
@@ -118,6 +118,8 @@ There are also some Dragonfly-specific arguments:
 ```bash
 ./dragonfly-x86_64 --logtostderr --requirepass=youshallnotpass --cache_mode=true -dbnum 1 --bind localhost --port 6379  --save_schedule "*:30" --maxmemory=12gb --keys_output_limit=12288 --dbfilename dump.rdb
 ```
+
+Arguments can be also provided from a configuration file by runnning `dragonfly --flagfile <filename>`. The file should list one flag per line, with equal signs instead of spaces for key-value flags.
 
 For more options like logs management or TLS support, run `dragonfly --help`.
 
@@ -134,23 +136,23 @@ Please see our [Command Reference](https://dragonflydb.io/docs/category/command-
 ## <a name="design-decisions"><a/> Design decisions
 
 ### Novel cache design
-  
+
 Dragonfly has a single, unified, adaptive caching algorithm that is simple and memory efficient.
 
 You can enable caching mode by passing the `--cache_mode=true` flag. Once this mode is on, Dragonfly will evict items least likely to be stumbled upon in the future but only when it is near the `maxmemory` limit.
 
 ### Expiration deadlines with relative accuracy
-  
-Expiration ranges are limited to ~4 years. 
-  
+
+Expiration ranges are limited to ~4 years.
+
 Expiration deadlines with millisecond precision (PEXPIRE, PSETEX, etc.) are rounded to the closest second **for deadlines greater than 134217727ms (approximately 37 hours)**, which has less than 0.001% error and should be acceptable for large ranges. If this is not suitable for your use case, get in touch or open an issue explaining your case.
 
 For more detailed differences between Dragonfly expiration deadlines and Redis implementations, [see here](docs/differences.md).
 
 ### Native HTTP console and Prometheus-compatible metrics
-  
-By default, Dragonfly allows HTTP access via its main TCP port (6379). That's right, you can connect to Dragonfly via Redis protocol and via HTTP protocol — the server recognizes the protocol automatically during the connection initiation. Go ahead and try it with your browser. HTTP access currently does not have much info but will include useful debugging and management info in the future. 
-  
+
+By default, Dragonfly allows HTTP access via its main TCP port (6379). That's right, you can connect to Dragonfly via Redis protocol and via HTTP protocol — the server recognizes the protocol automatically during the connection initiation. Go ahead and try it with your browser. HTTP access currently does not have much info but will include useful debugging and management info in the future.
+
 Go to the URL `:6379/metrics` to view Prometheus-compatible metrics.
 
 The Prometheus exported metrics are compatible with the Grafana dashboard, [see here](tools/local/monitoring/grafana/provisioning/dashboards/dashboard.json).
