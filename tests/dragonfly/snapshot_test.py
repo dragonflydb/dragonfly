@@ -144,3 +144,21 @@ class TestPeriodicSnapshot(SnapshotTestBase):
         time.sleep(60)
 
         assert super().get_main_file("test-periodic-summary.dfs")
+
+
+@dfly_args({**BASIC_ARGS})
+class TestPathEscapes(SnapshotTestBase):
+    """Test that we don't allow path escapes. We just check that df_server.start()
+    fails because we don't have a much better way to test that."""
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_dir: Path):
+        super().setup(tmp_dir)
+
+    @pytest.mark.asyncio
+    async def test_snapshot(self, df_local_factory):
+        df_server = df_local_factory.create(dbfilename="../../../../etc/passwd")
+        try:
+            df_server.start()
+            assert False, "Server should not start correctly"
+        except Exception as e:
+            pass

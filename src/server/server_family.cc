@@ -276,7 +276,12 @@ void ExtendDfsFilenameWithShard(int shard, fs::path* filename) {
   ExtendDfsFilename(absl::Dec(shard, absl::kZeroPad4), filename);
 }
 
-GenericError ValidateFilenameExtension(const fs::path& filename, bool new_version) {
+GenericError ValidateFilename(const fs::path& filename, bool new_version) {
+  if (!filename.parent_path().empty()) {
+    return {absl::StrCat("filename may not contain directory separators (Got \"", filename.c_str(),
+                         "\")")};
+  }
+
   if (!filename.has_extension()) {
     return {};
   }
@@ -397,8 +402,7 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
     exit(1);
   }
 
-  if (auto ec =
-          ValidateFilenameExtension(GetFlag(FLAGS_dbfilename), GetFlag(FLAGS_df_snapshot_format));
+  if (auto ec = ValidateFilename(GetFlag(FLAGS_dbfilename), GetFlag(FLAGS_df_snapshot_format));
       ec) {
     LOG(ERROR) << ec.Format();
     exit(1);
@@ -942,7 +946,7 @@ GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
   absl::Time start = absl::Now();
 
   fs::path filename = GetFlag(FLAGS_dbfilename);
-  if (auto ec = ValidateFilenameExtension(filename, new_version); ec) {
+  if (auto ec = ValidateFilename(filename, new_version); ec) {
     return ec;
   }
   SubstituteFilenameTsPlaceholder(&filename, FormatTs(start));
