@@ -6,31 +6,42 @@
 #include "base/logging.h"
 #include "reply_capture.h"
 
+#define CHECK_MODE(needed)    \
+  if (reply_mode_ < needed) { \
+    current_ = monostate{};   \
+    return;                   \
+  }
 namespace facade {
 
 using namespace std;
 
 void CapturingReplyBuilder::SendError(std::string_view str, std::string_view type) {
+  CHECK_MODE(ReplyMode::ONLY_ERR);
   Capture(Error{str, type});
 }
 
 void CapturingReplyBuilder::SendMGetResponse(absl::Span<const OptResp> arr) {
+  CHECK_MODE(ReplyMode::FULL);
   Capture(vector<OptResp>{arr.begin(), arr.end()});
 }
 
 void CapturingReplyBuilder::SendError(OpStatus status) {
+  CHECK_MODE(ReplyMode::ONLY_ERR);
   Capture(status);
 }
 
 void CapturingReplyBuilder::SendNullArray() {
+  CHECK_MODE(ReplyMode::FULL);
   Capture(unique_ptr<CollectionPayload>{nullptr});
 }
 
 void CapturingReplyBuilder::SendEmptyArray() {
+  CHECK_MODE(ReplyMode::FULL);
   Capture(make_unique<CollectionPayload>(0, ARRAY));
 }
 
 void CapturingReplyBuilder::SendSimpleStrArr(StrSpan arr) {
+  CHECK_MODE(ReplyMode::FULL);
   DCHECK_EQ(current_.index(), 0u);
 
   WrappedStrSpan warr{arr};
@@ -42,6 +53,7 @@ void CapturingReplyBuilder::SendSimpleStrArr(StrSpan arr) {
 }
 
 void CapturingReplyBuilder::SendStringArr(StrSpan arr, CollectionType type) {
+  CHECK_MODE(ReplyMode::FULL);
   DCHECK_EQ(current_.index(), 0u);
 
   // TODO: 1. Allocate all strings at once 2. Allow movable types
@@ -54,31 +66,38 @@ void CapturingReplyBuilder::SendStringArr(StrSpan arr, CollectionType type) {
 }
 
 void CapturingReplyBuilder::SendNull() {
+  CHECK_MODE(ReplyMode::FULL);
   Capture(nullptr_t{});
 }
 
 void CapturingReplyBuilder::SendLong(long val) {
+  CHECK_MODE(ReplyMode::FULL);
   Capture(val);
 }
 
 void CapturingReplyBuilder::SendDouble(double val) {
+  CHECK_MODE(ReplyMode::FULL);
   Capture(val);
 }
 
 void CapturingReplyBuilder::SendSimpleString(std::string_view str) {
+  CHECK_MODE(ReplyMode::FULL);
   Capture(SimpleString{string{str}});
 }
 
 void CapturingReplyBuilder::SendBulkString(std::string_view str) {
+  CHECK_MODE(ReplyMode::FULL);
   Capture(BulkString{string{str}});
 }
 
 void CapturingReplyBuilder::SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
                                             bool with_scores) {
+  CHECK_MODE(ReplyMode::FULL);
   Capture(ScoredArray{arr, with_scores});
 }
 
 void CapturingReplyBuilder::StartCollection(unsigned len, CollectionType type) {
+  CHECK_MODE(ReplyMode::FULL);
   stack_.emplace(make_unique<CollectionPayload>(len, type), type == MAP ? len * 2 : len);
 
   // If we added an empty collection, it must be collapsed immediately.
@@ -185,6 +204,18 @@ struct CaptureVisitor {
 void CapturingReplyBuilder::Apply(Payload&& pl, RedisReplyBuilder* rb) {
   CaptureVisitor cv{rb};
   visit(cv, pl);
+}
+
+void CapturingReplyBuilder::SetReplyMode(ReplyMode mode) {
+  reply_mode_ = mode;
+  current_ = monostate{};
+}
+
+optional<CapturingReplyBuilder::ErrorRef> CapturingReplyBuilder::GetError(const Payload& pl) {
+  if (auto* err = get_if<Error>(&pl); err != nullptr) {
+    return ErrorRef{err->first, err->second};
+  }
+  return nullopt;
 }
 
 }  // namespace facade

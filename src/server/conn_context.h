@@ -22,12 +22,16 @@ class ChannelStore;
 // Used for storing MULTI/EXEC commands.
 class StoredCmd {
  public:
-  StoredCmd(const CommandId* cid, CmdArgList args);
+  StoredCmd(const CommandId* cid, CmdArgList args,
+            facade::ReplyMode mode = facade::ReplyMode::FULL);
 
   // Create on top of already filled tightly-packed buffer.
-  StoredCmd(std::string&& buffer, const CommandId* cid, CmdArgList args);
+  StoredCmd(std::string&& buffer, const CommandId* cid, CmdArgList args,
+            facade::ReplyMode mode = facade::ReplyMode::FULL);
 
   size_t NumArgs() const;
+
+  size_t UsedHeapMemory() const;
 
   // Fill the arg list with stored arguments, it should be at least of size NumArgs().
   // Between filling and invocation, cmd should NOT be moved.
@@ -35,10 +39,13 @@ class StoredCmd {
 
   const CommandId* Cid() const;
 
+  facade::ReplyMode Replies() const;
+
  private:
+  facade::ReplyMode reply_mode_;         // reply mode
   const CommandId* cid_;                 // underlying command
   std::string buffer_;                   // underlying buffer
-  absl::FixedArray<uint32_t, 4> sizes_;  // sizes of arg parts
+  absl::FixedArray<uint32_t, 4> sizes_;  // sizes of arg part
 };
 
 struct ConnectionState {
@@ -75,7 +82,11 @@ struct ConnectionState {
   struct ScriptInfo {
     bool is_write = true;
     absl::flat_hash_set<std::string_view> keys;  // declared keys
-    std::vector<StoredCmd> async_cmds;           // aggregated by acall
+
+    size_t async_cmds_heap_mem = 0;     // bytes used by async_cmds
+    size_t async_cmds_heap_limit = 0;   // max bytes allowed for async_cmds
+    std::vector<StoredCmd> async_cmds;  // aggregated by acall
+    GenericError async_error;
   };
 
   // PUB-SUB messaging related data.
@@ -117,7 +128,7 @@ struct ConnectionState {
   ExecInfo exec_info;
   ReplicationInfo replicaiton_info;
 
-  std::optional<ScriptInfo> script_info;
+  std::unique_ptr<ScriptInfo> script_info;
   std::unique_ptr<SubscribeInfo> subscribe_info;
 };
 

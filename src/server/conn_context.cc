@@ -16,8 +16,8 @@ namespace dfly {
 using namespace std;
 using namespace facade;
 
-StoredCmd::StoredCmd(const CommandId* cid, CmdArgList args)
-    : cid_{cid}, buffer_{}, sizes_(args.size()) {
+StoredCmd::StoredCmd(const CommandId* cid, CmdArgList args, ReplyMode mode)
+    : cid_{cid}, buffer_{}, sizes_(args.size()), reply_mode_{mode} {
   size_t total_size = 0;
   for (auto args : args)
     total_size += args.size();
@@ -31,8 +31,8 @@ StoredCmd::StoredCmd(const CommandId* cid, CmdArgList args)
   }
 }
 
-StoredCmd::StoredCmd(string&& buffer, const CommandId* cid, CmdArgList args)
-    : cid_{cid}, buffer_{move(buffer)}, sizes_(args.size()) {
+StoredCmd::StoredCmd(string&& buffer, const CommandId* cid, CmdArgList args, ReplyMode mode)
+    : cid_{cid}, buffer_{move(buffer)}, sizes_(args.size()), reply_mode_{mode} {
   for (unsigned i = 0; i < args.size(); i++) {
     // Assume tightly packed list.
     DCHECK(i + 1 == args.size() || args[i].data() + args[i].size() == args[i + 1].data());
@@ -51,6 +51,23 @@ void StoredCmd::Fill(CmdArgList args) {
 
 size_t StoredCmd::NumArgs() const {
   return sizes_.size();
+}
+
+ReplyMode StoredCmd::Replies() const {
+  return reply_mode_;
+}
+
+template <typename C> size_t IsStoredInside(const C& c) {
+  const void* start = static_cast<const void*>(&c);
+  const void* end = start + sizeof(C);
+  const void* data = static_cast<const void*>(c.data());
+  return data >= start && data <= end;
+}
+
+size_t StoredCmd::UsedHeapMemory() const {
+  return IsStoredInside(buffer_)                   ? 0
+         : buffer_.size() + IsStoredInside(sizes_) ? 0
+                                                   : sizes_.size() * sizeof(uint32_t);
 }
 
 const CommandId* StoredCmd::Cid() const {

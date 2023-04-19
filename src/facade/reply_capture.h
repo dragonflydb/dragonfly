@@ -64,18 +64,25 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   };
 
  public:
-  CapturingReplyBuilder() : RedisReplyBuilder{nullptr}, stack_{}, current_{} {
+  CapturingReplyBuilder(ReplyMode mode = ReplyMode::FULL)
+      : RedisReplyBuilder{nullptr}, reply_mode_{mode}, stack_{}, current_{} {
   }
 
   using Payload = std::variant<std::monostate, Null, Error, OpStatus, long, double, SimpleString,
                                BulkString, StrArrPayload, std::unique_ptr<CollectionPayload>,
                                std::vector<OptResp>, ScoredArray>;
 
+  using ErrorRef = std::pair<std::string_view, std::string_view>;
+
+  void SetReplyMode(ReplyMode mode);
+
   // Take payload and clear state.
   Payload Take();
 
   // Send payload to builder.
   static void Apply(Payload&& pl, RedisReplyBuilder* builder);
+
+  static std::optional<ErrorRef> GetError(const Payload& pl);
 
  private:
   struct CollectionPayload {
@@ -92,6 +99,8 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
 
   // While topmost collection in stack is full, finalize it and add it as a regular value.
   void CollapseFilledCollections();
+
+  ReplyMode reply_mode_;
 
   // List of nested active collections that are being built.
   std::stack<std::pair<std::unique_ptr<CollectionPayload>, int>> stack_;

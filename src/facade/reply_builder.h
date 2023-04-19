@@ -13,6 +13,8 @@
 
 namespace facade {
 
+enum class ReplyMode { NONE, ONLY_ERR, FULL };
+
 class SinkReplyBuilder {
  public:
   struct ResponseValue {
