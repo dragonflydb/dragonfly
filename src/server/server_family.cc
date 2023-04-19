@@ -190,7 +190,7 @@ class RdbSnapshot {
   RdbSnapshot(FiberQueueThreadPool* fq_tp) : fq_tp_(fq_tp) {
   }
 
-  error_code Start(SaveMode save_mode, const string& path, const StringVec& lua_scripts);
+  GenericError Start(SaveMode save_mode, const string& path, const StringVec& lua_scripts);
   void StartInShard(EngineShard* shard);
 
   error_code SaveBody();
@@ -223,18 +223,20 @@ io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
   return res;
 }
 
-error_code RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
-                              const StringVec& lua_scripts) {
+GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
+                                const StringVec& lua_scripts) {
   bool is_direct = false;
   if (fq_tp_) {  // EPOLL
     auto res = util::OpenFiberWriteFile(path, fq_tp_);
     if (!res)
-      return res.error();
+      return GenericError(res.error(), "Couldn't open file for writing");
     io_sink_.reset(*res);
   } else {
     auto res = OpenLinux(path, kRdbWriteFlags, 0666);
     if (!res) {
-      return res.error();
+      return GenericError(
+          res.error(),
+          "Couldn't open file for writing (is direct I/O supported by the file system?)");
     }
     io_sink_.reset(new LinuxWriteWrapper(res->release()));
     is_direct = kRdbWriteFlags & O_DIRECT;
@@ -899,8 +901,8 @@ using PartialSaveOpts = tuple<const fs::path& /*filename*/, const fs::path& /*pa
 
 // Start saving a single snapshot of a multi-file dfly snapshot.
 // If shard is null, then this is the summary file.
-error_code DoPartialSave(PartialSaveOpts opts, const dfly::StringVec& scripts,
-                         RdbSnapshot* snapshot, EngineShard* shard) {
+GenericError DoPartialSave(PartialSaveOpts opts, const dfly::StringVec& scripts,
+                           RdbSnapshot* snapshot, EngineShard* shard) {
   auto [filename, path] = opts;
   // Construct resulting filename.
   fs::path full_filename = filename;
@@ -913,7 +915,7 @@ error_code DoPartialSave(PartialSaveOpts opts, const dfly::StringVec& scripts,
 
   // Start rdb saving.
   SaveMode mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
-  error_code local_ec = snapshot->Start(mode, full_path.generic_string(), scripts);
+  GenericError local_ec = snapshot->Start(mode, full_path.generic_string(), scripts);
 
   if (!local_ec && mode == SaveMode::SINGLE_SHARD) {
     snapshot->StartInShard(shard);
