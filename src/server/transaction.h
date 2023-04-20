@@ -389,6 +389,9 @@ class Transaction {
   // Init as a global transaction.
   void InitGlobal();
 
+  // Init when command has no keys and it need to use transaction framework
+  void InitNoKey();
+
   // Init with a set of keys.
   void InitByKeys(KeyIndex keys);
 
@@ -531,6 +534,7 @@ class Transaction {
 
   TxId txid_{0};
   bool global_{false};
+  bool empty_args_{false};
   DbIndex db_index_{0};
   uint64_t time_now_ms_{0};
 

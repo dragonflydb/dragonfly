@@ -83,6 +83,15 @@ void Transaction::InitGlobal() {
     sd.local_mask = ACTIVE;
 }
 
+void Transaction::InitNoKey() {
+  // No key command will use the first shard.
+  unique_shard_cnt_ = 1;
+  unique_shard_id_ = 0;
+  shard_data_.resize(1);
+  shard_data_.front().local_mask |= ACTIVE;
+  empty_args_ = true;
+}
+
 void Transaction::BuildShardIndex(KeyIndex key_index, bool rev_mapping,
                                   std::vector<PerShardCache>* out) {
   auto args = full_args_;
@@ -307,6 +316,11 @@ OpStatus Transaction::InitByArgs(DbIndex index, CmdArgList args) {
 
   if ((cid_->opt_mask() & CO::GLOBAL_TRANS) > 0) {
     InitGlobal();
+    return OpStatus::OK;
+  }
+
+  if ((cid_->opt_mask() & CO::NO_KEY_JOURNAL) > 0) {
+    InitNoKey();
     return OpStatus::OK;
   }
 
@@ -929,6 +943,12 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   DCHECK(shard_data_.size() == 1u || multi_->mode == NON_ATOMIC);
   DCHECK_NE(unique_shard_id_, kInvalidSid);
 
+  // callback with no args that needs to be scheduled can run ooo, no keys need to be locked.
+  if (empty_args_) {
+    RunQuickie(shard);
+    return true;
+  }
+
   auto mode = Mode();
   auto lock_args = GetLockArgs(shard->shard_id());
 
@@ -1289,10 +1309,18 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
   if (multi_ && multi_->role == SQUASHER)
     return;
 
-  // Ignore non-write commands or ones with disabled autojournal.
-  if ((cid_->opt_mask() & CO::WRITE) == 0 || ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) > 0 &&
-                                              !renabled_auto_journal_.load(memory_order_relaxed)))
+  bool journal_by_cmd_mask = true;
+  if ((cid_->opt_mask() & CO::NO_KEY_JOURNAL) > 0) {
+    journal_by_cmd_mask = true;  // Enforce journaling for commands that dont change the db.
+  } else if ((cid_->opt_mask() & CO::WRITE) == 0) {
+    journal_by_cmd_mask = false;  // Non-write command are not journaled.
+  } else if ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) > 0 &&
+             !renabled_auto_journal_.load(memory_order_relaxed)) {
+    journal_by_cmd_mask = false;  // Command disabled auto journal.
+  }
+  if (!journal_by_cmd_mask) {
     return;
+  }
 
   auto journal = shard->journal();
   if (journal == nullptr)
