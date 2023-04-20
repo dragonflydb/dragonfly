@@ -78,6 +78,8 @@ bool MatchHttp11Line(string_view line) {
 constexpr size_t kMinReadSize = 256;
 constexpr size_t kMaxReadSize = 32_KB;
 
+constexpr size_t kMaxDispatchQMemory = 5_MB;
+
 thread_local uint32_t free_req_release_weight = 0;
 
 }  // namespace
@@ -173,11 +175,18 @@ template <class... Ts> struct Overloaded : Ts... {
 
 template <class... Ts> Overloaded(Ts...) -> Overloaded<Ts...>;
 
-size_t Connection::MessageHandle::StorageCapacity() const {
-  auto pub_size = [](const PubMessage& msg) -> size_t { return 0; };
-  auto msg_size = [](const PipelineMessage& arg) -> size_t { return arg.StorageCapacity(); };
-  auto monitor_size = [](const MonitorMessage& arg) -> size_t { return 0; };
-  return visit(Overloaded{pub_size, msg_size, monitor_size}, this->handle);
+size_t Connection::MessageHandle::UsedMemory() const {
+  // TODO: don't count inline size
+  auto pub_size = [](const PubMessage& msg) -> size_t {
+    const auto* md = get_if<PubMessage::MessageData>(&msg.data);
+    return sizeof(PubMessage) + (md ? (md->channel_len + md->message_len) : 0u);
+  };
+  auto msg_size = [](const PipelineMessage& arg) -> size_t {
+    return sizeof(PipelineMessage) + arg.args.capacity() * sizeof(MutableSlice) +
+           arg.storage.capacity();
+  };
+  auto monitor_size = [](const MonitorMessage& arg) -> size_t { return arg.capacity(); };
+  return sizeof(MessageHandle) + visit(Overloaded{pub_size, msg_size, monitor_size}, this->handle);
 }
 
 bool Connection::MessageHandle::IsPipelineMsg() const {
@@ -218,12 +227,9 @@ void Connection::DispatchOperations::operator()(const PubMessage& pub_msg) {
 
 void Connection::DispatchOperations::operator()(Connection::PipelineMessage& msg) {
   ++stats->pipelined_cmd_cnt;
-  self->pipeline_msg_cnt_--;
 
-  bool do_batch = (self->pipeline_msg_cnt_ > 0);
-  DVLOG(2) << "Dispatching pipeline: " << ToSV(msg.args.front()) << " " << do_batch;
+  DVLOG(2) << "Dispatching pipeline: " << ToSV(msg.args.front());
 
-  builder->SetBatchMode(do_batch);
   self->cc_->async_dispatch = true;
   self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()}, self->cc_.get());
   self->last_interaction_ = time(nullptr);
@@ -568,7 +574,6 @@ auto Connection::ParseRedis() -> ParserStatus {
       } else {
         // Dispatch via queue to speedup input reading.
         SendAsync(MessageHandle{FromArgs(move(tmp_parse_args_), tlh)});
-        ++pipeline_msg_cnt_;
         if (dispatch_q_.size() > 10)
           ThisFiber::Yield();
       }
@@ -740,7 +745,13 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
     MessageHandle msg = move(dispatch_q_.front());
     dispatch_q_.pop_front();
+
+    builder->SetBatchMode(dispatch_q_.size() > 0);
+
     std::visit(dispatch_op, msg.handle);
+
+    dispatch_q_bytes_.fetch_sub(msg.UsedMemory(), memory_order_relaxed);
+    evc_bp_.notify();
 
     if (auto* pipe = get_if<PipelineMessagePtr>(&msg.handle); pipe) {
       if (stats_->pipeline_cache_capacity < request_cache_limit) {
@@ -842,10 +853,17 @@ void Connection::SendAsync(MessageHandle msg) {
   if (cc_->conn_closing)
     return;
 
+  dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
+
   dispatch_q_.push_back(move(msg));
   if (dispatch_q_.size() == 1) {
     evc_.notify();
   }
+}
+
+void Connection::EnsureAsyncMemoryBudget() {
+  evc_bp_.await(
+      [this] { return dispatch_q_bytes_.load(memory_order_relaxed) <= kMaxDispatchQMemory; });
 }
 
 std::string Connection::RemoteEndpointStr() const {
