@@ -106,6 +106,7 @@ class DflyInstanceFactory:
 
     def create(self, **kwargs) -> DflyInstance:
         args = {**self.args, **kwargs}
+        args.setdefault("dbfilename", "")
         for k, v in args.items():
             args[k] = v.format(**self.params.env) if isinstance(v, str) else v
 
