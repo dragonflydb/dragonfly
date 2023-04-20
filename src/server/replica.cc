@@ -444,7 +444,8 @@ error_code Replica::Greet() {
     if (!CheckRespIsSimpleReply("OK")) {
       LOG(WARNING) << "master did not return OK on id message";
     }
-    VLOG(1) << "Master id: " << param0 << ", sync id: " << param1 << ", num journals "
+    VLOG(1) << "Master id: " << master_context_.master_repl_id
+            << ", sync id: " << master_context_.dfly_session_id << ", num journals "
             << num_df_flows_;
   } else {
     LOG(ERROR) << "Bad response " << ToSV(io_buf.InputBuffer());
