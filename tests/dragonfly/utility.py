@@ -493,9 +493,9 @@ class DflySeeder:
                     pipe.execute_command(*cmd)
 
             try:
-                print("before exec")
+                # print("before exec")
                 await pipe.execute()
-                print("after exec")
+                # print("after exec")
             except Exception as e:
                 raise SystemExit(e)
             queue.task_done()

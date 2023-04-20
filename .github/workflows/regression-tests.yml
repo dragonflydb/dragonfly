@@ -48,8 +48,8 @@ jobs:
           cd ${GITHUB_WORKSPACE}/tests
           pip install -r dragonfly/requirements.txt
           export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
-          pytest -xvs dragonfly/replication_test.py::test_disconnect_replica --df alsologtostderr --df enable_multi_shard_sync=true
-          pytest -xvs dragonfly/replication_test.py::test_disconnect_replica --df alsologtostderr --df enable_multi_shard_sync=false
+          pytest -xvs dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=true
+          pytest -xvs dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=false
 
       - name: Send notification on failure
         if: failure() || cancelled()
