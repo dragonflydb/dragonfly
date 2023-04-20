@@ -857,7 +857,7 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, PrimeIterator it,
                                             uint64_t upper_bound) {
   FiberAtomicGuard fg;
   uint64_t bucket_version = it.GetVersion();
-  // change_cb_ is ordered by vesion.
+  // change_cb_ is ordered by version.
   for (const auto& ccb : change_cb_) {
     uint64_t cb_vesrion = ccb.first;
     DCHECK_LE(cb_vesrion, upper_bound);
