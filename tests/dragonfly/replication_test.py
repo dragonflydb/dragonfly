@@ -36,9 +36,9 @@ replication_cases = [
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replicas, seeder_config", replication_cases)
 async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_replicas, seeder_config):
-    master = df_local_factory.create(port=BASE_PORT, proactor_threads=t_master, dbfilename="")
+    master = df_local_factory.create(port=BASE_PORT, proactor_threads=t_master)
     replicas = [
-        df_local_factory.create(port=BASE_PORT+i+1, proactor_threads=t, dbfilename="")
+        df_local_factory.create(port=BASE_PORT+i+1, proactor_threads=t)
         for i, t in enumerate(t_replicas)
     ]
 
@@ -148,10 +148,9 @@ disconnect_cases = [
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys", disconnect_cases)
 async def test_disconnect_replica(df_local_factory: DflyInstanceFactory, df_seeder_factory, t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys):
-    master = df_local_factory.create(port=BASE_PORT, proactor_threads=t_master, dbfilename="")
+    master = df_local_factory.create(port=BASE_PORT, proactor_threads=t_master)
     replicas = [
-        (df_local_factory.create(
-            port=BASE_PORT+i+1, proactor_threads=t, dbfilename=""), crash_fs)
+        (df_local_factory.create(port=BASE_PORT+i+1, proactor_threads=t), crash_fs)
         for i, (t, crash_fs) in enumerate(
             chain(
                 zip(t_crash_fs, repeat(DISCONNECT_CRASH_FULL_SYNC)),
@@ -284,10 +283,9 @@ master_crash_cases = [
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replicas, n_random_crashes, n_keys", master_crash_cases)
 async def test_disconnect_master(df_local_factory, df_seeder_factory, t_master, t_replicas, n_random_crashes, n_keys):
-    master = df_local_factory.create(port=1111, proactor_threads=t_master, dbfilename="")
+    master = df_local_factory.create(port=1111, proactor_threads=t_master)
     replicas = [
-        df_local_factory.create(
-            port=BASE_PORT+i+1, proactor_threads=t, dbfilename="")
+        df_local_factory.create(port=BASE_PORT+i+1, proactor_threads=t)
         for i, t in enumerate(t_replicas)
     ]
 
@@ -398,8 +396,8 @@ async def test_cancel_replication_immediately(df_local_factory, df_seeder_factor
     """
     COMMANDS_TO_ISSUE = 40
 
-    replica = df_local_factory.create(port=BASE_PORT, dbfilename="")
-    masters = [df_local_factory.create(port=BASE_PORT+i+1, dbfilename="") for i in range(4)]
+    replica = df_local_factory.create(port=BASE_PORT)
+    masters = [df_local_factory.create(port=BASE_PORT+i+1) for i in range(4)]
     seeders = [df_seeder_factory.create(port=m.port) for m in masters]
 
     df_local_factory.start_all([replica] + masters)
@@ -407,6 +405,7 @@ async def test_cancel_replication_immediately(df_local_factory, df_seeder_factor
     await asyncio.gather(*(seeder.run(target_deviation=0.1) for seeder in seeders))
 
     replication_commands = []
+
     async def replicate(index):
         await asyncio.sleep(10.0 * random.random())
         try:
@@ -426,7 +425,6 @@ async def test_cancel_replication_immediately(df_local_factory, df_seeder_factor
     num_successes = sum(results)
     assert COMMANDS_TO_ISSUE > num_successes, "At least one REPLICAOF must be cancelled"
     assert num_successes > 0, "At least one REPLICAOF must be succeed"
-
 
     await c_replica.execute_command(f"REPLICAOF localhost {masters[0].port}")
 
