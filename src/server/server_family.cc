@@ -467,7 +467,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
   if (!save_time.empty()) {
     std::optional<SnapshotSpec> spec = ParseSaveSchedule(save_time);
     if (spec) {
-      snapshot_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
+      snapshot_schedule_fb_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
           [save_spec = std::move(spec.value()), this] { SnapshotScheduling(save_spec); });
     } else {
       LOG(WARNING) << "Invalid snapshot time specifier " << save_time;
@@ -481,9 +481,18 @@ void ServerFamily::Shutdown() {
   if (load_result_.valid())
     load_result_.wait();
 
-  is_snapshot_done_.Notify();
-  if (snapshot_fiber_.IsJoinable()) {
-    snapshot_fiber_.Join();
+  schedule_done_.Notify();
+  if (snapshot_schedule_fb_.IsJoinable()) {
+    snapshot_schedule_fb_.Join();
+  }
+
+  if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty()) {
+    shard_set->pool()->GetNextProactor()->Await([this] {
+      GenericError ec = DoSave();
+      if (ec) {
+        LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
+      }
+    });
   }
 
   pb_task_->Await([this] {
@@ -608,7 +617,7 @@ Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
 void ServerFamily::SnapshotScheduling(const SnapshotSpec& spec) {
   const auto loop_sleep_time = std::chrono::seconds(20);
   while (true) {
-    if (is_snapshot_done_.WaitFor(loop_sleep_time)) {
+    if (schedule_done_.WaitFor(loop_sleep_time)) {
       break;
     }
 
@@ -629,13 +638,7 @@ void ServerFamily::SnapshotScheduling(const SnapshotSpec& spec) {
       continue;
     }
 
-    const CommandId* cid = service().FindCmd("SAVE");
-    CHECK_NOTNULL(cid);
-    boost::intrusive_ptr<Transaction> trans(
-        new Transaction{cid, ServerState::tlocal()->thread_index()});
-    trans->InitByArgs(0, {});
-
-    GenericError ec = DoSave(absl::GetFlag(FLAGS_df_snapshot_format), trans.get());
+    GenericError ec = DoSave();
     if (ec) {
       LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
     }
@@ -665,9 +668,6 @@ error_code ServerFamily::LoadRdb(const std::string& rdb_file) {
   } else {
     ec = res.error();
   }
-
-  service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-
   return ec;
 }
 
@@ -922,6 +922,15 @@ GenericError DoPartialSave(PartialSaveOpts opts, const dfly::StringVec& scripts,
   }
 
   return local_ec;
+}
+
+GenericError ServerFamily::DoSave() {
+  const CommandId* cid = service().FindCmd("SAVE");
+  CHECK_NOTNULL(cid);
+  boost::intrusive_ptr<Transaction> trans(
+      new Transaction{cid, ServerState::tlocal()->thread_index()});
+  trans->InitByArgs(0, {});
+  return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), trans.get());
 }
 
 GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
@@ -2036,6 +2045,22 @@ void ServerFamily::Latency(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::_Shutdown(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() > 1) {
+    (*cntx)->SendError(kSyntaxErr);
+    return;
+  }
+
+  if (args.size() == 1) {
+    auto sub_cmd = ArgS(args, 0);
+    if (absl::EqualsIgnoreCase(sub_cmd, "SAVE")) {
+    } else if (absl::EqualsIgnoreCase(sub_cmd, "NOSAVE")) {
+      save_on_shutdown_ = false;
+    } else {
+      (*cntx)->SendError(kSyntaxErr);
+      return;
+    }
+  }
+
   CHECK_NOTNULL(acceptor_)->Stop();
   (*cntx)->SendOk();
 }
@@ -2079,7 +2104,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING | CO::FAST, -2, 0, 0, 0}.HFUNC(Latency)
             << CI{"MEMORY", kMemOpts, -2, 0, 0, 0}.HFUNC(Memory)
             << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, 0}.HFUNC(Save)
-            << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0}.HFUNC(_Shutdown)
+            << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.HFUNC(_Shutdown)
             << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"READONLY", CO::READONLY, 1, 0, 0, 0}.HFUNC(ReadOnly)
             << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
