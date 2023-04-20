@@ -64,9 +64,12 @@ class Connection : public util::Connection {
   struct PubMessage {
     // Represents incoming message.
     struct MessageData {
-      std::string pattern{};              // non-empty for pattern subscriber
-      std::shared_ptr<char[]> buf;        // stores channel name and message
-      uint32_t channel_len, message_len;  // lengths in buf
+      std::string pattern{};            // non-empty for pattern subscriber
+      std::shared_ptr<char[]> buf;      // stores channel name and message
+      size_t channel_len, message_len;  // lengths in buf
+
+      std::string_view Channel() const;
+      std::string_view Message() const;
     };
 
     // Represents reply for subscribe/unsubscribe.
@@ -79,8 +82,8 @@ class Connection : public util::Connection {
     std::variant<MessageData, SubscribeData> data;
 
     PubMessage(bool add, std::string_view channel, uint32_t channel_cnt);
-    PubMessage(std::string pattern, std::shared_ptr<char[]> buf, uint32_t channel_len,
-               uint32_t message_len);
+    PubMessage(std::string pattern, std::shared_ptr<char[]> buf, size_t channel_len,
+               size_t message_len);
   };
 
   struct MonitorMessage : public std::string {};
@@ -103,19 +106,21 @@ class Connection : public util::Connection {
     StorageType storage;
   };
 
-  struct PipelineMessageDeleter {
-    void operator()(PipelineMessage* req) const;
+  struct MessageDeleter {
+    void operator()(PipelineMessage* msg) const;
+    void operator()(PubMessage* msg) const;
   };
 
   // Requests are allocated on the mimalloc heap and thus require a custom deleter.
-  using PipelineMessagePtr = std::unique_ptr<PipelineMessage, PipelineMessageDeleter>;
+  using PipelineMessagePtr = std::unique_ptr<PipelineMessage, MessageDeleter>;
+  using PubMessagePtr = std::unique_ptr<PubMessage, MessageDeleter>;
 
   struct MessageHandle {
     size_t StorageCapacity() const;
 
     bool IsPipelineMsg() const;
 
-    std::variant<MonitorMessage, PubMessage, PipelineMessagePtr> handle;
+    std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr> handle;
   };
 
   enum Phase { READ_SOCKET, PROCESS };

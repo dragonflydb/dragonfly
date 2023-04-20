@@ -98,13 +98,21 @@ struct Connection::Shutdown {
   }
 };
 
-Connection::PubMessage::PubMessage(string pattern, shared_ptr<char[]> buf, uint32_t channel_len,
-                                   uint32_t message_len)
+Connection::PubMessage::PubMessage(string pattern, shared_ptr<char[]> buf, size_t channel_len,
+                                   size_t message_len)
     : data{MessageData{pattern, move(buf), channel_len, message_len}} {
 }
 
 Connection::PubMessage::PubMessage(bool add, string_view channel, uint32_t channel_cnt)
     : data{SubscribeData{add, string{channel}, channel_cnt}} {
+}
+
+string_view Connection::PubMessage::MessageData::Channel() const {
+  return {buf.get(), channel_len};
+}
+
+string_view Connection::PubMessage::MessageData::Message() const {
+  return {buf.get() + channel_len, message_len};
 }
 
 struct Connection::DispatchOperations {
@@ -113,8 +121,12 @@ struct Connection::DispatchOperations {
   }
 
   void operator()(const PubMessage& msg);
-  void operator()(Connection::PipelineMessagePtr& msg);
+  void operator()(Connection::PipelineMessage& msg);
   void operator()(const MonitorMessage& msg);
+
+  template <typename T, typename D> void operator()(unique_ptr<T, D>& ptr) {
+    operator()(*ptr.get());
+  }
 
   ConnectionStats* stats = nullptr;
   SinkReplyBuilder* builder = nullptr;
@@ -132,8 +144,13 @@ void Connection::PipelineMessage::SetArgs(const RespVec& args) {
   }
 }
 
-void Connection::PipelineMessageDeleter::operator()(PipelineMessage* msg) const {
+void Connection::MessageDeleter::operator()(PipelineMessage* msg) const {
   msg->~PipelineMessage();
+  mi_free(msg);
+}
+
+void Connection::MessageDeleter::operator()(PubMessage* msg) const {
+  msg->~PubMessage();
   mi_free(msg);
 }
 
@@ -146,13 +163,20 @@ size_t Connection::PipelineMessage::StorageCapacity() const {
   return storage.capacity() + args.capacity();
 }
 
-template <class... Ts> struct Overloaded : Ts... { using Ts::operator()...; };
+template <class... Ts> struct Overloaded : Ts... {
+  using Ts::operator()...;
+
+  template <typename T, typename D> size_t operator()(const unique_ptr<T, D>& ptr) {
+    return operator()(*ptr.get());
+  }
+};
+
 template <class... Ts> Overloaded(Ts...) -> Overloaded<Ts...>;
 
 size_t Connection::MessageHandle::StorageCapacity() const {
   auto pub_size = [](const PubMessage& msg) -> size_t { return 0; };
-  auto msg_size = [](const PipelineMessagePtr& arg) -> size_t { return arg->StorageCapacity(); };
-  auto monitor_size = [](const MonitorMessage& arg) -> size_t { return arg.capacity(); };
+  auto msg_size = [](const PipelineMessage& arg) -> size_t { return arg.StorageCapacity(); };
+  auto monitor_size = [](const MonitorMessage& arg) -> size_t { return 0; };
   return visit(Overloaded{pub_size, msg_size, monitor_size}, this->handle);
 }
 
@@ -177,8 +201,8 @@ void Connection::DispatchOperations::operator()(const PubMessage& pub_msg) {
       arr[i++] = "pmessage";
       arr[i++] = data.pattern;
     }
-    arr[i++] = string_view{data.buf.get(), data.channel_len};
-    arr[i++] = string_view{data.buf.get() + data.channel_len, data.message_len};
+    arr[i++] = data.Channel();
+    arr[i++] = data.Message();
     rbuilder->SendStringArr(absl::Span<string_view>{arr, i},
                             RedisReplyBuilder::CollectionType::PUSH);
   };
@@ -192,16 +216,16 @@ void Connection::DispatchOperations::operator()(const PubMessage& pub_msg) {
   visit(Overloaded{send_msg, send_sub}, pub_msg.data);
 }
 
-void Connection::DispatchOperations::operator()(Connection::PipelineMessagePtr& msg) {
+void Connection::DispatchOperations::operator()(Connection::PipelineMessage& msg) {
   ++stats->pipelined_cmd_cnt;
   self->pipeline_msg_cnt_--;
 
   bool do_batch = (self->pipeline_msg_cnt_ > 0);
-  DVLOG(2) << "Dispatching pipeline: " << ToSV(msg->args.front()) << " " << do_batch;
+  DVLOG(2) << "Dispatching pipeline: " << ToSV(msg.args.front()) << " " << do_batch;
 
   builder->SetBatchMode(do_batch);
   self->cc_->async_dispatch = true;
-  self->service_->DispatchCommand(CmdArgList{msg->args.data(), msg->args.size()}, self->cc_.get());
+  self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()}, self->cc_.get());
   self->last_interaction_ = time(nullptr);
   self->cc_->async_dispatch = false;
 }
@@ -745,20 +769,17 @@ Connection::PipelineMessagePtr Connection::FromArgs(RespVec args, mi_heap_t* hea
   static_assert(kReqSz < MI_SMALL_SIZE_MAX);
   static_assert(alignof(PipelineMessage) == 8);
 
-  if (auto pipe = GetFromPipelinePool(); pipe) {
-    pipe->Reset(args.size(), backed_sz);
-    pipe->SetArgs(args);
-    return pipe;
+  PipelineMessagePtr ptr;
+  if (ptr = GetFromPipelinePool(); ptr) {
+    ptr->Reset(args.size(), backed_sz);
   } else {
-    constexpr auto kReqSz = sizeof(PipelineMessage);
-    void* ptr = mi_heap_malloc_small(heap, kReqSz);
-
+    void* heap_ptr = mi_heap_malloc_small(heap, sizeof(PipelineMessage));
     // We must construct in place here, since there is a slice that uses memory locations
-    PipelineMessage* msg = new (ptr) PipelineMessage(args.size(), backed_sz);
-    // TODO msg->SetArgs(args);
-
-    return PipelineMessagePtr{msg};
+    ptr.reset(new (heap_ptr) PipelineMessage(args.size(), backed_sz));
   }
+
+  ptr->SetArgs(args);
+  return ptr;
 }
 
 void Connection::ShrinkPipelinePool() {
@@ -807,11 +828,12 @@ void RespToArgList(const RespVec& src, CmdArgVec* dest) {
 }
 
 void Connection::SendPubMessageAsync(PubMessage msg) {
-  SendAsync(MessageHandle{move(msg)});
+  void* ptr = mi_malloc(sizeof(PubMessage));
+  SendAsync({PubMessagePtr{new (ptr) PubMessage{move(msg)}, MessageDeleter{}}});
 }
 
 void Connection::SendMonitorMessageAsync(string msg) {
-  SendAsync(MessageHandle{MonitorMessage{move(msg)}});
+  SendAsync({MonitorMessage{move(msg)}});
 }
 
 void Connection::SendAsync(MessageHandle msg) {
