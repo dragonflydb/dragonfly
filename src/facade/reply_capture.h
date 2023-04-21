@@ -45,7 +45,7 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   void StartCollection(unsigned len, CollectionType type) override;
 
  private:
-  using Error = std::pair<std::string, std::string>;  // SendError
+  using Error = std::pair<std::string, std::string>;  // SendError (msg, type)
   using Null = std::nullptr_t;                        // SendNull or SendNullArray
   struct SimpleString : public std::string {};        // SendSimpleString
   struct BulkString : public std::string {};          // SendBulkString
@@ -72,6 +72,7 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
                                BulkString, StrArrPayload, std::unique_ptr<CollectionPayload>,
                                std::vector<OptResp>, ScoredArray>;
 
+  // Non owned Error based on SendError arguments (msg, type)
   using ErrorRef = std::pair<std::string_view, std::string_view>;
 
   void SetReplyMode(ReplyMode mode);

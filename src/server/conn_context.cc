@@ -16,7 +16,7 @@ namespace dfly {
 using namespace std;
 using namespace facade;
 
-StoredCmd::StoredCmd(const CommandId* cid, CmdArgList args, ReplyMode mode)
+StoredCmd::StoredCmd(const CommandId* cid, CmdArgList args, facade::ReplyMode mode)
     : cid_{cid}, buffer_{}, sizes_(args.size()), reply_mode_{mode} {
   size_t total_size = 0;
   for (auto args : args)
@@ -31,7 +31,7 @@ StoredCmd::StoredCmd(const CommandId* cid, CmdArgList args, ReplyMode mode)
   }
 }
 
-StoredCmd::StoredCmd(string&& buffer, const CommandId* cid, CmdArgList args, ReplyMode mode)
+StoredCmd::StoredCmd(string&& buffer, const CommandId* cid, CmdArgList args, facade::ReplyMode mode)
     : cid_{cid}, buffer_{move(buffer)}, sizes_(args.size()), reply_mode_{mode} {
   for (unsigned i = 0; i < args.size(); i++) {
     // Assume tightly packed list.
@@ -53,7 +53,7 @@ size_t StoredCmd::NumArgs() const {
   return sizes_.size();
 }
 
-ReplyMode StoredCmd::Replies() const {
+facade::ReplyMode StoredCmd::ReplyMode() const {
   return reply_mode_;
 }
 

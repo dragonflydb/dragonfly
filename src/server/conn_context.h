@@ -39,7 +39,7 @@ class StoredCmd {
 
   const CommandId* Cid() const;
 
-  facade::ReplyMode Replies() const;
+  facade::ReplyMode ReplyMode() const;
 
  private:
   const CommandId* cid_;                 // underlying command

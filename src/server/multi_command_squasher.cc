@@ -83,7 +83,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
 
   // Because the squashed hop is currently blocking, we cannot add more than the max channel size,
   // otherwise a deadlock occurs.
-  bool need_flush = sinfo.cmds.size() >= kMaxSquashing - 2;
+  bool need_flush = sinfo.cmds.size() >= kMaxSquashing - 1;
   return need_flush ? SquashResult::SQUASHED_FULL : SquashResult::SQUASHED;
 }
 
@@ -116,7 +116,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
   for (auto* cmd : sinfo.cmds) {
     local_tx->MultiSwitchCmd(cmd->Cid());
     local_cntx.cid = cmd->Cid();
-    crb.SetReplyMode(cmd->Replies());
+    crb.SetReplyMode(cmd->ReplyMode());
 
     arg_vec.resize(cmd->NumArgs());
     auto args = absl::MakeSpan(arg_vec);
