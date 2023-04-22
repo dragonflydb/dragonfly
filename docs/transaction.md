@@ -134,6 +134,22 @@ __3. Non atomic mode__
 
 All commands are executed as separate transactions making the multi-transaction not atomic. It vastly improves the throughput with contended keys, as locks are acquired only for single commands. This mode is useful for Lua scripts without atomicity requirements.
 
+## Multi-op command squashing
+
+There are two fundamental problems to executing a series of consecutive commands on Dragonfly:
+* each command invocation requires an expensive hop
+* executing commands sequentially makes no use of our multi-threaded architecture
+
+Luckily we can make one important observation about command sequences. Given a sequence of commands _where each command needs to access only a single shard_, we can conclude that as long as they are part of one atomic transaction:
+* each command needs to preserve its order only relative to other commands accessing the same shard
+* commands accessing different shards can run in parallel
+
+The basic idea behind command squashing is identifying consecutive series of single-shard commands and separating them by shards, while maintaing their relative order withing each shard. Once the commands are separated, we can execute a single hop on all relevant shards. Within each shard the hop callback will execute one by one only those commands, that assigned to its respective shard. Because all commands are already placed on their relevant threads, no further hops are required and all command callbacks are executed inline.
+
+Reviewing our initial problems, command squashing:
+* Allows executing many commands with only one hop
+* Allows executing commands in pararllel
+
 ## Optimizations
 Out of order transactions - TBD
 
