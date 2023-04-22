@@ -11,6 +11,8 @@
 
 #include <cstring>
 #include <optional>
+#include <regex>
+#include <set>
 
 #include "core/interpreter_polyfill.h"
 
@@ -477,6 +479,68 @@ auto Interpreter::RunFunction(string_view sha, std::string* error) -> RunResult 
 
 void Interpreter::SetGlobalArray(const char* name, MutSliceSpan args) {
   SetGlobalArrayInternal(lua_, name, args);
+}
+
+optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
+  // We want to detect `redis.call` expressions with unused return values, i.e. they are a
+  // standalone statement, not part of a expression, condition, function call or assignment.
+  //
+  // We search for all `redis.(p)call` statements, that are preceeded on the same line by
+  // - `do` or `then` -> first statement in a new block, certainly unused value
+  // - no tokens      -> we need to check the previous line, if its part of a multi-line expression.
+  //
+  // If we need to check the previous line, we search for the last word (before comments, if it has
+  // one).
+  static const regex kRegex{"(?:(\\S+)(\\s*--.*?)*\\s*\n|(then)|(do)|(^))\\s*redis\\.(p*call)"};
+
+  // Taken from https://www.lua.org/manual/5.4/manual.html - 3.1 - Lexical conventions
+
+  // If a line ends with it, then most likely the next line belongs to it as well
+  static const set<string_view> kContOperators = {
+      "+",  "-",  "*",  "/", "%", "^", "#", "&", "~", "|",  "<<", ">>", "//", "==",
+      "~=", "<=", ">=", "<", ">", "=", "(", "{", "[", "::", ":",  ",",  ".",  ".."};
+
+  // If a line ends with it, then most likely the next line belongs to it as well
+  static const set<string_view> kContTokens = {"and",  "else",   "elseif", "end",   "for",
+                                               "goto", "if",     "in",     "local", "not",
+                                               "or",   "repeat", "return", "until", "while"};
+
+  auto last_n = [](const string& s, size_t n) {
+    return s.size() < n ? s : s.substr(s.size() - n, n);
+  };
+
+  smatch sm;
+  string body{body_sv};
+  vector<size_t> targets;
+
+  sregex_iterator it{body.begin(), body.end(), kRegex};
+  sregex_iterator end{};
+
+  for (; it != end; it++) {
+    auto last_word = it->str(1);
+
+    if (kContOperators.count(last_n(last_word, 2)) > 0 ||
+        kContOperators.count(last_n(last_word, 1)) > 0)
+      continue;
+
+    if (kContTokens.count(last_word) > 0)
+      continue;
+
+    targets.push_back(it->position(it->size() - 1));
+  }
+
+  if (targets.empty())
+    return nullopt;
+
+  // Insert 'a' before 'call' and 'pcall'. Reverse order to preserve positions
+  reverse(targets.begin(), targets.end());
+  body.reserve(body.size() + targets.size());
+  for (auto pos : targets)
+    body.insert(pos, "a");
+
+  VLOG(1) << "Detected " << targets.size() << " aync calls in script";
+
+  return body;
 }
 
 bool Interpreter::IsResultSafe() const {

@@ -202,6 +202,10 @@ io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter
   if (!params)
     return params.get_unexpected();
 
+  auto async_body = Interpreter::DetectPossibleAsyncCalls(body);
+  if (async_body)
+    body = *async_body;
+
   string result;
   Interpreter::AddResult add_result = interpreter->AddFunction(sha, body, &result);
   if (add_result == Interpreter::COMPILE_ERR)
