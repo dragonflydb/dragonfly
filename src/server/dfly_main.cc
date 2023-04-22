@@ -439,7 +439,7 @@ bool ShouldUseEpollAPI(const base::sys::KernelVersion& kver) {
   return true;
 }
 
-string GetCGroupPath() {
+io::Result<string> GetCGroupPath() {
   // Begin by reading /proc/self/cgroup
 
   auto cg = io::ReadFileToString("/proc/self/cgroup");
@@ -450,11 +450,14 @@ string GetCGroupPath() {
 
   // strip 0::<path> into just <path>, and newline.
   string cgv = std::move(cg.value());
-  return cgv.substr(3, cgv.length() - 3 - 1);
-  /**
-   * -3: we are skipping the first three characters
-   * -1: we discard the last character (a newline)
-   */
+  size_t pos = cgv.rfind(':');
+  if (pos == string::npos)
+    return nonstd::make_unexpected(make_error_code(errc::not_supported));
+
+  string res = cgv.substr(pos + 1);
+  absl::StripTrailingAsciiWhitespace(&res);
+
+  return res;
 }
 
 void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_threads) {
@@ -482,27 +485,30 @@ void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
 
   using io::Exists;
 
-  const string cgroup = "/sys/fs/cgroup/" + GetCGroupPath();
+  auto cgroup_res = GetCGroupPath();
+  if (!cgroup_res) {
+    VLOG(1) << "Failed to get cgroup path, error: " << cgroup_res.error().message();
+    return;
+  }
+
+  const string cgroup = "/sys/fs/cgroup/" + *cgroup_res;
 
   if (!Exists(cgroup + "/memory.max"))
     return;
 
   /* Update memory limits */
-  auto max = io::ReadFileToString(cgroup + "/memory.max");
+  auto mmax = io::ReadFileToString(cgroup + "/memory.max");
+  DVLOG(1) << "memory.max: " << mmax.value_or("N/A");
 
-  if (max.has_value()) {
-    auto max_val = max.value();
-    if (max_val.find("max") == max_val.npos)
-      CHECK(absl::SimpleAtoi(max.value(), &mdata->mem_total));
+  if (mmax && !absl::StartsWith(*mmax, "max")) {
+    CHECK(absl::SimpleAtoi(*mmax, &mdata->mem_total));
   }
 
   mdata->mem_avail = mdata->mem_total;
-  auto high = io::ReadFileToString(cgroup + "/memory.high");
+  auto mhigh = io::ReadFileToString(cgroup + "/memory.high");
 
-  if (high.has_value()) {
-    auto high_val = high.value();
-    if (high_val.find("max") == high_val.npos)
-      CHECK(absl::SimpleAtoi(high.value(), &mdata->mem_avail));
+  if (mhigh && !absl::StartsWith(*mhigh, "max")) {
+    CHECK(absl::SimpleAtoi(*mhigh, &mdata->mem_avail));
   }
 
   /* Update thread limits */
