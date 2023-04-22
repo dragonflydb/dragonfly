@@ -1052,8 +1052,14 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
   DCHECK(cntx->transaction);
   DVLOG(1) << "CallFromScript " << cntx->transaction->DebugId() << " " << ArgS(ca.args, 0);
 
+  InterpreterReplier replier(ca.translator);
+  facade::SinkReplyBuilder* orig = cntx->Inject(&replier);
+  absl::Cleanup clean = [orig, cntx] { cntx->Inject(orig); };
+
   if (ca.async) {
     auto& info = cntx->conn_state.script_info;
+
+    ToUpper(&ca.args[0]);
     auto* cid = registry_.Find(facade::ToSV(ca.args[0]));
 
     if (!VerifyCommand(cid, ca.args, cntx))
@@ -1064,8 +1070,6 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
     info->async_cmds_heap_mem += info->async_cmds.back().UsedHeapMemory();
   }
 
-  InterpreterReplier replier(ca.translator);
-
   if (auto err = FlushEvalAsyncCmds(cntx, !ca.async); err) {
     CapturingReplyBuilder::Apply(move(*err), &replier);  // forward error to lua
     *ca.requested_abort = true;
@@ -1075,11 +1079,7 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
   if (ca.async)
     return;
 
-  facade::SinkReplyBuilder* orig = cntx->Inject(&replier);
-
   DispatchCommand(ca.args, cntx);
-
-  cntx->Inject(orig);
 }
 
 void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
