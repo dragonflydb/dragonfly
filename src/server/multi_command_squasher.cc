@@ -24,8 +24,9 @@ template <typename F> void IterateKeys(CmdArgList args, KeyIndex keys, F&& f) {
 
 }  // namespace
 
-MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx)
-    : cmds_{cmds}, cntx_{cntx}, base_cid_{cntx->transaction->GetCId()} {
+MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
+                                           bool error_abort)
+    : cmds_{cmds}, cntx_{cntx}, base_cid_{cntx->transaction->GetCId()}, error_abort_{error_abort} {
   auto mode = cntx->transaction->GetMultiMode();
   track_keys_ = mode == Transaction::NON_ATOMIC;
 }
@@ -37,9 +38,6 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(Shar
   auto& sinfo = sharded_[sid];
   if (!sinfo.local_tx)
     sinfo.local_tx = new Transaction{cntx_->transaction};
-
-  if (!sinfo.reply_chan)
-    sinfo.reply_chan = make_unique<ReplyChan>(kChanBufferSize, 1);
 
   return sinfo;
 }
@@ -85,7 +83,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
 
   // Because the squashed hop is currently blocking, we cannot add more than the max channel size,
   // otherwise a deadlock occurs.
-  bool need_flush = sinfo.cmds.size() >= kChanBufferSize - 1;
+  bool need_flush = sinfo.cmds.size() >= kMaxSquashing - 1;
   return need_flush ? SquashResult::SQUASHED_FULL : SquashResult::SQUASHED;
 }
 
@@ -118,6 +116,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
   for (auto* cmd : sinfo.cmds) {
     local_tx->MultiSwitchCmd(cmd->Cid());
     local_cntx.cid = cmd->Cid();
+    crb.SetReplyMode(cmd->ReplyMode());
 
     arg_vec.resize(cmd->NumArgs());
     auto args = absl::MakeSpan(arg_vec);
@@ -126,18 +125,20 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
     local_tx->InitByArgs(parent_tx->GetDbIndex(), args);
     cmd->Cid()->Invoke(args, &local_cntx);
 
-    sinfo.reply_chan->Push(crb.Take());
+    sinfo.replies.emplace_back(crb.Take());
   }
 
   // ConnectionContext deletes the reply builder upon destruction, so
   // remove our local pointer from it.
   local_cntx.Inject(nullptr);
+
+  reverse(sinfo.replies.begin(), sinfo.replies.end());
   return OpStatus::OK;
 }
 
-void MultiCommandSquasher::ExecuteSquashed() {
+bool MultiCommandSquasher::ExecuteSquashed() {
   if (order_.empty())
-    return;
+    return false;
 
   Transaction* tx = cntx_->transaction;
 
@@ -149,14 +150,26 @@ void MultiCommandSquasher::ExecuteSquashed() {
     tx->PrepareSquashedMultiHop(base_cid_, cb);
   }
 
+  for (auto& sd : sharded_)
+    sd.replies.reserve(sd.cmds.size());
+
   cntx_->cid = base_cid_;
   tx->ScheduleSingleHop([this](auto* tx, auto* es) { return SquashedHopCb(tx, es); });
 
-  facade::CapturingReplyBuilder::Payload payload;
+  bool aborted = false;
+
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
   for (auto idx : order_) {
-    CHECK(sharded_[idx].reply_chan->Pop(payload));
-    CapturingReplyBuilder::Apply(move(payload), rb);
+    auto& replies = sharded_[idx].replies;
+    CHECK(!replies.empty());
+
+    aborted |= error_abort_ && CapturingReplyBuilder::GetError(replies.back());
+
+    CapturingReplyBuilder::Apply(move(replies.back()), rb);
+    replies.pop_back();
+
+    if (aborted)
+      break;
   }
 
   for (auto& sinfo : sharded_)
@@ -164,6 +177,7 @@ void MultiCommandSquasher::ExecuteSquashed() {
 
   order_.clear();
   collected_keys_.clear();
+  return aborted;
 }
 
 void MultiCommandSquasher::Run() {
@@ -173,8 +187,10 @@ void MultiCommandSquasher::Run() {
     if (res == SquashResult::ERROR)
       break;
 
-    if (res == SquashResult::NOT_SQUASHED || res == SquashResult::SQUASHED_FULL)
-      ExecuteSquashed();
+    if (res == SquashResult::NOT_SQUASHED || res == SquashResult::SQUASHED_FULL) {
+      if (ExecuteSquashed())
+        break;
+    }
 
     if (res == SquashResult::NOT_SQUASHED)
       ExecuteStandalone(&cmd);

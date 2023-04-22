@@ -377,6 +377,11 @@ Interpreter::Interpreter() {
   lua_pushcfunction(lua_, RedisACallCommand);
   lua_settable(lua_, -3);
 
+  /* redis.apcall */
+  lua_pushstring(lua_, "apcall");
+  lua_pushcfunction(lua_, RedisAPCallCommand);
+  lua_settable(lua_, -3);
+
   lua_pushstring(lua_, "sha1hex");
   lua_pushcfunction(lua_, RedisSha1Command);
   lua_settable(lua_, -3);
@@ -720,7 +725,7 @@ int Interpreter::RedisGenericCommand(bool raise_error, bool async) {
    * and this way we guaranty we will have room on the stack for the result. */
   lua_pop(lua_, argc);
   RedisTranslator translator(lua_);
-  redis_func_(CallArgs{MutSliceSpan{args}, &buffer, &translator, async});
+  redis_func_(CallArgs{MutSliceSpan{args}, &buffer, &translator, async, raise_error, &raise_error});
   cmd_depth_--;
 
   // Raise error for regular 'call' command if needed.
@@ -746,6 +751,11 @@ int Interpreter::RedisPCallCommand(lua_State* lua) {
 }
 
 int Interpreter::RedisACallCommand(lua_State* lua) {
+  void** ptr = static_cast<void**>(lua_getextraspace(lua));
+  return reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(true, true);
+}
+
+int Interpreter::RedisAPCallCommand(lua_State* lua) {
   void** ptr = static_cast<void**>(lua_getextraspace(lua));
   return reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(false, true);
 }

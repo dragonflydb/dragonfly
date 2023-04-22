@@ -120,7 +120,10 @@ class Service : public facade::ServiceInterface {
 
   void EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, ConnectionContext* cntx);
 
-  void FlushEvalAsyncCmds(ConnectionContext* cntx, bool force = false);
+  // Return optional payload - first received error that occured when executing commands.
+  std::optional<facade::CapturingReplyBuilder::Payload> FlushEvalAsyncCmds(ConnectionContext* cntx,
+                                                                           bool force = false);
+
   void CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& args);
 
   void RegisterCommands();
