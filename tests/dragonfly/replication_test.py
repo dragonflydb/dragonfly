@@ -467,9 +467,8 @@ async def test_flushall(df_local_factory):
         n_keys, n_keys*2), batch_size=3)
 
     await pipe.execute()
-
-    # Wait for replica to receive them
-    await asyncio.sleep(1)
+    # Check replica finished executing the replicated commands
+    await check_all_replicas_finished([c_replica], c_master)
 
     # Check replica keys 0..n_keys-1 dont exist
     pipe = c_replica.pipeline(transaction=False)
