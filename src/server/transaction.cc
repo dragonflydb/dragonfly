@@ -942,13 +942,15 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   DCHECK(shard_data_.size() == 1u || multi_->mode == NON_ATOMIC);
   DCHECK_NE(unique_shard_id_, kInvalidSid);
 
-  // callback with no args that needs to be scheduled can run ooo, no keys need to be locked.
   auto mode = Mode();
+  auto lock_args = GetLockArgs(shard->shard_id());
+
   auto& sd = shard_data_[SidToId(unique_shard_id_)];
   DCHECK_EQ(TxQueue::kEnd, sd.pq_pos);
 
-  auto lock_args = GetLockArgs(shard->shard_id());
-  if (false && shard->db_slice().CheckLock(mode, lock_args) && shard->shard_lock()->Check(mode)) {
+  // Fast path - for uncontended keys, just run the callback.
+  // That applies for single key operations like set, get, lpush etc.
+  if (shard->db_slice().CheckLock(mode, lock_args) && shard->shard_lock()->Check(mode)) {
     RunQuickie(shard);
     return true;
   }
@@ -1068,10 +1070,6 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
 
 // runs in engine-shard thread.
 ArgSlice Transaction::GetShardArgs(ShardId sid) const {
-  if (args_.empty()) {
-    ArgSlice{};
-  }
-
   // We can read unique_shard_cnt_  only because ShardArgsInShard is called after IsArmedInShard
   // barrier.
   if (unique_shard_cnt_ == 1) {
