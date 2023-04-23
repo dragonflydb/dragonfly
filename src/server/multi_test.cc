@@ -521,7 +521,8 @@ TEST_F(MultiTest, EvalOOO) {
     return;
   }
 
-  const char* kScript = "redis.call('MGET', unpack(KEYS)); return 'OK'";
+  // Assign to prevent asyc optimization.
+  const char* kScript = "local r = redis.call('MGET', unpack(KEYS)); return 'OK'";
 
   // Check single call.
   {

@@ -501,9 +501,9 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
       "~=", "<=", ">=", "<", ">", "=", "(", "{", "[", "::", ":",  ",",  ".",  ".."};
 
   // If a line ends with it, then most likely the next line belongs to it as well
-  static const set<string_view> kContTokens = {"and",  "else",   "elseif", "end",   "for",
-                                               "goto", "if",     "in",     "local", "not",
-                                               "or",   "repeat", "return", "until", "while"};
+  static const set<string_view> kContTokens = {"and",    "else",   "elseif", "for",  "goto",
+                                               "if",     "in",     "local",  "not",  "or",
+                                               "repeat", "return", "until",  "while"};
 
   auto last_n = [](const string& s, size_t n) {
     return s.size() < n ? s : s.substr(s.size() - n, n);
