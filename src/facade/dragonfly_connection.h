@@ -216,7 +216,7 @@ class Connection : public util::Connection {
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   dfly::EventCount evc_;                  // dispatch queue waker
 
-  std::atomic_uint32_t dispatch_q_bytes_ = 0;  // memory usage of all entries
+  std::atomic_uint64_t dispatch_q_bytes_ = 0;  // memory usage of all entries
   dfly::EventCount evc_bp_;                    // backpressure for memory limit
 
   base::IoBuf io_buf_;  // used in io loop and parsers
