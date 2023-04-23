@@ -534,7 +534,6 @@ class Transaction {
 
   TxId txid_{0};
   bool global_{false};
-  bool empty_args_{false};
   DbIndex db_index_{0};
   uint64_t time_now_ms_{0};
 

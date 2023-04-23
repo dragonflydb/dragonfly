@@ -89,7 +89,6 @@ void Transaction::InitNoKey() {
   unique_shard_id_ = 0;
   shard_data_.resize(1);
   shard_data_.front().local_mask |= ACTIVE;
-  empty_args_ = true;
 }
 
 void Transaction::BuildShardIndex(KeyIndex key_index, bool rev_mapping,
@@ -456,8 +455,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
   bool should_release = is_concluding && !IsAtomicMulti();
   IntentLock::Mode mode = Mode();
 
-  DCHECK(IsGlobal() || empty_args_ || (sd.local_mask & KEYLOCK_ACQUIRED) ||
-         (multi_ && multi_->mode == GLOBAL));
+  DCHECK(IsGlobal() || (sd.local_mask & KEYLOCK_ACQUIRED) || (multi_ && multi_->mode == GLOBAL));
 
   /*************************************************************************/
   // Actually running the callback.
@@ -510,7 +508,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
     if (IsGlobal()) {
       DCHECK(!awaked_prerun && !became_suspended);  // Global transactions can not be blocking.
       shard->shard_lock()->Release(Mode());
-    } else if (!empty_args_) {  // not global and command has args to release.
+    } else {  // not global.
       largs = GetLockArgs(idx);
       DCHECK(sd.local_mask & KEYLOCK_ACQUIRED);
 
@@ -949,11 +947,10 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   auto& sd = shard_data_[SidToId(unique_shard_id_)];
   DCHECK_EQ(TxQueue::kEnd, sd.pq_pos);
 
-  if (shard->shard_lock()->Check(mode)) {
-    if (empty_args_ || shard->db_slice().CheckLock(mode, GetLockArgs(shard->shard_id()))) {
-      RunQuickie(shard);
-      return true;
-    }
+  auto lock_args = GetLockArgs(shard->shard_id());
+  if (false && shard->db_slice().CheckLock(mode, lock_args) && shard->shard_lock()->Check(mode)) {
+    RunQuickie(shard);
+    return true;
   }
 
   // we can do it because only a single thread writes into txid_ and sd.
@@ -961,11 +958,9 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   sd.pq_pos = shard->txq()->Insert(this);
 
   DCHECK_EQ(0, sd.local_mask & KEYLOCK_ACQUIRED);
-  if (!empty_args_) {
-    auto lock_args = GetLockArgs(shard->shard_id());
-    shard->db_slice().Acquire(mode, lock_args);
-    sd.local_mask |= KEYLOCK_ACQUIRED;
-  }
+  shard->db_slice().Acquire(mode, lock_args);
+  sd.local_mask |= KEYLOCK_ACQUIRED;
+
   DVLOG(1) << "Rescheduling into TxQueue " << DebugId();
 
   shard->PollExecution("schedule_unique", nullptr);
@@ -1073,7 +1068,9 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
 
 // runs in engine-shard thread.
 ArgSlice Transaction::GetShardArgs(ShardId sid) const {
-  DCHECK(!args_.empty());
+  if (args_.empty()) {
+    ArgSlice{};
+  }
 
   // We can read unique_shard_cnt_  only because ShardArgsInShard is called after IsArmedInShard
   // barrier.
