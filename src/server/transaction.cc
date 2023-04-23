@@ -456,7 +456,8 @@ bool Transaction::RunInShard(EngineShard* shard) {
   bool should_release = is_concluding && !IsAtomicMulti();
   IntentLock::Mode mode = Mode();
 
-  DCHECK(IsGlobal() || (sd.local_mask & KEYLOCK_ACQUIRED) || (multi_ && multi_->mode == GLOBAL));
+  DCHECK(IsGlobal() || empty_args_ || (sd.local_mask & KEYLOCK_ACQUIRED) ||
+         (multi_ && multi_->mode == GLOBAL));
 
   /*************************************************************************/
   // Actually running the callback.
@@ -509,7 +510,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
     if (IsGlobal()) {
       DCHECK(!awaked_prerun && !became_suspended);  // Global transactions can not be blocking.
       shard->shard_lock()->Release(Mode());
-    } else {  // not global.
+    } else if (!empty_args_) {  // not global and command has args to release.
       largs = GetLockArgs(idx);
       DCHECK(sd.local_mask & KEYLOCK_ACQUIRED);
 
@@ -944,22 +945,15 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   DCHECK_NE(unique_shard_id_, kInvalidSid);
 
   // callback with no args that needs to be scheduled can run ooo, no keys need to be locked.
-  if (empty_args_) {
-    RunQuickie(shard);
-    return true;
-  }
-
   auto mode = Mode();
-  auto lock_args = GetLockArgs(shard->shard_id());
-
   auto& sd = shard_data_[SidToId(unique_shard_id_)];
   DCHECK_EQ(TxQueue::kEnd, sd.pq_pos);
 
-  // Fast path - for uncontended keys, just run the callback.
-  // That applies for single key operations like set, get, lpush etc.
-  if (shard->db_slice().CheckLock(mode, lock_args) && shard->shard_lock()->Check(mode)) {
-    RunQuickie(shard);
-    return true;
+  if (false && shard->shard_lock()->Check(mode)) {
+    if (empty_args_ || shard->db_slice().CheckLock(mode, GetLockArgs(shard->shard_id()))) {
+      RunQuickie(shard);
+      return true;
+    }
   }
 
   // we can do it because only a single thread writes into txid_ and sd.
@@ -967,9 +961,11 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   sd.pq_pos = shard->txq()->Insert(this);
 
   DCHECK_EQ(0, sd.local_mask & KEYLOCK_ACQUIRED);
-  shard->db_slice().Acquire(mode, lock_args);
-  sd.local_mask |= KEYLOCK_ACQUIRED;
-
+  if (!empty_args_) {
+    auto lock_args = GetLockArgs(shard->shard_id());
+    shard->db_slice().Acquire(mode, lock_args);
+    sd.local_mask |= KEYLOCK_ACQUIRED;
+  }
   DVLOG(1) << "Rescheduling into TxQueue " << DebugId();
 
   shard->PollExecution("schedule_unique", nullptr);
