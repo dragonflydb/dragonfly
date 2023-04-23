@@ -513,6 +513,10 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
   string body{body_sv};
   vector<size_t> targets;
 
+  // We don't handle comment blocks yet.
+  if (body.find("--[[") != string::npos)
+    return {};
+
   sregex_iterator it{body.begin(), body.end(), kRegex};
   sregex_iterator end{};
 

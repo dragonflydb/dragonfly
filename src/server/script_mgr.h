@@ -31,7 +31,8 @@ class ScriptMgr {
   };
 
   struct ScriptData : public ScriptParams {
-    const char* body = nullptr;
+    std::string body;
+    std::string orig_body;
   };
 
   struct ScriptKey : public std::array<char, 40> {
@@ -51,7 +52,7 @@ class ScriptMgr {
   std::optional<ScriptData> Find(std::string_view sha) const;
 
   // Returns a list of all scripts in the database with their sha and body.
-  std::vector<std::pair<std::string, std::string>> GetAll() const;
+  std::vector<std::pair<std::string, ScriptData>> GetAll() const;
 
  private:
   void ExistsCmd(CmdArgList args, ConnectionContext* cntx) const;
@@ -65,6 +66,7 @@ class ScriptMgr {
  private:
   struct InternalScriptData : public ScriptParams {
     std::unique_ptr<char[]> body{};
+    std::unique_ptr<char[]> orig_body{};
   };
 
   ScriptParams default_params_;

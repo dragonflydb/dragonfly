@@ -378,6 +378,11 @@ TEST_F(InterpreterTest, AsyncReplacement) {
       redis.[A]call('INCR', 'A')
     )",
       R"(
+      function test()
+        redis.[A]call('INCR', 'A')
+      end
+    )",
+      R"(
       local b = redis.call('GET', 'A') + redis.call('GET', 'B')
     )",
       R"(
@@ -423,7 +428,18 @@ TEST_F(InterpreterTest, AsyncReplacement) {
       redis.call('GET', 'A')
       then end
     )",
-  };
+      R"(
+    while
+    -- we have
+    -- a tricky
+    -- multiline comment
+    redis.call('EXISTS')
+    do end
+    )",
+      R"(
+    --[[ WE SKIP COMMENT BLOCKS FOR NOW ]]
+    redis.call('ECHO', 'TEST')
+    )"};
 
   for (auto test : kCases) {
     auto expected = absl::StrReplaceAll(test, {{"[A]", "a"}});
