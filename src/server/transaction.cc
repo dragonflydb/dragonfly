@@ -949,7 +949,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   auto& sd = shard_data_[SidToId(unique_shard_id_)];
   DCHECK_EQ(TxQueue::kEnd, sd.pq_pos);
 
-  if (false && shard->shard_lock()->Check(mode)) {
+  if (shard->shard_lock()->Check(mode)) {
     if (empty_args_ || shard->db_slice().CheckLock(mode, GetLockArgs(shard->shard_id()))) {
       RunQuickie(shard);
       return true;
