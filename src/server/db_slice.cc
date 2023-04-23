@@ -675,7 +675,7 @@ size_t DbSlice::DbSize(DbIndex db_ind) const {
 
 bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   if (lock_args.args.empty()) {
-    return false;
+    return true;
   }
   DCHECK_GT(lock_args.key_step, 0u);
 

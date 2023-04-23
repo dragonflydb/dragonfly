@@ -929,6 +929,7 @@ KeyLockArgs Transaction::GetLockArgs(ShardId sid) const {
   res.db_index = db_index_;
   res.key_step = cid_->key_arg_step();
   res.args = GetShardArgs(sid);
+  DCHECK(!res.args.empty() || (cid_->opt_mask() & CO::NO_KEY_JOURNAL));
 
   return res;
 }
@@ -960,6 +961,7 @@ bool Transaction::ScheduleUniqueShard(EngineShard* shard) {
   sd.pq_pos = shard->txq()->Insert(this);
 
   DCHECK_EQ(0, sd.local_mask & KEYLOCK_ACQUIRED);
+
   shard->db_slice().Acquire(mode, lock_args);
   sd.local_mask |= KEYLOCK_ACQUIRED;
 
