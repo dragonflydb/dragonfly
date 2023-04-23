@@ -835,3 +835,39 @@ async def test_auth_master(df_local_factory, n_keys=20):
     assert all(v is not None for v in res)
     await c_master.connection_pool.disconnect()
     await c_replica.connection_pool.disconnect()
+
+
+SCRIPT_TEMPLATE = "return {}"
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_script_transfer(df_local_factory):
+    master = df_local_factory.create(port=BASE_PORT)
+    replica = df_local_factory.create(port=BASE_PORT+1)
+
+    df_local_factory.start_all([master, replica])
+
+    c_master = aioredis.Redis(port=master.port)
+    c_replica = aioredis.Redis(port=replica.port)
+
+    # Load some scripts into master ahead
+    scripts = []
+    for i in range(0, 10):
+        sha = await c_master.script_load(SCRIPT_TEMPLATE.format(i))
+        scripts.append(sha)
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    # transfer in stable state
+    for i in range(10, 20):
+        sha = await c_master.script_load(SCRIPT_TEMPLATE.format(i))
+        scripts.append(sha)
+
+    await check_all_replicas_finished([c_replica], c_master)
+    await c_replica.execute_command("REPLICAOF NO ONE")
+
+    for i, sha in enumerate(scripts):
+        assert await c_replica.evalsha(sha, 0) == i
+    await c_master.connection_pool.disconnect()
+    await c_replica.connection_pool.disconnect()

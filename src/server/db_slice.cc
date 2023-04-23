@@ -674,6 +674,9 @@ size_t DbSlice::DbSize(DbIndex db_ind) const {
 }
 
 bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
+  if (lock_args.args.empty()) {
+    return true;
+  }
   DCHECK_GT(lock_args.key_step, 0u);
 
   auto& lt = db_arr_[lock_args.db_index]->trans_locks;
@@ -700,6 +703,9 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
 }
 
 void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
+  if (lock_args.args.empty()) {
+    return;
+  }
   DVLOG(2) << "Release " << IntentLock::ModeName(mode) << " for " << lock_args.args[0];
   if (lock_args.args.size() == 1) {
     Release(mode, lock_args.db_index, lock_args.args.front(), 1);
@@ -729,7 +735,6 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, string_view key) co
 }
 
 bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) const {
-  DCHECK(!lock_args.args.empty());
   const auto& lt = db_arr_[lock_args.db_index]->trans_locks;
   for (size_t i = 0; i < lock_args.args.size(); i += lock_args.key_step) {
     auto s = lock_args.args[i];
