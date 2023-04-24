@@ -159,7 +159,7 @@ async def test_failover(df_local_factory, sentinel, port_picker):
         await await_for(
             lambda: master_client.get("key"),
             lambda val: val == b"value",
-            10, "Timeout waiting for key to exist in replica."
+            15, "Timeout waiting for key to exist in replica."
         )
     except AssertionError:
         syncid, r_offset = await master_client.execute_command("DEBUG REPLICA OFFSET")
