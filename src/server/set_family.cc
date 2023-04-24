@@ -527,6 +527,8 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
   auto* es = op_args.shard;
   auto& db_slice = es->db_slice();
 
+  VLOG(2) << "OpAdd(" << key << ")";
+
   // overwrite - meaning we run in the context of 2-hop operation and we want
   // to overwrite the key. However, if the set is empty it means we should delete the
   // key if it exists.

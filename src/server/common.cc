@@ -165,6 +165,7 @@ bool ParseDouble(string_view src, double* value) {
 
 void RecordJournal(const OpArgs& op_args, string_view cmd, ArgSlice args, uint32_t shard_cnt,
                    bool multi_commands) {
+  VLOG(2) << "Logging command " << cmd << " from txn " << op_args.tx->txid();
   op_args.tx->LogJournalOnShard(op_args.shard, make_pair(cmd, args), shard_cnt, multi_commands,
                                 false);
 }

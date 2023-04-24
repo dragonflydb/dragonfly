@@ -269,6 +269,7 @@ error_code RdbSerializer::SelectDb(uint32_t dbid) {
 // Called by snapshot
 io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValue& pv,
                                              uint64_t expire_ms, DbIndex dbid) {
+  DVLOG(3) << "Selecting " << dbid << " previous: " << last_entry_db_index_;
   SelectDb(dbid);
   uint8_t buf[16];
   error_code ec;
@@ -286,7 +287,7 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
   unsigned encoding = pv.Encoding();
   uint8_t rdb_type = RdbObjectType(obj_type, encoding);
 
-  DVLOG(3) << "Saving key/val start " << key;
+  DVLOG(3) << ((void*)this) << ": Saving key/val start " << key << " in dbid=" << dbid;
 
   ec = WriteOpcode(rdb_type);
   if (ec)
