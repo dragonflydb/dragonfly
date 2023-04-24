@@ -44,7 +44,7 @@
 
 %token YYEOF
 %token <std::string> TERM "term"
-%token <int> NUMBER "number"
+%token <int64_t> INT64 "int64"
 %nterm <int> bool_expr
 
 %printer { yyo << $$; } <*>;

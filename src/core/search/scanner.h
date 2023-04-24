@@ -1,4 +1,4 @@
-// Copyright 2023, Roman Gershman.  All rights reserved.
+// Copyright 2023, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -22,8 +22,9 @@ class Scanner : public yyFlexLexer {
 
   Parser::symbol_type ParserLex(QueryDriver& drv);
 
-  std::string matched() {
-    return yytext;
+ private:
+  std::string Matched() const {
+    return std::string(YYText(), YYLeng());
   }
 };
 
