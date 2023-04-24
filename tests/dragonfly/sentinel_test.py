@@ -47,13 +47,13 @@ async def await_for(func, pred, timeout_sec, timeout_msg=""):
 
 
 class Sentinel:
-    def __init__(self, config_dir) -> None:
+    def __init__(self, port, master_port, config_dir) -> None:
         self.config_file = pathlib.Path(config_dir).joinpath("sentinel.conf")
-        self.port = 5555
+        self.port = port
         self.image = "bitnami/redis-sentinel:latest"
         self.container_name = "sentinel_test_py_sentinel"
         self.default_deployment = "my_deployment"
-        self.initial_master_port = 1111
+        self.initial_master_port = master_port
         self.proc = None
 
     def start(self):
@@ -112,8 +112,8 @@ class Sentinel:
 
 
 @pytest.fixture(scope="function") # Sentinel has state which we don't want carried over form test to test.
-def sentinel(tmp_dir) -> Sentinel:
-    s = Sentinel(tmp_dir)
+def sentinel(tmp_dir, port_picker) -> Sentinel:
+    s = Sentinel(port_picker.get_available_port(), port_picker.get_available_port(), tmp_dir)
     s.start()
     s.wait_ready()
     yield s
@@ -121,9 +121,9 @@ def sentinel(tmp_dir) -> Sentinel:
 
 
 @pytest.mark.asyncio
-async def test_failover(df_local_factory, sentinel):
+async def test_failover(df_local_factory, sentinel, port_picker):
     master = df_local_factory.create(port=sentinel.initial_master_port)
-    replica = df_local_factory.create(port=master.port + 1)
+    replica = df_local_factory.create(port=port_picker.get_available_port())
 
     master.start()
     replica.start()
@@ -153,7 +153,8 @@ async def test_failover(df_local_factory, sentinel):
     assert sentinel.slaves()[0]["port"] == str(master.port)
 
     # Verify we can now write to replica and read replicated value from master.
-    assert await replica_client.set("key", "value"), "Failed to set key promoted replica."
+    assert await replica_client.set("key", "value"), "Failed to set key on promoted replica."
+    logging.info("key was set on promoted replica, awaiting get on promoted replica.")
     try:
         await await_for(
             lambda: master_client.get("key"),
@@ -173,13 +174,17 @@ async def test_failover(df_local_factory, sentinel):
         logging.info(await replica_client.info())
         logging.info("master client info:")
         logging.info(await master_client.info())
+        replica_val = await replica_client.get("key")
+        master_val = await master_client.get("key")
+        logging.info(f"replica val: {replica_val}")
+        logging.info(f"master val: {master_val}")
         raise
 
 
 @pytest.mark.asyncio
-async def test_master_failure(df_local_factory, sentinel):
+async def test_master_failure(df_local_factory, sentinel, port_picker):
     master = df_local_factory.create(port=sentinel.initial_master_port)
-    replica = df_local_factory.create(port=master.port + 1)
+    replica = df_local_factory.create(port=port_picker.get_available_port())
 
     master.start()
     replica.start()
