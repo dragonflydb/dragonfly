@@ -209,13 +209,19 @@ io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter
 
   string_view orig_body = body;
 
-  auto params = DeduceParams(&body);
-  if (!params)
-    return params.get_unexpected();
+  auto params_opt = DeduceParams(&body);
+  if (!params_opt)
+    return params_opt.get_unexpected();
+  auto params = params_opt->value_or(default_params_);
 
-  auto async_body = Interpreter::DetectPossibleAsyncCalls(body);
-  if (async_body)
-    body = *async_body;
+  // If the script is atomic, check for possible squashing optimizations.
+  // For non atomic modes, squashing increases the time locks are held, which
+  // can decrease throughput with frequently accessed keys.
+  optional<string> async_body;
+  if (params.atomic) {
+    if (async_body = Interpreter::DetectPossibleAsyncCalls(body); async_body)
+      body = *async_body;
+  }
 
   string result;
   Interpreter::AddResult add_result = interpreter->AddFunction(sha, body, &result);
@@ -223,7 +229,7 @@ io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter
     return nonstd::make_unexpected(GenericError{move(result)});
 
   lock_guard lk{mu_};
-  auto [it, _] = db_.emplace(sha, InternalScriptData{params->value_or(default_params_), nullptr});
+  auto [it, _] = db_.emplace(sha, InternalScriptData{params, nullptr});
 
   if (!it->second.body) {
     it->second.body = CharBufFromSV(body);
