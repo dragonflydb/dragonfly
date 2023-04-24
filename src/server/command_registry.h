@@ -34,6 +34,7 @@ enum CommandOpt : uint32_t {
   GLOBAL_TRANS = 1U << 12,
 
   NO_AUTOJOURNAL = 1U << 15,  // Skip automatically logging command to journal inside transaction.
+  NO_KEY_JOURNAL = 1U << 16,  // Command with no keys that need to be journaled
 };
 
 const char* OptName(CommandOpt fl);

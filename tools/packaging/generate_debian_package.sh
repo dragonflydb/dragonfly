@@ -19,16 +19,6 @@
 
 set -eu
 
-ARCH_VAL=amd64
-if [ "$(uname -m)" = "x86_64" ]; then
-	ARCH_VAL="amd64"
-elif [ "$(uname -m)" = "aarch64" ]; then
-	ARCH_VAL="aarch64"
-else
-	echo "Unknown architecture: $(uname -m). Only x86_64 and aarch64 are supported."
-        exit 1
-fi
-
 SCRIPT_ABS_PATH=$(realpath $0)
 SCRIPT_PATH=$(dirname ${SCRIPT_ABS_PATH})
 PACKAGES_PATH=${SCRIPT_PATH}/debian
@@ -37,24 +27,24 @@ BUILD_DIR=build-opt
 ROOT_ABS_PATH=$(cd ${SCRIPT_PATH}; while [ ! -d ${BUILD_DIR} ]; do cd ..; done ; pwd)
 REPO_PATH=${ROOT_ABS_PATH}
 TEMP_WORK_DIR=$(mktemp -d)
-BASE_DIR=${TEMP_WORK_DIR}/packges
-BASE_PATH=${BASE_DIR}/dragonfly_${ARCH_VAL}
+BASE_DIR=${TEMP_WORK_DIR}/packages
+BASE_PATH=${BASE_DIR}/dragonfly
 BINARY_TARGET_DIR=${BASE_PATH}/debian/bin
 
 function cleanup {
-	echo $@
-	rm -rf ${TEMP_WORK_DIR}
-	exit 1
+    echo $@
+    rm -rf ${TEMP_WORK_DIR}
+    exit 1
 }
 
 if [ $# -ge 1 ]; then
-	VERSION_FILE=$1
+    VERSION_FILE=$1
 else
-	if ! [ -f ${ROOT_ABS_PATH}/${BUILD_DIR}/dragonfly ]; then
-		cleanup "no dragonfly binary found at ${ROOT_ABS_PATH}/${BUILD_DIR}"
-	else
-		VERSION_FILE=${ROOT_ABS_PATH}/${BUILD_DIR}/dragonfly
-	fi
+    if ! [ -f ${ROOT_ABS_PATH}/${BUILD_DIR}/dragonfly ]; then
+        cleanup "no dragonfly binary found at ${ROOT_ABS_PATH}/${BUILD_DIR}"
+    else
+        VERSION_FILE=${ROOT_ABS_PATH}/${BUILD_DIR}/dragonfly
+    fi
 fi
 
 mkdir -p ${BASE_PATH} || cleanup "failed to create working directory for building the package"
@@ -70,14 +60,21 @@ cp ${VERSION_FILE} ${BINARY_TARGET_DIR}/dragonfly || cleanup "failed to copy bin
 ${BASE_PATH}/${CHANGELOG_SCRIPT} ${REPO_PATH} || cleanup "failed to generate changelog for package"
 
 MY_DIR=${PWD}
-cd ${BASE_PATH} && dpkg-buildpackage --build=binary || cleanup "failed to generate the package"
-TEMP_RESULT_FILE=$(ls ../*.deb)
+cd ${BASE_PATH}
+dpkg-buildpackage --build=binary || cleanup "failed to generate the package"
 
-mv ${TEMP_RESULT_FILE} ${MY_DIR} && cd ${MY_DIR}
-RESULT_FILE=$(ls *.deb 2>/dev/null)
-if [ "$RESULT_FILE" = "" ]; then
-	cleanup "failed to find build result file"
+TEMP_RESULT_FILE=$(ls ../*.deb)
+if [ "$TEMP_RESULT_FILE" = "" ]; then
+    cleanup "failed to find debian file"
 fi
-echo "successfully build the install package at ${MY_DIR}/${RESULT_FILE}"
+
+for fl in ${TEMP_RESULT_FILE}; do
+    destfile=$(basename ${fl} | sed 's/_\([0-9.]*_\)/_/')
+    mv ${fl} ${MY_DIR}/${destfile}
+done
+
+cd ${MY_DIR}
+RESULT_FILE=$(ls *.deb 2>/dev/null)
+echo "successfully built the install package at ${MY_DIR}/${RESULT_FILE}"
 rm -rf ${TEMP_WORK_DIR}
 exit 0
