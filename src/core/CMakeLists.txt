@@ -19,3 +19,5 @@ cxx_test(json_test dfly_core TRDP::jsoncons LABELS DFLY)
 cxx_test(simple_lru_counter_test dfly_core LABELS DFLY)
 cxx_test(string_set_test dfly_core LABELS DFLY)
 cxx_test(string_map_test dfly_core LABELS DFLY)
+
+add_subdirectory(search)
