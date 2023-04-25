@@ -612,6 +612,7 @@ struct OpSetParams {
 OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList values,
                          const OpSetParams& op_sp = OpSetParams{}) {
   DCHECK(!values.empty() && 0 == values.size() % 2);
+  VLOG(2) << "OpSet(" << key << ")";
 
   auto& db_slice = op_args.shard->db_slice();
   pair<PrimeIterator, bool> add_res;

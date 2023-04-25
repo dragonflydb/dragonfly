@@ -310,6 +310,7 @@ pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string
   if (caching_mode_ && IsValid(res.first)) {
     if (!change_cb_.empty()) {
       auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
+        DVLOG(2) << "Running callbacks for key " << key << " in dbid " << cntx.db_index;
         for (const auto& ccb : change_cb_) {
           ccb.second(cntx.db_index, bit);
         }
@@ -363,6 +364,7 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
       return tuple_cat(res, make_tuple(false));
     }
     // It's a new entry.
+    DVLOG(2) << "Running callbacks for key " << key << " in dbid " << cntx.db_index;
     for (const auto& ccb : change_cb_) {
       ccb.second(cntx.db_index, key);
     }
@@ -748,6 +750,7 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, const KeyLockArgs& lock_args) con
 
 void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
   FiberAtomicGuard fg;
+  DVLOG(2) << "Running callbacks in dbid " << db_ind;
   for (const auto& ccb : change_cb_) {
     ccb.second(db_ind, ChangeReq{it});
   }
@@ -863,13 +866,15 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, PrimeIterator it,
   FiberAtomicGuard fg;
   uint64_t bucket_version = it.GetVersion();
   // change_cb_ is ordered by version.
+  DVLOG(2) << "Running callbacks in dbid " << db_ind << " with bucket_version=" << bucket_version
+           << ", upper_bound=" << upper_bound;
   for (const auto& ccb : change_cb_) {
-    uint64_t cb_vesrion = ccb.first;
-    DCHECK_LE(cb_vesrion, upper_bound);
-    if (cb_vesrion == upper_bound) {
+    uint64_t cb_version = ccb.first;
+    DCHECK_LE(cb_version, upper_bound);
+    if (cb_version == upper_bound) {
       return;
     }
-    if (bucket_version < cb_vesrion) {
+    if (bucket_version < cb_version) {
       ccb.second(db_ind, ChangeReq{it});
     }
   }
