@@ -14,7 +14,7 @@ using namespace std;
 class SearchParserTest : public ::testing::Test {
  protected:
   SearchParserTest() {
-    // query_driver_.scanner()->set_debug(1);
+    query_driver_.scanner()->set_debug(1);
   }
 
   void SetInput(const std::string& str) {
@@ -25,6 +25,12 @@ class SearchParserTest : public ::testing::Test {
     return query_driver_.Lex();
   }
 
+  int Parse(const std::string& str) {
+    query_driver_.SetInput(str);
+
+    return Parser(&query_driver_)();
+  }
+
   QueryDriver query_driver_;
 };
 
@@ -32,7 +38,7 @@ class SearchParserTest : public ::testing::Test {
 #define NEXT_EQ(tok_enum, type, val)                    \
   {                                                     \
     auto tok = Lex();                                   \
-    EXPECT_EQ(tok.type_get(), Parser::token::tok_enum); \
+    ASSERT_EQ(tok.type_get(), Parser::token::tok_enum); \
     EXPECT_EQ(val, tok.value.as<type>());               \
   }
 
@@ -60,6 +66,20 @@ TEST_F(SearchParserTest, Scanner) {
 
   SetInput(R"( "hello\"world" )");
   NEXT_EQ(TOK_TERM, string, R"(hello"world)");
+
+  SetInput(" $param @field:hello");
+  NEXT_EQ(TOK_PARAM, string, "$param");
+  NEXT_EQ(TOK_FIELD, string, "@field");
+  NEXT_TOK(TOK_COLON);
+  NEXT_EQ(TOK_TERM, string, "hello");
+
+  SetInput("почтальон Печкин");
+  NEXT_EQ(TOK_TERM, string, "почтальон");
+  NEXT_EQ(TOK_TERM, string, "Печкин");
+}
+
+TEST_F(SearchParserTest, Parse) {
+  EXPECT_EQ(0, Parse(" foo "));
 }
 
 }  // namespace search

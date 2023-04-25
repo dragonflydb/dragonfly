@@ -13,6 +13,8 @@
 
 // Added to header file before parser declaration.
 %code requires {
+  #include "core/search/ast_expr.h"
+
   namespace dfly {
   namespace search {
     class QueryDriver;
@@ -24,11 +26,12 @@
 %code {
 #include "core/search/query_driver.h"
 
-#define yylex driver.scanner()->ParserLex
+#define yylex driver->scanner()->Lex
+
+using namespace std;
 }
 
-// Only for parser
-%param { QueryDriver& driver }
+%parse-param { QueryDriver *driver  }
 
 %locations
 
@@ -40,36 +43,35 @@
 %token
   LPAREN  "("
   RPAREN  ")"
+  STAR    "*"
+  ARROW   "=>"
+  COLON   ":"
+  NOT_OP  "~"
 ;
 
 %token YYEOF
-%token <std::string> TERM "term"
+%token <std::string> TERM "term" PARAM "param" FIELD "field"
+
 %token <int64_t> INT64 "int64"
-%nterm <int> bool_expr
+%nterm <AstExpr> search_expr
 
 %printer { yyo << $$; } <*>;
 
 %%
-%start input;
 
-input:
-  %empty
-  | bool_expr
-  {
-    std::cout << $1 << std::endl;
-  }
+query:
+  search_expr
+  | query search_expr
   ;
 
-bool_expr: TERM {
-  std::cout << $1 << std::endl;
-} | TERM bool_expr {
-   std::cout << $1 << std::endl;
+search_expr: TERM {
+  cout << $1 << endl;
 }
 
 %%
 
 void
-dfly::search::Parser::error(const location_type& l, const std::string& m)
+dfly::search::Parser::error(const location_type& l, const string& m)
 {
-  std::cerr << l << ": " << m << '\n';
+  cerr << l << ": " << m << '\n';
 }
