@@ -1,7 +1,9 @@
-// Copyright 2023, Roman Gershman.  All rights reserved.
+// Copyright 2023, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
+
 #include "base/gtest.h"
+#include "base/logging.h"
 #include "core/search/query_driver.h"
 
 namespace dfly {
@@ -12,30 +14,52 @@ using namespace std;
 class SearchParserTest : public ::testing::Test {
  protected:
   SearchParserTest() {
+    // query_driver_.scanner()->set_debug(1);
   }
 
   void SetInput(const std::string& str) {
-    istr_.str(str);
-    query_driver_.scanner()->switch_streams(&istr_);
+    query_driver_.SetInput(str);
   }
 
   Parser::symbol_type Lex() {
-    return query_driver_.scanner()->ParserLex(query_driver_);
+    return query_driver_.Lex();
   }
 
   QueryDriver query_driver_;
-
-  std::istringstream istr_;
 };
+
+// tokens are not assignable, so we can not reuse them. This macros reduce the boilerplate.
+#define NEXT_EQ(tok_enum, type, val)                    \
+  {                                                     \
+    auto tok = Lex();                                   \
+    EXPECT_EQ(tok.type_get(), Parser::token::tok_enum); \
+    EXPECT_EQ(val, tok.value.as<type>());               \
+  }
+
+#define NEXT_TOK(tok_enum)                              \
+  {                                                     \
+    auto tok = Lex();                                   \
+    ASSERT_EQ(tok.type_get(), Parser::token::tok_enum); \
+  }
 
 TEST_F(SearchParserTest, Scanner) {
   SetInput("ab cd");
-  Parser::symbol_type tok = Lex();
-
   // 3.5.1 does not have name() method.
   // EXPECT_STREQ("term", tok.name());
-  EXPECT_EQ(tok.type_get(), Parser::token::TOK_TERM);
-  EXPECT_EQ("ab", tok.value.as<string>());
+
+  NEXT_EQ(TOK_TERM, string, "ab");
+  NEXT_EQ(TOK_TERM, string, "cd");
+  NEXT_TOK(TOK_YYEOF);
+
+  SetInput("(5a 6) ");
+
+  NEXT_TOK(TOK_LPAREN);
+  NEXT_EQ(TOK_TERM, string, "5a");
+  NEXT_EQ(TOK_INT64, int64_t, 6);
+  NEXT_TOK(TOK_RPAREN);
+
+  SetInput(R"( "hello\"world" )");
+  NEXT_EQ(TOK_TERM, string, R"(hello"world)");
 }
 
 }  // namespace search
