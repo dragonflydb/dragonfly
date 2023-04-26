@@ -1,21 +1,24 @@
+%top{
+  // Our lexer need to know about Parser::symbol_type
+  #include "core/search/parser.hh"
+}
 
-/* Seems that flex does not have unicode support.
-   TODO: to consider https://en.wikipedia.org/wiki/RE/flex in the future.
-*/
 %{
   #include <absl/strings/escaping.h>
   #include <absl/strings/numbers.h>
-  #include "base/logging.h"
-  #include "core/search/query_driver.h"
 
-  // Define main lexer function. QueryDriver is the shared state between scanner and parser
-  #undef YY_DECL
-  #define YY_DECL auto dfly::search::Scanner::ParserLex(QueryDriver& driver) -> Parser::symbol_type
+  #include "base/logging.h"
+
+  #define DFLY_LEXER_CC 1
+     #include "core/search/scanner.h"
+  #undef DFLY_LEXER_CC
 %}
 
-%option noyywrap nounput noinput batch debug
-%option yyclass="dfly::Scanner"
-%option c++
+%o bison-cc-namespace="dfly.search" bison-cc-parser="Parser"
+%o namespace="dfly.search"
+%o class="Scanner" lex="Lex"
+%o nodefault batch
+/* %o debug */
 
 /* Declarations before lexer implementation.  */
 %{
@@ -32,35 +35,38 @@ dq    \"
 esc_chars ['"\?\\abfnrtv]
 esc_seq \\{esc_chars}
 str_char ([^"]|{esc_seq})
+term_char [_]|\w
+
 
 %{
   // Code run each time a pattern is matched.
-  # define YY_USER_ACTION  loc.columns (yyleng);
 %}
 
 %%
 
 %{
-  // A handy shortcut to the location held by the driver.
-  auto& loc = driver.location;
-  // Code run each time yylex is called.
-  loc.step ();
+  // Code run each time lex() is called.
 %}
 
-{blank}+   loc.step ();
+[[:space:]]+   // skip white space
 
-\n         loc.lines (yyleng); loc.step ();
+"("            return Parser::make_LPAREN (loc());
+")"            return Parser::make_RPAREN (loc());
+"*"            return Parser::make_STAR (loc());
+"~"            return Parser::make_NOT_OP (loc());
+":"            return Parser::make_COLON (loc());
+"=>"           return Parser::make_ARROW (loc());
 
-"("        return Parser::make_LPAREN (loc);
-")"        return Parser::make_RPAREN (loc);
+-?[0-9]+       return make_INT64(matched_view(), loc());
 
--?[0-9]+    return make_INT64(Matched(), loc);
+{dq}{str_char}*{dq}  return make_StringLit(matched_view(1, 1), loc());
 
-{dq}{str_char}*{dq}  return make_StringLit(string_view{YYText(), size_t(YYLeng())}, loc);
+"$"{term_char}+ return Parser::make_PARAM(str(), loc());
+"@"{term_char}+ return Parser::make_FIELD(str(), loc());
 
-[[:alnum:]]+   return Parser::make_TERM(Matched(), loc);
+{term_char}+   return Parser::make_TERM(str(), loc());
 
-<<EOF>>    return Parser::make_YYEOF(loc);
+<<EOF>>    return Parser::make_YYEOF(loc());
 %%
 
 Parser::symbol_type
@@ -74,11 +80,6 @@ make_INT64 (string_view str, const Parser::location_type& loc)
 }
 
 Parser::symbol_type make_StringLit(string_view src, const Parser::location_type& loc) {
-  DCHECK_GE(src.size(), 2u);
-
-  // Remove quotes
-  src.remove_prefix(1);
-  src.remove_suffix(1);
   string res;
   if (!absl::CUnescape(src, &res)) {
     throw Parser::syntax_error (loc, "bad escaped string: " + string(src));

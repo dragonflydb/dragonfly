@@ -5,8 +5,8 @@
 #pragma once
 
 #include <memory>
-#include <sstream>
 
+#include "core/search/ast_expr.h"
 #include "core/search/parser.hh"
 #include "core/search/scanner.h"
 
@@ -23,19 +23,22 @@ class QueryDriver {
     return scanner_.get();
   }
 
-  void SetInput(const std::string& str) {
-    istr_.str(str);
-    scanner()->switch_streams(&istr_);
+  void SetInput(std::string str) {
+    cur_str_ = std::move(str);
+    scanner()->in(cur_str_);
   }
 
   Parser::symbol_type Lex() {
-    return scanner()->ParserLex(*this);
+    return scanner()->Lex();
   }
 
   Parser::location_type location;
 
+  void Add(AstExpr) {
+  }
+
  private:
-  std::istringstream istr_;
+  std::string cur_str_;
   std::unique_ptr<Scanner> scanner_;
 };
 
