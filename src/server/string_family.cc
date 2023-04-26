@@ -1092,8 +1092,7 @@ void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext
   }
 
   if (unit_vals < 1 || unit_vals >= kMaxExpireDeadlineSec) {
-    ToLower(&args[0]);
-    return (*cntx)->SendError(InvalidExpireTime(ArgS(args, 0)));
+    return (*cntx)->SendError(InvalidExpireTime(cntx->cid->name()));
   }
 
   SetCmd::SetParams sparams;
