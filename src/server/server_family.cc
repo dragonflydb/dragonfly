@@ -1666,8 +1666,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       auto replicas = dfly_cmd_->GetReplicasRoleInfo();
       for (size_t i = 0; i < replicas.size(); i++) {
         auto& r = replicas[i];
-        // e.g. slave0:ip=172.19.0.3,port=6379
-        append(StrCat("slave", i), StrCat("ip=", r.address, ",port=", r.listening_port));
+        // e.g. slave0:ip=172.19.0.3,port=6379,state=full_sync
+        append(StrCat("slave", i),
+               StrCat("ip=", r.address, ",port=", r.listening_port, ",state=", r.state));
       }
       append("master_replid", master_id_);
     } else {
