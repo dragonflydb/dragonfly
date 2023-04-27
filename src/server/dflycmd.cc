@@ -68,10 +68,10 @@ DflyCmd::ReplicaRoleInfo::ReplicaRoleInfo(std::string address, uint32_t listenin
       state = "preparation";
       break;
     case SyncState::FULL_SYNC:
-      state = "full sync";
+      state = "full_sync";
       break;
     case SyncState::STABLE_SYNC:
-      state = "stable sync";
+      state = "stable_sync";
       break;
     case SyncState::CANCELLED:
       state = "cancelled";
