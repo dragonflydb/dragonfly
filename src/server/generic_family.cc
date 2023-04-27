@@ -1281,6 +1281,32 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void GenericFamily::RandomKey(CmdArgList args, ConnectionContext* cntx) {
+  VLOG(1) << "RANDOMKEY";
+
+  string key{};
+
+  StringVec keys;
+  size_t cursor = 0u;
+  ScanOpts opts{};
+
+  do {
+    cursor = ScanGeneric(cursor, opts, &keys, cntx);
+  } while (cursor != 0u);
+
+  const size_t count_keys = keys.size();
+
+  if (count_keys > 0u) {
+    absl::BitGen bitgen;
+    key = keys[absl::Uniform<size_t>(bitgen, 0u, count_keys)];
+  }
+
+  if (key.empty())
+    (*cntx)->SendNull();
+  else
+    (*cntx)->SendBulkString(key);
+}
+
 OpResult<uint64_t> GenericFamily::OpTtl(Transaction* t, EngineShard* shard, string_view key) {
   auto& db_slice = shard->db_slice();
   auto [it, expire_it] = db_slice.FindExt(t->GetDbContext(), key);
@@ -1469,7 +1495,8 @@ void GenericFamily::Register(CommandRegistry* registry) {
             << CI{"STICK", CO::WRITE, -2, 1, -1, 1}.HFUNC(Stick)
             << CI{"SORT", CO::READONLY, -2, 1, 1, 1}.HFUNC(Sort)
             << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, 1}.HFUNC(Move)
-            << CI{"RESTORE", CO::WRITE, -4, 1, 1, 1}.HFUNC(Restore);
+            << CI{"RESTORE", CO::WRITE, -4, 1, 1, 1}.HFUNC(Restore)
+            << CI{"RANDOMKEY", CO::READONLY, 1, 0, 0, 0}.HFUNC(RandomKey);
 }
 
 }  // namespace dfly
