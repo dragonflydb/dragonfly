@@ -192,7 +192,8 @@ class Replica {
     std::string host;
     uint16_t port;
     bool master_link_established;
-    bool sync_in_progress;      // snapshot sync.
+    bool full_sync_in_progress;
+    bool full_sync_done;
     time_t master_last_io_sec;  // monotonic clock.
   };
 

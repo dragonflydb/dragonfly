@@ -1685,7 +1685,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       const char* link = rinfo.master_link_established ? "up" : "down";
       append("master_link_status", link);
       append("master_last_io_seconds_ago", rinfo.master_last_io_sec);
-      append("master_sync_in_progress", rinfo.sync_in_progress);
+      append("master_sync_in_progress", rinfo.full_sync_in_progress);
     }
   }
 
@@ -1988,17 +1988,20 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
 
   } else {
     auto replica_ptr = replica_;
+    CHECK(replica_ptr);
     Replica::Info rinfo = replica_ptr->GetInfo();
     (*cntx)->StartArray(4);
     (*cntx)->SendBulkString("replica");
     (*cntx)->SendBulkString(rinfo.host);
     (*cntx)->SendBulkString(absl::StrCat(rinfo.port));
-    if (rinfo.sync_in_progress) {
-      (*cntx)->SendBulkString("full_sync");
-    } else if (!rinfo.master_link_established) {
-      (*cntx)->SendBulkString("connecting");
-    } else {
+    if (rinfo.full_sync_done) {
       (*cntx)->SendBulkString("stable_sync");
+    } else if (rinfo.full_sync_in_progress) {
+      (*cntx)->SendBulkString("full_sync");
+    } else if (rinfo.master_link_established) {
+      (*cntx)->SendBulkString("preparation");
+    } else {
+      (*cntx)->SendBulkString("connecting");
     }
   }
 }
