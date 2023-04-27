@@ -871,3 +871,32 @@ async def test_script_transfer(df_local_factory):
         assert await c_replica.evalsha(sha, 0) == i
     await c_master.connection_pool.disconnect()
     await c_replica.connection_pool.disconnect()
+
+
+@dfly_args({"proactor_threads": 4})
+@pytest.mark.asyncio
+async def test_role_command(df_local_factory, n_keys=20):
+    master = df_local_factory.create(port=BASE_PORT)
+    replica = df_local_factory.create(port=BASE_PORT+1, logtostdout=True)
+
+    df_local_factory.start_all([master, replica])
+
+    c_master = aioredis.Redis(port=master.port)
+    c_replica = aioredis.Redis(port=replica.port)
+
+    assert await c_master.execute_command("role") == [b'master', []]
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    assert await c_master.execute_command("role") == [
+        b'master', [[b'127.0.0.1', bytes(str(replica.port), 'ascii'), b'stable_sync']]]
+    assert await c_replica.execute_command("role") == [
+        b'replica', b'localhost', bytes(str(master.port), 'ascii'), b'stable_sync']
+
+    master.stop()
+    await asyncio.sleep(0.1)
+    assert await c_replica.execute_command("role") == [
+        b'replica', b'localhost', bytes(str(master.port), 'ascii'), b'connecting']
+
+    await c_master.connection_pool.disconnect()
+    await c_replica.connection_pool.disconnect()
