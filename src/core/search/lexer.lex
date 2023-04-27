@@ -53,9 +53,11 @@ term_char [_]|\w
 "("            return Parser::make_LPAREN (loc());
 ")"            return Parser::make_RPAREN (loc());
 "*"            return Parser::make_STAR (loc());
-"~"            return Parser::make_NOT_OP (loc());
+"-"            return Parser::make_NOT_OP (loc());
 ":"            return Parser::make_COLON (loc());
 "=>"           return Parser::make_ARROW (loc());
+"["            return Parser::make_LBRACKET (loc());
+"]"            return Parser::make_RBRACKET (loc());
 
 -?[0-9]+       return make_INT64(matched_view(), loc());
 

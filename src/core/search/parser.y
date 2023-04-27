@@ -46,14 +46,18 @@ using namespace std;
   STAR    "*"
   ARROW   "=>"
   COLON   ":"
-  NOT_OP  "~"
+  LBRACKET "["
+  RBRACKET "]"
 ;
 
-%token YYEOF
+%precedence NOT_OP
+
+// Needed 0 at the end to satisfy bison 3.5.1
+%token YYEOF 0
 %token <std::string> TERM "term" PARAM "param" FIELD "field"
 
 %token <int64_t> INT64 "int64"
-%nterm <AstExpr> search_expr
+%nterm <AstExpr> search_expr field_filter field_cond range_value term_list opt_neg_term
 
 %printer { yyo << $$; } <*>;
 
@@ -64,9 +68,25 @@ query:
   | query search_expr
   ;
 
-search_expr: TERM {
-  cout << $1 << endl;
-}
+
+search_expr:
+ LPAREN search_expr RPAREN { $$ = $2; }
+ | NOT_OP search_expr { $$ = AstExpr{}; };
+ | TERM { }
+ | field_filter;
+
+field_filter:
+   FIELD COLON field_cond { $$ = AstExpr{}; }
+
+field_cond: term_list | range_value
+ range_value: LBRACKET INT64 INT64 RBRACKET { $$ = AstExpr{}; }
+
+term_list:
+  opt_neg_term |
+  LPAREN term_list opt_neg_term RPAREN { };
+
+opt_neg_term:
+  TERM { } | NOT_OP TERM { $$ = AstExpr{}; };
 
 %%
 
