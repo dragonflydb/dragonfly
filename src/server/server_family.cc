@@ -1666,8 +1666,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       auto replicas = dfly_cmd_->GetReplicasRoleInfo();
       for (size_t i = 0; i < replicas.size(); i++) {
         auto& r = replicas[i];
-        // e.g. slave0:ip=172.19.0.3,port=6379
-        append(StrCat("slave", i), StrCat("ip=", r.address, ",port=", r.listening_port));
+        // e.g. slave0:ip=172.19.0.3,port=6379,state=full_sync
+        append(StrCat("slave", i),
+               StrCat("ip=", r.address, ",port=", r.listening_port, ",state=", r.state));
       }
       append("master_replid", master_id_);
     } else {
@@ -1993,11 +1994,11 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
     (*cntx)->SendBulkString(rinfo.host);
     (*cntx)->SendBulkString(absl::StrCat(rinfo.port));
     if (rinfo.sync_in_progress) {
-      (*cntx)->SendBulkString("full sync");
+      (*cntx)->SendBulkString("full_sync");
     } else if (!rinfo.master_link_established) {
       (*cntx)->SendBulkString("connecting");
     } else {
-      (*cntx)->SendBulkString("stable sync");
+      (*cntx)->SendBulkString("stable_sync");
     }
   }
 }
