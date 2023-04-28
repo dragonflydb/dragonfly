@@ -29,7 +29,7 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
 }
 
 bool CommandId::IsTransactional() const {
-  if (first_key_ > 0 || (opt_mask_ & CO::GLOBAL_TRANS))
+  if (first_key_ > 0 || (opt_mask_ & CO::GLOBAL_TRANS) || (opt_mask_ & CO::NO_KEY_JOURNAL))
     return true;
 
   string_view name{name_};
@@ -124,6 +124,8 @@ const char* OptName(CO::CommandOpt fl) {
       return "variadic-keys";
     case NO_AUTOJOURNAL:
       return "custom-journal";
+    case NO_KEY_JOURNAL:
+      return "no-key-journal";
   }
   return "unknown";
 }

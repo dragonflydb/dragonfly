@@ -91,6 +91,10 @@ class ServerFamily {
   // if new_version is true, saves DF specific, non redis compatible snapshot.
   GenericError DoSave(bool new_version, Transaction* transaction);
 
+  // Calls DoSave with a default generated transaction and with the format
+  // specified in --df_snapshot_format
+  GenericError DoSave();
+
   // Burns down and destroy all the data from the database.
   // if kDbAll is passed, burns all the databases to the ground.
   std::error_code Drakarys(Transaction* transaction, DbIndex db_ind);
@@ -161,7 +165,7 @@ class ServerFamily {
 
   void SnapshotScheduling(const SnapshotSpec& time);
 
-  Fiber snapshot_fiber_;
+  Fiber snapshot_schedule_fb_;
   Future<std::error_code> load_result_;
 
   uint32_t stats_caching_task_ = 0;
@@ -186,7 +190,11 @@ class ServerFamily {
   std::shared_ptr<LastSaveInfo> last_save_info_;  // protected by save_mu_;
   std::atomic_bool is_saving_{false};
 
-  Done is_snapshot_done_;
+  // Used to override save on shutdown behavior that is usually set
+  // be --dbfilename.
+  bool save_on_shutdown_{true};
+
+  Done schedule_done_;
   std::unique_ptr<FiberQueueThreadPool> fq_threadpool_;
 };
 

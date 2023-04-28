@@ -20,6 +20,7 @@
 #include "facade/error.h"
 #include "server/engine_shard_set.h"
 #include "server/server_state.h"
+#include "server/transaction.h"
 
 ABSL_FLAG(std::string, default_lua_config, "",
           "Configure default mode for running Lua scripts: \n - Use 'allow-undeclared-keys' to "
@@ -126,6 +127,10 @@ void ScriptMgr::LoadCmd(CmdArgList args, ConnectionContext* cntx) {
   if (!res)
     return (*cntx)->SendError(res.error().Format());
 
+  // Schedule empty callback inorder to journal command via transaction framework.
+  auto cb = [&](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
+
+  cntx->transaction->ScheduleSingleHop(std::move(cb));
   return (*cntx)->SendBulkString(res.value());
 }
 

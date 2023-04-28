@@ -6,31 +6,42 @@
 #include "base/logging.h"
 #include "reply_capture.h"
 
+#define SKIP_LESS(needed)     \
+  if (reply_mode_ < needed) { \
+    current_ = monostate{};   \
+    return;                   \
+  }
 namespace facade {
 
 using namespace std;
 
 void CapturingReplyBuilder::SendError(std::string_view str, std::string_view type) {
+  SKIP_LESS(ReplyMode::ONLY_ERR);
   Capture(Error{str, type});
 }
 
 void CapturingReplyBuilder::SendMGetResponse(absl::Span<const OptResp> arr) {
+  SKIP_LESS(ReplyMode::FULL);
   Capture(vector<OptResp>{arr.begin(), arr.end()});
 }
 
 void CapturingReplyBuilder::SendError(OpStatus status) {
+  SKIP_LESS(ReplyMode::ONLY_ERR);
   Capture(status);
 }
 
 void CapturingReplyBuilder::SendNullArray() {
+  SKIP_LESS(ReplyMode::FULL);
   Capture(unique_ptr<CollectionPayload>{nullptr});
 }
 
 void CapturingReplyBuilder::SendEmptyArray() {
+  SKIP_LESS(ReplyMode::FULL);
   Capture(make_unique<CollectionPayload>(0, ARRAY));
 }
 
 void CapturingReplyBuilder::SendSimpleStrArr(StrSpan arr) {
+  SKIP_LESS(ReplyMode::FULL);
   DCHECK_EQ(current_.index(), 0u);
 
   WrappedStrSpan warr{arr};
@@ -42,6 +53,7 @@ void CapturingReplyBuilder::SendSimpleStrArr(StrSpan arr) {
 }
 
 void CapturingReplyBuilder::SendStringArr(StrSpan arr, CollectionType type) {
+  SKIP_LESS(ReplyMode::FULL);
   DCHECK_EQ(current_.index(), 0u);
 
   // TODO: 1. Allocate all strings at once 2. Allow movable types
@@ -54,31 +66,38 @@ void CapturingReplyBuilder::SendStringArr(StrSpan arr, CollectionType type) {
 }
 
 void CapturingReplyBuilder::SendNull() {
+  SKIP_LESS(ReplyMode::FULL);
   Capture(nullptr_t{});
 }
 
 void CapturingReplyBuilder::SendLong(long val) {
+  SKIP_LESS(ReplyMode::FULL);
   Capture(val);
 }
 
 void CapturingReplyBuilder::SendDouble(double val) {
+  SKIP_LESS(ReplyMode::FULL);
   Capture(val);
 }
 
 void CapturingReplyBuilder::SendSimpleString(std::string_view str) {
+  SKIP_LESS(ReplyMode::FULL);
   Capture(SimpleString{string{str}});
 }
 
 void CapturingReplyBuilder::SendBulkString(std::string_view str) {
+  SKIP_LESS(ReplyMode::FULL);
   Capture(BulkString{string{str}});
 }
 
 void CapturingReplyBuilder::SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
                                             bool with_scores) {
+  SKIP_LESS(ReplyMode::FULL);
   Capture(ScoredArray{arr, with_scores});
 }
 
 void CapturingReplyBuilder::StartCollection(unsigned len, CollectionType type) {
+  SKIP_LESS(ReplyMode::FULL);
   stack_.emplace(make_unique<CollectionPayload>(len, type), type == MAP ? len * 2 : len);
 
   // If we added an empty collection, it must be collapsed immediately.
@@ -90,6 +109,17 @@ CapturingReplyBuilder::Payload CapturingReplyBuilder::Take() {
   Payload pl = move(current_);
   current_ = monostate{};
   return pl;
+}
+
+void CapturingReplyBuilder::SendDirect(Payload&& val) {
+  bool is_err = holds_alternative<Error>(val) || holds_alternative<OpStatus>(val);
+  ReplyMode min_mode = is_err ? ReplyMode::ONLY_ERR : ReplyMode::FULL;
+  if (reply_mode_ >= min_mode) {
+    DCHECK_EQ(current_.index(), 0u);
+    current_ = move(val);
+  } else {
+    current_ = monostate{};
+  }
 }
 
 void CapturingReplyBuilder::Capture(Payload val) {
@@ -183,8 +213,25 @@ struct CaptureVisitor {
 };
 
 void CapturingReplyBuilder::Apply(Payload&& pl, RedisReplyBuilder* rb) {
+  if (auto* crb = dynamic_cast<CapturingReplyBuilder*>(rb); crb != nullptr) {
+    crb->SendDirect(move(pl));
+    return;
+  }
+
   CaptureVisitor cv{rb};
   visit(cv, pl);
+}
+
+void CapturingReplyBuilder::SetReplyMode(ReplyMode mode) {
+  reply_mode_ = mode;
+  current_ = monostate{};
+}
+
+optional<CapturingReplyBuilder::ErrorRef> CapturingReplyBuilder::GetError(const Payload& pl) {
+  if (auto* err = get_if<Error>(&pl); err != nullptr) {
+    return ErrorRef{err->first, err->second};
+  }
+  return nullopt;
 }
 
 }  // namespace facade

@@ -10,7 +10,7 @@ endif()
 
 add_library(dfly_transaction db_slice.cc malloc_stats.cc engine_shard_set.cc blocking_controller.cc
             common.cc
-            io_mgr.cc journal/journal.cc journal/journal_slice.cc server_state.cc table.cc
+            io_mgr.cc journal/journal.cc journal/types.cc journal/journal_slice.cc server_state.cc table.cc
             tiered_storage.cc top_keys.cc transaction.cc)
 cxx_link(dfly_transaction dfly_core strings_lib)
 

@@ -11,6 +11,7 @@
 #include <absl/flags/usage_config.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_split.h>
 #include <absl/strings/strip.h>
 #include <liburing.h>
 #include <mimalloc.h>
@@ -309,7 +310,11 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
   Service service(pool);
 
-  Listener* main_listener = new Listener{Protocol::REDIS, &service};
+  auto tcp_disabled = GetFlag(FLAGS_port) == 0u;
+  Listener* main_listener = nullptr;
+
+  if (!tcp_disabled)
+    main_listener = new Listener{Protocol::REDIS, &service};
 
   Service::InitOpts opts;
   opts.disable_time_update = false;
@@ -327,12 +332,22 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     Listener* uds_listener = new Listener{Protocol::REDIS, &service};
     error_code ec = acceptor->AddUDSListener(unix_sock.c_str(), uds_listener);
     if (ec) {
-      LOG(WARNING) << "Could not open unix socket " << unix_sock << ", error " << ec;
+      if (tcp_disabled) {
+        LOG(ERROR) << "Could not open unix socket " << unix_sock
+                   << ", and TCP listening is disabled (error: " << ec << "). Exiting.";
+        exit(1);
+      } else {
+        LOG(WARNING) << "Could not open unix socket " << unix_sock << ", error " << ec;
+      }
       delete uds_listener;
     } else {
       LOG(INFO) << "Listening on unix socket " << unix_sock;
       unlink_uds = true;
     }
+  } else if (tcp_disabled) {
+    LOG(ERROR)
+        << "Did not receive a unix socket to listen to, yet TCP listening is disabled. Exiting.";
+    exit(1);
   }
 
   std::uint16_t admin_port = GetFlag(FLAGS_admin_port);
@@ -354,14 +369,16 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     }
   }
 
-  error_code ec = acceptor->AddListener(bind_addr, port, main_listener);
+  if (!tcp_disabled) {
+    error_code ec = acceptor->AddListener(bind_addr, port, main_listener);
 
-  if (ec) {
-    LOG(ERROR) << "Could not open port " << port << ", error: " << ec.message();
-    exit(1);
+    if (ec) {
+      LOG(ERROR) << "Could not open port " << port << ", error: " << ec.message();
+      exit(1);
+    }
   }
 
-  if (mc_port > 0) {
+  if (mc_port > 0 && !tcp_disabled) {
     acceptor->AddListener(mc_port, new Listener{Protocol::MEMCACHE, &service});
   }
 
@@ -438,6 +455,98 @@ bool ShouldUseEpollAPI(const base::sys::KernelVersion& kver) {
   return true;
 }
 
+io::Result<string> GetCGroupPath() {
+  // Begin by reading /proc/self/cgroup
+
+  auto cg = io::ReadFileToString("/proc/self/cgroup");
+  CHECK(cg.has_value());
+
+  // Here, we assume that CGroup v1 is being used. This
+  // is quite likely, as CGroup v2 was introduced back in 2016.
+
+  // strip 0::<path> into just <path>, and newline.
+  string cgv = std::move(cg.value());
+  size_t pos = cgv.rfind(':');
+  if (pos == string::npos)
+    return nonstd::make_unexpected(make_error_code(errc::not_supported));
+
+  string res = cgv.substr(pos + 1);
+  absl::StripTrailingAsciiWhitespace(&res);
+
+  return res;
+}
+
+void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_threads) {
+  /**
+   * (attemps) to check whether we are running
+   * inside a container or not.
+   *
+   * We employ several tests, all of which
+   * are flawed, however together do cover a
+   * good portion of cases.
+   *
+   * 1. Checking '/.dockerenv': very simple, however
+   * only works for Docker, and this file may be moved
+   * in the future.
+   * 2. Checking '/sys/fs/cgroup/memory.max': This
+   * directory -cannot- be edited (not even using sudoedit),
+   * so users are not able to add files to there. The file
+   * 'memory.max' should contain a memory limit for processes.
+   *
+   * We also use this file to find out how much memory we can use.
+   * However, on LXC this is placed in a different directory:
+   * 3. Checking '/sys/fs/cgroup/memory/memory.limit_in_bytes':
+   * Same idea.
+   */
+
+  using io::Exists;
+
+  auto cgroup_res = GetCGroupPath();
+  if (!cgroup_res) {
+    VLOG(1) << "Failed to get cgroup path, error: " << cgroup_res.error().message();
+    return;
+  }
+
+  const string cgroup = "/sys/fs/cgroup/" + *cgroup_res;
+
+  if (!Exists(cgroup + "/memory.max"))
+    return;
+
+  /* Update memory limits */
+  auto mmax = io::ReadFileToString(cgroup + "/memory.max");
+  DVLOG(1) << "memory.max: " << mmax.value_or("N/A");
+
+  if (mmax && !absl::StartsWith(*mmax, "max")) {
+    CHECK(absl::SimpleAtoi(*mmax, &mdata->mem_total));
+  }
+
+  mdata->mem_avail = mdata->mem_total;
+  auto mhigh = io::ReadFileToString(cgroup + "/memory.high");
+
+  if (mhigh && !absl::StartsWith(*mhigh, "max")) {
+    CHECK(absl::SimpleAtoi(*mhigh, &mdata->mem_avail));
+  }
+
+  /* Update thread limits */
+
+  if (auto cpu = ReadFileToString(cgroup + "/cpu.max"); cpu.has_value()) {
+    vector<string_view> res = absl::StrSplit(cpu.value(), ' ');
+
+    CHECK_EQ(res.size(), 2u);
+
+    if (res[0] == "max")
+      *max_threads = 0u;
+    else {
+      double count, timeshare;
+      CHECK(absl::SimpleAtod(res[0], &count));
+      CHECK(absl::SimpleAtod(res[1], &timeshare));
+
+      *max_threads = static_cast<size_t>(ceil(count / timeshare));
+    }
+  } else
+    *max_threads = 0u;  // cpuset, this is handled later.
+}
+
 }  // namespace
 }  // namespace dfly
 
@@ -479,7 +588,16 @@ Usage: dragonfly [FLAGS]
   sigemptyset(&act.sa_mask);
   sigaction(SIGILL, &act, nullptr);
 
-  CHECK_GT(GetFlag(FLAGS_port), 0u);
+  if (GetFlag(FLAGS_port) == 0u) {
+    string usock = GetFlag(FLAGS_unixsocket);
+    if (usock.length() == 0u) {
+      LOG(ERROR) << "received --port 0, yet no unix socket to listen to. Exiting.";
+      exit(1);
+    }
+    LOG(INFO) << "received --port 0, disabling TCP listening.";
+    LOG(INFO) << "listening on unix socket " << usock << ".";
+  }
+
   mi_stats_reset();
 
   if (GetFlag(FLAGS_dbnum) > dfly::kMaxDbId) {
@@ -494,17 +612,29 @@ Usage: dragonfly [FLAGS]
     }
   }
 
+  auto memory = ReadMemInfo().value();
+  size_t max_available_threads = 0u;
+
+  UpdateResourceLimitsIfInsideContainer(&memory, &max_available_threads);
+
+  if (memory.swap_total != 0)
+    LOG(WARNING) << "SWAP is enabled. Consider disabling it when running Dragonfly.";
+
   if (GetFlag(FLAGS_maxmemory).value == 0) {
     LOG(INFO) << "maxmemory has not been specified. Deciding myself....";
 
-    Result<MemInfoData> res = ReadMemInfo();
-    size_t available = res->mem_avail;
+    size_t available = memory.mem_avail;
     size_t maxmemory = size_t(0.8 * available);
     LOG(INFO) << "Found " << HumanReadableNumBytes(available)
               << " available memory. Setting maxmemory to " << HumanReadableNumBytes(maxmemory);
     absl::SetFlag(&FLAGS_maxmemory, MaxMemoryFlag(maxmemory));
   } else {
-    LOG(INFO) << "Max memory limit is: " << HumanReadableNumBytes(GetFlag(FLAGS_maxmemory).value);
+    size_t limit = GetFlag(FLAGS_maxmemory).value;
+    string hr_limit = HumanReadableNumBytes(limit);
+    if (limit > memory.mem_avail)
+      LOG(WARNING) << "Got memory limit " << hr_limit << ", however only "
+                   << HumanReadableNumBytes(memory.mem_avail) << " was found.";
+    LOG(INFO) << "Max memory limit is: " << hr_limit;
   }
 
   dfly::max_memory_limit = GetFlag(FLAGS_maxmemory).value;
@@ -525,10 +655,11 @@ Usage: dragonfly [FLAGS]
   unique_ptr<util::ProactorPool> pool;
 
   bool use_epoll = ShouldUseEpollAPI(kver);
+
   if (use_epoll) {
-    pool.reset(fb2::Pool::Epoll());
+    pool.reset(fb2::Pool::Epoll(max_available_threads));
   } else {
-    pool.reset(fb2::Pool::IOUring(1024));  // 1024 - iouring queue size.
+    pool.reset(fb2::Pool::IOUring(1024, max_available_threads));  // 1024 - iouring queue size.
   }
 
   pool->Run();

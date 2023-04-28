@@ -76,6 +76,7 @@ string_view GetSlice(EngineShard* shard, const PrimeValue& pv, string* tmp) {
 
 OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t start,
                               string_view value) {
+  VLOG(2) << "SetRange(" << key << ", " << start << ", " << value << ")";
   auto& db_slice = op_args.shard->db_slice();
   size_t range_len = start + value.size();
 
@@ -1051,6 +1052,7 @@ void StringFamily::IncrByGeneric(string_view key, int64_t val, ConnectionContext
 void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view sval = ArgS(args, 1);
+  VLOG(2) << "ExtendGeneric(" << key << ", " << sval << ")";
 
   if (cntx->protocol() == Protocol::REDIS) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1090,8 +1092,7 @@ void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext
   }
 
   if (unit_vals < 1 || unit_vals >= kMaxExpireDeadlineSec) {
-    ToLower(&args[0]);
-    return (*cntx)->SendError(InvalidExpireTime(ArgS(args, 0)));
+    return (*cntx)->SendError(InvalidExpireTime(cntx->cid->name()));
   }
 
   SetCmd::SetParams sparams;

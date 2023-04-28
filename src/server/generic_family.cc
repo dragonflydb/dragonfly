@@ -723,8 +723,7 @@ void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (int_arg > kMaxExpireDeadlineSec || int_arg < -kMaxExpireDeadlineSec) {
-    ToLower(&args[0]);
-    return (*cntx)->SendError(InvalidExpireTime(ArgS(args, 0)));
+    return (*cntx)->SendError(InvalidExpireTime(cntx->cid->name()));
   }
 
   int_arg = std::max(int_arg, -1L);

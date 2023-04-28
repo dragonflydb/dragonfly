@@ -53,6 +53,8 @@ struct Entry : public EntryBase {
     return !std::holds_alternative<std::monostate>(payload);
   }
 
+  std::string ToString() const;
+
   Payload payload;
 };
 

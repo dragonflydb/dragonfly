@@ -190,7 +190,7 @@ class RdbSnapshot {
   RdbSnapshot(FiberQueueThreadPool* fq_tp) : fq_tp_(fq_tp) {
   }
 
-  error_code Start(SaveMode save_mode, const string& path, const StringVec& lua_scripts);
+  GenericError Start(SaveMode save_mode, const string& path, const StringVec& lua_scripts);
   void StartInShard(EngineShard* shard);
 
   error_code SaveBody();
@@ -223,18 +223,20 @@ io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {
   return res;
 }
 
-error_code RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
-                              const StringVec& lua_scripts) {
+GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
+                                const StringVec& lua_scripts) {
   bool is_direct = false;
   if (fq_tp_) {  // EPOLL
     auto res = util::OpenFiberWriteFile(path, fq_tp_);
     if (!res)
-      return res.error();
+      return GenericError(res.error(), "Couldn't open file for writing");
     io_sink_.reset(*res);
   } else {
     auto res = OpenLinux(path, kRdbWriteFlags, 0666);
     if (!res) {
-      return res.error();
+      return GenericError(
+          res.error(),
+          "Couldn't open file for writing (is direct I/O supported by the file system?)");
     }
     io_sink_.reset(new LinuxWriteWrapper(res->release()));
     is_direct = kRdbWriteFlags & O_DIRECT;
@@ -465,7 +467,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
   if (!save_time.empty()) {
     std::optional<SnapshotSpec> spec = ParseSaveSchedule(save_time);
     if (spec) {
-      snapshot_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
+      snapshot_schedule_fb_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
           [save_spec = std::move(spec.value()), this] { SnapshotScheduling(save_spec); });
     } else {
       LOG(WARNING) << "Invalid snapshot time specifier " << save_time;
@@ -479,9 +481,18 @@ void ServerFamily::Shutdown() {
   if (load_result_.valid())
     load_result_.wait();
 
-  is_snapshot_done_.Notify();
-  if (snapshot_fiber_.IsJoinable()) {
-    snapshot_fiber_.Join();
+  schedule_done_.Notify();
+  if (snapshot_schedule_fb_.IsJoinable()) {
+    snapshot_schedule_fb_.Join();
+  }
+
+  if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty()) {
+    shard_set->pool()->GetNextProactor()->Await([this] {
+      GenericError ec = DoSave();
+      if (ec) {
+        LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
+      }
+    });
   }
 
   pb_task_->Await([this] {
@@ -606,7 +617,7 @@ Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
 void ServerFamily::SnapshotScheduling(const SnapshotSpec& spec) {
   const auto loop_sleep_time = std::chrono::seconds(20);
   while (true) {
-    if (is_snapshot_done_.WaitFor(loop_sleep_time)) {
+    if (schedule_done_.WaitFor(loop_sleep_time)) {
       break;
     }
 
@@ -627,13 +638,7 @@ void ServerFamily::SnapshotScheduling(const SnapshotSpec& spec) {
       continue;
     }
 
-    const CommandId* cid = service().FindCmd("SAVE");
-    CHECK_NOTNULL(cid);
-    boost::intrusive_ptr<Transaction> trans(
-        new Transaction{cid, ServerState::tlocal()->thread_index()});
-    trans->InitByArgs(0, {});
-
-    GenericError ec = DoSave(absl::GetFlag(FLAGS_df_snapshot_format), trans.get());
+    GenericError ec = DoSave();
     if (ec) {
       LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
     }
@@ -663,9 +668,6 @@ error_code ServerFamily::LoadRdb(const std::string& rdb_file) {
   } else {
     ec = res.error();
   }
-
-  service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-
   return ec;
 }
 
@@ -899,8 +901,8 @@ using PartialSaveOpts = tuple<const fs::path& /*filename*/, const fs::path& /*pa
 
 // Start saving a single snapshot of a multi-file dfly snapshot.
 // If shard is null, then this is the summary file.
-error_code DoPartialSave(PartialSaveOpts opts, const dfly::StringVec& scripts,
-                         RdbSnapshot* snapshot, EngineShard* shard) {
+GenericError DoPartialSave(PartialSaveOpts opts, const dfly::StringVec& scripts,
+                           RdbSnapshot* snapshot, EngineShard* shard) {
   auto [filename, path] = opts;
   // Construct resulting filename.
   fs::path full_filename = filename;
@@ -913,13 +915,22 @@ error_code DoPartialSave(PartialSaveOpts opts, const dfly::StringVec& scripts,
 
   // Start rdb saving.
   SaveMode mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
-  error_code local_ec = snapshot->Start(mode, full_path.generic_string(), scripts);
+  GenericError local_ec = snapshot->Start(mode, full_path.generic_string(), scripts);
 
   if (!local_ec && mode == SaveMode::SINGLE_SHARD) {
     snapshot->StartInShard(shard);
   }
 
   return local_ec;
+}
+
+GenericError ServerFamily::DoSave() {
+  const CommandId* cid = service().FindCmd("SAVE");
+  CHECK_NOTNULL(cid);
+  boost::intrusive_ptr<Transaction> trans(
+      new Transaction{cid, ServerState::tlocal()->thread_index()});
+  trans->InitByArgs(0, {});
+  return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), trans.get());
 }
 
 GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
@@ -1655,8 +1666,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       auto replicas = dfly_cmd_->GetReplicasRoleInfo();
       for (size_t i = 0; i < replicas.size(); i++) {
         auto& r = replicas[i];
-        // e.g. slave0:ip=172.19.0.3,port=6379
-        append(StrCat("slave", i), StrCat("ip=", r.address, ",port=", r.listening_port));
+        // e.g. slave0:ip=172.19.0.3,port=6379,state=full_sync
+        append(StrCat("slave", i),
+               StrCat("ip=", r.address, ",port=", r.listening_port, ",state=", r.state));
       }
       append("master_replid", master_id_);
     } else {
@@ -1982,11 +1994,11 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
     (*cntx)->SendBulkString(rinfo.host);
     (*cntx)->SendBulkString(absl::StrCat(rinfo.port));
     if (rinfo.sync_in_progress) {
-      (*cntx)->SendBulkString("full sync");
+      (*cntx)->SendBulkString("full_sync");
     } else if (!rinfo.master_link_established) {
       (*cntx)->SendBulkString("connecting");
     } else {
-      (*cntx)->SendBulkString("stable sync");
+      (*cntx)->SendBulkString("stable_sync");
     }
   }
 }
@@ -2034,6 +2046,22 @@ void ServerFamily::Latency(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::_Shutdown(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() > 1) {
+    (*cntx)->SendError(kSyntaxErr);
+    return;
+  }
+
+  if (args.size() == 1) {
+    auto sub_cmd = ArgS(args, 0);
+    if (absl::EqualsIgnoreCase(sub_cmd, "SAVE")) {
+    } else if (absl::EqualsIgnoreCase(sub_cmd, "NOSAVE")) {
+      save_on_shutdown_ = false;
+    } else {
+      (*cntx)->SendError(kSyntaxErr);
+      return;
+    }
+  }
+
   CHECK_NOTNULL(acceptor_)->Stop();
   (*cntx)->SendOk();
 }
@@ -2077,14 +2105,14 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING | CO::FAST, -2, 0, 0, 0}.HFUNC(Latency)
             << CI{"MEMORY", kMemOpts, -2, 0, 0, 0}.HFUNC(Memory)
             << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, 0}.HFUNC(Save)
-            << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, 1, 0, 0, 0}.HFUNC(_Shutdown)
+            << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.HFUNC(_Shutdown)
             << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"READONLY", CO::READONLY, 1, 0, 0, 0}.HFUNC(ReadOnly)
             << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, 0}.HFUNC(ReplConf)
             << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, 0}.HFUNC(Role)
             << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, 0}.SetHandler(SlowLog)
-            << CI{"SCRIPT", CO::NOSCRIPT, -2, 0, 0, 0}.HFUNC(Script)
+            << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_JOURNAL, -2, 0, 0, 0}.HFUNC(Script)
             << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS, -2, 0, 0, 0}.HFUNC(Dfly);
 }
 

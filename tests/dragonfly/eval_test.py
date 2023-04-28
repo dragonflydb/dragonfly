@@ -4,6 +4,7 @@ import time
 import json
 import pytest
 import random
+import itertools
 from . import dfly_args, dfly_multi_test_args
 
 DJANGO_CACHEOPS_SCRIPT = """
@@ -49,12 +50,12 @@ end
 for db_table, disj in pairs(dnfs) do
     for _, conj in ipairs(disj) do
         -- Ensure scheme is known
-        redis.call('sadd', prefix .. 'schemes:' .. db_table, conj_schema(conj))
+        redis.acall('sadd', prefix .. 'schemes:' .. db_table, conj_schema(conj))
 
         -- Add new cache_key to list of dependencies
         local conj_key = conj_cache_key(db_table, conj)
 
-        redis.call('sadd', conj_key, key)
+        redis.acall('sadd', conj_key, key)
         -- NOTE: an invalidator should live longer than any key it references.
         --       So we update its ttl on every key if needed.
         -- NOTE: if CACHEOPS_LRU is True when invalidators should be left persistent,
@@ -82,7 +83,6 @@ def DJANGO_CACHEOPS_SCHEMA(vs): return {
         {"f-1": f'v-{vs[2]}'}, {"f-2": f'v-{vs[3]}'}
     ]
 }
-
 
 """
 Test the main caching script of https://github.com/Suor/django-cacheops.
@@ -177,7 +177,6 @@ async def test_golang_asynq_script(async_pool, num_queues=10, num_tasks=100):
     jobs = [asyncio.create_task(enqueue_worker(
         f"q-{queue}")) for queue in range(num_queues)]
 
-
     collected = 0
 
     async def dequeue_worker():
@@ -202,20 +201,24 @@ async def test_golang_asynq_script(async_pool, num_queues=10, num_tasks=100):
     for job in jobs:
         await job
 
-ERROR_CALL_SCRIPT = """
-redis.call('ECHO', 'I', 'want', 'an', 'error')
-"""
 
-ERROR_PCALL_SCRIPT = """
-redis.pcall('ECHO', 'I', 'want', 'an', 'error')
-"""
+ERROR_CALL_SCRIPT_TEMPLATE = [
+    "redis.{}('LTRIM', 'l', 'a', 'b')",  # error only on evaluation
+    "redis.{}('obviously wrong')"  # error immediately on preprocessing
+]
 
+
+@dfly_args({"proactor_threads": 1})
 @pytest.mark.asyncio
 async def test_eval_error_propagation(async_client):
-    assert await async_client.eval(ERROR_PCALL_SCRIPT, 0) is None
+    CMDS = ['call', 'pcall', 'acall', 'apcall']
 
-    try:
-        await async_client.eval(ERROR_CALL_SCRIPT, 0)
-        assert False, "Eval must have thrown an error"
-    except aioredis.RedisError as e:
-        pass
+    for cmd, template in itertools.product(CMDS, ERROR_CALL_SCRIPT_TEMPLATE):
+        does_abort = 'p' not in cmd
+        try:
+            await async_client.eval(template.format(cmd), 1, 'l')
+            if does_abort:
+                assert False, "Eval must have thrown an error: " + cmd
+        except aioredis.RedisError as e:
+            if not does_abort:
+                assert False, "Error should have been ignored: " + cmd

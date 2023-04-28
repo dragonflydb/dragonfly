@@ -225,4 +225,10 @@ TEST_F(HSetFamilyTest, TriggerConvertToStrMap) {
   EXPECT_THAT(Run({"HLEN", "hk"}), IntArg(kElements));
 }
 
+TEST_F(HSetFamilyTest, Issue1140) {
+  Run({"HSET", "CaseKey", "Foo", "Bar"});
+
+  EXPECT_EQ("Bar", Run({"HGET", "CaseKey", "Foo"}));
+}
+
 }  // namespace dfly

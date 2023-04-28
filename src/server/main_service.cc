@@ -42,9 +42,12 @@ extern "C" {
 #include "util/varz.h"
 
 using namespace std;
+using dfly::operator""_KB;
 
 ABSL_FLAG(uint32_t, port, 6379, "Redis port");
 ABSL_FLAG(uint32_t, memcache_port, 0, "Memcached port");
+
+ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose automatically");
 
 ABSL_FLAG(uint32_t, multi_exec_mode, 1,
           "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for non atomic");
@@ -52,7 +55,7 @@ ABSL_FLAG(uint32_t, multi_exec_mode, 1,
 ABSL_FLAG(bool, multi_exec_squash, true,
           "Whether multi exec will squash single shard commands to optimize performance");
 
-ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose automatically");
+ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4_KB, "Max buffer for squashed commands per script");
 
 namespace dfly {
 
@@ -155,7 +158,7 @@ std::string MakeMonitorMessage(const ConnectionState& conn_state,
                                const facade::Connection* connection, CmdArgList args) {
   std::string message = absl::StrCat(CreateMonitorTimestamp(), " [", conn_state.db_index);
 
-  if (conn_state.script_info.has_value()) {
+  if (conn_state.script_info) {
     absl::StrAppend(&message, " lua] ");
   } else {
     auto endpoint = connection == nullptr ? "REPLICATION:0" : connection->RemoteEndpointStr();
@@ -599,7 +602,7 @@ bool Service::VerifyCommand(const CommandId* cid, CmdArgList args,
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
 
   bool is_trans_cmd = (cmd_str == "EXEC" || cmd_str == "MULTI" || cmd_str == "DISCARD");
-  bool under_script = dfly_cntx->conn_state.script_info.has_value();
+  bool under_script = bool(dfly_cntx->conn_state.script_info);
 
   absl::Cleanup multi_error([dfly_cntx] { SetMultiExecErrorFlag(dfly_cntx); });
 
@@ -703,12 +706,13 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   ToUpper(&args[0]);
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
-  bool under_script = dfly_cntx->conn_state.script_info.has_value();
+  bool under_script = bool(dfly_cntx->conn_state.script_info);
 
   if (VLOG_IS_ON(2) &&
       cntx->owner()) {  // owner may not exists in case of this being called from replica context
     const char* lua = under_script ? "LUA " : "";
-    LOG(INFO) << "Got (" << cntx->owner()->GetClientId() << "): " << lua << args;
+    LOG(INFO) << "Got (" << cntx->owner()->GetClientId() << "): " << lua << args
+              << " in dbid=" << dfly_cntx->conn_state.db_index;
   }
 
   string_view cmd_str = ArgS(args, 0);
@@ -1016,61 +1020,68 @@ void Service::Unwatch(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendOk();
 }
 
-template <typename F> void WithoutReplies(ConnectionContext* cntx, F&& f) {
-  io::NullSink null_sink;
-  facade::RedisReplyBuilder rrb{&null_sink};
-  auto* old_rrb = cntx->Inject(&rrb);
-
+template <typename F> void WithReplies(CapturingReplyBuilder* crb, ConnectionContext* cntx, F&& f) {
+  SinkReplyBuilder* old_rrb = nullptr;
+  old_rrb = cntx->Inject(crb);
   f();
-
   cntx->Inject(old_rrb);
 }
 
-void Service::FlushEvalAsyncCmds(ConnectionContext* cntx, bool force) {
-  const int kMaxAsyncCmds = 100;
-
+optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionContext* cntx,
+                                                                     bool force) {
   auto& info = cntx->conn_state.script_info;
 
-  if ((!force && info->async_cmds.size() <= kMaxAsyncCmds) || info->async_cmds.empty())
-    return;
+  size_t used_mem = info->async_cmds_heap_mem + info->async_cmds.size() * sizeof(StoredCmd);
+  if ((info->async_cmds.empty() || !force) && used_mem < info->async_cmds_heap_limit)
+    return nullopt;
 
   auto* eval_cid = registry_.Find("EVAL");
   DCHECK(eval_cid);
   cntx->transaction->MultiSwitchCmd(eval_cid);
 
-  WithoutReplies(cntx,
-                 [&] { MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), cntx); });
+  CapturingReplyBuilder crb{ReplyMode::ONLY_ERR};
+  WithReplies(&crb, cntx,
+              [&] { MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), cntx, true); });
 
+  info->async_cmds_heap_mem = 0;
   info->async_cmds.clear();
+
+  auto reply = move(crb.Take());
+  return CapturingReplyBuilder::GetError(reply) ? make_optional(move(reply)) : nullopt;
 }
 
 void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca) {
   DCHECK(cntx->transaction);
   DVLOG(1) << "CallFromScript " << cntx->transaction->DebugId() << " " << ArgS(ca.args, 0);
 
+  InterpreterReplier replier(ca.translator);
+  facade::SinkReplyBuilder* orig = cntx->Inject(&replier);
+  absl::Cleanup clean = [orig, cntx] { cntx->Inject(orig); };
+
   if (ca.async) {
     auto& info = cntx->conn_state.script_info;
+
+    ToUpper(&ca.args[0]);
     auto* cid = registry_.Find(facade::ToSV(ca.args[0]));
 
-    bool valid = true;
-    WithoutReplies(cntx, [&] { valid = VerifyCommand(cid, ca.args, cntx); });
-
-    if (!valid)  // TODO: collect errors with capturing reply builder.
+    if (!VerifyCommand(cid, ca.args, cntx))
       return;
 
-    info->async_cmds.emplace_back(move(*ca.buffer), cid, ca.args.subspan(1));
-    FlushEvalAsyncCmds(cntx, false);
+    auto replies = ca.error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
+    info->async_cmds.emplace_back(move(*ca.buffer), cid, ca.args.subspan(1), replies);
+    info->async_cmds_heap_mem += info->async_cmds.back().UsedHeapMemory();
+  }
+
+  if (auto err = FlushEvalAsyncCmds(cntx, !ca.async); err) {
+    CapturingReplyBuilder::Apply(move(*err), &replier);  // forward error to lua
+    *ca.requested_abort = true;
     return;
   }
 
-  FlushEvalAsyncCmds(cntx, true);
-
-  InterpreterReplier replier(ca.translator);
-  facade::SinkReplyBuilder* orig = cntx->Inject(&replier);
+  if (ca.async)
+    return;
 
   DispatchCommand(ca.args, cntx);
-
-  cntx->Inject(orig);
 }
 
 void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
@@ -1209,10 +1220,12 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   // TODO: to determine whether the script is RO by scanning all "redis.p?call" calls
   // and checking whether all invocations consist of RO commands.
   // we can do it once during script insertion into script mgr.
-  cntx->conn_state.script_info.emplace(ConnectionState::ScriptInfo{});
+  auto& sinfo = cntx->conn_state.script_info;
+  sinfo.reset(new ConnectionState::ScriptInfo{});
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
-    cntx->conn_state.script_info->keys.insert(ArgS(eval_args.keys, i));
+    sinfo->keys.insert(ArgS(eval_args.keys, i));
   }
+  sinfo->async_cmds_heap_limit = absl::GetFlag(FLAGS_multi_eval_squash_buffer);
   DCHECK(cntx->transaction);
 
   bool scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, *params, cntx->transaction);
@@ -1224,7 +1237,11 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
   Interpreter::RunResult result = interpreter->RunFunction(eval_args.sha, &error);
   absl::Cleanup clean = [interpreter]() { interpreter->ResetStack(); };
 
-  FlushEvalAsyncCmds(cntx, true);
+  if (auto err = FlushEvalAsyncCmds(cntx, true); err) {
+    auto err_ref = CapturingReplyBuilder::GetError(*err);
+    result = Interpreter::RUN_ERR;
+    error = absl::StrCat(err_ref->first);
+  }
 
   cntx->conn_state.script_info.reset();  // reset script_info
 
@@ -1447,6 +1464,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
 void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
   string_view channel = ArgS(args, 0);
+  string_view msg = ArgS(args, 1);
 
   auto* cs = ServerState::tlocal()->channel_store();
   vector<ChannelStore::Subscriber> subscribers = cs->FetchSubscribers(channel);
@@ -1454,17 +1472,18 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
 
   if (!subscribers.empty()) {
     auto subscribers_ptr = make_shared<decltype(subscribers)>(move(subscribers));
-    auto msg_ptr = make_shared<string>(ArgS(args, 1));
-    auto channel_ptr = make_shared<string>(channel);
+    auto buf = shared_ptr<char[]>{new char[channel.size() + msg.size()]};
+    memcpy(buf.get(), channel.data(), channel.size());
+    memcpy(buf.get() + channel.size(), msg.data(), msg.size());
 
-    auto cb = [subscribers_ptr, msg_ptr, channel_ptr](unsigned idx, util::ProactorBase*) {
+    auto cb = [subscribers_ptr, buf, channel, msg](unsigned idx, util::ProactorBase*) {
       auto it = lower_bound(subscribers_ptr->begin(), subscribers_ptr->end(), idx,
                             ChannelStore::Subscriber::ByThread);
 
       while (it != subscribers_ptr->end() && it->thread_id == idx) {
         facade::Connection* conn = it->conn_cntx->owner();
         DCHECK(conn);
-        conn->SendPubMessageAsync({move(it->pattern), move(channel_ptr), move(msg_ptr)});
+        conn->SendPubMessageAsync({move(it->pattern), move(buf), channel.size(), msg.size()});
         it->borrow_token.Dec();
         it++;
       }

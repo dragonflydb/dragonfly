@@ -43,7 +43,12 @@ class Interpreter {
 
     ObjectExplorer* translator;
 
-    bool async;  // async by redis.acall
+    bool async;        // async by acall
+    bool error_abort;  // abort on errors (not pcall)
+
+    // The function can request an abort due to an error, even if error_abort is false.
+    // It happens when async cmds are flushed and result in an uncatched error.
+    bool* requested_abort;
   };
 
   using RedisFunc = std::function<void(CallArgs)>;
@@ -112,10 +117,12 @@ class Interpreter {
   bool IsTableSafe() const;
 
   int RedisGenericCommand(bool raise_error, bool async);
+  int RedisACallErrorsCommand();
 
   static int RedisCallCommand(lua_State* lua);
   static int RedisPCallCommand(lua_State* lua);
   static int RedisACallCommand(lua_State* lua);
+  static int RedisAPCallCommand(lua_State* lua);
 
   lua_State* lua_;
   unsigned cmd_depth_ = 0;

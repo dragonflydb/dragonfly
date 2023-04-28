@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "facade/reply_capture.h"
 #include "server/journal/types.h"
 
 namespace dfly {
@@ -14,6 +15,10 @@ class Service;
 class JournalExecutor {
  public:
   JournalExecutor(Service* service);
+  ~JournalExecutor();
+
+  JournalExecutor(JournalExecutor&&) = delete;
+
   void Execute(DbIndex dbid, std::vector<journal::ParsedEntry::CmdData>& cmds);
   void Execute(DbIndex dbid, journal::ParsedEntry::CmdData& cmd);
 
@@ -26,8 +31,8 @@ class JournalExecutor {
   void SelectDb(DbIndex dbid);
 
   Service* service_;
+  facade::CapturingReplyBuilder reply_builder_;
   ConnectionContext conn_context_;
-  io::NullSink null_sink_;
 
   std::vector<bool> ensured_dbs_;
 };

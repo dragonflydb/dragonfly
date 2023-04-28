@@ -15,8 +15,7 @@ jobs:
         # Test of these containers
         container: ["ubuntu-dev:20"]
         build-type: [Debug, Release]
-        # TODO: To bring back [self-hosted, linux, ARM64] once we stabilize the tests.
-        runner: [ubuntu-latest]
+        runner: [ubuntu-latest, [self-hosted, linux, ARM64]]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
 

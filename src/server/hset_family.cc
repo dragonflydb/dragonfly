@@ -612,6 +612,7 @@ struct OpSetParams {
 OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList values,
                          const OpSetParams& op_sp = OpSetParams{}) {
   DCHECK(!values.empty() && 0 == values.size() % 2);
+  VLOG(2) << "OpSet(" << key << ")";
 
   auto& db_slice = op_args.shard->db_slice();
   pair<PrimeIterator, bool> add_res;
@@ -954,10 +955,11 @@ void HSetFamily::HScan(CmdArgList args, ConnectionContext* cntx) {
 
 void HSetFamily::HSet(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
-  ToLower(&args[0]);
+
+  string_view cmd{cntx->cid->name()};
 
   if (args.size() % 2 != 1) {
-    return (*cntx)->SendError(facade::WrongNumArgsError("hset"), kSyntaxErrType);
+    return (*cntx)->SendError(facade::WrongNumArgsError(cmd), kSyntaxErrType);
   }
 
   args.remove_prefix(1);
@@ -966,7 +968,6 @@ void HSetFamily::HSet(CmdArgList args, ConnectionContext* cntx) {
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  string_view cmd{cntx->cid->name()};
 
   if (result && cmd == "HSET") {
     (*cntx)->SendLong(*result);

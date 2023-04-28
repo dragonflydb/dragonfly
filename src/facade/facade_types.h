@@ -21,6 +21,10 @@ inline std::string_view ToSV(MutableSlice slice) {
   return std::string_view{slice.data(), slice.size()};
 }
 
+inline std::string_view ToSV(std::string_view slice) {
+  return slice;
+}
+
 struct CmdArgListFormatter {
   void operator()(std::string* out, MutableSlice arg) const {
     out->append(absl::StrCat("`", std::string_view(arg.data(), arg.size()), "`"));
