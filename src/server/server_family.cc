@@ -1757,16 +1757,61 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   // If no arguments are provided default to RESP2.
-  // AUTH and SETNAME options are not supported.
   bool is_resp3 = false;
+  bool has_auth = false;
+  bool has_setname = false;
+  string_view username;
+  string_view password;
+  string_view clientname;
+
   if (args.size() > 0) {
     string_view proto_version = ArgS(args, 0);
     is_resp3 = proto_version == "3";
     bool valid_proto_version = proto_version == "2" || is_resp3;
-    if (!valid_proto_version || args.size() > 1) {
+    if (!valid_proto_version) {
       (*cntx)->SendError(UnknownCmd("HELLO", args));
       return;
     }
+
+    for (uint32_t i = 1; i < args.size(); i++) {
+      auto sub_cmd = ArgS(args, i);
+      auto moreargs = args.size() - 1 - i;
+      if (absl::EqualsIgnoreCase(sub_cmd, "AUTH") && moreargs >= 2) {
+        has_auth = true;
+        username = ArgS(args, i + 1);
+        password = ArgS(args, i + 2);
+        i += 2;
+      } else if (absl::EqualsIgnoreCase(sub_cmd, "SETNAME") && moreargs > 0) {
+        has_setname = true;
+        clientname = ArgS(args, i + 1);
+        i += 1;
+      } else {
+        (*cntx)->SendError(kSyntaxErr);
+        return;
+      }
+    }
+  }
+
+  if (has_auth) {
+    if (username == "default" && password == GetPassword()) {
+      cntx->authenticated = true;
+    } else {
+      (*cntx)->SendError(facade::kAuthRejected);
+      return;
+    }
+  }
+
+  if (cntx->req_auth && !cntx->authenticated) {
+    (*cntx)->SendError(
+        "-NOAUTH HELLO must be called with the client already "
+        "authenticated, otherwise the HELLO <proto> AUTH <user> <pass> "
+        "option can be used to authenticate the client and "
+        "select the RESP protocol version at the same time");
+    return;
+  }
+
+  if (has_setname) {
+    cntx->owner()->SetName(string{clientname});
   }
 
   int proto_version = 2;

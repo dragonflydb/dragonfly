@@ -625,7 +625,7 @@ bool Service::VerifyCommand(const CommandId* cid, CmdArgList args,
   string_view cmd_name{cid->name()};
 
   if (cntx->req_auth && !cntx->authenticated) {
-    if (cmd_name != "AUTH" && cmd_name != "QUIT") {
+    if (cmd_name != "AUTH" && cmd_name != "QUIT" && cmd_name != "HELLO") {
       (*cntx)->SendError("-NOAUTH Authentication required.");
       return false;
     }
