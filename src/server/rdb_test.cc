@@ -346,4 +346,30 @@ TEST_F(RdbTest, JsonTest) {
   }
 }
 
+// hll.rdb has 2 keys: "key-dense" and "key-sparse", both are HLL with a single added value "1".
+class HllRdbTest : public RdbTest, public testing::WithParamInterface<string> {};
+
+TEST_P(HllRdbTest, Hll) {
+  io::FileSource fs = GetSource("hll.rdb");
+  RdbLoader loader{service_.get()};
+
+  // must run in proactor thread in order to avoid polluting the serverstate
+  // in the main, testing thread.
+  auto ec = pp_->at(0)->Await([&] { return loader.Load(&fs); });
+
+  ASSERT_FALSE(ec) << ec.message();
+
+  EXPECT_EQ(CheckedInt({"pfcount", GetParam()}), 1);
+
+  EXPECT_EQ(CheckedInt({"pfcount", GetParam(), "non-existing"}), 1);
+
+  EXPECT_EQ(CheckedInt({"pfadd", "key2", "2"}), 1);
+  EXPECT_EQ(CheckedInt({"pfcount", GetParam(), "key2"}), 2);
+
+  EXPECT_EQ(CheckedInt({"pfadd", GetParam(), "2"}), 1);
+  EXPECT_EQ(CheckedInt({"pfcount", GetParam()}), 2);
+}
+
+INSTANTIATE_TEST_SUITE_P(HllRdbTest, HllRdbTest, Values("key-sparse", "key-dense"));
+
 }  // namespace dfly

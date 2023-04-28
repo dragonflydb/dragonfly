@@ -48,15 +48,15 @@ template <typename T> void HandleOpValueResult(const OpResult<T>& result, Connec
   }
 }
 
-HllBufferPtr StringToHllPtr(string* hll) {
-  return {.hll = (unsigned char*)hll->data(), .size = hll->size()};
+HllBufferPtr StringToHllPtr(string_view hll) {
+  return {.hll = (unsigned char*)hll.data(), .size = hll.size()};
 }
 
 void ConvertToDenseIfNeeded(string* hll) {
-  if (isValidHLL(StringToHllPtr(hll)) == HLL_VALID_SPARSE) {
+  if (isValidHLL(StringToHllPtr(*hll)) == HLL_VALID_SPARSE) {
     string new_hll;
     new_hll.resize(getDenseHllSize());
-    int result = convertSparseToDenseHll(StringToHllPtr(hll), StringToHllPtr(&new_hll));
+    int result = convertSparseToDenseHll(StringToHllPtr(*hll), StringToHllPtr(new_hll));
     DCHECK_EQ(result, 0);
     *hll = std::move(new_hll);
   }
@@ -71,7 +71,7 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
     auto [it, inserted] = db_slice.AddOrFind(op_args.db_cntx, key);
     if (inserted) {
       hll.resize(getDenseHllSize());
-      createDenseHll(StringToHllPtr(&hll));
+      createDenseHll(StringToHllPtr(hll));
     } else if (it->second.ObjType() != OBJ_STRING) {
       return OpStatus::WRONG_TYPE;
     } else {
@@ -81,7 +81,7 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
 
     int updated = 0;
     for (const auto& value : values) {
-      int added = pfadd(StringToHllPtr(&hll), (unsigned char*)value.data(), value.size());
+      int added = pfadd(StringToHllPtr(hll), (unsigned char*)value.data(), value.size());
       if (added < 0) {
         return OpStatus::INVALID_VALUE;
       }
@@ -117,19 +117,24 @@ OpResult<int64_t> CountHllsSingle(const OpArgs& op_args, string_view key) {
   OpResult<PrimeIterator> it = db_slice.Find(op_args.db_cntx, key, OBJ_STRING);
   if (it.ok()) {
     string hll;
-    // TODO: We should provide a GetView() method in compact object to avoid some allocations:
-    // string_view GetView(string& scratch);
-    it.value()->second.GetString(&hll);
+    string_view hll_view = it.value()->second.GetSlice(&hll);
 
-    // Even in the case of a read - we still want to convert the hll to dense format, as it could
-    // originate in Redis (like in replication or rdb load).
-    ConvertToDenseIfNeeded(&hll);
-
-    if (isValidHLL(StringToHllPtr(&hll)) != HLL_VALID_DENSE) {
-      return OpStatus::INVALID_VALUE;
+    switch (isValidHLL(StringToHllPtr(hll_view))) {
+      case HLL_VALID_DENSE:
+        break;
+      case HLL_VALID_SPARSE:
+        // Even in the case of a read - we still want to convert the hll to dense format, as it
+        // could originate in Redis (like in replication or rdb load).
+        hll = hll_view;
+        ConvertToDenseIfNeeded(&hll);
+        hll_view = hll;
+        break;
+      case HLL_INVALID:
+      default:
+        return OpStatus::INVALID_VALUE;
     }
 
-    return pfcountSingle(StringToHllPtr(&hll));
+    return pfcountSingle(StringToHllPtr(hll_view));
   } else if (it.status() == OpStatus::WRONG_TYPE) {
     return it.status();
   } else {
@@ -147,7 +152,7 @@ vector<OpResult<string>> ReadValues(const OpArgs& op_args, ArgSlice keys) {
       string hll;
       it.value()->second.GetString(&hll);
       ConvertToDenseIfNeeded(&hll);
-      if (isValidHLL(StringToHllPtr(&hll)) != HLL_VALID_DENSE) {
+      if (isValidHLL(StringToHllPtr(hll)) != HLL_VALID_DENSE) {
         values.push_back(OpStatus::INVALID_VALUE);
       } else {
         values.push_back(std::move(hll));
@@ -180,7 +185,7 @@ OpResult<int64_t> PFCountMulti(CmdArgList args, ConnectionContext* cntx) {
       if (!hll.ok()) {
         return hll.status();
       }
-      ptrs.push_back(StringToHllPtr(&hll.value()));
+      ptrs.push_back(StringToHllPtr(hll.value()));
     }
   }
   int64_t pf_count = pfcountMulti(ptrs.data(), ptrs.size());

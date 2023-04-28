@@ -40,7 +40,7 @@ cxx_test(stream_family_test dfly_test_lib LABELS DFLY)
 cxx_test(string_family_test dfly_test_lib LABELS DFLY)
 cxx_test(bitops_family_test dfly_test_lib LABELS DFLY)
 cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/redis6_small.rdb
-         testdata/redis6_stream.rdb LABELS DFLY)
+         testdata/redis6_stream.rdb testdata/hll.rdb LABELS DFLY)
 cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
 cxx_test(blocking_controller_test dragonfly_lib LABELS DFLY)
 cxx_test(snapshot_test dragonfly_lib LABELS DFLY)
