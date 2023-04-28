@@ -76,6 +76,14 @@ template <typename V> class OpResult : public OpResultBase {
     return status() == OpStatus::OK ? v_ : v;
   }
 
+  V* operator->() {
+    return &v_;
+  }
+
+  V& operator*() {
+    return v_;
+  }
+
   const V* operator->() const {
     return &v_;
   }
