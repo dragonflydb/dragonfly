@@ -25,6 +25,7 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/error.h"
 #include "server/generic_family.h"
+#include "server/hll_family.h"
 #include "server/hset_family.h"
 #include "server/json_family.h"
 #include "server/list_family.h"
@@ -1679,6 +1680,7 @@ void Service::RegisterCommands() {
   ZSetFamily::Register(&registry_);
   JsonFamily::Register(&registry_);
   BitOpsFamily::Register(&registry_);
+  HllFamily::Register(&registry_);
 
   server_family_.Register(&registry_);
 
