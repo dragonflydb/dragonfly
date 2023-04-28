@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <string>
+#include <string_view>
 
 #include "core/dense_set.h"
 
