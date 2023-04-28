@@ -235,11 +235,17 @@ TEST_F(DflyEngineTest, Hello) {
                           ArgType(RespExpr::STRING), "proto", IntArg(3), "id",
                           ArgType(RespExpr::INT64), "mode", "standalone", "role", "master"));
 
-  // These are valid arguments to HELLO, however as they are not yet supported the implementation
-  // is degraded to 'unknown command'.
-  EXPECT_THAT(
-      Run({"hello", "2", "AUTH", "uname", "pwd"}),
-      ErrArg("ERR unknown command 'HELLO' with args beginning with: `2`, `AUTH`, `uname`, `pwd`"));
+  EXPECT_THAT(Run({"hello", "2", "AUTH", "uname", "pwd"}),
+              ErrArg("WRONGPASS invalid username-password pair or user is disabled."));
+
+  EXPECT_THAT(Run({"hello", "2", "AUTH", "default", "pwd"}),
+              ErrArg("WRONGPASS invalid username-password pair or user is disabled."));
+
+  resp = Run({"hello", "3", "AUTH", "default", ""});
+  ASSERT_THAT(resp, ArrLen(14));
+
+  resp = Run({"hello", "3", "AUTH", "default", "", "SETNAME", "myname"});
+  ASSERT_THAT(resp, ArrLen(14));
 }
 
 TEST_F(DflyEngineTest, Memcache) {
