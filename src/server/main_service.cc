@@ -1470,6 +1470,15 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
   int num_published = subscribers.size();
 
   if (!subscribers.empty()) {
+    // Make sure neither of the subscribers buffers is filled up.
+    // This check actually doesn't reserve any memory ahead and doesn't prevent the buffer
+    // from eventually filling up, especially if multiple clients are unblocked simultaneously
+    // but is generally good enough to limit too fast producers.
+    // Most importantly, this approach allows not blocking and not awaiting in the dispatch below,
+    // thus not adding any overhead to backpressure checks.
+    for (auto& sub : subscribers)
+      sub.conn_cntx->owner()->EnsureAsyncMemoryBudget();
+
     auto subscribers_ptr = make_shared<decltype(subscribers)>(move(subscribers));
     auto buf = shared_ptr<char[]>{new char[channel.size() + msg.size()]};
     memcpy(buf.get(), channel.data(), channel.size());
