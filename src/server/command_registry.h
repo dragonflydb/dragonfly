@@ -39,6 +39,13 @@ enum CommandOpt : uint32_t {
 
 const char* OptName(CommandOpt fl);
 
+constexpr inline bool IsEvalKind(std::string_view name) {
+  return name.compare(0, 4, "EVAL") == 0;
+}
+
+static_assert(IsEvalKind("EVAL") && IsEvalKind("EVALSHA"));
+static_assert(!IsEvalKind(""));
+
 };  // namespace CO
 
 class CommandId {
