@@ -16,11 +16,6 @@ using namespace util;
 
 namespace dfly {
 
-// This is a representation of hll with sparse encoding, retrieved via pfadd-ing "1" in Redis.
-const string_view kSparseHll =
-    "HYLL\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80]f\x80"
-    "b\x97"sv;
-
 class HllFamilyTest : public BaseFamilyTest {
  protected:
 };
@@ -100,8 +95,19 @@ TEST_F(HllFamilyTest, CountMultiple) {
   EXPECT_EQ(CheckedInt({"pfcount", "key1", "key4"}), 5);
 }
 
-TEST_F(HllFamilyTest, WorkWithSparseEncoding) {
-  EXPECT_EQ(Run({"set", "key1", kSparseHll}), "OK");
+class HllFamilyTestEncoding : public HllFamilyTest, public testing::WithParamInterface<string> {};
+
+// This is a representation of hll with sparse encoding, retrieved via pfadd-ing "1" in Redis.
+const string_view kSparseEncodedHll =
+    "HYLL\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80]f\x80"
+    "b\x97"sv;
+
+const string_view kDenseEncodedHll =
+    "HYLL\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80]f\x80"
+    "b\x97"sv;
+
+TEST_P(HllFamilyTestEncoding, WorkWithRedisEncoding) {
+  EXPECT_EQ(Run({"set", "key1", GetParam()}), "OK");
   EXPECT_EQ(CheckedInt({"pfcount", "key1"}), 1);
 
   EXPECT_EQ(CheckedInt({"pfcount", "key1", "non-existing"}), 1);
@@ -113,4 +119,6 @@ TEST_F(HllFamilyTest, WorkWithSparseEncoding) {
   EXPECT_EQ(CheckedInt({"pfcount", "key1"}), 2);
 }
 
+INSTANTIATE_TEST_SUITE_P(HllFamilyTestEncoding, HllFamilyTestEncoding,
+                         Values(kDenseEncodedHll, kSparseEncodedHll));
 }  // namespace dfly
