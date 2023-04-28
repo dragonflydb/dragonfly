@@ -48,17 +48,17 @@ template <typename T> void HandleOpValueResult(const OpResult<T>& result, Connec
   }
 }
 
-HllBufferPtr StringToHllPtr(string& hll) {
-  return {.hll = (unsigned char*)hll.data(), .size = hll.size()};
+HllBufferPtr StringToHllPtr(string* hll) {
+  return {.hll = (unsigned char*)hll->data(), .size = hll->size()};
 }
 
-void ConvertToDenseIfNeeded(string& hll) {
+void ConvertToDenseIfNeeded(string* hll) {
   if (isValidHLL(StringToHllPtr(hll)) == HLL_VALID_SPARSE) {
     string new_hll;
     new_hll.resize(getDenseHllSize());
-    int result = convertSparseToDenseHll(StringToHllPtr(hll), StringToHllPtr(new_hll));
+    int result = convertSparseToDenseHll(StringToHllPtr(hll), StringToHllPtr(&new_hll));
     DCHECK_EQ(result, 0);
-    hll = std::move(new_hll);
+    *hll = std::move(new_hll);
   }
 }
 
@@ -71,17 +71,17 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
     auto [it, inserted] = db_slice.AddOrFind(op_args.db_cntx, key);
     if (inserted) {
       hll.resize(getDenseHllSize());
-      createDenseHll(StringToHllPtr(hll));
+      createDenseHll(StringToHllPtr(&hll));
     } else if (it->second.ObjType() != OBJ_STRING) {
       return OpStatus::WRONG_TYPE;
     } else {
       it->second.GetString(&hll);
-      ConvertToDenseIfNeeded(hll);
+      ConvertToDenseIfNeeded(&hll);
     }
 
     int updated = 0;
     for (const auto& value : values) {
-      int added = pfadd(StringToHllPtr(hll), (unsigned char*)value.data(), value.size());
+      int added = pfadd(StringToHllPtr(&hll), (unsigned char*)value.data(), value.size());
       if (added < 0) {
         return OpStatus::INVALID_VALUE;
       }
@@ -117,12 +117,19 @@ OpResult<int64_t> CountHllsSingle(const OpArgs& op_args, string_view key) {
   OpResult<PrimeIterator> it = db_slice.Find(op_args.db_cntx, key, OBJ_STRING);
   if (it.ok()) {
     string hll;
+    // TODO: We should provide a GetView() method in compact object to avoid some allocations:
+    // string_view GetView(string& scratch);
     it.value()->second.GetString(&hll);
-    ConvertToDenseIfNeeded(hll);
-    if (isValidHLL(StringToHllPtr(hll)) != HLL_VALID_DENSE) {
+
+    // Even in the case of a read - we still want to convert the hll to dense format, as it could
+    // originate in Redis (like in replication or rdb load).
+    ConvertToDenseIfNeeded(&hll);
+
+    if (isValidHLL(StringToHllPtr(&hll)) != HLL_VALID_DENSE) {
       return OpStatus::INVALID_VALUE;
     }
-    return pfcountSingle(StringToHllPtr(hll));
+
+    return pfcountSingle(StringToHllPtr(&hll));
   } else if (it.status() == OpStatus::WRONG_TYPE) {
     return it.status();
   } else {
@@ -131,18 +138,16 @@ OpResult<int64_t> CountHllsSingle(const OpArgs& op_args, string_view key) {
   }
 }
 
-void ReadValues(const OpArgs& op_args, ArgSlice keys, vector<OpResult<string>>& values) {
-  auto& db_slice = op_args.shard->db_slice();
-
-  vector<string> hlls;
-  hlls.reserve(keys.size());
+vector<OpResult<string>> ReadValues(const OpArgs& op_args, ArgSlice keys) {
+  vector<OpResult<string>> values;
   for (size_t i = 0; i < keys.size(); ++i) {
-    OpResult<PrimeIterator> it = db_slice.Find(op_args.db_cntx, keys[i], OBJ_STRING);
+    OpResult<PrimeIterator> it =
+        op_args.shard->db_slice().Find(op_args.db_cntx, keys[i], OBJ_STRING);
     if (it.ok()) {
       string hll;
       it.value()->second.GetString(&hll);
-      ConvertToDenseIfNeeded(hll);
-      if (isValidHLL(StringToHllPtr(hll)) != HLL_VALID_DENSE) {
+      ConvertToDenseIfNeeded(&hll);
+      if (isValidHLL(StringToHllPtr(&hll)) != HLL_VALID_DENSE) {
         values.push_back(OpStatus::INVALID_VALUE);
       } else {
         values.push_back(std::move(hll));
@@ -151,18 +156,17 @@ void ReadValues(const OpArgs& op_args, ArgSlice keys, vector<OpResult<string>>& 
       values.push_back(OpStatus::WRONG_TYPE);
     }
   }
+  return values;
 }
 
 OpResult<int64_t> PFCountMulti(CmdArgList args, ConnectionContext* cntx) {
-  vector<OpResult<string>> hlls;
-  hlls.reserve(args.size());
-
-  Mutex mu;  // Guards `hlls`
+  vector<vector<OpResult<string>>> hlls;
+  hlls.resize(shard_set->size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
+    ShardId sid = shard->shard_id();
     ArgSlice shard_args = t->GetShardArgs(shard->shard_id());
-    lock_guard guard(mu);
-    ReadValues(t->GetOpArgs(shard), shard_args, hlls);
+    hlls[sid] = ReadValues(t->GetOpArgs(shard), shard_args);
     return OpStatus::OK;
   };
 
@@ -171,11 +175,13 @@ OpResult<int64_t> PFCountMulti(CmdArgList args, ConnectionContext* cntx) {
 
   vector<HllBufferPtr> ptrs;
   ptrs.reserve(hlls.size());
-  for (auto& hll : hlls) {
-    if (!hll.ok()) {
-      return hll.status();
+  for (auto& shard_hlls : hlls) {
+    for (auto& hll : shard_hlls) {
+      if (!hll.ok()) {
+        return hll.status();
+      }
+      ptrs.push_back(StringToHllPtr(&hll.value()));
     }
-    ptrs.push_back(StringToHllPtr(hll.value()));
   }
   int64_t pf_count = pfcountMulti(ptrs.data(), ptrs.size());
   if (pf_count < 0) {

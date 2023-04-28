@@ -17,10 +17,9 @@ using namespace util;
 namespace dfly {
 
 // This is a representation of hll with sparse encoding, retrieved via pfadd-ing "1" in Redis.
-const char kSparseHllRaw[] =
+const string_view kSparseHll =
     "HYLL\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80]f\x80"
-    "b\x97";
-const string_view kSparseHll(kSparseHllRaw, size(kSparseHllRaw) - 1);
+    "b\x97"sv;
 
 class HllFamilyTest : public BaseFamilyTest {
  protected:
