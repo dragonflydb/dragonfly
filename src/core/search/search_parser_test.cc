@@ -47,6 +47,16 @@ class SearchParserTest : public ::testing::Test {
     auto tok = Lex();                                   \
     ASSERT_EQ(tok.type_get(), Parser::token::tok_enum); \
   }
+#define NEXT_ERROR()                          \
+  {                                           \
+    bool caught = false;                      \
+    try {                                     \
+      auto tok = Lex();                       \
+    } catch (const Parser::syntax_error& e) { \
+      caught = true;                          \
+    }                                         \
+    ASSERT_TRUE(caught);                      \
+  }
 
 TEST_F(SearchParserTest, Scanner) {
   SetInput("ab cd");
@@ -76,10 +86,18 @@ TEST_F(SearchParserTest, Scanner) {
   SetInput("почтальон Печкин");
   NEXT_EQ(TOK_TERM, string, "почтальон");
   NEXT_EQ(TOK_TERM, string, "Печкин");
+
+  SetInput("18446744073709551616");
+  NEXT_ERROR();
 }
 
 TEST_F(SearchParserTest, Parse) {
-  EXPECT_EQ(0, Parse(" foo "));
+  EXPECT_EQ(0, Parse(" foo bar (baz) "));
+  EXPECT_EQ(0, Parse(" -(foo) @foo:bar @ss:[1 2]"));
+  EXPECT_EQ(1, Parse(" -(foo "));
+  EXPECT_EQ(1, Parse(" foo:bar "));
+  EXPECT_EQ(1, Parse(" @foo:@bar "));
+  EXPECT_EQ(1, Parse(" @foo: "));
 }
 
 }  // namespace search

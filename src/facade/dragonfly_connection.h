@@ -116,7 +116,7 @@ class Connection : public util::Connection {
   using PubMessagePtr = std::unique_ptr<PubMessage, MessageDeleter>;
 
   struct MessageHandle {
-    size_t StorageCapacity() const;
+    size_t UsedMemory() const;  // How much bytes this handle takes up in total.
 
     bool IsPipelineMsg() const;
 
@@ -132,6 +132,10 @@ class Connection : public util::Connection {
 
   // Add monitor message to dispatch queue.
   void SendMonitorMessageAsync(std::string);
+
+  // Must be called before Send_Async to ensure the connection dispatch queue is not overfilled.
+  // Blocks until free space is available.
+  void EnsureAsyncMemoryBudget();
 
   // Register hook that is executed on connection shutdown.
   ShutdownHandle RegisterShutdownHook(ShutdownCb cb);
@@ -212,6 +216,9 @@ class Connection : public util::Connection {
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   dfly::EventCount evc_;                  // dispatch queue waker
 
+  std::atomic_uint64_t dispatch_q_bytes_ = 0;  // memory usage of all entries
+  dfly::EventCount evc_bp_;                    // backpressure for memory limit
+
   base::IoBuf io_buf_;  // used in io loop and parsers
   std::unique_ptr<RedisParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
@@ -233,8 +240,6 @@ class Connection : public util::Connection {
   std::unique_ptr<ConnectionContext> cc_;
 
   unsigned parser_error_ = 0;
-  uint32_t pipeline_msg_cnt_ = 0;
-
   uint32_t break_poll_id_ = UINT32_MAX;
 
   BreakerCb breaker_cb_;
