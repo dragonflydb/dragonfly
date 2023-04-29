@@ -615,7 +615,7 @@ bool ParseLexBound(string_view src, ZSetFamily::LexBound* bound) {
 }
 
 void SendAtLeastOneKeyError(ConnectionContext* cntx) {
-  string name = cntx->cid->name();
+  string name{cntx->cid->name()};
   absl::AsciiStrToLower(&name);
   (*cntx)->SendError(absl::StrCat("at least 1 input key is needed for ", name));
 }

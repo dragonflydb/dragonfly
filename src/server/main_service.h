@@ -116,7 +116,9 @@ class Service : public facade::ServiceInterface {
   };
 
   // Return false if command is invalid and reply with error.
-  bool VerifyCommand(const CommandId* cid, CmdArgList args, facade::ConnectionContext* cntx);
+  bool VerifyCommand(const CommandId* cid, CmdArgList args, ConnectionContext* cntx);
+
+  const CommandId* FindCmd(CmdArgList args) const;
 
   void EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, ConnectionContext* cntx);
 

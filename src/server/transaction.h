@@ -251,7 +251,7 @@ class Transaction {
 
   IntentLock::Mode Mode() const;  // Based on command mask
 
-  const char* Name() const;  // Based on command name
+  std::string_view Name() const;  // Based on command name
 
   uint32_t GetUniqueShardCnt() const {
     return unique_shard_cnt_;

@@ -11,6 +11,7 @@ extern "C" {
 #include <absl/cleanup/cleanup.h>
 #include <absl/functional/bind_front.h>
 #include <absl/strings/ascii.h>
+#include <absl/strings/match.h>
 #include <absl/strings/str_format.h>
 #include <xxhash.h>
 
@@ -191,14 +192,14 @@ void SendMonitor(const std::string& msg) {
   }
 }
 
-void DispatchMonitorIfNeeded(bool admin_cmd, ConnectionContext* connection, CmdArgList args) {
+void DispatchMonitorIfNeeded(bool admin_cmd, ConnectionContext* cntx, CmdArgList args) {
   // We are not sending any admin command in the monitor, and we do not want to
   // do any processing if we don't have any waiting connections with monitor
   // enabled on them - see https://redis.io/commands/monitor/
   const auto& my_monitors = ServerState::tlocal()->Monitors();
   if (!(my_monitors.Empty() || admin_cmd)) {
     //  We have connections waiting to get the info on the last command, send it to them
-    auto monitor_msg = MakeMonitorMessage(connection->conn_state, connection->owner(), args);
+    auto monitor_msg = MakeMonitorMessage(cntx->conn_state, cntx->owner(), args);
 
     VLOG(1) << "sending command '" << monitor_msg << "' to the clients that registered on it";
 
@@ -582,12 +583,6 @@ void Service::Shutdown() {
   ThisFiber::SleepFor(10ms);
 }
 
-static void SetMultiExecErrorFlag(ConnectionContext* cntx) {
-  if (cntx->conn_state.exec_info.IsActive()) {
-    cntx->conn_state.exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
-  }
-}
-
 // Return OK if all keys are allowed to be accessed: either declared in EVAL or
 // transaction is running in global or non-atomic mode.
 OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const CommandId* cid,
@@ -618,20 +613,19 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
   return OpStatus::OK;
 }
 
-bool Service::VerifyCommand(const CommandId* cid, CmdArgList args,
-                            facade::ConnectionContext* cntx) {
+bool Service::VerifyCommand(const CommandId* cid, CmdArgList args, ConnectionContext* dfly_cntx) {
   ServerState& etl = *ServerState::tlocal();
 
   string_view cmd_str = ArgS(args, 0);
-  ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
 
-  bool is_trans_cmd = (cmd_str == "EXEC" || cmd_str == "MULTI" || cmd_str == "DISCARD");
-  bool under_script = bool(dfly_cntx->conn_state.script_info);
-
-  absl::Cleanup multi_error([dfly_cntx] { SetMultiExecErrorFlag(dfly_cntx); });
+  absl::Cleanup multi_error([exec_info = &dfly_cntx->conn_state.exec_info] {
+    if (exec_info->IsActive()) {
+      exec_info->state = ConnectionState::ExecInfo::EXEC_ERROR;
+    }
+  });
 
   if (cid == nullptr) {
-    (*cntx)->SendError(StrCat("unknown command `", cmd_str, "`"), "unknown_cmd");
+    (*dfly_cntx)->SendError(StrCat("unknown command `", cmd_str, "`"), "unknown_cmd");
 
     lock_guard lk(mu_);
     if (unknown_cmds_.size() < 1024)
@@ -639,31 +633,33 @@ bool Service::VerifyCommand(const CommandId* cid, CmdArgList args,
     return false;
   }
 
-  bool blocked_by_loading = !cntx->journal_emulated && etl.gstate() == GlobalState::LOADING &&
+  bool is_trans_cmd = CO::IsTransKind(cid->name());
+  bool under_script = bool(dfly_cntx->conn_state.script_info);
+  bool blocked_by_loading = !dfly_cntx->journal_emulated && etl.gstate() == GlobalState::LOADING &&
                             (cid->opt_mask() & CO::LOADING) == 0;
   if (blocked_by_loading || etl.gstate() == GlobalState::SHUTTING_DOWN) {
     string err = StrCat("Can not execute during ", GlobalStateName(etl.gstate()));
-    (*cntx)->SendError(err);
+    (*dfly_cntx)->SendError(err);
     return false;
   }
 
   string_view cmd_name{cid->name()};
 
-  if (cntx->req_auth && !cntx->authenticated) {
+  if (dfly_cntx->req_auth && !dfly_cntx->authenticated) {
     if (cmd_name != "AUTH" && cmd_name != "QUIT" && cmd_name != "HELLO") {
-      (*cntx)->SendError("-NOAUTH Authentication required.");
+      (*dfly_cntx)->SendError("-NOAUTH Authentication required.");
       return false;
     }
   }
 
   // only reset and quit are allow if this connection is used for monitoring
   if (dfly_cntx->monitor && (cmd_name != "RESET" && cmd_name != "QUIT")) {
-    (*cntx)->SendError("Replica can't interact with the keyspace");
+    (*dfly_cntx)->SendError("Replica can't interact with the keyspace");
     return false;
   }
 
   if (under_script && (cid->opt_mask() & CO::NOSCRIPT)) {
-    (*cntx)->SendError("This Redis command is not allowed from script");
+    (*dfly_cntx)->SendError("This Redis command is not allowed from script");
     return false;
   }
 
@@ -672,18 +668,18 @@ bool Service::VerifyCommand(const CommandId* cid, CmdArgList args,
   bool under_multi = dfly_cntx->conn_state.exec_info.IsActive() && !is_trans_cmd;
 
   if (!etl.is_master && is_write_cmd && !dfly_cntx->is_replicating) {
-    (*cntx)->SendError("-READONLY You can't write against a read only replica.");
+    (*dfly_cntx)->SendError("-READONLY You can't write against a read only replica.");
     return false;
   }
 
   if ((cid->arity() > 0 && args.size() != size_t(cid->arity())) ||
       (cid->arity() < 0 && args.size() < size_t(-cid->arity()))) {
-    (*cntx)->SendError(facade::WrongNumArgsError(cmd_str), kSyntaxErrType);
+    (*dfly_cntx)->SendError(facade::WrongNumArgsError(cmd_str), kSyntaxErrType);
     return false;
   }
 
   if (cid->key_arg_step() == 2 && (args.size() % 2) == 0) {
-    (*cntx)->SendError(facade::WrongNumArgsError(cmd_str), kSyntaxErrType);
+    (*dfly_cntx)->SendError(facade::WrongNumArgsError(cmd_str), kSyntaxErrType);
     return false;
   }
 
@@ -694,12 +690,12 @@ bool Service::VerifyCommand(const CommandId* cid, CmdArgList args,
 
   if (under_multi) {
     if (cmd_name == "SELECT") {
-      (*cntx)->SendError("Can not call SELECT within a transaction");
+      (*dfly_cntx)->SendError("Can not call SELECT within a transaction");
       return false;
     }
 
     if (cmd_name == "WATCH" || cmd_name == "FLUSHALL" || cmd_name == "FLUSHDB") {
-      (*cntx)->SendError(absl::StrCat("'", cmd_name, "' inside MULTI is not allowed"));
+      (*dfly_cntx)->SendError(absl::StrCat("'", cmd_name, "' inside MULTI is not allowed"));
       return false;
     }
   }
@@ -709,12 +705,12 @@ bool Service::VerifyCommand(const CommandId* cid, CmdArgList args,
                                         dfly_cntx->transaction);
 
     if (status == OpStatus::KEY_NOTFOUND) {
-      (*cntx)->SendError("script tried accessing undeclared key");
+      (*dfly_cntx)->SendError("script tried accessing undeclared key");
       return false;
     }
 
     if (status != OpStatus::OK) {
-      (*cntx)->SendError(status);
+      (*dfly_cntx)->SendError(status);
       return false;
     }
   }
@@ -739,21 +735,20 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
               << " in dbid=" << dfly_cntx->conn_state.db_index;
   }
 
-  string_view cmd_str = ArgS(args, 0);
-  bool is_trans_cmd = (cmd_str == "EXEC" || cmd_str == "MULTI" || cmd_str == "DISCARD");
-  const CommandId* cid = registry_.Find(cmd_str);
+  const CommandId* cid = FindCmd(args);
   ServerState& etl = *ServerState::tlocal();
 
   etl.RecordCmd();
 
-  if (!VerifyCommand(cid, args, cntx))
+  if (!VerifyCommand(cid, args, dfly_cntx))
     return;
 
+  bool is_trans_cmd = CO::IsTransKind(cid->name());
   etl.connection_stats.cmd_count_map[cid->name()]++;
-
+  auto args_no_cmd = args.subspan(1);
   if (dfly_cntx->conn_state.exec_info.IsActive() && !is_trans_cmd) {
     // TODO: protect against aggregating huge transactions.
-    StoredCmd stored_cmd{cid, args.subspan(1)};
+    StoredCmd stored_cmd{cid, args_no_cmd};
     dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
 
     return (*cntx)->SendSimpleString("QUEUED");
@@ -770,7 +765,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     if (cid->IsTransactional()) {
       dfly_cntx->transaction->MultiSwitchCmd(cid);
       OpStatus status =
-          dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args.subspan(1));
+          dfly_cntx->transaction->InitByArgs(dfly_cntx->conn_state.db_index, args_no_cmd);
 
       if (status != OpStatus::OK)
         return (*cntx)->SendError(status);
@@ -782,7 +777,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
       dist_trans.reset(new Transaction{cid, etl.thread_index()});
 
       if (!dist_trans->IsMulti()) {  // Multi command initialize themself based on their mode.
-        if (auto st = dist_trans->InitByArgs(dfly_cntx->conn_state.db_index, args.subspan(1));
+        if (auto st = dist_trans->InitByArgs(dfly_cntx->conn_state.db_index, args_no_cmd);
             st != OpStatus::OK)
           return (*cntx)->SendError(st);
       }
@@ -806,7 +801,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   }
 
   end_usec = ProactorBase::GetMonotonicTimeNs();
-  request_latency_usec.IncBy(cmd_str, (end_usec - start_usec) / 1000);
+  request_latency_usec.IncBy(cid->name(), (end_usec - start_usec) / 1000);
 
   if (!under_script) {
     dfly_cntx->transaction = nullptr;
@@ -1213,6 +1208,20 @@ bool StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptParams param
   };
 
   return false;
+}
+
+const CommandId* Service::FindCmd(CmdArgList args) const {
+  const CommandId* res = registry_.Find(ArgS(args, 0));
+  if (!res)
+    return nullptr;
+
+  // A workaround for XGROUP HELP that does not fit our static taxonomy of commands.
+  if (args.size() == 2 && res->name() == "XGROUP") {
+    if (absl::EqualsIgnoreCase(ArgS(args, 1), "HELP")) {
+      res = registry_.Find("_XGROUP_HELP");
+    }
+  }
+  return res;
 }
 
 void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,

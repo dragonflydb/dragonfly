@@ -84,4 +84,12 @@ TEST_F(StreamFamilyTest, Range) {
   EXPECT_THAT(sub1, ElementsAre("1-0", ArrLen(2)));
 }
 
+TEST_F(StreamFamilyTest, Issue854) {
+  auto resp = Run({"xgroup", "help"});
+  EXPECT_THAT(resp, ArgType(RespExpr::ARRAY));
+
+  resp = Run({"eval", "redis.call('xgroup', 'help')", "0"});
+  EXPECT_THAT(resp, ErrArg("is not allowed"));
+}
+
 }  // namespace dfly

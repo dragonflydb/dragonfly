@@ -32,8 +32,7 @@ bool CommandId::IsTransactional() const {
   if (first_key_ > 0 || (opt_mask_ & CO::GLOBAL_TRANS) || (opt_mask_ & CO::NO_KEY_JOURNAL))
     return true;
 
-  string_view name{name_};
-  if (name == "EVAL" || name == "EVALSHA" || name == "EXEC")
+  if (name_ == "EVAL" || name_ == "EVALSHA" || name_ == "EXEC")
     return true;
 
   return false;
@@ -44,30 +43,41 @@ uint32_t CommandId::OptCount(uint32_t mask) {
 }
 
 CommandRegistry::CommandRegistry() {
-  CommandId cd("COMMAND", CO::LOADING | CO::NOSCRIPT, -1, 0, 0, 0);
+  static const char kCMD[] = "COMMAND";
+  CommandId cd(kCMD, CO::LOADING | CO::NOSCRIPT, -1, 0, 0, 0);
 
   cd.SetHandler([this](const auto& args, auto* cntx) { return Command(args, cntx); });
 
-  const char* nm = cd.name();
-  cmd_map_.emplace(nm, std::move(cd));
+  cmd_map_.emplace(kCMD, std::move(cd));
 }
 
 void CommandRegistry::Command(CmdArgList args, ConnectionContext* cntx) {
+  unsigned cmd_cnt = 0;
+  for (const auto& val : cmd_map_) {
+    const CommandId& cd = val.second;
+    if (cd.opt_mask() & CO::HIDDEN)
+      continue;
+
+    ++cmd_cnt;
+  }
+
   if (args.size() > 0) {
     ToUpper(&args[0]);
     string_view subcmd = ArgS(args, 0);
     if (subcmd == "COUNT") {
-      return (*cntx)->SendLong(cmd_map_.size());
+      return (*cntx)->SendLong(cmd_cnt);
     } else {
       return (*cntx)->SendError(kSyntaxErr, kSyntaxErrType);
     }
   }
-  size_t len = cmd_map_.size();
 
-  (*cntx)->StartArray(len);
+  (*cntx)->StartArray(cmd_cnt);
 
   for (const auto& val : cmd_map_) {
     const CommandId& cd = val.second;
+    if (cd.opt_mask() & CO::HIDDEN)
+      continue;
+
     (*cntx)->StartArray(6);
     (*cntx)->SendSimpleString(cd.name());
     (*cntx)->SendLong(cd.arity());
@@ -118,6 +128,8 @@ const char* OptName(CO::CommandOpt fl) {
       return "noscript";
     case BLOCKING:
       return "blocking";
+    case HIDDEN:
+      return "hidden";
     case GLOBAL_TRANS:
       return "global-trans";
     case VARIADIC_KEYS:

@@ -563,6 +563,24 @@ void SetId(string_view key, string_view gname, CmdArgList args, ConnectionContex
   }
 }
 
+void XGroupHelp(CmdArgList args, ConnectionContext* cntx) {
+  string_view help_arr[] = {
+      "CREATE <key> <groupname> <id|$> [option]",
+      "    Create a new consumer group. Options are:",
+      "    * MKSTREAM",
+      "      Create the empty stream if it does not exist.",
+      "CREATECONSUMER <key> <groupname> <consumer>",
+      "    Create a new consumer in the specified group.",
+      "DELCONSUMER <key> <groupname> <consumer>",
+      "    Remove the specified consumer.",
+      "DESTROY <key> <groupname>"
+      "    Remove the specified group.",
+      "SETID <key> <groupname> <id|$>",
+      "    Set the current group ID.",
+  };
+  return (*cntx)->SendSimpleStrArr(help_arr);
+}
+
 }  // namespace
 
 void StreamFamily::XAdd(CmdArgList args, ConnectionContext* cntx) {
@@ -651,23 +669,6 @@ void StreamFamily::XDel(CmdArgList args, ConnectionContext* cntx) {
 void StreamFamily::XGroup(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
-  if (sub_cmd == "HELP") {
-    string_view help_arr[] = {
-        "CREATE <key> <groupname> <id|$> [option]",
-        "    Create a new consumer group. Options are:",
-        "    * MKSTREAM",
-        "      Create the empty stream if it does not exist.",
-        "CREATECONSUMER <key> <groupname> <consumer>",
-        "    Create a new consumer in the specified group.",
-        "DELCONSUMER <key> <groupname> <consumer>",
-        "    Remove the specified consumer.",
-        "DESTROY <key> <groupname>"
-        "    Remove the specified group.",
-        "SETID <key> <groupname> <id|$>",
-        "    Set the current group ID.",
-    };
-    return (*cntx)->SendSimpleStrArr(help_arr);
-  }
 
   if (args.size() >= 2) {
     string_view key = ArgS(args, 1);
@@ -859,12 +860,13 @@ void StreamFamily::Register(CommandRegistry* registry) {
 
   *registry << CI{"XADD", CO::WRITE | CO::FAST, -5, 1, 1, 1}.HFUNC(XAdd)
             << CI{"XDEL", CO::WRITE | CO::FAST, -3, 1, 1, 1}.HFUNC(XDel)
-            << CI{"XGROUP", CO::WRITE | CO::DENYOOM, -2, 2, 2, 1}.HFUNC(XGroup)
+            << CI{"XGROUP", CO::WRITE | CO::DENYOOM, -3, 2, 2, 1}.HFUNC(XGroup)
             << CI{"XINFO", CO::READONLY | CO::NOSCRIPT, -2, 0, 0, 0}.HFUNC(XInfo)
             << CI{"XLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(XLen)
             << CI{"XRANGE", CO::READONLY, -4, 1, 1, 1}.HFUNC(XRange)
             << CI{"XREVRANGE", CO::READONLY, -4, 1, 1, 1}.HFUNC(XRevRange)
-            << CI{"XSETID", CO::WRITE | CO::DENYOOM, 3, 1, 1, 1}.HFUNC(XSetId);
+            << CI{"XSETID", CO::WRITE | CO::DENYOOM, 3, 1, 1, 1}.HFUNC(XSetId)
+            << CI{"_XGROUP_HELP", CO::NOSCRIPT | CO::HIDDEN, 2, 0, 0, 0}.SetHandler(XGroupHelp);
 }
 
 }  // namespace dfly
