@@ -138,9 +138,10 @@ struct Connection::DispatchOperations {
 void Connection::PipelineMessage::SetArgs(const RespVec& args) {
   auto* next = storage.data();
   for (size_t i = 0; i < args.size(); ++i) {
-    auto buf = args[i].GetBuf();
+    RespExpr::Buffer buf = args[i].GetBuf();
     size_t s = buf.size();
-    memcpy(next, buf.data(), s);
+    if (s)
+      memcpy(next, buf.data(), s);
     this->args[i] = MutableSlice(next, s);
     next += s;
   }

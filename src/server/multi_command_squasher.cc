@@ -47,9 +47,8 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
       (cmd->Cid()->opt_mask() & CO::GLOBAL_TRANS))
     return SquashResult::NOT_SQUASHED;
 
-  tmp_keylist_.resize(cmd->NumArgs());
+  cmd->Fill(&tmp_keylist_);
   auto args = absl::MakeSpan(tmp_keylist_);
-  cmd->Fill(args);
 
   auto keys = DetermineKeys(cmd->Cid(), args);
   if (!keys.ok())
@@ -94,9 +93,8 @@ void MultiCommandSquasher::ExecuteStandalone(StoredCmd* cmd) {
   tx->MultiSwitchCmd(cmd->Cid());
   cntx_->cid = cmd->Cid();
 
-  tmp_keylist_.resize(cmd->NumArgs());
+  cmd->Fill(&tmp_keylist_);
   auto args = absl::MakeSpan(tmp_keylist_);
-  cmd->Fill(args);
 
   if (cmd->Cid()->IsTransactional())
     tx->InitByArgs(cntx_->conn_state.db_index, args);

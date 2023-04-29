@@ -487,6 +487,29 @@ void TxTable(const http::QueryArgs& args, HttpContext* send) {
   send->Invoke(std::move(resp));
 }
 
+enum class ExecEvalState {
+  NONE = 0,
+  ALL = 1,
+  SOME = 2,
+};
+
+ExecEvalState DetermineEvalPresense(const std::vector<StoredCmd>& body) {
+  unsigned eval_cnt = 0;
+  for (const auto& scmd : body) {
+    if (CO::IsEvalKind(scmd.Cid()->name())) {
+      eval_cnt++;
+    }
+  }
+
+  if (eval_cnt == 0)
+    return ExecEvalState::NONE;
+
+  if (eval_cnt == body.size())
+    return ExecEvalState::ALL;
+
+  return ExecEvalState::SOME;
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp) : pp_(*pp), server_family_(this) {
@@ -583,7 +606,9 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
 
   const auto& key_index = *key_index_res;
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
-    if (!eval_info.keys.contains(ArgS(args, i))) {
+    string_view key = ArgS(args, i);
+    if (!eval_info.keys.contains(key)) {
+      VLOG(1) << "Key " << key << " is not declared for command " << cid->name();
       return OpStatus::KEY_NOTFOUND;
     }
   }
@@ -728,15 +753,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   etl.connection_stats.cmd_count_map[cid->name()]++;
 
   if (dfly_cntx->conn_state.exec_info.IsActive() && !is_trans_cmd) {
-    auto cmd_name = ArgS(args, 0);
-    if (cmd_name == "EVAL" || cmd_name == "EVALSHA") {
-      auto error =
-          absl::StrCat("'", cmd_name,
-                       "' Dragonfly does not allow execution of a server-side Lua script inside "
-                       "transaction block");
-      SetMultiExecErrorFlag(dfly_cntx);
-      return (*cntx)->SendError(error);
-    }
     // TODO: protect against aggregating huge transactions.
     StoredCmd stored_cmd{cid, args.subspan(1)};
     dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
@@ -1326,8 +1342,7 @@ template <typename F> void IterateAllKeys(ConnectionState::ExecInfo* exec_info, 
     if (!scmd.Cid()->IsTransactional())
       continue;
 
-    arg_vec.resize(scmd.NumArgs());
-    scmd.Fill(absl::MakeSpan(arg_vec));
+    scmd.Fill(&arg_vec);
 
     auto key_res = DetermineKeys(scmd.Cid(), absl::MakeSpan(arg_vec));
     if (!key_res.ok())
@@ -1413,7 +1428,45 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     return rb->SendNull();
   }
 
-  CmdArgVec tmp_keys;
+  ExecEvalState state = DetermineEvalPresense(exec_info.body);
+  if (state == ExecEvalState::SOME) {
+    auto error =
+        "Dragonfly does not allow execution of a server-side Lua script inside "
+        "MULTI/EXEC block";
+
+    return rb->SendError(error);
+  }
+
+  CmdArgVec arg_vec, tmp_keys;
+
+  // We ignore transaction mode in case it's filled only with EVAL-like commands.
+  // This is done to support OptimalBits/bull js framework
+  // that for some reason uses MULTI to send multiple jobs via EVAL(SHA) commands,
+  // instead of using pipeline mode.
+  // TODO: to check with BullMQ developers if this is a bug or a feature.
+  if (state == ExecEvalState::ALL) {
+    string cmd_name;
+    auto body = move(exec_info.body);
+    exec_info.Clear();
+    Transaction* trans = cntx->transaction;
+    cntx->transaction = nullptr;
+
+    rb->StartArray(body.size());
+    for (auto& scmd : body) {
+      arg_vec.resize(scmd.NumArgs() + 1);
+      // We need to copy command name to the first argument.
+      cmd_name = scmd.Cid()->name();
+      arg_vec.front() = MutableSlice{cmd_name.data(), cmd_name.size()};
+      auto args = absl::MakeSpan(arg_vec);
+      scmd.Fill(args.subspan(1));
+
+      DispatchCommand(args, cntx);
+    }
+    cntx->transaction = trans;
+
+    return;
+  }
+
   bool scheduled = StartMultiExec(cntx->db_index(), cntx->transaction, &exec_info, &tmp_keys);
 
   // EXEC should not run if any of the watched keys expired.
@@ -1429,15 +1482,16 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     if (absl::GetFlag(FLAGS_multi_exec_squash)) {
       MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), cntx);
     } else {
-      CmdArgVec arg_vec{};
-
       for (auto& scmd : exec_info.body) {
+        VLOG(2) << "TX CMD " << scmd.Cid()->name() << " " << scmd.NumArgs();
+
         cntx->transaction->MultiSwitchCmd(scmd.Cid());
         cntx->cid = scmd.Cid();
 
         arg_vec.resize(scmd.NumArgs());
+        scmd.Fill(&arg_vec);
+
         CmdArgList args = absl::MakeSpan(arg_vec);
-        scmd.Fill(args);
 
         if (scmd.Cid()->IsTransactional()) {
           OpStatus st = cntx->transaction->InitByArgs(cntx->conn_state.db_index, args);

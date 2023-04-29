@@ -77,9 +77,11 @@ TEST_F(MultiTest, MultiAndEval) {
 
   resp = Run({"get", kKey4});
   ASSERT_EQ(resp, "QUEUED");
-  EXPECT_THAT(Run({"eval", "return redis.call('exists', KEYS[2])", "2", "a", "b"}),
-              ErrArg("'EVAL' Dragonfly does not allow execution of a server-side Lua script inside "
-                     "transaction block"));
+  resp = Run({"eval", "return redis.call('exists', KEYS[2])", "2", "a", "b"});
+  ASSERT_EQ(resp, "QUEUED");
+
+  resp = Run({"exec"});
+  ASSERT_THAT(resp, ErrArg("ERR Dragonfly does not allow execution of a server-side Lua"));
 }
 
 TEST_F(MultiTest, MultiAndFlush) {
@@ -240,13 +242,14 @@ TEST_F(MultiTest, MultiConsistent) {
   ASSERT_FALSE(service_->IsShardSetLocked());
 }
 
-TEST_F(MultiTest, MultiWeirdCommands) {
-  // FIXME: issue https://github.com/dragonflydb/dragonfly/issues/457
-  // once we would have fix for supporting EVAL from within transaction
+TEST_F(MultiTest, MultiAllEval) {
   Run({"multi"});
-  EXPECT_THAT(Run({"eval", "return 42", "0"}),
-              ErrArg("'EVAL' Dragonfly does not allow execution of a server-side Lua script inside "
-                     "transaction block"));
+  EXPECT_EQ(Run({"eval", "return 42", "0"}), "QUEUED");
+  EXPECT_EQ(Run({"eval", "return 77", "0"}), "QUEUED");
+  auto resp = Run({"exec"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[0], IntArg(42));
+  EXPECT_THAT(resp.GetVec()[1], IntArg(77));
 }
 
 TEST_F(MultiTest, MultiRename) {
