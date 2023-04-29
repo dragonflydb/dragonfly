@@ -678,7 +678,7 @@ void CompactObj::SetString(std::string_view str) {
   }
 
   if (kUseSmallStrings) {
-    if ((taglen_ == 0 && encoded.size() < (1 << 15))) {
+    if ((taglen_ == 0 && encoded.size() < (1 << 13))) {
       SetMeta(SMALL_TAG, mask);
       tl.small_str_bytes += u_.small_str.Assign(encoded);
       return;
