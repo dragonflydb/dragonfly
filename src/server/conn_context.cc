@@ -41,7 +41,8 @@ StoredCmd::StoredCmd(string&& buffer, const CommandId* cid, CmdArgList args, fac
 }
 
 void StoredCmd::Fill(CmdArgList args) {
-  CHECK_GE(args.size(), sizes_.size());
+  DCHECK_GE(args.size(), sizes_.size());
+
   unsigned offset = 0;
   for (unsigned i = 0; i < sizes_.size(); i++) {
     args[i] = MutableSlice{buffer_.data() + offset, sizes_[i]};

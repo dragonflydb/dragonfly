@@ -37,6 +37,11 @@ class StoredCmd {
   // Between filling and invocation, cmd should NOT be moved.
   void Fill(CmdArgList args);
 
+  void Fill(CmdArgVec* dest) {
+    dest->resize(sizes_.size());
+    Fill(absl::MakeSpan(*dest));
+  }
+
   const CommandId* Cid() const;
 
   facade::ReplyMode ReplyMode() const;
