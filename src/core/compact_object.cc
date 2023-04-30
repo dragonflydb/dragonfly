@@ -940,18 +940,15 @@ bool CompactObj::operator==(const CompactObj& o) const {
   DCHECK(taglen_ != JSON_TAG && o.taglen_ != JSON_TAG) << "cannot use JSON type to check equal";
 
   uint8_t m1 = mask_ & kEncMask;
-  uint8_t m2 = mask_ & kEncMask;
+  uint8_t m2 = o.mask_ & kEncMask;
   if (m1 != m2)
     return false;
 
-  if (taglen_ == ROBJ_TAG || o.taglen_ == ROBJ_TAG) {
-    if (o.taglen_ != taglen_)
-      return false;
-    return u_.r_obj.Equal(o.u_.r_obj);
-  }
-
   if (taglen_ != o.taglen_)
     return false;
+
+  if (taglen_ == ROBJ_TAG)
+    return u_.r_obj.Equal(o.u_.r_obj);
 
   if (taglen_ == INT_TAG)
     return u_.ival == o.u_.ival;
