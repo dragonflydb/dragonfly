@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <ostream>
 
 namespace facade {
@@ -73,6 +74,14 @@ template <typename V> class OpResult : public OpResultBase {
 
   V value_or(V v) const {
     return status() == OpStatus::OK ? v_ : v;
+  }
+
+  V* operator->() {
+    return &v_;
+  }
+
+  V& operator*() {
+    return v_;
   }
 
   const V* operator->() const {

@@ -1057,7 +1057,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   info->async_cmds_heap_mem = 0;
   info->async_cmds.clear();
 
-  auto reply = move(crb.Take());
+  auto reply = crb.Take();
   return CapturingReplyBuilder::GetError(reply) ? make_optional(move(reply)) : nullopt;
 }
 

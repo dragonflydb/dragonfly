@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <string_view>
+
 #include "core/dense_set.h"
 
 extern "C" {
