@@ -82,8 +82,6 @@ jobs:
           echo "Input prerelease ${{ github.event.inputs.PRERELEASE }}"
           ls -l
           ls -l releases
-          # remove un-stripped packages so that we use the stripped version
-          rm releases/*.unstripped.tar.gz
           for f in releases/*.tar.gz; do tar xvfz $f -C releases; done
           rm releases/*.tar.gz
 
