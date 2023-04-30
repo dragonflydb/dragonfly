@@ -28,6 +28,10 @@ ABSL_FLAG(std::string, default_lua_config, "",
           "separated by space, for example 'allow-undeclared-keys disable-atomicity' runs scripts "
           "non-atomically and allows accessing undeclared keys");
 
+ABSL_FLAG(
+    bool, lua_auto_async, false,
+    "If enabled, call/pcall with discarded values are automatically replaced with acall/apcall.");
+
 namespace dfly {
 
 using namespace std;
@@ -218,7 +222,7 @@ io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter
   // For non atomic modes, squashing increases the time locks are held, which
   // can decrease throughput with frequently accessed keys.
   optional<string> async_body;
-  if (params.atomic) {
+  if (params.atomic && absl::GetFlag(FLAGS_lua_auto_async)) {
     if (async_body = Interpreter::DetectPossibleAsyncCalls(body); async_body)
       body = *async_body;
   }
