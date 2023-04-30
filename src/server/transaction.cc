@@ -920,7 +920,7 @@ void Transaction::UnwatchBlocking(bool should_expire, WaitKeysProvider wcb) {
   DVLOG(1) << "UnwatchBlocking finished " << DebugId();
 }
 
-const char* Transaction::Name() const {
+string_view Transaction::Name() const {
   return cid_->name();
 }
 

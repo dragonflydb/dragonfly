@@ -31,6 +31,7 @@ enum CommandOpt : uint32_t {
   ADMIN = 1U << 7,  // implies NOSCRIPT,
   NOSCRIPT = 1U << 8,
   BLOCKING = 1U << 9,  // implies REVERSE_MAPPING
+  HIDDEN = 1U << 10,   // does not show in COMMAND command output
   GLOBAL_TRANS = 1U << 12,
 
   NO_AUTOJOURNAL = 1U << 15,  // Skip automatically logging command to journal inside transaction.
@@ -41,6 +42,10 @@ const char* OptName(CommandOpt fl);
 
 constexpr inline bool IsEvalKind(std::string_view name) {
   return name.compare(0, 4, "EVAL") == 0;
+}
+
+constexpr inline bool IsTransKind(std::string_view name) {
+  return (name == "EXEC") || (name == "MULTI") || (name == "DISCARD");
 }
 
 static_assert(IsEvalKind("EVAL") && IsEvalKind("EVALSHA"));
@@ -78,7 +83,7 @@ class CommandId {
   CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key, int8_t last_key,
             int8_t step);
 
-  const char* name() const {
+  std::string_view name() const {
     return name_;
   }
 
@@ -132,7 +137,7 @@ class CommandId {
   static uint32_t OptCount(uint32_t mask);
 
  private:
-  const char* name_;
+  std::string_view name_;
 
   uint32_t opt_mask_;
   int8_t arity_;
