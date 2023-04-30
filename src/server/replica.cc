@@ -1229,7 +1229,8 @@ Replica::Info Replica::GetInfo() const {
     res.host = master_context_.host;
     res.port = master_context_.port;
     res.master_link_established = (state_mask_.load() & R_TCP_CONNECTED);
-    res.sync_in_progress = (state_mask_.load() & R_SYNCING);
+    res.full_sync_in_progress = (state_mask_.load() & R_SYNCING);
+    res.full_sync_done = (state_mask_.load() & R_SYNC_OK);
     res.master_last_io_sec = (ProactorBase::GetMonotonicTimeNs() - last_io_time) / 1000000000UL;
     return res;
   });
