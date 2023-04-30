@@ -49,7 +49,7 @@ class MemcacheParser {
 
     union {
       uint64_t cas_unique = 0;  // for CAS COMMAND
-      uint64_t delta;          // for DECR/INCR commands.
+      uint64_t delta;           // for DECR/INCR commands.
     };
 
     uint32_t expire_ts = 0;  // relative time in seconds.
@@ -76,4 +76,4 @@ class MemcacheParser {
  private:
 };
 
-}  // namespace dfly
+}  // namespace facade
