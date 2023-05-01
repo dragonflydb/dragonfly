@@ -268,8 +268,9 @@ vector<pair<string, ScriptMgr::ScriptData>> ScriptMgr::GetAll() const {
   lock_guard lk{mu_};
   res.reserve(db_.size());
   for (const auto& [sha, data] : db_) {
-    res.emplace_back(string{sha.data(), sha.size()},
-                     ScriptData{data, data.body.get(), data.orig_body.get()});
+    string body = data.body ? string{data.body.get()} : string{};
+    string orig_body = data.orig_body ? string{data.orig_body.get()} : string{};
+    res.emplace_back(string{sha.data(), sha.size()}, ScriptData{data, move(body), move(orig_body)});
   }
 
   return res;
