@@ -430,7 +430,10 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
     auto scripts = sf_->script_mgr()->GetAll();
     StringVec script_bodies;
     for (auto& [sha, data] : scripts) {
-      script_bodies.push_back(move(data.orig_body));
+      // Always send original body (with header & without auto async calls) that determines the sha,
+      // It's stored only if it's different from the post-processed version.
+      string& body = data.orig_body.empty() ? data.body : data.orig_body;
+      script_bodies.push_back(move(body));
     }
     ec = saver->SaveHeader(script_bodies);
   } else {
