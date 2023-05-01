@@ -31,8 +31,8 @@ class ScriptMgr {
   };
 
   struct ScriptData : public ScriptParams {
-    std::string body;
-    std::string orig_body;
+    std::string body;       // script source code present in lua interpreter
+    std::string orig_body;  // original code, before removing header and adding async
   };
 
   struct ScriptKey : public std::array<char, 40> {
