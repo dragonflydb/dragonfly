@@ -371,4 +371,85 @@ TEST_F(InterpreterTest, Compatibility) {
   EXPECT_FALSE(Execute("local t = {}; local a = 1; table.setn(t, 100); return a+123;"));
 }
 
+TEST_F(InterpreterTest, AsyncReplacement) {
+  const string_view kCases[] = {
+      R"(
+      redis.[A]call('INCR', 'A')
+      redis.[A]call('INCR', 'A')
+    )",
+      R"(
+      function test()
+        redis.[A]call('INCR', 'A')
+      end
+    )",
+      R"(
+      local b = redis.call('GET', 'A') + redis.call('GET', 'B')
+    )",
+      R"(
+      if redis.call('EXISTS', 'A') then redis.[A]call('SET', 'B', 1) end
+    )",
+      R"(
+      while redis.call('EXISTS', 'A') do redis.[A]call('SET', 'B', 1) end
+    )",
+      R"(
+      while
+      redis.call('EXISTS', 'A') do
+        print("OK")
+      end
+    )",
+      R"(
+      print(redis.call('GET', 'A'))
+    )",
+      R"(
+      local table = {
+        redis.call('GET', 'A')
+      }
+    )",
+      R"(
+      while true do
+        redis.[A]call('INCR', 'A')
+      end
+    )",
+      R"(
+      if 1 + -- now this is a tricky comment
+        redis.call('GET', 'A')
+        > 0
+      then end
+    )",
+      R"(
+      print('Output'
+      ..
+      redis.call('GET', 'A')
+      )
+    )",
+      R"(
+      while
+      0 < -- we have a comment here unfortunately
+      redis.call('GET', 'A')
+      then end
+    )",
+      R"(
+    while
+    -- we have
+    -- a tricky
+    -- multiline comment
+    redis.call('EXISTS')
+    do end
+    )",
+      R"(
+    --[[ WE SKIP COMMENT BLOCKS FOR NOW ]]
+    redis.call('ECHO', 'TEST')
+    )"};
+
+  for (auto test : kCases) {
+    auto expected = absl::StrReplaceAll(test, {{"[A]", "a"}});
+    auto input = absl::StrReplaceAll(test, {{"[A]", ""}});
+
+    auto result = Interpreter::DetectPossibleAsyncCalls(input);
+    string_view output = result ? *result : input;
+
+    EXPECT_EQ(expected, output);
+  }
+}
+
 }  // namespace dfly

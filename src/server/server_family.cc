@@ -991,8 +991,8 @@ GenericError ServerFamily::DoSave(bool new_version, Transaction* trans) {
   auto get_scripts = [this] {
     auto scripts = script_mgr_->GetAll();
     StringVec script_bodies;
-    for (const auto& script : scripts) {
-      script_bodies.push_back(move(script.second));
+    for (auto& [sha, data] : scripts) {
+      script_bodies.push_back(move(data.body));
     }
     return script_bodies;
   };

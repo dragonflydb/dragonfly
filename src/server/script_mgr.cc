@@ -29,6 +29,10 @@ ABSL_FLAG(std::string, default_lua_config, "",
           "separated by space, for example 'allow-undeclared-keys disable-atomicity' runs scripts "
           "non-atomically and allows accessing undeclared keys");
 
+ABSL_FLAG(
+    bool, lua_auto_async, false,
+    "If enabled, call/pcall with discarded values are automatically replaced with acall/apcall.");
+
 namespace dfly {
 
 using namespace std;
@@ -150,12 +154,14 @@ void ScriptMgr::ConfigCmd(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ScriptMgr::ListCmd(ConnectionContext* cntx) const {
-  vector<pair<string, string>> scripts = GetAll();
+  vector<pair<string, ScriptData>> scripts = GetAll();
   (*cntx)->StartArray(scripts.size());
-  for (const auto& k_v : scripts) {
-    (*cntx)->StartArray(2);
-    (*cntx)->SendBulkString(k_v.first);
-    (*cntx)->SendBulkString(k_v.second);
+  for (const auto& [sha, data] : scripts) {
+    (*cntx)->StartArray(data.orig_body.empty() ? 2 : 3);
+    (*cntx)->SendBulkString(sha);
+    (*cntx)->SendBulkString(data.body);
+    if (!data.orig_body.empty())
+      (*cntx)->SendBulkString(data.orig_body);
   }
 }
 
@@ -197,15 +203,34 @@ io::Result<optional<ScriptMgr::ScriptParams>, GenericError> DeduceParams(string_
   return params;
 }
 
+unique_ptr<char[]> CharBufFromSV(string_view sv) {
+  auto ptr = make_unique<char[]>(sv.size() + 1);
+  memcpy(ptr.get(), sv.data(), sv.size());
+  ptr[sv.size()] = '\0';
+  return ptr;
+}
+
 io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter* interpreter) {
   // Calculate hash before removing shebang (#!lua).
   char sha_buf[64];
   Interpreter::FuncSha1(body, sha_buf);
   string_view sha{sha_buf, std::strlen(sha_buf)};
 
-  auto params = DeduceParams(&body);
-  if (!params)
-    return params.get_unexpected();
+  string_view orig_body = body;
+
+  auto params_opt = DeduceParams(&body);
+  if (!params_opt)
+    return params_opt.get_unexpected();
+  auto params = params_opt->value_or(default_params_);
+
+  // If the script is atomic, check for possible squashing optimizations.
+  // For non atomic modes, squashing increases the time locks are held, which
+  // can decrease throughput with frequently accessed keys.
+  optional<string> async_body;
+  if (params.atomic && absl::GetFlag(FLAGS_lua_auto_async)) {
+    if (async_body = Interpreter::DetectPossibleAsyncCalls(body); async_body)
+      body = *async_body;
+  }
 
   string result;
   Interpreter::AddResult add_result = interpreter->AddFunction(sha, body, &result);
@@ -213,12 +238,12 @@ io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter
     return nonstd::make_unexpected(GenericError{move(result)});
 
   lock_guard lk{mu_};
-  auto [it, _] = db_.emplace(sha, InternalScriptData{params->value_or(default_params_), nullptr});
+  auto [it, _] = db_.emplace(sha, InternalScriptData{params, nullptr});
 
-  if (auto& body_ptr = it->second.body; !body_ptr) {
-    body_ptr.reset(new char[body.size() + 1]);
-    memcpy(body_ptr.get(), body.data(), body.size());
-    body_ptr[body.size()] = '\0';
+  if (!it->second.body) {
+    it->second.body = CharBufFromSV(body);
+    if (body != orig_body)
+      it->second.orig_body = CharBufFromSV(orig_body);
   }
 
   UpdateScriptCaches(sha, it->second);
@@ -232,18 +257,19 @@ optional<ScriptMgr::ScriptData> ScriptMgr::Find(std::string_view sha) const {
 
   lock_guard lk{mu_};
   if (auto it = db_.find(sha); it != db_.end() && it->second.body)
-    return ScriptData{it->second, it->second.body.get()};
+    return ScriptData{it->second, it->second.body.get(), {}};
 
   return std::nullopt;
 }
 
-vector<pair<string, string>> ScriptMgr::GetAll() const {
-  vector<pair<string, string>> res;
+vector<pair<string, ScriptMgr::ScriptData>> ScriptMgr::GetAll() const {
+  vector<pair<string, ScriptData>> res;
 
   lock_guard lk{mu_};
   res.reserve(db_.size());
   for (const auto& [sha, data] : db_) {
-    res.emplace_back(string{sha.data(), sha.size()}, data.body.get());
+    res.emplace_back(string{sha.data(), sha.size()},
+                     ScriptData{data, data.body.get(), data.orig_body.get()});
   }
 
   return res;
