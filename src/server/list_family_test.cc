@@ -233,9 +233,10 @@ TEST_F(ListFamilyTest, BLPopMultiPush) {
 
   pop_fb.Join();
 
+  // We can't determine what key was popped, so only check result presence.
+  // It might not be first kKey3 "C" because of squashing and re-ordering.
   ASSERT_THAT(blpop_resp, ArrLen(2));
-  auto resp_arr = blpop_resp.GetVec();
-  EXPECT_THAT(resp_arr, ElementsAre(kKey1, "A"));
+  ASSERT_THAT(Run({"exists", kKey1, kKey2, kKey3}), IntArg(2));
   ASSERT_EQ(0, NumWatched());
 }
 

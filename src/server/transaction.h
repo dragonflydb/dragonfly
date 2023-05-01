@@ -177,10 +177,8 @@ class Transaction {
   bool WaitOnWatch(const time_point& tp, WaitKeysProvider cb);
 
   // Returns true if transaction is awaked, false if it's timed-out and can be removed from the
-  // blocking queue. NotifySuspended may be called from (multiple) shard threads and
-  // with each call potentially improving the minimal wake_txid at which
-  // this transaction has been awaked.
-  bool NotifySuspended(TxId committed_ts, ShardId sid);
+  // blocking queue.
+  bool NotifySuspended(TxId committed_ts, ShardId sid, std::string_view key);
 
   // Cancel all blocking watches on shutdown. Set COORD_CANCELLED.
   void BreakOnShutdown();
@@ -275,6 +273,9 @@ class Transaction {
     return coordinator_state_ & COORD_OOO;
   }
 
+  // If blocking tx was woken up on this shard, get wake key.
+  std::optional<std::string_view> GetWakeKey(ShardId sid) const;
+
   OpArgs GetOpArgs(EngineShard* shard) const {
     return OpArgs{shard, this, GetDbContext()};
   }
@@ -329,7 +330,7 @@ class Transaction {
     std::atomic_bool is_armed{false};
 
     // We pad with some memory so that atomic loads won't cause false sharing betweem threads.
-    char pad[48];  // to make sure PerShardData is 64 bytes and takes full cacheline.
+    char pad[46];  // to make sure PerShardData is 64 bytes and takes full cacheline.
 
     uint32_t arg_start = 0;  // Indices into args_ array.
     uint16_t arg_count = 0;
@@ -341,6 +342,9 @@ class Transaction {
     // Needed to rollback inconsistent schedulings or remove OOO transactions from
     // tx queue.
     uint32_t pq_pos = TxQueue::kEnd;
+
+    // Index of key relative to args in shard that the shard was woken up after blocking wait.
+    uint16_t wake_key_pos = UINT16_MAX;
   };
 
   static_assert(sizeof(PerShardData) == 64);  // cacheline
