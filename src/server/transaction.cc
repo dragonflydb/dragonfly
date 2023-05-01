@@ -1106,8 +1106,7 @@ bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provi
   coordinator_state_ |= COORD_BLOCKED;
 
   auto wake_cb = [this] {
-    return (coordinator_state_ & COORD_CANCELLED) ||
-           notify_txid_.load(memory_order_relaxed) != kuint64max;
+    return (coordinator_state_ & COORD_CANCELLED) || wakeup_requested_.load(memory_order_relaxed);
   };
 
   cv_status status = cv_status::no_timeout;
@@ -1269,8 +1268,8 @@ bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid, string_view 
   // Wake a transaction only once on the first notify.
   // We don't care about preserving the strict order with multiple operations running on blocking
   // keys in parallel, because the internal order is not observable from outside either way.
-  uint64_t default_txid = UINT64_MAX;
-  if (!notify_txid_.compare_exchange_weak(default_txid, committed_txid, memory_order_relaxed))
+  bool expected = false;
+  if (!wakeup_requested_.compare_exchange_weak(expected, true, memory_order_relaxed))
     return false;
 
   DVLOG(1) << "NotifySuspended " << DebugId() << ", local_mask:" << local_mask << " by commited_id "

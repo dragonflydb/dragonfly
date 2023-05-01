@@ -255,10 +255,6 @@ class Transaction {
     return unique_shard_cnt_;
   }
 
-  TxId GetNotifyTxid() const {
-    return notify_txid_.load(std::memory_order_relaxed);
-  }
-
   bool IsMulti() const {
     return bool(multi_);
   }
@@ -541,7 +537,7 @@ class Transaction {
   DbIndex db_index_{0};
   uint64_t time_now_ms_{0};
 
-  std::atomic<TxId> notify_txid_{UINT64_MAX};
+  std::atomic<bool> wakeup_requested_{false};  // whether tx was woken up
   std::atomic_uint32_t use_count_{0}, run_count_{0}, seqlock_{0};
 
   // unique_shard_cnt_ and unique_shard_id_ are accessed only by coordinator thread.
