@@ -41,13 +41,14 @@ using namespace std;
 %define api.token.prefix {TOK_}
 
 %token
-  LPAREN  "("
-  RPAREN  ")"
-  STAR    "*"
-  ARROW   "=>"
-  COLON   ":"
+  LPAREN   "("
+  RPAREN   ")"
+  STAR     "*"
+  ARROW    "=>"
+  COLON    ":"
   LBRACKET "["
   RBRACKET "]"
+  VBAR     "|"
 ;
 
 %precedence NOT_OP
@@ -57,22 +58,25 @@ using namespace std;
 %token <std::string> TERM "term" PARAM "param" FIELD "field"
 
 %token <int64_t> INT64 "int64"
-%nterm <AstExpr> search_expr field_filter field_cond range_value term_list opt_neg_term
+%nterm <AstExpr> final_query filter search_expr field_filter field_cond range_value term_list opt_neg_term
 
 %printer { yyo << $$; } <*>;
 
 %%
 
-query:
-  search_expr
-  | query search_expr
-  ;
+final_query:
+  filter { driver->Set($1); }
+
+filter:
+  search_expr { $$ = $1; }
+  | filter search_expr { $$ = MakeExpr<AstLogicalNode>($1, $2, false);};
+  | filter VBAR search_expr { $$ = MakeExpr<AstLogicalNode>($1, $3, true); }
 
 
 search_expr:
  LPAREN search_expr RPAREN { $$ = $2; }
- | NOT_OP search_expr { $$ = AstExpr{}; };
- | TERM { }
+ | NOT_OP search_expr { $$ = MakeExpr<AstNegateNode>($2); };
+ | TERM { $$ = MakeExpr<AstTermNode>($1); }
  | field_filter;
 
 field_filter:

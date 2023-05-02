@@ -34,10 +34,17 @@ class QueryDriver {
 
   Parser::location_type location;
 
-  void Add(AstExpr) {
+  void Set(AstExpr expr) {
+    expr_ = expr;
+  }
+
+  AstExpr Get() {
+    return expr_;
   }
 
  private:
+  AstExpr expr_;
+
   std::string cur_str_;
   std::unique_ptr<Scanner> scanner_;
 };

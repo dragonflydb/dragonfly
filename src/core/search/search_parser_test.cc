@@ -31,6 +31,17 @@ class SearchParserTest : public ::testing::Test {
     return Parser(&query_driver_)();
   }
 
+  void ParseExpr(const std::string& str) {
+    query_driver_.SetInput(str);
+    (void)Parser (&query_driver_)();
+    expr_ = query_driver_.Get();
+  }
+
+  bool Check(string_view input) {
+    return expr_->Check(input);
+  }
+
+  AstExpr expr_;
   QueryDriver query_driver_;
 };
 
@@ -98,6 +109,54 @@ TEST_F(SearchParserTest, Parse) {
   EXPECT_EQ(1, Parse(" foo:bar "));
   EXPECT_EQ(1, Parse(" @foo:@bar "));
   EXPECT_EQ(1, Parse(" @foo: "));
+}
+
+TEST_F(SearchParserTest, MatchTerm) {
+  ParseExpr("foo");
+  EXPECT_TRUE(Check("foo"));
+  EXPECT_TRUE(Check("*foo*bar"));
+  EXPECT_TRUE(Check("more*foo*bar"));
+
+  EXPECT_FALSE(Check("faa"));
+  EXPECT_FALSE(Check("definitelywrong"));
+}
+
+TEST_F(SearchParserTest, MatchNotTerm) {
+  ParseExpr("-foo");
+  EXPECT_FALSE(Check("foo"));
+  EXPECT_FALSE(Check("*foo*bar"));
+  EXPECT_FALSE(Check("more*foo*bar"));
+
+  EXPECT_TRUE(Check("faa"));
+  EXPECT_TRUE(Check("definitelyright"));
+}
+
+TEST_F(SearchParserTest, MatchConjunctionTerm) {
+  ParseExpr("foo bar");
+
+  EXPECT_TRUE(Check("foo bar"));
+  EXPECT_TRUE(Check("bar foo"));
+  EXPECT_TRUE(Check("foo bar and more"));
+  EXPECT_TRUE(Check("more bar and foo"));
+
+  EXPECT_FALSE(Check("foo"));
+  EXPECT_FALSE(Check("bar"));
+  EXPECT_FALSE(Check("foob"));
+  EXPECT_FALSE(Check("foo and more stuff"));
+  EXPECT_FALSE(Check("but not bar"));
+}
+
+TEST_F(SearchParserTest, MatchDisjunctionTerm) {
+  ParseExpr("foo | bar");
+
+  EXPECT_TRUE(Check("foo bar"));
+  EXPECT_TRUE(Check("foo"));
+  EXPECT_TRUE(Check("bar"));
+  EXPECT_TRUE(Check("foo and more stuff"));
+  EXPECT_TRUE(Check("or only bar"));
+
+  EXPECT_FALSE(Check("wrong"));
+  EXPECT_FALSE(Check("no mentions"));
 }
 
 }  // namespace search
