@@ -742,7 +742,6 @@ void Replica::CloseSocket() {
       if (sock_->IsOpen()) {
         auto ec = sock_->Shutdown(SHUT_RDWR);
         LOG_IF(ERROR, ec) << "Could not shutdown socket " << ec;
-        sock_->Close();
       }
     });
   }
