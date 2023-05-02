@@ -1,5 +1,5 @@
-#ifndef CRC64_H
-#define CRC64_H
+#ifndef CRC16_H
+#define CRC16_H
 
 #include <stdint.h>
 
