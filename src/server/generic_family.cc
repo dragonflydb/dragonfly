@@ -441,7 +441,7 @@ OpStatus OpPersist(const OpArgs& op_args, string_view key) {
       return db_slice.UpdateExpire(op_args.db_cntx.db_index, it, 0) ? OpStatus::OK
                                                                     : OpStatus::SKIPPED;
     }
-    return OpStatus::OK;  // fall though - this is the default
+    return OpStatus::SKIPPED;  // fall though - key does not have expiry
   }
 }
 
@@ -710,7 +710,10 @@ void GenericFamily::Persist(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpPersist(t->GetOpArgs(shard), key); };
 
   OpStatus status = cntx->transaction->ScheduleSingleHop(move(cb));
-  (*cntx)->SendLong(status == OpStatus::OK);
+  if (status == OpStatus::OK)
+    (*cntx)->SendLong(1);
+  else
+    (*cntx)->SendLong(0);
 }
 
 void GenericFamily::Expire(CmdArgList args, ConnectionContext* cntx) {
