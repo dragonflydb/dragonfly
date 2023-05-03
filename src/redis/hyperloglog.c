@@ -1104,4 +1104,3 @@ int pfmerge(struct HllBufferPtr* in_hlls, size_t in_hlls_count, struct HllBuffer
 
   return C_OK;
 }
-
