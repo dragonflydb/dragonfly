@@ -1039,32 +1039,69 @@ int64_t pfcountSingle(struct HllBufferPtr hll_ptr) {
   return card;
 }
 
+/* Merge dense-encoded HLL */
+static void hllMergeDense(uint8_t* max, struct HllBufferPtr to) {
+  uint8_t* registers = max + HLL_HDR_SIZE;
+  uint8_t val;
+  struct hllhdr* hll_hdr = (struct hllhdr*)to.hll;
+
+  for (int i = 0; i < HLL_REGISTERS; i++) {
+    HLL_DENSE_GET_REGISTER(val, hll_hdr->registers, i);
+    if (val > registers[i]) {
+      registers[i] = val;
+    }
+  }
+}
+
 int64_t pfcountMulti(struct HllBufferPtr* hlls, size_t hlls_count) {
   struct hllhdr* hdr;
-  uint8_t max[HLL_HDR_SIZE + HLL_REGISTERS], *registers;
+  uint8_t max[HLL_HDR_SIZE + HLL_REGISTERS];
 
   /* Compute an HLL with M[i] = MAX(M[i]_j). */
   memset(max, 0, sizeof(max));
   hdr = (struct hllhdr*)max;
   hdr->encoding = HLL_RAW; /* Special internal-only encoding. */
-  registers = max + HLL_HDR_SIZE;
   for (size_t j = 0; j < hlls_count; j++) {
     /* Check type and size. */
     struct HllBufferPtr hll = hlls[j];
-    if (isValidHLL(hll) != HLL_VALID_DENSE)
+    if (isValidHLL(hll) != HLL_VALID_DENSE) {
       return C_ERR;
-
-    /* Merge dense-encoded HLL */
-    uint8_t val;
-    struct hllhdr* hll_hdr = (struct hllhdr*)hll.hll;
-
-    for (int i = 0; i < HLL_REGISTERS; i++) {
-      HLL_DENSE_GET_REGISTER(val, hll_hdr->registers, i);
-      if (val > registers[i])
-        registers[i] = val;
     }
+
+    hllMergeDense(max, hll);
   }
 
   /* Compute cardinality of the resulting set. */
   return hllCount(hdr, NULL);
 }
+
+int pfmerge(struct HllBufferPtr* in_hlls, size_t in_hlls_count, struct HllBufferPtr out_hll) {
+  if (isValidHLL(out_hll) != HLL_VALID_DENSE) {
+    return C_ERR;
+  }
+
+  uint8_t max[HLL_REGISTERS];
+
+  /* Compute an HLL with M[i] = MAX(M[i]_j).
+   * We store the maximum into the max array of registers. We'll write
+   * it to the target variable later. */
+  memset(max, 0, sizeof(max));
+
+  for (size_t j = 0; j < in_hlls_count; j++) {
+    struct HllBufferPtr hll = in_hlls[j];
+    if (isValidHLL(hll) != HLL_VALID_DENSE) {
+      return C_ERR;
+    }
+
+    hllMergeDense(max, hll);
+  }
+
+  struct hllhdr* hdr = (struct hllhdr*)out_hll.hll;
+  for (size_t j = 0; j < HLL_REGISTERS; j++) {
+    hllDenseSet(hdr->registers, j, max[j]);
+  }
+  HLL_INVALIDATE_CACHE(hdr);
+
+  return C_OK;
+}
+

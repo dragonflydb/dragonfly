@@ -51,4 +51,10 @@ int64_t pfcountSingle(struct HllBufferPtr hll_ptr);
  * All `hlls` elements must be valid, dense-encoded HLLs. */
 int64_t pfcountMulti(struct HllBufferPtr* hlls, size_t hlls_count);
 
+/* Merges array of HLLs pointed to be `in_hlls` of size `in_hlls_count` into `out_hll`.
+ * Returns 0 upon success, otherwise a negative number.
+ * Failure can occur when any of `in_hlls` or `out_hll` is not a dense-encoded HLL.
+ * `out_hll` *can* be one of the elements in `in_hlls`. */
+int pfmerge(struct HllBufferPtr* in_hlls, size_t in_hlls_count, struct HllBufferPtr out_hll);
+
 #endif

@@ -368,6 +368,9 @@ TEST_P(HllRdbTest, Hll) {
 
   EXPECT_EQ(CheckedInt({"pfadd", GetParam(), "2"}), 1);
   EXPECT_EQ(CheckedInt({"pfcount", GetParam()}), 2);
+
+  EXPECT_EQ(Run({"pfmerge", "key3", GetParam(), "key2"}), "OK");
+  EXPECT_EQ(CheckedInt({"pfcount", "key3"}), 2);
 }
 
 INSTANTIATE_TEST_SUITE_P(HllRdbTest, HllRdbTest, Values("key-sparse", "key-dense"));

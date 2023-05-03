@@ -95,4 +95,41 @@ TEST_F(HllFamilyTest, CountMultiple) {
   EXPECT_EQ(CheckedInt({"pfcount", "key1", "key4"}), 5);
 }
 
+TEST_F(HllFamilyTest, MergeToNew) {
+  EXPECT_EQ(CheckedInt({"pfadd", "key1", "1", "2", "3"}), 1);
+  EXPECT_EQ(CheckedInt({"pfadd", "key2", "4", "5"}), 1);
+  EXPECT_EQ(Run({"pfmerge", "key3", "key1", "key2"}), "OK");
+  EXPECT_EQ(CheckedInt({"pfcount", "key3"}), 5);
+}
+
+TEST_F(HllFamilyTest, MergeToExisting) {
+  EXPECT_EQ(CheckedInt({"pfadd", "key1", "1", "2", "3"}), 1);
+  EXPECT_EQ(CheckedInt({"pfadd", "key2", "4", "5"}), 1);
+  EXPECT_EQ(Run({"pfmerge", "key2", "key1"}), "OK");
+  EXPECT_EQ(CheckedInt({"pfcount", "key2"}), 5);
+}
+
+TEST_F(HllFamilyTest, MergeNonExisting) {
+  EXPECT_EQ(CheckedInt({"pfadd", "key1", "1", "2", "3"}), 1);
+  EXPECT_EQ(Run({"pfmerge", "key3", "key1", "key2"}), "OK");
+  EXPECT_EQ(CheckedInt({"pfcount", "key3"}), 3);
+}
+
+TEST_F(HllFamilyTest, MergeOverlapping) {
+  EXPECT_EQ(CheckedInt({"pfadd", "key1", "1", "2", "3"}), 1);
+  EXPECT_EQ(CheckedInt({"pfadd", "key2", "2", "3"}), 1);
+  EXPECT_EQ(CheckedInt({"pfadd", "key3", "1", "3"}), 1);
+  EXPECT_EQ(CheckedInt({"pfadd", "key4", "2", "3"}), 1);
+  EXPECT_EQ(CheckedInt({"pfadd", "key5", "3"}), 1);
+  EXPECT_EQ(Run({"pfmerge", "key6", "key1", "key2", "key3", "key4", "key5"}), "OK");
+  EXPECT_EQ(CheckedInt({"pfcount", "key6"}), 3);
+}
+
+TEST_F(HllFamilyTest, MergeInvalid) {
+  EXPECT_EQ(CheckedInt({"pfadd", "key1", "1", "2", "3"}), 1);
+  EXPECT_EQ(Run({"set", "key2", "..."}), "OK");
+  EXPECT_THAT(Run({"pfmerge", "key1", "key2"}), ErrArg(HllFamily::kInvalidHllErr));
+  EXPECT_EQ(CheckedInt({"pfcount", "key1"}), 3);
+}
+
 }  // namespace dfly
