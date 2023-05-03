@@ -5,6 +5,7 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 #include <string_view>
 
 #include "core/core_types.h"
@@ -105,6 +106,8 @@ class Interpreter {
   // fp must point to buffer with at least 41 chars.
   // fp[40] will be set to '\0'.
   static void FuncSha1(std::string_view body, char* fp);
+
+  static std::optional<std::string> DetectPossibleAsyncCalls(std::string_view body);
 
   template <typename U> void SetRedisFunc(U&& u) {
     redis_func_ = std::forward<U>(u);

@@ -76,12 +76,24 @@ TEST_F(StreamFamilyTest, Range) {
   EXPECT_THAT(sub0, ElementsAre("1-0", ArrLen(2)));
   EXPECT_THAT(sub1, ElementsAre("1-1", ArrLen(2)));
 
-  resp = Run({"xrevrange", "key", "-", "+"});
+  resp = Run({"xrevrange", "key", "+", "-"});
   sub_arr = resp.GetVec();
   sub0 = sub_arr[0].GetVec();
   sub1 = sub_arr[1].GetVec();
   EXPECT_THAT(sub0, ElementsAre("1-1", ArrLen(2)));
   EXPECT_THAT(sub1, ElementsAre("1-0", ArrLen(2)));
+}
+
+TEST_F(StreamFamilyTest, GroupCreate) {
+  Run({"xadd", "key", "1-*", "f1", "v1"});
+  auto resp = Run({"xgroup", "create", "key", "grname", "1"});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"xgroup", "create", "test", "test", "0"});
+  EXPECT_THAT(resp, ErrArg("requires the key to exist"));
+  resp = Run({"xgroup", "create", "test", "test", "0", "MKSTREAM"});
+  EXPECT_THAT(resp, "OK");
+  resp = Run({"xgroup", "create", "test", "test", "0", "MKSTREAM"});
+  EXPECT_THAT(resp, ErrArg("BUSYGROUP"));
 }
 
 TEST_F(StreamFamilyTest, Issue854) {

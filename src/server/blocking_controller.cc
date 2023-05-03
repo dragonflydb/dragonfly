@@ -287,7 +287,7 @@ void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueueMap* w
     Transaction* head = wi.get();
     DVLOG(2) << "WQ-Pop " << head->DebugId() << " from key " << key;
 
-    if (head->NotifySuspended(owner_->committed_txid(), sid)) {
+    if (head->NotifySuspended(owner_->committed_txid(), sid, key)) {
       // We deliberately keep the notified transaction in the queue to know which queue
       // must handled when this transaction finished.
       wq->notify_txid = owner_->committed_txid();

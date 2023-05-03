@@ -739,8 +739,10 @@ void Replica::CloseSocket() {
   unique_lock lk(sock_mu_);
   if (sock_) {
     sock_->proactor()->Await([this] {
-      auto ec = sock_->Shutdown(SHUT_RDWR);
-      LOG_IF(ERROR, ec) << "Could not shutdown socket " << ec;
+      if (sock_->IsOpen()) {
+        auto ec = sock_->Shutdown(SHUT_RDWR);
+        LOG_IF(ERROR, ec) << "Could not shutdown socket " << ec;
+      }
     });
   }
 }
