@@ -27,12 +27,12 @@ string AstNegateNode::Debug() const {
 }
 
 bool AstLogicalNode::Check(string_view input) const {
-  return disjunction_ ? (l_->Check(input) || r_->Check(input))
-                      : (l_->Check(input) && r_->Check(input));
+  return op_ == kOr ? (l_->Check(input) || r_->Check(input))
+                    : (l_->Check(input) && r_->Check(input));
 }
 
 string AstLogicalNode::Debug() const {
-  string op = disjunction_ ? "or" : "and";
+  string op = op_ == kOr ? "or" : "and";
   return op + "{" + l_->Debug() + "," + r_->Debug() + "}";
 }
 

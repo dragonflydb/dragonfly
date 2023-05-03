@@ -30,12 +30,11 @@ using NodePtr = std::shared_ptr<AstNode>;
 using AstExpr = NodePtr;
 
 template <typename T, typename... Ts> AstExpr MakeExpr(Ts... ts) {
-  auto ptr = std::make_shared<T>(std::forward<Ts>(ts)...);
-  return AstExpr{std::reinterpret_pointer_cast<AstNode>(move(ptr))};
+  return std::make_shared<T>(std::forward<Ts>(ts)...);
 }
 
 // AST term node, matches only if input contains term.
-class AstTermNode : AstNode {
+class AstTermNode : public AstNode {
  public:
   AstTermNode(std::string term) : term_{move(term)} {
   }
@@ -47,11 +46,11 @@ class AstTermNode : AstNode {
 };
 
 // Ast negation node, matches only if its sub node didn't match.
-class AstNegateNode : AstNode {
+class AstNegateNode : public AstNode {
  public:
   AstNegateNode(NodePtr node) : node_{node} {
   }
-  virtual bool Check(std::string_view needle) const;
+  virtual bool Check(std::string_view input) const;
   virtual std::string Debug() const;
 
  private:
@@ -60,16 +59,21 @@ class AstNegateNode : AstNode {
 
 // Ast logical operation node, matches only if sub nodes match
 // in respect to logical operation (and/or).
-class AstLogicalNode : AstNode {
+class AstLogicalNode : public AstNode {
  public:
-  AstLogicalNode(NodePtr l, NodePtr r, bool disjunction) : l_{l}, r_{r}, disjunction_{disjunction} {
+  enum Op {
+    kAnd,
+    kOr,
+  };
+
+  AstLogicalNode(NodePtr l, NodePtr r, Op op) : l_{l}, r_{r}, op_{op} {
   }
-  virtual bool Check(std::string_view needle) const;
+  virtual bool Check(std::string_view input) const;
   virtual std::string Debug() const;
 
  private:
   NodePtr l_, r_;
-  bool disjunction_;
+  Op op_;
 };
 
 }  // namespace search

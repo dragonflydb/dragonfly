@@ -131,7 +131,7 @@ TEST_F(SearchParserTest, MatchNotTerm) {
   EXPECT_TRUE(Check("definitelyright"));
 }
 
-TEST_F(SearchParserTest, MatchConjunctionTerm) {
+TEST_F(SearchParserTest, MatchConjunction) {
   ParseExpr("foo bar");
 
   EXPECT_TRUE(Check("foo bar"));
@@ -139,6 +139,7 @@ TEST_F(SearchParserTest, MatchConjunctionTerm) {
   EXPECT_TRUE(Check("foo bar and more"));
   EXPECT_TRUE(Check("more bar and foo"));
 
+  EXPECT_FALSE(Check("wrong"));
   EXPECT_FALSE(Check("foo"));
   EXPECT_FALSE(Check("bar"));
   EXPECT_FALSE(Check("foob"));
@@ -146,7 +147,29 @@ TEST_F(SearchParserTest, MatchConjunctionTerm) {
   EXPECT_FALSE(Check("but not bar"));
 }
 
-TEST_F(SearchParserTest, MatchDisjunctionTerm) {
+TEST_F(SearchParserTest, MatchConjunctionNot) {
+  ParseExpr("foo -bar");
+
+  EXPECT_TRUE(Check("foo"));
+  EXPECT_TRUE(Check("foo rab"));
+
+  EXPECT_FALSE(Check("wrong"));
+  EXPECT_FALSE(Check("bar"));
+  EXPECT_FALSE(Check("foo bar"));
+}
+
+TEST_F(SearchParserTest, MatchNotConjunction) {
+  ParseExpr("-bar foo");
+
+  EXPECT_TRUE(Check("foo"));
+  EXPECT_TRUE(Check("foo rab"));
+
+  EXPECT_FALSE(Check("wrong"));
+  EXPECT_FALSE(Check("bar"));
+  EXPECT_FALSE(Check("foo bar"));
+}
+
+TEST_F(SearchParserTest, MatchDisjunction) {
   ParseExpr("foo | bar");
 
   EXPECT_TRUE(Check("foo bar"));
@@ -156,7 +179,21 @@ TEST_F(SearchParserTest, MatchDisjunctionTerm) {
   EXPECT_TRUE(Check("or only bar"));
 
   EXPECT_FALSE(Check("wrong"));
-  EXPECT_FALSE(Check("no mentions"));
+  EXPECT_FALSE(Check("far"));
+}
+
+TEST_F(SearchParserTest, MatchParenthesis) {
+  ParseExpr("( foo | oof ) ( bar | rab )");
+
+  EXPECT_TRUE(Check("foo bar"));
+  EXPECT_TRUE(Check("oof rab"));
+  EXPECT_TRUE(Check("foo rab"));
+  EXPECT_TRUE(Check("oof bar"));
+  EXPECT_TRUE(Check("foo oof bar rab"));
+
+  EXPECT_FALSE(Check("wrong"));
+  EXPECT_FALSE(Check("bar rab"));
+  EXPECT_FALSE(Check("foo oof"));
 }
 
 }  // namespace search

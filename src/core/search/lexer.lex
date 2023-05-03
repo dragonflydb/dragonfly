@@ -58,7 +58,7 @@ term_char [_]|\w
 "=>"           return Parser::make_ARROW (loc());
 "["            return Parser::make_LBRACKET (loc());
 "]"            return Parser::make_RBRACKET (loc());
-"|"            return Parser::make_VBAR (loc());
+"|"            return Parser::make_OR_OP (loc());
 
 -?[0-9]+       return make_INT64(matched_view(), loc());
 

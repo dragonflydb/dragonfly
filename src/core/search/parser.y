@@ -48,14 +48,19 @@ using namespace std;
   COLON    ":"
   LBRACKET "["
   RBRACKET "]"
-  VBAR     "|"
+  OR_OP    "|"
 ;
 
-%precedence NOT_OP
+%token AND_OP
 
 // Needed 0 at the end to satisfy bison 3.5.1
 %token YYEOF 0
 %token <std::string> TERM "term" PARAM "param" FIELD "field"
+
+%precedence TERM
+%right NOT_OP
+%left OR_OP AND_OP
+%precedence LPAREN RPAREN
 
 %token <int64_t> INT64 "int64"
 %nterm <AstExpr> final_query filter search_expr field_filter field_cond range_value term_list opt_neg_term
@@ -69,12 +74,11 @@ final_query:
 
 filter:
   search_expr { $$ = $1; }
-  | filter search_expr { $$ = MakeExpr<AstLogicalNode>($1, $2, false);};
-  | filter VBAR search_expr { $$ = MakeExpr<AstLogicalNode>($1, $3, true); }
-
 
 search_expr:
  LPAREN search_expr RPAREN { $$ = $2; }
+ | search_expr search_expr %prec AND_OP { $$ = MakeExpr<AstLogicalNode>($1, $2, AstLogicalNode::kAnd); };
+ | search_expr OR_OP search_expr { $$ = MakeExpr<AstLogicalNode>($1, $3, AstLogicalNode::kOr); }
  | NOT_OP search_expr { $$ = MakeExpr<AstNegateNode>($2); };
  | TERM { $$ = MakeExpr<AstTermNode>($1); }
  | field_filter;
