@@ -76,7 +76,7 @@ TEST_F(StreamFamilyTest, Range) {
   EXPECT_THAT(sub0, ElementsAre("1-0", ArrLen(2)));
   EXPECT_THAT(sub1, ElementsAre("1-1", ArrLen(2)));
 
-  resp = Run({"xrevrange", "key", "-", "+"});
+  resp = Run({"xrevrange", "key", "+", "-"});
   sub_arr = resp.GetVec();
   sub0 = sub_arr[0].GetVec();
   sub1 = sub_arr[1].GetVec();

@@ -762,6 +762,7 @@ void StreamFamily::XRange(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StreamFamily::XRevRange(CmdArgList args, ConnectionContext* cntx) {
+  swap(args[1], args[2]);
   XRangeGeneric(std::move(args), true, cntx);
 }
 
