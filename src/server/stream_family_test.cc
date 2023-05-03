@@ -84,6 +84,18 @@ TEST_F(StreamFamilyTest, Range) {
   EXPECT_THAT(sub1, ElementsAre("1-0", ArrLen(2)));
 }
 
+TEST_F(StreamFamilyTest, GroupCreate) {
+  Run({"xadd", "key", "1-*", "f1", "v1"});
+  auto resp = Run({"xgroup", "create", "key", "grname", "1"});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"xgroup", "create", "test", "test", "0"});
+  EXPECT_THAT(resp, ErrArg("requires the key to exist"));
+  resp = Run({"xgroup", "create", "test", "test", "0", "MKSTREAM"});
+  EXPECT_THAT(resp, "OK");
+  resp = Run({"xgroup", "create", "test", "test", "0", "MKSTREAM"});
+  EXPECT_THAT(resp, ErrArg("BUSYGROUP"));
+}
+
 TEST_F(StreamFamilyTest, Issue854) {
   auto resp = Run({"xgroup", "help"});
   EXPECT_THAT(resp, ArgType(RespExpr::ARRAY));
