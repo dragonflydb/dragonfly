@@ -287,17 +287,31 @@ OpResult<vector<GroupInfo>> OpListGroups(const DbContext& db_cntx, string_view k
   return result;
 }
 
+constexpr uint8_t kCreateOptMkstream = 1 << 0;
+
 struct CreateOpts {
   string_view gname;
   string_view id;
+  uint8_t flags = 0;
 };
 
 OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts) {
   auto* shard = op_args.shard;
   auto& db_slice = shard->db_slice();
   OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
-  if (!res_it)
-    return res_it.status();
+  if (!res_it) {
+    if (opts.flags & kCreateOptMkstream) {
+      // MKSTREAM is enabled, so create the stream
+      res_it = db_slice.AddNew(op_args.db_cntx, key, PrimeValue{}, 0);
+      if (!res_it)
+        return res_it.status();
+
+      robj* stream_obj = createStreamObject();
+      (*res_it)->second.ImportRObj(stream_obj);
+    } else {
+      return res_it.status();
+    }
+  }
 
   CompactObj& cobj = (*res_it)->second;
   stream* s = (stream*)cobj.RObjPtr();
@@ -493,6 +507,11 @@ void CreateGroup(CmdArgList args, string_view key, ConnectionContext* cntx) {
   CreateOpts opts;
   opts.gname = ArgS(args, 0);
   opts.id = ArgS(args, 1);
+  if (args.size() >= 3) {
+    ToUpper(&args[2]);
+    if (ArgS(args, 2) == "MKSTREAM")
+      opts.flags |= kCreateOptMkstream;
+  }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpCreate(t->GetOpArgs(shard), key, opts);
