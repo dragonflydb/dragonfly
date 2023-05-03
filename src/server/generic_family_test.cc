@@ -415,13 +415,16 @@ TEST_F(GenericFamilyTest, Time) {
 TEST_F(GenericFamilyTest, Persist) {
   auto resp = Run({"set", "mykey", "somevalue"});
   EXPECT_EQ(resp, "OK");
-  // Key without expiration time - return 1
-  EXPECT_EQ(1, CheckedInt({"persist", "mykey"}));
+  // Key without expiration time - return 0
+  EXPECT_EQ(0, CheckedInt({"persist", "mykey"}));
+  EXPECT_EQ(-1, CheckedInt({"TTL", "mykey"}));
   // set expiration time and try again
   resp = Run({"EXPIRE", "mykey", "10"});
   EXPECT_EQ(10, CheckedInt({"TTL", "mykey"}));
   EXPECT_EQ(1, CheckedInt({"persist", "mykey"}));
   EXPECT_EQ(-1, CheckedInt({"TTL", "mykey"}));
+  // persist on key that does not exist should also return 0
+  EXPECT_EQ(0, CheckedInt({"persist", "keythatdoesnotexist"}));
 }
 
 TEST_F(GenericFamilyTest, Dump) {
