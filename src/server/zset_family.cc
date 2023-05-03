@@ -1294,7 +1294,10 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
   vector<OpResult<ScoredMap>> maps(shard_set->size(), OpStatus::SKIPPED);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    maps[shard->shard_id()] = OpInter(shard, t, dest_key, op_args.agg_type, op_args.weights, true);
+    auto& entry = maps[shard->shard_id()];
+    entry = OpInter(shard, t, dest_key, op_args.agg_type, op_args.weights, true);
+    if (entry && entry.value().empty())
+      entry = OpStatus::SKIPPED;
     return OpStatus::OK;
   };
 
@@ -1302,7 +1305,8 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
   cntx->transaction->Execute(std::move(cb), false);
 
   ScoredMap result;
-  for (auto& op_res : maps) {
+  for (auto i = 0u; i < maps.size(); ++i) {
+    auto& op_res = maps[i];
     if (op_res.status() == OpStatus::SKIPPED)
       continue;
 
