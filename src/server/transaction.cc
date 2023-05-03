@@ -1107,7 +1107,7 @@ bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provi
 
   auto wake_cb = [this] {
     return (coordinator_state_ & COORD_CANCELLED) ||
-           notify_txid_.load(memory_order_relaxed) != kuint64max;
+           wakeup_requested_.load(memory_order_relaxed) > 0;
   };
 
   cv_status status = cv_status::no_timeout;
@@ -1257,7 +1257,7 @@ bool Transaction::IsGlobal() const {
 // Runs only in the shard thread.
 // Returns true if the transacton has changed its state from suspended to awakened,
 // false, otherwise.
-bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid) {
+bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid, string_view key) {
   unsigned idx = SidToId(sid);
   auto& sd = shard_data_[idx];
   unsigned local_mask = sd.local_mask;
@@ -1265,6 +1265,12 @@ bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid) {
   if (local_mask & Transaction::EXPIRED_Q) {
     return false;
   }
+
+  // Wake a transaction only once on the first notify.
+  // We don't care about preserving the strict order with multiple operations running on blocking
+  // keys in parallel, because the internal order is not observable from outside either way.
+  if (wakeup_requested_.fetch_add(1, memory_order_relaxed) > 0)
+    return false;
 
   DVLOG(1) << "NotifySuspended " << DebugId() << ", local_mask:" << local_mask << " by commited_id "
            << committed_txid;
@@ -1277,20 +1283,25 @@ bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid) {
     sd.local_mask &= ~SUSPENDED_Q;
     sd.local_mask |= AWAKED_Q;
 
-    TxId notify_id = notify_txid_.load(memory_order_relaxed);
-
-    while (committed_txid < notify_id) {
-      if (notify_txid_.compare_exchange_weak(notify_id, committed_txid, memory_order_relaxed)) {
-        // if we improved notify_txid_ - break.
-        blocking_ec_.notify();  // release barrier.
-        break;
-      }
-    }
-    return true;
+    // Find index of awakened key.
+    auto args = GetShardArgs(sid);
+    auto it =
+        find_if(args.begin(), args.end(), [key](auto arg) { return facade::ToSV(arg) == key; });
+    DCHECK(it != args.end());
+    sd.wake_key_pos = it - args.begin();
   }
 
-  CHECK(sd.local_mask & AWAKED_Q);
-  return false;
+  blocking_ec_.notify();
+  return true;
+}
+
+optional<string_view> Transaction::GetWakeKey(ShardId sid) const {
+  auto& sd = shard_data_[SidToId(sid)];
+  if ((sd.local_mask & AWAKED_Q) == 0)
+    return nullopt;
+
+  CHECK_NE(sd.wake_key_pos, UINT16_MAX);
+  return GetShardArgs(sid).at(sd.wake_key_pos);
 }
 
 void Transaction::LogAutoJournalOnShard(EngineShard* shard) {

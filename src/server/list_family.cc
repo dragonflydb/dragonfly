@@ -136,7 +136,7 @@ struct ShardFFResult {
 };
 
 // Used by bpopper.
-OpResult<ShardFFResult> FindFirst(bool awaked_only, Transaction* trans) {
+OpResult<ShardFFResult> FindFirst(Transaction* trans) {
   VLOG(2) << "FindFirst::Find " << trans->DebugId();
 
   // Holds Find results: (iterator to a found key, and its index in the passed arguments).
@@ -145,31 +145,17 @@ OpResult<ShardFFResult> FindFirst(bool awaked_only, Transaction* trans) {
   std::vector<OpResult<FFResult>> find_res(shard_set->size());
   fill(find_res.begin(), find_res.end(), OpStatus::KEY_NOTFOUND);
 
-  // We must capture notify_txid before we spawn callbacks.
-  // Otherwise, consider the following scenario:
-  // 0. The key is added in shard 0, with notify_txid = 100
-  // 1. The cb runs first on shard1 and does not find anything.
-  // 2. A tx 99 runs on shard 1, adds a key, updates notify_txid to 99.
-  // 3. the cb on shard 0 runs and ignores the key due to lower notify_txid.
-  uint64_t notify_txid = trans->GetNotifyTxid();
-
   auto cb = [&](Transaction* t, EngineShard* shard) {
     auto args = t->GetShardArgs(shard->shard_id());
-    // if requested to consider awaked shards only, we check the AWAKED_Q flag.
-    if (awaked_only && (t->GetLocalMask(shard->shard_id()) & Transaction::AWAKED_Q) == 0) {
-      return OpStatus::OK;
-    }
 
-    if (shard->committed_txid() <= notify_txid) {
-      OpResult<pair<PrimeIterator, unsigned>> ff_res =
-          shard->db_slice().FindFirst(t->GetDbContext(), args);
+    OpResult<pair<PrimeIterator, unsigned>> ff_res =
+        shard->db_slice().FindFirst(t->GetDbContext(), args);
 
-      if (ff_res) {
-        FFResult ff_result(ff_res->first->first.AsRef(), ff_res->second);
-        find_res[shard->shard_id()] = move(ff_result);
-      } else {
-        find_res[shard->shard_id()] = ff_res.status();
-      }
+    if (ff_res) {
+      FFResult ff_result(ff_res->first->first.AsRef(), ff_res->second);
+      find_res[shard->shard_id()] = move(ff_result);
+    } else {
+      find_res[shard->shard_id()] = ff_res.status();
     }
 
     return OpStatus::OK;
@@ -229,6 +215,7 @@ class BPopper {
 
  private:
   void Pop(Transaction* t, EngineShard* shard);
+  void OpPop(Transaction* t, EngineShard* shard);
 
   ListDir dir_;
 
@@ -258,25 +245,25 @@ BPopper::BPopper(ListDir dir) : dir_(dir) {
 }
 
 OpStatus BPopper::Run(Transaction* trans, unsigned msec) {
-  time_point tp =
-      msec ? chrono::steady_clock::now() + chrono::milliseconds(msec) : time_point::max();
+  auto tp = msec ? chrono::steady_clock::now() + chrono::milliseconds(msec) : time_point::max();
   bool is_multi = trans->IsMulti();
+
   trans->Schedule();
 
   auto* stats = ServerState::tl_connection_stats();
 
-  OpResult<ShardFFResult> result = FindFirst(false, trans);
+  OpResult<ShardFFResult> result = FindFirst(trans);
 
-  if (result.status() == OpStatus::KEY_NOTFOUND) {
+  if (result.ok()) {
+    ff_result_ = move(result.value());
+  } else if (result.status() == OpStatus::KEY_NOTFOUND) {
+    // Close transaction and return.
     if (is_multi) {
-      // close transaction and return.
       auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
       trans->Execute(std::move(cb), true);
-
       return OpStatus::TIMED_OUT;
     }
 
-    // Block
     auto wcb = [](Transaction* t, EngineShard* shard) {
       return t->GetShardArgs(shard->shard_id());
     };
@@ -288,24 +275,15 @@ OpStatus BPopper::Run(Transaction* trans, unsigned msec) {
 
     if (!wait_succeeded)
       return OpStatus::TIMED_OUT;
-
-    // Now we have something for sure.
-    result = FindFirst(true, trans);  // retry - must find something.
-  }
-
-  if (!result) {
+  } else {
     // Could be the wrong-type error.
     // cleanups, locks removal etc.
     auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
     trans->Execute(std::move(cb), true);
 
     DCHECK_NE(result.status(), OpStatus::KEY_NOTFOUND);
-
     return result.status();
   }
-
-  VLOG(1) << "Popping an element " << trans->DebugId();
-  ff_result_ = move(result.value());
 
   auto cb = [this](Transaction* t, EngineShard* shard) {
     Pop(t, shard);
@@ -317,27 +295,35 @@ OpStatus BPopper::Run(Transaction* trans, unsigned msec) {
 }
 
 void BPopper::Pop(Transaction* t, EngineShard* shard) {
-  if (shard->shard_id() == ff_result_.sid) {
+  if (auto wake_key = t->GetWakeKey(shard->shard_id()); wake_key) {
+    key_ = *wake_key;
+    OpPop(t, shard);
+  } else if (shard->shard_id() == ff_result_.sid) {
     ff_result_.key.GetString(&key_);
-    auto& db_slice = shard->db_slice();
-    auto it_res = db_slice.Find(t->GetDbContext(), key_, OBJ_LIST);
-    CHECK(it_res) << t->DebugId() << " " << key_;  // must exist and must be ok.
-    PrimeIterator it = *it_res;
-    quicklist* ql = GetQL(it->second);
+    OpPop(t, shard);
+  }
+}
 
-    DVLOG(2) << "popping from " << key_ << " " << t->DebugId();
-    db_slice.PreUpdate(t->GetDbIndex(), it);
-    value_ = ListPop(dir_, ql);
-    db_slice.PostUpdate(t->GetDbIndex(), it, key_);
-    if (quicklistCount(ql) == 0) {
-      DVLOG(1) << "deleting key " << key_ << " " << t->DebugId();
-      CHECK(shard->db_slice().Del(t->GetDbIndex(), it));
-    }
-    OpArgs op_args = t->GetOpArgs(shard);
-    if (op_args.shard->journal()) {
-      string command = dir_ == ListDir::LEFT ? "LPOP" : "RPOP";
-      RecordJournal(op_args, command, ArgSlice{key_}, 1);
-    }
+void BPopper::OpPop(Transaction* t, EngineShard* shard) {
+  auto& db_slice = shard->db_slice();
+  auto it_res = db_slice.Find(t->GetDbContext(), key_, OBJ_LIST);
+  CHECK(it_res) << t->DebugId() << " " << key_;  // must exist and must be ok.
+  PrimeIterator it = *it_res;
+
+  quicklist* ql = GetQL(it->second);
+
+  DVLOG(2) << "popping from " << key_ << " " << t->DebugId();
+  db_slice.PreUpdate(t->GetDbIndex(), it);
+  value_ = ListPop(dir_, ql);
+  db_slice.PostUpdate(t->GetDbIndex(), it, key_);
+  if (quicklistCount(ql) == 0) {
+    DVLOG(1) << "deleting key " << key_ << " " << t->DebugId();
+    CHECK(shard->db_slice().Del(t->GetDbIndex(), it));
+  }
+  OpArgs op_args = t->GetOpArgs(shard);
+  if (op_args.shard->journal()) {
+    string command = dir_ == ListDir::LEFT ? "LPOP" : "RPOP";
+    RecordJournal(op_args, command, ArgSlice{key_}, 1);
   }
 }
 
@@ -1007,7 +993,6 @@ OpResult<string> BPopPusher::RunSingle(Transaction* t, time_point tp) {
 
   // Block
   ++stats->num_blocked_clients;
-
   bool wait_succeeded = t->WaitOnWatch(tp, std::move(wcb));
   --stats->num_blocked_clients;
 
