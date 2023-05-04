@@ -58,8 +58,8 @@ using namespace std;
 %token <std::string> TERM "term" PARAM "param" FIELD "field"
 
 %precedence TERM
-%right NOT_OP
 %left OR_OP AND_OP
+%right NOT_OP
 %precedence LPAREN RPAREN
 
 %token <int64_t> INT64 "int64"

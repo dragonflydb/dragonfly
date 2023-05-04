@@ -32,7 +32,7 @@ class QueryDriver {
     return scanner()->Lex();
   }
 
-  Parser::location_type location;
+  void ResetScanner();
 
   void Set(AstExpr expr) {
     expr_ = expr;
@@ -41,6 +41,8 @@ class QueryDriver {
   AstExpr Get() {
     return expr_;
   }
+
+  Parser::location_type location;
 
  private:
   AstExpr expr_;

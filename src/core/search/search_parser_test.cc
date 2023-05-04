@@ -26,21 +26,27 @@ class SearchParserTest : public ::testing::Test {
   }
 
   int Parse(const std::string& str) {
+    query_driver_.ResetScanner();
     query_driver_.SetInput(str);
 
     return Parser(&query_driver_)();
   }
 
   void ParseExpr(const std::string& str) {
-    query_driver_.SetInput(str);
-    (void)Parser (&query_driver_)();
+    raw_expr_ = str;
+    Parse(str);
     expr_ = query_driver_.Get();
   }
 
-  bool Check(string_view input) {
+  bool Check(string_view input) const {
     return expr_->Check(input);
   }
 
+  string DebugExpr() const {
+    return raw_expr_ + " parsed as " + expr_->Debug();
+  }
+
+  string raw_expr_;
   AstExpr expr_;
   QueryDriver query_driver_;
 };
@@ -67,6 +73,18 @@ class SearchParserTest : public ::testing::Test {
       caught = true;                          \
     }                                         \
     ASSERT_TRUE(caught);                      \
+  }
+
+#define CHECK_ALL(...)                                                    \
+  {                                                                       \
+    for (auto input : {__VA_ARGS__})                                      \
+      EXPECT_TRUE(Check(input)) << input << " failed on " << DebugExpr(); \
+  }
+
+#define CHECK_NONE(...)                                                    \
+  {                                                                        \
+    for (auto input : {__VA_ARGS__})                                       \
+      EXPECT_FALSE(Check(input)) << input << " failed on " << DebugExpr(); \
   }
 
 TEST_F(SearchParserTest, Scanner) {
@@ -113,87 +131,58 @@ TEST_F(SearchParserTest, Parse) {
 
 TEST_F(SearchParserTest, MatchTerm) {
   ParseExpr("foo");
-  EXPECT_TRUE(Check("foo"));
-  EXPECT_TRUE(Check("*foo*bar"));
-  EXPECT_TRUE(Check("more*foo*bar"));
-
-  EXPECT_FALSE(Check("faa"));
-  EXPECT_FALSE(Check("definitelywrong"));
+  CHECK_ALL("foo", "foo bar", "more foo bar");
+  CHECK_NONE("wrong", "nomatch");
 }
 
 TEST_F(SearchParserTest, MatchNotTerm) {
   ParseExpr("-foo");
-  EXPECT_FALSE(Check("foo"));
-  EXPECT_FALSE(Check("*foo*bar"));
-  EXPECT_FALSE(Check("more*foo*bar"));
-
-  EXPECT_TRUE(Check("faa"));
-  EXPECT_TRUE(Check("definitelyright"));
+  CHECK_ALL("faa", "definitielyright");
+  CHECK_NONE("foo", "foo bar", "more foo bar");
 }
 
-TEST_F(SearchParserTest, MatchConjunction) {
+TEST_F(SearchParserTest, MatchLogicalNode) {
   ParseExpr("foo bar");
 
-  EXPECT_TRUE(Check("foo bar"));
-  EXPECT_TRUE(Check("bar foo"));
-  EXPECT_TRUE(Check("foo bar and more"));
-  EXPECT_TRUE(Check("more bar and foo"));
+  CHECK_ALL("foo bar", "bar foo", "more bar and foo");
+  CHECK_NONE("wrong", "foo", "bar", "foob", "far");
 
-  EXPECT_FALSE(Check("wrong"));
-  EXPECT_FALSE(Check("foo"));
-  EXPECT_FALSE(Check("bar"));
-  EXPECT_FALSE(Check("foob"));
-  EXPECT_FALSE(Check("foo and more stuff"));
-  EXPECT_FALSE(Check("but not bar"));
-}
-
-TEST_F(SearchParserTest, MatchConjunctionNot) {
-  ParseExpr("foo -bar");
-
-  EXPECT_TRUE(Check("foo"));
-  EXPECT_TRUE(Check("foo rab"));
-
-  EXPECT_FALSE(Check("wrong"));
-  EXPECT_FALSE(Check("bar"));
-  EXPECT_FALSE(Check("foo bar"));
-}
-
-TEST_F(SearchParserTest, MatchNotConjunction) {
-  ParseExpr("-bar foo");
-
-  EXPECT_TRUE(Check("foo"));
-  EXPECT_TRUE(Check("foo rab"));
-
-  EXPECT_FALSE(Check("wrong"));
-  EXPECT_FALSE(Check("bar"));
-  EXPECT_FALSE(Check("foo bar"));
-}
-
-TEST_F(SearchParserTest, MatchDisjunction) {
   ParseExpr("foo | bar");
 
-  EXPECT_TRUE(Check("foo bar"));
-  EXPECT_TRUE(Check("foo"));
-  EXPECT_TRUE(Check("bar"));
-  EXPECT_TRUE(Check("foo and more stuff"));
-  EXPECT_TRUE(Check("or only bar"));
+  CHECK_ALL("foo bar", "foo", "bar", "foo and more", "or only bar");
+  CHECK_NONE("wrong", "only far");
 
-  EXPECT_FALSE(Check("wrong"));
-  EXPECT_FALSE(Check("far"));
+  ParseExpr("foo bar baz");
+
+  CHECK_ALL("baz bar foo", "bar and foo and baz");
+  CHECK_NONE("wrong", "foo baz", "bar baz", "and foo");
 }
 
 TEST_F(SearchParserTest, MatchParenthesis) {
   ParseExpr("( foo | oof ) ( bar | rab )");
 
-  EXPECT_TRUE(Check("foo bar"));
-  EXPECT_TRUE(Check("oof rab"));
-  EXPECT_TRUE(Check("foo rab"));
-  EXPECT_TRUE(Check("oof bar"));
-  EXPECT_TRUE(Check("foo oof bar rab"));
+  CHECK_ALL("foo bar", "oof rab", "foo rab", "oof bar", "foo oof bar rab");
+  CHECK_NONE("wrong", "bar rab", "foo oof");
+}
 
-  EXPECT_FALSE(Check("wrong"));
-  EXPECT_FALSE(Check("bar rab"));
-  EXPECT_FALSE(Check("foo oof"));
+TEST_F(SearchParserTest, CheckNotPriority) {
+  for (auto expr : {"-bar foo baz", "foo -bar baz", "foo baz -bar"}) {
+    ParseExpr(expr);
+
+    CHECK_ALL("foo baz", "foo rab baz", "baz rab foo");
+    CHECK_NONE("wrong", "bar", "foo bar baz", "foo baz bar");
+  }
+
+  for (auto expr : {"-bar | foo", "foo | -bar"}) {
+    ParseExpr(expr);
+
+    CHECK_ALL("foo", "right", "foo bar");
+    CHECK_NONE("bar", "bar baz");
+  }
+
+  ParseExpr("foo | -(bar baz)");
+  CHECK_ALL("foo", "not b/r and b/z", "foo bar baz", "single bar", "only baz");
+  CHECK_NONE("bar baz", "some more bar and baz");
 }
 
 }  // namespace search
