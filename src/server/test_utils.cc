@@ -156,6 +156,10 @@ void BaseFamilyTest::SetUp() {
   LOG(INFO) << "Starting " << test_info->name();
 }
 
+void BaseFamilyTest::DisableLockCheck() {
+  check_locks_ = false;
+}
+
 unsigned BaseFamilyTest::NumLocked() {
   atomic_uint count = 0;
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
@@ -167,7 +171,9 @@ unsigned BaseFamilyTest::NumLocked() {
 }
 
 void BaseFamilyTest::TearDown() {
-  CHECK_EQ(NumLocked(), 0U);
+  if (check_locks_) {
+    CHECK_EQ(NumLocked(), 0U);
+  }
 
   service_->Shutdown();
   service_.reset();
