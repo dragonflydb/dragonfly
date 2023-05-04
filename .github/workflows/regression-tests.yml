@@ -22,6 +22,14 @@ jobs:
     container:
       image: ghcr.io/romange/${{ matrix.container }}
     steps:
+      - name: 'Cleanup build folder'
+        if: ${{ matrix.runner  != 'ubuntu-latest' }}
+        run: |
+          ls -la ./
+          rm -rf ./* || true
+          rm -rf ./.??* || true
+          ls -la ./
+
       - uses: actions/checkout@v3
         with:
           submodules: true
