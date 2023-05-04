@@ -30,7 +30,7 @@ function(gen_bison name)
   ADD_CUSTOM_COMMAND(
            OUTPUT ${full_path_cc}
            COMMAND mkdir -p ${gen_dir}
-           COMMAND bison --language=c++ -o ${gen_dir}/${name}.cc ${name}.y
+           COMMAND bison --language=c++ -o ${gen_dir}/${name}.cc ${name}.y -Wconflicts-sr
            DEPENDS ${_in}
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
            COMMENT "Generating parser from ${name}.y" VERBATIM)

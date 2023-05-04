@@ -41,38 +41,46 @@ using namespace std;
 %define api.token.prefix {TOK_}
 
 %token
-  LPAREN  "("
-  RPAREN  ")"
-  STAR    "*"
-  ARROW   "=>"
-  COLON   ":"
+  LPAREN   "("
+  RPAREN   ")"
+  STAR     "*"
+  ARROW    "=>"
+  COLON    ":"
   LBRACKET "["
   RBRACKET "]"
+  OR_OP    "|"
 ;
 
-%precedence NOT_OP
+%token AND_OP
 
 // Needed 0 at the end to satisfy bison 3.5.1
 %token YYEOF 0
 %token <std::string> TERM "term" PARAM "param" FIELD "field"
 
+%precedence TERM
+%left OR_OP AND_OP
+%right NOT_OP
+%precedence LPAREN RPAREN
+
 %token <int64_t> INT64 "int64"
-%nterm <AstExpr> search_expr field_filter field_cond range_value term_list opt_neg_term
+%nterm <AstExpr> final_query filter search_expr field_filter field_cond range_value term_list opt_neg_term
 
 %printer { yyo << $$; } <*>;
 
 %%
 
-query:
-  search_expr
-  | query search_expr
-  ;
+final_query:
+  filter { driver->Set($1); }
 
+filter:
+  search_expr { $$ = $1; }
 
 search_expr:
  LPAREN search_expr RPAREN { $$ = $2; }
- | NOT_OP search_expr { $$ = AstExpr{}; };
- | TERM { }
+ | search_expr search_expr %prec AND_OP { $$ = MakeExpr<AstLogicalNode>($1, $2, AstLogicalNode::kAnd); };
+ | search_expr OR_OP search_expr { $$ = MakeExpr<AstLogicalNode>($1, $3, AstLogicalNode::kOr); }
+ | NOT_OP search_expr { $$ = MakeExpr<AstNegateNode>($2); };
+ | TERM { $$ = MakeExpr<AstTermNode>($1); }
  | field_filter;
 
 field_filter:

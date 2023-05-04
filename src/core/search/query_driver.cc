@@ -13,6 +13,9 @@ QueryDriver::QueryDriver() : scanner_(std::make_unique<Scanner>()) {
 QueryDriver::~QueryDriver() {
 }
 
+void QueryDriver::ResetScanner() {
+  scanner_ = std::make_unique<Scanner>();
+}
 }  // namespace search
 
 }  // namespace dfly

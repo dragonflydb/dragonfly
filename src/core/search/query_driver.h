@@ -32,12 +32,21 @@ class QueryDriver {
     return scanner()->Lex();
   }
 
-  Parser::location_type location;
+  void ResetScanner();
 
-  void Add(AstExpr) {
+  void Set(AstExpr expr) {
+    expr_ = expr;
   }
 
+  AstExpr Get() {
+    return expr_;
+  }
+
+  Parser::location_type location;
+
  private:
+  AstExpr expr_;
+
   std::string cur_str_;
   std::unique_ptr<Scanner> scanner_;
 };

@@ -26,11 +26,28 @@ class SearchParserTest : public ::testing::Test {
   }
 
   int Parse(const std::string& str) {
+    query_driver_.ResetScanner();
     query_driver_.SetInput(str);
 
     return Parser(&query_driver_)();
   }
 
+  void ParseExpr(const std::string& str) {
+    raw_expr_ = str;
+    Parse(str);
+    expr_ = query_driver_.Get();
+  }
+
+  bool Check(string_view input) const {
+    return expr_->Check(input);
+  }
+
+  string DebugExpr() const {
+    return raw_expr_ + " parsed as " + expr_->Debug();
+  }
+
+  string raw_expr_;
+  AstExpr expr_;
   QueryDriver query_driver_;
 };
 
@@ -56,6 +73,18 @@ class SearchParserTest : public ::testing::Test {
       caught = true;                          \
     }                                         \
     ASSERT_TRUE(caught);                      \
+  }
+
+#define CHECK_ALL(...)                                                    \
+  {                                                                       \
+    for (auto input : {__VA_ARGS__})                                      \
+      EXPECT_TRUE(Check(input)) << input << " failed on " << DebugExpr(); \
+  }
+
+#define CHECK_NONE(...)                                                    \
+  {                                                                        \
+    for (auto input : {__VA_ARGS__})                                       \
+      EXPECT_FALSE(Check(input)) << input << " failed on " << DebugExpr(); \
   }
 
 TEST_F(SearchParserTest, Scanner) {
@@ -98,6 +127,78 @@ TEST_F(SearchParserTest, Parse) {
   EXPECT_EQ(1, Parse(" foo:bar "));
   EXPECT_EQ(1, Parse(" @foo:@bar "));
   EXPECT_EQ(1, Parse(" @foo: "));
+}
+
+TEST_F(SearchParserTest, MatchTerm) {
+  ParseExpr("foo");
+
+  // Check basic cases
+  CHECK_ALL("foo", "foo bar", "more foo bar");
+  CHECK_NONE("wrong", "nomatch");
+
+  // Check part of sentence + case.
+  CHECK_ALL("Foo is cool.", "Where is foo?", "One. FOO!. More", "Foo is foo.");
+
+  // Check part of word is not matched
+  CHECK_NONE("foocool", "veryfoos", "ufoo", "morefoomore", "thefoo");
+}
+
+TEST_F(SearchParserTest, MatchNotTerm) {
+  ParseExpr("-foo");
+  CHECK_ALL("faa", "definitielyright");
+  CHECK_NONE("foo", "foo bar", "more foo bar");
+}
+
+TEST_F(SearchParserTest, MatchLogicalNode) {
+  ParseExpr("foo bar");
+
+  CHECK_ALL("foo bar", "bar foo", "more bar and foo");
+  CHECK_NONE("wrong", "foo", "bar", "foob", "far");
+
+  ParseExpr("foo | bar");
+
+  CHECK_ALL("foo bar", "foo", "bar", "foo and more", "or only bar");
+  CHECK_NONE("wrong", "only far");
+
+  ParseExpr("foo bar baz");
+
+  CHECK_ALL("baz bar foo", "bar and foo and baz");
+  CHECK_NONE("wrong", "foo baz", "bar baz", "and foo");
+}
+
+TEST_F(SearchParserTest, MatchParenthesis) {
+  ParseExpr("( foo | oof ) ( bar | rab )");
+
+  CHECK_ALL("foo bar", "oof rab", "foo rab", "oof bar", "foo oof bar rab");
+  CHECK_NONE("wrong", "bar rab", "foo oof");
+}
+
+TEST_F(SearchParserTest, CheckNotPriority) {
+  for (auto expr : {"-bar foo baz", "foo -bar baz", "foo baz -bar"}) {
+    ParseExpr(expr);
+
+    CHECK_ALL("foo baz", "foo rab baz", "baz rab foo");
+    CHECK_NONE("wrong", "bar", "foo bar baz", "foo baz bar");
+  }
+
+  for (auto expr : {"-bar | foo", "foo | -bar"}) {
+    ParseExpr(expr);
+
+    CHECK_ALL("foo", "right", "foo bar");
+    CHECK_NONE("bar", "bar baz");
+  }
+}
+
+TEST_F(SearchParserTest, CheckParenthesisPriority) {
+  ParseExpr("foo | -(bar baz)");
+
+  CHECK_ALL("foo", "not b/r and b/z", "foo bar baz", "single bar", "only baz");
+  CHECK_NONE("bar baz", "some more bar and baz");
+
+  ParseExpr("( foo (bar | baz) (rab | zab) ) | true");
+
+  CHECK_ALL("true", "foo bar rab", "foo baz zab", "foo bar zab");
+  CHECK_NONE("wrong", "foo bar baz", "foo rab zab", "foo bar what", "foo rab foo");
 }
 
 }  // namespace search
