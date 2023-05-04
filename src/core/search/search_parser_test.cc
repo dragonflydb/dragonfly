@@ -179,10 +179,18 @@ TEST_F(SearchParserTest, CheckNotPriority) {
     CHECK_ALL("foo", "right", "foo bar");
     CHECK_NONE("bar", "bar baz");
   }
+}
 
+TEST_F(SearchParserTest, CheckParenthesisPriority) {
   ParseExpr("foo | -(bar baz)");
+
   CHECK_ALL("foo", "not b/r and b/z", "foo bar baz", "single bar", "only baz");
   CHECK_NONE("bar baz", "some more bar and baz");
+
+  ParseExpr("( foo (bar | baz) (rab | zab) ) | true");
+
+  CHECK_ALL("true", "foo bar rab", "foo baz zab", "foo bar zab");
+  CHECK_NONE("wrong", "foo bar baz", "foo rab zab", "foo bar what", "foo rab foo");
 }
 
 }  // namespace search
