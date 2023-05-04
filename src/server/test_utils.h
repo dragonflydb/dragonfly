@@ -90,6 +90,8 @@ class BaseFamilyTest : public ::testing::Test {
   const facade::Connection::PubMessage::MessageData& GetPublishedMessage(std::string_view conn_id,
                                                                          size_t index) const;
 
+  static unsigned NumLocked();
+
   std::unique_ptr<util::ProactorPool> pp_;
   std::unique_ptr<Service> service_;
   unsigned num_threads_ = 3;

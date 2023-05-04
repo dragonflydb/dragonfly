@@ -156,7 +156,19 @@ void BaseFamilyTest::SetUp() {
   LOG(INFO) << "Starting " << test_info->name();
 }
 
+unsigned BaseFamilyTest::NumLocked() {
+  atomic_uint count = 0;
+  shard_set->RunBriefInParallel([&](EngineShard* shard) {
+    for (const auto& db : shard->db_slice().databases()) {
+      count += db->trans_locks.size();
+    }
+  });
+  return count;
+}
+
 void BaseFamilyTest::TearDown() {
+  CHECK_EQ(NumLocked(), 0U);
+
   service_->Shutdown();
   service_.reset();
   pp_->Stop();

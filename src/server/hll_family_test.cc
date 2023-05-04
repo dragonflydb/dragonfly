@@ -17,21 +17,7 @@ using namespace util;
 namespace dfly {
 
 class HllFamilyTest : public BaseFamilyTest {
- public:
  protected:
-  static unsigned NumLocked() {
-    atomic_uint count = 0;
-    shard_set->RunBriefInParallel([&](EngineShard* shard) {
-      for (const auto& db : shard->db_slice().databases()) {
-        for (const auto& [key, lock] : db->trans_locks) {
-          if (!lock.IsFree()) {
-            ++count;
-          }
-        }
-      }
-    });
-    return count;
-  }
 };
 
 TEST_F(HllFamilyTest, Simple) {
@@ -144,7 +130,6 @@ TEST_F(HllFamilyTest, MergeInvalid) {
   EXPECT_EQ(Run({"set", "key2", "..."}), "OK");
   EXPECT_THAT(Run({"pfmerge", "key1", "key2"}), ErrArg(HllFamily::kInvalidHllErr));
   EXPECT_EQ(CheckedInt({"pfcount", "key1"}), 3);
-  EXPECT_EQ(NumLocked(), 0);
 }
 
 }  // namespace dfly
