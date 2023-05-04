@@ -144,24 +144,28 @@ OpResult<int64_t> CountHllsSingle(const OpArgs& op_args, string_view key) {
 }
 
 OpResult<vector<string>> ReadValues(const OpArgs& op_args, ArgSlice keys) {
-  vector<string> values;
-  for (size_t i = 0; i < keys.size(); ++i) {
-    OpResult<PrimeIterator> it =
-        op_args.shard->db_slice().Find(op_args.db_cntx, keys[i], OBJ_STRING);
-    if (it.ok()) {
-      string hll;
-      it.value()->second.GetString(&hll);
-      ConvertToDenseIfNeeded(&hll);
-      if (isValidHLL(StringToHllPtr(hll)) != HLL_VALID_DENSE) {
-        return OpStatus::INVALID_VALUE;
-      } else {
-        values.push_back(std::move(hll));
+  try {
+    vector<string> values;
+    for (size_t i = 0; i < keys.size(); ++i) {
+      OpResult<PrimeIterator> it =
+          op_args.shard->db_slice().Find(op_args.db_cntx, keys[i], OBJ_STRING);
+      if (it.ok()) {
+        string hll;
+        it.value()->second.GetString(&hll);
+        ConvertToDenseIfNeeded(&hll);
+        if (isValidHLL(StringToHllPtr(hll)) != HLL_VALID_DENSE) {
+          return OpStatus::INVALID_VALUE;
+        } else {
+          values.push_back(std::move(hll));
+        }
+      } else if (it.status() == OpStatus::WRONG_TYPE) {
+        return OpStatus::WRONG_TYPE;
       }
-    } else if (it.status() == OpStatus::WRONG_TYPE) {
-      return OpStatus::WRONG_TYPE;
     }
+    return values;
+  } catch (const std::bad_alloc&) {
+    return OpStatus::OUT_OF_MEMORY;
   }
-  return values;
 }
 
 vector<HllBufferPtr> ConvertShardVector(const vector<vector<string>>& hlls) {
@@ -217,54 +221,51 @@ void PFCount(CmdArgList args, ConnectionContext* cntx) {
 }
 
 OpResult<int> PFMergeInternal(CmdArgList args, ConnectionContext* cntx) {
-  try {
-    vector<vector<string>> hlls;
-    hlls.resize(shard_set->size());
+  vector<vector<string>> hlls;
+  hlls.resize(shard_set->size());
 
-    atomic_bool success = true;
-    auto cb = [&](Transaction* t, EngineShard* shard) {
-      ShardId sid = shard->shard_id();
-      ArgSlice shard_args = t->GetShardArgs(shard->shard_id());
-      auto result = ReadValues(t->GetOpArgs(shard), shard_args);
-      if (result.ok()) {
-        hlls[sid] = std::move(result.value());
-      } else {
-        success = false;
-      }
-      return result.status();
-    };
-
-    Transaction* trans = cntx->transaction;
-    trans->Schedule();
-    trans->Execute(std::move(cb), false);
-
-    if (!success) {
-      return OpStatus::INVALID_VALUE;
+  atomic_bool success = true;
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    ShardId sid = shard->shard_id();
+    ArgSlice shard_args = t->GetShardArgs(shard->shard_id());
+    auto result = ReadValues(t->GetOpArgs(shard), shard_args);
+    if (result.ok()) {
+      hlls[sid] = std::move(result.value());
+    } else {
+      success = false;
     }
+    return result.status();
+  };
 
-    vector<HllBufferPtr> ptrs = ConvertShardVector(hlls);
+  Transaction* trans = cntx->transaction;
+  trans->Schedule();
+  trans->Execute(std::move(cb), false);
 
-    string hll;
-    hll.resize(getDenseHllSize());
-    createDenseHll(StringToHllPtr(hll));
-    int result = pfmerge(ptrs.data(), ptrs.size(), StringToHllPtr(hll));
-
-    auto set_cb = [&](Transaction* t, EngineShard* shard) {
-      string_view key = ArgS(args, 0);
-      const OpArgs& op_args = t->GetOpArgs(shard);
-      auto& db_slice = op_args.shard->db_slice();
-      auto [it, inserted] = db_slice.AddOrFind(t->GetDbContext(), key);
-      db_slice.PreUpdate(op_args.db_cntx.db_index, it);
-      it->second.SetString(hll);
-      db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, !inserted);
-      return OpStatus::OK;
-    };
-    trans->Execute(std::move(set_cb), true);
-
-    return result;
-  } catch (const std::bad_alloc&) {
-    return OpStatus::OUT_OF_MEMORY;
+  if (!success) {
+    trans->Execute([](Transaction*, EngineShard*) { return OpStatus::OK; }, true);
+    return OpStatus::INVALID_VALUE;
   }
+
+  vector<HllBufferPtr> ptrs = ConvertShardVector(hlls);
+
+  string hll;
+  hll.resize(getDenseHllSize());
+  createDenseHll(StringToHllPtr(hll));
+  int result = pfmerge(ptrs.data(), ptrs.size(), StringToHllPtr(hll));
+
+  auto set_cb = [&](Transaction* t, EngineShard* shard) {
+    string_view key = ArgS(args, 0);
+    const OpArgs& op_args = t->GetOpArgs(shard);
+    auto& db_slice = op_args.shard->db_slice();
+    auto [it, inserted] = db_slice.AddOrFind(t->GetDbContext(), key);
+    db_slice.PreUpdate(op_args.db_cntx.db_index, it);
+    it->second.SetString(hll);
+    db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, !inserted);
+    return OpStatus::OK;
+  };
+  trans->Execute(std::move(set_cb), true);
+
+  return result;
 }
 
 void PFMerge(CmdArgList args, ConnectionContext* cntx) {
