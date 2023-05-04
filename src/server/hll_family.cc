@@ -143,51 +143,60 @@ OpResult<int64_t> CountHllsSingle(const OpArgs& op_args, string_view key) {
   }
 }
 
-vector<OpResult<string>> ReadValues(const OpArgs& op_args, ArgSlice keys) {
-  vector<OpResult<string>> values;
-  for (size_t i = 0; i < keys.size(); ++i) {
-    OpResult<PrimeIterator> it =
-        op_args.shard->db_slice().Find(op_args.db_cntx, keys[i], OBJ_STRING);
-    if (it.ok()) {
-      string hll;
-      it.value()->second.GetString(&hll);
-      ConvertToDenseIfNeeded(&hll);
-      if (isValidHLL(StringToHllPtr(hll)) != HLL_VALID_DENSE) {
-        values.push_back(OpStatus::INVALID_VALUE);
-      } else {
-        values.push_back(std::move(hll));
+OpResult<vector<string>> ReadValues(const OpArgs& op_args, ArgSlice keys) {
+  try {
+    vector<string> values;
+    for (size_t i = 0; i < keys.size(); ++i) {
+      OpResult<PrimeIterator> it =
+          op_args.shard->db_slice().Find(op_args.db_cntx, keys[i], OBJ_STRING);
+      if (it.ok()) {
+        string hll;
+        it.value()->second.GetString(&hll);
+        ConvertToDenseIfNeeded(&hll);
+        if (isValidHLL(StringToHllPtr(hll)) != HLL_VALID_DENSE) {
+          return OpStatus::INVALID_VALUE;
+        } else {
+          values.push_back(std::move(hll));
+        }
+      } else if (it.status() == OpStatus::WRONG_TYPE) {
+        return OpStatus::WRONG_TYPE;
       }
-    } else if (it.status() == OpStatus::WRONG_TYPE) {
-      values.push_back(OpStatus::WRONG_TYPE);
+    }
+    return values;
+  } catch (const std::bad_alloc&) {
+    return OpStatus::OUT_OF_MEMORY;
+  }
+}
+
+vector<HllBufferPtr> ConvertShardVector(const vector<vector<string>>& hlls) {
+  vector<HllBufferPtr> ptrs;
+  ptrs.reserve(hlls.size());
+  for (auto& shard_hlls : hlls) {
+    for (auto& hll : shard_hlls) {
+      ptrs.push_back(StringToHllPtr(hll));
     }
   }
-  return values;
+  return ptrs;
 }
 
 OpResult<int64_t> PFCountMulti(CmdArgList args, ConnectionContext* cntx) {
-  vector<vector<OpResult<string>>> hlls;
+  vector<vector<string>> hlls;
   hlls.resize(shard_set->size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
     ArgSlice shard_args = t->GetShardArgs(shard->shard_id());
-    hlls[sid] = ReadValues(t->GetOpArgs(shard), shard_args);
-    return OpStatus::OK;
+    auto result = ReadValues(t->GetOpArgs(shard), shard_args);
+    if (result.ok()) {
+      hlls[sid] = std::move(result.value());
+    }
+    return result.status();
   };
 
   Transaction* trans = cntx->transaction;
   trans->ScheduleSingleHop(std::move(cb));
 
-  vector<HllBufferPtr> ptrs;
-  ptrs.reserve(hlls.size());
-  for (auto& shard_hlls : hlls) {
-    for (auto& hll : shard_hlls) {
-      if (!hll.ok()) {
-        return hll.status();
-      }
-      ptrs.push_back(StringToHllPtr(hll.value()));
-    }
-  }
+  vector<HllBufferPtr> ptrs = ConvertShardVector(hlls);
   int64_t pf_count = pfcountMulti(ptrs.data(), ptrs.size());
   if (pf_count < 0) {
     return OpStatus::INVALID_VALUE;
@@ -211,13 +220,75 @@ void PFCount(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+OpResult<int> PFMergeInternal(CmdArgList args, ConnectionContext* cntx) {
+  vector<vector<string>> hlls;
+  hlls.resize(shard_set->size());
+
+  atomic_bool success = true;
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    ShardId sid = shard->shard_id();
+    ArgSlice shard_args = t->GetShardArgs(shard->shard_id());
+    auto result = ReadValues(t->GetOpArgs(shard), shard_args);
+    if (result.ok()) {
+      hlls[sid] = std::move(result.value());
+    } else {
+      success = false;
+    }
+    return result.status();
+  };
+
+  Transaction* trans = cntx->transaction;
+  trans->Schedule();
+  trans->Execute(std::move(cb), false);
+
+  if (!success) {
+    trans->Execute([](Transaction*, EngineShard*) { return OpStatus::OK; }, true);
+    return OpStatus::INVALID_VALUE;
+  }
+
+  vector<HllBufferPtr> ptrs = ConvertShardVector(hlls);
+
+  string hll;
+  hll.resize(getDenseHllSize());
+  createDenseHll(StringToHllPtr(hll));
+  int result = pfmerge(ptrs.data(), ptrs.size(), StringToHllPtr(hll));
+
+  auto set_cb = [&](Transaction* t, EngineShard* shard) {
+    string_view key = ArgS(args, 0);
+    const OpArgs& op_args = t->GetOpArgs(shard);
+    auto& db_slice = op_args.shard->db_slice();
+    auto [it, inserted] = db_slice.AddOrFind(t->GetDbContext(), key);
+    db_slice.PreUpdate(op_args.db_cntx.db_index, it);
+    it->second.SetString(hll);
+    db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, !inserted);
+    return OpStatus::OK;
+  };
+  trans->Execute(std::move(set_cb), true);
+
+  return result;
+}
+
+void PFMerge(CmdArgList args, ConnectionContext* cntx) {
+  OpResult<int> result = PFMergeInternal(args, cntx);
+  if (result.ok()) {
+    if (result.value() == 0) {
+      (*cntx)->SendOk();
+    } else {
+      (*cntx)->SendError(HllFamily::kInvalidHllErr);
+    }
+  } else {
+    HandleOpValueResult(result, cntx);
+  }
+}
+
 }  // namespace
 
 void HllFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
 
   *registry << CI{"PFADD", CO::WRITE, -3, 1, 1, 1}.SetHandler(PFAdd)
-            << CI{"PFCOUNT", CO::WRITE, -2, 1, -1, 1}.SetHandler(PFCount);
+            << CI{"PFCOUNT", CO::WRITE, -2, 1, -1, 1}.SetHandler(PFCount)
+            << CI{"PFMERGE", CO::WRITE, -2, 1, -1, 1}.SetHandler(PFMerge);
 }
 
 const char HllFamily::kInvalidHllErr[] = "Key is not a valid HyperLogLog string value.";
