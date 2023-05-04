@@ -29,7 +29,7 @@ class AstNode {
 using NodePtr = std::shared_ptr<AstNode>;
 using AstExpr = NodePtr;
 
-template <typename T, typename... Ts> AstExpr MakeExpr(Ts... ts) {
+template <typename T, typename... Ts> AstExpr MakeExpr(Ts&&... ts) {
   return std::make_shared<T>(std::forward<Ts>(ts)...);
 }
 
