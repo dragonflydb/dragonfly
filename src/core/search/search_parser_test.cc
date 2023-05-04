@@ -131,8 +131,16 @@ TEST_F(SearchParserTest, Parse) {
 
 TEST_F(SearchParserTest, MatchTerm) {
   ParseExpr("foo");
+
+  // Check basic cases
   CHECK_ALL("foo", "foo bar", "more foo bar");
   CHECK_NONE("wrong", "nomatch");
+
+  // Check part of sentence + case.
+  CHECK_ALL("Foo is cool.", "Where is foo?", "One. FOO!. More", "Foo is foo.");
+
+  // Check part of word is not matched
+  CHECK_NONE("foocool", "veryfoos", "ufoo", "morefoomore", "thefoo");
 }
 
 TEST_F(SearchParserTest, MatchNotTerm) {

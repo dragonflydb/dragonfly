@@ -8,6 +8,7 @@
 #include <iostream>
 #include <memory>
 #include <ostream>
+#include <regex>
 #include <vector>
 
 namespace dfly {
@@ -36,13 +37,13 @@ template <typename T, typename... Ts> AstExpr MakeExpr(Ts&&... ts) {
 // AST term node, matches only if input contains term.
 class AstTermNode : public AstNode {
  public:
-  AstTermNode(std::string term) : term_{move(term)} {
-  }
+  AstTermNode(std::string term);
   virtual bool Check(std::string_view input) const;
   virtual std::string Debug() const;
 
  private:
   std::string term_;
+  std::regex pattern_;
 };
 
 // Ast negation node, matches only if its sub node didn't match.

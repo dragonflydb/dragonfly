@@ -5,13 +5,18 @@
 #include "core/search/ast_expr.h"
 
 #include <algorithm>
+#include <regex>
 
 using namespace std;
 
 namespace dfly::search {
 
+AstTermNode::AstTermNode(std::string term)
+    : term_{move(term)}, pattern_{"\\b" + term_ + "\\b", std::regex::icase} {
+}
+
 bool AstTermNode::Check(string_view input) const {
-  return input.find(term_) != string::npos;
+  return regex_search(input.begin(), input.begin() + input.size(), pattern_);
 }
 
 string AstTermNode::Debug() const {
