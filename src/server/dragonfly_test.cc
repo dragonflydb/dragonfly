@@ -291,8 +291,6 @@ TEST_F(DflyEngineTest, LimitMemory) {
 }
 
 TEST_F(DflyEngineTest, FlushAll) {
-  DisableLockCheck();
-
   auto fb0 = pp_->at(0)->LaunchFiber([&] { Run({"flushall"}); });
 
   auto fb1 = pp_->at(1)->LaunchFiber([&] {
