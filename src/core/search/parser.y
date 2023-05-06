@@ -63,7 +63,7 @@ using namespace std;
 %precedence LPAREN RPAREN
 
 %token <int64_t> INT64 "int64"
-%nterm <AstExpr> final_query filter search_expr field_filter field_cond range_value term_list opt_neg_term
+%nterm <AstExpr> final_query filter search_expr field_cond field_cond_expr
 
 %printer { yyo << $$; } <*>;
 
@@ -76,26 +76,25 @@ filter:
   search_expr { $$ = $1; }
 
 search_expr:
- LPAREN search_expr RPAREN { $$ = $2; }
- | search_expr search_expr %prec AND_OP { $$ = MakeExpr<AstLogicalNode>($1, $2, AstLogicalNode::kAnd); };
- | search_expr OR_OP search_expr { $$ = MakeExpr<AstLogicalNode>($1, $3, AstLogicalNode::kOr); }
- | NOT_OP search_expr { $$ = MakeExpr<AstNegateNode>($2); };
- | TERM { $$ = MakeExpr<AstTermNode>($1); }
- | field_filter;
+ LPAREN search_expr RPAREN              { $$ = $2; }
+ | search_expr search_expr %prec AND_OP { $$ = MakeExpr<AstLogicalNode>($1, $2, AstLogicalNode::kAnd); }
+ | search_expr OR_OP search_expr        { $$ = MakeExpr<AstLogicalNode>($1, $3, AstLogicalNode::kOr); }
+ | NOT_OP search_expr                   { $$ = MakeExpr<AstNegateNode>($2); }
+ | TERM                                 { $$ = MakeExpr<AstTermNode>($1); }
+ | FIELD COLON field_cond               { $$ = MakeExpr<AstFieldNode>($1, $3); }
 
-field_filter:
-   FIELD COLON field_cond { $$ = AstExpr{}; }
+field_cond:
+  TERM                                  { $$ = MakeExpr<AstTermNode>($1); }
+  | NOT_OP field_cond                   { $$ = MakeExpr<AstNegateNode>($2); }
+  | LPAREN field_cond_expr RPAREN       { $$ = $2; }
+  | LBRACKET INT64 INT64 RBRACKET       { $$ = MakeExpr<AstRangeNode>($2, $3); }
 
-field_cond: term_list | range_value
- range_value: LBRACKET INT64 INT64 RBRACKET { $$ = AstExpr{}; }
-
-term_list:
-  opt_neg_term |
-  LPAREN term_list opt_neg_term RPAREN { };
-
-opt_neg_term:
-  TERM { } | NOT_OP TERM { $$ = AstExpr{}; };
-
+field_cond_expr:
+  LPAREN field_cond_expr RPAREN                   { $$ = $2; }
+  | field_cond_expr field_cond_expr %prec AND_OP  { $$ = MakeExpr<AstLogicalNode>($1, $2, AstLogicalNode::kAnd); }
+  | field_cond_expr OR_OP field_cond_expr         { $$ = MakeExpr<AstLogicalNode>($1, $3, AstLogicalNode::kOr); }
+  | NOT_OP field_cond_expr                        { $$ = MakeExpr<AstNegateNode>($2); };
+  | TERM                                          { $$ = MakeExpr<AstTermNode>($1); }
 %%
 
 void

@@ -4,6 +4,7 @@
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/search/base.h"
 #include "core/search/query_driver.h"
 
 namespace dfly {
@@ -38,7 +39,7 @@ class SearchParserTest : public ::testing::Test {
     expr_ = query_driver_.Get();
   }
 
-  bool Check(string_view input) const {
+  bool Check(SearchInput input) const {
     return expr_->Check(input);
   }
 
@@ -49,6 +50,35 @@ class SearchParserTest : public ::testing::Test {
   string raw_expr_;
   AstExpr expr_;
   QueryDriver query_driver_;
+};
+
+class MockedHSetAccessor : public HSetAccessor {
+ public:
+  using Map = std::unordered_map<std::string, std::string>;
+
+  MockedHSetAccessor() = default;
+  MockedHSetAccessor(std::string test_field) : hset_{{"field", test_field}} {
+  }
+
+  bool Check(HSetAccessor::FieldConsumer f, string_view active_field) const override {
+    if (!active_field.empty()) {
+      auto it = hset_.find(string{active_field});
+      return f(it != hset_.end() ? it->second : "");
+    } else {
+      for (const auto& [k, v] : hset_) {
+        if (f(v))
+          return true;
+      }
+      return false;
+    }
+  }
+
+  void Set(Map hset) {
+    hset_ = hset;
+  }
+
+ private:
+  Map hset_{};
 };
 
 // tokens are not assignable, so we can not reuse them. This macros reduce the boilerplate.
@@ -75,16 +105,20 @@ class SearchParserTest : public ::testing::Test {
     ASSERT_TRUE(caught);                      \
   }
 
-#define CHECK_ALL(...)                                                    \
-  {                                                                       \
-    for (auto input : {__VA_ARGS__})                                      \
-      EXPECT_TRUE(Check(input)) << input << " failed on " << DebugExpr(); \
+#define CHECK_ALL(...)                                                               \
+  {                                                                                  \
+    for (auto str : {__VA_ARGS__}) {                                                 \
+      MockedHSetAccessor hset{str};                                                  \
+      EXPECT_TRUE(Check(SearchInput{&hset})) << str << " failed on " << DebugExpr(); \
+    }                                                                                \
   }
 
-#define CHECK_NONE(...)                                                    \
-  {                                                                        \
-    for (auto input : {__VA_ARGS__})                                       \
-      EXPECT_FALSE(Check(input)) << input << " failed on " << DebugExpr(); \
+#define CHECK_NONE(...)                                                               \
+  {                                                                                   \
+    for (auto str : {__VA_ARGS__}) {                                                  \
+      MockedHSetAccessor hset{str};                                                   \
+      EXPECT_FALSE(Check(SearchInput{&hset})) << str << " failed on " << DebugExpr(); \
+    }                                                                                 \
   }
 
 TEST_F(SearchParserTest, Scanner) {
@@ -199,6 +233,83 @@ TEST_F(SearchParserTest, CheckParenthesisPriority) {
 
   CHECK_ALL("true", "foo bar rab", "foo baz zab", "foo bar zab");
   CHECK_NONE("wrong", "foo bar baz", "foo rab zab", "foo bar what", "foo rab foo");
+}
+
+TEST_F(SearchParserTest, MatchField) {
+  ParseExpr("@f1:foo @f2:bar @f3:baz");
+
+  MockedHSetAccessor hset{};
+  SearchInput input{&hset};
+
+  hset.Set({{"f1", "foo"}, {"f2", "bar"}, {"f3", "baz"}});
+  EXPECT_TRUE(Check(input));
+
+  hset.Set({{"f1", "foo"}, {"f2", "bar"}, {"f3", "last is wrong"}});
+  EXPECT_FALSE(Check(input));
+
+  hset.Set({{"f1", "its"}, {"f2", "totally"}, {"f3", "wrong"}});
+  EXPECT_FALSE(Check(input));
+
+  hset.Set({{"f1", "im foo but its only me and"}, {"f2", "bar"}});
+  EXPECT_FALSE(Check(input));
+
+  hset.Set({});
+  EXPECT_FALSE(Check(input));
+}
+
+TEST_F(SearchParserTest, MatchRange) {
+  ParseExpr("@f1:[1 10] @f2:[50 100]");
+
+  MockedHSetAccessor hset{};
+  SearchInput input{&hset};
+
+  hset.Set({{"f1", "5"}, {"f2", "50"}});
+  EXPECT_TRUE(Check(input));
+
+  hset.Set({{"f1", "1"}, {"f2", "100"}});
+  EXPECT_TRUE(Check(input));
+
+  hset.Set({{"f1", "10"}, {"f2", "50"}});
+  EXPECT_TRUE(Check(input));
+
+  hset.Set({{"f1", "11"}, {"f2", "49"}});
+  EXPECT_FALSE(Check(input));
+
+  hset.Set({{"f1", "0"}, {"f2", "101"}});
+  EXPECT_FALSE(Check(input));
+}
+
+TEST_F(SearchParserTest, CheckExprInField) {
+  ParseExpr("@f1:(a|b) @f2:(c d) @f3:-e");
+
+  MockedHSetAccessor hset{};
+  SearchInput input{&hset};
+
+  hset.Set({{"f1", "a"}, {"f2", "c and d"}, {"f3", "right"}});
+  EXPECT_TRUE(Check(input));
+
+  hset.Set({{"f1", "b"}, {"f2", "d and c"}, {"f3", "ok"}});
+  EXPECT_TRUE(Check(input));
+
+  hset.Set({{"f1", "none"}, {"f2", "only d"}, {"f3", "ok"}});
+  EXPECT_FALSE(Check(input));
+
+  hset.Set({{"f1", "b"}, {"f2", "d and c"}, {"f3", "it has an e"}});
+  EXPECT_FALSE(Check(input)) << DebugExpr();
+
+  ParseExpr({"@f1:(a (b | c) -(d | e)) @f2:-(a|b)"});
+
+  hset.Set({{"f1", "a b w"}, {"f2", "c"}});
+  EXPECT_TRUE(Check(input));
+
+  hset.Set({{"f1", "a b d"}, {"f2", "c"}});
+  EXPECT_FALSE(Check(input));
+
+  hset.Set({{"f1", "a b w"}, {"f2", "a"}});
+  EXPECT_FALSE(Check(input));
+
+  hset.Set({{"f1", "a w"}, {"f2", "c"}});
+  EXPECT_FALSE(Check(input));
 }
 
 }  // namespace search
