@@ -16,6 +16,7 @@ extern "C" {
 #include "facade/error.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
+#include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/transaction.h"
 
@@ -43,30 +44,9 @@ bool IsGoodForListpack(CmdArgList args, const uint8_t* lp) {
   return lpBytes(const_cast<uint8_t*>(lp)) + sum < kMaxListPackLen;
 }
 
-inline StringMap* GetStringMap(const PrimeValue& pv, const DbContext& db_context) {
-  StringMap* res = (StringMap*)pv.RObjPtr();
-  uint32_t map_time = MemberTimeSeconds(db_context.time_now_ms);
-  res->set_time(map_time);
-  return res;
-}
-
-inline string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]) {
-  int64_t ele_len = 0;
-  uint8_t* elem = lpGet(lp_it, &ele_len, int_buf);
-  DCHECK(elem);
-  return string_view{reinterpret_cast<char*>(elem), size_t(ele_len)};
-}
-
-optional<string_view> LpFind(uint8_t* lp, string_view key, uint8_t int_buf[]) {
-  uint8_t* fptr = lpFirst(lp);
-  DCHECK(fptr);
-
-  fptr = lpFind(lp, fptr, (unsigned char*)key.data(), key.size(), 1);
-  if (!fptr)
-    return nullopt;
-  uint8_t* vptr = lpNext(lp, fptr);
-  return LpGetView(vptr, int_buf);
-}
+using container_utils::GetStringMap;
+using container_utils::LpFind;
+using container_utils::LpGetView;
 
 pair<uint8_t*, bool> LpDelete(uint8_t* lp, string_view field) {
   uint8_t* fptr = lpFirst(lp);

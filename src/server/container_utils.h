@@ -3,11 +3,12 @@
 //
 #pragma once
 
+#include "base/logging.h"
 #include "core/compact_object.h"
-#include "core/string_set.h"
 #include "server/table.h"
 
 extern "C" {
+#include "redis/listpack.h"
 #include "redis/object.h"
 #include "redis/quicklist.h"
 }
@@ -15,6 +16,8 @@ extern "C" {
 #include <functional>
 
 namespace dfly {
+
+class StringMap;
 
 namespace container_utils {
 
@@ -68,6 +71,17 @@ bool IterateSet(const PrimeValue& pv, const IterateFunc& func);
 // without stopping.
 bool IterateSortedSet(robj* zobj, const IterateSortedFunc& func, int32_t start = 0,
                       int32_t end = -1, bool reverse = false, bool use_score = false);
+
+StringMap* GetStringMap(const PrimeValue& pv, const DbContext& db_context);
+
+inline std::string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]) {
+  int64_t ele_len = 0;
+  uint8_t* elem = lpGet(lp_it, &ele_len, int_buf);
+  DCHECK(elem);
+  return std::string_view{reinterpret_cast<char*>(elem), size_t(ele_len)};
+}
+
+std::optional<std::string_view> LpFind(uint8_t* lp, std::string_view key, uint8_t int_buf[]);
 
 };  // namespace container_utils
 
