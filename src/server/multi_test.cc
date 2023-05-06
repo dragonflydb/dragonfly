@@ -124,8 +124,6 @@ TEST_F(MultiTest, Multi) {
 }
 
 TEST_F(MultiTest, MultiGlobalCommands) {
-  DisableLockCheck();
-
   ASSERT_THAT(Run({"set", "key", "val"}), "OK");
 
   ASSERT_THAT(Run({"multi"}), "OK");
