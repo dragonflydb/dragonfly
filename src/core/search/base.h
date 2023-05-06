@@ -13,21 +13,31 @@
 
 namespace dfly::search {
 
-// Represents input to a search tree.
-struct SearchInput {
+// Interface for accessing hashset values with different data structures underneath.
+struct HSetAccessor {
   // Callback that's supplied with field values.
   using FieldConsumer = std::function<bool(std::string_view)>;
 
-  virtual ~SearchInput() = default;
+  virtual bool Check(FieldConsumer f, std::string_view active_field) const = 0;
+};
 
-  // Check if the given callback returns true on any of  the active fields.
-  virtual bool Check(FieldConsumer) = 0;
+// Wrapper around hashset accessor and optional active field.
+struct SearchInput {
+  SearchInput(const HSetAccessor* hset, std::string_view active_field = {})
+      : hset_{hset}, active_field_{active_field} {
+  }
 
-  // Sets a single active field.
-  virtual void SelectField(std::string_view field) = 0;
+  SearchInput(const SearchInput& base, std::string_view active_field)
+      : hset_{base.hset_}, active_field_{active_field} {
+  }
 
-  // Removes current single active field, all fields are active.
-  virtual void ClearField() = 0;
+  bool Check(HSetAccessor::FieldConsumer f) {
+    return hset_->Check(move(f), active_field_);
+  }
+
+ private:
+  const HSetAccessor* hset_;
+  std::string_view active_field_;
 };
 
 }  // namespace dfly::search

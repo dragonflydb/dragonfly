@@ -23,7 +23,7 @@ class AstNode {
   virtual ~AstNode() = default;
 
   // Check if this input is matched by the node.
-  virtual bool Check(SearchInput*) const = 0;
+  virtual bool Check(SearchInput) const = 0;
 
   // Debug print node.
   virtual std::string Debug() const = 0;
@@ -40,7 +40,7 @@ template <typename T, typename... Ts> AstExpr MakeExpr(Ts&&... ts) {
 class AstTermNode : public AstNode {
  public:
   AstTermNode(std::string term);
-  virtual bool Check(SearchInput*) const;
+  virtual bool Check(SearchInput) const;
   virtual std::string Debug() const;
 
  private:
@@ -53,7 +53,7 @@ class AstNegateNode : public AstNode {
  public:
   AstNegateNode(NodePtr node) : node_{node} {
   }
-  bool Check(SearchInput*) const override;
+  bool Check(SearchInput) const override;
   std::string Debug() const override;
 
  private:
@@ -71,7 +71,7 @@ class AstLogicalNode : public AstNode {
 
   AstLogicalNode(NodePtr l, NodePtr r, Op op) : l_{l}, r_{r}, op_{op} {
   }
-  bool Check(SearchInput*) const override;
+  bool Check(SearchInput) const override;
   std::string Debug() const override;
 
  private:
@@ -85,7 +85,7 @@ class AstFieldNode : public AstNode {
   AstFieldNode(std::string field, NodePtr node) : field_{field.substr(1)}, node_{node} {
   }
 
-  bool Check(SearchInput*) const override;
+  bool Check(SearchInput) const override;
   std::string Debug() const override;
 
  private:
@@ -99,7 +99,7 @@ class AstRangeNode : public AstNode {
   AstRangeNode(int64_t l, int64_t r) : l_{l}, r_{r} {
   }
 
-  bool Check(SearchInput*) const override;
+  bool Check(SearchInput) const override;
   std::string Debug() const override;
 
  private:
