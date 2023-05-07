@@ -276,9 +276,6 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> Result {
     return OK;
   }
 
-  DVLOG(1) << "PushStack: (" << len << ", " << cached_expr_ << ")";
-  parse_stack_.emplace_back(len, cached_expr_);
-
   if (state_ == PARSE_ARG_S) {
     DCHECK(!server_mode_);
 
@@ -291,6 +288,9 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> Result {
   } else {
     state_ = PARSE_ARG_S;
   }
+
+  DVLOG(1) << "PushStack: (" << len << ", " << cached_expr_ << ")";
+  parse_stack_.emplace_back(len, cached_expr_);
 
   return OK;
 }

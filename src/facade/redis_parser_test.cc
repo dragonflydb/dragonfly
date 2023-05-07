@@ -197,4 +197,16 @@ TEST_F(RedisParserTest, NILs) {
   ASSERT_EQ(RedisParser::OK, Parse("_\r\n"));
 }
 
+TEST_F(RedisParserTest, NestedArray) {
+  parser_.SetClientMode();
+
+  // [[['foo'],['bar']],['car']]
+  ASSERT_EQ(RedisParser::OK,
+            Parse("*2\r\n*2\r\n*1\r\n$3\r\nfoo\r\n*1\r\n$3\r\nbar\r\n*1\r\n$3\r\ncar\r\n"));
+
+  ASSERT_THAT(args_, ElementsAre(ArrArg(2), ArrArg(1)));
+  ASSERT_THAT(args_[0].GetVec(), ElementsAre(ArrArg(1), ArrArg(1)));
+  ASSERT_THAT(args_[1].GetVec(), ElementsAre("car"));
+}
+
 }  // namespace facade
