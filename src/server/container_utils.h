@@ -72,15 +72,13 @@ bool IterateSet(const PrimeValue& pv, const IterateFunc& func);
 bool IterateSortedSet(robj* zobj, const IterateSortedFunc& func, int32_t start = 0,
                       int32_t end = -1, bool reverse = false, bool use_score = false);
 
+// Get StringMap pointer from primetable value. Sets expire time from db_context
 StringMap* GetStringMap(const PrimeValue& pv, const DbContext& db_context);
 
-inline std::string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]) {
-  int64_t ele_len = 0;
-  uint8_t* elem = lpGet(lp_it, &ele_len, int_buf);
-  DCHECK(elem);
-  return std::string_view{reinterpret_cast<char*>(elem), size_t(ele_len)};
-}
+// Get string_view from listpack poiner. Intbuf to store integer values as strings.
+std::string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]);
 
+// Find value by key and return stringview to it, otherwise nullopt.
 std::optional<std::string_view> LpFind(uint8_t* lp, std::string_view key, uint8_t int_buf[]);
 
 };  // namespace container_utils

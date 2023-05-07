@@ -56,6 +56,8 @@ struct ListPackAccessor : public BaseAccessor {
     }
 
     uint8_t* fptr = lpFirst(lp_);
+    DCHECK_NE(fptr, nullptr);
+
     while (fptr) {
       fptr = lpNext(lp_, fptr);  // skip key
       string_view v = container_utils::LpGetView(fptr, intbuf);
@@ -73,6 +75,8 @@ struct ListPackAccessor : public BaseAccessor {
     DocumentData out{};
 
     uint8_t* fptr = lpFirst(lp_);
+    DCHECK_NE(fptr, nullptr);
+
     while (fptr) {
       string_view k = container_utils::LpGetView(fptr, intbuf[0]);
       fptr = lpNext(lp_, fptr);  // skip key
@@ -167,9 +171,10 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
   string prefix;
 
   if (args.size() > 1 && ArgS(args, 1) == "ON") {
-    CHECK_EQ(ArgS(args, 2), "HASH");
-    CHECK_EQ(ArgS(args, 3), "PREFIX");
-    CHECK_EQ(ArgS(args, 4), "1");
+    if (ArgS(args, 2) != "HASH" || ArgS(args, 3) != "PREFIX" || ArgS(args, 4) != "1") {
+      (*cntx)->SendError("Only simplest config supported");
+      return;
+    }
     prefix = ArgS(args, 5);
   }
   {
@@ -188,7 +193,7 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
     lock_guard lk{indices_mu_};
     auto it = indices_.find(index);
     if (it == indices_.end()) {
-      (*cntx)->SendError("Search index not found");
+      (*cntx)->SendError(string{index} + ": no such index");
       return;
     }
     prefix = it->second;
@@ -196,7 +201,7 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
 
   Query query = search::ParseQuery(query_str);
   if (!query) {
-    (*cntx)->SendError("Invalid query");
+    (*cntx)->SendError("Syntax error");
     return;
   }
 

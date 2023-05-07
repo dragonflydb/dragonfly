@@ -14,7 +14,11 @@ AstExpr ParseQuery(std::string_view query) {
   QueryDriver driver{};
   driver.ResetScanner();
   driver.SetInput(std::string{query});
-  (void)Parser (&driver)();
+  try {
+    (void)Parser (&driver)();
+  } catch (...) {
+    return {};
+  }
   return driver.Get();
 }
 
