@@ -604,7 +604,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
   }
 
   if (co.Encoding() != kEncodingIntSet) {
-    res = AddStrSet(op_args.db_cntx, std::move(vals), UINT32_MAX, &co);
+    res = AddStrSet(op_args.db_cntx, vals, UINT32_MAX, &co);
   }
 
   db_slice.PostUpdate(op_args.db_cntx.db_index, it, key, !new_key);
