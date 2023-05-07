@@ -700,7 +700,7 @@ error_code Replica::ConsumeDflyStream() {
 
     // Iterate over map and cancle all blocking entities
     {
-      lock_guard{multi_shard_exe_->map_mu};
+      lock_guard l{multi_shard_exe_->map_mu};
       for (auto& tx_data : multi_shard_exe_->tx_sync_execution) {
         tx_data.second.barrier.Cancel();
         tx_data.second.block.Cancel();

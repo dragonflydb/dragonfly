@@ -909,7 +909,7 @@ void XGroupHelp(CmdArgList args, ConnectionContext* cntx) {
       "    Create a new consumer in the specified group.",
       "DELCONSUMER <key> <groupname> <consumer>",
       "    Remove the specified consumer.",
-      "DESTROY <key> <groupname>"
+      "DESTROY <key> <groupname>",
       "    Remove the specified group.",
       "SETID <key> <groupname> <id|$>",
       "    Set the current group ID.",
