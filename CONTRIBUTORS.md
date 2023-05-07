@@ -5,6 +5,7 @@
   * Helm Chart
 * **[Meng Chen](https://github.com/matchyc)**
 * **[Yuxuan Chen](https://github.com/YuxuanChen98)**
+* **[Pawel Kaplinski](https://github.com/pawelKapl)**
 * **[Redha Lhimeur](https://github.com/redhal)**
 * **[Braydn Moore](https://github.com/braydnm)**
 * **[Logan Raarup](https://github.com/logandk)**

@@ -155,6 +155,7 @@ class Connection : public util::Connection {
   std::string RemoteEndpointAddress() const;
   std::string LocalBindAddress() const;
   uint32_t GetClientId() const;
+  bool IsAdmin() const;
 
   Protocol protocol() const {
     return protocol_;

@@ -110,6 +110,7 @@ There are also some Dragonfly-specific arguments:
  * `primary_port_http_enabled`: Allows accessing HTTP console on main TCP port if `true` (`default: true`).
  * `admin_port`: To enable admin access to the console on the assigned port (`default: disabled`). Supports both HTTP and RESP protocols.
  * `admin_bind`: To bind the admin console TCP connection to a given address (`default: any`). Supports both HTTP and RESP protocols.
+ * `admin_nopass`: To enable open admin access to console on the assigned port, without auth token needed (`default: false`). Supports both HTTP and RESP protocols.
  * `cluster_mode`: Cluster mode supported (`default: ""`). Currently supports only `emulated`.
  * `cluster_announce_ip`: The IP that cluster commands announce to the client.
 
