@@ -32,23 +32,24 @@ TEST_F(SearchFamilyTest, Simple) {
 
   {
     auto resp = Run({"ft.search", "i1", "@foo:bar"});
-    EXPECT_THAT(resp, ArrLen(2));  // single key-data pair of d:2
+    EXPECT_THAT(resp, ArrLen(1 + 2));  // single key-data pair of d:2
 
     auto doc = resp.GetVec();
-    EXPECT_EQ(doc[0], "d:2");
-    EXPECT_THAT(doc[1], ArrLen(4));  // foo and k pairs
+    EXPECT_THAT(doc[0], IntArg(1));
+    EXPECT_EQ(doc[1], "d:2");
+    EXPECT_THAT(doc[2], ArrLen(4));  // foo and k pairs
   }
   {
     auto resp = Run({"ft.search", "i1", "@foo:bar | @foo:baz"});
-    EXPECT_THAT(resp, ArrLen(2 * 2));
+    EXPECT_THAT(resp, ArrLen(1 + 2 * 2));
   }
   {
     auto resp = Run({"ft.search", "i1", "@foo:(bar|baz|bad)"});
-    EXPECT_THAT(resp, ArrLen(3 * 2));
+    EXPECT_THAT(resp, ArrLen(1 + 3 * 2));
   }
   {
     auto resp = Run({"ft.search", "i1", "@foo:none"});
-    EXPECT_THAT(resp, ArrLen(0));
+    EXPECT_THAT(resp, IntArg(0));  // tests auto destruct single element arrays
   }
 }
 
