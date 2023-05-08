@@ -584,6 +584,29 @@ void Service::Shutdown() {
   ThisFiber::SleepFor(10ms);
 }
 
+bool Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
+                                 ConnectionContext* dfly_cntx) {
+  if (cid->first_key_pos() == 0) {
+    return true;  // No key command.
+  }
+  OpResult<KeyIndex> key_index_res = DetermineKeys(cid, args);
+  if (!key_index_res) {
+    (*dfly_cntx)->SendError(key_index_res.status());
+    return false;
+  }
+
+  const auto& key_index = *key_index_res;
+  for (unsigned i = key_index.start; i < key_index.end; ++i) {
+    string_view key = ArgS(args, i);
+    if (!server_family_.cluster_data()->IsKeyInMySlot(key)) {
+      VLOG(1) << "Key " << key << " is not owned by server";
+      (*dfly_cntx)->SendError("MOVED");  // TODO add more info to moved error.
+      return false;
+    }
+  }
+  return true;
+}
+
 // Return OK if all keys are allowed to be accessed: either declared in EVAL or
 // transaction is running in global or non-atomic mode.
 OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const CommandId* cid,
@@ -699,6 +722,10 @@ bool Service::VerifyCommand(const CommandId* cid, CmdArgList args, ConnectionCon
       (*dfly_cntx)->SendError(absl::StrCat("'", cmd_name, "' inside MULTI is not allowed"));
       return false;
     }
+  }
+
+  if (cluster_enabled && !CheckKeysOwnership(cid, args.subspan(1), dfly_cntx)) {
+    return false;
   }
 
   if (under_script && cid->IsTransactional()) {

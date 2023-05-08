@@ -36,6 +36,8 @@ const char* DebugString(OpStatus op) {
       return "ENTRIES ADDED IS TO SMALL";
     case OpStatus::INVALID_NUMERIC_RESULT:
       return "INVALID NUMERIC RESULT";
+    case OpStatus::KEY_MOVED:
+      return "MOVED";
   }
   return "Unknown Error Code";  // we should not be here, but this is how enums works in c++
 }

@@ -9,6 +9,7 @@
 #include "facade/conn_context.h"
 #include "facade/redis_parser.h"
 #include "server/channel_store.h"
+#include "server/cluster/cluster_data.h"
 #include "server/engine_shard_set.h"
 
 namespace util {
@@ -84,6 +85,10 @@ class ServerFamily {
 
   ScriptMgr* script_mgr() {
     return script_mgr_.get();
+  }
+
+  ClusterData* cluster_data() {
+    return cluster_data_.get();
   }
 
   void StatsMC(std::string_view section, facade::ConnectionContext* cntx);
@@ -186,6 +191,8 @@ class ServerFamily {
 
   time_t start_time_ = 0;  // in seconds, epoch time.
   bool is_emulated_cluster_ = false;
+
+  std::unique_ptr<ClusterData> cluster_data_;
 
   std::shared_ptr<LastSaveInfo> last_save_info_;  // protected by save_mu_;
   std::atomic_bool is_saving_{false};
