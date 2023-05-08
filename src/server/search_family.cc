@@ -49,10 +49,10 @@ struct ListPackAccessor : public BaseAccessor {
   }
 
   bool Check(FieldConsumer f, string_view active_field) const override {
-    uint8_t intbuf[LP_INTBUF_SIZE];
+    std::array<uint8_t, LP_INTBUF_SIZE> intbuf;
 
     if (!active_field.empty()) {
-      return f(container_utils::LpFind(lp_, active_field, intbuf).value_or(""));
+      return f(container_utils::LpFind(lp_, active_field, intbuf.data()).value_or(""));
     }
 
     uint8_t* fptr = lpFirst(lp_);
@@ -60,7 +60,7 @@ struct ListPackAccessor : public BaseAccessor {
 
     while (fptr) {
       fptr = lpNext(lp_, fptr);  // skip key
-      string_view v = container_utils::LpGetView(fptr, intbuf);
+      string_view v = container_utils::LpGetView(fptr, intbuf.data());
       fptr = lpNext(lp_, fptr);
 
       if (f(v))
@@ -71,16 +71,16 @@ struct ListPackAccessor : public BaseAccessor {
   }
 
   DocumentData Serialize() const override {
-    uint8_t intbuf[2][LP_INTBUF_SIZE];
+    std::array<uint8_t, LP_INTBUF_SIZE> intbuf[2];
     DocumentData out{};
 
     uint8_t* fptr = lpFirst(lp_);
     DCHECK_NE(fptr, nullptr);
 
     while (fptr) {
-      string_view k = container_utils::LpGetView(fptr, intbuf[0]);
+      string_view k = container_utils::LpGetView(fptr, intbuf[0].data());
       fptr = lpNext(lp_, fptr);  // skip key
-      string_view v = container_utils::LpGetView(fptr, intbuf[1]);
+      string_view v = container_utils::LpGetView(fptr, intbuf[1].data());
       fptr = lpNext(lp_, fptr);
 
       out[k] = v;
@@ -126,7 +126,6 @@ unique_ptr<BaseAccessor> GetAccessor(const OpArgs& op_args, const PrimeValue& pv
     auto ptr = reinterpret_cast<ListPackAccessor::LpPtr>(pv.RObjPtr());
     return make_unique<ListPackAccessor>(ptr);
   } else {
-    DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
     auto* sm = container_utils::GetStringMap(pv, op_args.db_cntx);
     return make_unique<StringMapAccessor>(sm);
   }

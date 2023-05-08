@@ -17,6 +17,7 @@ AstExpr ParseQuery(std::string_view query) {
   try {
     (void)Parser (&driver)();
   } catch (...) {
+    // TODO: return detailed error info
     return {};
   }
   return driver.Get();
