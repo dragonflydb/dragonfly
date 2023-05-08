@@ -60,7 +60,7 @@ ABSL_FLAG(string, save_schedule, "",
 ABSL_FLAG(bool, df_snapshot_format, true,
           "if true, save in dragonfly-specific snapshotting format");
 ABSL_FLAG(string, cluster_mode, "",
-          "Cluster mode supported. Currently supports only `emulated`. "
+          "Cluster mode supported."
           "default: \"\"");
 ABSL_FLAG(string, cluster_announce_ip, "", "ip that cluster commands announce to the client");
 
@@ -395,11 +395,13 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
   }
 
   string cluster_mode = GetFlag(FLAGS_cluster_mode);
-  if (cluster_mode.empty()) {
-    is_emulated_cluster_ = false;
-  } else if (cluster_mode == "emulated") {
+
+  if (cluster_mode == "emulated") {
     is_emulated_cluster_ = true;
-  } else {
+  } else if (cluster_mode == "yes") {
+    cluster_enabled = true;
+    cluster_data_.reset(new ClusterData());
+  } else if (!cluster_mode.empty()) {
     LOG(ERROR) << "invalid cluster_mode. Exiting...";
     exit(1);
   }
@@ -627,7 +629,8 @@ void ServerFamily::SnapshotScheduling(const SnapshotSpec& spec) {
       continue;
     }
 
-    // if it matches check the last save time, if it is the same minute don't save another snapshot
+    // if it matches check the last save time, if it is the same minute don't save another
+    // snapshot
     time_t last_save;
     {
       lock_guard lk(save_mu_);
@@ -887,7 +890,8 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
 }
 
 // Run callback for all active RdbSnapshots (passed as index).
-// .dfs format contains always `shard_set->size() + 1` snapshots (for every shard and summary file).
+// .dfs format contains always `shard_set->size() + 1` snapshots (for every shard and summary
+// file).
 static void RunStage(bool new_version, std::function<void(unsigned)> cb) {
   if (new_version) {
     shard_set->RunBlockingInParallel([&](EngineShard* es) { cb(es->shard_id()); });
@@ -1231,10 +1235,10 @@ void ServerFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
   // This command supports 2 sub options:
   // 1. HELP
   // 2. SLOTS: the slots are a mapping between sharding and hosts in the cluster.
-  // Note that as of the beginning of 2023 DF don't have cluster mode (i.e sharding across multiple
-  // hosts), as a results all shards are map to the same host (i.e. range is between  and kEndSlot)
-  // and number of cluster sharding is thus == 1 (kClustersShardingCount).
-  // For more details https://redis.io/commands/cluster-slots/
+  // Note that as of the beginning of 2023 DF don't have cluster mode (i.e sharding across
+  // multiple hosts), as a results all shards are map to the same host (i.e. range is between  and
+  // kEndSlot) and number of cluster sharding is thus == 1 (kClustersShardingCount). For more
+  // details https://redis.io/commands/cluster-slots/
   constexpr unsigned int kEndSlot = 16383;  // see redis code (cluster.c CLUSTER_SLOTS).
   constexpr unsigned int kStartSlot = 0;
   constexpr unsigned int kClustersShardingCount = 1;
@@ -1244,8 +1248,9 @@ void ServerFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
 
-  if (!is_emulated_cluster_) {
-    return (*cntx)->SendError("CLUSTER commands requires --cluster_mode=emulated");
+  if (!is_emulated_cluster_ && !cluster_enabled) {
+    return (*cntx)->SendError(
+        "CLUSTER commands requires --cluster_mode=emulated or --cluster_mode=yes");
   }
 
   if (sub_cmd == "HELP") {
@@ -1749,7 +1754,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
   if (should_enter("CLUSTER")) {
     ADD_HEADER("# Cluster");
-    append("cluster_enabled", is_emulated_cluster_);
+    append("cluster_enabled", is_emulated_cluster_ || cluster_enabled);
   }
 
   (*cntx)->SendBulkString(info);
