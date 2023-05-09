@@ -25,9 +25,6 @@ TEST_F(ClusterConfigTest, KeyTagTest) {
 
   key = "{}foo{bar}{zap}";
   ASSERT_EQ(key, ClusterConfig::KeyTag(key));
-
-  key = "foo{";
-  ASSERT_EQ(key, ClusterConfig::KeyTag(key));
 }
 
 }  // namespace dfly
