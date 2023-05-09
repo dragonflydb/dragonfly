@@ -59,6 +59,10 @@ ABSL_FLAG(bool, multi_exec_squash, true,
 
 ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4_KB, "Max buffer for squashed commands per script");
 
+ABSL_FLAG(bool, admin_nopass, false,
+          "If set, would enable open admin access to console on the assigned port, without auth "
+          "token needed.");
+
 namespace dfly {
 
 #if __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
@@ -931,10 +935,19 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
   dfly_cntx->conn_state.memcache_flag = 0;
 }
 
+bool RequireAdminAuth() {
+  return !GetFlag(FLAGS_admin_nopass);
+}
+
 facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
                                                   facade::Connection* owner) {
   ConnectionContext* res = new ConnectionContext{peer, owner};
-  res->req_auth = !GetPassword().empty();
+
+  if (owner->IsAdmin() && !RequireAdminAuth()) {
+    res->req_auth = false;
+  } else {
+    res->req_auth = !GetPassword().empty();
+  }
 
   // a bit of a hack. I set up breaker callback here for the owner.
   // Should work though it's confusing to have it here.

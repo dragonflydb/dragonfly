@@ -424,17 +424,19 @@ uint32_t Connection::GetClientId() const {
   return id_;
 }
 
+bool Connection::IsAdmin() const {
+  auto* lsb = static_cast<LinuxSocketBase*>(socket_.get());
+  uint16_t admin_port = absl::GetFlag(FLAGS_admin_port);
+  return lsb->LocalEndpoint().port() == admin_port;
+}
+
 io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
-  bool enabled = absl::GetFlag(FLAGS_primary_port_http_enabled);
-  if (!enabled) {
-    uint16_t admin_port = absl::GetFlag(FLAGS_admin_port);
-    // check if this connection is from the admin port, if so, override primary_port_http_enabled
-    LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
-    enabled = lsb->LocalEndpoint().port() == admin_port;
-  }
-  if (!enabled) {
+  bool primary_port_enabled = absl::GetFlag(FLAGS_primary_port_http_enabled);
+  bool admin = IsAdmin();
+  if (!primary_port_enabled && !admin) {
     return false;
   }
+
   size_t last_len = 0;
   do {
     auto buf = io_buf_.AppendBuffer();

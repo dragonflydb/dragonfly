@@ -119,6 +119,8 @@ Dragonfly 支持 Redis 的常见参数。
 
 * `admin_bind`：如果设置，将管理控制台 TCP 连接绑定到给定地址。支持 HTTP 和 RESP 协议。默认为any。
 
+* `admin_nopass`: 将管理控制台 TCP 连接绑定到给定地址。同时支持 HTTP 和 RESP 协议。
+
 * `cluster_mode`：支持集群模式。目前仅支持 `emulated`。默认为空`""`。
 
 * `cluster_announce_ip`：集群模式下向客户端公开的 IP。
