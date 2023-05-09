@@ -13,7 +13,7 @@ bool ClusterConfig::cluster_enabled = false;
 
 static constexpr SlotId kMaxSlotNum = 0x3FFF;
 
-std::string_view KeyTag(std::string_view key) {
+std::string_view ClusterConfig::KeyTag(std::string_view key) {
   size_t s, e; /* start-end indexes of { and } */
 
   for (s = 0; s < key.length(); s++)

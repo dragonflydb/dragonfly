@@ -21,6 +21,8 @@ class ClusterConfig {
   static bool IsClusterEnabled() {
     return cluster_enabled;
   }
+  // If the key contains the {...} pattern, return only the part between { and }
+  static std::string_view KeyTag(std::string_view key);
 
   // If key is in my slots ownership return true
   bool IsMySlot(SlotId id);
@@ -32,8 +34,5 @@ class ClusterConfig {
   absl::flat_hash_set<SlotId> owned_slots_;
   static bool cluster_enabled;
 };
-
-// If the key contains the {...} pattern, return only the part between { and }
-std::string_view KeyTag(std::string_view key);
 
 }  // namespace dfly
