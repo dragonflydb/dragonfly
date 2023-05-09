@@ -3,11 +3,12 @@
 //
 #pragma once
 
+#include "base/logging.h"
 #include "core/compact_object.h"
-#include "core/string_set.h"
 #include "server/table.h"
 
 extern "C" {
+#include "redis/listpack.h"
 #include "redis/object.h"
 #include "redis/quicklist.h"
 }
@@ -15,6 +16,8 @@ extern "C" {
 #include <functional>
 
 namespace dfly {
+
+class StringMap;
 
 namespace container_utils {
 
@@ -68,6 +71,15 @@ bool IterateSet(const PrimeValue& pv, const IterateFunc& func);
 // without stopping.
 bool IterateSortedSet(robj* zobj, const IterateSortedFunc& func, int32_t start = 0,
                       int32_t end = -1, bool reverse = false, bool use_score = false);
+
+// Get StringMap pointer from primetable value. Sets expire time from db_context
+StringMap* GetStringMap(const PrimeValue& pv, const DbContext& db_context);
+
+// Get string_view from listpack poiner. Intbuf to store integer values as strings.
+std::string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]);
+
+// Find value by key and return stringview to it, otherwise nullopt.
+std::optional<std::string_view> LpFind(uint8_t* lp, std::string_view key, uint8_t int_buf[]);
 
 };  // namespace container_utils
 

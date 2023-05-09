@@ -32,6 +32,7 @@ extern "C" {
 #include "server/list_family.h"
 #include "server/multi_command_squasher.h"
 #include "server/script_mgr.h"
+#include "server/search_family.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
 #include "server/stream_family.h"
@@ -1772,6 +1773,7 @@ void Service::RegisterCommands() {
   JsonFamily::Register(&registry_);
   BitOpsFamily::Register(&registry_);
   HllFamily::Register(&registry_);
+  SearchFamily::Register(&registry_);
 
   server_family_.Register(&registry_);
 

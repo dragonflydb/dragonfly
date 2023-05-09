@@ -4,6 +4,8 @@
 #include "server/container_utils.h"
 
 #include "base/logging.h"
+#include "core/string_map.h"
+#include "core/string_set.h"
 
 extern "C" {
 #include "redis/intset.h"
@@ -15,6 +17,8 @@ extern "C" {
 }
 
 namespace dfly::container_utils {
+
+using namespace std;
 
 quicklistEntry QLEntry() {
   quicklistEntry res{.quicklist = NULL,
@@ -156,6 +160,32 @@ bool IterateSortedSet(robj* zobj, const IterateSortedFunc& func, int32_t start, 
     return success;
   }
   return false;
+}
+
+StringMap* GetStringMap(const PrimeValue& pv, const DbContext& db_context) {
+  DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
+  StringMap* res = static_cast<StringMap*>(pv.RObjPtr());
+  uint32_t map_time = MemberTimeSeconds(db_context.time_now_ms);
+  res->set_time(map_time);
+  return res;
+}
+
+optional<string_view> LpFind(uint8_t* lp, string_view key, uint8_t int_buf[]) {
+  uint8_t* fptr = lpFirst(lp);
+  DCHECK(fptr);
+
+  fptr = lpFind(lp, fptr, (unsigned char*)key.data(), key.size(), 1);
+  if (!fptr)
+    return std::nullopt;
+  uint8_t* vptr = lpNext(lp, fptr);
+  return LpGetView(vptr, int_buf);
+}
+
+string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]) {
+  int64_t ele_len = 0;
+  uint8_t* elem = lpGet(lp_it, &ele_len, int_buf);
+  DCHECK(elem);
+  return std::string_view{reinterpret_cast<char*>(elem), size_t(ele_len)};
 }
 
 }  // namespace dfly::container_utils
