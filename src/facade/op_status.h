@@ -26,7 +26,6 @@ enum class OpStatus : uint16_t {
   STREAM_ID_SMALL,
   ENTRIES_ADDED_SMALL,
   INVALID_NUMERIC_RESULT,
-  KEY_MOVED,
 };
 
 const char* DebugString(OpStatus op);

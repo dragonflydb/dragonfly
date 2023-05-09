@@ -118,6 +118,8 @@ class Service : public facade::ServiceInterface {
   // Return false if command is invalid and reply with error.
   bool VerifyCommand(const CommandId* cid, CmdArgList args, ConnectionContext* cntx);
 
+  // Return false if not all keys are owned by the server when running in cluster mode.
+  // If false is returned error was sent to the client.
   bool CheckKeysOwnership(const CommandId* cid, CmdArgList args, ConnectionContext* dfly_cntx);
 
   const CommandId* FindCmd(CmdArgList args) const;

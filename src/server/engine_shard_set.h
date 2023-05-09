@@ -21,7 +21,7 @@ extern "C" {
 #include "core/fibers.h"
 #include "core/mi_memory_resource.h"
 #include "core/tx_queue.h"
-#include "server/cluster/cluster_data.h"
+#include "server/cluster/cluster_config.h"
 #include "server/db_slice.h"
 
 namespace dfly {
