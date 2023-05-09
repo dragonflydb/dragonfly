@@ -400,7 +400,7 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
     is_emulated_cluster_ = true;
   } else if (cluster_mode == "yes") {
     cluster_enabled = true;
-    cluster_data_.reset(new ClusterData());
+    cluster_config_.reset(new ClusterConfig());
   } else if (!cluster_mode.empty()) {
     LOG(ERROR) << "invalid cluster_mode. Exiting...";
     exit(1);

@@ -2,19 +2,15 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/cluster/cluster_data.h"
+#include "server/cluster/cluster_config.h"
 
 #include "base/gtest.h"
 
 namespace dfly {
 
-class ClusterDataTest : public ::testing::Test {
- protected:
-  ClusterDataTest() {
-  }
-};
+class ClusterConfigTest : public ::testing::Test {};
 
-TEST_F(ClusterDataTest, KeyTagTest) {
+TEST_F(ClusterConfigTest, KeyTagTest) {
   std::string key = "{user1000}.following";
   ASSERT_EQ("user1000", KeyTag(key));
 
