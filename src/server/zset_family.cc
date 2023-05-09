@@ -620,7 +620,7 @@ void SendAtLeastOneKeyError(ConnectionContext* cntx) {
   (*cntx)->SendError(absl::StrCat("at least 1 input key is needed for ", name));
 }
 
-enum class AggType : uint8_t { SUM, MIN, MAX };
+enum class AggType : uint8_t { SUM, MIN, MAX, NOOP };
 using ScoredMap = absl::flat_hash_map<std::string, double>;
 
 ScoredMap FromObject(const CompactObj& co, double weight) {
@@ -650,6 +650,8 @@ double Aggregate(double v1, double v2, AggType atype) {
       return max(v1, v2);
     case AggType::MIN:
       return min(v1, v2);
+    case AggType::NOOP:
+      return 0;
   }
   return 0;
 }
@@ -1338,6 +1340,37 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
   cntx->transaction->Execute(std::move(store_cb), true);
 
   (*cntx)->SendLong(smvec.size());
+}
+
+void ZSetFamily::ZInterCard(CmdArgList args, ConnectionContext* cntx) {
+  vector<OpResult<ScoredMap>> maps(shard_set->size(), OpStatus::SKIPPED);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    maps[shard->shard_id()] = OpInter(shard, t, "", AggType::NOOP, {}, false);
+    return OpStatus::OK;
+  };
+
+  cntx->transaction->ScheduleSingleHop(std::move(cb));
+
+  ScoredMap result;
+  for (auto& op_res : maps) {
+    if (op_res.status() == OpStatus::SKIPPED)
+      continue;
+
+    if (!op_res)
+      return (*cntx)->SendError(op_res.status());
+
+    if (result.empty()) {
+      result.swap(op_res.value());
+    } else {
+      InterScoredMap(&result, &op_res.value(), AggType::NOOP);
+    }
+
+    if (result.empty())
+      break;
+  }
+
+  (*cntx)->SendLong(result.size());
 }
 
 void ZSetFamily::ZPopMax(CmdArgList args, ConnectionContext* cntx) {
@@ -2134,6 +2167,8 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1, 1}.HFUNC(ZCount)
             << CI{"ZINCRBY", CO::FAST | CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(ZIncrBy)
             << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3, 1}.HFUNC(ZInterStore)
+            << CI{"ZINTERCARD", CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 2, 2, 1}
+                   .HFUNC(ZInterCard)
             << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1, 1}.HFUNC(ZLexCount)
             << CI{"ZPOPMAX", CO::FAST | CO::WRITE, -2, 1, 1, 1}.HFUNC(ZPopMax)
             << CI{"ZPOPMIN", CO::FAST | CO::WRITE, -2, 1, 1, 1}.HFUNC(ZPopMin)

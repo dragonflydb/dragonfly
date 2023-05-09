@@ -60,6 +60,7 @@ class ZSetFamily {
   static void ZCount(CmdArgList args, ConnectionContext* cntx);
   static void ZIncrBy(CmdArgList args, ConnectionContext* cntx);
   static void ZInterStore(CmdArgList args, ConnectionContext* cntx);
+  static void ZInterCard(CmdArgList args, ConnectionContext* cntx);
   static void ZLexCount(CmdArgList args, ConnectionContext* cntx);
   static void ZPopMax(CmdArgList args, ConnectionContext* cntx);
   static void ZPopMin(CmdArgList args, ConnectionContext* cntx);
