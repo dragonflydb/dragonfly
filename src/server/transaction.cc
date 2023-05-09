@@ -689,11 +689,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
       }
     };
 
-    // We can't allow inline scheduling during a full sync, because then journaling transactions
-    // will be scheduled before RdbLoader::LoadItemsBuffer is finished. We can't use the regular
-    // locking mechanism because RdbLoader is not using transactions.
-    if (coordinator_index_ == unique_shard_id_ &&
-        ServerState::tlocal()->gstate() != GlobalState::LOADING) {
+    if (coordinator_index_ == unique_shard_id_ && ServerState::tlocal()->AllowInlineScheduling()) {
       DVLOG(2) << "Inline scheduling a transaction";
       schedule_cb();
     } else {

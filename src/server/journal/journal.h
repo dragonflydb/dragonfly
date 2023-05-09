@@ -33,6 +33,7 @@ class Journal {
 
   uint32_t RegisterOnChange(ChangeCallback cb);
   void UnregisterOnChange(uint32_t id);
+  bool HasRegisteredCallbacks() const;
 
   /*
   void AddCmd(TxId txid, Op opcode, Span args) {

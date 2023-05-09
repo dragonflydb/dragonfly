@@ -44,6 +44,9 @@ class JournalSlice {
 
   uint32_t RegisterOnChange(ChangeCallback cb);
   void UnregisterOnChange(uint32_t);
+  bool HasRegisteredCallbacks() const {
+    return !change_cb_arr_.empty();
+  }
 
  private:
   struct RingItem;

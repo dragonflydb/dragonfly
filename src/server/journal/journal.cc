@@ -86,6 +86,10 @@ void Journal::UnregisterOnChange(uint32_t id) {
   journal_slice.UnregisterOnChange(id);
 }
 
+bool Journal::HasRegisteredCallbacks() const {
+  return journal_slice.HasRegisteredCallbacks();
+}
+
 LSN Journal::GetLsn() const {
   return journal_slice.cur_lsn();
 }
