@@ -18,6 +18,9 @@ class ClusterConfig {
  public:
   ClusterConfig();
   static SlotId KeySlot(std::string_view key);
+  static bool IsClusterEnabled() {
+    return cluster_enabled;
+  }
 
   // If key is in my slots ownership return true
   bool IsMySlot(SlotId id);
@@ -27,11 +30,10 @@ class ClusterConfig {
 
   util::SharedMutex slots_mu_;
   absl::flat_hash_set<SlotId> owned_slots_;
+  static bool cluster_enabled;
 };
 
 // If the key contains the {...} pattern, return only the part between { and }
 std::string_view KeyTag(std::string_view key);
-
-extern bool cluster_enabled;
 
 }  // namespace dfly

@@ -333,7 +333,7 @@ template <typename U> void EngineShardSet::RunBlockingInParallel(U&& func) {
 }
 
 inline ShardId Shard(std::string_view v, ShardId shard_num) {
-  if (cluster_enabled) {
+  if (ClusterConfig::IsClusterEnabled()) {
     v = KeyTag(v);
   }
   XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
