@@ -787,7 +787,7 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
     // In case ONLY the destination key is hosted in this shard no work on this shard should be
     // done in this step
     if (keys.empty()) {
-      return OpStatus::OK;
+      return OpStatus::SKIPPED;
     }
   }
 
