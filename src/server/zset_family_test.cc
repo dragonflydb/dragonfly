@@ -424,11 +424,19 @@ TEST_F(ZSetFamilyTest, ZInterStore) {
 }
 
 TEST_F(ZSetFamilyTest, ZInterCard) {
-  EXPECT_EQ(2, CheckedInt({"zadd", "z1", "1", "a", "2", "b"}));
-  EXPECT_EQ(2, CheckedInt({"zadd", "z2", "3", "c", "2", "b"}));
+  EXPECT_EQ(3, CheckedInt({"zadd", "z1", "1", "a", "2", "b", "3", "c"}));
+  EXPECT_EQ(3, CheckedInt({"zadd", "z2", "2", "b", "3", "c", "4", "d"}));
   RespExpr resp;
 
-  EXPECT_EQ(1, CheckedInt({"zintercard", "a", "2", "z1", "z2"}));
+  EXPECT_EQ(2, CheckedInt({"zintercard", "2", "z1", "z2"}));
+  EXPECT_EQ(1, CheckedInt({"zintercard", "2", "z1", "z2", "LIMIT", "1"}));
+
+  resp = Run({"zintercard", "2", "z1", "z2", "LIM"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+  resp = Run({"zintercard", "2", "z1", "z2", "LIMIT"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+  resp = Run({"zintercard", "2", "z1", "z2", "LIMIT", "a"});
+  EXPECT_THAT(resp, ErrArg("limit value is not a positive integer"));
 }
 
 TEST_F(ZSetFamilyTest, ZAddBug148) {

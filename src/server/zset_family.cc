@@ -1343,6 +1343,20 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZInterCard(CmdArgList args, ConnectionContext* cntx) {
+  unsigned num_keys;
+  if (!absl::SimpleAtoi(ArgS(args, 0), &num_keys)) {
+    return (*cntx)->SendError(OpStatus::SYNTAX_ERR);
+  }
+
+  uint64_t limit = 0;
+  if (args.size() == (1 + num_keys + 2) && ArgS(args, 1 + num_keys) == "LIMIT") {
+    if (!absl::SimpleAtoi(ArgS(args, 1 + num_keys + 1), &limit)) {
+      return (*cntx)->SendError("limit value is not a positive integer", kSyntaxErrType);
+    }
+  } else if (args.size() != 1 + num_keys) {
+    return (*cntx)->SendError(kSyntaxErr);
+  }
+
   vector<OpResult<ScoredMap>> maps(shard_set->size(), OpStatus::SKIPPED);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1370,6 +1384,9 @@ void ZSetFamily::ZInterCard(CmdArgList args, ConnectionContext* cntx) {
       break;
   }
 
+  if (0 < limit && limit < result.size()) {
+    return (*cntx)->SendLong(limit);
+  }
   (*cntx)->SendLong(result.size());
 }
 
