@@ -14,27 +14,15 @@ bool ClusterConfig::cluster_enabled = false;
 static constexpr SlotId kMaxSlotNum = 0x3FFF;
 
 std::string_view ClusterConfig::KeyTag(std::string_view key) {
-  size_t s, e; /* start-end indexes of { and } */
-
-  for (s = 0; s < key.length(); s++)
-    if (key[s] == '{')
-      break;
-
-  // No '{'
-  if (s == key.length())
+  size_t start = key.find('{');
+  if (start == key.npos) {
     return key;
-
-  // '{' found, Check if we have the corresponding '}'.
-  for (e = s + 1; e < key.length(); e++)
-    if (key[e] == '}')
-      break;
-
-  // No '}'
-  if (e == key.length() || e == s + 1)
+  }
+  size_t end = key.find('}', start + 1);
+  if (end == key.npos || end == start + 1) {
     return key;
-
-  // return only the part between { and }
-  return key.substr(s + 1, e - s - 1);
+  }
+  return key.substr(start + 1, end - start - 1);
 }
 
 SlotId ClusterConfig::KeySlot(std::string_view key) {

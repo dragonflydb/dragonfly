@@ -12,19 +12,22 @@ class ClusterConfigTest : public ::testing::Test {};
 
 TEST_F(ClusterConfigTest, KeyTagTest) {
   std::string key = "{user1000}.following";
-  ASSERT_EQ("user1000", KeyTag(key));
+  ASSERT_EQ("user1000", ClusterConfig::KeyTag(key));
 
   key = " foo{}{bar}";
-  ASSERT_EQ(key, KeyTag(key));
+  ASSERT_EQ(key, ClusterConfig::KeyTag(key));
 
   key = "foo{{bar}}zap";
-  ASSERT_EQ("{bar", KeyTag(key));
+  ASSERT_EQ("{bar", ClusterConfig::KeyTag(key));
 
   key = "foo{bar}{zap}";
-  ASSERT_EQ("bar", KeyTag(key));
+  ASSERT_EQ("bar", ClusterConfig::KeyTag(key));
 
   key = "{}foo{bar}{zap}";
-  ASSERT_EQ(key, KeyTag(key));
+  ASSERT_EQ(key, ClusterConfig::KeyTag(key));
+
+  key = "foo{";
+  ASSERT_EQ(key, ClusterConfig::KeyTag(key));
 }
 
 }  // namespace dfly
