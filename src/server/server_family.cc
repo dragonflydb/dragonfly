@@ -399,7 +399,6 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
   if (cluster_mode == "emulated") {
     is_emulated_cluster_ = true;
   } else if (cluster_mode == "yes") {
-    cluster_enabled = true;
     cluster_config_.reset(new ClusterConfig());
   } else if (!cluster_mode.empty()) {
     LOG(ERROR) << "invalid cluster_mode. Exiting...";
@@ -1248,7 +1247,7 @@ void ServerFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
 
-  if (!is_emulated_cluster_ && !cluster_enabled) {
+  if (!is_emulated_cluster_ && !ClusterConfig::IsClusterEnabled()) {
     return (*cntx)->SendError(
         "CLUSTER commands requires --cluster_mode=emulated or --cluster_mode=yes");
   }
@@ -1754,7 +1753,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
   if (should_enter("CLUSTER")) {
     ADD_HEADER("# Cluster");
-    append("cluster_enabled", is_emulated_cluster_ || cluster_enabled);
+    append("cluster_enabled", is_emulated_cluster_ || ClusterConfig::IsClusterEnabled());
   }
 
   (*cntx)->SendBulkString(info);

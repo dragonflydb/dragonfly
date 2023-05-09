@@ -9,7 +9,7 @@ extern "C" {
 
 namespace dfly {
 
-bool cluster_enabled = false;
+bool ClusterConfig::cluster_enabled = false;
 
 static constexpr SlotId kMaxSlotNum = 0x3FFF;
 
@@ -43,6 +43,7 @@ SlotId ClusterConfig::KeySlot(std::string_view key) {
 }
 
 ClusterConfig::ClusterConfig() {
+  cluster_enabled = true;
   AddSlots();
 }
 

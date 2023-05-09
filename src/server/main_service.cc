@@ -747,7 +747,7 @@ bool Service::VerifyCommand(const CommandId* cid, CmdArgList args, ConnectionCon
     }
   }
 
-  if (cluster_enabled && !CheckKeysOwnership(cid, args.subspan(1), dfly_cntx)) {
+  if (ClusterConfig::IsClusterEnabled() && !CheckKeysOwnership(cid, args.subspan(1), dfly_cntx)) {
     return false;
   }
 
