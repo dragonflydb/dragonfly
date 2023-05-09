@@ -28,7 +28,7 @@ class ClusterConfig {
   bool IsMySlot(SlotId id);
 
  private:
-  bool AddSlots();
+  void AddSlots();
 
   util::SharedMutex slots_mu_;
   absl::flat_hash_set<SlotId> owned_slots_;

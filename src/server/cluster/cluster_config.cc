@@ -47,14 +47,14 @@ ClusterConfig::ClusterConfig() {
   AddSlots();
 }
 
-bool ClusterConfig::AddSlots() {
+void ClusterConfig::AddSlots() {
   // TODO update logic acording to config
   // currently add all slots to owned slots
   std::lock_guard lk{slots_mu_};
   for (SlotId slot_id = 0; slot_id <= kMaxSlotNum; ++slot_id) {
     owned_slots_.emplace(slot_id);
   }
-  return true;
+  return;
 }
 
 bool ClusterConfig::IsMySlot(SlotId id) {
