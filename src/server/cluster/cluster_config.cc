@@ -47,8 +47,7 @@ void ClusterConfig::AddSlots() {
 
 bool ClusterConfig::IsMySlot(SlotId id) {
   std::shared_lock sl(slots_mu_);
-  size_t count = owned_slots_.count(id);
-  return count > 0;
+  return owned_slots_.contains(id);
 }
 
 }  // namespace dfly
