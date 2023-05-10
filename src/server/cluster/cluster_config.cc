@@ -50,7 +50,7 @@ optional<ClusterConfig::Node> GetMasterNodeForSlot(const vector<ClusterConfig::N
       return node;
     }
   }
-  
+
   CHECK(false) << "No master present in nodes";
   return nullopt;
 }
