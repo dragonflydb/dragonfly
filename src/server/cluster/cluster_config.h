@@ -6,8 +6,8 @@
 
 #include <absl/base/thread_annotations.h>
 
+#include <optional>
 #include <string_view>
-#include <tuple>
 #include <vector>
 
 #include "src/core/fibers.h"
@@ -43,9 +43,11 @@ class ClusterConfig {
   explicit ClusterConfig(std::string_view my_id);
 
   static SlotId KeySlot(std::string_view key);
+
   static bool IsClusterEnabled() {
     return cluster_enabled;
   }
+
   // If the key contains the {...} pattern, return only the part between { and }
   static std::string_view KeyTag(std::string_view key);
 
@@ -53,7 +55,7 @@ class ClusterConfig {
   bool IsMySlot(SlotId id) const;
 
   // Returns nodes that own `id`. Empty if owned by me.
-  std::shared_ptr<std::vector<Node>> GetNodesForSlot(SlotId id) const;
+  std::optional<Node> GetNodeForSlot(SlotId id) const;
 
   void SetConfig(const std::vector<ClusterShard>& new_config);
 
@@ -65,10 +67,9 @@ class ClusterConfig {
 
   mutable util::SharedMutex slots_mu_;
 
-  // This array covers the whole range of possible slots. We keep empty pointers for the current
-  // instance ("me"), as we do not need any additional information for it (such as ip and port).
-  std::array<std::shared_ptr<std::vector<Node>>, kMaxSlotNum + 1> config_
-      ABSL_GUARDED_BY(slots_mu_) = {};
+  // This array covers the whole range of possible slots. We keep nullopt for the current instance
+  // ("me"), as we do not need any additional information for it (such as ip and port).
+  std::array<std::optional<Node>, kMaxSlotNum + 1> config_ ABSL_GUARDED_BY(slots_mu_) = {};
 };
 
 }  // namespace dfly

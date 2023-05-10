@@ -7,6 +7,7 @@
 #include <gmock/gmock-matchers.h>
 
 #include "base/gtest.h"
+#include "base/logging.h"
 
 using namespace std;
 
@@ -39,7 +40,7 @@ TEST_F(ClusterConfigTest, ConfigEmpty) {
   // Test that empty-initialization causes all slots to be owned locally.
   for (SlotId i : {0, 1, 10, 100, 1'000, 10'000, 16'000, 0x3FFF}) {
     EXPECT_TRUE(config_.IsMySlot(i));
-    EXPECT_EQ(config_.GetNodesForSlot(i), nullptr);
+    EXPECT_EQ(config_.GetNodeForSlot(i), nullopt);
   }
 }
 
@@ -48,7 +49,7 @@ TEST_F(ClusterConfigTest, ConfigSetEmpty) {
   config_.SetConfig({});
   for (SlotId i : {0, 1, 10, 100, 1'000, 10'000, 16'000, 0x3FFF}) {
     EXPECT_TRUE(config_.IsMySlot(i));
-    EXPECT_EQ(config_.GetNodesForSlot(i), nullptr);
+    EXPECT_EQ(config_.GetNodeForSlot(i), nullopt);
   }
 }
 
@@ -67,25 +68,24 @@ TEST_F(ClusterConfigTest, ConfigSetPartial) {
   });
 
   EXPECT_TRUE(config_.IsMySlot(9));
-  EXPECT_EQ(config_.GetNodesForSlot(9), nullptr);
+  EXPECT_EQ(config_.GetNodeForSlot(9), nullopt);
 
   for (SlotId i = 10; i <= 15; ++i) {
     EXPECT_FALSE(config_.IsMySlot(i));
-    auto nodes = config_.GetNodesForSlot(i);
-    EXPECT_NE(nodes, nullptr);
-    EXPECT_EQ(nodes->size(), 1);
-    EXPECT_EQ((*nodes)[0].id, "other");
-    EXPECT_EQ((*nodes)[0].ip, "192.168.0.100");
-    EXPECT_EQ((*nodes)[0].port, 7000);
-    EXPECT_EQ((*nodes)[0].role, ClusterConfig::Role::kMaster);
+    auto node = config_.GetNodeForSlot(i);
+    CHECK(node.has_value());
+    EXPECT_EQ(node->id, "other");
+    EXPECT_EQ(node->ip, "192.168.0.100");
+    EXPECT_EQ(node->port, 7000);
+    EXPECT_EQ(node->role, ClusterConfig::Role::kMaster);
   }
 
   EXPECT_TRUE(config_.IsMySlot(16));
-  EXPECT_EQ(config_.GetNodesForSlot(16), nullptr);
+  EXPECT_EQ(config_.GetNodeForSlot(16), nullopt);
 
   for (SlotId i = 100; i <= 105; ++i) {
     EXPECT_TRUE(config_.IsMySlot(i));
-    EXPECT_EQ(config_.GetNodesForSlot(i), nullptr);
+    EXPECT_EQ(config_.GetNodeForSlot(i), nullopt);
   }
 }
 
