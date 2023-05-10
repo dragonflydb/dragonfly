@@ -602,7 +602,7 @@ bool Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
 
   const auto& key_index = *key_index_res;
   SlotId keys_slot;
-  bool crossslot = false;
+  bool cross_slot = false;
   // Iterate keys and check to which slot they belong.
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
     string_view key = ArgS(args, i);
@@ -613,11 +613,11 @@ bool Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
     }
     if (slot != keys_slot) {
       // keys belong to diffent slots
-      crossslot = true;
+      cross_slot = true;
       break;
     }
   }
-  if (crossslot) {
+  if (cross_slot) {
     (*dfly_cntx)->SendError("-CROSSSLOT Keys in request don't hash to the same slot");
     return false;
   }
