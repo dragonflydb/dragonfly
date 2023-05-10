@@ -3,20 +3,45 @@
 //
 
 #pragma once
-#include <absl/container/flat_hash_set.h>
+
+#include <absl/base/thread_annotations.h>
 
 #include <string_view>
 #include <tuple>
+#include <vector>
 
 #include "src/core/fibers.h"
 
 namespace dfly {
 
-typedef uint16_t SlotId;
+using SlotId = uint16_t;
 
 class ClusterConfig {
  public:
-  ClusterConfig();
+  enum class Role {
+    kMaster,
+    kReplica,
+  };
+
+  struct Node {
+    std::string id;
+    std::string ip;
+    uint16_t port = 0;
+    Role role;
+  };
+
+  struct SlotRange {
+    SlotId start = 0;
+    SlotId end = 0;
+  };
+
+  struct ClusterShard {
+    std::vector<SlotRange> slot_ranges;
+    std::vector<Node> nodes;
+  };
+
+  explicit ClusterConfig(std::string_view my_id);
+
   static SlotId KeySlot(std::string_view key);
   static bool IsClusterEnabled() {
     return cluster_enabled;
@@ -25,14 +50,25 @@ class ClusterConfig {
   static std::string_view KeyTag(std::string_view key);
 
   // If key is in my slots ownership return true
-  bool IsMySlot(SlotId id);
+  bool IsMySlot(SlotId id) const;
+
+  // Returns nodes that own `id`. Empty if owned by me.
+  std::shared_ptr<std::vector<Node>> GetNodesForSlot(SlotId id) const;
+
+  void SetConfig(const std::vector<ClusterShard>& new_config);
 
  private:
-  void AddSlots();
-
-  util::SharedMutex slots_mu_;
-  absl::flat_hash_set<SlotId> owned_slots_;
   static bool cluster_enabled;
+  static constexpr SlotId kMaxSlotNum = 0x3FFF;
+
+  const std::string my_id_;
+
+  mutable util::SharedMutex slots_mu_;
+
+  // This array covers the whole range of possible slots. We keep empty pointers for the current
+  // instance ("me"), as we do not need any additional information for it (such as ip and port).
+  std::array<std::shared_ptr<std::vector<Node>>, kMaxSlotNum + 1> config_
+      ABSL_GUARDED_BY(slots_mu_) = {};
 };
 
 }  // namespace dfly
