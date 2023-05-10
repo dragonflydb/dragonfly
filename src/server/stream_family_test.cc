@@ -39,6 +39,12 @@ TEST_F(StreamFamilyTest, Add) {
 
   resp = Run({"xadd", "key", "badid", "f1", "val1"});
   EXPECT_THAT(resp, ErrArg("Invalid stream ID"));
+
+  resp = Run({"xadd", "key", "nomkstream", "*", "field2", "value2"});
+  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
+
+  resp = Run({"xadd", "noexist", "nomkstream", "*", "field", "value"});
+  EXPECT_THAT(resp, ErrArg("no such key"));
 }
 
 TEST_F(StreamFamilyTest, AddExtended) {
@@ -62,6 +68,24 @@ TEST_F(StreamFamilyTest, AddExtended) {
 
   auto resp3 = Run({"xadd", "key", id2, "f1", "val1"});
   EXPECT_THAT(resp3, ErrArg("equal or smaller than"));
+
+  Run({"xadd", "key2", "5-0", "field", "val"});
+  Run({"xadd", "key2", "6-0", "field1", "val1"});
+  Run({"xadd", "key2", "7-0", "field2", "val2"});
+  auto resp = Run({"xadd", "key2", "minid", "6", "*", "field3", "val3"});
+  EXPECT_THAT(Run({"xlen", "key2"}), IntArg(3));
+  EXPECT_THAT(Run({"xrange", "key2", "5-0", "5-0"}), ArrLen(0));
+
+  for (int i = 0; i < 700; i++) {
+    Run({"xadd", "key3", "*", "field", "val"});
+  }
+  resp = Run({"xadd", "key3", "maxlen", "~", "500", "*", "field", "val"});
+  EXPECT_THAT(Run({"xlen", "key3"}), IntArg(501));
+  for (int i = 0; i < 700; i++) {
+    Run({"xadd", "key4", "*", "field", "val"});
+  }
+  resp = Run({"xadd", "key4", "maxlen", "~", "500", "limit", "100", "*", "field", "val"});
+  EXPECT_THAT(Run({"xlen", "key4"}), IntArg(601));
 }
 
 TEST_F(StreamFamilyTest, Range) {
