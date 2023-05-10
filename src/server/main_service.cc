@@ -589,6 +589,47 @@ void Service::Shutdown() {
   ThisFiber::SleepFor(10ms);
 }
 
+bool Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
+                                 ConnectionContext* dfly_cntx) {
+  if (cid->first_key_pos() == 0) {
+    return true;  // No key command.
+  }
+  OpResult<KeyIndex> key_index_res = DetermineKeys(cid, args);
+  if (!key_index_res) {
+    (*dfly_cntx)->SendError(key_index_res.status());
+    return false;
+  }
+
+  const auto& key_index = *key_index_res;
+  SlotId keys_slot;
+  bool cross_slot = false;
+  // Iterate keys and check to which slot they belong.
+  for (unsigned i = key_index.start; i < key_index.end; ++i) {
+    string_view key = ArgS(args, i);
+    SlotId slot = ClusterConfig::KeySlot(key);
+    if (i == key_index.start) {
+      keys_slot = slot;
+      continue;
+    }
+    if (slot != keys_slot) {
+      // keys belong to diffent slots
+      cross_slot = true;
+      break;
+    }
+  }
+  if (cross_slot) {
+    (*dfly_cntx)->SendError("-CROSSSLOT Keys in request don't hash to the same slot");
+    return false;
+  }
+  // Check keys slot is in my ownership
+  if (!server_family_.cluster_config()->IsMySlot(keys_slot)) {
+    (*dfly_cntx)->SendError("MOVED");  // TODO add more info to moved error.
+    return false;
+  }
+
+  return true;
+}
+
 // Return OK if all keys are allowed to be accessed: either declared in EVAL or
 // transaction is running in global or non-atomic mode.
 OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const CommandId* cid,
@@ -704,6 +745,10 @@ bool Service::VerifyCommand(const CommandId* cid, CmdArgList args, ConnectionCon
       (*dfly_cntx)->SendError(absl::StrCat("'", cmd_name, "' inside MULTI is not allowed"));
       return false;
     }
+  }
+
+  if (ClusterConfig::IsClusterEnabled() && !CheckKeysOwnership(cid, args.subspan(1), dfly_cntx)) {
+    return false;
   }
 
   if (under_script && cid->IsTransactional()) {

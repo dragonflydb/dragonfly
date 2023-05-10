@@ -21,6 +21,7 @@ extern "C" {
 #include "core/fibers.h"
 #include "core/mi_memory_resource.h"
 #include "core/tx_queue.h"
+#include "server/cluster/cluster_config.h"
 #include "server/db_slice.h"
 
 namespace dfly {
@@ -332,6 +333,9 @@ template <typename U> void EngineShardSet::RunBlockingInParallel(U&& func) {
 }
 
 inline ShardId Shard(std::string_view v, ShardId shard_num) {
+  if (ClusterConfig::IsClusterEnabled()) {
+    v = ClusterConfig::KeyTag(v);
+  }
   XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
   return hash % shard_num;
 }
