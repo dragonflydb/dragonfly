@@ -114,14 +114,15 @@ error_code JournalSlice::Close() {
 
 void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
   DCHECK(ring_buffer_);
-  cb_mu_.lock_shared();
-  DVLOG(2) << "AddLogRecord: run callbacks for " << entry.ToString()
-           << " num callbacks: " << change_cb_arr_.size();
+  {
+    std::shared_lock lk(cb_mu_);
+    DVLOG(2) << "AddLogRecord: run callbacks for " << entry.ToString()
+             << " num callbacks: " << change_cb_arr_.size();
 
-  for (const auto& k_v : change_cb_arr_) {
-    k_v.second(entry, await);
+    for (const auto& k_v : change_cb_arr_) {
+      k_v.second(entry, await);
+    }
   }
-  cb_mu_.unlock_shared();
 
   // TODO: This is preparation for AOC style journaling, currently unused.
   RingItem item;
