@@ -14,10 +14,12 @@ extern "C" {
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "facade/error.h"
+#include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
+#include "server/multi_key_blocking.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -117,6 +119,12 @@ OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args
     if (it->second.ObjType() != OBJ_ZSET)
       return OpStatus::WRONG_TYPE;
     db_slice.PreUpdate(op_args.db_cntx.db_index, it);
+  }
+
+  if (add_res.second && op_args.shard->blocking_controller()) {
+    string tmp;
+    string_view key = it->first.GetSlice(&tmp);
+    op_args.shard->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, key);
   }
 
   return it;
@@ -1111,7 +1119,96 @@ bool ParseLimit(string_view offset_str, string_view limit_str, ZSetFamily::Range
   return true;
 }
 
+ZSetFamily::ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key,
+                                bool is_max) {
+  auto& db_slice = shard->db_slice();
+  auto it_res = db_slice.Find(t->GetDbContext(), key, OBJ_ZSET);
+  CHECK(it_res) << t->DebugId() << " " << key;  // must exist and must be ok.
+  PrimeIterator it = *it_res;
+
+  ZSetFamily::RangeParams range_params;
+  range_params.reverse = is_max;
+  range_params.with_scores = true;
+  ZSetFamily::ZRangeSpec range_spec;
+  range_spec.params = range_params;
+  range_spec.interval = ZSetFamily::TopNScored(1);
+
+  DVLOG(2) << "popping from " << key << " " << t->DebugId();
+  db_slice.PreUpdate(t->GetDbIndex(), it);
+  robj* zobj = it_res.value()->second.AsRObj();
+
+  IntervalVisitor iv{Action::POP, range_spec.params, zobj};
+  std::visit(iv, range_spec.interval);
+
+  it_res.value()->second.SyncRObj();
+  db_slice.PostUpdate(t->GetDbIndex(), *it_res, key);
+
+  auto zlen = zsetLength(zobj);
+  if (zlen == 0) {
+    DVLOG(1) << "deleting key " << key << " " << t->DebugId();
+    CHECK(db_slice.Del(t->GetDbIndex(), *it_res));
+  }
+
+  OpArgs op_args = t->GetOpArgs(shard);
+  if (op_args.shard->journal()) {
+    string command = is_max ? "ZPOPMAX" : "ZPOPMIN";
+    RecordJournal(op_args, command, ArgSlice{key}, 1);
+  }
+
+  return iv.PopResult();
+}
+
+void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
+  DCHECK_GE(args.size(), 2u);
+
+  float timeout;
+  auto timeout_str = ArgS(args, args.size() - 1);
+  if (!absl::SimpleAtof(timeout_str, &timeout)) {
+    return (*cntx)->SendError("timeout is not a float or out of range");
+  }
+  if (timeout < 0) {
+    return (*cntx)->SendError("timeout is negative");
+  }
+  VLOG(1) << "BZPop timeout(" << timeout << ")";
+
+  Transaction* transaction = cntx->transaction;
+  MKBlocking<ZSetFamily::ScoredArray> popper(
+      [is_max](Transaction* t, EngineShard* shard, std::string_view key) {
+        return OpBZPop(t, shard, key, is_max);
+      });
+  OpStatus result = popper.Run(transaction, OBJ_ZSET, unsigned(timeout * 1000));
+
+  if (result == OpStatus::OK) {
+    DVLOG(1) << "BZPop " << transaction->DebugId() << " popped from key " << popper.Key();  // key.
+    CHECK(popper.Result().size() == 1);
+    (*cntx)->StartArray(3);
+    (*cntx)->SendBulkString(popper.Key());
+    (*cntx)->SendBulkString(popper.Result()[0].first);
+    return (*cntx)->SendDouble(popper.Result()[0].second);
+  }
+
+  DVLOG(1) << "result for " << transaction->DebugId() << " is " << result;
+
+  switch (result) {
+    case OpStatus::WRONG_TYPE:
+      return (*cntx)->SendError(kWrongTypeErr);
+    case OpStatus::TIMED_OUT:
+      return (*cntx)->SendNullArray();
+    default:
+      LOG(ERROR) << "Unexpected error " << result;
+  }
+  return (*cntx)->SendNullArray();
+}
+
 }  // namespace
+
+void ZSetFamily::BZPopMin(CmdArgList args, ConnectionContext* cntx) {
+  BZPopMinMax(args, cntx, false);
+}
+
+void ZSetFamily::BZPopMax(CmdArgList args, ConnectionContext* cntx) {
+  BZPopMinMax(args, cntx, true);
+}
 
 void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
@@ -2195,34 +2292,39 @@ OpResult<unsigned> ZSetFamily::OpLexCount(const OpArgs& op_args, string_view key
 void ZSetFamily::Register(CommandRegistry* registry) {
   constexpr uint32_t kStoreMask = CO::WRITE | CO::VARIADIC_KEYS | CO::REVERSE_MAPPING;
 
-  *registry << CI{"ZADD", CO::FAST | CO::WRITE | CO::DENYOOM, -4, 1, 1, 1}.HFUNC(ZAdd)
-            << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1, 1}.HFUNC(ZCard)
-            << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1, 1}.HFUNC(ZCount)
-            << CI{"ZINCRBY", CO::FAST | CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(ZIncrBy)
-            << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3, 1}.HFUNC(ZInterStore)
-            << CI{"ZINTERCARD", CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 2, 2, 1}
-                   .HFUNC(ZInterCard)
-            << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1, 1}.HFUNC(ZLexCount)
-            << CI{"ZPOPMAX", CO::FAST | CO::WRITE, -2, 1, 1, 1}.HFUNC(ZPopMax)
-            << CI{"ZPOPMIN", CO::FAST | CO::WRITE, -2, 1, 1, 1}.HFUNC(ZPopMin)
-            << CI{"ZREM", CO::FAST | CO::WRITE, -3, 1, 1, 1}.HFUNC(ZRem)
-            << CI{"ZRANGE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRange)
-            << CI{"ZRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZRank)
-            << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRangeByLex)
-            << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRangeByScore)
-            << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZScore)
-            << CI{"ZMSCORE", CO::READONLY | CO::FAST, -3, 1, 1, 1}.HFUNC(ZMScore)
-            << CI{"ZREMRANGEBYRANK", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRemRangeByRank)
-            << CI{"ZREMRANGEBYSCORE", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRemRangeByScore)
-            << CI{"ZREMRANGEBYLEX", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRemRangeByLex)
-            << CI{"ZREVRANGE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRevRange)
-            << CI{"ZREVRANGEBYLEX", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRevRangeByLex)
-            << CI{"ZREVRANGEBYSCORE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRevRangeByScore)
-            << CI{"ZREVRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZRevRank)
-            << CI{"ZSCAN", CO::READONLY, -3, 1, 1, 1}.HFUNC(ZScan)
-            << CI{"ZUNION", CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 2, 2, 1}
-                   .HFUNC(ZUnion)
-            << CI{"ZUNIONSTORE", kStoreMask, -4, 3, 3, 1}.HFUNC(ZUnionStore);
+  *registry
+      << CI{"ZADD", CO::FAST | CO::WRITE | CO::DENYOOM, -4, 1, 1, 1}.HFUNC(ZAdd)
+      << CI{"BZPOPMIN", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2, 1}
+             .HFUNC(BZPopMin)
+      << CI{"BZPOPMAX", CO::WRITE | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2, 1}
+             .HFUNC(BZPopMax)
+      << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1, 1}.HFUNC(ZCard)
+      << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1, 1}.HFUNC(ZCount)
+      << CI{"ZINCRBY", CO::FAST | CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(ZIncrBy)
+      << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3, 1}.HFUNC(ZInterStore)
+      << CI{"ZINTERCARD", CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 2, 2, 1}
+             .HFUNC(ZInterCard)
+      << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1, 1}.HFUNC(ZLexCount)
+      << CI{"ZPOPMAX", CO::FAST | CO::WRITE, -2, 1, 1, 1}.HFUNC(ZPopMax)
+      << CI{"ZPOPMIN", CO::FAST | CO::WRITE, -2, 1, 1, 1}.HFUNC(ZPopMin)
+      << CI{"ZREM", CO::FAST | CO::WRITE, -3, 1, 1, 1}.HFUNC(ZRem)
+      << CI{"ZRANGE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRange)
+      << CI{"ZRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZRank)
+      << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRangeByLex)
+      << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRangeByScore)
+      << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZScore)
+      << CI{"ZMSCORE", CO::READONLY | CO::FAST, -3, 1, 1, 1}.HFUNC(ZMScore)
+      << CI{"ZREMRANGEBYRANK", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRemRangeByRank)
+      << CI{"ZREMRANGEBYSCORE", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRemRangeByScore)
+      << CI{"ZREMRANGEBYLEX", CO::WRITE, 4, 1, 1, 1}.HFUNC(ZRemRangeByLex)
+      << CI{"ZREVRANGE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRevRange)
+      << CI{"ZREVRANGEBYLEX", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRevRangeByLex)
+      << CI{"ZREVRANGEBYSCORE", CO::READONLY, -4, 1, 1, 1}.HFUNC(ZRevRangeByScore)
+      << CI{"ZREVRANK", CO::READONLY | CO::FAST, 3, 1, 1, 1}.HFUNC(ZRevRank)
+      << CI{"ZSCAN", CO::READONLY, -3, 1, 1, 1}.HFUNC(ZScan)
+      << CI{"ZUNION", CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 2, 2, 1}.HFUNC(
+             ZUnion)
+      << CI{"ZUNIONSTORE", kStoreMask, -4, 3, 3, 1}.HFUNC(ZUnionStore);
 }
 
 }  // namespace dfly

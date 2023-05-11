@@ -55,6 +55,9 @@ class ZSetFamily {
  private:
   template <typename T> using OpResult = facade::OpResult<T>;
 
+  static void BZPopMin(CmdArgList args, ConnectionContext* cntx);
+  static void BZPopMax(CmdArgList args, ConnectionContext* cntx);
+
   static void ZAdd(CmdArgList args, ConnectionContext* cntx);
   static void ZCard(CmdArgList args, ConnectionContext* cntx);
   static void ZCount(CmdArgList args, ConnectionContext* cntx);
