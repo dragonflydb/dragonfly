@@ -6,6 +6,7 @@
 
 #include <absl/base/thread_annotations.h>
 
+#include <array>
 #include <optional>
 #include <string_view>
 #include <vector>
@@ -18,16 +19,10 @@ using SlotId = uint16_t;
 
 class ClusterConfig {
  public:
-  enum class Role {
-    kMaster,
-    kReplica,
-  };
-
   struct Node {
     std::string id;
     std::string ip;
     uint16_t port = 0;
-    Role role;
   };
 
   struct SlotRange {
@@ -37,7 +32,8 @@ class ClusterConfig {
 
   struct ClusterShard {
     std::vector<SlotRange> slot_ranges;
-    std::vector<Node> nodes;
+    Node master;
+    std::vector<Node> replicas;
   };
 
   explicit ClusterConfig(std::string_view my_id);
@@ -54,12 +50,27 @@ class ClusterConfig {
   // If key is in my slots ownership return true
   bool IsMySlot(SlotId id) const;
 
-  // Returns nodes that own `id`. Empty if owned by me.
-  std::optional<Node> GetNodeForSlot(SlotId id) const;
+  // Returns nodes that own `id`. Result will always have the first element set to be the master,
+  // and the following 0 or more elements are the replicas.
+  std::vector<Node> GetNodesForSlot(SlotId id) const;
 
-  void SetConfig(const std::vector<ClusterShard>& new_config);
+  // Returns the master configured for `id`. Returns a default-initialized `Node` if `SetConfig()`
+  // was never completed successfully.
+  Node GetMasterNodeForSlot(SlotId id) const;
+
+  // Returns true if `new_config` is valid and internal state was changed. Returns false and changes
+  // nothing otherwise.
+  bool SetConfig(const std::vector<ClusterShard>& new_config);
 
  private:
+  struct SlotOwner {
+    Node master;
+    std::vector<Node> replicas;
+    bool owned_by_me = false;
+  };
+
+  bool IsConfigValid(const std::vector<ClusterShard>& new_config);
+
   static bool cluster_enabled;
   static constexpr SlotId kMaxSlotNum = 0x3FFF;
 
@@ -67,9 +78,8 @@ class ClusterConfig {
 
   mutable util::SharedMutex slots_mu_;
 
-  // This array covers the whole range of possible slots. We keep nullopt for the current instance
-  // ("me"), as we do not need any additional information for it (such as ip and port).
-  std::array<std::optional<Node>, kMaxSlotNum + 1> config_ ABSL_GUARDED_BY(slots_mu_) = {};
+  // This array covers the whole range of possible slots.
+  std::array<SlotOwner, kMaxSlotNum + 1> slots_ ABSL_GUARDED_BY(slots_mu_) = {};
 };
 
 }  // namespace dfly
