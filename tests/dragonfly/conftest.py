@@ -2,6 +2,7 @@
 Pytest fixtures to be provided for all tests without import
 """
 
+import logging
 import os
 import sys
 from time import sleep
@@ -9,12 +10,13 @@ import pytest
 import pytest_asyncio
 import redis
 import aioredis
+import pymemcache
 import random
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from . import DflyInstance, DflyInstanceFactory, DflyParams, PortPicker
+from . import DflyInstance, DflyInstanceFactory, DflyParams, PortPicker, dfly_args
 from .utility import DflySeederFactory
 
 DATABASE_INDEX = 1
@@ -67,12 +69,14 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
 
     args = request.param if request.param else {}
     existing = request.config.getoption("--existing-port")
+    existing_mc = request.config.getoption("--existing-mc-port")
     params = DflyParams(
         path=path,
         cwd=tmp_dir,
         gdb=request.config.getoption("--gdb"),
         args=request.config.getoption("--df"),
         existing_port=int(existing) if existing else None,
+        existing_mc_port=int(existing_mc) if existing else None,
         env=test_env
     )
 
@@ -189,7 +193,16 @@ def pytest_addoption(parser):
     parser.addoption(
         '--existing-port', action='store', default=None, help='Provide a port to the existing process for the test')
 
+    parser.addoption(
+        '--existing-mc-port', action='store', default=None, help='Provide a port to the existing memcached process for the test'
+    )
+
 
 @pytest.fixture(scope="session")
 def port_picker():
     yield PortPicker()
+
+
+@pytest.fixture(scope="class")
+def memcached_connection(df_server: DflyInstance):
+    return pymemcache.Client(f"localhost:{df_server.mc_port}")
