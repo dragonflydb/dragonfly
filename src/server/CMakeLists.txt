@@ -75,6 +75,10 @@ endif()
 add_library(dfly_test_lib test_utils.cc)
 cxx_link(dfly_test_lib dragonfly_lib facade_test gtest_main_ext)
 
+
+add_executable(dfly_bench dfly_bench.cc)
+cxx_link(dfly_bench dfly_facade fibers2)
+
 cxx_test(dragonfly_test dfly_test_lib LABELS DFLY)
 cxx_test(multi_test dfly_test_lib LABELS DFLY)
 cxx_test(generic_family_test dfly_test_lib LABELS DFLY)
