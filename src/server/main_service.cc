@@ -601,20 +601,17 @@ bool Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
   }
 
   const auto& key_index = *key_index_res;
-  SlotId keys_slot;
+  optional<SlotId> keys_slot;
   bool cross_slot = false;
   // Iterate keys and check to which slot they belong.
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
     string_view key = ArgS(args, i);
     SlotId slot = ClusterConfig::KeySlot(key);
-    if (i == key_index.start) {
-      keys_slot = slot;
-      continue;
-    }
-    if (slot != keys_slot) {
-      // keys belong to diffent slots
-      cross_slot = true;
+    if (keys_slot && slot != *keys_slot) {
+      cross_slot = true;  // keys belong to different slots
       break;
+    } else {
+      keys_slot = slot;
     }
   }
   if (cross_slot) {
@@ -622,7 +619,7 @@ bool Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
     return false;
   }
   // Check keys slot is in my ownership
-  if (!server_family_.cluster_config()->IsMySlot(keys_slot)) {
+  if (keys_slot && !server_family_.cluster_config()->IsMySlot(*keys_slot)) {
     (*dfly_cntx)->SendError("MOVED");  // TODO add more info to moved error.
     return false;
   }
