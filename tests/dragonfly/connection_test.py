@@ -1,11 +1,10 @@
 import random
 import pytest
 import asyncio
-import aioredis
+from redis import asyncio as aioredis
 import async_timeout
 
 from . import DflyInstance
-
 
 async def run_monitor_eval(monitor, expected):
     async with monitor as mon:

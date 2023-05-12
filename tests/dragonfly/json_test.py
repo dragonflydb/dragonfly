@@ -1,6 +1,6 @@
 import pytest
 import redis
-from redis.commands.json.path import Path
+from redis import asyncio as aioredis
 from .utility import *
 from json import JSONDecoder, JSONEncoder
 
@@ -45,7 +45,7 @@ async def test_access_json_value_as_string(async_client: aioredis.Redis):
     try:
         result = await async_client.get(key_name)
         assert False, "should not be able to access JSON value as string"
-    except aioredis.exceptions.ResponseError as e:
+    except redis.exceptions.ResponseError as e:
         assert e.args[0] == "WRONGTYPE Operation against a key holding the wrong kind of value"
 
 
@@ -89,6 +89,6 @@ async def test_update_value(async_client: aioredis.Redis):
         await get_set_json(async_client, value="0", key=key_name,
                            path="$.a.*")
         assert False, "should not be able to modify JSON value as string"
-    except aioredis.exceptions.ResponseError as e:
+    except redis.exceptions.ResponseError as e:
         assert e.args[0] == "WRONGTYPE Operation against a key holding the wrong kind of value"
     assert await async_client.type(key_name) == "string"

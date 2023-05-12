@@ -2,9 +2,8 @@ import time
 import pytest
 import os
 import glob
-import aioredis
+from redis import asyncio as aioredis
 from pathlib import Path
-import aioredis
 
 from . import dfly_args
 from .utility import DflySeeder, wait_available_async
