@@ -768,6 +768,15 @@ OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest
   return UnionShardKeysWithScore(key_weight_vec, agg_type);
 }
 
+ScoredMap ZSetFromSet(const PrimeValue& pv, double weight) {
+  ScoredMap result;
+  container_utils::IterateSet(pv, [&result, weight](container_utils::ContainerEntry ce) {
+    result.emplace(ce.ToString(), weight);
+    return true;
+  });
+  return result;
+}
+
 OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
                             const vector<double>& weights, bool store) {
   ArgSlice keys = t->GetShardArgs(shard->shard_id());
@@ -799,15 +808,17 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
     return OpStatus::SKIPPED;  // return noop
 
   for (unsigned j = 0; j < keys.size(); ++j) {
-    auto it_res = db_slice.Find(t->GetDbContext(), keys[j], OBJ_ZSET);
-    if (it_res == OpStatus::WRONG_TYPE)  // TODO: support sets with default score 1.
-      return it_res.status();
-
-    if (!it_res)
+    auto it_res = db_slice.FindExt(t->GetDbContext(), keys[j]).first;
+    if (!IsValid(it_res))
       continue;  // we exit in the next loop
 
-    it_arr[j] = {*it_res, GetKeyWeight(t, shard->shard_id(), weights, j + removed_keys,
-                                       cmdargs_keys_offset)};
+    // sets are supported for ZINTER* commands:
+    auto obj_type = it_res->second.ObjType();
+    if (obj_type != OBJ_ZSET && obj_type != OBJ_SET)
+      return OpStatus::WRONG_TYPE;
+
+    it_arr[j] = {
+        it_res, GetKeyWeight(t, shard->shard_id(), weights, j + removed_keys, cmdargs_keys_offset)};
   }
 
   ScoredMap result;
@@ -816,7 +827,12 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
       return ScoredMap{};
     }
 
-    ScoredMap sm = FromObject(it->first->second, it->second);
+    ScoredMap sm;
+    if (it->first->second.ObjType() == OBJ_ZSET)
+      sm = FromObject(it->first->second, it->second);
+    else
+      sm = ZSetFromSet(it->first->second, it->second);
+
     if (result.empty())
       result.swap(sm);
     else

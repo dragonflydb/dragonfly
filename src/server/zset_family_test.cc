@@ -421,6 +421,12 @@ TEST_F(ZSetFamilyTest, ZInterStore) {
   EXPECT_EQ(1, CheckedInt({"zinterstore", "a", "2", "z1", "z2"}));
   resp = Run({"zrange", "a", "0", "-1", "withscores"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("b", "4"));
+
+  // support for sets
+  EXPECT_EQ(2, CheckedInt({"sadd", "s2", "b", "c"}));
+  EXPECT_EQ(1, CheckedInt({"zinterstore", "b", "2", "z1", "s2"}));
+  resp = Run({"zrange", "b", "0", "-1", "withscores"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("b", "3"));
 }
 
 TEST_F(ZSetFamilyTest, ZInterCard) {
@@ -437,6 +443,10 @@ TEST_F(ZSetFamilyTest, ZInterCard) {
   EXPECT_THAT(resp, ErrArg("syntax error"));
   resp = Run({"zintercard", "2", "z1", "z2", "LIMIT", "a"});
   EXPECT_THAT(resp, ErrArg("limit value is not a positive integer"));
+
+  // support for sets
+  EXPECT_EQ(3, CheckedInt({"sadd", "s2", "b", "c", "d"}));
+  EXPECT_EQ(2, CheckedInt({"zintercard", "2", "z1", "s2"}));
 }
 
 TEST_F(ZSetFamilyTest, ZAddBug148) {
