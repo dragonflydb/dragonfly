@@ -28,10 +28,8 @@ class RedisServer:
         except Exception as e:
             pass
 
-# Checks that master and redis are synced by writing a random key to master
+# Checks that master redis and dragonfly replica are synced by writing a random key to master
 # and waiting for it to exist in replica. Foreach db in 0..dbcount-1.
-
-
 async def await_synced(master_port, replica_port, dbcount=1):
     rnd_str = "".join(random.choices(string.ascii_letters, k=10))
     key = "sync_key/" + rnd_str
@@ -42,12 +40,12 @@ async def await_synced(master_port, replica_port, dbcount=1):
         c_replica = aioredis.Redis(port=replica_port, db=db)
         timeout = 30
         while timeout > 0:
-            timeout -= 1
             v = await c_replica.get(key)
             print(f"get {key} from REPLICA db = {db} got {v}")
             if v is not None:
                 break
             await asyncio.sleep(1)
+            timeout -= 1
         await c_master.close()
         await c_replica.close()
         assert timeout > 0, "Timeout while waiting for replica to sync"
