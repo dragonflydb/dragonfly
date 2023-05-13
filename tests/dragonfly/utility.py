@@ -1,7 +1,7 @@
-import aioredis
 import itertools
 import sys
 import asyncio
+from redis import asyncio as aioredis
 import random
 import string
 import itertools

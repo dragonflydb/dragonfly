@@ -1,6 +1,8 @@
 import os
-import aioredis
 import pytest
+import redis
+from redis import asyncio as aioredis
+
 from . import dfly_multi_test_args
 from .utility import batch_fill_data, gen_test_data
 
@@ -27,7 +29,7 @@ async def test_password(df_local_factory, export_dfly_password):
     dfly.start()
 
     # Expect password form environment variable
-    with pytest.raises(aioredis.exceptions.AuthenticationError):
+    with pytest.raises(redis.exceptions.AuthenticationError):
         client = aioredis.Redis()
         await client.ping()
     client = aioredis.Redis(password=export_dfly_password)
@@ -40,7 +42,7 @@ async def test_password(df_local_factory, export_dfly_password):
     dfly.start()
 
     # Expect password form flag
-    with pytest.raises(aioredis.exceptions.ResponseError):
+    with pytest.raises(redis.exceptions.AuthenticationError):
         client = aioredis.Redis(password=export_dfly_password)
         await client.ping()
     client = aioredis.Redis(password=requirepass)

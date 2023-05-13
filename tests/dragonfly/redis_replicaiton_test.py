@@ -1,7 +1,7 @@
 import time
 import pytest
 import asyncio
-import aioredis
+from redis import asyncio as aioredis
 import subprocess
 from .utility import *
 

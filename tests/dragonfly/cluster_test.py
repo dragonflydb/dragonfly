@@ -1,8 +1,9 @@
 import pytest
 import redis
-from . import dfly_args
-import aioredis
+from redis import asyncio as aioredis
 import asyncio
+
+from . import dfly_args
 
 BASE_PORT = 30001
 
@@ -133,7 +134,7 @@ async def test_cluster_info(async_client):
 async def test_cluster_nodes(async_client):
     res = await async_client.execute_command("CLUSTER NODES")
     assert len(res) == 1
-    info = res['127.0.0.2:6379@6379']
+    info = res['127.0.0.2:6379']
     assert res is not None
     assert info['connected'] == False
     assert info['epoch'] == '1'
