@@ -1739,6 +1739,9 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
   lock_guard lk(mu_);
   if (global_state_ != from)
     return global_state_;
+
+  VLOG(1) << "Switching state from " << GlobalStateName(from) << " to " << GlobalStateName(to);
+
   global_state_ = to;
 
   pp_.Await([&](ProactorBase*) { ServerState::tlocal()->set_gstate(to); });

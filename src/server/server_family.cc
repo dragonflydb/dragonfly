@@ -563,16 +563,6 @@ Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
     return {};
   }
 
-#if 0
-  auto& pool = service_.proactor_pool();
-  // Deliberately run on all I/O threads to update the state for non-shard threads as well.
-  pool.Await([&](ProactorBase*) {
-    // TODO: There can be a bug where status is different.
-    CHECK(ServerState::tlocal()->gstate() == GlobalState::IDLE);
-    ServerState::tlocal()->set_gstate(GlobalState::LOADING);
-  });
-#endif
-
   auto& pool = service_.proactor_pool();
 
   vector<Fiber> load_fibers;
