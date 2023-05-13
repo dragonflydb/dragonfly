@@ -52,7 +52,7 @@ class SearchParserTest : public ::testing::Test {
   QueryDriver query_driver_;
 };
 
-class MockedHSetAccessor : public HSetAccessor {
+class MockedHSetAccessor : public DocumentAccessor {
  public:
   using Map = std::unordered_map<std::string, std::string>;
 
@@ -60,7 +60,7 @@ class MockedHSetAccessor : public HSetAccessor {
   MockedHSetAccessor(std::string test_field) : hset_{{"field", test_field}} {
   }
 
-  bool Check(HSetAccessor::FieldConsumer f, string_view active_field) const override {
+  bool Check(DocumentAccessor::FieldConsumer f, string_view active_field) const override {
     if (!active_field.empty()) {
       auto it = hset_.find(string{active_field});
       return f(it != hset_.end() ? it->second : "");
