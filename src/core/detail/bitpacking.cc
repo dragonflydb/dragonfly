@@ -7,7 +7,11 @@
 #include <absl/base/internal/endian.h>
 
 #include "base/logging.h"
+#ifdef __s390x__
+#include <vecintrin.h>
+#else
 #include "core/sse_port.h"
+#endif
 
 using namespace std;
 
@@ -104,6 +108,33 @@ static inline pair<const char*, uint8_t*> simd_variant2_pack(const char* ascii, 
 // See https://github.com/lemire/fastvalidate-utf-8/
 // The function returns true (1) if all chars passed in src are
 // 7-bit values (0x00..0x7F). Otherwise, it returns false (0).
+#ifdef __s390x__
+bool validate_ascii_fast(const char* src, size_t len) {
+  size_t i = 0;
+  vector unsigned char has_error = vec_splat_s8(0);
+  if (len >= 16) {
+    for (; i <= len - 16; i += 16) {
+      vector unsigned char current_bytes = vec_load_len((signed char*)(src + i), 16);
+      has_error = vec_orc(has_error, current_bytes);
+    }
+  }
+
+  int error_mask = 0;
+  for (int i = 0; i < 16; i++) {
+    if (has_error[i]) {
+      error_mask |= 1 << i;
+    }
+  }
+
+  char tail_has_error = 0;
+  for (; i < len; i++) {
+    tail_has_error |= src[i];
+  }
+  error_mask |= (tail_has_error & 0x80);
+
+  return !error_mask;
+}
+#else
 bool validate_ascii_fast(const char* src, size_t len) {
   size_t i = 0;
   __m128i has_error = _mm_setzero_si128();
@@ -123,6 +154,7 @@ bool validate_ascii_fast(const char* src, size_t len) {
 
   return !error_mask;
 }
+#endif
 
 // len must be at least 16
 void ascii_pack(const char* ascii, size_t len, uint8_t* bin) {
