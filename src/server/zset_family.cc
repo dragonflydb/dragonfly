@@ -620,7 +620,7 @@ void SendAtLeastOneKeyError(ConnectionContext* cntx) {
   (*cntx)->SendError(absl::StrCat("at least 1 input key is needed for ", name));
 }
 
-enum class AggType : uint8_t { SUM, MIN, MAX };
+enum class AggType : uint8_t { SUM, MIN, MAX, NOOP };
 using ScoredMap = absl::flat_hash_map<std::string, double>;
 
 ScoredMap FromObject(const CompactObj& co, double weight) {
@@ -650,6 +650,8 @@ double Aggregate(double v1, double v2, AggType atype) {
       return max(v1, v2);
     case AggType::MIN:
       return min(v1, v2);
+    case AggType::NOOP:
+      return 0;
   }
   return 0;
 }
@@ -766,6 +768,15 @@ OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest
   return UnionShardKeysWithScore(key_weight_vec, agg_type);
 }
 
+ScoredMap ZSetFromSet(const PrimeValue& pv, double weight) {
+  ScoredMap result;
+  container_utils::IterateSet(pv, [&result, weight](container_utils::ContainerEntry ce) {
+    result.emplace(ce.ToString(), weight);
+    return true;
+  });
+  return result;
+}
+
 OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
                             const vector<double>& weights, bool store) {
   ArgSlice keys = t->GetShardArgs(shard->shard_id());
@@ -787,7 +798,7 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
     // In case ONLY the destination key is hosted in this shard no work on this shard should be
     // done in this step
     if (keys.empty()) {
-      return OpStatus::OK;
+      return OpStatus::SKIPPED;
     }
   }
 
@@ -797,15 +808,17 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
     return OpStatus::SKIPPED;  // return noop
 
   for (unsigned j = 0; j < keys.size(); ++j) {
-    auto it_res = db_slice.Find(t->GetDbContext(), keys[j], OBJ_ZSET);
-    if (it_res == OpStatus::WRONG_TYPE)  // TODO: support sets with default score 1.
-      return it_res.status();
-
-    if (!it_res)
+    auto it_res = db_slice.FindExt(t->GetDbContext(), keys[j]).first;
+    if (!IsValid(it_res))
       continue;  // we exit in the next loop
 
-    it_arr[j] = {*it_res, GetKeyWeight(t, shard->shard_id(), weights, j + removed_keys,
-                                       cmdargs_keys_offset)};
+    // sets are supported for ZINTER* commands:
+    auto obj_type = it_res->second.ObjType();
+    if (obj_type != OBJ_ZSET && obj_type != OBJ_SET)
+      return OpStatus::WRONG_TYPE;
+
+    it_arr[j] = {
+        it_res, GetKeyWeight(t, shard->shard_id(), weights, j + removed_keys, cmdargs_keys_offset)};
   }
 
   ScoredMap result;
@@ -814,7 +827,12 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
       return ScoredMap{};
     }
 
-    ScoredMap sm = FromObject(it->first->second, it->second);
+    ScoredMap sm;
+    if (it->first->second.ObjType() == OBJ_ZSET)
+      sm = FromObject(it->first->second, it->second);
+    else
+      sm = ZSetFromSet(it->first->second, it->second);
+
     if (result.empty())
       result.swap(sm);
     else
@@ -1338,6 +1356,54 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
   cntx->transaction->Execute(std::move(store_cb), true);
 
   (*cntx)->SendLong(smvec.size());
+}
+
+void ZSetFamily::ZInterCard(CmdArgList args, ConnectionContext* cntx) {
+  unsigned num_keys;
+  if (!absl::SimpleAtoi(ArgS(args, 0), &num_keys)) {
+    return (*cntx)->SendError(OpStatus::SYNTAX_ERR);
+  }
+
+  uint64_t limit = 0;
+  if (args.size() == (1 + num_keys + 2) && ArgS(args, 1 + num_keys) == "LIMIT") {
+    if (!absl::SimpleAtoi(ArgS(args, 1 + num_keys + 1), &limit)) {
+      return (*cntx)->SendError("limit value is not a positive integer", kSyntaxErrType);
+    }
+  } else if (args.size() != 1 + num_keys) {
+    return (*cntx)->SendError(kSyntaxErr);
+  }
+
+  vector<OpResult<ScoredMap>> maps(shard_set->size(), OpStatus::SKIPPED);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    maps[shard->shard_id()] = OpInter(shard, t, "", AggType::NOOP, {}, false);
+    return OpStatus::OK;
+  };
+
+  cntx->transaction->ScheduleSingleHop(std::move(cb));
+
+  ScoredMap result;
+  for (auto& op_res : maps) {
+    if (op_res.status() == OpStatus::SKIPPED)
+      continue;
+
+    if (!op_res)
+      return (*cntx)->SendError(op_res.status());
+
+    if (result.empty()) {
+      result.swap(op_res.value());
+    } else {
+      InterScoredMap(&result, &op_res.value(), AggType::NOOP);
+    }
+
+    if (result.empty())
+      break;
+  }
+
+  if (0 < limit && limit < result.size()) {
+    return (*cntx)->SendLong(limit);
+  }
+  (*cntx)->SendLong(result.size());
 }
 
 void ZSetFamily::ZPopMax(CmdArgList args, ConnectionContext* cntx) {
@@ -2134,6 +2200,8 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1, 1}.HFUNC(ZCount)
             << CI{"ZINCRBY", CO::FAST | CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(ZIncrBy)
             << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3, 1}.HFUNC(ZInterStore)
+            << CI{"ZINTERCARD", CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 2, 2, 1}
+                   .HFUNC(ZInterCard)
             << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1, 1}.HFUNC(ZLexCount)
             << CI{"ZPOPMAX", CO::FAST | CO::WRITE, -2, 1, 1, 1}.HFUNC(ZPopMax)
             << CI{"ZPOPMIN", CO::FAST | CO::WRITE, -2, 1, 1, 1}.HFUNC(ZPopMin)

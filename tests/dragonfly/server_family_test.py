@@ -56,7 +56,7 @@ async def test_multi_eval(async_client: aioredis.Redis):
 
 async def test_connection_name(async_client: aioredis.Redis):
     name = await async_client.execute_command("CLIENT GETNAME")
-    assert name == "test"
+    assert name == "default-async-fixture"
     await async_client.execute_command("CLIENT SETNAME test_conn_name")
     name = await async_client.execute_command("CLIENT GETNAME")
     assert name == "test_conn_name"
