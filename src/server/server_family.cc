@@ -500,7 +500,7 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
   if (cluster_mode == "emulated") {
     is_emulated_cluster_ = true;
   } else if (cluster_mode == "yes") {
-    cluster_config_.reset(new ClusterConfig());
+    cluster_config_ = std::make_unique<ClusterConfig>(master_id_);
   } else if (!cluster_mode.empty()) {
     LOG(ERROR) << "invalid cluster_mode. Exiting...";
     exit(1);
