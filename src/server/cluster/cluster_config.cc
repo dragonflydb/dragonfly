@@ -1,4 +1,3 @@
-#include <mutex>
 extern "C" {
 #include "redis/crc16.h"
 }
@@ -42,16 +41,21 @@ bool ClusterConfig::IsConfigValid(const vector<ClusterShard>& new_config) {
   for (const auto& shard : new_config) {
     for (const auto& slot_range : shard.slot_ranges) {
       if (slot_range.start > slot_range.end) {
+        LOG(WARNING) << "Invalid cluster config: start=" << slot_range.start
+                     << " is larger than end=" << slot_range.end;
         return false;
       }
 
       for (SlotId slot = slot_range.start; slot <= slot_range.end; ++slot) {
         if (slot >= slots_found.size()) {
+          LOG(WARNING) << "Invalid cluster config: slot=" << slot
+                       << " is bigger than allowed max=" << slots_found.size();
           return false;
         }
 
         if (slots_found[slot]) {
-          // `slot` was already seen
+          LOG(WARNING) << "Invalid cluster config: slot=" << slot
+                       << " was already configured by another slot range.";
           return false;
         }
 
@@ -61,7 +65,7 @@ bool ClusterConfig::IsConfigValid(const vector<ClusterShard>& new_config) {
   }
 
   if (!all_of(slots_found.begin(), slots_found.end(), [](bool b) { return b; }) > 0UL) {
-    // Missing slot
+    LOG(WARNING) << "Invalid cluster config: some slots were missing.";
     return false;
   }
 
@@ -73,19 +77,21 @@ bool ClusterConfig::SetConfig(const vector<ClusterShard>& new_config) {
     return false;
   }
 
-  lock_guard gu(slots_mu_);
+  lock_guard gu(mu_);
 
-  for (const auto& shard : new_config) {
+  config_ = new_config;
+
+  for (const auto& shard : config_) {
     for (const auto& slot_range : shard.slot_ranges) {
       bool owned_by_me =
           shard.master.id == my_id_ || any_of(shard.replicas.begin(), shard.replicas.end(),
                                               [&](const Node& node) { return node.id == my_id_; });
       for (SlotId i = slot_range.start; i <= slot_range.end; ++i) {
-        slots_[i] = {
-            .master = shard.master, .replicas = shard.replicas, .owned_by_me = owned_by_me};
+        slots_[i] = {.shard = &shard, .owned_by_me = owned_by_me};
       }
     }
   }
+
   return true;
 }
 
@@ -98,24 +104,20 @@ bool ClusterConfig::IsMySlot(SlotId id) const {
   return slots_[id].owned_by_me;
 }
 
-vector<ClusterConfig::Node> ClusterConfig::GetNodesForSlot(SlotId id) const {
-  if (id >= slots_.size()) {
-    DCHECK(false) << "Requesting a non-existing slot id " << id;
-    return {};
-  }
+ClusterConfig::Node ClusterConfig::GetMasterNodeForSlot(SlotId id) const {
+  shared_lock gu(mu_);
 
-  const SlotOwner& slot = slots_[id];
-  vector<ClusterConfig::Node> results;
-  results.reserve(slot.replicas.size() + 1);
-  results.push_back(slot.master);
-  results.insert(results.end(), slot.replicas.begin(), slot.replicas.end());
-  return results;
+  CHECK_LT(id, slots_.size()) << "Requesting a non-existing slot id " << id;
+  CHECK_NE(slots_[id].shard, nullptr)
+      << "Calling GetMasterNodeForSlot(" << id << ") before SetConfig()";
+
+  return slots_[id].shard->master;
 }
 
-ClusterConfig::Node ClusterConfig::GetMasterNodeForSlot(SlotId id) const {
-  CHECK_LT(id, slots_.size()) << "Requesting a non-existing slot id " << id;
+ClusterConfig::ClusterShards ClusterConfig::GetConfig() const {
+  shared_lock gu(mu_);
 
-  return slots_[id].master;
+  return config_;
 }
 
 }  // namespace dfly

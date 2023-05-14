@@ -36,6 +36,8 @@ class ClusterConfig {
     std::vector<Node> replicas;
   };
 
+  using ClusterShards = std::vector<ClusterShard>;
+
   explicit ClusterConfig(std::string_view my_id);
 
   static SlotId KeySlot(std::string_view key);
@@ -50,36 +52,35 @@ class ClusterConfig {
   // If key is in my slots ownership return true
   bool IsMySlot(SlotId id) const;
 
-  // Returns nodes that own `id`. Result will always have the first element set to be the master,
-  // and the following 0 or more elements are the replicas.
-  std::vector<Node> GetNodesForSlot(SlotId id) const;
-
   // Returns the master configured for `id`. Returns a default-initialized `Node` if `SetConfig()`
   // was never completed successfully.
   Node GetMasterNodeForSlot(SlotId id) const;
 
+  ClusterShards GetConfig() const;
+
   // Returns true if `new_config` is valid and internal state was changed. Returns false and changes
   // nothing otherwise.
-  bool SetConfig(const std::vector<ClusterShard>& new_config);
+  bool SetConfig(const ClusterShards& new_config);
 
  private:
-  struct SlotOwner {
-    Node master;
-    std::vector<Node> replicas;
+  struct SlotEntry {
+    const ClusterShard* shard = nullptr;
     bool owned_by_me = false;
   };
 
-  bool IsConfigValid(const std::vector<ClusterShard>& new_config);
+  bool IsConfigValid(const ClusterShards& new_config);
 
   static bool cluster_enabled;
   static constexpr SlotId kMaxSlotNum = 0x3FFF;
 
   const std::string my_id_;
 
-  mutable util::SharedMutex slots_mu_;
+  mutable util::SharedMutex mu_;
 
-  // This array covers the whole range of possible slots.
-  std::array<SlotOwner, kMaxSlotNum + 1> slots_ ABSL_GUARDED_BY(slots_mu_) = {};
+  ClusterShards config_ ABSL_GUARDED_BY(mu_);
+
+  // This array covers the whole range of possible slots for fast access. It points into `config_`.
+  std::array<SlotEntry, kMaxSlotNum + 1> slots_ ABSL_GUARDED_BY(mu_) = {};
 };
 
 }  // namespace dfly

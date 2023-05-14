@@ -10,15 +10,12 @@
 #include "base/logging.h"
 
 using namespace std;
-using testing::Pointwise;
 using Node = dfly::ClusterConfig::Node;
 
 namespace dfly {
 
-MATCHER(NodeMatches, "") {
-  auto first = std::get<0>(arg);
-  auto second = std::get<1>(arg);
-  return first.id == second.id && first.ip == second.ip && first.port == second.port;
+MATCHER_P(NodeMatches, expected, "") {
+  return arg.id == expected.id && arg.ip == expected.ip && arg.port == expected.port;
 }
 
 class ClusterConfigTest : public ::testing::Test {
@@ -60,8 +57,6 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidMissingSlots) {
   EXPECT_FALSE(config_.SetConfig({{.slot_ranges = {{.start = 0, .end = 16000}},
                                    .master = {.id = "other", .ip = "192.168.0.100", .port = 7000},
                                    .replicas = {}}}));
-  vector<Node> expected = {{}};  // 1 empty master, no replicas
-  EXPECT_THAT(config_.GetNodesForSlot(0), Pointwise(NodeMatches(), expected));
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidDoubleBookedSlot) {
@@ -71,17 +66,14 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidDoubleBookedSlot) {
                                   {.slot_ranges = {{.start = 0, .end = 0}},
                                    .master = {.id = "other2", .ip = "192.168.0.101", .port = 7001},
                                    .replicas = {}}}));
-  vector<Node> expected = {{}};  // 1 empty master, no replicas
-  EXPECT_THAT(config_.GetNodesForSlot(0), Pointwise(NodeMatches(), expected));
 }
 
 TEST_F(ClusterConfigTest, ConfigSetOk) {
   EXPECT_TRUE(config_.SetConfig({{.slot_ranges = {{.start = 0, .end = 0x3FFF}},
                                   .master = {.id = "other", .ip = "192.168.0.100", .port = 7000},
                                   .replicas = {}}}));
-  std::vector<Node> expected = {
-      ClusterConfig::Node{.id = "other", .ip = "192.168.0.100", .port = 7000}};
-  EXPECT_THAT(config_.GetNodesForSlot(0), Pointwise(NodeMatches(), expected));
+  EXPECT_THAT(config_.GetMasterNodeForSlot(0),
+              NodeMatches(Node{.id = "other", .ip = "192.168.0.100", .port = 7000}));
 }
 
 TEST_F(ClusterConfigTest, ConfigSetOkWithReplicas) {
@@ -89,10 +81,8 @@ TEST_F(ClusterConfigTest, ConfigSetOkWithReplicas) {
       {{.slot_ranges = {{.start = 0, .end = 0x3FFF}},
         .master = {.id = "other-master", .ip = "192.168.0.100", .port = 7000},
         .replicas = {{.id = "other-replica", .ip = "192.168.0.101", .port = 7001}}}}));
-  std::vector<Node> expected = {
-      ClusterConfig::Node{.id = "other-master", .ip = "192.168.0.100", .port = 7000},
-      ClusterConfig::Node{.id = "other-replica", .ip = "192.168.0.101", .port = 7001}};
-  EXPECT_THAT(config_.GetNodesForSlot(0), Pointwise(NodeMatches(), expected));
+  EXPECT_THAT(config_.GetMasterNodeForSlot(0),
+              NodeMatches(Node{.id = "other-master", .ip = "192.168.0.100", .port = 7000}));
 }
 
 TEST_F(ClusterConfigTest, ConfigSetMultipleInstances) {
@@ -107,27 +97,21 @@ TEST_F(ClusterConfigTest, ConfigSetMultipleInstances) {
         .master = {.id = "other-master3", .ip = "192.168.0.104", .port = 7004},
         .replicas = {{.id = "other-replica3", .ip = "192.168.0.105", .port = 7005}}}}));
   {
-    std::vector<Node> expected = {
-        ClusterConfig::Node{.id = "other-master", .ip = "192.168.0.100", .port = 7000},
-        ClusterConfig::Node{.id = "other-replica", .ip = "192.168.0.101", .port = 7001}};
     for (int i = 0; i <= 5'000; ++i) {
-      EXPECT_THAT(config_.GetNodesForSlot(i), Pointwise(NodeMatches(), expected));
+      EXPECT_THAT(config_.GetMasterNodeForSlot(i),
+                  NodeMatches(Node{.id = "other-master", .ip = "192.168.0.100", .port = 7000}));
     }
   }
   {
-    std::vector<Node> expected = {
-        ClusterConfig::Node{.id = "other-master2", .ip = "192.168.0.102", .port = 7002},
-        ClusterConfig::Node{.id = "other-replica2", .ip = "192.168.0.103", .port = 7003}};
     for (int i = 5'001; i <= 10'000; ++i) {
-      EXPECT_THAT(config_.GetNodesForSlot(i), Pointwise(NodeMatches(), expected));
+      EXPECT_THAT(config_.GetMasterNodeForSlot(i),
+                  NodeMatches(Node{.id = "other-master2", .ip = "192.168.0.102", .port = 7002}));
     }
   }
   {
-    std::vector<Node> expected = {
-        ClusterConfig::Node{.id = "other-master3", .ip = "192.168.0.104", .port = 7004},
-        ClusterConfig::Node{.id = "other-replica3", .ip = "192.168.0.105", .port = 7005}};
     for (int i = 10'001; i <= 0x3FFF; ++i) {
-      EXPECT_THAT(config_.GetNodesForSlot(i), Pointwise(NodeMatches(), expected));
+      EXPECT_THAT(config_.GetMasterNodeForSlot(i),
+                  NodeMatches(Node{.id = "other-master3", .ip = "192.168.0.104", .port = 7004}));
     }
   }
 }
