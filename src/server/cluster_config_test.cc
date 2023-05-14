@@ -20,7 +20,7 @@ MATCHER_P(NodeMatches, expected, "") {
 
 class ClusterConfigTest : public ::testing::Test {
  protected:
-  static constexpr string_view kMyId = "my-id";
+  const string kMyId = "my-id";
   ClusterConfig config_{kMyId};
 };
 
@@ -49,7 +49,6 @@ TEST_F(ClusterConfigTest, ConfigEmpty) {
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidEmpty) {
-  // Test that empty config means all slots are owned locally.
   EXPECT_FALSE(config_.SetConfig({}));
 }
 
@@ -91,7 +90,7 @@ TEST_F(ClusterConfigTest, ConfigSetMultipleInstances) {
         .master = {.id = "other-master", .ip = "192.168.0.100", .port = 7000},
         .replicas = {{.id = "other-replica", .ip = "192.168.0.101", .port = 7001}}},
        {.slot_ranges = {{.start = 5'001, .end = 10'000}},
-        .master = {.id = "other-master2", .ip = "192.168.0.102", .port = 7002},
+        .master = {.id = kMyId, .ip = "192.168.0.102", .port = 7002},
         .replicas = {{.id = "other-replica2", .ip = "192.168.0.103", .port = 7003}}},
        {.slot_ranges = {{.start = 10'001, .end = 0x3FFF}},
         .master = {.id = "other-master3", .ip = "192.168.0.104", .port = 7004},
@@ -100,18 +99,21 @@ TEST_F(ClusterConfigTest, ConfigSetMultipleInstances) {
     for (int i = 0; i <= 5'000; ++i) {
       EXPECT_THAT(config_.GetMasterNodeForSlot(i),
                   NodeMatches(Node{.id = "other-master", .ip = "192.168.0.100", .port = 7000}));
+      EXPECT_FALSE(config_.IsMySlot(i));
     }
   }
   {
     for (int i = 5'001; i <= 10'000; ++i) {
       EXPECT_THAT(config_.GetMasterNodeForSlot(i),
-                  NodeMatches(Node{.id = "other-master2", .ip = "192.168.0.102", .port = 7002}));
+                  NodeMatches(Node{.id = kMyId, .ip = "192.168.0.102", .port = 7002}));
+      EXPECT_TRUE(config_.IsMySlot(i));
     }
   }
   {
     for (int i = 10'001; i <= 0x3FFF; ++i) {
       EXPECT_THAT(config_.GetMasterNodeForSlot(i),
                   NodeMatches(Node{.id = "other-master3", .ip = "192.168.0.104", .port = 7004}));
+      EXPECT_FALSE(config_.IsMySlot(i));
     }
   }
 }
