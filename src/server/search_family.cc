@@ -5,9 +5,6 @@
 #include "server/search_family.h"
 
 #include <jsoncons/json.hpp>
-#include <jsoncons_ext/jsonpatch/jsonpatch.hpp>
-#include <jsoncons_ext/jsonpath/jsonpath.hpp>
-#include <jsoncons_ext/jsonpointer/jsonpointer.hpp>
 #include <variant>
 #include <vector>
 

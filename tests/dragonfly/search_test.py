@@ -20,7 +20,7 @@ TEST_DATA = [
 TEST_DATA_SCHEMA = [TextField("title"), TextField("content")]
 
 
-async def index_td(async_client: aioredis.Redis, itype: IndexType, prefix=""):
+async def index_test_data(async_client: aioredis.Redis, itype: IndexType, prefix=""):
     for i, e in enumerate(TEST_DATA):
         if itype == IndexType.HASH:
             await async_client.hset(prefix+str(i), mapping=e)
@@ -28,13 +28,15 @@ async def index_td(async_client: aioredis.Redis, itype: IndexType, prefix=""):
             await async_client.json().set(prefix+str(i), "$", e)
 
 
-def check_contains_td(docs, td_indices):
+def contains_test_data(res, td_indices):
+    if res.total != len(td_indices):
+        return False
+
     docset = set()
-    for doc in docs:
+    for doc in res.docs:
         docset.add(f"{doc.title}//{doc.content}")
 
-    for td_index in td_indices:
-        td_entry = TEST_DATA[td_index]
+    for td_entry in (TEST_DATA[tdi] for tdi in td_indices):
         if not f"{td_entry['title']}//{td_entry['content']}" in docset:
             return False
 
@@ -45,20 +47,16 @@ def check_contains_td(docs, td_indices):
 async def test_basic(async_client, index_type):
     i1 = async_client.ft("i1")
     await i1.create_index(TEST_DATA_SCHEMA, definition=IndexDefinition(index_type=index_type))
-    await index_td(async_client, index_type)
+    await index_test_data(async_client, index_type)
 
     res = await i1.search("article")
-    assert res.total == 2
-    assert check_contains_td(res.docs, [0, 1])
+    assert contains_test_data(res, [0, 1])
 
     res = await i1.search("text")
-    assert res.total == 2
-    assert check_contains_td(res.docs, [1, 3])
+    assert contains_test_data(res, [1, 3])
 
     res = await i1.search("brief piece")
-    assert res.total == 1
-    assert check_contains_td(res.docs, [2])
+    assert contains_test_data(res, [2])
 
     res = await i1.search("@title:(article|last) @content:text")
-    assert res.total == 2
-    assert check_contains_td(res.docs, [1, 3])
+    assert contains_test_data(res, [1, 3])

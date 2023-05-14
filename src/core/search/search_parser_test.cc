@@ -52,12 +52,12 @@ class SearchParserTest : public ::testing::Test {
   QueryDriver query_driver_;
 };
 
-class MockedHSetAccessor : public DocumentAccessor {
+class MockedDocument : public DocumentAccessor {
  public:
   using Map = std::unordered_map<std::string, std::string>;
 
-  MockedHSetAccessor() = default;
-  MockedHSetAccessor(std::string test_field) : hset_{{"field", test_field}} {
+  MockedDocument() = default;
+  MockedDocument(std::string test_field) : hset_{{"field", test_field}} {
   }
 
   bool Check(DocumentAccessor::FieldConsumer f, string_view active_field) const override {
@@ -108,7 +108,7 @@ class MockedHSetAccessor : public DocumentAccessor {
 #define CHECK_ALL(...)                                                               \
   {                                                                                  \
     for (auto str : {__VA_ARGS__}) {                                                 \
-      MockedHSetAccessor hset{str};                                                  \
+      MockedDocument hset{str};                                                      \
       EXPECT_TRUE(Check(SearchInput{&hset})) << str << " failed on " << DebugExpr(); \
     }                                                                                \
   }
@@ -116,7 +116,7 @@ class MockedHSetAccessor : public DocumentAccessor {
 #define CHECK_NONE(...)                                                               \
   {                                                                                   \
     for (auto str : {__VA_ARGS__}) {                                                  \
-      MockedHSetAccessor hset{str};                                                   \
+      MockedDocument hset{str};                                                       \
       EXPECT_FALSE(Check(SearchInput{&hset})) << str << " failed on " << DebugExpr(); \
     }                                                                                 \
   }
@@ -238,7 +238,7 @@ TEST_F(SearchParserTest, CheckParenthesisPriority) {
 TEST_F(SearchParserTest, MatchField) {
   ParseExpr("@f1:foo @f2:bar @f3:baz");
 
-  MockedHSetAccessor hset{};
+  MockedDocument hset{};
   SearchInput input{&hset};
 
   hset.Set({{"f1", "foo"}, {"f2", "bar"}, {"f3", "baz"}});
@@ -260,7 +260,7 @@ TEST_F(SearchParserTest, MatchField) {
 TEST_F(SearchParserTest, MatchRange) {
   ParseExpr("@f1:[1 10] @f2:[50 100]");
 
-  MockedHSetAccessor hset{};
+  MockedDocument hset{};
   SearchInput input{&hset};
 
   hset.Set({{"f1", "5"}, {"f2", "50"}});
@@ -282,7 +282,7 @@ TEST_F(SearchParserTest, MatchRange) {
 TEST_F(SearchParserTest, CheckExprInField) {
   ParseExpr("@f1:(a|b) @f2:(c d) @f3:-e");
 
-  MockedHSetAccessor hset{};
+  MockedDocument hset{};
   SearchInput input{&hset};
 
   hset.Set({{"f1", "a"}, {"f2", "c and d"}, {"f3", "right"}});
