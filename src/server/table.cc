@@ -33,6 +33,14 @@ DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
   return *this;
 }
 
+SlotStats& SlotStats::operator+=(const SlotStats& o) {
+  constexpr size_t kDbSz = sizeof(SlotStats);
+  static_assert(kDbSz == 8);
+
+  ADD(key_count);
+  return *this;
+}
+
 DbTable::DbTable(std::pmr::memory_resource* mr)
     : prime(kInitSegmentLog, detail::PrimeTablePolicy{}, mr),
       expire(0, detail::ExpireTablePolicy{}, mr), mcflag(0, detail::ExpireTablePolicy{}, mr),

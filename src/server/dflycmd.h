@@ -163,6 +163,9 @@ class DflyCmd {
   // Return journal records num sent for each flow of replication.
   void ReplicaOffset(CmdArgList args, ConnectionContext* cntx);
 
+  // CLUSTER GETSLOTINFO commands
+  void ClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx);
+
   // Start full sync in thread. Start FullSyncFb. Called for each flow.
   facade::OpStatus StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard);
 

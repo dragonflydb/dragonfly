@@ -55,6 +55,13 @@ void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* s
   if (pv.ObjType() == OBJ_STRING)
     stats.strval_memory_usage -= value_heap_size;
 
+  if (ClusterConfig::IsClusterEnabled()) {
+    string key;
+    del_it->first.GetString(&key);
+    SlotId sid = ClusterConfig::KeySlot(key);
+    table->slots_stats[sid].key_count -= 1;
+  }
+
   table->prime.Erase(del_it);
 }
 
@@ -266,6 +273,11 @@ auto DbSlice::GetStats() const -> Stats {
   return s;
 }
 
+SlotStats DbSlice::GetSlotStats(SlotId sid) const {
+  CHECK(db_arr_[0]);
+  return db_arr_[0]->slots_stats[sid];
+}
+
 void DbSlice::Reserve(DbIndex db_ind, size_t key_size) {
   ActivateDb(db_ind);
 
@@ -419,7 +431,10 @@ tuple<PrimeIterator, ExpireIterator, bool> DbSlice::AddOrFind2(const Context& cn
 
     it.SetVersion(NextVersion());
     memory_budget_ = evp.mem_budget() + evicted_obj_bytes;
-
+    if (ClusterConfig::IsClusterEnabled()) {
+      SlotId sid = ClusterConfig::KeySlot(key);
+      db.slots_stats[sid].key_count += 1;
+    }
     return make_tuple(it, ExpireIterator{}, true);
   }
 

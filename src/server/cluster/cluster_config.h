@@ -61,6 +61,7 @@ class ClusterConfig {
   // Returns true if `new_config` is valid and internal state was changed. Returns false and changes
   // nothing otherwise.
   bool SetConfig(const ClusterShards& new_config);
+  static constexpr SlotId kMaxSlotNum = 0x3FFF;
 
  private:
   struct SlotEntry {
@@ -71,7 +72,6 @@ class ClusterConfig {
   bool IsConfigValid(const ClusterShards& new_config);
 
   static bool cluster_enabled;
-  static constexpr SlotId kMaxSlotNum = 0x3FFF;
 
   const std::string my_id_;
 
