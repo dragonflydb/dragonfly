@@ -50,7 +50,7 @@ struct BaseAccessor : public search::DocumentAccessor {
 struct ListPackAccessor : public BaseAccessor {
   using LpPtr = uint8_t*;
 
-  ListPackAccessor(LpPtr ptr) : lp_{ptr} {
+  explicit ListPackAccessor(LpPtr ptr) : lp_{ptr} {
   }
 
   bool Check(FieldConsumer f, string_view active_field) const override {
@@ -100,7 +100,7 @@ struct ListPackAccessor : public BaseAccessor {
 
 // Accessor for hashes stored with StringMap
 struct StringMapAccessor : public BaseAccessor {
-  StringMapAccessor(StringMap* hset) : hset_{hset} {
+  explicit StringMapAccessor(StringMap* hset) : hset_{hset} {
   }
 
   bool Check(FieldConsumer f, string_view active_field) const override {
@@ -129,7 +129,7 @@ struct StringMapAccessor : public BaseAccessor {
 
 // Accessor for json values
 struct JsonAccessor : public BaseAccessor {
-  JsonAccessor(JsonType* json) : json_{json} {
+  explicit JsonAccessor(JsonType* json) : json_{json} {
   }
 
   bool Check(FieldConsumer f, string_view active_field) const override {
