@@ -7,6 +7,7 @@
 #include "base/varz_value.h"
 #include "core/interpreter.h"
 #include "facade/service_interface.h"
+#include "server/cluster/cluster_family.h"
 #include "server/command_registry.h"
 #include "server/engine_shard_set.h"
 #include "server/server_family.h"
@@ -139,6 +140,7 @@ class Service : public facade::ServiceInterface {
   util::ProactorPool& pp_;
 
   ServerFamily server_family_;
+  ClusterFamily cluster_family_;
   CommandRegistry registry_;
   absl::flat_hash_map<std::string, unsigned> unknown_cmds_;
 

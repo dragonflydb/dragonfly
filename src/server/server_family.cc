@@ -62,10 +62,6 @@ ABSL_FLAG(string, save_schedule, "",
           "glob spec for the UTC time to save a snapshot which matches HH:MM 24h time");
 ABSL_FLAG(bool, df_snapshot_format, true,
           "if true, save in dragonfly-specific snapshotting format");
-ABSL_FLAG(string, cluster_mode, "",
-          "Cluster mode supported."
-          "default: \"\"");
-ABSL_FLAG(string, cluster_announce_ip, "", "ip that cluster commands announce to the client");
 
 ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
@@ -138,7 +134,7 @@ optional<pair<string, string>> GetBucketPath(string_view path) {
 
 string InferLoadFile(string_view dir, cloud::AWS* aws) {
   fs::path data_folder;
-  string_view bucket_name, obj_path;
+  string bucket_name, obj_path;
 
   if (dir.empty()) {
     data_folder = fs::current_path();
@@ -307,7 +303,7 @@ GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
   if (IsCloudPath(path)) {
     DCHECK(aws_);
 
-    optional<pair<string_view, string_view>> bucket_path = GetBucketPath(path);
+    optional<pair<string, string>> bucket_path = GetBucketPath(path);
     if (!bucket_path) {
       return GenericError("Invalid S3 path");
     }
@@ -421,16 +417,6 @@ void SlowLog(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendError(UnknownSubCmd(sub_cmd, "SLOWLOG"), kSyntaxErrType);
 }
 
-void BuildClusterSlotNetworkInfo(ConnectionContext* cntx, std::string_view host, uint32_t port,
-                                 std::string_view id) {
-  constexpr unsigned int kNetworkInfoSize = 3;
-
-  (*cntx)->StartArray(kNetworkInfoSize);
-  (*cntx)->SendBulkString(host);
-  (*cntx)->SendLong(port);
-  (*cntx)->SendBulkString(id);
-}
-
 }  // namespace
 
 std::optional<SnapshotSpec> ParseSaveSchedule(string_view time) {
@@ -495,17 +481,6 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
     DCHECK_EQ(CONFIG_RUN_ID_SIZE, master_id_.size());
   }
 
-  string cluster_mode = GetFlag(FLAGS_cluster_mode);
-
-  if (cluster_mode == "emulated") {
-    is_emulated_cluster_ = true;
-  } else if (cluster_mode == "yes") {
-    cluster_config_ = std::make_unique<ClusterConfig>(master_id_);
-  } else if (!cluster_mode.empty()) {
-    LOG(ERROR) << "invalid cluster_mode. Exiting...";
-    exit(1);
-  }
-
   if (auto ec = ValidateFilename(GetFlag(FLAGS_dbfilename), GetFlag(FLAGS_df_snapshot_format));
       ec) {
     LOG(ERROR) << ec.Format();
@@ -516,11 +491,13 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
 ServerFamily::~ServerFamily() {
 }
 
-void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_listener) {
+void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_listener,
+                        ClusterFamily* cluster_family) {
   CHECK(acceptor_ == nullptr);
   acceptor_ = acceptor;
   main_listener_ = main_listener;
-  dfly_cmd_.reset(new DflyCmd(main_listener, this));
+  dfly_cmd_ = make_unique<DflyCmd>(main_listener, this, cluster_family);
+  cluster_family_ = cluster_family;
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
@@ -601,9 +578,9 @@ void ServerFamily::Shutdown() {
       LOG_IF(ERROR, ec) << "Error closing journal " << ec;
     }
 
-    unique_lock lk(replicaof_mu_);
-    if (replica_) {
-      replica_->Stop();
+    auto replica = replica_.Get();
+    if (*replica) {
+      (*replica)->Stop();
     }
 
     dfly_cmd_->Shutdown();
@@ -903,26 +880,30 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
 }
 
 void ServerFamily::PauseReplication(bool pause) {
-  unique_lock lk(replicaof_mu_);
+  auto replica = replica_.Get();
 
   // Switch to primary mode.
   if (!ServerState::tlocal()->is_master) {
-    auto repl_ptr = replica_;
+    auto repl_ptr = *replica;
     CHECK(repl_ptr);
     repl_ptr->Pause(pause);
   }
 }
 
 std::optional<ReplicaOffsetInfo> ServerFamily::GetReplicaOffsetInfo() {
-  unique_lock lk(replicaof_mu_);
+  auto replica = replica_.Get();
 
   // Switch to primary mode.
   if (!ServerState::tlocal()->is_master) {
-    auto repl_ptr = replica_;
+    auto repl_ptr = *replica;
     CHECK(repl_ptr);
     return ReplicaOffsetInfo{repl_ptr->GetSyncId(), repl_ptr->GetReplicaOffset()};
   }
   return nullopt;
+}
+
+MutexGuardedObject<shared_ptr<Replica>>::ConstAccess ServerFamily::GetReplica() const {
+  return replica_.Get();
 }
 
 void ServerFamily::OnClose(ConnectionContext* cntx) {
@@ -1337,144 +1318,6 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "CLIENT"), kSyntaxErrType);
 }
 
-void ServerFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
-  // This command supports 2 sub options:
-  // 1. HELP
-  // 2. SLOTS: the slots are a mapping between sharding and hosts in the cluster.
-  // Note that as of the beginning of 2023 DF don't have cluster mode (i.e sharding across
-  // multiple hosts), as a results all shards are map to the same host (i.e. range is between  and
-  // kEndSlot) and number of cluster sharding is thus == 1 (kClustersShardingCount). For more
-  // details https://redis.io/commands/cluster-slots/
-  constexpr unsigned int kEndSlot = 16383;  // see redis code (cluster.c CLUSTER_SLOTS).
-  constexpr unsigned int kStartSlot = 0;
-  constexpr unsigned int kClustersShardingCount = 1;
-  constexpr unsigned int kNoReplicaInfoSize = 3;
-  constexpr unsigned int kWithReplicaInfoSize = 4;
-
-  ToUpper(&args[0]);
-  string_view sub_cmd = ArgS(args, 0);
-
-  if (!is_emulated_cluster_ && !ClusterConfig::IsClusterEnabled()) {
-    return (*cntx)->SendError(
-        "CLUSTER commands requires --cluster_mode=emulated or --cluster_mode=yes");
-  }
-
-  if (sub_cmd == "HELP") {
-    string_view help_arr[] = {
-        "CLUSTER <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
-        "SLOTS",
-        "   Return information about slots range mappings. Each range is made of:",
-        "   start, end, master and replicas IP addresses, ports and ids.",
-        "NODES",
-        "   Return cluster configuration seen by node. Output format:",
-        "   <id> <ip:port> <flags> <master> <pings> <pongs> <epoch> <link> <slot> ...",
-        "INFO",
-        "  Return information about the cluster",
-        "HELP",
-        "    Prints this help.",
-    };
-    return (*cntx)->SendSimpleStrArr(help_arr);
-  }
-
-  if (sub_cmd == "SLOTS") {
-    /* Format: 1) 1) start slot
-     *            2) end slot
-     *            3) 1) master IP
-     *               2) master port
-     *               3) node ID
-     *            4) 1) replica IP (optional)
-     *               2) replica port
-     *               3) node ID
-     *           ... note that in this case, only 1 slot
-     */
-    ServerState& etl = *ServerState::tlocal();
-    // we have 3 cases here
-    // 1. This is a stand alone, in this case we only sending local information
-    // 2. We are the master, and we have replica, in this case send us as master
-    // 3. We are replica to a master, sends the information about us as replica
-    (*cntx)->StartArray(kClustersShardingCount);
-    if (etl.is_master) {
-      std::string cluster_announce_ip = GetFlag(FLAGS_cluster_announce_ip);
-      std::string preferred_endpoint =
-          cluster_announce_ip.empty() ? cntx->owner()->LocalBindAddress() : cluster_announce_ip;
-      auto vec = dfly_cmd_->GetReplicasRoleInfo();
-      unsigned int info_len = vec.empty() ? kNoReplicaInfoSize : kWithReplicaInfoSize;
-      (*cntx)->StartArray(info_len);
-      (*cntx)->SendLong(kStartSlot);  // start sharding range
-      (*cntx)->SendLong(kEndSlot);    // end sharding range
-      BuildClusterSlotNetworkInfo(cntx, preferred_endpoint, GetFlag(FLAGS_port), master_id());
-      if (!vec.empty()) {  // info about the replica
-        const auto& info = vec[0];
-        BuildClusterSlotNetworkInfo(cntx, info.address, info.listening_port, etl.remote_client_id_);
-      }
-    } else {
-      unique_lock lk(replicaof_mu_);  // make sure that this pointer stays alive!
-      auto replica_ptr = replica_;
-      CHECK(replica_ptr);
-      Replica::Info info = replica_ptr->GetInfo();
-      (*cntx)->StartArray(kWithReplicaInfoSize);
-      (*cntx)->SendLong(kStartSlot);  // start sharding range
-      (*cntx)->SendLong(kEndSlot);    // end sharding range
-      BuildClusterSlotNetworkInfo(cntx, info.host, info.port, replica_ptr->MasterId());
-      BuildClusterSlotNetworkInfo(cntx, cntx->owner()->LocalBindAddress(), GetFlag(FLAGS_port),
-                                  master_id());
-    }
-
-    return;
-  } else if (sub_cmd == "NODES") {
-    // Support for NODES commands can help in case we are working in cluster mode
-    // In this case, we can save information about the cluster
-    // In case this is the master, it can save the information about the replica from this command
-    std::string msg = BuildClusterNodeReply(cntx);
-    (*cntx)->SendBulkString(msg);
-    return;
-  } else if (sub_cmd == "INFO") {
-    std::string msg;
-    auto append = [&msg](absl::AlphaNum a1, absl::AlphaNum a2) {
-      absl::StrAppend(&msg, a1, ":", a2, "\r\n");
-    };
-    // info command just return some stats about this instance
-    int known_nodes = 1;
-    long epoch = 1;
-    ServerState& etl = *ServerState::tlocal();
-    if (etl.is_master) {
-      auto vec = dfly_cmd_->GetReplicasRoleInfo();
-      if (!vec.empty()) {
-        known_nodes = 2;
-      }
-    } else {
-      if (replica_) {
-        known_nodes = 2;
-        unique_lock lk(replicaof_mu_);  // make sure that this pointer stays alive!
-        auto replica_ptr = replica_;
-        CHECK(replica_ptr);
-        epoch = replica_ptr->GetInfo().master_last_io_sec;
-      }
-    }
-    int cluster_size = known_nodes - 1;
-    append("cluster_state", "ok");
-    append("cluster_slots_assigned", kEndSlot);
-    append("cluster_slots_ok", kEndSlot);
-    append("cluster_slots_pfail", 0);
-    append("cluster_slots_fail", 0);
-    append("cluster_known_nodes", known_nodes);
-    append("cluster_size", cluster_size);
-    append("cluster_current_epoch", epoch);
-    append("cluster_my_epoch", 1);
-    append("cluster_stats_messages_ping_sent", 1);
-    append("cluster_stats_messages_pong_sent", 1);
-    append("cluster_stats_messages_sent", 1);
-    append("cluster_stats_messages_ping_received", 1);
-    append("cluster_stats_messages_pong_received", 1);
-    append("cluster_stats_messages_meet_received", 0);
-    append("cluster_stats_messages_received", 1);
-    (*cntx)->SendBulkString(msg);
-    return;
-  }
-
-  return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "CLUSTER"), kSyntaxErrType);
-}
-
 void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
@@ -1793,8 +1636,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       // it's safe to access replica_ because replica_ is created before etl.is_master set to
       // false and cleared after etl.is_master is set to true. And since the code here that checks
       // for is_master and copies shared_ptr is atomic, it1 should be correct.
-      auto replica_ptr = replica_;
-      Replica::Info rinfo = replica_ptr->GetInfo();
+      auto replica_ptr = replica_.Get();
+      Replica::Info rinfo = (*replica_ptr)->GetInfo();
       append("master_host", rinfo.host);
       append("master_port", rinfo.port);
 
@@ -1865,7 +1708,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
   if (should_enter("CLUSTER")) {
     ADD_HEADER("# Cluster");
-    append("cluster_enabled", is_emulated_cluster_ || ClusterConfig::IsClusterEnabled());
+    append("cluster_enabled", cluster_family_->IsEnabledOrEmulated());
   }
 
   (*cntx)->SendBulkString(info);
@@ -1956,48 +1799,13 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendBulkString((*ServerState::tlocal()).is_master ? "master" : "slave");
 }
 
-std::string ServerFamily::BuildClusterNodeReply(ConnectionContext* cntx) const {
-  ServerState& etl = *ServerState::tlocal();
-  auto epoch_master_time = std::time(nullptr) * 1000;
-  if (etl.is_master) {
-    std::string cluster_announce_ip = GetFlag(FLAGS_cluster_announce_ip);
-    std::string preferred_endpoint =
-        cluster_announce_ip.empty() ? cntx->owner()->LocalBindAddress() : cluster_announce_ip;
-    auto vec = dfly_cmd_->GetReplicasRoleInfo();
-    auto my_port = GetFlag(FLAGS_port);
-    const char* connect_state = vec.empty() ? "disconnected" : "connected";
-    std::string msg = absl::StrCat(master_id(), " ", preferred_endpoint, ":", my_port, "@", my_port,
-                                   " myself,master - 0 ", epoch_master_time, " 1 ", connect_state,
-                                   " 0-16383\r\n");
-    if (!vec.empty()) {  // info about the replica
-      const auto& info = vec[0];
-      absl::StrAppend(&msg, etl.remote_client_id_, " ", info.address, ":", info.listening_port, "@",
-                      info.listening_port, " slave 0 ", master_id(), " 1 ", connect_state, "\r\n");
-    }
-    return msg;
-  } else {
-    unique_lock lk(replicaof_mu_);  // make sure that this pointer stays alive!
-    auto replica_ptr = replica_;
-    Replica::Info info = replica_ptr->GetInfo();
-    auto my_ip = cntx->owner()->LocalBindAddress();
-    auto my_port = GetFlag(FLAGS_port);
-    const char* connect_state =
-        replica_ptr->GetInfo().master_link_established ? "connected" : "disconnected";
-    std::string msg =
-        absl::StrCat(master_id(), " ", my_ip, ":", my_port, "@", my_port, " myself,slave ",
-                     master_id(), " 0 ", epoch_master_time, " 1 ", connect_state, "\r\n");
-    absl::StrAppend(&msg, replica_ptr->MasterId(), " ", info.host, ":", info.port, "@", info.port,
-                    " master - 0 ", epoch_master_time, " 1 ", connect_state, " 0-16383\r\n");
-    return msg;
-  }
-}
-
 void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   std::string_view host = ArgS(args, 0);
   std::string_view port_s = ArgS(args, 1);
   auto& pool = service_.proactor_pool();
 
   LOG(INFO) << "Replicating " << host << ":" << port_s;
+  shared_ptr<Replica> new_replica;
 
   // We lock to protect global state changes that we perform during the replication setup:
   // The replica_ pointer, GlobalState, and the DB itself (we do a flushall txn before syncing).
@@ -2010,73 +1818,77 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   // We have a relatively involved state machine inside Replica itself which handels cancellation
   // with those requirements.
   VLOG(1) << "Acquire replica lock";
-  unique_lock lk(replicaof_mu_);
+  {
+    auto replica = replica_.Get();
 
-  if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_s, "one")) {
-    if (!ServerState::tlocal()->is_master) {
-      auto repl_ptr = replica_;
-      CHECK(repl_ptr);
+    if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_s, "one")) {
+      if (!ServerState::tlocal()->is_master) {
+        auto repl_ptr = *replica;
+        CHECK(repl_ptr);
+
+        pool.AwaitFiberOnAll(
+            [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = true; });
+        repl_ptr->Stop();
+        repl_ptr.reset();
+      }
+
+      return (*cntx)->SendOk();
+    }
+
+    uint32_t port;
+
+    if (!absl::SimpleAtoi(port_s, &port) || port < 1 || port > 65535) {
+      (*cntx)->SendError(kInvalidIntErr);
+      return;
+    }
+
+    new_replica = make_shared<Replica>(string(host), port, &service_, master_id());
+
+    if (*replica) {
+      (*replica)->Stop();  // NOTE: consider introducing update API flow.
+    } else {
+      // TODO: to disconnect all the blocked clients (pubsub, blpop etc)
 
       pool.AwaitFiberOnAll(
-          [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = true; });
-      replica_->Stop();
-      replica_.reset();
+          [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = false; });
+    }
+    replica_.SetUnderLock(new_replica);
+
+    GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+    if (new_state != GlobalState::LOADING) {
+      LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
+      return;
     }
 
-    return (*cntx)->SendOk();
+    // Flushing all the data after we marked this instance as replica.
+    Transaction* transaction = cntx->transaction;
+    transaction->Schedule();
+
+    auto cb = [](Transaction* t, EngineShard* shard) {
+      shard->db_slice().FlushDb(DbSlice::kDbAll);
+      return OpStatus::OK;
+    };
+    transaction->Execute(std::move(cb), true);
+
+    // Replica sends response in either case. No need to send response in this function.
+    // It's a bit confusing but simpler.
   }
-
-  uint32_t port;
-
-  if (!absl::SimpleAtoi(port_s, &port) || port < 1 || port > 65535) {
-    (*cntx)->SendError(kInvalidIntErr);
-    return;
-  }
-
-  auto new_replica = make_shared<Replica>(string(host), port, &service_, master_id());
-
-  if (replica_) {
-    replica_->Stop();  // NOTE: consider introducing update API flow.
-  } else {
-    // TODO: to disconnect all the blocked clients (pubsub, blpop etc)
-
-    pool.AwaitFiberOnAll([&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = false; });
-  }
-  replica_ = new_replica;
-
-  GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-  if (new_state != GlobalState::LOADING) {
-    LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
-    return;
-  }
-
-  // Flushing all the data after we marked this instance as replica.
-  Transaction* transaction = cntx->transaction;
-  transaction->Schedule();
-
-  auto cb = [](Transaction* t, EngineShard* shard) {
-    shard->db_slice().FlushDb(DbSlice::kDbAll);
-    return OpStatus::OK;
-  };
-  transaction->Execute(std::move(cb), true);
-
-  // Replica sends response in either case. No need to send response in this function.
-  // It's a bit confusing but simpler.
-  lk.unlock();
   error_code ec = new_replica->Start(cntx);
   VLOG(1) << "Acquire replica lock";
-  lk.lock();
+  {
+    auto replica = replica_.Get();
 
-  // Since we released the replication lock during Start(..), we need to check if this still the
-  // last replicaof command we got. If it's not, then we were cancelled and just exit.
-  if (replica_ == new_replica) {
-    if (ec) {
-      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-      replica_.reset();
+    // Since we released the replication lock during Start(..), we need to check if this still the
+    // last replicaof command we got. If it's not, then we were cancelled and just exit.
+    if (*replica == new_replica) {
+      if (ec) {
+        service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+        replica_.SetUnderLock({});
+      }
+      bool is_master = !*replica;
+      pool.AwaitFiberOnAll(
+          [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
     }
-    bool is_master = !replica_;
-    pool.AwaitFiberOnAll(
-        [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
   }
 }
 
@@ -2148,7 +1960,8 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
     }
 
   } else {
-    auto replica_ptr = replica_;
+    auto replica = replica_.Get();
+    auto replica_ptr = *replica;
     CHECK(replica_ptr);
     Replica::Info rinfo = replica_ptr->GetInfo();
     (*cntx)->StartArray(4);
@@ -2179,13 +1992,6 @@ void ServerFamily::Sync(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::Psync(CmdArgList args, ConnectionContext* cntx) {
   SyncGeneric("?", 0, cntx);  // full sync, ignore the request.
-}
-
-void ServerFamily::ReadOnly(CmdArgList args, ConnectionContext* cntx) {
-  if (!is_emulated_cluster_) {
-    return (*cntx)->SendError("READONLY command requires --cluster_mode=emulated");
-  }
-  (*cntx)->SendOk();
 }
 
 void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
@@ -2257,7 +2063,6 @@ void ServerFamily::Register(CommandRegistry* registry) {
   *registry << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, 0}.HFUNC(Auth)
             << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, 1, 0, 0, 0}.HFUNC(Save)
             << CI{"CLIENT", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, 0}.HFUNC(Client)
-            << CI{"CLUSTER", CO::READONLY, 2, 1, 1, 1}.HFUNC(Cluster)
             << CI{"CONFIG", CO::ADMIN, -2, 0, 0, 0}.HFUNC(Config)
             << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, 0}.HFUNC(DbSize)
             << CI{"DEBUG", CO::ADMIN | CO::LOADING, -2, 0, 0, 0}.HFUNC(Debug)
@@ -2271,7 +2076,6 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, 0}.HFUNC(Save)
             << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.HFUNC(_Shutdown)
             << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
-            << CI{"READONLY", CO::READONLY, 1, 0, 0, 0}.HFUNC(ReadOnly)
             << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, 0}.HFUNC(ReplConf)
             << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, 0}.HFUNC(Role)

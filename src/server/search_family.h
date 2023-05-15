@@ -22,9 +22,19 @@ class SearchFamily {
  public:
   static void Register(CommandRegistry* registry);
 
+  struct IndexData {
+    enum DataType { HASH, JSON };
+
+    // Get numeric OBJ_ code
+    uint8_t GetObjCode() const;
+
+    std::string prefix{};
+    DataType type{HASH};
+  };
+
  private:
   static Mutex indices_mu_;
-  static absl::flat_hash_map<std::string, std::string> indices_;
+  static absl::flat_hash_map<std::string, IndexData> indices_;
 };
 
 }  // namespace dfly

@@ -2,6 +2,7 @@ extern "C" {
 #include "redis/crc16.h"
 }
 
+#include <jsoncons/json.hpp>
 #include <shared_mutex>
 #include <string_view>
 
@@ -95,12 +96,146 @@ bool ClusterConfig::SetConfig(const vector<ClusterShard>& new_config) {
   return true;
 }
 
+namespace {
+constexpr string_view kInvalidConfigPrefix = "Invalid JSON cluster config: "sv;
+
+template <typename T> optional<T> ReadNumeric(const JsonType& obj) {
+  if (!obj.is_number()) {
+    LOG(WARNING) << kInvalidConfigPrefix << "object is not a number " << obj;
+    return nullopt;
+  }
+
+  return obj.as<T>();
+}
+
+optional<vector<ClusterConfig::SlotRange>> GetClusterSlotRanges(const JsonType& slots) {
+  if (!slots.is_array()) {
+    LOG(WARNING) << kInvalidConfigPrefix << "slot_ranges is not an array " << slots;
+    return nullopt;
+  }
+
+  vector<ClusterConfig::SlotRange> ranges;
+
+  for (const auto& range : slots.array_value()) {
+    if (!range.is_object()) {
+      LOG(WARNING) << kInvalidConfigPrefix << "slot_ranges element is not an object " << range;
+      return nullopt;
+    }
+
+    optional<SlotId> start = ReadNumeric<SlotId>(range.at_or_null("start"));
+    optional<SlotId> end = ReadNumeric<SlotId>(range.at_or_null("end"));
+    if (!start.has_value() || !end.has_value()) {
+      return nullopt;
+    }
+
+    ranges.push_back({.start = start.value(), .end = end.value()});
+  }
+
+  return ranges;
+}
+
+optional<ClusterConfig::Node> ParseClusterNode(const JsonType& json) {
+  if (!json.is_object()) {
+    LOG(WARNING) << kInvalidConfigPrefix << "node config is not an object " << json;
+    return nullopt;
+  }
+
+  ClusterConfig::Node node;
+
+  {
+    auto id = json.at_or_null("id");
+    if (!id.is_string()) {
+      LOG(WARNING) << kInvalidConfigPrefix << "invalid id for node " << json;
+      return nullopt;
+    }
+    node.id = std::move(id).as_string();
+  }
+
+  {
+    auto ip = json.at_or_null("ip");
+    if (!ip.is_string()) {
+      LOG(WARNING) << kInvalidConfigPrefix << "invalid ip for node " << json;
+      return nullopt;
+    }
+    node.ip = std::move(ip).as_string();
+  }
+
+  {
+    auto port = ReadNumeric<uint16_t>(json.at_or_null("port"));
+    if (!port.has_value()) {
+      return nullopt;
+    }
+    node.port = port.value();
+  }
+
+  return node;
+}
+
+optional<ClusterConfig::ClusterShards> BuildClusterConfigFromJson(const JsonType& json) {
+  ClusterConfig::ClusterShards config;
+
+  if (!json.is_array()) {
+    LOG(WARNING) << kInvalidConfigPrefix << "not an array " << json;
+    return nullopt;
+  }
+
+  for (const auto& element : json.array_value()) {
+    ClusterConfig::ClusterShard shard;
+
+    if (!element.is_object()) {
+      LOG(WARNING) << kInvalidConfigPrefix << "shard element is not an object " << element;
+      return nullopt;
+    }
+
+    auto slots = GetClusterSlotRanges(element.at_or_null("slot_ranges"));
+    if (!slots.has_value()) {
+      return nullopt;
+    }
+    shard.slot_ranges = std::move(slots).value();
+
+    auto master = ParseClusterNode(element.at_or_null("master"));
+    if (!master.has_value()) {
+      return nullopt;
+    }
+    shard.master = std::move(master).value();
+
+    auto replicas = element.at_or_null("replicas");
+    if (!replicas.is_array()) {
+      LOG(WARNING) << kInvalidConfigPrefix << "replicas is not an array " << replicas;
+      return nullopt;
+    }
+
+    for (const auto& replica : replicas.array_value()) {
+      auto node = ParseClusterNode(replica);
+      if (!node.has_value()) {
+        return nullopt;
+      }
+      shard.replicas.push_back(std::move(node).value());
+    }
+
+    config.push_back(std::move(shard));
+  }
+
+  return config;
+}
+}  // namespace
+
+bool ClusterConfig::SetConfig(const JsonType& json) {
+  optional<ClusterShards> config = BuildClusterConfigFromJson(json);
+  if (!config.has_value()) {
+    return false;
+  }
+
+  return SetConfig(config.value());
+}
+
 bool ClusterConfig::IsMySlot(SlotId id) const {
   if (id >= slots_.size()) {
     DCHECK(false) << "Requesting a non-existing slot id " << id;
     return false;
   }
 
+  shared_lock gu(mu_);
   return slots_[id].owned_by_me;
 }
 
