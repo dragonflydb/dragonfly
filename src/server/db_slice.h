@@ -110,6 +110,9 @@ class DbSlice {
   // Returns statistics for the whole db slice. A bit heavy operation.
   Stats GetStats() const;
 
+  // Returns slot statistics for db 0.
+  SlotStats GetSlotStats(SlotId sid) const;
+
   void UpdateExpireBase(uint64_t now, unsigned generation) {
     expire_base_[generation & 1] = now;
   }
