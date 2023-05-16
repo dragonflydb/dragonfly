@@ -37,7 +37,6 @@ string_view SdsToSafeSv(sds str) {
 
 using DocumentData = absl::flat_hash_map<std::string, std::string>;
 using SerializedDocument = pair<std::string /*key*/, DocumentData>;
-using Query = search::AstExpr;
 
 // Base class for document accessors
 struct BaseAccessor : public search::DocumentAccessor {
@@ -174,8 +173,8 @@ unique_ptr<BaseAccessor> GetAccessor(const OpArgs& op_args, const PrimeValue& pv
 
 // Perform brute force search for all hashes in shard with specific prefix
 // that match the query
-void OpSearch(const OpArgs& op_args, const SearchFamily::IndexData& index, const Query& query,
-              vector<SerializedDocument>* shard_out) {
+void OpSearch(const OpArgs& op_args, const SearchFamily::IndexData& index,
+              const search::SearchAlgorithm& search_algo, vector<SerializedDocument>* shard_out) {
   auto& db_slice = op_args.shard->db_slice();
   DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
   auto [prime_table, _] = db_slice.GetTables(op_args.db_cntx.db_index);
@@ -194,7 +193,7 @@ void OpSearch(const OpArgs& op_args, const SearchFamily::IndexData& index, const
 
     // Check entry matches filter
     auto accessor = GetAccessor(op_args, pv);
-    if (query->Check(search::SearchInput{accessor.get()}))
+    if (search_algo.Check(accessor.get()))
       shard_out->emplace_back(key, accessor->Serialize());
   };
 
@@ -265,15 +264,17 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
     index = it->second;
   }
 
-  Query query = search::ParseQuery(query_str);
-  if (!query) {
+  optional<search::SearchAlgorithm> search_algo{};
+  try {
+    search_algo = search::SearchAlgorithm{query_str};
+  } catch (...) {
     (*cntx)->SendError("Syntax error");
     return;
   }
 
   vector<vector<SerializedDocument>> docs(shard_set->size());
   cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* shard) {
-    OpSearch(t->GetOpArgs(shard), index, query, &docs[shard->shard_id()]);
+    OpSearch(t->GetOpArgs(shard), index, *search_algo, &docs[shard->shard_id()]);
     return OpStatus::OK;
   });
 

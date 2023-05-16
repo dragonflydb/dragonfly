@@ -35,11 +35,11 @@ class QueryDriver {
   void ResetScanner();
 
   void Set(AstExpr expr) {
-    expr_ = expr;
+    expr_ = std::move(expr);
   }
 
-  AstExpr Get() {
-    return expr_;
+  AstExpr Take() {
+    return std::move(expr_);
   }
 
   Parser::location_type location;

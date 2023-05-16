@@ -70,31 +70,31 @@ using namespace std;
 %%
 
 final_query:
-  filter { driver->Set($1); }
+  filter { driver->Set(move($1)); }
 
 filter:
-  search_expr { $$ = $1; }
+  search_expr { $$ = move($1); }
 
 search_expr:
- LPAREN search_expr RPAREN              { $$ = $2; }
- | search_expr search_expr %prec AND_OP { $$ = MakeExpr<AstLogicalNode>($1, $2, AstLogicalNode::kAnd); }
- | search_expr OR_OP search_expr        { $$ = MakeExpr<AstLogicalNode>($1, $3, AstLogicalNode::kOr); }
- | NOT_OP search_expr                   { $$ = MakeExpr<AstNegateNode>($2); }
- | TERM                                 { $$ = MakeExpr<AstTermNode>($1); }
- | FIELD COLON field_cond               { $$ = MakeExpr<AstFieldNode>($1, $3); }
+ LPAREN search_expr RPAREN              { $$ = move($2); }
+ | search_expr search_expr %prec AND_OP { $$ = AstLogicalNode(move($1), move($2), AstLogicalNode::AND); }
+ | search_expr OR_OP search_expr        { $$ = AstLogicalNode(move($1), move($3), AstLogicalNode::OR); }
+ | NOT_OP search_expr                   { $$ = AstNegateNode(move($2)); }
+ | TERM                                 { $$ = AstTermNode(move($1)); }
+ | FIELD COLON field_cond               { $$ = AstFieldNode(move($1), move($3)); }
 
 field_cond:
-  TERM                                  { $$ = MakeExpr<AstTermNode>($1); }
-  | NOT_OP field_cond                   { $$ = MakeExpr<AstNegateNode>($2); }
-  | LPAREN field_cond_expr RPAREN       { $$ = $2; }
-  | LBRACKET INT64 INT64 RBRACKET       { $$ = MakeExpr<AstRangeNode>($2, $3); }
+  TERM                                  { $$ = AstTermNode(move($1)); }
+  | NOT_OP field_cond                   { $$ = AstNegateNode(move($2)); }
+  | LPAREN field_cond_expr RPAREN       { $$ = move($2); }
+  | LBRACKET INT64 INT64 RBRACKET       { $$ = AstRangeNode(move($2), move($3)); }
 
 field_cond_expr:
-  LPAREN field_cond_expr RPAREN                   { $$ = $2; }
-  | field_cond_expr field_cond_expr %prec AND_OP  { $$ = MakeExpr<AstLogicalNode>($1, $2, AstLogicalNode::kAnd); }
-  | field_cond_expr OR_OP field_cond_expr         { $$ = MakeExpr<AstLogicalNode>($1, $3, AstLogicalNode::kOr); }
-  | NOT_OP field_cond_expr                        { $$ = MakeExpr<AstNegateNode>($2); };
-  | TERM                                          { $$ = MakeExpr<AstTermNode>($1); }
+  LPAREN field_cond_expr RPAREN                   { $$ = move($2); }
+  | field_cond_expr field_cond_expr %prec AND_OP  { $$ = AstLogicalNode(move($1), move($2), AstLogicalNode::AND); }
+  | field_cond_expr OR_OP field_cond_expr         { $$ = AstLogicalNode(move($1), move($3), AstLogicalNode::OR); }
+  | NOT_OP field_cond_expr                        { $$ = AstNegateNode(move($2)); };
+  | TERM                                          { $$ = AstTermNode(move($1)); }
 %%
 
 void
