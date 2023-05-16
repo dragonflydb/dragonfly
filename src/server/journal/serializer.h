@@ -58,7 +58,7 @@ struct JournalReader {
   template <typename UT> io::Result<UT> ReadUInt();
 
   // Read and copy to buffer, return size.
-  io::Result<size_t> ReadString(char* buffer);
+  io::Result<size_t> ReadString(MutableSlice buffer);
 
   // Read argument array into string buffer.
   std::error_code ReadCommand(journal::ParsedEntry::CmdData* entry);

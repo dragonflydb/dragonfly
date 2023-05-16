@@ -126,8 +126,8 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
     return ReplicaOffset(args, cntx);
   }
 
-  if (sub_cmd == "CLUSTER" && args.size() >= 2) {
-    return Cluster(args, cntx);
+  if (sub_cmd == "CLUSTER" && args.size() > 2) {
+    return ClusterManagmentCmd(args, cntx);
   }
 
   rb->SendError(kSyntaxErr);
@@ -526,20 +526,71 @@ void DflyCmd::ClusterConfig(CmdArgList args, ConnectionContext* cntx) {
   return rb->SendOk();
 }
 
-void DflyCmd::Cluster(CmdArgList args, ConnectionContext* cntx) {
-  SinkReplyBuilder* rb = cntx->reply_builder();
-
-  if (sf_->cluster_config() == nullptr || !ClusterConfig::IsClusterEnabled()) {
-    return rb->SendError("Cluster not enabled.");
+void DflyCmd::ClusterManagmentCmd(CmdArgList args, ConnectionContext* cntx) {
+  if (!ClusterConfig::IsClusterEnabled()) {
+    return (*cntx)->SendError("DFLY CLUSTER commands requires --cluster_mode=yes");
   }
+  CHECK_NE(sf_->cluster_config(), nullptr);
 
+  // TODO check admin port
   ToUpper(&args[1]);
-  auto sub_cmd = ArgS(args, 1);
-  if (sub_cmd == "CONFIG") {
+  string_view sub_cmd = ArgS(args, 1);
+  if (sub_cmd == "GETSLOTINFO") {
+    return ClusterGetSlotInfo(args, cntx);
+  } else if (sub_cmd == "CONFIG") {
     return ClusterConfig(args, cntx);
   }
 
-  return rb->SendError("Invalid CLUSTER subcommand");
+  return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "DFLY CLUSTER"), kSyntaxErrType);
+}
+
+void DflyCmd::ClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() == 3) {
+    return (*cntx)->SendError(facade::WrongNumArgsError("DFLY CLUSTER GETSLOTINFO"),
+                              kSyntaxErrType);
+  }
+  ToUpper(&args[2]);
+  string_view slots_str = ArgS(args, 2);
+  if (slots_str != "SLOTS") {
+    return (*cntx)->SendError(kSyntaxErr, kSyntaxErrType);
+  }
+
+  vector<std::pair<SlotId, SlotStats>> slots_stats;
+  for (size_t i = 3; i < args.size(); ++i) {
+    string_view slot_str = ArgS(args, i);
+    uint32_t sid;
+    if (!absl::SimpleAtoi(slot_str, &sid)) {
+      return (*cntx)->SendError(kInvalidIntErr);
+    }
+    if (sid > ClusterConfig::kMaxSlotNum) {
+      return (*cntx)->SendError("Invalid slot id");
+    }
+    slots_stats.push_back(make_pair(sid, SlotStats{}));
+  }
+
+  Mutex mu;
+
+  auto cb = [&](auto*) {
+    EngineShard* shard = EngineShard::tlocal();
+    if (shard == nullptr)
+      return;
+
+    lock_guard lk(mu);
+    for (auto& [slot, data] : slots_stats) {
+      data += shard->db_slice().GetSlotStats(slot);
+    }
+  };
+
+  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+
+  (*cntx)->StartArray(slots_stats.size());
+
+  for (const auto& slot_data : slots_stats) {
+    (*cntx)->StartArray(3);
+    (*cntx)->SendBulkString(absl::StrCat(slot_data.first));
+    (*cntx)->SendBulkString("key_count");
+    (*cntx)->SendBulkString(absl::StrCat(slot_data.second.key_count));
+  }
 }
 
 OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {

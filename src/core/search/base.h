@@ -13,30 +13,30 @@
 
 namespace dfly::search {
 
-// Interface for accessing hashset values with different data structures underneath.
-struct HSetAccessor {
+// Interface for accessing document values with different data structures underneath.
+struct DocumentAccessor {
   // Callback that's supplied with field values.
   using FieldConsumer = std::function<bool(std::string_view)>;
 
   virtual bool Check(FieldConsumer f, std::string_view active_field) const = 0;
 };
 
-// Wrapper around hashset accessor and optional active field.
+// Wrapper around document accessor and optional active field.
 struct SearchInput {
-  SearchInput(const HSetAccessor* hset, std::string_view active_field = {})
-      : hset_{hset}, active_field_{active_field} {
+  SearchInput(const DocumentAccessor* doc, std::string_view active_field = {})
+      : doc_{doc}, active_field_{active_field} {
   }
 
   SearchInput(const SearchInput& base, std::string_view active_field)
-      : hset_{base.hset_}, active_field_{active_field} {
+      : doc_{base.doc_}, active_field_{active_field} {
   }
 
-  bool Check(HSetAccessor::FieldConsumer f) {
-    return hset_->Check(move(f), active_field_);
+  bool Check(DocumentAccessor::FieldConsumer f) {
+    return doc_->Check(move(f), active_field_);
   }
 
  private:
-  const HSetAccessor* hset_;
+  const DocumentAccessor* doc_;
   std::string_view active_field_;
 };
 

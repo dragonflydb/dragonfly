@@ -64,4 +64,33 @@ TEST_F(SearchFamilyTest, NoPrefix) {
   EXPECT_THAT(Run({"ft.search", "i1", "one | three"}), ArrLen(1 + 2 * 2));
 }
 
+TEST_F(SearchFamilyTest, Json) {
+  EXPECT_EQ(Run({"ft.create", "i1", "on", "json"}), "OK");
+  Run({"json.set", "k1", ".", R"({"a": "small test", "b": "some details"})"});
+  Run({"json.set", "k2", ".", R"({"a": "another test", "b": "more details"})"});
+  Run({"json.set", "k3", ".", R"({"a": "last test", "b": "secret details"})"});
+
+  VLOG(0) << Run({"json.get", "k2", "$"});
+
+  {
+    auto resp = Run({"ft.search", "i1", "more"});
+    EXPECT_THAT(resp, ArrLen(1 + 2));
+
+    auto doc = resp.GetVec();
+    EXPECT_THAT(doc[0], IntArg(1));
+    EXPECT_EQ(doc[1], "k2");
+    EXPECT_THAT(doc[2], ArrLen(4));
+  }
+
+  EXPECT_THAT(Run({"ft.search", "i1", "some|more"}), ArrLen(1 + 2 * 2));
+  EXPECT_THAT(Run({"ft.search", "i1", "some|more|secret"}), ArrLen(1 + 3 * 2));
+
+  EXPECT_THAT(Run({"ft.search", "i1", "@a:last @b:details"}), ArrLen(1 + 1 * 2));
+  EXPECT_THAT(Run({"ft.search", "i1", "@a:(another|small)"}), ArrLen(1 + 2 * 2));
+  EXPECT_THAT(Run({"ft.search", "i1", "@a:(another|small|secret)"}), ArrLen(1 + 2 * 2));
+
+  EXPECT_THAT(Run({"ft.search", "i1", "none"}), kNoResults);
+  EXPECT_THAT(Run({"ft.search", "i1", "@a:small @b:secret"}), kNoResults);
+}
+
 }  // namespace dfly

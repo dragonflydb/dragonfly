@@ -19,8 +19,6 @@ using SlotId = uint16_t;
 
 class ClusterConfig {
  public:
-  static constexpr SlotId kMaxSlotNum = 0x3FFF;
-
   struct Node {
     std::string id;
     std::string ip;
@@ -63,6 +61,7 @@ class ClusterConfig {
   // Returns true if `new_config` is valid and internal state was changed. Returns false and changes
   // nothing otherwise.
   bool SetConfig(const ClusterShards& new_config);
+  static constexpr SlotId kMaxSlotNum = 0x3FFF;
 
  private:
   struct SlotEntry {
