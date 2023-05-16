@@ -427,9 +427,9 @@ void DflyCmd::ClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx) {
 
   for (const auto& slot_data : slots_stats) {
     (*cntx)->StartArray(3);
-    (*cntx)->SendLong(slot_data.first);
-    (*cntx)->SendSimpleString("key_count");
-    (*cntx)->SendLong(slot_data.second.key_count);
+    (*cntx)->SendBulkString(absl::StrCat(slot_data.first));
+    (*cntx)->SendBulkString("key_count");
+    (*cntx)->SendBulkString(absl::StrCat(slot_data.second.key_count));
   }
 }
 
