@@ -416,8 +416,8 @@ void DflyCmd::ClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx) {
       return;
 
     lock_guard lk(mu);
-    for (auto& slot_data : slots_stats) {
-      slot_data.second += shard->db_slice().GetSlotStats(slot_data.first);
+    for (auto& [slot, data] : slots_stats) {
+      data += shard->db_slice().GetSlotStats(slot);
     }
   };
 

@@ -166,7 +166,7 @@ class DflyCmd {
   // Runs DFLY CLUSTER sub commands
   void ClusterManagmentCmd(CmdArgList args, ConnectionContext* cntx);
 
-  // CLUSTER GETSLOTINFO commands
+  // CLUSTER GETSLOTINFO command
   void ClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx);
 
   // Start full sync in thread. Start FullSyncFb. Called for each flow.
