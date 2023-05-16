@@ -138,7 +138,7 @@ optional<pair<string, string>> GetBucketPath(string_view path) {
 
 string InferLoadFile(string_view dir, cloud::AWS* aws) {
   fs::path data_folder;
-  string_view bucket_name, obj_path;
+  string bucket_name, obj_path;
 
   if (dir.empty()) {
     data_folder = fs::current_path();
@@ -307,7 +307,7 @@ GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
   if (IsCloudPath(path)) {
     DCHECK(aws_);
 
-    optional<pair<string_view, string_view>> bucket_path = GetBucketPath(path);
+    optional<pair<string, string>> bucket_path = GetBucketPath(path);
     if (!bucket_path) {
       return GenericError("Invalid S3 path");
     }
