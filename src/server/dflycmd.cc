@@ -7,9 +7,15 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
 
+#include <jsoncons/json.hpp>
+#include <limits>
+#include <optional>
+
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/json_object.h"
 #include "facade/dragonfly_connection.h"
+#include "server/cluster/cluster_config.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
@@ -118,6 +124,10 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
 
   if (sub_cmd == "REPLICAOFFSET" && args.size() == 2) {
     return ReplicaOffset(args, cntx);
+  }
+
+  if (sub_cmd == "CLUSTER" && args.size() >= 2) {
+    return Cluster(args, cntx);
   }
 
   rb->SendError(kSyntaxErr);
@@ -364,6 +374,172 @@ void DflyCmd::ReplicaOffset(CmdArgList args, ConnectionContext* cntx) {
       rb->SendLong(0);
     }
   }
+}
+
+namespace {
+constexpr string_view kInvalidConfigPrefix = "Invalid JSON cluster config: "sv;
+
+template <typename T> optional<T> ReadNumeric(const JsonType& obj) {
+  if (!obj.is_number()) {
+    LOG(WARNING) << kInvalidConfigPrefix << "object is not a number " << obj;
+    return nullopt;
+  }
+
+  return obj.as<T>();
+}
+
+optional<vector<ClusterConfig::SlotRange>> GetClusterSlotRanges(const JsonType& slots) {
+  if (!slots.is_array()) {
+    LOG(WARNING) << kInvalidConfigPrefix << "slot_ranges is not an array " << slots;
+    return nullopt;
+  }
+
+  vector<ClusterConfig::SlotRange> ranges;
+
+  for (const auto& range : slots.array_value()) {
+    if (!range.is_object()) {
+      LOG(WARNING) << kInvalidConfigPrefix << "slot_ranges element is not an object " << range;
+      return nullopt;
+    }
+
+    optional<SlotId> start = ReadNumeric<SlotId>(range.at_or_null("start"));
+    optional<SlotId> end = ReadNumeric<SlotId>(range.at_or_null("end"));
+    if (!start.has_value() || !end.has_value()) {
+      return nullopt;
+    }
+
+    ranges.push_back({.start = start.value(), .end = end.value()});
+  }
+
+  return ranges;
+}
+
+optional<ClusterConfig::Node> ParseClusterNode(const JsonType& json) {
+  if (!json.is_object()) {
+    LOG(WARNING) << kInvalidConfigPrefix << "node config is not an object " << json;
+    return nullopt;
+  }
+
+  ClusterConfig::Node node;
+
+  {
+    auto id = json.at_or_null("id");
+    if (!id.is_string()) {
+      LOG(WARNING) << kInvalidConfigPrefix << "invalid id for node " << json;
+      return nullopt;
+    }
+    node.id = std::move(id).as_string();
+  }
+
+  {
+    auto ip = json.at_or_null("ip");
+    if (!ip.is_string()) {
+      LOG(WARNING) << kInvalidConfigPrefix << "invalid ip for node " << json;
+      return nullopt;
+    }
+    node.ip = std::move(ip).as_string();
+  }
+
+  {
+    auto port = ReadNumeric<uint16_t>(json.at_or_null("port"));
+    if (!port.has_value()) {
+      return nullopt;
+    }
+    node.port = port.value();
+  }
+
+  return node;
+}
+
+optional<ClusterConfig::ClusterShards> BuildClusterConfigFromJson(const JsonType& json) {
+  ClusterConfig::ClusterShards config;
+
+  if (!json.is_array()) {
+    LOG(WARNING) << kInvalidConfigPrefix << "not an array " << json;
+    return nullopt;
+  }
+
+  for (const auto& element : json.array_value()) {
+    ClusterConfig::ClusterShard shard;
+
+    if (!element.is_object()) {
+      LOG(WARNING) << kInvalidConfigPrefix << "shard element is not an object " << element;
+      return nullopt;
+    }
+
+    auto slots = GetClusterSlotRanges(element.at_or_null("slot_ranges"));
+    if (!slots.has_value()) {
+      return nullopt;
+    }
+    shard.slot_ranges = std::move(slots).value();
+
+    auto master = ParseClusterNode(element.at_or_null("master"));
+    if (!master.has_value()) {
+      return nullopt;
+    }
+    shard.master = std::move(master).value();
+
+    auto replicas = element.at_or_null("replicas");
+    if (!replicas.is_array()) {
+      LOG(WARNING) << kInvalidConfigPrefix << "replicas is not an array " << replicas;
+      return nullopt;
+    }
+
+    for (const auto& replica : replicas.array_value()) {
+      auto node = ParseClusterNode(replica);
+      if (!node.has_value()) {
+        return nullopt;
+      }
+      shard.replicas.push_back(std::move(node).value());
+    }
+
+    config.push_back(std::move(shard));
+  }
+
+  return config;
+}
+}  // namespace
+
+void DflyCmd::ClusterConfig(CmdArgList args, ConnectionContext* cntx) {
+  SinkReplyBuilder* rb = cntx->reply_builder();
+
+  if (args.size() != 3) {
+    return rb->SendError(kSyntaxErr);
+  }
+
+  string_view json_str = ArgS(args, 2);
+  optional<JsonType> json = JsonFromString(json_str);
+  if (!json.has_value()) {
+    LOG(WARNING) << kInvalidConfigPrefix << "Can't parse JSON " << json_str;
+    return rb->SendError(kSyntaxErr);
+  }
+
+  optional<ClusterConfig::ClusterShards> config = BuildClusterConfigFromJson(json.value());
+  if (!config.has_value()) {
+    return rb->SendError(kSyntaxErr);
+  }
+
+  if (!sf_->cluster_config()->SetConfig(config.value())) {
+    return rb->SendError("Invalid cluster configuration.");
+  }
+
+  return rb->SendOk();
+}
+
+void DflyCmd::Cluster(CmdArgList args, ConnectionContext* cntx) {
+  SinkReplyBuilder* rb = cntx->reply_builder();
+
+  if (sf_->cluster_config() == nullptr || !ClusterConfig::IsClusterEnabled()) {
+    return rb->SendError("Cluster not enabled.");
+  }
+
+  ToUpper(&args[1]);
+  auto sub_cmd = ArgS(args, 1);
+  if (sub_cmd == "CONFIG") {
+    return ClusterConfig(args, cntx);
+  }
+
+  return rb->SendError("Invalid CLUSTER subcommand");
 }
 
 OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
