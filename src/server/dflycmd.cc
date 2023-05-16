@@ -121,15 +121,7 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (sub_cmd == "CLUSTER" && args.size() > 2) {
-    if (!ClusterConfig::IsClusterEnabled()) {
-      return (*cntx)->SendError("DFLY CLUSTER commands requires --cluster_mode=yes");
-    }
-    ToUpper(&args[1]);
-    string_view sub_cmd = ArgS(args, 1);
-    if (sub_cmd == "GETSLOTINFO") {
-      return ClusterGetSlotInfo(args, cntx);
-    }
-    return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "DFLY CLUSTER"), kSyntaxErrType);
+    return ClusterManagmentCmd(args, cntx);
   }
 
   rb->SendError(kSyntaxErr);
@@ -378,6 +370,20 @@ void DflyCmd::ReplicaOffset(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void DflyCmd::ClusterManagmentCmd(CmdArgList args, ConnectionContext* cntx) {
+  if (!ClusterConfig::IsClusterEnabled()) {
+    return (*cntx)->SendError("DFLY CLUSTER commands requires --cluster_mode=yes");
+  }
+  // TODO check admin port
+  ToUpper(&args[1]);
+  string_view sub_cmd = ArgS(args, 1);
+  if (sub_cmd == "GETSLOTINFO") {
+    return ClusterGetSlotInfo(args, cntx);
+  }
+
+  return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "DFLY CLUSTER"), kSyntaxErrType);
+}
+
 void DflyCmd::ClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() == 3) {
     return (*cntx)->SendError(facade::WrongNumArgsError("DFLY CLUSTER GETSLOTINFO"),
@@ -411,8 +417,7 @@ void DflyCmd::ClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx) {
 
     lock_guard lk(mu);
     for (auto& slot_data : slots_stats) {
-      SlotStats stats = shard->db_slice().GetSlotStats(slot_data.first);
-      slot_data.second += stats;
+      slot_data.second += shard->db_slice().GetSlotStats(slot_data.first);
     }
   };
 
@@ -421,12 +426,11 @@ void DflyCmd::ClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->StartArray(slots_stats.size());
 
   for (const auto& slot_data : slots_stats) {
-    (*cntx)->StartArray(2);
+    (*cntx)->StartArray(3);
     (*cntx)->SendLong(slot_data.first);
+    (*cntx)->SendSimpleString("key_count");
     (*cntx)->SendLong(slot_data.second.key_count);
   }
-
-  return;
 }
 
 OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {

@@ -56,8 +56,8 @@ void PerformDeletion(PrimeIterator del_it, ExpireIterator exp_it, EngineShard* s
     stats.strval_memory_usage -= value_heap_size;
 
   if (ClusterConfig::IsClusterEnabled()) {
-    string key;
-    del_it->first.GetString(&key);
+    string tmp;
+    string_view key = del_it->first.GetSlice(&tmp);
     SlotId sid = ClusterConfig::KeySlot(key);
     table->slots_stats[sid].key_count -= 1;
   }

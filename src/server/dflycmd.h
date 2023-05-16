@@ -163,6 +163,9 @@ class DflyCmd {
   // Return journal records num sent for each flow of replication.
   void ReplicaOffset(CmdArgList args, ConnectionContext* cntx);
 
+  // Runs DFLY CLUSTER sub commands
+  void ClusterManagmentCmd(CmdArgList args, ConnectionContext* cntx);
+
   // CLUSTER GETSLOTINFO commands
   void ClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx);
 

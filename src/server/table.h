@@ -76,7 +76,7 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   absl::flat_hash_map<std::string, std::vector<ConnectionState::ExecInfo*>> watched_keys;
 
   mutable DbTableStats stats;
-  std::array<SlotStats, ClusterConfig::kMaxSlotNum + 1> slots_stats;
+  std::vector<SlotStats> slots_stats;
   ExpireTable::Cursor expire_cursor;
   PrimeTable::Cursor prime_cursor;
 

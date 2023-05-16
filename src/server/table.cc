@@ -45,6 +45,9 @@ DbTable::DbTable(std::pmr::memory_resource* mr)
     : prime(kInitSegmentLog, detail::PrimeTablePolicy{}, mr),
       expire(0, detail::ExpireTablePolicy{}, mr), mcflag(0, detail::ExpireTablePolicy{}, mr),
       top_keys({.enabled = absl::GetFlag(FLAGS_enable_top_keys_tracking)}) {
+  if (ClusterConfig::IsClusterEnabled()) {
+    slots_stats.resize(ClusterConfig::kMaxSlotNum + 1);
+  }
 }
 
 DbTable::~DbTable() {

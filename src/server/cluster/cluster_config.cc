@@ -32,7 +32,9 @@ SlotId ClusterConfig::KeySlot(string_view key) {
 }
 
 ClusterConfig::ClusterConfig(string_view my_id) : my_id_(my_id) {
-  cluster_enabled = true;
+  SetConfig({{.slot_ranges = {{.start = 0, .end = 0x3FFF}},
+              .master = {.id = my_id_, .ip = "192.168.0.100", .port = 7000},
+              .replicas = {}}});
 }
 
 bool ClusterConfig::IsConfigValid(const vector<ClusterShard>& new_config) {
