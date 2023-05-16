@@ -101,6 +101,7 @@ bool ClusterConfig::IsMySlot(SlotId id) const {
     return false;
   }
 
+  shared_lock gu(mu_);
   return slots_[id].owned_by_me;
 }
 
