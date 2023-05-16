@@ -133,14 +133,17 @@ template io::Result<uint16_t> JournalReader::ReadUInt<uint16_t>();
 template io::Result<uint32_t> JournalReader::ReadUInt<uint32_t>();
 template io::Result<uint64_t> JournalReader::ReadUInt<uint64_t>();
 
-io::Result<size_t> JournalReader::ReadString(char* buffer) {
+io::Result<size_t> JournalReader::ReadString(MutableSlice buffer) {
   size_t size = 0;
   SET_OR_UNEXPECT(ReadUInt<uint64_t>(), size);
 
   if (auto ec = EnsureRead(size); ec)
     return make_unexpected(ec);
 
-  buf_.ReadAndConsume(size, buffer);
+  if (size > buffer.size())
+    return make_unexpected(make_error_code(errc::bad_message));
+
+  buf_.ReadAndConsume(size, buffer.data());
 
   return size;
 }
@@ -158,9 +161,11 @@ std::error_code JournalReader::ReadCommand(journal::ParsedEntry::CmdData* data) 
   char* ptr = data->command_buf.get();
   for (auto& span : data->cmd_args) {
     size_t size;
-    SET_OR_RETURN(ReadString(ptr), size);
+    SET_OR_RETURN(ReadString({ptr, cmd_size}), size);
+    DCHECK(size <= cmd_size);
     span = MutableSlice{ptr, size};
     ptr += size;
+    cmd_size -= size;
   }
   return std::error_code{};
 }
