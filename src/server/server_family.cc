@@ -1151,7 +1151,10 @@ string GetPassword() {
 void ServerFamily::FlushDb(CmdArgList args, ConnectionContext* cntx) {
   DCHECK(cntx->transaction);
   Drakarys(cntx->transaction, cntx->transaction->GetDbIndex());
-  cntx->reply_builder()->SendOk();
+
+  bool noreply = cntx->protocol() == Protocol::MEMCACHE && cntx->conn_state.memcache_noreply;
+  if (!noreply)
+    cntx->reply_builder()->SendOk();
 }
 
 void ServerFamily::FlushAll(CmdArgList args, ConnectionContext* cntx) {
