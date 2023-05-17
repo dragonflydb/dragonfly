@@ -76,6 +76,9 @@ struct BasicSearch {
 
 };  // namespace
 
+SearchAlgorithm::SearchAlgorithm() = default;
+SearchAlgorithm::~SearchAlgorithm() = default;
+
 SearchAlgorithm::SearchAlgorithm(string_view query)
     : query{make_unique<AstExpr>(ParseQuery(query))} {
 }

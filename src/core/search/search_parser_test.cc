@@ -36,11 +36,11 @@ class SearchParserTest : public ::testing::Test {
 
   void ParseExpr(const std::string& str) {
     raw_expr_ = str;
-    search_algo_ = SearchAlgorithm{str};
+    search_algo_.emplace(str);
   }
 
   bool Check(DocumentAccessor* doc) const {
-    return search_algo_.Check(doc);
+    return search_algo_->Check(doc);
   }
 
   string DebugExpr() const {
@@ -48,7 +48,7 @@ class SearchParserTest : public ::testing::Test {
   }
 
   string raw_expr_;
-  SearchAlgorithm search_algo_;
+  optional<SearchAlgorithm> search_algo_;
   QueryDriver query_driver_;
 };
 

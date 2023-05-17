@@ -24,12 +24,14 @@ AstNegateNode::AstNegateNode(AstNode&& node) : node{make_unique<AstNode>(move(no
 }
 
 AstLogicalNode::AstLogicalNode(AstNode&& l, AstNode&& r, LogicOp op) : op{op}, nodes{} {
-  // If the left node is already a logical node with the same op,
+  // If either node is already a logical node with the same op,
   // we can re-use it, as logical ops are associative.
-  if (auto* ln = get_if<AstLogicalNode>(&l); ln && ln->op == op) {
-    *this = move(*ln);
-    nodes.emplace_back(move(r));
-    return;
+  for (auto* node : {&l, &r}) {
+    if (auto* ln = get_if<AstLogicalNode>(node); ln && ln->op == op) {
+      *this = move(*ln);
+      nodes.emplace_back(move(r));
+      return;
+    }
   }
 
   nodes.emplace_back(move(l));

@@ -266,7 +266,7 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
 
   optional<search::SearchAlgorithm> search_algo{};
   try {
-    search_algo = search::SearchAlgorithm{query_str};
+    search_algo.emplace(query_str);
   } catch (...) {
     (*cntx)->SendError("Syntax error");
     return;

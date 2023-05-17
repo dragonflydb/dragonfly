@@ -18,6 +18,7 @@ namespace search {
 
 struct AstNode;
 
+// Matches terms in text fields
 struct AstTermNode {
   AstTermNode(std::string term);
 
@@ -25,27 +26,32 @@ struct AstTermNode {
   std::regex pattern;
 };
 
+// Matches numeric range
 struct AstRangeNode {
   AstRangeNode(int64_t lo, int64_t hi);
 
   int64_t lo, hi;
 };
 
+// Negates subtree
 struct AstNegateNode {
   AstNegateNode(AstNode&& node);
 
   std::unique_ptr<AstNode> node;
 };
 
+// Applies logical operation to results of all sub-nodes
 struct AstLogicalNode {
   enum LogicOp { AND, OR };
 
+  // If either node is already a logical node with the same op, it'll be re-used.
   AstLogicalNode(AstNode&& l, AstNode&& r, LogicOp op);
 
   LogicOp op;
   std::vector<AstNode> nodes;
 };
 
+// Selects specific field for subtree
 struct AstFieldNode {
   AstFieldNode(std::string field, AstNode&& node);
 
@@ -55,7 +61,7 @@ struct AstFieldNode {
 
 using NodeVariants = std::variant<std::monostate, AstTermNode, AstRangeNode, AstNegateNode,
                                   AstLogicalNode, AstFieldNode>;
-struct AstNode : NodeVariants {
+struct AstNode : public NodeVariants {
   using variant::variant;
 };
 
