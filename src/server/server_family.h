@@ -10,7 +10,7 @@
 #include "facade/redis_parser.h"
 #include "server/channel_store.h"
 #include "server/engine_shard_set.h"
-#include "server/replica.h"
+#include "server/mutex_guarded_object.h"
 
 namespace util {
 class AcceptServer;
@@ -35,6 +35,7 @@ class ClusterFamily;
 class ConnectionContext;
 class CommandRegistry;
 class DflyCmd;
+class Replica;
 class Service;
 class ScriptMgr;
 
