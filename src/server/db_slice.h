@@ -209,8 +209,9 @@ class DbSlice {
    */
   void FlushDb(DbIndex db_ind);
 
+  using SlotSet = absl::flat_hash_set<SlotId>;
   // Flushes the data of given slot ids.
-  void FlushSlots(const absl::flat_hash_set<SlotId>& slot_ids);
+  void FlushSlots(const SlotSet&& slot_ids);
 
   EngineShard* shard_owner() const {
     return owner_;
@@ -318,13 +319,13 @@ class DbSlice {
                                                      PrimeValue obj, uint64_t expire_at_ms,
                                                      bool force_update) noexcept(false);
 
-  void FlushSlotsFb(const absl::flat_hash_set<SlotId>& slot_ids);
+  void FlushSlotsFb(const SlotSet& slot_ids);
 
   // Invalidate all watched keys in database. Used on FLUSH.
   void InvalidateDbWatches(DbIndex db_indx);
 
   // Invalidate all watched keys for given slots. Used on FlushSlots.
-  void InvalidateSlotWatches(const absl::flat_hash_set<SlotId>& slot_ids);
+  void InvalidateSlotWatches(const SlotSet& slot_ids);
 
   void CreateDb(DbIndex index);
   size_t EvictObjects(size_t memory_to_free, PrimeIterator it, DbTable* table);

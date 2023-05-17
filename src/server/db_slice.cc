@@ -495,14 +495,14 @@ bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
   return true;
 }
 
-void DbSlice::FlushSlotsFb(const absl::flat_hash_set<SlotId>& slot_ids) {
+void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
   // Slot deletion can take time as it traverses all the database, hence it runs in fiber.
   // We want to flush all the data of a slot that was added till the time the call to FlushSlotsFb
   // was made. Therefore we delete slots entries with version < next_version
   uint64_t next_version = NextVersion();
 
+  std::string tmp;
   auto del_entry_cb = [&](PrimeTable::iterator it) {
-    std::string tmp;
     std::string_view key = it->first.GetSlice(&tmp);
     SlotId sid = ClusterConfig::KeySlot(key);
     if (slot_ids.contains(sid) && it.GetVersion() < next_version) {
@@ -526,10 +526,11 @@ void DbSlice::FlushSlotsFb(const absl::flat_hash_set<SlotId>& slot_ids) {
   mi_heap_collect(ServerState::tlocal()->data_heap(), true);
 }
 
-void DbSlice::FlushSlots(const absl::flat_hash_set<SlotId>& slot_ids) {
+void DbSlice::FlushSlots(const SlotSet&& slot_ids) {
   InvalidateSlotWatches(slot_ids);
-
-  util::MakeFiber(&DbSlice::FlushSlotsFb, this, slot_ids).Detach();
+  util::MakeFiber([this, slot_ids = std::move(slot_ids)]() mutable {
+    FlushSlotsFb(slot_ids);
+  }).Detach();
 }
 
 void DbSlice::FlushDb(DbIndex db_ind) {
@@ -1106,7 +1107,7 @@ void DbSlice::InvalidateDbWatches(DbIndex db_indx) {
   }
 }
 
-void DbSlice::InvalidateSlotWatches(const absl::flat_hash_set<SlotId>& slot_ids) {
+void DbSlice::InvalidateSlotWatches(const SlotSet& slot_ids) {
   for (const auto& [key, conn_list] : db_arr_[0]->watched_keys) {
     SlotId sid = ClusterConfig::KeySlot(key);
     if (!slot_ids.contains(sid)) {
