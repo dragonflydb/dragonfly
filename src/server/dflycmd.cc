@@ -392,7 +392,7 @@ void DflyCmd::ClusterConfig(CmdArgList args, ConnectionContext* cntx) {
     return rb->SendError("Invalid JSON cluster config", kSyntaxErrType);
   }
 
-  if (!cluster_family_->cluster_config()->SetConfig(json.value())) {
+  if (!sf_->cluster_config()->SetConfig(json.value())) {
     return rb->SendError("Invalid cluster configuration.");
   }
 
@@ -403,7 +403,7 @@ void DflyCmd::ClusterManagmentCmd(CmdArgList args, ConnectionContext* cntx) {
   if (!ClusterConfig::IsClusterEnabled()) {
     return (*cntx)->SendError("DFLY CLUSTER commands requires --cluster_mode=yes");
   }
-  CHECK_NE(cluster_family_->cluster_config(), nullptr);
+  CHECK_NE(sf_->cluster_config(), nullptr);
 
   // TODO check admin port
   ToUpper(&args[1]);
