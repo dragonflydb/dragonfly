@@ -43,10 +43,20 @@ struct RangeId {
   bool exclude = false;
 };
 
+enum class TrimStrategy {
+  kAddOptsTrimNone = TRIM_STRATEGY_NONE,
+  kAddOptsTrimMaxLen = TRIM_STRATEGY_MAXLEN,
+  kAddOptsTrimMinId = TRIM_STRATEGY_MINID,
+};
+
 struct AddOpts {
   ParsedStreamId parsed_id;
-  uint32_t max_limit = kuint32max;
-  bool max_limit_approx = false;
+  ParsedStreamId minid;
+  uint32_t max_len = kuint32max;
+  uint32_t limit = 0;
+  TrimStrategy trim_strategy = TrimStrategy::kAddOptsTrimNone;
+  bool trim_approx = false;
+  bool no_mkstream = false;
 };
 
 struct GroupInfo {
@@ -471,10 +481,19 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
   auto& db_slice = op_args.shard->db_slice();
   pair<PrimeIterator, bool> add_res;
 
-  try {
-    add_res = db_slice.AddOrFind(op_args.db_cntx, key);
-  } catch (bad_alloc&) {
-    return OpStatus::OUT_OF_MEMORY;
+  if (opts.no_mkstream) {
+    auto res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
+    if (!res_it) {
+      return res_it.status();
+    }
+    add_res.first = res_it.value();
+    add_res.second = false;
+  } else {
+    try {
+      add_res = db_slice.AddOrFind(op_args.db_cntx, key);
+    } catch (bad_alloc&) {
+      return OpStatus::OUT_OF_MEMORY;
+    }
   }
 
   robj* stream_obj = nullptr;
@@ -508,10 +527,26 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
     return OpStatus::OUT_OF_MEMORY;
   }
 
-  if (opts.max_limit < kuint32max) {
-    /* Notify xtrim event if needed. */
-    streamTrimByLength(stream_inst, opts.max_limit, opts.max_limit_approx);
-    // TODO: when replicating, we should propagate it as exact limit in case of trimming.
+  if (!opts.limit) {
+    if (opts.trim_strategy == TrimStrategy::kAddOptsTrimMaxLen) {
+      /* Notify xtrim event if needed. */
+      streamTrimByLength(stream_inst, opts.max_len, opts.trim_approx);
+      // TODO: when replicating, we should propagate it as exact limit in case of trimming.
+    } else if (opts.trim_strategy == TrimStrategy::kAddOptsTrimMinId) {
+      streamTrimByID(stream_inst, opts.minid.val, opts.trim_approx);
+    }
+  } else {
+    streamAddTrimArgs add_args = {
+        .trim_strategy = static_cast<int>(opts.trim_strategy),
+        .approx_trim = opts.trim_approx,
+        .limit = opts.limit,
+    };
+    if (opts.trim_strategy == TrimStrategy::kAddOptsTrimMaxLen) {
+      add_args.maxlen = opts.max_len;
+    } else if (opts.trim_strategy == TrimStrategy::kAddOptsTrimMinId) {
+      add_args.minid = opts.minid.val;
+    }
+    streamTrim(stream_inst, &add_args);
   }
   return result_id;
 }
@@ -927,17 +962,38 @@ void StreamFamily::XAdd(CmdArgList args, ConnectionContext* cntx) {
   for (; id_indx < args.size(); ++id_indx) {
     ToUpper(&args[id_indx]);
     string_view arg = ArgS(args, id_indx);
-    if (arg == "MAXLEN") {
+    if (arg == "NOMKSTREAM") {
+      add_opts.no_mkstream = true;
+    } else if (arg == "MAXLEN" || arg == "MINID") {
+      if (arg == "MAXLEN") {
+        add_opts.trim_strategy = TrimStrategy::kAddOptsTrimMaxLen;
+      } else {
+        add_opts.trim_strategy = TrimStrategy::kAddOptsTrimMinId;
+      }
       if (id_indx + 2 >= args.size()) {
         return (*cntx)->SendError(kSyntaxErr);
       }
       ++id_indx;
       if (ArgS(args, id_indx) == "~") {
-        add_opts.max_limit_approx = true;
+        add_opts.trim_approx = true;
         ++id_indx;
       }
       arg = ArgS(args, id_indx);
-      if (!absl::SimpleAtoi(arg, &add_opts.max_limit)) {
+      if (add_opts.trim_strategy == TrimStrategy::kAddOptsTrimMaxLen &&
+          !absl::SimpleAtoi(arg, &add_opts.max_len)) {
+        return (*cntx)->SendError(kSyntaxErr);
+      }
+      if (add_opts.trim_strategy == TrimStrategy::kAddOptsTrimMinId &&
+          !ParseID(arg, false, 0, &add_opts.minid)) {
+        return (*cntx)->SendError(kSyntaxErr);
+      }
+
+    } else if (arg == "LIMIT" && add_opts.trim_strategy != TrimStrategy::kAddOptsTrimNone) {
+      if (id_indx + 2 >= args.size() || !add_opts.trim_approx) {
+        return (*cntx)->SendError(kSyntaxErr);
+      }
+      ++id_indx;
+      if (!absl::SimpleAtoi(ArgS(args, id_indx), &add_opts.limit)) {
         return (*cntx)->SendError(kSyntaxErr);
       }
     } else {

@@ -1,5 +1,5 @@
-import aioredis
 import asyncio
+from redis import asyncio as aioredis
 import time
 import json
 import pytest

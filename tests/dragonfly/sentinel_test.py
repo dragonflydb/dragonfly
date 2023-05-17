@@ -1,7 +1,7 @@
 import pathlib
 import subprocess
 from typing import Awaitable
-import aioredis
+from redis import asyncio as aioredis
 import pytest
 import time
 import asyncio

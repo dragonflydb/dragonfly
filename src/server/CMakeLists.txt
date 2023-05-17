@@ -25,8 +25,8 @@ add_library(dragonfly_lib channel_store.cc command_registry.cc
             top_keys.cc multi_command_squasher.cc hll_family.cc cluster/cluster_config.cc)
 
 
-cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib strings_lib html_lib http_client_lib
-         absl::random_random TRDP::jsoncons zstd TRDP::lz4)
+cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib aws_lib strings_lib html_lib
+         http_client_lib absl::random_random TRDP::jsoncons zstd TRDP::lz4)
 
 add_library(dfly_test_lib test_utils.cc)
 cxx_link(dfly_test_lib dragonfly_lib facade_test gtest_main_ext)
@@ -52,6 +52,7 @@ cxx_test(top_keys_test dfly_test_lib LABELS DFLY)
 cxx_test(hll_family_test dfly_test_lib LABELS DFLY)
 cxx_test(search_family_test dfly_test_lib LABELS DFLY)
 cxx_test(cluster_config_test dfly_test_lib LABELS DFLY)
+cxx_test(dflycmd_test dfly_test_lib LABELS DFLY)
 
 
 

@@ -1,14 +1,12 @@
-
-import pytest
-import asyncio
-import aioredis
 import random
 from itertools import chain, repeat
 import re
-
+import pytest
+import asyncio
+import redis
+from redis import asyncio as aioredis
 from .utility import *
 from . import DflyInstanceFactory, dfly_args
-
 
 BASE_PORT = 1111
 
@@ -414,7 +412,7 @@ async def test_cancel_replication_immediately(df_local_factory, df_seeder_factor
             # Giving replication commands shouldn't hang.
             assert time.time() - start < 2.0
             return True
-        except aioredis.exceptions.ResponseError as e:
+        except redis.exceptions.ResponseError as e:
             assert e.args[0] == "replication cancelled"
             return False
 

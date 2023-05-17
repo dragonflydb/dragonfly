@@ -694,7 +694,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       bool is_ms = (cur_arg == "PX" || cur_arg == "PXAT");
       ++i;
       if (i == args.size()) {
-        builder->SendError(kSyntaxErr);
+        return builder->SendError(kSyntaxErr);
       }
 
       string_view ex = ArgS(args, i);

@@ -16,6 +16,11 @@ namespace util {
 class AcceptServer;
 class ListenerInterface;
 class HttpListenerBase;
+
+namespace cloud {
+class AWS;
+}  // namespace cloud
+
 }  // namespace util
 
 namespace dfly {
@@ -94,7 +99,8 @@ class ServerFamily {
   void StatsMC(std::string_view section, facade::ConnectionContext* cntx);
 
   // if new_version is true, saves DF specific, non redis compatible snapshot.
-  GenericError DoSave(bool new_version, Transaction* transaction);
+  // if basename is not empty it will override dbfilename flag.
+  GenericError DoSave(bool new_version, std::string_view basename, Transaction* transaction);
 
   // Calls DoSave with a default generated transaction and with the format
   // specified in --df_snapshot_format
@@ -203,6 +209,7 @@ class ServerFamily {
 
   Done schedule_done_;
   std::unique_ptr<FiberQueueThreadPool> fq_threadpool_;
+  std::unique_ptr<util::cloud::AWS> aws_;
 };
 
 }  // namespace dfly
