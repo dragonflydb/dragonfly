@@ -387,7 +387,7 @@ void DflyCmd::ClusterConfig(CmdArgList args, ConnectionContext* cntx) {
   optional<JsonType> json = JsonFromString(json_str);
   if (!json.has_value()) {
     LOG(WARNING) << "Can't parse JSON for ClusterConfig " << json_str;
-    return rb->SendError("Invalid JSON cluster config" , kSyntaxErrType);
+    return rb->SendError("Invalid JSON cluster config", kSyntaxErrType);
   }
 
   if (!sf_->cluster_config()->SetConfig(json.value())) {
