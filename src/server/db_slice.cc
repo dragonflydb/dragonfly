@@ -495,6 +495,44 @@ bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
   return true;
 }
 
+void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
+  // Slot deletion can take time as it traverses all the database, hence it runs in fiber.
+  // We want to flush all the data of a slot that was added till the time the call to FlushSlotsFb
+  // was made. Therefore we delete slots entries with version < next_version
+  uint64_t next_version = NextVersion();
+
+  std::string tmp;
+  auto del_entry_cb = [&](PrimeTable::iterator it) {
+    std::string_view key = it->first.GetSlice(&tmp);
+    SlotId sid = ClusterConfig::KeySlot(key);
+    if (slot_ids.contains(sid) && it.GetVersion() < next_version) {
+      PerformDeletion(it, shard_owner(), db_arr_[0].get());
+    }
+    return true;
+  };
+
+  PrimeTable* pt = &db_arr_[0]->prime;
+  PrimeTable::Cursor cursor;
+  uint64_t i = 0;
+  do {
+    PrimeTable::Cursor next = pt->Traverse(cursor, del_entry_cb);
+    ++i;
+    cursor = next;
+    if (i % 100 == 0) {
+      ThisFiber::Yield();
+    }
+
+  } while (cursor);
+  mi_heap_collect(ServerState::tlocal()->data_heap(), true);
+}
+
+void DbSlice::FlushSlots(SlotSet slot_ids) {
+  InvalidateSlotWatches(slot_ids);
+  util::MakeFiber([this, slot_ids = std::move(slot_ids)]() mutable {
+    FlushSlotsFb(slot_ids);
+  }).Detach();
+}
+
 void DbSlice::FlushDb(DbIndex db_ind) {
   // TODO: to add preeemptiveness by yielding inside clear.
 
@@ -548,6 +586,7 @@ void DbSlice::FlushDb(DbIndex db_ind) {
     for (auto& db : all_dbs) {
       db.reset();
     }
+    mi_heap_collect(ServerState::tlocal()->data_heap(), true);
   }).Detach();
 }
 
@@ -1062,6 +1101,18 @@ void DbSlice::UnregisterConnectionWatches(ConnectionState::ExecInfo* exec_info) 
 
 void DbSlice::InvalidateDbWatches(DbIndex db_indx) {
   for (const auto& [key, conn_list] : db_arr_[db_indx]->watched_keys) {
+    for (auto conn_ptr : conn_list) {
+      conn_ptr->watched_dirty.store(true, memory_order_relaxed);
+    }
+  }
+}
+
+void DbSlice::InvalidateSlotWatches(const SlotSet& slot_ids) {
+  for (const auto& [key, conn_list] : db_arr_[0]->watched_keys) {
+    SlotId sid = ClusterConfig::KeySlot(key);
+    if (!slot_ids.contains(sid)) {
+      continue;
+    }
     for (auto conn_ptr : conn_list) {
       conn_ptr->watched_dirty.store(true, memory_order_relaxed);
     }
