@@ -211,7 +211,7 @@ class DbSlice {
 
   using SlotSet = absl::flat_hash_set<SlotId>;
   // Flushes the data of given slot ids.
-  void FlushSlots(const SlotSet&& slot_ids);
+  void FlushSlots(SlotSet slot_ids);
 
   EngineShard* shard_owner() const {
     return owner_;

@@ -526,7 +526,7 @@ void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
   mi_heap_collect(ServerState::tlocal()->data_heap(), true);
 }
 
-void DbSlice::FlushSlots(const SlotSet&& slot_ids) {
+void DbSlice::FlushSlots(SlotSet slot_ids) {
   InvalidateSlotWatches(slot_ids);
   util::MakeFiber([this, slot_ids = std::move(slot_ids)]() mutable {
     FlushSlotsFb(slot_ids);
