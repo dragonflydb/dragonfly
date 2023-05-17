@@ -596,12 +596,13 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
     StringMap* string_map = new StringMap;
 
     auto cleanup = absl::MakeCleanup([&] { delete string_map; });
+    std::string key;
     string_map->Reserve(len);
     for (const auto& seg : ltrace->arr) {
       for (size_t i = 0; i < seg.size(); i += 2) {
         // ToSV may reference an internal buffer, therefore we can use only before the
-        // next call to ToSV. To workaround, I copy the key to string.
-        string key(ToSV(seg[i].rdb_var));
+        // next call to ToSV. To workaround, copy the key locally.
+        key = ToSV(seg[i].rdb_var);
         string_view val = ToSV(seg[i + 1].rdb_var);
 
         if (ec_)
