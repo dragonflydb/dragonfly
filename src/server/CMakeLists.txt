@@ -52,6 +52,7 @@ cxx_test(top_keys_test dfly_test_lib LABELS DFLY)
 cxx_test(hll_family_test dfly_test_lib LABELS DFLY)
 cxx_test(search_family_test dfly_test_lib LABELS DFLY)
 cxx_test(cluster_config_test dfly_test_lib LABELS DFLY)
+cxx_test(dflycmd_test dfly_test_lib LABELS DFLY)
 
 
 

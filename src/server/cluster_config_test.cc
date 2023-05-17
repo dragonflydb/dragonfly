@@ -6,6 +6,8 @@
 
 #include <gmock/gmock-matchers.h>
 
+#include <jsoncons/json.hpp>
+
 #include "base/gtest.h"
 #include "base/logging.h"
 
@@ -20,6 +22,12 @@ MATCHER_P(NodeMatches, expected, "") {
 
 class ClusterConfigTest : public ::testing::Test {
  protected:
+  JsonType ParseJson(string_view json_str) {
+    optional<JsonType> opt_json = JsonFromString(json_str);
+    CHECK(opt_json.has_value());
+    return opt_json.value();
+  }
+
   const string kMyId = "my-id";
   ClusterConfig config_{kMyId};
 };
@@ -49,7 +57,7 @@ TEST_F(ClusterConfigTest, ConfigEmpty) {
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidEmpty) {
-  EXPECT_FALSE(config_.SetConfig({}));
+  EXPECT_FALSE(config_.SetConfig(ClusterConfig::ClusterShards{}));
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidMissingSlots) {
@@ -116,6 +124,171 @@ TEST_F(ClusterConfigTest, ConfigSetMultipleInstances) {
       EXPECT_FALSE(config_.IsMySlot(i));
     }
   }
+}
+
+TEST_F(ClusterConfigTest, ConfigSetInvalidSlotRanges) {
+  // Note that slot_ranges is not an object
+  EXPECT_FALSE(config_.SetConfig(ParseJson(R"json(
+      [
+        {
+          "slot_ranges": "0,16383",
+          "master": {
+            "id": "abcd1234",
+            "ip": "10.0.0.1",
+            "port": 7000
+          },
+          "replicas": []
+        }
+      ])json")));
+}
+
+TEST_F(ClusterConfigTest, ConfigSetInvalidSlotRangeStart) {
+  // Note that slot_ranges.start is not a number
+  EXPECT_FALSE(config_.SetConfig(ParseJson(R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": "0",
+              "end": 16383
+            }
+          ],
+          "master": {
+            "id": "abcd1234",
+            "ip": "10.0.0.1",
+            "port": 7000
+          },
+          "replicas": []
+        }
+      ])json")));
+}
+
+TEST_F(ClusterConfigTest, ConfigSetInvalidSlotRangeEnd) {
+  // Note that slot_ranges.end is not a number
+  EXPECT_FALSE(config_.SetConfig(ParseJson(R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": "16383"
+            }
+          ],
+          "master": {
+            "id": "abcd1234",
+            "ip": "10.0.0.1",
+            "port": 7000
+          },
+          "replicas": []
+        }
+      ])json")));
+}
+
+TEST_F(ClusterConfigTest, ConfigSetInvalidMissingMaster) {
+  EXPECT_FALSE(config_.SetConfig(ParseJson(R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 16383
+            }
+          ]
+        }
+      ])json")));
+}
+
+TEST_F(ClusterConfigTest, ConfigSetInvalidMasterNotObject) {
+  // Note that master is not an object
+  EXPECT_FALSE(config_.SetConfig(ParseJson(R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 16383
+            }
+          ],
+          "master": 123,
+          "replicas": []
+        }
+      ])json")));
+}
+
+TEST_F(ClusterConfigTest, ConfigSetInvalidMasterMissingId) {
+  EXPECT_FALSE(config_.SetConfig(ParseJson(R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 16383
+            }
+          ],
+          "master": {
+            "ip": "10.0.0.0",
+            "port": 8000
+          },
+          "replicas": []
+        }
+      ])json")));
+}
+
+TEST_F(ClusterConfigTest, ConfigSetInvalidMasterMissingIp) {
+  EXPECT_FALSE(config_.SetConfig(ParseJson(R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 16383
+            }
+          ],
+          "master": {
+            "id": "abcdefg",
+            "port": 8000
+          },
+          "replicas": []
+        }
+      ])json")));
+}
+
+TEST_F(ClusterConfigTest, ConfigSetInvalidMasterMissingPort) {
+  EXPECT_FALSE(config_.SetConfig(ParseJson(R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 16383
+            }
+          ],
+          "master": {
+            "id": "abcdefg",
+            "ip": "10.0.0.0"
+          },
+          "replicas": []
+        }
+      ])json")));
+}
+
+TEST_F(ClusterConfigTest, ConfigSetInvalidMissingReplicas) {
+  EXPECT_FALSE(config_.SetConfig(ParseJson(R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 16383
+            }
+          ],
+          "master": {
+            "id": "abcdefg",
+            "ip": "10.0.0.0",
+            "port": 8000
+          }
+        }
+      ])json")));
 }
 
 }  // namespace dfly

@@ -169,6 +169,9 @@ class DflyCmd {
   // CLUSTER GETSLOTINFO command
   void ClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx);
 
+  // CLUSTER CONFIG command
+  void ClusterConfig(CmdArgList args, ConnectionContext* cntx);
+
   // Start full sync in thread. Start FullSyncFb. Called for each flow.
   facade::OpStatus StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard);
 

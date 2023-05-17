@@ -7,9 +7,15 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
 
+#include <jsoncons/json.hpp>
+#include <limits>
+#include <optional>
+
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/json_object.h"
 #include "facade/dragonfly_connection.h"
+#include "server/cluster/cluster_config.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
@@ -370,15 +376,40 @@ void DflyCmd::ReplicaOffset(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void DflyCmd::ClusterConfig(CmdArgList args, ConnectionContext* cntx) {
+  SinkReplyBuilder* rb = cntx->reply_builder();
+
+  if (args.size() != 3) {
+    return rb->SendError(WrongNumArgsError("dfly cluster config"));
+  }
+
+  string_view json_str = ArgS(args, 2);
+  optional<JsonType> json = JsonFromString(json_str);
+  if (!json.has_value()) {
+    LOG(WARNING) << "Can't parse JSON for ClusterConfig " << json_str;
+    return rb->SendError("Invalid JSON cluster config", kSyntaxErrType);
+  }
+
+  if (!sf_->cluster_config()->SetConfig(json.value())) {
+    return rb->SendError("Invalid cluster configuration.");
+  }
+
+  return rb->SendOk();
+}
+
 void DflyCmd::ClusterManagmentCmd(CmdArgList args, ConnectionContext* cntx) {
   if (!ClusterConfig::IsClusterEnabled()) {
     return (*cntx)->SendError("DFLY CLUSTER commands requires --cluster_mode=yes");
   }
+  CHECK_NE(sf_->cluster_config(), nullptr);
+
   // TODO check admin port
   ToUpper(&args[1]);
   string_view sub_cmd = ArgS(args, 1);
   if (sub_cmd == "GETSLOTINFO") {
     return ClusterGetSlotInfo(args, cntx);
+  } else if (sub_cmd == "CONFIG") {
+    return ClusterConfig(args, cntx);
   }
 
   return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "DFLY CLUSTER"), kSyntaxErrType);
