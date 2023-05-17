@@ -105,6 +105,26 @@ typedef struct streamPropInfo {
     robj *groupname;
 } streamPropInfo;
 
+typedef struct {
+  /* XADD options */
+  streamID id;     /* User-provided ID, for XADD only. */
+  int id_given;    /* Was an ID different than "*" specified? for XADD only. */
+  int seq_given;   /* Was an ID different than "ms-*" specified? for XADD only. */
+  int no_mkstream; /* if set to 1 do not create new stream */
+
+  /* XADD + XTRIM common options */
+  int trim_strategy;         /* TRIM_STRATEGY_* */
+  int trim_strategy_arg_idx; /* Index of the count in MAXLEN/MINID, for rewriting. */
+  int approx_trim;           /* If 1 only delete whole radix tree nodes, so
+                              * the trim argument is not applied verbatim. */
+  long long limit;           /* Maximum amount of entries to trim. If 0, no limitation
+                              * on the amount of trimming work is enforced. */
+  /* TRIM_STRATEGY_MAXLEN options */
+  long long maxlen; /* After trimming, leave stream at this length . */
+  /* TRIM_STRATEGY_MINID options */
+  streamID minid; /* Trim by ID (No stream entries with ID < 'minid' will remain) */
+} streamAddTrimArgs;
+
 /* Prototypes of exported APIs. */
 // struct client;
 
@@ -118,6 +138,10 @@ typedef struct streamPropInfo {
 #define SCC_NO_DIRTIFY    (1<<1) /* Do not dirty++ if consumer created */
 
 #define SCG_INVALID_ENTRIES_READ -1
+
+#define TRIM_STRATEGY_NONE 0
+#define TRIM_STRATEGY_MAXLEN 1
+#define TRIM_STRATEGY_MINID 2
 
 stream *streamNew(void);
 void freeStream(stream *s);
@@ -147,6 +171,7 @@ int streamAppendItem(stream *s, robj **argv, int64_t numfields, streamID *added_
 int streamDeleteItem(stream *s, streamID *id);
 void streamGetEdgeID(stream *s, int first, int skip_tombstones, streamID *edge_id);
 long long streamEstimateDistanceFromFirstEverEntry(stream *s, streamID *id);
+int64_t streamTrim(stream *s, streamAddTrimArgs *args);
 int64_t streamTrimByLength(stream *s, long long maxlen, int approx);
 int64_t streamTrimByID(stream *s, streamID minid, int approx);
 void streamFreeCG(streamCG *cg);
