@@ -200,6 +200,8 @@ TEST_F(MultiTest, MultiConsistent) {
   if (multi_mode == Transaction::NON_ATOMIC)
     return;
 
+  Run({"mset", kKey1, "base", kKey4, "base"});
+
   auto mset_fb = pp_->at(0)->LaunchFiber([&] {
     for (size_t i = 1; i < 10; ++i) {
       string base = StrCat(i * 900);
