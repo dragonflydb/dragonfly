@@ -16,9 +16,11 @@ namespace dfly {
 namespace {
 using namespace std;
 
-class DflyFamilyTest : public BaseFamilyTest {
+class DflyFamilyTest : public BaseFamilyTest {};
+
+class DflyClusterTest : public DflyFamilyTest {
  public:
-  DflyFamilyTest() {
+  DflyClusterTest() {
     auto* flag = absl::FindCommandLineFlag("cluster_mode");
     CHECK_NE(flag, nullptr);
     string error;
@@ -29,14 +31,14 @@ class DflyFamilyTest : public BaseFamilyTest {
   static constexpr string_view kInvalidConfiguration = "Invalid cluster configuration";
 };
 
-TEST_F(DflyFamilyTest, ClusterConfigInvalid) {
+TEST_F(DflyClusterTest, ClusterConfigInvalid) {
   EXPECT_THAT(Run({"dfly", "cluster", "config"}), ErrArg("syntax error"));
   EXPECT_THAT(Run({"dfly", "cluster", "config", "invalid JSON"}),
               ErrArg("Invalid JSON cluster config"));
   EXPECT_THAT(Run({"dfly", "cluster", "config", "[]"}), ErrArg(kInvalidConfiguration));
 }
 
-TEST_F(DflyFamilyTest, ClusterConfigInvalidMissingSlots) {
+TEST_F(DflyClusterTest, ClusterConfigInvalidMissingSlots) {
   EXPECT_THAT(Run({"dfly", "cluster", "config", R"json(
       [
         {
@@ -57,7 +59,7 @@ TEST_F(DflyFamilyTest, ClusterConfigInvalidMissingSlots) {
               ErrArg(kInvalidConfiguration));
 }
 
-TEST_F(DflyFamilyTest, ClusterConfigInvalidOverlappingSlots) {
+TEST_F(DflyClusterTest, ClusterConfigInvalidOverlappingSlots) {
   EXPECT_THAT(Run({"dfly", "cluster", "config", R"json(
       [
         {
@@ -92,7 +94,7 @@ TEST_F(DflyFamilyTest, ClusterConfigInvalidOverlappingSlots) {
               ErrArg(kInvalidConfiguration));
 }
 
-TEST_F(DflyFamilyTest, ClusterConfigNoReplicas) {
+TEST_F(DflyClusterTest, ClusterConfigNoReplicas) {
   EXPECT_EQ(Run({"dfly", "cluster", "config", R"json(
       [
         {
@@ -116,7 +118,7 @@ TEST_F(DflyFamilyTest, ClusterConfigNoReplicas) {
   // takes effect.
 }
 
-TEST_F(DflyFamilyTest, ClusterConfigFull) {
+TEST_F(DflyClusterTest, ClusterConfigFull) {
   EXPECT_EQ(Run({"dfly", "cluster", "config", R"json(
       [
         {
@@ -146,7 +148,7 @@ TEST_F(DflyFamilyTest, ClusterConfigFull) {
   // takes effect.
 }
 
-TEST_F(DflyFamilyTest, ClusterConfigFullMultipleInstances) {
+TEST_F(DflyClusterTest, ClusterConfigFullMultipleInstances) {
   EXPECT_EQ(Run({"dfly", "cluster", "config", R"json(
       [
         {
