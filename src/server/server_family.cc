@@ -2091,7 +2091,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
     std::string_view arg = ArgS(args, i + 1);
     if (cmd == "CAPA") {
       if (arg == "dragonfly" && args.size() == 2 && i == 0) {
-        uint32_t sid = dfly_cmd_->CreateSyncSession(cntx);
+        auto [sid, replica_info] = dfly_cmd_->CreateSyncSession(cntx);
         cntx->owner()->SetName(absl::StrCat("repl_ctrl_", sid));
 
         string sync_id = absl::StrCat("SYNC", sid);
@@ -2106,7 +2106,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
         (*cntx)->StartArray(3);
         (*cntx)->SendSimpleString(master_id_);
         (*cntx)->SendSimpleString(sync_id);
-        (*cntx)->SendLong(shard_set->pool()->size());
+        (*cntx)->SendLong(replica_info->flows.size());
         return;
       }
     } else if (cmd == "LISTENING-PORT") {
@@ -2116,7 +2116,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
         return;
       }
       cntx->conn_state.replicaiton_info.repl_listening_port = replica_listening_port;
-    } else if (cmd == "CLIENT-ID" && args.size() == 3) {
+    } else if (cmd == "CLIENT-ID" && args.size() == 2) {
       std::string client_id{arg};
       auto& pool = service_.proactor_pool();
       pool.AwaitFiberOnAll(
