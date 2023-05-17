@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2023, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -31,8 +31,8 @@ class DflyFamilyTest : public BaseFamilyTest {
 
 TEST_F(DflyFamilyTest, ClusterConfigInvalid) {
   EXPECT_THAT(Run({"dfly", "cluster", "config"}), ErrArg("syntax error"));
-  EXPECT_THAT(Run({"dfly", "cluster", "config", "invalid JSON"}), ErrArg("syntax error"));
-
+  EXPECT_THAT(Run({"dfly", "cluster", "config", "invalid JSON"}),
+              ErrArg("Invalid JSON cluster config"));
   EXPECT_THAT(Run({"dfly", "cluster", "config", "[]"}), ErrArg(kInvalidConfiguration));
 }
 
@@ -90,180 +90,6 @@ TEST_F(DflyFamilyTest, ClusterConfigInvalidOverlappingSlots) {
         }
       ])json"}),
               ErrArg(kInvalidConfiguration));
-}
-
-TEST_F(DflyFamilyTest, ClusterConfigInvalidSlotRanges) {
-  // Note that slot_ranges is not an object
-  EXPECT_THAT(Run({"dfly", "cluster", "config", R"json(
-      [
-        {
-          "slot_ranges": "0,16383",
-          "master": {
-            "id": "abcd1234",
-            "ip": "10.0.0.1",
-            "port": 7000
-          },
-          "replicas": []
-        }
-      ])json"}),
-              ErrArg("syntax error"));
-}
-
-TEST_F(DflyFamilyTest, ClusterConfigInvalidSlotRangeStart) {
-  // Note that slot_ranges.start is not a number
-  EXPECT_THAT(Run({"dfly", "cluster", "config", R"json(
-      [
-        {
-          "slot_ranges": [
-            {
-              "start": "0",
-              "end": 16383
-            }
-          ],
-          "master": {
-            "id": "abcd1234",
-            "ip": "10.0.0.1",
-            "port": 7000
-          },
-          "replicas": []
-        }
-      ])json"}),
-              ErrArg("syntax error"));
-}
-
-TEST_F(DflyFamilyTest, ClusterConfigInvalidSlotRangeEnd) {
-  // Note that slot_ranges.end is not a number
-  EXPECT_THAT(Run({"dfly", "cluster", "config", R"json(
-      [
-        {
-          "slot_ranges": [
-            {
-              "start": 0,
-              "end": "16383"
-            }
-          ],
-          "master": {
-            "id": "abcd1234",
-            "ip": "10.0.0.1",
-            "port": 7000
-          },
-          "replicas": []
-        }
-      ])json"}),
-              ErrArg("syntax error"));
-}
-
-TEST_F(DflyFamilyTest, ClusterConfigInvalidMissingMaster) {
-  EXPECT_THAT(Run({"dfly", "cluster", "config", R"json(
-      [
-        {
-          "slot_ranges": [
-            {
-              "start": 0,
-              "end": 16383
-            }
-          ]
-        }
-      ])json"}),
-              ErrArg("syntax error"));
-}
-
-TEST_F(DflyFamilyTest, ClusterConfigInvalidMasterNotObject) {
-  // Note that master is not an object
-  EXPECT_THAT(Run({"dfly", "cluster", "config", R"json(
-      [
-        {
-          "slot_ranges": [
-            {
-              "start": 0,
-              "end": 16383
-            }
-          ],
-          "master": 123,
-          "replicas": []
-        }
-      ])json"}),
-              ErrArg("syntax error"));
-}
-
-TEST_F(DflyFamilyTest, ClusterConfigInvalidMasterMissingId) {
-  EXPECT_THAT(Run({"dfly", "cluster", "config", R"json(
-      [
-        {
-          "slot_ranges": [
-            {
-              "start": 0,
-              "end": 16383
-            }
-          ],
-          "master": {
-            "ip": "10.0.0.0",
-            "port": 8000
-          },
-          "replicas": []
-        }
-      ])json"}),
-              ErrArg("syntax error"));
-}
-
-TEST_F(DflyFamilyTest, ClusterConfigInvalidMasterMissingIp) {
-  EXPECT_THAT(Run({"dfly", "cluster", "config", R"json(
-      [
-        {
-          "slot_ranges": [
-            {
-              "start": 0,
-              "end": 16383
-            }
-          ],
-          "master": {
-            "id": "abcdefg",
-            "port": 8000
-          },
-          "replicas": []
-        }
-      ])json"}),
-              ErrArg("syntax error"));
-}
-
-TEST_F(DflyFamilyTest, ClusterConfigInvalidMasterMissingPort) {
-  EXPECT_THAT(Run({"dfly", "cluster", "config", R"json(
-      [
-        {
-          "slot_ranges": [
-            {
-              "start": 0,
-              "end": 16383
-            }
-          ],
-          "master": {
-            "id": "abcdefg",
-            "ip": "10.0.0.0",
-          },
-          "replicas": []
-        }
-      ])json"}),
-              ErrArg("syntax error"));
-}
-
-TEST_F(DflyFamilyTest, ClusterConfigInvalidMissingReplicas) {
-  EXPECT_THAT(Run({"dfly", "cluster", "config", R"json(
-      [
-        {
-          "slot_ranges": [
-            {
-              "start": 0,
-              "end": 16383
-            }
-          ],
-          "master": {
-            "id": "abcdefg",
-            "ip": "10.0.0.0",
-            "port": 8000
-          }
-        }
-      ])json"}),
-              ErrArg("syntax error"));
 }
 
 TEST_F(DflyFamilyTest, ClusterConfigNoReplicas) {

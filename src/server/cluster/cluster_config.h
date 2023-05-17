@@ -11,6 +11,7 @@
 #include <string_view>
 #include <vector>
 
+#include "core/json_object.h"
 #include "src/core/fibers.h"
 
 namespace dfly {
@@ -19,6 +20,8 @@ using SlotId = uint16_t;
 
 class ClusterConfig {
  public:
+  static constexpr SlotId kMaxSlotNum = 0x3FFF;
+
   struct Node {
     std::string id;
     std::string ip;
@@ -61,7 +64,9 @@ class ClusterConfig {
   // Returns true if `new_config` is valid and internal state was changed. Returns false and changes
   // nothing otherwise.
   bool SetConfig(const ClusterShards& new_config);
-  static constexpr SlotId kMaxSlotNum = 0x3FFF;
+
+  // Parses `json` into `ClusterShards` and calls the above overload.
+  bool SetConfig(const JsonType& json);
 
  private:
   struct SlotEntry {
