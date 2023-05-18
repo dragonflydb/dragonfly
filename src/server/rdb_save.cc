@@ -942,7 +942,7 @@ RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, CompressionMode 
     aligned_buf_.emplace(kBufLen, sink);
     sink_ = &aligned_buf_.value();
   }
-  if (sm == SaveMode::SINGLE_SHARD) {
+  if (sm == SaveMode::SINGLE_SHARD || sm == SaveMode::SINGLE_SHARD_WITH_SUMMARY) {
     push_to_sink_with_order_ = true;
   }
 
@@ -1098,6 +1098,7 @@ RdbSaver::RdbSaver(::io::Sink* sink, SaveMode save_mode, bool align_writes) {
       }
       break;
     case SaveMode::SINGLE_SHARD:
+    case SaveMode::SINGLE_SHARD_WITH_SUMMARY:
       producer_count = 1;
       if (compression_mode == 3) {
         compression_mode_ = CompressionMode::MULTY_ENTRY_LZ4;

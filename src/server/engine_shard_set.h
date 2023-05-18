@@ -264,11 +264,13 @@ class EngineShardSet {
   }
 
   // Runs a brief function on all shards. Waits for it to complete.
+  // `func` must not preempt.
   template <typename U> void RunBriefInParallel(U&& func) const {
     RunBriefInParallel(std::forward<U>(func), [](auto i) { return true; });
   }
 
   // Runs a brief function on selected shard thread. Waits for it to complete.
+  // `func` must not preempt.
   template <typename U, typename P> void RunBriefInParallel(U&& func, P&& pred) const;
 
   template <typename U> void RunBlockingInParallel(U&& func);

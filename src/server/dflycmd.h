@@ -46,7 +46,7 @@ class JournalStreamer;
 //    access.
 //
 // Upon first connection from the replica, a new ReplicaInfo is created.
-// It tranistions through the following phases:
+// It transitions through the following phases:
 //  1. Preparation
 //    During this start phase the "flows" are set up - one connection for every master thread. Those
 //    connections registered by the FLOW command sent from each newly opened connection.
@@ -132,7 +132,7 @@ class DflyCmd {
   void Shutdown();
 
   // Create new sync session.
-  uint32_t CreateSyncSession(ConnectionContext* cntx);
+  std::pair<uint32_t, std::shared_ptr<ReplicaInfo>> CreateSyncSession(ConnectionContext* cntx);
 
   std::vector<ReplicaRoleInfo> GetReplicasRoleInfo();
 
