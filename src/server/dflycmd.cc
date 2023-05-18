@@ -7,16 +7,12 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
 
-#include <jsoncons/json.hpp>
 #include <limits>
 #include <optional>
 
 #include "base/flags.h"
 #include "base/logging.h"
-#include "core/json_object.h"
 #include "facade/dragonfly_connection.h"
-#include "server/cluster/cluster_config.h"
-#include "server/cluster/cluster_family.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
@@ -88,9 +84,8 @@ DflyCmd::ReplicaRoleInfo::ReplicaRoleInfo(std::string address, uint32_t listenin
   }
 }
 
-DflyCmd::DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family,
-                 ClusterFamily* cluster_family)
-    : sf_(server_family), listener_(listener), cluster_family_(cluster_family) {
+DflyCmd::DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family)
+    : sf_(server_family), listener_(listener) {
 }
 
 void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
@@ -126,10 +121,6 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
 
   if (sub_cmd == "REPLICAOFFSET" && args.size() == 2) {
     return ReplicaOffset(args, cntx);
-  }
-
-  if (sub_cmd == "CLUSTER" && args.size() > 2) {
-    return ClusterManagmentCmd(args, cntx);
   }
 
   rb->SendError(kSyntaxErr);
@@ -373,94 +364,6 @@ void DflyCmd::ReplicaOffset(CmdArgList args, ConnectionContext* cntx) {
     } else {
       rb->SendLong(0);
     }
-  }
-}
-
-void DflyCmd::ClusterConfig(CmdArgList args, ConnectionContext* cntx) {
-  SinkReplyBuilder* rb = cntx->reply_builder();
-
-  if (args.size() != 3) {
-    return rb->SendError(WrongNumArgsError("dfly cluster config"));
-  }
-
-  string_view json_str = ArgS(args, 2);
-  optional<JsonType> json = JsonFromString(json_str);
-  if (!json.has_value()) {
-    LOG(WARNING) << "Can't parse JSON for ClusterConfig " << json_str;
-    return rb->SendError("Invalid JSON cluster config", kSyntaxErrType);
-  }
-
-  if (!cluster_family_->cluster_config()->SetConfig(json.value())) {
-    return rb->SendError("Invalid cluster configuration.");
-  }
-
-  return rb->SendOk();
-}
-
-void DflyCmd::ClusterManagmentCmd(CmdArgList args, ConnectionContext* cntx) {
-  if (!ClusterConfig::IsClusterEnabled()) {
-    return (*cntx)->SendError("DFLY CLUSTER commands requires --cluster_mode=yes");
-  }
-  CHECK_NE(cluster_family_->cluster_config(), nullptr);
-
-  // TODO check admin port
-  ToUpper(&args[1]);
-  string_view sub_cmd = ArgS(args, 1);
-  if (sub_cmd == "GETSLOTINFO") {
-    return ClusterGetSlotInfo(args, cntx);
-  } else if (sub_cmd == "CONFIG") {
-    return ClusterConfig(args, cntx);
-  }
-
-  return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "DFLY CLUSTER"), kSyntaxErrType);
-}
-
-void DflyCmd::ClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() == 3) {
-    return (*cntx)->SendError(facade::WrongNumArgsError("DFLY CLUSTER GETSLOTINFO"),
-                              kSyntaxErrType);
-  }
-  ToUpper(&args[2]);
-  string_view slots_str = ArgS(args, 2);
-  if (slots_str != "SLOTS") {
-    return (*cntx)->SendError(kSyntaxErr, kSyntaxErrType);
-  }
-
-  vector<std::pair<SlotId, SlotStats>> slots_stats;
-  for (size_t i = 3; i < args.size(); ++i) {
-    string_view slot_str = ArgS(args, i);
-    uint32_t sid;
-    if (!absl::SimpleAtoi(slot_str, &sid)) {
-      return (*cntx)->SendError(kInvalidIntErr);
-    }
-    if (sid > ClusterConfig::kMaxSlotNum) {
-      return (*cntx)->SendError("Invalid slot id");
-    }
-    slots_stats.push_back(make_pair(sid, SlotStats{}));
-  }
-
-  Mutex mu;
-
-  auto cb = [&](auto*) {
-    EngineShard* shard = EngineShard::tlocal();
-    if (shard == nullptr)
-      return;
-
-    lock_guard lk(mu);
-    for (auto& [slot, data] : slots_stats) {
-      data += shard->db_slice().GetSlotStats(slot);
-    }
-  };
-
-  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
-
-  (*cntx)->StartArray(slots_stats.size());
-
-  for (const auto& slot_data : slots_stats) {
-    (*cntx)->StartArray(3);
-    (*cntx)->SendBulkString(absl::StrCat(slot_data.first));
-    (*cntx)->SendBulkString("key_count");
-    (*cntx)->SendBulkString(absl::StrCat(slot_data.second.key_count));
   }
 }
 

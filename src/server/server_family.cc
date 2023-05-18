@@ -495,7 +495,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
   CHECK(acceptor_ == nullptr);
   acceptor_ = acceptor;
   main_listener_ = main_listener;
-  dfly_cmd_ = make_unique<DflyCmd>(main_listener, this, cluster_family);
+  dfly_cmd_ = make_unique<DflyCmd>(main_listener, this);
   cluster_family_ = cluster_family;
 
   pb_task_ = shard_set->pool()->GetNextProactor();

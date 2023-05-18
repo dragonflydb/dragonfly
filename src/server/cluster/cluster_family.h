@@ -30,6 +30,7 @@ class ClusterFamily {
   }
 
  private:
+  // Cluster commands compatible with Redis
   void Cluster(CmdArgList args, ConnectionContext* cntx);
   void ClusterHelp(ConnectionContext* cntx);
   void ClusterSlots(ConnectionContext* cntx);
@@ -38,6 +39,11 @@ class ClusterFamily {
 
   void ReadOnly(CmdArgList args, ConnectionContext* cntx);
   void ReadWrite(CmdArgList args, ConnectionContext* cntx);
+
+  // Custom Dragonfly commands for cluster management
+  void DflyCluster(CmdArgList args, ConnectionContext* cntx);
+  void DflyClusterConfig(CmdArgList args, ConnectionContext* cntx);
+  void DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx);
 
   std::string BuildClusterNodeReply(ConnectionContext* cntx) const;
 

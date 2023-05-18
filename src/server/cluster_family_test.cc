@@ -16,11 +16,9 @@ namespace dfly {
 namespace {
 using namespace std;
 
-class DflyFamilyTest : public BaseFamilyTest {};
-
-class DflyClusterTest : public DflyFamilyTest {
+class ClusterFamilyTest : public BaseFamilyTest {
  public:
-  DflyClusterTest() {
+  ClusterFamilyTest() {
     auto* flag = absl::FindCommandLineFlag("cluster_mode");
     CHECK_NE(flag, nullptr);
     string error;
@@ -31,15 +29,14 @@ class DflyClusterTest : public DflyFamilyTest {
   static constexpr string_view kInvalidConfiguration = "Invalid cluster configuration";
 };
 
-TEST_F(DflyClusterTest, ClusterConfigInvalid) {
-  EXPECT_THAT(Run({"dfly", "cluster", "config"}), ErrArg("syntax error"));
-  EXPECT_THAT(Run({"dfly", "cluster", "config", "invalid JSON"}),
+TEST_F(ClusterFamilyTest, ClusterConfigInvalid) {
+  EXPECT_THAT(Run({"dflycluster", "config", "invalid JSON"}),
               ErrArg("Invalid JSON cluster config"));
-  EXPECT_THAT(Run({"dfly", "cluster", "config", "[]"}), ErrArg(kInvalidConfiguration));
+  EXPECT_THAT(Run({"dflycluster", "config", "[]"}), ErrArg(kInvalidConfiguration));
 }
 
-TEST_F(DflyClusterTest, ClusterConfigInvalidMissingSlots) {
-  EXPECT_THAT(Run({"dfly", "cluster", "config", R"json(
+TEST_F(ClusterFamilyTest, ClusterConfigInvalidMissingSlots) {
+  EXPECT_THAT(Run({"dflycluster", "config", R"json(
       [
         {
           "slot_ranges": [
@@ -59,8 +56,8 @@ TEST_F(DflyClusterTest, ClusterConfigInvalidMissingSlots) {
               ErrArg(kInvalidConfiguration));
 }
 
-TEST_F(DflyClusterTest, ClusterConfigInvalidOverlappingSlots) {
-  EXPECT_THAT(Run({"dfly", "cluster", "config", R"json(
+TEST_F(ClusterFamilyTest, ClusterConfigInvalidOverlappingSlots) {
+  EXPECT_THAT(Run({"dflycluster", "config", R"json(
       [
         {
           "slot_ranges": [
@@ -94,8 +91,8 @@ TEST_F(DflyClusterTest, ClusterConfigInvalidOverlappingSlots) {
               ErrArg(kInvalidConfiguration));
 }
 
-TEST_F(DflyClusterTest, ClusterConfigNoReplicas) {
-  EXPECT_EQ(Run({"dfly", "cluster", "config", R"json(
+TEST_F(ClusterFamilyTest, ClusterConfigNoReplicas) {
+  EXPECT_EQ(Run({"dflycluster", "config", R"json(
       [
         {
           "slot_ranges": [
@@ -118,8 +115,8 @@ TEST_F(DflyClusterTest, ClusterConfigNoReplicas) {
   // takes effect.
 }
 
-TEST_F(DflyClusterTest, ClusterConfigFull) {
-  EXPECT_EQ(Run({"dfly", "cluster", "config", R"json(
+TEST_F(ClusterFamilyTest, ClusterConfigFull) {
+  EXPECT_EQ(Run({"dflycluster", "config", R"json(
       [
         {
           "slot_ranges": [
@@ -148,8 +145,8 @@ TEST_F(DflyClusterTest, ClusterConfigFull) {
   // takes effect.
 }
 
-TEST_F(DflyClusterTest, ClusterConfigFullMultipleInstances) {
-  EXPECT_EQ(Run({"dfly", "cluster", "config", R"json(
+TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
+  EXPECT_EQ(Run({"dflycluster", "config", R"json(
       [
         {
           "slot_ranges": [
