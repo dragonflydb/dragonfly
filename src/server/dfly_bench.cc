@@ -34,12 +34,12 @@ using facade::RespVec;
 
 // Per connection driver.
 class Driver {
-  Driver(const Driver&) = delete;
-
  public:
-  Driver(ProactorBase* p) {
+  explicit Driver(ProactorBase* p) {
     socket_.reset(p->CreateSocket());
   }
+
+  Driver(const Driver&) = delete;
 
   void Connect(unsigned index, const tcp::endpoint& ep);
   void Run(base::Histogram* dest);
@@ -57,21 +57,22 @@ class Driver {
 
 // Per thread client.
 class TLocalClient {
-  ProactorBase* p_;
-  vector<unique_ptr<Driver>> drivers_;
-
-  TLocalClient(const TLocalClient&) = delete;
-
  public:
-  TLocalClient(ProactorBase* p) : p_(p) {
-    drivers_.resize(absl::GetFlag(FLAGS_c));
+  explicit TLocalClient(ProactorBase* p) : p_(p) {
+    drivers_.reserve(absl::GetFlag(FLAGS_c));
     for (size_t i = 0; i < drivers_.size(); ++i) {
-      drivers_[i].reset(new Driver{p});
+      drivers_.push_back(make_unique<Driver>(p_));
     }
   }
 
+  TLocalClient(const TLocalClient&) = delete;
+
   void Connect(tcp::endpoint ep);
   void Run();
+
+ private:
+  ProactorBase* p_;
+  vector<unique_ptr<Driver>> drivers_;
 };
 
 void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
