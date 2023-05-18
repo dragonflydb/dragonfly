@@ -73,27 +73,31 @@ bool ClusterConfig::IsConfigValid(const vector<ClusterShard>& new_config) {
   return true;
 }
 
-bool ClusterConfig::SetConfig(const vector<ClusterShard>& new_config) {
+optional<SlotSet> ClusterConfig::SetConfig(const vector<ClusterShard>& new_config) {
   if (!IsConfigValid(new_config)) {
-    return false;
+    return nullopt;
   }
 
   lock_guard gu(mu_);
 
   config_ = new_config;
 
+  SlotSet deleted_slots;
   for (const auto& shard : config_) {
     for (const auto& slot_range : shard.slot_ranges) {
       bool owned_by_me =
           shard.master.id == my_id_ || any_of(shard.replicas.begin(), shard.replicas.end(),
                                               [&](const Node& node) { return node.id == my_id_; });
       for (SlotId i = slot_range.start; i <= slot_range.end; ++i) {
+        if (slots_[i].owned_by_me && !owned_by_me) {
+          deleted_slots.insert(i);
+        }
         slots_[i] = {.shard = &shard, .owned_by_me = owned_by_me};
       }
     }
   }
 
-  return true;
+  return deleted_slots;
 }
 
 namespace {
@@ -220,10 +224,10 @@ optional<ClusterConfig::ClusterShards> BuildClusterConfigFromJson(const JsonType
 }
 }  // namespace
 
-bool ClusterConfig::SetConfig(const JsonType& json) {
+optional<SlotSet> ClusterConfig::SetConfig(const JsonType& json) {
   optional<ClusterShards> config = BuildClusterConfigFromJson(json);
   if (!config.has_value()) {
-    return false;
+    return nullopt;
   }
 
   return SetConfig(config.value());

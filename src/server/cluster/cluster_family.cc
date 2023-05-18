@@ -284,8 +284,21 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
     return rb->SendError("Invalid JSON cluster config", kSyntaxErrType);
   }
 
-  if (!cluster_config_->SetConfig(json.value())) {
+  auto deleted_slot_ids = cluster_config_->SetConfig(json.value());
+  if (!deleted_slot_ids) {
     return rb->SendError("Invalid cluster configuration.");
+  }
+
+  // Delete old slots data.
+  if (!deleted_slot_ids.value().empty()) {
+    auto cb = [&](auto*) {
+      EngineShard* shard = EngineShard::tlocal();
+      if (shard == nullptr)
+        return;
+
+      shard->db_slice().FlushSlots(deleted_slot_ids.value());
+    };
+    shard_set->pool()->AwaitFiberOnAll(std::move(cb));
   }
 
   return rb->SendOk();
