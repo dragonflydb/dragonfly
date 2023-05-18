@@ -83,17 +83,16 @@ string ClusterFamily::BuildClusterNodeReply(ConnectionContext* cntx) const {
     }
     return msg;
   } else {
-    auto replica = server_family_->GetReplica();
-    Replica::Info info = (*replica)->GetInfo();
+    Replica::Info info = server_family_->GetReplicaInfo();
     auto my_ip = cntx->owner()->LocalBindAddress();
     auto my_port = absl::GetFlag(FLAGS_port);
-    const char* connect_state =
-        (*replica)->GetInfo().master_link_established ? "connected" : "disconnected";
+    const char* connect_state = info.master_link_established ? "connected" : "disconnected";
     std::string msg = absl::StrCat(server_family_->master_id(), " ", my_ip, ":", my_port, "@",
                                    my_port, " myself,slave ", server_family_->master_id(), " 0 ",
                                    epoch_master_time, " 1 ", connect_state, "\r\n");
-    absl::StrAppend(&msg, (*replica)->MasterId(), " ", info.host, ":", info.port, "@", info.port,
-                    " master - 0 ", epoch_master_time, " 1 ", connect_state, " 0-16383\r\n");
+    absl::StrAppend(&msg, server_family_->GetReplicaMasterId(), " ", info.host, ":", info.port, "@",
+                    info.port, " master - 0 ", epoch_master_time, " 1 ", connect_state,
+                    " 0-16383\r\n");
     return msg;
   }
 }
@@ -153,13 +152,11 @@ void ClusterFamily::ClusterSlots(ConnectionContext* cntx) {
       BuildClusterSlotNetworkInfo(cntx, info.address, info.listening_port, etl.remote_client_id_);
     }
   } else {
-    auto replica = server_family_->GetReplica();
-    CHECK(*replica);
-    Replica::Info info = (*replica)->GetInfo();
+    Replica::Info info = server_family_->GetReplicaInfo();
     (*cntx)->StartArray(kWithReplicaInfoSize);
     (*cntx)->SendLong(0);                           // start sharding range
     (*cntx)->SendLong(ClusterConfig::kMaxSlotNum);  // end sharding range
-    BuildClusterSlotNetworkInfo(cntx, info.host, info.port, (*replica)->MasterId());
+    BuildClusterSlotNetworkInfo(cntx, info.host, info.port, server_family_->GetReplicaMasterId());
     BuildClusterSlotNetworkInfo(cntx, cntx->owner()->LocalBindAddress(), absl::GetFlag(FLAGS_port),
                                 server_family_->master_id());
   }
@@ -188,10 +185,9 @@ void ClusterFamily::ClusterInfo(ConnectionContext* cntx) {
       known_nodes = 2;
     }
   } else {
-    auto replica = server_family_->GetReplica();
-    if (*replica) {
+    if (server_family_->HasReplica()) {
       known_nodes = 2;
-      epoch = (*replica)->GetInfo().master_last_io_sec;
+      epoch = server_family_->GetReplicaInfo().master_last_io_sec;
     }
   }
   int cluster_size = known_nodes - 1;

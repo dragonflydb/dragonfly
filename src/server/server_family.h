@@ -9,8 +9,8 @@
 #include "facade/conn_context.h"
 #include "facade/redis_parser.h"
 #include "server/channel_store.h"
+#include "server/replica.h"
 #include "server/engine_shard_set.h"
-#include "server/mutex_guarded_object.h"
 
 namespace util {
 class AcceptServer;
@@ -35,7 +35,6 @@ class ClusterFamily;
 class ConnectionContext;
 class CommandRegistry;
 class DflyCmd;
-class Replica;
 class Service;
 class ScriptMgr;
 
@@ -136,7 +135,9 @@ class ServerFamily {
     return dfly_cmd_.get();
   }
 
-  MutexGuardedObject<std::shared_ptr<Replica>>::ConstAccess GetReplica() const;
+  bool HasReplica() const;
+  Replica::Info GetReplicaInfo() const;
+  std::string GetReplicaMasterId() const;
 
   void OnClose(ConnectionContext* cntx);
 
@@ -186,8 +187,8 @@ class ServerFamily {
   util::ListenerInterface* main_listener_ = nullptr;
   util::ProactorBase* pb_task_ = nullptr;
 
-  mutable Mutex save_mu_;
-  MutexGuardedObject<std::shared_ptr<Replica>> replica_;
+  mutable Mutex replicaof_mu_, save_mu_;
+  std::shared_ptr<Replica> replica_ ABSL_GUARDED_BY(replicaof_mu_);
 
   std::unique_ptr<ScriptMgr> script_mgr_;
   std::unique_ptr<journal::Journal> journal_;

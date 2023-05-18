@@ -38,7 +38,6 @@ extern "C" {
 #include "server/memory_cmd.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
-#include "server/replica.h"
 #include "server/script_mgr.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
@@ -578,9 +577,9 @@ void ServerFamily::Shutdown() {
       LOG_IF(ERROR, ec) << "Error closing journal " << ec;
     }
 
-    auto replica = replica_.Get();
-    if (*replica) {
-      (*replica)->Stop();
+    unique_lock lk(replicaof_mu_);
+    if (replica_) {
+      replica_->Stop();
     }
 
     dfly_cmd_->Shutdown();
@@ -880,30 +879,41 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
 }
 
 void ServerFamily::PauseReplication(bool pause) {
-  auto replica = replica_.Get();
+  unique_lock lk(replicaof_mu_);
 
   // Switch to primary mode.
   if (!ServerState::tlocal()->is_master) {
-    auto repl_ptr = *replica;
+    auto repl_ptr = replica_;
     CHECK(repl_ptr);
     repl_ptr->Pause(pause);
   }
 }
 
 std::optional<ReplicaOffsetInfo> ServerFamily::GetReplicaOffsetInfo() {
-  auto replica = replica_.Get();
+  unique_lock lk(replicaof_mu_);
 
   // Switch to primary mode.
   if (!ServerState::tlocal()->is_master) {
-    auto repl_ptr = *replica;
+    auto repl_ptr = replica_;
     CHECK(repl_ptr);
     return ReplicaOffsetInfo{repl_ptr->GetSyncId(), repl_ptr->GetReplicaOffset()};
   }
   return nullopt;
 }
 
-MutexGuardedObject<shared_ptr<Replica>>::ConstAccess ServerFamily::GetReplica() const {
-  return replica_.Get();
+bool ServerFamily::HasReplica() const {
+  unique_lock lk(replicaof_mu_);
+  return replica_ != nullptr;
+}
+
+Replica::Info ServerFamily::GetReplicaInfo() const {
+  unique_lock lk(replicaof_mu_);
+  return replica_->GetInfo();
+}
+
+string ServerFamily::GetReplicaMasterId() const {
+  unique_lock lk(replicaof_mu_);
+  return string(replica_->MasterId());
 }
 
 void ServerFamily::OnClose(ConnectionContext* cntx) {
@@ -1636,8 +1646,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       // it's safe to access replica_ because replica_ is created before etl.is_master set to
       // false and cleared after etl.is_master is set to true. And since the code here that checks
       // for is_master and copies shared_ptr is atomic, it1 should be correct.
-      auto replica_ptr = replica_.Get();
-      Replica::Info rinfo = (*replica_ptr)->GetInfo();
+      auto replica_ptr = replica_;
+      Replica::Info rinfo = replica_ptr->GetInfo();
       append("master_host", rinfo.host);
       append("master_port", rinfo.port);
 
@@ -1805,7 +1815,6 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   auto& pool = service_.proactor_pool();
 
   LOG(INFO) << "Replicating " << host << ":" << port_s;
-  shared_ptr<Replica> new_replica;
 
   // We lock to protect global state changes that we perform during the replication setup:
   // The replica_ pointer, GlobalState, and the DB itself (we do a flushall txn before syncing).
@@ -1818,77 +1827,73 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   // We have a relatively involved state machine inside Replica itself which handels cancellation
   // with those requirements.
   VLOG(1) << "Acquire replica lock";
-  {
-    auto replica = replica_.Get();
+  unique_lock lk(replicaof_mu_);
 
-    if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_s, "one")) {
-      if (!ServerState::tlocal()->is_master) {
-        auto repl_ptr = *replica;
-        CHECK(repl_ptr);
-
-        pool.AwaitFiberOnAll(
-            [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = true; });
-        repl_ptr->Stop();
-        repl_ptr.reset();
-      }
-
-      return (*cntx)->SendOk();
-    }
-
-    uint32_t port;
-
-    if (!absl::SimpleAtoi(port_s, &port) || port < 1 || port > 65535) {
-      (*cntx)->SendError(kInvalidIntErr);
-      return;
-    }
-
-    new_replica = make_shared<Replica>(string(host), port, &service_, master_id());
-
-    if (*replica) {
-      (*replica)->Stop();  // NOTE: consider introducing update API flow.
-    } else {
-      // TODO: to disconnect all the blocked clients (pubsub, blpop etc)
+  if (absl::EqualsIgnoreCase(host, "no") && absl::EqualsIgnoreCase(port_s, "one")) {
+    if (!ServerState::tlocal()->is_master) {
+      auto repl_ptr = replica_;
+      CHECK(repl_ptr);
 
       pool.AwaitFiberOnAll(
-          [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = false; });
-    }
-    replica_.SetUnderLock(new_replica);
-
-    GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-    if (new_state != GlobalState::LOADING) {
-      LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
-      return;
+          [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = true; });
+      replica_->Stop();
+      replica_.reset();
     }
 
-    // Flushing all the data after we marked this instance as replica.
-    Transaction* transaction = cntx->transaction;
-    transaction->Schedule();
-
-    auto cb = [](Transaction* t, EngineShard* shard) {
-      shard->db_slice().FlushDb(DbSlice::kDbAll);
-      return OpStatus::OK;
-    };
-    transaction->Execute(std::move(cb), true);
-
-    // Replica sends response in either case. No need to send response in this function.
-    // It's a bit confusing but simpler.
+    return (*cntx)->SendOk();
   }
+
+  uint32_t port;
+
+  if (!absl::SimpleAtoi(port_s, &port) || port < 1 || port > 65535) {
+    (*cntx)->SendError(kInvalidIntErr);
+    return;
+  }
+
+  auto new_replica = make_shared<Replica>(string(host), port, &service_, master_id());
+
+  if (replica_) {
+    replica_->Stop();  // NOTE: consider introducing update API flow.
+  } else {
+    // TODO: to disconnect all the blocked clients (pubsub, blpop etc)
+
+    pool.AwaitFiberOnAll([&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = false; });
+  }
+  replica_ = new_replica;
+
+  GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+  if (new_state != GlobalState::LOADING) {
+    LOG(WARNING) << GlobalStateName(new_state) << " in progress, ignored";
+    return;
+  }
+
+  // Flushing all the data after we marked this instance as replica.
+  Transaction* transaction = cntx->transaction;
+  transaction->Schedule();
+
+  auto cb = [](Transaction* t, EngineShard* shard) {
+    shard->db_slice().FlushDb(DbSlice::kDbAll);
+    return OpStatus::OK;
+  };
+  transaction->Execute(std::move(cb), true);
+
+  // Replica sends response in either case. No need to send response in this function.
+  // It's a bit confusing but simpler.
+  lk.unlock();
   error_code ec = new_replica->Start(cntx);
   VLOG(1) << "Acquire replica lock";
-  {
-    auto replica = replica_.Get();
+  lk.lock();
 
-    // Since we released the replication lock during Start(..), we need to check if this still the
-    // last replicaof command we got. If it's not, then we were cancelled and just exit.
-    if (*replica == new_replica) {
-      if (ec) {
-        service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-        replica_.SetUnderLock({});
-      }
-      bool is_master = !*replica;
-      pool.AwaitFiberOnAll(
-          [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
+  // Since we released the replication lock during Start(..), we need to check if this still the
+  // last replicaof command we got. If it's not, then we were cancelled and just exit.
+  if (replica_ == new_replica) {
+    if (ec) {
+      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+      replica_.reset();
     }
+    bool is_master = !replica_;
+    pool.AwaitFiberOnAll(
+        [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
   }
 }
 
@@ -1960,8 +1965,7 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
     }
 
   } else {
-    auto replica = replica_.Get();
-    auto replica_ptr = *replica;
+    auto replica_ptr = replica_;
     CHECK(replica_ptr);
     Replica::Info rinfo = replica_ptr->GetInfo();
     (*cntx)->StartArray(4);
