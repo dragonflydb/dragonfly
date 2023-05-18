@@ -104,6 +104,8 @@ class SinkReplyBuilder {
 };
 
 class MCReplyBuilder : public SinkReplyBuilder {
+  bool noreply_;
+
  public:
   MCReplyBuilder(::io::Sink* stream);
 
@@ -121,6 +123,10 @@ class MCReplyBuilder : public SinkReplyBuilder {
   void SendClientError(std::string_view str);
   void SendNotFound();
   void SendSimpleString(std::string_view str) final;
+
+  void SetNoreply(bool noreply) {
+    noreply_ = noreply;
+  }
 };
 
 class RedisReplyBuilder : public SinkReplyBuilder {

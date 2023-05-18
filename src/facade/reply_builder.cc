@@ -105,10 +105,13 @@ void SinkReplyBuilder::SendRawVec(absl::Span<const std::string_view> msg_vec) {
   Send(arr.data(), msg_vec.size());
 }
 
-MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
+MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink), noreply_(false) {
 }
 
 void MCReplyBuilder::SendSimpleString(std::string_view str) {
+  if (noreply_)
+    return;
+
   iovec v[2] = {IoVec(str), IoVec(kCRLF)};
 
   Send(v, ABSL_ARRAYSIZE(v));

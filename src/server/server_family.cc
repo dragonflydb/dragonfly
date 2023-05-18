@@ -1249,6 +1249,7 @@ string GetPassword() {
 void ServerFamily::FlushDb(CmdArgList args, ConnectionContext* cntx) {
   DCHECK(cntx->transaction);
   Drakarys(cntx->transaction, cntx->transaction->GetDbIndex());
+
   cntx->reply_builder()->SendOk();
 }
 
