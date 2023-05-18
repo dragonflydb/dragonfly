@@ -23,6 +23,7 @@ class StreamFamily {
   static void XLen(CmdArgList args, ConnectionContext* cntx);
   static void XRevRange(CmdArgList args, ConnectionContext* cntx);
   static void XRange(CmdArgList args, ConnectionContext* cntx);
+  static void XRead(CmdArgList args, ConnectionContext* cntx);
   static void XSetId(CmdArgList args, ConnectionContext* cntx);
   static void XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext* cntx);
 };
