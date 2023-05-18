@@ -21,6 +21,7 @@ class ListenerInterface;
 
 namespace dfly {
 
+class ClusterFamily;
 class EngineShardSet;
 class ServerFamily;
 class RdbSaver;
@@ -118,7 +119,8 @@ class DflyCmd {
   };
 
  public:
-  DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family);
+  DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family,
+          ClusterFamily* cluster_family);
 
   void Run(CmdArgList args, ConnectionContext* cntx);
 
@@ -202,10 +204,12 @@ class DflyCmd {
                                 facade::RedisReplyBuilder* rb);
 
  private:
-  ServerFamily* sf_;
+  ServerFamily* sf_;  // Not owned
 
   util::ListenerInterface* listener_;
   TxId journal_txid_ = 0;
+
+  ClusterFamily* cluster_family_;  // Not owned
 
   uint32_t next_sync_id_ = 1;
 

@@ -16,6 +16,7 @@
 #include "core/json_object.h"
 #include "facade/dragonfly_connection.h"
 #include "server/cluster/cluster_config.h"
+#include "server/cluster/cluster_family.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
@@ -87,8 +88,9 @@ DflyCmd::ReplicaRoleInfo::ReplicaRoleInfo(std::string address, uint32_t listenin
   }
 }
 
-DflyCmd::DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family)
-    : sf_(server_family), listener_(listener) {
+DflyCmd::DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family,
+                 ClusterFamily* cluster_family)
+    : sf_(server_family), listener_(listener), cluster_family_(cluster_family) {
 }
 
 void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
@@ -390,7 +392,7 @@ void DflyCmd::ClusterConfig(CmdArgList args, ConnectionContext* cntx) {
     return rb->SendError("Invalid JSON cluster config", kSyntaxErrType);
   }
 
-  if (!sf_->cluster_config()->SetConfig(json.value())) {
+  if (!cluster_family_->cluster_config()->SetConfig(json.value())) {
     return rb->SendError("Invalid cluster configuration.");
   }
 
@@ -401,7 +403,7 @@ void DflyCmd::ClusterManagmentCmd(CmdArgList args, ConnectionContext* cntx) {
   if (!ClusterConfig::IsClusterEnabled()) {
     return (*cntx)->SendError("DFLY CLUSTER commands requires --cluster_mode=yes");
   }
-  CHECK_NE(sf_->cluster_config(), nullptr);
+  CHECK_NE(cluster_family_->cluster_config(), nullptr);
 
   // TODO check admin port
   ToUpper(&args[1]);
