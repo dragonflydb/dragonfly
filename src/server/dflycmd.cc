@@ -124,7 +124,7 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
     return Expire(args, cntx);
   }
 
-  if (sub_cmd == "REPLICAOFFSET" && args.size() == 2) {
+  if (sub_cmd == "REPLICAOFFSET" && args.size() == 1) {
     return ReplicaOffset(args, cntx);
   }
 
@@ -356,23 +356,14 @@ void DflyCmd::Expire(CmdArgList args, ConnectionContext* cntx) {
 
 void DflyCmd::ReplicaOffset(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  string_view sync_id_str = ArgS(args, 1);
 
-  VLOG(1) << "Got DFLY REPLICAOFFSET " << sync_id_str;
-  auto [sync_id, replica_ptr] = GetReplicaInfoOrReply(sync_id_str, rb);
-  if (!sync_id)
-    return;
+  rb->StartArray(shard_set->size());
+  std::vector<LSN> LSNs(shard_set->size());
+  shard_set->RunBriefInParallel(
+      [&](EngineShard* shard) { LSNs[shard->shard_id()] = sf_->journal()->GetLsn(); });
 
-  string result;
-  unique_lock lk(replica_ptr->mu);
-  rb->StartArray(replica_ptr->flows.size());
-  for (size_t flow_id = 0; flow_id < replica_ptr->flows.size(); ++flow_id) {
-    JournalStreamer* streamer = replica_ptr->flows[flow_id].streamer.get();
-    if (streamer) {
-      rb->SendLong(streamer->GetRecordCount());
-    } else {
-      rb->SendLong(0);
-    }
+  for (size_t flow_id = 0; flow_id < shard_set->size(); ++flow_id) {
+    rb->SendLong(LSNs[flow_id]);
   }
 }
 

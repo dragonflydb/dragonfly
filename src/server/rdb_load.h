@@ -154,6 +154,7 @@ class RdbLoaderBase {
   base::PODArray<uint8_t> compr_buf_;
   std::unique_ptr<DecompressImpl> decompress_impl_;
   JournalReader journal_reader_{nullptr, 0};
+  uint64_t journal_offset_ = 0;
 };
 
 class RdbLoader : protected RdbLoaderBase {
@@ -182,6 +183,10 @@ class RdbLoader : protected RdbLoaderBase {
   // returns time in seconds.
   double load_time() const {
     return load_time_;
+  }
+
+  uint64_t journal_offset() const {
+    return journal_offset_;
   }
 
   // Set callback for receiving RDB_OPCODE_FULLSYNC_END.

@@ -8,21 +8,16 @@ namespace dfly {
 using namespace util;
 
 void JournalStreamer::Start(io::Sink* dest) {
+  using namespace journal;
   write_fb_ = MakeFiber(&JournalStreamer::WriterFb, this, dest);
-  journal_cb_id_ =
-      journal_->RegisterOnChange([this](const journal::Entry& entry, bool allow_await) {
-        if (entry.opcode == journal::Op::NOOP) {
-          // No recode to write, just await if data was written so consumer will read the data.
-          return AwaitIfWritten();
-        }
-        writer_.Write(entry);
-        record_cnt_.fetch_add(1, std::memory_order_relaxed);
-        NotifyWritten(allow_await);
-      });
-}
-
-uint64_t JournalStreamer::GetRecordCount() const {
-  return record_cnt_.load(std::memory_order_relaxed);
+  journal_cb_id_ = journal_->RegisterOnChange([this](const Entry& entry, bool allow_await) {
+    if (entry.opcode == Op::NOOP) {
+      // No recode to write, just await if data was written so consumer will read the data.
+      return AwaitIfWritten();
+    }
+    writer_.Write(entry);
+    NotifyWritten(allow_await);
+  });
 }
 
 void JournalStreamer::Cancel() {

@@ -155,7 +155,7 @@ class RdbSerializer {
   std::error_code WriteJournalEntry(const journal::Entry& entry);
 
   // Send FULL_SYNC_CUT opcode to notify that all static data was sent.
-  std::error_code SendFullSyncCut();
+  std::error_code SendFullSyncCut(uint64_t final_version);
 
  private:
   // Prepare internal buffer for flush. Compress it.

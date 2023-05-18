@@ -123,12 +123,15 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
   }
   cb_mu_.unlock_shared();
 
+  if (entry.opcode == Op::NOOP)
+    return;
+
   // TODO: This is preparation for AOC style journaling, currently unused.
   RingItem item;
   item.lsn = lsn_;
   item.opcode = entry.opcode;
   item.txid = entry.txid;
-  VLOG(1) << "Writing item " << item.lsn;
+  VLOG(1) << "Writing item [" << item.lsn << "]: " << entry.ToString();
   ring_buffer_->EmplaceOrOverride(move(item));
 
   if (shard_file_) {

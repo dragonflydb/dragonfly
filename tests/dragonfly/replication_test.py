@@ -83,7 +83,7 @@ async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_
 
 async def check_replica_finished_exec(c_replica, c_master):
     syncid, r_offset = await c_replica.execute_command("DEBUG REPLICA OFFSET")
-    command = "DFLY REPLICAOFFSET " + syncid.decode()
+    command = "DFLY REPLICAOFFSET"
     m_offset = await c_master.execute_command(command)
 
     print("  offset", syncid.decode(),  r_offset, m_offset)

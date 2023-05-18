@@ -28,7 +28,6 @@ class JournalStreamer : protected BufferedStreamerBase {
   // Must be called on context cancellation for unblocking
   // and manual cleanup.
   void Cancel();
-  uint64_t GetRecordCount() const;
 
  private:
   // Writer fiber that steals buffer contents and writes them to dest.
@@ -42,8 +41,6 @@ class JournalStreamer : protected BufferedStreamerBase {
 
   Fiber write_fb_{};
   JournalWriter writer_{this};
-
-  std::atomic_uint64_t record_cnt_{0};
 };
 
 }  // namespace dfly

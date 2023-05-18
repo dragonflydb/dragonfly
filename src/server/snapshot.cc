@@ -150,7 +150,18 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
   }  // for (dbindex)
 
   CHECK(!serialize_bucket_running_);
-  CHECK(!serializer_->SendFullSyncCut());
+  // Is getting LSN here thread safe against the journal callbacks?
+
+  auto* journal = db_slice_->shard_owner()->journal();
+  // If we only save a snapshot we don't have a journal configured here. Might want to change
+  // this in the future so we always have LSNs, but for now we just write zeros.
+  if (journal) {
+    LOG(INFO) << "Finished IterateBucketsFb at LSN=" << journal->GetLsn();
+    CHECK(!serializer_->SendFullSyncCut(journal->GetLsn()));
+  } else {
+    CHECK(!serializer_->SendFullSyncCut(0));
+  }
+
   PushSerializedToChannel(true);
 
   // serialized + side_saved must be equal to the total saved.
@@ -259,14 +270,15 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 // OnJournalEntry registers for changes in journal, the journal change function signature is
 // (const journal::Entry& entry, bool await) In snapshot flow we dont use the await argument.
 void SliceSnapshot::OnJournalEntry(const journal::Entry& entry, bool unused_await_arg) {
-  // We ignore non payload entries like EXEC because we have no transactional ordering during
-  // LOAD phase on replica.
-  if (!entry.HasPayload()) {
+  // We ignore non payload entries because we have no transactional ordering during
+  // LOAD phase on replica, but we have to count EXEC because they affect the journal
+  // counters that have to stay synchronized in replication.
+  if (!entry.HasPayload() && entry.opcode != journal::Op::EXEC) {
     return;
   }
 
   serializer_->WriteJournalEntry(entry);
-
+  
   // This is the only place that flushes in streaming mode
   // once the iterate buckets fiber finished.
   PushSerializedToChannel(false);
