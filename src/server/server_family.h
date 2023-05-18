@@ -9,8 +9,8 @@
 #include "facade/conn_context.h"
 #include "facade/redis_parser.h"
 #include "server/channel_store.h"
-#include "server/replica.h"
 #include "server/engine_shard_set.h"
+#include "server/replica.h"
 
 namespace util {
 class AcceptServer;
