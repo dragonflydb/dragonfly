@@ -64,8 +64,8 @@ struct TransactionGuard {
 }  // namespace
 
 DflyCmd::ReplicaRoleInfo::ReplicaRoleInfo(std::string address, uint32_t listening_port,
-                                          SyncState sync_state)
-    : address(address), listening_port(listening_port) {
+                                          SyncState sync_state, uint64_t lag)
+    : address(address), listening_port(listening_port), lag(lag) {
   switch (sync_state) {
     case SyncState::PREPARATION:
       state = "preparation";
@@ -553,9 +553,12 @@ shared_ptr<DflyCmd::ReplicaInfo> DflyCmd::GetReplicaInfo(uint32_t sync_id) {
 std::vector<DflyCmd::ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() {
   std::vector<ReplicaRoleInfo> vec;
   unique_lock lk(mu_);
+
+  auto replication_lags = ReplicationLags();
+
   for (const auto& info : replica_infos_) {
     vec.emplace_back(info.second->address, info.second->listening_port,
-                     info.second->state.load(memory_order_relaxed));
+                     info.second->state.load(memory_order_relaxed), replication_lags[info.first]);
   }
   return vec;
 }
@@ -577,6 +580,39 @@ pair<uint32_t, shared_ptr<DflyCmd::ReplicaInfo>> DflyCmd::GetReplicaInfoOrReply(
   }
 
   return {sync_id, sync_it->second};
+}
+
+std::map<uint32_t, LSN> DflyCmd::ReplicationLags() const {
+  if (replica_infos_.empty())
+    return {};
+
+  // In each shard we calculate a vector of replication lags for all replicas.
+  std::vector<std::vector<uint64_t>> shard_lags(shard_set->size());
+  shard_set->RunBriefInParallel([&shard_lags, this](EngineShard* shard) {
+    auto& lags = shard_lags[shard->shard_id()];
+    lags.reserve(replica_infos_.size());
+    for (const auto& info : replica_infos_) {
+      int64_t lag = shard->journal()->GetLsn() - info.second->flows[shard->shard_id()].last_ack;
+      DCHECK(lag >= 0);
+      lags.push_back(lag);
+    }
+  });
+
+  // Then we accumulate the lags in each shard and calculate the maximal lag for each replica.
+  std::vector<uint64_t> max_lags(shard_set->size());
+  for (const auto& lags : shard_lags) {
+    std::transform(max_lags.begin(), max_lags.end(), lags.begin(), max_lags.begin(),
+                   [](uint64_t a, uint64_t b) { return std::max(a, b); });
+  }
+
+  // And map it back into a replication ID.
+  size_t i = 0;
+  std::map<uint32_t, LSN> rv;
+  for (const auto& info : replica_infos_) {
+    rv[info.first] = max_lags[i];
+    i++;
+  }
+  return rv;
 }
 
 bool DflyCmd::CheckReplicaStateOrReply(const ReplicaInfo& sync_info, SyncState expected,

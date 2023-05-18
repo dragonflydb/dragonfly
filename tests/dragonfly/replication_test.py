@@ -900,3 +900,46 @@ async def test_role_command(df_local_factory, n_keys=20):
 
     await c_master.connection_pool.disconnect()
     await c_replica.connection_pool.disconnect()
+
+
+def parse_lag(replication_info: bytes):
+    lags = re.findall(b"lag=([0-9]+)\r\n", replication_info)
+    assert len(lags) == 1
+    return int(lags[0])
+
+
+async def assert_lag_condition(client, condition):
+    for _ in range(10):
+        lag = parse_lag(await client.execute_command("info replication"))
+        if condition(lag):
+            break
+        print("current lag =", lag)
+        time.sleep(0.05)
+    else:
+        assert False, "Lag has never satisfied condition!"
+
+
+@dfly_args({"proactor_threads": 2})
+@pytest.mark.asyncio
+async def test_replication_info(df_local_factory, df_seeder_factory, n_keys=2000):
+    master = df_local_factory.create(port=BASE_PORT)
+    replica = df_local_factory.create(
+        port=BASE_PORT+1, logtostdout=True, replication_acks_interval=100)
+    df_local_factory.start_all([master, replica])
+    c_master = aioredis.Redis(port=master.port)
+    c_replica = aioredis.Redis(port=replica.port)
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+    await assert_lag_condition(c_master, lambda lag: lag == 0)
+
+    seeder = df_seeder_factory.create(port=master.port, keys=n_keys, dbcount=2)
+    fill_task = asyncio.create_task(seeder.run(target_ops=300))
+    await assert_lag_condition(c_master, lambda lag: lag > 30)
+
+    await fill_task
+    await wait_available_async(c_replica)
+    await assert_lag_condition(c_master, lambda lag: lag == 0)
+
+    await c_master.connection_pool.disconnect()
+    await c_replica.connection_pool.disconnect()
