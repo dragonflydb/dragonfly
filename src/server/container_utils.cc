@@ -6,6 +6,10 @@
 #include "base/logging.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
+#include "server/engine_shard_set.h"
+#include "server/server_state.h"
+#include "server/transaction.h"
+#include "src/facade/op_status.h"
 
 extern "C" {
 #include "redis/intset.h"
@@ -186,6 +190,128 @@ string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]) {
   uint8_t* elem = lpGet(lp_it, &ele_len, int_buf);
   DCHECK(elem);
   return std::string_view{reinterpret_cast<char*>(elem), size_t(ele_len)};
+}
+
+OpResult<ShardFFResult> FindFirstNonEmptyKey(Transaction* trans, int req_obj_type) {
+  using FFResult = std::pair<PrimeKey, unsigned>;  // key, argument index.
+  VLOG(2) << "FindFirst::Find " << trans->DebugId();
+
+  // Holds Find results: (iterator to a found key, and its index in the passed arguments).
+  // See DbSlice::FindFirst for more details.
+  // spans all the shards for now.
+  std::vector<OpResult<FFResult>> find_res(shard_set->size());
+  std::fill(find_res.begin(), find_res.end(), OpStatus::KEY_NOTFOUND);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    auto args = t->GetShardArgs(shard->shard_id());
+    OpResult<std::pair<PrimeIterator, unsigned>> ff_res =
+        shard->db_slice().FindFirst(t->GetDbContext(), args, req_obj_type);
+
+    if (ff_res) {
+      FFResult ff_result(ff_res->first->first.AsRef(), ff_res->second);
+      find_res[shard->shard_id()] = std::move(ff_result);
+    } else {
+      find_res[shard->shard_id()] = ff_res.status();
+    }
+
+    return OpStatus::OK;
+  };
+
+  trans->Execute(std::move(cb), false);
+
+  uint32_t min_arg_indx = UINT32_MAX;
+  ShardFFResult shard_result;
+
+  // We iterate over all results to find the key with the minimal arg_index
+  // after reversing the arg indexing permutation.
+  for (size_t sid = 0; sid < find_res.size(); ++sid) {
+    const auto& fr = find_res[sid];
+    auto status = fr.status();
+    if (status == OpStatus::KEY_NOTFOUND)
+      continue;
+    if (status == OpStatus::WRONG_TYPE) {
+      return status;
+    }
+    CHECK(fr);
+
+    const auto& it_pos = fr.value();
+
+    size_t arg_indx = trans->ReverseArgIndex(sid, it_pos.second);
+    if (arg_indx < min_arg_indx) {
+      min_arg_indx = arg_indx;
+      shard_result.sid = sid;
+
+      // we do not dereference the key, do not extract the string value, so it it
+      // ok to just move it. We can not dereference it due to limitations of SmallString
+      // that rely on thread-local data-structure for pointer translation.
+      shard_result.key = it_pos.first.AsRef();
+    }
+  }
+
+  if (shard_result.sid == kInvalidSid) {
+    return OpStatus::KEY_NOTFOUND;
+  }
+
+  return OpResult<ShardFFResult>{std::move(shard_result)};
+}
+
+// If OK is returned then cb was called on the first non empty key and `out_key` is set to the key.
+facade::OpStatus RunCbOnFirstNonEmptyBlocking(BlockingResultCb&& func, std::string* out_key,
+                                              Transaction* trans, int req_obj_type,
+                                              unsigned limit_ms) {
+  auto limit_tp = limit_ms ? std::chrono::steady_clock::now() + std::chrono::milliseconds(limit_ms)
+                           : Transaction::time_point::max();
+  bool is_multi = trans->IsMulti();
+  trans->Schedule();
+
+  ShardFFResult ff_result;
+  OpResult<ShardFFResult> result = FindFirstNonEmptyKey(trans, req_obj_type);
+
+  if (result.ok()) {
+    ff_result = std::move(result.value());
+  } else if (result.status() == OpStatus::KEY_NOTFOUND) {
+    // Close transaction and return.
+    if (is_multi) {
+      auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
+      trans->Execute(std::move(cb), true);
+      return OpStatus::TIMED_OUT;
+    }
+
+    auto wcb = [](Transaction* t, EngineShard* shard) {
+      return t->GetShardArgs(shard->shard_id());
+    };
+
+    VLOG(1) << "Blocking BLPOP " << trans->DebugId();
+    auto* stats = ServerState::tl_connection_stats();
+    ++stats->num_blocked_clients;
+    bool wait_succeeded = trans->WaitOnWatch(limit_tp, std::move(wcb));
+    --stats->num_blocked_clients;
+
+    if (!wait_succeeded)
+      return OpStatus::TIMED_OUT;
+  } else {
+    // Could be the wrong-type error.
+    // cleanups, locks removal etc.
+    auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
+    trans->Execute(std::move(cb), true);
+
+    DCHECK_NE(result.status(), OpStatus::KEY_NOTFOUND);
+    return result.status();
+  }
+
+  auto cb = [&func, &ff_result, out_key](Transaction* t, EngineShard* shard) {
+    if (auto wake_key = t->GetWakeKey(shard->shard_id()); wake_key) {
+      *out_key = *wake_key;
+      func(t, shard, *out_key);
+    } else if (shard->shard_id() == ff_result.sid) {
+      ff_result.key.GetString(out_key);
+      func(t, shard, *out_key);
+    }
+    return OpStatus::OK;
+  };
+  trans->Execute(std::move(cb), true);
+
+  return OpStatus::OK;
 }
 
 }  // namespace dfly::container_utils

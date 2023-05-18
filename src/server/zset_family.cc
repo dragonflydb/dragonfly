@@ -19,7 +19,6 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
-#include "server/multi_key_blocking.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -1172,19 +1171,21 @@ void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
   VLOG(1) << "BZPop timeout(" << timeout << ")";
 
   Transaction* transaction = cntx->transaction;
-  MKBlocking<ZSetFamily::ScoredArray> popper(
-      [is_max](Transaction* t, EngineShard* shard, std::string_view key) {
-        return OpBZPop(t, shard, key, is_max);
-      });
-  OpStatus result = popper.Run(transaction, OBJ_ZSET, unsigned(timeout * 1000));
+  std::string popped_key;
+  OpResult<ZSetFamily::ScoredArray> popped_array;
+  OpStatus result = container_utils::RunCbOnFirstNonEmptyBlocking(
+      [is_max, &popped_array](Transaction* t, EngineShard* shard, std::string_view key) {
+        popped_array = OpBZPop(t, shard, key, is_max);
+      },
+      &popped_key, transaction, OBJ_ZSET, unsigned(timeout * 1000));
 
   if (result == OpStatus::OK) {
-    DVLOG(1) << "BZPop " << transaction->DebugId() << " popped from key " << popper.Key();  // key.
-    CHECK(popper.Result().size() == 1);
+    DVLOG(1) << "BZPop " << transaction->DebugId() << " popped from key " << popped_key;  // key.
+    CHECK(popped_array->size() == 1);
     (*cntx)->StartArray(3);
-    (*cntx)->SendBulkString(popper.Key());
-    (*cntx)->SendBulkString(popper.Result()[0].first);
-    return (*cntx)->SendDouble(popper.Result()[0].second);
+    (*cntx)->SendBulkString(popped_key);
+    (*cntx)->SendBulkString(popped_array->front().first);
+    return (*cntx)->SendDouble(popped_array->front().second);
   }
 
   DVLOG(1) << "result for " << transaction->DebugId() << " is " << result;

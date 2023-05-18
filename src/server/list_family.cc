@@ -18,7 +18,6 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
-#include "server/multi_key_blocking.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
 
@@ -1152,14 +1151,17 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
   VLOG(1) << "BPop timeout(" << timeout << ")";
 
   Transaction* transaction = cntx->transaction;
-  MKBlocking<std::string> popper([dir](Transaction* t, EngineShard* shard, std::string_view key) {
-    return OpBPop(t, shard, key, dir);
-  });
-  OpStatus result = popper.Run(transaction, OBJ_LIST, unsigned(timeout * 1000));
+  std::string popped_key;
+  std::string popped_value;
+  OpStatus result = container_utils::RunCbOnFirstNonEmptyBlocking(
+      [dir, &popped_value](Transaction* t, EngineShard* shard, std::string_view key) {
+        popped_value = OpBPop(t, shard, key, dir);
+      },
+      &popped_key, transaction, OBJ_LIST, unsigned(timeout * 1000));
 
   if (result == OpStatus::OK) {
-    DVLOG(1) << "BPop " << transaction->DebugId() << " popped from key " << popper.Key();  // key.
-    std::string_view str_arr[2] = {popper.Key(), popper.Result()};
+    DVLOG(1) << "BPop " << transaction->DebugId() << " popped from key " << popped_key;  // key.
+    std::string_view str_arr[2] = {popped_key, popped_value};
     return (*cntx)->SendStringArr(str_arr);
   }
 
