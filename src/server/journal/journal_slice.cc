@@ -43,6 +43,10 @@ JournalSlice::JournalSlice() {
 
 JournalSlice::~JournalSlice() {
   CHECK(!shard_file_);
+
+  pings_done_.Notify();
+  if (pings_fb_.IsJoinable())
+    pings_fb_.Join();
 }
 
 void JournalSlice::Init(unsigned index) {
@@ -51,6 +55,7 @@ void JournalSlice::Init(unsigned index) {
 
   slice_index_ = index;
   ring_buffer_.emplace(128);  // TODO: to make it configurable
+  pings_fb_ = MakeFiber(&JournalSlice::PingsLoop, this, 3000ms);
 }
 
 std::error_code JournalSlice::Open(std::string_view dir) {
@@ -158,6 +163,23 @@ void JournalSlice::UnregisterOnChange(uint32_t id) {
                     [id](const auto& e) { return e.first == id; });
   CHECK(it != change_cb_arr_.end());
   change_cb_arr_.erase(it);
+}
+
+void JournalSlice::PingsLoop(std::chrono::milliseconds period_ms) {
+  std::string command = "PING";
+  MutableSlice slice{command};
+  CmdArgList args{&slice, 1};
+  Entry::Payload payload = std::make_pair(command, args);
+  Entry entry(/*txid=*/0, Op::COMMAND, /*dbid=*/0,
+              /*shard_cnt=*/1, payload);
+  while (!lameduck_) {
+    VLOG(1) << "Sending PING to journal writer.";
+    AddLogRecord(entry, true);
+    if (pings_done_.WaitFor(period_ms)) {
+      VLOG(1) << "Finished running periodic acks";
+      return;
+    }
+  }
 }
 
 }  // namespace journal

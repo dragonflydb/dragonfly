@@ -18,6 +18,7 @@ namespace dfly {
 class EngineShardSet;
 class ConnectionContext;
 class ChannelStore;
+class FlowInfo;
 
 // Stores command id and arguments for delayed invocation.
 // Used for storing MULTI/EXEC commands.
@@ -172,7 +173,10 @@ class ConnectionContext : public facade::ConnectionContext {
   void PUnsubscribeAll(bool to_reply);
   void ChangeMonitor(bool start);  // either start or stop monitor on a given connection
 
+  // Whether this connection is a connection from a replica to its master.
   bool is_replicating = false;
+  // Reference to a FlowInfo for this connection if from a master to a replica.
+  FlowInfo* replication_flow;
   bool monitor = false;  // when a monitor command is sent over a given connection, we need to aware
                          // of it as a state for the connection
 

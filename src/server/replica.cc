@@ -934,6 +934,10 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
 
   JournalReader reader{&ps, 0};
   TransactionReader tx_reader{};
+  std::string ack_cmd;
+  time_t last_ack = 0;
+  ReqSerializer serializer{sock_.get()};
+
   while (!cntx->IsCancelled()) {
     waker_.await([&]() {
       return ((trans_data_queue_.size() < kYieldAfterItemsInQueue) || cntx->IsCancelled());
@@ -951,6 +955,18 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
       InsertTxDataToShardResource(std::move(*tx_data));
     } else {
       ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
+    }
+
+    // Handle ACKs with the master. PING commands from the master mean we should immediately
+    // answer.
+    uint64_t current_offset = journal_rec_executed_.load(std::memory_order_relaxed);
+    bool force_ack =
+        !tx_data->commands.empty() && ToSV(tx_data->commands.front().cmd_args[0]) == "PING";
+    if (force_ack || current_offset > ack_offs_ + 1024 || time(nullptr) > last_ack + 1) {
+      ack_cmd = absl::StrCat("REPLCONF ACK ", current_offset);
+      last_ack = time(nullptr);
+      ack_offs_ = current_offset;
+      CHECK(!SendCommand(ack_cmd, &serializer));
     }
 
     waker_.notify();
