@@ -464,8 +464,12 @@ void DflyCmd::ClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx) {
 
 OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
   DCHECK(!flow->full_sync_fb.IsJoinable());
+  DCHECK(shard);
 
-  SaveMode save_mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
+  // The summary contains the LUA scripts, so make sure at least (and exactly one)
+  // of the flows also contain them.
+  SaveMode save_mode =
+      shard->shard_id() == 0 ? SaveMode::SINGLE_SHARD_WITH_SUMMARY : SaveMode::SINGLE_SHARD;
   flow->saver.reset(new RdbSaver(flow->conn->socket(), save_mode, false));
 
   flow->cleanup = [flow]() {
@@ -522,7 +526,7 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
   error_code ec;
   RdbSaver* saver = flow->saver.get();
 
-  if (saver->Mode() == SaveMode::SUMMARY) {
+  if (saver->Mode() == SaveMode::SUMMARY || saver->Mode() == SaveMode::SINGLE_SHARD_WITH_SUMMARY) {
     auto scripts = sf_->script_mgr()->GetAll();
     StringVec script_bodies;
     for (auto& [sha, data] : scripts) {
