@@ -971,8 +971,6 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     }
   }
 
-  dfly_cntx->conn_state.memcache_noreply = cmd.no_reply;
-
   DispatchCommand(CmdArgList{args}, cntx);
 
   // Reset back.

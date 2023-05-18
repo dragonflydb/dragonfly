@@ -128,7 +128,6 @@ struct ConnectionState {
   // For set op - it's the flag value we are storing along with the value.
   // For get op - we use it as a mask of MCGetMask values.
   uint32_t memcache_flag = 0;
-  bool memcache_noreply = false;
 
   ExecInfo exec_info;
   ReplicationInfo replicaiton_info;

@@ -654,9 +654,6 @@ void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
 
   uint32_t del_cnt = result.load(memory_order_relaxed);
   if (is_mc) {
-    if (cntx->conn_state.memcache_noreply)
-      return;
-
     using facade::MCReplyBuilder;
     MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
 

@@ -668,14 +668,6 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
 
-  bool noreply = false;  // Redis always replies, default that.
-  if (cntx->protocol() == Protocol::MEMCACHE)
-    noreply = cntx->conn_state.memcache_noreply;
-  if (noreply)
-    LOG(INFO) << "noreply == true, not replying.";
-  else
-    LOG(INFO) << "noreply == false, replying.";
-
   SetCmd::SetParams sparams;
   sparams.memcache_flags = cntx->conn_state.memcache_flag;
 
@@ -713,9 +705,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
         int_arg = AbsExpiryToTtl(int_arg, is_ms);
         if (int_arg < 0) {
           // this happened in the past, just return, for some reason Redis reports OK in this case
-          if (!noreply)
-            builder->SendStored();
-          return;
+          return builder->SendStored();
         }
       }
       if (!is_ms && int_arg >= kMaxExpireDeadlineSec) {
@@ -755,9 +745,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (result == OpStatus::OK) {
-    if (!noreply)
-      builder->SendStored();
-    return;
+    return builder->SendStored();
   }
 
   if (result == OpStatus::OUT_OF_MEMORY) {
@@ -766,10 +754,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
 
   CHECK_EQ(result, OpStatus::SKIPPED);  // in case of NX option
 
-  if (!noreply)
-    builder->SendSetSkipped();
-
-  return;
+  builder->SendSetSkipped();
 }
 
 void StringFamily::SetEx(CmdArgList args, ConnectionContext* cntx) {
@@ -1015,12 +1000,10 @@ void StringFamily::DecrBy(CmdArgList args, ConnectionContext* cntx) {
   string_view sval = ArgS(args, 1);
   int64_t val;
 
-  bool noreply = cntx->protocol() == Protocol::MEMCACHE && cntx->conn_state.memcache_noreply;
-
-  if (!absl::SimpleAtoi(sval, &val) && !noreply) {
+  if (!absl::SimpleAtoi(sval, &val)) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
-  if (val == INT64_MIN && !noreply) {
+  if (val == INT64_MIN) {
     return (*cntx)->SendError(kIncrOverflow);
   }
 
@@ -1047,9 +1030,6 @@ void StringFamily::IncrByGeneric(string_view key, int64_t val, ConnectionContext
   auto* builder = cntx->reply_builder();
 
   DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
-
-  if (skip_on_missing && cntx->conn_state.memcache_noreply)
-    return;
 
   switch (result.status()) {
     case OpStatus::OK:
@@ -1094,9 +1074,6 @@ void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContex
 
   OpResult<bool> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   SinkReplyBuilder* builder = cntx->reply_builder();
-
-  if (cntx->conn_state.memcache_noreply)
-    return;
 
   if (result.value_or(false)) {
     return builder->SendStored();
