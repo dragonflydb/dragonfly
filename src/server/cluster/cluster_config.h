@@ -63,7 +63,7 @@ class ClusterConfig {
 
   ClusterShards GetConfig() const;
 
-  // Returns Deleted slots set if `new_config` is valid and internal state was changed. Returns
+  // Returns deleted slot set if `new_config` is valid and internal state was changed. Returns
   // nullopt and changes nothing otherwise.
   std::optional<SlotSet> SetConfig(const ClusterShards& new_config);
 

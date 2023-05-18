@@ -12,6 +12,7 @@
 #include "base/logging.h"
 
 using namespace std;
+using namespace testing;
 using Node = dfly::ClusterConfig::Node;
 
 namespace dfly {
@@ -138,7 +139,7 @@ TEST_F(ClusterConfigTest, ConfigSetGetDeletedSlots) {
                           .master = {.id = "other-master2", .ip = "192.168.0.104", .port = 7004},
                           .replicas = {}}});
 
-  EXPECT_TRUE(ds);
+  EXPECT_TRUE(ds.has_value());
   EXPECT_TRUE(ds.value().empty());  // On first config set no deleted slots.
 
   ds = config_.SetConfig({{.slot_ranges = {{.start = 0, .end = 6'000}},
@@ -151,7 +152,7 @@ TEST_F(ClusterConfigTest, ConfigSetGetDeletedSlots) {
                            .master = {.id = "other-master2", .ip = "192.168.0.104", .port = 7004},
                            .replicas = {}}});
 
-  EXPECT_TRUE(ds);
+  EXPECT_TRUE(ds.has_value());
   EXPECT_TRUE(ds.value().empty());  // On second config no slots taken from ownership
 
   ds = config_.SetConfig({{.slot_ranges = {{.start = 0, .end = 5'997}},
@@ -164,11 +165,8 @@ TEST_F(ClusterConfigTest, ConfigSetGetDeletedSlots) {
                            .master = {.id = "other-master2", .ip = "192.168.0.104", .port = 7004},
                            .replicas = {}}});
 
-  EXPECT_TRUE(ds);
-  EXPECT_FALSE(ds.value().empty());
-  EXPECT_TRUE(ds.value().contains(5'998));
-  EXPECT_TRUE(ds.value().contains(5'999));
-  EXPECT_TRUE(ds.value().contains(6'000));
+  EXPECT_TRUE(ds.has_value());
+  EXPECT_THAT(ds.value(), UnorderedElementsAre(5'998, 5'999, 6'000));
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidSlotRanges) {
