@@ -602,7 +602,6 @@ auto Connection::ParseMemcache() -> ParserStatus {
   MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(cc_->reply_builder());
 
   do {
-    builder->SetNoreply(false);
     string_view str = ToSV(io_buf_.InputBuffer());
     result = memcache_parser_->Parse(str, &consumed, &cmd);
 
@@ -628,7 +627,6 @@ auto Connection::ParseMemcache() -> ParserStatus {
     // fiber enters the condition below and executes out of order.
     bool is_sync_dispatch = !cc_->async_dispatch;
     if (dispatch_q_.empty() && is_sync_dispatch) {
-      builder->SetNoreply(cmd.no_reply);
       service_->DispatchMC(cmd, value, cc_.get());
     }
     io_buf_.ConsumeInput(total_len);

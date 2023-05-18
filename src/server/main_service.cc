@@ -887,6 +887,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
   char ttl_op[] = "EX";
 
   MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
+  mc_builder->SetNoreply(cmd.no_reply);
 
   switch (cmd.type) {
     case MemcacheParser::REPLACE:
