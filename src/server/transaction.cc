@@ -1383,11 +1383,30 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
   if (cid->opt_mask() & CO::VARIADIC_KEYS) {
     // ZUNION/INTER <num_keys> <key1> [<key2> ...]
     // EVAL <script> <num_keys>
+    // XREAD ... STREAMS ...
     if (args.size() < 2) {
       return OpStatus::SYNTAX_ERR;
     }
 
     string_view name{cid->name()};
+
+    if (name == "XREAD") {
+      for (size_t i = 0; i < args.size(); ++i) {
+        string_view arg = ArgS(args, i);
+        if (absl::EqualsIgnoreCase(arg, "STREAMS")) {
+          size_t left = args.size() - i - 1;
+          if (left < 2 || left % 2 != 0)
+            return OpStatus::SYNTAX_ERR;
+
+          key_index.start = i + 1;
+          key_index.end = key_index.start + (left / 2);
+          key_index.step = 1;
+
+          return key_index;
+        }
+      }
+      return OpStatus::SYNTAX_ERR;
+    }
 
     if (absl::EndsWith(name, "STORE"))
       key_index.bonus = 0;  // Z<xxx>STORE <key> commands

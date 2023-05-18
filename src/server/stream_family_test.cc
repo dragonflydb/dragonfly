@@ -170,7 +170,7 @@ TEST_F(StreamFamilyTest, XReadInvalidArgs) {
 
   // Missing STREAMS.
   resp = Run({"xread", "count", "5"});
-  EXPECT_THAT(resp, ErrArg("wrong number of arguments for 'xread' command"));
+  EXPECT_THAT(resp, ErrArg("syntax error"));
 
   // Unbalanced list of streams.
   resp = Run({"xread", "count", "invalid", "streams", "s1", "s2", "s3", "0", "0"});
