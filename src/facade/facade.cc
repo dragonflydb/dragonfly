@@ -6,10 +6,10 @@
 #include <absl/strings/str_cat.h>
 
 #include "base/logging.h"
+#include "facade/command_id.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
-#include "facade/facade_types.h"
 
 namespace facade {
 
@@ -128,6 +128,16 @@ RedisReplyBuilder* ConnectionContext::operator->() {
   CHECK(Protocol::REDIS == protocol());
 
   return static_cast<RedisReplyBuilder*>(rbuilder_.get());
+}
+
+CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
+                     int8_t last_key, int8_t step)
+    : name_(name), opt_mask_(mask), arity_(arity), first_key_(first_key), last_key_(last_key),
+      step_key_(step) {
+}
+
+uint32_t CommandId::OptCount(uint32_t mask) {
+  return absl::popcount(mask);
 }
 
 }  // namespace facade

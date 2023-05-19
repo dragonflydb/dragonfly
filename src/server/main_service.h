@@ -108,6 +108,8 @@ class Service : public facade::ServiceInterface {
   void Function(CmdArgList args, ConnectionContext* cntx);
   void Monitor(CmdArgList args, ConnectionContext* cntx);
   void Pubsub(CmdArgList args, ConnectionContext* cntx);
+  void Command(CmdArgList args, ConnectionContext* cntx);
+
   void PubsubChannels(std::string_view pattern, ConnectionContext* cntx);
   void PubsubPatterns(ConnectionContext* cntx);
 
