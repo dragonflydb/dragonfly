@@ -450,6 +450,58 @@ TEST_F(DflyEngineTest, PUnsubscribe) {
   EXPECT_THAT(resp.GetVec(), ElementsAre("punsubscribe", "b*", IntArg(0)));
 }
 
+TEST_F(DflyEngineTest, SubscribeInMulti) {
+  Run({"multi"});
+  for (unsigned i = 0; i < 10; i++) {
+    Run({"set", "a", "1"});
+    string chan = "ch" + to_string(i);
+    Run({"subscribe", chan});
+  }
+  auto resp = Run({"exec"});
+
+  // Make sure subscribe responses are ordered correctly
+  for (unsigned i = 0; i < 10; i++) {
+    EXPECT_EQ(resp.GetVec()[2 * i], "OK");
+    string chan = "ch" + to_string(i);
+    EXPECT_THAT(resp.GetVec()[2 * i + 1].GetVec(), ElementsAre("subscribe", chan, IntArg(i + 1)));
+  }
+}
+
+TEST_F(DflyEngineTest, SubscribeInMultiWithStream) {
+  atomic_bool done = false;
+
+  auto f = pp_->at(1)->LaunchFiber([&] {
+    while (!done.load()) {
+      ThisFiber::Yield();
+      Run({"publish", "foo", "bar"});
+    }
+  });
+
+  for (unsigned i = 0; i < 10; i++) {
+    Run({"multi"});
+    Run({"set", "a", "1"});
+    Run({"subscribe", "foo"});
+    for (unsigned j = 0; j < 100; j++)
+      Run({"get", "a"});
+    auto resp = Run({"exec"});
+
+    // Make sure no messages from publish got into the MULTI/EXEC response
+    EXPECT_EQ(resp.GetVec()[0], "OK");
+    EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("subscribe", "foo", IntArg(1)));
+    for (unsigned j = 0; j < 100; j++)
+      EXPECT_EQ(resp.GetVec()[2 + j], "1");
+
+    ThisFiber::Yield();
+
+    Run({"unsubscribe", "foo"});
+  }
+
+  EXPECT_GT(SubscriberMessagesLen("IO0"), 0) << "Weak test";
+
+  done = true;
+  f.Join();
+}
+
 TEST_F(DflyEngineTest, Bug468) {
   RespExpr resp = Run({"multi"});
   ASSERT_EQ(resp, "OK");

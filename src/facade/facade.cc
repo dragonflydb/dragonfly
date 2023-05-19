@@ -115,13 +115,15 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : ow
       break;
   }
 
-  async_dispatch = false;
   conn_closing = false;
   req_auth = false;
   replica_conn = false;
   authenticated = false;
-  force_dispatch = false;
+  async_dispatch = false;
+  sync_dispatch = false;
   journal_emulated = false;
+
+  subscriptions = 0;
 }
 
 RedisReplyBuilder* ConnectionContext::operator->() {

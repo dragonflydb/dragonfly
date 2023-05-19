@@ -23,7 +23,7 @@ class TestConnection : public facade::Connection {
 
   void SendPubMessageAsync(PubMessage pmsg) final;
 
-  std::vector<PubMessage::MessageData> messages;
+  std::vector<PubMessage> messages;
 
  private:
   io::StringSink* sink_;
@@ -87,8 +87,8 @@ class BaseFamilyTest : public ::testing::Test {
   std::string GetId() const;
   size_t SubscriberMessagesLen(std::string_view conn_id) const;
 
-  const facade::Connection::PubMessage::MessageData& GetPublishedMessage(std::string_view conn_id,
-                                                                         size_t index) const;
+  const facade::Connection::PubMessage& GetPublishedMessage(std::string_view conn_id,
+                                                            size_t index) const;
 
   static unsigned NumLocked();
 

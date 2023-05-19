@@ -105,7 +105,7 @@ vector<unsigned> ChangeSubscriptions(bool pattern, CmdArgList args, bool to_add,
     DCHECK(to_add);
 
     conn_state.subscribe_info.reset(new ConnectionState::SubscribeInfo);
-    conn->force_dispatch = true;  // to be able to read input and still write the output.
+    conn->subscriptions++;
   }
 
   auto& sinfo = *conn->conn_state.subscribe_info.get();
@@ -134,7 +134,7 @@ vector<unsigned> ChangeSubscriptions(bool pattern, CmdArgList args, bool to_add,
   // removed.
   if (!to_add && conn_state.subscribe_info->IsEmpty()) {
     conn_state.subscribe_info.reset();
-    conn->force_dispatch = false;
+    conn->subscriptions--;
   }
 
   return result;
@@ -145,7 +145,11 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
 
   if (to_reply) {
     for (size_t i = 0; i < result.size(); ++i) {
-      owner()->SendPubMessageAsync({to_add, ArgS(args, i), result[i]});
+      const char* action[2] = {"unsubscribe", "subscribe"};
+      (*this)->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
+      (*this)->SendBulkString(action[to_add]);
+      (*this)->SendBulkString(ArgS(args, i));
+      (*this)->SendLong(result[i]);
     }
   }
 }
