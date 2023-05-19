@@ -19,15 +19,9 @@ using namespace std;
 using namespace util;
 using namespace facade;
 
-#ifdef USE_FB2
 using Proactor = fb2::UringProactor;
 using fb2::ProactorBase;
 using fb2::SubmitEntry;
-
-#else
-using uring::Proactor;
-using uring::SubmitEntry;
-#endif
 
 namespace {
 

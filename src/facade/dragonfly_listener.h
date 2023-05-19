@@ -25,12 +25,12 @@ class Listener : public util::ListenerInterface {
   std::error_code ConfigureServerSocket(int fd) final;
 
  private:
-  util::Connection* NewConnection(util::ProactorBase* proactor) final;
-  util::ProactorBase* PickConnectionProactor(util::LinuxSocketBase* sock) final;
+  util::Connection* NewConnection(ProactorBase* proactor) final;
+  ProactorBase* PickConnectionProactor(util::LinuxSocketBase* sock) final;
 
   void OnConnectionStart(util::Connection* conn) final;
   void OnConnectionClose(util::Connection* conn) final;
-  void PreAcceptLoop(util::ProactorBase* pb) final;
+  void PreAcceptLoop(ProactorBase* pb) final;
 
   void PreShutdown() final;
 
