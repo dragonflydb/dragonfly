@@ -21,6 +21,7 @@ class ListenerInterface;
 
 namespace dfly {
 
+class ClusterFamily;
 class EngineShardSet;
 class ServerFamily;
 class RdbSaver;
@@ -45,7 +46,7 @@ class JournalStreamer;
 //    access.
 //
 // Upon first connection from the replica, a new ReplicaInfo is created.
-// It tranistions through the following phases:
+// It transitions through the following phases:
 //  1. Preparation
 //    During this start phase the "flows" are set up - one connection for every master thread. Those
 //    connections registered by the FLOW command sent from each newly opened connection.
@@ -118,7 +119,8 @@ class DflyCmd {
   };
 
  public:
-  DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family);
+  DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family,
+          ClusterFamily* cluster_family);
 
   void Run(CmdArgList args, ConnectionContext* cntx);
 
@@ -130,7 +132,7 @@ class DflyCmd {
   void Shutdown();
 
   // Create new sync session.
-  uint32_t CreateSyncSession(ConnectionContext* cntx);
+  std::pair<uint32_t, std::shared_ptr<ReplicaInfo>> CreateSyncSession(ConnectionContext* cntx);
 
   std::vector<ReplicaRoleInfo> GetReplicasRoleInfo();
 
@@ -163,6 +165,15 @@ class DflyCmd {
   // Return journal records num sent for each flow of replication.
   void ReplicaOffset(CmdArgList args, ConnectionContext* cntx);
 
+  // Runs DFLY CLUSTER sub commands
+  void ClusterManagmentCmd(CmdArgList args, ConnectionContext* cntx);
+
+  // CLUSTER GETSLOTINFO command
+  void ClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx);
+
+  // CLUSTER CONFIG command
+  void ClusterConfig(CmdArgList args, ConnectionContext* cntx);
+
   // Start full sync in thread. Start FullSyncFb. Called for each flow.
   facade::OpStatus StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard);
 
@@ -193,10 +204,12 @@ class DflyCmd {
                                 facade::RedisReplyBuilder* rb);
 
  private:
-  ServerFamily* sf_;
+  ServerFamily* sf_;  // Not owned
 
   util::ListenerInterface* listener_;
   TxId journal_txid_ = 0;
+
+  ClusterFamily* cluster_family_;  // Not owned
 
   uint32_t next_sync_id_ = 1;
 

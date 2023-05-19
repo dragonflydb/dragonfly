@@ -58,9 +58,11 @@ class AlignedBuffer : public ::io::Sink {
 
 // SaveMode for snapshot. Used by RdbSaver to adjust internals.
 enum class SaveMode {
-  SUMMARY,       // Save only header values (summary.dfs). Expected to read no shards.
-  SINGLE_SHARD,  // Save single shard values (XXXX.dfs). Expected to read one shard.
-  RDB,           // Save .rdb file. Expected to read all shards.
+  SUMMARY,                    // Save only header values (summary.dfs). Expected to read no shards.
+  SINGLE_SHARD,               // Save single shard values (XXXX.dfs). Expected to read one shard.
+  SINGLE_SHARD_WITH_SUMMARY,  // Save single shard value with the global summary. Used in the
+                              // replication's fully sync stage.
+  RDB,                        // Save .rdb file. Expected to read all shards.
 };
 
 enum class CompressionMode { NONE, SINGLE_ENTRY, MULTY_ENTRY_ZSTD, MULTY_ENTRY_LZ4 };

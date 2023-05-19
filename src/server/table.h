@@ -11,6 +11,7 @@
 
 #include "core/expire_period.h"
 #include "core/intent_lock.h"
+#include "server/cluster/cluster_config.h"
 #include "server/conn_context.h"
 #include "server/detail/table.h"
 #include "server/top_keys.h"
@@ -35,6 +36,11 @@ inline bool IsValid(PrimeIterator it) {
 inline bool IsValid(ExpireIterator it) {
   return !it.is_done();
 }
+
+struct SlotStats {
+  uint64_t key_count = 0;
+  SlotStats& operator+=(const SlotStats& o);
+};
 
 struct DbTableStats {
   // Number of inline keys.
@@ -70,6 +76,7 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   absl::flat_hash_map<std::string, std::vector<ConnectionState::ExecInfo*>> watched_keys;
 
   mutable DbTableStats stats;
+  std::vector<SlotStats> slots_stats;
   ExpireTable::Cursor expire_cursor;
   PrimeTable::Cursor prime_cursor;
 

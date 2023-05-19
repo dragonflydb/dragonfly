@@ -686,7 +686,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       bool is_ms = (cur_arg == "PX" || cur_arg == "PXAT");
       ++i;
       if (i == args.size()) {
-        builder->SendError(kSyntaxErr);
+        return builder->SendError(kSyntaxErr);
       }
 
       string_view ex = ArgS(args, i);
@@ -754,7 +754,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
 
   CHECK_EQ(result, OpStatus::SKIPPED);  // in case of NX option
 
-  return builder->SendSetSkipped();
+  builder->SendSetSkipped();
 }
 
 void StringFamily::SetEx(CmdArgList args, ConnectionContext* cntx) {
@@ -1030,6 +1030,7 @@ void StringFamily::IncrByGeneric(string_view key, int64_t val, ConnectionContext
   auto* builder = cntx->reply_builder();
 
   DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
+
   switch (result.status()) {
     case OpStatus::OK:
       builder->SendLong(result.value());
@@ -1073,6 +1074,7 @@ void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContex
 
   OpResult<bool> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   SinkReplyBuilder* builder = cntx->reply_builder();
+
   if (result.value_or(false)) {
     return builder->SendStored();
   }

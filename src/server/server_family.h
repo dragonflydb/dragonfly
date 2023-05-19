@@ -9,8 +9,8 @@
 #include "facade/conn_context.h"
 #include "facade/redis_parser.h"
 #include "server/channel_store.h"
-#include "server/cluster/cluster_config.h"
 #include "server/engine_shard_set.h"
+#include "server/replica.h"
 
 namespace util {
 class AcceptServer;
@@ -31,11 +31,11 @@ namespace journal {
 class Journal;
 }  // namespace journal
 
+class ClusterFamily;
 class ConnectionContext;
 class CommandRegistry;
 class DflyCmd;
 class Service;
-class Replica;
 class ScriptMgr;
 
 struct Metrics {
@@ -75,10 +75,11 @@ struct ReplicaOffsetInfo {
 
 class ServerFamily {
  public:
-  ServerFamily(Service* service);
+  explicit ServerFamily(Service* service);
   ~ServerFamily();
 
-  void Init(util::AcceptServer* acceptor, util::ListenerInterface* main_listener);
+  void Init(util::AcceptServer* acceptor, util::ListenerInterface* main_listener,
+            ClusterFamily* cluster_family);
   void Register(CommandRegistry* registry);
   void Shutdown();
 
@@ -90,10 +91,6 @@ class ServerFamily {
 
   ScriptMgr* script_mgr() {
     return script_mgr_.get();
-  }
-
-  ClusterConfig* cluster_config() {
-    return cluster_config_.get();
   }
 
   void StatsMC(std::string_view section, facade::ConnectionContext* cntx);
@@ -134,6 +131,14 @@ class ServerFamily {
     return journal_.get();
   }
 
+  DflyCmd* GetDflyCmd() const {
+    return dfly_cmd_.get();
+  }
+
+  bool HasReplica() const;
+  Replica::Info GetReplicaInfo() const;
+  std::string GetReplicaMasterId() const;
+
   void OnClose(ConnectionContext* cntx);
 
   void BreakOnShutdown();
@@ -143,11 +148,8 @@ class ServerFamily {
     return shard_set->size();
   }
 
-  std::string BuildClusterNodeReply(ConnectionContext* cntx) const;
-
   void Auth(CmdArgList args, ConnectionContext* cntx);
   void Client(CmdArgList args, ConnectionContext* cntx);
-  void Cluster(CmdArgList args, ConnectionContext* cntx);
   void Config(CmdArgList args, ConnectionContext* cntx);
   void DbSize(CmdArgList args, ConnectionContext* cntx);
   void Debug(CmdArgList args, ConnectionContext* cntx);
@@ -160,7 +162,6 @@ class ServerFamily {
   void LastSave(CmdArgList args, ConnectionContext* cntx);
   void Latency(CmdArgList args, ConnectionContext* cntx);
   void Psync(CmdArgList args, ConnectionContext* cntx);
-  void ReadOnly(CmdArgList args, ConnectionContext* cntx);
   void ReplicaOf(CmdArgList args, ConnectionContext* cntx);
   void ReplConf(CmdArgList args, ConnectionContext* cntx);
   void Role(CmdArgList args, ConnectionContext* cntx);
@@ -187,18 +188,16 @@ class ServerFamily {
   util::ProactorBase* pb_task_ = nullptr;
 
   mutable Mutex replicaof_mu_, save_mu_;
-  std::shared_ptr<Replica> replica_;  // protected by replica_of_mu_
+  std::shared_ptr<Replica> replica_ ABSL_GUARDED_BY(replicaof_mu_);
 
   std::unique_ptr<ScriptMgr> script_mgr_;
   std::unique_ptr<journal::Journal> journal_;
   std::unique_ptr<DflyCmd> dfly_cmd_;
+  ClusterFamily* cluster_family_ = nullptr;  // Not owned
 
   std::string master_id_;
 
   time_t start_time_ = 0;  // in seconds, epoch time.
-  bool is_emulated_cluster_ = false;
-
-  std::unique_ptr<ClusterConfig> cluster_config_;
 
   std::shared_ptr<LastSaveInfo> last_save_info_;  // protected by save_mu_;
   std::atomic_bool is_saving_{false};

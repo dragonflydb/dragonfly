@@ -39,6 +39,12 @@ TEST_F(StreamFamilyTest, Add) {
 
   resp = Run({"xadd", "key", "badid", "f1", "val1"});
   EXPECT_THAT(resp, ErrArg("Invalid stream ID"));
+
+  resp = Run({"xadd", "key", "nomkstream", "*", "field2", "value2"});
+  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
+
+  resp = Run({"xadd", "noexist", "nomkstream", "*", "field", "value"});
+  EXPECT_THAT(resp, ErrArg("no such key"));
 }
 
 TEST_F(StreamFamilyTest, AddExtended) {
@@ -62,6 +68,24 @@ TEST_F(StreamFamilyTest, AddExtended) {
 
   auto resp3 = Run({"xadd", "key", id2, "f1", "val1"});
   EXPECT_THAT(resp3, ErrArg("equal or smaller than"));
+
+  Run({"xadd", "key2", "5-0", "field", "val"});
+  Run({"xadd", "key2", "6-0", "field1", "val1"});
+  Run({"xadd", "key2", "7-0", "field2", "val2"});
+  auto resp = Run({"xadd", "key2", "minid", "6", "*", "field3", "val3"});
+  EXPECT_THAT(Run({"xlen", "key2"}), IntArg(3));
+  EXPECT_THAT(Run({"xrange", "key2", "5-0", "5-0"}), ArrLen(0));
+
+  for (int i = 0; i < 700; i++) {
+    Run({"xadd", "key3", "*", "field", "val"});
+  }
+  resp = Run({"xadd", "key3", "maxlen", "~", "500", "*", "field", "val"});
+  EXPECT_THAT(Run({"xlen", "key3"}), IntArg(501));
+  for (int i = 0; i < 700; i++) {
+    Run({"xadd", "key4", "*", "field", "val"});
+  }
+  resp = Run({"xadd", "key4", "maxlen", "~", "500", "limit", "100", "*", "field", "val"});
+  EXPECT_THAT(Run({"xlen", "key4"}), IntArg(601));
 }
 
 TEST_F(StreamFamilyTest, Range) {
@@ -94,6 +118,75 @@ TEST_F(StreamFamilyTest, GroupCreate) {
   EXPECT_THAT(resp, "OK");
   resp = Run({"xgroup", "create", "test", "test", "0", "MKSTREAM"});
   EXPECT_THAT(resp, ErrArg("BUSYGROUP"));
+}
+
+TEST_F(StreamFamilyTest, XRead) {
+  Run({"xadd", "foo", "1-*", "k1", "v1"});
+  Run({"xadd", "foo", "1-*", "k2", "v2"});
+  Run({"xadd", "foo", "1-*", "k3", "v3"});
+  Run({"xadd", "bar", "1-*", "k4", "v4"});
+
+  // Receive all records from both streams.
+  auto resp = Run({"xread", "count", "10", "streams", "foo", "bar", "0", "0"});
+  EXPECT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(3)));
+  EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("bar", ArrLen(1)));
+
+  // Order of the requested streams is maintained.
+  resp = Run({"xread", "count", "10", "streams", "bar", "foo", "0", "0"});
+  EXPECT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("bar", ArrLen(1)));
+  EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("foo", ArrLen(3)));
+
+  // Limit count.
+  resp = Run({"xread", "count", "1", "streams", "foo", "bar", "0", "0"});
+  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(1)));
+  EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("bar", ArrLen(1)));
+
+  // Stream not found.
+  resp = Run({"xread", "count", "10", "streams", "foo", "notfound", "0", "0"});
+  // Note when the response has length 1, Run returns the first element.
+  EXPECT_THAT(resp.GetVec(), ElementsAre("foo", ArrLen(3)));
+
+  // Read from ID.
+  resp = Run({"xread", "count", "10", "streams", "foo", "bar", "1-1", "2-0"});
+  // Note when the response has length 1, Run returns the first element.
+  EXPECT_THAT(resp.GetVec(), ElementsAre("foo", ArrLen(1)));
+  EXPECT_THAT(resp.GetVec()[1].GetVec()[0].GetVec(), ElementsAre("1-2", ArrLen(2)));
+}
+
+TEST_F(StreamFamilyTest, XReadInvalidArgs) {
+  // Using BLOCK when it is not supported.
+  auto resp = Run({"xread", "count", "5", "block", "2000", "streams", "s1", "s2", "0", "0"});
+  EXPECT_THAT(resp, ErrArg("BLOCK is not supported"));
+
+  // Invalid COUNT value.
+  resp = Run({"xread", "count", "invalid", "streams", "s1", "s2", "0", "0"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // Missing COUNT value.
+  resp = Run({"xread", "count"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments for 'xread' command"));
+
+  // Missing STREAMS.
+  resp = Run({"xread", "count", "5"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments for 'xread' command"));
+
+  // Unbalanced list of streams.
+  resp = Run({"xread", "count", "invalid", "streams", "s1", "s2", "s3", "0", "0"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // Missing COUNT option.
+  // TODO Remove once support optional COUNT option.
+  resp = Run({"xread", "streams", "s1", "s2", "0", "0"});
+  EXPECT_THAT(resp, ErrArg("requires COUNT option"));
+
+  // Less/more than two streams.
+  // TODO Remove once support a variable number of streams.
+  resp = Run({"xread", "count", "5", "streams", "s1", "0"});
+  EXPECT_THAT(resp, ErrArg("requires 2 streams"));
+  resp = Run({"xread", "count", "5", "streams", "s1", "s2", "s3", "0", "0", "0"});
+  EXPECT_THAT(resp, ErrArg("requires 2 streams"));
 }
 
 TEST_F(StreamFamilyTest, Issue854) {

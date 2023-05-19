@@ -15,6 +15,7 @@ class DflyParams:
     gdb: bool
     args: list
     existing_port: int
+    existing_mc_port: int
     env: any
 
 
@@ -83,6 +84,11 @@ class DflyInstance:
         if self.params.existing_port:
             return self.params.existing_port
         return int(self.args.get("port", "6379"))
+    @property
+    def mc_port(self) -> int:
+        if self.params.existing_mc_port:
+            return self.params.existing_mc_port
+        return int(self.args.get("mc_port", "11211"))
 
     @staticmethod
     def format_args(args):

@@ -102,6 +102,7 @@ MP::Result ParseValueless(const std::string_view* tokens, unsigned num_tokens, M
 }  // namespace
 
 auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
+  cmd->no_reply = false;  // re-initialize
   auto pos = str.find('\n');
   *consumed = 0;
   if (pos == string_view::npos) {
@@ -173,4 +174,4 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
   return ParseValueless(tokens + 1, num_tokens - 1, cmd);
 };
 
-}  // namespace dfly
+}  // namespace facade

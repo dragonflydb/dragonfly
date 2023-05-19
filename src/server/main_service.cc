@@ -23,6 +23,7 @@ extern "C" {
 #include "facade/error.h"
 #include "facade/reply_capture.h"
 #include "server/bitops_family.h"
+#include "server/cluster/cluster_family.h"
 #include "server/conn_context.h"
 #include "server/error.h"
 #include "server/generic_family.h"
@@ -518,7 +519,8 @@ ExecEvalState DetermineEvalPresense(const std::vector<StoredCmd>& body) {
 
 }  // namespace
 
-Service::Service(ProactorPool* pp) : pp_(*pp), server_family_(this) {
+Service::Service(ProactorPool* pp)
+    : pp_(*pp), server_family_(this), cluster_family_(&server_family_) {
   CHECK(pp);
   CHECK(shard_set == NULL);
 
@@ -555,7 +557,7 @@ void Service::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_i
   request_latency_usec.Init(&pp_);
   StringFamily::Init(&pp_);
   GenericFamily::Init(&pp_);
-  server_family_.Init(acceptor, main_interface);
+  server_family_.Init(acceptor, main_interface, &cluster_family_);
 
   ChannelStore* cs = new ChannelStore{};
   pp_.Await(
@@ -619,7 +621,7 @@ bool Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
     return false;
   }
   // Check keys slot is in my ownership
-  if (keys_slot && !server_family_.cluster_config()->IsMySlot(*keys_slot)) {
+  if (keys_slot && !cluster_family_.cluster_config()->IsMySlot(*keys_slot)) {
     (*dfly_cntx)->SendError("MOVED");  // TODO add more info to moved error.
     return false;
   }
@@ -887,6 +889,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
   char ttl_op[] = "EX";
 
   MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
+  mc_builder->SetNoreply(cmd.no_reply);
 
   switch (cmd.type) {
     case MemcacheParser::REPLACE:
@@ -1834,6 +1837,7 @@ void Service::RegisterCommands() {
   SearchFamily::Register(&registry_);
 
   server_family_.Register(&registry_);
+  cluster_family_.Register(&registry_);
 
   if (VLOG_IS_ON(1)) {
     LOG(INFO) << "Multi-key commands are: ";

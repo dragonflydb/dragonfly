@@ -8,7 +8,7 @@ metadata:
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
-    app.kubernetes.io/version: "v1.2.1"
+    app.kubernetes.io/version: "v1.3.0"
     app.kubernetes.io/managed-by: Helm
 ---
 # Source: dragonfly/templates/service.yaml
@@ -20,7 +20,7 @@ metadata:
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
-    app.kubernetes.io/version: "v1.2.1"
+    app.kubernetes.io/version: "v1.3.0"
     app.kubernetes.io/managed-by: Helm
 spec:
   type: ClusterIP
@@ -42,7 +42,7 @@ metadata:
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
-    app.kubernetes.io/version: "v1.2.1"
+    app.kubernetes.io/version: "v1.3.0"
     app.kubernetes.io/managed-by: Helm
 spec:
   replicas: 1
@@ -63,7 +63,7 @@ spec:
       serviceAccountName: test-dragonfly
       containers:
         - name: dragonfly
-          image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.2.1"
+          image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.3.0"
           imagePullPolicy: IfNotPresent
           ports:
             - name: dragonfly

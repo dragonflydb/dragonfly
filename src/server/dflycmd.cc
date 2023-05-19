@@ -7,9 +7,16 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
 
+#include <jsoncons/json.hpp>
+#include <limits>
+#include <optional>
+
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/json_object.h"
 #include "facade/dragonfly_connection.h"
+#include "server/cluster/cluster_config.h"
+#include "server/cluster/cluster_family.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
@@ -81,8 +88,9 @@ DflyCmd::ReplicaRoleInfo::ReplicaRoleInfo(std::string address, uint32_t listenin
   }
 }
 
-DflyCmd::DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family)
-    : sf_(server_family), listener_(listener) {
+DflyCmd::DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family,
+                 ClusterFamily* cluster_family)
+    : sf_(server_family), listener_(listener), cluster_family_(cluster_family) {
 }
 
 void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
@@ -120,6 +128,10 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
     return ReplicaOffset(args, cntx);
   }
 
+  if (sub_cmd == "CLUSTER" && args.size() > 2) {
+    return ClusterManagmentCmd(args, cntx);
+  }
+
   rb->SendError(kSyntaxErr);
 }
 
@@ -139,9 +151,8 @@ void DflyCmd::Journal(CmdArgList args, ConnectionContext* cntx) {
       string dir = absl::GetFlag(FLAGS_dir);
 
       atomic_uint32_t created{0};
-      auto* pool = shard_set->pool();
 
-      auto open_cb = [&](auto* pb) {
+      auto open_cb = [&](EngineShard*) {
         auto ec = sf_->journal()->OpenInThread(true, dir);
         if (ec) {
           LOG(ERROR) << "Could not create journal " << ec;
@@ -150,8 +161,8 @@ void DflyCmd::Journal(CmdArgList args, ConnectionContext* cntx) {
         }
       };
 
-      pool->AwaitFiberOnAll(open_cb);
-      if (created.load(memory_order_acquire) != pool->size()) {
+      shard_set->RunBlockingInParallel(open_cb);
+      if (created.load(memory_order_acquire) != shard_set->size()) {
         LOG(FATAL) << "TBD / revert";
       }
 
@@ -228,7 +239,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
   }
 
   unsigned flow_id;
-  if (!absl::SimpleAtoi(flow_id_str, &flow_id) || flow_id >= shard_set->pool()->size()) {
+  if (!absl::SimpleAtoi(flow_id_str, &flow_id) || flow_id >= shard_set->size()) {
     return rb->SendError(facade::kInvalidIntErr);
   }
 
@@ -277,11 +288,11 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
     AggregateStatus status;
 
     // Use explicit assignment for replica_ptr, because capturing structured bindings is C++20.
-    auto cb = [this, &status, replica_ptr = replica_ptr](unsigned index, auto*) {
-      status = StartFullSyncInThread(&replica_ptr->flows[index], &replica_ptr->cntx,
-                                     EngineShard::tlocal());
+    auto cb = [this, &status, replica_ptr = replica_ptr](EngineShard* shard) {
+      status =
+          StartFullSyncInThread(&replica_ptr->flows[shard->shard_id()], &replica_ptr->cntx, shard);
     };
-    shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+    shard_set->RunBlockingInParallel(std::move(cb));
 
     // TODO: Send better error
     if (*status != OpStatus::OK)
@@ -313,15 +324,14 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
     TransactionGuard tg{cntx->transaction};
     AggregateStatus status;
 
-    auto cb = [this, &status, replica_ptr = replica_ptr](unsigned index, auto*) {
-      EngineShard* shard = EngineShard::tlocal();
-      FlowInfo* flow = &replica_ptr->flows[index];
+    auto cb = [this, &status, replica_ptr = replica_ptr](EngineShard* shard) {
+      FlowInfo* flow = &replica_ptr->flows[shard->shard_id()];
 
       StopFullSyncInThread(flow, shard);
       status = StartStableSyncInThread(flow, &replica_ptr->cntx, shard);
       return OpStatus::OK;
     };
-    shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+    shard_set->RunBlockingInParallel(std::move(cb));
 
     if (*status != OpStatus::OK)
       return rb->SendError(kInvalidState);
@@ -366,10 +376,102 @@ void DflyCmd::ReplicaOffset(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void DflyCmd::ClusterConfig(CmdArgList args, ConnectionContext* cntx) {
+  SinkReplyBuilder* rb = cntx->reply_builder();
+
+  if (args.size() != 3) {
+    return rb->SendError(WrongNumArgsError("dfly cluster config"));
+  }
+
+  string_view json_str = ArgS(args, 2);
+  optional<JsonType> json = JsonFromString(json_str);
+  if (!json.has_value()) {
+    LOG(WARNING) << "Can't parse JSON for ClusterConfig " << json_str;
+    return rb->SendError("Invalid JSON cluster config", kSyntaxErrType);
+  }
+
+  if (!cluster_family_->cluster_config()->SetConfig(json.value())) {
+    return rb->SendError("Invalid cluster configuration.");
+  }
+
+  return rb->SendOk();
+}
+
+void DflyCmd::ClusterManagmentCmd(CmdArgList args, ConnectionContext* cntx) {
+  if (!ClusterConfig::IsClusterEnabled()) {
+    return (*cntx)->SendError("DFLY CLUSTER commands requires --cluster_mode=yes");
+  }
+  CHECK_NE(cluster_family_->cluster_config(), nullptr);
+
+  // TODO check admin port
+  ToUpper(&args[1]);
+  string_view sub_cmd = ArgS(args, 1);
+  if (sub_cmd == "GETSLOTINFO") {
+    return ClusterGetSlotInfo(args, cntx);
+  } else if (sub_cmd == "CONFIG") {
+    return ClusterConfig(args, cntx);
+  }
+
+  return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "DFLY CLUSTER"), kSyntaxErrType);
+}
+
+void DflyCmd::ClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() == 3) {
+    return (*cntx)->SendError(facade::WrongNumArgsError("DFLY CLUSTER GETSLOTINFO"),
+                              kSyntaxErrType);
+  }
+  ToUpper(&args[2]);
+  string_view slots_str = ArgS(args, 2);
+  if (slots_str != "SLOTS") {
+    return (*cntx)->SendError(kSyntaxErr, kSyntaxErrType);
+  }
+
+  vector<std::pair<SlotId, SlotStats>> slots_stats;
+  for (size_t i = 3; i < args.size(); ++i) {
+    string_view slot_str = ArgS(args, i);
+    uint32_t sid;
+    if (!absl::SimpleAtoi(slot_str, &sid)) {
+      return (*cntx)->SendError(kInvalidIntErr);
+    }
+    if (sid > ClusterConfig::kMaxSlotNum) {
+      return (*cntx)->SendError("Invalid slot id");
+    }
+    slots_stats.push_back(make_pair(sid, SlotStats{}));
+  }
+
+  Mutex mu;
+
+  auto cb = [&](auto*) {
+    EngineShard* shard = EngineShard::tlocal();
+    if (shard == nullptr)
+      return;
+
+    lock_guard lk(mu);
+    for (auto& [slot, data] : slots_stats) {
+      data += shard->db_slice().GetSlotStats(slot);
+    }
+  };
+
+  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+
+  (*cntx)->StartArray(slots_stats.size());
+
+  for (const auto& slot_data : slots_stats) {
+    (*cntx)->StartArray(3);
+    (*cntx)->SendBulkString(absl::StrCat(slot_data.first));
+    (*cntx)->SendBulkString("key_count");
+    (*cntx)->SendBulkString(absl::StrCat(slot_data.second.key_count));
+  }
+}
+
 OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
   DCHECK(!flow->full_sync_fb.IsJoinable());
+  DCHECK(shard);
 
-  SaveMode save_mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
+  // The summary contains the LUA scripts, so make sure at least (and exactly one)
+  // of the flows also contain them.
+  SaveMode save_mode =
+      shard->shard_id() == 0 ? SaveMode::SINGLE_SHARD_WITH_SUMMARY : SaveMode::SINGLE_SHARD;
   flow->saver.reset(new RdbSaver(flow->conn->socket(), save_mode, false));
 
   flow->cleanup = [flow]() {
@@ -426,7 +528,7 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
   error_code ec;
   RdbSaver* saver = flow->saver.get();
 
-  if (saver->Mode() == SaveMode::SUMMARY) {
+  if (saver->Mode() == SaveMode::SUMMARY || saver->Mode() == SaveMode::SINGLE_SHARD_WITH_SUMMARY) {
     auto scripts = sf_->script_mgr()->GetAll();
     StringVec script_bodies;
     for (auto& [sha, data] : scripts) {
@@ -457,12 +559,12 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
   }
 }
 
-uint32_t DflyCmd::CreateSyncSession(ConnectionContext* cntx) {
-  ;
+auto DflyCmd::CreateSyncSession(ConnectionContext* cntx)
+    -> std::pair<uint32_t, std::shared_ptr<ReplicaInfo>> {
   unique_lock lk(mu_);
   unsigned sync_id = next_sync_id_++;
 
-  unsigned flow_count = shard_set->pool()->size();
+  unsigned flow_count = shard_set->size();
   auto err_handler = [this, sync_id](const GenericError& err) {
     LOG(INFO) << "Replication error: " << err.Format();
 
@@ -481,7 +583,7 @@ uint32_t DflyCmd::CreateSyncSession(ConnectionContext* cntx) {
   auto [it, inserted] = replica_infos_.emplace(sync_id, std::move(replica_ptr));
   CHECK(inserted);
 
-  return sync_id;
+  return *it;
 }
 
 void DflyCmd::OnClose(ConnectionContext* cntx) {
@@ -521,8 +623,8 @@ void DflyCmd::CancelReplication(uint32_t sync_id, shared_ptr<ReplicaInfo> replic
   replica_ptr->cntx.Cancel();
 
   // Wait for tasks to finish.
-  shard_set->pool()->AwaitFiberOnAll([replica_ptr](unsigned index, auto*) {
-    FlowInfo* flow = &replica_ptr->flows[index];
+  shard_set->RunBlockingInParallel([replica_ptr](EngineShard* shard) {
+    FlowInfo* flow = &replica_ptr->flows[shard->shard_id()];
     if (flow->cleanup) {
       flow->cleanup();
     }
