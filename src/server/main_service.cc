@@ -1718,6 +1718,48 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void Service::Command(CmdArgList args, ConnectionContext* cntx) {
+  unsigned cmd_cnt = 0;
+  registry_.Traverse([&](string_view name, const CommandId& cd) {
+    if ((cd.opt_mask() & CO::HIDDEN) == 0) {
+      ++cmd_cnt;
+    }
+  });
+
+  if (args.size() > 0) {
+    ToUpper(&args[0]);
+    string_view subcmd = ArgS(args, 0);
+    if (subcmd == "COUNT") {
+      return (*cntx)->SendLong(cmd_cnt);
+    } else {
+      return (*cntx)->SendError(kSyntaxErr, kSyntaxErrType);
+    }
+  }
+
+  (*cntx)->StartArray(cmd_cnt);
+
+  registry_.Traverse([&](string_view name, const CommandId& cd) {
+    if (cd.opt_mask() & CO::HIDDEN)
+      return;
+    (*cntx)->StartArray(6);
+    (*cntx)->SendSimpleString(cd.name());
+    (*cntx)->SendLong(cd.arity());
+    (*cntx)->StartArray(CommandId::OptCount(cd.opt_mask()));
+
+    for (uint32_t i = 0; i < 32; ++i) {
+      unsigned obit = (1u << i);
+      if (cd.opt_mask() & obit) {
+        const char* name = CO::OptName(CO::CommandOpt{obit});
+        (*cntx)->SendSimpleString(name);
+      }
+    }
+
+    (*cntx)->SendLong(cd.first_key_pos());
+    (*cntx)->SendLong(cd.last_key_pos());
+    (*cntx)->SendLong(cd.key_arg_step());
+  });
+}
+
 VarzValue::Map Service::GetVarzStats() {
   VarzValue::Map res;
 
@@ -1822,7 +1864,8 @@ void Service::RegisterCommands() {
       << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.MFUNC(PUnsubscribe)
       << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, 0}.MFUNC(Function)
       << CI{"MONITOR", CO::ADMIN, 1, 0, 0, 0}.MFUNC(Monitor)
-      << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, 0}.MFUNC(Pubsub);
+      << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, 0}.MFUNC(Pubsub)
+      << CI{"COMMAND", CO::LOADING | CO::NOSCRIPT, -1, 0, 0, 0}.MFUNC(Command);
 
   StreamFamily::Register(&registry_);
   StringFamily::Register(&registry_);
