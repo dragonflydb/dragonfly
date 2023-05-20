@@ -175,18 +175,6 @@ TEST_F(StreamFamilyTest, XReadInvalidArgs) {
   // Unbalanced list of streams.
   resp = Run({"xread", "count", "invalid", "streams", "s1", "s2", "s3", "0", "0"});
   EXPECT_THAT(resp, ErrArg("syntax error"));
-
-  // Missing COUNT option.
-  // TODO Remove once support optional COUNT option.
-  resp = Run({"xread", "streams", "s1", "s2", "0", "0"});
-  EXPECT_THAT(resp, ErrArg("requires COUNT option"));
-
-  // Less/more than two streams.
-  // TODO Remove once support a variable number of streams.
-  resp = Run({"xread", "count", "5", "streams", "s1", "0"});
-  EXPECT_THAT(resp, ErrArg("requires 2 streams"));
-  resp = Run({"xread", "count", "5", "streams", "s1", "s2", "s3", "0", "0", "0"});
-  EXPECT_THAT(resp, ErrArg("requires 2 streams"));
 }
 
 TEST_F(StreamFamilyTest, Issue854) {

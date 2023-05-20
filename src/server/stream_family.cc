@@ -1197,7 +1197,6 @@ void StreamFamily::XRead(CmdArgList args, ConnectionContext* cntx) {
   size_t streams_arg = 0;
 
   uint32_t count = kuint32max;
-  bool count_found = false;
 
   // Parse the arguments.
   for (size_t id_indx = 0; id_indx < args.size(); ++id_indx) {
@@ -1213,7 +1212,6 @@ void StreamFamily::XRead(CmdArgList args, ConnectionContext* cntx) {
       if (!absl::SimpleAtoi(arg, &count)) {
         return (*cntx)->SendError(kSyntaxErr);
       }
-      count_found = true;
     } else if (arg == "STREAMS" && remaining_args > 0) {
       streams_arg = id_indx + 1;
 
@@ -1233,15 +1231,6 @@ void StreamFamily::XRead(CmdArgList args, ConnectionContext* cntx) {
   // STREAMS option is required.
   if (streams_arg == 0) {
     return (*cntx)->SendError(kSyntaxErr);
-  }
-
-  // TODO NB: Currently require 2 streams and a COUNT option due to the
-  // transaction expecting stream keys at positions 4 and 5.
-  if (!count_found) {
-    return (*cntx)->SendError("requires COUNT option", kSyntaxErr);
-  }
-  if (streams_count != 2) {
-    return (*cntx)->SendError("requires 2 streams", kSyntaxErr);
   }
 
   ReadOpts read_opts;
@@ -1439,13 +1428,7 @@ void StreamFamily::Register(CommandRegistry* registry) {
             << CI{"XLEN", CO::READONLY | CO::FAST, 2, 1, 1, 1}.HFUNC(XLen)
             << CI{"XRANGE", CO::READONLY, -4, 1, 1, 1}.HFUNC(XRange)
             << CI{"XREVRANGE", CO::READONLY, -4, 1, 1, 1}.HFUNC(XRevRange)
-            // TODO NB: Assuming:
-            // * We always have a COUNT parameter
-            // * We always have two streams
-            // * Don't support BLOCK
-            // Therefore the command has format:
-            //   XREAD COUNT <count> STREAMS <stream1> <stream2> <id1> <id2>
-            // Where the keys are <stream1> and <stream2>.
+            // TODO NB: Doesn't support BLOCK
             << CI{"XREAD", CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 3, 3, 1}
                    .HFUNC(XRead)
             << CI{"XSETID", CO::WRITE | CO::DENYOOM, 3, 1, 1, 1}.HFUNC(XSetId)
