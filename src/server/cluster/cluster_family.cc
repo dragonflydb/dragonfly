@@ -256,7 +256,7 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
   if (!ClusterConfig::IsClusterEnabled()) {
     return (*cntx)->SendError("DFLYCLUSTER commands requires --cluster_mode=yes");
   }
-  CHECK_NE(cluster_config_, nullptr);
+  CHECK_NE(cluster_config_.get(), nullptr);
 
   // TODO check admin port
   ToUpper(&args[0]);
