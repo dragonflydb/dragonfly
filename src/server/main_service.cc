@@ -735,8 +735,8 @@ bool Service::VerifyCommand(const CommandId* cid, CmdArgList args, ConnectionCon
   }
 
   if (under_multi) {
-    if (cmd_name == "SELECT") {
-      (*dfly_cntx)->SendError("Can not call SELECT within a transaction");
+    if (cmd_name == "SELECT" || absl::EndsWith(cmd_name, "SUBSCRIBE")) {
+      (*dfly_cntx)->SendError(absl::StrCat("Can not call ", cmd_name, " within a transaction"));
       return false;
     }
 
