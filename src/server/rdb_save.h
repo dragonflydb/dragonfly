@@ -154,8 +154,10 @@ class RdbSerializer {
   // Write journal entry as an embedded journal blob.
   std::error_code WriteJournalEntry(const journal::Entry& entry);
 
+  std::error_code SendJournalOffset(uint64_t journal_offset);
+
   // Send FULL_SYNC_CUT opcode to notify that all static data was sent.
-  std::error_code SendFullSyncCut(uint64_t final_version);
+  std::error_code SendFullSyncCut();
 
  private:
   // Prepare internal buffer for flush. Compress it.

@@ -666,16 +666,21 @@ error_code RdbSerializer::SaveStreamConsumers(streamCG* cg) {
   return error_code{};
 }
 
-error_code RdbSerializer::SendFullSyncCut(uint64_t final_version) {
+error_code RdbSerializer::SendJournalOffset(uint64_t journal_offset) {
+  RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_JOURNAL_OFFSET));
+  uint8_t buf[sizeof(uint64_t)] = {0};
+  memcpy(buf, &journal_offset, sizeof(uint64_t));
+  return WriteRaw(buf);
+}
+
+error_code RdbSerializer::SendFullSyncCut() {
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_FULLSYNC_END));
 
-  VLOG(1) << "final_version=" << final_version;
   // RDB_OPCODE_FULLSYNC_END followed by 8 bytes of 0.
   // The reason for this is that some opcodes require to have at least 8 bytes of data
   // in the read buffer when consuming the rdb data, and since RDB_OPCODE_FULLSYNC_END is one of
   // the last opcodes sent to replica, we respect this requirement by sending a blob of 8 bytes.
-  uint8_t buf[sizeof(uint64_t)] = {0};
-  memcpy(buf, &final_version, sizeof(uint64_t));
+  uint8_t buf[8] = {0};
   return WriteRaw(buf);
 }
 
@@ -1153,7 +1158,7 @@ error_code RdbSaver::SaveBody(const Cancellation* cll, RdbTypeFreqMap* freq_map)
   RETURN_ON_ERR(impl_->serializer()->FlushToSink(impl_->sink()));
 
   if (save_mode_ == SaveMode::SUMMARY) {
-    impl_->serializer()->SendFullSyncCut(0);
+    impl_->serializer()->SendFullSyncCut();
   } else {
     VLOG(1) << "SaveBody , snapshots count: " << impl_->Size();
     error_code io_error = impl_->ConsumeChannel(cll);

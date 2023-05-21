@@ -358,12 +358,14 @@ void DflyCmd::ReplicaOffset(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
 
   rb->StartArray(shard_set->size());
-  std::vector<LSN> LSNs(shard_set->size());
-  shard_set->RunBriefInParallel(
-      [&](EngineShard* shard) { LSNs[shard->shard_id()] = sf_->journal()->GetLsn(); });
+  std::vector<LSN> lsns(shard_set->size());
+  shard_set->RunBriefInParallel([&](EngineShard* shard) {
+    auto* journal = shard->journal();
+    lsns[shard->shard_id()] = journal ? journal->GetLsn() : 0;
+  });
 
-  for (size_t flow_id = 0; flow_id < shard_set->size(); ++flow_id) {
-    rb->SendLong(LSNs[flow_id]);
+  for (size_t shard_id = 0; shard_id < shard_set->size(); ++shard_id) {
+    rb->SendLong(lsns[shard_id]);
   }
 }
 
