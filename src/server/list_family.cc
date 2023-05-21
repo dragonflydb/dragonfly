@@ -128,110 +128,13 @@ bool ElemCompare(const quicklistEntry& entry, string_view elem) {
   return elem == an.Piece();
 }
 
-using FFResult = pair<PrimeKey, unsigned>;  // key, argument index.
-
-struct ShardFFResult {
-  PrimeKey key;
-  ShardId sid = kInvalidSid;
-};
-
-// Used by bpopper.
-OpResult<ShardFFResult> FindFirst(Transaction* trans) {
-  VLOG(2) << "FindFirst::Find " << trans->DebugId();
-
-  // Holds Find results: (iterator to a found key, and its index in the passed arguments).
-  // See DbSlice::FindFirst for more details.
-  // spans all the shards for now.
-  std::vector<OpResult<FFResult>> find_res(shard_set->size());
-  fill(find_res.begin(), find_res.end(), OpStatus::KEY_NOTFOUND);
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    auto args = t->GetShardArgs(shard->shard_id());
-
-    OpResult<pair<PrimeIterator, unsigned>> ff_res =
-        shard->db_slice().FindFirst(t->GetDbContext(), args);
-
-    if (ff_res) {
-      FFResult ff_result(ff_res->first->first.AsRef(), ff_res->second);
-      find_res[shard->shard_id()] = move(ff_result);
-    } else {
-      find_res[shard->shard_id()] = ff_res.status();
-    }
-
-    return OpStatus::OK;
-  };
-
-  trans->Execute(move(cb), false);
-
-  uint32_t min_arg_indx = UINT32_MAX;
-
-  ShardFFResult shard_result;
-
-  for (size_t sid = 0; sid < find_res.size(); ++sid) {
-    const auto& fr = find_res[sid];
-    auto status = fr.status();
-    if (status == OpStatus::KEY_NOTFOUND)
-      continue;
-
-    if (status == OpStatus::WRONG_TYPE) {
-      return status;
-    }
-
-    CHECK(fr);
-
-    const auto& it_pos = fr.value();
-
-    size_t arg_indx = trans->ReverseArgIndex(sid, it_pos.second);
-    if (arg_indx < min_arg_indx) {
-      min_arg_indx = arg_indx;
-      shard_result.sid = sid;
-
-      // we do not dereference the key, do not extract the string value, so it it
-      // ok to just move it. We can not dereference it due to limitations of SmallString
-      // that rely on thread-local data-structure for pointer translation.
-      shard_result.key = it_pos.first.AsRef();
-    }
-  }
-
-  if (shard_result.sid == kInvalidSid) {
-    return OpStatus::KEY_NOTFOUND;
-  }
-
-  return OpResult<ShardFFResult>{move(shard_result)};
-}
-
-class BPopper {
- public:
-  explicit BPopper(ListDir dir);
-
-  // Returns WRONG_TYPE, OK.
-  // If OK is returned then use result() to fetch the value.
-  OpStatus Run(Transaction* t, unsigned msec);
-
-  // returns (key, value) pair.
-  auto result() const {
-    return make_pair<string_view, string_view>(key_, value_);
-  }
-
- private:
-  void Pop(Transaction* t, EngineShard* shard);
-  void OpPop(Transaction* t, EngineShard* shard);
-
-  ListDir dir_;
-
-  ShardFFResult ff_result_;
-
-  string key_;
-  string value_;
-};
-
 class BPopPusher {
  public:
   BPopPusher(string_view pop_key, string_view push_key, ListDir popdir, ListDir pushdir);
 
   // Returns WRONG_TYPE, OK.
   // If OK is returned then use result() to fetch the value.
-  OpResult<string> Run(Transaction* t, unsigned msec);
+  OpResult<string> Run(Transaction* t, unsigned limit_ms);
 
  private:
   OpResult<string> RunSingle(Transaction* t, time_point tp);
@@ -241,90 +144,30 @@ class BPopPusher {
   ListDir popdir_, pushdir_;
 };
 
-BPopper::BPopper(ListDir dir) : dir_(dir) {
-}
-
-OpStatus BPopper::Run(Transaction* trans, unsigned msec) {
-  auto tp = msec ? chrono::steady_clock::now() + chrono::milliseconds(msec) : time_point::max();
-  bool is_multi = trans->IsMulti();
-
-  trans->Schedule();
-
-  auto* stats = ServerState::tl_connection_stats();
-
-  OpResult<ShardFFResult> result = FindFirst(trans);
-
-  if (result.ok()) {
-    ff_result_ = move(result.value());
-  } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    // Close transaction and return.
-    if (is_multi) {
-      auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
-      trans->Execute(std::move(cb), true);
-      return OpStatus::TIMED_OUT;
-    }
-
-    auto wcb = [](Transaction* t, EngineShard* shard) {
-      return t->GetShardArgs(shard->shard_id());
-    };
-
-    VLOG(1) << "Blocking BLPOP " << trans->DebugId();
-    ++stats->num_blocked_clients;
-    bool wait_succeeded = trans->WaitOnWatch(tp, std::move(wcb));
-    --stats->num_blocked_clients;
-
-    if (!wait_succeeded)
-      return OpStatus::TIMED_OUT;
-  } else {
-    // Could be the wrong-type error.
-    // cleanups, locks removal etc.
-    auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
-    trans->Execute(std::move(cb), true);
-
-    DCHECK_NE(result.status(), OpStatus::KEY_NOTFOUND);
-    return result.status();
-  }
-
-  auto cb = [this](Transaction* t, EngineShard* shard) {
-    Pop(t, shard);
-    return OpStatus::OK;
-  };
-  trans->Execute(std::move(cb), true);
-
-  return OpStatus::OK;
-}
-
-void BPopper::Pop(Transaction* t, EngineShard* shard) {
-  if (auto wake_key = t->GetWakeKey(shard->shard_id()); wake_key) {
-    key_ = *wake_key;
-    OpPop(t, shard);
-  } else if (shard->shard_id() == ff_result_.sid) {
-    ff_result_.key.GetString(&key_);
-    OpPop(t, shard);
-  }
-}
-
-void BPopper::OpPop(Transaction* t, EngineShard* shard) {
+// Called as a callback from MKBlocking after we've determined which key to pop.
+std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, ListDir dir) {
   auto& db_slice = shard->db_slice();
-  auto it_res = db_slice.Find(t->GetDbContext(), key_, OBJ_LIST);
-  CHECK(it_res) << t->DebugId() << " " << key_;  // must exist and must be ok.
+  auto it_res = db_slice.Find(t->GetDbContext(), key, OBJ_LIST);
+  CHECK(it_res) << t->DebugId() << " " << key;  // must exist and must be ok.
   PrimeIterator it = *it_res;
 
   quicklist* ql = GetQL(it->second);
 
-  DVLOG(2) << "popping from " << key_ << " " << t->DebugId();
+  DVLOG(2) << "popping from " << key << " " << t->DebugId();
   db_slice.PreUpdate(t->GetDbIndex(), it);
-  value_ = ListPop(dir_, ql);
-  db_slice.PostUpdate(t->GetDbIndex(), it, key_);
+  std::string value = ListPop(dir, ql);
+  db_slice.PostUpdate(t->GetDbIndex(), it, key);
   if (quicklistCount(ql) == 0) {
-    DVLOG(1) << "deleting key " << key_ << " " << t->DebugId();
+    DVLOG(1) << "deleting key " << key << " " << t->DebugId();
     CHECK(shard->db_slice().Del(t->GetDbIndex(), it));
   }
   OpArgs op_args = t->GetOpArgs(shard);
   if (op_args.shard->journal()) {
-    string command = dir_ == ListDir::LEFT ? "LPOP" : "RPOP";
-    RecordJournal(op_args, command, ArgSlice{key_}, 1);
+    string command = dir == ListDir::LEFT ? "LPOP" : "RPOP";
+    RecordJournal(op_args, command, ArgSlice{key}, 1);
   }
+
+  return value;
 }
 
 OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, string_view dest,
@@ -951,9 +794,9 @@ BPopPusher::BPopPusher(string_view pop_key, string_view push_key, ListDir popdir
     : pop_key_(pop_key), push_key_(push_key), popdir_(popdir), pushdir_(pushdir) {
 }
 
-OpResult<string> BPopPusher::Run(Transaction* t, unsigned msec) {
+OpResult<string> BPopPusher::Run(Transaction* t, unsigned limit_ms) {
   time_point tp =
-      msec ? chrono::steady_clock::now() + chrono::milliseconds(msec) : time_point::max();
+      limit_ms ? chrono::steady_clock::now() + chrono::milliseconds(limit_ms) : time_point::max();
 
   t->Schedule();
 
@@ -1308,16 +1151,17 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
   VLOG(1) << "BPop timeout(" << timeout << ")";
 
   Transaction* transaction = cntx->transaction;
-  BPopper popper(dir);
-  OpStatus result = popper.Run(transaction, unsigned(timeout * 1000));
+  std::string popped_key;
+  std::string popped_value;
+  OpStatus result = container_utils::RunCbOnFirstNonEmptyBlocking(
+      [dir, &popped_value](Transaction* t, EngineShard* shard, std::string_view key) {
+        popped_value = OpBPop(t, shard, key, dir);
+      },
+      &popped_key, transaction, OBJ_LIST, unsigned(timeout * 1000));
 
   if (result == OpStatus::OK) {
-    auto res = popper.result();
-
-    DVLOG(1) << "BPop " << transaction->DebugId() << " popped from key " << res.first;  // key.
-
-    std::string_view str_arr[2] = {res.first, res.second};
-
+    DVLOG(1) << "BPop " << transaction->DebugId() << " popped from key " << popped_key;  // key.
+    std::string_view str_arr[2] = {popped_key, popped_value};
     return (*cntx)->SendStringArr(str_arr);
   }
 

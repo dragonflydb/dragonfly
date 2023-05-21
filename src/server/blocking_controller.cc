@@ -212,7 +212,9 @@ void BlockingController::NotifyPending() {
 
       // Double verify we still got the item.
       auto [it, exp_it] = owner_->db_slice().FindExt(context, sv_key);
-      if (!IsValid(it) || it->second.ObjType() != OBJ_LIST)  // Only LIST is allowed to block.
+      if (!IsValid(it) ||
+          !(it->second.ObjType() == OBJ_LIST ||
+            it->second.ObjType() == OBJ_ZSET))  // Only LIST and ZSET are allowed to block.
         continue;
 
       NotifyWatchQueue(sv_key, &wt.queue_map);
