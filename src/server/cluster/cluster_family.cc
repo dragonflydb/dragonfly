@@ -205,21 +205,17 @@ void ClusterFamily::ClusterInfo(ConnectionContext* cntx) {
     cluster_size = 0;
     known_nodes = 0;
   } else {
-    absl::flat_hash_set<string_view> nodes;
-    absl::flat_hash_set<string_view> master_nodes;
+    known_nodes = 0;
+    cluster_size = 0;
     auto config = cluster_config_->GetConfig();
     for (const auto& shard_config : config) {
-      nodes.insert(shard_config.master.id);
-      if (!shard_config.slot_ranges.empty()) {
-        master_nodes.insert(shard_config.master.id);
-      }
+      known_nodes += 1;  // For master
+      known_nodes += shard_config.replicas.size();
 
-      for (const auto& replica : shard_config.replicas) {
-        nodes.insert(replica.id);
+      if (!shard_config.slot_ranges.empty()) {
+        ++cluster_size;
       }
     }
-    known_nodes = nodes.size();
-    cluster_size = master_nodes.size();
   }
 
   append("cluster_state", state);
