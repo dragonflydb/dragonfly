@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include <absl/container/flat_hash_set.h>
-
 #include "facade/op_status.h"
 #include "server/common.h"
 #include "server/conn_context.h"
@@ -210,7 +208,6 @@ class DbSlice {
    */
   void FlushDb(DbIndex db_ind);
 
-  using SlotSet = absl::flat_hash_set<SlotId>;
   // Flushes the data of given slot ids.
   void FlushSlots(SlotSet slot_ids);
 

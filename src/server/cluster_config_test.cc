@@ -12,6 +12,7 @@
 #include "base/logging.h"
 
 using namespace std;
+using namespace testing;
 using Node = dfly::ClusterConfig::Node;
 
 namespace dfly {
@@ -124,6 +125,48 @@ TEST_F(ClusterConfigTest, ConfigSetMultipleInstances) {
       EXPECT_FALSE(config_.IsMySlot(i));
     }
   }
+}
+
+TEST_F(ClusterConfigTest, ConfigSetGetDeletedSlots) {
+  auto ds =
+      config_.SetConfig({{.slot_ranges = {{.start = 0, .end = 5'000}},
+                          .master = {.id = kMyId, .ip = "192.168.0.100", .port = 7000},
+                          .replicas = {}},
+                         {.slot_ranges = {{.start = 5'001, .end = 10'000}},
+                          .master = {.id = "other-master", .ip = "192.168.0.102", .port = 7002},
+                          .replicas = {}},
+                         {.slot_ranges = {{.start = 10'001, .end = 0x3FFF}},
+                          .master = {.id = "other-master2", .ip = "192.168.0.104", .port = 7004},
+                          .replicas = {}}});
+
+  EXPECT_TRUE(ds.has_value());
+  EXPECT_TRUE(ds.value().empty());  // On first config set no deleted slots.
+
+  ds = config_.SetConfig({{.slot_ranges = {{.start = 0, .end = 6'000}},
+                           .master = {.id = kMyId, .ip = "192.168.0.100", .port = 7000},
+                           .replicas = {}},
+                          {.slot_ranges = {{.start = 6'001, .end = 10'000}},
+                           .master = {.id = "other-master", .ip = "192.168.0.102", .port = 7002},
+                           .replicas = {}},
+                          {.slot_ranges = {{.start = 10'001, .end = 0x3FFF}},
+                           .master = {.id = "other-master2", .ip = "192.168.0.104", .port = 7004},
+                           .replicas = {}}});
+
+  EXPECT_TRUE(ds.has_value());
+  EXPECT_TRUE(ds.value().empty());  // On second config no slots taken from ownership
+
+  ds = config_.SetConfig({{.slot_ranges = {{.start = 0, .end = 5'997}},
+                           .master = {.id = kMyId, .ip = "192.168.0.100", .port = 7000},
+                           .replicas = {}},
+                          {.slot_ranges = {{.start = 5'998, .end = 10'000}},
+                           .master = {.id = "other-master", .ip = "192.168.0.102", .port = 7002},
+                           .replicas = {}},
+                          {.slot_ranges = {{.start = 10'001, .end = 0x3FFF}},
+                           .master = {.id = "other-master2", .ip = "192.168.0.104", .port = 7004},
+                           .replicas = {}}});
+
+  EXPECT_TRUE(ds.has_value());
+  EXPECT_THAT(ds.value(), UnorderedElementsAre(5'998, 5'999, 6'000));
 }
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidSlotRanges) {

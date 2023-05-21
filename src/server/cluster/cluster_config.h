@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/base/thread_annotations.h>
+#include <absl/container/flat_hash_set.h>
 
 #include <array>
 #include <optional>
@@ -17,6 +18,7 @@
 namespace dfly {
 
 using SlotId = uint16_t;
+using SlotSet = absl::flat_hash_set<SlotId>;
 
 class ClusterConfig {
  public:
@@ -61,12 +63,12 @@ class ClusterConfig {
 
   ClusterShards GetConfig() const;
 
-  // Returns true if `new_config` is valid and internal state was changed. Returns false and changes
-  // nothing otherwise.
-  bool SetConfig(const ClusterShards& new_config);
+  // Returns deleted slot set if `new_config` is valid and internal state was changed. Returns
+  // nullopt and changes nothing otherwise.
+  std::optional<SlotSet> SetConfig(const ClusterShards& new_config);
 
   // Parses `json` into `ClusterShards` and calls the above overload.
-  bool SetConfig(const JsonType& json);
+  std::optional<SlotSet> SetConfig(const JsonType& json);
 
  private:
   struct SlotEntry {
