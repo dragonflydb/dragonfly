@@ -618,7 +618,7 @@ vector<RecordVec> OpRead(const OpArgs& op_args, const ArgSlice& args, const Read
 
   vector<RecordVec> response(args.size());
   for (size_t i = 0; i < args.size(); ++i) {
-    const string_view key = args[i];
+    string_view key = args[i];
 
     range_opts.start = opts.stream_ids.at(key);
 
@@ -1446,7 +1446,8 @@ void StreamFamily::Register(CommandRegistry* registry) {
             // Therefore the command has format:
             //   XREAD COUNT <count> STREAMS <stream1> <stream2> <id1> <id2>
             // Where the keys are <stream1> and <stream2>.
-            << CI{"XREAD", CO::READONLY | CO::REVERSE_MAPPING, -4, 4, 5, 1}.HFUNC(XRead)
+            << CI{"XREAD", CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 3, 3, 1}
+                   .HFUNC(XRead)
             << CI{"XSETID", CO::WRITE | CO::DENYOOM, 3, 1, 1, 1}.HFUNC(XSetId)
             << CI{"_XGROUP_HELP", CO::NOSCRIPT | CO::HIDDEN, 2, 0, 0, 0}.SetHandler(XGroupHelp);
 }
