@@ -55,8 +55,8 @@ class ClusterConfig {
   // If key is in my slots ownership return true
   bool IsMySlot(SlotId id) const;
 
-  // Returns the master configured for `id`. Returns a default-initialized `Node` if `SetConfig()`
-  // was never completed successfully.
+  // Returns the master configured for `id`.
+  // Must not be called when IsConfigured() == false.
   Node GetMasterNodeForSlot(SlotId id) const;
 
   ClusterShards GetConfig() const;
@@ -67,6 +67,9 @@ class ClusterConfig {
 
   // Parses `json` into `ClusterShards` and calls the above overload.
   bool SetConfig(const JsonType& json);
+
+  // Returns whether SetConfig() was ever successfully called.
+  bool IsConfigured() const;
 
  private:
   struct SlotEntry {

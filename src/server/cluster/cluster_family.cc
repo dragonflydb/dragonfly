@@ -178,25 +178,53 @@ void ClusterFamily::ClusterInfo(ConnectionContext* cntx) {
   auto append = [&msg](absl::AlphaNum a1, absl::AlphaNum a2) {
     absl::StrAppend(&msg, a1, ":", a2, "\r\n");
   };
-  // info command just return some stats about this instance
-  int known_nodes = 1;
+
+  // Initialize response variables to emulated mode.
+  string_view state = "ok"sv;
+  SlotId slots_assigned = ClusterConfig::kMaxSlotNum + 1;
+  size_t known_nodes = 1;
   long epoch = 1;
-  ServerState& etl = *ServerState::tlocal();
-  if (etl.is_master) {
-    auto vec = server_family_->GetDflyCmd()->GetReplicasRoleInfo();
-    if (!vec.empty()) {
-      known_nodes = 2;
+  size_t cluster_size = 1;
+
+  if (is_emulated_cluster_) {
+    ServerState& etl = *ServerState::tlocal();
+    if (etl.is_master) {
+      auto vec = server_family_->GetDflyCmd()->GetReplicasRoleInfo();
+      if (!vec.empty()) {
+        known_nodes = 2;
+      }
+    } else {
+      if (server_family_->HasReplica()) {
+        known_nodes = 2;
+        epoch = server_family_->GetReplicaInfo().master_last_io_sec;
+      }
     }
+  } else if (!cluster_config_->IsConfigured()) {
+    state = "fail"sv;
+    slots_assigned = 0;
+    cluster_size = 0;
+    known_nodes = 0;
   } else {
-    if (server_family_->HasReplica()) {
-      known_nodes = 2;
-      epoch = server_family_->GetReplicaInfo().master_last_io_sec;
+    absl::flat_hash_set<string_view> nodes;
+    absl::flat_hash_set<string_view> master_nodes;
+    auto config = cluster_config_->GetConfig();
+    for (const auto& shard_config : config) {
+      nodes.insert(shard_config.master.id);
+      if (!shard_config.slot_ranges.empty()) {
+        master_nodes.insert(shard_config.master.id);
+      }
+
+      for (const auto& replica : shard_config.replicas) {
+        nodes.insert(replica.id);
+      }
     }
+    known_nodes = nodes.size();
+    cluster_size = master_nodes.size();
   }
-  int cluster_size = known_nodes - 1;
-  append("cluster_state", "ok");
-  append("cluster_slots_assigned", ClusterConfig::kMaxSlotNum);
-  append("cluster_slots_ok", ClusterConfig::kMaxSlotNum);
+
+  append("cluster_state", state);
+  append("cluster_slots_assigned", slots_assigned);
+  append("cluster_slots_ok", slots_assigned);  // We do not support other failed nodes.
   append("cluster_slots_pfail", 0);
   append("cluster_slots_fail", 0);
   append("cluster_known_nodes", known_nodes);

@@ -3,6 +3,7 @@
 //
 
 #include <absl/flags/reflection.h>
+#include <gmock/gmock-matchers.h>
 
 #include <string>
 #include <string_view>
@@ -14,7 +15,9 @@
 
 namespace dfly {
 namespace {
+
 using namespace std;
+using testing::HasSubstr;
 
 class ClusterFamilyTest : public BaseFamilyTest {
  public:
@@ -29,10 +32,27 @@ class ClusterFamilyTest : public BaseFamilyTest {
   static constexpr string_view kInvalidConfiguration = "Invalid cluster configuration";
 };
 
-TEST_F(ClusterFamilyTest, ClusterConfigInvalid) {
+TEST_F(ClusterFamilyTest, ClusterConfigInvalidJSON) {
   EXPECT_THAT(Run({"dflycluster", "config", "invalid JSON"}),
               ErrArg("Invalid JSON cluster config"));
+
+  string cluster_info = Run({"cluster", "info"}).GetString();
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_state:fail"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_assigned:0"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_ok:0"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:0"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_size:0"));
+}
+
+TEST_F(ClusterFamilyTest, ClusterConfigInvalidConfig) {
   EXPECT_THAT(Run({"dflycluster", "config", "[]"}), ErrArg(kInvalidConfiguration));
+
+  string cluster_info = Run({"cluster", "info"}).GetString();
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_state:fail"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_assigned:0"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_ok:0"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:0"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_size:0"));
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidMissingSlots) {
@@ -54,6 +74,13 @@ TEST_F(ClusterFamilyTest, ClusterConfigInvalidMissingSlots) {
         }
       ])json"}),
               ErrArg(kInvalidConfiguration));
+
+  string cluster_info = Run({"cluster", "info"}).GetString();
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_state:fail"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_assigned:0"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_ok:0"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:0"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_size:0"));
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidOverlappingSlots) {
@@ -89,6 +116,13 @@ TEST_F(ClusterFamilyTest, ClusterConfigInvalidOverlappingSlots) {
         }
       ])json"}),
               ErrArg(kInvalidConfiguration));
+
+  string cluster_info = Run({"cluster", "info"}).GetString();
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_state:fail"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_assigned:0"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_ok:0"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:0"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_size:0"));
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigNoReplicas) {
@@ -111,6 +145,12 @@ TEST_F(ClusterFamilyTest, ClusterConfigNoReplicas) {
       ])json"}),
             "OK");
 
+  string cluster_info = Run({"cluster", "info"}).GetString();
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_state:ok"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_assigned:16384"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_ok:16384"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:1"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_size:1"));
   // TODO: Use "CLUSTER SLOTS" and "CLUSTER SHARDS" once implemented to verify new configuration
   // takes effect.
 }
@@ -141,6 +181,12 @@ TEST_F(ClusterFamilyTest, ClusterConfigFull) {
       ])json"}),
             "OK");
 
+  string cluster_info = Run({"cluster", "info"}).GetString();
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_state:ok"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_assigned:16384"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_ok:16384"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:2"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_size:1"));
   // TODO: Use "CLUSTER SLOTS" and "CLUSTER SHARDS" once implemented to verify new configuration
   // takes effect.
 }
@@ -191,8 +237,33 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
       ])json"}),
             "OK");
 
+  string cluster_info = Run({"cluster", "info"}).GetString();
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_state:ok"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_assigned:16384"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_ok:16384"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:4"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_size:2"));
   // TODO: Use "CLUSTER SLOTS" and "CLUSTER SHARDS" once implemented to verify new configuration
   // takes effect.
+}
+
+class ClusterFamilyEmulatedTest : public BaseFamilyTest {
+ public:
+  ClusterFamilyEmulatedTest() {
+    auto* flag = absl::FindCommandLineFlag("cluster_mode");
+    CHECK_NE(flag, nullptr);
+    string error;
+    CHECK(flag->ParseFrom("emulated", &error));
+  }
+};
+
+TEST_F(ClusterFamilyEmulatedTest, ClusterInfo) {
+  string cluster_info = Run({"cluster", "info"}).GetString();
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_state:ok"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_assigned:16384"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_ok:16384"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:1"));
+  EXPECT_THAT(cluster_info, HasSubstr("cluster_size:1"));
 }
 
 }  // namespace

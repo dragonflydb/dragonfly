@@ -251,8 +251,12 @@ ClusterConfig::Node ClusterConfig::GetMasterNodeForSlot(SlotId id) const {
 
 ClusterConfig::ClusterShards ClusterConfig::GetConfig() const {
   shared_lock gu(mu_);
-
   return config_;
+}
+
+bool ClusterConfig::IsConfigured() const {
+  shared_lock gu(mu_);
+  return !config_.empty();
 }
 
 }  // namespace dfly
