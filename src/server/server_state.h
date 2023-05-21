@@ -130,6 +130,8 @@ class ServerState {  // public struct - to allow initialization.
     gstate_ = s;
   }
 
+  bool AllowInlineScheduling() const;
+
   // Borrow interpreter from internal manager. Return int with ReturnInterpreter.
   Interpreter* BorrowInterpreter();
 

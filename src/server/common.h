@@ -50,9 +50,9 @@ class Transaction;
 class EngineShard;
 
 struct KeyLockArgs {
-  DbIndex db_index;
+  DbIndex db_index = 0;
   ArgSlice args;
-  unsigned key_step;
+  unsigned key_step = 1;
 };
 
 // Describes key indices.

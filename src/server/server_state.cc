@@ -13,6 +13,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
+#include "server/journal/journal.h"
 
 ABSL_FLAG(uint32_t, interpreter_per_thread, 10, "Lua interpreters per thread");
 
@@ -68,6 +69,24 @@ void ServerState::Init(uint32_t thread_index) {
 void ServerState::Destroy() {
   delete state_;
   state_ = nullptr;
+}
+
+bool ServerState::AllowInlineScheduling() const {
+  // We can't allow inline scheduling during a full sync, because then journaling transactions
+  // will be scheduled before RdbLoader::LoadItemsBuffer is finished. We can't use the regular
+  // locking mechanism because RdbLoader is not using transactions.
+  if (gstate_ == GlobalState::LOADING)
+    return false;
+
+  // Journal callbacks can preempt; This means we have to disallow inline scheduling
+  // because then we might interleave the callbacks loop from an inlined-scheduled command
+  // and a normally-scheduled command.
+  // The problematic loop is in JournalSlice::AddLogRecord, going over all the callbacks.
+
+  if (journal_ && journal_->HasRegisteredCallbacks())
+    return false;
+
+  return true;
 }
 
 Interpreter* ServerState::BorrowInterpreter() {
