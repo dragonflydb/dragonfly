@@ -285,7 +285,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
   }
 
   auto deleted_slot_ids = cluster_config_->SetConfig(json.value());
-  if (!deleted_slot_ids) {
+  if (!deleted_slot_ids.has_value()) {
     return rb->SendError("Invalid cluster configuration.");
   }
 
