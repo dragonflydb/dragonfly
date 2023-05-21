@@ -980,7 +980,7 @@ void Replica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context*
   }
   if (tx_data.shard_cnt <= 1 || (!use_multi_shard_exe_sync_ && !tx_data.IsGlobalCmd())) {
     VLOG(2) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
-    executor_->Execute(tx_data.dbid, tx_data.commands);
+    executor_->Execute(tx_data.dbid, absl::MakeSpan(tx_data.commands));
     journal_rec_executed_.fetch_add(tx_data.journal_rec_count, std::memory_order_relaxed);
     return;
   }
@@ -1012,7 +1012,7 @@ void Replica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context*
     // Global command will be executed only from one flow fiber. This ensure corectness of data in
     // replica.
     if (inserted_by_me) {
-      executor_->Execute(tx_data.dbid, tx_data.commands);
+      executor_->Execute(tx_data.dbid, absl::MakeSpan(tx_data.commands));
     }
     // Wait until exection is done, to make sure we done execute next commands while the global is
     // executed.
@@ -1022,7 +1022,7 @@ void Replica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context*
       return;
   } else {  // Non gloabl command will be executed by each the flow fiber
     VLOG(2) << "Execute txid: " << tx_data.txid << " executing shard transaction commands";
-    executor_->Execute(tx_data.dbid, tx_data.commands);
+    executor_->Execute(tx_data.dbid, absl::MakeSpan(tx_data.commands));
   }
   journal_rec_executed_.fetch_add(tx_data.journal_rec_count, std::memory_order_relaxed);
 

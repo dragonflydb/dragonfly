@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <absl/types/span.h>
+
 #include "facade/reply_capture.h"
 #include "server/journal/types.h"
 
@@ -19,7 +21,7 @@ class JournalExecutor {
 
   JournalExecutor(JournalExecutor&&) = delete;
 
-  void Execute(DbIndex dbid, std::vector<journal::ParsedEntry::CmdData>& cmds);
+  void Execute(DbIndex dbid, absl::Span<journal::ParsedEntry::CmdData> cmds);
   void Execute(DbIndex dbid, journal::ParsedEntry::CmdData& cmd);
 
   void FlushAll();  // Execute FLUSHALL.

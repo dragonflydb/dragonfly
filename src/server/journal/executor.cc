@@ -48,7 +48,7 @@ JournalExecutor::~JournalExecutor() {
   conn_context_.Inject(nullptr);
 }
 
-void JournalExecutor::Execute(DbIndex dbid, std::vector<journal::ParsedEntry::CmdData>& cmds) {
+void JournalExecutor::Execute(DbIndex dbid, absl::Span<journal::ParsedEntry::CmdData> cmds) {
   SelectDb(dbid);
   for (auto& cmd : cmds) {
     Execute(cmd);
