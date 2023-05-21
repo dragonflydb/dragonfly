@@ -951,22 +951,28 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
 
     last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
 
-    if (use_multi_shard_exe_sync_) {
-      InsertTxDataToShardResource(std::move(*tx_data));
+    if (!tx_data->is_ping) {
+      if (use_multi_shard_exe_sync_) {
+        InsertTxDataToShardResource(std::move(*tx_data));
+      } else {
+        ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
+      }
     } else {
-      ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
+      journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
     }
 
-    // Handle ACKs with the master. PING commands from the master mean we should immediately
+    // Handle ACKs with the master. PING opcodes from the master mean we should immediately
     // answer.
     uint64_t current_offset = journal_rec_executed_.load(std::memory_order_relaxed);
-    bool force_ack =
-        !tx_data->commands.empty() && ToSV(tx_data->commands.front().cmd_args[0]) == "PING";
-    if (force_ack || current_offset > ack_offs_ + 1024 || time(nullptr) > last_ack + 1) {
+    if (tx_data->is_ping || current_offset > ack_offs_ + 1024 || time(nullptr) > last_ack + 1) {
+      VLOG(1) << "Sending an ACK with offset=" << current_offset << " forced=" << tx_data->is_ping;
       ack_cmd = absl::StrCat("REPLCONF ACK ", current_offset);
       last_ack = time(nullptr);
       ack_offs_ = current_offset;
-      CHECK(!SendCommand(ack_cmd, &serializer));
+      if (auto ec = SendCommand(ack_cmd, &serializer); ec) {
+        cntx->ReportError(ec);
+        break;
+      }
     }
 
     waker_.notify();
@@ -1330,6 +1336,9 @@ bool Replica::TransactionData::AddEntry(journal::ParsedEntry&& entry) {
   ++journal_rec_count;
 
   switch (entry.opcode) {
+    case journal::Op::PING:
+      is_ping = true;
+      return true;
     case journal::Op::EXPIRED:
     case journal::Op::COMMAND:
       commands.push_back(std::move(entry.cmd));
@@ -1371,7 +1380,8 @@ auto Replica::TransactionReader::NextTxData(JournalReader* reader, Context* cntx
 
     // Check if journal command can be executed right away.
     // Expiration checks lock on master, so it never conflicts with running multi transactions.
-    if (res->opcode == journal::Op::EXPIRED || res->opcode == journal::Op::COMMAND)
+    if (res->opcode == journal::Op::EXPIRED || res->opcode == journal::Op::COMMAND ||
+        res->opcode == journal::Op::PING)
       return TransactionData::FromSingle(std::move(res.value()));
 
     // Otherwise, continue building multi command.

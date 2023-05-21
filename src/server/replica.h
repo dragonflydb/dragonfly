@@ -72,6 +72,7 @@ class Replica {
     uint32_t shard_cnt{0};
     absl::InlinedVector<journal::ParsedEntry::CmdData, 1> commands{0};
     uint32_t journal_rec_count{0};  // Count number of source entries to check offset.
+    bool is_ping = false;           // For Op::PING entries.
   };
 
   // Utility for reading TransactionData from a journal reader.

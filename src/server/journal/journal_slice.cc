@@ -166,12 +166,8 @@ void JournalSlice::UnregisterOnChange(uint32_t id) {
 }
 
 void JournalSlice::PingsLoop(std::chrono::milliseconds period_ms) {
-  std::string command = "PING";
-  MutableSlice slice{command};
-  CmdArgList args{&slice, 1};
-  Entry::Payload payload = std::make_pair(command, args);
-  Entry entry(/*txid=*/0, Op::COMMAND, /*dbid=*/0,
-              /*shard_cnt=*/1, payload);
+  Entry entry(/*txid=*/0, Op::PING, /*dbid=*/0,
+              /*shard_cnt=*/1, /*pl=*/{});
   while (!lameduck_) {
     VLOG(1) << "Sending PING to journal writer.";
     AddLogRecord(entry, true);

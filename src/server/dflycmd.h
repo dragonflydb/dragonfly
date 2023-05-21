@@ -40,7 +40,7 @@ struct FlowInfo {
   std::unique_ptr<JournalStreamer> streamer;
   std::string eof_token;
 
-  uint64_t last_ack;
+  uint64_t last_acked_lsn;
 
   std::function<void()> cleanup;  // Optional cleanup for cancellation.
 };

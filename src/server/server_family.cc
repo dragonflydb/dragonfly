@@ -1948,13 +1948,13 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
         return;
       }
 
-      int64_t ack;
+      uint64_t ack;
       if (!absl::SimpleAtoi(arg, &ack)) {
         LOG(ERROR) << "Bad int in REPLCONF ACK command! arg=" << arg;
         return;
       }
       VLOG(1) << "Received client ACK=" << ack;
-      cntx->replication_flow->last_ack = ack;
+      cntx->replication_flow->last_acked_lsn = ack;
       return;
     } else {
       VLOG(1) << cmd << " " << arg << " " << args.size();
