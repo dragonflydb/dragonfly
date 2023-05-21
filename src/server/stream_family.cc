@@ -543,7 +543,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
       streamTrimByID(stream_inst, opts.minid.val, opts.trim_approx);
     }
   } else {
-    streamAddTrimArgs add_args = {0};
+    streamAddTrimArgs add_args = {};
     add_args.trim_strategy = static_cast<int>(opts.trim_strategy);
     add_args.approx_trim = opts.trim_approx;
     add_args.limit = opts.limit;
