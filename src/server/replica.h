@@ -3,6 +3,8 @@
 //
 #pragma once
 
+#include <absl/container/inlined_vector.h>
+
 #include <boost/fiber/barrier.hpp>
 #include <queue>
 #include <variant>
@@ -65,7 +67,7 @@ class Replica {
     TxId txid{0};
     DbIndex dbid{0};
     uint32_t shard_cnt{0};
-    std::vector<journal::ParsedEntry::CmdData> commands{0};
+    absl::InlinedVector<journal::ParsedEntry::CmdData, 1> commands{0};
     uint32_t journal_rec_count{0};  // Count number of source entries to check offset.
   };
 
