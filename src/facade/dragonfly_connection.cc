@@ -198,7 +198,7 @@ void Connection::DispatchOperations::operator()(const PubMessage& pub_msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
   ++stats->async_writes_cnt;
   unsigned i = 0;
-  string_view arr[4];
+  array<string_view, 4> arr;
   if (pub_msg.pattern.empty()) {
     arr[i++] = "message";
   } else {
@@ -207,7 +207,8 @@ void Connection::DispatchOperations::operator()(const PubMessage& pub_msg) {
   }
   arr[i++] = pub_msg.Channel();
   arr[i++] = pub_msg.Message();
-  rbuilder->SendStringArr(absl::Span<string_view>{arr, i}, RedisReplyBuilder::CollectionType::PUSH);
+  rbuilder->SendStringArr(absl::Span<string_view>{arr.data(), i},
+                          RedisReplyBuilder::CollectionType::PUSH);
   VLOG(0) << "Sent data";
 }
 

@@ -134,6 +134,7 @@ vector<unsigned> ChangeSubscriptions(bool pattern, CmdArgList args, bool to_add,
   // removed.
   if (!to_add && conn_state.subscribe_info->IsEmpty()) {
     conn_state.subscribe_info.reset();
+    DCHECK_GE(conn->subscriptions, 1u);
     conn->subscriptions--;
   }
 
