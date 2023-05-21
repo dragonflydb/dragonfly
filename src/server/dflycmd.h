@@ -114,11 +114,11 @@ class DflyCmd {
 
   struct ReplicaRoleInfo {
     ReplicaRoleInfo(std::string address, uint32_t listening_port, SyncState sync_state,
-                    uint64_t lag);
+                    uint64_t lsn_lag);
     std::string address;
     uint32_t listening_port;
     std::string state;
-    uint64_t lag;
+    uint64_t lsn_lag;
   };
 
  public:

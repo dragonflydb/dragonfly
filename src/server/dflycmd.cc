@@ -64,8 +64,8 @@ struct TransactionGuard {
 }  // namespace
 
 DflyCmd::ReplicaRoleInfo::ReplicaRoleInfo(std::string address, uint32_t listening_port,
-                                          SyncState sync_state, uint64_t lag)
-    : address(address), listening_port(listening_port), lag(lag) {
+                                          SyncState sync_state, uint64_t lsn_lag)
+    : address(address), listening_port(listening_port), lsn_lag(lsn_lag) {
   switch (sync_state) {
     case SyncState::PREPARATION:
       state = "preparation";
@@ -556,9 +556,9 @@ std::vector<DflyCmd::ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() {
 
   auto replication_lags = ReplicationLags();
 
-  for (const auto& info : replica_infos_) {
-    vec.emplace_back(info.second->address, info.second->listening_port,
-                     info.second->state.load(memory_order_relaxed), replication_lags[info.first]);
+  for (const auto& [id, info] : replica_infos_) {
+    vec.emplace_back(info->address, info->listening_port, info->state.load(memory_order_relaxed),
+                     replication_lags[id]);
   }
   return vec;
 }
@@ -592,7 +592,8 @@ std::map<uint32_t, LSN> DflyCmd::ReplicationLags() const {
     auto& lags = shard_lags[shard->shard_id()];
     lags.reserve(replica_infos_.size());
     for (const auto& info : replica_infos_) {
-      int64_t lag = shard->journal()->GetLsn() - info.second->flows[shard->shard_id()].last_ack;
+      int64_t lag =
+          shard->journal()->GetLsn() - info.second->flows[shard->shard_id()].last_acked_lsn;
       DCHECK(lag >= 0);
       lags.push_back(lag);
     }
