@@ -4,11 +4,13 @@
 
 #include "server/cluster/cluster_family.h"
 
+#include <jsoncons/json.hpp>
 #include <mutex>
 #include <string>
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/json_object.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "server/command_registry.h"
@@ -30,6 +32,7 @@ namespace dfly {
 namespace {
 
 using namespace std;
+using namespace facade;
 using CI = CommandId;
 
 void BuildClusterSlotNetworkInfo(ConnectionContext* cntx, std::string_view host, uint32_t port,
@@ -249,6 +252,93 @@ void ClusterFamily::ReadWrite(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendOk();
 }
 
+void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
+  if (!ClusterConfig::IsClusterEnabled()) {
+    return (*cntx)->SendError("DFLYCLUSTER commands requires --cluster_mode=yes");
+  }
+  CHECK_NE(cluster_config_.get(), nullptr);
+
+  // TODO check admin port
+  ToUpper(&args[0]);
+  string_view sub_cmd = ArgS(args, 0);
+  if (sub_cmd == "GETSLOTINFO") {
+    return DflyClusterGetSlotInfo(args, cntx);
+  } else if (sub_cmd == "CONFIG") {
+    return DflyClusterConfig(args, cntx);
+  }
+
+  return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "DFLYCLUSTER"), kSyntaxErrType);
+}
+
+void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) {
+  SinkReplyBuilder* rb = cntx->reply_builder();
+
+  if (args.size() != 2) {
+    return rb->SendError(WrongNumArgsError("DFLYCLUSTER CONFIG"));
+  }
+
+  string_view json_str = ArgS(args, 1);
+  optional<JsonType> json = JsonFromString(json_str);
+  if (!json.has_value()) {
+    LOG(WARNING) << "Can't parse JSON for ClusterConfig " << json_str;
+    return rb->SendError("Invalid JSON cluster config", kSyntaxErrType);
+  }
+
+  if (!cluster_config_->SetConfig(json.value())) {
+    return rb->SendError("Invalid cluster configuration.");
+  }
+
+  return rb->SendOk();
+}
+
+void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() == 2) {
+    return (*cntx)->SendError(facade::WrongNumArgsError("DFLYCLUSTER GETSLOTINFO"), kSyntaxErrType);
+  }
+  ToUpper(&args[1]);
+  string_view slots_str = ArgS(args, 1);
+  if (slots_str != "SLOTS") {
+    return (*cntx)->SendError(kSyntaxErr, kSyntaxErrType);
+  }
+
+  vector<std::pair<SlotId, SlotStats>> slots_stats;
+  for (size_t i = 2; i < args.size(); ++i) {
+    string_view slot_str = ArgS(args, i);
+    uint32_t sid;
+    if (!absl::SimpleAtoi(slot_str, &sid)) {
+      return (*cntx)->SendError(kInvalidIntErr);
+    }
+    if (sid > ClusterConfig::kMaxSlotNum) {
+      return (*cntx)->SendError("Invalid slot id");
+    }
+    slots_stats.emplace_back(sid, SlotStats{});
+  }
+
+  Mutex mu;
+
+  auto cb = [&](auto*) {
+    EngineShard* shard = EngineShard::tlocal();
+    if (shard == nullptr)
+      return;
+
+    lock_guard lk(mu);
+    for (auto& [slot, data] : slots_stats) {
+      data += shard->db_slice().GetSlotStats(slot);
+    }
+  };
+
+  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+
+  (*cntx)->StartArray(slots_stats.size());
+
+  for (const auto& slot_data : slots_stats) {
+    (*cntx)->StartArray(3);
+    (*cntx)->SendBulkString(absl::StrCat(slot_data.first));
+    (*cntx)->SendBulkString("key_count");
+    (*cntx)->SendBulkString(absl::StrCat(slot_data.second.key_count));
+  }
+}
+
 using EngineFunc = void (ClusterFamily::*)(CmdArgList args, ConnectionContext* cntx);
 
 inline CommandId::Handler HandlerFunc(ClusterFamily* se, EngineFunc f) {
@@ -259,6 +349,8 @@ inline CommandId::Handler HandlerFunc(ClusterFamily* se, EngineFunc f) {
 
 void ClusterFamily::Register(CommandRegistry* registry) {
   *registry << CI{"CLUSTER", CO::READONLY, 2, 0, 0, 0}.HFUNC(Cluster)
+            << CI{"DFLYCLUSTER", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, 0}.HFUNC(
+                   DflyCluster)
             << CI{"READONLY", CO::READONLY, 1, 0, 0, 0}.HFUNC(ReadOnly)
             << CI{"READWRITE", CO::READONLY, 1, 0, 0, 0}.HFUNC(ReadWrite);
 }
