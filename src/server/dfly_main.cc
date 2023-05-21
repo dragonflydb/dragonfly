@@ -1,5 +1,5 @@
 
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2023, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -75,7 +75,6 @@ ABSL_DECLARE_FLAG(uint32_t, memcache_port);
 ABSL_DECLARE_FLAG(uint16_t, admin_port);
 ABSL_DECLARE_FLAG(std::string, admin_bind);
 
-ABSL_FLAG(bool, use_large_pages, false, "If true - uses large memory pages for allocations");
 ABSL_FLAG(string, bind, "",
           "Bind address. If empty - binds on all interfaces. "
           "It's not advised due to security implications.");
@@ -383,10 +382,12 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   }
 
   VersionMonitor version_monitor;
-
-  acceptor->Run();
   version_monitor.Run(pool);
+
+  // Start the acceptor loop and wait for the server to shutdown.
+  acceptor->Run();
   acceptor->Wait();
+
   version_monitor.Shutdown();
   service.Shutdown();
 
@@ -639,9 +640,6 @@ Usage: dragonfly [FLAGS]
 
   dfly::max_memory_limit = GetFlag(FLAGS_maxmemory).value;
 
-  if (GetFlag(FLAGS_use_large_pages)) {
-    mi_option_enable(mi_option_large_os_pages);
-  }
   mi_option_enable(mi_option_show_errors);
   mi_option_set(mi_option_max_warnings, 0);
   mi_option_set(mi_option_decommit_delay, 0);
