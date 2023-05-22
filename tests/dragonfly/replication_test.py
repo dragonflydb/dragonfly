@@ -292,7 +292,6 @@ async def test_disconnect_master(df_local_factory, df_seeder_factory, t_master, 
     seeder = df_seeder_factory.create(port=master.port, keys=n_keys, dbcount=2)
 
     async def crash_master_fs():
-        await asyncio.sleep(random.random() / 10 + 0.1 * len(replicas))
         master.stop(kill=True)
 
     async def start_master():
@@ -307,7 +306,8 @@ async def test_disconnect_master(df_local_factory, df_seeder_factory, t_master, 
 
     # Crash master during full sync, but with all passing initial connection phase
     await asyncio.gather(*(c_replica.execute_command("REPLICAOF localhost " + str(master.port))
-                           for c_replica in c_replicas), crash_master_fs())
+                           for c_replica in c_replicas))
+    await crash_master_fs()
 
     await asyncio.sleep(1 + len(replicas) * 0.5)
 

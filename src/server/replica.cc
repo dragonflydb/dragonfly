@@ -138,6 +138,9 @@ Replica::~Replica() {
   if (sync_fb_.IsJoinable()) {
     sync_fb_.Join();
   }
+  if (acks_fb_.IsJoinable()) {
+    acks_fb_.Join();
+  }
   if (execution_fb_.IsJoinable()) {
     execution_fb_.Join();
   }
@@ -202,8 +205,11 @@ void Replica::Stop() {
 
   // Make sure the replica fully stopped and did all cleanup,
   // so we can freely release resources (connections).
+  waker_.notifyAll();
   if (sync_fb_.IsJoinable())
     sync_fb_.Join();
+  if (acks_fb_.IsJoinable())
+    acks_fb_.Join();
 }
 
 void Replica::Pause(bool pause) {
@@ -783,6 +789,9 @@ void Replica::JoinAllFlows() {
     if (flow->sync_fb_.IsJoinable()) {
       flow->sync_fb_.Join();
     }
+    if (flow->acks_fb_.IsJoinable()) {
+      flow->acks_fb_.Join();
+    }
     if (flow->execution_fb_.IsJoinable()) {
       flow->execution_fb_.Join();
     }
@@ -934,9 +943,8 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
 
   JournalReader reader{&ps, 0};
   TransactionReader tx_reader{};
-  std::string ack_cmd;
-  time_t last_ack = 0;
-  ReqSerializer serializer{sock_.get()};
+
+  acks_fb_ = MakeFiber(&Replica::StableSyncDflyAcksFb, this, cntx);
 
   while (!cntx->IsCancelled()) {
     waker_.await([&]() {
@@ -958,24 +966,43 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
         ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
       }
     } else {
+      force_ping_ = true;
       journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
     }
 
+    waker_.notify();
+  }
+}
+
+void Replica::StableSyncDflyAcksFb(Context* cntx) {
+  constexpr std::chrono::duration ACK_TIME_MAX_INTERVAL = 3s;
+  constexpr size_t ACK_RECORD_MAX_INTERVAL = 1024;
+  std::string ack_cmd;
+  ReqSerializer serializer{sock_.get()};
+
+  auto next_ack_tp = std::chrono::steady_clock::now();
+
+  while (!cntx->IsCancelled()) {
     // Handle ACKs with the master. PING opcodes from the master mean we should immediately
     // answer.
     uint64_t current_offset = journal_rec_executed_.load(std::memory_order_relaxed);
-    if (tx_data->is_ping || current_offset > ack_offs_ + 1024 || time(nullptr) > last_ack + 1) {
-      VLOG(1) << "Sending an ACK with offset=" << current_offset << " forced=" << tx_data->is_ping;
-      ack_cmd = absl::StrCat("REPLCONF ACK ", current_offset);
-      last_ack = time(nullptr);
-      ack_offs_ = current_offset;
-      if (auto ec = SendCommand(ack_cmd, &serializer); ec) {
-        cntx->ReportError(ec);
-        break;
-      }
+    VLOG(1) << "Sending an ACK with offset=" << current_offset << " forced=" << force_ping_;
+    ack_cmd = absl::StrCat("REPLCONF ACK ", current_offset);
+    if (auto ec = SendCommand(ack_cmd, &serializer); ec) {
+      cntx->ReportError(ec);
+      break;
     }
+    ack_offs_ = current_offset;
+    force_ping_ = false;
+    next_ack_tp = std::chrono::steady_clock::now() + ACK_TIME_MAX_INTERVAL;
 
-    waker_.notify();
+    waker_.await_until(
+        [&]() {
+          return journal_rec_executed_.load(std::memory_order_relaxed) >
+                     ack_offs_ + ACK_RECORD_MAX_INTERVAL ||
+                 force_ping_;
+        },
+        next_ack_tp);
   }
 }
 

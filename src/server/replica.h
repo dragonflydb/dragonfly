@@ -163,6 +163,8 @@ class Replica {
   // Single flow stable state sync fiber spawned by StartStableSyncFlow.
   void StableSyncDflyReadFb(Context* cntx);
 
+  void StableSyncDflyAcksFb(Context* cntx);
+
   void StableSyncDflyExecFb(Context* cntx);
 
  private: /* Utility */
@@ -253,6 +255,8 @@ class Replica {
 
   // MainReplicationFb in standalone mode, FullSyncDflyFb in flow mode.
   Fiber sync_fb_;
+  Fiber acks_fb_;
+  bool force_ping_ = false;
   Fiber execution_fb_;
 
   std::vector<std::unique_ptr<Replica>> shard_flows_;

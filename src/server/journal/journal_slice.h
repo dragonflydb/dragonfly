@@ -50,8 +50,6 @@ class JournalSlice {
     return !change_cb_arr_.empty();
   }
 
-  void PingsLoop(std::chrono::milliseconds period_ms);
-
  private:
   struct RingItem;
 
@@ -70,9 +68,6 @@ class JournalSlice {
   std::error_code status_ec_;
 
   bool lameduck_ = false;
-
-  Fiber pings_fb_;
-  Done pings_done_;
 };
 
 }  // namespace journal
