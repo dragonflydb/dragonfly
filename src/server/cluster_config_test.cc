@@ -334,4 +334,95 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidMissingReplicas) {
       ])json")));
 }
 
+TEST_F(ClusterConfigTest, ConfigSetInvalidRepeatingMasterId) {
+  EXPECT_FALSE(config_.SetConfig(ParseJson(R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 10000
+            }
+          ],
+          "master": {
+            "id": "abcdefg",
+            "ip": "10.0.0.0",
+            "port": 8000
+          },
+          "replicas": []
+        },
+        {
+          "slot_ranges": [
+            {
+              "start": 10001,
+              "end": 16383
+            }
+          ],
+          "master": {
+            "id": "abcdefg",
+            "ip": "10.0.0.0",
+            "port": 8000
+          },
+          "replicas": []
+        }
+      ])json")));
+}
+
+TEST_F(ClusterConfigTest, ConfigSetInvalidRepeatingReplicaId) {
+  EXPECT_FALSE(config_.SetConfig(ParseJson(R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 16383
+            }
+          ],
+          "master": {
+            "id": "abcdefg",
+            "ip": "10.0.0.0",
+            "port": 8000
+          },
+          "replicas": [
+            {
+              "id": "xyz",
+              "ip": "10.0.0.1",
+              "port": 8001
+            },
+            {
+              "id": "xyz",
+              "ip": "10.0.0.2",
+              "port": 8002
+            }
+          ]
+        }
+      ])json")));
+}
+
+TEST_F(ClusterConfigTest, ConfigSetInvalidRepeatingMasterAndReplicaId) {
+  EXPECT_FALSE(config_.SetConfig(ParseJson(R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 16383
+            }
+          ],
+          "master": {
+            "id": "abcdefg",
+            "ip": "10.0.0.0",
+            "port": 8000
+          },
+          "replicas": [
+            {
+              "id": "abcdefg",
+              "ip": "10.0.0.1",
+              "port": 8001
+            }
+          ]
+        }
+      ])json")));
+}
+
 }  // namespace dfly
