@@ -977,25 +977,19 @@ static void RunStage(bool new_version, std::function<void(unsigned)> cb) {
   }
 };
 
-using PartialSaveOpts = tuple<const fs::path& /*filename*/, const fs::path& /*path*/>;
-
 // Start saving a single snapshot of a multi-file dfly snapshot.
 // If shard is null, then this is the summary file.
-GenericError DoPartialSave(PartialSaveOpts opts, const dfly::StringVec& scripts,
+GenericError DoPartialSave(fs::path full_filename, const dfly::StringVec& scripts,
                            RdbSnapshot* snapshot, EngineShard* shard) {
-  auto [filename, path] = opts;
-  // Construct resulting filename.
-  fs::path full_filename = filename;
   if (shard == nullptr) {
     ExtendDfsFilename("summary", &full_filename);
   } else {
     ExtendDfsFilenameWithShard(shard->shard_id(), &full_filename);
   }
-  fs::path full_path = path / full_filename;  // use / operator to concatenate paths.
 
   // Start rdb saving.
   SaveMode mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
-  GenericError local_ec = snapshot->Start(mode, full_path.string(), scripts);
+  GenericError local_ec = snapshot->Start(mode, full_filename.string(), scripts);
 
   if (!local_ec && mode == SaveMode::SINGLE_SHARD) {
     snapshot->StartInShard(shard);
@@ -1047,7 +1041,7 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
     return ec;
   }
   SubstituteFilenameTsPlaceholder(&filename, FormatTs(start));
-  fs::path path = dir_path;
+  fs::path fpath = dir_path;
 
   shared_ptr<LastSaveInfo> save_info;
 
@@ -1083,10 +1077,21 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
     return script_bodies;
   };
 
+  fpath /= filename;
+
+  if (IsCloudPath(fpath.string())) {
+    if (!aws_) {
+      aws_ = make_unique<cloud::AWS>("s3");
+      if (auto ec = aws_->Init(); ec) {
+        LOG(ERROR) << "Failed to initialize AWS " << ec;
+        aws_.reset();
+        return GenericError(ec, "Couldn't initialize AWS");
+      }
+    }
+  }
+
   // Start snapshots.
   if (new_version) {
-    auto file_opts = make_tuple(cref(filename), cref(path));
-
     // In the new version (.dfs) we store a file for every shard and one more summary file.
     // Summary file is always last in snapshots array.
     snapshots.resize(shard_set->size() + 1);
@@ -1098,7 +1103,7 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
       snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
 
       snapshot->SetAWS(aws_.get());
-      if (auto local_ec = DoPartialSave(file_opts, scripts, snapshot.get(), nullptr); local_ec) {
+      if (auto local_ec = DoPartialSave(fpath, scripts, snapshot.get(), nullptr); local_ec) {
         ec = local_ec;
         snapshot.reset();
       }
@@ -1109,7 +1114,7 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
       auto& snapshot = snapshots[shard->shard_id()];
       snapshot.reset(new RdbSnapshot(fq_threadpool_.get()));
       snapshot->SetAWS(aws_.get());
-      if (auto local_ec = DoPartialSave(file_opts, {}, snapshot.get(), shard); local_ec) {
+      if (auto local_ec = DoPartialSave(fpath, {}, snapshot.get(), shard); local_ec) {
         ec = local_ec;
         snapshot.reset();
       }
@@ -1120,28 +1125,15 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
   } else {
     snapshots.resize(1);
 
-    if (!filename.has_extension()) {
-      filename += ".rdb";
+    if (!fpath.has_extension()) {
+      fpath += ".rdb";
     }
-    path /= filename;  // use / operator to concatenate paths.
 
     snapshots[0].reset(new RdbSnapshot(fq_threadpool_.get()));
     auto lua_scripts = get_scripts();
-    string path_str = path.string();
 
-    if (IsCloudPath(path_str)) {
-      if (!aws_) {
-        aws_ = make_unique<cloud::AWS>("s3");
-        if (auto ec = aws_->Init(); ec) {
-          LOG(ERROR) << "Failed to initialize AWS " << ec;
-          aws_.reset();
-          return GenericError(ec, "Couldn't initialize AWS");
-        }
-      }
-      snapshots[0]->SetAWS(aws_.get());
-    }
-
-    ec = snapshots[0]->Start(SaveMode::RDB, path.string(), lua_scripts);
+    snapshots[0]->SetAWS(aws_.get());
+    ec = snapshots[0]->Start(SaveMode::RDB, fpath.string(), lua_scripts);
 
     if (!ec) {
       auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1166,8 +1158,7 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
   RunStage(new_version, close_cb);
 
   if (new_version) {
-    ExtendDfsFilename("summary", &filename);
-    path /= filename;
+    ExtendDfsFilename("summary", &fpath);
   }
 
   absl::Duration dur = absl::Now() - start;
@@ -1175,7 +1166,7 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
 
   // Populate LastSaveInfo.
   if (!ec) {
-    LOG(INFO) << "Saving " << path << " finished after "
+    LOG(INFO) << "Saving " << fpath << " finished after "
               << strings::HumanReadableElapsedTime(seconds);
 
     save_info = make_shared<LastSaveInfo>();
@@ -1184,7 +1175,7 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
     }
 
     save_info->save_time = absl::ToUnixSeconds(start);
-    save_info->file_name = path.generic_string();
+    save_info->file_name = fpath.generic_string();
     save_info->duration_sec = uint32_t(seconds);
 
     lock_guard lk(save_mu_);
