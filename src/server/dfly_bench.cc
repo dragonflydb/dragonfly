@@ -4,9 +4,12 @@
 
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
+#include <absl/strings/str_split.h>
+#include <absl/random/random.h>
 
 #include <queue>
 
+#include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "base/histogram.h"
 #include "base/init.h"
@@ -24,6 +27,9 @@ ABSL_FLAG(uint32_t, c, 20, "Number of connections per thread");
 ABSL_FLAG(uint32_t, qps, 20, "QPS schedule at which the generator sends requests to the server");
 ABSL_FLAG(uint32_t, n, 1000, "Number of requests to send per connection");
 ABSL_FLAG(std::string, h, "localhost", "server hostname/ip");
+ABSL_FLAG(uint32_t, key_minimum, 0, "Min value for keys used");
+ABSL_FLAG(uint32_t, key_maximum, 1'000, "Max value for keys used");
+ABSL_FLAG(std::string, ratio, "1:10", "Set:Get ratio");
 
 using namespace std;
 using namespace util;
@@ -84,37 +90,64 @@ void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
 }
 
 void Driver::Run(base::Histogram* dest) {
+  // TODO: move flag parsing to a central place and copy it to each thread
   string cmd;
-  bool conn_close = false;
-  uint32_t qps = GetFlag(FLAGS_qps);
-  double interval = 1000000000.0 / qps;
+  const uint32_t qps = GetFlag(FLAGS_qps);
+  const int64_t interval = 1000000000LL / qps;
+  VLOG(1) << "Delay between each query is " << interval << "ns";
 
-  // TODO: to measure latencies and add them into dest.
   auto receive_fb = MakeFiber([this, dest] { ReceiveFb(dest); });
 
-  uint32_t now = absl::GetCurrentTimeNanos();
+  int64_t last_invocation = absl::GetCurrentTimeNanos() - interval;
+
   uint32_t n = GetFlag(FLAGS_n);
-  VLOG(1) << "Sending " << n << " requests";
+  LOG(INFO) << "Sending " << n << " requests";
+
+  thread_local absl::InsecureBitGen bit_gen;
+  const uint32_t key_minimum = GetFlag(FLAGS_key_minimum);
+  const uint32_t key_maximum = GetFlag(FLAGS_key_maximum);
+
+  pair<string, string> ratio_str = absl::StrSplit(GetFlag(FLAGS_ratio), ':');
+  uint32_t ratio_set, ratio_get;
+  CHECK(absl::SimpleAtoi(ratio_str.first, &ratio_set));
+  CHECK(absl::SimpleAtoi(ratio_str.second, &ratio_get));
 
   for (unsigned i = 0; i < n; ++i) {
     cmd.clear();
 
-    // TODO: Decide on get/set based on input --ratio
-    // TODO: Randomize key based on input --key-minimum and --key-maximum
-    absl::StrAppend(&cmd, "set ", "key", i, " val\r\n");
-    Req req;
-    req.start = absl::GetCurrentTimeNanos();
-    reqs_.push(req);
+    uint32_t key_suffix = absl::Uniform(bit_gen, key_minimum, key_maximum);
 
-    // TODO: to schedule constant QPS.
+    if (absl::Uniform(bit_gen, 0U, ratio_get + ratio_set) < ratio_set) {
+      // TODO: value size
+      absl::StrAppend(&cmd, "set ", "key", key_suffix, " val\r\n");
+    } else {
+      absl::StrAppend(&cmd, "get ", "key", key_suffix, "\r\n");
+    }
+
+    int64_t sleep_ns = absl::GetCurrentTimeNanos() - last_invocation - interval;
+    if (sleep_ns > 0) {
+      VLOG(5) << "Sleeping for " << sleep_ns << "ns";
+      ThisFiber::SleepFor(chrono::nanoseconds(sleep_ns));
+    } else {
+      VLOG(5) << "Behind QPS schedule";
+    }
+    last_invocation = absl::GetCurrentTimeNanos();
+
+    Req req;
+    req.start = last_invocation;
+    reqs_.push(req);
+    // TODO: add type (get/set)
+
     error_code ec = socket_->Write(io::Buffer(cmd));
     if (ec && FiberSocketBase::IsConnClosed(ec)) {
-      conn_close = true;
+      // TODO: report failure
       VLOG(1) << "Connection closed";
       break;
     }
     CHECK(!ec) << ec.message();
   }
+
+  LOG(INFO) << "Done queuing requests, waiting for server processing";
 
   // TODO: to change to a condvar or something.
   while (!reqs_.empty()) {
@@ -213,7 +246,10 @@ int main(int argc, char* argv[]) {
   });
 
   LOG(INFO) << "Running all threads";
+  absl::Time start_time = absl::Now();
   pp->AwaitFiberOnAll([&](auto* p) { client->Run(); });
+  absl::Duration duration = absl::Now() - start_time;
+  LOG(INFO) << "Finished. Total time: " << duration;
 
   dfly::Mutex mutex;
   base::Histogram hist;
