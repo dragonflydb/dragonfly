@@ -36,9 +36,40 @@ ClusterConfig::ClusterConfig(string_view my_id) : my_id_(my_id) {
   cluster_enabled = true;
 }
 
-bool ClusterConfig::IsConfigValid(const vector<ClusterShard>& new_config) {
+namespace {
+bool HasValidNodeIds(const ClusterConfig::ClusterShards& new_config) {
+  absl::flat_hash_set<string_view> nodes;
+
+  auto CheckAndInsertNode = [&](string_view node) {
+    auto [_, inserted] = nodes.insert(node);
+    return inserted;
+  };
+
+  for (const auto& shard : new_config) {
+    if (!CheckAndInsertNode(shard.master.id)) {
+      LOG(WARNING) << "Master " << shard.master.id << " appears more than once";
+      return false;
+    }
+    for (const auto& replica : shard.replicas) {
+      if (!CheckAndInsertNode(replica.id)) {
+        LOG(WARNING) << "Replica " << replica.id << " appears more than once";
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+}  // namespace
+
+bool ClusterConfig::IsConfigValid(const ClusterShards& new_config) {
   // Make sure that all slots are set exactly once.
   array<bool, tuple_size<decltype(slots_)>::value> slots_found = {};
+
+  if (!HasValidNodeIds(new_config)) {
+    return false;
+  }
+
   for (const auto& shard : new_config) {
     for (const auto& slot_range : shard.slot_ranges) {
       if (slot_range.start > slot_range.end) {
