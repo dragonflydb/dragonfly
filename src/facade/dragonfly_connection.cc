@@ -209,7 +209,6 @@ void Connection::DispatchOperations::operator()(const PubMessage& pub_msg) {
   arr[i++] = pub_msg.Message();
   rbuilder->SendStringArr(absl::Span<string_view>{arr.data(), i},
                           RedisReplyBuilder::CollectionType::PUSH);
-  VLOG(0) << "Sent data";
 }
 
 void Connection::DispatchOperations::operator()(Connection::PipelineMessage& msg) {
@@ -865,6 +864,11 @@ void Connection::SendAsync(MessageHandle msg) {
   dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
 
   dispatch_q_.push_back(move(msg));
+
+  // Don't notify if a sync dispatch is in progress, it will wake after finishing.
+  // This might only happen if we started receving messages while `SUBSCRIBE`
+  // is still updating thread local data (see channel_store). We need to make sure its
+  // ack is sent before all other messages.
   if (dispatch_q_.size() == 1 && !cc_->sync_dispatch) {
     evc_.notify();
   }
