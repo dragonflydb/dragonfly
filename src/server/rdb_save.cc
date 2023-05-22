@@ -668,8 +668,8 @@ error_code RdbSerializer::SaveStreamConsumers(streamCG* cg) {
 
 error_code RdbSerializer::SendJournalOffset(uint64_t journal_offset) {
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_JOURNAL_OFFSET));
-  uint8_t buf[sizeof(uint64_t)] = {0};
-  memcpy(buf, &journal_offset, sizeof(uint64_t));
+  uint8_t buf[sizeof(uint64_t)];
+  absl::little_endian::Store64(buf, journal_offset);
   return WriteRaw(buf);
 }
 
