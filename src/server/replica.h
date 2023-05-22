@@ -234,7 +234,14 @@ class Replica {
   bool use_multi_shard_exe_sync_;
 
   std::unique_ptr<JournalExecutor> executor_;
-  // Count the number of journal records executed in specific flow
+
+  // The master instance has a LSN for each journal record. This counts
+  // the number of journal records executed in this flow plus the initial
+  // journal offset that we received in the transition from full sync
+  // to stable sync.
+  // Note: This is not 1-to-1 the LSN in the master, because this counts
+  // **executed** records, which might be received interleaved when commands
+  // run out-of-order on the master instance.
   std::atomic_uint64_t journal_rec_executed_ = 0;
 
   // MainReplicationFb in standalone mode, FullSyncDflyFb in flow mode.

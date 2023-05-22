@@ -27,6 +27,7 @@ class JournalSlice {
 
   std::error_code Close();
 
+  // This is always the LSN of the *next* journal entry.
   LSN cur_lsn() const {
     return lsn_;
   }

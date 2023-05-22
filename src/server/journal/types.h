@@ -64,6 +64,8 @@ struct ParsedEntry : public EntryBase {
     CmdArgVec cmd_args;  // represents the parsed command.
   };
   CmdData cmd;
+
+  std::string ToString() const;
 };
 
 using ChangeCallback = std::function<void(const Entry&, bool await)>;

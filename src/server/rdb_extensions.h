@@ -27,3 +27,9 @@ const uint8_t RDB_OPCODE_COMPRESSED_LZ4_BLOB_START = 202;
 const uint8_t RDB_OPCODE_COMPRESSED_BLOB_END = 203;
 
 const uint8_t RDB_OPCODE_JOURNAL_BLOB = 210;
+
+// A full sync will continue to send information in journal blobs until the replica
+// sends a `DFLY STARTSTABLE` to the master.
+// We use this opcode to synchronize the journal offsets at the end of the full sync,
+// so it is always sent at the end of the RDB stream.
+const uint8_t RDB_OPCODE_JOURNAL_OFFSET = 211;

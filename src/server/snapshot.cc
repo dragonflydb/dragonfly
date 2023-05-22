@@ -66,7 +66,9 @@ void SliceSnapshot::Stop() {
   Join();
 
   if (journal_cb_id_) {
-    db_slice_->shard_owner()->journal()->UnregisterOnChange(journal_cb_id_);
+    auto* journal = db_slice_->shard_owner()->journal();
+    serializer_->SendJournalOffset(journal->GetLsn());
+    journal->UnregisterOnChange(journal_cb_id_);
   }
 
   PushSerializedToChannel(true);

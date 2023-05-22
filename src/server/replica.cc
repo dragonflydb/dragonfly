@@ -698,9 +698,9 @@ error_code Replica::ConsumeDflyStream() {
       flow->waker_.notifyAll();
     }
 
-    // Iterate over map and cancle all blocking entities
+    // Iterate over map and cancel all blocking entities
     {
-      lock_guard l{multi_shard_exe_->map_mu};
+      lock_guard lk{multi_shard_exe_->map_mu};
       for (auto& tx_data : multi_shard_exe_->tx_sync_execution) {
         tx_data.second.barrier.Cancel();
         tx_data.second.block.Cancel();
@@ -888,6 +888,7 @@ void Replica::FullSyncDflyFb(string eof_token, BlockingCounter bc, Context* cntx
     leftover_buf_.reset();
   }
 
+  this->journal_rec_executed_.store(loader.journal_offset());
   VLOG(1) << "FullSyncDflyFb finished after reading " << loader.bytes_read() << " bytes";
 }
 
@@ -1020,7 +1021,7 @@ void Replica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context*
     // Check if we woke up due to cancellation.
     if (cntx_.IsCancelled())
       return;
-  } else {  // Non gloabl command will be executed by each the flow fiber
+  } else {  // Non global command will be executed by each flow fiber
     VLOG(2) << "Execute txid: " << tx_data.txid << " executing shard transaction commands";
     executor_->Execute(tx_data.dbid, absl::MakeSpan(tx_data.commands));
   }

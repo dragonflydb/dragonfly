@@ -65,6 +65,8 @@ void JournalWriter::Write(const journal::Entry& entry) {
     cur_dbid_ = entry.dbid;
   }
 
+  VLOG(1) << "Writing entry " << entry.ToString();
+
   Write(uint8_t(entry.opcode));
 
   switch (entry.opcode) {
@@ -186,6 +188,8 @@ io::Result<journal::ParsedEntry> JournalReader::ReadEntry() {
 
   SET_OR_UNEXPECT(ReadUInt<uint64_t>(), entry.txid);
   SET_OR_UNEXPECT(ReadUInt<uint32_t>(), entry.shard_cnt);
+
+  VLOG(1) << "Read entry " << entry.ToString();
 
   if (opcode == journal::Op::EXEC) {
     return entry;

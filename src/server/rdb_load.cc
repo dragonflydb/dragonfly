@@ -1826,6 +1826,15 @@ error_code RdbLoader::Load(io::Source* src) {
       continue;
     }
 
+    if (type == RDB_OPCODE_JOURNAL_OFFSET) {
+      VLOG(1) << "Read RDB_OPCODE_JOURNAL_OFFSET";
+      uint64_t journal_offset;
+      SET_OR_RETURN(FetchInt<uint64_t>(), journal_offset);
+      VLOG(1) << "Got offset " << journal_offset;
+      journal_offset_ = journal_offset;
+      continue;
+    }
+
     if (type == RDB_OPCODE_SELECTDB) {
       unsigned dbid = 0;
 
@@ -1838,7 +1847,7 @@ error_code RdbLoader::Load(io::Source* src) {
         return RdbError(errc::bad_db_index);
       }
 
-      VLOG(1) << "Select DB: " << dbid;
+      VLOG(2) << "Select DB: " << dbid;
       for (unsigned i = 0; i < shard_set->size(); ++i) {
         // we should flush pending items before switching dbid.
         FlushShardAsync(i);
@@ -2050,6 +2059,7 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
     journal::ParsedEntry entry{};
     SET_OR_RETURN(journal_reader_.ReadEntry(), entry);
     ex.Execute(entry.dbid, entry.cmd);
+    VLOG(1) << "Reading item: " << entry.ToString();
     done++;
   }
 

@@ -666,6 +666,13 @@ error_code RdbSerializer::SaveStreamConsumers(streamCG* cg) {
   return error_code{};
 }
 
+error_code RdbSerializer::SendJournalOffset(uint64_t journal_offset) {
+  RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_JOURNAL_OFFSET));
+  uint8_t buf[sizeof(uint64_t)];
+  absl::little_endian::Store64(buf, journal_offset);
+  return WriteRaw(buf);
+}
+
 error_code RdbSerializer::SendFullSyncCut() {
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_FULLSYNC_END));
 
