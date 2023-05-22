@@ -247,6 +247,102 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
   // takes effect.
 }
 
+TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
+  string node_id = Run({"dflycluster", "myid"}).GetString();
+  string config_prefix = R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 16383
+            }
+          ],
+          "master": {
+            "id": ")json";
+  string config_suffix = R"json(",
+            "ip": "10.0.0.1",
+            "port": 7000
+          },
+          "replicas": []
+        }
+      ])json";
+  string full_config = absl::StrCat(config_prefix, node_id, config_suffix);
+
+  EXPECT_EQ(Run({"dflycluster", "config", full_config}), "OK");
+
+  Run({"debug", "populate", "100000"});
+
+  auto slots_info = Run({"dflycluster", "getslotinfo", "slots", "1", "2"}).GetVec();
+  EXPECT_EQ(slots_info.size(), 2);
+  auto slot1 = slots_info[0].GetVec();
+  EXPECT_EQ(slot1.size(), 3);
+  EXPECT_EQ(slot1[0], "1");
+  EXPECT_EQ(slot1[1], "key_count");
+  EXPECT_NE(slot1[2], "0");
+  auto slot2 = slots_info[1].GetVec();
+  EXPECT_EQ(slot2.size(), 3);
+  EXPECT_EQ(slot2[0], "2");
+  EXPECT_EQ(slot2[1], "key_count");
+  EXPECT_NE(slot2[2], "0");
+}
+
+TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
+  string node_id = Run({"dflycluster", "myid"}).GetString();
+  string config_prefix = R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 16383
+            }
+          ],
+          "master": {
+            "id": ")json";
+  string config_suffix = R"json(",
+            "ip": "10.0.0.1",
+            "port": 7000
+          },
+          "replicas": []
+        }
+      ])json";
+  string full_config = absl::StrCat(config_prefix, node_id, config_suffix);
+
+  EXPECT_EQ(Run({"dflycluster", "config", full_config}), "OK");
+
+  Run({"debug", "populate", "100000"});
+
+  auto slots_info = Run({"dflycluster", "getslotinfo", "slots", "1", "2"}).GetVec();
+  EXPECT_EQ(slots_info.size(), 2);
+  auto slot1 = slots_info[0].GetVec();
+  EXPECT_EQ(slot1.size(), 3);
+  EXPECT_EQ(slot1[0], "1");
+  EXPECT_EQ(slot1[1], "key_count");
+  EXPECT_NE(slot1[2], "0");
+  auto slot2 = slots_info[1].GetVec();
+  EXPECT_EQ(slot2.size(), 3);
+  EXPECT_EQ(slot2[0], "2");
+  EXPECT_EQ(slot2[1], "key_count");
+  EXPECT_NE(slot2[2], "0");
+
+  string new_config = absl::StrCat(config_prefix, "abc", config_suffix);
+  EXPECT_EQ(Run({"dflycluster", "config", new_config}), "OK");
+  sleep(1);
+  slots_info = Run({"dflycluster", "getslotinfo", "slots", "1", "2"}).GetVec();
+  EXPECT_EQ(slots_info.size(), 2);
+  slot1 = slots_info[0].GetVec();
+  EXPECT_EQ(slot1.size(), 3);
+  EXPECT_EQ(slot1[0], "1");
+  EXPECT_EQ(slot1[1], "key_count");
+  EXPECT_EQ(slot1[2], "0");
+  slot2 = slots_info[1].GetVec();
+  EXPECT_EQ(slot2.size(), 3);
+  EXPECT_EQ(slot2[0], "2");
+  EXPECT_EQ(slot2[1], "key_count");
+  EXPECT_EQ(slot2[2], "0");
+}
+
 class ClusterFamilyEmulatedTest : public BaseFamilyTest {
  public:
   ClusterFamilyEmulatedTest() {

@@ -289,9 +289,18 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return DflyClusterGetSlotInfo(args, cntx);
   } else if (sub_cmd == "CONFIG") {
     return DflyClusterConfig(args, cntx);
+  } else if (sub_cmd == "MYID") {
+    return DflyClusterMyId(args, cntx);
   }
 
   return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "DFLYCLUSTER"), kSyntaxErrType);
+}
+
+void ClusterFamily::DflyClusterMyId(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() != 1) {
+    return (*cntx)->SendError(WrongNumArgsError("DFLYCLUSTER MYID"));
+  }
+  (*cntx)->SendBulkString(server_family_->master_id());
 }
 
 void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) {
