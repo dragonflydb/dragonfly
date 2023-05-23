@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 
+#include "absl/strings/substitute.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
@@ -17,7 +18,7 @@ namespace dfly {
 namespace {
 
 using namespace std;
-using testing::HasSubstr;
+using namespace testing;
 
 class ClusterFamilyTest : public BaseFamilyTest {
  public:
@@ -245,6 +246,83 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
   EXPECT_THAT(cluster_info, HasSubstr("cluster_size:2"));
   // TODO: Use "CLUSTER SLOTS" and "CLUSTER SHARDS" once implemented to verify new configuration
   // takes effect.
+}
+
+TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
+  string config_template = R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 16383
+            }
+          ],
+          "master": {
+            "id": "$0",
+            "ip": "10.0.0.1",
+            "port": 7000
+          },
+          "replicas": []
+        }
+      ])json";
+  string config = absl::Substitute(config_template, Run({"dflycluster", "myid"}).GetString());
+
+  EXPECT_EQ(Run({"dflycluster", "config", config}), "OK");
+
+  Run({"debug", "populate", "100000"});
+
+  auto slots_info = Run({"dflycluster", "getslotinfo", "slots", "1", "2"}).GetVec();
+  EXPECT_EQ(slots_info.size(), 2);
+  auto slot1 = slots_info[0].GetVec();
+  EXPECT_THAT(slot1, ElementsAre("1", "key_count", Not("0")));
+
+  auto slot2 = slots_info[1].GetVec();
+  EXPECT_THAT(slot2, ElementsAre("2", "key_count", Not("0")));
+}
+
+TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
+  string config_template = R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 16383
+            }
+          ],
+          "master": {
+            "id": "$0",
+            "ip": "10.0.0.1",
+            "port": 7000
+          },
+          "replicas": []
+        }
+      ])json";
+  string config = absl::Substitute(config_template, Run({"dflycluster", "myid"}).GetString());
+
+  EXPECT_EQ(Run({"dflycluster", "config", config}), "OK");
+
+  Run({"debug", "populate", "100000"});
+
+  auto slots_info = Run({"dflycluster", "getslotinfo", "slots", "1", "2"}).GetVec();
+  EXPECT_EQ(slots_info.size(), 2);
+  auto slot1 = slots_info[0].GetVec();
+  EXPECT_THAT(slot1, ElementsAre("1", "key_count", Not("0")));
+
+  auto slot2 = slots_info[1].GetVec();
+  EXPECT_THAT(slot2, ElementsAre("2", "key_count", Not("0")));
+
+  config = absl::Substitute(config_template, "abc");
+  EXPECT_EQ(Run({"dflycluster", "config", config}), "OK");
+  sleep(1);
+  slots_info = Run({"dflycluster", "getslotinfo", "slots", "1", "2"}).GetVec();
+  EXPECT_EQ(slots_info.size(), 2);
+  slot1 = slots_info[0].GetVec();
+  EXPECT_THAT(slot1, ElementsAre("1", "key_count", "0"));
+
+  slot2 = slots_info[1].GetVec();
+  EXPECT_THAT(slot2, ElementsAre("2", "key_count", "0"));
 }
 
 class ClusterFamilyEmulatedTest : public BaseFamilyTest {

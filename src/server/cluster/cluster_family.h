@@ -44,6 +44,7 @@ class ClusterFamily {
   void DflyCluster(CmdArgList args, ConnectionContext* cntx);
   void DflyClusterConfig(CmdArgList args, ConnectionContext* cntx);
   void DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx);
+  void DflyClusterMyId(CmdArgList args, ConnectionContext* cntx);
 
   std::string BuildClusterNodeReply(ConnectionContext* cntx) const;
 
