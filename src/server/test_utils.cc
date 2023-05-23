@@ -106,6 +106,7 @@ class BaseFamilyTest::TestConnWrapper {
 
 BaseFamilyTest::TestConnWrapper::TestConnWrapper(Protocol proto)
     : dummy_conn_(new TestConnection(proto, &sink_)), cmd_cntx_(&sink_, dummy_conn_.get()) {
+  cmd_cntx_.is_test = true;
 }
 
 BaseFamilyTest::TestConnWrapper::~TestConnWrapper() {
