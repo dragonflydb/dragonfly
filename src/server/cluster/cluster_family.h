@@ -33,6 +33,7 @@ class ClusterFamily {
   // Cluster commands compatible with Redis
   void Cluster(CmdArgList args, ConnectionContext* cntx);
   void ClusterHelp(ConnectionContext* cntx);
+  void ClusterShards(ConnectionContext* cntx);
   void ClusterSlots(ConnectionContext* cntx);
   void ClusterNodes(ConnectionContext* cntx);
   void ClusterInfo(ConnectionContext* cntx);
@@ -47,6 +48,8 @@ class ClusterFamily {
   void DflyClusterMyId(CmdArgList args, ConnectionContext* cntx);
 
   std::string BuildClusterNodeReply(ConnectionContext* cntx) const;
+
+  ClusterConfig::ClusterShard GetEmulatedShardInfo(ConnectionContext* cntx) const;
 
   bool is_emulated_cluster_ = false;
   ServerFamily* server_family_ = nullptr;
