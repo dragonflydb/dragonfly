@@ -4,6 +4,7 @@
 
 #include <absl/flags/reflection.h>
 #include <gmock/gmock-matchers.h>
+#include <gtest/gtest-matchers.h>
 
 #include <string>
 #include <string_view>
@@ -152,6 +153,10 @@ TEST_F(ClusterFamilyTest, ClusterConfigNoReplicas) {
   EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_ok:16384"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:1"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_size:1"));
+
+  EXPECT_THAT(Run({"get", "x"}).GetString(),
+              testing::MatchesRegex(R"(MOVED [0-9]+ 10.0.0.1:7000)"));
+
   // TODO: Use "CLUSTER SLOTS" and "CLUSTER SHARDS" once implemented to verify new configuration
   // takes effect.
 }
@@ -244,6 +249,32 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
   EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_ok:16384"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:4"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_size:2"));
+
+  absl::InsecureBitGen eng;
+  while (true) {
+    string random_key = GetRandomHex(eng, 40);
+    SlotId slot = ClusterConfig::KeySlot(random_key);
+    if (slot > 10'000) {
+      continue;
+    }
+
+    EXPECT_THAT(Run({"get", random_key}).GetString(),
+                testing::MatchesRegex(R"(MOVED [0-9]+ 10.0.0.1:7000)"));
+    break;
+  }
+
+  while (true) {
+    string random_key = GetRandomHex(eng, 40);
+    SlotId slot = ClusterConfig::KeySlot(random_key);
+    if (slot <= 10'000) {
+      continue;
+    }
+
+    EXPECT_THAT(Run({"get", random_key}).GetString(),
+                testing::MatchesRegex(R"(MOVED [0-9]+ 10.0.0.2:7001)"));
+    break;
+  }
+
   // TODO: Use "CLUSTER SLOTS" and "CLUSTER SHARDS" once implemented to verify new configuration
   // takes effect.
 }
