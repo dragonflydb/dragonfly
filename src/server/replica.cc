@@ -988,13 +988,13 @@ void Replica::StableSyncDflyAcksFb(Context* cntx) {
     uint64_t current_offset = journal_rec_executed_.load(std::memory_order_relaxed);
     VLOG(1) << "Sending an ACK with offset=" << current_offset << " forced=" << force_ping_;
     ack_cmd = absl::StrCat("REPLCONF ACK ", current_offset);
+    force_ping_ = false;
+    next_ack_tp = std::chrono::steady_clock::now() + kAckTimeMaxInterval;
     if (auto ec = SendCommand(ack_cmd, &serializer); ec) {
       cntx->ReportError(ec);
       break;
     }
     ack_offs_ = current_offset;
-    force_ping_ = false;
-    next_ack_tp = std::chrono::steady_clock::now() + kAckTimeMaxInterval;
 
     waker_.await_until(
         [&]() {
