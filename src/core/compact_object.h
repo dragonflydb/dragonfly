@@ -72,7 +72,7 @@ class RobjWrapper {
 
   uint32_t type_ : 4;
   uint32_t encoding_ : 4;
-  uint32_t unneeded_ : 24;
+  uint32_t : 24;
 
 } __attribute__((packed));
 

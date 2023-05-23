@@ -37,6 +37,13 @@ jobs:
         # Test of these containers
         container: ["ubuntu-dev:20", "alpine-dev:latest"]
         build-type: [Debug, Release]
+        compiler: [{cxx: g++, c: gcc}]
+        cxx_flags: ["-Werror"]
+        include:
+          - container: "alpine-dev:latest"
+            build-type: Debug
+            compiler: {cxx: clang++, c: clang}
+            cxx_flags: ""
     timeout-minutes: 30
     container:
       image: ghcr.io/romange/${{ matrix.container }}
@@ -53,6 +60,9 @@ jobs:
           uname -a
           cmake --version
           mkdir -p ${{github.workspace}}/build
+          if [ "${{matrix.compiler.c}}" = "clang" ]; then
+            apk update && apk add clang
+          fi
       - name: Cache build deps
         id: cache-deps
         uses: actions/cache@v3
@@ -71,8 +81,10 @@ jobs:
           cmake -B ${{github.workspace}}/build \
             -DCMAKE_BUILD_TYPE=${{matrix.build-type}} \
             -GNinja \
+            -DCMAKE_C_COMPILER="${{matrix.compiler.c}}" \
+            -DCMAKE_CXX_COMPILER="${{matrix.compiler.cxx}}" \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_FLAGS="-Werror" \
+            -DCMAKE_CXX_FLAGS="${{matrix.compiler.cxx_flags}}" \
             -L
           cd ${{github.workspace}}/build && pwd
           du -hcs _deps/

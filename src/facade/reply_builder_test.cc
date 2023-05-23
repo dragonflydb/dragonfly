@@ -760,7 +760,7 @@ TEST_F(RedisReplyBuilderTest, TestBasicCapture) {
   CapturingReplyBuilder crb{};
   using RRB = RedisReplyBuilder;
 
-  auto big_arr_cb = [kTestSws](RRB* r) {
+  auto big_arr_cb = [](RRB* r) {
     r->StartArray(4);
     {
       r->StartArray(2);
@@ -802,7 +802,7 @@ TEST_F(RedisReplyBuilderTest, TestBasicCapture) {
         r->SendDouble(2.5);
         r->SendSimpleStrArr(kTestSws);
       },
-      [kTestSws](RRB* r) {
+      [](RRB* r) {
         vector<RRB::OptResp> v = {
             RRB::ResponseValue{"key-1", "value-1", 0, 0},
             nullopt,

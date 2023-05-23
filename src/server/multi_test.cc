@@ -40,7 +40,6 @@ const char kKey4[] = "y";
 const char kKeySid0[] = "x";
 const char kKeySid1[] = "c";
 const char kKeySid2[] = "b";
-const char kKey2Sid0[] = "y";
 
 }  // namespace
 
@@ -558,9 +557,9 @@ TEST_F(MultiTest, EvalOOO) {
 //        MULTI - SET k1 v - SET k2 v - SET k3 v - EXEC
 // but the order of the commands inside appears in any permutation.
 TEST_F(MultiTest, MultiContendedPermutatedKeys) {
-  const int kRounds = 5;
+  constexpr int kRounds = 5;
 
-  auto run = [this, kRounds](vector<string> keys, bool reversed) {
+  auto run = [this](vector<string> keys, bool reversed) {
     int i = 0;
     do {
       Run({"multi"});
@@ -691,10 +690,10 @@ TEST_F(MultiTest, ContendedList) {
   if (absl::GetFlag(FLAGS_multi_exec_mode) == Transaction::NON_ATOMIC)
     return;
 
-  const int listSize = 50;
-  const int stepSize = 5;
+  constexpr int listSize = 50;
+  constexpr int stepSize = 5;
 
-  auto run = [this, listSize, stepSize](string_view src, string_view dest) {
+  auto run = [this](string_view src, string_view dest) {
     for (int i = 0; i < listSize / stepSize; i++) {
       Run({"multi"});
       Run({"sort", src});
