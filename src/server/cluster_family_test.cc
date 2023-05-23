@@ -336,13 +336,13 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
           "replicas": []
         }
       ])json";
-  string config = absl::Substitute(config_template, Run({"dflycluster", "myid"}).GetString());
+  string config = absl::Substitute(config_template, RunAdmin({"dflycluster", "myid"}).GetString());
 
-  EXPECT_EQ(Run({"dflycluster", "config", config}), "OK");
+  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
 
   Run({"debug", "populate", "100000"});
 
-  auto slots_info = Run({"dflycluster", "getslotinfo", "slots", "1", "2"}).GetVec();
+  auto slots_info = RunAdmin({"dflycluster", "getslotinfo", "slots", "1", "2"}).GetVec();
   EXPECT_EQ(slots_info.size(), 2);
   auto slot1 = slots_info[0].GetVec();
   EXPECT_THAT(slot1, ElementsAre("1", "key_count", Not("0")));
@@ -369,13 +369,13 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
           "replicas": []
         }
       ])json";
-  string config = absl::Substitute(config_template, Run({"dflycluster", "myid"}).GetString());
+  string config = absl::Substitute(config_template, RunAdmin({"dflycluster", "myid"}).GetString());
 
-  EXPECT_EQ(Run({"dflycluster", "config", config}), "OK");
+  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
 
   Run({"debug", "populate", "100000"});
 
-  auto slots_info = Run({"dflycluster", "getslotinfo", "slots", "1", "2"}).GetVec();
+  auto slots_info = RunAdmin({"dflycluster", "getslotinfo", "slots", "1", "2"}).GetVec();
   EXPECT_EQ(slots_info.size(), 2);
   auto slot1 = slots_info[0].GetVec();
   EXPECT_THAT(slot1, ElementsAre("1", "key_count", Not("0")));
@@ -384,9 +384,9 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
   EXPECT_THAT(slot2, ElementsAre("2", "key_count", Not("0")));
 
   config = absl::Substitute(config_template, "abc");
-  EXPECT_EQ(Run({"dflycluster", "config", config}), "OK");
+  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
   sleep(1);
-  slots_info = Run({"dflycluster", "getslotinfo", "slots", "1", "2"}).GetVec();
+  slots_info = RunAdmin({"dflycluster", "getslotinfo", "slots", "1", "2"}).GetVec();
   EXPECT_EQ(slots_info.size(), 2);
   slot1 = slots_info[0].GetVec();
   EXPECT_THAT(slot1, ElementsAre("1", "key_count", "0"));
