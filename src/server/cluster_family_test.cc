@@ -258,7 +258,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
     }
 
     EXPECT_THAT(Run({"get", random_key}).GetString(),
-        testing::MatchesRegex(R"(MOVED [0-9]+ 10.0.0.1:7000)"));
+                testing::MatchesRegex(R"(MOVED [0-9]+ 10.0.0.1:7000)"));
     break;
   }
 
@@ -270,7 +270,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
     }
 
     EXPECT_THAT(Run({"get", random_key}).GetString(),
-        testing::MatchesRegex(R"(MOVED [0-9]+ 10.0.0.2:7001)"));
+                testing::MatchesRegex(R"(MOVED [0-9]+ 10.0.0.2:7001)"));
     break;
   }
 
