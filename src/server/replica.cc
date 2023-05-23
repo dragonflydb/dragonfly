@@ -975,8 +975,8 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
 }
 
 void Replica::StableSyncDflyAcksFb(Context* cntx) {
-  constexpr std::chrono::duration ACK_TIME_MAX_INTERVAL = 3s;
-  constexpr size_t ACK_RECORD_MAX_INTERVAL = 1024;
+  constexpr std::chrono::duration kAckTimeMaxInterval = 3s;
+  constexpr size_t kAckRecordMaxInterval = 1024;
   std::string ack_cmd;
   ReqSerializer serializer{sock_.get()};
 
@@ -994,12 +994,12 @@ void Replica::StableSyncDflyAcksFb(Context* cntx) {
     }
     ack_offs_ = current_offset;
     force_ping_ = false;
-    next_ack_tp = std::chrono::steady_clock::now() + ACK_TIME_MAX_INTERVAL;
+    next_ack_tp = std::chrono::steady_clock::now() + kAckTimeMaxInterval;
 
     waker_.await_until(
         [&]() {
           return journal_rec_executed_.load(std::memory_order_relaxed) >
-                     ack_offs_ + ACK_RECORD_MAX_INTERVAL ||
+                     ack_offs_ + kAckRecordMaxInterval ||
                  force_ping_;
         },
         next_ack_tp);
