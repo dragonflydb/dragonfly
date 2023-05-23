@@ -34,8 +34,47 @@ class ClusterFamilyTest : public BaseFamilyTest {
   static constexpr string_view kInvalidConfiguration = "Invalid cluster configuration";
 };
 
+TEST_F(ClusterFamilyTest, DflyClusterOnlyOnAdminPort) {
+  EXPECT_EQ(RunAdmin({"dflycluster", "config", R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 16383
+            }
+          ],
+          "master": {
+            "id": "abcd1234",
+            "ip": "10.0.0.1",
+            "port": 7000
+          },
+          "replicas": []
+        }
+      ])json"}),
+            "OK");
+  EXPECT_THAT(Run({"dflycluster", "config", R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 16383
+            }
+          ],
+          "master": {
+            "id": "abcd1234",
+            "ip": "10.0.0.1",
+            "port": 7000
+          },
+          "replicas": []
+        }
+      ])json"}),
+              ErrArg("DFLYCLUSTER commands requires admin port"));
+}
+
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidJSON) {
-  EXPECT_THAT(Run({"dflycluster", "config", "invalid JSON"}),
+  EXPECT_THAT(RunAdmin({"dflycluster", "config", "invalid JSON"}),
               ErrArg("Invalid JSON cluster config"));
 
   string cluster_info = Run({"cluster", "info"}).GetString();
@@ -47,7 +86,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigInvalidJSON) {
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidConfig) {
-  EXPECT_THAT(Run({"dflycluster", "config", "[]"}), ErrArg(kInvalidConfiguration));
+  EXPECT_THAT(RunAdmin({"dflycluster", "config", "[]"}), ErrArg(kInvalidConfiguration));
 
   string cluster_info = Run({"cluster", "info"}).GetString();
   EXPECT_THAT(cluster_info, HasSubstr("cluster_state:fail"));
@@ -58,7 +97,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigInvalidConfig) {
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidMissingSlots) {
-  EXPECT_THAT(Run({"dflycluster", "config", R"json(
+  EXPECT_THAT(RunAdmin({"dflycluster", "config", R"json(
       [
         {
           "slot_ranges": [
@@ -86,7 +125,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigInvalidMissingSlots) {
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidOverlappingSlots) {
-  EXPECT_THAT(Run({"dflycluster", "config", R"json(
+  EXPECT_THAT(RunAdmin({"dflycluster", "config", R"json(
       [
         {
           "slot_ranges": [
@@ -128,7 +167,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigInvalidOverlappingSlots) {
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigNoReplicas) {
-  EXPECT_EQ(Run({"dflycluster", "config", R"json(
+  EXPECT_EQ(RunAdmin({"dflycluster", "config", R"json(
       [
         {
           "slot_ranges": [
@@ -162,7 +201,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigNoReplicas) {
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigFull) {
-  EXPECT_EQ(Run({"dflycluster", "config", R"json(
+  EXPECT_EQ(RunAdmin({"dflycluster", "config", R"json(
       [
         {
           "slot_ranges": [
@@ -198,7 +237,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigFull) {
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
-  EXPECT_EQ(Run({"dflycluster", "config", R"json(
+  EXPECT_EQ(RunAdmin({"dflycluster", "config", R"json(
       [
         {
           "slot_ranges": [

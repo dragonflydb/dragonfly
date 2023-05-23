@@ -106,7 +106,6 @@ class BaseFamilyTest::TestConnWrapper {
 
 BaseFamilyTest::TestConnWrapper::TestConnWrapper(Protocol proto)
     : dummy_conn_(new TestConnection(proto, &sink_)), cmd_cntx_(&sink_, dummy_conn_.get()) {
-  cmd_cntx_.is_test = true;
 }
 
 BaseFamilyTest::TestConnWrapper::~TestConnWrapper() {
@@ -201,6 +200,8 @@ RespExpr BaseFamilyTest::Run(absl::Span<std::string> span) {
 RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
   TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, id);
 
+  conn_wrapper->conn()->SetAdmin(admin_);
+
   CmdArgVec args = conn_wrapper->Args(slice);
 
   auto* context = conn_wrapper->cmd_cntx();
@@ -208,6 +209,7 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
   DCHECK(context->transaction == nullptr) << id;
 
   service_->DispatchCommand(CmdArgList{args}, context);
+  conn_wrapper->conn()->SetAdmin(false);
 
   DCHECK(context->transaction == nullptr);
 

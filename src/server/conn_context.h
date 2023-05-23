@@ -173,7 +173,6 @@ class ConnectionContext : public facade::ConnectionContext {
   bool is_replicating = false;
   bool monitor = false;  // when a monitor command is sent over a given connection, we need to aware
                          // of it as a state for the connection
-  bool is_test = false;
 
  private:
   void EnableMonitoring(bool enable) {

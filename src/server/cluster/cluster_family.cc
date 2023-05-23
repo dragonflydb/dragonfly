@@ -281,7 +281,7 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError("DFLYCLUSTER commands requires --cluster_mode=yes");
   }
   CHECK_NE(cluster_config_.get(), nullptr);
-  if (!(cntx->is_test) && !cntx->owner()->IsAdmin()) {
+  if (!cntx->owner()->IsAdmin()) {
     return (*cntx)->SendError("DFLYCLUSTER commands requires admin port");
   }
   ToUpper(&args[0]);

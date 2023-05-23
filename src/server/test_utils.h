@@ -23,10 +23,18 @@ class TestConnection : public facade::Connection {
 
   void SendPubMessageAsync(PubMessage pmsg) final;
 
+  bool IsAdmin() const override {
+    return is_admin_;
+  }
+  void SetAdmin(bool is_admin) {
+    is_admin_ = is_admin;
+  }
+
   std::vector<PubMessage> messages;
 
  private:
   io::StringSink* sink_;
+  bool is_admin_ = false;
 };
 
 class BaseFamilyTest : public ::testing::Test {
@@ -44,6 +52,13 @@ class BaseFamilyTest : public ::testing::Test {
 
   RespExpr Run(std::initializer_list<const std::string_view> list) {
     return Run(ArgSlice{list.begin(), list.size()});
+  }
+
+  RespExpr RunAdmin(std::initializer_list<const std::string_view> list) {
+    admin_ = true;
+    auto res = Run(ArgSlice{list.begin(), list.size()});
+    admin_ = false;
+    return res;
   }
 
   RespExpr Run(ArgSlice list);
@@ -102,6 +117,7 @@ class BaseFamilyTest : public ::testing::Test {
 
   std::vector<RespVec*> resp_vec_;
   bool single_response_ = true;
+  bool admin_ = false;
 };
 
 std::ostream& operator<<(std::ostream& os, const DbStats& stats);
