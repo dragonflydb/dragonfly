@@ -18,8 +18,7 @@ namespace dfly {
 namespace {
 
 using namespace std;
-using testing::ElementsAre;
-using testing::HasSubstr;
+using namespace testing;
 
 class ClusterFamilyTest : public BaseFamilyTest {
  public:
@@ -277,15 +276,11 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
   EXPECT_EQ(slots_info.size(), 2);
   auto slot1 = slots_info[0].GetVec();
   EXPECT_EQ(slot1.size(), 3);
-  EXPECT_EQ(slot1[0], "1");
-  EXPECT_EQ(slot1[1], "key_count");
-  EXPECT_NE(slot1[2], "0");
+  EXPECT_THAT(slot1, ElementsAre("1", "key_count", Not("0")));
 
   auto slot2 = slots_info[1].GetVec();
   EXPECT_EQ(slot2.size(), 3);
-  EXPECT_EQ(slot2[0], "2");
-  EXPECT_EQ(slot2[1], "key_count");
-  EXPECT_NE(slot2[2], "0");
+  EXPECT_THAT(slot2, ElementsAre("2", "key_count", Not("0")));
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
@@ -316,14 +311,11 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
   EXPECT_EQ(slots_info.size(), 2);
   auto slot1 = slots_info[0].GetVec();
   EXPECT_EQ(slot1.size(), 3);
-  EXPECT_EQ(slot1[0], "1");
-  EXPECT_EQ(slot1[1], "key_count");
-  EXPECT_NE(slot1[2], "0");
+  EXPECT_THAT(slot1, ElementsAre("1", "key_count", Not("0")));
+
   auto slot2 = slots_info[1].GetVec();
   EXPECT_EQ(slot2.size(), 3);
-  EXPECT_EQ(slot2[0], "2");
-  EXPECT_EQ(slot2[1], "key_count");
-  EXPECT_NE(slot2[2], "0");
+  EXPECT_THAT(slot2, ElementsAre("2", "key_count", Not("0")));
 
   config = absl::Substitute(config_template, "abc");
   EXPECT_EQ(Run({"dflycluster", "config", config}), "OK");
