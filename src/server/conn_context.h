@@ -176,7 +176,7 @@ class ConnectionContext : public facade::ConnectionContext {
 
  private:
   void EnableMonitoring(bool enable) {
-    force_dispatch = enable;  // required to support the monitoring
+    subscriptions++;  // required to support the monitoring
     monitor = enable;
   }
   void SendSubscriptionChangedResponse(std::string_view action,

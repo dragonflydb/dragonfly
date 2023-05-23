@@ -62,16 +62,7 @@ TestConnection::TestConnection(Protocol protocol, io::StringSink* sink)
 }
 
 void TestConnection::SendPubMessageAsync(PubMessage pmsg) {
-  if (auto* ptr = std::get_if<PubMessage::MessageData>(&pmsg.data); ptr != nullptr) {
-    messages.push_back(move(*ptr));
-  } else if (auto* ptr = std::get_if<PubMessage::SubscribeData>(&pmsg.data); ptr != nullptr) {
-    RedisReplyBuilder builder(sink_);
-    const char* action[2] = {"unsubscribe", "subscribe"};
-    builder.StartArray(3);
-    builder.SendBulkString(action[ptr->add]);
-    builder.SendBulkString(ptr->channel);
-    builder.SendLong(ptr->channel_cnt);
-  }
+  messages.push_back(move(pmsg));
 }
 
 class BaseFamilyTest::TestConnWrapper {
@@ -84,7 +75,7 @@ class BaseFamilyTest::TestConnWrapper {
   RespVec ParseResponse(bool fully_consumed);
 
   // returns: type(pmessage), pattern, channel, message.
-  const facade::Connection::PubMessage::MessageData& GetPubMessage(size_t index) const;
+  const facade::Connection::PubMessage& GetPubMessage(size_t index) const;
 
   ConnectionContext* cmd_cntx() {
     return &cmd_cntx_;
@@ -375,7 +366,7 @@ RespVec BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
   return res;
 }
 
-const facade::Connection::PubMessage::MessageData& BaseFamilyTest::TestConnWrapper::GetPubMessage(
+const facade::Connection::PubMessage& BaseFamilyTest::TestConnWrapper::GetPubMessage(
     size_t index) const {
   CHECK_LT(index, dummy_conn_->messages.size());
   return dummy_conn_->messages[index];
@@ -406,8 +397,8 @@ size_t BaseFamilyTest::SubscriberMessagesLen(string_view conn_id) const {
   return it->second->conn()->messages.size();
 }
 
-const facade::Connection::PubMessage::MessageData& BaseFamilyTest::GetPublishedMessage(
-    string_view conn_id, size_t index) const {
+const facade::Connection::PubMessage& BaseFamilyTest::GetPublishedMessage(string_view conn_id,
+                                                                          size_t index) const {
   auto it = connections_.find(conn_id);
   CHECK(it != connections_.end());
 

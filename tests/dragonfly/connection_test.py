@@ -335,3 +335,14 @@ async def test_subscribe_pipelined(async_client: aioredis.Redis):
     pipe.execute_command('subscribe channel').execute_command(
         'subscribe channel')
     await pipe.echo('bye bye').execute()
+
+async def test_subscribe_in_pipeline(async_client: aioredis.Redis):
+    pipe = async_client.pipeline(transaction=False)
+    pipe.echo("one")
+    pipe.execute_command("SUBSCRIBE ch1")
+    pipe.echo("two")
+    pipe.execute_command("SUBSCRIBE ch2")
+    pipe.echo("three")
+    res = await pipe.execute()
+
+    assert res == ['one', ['subscribe', 'ch1', 1], 'two', ['subscribe', 'ch2', 2], 'three']
