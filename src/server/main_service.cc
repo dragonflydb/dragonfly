@@ -616,13 +616,18 @@ bool Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
       keys_slot = slot;
     }
   }
+
   if (cross_slot) {
     (*dfly_cntx)->SendError("-CROSSSLOT Keys in request don't hash to the same slot");
     return false;
   }
+
   // Check keys slot is in my ownership
-  if (keys_slot && !cluster_family_.cluster_config()->IsMySlot(*keys_slot)) {
-    (*dfly_cntx)->SendError("MOVED");  // TODO add more info to moved error.
+  const auto& cluster_config = cluster_family_.cluster_config();
+  if (keys_slot.has_value() && !cluster_config->IsMySlot(*keys_slot)) {
+    // See more details here: https://redis.io/docs/reference/cluster-spec/#moved-redirection
+    ClusterConfig::Node master = cluster_config->GetMasterNodeForSlot(*keys_slot);
+    (*dfly_cntx)->SendError(absl::StrCat("-MOVED ", *keys_slot, " ", master.ip, ":", master.port));
     return false;
   }
 
