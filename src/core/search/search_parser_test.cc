@@ -6,6 +6,7 @@
 #include "base/logging.h"
 #include "core/search/base.h"
 #include "core/search/query_driver.h"
+#include "core/search/search.h"
 
 namespace dfly {
 namespace search {
@@ -35,20 +36,19 @@ class SearchParserTest : public ::testing::Test {
 
   void ParseExpr(const std::string& str) {
     raw_expr_ = str;
-    Parse(str);
-    expr_ = query_driver_.Get();
+    search_algo_.emplace(str);
   }
 
-  bool Check(SearchInput input) const {
-    return expr_->Check(input);
+  bool Check(DocumentAccessor* doc) const {
+    return search_algo_->Check(doc);
   }
 
   string DebugExpr() const {
-    return raw_expr_ + " parsed as " + expr_->Debug();
+    return raw_expr_;
   }
 
   string raw_expr_;
-  AstExpr expr_;
+  optional<SearchAlgorithm> search_algo_;
   QueryDriver query_driver_;
 };
 
@@ -105,20 +105,20 @@ class MockedDocument : public DocumentAccessor {
     ASSERT_TRUE(caught);                      \
   }
 
-#define CHECK_ALL(...)                                                               \
-  {                                                                                  \
-    for (auto str : {__VA_ARGS__}) {                                                 \
-      MockedDocument hset{str};                                                      \
-      EXPECT_TRUE(Check(SearchInput{&hset})) << str << " failed on " << DebugExpr(); \
-    }                                                                                \
+#define CHECK_ALL(...)                                                  \
+  {                                                                     \
+    for (auto str : {__VA_ARGS__}) {                                    \
+      MockedDocument hset{str};                                         \
+      EXPECT_TRUE(Check(&hset)) << str << " failed on " << DebugExpr(); \
+    }                                                                   \
   }
 
-#define CHECK_NONE(...)                                                               \
-  {                                                                                   \
-    for (auto str : {__VA_ARGS__}) {                                                  \
-      MockedDocument hset{str};                                                       \
-      EXPECT_FALSE(Check(SearchInput{&hset})) << str << " failed on " << DebugExpr(); \
-    }                                                                                 \
+#define CHECK_NONE(...)                                                  \
+  {                                                                      \
+    for (auto str : {__VA_ARGS__}) {                                     \
+      MockedDocument hset{str};                                          \
+      EXPECT_FALSE(Check(&hset)) << str << " failed on " << DebugExpr(); \
+    }                                                                    \
   }
 
 TEST_F(SearchParserTest, Scanner) {
@@ -238,78 +238,75 @@ TEST_F(SearchParserTest, CheckParenthesisPriority) {
 TEST_F(SearchParserTest, MatchField) {
   ParseExpr("@f1:foo @f2:bar @f3:baz");
 
-  MockedDocument hset{};
-  SearchInput input{&hset};
+  MockedDocument doc{};
 
-  hset.Set({{"f1", "foo"}, {"f2", "bar"}, {"f3", "baz"}});
-  EXPECT_TRUE(Check(input));
+  doc.Set({{"f1", "foo"}, {"f2", "bar"}, {"f3", "baz"}});
+  EXPECT_TRUE(Check(&doc));
 
-  hset.Set({{"f1", "foo"}, {"f2", "bar"}, {"f3", "last is wrong"}});
-  EXPECT_FALSE(Check(input));
+  doc.Set({{"f1", "foo"}, {"f2", "bar"}, {"f3", "last is wrong"}});
+  EXPECT_FALSE(Check(&doc));
 
-  hset.Set({{"f1", "its"}, {"f2", "totally"}, {"f3", "wrong"}});
-  EXPECT_FALSE(Check(input));
+  doc.Set({{"f1", "its"}, {"f2", "totally"}, {"f3", "wrong"}});
+  EXPECT_FALSE(Check(&doc));
 
-  hset.Set({{"f1", "im foo but its only me and"}, {"f2", "bar"}});
-  EXPECT_FALSE(Check(input));
+  doc.Set({{"f1", "im foo but its only me and"}, {"f2", "bar"}});
+  EXPECT_FALSE(Check(&doc));
 
-  hset.Set({});
-  EXPECT_FALSE(Check(input));
+  doc.Set({});
+  EXPECT_FALSE(Check(&doc));
 }
 
 TEST_F(SearchParserTest, MatchRange) {
   ParseExpr("@f1:[1 10] @f2:[50 100]");
 
-  MockedDocument hset{};
-  SearchInput input{&hset};
+  MockedDocument doc{};
 
-  hset.Set({{"f1", "5"}, {"f2", "50"}});
-  EXPECT_TRUE(Check(input));
+  doc.Set({{"f1", "5"}, {"f2", "50"}});
+  EXPECT_TRUE(Check(&doc));
 
-  hset.Set({{"f1", "1"}, {"f2", "100"}});
-  EXPECT_TRUE(Check(input));
+  doc.Set({{"f1", "1"}, {"f2", "100"}});
+  EXPECT_TRUE(Check(&doc));
 
-  hset.Set({{"f1", "10"}, {"f2", "50"}});
-  EXPECT_TRUE(Check(input));
+  doc.Set({{"f1", "10"}, {"f2", "50"}});
+  EXPECT_TRUE(Check(&doc));
 
-  hset.Set({{"f1", "11"}, {"f2", "49"}});
-  EXPECT_FALSE(Check(input));
+  doc.Set({{"f1", "11"}, {"f2", "49"}});
+  EXPECT_FALSE(Check(&doc));
 
-  hset.Set({{"f1", "0"}, {"f2", "101"}});
-  EXPECT_FALSE(Check(input));
+  doc.Set({{"f1", "0"}, {"f2", "101"}});
+  EXPECT_FALSE(Check(&doc));
 }
 
 TEST_F(SearchParserTest, CheckExprInField) {
   ParseExpr("@f1:(a|b) @f2:(c d) @f3:-e");
 
-  MockedDocument hset{};
-  SearchInput input{&hset};
+  MockedDocument doc{};
 
-  hset.Set({{"f1", "a"}, {"f2", "c and d"}, {"f3", "right"}});
-  EXPECT_TRUE(Check(input));
+  doc.Set({{"f1", "a"}, {"f2", "c and d"}, {"f3", "right"}});
+  EXPECT_TRUE(Check(&doc));
 
-  hset.Set({{"f1", "b"}, {"f2", "d and c"}, {"f3", "ok"}});
-  EXPECT_TRUE(Check(input));
+  doc.Set({{"f1", "b"}, {"f2", "d and c"}, {"f3", "ok"}});
+  EXPECT_TRUE(Check(&doc));
 
-  hset.Set({{"f1", "none"}, {"f2", "only d"}, {"f3", "ok"}});
-  EXPECT_FALSE(Check(input));
+  doc.Set({{"f1", "none"}, {"f2", "only d"}, {"f3", "ok"}});
+  EXPECT_FALSE(Check(&doc));
 
-  hset.Set({{"f1", "b"}, {"f2", "d and c"}, {"f3", "it has an e"}});
-  EXPECT_FALSE(Check(input)) << DebugExpr();
+  doc.Set({{"f1", "b"}, {"f2", "d and c"}, {"f3", "it has an e"}});
+  EXPECT_FALSE(Check(&doc)) << DebugExpr();
 
   ParseExpr({"@f1:(a (b | c) -(d | e)) @f2:-(a|b)"});
 
-  hset.Set({{"f1", "a b w"}, {"f2", "c"}});
-  EXPECT_TRUE(Check(input));
+  doc.Set({{"f1", "a b w"}, {"f2", "c"}});
+  EXPECT_TRUE(Check(&doc));
 
-  hset.Set({{"f1", "a b d"}, {"f2", "c"}});
-  EXPECT_FALSE(Check(input));
+  doc.Set({{"f1", "a b d"}, {"f2", "c"}});
+  EXPECT_FALSE(Check(&doc));
 
-  hset.Set({{"f1", "a b w"}, {"f2", "a"}});
-  EXPECT_FALSE(Check(input));
+  doc.Set({{"f1", "a b w"}, {"f2", "a"}});
+  EXPECT_FALSE(Check(&doc));
 
-  hset.Set({{"f1", "a w"}, {"f2", "c"}});
-  EXPECT_FALSE(Check(input));
+  doc.Set({{"f1", "a w"}, {"f2", "c"}});
+  EXPECT_FALSE(Check(&doc));
 }
 
 }  // namespace search

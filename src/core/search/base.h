@@ -22,23 +22,4 @@ struct DocumentAccessor {
   virtual bool Check(FieldConsumer f, std::string_view active_field) const = 0;
 };
 
-// Wrapper around document accessor and optional active field.
-struct SearchInput {
-  SearchInput(const DocumentAccessor* doc, std::string_view active_field = {})
-      : doc_{doc}, active_field_{active_field} {
-  }
-
-  SearchInput(const SearchInput& base, std::string_view active_field)
-      : doc_{base.doc_}, active_field_{active_field} {
-  }
-
-  bool Check(DocumentAccessor::FieldConsumer f) {
-    return doc_->Check(move(f), active_field_);
-  }
-
- private:
-  const DocumentAccessor* doc_;
-  std::string_view active_field_;
-};
-
 }  // namespace dfly::search

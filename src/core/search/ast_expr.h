@@ -9,102 +9,63 @@
 #include <memory>
 #include <ostream>
 #include <regex>
+#include <variant>
 #include <vector>
-
-#include "core/search/base.h"
 
 namespace dfly {
 
 namespace search {
 
-// Describes a single node of the filter AST tree.
-class AstNode {
- public:
-  virtual ~AstNode() = default;
+struct AstNode;
 
-  // Check if this input is matched by the node.
-  virtual bool Check(SearchInput) const = 0;
-
-  // Debug print node.
-  virtual std::string Debug() const = 0;
-};
-
-using NodePtr = std::shared_ptr<AstNode>;
-using AstExpr = NodePtr;
-
-template <typename T, typename... Ts> AstExpr MakeExpr(Ts&&... ts) {
-  return std::make_shared<T>(std::forward<Ts>(ts)...);
-}
-
-// AST term node, matches only if input contains term.
-class AstTermNode : public AstNode {
- public:
+// Matches terms in text fields
+struct AstTermNode {
   AstTermNode(std::string term);
-  virtual bool Check(SearchInput) const;
-  virtual std::string Debug() const;
 
- private:
-  std::string term_;
-  std::regex pattern_;
+  std::string term;
+  std::regex pattern;
 };
 
-// Ast negation node, matches only if its subtree didn't match.
-class AstNegateNode : public AstNode {
- public:
-  AstNegateNode(NodePtr node) : node_{node} {
-  }
-  bool Check(SearchInput) const override;
-  std::string Debug() const override;
+// Matches numeric range
+struct AstRangeNode {
+  AstRangeNode(int64_t lo, int64_t hi);
 
- private:
-  NodePtr node_;
+  int64_t lo, hi;
 };
 
-// Ast logical operation node, matches only if subtrees match
-// in respect to logical operation (and/or).
-class AstLogicalNode : public AstNode {
- public:
-  enum Op {
-    kAnd,
-    kOr,
-  };
+// Negates subtree
+struct AstNegateNode {
+  AstNegateNode(AstNode&& node);
 
-  AstLogicalNode(NodePtr l, NodePtr r, Op op) : l_{l}, r_{r}, op_{op} {
-  }
-  bool Check(SearchInput) const override;
-  std::string Debug() const override;
-
- private:
-  NodePtr l_, r_;
-  Op op_;
+  std::unique_ptr<AstNode> node;
 };
 
-// Ast field node, selects a field from the input for its subtree.
-class AstFieldNode : public AstNode {
- public:
-  AstFieldNode(std::string field, NodePtr node) : field_{field.substr(1)}, node_{node} {
-  }
+// Applies logical operation to results of all sub-nodes
+struct AstLogicalNode {
+  enum LogicOp { AND, OR };
 
-  bool Check(SearchInput) const override;
-  std::string Debug() const override;
+  // If either node is already a logical node with the same op, it'll be re-used.
+  AstLogicalNode(AstNode&& l, AstNode&& r, LogicOp op);
 
- private:
-  std::string field_;
-  NodePtr node_;
+  LogicOp op;
+  std::vector<AstNode> nodes;
 };
 
-// Ast range node, checks if input is inside int range
-class AstRangeNode : public AstNode {
- public:
-  AstRangeNode(int64_t l, int64_t r) : l_{l}, r_{r} {
-  }
+// Selects specific field for subtree
+struct AstFieldNode {
+  AstFieldNode(std::string field, AstNode&& node);
 
-  bool Check(SearchInput) const override;
-  std::string Debug() const override;
-
- private:
-  int64_t l_, r_;
+  std::string field;
+  std::unique_ptr<AstNode> node;
 };
+
+using NodeVariants = std::variant<std::monostate, AstTermNode, AstRangeNode, AstNegateNode,
+                                  AstLogicalNode, AstFieldNode>;
+struct AstNode : public NodeVariants {
+  using variant::variant;
+};
+
+using AstExpr = AstNode;
 
 }  // namespace search
 }  // namespace dfly
@@ -112,7 +73,7 @@ class AstRangeNode : public AstNode {
 namespace std {
 
 inline std::ostream& operator<<(std::ostream& os, const dfly::search::AstExpr& ast) {
-  os << "ast{" << ast->Debug() << "}";
+  // os << "ast{" << ast->Debug() << "}";
   return os;
 }
 
