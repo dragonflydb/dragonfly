@@ -275,11 +275,9 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
   auto slots_info = Run({"dflycluster", "getslotinfo", "slots", "1", "2"}).GetVec();
   EXPECT_EQ(slots_info.size(), 2);
   auto slot1 = slots_info[0].GetVec();
-  EXPECT_EQ(slot1.size(), 3);
   EXPECT_THAT(slot1, ElementsAre("1", "key_count", Not("0")));
 
   auto slot2 = slots_info[1].GetVec();
-  EXPECT_EQ(slot2.size(), 3);
   EXPECT_THAT(slot2, ElementsAre("2", "key_count", Not("0")));
 }
 
@@ -310,11 +308,9 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
   auto slots_info = Run({"dflycluster", "getslotinfo", "slots", "1", "2"}).GetVec();
   EXPECT_EQ(slots_info.size(), 2);
   auto slot1 = slots_info[0].GetVec();
-  EXPECT_EQ(slot1.size(), 3);
   EXPECT_THAT(slot1, ElementsAre("1", "key_count", Not("0")));
 
   auto slot2 = slots_info[1].GetVec();
-  EXPECT_EQ(slot2.size(), 3);
   EXPECT_THAT(slot2, ElementsAre("2", "key_count", Not("0")));
 
   config = absl::Substitute(config_template, "abc");
@@ -323,11 +319,9 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
   slots_info = Run({"dflycluster", "getslotinfo", "slots", "1", "2"}).GetVec();
   EXPECT_EQ(slots_info.size(), 2);
   slot1 = slots_info[0].GetVec();
-  EXPECT_EQ(slot1.size(), 3);
   EXPECT_THAT(slot1, ElementsAre("1", "key_count", "0"));
 
   slot2 = slots_info[1].GetVec();
-  EXPECT_EQ(slot2.size(), 3);
   EXPECT_THAT(slot2, ElementsAre("2", "key_count", "0"));
 }
 
