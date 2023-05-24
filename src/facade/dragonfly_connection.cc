@@ -102,18 +102,14 @@ struct Connection::Shutdown {
 
 Connection::PubMessage::PubMessage(string pattern, shared_ptr<char[]> buf, size_t channel_len,
                                    size_t message_len)
-    : data{MessageData{pattern, move(buf), channel_len, message_len}} {
+    : pattern{move(pattern)}, buf{move(buf)}, channel_len{channel_len}, message_len{message_len} {
 }
 
-Connection::PubMessage::PubMessage(bool add, string_view channel, uint32_t channel_cnt)
-    : data{SubscribeData{add, string{channel}, channel_cnt}} {
-}
-
-string_view Connection::PubMessage::MessageData::Channel() const {
+string_view Connection::PubMessage::Channel() const {
   return {buf.get(), channel_len};
 }
 
-string_view Connection::PubMessage::MessageData::Message() const {
+string_view Connection::PubMessage::Message() const {
   return {buf.get() + channel_len, message_len};
 }
 
@@ -179,8 +175,7 @@ template <class... Ts> Overloaded(Ts...) -> Overloaded<Ts...>;
 size_t Connection::MessageHandle::UsedMemory() const {
   // TODO: don't count inline size
   auto pub_size = [](const PubMessage& msg) -> size_t {
-    const auto* md = get_if<PubMessage::MessageData>(&msg.data);
-    return sizeof(PubMessage) + (md ? (md->channel_len + md->message_len) : 0u);
+    return sizeof(PubMessage) + (msg.channel_len + msg.message_len);
   };
   auto msg_size = [](const PipelineMessage& arg) -> size_t {
     return sizeof(PipelineMessage) + arg.args.capacity() * sizeof(MutableSlice) +
@@ -202,28 +197,18 @@ void Connection::DispatchOperations::operator()(const MonitorMessage& msg) {
 void Connection::DispatchOperations::operator()(const PubMessage& pub_msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
   ++stats->async_writes_cnt;
-  auto send_msg = [rbuilder](const PubMessage::MessageData& data) {
-    unsigned i = 0;
-    string_view arr[4];
-    if (data.pattern.empty()) {
-      arr[i++] = "message";
-    } else {
-      arr[i++] = "pmessage";
-      arr[i++] = data.pattern;
-    }
-    arr[i++] = data.Channel();
-    arr[i++] = data.Message();
-    rbuilder->SendStringArr(absl::Span<string_view>{arr, i},
-                            RedisReplyBuilder::CollectionType::PUSH);
-  };
-  auto send_sub = [rbuilder](const PubMessage::SubscribeData& data) {
-    const char* action[2] = {"unsubscribe", "subscribe"};
-    rbuilder->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
-    rbuilder->SendBulkString(action[data.add]);
-    rbuilder->SendBulkString(data.channel);
-    rbuilder->SendLong(data.channel_cnt);
-  };
-  visit(Overloaded{send_msg, send_sub}, pub_msg.data);
+  unsigned i = 0;
+  array<string_view, 4> arr;
+  if (pub_msg.pattern.empty()) {
+    arr[i++] = "message";
+  } else {
+    arr[i++] = "pmessage";
+    arr[i++] = pub_msg.pattern;
+  }
+  arr[i++] = pub_msg.Channel();
+  arr[i++] = pub_msg.Message();
+  rbuilder->SendStringArr(absl::Span<string_view>{arr.data(), i},
+                          RedisReplyBuilder::CollectionType::PUSH);
 }
 
 void Connection::DispatchOperations::operator()(Connection::PipelineMessage& msg) {
@@ -231,10 +216,8 @@ void Connection::DispatchOperations::operator()(Connection::PipelineMessage& msg
 
   DVLOG(2) << "Dispatching pipeline: " << ToSV(msg.args.front());
 
-  self->cc_->async_dispatch = true;
   self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()}, self->cc_.get());
   self->last_interaction_ = time(nullptr);
-  self->cc_->async_dispatch = false;
 }
 
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
@@ -542,7 +525,44 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   --stats_->num_conns;
 }
 
-auto Connection::ParseRedis() -> ParserStatus {
+void Connection::DispatchCommand(uint32_t consumed, mi_heap_t* heap) {
+  bool can_dispatch_sync = (consumed >= io_buf_.InputLen());
+
+  // Avoid sync dispatch if an async dispatch is already in progress, or else they'll interleave.
+  if (cc_->async_dispatch)
+    can_dispatch_sync = false;
+
+  // Avoid sync dispatch if we already have pending async messages or
+  // can potentially receive some (subscriptions > 0). Otherwise the dispatch
+  // fiber might be constantly blocked by sync_dispatch.
+  if (dispatch_q_.size() > 0 || cc_->subscriptions > 0)
+    can_dispatch_sync = false;
+
+  if (can_dispatch_sync) {
+    ShrinkPipelinePool();  // Gradually release pipeline request pool.
+
+    RespToArgList(tmp_parse_args_, &tmp_cmd_vec_);
+
+    {
+      cc_->sync_dispatch = true;
+      service_->DispatchCommand(absl::MakeSpan(tmp_cmd_vec_), cc_.get());
+      cc_->sync_dispatch = false;
+    }
+
+    last_interaction_ = time(nullptr);
+
+    // We might have blocked the dispatch queue from processing, wake it up.
+    if (dispatch_q_.size() > 0)
+      evc_.notify();
+
+  } else {
+    SendAsync(MessageHandle{FromArgs(move(tmp_parse_args_), heap)});
+    if (dispatch_q_.size() > 10)
+      ThisFiber::Yield();
+  }
+}
+
+Connection::ParserStatus Connection::ParseRedis() {
   uint32_t consumed = 0;
 
   RedisParser::Result result = RedisParser::OK;
@@ -558,28 +578,7 @@ auto Connection::ParseRedis() -> ParserStatus {
         DVLOG(2) << "Got Args with first token " << ToSV(first.GetBuf());
       }
 
-      // An optimization to skip dispatch_q_ if no pipelining is identified.
-      // We use ASYNC_DISPATCH as a lock to avoid out-of-order replies when the
-      // dispatch fiber pulls the last record but is still processing the command and then this
-      // fiber enters the condition below and executes out of order.
-      bool is_sync_dispatch = !cc_->async_dispatch && !cc_->force_dispatch;
-      if (dispatch_q_.empty() && is_sync_dispatch && consumed >= io_buf_.InputLen()) {
-        // Gradually release the request pool.
-        ShrinkPipelinePool();
-
-        RespToArgList(tmp_parse_args_, &tmp_cmd_vec_);
-
-        DVLOG(2) << "Sync dispatch " << ToSV(tmp_cmd_vec_.front());
-
-        CmdArgList cmd_list{tmp_cmd_vec_.data(), tmp_cmd_vec_.size()};
-        service_->DispatchCommand(cmd_list, cc_.get());
-        last_interaction_ = time(nullptr);
-      } else {
-        // Dispatch via queue to speedup input reading.
-        SendAsync(MessageHandle{FromArgs(move(tmp_parse_args_), tlh)});
-        if (dispatch_q_.size() > 10)
-          ThisFiber::Yield();
-      }
+      DispatchCommand(consumed, tlh);
     }
     io_buf_.ConsumeInput(consumed);
   } while (RedisParser::OK == result && !builder->GetError());
@@ -742,7 +741,8 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
   uint64_t request_cache_limit = absl::GetFlag(FLAGS_request_cache_limit);
 
   while (!builder->GetError()) {
-    evc_.await([this] { return cc_->conn_closing || !dispatch_q_.empty(); });
+    evc_.await(
+        [this] { return cc_->conn_closing || (!dispatch_q_.empty() && !cc_->sync_dispatch); });
     if (cc_->conn_closing)
       break;
 
@@ -751,11 +751,16 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
     builder->SetBatchMode(dispatch_q_.size() > 0);
 
-    std::visit(dispatch_op, msg.handle);
+    {
+      cc_->async_dispatch = true;
+      std::visit(dispatch_op, msg.handle);
+      cc_->async_dispatch = false;
+    }
 
     dispatch_q_bytes_.fetch_sub(msg.UsedMemory(), memory_order_relaxed);
     evc_bp_.notify();
 
+    // Retain pipeline message in pool.
     if (auto* pipe = get_if<PipelineMessagePtr>(&msg.handle); pipe) {
       if (stats_->pipeline_cache_capacity < request_cache_limit) {
         stats_->pipeline_cache_capacity += (*pipe)->StorageCapacity();
@@ -859,7 +864,12 @@ void Connection::SendAsync(MessageHandle msg) {
   dispatch_q_bytes_.fetch_add(msg.UsedMemory(), memory_order_relaxed);
 
   dispatch_q_.push_back(move(msg));
-  if (dispatch_q_.size() == 1) {
+
+  // Don't notify if a sync dispatch is in progress, it will wake after finishing.
+  // This might only happen if we started receving messages while `SUBSCRIBE`
+  // is still updating thread local data (see channel_store). We need to make sure its
+  // ack is sent before all other messages.
+  if (dispatch_q_.size() == 1 && !cc_->sync_dispatch) {
     evc_.notify();
   }
 }

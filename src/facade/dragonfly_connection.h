@@ -62,26 +62,13 @@ class Connection : public util::Connection {
 
   // PubSub message, either incoming message for active subscription or reply for new subscription.
   struct PubMessage {
-    // Represents incoming message.
-    struct MessageData {
-      std::string pattern{};            // non-empty for pattern subscriber
-      std::shared_ptr<char[]> buf;      // stores channel name and message
-      size_t channel_len, message_len;  // lengths in buf
+    std::string pattern{};            // non-empty for pattern subscriber
+    std::shared_ptr<char[]> buf;      // stores channel name and message
+    size_t channel_len, message_len;  // lengths in buf
 
-      std::string_view Channel() const;
-      std::string_view Message() const;
-    };
+    std::string_view Channel() const;
+    std::string_view Message() const;
 
-    // Represents reply for subscribe/unsubscribe.
-    struct SubscribeData {
-      bool add;
-      std::string channel;
-      uint32_t channel_cnt;
-    };
-
-    std::variant<MessageData, SubscribeData> data;
-
-    PubMessage(bool add, std::string_view channel, uint32_t channel_cnt);
     PubMessage(std::string pattern, std::shared_ptr<char[]> buf, size_t channel_len,
                size_t message_len);
   };
@@ -193,6 +180,9 @@ class Connection : public util::Connection {
 
   // Returns true if HTTP header is detected.
   io::Result<bool> CheckForHttpProto(util::FiberSocketBase* peer);
+
+  // Dispatch last command parsed by ParseRedis
+  void DispatchCommand(uint32_t consumed, mi_heap_t* heap);
 
   // Handles events from dispatch queue.
   void DispatchFiber(util::FiberSocketBase* peer);
