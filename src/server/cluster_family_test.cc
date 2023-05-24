@@ -477,17 +477,17 @@ TEST_F(ClusterFamilyEmulatedTest, ClusterInfo) {
 
 TEST_F(ClusterFamilyEmulatedTest, ClusterShards) {
   EXPECT_THAT(Run({"cluster", "shards"}),
-              RespArray(ElementsAre("slots",                                             //
-                                    RespArray(ElementsAre(IntArg(0), IntArg(16383))),    //
-                                    "nodes",                                             //
-                                    RespArray(ElementsAre(                               //
-                                        RespArray(ElementsAre(                           //
-                                            "id", Run({"dflycluster", "myid"}).GetString(),  //
-                                            "endpoint", "fake-host",                     //
-                                            "ip", "fake-host",                           //
-                                            "port", IntArg(6379),                        //
-                                            "role", "master",                            //
-                                            "replication-offset", IntArg(0),             //
+              RespArray(ElementsAre("slots",                                                      //
+                                    RespArray(ElementsAre(IntArg(0), IntArg(16383))),             //
+                                    "nodes",                                                      //
+                                    RespArray(ElementsAre(                                        //
+                                        RespArray(ElementsAre(                                    //
+                                            "id", RunAdmin({"dflycluster", "myid"}).GetString(),  //
+                                            "endpoint", "fake-host",                              //
+                                            "ip", "fake-host",                                    //
+                                            "port", IntArg(6379),                                 //
+                                            "role", "master",                                     //
+                                            "replication-offset", IntArg(0),                      //
                                             "health", "online")))))));
 }
 
