@@ -66,6 +66,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigInvalidJSON) {
   EXPECT_THAT(cluster_info, HasSubstr("cluster_size:0"));
 
   EXPECT_THAT(Run({"cluster", "shards"}), ErrArg("Cluster is not yet configured"));
+  EXPECT_THAT(Run({"cluster", "slots"}), ErrArg("Cluster is not yet configured"));
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidConfig) {
@@ -193,8 +194,13 @@ TEST_F(ClusterFamilyTest, ClusterConfigNoReplicas) {
   EXPECT_THAT(Run({"get", "x"}).GetString(),
               testing::MatchesRegex(R"(MOVED [0-9]+ 10.0.0.1:7000)"));
 
-  // TODO: Use "CLUSTER SLOTS" and "CLUSTER SHARDS" once implemented to verify new configuration
-  // takes effect.
+  EXPECT_THAT(Run({"cluster", "slots"}),
+              RespArray(ElementsAre(IntArg(0),              //
+                                    IntArg(16'383),         //
+                                    RespArray(ElementsAre(  //
+                                        "10.0.0.1",         //
+                                        IntArg(7'000),      //
+                                        "abcd1234")))));
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigFull) {
@@ -252,8 +258,17 @@ TEST_F(ClusterFamilyTest, ClusterConfigFull) {
                                             "replication-offset", IntArg(0),            //
                                             "health", "online")))))));
 
-  // TODO: Use "CLUSTER SLOTS" and "CLUSTER SHARDS" once implemented to verify new configuration
-  // takes effect.
+  EXPECT_THAT(Run({"cluster", "slots"}),
+              RespArray(ElementsAre(IntArg(0),              //
+                                    IntArg(16'383),         //
+                                    RespArray(ElementsAre(  //
+                                        "10.0.0.1",         //
+                                        IntArg(7'000),      //
+                                        "abcd1234")),       //
+                                    RespArray(ElementsAre(  //
+                                        "10.0.0.10",        //
+                                        IntArg(8'000),      //
+                                        "wxyz")))));
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
@@ -352,6 +367,29 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
                                                 "replication-offset", IntArg(0),                 //
                                                 "health", "online")))))))));
 
+  EXPECT_THAT(Run({"cluster", "slots"}),
+              RespArray(ElementsAre(                            //
+                  RespArray(ElementsAre(IntArg(0),              //
+                                        IntArg(10'000),         //
+                                        RespArray(ElementsAre(  //
+                                            "10.0.0.1",         //
+                                            IntArg(7'000),      //
+                                            "abcd1234")),       //
+                                        RespArray(ElementsAre(  //
+                                            "10.0.0.10",        //
+                                            IntArg(8'000),      //
+                                            "wxyz")))),         //
+                  RespArray(ElementsAre(IntArg(10'001),         //
+                                        IntArg(16'383),         //
+                                        RespArray(ElementsAre(  //
+                                            "10.0.0.2",         //
+                                            IntArg(7'001),      //
+                                            "efgh7890")),       //
+                                        RespArray(ElementsAre(  //
+                                            "10.0.0.11",        //
+                                            IntArg(8'001),      //
+                                            "qwerty")))))));
+
   absl::InsecureBitGen eng;
   while (true) {
     string random_key = GetRandomHex(eng, 40);
@@ -376,9 +414,6 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
                 testing::MatchesRegex(R"(MOVED [0-9]+ 10.0.0.2:7001)"));
     break;
   }
-
-  // TODO: Use "CLUSTER SLOTS" and "CLUSTER SHARDS" once implemented to verify new configuration
-  // takes effect.
 }
 
 TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
@@ -489,6 +524,16 @@ TEST_F(ClusterFamilyEmulatedTest, ClusterShards) {
                                             "role", "master",                                     //
                                             "replication-offset", IntArg(0),                      //
                                             "health", "online")))))));
+}
+
+TEST_F(ClusterFamilyEmulatedTest, ClusterSlots) {
+  EXPECT_THAT(Run({"cluster", "slots"}),
+              RespArray(ElementsAre(IntArg(0),              //
+                                    IntArg(16383),          //
+                                    RespArray(ElementsAre(  //
+                                        "fake-host",        //
+                                        IntArg(6379),       //
+                                        RunAdmin({"dflycluster", "myid"}).GetString())))));
 }
 
 }  // namespace
