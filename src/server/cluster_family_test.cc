@@ -35,7 +35,7 @@ class ClusterFamilyTest : public BaseFamilyTest {
 };
 
 TEST_F(ClusterFamilyTest, DflyClusterOnlyOnAdminPort) {
-  EXPECT_EQ(RunAdmin({"dflycluster", "config", R"json(
+  string config = R"json(
       [
         {
           "slot_ranges": [
@@ -51,25 +51,9 @@ TEST_F(ClusterFamilyTest, DflyClusterOnlyOnAdminPort) {
           },
           "replicas": []
         }
-      ])json"}),
-            "OK");
-  EXPECT_THAT(Run({"dflycluster", "config", R"json(
-      [
-        {
-          "slot_ranges": [
-            {
-              "start": 0,
-              "end": 16383
-            }
-          ],
-          "master": {
-            "id": "abcd1234",
-            "ip": "10.0.0.1",
-            "port": 7000
-          },
-          "replicas": []
-        }
-      ])json"}),
+      ])json";
+  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
+  EXPECT_THAT(Run({"dflycluster", "config", config}),
               ErrArg("DFLYCLUSTER commands requires admin port"));
 }
 
