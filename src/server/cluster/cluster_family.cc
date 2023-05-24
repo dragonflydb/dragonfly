@@ -375,9 +375,12 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError("DFLYCLUSTER commands requires --cluster_mode=yes");
   }
 
+  if (!cntx->owner()->IsAdmin()) {
+    return (*cntx)->SendError("DFLYCLUSTER commands requires admin port");
+  }
+
   CHECK(is_emulated_cluster_ || cluster_config_.get() != nullptr);
 
-  // TODO check admin port
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
   if (sub_cmd == "GETSLOTINFO") {
