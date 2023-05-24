@@ -65,6 +65,42 @@ bool ClusterFamily::IsEnabledOrEmulated() const {
   return is_emulated_cluster_ || ClusterConfig::IsClusterEnabled();
 }
 
+// TODO: Extend this method to accommodate the needs of `CLUSTER NODES` and `CLUSTER SLOTS`.
+// TODO: Also make this function safe in that it will read the state atomically.
+ClusterConfig::ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const {
+  ClusterConfig::ClusterShard info{
+      .slot_ranges = {{.start = 0, .end = ClusterConfig::kMaxSlotNum}},
+      .master = {},
+      .replicas = {},
+  };
+
+  ServerState& etl = *ServerState::tlocal();
+  if (etl.is_master) {
+    std::string cluster_announce_ip = absl::GetFlag(FLAGS_cluster_announce_ip);
+    std::string preferred_endpoint =
+        cluster_announce_ip.empty() ? cntx->owner()->LocalBindAddress() : cluster_announce_ip;
+
+    info.master = {.id = server_family_->master_id(),
+                   .ip = preferred_endpoint,
+                   .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))};
+
+    for (const auto& replica : server_family_->GetDflyCmd()->GetReplicasRoleInfo()) {
+      info.replicas.push_back({.id = etl.remote_client_id_,
+                               .ip = replica.address,
+                               .port = static_cast<uint16_t>(replica.listening_port)});
+    }
+  } else {
+    Replica::Info replication_info = server_family_->GetReplicaInfo();
+    info.master = {
+        .id = etl.remote_client_id_, .ip = replication_info.host, .port = replication_info.port};
+    info.replicas.push_back({.id = server_family_->master_id(),
+                             .ip = cntx->owner()->LocalBindAddress(),
+                             .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))});
+  }
+
+  return info;
+}
+
 string ClusterFamily::BuildClusterNodeReply(ConnectionContext* cntx) const {
   ServerState& etl = *ServerState::tlocal();
   auto epoch_master_time = std::time(nullptr) * 1000;
@@ -115,6 +151,62 @@ void ClusterFamily::ClusterHelp(ConnectionContext* cntx) {
       "    Prints this help.",
   };
   return (*cntx)->SendSimpleStrArr(help_arr);
+}
+
+namespace {
+void ClusterShardsImpl(const ClusterConfig::ClusterShards& config, ConnectionContext* cntx) {
+  // For more details https://redis.io/commands/cluster-shards/
+  constexpr unsigned int kEntrySize = 4;
+
+  auto WriteNode = [&](const ClusterConfig::Node& node, string_view role) {
+    constexpr unsigned int kNodeSize = 14;
+    (*cntx)->StartArray(kNodeSize);
+    (*cntx)->SendBulkString("id");
+    (*cntx)->SendBulkString(node.id);
+    (*cntx)->SendBulkString("endpoint");
+    (*cntx)->SendBulkString(node.ip);
+    (*cntx)->SendBulkString("ip");
+    (*cntx)->SendBulkString(node.ip);
+    (*cntx)->SendBulkString("port");
+    (*cntx)->SendLong(node.port);
+    (*cntx)->SendBulkString("role");
+    (*cntx)->SendBulkString(role);
+    (*cntx)->SendBulkString("replication-offset");
+    (*cntx)->SendLong(0);
+    (*cntx)->SendBulkString("health");
+    (*cntx)->SendBulkString("online");
+  };
+
+  (*cntx)->StartArray(config.size());
+  for (const auto& shard : config) {
+    (*cntx)->StartArray(kEntrySize);
+    (*cntx)->SendBulkString("slots");
+
+    (*cntx)->StartArray(shard.slot_ranges.size() * 2);
+    for (const auto& slot_range : shard.slot_ranges) {
+      (*cntx)->SendLong(slot_range.start);
+      (*cntx)->SendLong(slot_range.end);
+    }
+
+    (*cntx)->SendBulkString("nodes");
+    (*cntx)->StartArray(1 + shard.replicas.size());
+    WriteNode(shard.master, "master");
+    for (const auto& replica : shard.replicas) {
+      WriteNode(replica, "replica");
+    }
+  }
+}
+}  // namespace
+
+void ClusterFamily::ClusterShards(ConnectionContext* cntx) {
+  if (is_emulated_cluster_) {
+    ClusterConfig::ClusterShards config{GetEmulatedShardInfo(cntx)};
+    return ClusterShardsImpl(config, cntx);
+  } else if (cluster_config_->IsConfigured()) {
+    return ClusterShardsImpl(cluster_config_->GetConfig(), cntx);
+  } else {
+    return (*cntx)->SendError("Cluster is not yet configured");
+  }
 }
 
 void ClusterFamily::ClusterSlots(ConnectionContext* cntx) {
@@ -251,6 +343,8 @@ void ClusterFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
 
   if (sub_cmd == "HELP") {
     return ClusterHelp(cntx);
+  } else if (sub_cmd == "SHARDS") {
+    return ClusterShards(cntx);
   } else if (sub_cmd == "SLOTS") {
     return ClusterSlots(cntx);
   } else if (sub_cmd == "NODES") {
@@ -277,13 +371,16 @@ void ClusterFamily::ReadWrite(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
-  if (!ClusterConfig::IsClusterEnabled()) {
+  if (!is_emulated_cluster_ && !ClusterConfig::IsClusterEnabled()) {
     return (*cntx)->SendError("DFLYCLUSTER commands requires --cluster_mode=yes");
   }
-  CHECK_NE(cluster_config_.get(), nullptr);
+
   if (!cntx->owner()->IsAdmin()) {
     return (*cntx)->SendError("DFLYCLUSTER commands requires admin port");
   }
+
+  CHECK(is_emulated_cluster_ || cluster_config_.get() != nullptr);
+
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
   if (sub_cmd == "GETSLOTINFO") {

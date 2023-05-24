@@ -73,6 +73,12 @@ inline ::testing::PolymorphicMatcher<RespTypeMatcher> ArgType(RespExpr::Type t) 
   return ::testing::MakePolymorphicMatcher(RespTypeMatcher(t));
 }
 
+MATCHER_P(RespArray, value, "") {
+  return ExplainMatchResult(testing::AllOf(testing::Field(&RespExpr::type, RespExpr::ARRAY),
+                                           testing::Property(&RespExpr::GetVec, value)),
+                            arg, result_listener);
+}
+
 inline bool operator==(const RespExpr& left, std::string_view s) {
   return left.type == RespExpr::STRING && ToSV(left.GetBuf()) == s;
 }

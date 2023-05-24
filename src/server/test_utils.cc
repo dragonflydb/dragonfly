@@ -8,6 +8,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include <absl/flags/reflection.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_split.h>
 #include <mimalloc.h>
@@ -453,6 +454,13 @@ vector<string> BaseFamilyTest::StrArray(const RespExpr& expr) {
   }
 
   return res;
+}
+
+void BaseFamilyTest::SetTestFlag(string_view flag_name, string_view new_value) {
+  auto* flag = absl::FindCommandLineFlag(flag_name);
+  CHECK_NE(flag, nullptr);
+  string error;
+  CHECK(flag->ParseFrom(new_value, &error)) << "Error: " << error;
 }
 
 }  // namespace dfly

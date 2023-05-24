@@ -24,10 +24,7 @@ using namespace testing;
 class ClusterFamilyTest : public BaseFamilyTest {
  public:
   ClusterFamilyTest() {
-    auto* flag = absl::FindCommandLineFlag("cluster_mode");
-    CHECK_NE(flag, nullptr);
-    string error;
-    CHECK(flag->ParseFrom("yes", &error));
+    SetTestFlag("cluster_mode", "yes");
   }
 
  protected:
@@ -67,6 +64,8 @@ TEST_F(ClusterFamilyTest, ClusterConfigInvalidJSON) {
   EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_ok:0"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:0"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_size:0"));
+
+  EXPECT_THAT(Run({"cluster", "shards"}), ErrArg("Cluster is not yet configured"));
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidConfig) {
@@ -177,6 +176,20 @@ TEST_F(ClusterFamilyTest, ClusterConfigNoReplicas) {
   EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:1"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_size:1"));
 
+  EXPECT_THAT(Run({"cluster", "shards"}),
+              RespArray(ElementsAre("slots",                                            //
+                                    RespArray(ElementsAre(IntArg(0), IntArg(16'383))),  //
+                                    "nodes",                                            //
+                                    RespArray(ElementsAre(                              //
+                                        RespArray(ElementsAre(                          //
+                                            "id", "abcd1234",                           //
+                                            "endpoint", "10.0.0.1",                     //
+                                            "ip", "10.0.0.1",                           //
+                                            "port", IntArg(7000),                       //
+                                            "role", "master",                           //
+                                            "replication-offset", IntArg(0),            //
+                                            "health", "online")))))));
+
   EXPECT_THAT(Run({"get", "x"}).GetString(),
               testing::MatchesRegex(R"(MOVED [0-9]+ 10.0.0.1:7000)"));
 
@@ -216,6 +229,29 @@ TEST_F(ClusterFamilyTest, ClusterConfigFull) {
   EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_ok:16384"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:2"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_size:1"));
+
+  EXPECT_THAT(Run({"cluster", "shards"}),
+              RespArray(ElementsAre("slots",                                            //
+                                    RespArray(ElementsAre(IntArg(0), IntArg(16'383))),  //
+                                    "nodes",                                            //
+                                    RespArray(ElementsAre(                              //
+                                        RespArray(ElementsAre(                          //
+                                            "id", "abcd1234",                           //
+                                            "endpoint", "10.0.0.1",                     //
+                                            "ip", "10.0.0.1",                           //
+                                            "port", IntArg(7000),                       //
+                                            "role", "master",                           //
+                                            "replication-offset", IntArg(0),            //
+                                            "health", "online")),                       //
+                                        RespArray(ElementsAre(                          //
+                                            "id", "wxyz",                               //
+                                            "endpoint", "10.0.0.10",                    //
+                                            "ip", "10.0.0.10",                          //
+                                            "port", IntArg(8000),                       //
+                                            "role", "replica",                          //
+                                            "replication-offset", IntArg(0),            //
+                                            "health", "online")))))));
+
   // TODO: Use "CLUSTER SLOTS" and "CLUSTER SHARDS" once implemented to verify new configuration
   // takes effect.
 }
@@ -272,6 +308,49 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
   EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_ok:16384"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:4"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_size:2"));
+
+  EXPECT_THAT(Run({"cluster", "shards"}),
+              RespArray(ElementsAre(
+                  RespArray(ElementsAre("slots",                                                 //
+                                        RespArray(ElementsAre(IntArg(0), IntArg(10'000))),       //
+                                        "nodes",                                                 //
+                                        RespArray(ElementsAre(                                   //
+                                            RespArray(ElementsAre(                               //
+                                                "id", "abcd1234",                                //
+                                                "endpoint", "10.0.0.1",                          //
+                                                "ip", "10.0.0.1",                                //
+                                                "port", IntArg(7000),                            //
+                                                "role", "master",                                //
+                                                "replication-offset", IntArg(0),                 //
+                                                "health", "online")),                            //
+                                            RespArray(ElementsAre(                               //
+                                                "id", "wxyz",                                    //
+                                                "endpoint", "10.0.0.10",                         //
+                                                "ip", "10.0.0.10",                               //
+                                                "port", IntArg(8000),                            //
+                                                "role", "replica",                               //
+                                                "replication-offset", IntArg(0),                 //
+                                                "health", "online")))))),                        //
+                  RespArray(ElementsAre("slots",                                                 //
+                                        RespArray(ElementsAre(IntArg(10'001), IntArg(16'383))),  //
+                                        "nodes",                                                 //
+                                        RespArray(ElementsAre(                                   //
+                                            RespArray(ElementsAre(                               //
+                                                "id", "efgh7890",                                //
+                                                "endpoint", "10.0.0.2",                          //
+                                                "ip", "10.0.0.2",                                //
+                                                "port", IntArg(7001),                            //
+                                                "role", "master",                                //
+                                                "replication-offset", IntArg(0),                 //
+                                                "health", "online")),                            //
+                                            RespArray(ElementsAre(                               //
+                                                "id", "qwerty",                                  //
+                                                "endpoint", "10.0.0.11",                         //
+                                                "ip", "10.0.0.11",                               //
+                                                "port", IntArg(8001),                            //
+                                                "role", "replica",                               //
+                                                "replication-offset", IntArg(0),                 //
+                                                "health", "online")))))))));
 
   absl::InsecureBitGen eng;
   while (true) {
@@ -382,10 +461,8 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
 class ClusterFamilyEmulatedTest : public BaseFamilyTest {
  public:
   ClusterFamilyEmulatedTest() {
-    auto* flag = absl::FindCommandLineFlag("cluster_mode");
-    CHECK_NE(flag, nullptr);
-    string error;
-    CHECK(flag->ParseFrom("emulated", &error));
+    SetTestFlag("cluster_mode", "emulated");
+    SetTestFlag("cluster_announce_ip", "fake-host");
   }
 };
 
@@ -396,6 +473,22 @@ TEST_F(ClusterFamilyEmulatedTest, ClusterInfo) {
   EXPECT_THAT(cluster_info, HasSubstr("cluster_slots_ok:16384"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_known_nodes:1"));
   EXPECT_THAT(cluster_info, HasSubstr("cluster_size:1"));
+}
+
+TEST_F(ClusterFamilyEmulatedTest, ClusterShards) {
+  EXPECT_THAT(Run({"cluster", "shards"}),
+              RespArray(ElementsAre("slots",                                                      //
+                                    RespArray(ElementsAre(IntArg(0), IntArg(16383))),             //
+                                    "nodes",                                                      //
+                                    RespArray(ElementsAre(                                        //
+                                        RespArray(ElementsAre(                                    //
+                                            "id", RunAdmin({"dflycluster", "myid"}).GetString(),  //
+                                            "endpoint", "fake-host",                              //
+                                            "ip", "fake-host",                                    //
+                                            "port", IntArg(6379),                                 //
+                                            "role", "master",                                     //
+                                            "replication-offset", IntArg(0),                      //
+                                            "health", "online")))))));
 }
 
 }  // namespace
