@@ -23,10 +23,18 @@ class TestConnection : public facade::Connection {
 
   void SendPubMessageAsync(PubMessage pmsg) final;
 
+  bool IsAdmin() const override {
+    return is_admin_;
+  }
+  void SetAdmin(bool is_admin) {
+    is_admin_ = is_admin;
+  }
+
   std::vector<PubMessage> messages;
 
  private:
   io::StringSink* sink_;
+  bool is_admin_ = false;
 };
 
 class BaseFamilyTest : public ::testing::Test {
@@ -45,6 +53,10 @@ class BaseFamilyTest : public ::testing::Test {
   RespExpr Run(std::initializer_list<const std::string_view> list) {
     return Run(ArgSlice{list.begin(), list.size()});
   }
+
+  // Runs the command in a mocked admin connection
+  // Use for running commands which are allowed only when using admin connection.
+  RespExpr RunAdmin(std::initializer_list<const std::string_view> list);
 
   RespExpr Run(ArgSlice list);
   RespExpr Run(absl::Span<std::string> list);
