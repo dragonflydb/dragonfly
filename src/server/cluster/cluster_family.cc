@@ -371,10 +371,11 @@ void ClusterFamily::ReadWrite(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
-  if (!ClusterConfig::IsClusterEnabled()) {
+  if (!is_emulated_cluster_ && !ClusterConfig::IsClusterEnabled()) {
     return (*cntx)->SendError("DFLYCLUSTER commands requires --cluster_mode=yes");
   }
-  CHECK_NE(cluster_config_.get(), nullptr);
+
+  CHECK(is_emulated_cluster_ || cluster_config_.get() != nullptr);
 
   // TODO check admin port
   ToUpper(&args[0]);
