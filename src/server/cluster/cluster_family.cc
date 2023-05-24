@@ -84,11 +84,10 @@ ClusterConfig::ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContex
                    .ip = preferred_endpoint,
                    .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))};
 
-    auto vec = server_family_->GetDflyCmd()->GetReplicasRoleInfo();
-    if (!vec.empty()) {
+    for (const auto& replica : server_family_->GetDflyCmd()->GetReplicasRoleInfo()) {
       info.replicas.push_back({.id = etl.remote_client_id_,
-                               .ip = vec[0].address,
-                               .port = static_cast<uint16_t>(vec[0].listening_port)});
+                               .ip = replica.address,
+                               .port = static_cast<uint16_t>(replica.listening_port)});
     }
   } else {
     Replica::Info replication_info = server_family_->GetReplicaInfo();
