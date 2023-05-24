@@ -1159,6 +1159,9 @@ void GenericFamily::Select(CmdArgList args, ConnectionContext* cntx) {
   if (!absl::SimpleAtoi(key, &index)) {
     return (*cntx)->SendError(kInvalidDbIndErr);
   }
+  if (ClusterConfig::IsClusterEnabled() && index != 0) {
+    return (*cntx)->SendError("SELECT is not allowed in cluster mode");
+  }
   if (index < 0 || index >= absl::GetFlag(FLAGS_dbnum)) {
     return (*cntx)->SendError(kDbIndOutOfRangeErr);
   }
