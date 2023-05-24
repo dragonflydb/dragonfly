@@ -114,7 +114,7 @@ class Connection : public util::Connection {
 
  public:
   // Add PubMessage to dispatch queue.
-  // Virtual because behaviour is overwritten in test_utils.
+  // Virtual because behavior is overridden in test_utils.
   virtual void SendPubMessageAsync(PubMessage);
 
   // Add monitor message to dispatch queue.
@@ -142,7 +142,7 @@ class Connection : public util::Connection {
   std::string RemoteEndpointAddress() const;
   std::string LocalBindAddress() const;
   uint32_t GetClientId() const;
-  // Virtual because behaviour is overwritten in test_utils.
+  // Virtual because behavior is overridden in test_utils.
   virtual bool IsAdmin() const;
 
   Protocol protocol() const {
