@@ -45,8 +45,9 @@ void SinkReplyBuilder::CloseConnection() {
 
 void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   DCHECK(sink_);
+  constexpr uint32_t kMaxBatchCnt = 25;
 
-  if (should_batch_) {
+  if ((should_batch_ || should_aggregate_) && batch_cnt_ < kMaxBatchCnt) {
     size_t total_size = batch_.size();
     for (unsigned i = 0; i < len; ++i) {
       total_size += v[i].iov_len;
@@ -57,6 +58,7 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
         std::string_view src((char*)v[i].iov_base, v[i].iov_len);
         DVLOG(2) << "Appending to stream " << src;
         batch_.append(src.data(), src.size());
+        ++batch_cnt_;
       }
       return;
     }
@@ -64,10 +66,12 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
 
   error_code ec;
   ++io_write_cnt_;
-
+  size_t bsize = 0;
   for (unsigned i = 0; i < len; ++i) {
-    io_write_bytes_ += v[i].iov_len;
+    bsize += v[i].iov_len;
   }
+  io_write_bytes_ += bsize;
+  DVLOG(2) << "Writing " << bsize << " bytes of len " << len;
 
   if (batch_.empty()) {
     ec = sink_->Write(v, len);
@@ -75,6 +79,7 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
     DVLOG(1) << "Sending batch to stream " << sink_ << "\n" << batch_;
 
     io_write_bytes_ += batch_.size();
+    batch_cnt_ = 0;
 
     iovec tmp[len + 1];
     tmp[0].iov_base = batch_.data();
@@ -103,6 +108,20 @@ void SinkReplyBuilder::SendRawVec(absl::Span<const std::string_view> msg_vec) {
     arr[i].iov_len = msg_vec[i].size();
   }
   Send(arr.data(), msg_vec.size());
+}
+
+void SinkReplyBuilder::StopAggregate() {
+  should_aggregate_ = false;
+
+  if (should_batch_ || batch_.empty())
+    return;
+
+  error_code ec = sink_->Write(io::Buffer(batch_));
+  batch_.clear();
+  batch_cnt_ = 0;
+
+  if (ec)
+    ec_ = ec;
 }
 
 MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink), noreply_(false) {
@@ -287,6 +306,7 @@ void RedisReplyBuilder::SendLong(long num) {
 
 void RedisReplyBuilder::SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
                                         bool with_scores) {
+  ReplyAggregator agg(this);
   if (!with_scores) {
     StartArray(arr.size());
     for (const auto& p : arr) {
@@ -385,7 +405,13 @@ void RedisReplyBuilder::StartCollection(unsigned len, CollectionType type) {
     type = ARRAY;
   }
 
+  // We do not want to send multiple packets for small responses because these
+  // trigger TCP-related artifacts (e.g. Nagle's algorithm) that slow down the delivery of the whole
+  // response.
+  bool prev = should_aggregate_;
+  should_aggregate_ |= (len > 0);
   SendRaw(absl::StrCat(START_SYMBOLS[type], len, kCRLF));
+  should_aggregate_ = prev;
 }
 
 // This implementation a bit complicated because it uses vectorized

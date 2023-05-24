@@ -965,6 +965,7 @@ void ListFamily::LPos(CmdArgList args, ConnectionContext* cntx) {
       (*cntx)->SendLong((*result)[0]);
     }
   } else {
+    SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
     (*cntx)->StartArray(result->size());
     const auto& array = result.value();
     for (const auto& v : array) {
