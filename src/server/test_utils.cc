@@ -189,6 +189,22 @@ RespExpr BaseFamilyTest::Run(ArgSlice list) {
   return Run(GetId(), list);
 }
 
+RespExpr BaseFamilyTest::RunAdmin(std::initializer_list<const std::string_view> list) {
+  if (!ProactorBase::IsProactorThread()) {
+    return pp_->at(0)->Await([&] { return this->RunAdmin(list); });
+  }
+  string id = GetId();
+  TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, id);
+  // Before running the command set the connection as admin connection
+  conn_wrapper->conn()->SetAdmin(true);
+  auto res = Run(id, ArgSlice{list.begin(), list.size()});
+  // After running the command set the connection as non admin connection
+  // because the connction is returned to the pull. This way the next call to Run from the same
+  // thread will not have the connection set as admin.
+  conn_wrapper->conn()->SetAdmin(false);
+  return res;
+}
+
 RespExpr BaseFamilyTest::Run(absl::Span<std::string> span) {
   vector<string_view> sv_vec(span.size());
   for (unsigned i = 0; i < span.size(); ++i) {
@@ -200,8 +216,6 @@ RespExpr BaseFamilyTest::Run(absl::Span<std::string> span) {
 RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
   TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, id);
 
-  conn_wrapper->conn()->SetAdmin(admin_);
-
   CmdArgVec args = conn_wrapper->Args(slice);
 
   auto* context = conn_wrapper->cmd_cntx();
@@ -209,7 +223,6 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
   DCHECK(context->transaction == nullptr) << id;
 
   service_->DispatchCommand(CmdArgList{args}, context);
-  conn_wrapper->conn()->SetAdmin(false);
 
   DCHECK(context->transaction == nullptr);
 

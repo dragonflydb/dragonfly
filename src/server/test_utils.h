@@ -54,12 +54,9 @@ class BaseFamilyTest : public ::testing::Test {
     return Run(ArgSlice{list.begin(), list.size()});
   }
 
-  RespExpr RunAdmin(std::initializer_list<const std::string_view> list) {
-    admin_ = true;
-    auto res = Run(ArgSlice{list.begin(), list.size()});
-    admin_ = false;
-    return res;
-  }
+  // Runs the command in a mocked admin connection
+  // Use for running commands which are allowed only when using admin connection.
+  RespExpr RunAdmin(std::initializer_list<const std::string_view> list);
 
   RespExpr Run(ArgSlice list);
   RespExpr Run(absl::Span<std::string> list);
@@ -117,7 +114,6 @@ class BaseFamilyTest : public ::testing::Test {
 
   std::vector<RespVec*> resp_vec_;
   bool single_response_ = true;
-  bool admin_ = false;
 };
 
 std::ostream& operator<<(std::ostream& os, const DbStats& stats);
