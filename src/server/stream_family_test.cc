@@ -127,13 +127,13 @@ TEST_F(StreamFamilyTest, XRead) {
   Run({"xadd", "bar", "1-*", "k4", "v4"});
 
   // Receive all records from both streams.
-  auto resp = Run({"xread", "count", "10", "streams", "foo", "bar", "0", "0"});
+  auto resp = Run({"xread", "streams", "foo", "bar", "0", "0"});
   EXPECT_THAT(resp, ArrLen(2));
   EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(3)));
   EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("bar", ArrLen(1)));
 
   // Order of the requested streams is maintained.
-  resp = Run({"xread", "count", "10", "streams", "bar", "foo", "0", "0"});
+  resp = Run({"xread", "streams", "bar", "foo", "0", "0"});
   EXPECT_THAT(resp, ArrLen(2));
   EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("bar", ArrLen(1)));
   EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("foo", ArrLen(3)));
@@ -143,30 +143,76 @@ TEST_F(StreamFamilyTest, XRead) {
   EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(1)));
   EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("bar", ArrLen(1)));
 
-  // Stream not found.
-  resp = Run({"xread", "count", "10", "streams", "foo", "notfound", "0", "0"});
-  // Note when the response has length 1, Run returns the first element.
-  EXPECT_THAT(resp.GetVec(), ElementsAre("foo", ArrLen(3)));
-
   // Read from ID.
   resp = Run({"xread", "count", "10", "streams", "foo", "bar", "1-1", "2-0"});
   // Note when the response has length 1, Run returns the first element.
   EXPECT_THAT(resp.GetVec(), ElementsAre("foo", ArrLen(1)));
   EXPECT_THAT(resp.GetVec()[1].GetVec()[0].GetVec(), ElementsAre("1-2", ArrLen(2)));
+
+  // Stream not found.
+  resp = Run({"xread", "streams", "foo", "notfound", "0", "0"});
+  // Note when the response has length 1, Run returns the first element.
+  EXPECT_THAT(resp.GetVec(), ElementsAre("foo", ArrLen(3)));
+
+  // Not found.
+  resp = Run({"xread", "streams", "notfound", "0"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+}
+
+TEST_F(StreamFamilyTest, XReadBlock) {
+  Run({"xadd", "foo", "1-*", "k1", "v1"});
+  Run({"xadd", "foo", "1-*", "k2", "v2"});
+  Run({"xadd", "foo", "1-*", "k3", "v3"});
+  Run({"xadd", "bar", "1-*", "k4", "v4"});
+
+  // Receive all records from both streams.
+  auto resp = Run({"xread", "block", "100", "streams", "foo", "bar", "0", "0"});
+  EXPECT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(3)));
+  EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("bar", ArrLen(1)));
+
+  // Timeout.
+  resp = Run({"xread", "block", "1", "streams", "foo", "bar", "$", "$"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+
+  // Run XREAD BLOCK from 2 fibers.
+  RespExpr resp0, resp1;
+  auto fb0 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    resp0 = Run({"xread", "block", "0", "streams", "foo", "bar", "$", "$"});
+  });
+  auto fb1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    resp1 = Run({"xread", "block", "0", "streams", "foo", "bar", "$", "$"});
+  });
+  ThisFiber::SleepFor(50us);
+
+  resp = pp_->at(1)->Await([&] { return Run("xadd", {"xadd", "foo", "1-*", "k5", "v5"}); });
+
+  fb0.Join();
+  fb1.Join();
+
+  // Both xread calls should have been unblocked.
+  //
+  // Note when the response has length 1, Run returns the first element.
+  EXPECT_THAT(resp0.GetVec(), ElementsAre("foo", ArrLen(1)));
+  EXPECT_THAT(resp1.GetVec(), ElementsAre("foo", ArrLen(1)));
 }
 
 TEST_F(StreamFamilyTest, XReadInvalidArgs) {
-  // Using BLOCK when it is not supported.
-  auto resp = Run({"xread", "count", "5", "block", "2000", "streams", "s1", "s2", "0", "0"});
-  EXPECT_THAT(resp, ErrArg("BLOCK is not supported"));
-
   // Invalid COUNT value.
-  resp = Run({"xread", "count", "invalid", "streams", "s1", "s2", "0", "0"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  auto resp = Run({"xread", "count", "invalid", "streams", "s1", "s2", "0", "0"});
+  EXPECT_THAT(resp, ErrArg("not an integer or out of range"));
 
   // Missing COUNT value.
   resp = Run({"xread", "count"});
   EXPECT_THAT(resp, ErrArg("wrong number of arguments for 'xread' command"));
+
+  // Invalid BLOCK value.
+  resp = Run({"xread", "block", "invalid", "streams", "s1", "s2", "0", "0"});
+  EXPECT_THAT(resp, ErrArg("not an integer or out of range"));
+
+  // Missing BLOCK value.
+  resp = Run({"xread", "block", "streams", "s1", "s2", "0", "0"});
+  EXPECT_THAT(resp, ErrArg("not an integer or out of range"));
 
   // Missing STREAMS.
   resp = Run({"xread", "count", "5"});
@@ -175,6 +221,11 @@ TEST_F(StreamFamilyTest, XReadInvalidArgs) {
   // Unbalanced list of streams.
   resp = Run({"xread", "count", "invalid", "streams", "s1", "s2", "s3", "0", "0"});
   EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // Wrong type.
+  Run({"set", "foo", "v"});
+  resp = Run({"xread", "streams", "foo", "0"});
+  EXPECT_THAT(resp, ErrArg("key holding the wrong kind of value"));
 }
 
 TEST_F(StreamFamilyTest, Issue854) {
