@@ -2,7 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/search_family.h"
+#include "server/search/search_family.h"
 
 #include <jsoncons/json.hpp>
 #include <variant>
