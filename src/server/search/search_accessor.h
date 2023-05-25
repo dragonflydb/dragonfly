@@ -29,7 +29,8 @@ string_view SdsToSafeSv(sds str) {
 
 }  // namespace
 
-// Base class for document accessors
+// Document accessors allow different types (json/hset) to be hidden
+// behind a document interface for quering fields and serializing.
 struct BaseAccessor : public search::DocumentAccessor {
   using FieldConsumer = search::DocumentAccessor::FieldConsumer;
 

@@ -17,6 +17,7 @@ namespace dfly {
 using SearchDocData = absl::flat_hash_map<std::string, std::string>;
 using SerializedSearchDoc = std::pair<std::string /*key*/, SearchDocData>;
 
+// SearchIndex stores basic shard independent info about an index.
 struct SearchIndex {
   enum DataType { HASH, JSON };
 
@@ -27,10 +28,12 @@ struct SearchIndex {
   DataType type{HASH};
 };
 
+// ShardSearchIndex stores search indices on a specific shard.
+// It keeps its indices up-to-date whenever documents are added or removed.
 class ShardSearchIndex {
   using DocId = uint32_t;
 
-  // Manages mapping document ids to keys and vice versa through a simple interface.
+  // DocKeyIndex manages mapping document keys to ids and vice versa through a simple interface.
   struct DocKeyIndex {
     DocId Add(std::string_view key);
     void Delete(std::string_view key);
@@ -46,6 +49,7 @@ class ShardSearchIndex {
  public:
   ShardSearchIndex(std::shared_ptr<SearchIndex> index);
 
+  // Perform search on all indexed documents and return results.
   std::vector<SerializedSearchDoc> Search(const OpArgs& op_args,
                                           search::SearchAlgorithm* search_algo);
 
@@ -54,10 +58,11 @@ class ShardSearchIndex {
                           std::shared_ptr<SearchIndex> index);
 
  private:
+  // Initialize index. Traverses all matching documents and assigns ids.
   void Init(const OpArgs& op_args);
 
  private:
-  std::shared_ptr<const SearchIndex> index_;
+  std::shared_ptr<const SearchIndex> base_;
   DocKeyIndex key_index_;
 
   static thread_local absl::flat_hash_map<std::string, ShardSearchIndex> indices_;

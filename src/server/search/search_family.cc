@@ -122,7 +122,7 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
 void SearchFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
 
-  *registry << CI{"FT.CREATE", CO::FAST, -2, 0, 0, 0}.HFUNC(FtCreate)
+  *registry << CI{"FT.CREATE", CO::GLOBAL_TRANS, -2, 0, 0, 0}.HFUNC(FtCreate)
             << CI{"FT.SEARCH", CO::GLOBAL_TRANS, -3, 0, 0, 0}.HFUNC(FtSearch);
 }
 

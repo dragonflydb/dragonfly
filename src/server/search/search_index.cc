@@ -81,22 +81,22 @@ uint8_t SearchIndex::GetObjCode() const {
   return type == JSON ? OBJ_JSON : OBJ_HASH;
 }
 
-ShardSearchIndex::ShardSearchIndex(shared_ptr<SearchIndex> index) : index_{index} {
+ShardSearchIndex::ShardSearchIndex(shared_ptr<SearchIndex> index) : base_{index} {
 }
 
 void ShardSearchIndex::Init(const OpArgs& op_args) {
-  TraverseAllMatching(*index_, op_args,
+  TraverseAllMatching(*base_, op_args,
                       [this](string_view key, BaseAccessor* doc) { key_index_.Add(key); });
 }
 
 vector<SerializedSearchDoc> ShardSearchIndex::Search(const OpArgs& op_args,
                                                      search::SearchAlgorithm* search_algo) {
   vector<SerializedSearchDoc> out;
-  TraverseAllMatching(*index_, op_args, [search_algo, &out](string_view key, BaseAccessor* doc) {
+  TraverseAllMatching(*base_, op_args, [search_algo, &out](string_view key, BaseAccessor* doc) {
     if (search_algo->Check(doc))
       out.emplace_back(key, doc->Serialize());
   });
-  return {};
+  return out;
 }
 
 ShardSearchIndex* ShardSearchIndex::GetOnShard(string_view name) {
