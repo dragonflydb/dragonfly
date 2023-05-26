@@ -4,8 +4,11 @@
 
 #include "core/search/indices.h"
 
+<<<<<<< HEAD
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/ascii.h>
+=======
+>>>>>>> 5469a13 (feat: basic indices)
 #include <absl/strings/numbers.h>
 
 #include <algorithm>

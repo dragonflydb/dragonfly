@@ -8,6 +8,7 @@
 
 #include "base/logging.h"
 #include "core/search/ast_expr.h"
+#include "core/search/indices.h"
 #include "core/search/query_driver.h"
 
 using namespace std;
@@ -25,56 +26,150 @@ AstExpr ParseQuery(std::string_view query) {
 }
 
 struct BasicSearch {
-  bool Check(monostate, string_view) {
-    return false;
+  vector<DocId> Search(monostate, string_view) {
+    return {};
   }
 
-  bool Check(const AstTermNode& node, string_view active_field) {
-    auto cb = [&node](string_view str) {
-      return regex_search(str.begin(), str.begin() + str.size(), node.pattern);
-    };
-    return doc->Check(cb, active_field);
+  vector<DocId> Search(const AstTermNode& node, string_view active_field) {
+    vector<TextIndex*> selected_indices;
+    if (active_field.empty()) {
+      selected_indices = indices->GetAllTextIndices();
+    } else {
+      auto index = indices->GetIndex(active_field);
+      DCHECK(index);  // TODO: Handle not existing index error
+      auto* text_index = dynamic_cast<TextIndex*>(*index);
+      DCHECK(text_index);  // TODO: Handle wrong type error
+      selected_indices.push_back(text_index);
+    }
+
+    vector<DocId> out, current;
+    for (auto* index : selected_indices) {
+      auto matched = index->Matching(node.term);
+      current = move(out);
+      merge(matched.begin(), matched.end(), current.begin(), current.end(), back_inserter(out));
+      out.erase(unique(out.begin(), out.end()), out.end());
+    }
+
+    return out;
   }
 
-  bool Check(const AstRangeNode& node, string_view active_field) {
-    auto cb = [&node](string_view str) {
-      int64_t v;
-      if (!absl::SimpleAtoi(str, &v))
-        return false;
-      return node.lo <= v && v <= node.hi;
-    };
-    return doc->Check(cb, active_field);
+  vector<DocId> Search(const AstRangeNode& node, string_view active_field) {
+    DCHECK(!active_field.empty());
+    auto index = indices->GetIndex(active_field);
+    DCHECK(index);  // TODO: Handle not existing index error
+    auto* numeric_index = dynamic_cast<NumericIndex*>(*index);
+    DCHECK(numeric_index);  // TODO: Handle wrong type error
+    return numeric_index->Range(node.lo, node.hi);
   }
 
-  bool Check(const AstNegateNode& node, string_view active_field) {
-    return !Check(*node.node, active_field);
+  vector<DocId> Search(const AstNegateNode& node, string_view active_field) {
+    auto matched = SearchGeneric(*node.node, active_field);
+    auto all = indices->GetAllDocs();
+
+    vector<DocId> out;
+    for (auto doc : all) {
+      if (!binary_search(matched.begin(), matched.end(), doc))
+        out.push_back(doc);
+    }
+
+    return out;
   }
 
-  bool Check(const AstLogicalNode& node, string_view active_field) {
-    auto pred = [this, active_field](const AstNode& sub) { return Check(sub, active_field); };
-    return node.op == AstLogicalNode::AND ? all_of(node.nodes.begin(), node.nodes.end(), pred)
-                                          : any_of(node.nodes.begin(), node.nodes.end(), pred);
+  vector<DocId> Search(const AstLogicalNode& node, string_view active_field) {
+    bool first = true;
+    vector<DocId> out, current;
+
+    for (auto& subnode : node.nodes) {
+      auto matched = SearchGeneric(subnode, active_field);
+
+      if (first) {
+        out = move(matched);
+        first = false;
+        continue;
+      }
+
+      current = move(out);
+      if (node.op == AstLogicalNode::AND) {
+        // Intersect sorted results sets
+        set_intersection(matched.begin(), matched.end(), current.begin(), current.end(),
+                         back_inserter(out));
+      } else {
+        DCHECK_EQ(node.op, AstLogicalNode::OR);
+        // Merge sorted result sets and remove duplicates
+        merge(matched.begin(), matched.end(), current.begin(), current.end(), back_inserter(out));
+        out.erase(unique(out.begin(), out.end()), out.end());
+      }
+    }
+    return out;
   }
 
-  bool Check(const AstFieldNode& node, string_view active_field) {
-    DCHECK(active_field.empty());
-    return Check(*node.node, node.field);
+  vector<DocId> Search(const AstFieldNode& node, string_view active_field) {
+    DCHECK_EQ(active_field.size(), 0u);
+    return SearchGeneric(*node.node, node.field);
   }
 
-  bool Check(const AstNode& node, string_view active_field) {
-    auto cb = [this, active_field](const auto& inner) { return Check(inner, active_field); };
-    return visit(cb, (const NodeVariants&)node);
+  vector<DocId> SearchGeneric(const AstNode& node, string_view active_field) {
+    auto cb = [this, active_field](const auto& inner) { return Search(inner, active_field); };
+    auto result = visit(cb, static_cast<const NodeVariants&>(node));
+    DCHECK(is_sorted(result.begin(), result.end()));
+    return result;
   }
 
-  static bool Check(DocumentAccessor* doc, const AstNode& query) {
-    BasicSearch search{doc};
-    return search.Check(query, "");
+  static vector<DocId> Search(FieldIndices* indices, const AstNode& query) {
+    BasicSearch search{indices};
+    return search.SearchGeneric(query, "");
   }
 
-  DocumentAccessor* doc;
+  FieldIndices* indices;
 };
 
-};  // namespace
+}  // namespace
+
+FieldIndices::FieldIndices(Schema schema) : schema_{move(schema)}, all_ids_{}, indices_{} {
+  for (auto& [field, type] : schema_.fields) {
+    switch (type) {
+      case Schema::TEXT:
+        indices_[field] = make_unique<TextIndex>();
+        break;
+      case Schema::NUMERIC:
+        indices_[field] = make_unique<NumericIndex>();
+        break;
+      case Schema::TAG:
+        break;
+    }
+  }
+}
+
+void FieldIndices::Add(DocId doc, DocumentAccessor* access) {
+  for (auto& [field, index] : indices_) {
+    index->Add(doc, access->Get(field));
+  }
+  all_ids_.push_back(doc);
+  sort(all_ids_.begin(), all_ids_.end());
+}
+
+optional<BaseIndex*> FieldIndices::GetIndex(string_view field) {
+  auto it = indices_.find(field);
+  return it != indices_.end() ? make_optional(it->second.get()) : nullopt;
+}
+
+std::vector<TextIndex*> FieldIndices::GetAllTextIndices() {
+  vector<TextIndex*> out;
+  for (auto& [field, type] : schema_.fields) {
+    if (type != Schema::TEXT)
+      continue;
+    auto index = GetIndex(field);
+    DCHECK(index);
+    auto* text_index = dynamic_cast<TextIndex*>(*index);
+    DCHECK(text_index);
+    out.push_back(text_index);
+  }
+  return out;
+}
+
+vector<DocId> FieldIndices::GetAllDocs() const {
+  return all_ids_;
+}
 
 SearchAlgorithm::SearchAlgorithm() = default;
 SearchAlgorithm::~SearchAlgorithm() = default;
@@ -92,8 +187,8 @@ bool SearchAlgorithm::Init(string_view query) {
   }
 }
 
-bool SearchAlgorithm::Check(DocumentAccessor* doc) const {
-  return BasicSearch::Check(doc, *query_);
+vector<DocId> SearchAlgorithm::Search(FieldIndices* index) const {
+  return BasicSearch::Search(index, *query_);
 }
 
 }  // namespace dfly::search

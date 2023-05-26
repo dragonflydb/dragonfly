@@ -29,6 +29,7 @@ struct MockedDocument : public DocumentAccessor {
   MockedDocument(std::string test_field) : fields_{{"field", test_field}} {
   }
 
+<<<<<<< HEAD
   bool Check(DocumentAccessor::FieldConsumer f, string_view active_field) const override {
     if (!active_field.empty()) {
       auto it = fields_.find(string{active_field});
@@ -40,6 +41,11 @@ struct MockedDocument : public DocumentAccessor {
       }
       return false;
     }
+=======
+  string_view Get(string_view field) const override {
+    auto it = fields_.find(field);
+    return it != fields_.end() ? string_view{it->second} : "";
+>>>>>>> 5469a13 (feat: basic indices)
   }
 
   string DebugFormat() {
@@ -60,6 +66,7 @@ struct MockedDocument : public DocumentAccessor {
   Map fields_{};
 };
 
+<<<<<<< HEAD
 // Just a filler. TODO: Remove
 struct Schema {
   enum FieldType { TEXT, NUMERIC };
@@ -67,6 +74,8 @@ struct Schema {
   absl::flat_hash_map<std::string, FieldType> fields;
 };
 
+=======
+>>>>>>> 5469a13 (feat: basic indices)
 class SearchParserTest : public ::testing::Test {
  protected:
   SearchParserTest() {
@@ -94,6 +103,7 @@ class SearchParserTest : public ::testing::Test {
   }
 
   bool Check() {
+<<<<<<< HEAD
     SearchAlgorithm search_algo{};
     search_algo.Init(query_);
 
@@ -103,6 +113,25 @@ class SearchParserTest : public ::testing::Test {
       if (doc_matched != expect_match) {
         error_ = "doc: \"" + doc.DebugFormat() + "\"" + " was expected" +
                  (expect_match ? "" : " not") + " to match" + " query: \"" + query_ + "\"";
+=======
+    FieldIndices index{schema_};
+
+    shuffle(entries_.begin(), entries_.end(), default_random_engine{});
+    for (DocId i = 0; i < entries_.size(); i++)
+      index.Add(i, &entries_[i].first);
+
+    SearchAlgorithm search_algo{query_};
+    auto matched = search_algo.Search(&index);
+
+    if (!is_sorted(matched.begin(), matched.end()))
+      throw "Search result is not sorted";
+
+    for (DocId i = 0; i < entries_.size(); i++) {
+      bool doc_matched = binary_search(matched.begin(), matched.end(), i);
+      if (doc_matched != entries_[i].second) {
+        error_ = "doc: \"" + entries_[i].first.DebugFormat() + "\"" + " was expected" +
+                 (entries_[i].second ? "" : " not") + " to match" + " query: \"" + query_ + "\"";
+>>>>>>> 5469a13 (feat: basic indices)
         entries_.clear();
         return false;
       }
