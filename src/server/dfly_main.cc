@@ -514,6 +514,13 @@ void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
     return;
 
   /* Update memory limits */
+  auto mlimit = io::ReadFileToString(cgroup + "/memory/memory.limit_in_bytes");
+  DVLOG(1) << "memory/memory.limit_in_bytes: " << mlimit.value_or("N/A");
+
+  if (mlimit && !absl::StartsWith(*mlimit, "max")) {
+    CHECK(absl::SimpleAtoi(*mlimit, &mdata->mem_total));
+  }
+  
   auto mmax = io::ReadFileToString(cgroup + "/memory.max");
   DVLOG(1) << "memory.max: " << mmax.value_or("N/A");
 
