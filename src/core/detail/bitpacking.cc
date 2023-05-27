@@ -111,10 +111,14 @@ static inline pair<const char*, uint8_t*> simd_variant2_pack(const char* ascii, 
 #ifdef __s390x__
 bool validate_ascii_fast(const char* src, size_t len) {
   size_t i = 0;
-  vector unsigned char has_error = vec_splat_s8(0);
+
+  // Initialize a vector in which all the elements are set to zero.
+  vector signed char has_error = vec_splat_s8(0);
   if (len >= 16) {
     for (; i <= len - 16; i += 16) {
-      vector unsigned char current_bytes = vec_load_len((signed char*)(src + i), 16);
+      // Load 16 bytes from buffer into a vector.
+      vector signed char current_bytes = vec_load_len((signed char*)(src + i), 16);
+      // Perform a bitwise OR operation between the current and the previously loaded contents.
       has_error = vec_orc(has_error, current_bytes);
     }
   }
@@ -130,9 +134,10 @@ bool validate_ascii_fast(const char* src, size_t len) {
   for (; i < len; i++) {
     tail_has_error |= src[i];
   }
+
   error_mask |= (tail_has_error & 0x80);
 
-  return !error_mask;
+  return (error_mask < 0x80);
 }
 #else
 bool validate_ascii_fast(const char* src, size_t len) {
