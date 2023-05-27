@@ -282,11 +282,8 @@ facade::OpStatus RunCbOnFirstNonEmptyBlocking(BlockingResultCb&& func, std::stri
     };
 
     VLOG(1) << "Blocking BLPOP " << trans->DebugId();
-    auto* stats = ServerState::tl_connection_stats();
-    ++stats->num_blocked_clients;
-    bool wait_succeeded = trans->WaitOnWatch(limit_tp, std::move(wcb));
-    --stats->num_blocked_clients;
 
+    bool wait_succeeded = trans->WaitOnWatch(limit_tp, std::move(wcb));
     if (!wait_succeeded)
       return OpStatus::TIMED_OUT;
   } else {

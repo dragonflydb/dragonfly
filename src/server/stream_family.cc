@@ -1367,11 +1367,7 @@ void XReadBlock(ReadOpts opts, ConnectionContext* cntx) {
   auto tp = (opts.timeout) ? chrono::steady_clock::now() + chrono::milliseconds(opts.timeout)
                            : Transaction::time_point::max();
 
-  auto* stats = ServerState::tl_connection_stats();
-  ++stats->num_blocked_clients;
   bool wait_succeeded = cntx->transaction->WaitOnWatch(tp, std::move(wcb));
-  --stats->num_blocked_clients;
-
   if (!wait_succeeded) {
     return (*cntx)->SendNullArray();
   }
