@@ -40,6 +40,7 @@ void BlockingControllerTest::SetUp() {
   pp_.reset(fb2::Pool::IOUring(16, kNumThreads));
   pp_->Run();
   pp_->Await([](unsigned index, ProactorBase* p) { ServerState::Init(index); });
+  ServerState::Init(kNumThreads);
 
   shard_set = new EngineShardSet(pp_.get());
   shard_set->Init(kNumThreads, false);

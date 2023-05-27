@@ -830,15 +830,10 @@ OpResult<string> BPopPusher::RunSingle(Transaction* t, time_point tp) {
     return op_res;
   }
 
-  auto* stats = ServerState::tl_connection_stats();
-
   auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice{&this->pop_key_, 1}; };
 
   // Block
-  ++stats->num_blocked_clients;
   bool wait_succeeded = t->WaitOnWatch(tp, std::move(wcb));
-  --stats->num_blocked_clients;
-
   if (!wait_succeeded)
     return OpStatus::TIMED_OUT;
 
@@ -857,19 +852,13 @@ OpResult<string> BPopPusher::RunPair(Transaction* t, time_point tp) {
     return op_res;
   }
 
-  auto* stats = ServerState::tl_connection_stats();
-
   // a hack: we watch in both shards for pop_key but only in the source shard it's relevant.
   // Therefore we follow the regular flow of watching the key but for the destination shard it
   // will never be triggerred.
   // This allows us to run Transaction::Execute on watched transactions in both shards.
   auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice{&this->pop_key_, 1}; };
 
-  ++stats->num_blocked_clients;
-
   bool wait_succeeded = t->WaitOnWatch(tp, std::move(wcb));
-  --stats->num_blocked_clients;
-
   if (!wait_succeeded)
     return OpStatus::TIMED_OUT;
 

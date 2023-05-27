@@ -1116,6 +1116,9 @@ bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provi
            wakeup_requested_.load(memory_order_relaxed) > 0;
   };
 
+  auto* stats = ServerState::tl_connection_stats();
+  ++stats->num_blocked_clients;
+
   cv_status status = cv_status::no_timeout;
   if (tp == time_point::max()) {
     DVLOG(1) << "WaitOnWatch foreva " << DebugId();
@@ -1130,6 +1133,8 @@ bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provi
 
     DVLOG(1) << "WaitOnWatch await_until " << int(status);
   }
+
+  --stats->num_blocked_clients;
 
   bool is_expired = (coordinator_state_ & COORD_CANCELLED) || status == cv_status::timeout;
   UnwatchBlocking(is_expired, wkeys_provider);
