@@ -18,7 +18,7 @@
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
-#include "server/search/search_index.h"
+#include "server/search/doc_index.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -29,7 +29,7 @@ using namespace facade;
 void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
   string_view idx_name = ArgS(args, 0);
 
-  SearchIndex index{};
+  DocIndex index{};
 
   for (size_t i = 1; i < args.size(); i++) {
     ToUpper(&args[i]);
@@ -42,9 +42,9 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
       ToUpper(&args[i]);
       string_view type = ArgS(args, i);
       if (type == "HASH")
-        index.type = SearchIndex::HASH;
+        index.type = DocIndex::HASH;
       else if (type == "JSON")
-        index.type = SearchIndex::JSON;
+        index.type = DocIndex::JSON;
       else
         return (*cntx)->SendError("Invalid rule type: " + string{type});
       continue;
@@ -63,9 +63,9 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  auto idx_ptr = make_shared<SearchIndex>(move(index));
+  auto idx_ptr = make_shared<DocIndex>(move(index));
   cntx->transaction->ScheduleSingleHop([idx_name, idx_ptr](auto* tx, auto* es) {
-    ShardSearchIndex::InitOnShard(tx->GetOpArgs(es), idx_name, idx_ptr);
+    es->search_indices()->Init(tx->GetOpArgs(es), idx_name, idx_ptr);
     return OpStatus::OK;
   });
 
@@ -76,21 +76,17 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
   string_view index_name = ArgS(args, 0);
   string_view query_str = ArgS(args, 1);
 
-  optional<search::SearchAlgorithm> search_algo{};
-  try {
-    search_algo.emplace(query_str);
-  } catch (...) {
-    (*cntx)->SendError("Syntax error");
-    return;
-  }
+  search::SearchAlgorithm search_algo;
+  if (!search_algo.Init(query_str))
+    return (*cntx)->SendError("Query syntax error");
 
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
   atomic<bool> index_not_found{false};
   vector<vector<SerializedSearchDoc>> docs(shard_set->size());
 
   cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    if (auto* index = ShardSearchIndex::GetOnShard(index_name); index)
-      docs[es->shard_id()] = index->Search(t->GetOpArgs(es), &*search_algo);
+    if (auto* index = es->search_indices()->Get(index_name); index)
+      docs[es->shard_id()] = index->Search(t->GetOpArgs(es), &search_algo);
     else
       index_not_found.store(true, memory_order_relaxed);
     return OpStatus::OK;

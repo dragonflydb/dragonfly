@@ -12,6 +12,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/blocking_controller.h"
+#include "server/search/doc_index.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
@@ -263,6 +264,8 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
     error_code ec = shard_->tiered_storage_->Open(backing_prefix);
     CHECK(!ec) << ec.message();  // TODO
   }
+
+  shard_->shard_search_indices_.reset(new ShardDocIndices());
 }
 
 void EngineShard::DestroyThreadLocal() {

@@ -2,6 +2,8 @@
 // See LICENSE for licensing terms.
 //
 
+#pragma once
+
 #include <absl/container/flat_hash_map.h>
 
 #include <memory>
@@ -14,11 +16,11 @@
 
 namespace dfly {
 
-using SearchDocData = absl::flat_hash_map<std::string, std::string>;
+using SearchDocData = absl::flat_hash_map<std::string /*field*/, std::string /*value*/>;
 using SerializedSearchDoc = std::pair<std::string /*key*/, SearchDocData>;
 
-// SearchIndex stores basic shard independent info about an index.
-struct SearchIndex {
+// Stores basic info about a document index.
+struct DocIndex {
   enum DataType { HASH, JSON };
 
   // Get numeric OBJ_ code
@@ -28,9 +30,8 @@ struct SearchIndex {
   DataType type{HASH};
 };
 
-// ShardSearchIndex stores search indices on a specific shard.
-// It keeps its indices up-to-date whenever documents are added or removed.
-class ShardSearchIndex {
+// Stores internal search indices for documents of a document index on a specific shard.
+class ShardDocIndex {
   using DocId = uint32_t;
 
   // DocKeyIndex manages mapping document keys to ids and vice versa through a simple interface.
@@ -40,32 +41,35 @@ class ShardSearchIndex {
     std::string Get(DocId id);
 
    private:
-    absl::flat_hash_map<std::string, DocId> ids;
-    std::vector<std::string> keys;
-    std::vector<DocId> free_ids;
-    DocId next_id = 1;
+    absl::flat_hash_map<std::string, DocId> ids_;
+    std::vector<std::string> keys_;
+    std::vector<DocId> free_ids_;
+    DocId last_id_ = 0;
   };
 
  public:
-  ShardSearchIndex(std::shared_ptr<SearchIndex> index);
+  ShardDocIndex(std::shared_ptr<DocIndex> index);
 
   // Perform search on all indexed documents and return results.
   std::vector<SerializedSearchDoc> Search(const OpArgs& op_args,
                                           search::SearchAlgorithm* search_algo);
 
-  static ShardSearchIndex* GetOnShard(std::string_view name);
-  static void InitOnShard(const OpArgs& op_args, std::string_view name,
-                          std::shared_ptr<SearchIndex> index);
-
- private:
   // Initialize index. Traverses all matching documents and assigns ids.
   void Init(const OpArgs& op_args);
 
  private:
-  std::shared_ptr<const SearchIndex> base_;
+  std::shared_ptr<const DocIndex> base_;
   DocKeyIndex key_index_;
+};
 
-  static thread_local absl::flat_hash_map<std::string, ShardSearchIndex> indices_;
+// Stores shard doc indices by name on a specific shard.
+class ShardDocIndices {
+ public:
+  ShardDocIndex* Get(std::string_view name);
+  void Init(const OpArgs& op_args, std::string_view name, std::shared_ptr<DocIndex> index);
+
+ private:
+  absl::flat_hash_map<std::string, std::unique_ptr<ShardDocIndex>> indices_;
 };
 
 }  // namespace dfly

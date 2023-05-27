@@ -79,12 +79,17 @@ struct BasicSearch {
 SearchAlgorithm::SearchAlgorithm() = default;
 SearchAlgorithm::~SearchAlgorithm() = default;
 
-SearchAlgorithm::SearchAlgorithm(string_view query)
-    : query{make_unique<AstExpr>(ParseQuery(query))} {
+bool SearchAlgorithm::Init(string_view query) {
+  try {
+    query_ = make_unique<AstExpr>(ParseQuery(query));
+    return true;
+  } catch (...) {
+    return false;
+  }
 }
 
 bool SearchAlgorithm::Check(DocumentAccessor* doc) const {
-  return BasicSearch::Check(doc, *query);
+  return BasicSearch::Check(doc, *query_);
 }
 
 }  // namespace dfly::search
