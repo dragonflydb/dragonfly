@@ -22,24 +22,24 @@ struct TextIndex;
 // Interface for accessing document values with different data structures underneath.
 struct DocumentAccessor {
   virtual ~DocumentAccessor() = default;
-
   virtual std::string_view Get(std::string_view active_field) const = 0;
 };
 
 struct Schema {
-  enum FieldType { TEXT, TAG, NUMERIC };
+  enum FieldType { TEXT, NUMERIC };
 
   std::unordered_map<std::string, FieldType> fields;
 };
 
+// Collection of indices for all fields in schema
 struct FieldIndices {
+  // Create indices based on schema
   FieldIndices(Schema schema);
 
   void Add(DocId doc, DocumentAccessor* access);
 
   std::optional<BaseIndex*> GetIndex(std::string_view field);
   std::vector<TextIndex*> GetAllTextIndices();
-
   std::vector<DocId> GetAllDocs() const;
 
  private:
@@ -48,6 +48,7 @@ struct FieldIndices {
   absl::flat_hash_map<std::string, std::unique_ptr<BaseIndex>> indices_;
 };
 
+// SearchAlgorithm allows searching field indices with a query
 class SearchAlgorithm {
  public:
   SearchAlgorithm();
