@@ -84,7 +84,7 @@ jobs:
             -DCMAKE_C_COMPILER="${{matrix.compiler.c}}" \
             -DCMAKE_CXX_COMPILER="${{matrix.compiler.cxx}}" \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_FLAGS="${{matrix.compiler.cxx_flags}}" \
+            -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}}" \
             -L
           cd ${{github.workspace}}/build && pwd
           du -hcs _deps/
