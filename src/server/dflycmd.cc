@@ -110,6 +110,10 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
     return StartStable(args, cntx);
   }
 
+  if (sub_cmd == "TAKEOVER" && args.size() == 3) {
+    return TakeOver(args, cntx);
+  }
+
   if (sub_cmd == "EXPIRE") {
     return Expire(args, cntx);
   }
@@ -316,7 +320,6 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
 
       StopFullSyncInThread(flow, shard);
       status = StartStableSyncInThread(flow, &replica_ptr->cntx, shard);
-      return OpStatus::OK;
     };
     shard_set->RunBlockingInParallel(std::move(cb));
 
@@ -329,6 +332,56 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
 
   replica_ptr->state.store(SyncState::STABLE_SYNC, memory_order_relaxed);
   return rb->SendOk();
+}
+
+void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
+  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  string_view sync_id_str = ArgS(args, 2);
+  float timeout;
+  if (!absl::SimpleAtof(ArgS(args, 1), &timeout)) {
+    return (*cntx)->SendError(kInvalidIntErr);
+  }
+  if (timeout < 0) {
+    return (*cntx)->SendError("timeout is negative");
+  }
+
+  VLOG(1) << "Got DFLY TAKEOVER " << sync_id_str;
+
+  auto [sync_id, replica_ptr] = GetReplicaInfoOrReply(sync_id_str, rb);
+  if (!sync_id)
+    return;
+
+  unique_lock lk(replica_ptr->mu);
+  if (!CheckReplicaStateOrReply(*replica_ptr, SyncState::STABLE_SYNC, rb))
+    return;
+
+  VLOG(1) << "Takeover initiated, locking down the database.";
+  TransactionGuard tg{cntx->transaction};
+  AggregateStatus status;
+
+  auto cb = [replica_ptr = replica_ptr, timeout, &status](EngineShard* shard) {
+    FlowInfo* flow = &replica_ptr->flows[shard->shard_id()];
+
+    shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, {}, true);
+
+    absl::Time start = absl::Now();
+    while (flow->last_acked_lsn < shard->journal()->GetLsn()) {
+      if (absl::ToInt64Seconds(absl::Now() - start) > timeout) {
+        VLOG(1) << "Couldn't synchronize with replica for takeover in time.";
+        status = OpStatus::TIMED_OUT;
+        return;
+      }
+      ThisFiber::SleepFor(1ms);
+    }
+  };
+  shard_set->RunBlockingInParallel(std::move(cb));
+
+  if (*status != OpStatus::OK)
+    return rb->SendError("Takeover timeout!");
+  (*cntx)->SendOk();
+
+  VLOG(1) << "Takeover accepted, shutting down.";
+  return sf_->ShutdownCmd({}, cntx);
 }
 
 void DflyCmd::Expire(CmdArgList args, ConnectionContext* cntx) {

@@ -893,8 +893,8 @@ void Transaction::RunQuickie(EngineShard* shard) {
   auto& sd = shard_data_[SidToId(unique_shard_id_)];
   DCHECK_EQ(0, sd.local_mask & (KEYLOCK_ACQUIRED | OUT_OF_ORDER));
 
-  DVLOG(1) << "RunQuickSingle " << DebugId() << " " << shard->shard_id() << " " << args_[0];
-  DCHECK(cb_ptr_) << DebugId() << " " << shard->shard_id() << " " << args_[0];
+  DVLOG(1) << "RunQuickSingle " << DebugId() << " " << shard->shard_id();
+  DCHECK(cb_ptr_) << DebugId() << " " << shard->shard_id();
 
   // Calling the callback in somewhat safe way
   try {

@@ -1933,6 +1933,41 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
+  VLOG(1) << "Starting take over";
+  VLOG(1) << "Acquire replica lock";
+  unique_lock lk(replicaof_mu_);
+
+  float_t timeout;
+  if (!absl::SimpleAtof(ArgS(args, 0), &timeout)) {
+    return (*cntx)->SendError(kInvalidIntErr);
+  }
+  if (timeout < 0) {
+    return (*cntx)->SendError("timeout is negative");
+  }
+
+  if (ServerState::tlocal()->is_master)
+    return (*cntx)->SendError("Already a master instance");
+  auto repl_ptr = replica_;
+  CHECK(repl_ptr);
+
+  auto info = replica_->GetInfo();
+  if (!info.full_sync_done) {
+    return (*cntx)->SendError("Full sync not done");
+  }
+
+  std::error_code ec = replica_->TakeOver(ArgS(args, 0));
+  if (ec)
+    return (*cntx)->SendError("Couldn't execute takeover");
+
+  VLOG(1) << "Takeover successful, promoting this instance to master.";
+  service_.proactor_pool().AwaitFiberOnAll(
+      [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = true; });
+  replica_->Stop();
+  replica_.reset();
+  return (*cntx)->SendOk();
+}
+
 void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() % 2 == 1)
     goto err;
@@ -2083,7 +2118,7 @@ void ServerFamily::Latency(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendError(kSyntaxErr);
 }
 
-void ServerFamily::_Shutdown(CmdArgList args, ConnectionContext* cntx) {
+void ServerFamily::ShutdownCmd(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 1) {
     (*cntx)->SendError(kSyntaxErr);
     return;
@@ -2145,9 +2180,11 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING | CO::FAST, -2, 0, 0, 0}.HFUNC(Latency)
             << CI{"MEMORY", kMemOpts, -2, 0, 0, 0}.HFUNC(Memory)
             << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, 0}.HFUNC(Save)
-            << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.HFUNC(_Shutdown)
+            << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.HFUNC(
+                   ShutdownCmd)
             << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
+            << CI{"REPLTAKEOVER", kReplicaOpts, 2, 0, 0, 0}.HFUNC(ReplTakeOver)
             << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, 0}.HFUNC(ReplConf)
             << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, 0}.HFUNC(Role)
             << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, 0}.SetHandler(SlowLog)

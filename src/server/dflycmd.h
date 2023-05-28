@@ -99,7 +99,7 @@ class DflyCmd {
   struct ReplicaInfo {
     ReplicaInfo(unsigned flow_count, std::string address, uint32_t listening_port,
                 Context::ErrHandler err_handler)
-        : state{SyncState::PREPARATION}, cntx{std::move(err_handler)}, address{address},
+        : state{SyncState::PREPARATION}, cntx{std::move(err_handler)}, address{std::move(address)},
           listening_port(listening_port), flows{flow_count} {
     }
 
@@ -150,6 +150,10 @@ class DflyCmd {
   // STARTSTABLE <syncid>
   // Switch to stable state replication.
   void StartStable(CmdArgList args, ConnectionContext* cntx);
+
+  // STARTSTABLE <syncid>
+  // Switch to stable state replication.
+  void TakeOver(CmdArgList args, ConnectionContext* cntx);
 
   // EXPIRE
   // Check all keys for expiry.

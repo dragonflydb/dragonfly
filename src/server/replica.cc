@@ -226,6 +226,23 @@ void Replica::Pause(bool pause) {
   sock_->proactor()->Await([&] { is_paused_ = pause; });
 }
 
+std::error_code Replica::TakeOver(std::string_view timeout) {
+  VLOG(1) << "Taking over";
+
+  std::unique_lock lk(sock_mu_);
+
+  std::error_code ec;
+  sock_->proactor()->Await(
+      [this, &ec, timeout] { ec = SendNextPhaseRequest(absl::StrCat("TAKEOVER ", timeout)); });
+
+  if (ec) {
+    // TODO: Handle timeout more gracefully.
+    return cntx_.ReportError(ec);
+  }
+  // If we successfully taken over, return and let server_family stop us.
+  return {};
+}
+
 void Replica::MainReplicationFb() {
   VLOG(1) << "Main replication fiber started";
   // Switch shard states to replication.
@@ -608,7 +625,7 @@ error_code Replica::InitiateDflySync() {
   RETURN_ON_ERR(cntx_.GetError());
 
   // Send DFLY SYNC.
-  if (auto ec = SendNextPhaseRequest(false); ec) {
+  if (auto ec = SendNextPhaseRequest("SYNC"); ec) {
     return cntx_.ReportError(ec);
   }
 
@@ -624,7 +641,7 @@ error_code Replica::InitiateDflySync() {
     return cntx_.GetError();
 
   // Send DFLY STARTSTABLE.
-  if (auto ec = SendNextPhaseRequest(true); ec) {
+  if (auto ec = SendNextPhaseRequest("STARTSTABLE"); ec) {
     return cntx_.ReportError(ec);
   }
 
@@ -768,11 +785,10 @@ void Replica::DefaultErrorHandler(const GenericError& err) {
   CloseSocket();
 }
 
-error_code Replica::SendNextPhaseRequest(bool stable) {
+error_code Replica::SendNextPhaseRequest(string_view kind) {
   ReqSerializer serializer{sock_.get()};
 
   // Ask master to start sending replication stream
-  string_view kind = (stable) ? "STARTSTABLE"sv : "SYNC"sv;
   string request = StrCat("DFLY ", kind, " ", master_context_.dfly_session_id);
 
   VLOG(1) << "Sending: " << request;
