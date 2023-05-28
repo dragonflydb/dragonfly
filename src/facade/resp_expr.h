@@ -7,6 +7,7 @@
 #include <absl/strings/ascii.h>
 #include <absl/types/span.h>
 
+#include <optional>
 #include <variant>
 #include <vector>
 
@@ -42,6 +43,11 @@ class RespExpr {
 
   const Vec& GetVec() const {
     return *std::get<Vec*>(u);
+  }
+
+  std::optional<int64_t> GetInt() const {
+    return std::holds_alternative<int64_t>(u) ? std::make_optional(std::get<int64_t>(u))
+                                              : std::nullopt;
   }
 
   static const char* TypeName(Type t);
