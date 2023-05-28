@@ -458,6 +458,11 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
   EXPECT_THAT(slot2, ElementsAre("2", "key_count", "0"));
 }
 
+TEST_F(ClusterFamilyTest, ClusterModeSelectNotAllowed) {
+  EXPECT_THAT(Run({"select", "1"}), ErrArg("SELECT is not allowed in cluster mode"));
+  EXPECT_EQ(Run({"select", "0"}), "OK");
+}
+
 class ClusterFamilyEmulatedTest : public BaseFamilyTest {
  public:
   ClusterFamilyEmulatedTest() {
