@@ -498,6 +498,37 @@ TEST_F(ClusterFamilyTest, ClusterModeSelectNotAllowed) {
   EXPECT_EQ(Run({"select", "0"}), "OK");
 }
 
+TEST_F(ClusterFamilyTest, ClusterFirstConfigCallDropsEntriesNotOwnedByNode) {
+  Run({"debug", "populate", "50000"});
+
+  EXPECT_EQ(Run({"save", "df"}), "OK");
+
+  auto save_info = service_->server_family().GetLastSaveInfo();
+  EXPECT_EQ(Run({"debug", "load", save_info->file_name}), "OK");
+  EXPECT_EQ(CheckedInt({"dbsize"}), 50000);
+
+  EXPECT_EQ(RunAdmin({"dflycluster", "config", R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 16383
+            }
+          ],
+          "master": {
+            "id": "abcd1234",
+            "ip": "10.0.0.1",
+            "port": 7000
+          },
+          "replicas": []
+        }
+      ])json"}),
+            "OK");
+  sleep(1);
+  EXPECT_EQ(CheckedInt({"dbsize"}), 0);
+}
+
 class ClusterFamilyEmulatedTest : public BaseFamilyTest {
  public:
   ClusterFamilyEmulatedTest() {
