@@ -216,7 +216,7 @@ void ClusterFamily::ClusterSlots(ConnectionContext* cntx) {
 
 namespace {
 void ClusterNodesImpl(const ClusterShards& config, string_view my_id, ConnectionContext* cntx) {
-  // For more details https://redis.io/commands/cluster-slots/
+  // For more details https://redis.io/commands/cluster-nodes/
 
   string result;
 
@@ -248,7 +248,8 @@ void ClusterNodesImpl(const ClusterShards& config, string_view my_id, Connection
   for (const auto& shard : config) {
     WriteNode(shard.master, "master", "-", shard.slot_ranges);
     for (const auto& replica : shard.replicas) {
-      WriteNode(replica, "slave", shard.master.id, shard.slot_ranges);
+      // Only the master prints ranges, so we send an empty set for replicas.
+      WriteNode(replica, "slave", shard.master.id, {});
     }
   }
 

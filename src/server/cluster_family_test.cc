@@ -276,7 +276,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigFull) {
 
   EXPECT_EQ(Run({"cluster", "nodes"}),
             "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 connected 0-16383\r\n"
-            "wxyz 10.0.0.10:8000@8000 slave abcd1234 0 0 0 connected 0-16383\r\n");
+            "wxyz 10.0.0.10:8000@8000 slave abcd1234 0 0 0 connected\r\n");
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
@@ -400,9 +400,9 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
 
   EXPECT_THAT(Run({"cluster", "nodes"}),
               "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 connected 0-10000\r\n"
-              "wxyz 10.0.0.10:8000@8000 slave abcd1234 0 0 0 connected 0-10000\r\n"
+              "wxyz 10.0.0.10:8000@8000 slave abcd1234 0 0 0 connected\r\n"
               "efgh7890 10.0.0.2:7001@7001 master - 0 0 0 connected 10001-16383\r\n"
-              "qwerty 10.0.0.11:8001@8001 slave efgh7890 0 0 0 connected 10001-16383\r\n");
+              "qwerty 10.0.0.11:8001@8001 slave efgh7890 0 0 0 connected\r\n");
 
   absl::InsecureBitGen eng;
   while (true) {
