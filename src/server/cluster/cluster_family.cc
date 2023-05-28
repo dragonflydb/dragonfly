@@ -35,7 +35,7 @@ using namespace std;
 using namespace facade;
 using CI = CommandId;
 
-constexpr string_view kClusterNotConfigured = "-Cluster is not yet configured";
+constexpr string_view kClusterNotConfigured = "Cluster is not yet configured";
 
 }  // namespace
 
