@@ -33,7 +33,7 @@ extern "C" {
 #include "server/list_family.h"
 #include "server/multi_command_squasher.h"
 #include "server/script_mgr.h"
-#include "server/search_family.h"
+#include "server/search/search_family.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
 #include "server/stream_family.h"

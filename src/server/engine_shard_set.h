@@ -31,6 +31,7 @@ class Journal;
 }  // namespace journal
 
 class TieredStorage;
+class ShardDocIndices;
 class BlockingController;
 
 class EngineShard {
@@ -113,6 +114,10 @@ class EngineShard {
 
   TieredStorage* tiered_storage() {
     return tiered_storage_.get();
+  }
+
+  ShardDocIndices* search_indices() {
+    return shard_search_indices_.get();
   }
 
   BlockingController* EnsureBlockingController();
@@ -214,6 +219,7 @@ class EngineShard {
 
   DefragTaskState defrag_state_;
   std::unique_ptr<TieredStorage> tiered_storage_;
+  std::unique_ptr<ShardDocIndices> shard_search_indices_;
   std::unique_ptr<BlockingController> blocking_controller_;
 
   using Counter = util::SlidingCounter<7>;

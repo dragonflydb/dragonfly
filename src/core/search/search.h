@@ -15,14 +15,14 @@ class SearchAlgorithm {
   SearchAlgorithm();
   ~SearchAlgorithm();
 
-  // Construct from query. Throws on error.
-  SearchAlgorithm(std::string_view query);
+  // Init with query and return true if successful.
+  bool Init(std::string_view query);
 
   // Interface will change
   bool Check(DocumentAccessor* accessor) const;
 
  private:
-  std::unique_ptr<AstNode> query;
+  std::unique_ptr<AstNode> query_;
 };
 
 }  // namespace dfly::search

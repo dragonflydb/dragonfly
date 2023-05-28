@@ -2,7 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/search_family.h"
+#include "server/search/search_family.h"
 
 #include "base/gtest.h"
 #include "base/logging.h"
@@ -48,7 +48,7 @@ TEST_F(SearchFamilyTest, Simple) {
   EXPECT_THAT(Run({"ft.search", "i1", "@foo:none"}), kNoResults);
 
   EXPECT_THAT(Run({"ft.search", "iNone", "@foo:bar"}), ErrArg("iNone: no such index"));
-  EXPECT_THAT(Run({"ft.search", "i1", "@@NOTAQUERY@@"}), ErrArg("Syntax error"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@@NOTAQUERY@@"}), ErrArg("Query syntax error"));
 
   // w: prefix is not part of index
   Run({"hset", "w:2", "foo", "this", "k", "v"});
