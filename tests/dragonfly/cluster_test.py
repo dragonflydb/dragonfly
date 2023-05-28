@@ -136,8 +136,8 @@ async def test_cluster_nodes(async_client):
     assert len(res) == 1
     info = res['127.0.0.2:6379']
     assert res is not None
-    assert info['connected'] == False
-    assert info['epoch'] == '1'
+    assert info['connected'] == True
+    assert info['epoch'] == '0'
     assert info['flags'] == 'myself,master'
     assert info['last_ping_sent'] == '0'
     assert info['slots'] == [['0', '16383']]
