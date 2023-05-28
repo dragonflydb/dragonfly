@@ -36,7 +36,7 @@ class SearchParserTest : public ::testing::Test {
 
   void ParseExpr(const std::string& str) {
     raw_expr_ = str;
-    search_algo_.Init(str);
+    CHECK(search_algo_.Init(str));
   }
 
   bool Check(DocumentAccessor* doc) const {

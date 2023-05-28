@@ -20,7 +20,7 @@ AstExpr ParseQuery(std::string_view query) {
   QueryDriver driver{};
   driver.ResetScanner();
   driver.SetInput(std::string{query});
-  (void)Parser (&driver)();  // throws
+  (void)Parser (&driver)();  // can throw
   return driver.Take();
 }
 
@@ -82,8 +82,12 @@ SearchAlgorithm::~SearchAlgorithm() = default;
 bool SearchAlgorithm::Init(string_view query) {
   try {
     query_ = make_unique<AstExpr>(ParseQuery(query));
-    return true;
+    return !holds_alternative<monostate>(*query_);
+  } catch (const Parser::syntax_error& se) {
+    LOG(INFO) << "Failed to parse query \"" << query << "\":" << se.what();
+    return false;
   } catch (...) {
+    LOG(INFO) << "Unexpected query parser error";
     return false;
   }
 }
