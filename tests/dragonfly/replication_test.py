@@ -1069,3 +1069,23 @@ async def test_readonly_script(df_local_factory):
         assert False
     except aioredis.ResponseError as roe:
         assert 'READONLY ' in str(roe)
+
+
+@dfly_args({"proactor_threads": 2})
+@pytest.mark.asyncio
+async def test_take_over(df_local_factory):
+    master = df_local_factory.create(port=BASE_PORT)
+    replica = df_local_factory.create(
+        port=BASE_PORT+1, logtostdout=True, replication_acks_interval=100)
+    df_local_factory.start_all([master, replica])
+    c_master = aioredis.Redis(port=master.port)
+    c_replica = aioredis.Redis(port=replica.port)
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    await c_replica.execute_command(f"REPLTAKEOVER 1")
+    assert await c_replica.execute_command("role") == [b'master', []]
+
+    await c_master.connection_pool.disconnect()
+    await c_replica.connection_pool.disconnect()
