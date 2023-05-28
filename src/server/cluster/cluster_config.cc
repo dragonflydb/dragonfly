@@ -126,7 +126,7 @@ optional<SlotSet> ClusterConfig::SetConfig(const vector<ClusterShard>& new_confi
           shard.master.id == my_id_ || any_of(shard.replicas.begin(), shard.replicas.end(),
                                               [&](const Node& node) { return node.id == my_id_; });
       for (SlotId i = slot_range.start; i <= slot_range.end; ++i) {
-        if ((slots_[i].owned_by_me && !owned_by_me) || (is_first_config && !owned_by_me)) {
+        if ((slots_[i].owned_by_me || is_first_config) && !owned_by_me) {
           deleted_slots.insert(i);
         }
         slots_[i] = {.shard = &shard, .owned_by_me = owned_by_me};
