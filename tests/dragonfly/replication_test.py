@@ -292,6 +292,7 @@ async def test_disconnect_master(df_local_factory, df_seeder_factory, t_master, 
     seeder = df_seeder_factory.create(port=master.port, keys=n_keys, dbcount=2)
 
     async def crash_master_fs():
+        await asyncio.sleep(random.random() / 10)
         master.stop(kill=True)
 
     async def start_master():
