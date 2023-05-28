@@ -25,86 +25,92 @@ AstExpr ParseQuery(std::string_view query) {
   return driver.Take();
 }
 
+// Add results from matched to current, keep sorted and remove duplicates.
+void UnifyResults(vector<DocId>&& matched, vector<DocId>* current, vector<DocId>* tmp) {
+  swap(*current, *tmp);  // Move current to tmp so we can directly write into current
+  current->clear();
+  current->reserve(matched.size() + tmp->size());
+
+  merge(matched.begin(), matched.end(), tmp->begin(), tmp->end(), back_inserter(*current));
+  current->erase(unique(current->begin(), current->end()), current->end());
+}
+
+// Merge results from matched with current, keep sorted.
+void MergeResults(vector<DocId>&& matched, vector<DocId>* current, vector<DocId>* tmp) {
+  swap(*current, *tmp);  // Move current to tmp so we can directly write into current
+  current->clear();
+  current->reserve(matched.size() + tmp->size());
+
+  set_intersection(matched.begin(), matched.end(), tmp->begin(), tmp->end(),
+                   back_inserter(*current));
+}
+
 struct BasicSearch {
+  // Get casted sub index by field
+  template <typename T> T* GetIndex(string_view field) {
+    static_assert(is_base_of_v<BaseIndex, T>);
+    auto index = indices->GetIndex(field);
+    DCHECK(index);  // TODO: handle not existing erorr
+    auto* casted_ptr = dynamic_cast<T*>(index);
+    DCHECK(casted_ptr);  // TODO: handle type errors
+    return casted_ptr;
+  }
+
   vector<DocId> Search(monostate, string_view) {
     return {};
   }
 
   vector<DocId> Search(const AstTermNode& node, string_view active_field) {
+    // Select active indices: search in all text indices if none is selected
     vector<TextIndex*> selected_indices;
-    if (active_field.empty()) {
+    if (active_field.empty())
       selected_indices = indices->GetAllTextIndices();
-    } else {
-      auto index = indices->GetIndex(active_field);
-      DCHECK(index);  // TODO: Handle not existing index error
-      auto* text_index = dynamic_cast<TextIndex*>(*index);
-      DCHECK(text_index);  // TODO: Handle wrong type error
-      selected_indices.push_back(text_index);
-    }
+    else
+      selected_indices = {GetIndex<TextIndex>(active_field)};
 
-    vector<DocId> out, current;
-    for (auto* index : selected_indices) {
-      auto matched = index->Matching(node.term);
-      current = move(out);
-      merge(matched.begin(), matched.end(), current.begin(), current.end(), back_inserter(out));
-      out.erase(unique(out.begin(), out.end()), out.end());
-    }
+    // Unify results from all indices
+    vector<DocId> out, tmp;
+    for (auto* index : selected_indices)
+      UnifyResults(index->Matching(node.term), &out, &tmp);
 
     return out;
   }
 
   vector<DocId> Search(const AstRangeNode& node, string_view active_field) {
     DCHECK(!active_field.empty());
-    auto index = indices->GetIndex(active_field);
-    DCHECK(index);  // TODO: Handle not existing index error
-    auto* numeric_index = dynamic_cast<NumericIndex*>(*index);
-    DCHECK(numeric_index);  // TODO: Handle wrong type error
-    return numeric_index->Range(node.lo, node.hi);
+    return GetIndex<NumericIndex>(active_field)->Range(node.lo, node.hi);
   }
 
   vector<DocId> Search(const AstNegateNode& node, string_view active_field) {
+    // To negate a result, we have to find the complement of matched to all documents.
     auto matched = SearchGeneric(*node.node, active_field);
-    auto all = indices->GetAllDocs();
-
-    vector<DocId> out;
-    for (auto doc : all) {
-      if (!binary_search(matched.begin(), matched.end(), doc))
-        out.push_back(doc);
-    }
-
+    auto out = indices->GetAllDocs();
+    auto pred = [&matched](DocId doc) {
+      return binary_search(matched.begin(), matched.end(), doc);
+    };
+    out.erase(remove_if(out.begin(), out.end(), pred), out.end());
     return out;
   }
 
   vector<DocId> Search(const AstLogicalNode& node, string_view active_field) {
-    bool first = true;
-    vector<DocId> out, current;
+    auto merge_func = node.op == AstLogicalNode::AND ? MergeResults : UnifyResults;
 
+    bool first = true;
+    vector<DocId> out, tmp;
     for (auto& subnode : node.nodes) {
       auto matched = SearchGeneric(subnode, active_field);
-
       if (first) {
-        out = move(matched);
+        out = matched;
         first = false;
-        continue;
-      }
-
-      current = move(out);
-      if (node.op == AstLogicalNode::AND) {
-        // Intersect sorted results sets
-        set_intersection(matched.begin(), matched.end(), current.begin(), current.end(),
-                         back_inserter(out));
       } else {
-        DCHECK_EQ(node.op, AstLogicalNode::OR);
-        // Merge sorted result sets and remove duplicates
-        merge(matched.begin(), matched.end(), current.begin(), current.end(), back_inserter(out));
-        out.erase(unique(out.begin(), out.end()), out.end());
+        merge_func(move(matched), &out, &tmp);
       }
     }
     return out;
   }
 
   vector<DocId> Search(const AstFieldNode& node, string_view active_field) {
-    DCHECK_EQ(active_field.size(), 0u);
+    DCHECK(active_field.empty());
     return SearchGeneric(*node.node, node.field);
   }
 
@@ -116,8 +122,7 @@ struct BasicSearch {
   }
 
   static vector<DocId> Search(FieldIndices* indices, const AstNode& query) {
-    BasicSearch search{indices};
-    return search.SearchGeneric(query, "");
+    return BasicSearch{indices}.SearchGeneric(query, "");
   }
 
   FieldIndices* indices;
@@ -134,8 +139,6 @@ FieldIndices::FieldIndices(Schema schema) : schema_{move(schema)}, all_ids_{}, i
       case Schema::NUMERIC:
         indices_[field] = make_unique<NumericIndex>();
         break;
-      case Schema::TAG:
-        break;
     }
   }
 }
@@ -148,9 +151,9 @@ void FieldIndices::Add(DocId doc, DocumentAccessor* access) {
   sort(all_ids_.begin(), all_ids_.end());
 }
 
-optional<BaseIndex*> FieldIndices::GetIndex(string_view field) {
+BaseIndex* FieldIndices::GetIndex(string_view field) {
   auto it = indices_.find(field);
-  return it != indices_.end() ? make_optional(it->second.get()) : nullopt;
+  return it != indices_.end() ? it->second.get() : nullptr;
 }
 
 std::vector<TextIndex*> FieldIndices::GetAllTextIndices() {
@@ -158,11 +161,9 @@ std::vector<TextIndex*> FieldIndices::GetAllTextIndices() {
   for (auto& [field, type] : schema_.fields) {
     if (type != Schema::TEXT)
       continue;
-    auto index = GetIndex(field);
+    auto* index = dynamic_cast<TextIndex*>(GetIndex(field));
     DCHECK(index);
-    auto* text_index = dynamic_cast<TextIndex*>(*index);
-    DCHECK(text_index);
-    out.push_back(text_index);
+    out.push_back(index);
   }
   return out;
 }

@@ -34,24 +34,6 @@ vector<string> GetWords(string_view text) {
   return vector<string>{make_move_iterator(words.begin()), make_move_iterator(words.end())};
 }
 
-vector<string> GetWords(string_view text) {
-  std::regex rx{"\\b.*?\\b", std::regex_constants::icase};
-
-  std::cregex_iterator begin(text.data(), text.data() + text.size(), rx);
-  std::cregex_iterator end;
-
-  vector<string> out;
-  for (auto it = begin; it != end; ++it) {
-    auto str = it->str();
-    absl::AsciiStrToLower(&str);
-    out.push_back(move(str));
-  }
-
-  sort(out.begin(), out.end());
-  out.erase(unique(out.begin(), out.end()), out.end());
-  return out;
-}
-
 };  // namespace
 
 void NumericIndex::Add(DocId doc, string_view value) {

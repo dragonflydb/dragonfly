@@ -38,7 +38,7 @@ struct FieldIndices {
 
   void Add(DocId doc, DocumentAccessor* access);
 
-  std::optional<BaseIndex*> GetIndex(std::string_view field);
+  BaseIndex* GetIndex(std::string_view field);
   std::vector<TextIndex*> GetAllTextIndices();
   std::vector<DocId> GetAllDocs() const;
 
