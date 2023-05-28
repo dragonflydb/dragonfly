@@ -67,6 +67,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigInvalidJSON) {
 
   EXPECT_THAT(Run({"cluster", "shards"}), ErrArg("Cluster is not yet configured"));
   EXPECT_THAT(Run({"cluster", "slots"}), ErrArg("Cluster is not yet configured"));
+  EXPECT_THAT(Run({"cluster", "nodes"}), ErrArg("Cluster is not yet configured"));
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidConfig) {
@@ -201,6 +202,9 @@ TEST_F(ClusterFamilyTest, ClusterConfigNoReplicas) {
                                         "10.0.0.1",         //
                                         IntArg(7'000),      //
                                         "abcd1234")))));
+
+  EXPECT_EQ(Run({"cluster", "nodes"}),
+            "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 connected 0-16383\r\n");
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigFull) {
@@ -269,6 +273,10 @@ TEST_F(ClusterFamilyTest, ClusterConfigFull) {
                                         "10.0.0.10",        //
                                         IntArg(8'000),      //
                                         "wxyz")))));
+
+  EXPECT_EQ(Run({"cluster", "nodes"}),
+            "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 connected 0-16383\r\n"
+            "wxyz 10.0.0.10:8000@8000 slave abcd1234 0 0 0 connected\r\n");
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
@@ -389,6 +397,12 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
                                             "10.0.0.11",        //
                                             IntArg(8'001),      //
                                             "qwerty")))))));
+
+  EXPECT_THAT(Run({"cluster", "nodes"}),
+              "abcd1234 10.0.0.1:7000@7000 master - 0 0 0 connected 0-10000\r\n"
+              "wxyz 10.0.0.10:8000@8000 slave abcd1234 0 0 0 connected\r\n"
+              "efgh7890 10.0.0.2:7001@7001 master - 0 0 0 connected 10001-16383\r\n"
+              "qwerty 10.0.0.11:8001@8001 slave efgh7890 0 0 0 connected\r\n");
 
   absl::InsecureBitGen eng;
   while (true) {
@@ -539,6 +553,12 @@ TEST_F(ClusterFamilyEmulatedTest, ClusterSlots) {
                                         "fake-host",        //
                                         IntArg(6379),       //
                                         RunAdmin({"dflycluster", "myid"}).GetString())))));
+}
+
+TEST_F(ClusterFamilyEmulatedTest, ClusterNodes) {
+  EXPECT_THAT(Run({"cluster", "nodes"}),
+              RunAdmin({"dflycluster", "myid"}).GetString() +
+                  " fake-host:6379@6379 myself,master - 0 0 0 connected 0-16383\r\n");
 }
 
 }  // namespace

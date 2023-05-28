@@ -34,6 +34,10 @@ namespace {
 using namespace std;
 using namespace facade;
 using CI = CommandId;
+using ClusterShard = ClusterConfig::ClusterShard;
+using ClusterShards = ClusterConfig::ClusterShards;
+using Node = ClusterConfig::Node;
+using SlotRange = ClusterConfig::SlotRange;
 
 constexpr string_view kClusterDisabled =
     "Cluster is disabled. Enabled via passing --cluster_mode=emulated|yes";
@@ -61,8 +65,8 @@ bool ClusterFamily::IsEnabledOrEmulated() const {
 
 // TODO: Extend this method to accommodate the needs of `CLUSTER NODES` and `CLUSTER SLOTS`.
 // TODO: Also make this function safe in that it will read the state atomically.
-ClusterConfig::ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const {
-  ClusterConfig::ClusterShard info{
+ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const {
+  ClusterShard info{
       .slot_ranges = {{.start = 0, .end = ClusterConfig::kMaxSlotNum}},
       .master = {},
       .replicas = {},
@@ -95,41 +99,6 @@ ClusterConfig::ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContex
   return info;
 }
 
-string ClusterFamily::BuildClusterNodeReply(ConnectionContext* cntx) const {
-  ServerState& etl = *ServerState::tlocal();
-  auto epoch_master_time = std::time(nullptr) * 1000;
-  if (etl.is_master) {
-    std::string cluster_announce_ip = absl::GetFlag(FLAGS_cluster_announce_ip);
-    std::string preferred_endpoint =
-        cluster_announce_ip.empty() ? cntx->owner()->LocalBindAddress() : cluster_announce_ip;
-    auto vec = server_family_->GetDflyCmd()->GetReplicasRoleInfo();
-    auto my_port = absl::GetFlag(FLAGS_port);
-    const char* connect_state = vec.empty() ? "disconnected" : "connected";
-    std::string msg = absl::StrCat(server_family_->master_id(), " ", preferred_endpoint, ":",
-                                   my_port, "@", my_port, " myself,master - 0 ", epoch_master_time,
-                                   " 1 ", connect_state, " 0-16383\r\n");
-    if (!vec.empty()) {  // info about the replica
-      const auto& info = vec[0];
-      absl::StrAppend(&msg, etl.remote_client_id_, " ", info.address, ":", info.listening_port, "@",
-                      info.listening_port, " slave 0 ", server_family_->master_id(), " 1 ",
-                      connect_state, "\r\n");
-    }
-    return msg;
-  } else {
-    Replica::Info info = server_family_->GetReplicaInfo();
-    auto my_ip = cntx->owner()->LocalBindAddress();
-    auto my_port = absl::GetFlag(FLAGS_port);
-    const char* connect_state = info.master_link_established ? "connected" : "disconnected";
-    std::string msg = absl::StrCat(server_family_->master_id(), " ", my_ip, ":", my_port, "@",
-                                   my_port, " myself,slave ", server_family_->master_id(), " 0 ",
-                                   epoch_master_time, " 1 ", connect_state, "\r\n");
-    absl::StrAppend(&msg, server_family_->GetReplicaMasterId(), " ", info.host, ":", info.port, "@",
-                    info.port, " master - 0 ", epoch_master_time, " 1 ", connect_state,
-                    " 0-16383\r\n");
-    return msg;
-  }
-}
-
 void ClusterFamily::ClusterHelp(ConnectionContext* cntx) {
   string_view help_arr[] = {
       "CLUSTER <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
@@ -148,11 +117,11 @@ void ClusterFamily::ClusterHelp(ConnectionContext* cntx) {
 }
 
 namespace {
-void ClusterShardsImpl(const ClusterConfig::ClusterShards& config, ConnectionContext* cntx) {
+void ClusterShardsImpl(const ClusterShards& config, ConnectionContext* cntx) {
   // For more details https://redis.io/commands/cluster-shards/
   constexpr unsigned int kEntrySize = 4;
 
-  auto WriteNode = [&](const ClusterConfig::Node& node, string_view role) {
+  auto WriteNode = [&](const Node& node, string_view role) {
     constexpr unsigned int kNodeSize = 14;
     (*cntx)->StartArray(kNodeSize);
     (*cntx)->SendBulkString("id");
@@ -203,9 +172,9 @@ void ClusterFamily::ClusterShards(ConnectionContext* cntx) {
 }
 
 namespace {
-void ClusterSlotsImpl(const ClusterConfig::ClusterShards& config, ConnectionContext* cntx) {
+void ClusterSlotsImpl(const ClusterShards& config, ConnectionContext* cntx) {
   // For more details https://redis.io/commands/cluster-slots/
-  auto WriteNode = [&](const ClusterConfig::Node& node) {
+  auto WriteNode = [&](const Node& node) {
     constexpr unsigned int kNodeSize = 3;
     (*cntx)->StartArray(kNodeSize);
     (*cntx)->SendBulkString(node.ip);
@@ -245,12 +214,57 @@ void ClusterFamily::ClusterSlots(ConnectionContext* cntx) {
   }
 }
 
+namespace {
+void ClusterNodesImpl(const ClusterShards& config, string_view my_id, ConnectionContext* cntx) {
+  // For more details https://redis.io/commands/cluster-nodes/
+
+  string result;
+
+  auto WriteNode = [&](const Node& node, string_view role, string_view master_id,
+                       const vector<SlotRange>& ranges) {
+    absl::StrAppend(&result, node.id, " ");
+
+    absl::StrAppend(&result, node.ip, ":", node.port, "@", node.port, " ");
+
+    if (my_id == node.id) {
+      absl::StrAppend(&result, "myself,");
+    }
+    absl::StrAppend(&result, role, " ");
+
+    absl::StrAppend(&result, master_id, " ");
+
+    absl::StrAppend(&result, "0 0 0 connected");
+
+    for (const auto& range : ranges) {
+      absl::StrAppend(&result, " ", range.start);
+      if (range.start != range.end) {
+        absl::StrAppend(&result, "-", range.end);
+      }
+    }
+
+    absl::StrAppend(&result, "\r\n");
+  };
+
+  for (const auto& shard : config) {
+    WriteNode(shard.master, "master", "-", shard.slot_ranges);
+    for (const auto& replica : shard.replicas) {
+      // Only the master prints ranges, so we send an empty set for replicas.
+      WriteNode(replica, "slave", shard.master.id, {});
+    }
+  }
+
+  return (*cntx)->SendBulkString(result);
+}
+}  // namespace
+
 void ClusterFamily::ClusterNodes(ConnectionContext* cntx) {
-  // Support for NODES commands can help in case we are working in cluster mode
-  // In this case, we can save information about the cluster
-  // In case this is the master, it can save the information about the replica from this command
-  std::string msg = BuildClusterNodeReply(cntx);
-  (*cntx)->SendBulkString(msg);
+  if (is_emulated_cluster_) {
+    return ClusterNodesImpl({GetEmulatedShardInfo(cntx)}, server_family_->master_id(), cntx);
+  } else if (cluster_config_->IsConfigured()) {
+    return ClusterNodesImpl(cluster_config_->GetConfig(), server_family_->master_id(), cntx);
+  } else {
+    return (*cntx)->SendError(kClusterNotConfigured);
+  }
 }
 
 void ClusterFamily::ClusterInfo(ConnectionContext* cntx) {
