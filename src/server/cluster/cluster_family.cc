@@ -35,6 +35,8 @@ using namespace std;
 using namespace facade;
 using CI = CommandId;
 
+constexpr string_view kClusterDisabled =
+    "Cluster is disabled. Enabled via passing --cluster_mode=emulated|yes";
 constexpr string_view kClusterNotConfigured = "Cluster is not yet configured";
 
 }  // namespace
@@ -323,8 +325,7 @@ void ClusterFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
   string_view sub_cmd = ArgS(args, 0);
 
   if (!is_emulated_cluster_ && !ClusterConfig::IsClusterEnabled()) {
-    return (*cntx)->SendError(
-        "CLUSTER commands requires --cluster_mode=emulated or --cluster_mode=yes");
+    return (*cntx)->SendError(kClusterDisabled);
   }
 
   if (sub_cmd == "HELP") {
@@ -344,25 +345,25 @@ void ClusterFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
 
 void ClusterFamily::ReadOnly(CmdArgList args, ConnectionContext* cntx) {
   if (!is_emulated_cluster_) {
-    return (*cntx)->SendError("READONLY command requires --cluster_mode=emulated");
+    return (*cntx)->SendError(kClusterDisabled);
   }
   (*cntx)->SendOk();
 }
 
 void ClusterFamily::ReadWrite(CmdArgList args, ConnectionContext* cntx) {
   if (!is_emulated_cluster_) {
-    return (*cntx)->SendError("READWRITE command requires --cluster_mode=emulated");
+    return (*cntx)->SendError(kClusterDisabled);
   }
   (*cntx)->SendOk();
 }
 
 void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
   if (!is_emulated_cluster_ && !ClusterConfig::IsClusterEnabled()) {
-    return (*cntx)->SendError("DFLYCLUSTER commands requires --cluster_mode=yes");
+    return (*cntx)->SendError(kClusterDisabled);
   }
 
   if (!cntx->owner()->IsAdmin()) {
-    return (*cntx)->SendError("DFLYCLUSTER commands requires admin port");
+    return (*cntx)->SendError(kClusterDisabled);
   }
 
   CHECK(is_emulated_cluster_ || cluster_config_.get() != nullptr);
