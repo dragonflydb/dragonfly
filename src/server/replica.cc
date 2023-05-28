@@ -1000,7 +1000,7 @@ void Replica::StableSyncDflyAcksFb(Context* cntx) {
         [&]() {
           return journal_rec_executed_.load(std::memory_order_relaxed) >
                      ack_offs_ + kAckRecordMaxInterval ||
-                 force_ping_;
+                 force_ping_ || cntx->IsCancelled();
         },
         next_ack_tp);
   }

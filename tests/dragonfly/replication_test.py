@@ -891,6 +891,8 @@ async def test_role_command(df_local_factory, n_keys=20):
     assert await c_replica.execute_command("role") == [
         b'replica', b'localhost', bytes(str(master.port), 'ascii'), b'stable_sync']
 
+    # This tests that we react fast to socket shutdowns and don't hang on
+    # things like the ACK or execution fibers.
     master.stop()
     await asyncio.sleep(0.1)
     assert await c_replica.execute_command("role") == [
