@@ -91,21 +91,21 @@ TEST_F(SearchFamilyTest, Simple) {
 }
 
 TEST_F(SearchFamilyTest, NoPrefix) {
-  EXPECT_EQ(Run({"ft.create", "i1"}), "OK");
-  Run({"hset", "d:1", "f", "one", "k", "v"});
-  Run({"hset", "d:2", "f", "two", "k", "v"});
-  Run({"hset", "d:3", "f", "three", "k", "v"});
+  Run({"hset", "d:1", "a", "one", "k", "v"});
+  Run({"hset", "d:2", "a", "two", "k", "v"});
+  Run({"hset", "d:3", "a", "three", "k", "v"});
+
+  EXPECT_EQ(Run({"ft.create", "i1", "schema", "a", "text", "k", "text"}), "OK");
 
   EXPECT_THAT(Run({"ft.search", "i1", "one | three"}), AreDocIds("d:1", "d:3"));
 }
 
 TEST_F(SearchFamilyTest, Json) {
-  EXPECT_EQ(Run({"ft.create", "i1", "on", "json"}), "OK");
   Run({"json.set", "k1", ".", R"({"a": "small test", "b": "some details"})"});
   Run({"json.set", "k2", ".", R"({"a": "another test", "b": "more details"})"});
   Run({"json.set", "k3", ".", R"({"a": "last test", "b": "secret details"})"});
 
-  EXPECT_THAT(Run({"ft.search", "i1", "more"}), AreDocIds("k2"));
+  EXPECT_EQ(Run({"ft.create", "i1", "on", "json", "schema", "a", "text", "b", "text"}), "OK");
 
   EXPECT_THAT(Run({"ft.search", "i1", "some|more"}), AreDocIds("k1", "k2"));
   EXPECT_THAT(Run({"ft.search", "i1", "some|more|secret"}), AreDocIds("k1", "k2", "k3"));

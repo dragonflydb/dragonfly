@@ -28,7 +28,7 @@ struct DocumentAccessor {
 struct Schema {
   enum FieldType { TEXT, NUMERIC };
 
-  std::unordered_map<std::string, FieldType> fields;
+  absl::flat_hash_map<std::string, FieldType> fields;
 };
 
 // Collection of indices for all fields in schema

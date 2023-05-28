@@ -19,8 +19,6 @@ class StringMap;
 // Document accessors allow different types (json/hset) to be hidden
 // behind a document interface for quering fields and serializing.
 struct BaseAccessor : public search::DocumentAccessor {
-  using FieldConsumer = search::DocumentAccessor::FieldConsumer;
-
   // Convert underlying type to a map<string, string> to be sent as a reply
   virtual SearchDocData Serialize() const = 0;
 };
@@ -32,10 +30,11 @@ struct ListPackAccessor : public BaseAccessor {
   explicit ListPackAccessor(LpPtr ptr) : lp_{ptr} {
   }
 
-  bool Check(FieldConsumer f, std::string_view active_field) const override;
+  std::string_view Get(std::string_view field) const override;
   SearchDocData Serialize() const override;
 
  private:
+  mutable std::array<uint8_t, 33> intbuf_[2];
   LpPtr lp_;
 };
 
@@ -44,7 +43,7 @@ struct StringMapAccessor : public BaseAccessor {
   explicit StringMapAccessor(StringMap* hset) : hset_{hset} {
   }
 
-  bool Check(FieldConsumer f, std::string_view active_field) const override;
+  std::string_view Get(std::string_view field) const override;
   SearchDocData Serialize() const override;
 
  private:
@@ -56,10 +55,11 @@ struct JsonAccessor : public BaseAccessor {
   explicit JsonAccessor(JsonType* json) : json_{json} {
   }
 
-  bool Check(FieldConsumer f, std::string_view active_field) const override;
+  std::string_view Get(std::string_view field) const override;
   SearchDocData Serialize() const override;
 
  private:
+  mutable std::string buf_;
   JsonType* json_;
 };
 

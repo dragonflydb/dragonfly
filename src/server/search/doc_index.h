@@ -26,19 +26,20 @@ struct DocIndex {
   // Get numeric OBJ_ code
   uint8_t GetObjCode() const;
 
+  search::Schema schema;
   std::string prefix{};
   DataType type{HASH};
 };
 
 // Stores internal search indices for documents of a document index on a specific shard.
 class ShardDocIndex {
-  using DocId = uint32_t;
+  using DocId = search::DocId;
 
   // DocKeyIndex manages mapping document keys to ids and vice versa through a simple interface.
   struct DocKeyIndex {
     DocId Add(std::string_view key);
     void Delete(std::string_view key);
-    std::string Get(DocId id);
+    std::string_view Get(DocId id);
 
    private:
     absl::flat_hash_map<std::string, DocId> ids_;
@@ -59,6 +60,7 @@ class ShardDocIndex {
 
  private:
   std::shared_ptr<const DocIndex> base_;
+  search::FieldIndices indices_;
   DocKeyIndex key_index_;
 };
 
