@@ -19,6 +19,8 @@ from tempfile import TemporaryDirectory
 from . import DflyInstance, DflyInstanceFactory, DflyParams, PortPicker, dfly_args
 from .utility import DflySeederFactory
 
+logging.getLogger('asyncio').setLevel(logging.WARNING)
+
 DATABASE_INDEX = 1
 
 
