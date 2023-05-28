@@ -35,15 +35,7 @@ using namespace std;
 using namespace facade;
 using CI = CommandId;
 
-void BuildClusterSlotNetworkInfo(ConnectionContext* cntx, std::string_view host, uint32_t port,
-                                 std::string_view id) {
-  constexpr unsigned int kNetworkInfoSize = 3;
-
-  (*cntx)->StartArray(kNetworkInfoSize);
-  (*cntx)->SendBulkString(host);
-  (*cntx)->SendLong(port);
-  (*cntx)->SendBulkString(id);
-}
+constexpr string_view kClusterNotConfigured = "Cluster is not yet configured";
 
 }  // namespace
 
@@ -200,60 +192,54 @@ void ClusterShardsImpl(const ClusterConfig::ClusterShards& config, ConnectionCon
 
 void ClusterFamily::ClusterShards(ConnectionContext* cntx) {
   if (is_emulated_cluster_) {
-    ClusterConfig::ClusterShards config{GetEmulatedShardInfo(cntx)};
-    return ClusterShardsImpl(config, cntx);
+    return ClusterShardsImpl({GetEmulatedShardInfo(cntx)}, cntx);
   } else if (cluster_config_->IsConfigured()) {
     return ClusterShardsImpl(cluster_config_->GetConfig(), cntx);
   } else {
-    return (*cntx)->SendError("Cluster is not yet configured");
+    return (*cntx)->SendError(kClusterNotConfigured);
   }
 }
 
-void ClusterFamily::ClusterSlots(ConnectionContext* cntx) {
+namespace {
+void ClusterSlotsImpl(const ClusterConfig::ClusterShards& config, ConnectionContext* cntx) {
   // For more details https://redis.io/commands/cluster-slots/
-  constexpr unsigned int kClustersShardingCount = 1;
-  constexpr unsigned int kNoReplicaInfoSize = 3;
-  constexpr unsigned int kWithReplicaInfoSize = 4;
+  auto WriteNode = [&](const ClusterConfig::Node& node) {
+    constexpr unsigned int kNodeSize = 3;
+    (*cntx)->StartArray(kNodeSize);
+    (*cntx)->SendBulkString(node.ip);
+    (*cntx)->SendLong(node.port);
+    (*cntx)->SendBulkString(node.id);
+  };
 
-  /* Format: 1) 1) start slot
-   *            2) end slot
-   *            3) 1) master IP
-   *               2) master port
-   *               3) node ID
-   *            4) 1) replica IP (optional)
-   *               2) replica port
-   *               3) node ID
-   *           ... note that in this case, only 1 slot
-   */
-  ServerState& etl = *ServerState::tlocal();
-  // we have 3 cases here
-  // 1. This is a stand alone, in this case we only sending local information
-  // 2. We are the master, and we have replica, in this case send us as master
-  // 3. We are replica to a master, sends the information about us as replica
-  (*cntx)->StartArray(kClustersShardingCount);
-  if (etl.is_master) {
-    std::string cluster_announce_ip = absl::GetFlag(FLAGS_cluster_announce_ip);
-    std::string preferred_endpoint =
-        cluster_announce_ip.empty() ? cntx->owner()->LocalBindAddress() : cluster_announce_ip;
-    auto vec = server_family_->GetDflyCmd()->GetReplicasRoleInfo();
-    unsigned int info_len = vec.empty() ? kNoReplicaInfoSize : kWithReplicaInfoSize;
-    (*cntx)->StartArray(info_len);
-    (*cntx)->SendLong(0);                           // start sharding range
-    (*cntx)->SendLong(ClusterConfig::kMaxSlotNum);  // end sharding range
-    BuildClusterSlotNetworkInfo(cntx, preferred_endpoint, absl::GetFlag(FLAGS_port),
-                                server_family_->master_id());
-    if (!vec.empty()) {  // info about the replica
-      const auto& info = vec[0];
-      BuildClusterSlotNetworkInfo(cntx, info.address, info.listening_port, etl.remote_client_id_);
+  unsigned int slot_ranges = 0;
+  for (const auto& shard : config) {
+    slot_ranges += shard.slot_ranges.size();
+  }
+
+  (*cntx)->StartArray(slot_ranges);
+  for (const auto& shard : config) {
+    for (const auto& slot_range : shard.slot_ranges) {
+      const unsigned int array_size =
+          /* slot-start, slot-end */ 2 + /* master */ 1 + /* replicas */ shard.replicas.size();
+      (*cntx)->StartArray(array_size);
+      (*cntx)->SendLong(slot_range.start);
+      (*cntx)->SendLong(slot_range.end);
+      WriteNode(shard.master);
+      for (const auto& replica : shard.replicas) {
+        WriteNode(replica);
+      }
     }
+  }
+}
+}  // namespace
+
+void ClusterFamily::ClusterSlots(ConnectionContext* cntx) {
+  if (is_emulated_cluster_) {
+    return ClusterSlotsImpl({GetEmulatedShardInfo(cntx)}, cntx);
+  } else if (cluster_config_->IsConfigured()) {
+    return ClusterSlotsImpl(cluster_config_->GetConfig(), cntx);
   } else {
-    Replica::Info info = server_family_->GetReplicaInfo();
-    (*cntx)->StartArray(kWithReplicaInfoSize);
-    (*cntx)->SendLong(0);                           // start sharding range
-    (*cntx)->SendLong(ClusterConfig::kMaxSlotNum);  // end sharding range
-    BuildClusterSlotNetworkInfo(cntx, info.host, info.port, server_family_->GetReplicaMasterId());
-    BuildClusterSlotNetworkInfo(cntx, cntx->owner()->LocalBindAddress(), absl::GetFlag(FLAGS_port),
-                                server_family_->master_id());
+    return (*cntx)->SendError(kClusterNotConfigured);
   }
 }
 
