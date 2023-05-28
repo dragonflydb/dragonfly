@@ -22,8 +22,8 @@
 #include "server/server_state.h"
 #include "server/transaction.h"
 
-ABSL_FLAG(std::string, default_lua_config, "",
-          "Configure default mode for running Lua scripts: \n - Use 'allow-undeclared-keys' to "
+ABSL_FLAG(std::string, default_lua_flags, "",
+          "Configure default flags for running Lua scripts: \n - Use 'allow-undeclared-keys' to "
           "allow accessing undeclared keys, \n - Use 'disable-atomicity' to allow "
           "running scripts non-atomically. \nSpecify multiple values "
           "separated by space, for example 'allow-undeclared-keys disable-atomicity' runs scripts "
@@ -40,12 +40,12 @@ using namespace facade;
 using namespace util;
 
 ScriptMgr::ScriptMgr() {
-  // Build default script config
-  std::string config = absl::GetFlag(FLAGS_default_lua_config);
+  // Build default script flags
+  string flags = absl::GetFlag(FLAGS_default_lua_flags);
 
   static_assert(ScriptParams{}.atomic && !ScriptParams{}.undeclared_keys);
 
-  auto err = ScriptParams::ApplyFlags(config, &default_params_);
+  auto err = ScriptParams::ApplyFlags(flags, &default_params_);
   CHECK(!err) << err.Format();
 }
 
@@ -65,11 +65,11 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
         "   Return information about the existence of the scripts in the script cache.",
         "LOAD <script>",
         "   Load a script into the scripts cache without executing it.",
-        "CONFIGURE <sha> [options ...]",
-        "   The following options are possible: ",
+        "FLAGS <sha> [flags ...]",
+        "   Set specific flags for script. Can be called before the sript is loaded."
+        "   The following flags are possible: ",
         "      - Use 'allow-undeclared-keys' to allow accessing undeclared keys",
-        "      - Use 'disable-atomicity' to allow running scripts non-atomically to improve "
-        "performance",
+        "      - Use 'disable-atomicity' to allow running scripts non-atomically",
         "LIST",
         "   Lists loaded scripts.",
         "LATENCY",

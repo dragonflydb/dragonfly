@@ -462,6 +462,11 @@ TEST_F(StringFamilyTest, SetPxAtExAt) {
   EXPECT_EQ(Run({"get", "foo2"}), "abc");
 }
 
+TEST_F(StringFamilyTest, SetStick) {
+  Run({"set", "foo", "bar", "STICK"});
+  EXPECT_THAT(Run({"STICK", "foo"}), IntArg(0));
+}
+
 TEST_F(StringFamilyTest, GetDel) {
   auto resp = Run({"set", "foo", "bar"});
   EXPECT_THAT(resp, "OK");
