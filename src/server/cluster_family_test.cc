@@ -459,8 +459,8 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
 }
 
 TEST_F(ClusterFamilyTest, ClusterModeSelectNotAllowed) {
-  EXPECT_THAT(Run({"select", "1"}).GetString(), "ERR SELECT is not allowed in cluster mode");
-  EXPECT_THAT(Run({"select", "0"}).GetString(), "OK");
+  EXPECT_THAT(Run({"select", "1"}), ErrArg("SELECT is not allowed in cluster mode"));
+  EXPECT_EQ(Run({"select", "0"}), "OK");
 }
 
 class ClusterFamilyEmulatedTest : public BaseFamilyTest {
