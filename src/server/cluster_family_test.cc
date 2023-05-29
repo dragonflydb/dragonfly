@@ -525,8 +525,14 @@ TEST_F(ClusterFamilyTest, ClusterFirstConfigCallDropsEntriesNotOwnedByNode) {
         }
       ])json"}),
             "OK");
-  sleep(1);
-  EXPECT_EQ(CheckedInt({"dbsize"}), 0);
+
+  time_t start = std::time(NULL);
+  while (CheckedInt({"dbsize"})) {
+    time_t now = std::time(NULL);
+    // Checking deleting the data does not takes more than 5 senconds in the test.
+    EXPECT_LT(now, start + 5);
+    sleep(1);
+  }
 }
 
 class ClusterFamilyEmulatedTest : public BaseFamilyTest {
