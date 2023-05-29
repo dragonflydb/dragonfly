@@ -20,7 +20,11 @@ struct NumericIndex : public BaseIndex {
   std::vector<DocId> Range(int64_t l, int64_t r) const;
 
  private:
+<<<<<<< HEAD
   std::set<std::pair<int64_t, DocId>> entries_;
+=======
+  std::set<std::pair<uint64_t, DocId>> entries_;
+>>>>>>> 9ddd7d0 (fix: fixes)
 };
 
 // Index for text fields.

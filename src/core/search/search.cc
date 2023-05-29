@@ -82,14 +82,16 @@ struct BasicSearch {
   }
 
   vector<DocId> Search(const AstNegateNode& node, string_view active_field) {
-    // To negate a result, we have to find the complement of matched to all documents.
-    auto matched = SearchGeneric(*node.node, active_field);
-    auto out = indices->GetAllDocs();
+    vector<DocId> matched = SearchGeneric(*node.node, active_field);
+    vector<DocId> all = indices->GetAllDocs();
+
+    // To negate a result, we have to find the complement of matched to all documents,
+    // so we remove all matched documents from the set of all documents.
     auto pred = [&matched](DocId doc) {
       return binary_search(matched.begin(), matched.end(), doc);
     };
-    out.erase(remove_if(out.begin(), out.end(), pred), out.end());
-    return out;
+    all.erase(remove_if(all.begin(), all.end(), pred), all.end());
+    return all;
   }
 
   vector<DocId> Search(const AstLogicalNode& node, string_view active_field) {

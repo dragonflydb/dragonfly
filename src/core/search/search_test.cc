@@ -120,7 +120,8 @@ class SearchParserTest : public ::testing::Test {
     for (DocId i = 0; i < entries_.size(); i++)
       index.Add(i, &entries_[i].first);
 
-    SearchAlgorithm search_algo{query_};
+    SearchAlgorithm search_algo{};
+    search_algo.Init(query_);
     auto matched = search_algo.Search(&index);
 
     if (!is_sorted(matched.begin(), matched.end()))
