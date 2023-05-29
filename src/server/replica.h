@@ -14,6 +14,7 @@
 #include "facade/redis_parser.h"
 #include "server/common.h"
 #include "server/journal/types.h"
+#include "server/version.h"
 #include "util/fiber_socket_base.h"
 
 namespace facade {
@@ -38,6 +39,8 @@ class Replica {
     std::string master_repl_id;
     std::string dfly_session_id;         // Sync session id for dfly sync.
     uint32_t dfly_flow_id = UINT32_MAX;  // Flow id if replica acts as a dfly flow.
+
+    DflyVersion version = DflyVersion::VER0;
 
     std::string Description() const;
   };
@@ -123,6 +126,9 @@ class Replica {
   // Connect to master and authenticate if needed.
   std::error_code ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms);
   std::error_code Greet();  // Send PING and REPLCONF.
+
+  std::error_code HandleCapaDflyResp();
+  std::error_code ConfigureDflyMaster();
 
   std::error_code InitiatePSync();     // Redis full sync.
   std::error_code InitiateDflySync();  // Dragonfly full sync.

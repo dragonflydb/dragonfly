@@ -11,6 +11,7 @@
 #include "facade/conn_context.h"
 #include "facade/reply_capture.h"
 #include "server/common.h"
+#include "server/version.h"
 
 namespace dfly {
 
@@ -116,6 +117,7 @@ struct ConnectionState {
     uint32_t repl_session_id = 0;
     uint32_t repl_flow_id = UINT32_MAX;
     uint32_t repl_listening_port = 0;
+    DflyVersion repl_version = DflyVersion::VER0;
   };
 
   enum MCGetMask {
