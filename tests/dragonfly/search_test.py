@@ -45,7 +45,7 @@ def contains_test_data(res, td_indices):
 
 @pytest.mark.parametrize("index_type", [IndexType.HASH, IndexType.JSON])
 async def test_basic(async_client, index_type):
-    i1 = async_client.ft("i1")
+    i1 = async_client.ft("i-"+str(index_type))
     await i1.create_index(TEST_DATA_SCHEMA, definition=IndexDefinition(index_type=index_type))
     await index_test_data(async_client, index_type)
 
