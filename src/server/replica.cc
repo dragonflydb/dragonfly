@@ -418,7 +418,6 @@ error_code Replica::Greet() {
   } else if (resp_args_.size() >= 3) {  // it's dragonfly master.
     if (auto ec = HandleCapaDflyResp(); ec)
       return err_handler();
-    io_buf.ConsumeInput(consumed);
     if (auto ec = ConfigureDflyMaster(); ec)
       return ec;
   } else {
@@ -474,6 +473,9 @@ std::error_code Replica::ConfigureDflyMaster() {
     LOG(WARNING) << "master did not return OK on id message";
   }
 
+  io_buf.ConsumeInput(consumed);
+
+  // Tell the master our version if it supports REPLCONF CLIENT-VERSION
   if (master_context_.version > DflyVersion::VER0) {
     RETURN_ON_ERR(
         SendCommand(StrCat("REPLCONF CLIENT-VERSION ", DflyVersion::CURRENT_VER), &serializer));
