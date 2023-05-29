@@ -127,6 +127,9 @@ class Replica {
   std::error_code ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms);
   std::error_code Greet();  // Send PING and REPLCONF.
 
+  std::error_code HandleCapaDflyResp();
+  std::error_code ConfigureDflyMaster();
+
   std::error_code InitiatePSync();     // Redis full sync.
   std::error_code InitiateDflySync();  // Dragonfly full sync.
 

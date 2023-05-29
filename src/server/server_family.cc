@@ -1936,6 +1936,8 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
       if (!absl::SimpleAtoi(arg, &version)) {
         return (*cntx)->SendError(kInvalidIntErr);
       }
+      VLOG(1) << "Client version for session_id="
+              << cntx->conn_state.replicaiton_info.repl_session_id << " is " << version;
       cntx->conn_state.replicaiton_info.repl_version = DflyVersion(version);
     } else {
       VLOG(1) << cmd << " " << arg;
