@@ -109,6 +109,12 @@ optional<SlotSet> ClusterConfig::SetConfig(const vector<ClusterShard>& new_confi
     return nullopt;
   }
 
+  // When set config is called the first time, deleted_slots will contain all slots which are not
+  // allocated to this node. This makes sure that if there is data in server that was loaded from
+  // disk (rdb_load), then after the call to set config the server data will contain only data from
+  // the node owned slots.
+  bool is_first_config = !IsConfigured();
+
   lock_guard gu(mu_);
 
   config_ = new_config;
@@ -120,7 +126,7 @@ optional<SlotSet> ClusterConfig::SetConfig(const vector<ClusterShard>& new_confi
           shard.master.id == my_id_ || any_of(shard.replicas.begin(), shard.replicas.end(),
                                               [&](const Node& node) { return node.id == my_id_; });
       for (SlotId i = slot_range.start; i <= slot_range.end; ++i) {
-        if (slots_[i].owned_by_me && !owned_by_me) {
+        if ((slots_[i].owned_by_me || is_first_config) && !owned_by_me) {
           deleted_slots.insert(i);
         }
         slots_[i] = {.shard = &shard, .owned_by_me = owned_by_me};
