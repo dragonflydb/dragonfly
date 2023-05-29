@@ -138,6 +138,9 @@ Replica::~Replica() {
   if (sync_fb_.IsJoinable()) {
     sync_fb_.Join();
   }
+  if (acks_fb_.IsJoinable()) {
+    acks_fb_.Join();
+  }
   if (execution_fb_.IsJoinable()) {
     execution_fb_.Join();
   }
@@ -202,8 +205,11 @@ void Replica::Stop() {
 
   // Make sure the replica fully stopped and did all cleanup,
   // so we can freely release resources (connections).
+  waker_.notifyAll();
   if (sync_fb_.IsJoinable())
     sync_fb_.Join();
+  if (acks_fb_.IsJoinable())
+    acks_fb_.Join();
 }
 
 void Replica::Pause(bool pause) {
@@ -783,6 +789,9 @@ void Replica::JoinAllFlows() {
     if (flow->sync_fb_.IsJoinable()) {
       flow->sync_fb_.Join();
     }
+    if (flow->acks_fb_.IsJoinable()) {
+      flow->acks_fb_.Join();
+    }
     if (flow->execution_fb_.IsJoinable()) {
       flow->execution_fb_.Join();
     }
@@ -934,6 +943,11 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
 
   JournalReader reader{&ps, 0};
   TransactionReader tx_reader{};
+
+  if (master_context_.version > DflyVersion::VER0) {
+    acks_fb_ = MakeFiber(&Replica::StableSyncDflyAcksFb, this, cntx);
+  }
+
   while (!cntx->IsCancelled()) {
     waker_.await([&]() {
       return ((trans_data_queue_.size() < kYieldAfterItemsInQueue) || cntx->IsCancelled());
@@ -947,13 +961,50 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
 
     last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
 
-    if (use_multi_shard_exe_sync_) {
-      InsertTxDataToShardResource(std::move(*tx_data));
+    if (!tx_data->is_ping) {
+      if (use_multi_shard_exe_sync_) {
+        InsertTxDataToShardResource(std::move(*tx_data));
+      } else {
+        ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
+      }
     } else {
-      ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
+      force_ping_ = true;
+      journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
     }
 
     waker_.notify();
+  }
+}
+
+void Replica::StableSyncDflyAcksFb(Context* cntx) {
+  constexpr std::chrono::duration kAckTimeMaxInterval = 3s;
+  constexpr size_t kAckRecordMaxInterval = 1024;
+  std::string ack_cmd;
+  ReqSerializer serializer{sock_.get()};
+
+  auto next_ack_tp = std::chrono::steady_clock::now();
+
+  while (!cntx->IsCancelled()) {
+    // Handle ACKs with the master. PING opcodes from the master mean we should immediately
+    // answer.
+    uint64_t current_offset = journal_rec_executed_.load(std::memory_order_relaxed);
+    VLOG(1) << "Sending an ACK with offset=" << current_offset << " forced=" << force_ping_;
+    ack_cmd = absl::StrCat("REPLCONF ACK ", current_offset);
+    force_ping_ = false;
+    next_ack_tp = std::chrono::steady_clock::now() + kAckTimeMaxInterval;
+    if (auto ec = SendCommand(ack_cmd, &serializer); ec) {
+      cntx->ReportError(ec);
+      break;
+    }
+    ack_offs_ = current_offset;
+
+    waker_.await_until(
+        [&]() {
+          return journal_rec_executed_.load(std::memory_order_relaxed) >
+                     ack_offs_ + kAckRecordMaxInterval ||
+                 force_ping_ || cntx->IsCancelled();
+        },
+        next_ack_tp);
   }
 }
 
@@ -1314,6 +1365,9 @@ bool Replica::TransactionData::AddEntry(journal::ParsedEntry&& entry) {
   ++journal_rec_count;
 
   switch (entry.opcode) {
+    case journal::Op::PING:
+      is_ping = true;
+      return true;
     case journal::Op::EXPIRED:
     case journal::Op::COMMAND:
       commands.push_back(std::move(entry.cmd));
@@ -1355,7 +1409,8 @@ auto Replica::TransactionReader::NextTxData(JournalReader* reader, Context* cntx
 
     // Check if journal command can be executed right away.
     // Expiration checks lock on master, so it never conflicts with running multi transactions.
-    if (res->opcode == journal::Op::EXPIRED || res->opcode == journal::Op::COMMAND)
+    if (res->opcode == journal::Op::EXPIRED || res->opcode == journal::Op::COMMAND ||
+        res->opcode == journal::Op::PING)
       return TransactionData::FromSingle(std::move(res.value()));
 
     // Otherwise, continue building multi command.

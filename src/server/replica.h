@@ -72,6 +72,7 @@ class Replica {
     uint32_t shard_cnt{0};
     absl::InlinedVector<journal::ParsedEntry::CmdData, 1> commands{0};
     uint32_t journal_rec_count{0};  // Count number of source entries to check offset.
+    bool is_ping = false;           // For Op::PING entries.
   };
 
   // Utility for reading TransactionData from a journal reader.
@@ -161,6 +162,8 @@ class Replica {
 
   // Single flow stable state sync fiber spawned by StartStableSyncFlow.
   void StableSyncDflyReadFb(Context* cntx);
+
+  void StableSyncDflyAcksFb(Context* cntx);
 
   void StableSyncDflyExecFb(Context* cntx);
 
@@ -252,6 +255,8 @@ class Replica {
 
   // MainReplicationFb in standalone mode, FullSyncDflyFb in flow mode.
   Fiber sync_fb_;
+  Fiber acks_fb_;
+  bool force_ping_ = false;
   Fiber execution_fb_;
 
   std::vector<std::unique_ptr<Replica>> shard_flows_;

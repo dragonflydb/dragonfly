@@ -250,6 +250,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
   absl::InsecureBitGen gen;
   string eof_token = GetRandomHex(gen, 40);
 
+  cntx->replication_flow = &replica_ptr->flows[flow_id];
   replica_ptr->flows[flow_id].conn = cntx->owner();
   replica_ptr->flows[flow_id].eof_token = eof_token;
   listener_->Migrate(cntx->owner(), shard_set->pool()->at(flow_id));
@@ -612,17 +613,17 @@ void DflyCmd::Shutdown() {
   }
 }
 
-void DflyCmd::FlowInfo::TryShutdownSocket() {
+void FlowInfo::TryShutdownSocket() {
   // Close socket for clean disconnect.
   if (conn->socket()->IsOpen()) {
     (void)conn->socket()->Shutdown(SHUT_RDWR);
   }
 }
 
-DflyCmd::FlowInfo::~FlowInfo() {
+FlowInfo::~FlowInfo() {
 }
 
-DflyCmd::FlowInfo::FlowInfo() {
+FlowInfo::FlowInfo() {
 }
 
 }  // namespace dfly

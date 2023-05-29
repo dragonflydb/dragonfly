@@ -26,6 +26,25 @@ class ServerFamily;
 class RdbSaver;
 class JournalStreamer;
 
+// Stores information related to a single flow.
+struct FlowInfo {
+  FlowInfo();
+  ~FlowInfo();
+  // Shutdown associated socket if its still open.
+  void TryShutdownSocket();
+
+  facade::Connection* conn;
+
+  Fiber full_sync_fb;               // Full sync fiber.
+  std::unique_ptr<RdbSaver> saver;  // Saver used by the full sync phase.
+  std::unique_ptr<JournalStreamer> streamer;
+  std::string eof_token;
+
+  uint64_t last_acked_lsn;
+
+  std::function<void()> cleanup;  // Optional cleanup for cancellation.
+};
+
 // DflyCmd is responsible for managing replication. A master instance can be connected
 // to many replica instances, what is more, each of them can open multiple connections.
 // This is why its important to understand replica lifecycle management before making
@@ -74,23 +93,6 @@ class DflyCmd {
  public:
   // See header comments for state descriptions.
   enum class SyncState { PREPARATION, FULL_SYNC, STABLE_SYNC, CANCELLED };
-
-  // Stores information related to a single flow.
-  struct FlowInfo {
-    FlowInfo();
-    ~FlowInfo();
-    // Shutdown associated socket if its still open.
-    void TryShutdownSocket();
-
-    facade::Connection* conn;
-
-    Fiber full_sync_fb;               // Full sync fiber.
-    std::unique_ptr<RdbSaver> saver;  // Saver used by the full sync phase.
-    std::unique_ptr<JournalStreamer> streamer;
-    std::string eof_token;
-
-    std::function<void()> cleanup;  // Optional cleanup for cancellation.
-  };
 
   // Stores information related to a single replica.
   struct ReplicaInfo {
