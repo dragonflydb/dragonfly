@@ -978,9 +978,9 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
 }
 
 void Replica::StableSyncDflyAcksFb(Context* cntx) {
-  constexpr std::chrono::duration ack_time_max_interval =
-      1ms * absl::GetFlag(FLAGS_replication_acks_interval);
   constexpr size_t kAckRecordMaxInterval = 1024;
+  std::chrono::duration ack_time_max_interval =
+      1ms * absl::GetFlag(FLAGS_replication_acks_interval);
   std::string ack_cmd;
   ReqSerializer serializer{sock_.get()};
 
