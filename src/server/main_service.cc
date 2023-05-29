@@ -1524,6 +1524,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     Transaction* trans = cntx->transaction;
     cntx->transaction = nullptr;
 
+    SinkReplyBuilder::ReplyAggregator agg(rb);
     rb->StartArray(body.size());
     for (auto& scmd : body) {
       arg_vec.resize(scmd.NumArgs() + 1);
@@ -1549,6 +1550,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   }
 
   VLOG(1) << "StartExec " << exec_info.body.size();
+  SinkReplyBuilder::ReplyAggregator agg(rb);
   rb->StartArray(exec_info.body.size());
 
   if (!exec_info.body.empty()) {

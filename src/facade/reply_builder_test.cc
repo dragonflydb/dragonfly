@@ -185,12 +185,11 @@ TEST_F(RedisReplyBuilderTest, TestMessageSend) {
   builder_->SendOk();
   ASSERT_EQ(TakePayload(), kOKMessage);
   builder_->StartArray(10);
-  ASSERT_EQ(TakePayload(), "*10\r\n");
-  sink_.Clear();
+
   std::string_view hello_msg = "hello";
   builder_->SendBulkString(hello_msg);
-  std::string expected_bulk_string =
-      absl::StrCat(kBulkStringStart, std::to_string(hello_msg.size()), kCRLF, hello_msg, kCRLF);
+  std::string expected_bulk_string = absl::StrCat(
+      "*10\r\n", kBulkStringStart, std::to_string(hello_msg.size()), kCRLF, hello_msg, kCRLF);
   ASSERT_EQ(TakePayload(), expected_bulk_string);
 }
 
