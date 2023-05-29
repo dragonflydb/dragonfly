@@ -944,7 +944,9 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
   JournalReader reader{&ps, 0};
   TransactionReader tx_reader{};
 
-  acks_fb_ = MakeFiber(&Replica::StableSyncDflyAcksFb, this, cntx);
+  if (master_context_.version > DflyVersion::VER0) {
+    acks_fb_ = MakeFiber(&Replica::StableSyncDflyAcksFb, this, cntx);
+  }
 
   while (!cntx->IsCancelled()) {
     waker_.await([&]() {
