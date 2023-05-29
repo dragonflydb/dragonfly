@@ -89,7 +89,7 @@ struct ReadOpts {
   uint32_t count = kuint32max;
   // Contains the time to block waiting for entries, or -1 if should not block.
   int64_t timeout = -1;
-  size_t streams_arg;
+  size_t streams_arg = 0;
 };
 
 const char kInvalidStreamId[] = "Invalid stream ID specified as stream command argument";

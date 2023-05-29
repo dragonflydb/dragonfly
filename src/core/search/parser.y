@@ -26,6 +26,10 @@
 %code {
 #include "core/search/query_driver.h"
 
+// Have to disable because GCC doesn't understand `symbol_type`'s union
+// implementation
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+
 #define yylex driver->scanner()->Lex
 
 using namespace std;
