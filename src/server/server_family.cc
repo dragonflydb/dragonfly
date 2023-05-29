@@ -1911,11 +1911,12 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
         }
         cntx->replica_conn = true;
 
-        // The response for 'capa dragonfly' is: <masterid> <syncid> <numthreads>
-        (*cntx)->StartArray(3);
+        // The response for 'capa dragonfly' is: <masterid> <syncid> <numthreads> <version>
+        (*cntx)->StartArray(4);
         (*cntx)->SendSimpleString(master_id_);
         (*cntx)->SendSimpleString(sync_id);
         (*cntx)->SendLong(replica_info->flows.size());
+        (*cntx)->SendLong(unsigned(DflyVersion::CURRENT_VER));
         return;
       }
     } else if (cmd == "LISTENING-PORT") {
@@ -1930,6 +1931,12 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
       auto& pool = service_.proactor_pool();
       pool.AwaitFiberOnAll(
           [&](util::ProactorBase* pb) { ServerState::tlocal()->remote_client_id_ = arg; });
+    } else if (cmd == "CLIENT-VERSION" && args.size() == 2) {
+      unsigned version;
+      if (!absl::SimpleAtoi(arg, &version)) {
+        return (*cntx)->SendError(kInvalidIntErr);
+      }
+      cntx->conn_state.replicaiton_info.repl_version = DflyVersion(version);
     } else {
       VLOG(1) << cmd << " " << arg;
     }

@@ -402,40 +402,47 @@ error_code Replica::Greet() {
   // Note that we currently do not support dragonfly->redis replication.
   RETURN_ON_ERR(SendCommand("REPLCONF capa dragonfly", &serializer));
   RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
-  if (!CheckRespFirstTypes({RespExpr::STRING})) {
+  auto err_handler = [&io_buf]() {
+    LOG(ERROR) << "Unexpected response " << ToSV(io_buf.InputBuffer());
     return make_error_code(errc::bad_message);
-  }
+  };
+
+  if (!CheckRespFirstTypes({RespExpr::STRING}))
+    return err_handler();
 
   string_view cmd = ToSV(resp_args_[0].GetBuf());
+
   if (resp_args_.size() == 1) {  // Redis
-    if (cmd != "OK") {
-      LOG(ERROR) << "Unexpected response " << cmd;
-      return make_error_code(errc::bad_message);
-    }
-  } else if (resp_args_.size() == 3) {  // it's dragonfly master.
+    if (cmd != "OK")
+      return err_handler();
+  } else if (resp_args_.size() >= 3) {  // it's dragonfly master.
     // Response is: <master_repl_id, syncid, num_shards>
     if (!CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING, RespExpr::INT64}) ||
-        resp_args_[0].GetBuf().size() != CONFIG_RUN_ID_SIZE) {
-      LOG(ERROR) << "Unexpected response " << ToSV(io_buf.InputBuffer());
-      return make_error_code(errc::bad_message);
-    }
+        resp_args_[0].GetBuf().size() != CONFIG_RUN_ID_SIZE)
+      return err_handler();
 
-    string_view param0 = ToSV(resp_args_[0].GetBuf());
-    string_view param1 = ToSV(resp_args_[1].GetBuf());
-    int64 param2 = get<int64_t>(resp_args_[2].u);
-
-    if (param2 <= 0 || param2 > 1024) {
+    int64 param_num_flows = get<int64_t>(resp_args_[2].u);
+    if (param_num_flows <= 0 || param_num_flows > 1024) {
       // sanity check, we support upto 1024 shards.
       // It's not that we can not support more but it's probably highly unlikely that someone
       // will run dragonfly with more than 1024 cores.
-      LOG(ERROR) << "Invalid flow count " << param2;
+      LOG(ERROR) << "Invalid flow count " << param_num_flows;
       return make_error_code(errc::bad_message);
     }
 
-    master_context_.master_repl_id = param0;
-    master_context_.dfly_session_id = param1;
-    num_df_flows_ = param2;
+    master_context_.master_repl_id = ToSV(resp_args_[0].GetBuf());
+    master_context_.dfly_session_id = ToSV(resp_args_[1].GetBuf());
+    num_df_flows_ = param_num_flows;
     io_buf.ConsumeInput(consumed);
+    if (resp_args_.size() >= 4) {
+      if (resp_args_[3].type != RespExpr::INT64)
+        return err_handler();
+      master_context_.version = DflyVersion(get<int64_t>(resp_args_[3].u));
+    }
+    VLOG(1) << "Master id: " << master_context_.master_repl_id
+            << ", sync id: " << master_context_.dfly_session_id << ", num journals "
+            << num_df_flows_ << " version: " << unsigned(master_context_.version);
+
     // We need to send this because we may require to use this for cluster commands.
     // this reason to send this here is that in other context we can get an error reply
     // since we are budy with the replication
@@ -444,13 +451,16 @@ error_code Replica::Greet() {
     if (!CheckRespIsSimpleReply("OK")) {
       LOG(WARNING) << "master did not return OK on id message";
     }
-    VLOG(1) << "Master id: " << master_context_.master_repl_id
-            << ", sync id: " << master_context_.dfly_session_id << ", num journals "
-            << num_df_flows_;
-  } else {
-    LOG(ERROR) << "Bad response " << ToSV(io_buf.InputBuffer());
 
-    return make_error_code(errc::bad_message);
+    if (master_context_.version > DflyVersion::VER0) {
+      RETURN_ON_ERR(
+          SendCommand(StrCat("REPLCONF CLIENT-VERSION ", DflyVersion::CURRENT_VER), &serializer));
+      RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
+      if (!CheckRespIsSimpleReply("OK"))
+        return err_handler();
+    }
+  } else {
+    return err_handler();
   }
 
   io_buf.ConsumeInput(consumed);
