@@ -55,7 +55,7 @@ ShardDocIndex::DocId ShardDocIndex::DocKeyIndex::Add(string_view key) {
     free_ids_.pop_back();
     keys_[id] = key;
   } else {
-    id = ++last_id_;
+    id = last_id_++;
     DCHECK_EQ(keys_.size(), id);
     keys_.emplace_back(key);
   }

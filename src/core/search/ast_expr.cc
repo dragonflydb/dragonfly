@@ -29,7 +29,7 @@ AstLogicalNode::AstLogicalNode(AstNode&& l, AstNode&& r, LogicOp op) : op{op}, n
   for (auto* node : {&l, &r}) {
     if (auto* ln = get_if<AstLogicalNode>(node); ln && ln->op == op) {
       *this = move(*ln);
-      nodes.emplace_back(move(r));
+      nodes.emplace_back(move(*(node == &l ? &r : &l)));
       return;
     }
   }
