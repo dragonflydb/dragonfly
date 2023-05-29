@@ -91,7 +91,7 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
   if (subcmd == "LOAD" && args.size() == 2)
     return LoadCmd(args, cntx);
 
-  if (subcmd == "CONFIG" && args.size() > 2)
+  if (subcmd == "FLAGS" && args.size() > 2)
     return ConfigCmd(args, cntx);
 
   string err = absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd,
