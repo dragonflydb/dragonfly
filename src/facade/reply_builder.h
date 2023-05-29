@@ -119,10 +119,10 @@ class SinkReplyBuilder {
   size_t io_write_bytes_ = 0;
   absl::flat_hash_map<std::string, uint64_t> err_count_;
 
-  bool should_batch_ : 1 = false;
+  bool should_batch_ : 1;
 
   // Similarly to batch mode but is controlled by at operation level.
-  bool should_aggregate_ : 2 = false;
+  bool should_aggregate_ : 1;
   uint32_t batch_cnt_ = 0;
 };
 

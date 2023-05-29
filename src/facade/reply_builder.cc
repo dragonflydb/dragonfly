@@ -35,7 +35,8 @@ DoubleToStringConverter dfly_conv(kConvFlags, "inf", "nan", 'e', -6, 21, 6, 0);
 
 }  // namespace
 
-SinkReplyBuilder::SinkReplyBuilder(::io::Sink* sink) : sink_(sink) {
+SinkReplyBuilder::SinkReplyBuilder(::io::Sink* sink)
+    : sink_(sink), should_batch_(false), should_aggregate_(false) {
 }
 
 void SinkReplyBuilder::CloseConnection() {
