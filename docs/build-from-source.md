@@ -12,14 +12,14 @@ On Debian/Ubuntu:
 
 ```bash
 sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
-     autoconf-archive libtool cmake g++ libzstd-dev
+     autoconf-archive libtool cmake g++ libzstd-dev bison libxml2-dev
 ```
 
 On Fedora:
 
 ```bash
 sudo yum install automake boost-devel g++ git cmake libtool ninja-build libzstd-devel  \
-     openssl-devel libunwind-devel autoconf-archive patch
+     openssl-devel libunwind-devel autoconf-archive patch bison libxml2-devel
 ```
 
 ## Step 2 - clone the project
