@@ -111,7 +111,7 @@ optional<SlotSet> ClusterConfig::SetConfig(const vector<ClusterShard>& new_confi
 
   // When set config is called the first time, deleted_slots will contain all slots which are not
   // allocated to this node. This makes sure that if there is data in server that was loaded from
-  // disk (rdb_load), than after the call to set config the server data will contain only data from
+  // disk (rdb_load), then after the call to set config the server data will contain only data from
   // the node owned slots.
   bool is_first_config = !IsConfigured();
 
