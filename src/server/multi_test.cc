@@ -17,7 +17,7 @@
 
 ABSL_DECLARE_FLAG(uint32_t, multi_exec_mode);
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
-ABSL_DECLARE_FLAG(std::string, default_lua_config);
+ABSL_DECLARE_FLAG(std::string, default_lua_flags);
 
 namespace dfly {
 
@@ -338,8 +338,8 @@ TEST_F(MultiTest, FlushDb) {
 }
 
 TEST_F(MultiTest, Eval) {
-  if (auto config = absl::GetFlag(FLAGS_default_lua_config); config != "") {
-    LOG(WARNING) << "Skipped Eval test because default_lua_config is set";
+  if (auto config = absl::GetFlag(FLAGS_default_lua_flags); config != "") {
+    LOG(WARNING) << "Skipped Eval test because default_lua_flags is set";
     return;
   }
 
@@ -520,8 +520,8 @@ TEST_F(MultiTest, MultiOOO) {
 
 // Lua scripts lock their keys ahead and thus can run out of order.
 TEST_F(MultiTest, EvalOOO) {
-  if (auto config = absl::GetFlag(FLAGS_default_lua_config); config != "") {
-    LOG(WARNING) << "Skipped Eval test because default_lua_config is set";
+  if (auto config = absl::GetFlag(FLAGS_default_lua_flags); config != "") {
+    LOG(WARNING) << "Skipped Eval test because default_lua_flags is set";
     return;
   }
 
@@ -631,9 +631,9 @@ TEST_F(MultiTest, ExecGlobalFallback) {
   //  EXPECT_EQ(1, GetMetrics().ooo_tx_transaction_cnt);
 }
 
-TEST_F(MultiTest, ScriptConfig) {
-  if (auto config = absl::GetFlag(FLAGS_default_lua_config); config != "") {
-    LOG(WARNING) << "Skipped Eval test because default_lua_config is set";
+TEST_F(MultiTest, ScriptFlagsCommand) {
+  if (auto flags = absl::GetFlag(FLAGS_default_lua_flags); flags != "") {
+    LOG(WARNING) << "Skipped Eval test because default_lua_flags is set";
     return;
   }
 
@@ -643,30 +643,31 @@ TEST_F(MultiTest, ScriptConfig) {
   Run({"set", "random-key-1", "works"});
   Run({"set", "random-key-2", "works"});
 
-  // Check SCRIPT CONFIG is applied correctly to loaded scripts.
+  // Check SCRIPT FLAGS is applied correctly to loaded scripts.
   {
     auto sha_resp = Run({"script", "load", kUndeclared1});
     auto sha = facade::ToSV(sha_resp.GetBuf());
 
     EXPECT_THAT(Run({"evalsha", sha, "0"}), ErrArg("undeclared"));
 
-    EXPECT_THAT(Run({"script", "config", sha, "allow-undeclared-keys"}), "OK");
+    EXPECT_EQ(Run({"script", "flags", sha, "allow-undeclared-keys"}), "OK");
+
     EXPECT_THAT(Run({"evalsha", sha, "0"}), "works");
   }
 
-  // Check SCRIPT CONFIG can be applied by sha before loading.
+  // Check SCRIPT FLAGS can be applied by sha before loading.
   {
     char sha_buf[41];
     Interpreter::FuncSha1(kUndeclared2, sha_buf);
     string_view sha{sha_buf, 40};
 
-    EXPECT_THAT(Run({"script", "config", sha, "allow-undeclared-keys"}), "OK");
+    EXPECT_THAT(Run({"script", "flags", sha, "allow-undeclared-keys"}), "OK");
 
     EXPECT_THAT(Run({"eval", kUndeclared2, "0"}), "works");
   }
 }
 
-TEST_F(MultiTest, ScriptFlags) {
+TEST_F(MultiTest, ScriptFlagsEmbedded) {
   const char* s1 = R"(
   #!lua flags=allow-undeclared-keys
   return redis.call('GET', 'random-key');
