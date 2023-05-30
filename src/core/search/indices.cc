@@ -56,8 +56,8 @@ vector<DocId> NumericIndex::Range(int64_t l, int64_t r) const {
 
 void TextIndex::Add(DocId doc, string_view value) {
   for (const auto& word : GetWords(value)) {
-    entries_[word].push_back(doc);
-    sort(entries_[word].begin(), entries_[word].end());
+    auto& list = entries_[word];
+    list.insert(upper_bound(list.begin(), list.end(), doc), doc);
   }
 }
 
