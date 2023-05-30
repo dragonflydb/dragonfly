@@ -215,7 +215,7 @@ void DebugCmd::Load(string_view filename) {
   }
 
   absl::Cleanup rev_state = [this] {
-    sf_.service().SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
+    sf_.service().SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
   };
 
   const CommandId* cid = sf_.service().FindCmd("FLUSHALL");

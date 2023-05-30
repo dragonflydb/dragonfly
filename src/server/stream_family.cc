@@ -118,6 +118,11 @@ inline string NoGroupError(string_view key, string_view cgroup) {
   return absl::StrCat("-NOGROUP No such consumer group '", cgroup, "' for key name '", key, "'");
 }
 
+inline const uint8_t* SafePtr(MutableSlice field) {
+  return field.empty() ? reinterpret_cast<const uint8_t*>("")
+                       : reinterpret_cast<const uint8_t*>(field.data());
+}
+
 bool ParseID(string_view strid, bool strict, uint64_t missing_seq, ParsedStreamId* dest) {
   if (strid.empty() || strid.size() > 127)
     return false;
@@ -394,7 +399,8 @@ int StreamAppendItem(stream* s, CmdArgList fields, streamID* added_id, streamID*
     lp = lpAppendInteger(lp, numfields);
     for (int64_t i = 0; i < numfields; i++) {
       MutableSlice field = fields[i * 2];
-      lp = lpAppend(lp, reinterpret_cast<const uint8_t*>(field.data()), field.size());
+
+      lp = lpAppend(lp, SafePtr(field), field.size());
     }
     lp = lpAppendInteger(lp, 0); /* Master entry zero terminator. */
     raxInsert(s->rax_tree, (unsigned char*)&rax_key, sizeof(rax_key), lp, NULL);
@@ -468,8 +474,8 @@ int StreamAppendItem(stream* s, CmdArgList fields, streamID* added_id, streamID*
   for (int64_t i = 0; i < numfields; i++) {
     MutableSlice field = fields[i * 2], value = fields[i * 2 + 1];
     if (!(flags & STREAM_ITEM_FLAG_SAMEFIELDS))
-      lp = lpAppend(lp, reinterpret_cast<const uint8_t*>(field.data()), field.size());
-    lp = lpAppend(lp, reinterpret_cast<const uint8_t*>(value.data()), value.size());
+      lp = lpAppend(lp, SafePtr(field), field.size());
+    lp = lpAppend(lp, SafePtr(value), value.size());
   }
   /* Compute and store the lp-count field. */
   int64_t lp_count = numfields;

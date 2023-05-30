@@ -60,6 +60,7 @@ namespace {
 
 constexpr size_t kYieldPeriod = 50000;
 constexpr size_t kMaxBlobLen = 1ULL << 16;
+constexpr char kErrCat[] = "dragonfly.rdbload";
 
 inline void YieldIfNeeded(size_t i) {
   if (i % kYieldPeriod == 0) {
@@ -70,7 +71,7 @@ inline void YieldIfNeeded(size_t i) {
 class error_category : public std::error_category {
  public:
   const char* name() const noexcept final {
-    return "dragonfly.rdbload";
+    return kErrCat;
   }
 
   string message(int ev) const final;
@@ -980,7 +981,8 @@ string_view RdbLoaderBase::OpaqueObjLoader::ToSV(const RdbVariant& obj) {
 
   const base::PODArray<char>* ch_arr = get_if<base::PODArray<char>>(&obj);
   if (ch_arr) {
-    return string_view(ch_arr->data(), ch_arr->size());
+    // pass non-null pointer to avoid UB with lp API.
+    return ch_arr->empty() ? ""sv : string_view{ch_arr->data(), ch_arr->size()};
   }
 
   const LzfString* lzf = get_if<LzfString>(&obj);
@@ -990,7 +992,7 @@ string_view RdbLoaderBase::OpaqueObjLoader::ToSV(const RdbVariant& obj) {
                        lzf->uncompressed_len) == 0) {
       LOG(ERROR) << "Invalid LZF compressed string";
       ec_ = RdbError(errc::rdb_file_corrupted);
-      return string_view{};
+      return string_view{tset_blob_.data(), 0};
     }
     return string_view{tset_blob_.data(), tset_blob_.size()};
   }

@@ -180,7 +180,8 @@ int lpStringToInt64(const char *s, unsigned long slen, int64_t *value) {
     int negative = 0;
     uint64_t v;
 
-    if (plen == slen)
+    /* Abort if length indicates this cannot possibly be an int */
+    if (slen == 0)
         return 0;
 
     /* Special case: first and only digit is 0. */
@@ -958,7 +959,7 @@ unsigned char *lpPrependInteger(unsigned char *lp, long long lval) {
     return lpInsertInteger(lp, lval, p, LP_BEFORE, NULL);
 }
 
-/* Append the specified element 'ele' of length 'len' at the end of the
+/* Append the specified element 'ele' of length 'size' at the end of the
  * listpack. It is implemented in terms of lpInsert(), so the return value is
  * the same as lpInsert(). */
 unsigned char *lpAppend(unsigned char *lp, const unsigned char *ele, uint32_t size) {

@@ -5,6 +5,7 @@
 
 extern "C" {
 #include "redis/crc64.h"
+#include "redis/listpack.h"
 #include "redis/redis_aux.h"
 #include "redis/zmalloc.h"
 }
@@ -318,7 +319,7 @@ TEST_F(RdbTest, SaveManyDbs) {
 }
 
 TEST_F(RdbTest, HMapBugs) {
-  // Force OBJ_ENCODING_HT encoding.
+  // Force kEncodingStrMap2 encoding.
   server.hash_max_listpack_value = 0;
   Run({"hset", "hmap1", "key1", "val", "key2", "val2"});
   Run({"hset", "hmap2", "key1", string(690557, 'a')});
@@ -326,6 +327,26 @@ TEST_F(RdbTest, HMapBugs) {
   server.hash_max_listpack_value = 32;
   Run({"debug", "reload"});
   EXPECT_EQ(2, CheckedInt({"hlen", "hmap1"}));
+}
+
+TEST_F(RdbTest, Issue1305) {
+  /***************
+   * The code below crashes because of the weird listpack API that assumes that lpInsert
+   * pointers are null then it should do deletion :(. See lpInsert comments for more info.
+
+     uint8_t* lp = lpNew(128);
+     lpAppend(lp, NULL, 0);
+     lpFree(lp);
+
+  */
+
+  // Force kEncodingStrMap2 encoding.
+  server.hash_max_listpack_value = 0;
+  Run({"hset", "hmap", "key1", "val", "key2", ""});
+
+  server.hash_max_listpack_value = 32;
+  Run({"debug", "reload"});
+  EXPECT_EQ(2, CheckedInt({"hlen", "hmap"}));
 }
 
 TEST_F(RdbTest, JsonTest) {
