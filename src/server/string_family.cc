@@ -573,6 +573,10 @@ OpResult<optional<string>> SetCmd::Set(const SetParams& params, string_view key,
     shard->tiered_storage()->ScheduleOffload(op_args_.db_cntx.db_index, it);
   }
 
+  if (params.flags & SET_STICK) {
+    it->first.SetSticky(true);
+  }
+
   if (manual_journal_ && op_args_.shard->journal()) {
     RecordJournal(params, key, value);
   }
@@ -614,6 +618,10 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
     }
   }
 
+  if (params.flags & SET_STICK) {
+    it->first.SetSticky(true);
+  }
+
   db_slice.PreUpdate(op_args_.db_cntx.db_index, it);
 
   // Check whether we need to update flags table.
@@ -646,7 +654,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, PrimeIterator it, ExpireIt
 }
 
 void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view value) {
-  absl::InlinedVector<string_view, 5> cmds({key, value});  // 4 is theoretical maximum;
+  absl::InlinedVector<string_view, 5> cmds({key, value});  // 5 is theoretical maximum;
 
   std::string exp_str;
   if (params.flags & SET_EXPIRE_AFTER_MS) {
@@ -654,6 +662,10 @@ void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view
     cmds.insert(cmds.end(), {"PXAT", exp_str});
   } else if (params.flags & SET_KEEP_EXPIRE) {
     cmds.push_back("KEEPTTL");
+  }
+
+  if (params.flags & SET_STICK) {
+    cmds.push_back("STICK");
   }
 
   // Skip NX/XX because SET operation was exectued.
@@ -727,6 +739,8 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       sparams.flags |= SetCmd::SET_KEEP_EXPIRE;
     } else if (cur_arg == "GET") {
       sparams.flags |= SetCmd::SET_GET;
+    } else if (cur_arg == "STICK") {
+      sparams.flags |= SetCmd::SET_STICK;
     } else {
       return builder->SendError(kSyntaxErr);
     }

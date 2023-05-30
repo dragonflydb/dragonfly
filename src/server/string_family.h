@@ -26,11 +26,12 @@ class SetCmd {
 
   enum SetFlags {
     SET_ALWAYS = 0,
-    SET_IF_NOTEXIST = 1 << 0,    /* NX: Set if key not exists. */
-    SET_IF_EXISTS = 1 << 1,      /* XX: Set if key exists. */
-    SET_KEEP_EXPIRE = 1 << 2,    /* KEEPTTL: Set and keep the ttl */
-    SET_GET = 1 << 3,            /* GET: Set if want to get key before set */
-    SET_EXPIRE_AFTER_MS = 1 << 4 /* EX,PX,EXAT,PXAT: Expire after ms. */
+    SET_IF_NOTEXIST = 1 << 0,     /* NX: Set if key not exists. */
+    SET_IF_EXISTS = 1 << 1,       /* XX: Set if key exists. */
+    SET_KEEP_EXPIRE = 1 << 2,     /* KEEPTTL: Set and keep the ttl */
+    SET_GET = 1 << 3,             /* GET: Set if want to get key before set */
+    SET_EXPIRE_AFTER_MS = 1 << 4, /* EX,PX,EXAT,PXAT: Expire after ms. */
+    SET_STICK = 1 << 5,           /* Set STICK flag */
   };
 
   struct SetParams {
