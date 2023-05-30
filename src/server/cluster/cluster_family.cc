@@ -73,6 +73,7 @@ ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const 
   optional<Replica::Info> replication_info = server_family_->GetReplicaInfo();
   ServerState& etl = *ServerState::tlocal();
   if (!replication_info.has_value()) {
+    DCHECK(etl.is_master);
     std::string cluster_announce_ip = absl::GetFlag(FLAGS_cluster_announce_ip);
     std::string preferred_endpoint =
         cluster_announce_ip.empty() ? cntx->owner()->LocalBindAddress() : cluster_announce_ip;
@@ -87,7 +88,6 @@ ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const 
                                .port = static_cast<uint16_t>(replica.listening_port)});
     }
   } else {
-    DCHECK(etl.is_master);
     info.master = {
         .id = etl.remote_client_id_, .ip = replication_info->host, .port = replication_info->port};
     info.replicas.push_back({.id = server_family_->master_id(),
