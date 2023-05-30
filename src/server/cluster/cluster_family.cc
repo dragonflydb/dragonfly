@@ -63,8 +63,7 @@ bool ClusterFamily::IsEnabledOrEmulated() const {
   return is_emulated_cluster_ || ClusterConfig::IsClusterEnabled();
 }
 
-// TODO: Extend this method to accommodate the needs of `CLUSTER NODES` and `CLUSTER SLOTS`.
-// TODO: Also make this function safe in that it will read the state atomically.
+// TODO: Make this function safe in that it will read the state atomically.
 ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const {
   ClusterShard info{
       .slot_ranges = {{.start = 0, .end = ClusterConfig::kMaxSlotNum}},
@@ -267,7 +266,8 @@ void ClusterFamily::ClusterNodes(ConnectionContext* cntx) {
   }
 }
 
-void ClusterFamily::ClusterInfo(ConnectionContext* cntx) {
+namespace {
+void ClusterInfoImpl(const ClusterShards& config, ConnectionContext* cntx) {
   std::string msg;
   auto append = [&msg](absl::AlphaNum a1, absl::AlphaNum a2) {
     absl::StrAppend(&msg, a1, ":", a2, "\r\n");
@@ -280,20 +280,7 @@ void ClusterFamily::ClusterInfo(ConnectionContext* cntx) {
   long epoch = 1;
   size_t cluster_size = 1;
 
-  if (is_emulated_cluster_) {
-    ServerState& etl = *ServerState::tlocal();
-    if (etl.is_master) {
-      auto vec = server_family_->GetDflyCmd()->GetReplicasRoleInfo();
-      if (!vec.empty()) {
-        known_nodes = 2;
-      }
-    } else {
-      if (server_family_->HasReplica()) {
-        known_nodes = 2;
-        epoch = server_family_->GetReplicaInfo().master_last_io_sec;
-      }
-    }
-  } else if (!cluster_config_->IsConfigured()) {
+  if (config.empty()) {
     state = "fail"sv;
     slots_assigned = 0;
     cluster_size = 0;
@@ -301,7 +288,6 @@ void ClusterFamily::ClusterInfo(ConnectionContext* cntx) {
   } else {
     known_nodes = 0;
     cluster_size = 0;
-    auto config = cluster_config_->GetConfig();
     for (const auto& shard_config : config) {
       known_nodes += 1;  // For master
       known_nodes += shard_config.replicas.size();
@@ -329,6 +315,17 @@ void ClusterFamily::ClusterInfo(ConnectionContext* cntx) {
   append("cluster_stats_messages_meet_received", 0);
   append("cluster_stats_messages_received", 1);
   (*cntx)->SendBulkString(msg);
+}
+}  // namespace
+
+void ClusterFamily::ClusterInfo(ConnectionContext* cntx) {
+  if (is_emulated_cluster_) {
+    return ClusterInfoImpl({GetEmulatedShardInfo(cntx)}, cntx);
+  } else if (cluster_config_->IsConfigured()) {
+    return ClusterInfoImpl(cluster_config_->GetConfig(), cntx);
+  } else {
+    return ClusterInfoImpl({}, cntx);
+  }
 }
 
 void ClusterFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
