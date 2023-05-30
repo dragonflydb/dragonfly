@@ -63,7 +63,6 @@ bool ClusterFamily::IsEnabledOrEmulated() const {
   return is_emulated_cluster_ || ClusterConfig::IsClusterEnabled();
 }
 
-// TODO: Make this function safe in that it will read the state atomically.
 ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const {
   ClusterShard info{
       .slot_ranges = {{.start = 0, .end = ClusterConfig::kMaxSlotNum}},
@@ -71,8 +70,9 @@ ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const 
       .replicas = {},
   };
 
+  optional<Replica::Info> replication_info = server_family_->GetReplicaInfo();
   ServerState& etl = *ServerState::tlocal();
-  if (etl.is_master) {
+  if (!replication_info.has_value()) {
     std::string cluster_announce_ip = absl::GetFlag(FLAGS_cluster_announce_ip);
     std::string preferred_endpoint =
         cluster_announce_ip.empty() ? cntx->owner()->LocalBindAddress() : cluster_announce_ip;
@@ -87,9 +87,9 @@ ClusterShard ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const 
                                .port = static_cast<uint16_t>(replica.listening_port)});
     }
   } else {
-    Replica::Info replication_info = server_family_->GetReplicaInfo();
+    DCHECK(etl.is_master);
     info.master = {
-        .id = etl.remote_client_id_, .ip = replication_info.host, .port = replication_info.port};
+        .id = etl.remote_client_id_, .ip = replication_info->host, .port = replication_info->port};
     info.replicas.push_back({.id = server_family_->master_id(),
                              .ip = cntx->owner()->LocalBindAddress(),
                              .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))});
