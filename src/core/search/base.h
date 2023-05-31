@@ -22,4 +22,15 @@ struct DocumentAccessor {
   virtual bool Check(FieldConsumer f, std::string_view active_field) const = 0;
 };
 
+using DocId = uint32_t;
+
+// Base class for type-specific indices.
+//
+// Queries should be done directly on subclasses with their distinc
+// query functions. All results for all index types should be sorted.
+struct BaseIndex {
+  virtual ~BaseIndex() = default;
+  virtual void Add(DocId doc, std::string_view value) = 0;
+};
+
 }  // namespace dfly::search
