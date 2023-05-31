@@ -36,6 +36,12 @@ ABSL_FLAG(int, master_reconnect_timeout_ms, 1000,
           "Timeout for re-establishing connection to a replication master");
 ABSL_DECLARE_FLAG(uint32_t, port);
 
+#define RETURN_BAD_MESSAGE(msg)                                         \
+  do {                                                                  \
+    LOG(ERROR) << (msg) << ": \"" << absl::CEscape(last_resp_) << "\""; \
+    return std::make_error_code(errc::bad_message);                     \
+  } while (false)
+
 namespace dfly {
 
 using namespace std;
@@ -355,80 +361,58 @@ error_code Replica::ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms)
   auto masterauth = absl::GetFlag(FLAGS_masterauth);
   if (!masterauth.empty()) {
     ReqSerializer serializer{sock_.get()};
-    uint32_t consumed = 0;
-    base::IoBuf io_buf{128};
     parser_.reset(new RedisParser{false});
     RETURN_ON_ERR(SendCommand(StrCat("AUTH ", masterauth), &serializer));
-    RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
-    if (!CheckRespIsSimpleReply("OK")) {
-      LOG(ERROR) << "Failed authentication with masters " << ToSV(io_buf.InputBuffer());
-      return make_error_code(errc::bad_message);
-    }
+    RETURN_ON_ERR(ReadRespReply());
+    if (!CheckRespIsSimpleReply("OK"))
+      RETURN_BAD_MESSAGE("Failed authentication with masters");
   }
   return error_code{};
 }
 
 error_code Replica::Greet() {
   parser_.reset(new RedisParser{false});
-  base::IoBuf io_buf{128};
   ReqSerializer serializer{sock_.get()};
-  uint32_t consumed = 0;
   VLOG(1) << "greeting message handling";
   // Corresponds to server.repl_state == REPL_STATE_CONNECTING state in redis
   RETURN_ON_ERR(SendCommand("PING", &serializer));  // optional.
-  RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
-  if (!CheckRespIsSimpleReply("PONG")) {
-    LOG(ERROR) << "Bad pong response " << ToSV(io_buf.InputBuffer());
-    return make_error_code(errc::bad_message);
-  }
-
-  io_buf.ConsumeInput(consumed);
+  RETURN_ON_ERR(ReadRespReply());
+  if (!CheckRespIsSimpleReply("PONG"))
+    RETURN_BAD_MESSAGE("Bad pong response");
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_HANDSHAKE condition in replication.c
   auto port = absl::GetFlag(FLAGS_port);
   RETURN_ON_ERR(SendCommand(StrCat("REPLCONF listening-port ", port), &serializer));
-  RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
-  if (!CheckRespIsSimpleReply("OK")) {
-    LOG(ERROR) << "Bad REPLCONF response " << ToSV(io_buf.InputBuffer());
-    return make_error_code(errc::bad_message);
-  }
-
-  io_buf.ConsumeInput(consumed);
+  RETURN_ON_ERR(ReadRespReply());
+  if (!CheckRespIsSimpleReply("OK"))
+    RETURN_BAD_MESSAGE("Bad REPLCONF response");
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_CAPA
   RETURN_ON_ERR(SendCommand("REPLCONF capa eof capa psync2", &serializer));
-  RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
-  if (!CheckRespIsSimpleReply("OK")) {
-    LOG(ERROR) << "Bad REPLCONF response " << ToSV(io_buf.InputBuffer());
-    return make_error_code(errc::bad_message);
-  }
-
-  io_buf.ConsumeInput(consumed);
+  RETURN_ON_ERR(ReadRespReply());
+  if (!CheckRespIsSimpleReply("OK"))
+    RETURN_BAD_MESSAGE("Bad REPLCONF response");
 
   // Announce that we are the dragonfly client.
   // Note that we currently do not support dragonfly->redis replication.
   RETURN_ON_ERR(SendCommand("REPLCONF capa dragonfly", &serializer));
-  RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
-  auto err_handler = [&io_buf]() {
-    LOG(ERROR) << "Unexpected response " << ToSV(io_buf.InputBuffer());
-    return make_error_code(errc::bad_message);
-  };
+  RETURN_ON_ERR(ReadRespReply());
 
   if (!CheckRespFirstTypes({RespExpr::STRING}))
-    return err_handler();
+    RETURN_BAD_MESSAGE("Bad response");
 
   string_view cmd = ToSV(resp_args_[0].GetBuf());
 
   if (resp_args_.size() == 1) {  // Redis
     if (cmd != "OK")
-      return err_handler();
+      RETURN_BAD_MESSAGE("Bad response");
   } else if (resp_args_.size() >= 3) {  // it's dragonfly master.
     if (auto ec = HandleCapaDflyResp(); ec)
-      return err_handler();
+      RETURN_BAD_MESSAGE("Bad response");
     if (auto ec = ConfigureDflyMaster(); ec)
       return ec;
   } else {
-    return err_handler();
+    RETURN_BAD_MESSAGE("Bad response");
   }
 
   state_mask_.fetch_or(R_GREETED);
@@ -456,7 +440,7 @@ std::error_code Replica::HandleCapaDflyResp() {
 
   if (resp_args_.size() >= 4) {
     if (resp_args_[3].type != RespExpr::INT64)
-      return make_error_code(errc::bad_message);
+      RETURN_BAD_MESSAGE("Version argument not an integer");
     master_context_.version = DflyVersion(get<int64_t>(resp_args_[3].u));
   }
   VLOG(1) << "Master id: " << master_context_.master_repl_id
@@ -467,30 +451,24 @@ std::error_code Replica::HandleCapaDflyResp() {
 }
 
 std::error_code Replica::ConfigureDflyMaster() {
-  base::IoBuf io_buf{128};
   ReqSerializer serializer{sock_.get()};
-  uint32_t consumed = 0;
 
   // We need to send this because we may require to use this for cluster commands.
   // this reason to send this here is that in other context we can get an error reply
   // since we are budy with the replication
   RETURN_ON_ERR(SendCommand(StrCat("REPLCONF CLIENT-ID ", id_), &serializer));
-  RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
+  RETURN_ON_ERR(ReadRespReply());
   if (!CheckRespIsSimpleReply("OK")) {
     LOG(WARNING) << "master did not return OK on id message";
   }
-
-  io_buf.ConsumeInput(consumed);
 
   // Tell the master our version if it supports REPLCONF CLIENT-VERSION
   if (master_context_.version > DflyVersion::VER0) {
     RETURN_ON_ERR(
         SendCommand(StrCat("REPLCONF CLIENT-VERSION ", DflyVersion::CURRENT_VER), &serializer));
-    RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
-    if (!CheckRespIsSimpleReply("OK")) {
-      LOG(ERROR) << "Unexpected response " << ToSV(io_buf.InputBuffer());
-      return make_error_code(errc::bad_message);
-    }
+    RETURN_ON_ERR(ReadRespReply());
+    if (!CheckRespIsSimpleReply("OK"))
+      RETURN_BAD_MESSAGE("Bad response");
   }
 
   return error_code{};
@@ -817,13 +795,9 @@ error_code Replica::SendNextPhaseRequest(bool stable) {
   VLOG(1) << "Sending: " << request;
   RETURN_ON_ERR(SendCommand(request, &serializer));
 
-  base::IoBuf io_buf{128};
-  unsigned consumed = 0;
-  RETURN_ON_ERR(ReadRespReply(&io_buf, &consumed));
-  if (!CheckRespIsSimpleReply("OK")) {
-    LOG(ERROR) << "Phase transition failed " << ToSV(io_buf.InputBuffer());
-    return make_error_code(errc::bad_message);
-  }
+  RETURN_ON_ERR(ReadRespReply());
+  if (!CheckRespIsSimpleReply("OK"))
+    RETURN_BAD_MESSAGE("Phase transition failed");
 
   return std::error_code{};
 }
@@ -844,23 +818,18 @@ error_code Replica::StartFullSyncFlow(BlockingCounter sb, Context* cntx) {
   parser_.reset(new RedisParser{false});  // client mode
 
   leftover_buf_.emplace(128);
-  unsigned consumed = 0;
-  RETURN_ON_ERR(ReadRespReply(&*leftover_buf_, &consumed));  // uses parser_
+  RETURN_ON_ERR(ReadRespReply(&*leftover_buf_));  // uses parser_
 
-  if (!CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING})) {
-    LOG(ERROR) << "Bad FLOW response " << ToSV(leftover_buf_->InputBuffer());
-    return make_error_code(errc::bad_message);
-  }
+  if (!CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING}))
+    RETURN_BAD_MESSAGE("Bad FLOW response");
 
   string_view flow_directive = ToSV(resp_args_[0].GetBuf());
   string eof_token;
   if (flow_directive == "FULL") {
     eof_token = ToSV(resp_args_[1].GetBuf());
   } else {
-    LOG(ERROR) << "Bad FLOW response " << ToSV(leftover_buf_->InputBuffer());
-    return make_error_code(errc::bad_message);
+    RETURN_BAD_MESSAGE("Bad FLOW response");
   }
-  leftover_buf_->ConsumeInput(consumed);
 
   state_mask_.fetch_or(R_TCP_CONNECTED);
 
@@ -1122,14 +1091,20 @@ void Replica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context*
   }
 }
 
-error_code Replica::ReadRespReply(base::IoBuf* io_buf, uint32_t* consumed) {
+error_code Replica::ReadRespReply(base::IoBuf* buffer) {
   DCHECK(parser_);
 
   error_code ec;
+  if (!buffer) {
+    buffer = &resp_buf_;
+    buffer->Clear();
+  }
+  last_resp_ = "";
 
   // basically reflection of dragonfly_connection IoLoop function.
   while (!ec) {
-    io::MutableBytes buf = io_buf->AppendBuffer();
+    uint32_t consumed;
+    io::MutableBytes buf = buffer->AppendBuffer();
     io::Result<size_t> size_res = sock_->Recv(buf);
     if (!size_res)
       return size_res.error();
@@ -1138,20 +1113,20 @@ error_code Replica::ReadRespReply(base::IoBuf* io_buf, uint32_t* consumed) {
 
     last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
 
-    io_buf->CommitWrite(*size_res);
+    buffer->CommitWrite(*size_res);
 
-    RedisParser::Result result = parser_->Parse(io_buf->InputBuffer(), consumed, &resp_args_);
+    RedisParser::Result result = parser_->Parse(buffer->InputBuffer(), &consumed, &resp_args_);
+    last_resp_ += std::string_view((char*)buffer->InputBuffer().data(), consumed);
+    buffer->ConsumeInput(consumed);
 
     if (result == RedisParser::OK && !resp_args_.empty()) {
       return error_code{};  // success path
     }
 
     if (result != RedisParser::INPUT_PENDING) {
-      LOG(ERROR) << "Invalid parser status " << result << " for buffer of size "
-                 << io_buf->InputLen();
+      LOG(ERROR) << "Invalid parser status " << result << " for response " << last_resp_;
       return std::make_error_code(std::errc::bad_message);
     }
-    io_buf->ConsumeInput(*consumed);
   }
 
   return ec;
