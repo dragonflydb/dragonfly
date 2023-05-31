@@ -76,6 +76,12 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidDoubleBookedSlot) {
                                    .replicas = {}}}));
 }
 
+TEST_F(ClusterConfigTest, ConfigSetInvalidSlotId) {
+  EXPECT_FALSE(config_.SetConfig({{.slot_ranges = {{.start = 0, .end = 0x3FFF + 1}},
+                                   .master = {.id = "other", .ip = "192.168.0.100", .port = 7000},
+                                   .replicas = {}}}));
+}
+
 TEST_F(ClusterConfigTest, ConfigSetOk) {
   EXPECT_TRUE(config_.SetConfig({{.slot_ranges = {{.start = 0, .end = 0x3FFF}},
                                   .master = {.id = "other", .ip = "192.168.0.100", .port = 7000},
