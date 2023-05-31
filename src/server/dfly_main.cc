@@ -456,72 +456,78 @@ bool ShouldUseEpollAPI(const base::sys::KernelVersion& kver) {
   return true;
 }
 
-io::Result<string> GetCGroupPath() {
+error_code GetCGroupPath(string* memory_path, string* cpu_path) {
+  CHECK(memory_path != nullptr) << "memory_path is null! (this shouldn't happen!)";
+  CHECK(cpu_path != nullptr) << "cpu_path is null! (this shouldn't happen!)";
+
   // Begin by reading /proc/self/cgroup
 
   auto cg = io::ReadFileToString("/proc/self/cgroup");
-  CHECK(cg.has_value());
+  CHECK(cg.has_value()) << "Failed to read /proc/self/cgroup";
 
-  // Here, we assume that CGroup v1 is being used. This
-  // is quite likely, as CGroup v2 was introduced back in 2016.
+  string cgv = std::move(cg).value();
 
-  // strip 0::<path> into just <path>, and newline.
-  string cgv = std::move(cg.value());
-  size_t pos = cgv.rfind(':');
-  if (pos == string::npos)
-    return nonstd::make_unexpected(make_error_code(errc::not_supported));
+  // Next, depending on cgroup version we either read:
+  // N:<cgroup name>:<path> -- in case of v1, in many lines
+  // 0::<cgroup name> -- in case of v2, in a single line
 
-  string res = cgv.substr(pos + 1);
-  absl::StripTrailingAsciiWhitespace(&res);
+  auto stripped = absl::StripAsciiWhitespace(cgv);
 
-  return res;
+  vector<string_view> groups = absl::StrSplit(stripped, '\n');
+
+  if (groups.size() == 1) {
+    // for v2 we only read 0::<name>
+    size_t pos = cgv.rfind(':');
+    if (pos == string::npos)
+      return make_error_code(errc::not_supported);
+
+    string_view res = absl::StripTrailingAsciiWhitespace(cgv.substr(pos + 1));
+
+    *memory_path = absl::StrCat("/sys/fs/cgroup/", res);
+    *cpu_path = *memory_path;  // in v2 the path to the cgroup is singular
+  } else {
+    for (const auto& sv : groups) {
+      // in v1 the format is
+      // N:s1:2 where N is an integer, s1, s2 strings with s1 maybe empty.
+      vector<string_view> entry = absl::StrSplit(sv, ':');
+      CHECK_EQ(entry.size(), 3u);
+
+      // in v1 there are several 'canonical' cgroups
+      // we are interested in the 'memory' and the 'cpu,cpuacct' ones
+      // which specify memory and cpu limits, respectively.
+      if (entry[1] == "memory")
+        *memory_path = absl::StrCat("/sys/fs/cgroup/memory/", entry[2]);
+
+      if (entry[1] == "cpu,cpuacct")
+        *cpu_path = absl::StrCat("/sys/fs/cgroup/cpu,cpuacct/", entry[2]);
+    }
+  }
+
+  return error_code{};
 }
 
 void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_threads) {
-  /**
-   * (attemps) to check whether we are running
-   * inside a container or not.
-   *
-   * We employ several tests, all of which
-   * are flawed, however together do cover a
-   * good portion of cases.
-   *
-   * 1. Checking '/.dockerenv': very simple, however
-   * only works for Docker, and this file may be moved
-   * in the future.
-   * 2. Checking '/sys/fs/cgroup/memory.max': This
-   * directory -cannot- be edited (not even using sudoedit),
-   * so users are not able to add files to there. The file
-   * 'memory.max' should contain a memory limit for processes.
-   *
-   * We also use this file to find out how much memory we can use.
-   * However, on LXC this is placed in a different directory:
-   * 3. Checking '/sys/fs/cgroup/memory/memory.limit_in_bytes':
-   * Same idea.
-   */
-
   using io::Exists;
 
-  auto cgroup_res = GetCGroupPath();
-  if (!cgroup_res) {
-    VLOG(1) << "Failed to get cgroup path, error: " << cgroup_res.error().message();
+  string mem_path, cpu_path;
+  auto err = GetCGroupPath(&mem_path, &cpu_path);
+
+  if (mem_path.empty() || cpu_path.empty()) {
+    VLOG(1) << "Failed to get cgroup path, error: " << err;
     return;
   }
 
-  const string cgroup = "/sys/fs/cgroup/" + *cgroup_res;
-
-  if (!Exists(cgroup + "/memory.max"))
-    return;
+  auto original_memory = mdata->mem_total;
 
   /* Update memory limits */
-  auto mlimit = io::ReadFileToString(cgroup + "/memory/memory.limit_in_bytes");
+  auto mlimit = io::ReadFileToString(mem_path + "/memory.limit_in_bytes");
   DVLOG(1) << "memory/memory.limit_in_bytes: " << mlimit.value_or("N/A");
 
   if (mlimit && !absl::StartsWith(*mlimit, "max")) {
     CHECK(absl::SimpleAtoi(*mlimit, &mdata->mem_total));
   }
 
-  auto mmax = io::ReadFileToString(cgroup + "/memory.max");
+  auto mmax = io::ReadFileToString(mem_path + "/memory.max");
   DVLOG(1) << "memory.max: " << mmax.value_or("N/A");
 
   if (mmax && !absl::StartsWith(*mmax, "max")) {
@@ -529,15 +535,20 @@ void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
   }
 
   mdata->mem_avail = mdata->mem_total;
-  auto mhigh = io::ReadFileToString(cgroup + "/memory.high");
+  auto mhigh = io::ReadFileToString(mem_path + "/memory.high");
 
   if (mhigh && !absl::StartsWith(*mhigh, "max")) {
     CHECK(absl::SimpleAtoi(*mhigh, &mdata->mem_avail));
   }
 
+  if (numeric_limits<size_t>::max() == mdata->mem_total)
+    mdata->mem_avail = original_memory;
+
   /* Update thread limits */
 
-  if (auto cpu = ReadFileToString(cgroup + "/cpu.max"); cpu.has_value()) {
+  double count = 0, timeshare = 1;
+
+  if (auto cpu = ReadFileToString(cpu_path + "/cpu.max"); cpu.has_value()) {
     vector<string_view> res = absl::StrSplit(cpu.value(), ' ');
 
     CHECK_EQ(res.size(), 2u);
@@ -545,14 +556,29 @@ void UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
     if (res[0] == "max")
       *max_threads = 0u;
     else {
-      double count, timeshare;
       CHECK(absl::SimpleAtod(res[0], &count));
       CHECK(absl::SimpleAtod(res[1], &timeshare));
 
       *max_threads = static_cast<size_t>(ceil(count / timeshare));
     }
-  } else
+  } else if (auto quota = ReadFileToString(cpu_path + "/cpu.cfs_quota_us"); quota.has_value()) {
+    auto period = ReadFileToString(cpu_path + "/cpu.cfs_period_us");
+
+    CHECK(period.has_value()) << "Failed to read cgroup cpu.cfs_period_us, but read cpu.cfs_quota "
+                                 "us (this shouldn't happen!)";
+
+    CHECK(absl::SimpleAtod(quota.value(), &count));
+
+    if (count == -1)  // on -1 there is no limit.
+      count = 0;
+
+    CHECK(absl::SimpleAtod(period.value(), &timeshare));
+  } else {
     *max_threads = 0u;  // cpuset, this is handled later.
+    return;
+  }
+
+  *max_threads = static_cast<size_t>(ceil(count / timeshare));
 }
 
 }  // namespace
