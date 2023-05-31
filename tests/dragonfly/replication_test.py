@@ -426,6 +426,7 @@ async def test_cancel_replication_immediately(df_local_factory, df_seeder_factor
 
     await c_replica.execute_command(f"REPLICAOF localhost {masters[0].port}")
 
+    await wait_available_async(c_replica)
     capture = await seeders[0].capture()
     assert await seeders[0].compare(capture, replica.port)
 
