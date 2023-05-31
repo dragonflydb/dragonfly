@@ -906,9 +906,13 @@ bool ServerFamily::HasReplica() const {
   return replica_ != nullptr;
 }
 
-Replica::Info ServerFamily::GetReplicaInfo() const {
+optional<Replica::Info> ServerFamily::GetReplicaInfo() const {
   unique_lock lk(replicaof_mu_);
-  return replica_->GetInfo();
+  if (replica_ == nullptr) {
+    return nullopt;
+  } else {
+    return replica_->GetInfo();
+  }
 }
 
 string ServerFamily::GetReplicaMasterId() const {
