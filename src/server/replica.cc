@@ -362,10 +362,9 @@ error_code Replica::ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms)
   if (!masterauth.empty()) {
     ReqSerializer serializer{sock_.get()};
     parser_.reset(new RedisParser{false});
-    RETURN_ON_ERR(SendCommand(StrCat("AUTH ", masterauth), &serializer));
-    RETURN_ON_ERR(ReadRespReply());
+    RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("AUTH ", masterauth), &serializer));
     if (!CheckRespIsSimpleReply("OK"))
-      RETURN_BAD_MESSAGE("Failed authentication with masters");
+      RETURN_BAD_MESSAGE("Failed authentication with master");
   }
   return error_code{};
 }
@@ -375,44 +374,40 @@ error_code Replica::Greet() {
   ReqSerializer serializer{sock_.get()};
   VLOG(1) << "greeting message handling";
   // Corresponds to server.repl_state == REPL_STATE_CONNECTING state in redis
-  RETURN_ON_ERR(SendCommand("PING", &serializer));  // optional.
-  RETURN_ON_ERR(ReadRespReply());
+  RETURN_ON_ERR(SendCommandAndReadResponse("PING", &serializer));  // optional.
   if (!CheckRespIsSimpleReply("PONG"))
     RETURN_BAD_MESSAGE("Bad pong response");
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_HANDSHAKE condition in replication.c
   auto port = absl::GetFlag(FLAGS_port);
-  RETURN_ON_ERR(SendCommand(StrCat("REPLCONF listening-port ", port), &serializer));
-  RETURN_ON_ERR(ReadRespReply());
+  RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("REPLCONF listening-port ", port), &serializer));
   if (!CheckRespIsSimpleReply("OK"))
-    RETURN_BAD_MESSAGE("Bad REPLCONF response");
+    RETURN_BAD_MESSAGE("Bad REPLCONF listening-port response");
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_CAPA
-  RETURN_ON_ERR(SendCommand("REPLCONF capa eof capa psync2", &serializer));
-  RETURN_ON_ERR(ReadRespReply());
+  RETURN_ON_ERR(SendCommandAndReadResponse("REPLCONF capa eof capa psync2", &serializer));
   if (!CheckRespIsSimpleReply("OK"))
-    RETURN_BAD_MESSAGE("Bad REPLCONF response");
+    RETURN_BAD_MESSAGE("Bad REPLCONF capa response");
 
   // Announce that we are the dragonfly client.
   // Note that we currently do not support dragonfly->redis replication.
-  RETURN_ON_ERR(SendCommand("REPLCONF capa dragonfly", &serializer));
-  RETURN_ON_ERR(ReadRespReply());
+  RETURN_ON_ERR(SendCommandAndReadResponse("REPLCONF capa dragonfly", &serializer));
 
   if (!CheckRespFirstTypes({RespExpr::STRING}))
-    RETURN_BAD_MESSAGE("Bad response");
+    RETURN_BAD_MESSAGE("Bad REPLCONF capa dragonfly response");
 
   string_view cmd = ToSV(resp_args_[0].GetBuf());
 
   if (resp_args_.size() == 1) {  // Redis
     if (cmd != "OK")
-      RETURN_BAD_MESSAGE("Bad response");
+      RETURN_BAD_MESSAGE("Bad REPLCONF capa dragonfly response");
   } else if (resp_args_.size() >= 3) {  // it's dragonfly master.
     if (auto ec = HandleCapaDflyResp(); ec)
-      RETURN_BAD_MESSAGE("Bad response");
+      RETURN_BAD_MESSAGE("Bad REPLCONF capa dragonfly response");
     if (auto ec = ConfigureDflyMaster(); ec)
       return ec;
   } else {
-    RETURN_BAD_MESSAGE("Bad response");
+    RETURN_BAD_MESSAGE("Bad REPLCONF capa dragonfly response");
   }
 
   state_mask_.fetch_or(R_GREETED);
@@ -456,19 +451,18 @@ std::error_code Replica::ConfigureDflyMaster() {
   // We need to send this because we may require to use this for cluster commands.
   // this reason to send this here is that in other context we can get an error reply
   // since we are budy with the replication
-  RETURN_ON_ERR(SendCommand(StrCat("REPLCONF CLIENT-ID ", id_), &serializer));
-  RETURN_ON_ERR(ReadRespReply());
+  RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("REPLCONF CLIENT-ID ", id_), &serializer));
   if (!CheckRespIsSimpleReply("OK")) {
-    LOG(WARNING) << "master did not return OK on id message";
+    LOG(WARNING) << "Bad REPLCONF CLIENT-ID response";
   }
 
   // Tell the master our version if it supports REPLCONF CLIENT-VERSION
   if (master_context_.version > DflyVersion::VER0) {
-    RETURN_ON_ERR(
-        SendCommand(StrCat("REPLCONF CLIENT-VERSION ", DflyVersion::CURRENT_VER), &serializer));
-    RETURN_ON_ERR(ReadRespReply());
+    RETURN_ON_ERR(SendCommandAndReadResponse(
+        StrCat("REPLCONF CLIENT-VERSION ", DflyVersion::CURRENT_VER), &serializer));
+
     if (!CheckRespIsSimpleReply("OK"))
-      RETURN_BAD_MESSAGE("Bad response");
+      RETURN_BAD_MESSAGE("Bad REPLCONF CLIENT-VERSION response");
   }
 
   return error_code{};
@@ -793,9 +787,8 @@ error_code Replica::SendNextPhaseRequest(bool stable) {
   string request = StrCat("DFLY ", kind, " ", master_context_.dfly_session_id);
 
   VLOG(1) << "Sending: " << request;
-  RETURN_ON_ERR(SendCommand(request, &serializer));
+  RETURN_ON_ERR(SendCommandAndReadResponse(request, &serializer));
 
-  RETURN_ON_ERR(ReadRespReply());
   if (!CheckRespIsSimpleReply("OK"))
     RETURN_BAD_MESSAGE("Phase transition failed");
 
@@ -813,12 +806,10 @@ error_code Replica::StartFullSyncFlow(BlockingCounter sb, Context* cntx) {
   ReqSerializer serializer{sock_.get()};
   auto cmd = StrCat("DFLY FLOW ", master_context_.master_repl_id, " ",
                     master_context_.dfly_session_id, " ", master_context_.dfly_flow_id);
-  RETURN_ON_ERR(SendCommand(cmd, &serializer));
 
   parser_.reset(new RedisParser{false});  // client mode
-
   leftover_buf_.emplace(128);
-  RETURN_ON_ERR(ReadRespReply(&*leftover_buf_));  // uses parser_
+  RETURN_ON_ERR(SendCommandAndReadResponse(cmd, &serializer, &*leftover_buf_));
 
   if (!CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING}))
     RETURN_BAD_MESSAGE("Bad FLOW response");
@@ -1336,6 +1327,13 @@ error_code Replica::SendCommand(string_view command, ReqSerializer* serializer) 
     last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
   }
   return ec;
+}
+
+error_code Replica::SendCommandAndReadResponse(string_view command, ReqSerializer* serializer,
+                                               base::IoBuf* buffer) {
+  if (auto ec = SendCommand(command, serializer); ec)
+    return ec;
+  return ReadRespReply(buffer);
 }
 
 bool Replica::TransactionData::AddEntry(journal::ParsedEntry&& entry) {

@@ -194,6 +194,10 @@ class Replica {
 
   // Send command, update last_io_time, return error.
   std::error_code SendCommand(std::string_view command, facade::ReqSerializer* serializer);
+  // Send command, read response into resp_args_.
+  std::error_code SendCommandAndReadResponse(std::string_view command,
+                                             facade::ReqSerializer* serializer,
+                                             base::IoBuf* buffer = nullptr);
 
   void ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context* cntx);
   void InsertTxDataToShardResource(TransactionData&& tx_data);
