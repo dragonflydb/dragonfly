@@ -36,10 +36,12 @@ ABSL_FLAG(int, master_reconnect_timeout_ms, 1000,
           "Timeout for re-establishing connection to a replication master");
 ABSL_DECLARE_FLAG(uint32_t, port);
 
-#define RETURN_BAD_MESSAGE(msg)                                         \
-  do {                                                                  \
-    LOG(ERROR) << (msg) << ": \"" << absl::CEscape(last_resp_) << "\""; \
-    return std::make_error_code(errc::bad_message);                     \
+#define CHECK_CMD_RESPONSE(x)                                                                   \
+  do {                                                                                          \
+    if (!(x)) {                                                                                 \
+      LOG(ERROR) << "Bad response to \"" << last_cmd_ << "\": \"" << absl::CEscape(last_resp_); \
+      return std::make_error_code(errc::bad_message);                                           \
+    }                                                                                           \
   } while (false)
 
 namespace dfly {
@@ -363,8 +365,7 @@ error_code Replica::ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms)
     ReqSerializer serializer{sock_.get()};
     parser_.reset(new RedisParser{false});
     RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("AUTH ", masterauth), &serializer));
-    if (!CheckRespIsSimpleReply("OK"))
-      RETURN_BAD_MESSAGE("Failed authentication with master");
+    CHECK_CMD_RESPONSE(CheckRespIsSimpleReply("OK"));
   }
   return error_code{};
 }
@@ -375,39 +376,30 @@ error_code Replica::Greet() {
   VLOG(1) << "greeting message handling";
   // Corresponds to server.repl_state == REPL_STATE_CONNECTING state in redis
   RETURN_ON_ERR(SendCommandAndReadResponse("PING", &serializer));  // optional.
-  if (!CheckRespIsSimpleReply("PONG"))
-    RETURN_BAD_MESSAGE("Bad pong response");
+  CHECK_CMD_RESPONSE(CheckRespIsSimpleReply("PONG"));
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_HANDSHAKE condition in replication.c
   auto port = absl::GetFlag(FLAGS_port);
   RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("REPLCONF listening-port ", port), &serializer));
-  if (!CheckRespIsSimpleReply("OK"))
-    RETURN_BAD_MESSAGE("Bad REPLCONF listening-port response");
+  CHECK_CMD_RESPONSE(CheckRespIsSimpleReply("OK"));
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_CAPA
   RETURN_ON_ERR(SendCommandAndReadResponse("REPLCONF capa eof capa psync2", &serializer));
-  if (!CheckRespIsSimpleReply("OK"))
-    RETURN_BAD_MESSAGE("Bad REPLCONF capa response");
+  CHECK_CMD_RESPONSE(CheckRespIsSimpleReply("OK"));
 
   // Announce that we are the dragonfly client.
   // Note that we currently do not support dragonfly->redis replication.
   RETURN_ON_ERR(SendCommandAndReadResponse("REPLCONF capa dragonfly", &serializer));
-
-  if (!CheckRespFirstTypes({RespExpr::STRING}))
-    RETURN_BAD_MESSAGE("Bad REPLCONF capa dragonfly response");
-
-  string_view cmd = ToSV(resp_args_[0].GetBuf());
+  CHECK_CMD_RESPONSE(CheckRespFirstTypes({RespExpr::STRING}));
 
   if (resp_args_.size() == 1) {  // Redis
-    if (cmd != "OK")
-      RETURN_BAD_MESSAGE("Bad REPLCONF capa dragonfly response");
+    CHECK_CMD_RESPONSE(CheckRespIsSimpleReply("OK"));
   } else if (resp_args_.size() >= 3) {  // it's dragonfly master.
-    if (auto ec = HandleCapaDflyResp(); ec)
-      RETURN_BAD_MESSAGE("Bad REPLCONF capa dragonfly response");
+    CHECK_CMD_RESPONSE(!HandleCapaDflyResp());
     if (auto ec = ConfigureDflyMaster(); ec)
       return ec;
   } else {
-    RETURN_BAD_MESSAGE("Bad REPLCONF capa dragonfly response");
+    CHECK_CMD_RESPONSE(false);
   }
 
   state_mask_.fetch_or(R_GREETED);
@@ -434,8 +426,7 @@ std::error_code Replica::HandleCapaDflyResp() {
   num_df_flows_ = param_num_flows;
 
   if (resp_args_.size() >= 4) {
-    if (resp_args_[3].type != RespExpr::INT64)
-      RETURN_BAD_MESSAGE("Version argument not an integer");
+    CHECK_CMD_RESPONSE(resp_args_[3].type == RespExpr::INT64);
     master_context_.version = DflyVersion(get<int64_t>(resp_args_[3].u));
   }
   VLOG(1) << "Master id: " << master_context_.master_repl_id
@@ -460,9 +451,7 @@ std::error_code Replica::ConfigureDflyMaster() {
   if (master_context_.version > DflyVersion::VER0) {
     RETURN_ON_ERR(SendCommandAndReadResponse(
         StrCat("REPLCONF CLIENT-VERSION ", DflyVersion::CURRENT_VER), &serializer));
-
-    if (!CheckRespIsSimpleReply("OK"))
-      RETURN_BAD_MESSAGE("Bad REPLCONF CLIENT-VERSION response");
+    CHECK_CMD_RESPONSE(CheckRespIsSimpleReply("OK"));
   }
 
   return error_code{};
@@ -789,8 +778,7 @@ error_code Replica::SendNextPhaseRequest(bool stable) {
   VLOG(1) << "Sending: " << request;
   RETURN_ON_ERR(SendCommandAndReadResponse(request, &serializer));
 
-  if (!CheckRespIsSimpleReply("OK"))
-    RETURN_BAD_MESSAGE("Phase transition failed");
+  CHECK_CMD_RESPONSE(CheckRespIsSimpleReply("OK"));
 
   return std::error_code{};
 }
@@ -811,16 +799,12 @@ error_code Replica::StartFullSyncFlow(BlockingCounter sb, Context* cntx) {
   leftover_buf_.emplace(128);
   RETURN_ON_ERR(SendCommandAndReadResponse(cmd, &serializer, &*leftover_buf_));
 
-  if (!CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING}))
-    RETURN_BAD_MESSAGE("Bad FLOW response");
+  CHECK_CMD_RESPONSE(CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING}));
 
   string_view flow_directive = ToSV(resp_args_[0].GetBuf());
   string eof_token;
-  if (flow_directive == "FULL") {
-    eof_token = ToSV(resp_args_[1].GetBuf());
-  } else {
-    RETURN_BAD_MESSAGE("Bad FLOW response");
-  }
+  CHECK_CMD_RESPONSE(flow_directive == "FULL");
+  eof_token = ToSV(resp_args_[1].GetBuf());
 
   state_mask_.fetch_or(R_TCP_CONNECTED);
 
@@ -1331,6 +1315,7 @@ error_code Replica::SendCommand(string_view command, ReqSerializer* serializer) 
 
 error_code Replica::SendCommandAndReadResponse(string_view command, ReqSerializer* serializer,
                                                base::IoBuf* buffer) {
+  last_cmd_ = command;
   if (auto ec = SendCommand(command, serializer); ec)
     return ec;
   return ReadRespReply(buffer);

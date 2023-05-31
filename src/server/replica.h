@@ -274,6 +274,7 @@ class Replica {
   std::unique_ptr<facade::RedisParser> parser_;
   facade::RespVec resp_args_;
   base::IoBuf resp_buf_;
+  std::string last_cmd_;
   std::string last_resp_;
   facade::CmdArgVec cmd_str_args_;
 
