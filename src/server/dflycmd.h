@@ -113,10 +113,12 @@ class DflyCmd {
   };
 
   struct ReplicaRoleInfo {
-    ReplicaRoleInfo(std::string address, uint32_t listening_port, SyncState sync_state);
+    ReplicaRoleInfo(std::string address, uint32_t listening_port, SyncState sync_state,
+                    uint64_t lsn_lag);
     std::string address;
     uint32_t listening_port;
     std::string state;
+    uint64_t lsn_lag;
   };
 
  public:
@@ -193,6 +195,10 @@ class DflyCmd {
   // Check replica is in expected state and flows are set-up correctly.
   bool CheckReplicaStateOrReply(const ReplicaInfo& ri, SyncState expected,
                                 facade::RedisReplyBuilder* rb);
+
+  // Return a map between replication ID to lag. lag is defined as the maximum of difference
+  // between the master's LSN and the last acknowledged LSN in over all shards.
+  std::map<uint32_t, LSN> ReplicationLags() const;
 
  private:
   ServerFamily* sf_;  // Not owned
