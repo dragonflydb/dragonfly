@@ -8,6 +8,12 @@ from . import dfly_args
 BASE_PORT = 30001
 
 
+async def push_config(config, admin_connections):
+    print("Pushing config ", config)
+    for c in admin_connections:
+        await c.execute_command("DFLYCLUSTER", "CONFIG", config)
+
+
 @dfly_args({})
 class TestNotEmulated:
     async def test_cluster_commands_fails_when_not_emulate(self, async_client: aioredis.Redis):
@@ -142,3 +148,121 @@ async def test_cluster_nodes(async_client):
     assert info['last_ping_sent'] == '0'
     assert info['slots'] == [['0', '16383']]
     assert info['master_id'] == "-"
+
+
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_cluster(df_local_factory):
+    masters = [
+        df_local_factory.create(port=BASE_PORT+i+1, admin_port=BASE_PORT+i+1001)
+        for i in range(2)
+    ]
+
+    df_local_factory.start_all(masters)
+
+    c_masters = [aioredis.Redis(port=master.port) for master in masters]
+    c_masters_admin = [aioredis.Redis(port=master.admin_port) for master in masters]
+
+    master_ids = []
+
+    for i in range(len(masters)):
+        id = (await c_masters_admin[i].execute_command("DFLYCLUSTER MYID")).decode()
+        print(f'Master {i} id is {id}')
+        master_ids.append(id)
+
+    config = f"""
+      [
+        {{
+          "slot_ranges": [
+            {{
+              "start": 0,
+              "end": 5259
+            }}
+          ],
+          "master": {{
+            "id": "{master_ids[0]}",
+            "ip": "localhost",
+            "port": {masters[0].port}
+          }},
+          "replicas": []
+        }},
+        {{
+          "slot_ranges": [
+            {{
+              "start": 5260,
+              "end": 16383
+            }}
+          ],
+          "master": {{
+            "id": "{master_ids[1]}",
+            "ip": "localhost",
+            "port": {masters[1].port}
+          }},
+          "replicas": []
+        }}
+      ]
+    """
+
+    await push_config(config, c_masters_admin)
+
+    # crc16("KEY1") % slots-count == 5259
+
+    # Insert a key that should stay in master0
+    assert await c_masters[0].execute_command("SET", "KEY0", "value")
+
+    # And to master1 (so it happens that 'KEY0' belongs to 0 and 'KEY2' to 1)
+    assert await c_masters[1].execute_command("SET", "KEY2", "value")
+
+    # Insert a key that we will move ownership of to master1 (but without migration yet)
+    assert await c_masters[0].execute_command("SET", "KEY1", "value")
+    assert await c_masters[0].execute_command("DBSIZE") == 2
+    assert (await c_masters[0].execute_command("GET", "KEY0")).decode() == "value"
+
+    try:
+        await c_masters[1].execute_command("SET", "KEY1", "value")
+        assert False, "Should not be able to set key on non-owner cluster node"
+    except redis.exceptions.ResponseError as e:
+        assert e.args[0] == "MOVED 5259 localhost:30002"
+
+    assert await c_masters[1].execute_command("DBSIZE") == 1
+
+    print("Moving ownership over 5259 ('KEY1') to other master")
+
+    config = config.replace('5259', '5258').replace('5260', '5259')
+    await push_config(config, c_masters_admin)
+
+    assert await c_masters[0].execute_command("DBSIZE") == 1
+    assert (await c_masters[0].execute_command("GET", "KEY0")).decode() == "value"
+    assert await c_masters[1].execute_command("DBSIZE") == 1
+
+    try:
+        await c_masters[0].execute_command("SET", "KEY1", "value")
+        assert False, "Should not be able to set key on non-owner cluster node"
+    except redis.exceptions.ResponseError as e:
+        assert e.args[0] == "MOVED 5259 localhost:30003"
+
+    assert await c_masters[1].execute_command("SET", "KEY1", "value")
+    assert await c_masters[1].execute_command("DBSIZE") == 2
+
+    config = f"""
+      [
+        {{
+          "slot_ranges": [
+            {{
+              "start": 0,
+              "end": 16383
+            }}
+          ],
+          "master": {{
+            "id": "{master_ids[0]}",
+            "ip": "localhost",
+            "port": {masters[0].port}
+          }},
+          "replicas": []
+        }}
+      ]
+    """
+    await push_config(config, c_masters_admin)
+
+    assert await c_masters[0].execute_command("DBSIZE") == 1
+    assert (await c_masters[0].execute_command("GET", "KEY0")).decode() == "value"
+    assert await c_masters[1].execute_command("DBSIZE") == 0

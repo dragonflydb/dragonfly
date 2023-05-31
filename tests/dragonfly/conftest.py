@@ -71,6 +71,7 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
 
     args = request.param if request.param else {}
     existing = request.config.getoption("--existing-port")
+    existing_admin = request.config.getoption("--existing-admin-port")
     existing_mc = request.config.getoption("--existing-mc-port")
     params = DflyParams(
         path=path,
@@ -78,6 +79,7 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
         gdb=request.config.getoption("--gdb"),
         args=request.config.getoption("--df"),
         existing_port=int(existing) if existing else None,
+        existing_admin_port=int(existing_admin) if existing_admin else None,
         existing_mc_port=int(existing_mc) if existing else None,
         env=test_env
     )
@@ -183,6 +185,7 @@ def pytest_addoption(parser):
         --df arg - pass arg to all instances, can be used multiple times
         --log-seeder file - to log commands of last seeder run
         --existing-port - to provide a port to an existing process instead of starting a new instance
+        --existing-admin-port - to provide an admin port to an existing process instead of starting a new instance
         --rand-seed - to set the global random seed
     """
     parser.addoption(
@@ -199,6 +202,8 @@ def pytest_addoption(parser):
     )
     parser.addoption(
         '--existing-port', action='store', default=None, help='Provide a port to the existing process for the test')
+    parser.addoption(
+        '--existing-admin-port', action='store', default=None, help='Provide an admin port to the existing process for the test')
 
     parser.addoption(
         '--existing-mc-port', action='store', default=None, help='Provide a port to the existing memcached process for the test'
