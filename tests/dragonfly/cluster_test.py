@@ -1,8 +1,11 @@
 import pytest
+import re
 import redis
 from redis import asyncio as aioredis
 import asyncio
 
+from .utility import *
+from .replication_test import check_all_replicas_finished
 from . import dfly_args
 
 BASE_PORT = 30001
@@ -284,3 +287,111 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
     assert await c_nodes[0].execute_command("DBSIZE") == 1
     assert (await c_nodes[0].get("KEY0")).decode() == "value"
     assert await c_nodes[1].execute_command("DBSIZE") == 0
+
+
+# Tests that master commands to the replica are applied regardless of slot ownership
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_cluster_replica_sets_non_owned_keys(df_local_factory):
+    # Start and configure cluster with 1 master and 1 replica, both own all slots
+    master = df_local_factory.create(port=BASE_PORT, admin_port=BASE_PORT+1000)
+    replica = df_local_factory.create(port=BASE_PORT+1, admin_port=BASE_PORT+1001)
+    df_local_factory.start_all([master, replica])
+
+    c_master = aioredis.Redis(port=master.port)
+    c_master_admin = aioredis.Redis(port=master.admin_port)
+    master_id = await get_node_id(c_master_admin)
+
+    c_replica = aioredis.Redis(port=replica.port)
+    c_replica_admin = aioredis.Redis(port=replica.admin_port)
+    replica_id = await get_node_id(c_replica_admin)
+
+    config = f"""
+      [
+        {{
+          "slot_ranges": [
+            {{
+              "start": 0,
+              "end": 16383
+            }}
+          ],
+          "master": {{
+            "id": "{master_id}",
+            "ip": "localhost",
+            "port": {master.port}
+          }},
+          "replicas": [
+            {{
+              "id": "{replica_id}",
+              "ip": "localhost",
+              "port": {replica.port}
+            }}
+          ]
+        }}
+      ]
+    """
+    await push_config(config, [c_master_admin, c_replica_admin])
+
+    # Setup replication and make sure that it works properly.
+    await c_master.set("key", "value");
+    await c_replica.execute_command("REPLICAOF", "localhost", master.port)
+    await check_all_replicas_finished([c_replica], c_master)
+    assert (await c_replica.get("key")).decode() == "value"
+    assert await c_replica.execute_command("dbsize") == 1
+
+    # Tell the replica that it and the master no longer own any data, but don't tell that to the
+    # master. This will allow us to set keys on the master and make sure that they are set in the
+    # replica.
+
+    replica_config = f"""
+      [
+        {{
+          "slot_ranges": [],
+          "master": {{
+            "id": "{master_id}",
+            "ip": "localhost",
+            "port": {master.port}
+          }},
+          "replicas": [
+            {{
+              "id": "{replica_id}",
+              "ip": "localhost",
+              "port": {replica.port}
+            }}
+          ]
+        }},
+        {{
+          "slot_ranges": [
+            {{
+              "start": 0,
+              "end": 16383
+            }}
+          ],
+          "master": {{
+            "id": "non-existing-master",
+            "ip": "localhost",
+            "port": 1111
+          }},
+          "replicas": []
+        }}
+      ]
+    """
+
+    await push_config(replica_config, [c_replica_admin])
+
+    # The replica should have deleted the key.
+    assert await c_replica.execute_command("dbsize") == 0
+
+    # Set another key on the master, which it owns but the replica does not own.
+    await c_master.set("key2", "value");
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # See that the key exists in both replica and master
+    assert await c_master.execute_command("dbsize") == 2
+    assert await c_replica.execute_command("dbsize") == 1
+
+    # The replica should still reply with MOVED, despite having that key.
+    try:
+        await c_replica.get("key2")
+        assert False, "Should not be able to get key on non-owner cluster node"
+    except redis.exceptions.ResponseError as e:
+        assert re.match(r"MOVED \d+ localhost:1111", e.args[0])
