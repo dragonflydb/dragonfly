@@ -586,6 +586,11 @@ void ServerFamily::Shutdown() {
   });
 }
 
+struct AggregateLoadResult {
+  AggregateError first_error;
+  std::atomic<size_t> keys_read;
+};
+
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
@@ -640,7 +645,7 @@ Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
   vector<Fiber> load_fibers;
   load_fibers.reserve(paths.size());
 
-  auto first_error = std::make_shared<AggregateError>();
+  auto aggregated_result = std::make_shared<AggregateLoadResult>();
 
   for (auto& path : paths) {
     // For single file, choose thread that does not handle shards if possible.
@@ -652,8 +657,12 @@ Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
       proactor = pool.GetNextProactor();
     }
 
-    auto load_fiber = [this, first_error, path = std::move(path)]() {
-      *first_error = LoadRdb(path);
+    auto load_fiber = [this, aggregated_result, path = std::move(path)]() {
+      auto load_result = LoadRdb(path);
+      if (load_result.has_value())
+        aggregated_result->keys_read.fetch_add(*load_result);
+      else
+        aggregated_result->first_error = load_result.error();
     };
     load_fibers.push_back(proactor->LaunchFiber(std::move(load_fiber)));
   }
@@ -662,15 +671,15 @@ Future<std::error_code> ServerFamily::Load(const std::string& load_path) {
   Future<std::error_code> ec_future = ec_promise.get_future();
 
   // Run fiber that empties the channel and sets ec_promise.
-  auto load_join_fiber = [this, first_error, load_fibers = std::move(load_fibers),
+  auto load_join_fiber = [this, aggregated_result, load_fibers = std::move(load_fibers),
                           ec_promise = std::move(ec_promise)]() mutable {
     for (auto& fiber : load_fibers) {
       fiber.Join();
     }
 
-    VLOG(1) << "Load finished";
+    LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-    ec_promise.set_value(**first_error);
+    ec_promise.set_value(*(aggregated_result->first_error));
   };
   pool.GetNextProactor()->Dispatch(std::move(load_join_fiber));
 
@@ -709,7 +718,7 @@ void ServerFamily::SnapshotScheduling(const SnapshotSpec& spec) {
   }
 }
 
-error_code ServerFamily::LoadRdb(const std::string& rdb_file) {
+io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file) {
   error_code ec;
   io::ReadonlyFileOrError res;
 
@@ -725,14 +734,14 @@ error_code ServerFamily::LoadRdb(const std::string& rdb_file) {
     RdbLoader loader{&service_};
     ec = loader.Load(&fs);
     if (!ec) {
-      LOG(INFO) << "Done loading RDB, keys loaded: " << loader.keys_loaded();
-      LOG(INFO) << "Loading finished after "
-                << strings::HumanReadableElapsedTime(loader.load_time());
+      VLOG(1) << "Done loading RDB from " << rdb_file << ", keys loaded: " << loader.keys_loaded();
+      VLOG(1) << "Loading finished after " << strings::HumanReadableElapsedTime(loader.load_time());
+      return loader.keys_loaded();
     }
   } else {
     ec = res.error();
   }
-  return ec;
+  return nonstd::make_unexpected(ec);
 }
 
 enum MetricType { COUNTER, GAUGE, SUMMARY, HISTOGRAM };
