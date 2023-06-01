@@ -15,6 +15,11 @@ async def push_config(config, admin_connections):
         for c_admin in admin_connections))
 
 
+async def get_node_id(admin_connection):
+    id = await admin_connection.execute_command("DFLYCLUSTER MYID")
+    return id.decode()
+
+
 @dfly_args({})
 class TestNotEmulated:
     async def test_cluster_commands_fails_when_not_emulate(self, async_client: aioredis.Redis):
@@ -151,7 +156,8 @@ async def test_cluster_nodes(async_client):
     assert info['master_id'] == "-"
 
 
-""" Test that slot ownership changes correctly with config changes.
+"""
+Test that slot ownership changes correctly with config changes.
 
 Add a key to node0, then move the slot ownership to node1 and see that they both behave as
 intended.
@@ -170,11 +176,7 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
     c_nodes = [aioredis.Redis(port=node.port) for node in nodes]
     c_nodes_admin = [aioredis.Redis(port=node.admin_port) for node in nodes]
 
-    node_ids = [
-        id.decode()
-        for id in await asyncio.gather(*(c_admin.execute_command("DFLYCLUSTER MYID")
-        for c_admin in c_nodes_admin))
-    ]
+    node_ids = await asyncio.gather(*(get_node_id(c) for c in c_nodes_admin))
 
     config = f"""
       [
