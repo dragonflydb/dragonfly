@@ -159,7 +159,7 @@ async def test_cluster_nodes(async_client):
 async def test_cluster_slot_ownership_changes(df_local_factory):
     # Start and configure cluster with 2 masters
     masters = [
-        df_local_factory.create(port=BASE_PORT+i+1, admin_port=BASE_PORT+i+1001)
+        df_local_factory.create(port=BASE_PORT+i, admin_port=BASE_PORT+i+1000)
         for i in range(2)
     ]
 
@@ -229,7 +229,7 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
         await c_masters[1].execute_command("SET", "KEY1", "value")
         assert False, "Should not be able to set key on non-owner cluster node"
     except redis.exceptions.ResponseError as e:
-        assert e.args[0] == "MOVED 5259 localhost:30002"
+        assert e.args[0] == "MOVED 5259 localhost:30001"
 
     # And that master1 only has 1 key ("KEY2")
     assert await c_masters[1].execute_command("DBSIZE") == 1
@@ -251,7 +251,7 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
         await c_masters[0].execute_command("SET", "KEY1", "value")
         assert False, "Should not be able to set key on non-owner cluster node"
     except redis.exceptions.ResponseError as e:
-        assert e.args[0] == "MOVED 5259 localhost:30003"
+        assert e.args[0] == "MOVED 5259 localhost:30002"
 
     # And master1 should own it and allow using it
     assert await c_masters[1].execute_command("SET", "KEY1", "value")
