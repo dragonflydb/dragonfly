@@ -214,21 +214,21 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
     # Slot for "KEY1" is 5259
 
     # Insert a key that should stay in node0
-    assert await c_nodes[0].execute_command("SET", "KEY0", "value")
+    assert await c_nodes[0].set("KEY0", "value")
 
     # And to node1 (so it happens that 'KEY0' belongs to 0 and 'KEY2' to 1)
-    assert await c_nodes[1].execute_command("SET", "KEY2", "value")
+    assert await c_nodes[1].set("KEY2", "value")
 
     # Insert a key that we will move ownership of to node1 (but without migration yet)
-    assert await c_nodes[0].execute_command("SET", "KEY1", "value")
+    assert await c_nodes[0].set("KEY1", "value")
     assert await c_nodes[0].execute_command("DBSIZE") == 2
 
     # Make sure that node0 owns "KEY0"
-    assert (await c_nodes[0].execute_command("GET", "KEY0")).decode() == "value"
+    assert (await c_nodes[0].get("KEY0")).decode() == "value"
 
     # Make sure that "KEY1" is not owned by node1
     try:
-        await c_nodes[1].execute_command("SET", "KEY1", "value")
+        await c_nodes[1].set("KEY1", "value")
         assert False, "Should not be able to set key on non-owner cluster node"
     except redis.exceptions.ResponseError as e:
         assert e.args[0] == "MOVED 5259 localhost:30001"
@@ -244,19 +244,19 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
     # node0 should have removed "KEY1" as it no longer owns it
     assert await c_nodes[0].execute_command("DBSIZE") == 1
     # node0 should still own "KEY0" though
-    assert (await c_nodes[0].execute_command("GET", "KEY0")).decode() == "value"
+    assert (await c_nodes[0].get("KEY0")).decode() == "value"
     # node1 should still have "KEY2"
     assert await c_nodes[1].execute_command("DBSIZE") == 1
 
     # Now node0 should reply with MOVED for "KEY1"
     try:
-        await c_nodes[0].execute_command("SET", "KEY1", "value")
+        await c_nodes[0].set("KEY1", "value")
         assert False, "Should not be able to set key on non-owner cluster node"
     except redis.exceptions.ResponseError as e:
         assert e.args[0] == "MOVED 5259 localhost:30002"
 
     # And node1 should own it and allow using it
-    assert await c_nodes[1].execute_command("SET", "KEY1", "value")
+    assert await c_nodes[1].set("KEY1", "value")
     assert await c_nodes[1].execute_command("DBSIZE") == 2
 
     config = f"""
@@ -280,5 +280,5 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
     await push_config(config, c_nodes_admin)
 
     assert await c_nodes[0].execute_command("DBSIZE") == 1
-    assert (await c_nodes[0].execute_command("GET", "KEY0")).decode() == "value"
+    assert (await c_nodes[0].get("KEY0")).decode() == "value"
     assert await c_nodes[1].execute_command("DBSIZE") == 0
