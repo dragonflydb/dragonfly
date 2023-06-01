@@ -173,7 +173,8 @@ class ServerFamily {
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
 
-  std::error_code LoadRdb(const std::string& rdb_file, size_t* keys_loaded = nullptr);
+  // Returns the number of loaded keys if successfull.
+  io::Result<size_t> LoadRdb(const std::string& rdb_file);
 
   void SnapshotScheduling(const SnapshotSpec& time);
 
