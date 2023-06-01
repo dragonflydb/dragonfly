@@ -26,6 +26,7 @@ extern "C" {
 #include "server/rdb_load.h"
 #include "strings/human_readable.h"
 
+ABSL_FLAG(int, replication_acks_interval, 3000, "Interval between acks in milliseconds.");
 ABSL_FLAG(bool, enable_multi_shard_sync, false,
           "Execute multi shards commands on replica syncrhonized");
 ABSL_FLAG(std::string, masterauth, "", "password for authentication with master");
@@ -977,8 +978,9 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
 }
 
 void Replica::StableSyncDflyAcksFb(Context* cntx) {
-  constexpr std::chrono::duration kAckTimeMaxInterval = 3s;
   constexpr size_t kAckRecordMaxInterval = 1024;
+  std::chrono::duration ack_time_max_interval =
+      1ms * absl::GetFlag(FLAGS_replication_acks_interval);
   std::string ack_cmd;
   ReqSerializer serializer{sock_.get()};
 
@@ -991,7 +993,7 @@ void Replica::StableSyncDflyAcksFb(Context* cntx) {
     VLOG(1) << "Sending an ACK with offset=" << current_offset << " forced=" << force_ping_;
     ack_cmd = absl::StrCat("REPLCONF ACK ", current_offset);
     force_ping_ = false;
-    next_ack_tp = std::chrono::steady_clock::now() + kAckTimeMaxInterval;
+    next_ack_tp = std::chrono::steady_clock::now() + ack_time_max_interval;
     if (auto ec = SendCommand(ack_cmd, &serializer); ec) {
       cntx->ReportError(ec);
       break;

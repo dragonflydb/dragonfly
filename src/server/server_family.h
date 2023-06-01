@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
 
 #include "facade/conn_context.h"
@@ -136,7 +137,7 @@ class ServerFamily {
   }
 
   bool HasReplica() const;
-  Replica::Info GetReplicaInfo() const;
+  std::optional<Replica::Info> GetReplicaInfo() const;
   std::string GetReplicaMasterId() const;
 
   void OnClose(ConnectionContext* cntx);

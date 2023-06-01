@@ -906,9 +906,13 @@ bool ServerFamily::HasReplica() const {
   return replica_ != nullptr;
 }
 
-Replica::Info ServerFamily::GetReplicaInfo() const {
+optional<Replica::Info> ServerFamily::GetReplicaInfo() const {
   unique_lock lk(replicaof_mu_);
-  return replica_->GetInfo();
+  if (replica_ == nullptr) {
+    return nullopt;
+  } else {
+    return replica_->GetInfo();
+  }
 }
 
 string ServerFamily::GetReplicaMasterId() const {
@@ -1628,8 +1632,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       for (size_t i = 0; i < replicas.size(); i++) {
         auto& r = replicas[i];
         // e.g. slave0:ip=172.19.0.3,port=6379,state=full_sync
-        append(StrCat("slave", i),
-               StrCat("ip=", r.address, ",port=", r.listening_port, ",state=", r.state));
+        append(StrCat("slave", i), StrCat("ip=", r.address, ",port=", r.listening_port,
+                                          ",state=", r.state, ",lag=", r.lsn_lag));
       }
       append("master_replid", master_id_);
     } else {
