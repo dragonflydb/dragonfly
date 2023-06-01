@@ -10,8 +10,9 @@ BASE_PORT = 30001
 
 async def push_config(config, admin_connections):
     print("Pushing config ", config)
-    for c in admin_connections:
-        await c.execute_command("DFLYCLUSTER", "CONFIG", config)
+    await asyncio.gather(*(c_admin.execute_command(
+        "DFLYCLUSTER", "CONFIG", config)
+        for c_admin in admin_connections))
 
 
 @dfly_args({})
@@ -150,8 +151,13 @@ async def test_cluster_nodes(async_client):
     assert info['master_id'] == "-"
 
 
+# Test that slot ownership changes correctly with config changes:
+# Add a key to master0, then move the slot ownership to master1 and see that they both behave as
+# intended.
+# Also add keys to each of them that are *not* moved, and see that they are unaffected by the move.
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_cluster(df_local_factory):
+async def test_cluster_slot_ownership_changes(df_local_factory):
+    # Start and configure cluster with 2 masters
     masters = [
         df_local_factory.create(port=BASE_PORT+i+1, admin_port=BASE_PORT+i+1001)
         for i in range(2)
@@ -162,12 +168,11 @@ async def test_cluster(df_local_factory):
     c_masters = [aioredis.Redis(port=master.port) for master in masters]
     c_masters_admin = [aioredis.Redis(port=master.admin_port) for master in masters]
 
-    master_ids = []
-
-    for i in range(len(masters)):
-        id = (await c_masters_admin[i].execute_command("DFLYCLUSTER MYID")).decode()
-        print(f'Master {i} id is {id}')
-        master_ids.append(id)
+    master_ids = [
+        id.decode()
+        for id in await asyncio.gather(*(c_admin.execute_command("DFLYCLUSTER MYID")
+        for c_admin in c_masters_admin))
+    ]
 
     config = f"""
       [
@@ -204,7 +209,7 @@ async def test_cluster(df_local_factory):
 
     await push_config(config, c_masters_admin)
 
-    # crc16("KEY1") % slots-count == 5259
+    # Slot for "KEY1" is 5259
 
     # Insert a key that should stay in master0
     assert await c_masters[0].execute_command("SET", "KEY0", "value")
@@ -215,14 +220,18 @@ async def test_cluster(df_local_factory):
     # Insert a key that we will move ownership of to master1 (but without migration yet)
     assert await c_masters[0].execute_command("SET", "KEY1", "value")
     assert await c_masters[0].execute_command("DBSIZE") == 2
+
+    # Make sure that master0 owns "KEY0"
     assert (await c_masters[0].execute_command("GET", "KEY0")).decode() == "value"
 
+    # Make sure that "KEY1" is not owned by master1
     try:
         await c_masters[1].execute_command("SET", "KEY1", "value")
         assert False, "Should not be able to set key on non-owner cluster node"
     except redis.exceptions.ResponseError as e:
         assert e.args[0] == "MOVED 5259 localhost:30002"
 
+    # And that master1 only has 1 key ("KEY2")
     assert await c_masters[1].execute_command("DBSIZE") == 1
 
     print("Moving ownership over 5259 ('KEY1') to other master")
@@ -230,16 +239,21 @@ async def test_cluster(df_local_factory):
     config = config.replace('5259', '5258').replace('5260', '5259')
     await push_config(config, c_masters_admin)
 
+    # master0 should have removed "KEY1" as it no longer owns it
     assert await c_masters[0].execute_command("DBSIZE") == 1
+    # master0 should still own "KEY0" though
     assert (await c_masters[0].execute_command("GET", "KEY0")).decode() == "value"
+    # master1 should still have "KEY2"
     assert await c_masters[1].execute_command("DBSIZE") == 1
 
+    # Now master0 should reply with MOVED for "KEY1"
     try:
         await c_masters[0].execute_command("SET", "KEY1", "value")
         assert False, "Should not be able to set key on non-owner cluster node"
     except redis.exceptions.ResponseError as e:
         assert e.args[0] == "MOVED 5259 localhost:30003"
 
+    # And master1 should own it and allow using it
     assert await c_masters[1].execute_command("SET", "KEY1", "value")
     assert await c_masters[1].execute_command("DBSIZE") == 2
 
