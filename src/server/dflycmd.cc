@@ -65,15 +65,25 @@ std::string_view SyncStateName(DflyCmd::SyncState sync_state) {
 }
 
 struct TransactionGuard {
-  constexpr static auto kEmptyCb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
+  static OpStatus ExitGuardCb(Transaction* t, EngineShard* shard) {
+    shard->db_slice().SetExpireAllowed(true);
+    return OpStatus::OK;
+  };
 
-  TransactionGuard(Transaction* t) : t(t) {
+  explicit TransactionGuard(Transaction* t, bool disable_expirations = false) : t(t) {
     t->Schedule();
-    t->Execute(kEmptyCb, false);
+    t->Execute(
+        [disable_expirations](Transaction* t, EngineShard* shard) {
+          if (disable_expirations) {
+            shard->db_slice().SetExpireAllowed(!disable_expirations);
+          }
+          return OpStatus::OK;
+        },
+        false);
   }
 
   ~TransactionGuard() {
-    t->Execute(kEmptyCb, true);
+    t->Execute(ExitGuardCb, true);
   }
 
   Transaction* t;
@@ -355,11 +365,12 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   if (!CheckReplicaStateOrReply(*replica_ptr, SyncState::STABLE_SYNC, rb))
     return;
 
-  VLOG(1) << "Takeover initiated, locking down the database.";
-  TransactionGuard tg{cntx->transaction};
+  LOG(INFO) << "Takeover initiated, locking down the database.";
+  TransactionGuard tg{cntx->transaction, /*disable_expirations=*/true};
   AggregateStatus status;
 
-  auto cb = [replica_ptr = replica_ptr, timeout, &status](EngineShard* shard) {
+  auto cb = [&cntx = replica_ptr->cntx, replica_ptr = replica_ptr, timeout,
+             &status](EngineShard* shard) {
     FlowInfo* flow = &replica_ptr->flows[shard->shard_id()];
 
     shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, {}, true);
@@ -371,13 +382,17 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
         status = OpStatus::TIMED_OUT;
         return;
       }
+      if (cntx.IsCancelled()) {
+        status = OpStatus::CANCELLED;
+        return;
+      }
       ThisFiber::SleepFor(1ms);
     }
   };
   shard_set->RunBlockingInParallel(std::move(cb));
 
   if (*status != OpStatus::OK)
-    return rb->SendError("Takeover timeout!");
+    return rb->SendError("Takeover failed!");
   (*cntx)->SendOk();
 
   VLOG(1) << "Takeover accepted, shutting down.";

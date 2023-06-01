@@ -324,6 +324,10 @@ class DbSlice {
   // Resets the event counter for updates/insertions
   void ResetUpdateEvents();
 
+  void SetExpireAllowed(bool is_allowed) {
+    expire_allowed_ = is_allowed;
+  }
+
  private:
   std::pair<PrimeIterator, bool> AddOrUpdateInternal(const Context& cntx, std::string_view key,
                                                      PrimeValue obj, uint64_t expire_at_ms,
@@ -351,6 +355,7 @@ class DbSlice {
   EngineShard* owner_;
 
   time_t expire_base_[2];  // Used for expire logic, represents a real clock.
+  bool expire_allowed_ = true;
 
   uint64_t version_ = 1;  // Used to version entries in the PrimeTable.
   ssize_t memory_budget_ = SSIZE_MAX;

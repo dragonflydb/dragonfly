@@ -1960,7 +1960,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
   if (ec)
     return (*cntx)->SendError("Couldn't execute takeover");
 
-  VLOG(1) << "Takeover successful, promoting this instance to master.";
+  LOG(INFO) << "Takeover successful, promoting this instance to master.";
   service_.proactor_pool().AwaitFiberOnAll(
       [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = true; });
   replica_->Stop();
@@ -2184,7 +2184,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
                    ShutdownCmd)
             << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
-            << CI{"REPLTAKEOVER", kReplicaOpts, 2, 0, 0, 0}.HFUNC(ReplTakeOver)
+            << CI{"REPLTAKEOVER", CO::ADMIN | CO::GLOBAL_TRANS, 2, 0, 0, 0}.HFUNC(ReplTakeOver)
             << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, 0}.HFUNC(ReplConf)
             << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, 0}.HFUNC(Role)
             << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, 0}.SetHandler(SlowLog)

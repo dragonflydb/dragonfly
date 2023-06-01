@@ -151,8 +151,8 @@ class DflyCmd {
   // Switch to stable state replication.
   void StartStable(CmdArgList args, ConnectionContext* cntx);
 
-  // STARTSTABLE <syncid>
-  // Switch to stable state replication.
+  // TAKEOVER <syncid>
+  // Shut this master down atomically with replica promotion.
   void TakeOver(CmdArgList args, ConnectionContext* cntx);
 
   // EXPIRE
