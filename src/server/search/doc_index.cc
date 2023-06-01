@@ -73,7 +73,7 @@ void ShardDocIndex::DocKeyIndex::Delete(string_view key) {
   free_ids_.push_back(id);
 }
 
-string_view ShardDocIndex::DocKeyIndex::Get(DocId id) {
+string_view ShardDocIndex::DocKeyIndex::Get(DocId id) const {
   DCHECK_LT(id, keys_.size());
   DCHECK_GT(keys_[id].size(), 0u);
 
@@ -94,7 +94,7 @@ void ShardDocIndex::Init(const OpArgs& op_args) {
 }
 
 vector<SerializedSearchDoc> ShardDocIndex::Search(const OpArgs& op_args,
-                                                  search::SearchAlgorithm* search_algo) {
+                                                  search::SearchAlgorithm* search_algo) const {
   auto& db_slice = op_args.shard->db_slice();
 
   auto doc_ids = search_algo->Search(&indices_);
@@ -103,14 +103,14 @@ vector<SerializedSearchDoc> ShardDocIndex::Search(const OpArgs& op_args,
   for (search::DocId doc : doc_ids) {
     auto key = key_index_.Get(doc);
     auto it = db_slice.Find(op_args.db_cntx, key, base_->GetObjCode());
-    CHECK(it);
+    CHECK(it) << "Expected key: " << key << " to exist";
     auto doc_access = GetAccessor(op_args, (*it)->second);
     out.emplace_back(key, doc_access->Serialize());
   }
   return out;
 }
 
-ShardDocIndex* ShardDocIndices::Get(string_view name) {
+ShardDocIndex* ShardDocIndices::Get(string_view name) const {
   auto it = indices_.find(name);
   return it != indices_.end() ? it->second.get() : nullptr;
 }

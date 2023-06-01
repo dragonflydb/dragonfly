@@ -32,14 +32,15 @@ struct Schema {
 };
 
 // Collection of indices for all fields in schema
-struct FieldIndices {
+class FieldIndices {
+ public:
   // Create indices based on schema
   FieldIndices(Schema schema);
 
   void Add(DocId doc, DocumentAccessor* access);
 
-  BaseIndex* GetIndex(std::string_view field);
-  std::vector<TextIndex*> GetAllTextIndices();
+  BaseIndex* GetIndex(std::string_view field) const;
+  std::vector<TextIndex*> GetAllTextIndices() const;
   std::vector<DocId> GetAllDocs() const;
 
  private:
@@ -57,7 +58,7 @@ class SearchAlgorithm {
   // Init with query and return true if successful.
   bool Init(std::string_view query);
 
-  std::vector<DocId> Search(FieldIndices* index) const;
+  std::vector<DocId> Search(const FieldIndices* index) const;
 
  private:
   std::unique_ptr<AstNode> query_;

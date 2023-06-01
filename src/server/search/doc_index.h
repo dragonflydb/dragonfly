@@ -39,7 +39,7 @@ class ShardDocIndex {
   struct DocKeyIndex {
     DocId Add(std::string_view key);
     void Delete(std::string_view key);
-    std::string_view Get(DocId id);
+    std::string_view Get(DocId id) const;
 
    private:
     absl::flat_hash_map<std::string, DocId> ids_;
@@ -53,7 +53,7 @@ class ShardDocIndex {
 
   // Perform search on all indexed documents and return results.
   std::vector<SerializedSearchDoc> Search(const OpArgs& op_args,
-                                          search::SearchAlgorithm* search_algo);
+                                          search::SearchAlgorithm* search_algo) const;
 
   // Initialize index. Traverses all matching documents and assigns ids.
   void Init(const OpArgs& op_args);
@@ -67,7 +67,7 @@ class ShardDocIndex {
 // Stores shard doc indices by name on a specific shard.
 class ShardDocIndices {
  public:
-  ShardDocIndex* Get(std::string_view name);
+  ShardDocIndex* Get(std::string_view name) const;
   void Init(const OpArgs& op_args, std::string_view name, std::shared_ptr<DocIndex> index);
 
  private:

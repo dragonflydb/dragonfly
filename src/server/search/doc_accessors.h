@@ -18,6 +18,7 @@ class StringMap;
 
 // Document accessors allow different types (json/hset) to be hidden
 // behind a document interface for quering fields and serializing.
+// Field string_view's are only valid until the next is requested.
 struct BaseAccessor : public search::DocumentAccessor {
   // Convert underlying type to a map<string, string> to be sent as a reply
   virtual SearchDocData Serialize() const = 0;

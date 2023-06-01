@@ -123,11 +123,11 @@ struct BasicSearch {
     return result;
   }
 
-  static vector<DocId> Search(FieldIndices* indices, const AstNode& query) {
+  static vector<DocId> Search(const FieldIndices* indices, const AstNode& query) {
     return BasicSearch{indices}.SearchGeneric(query, "");
   }
 
-  FieldIndices* indices;
+  const FieldIndices* indices;
 };
 
 }  // namespace
@@ -153,12 +153,12 @@ void FieldIndices::Add(DocId doc, DocumentAccessor* access) {
   sort(all_ids_.begin(), all_ids_.end());
 }
 
-BaseIndex* FieldIndices::GetIndex(string_view field) {
+BaseIndex* FieldIndices::GetIndex(string_view field) const {
   auto it = indices_.find(field);
   return it != indices_.end() ? it->second.get() : nullptr;
 }
 
-std::vector<TextIndex*> FieldIndices::GetAllTextIndices() {
+std::vector<TextIndex*> FieldIndices::GetAllTextIndices() const {
   vector<TextIndex*> out;
   for (auto& [field, type] : schema_.fields) {
     if (type != Schema::TEXT)
@@ -190,7 +190,7 @@ bool SearchAlgorithm::Init(string_view query) {
   }
 }
 
-vector<DocId> SearchAlgorithm::Search(FieldIndices* index) const {
+vector<DocId> SearchAlgorithm::Search(const FieldIndices* index) const {
   return BasicSearch::Search(index, *query_);
 }
 
