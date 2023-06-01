@@ -36,7 +36,7 @@ ABSL_FLAG(int, master_reconnect_timeout_ms, 1000,
           "Timeout for re-establishing connection to a replication master");
 ABSL_DECLARE_FLAG(uint32_t, port);
 
-#define CHECK_CMD_RESPONSE(x)                                                                   \
+#define RETURN_ON_BAD_RESPONSE(x)                                                               \
   do {                                                                                          \
     if (!(x)) {                                                                                 \
       LOG(ERROR) << "Bad response to \"" << last_cmd_ << "\": \"" << absl::CEscape(last_resp_); \
@@ -365,7 +365,7 @@ error_code Replica::ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms)
     ReqSerializer serializer{sock_.get()};
     parser_.reset(new RedisParser{false});
     RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("AUTH ", masterauth), &serializer));
-    CHECK_CMD_RESPONSE(CheckRespIsSimpleReply("OK"));
+    RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
   }
   return error_code{};
 }
@@ -376,30 +376,30 @@ error_code Replica::Greet() {
   VLOG(1) << "greeting message handling";
   // Corresponds to server.repl_state == REPL_STATE_CONNECTING state in redis
   RETURN_ON_ERR(SendCommandAndReadResponse("PING", &serializer));  // optional.
-  CHECK_CMD_RESPONSE(CheckRespIsSimpleReply("PONG"));
+  RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("PONG"));
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_HANDSHAKE condition in replication.c
   auto port = absl::GetFlag(FLAGS_port);
   RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("REPLCONF listening-port ", port), &serializer));
-  CHECK_CMD_RESPONSE(CheckRespIsSimpleReply("OK"));
+  RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_CAPA
   RETURN_ON_ERR(SendCommandAndReadResponse("REPLCONF capa eof capa psync2", &serializer));
-  CHECK_CMD_RESPONSE(CheckRespIsSimpleReply("OK"));
+  RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
 
   // Announce that we are the dragonfly client.
   // Note that we currently do not support dragonfly->redis replication.
   RETURN_ON_ERR(SendCommandAndReadResponse("REPLCONF capa dragonfly", &serializer));
-  CHECK_CMD_RESPONSE(CheckRespFirstTypes({RespExpr::STRING}));
+  RETURN_ON_BAD_RESPONSE(CheckRespFirstTypes({RespExpr::STRING}));
 
   if (resp_args_.size() == 1) {  // Redis
-    CHECK_CMD_RESPONSE(CheckRespIsSimpleReply("OK"));
+    RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
   } else if (resp_args_.size() >= 3) {  // it's dragonfly master.
-    CHECK_CMD_RESPONSE(!HandleCapaDflyResp());
+    RETURN_ON_BAD_RESPONSE(!HandleCapaDflyResp());
     if (auto ec = ConfigureDflyMaster(); ec)
       return ec;
   } else {
-    CHECK_CMD_RESPONSE(false);
+    RETURN_ON_BAD_RESPONSE(false);
   }
 
   state_mask_.fetch_or(R_GREETED);
@@ -426,7 +426,7 @@ std::error_code Replica::HandleCapaDflyResp() {
   num_df_flows_ = param_num_flows;
 
   if (resp_args_.size() >= 4) {
-    CHECK_CMD_RESPONSE(resp_args_[3].type == RespExpr::INT64);
+    RETURN_ON_BAD_RESPONSE(resp_args_[3].type == RespExpr::INT64);
     master_context_.version = DflyVersion(get<int64_t>(resp_args_[3].u));
   }
   VLOG(1) << "Master id: " << master_context_.master_repl_id
@@ -451,7 +451,7 @@ std::error_code Replica::ConfigureDflyMaster() {
   if (master_context_.version > DflyVersion::VER0) {
     RETURN_ON_ERR(SendCommandAndReadResponse(
         StrCat("REPLCONF CLIENT-VERSION ", DflyVersion::CURRENT_VER), &serializer));
-    CHECK_CMD_RESPONSE(CheckRespIsSimpleReply("OK"));
+    RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
   }
 
   return error_code{};
@@ -778,7 +778,7 @@ error_code Replica::SendNextPhaseRequest(bool stable) {
   VLOG(1) << "Sending: " << request;
   RETURN_ON_ERR(SendCommandAndReadResponse(request, &serializer));
 
-  CHECK_CMD_RESPONSE(CheckRespIsSimpleReply("OK"));
+  RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
 
   return std::error_code{};
 }
@@ -799,11 +799,11 @@ error_code Replica::StartFullSyncFlow(BlockingCounter sb, Context* cntx) {
   leftover_buf_.emplace(128);
   RETURN_ON_ERR(SendCommandAndReadResponse(cmd, &serializer, &*leftover_buf_));
 
-  CHECK_CMD_RESPONSE(CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING}));
+  RETURN_ON_BAD_RESPONSE(CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING}));
 
   string_view flow_directive = ToSV(resp_args_[0].GetBuf());
   string eof_token;
-  CHECK_CMD_RESPONSE(flow_directive == "FULL");
+  RETURN_ON_BAD_RESPONSE(flow_directive == "FULL");
   eof_token = ToSV(resp_args_[1].GetBuf());
 
   state_mask_.fetch_or(R_TCP_CONNECTED);
