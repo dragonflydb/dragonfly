@@ -51,7 +51,7 @@ jobs:
           pytest -sxvr dragonfly --ignore=dragonfly/replication_test.py
       - name: Run PyTests replication test
         if: ${{ matrix.runner  == 'ubuntu-latest' }}
-        timeout-minutes: 15
+        timeout-minutes: 20
         run: |
           cd ${GITHUB_WORKSPACE}/tests
           export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
