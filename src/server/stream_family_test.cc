@@ -236,4 +236,87 @@ TEST_F(StreamFamilyTest, Issue854) {
   EXPECT_THAT(resp, ErrArg("is not allowed"));
 }
 
+TEST_F(StreamFamilyTest, XTrim) {
+  Run({"xadd", "foo", "1-*", "k", "v"});
+  Run({"xadd", "foo", "1-*", "k", "v"});
+  Run({"xadd", "foo", "1-*", "k", "v"});
+  Run({"xadd", "foo", "1-*", "k", "v"});
+
+  // Trim to maxlen 2, 2 entries should have been deleted with 2 entries remaining.
+  auto resp = Run({"xtrim", "foo", "maxlen", "2"});
+  EXPECT_THAT(resp, IntArg(2));
+  resp = Run({"xlen", "foo"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  Run({"xadd", "foo", "1-*", "k", "v"});
+  Run({"xadd", "foo", "1-*", "k", "v"});
+
+  // Trim messages whose ID is before 1-4, 2 entries should have been deleted with
+  // 2 entries remaining.
+  resp = Run({"xtrim", "foo", "minid", "1-4"});
+  EXPECT_THAT(resp, IntArg(2));
+  resp = Run({"xlen", "foo"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  // Trim no changes needed.
+  resp = Run({"xtrim", "foo", "maxlen", "5"});
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"xlen", "foo"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  Run({"xadd", "foo", "1-*", "k", "v"});
+  Run({"xadd", "foo", "1-*", "k", "v"});
+
+  // Trim exact.
+  resp = Run({"xtrim", "foo", "maxlen", "=", "2"});
+  EXPECT_THAT(resp, IntArg(2));
+  resp = Run({"xlen", "foo"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  Run({"xadd", "foo", "1-*", "k", "v"});
+  Run({"xadd", "foo", "1-*", "k", "v"});
+
+  // Trim approx.
+  resp = Run({"xtrim", "foo", "maxlen", "~", "2"});
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"xlen", "foo"});
+  EXPECT_THAT(resp, IntArg(4));
+
+  // Trim stream not found should return no entries.
+  resp = Run({"xtrim", "notfound", "maxlen", "5"});
+  EXPECT_THAT(resp, IntArg(0));
+}
+
+TEST_F(StreamFamilyTest, XTrimInvalidArgs) {
+  // Missing threshold.
+  auto resp = Run({"xtrim", "foo"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+  resp = Run({"xtrim", "foo", "maxlen"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+  resp = Run({"xtrim", "foo", "minid"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  // Invalid threshold.
+  resp = Run({"xtrim", "foo", "maxlen", "nan"});
+  EXPECT_THAT(resp, ErrArg("not an integer or out of range"));
+  resp = Run({"xtrim", "foo", "maxlen", "-1"});
+  EXPECT_THAT(resp, ErrArg("not an integer or out of range"));
+  resp = Run({"xtrim", "foo", "minid", "nan"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // Limit with non-approx.
+  resp = Run({"xtrim", "foo", "maxlen", "2", "limit", "5"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // Include both maxlen and minid.
+  resp = Run({"xtrim", "foo", "maxlen", "2", "minid", "1-1"});
+  EXPECT_THAT(resp, ErrArg("MAXLEN and MINID options at the same time are not compatible"));
+  resp = Run({"xtrim", "foo", "minid", "1-1", "maxlen", "2"});
+  EXPECT_THAT(resp, ErrArg("MAXLEN and MINID options at the same time are not compatible"));
+
+  // Invalid limit.
+  resp = Run({"xtrim", "foo", "maxlen", "~", "2", "limit", "nan"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+}
+
 }  // namespace dfly
