@@ -536,7 +536,6 @@ OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot
 }
 
 OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view elem, long count) {
-  DCHECK(!elem.empty());
   auto& db_slice = op_args.shard->db_slice();
   auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
@@ -579,7 +578,6 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
 }
 
 OpStatus OpSet(const OpArgs& op_args, string_view key, string_view elem, long index) {
-  DCHECK(!elem.empty());
   auto& db_slice = op_args.shard->db_slice();
   auto it_res = db_slice.Find(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
