@@ -53,18 +53,21 @@ struct RangeId {
 };
 
 enum class TrimStrategy {
-  kAddOptsTrimNone = TRIM_STRATEGY_NONE,
-  kAddOptsTrimMaxLen = TRIM_STRATEGY_MAXLEN,
-  kAddOptsTrimMinId = TRIM_STRATEGY_MINID,
+  kNone = TRIM_STRATEGY_NONE,
+  kMaxLen = TRIM_STRATEGY_MAXLEN,
+  kMinId = TRIM_STRATEGY_MINID,
 };
 
-struct AddOpts {
-  ParsedStreamId parsed_id;
+struct AddTrimOpts {
+  string_view key;
   ParsedStreamId minid;
   uint32_t max_len = kuint32max;
   uint32_t limit = 0;
-  TrimStrategy trim_strategy = TrimStrategy::kAddOptsTrimNone;
+  TrimStrategy trim_strategy = TrimStrategy::kNone;
   bool trim_approx = false;
+
+  // XADD only.
+  ParsedStreamId parsed_id;
   bool no_mkstream = false;
 };
 
@@ -500,14 +503,39 @@ int StreamAppendItem(stream* s, CmdArgList fields, streamID* added_id, streamID*
   return C_OK;
 }
 
-OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& opts,
-                         CmdArgList args) {
+int StreamTrim(const AddTrimOpts& opts, stream* s) {
+  if (!opts.limit) {
+    if (opts.trim_strategy == TrimStrategy::kMaxLen) {
+      /* Notify xtrim event if needed. */
+      return streamTrimByLength(s, opts.max_len, opts.trim_approx);
+      // TODO: when replicating, we should propagate it as exact limit in case of trimming.
+    } else if (opts.trim_strategy == TrimStrategy::kMinId) {
+      return streamTrimByID(s, opts.minid.val, opts.trim_approx);
+    }
+  } else {
+    streamAddTrimArgs trim_args = {};
+    trim_args.trim_strategy = static_cast<int>(opts.trim_strategy);
+    trim_args.approx_trim = opts.trim_approx;
+    trim_args.limit = opts.limit;
+
+    if (opts.trim_strategy == TrimStrategy::kMaxLen) {
+      trim_args.maxlen = opts.max_len;
+    } else if (opts.trim_strategy == TrimStrategy::kMinId) {
+      trim_args.minid = opts.minid.val;
+    }
+    return streamTrim(s, &trim_args);
+  }
+
+  return 0;
+}
+
+OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgList args) {
   DCHECK(!args.empty() && args.size() % 2 == 0);
   auto& db_slice = op_args.shard->db_slice();
   pair<PrimeIterator, bool> add_res;
 
   if (opts.no_mkstream) {
-    auto res_it = db_slice.Find(op_args.db_cntx, key, OBJ_STREAM);
+    auto res_it = db_slice.Find(op_args.db_cntx, opts.key, OBJ_STREAM);
     if (!res_it) {
       return res_it.status();
     }
@@ -515,7 +543,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
     add_res.second = false;
   } else {
     try {
-      add_res = db_slice.AddOrFind(op_args.db_cntx, key);
+      add_res = db_slice.AddOrFind(op_args.db_cntx, opts.key);
     } catch (bad_alloc&) {
       return OpStatus::OUT_OF_MEMORY;
     }
@@ -552,31 +580,11 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
     return OpStatus::OUT_OF_MEMORY;
   }
 
-  if (!opts.limit) {
-    if (opts.trim_strategy == TrimStrategy::kAddOptsTrimMaxLen) {
-      /* Notify xtrim event if needed. */
-      streamTrimByLength(stream_inst, opts.max_len, opts.trim_approx);
-      // TODO: when replicating, we should propagate it as exact limit in case of trimming.
-    } else if (opts.trim_strategy == TrimStrategy::kAddOptsTrimMinId) {
-      streamTrimByID(stream_inst, opts.minid.val, opts.trim_approx);
-    }
-  } else {
-    streamAddTrimArgs add_args = {};
-    add_args.trim_strategy = static_cast<int>(opts.trim_strategy);
-    add_args.approx_trim = opts.trim_approx;
-    add_args.limit = opts.limit;
-
-    if (opts.trim_strategy == TrimStrategy::kAddOptsTrimMaxLen) {
-      add_args.maxlen = opts.max_len;
-    } else if (opts.trim_strategy == TrimStrategy::kAddOptsTrimMinId) {
-      add_args.minid = opts.minid.val;
-    }
-    streamTrim(stream_inst, &add_args);
-  }
+  StreamTrim(opts, stream_inst);
 
   EngineShard* es = op_args.shard;
   if (es->blocking_controller()) {
-    es->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, key);
+    es->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, opts.key);
   }
 
   return result_id;
@@ -1040,54 +1048,103 @@ void XGroupHelp(CmdArgList args, ConnectionContext* cntx) {
   return (*cntx)->SendSimpleStrArr(help_arr);
 }
 
-}  // namespace
+OpResult<int64_t> OpTrim(const OpArgs& op_args, const AddTrimOpts& opts) {
+  auto* shard = op_args.shard;
+  auto& db_slice = shard->db_slice();
+  OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, opts.key, OBJ_STREAM);
+  if (!res_it) {
+    if (res_it.status() == OpStatus::KEY_NOTFOUND) {
+      return 0;
+    }
+    return res_it.status();
+  }
 
-void StreamFamily::XAdd(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
+  CompactObj& cobj = (*res_it)->second;
+  stream* s = (stream*)cobj.RObjPtr();
+
+  return StreamTrim(opts, s);
+}
+
+optional<pair<AddTrimOpts, unsigned>> ParseAddOrTrimArgsOrReply(CmdArgList args,
+                                                                ConnectionContext* cntx,
+                                                                bool is_xadd) {
+  AddTrimOpts opts;
+  opts.key = ArgS(args, 0);
+
   unsigned id_indx = 1;
-  AddOpts add_opts;
-
   for (; id_indx < args.size(); ++id_indx) {
     ToUpper(&args[id_indx]);
     string_view arg = ArgS(args, id_indx);
-    if (arg == "NOMKSTREAM") {
-      add_opts.no_mkstream = true;
-    } else if (arg == "MAXLEN" || arg == "MINID") {
-      if (arg == "MAXLEN") {
-        add_opts.trim_strategy = TrimStrategy::kAddOptsTrimMaxLen;
-      } else {
-        add_opts.trim_strategy = TrimStrategy::kAddOptsTrimMinId;
-      }
-      if (id_indx + 2 >= args.size()) {
-        return (*cntx)->SendError(kSyntaxErr);
-      }
-      ++id_indx;
-      if (ArgS(args, id_indx) == "~") {
-        add_opts.trim_approx = true;
-        ++id_indx;
-      }
-      arg = ArgS(args, id_indx);
-      if (add_opts.trim_strategy == TrimStrategy::kAddOptsTrimMaxLen &&
-          !absl::SimpleAtoi(arg, &add_opts.max_len)) {
-        return (*cntx)->SendError(kSyntaxErr);
-      }
-      if (add_opts.trim_strategy == TrimStrategy::kAddOptsTrimMinId &&
-          !ParseID(arg, false, 0, &add_opts.minid)) {
-        return (*cntx)->SendError(kSyntaxErr);
+
+    size_t remaining_args = args.size() - id_indx - 1;
+
+    if (is_xadd && arg == "NOMKSTREAM") {
+      opts.no_mkstream = true;
+    } else if ((arg == "MAXLEN" || arg == "MINID") && remaining_args >= 1) {
+      if (opts.trim_strategy != TrimStrategy::kNone) {
+        (*cntx)->SendError("MAXLEN and MINID options at the same time are not compatible",
+                           kSyntaxErr);
+        return std::nullopt;
       }
 
-    } else if (arg == "LIMIT" && add_opts.trim_strategy != TrimStrategy::kAddOptsTrimNone) {
-      if (id_indx + 2 >= args.size() || !add_opts.trim_approx) {
-        return (*cntx)->SendError(kSyntaxErr);
+      if (arg == "MAXLEN") {
+        opts.trim_strategy = TrimStrategy::kMaxLen;
+      } else {
+        opts.trim_strategy = TrimStrategy::kMinId;
+      }
+
+      id_indx++;
+      arg = ArgS(args, id_indx);
+      if (remaining_args >= 2 && arg == "~") {
+        opts.trim_approx = true;
+        id_indx++;
+        arg = ArgS(args, id_indx);
+      } else if (remaining_args >= 2 && arg == "=") {
+        opts.trim_approx = false;
+        id_indx++;
+        arg = ArgS(args, id_indx);
+      }
+
+      if (opts.trim_strategy == TrimStrategy::kMaxLen && !absl::SimpleAtoi(arg, &opts.max_len)) {
+        (*cntx)->SendError(kInvalidIntErr);
+        return std::nullopt;
+      }
+      if (opts.trim_strategy == TrimStrategy::kMinId && !ParseID(arg, false, 0, &opts.minid)) {
+        (*cntx)->SendError(kSyntaxErr);
+        return std::nullopt;
+      }
+    } else if (arg == "LIMIT" && remaining_args >= 1 && opts.trim_strategy != TrimStrategy::kNone) {
+      if (!opts.trim_approx) {
+        (*cntx)->SendError(kSyntaxErr);
+        return std::nullopt;
       }
       ++id_indx;
-      if (!absl::SimpleAtoi(ArgS(args, id_indx), &add_opts.limit)) {
-        return (*cntx)->SendError(kSyntaxErr);
+      if (!absl::SimpleAtoi(ArgS(args, id_indx), &opts.limit)) {
+        (*cntx)->SendError(kSyntaxErr);
+        return std::nullopt;
       }
-    } else {
+    } else if (is_xadd) {
+      // There are still remaining field args.
       break;
+    } else {
+      (*cntx)->SendError(kSyntaxErr);
+      return std::nullopt;
     }
   }
+
+  return make_pair(opts, id_indx);
+}
+
+}  // namespace
+
+void StreamFamily::XAdd(CmdArgList args, ConnectionContext* cntx) {
+  auto parse_resp = ParseAddOrTrimArgsOrReply(args, cntx, true);
+  if (!parse_resp) {
+    return;
+  }
+
+  auto add_opts = parse_resp->first;
+  auto id_indx = parse_resp->second;
 
   args.remove_prefix(id_indx);
   if (args.size() < 2 || args.size() % 2 == 0) {
@@ -1102,7 +1159,7 @@ void StreamFamily::XAdd(CmdArgList args, ConnectionContext* cntx) {
 
   args.remove_prefix(1);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpAdd(t->GetOpArgs(shard), key, add_opts, args);
+    return OpAdd(t->GetOpArgs(shard), add_opts, args);
   };
 
   OpResult<streamID> add_result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1555,6 +1612,25 @@ void StreamFamily::XSetId(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void StreamFamily::XTrim(CmdArgList args, ConnectionContext* cntx) {
+  auto parse_resp = ParseAddOrTrimArgsOrReply(args, cntx, true);
+  if (!parse_resp) {
+    return;
+  }
+
+  auto trim_opts = parse_resp->first;
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpTrim(t->GetOpArgs(shard), trim_opts);
+  };
+
+  OpResult<int64_t> trim_result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (trim_result) {
+    return (*cntx)->SendLong(*trim_result);
+  }
+  return (*cntx)->SendError(trim_result.status());
+}
+
 void StreamFamily::XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view start = ArgS(args, 1);
@@ -1631,6 +1707,7 @@ void StreamFamily::Register(CommandRegistry* registry) {
             << CI{"XREAD", CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 3, 3, 1}
                    .HFUNC(XRead)
             << CI{"XSETID", CO::WRITE | CO::DENYOOM, 3, 1, 1, 1}.HFUNC(XSetId)
+            << CI{"XTRIM", CO::WRITE | CO::FAST, -4, 1, 1, 1}.HFUNC(XTrim)
             << CI{"_XGROUP_HELP", CO::NOSCRIPT | CO::HIDDEN, 2, 0, 0, 0}.SetHandler(XGroupHelp);
 }
 
