@@ -51,6 +51,11 @@ optional<search::Schema> ParseSchemaOrReply(CmdArgList args, ConnectionContext* 
     }
 
     schema.fields[field] = it->second;
+
+    // Skip optional WEIGHT flag
+    if (i + 2 < args.size() && ArgS(args, i + 1) == "WEIGHT") {
+      i += 2;
+    }
   }
 
   return schema;
