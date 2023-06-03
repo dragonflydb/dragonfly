@@ -90,7 +90,7 @@ class SearchParserTest : public ::testing::Test {
     auto matched = search_algo.Search(&index);
 
     if (!is_sorted(matched.begin(), matched.end()))
-      throw "Search result is not sorted";
+      LOG(FATAL) << "Search result is not sorted";
 
     for (DocId i = 0; i < entries_.size(); i++) {
       bool doc_matched = binary_search(matched.begin(), matched.end(), i);
