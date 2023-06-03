@@ -31,7 +31,9 @@ using namespace facade;
 namespace {
 
 unordered_map<string_view, search::Schema::FieldType> kSchemaTypes = {
-    {"TEXT"sv, search::Schema::TEXT}, {"NUMERIC"sv, search::Schema::NUMERIC}};
+    {"TAG"sv, search::Schema::TAG},
+    {"TEXT"sv, search::Schema::TEXT},
+    {"NUMERIC"sv, search::Schema::NUMERIC}};
 
 optional<search::Schema> ParseSchemaOrReply(CmdArgList args, ConnectionContext* cntx) {
   search::Schema schema;
@@ -48,6 +50,12 @@ optional<search::Schema> ParseSchemaOrReply(CmdArgList args, ConnectionContext* 
     if (it == kSchemaTypes.end()) {
       (*cntx)->SendError("Invalid field type: " + string{type_str});
       return nullopt;
+    }
+
+    // Skip optional WEIGHT or SEPARATOR flags
+    if (i + 2 < args.size() &&
+        (ArgS(args, i + 1) == "WEIGHT" || ArgS(args, i + 1) == "SEPARATOR")) {
+      i += 2;
     }
 
     schema.fields[field] = it->second;

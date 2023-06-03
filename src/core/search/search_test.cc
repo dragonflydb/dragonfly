@@ -4,6 +4,7 @@
 
 #include "core/search/search.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
 
 #include <algorithm>
@@ -79,6 +80,8 @@ class SearchParserTest : public ::testing::Test {
   }
 
   bool Check() {
+    absl::Cleanup cl{[this] { entries_.clear(); }};
+
     FieldIndices index{schema_};
 
     shuffle(entries_.begin(), entries_.end(), default_random_engine{});
@@ -86,7 +89,11 @@ class SearchParserTest : public ::testing::Test {
       index.Add(i, &entries_[i].first);
 
     SearchAlgorithm search_algo{};
-    search_algo.Init(query_);
+    if (!search_algo.Init(query_)) {
+      error_ = "Failed to parse query";
+      return false;
+    }
+
     auto matched = search_algo.Search(&index);
 
     if (!is_sorted(matched.begin(), matched.end()))
@@ -97,12 +104,10 @@ class SearchParserTest : public ::testing::Test {
       if (doc_matched != entries_[i].second) {
         error_ = "doc: \"" + entries_[i].first.DebugFormat() + "\"" + " was expected" +
                  (entries_[i].second ? "" : " not") + " to match" + " query: \"" + query_ + "\"";
-        entries_.clear();
         return false;
       }
     }
 
-    entries_.clear();
     return true;
   }
 
@@ -266,6 +271,22 @@ TEST_F(SearchParserTest, CheckExprInField) {
 
     EXPECT_TRUE(Check()) << GetError();
   }
+}
+
+TEST_F(SearchParserTest, CheckTag) {
+  PrepareSchema({{{"f1", Schema::TAG}, {"f2", Schema::TAG}}});
+
+  PrepareQuery("@f1:{red | blue} @f2:{circle | square}");
+
+  ExpectAll(Map{{"f1", "red"}, {"f2", "square"}}, Map{{"f1", "blue"}, {"f2", "square"}},
+            Map{{"f1", "red"}, {"f2", "circle"}}, Map{{"f1", "red"}, {"f2", "circle, square"}},
+            Map{{"f1", "red"}, {"f2", "triangle, circle"}},
+            Map{{"f1", "red, green"}, {"f2", "square"}},
+            Map{{"f1", "green, blue"}, {"f2", "circle"}});
+  ExpectNone(Map{{"f1", "green"}, {"f2", "square"}}, Map{{"f1", "green"}, {"f2", "circle"}},
+             Map{{"f1", "red"}, {"f2", "triangle"}}, Map{{"f1", "blue"}, {"f2", "line, triangle"}});
+
+  EXPECT_TRUE(Check()) << GetError();
 }
 
 }  // namespace search

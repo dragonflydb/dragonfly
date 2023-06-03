@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <regex>
 
+#include "base/logging.h"
+
 using namespace std;
 
 namespace dfly::search {
@@ -40,6 +42,18 @@ AstLogicalNode::AstLogicalNode(AstNode&& l, AstNode&& r, LogicOp op) : op{op}, n
 
 AstFieldNode::AstFieldNode(string field, AstNode&& node)
     : field{field.substr(1)}, node{make_unique<AstNode>(move(node))} {
+}
+
+AstTagsNode::AstTagsNode(std::string tag) {
+  tags = {move(tag)};
+}
+
+AstTagsNode::AstTagsNode(AstExpr&& l, std::string tag) {
+  DCHECK(holds_alternative<AstTagsNode>(l));
+  auto& tags_node = get<AstTagsNode>(l);
+
+  tags = move(tags_node.tags);
+  tags.push_back(move(tag));
 }
 
 }  // namespace dfly::search

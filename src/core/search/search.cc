@@ -113,7 +113,18 @@ struct BasicSearch {
 
   vector<DocId> Search(const AstFieldNode& node, string_view active_field) {
     DCHECK(active_field.empty());
+    DCHECK(node.node);
     return SearchGeneric(*node.node, node.field);
+  }
+
+  vector<DocId> Search(const AstTagsNode& node, string_view active_field) {
+    auto* tag_index = GetIndex<TagIndex>(active_field);
+
+    vector<DocId> out, tmp;
+    for (const auto& tag : node.tags)
+      UnifyResults(tag_index->Matching(tag), &out, &tmp);
+
+    return out;
   }
 
   vector<DocId> SearchGeneric(const AstNode& node, string_view active_field) {
@@ -135,6 +146,9 @@ struct BasicSearch {
 FieldIndices::FieldIndices(Schema schema) : schema_{move(schema)}, all_ids_{}, indices_{} {
   for (auto& [field, type] : schema_.fields) {
     switch (type) {
+      case Schema::TAG:
+        indices_[field] = make_unique<TagIndex>();
+        break;
       case Schema::TEXT:
         indices_[field] = make_unique<TextIndex>();
         break;

@@ -118,6 +118,29 @@ TEST_F(SearchFamilyTest, Json) {
   EXPECT_THAT(Run({"ft.search", "i1", "@a:small @b:secret"}), kNoResults);
 }
 
+TEST_F(SearchFamilyTest, Tags) {
+  Run({"hset", "d:1", "color", "red, green"});
+  Run({"hset", "d:2", "color", "green, blue"});
+  Run({"hset", "d:3", "color", "blue, red"});
+  Run({"hset", "d:4", "color", "red"});
+  Run({"hset", "d:5", "color", "green"});
+  Run({"hset", "d:6", "color", "blue"});
+
+  EXPECT_EQ(Run({"ft.create", "i1", "on", "hash", "schema", "color", "tag"}), "OK");
+
+  // Tags don't participate in full text search
+  EXPECT_THAT(Run({"ft.search", "i1", "red"}), kNoResults);
+
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{ red }"}), AreDocIds("d:1", "d:3", "d:4"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{green}"}), AreDocIds("d:1", "d:2", "d:5"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), AreDocIds("d:2", "d:3", "d:6"));
+
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{red | green}"}),
+              AreDocIds("d:1", "d:2", "d:3", "d:4", "d:5"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue | green}"}),
+              AreDocIds("d:1", "d:2", "d:3", "d:5", "d:6"));
+}
+
 TEST_F(SearchFamilyTest, Numbers) {
   for (unsigned i = 0; i <= 10; i++) {
     for (unsigned j = 0; j <= 10; j++) {

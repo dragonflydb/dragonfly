@@ -85,6 +85,13 @@ TEST_F(SearchParserTest, Scanner) {
   NEXT_TOK(TOK_COLON);
   NEXT_EQ(TOK_TERM, string, "hello");
 
+  SetInput("@field:{ tag }");
+  NEXT_EQ(TOK_FIELD, string, "@field");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_TERM, string, "tag");
+  NEXT_TOK(TOK_RCURLBR);
+
   SetInput("почтальон Печкин");
   NEXT_EQ(TOK_TERM, string, "почтальон");
   NEXT_EQ(TOK_TERM, string, "Печкин");
@@ -96,6 +103,8 @@ TEST_F(SearchParserTest, Scanner) {
 TEST_F(SearchParserTest, Parse) {
   EXPECT_EQ(0, Parse(" foo bar (baz) "));
   EXPECT_EQ(0, Parse(" -(foo) @foo:bar @ss:[1 2]"));
+  EXPECT_EQ(0, Parse("@foo:{ tag1 | tag2 }"));
+
   EXPECT_EQ(1, Parse(" -(foo "));
   EXPECT_EQ(1, Parse(" foo:bar "));
   EXPECT_EQ(1, Parse(" @foo:@bar "));

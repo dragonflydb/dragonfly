@@ -26,7 +26,7 @@ struct DocumentAccessor {
 };
 
 struct Schema {
-  enum FieldType { TEXT, NUMERIC };
+  enum FieldType { TAG, TEXT, NUMERIC };
 
   absl::flat_hash_map<std::string, FieldType> fields;
 };
