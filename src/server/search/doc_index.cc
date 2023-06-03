@@ -73,7 +73,7 @@ void ShardDocIndex::DocKeyIndex::Delete(string_view key) {
   free_ids_.push_back(id);
 }
 
-string ShardDocIndex::DocKeyIndex::Get(DocId id) {
+string_view ShardDocIndex::DocKeyIndex::Get(DocId id) const {
   DCHECK_LT(id, keys_.size());
   DCHECK_GT(keys_[id].size(), 0u);
 
@@ -84,25 +84,33 @@ uint8_t DocIndex::GetObjCode() const {
   return type == JSON ? OBJ_JSON : OBJ_HASH;
 }
 
-ShardDocIndex::ShardDocIndex(shared_ptr<DocIndex> index) : base_{index} {
+ShardDocIndex::ShardDocIndex(shared_ptr<DocIndex> index)
+    : base_{index}, indices_{index->schema}, key_index_{} {
 }
 
 void ShardDocIndex::Init(const OpArgs& op_args) {
-  TraverseAllMatching(*base_, op_args,
-                      [this](string_view key, BaseAccessor* doc) { key_index_.Add(key); });
+  auto cb = [this](string_view key, BaseAccessor* doc) { indices_.Add(key_index_.Add(key), doc); };
+  TraverseAllMatching(*base_, op_args, cb);
 }
 
 vector<SerializedSearchDoc> ShardDocIndex::Search(const OpArgs& op_args,
-                                                  search::SearchAlgorithm* search_algo) {
+                                                  search::SearchAlgorithm* search_algo) const {
+  auto& db_slice = op_args.shard->db_slice();
+
+  auto doc_ids = search_algo->Search(&indices_);
+
   vector<SerializedSearchDoc> out;
-  TraverseAllMatching(*base_, op_args, [search_algo, &out](string_view key, BaseAccessor* doc) {
-    if (search_algo->Check(doc))
-      out.emplace_back(key, doc->Serialize());
-  });
+  for (search::DocId doc : doc_ids) {
+    auto key = key_index_.Get(doc);
+    auto it = db_slice.Find(op_args.db_cntx, key, base_->GetObjCode());
+    CHECK(it) << "Expected key: " << key << " to exist";
+    auto doc_access = GetAccessor(op_args, (*it)->second);
+    out.emplace_back(key, doc_access->Serialize());
+  }
   return out;
 }
 
-ShardDocIndex* ShardDocIndices::Get(string_view name) {
+ShardDocIndex* ShardDocIndices::Get(string_view name) const {
   auto it = indices_.find(name);
   return it != indices_.end() ? it->second.get() : nullptr;
 }

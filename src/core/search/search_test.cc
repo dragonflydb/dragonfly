@@ -29,17 +29,9 @@ struct MockedDocument : public DocumentAccessor {
   MockedDocument(std::string test_field) : fields_{{"field", test_field}} {
   }
 
-  bool Check(DocumentAccessor::FieldConsumer f, string_view active_field) const override {
-    if (!active_field.empty()) {
-      auto it = fields_.find(string{active_field});
-      return f(it != fields_.end() ? it->second : "");
-    } else {
-      for (const auto& [k, v] : fields_) {
-        if (f(v))
-          return true;
-      }
-      return false;
-    }
+  string_view Get(string_view field) const override {
+    auto it = fields_.find(field);
+    return it != fields_.end() ? string_view{it->second} : "";
   }
 
   string DebugFormat() {
@@ -58,13 +50,6 @@ struct MockedDocument : public DocumentAccessor {
 
  private:
   Map fields_{};
-};
-
-// Just a filler. TODO: Remove
-struct Schema {
-  enum FieldType { TEXT, NUMERIC };
-
-  absl::flat_hash_map<std::string, FieldType> fields;
 };
 
 class SearchParserTest : public ::testing::Test {
@@ -94,15 +79,24 @@ class SearchParserTest : public ::testing::Test {
   }
 
   bool Check() {
+    FieldIndices index{schema_};
+
+    shuffle(entries_.begin(), entries_.end(), default_random_engine{});
+    for (DocId i = 0; i < entries_.size(); i++)
+      index.Add(i, &entries_[i].first);
+
     SearchAlgorithm search_algo{};
     search_algo.Init(query_);
+    auto matched = search_algo.Search(&index);
 
-    for (auto& [doc, expect_match] : entries_) {
-      bool doc_matched = search_algo.Check(&doc);
+    if (!is_sorted(matched.begin(), matched.end()))
+      LOG(FATAL) << "Search result is not sorted";
 
-      if (doc_matched != expect_match) {
-        error_ = "doc: \"" + doc.DebugFormat() + "\"" + " was expected" +
-                 (expect_match ? "" : " not") + " to match" + " query: \"" + query_ + "\"";
+    for (DocId i = 0; i < entries_.size(); i++) {
+      bool doc_matched = binary_search(matched.begin(), matched.end(), i);
+      if (doc_matched != entries_[i].second) {
+        error_ = "doc: \"" + entries_[i].first.DebugFormat() + "\"" + " was expected" +
+                 (entries_[i].second ? "" : " not") + " to match" + " query: \"" + query_ + "\"";
         entries_.clear();
         return false;
       }

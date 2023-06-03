@@ -13,15 +13,6 @@
 
 namespace dfly::search {
 
-// Interface for accessing document values with different data structures underneath.
-struct DocumentAccessor {
-  // Callback that's supplied with field values.
-  using FieldConsumer = std::function<bool(std::string_view)>;
-  virtual ~DocumentAccessor() = default;
-
-  virtual bool Check(FieldConsumer f, std::string_view active_field) const = 0;
-};
-
 using DocId = uint32_t;
 
 // Base class for type-specific indices.

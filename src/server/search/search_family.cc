@@ -4,6 +4,8 @@
 
 #include "server/search/search_family.h"
 
+#include <absl/strings/ascii.h>
+
 #include <atomic>
 #include <jsoncons/json.hpp>
 #include <variant>
@@ -25,6 +27,36 @@ namespace dfly {
 
 using namespace std;
 using namespace facade;
+
+namespace {
+
+unordered_map<string_view, search::Schema::FieldType> kSchemaTypes = {
+    {"TEXT"sv, search::Schema::TEXT}, {"NUMERIC"sv, search::Schema::NUMERIC}};
+
+optional<search::Schema> ParseSchemaOrReply(CmdArgList args, ConnectionContext* cntx) {
+  search::Schema schema;
+  for (size_t i = 0; i < args.size(); i++) {
+    string_view field = ArgS(args, i);
+    if (i++ >= args.size()) {
+      (*cntx)->SendError("No field type for field: " + string{field});
+      return nullopt;
+    }
+
+    ToUpper(&args[i]);
+    string_view type_str = ArgS(args, i);
+    auto it = kSchemaTypes.find(type_str);
+    if (it == kSchemaTypes.end()) {
+      (*cntx)->SendError("Invalid field type: " + string{type_str});
+      return nullopt;
+    }
+
+    schema.fields[field] = it->second;
+  }
+
+  return schema;
+}
+
+}  // namespace
 
 void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
   string_view idx_name = ArgS(args, 0);
@@ -60,6 +92,18 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
 
       index.prefix = ArgS(args, ++i);
       continue;
+    }
+
+    // [SCHEMA]
+    if (ArgS(args, i) == "SCHEMA") {
+      if (i++ >= args.size())
+        return (*cntx)->SendError("Empty schema");
+
+      auto schema = ParseSchemaOrReply(args.subspan(i), cntx);
+      if (!schema)
+        return;
+      index.schema = move(*schema);
+      break;  // SCHEMA always comes last
     }
   }
 
