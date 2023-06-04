@@ -970,22 +970,25 @@ async def test_flushall_in_full_sync(df_local_factory, df_seeder_factory):
     c_replica = aioredis.Redis(port=replica.port)
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
 
-    full_sync_role = [b'replica', b'localhost', bytes(str(master.port), 'ascii'), b'full_sync']
+    async def get_sync_mode(c_replica):
+        result = await c_replica.execute_command("role")
+        return result[3]
+
+    async def is_full_sync_mode(c_replica):
+        return await get_sync_mode(c_replica) == b'full_sync'
 
     # Wait for full sync to start
-    while await c_replica.execute_command("role") != full_sync_role:
+    while not await is_full_sync_mode(c_replica):
         await asyncio.sleep(0.0)
 
     # Issue FLUSHALL and push some more entries
     await c_master.execute_command("FLUSHALL")
 
-    connecting_role = [b'replica', b'localhost', bytes(str(master.port), 'ascii'), b'connecting']
-    while await c_replica.execute_command("role") == connecting_role:
+    while await get_sync_mode(c_replica) == b'connecting':
         await asyncio.sleep(0.0)
 
     # Make sure we are still in full-sync mode
-    assert (await c_replica.execute_command("role") == full_sync_role
-        ), "Weak testcase. We left full sync mode too quickly."
+    assert await is_full_sync_mode(c_replica), "Weak testcase. We left full sync mode too quickly."
 
     post_seeder = df_seeder_factory.create(port=master.port, keys=10, dbcount=1)
     await post_seeder.run(target_deviation=0.1)
