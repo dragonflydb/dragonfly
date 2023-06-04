@@ -51,7 +51,7 @@ TEST_F(ClusterFamilyTest, DflyClusterOnlyOnAdminPort) {
       ])json";
   EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
   EXPECT_THAT(Run({"dflycluster", "config", config}),
-              ErrArg("Cluster is disabled. Enabled via passing --cluster_mode=emulated|yes"));
+              ErrArg("DflyCluster command allowed only under admin port"));
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidJSON) {

@@ -624,6 +624,10 @@ bool Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
 
   // Check keys slot is in my ownership
   const auto& cluster_config = cluster_family_.cluster_config();
+  if (!cluster_config->IsConfigured()) {
+    (*dfly_cntx)->SendError(kClusterNotConfigured);
+    return false;
+  }
   if (keys_slot.has_value() && !cluster_config->IsMySlot(*keys_slot)) {
     // See more details here: https://redis.io/docs/reference/cluster-spec/#moved-redirection
     ClusterConfig::Node master = cluster_config->GetMasterNodeForSlot(*keys_slot);

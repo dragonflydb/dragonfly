@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "server/cluster/cluster_config.h"
 #include "server/conn_context.h"
 
 namespace dfly {
@@ -12,6 +13,19 @@ class EngineShardSet;
 class ServerFamily;
 
 class DebugCmd {
+ private:
+  struct PopulateOptions {
+    uint64_t total_count = 0;
+    std::string_view prefix{"key"};
+    uint32_t val_size = 0;
+    bool populate_random_values = false;
+    struct SlotRange {
+      SlotId start = 0;
+      SlotId end = 0;
+    };
+    std::optional<SlotRange> slot_range;
+  };
+
  public:
   DebugCmd(ServerFamily* owner, ConnectionContext* cntx);
 
@@ -19,8 +33,8 @@ class DebugCmd {
 
  private:
   void Populate(CmdArgList args);
-  void PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view prefix, unsigned value_len,
-                          bool populate_random_values);
+  std::optional<PopulateOptions> ParsePopulateArgs(CmdArgList args);
+  void PopulateRangeFiber(uint64_t from, uint64_t count, const PopulateOptions& opts);
   void Reload(CmdArgList args);
   void Replica(CmdArgList args);
   void Load(std::string_view filename);
