@@ -945,3 +945,40 @@ async def test_replication_info(df_local_factory, df_seeder_factory, n_keys=2000
 
     await c_master.connection_pool.disconnect()
     await c_replica.connection_pool.disconnect()
+
+
+"""
+Test flushall command that's invoked while in full sync mode.
+This can cause an issue because it will be executed on each shard independently.
+More details in https://github.com/dragonflydb/dragonfly/issues/1231
+"""
+@pytest.mark.asyncio
+async def test_flushall_in_full_sync(df_local_factory, df_seeder_factory):
+    master = df_local_factory.create(port=BASE_PORT, proactor_threads=4)
+    replica = df_local_factory.create(port=BASE_PORT+1, proactor_threads=2)
+
+    # Start master
+    master.start()
+    c_master = aioredis.Redis(port=master.port)
+
+    # Fill master with test data
+    seeder = df_seeder_factory.create(port=master.port, keys=40_000, dbcount=4)
+    await seeder.run(target_deviation=0.1)
+
+    # Start replica
+    replica.start()
+    c_replica = aioredis.Redis(port=replica.port)
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    # Issue FLUSHALL and push some more entries
+    await c_master.execute_command("FLUSHALL")
+
+    # Make sure we are in full-sync mode
+    assert await c_replica.execute_command("role") == [
+        b'replica', b'localhost', bytes(str(master.port), 'ascii'), b'full_sync']
+
+    post_seeder = df_seeder_factory.create(port=master.port, keys=10, dbcount=1)
+    await post_seeder.run(target_deviation=0.1)
+
+    await wait_available_async(c_replica)
+    await check_data(post_seeder, [replica], [c_replica])
