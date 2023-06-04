@@ -1084,8 +1084,26 @@ async def test_take_over(df_local_factory):
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
 
-    await c_replica.execute_command(f"REPLTAKEOVER 1")
+    async def counter(key):
+        value = 0
+        await c_master.execute_command(f"SET {key} 0")
+        while True:
+            try:
+                value = await c_master.execute_command(f"INCR {key}")
+            except redis.exceptions.ConnectionError as e:
+                break
+        return key, value
+
+    async def delayed_takeover():
+        await asyncio.sleep(1)
+        await c_replica.execute_command(f"REPLTAKEOVER 1")
+
+    _, *results = await asyncio.gather(delayed_takeover(), *[counter(f"key{i}") for i in range(16)])
     assert await c_replica.execute_command("role") == [b'master', []]
+
+    for key, master_value in results:
+        replicated_value = await c_replica.get(key)
+        assert master_value == int(replicated_value)
 
     await c_master.connection_pool.disconnect()
     await c_replica.connection_pool.disconnect()
