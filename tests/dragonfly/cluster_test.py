@@ -379,6 +379,7 @@ async def test_cluster_replica_sets_non_owned_keys(df_local_factory):
     await push_config(replica_config, [c_replica_admin])
 
     # The replica should have deleted the key.
+    # Note: this is not the long-term intended behavior. It will change after we fix #1320.
     assert await c_replica.execute_command("dbsize") == 0
 
     # Set another key on the master, which it owns but the replica does not own.
