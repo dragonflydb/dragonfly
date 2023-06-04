@@ -59,8 +59,16 @@ struct AstFieldNode {
   std::unique_ptr<AstNode> node;
 };
 
+// Stores a list of tags for a tag query
+struct AstTagsNode {
+  AstTagsNode(std::string tag);
+  AstTagsNode(AstNode&& l, std::string tag);
+
+  std::vector<std::string> tags;
+};
+
 using NodeVariants = std::variant<std::monostate, AstTermNode, AstRangeNode, AstNegateNode,
-                                  AstLogicalNode, AstFieldNode>;
+                                  AstLogicalNode, AstFieldNode, AstTagsNode>;
 struct AstNode : public NodeVariants {
   using variant::variant;
 };

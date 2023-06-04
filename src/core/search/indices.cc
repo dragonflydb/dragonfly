@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/numbers.h>
+#include <absl/strings/str_split.h>
 
 #include <algorithm>
 #include <regex>
@@ -54,6 +55,11 @@ vector<DocId> NumericIndex::Range(int64_t l, int64_t r) const {
   return out;
 }
 
+vector<DocId> BaseStringIndex::Matching(string_view str) const {
+  auto it = entries_.find(absl::StripAsciiWhitespace(str));
+  return (it != entries_.end()) ? it->second : vector<DocId>{};
+}
+
 void TextIndex::Add(DocId doc, string_view value) {
   for (const auto& word : GetWords(value)) {
     auto& list = entries_[word];
@@ -61,9 +67,12 @@ void TextIndex::Add(DocId doc, string_view value) {
   }
 }
 
-vector<DocId> TextIndex::Matching(string_view word_sv) const {
-  auto it = entries_.find(word_sv);
-  return (it != entries_.end()) ? it->second : vector<DocId>{};
+void TagIndex::Add(DocId doc, string_view value) {
+  auto tags = absl::StrSplit(value, ',');
+  for (string_view tag : tags) {
+    auto& list = entries_[absl::StripAsciiWhitespace(tag)];
+    list.insert(upper_bound(list.begin(), list.end(), doc), doc);
+  }
 }
 
 }  // namespace dfly::search

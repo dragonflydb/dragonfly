@@ -23,15 +23,24 @@ struct NumericIndex : public BaseIndex {
   std::set<std::pair<int64_t, DocId>> entries_;
 };
 
+// Base index for string based indices.
+struct BaseStringIndex : public BaseIndex {
+  std::vector<DocId> Matching(std::string_view str) const;
+
+ protected:
+  absl::flat_hash_map<std::string, std::vector<DocId>> entries_;
+};
+
 // Index for text fields.
 // Hashmap based lookup per word.
-struct TextIndex : public BaseIndex {
+struct TextIndex : public BaseStringIndex {
   void Add(DocId doc, std::string_view value) override;
+};
 
-  std::vector<DocId> Matching(std::string_view word) const;
-
- private:
-  absl::flat_hash_map<std::string, std::vector<DocId>> entries_;
+// Index for text fields.
+// Hashmap based lookup per word.
+struct TagIndex : public BaseStringIndex {
+  void Add(DocId doc, std::string_view value) override;
 };
 
 }  // namespace dfly::search
