@@ -593,6 +593,11 @@ void Service::Shutdown() {
 
 bool Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
                                  ConnectionContext* dfly_cntx) {
+  if (dfly_cntx->is_replicating) {
+    // Always allow commands on the replication port, as it might be for future-owned keys.
+    return true;
+  }
+
   if (cid->first_key_pos() == 0) {
     return true;  // No key command.
   }
