@@ -273,8 +273,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args)
     }
   }
 
-  size_t index = 4;
-  while (args.size() > index) {
+  for (size_t index = 4; args.size() > index; ++index) {
     ToUpper(&args[index]);
     std::string_view str = ArgS(args, index);
     if (str == "RAND") {
@@ -297,23 +296,22 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args)
       };
 
       auto start = parse_slot(ArgS(args, ++index));
-      if (!start.value()) {
+      if (start.status() != facade::OpStatus::OK) {
         (*cntx_)->SendError(start.status());
         return nullopt;
       }
       auto end = parse_slot(ArgS(args, ++index));
-      if (!end.value()) {
+      if (end.status() != facade::OpStatus::OK) {
         (*cntx_)->SendError(end.status());
         return nullopt;
       }
-      options.slot_range = PopulateOptions::SlotRange{.start = static_cast<SlotId>(start.value()),
-                                                      .end = static_cast<SlotId>(end.value())};
+      options.slot_range = ClusterConfig::SlotRange{.start = static_cast<SlotId>(start.value()),
+                                                    .end = static_cast<SlotId>(end.value())};
 
     } else {
       (*cntx_)->SendError(kSyntaxErr);
       return nullopt;
     }
-    ++index;
   }
   return options;
 }
@@ -368,26 +366,24 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
     if ((index > from) && (index % num_of_keys == 0)) {
       index = index - num_of_keys + options.total_count;
     }
+    key.resize(prefsize);  // shrink back
     StrAppend(&key, index);
 
     if (options.slot_range.has_value()) {
-      // Each fiber will add num_of_keys. Key are in the form of <key_prefix>:<index>
+      // Each fiber will add num_of_keys. Keys are in the form of <key_prefix>:<index>
       // We need to make sure that different fibers will not add the same key.
       // Fiber starting <key_prefix>:<from> to <key_prefix>:<num_of_keys-1>
-      // than continue to <key_prefix>:<total_count> to <key_prefix>:<total_count+num_of_keys-1>
-      // and continue untill num_of_keys are added.
+      // then continue to <key_prefix>:<total_count> to <key_prefix>:<total_count+num_of_keys-1>
+      // and continue until num_of_keys are added.
 
       // Add keys only in slot range.
       SlotId sid = ClusterConfig::KeySlot(key);
       if (sid < options.slot_range->start || sid > options.slot_range->end) {
-        key.resize(prefsize);  // shrink back
         ++index;
         continue;
       }
     }
     ShardId sid = Shard(key, ess.size());
-
-    key.resize(prefsize);  // shrink back
 
     auto& shard_batch = ps[sid];
     shard_batch.index[shard_batch.sz++] = index;

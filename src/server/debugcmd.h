@@ -19,11 +19,8 @@ class DebugCmd {
     std::string_view prefix{"key"};
     uint32_t val_size = 0;
     bool populate_random_values = false;
-    struct SlotRange {
-      SlotId start = 0;
-      SlotId end = 0;
-    };
-    std::optional<SlotRange> slot_range;
+
+    std::optional<ClusterConfig::SlotRange> slot_range;
   };
 
  public:
