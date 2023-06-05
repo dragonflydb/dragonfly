@@ -430,6 +430,14 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
   }
 }
 
+TEST_F(ClusterFamilyTest, ClusterGetSlotInfoInvalid) {
+  constexpr string_view kTooFewArgs =
+      "ERR wrong number of arguments for 'dflycluster getslotinfo' command";
+  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo"}), ErrArg(kTooFewArgs));
+  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "s"}), ErrArg(kTooFewArgs));
+  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots"}), ErrArg(kTooFewArgs));
+}
+
 TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
   string config_template = R"json(
       [
