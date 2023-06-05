@@ -490,7 +490,6 @@ TEST_F(ClusterFamilyTest, ClusterSlotsPopulate) {
   for (int i = 0; i <= 16383; ++i) {
     string slot_str = absl::StrCat(i);
     auto slots_info = RunAdmin({"dflycluster", "getslotinfo", "slots", slot_str}).GetVec();
-    EXPECT_EQ(slots_info.size(), 3);
 
     if (i <= 1000) {
       EXPECT_THAT(slots_info, ElementsAre(slot_str, "key_count", Not("0")));
