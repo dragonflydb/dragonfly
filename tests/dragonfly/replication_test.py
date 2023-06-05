@@ -981,14 +981,15 @@ async def test_flushall_in_full_sync(df_local_factory, df_seeder_factory):
     while not await is_full_sync_mode(c_replica):
         await asyncio.sleep(0.0)
 
+    syncid, r_offset = await c_replica.execute_command("DEBUG REPLICA OFFSET")
+
     # Issue FLUSHALL and push some more entries
     await c_master.execute_command("FLUSHALL")
 
-    while await get_sync_mode(c_replica) == b'connecting':
-        await asyncio.sleep(0.0)
+    await asyncio.sleep(1.0)
 
-    # Make sure we are still in full-sync mode
-    assert await is_full_sync_mode(c_replica), "Weak testcase. We left full sync mode too quickly."
+    new_syncid, r_offset = await c_replica.execute_command("DEBUG REPLICA OFFSET")
+    assert new_syncid != syncid
 
     post_seeder = df_seeder_factory.create(port=master.port, keys=10, dbcount=1)
     await post_seeder.run(target_deviation=0.1)
