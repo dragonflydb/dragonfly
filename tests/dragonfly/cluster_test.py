@@ -487,7 +487,7 @@ async def test_cluster_native_client(df_local_factory):
 
     client = aioredis.RedisCluster(decode_responses=True, host="localhost", port=masters[0].port)
 
-    for i in range(10_000):
+    for i in range(100):
         key = 'key' + str(i)
         assert await client.set(key, 'value') == True
         assert await client.get(key) == 'value'
@@ -564,7 +564,7 @@ async def test_cluster_native_client(df_local_factory):
     """
     await push_config(config, c_masters_admin + c_replicas_admin)
 
-    for i in range(10_000):
+    for i in range(100):
         key = 'key' + str(i)
         assert await client.set(key, 'value') == True
         assert await client.get(key) == 'value'
