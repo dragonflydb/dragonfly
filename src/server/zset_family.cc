@@ -1351,6 +1351,86 @@ void ZSetFamily::ZCount(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+vector<ScoredMap> OpFetch(EngineShard* shard, Transaction* t) {
+  ArgSlice keys = t->GetShardArgs(shard->shard_id());
+  DVLOG(1) << "shard:" << shard->shard_id() << ", keys " << vector(keys.begin(), keys.end());
+  DCHECK(!keys.empty());
+
+  vector<ScoredMap> results;
+  results.reserve(keys.size());
+
+  auto& db_slice = shard->db_slice();
+  for (size_t i = 0; i < keys.size(); ++i) {
+    auto it = db_slice.Find(t->GetDbContext(), keys[i], OBJ_ZSET);
+    if (!it) {
+      results.push_back({});
+      continue;
+    }
+
+    ScoredMap sm = FromObject((*it)->second, 1);
+    results.push_back(std::move(sm));
+  }
+
+  return results;
+}
+
+void ZSetFamily::ZDiff(CmdArgList args, ConnectionContext* cntx) {
+  vector<vector<ScoredMap>> maps(shard_set->size());
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    maps[shard->shard_id()] = OpFetch(shard, t);
+    return OpStatus::OK;
+  };
+
+  cntx->transaction->ScheduleSingleHop(std::move(cb));
+
+  const string_view key = ArgS(args, 1);
+  const ShardId sid = Shard(key, maps.size());
+  // Extract the ScoredMap of the first key
+  auto& sm = maps[sid];
+  if (sm.empty()) {
+    (*cntx)->SendEmptyArray();
+    return;
+  }
+  auto result = std::move(sm[0]);
+  sm.erase(sm.begin());
+
+  auto filter = [&result](const auto& key) mutable {
+    auto it = result.find(key);
+    if (it != result.end()) {
+      result.erase(it);
+    }
+  };
+
+  // Total O(L)
+  // Iterate over the results of each shard
+  for (auto& vsm : maps) {
+    // Iterate over each fetched set
+    for (auto& sm : vsm) {
+      // Iterate over each key in the fetched set and filter
+      for (auto& [key, value] : sm) {
+        filter(key);
+      }
+    }
+  }
+
+  vector<ScoredMemberView> smvec;
+  for (const auto& elem : result) {
+    smvec.emplace_back(elem.second, elem.first);
+  }
+
+  // Total O(KlogK)
+  std::sort(std::begin(smvec), std::end(smvec));
+
+  const bool with_scores = ArgS(args, args.size() - 1) == "WITHSCORES";
+  (*cntx)->StartArray(result.size() * (with_scores ? 2 : 1));
+  for (const auto& [score, key] : smvec) {
+    (*cntx)->SendBulkString(key);
+    if (with_scores) {
+      (*cntx)->SendDouble(score);
+    }
+  }
+}
+
 void ZSetFamily::ZIncrBy(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view score_arg = ArgS(args, 1);
@@ -2301,6 +2381,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
              .HFUNC(BZPopMax)
       << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1, 1}.HFUNC(ZCard)
       << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1, 1}.HFUNC(ZCount)
+      << CI{"ZDIFF", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, 1}.HFUNC(ZDiff)
       << CI{"ZINCRBY", CO::FAST | CO::WRITE | CO::DENYOOM, 4, 1, 1, 1}.HFUNC(ZIncrBy)
       << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3, 1}.HFUNC(ZInterStore)
       << CI{"ZINTERCARD", CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 2, 2, 1}

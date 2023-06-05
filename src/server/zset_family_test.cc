@@ -578,4 +578,57 @@ TEST_F(ZSetFamilyTest, BlockingTimeout) {
   EXPECT_THAT(resp0, ArgType(RespExpr::NIL_ARRAY));
 }
 
+TEST_F(ZSetFamilyTest, ZDiffError) {
+  RespExpr resp;
+
+  resp = Run({"zdiff", "-1", "z1"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
+  resp = Run({"zdiff", "0"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  resp = Run({"zdiff", "0", "z1"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
+  resp = Run({"zdiff", "0", "z1", "z2"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+}
+
+TEST_F(ZSetFamilyTest, ZDiff) {
+  RespExpr resp;
+
+  EXPECT_EQ(4, CheckedInt({"zadd", "z1", "1", "one", "2", "two", "3", "three", "4", "four"}));
+  EXPECT_EQ(2, CheckedInt({"zadd", "z2", "1", "one", "5", "five"}));
+  EXPECT_EQ(2, CheckedInt({"zadd", "z3", "2", "two", "3", "three"}));
+  EXPECT_EQ(1, CheckedInt({"zadd", "z4", "4", "four"}));
+
+  resp = Run({"zdiff", "1", "z1"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("one", "two", "three", "four"));
+
+  resp = Run({"zdiff", "2", "z1", "z1"});
+  EXPECT_THAT(resp.GetVec().empty(), true);
+
+  resp = Run({"zdiff", "2", "z1", "doesnt_exist"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("one", "two", "three", "four"));
+
+  resp = Run({"zdiff", "2", "z1", "z2"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("two", "three", "four"));
+
+  resp = Run({"zdiff", "2", "z1", "z3"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("one", "four"));
+
+  resp = Run({"zdiff", "4", "z1", "z2", "z3", "z4"});
+  EXPECT_THAT(resp.GetVec().empty(), true);
+
+  resp = Run({"zdiff", "2", "doesnt_exist", "key1"});
+  EXPECT_THAT(resp.GetVec().empty(), true);
+
+  // WITHSCORES
+  resp = Run({"zdiff", "1", "z1", "WITHSCORES"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("one", "1", "two", "2", "three", "3", "four", "4"));
+
+  resp = Run({"zdiff", "2", "z1", "z2", "WITHSCORES"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("two", "2", "three", "3", "four", "4"));
+}
+
 }  // namespace dfly
