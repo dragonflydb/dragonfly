@@ -492,6 +492,8 @@ async def test_cluster_native_client(df_local_factory):
         assert await client.set(key, 'value') == True
         assert await client.get(key) == 'value'
 
+    await asyncio.gather(*(wait_available_async(c) for c in c_replicas))
+
     # Make sure that getting a value from a replica works as well.
     replica_response = await client.execute_command(
             'get', 'key0', target_nodes=aioredis.RedisCluster.REPLICAS)
@@ -565,7 +567,7 @@ async def test_cluster_native_client(df_local_factory):
     await push_config(config, c_masters_admin + c_replicas_admin)
 
     for i in range(100):
-        key = 'key' + str(i)
+        key = 'key' + str(random.randint(0, 100_000))
         assert await client.set(key, 'value') == True
         assert await client.get(key) == 'value'
     await client.close()
