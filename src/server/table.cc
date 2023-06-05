@@ -34,10 +34,11 @@ DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
 }
 
 SlotStats& SlotStats::operator+=(const SlotStats& o) {
-  constexpr size_t kDbSz = sizeof(SlotStats);
-  static_assert(kDbSz == 8);
+  static_assert(sizeof(SlotStats) == 24);
 
   ADD(key_count);
+  ADD(total_reads);
+  ADD(total_writes);
   return *this;
 }
 

@@ -460,15 +460,36 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
 
   EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
 
-  Run({"debug", "populate", "100000"});
+  constexpr string_view kKey = "some-key";
+  const SlotId slot = ClusterConfig::KeySlot(kKey);
+  EXPECT_NE(slot, 0) << "We need to choose another key";
 
-  auto slots_info = RunAdmin({"dflycluster", "getslotinfo", "slots", "1", "2"}).GetVec();
-  EXPECT_EQ(slots_info.size(), 2);
-  auto slot1 = slots_info[0].GetVec();
-  EXPECT_THAT(slot1, ElementsAre("1", "key_count", Not("0")));
+  EXPECT_EQ(Run({"SET", kKey, "value"}), "OK");
 
-  auto slot2 = slots_info[1].GetVec();
-  EXPECT_THAT(slot2, ElementsAre("2", "key_count", Not("0")));
+  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "0", absl::StrCat(slot)}),
+              RespArray(ElementsAre(
+                  RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads", IntArg(0),
+                                        "total_writes", IntArg(0))),
+                  RespArray(ElementsAre(IntArg(slot), "key_count", IntArg(1), "total_reads",
+                                        IntArg(0), "total_writes", IntArg(1))))));
+
+  EXPECT_EQ(Run({"GET", kKey}), "value");
+
+  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "0", absl::StrCat(slot)}),
+              RespArray(ElementsAre(
+                  RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads", IntArg(0),
+                                        "total_writes", IntArg(0))),
+                  RespArray(ElementsAre(IntArg(slot), "key_count", IntArg(1), "total_reads",
+                                        IntArg(1), "total_writes", IntArg(1))))));
+
+  EXPECT_EQ(Run({"SET", kKey, "value2"}), "OK");
+
+  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "0", absl::StrCat(slot)}),
+              RespArray(ElementsAre(
+                  RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0), "total_reads", IntArg(0),
+                                        "total_writes", IntArg(0))),
+                  RespArray(ElementsAre(IntArg(slot), "key_count", IntArg(1), "total_reads",
+                                        IntArg(1), "total_writes", IntArg(2))))));
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
@@ -495,24 +516,23 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
 
   Run({"debug", "populate", "100000"});
 
-  auto slots_info = RunAdmin({"dflycluster", "getslotinfo", "slots", "1", "2"}).GetVec();
-  EXPECT_EQ(slots_info.size(), 2);
-  auto slot1 = slots_info[0].GetVec();
-  EXPECT_THAT(slot1, ElementsAre("1", "key_count", Not("0")));
-
-  auto slot2 = slots_info[1].GetVec();
-  EXPECT_THAT(slot2, ElementsAre("2", "key_count", Not("0")));
+  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "1", "2"}),
+              RespArray(ElementsAre(
+                  RespArray(ElementsAre(IntArg(1), "key_count", Not(IntArg(0)), "total_reads",
+                                        IntArg(0), "total_writes", Not(IntArg(0)))),
+                  RespArray(ElementsAre(IntArg(2), "key_count", Not(IntArg(0)), "total_reads",
+                                        IntArg(0), "total_writes", Not(IntArg(0)))))));
 
   config = absl::Substitute(config_template, "abc");
   EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
   sleep(1);
-  slots_info = RunAdmin({"dflycluster", "getslotinfo", "slots", "1", "2"}).GetVec();
-  EXPECT_EQ(slots_info.size(), 2);
-  slot1 = slots_info[0].GetVec();
-  EXPECT_THAT(slot1, ElementsAre("1", "key_count", "0"));
 
-  slot2 = slots_info[1].GetVec();
-  EXPECT_THAT(slot2, ElementsAre("2", "key_count", "0"));
+  EXPECT_THAT(
+      RunAdmin({"dflycluster", "getslotinfo", "slots", "1", "2"}),
+      RespArray(ElementsAre(RespArray(ElementsAre(IntArg(1), "key_count", IntArg(0), "total_reads",
+                                                  IntArg(0), "total_writes", Not(IntArg(0)))),
+                            RespArray(ElementsAre(IntArg(2), "key_count", IntArg(0), "total_reads",
+                                                  IntArg(0), "total_writes", Not(IntArg(0)))))));
 }
 
 TEST_F(ClusterFamilyTest, ClusterModeSelectNotAllowed) {
