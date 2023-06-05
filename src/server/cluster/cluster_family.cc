@@ -41,7 +41,7 @@ using SlotRange = ClusterConfig::SlotRange;
 
 constexpr string_view kClusterDisabled =
     "Cluster is disabled. Enabled via passing --cluster_mode=emulated|yes";
-constexpr string_view kClusterNotConfigured = "Cluster is not yet configured";
+constexpr string_view kDflyClusterCmdPort = "DflyCluster command allowed only under admin port";
 
 }  // namespace
 
@@ -374,7 +374,7 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (!cntx->owner()->IsAdmin()) {
-    return (*cntx)->SendError(kClusterDisabled);
+    return (*cntx)->SendError(kDflyClusterCmdPort);
   }
 
   CHECK(is_emulated_cluster_ || cluster_config_.get() != nullptr);

@@ -51,7 +51,7 @@ TEST_F(ClusterFamilyTest, DflyClusterOnlyOnAdminPort) {
       ])json";
   EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
   EXPECT_THAT(Run({"dflycluster", "config", config}),
-              ErrArg("Cluster is disabled. Enabled via passing --cluster_mode=emulated|yes"));
+              ErrArg("DflyCluster command allowed only under admin port"));
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidJSON) {
@@ -469,6 +469,42 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
 
   auto slot2 = slots_info[1].GetVec();
   EXPECT_THAT(slot2, ElementsAre("2", "key_count", Not("0")));
+}
+
+TEST_F(ClusterFamilyTest, ClusterSlotsPopulate) {
+  string config_template = R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 16383
+            }
+          ],
+          "master": {
+            "id": "$0",
+            "ip": "10.0.0.1",
+            "port": 7000
+          },
+          "replicas": []
+        }
+      ])json";
+  string config = absl::Substitute(config_template, RunAdmin({"dflycluster", "myid"}).GetString());
+
+  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
+
+  Run({"debug", "populate", "10000", "key", "4", "SLOTS", "0", "1000"});
+
+  for (int i = 0; i <= 16383; ++i) {
+    string slot_str = absl::StrCat(i);
+    auto slots_info = RunAdmin({"dflycluster", "getslotinfo", "slots", slot_str}).GetVec();
+
+    if (i <= 1000) {
+      EXPECT_THAT(slots_info, ElementsAre(slot_str, "key_count", Not("0")));
+    } else {
+      EXPECT_THAT(slots_info, ElementsAre(slot_str, "key_count", "0"));
+    }
+  }
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
