@@ -487,11 +487,13 @@ async def test_cluster_native_client(df_local_factory):
 
     client = aioredis.RedisCluster(decode_responses=True, host="localhost", port=masters[0].port)
 
-    for i in range(100):
-        key = 'key' + str(i)
-        assert await client.set(key, 'value') == True
-        assert await client.get(key) == 'value'
+    async def test_random_keys():
+        for i in range(100):
+            key = 'key' + str(i)
+            assert await client.set(key, 'value') == True
+            assert await client.get(key) == 'value'
 
+    await test_random_keys()
     await asyncio.gather(*(wait_available_async(c) for c in c_replicas))
 
     # Make sure that getting a value from a replica works as well.
@@ -566,8 +568,5 @@ async def test_cluster_native_client(df_local_factory):
     """
     await push_config(config, c_masters_admin + c_replicas_admin)
 
-    for i in range(100):
-        key = 'key' + str(random.randint(0, 100_000))
-        assert await client.set(key, 'value') == True
-        assert await client.get(key) == 'value'
+    await test_random_keys()
     await client.close()
