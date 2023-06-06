@@ -128,6 +128,35 @@ bool ElemCompare(const quicklistEntry& entry, string_view elem) {
   return elem == an.Piece();
 }
 
+// Circular buffer for string messages
+struct CircularMessages {
+  CircularMessages(size_t size) : current{0}, messages{size} {
+  }
+
+  string* Next() {
+    string* next = &messages[current];
+    current = (current + 1) % messages.size();
+    next->clear();
+    return next;
+  }
+
+  vector<string> All() {
+    vector<string> out;
+    out.insert(out.end(), messages.begin() + current, messages.end());
+    out.insert(out.end(), messages.begin(), messages.begin() + current);
+    out.erase(std::remove_if(out.begin(), out.end(), [&](const auto& msg) { return msg.empty(); }),
+              out.end());
+    return out;
+  }
+
+  int current = 0;
+  vector<string> messages;
+};
+
+// Temporary debug measures. Trace what happens with list keys on given shard.
+// Used to recover logs for BLPOP failures. See OpBPop.
+thread_local CircularMessages debugMessages{100};
+
 class BPopPusher {
  public:
   BPopPusher(string_view pop_key, string_view push_key, ListDir popdir, ListDir pushdir);
@@ -146,23 +175,45 @@ class BPopPusher {
 
 // Called as a callback from MKBlocking after we've determined which key to pop.
 std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, ListDir dir) {
+  DVLOG(2) << "popping from " << key << " " << t->DebugId();
+
   auto& db_slice = shard->db_slice();
   auto it_res = db_slice.Find(t->GetDbContext(), key, OBJ_LIST);
-  CHECK(it_res) << t->DebugId() << " " << key;  // must exist and must be ok.
-  PrimeIterator it = *it_res;
 
+  if (!it_res) {
+    auto messages = debugMessages.All();
+    stringstream out;
+    out << "CRASH REPORT" << endl;
+    out << "key: " << key << " tx: " << t->DebugId() << "\n";
+    out << "===\n";
+    for (auto msg : messages)
+      out << msg << "\n";
+    out << "===" << endl;
+    LOG(ERROR) << out.str();
+    LOG(FATAL)
+        << "Encountered critical error. Please open a github issue or message us on discord with "
+           "attached report. https://github.com/dragonflydb/dragonfly";
+  }
+
+  CHECK(it_res) << t->DebugId() << " " << key;  // must exist and must be ok.
+
+  PrimeIterator it = *it_res;
   quicklist* ql = GetQL(it->second);
 
-  DVLOG(2) << "popping from " << key << " " << t->DebugId();
+  absl::StrAppend(debugMessages.Next(), "OpBPop", key, " by ", t->DebugId());
+
   db_slice.PreUpdate(t->GetDbIndex(), it);
   std::string value = ListPop(dir, ql);
   db_slice.PostUpdate(t->GetDbIndex(), it, key);
+
   if (quicklistCount(ql) == 0) {
     DVLOG(1) << "deleting key " << key << " " << t->DebugId();
+    absl::StrAppend(debugMessages.Next(), "OpBPop Del: ", key, " by ", t->DebugId());
+
     CHECK(shard->db_slice().Del(t->GetDbIndex(), it));
   }
-  OpArgs op_args = t->GetOpArgs(shard);
-  if (op_args.shard->journal()) {
+
+  if (OpArgs op_args = t->GetOpArgs(shard); op_args.shard->journal()) {
     string command = dir == ListDir::LEFT ? "LPOP" : "RPOP";
     RecordJournal(op_args, command, ArgSlice{key}, 1);
   }
@@ -304,11 +355,15 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
     if (es->blocking_controller()) {
       string tmp;
       string_view key = it->first.GetSlice(&tmp);
+
+      absl::StrAppend(debugMessages.Next(), "OpPush AwakeWatched: ", string{key}, " by ",
+                      op_args.tx->DebugId(), " expire: ", it->second.HasExpire());
       es->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, key);
     }
   } else {
     es->db_slice().PostUpdate(op_args.db_cntx.db_index, it, key, true);
   }
+
   if (journal_rewrite && op_args.shard->journal()) {
     string command = dir == ListDir::LEFT ? "LPUSH" : "RPUSH";
     vector<string_view> mapped(vals.size() + 1);
@@ -350,8 +405,10 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
   db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
 
   if (quicklistCount(ql) == 0) {
+    absl::StrAppend(debugMessages.Next(), "OpPop Del: ", key, " by ", op_args.tx->DebugId());
     CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
   }
+
   if (op_args.shard->journal() && journal_rewrite) {
     string command = dir == ListDir::LEFT ? "LPOP" : "RPOP";
     RecordJournal(op_args, command, ArgSlice{key}, 2);
@@ -635,6 +692,7 @@ OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
   db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
 
   if (quicklistCount(ql) == 0) {
+    absl::StrAppend(debugMessages.Next(), "OpTrim Del: ", key, " by ", op_args.tx->DebugId());
     CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
   }
   return OpStatus::OK;
@@ -1139,13 +1197,16 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
   VLOG(1) << "BPop timeout(" << timeout << ")";
 
   Transaction* transaction = cntx->transaction;
-  std::string popped_key;
-  std::string popped_value;
+
+  absl::StrAppend(debugMessages.Next(), "BPopGeneric by ", transaction->DebugId());
+
+  std::string popped_key, popped_value;
+  auto cb = [dir, &popped_value](Transaction* t, EngineShard* shard, std::string_view key) {
+    popped_value = OpBPop(t, shard, key, dir);
+  };
+
   OpStatus result = container_utils::RunCbOnFirstNonEmptyBlocking(
-      [dir, &popped_value](Transaction* t, EngineShard* shard, std::string_view key) {
-        popped_value = OpBPop(t, shard, key, dir);
-      },
-      &popped_key, transaction, OBJ_LIST, unsigned(timeout * 1000));
+      cb, &popped_key, transaction, OBJ_LIST, unsigned(timeout * 1000));
 
   if (result == OpStatus::OK) {
     DVLOG(1) << "BPop " << transaction->DebugId() << " popped from key " << popped_key;  // key.
