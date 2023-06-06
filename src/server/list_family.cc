@@ -133,9 +133,11 @@ struct CircularMessages {
   CircularMessages(size_t size) : current{0}, messages{size} {
   }
 
-  void operator<<(string msg) {
-    messages[current] = msg;
+  string* Next() {
+    string* next = &messages[current];
     current = (current + 1) % messages.size();
+    next->clear();
+    return next;
   }
 
   vector<string> All() {
@@ -180,12 +182,14 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
 
   if (!it_res) {
     auto messages = debugMessages.All();
-    cerr << "CRASH REPORT" << endl;
-    cerr << "key: " << key << " tx: " << t->DebugId() << "\n";
-    cerr << "===\n";
+    stringstream out;
+    out << "CRASH REPORT" << endl;
+    out << "key: " << key << " tx: " << t->DebugId() << "\n";
+    out << "===\n";
     for (auto msg : messages)
-      cerr << msg << "\n";
-    cerr << "===" << endl;
+      out << msg << "\n";
+    out << "===" << endl;
+    LOG(ERROR) << out.str();
     LOG(FATAL)
         << "Encountered critical error. Please open a github issue or message us on discord with "
            "attached report. https://github.com/dragonflydb/dragonfly";
@@ -196,7 +200,7 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
   PrimeIterator it = *it_res;
   quicklist* ql = GetQL(it->second);
 
-  debugMessages << "OpBPop: " + string{key} + " by " + t->DebugId();
+  absl::StrAppend(debugMessages.Next(), "OpBPop", key, " by ", t->DebugId());
 
   db_slice.PreUpdate(t->GetDbIndex(), it);
   std::string value = ListPop(dir, ql);
@@ -204,7 +208,7 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
 
   if (quicklistCount(ql) == 0) {
     DVLOG(1) << "deleting key " << key << " " << t->DebugId();
-    debugMessages << "OpBPop Del: " + string{key} + " by " + t->DebugId();
+    absl::StrAppend(debugMessages.Next(), "OpBPop Del: ", key, " by ", t->DebugId());
 
     CHECK(shard->db_slice().Del(t->GetDbIndex(), it));
   }
@@ -352,8 +356,8 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
       string tmp;
       string_view key = it->first.GetSlice(&tmp);
 
-      debugMessages << "OpPush AwakeWatched: " + string{key} + " by " + op_args.tx->DebugId() +
-                           " expire: " + to_string(it->second.HasExpire());
+      absl::StrAppend(debugMessages.Next(), "OpPush AwakeWatched: ", string{key}, " by ",
+                      op_args.tx->DebugId(), " expire: ", it->second.HasExpire());
       es->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, key);
     }
   } else {
@@ -401,7 +405,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
   db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
 
   if (quicklistCount(ql) == 0) {
-    debugMessages << "OpPop Del: " + string{key} + " by " + op_args.tx->DebugId();
+    absl::StrAppend(debugMessages.Next(), "OpPop Del: ", key, " by ", op_args.tx->DebugId());
     CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
   }
 
@@ -688,7 +692,7 @@ OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
   db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
 
   if (quicklistCount(ql) == 0) {
-    debugMessages << "OpTrim Del: " + string{key} + " by " + op_args.tx->DebugId();
+    absl::StrAppend(debugMessages.Next(), "OpTrim Del: ", key, " by ", op_args.tx->DebugId());
     CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
   }
   return OpStatus::OK;
@@ -1194,7 +1198,7 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
 
   Transaction* transaction = cntx->transaction;
 
-  debugMessages << "BPopGeneric by " + transaction->DebugId();
+  absl::StrAppend(debugMessages.Next(), "BPopGeneric by ", transaction->DebugId());
 
   std::string popped_key, popped_value;
   auto cb = [dir, &popped_value](Transaction* t, EngineShard* shard, std::string_view key) {
