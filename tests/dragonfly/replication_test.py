@@ -945,3 +945,56 @@ async def test_replication_info(df_local_factory, df_seeder_factory, n_keys=2000
 
     await c_master.connection_pool.disconnect()
     await c_replica.connection_pool.disconnect()
+
+
+"""
+Test flushall command that's invoked while in full sync mode.
+This can cause an issue because it will be executed on each shard independently.
+More details in https://github.com/dragonflydb/dragonfly/issues/1231
+"""
+@pytest.mark.asyncio
+async def test_flushall_in_full_sync(df_local_factory, df_seeder_factory):
+    master = df_local_factory.create(port=BASE_PORT, proactor_threads=4, logtostdout=True)
+    replica = df_local_factory.create(port=BASE_PORT+1, proactor_threads=2, logtostdout=True)
+
+    # Start master
+    master.start()
+    c_master = aioredis.Redis(port=master.port)
+
+    # Fill master with test data
+    seeder = df_seeder_factory.create(port=master.port, keys=10_000, dbcount=1)
+    await seeder.run(target_deviation=0.1)
+
+    # Start replica
+    replica.start()
+    c_replica = aioredis.Redis(port=replica.port)
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    async def get_sync_mode(c_replica):
+        result = await c_replica.execute_command("role")
+        return result[3]
+
+    async def is_full_sync_mode(c_replica):
+        return await get_sync_mode(c_replica) == b'full_sync'
+
+    # Wait for full sync to start
+    while not await is_full_sync_mode(c_replica):
+        await asyncio.sleep(0.0)
+
+    syncid, _ = await c_replica.execute_command("DEBUG REPLICA OFFSET")
+
+    # Issue FLUSHALL and push some more entries
+    await c_master.execute_command("FLUSHALL")
+
+    await asyncio.sleep(1.0)
+
+    # Make sure that a new sync ID is present, meaning replication restarted following FLUSHALL
+    new_syncid, _ = await c_replica.execute_command("DEBUG REPLICA OFFSET")
+    assert new_syncid != syncid
+
+    post_seeder = df_seeder_factory.create(port=master.port, keys=10, dbcount=1)
+    await post_seeder.run(target_deviation=0.1)
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    await check_data(post_seeder, [replica], [c_replica])

@@ -17,6 +17,7 @@ extern "C" {
 #include "redis/zset.h"
 }
 #include <absl/cleanup/cleanup.h>
+#include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <lz4frame.h>
 #include <zstd.h>
@@ -2060,6 +2061,17 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
   while (done < num_entries) {
     journal::ParsedEntry entry{};
     SET_OR_RETURN(journal_reader_.ReadEntry(), entry);
+
+    if (!entry.cmd.cmd_args.empty()) {
+      if (absl::EqualsIgnoreCase(facade::ToSV(entry.cmd.cmd_args[0]), "FLUSHALL") ||
+          absl::EqualsIgnoreCase(facade::ToSV(entry.cmd.cmd_args[0]), "FLUSHDB")) {
+        // Applying a flush* operation in the middle of a load can cause out-of-sync deletions of
+        // data that should not be deleted, see https://github.com/dragonflydb/dragonfly/issues/1231
+        // By returning an error we are effectively restarting the replication.
+        return RdbError(errc::unsupported_operation);
+      }
+    }
+
     ex.Execute(entry.dbid, entry.cmd);
     VLOG(1) << "Reading item: " << entry.ToString();
     done++;
