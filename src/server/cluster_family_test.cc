@@ -516,15 +516,14 @@ TEST_F(ClusterFamilyTest, ClusterSlotsPopulate) {
 
   Run({"debug", "populate", "10000", "key", "4", "SLOTS", "0", "1000"});
 
-  for (int i = 0; i <= 16383; ++i) {
-    string slot_str = absl::StrCat(i);
-    auto slots_info = RunAdmin({"dflycluster", "getslotinfo", "slots", slot_str}).GetVec();
+  for (int i = 0; i <= 1'000; ++i) {
+    EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", absl::StrCat(i)}),
+                RespArray(ElementsAre(IntArg(i), "key_count", Not(IntArg(0)), _, _, _, _)));
+  }
 
-    if (i <= 1000) {
-      EXPECT_THAT(slots_info, ElementsAre(slot_str, "key_count", Not("0")));
-    } else {
-      EXPECT_THAT(slots_info, ElementsAre(slot_str, "key_count", "0"));
-    }
+  for (int i = 1'001; i <= 16'383; ++i) {
+    EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", absl::StrCat(i)}),
+                RespArray(ElementsAre(IntArg(i), "key_count", IntArg(0), _, _, _, _)));
   }
 }
 
