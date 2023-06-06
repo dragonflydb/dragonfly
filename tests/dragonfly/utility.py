@@ -44,6 +44,9 @@ async def wait_available_async(client: aioredis.Redis):
             await client.get('key')
             return
         except aioredis.ResponseError as e:
+            if ("MOVED" in str(e)):
+                # MOVED means we *can* serve traffic, but 'key' does not belong to an owned slot
+                return
             assert "Can not execute during LOADING" in str(e)
 
         # Print W to indicate test is waiting for replica

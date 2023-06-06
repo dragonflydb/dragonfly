@@ -396,3 +396,180 @@ async def test_cluster_replica_sets_non_owned_keys(df_local_factory):
         assert False, "Should not be able to get key on non-owner cluster node"
     except redis.exceptions.ResponseError as e:
         assert re.match(r"MOVED \d+ localhost:1111", e.args[0])
+
+
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_cluster_native_client(df_local_factory):
+    # Start and configure cluster with 3 masters and 3 replicas
+    masters = [
+        df_local_factory.create(port=BASE_PORT+i, admin_port=BASE_PORT+i+1000)
+        for i in range(3)
+    ]
+    df_local_factory.start_all(masters)
+    c_masters = [aioredis.Redis(port=master.port) for master in masters]
+    c_masters_admin = [aioredis.Redis(port=master.admin_port) for master in masters]
+    master_ids = await asyncio.gather(*(get_node_id(c) for c in c_masters_admin))
+
+    replicas = [
+        df_local_factory.create(port=BASE_PORT+100+i, admin_port=BASE_PORT+i+1100)
+        for i in range(3)
+    ]
+    df_local_factory.start_all(replicas)
+    c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
+    c_replicas_admin = [aioredis.Redis(port=replica.admin_port) for replica in replicas]
+    replica_ids = await asyncio.gather(*(get_node_id(c) for c in c_replicas_admin))
+
+    config = f"""
+      [
+        {{
+          "slot_ranges": [
+            {{
+              "start": 0,
+              "end": 5000
+            }}
+          ],
+          "master": {{
+            "id": "{master_ids[0]}",
+            "ip": "localhost",
+            "port": {masters[0].port}
+          }},
+          "replicas": [
+              {{
+                "id": "{replica_ids[0]}",
+                "ip": "localhost",
+                "port": {replicas[0].port}
+              }}
+          ]
+        }},
+        {{
+          "slot_ranges": [
+            {{
+              "start": 5001,
+              "end": 10000
+            }}
+          ],
+          "master": {{
+            "id": "{master_ids[1]}",
+            "ip": "localhost",
+            "port": {masters[1].port}
+          }},
+          "replicas": [
+              {{
+                "id": "{replica_ids[1]}",
+                "ip": "localhost",
+                "port": {replicas[1].port}
+              }}
+          ]
+        }},
+        {{
+          "slot_ranges": [
+            {{
+              "start": 10001,
+              "end": 16383
+            }}
+          ],
+          "master": {{
+            "id": "{master_ids[2]}",
+            "ip": "localhost",
+            "port": {masters[2].port}
+          }},
+          "replicas": [
+              {{
+                "id": "{replica_ids[2]}",
+                "ip": "localhost",
+                "port": {replicas[2].port}
+              }}
+          ]
+        }}
+      ]
+    """
+    await push_config(config, c_masters_admin + c_replicas_admin)
+
+    client = aioredis.RedisCluster(decode_responses=True, host="localhost", port=masters[0].port)
+
+    assert await client.set('key0', 'value') == True
+    assert await client.get('key0') == 'value'
+
+    async def test_random_keys():
+        for i in range(100):
+            key = 'key' + str(random.randint(0, 100_000))
+            assert await client.set(key, 'value') == True
+            assert await client.get(key) == 'value'
+
+    await test_random_keys()
+    await asyncio.gather(*(wait_available_async(c) for c in c_replicas))
+
+    # Make sure that getting a value from a replica works as well.
+    replica_response = await client.execute_command(
+            'get', 'key0', target_nodes=aioredis.RedisCluster.REPLICAS)
+    assert 'value' in replica_response.values()
+
+    # Push new config
+    config = f"""
+      [
+        {{
+          "slot_ranges": [
+            {{
+              "start": 0,
+              "end": 4000
+            }}
+          ],
+          "master": {{
+            "id": "{master_ids[0]}",
+            "ip": "localhost",
+            "port": {masters[0].port}
+          }},
+          "replicas": [
+              {{
+                "id": "{replica_ids[0]}",
+                "ip": "localhost",
+                "port": {replicas[0].port}
+              }}
+          ]
+        }},
+        {{
+          "slot_ranges": [
+            {{
+              "start": 4001,
+              "end": 14000
+            }}
+          ],
+          "master": {{
+            "id": "{master_ids[1]}",
+            "ip": "localhost",
+            "port": {masters[1].port}
+          }},
+          "replicas": [
+              {{
+                "id": "{replica_ids[1]}",
+                "ip": "localhost",
+                "port": {replicas[1].port}
+              }}
+          ]
+        }},
+        {{
+          "slot_ranges": [
+            {{
+              "start": 14001,
+              "end": 16383
+            }}
+          ],
+          "master": {{
+            "id": "{master_ids[2]}",
+            "ip": "localhost",
+            "port": {masters[2].port}
+          }},
+          "replicas": [
+              {{
+                "id": "{replica_ids[2]}",
+                "ip": "localhost",
+                "port": {replicas[2].port}
+              }}
+          ]
+        }}
+      ]
+    """
+    await push_config(config, c_masters_admin + c_replicas_admin)
+
+    await test_random_keys()
+    await client.close()
