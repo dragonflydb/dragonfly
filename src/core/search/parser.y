@@ -52,6 +52,8 @@ using namespace std;
   COLON    ":"
   LBRACKET "["
   RBRACKET "]"
+  LCURLBR  "{"
+  RCURLBR  "}"
   OR_OP    "|"
 ;
 
@@ -67,7 +69,7 @@ using namespace std;
 %precedence LPAREN RPAREN
 
 %token <int64_t> INT64 "int64"
-%nterm <AstExpr> final_query filter search_expr field_cond field_cond_expr
+%nterm <AstExpr> final_query filter search_expr field_cond field_cond_expr tag_list
 
 %printer { yyo << $$; } <*>;
 
@@ -92,6 +94,7 @@ field_cond:
   | NOT_OP field_cond                   { $$ = AstNegateNode(move($2)); }
   | LPAREN field_cond_expr RPAREN       { $$ = move($2); }
   | LBRACKET INT64 INT64 RBRACKET       { $$ = AstRangeNode(move($2), move($3)); }
+  | LCURLBR tag_list RCURLBR            { $$ = move($2); }
 
 field_cond_expr:
   LPAREN field_cond_expr RPAREN                   { $$ = move($2); }
@@ -99,6 +102,11 @@ field_cond_expr:
   | field_cond_expr OR_OP field_cond_expr         { $$ = AstLogicalNode(move($1), move($3), AstLogicalNode::OR); }
   | NOT_OP field_cond_expr                        { $$ = AstNegateNode(move($2)); };
   | TERM                                          { $$ = AstTermNode(move($1)); }
+
+tag_list:
+  TERM                       { $$ = AstTagsNode(move($1)); }
+  | tag_list OR_OP TERM      { $$ = AstTagsNode(move($1), move($3)); }
+
 %%
 
 void

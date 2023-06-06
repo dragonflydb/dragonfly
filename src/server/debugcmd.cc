@@ -106,12 +106,13 @@ void DebugCmd::Run(CmdArgList args) {
         "    Return sync id and array of number of journal commands executed for each replica flow",
         "WATCHED",
         "    Shows the watched keys as a result of BLPOP and similar operations.",
-        "POPULATE <count> [<prefix>] [<size>] [RAND]",
+        "POPULATE <count> [<prefix>] [<size>] [RAND] [SLOTS start end]",
         "    Create <count> string keys named key:<num> with value value:<num>.",
         "    If <prefix> is specified then it is used instead of the 'key' prefix.",
         "    If <size> is specified then X character is concatenated multiple times to value:<num>",
         "    to meet value size.",
-        "    If RAND is specified than value will be set to random hex string in specified size.",
+        "    If RAND is specified then value will be set to random hex string in specified size.",
+        "    If SLOTS is specified then create keys only in given slots range."
         "HELP",
         "    Prints this help.",
     };
@@ -249,55 +250,96 @@ void DebugCmd::Load(string_view filename) {
   (*cntx_)->SendOk();
 }
 
-void DebugCmd::Populate(CmdArgList args) {
-  if (args.size() < 2 || args.size() > 5) {
-    return (*cntx_)->SendError(UnknownSubCmd("populate", "DEBUG"));
+optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args) {
+  if (args.size() < 2 || args.size() > 8) {
+    (*cntx_)->SendError(UnknownSubCmd("populate", "DEBUG"));
+    return nullopt;
   }
 
-  uint64_t total_count = 0;
-  if (!absl::SimpleAtoi(ArgS(args, 1), &total_count))
-    return (*cntx_)->SendError(kUintErr);
-  std::string_view prefix{"key"};
+  PopulateOptions options;
+  if (!absl::SimpleAtoi(ArgS(args, 1), &options.total_count)) {
+    (*cntx_)->SendError(kUintErr);
+    return nullopt;
+  }
 
   if (args.size() > 2) {
-    prefix = ArgS(args, 2);
+    options.prefix = ArgS(args, 2);
   }
-  uint32_t val_size = 0;
+
   if (args.size() > 3) {
-    std::string_view str = ArgS(args, 3);
-    if (!absl::SimpleAtoi(str, &val_size))
-      return (*cntx_)->SendError(kUintErr);
-  }
-
-  bool populate_random_values = false;
-  if (args.size() > 4) {
-    ToUpper(&args[4]);
-    std::string_view str = ArgS(args, 4);
-    if (str != "RAND") {
-      return (*cntx_)->SendError(kSyntaxErr);
+    if (!absl::SimpleAtoi(ArgS(args, 3), &options.val_size)) {
+      (*cntx_)->SendError(kUintErr);
+      return nullopt;
     }
-    populate_random_values = true;
   }
 
+  for (size_t index = 4; args.size() > index; ++index) {
+    ToUpper(&args[index]);
+    std::string_view str = ArgS(args, index);
+    if (str == "RAND") {
+      options.populate_random_values = true;
+    } else if (str == "SLOTS") {
+      if (args.size() < index + 3) {
+        (*cntx_)->SendError(kSyntaxErr);
+        return nullopt;
+      }
+
+      auto parse_slot = [](string_view slot_str) -> OpResult<uint32_t> {
+        uint32_t slot_id;
+        if (!absl::SimpleAtoi(slot_str, &slot_id)) {
+          return facade::OpStatus::INVALID_INT;
+        }
+        if (slot_id > ClusterConfig::kMaxSlotNum) {
+          return facade::OpStatus::INVALID_VALUE;
+        }
+        return slot_id;
+      };
+
+      auto start = parse_slot(ArgS(args, ++index));
+      if (start.status() != facade::OpStatus::OK) {
+        (*cntx_)->SendError(start.status());
+        return nullopt;
+      }
+      auto end = parse_slot(ArgS(args, ++index));
+      if (end.status() != facade::OpStatus::OK) {
+        (*cntx_)->SendError(end.status());
+        return nullopt;
+      }
+      options.slot_range = ClusterConfig::SlotRange{.start = static_cast<SlotId>(start.value()),
+                                                    .end = static_cast<SlotId>(end.value())};
+
+    } else {
+      (*cntx_)->SendError(kSyntaxErr);
+      return nullopt;
+    }
+  }
+  return options;
+}
+
+void DebugCmd::Populate(CmdArgList args) {
+  optional<PopulateOptions> options = ParsePopulateArgs(args);
+  if (!options.has_value()) {
+    return;
+  }
   ProactorPool& pp = sf_.service().proactor_pool();
   size_t runners_count = pp.size();
   vector<pair<uint64_t, uint64_t>> ranges(runners_count - 1);
-  uint64_t batch_size = total_count / runners_count;
+  uint64_t batch_size = options->total_count / runners_count;
   size_t from = 0;
   for (size_t i = 0; i < ranges.size(); ++i) {
     ranges[i].first = from;
     ranges[i].second = batch_size;
     from += batch_size;
   }
-  ranges.emplace_back(from, total_count - from);
+  ranges.emplace_back(from, options->total_count - from);
 
   vector<Fiber> fb_arr(ranges.size());
   for (size_t i = 0; i < ranges.size(); ++i) {
     auto range = ranges[i];
 
     // whatever we do, we should not capture i by reference.
-    fb_arr[i] = pp.at(i)->LaunchFiber([range, prefix, val_size, populate_random_values, this] {
-      this->PopulateRangeFiber(range.first, range.second, prefix, val_size, populate_random_values);
+    fb_arr[i] = pp.at(i)->LaunchFiber([range, options, this] {
+      this->PopulateRangeFiber(range.first, range.second, options.value());
     });
   }
   for (auto& fb : fb_arr)
@@ -306,29 +348,53 @@ void DebugCmd::Populate(CmdArgList args) {
   (*cntx_)->SendOk();
 }
 
-void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view prefix,
-                                  unsigned value_len, bool populate_random_values) {
+void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
+                                  const PopulateOptions& options) {
   ThisFiber::SetName("populate_range");
-  VLOG(1) << "PopulateRange: " << from << "-" << (from + len - 1);
+  VLOG(1) << "PopulateRange: " << from << "-" << (from + num_of_keys - 1);
 
-  string key = absl::StrCat(prefix, ":");
+  string key = absl::StrCat(options.prefix, ":");
   size_t prefsize = key.size();
   DbIndex db_indx = cntx_->db_index();
   EngineShardSet& ess = *shard_set;
   std::vector<PopulateBatch> ps(ess.size(), PopulateBatch{db_indx});
   SetCmd::SetParams params;
 
-  for (uint64_t i = from; i < from + len; ++i) {
-    StrAppend(&key, i);
-    ShardId sid = Shard(key, ess.size());
+  uint64_t index = from;
+  uint64_t added = 0;
+  while (added < num_of_keys) {
+    if ((index > from) && (index % num_of_keys == 0)) {
+      index = index - num_of_keys + options.total_count;
+    }
     key.resize(prefsize);  // shrink back
+    StrAppend(&key, index);
+
+    if (options.slot_range.has_value()) {
+      // Each fiber will add num_of_keys. Keys are in the form of <key_prefix>:<index>
+      // We need to make sure that different fibers will not add the same key.
+      // Fiber starting <key_prefix>:<from> to <key_prefix>:<num_of_keys-1>
+      // then continue to <key_prefix>:<total_count> to <key_prefix>:<total_count+num_of_keys-1>
+      // and continue until num_of_keys are added.
+
+      // Add keys only in slot range.
+      SlotId sid = ClusterConfig::KeySlot(key);
+      if (sid < options.slot_range->start || sid > options.slot_range->end) {
+        ++index;
+        continue;
+      }
+    }
+    ShardId sid = Shard(key, ess.size());
 
     auto& shard_batch = ps[sid];
-    shard_batch.index[shard_batch.sz++] = i;
-    if (shard_batch.sz == 32) {  // TODO what is this 32?
+    shard_batch.index[shard_batch.sz++] = index;
+    ++added;
+    ++index;
+
+    if (shard_batch.sz == 32) {
       ess.Add(sid, [=] {
-        DoPopulateBatch(prefix, value_len, populate_random_values, params, shard_batch);
-        if (i % 50 == 0) {
+        DoPopulateBatch(options.prefix, options.val_size, options.populate_random_values, params,
+                        shard_batch);
+        if (index % 50 == 0) {
           ThisFiber::Yield();
         }
       });
@@ -339,7 +405,8 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t len, std::string_view 
   }
 
   ess.RunBlockingInParallel([&](EngineShard* shard) {
-    DoPopulateBatch(prefix, value_len, populate_random_values, params, ps[shard->shard_id()]);
+    DoPopulateBatch(options.prefix, options.val_size, options.populate_random_values, params,
+                    ps[shard->shard_id()]);
   });
 }
 
