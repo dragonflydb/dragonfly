@@ -41,7 +41,7 @@ using SlotRange = ClusterConfig::SlotRange;
 
 constexpr string_view kClusterDisabled =
     "Cluster is disabled. Enabled via passing --cluster_mode=emulated|yes";
-constexpr string_view kClusterNotConfigured = "Cluster is not yet configured";
+constexpr string_view kDflyClusterCmdPort = "DflyCluster command allowed only under admin port";
 
 }  // namespace
 
@@ -374,7 +374,7 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (!cntx->owner()->IsAdmin()) {
-    return (*cntx)->SendError(kClusterDisabled);
+    return (*cntx)->SendError(kDflyClusterCmdPort);
   }
 
   CHECK(is_emulated_cluster_ || cluster_config_.get() != nullptr);
@@ -434,9 +434,10 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 }
 
 void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() == 2) {
+  if (args.size() <= 2) {
     return (*cntx)->SendError(facade::WrongNumArgsError("DFLYCLUSTER GETSLOTINFO"), kSyntaxErrType);
   }
+
   ToUpper(&args[1]);
   string_view slots_str = ArgS(args, 1);
   if (slots_str != "SLOTS") {
@@ -474,10 +475,14 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* c
   (*cntx)->StartArray(slots_stats.size());
 
   for (const auto& slot_data : slots_stats) {
-    (*cntx)->StartArray(3);
-    (*cntx)->SendBulkString(absl::StrCat(slot_data.first));
+    (*cntx)->StartArray(7);
+    (*cntx)->SendLong(slot_data.first);
     (*cntx)->SendBulkString("key_count");
-    (*cntx)->SendBulkString(absl::StrCat(slot_data.second.key_count));
+    (*cntx)->SendLong(static_cast<long>(slot_data.second.key_count));
+    (*cntx)->SendBulkString("total_reads");
+    (*cntx)->SendLong(static_cast<long>(slot_data.second.total_reads));
+    (*cntx)->SendBulkString("total_writes");
+    (*cntx)->SendLong(static_cast<long>(slot_data.second.total_writes));
   }
 }
 

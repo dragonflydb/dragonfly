@@ -338,6 +338,11 @@ pair<PrimeIterator, ExpireIterator> DbSlice::FindExt(const Context& cntx, string
 
   events_.hits++;
   db.top_keys.Touch(key);
+
+  if (ClusterConfig::IsClusterEnabled()) {
+    db.slots_stats[ClusterConfig::KeySlot(key)].total_reads += 1;
+  }
+
   return res;
 }
 
@@ -846,7 +851,8 @@ void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
   if (existing)
     stats->update_value_amount += value_heap_size;
 
-  auto& watched_keys = db_arr_[db_ind]->watched_keys;
+  auto& db = *db_arr_[db_ind];
+  auto& watched_keys = db.watched_keys;
   if (!watched_keys.empty()) {
     // Check if the key is watched.
     if (auto wit = watched_keys.find(key); wit != watched_keys.end()) {
@@ -856,6 +862,10 @@ void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
       // No connections need to watch it anymore.
       watched_keys.erase(wit);
     }
+  }
+
+  if (ClusterConfig::IsClusterEnabled()) {
+    db.slots_stats[ClusterConfig::KeySlot(key)].total_writes += 1;
   }
 }
 

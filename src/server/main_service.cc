@@ -593,6 +593,11 @@ void Service::Shutdown() {
 
 bool Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
                                  ConnectionContext* dfly_cntx) {
+  if (dfly_cntx->is_replicating) {
+    // Always allow commands on the replication port, as it might be for future-owned keys.
+    return true;
+  }
+
   if (cid->first_key_pos() == 0) {
     return true;  // No key command.
   }
@@ -624,6 +629,10 @@ bool Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
 
   // Check keys slot is in my ownership
   const auto& cluster_config = cluster_family_.cluster_config();
+  if (!cluster_config->IsConfigured()) {
+    (*dfly_cntx)->SendError(kClusterNotConfigured);
+    return false;
+  }
   if (keys_slot.has_value() && !cluster_config->IsMySlot(*keys_slot)) {
     // See more details here: https://redis.io/docs/reference/cluster-spec/#moved-redirection
     ClusterConfig::Node master = cluster_config->GetMasterNodeForSlot(*keys_slot);

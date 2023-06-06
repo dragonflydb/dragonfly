@@ -39,6 +39,8 @@ inline bool IsValid(ExpireIterator it) {
 
 struct SlotStats {
   uint64_t key_count = 0;
+  uint64_t total_reads = 0;
+  uint64_t total_writes = 0;
   SlotStats& operator+=(const SlotStats& o);
 };
 

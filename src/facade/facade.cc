@@ -81,6 +81,7 @@ const char kScriptErrType[] = "script_error";
 const char kIndexOutOfRange[] = "index out of range";
 const char kOutOfMemory[] = "Out of memory";
 const char kInvalidNumericResult[] = "result is not a number";
+const char kClusterNotConfigured[] = "Cluster is not yet configured";
 
 const char* RespExpr::TypeName(Type t) {
   switch (t) {

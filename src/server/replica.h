@@ -177,7 +177,9 @@ class Replica {
 
   // This function uses parser_ and cmd_args_ in order to consume a single response
   // from the sock_. The output will reside in cmd_str_args_.
-  std::error_code ReadRespReply(base::IoBuf* io_buf, uint32_t* consumed);
+  // For error reporting purposes, the parsed command would be in last_resp_.
+  // If io_buf is not given, a temporary buffer will be used.
+  std::error_code ReadRespReply(base::IoBuf* buffer = nullptr);
 
   std::error_code ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* header);
   std::error_code ReadLine(base::IoBuf* io_buf, std::string_view* line);
@@ -192,6 +194,10 @@ class Replica {
 
   // Send command, update last_io_time, return error.
   std::error_code SendCommand(std::string_view command, facade::ReqSerializer* serializer);
+  // Send command, read response into resp_args_.
+  std::error_code SendCommandAndReadResponse(std::string_view command,
+                                             facade::ReqSerializer* serializer,
+                                             base::IoBuf* buffer = nullptr);
 
   void ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context* cntx);
   void InsertTxDataToShardResource(TransactionData&& tx_data);
@@ -267,6 +273,9 @@ class Replica {
   std::optional<base::IoBuf> leftover_buf_;
   std::unique_ptr<facade::RedisParser> parser_;
   facade::RespVec resp_args_;
+  base::IoBuf resp_buf_;
+  std::string last_cmd_;
+  std::string last_resp_;
   facade::CmdArgVec cmd_str_args_;
 
   Context cntx_;  // context for tasks in replica.
