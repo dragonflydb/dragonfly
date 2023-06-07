@@ -129,15 +129,73 @@ jobs:
             # will set tag like 'v0.12.0-(ubuntu|alpine)', if inputs.release_version is not empty
             type=raw,value=${{ inputs.release_version }}-${{ matrix.flavor }},enable=${{ inputs.release_version != '' }}
 
+      #  build is broken based on platforms as load: true is not supported with multi-platform builds
       - if: ${{ hashFiles(format('{0}-{1}', matrix.dockerfile, inputs.build_type)) }}
-        name: Build release image
+        name: Build release image for amd64
+        uses: docker/build-push-action@v3
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: |
+            QEMU_CPU=max,pauth-impdef=on
+          push: false
+          tags: |
+            ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          file: ${{ matrix.dockerfile }}-${{ inputs.build_type }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # only load AMD64 image for testing
+          load: true
+
+      - if: ${{ hashFiles(format('{0}-{1}', matrix.dockerfile, inputs.build_type)) }}
+        name: Build release image for arm64
+        uses: docker/build-push-action@v3
+        with:
+            context: .
+            platforms: linux/arm64
+            build-args: |
+              QEMU_CPU=max,pauth-impdef=on
+            push: false
+            tags: |
+              ${{ steps.metadata.outputs.tags }}
+            labels: ${{ steps.metadata.outputs.labels }}
+            file: ${{ matrix.dockerfile }}-${{ inputs.build_type }}
+            cache-from: type=gha
+            cache-to: type=gha,mode=max
+
+      - name: Test Docker run
+        run: |
+          # docker run with port-forwarding
+          # install redis-tools
+          sudo apt-get install redis-tools -y
+          tag="${{ steps.metadata.outputs.tags }}"
+          # use the first tag if multiple tags are provided
+          if [[ $(echo "${tag}" | wc -l) -gt 1 ]]; then
+            echo "Multiple tags provided, using the first one"
+            tag=$(echo "${tag}" | head -n 1)
+          fi
+          echo "Testing ${tag}"
+          docker run -d -p 6379:6379 ${tag}
+          sleep 5
+          # ping with redis-cli and expect PONG
+          if [[ $(redis-cli -h localhost ping) != "PONG" ]]; then
+            echo "Redis ping failed"
+            exit 1
+          else
+            echo "Redis ping succeeded"
+            exit 0
+          fi
+
+      - if: ${{ hashFiles(format('{0}-{1}', matrix.dockerfile, inputs.build_type)) }}
+        name: Push release image
         uses: docker/build-push-action@v3
         with:
           context: .
           platforms: linux/amd64,linux/arm64
+          push: true
           build-args: |
             QEMU_CPU=max,pauth-impdef=on
-          push: true
           tags: |
             ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
