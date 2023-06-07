@@ -374,6 +374,8 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
   flow->cleanup = [flow]() {
     flow->saver->Cancel();
     flow->TryShutdownSocket();
+    flow->full_sync_fb.JoinIfNeeded();
+    flow->saver.reset();
   };
 
   // Shard can be null for io thread.
@@ -393,9 +395,7 @@ void DflyCmd::StopFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
   }
 
   // Wait for full sync to finish.
-  if (flow->full_sync_fb.IsJoinable()) {
-    flow->full_sync_fb.Join();
-  }
+  flow->full_sync_fb.JoinIfNeeded();
 
   // Reset cleanup and saver
   flow->cleanup = []() {};
@@ -526,9 +526,7 @@ void DflyCmd::CancelReplication(uint32_t sync_id, shared_ptr<ReplicaInfo> replic
       flow->cleanup();
     }
 
-    if (flow->full_sync_fb.IsJoinable()) {
-      flow->full_sync_fb.Join();
-    }
+    flow->full_sync_fb.JoinIfNeeded();
   });
 
   // Remove ReplicaInfo from global map
