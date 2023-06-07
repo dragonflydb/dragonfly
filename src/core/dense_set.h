@@ -6,8 +6,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <memory_resource>
 #include <type_traits>
+
+#ifdef __clang__
+#include <experimental/memory_resource>
+namespace PMR_NS = std::experimental::pmr;
+#else
+#include <memory_resource>
+namespace PMR_NS = std::pmr;
+#endif
 
 namespace dfly {
 
@@ -166,9 +173,10 @@ class DenseSet {
   static_assert(sizeof(DenseLinkKey) == 2 * sizeof(uintptr_t));
 
  protected:
-  using LinkAllocator = std::pmr::polymorphic_allocator<DenseLinkKey>;
-  using ChainVectorIterator = std::pmr::vector<DensePtr>::iterator;
-  using ChainVectorConstIterator = std::pmr::vector<DensePtr>::const_iterator;
+  using LinkAllocator = PMR_NS::polymorphic_allocator<DenseLinkKey>;
+  using DensePtrAllocator = PMR_NS::polymorphic_allocator<DensePtr>;
+  using ChainVectorIterator = std::vector<DensePtr, DensePtrAllocator>::iterator;
+  using ChainVectorConstIterator = std::vector<DensePtr, DensePtrAllocator>::const_iterator;
 
   class IteratorBase {
    protected:
@@ -185,7 +193,9 @@ class DenseSet {
   };
 
  public:
-  explicit DenseSet(std::pmr::memory_resource* mr = std::pmr::get_default_resource());
+  using MemoryResource = PMR_NS::memory_resource;
+
+  explicit DenseSet(MemoryResource* mr = PMR_NS::get_default_resource());
   virtual ~DenseSet();
 
   size_t Size() const {
@@ -281,7 +291,7 @@ class DenseSet {
 
   bool Equal(DensePtr dptr, const void* ptr, uint32_t cookie) const;
 
-  std::pmr::memory_resource* mr() {
+  MemoryResource* mr() {
     return entries_.get_allocator().resource();
   }
 
@@ -330,7 +340,7 @@ class DenseSet {
   // If ptr is a link then it will be deleted internally.
   void Delete(DensePtr* prev, DensePtr* ptr);
 
-  std::pmr::vector<DensePtr> entries_;
+  std::vector<DensePtr, DensePtrAllocator> entries_;
 
   mutable size_t obj_malloc_used_ = 0;
   mutable uint32_t size_ = 0;

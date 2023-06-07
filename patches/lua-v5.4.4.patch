@@ -15,25 +15,27 @@ diff --git a/makefile b/makefile
 index d46e650c..e347e614 100644
 --- a/makefile
 +++ b/makefile
-@@ -66,13 +66,21 @@ LOCAL = $(TESTS) $(CWARNS)
- 
- 
+@@ -66,13 +66,23 @@ LOCAL = $(TESTS) $(CWARNS)
+
+
  # enable Linux goodies
 -MYCFLAGS= $(LOCAL) -std=c99 -DLUA_USE_LINUX -DLUA_USE_READLINE
 +MYCFLAGS= $(LOCAL) -std=c99 -g -O2 -DLUA_USE_LINUX
  MYLDFLAGS= $(LOCAL) -Wl,-E
 -MYLIBS= -ldl -lreadline
 +MYLIBS= -ldl
- 
+
 +uname_m := $(shell uname -m)
-+ifeq ($(uname_m),x86_64)
++
++# equivalent to: if $(uname_m) == x86_64 || $(uname_m) == amd64
++ifneq (, $(uname_m),x86_64,amd64)
 +OPTFLAGS= -march=sandybridge
 +else ifeq ($(uname_m), aarch64)
 +OPTFLAGS= -march=armv8.2-a+fp16+rcpc+dotprod+crypto
 +else
 +  $(error ERROR: unknown architecture $(uname_m))
 +endif
- 
+
  CC= gcc
 -CFLAGS= -Wall -O2 $(MYCFLAGS) -fno-stack-protector -fno-common -march=native
 +CFLAGS= -Wall -O2 $(MYCFLAGS) -fno-stack-protector -fno-common $(OPTFLAGS)

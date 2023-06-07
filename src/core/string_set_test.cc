@@ -32,7 +32,7 @@ namespace dfly {
 using namespace std;
 using absl::StrCat;
 
-class DenseSetAllocator : public pmr::memory_resource {
+class DenseSetAllocator : public PMR_NS::memory_resource {
  public:
   bool all_freed() const {
     return alloced_ == 0;
@@ -40,17 +40,17 @@ class DenseSetAllocator : public pmr::memory_resource {
 
   void* do_allocate(size_t bytes, size_t alignment) override {
     alloced_ += bytes;
-    void* p = pmr::new_delete_resource()->allocate(bytes, alignment);
+    void* p = PMR_NS::new_delete_resource()->allocate(bytes, alignment);
     return p;
   }
 
   void do_deallocate(void* p, size_t bytes, size_t alignment) override {
     alloced_ -= bytes;
-    return pmr::new_delete_resource()->deallocate(p, bytes, alignment);
+    return PMR_NS::new_delete_resource()->deallocate(p, bytes, alignment);
   }
 
-  bool do_is_equal(const pmr::memory_resource& other) const noexcept override {
-    return pmr::new_delete_resource()->is_equal(other);
+  bool do_is_equal(const PMR_NS::memory_resource& other) const noexcept override {
+    return PMR_NS::new_delete_resource()->is_equal(other);
   }
 
  private:

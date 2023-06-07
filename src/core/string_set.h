@@ -20,7 +20,7 @@ namespace dfly {
 
 class StringSet : public DenseSet {
  public:
-  StringSet(std::pmr::memory_resource* res = std::pmr::get_default_resource()) : DenseSet(res) {
+  StringSet(MemoryResource* res = PMR_NS::get_default_resource()) : DenseSet(res) {
   }
 
   ~StringSet();

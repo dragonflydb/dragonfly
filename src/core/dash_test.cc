@@ -83,7 +83,7 @@ struct RelaxedBumpPolicy {
   }
 };
 
-class CappedResource final : public std::pmr::memory_resource {
+class CappedResource final : public PMR_NS::memory_resource {
  public:
   explicit CappedResource(size_t cap) : cap_(cap) {
   }
@@ -97,7 +97,7 @@ class CappedResource final : public std::pmr::memory_resource {
     if (used_ + size > cap_)
       throw std::bad_alloc{};
 
-    void* res = pmr::get_default_resource()->allocate(size, align);
+    void* res = PMR_NS::get_default_resource()->allocate(size, align);
     used_ += size;
 
     return res;
@@ -105,10 +105,10 @@ class CappedResource final : public std::pmr::memory_resource {
 
   void do_deallocate(void* ptr, std::size_t size, std::size_t align) {
     used_ -= size;
-    pmr::get_default_resource()->deallocate(ptr, size, align);
+    PMR_NS::get_default_resource()->deallocate(ptr, size, align);
   }
 
-  bool do_is_equal(const std::pmr::memory_resource& o) const noexcept {
+  bool do_is_equal(const PMR_NS::memory_resource& o) const noexcept {
     return this == &o;
   }
 
@@ -803,7 +803,6 @@ struct BlankPolicy : public BasicDashPolicy {
     return v;
   }
 };
-
 
 // The bug was that for very rare cases when during segment splitting we move all the items
 // into a new segment, not every item finds a place.

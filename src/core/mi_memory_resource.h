@@ -6,11 +6,17 @@
 
 #include <mimalloc.h>
 
+#ifdef __clang__
+#include <experimental/memory_resource>
+namespace PMR_NS = std::experimental::pmr;
+#else
 #include <memory_resource>
+namespace PMR_NS = std::pmr;
+#endif
 
 namespace dfly {
 
-class MiMemoryResource : public std::pmr::memory_resource {
+class MiMemoryResource : public PMR_NS::memory_resource {
  public:
   explicit MiMemoryResource(mi_heap_t* heap) : heap_(heap) {
   }
@@ -28,7 +34,7 @@ class MiMemoryResource : public std::pmr::memory_resource {
 
   void do_deallocate(void* ptr, std::size_t size, std::size_t align) final;
 
-  bool do_is_equal(const std::pmr::memory_resource& o) const noexcept {
+  bool do_is_equal(const PMR_NS::memory_resource& o) const noexcept {
     return this == &o;
   }
 

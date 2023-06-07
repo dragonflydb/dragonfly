@@ -37,7 +37,7 @@ class SdsPair {
 
 class StringMap : public DenseSet {
  public:
-  StringMap(std::pmr::memory_resource* res = std::pmr::get_default_resource()) : DenseSet(res) {
+  StringMap(MemoryResource* res = PMR_NS::get_default_resource()) : DenseSet(res) {
   }
 
   ~StringMap();

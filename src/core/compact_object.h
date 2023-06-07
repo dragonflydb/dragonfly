@@ -6,7 +6,14 @@
 
 #include <absl/base/internal/endian.h>
 
+#ifdef __clang__
+#include <experimental/memory_resource>
+namespace PMR_NS = std::experimental::pmr;
+#else
 #include <memory_resource>
+namespace PMR_NS = std::pmr;
+#endif
+
 #include <optional>
 
 #include "core/json_object.h"
@@ -26,6 +33,8 @@ namespace detail {
 // redis objects or blobs of upto 4GB size.
 class RobjWrapper {
  public:
+  using MemoryResource = PMR_NS::memory_resource;
+
   RobjWrapper() {
   }
   size_t MallocUsed() const;
@@ -34,9 +43,9 @@ class RobjWrapper {
   bool Equal(const RobjWrapper& ow) const;
   bool Equal(std::string_view sv) const;
   size_t Size() const;
-  void Free(std::pmr::memory_resource* mr);
+  void Free(MemoryResource* mr);
 
-  void SetString(std::string_view s, std::pmr::memory_resource* mr);
+  void SetString(std::string_view s, MemoryResource* mr);
   void Init(unsigned type, unsigned encoding, void* inner);
 
   unsigned type() const {
@@ -56,9 +65,9 @@ class RobjWrapper {
   bool DefragIfNeeded(float ratio);
 
  private:
-  bool Reallocate(std::pmr::memory_resource* mr);
+  bool Reallocate(MemoryResource* mr);
   size_t InnerObjMallocUsed() const;
-  void MakeInnerRoom(size_t current_cap, size_t desired, std::pmr::memory_resource* mr);
+  void MakeInnerRoom(size_t current_cap, size_t desired, MemoryResource* mr);
 
   void Set(void* p, uint32_t s) {
     inner_obj_ = p;
@@ -106,6 +115,7 @@ class CompactObj {
 
  public:
   using PrefixArray = std::vector<std::string_view>;
+  using MemoryResource = detail::RobjWrapper::MemoryResource;
 
   CompactObj() {  // By default - empty string.
   }
@@ -291,8 +301,8 @@ class CompactObj {
 
   static Stats GetStats();
 
-  static void InitThreadLocal(std::pmr::memory_resource* mr);
-  static std::pmr::memory_resource* memory_resource();  // thread-local.
+  static void InitThreadLocal(MemoryResource* mr);
+  static MemoryResource* memory_resource();  // thread-local.
 
  private:
   size_t DecodedLen(size_t sz) const;
@@ -408,3 +418,5 @@ class CompactObjectView {
 };
 
 }  // namespace dfly
+
+#undef PMR_NS

@@ -1,9 +1,17 @@
+
+if ("${CMAKE_SYSTEM_NAME}" STREQUAL "FreeBSD")
+  set(DFLY_TOOLS_MAKE "gmake")
+else()
+  set(DFLY_TOOLS_MAKE "make")
+endif()
+
 add_third_party(
   lua
   URL https://github.com/lua/lua/archive/refs/tags/v5.4.4.tar.gz
   PATCH_COMMAND patch -p1 -i "${CMAKE_SOURCE_DIR}/patches/lua-v5.4.4.patch"
   CONFIGURE_COMMAND echo
   BUILD_IN_SOURCE 1
+  BUILD_COMMAND ${DFLY_TOOLS_MAKE} all
   INSTALL_COMMAND cp <SOURCE_DIR>/liblua.a ${THIRD_PARTY_LIB_DIR}/lua/lib/
   COMMAND cp <SOURCE_DIR>/lualib.h <SOURCE_DIR>/lua.h <SOURCE_DIR>/lauxlib.h
           <SOURCE_DIR>/luaconf.h ${THIRD_PARTY_LIB_DIR}/lua/include
@@ -64,8 +72,8 @@ add_third_party(
 
   BUILD_IN_SOURCE 1
   CONFIGURE_COMMAND echo skip
-  BUILD_COMMAND make lib-release
-  INSTALL_COMMAND make install BUILD_SHARED=no PREFIX=${THIRD_PARTY_LIB_DIR}/lz4
+  BUILD_COMMAND ${DFLY_TOOLS_MAKE} lib-release
+  INSTALL_COMMAND ${DFLY_TOOLS_MAKE} install BUILD_SHARED=no PREFIX=${THIRD_PARTY_LIB_DIR}/lz4
 )
 
 add_library(TRDP::jsoncons INTERFACE IMPORTED)

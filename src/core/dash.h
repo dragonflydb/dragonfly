@@ -3,7 +3,14 @@
 //
 #pragma once
 
+#ifdef __clang__
+#include <experimental/memory_resource>
+namespace PMR_NS = std::experimental::pmr;
+#else
 #include <memory_resource>
+namespace PMR_NS = std::pmr;
+#endif
+
 #include <vector>
 
 #include "core/dash_internal.h"
@@ -127,7 +134,7 @@ class DashTable : public detail::DashTableBase {
   };
 
   DashTable(size_t capacity_log = 1, const Policy& policy = Policy{},
-            std::pmr::memory_resource* mr = std::pmr::get_default_resource());
+            PMR_NS::memory_resource* mr = PMR_NS::get_default_resource());
   ~DashTable();
 
   void Reserve(size_t size);
@@ -291,7 +298,7 @@ class DashTable : public detail::DashTableBase {
   }
 
   Policy policy_;
-  std::pmr::vector<SegmentType*> segment_;
+  std::vector<SegmentType*, PMR_NS::polymorphic_allocator<SegmentType*>> segment_;
 
   uint64_t garbage_collected_ = 0;
   uint64_t stash_unloaded_ = 0;
@@ -474,10 +481,10 @@ void DashTable<_Key, _Value, Policy>::Iterator<IsConst, IsSingleBucket>::Seek2Oc
 
 template <typename _Key, typename _Value, typename Policy>
 DashTable<_Key, _Value, Policy>::DashTable(size_t capacity_log, const Policy& policy,
-                                           std::pmr::memory_resource* mr)
+                                           PMR_NS::memory_resource* mr)
     : Base(capacity_log), policy_(policy), segment_(mr) {
   segment_.resize(unique_segments_);
-  std::pmr::polymorphic_allocator<SegmentType> pa(mr);
+  PMR_NS::polymorphic_allocator<SegmentType> pa(mr);
 
   // I assume we have enough memory to create the initial table and do not check allocations.
   for (auto& ptr : segment_) {
@@ -490,7 +497,7 @@ template <typename _Key, typename _Value, typename Policy>
 DashTable<_Key, _Value, Policy>::~DashTable() {
   Clear();
   auto* resource = segment_.get_allocator().resource();
-  std::pmr::polymorphic_allocator<SegmentType> pa(resource);
+  PMR_NS::polymorphic_allocator<SegmentType> pa(resource);
   using alloc_traits = std::allocator_traits<decltype(pa)>;
 
   IterateDistinct([&](SegmentType* seg) {
@@ -574,7 +581,7 @@ void DashTable<_Key, _Value, Policy>::Clear() {
      and then erase all other distinct segments.
   **********/
   if (global_depth_ > initial_depth_) {
-    std::pmr::polymorphic_allocator<SegmentType> pa(segment_.get_allocator());
+    PMR_NS::polymorphic_allocator<SegmentType> pa(segment_.get_allocator());
     using alloc_traits = std::allocator_traits<decltype(pa)>;
 
     size_t dest = 0, src = 0;
@@ -837,7 +844,7 @@ void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id) {
   size_t chunk_size = 1u << (global_depth_ - source->local_depth());
   size_t start_idx = seg_id & (~(chunk_size - 1));
   assert(segment_[start_idx] == source && segment_[start_idx + chunk_size - 1] == source);
-  std::pmr::polymorphic_allocator<SegmentType> alloc(segment_.get_allocator().resource());
+  PMR_NS::polymorphic_allocator<SegmentType> alloc(segment_.get_allocator().resource());
   SegmentType* target = alloc.allocate(1);
   alloc.construct(target, source->local_depth() + 1);
 
