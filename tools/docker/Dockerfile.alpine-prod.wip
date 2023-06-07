@@ -14,7 +14,7 @@ RUN ninja dragonfly
 FROM alpine:latest
 
 RUN addgroup -S -g 1000 dfly && adduser -S -G dfly -u 999 dfly
-RUN apk --no-cache add libgcc libstdc++ libunwind boost1.77-fiber \
+RUN apk --no-cache add libgcc libstdc++ libunwind boost1.77-fiber libxml2 \
     'su-exec>=0.2' netcat-openbsd openssl
 
 RUN mkdir /data && chown dfly:dfly /data
