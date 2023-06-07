@@ -190,4 +190,23 @@ TEST_F(SearchFamilyTest, Numbers) {
   */
 }
 
+TEST_F(SearchFamilyTest, TestLimit) {
+  for (unsigned i = 0; i < 20; i++)
+    Run({"hset", to_string(i), "match", "all"});
+  Run({"ft.create", "i1", "SCHEMA", "match", "text"});
+
+  // Default limit is 10
+  auto resp = Run({"ft.search", "i1", "all"});
+  EXPECT_THAT(resp, ArrLen(10 * 2 + 1));
+
+  resp = Run({"ft.search", "i1", "all", "limit", "0", "0"});
+  EXPECT_THAT(resp, IntArg(20));
+
+  resp = Run({"ft.search", "i1", "all", "limit", "0", "5"});
+  EXPECT_THAT(resp, ArrLen(5 * 2 + 1));
+
+  resp = Run({"ft.search", "i1", "all", "limit", "17", "5"});
+  EXPECT_THAT(resp, ArrLen(3 * 2 + 1));
+}
+
 }  // namespace dfly

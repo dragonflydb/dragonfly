@@ -19,6 +19,15 @@ namespace dfly {
 using SearchDocData = absl::flat_hash_map<std::string /*field*/, std::string /*value*/>;
 using SerializedSearchDoc = std::pair<std::string /*key*/, SearchDocData>;
 
+struct SearchResult {
+  std::vector<SerializedSearchDoc> docs;
+  size_t total_hits;
+};
+
+struct SearchParams {
+  size_t limit_offset, limit_total;
+};
+
 // Stores basic info about a document index.
 struct DocIndex {
   enum DataType { HASH, JSON };
@@ -52,8 +61,8 @@ class ShardDocIndex {
   ShardDocIndex(std::shared_ptr<DocIndex> index);
 
   // Perform search on all indexed documents and return results.
-  std::vector<SerializedSearchDoc> Search(const OpArgs& op_args,
-                                          search::SearchAlgorithm* search_algo) const;
+  SearchResult Search(const OpArgs& op_args, const SearchParams& params,
+                      search::SearchAlgorithm* search_algo) const;
 
   // Initialize index. Traverses all matching documents and assigns ids.
   void Init(const OpArgs& op_args);
