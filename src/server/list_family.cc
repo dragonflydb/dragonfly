@@ -1050,7 +1050,7 @@ void ListFamily::LInsert(CmdArgList args, ConnectionContext* cntx) {
   string_view elem = ArgS(args, 3);
   int where;
 
-  ToUpper(&args[2]);
+  ToUpper(&args[1]);
   if (param == "AFTER") {
     where = LIST_TAIL;
   } else if (param == "BEFORE") {

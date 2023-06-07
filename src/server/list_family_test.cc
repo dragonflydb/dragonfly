@@ -768,4 +768,33 @@ TEST_F(ListFamilyTest, RPushX) {
   EXPECT_THAT(Run({"lrange", kKey1, "0", "-1"}).GetVec(), ElementsAre("val1", "val2"));
 }
 
+TEST_F(ListFamilyTest, LInsert) {
+  // List not found.
+  EXPECT_THAT(Run({"linsert", "notfound", "before", "foo", "bar"}), ErrArg("no such key"));
+
+  // Key is not a list.
+  Run({"set", "notalist", "x"});
+  EXPECT_THAT(Run({"linsert", "notalist", "before", "foo", "bar"}),
+              ErrArg("Operation against a key holding the wrong kind of value"));
+
+  // Insert before.
+  Run({"rpush", "mylist", "foo"});
+  EXPECT_THAT(Run({"linsert", "mylist", "before", "foo", "bar"}), IntArg(2));
+  auto resp = Run({"lrange", "mylist", "0", "1"});
+  ASSERT_THAT(resp, ArrLen(2));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("bar", "foo"));
+
+  // Insert after.
+  EXPECT_THAT(Run({"linsert", "mylist", "after", "foo", "car"}), IntArg(3));
+  resp = Run({"lrange", "mylist", "0", "2"});
+  ASSERT_THAT(resp, ArrLen(3));
+  ASSERT_THAT(resp.GetVec(), ElementsAre("bar", "foo", "car"));
+
+  // Insert before, pivot not found.
+  EXPECT_THAT(Run({"linsert", "mylist", "before", "notfound", "x"}), IntArg(-1));
+
+  // Insert after, pivot not found.
+  EXPECT_THAT(Run({"linsert", "mylist", "after", "notfound", "x"}), IntArg(-1));
+}
+
 }  // namespace dfly
