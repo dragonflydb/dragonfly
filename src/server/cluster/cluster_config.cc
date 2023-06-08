@@ -114,11 +114,11 @@ unique_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
   result->config_ = config;
 
   for (const auto& shard : result->config_) {
-    for (const auto& slot_range : shard.slot_ranges) {
-      bool owned_by_me =
-          shard.master.id == my_id || any_of(shard.replicas.begin(), shard.replicas.end(),
-                                             [&](const Node& node) { return node.id == my_id; });
-      if (owned_by_me) {
+    bool owned_by_me =
+        shard.master.id == my_id || any_of(shard.replicas.begin(), shard.replicas.end(),
+                                           [&](const Node& node) { return node.id == my_id; });
+    if (owned_by_me) {
+      for (const auto& slot_range : shard.slot_ranges) {
         for (SlotId i = slot_range.start; i <= slot_range.end; ++i) {
           result->my_slots_.set(i);
         }
