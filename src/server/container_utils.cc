@@ -20,6 +20,10 @@ extern "C" {
 #include "redis/zset.h"
 }
 
+namespace dfly {
+extern void _DebugAppend(std::string_view msg);
+}
+
 namespace dfly::container_utils {
 
 using namespace std;
@@ -192,8 +196,15 @@ string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]) {
   return std::string_view{reinterpret_cast<char*>(elem), size_t(ele_len)};
 }
 
+static thread_local absl::flat_hash_map<string_view, Transaction*> current_block_tx;
+
 OpResult<ShardFFResult> FindFirstNonEmptyKey(Transaction* trans, int req_obj_type) {
-  using FFResult = std::pair<PrimeKey, unsigned>;  // key, argument index.
+  // using FFResult = std::pair<PrimeKey, unsigned>;  // key, argument index.
+  struct FFResult {
+    PrimeKey first;
+    unsigned second;
+    string key;
+  };
   VLOG(2) << "FindFirst::Find " << trans->DebugId();
 
   // Holds Find results: (iterator to a found key, and its index in the passed arguments).
@@ -204,12 +215,45 @@ OpResult<ShardFFResult> FindFirstNonEmptyKey(Transaction* trans, int req_obj_typ
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     auto args = t->GetShardArgs(shard->shard_id());
+    if (args.size() == 1) {
+      string_view key = args[0];
+      auto res = current_block_tx.emplace(key, t);
+      if (!res.second) {
+        Transaction* current_block_tx = res.first->second;
+        LOG(ERROR) << "Concurrent transactions are running " << key << " "
+                   << current_block_tx->DebugId() << " - "
+                   << current_block_tx->GetLocalMask(shard->shard_id()) << " "
+                   << current_block_tx->IsOOO() << "\n and " << t->DebugId() << " - "
+                   << t->GetLocalMask(shard->shard_id()) << " " << t->IsOOO() << " - "
+                   << shard->shard_id() << " " << current_block_tx->IsMulti() << " " << t->IsMulti()
+                   << " " << current_block_tx->full_args().size();
+        if (shard->GetContTx()) {
+          LOG(ERROR) << "GetContTx: " << shard->GetContTx()->DebugId() << " - "
+                     << shard->GetContTx()->GetLocalMask(shard->shard_id()) << " "
+                     << shard->GetContTx()->IsOOO();
+        }
+        LOG(FATAL) << "Internal error !: " << current_block_tx->GetLocalTxqPos(shard->shard_id())
+                   << " " << t->GetLocalTxqPos(shard->shard_id()) << " " << shard->txq()->Head()
+                   << "\n ";
+      }
+    }
     OpResult<std::pair<PrimeIterator, unsigned>> ff_res =
         shard->db_slice().FindFirst(t->GetDbContext(), args, req_obj_type);
 
     if (ff_res) {
-      FFResult ff_result(ff_res->first->first.AsRef(), ff_res->second);
+      FFResult ff_result;
+      ff_result.first = ff_res->first->first.AsRef();
+      ff_result.second = ff_res->second;
+      ff_res->first->first.GetString(&ff_result.key);
       find_res[shard->shard_id()] = std::move(ff_result);
+      _DebugAppend(absl::StrCat("found_first: ", ff_result.key, " ", t->DebugId(), " ",
+                                ff_result.second, " ", t->full_args().size(), " ", args.size(), " ",
+                                t->GetLocalMask(shard->shard_id()), " ", t->IsOOO()));
+      if (shard->GetContTx()) {
+        _DebugAppend(absl::StrCat("contx: ", shard->GetContTx()->DebugId(), " ",
+                                  shard->GetContTx()->GetLocalMask(shard->shard_id()), " ",
+                                  shard->GetContTx()->IsOOO()));
+      }
     } else {
       find_res[shard->shard_id()] = ff_res.status();
     }
@@ -234,7 +278,7 @@ OpResult<ShardFFResult> FindFirstNonEmptyKey(Transaction* trans, int req_obj_typ
     }
     CHECK(fr);
 
-    const auto& it_pos = fr.value();
+    const FFResult& it_pos = fr.value();
 
     size_t arg_indx = trans->ReverseArgIndex(sid, it_pos.second);
     if (arg_indx < min_arg_indx) {
@@ -245,6 +289,7 @@ OpResult<ShardFFResult> FindFirstNonEmptyKey(Transaction* trans, int req_obj_typ
       // ok to just move it. We can not dereference it due to limitations of SmallString
       // that rely on thread-local data-structure for pointer translation.
       shard_result.key = it_pos.first.AsRef();
+      shard_result.key2 = it_pos.key;
     }
   }
 
@@ -271,12 +316,28 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     // Close transaction and return.
     if (is_multi) {
-      auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
+      auto cb = [](Transaction* t, EngineShard* shard) {
+        auto args = t->GetShardArgs(shard->shard_id());
+        if (args.size() == 1) {
+          string_view key = args[0];
+          CHECK_EQ(1u, current_block_tx.erase(key)) << key;
+        }
+        return OpStatus::OK;
+      };
+
       trans->Execute(std::move(cb), true);
       return OpStatus::TIMED_OUT;
     }
 
     auto wcb = [](Transaction* t, EngineShard* shard) {
+      auto args = t->GetShardArgs(shard->shard_id());
+      if (args.size() == 1) {
+        string_view key = args[0];
+        auto it = current_block_tx.find(key);
+        if (it != current_block_tx.end() && it->second == t) {
+          current_block_tx.erase(it);
+        }
+      }
       return t->GetShardArgs(shard->shard_id());
     };
 
@@ -288,15 +349,32 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
   } else {
     // Could be the wrong-type error.
     // cleanups, locks removal etc.
-    auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
+    auto cb = [](Transaction* t, EngineShard* shard) {
+      auto args = t->GetShardArgs(shard->shard_id());
+      if (args.size() == 1) {
+        string_view key = args[0];
+        CHECK_EQ(1u, current_block_tx.erase(key)) << key;
+      }
+      return OpStatus::OK;
+    };
     trans->Execute(std::move(cb), true);
 
     DCHECK_NE(result.status(), OpStatus::KEY_NOTFOUND);
+
     return result.status();
   }
 
   string result_key;
   auto cb = [&](Transaction* t, EngineShard* shard) {
+    auto args = t->GetShardArgs(shard->shard_id());
+    if (args.size() == 1) {
+      string_view key = args[0];
+      auto it = current_block_tx.find(key);
+      if (it != current_block_tx.end() && it->second == t) {
+        current_block_tx.erase(it);
+      }
+    }
+
     if (auto wake_key = t->GetWakeKey(shard->shard_id()); wake_key) {
       result_key = *wake_key;
       func(t, shard, result_key);

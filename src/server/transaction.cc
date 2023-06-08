@@ -455,6 +455,10 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
   DCHECK(IsGlobal() || (sd.local_mask & KEYLOCK_ACQUIRED) || (multi_ && multi_->mode == GLOBAL));
 
+  if (txq_ooo) {
+    DCHECK(sd.local_mask & OUT_OF_ORDER);
+  }
+
   /*************************************************************************/
   // Actually running the callback.
   // If you change the logic here, also please change the logic
@@ -529,7 +533,6 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
     // 1: to go over potential wakened keys, verify them and activate watch queues.
     // 2: if this transaction was notified and finished running - to remove it from the head
     //    of the queue and notify the next one.
-    // RunStep is also called for global transactions because of commands like MOVE.
     if (auto* bcontroller = shard->blocking_controller(); bcontroller) {
       if (awaked_prerun || was_suspended) {
         bcontroller->FinalizeWatched(largs, this);
@@ -929,6 +932,8 @@ void Transaction::UnwatchBlocking(bool should_expire, WaitKeysProvider wcb) {
 
   IterateActiveShards([&expire_cb](PerShardData& sd, auto i) { shard_set->Add(i, expire_cb); });
 
+  DCHECK(!fb2::detail::FiberActive()->wait_hook.is_linked());
+
   // Wait for all callbacks to conclude.
   WaitForShardCallbacks();
   DVLOG(1) << "UnwatchBlocking finished " << DebugId();
@@ -1130,7 +1135,9 @@ bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provi
   cv_status status = cv_status::no_timeout;
   if (tp == time_point::max()) {
     DVLOG(1) << "WaitOnWatch foreva " << DebugId();
+    DCHECK(!fb2::detail::FiberActive()->wait_hook.is_linked());
     blocking_ec_.await(move(wake_cb));
+    DCHECK(!fb2::detail::FiberActive()->wait_hook.is_linked());
     DVLOG(1) << "WaitOnWatch AfterWait";
   } else {
     DVLOG(1) << "WaitOnWatch TimeWait for "
@@ -1163,6 +1170,7 @@ OpStatus Transaction::WatchInShard(ArgSlice keys, EngineShard* shard) {
 
   sd.local_mask |= SUSPENDED_Q;
   sd.local_mask &= ~OUT_OF_ORDER;
+
   DVLOG(2) << "AddWatched " << DebugId() << " local_mask:" << sd.local_mask
            << ", first_key:" << keys.front();
 
@@ -1225,6 +1233,7 @@ void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, E
   }
 
   auto& sd = shard_data_[SidToId(shard->shard_id())];
+  sd.local_mask |= UNLOCK_MULTI;
 
   // It does not have to be that all shards in multi transaction execute this tx.
   // Hence it could stay in the tx queue. We perform the necessary cleanup and remove it from

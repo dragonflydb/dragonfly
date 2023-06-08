@@ -259,10 +259,10 @@ void BlockingController::AddWatched(ArgSlice keys, Transaction* trans) {
 }
 
 // Called from commands like lpush.
-void BlockingController::AwakeWatched(DbIndex db_index, string_view db_key) {
+bool BlockingController::AwakeWatched(DbIndex db_index, string_view db_key) {
   auto it = watched_dbs_.find(db_index);
   if (it == watched_dbs_.end())
-    return;
+    return false;
 
   DbWatchTable& wt = *it->second;
   DCHECK(!wt.queue_map.empty());
@@ -271,7 +271,9 @@ void BlockingController::AwakeWatched(DbIndex db_index, string_view db_key) {
     VLOG(1) << "AwakeWatched: db(" << db_index << ") " << db_key;
 
     awakened_indices_.insert(db_index);
+    return true;
   }
+  return false;
 }
 
 // Marks the queue as active and notifies the first transaction in the queue.

@@ -83,6 +83,7 @@ std::optional<std::string_view> LpFind(uint8_t* lp, std::string_view key, uint8_
 
 struct ShardFFResult {
   PrimeKey key;
+  std::string key2;
   ShardId sid = kInvalidSid;
 };
 

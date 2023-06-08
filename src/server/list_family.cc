@@ -155,7 +155,7 @@ struct CircularMessages {
 
 // Temporary debug measures. Trace what happens with list keys on given shard.
 // Used to recover logs for BLPOP failures. See OpBPop.
-thread_local CircularMessages debugMessages{100};
+thread_local CircularMessages debugMessages{50};
 
 class BPopPusher {
  public:
@@ -200,7 +200,7 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
   PrimeIterator it = *it_res;
   quicklist* ql = GetQL(it->second);
 
-  absl::StrAppend(debugMessages.Next(), "OpBPop", key, " by ", t->DebugId());
+  absl::StrAppend(debugMessages.Next(), "OpBPop: ", key, " by ", t->DebugId());
 
   db_slice.PreUpdate(t->GetDbIndex(), it);
   std::string value = ListPop(dir, ql);
@@ -356,9 +356,9 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
       string tmp;
       string_view key = it->first.GetSlice(&tmp);
 
-      absl::StrAppend(debugMessages.Next(), "OpPush AwakeWatched: ", string{key}, " by ",
-                      op_args.tx->DebugId(), " expire: ", it->second.HasExpire());
-      es->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, key);
+      bool res = es->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, key);
+      absl::StrAppend(debugMessages.Next(), "OpPush AwakeWatched: ", key, " by ",
+                      op_args.tx->DebugId(), " res: ", res);
     }
   } else {
     es->db_slice().PostUpdate(op_args.db_cntx.db_index, it, key, true);
@@ -692,7 +692,6 @@ OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
   db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
 
   if (quicklistCount(ql) == 0) {
-    absl::StrAppend(debugMessages.Next(), "OpTrim Del: ", key, " by ", op_args.tx->DebugId());
     CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
   }
   return OpStatus::OK;
@@ -922,6 +921,10 @@ OpResult<string> BPopPusher::RunPair(Transaction* t, time_point tp) {
 }
 
 }  // namespace
+
+void _DebugAppend(string_view msg) {
+  debugMessages.Next()->assign(msg);
+}
 
 void ListFamily::LPush(CmdArgList args, ConnectionContext* cntx) {
   return PushGeneric(ListDir::LEFT, false, std::move(args), cntx);
@@ -1197,8 +1200,6 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
   VLOG(1) << "BPop timeout(" << timeout << ")";
 
   Transaction* transaction = cntx->transaction;
-
-  absl::StrAppend(debugMessages.Next(), "BPopGeneric by ", transaction->DebugId());
 
   std::string popped_value;
   auto cb = [dir, &popped_value](Transaction* t, EngineShard* shard, std::string_view key) {

@@ -42,7 +42,8 @@ class BlockingController {
   void AddWatched(ArgSlice watch_keys, Transaction* me);
 
   // Called from operations that create keys like lpush, rename etc.
-  void AwakeWatched(DbIndex db_index, std::string_view db_key);
+  // Returns true if a notification was added.
+  bool AwakeWatched(DbIndex db_index, std::string_view db_key);
 
   // Used in tests and debugging functions.
   size_t NumWatched(DbIndex db_indx) const;
