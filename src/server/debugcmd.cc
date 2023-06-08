@@ -79,7 +79,11 @@ void DoPopulateBatch(std::string_view prefix, size_t val_size, bool random_value
       }
     }
 
-    sg.Set(params, key, val);
+    auto res = sg.Set(params, key, val);
+    if (!res) {
+      LOG_EVERY_N(WARNING, 10'000) << "Debug populate failed to set value. Status:" << res.status();
+      return;
+    }
   }
 }
 
@@ -361,20 +365,22 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
   SetCmd::SetParams params;
 
   uint64_t index = from;
+  uint64_t to = from + num_of_keys;
   uint64_t added = 0;
   while (added < num_of_keys) {
-    if ((index > from) && (index % num_of_keys == 0)) {
+    if ((index >= to) && ((index - to) % options.total_count == 0)) {
       index = index - num_of_keys + options.total_count;
     }
     key.resize(prefsize);  // shrink back
+
     StrAppend(&key, index);
 
     if (options.slot_range.has_value()) {
       // Each fiber will add num_of_keys. Keys are in the form of <key_prefix>:<index>
       // We need to make sure that different fibers will not add the same key.
-      // Fiber starting <key_prefix>:<from> to <key_prefix>:<num_of_keys-1>
-      // then continue to <key_prefix>:<total_count> to <key_prefix>:<total_count+num_of_keys-1>
-      // and continue until num_of_keys are added.
+      // Fiber starting <key_prefix>:<from> to <key_prefix>:<from+num_of_keys-1>
+      // then continue to <key_prefix>:<from+total_count> to
+      // <key_prefix>:<from+total_count+num_of_keys-1> and continue until num_of_keys are added.
 
       // Add keys only in slot range.
       SlotId sid = ClusterConfig::KeySlot(key);
