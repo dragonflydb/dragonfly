@@ -628,8 +628,8 @@ bool Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
   }
 
   // Check keys slot is in my ownership
-  const auto& cluster_config = cluster_family_.cluster_config();
-  if (!cluster_config->IsConfigured()) {
+  const ClusterConfig* cluster_config = cluster_family_.cluster_config();
+  if (cluster_config == nullptr) {
     (*dfly_cntx)->SendError(kClusterNotConfigured);
     return false;
   }

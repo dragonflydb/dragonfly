@@ -8,7 +8,8 @@
 #include <absl/container/flat_hash_set.h>
 
 #include <array>
-#include <optional>
+#include <bitset>
+#include <memory>
 #include <string_view>
 #include <vector>
 
@@ -43,9 +44,13 @@ class ClusterConfig {
 
   using ClusterShards = std::vector<ClusterShard>;
 
-  explicit ClusterConfig(std::string_view my_id);
+  ClusterConfig& operator=(const ClusterConfig&) = default;
 
   static SlotId KeySlot(std::string_view key);
+
+  static void EnableCluster() {
+    cluster_enabled = true;
+  }
 
   static bool IsClusterEnabled() {
     return cluster_enabled;
@@ -54,24 +59,24 @@ class ClusterConfig {
   // If the key contains the {...} pattern, return only the part between { and }
   static std::string_view KeyTag(std::string_view key);
 
+  // Returns an instance with `config` if it is valid.
+  // Returns heap-allocated object as it is too big for a stack frame.
+  static std::unique_ptr<ClusterConfig> CreateFromConfig(std::string_view my_id,
+                                                         const ClusterShards& config);
+
+  // Parses `json_config` into `ClusterShards` and calls the above overload.
+  static std::unique_ptr<ClusterConfig> CreateFromConfig(std::string_view my_id,
+                                                         const JsonType& json_config);
+
   // If key is in my slots ownership return true
   bool IsMySlot(SlotId id) const;
 
   // Returns the master configured for `id`.
-  // Must not be called when IsConfigured() == false.
   Node GetMasterNodeForSlot(SlotId id) const;
 
   ClusterShards GetConfig() const;
 
-  // Returns deleted slot set if `new_config` is valid and internal state was changed. Returns
-  // nullopt and changes nothing otherwise.
-  std::optional<SlotSet> SetConfig(const ClusterShards& new_config);
-
-  // Parses `json` into `ClusterShards` and calls the above overload.
-  std::optional<SlotSet> SetConfig(const JsonType& json);
-
-  // Returns whether SetConfig() was ever successfully called.
-  bool IsConfigured() const;
+  SlotSet GetOwnedSlots() const;
 
  private:
   struct SlotEntry {
@@ -79,18 +84,16 @@ class ClusterConfig {
     bool owned_by_me = false;
   };
 
-  bool IsConfigValid(const ClusterShards& new_config);
-
   static bool cluster_enabled;
 
-  const std::string my_id_;
+  ClusterConfig() = default;
 
-  mutable util::SharedMutex mu_;
+  std::string my_id_;
 
-  ClusterShards config_ ABSL_GUARDED_BY(mu_);
+  ClusterShards config_;
 
-  // This array covers the whole range of possible slots for fast access. It points into `config_`.
-  std::array<SlotEntry, kMaxSlotNum + 1> slots_ ABSL_GUARDED_BY(mu_) = {};
+  // True bits in `my_slots_` indicate that this slot is owned by this node.
+  std::bitset<kMaxSlotNum + 1> my_slots_;
 };
 
 }  // namespace dfly

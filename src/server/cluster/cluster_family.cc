@@ -5,6 +5,7 @@
 #include "server/cluster/cluster_family.h"
 
 #include <jsoncons/json.hpp>
+#include <memory>
 #include <mutex>
 #include <string>
 
@@ -17,6 +18,7 @@
 #include "server/conn_context.h"
 #include "server/dflycmd.h"
 #include "server/error.h"
+#include "server/main_service.h"
 #include "server/replica.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
@@ -43,6 +45,8 @@ constexpr string_view kClusterDisabled =
     "Cluster is disabled. Enabled via passing --cluster_mode=emulated|yes";
 constexpr string_view kDflyClusterCmdPort = "DflyCluster command allowed only under admin port";
 
+thread_local unique_ptr<ClusterConfig> tl_cluster_config;
+
 }  // namespace
 
 ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(server_family) {
@@ -52,11 +56,15 @@ ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(serve
   if (cluster_mode == "emulated") {
     is_emulated_cluster_ = true;
   } else if (cluster_mode == "yes") {
-    cluster_config_ = std::make_unique<ClusterConfig>(server_family_->master_id());
+    ClusterConfig::EnableCluster();
   } else if (!cluster_mode.empty()) {
     LOG(ERROR) << "invalid cluster_mode. Exiting...";
     exit(1);
   }
+}
+
+ClusterConfig* ClusterFamily::cluster_config() {
+  return tl_cluster_config.get();
 }
 
 bool ClusterFamily::IsEnabledOrEmulated() const {
@@ -163,8 +171,8 @@ void ClusterShardsImpl(const ClusterShards& config, ConnectionContext* cntx) {
 void ClusterFamily::ClusterShards(ConnectionContext* cntx) {
   if (is_emulated_cluster_) {
     return ClusterShardsImpl({GetEmulatedShardInfo(cntx)}, cntx);
-  } else if (cluster_config_->IsConfigured()) {
-    return ClusterShardsImpl(cluster_config_->GetConfig(), cntx);
+  } else if (tl_cluster_config != nullptr) {
+    return ClusterShardsImpl(tl_cluster_config->GetConfig(), cntx);
   } else {
     return (*cntx)->SendError(kClusterNotConfigured);
   }
@@ -206,8 +214,8 @@ void ClusterSlotsImpl(const ClusterShards& config, ConnectionContext* cntx) {
 void ClusterFamily::ClusterSlots(ConnectionContext* cntx) {
   if (is_emulated_cluster_) {
     return ClusterSlotsImpl({GetEmulatedShardInfo(cntx)}, cntx);
-  } else if (cluster_config_->IsConfigured()) {
-    return ClusterSlotsImpl(cluster_config_->GetConfig(), cntx);
+  } else if (tl_cluster_config != nullptr) {
+    return ClusterSlotsImpl(tl_cluster_config->GetConfig(), cntx);
   } else {
     return (*cntx)->SendError(kClusterNotConfigured);
   }
@@ -259,8 +267,8 @@ void ClusterNodesImpl(const ClusterShards& config, string_view my_id, Connection
 void ClusterFamily::ClusterNodes(ConnectionContext* cntx) {
   if (is_emulated_cluster_) {
     return ClusterNodesImpl({GetEmulatedShardInfo(cntx)}, server_family_->master_id(), cntx);
-  } else if (cluster_config_->IsConfigured()) {
-    return ClusterNodesImpl(cluster_config_->GetConfig(), server_family_->master_id(), cntx);
+  } else if (tl_cluster_config != nullptr) {
+    return ClusterNodesImpl(tl_cluster_config->GetConfig(), server_family_->master_id(), cntx);
   } else {
     return (*cntx)->SendError(kClusterNotConfigured);
   }
@@ -321,8 +329,8 @@ void ClusterInfoImpl(const ClusterShards& config, ConnectionContext* cntx) {
 void ClusterFamily::ClusterInfo(ConnectionContext* cntx) {
   if (is_emulated_cluster_) {
     return ClusterInfoImpl({GetEmulatedShardInfo(cntx)}, cntx);
-  } else if (cluster_config_->IsConfigured()) {
-    return ClusterInfoImpl(cluster_config_->GetConfig(), cntx);
+  } else if (tl_cluster_config != nullptr) {
+    return ClusterInfoImpl(tl_cluster_config->GetConfig(), cntx);
   } else {
     return ClusterInfoImpl({}, cntx);
   }
@@ -377,8 +385,6 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kDflyClusterCmdPort);
   }
 
-  CHECK(is_emulated_cluster_ || cluster_config_.get() != nullptr);
-
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
   if (sub_cmd == "GETSLOTINFO") {
@@ -399,6 +405,21 @@ void ClusterFamily::DflyClusterMyId(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendBulkString(server_family_->master_id());
 }
 
+namespace {
+SlotSet GetDeletedSlots(bool is_first_config, const SlotSet& before, const SlotSet& after) {
+  SlotSet result;
+  for (SlotId id = 0; id <= ClusterConfig::kMaxSlotNum; ++id) {
+    if ((before.contains(id) || is_first_config) && !after.contains(id)) {
+      result.insert(id);
+    }
+  }
+  return result;
+}
+
+// Guards set configuration, so that we won't handle 2 in parallel.
+Mutex set_config_mu;
+}  // namespace
+
 void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) {
   SinkReplyBuilder* rb = cntx->reply_builder();
 
@@ -413,19 +434,44 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
     return rb->SendError("Invalid JSON cluster config", kSyntaxErrType);
   }
 
-  auto deleted_slot_ids = cluster_config_->SetConfig(json.value());
-  if (!deleted_slot_ids.has_value()) {
+  unique_ptr<ClusterConfig> new_config =
+      ClusterConfig::CreateFromConfig(server_family_->master_id(), json.value());
+  if (new_config == nullptr) {
+    LOG(WARNING) << "Can't set cluster config";
     return rb->SendError("Invalid cluster configuration.");
   }
 
+  lock_guard gu(set_config_mu);
+
+  bool is_first_config = true;
+  SlotSet before;
+  if (tl_cluster_config != nullptr) {
+    is_first_config = false;
+    before = tl_cluster_config->GetOwnedSlots();
+  }
+
+  auto cb = [&](util::ProactorBase* pb) {
+    if (tl_cluster_config == nullptr) {
+      tl_cluster_config = make_unique<ClusterConfig>(*new_config);
+    } else {
+      *tl_cluster_config = *new_config;
+    }
+  };
+  server_family_->service().proactor_pool().AwaitFiberOnAll(std::move(cb));
+
+  DCHECK(tl_cluster_config != nullptr);
+
+  SlotSet after = tl_cluster_config->GetOwnedSlots();
+
   // Delete old slots data.
-  if (!deleted_slot_ids.value().empty()) {
+  SlotSet deleted_slot_ids = GetDeletedSlots(is_first_config, before, after);
+  if (!deleted_slot_ids.empty()) {
     auto cb = [&](auto*) {
       EngineShard* shard = EngineShard::tlocal();
       if (shard == nullptr)
         return;
 
-      shard->db_slice().FlushSlots(deleted_slot_ids.value());
+      shard->db_slice().FlushSlots(deleted_slot_ids);
     };
     shard_set->pool()->AwaitFiberOnAll(std::move(cb));
   }

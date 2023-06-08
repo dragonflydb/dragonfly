@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include <memory>
 #include <string>
 
 #include "facade/conn_context.h"
@@ -25,9 +24,8 @@ class ClusterFamily {
 
   bool IsEnabledOrEmulated() const;
 
-  ClusterConfig* cluster_config() {
-    return cluster_config_.get();
-  }
+  // Returns a thread-local pointer.
+  ClusterConfig* cluster_config();
 
  private:
   // Cluster commands compatible with Redis
@@ -51,8 +49,6 @@ class ClusterFamily {
 
   bool is_emulated_cluster_ = false;
   ServerFamily* server_family_ = nullptr;
-
-  std::unique_ptr<ClusterConfig> cluster_config_;
 };
 
 }  // namespace dfly
