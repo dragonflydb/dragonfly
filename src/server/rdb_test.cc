@@ -169,6 +169,10 @@ TEST_F(RdbTest, Stream) {
 
 TEST_F(RdbTest, ComressionModeSaveDragonflyAndReload) {
   Run({"debug", "populate", "50000"});
+  ASSERT_EQ(50000, CheckedInt({"dbsize"}));
+  // Check keys inserted are lower than 50,000.
+  auto resp = Run({"keys", "key:[5-9][0-9][0-9][0-9][0-9]*"});
+  EXPECT_EQ(resp.GetVec().size(), 0);
 
   for (int i = 0; i <= 3; ++i) {
     SetFlag(&FLAGS_compression_mode, i);
