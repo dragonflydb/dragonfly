@@ -123,7 +123,6 @@ class SinkReplyBuilder {
 
   // Similarly to batch mode but is controlled by at operation level.
   bool should_aggregate_ : 1;
-  uint32_t batch_cnt_ = 0;
 };
 
 class MCReplyBuilder : public SinkReplyBuilder {
