@@ -118,8 +118,10 @@ unique_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
       bool owned_by_me =
           shard.master.id == my_id || any_of(shard.replicas.begin(), shard.replicas.end(),
                                              [&](const Node& node) { return node.id == my_id; });
-      for (SlotId i = slot_range.start; i <= slot_range.end; ++i) {
-        result->slots_[i] = {.shard = &shard, .owned_by_me = owned_by_me};
+      if (owned_by_me) {
+        for (SlotId i = slot_range.start; i <= slot_range.end; ++i) {
+          result->my_slots_.set(i);
+        }
       }
     }
   }
@@ -263,20 +265,27 @@ unique_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
 }
 
 bool ClusterConfig::IsMySlot(SlotId id) const {
-  if (id >= slots_.size()) {
+  if (id >= my_slots_.size()) {
     DCHECK(false) << "Requesting a non-existing slot id " << id;
     return false;
   }
 
-  return slots_[id].owned_by_me;
+  return my_slots_.test(id);
 }
 
 ClusterConfig::Node ClusterConfig::GetMasterNodeForSlot(SlotId id) const {
-  CHECK_LT(id, slots_.size()) << "Requesting a non-existing slot id " << id;
-  CHECK_NE(slots_[id].shard, nullptr)
-      << "Calling GetMasterNodeForSlot(" << id << ") before setting configuration";
+  CHECK_LT(id, my_slots_.size()) << "Requesting a non-existing slot id " << id;
 
-  return slots_[id].shard->master;
+  for (const auto& shard : config_) {
+    for (const auto& range : shard.slot_ranges) {
+      if (id >= range.start && id <= range.end) {
+        return shard.master;
+      }
+    }
+  }
+
+  DCHECK(false) << "Can't find master node for slot " << id;
+  return {};
 }
 
 ClusterConfig::ClusterShards ClusterConfig::GetConfig() const {

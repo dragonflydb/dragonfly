@@ -8,6 +8,7 @@
 #include <absl/container/flat_hash_set.h>
 
 #include <array>
+#include <bitset>
 #include <memory>
 #include <string_view>
 #include <vector>
@@ -91,8 +92,8 @@ class ClusterConfig {
 
   ClusterShards config_;
 
-  // This array covers the whole range of possible slots for fast access. It points into `config_`.
-  std::array<SlotEntry, kMaxSlotNum + 1> slots_ = {};
+  // True bits in `my_slots_` indicate that this slot is owned by this node.
+  std::bitset<kMaxSlotNum + 1> my_slots_;
 };
 
 }  // namespace dfly
