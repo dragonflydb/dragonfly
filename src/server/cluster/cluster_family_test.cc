@@ -9,7 +9,10 @@
 #include <string>
 #include <string_view>
 
+#include "absl/strings/str_replace.h"
 #include "absl/strings/substitute.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
@@ -29,6 +32,21 @@ class ClusterFamilyTest : public BaseFamilyTest {
 
  protected:
   static constexpr string_view kInvalidConfiguration = "Invalid cluster configuration";
+
+  void ExpectConditionWithinTimeout(const std::function<bool()>& condition,
+                                    absl::Duration timeout = absl::Seconds(5)) {
+    absl::Time deadline = absl::Now() + timeout;
+
+    while (deadline > absl::Now()) {
+      if (condition()) {
+        break;
+      }
+      absl::SleepFor(absl::Milliseconds(10));
+    }
+
+    EXPECT_LE(absl::Now(), deadline)
+        << "Timeout of " << timeout << " reached when expecting condition";
+  }
 };
 
 TEST_F(ClusterFamilyTest, DflyClusterOnlyOnAdminPort) {
@@ -560,7 +578,8 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
 
   config = absl::Substitute(config_template, "abc");
   EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
-  sleep(1);
+
+  ExpectConditionWithinTimeout([&]() { return CheckedInt({"dbsize"}) == 0; });
 
   EXPECT_THAT(
       RunAdmin({"dflycluster", "getslotinfo", "slots", "1", "2"}),
@@ -568,6 +587,64 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
                                                   IntArg(0), "total_writes", Not(IntArg(0)))),
                             RespArray(ElementsAre(IntArg(2), "key_count", IntArg(0), "total_reads",
                                                   IntArg(0), "total_writes", Not(IntArg(0)))))));
+}
+
+TEST_F(ClusterFamilyTest, ClusterConfigDeleteSomeSlots) {
+  string config_template = R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 8000
+            }
+          ],
+          "master": {
+            "id": "$0",
+            "ip": "10.0.0.1",
+            "port": 7000
+          },
+          "replicas": []
+        },
+        {
+          "slot_ranges": [
+            {
+              "start": 8001,
+              "end": 16383
+            }
+          ],
+          "master": {
+            "id": "other",
+            "ip": "10.0.0.2",
+            "port": 7000
+          },
+          "replicas": []
+        }
+      ])json";
+  string config = absl::Substitute(config_template, RunAdmin({"dflycluster", "myid"}).GetString());
+
+  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
+
+  Run({"debug", "populate", "1", "key", "4", "SLOTS", "7999", "7999"});
+  Run({"debug", "populate", "2", "key", "4", "SLOTS", "8000", "8000"});
+
+  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "7999", "8000"}),
+              RespArray(ElementsAre(
+                  RespArray(ElementsAre(IntArg(7999), "key_count", IntArg(1), _, _, _, _)),
+                  RespArray(ElementsAre(IntArg(8000), "key_count", IntArg(2), _, _, _, _)))));
+  EXPECT_THAT(Run({"dbsize"}), IntArg(3));
+
+  // Move ownership over 8000 to other master
+  config = absl::StrReplaceAll(config, {{"8000", "7999"}, {"8001", "8000"}});
+  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
+
+  // Verify that keys for slot 8000 were deleted, while key for slot 7999 was kept
+  ExpectConditionWithinTimeout([&]() { return CheckedInt({"dbsize"}) == 1; });
+
+  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "7999", "8000"}),
+              RespArray(ElementsAre(
+                  RespArray(ElementsAre(IntArg(7999), "key_count", IntArg(1), _, _, _, _)),
+                  RespArray(ElementsAre(IntArg(8000), "key_count", IntArg(0), _, _, _, _)))));
 }
 
 TEST_F(ClusterFamilyTest, ClusterModeSelectNotAllowed) {
@@ -604,15 +681,7 @@ TEST_F(ClusterFamilyTest, ClusterFirstConfigCallDropsEntriesNotOwnedByNode) {
             "OK");
 
   // Make sure `dbsize` all slots were removed
-  constexpr absl::Duration kMaxTime = absl::Seconds(5);
-  absl::Time deadline = absl::Now() + kMaxTime;
-  while (deadline > absl::Now()) {
-    if (CheckedInt({"dbsize"}) == 0) {
-      break;
-    }
-    sleep(1);
-  }
-  EXPECT_LE(absl::Now(), deadline);
+  ExpectConditionWithinTimeout([&]() { return CheckedInt({"dbsize"}) == 0; });
 }
 
 class ClusterFamilyEmulatedTest : public BaseFamilyTest {
