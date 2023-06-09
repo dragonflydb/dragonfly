@@ -158,7 +158,7 @@ TEST_F(RdbTest, Stream) {
 
   resp = Run({"xinfo", "groups", "key:1"});  // test dereferences array of size 1
   EXPECT_THAT(resp, ArrLen(8));
-  EXPECT_THAT(resp.GetVec(), ElementsAre("name", "g2", "consumers", "0", "pending", "0",
+  EXPECT_THAT(resp.GetVec(), ElementsAre("name", "g2", "consumers", IntArg(0), "pending", IntArg(0),
                                          "last-delivered-id", "1655444851523-1"));
 
   resp = Run({"xinfo", "groups", "key:2"});
