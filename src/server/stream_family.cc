@@ -1266,13 +1266,17 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
       if (result) {
         (*cntx)->StartArray(result->size());
         for (const auto& ginfo : *result) {
-          absl::AlphaNum an1(ginfo.consumer_size);
-          absl::AlphaNum an2(ginfo.pending_size);
           string last_id = StreamIdRepr(ginfo.last_id);
-          string_view arr[8] = {"name",    ginfo.name,  "consumers",         an1.Piece(),
-                                "pending", an2.Piece(), "last-delivered-id", last_id};
 
-          (*cntx)->SendStringArr(absl::Span<string_view>{arr, 8}, RedisReplyBuilder::MAP);
+          (*cntx)->StartCollection(4, RedisReplyBuilder::MAP);
+          (*cntx)->SendBulkString("name");
+          (*cntx)->SendBulkString(ginfo.name);
+          (*cntx)->SendBulkString("consumers");
+          (*cntx)->SendLong(ginfo.consumer_size);
+          (*cntx)->SendBulkString("pending");
+          (*cntx)->SendLong(ginfo.pending_size);
+          (*cntx)->SendBulkString("last-delivered-id");
+          (*cntx)->SendBulkString(last_id);
         }
         return;
       }
