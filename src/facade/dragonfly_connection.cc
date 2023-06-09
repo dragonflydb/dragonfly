@@ -457,24 +457,25 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   stats_->read_buf_capacity += io_buf_.Capacity();
 
   ParserStatus parse_status = OK;
+  SinkReplyBuilder* orig_builder = cc_->reply_builder();
 
   // At the start we read from the socket to determine the HTTP/Memstore protocol.
   // Therefore we may already have some data in the buffer.
   if (io_buf_.InputLen() > 0) {
     phase_ = PROCESS;
     if (redis_parser_) {
-      parse_status = ParseRedis();
+      parse_status = ParseRedis(orig_builder);
     } else {
       DCHECK(memcache_parser_);
       parse_status = ParseMemcache();
     }
   }
 
-  error_code ec = cc_->reply_builder()->GetError();
+  error_code ec = orig_builder->GetError();
 
   // Main loop.
   if (parse_status != ERROR && !ec) {
-    auto res = IoLoop(peer);
+    auto res = IoLoop(peer, orig_builder);
 
     if (holds_alternative<error_code>(res)) {
       ec = get<error_code>(res);
@@ -562,11 +563,10 @@ void Connection::DispatchCommand(uint32_t consumed, mi_heap_t* heap) {
   }
 }
 
-Connection::ParserStatus Connection::ParseRedis() {
+Connection::ParserStatus Connection::ParseRedis(SinkReplyBuilder* orig_builder) {
   uint32_t consumed = 0;
 
   RedisParser::Result result = RedisParser::OK;
-  SinkReplyBuilder* builder = cc_->reply_builder();
   mi_heap_t* tlh = mi_heap_get_backing();
 
   do {
@@ -581,7 +581,7 @@ Connection::ParserStatus Connection::ParseRedis() {
       DispatchCommand(consumed, tlh);
     }
     io_buf_.ConsumeInput(consumed);
-  } while (RedisParser::OK == result && !builder->GetError());
+  } while (RedisParser::OK == result && !orig_builder->GetError());
 
   parser_error_ = result;
   if (result == RedisParser::OK)
@@ -661,13 +661,13 @@ void Connection::OnBreakCb(int32_t mask) {
   evc_.notify();  // Notify dispatch fiber.
 }
 
-auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, ParserStatus> {
-  SinkReplyBuilder* builder = cc_->reply_builder();
+auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_builder)
+    -> variant<error_code, ParserStatus> {
   error_code ec;
   ParserStatus parse_status = OK;
 
   do {
-    FetchBuilderStats(stats_, builder);
+    FetchBuilderStats(stats_, orig_builder);
 
     io::MutableBytes append_buf = io_buf_.AppendBuffer();
     phase_ = READ_SOCKET;
@@ -687,7 +687,7 @@ auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, Pars
     phase_ = PROCESS;
 
     if (redis_parser_) {
-      parse_status = ParseRedis();
+      parse_status = ParseRedis(orig_builder);
     } else {
       DCHECK(memcache_parser_);
       parse_status = ParseMemcache();
@@ -717,10 +717,10 @@ auto Connection::IoLoop(util::FiberSocketBase* peer) -> variant<error_code, Pars
     } else if (parse_status != OK) {
       break;
     }
-    ec = builder->GetError();
+    ec = orig_builder->GetError();
   } while (peer->IsOpen() && !ec);
 
-  FetchBuilderStats(stats_, builder);
+  FetchBuilderStats(stats_, orig_builder);
 
   if (ec)
     return ec;

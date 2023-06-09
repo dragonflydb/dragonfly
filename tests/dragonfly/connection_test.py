@@ -336,6 +336,7 @@ async def test_subscribe_pipelined(async_client: aioredis.Redis):
         'subscribe channel')
     await pipe.echo('bye bye').execute()
 
+
 async def test_subscribe_in_pipeline(async_client: aioredis.Redis):
     pipe = async_client.pipeline(transaction=False)
     pipe.echo("one")
@@ -346,3 +347,55 @@ async def test_subscribe_in_pipeline(async_client: aioredis.Redis):
     res = await pipe.execute()
 
     assert res == ['one', ['subscribe', 'ch1', 1], 'two', ['subscribe', 'ch2', 2], 'three']
+
+"""
+This test makes sure that Dragonfly can receive blocks of pipelined commands even
+while a script is still executing. This is a dangerous scenario because both the dispatch fiber
+and the connection fiber are actively using the context. What is more, the script execution injects
+its own custom reply builder, which can't be used anywhere else, besides the lua script itself.
+"""
+
+BUSY_SCRIPT = """
+for i=1,300 do
+    redis.call('MGET', 'k1', 'k2', 'k3')
+end
+"""
+
+PACKET1 = """
+MGET s1 s2 s3
+EVALSHA {sha} 3 k1 k2 k3
+"""
+
+PACKET2 = """
+MGET m1 m2 m3
+MGET m4 m5 m6
+MGET m7 m8 m9\n
+"""
+
+PACKET3 = """
+PING
+""" * 500 + "ECHO DONE\n"
+
+async def test_parser_while_script_running(async_client: aioredis.Redis, df_server: DflyInstance):
+    sha = await async_client.script_load(BUSY_SCRIPT)
+
+    # Use a raw tcp connection for strict control of sent commands
+    # Below we send commands while the previous ones didn't finish
+    reader, writer = await asyncio.open_connection('localhost', df_server.port)
+
+    # Send first pipeline packet, last commands is a long executing script
+    writer.write(PACKET1.format(sha=sha).encode())
+    await writer.drain()
+
+    # Give the script some time to start running
+    await asyncio.sleep(0.01)
+
+    # Send another packet that will be received while the script is running
+    writer.write(PACKET2.encode())
+    # The last batch has to be big enough, so the script will finish before it is fully consumed
+    writer.write(PACKET3.encode())
+    await writer.drain()
+
+    await reader.readuntil(b"DONE")
+    writer.close()
+    await writer.wait_closed()

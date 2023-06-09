@@ -47,6 +47,7 @@ jobs:
           echo "Current commit is ${{github.sha}}"
           pip install -r dragonfly/requirements.txt
           export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
+          export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
           pytest -sxvr dragonfly --ignore=dragonfly/replication_test.py
       - name: Run PyTests replication test

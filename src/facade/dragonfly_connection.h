@@ -44,6 +44,7 @@ class ConnectionContext;
 class RedisParser;
 class ServiceInterface;
 class MemcacheParser;
+class SinkReplyBuilder;
 
 // Connection represents an active connection for a client.
 //
@@ -177,7 +178,8 @@ class Connection : public util::Connection {
   void ConnectionFlow(util::FiberSocketBase* peer);
 
   // Main loop reading client messages and passing requests to dispatch queue.
-  std::variant<std::error_code, ParserStatus> IoLoop(util::FiberSocketBase* peer);
+  std::variant<std::error_code, ParserStatus> IoLoop(util::FiberSocketBase* peer,
+                                                     SinkReplyBuilder* orig_builder);
 
   // Returns true if HTTP header is detected.
   io::Result<bool> CheckForHttpProto(util::FiberSocketBase* peer);
@@ -193,7 +195,7 @@ class Connection : public util::Connection {
   // Create new pipeline request, re-use from pool when possible.
   PipelineMessagePtr FromArgs(RespVec args, mi_heap_t* heap);
 
-  ParserStatus ParseRedis();
+  ParserStatus ParseRedis(SinkReplyBuilder* orig_builder);
   ParserStatus ParseMemcache();
 
   void OnBreakCb(int32_t mask);
