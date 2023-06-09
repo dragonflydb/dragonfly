@@ -69,6 +69,30 @@ optional<search::Schema> ParseSchemaOrReply(CmdArgList args, ConnectionContext* 
   return schema;
 }
 
+optional<SearchParams> ParseSearchParamsOrReply(CmdArgList args, ConnectionContext* cntx) {
+  size_t limit_offset = 0, limit_total = 10;
+
+  for (size_t i = 0; i < args.size(); i++) {
+    ToUpper(&args[i]);
+
+    // [LIMIT offset total]
+    if (ArgS(args, i) == "LIMIT") {
+      if (i + 2 >= args.size()) {
+        (*cntx)->SendError(kSyntaxErr);
+        return nullopt;
+      }
+      if (!absl::SimpleAtoi(ArgS(args, i + 1), &limit_offset) ||
+          !absl::SimpleAtoi(ArgS(args, i + 2), &limit_total)) {
+        (*cntx)->SendError(kInvalidIntErr);
+        return nullopt;
+      }
+      i += 2;
+    }
+  }
+
+  return SearchParams{limit_offset, limit_total};
+}
+
 }  // namespace
 
 void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
@@ -133,17 +157,21 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
   string_view index_name = ArgS(args, 0);
   string_view query_str = ArgS(args, 1);
 
+  auto params = ParseSearchParamsOrReply(args.subspan(2), cntx);
+  if (!params.has_value())
+    return;
+
   search::SearchAlgorithm search_algo;
   if (!search_algo.Init(query_str))
     return (*cntx)->SendError("Query syntax error");
 
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
   atomic<bool> index_not_found{false};
-  vector<vector<SerializedSearchDoc>> docs(shard_set->size());
+  vector<SearchResult> docs(shard_set->size());
 
   cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     if (auto* index = es->search_indices()->Get(index_name); index)
-      docs[es->shard_id()] = index->Search(t->GetOpArgs(es), &search_algo);
+      docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo);
     else
       index_not_found.store(true, memory_order_relaxed);
     return OpStatus::OK;
@@ -154,12 +182,27 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
 
   size_t total_count = 0;
   for (const auto& shard_docs : docs)
-    total_count += shard_docs.size();
+    total_count += shard_docs.total_hits;
 
-  (*cntx)->StartArray(total_count * 2 + 1);
+  size_t response_count =
+      min(total_count - min(total_count, params->limit_offset), params->limit_total);
+
+  (*cntx)->StartArray(response_count * 2 + 1);
   (*cntx)->SendLong(total_count);
+
+  size_t sent = 0;
+  size_t to_skip = 0;
   for (const auto& shard_docs : docs) {
-    for (const auto& [key, doc] : shard_docs) {
+    for (const auto& [key, doc] : shard_docs.docs) {
+      // Scoring is not implemented yet, so we just cut them in the order they were retrieved
+      if (to_skip > 0) {
+        to_skip--;
+        continue;
+      }
+
+      if (sent++ >= response_count)
+        return;
+
       (*cntx)->SendBulkString(key);
       (*cntx)->StartCollection(doc.size(), RedisReplyBuilder::MAP);
       for (const auto& [k, v] : doc) {

@@ -93,8 +93,8 @@ void ShardDocIndex::Init(const OpArgs& op_args) {
   TraverseAllMatching(*base_, op_args, cb);
 }
 
-vector<SerializedSearchDoc> ShardDocIndex::Search(const OpArgs& op_args,
-                                                  search::SearchAlgorithm* search_algo) const {
+SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& params,
+                                   search::SearchAlgorithm* search_algo) const {
   auto& db_slice = op_args.shard->db_slice();
 
   auto doc_ids = search_algo->Search(&indices_);
@@ -106,8 +106,13 @@ vector<SerializedSearchDoc> ShardDocIndex::Search(const OpArgs& op_args,
     CHECK(it) << "Expected key: " << key << " to exist";
     auto doc_access = GetAccessor(op_args, (*it)->second);
     out.emplace_back(key, doc_access->Serialize());
+
+    // Scoring is not implemented yet, so we take just the first documents
+    if (out.size() >= params.limit_offset + params.limit_total)
+      break;
   }
-  return out;
+
+  return SearchResult{std::move(out), doc_ids.size()};
 }
 
 ShardDocIndex* ShardDocIndices::Get(string_view name) const {
