@@ -356,7 +356,7 @@ its own custom reply builder, which can't be used anywhere else, besides the lua
 """
 
 BUSY_SCRIPT = """
-for i=1,75 do
+for i=1,300 do
     redis.call('MGET', 'k1', 'k2', 'k3')
 end
 """
@@ -374,7 +374,7 @@ MGET m7 m8 m9\n
 
 PACKET3 = """
 PING
-""" * 300 + "ECHO DONE\n"
+""" * 500 + "ECHO DONE\n"
 
 async def test_parser_while_script_running(async_client: aioredis.Redis, df_server: DflyInstance):
     sha = await async_client.script_load(BUSY_SCRIPT)

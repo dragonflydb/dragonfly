@@ -566,9 +566,6 @@ void Connection::DispatchCommand(uint32_t consumed, mi_heap_t* heap) {
 Connection::ParserStatus Connection::ParseRedis(SinkReplyBuilder* orig_builder) {
   uint32_t consumed = 0;
 
-  // REMOVE THIS LINE TO MAKE IT WORK
-  orig_builder = cc_->reply_builder();
-
   RedisParser::Result result = RedisParser::OK;
   mi_heap_t* tlh = mi_heap_get_backing();
 
