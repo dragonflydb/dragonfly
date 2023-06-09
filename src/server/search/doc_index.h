@@ -25,7 +25,10 @@ struct SearchResult {
 };
 
 struct SearchParams {
-  size_t limit_offset, limit_total;
+  // Parameters for "LIMIT offset total": select total amount documents with a specific offset from
+  // the whole result set
+  size_t limit_offset;
+  size_t limit_total;
 };
 
 // Stores basic info about a document index.

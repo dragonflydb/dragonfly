@@ -158,7 +158,7 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
   string_view query_str = ArgS(args, 1);
 
   auto params = ParseSearchParamsOrReply(args.subspan(2), cntx);
-  if (!params)
+  if (!params.has_value())
     return;
 
   search::SearchAlgorithm search_algo;
@@ -194,14 +194,14 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
   size_t to_skip = 0;
   for (const auto& shard_docs : docs) {
     for (const auto& [key, doc] : shard_docs.docs) {
-      // Scoring is not implemented yet, so we take just cut them in the order they were retrieved
+      // Scoring is not implemented yet, so we just cut them in the order they were retrieved
       if (to_skip > 0) {
         to_skip--;
         continue;
       }
 
       if (sent++ >= response_count)
-        goto END;
+        return;
 
       (*cntx)->SendBulkString(key);
       (*cntx)->StartCollection(doc.size(), RedisReplyBuilder::MAP);
@@ -211,7 +211,6 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
       }
     }
   }
-END:;
 }
 
 #define HFUNC(x) SetHandler(&SearchFamily::x)
