@@ -1460,6 +1460,8 @@ void XReadBlock(ReadOpts opts, ConnectionContext* cntx) {
   cntx->transaction->Execute(std::move(range_cb), true);
 
   if (result) {
+    SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
+
     (*cntx)->StartArray(1);
 
     (*cntx)->StartArray(2);
@@ -1566,6 +1568,8 @@ void StreamFamily::XRead(CmdArgList args, ConnectionContext* cntx) {
       res[indx - opts->streams_arg] = std::move(results[i]);
     }
   }
+
+  SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
 
   (*cntx)->StartArray(resolved_streams);
   for (size_t i = 0; i != res.size(); i++) {
@@ -1677,6 +1681,8 @@ void StreamFamily::XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext
   OpResult<RecordVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
+    SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
+
     (*cntx)->StartArray(result->size());
     for (const auto& item : *result) {
       (*cntx)->StartArray(2);
