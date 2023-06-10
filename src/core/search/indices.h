@@ -2,10 +2,11 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/container/btree_map.h>
 #include <absl/container/flat_hash_map.h>
 
+#include <map>
 #include <optional>
-#include <set>
 #include <vector>
 
 #include "core/search/base.h"
@@ -20,7 +21,7 @@ struct NumericIndex : public BaseIndex {
   std::vector<DocId> Range(int64_t l, int64_t r) const;
 
  private:
-  std::set<std::pair<int64_t, DocId>> entries_;
+  absl::btree_multimap<int64_t, DocId> entries_;
 };
 
 // Base index for string based indices.

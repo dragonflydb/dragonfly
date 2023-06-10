@@ -73,12 +73,11 @@ IndexResult MergeOR(IndexResult&& matched, IndexResult&& current, vector<DocId>*
   tmp->clear();
   tmp->reserve(matched->size() + current->size());
 
-  merge(matched->begin(), matched->end(), current->begin(), current->end(), back_inserter(*tmp));
-  tmp->erase(unique(tmp->begin(), tmp->end()), tmp->end());
+  set_union(matched->begin(), matched->end(), current->begin(), current->end(),
+            back_inserter(*tmp));
 
   IndexResult result{move(*tmp)};
   *tmp = current.TakeOwnedOrEmpty();  // If current has a backing array, keep it
-
   return result;
 }
 
@@ -92,25 +91,26 @@ IndexResult MergeAND(IndexResult&& matched, IndexResult&& current, vector<DocId>
 
   IndexResult result{move(*tmp)};
   *tmp = current.TakeOwnedOrEmpty();  // If current has a backing array, keep it
-
   return result;
 }
 
 struct BasicSearch {
-  BasicSearch(const FieldIndices* indices) : indices{indices}, tmp_vec{} {
+  using LogicOp = AstLogicalNode::LogicOp;
+
+  BasicSearch(const FieldIndices* indices) : indices_{indices}, tmp_vec_{} {
   }
 
   // Get casted sub index by field
   template <typename T> T* GetIndex(string_view field) {
     static_assert(is_base_of_v<BaseIndex, T>);
-    auto index = indices->GetIndex(field);
+    auto index = indices_->GetIndex(field);
     DCHECK(index);  // TODO: handle not existing erorr
     auto* casted_ptr = dynamic_cast<T*>(index);
     DCHECK(casted_ptr);  // TODO: handle type errors
     return casted_ptr;
   }
 
-  // Collect all index results from F(C[i]) and sort by size
+  // Collect all index results from F(C[i])
   template <typename C, typename F> vector<IndexResult> GetSubResults(C&& container, F&& f) {
     vector<IndexResult> sub_results(container.size());
     for (size_t i = 0; i < container.size(); i++)
@@ -118,23 +118,21 @@ struct BasicSearch {
     return sub_results;
   }
 
-  using LogicOp = AstLogicalNode::LogicOp;
-
   // Efficiently unify multiple sub results with specified logical op
   IndexResult UnifyResults(vector<IndexResult>&& sub_results, LogicOp op) {
     if (sub_results.empty())
       return vector<DocId>{};
 
-    auto f = op == AstLogicalNode::AND ? MergeAND : MergeOR;
+    auto op_func = op == AstLogicalNode::AND ? MergeAND : MergeOR;
 
     // Unifying from smallest to largest is more efficient.
-    // For AND: the result set only shrinks, so start with the smallest.
-    // For OR: unifying smaller sets first reduces the number of element traversals on average.
+    // AND: the result only shrinks, so starting with the smallest is most optimal.
+    // OR: unifying smaller sets first reduces the number of element traversals on average.
     sort(sub_results.begin(), sub_results.end(), IndexResult::BySize);
 
     IndexResult out{move(sub_results[0])};
     for (auto& matched : absl::MakeSpan(sub_results).subspan(1))
-      out = f(move(matched), move(out), &tmp_vec);
+      out = op_func(move(matched), move(out), &tmp_vec_);
     return out;
   }
 
@@ -149,7 +147,7 @@ struct BasicSearch {
       return index->Matching(node.term);
     }
 
-    vector<TextIndex*> selected_indices = indices->GetAllTextIndices();
+    vector<TextIndex*> selected_indices = indices_->GetAllTextIndices();
     auto mapping = [&node](TextIndex* index) { return index->Matching(node.term); };
 
     return UnifyResults(GetSubResults(selected_indices, mapping), LogicOp::OR);
@@ -164,7 +162,7 @@ struct BasicSearch {
   // negate -(*subquery*): explicity compute result complement. Needs further optimizations
   IndexResult Search(const AstNegateNode& node, string_view active_field) {
     vector<DocId> matched = SearchGeneric(*node.node, active_field).Take();
-    vector<DocId> all = indices->GetAllDocs();
+    vector<DocId> all = indices_->GetAllDocs();
 
     // To negate a result, we have to find the complement of matched to all documents,
     // so we remove all matched documents from the set of all documents.
@@ -207,8 +205,8 @@ struct BasicSearch {
     return BasicSearch{indices}.SearchGeneric(query, "").Take();
   }
 
-  const FieldIndices* indices;
-  vector<DocId> tmp_vec;
+  const FieldIndices* indices_;
+  vector<DocId> tmp_vec_;
 };
 
 }  // namespace
