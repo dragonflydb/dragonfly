@@ -88,15 +88,24 @@ class SinkReplyBuilder {
 
   struct ReplyAggregator {
     explicit ReplyAggregator(SinkReplyBuilder* builder) : builder_(builder) {
+      // If the builder is already aggregating then don't aggregate again as
+      // this will cause redundant sink writes (such as in a MULTI/EXEC).
+      if (builder->should_aggregate_) {
+        return;
+      }
       builder_->StartAggregate();
+      is_nested_ = false;
     }
 
     ~ReplyAggregator() {
-      builder_->StopAggregate();
+      if (!is_nested_) {
+        builder_->StopAggregate();
+      }
     }
 
    private:
     SinkReplyBuilder* builder_;
+    bool is_nested_ = true;
   };
 
  protected:
