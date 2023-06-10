@@ -1354,6 +1354,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
 
   CHECK(result == Interpreter::RUN_OK);
 
+  SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
   EvalSerializer ser{static_cast<RedisReplyBuilder*>(cntx->reply_builder())};
   if (!interpreter->IsResultSafe()) {
     (*cntx)->SendError("reached lua stack limit");

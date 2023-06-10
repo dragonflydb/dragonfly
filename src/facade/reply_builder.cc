@@ -46,7 +46,7 @@ void SinkReplyBuilder::CloseConnection() {
 
 void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   DCHECK(sink_);
-  constexpr size_t kMaxBatchSize = 8192;
+  constexpr size_t kMaxBatchSize = 1024;
 
   size_t bsize = 0;
   for (unsigned i = 0; i < len; ++i) {
