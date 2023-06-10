@@ -25,7 +25,8 @@ struct NumericIndex : public BaseIndex {
 
 // Base index for string based indices.
 struct BaseStringIndex : public BaseIndex {
-  std::vector<DocId> Matching(std::string_view str) const;
+  // Pointer is valid as long as index is not mutated. Nullptr if not found
+  const std::vector<DocId>* Matching(std::string_view str) const;
 
  protected:
   absl::flat_hash_map<std::string, std::vector<DocId>> entries_;

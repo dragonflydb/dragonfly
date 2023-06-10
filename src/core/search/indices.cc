@@ -55,9 +55,9 @@ vector<DocId> NumericIndex::Range(int64_t l, int64_t r) const {
   return out;
 }
 
-vector<DocId> BaseStringIndex::Matching(string_view str) const {
+const vector<DocId>* BaseStringIndex::Matching(string_view str) const {
   auto it = entries_.find(absl::StripAsciiWhitespace(str));
-  return (it != entries_.end()) ? it->second : vector<DocId>{};
+  return (it != entries_.end()) ? &it->second : nullptr;
 }
 
 void TextIndex::Add(DocId doc, string_view value) {
