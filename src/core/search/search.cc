@@ -31,68 +31,41 @@ AstExpr ParseQuery(std::string_view query) {
 struct IndexResult {
   using DocVec = vector<DocId>;
 
-  IndexResult() : value{DocVec{}} {};
+  IndexResult() : value_{DocVec{}} {};
 
-  IndexResult(const DocVec* dv) : value{dv} {
+  IndexResult(const DocVec* dv) : value_{dv} {
     if (dv == nullptr)
-      value = DocVec{};
+      value_ = DocVec{};
   }
 
-  IndexResult(DocVec&& dv) : value{move(dv)} {
+  IndexResult(DocVec&& dv) : value_{move(dv)} {
   }
 
   // Transparent const access to underlying value
   const DocVec* operator->() const {
-    return holds_alternative<DocVec>(value) ? &get<DocVec>(value) : get<const DocVec*>(value);
+    return holds_alternative<DocVec>(value_) ? &get<DocVec>(value_) : get<const DocVec*>(value_);
+  }
+
+  IndexResult& operator=(DocVec&& entries) {
+    if (holds_alternative<DocVec>(value_)) {
+      swap(get<DocVec>(value_), entries);  // swap to keep backing array
+      entries.clear();
+    } else {
+      value_ = move(entries);
+    }
+    return *this;
   }
 
   // Move out of owned or copy borrowed
   DocVec Take() {
-    if (holds_alternative<DocVec>(value))
-      return move(get<DocVec>(value));
-    return *get<const DocVec*>(value);
-  }
-
-  // Move out of owned or return empty
-  DocVec TakeOwnedOrEmpty() {
-    if (holds_alternative<DocVec>(value))
-      return move(get<DocVec>(value));
-    return DocVec{};
-  }
-
-  static bool BySize(const IndexResult& l, const IndexResult& r) {
-    return l->size() < r->size();
+    if (holds_alternative<DocVec>(value_))
+      return move(get<DocVec>(value_));
+    return *get<const DocVec*>(value_);
   }
 
  private:
-  variant<DocVec /*owned*/, const DocVec* /*pointer to borrowed*/> value;
+  variant<DocVec /*owned*/, const DocVec* /*pointer to borrowed*/> value_;
 };
-
-// Unify (OR) matched and current
-IndexResult MergeOR(IndexResult&& matched, IndexResult&& current, vector<DocId>* tmp) {
-  tmp->clear();
-  tmp->reserve(matched->size() + current->size());
-
-  set_union(matched->begin(), matched->end(), current->begin(), current->end(),
-            back_inserter(*tmp));
-
-  IndexResult result{move(*tmp)};
-  *tmp = current.TakeOwnedOrEmpty();  // If current has a backing array, keep it
-  return result;
-}
-
-// Merge (AND) matched and current
-IndexResult MergeAND(IndexResult&& matched, IndexResult&& current, vector<DocId>* tmp) {
-  tmp->clear();
-  tmp->reserve(min(matched->size(), current->size()));
-
-  set_intersection(matched->begin(), matched->end(), current->begin(), current->end(),
-                   back_inserter(*tmp));
-
-  IndexResult result{move(*tmp)};
-  *tmp = current.TakeOwnedOrEmpty();  // If current has a backing array, keep it
-  return result;
-}
 
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
@@ -111,11 +84,29 @@ struct BasicSearch {
   }
 
   // Collect all index results from F(C[i])
-  template <typename C, typename F> vector<IndexResult> GetSubResults(C&& container, F&& f) {
+  template <typename C, typename F>
+  vector<IndexResult> GetSubResults(const C& container, const F& f) {
     vector<IndexResult> sub_results(container.size());
     for (size_t i = 0; i < container.size(); i++)
       sub_results[i] = f(container[i]);
     return sub_results;
+  }
+
+  void Merge(IndexResult matched, IndexResult* current_ptr, LogicOp op) {
+    IndexResult& current = *current_ptr;
+    tmp_vec_.clear();
+
+    if (op == LogicOp::AND) {
+      tmp_vec_.reserve(min(matched->size(), current->size()));
+      set_intersection(matched->begin(), matched->end(), current->begin(), current->end(),
+                       back_inserter(tmp_vec_));
+    } else {
+      tmp_vec_.reserve(matched->size() + current->size());
+      set_union(matched->begin(), matched->end(), current->begin(), current->end(),
+                back_inserter(tmp_vec_));
+    }
+
+    current = move(tmp_vec_);
   }
 
   // Efficiently unify multiple sub results with specified logical op
@@ -123,16 +114,15 @@ struct BasicSearch {
     if (sub_results.empty())
       return vector<DocId>{};
 
-    auto op_func = op == AstLogicalNode::AND ? MergeAND : MergeOR;
-
     // Unifying from smallest to largest is more efficient.
     // AND: the result only shrinks, so starting with the smallest is most optimal.
     // OR: unifying smaller sets first reduces the number of element traversals on average.
-    sort(sub_results.begin(), sub_results.end(), IndexResult::BySize);
+    sort(sub_results.begin(), sub_results.end(),
+         [](const auto& l, const auto& r) { return l->size() < r->size(); });
 
     IndexResult out{move(sub_results[0])};
     for (auto& matched : absl::MakeSpan(sub_results).subspan(1))
-      out = op_func(move(matched), move(out), &tmp_vec_);
+      Merge(move(matched), &out, op);
     return out;
   }
 
@@ -159,7 +149,7 @@ struct BasicSearch {
     return GetIndex<NumericIndex>(active_field)->Range(node.lo, node.hi);
   }
 
-  // negate -(*subquery*): explicity compute result complement. Needs further optimizations
+  // negate -(*subquery*): explicitly compute result complement. Needs further optimizations
   IndexResult Search(const AstNegateNode& node, string_view active_field) {
     vector<DocId> matched = SearchGeneric(*node.node, active_field).Take();
     vector<DocId> all = indices_->GetAllDocs();
