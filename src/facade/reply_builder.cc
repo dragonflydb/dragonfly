@@ -120,6 +120,27 @@ void SinkReplyBuilder::StopAggregate() {
 MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink), noreply_(false) {
 }
 
+void MCReplyBuilder::SendCommonString(CommonStrings string) {
+  if (noreply_)
+    return;
+
+  iovec v[1];
+
+#define X(e)                 \
+  case CommonStrings::e:     \
+    v[0] = IoVec(#e "\r\n"); \
+    break;
+
+  switch (string) {
+    DFLY_COMMON_STRINGS_X_MACRO()
+    default:
+      LOG(FATAL) << "Bad type " << int(string);
+  }
+#undef X
+
+  Send(v, ABSL_ARRAYSIZE(v));
+}
+
 void MCReplyBuilder::SendSimpleString(std::string_view str) {
   if (noreply_)
     return;
@@ -130,7 +151,7 @@ void MCReplyBuilder::SendSimpleString(std::string_view str) {
 }
 
 void MCReplyBuilder::SendStored() {
-  SendSimpleString("STORED");
+  SendCommonString(CommonStrings::STORED);
 }
 
 void MCReplyBuilder::SendLong(long val) {
@@ -155,11 +176,11 @@ void MCReplyBuilder::SendMGetResponse(absl::Span<const OptResp> arr) {
       header.clear();
     }
   }
-  SendSimpleString("END");
+  SendCommonString(CommonStrings::END);
 }
 
 void MCReplyBuilder::SendError(string_view str, std::string_view type) {
-  SendSimpleString("ERROR");
+  SendCommonString(CommonStrings::ERROR);
 }
 
 void MCReplyBuilder::SendProtocolError(std::string_view str) {
@@ -172,11 +193,11 @@ void MCReplyBuilder::SendClientError(string_view str) {
 }
 
 void MCReplyBuilder::SendSetSkipped() {
-  SendSimpleString("NOT_STORED");
+  SendCommonString(CommonStrings::NOT_STORED);
 }
 
 void MCReplyBuilder::SendNotFound() {
-  SendSimpleString("NOT_FOUND");
+  SendCommonString(CommonStrings::NOT_FOUND);
 }
 
 size_t RedisReplyBuilder::WrappedStrSpan::Size() const {
@@ -224,6 +245,24 @@ void RedisReplyBuilder::SendProtocolError(std::string_view str) {
   SendError(absl::StrCat("-ERR Protocol error: ", str), "protocol_error");
 }
 
+void RedisReplyBuilder::SendCommonString(CommonStrings string) {
+  iovec v[1];
+
+#define X(e)                     \
+  case CommonStrings::e:         \
+    v[0] = IoVec("+" #e "\r\n"); \
+    break;
+
+  switch (string) {
+    DFLY_COMMON_STRINGS_X_MACRO()
+    default:
+      LOG(FATAL) << "Bad type " << int(string);
+  }
+#undef X
+
+  Send(v, ABSL_ARRAYSIZE(v));
+}
+
 void RedisReplyBuilder::SendSimpleString(std::string_view str) {
   iovec v[3] = {IoVec(kSimplePref), IoVec(str), IoVec(kCRLF)};
 
@@ -231,7 +270,7 @@ void RedisReplyBuilder::SendSimpleString(std::string_view str) {
 }
 
 void RedisReplyBuilder::SendStored() {
-  SendSimpleString("OK");
+  SendCommonString(CommonStrings::OK);
 }
 
 void RedisReplyBuilder::SendSetSkipped() {

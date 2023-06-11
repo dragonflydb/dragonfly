@@ -272,7 +272,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
   cntx->owner()->Migrate(shard_set->pool()->at(flow_id));
 
   rb->StartArray(2);
-  rb->SendSimpleString("FULL");
+  rb->SendCommonString(CommonStrings::FULL);
   rb->SendSimpleString(eof_token);
 }
 

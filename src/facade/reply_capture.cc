@@ -80,6 +80,19 @@ void CapturingReplyBuilder::SendDouble(double val) {
   Capture(val);
 }
 
+void CapturingReplyBuilder::SendCommonString(CommonStrings string) {
+#define X(t)             \
+  case CommonStrings::t: \
+    return Capture(SimpleString(#t));
+
+  SKIP_LESS(ReplyMode::FULL);
+  switch (string) {
+    DFLY_COMMON_STRINGS_X_MACRO()
+    default:
+      LOG(FATAL) << "bad string " << int(string);
+  }
+}
+
 void CapturingReplyBuilder::SendSimpleString(std::string_view str) {
   SKIP_LESS(ReplyMode::FULL);
   Capture(SimpleString{string{str}});

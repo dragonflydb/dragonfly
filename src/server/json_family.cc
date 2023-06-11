@@ -1124,7 +1124,7 @@ void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
 
   if (result) {
     if (*result) {
-      (*cntx)->SendSimpleString("OK");
+      (*cntx)->SendOk();
     } else {
       (*cntx)->SendNull();
     }

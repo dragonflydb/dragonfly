@@ -245,6 +245,7 @@ class InterpreterReplier : public RedisReplyBuilder {
   void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
   void SendStored() final;
 
+  void SendCommonString(CommonStrings str) final;
   void SendSimpleString(std::string_view str) final;
   void SendMGetResponse(absl::Span<const OptResp>) final;
   void SendSimpleStrArr(StrSpan arr) final;
@@ -341,7 +342,21 @@ void InterpreterReplier::SendError(string_view str, std::string_view type) {
 
 void InterpreterReplier::SendStored() {
   DCHECK(array_len_.empty());
-  SendSimpleString("OK");
+  SendOk();
+}
+
+void InterpreterReplier::SendCommonString(CommonStrings str) {
+#define X(t)             \
+  case CommonStrings::t: \
+    return SendSimpleString(#t);
+
+  switch (str) {
+    DFLY_COMMON_STRINGS_X_MACRO()
+    default:
+      LOG(FATAL) << "Bad string " << int(str);
+  }
+
+#undef X
 }
 
 void InterpreterReplier::SendSimpleString(string_view str) {
@@ -863,7 +878,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     StoredCmd stored_cmd{cid, args_no_cmd};
     dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
 
-    return (*cntx)->SendSimpleString("QUEUED");
+    return (*cntx)->SendCommonString(CommonStrings::QUEUED);
   }
 
   // We are not sending any admin command in the monitor, and we do not want to

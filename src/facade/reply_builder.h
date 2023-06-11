@@ -20,6 +20,22 @@ enum class ReplyMode {
   FULL       // All replies are recorded
 };
 
+#define DFLY_COMMON_STRINGS_X_MACRO() \
+  X(OK)                               \
+  X(ERROR)                            \
+  X(QUEUED)                           \
+  X(NOT_FOUND)                        \
+  X(STORED)                           \
+  X(NOT_STORED)                       \
+  X(END)                              \
+  X(FULL)                             \
+  X(DELETED)                          \
+  X(PONG)
+
+#define X(t) t,
+enum class CommonStrings { DFLY_COMMON_STRINGS_X_MACRO() };
+#undef X
+
 class SinkReplyBuilder {
  public:
   struct ResponseValue {
@@ -50,8 +66,10 @@ class SinkReplyBuilder {
   virtual void SendLong(long val) = 0;
   virtual void SendSimpleString(std::string_view str) = 0;
 
+  virtual void SendCommonString(CommonStrings string) = 0;
+
   void SendOk() {
-    SendSimpleString("OK");
+    SendCommonString(CommonStrings::OK);
   }
 
   virtual void SendProtocolError(std::string_view str) = 0;
@@ -155,6 +173,7 @@ class MCReplyBuilder : public SinkReplyBuilder {
 
   void SendClientError(std::string_view str);
   void SendNotFound();
+  void SendCommonString(CommonStrings str) final;
   void SendSimpleString(std::string_view str) final;
   void SendProtocolError(std::string_view str) final;
 
@@ -189,6 +208,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   virtual void SendNull();
   void SendLong(long val) override;
   virtual void SendDouble(double val);
+  void SendCommonString(CommonStrings str) override;
   void SendSimpleString(std::string_view str) override;
 
   virtual void SendBulkString(std::string_view str);

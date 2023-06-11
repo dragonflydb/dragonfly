@@ -660,7 +660,7 @@ void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
     if (del_cnt == 0) {
       mc_builder->SendNotFound();
     } else {
-      mc_builder->SendSimpleString("DELETED");
+      mc_builder->SendCommonString(CommonStrings::DELETED);
     }
   } else {
     (*cntx)->SendLong(del_cnt);
@@ -675,7 +675,7 @@ void GenericFamily::Ping(CmdArgList args, ConnectionContext* cntx) {
   // We synchronously block here until the engine sends us the payload and notifies that
   // the I/O operation has been processed.
   if (args.size() == 0) {
-    return (*cntx)->SendSimpleString("PONG");
+    return (*cntx)->SendCommonString(CommonStrings::PONG);
   } else {
     string_view arg = ArgS(args, 0);
     DVLOG(2) << "Ping " << arg;

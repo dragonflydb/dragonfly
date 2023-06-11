@@ -38,6 +38,7 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   void SendNull() override;
   void SendLong(long val) override;
   void SendDouble(double val) override;
+  void SendCommonString(CommonStrings string) override;
   void SendSimpleString(std::string_view str) override;
 
   void SendBulkString(std::string_view str) override;
