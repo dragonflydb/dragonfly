@@ -837,6 +837,10 @@ void Connection::ShutdownThreadLocal() {
   pipeline_req_pool_.clear();
 }
 
+bool Connection::IsCurrentlyDispatching() const {
+  return cc_->async_dispatch || cc_->sync_dispatch;
+}
+
 void RespToArgList(const RespVec& src, CmdArgVec* dest) {
   dest->resize(src.size());
   for (size_t i = 0; i < src.size(); ++i) {

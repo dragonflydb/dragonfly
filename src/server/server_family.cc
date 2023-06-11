@@ -2069,6 +2069,9 @@ void ServerFamily::_Shutdown(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
+  service_.proactor_pool().AwaitFiberOnAll(
+      [](ProactorBase* pb) { ServerState::tlocal()->EnterLameDuck(); });
+
   CHECK_NOTNULL(acceptor_)->Stop();
   (*cntx)->SendOk();
 }
