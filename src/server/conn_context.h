@@ -87,7 +87,6 @@ struct ConnectionState {
 
   // Lua-script related data.
   struct ScriptInfo {
-    bool is_write = true;
     absl::flat_hash_set<std::string_view> keys;  // declared keys
 
     size_t async_cmds_heap_mem = 0;     // bytes used by async_cmds

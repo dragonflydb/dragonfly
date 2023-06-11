@@ -723,8 +723,7 @@ bool Service::VerifyCommand(const CommandId* cid, CmdArgList args, ConnectionCon
     return false;
   }
 
-  bool is_write_cmd = (cid->opt_mask() & CO::WRITE) ||
-                      (under_script && dfly_cntx->conn_state.script_info->is_write);
+  bool is_write_cmd = cid->opt_mask() & CO::WRITE;
   bool under_multi = dfly_cntx->conn_state.exec_info.IsActive() && !is_trans_cmd;
 
   if (!etl.is_master && is_write_cmd && !dfly_cntx->is_replicating) {

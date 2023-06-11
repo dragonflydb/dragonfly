@@ -952,10 +952,14 @@ Test flushall command that's invoked while in full sync mode.
 This can cause an issue because it will be executed on each shard independently.
 More details in https://github.com/dragonflydb/dragonfly/issues/1231
 """
+
+
 @pytest.mark.asyncio
 async def test_flushall_in_full_sync(df_local_factory, df_seeder_factory):
-    master = df_local_factory.create(port=BASE_PORT, proactor_threads=4, logtostdout=True)
-    replica = df_local_factory.create(port=BASE_PORT+1, proactor_threads=2, logtostdout=True)
+    master = df_local_factory.create(
+        port=BASE_PORT, proactor_threads=4, logtostdout=True)
+    replica = df_local_factory.create(
+        port=BASE_PORT+1, proactor_threads=2, logtostdout=True)
 
     # Start master
     master.start()
@@ -992,9 +996,51 @@ async def test_flushall_in_full_sync(df_local_factory, df_seeder_factory):
     new_syncid, _ = await c_replica.execute_command("DEBUG REPLICA OFFSET")
     assert new_syncid != syncid
 
-    post_seeder = df_seeder_factory.create(port=master.port, keys=10, dbcount=1)
+    post_seeder = df_seeder_factory.create(
+        port=master.port, keys=10, dbcount=1)
     await post_seeder.run(target_deviation=0.1)
 
     await check_all_replicas_finished([c_replica], c_master)
 
     await check_data(post_seeder, [replica], [c_replica])
+
+
+"""
+Test read-only scripts work with replication. EVAL_RO and the 'no-writes' flags are currently not supported.
+"""
+
+READONLY_SCRIPT = """
+redis.call('GET', 'A')
+redis.call('EXISTS', 'B')
+return redis.call('GET', 'WORKS')
+"""
+
+WRITE_SCRIPT = """
+redis.call('SET', 'A', 'ErrroR')
+"""
+
+
+@pytest.mark.asyncio
+async def test_readonly_script(df_local_factory):
+    master = df_local_factory.create(
+        port=BASE_PORT, proactor_threads=2, logtostdout=True)
+    replica = df_local_factory.create(
+        port=BASE_PORT+1, proactor_threads=2, logtostdout=True)
+
+    df_local_factory.start_all([master, replica])
+
+    c_master = aioredis.Redis(port=master.port)
+    c_replica = aioredis.Redis(port=replica.port)
+
+    await c_master.set('WORKS', 'YES')
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    await c_replica.eval(READONLY_SCRIPT, 3, 'A', 'B', 'WORKS') == 'YES'
+
+    try:
+        await c_replica.eval(WRITE_SCRIPT, 1, 'A')
+        assert False
+    except aioredis.ResponseError as roe:
+        assert 'READONLY ' in str(roe)
