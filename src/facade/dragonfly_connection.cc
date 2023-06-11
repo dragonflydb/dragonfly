@@ -300,7 +300,7 @@ void Connection::HandleRequests() {
 
   if (absl::GetFlag(FLAGS_tcp_nodelay)) {
     int val = 1;
-    CHECK_EQ(0, setsockopt(lsb->native_handle(), SOL_TCP, TCP_NODELAY, &val, sizeof(val)));
+    CHECK_EQ(0, setsockopt(lsb->native_handle(), IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val)));
   }
 
   auto remote_ep = lsb->RemoteEndpoint();

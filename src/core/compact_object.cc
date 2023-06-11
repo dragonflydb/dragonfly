@@ -33,7 +33,7 @@ namespace dfly {
 using namespace std;
 using absl::GetFlag;
 using detail::binpacked_len;
-
+using MemoryResource = detail::RobjWrapper::MemoryResource;
 namespace {
 
 constexpr XXH64_hash_t kHashSeed = 24061983;
@@ -53,7 +53,7 @@ size_t DictMallocSize(dict* d) {
   return res + dictSize(d) * 16;  // approximation.
 }
 
-inline void FreeObjSet(unsigned encoding, void* ptr, pmr::memory_resource* mr) {
+inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
   switch (encoding) {
     case kEncodingStrMap: {
       dictRelease((dict*)ptr);
@@ -181,7 +181,7 @@ struct TL {
   robj tmp_robj{
       .type = 0, .encoding = 0, .lru = 0, .refcount = OBJ_STATIC_REFCOUNT, .ptr = nullptr};
 
-  pmr::memory_resource* local_mr = pmr::get_default_resource();
+  MemoryResource* local_mr = PMR_NS::get_default_resource();
   size_t small_str_bytes;
   base::PODArray<uint8_t> tmp_buf;
   string tmp_str;
@@ -266,7 +266,7 @@ size_t RobjWrapper::Size() const {
   return 0;
 }
 
-void RobjWrapper::Free(pmr::memory_resource* mr) {
+void RobjWrapper::Free(MemoryResource* mr) {
   if (!inner_obj_)
     return;
   DVLOG(1) << "RobjWrapper::Free " << inner_obj_;
@@ -338,7 +338,7 @@ bool RobjWrapper::Equal(string_view sv) const {
   return AsView() == sv;
 }
 
-void RobjWrapper::SetString(string_view s, pmr::memory_resource* mr) {
+void RobjWrapper::SetString(string_view s, MemoryResource* mr) {
   type_ = OBJ_STRING;
   encoding_ = OBJ_ENCODING_RAW;
 
@@ -361,7 +361,7 @@ bool RobjWrapper::DefragIfNeeded(float ratio) {
   return false;
 }
 
-bool RobjWrapper::Reallocate(std::pmr::memory_resource* mr) {
+bool RobjWrapper::Reallocate(MemoryResource* mr) {
   void* old_ptr = inner_obj_;
   inner_obj_ = mr->allocate(sz_, kAlignSize);
   memcpy(inner_obj_, old_ptr, sz_);
@@ -379,7 +379,7 @@ inline size_t RobjWrapper::InnerObjMallocUsed() const {
   return zmalloc_size(inner_obj_);
 }
 
-void RobjWrapper::MakeInnerRoom(size_t current_cap, size_t desired, pmr::memory_resource* mr) {
+void RobjWrapper::MakeInnerRoom(size_t current_cap, size_t desired, MemoryResource* mr) {
   if (current_cap * 2 > desired) {
     if (desired < SDS_MAX_PREALLOC)
       desired *= 2;
@@ -409,7 +409,7 @@ auto CompactObj::GetStats() -> Stats {
   return res;
 }
 
-void CompactObj::InitThreadLocal(pmr::memory_resource* mr) {
+void CompactObj::InitThreadLocal(MemoryResource* mr) {
   tl.local_mr = mr;
   tl.tmp_buf = base::PODArray<uint8_t>{mr};
 }
@@ -1057,7 +1057,7 @@ size_t CompactObj::DecodedLen(size_t sz) const {
   return ascii_len(sz) - ((mask_ & ASCII1_ENC_BIT) ? 1 : 0);
 }
 
-pmr::memory_resource* CompactObj::memory_resource() {
+MemoryResource* CompactObj::memory_resource() {
   return tl.local_mr;
 }
 

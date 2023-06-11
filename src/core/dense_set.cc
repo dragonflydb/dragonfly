@@ -67,7 +67,7 @@ void DenseSet::IteratorBase::Advance() {
   DCHECK(!curr_entry_->IsEmpty());
 }
 
-DenseSet::DenseSet(pmr::memory_resource* mr) : entries_(mr) {
+DenseSet::DenseSet(MemoryResource* mr) : entries_(mr) {
 }
 
 DenseSet::~DenseSet() {
@@ -466,7 +466,7 @@ void DenseSet::Delete(DensePtr* prev, DensePtr* ptr) {
 }
 
 void* DenseSet::PopInternal() {
-  std::pmr::vector<DenseSet::DensePtr>::iterator bucket_iter = entries_.begin();
+  ChainVectorIterator bucket_iter = entries_.begin();
 
   // find the first non-empty chain
   do {

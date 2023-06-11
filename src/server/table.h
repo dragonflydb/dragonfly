@@ -84,7 +84,7 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
 
   TopKeys top_keys;
 
-  explicit DbTable(std::pmr::memory_resource* mr);
+  explicit DbTable(PMR_NS::memory_resource* mr);
   ~DbTable();
 
   void Clear();

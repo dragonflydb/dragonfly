@@ -71,7 +71,7 @@ class EngineShard {
     return db_slice_;
   }
 
-  std::pmr::memory_resource* memory_resource() {
+  PMR_NS::memory_resource* memory_resource() {
     return &mi_resource_;
   }
 
