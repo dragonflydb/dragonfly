@@ -13,10 +13,9 @@ To install: pip install -r requirements.txt
 
 class Node:
     def __init__(self, port, admin_port):
+        self.id = ''
         self.port = port
         self.admin_port = admin_port
-
-    id = ''
 
 
 def start_node(node, threads):
@@ -28,10 +27,9 @@ def start_node(node, threads):
 
 
 def send_command(node, command):
+    client = redis.Redis(decode_responses=True, host="localhost", port=node.admin_port)
     for i in range(0, 5):
         try:
-            client = redis.Redis(decode_responses=True,
-                                 host="localhost", port=node.admin_port)
             result = client.execute_command(*command)
             client.close()
             return result
@@ -108,14 +106,13 @@ def main():
     print(f'- Replicas? {args.with_replicas}')
     print()
 
-    masters = []
-    for i in range(args.num_masters):
-        masters.append(Node(args.first_port+i, args.first_admin_port+i))
+    masters = [Node(args.first_port+i, args.first_admin_port+i)
+               for i in range(args.num_masters)]
 
     replicas = []
     if args.with_replicas:
-        for i in range(args.num_masters, args.num_masters*2):
-            replicas.append(Node(args.first_port+i, args.first_admin_port+i))
+        replicas = [Node(args.first_port+i, args.first_admin_port+i)
+                    for i in range(args.num_masters, args.num_masters*2)]
 
     nodes = (masters + replicas)
     print('Starting nodes...')
