@@ -187,6 +187,8 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
   size_t response_count =
       min(total_count - min(total_count, params->limit_offset), params->limit_total);
 
+  facade::SinkReplyBuilder::ReplyAggregator agg{cntx->reply_builder()};
+
   (*cntx)->StartArray(response_count * 2 + 1);
   (*cntx)->SendLong(total_count);
 

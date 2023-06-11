@@ -44,8 +44,8 @@ void NumericIndex::Add(DocId doc, string_view value) {
 }
 
 vector<DocId> NumericIndex::Range(int64_t l, int64_t r) const {
-  auto it_l = entries_.lower_bound({l, 0});
-  auto it_r = entries_.lower_bound({r, numeric_limits<DocId>::max()});
+  auto it_l = entries_.lower_bound(l);
+  auto it_r = entries_.lower_bound(r + 1);
 
   vector<DocId> out;
   for (auto it = it_l; it != it_r; ++it)
@@ -55,9 +55,9 @@ vector<DocId> NumericIndex::Range(int64_t l, int64_t r) const {
   return out;
 }
 
-vector<DocId> BaseStringIndex::Matching(string_view str) const {
+const vector<DocId>* BaseStringIndex::Matching(string_view str) const {
   auto it = entries_.find(absl::StripAsciiWhitespace(str));
-  return (it != entries_.end()) ? it->second : vector<DocId>{};
+  return (it != entries_.end()) ? &it->second : nullptr;
 }
 
 void TextIndex::Add(DocId doc, string_view value) {

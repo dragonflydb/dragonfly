@@ -6,6 +6,8 @@
 
 #include <absl/strings/numbers.h>
 
+#include <variant>
+
 #include "base/logging.h"
 #include "core/search/ast_expr.h"
 #include "core/search/indices.h"
@@ -25,65 +27,132 @@ AstExpr ParseQuery(std::string_view query) {
   return driver.Take();
 }
 
-// Add results from matched to current, keep sorted and remove duplicates.
-void UnifyResults(vector<DocId>&& matched, vector<DocId>* current, vector<DocId>* tmp) {
-  swap(*current, *tmp);  // Move current to tmp so we can directly write into current
-  current->clear();
-  current->reserve(matched.size() + tmp->size());
+// Represents an either owned or non-owned result set that can be accessed transparently.
+struct IndexResult {
+  using DocVec = vector<DocId>;
 
-  merge(matched.begin(), matched.end(), tmp->begin(), tmp->end(), back_inserter(*current));
-  current->erase(unique(current->begin(), current->end()), current->end());
-}
+  IndexResult() : value_{DocVec{}} {};
 
-// Merge results from matched with current, keep sorted.
-void MergeResults(vector<DocId>&& matched, vector<DocId>* current, vector<DocId>* tmp) {
-  swap(*current, *tmp);  // Move current to tmp so we can directly write into current
-  current->clear();
-  current->reserve(matched.size() + tmp->size());
+  IndexResult(const DocVec* dv) : value_{dv} {
+    if (dv == nullptr)
+      value_ = DocVec{};
+  }
 
-  set_intersection(matched.begin(), matched.end(), tmp->begin(), tmp->end(),
-                   back_inserter(*current));
-}
+  IndexResult(DocVec&& dv) : value_{move(dv)} {
+  }
+
+  // Transparent const access to underlying value
+  const DocVec* operator->() const {
+    return holds_alternative<DocVec>(value_) ? &get<DocVec>(value_) : get<const DocVec*>(value_);
+  }
+
+  IndexResult& operator=(DocVec&& entries) {
+    if (holds_alternative<DocVec>(value_)) {
+      swap(get<DocVec>(value_), entries);  // swap to keep backing array
+      entries.clear();
+    } else {
+      value_ = move(entries);
+    }
+    return *this;
+  }
+
+  // Move out of owned or copy borrowed
+  DocVec Take() {
+    if (holds_alternative<DocVec>(value_))
+      return move(get<DocVec>(value_));
+    return *get<const DocVec*>(value_);
+  }
+
+ private:
+  variant<DocVec /*owned*/, const DocVec* /*pointer to borrowed*/> value_;
+};
 
 struct BasicSearch {
+  using LogicOp = AstLogicalNode::LogicOp;
+
+  BasicSearch(const FieldIndices* indices) : indices_{indices}, tmp_vec_{} {
+  }
+
   // Get casted sub index by field
   template <typename T> T* GetIndex(string_view field) {
     static_assert(is_base_of_v<BaseIndex, T>);
-    auto index = indices->GetIndex(field);
+    auto index = indices_->GetIndex(field);
     DCHECK(index);  // TODO: handle not existing erorr
     auto* casted_ptr = dynamic_cast<T*>(index);
     DCHECK(casted_ptr);  // TODO: handle type errors
     return casted_ptr;
   }
 
-  vector<DocId> Search(monostate, string_view) {
-    return {};
+  // Collect all index results from F(C[i])
+  template <typename C, typename F>
+  vector<IndexResult> GetSubResults(const C& container, const F& f) {
+    vector<IndexResult> sub_results(container.size());
+    for (size_t i = 0; i < container.size(); i++)
+      sub_results[i] = f(container[i]);
+    return sub_results;
   }
 
-  vector<DocId> Search(const AstTermNode& node, string_view active_field) {
-    // Select active indices: search in all text indices if none is selected
-    vector<TextIndex*> selected_indices;
-    if (active_field.empty())
-      selected_indices = indices->GetAllTextIndices();
-    else
-      selected_indices = {GetIndex<TextIndex>(active_field)};
+  void Merge(IndexResult matched, IndexResult* current_ptr, LogicOp op) {
+    IndexResult& current = *current_ptr;
+    tmp_vec_.clear();
 
-    // Unify results from all indices
-    vector<DocId> out, tmp;
-    for (auto* index : selected_indices)
-      UnifyResults(index->Matching(node.term), &out, &tmp);
+    if (op == LogicOp::AND) {
+      tmp_vec_.reserve(min(matched->size(), current->size()));
+      set_intersection(matched->begin(), matched->end(), current->begin(), current->end(),
+                       back_inserter(tmp_vec_));
+    } else {
+      tmp_vec_.reserve(matched->size() + current->size());
+      set_union(matched->begin(), matched->end(), current->begin(), current->end(),
+                back_inserter(tmp_vec_));
+    }
 
+    current = move(tmp_vec_);
+  }
+
+  // Efficiently unify multiple sub results with specified logical op
+  IndexResult UnifyResults(vector<IndexResult>&& sub_results, LogicOp op) {
+    if (sub_results.empty())
+      return vector<DocId>{};
+
+    // Unifying from smallest to largest is more efficient.
+    // AND: the result only shrinks, so starting with the smallest is most optimal.
+    // OR: unifying smaller sets first reduces the number of element traversals on average.
+    sort(sub_results.begin(), sub_results.end(),
+         [](const auto& l, const auto& r) { return l->size() < r->size(); });
+
+    IndexResult out{move(sub_results[0])};
+    for (auto& matched : absl::MakeSpan(sub_results).subspan(1))
+      Merge(move(matched), &out, op);
     return out;
   }
 
-  vector<DocId> Search(const AstRangeNode& node, string_view active_field) {
+  IndexResult Search(monostate, string_view) {
+    return vector<DocId>{};
+  }
+
+  // "term": access field's text index or unify results from all text indices if no field is set
+  IndexResult Search(const AstTermNode& node, string_view active_field) {
+    if (!active_field.empty()) {
+      auto* index = GetIndex<TextIndex>(active_field);
+      return index->Matching(node.term);
+    }
+
+    vector<TextIndex*> selected_indices = indices_->GetAllTextIndices();
+    auto mapping = [&node](TextIndex* index) { return index->Matching(node.term); };
+
+    return UnifyResults(GetSubResults(selected_indices, mapping), LogicOp::OR);
+  }
+
+  // [range]: access field's numeric index
+  IndexResult Search(const AstRangeNode& node, string_view active_field) {
     DCHECK(!active_field.empty());
     return GetIndex<NumericIndex>(active_field)->Range(node.lo, node.hi);
   }
 
-  vector<DocId> Search(const AstNegateNode& node, string_view active_field) {
-    vector<DocId> matched = SearchGeneric(*node.node, active_field);
-    vector<DocId> all = indices->GetAllDocs();
+  // negate -(*subquery*): explicitly compute result complement. Needs further optimizations
+  IndexResult Search(const AstNegateNode& node, string_view active_field) {
+    vector<DocId> matched = SearchGeneric(*node.node, active_field).Take();
+    vector<DocId> all = indices_->GetAllDocs();
 
     // To negate a result, we have to find the complement of matched to all documents,
     // so we remove all matched documents from the set of all documents.
@@ -94,51 +163,40 @@ struct BasicSearch {
     return all;
   }
 
-  vector<DocId> Search(const AstLogicalNode& node, string_view active_field) {
-    auto merge_func = node.op == AstLogicalNode::AND ? MergeResults : UnifyResults;
-
-    bool first = true;
-    vector<DocId> out, tmp;
-    for (auto& subnode : node.nodes) {
-      auto matched = SearchGeneric(subnode, active_field);
-      if (first) {
-        out = matched;
-        first = false;
-      } else {
-        merge_func(move(matched), &out, &tmp);
-      }
-    }
-    return out;
+  // logical query: unify all sub results
+  IndexResult Search(const AstLogicalNode& node, string_view active_field) {
+    auto mapping = [&](auto& node) { return SearchGeneric(node, active_field); };
+    return UnifyResults(GetSubResults(node.nodes, mapping), node.op);
   }
 
-  vector<DocId> Search(const AstFieldNode& node, string_view active_field) {
+  // @field: set active field for sub tree
+  IndexResult Search(const AstFieldNode& node, string_view active_field) {
     DCHECK(active_field.empty());
     DCHECK(node.node);
     return SearchGeneric(*node.node, node.field);
   }
 
-  vector<DocId> Search(const AstTagsNode& node, string_view active_field) {
+  // {tags | ...}: Unify results for all tags
+  IndexResult Search(const AstTagsNode& node, string_view active_field) {
     auto* tag_index = GetIndex<TagIndex>(active_field);
-
-    vector<DocId> out, tmp;
-    for (const auto& tag : node.tags)
-      UnifyResults(tag_index->Matching(tag), &out, &tmp);
-
-    return out;
+    auto mapping = [tag_index](string_view tag) { return tag_index->Matching(tag); };
+    return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);
   }
 
-  vector<DocId> SearchGeneric(const AstNode& node, string_view active_field) {
+  // Determine node type and call specific search function
+  IndexResult SearchGeneric(const AstNode& node, string_view active_field) {
     auto cb = [this, active_field](const auto& inner) { return Search(inner, active_field); };
     auto result = visit(cb, static_cast<const NodeVariants&>(node));
-    DCHECK(is_sorted(result.begin(), result.end()));
+    DCHECK(is_sorted(result->begin(), result->end()));
     return result;
   }
 
   static vector<DocId> Search(const FieldIndices* indices, const AstNode& query) {
-    return BasicSearch{indices}.SearchGeneric(query, "");
+    return BasicSearch{indices}.SearchGeneric(query, "").Take();
   }
 
-  const FieldIndices* indices;
+  const FieldIndices* indices_;
+  vector<DocId> tmp_vec_;
 };
 
 }  // namespace
