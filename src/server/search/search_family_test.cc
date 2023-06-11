@@ -72,8 +72,7 @@ TEST_F(SearchFamilyTest, Simple) {
   Run({"hset", "d:2", "foo", "bar", "k", "v"});
   Run({"hset", "d:3", "foo", "bad", "k", "v"});
 
-  EXPECT_EQ(Run({"ft.create", "i1", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "foo", "TEXT", "k",
-                 "TEXT"}),
+  EXPECT_EQ(Run({"ft.create", "i1", "PREFIX", "1", "d:", "SCHEMA", "foo", "TEXT", "k", "TEXT"}),
             "OK");
 
   EXPECT_THAT(Run({"ft.search", "i1", "@foo:bar"}), AreDocIds("d:2"));
@@ -207,6 +206,57 @@ TEST_F(SearchFamilyTest, TestLimit) {
 
   resp = Run({"ft.search", "i1", "all", "limit", "17", "5"});
   EXPECT_THAT(resp, ArrLen(3 * 2 + 1));
+}
+
+TEST_F(SearchFamilyTest, SimpleUpdates) {
+  EXPECT_EQ(Run({"ft.create", "i1", "schema", "title", "text", "visits", "numeric"}), "OK");
+
+  Run({"hset", "d:1", "title", "Dragonfly article", "visits", "100"});
+  Run({"hset", "d:2", "title", "Butterfly observations", "visits", "50"});
+  Run({"hset", "d:3", "title", "Bumblebee studies", "visits", "30"});
+
+  // Check values above were added to the index
+  EXPECT_THAT(Run({"ft.search", "i1", "article | observations | studies"}),
+              AreDocIds("d:1", "d:2", "d:3"));
+
+  // Update title - text value
+  {
+    Run({"hset", "d:2", "title", "Butterfly studies"});
+    EXPECT_THAT(Run({"ft.search", "i1", "observations"}), kNoResults);
+    EXPECT_THAT(Run({"ft.search", "i1", "studies"}), AreDocIds("d:2", "d:3"));
+
+    Run({"hset", "d:1", "title", "Upcoming Dragonfly presentation"});
+    EXPECT_THAT(Run({"ft.search", "i1", "article"}), kNoResults);
+    EXPECT_THAT(Run({"ft.search", "i1", "upcoming presentation"}), AreDocIds("d:1"));
+
+    Run({"hset", "d:3", "title", "Secret bumblebee research"});
+    EXPECT_THAT(Run({"ft.search", "i1", "studies"}), AreDocIds("d:2"));
+    EXPECT_THAT(Run({"ft.search", "i1", "secret research"}), AreDocIds("d:3"));
+  }
+
+  // Update visits - numeric value
+  {
+    EXPECT_THAT(Run({"ft.search", "i1", "@visits:[50 1000]"}), AreDocIds("d:1", "d:2"));
+
+    Run({"hset", "d:3", "visits", "75"});
+    EXPECT_THAT(Run({"ft.search", "i1", "@visits:[0 49]"}), kNoResults);
+    EXPECT_THAT(Run({"ft.search", "i1", "@visits:[50 1000]"}), AreDocIds("d:1", "d:2", "d:3"));
+
+    Run({"hset", "d:1", "visits", "125"});
+    Run({"hset", "d:2", "visits", "150"});
+    EXPECT_THAT(Run({"ft.search", "i1", "@visits:[100 1000]"}), AreDocIds("d:1", "d:2"));
+
+    Run({"hset", "d:3", "visits", "175"});
+    EXPECT_THAT(Run({"ft.search", "i1", "@visits:[0 100]"}), kNoResults);
+    EXPECT_THAT(Run({"ft.search", "i1", "@visits:[150 1000]"}), AreDocIds("d:2", "d:3"));
+  }
+
+  // Delete documents
+  {
+    Run({"del", "d:2", "d:3"});
+    EXPECT_THAT(Run({"ft.search", "i1", "dragonfly"}), AreDocIds("d:1"));
+    EXPECT_THAT(Run({"ft.search", "i1", "butterfly | bumblebee"}), kNoResults);
+  }
 }
 
 }  // namespace dfly

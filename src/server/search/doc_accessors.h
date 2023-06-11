@@ -65,6 +65,6 @@ struct JsonAccessor : public BaseAccessor {
 };
 
 // Get accessor for value
-std::unique_ptr<BaseAccessor> GetAccessor(const OpArgs& op_args, const PrimeValue& pv);
+std::unique_ptr<BaseAccessor> GetAccessor(const DbContext& db_cntx, const PrimeValue& pv);
 
 }  // namespace dfly

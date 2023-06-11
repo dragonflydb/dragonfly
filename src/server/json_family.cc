@@ -22,6 +22,7 @@ extern "C" {
 #include "server/command_registry.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
+#include "server/search/doc_index.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 
@@ -51,9 +52,14 @@ void SetJson(const OpArgs& op_args, string_view key, JsonType&& value) {
   auto& db_slice = op_args.shard->db_slice();
   DbIndex db_index = op_args.db_cntx.db_index;
   auto [it_output, added] = db_slice.AddOrFind(op_args.db_cntx, key);
+
+  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it_output->second);
   db_slice.PreUpdate(db_index, it_output);
+
   it_output->second.SetJson(std::move(value));
+
   db_slice.PostUpdate(db_index, it_output, key);
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, it_output->second);
 }
 
 string JsonTypeToName(const JsonType& val) {
@@ -139,6 +145,8 @@ OpStatus UpdateEntry(const OpArgs& op_args, std::string_view key, std::string_vi
   DCHECK(json_val) << "should have a valid JSON object for key '" << key << "' the type for it is '"
                    << entry_it->second.ObjType() << "'";
   JsonType& json_entry = *json_val;
+
+  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, entry_it->second);
   db_slice.PreUpdate(db_index, entry_it);
 
   // Run the update operation on this entry
@@ -152,6 +160,7 @@ OpStatus UpdateEntry(const OpArgs& op_args, std::string_view key, std::string_vi
   OpStatus res = verify_op(json_entry);
   if (res == OpStatus::OK) {
     db_slice.PostUpdate(db_index, entry_it, key);
+    op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, entry_it->second);
   }
 
   return res;

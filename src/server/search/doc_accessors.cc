@@ -74,7 +74,7 @@ SearchDocData JsonAccessor::Serialize() const {
   return out;
 }
 
-unique_ptr<BaseAccessor> GetAccessor(const OpArgs& op_args, const PrimeValue& pv) {
+unique_ptr<BaseAccessor> GetAccessor(const DbContext& db_cntx, const PrimeValue& pv) {
   DCHECK(pv.ObjType() == OBJ_HASH || pv.ObjType() == OBJ_JSON);
 
   if (pv.ObjType() == OBJ_JSON) {
@@ -86,7 +86,7 @@ unique_ptr<BaseAccessor> GetAccessor(const OpArgs& op_args, const PrimeValue& pv
     auto ptr = reinterpret_cast<ListPackAccessor::LpPtr>(pv.RObjPtr());
     return make_unique<ListPackAccessor>(ptr);
   } else {
-    auto* sm = container_utils::GetStringMap(pv, op_args.db_cntx);
+    auto* sm = container_utils::GetStringMap(pv, db_cntx);
     return make_unique<StringMapAccessor>(sm);
   }
 }

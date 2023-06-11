@@ -221,8 +221,16 @@ void FieldIndices::Add(DocId doc, DocumentAccessor* access) {
   for (auto& [field, index] : indices_) {
     index->Add(doc, access->Get(field));
   }
-  all_ids_.push_back(doc);
-  sort(all_ids_.begin(), all_ids_.end());
+  all_ids_.insert(upper_bound(all_ids_.begin(), all_ids_.end(), doc), doc);
+}
+
+void FieldIndices::Remove(DocId doc, DocumentAccessor* access) {
+  for (auto& [field, index] : indices_) {
+    index->Remove(doc, access->Get(field));
+  }
+  auto it = lower_bound(all_ids_.begin(), all_ids_.end(), doc);
+  CHECK(it != all_ids_.end() && *it == doc);
+  all_ids_.erase(it);
 }
 
 BaseIndex* FieldIndices::GetIndex(string_view field) const {

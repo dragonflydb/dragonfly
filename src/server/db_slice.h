@@ -84,6 +84,10 @@ class DbSlice {
     }
   };
 
+  // Called before deleting an element to notify the search indices.
+  using DocDeletionCallback =
+      std::function<void(std::string_view, const Context&, const PrimeValue& pv)>;
+
   struct ExpireParams {
     int64_t value = INT64_MIN;  // undefined
 
@@ -312,6 +316,8 @@ class DbSlice {
   // Unregisted all watched key entries for connection.
   void UnregisterConnectionWatches(ConnectionState::ExecInfo* exec_info);
 
+  void SetDocDeletionCallback(DocDeletionCallback ddcb);
+
  private:
   std::pair<PrimeIterator, bool> AddOrUpdateInternal(const Context& cntx, std::string_view key,
                                                      PrimeValue obj, uint64_t expire_at_ms,
@@ -354,6 +360,9 @@ class DbSlice {
 
   // ordered from the smallest to largest version.
   std::vector<std::pair<uint64_t, ChangeCallback>> change_cb_;
+
+  // Registered by shard indices on when first document index is created.
+  DocDeletionCallback doc_del_cb_;
 };
 
 }  // namespace dfly

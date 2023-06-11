@@ -34,7 +34,7 @@ void TraverseAllMatching(const DocIndex& index, const OpArgs& op_args, F&& f) {
     if (key.rfind(index.prefix, 0) != 0)
       return;
 
-    auto accessor = GetAccessor(op_args, pv);
+    auto accessor = GetAccessor(op_args.db_cntx, pv);
     f(key, accessor.get());
   };
 
@@ -64,13 +64,15 @@ ShardDocIndex::DocId ShardDocIndex::DocKeyIndex::Add(string_view key) {
   return id;
 }
 
-void ShardDocIndex::DocKeyIndex::Delete(string_view key) {
+ShardDocIndex::DocId ShardDocIndex::DocKeyIndex::Remove(string_view key) {
   DCHECK_GT(ids_.count(key), 0u);
 
   DocId id = ids_.find(key)->second;
   keys_[id] = "";
   ids_.erase(key);
   free_ids_.push_back(id);
+
+  return id;
 }
 
 string_view ShardDocIndex::DocKeyIndex::Get(DocId id) const {
@@ -84,6 +86,10 @@ uint8_t DocIndex::GetObjCode() const {
   return type == JSON ? OBJ_JSON : OBJ_HASH;
 }
 
+bool DocIndex::Matches(string_view key, unsigned obj_code) const {
+  return obj_code == GetObjCode() && key.rfind(prefix, 0) == 0;
+}
+
 ShardDocIndex::ShardDocIndex(shared_ptr<DocIndex> index)
     : base_{index}, indices_{index->schema}, key_index_{} {
 }
@@ -91,6 +97,21 @@ ShardDocIndex::ShardDocIndex(shared_ptr<DocIndex> index)
 void ShardDocIndex::Init(const OpArgs& op_args) {
   auto cb = [this](string_view key, BaseAccessor* doc) { indices_.Add(key_index_.Add(key), doc); };
   TraverseAllMatching(*base_, op_args, cb);
+}
+
+void ShardDocIndex::AddDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
+  auto accessor = GetAccessor(db_cntx, pv);
+  indices_.Add(key_index_.Add(key), accessor.get());
+}
+
+void ShardDocIndex::RemoveDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
+  auto accessor = GetAccessor(db_cntx, pv);
+  DocId id = key_index_.Remove(key);
+  indices_.Remove(id, accessor.get());
+}
+
+bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
+  return base_->Matches(key, obj_code);
 }
 
 SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& params,
@@ -104,7 +125,7 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     auto key = key_index_.Get(doc);
     auto it = db_slice.Find(op_args.db_cntx, key, base_->GetObjCode());
     CHECK(it) << "Expected key: " << key << " to exist";
-    auto doc_access = GetAccessor(op_args, (*it)->second);
+    auto doc_access = GetAccessor(op_args.db_cntx, (*it)->second);
     out.emplace_back(key, doc_access->Serialize());
 
     // Scoring is not implemented yet, so we take just the first documents
@@ -115,16 +136,35 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   return SearchResult{std::move(out), doc_ids.size()};
 }
 
-ShardDocIndex* ShardDocIndices::Get(string_view name) const {
+ShardDocIndex* ShardDocIndices::GetIndex(string_view name) {
   auto it = indices_.find(name);
   return it != indices_.end() ? it->second.get() : nullptr;
 }
 
-void ShardDocIndices::Init(const OpArgs& op_args, std::string_view name,
-                           shared_ptr<DocIndex> index_ptr) {
+void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
+                                shared_ptr<DocIndex> index_ptr) {
   auto shard_index = make_unique<ShardDocIndex>(index_ptr);
   auto [it, _] = indices_.emplace(name, move(shard_index));
   it->second->Init(op_args);
+
+  op_args.shard->db_slice().SetDocDeletionCallback(
+      [this](string_view key, const DbContext& cntx, const PrimeValue& pv) {
+        RemoveDoc(key, cntx, pv);
+      });
+}
+
+void ShardDocIndices::AddDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
+  for (auto& [_, index] : indices_) {
+    if (index->Matches(key, pv.ObjType()))
+      index->AddDoc(key, db_cntx, pv);
+  }
+}
+
+void ShardDocIndices::RemoveDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
+  for (auto& [_, index] : indices_) {
+    if (index->Matches(key, pv.ObjType()))
+      index->RemoveDoc(key, db_cntx, pv);
+  }
 }
 
 }  // namespace dfly

@@ -22,6 +22,7 @@ using DocId = uint32_t;
 struct BaseIndex {
   virtual ~BaseIndex() = default;
   virtual void Add(DocId doc, std::string_view value) = 0;
+  virtual void Remove(DocId doc, std::string_view value) = 0;
 };
 
 }  // namespace dfly::search
