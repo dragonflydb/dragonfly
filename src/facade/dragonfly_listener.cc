@@ -180,6 +180,37 @@ void Listener::PreAcceptLoop(util::ProactorBase* pb) {
 }
 
 void Listener::PreShutdown() {
+  // Iterate on all connections and allow them to finish their commands for
+  // a short period.
+  // Executed commands can be visible in snapshots or replicas, but if we close the client
+  // connections too fast we might not send the acknowledgment for those commands.
+  // This shouldn't take a long time: All clients should reject incoming commands
+  // at this stage since we're in SHUTDOWN mode.
+  // If a command is running for too long we give up and proceed.
+  const absl::Duration kDispatchShutdownTimeout = absl::Milliseconds(10);
+  absl::Time start = absl::Now();
+
+  bool success = false;
+  while (absl::Now() - start < kDispatchShutdownTimeout) {
+    std::atomic<bool> any_connection_dispatching = false;
+    auto cb = [&any_connection_dispatching](unsigned thread_index, util::Connection* conn) {
+      if (static_cast<Connection*>(conn)->IsCurrentlyDispatching()) {
+        any_connection_dispatching.store(true);
+      }
+    };
+    this->TraverseConnections(cb);
+    if (!any_connection_dispatching.load()) {
+      success = true;
+      break;
+    }
+    VLOG(1) << "A command is still dispatching, let's wait for it";
+    ThisFiber::SleepFor(100us);
+  }
+
+  if (!success) {
+    LOG(WARNING) << "Some commands are still being dispatched but didn't conclude in time. "
+                    "Proceeding in shutdown.";
+  }
 }
 
 void Listener::PostShutdown() {

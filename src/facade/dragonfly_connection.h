@@ -138,6 +138,8 @@ class Connection : public util::Connection {
 
   static void ShutdownThreadLocal();
 
+  bool IsCurrentlyDispatching() const;
+
   std::string GetClientInfo(unsigned thread_id) const;
   std::string RemoteEndpointStr() const;
   std::string RemoteEndpointAddress() const;
