@@ -45,7 +45,7 @@ constexpr string_view kClusterDisabled =
     "Cluster is disabled. Enabled via passing --cluster_mode=emulated|yes";
 constexpr string_view kDflyClusterCmdPort = "DflyCluster command allowed only under admin port";
 
-thread_local unique_ptr<ClusterConfig> tl_cluster_config;
+thread_local shared_ptr<ClusterConfig> tl_cluster_config;
 
 }  // namespace
 
@@ -434,7 +434,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
     return rb->SendError("Invalid JSON cluster config", kSyntaxErrType);
   }
 
-  unique_ptr<ClusterConfig> new_config =
+  shared_ptr<ClusterConfig> new_config =
       ClusterConfig::CreateFromConfig(server_family_->master_id(), json.value());
   if (new_config == nullptr) {
     LOG(WARNING) << "Can't set cluster config";
@@ -452,7 +452,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   auto cb = [&](util::ProactorBase* pb) {
     if (tl_cluster_config == nullptr) {
-      tl_cluster_config = make_unique<ClusterConfig>(*new_config);
+      tl_cluster_config = new_config;
     } else {
       *tl_cluster_config = *new_config;
     }
