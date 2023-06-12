@@ -838,6 +838,8 @@ void Connection::ShutdownThreadLocal() {
 }
 
 bool Connection::IsCurrentlyDispatching() const {
+  if (!cc_)
+    return false;
   return cc_->async_dispatch || cc_->sync_dispatch;
 }
 

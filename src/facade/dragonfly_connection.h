@@ -233,6 +233,8 @@ class Connection : public util::Connection {
   Phase phase_;
   std::string name_;
 
+  // A pointer to the ConnectionContext object if it exists. Some connections (like http
+  // requests) don't have it.
   std::unique_ptr<ConnectionContext> cc_;
 
   unsigned parser_error_ = 0;
