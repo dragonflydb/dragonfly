@@ -14,10 +14,12 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
+#include "facade/dragonfly_listener.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
 #include "server/journal/streamer.h"
+#include "server/main_service.h"
 #include "server/rdb_save.h"
 #include "server/script_mgr.h"
 #include "server/server_family.h"
@@ -80,9 +82,11 @@ struct TransactionGuard {
           return OpStatus::OK;
         },
         false);
+    VLOG(1) << "Transaction guard engaged";
   }
 
   ~TransactionGuard() {
+    VLOG(1) << "Releasing transaction guard";
     t->Execute(ExitGuardCb, true);
   }
 
@@ -366,33 +370,49 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
     return;
 
   LOG(INFO) << "Takeover initiated, locking down the database.";
-  TransactionGuard tg{cntx->transaction, /*disable_expirations=*/true};
+
+  sf_->service().SwitchState(GlobalState::ACTIVE, GlobalState::TAKEN_OVER);
+
+  absl::Duration timeout_dur = absl::Seconds(timeout);
+  absl::Time start = absl::Now();
   AggregateStatus status;
 
-  auto cb = [&cntx = replica_ptr->cntx, replica_ptr = replica_ptr, timeout,
-             &status](EngineShard* shard) {
-    FlowInfo* flow = &replica_ptr->flows[shard->shard_id()];
+  // TODO: We should cancel blocking commands before awaiting all
+  // dispatches to finish.
+  if (!static_cast<Listener*>(listener_)->AwaitDispatches(
+          timeout_dur, [self = cntx->owner()](util::Connection* conn) { return conn != self; })) {
+    LOG(WARNING) << "Couldn't wait for commands to finish dispatching. " << timeout_dur;
+    status = OpStatus::TIMED_OUT;
+  }
 
-    shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, {}, true);
+  TransactionGuard tg{cntx->transaction, /*disable_expirations=*/true};
 
-    absl::Time start = absl::Now();
-    while (flow->last_acked_lsn < shard->journal()->GetLsn()) {
-      if (absl::ToInt64Seconds(absl::Now() - start) > timeout) {
-        VLOG(1) << "Couldn't synchronize with replica for takeover in time.";
-        status = OpStatus::TIMED_OUT;
-        return;
+  if (*status == OpStatus::OK) {
+    auto cb = [&cntx = replica_ptr->cntx, replica_ptr = replica_ptr, timeout_dur, start,
+               &status](EngineShard* shard) {
+      FlowInfo* flow = &replica_ptr->flows[shard->shard_id()];
+
+      shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, {}, true);
+      while (flow->last_acked_lsn < shard->journal()->GetLsn()) {
+        if (absl::Now() - start > timeout_dur) {
+          LOG(WARNING) << "Couldn't synchronize with replica for takeover in time.";
+          status = OpStatus::TIMED_OUT;
+          return;
+        }
+        if (cntx.IsCancelled()) {
+          status = OpStatus::CANCELLED;
+          return;
+        }
+        ThisFiber::SleepFor(1ms);
       }
-      if (cntx.IsCancelled()) {
-        status = OpStatus::CANCELLED;
-        return;
-      }
-      ThisFiber::SleepFor(1ms);
-    }
-  };
-  shard_set->RunBlockingInParallel(std::move(cb));
+    };
+    shard_set->RunBlockingInParallel(std::move(cb));
+  }
 
-  if (*status != OpStatus::OK)
+  if (*status != OpStatus::OK) {
+    sf_->service().SwitchState(GlobalState::TAKEN_OVER, GlobalState::ACTIVE);
     return rb->SendError("Takeover failed!");
+  }
   (*cntx)->SendOk();
 
   VLOG(1) << "Takeover accepted, shutting down.";

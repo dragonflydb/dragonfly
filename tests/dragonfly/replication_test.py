@@ -1071,15 +1071,28 @@ async def test_readonly_script(df_local_factory):
         assert 'READONLY ' in str(roe)
 
 
+cases = [
+    [2, 2],
+    [2, 4],
+    [4, 2],
+    [8, 8],
+]
+
+
 @dfly_args({"proactor_threads": 2})
+@pytest.mark.parametrize("master_threads, replica_threads", cases)
 @pytest.mark.asyncio
-async def test_take_over(df_local_factory):
-    master = df_local_factory.create(port=BASE_PORT)
+async def test_take_over(df_local_factory, master_threads, replica_threads):
+    master = df_local_factory.create(proactor_threads=master_threads,
+                                     port=BASE_PORT,
+                                     #  vmodule="journal_slice=2,dflycmd=2,main_service=1",
+                                     logtostderr=True)
     replica = df_local_factory.create(
-        port=BASE_PORT+1, logtostdout=True, replication_acks_interval=100)
+        port=BASE_PORT+1, proactor_threads=replica_threads)
     df_local_factory.start_all([master, replica])
     c_master = aioredis.Redis(port=master.port)
     c_replica = aioredis.Redis(port=replica.port)
+    c_blocking = aioredis.Redis(port=master.port)
 
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
@@ -1090,20 +1103,29 @@ async def test_take_over(df_local_factory):
         while True:
             try:
                 value = await c_master.execute_command(f"INCR {key}")
-            except redis.exceptions.ConnectionError as e:
+            except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError) as e:
                 break
         return key, value
+
+    async def block_during_takeover():
+        "Add a blocking command during takeover to make sure it doesn't block it."
+        # TODO: We need to make takeover interrupt blocking commands.
+        return
+        try:
+            await c_blocking.execute_command("BLPOP BLOCKING_KEY1 BLOCKING_KEY2 10")
+        except redis.exceptions.ConnectionError:
+            pass
 
     async def delayed_takeover():
         await asyncio.sleep(1)
         await c_replica.execute_command(f"REPLTAKEOVER 1")
 
-    _, *results = await asyncio.gather(delayed_takeover(), *[counter(f"key{i}") for i in range(16)])
+    _, _, *results = await asyncio.gather(delayed_takeover(), block_during_takeover(), *[counter(f"key{i}") for i in range(16)])
     assert await c_replica.execute_command("role") == [b'master', []]
 
-    for key, master_value in results:
+    for key, client_value in results:
         replicated_value = await c_replica.get(key)
-        assert master_value == int(replicated_value)
+        assert client_value == int(replicated_value)
 
     await c_master.connection_pool.disconnect()
     await c_replica.connection_pool.disconnect()

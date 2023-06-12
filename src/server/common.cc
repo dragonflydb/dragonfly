@@ -44,6 +44,8 @@ const char* GlobalStateName(GlobalState s) {
       return "SAVING";
     case GlobalState::SHUTTING_DOWN:
       return "SHUTTING DOWN";
+    case GlobalState::TAKEN_OVER:
+      return "TAKEN OVER";
   }
   ABSL_UNREACHABLE();
 }

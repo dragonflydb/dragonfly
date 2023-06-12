@@ -134,6 +134,7 @@ enum class GlobalState : uint8_t {
   LOADING,
   SAVING,
   SHUTTING_DOWN,
+  TAKEN_OVER,
 };
 
 enum class TimeUnit : uint8_t { SEC, MSEC };

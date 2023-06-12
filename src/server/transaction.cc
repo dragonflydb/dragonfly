@@ -507,6 +507,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
     if (IsGlobal()) {
       DCHECK(!awaked_prerun && !became_suspended);  // Global transactions can not be blocking.
+      VLOG(2) << "Releasing shard lock";
       shard->shard_lock()->Release(Mode());
     } else {  // not global.
       largs = GetLockArgs(idx);
@@ -572,6 +573,7 @@ void Transaction::ScheduleInternal() {
     // Lock shards
     auto cb = [mode](EngineShard* shard) { shard->shard_lock()->Acquire(mode); };
     shard_set->RunBriefInParallel(std::move(cb));
+    VLOG(1) << "Global shard lock acquired";
   } else {
     num_shards = unique_shard_cnt_;
     DCHECK_GT(num_shards, 0u);
@@ -667,7 +669,9 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
 
   // If we run only on one shard and conclude, we can avoid scheduling at all
   // and directly dispatch the task to its destination shard.
-  bool schedule_fast = (unique_shard_cnt_ == 1) && !IsGlobal() && !IsAtomicMulti();
+  bool schedule_fast = (unique_shard_cnt_ == 1) && !IsGlobal() && !IsAtomicMulti()
+      // && ServerState::tlocal()->gstate() != GlobalState::TAKEN_OVER
+      ;
   if (schedule_fast) {
     DCHECK_NE(unique_shard_id_, kInvalidSid);
     DCHECK(shard_data_.size() == 1 || multi_->mode == NON_ATOMIC);
