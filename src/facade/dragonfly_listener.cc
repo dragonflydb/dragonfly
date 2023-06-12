@@ -179,6 +179,28 @@ void Listener::PreAcceptLoop(util::ProactorBase* pb) {
   per_thread_.resize(pool()->size());
 }
 
+bool Listener::AwaitDispatches(absl::Duration timeout,
+                               std::function<bool(util::Connection*)> filter) {
+  absl::Time start = absl::Now();
+
+  while (absl::Now() - start < timeout) {
+    std::atomic<bool> any_connection_dispatching = false;
+    auto cb = [&any_connection_dispatching, &filter](unsigned thread_index,
+                                                     util::Connection* conn) {
+      if (filter(conn) && static_cast<Connection*>(conn)->IsCurrentlyDispatching()) {
+        any_connection_dispatching.store(true);
+      }
+    };
+    this->TraverseConnections(cb);
+    if (!any_connection_dispatching.load()) {
+      return true;
+    }
+    VLOG(1) << "A command is still dispatching, let's wait for it";
+    ThisFiber::SleepFor(100us);
+  }
+  return false;
+}
+
 void Listener::PreShutdown() {
   // Iterate on all connections and allow them to finish their commands for
   // a short period.
@@ -188,26 +210,8 @@ void Listener::PreShutdown() {
   // at this stage since we're in SHUTDOWN mode.
   // If a command is running for too long we give up and proceed.
   const absl::Duration kDispatchShutdownTimeout = absl::Milliseconds(10);
-  absl::Time start = absl::Now();
 
-  bool success = false;
-  while (absl::Now() - start < kDispatchShutdownTimeout) {
-    std::atomic<bool> any_connection_dispatching = false;
-    auto cb = [&any_connection_dispatching](unsigned thread_index, util::Connection* conn) {
-      if (static_cast<Connection*>(conn)->IsCurrentlyDispatching()) {
-        any_connection_dispatching.store(true);
-      }
-    };
-    this->TraverseConnections(cb);
-    if (!any_connection_dispatching.load()) {
-      success = true;
-      break;
-    }
-    VLOG(1) << "A command is still dispatching, let's wait for it";
-    ThisFiber::SleepFor(100us);
-  }
-
-  if (!success) {
+  if (!AwaitDispatches(kDispatchShutdownTimeout, [](util::Connection*) { return true; })) {
     LOG(WARNING) << "Some commands are still being dispatched but didn't conclude in time. "
                     "Proceeding in shutdown.";
   }
