@@ -869,6 +869,19 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                       &db_key_expire_metrics);
   }
 
+  if (!m.replication_metrics.empty()) {
+    string replication_lag_metrics;
+    AppendMetricHeader("connected_replica_lag_records", "Lag in records of a connected replica.",
+                       MetricType::GAUGE, &replication_lag_metrics);
+    for (const auto& replica : m.replication_metrics) {
+      AppendMetricValue("connected_replica_lag_records", replica.lsn_lag,
+                        {"replica_ip", "replica_port", "replica_state"},
+                        {replica.address, absl::StrCat(replica.listening_port), replica.state},
+                        &replication_lag_metrics);
+    }
+    absl::StrAppend(&resp->body(), replication_lag_metrics);
+  }
+
   absl::StrAppend(&resp->body(), db_key_metrics);
   absl::StrAppend(&resp->body(), db_key_expire_metrics);
 }
@@ -1460,6 +1473,9 @@ Metrics ServerFamily::GetMetrics() const {
   result.traverse_ttl_per_sec /= 6;
   result.delete_ttl_per_sec /= 6;
 
+  if (ServerState::tlocal()->is_master)
+    result.replication_metrics = dfly_cmd_->GetReplicasRoleInfo();
+
   return result;
 }
 
@@ -1636,7 +1652,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     if (etl.is_master) {
       append("role", "master");
       append("connected_slaves", m.conn_stats.num_replicas);
-      auto replicas = dfly_cmd_->GetReplicasRoleInfo();
+      const auto& replicas = m.replication_metrics;
       for (size_t i = 0; i < replicas.size(); i++) {
         auto& r = replicas[i];
         // e.g. slave0:ip=172.19.0.3,port=6379,state=full_sync

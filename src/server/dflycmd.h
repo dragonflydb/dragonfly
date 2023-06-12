@@ -25,6 +25,7 @@ class EngineShardSet;
 class ServerFamily;
 class RdbSaver;
 class JournalStreamer;
+struct ReplicaRoleInfo;
 
 // Stores information related to a single flow.
 struct FlowInfo {
@@ -91,7 +92,7 @@ struct FlowInfo {
 //
 class DflyCmd {
  public:
-  // See header comments for state descriptions.
+  // See class comments for state descriptions.
   enum class SyncState { PREPARATION, FULL_SYNC, STABLE_SYNC, CANCELLED };
 
   // Stores information related to a single replica.
@@ -110,15 +111,6 @@ class DflyCmd {
 
     std::vector<FlowInfo> flows;
     Mutex mu;  // See top of header for locking levels.
-  };
-
-  struct ReplicaRoleInfo {
-    ReplicaRoleInfo(std::string address, uint32_t listening_port, SyncState sync_state,
-                    uint64_t lsn_lag);
-    std::string address;
-    uint32_t listening_port;
-    std::string state;
-    uint64_t lsn_lag;
   };
 
  public:
@@ -213,5 +205,7 @@ class DflyCmd {
 
   Mutex mu_;  // Guard global operations. See header top for locking levels.
 };
+
+std::string_view SyncStateName(DflyCmd::SyncState sync_state);
 
 }  // namespace dfly

@@ -55,6 +55,8 @@ struct Metrics {
   uint32_t delete_ttl_per_sec = 0;
 
   facade::ConnectionStats conn_stats;
+
+  std::vector<ReplicaRoleInfo> replication_metrics;
 };
 
 struct LastSaveInfo {
