@@ -18,6 +18,12 @@ class Node:
         self.admin_port = admin_port
 
 
+class Master:
+    def __init__(self, port, admin_port):
+        self.node = Node(port, admin_port)
+        self.replicas = []
+
+
 def start_node(node, threads):
     f = open(f'/tmp/dfly.cluster.node.{node.port}.log', 'w')
     print(f'- Log file for node {node.port}: {f.name}')
@@ -27,7 +33,9 @@ def start_node(node, threads):
 
 
 def send_command(node, command):
-    client = redis.Redis(decode_responses=True, host="localhost", port=node.admin_port)
+    client = redis.Redis(decode_responses=True,
+                         host="localhost", port=node.admin_port)
+
     for i in range(0, 5):
         try:
             result = client.execute_command(*command)
@@ -46,8 +54,9 @@ def update_id(node):
     print(f'- ID for {node.port}: {id}')
 
 
-def build_config(masters, replicas):
-    slots_per_node = 16384 / len(masters)
+def build_config(masters):
+    total_slots = 16384
+    slots_per_node = math.floor(total_slots / len(masters))
 
     def build_node(node):
         return {
@@ -61,19 +70,17 @@ def build_config(masters, replicas):
         c = {
             "slot_ranges": [
                 {
-                    "start": math.floor(i * slots_per_node),
-                    "end": math.floor((i+1) * slots_per_node - 1)
+                    "start": i * slots_per_node,
+                    "end": (i+1) * slots_per_node - 1
                 }
             ],
-            "master": build_node(master),
-            "replicas": []
+            "master": build_node(master.node),
+            "replicas": [build_node(replica) for replica in master.replicas]
         }
-
-        if len(replicas) > 0:
-            c["replicas"].append(build_node(replicas[i]))
 
         config.append(c)
 
+    config[-1]["slot_ranges"][-1]["end"] += total_slots % len(masters)
     return json.dumps(config, indent=2)
 
 
@@ -87,12 +94,12 @@ def main():
     parser = argparse.ArgumentParser(description='Local Cluster Manager')
     parser.add_argument('--num_masters', type=int, default=3,
                         help='Number of master nodes in cluster')
-    parser.add_argument('--with_replicas', action='store_true',
-                        help='Should add replicas?')
+    parser.add_argument('--replicas_per_master', type=int, default=0,
+                        help='How many replicas for each master')
     parser.add_argument('--first_port', type=int,
                         default=7001, help="First master's port")
     parser.add_argument('--first_admin_port', type=int,
-                        default=8001, help="First master's admin port")
+                        default=17_001, help="First master's admin port")
     parser.add_argument('--threads', type=int, default=2,
                         help="Threads per node")
     args = parser.parse_args()
@@ -103,29 +110,42 @@ def main():
         f'- Ports: {args.first_port}...{args.first_port + args.num_masters - 1}')
     print(
         f'- Admin ports: {args.first_admin_port}...{args.first_admin_port + args.num_masters - 1}')
-    print(f'- Replicas? {args.with_replicas}')
+    print(f'- Replicas for each master: {args.replicas_per_master}')
     print()
 
-    masters = [Node(args.first_port+i, args.first_admin_port+i)
-               for i in range(args.num_masters)]
+    next_port = args.first_port
+    next_admin_port = args.first_admin_port
+    masters = []
+    for i in range(args.num_masters):
+        master = Master(next_port, next_admin_port)
+        next_port += 1
+        next_admin_port += 1
+        for j in range(args.replicas_per_master):
+            replica = Node(next_port, next_admin_port)
+            master.replicas.append(replica)
+            next_port += 1
+            next_admin_port += 1
+        masters.append(master)
 
-    replicas = []
-    if args.with_replicas:
-        replicas = [Node(args.first_port+i, args.first_admin_port+i)
-                    for i in range(args.num_masters, args.num_masters*2)]
+    nodes = []
+    for master in masters:
+        nodes.append(master.node)
+        for replica in master.replicas:
+            nodes.append(replica)
 
-    nodes = (masters + replicas)
     print('Starting nodes...')
     for node in nodes:
         start_node(node, args.threads)
     print()
 
-    if len(replicas) > 0:
+    if args.replicas_per_master > 0:
         print('Configuring replication...')
-        for i, replica in enumerate(replicas):
-            response = send_command(
-                replica, ['replicaof', 'localhost', masters[i].port])
-            print(f'- Response for {replica.port}: {response}')
+        for master in masters:
+            for replica in master.replicas:
+                response = send_command(
+                    replica, ['replicaof', 'localhost', master.node.port])
+                print(
+                    f'- {replica.port} replicating {master.node.port}: {response}')
         print()
 
     print(f'Getting IDs...')
@@ -133,7 +153,7 @@ def main():
         update_id(n)
     print()
 
-    config = build_config(masters, replicas)
+    config = build_config(masters)
     print(f'Pushing config...')
     push_config(nodes, config)
     print()
