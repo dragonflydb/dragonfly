@@ -12,11 +12,16 @@
 #include <variant>
 #include <vector>
 
+#include "core/search/base.h"
+
 namespace dfly {
 
 namespace search {
 
 struct AstNode;
+
+// Matches all documents
+struct AstStarNode {};
 
 // Matches terms in text fields
 struct AstTermNode {
@@ -67,8 +72,20 @@ struct AstTagsNode {
   std::vector<std::string> tags;
 };
 
-using NodeVariants = std::variant<std::monostate, AstTermNode, AstRangeNode, AstNegateNode,
-                                  AstLogicalNode, AstFieldNode, AstTagsNode>;
+// Applies nearest neighbor search to the final result set
+struct AstKnnNode {
+  AstKnnNode(AstNode&& sub, size_t limit, std::string field, FtVector vec);
+
+  std::unique_ptr<AstNode> filter;
+  size_t limit;
+  std::string field;
+  FtVector vector;
+};
+
+using NodeVariants =
+    std::variant<std::monostate, AstStarNode, AstTermNode, AstRangeNode, AstNegateNode,
+                 AstLogicalNode, AstFieldNode, AstTagsNode, AstKnnNode>;
+
 struct AstNode : public NodeVariants {
   using variant::variant;
 };

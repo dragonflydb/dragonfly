@@ -15,6 +15,14 @@ namespace dfly::search {
 
 using DocId = uint32_t;
 
+using FtVector = std::vector<float>;
+
+// Query params represent named parameters for queries supplied via PARAMS.
+// Currently its only a placeholder to pass the vector to KNN.
+struct QueryParams {
+  FtVector knn_vec;
+};
+
 // Base class for type-specific indices.
 //
 // Queries should be done directly on subclasses with their distinc

@@ -12,6 +12,7 @@
 #include "core/search/ast_expr.h"
 #include "core/search/indices.h"
 #include "core/search/query_driver.h"
+#include "core/search/vector.h"
 
 using namespace std;
 
@@ -19,9 +20,10 @@ namespace dfly::search {
 
 namespace {
 
-AstExpr ParseQuery(std::string_view query) {
+AstExpr ParseQuery(std::string_view query, const QueryParams& params) {
   QueryDriver driver{};
   driver.ResetScanner();
+  driver.SetParams(params);
   driver.SetInput(std::string{query});
   (void)Parser (&driver)();  // can throw
   return driver.Take();
@@ -44,6 +46,10 @@ struct IndexResult {
   // Transparent const access to underlying value
   const DocVec* operator->() const {
     return holds_alternative<DocVec>(value_) ? &get<DocVec>(value_) : get<const DocVec*>(value_);
+  }
+
+  const DocVec& operator*() const {
+    return holds_alternative<DocVec>(value_) ? get<DocVec>(value_) : *get<const DocVec*>(value_);
   }
 
   IndexResult& operator=(DocVec&& entries) {
@@ -77,9 +83,9 @@ struct BasicSearch {
   template <typename T> T* GetIndex(string_view field) {
     static_assert(is_base_of_v<BaseIndex, T>);
     auto index = indices_->GetIndex(field);
-    DCHECK(index);  // TODO: handle not existing erorr
+    DCHECK(index) << field;  // TODO: handle not existing erorr
     auto* casted_ptr = dynamic_cast<T*>(index);
-    DCHECK(casted_ptr);  // TODO: handle type errors
+    DCHECK(casted_ptr) << field;  // TODO: handle type errors
     return casted_ptr;
   }
 
@@ -128,6 +134,11 @@ struct BasicSearch {
 
   IndexResult Search(monostate, string_view) {
     return vector<DocId>{};
+  }
+
+  IndexResult Search(const AstStarNode& node, string_view active_field) {
+    DCHECK(active_field.empty());
+    return &indices_->GetAllDocs();
   }
 
   // "term": access field's text index or unify results from all text indices if no field is set
@@ -183,6 +194,31 @@ struct BasicSearch {
     return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);
   }
 
+  // [KNN count @field vec]: Compute distance to all vectors from query center and sort, keep
+  // closest `count`
+  IndexResult Search(const AstKnnNode& knn, string_view active_field) {
+    DCHECK(active_field.empty());
+    auto sub_results = SearchGeneric(*knn.filter, active_field);
+
+    auto* vec_index = GetIndex<VectorIndex>(knn.field);
+
+    vector<pair<float, DocId>> distances;
+    distances.reserve(sub_results->size());
+    for (DocId matched_doc : *sub_results) {
+      float dist = VectorDistance(knn.vector, vec_index->Get(matched_doc));
+      distances.emplace_back(dist, matched_doc);
+    }
+
+    sort(distances.begin(), distances.end());
+
+    vector<DocId> out(knn.limit);
+    for (size_t i = 0; i < knn.limit; i++)
+      out[i] = distances[i].second;
+
+    sort(out.begin(), out.end());
+    return out;
+  }
+
   // Determine node type and call specific search function
   IndexResult SearchGeneric(const AstNode& node, string_view active_field) {
     auto cb = [this, active_field](const auto& inner) { return Search(inner, active_field); };
@@ -212,6 +248,9 @@ FieldIndices::FieldIndices(Schema schema) : schema_{move(schema)}, all_ids_{}, i
         break;
       case Schema::NUMERIC:
         indices_[field] = make_unique<NumericIndex>();
+        break;
+      case Schema::VECTOR:
+        indices_[field] = make_unique<VectorIndex>();
         break;
     }
   }
@@ -250,16 +289,16 @@ std::vector<TextIndex*> FieldIndices::GetAllTextIndices() const {
   return out;
 }
 
-vector<DocId> FieldIndices::GetAllDocs() const {
+const vector<DocId>& FieldIndices::GetAllDocs() const {
   return all_ids_;
 }
 
 SearchAlgorithm::SearchAlgorithm() = default;
 SearchAlgorithm::~SearchAlgorithm() = default;
 
-bool SearchAlgorithm::Init(string_view query) {
+bool SearchAlgorithm::Init(string_view query, const QueryParams& params) {
   try {
-    query_ = make_unique<AstExpr>(ParseQuery(query));
+    query_ = make_unique<AstExpr>(ParseQuery(query, params));
     return !holds_alternative<monostate>(*query_);
   } catch (const Parser::syntax_error& se) {
     LOG(INFO) << "Failed to parse query \"" << query << "\":" << se.what();

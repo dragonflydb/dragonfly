@@ -55,6 +55,7 @@ using namespace std;
   LCURLBR  "{"
   RCURLBR  "}"
   OR_OP    "|"
+  KNN    "KNN"
 ;
 
 %token AND_OP
@@ -76,10 +77,14 @@ using namespace std;
 %%
 
 final_query:
-  filter { driver->Set(move($1)); }
+  filter
+      { driver->Set(move($1)); }
+  | filter ARROW LBRACKET KNN INT64 FIELD TERM RBRACKET
+      { driver->Set(AstKnnNode(move($1), $5, $6, driver->GetParams().knn_vec)); }
 
 filter:
   search_expr { $$ = move($1); }
+  | STAR { $$ = AstStarNode(); }
 
 search_expr:
  LPAREN search_expr RPAREN              { $$ = move($2); }

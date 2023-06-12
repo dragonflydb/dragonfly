@@ -33,7 +33,11 @@ namespace {
 unordered_map<string_view, search::Schema::FieldType> kSchemaTypes = {
     {"TAG"sv, search::Schema::TAG},
     {"TEXT"sv, search::Schema::TEXT},
-    {"NUMERIC"sv, search::Schema::NUMERIC}};
+    {"NUMERIC"sv, search::Schema::NUMERIC},
+    {"VECTOR"sv, search::Schema::VECTOR}};
+
+static const set<string_view> kIgnoredOptions = {"WEIGHT", "SEPARATOR", "TYPE", "DIM",
+                                                 "DISTANCE_METRIC"};
 
 optional<search::Schema> ParseSchemaOrReply(CmdArgList args, ConnectionContext* cntx) {
   search::Schema schema;
@@ -52,18 +56,16 @@ optional<search::Schema> ParseSchemaOrReply(CmdArgList args, ConnectionContext* 
       return nullopt;
     }
 
-    // Skip optional WEIGHT or SEPARATOR flags
-    if (i + 2 < args.size() &&
-        (ArgS(args, i + 1) == "WEIGHT" || ArgS(args, i + 1) == "SEPARATOR")) {
+    // Skip {algorithm} {dim} flags
+    if (it->second == search::Schema::VECTOR)
+      i += 2;
+
+    // Skip all trailing ignored parameters
+    while (i + 2 < args.size() && kIgnoredOptions.count(ArgS(args, i + 1)) > 0) {
       i += 2;
     }
 
     schema.fields[field] = it->second;
-
-    // Skip optional WEIGHT flag
-    if (i + 2 < args.size() && ArgS(args, i + 1) == "WEIGHT") {
-      i += 2;
-    }
   }
 
   return schema;
@@ -162,7 +164,7 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
     return;
 
   search::SearchAlgorithm search_algo;
-  if (!search_algo.Init(query_str))
+  if (!search_algo.Init(query_str, {}))
     return (*cntx)->SendError("Query syntax error");
 
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.

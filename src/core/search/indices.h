@@ -48,4 +48,16 @@ struct TagIndex : public BaseStringIndex {
   void Remove(DocId doc, std::string_view value) override;
 };
 
+// Index for vector fields.
+// Only supports lookup by id.
+struct VectorIndex : public BaseIndex {
+  void Add(DocId doc, std::string_view value) override;
+  void Remove(DocId doc, std::string_view value) override;
+
+  FtVector Get(DocId doc) const;
+
+ private:
+  absl::flat_hash_map<DocId, FtVector> entries_;
+};
+
 }  // namespace dfly::search

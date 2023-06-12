@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "core/search/ast_expr.h"
+#include "core/search/base.h"
 #include "core/search/parser.hh"
 #include "core/search/scanner.h"
 
@@ -28,6 +29,10 @@ class QueryDriver {
     scanner()->in(cur_str_);
   }
 
+  void SetParams(QueryParams params) {
+    params_ = std::move(params);
+  }
+
   Parser::symbol_type Lex() {
     return scanner()->Lex();
   }
@@ -42,9 +47,15 @@ class QueryDriver {
     return std::move(expr_);
   }
 
+  const QueryParams& GetParams() {
+    return params_;
+  }
+
+ public:
   Parser::location_type location;
 
  private:
+  QueryParams params_;
   AstExpr expr_;
 
   std::string cur_str_;
