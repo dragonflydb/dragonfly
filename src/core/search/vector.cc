@@ -13,6 +13,7 @@ namespace dfly::search {
 using namespace std;
 
 // Euclidean vector distance: sqrt( sum: (u[i] - v[i])^2  )
+__attribute__((optimize("fast-math")))
 float VectorDistance(const FtVector& u, const FtVector& v) {
   DCHECK_EQ(u.size(), v.size());
   float sum = 0;
