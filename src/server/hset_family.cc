@@ -18,6 +18,7 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
+#include "server/search/doc_index.h"
 #include "server/transaction.h"
 
 using namespace std;
@@ -171,6 +172,7 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
     if (pv.ObjType() != OBJ_HASH)
       return OpStatus::WRONG_TYPE;
 
+    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it->second);
     db_slice.PreUpdate(op_args.db_cntx.db_index, it);
 
     if (pv.Encoding() == kEncodingListPack) {
@@ -248,6 +250,7 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   }
 
   db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
 
   return OpStatus::OK;
 }
@@ -331,7 +334,9 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
   if (!it_res)
     return it_res.status();
 
+  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, (*it_res)->second);
   db_slice.PreUpdate(op_args.db_cntx.db_index, *it_res);
+
   PrimeValue& pv = (*it_res)->second;
   unsigned deleted = 0;
   bool key_remove = false;
@@ -370,6 +375,10 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
   }
 
   db_slice.PostUpdate(op_args.db_cntx.db_index, *it_res, key);
+
+  if (!key_remove)
+    op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
+
   if (key_remove) {
     if (enc == kEncodingListPack) {
       stats->listpack_blob_cnt--;
@@ -623,6 +632,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
     if (pv.ObjType() != OBJ_HASH)
       return OpStatus::WRONG_TYPE;
 
+    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it->second);
     db_slice.PreUpdate(op_args.db_cntx.db_index, it);
   }
 
@@ -663,7 +673,9 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
       created += unsigned(added);
     }
   }
+
   db_slice.PostUpdate(op_args.db_cntx.db_index, it, key);
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
 
   return created;
 }

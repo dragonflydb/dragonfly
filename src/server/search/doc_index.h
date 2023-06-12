@@ -13,6 +13,7 @@
 
 #include "core/search/search.h"
 #include "server/common.h"
+#include "server/table.h"
 
 namespace dfly {
 
@@ -38,6 +39,9 @@ struct DocIndex {
   // Get numeric OBJ_ code
   uint8_t GetObjCode() const;
 
+  // Return true if the following document (key, obj_code) is tracked by this index.
+  bool Matches(std::string_view key, unsigned obj_code) const;
+
   search::Schema schema;
   std::string prefix{};
   DataType type{HASH};
@@ -50,7 +54,7 @@ class ShardDocIndex {
   // DocKeyIndex manages mapping document keys to ids and vice versa through a simple interface.
   struct DocKeyIndex {
     DocId Add(std::string_view key);
-    void Delete(std::string_view key);
+    DocId Remove(std::string_view key);
     std::string_view Get(DocId id) const;
 
    private:
@@ -70,6 +74,12 @@ class ShardDocIndex {
   // Initialize index. Traverses all matching documents and assigns ids.
   void Init(const OpArgs& op_args);
 
+  // Return whether base index matches
+  bool Matches(std::string_view key, unsigned obj_code) const;
+
+  void AddDoc(std::string_view key, const DbContext& db_cntx, const PrimeValue& pv);
+  void RemoveDoc(std::string_view key, const DbContext& db_cntx, const PrimeValue& pv);
+
  private:
   std::shared_ptr<const DocIndex> base_;
   search::FieldIndices indices_;
@@ -79,8 +89,13 @@ class ShardDocIndex {
 // Stores shard doc indices by name on a specific shard.
 class ShardDocIndices {
  public:
-  ShardDocIndex* Get(std::string_view name) const;
-  void Init(const OpArgs& op_args, std::string_view name, std::shared_ptr<DocIndex> index);
+  // Get sharded document index by its name
+  ShardDocIndex* GetIndex(std::string_view name);
+  // Init index: create shard local state for given index with given name
+  void InitIndex(const OpArgs& op_args, std::string_view name, std::shared_ptr<DocIndex> index);
+
+  void AddDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
+  void RemoveDoc(std::string_view key, const DbContext& db_cnt, const PrimeValue& pv);
 
  private:
   absl::flat_hash_map<std::string, std::unique_ptr<ShardDocIndex>> indices_;

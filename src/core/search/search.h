@@ -38,6 +38,7 @@ class FieldIndices {
   FieldIndices(Schema schema);
 
   void Add(DocId doc, DocumentAccessor* access);
+  void Remove(DocId doc, DocumentAccessor* access);
 
   BaseIndex* GetIndex(std::string_view field) const;
   std::vector<TextIndex*> GetAllTextIndices() const;

@@ -496,6 +496,14 @@ bool DbSlice::Del(DbIndex db_ind, PrimeIterator it) {
     CHECK_EQ(1u, db->mcflag.Erase(it->first));
   }
 
+  auto obj_type = it->second.ObjType();
+  if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
+    string tmp;
+    string_view key = it->first.GetSlice(&tmp);
+    DbContext cntx{db_ind, GetCurrentTimeMs()};
+    doc_del_cb_(key, cntx, it->second);
+  }
+
   PerformDeletion(it, shard_owner(), db.get());
 
   return true;
@@ -814,6 +822,7 @@ void DbSlice::PreUpdate(DbIndex db_ind, PrimeIterator it) {
   for (const auto& ccb : change_cb_) {
     ccb.second(db_ind, ChangeReq{it});
   }
+
   size_t value_heap_size = it->second.MallocUsed();
   auto* stats = MutableStats(db_ind);
   stats->obj_memory_usage -= value_heap_size;
@@ -1128,6 +1137,10 @@ void DbSlice::InvalidateSlotWatches(const SlotSet& slot_ids) {
       conn_ptr->watched_dirty.store(true, memory_order_relaxed);
     }
   }
+}
+
+void DbSlice::SetDocDeletionCallback(DocDeletionCallback ddcb) {
+  doc_del_cb_ = move(ddcb);
 }
 
 }  // namespace dfly

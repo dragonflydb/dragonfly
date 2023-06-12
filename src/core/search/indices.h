@@ -2,7 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
-#include <absl/container/btree_map.h>
+#include <absl/container/btree_set.h>
 #include <absl/container/flat_hash_map.h>
 
 #include <map>
@@ -17,11 +17,12 @@ namespace dfly::search {
 // Range bounds are queried in logarithmic time, iteration is constant.
 struct NumericIndex : public BaseIndex {
   void Add(DocId doc, std::string_view value) override;
+  void Remove(DocId doc, std::string_view value) override;
 
   std::vector<DocId> Range(int64_t l, int64_t r) const;
 
  private:
-  absl::btree_multimap<int64_t, DocId> entries_;
+  absl::btree_set<std::pair<int64_t, DocId>> entries_;
 };
 
 // Base index for string based indices.
@@ -37,12 +38,14 @@ struct BaseStringIndex : public BaseIndex {
 // Hashmap based lookup per word.
 struct TextIndex : public BaseStringIndex {
   void Add(DocId doc, std::string_view value) override;
+  void Remove(DocId doc, std::string_view value) override;
 };
 
 // Index for text fields.
 // Hashmap based lookup per word.
 struct TagIndex : public BaseStringIndex {
   void Add(DocId doc, std::string_view value) override;
+  void Remove(DocId doc, std::string_view value) override;
 };
 
 }  // namespace dfly::search

@@ -146,7 +146,7 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
 
   auto idx_ptr = make_shared<DocIndex>(move(index));
   cntx->transaction->ScheduleSingleHop([idx_name, idx_ptr](auto* tx, auto* es) {
-    es->search_indices()->Init(tx->GetOpArgs(es), idx_name, idx_ptr);
+    es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr);
     return OpStatus::OK;
   });
 
@@ -170,7 +170,7 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
   vector<SearchResult> docs(shard_set->size());
 
   cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    if (auto* index = es->search_indices()->Get(index_name); index)
+    if (auto* index = es->search_indices()->GetIndex(index_name); index)
       docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo);
     else
       index_not_found.store(true, memory_order_relaxed);
