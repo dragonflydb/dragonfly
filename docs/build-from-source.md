@@ -5,6 +5,10 @@
 Dragonfly runs on linux. We advice running it on linux version 5.11 or later
 but you can also run Dragonfly on older kernels as well.
 
+> :warning: **Dragonfly releases are compiled with LTO (link time optimization)**:
+  Depending on the workload this can notably improve performance. If you want to
+  benchmark Dragonfly or use it in production, you should enable LTO by giving
+  `blaze.sh` the `-DCMAKE_CXX_FLAGS="-flto"` argument.
 
 ## Step 1 - install dependencies
 
