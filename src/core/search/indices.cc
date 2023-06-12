@@ -21,7 +21,7 @@ using namespace std;
 namespace {
 
 // Get all words from text as matched by regex word boundaries
-vector<string> Tokenize(string_view text) {
+absl::flat_hash_set<string> Tokenize(string_view text) {
   std::regex rx{"\\b.*?\\b", std::regex_constants::icase};
   std::cregex_iterator begin{text.data(), text.data() + text.size(), rx}, end{};
 
@@ -31,12 +31,11 @@ vector<string> Tokenize(string_view text) {
     absl::AsciiStrToLower(&word);
     words.insert(move(word));
   }
-
-  return vector<string>{make_move_iterator(words.begin()), make_move_iterator(words.end())};
+  return words;
 }
 
 // Split taglist, remove duplicates and convert all to lowercase
-vector<string> NormalizeTags(string_view taglist) {
+absl::flat_hash_set<string> NormalizeTags(string_view taglist) {
   string tmp;
   absl::flat_hash_set<string> tags;
   for (string_view tag : absl::StrSplit(taglist, ',')) {
@@ -44,7 +43,7 @@ vector<string> NormalizeTags(string_view taglist) {
     absl::AsciiStrToLower(&tmp);
     tags.insert(move(tmp));
   }
-  return vector<string>{make_move_iterator(tags.begin()), make_move_iterator(tags.end())};
+  return tags;
 }
 
 };  // namespace
