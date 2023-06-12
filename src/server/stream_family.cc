@@ -817,6 +817,26 @@ OpStatus OpDestroyGroup(const OpArgs& op_args, string_view key, string_view gnam
   return OpStatus::SKIPPED;
 }
 
+// XGROUP CREATECONSUMER key groupname consumername
+OpResult<uint32_t> OpCreateConsumer(const OpArgs& op_args, string_view key, string_view gname,
+                                    string_view consumer_name) {
+  OpResult<pair<stream*, streamCG*>> cgroup_res = FindGroup(op_args, key, gname);
+  if (!cgroup_res)
+    return cgroup_res.status();
+  streamCG* cg = cgroup_res->second;
+  if (cg == nullptr)
+    return OpStatus::SKIPPED;
+
+  auto* shard = op_args.shard;
+  shard->tmp_str1 = sdscpylen(shard->tmp_str1, consumer_name.data(), consumer_name.size());
+  streamConsumer* consumer =
+      streamCreateConsumer(cg, shard->tmp_str1, NULL, 0, SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
+
+  if (consumer)
+    return OpStatus::OK;
+  return OpStatus::KEY_EXISTS;
+}
+
 // XGROUP DELCONSUMER key groupname consumername
 OpResult<uint32_t> OpDelConsumer(const OpArgs& op_args, string_view key, string_view gname,
                                  string_view consumer_name) {
@@ -989,6 +1009,27 @@ void DestroyGroup(string_view key, string_view gname, ConnectionContext* cntx) {
       return (*cntx)->SendError(kXGroupKeyNotFound);
     default:
       (*cntx)->SendError(result);
+  }
+}
+
+void CreateConsumer(string_view key, string_view gname, string_view consumer,
+                    ConnectionContext* cntx) {
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpCreateConsumer(t->GetOpArgs(shard), key, gname, consumer);
+  };
+  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+
+  switch (result.status()) {
+    case OpStatus::OK:
+      return (*cntx)->SendLong(1);
+    case OpStatus::KEY_EXISTS:
+      return (*cntx)->SendLong(0);
+    case OpStatus::SKIPPED:
+      return (*cntx)->SendError(NoGroupError(key, gname));
+    case OpStatus::KEY_NOTFOUND:
+      return (*cntx)->SendError(kXGroupKeyNotFound);
+    default:
+      (*cntx)->SendError(result.status());
   }
 }
 
@@ -1217,6 +1258,12 @@ void StreamFamily::XGroup(CmdArgList args, ConnectionContext* cntx) {
     if (sub_cmd == "DESTROY" && args.size() == 3) {
       string_view gname = ArgS(args, 2);
       return DestroyGroup(key, gname, cntx);
+    }
+
+    if (sub_cmd == "CREATECONSUMER" && args.size() == 4) {
+      string_view gname = ArgS(args, 2);
+      string_view cname = ArgS(args, 3);
+      return CreateConsumer(key, gname, cname, cntx);
     }
 
     if (sub_cmd == "DELCONSUMER" && args.size() == 4) {
