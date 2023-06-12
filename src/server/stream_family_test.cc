@@ -236,6 +236,29 @@ TEST_F(StreamFamilyTest, Issue854) {
   EXPECT_THAT(resp, ErrArg("is not allowed"));
 }
 
+TEST_F(StreamFamilyTest, XGroupConsumer) {
+  Run({"xgroup", "create", "foo", "group", "$", "MKSTREAM"});
+  auto resp = Run({"xgroup", "createconsumer", "foo", "group", "bob"});
+  EXPECT_THAT(resp, IntArg(1));
+  Run({"xgroup", "createconsumer", "foo", "group", "alice"});
+  resp = Run({"xinfo", "groups", "foo"});
+  EXPECT_THAT(resp.GetVec()[3], IntArg(2));
+  Run({"xgroup", "delconsumer", "foo", "group", "alice"});
+  resp = Run({"xinfo", "groups", "foo"});
+  EXPECT_THAT(resp.GetVec()[3], IntArg(1));
+
+  resp = Run({"xgroup", "createconsumer", "foo", "group", "alice"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  // ensure createconsumer doesn't create consumer that already exists
+  resp = Run({"xgroup", "createconsumer", "foo", "group", "alice"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // nogrouperror
+  resp = Run({"xgroup", "createconsumer", "foo", "not-exists", "alice"});
+  EXPECT_THAT(resp, ErrArg("NOGROUP"));
+}
+
 TEST_F(StreamFamilyTest, XTrim) {
   Run({"xadd", "foo", "1-*", "k", "v"});
   Run({"xadd", "foo", "1-*", "k", "v"});
