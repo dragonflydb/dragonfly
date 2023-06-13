@@ -55,7 +55,7 @@ using namespace std;
   LCURLBR  "{"
   RCURLBR  "}"
   OR_OP    "|"
-  KNN    "KNN"
+  KNN      "KNN"
 ;
 
 %token AND_OP

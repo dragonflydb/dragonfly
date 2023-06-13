@@ -384,6 +384,12 @@ TEST_F(SearchParserTest, Simple2dKnn) {
     algo.Init("* =>[KNN 4 @pos VEC]", QueryParams{FtVector{1, 1}});
     EXPECT_THAT(algo.Search(&indices), testing::ElementsAre(1, 2, 3, 4));
   }
+
+  // Request more than there is
+  {
+    algo.Init("* => [KNN 10 @pos VEC]", QueryParams{FtVector{0, 0}});
+    EXPECT_THAT(algo.Search(&indices), testing::ElementsAre(0, 1, 2, 3, 4));
+  }
 }
 
 }  // namespace search

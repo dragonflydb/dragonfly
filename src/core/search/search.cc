@@ -83,7 +83,7 @@ struct BasicSearch {
   template <typename T> T* GetIndex(string_view field) {
     static_assert(is_base_of_v<BaseIndex, T>);
     auto index = indices_->GetIndex(field);
-    DCHECK(index) << field;  // TODO: handle not existing erorr
+    DCHECK(index) << field;  // TODO: handle not existing error
     auto* casted_ptr = dynamic_cast<T*>(index);
     DCHECK(casted_ptr) << field;  // TODO: handle type errors
     return casted_ptr;
@@ -194,8 +194,7 @@ struct BasicSearch {
     return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);
   }
 
-  // [KNN count @field vec]: Compute distance to all vectors from query center and sort, keep
-  // closest `count`
+  // [KNN limit @field vec]: Compute distance from `vec` to all vectors keep closest `limit`
   IndexResult Search(const AstKnnNode& knn, string_view active_field) {
     DCHECK(active_field.empty());
     auto sub_results = SearchGeneric(*knn.filter, active_field);
@@ -211,8 +210,8 @@ struct BasicSearch {
 
     sort(distances.begin(), distances.end());
 
-    vector<DocId> out(knn.limit);
-    for (size_t i = 0; i < knn.limit; i++)
+    vector<DocId> out(min(knn.limit, distances.size()));
+    for (size_t i = 0; i < out.size(); i++)
       out[i] = distances[i].second;
 
     sort(out.begin(), out.end());
