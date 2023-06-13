@@ -2,10 +2,10 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/random/random.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
 #include <absl/strings/str_split.h>
-#include <absl/random/random.h>
 
 #include <queue>
 
@@ -94,14 +94,15 @@ void Driver::Run(base::Histogram* dest) {
   string cmd;
   const uint32_t qps = GetFlag(FLAGS_qps);
   const int64_t interval = 1000000000LL / qps;
-  VLOG(1) << "Delay between each query is " << interval << "ns";
 
   auto receive_fb = MakeFiber([this, dest] { ReceiveFb(dest); });
 
-  int64_t last_invocation = absl::GetCurrentTimeNanos() - interval;
+  int64_t next_invocation = absl::GetCurrentTimeNanos();
 
   uint32_t n = GetFlag(FLAGS_n);
-  LOG(INFO) << "Sending " << n << " requests";
+  const absl::Time start = absl::Now();
+  LOG(INFO) << "Sending " << n << " requests at a rate of " << GetFlag(FLAGS_qps)
+            << "qps, i.e. request every " << interval << "ns";
 
   thread_local absl::InsecureBitGen bit_gen;
   const uint32_t key_minimum = GetFlag(FLAGS_key_minimum);
@@ -113,6 +114,17 @@ void Driver::Run(base::Histogram* dest) {
   CHECK(absl::SimpleAtoi(ratio_str.second, &ratio_get));
 
   for (unsigned i = 0; i < n; ++i) {
+    int64_t now = absl::GetCurrentTimeNanos();
+
+    int64_t sleep_ns = next_invocation - now;
+    if (sleep_ns > 0) {
+      VLOG(5) << "Sleeping for " << sleep_ns << "ns";
+      ThisFiber::SleepFor(chrono::nanoseconds(sleep_ns));
+    } else {
+      VLOG(5) << "Behind QPS schedule";
+    }
+    next_invocation += interval;
+
     cmd.clear();
 
     uint32_t key_suffix = absl::Uniform(bit_gen, key_minimum, key_maximum);
@@ -124,17 +136,8 @@ void Driver::Run(base::Histogram* dest) {
       absl::StrAppend(&cmd, "get ", "key", key_suffix, "\r\n");
     }
 
-    int64_t sleep_ns = absl::GetCurrentTimeNanos() - last_invocation - interval;
-    if (sleep_ns > 0) {
-      VLOG(5) << "Sleeping for " << sleep_ns << "ns";
-      ThisFiber::SleepFor(chrono::nanoseconds(sleep_ns));
-    } else {
-      VLOG(5) << "Behind QPS schedule";
-    }
-    last_invocation = absl::GetCurrentTimeNanos();
-
     Req req;
-    req.start = last_invocation;
+    req.start = absl::GetCurrentTimeNanos();
     reqs_.push(req);
     // TODO: add type (get/set)
 
@@ -147,7 +150,9 @@ void Driver::Run(base::Histogram* dest) {
     CHECK(!ec) << ec.message();
   }
 
-  LOG(INFO) << "Done queuing requests, waiting for server processing";
+  const absl::Time finish = absl::Now();
+  LOG(INFO) << "Done queuing " << n << " requests, which took " << finish - start
+            << ". Waiting for server processing";
 
   // TODO: to change to a condvar or something.
   while (!reqs_.empty()) {
@@ -246,7 +251,7 @@ int main(int argc, char* argv[]) {
   });
 
   LOG(INFO) << "Running all threads";
-  absl::Time start_time = absl::Now();
+  const absl::Time start_time = absl::Now();
   pp->AwaitFiberOnAll([&](auto* p) { client->Run(); });
   absl::Duration duration = absl::Now() - start_time;
   LOG(INFO) << "Finished. Total time: " << duration;
