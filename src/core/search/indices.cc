@@ -109,4 +109,25 @@ void TagIndex::Remove(DocId doc, string_view value) {
   }
 }
 
+void VectorIndex::Add(DocId doc, string_view value) {
+  // TODO: parsing from a string here is a temporary solution.
+  // Instead, DocAccessor should provide this value directly.
+  FtVector out;
+  for (string_view coord : absl::StrSplit(value, ',')) {
+    float v;
+    CHECK(absl::SimpleAtof(coord, &v));
+    out.push_back(v);
+  }
+  entries_[doc] = move(out);
+}
+
+void VectorIndex::Remove(DocId doc, string_view value) {
+  entries_.erase(doc);
+}
+
+FtVector VectorIndex::Get(DocId doc) const {
+  auto it = entries_.find(doc);
+  return it != entries_.end() ? it->second : FtVector{};
+}
+
 }  // namespace dfly::search

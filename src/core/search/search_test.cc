@@ -6,6 +6,10 @@
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
+#include <absl/strings/numbers.h>
+#include <absl/strings/str_split.h>
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
 
 #include <algorithm>
 #include <random>
@@ -63,6 +67,10 @@ class SearchParserTest : public ::testing::Test {
     EXPECT_EQ(entries_.size(), 0u) << "Missing check";
   }
 
+  void SetKnnVec(FtVector vec) {
+    params_.knn_vec = vec;
+  }
+
   void PrepareSchema(Schema schema = {{{"field", Schema::TEXT}}}) {
     schema_ = schema;
   }
@@ -89,7 +97,7 @@ class SearchParserTest : public ::testing::Test {
       index.Add(i, &entries_[i].first);
 
     SearchAlgorithm search_algo{};
-    if (!search_algo.Init(query_)) {
+    if (!search_algo.Init(query_, params_)) {
       error_ = "Failed to parse query";
       return false;
     }
@@ -118,6 +126,7 @@ class SearchParserTest : public ::testing::Test {
  private:
   using DocEntry = pair<MockedDocument, bool /*should_match*/>;
 
+  QueryParams params_;
   Schema schema_;
   vector<DocEntry> entries_;
   string query_, error_;
@@ -250,6 +259,12 @@ TEST_F(SearchParserTest, MatchRange) {
   EXPECT_TRUE(Check()) << GetError();
 }
 
+TEST_F(SearchParserTest, MatchStar) {
+  PrepareQuery("*");
+  ExpectAll("one", "two", "three", "and", "all", "documents");
+  EXPECT_TRUE(Check()) << GetError();
+}
+
 TEST_F(SearchParserTest, CheckExprInField) {
   PrepareSchema({{{"f1", Schema::TEXT}, {"f2", Schema::TEXT}, {"f3", Schema::TEXT}}});
   {
@@ -287,6 +302,94 @@ TEST_F(SearchParserTest, CheckTag) {
              Map{{"f1", "red"}, {"f2", "triangle"}}, Map{{"f1", "blue"}, {"f2", "line, triangle"}});
 
   EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchParserTest, SimpleKnn) {
+  Schema schema{{{"even", Schema::TAG}, {"pos", Schema::VECTOR}}};
+  FieldIndices indices{schema};
+
+  // Place points on a straight line
+  for (size_t i = 0; i < 100; i++) {
+    Map values{{{"even", i % 2 == 0 ? "YES" : "NO"}, {"pos", to_string(float(i))}}};
+    MockedDocument doc{values};
+    indices.Add(i, &doc);
+  }
+
+  SearchAlgorithm algo{};
+
+  // Five closest to 50
+  {
+    algo.Init("*=>[KNN 5 @pos VEC]", QueryParams{FtVector{50.0}});
+    EXPECT_THAT(algo.Search(&indices), testing::ElementsAre(48, 49, 50, 51, 52));
+  }
+
+  // Five closest to 0
+  {
+    algo.Init("*=>[KNN 5 @pos VEC]", QueryParams{FtVector{0.0}});
+    EXPECT_THAT(algo.Search(&indices), testing::ElementsAre(0, 1, 2, 3, 4));
+  }
+
+  // Five closest to 20, all even
+  {
+    algo.Init("@even:{yes} =>[KNN 5 @pos VEC]", QueryParams{FtVector{20.0}});
+    EXPECT_THAT(algo.Search(&indices), testing::ElementsAre(16, 18, 20, 22, 24));
+  }
+
+  // Three closest to 31, all odd
+  {
+    algo.Init("@even:{no} =>[KNN 3 @pos VEC]", QueryParams{FtVector{31.0}});
+    EXPECT_THAT(algo.Search(&indices), testing::ElementsAre(29, 31, 33));
+  }
+
+  // Two closest to 70.5
+  {
+    algo.Init("* =>[KNN 2 @pos VEC]", QueryParams{FtVector{70.5}});
+    EXPECT_THAT(algo.Search(&indices), testing::ElementsAre(70, 71));
+  }
+}
+
+TEST_F(SearchParserTest, Simple2dKnn) {
+  // Square:
+  // 3      2
+  //    4
+  // 0      1
+  const pair<float, float> kTestCoords[] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}, {0.5, 0.5}};
+
+  Schema schema{{{"pos", Schema::VECTOR}}};
+  FieldIndices indices{schema};
+
+  for (size_t i = 0; i < ABSL_ARRAYSIZE(kTestCoords); i++) {
+    auto [x, y] = kTestCoords[i];
+    string coords = absl::StrCat(x, ",", y);
+    MockedDocument doc{Map{{"pos", coords}}};
+    indices.Add(i, &doc);
+  }
+
+  SearchAlgorithm algo{};
+
+  // Single center
+  {
+    algo.Init("* =>[KNN 1 @pos VEC]", QueryParams{FtVector{0.5, 0.5}});
+    EXPECT_THAT(algo.Search(&indices), testing::ElementsAre(4));
+  }
+
+  // Lower left
+  {
+    algo.Init("* =>[KNN 4 @pos VEC]", QueryParams{FtVector{0, 0}});
+    EXPECT_THAT(algo.Search(&indices), testing::ElementsAre(0, 1, 3, 4));
+  }
+
+  // Upper right
+  {
+    algo.Init("* =>[KNN 4 @pos VEC]", QueryParams{FtVector{1, 1}});
+    EXPECT_THAT(algo.Search(&indices), testing::ElementsAre(1, 2, 3, 4));
+  }
+
+  // Request more than there is
+  {
+    algo.Init("* => [KNN 10 @pos VEC]", QueryParams{FtVector{0, 0}});
+    EXPECT_THAT(algo.Search(&indices), testing::ElementsAre(0, 1, 2, 3, 4));
+  }
 }
 
 }  // namespace search

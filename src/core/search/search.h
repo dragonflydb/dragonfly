@@ -26,7 +26,7 @@ struct DocumentAccessor {
 };
 
 struct Schema {
-  enum FieldType { TAG, TEXT, NUMERIC };
+  enum FieldType { TAG, TEXT, NUMERIC, VECTOR };
 
   absl::flat_hash_map<std::string, FieldType> fields;
 };
@@ -42,7 +42,7 @@ class FieldIndices {
 
   BaseIndex* GetIndex(std::string_view field) const;
   std::vector<TextIndex*> GetAllTextIndices() const;
-  std::vector<DocId> GetAllDocs() const;
+  const std::vector<DocId>& GetAllDocs() const;
 
  private:
   Schema schema_;
@@ -57,7 +57,7 @@ class SearchAlgorithm {
   ~SearchAlgorithm();
 
   // Init with query and return true if successful.
-  bool Init(std::string_view query);
+  bool Init(std::string_view query, const QueryParams& params);
 
   std::vector<DocId> Search(const FieldIndices* index) const;
 
