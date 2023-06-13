@@ -1171,8 +1171,6 @@ void Transaction::UnwatchShardCb(ArgSlice wkeys, bool should_expire, EngineShard
     sd.local_mask &= ~KEYLOCK_ACQUIRED;
     shard->blocking_controller()->FinalizeWatched(wkeys, this);
     DCHECK(!shard->blocking_controller()->awakened_transactions().contains(this));
-
-    shard->blocking_controller()->NotifyPending();
   }
 
   // Need to see why I decided to call this.

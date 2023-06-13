@@ -797,4 +797,34 @@ TEST_F(ListFamilyTest, LInsert) {
   EXPECT_THAT(Run({"linsert", "mylist", "after", "notfound", "x"}), IntArg(-1));
 }
 
+TEST_F(ListFamilyTest, BLPopUnwakesInScript) {
+  const string_view SCRIPT = R"(
+    for i = 1, 1000 do
+      redis.call('MGET', 'a', 'b', 'c', 'd')
+      redis.call('LPUSH', 'l', tostring(i))
+    end
+  )";
+
+  // Start blpop with without timeout
+  auto f1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&]() {
+    auto resp = Run("blpop", {"BLPOP", "l", "0"});
+    // blpop should only be awakened after the script has completed, so the
+    // last element added in the script should be returned.
+    EXPECT_THAT(resp, ArgType(RespExpr::ARRAY));
+    EXPECT_THAT(resp.GetVec(), ElementsAre("l", "1000"));
+  });
+
+  // Start long running script that intends to wake up blpop
+  auto f2 = pp_->at(2)->LaunchFiber([&]() {
+    Run("script", {"EVAL", SCRIPT, "5", "a", "b", "c", "d", "l"});
+  });
+
+  // Run blpop that times out
+  auto resp = Run({"blpop", "g", "0.01"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+
+  f1.Join();
+  f2.Join();
+}
+
 }  // namespace dfly
