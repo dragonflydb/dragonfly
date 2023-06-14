@@ -14,6 +14,7 @@
 #include "facade/redis_parser.h"
 #include "server/common.h"
 #include "server/journal/types.h"
+#include "server/protocol_client.h"
 #include "server/version.h"
 #include "util/fiber_socket_base.h"
 
@@ -28,21 +29,15 @@ class ConnectionContext;
 class JournalExecutor;
 struct JournalReader;
 
-class Replica {
+class Replica : ProtocolClient {
  private:
   // The attributes of the master we are connecting to.
   struct MasterContext {
-    std::string host;
-    uint16_t port;
-    boost::asio::ip::tcp::endpoint endpoint;
-
     std::string master_repl_id;
     std::string dfly_session_id;         // Sync session id for dfly sync.
     uint32_t dfly_flow_id = UINT32_MAX;  // Flow id if replica acts as a dfly flow.
 
     DflyVersion version = DflyVersion::VER0;
-
-    std::string Description() const;
   };
 
   // The flow is : R_ENABLED -> R_TCP_CONNECTED -> (R_SYNCING) -> R_SYNC_OK.
@@ -95,7 +90,7 @@ class Replica {
       std::atomic_uint32_t counter;
       BlockingCounter block;
 
-      TxExecutionSync(uint32_t counter) : barrier(counter), counter(counter), block(counter) {
+      explicit TxExecutionSync(uint32_t counter) : barrier(counter), counter(counter), block(counter) {
       }
     };
 
@@ -125,9 +120,6 @@ class Replica {
   // Coordinate state transitions. Spawned by start.
   void MainReplicationFb();
 
-  std::error_code ResolveMasterDns();  // Resolve master dns
-  // Connect to master and authenticate if needed.
-  std::error_code ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms);
   std::error_code Greet();  // Send PING and REPLCONF.
 
   std::error_code HandleCapaDflyResp();
@@ -139,7 +131,6 @@ class Replica {
   std::error_code ConsumeRedisStream();  // Redis stable state.
   std::error_code ConsumeDflyStream();   // Dragonfly stable state.
 
-  void CloseSocket();                 // Close replica sockets.
   void JoinAllFlows();                // Join all flows if possible.
   void SetShardStates(bool replica);  // Call SetReplica(replica) on all shards.
 
@@ -150,8 +141,8 @@ class Replica {
 
  private: /* Main dlfly flow mode functions */
   // Initialize as single dfly flow.
-  Replica(const MasterContext& context, uint32_t dfly_flow_id, Service* service,
-          std::shared_ptr<MultiShardExecution> shared_exe_data);
+  Replica(ProtocolClient::ServerContext server_context, const MasterContext& context, uint32_t dfly_flow_id,
+          Service* service, std::shared_ptr<MultiShardExecution> shared_exe_data);
 
   // Start replica initialized as dfly flow.
   std::error_code StartFullSyncFlow(BlockingCounter block, Context* cntx);
@@ -160,12 +151,12 @@ class Replica {
   std::error_code StartStableSyncFlow(Context* cntx);
 
   // Single flow full sync fiber spawned by StartFullSyncFlow.
-  void FullSyncDflyFb(std::string eof_token, BlockingCounter block, Context* cntx);
+  void FullSyncDflyFb(const std::string& eof_token, BlockingCounter block, Context* cntx);
 
   // Single flow stable state sync fiber spawned by StartStableSyncFlow.
   void StableSyncDflyReadFb(Context* cntx);
 
-  void StableSyncDflyAcksFb(Context* cntx);
+  void StableSyncDflyAcksFb(Context* cntx, bool use_journal_count);
 
   void StableSyncDflyExecFb(Context* cntx);
 
@@ -177,29 +168,7 @@ class Replica {
     std::variant<std::string, size_t> fullsync;
   };
 
-  // This function uses parser_ and cmd_args_ in order to consume a single response
-  // from the sock_. The output will reside in cmd_str_args_.
-  // For error reporting purposes, the parsed command would be in last_resp_.
-  // If io_buf is not given, a temporary buffer will be used.
-  std::error_code ReadRespReply(base::IoBuf* buffer = nullptr);
-
-  std::error_code ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* header);
-  std::error_code ReadLine(base::IoBuf* io_buf, std::string_view* line);
-
-  std::error_code ParseAndExecute(base::IoBuf* io_buf, ConnectionContext* cntx);
-
-  // Check if reps_args contains a simple reply.
-  bool CheckRespIsSimpleReply(std::string_view reply) const;
-
-  // Check resp_args contains the following types at front.
-  bool CheckRespFirstTypes(std::initializer_list<facade::RespExpr::Type> types) const;
-
-  // Send command, update last_io_time, return error.
-  std::error_code SendCommand(std::string_view command, facade::ReqSerializer* serializer);
-  // Send command, read response into resp_args_.
-  std::error_code SendCommandAndReadResponse(std::string_view command,
-                                             facade::ReqSerializer* serializer,
-                                             base::IoBuf* buffer = nullptr);
+  std::error_code ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* dest);
 
   void ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context* cntx);
   void InsertTxDataToShardResource(TransactionData&& tx_data);
@@ -227,11 +196,11 @@ class Replica {
   }
 
   const std::string& MasterHost() const {
-    return master_context_.host;
+    return server().host;
   }
 
   uint16_t Port() const {
-    return master_context_.port;
+    return server().port;
   }
 
   std::vector<uint64_t> GetReplicaOffset() const;
@@ -240,8 +209,6 @@ class Replica {
  private:
   Service& service_;
   MasterContext master_context_;
-  std::unique_ptr<util::LinuxSocketBase> sock_;
-  Mutex sock_mu_;
 
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;
 
@@ -273,19 +240,12 @@ class Replica {
   Mutex flows_op_mu_;
 
   std::optional<base::IoBuf> leftover_buf_;
-  std::unique_ptr<facade::RedisParser> parser_;
-  facade::RespVec resp_args_;
-  base::IoBuf resp_buf_;
-  std::string last_cmd_;
-  std::string last_resp_;
-  facade::CmdArgVec cmd_str_args_;
 
   Context cntx_;  // context for tasks in replica.
 
   // repl_offs - till what offset we've already read from the master.
   // ack_offs_ last acknowledged offset.
   size_t repl_offs_ = 0, ack_offs_ = 0;
-  uint64_t last_io_time_ = 0;  // in ns, monotonic clock.
   std::atomic<unsigned> state_mask_ = 0;
   unsigned num_df_flows_ = 0;
 
