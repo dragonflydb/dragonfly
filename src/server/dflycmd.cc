@@ -65,7 +65,7 @@ struct TransactionGuard {
 };
 }  // namespace
 
-std::string_view SyncStateName(DflyCmd::SyncState sync_state) {
+std::string_view DflyCmd::SyncStateName(DflyCmd::SyncState sync_state) {
   switch (sync_state) {
     case DflyCmd::SyncState::PREPARATION:
       return "preparation";
@@ -75,9 +75,8 @@ std::string_view SyncStateName(DflyCmd::SyncState sync_state) {
       return "stable_sync";
     case DflyCmd::SyncState::CANCELLED:
       return "cancelled";
-    default:
-      LOG(FATAL) << "bad state " << int(sync_state);
   }
+  LOG(FATAL) << "Unspported state " << int(sync_state);
 }
 
 DflyCmd::DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family)

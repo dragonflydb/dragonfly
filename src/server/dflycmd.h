@@ -94,6 +94,7 @@ class DflyCmd {
  public:
   // See class comments for state descriptions.
   enum class SyncState { PREPARATION, FULL_SYNC, STABLE_SYNC, CANCELLED };
+  static std::string_view SyncStateName(DflyCmd::SyncState sync_state);
 
   // Stores information related to a single replica.
   struct ReplicaInfo {
@@ -205,7 +206,5 @@ class DflyCmd {
 
   Mutex mu_;  // Guard global operations. See header top for locking levels.
 };
-
-std::string_view SyncStateName(DflyCmd::SyncState sync_state);
 
 }  // namespace dfly
