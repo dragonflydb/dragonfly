@@ -18,7 +18,14 @@
 namespace dfly {
 
 using SearchDocData = absl::flat_hash_map<std::string /*field*/, std::string /*value*/>;
-using SerializedSearchDoc = std::pair<std::string /*key*/, SearchDocData>;
+
+search::FtVector BytesToFtVector(std::string_view value);
+
+struct SerializedSearchDoc {
+  std::string key;
+  SearchDocData values;
+  float knn_distance;
+};
 
 struct SearchResult {
   std::vector<SerializedSearchDoc> docs;
@@ -30,6 +37,8 @@ struct SearchParams {
   // the whole result set
   size_t limit_offset;
   size_t limit_total;
+
+  search::FtVector knn_vector;
 };
 
 // Stores basic info about a document index.

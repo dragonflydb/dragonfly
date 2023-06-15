@@ -201,37 +201,50 @@ struct BasicSearch {
 
     auto* vec_index = GetIndex<VectorIndex>(knn.field);
 
-    vector<pair<float, DocId>> distances;
-    distances.reserve(sub_results->size());
+    distances_.reserve(sub_results->size());
     for (DocId matched_doc : *sub_results) {
       float dist = VectorDistance(knn.vector, vec_index->Get(matched_doc));
-      distances.emplace_back(dist, matched_doc);
+      distances_.emplace_back(dist, matched_doc);
     }
 
-    sort(distances.begin(), distances.end());
+    sort(distances_.begin(), distances_.end());
 
-    vector<DocId> out(min(knn.limit, distances.size()));
+    vector<DocId> out(min(knn.limit, distances_.size()));
     for (size_t i = 0; i < out.size(); i++)
-      out[i] = distances[i].second;
+      out[i] = distances_[i].second;
 
-    sort(out.begin(), out.end());
     return out;
   }
 
   // Determine node type and call specific search function
-  IndexResult SearchGeneric(const AstNode& node, string_view active_field) {
+  IndexResult SearchGeneric(const AstNode& node, string_view active_field, bool top_level = false) {
     auto cb = [this, active_field](const auto& inner) { return Search(inner, active_field); };
     auto result = visit(cb, static_cast<const NodeVariants&>(node));
-    DCHECK(is_sorted(result->begin(), result->end()));
+
+    // Top level results don't need to be sorted, because they will be scored, sorted by fields or
+    // used by knn
+    DCHECK(top_level || is_sorted(result->begin(), result->end()));
+
     return result;
   }
 
-  static vector<DocId> Search(const FieldIndices* indices, const AstNode& query) {
-    return BasicSearch{indices}.SearchGeneric(query, "").Take();
+  SearchResult Search(const AstNode& query) {
+    IndexResult result = SearchGeneric(query, "", true);
+
+    if (!distances_.empty()) {
+      vector<float> out_distances(result->size());
+      for (size_t i = 0; i < out_distances.size(); i++)
+        out_distances[i] = distances_[i].first;
+
+      return SearchResult{result.Take(), move(out_distances)};
+    }
+
+    return SearchResult{result.Take(), {}};
   }
 
   const FieldIndices* indices_;
   vector<DocId> tmp_vec_;
+  vector<pair<float, DocId>> distances_;
 };
 
 }  // namespace
@@ -257,14 +270,14 @@ FieldIndices::FieldIndices(Schema schema) : schema_{move(schema)}, all_ids_{}, i
 
 void FieldIndices::Add(DocId doc, DocumentAccessor* access) {
   for (auto& [field, index] : indices_) {
-    index->Add(doc, access->Get(field));
+    index->Add(doc, access, field);
   }
   all_ids_.insert(upper_bound(all_ids_.begin(), all_ids_.end(), doc), doc);
 }
 
 void FieldIndices::Remove(DocId doc, DocumentAccessor* access) {
   for (auto& [field, index] : indices_) {
-    index->Remove(doc, access->Get(field));
+    index->Remove(doc, access, field);
   }
   auto it = lower_bound(all_ids_.begin(), all_ids_.end(), doc);
   CHECK(it != all_ids_.end() && *it == doc);
@@ -308,8 +321,15 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams& params) {
   }
 }
 
-vector<DocId> SearchAlgorithm::Search(const FieldIndices* index) const {
-  return BasicSearch::Search(index, *query_);
+SearchResult SearchAlgorithm::Search(const FieldIndices* index) const {
+  return BasicSearch{index}.Search(*query_);
+}
+
+optional<size_t> SearchAlgorithm::HasKnn() const {
+  DCHECK(query_);
+  if (holds_alternative<AstKnnNode>(*query_))
+    return get<AstKnnNode>(*query_).limit;
+  return nullopt;
 }
 
 }  // namespace dfly::search

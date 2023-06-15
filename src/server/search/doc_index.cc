@@ -4,6 +4,8 @@
 
 #include "server/search/doc_index.h"
 
+#include <memory>
+
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
 #include "server/search/doc_accessors.h"
@@ -45,6 +47,19 @@ void TraverseAllMatching(const DocIndex& index, const OpArgs& op_args, F&& f) {
 }
 
 }  // namespace
+
+search::FtVector BytesToFtVector(string_view value) {
+  DCHECK_EQ(value.size() % sizeof(float), 0u);
+  search::FtVector out(value.size() / sizeof(float));
+
+  // Create copy for aligned access
+  unique_ptr<float[]> float_ptr = make_unique<float[]>(out.size());
+  memcpy(float_ptr.get(), value.data(), value.size());
+
+  for (size_t i = 0; i < out.size(); i++)
+    out[i] = float_ptr[i];
+  return out;
+}
 
 ShardDocIndex::DocId ShardDocIndex::DocKeyIndex::Add(string_view key) {
   DCHECK_EQ(ids_.count(key), 0u);
@@ -117,23 +132,25 @@ bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
 SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& params,
                                    search::SearchAlgorithm* search_algo) const {
   auto& db_slice = op_args.shard->db_slice();
+  auto search_results = search_algo->Search(&indices_);
 
-  auto doc_ids = search_algo->Search(&indices_);
+  size_t serialize_count = min(search_results.ids.size(), params.limit_offset + params.limit_total);
 
-  vector<SerializedSearchDoc> out;
-  for (search::DocId doc : doc_ids) {
-    auto key = key_index_.Get(doc);
+  vector<SerializedSearchDoc> out(serialize_count);
+  for (size_t i = 0; i < serialize_count; i++) {
+    auto key = key_index_.Get(search_results.ids[i]);
     auto it = db_slice.Find(op_args.db_cntx, key, base_->GetObjCode());
     CHECK(it) << "Expected key: " << key << " to exist";
-    auto doc_access = GetAccessor(op_args.db_cntx, (*it)->second);
-    out.emplace_back(key, doc_access->Serialize());
 
-    // Scoring is not implemented yet, so we take just the first documents
-    if (out.size() >= params.limit_offset + params.limit_total)
-      break;
+    VLOG(0) << "Fetched " << key;
+
+    auto doc_data = GetAccessor(op_args.db_cntx, (*it)->second)->Serialize(base_->schema);
+    float score = search_results.knn_distances.empty() ? 0 : search_results.knn_distances[i];
+
+    out[i] = SerializedSearchDoc{string{key}, std::move(doc_data), score};
   }
 
-  return SearchResult{std::move(out), doc_ids.size()};
+  return SearchResult{std::move(out), search_results.ids.size()};
 }
 
 ShardDocIndex* ShardDocIndices::GetIndex(string_view name) {

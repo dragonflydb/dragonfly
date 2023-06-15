@@ -48,16 +48,16 @@ absl::flat_hash_set<string> NormalizeTags(string_view taglist) {
 
 };  // namespace
 
-void NumericIndex::Add(DocId doc, string_view value) {
+void NumericIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
   int64_t num;
-  if (absl::SimpleAtoi(value, &num))
-    entries_.emplace(num, doc);
+  if (absl::SimpleAtoi(doc->GetString(field), &num))
+    entries_.emplace(num, id);
 }
 
-void NumericIndex::Remove(DocId doc, string_view value) {
+void NumericIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
   int64_t num;
-  if (absl::SimpleAtoi(value, &num))
-    entries_.erase({num, doc});
+  if (absl::SimpleAtoi(doc->GetString(field), &num))
+    entries_.erase({num, id});
 }
 
 vector<DocId> NumericIndex::Range(int64_t l, int64_t r) const {
@@ -77,52 +77,48 @@ const vector<DocId>* BaseStringIndex::Matching(string_view str) const {
   return (it != entries_.end()) ? &it->second : nullptr;
 }
 
-void TextIndex::Add(DocId doc, string_view value) {
-  for (const auto& word : Tokenize(value)) {
+void TextIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
+  for (const auto& word : Tokenize(doc->GetString(field))) {
     auto& list = entries_[word];
-    list.insert(upper_bound(list.begin(), list.end(), doc), doc);
+    list.insert(upper_bound(list.begin(), list.end(), id), id);
   }
 }
 
-void TextIndex::Remove(DocId doc, string_view value) {
-  for (const auto& word : Tokenize(value)) {
+void TextIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
+  for (const auto& word : Tokenize(doc->GetString(field))) {
     auto& list = entries_[word];
-    auto it = lower_bound(list.begin(), list.end(), doc);
-    if (it != list.end() && *it == doc)
+    auto it = lower_bound(list.begin(), list.end(), id);
+    if (it != list.end() && *it == id)
       list.erase(it);
   }
 }
 
-void TagIndex::Add(DocId doc, string_view value) {
-  for (auto& tag : NormalizeTags(value)) {
+void TagIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
+  for (auto& tag : NormalizeTags(doc->GetString(field))) {
     auto& list = entries_[tag];
-    list.insert(upper_bound(list.begin(), list.end(), doc), doc);
+    list.insert(upper_bound(list.begin(), list.end(), id), id);
   }
 }
 
-void TagIndex::Remove(DocId doc, string_view value) {
-  for (auto& tag : NormalizeTags(value)) {
+void TagIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
+  for (auto& tag : NormalizeTags(doc->GetString(field))) {
     auto& list = entries_[tag];
-    auto it = lower_bound(list.begin(), list.end(), doc);
-    if (it != list.end() && *it == doc)
+    auto it = lower_bound(list.begin(), list.end(), id);
+    if (it != list.end() && *it == id)
       list.erase(it);
   }
 }
 
-void VectorIndex::Add(DocId doc, string_view value) {
-  // TODO: parsing from a string here is a temporary solution.
-  // Instead, DocAccessor should provide this value directly.
-  FtVector out;
-  for (string_view coord : absl::StrSplit(value, ',')) {
-    float v;
-    CHECK(absl::SimpleAtof(coord, &v));
-    out.push_back(v);
-  }
-  entries_[doc] = move(out);
+void VectorIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
+  auto v = doc->GetVector(field);
+  string vs;
+  for (auto vv : v)
+    vs = absl::StrCat(vs, vv);
+  entries_[id] = doc->GetVector(field);
 }
 
-void VectorIndex::Remove(DocId doc, string_view value) {
-  entries_.erase(doc);
+void VectorIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
+  entries_.erase(id);
 }
 
 FtVector VectorIndex::Get(DocId doc) const {

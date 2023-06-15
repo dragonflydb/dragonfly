@@ -21,7 +21,7 @@ class StringMap;
 // Field string_view's are only valid until the next is requested.
 struct BaseAccessor : public search::DocumentAccessor {
   // Convert underlying type to a map<string, string> to be sent as a reply
-  virtual SearchDocData Serialize() const = 0;
+  virtual SearchDocData Serialize(search::Schema schema) const = 0;
 };
 
 // Accessor for hashes stored with listpack
@@ -31,8 +31,9 @@ struct ListPackAccessor : public BaseAccessor {
   explicit ListPackAccessor(LpPtr ptr) : lp_{ptr} {
   }
 
-  std::string_view Get(std::string_view field) const override;
-  SearchDocData Serialize() const override;
+  std::string_view GetString(std::string_view field) const override;
+  search::FtVector GetVector(std::string_view field) const override;
+  SearchDocData Serialize(search::Schema schema) const override;
 
  private:
   mutable std::array<uint8_t, 33> intbuf_[2];
@@ -44,8 +45,9 @@ struct StringMapAccessor : public BaseAccessor {
   explicit StringMapAccessor(StringMap* hset) : hset_{hset} {
   }
 
-  std::string_view Get(std::string_view field) const override;
-  SearchDocData Serialize() const override;
+  std::string_view GetString(std::string_view field) const override;
+  search::FtVector GetVector(std::string_view field) const override;
+  SearchDocData Serialize(search::Schema schema) const override;
 
  private:
   StringMap* hset_;
@@ -56,8 +58,9 @@ struct JsonAccessor : public BaseAccessor {
   explicit JsonAccessor(JsonType* json) : json_{json} {
   }
 
-  std::string_view Get(std::string_view field) const override;
-  SearchDocData Serialize() const override;
+  std::string_view GetString(std::string_view field) const override;
+  search::FtVector GetVector(std::string_view field) const override;
+  SearchDocData Serialize(search::Schema schema) const override;
 
  private:
   mutable std::string buf_;

@@ -34,9 +34,20 @@ struct MockedDocument : public DocumentAccessor {
   MockedDocument(std::string test_field) : fields_{{"field", test_field}} {
   }
 
-  string_view Get(string_view field) const override {
+  string_view GetString(string_view field) const override {
     auto it = fields_.find(field);
     return it != fields_.end() ? string_view{it->second} : "";
+  }
+
+  FtVector GetVector(string_view field) const override {
+    string_view str_value = fields_.at(field);
+    FtVector out;
+    for (string_view coord : absl::StrSplit(str_value, ',')) {
+      float v;
+      CHECK(absl::SimpleAtof(coord, &v));
+      out.push_back(v);
+    }
+    return out;
   }
 
   string DebugFormat() {

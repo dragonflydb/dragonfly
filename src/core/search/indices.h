@@ -16,8 +16,8 @@ namespace dfly::search {
 // Index for integer fields.
 // Range bounds are queried in logarithmic time, iteration is constant.
 struct NumericIndex : public BaseIndex {
-  void Add(DocId doc, std::string_view value) override;
-  void Remove(DocId doc, std::string_view value) override;
+  void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
 
   std::vector<DocId> Range(int64_t l, int64_t r) const;
 
@@ -37,22 +37,22 @@ struct BaseStringIndex : public BaseIndex {
 // Index for text fields.
 // Hashmap based lookup per word.
 struct TextIndex : public BaseStringIndex {
-  void Add(DocId doc, std::string_view value) override;
-  void Remove(DocId doc, std::string_view value) override;
+  void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
 };
 
 // Index for text fields.
 // Hashmap based lookup per word.
 struct TagIndex : public BaseStringIndex {
-  void Add(DocId doc, std::string_view value) override;
-  void Remove(DocId doc, std::string_view value) override;
+  void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
 };
 
 // Index for vector fields.
 // Only supports lookup by id.
 struct VectorIndex : public BaseIndex {
-  void Add(DocId doc, std::string_view value) override;
-  void Remove(DocId doc, std::string_view value) override;
+  void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
 
   FtVector Get(DocId doc) const;
 

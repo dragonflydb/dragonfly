@@ -73,6 +73,7 @@ optional<search::Schema> ParseSchemaOrReply(CmdArgList args, ConnectionContext* 
 
 optional<SearchParams> ParseSearchParamsOrReply(CmdArgList args, ConnectionContext* cntx) {
   size_t limit_offset = 0, limit_total = 10;
+  search::FtVector knn_vector;
 
   for (size_t i = 0; i < args.size(); i++) {
     ToUpper(&args[i]);
@@ -89,10 +90,87 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgList args, ConnectionConte
         return nullopt;
       }
       i += 2;
+      continue;
+    }
+
+    // [PARAMS num(ignored) name(ignored) knn_vector]
+    if (ArgS(args, i) == "PARAMS") {
+      if (i + 3 >= args.size()) {
+        (*cntx)->SendError(kSyntaxErr);
+        return nullopt;
+      }
+      knn_vector = BytesToFtVector(ArgS(args, i + 3));
+      i += 3;
+      continue;
     }
   }
 
-  return SearchParams{limit_offset, limit_total};
+  return SearchParams{limit_offset, limit_total, move(knn_vector)};
+}
+
+void SendSerializedDoc(const SerializedSearchDoc& doc, ConnectionContext* cntx) {
+  (*cntx)->SendBulkString(doc.key);
+  (*cntx)->StartCollection(doc.values.size(), RedisReplyBuilder::MAP);
+  for (const auto& [k, v] : doc.values) {
+    (*cntx)->SendBulkString(k);
+    (*cntx)->SendBulkString(v);
+  }
+}
+
+void ReplyWithResults(const SearchParams& params, absl::Span<SearchResult> results,
+                      ConnectionContext* cntx) {
+  size_t total_count = 0;
+  for (const auto& shard_docs : results)
+    total_count += shard_docs.total_hits;
+
+  size_t response_count =
+      min(total_count - min(total_count, params.limit_offset), params.limit_total);
+
+  facade::SinkReplyBuilder::ReplyAggregator agg{cntx->reply_builder()};
+
+  (*cntx)->StartArray(response_count * 2 + 1);
+  (*cntx)->SendLong(total_count);
+
+  size_t sent = 0;
+  size_t to_skip = 0;
+  for (const auto& shard_docs : results) {
+    for (const auto& serialized_doc : shard_docs.docs) {
+      // Scoring is not implemented yet, so we just cut them in the order they were retrieved
+      if (to_skip > 0) {
+        to_skip--;
+        continue;
+      }
+
+      if (sent++ >= response_count)
+        return;
+
+      SendSerializedDoc(serialized_doc, cntx);
+    }
+  }
+}
+
+void ReplyKnn(size_t knn_limit, const SearchParams& params, absl::Span<SearchResult> results,
+              ConnectionContext* cntx) {
+  vector<const SerializedSearchDoc*> docs;
+  for (const auto& shard_results : results) {
+    for (const auto& doc : shard_results.docs) {
+      docs.push_back(&doc);
+    }
+  }
+
+  partial_sort(docs.begin(), docs.end(),
+               docs.begin() + min(params.limit_offset + params.limit_total, knn_limit),
+               [](const auto* l, const auto* r) { return l->knn_distance < r->knn_distance; });
+  docs.resize(min(docs.size(), knn_limit));
+
+  size_t response_count =
+      min(docs.size() - min(docs.size(), params.limit_offset), params.limit_total);
+
+  (*cntx)->StartArray(response_count * 2 + 1);
+  (*cntx)->SendLong(docs.size());
+  for (auto* doc : absl::MakeSpan(docs).subspan(params.limit_offset, response_count)) {
+    SendSerializedDoc(*doc, cntx);
+  }
 }
 
 }  // namespace
@@ -164,7 +242,7 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
     return;
 
   search::SearchAlgorithm search_algo;
-  if (!search_algo.Init(query_str, {}))
+  if (!search_algo.Init(query_str, {move(params->knn_vector)}))
     return (*cntx)->SendError("Query syntax error");
 
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
@@ -182,39 +260,10 @@ void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
   if (index_not_found.load())
     return (*cntx)->SendError(string{index_name} + ": no such index");
 
-  size_t total_count = 0;
-  for (const auto& shard_docs : docs)
-    total_count += shard_docs.total_hits;
-
-  size_t response_count =
-      min(total_count - min(total_count, params->limit_offset), params->limit_total);
-
-  facade::SinkReplyBuilder::ReplyAggregator agg{cntx->reply_builder()};
-
-  (*cntx)->StartArray(response_count * 2 + 1);
-  (*cntx)->SendLong(total_count);
-
-  size_t sent = 0;
-  size_t to_skip = 0;
-  for (const auto& shard_docs : docs) {
-    for (const auto& [key, doc] : shard_docs.docs) {
-      // Scoring is not implemented yet, so we just cut them in the order they were retrieved
-      if (to_skip > 0) {
-        to_skip--;
-        continue;
-      }
-
-      if (sent++ >= response_count)
-        return;
-
-      (*cntx)->SendBulkString(key);
-      (*cntx)->StartCollection(doc.size(), RedisReplyBuilder::MAP);
-      for (const auto& [k, v] : doc) {
-        (*cntx)->SendBulkString(k);
-        (*cntx)->SendBulkString(v);
-      }
-    }
-  }
+  if (auto knn_limit = search_algo.HasKnn(); knn_limit)
+    ReplyKnn(*knn_limit, *params, absl::MakeSpan(docs), cntx);
+  else
+    ReplyWithResults(*params, absl::MakeSpan(docs), cntx);
 }
 
 #define HFUNC(x) SetHandler(&SearchFamily::x)
