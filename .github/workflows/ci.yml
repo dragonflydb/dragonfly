@@ -142,6 +142,11 @@ jobs:
         name: Create kind cluster
         uses: helm/kind-action@v1.5.0
 
+      - if: steps.list-changed.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        name: Getting cluster ready
+        run: |
+          kubectl label nodes chart-testing-control-plane key/node-kind=high-memory
+
       - name: Run chart-testing (install)
         run: |
           ct \

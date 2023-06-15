@@ -57,6 +57,24 @@ spec:
         app.kubernetes.io/name: dragonfly
         app.kubernetes.io/instance: test
     spec:
+      tolerations:
+        - effect: NoSchedule
+          key: key/high-memory
+          operator: Equal
+          value: "true"
+        - effect: PreferNoSchedule
+          key: key/high-memory
+          operator: Equal
+          value: "true"
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: key/node-kind
+                operator: In
+                values:
+                - high-memory
       serviceAccountName: test-dragonfly
       containers:
         - name: dragonfly
@@ -89,9 +107,5 @@ spec:
           args:
             - "--alsologtostderr"
           resources:
-            limits:
-              cpu: 100m
-              memory: 400Mi
-            requests:
-              cpu: 100m
-              memory: 300Mi
+            limits: {}
+            requests: {}

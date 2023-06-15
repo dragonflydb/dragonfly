@@ -1,0 +1,18 @@
+tolerations:
+  - key: key/high-memory
+    operator: "Equal"
+    value: "true"
+    effect: "NoSchedule"
+  - key: key/high-memory
+    operator: "Equal"
+    value: "true"
+    effect: "PreferNoSchedule"
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: key/node-kind
+              operator: In
+              values:
+                - high-memory

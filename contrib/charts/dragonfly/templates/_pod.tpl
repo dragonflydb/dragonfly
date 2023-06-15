@@ -16,15 +16,15 @@ volumeMounts:
 {{- end }}
 
 {{- define "dragonfly.pod" -}}
-{{- with .Values.tolerations -}}
+{{- with .Values.tolerations }}
 tolerations:
   {{- toYaml . | trim | nindent 2 -}}
 {{- end }}
-{{- with .Values.nodeSelector -}}
+{{- with .Values.nodeSelector }}
 nodeSelector:
   {{- toYaml . | trim | nindent 2 -}}
 {{- end }}
-{{- with .Values.affinity -}}
+{{- with .Values.affinity }}
 affinity:
   {{- toYaml . | trim | nindent 2 -}}
 {{- end }}
