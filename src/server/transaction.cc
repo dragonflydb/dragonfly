@@ -133,8 +133,6 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
     auto& sd = shard_data_[i];
     auto& si = shard_index[i];
 
-    CHECK_LT(si.args.size(), 1u << 15);
-
     sd.arg_count = si.args.size();
     sd.arg_start = args_.size();
 
@@ -157,7 +155,7 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
     }
   }
 
-  CHECK(args_.size() == num_args);
+  CHECK_EQ(args_.size(), num_args);
 }
 
 void Transaction::InitMultiData(KeyIndex key_index) {

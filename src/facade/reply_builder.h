@@ -54,6 +54,8 @@ class SinkReplyBuilder {
     SendSimpleString("OK");
   }
 
+  virtual void SendProtocolError(std::string_view str) = 0;
+
   // In order to reduce interrupt rate we allow coalescing responses together using
   // Batch mode. It is controlled by Connection state machine because it makes sense only
   // when pipelined requests are arriving.
@@ -154,6 +156,7 @@ class MCReplyBuilder : public SinkReplyBuilder {
   void SendClientError(std::string_view str);
   void SendNotFound();
   void SendSimpleString(std::string_view str) final;
+  void SendProtocolError(std::string_view str) final;
 
   void SetNoreply(bool noreply) {
     noreply_ = noreply;
@@ -176,6 +179,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   void SendStored() override;
   void SendSetSkipped() override;
   virtual void SendError(OpStatus status);
+  void SendProtocolError(std::string_view str) override;
 
   virtual void SendNullArray();   // Send *-1
   virtual void SendEmptyArray();  // Send *0
