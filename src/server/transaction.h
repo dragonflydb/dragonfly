@@ -433,12 +433,12 @@ class Transaction {
   // Adds itself to watched queue in the shard. Must run in that shard thread.
   OpStatus WatchInShard(ArgSlice keys, EngineShard* shard);
 
-  void UnwatchBlocking(bool should_expire, WaitKeysProvider wcb);
+  void ExpireBlocking(WaitKeysProvider wcb);
+
+  void ExpireBlockingShardCb(ArgSlice wkeys, EngineShard* shard);
 
   // Returns true if we need to follow up with PollExecution on this shard.
   bool CancelShardCb(EngineShard* shard);
-
-  void UnwatchShardCb(ArgSlice wkeys, bool should_expire, EngineShard* shard);
 
   // Run callback inline as part of multi stub.
   OpStatus RunSquashedMultiCb(RunnableType cb);

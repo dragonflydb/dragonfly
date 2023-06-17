@@ -906,24 +906,24 @@ void Transaction::RunQuickie(EngineShard* shard) {
 
 // runs in coordinator thread.
 // Marks the transaction as expired and removes it from the waiting queue.
-void Transaction::UnwatchBlocking(bool should_expire, WaitKeysProvider wcb) {
-  DVLOG(1) << "UnwatchBlocking " << DebugId() << " expire: " << should_expire;
+void Transaction::ExpireBlocking(WaitKeysProvider wcb) {
+  DVLOG(1) << "ExpireBlocking " << DebugId();
   DCHECK(!IsGlobal());
 
   run_count_.store(unique_shard_cnt_, memory_order_release);
 
-  auto expire_cb = [this, &wcb, should_expire] {
+  auto expire_cb = [this, &wcb] {
     EngineShard* es = EngineShard::tlocal();
     ArgSlice wkeys = wcb(this, es);
 
-    UnwatchShardCb(wkeys, should_expire, es);
+    ExpireBlockingShardCb(wkeys, es);
   };
 
   IterateActiveShards([&expire_cb](PerShardData& sd, auto i) { shard_set->Add(i, expire_cb); });
 
   // Wait for all callbacks to conclude.
   WaitForShardCallbacks();
-  DVLOG(1) << "UnwatchBlocking finished " << DebugId();
+  DVLOG(1) << "ExpireBlocking finished " << DebugId();
 }
 
 string_view Transaction::Name() const {
@@ -1114,7 +1114,8 @@ bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provi
   if (DCHECK_IS_ON() && VLOG_IS_ON(1)) {
     string time_str = "forever";
     if (tp != time_point::max())
-      time_str = duration_cast<milliseconds>(tp - time_point::clock::now()).count() + "ms";
+      time_str =
+          to_string(duration_cast<milliseconds>(tp - time_point::clock::now()).count()) + "ms";
     DVLOG(1) << "WaitOnWatch until: " << time_str << " " << DebugId();
   }
 
@@ -1137,9 +1138,11 @@ bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provi
   --stats->num_blocked_clients;
 
   bool is_expired = (coordinator_state_ & COORD_CANCELLED) || status == cv_status::timeout;
-  UnwatchBlocking(is_expired, wkeys_provider);
-  coordinator_state_ &= ~COORD_BLOCKED;
+  if (is_expired) {
+    ExpireBlocking(wkeys_provider);
+  }
 
+  coordinator_state_ &= ~COORD_BLOCKED;
   return !is_expired;
 }
 
@@ -1160,24 +1163,16 @@ OpStatus Transaction::WatchInShard(ArgSlice keys, EngineShard* shard) {
   return OpStatus::OK;
 }
 
-void Transaction::UnwatchShardCb(ArgSlice wkeys, bool should_expire, EngineShard* shard) {
-  if (should_expire) {
-    auto lock_args = GetLockArgs(shard->shard_id());
-    shard->db_slice().Release(Mode(), lock_args);
+void Transaction::ExpireBlockingShardCb(ArgSlice wkeys, EngineShard* shard) {
+  auto lock_args = GetLockArgs(shard->shard_id());
+  shard->db_slice().Release(Mode(), lock_args);
 
-    unsigned sd_idx = SidToId(shard->shard_id());
-    auto& sd = shard_data_[sd_idx];
-    sd.local_mask |= EXPIRED_Q;
-    sd.local_mask &= ~KEYLOCK_ACQUIRED;
-    shard->blocking_controller()->FinalizeWatched(wkeys, this);
-    DCHECK(!shard->blocking_controller()->awakened_transactions().contains(this));
-  }
-
-  // Need to see why I decided to call this.
-  // My guess - probably to trigger the run of stalled transactions in case
-  // this shard concurrently awoke this transaction and stalled the processing
-  // of TxQueue.
-  shard->PollExecution("unwatchcb", nullptr);
+  unsigned sd_idx = SidToId(shard->shard_id());
+  auto& sd = shard_data_[sd_idx];
+  sd.local_mask |= EXPIRED_Q;
+  sd.local_mask &= ~KEYLOCK_ACQUIRED;
+  shard->blocking_controller()->FinalizeWatched(wkeys, this);
+  DCHECK(!shard->blocking_controller()->awakened_transactions().contains(this));
 
   CHECK_GE(DecreaseRunCnt(), 1u);
 }
