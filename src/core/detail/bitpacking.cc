@@ -125,8 +125,8 @@ bool validate_ascii_fast(const char* src, size_t len) {
 
   int error_mask = 0;
   for (int i = 0; i < 16; i++) {
-    if (has_error[i]) {
-      error_mask |= 1 << i;
+    if (has_error[i] & 0x80) {
+      return false;
     }
   }
 
@@ -134,10 +134,9 @@ bool validate_ascii_fast(const char* src, size_t len) {
   for (; i < len; i++) {
     tail_has_error |= src[i];
   }
-
   error_mask |= (tail_has_error & 0x80);
 
-  return (error_mask < 0x80);
+  return !error_mask;
 }
 #else
 bool validate_ascii_fast(const char* src, size_t len) {
