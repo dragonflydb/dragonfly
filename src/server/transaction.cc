@@ -1102,37 +1102,37 @@ bool Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provi
   DVLOG(2) << "WaitOnWatch " << DebugId();
   using namespace chrono;
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    auto keys = wkeys_provider(t, shard);
-    return t->WatchInShard(keys, shard);
+  auto cb = [&wkeys_provider](Transaction* t, EngineShard* shard) {
+    return t->WatchInShard(wkeys_provider(t, shard), shard);
   };
-
   Execute(move(cb), true);
 
   coordinator_state_ |= COORD_BLOCKED;
+
+  cv_status status = cv_status::no_timeout;
+
+  if (DCHECK_IS_ON() && VLOG_IS_ON(1)) {
+    string time_str = "forever";
+    if (tp != time_point::max())
+      time_str = duration_cast<milliseconds>(tp - time_point::clock::now()).count() + "ms";
+    DVLOG(1) << "WaitOnWatch until: " << time_str << " " << DebugId();
+  }
+
+  auto* stats = ServerState::tl_connection_stats();
+  ++stats->num_blocked_clients;
 
   auto wake_cb = [this] {
     return (coordinator_state_ & COORD_CANCELLED) ||
            wakeup_requested_.load(memory_order_relaxed) > 0;
   };
 
-  auto* stats = ServerState::tl_connection_stats();
-  ++stats->num_blocked_clients;
-
-  cv_status status = cv_status::no_timeout;
   if (tp == time_point::max()) {
-    DVLOG(1) << "WaitOnWatch foreva " << DebugId();
     blocking_ec_.await(move(wake_cb));
-    DVLOG(1) << "WaitOnWatch AfterWait";
   } else {
-    DVLOG(1) << "WaitOnWatch TimeWait for "
-             << duration_cast<milliseconds>(tp - time_point::clock::now()).count() << " ms "
-             << DebugId();
-
     status = blocking_ec_.await_until(move(wake_cb), tp);
-
-    DVLOG(1) << "WaitOnWatch await_until " << int(status);
   }
+
+  DVLOG(1) << "WaitOnWatch wakeup " << int(status);
 
   --stats->num_blocked_clients;
 
