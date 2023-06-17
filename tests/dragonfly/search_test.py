@@ -136,3 +136,50 @@ async def test_knn(async_client: aioredis.Redis, index_type):
     assert await knn_query(i2, "@even:{yes} => [KNN 3 @pos VEC]", [20.0]) == {'k18', 'k20', 'k22'}
 
     assert await knn_query(i2, "@even:{no} => [KNN 4 @pos VEC]", [30.0]) == {'k27', 'k29', 'k31', 'k33'}
+
+    assert await knn_query(i2, "@even:{yes} => [KNN 3 @pos VEC]", [10.0] == {'k8', 'k10', 'k12'})
+
+
+NUM_DIMS = 10
+NUM_POINTS = 100
+
+
+@dfly_args({"proactor_threads": 4})
+@pytest.mark.parametrize("index_type", [IndexType.HASH, IndexType.JSON])
+async def test_multidim_knn(async_client: aioredis.Redis, index_type):
+    vector_field = VectorField("pos", "FLAT", {
+        "TYPE": "FLOAT32",
+        "DIM": NUM_DIMS,
+        "DISTANCE_METRIC": "L2",
+    })
+
+    i3 = async_client.ft("i3-"+str(index_type))
+    await i3.create_index([vector_field], definition=IndexDefinition(index_type=index_type))
+
+    def rand_point():
+        return np.random.uniform(0, 10, NUM_DIMS).astype(np.float32)
+
+    # Generate points and send to DF
+    points = [rand_point()
+              for _ in range(NUM_POINTS)]
+    points = list(enumerate(points))
+
+    pipe = async_client.pipeline(transaction=False)
+    for i, point in points:
+        if index_type == IndexType.HASH:
+            pipe.hset(f"k{i}", mapping={"pos": point.tobytes()})
+        else:
+            pipe.json().set(f"k{i}", "$", {"pos": point.tolist()})
+    await pipe.execute()
+
+    # Run 10 random queries
+    for _ in range(10):
+        center = rand_point()
+        limit = random.randint(1, NUM_POINTS/10)
+
+        expected_ids = [f"k{i}" for i, point in sorted(
+            points, key=lambda p: np.linalg.norm(center - p[1]))[:limit]]
+
+        got_ids = await knn_query(i3, f"* => [KNN {limit} @pos VEC]", center)
+
+        assert set(expected_ids) == set(got_ids)

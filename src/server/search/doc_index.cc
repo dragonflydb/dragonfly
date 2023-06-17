@@ -142,8 +142,6 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     auto it = db_slice.Find(op_args.db_cntx, key, base_->GetObjCode());
     CHECK(it) << "Expected key: " << key << " to exist";
 
-    VLOG(0) << "Fetched " << key;
-
     auto doc_data = GetAccessor(op_args.db_cntx, (*it)->second)->Serialize(base_->schema);
     float score = search_results.knn_distances.empty() ? 0 : search_results.knn_distances[i];
 
