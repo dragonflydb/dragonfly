@@ -12,10 +12,10 @@ index d42d14b7..75647e72 100644
  #define LUAI_MAXSTACK		15000
  #endif
 diff --git a/makefile b/makefile
-index d46e650c..e347e614 100644
+index d46e650c..c27e5677 100644
 --- a/makefile
 +++ b/makefile
-@@ -66,13 +66,23 @@ LOCAL = $(TESTS) $(CWARNS)
+@@ -66,13 +66,25 @@ LOCAL = $(TESTS) $(CWARNS)
 
 
  # enable Linux goodies
@@ -32,6 +32,8 @@ index d46e650c..e347e614 100644
 +OPTFLAGS= -march=sandybridge
 +else ifeq ($(uname_m), aarch64)
 +OPTFLAGS= -march=armv8.2-a+fp16+rcpc+dotprod+crypto
++else ifeq ($(uname_m), s390x)
++OPTFLAGS= -march=native
 +else
 +  $(error ERROR: unknown architecture $(uname_m))
 +endif
