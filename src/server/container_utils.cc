@@ -272,8 +272,7 @@ facade::OpStatus RunCbOnFirstNonEmptyBlocking(BlockingResultCb&& func, std::stri
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     // Close transaction and return.
     if (is_multi) {
-      auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
-      trans->Execute(std::move(cb), true);
+      trans->Conclude();
       return OpStatus::TIMED_OUT;
     }
 
@@ -288,10 +287,7 @@ facade::OpStatus RunCbOnFirstNonEmptyBlocking(BlockingResultCb&& func, std::stri
       return OpStatus::TIMED_OUT;
   } else {
     // Could be the wrong-type error.
-    // cleanups, locks removal etc.
-    auto cb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
-    trans->Execute(std::move(cb), true);
-
+    trans->Conclude();
     DCHECK_NE(result.status(), OpStatus::KEY_NOTFOUND);
     return result.status();
   }

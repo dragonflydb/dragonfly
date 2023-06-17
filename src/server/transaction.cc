@@ -1381,6 +1381,10 @@ void Transaction::BreakOnShutdown() {
   }
 }
 
+void Transaction::Conclude() {
+  Execute([](Transaction*, EngineShard*) { return OpStatus::OK; }, true);
+}
+
 OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
   if (cid->opt_mask() & CO::GLOBAL_TRANS)
     return KeyIndex::Empty();

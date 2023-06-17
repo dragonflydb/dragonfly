@@ -442,8 +442,7 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
   if (!find_res[0] || find_res[1].status() == OpStatus::WRONG_TYPE) {
     result = find_res[0] ? find_res[1] : find_res[0];
     if (conclude_on_error) {
-      auto cb = [&](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
-      trans->Execute(move(cb), true);
+      trans->Conclude();
     }
   } else {
     // Everything is ok, lets proceed with the mutations.

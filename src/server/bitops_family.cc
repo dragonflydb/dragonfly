@@ -498,10 +498,6 @@ template <typename T> void HandleOpValueResult(const OpResult<T>& result, Connec
   }
 }
 
-OpStatus NoOpCb(Transaction* t, EngineShard* shard) {
-  return OpStatus::OK;
-}
-
 // ------------------------------------------------------------------------- //
 //  Impl for the command functions
 void BitPos(CmdArgList args, ConnectionContext* cntx) {
@@ -627,7 +623,7 @@ void BitOp(CmdArgList args, ConnectionContext* cntx) {
   const auto joined_results = CombineResultOp(result_set, op);
   // Second phase - save to targe key if successful
   if (!joined_results) {
-    cntx->transaction->Execute(NoOpCb, true);
+    cntx->transaction->Conclude();
     (*cntx)->SendError(joined_results.status());
     return;
   } else {

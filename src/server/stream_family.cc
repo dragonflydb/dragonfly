@@ -1471,8 +1471,7 @@ void XReadBlock(ReadOpts opts, ConnectionContext* cntx) {
   // entries.
   if (opts.timeout == -1 || cntx->transaction->IsMulti()) {
     // Close the transaction and release locks.
-    auto close_cb = [&](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
-    cntx->transaction->Execute(std::move(close_cb), true);
+    cntx->transaction->Conclude();
     return (*cntx)->SendNullArray();
   }
 
@@ -1541,9 +1540,7 @@ void StreamFamily::XRead(CmdArgList args, ConnectionContext* cntx) {
   auto last_ids = StreamLastIDs(cntx->transaction);
   if (!last_ids) {
     // Close the transaction.
-    auto close_cb = [&](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
-    cntx->transaction->Execute(std::move(close_cb), true);
-
+    cntx->transaction->Conclude();
     if (last_ids.status() == OpStatus::WRONG_TYPE) {
       (*cntx)->SendError(kWrongTypeErr);
       return;

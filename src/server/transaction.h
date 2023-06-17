@@ -188,6 +188,9 @@ class Transaction {
     renabled_auto_journal_.store(true, std::memory_order_relaxed);
   }
 
+  // Conclude with empty hop
+  void Conclude();
+
   // Prepare a squashed hop on given keys.
   void PrepareSquashedMultiHop(const CommandId* cid, CmdArgList keys);
 
