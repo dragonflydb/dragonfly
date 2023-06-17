@@ -1382,6 +1382,7 @@ void Transaction::BreakOnShutdown() {
 }
 
 void Transaction::Conclude() {
+  DCHECK(coordinator_state_ & COORD_SCHED);
   Execute([](Transaction*, EngineShard*) { return OpStatus::OK; }, true);
 }
 

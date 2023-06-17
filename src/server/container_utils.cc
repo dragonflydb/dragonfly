@@ -261,43 +261,47 @@ facade::OpStatus RunCbOnFirstNonEmptyBlocking(BlockingResultCb&& func, std::stri
                                               unsigned limit_ms) {
   auto limit_tp = limit_ms ? std::chrono::steady_clock::now() + std::chrono::milliseconds(limit_ms)
                            : Transaction::time_point::max();
-  bool is_multi = trans->IsMulti();
+
   trans->Schedule();
 
-  ShardFFResult ff_result;
   OpResult<ShardFFResult> result = FindFirstNonEmptyKey(trans, req_obj_type);
 
+  // If a non-empty key is present, handle it immediately
   if (result.ok()) {
-    ff_result = std::move(result.value());
-  } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    // Close transaction and return.
-    if (is_multi) {
-      trans->Conclude();
-      return OpStatus::TIMED_OUT;
-    }
-
-    auto wcb = [](Transaction* t, EngineShard* shard) {
-      return t->GetShardArgs(shard->shard_id());
+    auto cb = [&func, &result, out_key](Transaction* t, EngineShard* shard) {
+      if (shard->shard_id() == result->sid) {
+        result->key.GetString(out_key);
+        func(t, shard, *out_key);
+      }
+      return OpStatus::OK;
     };
+    trans->Execute(std::move(cb), true);
+    return OpStatus::OK;
+  }
 
-    VLOG(1) << "Blocking BLPOP " << trans->DebugId();
-
-    bool wait_succeeded = trans->WaitOnWatch(limit_tp, std::move(wcb));
-    if (!wait_succeeded)
-      return OpStatus::TIMED_OUT;
-  } else {
-    // Could be the wrong-type error.
+  // Handle errors like wrong type
+  if (result.status() != OpStatus::KEY_NOTFOUND) {
     trans->Conclude();
-    DCHECK_NE(result.status(), OpStatus::KEY_NOTFOUND);
     return result.status();
   }
 
-  auto cb = [&func, &ff_result, out_key](Transaction* t, EngineShard* shard) {
+  // Multi times out immediately
+  if (trans->IsMulti()) {
+    trans->Conclude();
+    return OpStatus::TIMED_OUT;
+  }
+
+  VLOG(1) << "Blocking transaction " << trans->DebugId();
+
+  auto wcb = [](Transaction* t, EngineShard* shard) { return t->GetShardArgs(shard->shard_id()); };
+  bool wait_succeeded = trans->WaitOnWatch(limit_tp, std::move(wcb));
+
+  if (!wait_succeeded)
+    return OpStatus::TIMED_OUT;
+
+  auto cb = [&func, out_key](Transaction* t, EngineShard* shard) {
     if (auto wake_key = t->GetWakeKey(shard->shard_id()); wake_key) {
       *out_key = *wake_key;
-      func(t, shard, *out_key);
-    } else if (shard->shard_id() == ff_result.sid) {
-      ff_result.key.GetString(out_key);
       func(t, shard, *out_key);
     }
     return OpStatus::OK;
