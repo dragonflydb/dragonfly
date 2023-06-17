@@ -252,7 +252,7 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> Result {
       return BAD_ARRAYLEN;
     case OK:
       if (len < -1 || len > kMaxArrayLen) {
-        VLOG_IF(1, len > kMaxArrayLen) << "Multi bulk len is too big " << len;
+        LOG_IF(WARNING, len > kMaxArrayLen) << "Multi bulk len is too big " << len;
 
         return BAD_ARRAYLEN;
       }
