@@ -21,7 +21,7 @@ constexpr size_t kSizeConnStats = sizeof(ConnectionStats);
 
 ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   // To break this code deliberately if we add/remove a field to this struct.
-  static_assert(kSizeConnStats == 184);
+  static_assert(kSizeConnStats == 176);
 
   ADD(read_buf_capacity);
   ADD(pipeline_cache_capacity);
@@ -31,7 +31,6 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   ADD(io_write_bytes);
   ADD(command_cnt);
   ADD(pipelined_cmd_cnt);
-  ADD(parser_err_cnt);
   ADD(async_writes_cnt);
   ADD(conn_received_cnt);
   ADD(num_conns);

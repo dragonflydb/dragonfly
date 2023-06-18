@@ -43,18 +43,13 @@ using nonstd::make_unexpected;
 namespace facade {
 namespace {
 
-void SendProtocolError(RedisParser::Result pres, FiberSocketBase* peer) {
+void SendProtocolError(RedisParser::Result pres, SinkReplyBuilder* builder) {
   string res("-ERR Protocol error: ");
   if (pres == RedisParser::BAD_BULKLEN) {
-    res.append("invalid bulk length\r\n");
+    builder->SendProtocolError("invalid bulk length");
   } else {
     CHECK_EQ(RedisParser::BAD_ARRAYLEN, pres);
-    res.append("invalid multibulk length\r\n");
-  }
-
-  error_code ec = peer->Write(::io::Buffer(res));
-  if (ec) {
-    LOG(WARNING) << "Error " << ec;
+    builder->SendProtocolError("invalid multibulk length");
   }
 }
 
@@ -503,20 +498,33 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   // offending request.
   if (parse_status == ERROR) {
     VLOG(1) << "Error parser status " << parser_error_;
-    ++stats_->parser_err_cnt;
 
     if (redis_parser_) {
-      SendProtocolError(RedisParser::Result(parser_error_), peer);
+      SendProtocolError(RedisParser::Result(parser_error_), orig_builder);
     } else {
-      string_view sv{"CLIENT_ERROR bad command line format\r\n"};
-      error_code ec2 = peer->Write(::io::Buffer(sv));
-      if (ec2) {
-        LOG(WARNING) << "Error " << ec2;
-        ec = ec2;
+      DCHECK(memcache_parser_);
+      orig_builder->SendProtocolError("bad command line format");
+    }
+
+    // Shut down the servers side of the socket to send a FIN to the client
+    // then keep draining the socket (discarding any received data) until
+    // the client closes the connection.
+    //
+    // Otherwise the clients write could fail (or block), so they would never
+    // read the above protocol error (see issue #1327).
+    error_code ec2 = peer->Shutdown(SHUT_WR);
+    LOG_IF(WARNING, ec2) << "Could not shutdown socket " << ec2;
+    if (!ec2) {
+      while (true) {
+        // Discard any received data.
+        io_buf_.Clear();
+        if (!peer->Recv(io_buf_.AppendBuffer())) {
+          break;
+        }
       }
     }
-    error_code ec2 = peer->Shutdown(SHUT_RDWR);
-    LOG_IF(WARNING, ec2) << "Could not shutdown socket " << ec2;
+
+    FetchBuilderStats(stats_, orig_builder);
   }
 
   if (ec && !FiberSocketBase::IsConnClosed(ec)) {

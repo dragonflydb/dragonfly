@@ -13,6 +13,7 @@ using namespace std;
 
 namespace {
 
+// When changing this constant, also update `test_large_cmd` test in connection_test.py.
 constexpr int kMaxArrayLen = 65536;
 constexpr int64_t kMaxBulkLen = 64 * (1ul << 20);  // 64MB.
 
@@ -251,7 +252,7 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> Result {
       return BAD_ARRAYLEN;
     case OK:
       if (len < -1 || len > kMaxArrayLen) {
-        VLOG_IF(1, len > kMaxArrayLen) << "Multi bulk len is too big " << len;
+        LOG_IF(WARNING, len > kMaxArrayLen) << "Multi bulk len is too big " << len;
 
         return BAD_ARRAYLEN;
       }
