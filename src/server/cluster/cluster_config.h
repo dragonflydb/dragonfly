@@ -44,8 +44,6 @@ class ClusterConfig {
 
   using ClusterShards = std::vector<ClusterShard>;
 
-  ClusterConfig& operator=(const ClusterConfig&) = default;
-
   static SlotId KeySlot(std::string_view key);
 
   static void EnableCluster() {
