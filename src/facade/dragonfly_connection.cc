@@ -505,8 +505,24 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
       DCHECK(memcache_parser_);
       orig_builder->SendProtocolError("bad command line format");
     }
-    error_code ec2 = peer->Shutdown(SHUT_RDWR);
+
+    // Shut down the servers side of the socket to send a FIN to the client
+    // then keep draining the socket (discarding any received data) until
+    // the client closes the connection.
+    //
+    // Otherwise the clients write could fail (or block), so they would never
+    // read the above protocol error (see issue #1327).
+    error_code ec2 = peer->Shutdown(SHUT_WR);
     LOG_IF(WARNING, ec2) << "Could not shutdown socket " << ec2;
+    if (!ec2) {
+      while (true) {
+        // Discard any received data.
+        io_buf_.Clear();
+        if (!peer->Recv(io_buf_.AppendBuffer())) {
+          break;
+        }
+      }
+    }
 
     FetchBuilderStats(stats_, orig_builder);
   }
