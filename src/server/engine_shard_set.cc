@@ -298,7 +298,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     DCHECK(continuation_trans_ == nullptr)
         << continuation_trans_->DebugId() << " when polling " << trans->DebugId();
 
-    bool keep = trans->RunInShard(this);
+    bool keep = trans->RunInShard(this, false);
     if (keep) {
       return;
     }
@@ -309,7 +309,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
       trans = nullptr;
 
     if (continuation_trans_->IsArmedInShard(sid)) {
-      bool to_keep = continuation_trans_->RunInShard(this);
+      bool to_keep = continuation_trans_->RunInShard(this, false);
       DVLOG(1) << "RunContTrans: " << continuation_trans_->DebugId() << " keep: " << to_keep;
       if (!to_keep) {
         continuation_trans_ = nullptr;
@@ -361,7 +361,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
         dbg_id = head->DebugId();
       }
 
-      bool keep = head->RunInShard(this);
+      bool keep = head->RunInShard(this, false);
 
       // We should not access head from this point since RunInShard callback decrements refcount.
       DLOG_IF(INFO, !dbg_id.empty()) << "RunHead " << dbg_id << ", keep " << keep;
@@ -390,7 +390,14 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     }
     ++stats_.ooo_runs;
 
-    bool keep = trans->RunInShard(this);
+    bool txq_ooo = trans_mask & Transaction::OUT_OF_ORDER;
+    bool keep = trans->RunInShard(this, txq_ooo);
+
+    // If the transaction concluded, it must remove itself from the tx queue.
+    // Otherwise it is required to stay there to keep the relative order.
+    if (txq_ooo && !trans->IsMulti())
+      DCHECK_EQ(keep, trans->GetLocalTxqPos(sid) != TxQueue::kEnd);
+
     DLOG_IF(INFO, !dbg_id.empty()) << "Eager run " << sid << ", " << dbg_id << ", keep " << keep;
   }
 }

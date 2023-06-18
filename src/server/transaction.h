@@ -166,9 +166,11 @@ class Transaction {
   // Can be used only for single key invocations, because it writes a into shared variable.
   template <typename F> auto ScheduleSingleHopT(F&& f) -> decltype(f(this, nullptr));
 
-  // Called by EngineShard when performing Execute over the tx queue.
+  // Called by engine shard to execute a transaction hop.
+  // txq_ooo is set to true if the transaction is running out of order
+  // not as the tx queue head.
   // Returns true if transaction should be kept in the queue.
-  bool RunInShard(EngineShard* shard);
+  bool RunInShard(EngineShard* shard, bool txq_ooo);
 
   // Registers transaction into watched queue and blocks until a) either notification is received.
   // or b) tp is reached. If tp is time_point::max() then waits indefinitely.
@@ -241,6 +243,10 @@ class Transaction {
   // Called from engine set shard threads.
   uint16_t GetLocalMask(ShardId sid) const {
     return shard_data_[SidToId(sid)].local_mask;
+  }
+
+  uint32_t GetLocalTxqPos(ShardId sid) const {
+    return shard_data_[SidToId(sid)].pq_pos;
   }
 
   TxId txid() const {
@@ -365,11 +371,10 @@ class Transaction {
     COORD_SCHED = 1,
     COORD_EXEC = 2,
 
-    // We are running the last execution step in multi-hop operation.
-    COORD_EXEC_CONCLUDING = 4,
-    COORD_BLOCKED = 8,
-    COORD_CANCELLED = 0x10,
-    COORD_OOO = 0x20,
+    COORD_EXEC_CONCLUDING = 1 << 2,  // Whether its the last hop of a transaction
+    COORD_BLOCKED = 1 << 3,
+    COORD_CANCELLED = 1 << 4,
+    COORD_OOO = 1 << 5,
   };
 
   struct PerShardCache {
