@@ -104,6 +104,42 @@ static inline pair<const char*, uint8_t*> simd_variant2_pack(const char* ascii, 
 // See https://github.com/lemire/fastvalidate-utf-8/
 // The function returns true (1) if all chars passed in src are
 // 7-bit values (0x00..0x7F). Otherwise, it returns false (0).
+#ifdef __s390x__
+bool validate_ascii_fast(const char* src, size_t len) {
+  size_t i = 0;
+
+  // Initialize a vector in which all the elements are set to zero.
+  vector unsigned char has_error = vec_splat_s8(0);
+  if (len >= 16) {
+    for (; i <= len - 16; i += 16) {
+      // Load 16 bytes from buffer into a vector.
+      vector unsigned char current_bytes = vec_load_len((signed char*)(src + i), 16);
+      // Perform a bitwise OR operation between the current and the previously loaded contents.
+      has_error = vec_orc(has_error, current_bytes);
+    }
+  }
+
+  // Initialize a vector in which all the elements are set to an invalid ASCII value.
+  vector unsigned char rep_invalid_values = vec_splat_s8(0x80);
+
+  // Perform bitwise AND-complement operation between two vectors.
+  vector unsigned char andc_result = vec_andc(rep_invalid_values, has_error);
+
+  // Tests whether any of corresponding elements of the given vectors are not equal.
+  // After the bitwise operation, both vectors should be equal if ASCII values.
+  if (!vec_all_eq(rep_invalid_values, andc_result)) {
+    return false;
+  }
+
+  for (; i < len; i++) {
+    if (src[i] & 0x80) {
+      return false;
+    }
+  }
+
+  return true;
+}
+#else
 bool validate_ascii_fast(const char* src, size_t len) {
   size_t i = 0;
   __m128i has_error = _mm_setzero_si128();
@@ -123,6 +159,7 @@ bool validate_ascii_fast(const char* src, size_t len) {
 
   return !error_mask;
 }
+#endif
 
 // len must be at least 16
 void ascii_pack(const char* ascii, size_t len, uint8_t* bin) {

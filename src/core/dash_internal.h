@@ -879,6 +879,34 @@ unsigned BucketBase<NUM_SLOTS, NUM_OVR>::UnsetStashPtr(uint8_t fp_hash, unsigned
   return res;
 }
 
+#ifdef __s390x__
+template <unsigned NUM_SLOTS, unsigned NUM_OVR>
+uint32_t BucketBase<NUM_SLOTS, NUM_OVR>::CompareFP(uint8_t fp) const {
+  static_assert(FpArray{}.size() <= 16);
+  vector unsigned char v1;
+
+  // Replicate 16 times fp to key_data.
+  for (int i = 0; i < 16; i++) {
+    v1[i] = fp;
+  }
+
+  // Loads 16 bytes of src into seg_data.
+  vector unsigned char v2 = vec_load_len(finger_arr_.data(), 16);
+
+  // compare 1-byte vectors seg_data and key_data, dst[i] := ( a[i] == b[i] ) ? 0xFF : 0.
+  vector bool char rv_mask = vec_cmpeq(v1, v2);
+
+  // collapses 16 msb bits from each byte in rv_mask into mask.
+  int mask = 0;
+  for (int i = 0; i < 16; i++) {
+    if (rv_mask[i]) {
+      mask |= 1 << i;
+    }
+  }
+
+  return mask;
+}
+#else
 template <unsigned NUM_SLOTS, unsigned NUM_OVR>
 uint32_t BucketBase<NUM_SLOTS, NUM_OVR>::CompareFP(uint8_t fp) const {
   static_assert(FpArray{}.size() <= 16);
@@ -898,6 +926,7 @@ uint32_t BucketBase<NUM_SLOTS, NUM_OVR>::CompareFP(uint8_t fp) const {
   // Note: Last 2 operations can be combined in skylake with _mm_cmpeq_epi8_mask.
   return mask;
 }
+#endif
 
 // Bucket slot array goes from left to right: [x, x, ...]
 // Shift right vacates the first slot on the left by shifting all the elements right and
