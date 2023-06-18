@@ -1156,6 +1156,7 @@ OpStatus Transaction::WatchInShard(ArgSlice keys, EngineShard* shard) {
   bc->AddWatched(keys, this);
 
   sd.local_mask |= SUSPENDED_Q;
+  sd.local_mask &= ~OUT_OF_ORDER;
   DVLOG(2) << "AddWatched " << DebugId() << " local_mask:" << sd.local_mask
            << ", first_key:" << keys.front();
 
