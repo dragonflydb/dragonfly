@@ -215,7 +215,7 @@ def move(args):
             if from_range["start"] > from_range["end"]:
                 from_shard["slot_ranges"].remove(from_range)
         else:
-            assert slot > from_range["start"] and slot < from_range["end"]
+            assert slot > from_range["start"] and slot < from_range["end"], f'{slot} {from_range["start"]} {from_range["end"]}'
             from_shard["slot_ranges"].append(
                 {"start": slot + 1, "end": from_range["end"]})
             from_range["end"] = slot - 1
@@ -235,9 +235,8 @@ def move(args):
             if shard == new_owner:
                 continue
             for slot_range in shard["slot_ranges"]:
-                for slot in range(slot_range["start"], slot_range["end"] + 1):
-                    if slot >= args.slot_start and slot <= args.slot_end:
-                        return shard, slot_range
+                if slot >= slot_range["start"] and slot <= slot_range["end"]:
+                    return shard, slot_range
         return None, None
 
     def pack(slot_ranges):
@@ -254,7 +253,6 @@ def move(args):
             continue
         if shard == new_owner:
             continue
-        print(f"moving slot {slot} to {new_owner['master']['id']}")
         remove_slot(slot, slot_range, shard)
         add_slot(slot, new_owner)
 
