@@ -1,9 +1,10 @@
 import os
 import pytest
 import redis
+import asyncio
 from redis import asyncio as aioredis
 
-from . import dfly_multi_test_args
+from . import dfly_multi_test_args, dfly_args
 from .utility import batch_fill_data, gen_test_data
 
 
@@ -48,3 +49,32 @@ async def test_password(df_local_factory, export_dfly_password):
     client = aioredis.Redis(password=requirepass)
     await client.ping()
     dfly.stop()
+
+
+"""
+Make sure that multi-hop transactions can't run OOO.
+"""
+
+MULTI_HOPS = """
+for i = 0, ARGV[1] do
+  redis.call('INCR', KEYS[1])
+end
+"""
+
+@dfly_args({"proactor_threads": 1})
+async def test_txq_ooo(async_client: aioredis.Redis, df_server):
+    async def task1(k, h):
+        c = aioredis.Redis(port=df_server.port)
+        for _ in range(100):
+            await c.eval(MULTI_HOPS, 1, k, h)
+
+    async def task2(k, n):
+        c = aioredis.Redis(port=df_server.port)
+        for _ in range(100):
+            pipe = c.pipeline(transaction=False)
+            pipe.lpush(k, 1)
+            for _ in range(n):
+                pipe.blpop(k, 0.001)
+            await pipe.execute()
+
+    await asyncio.gather(task1('i1', 2), task1('i2', 3), task2('l1', 2), task2('l1', 2), task2('l1', 5))
