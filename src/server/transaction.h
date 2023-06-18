@@ -245,6 +245,10 @@ class Transaction {
     return shard_data_[SidToId(sid)].local_mask;
   }
 
+  uint32_t GetLocalTxqPos(ShardId sid) const {
+    return shard_data_[SidToId(sid)].pq_pos;
+  }
+
   TxId txid() const {
     return txid_;
   }
