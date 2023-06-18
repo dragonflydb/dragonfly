@@ -329,15 +329,15 @@ class Transaction {
     char pad[46];  // to make sure PerShardData is 64 bytes and takes full cacheline.
 
     uint32_t arg_start = 0;  // Indices into args_ array.
-    uint16_t arg_count = 0;
-
-    // Accessed within shard thread.
-    // Bitmask of LocalState enums.
-    uint16_t local_mask = 0;
+    uint32_t arg_count = 0;
 
     // Needed to rollback inconsistent schedulings or remove OOO transactions from
     // tx queue.
     uint32_t pq_pos = TxQueue::kEnd;
+
+    // Accessed within shard thread.
+    // Bitmask of LocalState enums.
+    uint16_t local_mask = 0;
 
     // Index of key relative to args in shard that the shard was woken up after blocking wait.
     uint16_t wake_key_pos = UINT16_MAX;

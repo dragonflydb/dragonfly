@@ -44,7 +44,6 @@ struct ConnectionStats {
   size_t io_write_bytes = 0;
   uint64_t command_cnt = 0;
   uint64_t pipelined_cmd_cnt = 0;
-  uint64_t parser_err_cnt = 0;
 
   // Writes count that happened via DispatchOperations call.
   uint64_t async_writes_cnt = 0;

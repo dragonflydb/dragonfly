@@ -80,7 +80,7 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
         args=request.config.getoption("--df"),
         existing_port=int(existing) if existing else None,
         existing_admin_port=int(existing_admin) if existing_admin else None,
-        existing_mc_port=int(existing_mc) if existing else None,
+        existing_mc_port=int(existing_mc) if existing_mc else None,
         env=test_env
     )
 

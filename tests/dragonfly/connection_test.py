@@ -4,7 +4,8 @@ import asyncio
 from redis import asyncio as aioredis
 import async_timeout
 
-from . import DflyInstance
+from . import DflyInstance, dfly_args
+
 
 async def run_monitor_eval(monitor, expected):
     async with monitor as mon:
@@ -346,7 +347,8 @@ async def test_subscribe_in_pipeline(async_client: aioredis.Redis):
     pipe.echo("three")
     res = await pipe.execute()
 
-    assert res == ['one', ['subscribe', 'ch1', 1], 'two', ['subscribe', 'ch2', 2], 'three']
+    assert res == ['one', ['subscribe', 'ch1', 1],
+                   'two', ['subscribe', 'ch2', 2], 'three']
 
 """
 This test makes sure that Dragonfly can receive blocks of pipelined commands even
@@ -376,6 +378,7 @@ PACKET3 = """
 PING
 """ * 500 + "ECHO DONE\n"
 
+
 async def test_parser_while_script_running(async_client: aioredis.Redis, df_server: DflyInstance):
     sha = await async_client.script_load(BUSY_SCRIPT)
 
@@ -399,3 +402,16 @@ async def test_parser_while_script_running(async_client: aioredis.Redis, df_serv
     await reader.readuntil(b"DONE")
     writer.close()
     await writer.wait_closed()
+
+
+@dfly_args({"proactor_threads": 1})
+async def test_large_cmd(async_client: aioredis.Redis):
+    MAX_ARR_SIZE = 65535
+    res = await async_client.hset('foo', mapping={f"key{i}": f"val{i}" for i in range(MAX_ARR_SIZE // 2)})
+    assert res == MAX_ARR_SIZE // 2
+
+    res = await async_client.mset({f"key{i}": f"val{i}" for i in range(MAX_ARR_SIZE // 2)})
+    assert res
+
+    res = await async_client.mget([f"key{i}" for i in range(MAX_ARR_SIZE)])
+    assert len(res) == MAX_ARR_SIZE

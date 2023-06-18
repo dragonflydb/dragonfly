@@ -54,7 +54,7 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   }
 
   // Allow batching with up to 8K of data.
-  if ((should_batch_ || should_aggregate_) && batch_.size() + bsize < kMaxBatchSize) {
+  if ((should_batch_ || should_aggregate_) && (batch_.size() + bsize < kMaxBatchSize)) {
     for (unsigned i = 0; i < len; ++i) {
       std::string_view src((char*)v[i].iov_base, v[i].iov_len);
       DVLOG(2) << "Appending to stream " << src;
@@ -71,7 +71,7 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   if (batch_.empty()) {
     ec = sink_->Write(v, len);
   } else {
-    DVLOG(1) << "Sending batch to stream " << sink_ << "\n" << batch_;
+    DVLOG(2) << "Sending batch to stream " << sink_ << "\n" << batch_;
 
     io_write_bytes_ += batch_.size();
 
@@ -162,6 +162,10 @@ void MCReplyBuilder::SendError(string_view str, std::string_view type) {
   SendSimpleString("ERROR");
 }
 
+void MCReplyBuilder::SendProtocolError(std::string_view str) {
+  SendSimpleString(absl::StrCat("CLIENT_ERROR ", str));
+}
+
 void MCReplyBuilder::SendClientError(string_view str) {
   iovec v[] = {IoVec("CLIENT_ERROR "), IoVec(str), IoVec(kCRLF)};
   Send(v, ABSL_ARRAYSIZE(v));
@@ -197,6 +201,8 @@ void RedisReplyBuilder::SetResp3(bool is_resp3) {
 }
 
 void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
+  VLOG(1) << "Error: " << str;
+
   if (err_type.empty()) {
     err_type = str;
     if (err_type == kSyntaxErr)
@@ -212,6 +218,10 @@ void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
     iovec v[] = {IoVec(kErrPref), IoVec(str), IoVec(kCRLF)};
     Send(v, ABSL_ARRAYSIZE(v));
   }
+}
+
+void RedisReplyBuilder::SendProtocolError(std::string_view str) {
+  SendError(absl::StrCat("-ERR Protocol error: ", str), "protocol_error");
 }
 
 void RedisReplyBuilder::SendSimpleString(std::string_view str) {
@@ -483,7 +493,7 @@ void RedisReplyBuilder::SendStringArrInternal(WrappedStrSpan arr, CollectionType
 }
 
 void ReqSerializer::SendCommand(std::string_view str) {
-  VLOG(1) << "SendCommand: " << str;
+  VLOG(2) << "SendCommand: " << str;
 
   iovec v[] = {IoVec(str), IoVec(kCRLF)};
   ec_ = sink_->Write(v, ABSL_ARRAYSIZE(v));
