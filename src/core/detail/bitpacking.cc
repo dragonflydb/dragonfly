@@ -7,11 +7,7 @@
 #include <absl/base/internal/endian.h>
 
 #include "base/logging.h"
-#ifdef __s390x__
-#include <vecintrin.h>
-#else
 #include "core/sse_port.h"
-#endif
 
 using namespace std;
 

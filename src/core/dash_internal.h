@@ -13,11 +13,7 @@
 #include <cstring>
 #include <functional>
 
-#ifdef __s390x__
-#include <vecintrin.h>
-#else
 #include "core/sse_port.h"
-#endif
 
 namespace dfly {
 namespace detail {
