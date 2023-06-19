@@ -684,6 +684,17 @@ TEST_F(ClusterFamilyTest, ClusterFirstConfigCallDropsEntriesNotOwnedByNode) {
   ExpectConditionWithinTimeout([&]() { return CheckedInt({"dbsize"}) == 0; });
 }
 
+TEST_F(ClusterFamilyTest, Keyslot) {
+  // Example from Redis' command reference: https://redis.io/commands/cluster-keyslot/
+  EXPECT_THAT(Run({"cluster", "keyslot", "somekey"}), IntArg(11'058));
+
+  // Test hash tags
+  EXPECT_THAT(Run({"cluster", "keyslot", "prefix{somekey}suffix"}), IntArg(11'058));
+
+  EXPECT_EQ(CheckedInt({"cluster", "keyslot", "abc{def}ghi"}),
+            CheckedInt({"cluster", "keyslot", "123{def}456"}));
+}
+
 class ClusterFamilyEmulatedTest : public BaseFamilyTest {
  public:
   ClusterFamilyEmulatedTest() {

@@ -36,6 +36,8 @@ class ClusterFamily {
   void ClusterNodes(ConnectionContext* cntx);
   void ClusterInfo(ConnectionContext* cntx);
 
+  void KeySlot(CmdArgList args, ConnectionContext* cntx);
+
   void ReadOnly(CmdArgList args, ConnectionContext* cntx);
   void ReadWrite(CmdArgList args, ConnectionContext* cntx);
 
