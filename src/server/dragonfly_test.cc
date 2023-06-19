@@ -605,6 +605,10 @@ TEST_F(DflyEngineTest, Issue752) {
   ASSERT_THAT(resp.GetVec(), ElementsAre(IntArg(0), IntArg(0)));
 }
 
+TEST_F(DflyEngineTest, Latency) {
+  Run({"latency", "latest"});
+}
+
 // TODO: to test transactions with a single shard since then all transactions become local.
 // To consider having a parameter in dragonfly engine controlling number of shards
 // unconditionally from number of cpus. TO TEST BLPOP under multi for single/multi argument case.
