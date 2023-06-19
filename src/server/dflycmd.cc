@@ -244,8 +244,8 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
 
   // Set meta info on connection.
   cntx->owner()->SetName(absl::StrCat("repl_flow_", sync_id));
-  cntx->conn_state.replicaiton_info.repl_session_id = sync_id;
-  cntx->conn_state.replicaiton_info.repl_flow_id = flow_id;
+  cntx->conn_state.replication_info.repl_session_id = sync_id;
+  cntx->conn_state.replication_info.repl_flow_id = flow_id;
 
   absl::InsecureBitGen gen;
   string eof_token = GetRandomHex(gen, 40);
@@ -471,7 +471,7 @@ auto DflyCmd::CreateSyncSession(ConnectionContext* cntx)
   };
 
   string address = cntx->owner()->RemoteEndpointAddress();
-  uint32_t port = cntx->conn_state.replicaiton_info.repl_listening_port;
+  uint32_t port = cntx->conn_state.replication_info.repl_listening_port;
 
   LOG(INFO) << "Registered replica " << address << ":" << port;
 
@@ -484,7 +484,7 @@ auto DflyCmd::CreateSyncSession(ConnectionContext* cntx)
 }
 
 void DflyCmd::OnClose(ConnectionContext* cntx) {
-  unsigned session_id = cntx->conn_state.replicaiton_info.repl_session_id;
+  unsigned session_id = cntx->conn_state.replication_info.repl_session_id;
   if (!session_id)
     return;
 

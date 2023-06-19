@@ -130,9 +130,10 @@ struct ConnectionState {
   // For set op - it's the flag value we are storing along with the value.
   // For get op - we use it as a mask of MCGetMask values.
   uint32_t memcache_flag = 0;
+  bool is_blocking = false;  // whether this connection is blocking on a command
 
   ExecInfo exec_info;
-  ReplicationInfo replicaiton_info;
+  ReplicationInfo replication_info;
 
   std::unique_ptr<ScriptInfo> script_info;
   std::unique_ptr<SubscribeInfo> subscribe_info;
@@ -173,11 +174,15 @@ class ConnectionContext : public facade::ConnectionContext {
   void ChangeMonitor(bool start);  // either start or stop monitor on a given connection
 
   // Whether this connection is a connection from a replica to its master.
+  // This flag is true only on replica side, where we need to setup a special ConnectionContext
+  // instance that helps applying commands coming from master.
   bool is_replicating = false;
-  // Reference to a FlowInfo for this connection if from a master to a replica.
-  FlowInfo* replication_flow;
+
   bool monitor = false;  // when a monitor command is sent over a given connection, we need to aware
                          // of it as a state for the connection
+
+  // Reference to a FlowInfo for this connection if from a master to a replica.
+  FlowInfo* replication_flow;
 
  private:
   void EnableMonitoring(bool enable) {

@@ -89,9 +89,8 @@ struct ShardFFResult {
 OpResult<ShardFFResult> FindFirstNonEmptyKey(Transaction* trans, int req_obj_type);
 
 using BlockingResultCb = std::function<void(Transaction*, EngineShard*, std::string_view)>;
-facade::OpStatus RunCbOnFirstNonEmptyBlocking(BlockingResultCb&& cb, std::string* out_key,
-                                              Transaction* trans, int req_obj_type,
-                                              unsigned limit_ms);
+OpResult<std::string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,
+                                                   BlockingResultCb cb, unsigned limit_ms);
 
 };  // namespace container_utils
 

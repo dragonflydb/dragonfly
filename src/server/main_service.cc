@@ -1844,11 +1844,19 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
 string Service::GetContextInfo(facade::ConnectionContext* cntx) {
   char buf[16] = {0};
   unsigned index = 0;
-  if (cntx->async_dispatch)
+  ConnectionContext* server_cntx = static_cast<ConnectionContext*>(cntx);
+
+  if (server_cntx->async_dispatch)
     buf[index++] = 'a';
 
-  if (cntx->conn_closing)
+  if (server_cntx->conn_closing)
     buf[index++] = 't';
+
+  if (server_cntx->conn_state.subscribe_info)
+    buf[index++] = 'P';
+
+  if (server_cntx->conn_state.is_blocking)
+    buf[index++] = 'b';
 
   return index ? absl::StrCat("flags:", buf) : string();
 }

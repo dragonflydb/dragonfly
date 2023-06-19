@@ -256,9 +256,8 @@ OpResult<ShardFFResult> FindFirstNonEmptyKey(Transaction* trans, int req_obj_typ
 }
 
 // If OK is returned then cb was called on the first non empty key and `out_key` is set to the key.
-facade::OpStatus RunCbOnFirstNonEmptyBlocking(BlockingResultCb&& func, std::string* out_key,
-                                              Transaction* trans, int req_obj_type,
-                                              unsigned limit_ms) {
+OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,
+                                              BlockingResultCb func, unsigned limit_ms) {
   auto limit_tp = limit_ms ? std::chrono::steady_clock::now() + std::chrono::milliseconds(limit_ms)
                            : Transaction::time_point::max();
   bool is_multi = trans->IsMulti();
@@ -296,19 +295,20 @@ facade::OpStatus RunCbOnFirstNonEmptyBlocking(BlockingResultCb&& func, std::stri
     return result.status();
   }
 
-  auto cb = [&func, &ff_result, out_key](Transaction* t, EngineShard* shard) {
+  string result_key;
+  auto cb = [&](Transaction* t, EngineShard* shard) {
     if (auto wake_key = t->GetWakeKey(shard->shard_id()); wake_key) {
-      *out_key = *wake_key;
-      func(t, shard, *out_key);
+      result_key = *wake_key;
+      func(t, shard, result_key);
     } else if (shard->shard_id() == ff_result.sid) {
-      ff_result.key.GetString(out_key);
-      func(t, shard, *out_key);
+      ff_result.key.GetString(&result_key);
+      func(t, shard, result_key);
     }
     return OpStatus::OK;
   };
   trans->Execute(std::move(cb), true);
 
-  return OpStatus::OK;
+  return result_key;
 }
 
 }  // namespace dfly::container_utils
