@@ -196,6 +196,9 @@ void BlockingController::FinalizeWatched(ArgSlice args, Transaction* tx) {
 }
 
 void BlockingController::NotifyPending() {
+  const Transaction* tx = owner_->GetContTx();
+  CHECK(tx == nullptr) << tx->DebugId();
+
   DbContext context;
   context.time_now_ms = GetCurrentTimeMs();
 

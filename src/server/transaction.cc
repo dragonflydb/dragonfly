@@ -527,11 +527,14 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
     // 2: if this transaction was notified and finished running - to remove it from the head
     //    of the queue and notify the next one.
     // RunStep is also called for global transactions because of commands like MOVE.
-    if (shard->blocking_controller()) {
+    if (auto* bcontroller = shard->blocking_controller(); bcontroller) {
       if (awaked_prerun || was_suspended) {
-        shard->blocking_controller()->FinalizeWatched(largs, this);
+        bcontroller->FinalizeWatched(largs, this);
       }
-      shard->blocking_controller()->NotifyPending();
+      // Transactions that wake blocked keys can only run via tx queue to maintain strict order
+      if (shard->GetContTx() == nullptr) {
+        bcontroller->NotifyPending();
+      }
     }
   }
 
@@ -1234,10 +1237,10 @@ void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, E
 
   shard->ShutdownMulti(this);
 
-  // notify awakened transactions, not sure we need it here because it's done after
-  // each operation
-  if (shard->blocking_controller())
+  // Notify pending blocking transactions only if we wan via txq
+  if (shard->GetContTx() == nullptr)
     shard->blocking_controller()->NotifyPending();
+
   shard->PollExecution("unlockmulti", nullptr);
 
   this->DecreaseRunCnt();

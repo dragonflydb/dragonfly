@@ -153,6 +153,10 @@ class EngineShard {
     return is_replica_;
   }
 
+  const Transaction* GetContTx() const {
+    return continuation_trans_;
+  }
+
   void TEST_EnableHeartbeat();
 
  private:
