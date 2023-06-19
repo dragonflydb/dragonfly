@@ -1200,29 +1200,30 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
 
   absl::StrAppend(debugMessages.Next(), "BPopGeneric by ", transaction->DebugId());
 
-  std::string popped_key, popped_value;
+  std::string popped_value;
   auto cb = [dir, &popped_value](Transaction* t, EngineShard* shard, std::string_view key) {
     popped_value = OpBPop(t, shard, key, dir);
   };
 
-  OpStatus result = container_utils::RunCbOnFirstNonEmptyBlocking(
-      cb, &popped_key, transaction, OBJ_LIST, unsigned(timeout * 1000));
-
-  if (result == OpStatus::OK) {
+  cntx->conn_state.is_blocking = true;
+  OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
+      transaction, OBJ_LIST, move(cb), unsigned(timeout * 1000));
+  cntx->conn_state.is_blocking = false;
+  if (popped_key) {
     DVLOG(1) << "BPop " << transaction->DebugId() << " popped from key " << popped_key;  // key.
-    std::string_view str_arr[2] = {popped_key, popped_value};
+    std::string_view str_arr[2] = {*popped_key, popped_value};
     return (*cntx)->SendStringArr(str_arr);
   }
 
-  DVLOG(1) << "result for " << transaction->DebugId() << " is " << result;
+  DVLOG(1) << "result for " << transaction->DebugId() << " is " << popped_key.status();
 
-  switch (result) {
+  switch (popped_key.status()) {
     case OpStatus::WRONG_TYPE:
       return (*cntx)->SendError(kWrongTypeErr);
     case OpStatus::TIMED_OUT:
       return (*cntx)->SendNullArray();
     default:
-      LOG(ERROR) << "Unexpected error " << result;
+      LOG(ERROR) << "Unexpected error " << popped_key.status();
   }
   return (*cntx)->SendNullArray();
 }

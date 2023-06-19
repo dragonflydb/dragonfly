@@ -1171,32 +1171,34 @@ void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
   VLOG(1) << "BZPop timeout(" << timeout << ")";
 
   Transaction* transaction = cntx->transaction;
-  std::string popped_key;
   OpResult<ZSetFamily::ScoredArray> popped_array;
-  OpStatus result = container_utils::RunCbOnFirstNonEmptyBlocking(
+  cntx->conn_state.is_blocking = true;
+  OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
+      transaction, OBJ_ZSET,
       [is_max, &popped_array](Transaction* t, EngineShard* shard, std::string_view key) {
         popped_array = OpBZPop(t, shard, key, is_max);
       },
-      &popped_key, transaction, OBJ_ZSET, unsigned(timeout * 1000));
+      unsigned(timeout * 1000));
+  cntx->conn_state.is_blocking = false;
 
-  if (result == OpStatus::OK) {
+  if (popped_key) {
     DVLOG(1) << "BZPop " << transaction->DebugId() << " popped from key " << popped_key;  // key.
     CHECK(popped_array->size() == 1);
     (*cntx)->StartArray(3);
-    (*cntx)->SendBulkString(popped_key);
+    (*cntx)->SendBulkString(*popped_key);
     (*cntx)->SendBulkString(popped_array->front().first);
     return (*cntx)->SendDouble(popped_array->front().second);
   }
 
-  DVLOG(1) << "result for " << transaction->DebugId() << " is " << result;
+  DVLOG(1) << "result for " << transaction->DebugId() << " is " << popped_key.status();
 
-  switch (result) {
+  switch (popped_key.status()) {
     case OpStatus::WRONG_TYPE:
       return (*cntx)->SendError(kWrongTypeErr);
     case OpStatus::TIMED_OUT:
       return (*cntx)->SendNullArray();
     default:
-      LOG(ERROR) << "Unexpected error " << result;
+      LOG(ERROR) << "Unexpected error " << popped_key.status();
   }
   return (*cntx)->SendNullArray();
 }

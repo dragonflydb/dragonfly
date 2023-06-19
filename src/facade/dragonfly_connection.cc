@@ -528,7 +528,9 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   }
 
   if (ec && !FiberSocketBase::IsConnClosed(ec)) {
-    LOG(WARNING) << "Socket error " << ec << " " << ec.message();
+    string conn_info = service_->GetContextInfo(cc_.get());
+    LOG(WARNING) << "Socket error for connection " << conn_info << " " << GetName() << ": " << ec
+                 << " " << ec.message();
   }
 
   --stats_->num_conns;
