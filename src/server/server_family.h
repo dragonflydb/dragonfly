@@ -39,6 +39,13 @@ class DflyCmd;
 class Service;
 class ScriptMgr;
 
+struct ReplicaRoleInfo {
+  std::string address;
+  uint32_t listening_port;
+  std::string_view state;
+  uint64_t lsn_lag;
+};
+
 struct Metrics {
   std::vector<DbStats> db;
   SliceEvents events;

@@ -924,7 +924,7 @@ async def assert_lag_condition(inst, client, condition):
         if condition(lag):
             break
         print("current prometheus lag =", lag)
-        time.sleep(0.05)
+        await asyncio.sleep(0.05)
     else:
         assert False, "Lag from prometheus metrics has never satisfied condition!"
     for _ in range(10):
@@ -932,7 +932,7 @@ async def assert_lag_condition(inst, client, condition):
         if condition(lag):
             break
         print("current lag =", lag)
-        time.sleep(0.05)
+        await asyncio.sleep(0.05)
     else:
         assert False, "Lag has never satisfied condition!"
 

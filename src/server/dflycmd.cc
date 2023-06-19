@@ -49,6 +49,20 @@ bool ToSyncId(string_view str, uint32_t* num) {
   return absl::SimpleAtoi(str, num);
 }
 
+std::string_view SyncStateName(DflyCmd::SyncState sync_state) {
+  switch (sync_state) {
+    case DflyCmd::SyncState::PREPARATION:
+      return "preparation";
+    case DflyCmd::SyncState::FULL_SYNC:
+      return "full_sync";
+    case DflyCmd::SyncState::STABLE_SYNC:
+      return "stable_sync";
+    case DflyCmd::SyncState::CANCELLED:
+      return "cancelled";
+  }
+  LOG(FATAL) << "Unspported state " << int(sync_state);
+}
+
 struct TransactionGuard {
   constexpr static auto kEmptyCb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
 
@@ -64,20 +78,6 @@ struct TransactionGuard {
   Transaction* t;
 };
 }  // namespace
-
-std::string_view DflyCmd::SyncStateName(DflyCmd::SyncState sync_state) {
-  switch (sync_state) {
-    case DflyCmd::SyncState::PREPARATION:
-      return "preparation";
-    case DflyCmd::SyncState::FULL_SYNC:
-      return "full_sync";
-    case DflyCmd::SyncState::STABLE_SYNC:
-      return "stable_sync";
-    case DflyCmd::SyncState::CANCELLED:
-      return "cancelled";
-  }
-  LOG(FATAL) << "Unspported state " << int(sync_state);
-}
 
 DflyCmd::DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family)
     : sf_(server_family), listener_(listener) {

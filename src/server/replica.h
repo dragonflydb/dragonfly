@@ -28,13 +28,6 @@ class ConnectionContext;
 class JournalExecutor;
 struct JournalReader;
 
-struct ReplicaRoleInfo {
-  std::string address;
-  uint32_t listening_port;
-  std::string_view state;
-  uint64_t lsn_lag;
-};
-
 class Replica {
  private:
   // The attributes of the master we are connecting to.
