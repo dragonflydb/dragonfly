@@ -132,7 +132,7 @@ void ReplyWithResults(const SearchParams& params, absl::Span<SearchResult> resul
   (*cntx)->SendLong(total_count);
 
   size_t sent = 0;
-  size_t to_skip = 0;
+  size_t to_skip = params.limit_offset;
   for (const auto& shard_docs : results) {
     for (const auto& serialized_doc : shard_docs.docs) {
       // Scoring is not implemented yet, so we just cut them in the order they were retrieved

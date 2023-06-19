@@ -4,6 +4,9 @@
 
 #include "server/search/doc_accessors.h"
 
+#include <absl/strings/str_cat.h>
+#include <absl/strings/str_join.h>
+
 #include <jsoncons/json.hpp>
 
 #include "core/json_object.h"
@@ -27,13 +30,7 @@ string_view SdsToSafeSv(sds str) {
 }
 
 string FtVectorToString(const search::FtVector& vec) {
-  string out = "[";
-  for (float v : vec)
-    absl::StrAppend(&out, v, ",");
-  if (out.size() > 1)
-    out.pop_back();
-  absl::StrAppend(&out, "]");
-  return out;
+  return absl::StrCat("[", absl::StrJoin(vec, ","), "]");
 }
 
 }  // namespace
