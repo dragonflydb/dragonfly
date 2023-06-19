@@ -461,13 +461,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
     before = tl_cluster_config->GetOwnedSlots();
   }
 
-  auto cb = [&](util::ProactorBase* pb) {
-    if (tl_cluster_config == nullptr) {
-      tl_cluster_config = new_config;
-    } else {
-      *tl_cluster_config = *new_config;
-    }
-  };
+  auto cb = [&](util::ProactorBase* pb) { tl_cluster_config = new_config; };
   server_family_->service().proactor_pool().AwaitFiberOnAll(std::move(cb));
 
   DCHECK(tl_cluster_config != nullptr);

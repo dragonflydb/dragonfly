@@ -103,13 +103,13 @@ bool IsConfigValid(const ClusterConfig::ClusterShards& new_config) {
 }  // namespace
 
 /* static */
-unique_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
+shared_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
                                                           const ClusterShards& config) {
   if (!IsConfigValid(config)) {
     return nullptr;
   }
 
-  unique_ptr<ClusterConfig> result(new ClusterConfig());
+  shared_ptr<ClusterConfig> result(new ClusterConfig());
 
   result->config_ = config;
 
@@ -254,7 +254,7 @@ optional<ClusterConfig::ClusterShards> BuildClusterConfigFromJson(const JsonType
 }  // namespace
 
 /* static */
-unique_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
+shared_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
                                                           const JsonType& json_config) {
   optional<ClusterShards> config = BuildClusterConfigFromJson(json_config);
   if (!config.has_value()) {

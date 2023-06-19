@@ -44,8 +44,6 @@ class ClusterConfig {
 
   using ClusterShards = std::vector<ClusterShard>;
 
-  ClusterConfig& operator=(const ClusterConfig&) = default;
-
   static SlotId KeySlot(std::string_view key);
 
   static void EnableCluster() {
@@ -61,11 +59,11 @@ class ClusterConfig {
 
   // Returns an instance with `config` if it is valid.
   // Returns heap-allocated object as it is too big for a stack frame.
-  static std::unique_ptr<ClusterConfig> CreateFromConfig(std::string_view my_id,
+  static std::shared_ptr<ClusterConfig> CreateFromConfig(std::string_view my_id,
                                                          const ClusterShards& config);
 
   // Parses `json_config` into `ClusterShards` and calls the above overload.
-  static std::unique_ptr<ClusterConfig> CreateFromConfig(std::string_view my_id,
+  static std::shared_ptr<ClusterConfig> CreateFromConfig(std::string_view my_id,
                                                          const JsonType& json_config);
 
   // If key is in my slots ownership return true
