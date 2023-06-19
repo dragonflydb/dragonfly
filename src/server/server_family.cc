@@ -2041,7 +2041,7 @@ void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::Latency(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
-  string_view sub_cmd = ArgS(args, 01);
+  string_view sub_cmd = ArgS(args, 0);
 
   if (sub_cmd == "LATEST") {
     return (*cntx)->SendEmptyArray();
