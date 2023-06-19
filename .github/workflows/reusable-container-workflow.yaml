@@ -164,7 +164,8 @@ jobs:
             cache-from: type=gha
             cache-to: type=gha,mode=max
 
-      - name: Test Docker run
+      - if: ${{ hashFiles(format('{0}-{1}', matrix.dockerfile, inputs.build_type)) }}
+        name: Test Docker run
         run: |
           # docker run with port-forwarding
           # install redis-tools
