@@ -1,0 +1,107 @@
+name: Daily Coverage
+
+on:
+    pull_request:
+        branches: [main]
+    # TODO: Remove this. This is for testing
+    schedule:
+      - cron: '0 6 * * *' # run at 6 AM UTC
+    workflow_dispatch:
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-python@v3
+      - name: Install dependencies
+        run: |
+          python -m pip install pre-commit
+          python -m pip freeze --local
+      - uses: actions/cache@v3
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit|${{ env.pythonLocation }}|${{ hashFiles('.pre-commit-config.yaml') }}
+      - name: Run pre-commit checks
+        run: pre-commit run --show-diff-on-failure --color=always --from-ref HEAD^ --to-ref HEAD
+        shell: bash
+  build:
+    # The CMake configure and build commands are platform agnostic and should work equally
+    # well on Windows or Mac.  You can convert this to a matrix build if you need
+    # cross-platform coverage.
+    # See: https://docs.github.com/en/free-pro-team@latest/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
+    runs-on: ubuntu-latest
+    outputs:
+      cov: ${{ steps.cov_gen.outputs.path }}
+    strategy:
+      matrix:
+        include:
+          - container: "ubuntu-dev:20"
+            build-type: Release
+            compiler: {cxx: g++, c: gcc}
+            cxx_flags: "-fprofile-arcs -ftest-coverage"
+    timeout-minutes: 60
+    container:
+      image: ghcr.io/romange/${{ matrix.container }}
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: Install dependencies
+        run: |
+          uname -a
+          cmake --version
+          mkdir -p ${{github.workspace}}/build
+          apt update && apt install -y lcov pip
+      - name: Cache build deps
+        id: cache-deps
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.ccache
+            ${{github.workspace}}/build/_deps
+          key: ${{ runner.os }}-deps-${{ github.base_ref }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-deps-${{ github.base_ref }}-
+
+      - name: Configure CMake
+        run: |
+          pip install -r tests/dragonfly/requirements.txt
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=${{matrix.build-type}} \
+            -GNinja \
+            -DCMAKE_C_COMPILER="${{matrix.compiler.c}}" \
+            -DCMAKE_CXX_COMPILER="${{matrix.compiler.cxx}}" \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}}" \
+            -L
+          pwd
+          cd build && pwd
+      - name: Build & Test Coverage
+        run: |
+          cd $GITHUB_WORKSPACE/build
+          ninja
+
+          ninja test
+
+          export DRAGONFLY_PATH=`pwd`/dragonfly
+          pytest ../tests/dragonfly/
+
+          lcov -c -d . -o main_coverage.info
+          lcov --remove main_coverage.info -o main_coverage.info '/usr/*' '*/_deps/*' '*/third_party/*'
+          genhtml main_coverage.info --ignore-errors source --output-directory covout -p $GITHUB_WORKSPACE
+          ls ./
+          echo ls covout
+          ls covout/
+      - name: Upload coverage
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage-report
+          path: build/covout/
+          if-no-files-found: error
