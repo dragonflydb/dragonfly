@@ -110,10 +110,6 @@ void TagIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
 }
 
 void VectorIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
-  auto v = doc->GetVector(field);
-  string vs;
-  for (auto vv : v)
-    vs = absl::StrCat(vs, vv);
   entries_[id] = doc->GetVector(field);
 }
 

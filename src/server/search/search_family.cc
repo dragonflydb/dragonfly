@@ -158,8 +158,8 @@ void ReplyKnn(size_t knn_limit, const SearchParams& params, absl::Span<SearchRes
     }
   }
 
-  partial_sort(docs.begin(), docs.end(),
-               docs.begin() + min(params.limit_offset + params.limit_total, knn_limit),
+  partial_sort(docs.begin(),
+               docs.begin() + min(params.limit_offset + params.limit_total, knn_limit), docs.end(),
                [](const auto* l, const auto* r) { return l->knn_distance < r->knn_distance; });
   docs.resize(min(docs.size(), knn_limit));
 

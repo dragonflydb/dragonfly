@@ -401,6 +401,18 @@ TEST_F(SearchParserTest, Simple2dKnn) {
     algo.Init("* => [KNN 10 @pos VEC]", QueryParams{FtVector{0, 0}});
     EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 3, 4));
   }
+
+  // Test correct order: (0.7, 0.15)
+  {
+    algo.Init("* => [KNN 10 @pos VEC]", QueryParams{FtVector{0.7, 0.15}});
+    EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(1, 4, 0, 2, 3));
+  }
+
+  // Test correct order: (0.8, 0.9)
+  {
+    algo.Init("* => [KNN 10 @pos VEC]", QueryParams{FtVector{0.8, 0.9}});
+    EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(2, 4, 3, 1, 0));
+  }
 }
 
 }  // namespace search
