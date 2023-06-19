@@ -594,6 +594,20 @@ struct AggregateLoadResult {
   std::atomic<size_t> keys_read;
 };
 
+template <typename T> class OnScopeExit {
+ public:
+  explicit OnScopeExit(T&& f) : fun(move(f)) {
+  }
+  OnScopeExit(const OnScopeExit&) = delete;
+  OnScopeExit(const OnScopeExit&&) = delete;
+  ~OnScopeExit() {
+    fun();
+  };
+
+ private:
+  T fun;
+};
+
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
@@ -984,9 +998,14 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
 // Run callback for all active RdbSnapshots (passed as index).
 // .dfs format contains always `shard_set->size() + 1` snapshots (for every shard and summary
 // file).
-static void RunStage(bool new_version, std::function<void(unsigned)> cb) {
+static void RunStage(
+    bool new_version, std::function<void(unsigned)> cb,
+    std::function<void(EngineShard*)> maybe_reset_events = []([[maybe_unused]] auto*) {}) {
   if (new_version) {
-    shard_set->RunBlockingInParallel([&](EngineShard* es) { cb(es->shard_id()); });
+    shard_set->RunBlockingInParallel([&](EngineShard* es) {
+      cb(es->shard_id());
+      maybe_reset_events(es);
+    });
     cb(shard_set->size());
   } else {
     cb(0);
@@ -1171,7 +1190,9 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
 
   is_saving_.store(false, memory_order_relaxed);
 
-  RunStage(new_version, close_cb);
+  auto reset_event_cb = [](EngineShard* es) { es->db_slice().ResetUpdateEvents(); };
+
+  RunStage(new_version, close_cb, reset_event_cb);
 
   if (new_version) {
     ExtendDfsFilename("summary", &fpath);
@@ -1625,10 +1646,13 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("last_save", save_info->save_time);
     append("last_save_duration_sec", save_info->duration_sec);
     append("last_save_file", save_info->file_name);
+    size_t is_loading = service_.GetGlobalState() == GlobalState::LOADING;
+    append("loading", is_loading);
 
     for (const auto& k_v : save_info->freq_map) {
       append(StrCat("rdb_", k_v.first), k_v.second);
     }
+    append("rdb_changes_since_last_save", m.events.update);
   }
 
   if (should_enter("REPLICATION")) {

@@ -85,6 +85,8 @@ class Service : public facade::ServiceInterface {
   // Upon switch, updates cached global state in threadlocal ServerState struct.
   GlobalState SwitchState(GlobalState from, GlobalState to);
 
+  GlobalState GetGlobalState() const;
+
   void ConfigureHttpHandlers(util::HttpListenerBase* base) final;
   void OnClose(facade::ConnectionContext* cntx) final;
   std::string GetContextInfo(facade::ConnectionContext* cntx) final;

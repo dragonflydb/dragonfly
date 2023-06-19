@@ -1806,6 +1806,11 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
   return to;
 }
 
+GlobalState Service::GetGlobalState() const {
+  lock_guard lk(mu_);
+  return global_state_;
+}
+
 void Service::ConfigureHttpHandlers(util::HttpListenerBase* base) {
   server_family_.ConfigureMetrics(base);
   base->RegisterCb("/txz", TxTable);

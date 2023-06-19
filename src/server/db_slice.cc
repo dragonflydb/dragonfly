@@ -215,7 +215,7 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 80, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 88, "You should update this function with new fields");
 
   ADD(evicted_keys);
   ADD(hard_evictions);
@@ -227,6 +227,7 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
   ADD(hits);
   ADD(misses);
   ADD(insertion_rejections);
+  ADD(update);
 
   return *this;
 }
@@ -873,6 +874,8 @@ void DbSlice::PostUpdate(DbIndex db_ind, PrimeIterator it, std::string_view key,
     }
   }
 
+  ++events_.update;
+
   if (ClusterConfig::IsClusterEnabled()) {
     db.slots_stats[ClusterConfig::KeySlot(key)].total_writes += 1;
   }
@@ -1141,6 +1144,10 @@ void DbSlice::InvalidateSlotWatches(const SlotSet& slot_ids) {
 
 void DbSlice::SetDocDeletionCallback(DocDeletionCallback ddcb) {
   doc_del_cb_ = move(ddcb);
+}
+
+void DbSlice::ResetUpdateEvents() {
+  events_.update = 0;
 }
 
 }  // namespace dfly
