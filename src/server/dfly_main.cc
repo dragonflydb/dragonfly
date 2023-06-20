@@ -82,6 +82,7 @@ ABSL_FLAG(string, pidfile, "", "If not empty - server writes its pid into the fi
 ABSL_FLAG(string, unixsocket, "",
           "If not empty - specifies path for the Unis socket that will "
           "be used for listening for incoming connections.");
+ABSL_FLAG(string, unixsocketperm, "", "Set permissions for unixsocket, in octal value.");
 ABSL_FLAG(bool, force_epoll, false,
           "If true - uses linux epoll engine underneath."
           "Can fit for kernels older than 5.10.");
@@ -323,13 +324,28 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   auto port = GetFlag(FLAGS_port);
   auto mc_port = GetFlag(FLAGS_memcache_port);
   string unix_sock = GetFlag(FLAGS_unixsocket);
+  mode_t unix_socket_perm;
+  string perm_str = GetFlag(FLAGS_unixsocketperm);
+  if (perm_str.empty()) {
+    // get umask of running process.
+    mode_t umask_val = umask(0);
+    umask(umask_val);
+    unix_socket_perm = 0777 & ~umask_val;
+  } else {
+    if (!absl::numbers_internal::safe_strtoi_base(perm_str, &unix_socket_perm, 8) ||
+        unix_socket_perm > 0777) {
+      LOG(ERROR) << "Invalid unixsocketperm: " << perm_str;
+      exit(1);
+    }
+  }
+
   bool unlink_uds = false;
 
   if (!unix_sock.empty()) {
     unlink(unix_sock.c_str());
 
     Listener* uds_listener = new Listener{Protocol::REDIS, &service};
-    error_code ec = acceptor->AddUDSListener(unix_sock.c_str(), uds_listener);
+    error_code ec = acceptor->AddUDSListener(unix_sock.c_str(), unix_socket_perm, uds_listener);
     if (ec) {
       if (tcp_disabled) {
         LOG(ERROR) << "Could not open unix socket " << unix_sock
