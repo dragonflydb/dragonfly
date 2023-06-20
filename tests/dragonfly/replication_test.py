@@ -446,6 +446,7 @@ async def test_flushall(df_local_factory):
 
     master.start()
     replica.start()
+    assert 1 == 2
 
     # Connect replica to master
     c_replica = aioredis.Redis(port=replica.port)
@@ -967,7 +968,8 @@ async def test_flushall_in_full_sync(df_local_factory, df_seeder_factory):
     c_master = aioredis.Redis(port=master.port)
 
     # Fill master with test data
-    seeder = df_seeder_factory.create(port=master.port, keys=100_000, dbcount=1)
+    seeder = df_seeder_factory.create(
+        port=master.port, keys=100_000, dbcount=1)
     await seeder.run(target_deviation=0.1)
 
     # Start replica
@@ -992,7 +994,8 @@ async def test_flushall_in_full_sync(df_local_factory, df_seeder_factory):
     await c_master.execute_command("FLUSHALL")
 
     if not await is_full_sync_mode(c_replica):
-        logging.error("!!! Full sync finished too fast. Adjust test parameters !!!")
+        logging.error(
+            "!!! Full sync finished too fast. Adjust test parameters !!!")
         return
 
     post_seeder = df_seeder_factory.create(
