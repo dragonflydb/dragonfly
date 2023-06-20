@@ -68,7 +68,7 @@ struct ConnectionState {
       return state == EXEC_COLLECT;
     }
 
-    bool IsRunning() {
+    bool IsRunning() const {
       return state == EXEC_RUNNING;
     }
 
