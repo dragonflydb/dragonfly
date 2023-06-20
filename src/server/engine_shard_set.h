@@ -99,7 +99,8 @@ class EngineShard {
   }
 
   // TODO: Awkward interface. I should solve it somehow.
-  void ShutdownMulti(Transaction* multi);
+  // Remove current continuation trans if its equal to tx.
+  void RemoveContTx(Transaction* tx);
 
   void IncQuickRun() {
     stats_.quick_runs++;

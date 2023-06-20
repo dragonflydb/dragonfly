@@ -402,8 +402,8 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   }
 }
 
-void EngineShard::ShutdownMulti(Transaction* multi) {
-  if (continuation_trans_ == multi) {
+void EngineShard::RemoveContTx(Transaction* tx) {
+  if (continuation_trans_ == tx) {
     continuation_trans_ = nullptr;
   }
 }

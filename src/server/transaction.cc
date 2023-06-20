@@ -522,6 +522,8 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
       sd.local_mask &= ~OUT_OF_ORDER;
     }
 
+    shard->RemoveContTx(this);
+
     // It has 2 responsibilities.
     // 1: to go over potential wakened keys, verify them and activate watch queues.
     // 2: if this transaction was notified and finished running - to remove it from the head
@@ -531,7 +533,8 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
       if (awaked_prerun || was_suspended) {
         bcontroller->FinalizeWatched(largs, this);
       }
-      // Transactions that wake blocked keys can only run via tx queue to maintain strict order
+
+      // Wake only if no tx queue head is currently running
       if (shard->GetContTx() == nullptr) {
         bcontroller->NotifyPending();
       }
@@ -1235,10 +1238,10 @@ void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, E
     sd.pq_pos = TxQueue::kEnd;
   }
 
-  shard->ShutdownMulti(this);
+  shard->RemoveContTx(this);
 
-  // Notify pending blocking transactions only if we wan via txq
-  if (shard->GetContTx() == nullptr)
+  // Wake only if no tx queue head is currently running
+  if (shard->blocking_controller() && shard->GetContTx() == nullptr)
     shard->blocking_controller()->NotifyPending();
 
   shard->PollExecution("unlockmulti", nullptr);
