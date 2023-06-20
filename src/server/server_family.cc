@@ -594,20 +594,6 @@ struct AggregateLoadResult {
   std::atomic<size_t> keys_read;
 };
 
-template <typename T> class OnScopeExit {
- public:
-  explicit OnScopeExit(T&& f) : fun(move(f)) {
-  }
-  OnScopeExit(const OnScopeExit&) = delete;
-  OnScopeExit(const OnScopeExit&&) = delete;
-  ~OnScopeExit() {
-    fun();
-  };
-
- private:
-  T fun;
-};
-
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
