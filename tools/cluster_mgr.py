@@ -215,7 +215,8 @@ def move(args):
             if from_range["start"] > from_range["end"]:
                 from_shard["slot_ranges"].remove(from_range)
         else:
-            assert slot > from_range["start"] and slot < from_range["end"], f'{slot} {from_range["start"]} {from_range["end"]}'
+            assert slot > from_range["start"] and slot < from_range[
+                "end"], f'{slot} {from_range["start"]} {from_range["end"]}'
             from_shard["slot_ranges"].append(
                 {"start": slot + 1, "end": from_range["end"]})
             from_range["end"] = slot - 1
@@ -240,12 +241,26 @@ def move(args):
         return None, None
 
     def pack(slot_ranges):
-        for slot_range in slot_ranges:
-            for other_slot_range in slot_ranges:
-                if slot_range["end"] + 1 == other_slot_range["start"]:
-                    slot_range["end"] = other_slot_range["end"]
-                    slot_ranges.remove(other_slot_range)
-                    break
+        new_range = []
+        while True:
+            changed = False
+            new_range = []
+            slot_ranges.sort(key=lambda x: x["start"])
+            for i, slot_range in enumerate(slot_ranges):
+                added = False
+                for j in range(i):
+                    prev_slot_range = slot_ranges[j]
+                    if prev_slot_range["end"] + 1 == slot_range["start"]:
+                        prev_slot_range["end"] = slot_range["end"]
+                        changed = True
+                        added = True
+                        break
+                if not added:
+                    new_range.append(slot_range)
+            slot_ranges = new_range
+            if not changed:
+                break
+        return new_range
 
     for slot in range(args.slot_start, args.slot_end+1):
         shard, slot_range = find_slot(slot, config)
@@ -257,7 +272,7 @@ def move(args):
         add_slot(slot, new_owner)
 
     for shard in config:
-        pack(shard["slot_ranges"])
+        shard["slot_ranges"] = pack(shard["slot_ranges"])
 
     print(f'Pushing new config:\n{json.dumps(config, indent=2)}\n')
     push_config(config)
@@ -268,7 +283,7 @@ def print_config(args):
     print(json.dumps(config, indent=2))
 
 
-def destroy(args):
+def shutdown(args):
     config = build_config_from_existing(args)
     for node in get_nodes_from_config(config):
         send_command(node, ["shutdown"])
@@ -311,14 +326,11 @@ Connect to cluster and move slots 10-20 to master with port 7002:
                         "[--slot_start, --slot_end]")
     args = parser.parse_args()
 
-    if (args.action == 'create'):
-        create(args)
-    elif (args.action == 'shutdown'):
-        destroy(args)
-    elif (args.action == 'move'):
-        move(args)
-    elif (args.action == 'print'):
-        print_config(args)
+    actions = {'create': create, 'shutdown': shutdown,
+               'move': move, 'print': print_config}
+    action = actions.get(args.action.lower())
+    if (action):
+        action(args)
     else:
         print(f'Error - unknown action "{args.action}"')
         exit(-1)
