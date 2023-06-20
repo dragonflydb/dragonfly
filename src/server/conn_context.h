@@ -64,7 +64,7 @@ struct ConnectionState {
     // ExecInfo is immovable due to being referenced from DbSlice.
     ExecInfo(ExecInfo&&) = delete;
 
-    bool IsCollecting() {
+    bool IsCollecting() const {
       return state == EXEC_COLLECT;
     }
 
