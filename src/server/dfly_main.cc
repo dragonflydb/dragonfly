@@ -18,6 +18,7 @@
 #include <openssl/err.h>
 #include <signal.h>
 
+#include <iostream>
 #include <regex>
 
 #include "base/init.h"
@@ -609,7 +610,20 @@ void sigill_hdlr(int signo) {
   exit(1);
 }
 
+void print_basic_usage_info() {
+  std::cout << "* Default logdir is: \"/tmp/\". It can be overwritten with flag --log_dir=[path]\n";
+  std::cout << "* Logfile name format is: ";
+  std::cout << "dragonfly.[machine_name].[user_name].[WARNING|INFO|ERROR].[date and time]\n";
+  std::cout << "* For usage info flags type dragonfly [--help | --helpfull]\n";
+  const string df_website = "https://www.dragonflydb.io/";
+  std::cout << "* You can read more about dragonflydb at: " << df_website << '\n';
+  const string df_docs = "https://www.dragonflydb.io/docs";
+  std::cout << "* Documentation can be found at: " << df_docs;
+  std::cout << endl;
+}
+
 int main(int argc, char* argv[]) {
+  print_basic_usage_info();
   absl::SetProgramUsageMessage(
       R"(a modern in-memory store.
 
