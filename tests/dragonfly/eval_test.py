@@ -222,3 +222,20 @@ async def test_eval_error_propagation(async_client):
         except aioredis.RedisError as e:
             if not does_abort:
                 assert False, "Error should have been ignored: " + cmd
+
+
+@dfly_args({"proactor_threads": 1, "default_lua_flags": "allow-undeclared-keys"})
+async def test_global_eval_in_multi(async_client: aioredis.Redis):
+    GLOBAL_SCRIPT = """
+        return redis.call('GET', 'any-key');
+    """
+
+    await async_client.set('any-key', 'works')
+
+    pipe = async_client.pipeline(transaction=True)
+    pipe.set('another-key', 'ok')
+    pipe.eval(GLOBAL_SCRIPT, 0)
+    res = await pipe.execute()
+
+    print(res)
+    assert res[1] == 'works'
