@@ -522,6 +522,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
       sd.local_mask &= ~OUT_OF_ORDER;
     }
 
+    // This is the last hop, so clear cont_trans if its held by the current tx
     shard->RemoveContTx(this);
 
     // It has 2 responsibilities.
@@ -535,6 +536,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
       }
 
       // Wake only if no tx queue head is currently running
+      // Note: RemoveContTx might have no effect above if this tx had no continuations
       if (shard->GetContTx() == nullptr) {
         bcontroller->NotifyPending();
       }

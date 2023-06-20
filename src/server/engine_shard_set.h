@@ -98,7 +98,6 @@ class EngineShard {
     return &shard_lock_;
   }
 
-  // TODO: Awkward interface. I should solve it somehow.
   // Remove current continuation trans if its equal to tx.
   void RemoveContTx(Transaction* tx);
 
