@@ -23,14 +23,21 @@ struct QueryParams {
   FtVector knn_vec;
 };
 
+// Interface for accessing document values with different data structures underneath.
+struct DocumentAccessor {
+  virtual ~DocumentAccessor() = default;
+  virtual std::string_view GetString(std::string_view active_field) const = 0;
+  virtual FtVector GetVector(std::string_view active_field) const = 0;
+};
+
 // Base class for type-specific indices.
 //
 // Queries should be done directly on subclasses with their distinc
 // query functions. All results for all index types should be sorted.
 struct BaseIndex {
   virtual ~BaseIndex() = default;
-  virtual void Add(DocId doc, std::string_view value) = 0;
-  virtual void Remove(DocId doc, std::string_view value) = 0;
+  virtual void Add(DocId id, DocumentAccessor* doc, std::string_view field) = 0;
+  virtual void Remove(DocId id, DocumentAccessor* doc, std::string_view field) = 0;
 };
 
 }  // namespace dfly::search

@@ -34,9 +34,20 @@ struct MockedDocument : public DocumentAccessor {
   MockedDocument(std::string test_field) : fields_{{"field", test_field}} {
   }
 
-  string_view Get(string_view field) const override {
+  string_view GetString(string_view field) const override {
     auto it = fields_.find(field);
     return it != fields_.end() ? string_view{it->second} : "";
+  }
+
+  FtVector GetVector(string_view field) const override {
+    string_view str_value = fields_.at(field);
+    FtVector out;
+    for (string_view coord : absl::StrSplit(str_value, ',')) {
+      float v;
+      CHECK(absl::SimpleAtof(coord, &v));
+      out.push_back(v);
+    }
+    return out;
   }
 
   string DebugFormat() {
@@ -104,11 +115,11 @@ class SearchParserTest : public ::testing::Test {
 
     auto matched = search_algo.Search(&index);
 
-    if (!is_sorted(matched.begin(), matched.end()))
+    if (!is_sorted(matched.ids.begin(), matched.ids.end()))
       LOG(FATAL) << "Search result is not sorted";
 
     for (DocId i = 0; i < entries_.size(); i++) {
-      bool doc_matched = binary_search(matched.begin(), matched.end(), i);
+      bool doc_matched = binary_search(matched.ids.begin(), matched.ids.end(), i);
       if (doc_matched != entries_[i].second) {
         error_ = "doc: \"" + entries_[i].first.DebugFormat() + "\"" + " was expected" +
                  (entries_[i].second ? "" : " not") + " to match" + " query: \"" + query_ + "\"";
@@ -320,31 +331,31 @@ TEST_F(SearchParserTest, SimpleKnn) {
   // Five closest to 50
   {
     algo.Init("*=>[KNN 5 @pos VEC]", QueryParams{FtVector{50.0}});
-    EXPECT_THAT(algo.Search(&indices), testing::ElementsAre(48, 49, 50, 51, 52));
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(48, 49, 50, 51, 52));
   }
 
   // Five closest to 0
   {
     algo.Init("*=>[KNN 5 @pos VEC]", QueryParams{FtVector{0.0}});
-    EXPECT_THAT(algo.Search(&indices), testing::ElementsAre(0, 1, 2, 3, 4));
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 3, 4));
   }
 
   // Five closest to 20, all even
   {
     algo.Init("@even:{yes} =>[KNN 5 @pos VEC]", QueryParams{FtVector{20.0}});
-    EXPECT_THAT(algo.Search(&indices), testing::ElementsAre(16, 18, 20, 22, 24));
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(16, 18, 20, 22, 24));
   }
 
   // Three closest to 31, all odd
   {
     algo.Init("@even:{no} =>[KNN 3 @pos VEC]", QueryParams{FtVector{31.0}});
-    EXPECT_THAT(algo.Search(&indices), testing::ElementsAre(29, 31, 33));
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(29, 31, 33));
   }
 
   // Two closest to 70.5
   {
     algo.Init("* =>[KNN 2 @pos VEC]", QueryParams{FtVector{70.5}});
-    EXPECT_THAT(algo.Search(&indices), testing::ElementsAre(70, 71));
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(70, 71));
   }
 }
 
@@ -370,25 +381,37 @@ TEST_F(SearchParserTest, Simple2dKnn) {
   // Single center
   {
     algo.Init("* =>[KNN 1 @pos VEC]", QueryParams{FtVector{0.5, 0.5}});
-    EXPECT_THAT(algo.Search(&indices), testing::ElementsAre(4));
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(4));
   }
 
   // Lower left
   {
     algo.Init("* =>[KNN 4 @pos VEC]", QueryParams{FtVector{0, 0}});
-    EXPECT_THAT(algo.Search(&indices), testing::ElementsAre(0, 1, 3, 4));
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 3, 4));
   }
 
   // Upper right
   {
     algo.Init("* =>[KNN 4 @pos VEC]", QueryParams{FtVector{1, 1}});
-    EXPECT_THAT(algo.Search(&indices), testing::ElementsAre(1, 2, 3, 4));
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 2, 3, 4));
   }
 
   // Request more than there is
   {
     algo.Init("* => [KNN 10 @pos VEC]", QueryParams{FtVector{0, 0}});
-    EXPECT_THAT(algo.Search(&indices), testing::ElementsAre(0, 1, 2, 3, 4));
+    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 3, 4));
+  }
+
+  // Test correct order: (0.7, 0.15)
+  {
+    algo.Init("* => [KNN 10 @pos VEC]", QueryParams{FtVector{0.7, 0.15}});
+    EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(1, 4, 0, 2, 3));
+  }
+
+  // Test correct order: (0.8, 0.9)
+  {
+    algo.Init("* => [KNN 10 @pos VEC]", QueryParams{FtVector{0.8, 0.9}});
+    EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(2, 4, 3, 1, 0));
   }
 }
 
