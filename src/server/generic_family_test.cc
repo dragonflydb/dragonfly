@@ -540,4 +540,44 @@ TEST_F(GenericFamilyTest, Restore) {
   EXPECT_EQ(CheckedInt({"ttl", "string-key"}), -1);
 }
 
+TEST_F(GenericFamilyTest, Info) {
+  auto get_rdb_changes_since_last_save = [](const string& str) -> size_t {
+    const string matcher = "rdb_changes_since_last_save:";
+    const auto pos = str.find(matcher) + matcher.size();
+    const auto sub = str.substr(pos, 1);
+    return atoi(sub.c_str());
+  };
+  auto resp = Run({"set", "k", "1"});
+  resp = Run({"info", "persistence"});
+  EXPECT_EQ(1, get_rdb_changes_since_last_save(resp.GetString()));
+
+  resp = Run({"set", "k", "1"});
+  resp = Run({"info", "persistence"});
+  EXPECT_EQ(2, get_rdb_changes_since_last_save(resp.GetString()));
+
+  resp = Run({"set", "k2", "2"});
+  resp = Run({"info", "persistence"});
+  EXPECT_EQ(3, get_rdb_changes_since_last_save(resp.GetString()));
+
+  resp = Run({"save"});
+  resp = Run({"info", "persistence"});
+  EXPECT_EQ(0, get_rdb_changes_since_last_save(resp.GetString()));
+
+  resp = Run({"set", "k2", "2"});
+  resp = Run({"info", "persistence"});
+  EXPECT_EQ(1, get_rdb_changes_since_last_save(resp.GetString()));
+
+  resp = Run({"bgsave"});
+  resp = Run({"info", "persistence"});
+  EXPECT_EQ(0, get_rdb_changes_since_last_save(resp.GetString()));
+
+  resp = Run({"set", "k3", "3"});
+  resp = Run({"info", "persistence"});
+  EXPECT_EQ(1, get_rdb_changes_since_last_save(resp.GetString()));
+
+  resp = Run({"del", "k3"});
+  resp = Run({"info", "persistence"});
+  EXPECT_EQ(1, get_rdb_changes_since_last_save(resp.GetString()));
+}
+
 }  // namespace dfly

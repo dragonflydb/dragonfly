@@ -51,6 +51,9 @@ struct SliceEvents {
   // how many insertions were rejected due to OOM.
   size_t insertion_rejections = 0;
 
+  // how many updates and insertions of keys between snapshot intervals
+  size_t update = 0;
+
   SliceEvents& operator+=(const SliceEvents& o);
 };
 
@@ -317,6 +320,9 @@ class DbSlice {
   void UnregisterConnectionWatches(ConnectionState::ExecInfo* exec_info);
 
   void SetDocDeletionCallback(DocDeletionCallback ddcb);
+
+  // Resets the event counter for updates/insertions
+  void ResetUpdateEvents();
 
  private:
   std::pair<PrimeIterator, bool> AddOrUpdateInternal(const Context& cntx, std::string_view key,

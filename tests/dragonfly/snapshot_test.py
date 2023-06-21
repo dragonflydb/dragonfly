@@ -191,3 +191,35 @@ class TestDflySnapshotOnShutdown(SnapshotTestBase):
         await a_client.connection_pool.disconnect()
 
         assert await seeder.compare(start_capture)
+
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-info-persistence"})
+class TestDflyInfoPersistenceLoadingField(SnapshotTestBase):
+    """Test is_loading field on INFO PERSISTENCE during snapshot loading"""
+    @pytest.fixture(autouse=True)
+    def setup(self, tmp_dir: Path):
+        self.tmp_dir = tmp_dir
+
+    def extract_is_loading_field(self, res):
+        matcher = b'loading:'
+        start = res.find(matcher)
+        pos = start + len(matcher)
+        return chr(res[pos])
+
+    @pytest.mark.asyncio
+    async def test_snapshot(self, df_seeder_factory, df_server):
+        seeder = df_seeder_factory.create(port=df_server.port, **SEEDER_ARGS)
+        await seeder.run(target_deviation=0.1)
+
+        df_server.stop()
+        df_server.start()
+
+        a_client = aioredis.Redis(port=df_server.port)
+        res = await a_client.execute_command("INFO PERSISTENCE")
+        assert '1' == self.extract_is_loading_field(res)
+
+        #Wait for snapshot to finish loading and retry INFO PERSISTENCE
+        await wait_available_async(a_client)
+        res = await a_client.execute_command("INFO PERSISTENCE")
+        assert '0' == self.extract_is_loading_field(res)
+
+        await a_client.connection_pool.disconnect()
