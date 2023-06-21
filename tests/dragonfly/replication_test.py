@@ -446,7 +446,6 @@ async def test_flushall(df_local_factory):
 
     master.start()
     replica.start()
-    assert 1 == 2
 
     # Connect replica to master
     c_replica = aioredis.Redis(port=replica.port)
