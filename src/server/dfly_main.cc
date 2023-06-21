@@ -326,6 +326,7 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   string unix_sock = GetFlag(FLAGS_unixsocket);
   mode_t unix_socket_perm;
   string perm_str = GetFlag(FLAGS_unixsocketperm);
+  bool unlink_uds = false;
   if (!unix_sock.empty()) {
     if (perm_str.empty()) {
       // get umask of running process, indicates the permission bits that are turned off
@@ -339,11 +340,6 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
         exit(1);
       }
     }
-  }
-
-  bool unlink_uds = false;
-
-  if (!unix_sock.empty()) {
     unlink(unix_sock.c_str());
 
     Listener* uds_listener = new Listener{Protocol::REDIS, &service};
