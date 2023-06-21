@@ -61,6 +61,9 @@ ABSL_FLAG(string, save_schedule, "",
           "glob spec for the UTC time to save a snapshot which matches HH:MM 24h time");
 ABSL_FLAG(bool, df_snapshot_format, true,
           "if true, save in dragonfly-specific snapshotting format");
+ABSL_FLAG(int, epoll_file_threads, 0,
+          "thread size for file workers when running in epoll mode, default is hardware concurrent "
+          "threads");
 
 ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
@@ -500,7 +503,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
-    fq_threadpool_.reset(new FiberQueueThreadPool());
+    fq_threadpool_.reset(new FiberQueueThreadPool(absl::GetFlag(FLAGS_epoll_file_threads)));
   }
 
   // Unlike EngineShard::Heartbeat that runs independently in each shard thread,
