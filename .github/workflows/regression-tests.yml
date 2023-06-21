@@ -80,9 +80,9 @@ jobs:
           # report file and if exist we get the failed test from the pytest run, if there are any.
           if [ -f rep2_report.json ]; then
             failed_tests=$(get_failed_tests rep2_report.json)
-          elif [-f rep1_report.json ]; then
+          elif [ -f rep1_report.json ]; then
             failed_tests=$(get_failed_tests rep1_report.json)
-          elif [-f pytest_report.json ]; then
+          elif [ -f pytest_report.json ]; then
             failed_tests=$(get_failed_tests pytest_report.json)
           fi
           curl -s \
