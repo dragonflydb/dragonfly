@@ -522,16 +522,24 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
       sd.local_mask &= ~OUT_OF_ORDER;
     }
 
+    // This is the last hop, so clear cont_trans if its held by the current tx
+    shard->RemoveContTx(this);
+
     // It has 2 responsibilities.
     // 1: to go over potential wakened keys, verify them and activate watch queues.
     // 2: if this transaction was notified and finished running - to remove it from the head
     //    of the queue and notify the next one.
     // RunStep is also called for global transactions because of commands like MOVE.
-    if (shard->blocking_controller()) {
+    if (auto* bcontroller = shard->blocking_controller(); bcontroller) {
       if (awaked_prerun || was_suspended) {
-        shard->blocking_controller()->FinalizeWatched(largs, this);
+        bcontroller->FinalizeWatched(largs, this);
       }
-      shard->blocking_controller()->NotifyPending();
+
+      // Wake only if no tx queue head is currently running
+      // Note: RemoveContTx might have no effect above if this tx had no continuations
+      if (shard->GetContTx() == nullptr) {
+        bcontroller->NotifyPending();
+      }
     }
   }
 
@@ -1232,12 +1240,12 @@ void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, E
     sd.pq_pos = TxQueue::kEnd;
   }
 
-  shard->ShutdownMulti(this);
+  shard->RemoveContTx(this);
 
-  // notify awakened transactions, not sure we need it here because it's done after
-  // each operation
-  if (shard->blocking_controller())
+  // Wake only if no tx queue head is currently running
+  if (shard->blocking_controller() && shard->GetContTx() == nullptr)
     shard->blocking_controller()->NotifyPending();
+
   shard->PollExecution("unlockmulti", nullptr);
 
   this->DecreaseRunCnt();
