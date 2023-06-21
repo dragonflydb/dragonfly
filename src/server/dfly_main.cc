@@ -300,6 +300,21 @@ string NormalizePaths(std::string_view path) {
   return string(path);
 }
 
+bool StoiOctalBase(string str, int* out) {
+  size_t pos;
+  try {
+    *out = std::stoi(str, &pos, 8);
+  } catch (const std::invalid_argument&) {
+    return false;
+  } catch (const std::out_of_range&) {
+    return false;
+  }
+  if (pos != str.size()) {
+    return false;
+  }
+  return true;
+}
+
 bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   auto maxmemory = GetFlag(FLAGS_maxmemory).value;
   if (maxmemory > 0 && maxmemory < pool->size() * 256_MB) {
@@ -332,11 +347,12 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     umask(umask_val);
     unix_socket_perm = 0777 & ~umask_val;
   } else {
-    if (!absl::numbers_internal::safe_strtoi_base(perm_str, &unix_socket_perm, 8) ||
-        unix_socket_perm > 0777) {
+    int val;
+    if (!StoiOctalBase(perm_str, &val) || val > 0777 || val < 0) {
       LOG(ERROR) << "Invalid unixsocketperm: " << perm_str;
       exit(1);
     }
+    unix_socket_perm = val;
   }
 
   bool unlink_uds = false;
