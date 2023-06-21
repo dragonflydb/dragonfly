@@ -60,8 +60,8 @@ jobs:
           cd ${GITHUB_WORKSPACE}/tests
           export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
 
-          pytest --json-report --json-report-file=rep1_report.json -svr dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=true
-          pytest --json-report --json-report-file=rep2_report.json -svr dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=false
+          pytest --json-report --json-report-file=rep1_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=true
+          pytest --json-report --json-report-file=rep2_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=false
 
 
 
