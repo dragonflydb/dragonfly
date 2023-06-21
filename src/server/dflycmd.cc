@@ -60,7 +60,8 @@ std::string_view SyncStateName(DflyCmd::SyncState sync_state) {
     case DflyCmd::SyncState::CANCELLED:
       return "cancelled";
   }
-  LOG(FATAL) << "Unspported state " << int(sync_state);
+  DCHECK(false) << "Unspported state " << int(sync_state);
+  return "unsupported";
 }
 
 struct TransactionGuard {
