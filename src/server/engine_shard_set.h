@@ -98,8 +98,8 @@ class EngineShard {
     return &shard_lock_;
   }
 
-  // TODO: Awkward interface. I should solve it somehow.
-  void ShutdownMulti(Transaction* multi);
+  // Remove current continuation trans if its equal to tx.
+  void RemoveContTx(Transaction* tx);
 
   void IncQuickRun() {
     stats_.quick_runs++;
@@ -151,6 +151,10 @@ class EngineShard {
 
   bool IsReplica() const {
     return is_replica_;
+  }
+
+  const Transaction* GetContTx() const {
+    return continuation_trans_;
   }
 
   void TEST_EnableHeartbeat();

@@ -61,6 +61,9 @@ ABSL_FLAG(string, save_schedule, "",
           "glob spec for the UTC time to save a snapshot which matches HH:MM 24h time");
 ABSL_FLAG(bool, df_snapshot_format, true,
           "if true, save in dragonfly-specific snapshotting format");
+ABSL_FLAG(int, epoll_file_threads, 0,
+          "thread size for file workers when running in epoll mode, default is hardware concurrent "
+          "threads");
 
 ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
@@ -500,7 +503,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* m
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
-    fq_threadpool_.reset(new FiberQueueThreadPool());
+    fq_threadpool_.reset(new FiberQueueThreadPool(absl::GetFlag(FLAGS_epoll_file_threads)));
   }
 
   // Unlike EngineShard::Heartbeat that runs independently in each shard thread,
@@ -1932,7 +1935,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
         cntx->owner()->SetName(absl::StrCat("repl_ctrl_", sid));
 
         string sync_id = absl::StrCat("SYNC", sid);
-        cntx->conn_state.replicaiton_info.repl_session_id = sid;
+        cntx->conn_state.replication_info.repl_session_id = sid;
 
         if (!cntx->replica_conn) {
           ServerState::tl_connection_stats()->num_replicas += 1;
@@ -1953,7 +1956,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
         (*cntx)->SendError(kInvalidIntErr);
         return;
       }
-      cntx->conn_state.replicaiton_info.repl_listening_port = replica_listening_port;
+      cntx->conn_state.replication_info.repl_listening_port = replica_listening_port;
     } else if (cmd == "CLIENT-ID" && args.size() == 2) {
       std::string client_id{arg};
       auto& pool = service_.proactor_pool();
@@ -1965,8 +1968,8 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
         return (*cntx)->SendError(kInvalidIntErr);
       }
       VLOG(1) << "Client version for session_id="
-              << cntx->conn_state.replicaiton_info.repl_session_id << " is " << version;
-      cntx->conn_state.replicaiton_info.repl_version = DflyVersion(version);
+              << cntx->conn_state.replication_info.repl_session_id << " is " << version;
+      cntx->conn_state.replication_info.repl_version = DflyVersion(version);
     } else if (cmd == "ACK" && args.size() == 2) {
       // Don't send error/Ok back through the socket, because we don't want to interleave with
       // the journal writes that we write into the same socket.
@@ -2057,7 +2060,7 @@ void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::Latency(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
-  string_view sub_cmd = ArgS(args, 01);
+  string_view sub_cmd = ArgS(args, 0);
 
   if (sub_cmd == "LATEST") {
     return (*cntx)->SendEmptyArray();

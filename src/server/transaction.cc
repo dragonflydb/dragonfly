@@ -423,7 +423,7 @@ string Transaction::DebugId() const {
 }
 
 // Runs in the dbslice thread. Returns true if transaction needs to be kept in the queue.
-bool Transaction::RunInShard(EngineShard* shard) {
+bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   DCHECK_GT(run_count_.load(memory_order_relaxed), 0u);
   CHECK(cb_ptr_) << DebugId();
   DCHECK_GT(txid_, 0u);
@@ -491,9 +491,11 @@ bool Transaction::RunInShard(EngineShard* shard) {
   // at least the coordinator thread owns the reference.
   DCHECK_GE(GetUseCount(), 1u);
 
-  // we remove tx from tx-queue upon first invocation.
-  // if it needs to run again it runs via a dedicated continuation_trans_ state in EngineShard.
-  if (sd.pq_pos != TxQueue::kEnd) {
+  // If we're the head of tx queue (txq_ooo is false), we remove ourselves upon first invocation
+  // and successive hops are run by continuation_trans_ in engine shard.
+  // Otherwise we can remove ourselves only when we're concluding (so no more hops will follow).
+  bool remove_txq = is_concluding || !txq_ooo;
+  if (remove_txq && sd.pq_pos != TxQueue::kEnd) {
     shard->txq()->Remove(sd.pq_pos);
     sd.pq_pos = TxQueue::kEnd;
   }
@@ -520,16 +522,24 @@ bool Transaction::RunInShard(EngineShard* shard) {
       sd.local_mask &= ~OUT_OF_ORDER;
     }
 
+    // This is the last hop, so clear cont_trans if its held by the current tx
+    shard->RemoveContTx(this);
+
     // It has 2 responsibilities.
     // 1: to go over potential wakened keys, verify them and activate watch queues.
     // 2: if this transaction was notified and finished running - to remove it from the head
     //    of the queue and notify the next one.
     // RunStep is also called for global transactions because of commands like MOVE.
-    if (shard->blocking_controller()) {
+    if (auto* bcontroller = shard->blocking_controller(); bcontroller) {
       if (awaked_prerun || was_suspended) {
-        shard->blocking_controller()->FinalizeWatched(largs, this);
+        bcontroller->FinalizeWatched(largs, this);
       }
-      shard->blocking_controller()->NotifyPending();
+
+      // Wake only if no tx queue head is currently running
+      // Note: RemoveContTx might have no effect above if this tx had no continuations
+      if (shard->GetContTx() == nullptr) {
+        bcontroller->NotifyPending();
+      }
     }
   }
 
@@ -1152,6 +1162,7 @@ OpStatus Transaction::WatchInShard(ArgSlice keys, EngineShard* shard) {
   bc->AddWatched(keys, this);
 
   sd.local_mask |= SUSPENDED_Q;
+  sd.local_mask &= ~OUT_OF_ORDER;
   DVLOG(2) << "AddWatched " << DebugId() << " local_mask:" << sd.local_mask
            << ", first_key:" << keys.front();
 
@@ -1229,12 +1240,12 @@ void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, E
     sd.pq_pos = TxQueue::kEnd;
   }
 
-  shard->ShutdownMulti(this);
+  shard->RemoveContTx(this);
 
-  // notify awakened transactions, not sure we need it here because it's done after
-  // each operation
-  if (shard->blocking_controller())
+  // Wake only if no tx queue head is currently running
+  if (shard->blocking_controller() && shard->GetContTx() == nullptr)
     shard->blocking_controller()->NotifyPending();
+
   shard->PollExecution("unlockmulti", nullptr);
 
   this->DecreaseRunCnt();

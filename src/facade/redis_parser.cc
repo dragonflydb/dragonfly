@@ -15,7 +15,7 @@ namespace {
 
 // When changing this constant, also update `test_large_cmd` test in connection_test.py.
 constexpr int kMaxArrayLen = 65536;
-constexpr int64_t kMaxBulkLen = 64 * (1ul << 20);  // 64MB.
+constexpr int64_t kMaxBulkLen = 256 * (1ul << 20);  // 256MB.
 
 }  // namespace
 

@@ -827,4 +827,39 @@ TEST_F(ListFamilyTest, BLPopUnwakesInScript) {
   f2.Join();
 }
 
+TEST_F(ListFamilyTest, OtherMultiWakesBLpop) {
+  const string_view SCRIPT = R"(
+    redis.call('LPUSH', 'l', 'bad')
+    for i = 1, 1000 do
+      redis.call('MGET', 'a', 'b', 'c', 'd')
+    end
+    redis.call('LPUSH', 'l', 'good')
+  )";
+
+  const string_view SCRIPT_SHORT = R"(
+    redis.call('GET', KEYS[1])
+  )";
+
+  // Start BLPOP with infinite timeout
+  auto f1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&]() {
+    auto resp = Run("blpop", {"BLPOP", "l", "0"});
+    // blpop should only be awakened after the script has completed, so the
+    // last element added in the script should be returned.
+    EXPECT_THAT(resp, ArgType(RespExpr::ARRAY));
+    EXPECT_THAT(resp.GetVec(), ElementsAre("l", "good"));
+  });
+
+  // Start long running script that accesses the list, but should wake up blpop only after it
+  // finished
+  auto f2 = pp_->at(2)->LaunchFiber(Launch::dispatch, [&]() {
+    Run("script", {"EVAL", SCRIPT, "5", "a", "b", "c", "d", "l"});
+  });
+
+  // Run quick multi transaction that concludes after one hop
+  Run({"EVAL", SCRIPT_SHORT, "1", "y"});
+
+  f1.Join();
+  f2.Join();
+}
+
 }  // namespace dfly

@@ -19,12 +19,6 @@ namespace dfly::search {
 struct AstNode;
 struct TextIndex;
 
-// Interface for accessing document values with different data structures underneath.
-struct DocumentAccessor {
-  virtual ~DocumentAccessor() = default;
-  virtual std::string_view Get(std::string_view active_field) const = 0;
-};
-
 struct Schema {
   enum FieldType { TAG, TEXT, NUMERIC, VECTOR };
 
@@ -50,6 +44,15 @@ class FieldIndices {
   absl::flat_hash_map<std::string, std::unique_ptr<BaseIndex>> indices_;
 };
 
+// Represents a search result returned from the search algorithm.
+struct SearchResult {
+  std::vector<DocId> ids;
+
+  // If a KNN-query is present, distances for doc ids are returned as well
+  // and sorted from smallest to largest.
+  std::vector<float> knn_distances;
+};
+
 // SearchAlgorithm allows searching field indices with a query
 class SearchAlgorithm {
  public:
@@ -59,7 +62,10 @@ class SearchAlgorithm {
   // Init with query and return true if successful.
   bool Init(std::string_view query, const QueryParams& params);
 
-  std::vector<DocId> Search(const FieldIndices* index) const;
+  SearchResult Search(const FieldIndices* index) const;
+
+  // Return KNN limit if it is enabled
+  std::optional<size_t> HasKnn() const;
 
  private:
   std::unique_ptr<AstNode> query_;

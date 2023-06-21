@@ -336,6 +336,15 @@ void ClusterFamily::ClusterInfo(ConnectionContext* cntx) {
   }
 }
 
+void ClusterFamily::KeySlot(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() != 2) {
+    return (*cntx)->SendError(WrongNumArgsError("CLUSTER KEYSLOT"));
+  }
+
+  SlotId id = ClusterConfig::KeySlot(ArgS(args, 1));
+  return (*cntx)->SendLong(id);
+}
+
 void ClusterFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
   // In emulated cluster mode, all slots are mapped to the same host, and number of cluster
   // instances is thus 1.
@@ -357,6 +366,8 @@ void ClusterFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
     return ClusterNodes(cntx);
   } else if (sub_cmd == "INFO") {
     return ClusterInfo(cntx);
+  } else if (sub_cmd == "KEYSLOT") {
+    return KeySlot(args, cntx);
   } else {
     return (*cntx)->SendError(facade::UnknownSubCmd(sub_cmd, "CLUSTER"), facade::kSyntaxErrType);
   }
@@ -450,13 +461,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
     before = tl_cluster_config->GetOwnedSlots();
   }
 
-  auto cb = [&](util::ProactorBase* pb) {
-    if (tl_cluster_config == nullptr) {
-      tl_cluster_config = new_config;
-    } else {
-      *tl_cluster_config = *new_config;
-    }
-  };
+  auto cb = [&](util::ProactorBase* pb) { tl_cluster_config = new_config; };
   server_family_->service().proactor_pool().AwaitFiberOnAll(std::move(cb));
 
   DCHECK(tl_cluster_config != nullptr);
@@ -541,7 +546,7 @@ inline CommandId::Handler HandlerFunc(ClusterFamily* se, EngineFunc f) {
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ClusterFamily::x))
 
 void ClusterFamily::Register(CommandRegistry* registry) {
-  *registry << CI{"CLUSTER", CO::READONLY, 2, 0, 0, 0}.HFUNC(Cluster)
+  *registry << CI{"CLUSTER", CO::READONLY, -2, 0, 0, 0}.HFUNC(Cluster)
             << CI{"DFLYCLUSTER", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, 0}.HFUNC(
                    DflyCluster)
             << CI{"READONLY", CO::READONLY, 1, 0, 0, 0}.HFUNC(ReadOnly)
