@@ -610,20 +610,17 @@ void sigill_hdlr(int signo) {
   exit(1);
 }
 
-void print_basic_usage_info() {
-  std::cout << "* Default logdir is: \"/tmp/\". It can be overwritten with flag --log_dir=[path]\n";
-  std::cout << "* Logfile name format is: ";
-  std::cout << "dragonfly.[machine_name].[user_name].[WARNING|INFO|ERROR].[date and time]\n";
-  std::cout << "* For usage info flags type dragonfly [--help | --helpfull]\n";
-  const string df_website = "https://www.dragonflydb.io/";
-  std::cout << "* You can read more about dragonflydb at: " << df_website << '\n';
+void PrintBasicUsageInfo() {
+  const string flags_log_dir = FLAGS_log_dir.CurrentValue();
+  const string log_dir = (flags_log_dir == string("")) ? string("/tmp/") : flags_log_dir;
+  std::cout << "* Logdir is: " + log_dir << '\n';
+  std::cout << "* For the available flags type dragonfly [--help | --helpfull]\n";
   const string df_docs = "https://www.dragonflydb.io/docs";
   std::cout << "* Documentation can be found at: " << df_docs;
   std::cout << endl;
 }
 
 int main(int argc, char* argv[]) {
-  print_basic_usage_info();
   absl::SetProgramUsageMessage(
       R"(a modern in-memory store.
 
@@ -644,6 +641,7 @@ Usage: dragonfly [FLAGS]
 
   MainInitGuard guard(&argc, &argv);
 
+  PrintBasicUsageInfo();
   LOG(INFO) << "Starting dragonfly " << GetVersion() << "-" << kGitSha;
 
   struct sigaction act;
