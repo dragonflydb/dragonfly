@@ -324,10 +324,11 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   auto port = GetFlag(FLAGS_port);
   auto mc_port = GetFlag(FLAGS_memcache_port);
   string unix_sock = GetFlag(FLAGS_unixsocket);
-  mode_t unix_socket_perm;
-  string perm_str = GetFlag(FLAGS_unixsocketperm);
   bool unlink_uds = false;
+
   if (!unix_sock.empty()) {
+    string perm_str = GetFlag(FLAGS_unixsocketperm);
+    mode_t unix_socket_perm;
     if (perm_str.empty()) {
       // get umask of running process, indicates the permission bits that are turned off
       mode_t umask_val = umask(0);
