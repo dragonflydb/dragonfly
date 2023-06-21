@@ -79,11 +79,11 @@ jobs:
           # As github runner will not run the next step if the pytest failed, we start from the last
           # report file and if exist we get the failed test from the pytest run, if there are any.
           if [ -f rep2_report.json ]; then
-            get_failed_tests rep2_report.json
+            failed_tests=$(get_failed_tests rep2_report.json)
           elif [-f rep1_report.json ]; then
-            get_failed_tests rep1_report.json
+            failed_tests=$(get_failed_tests rep1_report.json)
           elif [-f pytest_report.json ]; then
-            get_failed_tests pytest_report.json
+            failed_tests=$(get_failed_tests pytest_report.json)
           fi
           curl -s \
             -X POST \
