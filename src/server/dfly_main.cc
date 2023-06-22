@@ -18,6 +18,7 @@
 #include <openssl/err.h>
 #include <signal.h>
 
+#include <iostream>
 #include <regex>
 
 #include "base/init.h"
@@ -609,6 +610,16 @@ void sigill_hdlr(int signo) {
   exit(1);
 }
 
+void PrintBasicUsageInfo() {
+  std::cout << "* Logs will be written to the first available of the following paths:\n";
+  for (const auto& dir : google::GetLoggingDirectories()) {
+    std::cout << dir << "dragonfly.*\n";
+  }
+  std::cout << "* For the available flags type dragonfly [--help | --helpfull]\n";
+  std::cout << "* Documentation can be found at: https://www.dragonflydb.io/docs";
+  std::cout << endl;
+}
+
 int main(int argc, char* argv[]) {
   absl::SetProgramUsageMessage(
       R"(a modern in-memory store.
@@ -630,6 +641,7 @@ Usage: dragonfly [FLAGS]
 
   MainInitGuard guard(&argc, &argv);
 
+  PrintBasicUsageInfo();
   LOG(INFO) << "Starting dragonfly " << GetVersion() << "-" << kGitSha;
 
   struct sigaction act;
