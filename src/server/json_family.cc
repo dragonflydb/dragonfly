@@ -84,6 +84,16 @@ string JsonTypeToName(const JsonType& val) {
   return std::string{};
 }
 
+JsonExpression ParseJsonPath(string_view path, error_code* ec) {
+  if (path == ".") {
+    // RedisJson V1 uses the dot for root level access.
+    // There are more incompatibilities with legacy paths which are not supported.
+    path = "$"sv;
+  }
+
+  return jsonpath::make_expression<JsonType>(path, *ec);
+}
+
 template <typename T>
 void PrintOptVec(ConnectionContext* cntx, const OpResult<vector<optional<T>>>& result) {
   if (result->empty()) {
@@ -1131,7 +1141,7 @@ void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
   }
 
   error_code ec;
-  JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
+  JsonExpression expression = ParseJsonPath(path, &ec);
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
@@ -1184,7 +1194,7 @@ void JsonFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
   error_code ec;
   string_view key = ArgS(args, 1);
   string_view path = ArgS(args, 2);
-  JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
+  JsonExpression expression = ParseJsonPath(path, &ec);
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
@@ -1211,7 +1221,7 @@ void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
 
   error_code ec;
   string_view path = ArgS(args, args.size() - 1);
-  JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
+  JsonExpression expression = ParseJsonPath(path, &ec);
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
@@ -1225,7 +1235,7 @@ void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
-    mget_resp[sid] = OpMGet(jsonpath::make_expression<JsonType>(path, ec), t, shard);
+    mget_resp[sid] = OpMGet(ParseJsonPath(path, &ec), t, shard);
     return OpStatus::OK;
   };
 
@@ -1267,7 +1277,7 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
   string_view path = ArgS(args, 1);
 
   error_code ec;
-  JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
+  JsonExpression expression = ParseJsonPath(path, &ec);
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
@@ -1435,7 +1445,7 @@ void JsonFamily::ArrPop(CmdArgList args, ConnectionContext* cntx) {
   }
 
   error_code ec;
-  JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
+  JsonExpression expression = ParseJsonPath(path, &ec);
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
@@ -1509,7 +1519,7 @@ void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
   string_view path = ArgS(args, 1);
 
   error_code ec;
-  JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
+  JsonExpression expression = ParseJsonPath(path, &ec);
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
@@ -1627,7 +1637,7 @@ void JsonFamily::Type(CmdArgList args, ConnectionContext* cntx) {
   string_view path = ArgS(args, 1);
 
   error_code ec;
-  JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
+  JsonExpression expression = ParseJsonPath(path, &ec);
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
@@ -1663,7 +1673,7 @@ void JsonFamily::ArrLen(CmdArgList args, ConnectionContext* cntx) {
   string_view path = ArgS(args, 1);
 
   error_code ec;
-  JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
+  JsonExpression expression = ParseJsonPath(path, &ec);
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
@@ -1690,7 +1700,7 @@ void JsonFamily::ObjLen(CmdArgList args, ConnectionContext* cntx) {
   string_view path = ArgS(args, 1);
 
   error_code ec;
-  JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
+  JsonExpression expression = ParseJsonPath(path, &ec);
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
@@ -1717,7 +1727,7 @@ void JsonFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
   string_view path = ArgS(args, 1);
 
   error_code ec;
-  JsonExpression expression = jsonpath::make_expression<JsonType>(path, ec);
+  JsonExpression expression = ParseJsonPath(path, &ec);
 
   if (ec) {
     VLOG(1) << "Invalid JSONPath syntax: " << ec.message();
@@ -1748,7 +1758,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   for (size_t i = 1; i < args.size(); ++i) {
     string_view path = ArgS(args, i);
     error_code ec;
-    JsonExpression expr = jsonpath::make_expression<JsonType>(path, ec);
+    JsonExpression expr = ParseJsonPath(path, &ec);
 
     if (ec) {
       LOG(WARNING) << "path '" << path << "': Invalid JSONPath syntax: " << ec.message();

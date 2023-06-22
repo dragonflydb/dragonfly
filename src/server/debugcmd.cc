@@ -410,7 +410,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
     }
   }
 
-  ess.RunBlockingInParallel([&](EngineShard* shard) {
+  ess.AwaitRunningOnShardQueue([&](EngineShard* shard) {
     DoPopulateBatch(options.prefix, options.val_size, options.populate_random_values, params,
                     ps[shard->shard_id()]);
   });

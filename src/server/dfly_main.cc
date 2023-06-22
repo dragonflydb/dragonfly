@@ -18,6 +18,7 @@
 #include <openssl/err.h>
 #include <signal.h>
 
+#include <iostream>
 #include <regex>
 
 #include "base/init.h"
@@ -71,7 +72,7 @@ std::string AbslUnparseFlag(const MaxMemoryFlag& flag) {
 }
 
 ABSL_DECLARE_FLAG(uint32_t, port);
-ABSL_DECLARE_FLAG(uint32_t, memcache_port);
+ABSL_DECLARE_FLAG(uint32_t, memcached_port);
 ABSL_DECLARE_FLAG(uint16_t, admin_port);
 ABSL_DECLARE_FLAG(std::string, admin_bind);
 
@@ -322,7 +323,7 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   const auto& bind = GetFlag(FLAGS_bind);
   const char* bind_addr = bind.empty() ? nullptr : bind.c_str();
   auto port = GetFlag(FLAGS_port);
-  auto mc_port = GetFlag(FLAGS_memcache_port);
+  auto mc_port = GetFlag(FLAGS_memcached_port);
   string unix_sock = GetFlag(FLAGS_unixsocket);
   bool unlink_uds = false;
 
@@ -609,6 +610,16 @@ void sigill_hdlr(int signo) {
   exit(1);
 }
 
+void PrintBasicUsageInfo() {
+  std::cout << "* Logs will be written to the first available of the following paths:\n";
+  for (const auto& dir : google::GetLoggingDirectories()) {
+    std::cout << dir << "dragonfly.*\n";
+  }
+  std::cout << "* For the available flags type dragonfly [--help | --helpfull]\n";
+  std::cout << "* Documentation can be found at: https://www.dragonflydb.io/docs";
+  std::cout << endl;
+}
+
 int main(int argc, char* argv[]) {
   absl::SetProgramUsageMessage(
       R"(a modern in-memory store.
@@ -630,6 +641,7 @@ Usage: dragonfly [FLAGS]
 
   MainInitGuard guard(&argc, &argv);
 
+  PrintBasicUsageInfo();
   LOG(INFO) << "Starting dragonfly " << GetVersion() << "-" << kGitSha;
 
   struct sigaction act;

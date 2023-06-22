@@ -9,6 +9,7 @@
 
 #include <limits>
 #include <optional>
+#include <utility>
 
 #include "base/flags.h"
 #include "base/logging.h"
@@ -31,6 +32,7 @@ namespace dfly {
 using namespace facade;
 using namespace util;
 
+using std::string;
 using util::ProactorBase;
 
 namespace {
@@ -45,6 +47,21 @@ bool ToSyncId(string_view str, uint32_t* num) {
   str.remove_prefix(4);
 
   return absl::SimpleAtoi(str, num);
+}
+
+std::string_view SyncStateName(DflyCmd::SyncState sync_state) {
+  switch (sync_state) {
+    case DflyCmd::SyncState::PREPARATION:
+      return "preparation";
+    case DflyCmd::SyncState::FULL_SYNC:
+      return "full_sync";
+    case DflyCmd::SyncState::STABLE_SYNC:
+      return "stable_sync";
+    case DflyCmd::SyncState::CANCELLED:
+      return "cancelled";
+  }
+  DCHECK(false) << "Unspported state " << int(sync_state);
+  return "unsupported";
 }
 
 struct TransactionGuard {
@@ -62,27 +79,6 @@ struct TransactionGuard {
   Transaction* t;
 };
 }  // namespace
-
-DflyCmd::ReplicaRoleInfo::ReplicaRoleInfo(std::string address, uint32_t listening_port,
-                                          SyncState sync_state, uint64_t lsn_lag)
-    : address(address), listening_port(listening_port), lsn_lag(lsn_lag) {
-  switch (sync_state) {
-    case SyncState::PREPARATION:
-      state = "preparation";
-      break;
-    case SyncState::FULL_SYNC:
-      state = "full_sync";
-      break;
-    case SyncState::STABLE_SYNC:
-      state = "stable_sync";
-      break;
-    case SyncState::CANCELLED:
-      state = "cancelled";
-      break;
-    default:
-      break;
-  }
-}
 
 DflyCmd::DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family)
     : sf_(server_family), listener_(listener) {
@@ -548,15 +544,16 @@ shared_ptr<DflyCmd::ReplicaInfo> DflyCmd::GetReplicaInfo(uint32_t sync_id) {
   return {};
 }
 
-std::vector<DflyCmd::ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() {
+std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() {
   std::vector<ReplicaRoleInfo> vec;
   unique_lock lk(mu_);
 
   auto replication_lags = ReplicationLags();
 
   for (const auto& [id, info] : replica_infos_) {
-    vec.emplace_back(info->address, info->listening_port, info->state.load(memory_order_relaxed),
-                     replication_lags[id]);
+    vec.push_back(ReplicaRoleInfo{info->address, info->listening_port,
+                                  SyncStateName(info->state.load(memory_order_relaxed)),
+                                  replication_lags[id]});
   }
   return vec;
 }

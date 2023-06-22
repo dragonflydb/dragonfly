@@ -99,7 +99,7 @@ Dragonfly 支持 Redis 的常见参数。
 
 此外，还有 Dragonfly 特定的参数选项：
 
-* `memcache_port`：在此端口上启用 memcached 兼容的 API。默认禁用。
+* `memcached_port`：在此端口上启用 memcached 兼容的 API。默认禁用。
 
 * `keys_output_limit`：在`keys` 命令中返回的最大键数。默认为 8192。
 

@@ -911,15 +911,31 @@ def parse_lag(replication_info: bytes):
     return int(lags[0])
 
 
-async def assert_lag_condition(client, condition):
+async def assert_lag_condition(inst, client, condition):
+    """
+    Since lag is a bit random, and we want stable tests, we check
+    10 times in quick succession and validate that the condition
+    is satisfied at least once.
+    We check both `INFO REPLICATION` redis protocol and the `/metrics`
+    prometheus endpoint.
+    """
+    for _ in range(10):
+        lag = (await inst.metrics())["dragonfly_connected_replica_lag_records"].samples[0].value
+        if condition(lag):
+            break
+        print("current prometheus lag =", lag)
+        await asyncio.sleep(0.05)
+    else:
+        assert False, "Lag from prometheus metrics has never satisfied condition!"
     for _ in range(10):
         lag = parse_lag(await client.execute_command("info replication"))
         if condition(lag):
             break
         print("current lag =", lag)
-        time.sleep(0.05)
+        await asyncio.sleep(0.05)
     else:
         assert False, "Lag has never satisfied condition!"
+
 
 
 @dfly_args({"proactor_threads": 2})
@@ -934,15 +950,15 @@ async def test_replication_info(df_local_factory, df_seeder_factory, n_keys=2000
 
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
-    await assert_lag_condition(c_master, lambda lag: lag == 0)
+    await assert_lag_condition(master, c_master, lambda lag: lag == 0)
 
     seeder = df_seeder_factory.create(port=master.port, keys=n_keys, dbcount=2)
     fill_task = asyncio.create_task(seeder.run(target_ops=300))
-    await assert_lag_condition(c_master, lambda lag: lag > 30)
+    await assert_lag_condition(master, c_master, lambda lag: lag > 30)
 
     await fill_task
     await wait_available_async(c_replica)
-    await assert_lag_condition(c_master, lambda lag: lag == 0)
+    await assert_lag_condition(master, c_master, lambda lag: lag == 0)
 
     await c_master.connection_pool.disconnect()
     await c_replica.connection_pool.disconnect()
@@ -967,7 +983,8 @@ async def test_flushall_in_full_sync(df_local_factory, df_seeder_factory):
     c_master = aioredis.Redis(port=master.port)
 
     # Fill master with test data
-    seeder = df_seeder_factory.create(port=master.port, keys=100_000, dbcount=1)
+    seeder = df_seeder_factory.create(
+        port=master.port, keys=100_000, dbcount=1)
     await seeder.run(target_deviation=0.1)
 
     # Start replica
@@ -992,7 +1009,8 @@ async def test_flushall_in_full_sync(df_local_factory, df_seeder_factory):
     await c_master.execute_command("FLUSHALL")
 
     if not await is_full_sync_mode(c_replica):
-        logging.error("!!! Full sync finished too fast. Adjust test parameters !!!")
+        logging.error(
+            "!!! Full sync finished too fast. Adjust test parameters !!!")
         return
 
     post_seeder = df_seeder_factory.create(

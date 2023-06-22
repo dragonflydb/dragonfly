@@ -1,6 +1,8 @@
 import pytest
 import time
 import subprocess
+import aiohttp
+from prometheus_client.parser import text_string_to_metric_families
 
 from dataclasses import dataclass
 
@@ -104,6 +106,13 @@ class DflyInstance:
             if v is not None:
                 out.append(str(v))
         return out
+
+    async def metrics(self):
+        session = aiohttp.ClientSession()
+        resp = await session.get(f"http://localhost:{self.port}/metrics")
+        data = await resp.text()
+        await session.close()
+        return {metric_family.name : metric_family for metric_family in text_string_to_metric_families(data)}
 
 
 class DflyInstanceFactory:
