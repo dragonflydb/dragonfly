@@ -18,7 +18,7 @@ namespace dfly {
 class EngineShardSet;
 class ConnectionContext;
 class ChannelStore;
-class FlowInfo;
+struct FlowInfo;
 
 // Stores command id and arguments for delayed invocation.
 // Used for storing MULTI/EXEC commands.

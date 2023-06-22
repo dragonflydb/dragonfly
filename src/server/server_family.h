@@ -39,6 +39,13 @@ class DflyCmd;
 class Service;
 class ScriptMgr;
 
+struct ReplicaRoleInfo {
+  std::string address;
+  uint32_t listening_port;
+  std::string_view state;
+  uint64_t lsn_lag;
+};
+
 struct Metrics {
   std::vector<DbStats> db;
   SliceEvents events;
@@ -55,6 +62,8 @@ struct Metrics {
   uint32_t delete_ttl_per_sec = 0;
 
   facade::ConnectionStats conn_stats;
+
+  std::vector<ReplicaRoleInfo> replication_metrics;
 };
 
 struct LastSaveInfo {
