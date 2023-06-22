@@ -1,5 +1,7 @@
 #!/usr/bin/make -f
 
+export DEB_BUILD_OPTIONS="noopt nostrip nocheck"
+
 %:
 	dh $@
 
