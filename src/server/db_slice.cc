@@ -894,8 +894,8 @@ pair<PrimeIterator, ExpireIterator> DbSlice::ExpireIfNeeded(const Context& cntx,
   // TODO: to employ multi-generation update of expire-base and the underlying values.
   time_t expire_time = ExpireTime(expire_it);
 
-  // Never do expiration on replica.
-  if (time_t(cntx.time_now_ms) < expire_time || owner_->IsReplica())
+  // Never do expiration on replica or if expiration is disabled.
+  if (time_t(cntx.time_now_ms) < expire_time || owner_->IsReplica() || !expire_allowed_)
     return make_pair(it, expire_it);
 
   // Replicate expiry
