@@ -1013,7 +1013,7 @@ TEST_F(JsonFamilyTest, LegacyV1) {
 
   // JSON.GET key "." is the same as JSON.GET key "$"
   resp = Run({"JSON.GET", "json1", "."});
-  EXPECT_THAT(resp, absl::StrCat("[", absl::StripAsciiWhitespace(json), "]"));
+  EXPECT_THAT(resp, absl::StrCat("[", json, "]"));
 }
 
 }  // namespace dfly
