@@ -48,7 +48,7 @@ using namespace std;
 using dfly::operator""_KB;
 
 ABSL_FLAG(uint32_t, port, 6379, "Redis port");
-ABSL_FLAG(uint32_t, memcache_port, 0, "Memcached port");
+ABSL_FLAG(uint32_t, memcached_port, 0, "Memcached port");
 
 ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose automatically");
 

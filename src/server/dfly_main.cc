@@ -71,7 +71,7 @@ std::string AbslUnparseFlag(const MaxMemoryFlag& flag) {
 }
 
 ABSL_DECLARE_FLAG(uint32_t, port);
-ABSL_DECLARE_FLAG(uint32_t, memcache_port);
+ABSL_DECLARE_FLAG(uint32_t, memcached_port);
 ABSL_DECLARE_FLAG(uint16_t, admin_port);
 ABSL_DECLARE_FLAG(std::string, admin_bind);
 
@@ -322,7 +322,7 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   const auto& bind = GetFlag(FLAGS_bind);
   const char* bind_addr = bind.empty() ? nullptr : bind.c_str();
   auto port = GetFlag(FLAGS_port);
-  auto mc_port = GetFlag(FLAGS_memcache_port);
+  auto mc_port = GetFlag(FLAGS_memcached_port);
   string unix_sock = GetFlag(FLAGS_unixsocket);
   bool unlink_uds = false;
 
