@@ -31,7 +31,7 @@ jobs:
 
       - name: Configure & Build
         run: |
-          apt update && apt install -y pip
+          apt update && apt install -y pip jq
           cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
                 -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
@@ -49,21 +49,44 @@ jobs:
           export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
           export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
-          pytest -sxvr dragonfly --ignore=dragonfly/replication_test.py
+          pytest --json-report --json-report-file=report.json -svr dragonfly --ignore=dragonfly/replication_test.py
+
+
+
       - name: Run PyTests replication test
         if: ${{ matrix.runner  == 'ubuntu-latest' }}
         timeout-minutes: 20
         run: |
           cd ${GITHUB_WORKSPACE}/tests
           export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
-          pytest -xvs dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=true
-          pytest -xvs dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=false
+
+          pytest --json-report --json-report-file=rep1_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=true
+          pytest --json-report --json-report-file=rep2_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=false
+
+
 
       - name: Send notification on failure
         if: failure() || cancelled()
         run: |
+
+          get_failed_tests() {
+            local report_file=$1
+            echo $(jq -r '.tests[] | select(.outcome == "failed") | .nodeid' "$report_file")
+          }
+          cd ${GITHUB_WORKSPACE}/tests
+          failed_tests=""
+          # The order in of if is important, and expected to be the oposite order of the pytest run.
+          # As github runner will not run the next step if the pytest failed, we start from the last
+          # report file and if exist we get the failed test from the pytest run, if there are any.
+          if [ -f rep2_report.json ]; then
+            failed_tests=$(get_failed_tests rep2_report.json)
+          elif [ -f rep1_report.json ]; then
+            failed_tests=$(get_failed_tests rep1_report.json)
+          elif [ -f pytest_report.json ]; then
+            failed_tests=$(get_failed_tests pytest_report.json)
+          fi
           curl -s \
             -X POST \
             -H 'Content-Type: application/json' \
             '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
-            -d '{"text": "Unforunately the tests of dragonfly build are not passed :( \n The commit is ${{github.sha}}	"}'
+            -d "{\"text\": \"Regression tests failed.\\n The commit is ${{github.sha}}.\\n $failed_tests\"}"
