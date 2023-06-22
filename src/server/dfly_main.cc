@@ -611,12 +611,12 @@ void sigill_hdlr(int signo) {
 }
 
 void PrintBasicUsageInfo() {
-  const string flags_log_dir = FLAGS_log_dir.CurrentValue();
-  const string log_dir = (flags_log_dir == string("")) ? string("/tmp/") : flags_log_dir;
-  std::cout << "* Logdir is: " + log_dir << '\n';
+  std::cout << "* Logs will be written to the following paths (in this order): \n";
+  for (const auto& dir : google::GetLoggingDirectories()) {
+    std::cout << dir << "dragonfly.*\n";
+  }
   std::cout << "* For the available flags type dragonfly [--help | --helpfull]\n";
-  const string df_docs = "https://www.dragonflydb.io/docs";
-  std::cout << "* Documentation can be found at: " << df_docs;
+  std::cout << "* Documentation can be found at: https://www.dragonflydb.io/docs";
   std::cout << endl;
 }
 
