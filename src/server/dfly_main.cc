@@ -611,7 +611,7 @@ void sigill_hdlr(int signo) {
 }
 
 void PrintBasicUsageInfo() {
-  std::cout << "* Logs will be written to the following paths (in this order): \n";
+  std::cout << "* Logs will be written to the first available of the following paths:\n";
   for (const auto& dir : google::GetLoggingDirectories()) {
     std::cout << dir << "dragonfly.*\n";
   }
