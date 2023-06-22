@@ -1005,4 +1005,15 @@ TEST_F(JsonFamilyTest, Set) {
   EXPECT_EQ(resp, R"([{"a":2,"b":8,"c":[1,2,3]}])");
 }
 
+TEST_F(JsonFamilyTest, LegacyV1) {
+  string json = R"({"key":[1,2,3,4]})";
+
+  auto resp = Run({"JSON.SET", "json1", ".", json});
+  EXPECT_THAT(resp, "OK");
+
+  // JSON.GET key "." is the same as JSON.GET key "$"
+  resp = Run({"JSON.GET", "json1", "."});
+  EXPECT_THAT(resp, absl::StrCat("[", json, "]"));
+}
+
 }  // namespace dfly
