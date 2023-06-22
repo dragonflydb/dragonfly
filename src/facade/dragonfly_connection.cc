@@ -843,6 +843,10 @@ void Connection::ShutdownSelf() {
   util::Connection::Shutdown();
 }
 
+void Connection::Migrate(util::fb2::ProactorBase* dest) {
+  owner()->Migrate(this, dest);
+}
+
 void Connection::ShutdownThreadLocal() {
   pipeline_req_pool_.clear();
 }

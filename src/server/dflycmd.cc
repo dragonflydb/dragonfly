@@ -80,8 +80,7 @@ struct TransactionGuard {
 };
 }  // namespace
 
-DflyCmd::DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family)
-    : sf_(server_family), listener_(listener) {
+DflyCmd::DflyCmd(ServerFamily* server_family) : sf_(server_family) {
 }
 
 void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
@@ -204,7 +203,7 @@ void DflyCmd::Thread(CmdArgList args, ConnectionContext* cntx) {
 
   if (num_thread < pool->size()) {
     if (int(num_thread) != ProactorBase::GetIndex()) {
-      listener_->Migrate(cntx->owner(), pool->at(num_thread));
+      cntx->owner()->Migrate(pool->at(num_thread));
     }
 
     return rb->SendOk();
@@ -249,7 +248,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
   cntx->replication_flow = &replica_ptr->flows[flow_id];
   replica_ptr->flows[flow_id].conn = cntx->owner();
   replica_ptr->flows[flow_id].eof_token = eof_token;
-  listener_->Migrate(cntx->owner(), shard_set->pool()->at(flow_id));
+  cntx->owner()->Migrate(shard_set->pool()->at(flow_id));
 
   rb->StartArray(2);
   rb->SendSimpleString("FULL");

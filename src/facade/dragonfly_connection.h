@@ -136,6 +136,9 @@ class Connection : public util::Connection {
   // Manually shutdown self.
   void ShutdownSelf();
 
+  // Migrate this connecton to a different thread.
+  void Migrate(util::fb2::ProactorBase* dest);
+
   static void ShutdownThreadLocal();
 
   bool IsCurrentlyDispatching() const;
