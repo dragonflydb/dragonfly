@@ -101,7 +101,7 @@ Dragonfly currently supports the following Redis-specific arguments:
  * `dbfilename`: The filename to save and load the database (`default: dump`).
 
 There are also some Dragonfly-specific arguments:
- * `memcache_port`: The port to enable Memcached-compatible API on (`default: disabled`).
+ * `memcached_port`: The port to enable Memcached-compatible API on (`default: disabled`).
  * `keys_output_limit`: Maximum number of returned keys in `keys` command (`default: 8192`). Note that `keys` is a dangerous command. We truncate its result to avoid a blowup in memory use when fetching too many keys.
  * `dbnum`: Maximum number of supported databases for `select`.
  * `cache_mode`: See the [novel cache design](#novel-cache-design) section below.
