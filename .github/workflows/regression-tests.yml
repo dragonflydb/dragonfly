@@ -31,7 +31,7 @@ jobs:
 
       - name: Configure & Build
         run: |
-          apt update && apt install -y pip  && apt install -y jq
+          apt update && apt install -y pip jq
           cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
                 -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
