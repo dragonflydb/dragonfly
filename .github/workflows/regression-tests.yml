@@ -82,8 +82,8 @@ jobs:
             failed_tests=$(get_failed_tests rep2_report.json)
           elif [ -f rep1_report.json ]; then
             failed_tests=$(get_failed_tests rep1_report.json)
-          elif [ -f pytest_report.json ]; then
-            failed_tests=$(get_failed_tests pytest_report.json)
+          elif [ -f report.json ]; then
+            failed_tests=$(get_failed_tests report.json)
           fi
           curl -s \
             -X POST \
