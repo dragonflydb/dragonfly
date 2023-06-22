@@ -1100,11 +1100,14 @@ async def test_take_over(df_local_factory, master_threads, replica_threads):
     async def counter(key):
         value = 0
         await c_master.execute_command(f"SET {key} 0")
-        while True:
+        start = time.time()
+        while time.time() - start < 20:
             try:
                 value = await c_master.execute_command(f"INCR {key}")
             except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError) as e:
                 break
+        else:
+            assert False, "The incrementing loop should be exited with a connection error"
         return key, value
 
     async def block_during_takeover():

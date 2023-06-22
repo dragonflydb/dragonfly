@@ -229,8 +229,6 @@ void Replica::Pause(bool pause) {
 std::error_code Replica::TakeOver(std::string_view timeout) {
   VLOG(1) << "Taking over";
 
-  std::unique_lock lk(sock_mu_);
-
   std::error_code ec;
   sock_->proactor()->Await(
       [this, &ec, timeout] { ec = SendNextPhaseRequest(absl::StrCat("TAKEOVER ", timeout)); });

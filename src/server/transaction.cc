@@ -669,9 +669,7 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
 
   // If we run only on one shard and conclude, we can avoid scheduling at all
   // and directly dispatch the task to its destination shard.
-  bool schedule_fast = (unique_shard_cnt_ == 1) && !IsGlobal() && !IsAtomicMulti()
-      // && ServerState::tlocal()->gstate() != GlobalState::TAKEN_OVER
-      ;
+  bool schedule_fast = (unique_shard_cnt_ == 1) && !IsGlobal() && !IsAtomicMulti();
   if (schedule_fast) {
     DCHECK_NE(unique_shard_id_, kInvalidSid);
     DCHECK(shard_data_.size() == 1 || multi_->mode == NON_ATOMIC);

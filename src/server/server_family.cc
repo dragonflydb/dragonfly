@@ -1938,11 +1938,11 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "Acquire replica lock";
   unique_lock lk(replicaof_mu_);
 
-  float_t timeout;
-  if (!absl::SimpleAtof(ArgS(args, 0), &timeout)) {
+  float_t timeout_sec;
+  if (!absl::SimpleAtof(ArgS(args, 0), &timeout_sec)) {
     return (*cntx)->SendError(kInvalidIntErr);
   }
-  if (timeout < 0) {
+  if (timeout_sec < 0) {
     return (*cntx)->SendError("timeout is negative");
   }
 
