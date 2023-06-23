@@ -61,7 +61,7 @@ set(REFLEX "${THIRD_PARTY_LIB_DIR}/reflex/bin/reflex")
 
 add_third_party(
   jsoncons
-  URL https://github.com/danielaparker/jsoncons/archive/refs/tags/v0.170.0.tar.gz
+  URL https://github.com/danielaparker/jsoncons/archive/refs/tags/v0.170.2.tar.gz
   CMAKE_PASS_FLAGS "-DJSONCONS_BUILD_TESTS=OFF"
   LIB "none"
 )
