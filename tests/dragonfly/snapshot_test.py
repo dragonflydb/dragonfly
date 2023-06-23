@@ -208,7 +208,9 @@ class TestDflyInfoPersistenceLoadingField(SnapshotTestBase):
     @pytest.mark.asyncio
     async def test_snapshot(self, df_seeder_factory, df_server):
         seeder = df_seeder_factory.create(port=df_server.port, **SEEDER_ARGS)
-        await seeder.run(target_deviation=0.1)
+        await seeder.run(target_deviation=0.05)
+        a_client = aioredis.Redis(port=df_server.port)
+        await a_client.execute_command("SAVE")
 
         df_server.stop()
         df_server.start()
