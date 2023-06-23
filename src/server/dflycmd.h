@@ -114,7 +114,7 @@ class DflyCmd {
   };
 
  public:
-  DflyCmd(util::ListenerInterface* listener, ServerFamily* server_family);
+  DflyCmd(ServerFamily* server_family);
 
   void Run(CmdArgList args, ConnectionContext* cntx);
 
@@ -195,7 +195,6 @@ class DflyCmd {
  private:
   ServerFamily* sf_;  // Not owned
 
-  util::ListenerInterface* listener_;
   TxId journal_txid_ = 0;
 
   uint32_t next_sync_id_ = 1;
