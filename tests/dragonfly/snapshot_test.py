@@ -210,6 +210,8 @@ class TestDflyInfoPersistenceLoadingField(SnapshotTestBase):
         seeder = df_seeder_factory.create(port=df_server.port, **SEEDER_ARGS)
         await seeder.run(target_deviation=0.05)
         a_client = aioredis.Redis(port=df_server.port)
+        #50 million keys
+        await a_client.execute_command("DEBUG POPULATE 50000000")
         await a_client.execute_command("SAVE")
 
         df_server.stop()
