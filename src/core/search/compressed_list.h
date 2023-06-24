@@ -81,6 +81,17 @@ class CompressedList {
   size_t ByteSize() const;
 
  private:
+  struct BoundLocation {
+    uint32_t bound, prev_bound;
+    uint32_t bound_diff;
+    absl::Span<const uint8_t> left, bound_span;
+  };
+
+ private:
+  // Find first element that is not less than value. Return its value, its preceding value,
+  // the position of its encoded difference and the tail for further reads.
+  BoundLocation LowerBound(uint32_t value) const;
+
   // Push back difference without any decoding. Used only for efficient contruction from sorted list
   void PushBackDiff(uint32_t diff);
 

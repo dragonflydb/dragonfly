@@ -73,17 +73,10 @@ void CompressedList::PushBackDiff(uint32_t diff) {
   diffs_.insert(diffs_.end(), diff_span.begin(), diff_span.end());
 }
 
-void CompressedList::Remove(uint32_t value) {
-}
-
-// Insert has linear complexity. It tries to find between which two elements A and B the new value V
-// needs to be inserted. Then it computes the differences dif1 = V - A and diff2 = B - V that need
-// to be stored to encode the triple A V B. Those are stored where diff0 = B - A was previously
-// stored, possibly extending the vector
-void CompressedList::Insert(uint32_t value) {
+CompressedList::BoundLocation CompressedList::LowerBound(uint32_t value) const {
   // Find lower bound: first element that is not less than value
   // Store also previous element to re-compute both differences
-  uint32_t bound = 0, prev_bound = 0;
+  uint32_t bound = 0, prev_bound = 0, last_diff;
   // Store remaining elements and span of last element read (for overwriting)
   absl::Span<const uint8_t> diffs_left{diffs_}, last_read{};
   while (bound < value && !diffs_left.empty()) {
@@ -91,34 +84,85 @@ void CompressedList::Insert(uint32_t value) {
     last_read = diffs_left.subspan(0, read);
     prev_bound = bound;
     bound += diff;
+    last_diff = diff;
     diffs_left.remove_prefix(read);
   }
 
+  return BoundLocation{bound, prev_bound, last_diff, diffs_left, last_read};
+}
+
+// Remove has linear complexity. It tries to find the element V and its neighbors A and B,
+// which are encoded as diff1 = V - A and diff2 = B - V. Adjacently stored diff1 and diff2
+// need to be replaced with diff3 = diff1 + diff2s
+void CompressedList::Remove(uint32_t value) {
+  auto bound = LowerBound(value);
+
+  // Nothing was read or the element was not found
+  if (bound.bound_span.empty() || bound.bound != value)
+    return;
+
+  // We're removing below unconditionally
+  size_--;
+
+  // Calculate offset where `bound` is stored
+  ptrdiff_t base_offset = bound.bound_span.data() - diffs_.data();
+
+  // Bound diff is last, remove it
+  if (bound.left.empty()) {
+    diffs_.erase(diffs_.begin() + base_offset,
+                 diffs_.begin() + base_offset + bound.bound_span.size());
+    return;
+  }
+
+  // Read diff2 and calculate diff3 = diff1 + diff2
+  auto [diff2, diff2_read] = ReadVarLen(bound.left);
+  uint32_t diff3 = bound.bound_diff + diff2;
+
+  // Encode diff3
+  array<uint8_t, 16> buf;
+  auto diff3_buf = WriteVarLen(diff3, absl::MakeSpan(buf));
+
+  // Shrink vector before overwriting diff1 & diff2 with diff3
+  DCHECK_LE(diff3_buf.size(), diff2_read + bound.bound_span.size());
+  size_t to_remove = diff2_read + bound.bound_span.size() - diff3_buf.size();
+  diffs_.erase(diffs_.begin() + base_offset, diffs_.begin() + base_offset + to_remove);
+
+  copy(diff3_buf.begin(), diff3_buf.end(), diffs_.begin() + base_offset);
+}
+
+// Insert has linear complexity. It tries to find between which two elements A and B the new value V
+// needs to be inserted. Then it computes the differences dif1 = V - A and diff2 = B - V that need
+// to be stored to encode the triple A V B. Those are stored where diff0 = B - A was previously
+// stored, possibly extending the vector
+void CompressedList::Insert(uint32_t value) {
+  auto bound = LowerBound(value);
+
   // We have read at least one element and value is already present
-  if (bound == value && !last_read.empty())
+  if (bound.bound == value && !bound.bound_span.empty())
     return;
 
   // We're inserting below unconditionally
   size_++;
 
   // It belongs at the very end: all elements are either less or there are none at all
-  if (bound < value || last_read.empty()) {
-    PushBackDiff(value - bound);
+  if (bound.bound < value || bound.bound_span.empty()) {
+    PushBackDiff(value - bound.bound);
     return;
   }
 
   // We need to insert value between `prev_bound` and `bound`, so we compute both differences
   // diff1 and diff2 and encode them
   array<uint8_t, 16> buf1, buf2;
-  auto diff1_span = WriteVarLen(value - prev_bound, absl::MakeSpan(buf1));
-  auto diff2_span = WriteVarLen(bound - value, absl::MakeSpan(buf2));
+  auto diff1_span = WriteVarLen(value - bound.prev_bound, absl::MakeSpan(buf1));
+  auto diff2_span = WriteVarLen(bound.bound - value, absl::MakeSpan(buf2));
 
   // Calculate offset where `bound` is stored
-  ptrdiff_t base_offset = last_read.data() - diffs_.data();
+  ptrdiff_t base_offset = bound.bound_span.data() - diffs_.data();
 
   // Compute how much more space we need to insert two differences and fill it with 0s
-  DCHECK_LE(last_read.size(), diff1_span.size() + diff2_span.size());  // It can't shrink for sure
-  size_t len_diff = diff1_span.size() + diff2_span.size() - last_read.size();
+  DCHECK_LE(bound.bound_span.size(),
+            diff1_span.size() + diff2_span.size());  // It can't shrink for sure
+  size_t len_diff = diff1_span.size() + diff2_span.size() - bound.bound_span.size();
   diffs_.insert(diffs_.begin() + base_offset, len_diff, 0u);
 
   // Now overwrite previous diff + padded 0s with the two new differences

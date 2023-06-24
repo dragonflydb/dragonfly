@@ -68,7 +68,7 @@ TEST_F(CompressedListTest, BasicInsert) {
   EXPECT_EQ(list.ByteSize(), list.Size());
 }
 
-TEST_F(CompressedListTest, BasicLarger) {
+TEST_F(CompressedListTest, BasicInsertLargeValues) {
   CompressedList list;
 
   uint32_t base = 1'000'000;
@@ -93,6 +93,61 @@ TEST_F(CompressedListTest, SortedBackInserter) {
   merge(v1.begin(), v1.end(), v2.begin(), v2.end(), CompressedList::SortedBackInserter{&list});
 
   EXPECT_EQ(IdVec(list.begin(), list.end()), IdVec({1, 2, 3, 4, 5, 6}));
+}
+
+TEST_F(CompressedListTest, BasicRemove) {
+  CompressedList list;
+
+  IdVec values = {1, 3, 4, 7, 8, 11, 15, 17, 20, 22, 27};
+  copy(values.begin(), values.end(), CompressedList::SortedBackInserter(&list));
+  EXPECT_EQ(IdVec(list.begin(), list.end()), values);
+
+  auto remove = [&list, &values](uint32_t value) {
+    values.erase(find(values.begin(), values.end(), value));
+    list.Remove(value);
+  };
+
+  // Remove back and front
+  remove(27);
+  EXPECT_EQ(IdVec(list.begin(), list.end()), values);
+  remove(1);
+  EXPECT_EQ(IdVec(list.begin(), list.end()), values);
+
+  // Remove from middle
+  remove(11);
+  EXPECT_EQ(IdVec(list.begin(), list.end()), values);
+  remove(4);
+  EXPECT_EQ(IdVec(list.begin(), list.end()), values);
+  remove(17);
+  EXPECT_EQ(IdVec(list.begin(), list.end()), values);
+  remove(8);
+  EXPECT_EQ(IdVec(list.begin(), list.end()), values);
+
+  // Remove non existing
+  list.Remove(16);
+  EXPECT_EQ(IdVec(list.begin(), list.end()), values);
+}
+
+TEST_F(CompressedListTest, BasicRemoveLargeValues) {
+  CompressedList list;
+
+  IdVec values = {1, 12, 123, 123'4, 123'45, 123'456, 1'234'567, 12'345'678};
+  copy(values.begin(), values.end(), CompressedList::SortedBackInserter(&list));
+  EXPECT_EQ(IdVec(list.begin(), list.end()), values);
+
+  auto remove = [&list, &values](uint32_t value) {
+    values.erase(find(values.begin(), values.end(), value));
+    list.Remove(value);
+  };
+
+  remove(123'45);
+  EXPECT_EQ(IdVec(list.begin(), list.end()), values);
+
+  remove(12);
+  EXPECT_EQ(IdVec(list.begin(), list.end()), values);
+
+  remove(1'234'567);
+  EXPECT_EQ(IdVec(list.begin(), list.end()), values);
 }
 
 }  // namespace dfly::search
