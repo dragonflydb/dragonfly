@@ -526,6 +526,7 @@ void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
     return true;
   };
 
+  ServerState& etl = *ServerState::tlocal();
   PrimeTable* pt = &db_arr_[0]->prime;
   PrimeTable::Cursor cursor;
   uint64_t i = 0;
@@ -537,8 +538,8 @@ void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
       ThisFiber::Yield();
     }
 
-  } while (cursor);
-  mi_heap_collect(ServerState::tlocal()->data_heap(), true);
+  } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
+  mi_heap_collect(etl.data_heap(), true);
 }
 
 void DbSlice::FlushSlots(SlotSet slot_ids) {
