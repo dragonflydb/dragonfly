@@ -103,6 +103,13 @@ The Dragonfly DB team has agreed to systematically use a number of pre-commit ho
 normalize formatting of code. You need to install and enable pre-commit to have these used
 when you do your own commits.
 
+## Codebase guidelines
+
+This repo conforms to the Google's C++ Style Guide. Keep in mind we use an older version of the
+style guide which can be found [here](https://github.com/google/styleguide/blob/505ba68c74eb97e6966f60907ce893001bedc706/cppguide.html).
+
+Any exception to the rules specified on the style guide will be documented here.
+
 ## License terms for contributions
 
 Please see our [CLA agreement](./CLA.txt)
