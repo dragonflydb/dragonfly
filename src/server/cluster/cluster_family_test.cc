@@ -589,8 +589,8 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
                                                   IntArg(0), "total_writes", Not(IntArg(0)))))));
 }
 
-// Fix issue #1302
-TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlotsNoCrushOnShutdown) {
+// Test issue #1302
+TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlotsNoCrashOnShutdown) {
   string config_template = R"json(
       [
         {
@@ -622,6 +622,8 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlotsNoCrushOnShutdown) {
                                         IntArg(0), "total_writes", Not(IntArg(0)))))));
 
   config = absl::Substitute(config_template, "abc");
+  // After running the new config we start a fiber that removes all slots from current instance
+  // we immediately shut down to test that we do not crash.
   EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
 }
 
