@@ -953,8 +953,9 @@ async def test_replication_info(df_local_factory, df_seeder_factory, n_keys=2000
     await assert_lag_condition(master, c_master, lambda lag: lag == 0)
 
     seeder = df_seeder_factory.create(port=master.port, keys=n_keys, dbcount=2)
-    fill_task = asyncio.create_task(seeder.run(target_ops=300))
+    fill_task = asyncio.create_task(seeder.run(target_ops=3000))
     await assert_lag_condition(master, c_master, lambda lag: lag > 30)
+    seeder.stop()
 
     await fill_task
     await wait_available_async(c_replica)
