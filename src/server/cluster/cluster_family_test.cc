@@ -589,6 +589,44 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
                                                   IntArg(0), "total_writes", Not(IntArg(0)))))));
 }
 
+// Test issue #1302
+TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlotsNoCrashOnShutdown) {
+  string config_template = R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 16383
+            }
+          ],
+          "master": {
+            "id": "$0",
+            "ip": "10.0.0.1",
+            "port": 7000
+          },
+          "replicas": []
+        }
+      ])json";
+  string config = absl::Substitute(config_template, RunAdmin({"dflycluster", "myid"}).GetString());
+
+  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
+
+  Run({"debug", "populate", "100000"});
+
+  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "1", "2"}),
+              RespArray(ElementsAre(
+                  RespArray(ElementsAre(IntArg(1), "key_count", Not(IntArg(0)), "total_reads",
+                                        IntArg(0), "total_writes", Not(IntArg(0)))),
+                  RespArray(ElementsAre(IntArg(2), "key_count", Not(IntArg(0)), "total_reads",
+                                        IntArg(0), "total_writes", Not(IntArg(0)))))));
+
+  config = absl::Substitute(config_template, "abc");
+  // After running the new config we start a fiber that removes all slots from current instance
+  // we immediately shut down to test that we do not crash.
+  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
+}
+
 TEST_F(ClusterFamilyTest, ClusterConfigDeleteSomeSlots) {
   string config_template = R"json(
       [
