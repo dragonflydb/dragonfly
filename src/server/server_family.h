@@ -8,6 +8,7 @@
 #include <string>
 
 #include "facade/conn_context.h"
+#include "facade/dragonfly_listener.h"
 #include "facade/redis_parser.h"
 #include "server/channel_store.h"
 #include "server/engine_shard_set.h"
@@ -88,7 +89,7 @@ class ServerFamily {
   explicit ServerFamily(Service* service);
   ~ServerFamily();
 
-  void Init(util::AcceptServer* acceptor, util::ListenerInterface* main_listener,
+  void Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners,
             ClusterFamily* cluster_family);
   void Register(CommandRegistry* registry);
   void Shutdown();
@@ -195,7 +196,7 @@ class ServerFamily {
   Service& service_;
 
   util::AcceptServer* acceptor_ = nullptr;
-  util::ListenerInterface* main_listener_ = nullptr;
+  std::vector<facade::Listener*> listeners_;
   util::ProactorBase* pb_task_ = nullptr;
 
   mutable Mutex replicaof_mu_, save_mu_;

@@ -539,7 +539,7 @@ Service::~Service() {
   shard_set = nullptr;
 }
 
-void Service::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_interface,
+void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners,
                    const InitOpts& opts) {
   InitRedisTables();
 
@@ -557,7 +557,7 @@ void Service::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_i
   request_latency_usec.Init(&pp_);
   StringFamily::Init(&pp_);
   GenericFamily::Init(&pp_);
-  server_family_.Init(acceptor, main_interface, &cluster_family_);
+  server_family_.Init(acceptor, listeners, &cluster_family_);
 
   ChannelStore* cs = new ChannelStore{};
   pp_.Await(
