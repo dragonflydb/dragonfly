@@ -379,6 +379,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
 
   // TODO: We should cancel blocking commands before awaiting all
   // dispatches to finish.
+  sf_->CancelBlockingCommands();
   if (!sf_->AwaitDispatches(timeout_dur, [self = cntx->owner()](util::Connection* conn) {
         // The only command that is currently dispatching should be the takeover command -
         // so we wait until this is true.

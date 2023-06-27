@@ -1029,7 +1029,7 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
   // Should work though it's confusing to have it here.
   owner->RegisterBreakHook([res, this](uint32_t) {
     if (res->transaction) {
-      res->transaction->BreakOnShutdown();
+      res->transaction->CancelBlocking();
     }
     this->server_family().BreakOnShutdown();
   });
