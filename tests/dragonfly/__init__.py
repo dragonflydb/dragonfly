@@ -3,6 +3,7 @@ import time
 import subprocess
 import aiohttp
 from prometheus_client.parser import text_string_to_metric_families
+from redis.asyncio import Redis as RedisClient
 
 from dataclasses import dataclass
 
@@ -32,6 +33,10 @@ class DflyInstance:
         self.args = args
         self.params = params
         self.proc = None
+        self._client : Optional[RedisClient] = None
+
+    def client(self) -> RedisClient:
+        return RedisClient(port=self.port)
 
     def start(self):
         self._start()

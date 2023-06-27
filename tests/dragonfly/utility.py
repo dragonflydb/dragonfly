@@ -2,6 +2,7 @@ import itertools
 import sys
 import asyncio
 from redis import asyncio as aioredis
+import redis
 import random
 import string
 import itertools
@@ -342,7 +343,7 @@ class DflySeeder:
         assert await seeder.compare(capture, port=1112)
     """
 
-    def __init__(self, port=6379, keys=1000, val_size=50, batch_size=100, max_multikey=5, dbcount=1, multi_transaction_probability=0.3, log_file=None, unsupported_types=[]):
+    def __init__(self, port=6379, keys=1000, val_size=50, batch_size=100, max_multikey=5, dbcount=1, multi_transaction_probability=0.3, log_file=None, unsupported_types=[], stop_on_failure=True):
         self.gen = CommandGenerator(
             keys, val_size, batch_size, max_multikey, unsupported_types
         )
@@ -350,6 +351,7 @@ class DflySeeder:
         self.dbcount = dbcount
         self.multi_transaction_probability = multi_transaction_probability
         self.stop_flag = False
+        self.stop_on_failure = stop_on_failure
 
         self.log_file = log_file
         if self.log_file is not None:
@@ -496,8 +498,9 @@ class DflySeeder:
 
             try:
                 await pipe.execute()
-            except Exception as e:
-                raise SystemExit(e)
+            except redis.exceptions.ConnectionError as e:
+                if self.stop_on_failure:
+                    raise SystemExit(e)
             queue.task_done()
         await client.connection_pool.disconnect()
 
