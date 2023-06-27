@@ -86,8 +86,6 @@ class ClusterConfig {
 
   ClusterConfig() = default;
 
-  std::string my_id_;
-
   ClusterShards config_;
 
   // True bits in `my_slots_` indicate that this slot is owned by this node.

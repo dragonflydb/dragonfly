@@ -91,7 +91,7 @@ TEST_F(ClusterConfigTest, ConfigSetOk) {
   EXPECT_THAT(config->GetOwnedSlots(), UnorderedElementsAre());
 }
 
-TEST_F(ClusterConfigTest, ConfigSetOkWithReplicas) {
+TEST_F(ClusterConfigTest, ConfigSetOkWithReplica) {
   auto config = ClusterConfig::CreateFromConfig(
       kMyId, {{.slot_ranges = {{.start = 0, .end = 0x3FFF}},
                .master = {.id = "other-master", .ip = "192.168.0.100", .port = 7000},
