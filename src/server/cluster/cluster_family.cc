@@ -18,6 +18,7 @@
 #include "server/conn_context.h"
 #include "server/dflycmd.h"
 #include "server/error.h"
+#include "server/journal/journal.h"
 #include "server/main_service.h"
 #include "server/replica.h"
 #include "server/server_family.h"
@@ -392,7 +393,7 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError(kClusterDisabled);
   }
 
-  if (!cntx->owner()->IsAdmin()) {
+  if (cntx->owner() && !cntx->owner()->IsAdmin()) {
     return (*cntx)->SendError(kDflyClusterCmdPort);
   }
 
@@ -404,6 +405,8 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return DflyClusterConfig(args, cntx);
   } else if (sub_cmd == "MYID") {
     return DflyClusterMyId(args, cntx);
+  } else if (sub_cmd == "FLUSHSLOTS") {
+    return DflyClusterFlushSlots(args, cntx);
   }
 
   return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "DFLYCLUSTER"), kSyntaxErrType);
@@ -429,6 +432,59 @@ SlotSet GetDeletedSlots(bool is_first_config, const SlotSet& before, const SlotS
 
 // Guards set configuration, so that we won't handle 2 in parallel.
 Mutex set_config_mu;
+
+void DeleteSlots(const SlotSet& slots) {
+  if (slots.empty()) {
+    return;
+  }
+
+  auto cb = [&](auto*) {
+    EngineShard* shard = EngineShard::tlocal();
+    if (shard == nullptr)
+      return;
+
+    shard->db_slice().FlushSlots(slots);
+  };
+  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+}
+
+void WriteFlushSlotsToJournal(const SlotSet& slots) {
+  if (slots.empty()) {
+    return;
+  }
+
+  // Build args
+  vector<string> args;
+  args.reserve(slots.size() + 1);
+  args.push_back("FLUSHSLOTS");
+  for (const SlotId slot : slots) {
+    args.push_back(absl::StrCat(slot));
+  }
+
+  // Build view
+  vector<string_view> args_view(args.size());
+  for (size_t i = 0; i < args.size(); ++i) {
+    args_view[i] = args[i];
+  }
+
+  auto cb = [&](auto*) {
+    EngineShard* shard = EngineShard::tlocal();
+    if (shard == nullptr) {
+      return;
+    }
+
+    auto journal = EngineShard::tlocal()->journal();
+    if (journal == nullptr) {
+      return;
+    }
+
+    // Send journal entry
+    journal->RecordEntry(/* txid= */ 0, journal::Op::COMMAND, /* dbid= */ 0,
+                         /* shard_cnt= */ shard_set->size(), make_pair("DFLYCLUSTER", args_view),
+                         false);
+  };
+  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+}
 }  // namespace
 
 void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) {
@@ -468,17 +524,10 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   SlotSet after = tl_cluster_config->GetOwnedSlots();
 
-  // Delete old slots data.
-  SlotSet deleted_slot_ids = GetDeletedSlots(is_first_config, before, after);
-  if (!deleted_slot_ids.empty()) {
-    auto cb = [&](auto*) {
-      EngineShard* shard = EngineShard::tlocal();
-      if (shard == nullptr)
-        return;
-
-      shard->db_slice().FlushSlots(deleted_slot_ids);
-    };
-    shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+  if (ServerState::tlocal()->is_master) {
+    auto deleted_slots = GetDeletedSlots(is_first_config, before, after);
+    DeleteSlots(deleted_slots);
+    WriteFlushSlotsToJournal(deleted_slots);
   }
 
   return rb->SendOk();
@@ -535,6 +584,26 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* c
     (*cntx)->SendBulkString("total_writes");
     (*cntx)->SendLong(static_cast<long>(slot_data.second.total_writes));
   }
+}
+
+void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cntx) {
+  SinkReplyBuilder* rb = cntx->reply_builder();
+
+  args.remove_prefix(1);  // Removes "FLUSHSLOTS" subcmd string
+
+  SlotSet slots;
+  slots.reserve(args.size());
+  for (size_t i = 0; i < args.size(); ++i) {
+    unsigned slot;
+    if (!absl::SimpleAtoi(ArgS(args, i), &slot) || (slot > ClusterConfig::kMaxSlotNum)) {
+      return rb->SendError(kSyntaxErrType);
+    }
+    slots.insert(static_cast<SlotId>(slot));
+  }
+
+  DeleteSlots(slots);
+
+  return rb->SendOk();
 }
 
 using EngineFunc = void (ClusterFamily::*)(CmdArgList args, ConnectionContext* cntx);

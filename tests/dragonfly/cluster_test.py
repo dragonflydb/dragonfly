@@ -378,9 +378,8 @@ async def test_cluster_replica_sets_non_owned_keys(df_local_factory):
 
     await push_config(replica_config, [c_replica_admin])
 
-    # The replica should have deleted the key.
-    # Note: this is not the long-term intended behavior. It will change after we fix #1320.
-    assert await c_replica.execute_command("dbsize") == 0
+    # The replica should *not* have deleted the key.
+    assert await c_replica.execute_command("dbsize") == 1
 
     # Set another key on the master, which it owns but the replica does not own.
     await c_master.set("key2", "value");
@@ -388,7 +387,7 @@ async def test_cluster_replica_sets_non_owned_keys(df_local_factory):
 
     # See that the key exists in both replica and master
     assert await c_master.execute_command("dbsize") == 2
-    assert await c_replica.execute_command("dbsize") == 1
+    assert await c_replica.execute_command("dbsize") == 2
 
     # The replica should still reply with MOVED, despite having that key.
     try:
@@ -396,6 +395,11 @@ async def test_cluster_replica_sets_non_owned_keys(df_local_factory):
         assert False, "Should not be able to get key on non-owner cluster node"
     except redis.exceptions.ResponseError as e:
         assert re.match(r"MOVED \d+ localhost:1111", e.args[0])
+
+    await push_config(replica_config, [c_master_admin])
+    await asyncio.sleep(0.5)
+    assert await c_master.execute_command("dbsize") == 0
+    assert await c_replica.execute_command("dbsize") == 0
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
