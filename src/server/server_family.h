@@ -156,6 +156,9 @@ class ServerFamily {
 
   void BreakOnShutdown();
 
+  bool AwaitDispatches(absl::Duration timeout,
+                       const std::function<bool(util::Connection*)>& filter);
+
  private:
   uint32_t shard_count() const {
     return shard_set->size();

@@ -1259,6 +1259,19 @@ void ServerFamily::BreakOnShutdown() {
   dfly_cmd_->BreakOnShutdown();
 }
 
+bool ServerFamily::AwaitDispatches(absl::Duration timeout,
+                                   const std::function<bool(util::Connection*)>& filter) {
+  auto start = absl::Now();
+  for (auto* listener : listeners_) {
+    absl::Duration remaining_time = timeout - (absl::Now() - start);
+    if (remaining_time < absl::Nanoseconds(0) ||
+        !listener->AwaitDispatches(remaining_time, filter)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 string GetPassword() {
   string flag = GetFlag(FLAGS_requirepass);
   if (!flag.empty()) {

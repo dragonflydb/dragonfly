@@ -26,7 +26,8 @@ class Listener : public util::ListenerInterface {
 
   // Wait until all connections that pass the filter have stopped dispatching or until a timeout has
   // run out. Returns true if the all connections have stopped dispatching.
-  bool AwaitDispatches(absl::Duration timeout, std::function<bool(util::Connection*)> filter);
+  bool AwaitDispatches(absl::Duration timeout,
+                       const std::function<bool(util::Connection*)>& filter);
 
  private:
   util::Connection* NewConnection(ProactorBase* proactor) final;

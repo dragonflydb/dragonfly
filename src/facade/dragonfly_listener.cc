@@ -180,7 +180,7 @@ void Listener::PreAcceptLoop(util::ProactorBase* pb) {
 }
 
 bool Listener::AwaitDispatches(absl::Duration timeout,
-                               std::function<bool(util::Connection*)> filter) {
+                               const std::function<bool(util::Connection*)>& filter) {
   absl::Time start = absl::Now();
 
   while (absl::Now() - start < timeout) {
