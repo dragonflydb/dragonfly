@@ -66,9 +66,8 @@ jobs:
 
 
       - name: Send notification on failure
-        if: failure() || cancelled()
+        if: failure()
         run: |
-
           get_failed_tests() {
             local report_file=$1
             echo $(jq -r '.tests[] | select(.outcome == "failed") | .nodeid' "$report_file")
