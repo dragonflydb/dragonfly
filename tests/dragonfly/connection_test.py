@@ -406,7 +406,6 @@ async def test_parser_while_script_running(async_client: aioredis.Redis, df_serv
 
 @dfly_args({"proactor_threads": 1})
 async def test_large_cmd(async_client: aioredis.Redis):
-    assert 1 == 2  # Test fail
     MAX_ARR_SIZE = 65535
     res = await async_client.hset('foo', mapping={f"key{i}": f"val{i}" for i in range(MAX_ARR_SIZE // 2)})
     assert res == MAX_ARR_SIZE // 2
