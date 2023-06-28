@@ -14,11 +14,13 @@
 #include "base/io_buf.h"
 #include "util/connection.h"
 #include "util/http/http_handler.h"
+#include "util/tls/tls_engine.h"
 
 //
 #include "core/fibers.h"
 #include "facade/facade_types.h"
 #include "facade/resp_expr.h"
+#include "util/tls/tls_socket.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
 typedef struct mi_heap_s mi_heap_t;
@@ -187,7 +189,8 @@ class Connection : public util::Connection {
                                                      SinkReplyBuilder* orig_builder);
 
   // Returns true if HTTP header is detected.
-  io::Result<bool> CheckForHttpProto(util::FiberSocketBase* peer);
+  io::Result<bool> CheckForHttpProto(util::FiberSocketBase* peer,
+                                     util::tls::TlsSocket::Buffer maybe_leftover_bytes);
 
   // Dispatch last command parsed by ParseRedis
   void DispatchCommand(uint32_t consumed, mi_heap_t* heap);
@@ -253,6 +256,8 @@ class Connection : public util::Connection {
   // Aggregated while handling pipelines,
   // graudally released while handling regular commands.
   static thread_local std::vector<PipelineMessagePtr> pipeline_req_pool_;
+
+  bool IsReplicaCommand(util::tls::TlsSocket::Buffer b) const;
 };
 
 void RespToArgList(const RespVec& src, CmdArgVec* dest);
