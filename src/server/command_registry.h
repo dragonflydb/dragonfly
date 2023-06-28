@@ -101,9 +101,10 @@ class CommandId : public facade::CommandId {
 
 class CommandRegistry {
   absl::flat_hash_map<std::string_view, CommandId> cmd_map_;
+  absl::flat_hash_map<std::string, std::string> cmd_rename_map_;
 
  public:
-  CommandRegistry() = default;
+  CommandRegistry();
 
   CommandRegistry& operator<<(CommandId cmd);
 

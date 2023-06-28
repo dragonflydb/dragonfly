@@ -4,17 +4,25 @@
 
 #include "server/command_registry.h"
 
+#include <absl/strings/str_split.h>
+
 #include "absl/strings/str_cat.h"
 #include "base/bits.h"
+#include "base/flags.h"
 #include "base/logging.h"
 #include "facade/error.h"
 #include "server/conn_context.h"
 
+using namespace std;
+ABSL_FLAG(string, rename_command, "",
+          "Change the name of commands, format is: <cmd1_name>=<cmd1_new_name>, "
+          "<cmd2_name>=<cmd2_new_name>");
+
 namespace dfly {
 
 using namespace facade;
-using namespace std;
 
+using absl::GetFlag;
 using absl::StrAppend;
 using absl::StrCat;
 
@@ -38,8 +46,26 @@ bool CommandId::IsTransactional() const {
   return false;
 }
 
+CommandRegistry::CommandRegistry() {
+  string rename_command = GetFlag(FLAGS_rename_command);
+  vector<std::string_view> parts = absl::StrSplit(rename_command, ",", absl::SkipEmpty());
+  for (std::string_view p : parts) {
+    size_t sep = p.find('=');
+
+    string cmd_name = string(p.substr(0, sep));
+    transform(cmd_name.begin(), cmd_name.end(), cmd_name.begin(), ::toupper);
+    string cmd_new_name = string(p.substr(sep + 1));
+    transform(cmd_new_name.begin(), cmd_new_name.end(), cmd_new_name.begin(), ::toupper);
+    cmd_rename_map_.emplace(cmd_name, cmd_new_name);
+  }
+}
+
 CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   string_view k = cmd.name();
+  auto it = cmd_rename_map_.find(k);
+  if (it != cmd_rename_map_.end()) {
+    k = it->second;
+  }
   CHECK(cmd_map_.emplace(k, std::move(cmd)).second) << k;
 
   return *this;

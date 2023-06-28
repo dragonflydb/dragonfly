@@ -21,6 +21,7 @@ extern "C" {
 #include "server/test_utils.h"
 
 ABSL_DECLARE_FLAG(float, mem_defrag_threshold);
+ABSL_DECLARE_FLAG(std::string, rename_command);
 
 namespace dfly {
 
@@ -89,6 +90,28 @@ TEST_F(DflyEngineTest, Sds) {
   EXPECT_STREQ("abc\xf0", argv[0]);
   EXPECT_STREQ("oops\n", argv[1]);
   sdsfreesplitres(argv, argc);
+}
+
+class DflyRenameCommandTest : public DflyEngineTest {
+ protected:
+  DflyRenameCommandTest() : DflyEngineTest() {
+    // remame flushall to myflushall, flushdb command will not be able to execute
+    absl::SetFlag(&FLAGS_rename_command, "flushall=myflushall,flushdb=,");
+  }
+};
+
+TEST_F(DflyRenameCommandTest, RenameCommand) {
+  Run({"set", "a", "1"});
+  ASSERT_EQ(1, CheckedInt({"dbsize"}));
+  // flushall should not execute anything and should return error, as it was renamed.
+  RespExpr resp = Run({"flushall"});
+  ASSERT_THAT(resp, ErrArg("unknown command `FLUSHALL`"));
+  ASSERT_EQ(1, CheckedInt({"dbsize"}));
+  resp = Run({"myflushall"});
+  ASSERT_EQ(resp, "OK");
+  ASSERT_EQ(0, CheckedInt({"dbsize"}));
+  resp = Run({"flushdb", "0"});
+  ASSERT_THAT(resp, ErrArg("unknown command `FLUSHDB`"));
 }
 
 TEST_F(SingleThreadDflyEngineTest, GlobalSingleThread) {
