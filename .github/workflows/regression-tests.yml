@@ -66,9 +66,8 @@ jobs:
 
 
       - name: Send notification on failure
-        if: failure() || cancelled()
+        if: failure()
         run: |
-
           get_failed_tests() {
             local report_file=$1
             echo $(jq -r '.tests[] | select(.outcome == "failed") | .nodeid' "$report_file")
@@ -85,8 +84,12 @@ jobs:
           elif [ -f report.json ]; then
             failed_tests=$(get_failed_tests report.json)
           fi
+
+          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          message="Regression tests failed.\\n The commit is: ${{github.sha}}.\\n $failed_tests \\n Job Link: ${job_link}\\n"
+
           curl -s \
             -X POST \
             -H 'Content-Type: application/json' \
             '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
-            -d "{\"text\": \"Regression tests failed.\\n The commit is ${{github.sha}}.\\n $failed_tests\"}"
+            -d '{"text": "'"${message}"'"}'

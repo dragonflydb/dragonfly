@@ -765,6 +765,40 @@ TEST_F(ClusterFamilyTest, FlushSlots) {
                                                           "total_reads", _, "total_writes", _)))));
 }
 
+TEST_F(ClusterFamilyTest, ClusterCrossSlot) {
+  string config_template = R"json(
+      [
+        {
+          "slot_ranges": [
+            {
+              "start": 0,
+              "end": 16383
+            }
+          ],
+          "master": {
+            "id": "$0",
+            "ip": "10.0.0.1",
+            "port": 7000
+          },
+          "replicas": []
+        }
+      ])json";
+  string config = absl::Substitute(config_template, GetMyId());
+
+  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
+  EXPECT_EQ(Run({"SET", "key", "value"}), "OK");
+  EXPECT_EQ(Run({"GET", "key"}), "value");
+
+  EXPECT_EQ(Run({"MSET", "key", "value2"}), "OK");
+  EXPECT_EQ(Run({"MGET", "key"}), "value2");
+
+  EXPECT_THAT(Run({"MSET", "key", "value", "key2", "value2"}), ErrArg("CROSSSLOT"));
+  EXPECT_THAT(Run({"MGET", "key", "key2"}), ErrArg("CROSSSLOT"));
+
+  EXPECT_EQ(Run({"MSET", "key{tag}", "value", "key2{tag}", "value2"}), "OK");
+  EXPECT_THAT(Run({"MGET", "key{tag}", "key2{tag}"}), RespArray(ElementsAre("value", "value2")));
+}
+
 class ClusterFamilyEmulatedTest : public ClusterFamilyTest {
  public:
   ClusterFamilyEmulatedTest() {

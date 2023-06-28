@@ -1350,18 +1350,20 @@ bool Replica::TransactionData::AddEntry(journal::ParsedEntry&& entry) {
 }
 
 bool Replica::TransactionData::IsGlobalCmd() const {
-  if (commands.size() != 1) {
+  if (commands.size() > 1) {
     return false;
   }
 
-  auto& front = commands.front();
-  if (front.cmd_args.size() == 1) {
-    return true;
+  auto& command = commands.front();
+  if (command.cmd_args.empty()) {
+    return false;
   }
 
-  CHECK_GE(front.cmd_args.size(), 2UL);
-  if (absl::EqualsIgnoreCase(ToSV(front.cmd_args[0]), "DFLYCLUSTER"sv) &&
-      absl::EqualsIgnoreCase(ToSV(front.cmd_args[1]), "FLUSHSLOTS"sv)) {
+  auto& args = command.cmd_args;
+  if (absl::EqualsIgnoreCase(ToSV(args[0]), "FLUSHDB"sv) ||
+      absl::EqualsIgnoreCase(ToSV(args[0]), "FLUSHALL"sv) ||
+      (absl::EqualsIgnoreCase(ToSV(args[0]), "DFLYCLUSTER"sv) &&
+       absl::EqualsIgnoreCase(ToSV(args[1]), "FLUSHSLOTS"sv))) {
     return true;
   }
 

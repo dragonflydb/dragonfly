@@ -19,8 +19,6 @@ namespace journal {
 struct Entry;
 }  // namespace journal
 
-class RdbSerializer;
-
 // ┌────────────────┐   ┌─────────────┐
 // │IterateBucketsFb│   │  OnDbChange │
 // └──────┬─────────┘   └─┬───────────┘
