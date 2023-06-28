@@ -38,6 +38,7 @@ TEST_F(CompressedListTest, BasicInsert) {
   add(10);
   EXPECT_EQ(current(), list_copy);
   add(15);
+  EXPECT_EQ(current(), list_copy);
   add(22);
   EXPECT_EQ(current(), list_copy);
   add(25);

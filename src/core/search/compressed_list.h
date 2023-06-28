@@ -35,6 +35,7 @@ class CompressedList {
     IntType operator*() const;
     Iterator& operator++();
 
+    friend class CompressedList;
     friend bool operator==(const Iterator& l, const Iterator& r);
     friend bool operator!=(const Iterator& l, const Iterator& r);
 
@@ -42,6 +43,7 @@ class CompressedList {
     void ReadNext();  // Decode next value to stash
 
     std::optional<IntType> stash_{};
+    absl::Span<const uint8_t> last_read_{};
     absl::Span<const uint8_t> diffs_{};
   };
 

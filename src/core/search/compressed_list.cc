@@ -38,8 +38,9 @@ bool operator!=(const CompressedList::Iterator& l, const CompressedList::Iterato
 
 void CompressedList::Iterator::ReadNext() {
   if (diffs_.empty()) {
-    diffs_ = {nullptr, 0};
     stash_ = nullopt;
+    last_read_ = {nullptr, 0};
+    diffs_ = {nullptr, 0};
     return;
   }
 
@@ -47,6 +48,7 @@ void CompressedList::Iterator::ReadNext() {
   auto [diff, read] = CompressedList::ReadVarLen(diffs_);
 
   stash_ = base + diff;
+  last_read_ = diffs_.subspan(0, read);
   diffs_.remove_prefix(read);
 }
 
@@ -80,23 +82,16 @@ void CompressedList::PushBackDiff(IntType diff) {
 
 // Do a linear scan by encoding all diffs to find value
 CompressedList::EntryLocation CompressedList::LowerBound(IntType value) const {
-  IntType entry = 0, prev_entry = 0;
-  absl::Span<const uint8_t> diffs_tail{diffs_}, entry_span{};
-
-  while (!diffs_tail.empty()) {
-    auto [diff, read] = ReadVarLen(diffs_tail);
-
-    prev_entry = entry;
-    entry += diff;
-
-    entry_span = diffs_tail.subspan(0, read);
-    diffs_tail.remove_prefix(read);
-
-    if (entry >= value)
+  auto it = begin(), prev_it = end(), next_it = end();
+  while (it != end()) {
+    next_it = it;
+    if (*it >= value || ++next_it == end())
       break;
+    prev_it = it;
+    it = next_it;
   }
 
-  return EntryLocation{entry, prev_entry, entry_span};
+  return EntryLocation{it.stash_.value_or(0), prev_it.stash_.value_or(0), it.last_read_};
 }
 
 // Insert has linear complexity. It tries to find between which two entries A and B the new value V
