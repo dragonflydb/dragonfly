@@ -3,6 +3,8 @@
 //
 #include "server/replica.h"
 
+#include "absl/strings/match.h"
+
 extern "C" {
 #include "redis/rdb.h"
 }
@@ -1348,7 +1350,24 @@ bool Replica::TransactionData::AddEntry(journal::ParsedEntry&& entry) {
 }
 
 bool Replica::TransactionData::IsGlobalCmd() const {
-  return commands.size() == 1 && commands.front().cmd_args.size() == 1;
+  if (commands.size() > 1) {
+    return false;
+  }
+
+  auto& command = commands.front();
+  if (command.cmd_args.empty()) {
+    return false;
+  }
+
+  auto& args = command.cmd_args;
+  if (absl::EqualsIgnoreCase(ToSV(args[0]), "FLUSHDB"sv) ||
+      absl::EqualsIgnoreCase(ToSV(args[0]), "FLUSHALL"sv) ||
+      (absl::EqualsIgnoreCase(ToSV(args[0]), "DFLYCLUSTER"sv) &&
+       absl::EqualsIgnoreCase(ToSV(args[1]), "FLUSHSLOTS"sv))) {
+    return true;
+  }
+
+  return false;
 }
 
 Replica::TransactionData Replica::TransactionData::FromSingle(journal::ParsedEntry&& entry) {

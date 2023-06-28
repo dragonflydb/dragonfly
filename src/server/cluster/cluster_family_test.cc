@@ -47,6 +47,10 @@ class ClusterFamilyTest : public BaseFamilyTest {
     EXPECT_LE(absl::Now(), deadline)
         << "Timeout of " << timeout << " reached when expecting condition";
   }
+
+  string GetMyId() {
+    return RunAdmin({"dflycluster", "myid"}).GetString();
+  }
 };
 
 TEST_F(ClusterFamilyTest, DflyClusterOnlyOnAdminPort) {
@@ -474,7 +478,7 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
           "replicas": []
         }
       ])json";
-  string config = absl::Substitute(config_template, RunAdmin({"dflycluster", "myid"}).GetString());
+  string config = absl::Substitute(config_template, GetMyId());
 
   EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
 
@@ -528,7 +532,7 @@ TEST_F(ClusterFamilyTest, ClusterSlotsPopulate) {
           "replicas": []
         }
       ])json";
-  string config = absl::Substitute(config_template, RunAdmin({"dflycluster", "myid"}).GetString());
+  string config = absl::Substitute(config_template, GetMyId());
 
   EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
 
@@ -563,7 +567,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
           "replicas": []
         }
       ])json";
-  string config = absl::Substitute(config_template, RunAdmin({"dflycluster", "myid"}).GetString());
+  string config = absl::Substitute(config_template, GetMyId());
 
   EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
 
@@ -608,7 +612,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlotsNoCrashOnShutdown) {
           "replicas": []
         }
       ])json";
-  string config = absl::Substitute(config_template, RunAdmin({"dflycluster", "myid"}).GetString());
+  string config = absl::Substitute(config_template, GetMyId());
 
   EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
 
@@ -659,7 +663,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSomeSlots) {
           "replicas": []
         }
       ])json";
-  string config = absl::Substitute(config_template, RunAdmin({"dflycluster", "myid"}).GetString());
+  string config = absl::Substitute(config_template, GetMyId());
 
   EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
 
@@ -733,6 +737,34 @@ TEST_F(ClusterFamilyTest, Keyslot) {
             CheckedInt({"cluster", "keyslot", "123{def}456"}));
 }
 
+TEST_F(ClusterFamilyTest, FlushSlots) {
+  EXPECT_EQ(Run({"debug", "populate", "100", "key", "4", "slots", "0", "1"}), "OK");
+
+  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "0", "1"}),
+              RespArray(ElementsAre(RespArray(ElementsAre(IntArg(0), "key_count", Not(IntArg(0)),
+                                                          "total_reads", _, "total_writes", _)),
+                                    RespArray(ElementsAre(IntArg(1), "key_count", Not(IntArg(0)),
+                                                          "total_reads", _, "total_writes", _)))));
+
+  ExpectConditionWithinTimeout([&]() {
+    return RunAdmin({"dflycluster", "flushslots", "0"}) == "OK";
+  });
+
+  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "0", "1"}),
+              RespArray(ElementsAre(RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0),
+                                                          "total_reads", _, "total_writes", _)),
+                                    RespArray(ElementsAre(IntArg(1), "key_count", Not(IntArg(0)),
+                                                          "total_reads", _, "total_writes", _)))));
+
+  EXPECT_EQ(RunAdmin({"dflycluster", "flushslots", "0", "1"}), "OK");
+
+  EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "0", "1"}),
+              RespArray(ElementsAre(RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0),
+                                                          "total_reads", _, "total_writes", _)),
+                                    RespArray(ElementsAre(IntArg(1), "key_count", IntArg(0),
+                                                          "total_reads", _, "total_writes", _)))));
+}
+
 TEST_F(ClusterFamilyTest, ClusterCrossSlot) {
   string config_template = R"json(
       [
@@ -751,7 +783,7 @@ TEST_F(ClusterFamilyTest, ClusterCrossSlot) {
           "replicas": []
         }
       ])json";
-  string config = absl::Substitute(config_template, RunAdmin({"dflycluster", "myid"}).GetString());
+  string config = absl::Substitute(config_template, GetMyId());
 
   EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
   EXPECT_EQ(Run({"SET", "key", "value"}), "OK");
@@ -767,7 +799,7 @@ TEST_F(ClusterFamilyTest, ClusterCrossSlot) {
   EXPECT_THAT(Run({"MGET", "key{tag}", "key2{tag}"}), RespArray(ElementsAre("value", "value2")));
 }
 
-class ClusterFamilyEmulatedTest : public BaseFamilyTest {
+class ClusterFamilyEmulatedTest : public ClusterFamilyTest {
  public:
   ClusterFamilyEmulatedTest() {
     SetTestFlag("cluster_mode", "emulated");
@@ -786,17 +818,17 @@ TEST_F(ClusterFamilyEmulatedTest, ClusterInfo) {
 
 TEST_F(ClusterFamilyEmulatedTest, ClusterShards) {
   EXPECT_THAT(Run({"cluster", "shards"}),
-              RespArray(ElementsAre("slots",                                                      //
-                                    RespArray(ElementsAre(IntArg(0), IntArg(16383))),             //
-                                    "nodes",                                                      //
-                                    RespArray(ElementsAre(                                        //
-                                        RespArray(ElementsAre(                                    //
-                                            "id", RunAdmin({"dflycluster", "myid"}).GetString(),  //
-                                            "endpoint", "fake-host",                              //
-                                            "ip", "fake-host",                                    //
-                                            "port", IntArg(6379),                                 //
-                                            "role", "master",                                     //
-                                            "replication-offset", IntArg(0),                      //
+              RespArray(ElementsAre("slots",                                           //
+                                    RespArray(ElementsAre(IntArg(0), IntArg(16383))),  //
+                                    "nodes",                                           //
+                                    RespArray(ElementsAre(                             //
+                                        RespArray(ElementsAre(                         //
+                                            "id", GetMyId(),                           //
+                                            "endpoint", "fake-host",                   //
+                                            "ip", "fake-host",                         //
+                                            "port", IntArg(6379),                      //
+                                            "role", "master",                          //
+                                            "replication-offset", IntArg(0),           //
                                             "health", "online")))))));
 }
 
@@ -807,13 +839,12 @@ TEST_F(ClusterFamilyEmulatedTest, ClusterSlots) {
                                     RespArray(ElementsAre(  //
                                         "fake-host",        //
                                         IntArg(6379),       //
-                                        RunAdmin({"dflycluster", "myid"}).GetString())))));
+                                        GetMyId())))));
 }
 
 TEST_F(ClusterFamilyEmulatedTest, ClusterNodes) {
   EXPECT_THAT(Run({"cluster", "nodes"}),
-              RunAdmin({"dflycluster", "myid"}).GetString() +
-                  " fake-host:6379@6379 myself,master - 0 0 0 connected 0-16383\r\n");
+              GetMyId() + " fake-host:6379@6379 myself,master - 0 0 0 connected 0-16383\r\n");
 }
 
 }  // namespace
