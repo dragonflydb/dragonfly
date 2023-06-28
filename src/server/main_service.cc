@@ -611,7 +611,7 @@ bool Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
   optional<SlotId> keys_slot;
   bool cross_slot = false;
   // Iterate keys and check to which slot they belong.
-  for (unsigned i = key_index.start; i < key_index.end; ++i) {
+  for (unsigned i = key_index.start; i < key_index.end; i += key_index.step) {
     string_view key = ArgS(args, i);
     SlotId slot = ClusterConfig::KeySlot(key);
     if (keys_slot && slot != *keys_slot) {
