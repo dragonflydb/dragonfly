@@ -8,14 +8,17 @@ namespace dfly::search {
 
 using namespace std;
 
+namespace {
+
+const int kMaxBufferSize = sizeof(CompressedList::IntType) * 2;
+
+}  // namespace
+
 CompressedList::Iterator::Iterator(const CompressedList& list) : stash_{}, diffs_{list.diffs_} {
   ReadNext();
 }
 
-CompressedList::Iterator::Iterator() : stash_{}, diffs_{nullptr, 0} {
-}
-
-uint32_t CompressedList::Iterator::operator*() const {
+CompressedList::IntType CompressedList::Iterator::operator*() const {
   DCHECK(stash_);
   return *stash_;
 }
@@ -36,10 +39,11 @@ bool operator!=(const CompressedList::Iterator& l, const CompressedList::Iterato
 void CompressedList::Iterator::ReadNext() {
   if (diffs_.empty()) {
     diffs_ = {nullptr, 0};
+    stash_ = nullopt;
     return;
   }
 
-  uint32_t base = stash_.value_or(0);
+  IntType base = stash_.value_or(0);
   auto [diff, read] = CompressedList::ReadVarLen(diffs_);
 
   stash_ = base + diff;
@@ -58,7 +62,7 @@ CompressedList::SortedBackInserter::SortedBackInserter(CompressedList* list)
     : last_{0}, list_{list} {
 }
 
-CompressedList::SortedBackInserter& CompressedList::SortedBackInserter::operator=(uint32_t value) {
+CompressedList::SortedBackInserter& CompressedList::SortedBackInserter::operator=(IntType value) {
   DCHECK_LE(last_, value);
   if (value > last_) {
     list_->PushBackDiff(value - last_);
@@ -68,18 +72,18 @@ CompressedList::SortedBackInserter& CompressedList::SortedBackInserter::operator
 }
 
 // Simply encode difference and add to end of diffs array
-void CompressedList::PushBackDiff(uint32_t diff) {
-  array<uint8_t, 16> buf;
+void CompressedList::PushBackDiff(IntType diff) {
+  array<uint8_t, kMaxBufferSize> buf;
   auto diff_span = WriteVarLen(diff, absl::MakeSpan(buf));
   diffs_.insert(diffs_.end(), diff_span.begin(), diff_span.end());
 }
 
 // Do a linear scan by encoding all diffs to find value
-CompressedList::EntryLocation CompressedList::LowerBound(uint32_t value) const {
-  uint32_t entry = 0, prev_entry = 0;
+CompressedList::EntryLocation CompressedList::LowerBound(IntType value) const {
+  IntType entry = 0, prev_entry = 0;
   absl::Span<const uint8_t> diffs_tail{diffs_}, entry_span{};
 
-  while (entry < value && !diffs_tail.empty()) {
+  while (!diffs_tail.empty()) {
     auto [diff, read] = ReadVarLen(diffs_tail);
 
     prev_entry = entry;
@@ -87,6 +91,9 @@ CompressedList::EntryLocation CompressedList::LowerBound(uint32_t value) const {
 
     entry_span = diffs_tail.subspan(0, read);
     diffs_tail.remove_prefix(read);
+
+    if (entry >= value)
+      break;
   }
 
   return EntryLocation{entry, prev_entry, entry_span};
@@ -96,7 +103,7 @@ CompressedList::EntryLocation CompressedList::LowerBound(uint32_t value) const {
 // needs to be inserted. Then it computes the differences dif1 = V - A and diff2 = B - V that need
 // to be stored to encode the triple A V B. Those are stored where diff0 = B - A was previously
 // stored, possibly extending the vector
-void CompressedList::Insert(uint32_t value) {
+void CompressedList::Insert(IntType value) {
   auto bound = LowerBound(value);
 
   // At least one element was read and it's equal to value: return to avoid duplicate
@@ -115,10 +122,10 @@ void CompressedList::Insert(uint32_t value) {
   // Now the list certainly contains the bound B > V and possibly A < V (or 0 by default),
   // so we need to encode both differences diff1 and diff2
   DCHECK_GT(bound.value, value);
-  DCHECK_LT(bound.prev_value, value);
+  DCHECK_LE(bound.prev_value, value);
 
   // Compute and encode new diff1 and diff2 into buf1 and buf2 respectivaly
-  array<uint8_t, 16> buf1, buf2;
+  array<uint8_t, kMaxBufferSize> buf1, buf2;
   auto diff1_span = WriteVarLen(value - bound.prev_value, absl::MakeSpan(buf1));
   auto diff2_span = WriteVarLen(bound.value - value, absl::MakeSpan(buf2));
 
@@ -136,7 +143,7 @@ void CompressedList::Insert(uint32_t value) {
 // Remove has linear complexity. It tries to find the element V and its neighbors A and B,
 // which are encoded as diff1 = V - A and diff2 = B - V. Adjacently stored diff1 and diff2
 // need to be replaced with diff3 = diff1 + diff2s
-void CompressedList::Remove(uint32_t value) {
+void CompressedList::Remove(IntType value) {
   auto bound = LowerBound(value);
 
   // Nothing was read or the element was not found
@@ -150,7 +157,7 @@ void CompressedList::Remove(uint32_t value) {
   ptrdiff_t diff_offset = bound.diff_span.data() - diffs_.data();
   auto diffs_tail = absl::MakeSpan(diffs_).subspan(diff_offset + bound.diff_span.size());
 
-  // If its stored at the end, simply truncate it away
+  // If it's stored at the end, simply truncate it away
   if (diffs_tail.empty()) {
     diffs_.resize(diffs_.size() - bound.diff_span.size());
     return;
@@ -159,10 +166,10 @@ void CompressedList::Remove(uint32_t value) {
   // Now the list certainly contains a succeeding element B > V and possibly A < V (or 0)
   // Read diff2 and calculate diff3 = diff1 + diff2
   auto [diff2, diff2_read] = ReadVarLen(diffs_tail);
-  uint32_t diff3 = (bound.value - bound.prev_value) + diff2;
+  IntType diff3 = (bound.value - bound.prev_value) + diff2;
 
   // Encode diff3
-  array<uint8_t, 16> buf;
+  array<uint8_t, kMaxBufferSize> buf;
   auto diff3_buf = WriteVarLen(diff3, absl::MakeSpan(buf));
 
   // Shrink vector before overwriting
@@ -183,7 +190,7 @@ size_t CompressedList::ByteSize() const {
 }
 
 // Encode with simple MSB (Most significant bit) encoding: 7 bits of value + 1 to indicate next byte
-absl::Span<uint8_t> CompressedList::WriteVarLen(uint32_t value, absl::Span<uint8_t> buf) {
+absl::Span<uint8_t> CompressedList::WriteVarLen(IntType value, absl::Span<uint8_t> buf) {
   size_t i = 0;
   do {
     uint8_t byte = value & 0x7F;
@@ -195,11 +202,12 @@ absl::Span<uint8_t> CompressedList::WriteVarLen(uint32_t value, absl::Span<uint8
   return buf.subspan(0, i);
 }
 
-std::pair<uint32_t, size_t> CompressedList::ReadVarLen(absl::Span<const uint8_t> source) {
-  uint32_t value = 0;
+std::pair<CompressedList::IntType, size_t> CompressedList::ReadVarLen(
+    absl::Span<const uint8_t> source) {
+  IntType value = 0;
   size_t read = 0;
   for (uint8_t byte : source) {
-    value |= static_cast<uint32_t>(byte & 0x7F) << (read * 7);
+    value |= static_cast<IntType>(byte & 0x7F) << (read * 7);
     read++;
     if ((byte & 0x80) == 0)
       break;

@@ -47,7 +47,6 @@ TEST_F(CompressedListTest, BasicInsert) {
   // Now insert front
   add(7);
   EXPECT_EQ(current(), list_copy);
-  return;
   add(2);
   EXPECT_EQ(current(), list_copy);
 
@@ -66,6 +65,10 @@ TEST_F(CompressedListTest, BasicInsert) {
   add(40);
   add(37);
   add(34);
+  EXPECT_EQ(current(), list_copy);
+
+  // Now add a 0
+  add(0);
   EXPECT_EQ(current(), list_copy);
 
   // Make sure all test integers fit into a single byte
