@@ -689,72 +689,6 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSomeSlots) {
                   RespArray(ElementsAre(IntArg(8000), "key_count", IntArg(0), _, _, _, _)))));
 }
 
-TEST_F(ClusterFamilyTest, ClusterConfigReplicaDoesNotDeleteSlots) {
-  string config_template = R"json(
-      [
-        {
-          "slot_ranges": [
-            {
-              "start": 0,
-              "end": $0
-            }
-          ],
-          "master": {
-            "id": "some-master",
-            "ip": "10.0.0.1",
-            "port": 7000
-          },
-          "replicas": [
-            {
-              "id": "$1",
-              "ip": "10.0.0.1",
-              "port": 7000
-            }
-          ]
-        },
-        {
-          "slot_ranges": [
-            {
-              "start": $2,
-              "end": 16383
-            }
-          ],
-          "master": {
-            "id": "other",
-            "ip": "10.0.0.2",
-            "port": 7000
-          },
-          "replicas": []
-        }
-      ])json";
-  string config = absl::Substitute(config_template, /* last-owned-slot= */ 8'000, GetMyId(),
-                                   /* next-owned-slot= */ 8'001);
-
-  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
-
-  EXPECT_EQ(Run({"debug", "populate", "10", "key", "4", "slots", "7999", "8000"}), "OK");
-
-  EXPECT_THAT(
-      RunAdmin({"dflycluster", "getslotinfo", "slots", "7999", "8000"}),
-      RespArray(ElementsAre(RespArray(ElementsAre(IntArg(7'999), "key_count", Not(IntArg(0)),
-                                                  "total_reads", _, "total_writes", _)),
-                            RespArray(ElementsAre(IntArg(8'000), "key_count", Not(IntArg(0)),
-                                                  "total_reads", _, "total_writes", _)))));
-
-  // Move ownership of slot 8,000 to another node.
-  config = absl::Substitute(config_template, /* last-owned-slot= */ 8'001, GetMyId(),
-                            /* next-owned-slot= */ 8'002);
-  EXPECT_EQ(RunAdmin({"dflycluster", "config", config}), "OK");
-
-  // Expect that no data was removed, despite ownership move, because node is a replica.
-  EXPECT_THAT(
-      RunAdmin({"dflycluster", "getslotinfo", "slots", "7999", "8000"}),
-      RespArray(ElementsAre(RespArray(ElementsAre(IntArg(7'999), "key_count", Not(IntArg(0)),
-                                                  "total_reads", _, "total_writes", _)),
-                            RespArray(ElementsAre(IntArg(8'000), "key_count", Not(IntArg(0)),
-                                                  "total_reads", _, "total_writes", _)))));
-}
-
 TEST_F(ClusterFamilyTest, ClusterModeSelectNotAllowed) {
   EXPECT_THAT(Run({"select", "1"}), ErrArg("SELECT is not allowed in cluster mode"));
   EXPECT_EQ(Run({"select", "0"}), "OK");
@@ -812,7 +746,9 @@ TEST_F(ClusterFamilyTest, FlushSlots) {
                                     RespArray(ElementsAre(IntArg(1), "key_count", Not(IntArg(0)),
                                                           "total_reads", _, "total_writes", _)))));
 
-  EXPECT_EQ(RunAdmin({"dflycluster", "flushslots", "0"}), "OK");
+  ExpectConditionWithinTimeout([&]() {
+    return RunAdmin({"dflycluster", "flushslots", "0"}) == "OK";
+  });
 
   EXPECT_THAT(RunAdmin({"dflycluster", "getslotinfo", "slots", "0", "1"}),
               RespArray(ElementsAre(RespArray(ElementsAre(IntArg(0), "key_count", IntArg(0),

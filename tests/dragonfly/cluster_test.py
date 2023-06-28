@@ -403,6 +403,113 @@ async def test_cluster_replica_sets_non_owned_keys(df_local_factory):
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_cluster_flush_slots_after_config_change(df_local_factory):
+    # Start and configure cluster with 1 master and 1 replica, both own all slots
+    master = df_local_factory.create(port=BASE_PORT, admin_port=BASE_PORT+1000)
+    replica = df_local_factory.create(port=BASE_PORT+1, admin_port=BASE_PORT+1001)
+    df_local_factory.start_all([master, replica])
+
+    c_master = aioredis.Redis(port=master.port)
+    c_master_admin = aioredis.Redis(port=master.admin_port)
+    master_id = await get_node_id(c_master_admin)
+
+    c_replica = aioredis.Redis(port=replica.port)
+    c_replica_admin = aioredis.Redis(port=replica.admin_port)
+    replica_id = await get_node_id(c_replica_admin)
+
+    config = f"""
+      [
+        {{
+          "slot_ranges": [
+            {{
+              "start": 0,
+              "end": 16383
+            }}
+          ],
+          "master": {{
+            "id": "{master_id}",
+            "ip": "localhost",
+            "port": {master.port}
+          }},
+          "replicas": [
+            {{
+              "id": "{replica_id}",
+              "ip": "localhost",
+              "port": {replica.port}
+            }}
+          ]
+        }}
+      ]
+    """
+    await push_config(config, [c_master_admin, c_replica_admin])
+
+    await c_master.execute_command("debug", "populate", "100000");
+    assert await c_master.execute_command("dbsize") == 100_000
+
+    # Setup replication and make sure that it works properly.
+    await c_replica.execute_command("REPLICAOF", "localhost", master.port)
+    await check_all_replicas_finished([c_replica], c_master)
+    assert await c_replica.execute_command("dbsize") == 100_000
+
+    resp = await c_master_admin.execute_command("dflycluster", "getslotinfo", "slots", "0")
+    assert resp[0][0] == 0
+    slot_0_size = resp[0][2]
+    print(f'Slot 0 size = {slot_0_size}')
+    assert slot_0_size > 0
+
+    config = f"""
+      [
+        {{
+          "slot_ranges": [
+            {{
+              "start": 1,
+              "end": 16383
+            }}
+          ],
+          "master": {{
+            "id": "{master_id}",
+            "ip": "localhost",
+            "port": {master.port}
+          }},
+          "replicas": [
+            {{
+              "id": "{replica_id}",
+              "ip": "localhost",
+              "port": {replica.port}
+            }}
+          ]
+        }},
+        {{
+          "slot_ranges": [
+            {{
+              "start": 0,
+              "end": 0
+            }}
+          ],
+          "master": {{
+            "id": "other-master",
+            "ip": "localhost",
+            "port": 9000
+          }},
+          "replicas": [
+            {{
+              "id": "other-replica",
+              "ip": "localhost",
+              "port": 9001
+            }}
+          ]
+        }}
+      ]
+    """
+    await push_config(config, [c_master_admin, c_replica_admin])
+
+    await asyncio.sleep(0.5)
+
+    assert await c_master.execute_command("dbsize") == (100_000 - slot_0_size)
+    assert await c_replica.execute_command("dbsize") == (100_000 - slot_0_size)
+
+
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_native_client(df_local_factory):
     # Start and configure cluster with 3 masters and 3 replicas
     masters = [
