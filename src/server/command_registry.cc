@@ -4,19 +4,29 @@
 
 #include "server/command_registry.h"
 
+#include <absl/strings/str_split.h>
+
 #include "absl/strings/str_cat.h"
 #include "base/bits.h"
+#include "base/flags.h"
 #include "base/logging.h"
 #include "facade/error.h"
 #include "server/conn_context.h"
 
+using namespace std;
+ABSL_FLAG(vector<string>, rename_command, {},
+          "Change the name of commands, format is: <cmd1_name>=<cmd1_new_name>, "
+          "<cmd2_name>=<cmd2_new_name>");
+
 namespace dfly {
 
 using namespace facade;
-using namespace std;
 
+using absl::AsciiStrToUpper;
+using absl::GetFlag;
 using absl::StrAppend;
 using absl::StrCat;
+using absl::StrSplit;
 
 CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
                      int8_t last_key, int8_t step)
@@ -38,8 +48,29 @@ bool CommandId::IsTransactional() const {
   return false;
 }
 
+CommandRegistry::CommandRegistry() {
+  vector<string> rename_command = GetFlag(FLAGS_rename_command);
+
+  for (string command_data : rename_command) {
+    pair<string_view, string_view> kv = StrSplit(command_data, '=');
+    auto [_, inserted] =
+        cmd_rename_map_.emplace(AsciiStrToUpper(kv.first), AsciiStrToUpper(kv.second));
+    if (!inserted) {
+      LOG(ERROR) << "Invalid rename_command flag, trying to give 2 names to a command";
+      exit(1);
+    }
+  }
+}
+
 CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   string_view k = cmd.name();
+  auto it = cmd_rename_map_.find(k);
+  if (it != cmd_rename_map_.end()) {
+    if (it->second.empty()) {
+      return *this;  // Incase of empty string we want to remove the command from registry.
+    }
+    k = it->second;
+  }
   CHECK(cmd_map_.emplace(k, std::move(cmd)).second) << k;
 
   return *this;
