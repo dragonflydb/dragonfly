@@ -95,8 +95,8 @@ TEST_F(DflyEngineTest, Sds) {
 class DflyRenameCommandTest : public DflyEngineTest {
  protected:
   DflyRenameCommandTest() : DflyEngineTest() {
-    // remame flushall to myflushall, flushdb command will not be able to execute
-    absl::SetFlag(&FLAGS_rename_command, "flushall=myflushall,flushdb=,");
+    // rename flushall to myflushall, flushdb command will not be able to execute
+    absl::SetFlag(&FLAGS_rename_command, "flushall=myflushall,flushdb=");
   }
 };
 
@@ -112,6 +112,8 @@ TEST_F(DflyRenameCommandTest, RenameCommand) {
   ASSERT_EQ(0, CheckedInt({"dbsize"}));
   resp = Run({"flushdb", "0"});
   ASSERT_THAT(resp, ErrArg("unknown command `FLUSHDB`"));
+  resp = Run({""});
+  ASSERT_THAT(resp, ErrArg("unknown command ``"));
 }
 
 TEST_F(SingleThreadDflyEngineTest, GlobalSingleThread) {

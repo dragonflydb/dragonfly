@@ -22,9 +22,11 @@ namespace dfly {
 
 using namespace facade;
 
+using absl::AsciiStrToUpper;
 using absl::GetFlag;
 using absl::StrAppend;
 using absl::StrCat;
+using absl::StrSplit;
 
 CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
                      int8_t last_key, int8_t step)
@@ -48,15 +50,15 @@ bool CommandId::IsTransactional() const {
 
 CommandRegistry::CommandRegistry() {
   string rename_command = GetFlag(FLAGS_rename_command);
-  vector<std::string_view> parts = absl::StrSplit(rename_command, ",", absl::SkipEmpty());
-  for (std::string_view p : parts) {
-    size_t sep = p.find('=');
 
-    string cmd_name = string(p.substr(0, sep));
-    transform(cmd_name.begin(), cmd_name.end(), cmd_name.begin(), ::toupper);
-    string cmd_new_name = string(p.substr(sep + 1));
-    transform(cmd_new_name.begin(), cmd_new_name.end(), cmd_new_name.begin(), ::toupper);
-    cmd_rename_map_.emplace(cmd_name, cmd_new_name);
+  for (std::string_view p : StrSplit(rename_command, ",", absl::SkipEmpty())) {
+    pair<string_view, string_view> kv = StrSplit(p, '=');
+    auto [_, inserted] =
+        cmd_rename_map_.emplace(AsciiStrToUpper(kv.first), AsciiStrToUpper(kv.second));
+    if (!inserted) {
+      LOG(ERROR) << "Invalid rename_command flag, trying to give 2 names to a command";
+      exit(1);
+    }
   }
 }
 
@@ -64,6 +66,9 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   string_view k = cmd.name();
   auto it = cmd_rename_map_.find(k);
   if (it != cmd_rename_map_.end()) {
+    if (it->second.empty()) {
+      return *this;  // Incase of empty string we want to remove the command from registry.
+    }
     k = it->second;
   }
   CHECK(cmd_map_.emplace(k, std::move(cmd)).second) << k;
