@@ -106,7 +106,7 @@ class CompressedList {
   static std::pair<IntType /*value*/, size_t /*read*/> ReadVarLen(absl::Span<const uint8_t> source);
 
  private:
-  IntType size_{0};  // TODO: Need to check if we need this at all (to save space)
+  IntType size_{0};
   std::vector<uint8_t> diffs_{};
 };
 

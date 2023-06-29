@@ -1,6 +1,7 @@
 #include "core/search/compressed_list.h"
 
 #include <array>
+#include <bitset>
 
 #include "base/logging.h"
 
@@ -184,30 +185,29 @@ size_t CompressedList::ByteSize() const {
   return diffs_.size();
 }
 
-// Encode with simple MSB (Most significant bit) encoding: 7 bits of value + 1 to indicate next byte
 absl::Span<uint8_t> CompressedList::WriteVarLen(IntType value, absl::Span<uint8_t> buf) {
-  size_t i = 0;
-  do {
-    uint8_t byte = value & 0x7F;
-    value >>= 7;
-    if (value != 0)  // If its not the last byte, set continuation bit
-      byte |= 0x80;
-    buf[i++] = byte;
-  } while (value != 0);
-  return buf.subspan(0, i);
+  buf[0] = (value & 0b11111) << 3;
+  value >>= 5;
+
+  uint8_t tail_size = 0;
+  while (value > 0) {
+    buf[++tail_size] = value & 0xFF;
+    value >>= 8;
+  }
+
+  buf[0] |= tail_size;
+  return buf.first(tail_size + 1);
 }
 
 std::pair<CompressedList::IntType, size_t> CompressedList::ReadVarLen(
     absl::Span<const uint8_t> source) {
-  IntType value = 0;
-  size_t read = 0;
-  for (uint8_t byte : source) {
-    value |= static_cast<IntType>(byte & 0x7F) << (read * 7);
-    read++;
-    if ((byte & 0x80) == 0)
-      break;
-  }
-  return {value, read};
+  IntType value = source[0] >> 3;
+
+  uint8_t tail_size = source[0] & 0b111;
+  for (uint8_t i = 0; i < tail_size; i++)
+    value |= static_cast<IntType>(source[i + 1]) << (5 + i * 8);
+
+  return {value, tail_size + 1};
 }
 
 }  // namespace dfly::search

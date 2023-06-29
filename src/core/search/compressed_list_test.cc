@@ -178,4 +178,12 @@ TEST_F(CompressedListTest, BasicRemoveLargeValues) {
   EXPECT_EQ(IdVec(list.begin(), list.end()), values);
 }
 
+TEST_F(CompressedListTest, Debug) {
+  CompressedList list;
+
+  list.Insert(100500100);
+  list.Insert(212312312);
+
+  EXPECT_EQ(IdVec(list.begin(), list.end()), IdVec({100500100, 212312312}));
+}
 }  // namespace dfly::search
