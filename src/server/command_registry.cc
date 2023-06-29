@@ -14,7 +14,7 @@
 #include "server/conn_context.h"
 
 using namespace std;
-ABSL_FLAG(string, rename_command, "",
+ABSL_FLAG(vector<string>, rename_command, {},
           "Change the name of commands, format is: <cmd1_name>=<cmd1_new_name>, "
           "<cmd2_name>=<cmd2_new_name>");
 
@@ -49,10 +49,10 @@ bool CommandId::IsTransactional() const {
 }
 
 CommandRegistry::CommandRegistry() {
-  string rename_command = GetFlag(FLAGS_rename_command);
+  vector<string> rename_command = GetFlag(FLAGS_rename_command);
 
-  for (std::string_view p : StrSplit(rename_command, ",", absl::SkipEmpty())) {
-    pair<string_view, string_view> kv = StrSplit(p, '=');
+  for (string command_data : rename_command) {
+    pair<string_view, string_view> kv = StrSplit(command_data, '=');
     auto [_, inserted] =
         cmd_rename_map_.emplace(AsciiStrToUpper(kv.first), AsciiStrToUpper(kv.second));
     if (!inserted) {

@@ -21,7 +21,7 @@ extern "C" {
 #include "server/test_utils.h"
 
 ABSL_DECLARE_FLAG(float, mem_defrag_threshold);
-ABSL_DECLARE_FLAG(std::string, rename_command);
+ABSL_DECLARE_FLAG(std::vector<std::string>, rename_command);
 
 namespace dfly {
 
@@ -96,7 +96,8 @@ class DflyRenameCommandTest : public DflyEngineTest {
  protected:
   DflyRenameCommandTest() : DflyEngineTest() {
     // rename flushall to myflushall, flushdb command will not be able to execute
-    absl::SetFlag(&FLAGS_rename_command, "flushall=myflushall,flushdb=");
+    absl::SetFlag(&FLAGS_rename_command,
+                  std::vector<std::string>({"flushall=myflushall", "flushdb="}));
   }
 };
 
