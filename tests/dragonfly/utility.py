@@ -498,9 +498,11 @@ class DflySeeder:
 
             try:
                 await pipe.execute()
-            except redis.exceptions.ConnectionError as e:
+            except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError) as e:
                 if self.stop_on_failure:
                     raise SystemExit(e)
+            except Exception as e:
+                raise SystemExit(e)
             queue.task_done()
         await client.connection_pool.disconnect()
 

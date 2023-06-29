@@ -1054,12 +1054,13 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
 
   // Manage global state.
   GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
-  if (new_state != GlobalState::SAVING) {
+  if (new_state != GlobalState::SAVING && new_state != GlobalState::TAKEN_OVER) {
     return {make_error_code(errc::operation_in_progress),
             StrCat(GlobalStateName(new_state), " - can not save database")};
   }
-  absl::Cleanup rev_state = [this] {
-    service_.SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
+  absl::Cleanup rev_state = [this, new_state] {
+    if (new_state == GlobalState::SAVING)
+      service_.SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
   };
 
   absl::Time start = absl::Now();

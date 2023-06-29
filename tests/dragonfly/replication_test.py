@@ -1085,25 +1085,25 @@ async def test_take_over_counters(df_local_factory, master_threads, replica_thre
                                      port=BASE_PORT,
                                      #  vmodule="journal_slice=2,dflycmd=2,main_service=1",
                                      logtostderr=True)
-    replica = df_local_factory.create(
+    replica1 = df_local_factory.create(
         port=BASE_PORT+1, proactor_threads=replica_threads)
     replica2 = df_local_factory.create(
         port=BASE_PORT+2, proactor_threads=replica_threads)
     replica3 = df_local_factory.create(
         port=BASE_PORT+3, proactor_threads=replica_threads)
-    df_local_factory.start_all([master, replica, replica2, replica3])
+    df_local_factory.start_all([master, replica1, replica2, replica3])
     async with (
         master.client() as c_master,
-        replica.client() as c_replica,
+        replica1.client() as c1,
         master.client() as c_blocking,
         replica2.client() as c2,
         replica3.client() as c3,
     ):
-        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+        await c1.execute_command(f"REPLICAOF localhost {master.port}")
         await c2.execute_command(f"REPLICAOF localhost {master.port}")
-        await c3.execute_command(f"REPLICAOF localhost {replica.port}")
+        await c3.execute_command(f"REPLICAOF localhost {replica1.port}")
 
-        await wait_available_async(c_replica)
+        await wait_available_async(c1)
 
         async def counter(key):
             value = 0
@@ -1129,14 +1129,16 @@ async def test_take_over_counters(df_local_factory, master_threads, replica_thre
 
         async def delayed_takeover():
             await asyncio.sleep(1)
-            await c_replica.execute_command(f"REPLTAKEOVER 5")
+            await c1.execute_command(f"REPLTAKEOVER 5")
 
         _, _, *results = await asyncio.gather(delayed_takeover(), block_during_takeover(), *[counter(f"key{i}") for i in range(16)])
-        assert await c_replica.execute_command("role") == [b'master', [[b'127.0.0.1', bytes(str(replica3.port), 'ascii'), b'stable_sync']]]
+        assert await c1.execute_command("role") == [b'master', [[b'127.0.0.1', bytes(str(replica3.port), 'ascii'), b'stable_sync']]]
 
         for key, client_value in results:
-            replicated_value = await c_replica.get(key)
+            replicated_value = await c1.get(key)
             assert client_value == int(replicated_value)
+            # replica3 replicates replica1, so it should still be consistent with
+            # the replica1 and therefor with the counters.
             replicated_value2 = await c3.get(key)
             assert client_value == int(replicated_value2)
 
@@ -1146,7 +1148,7 @@ async def test_take_over_counters(df_local_factory, master_threads, replica_thre
 async def test_take_over_seeder(df_local_factory, df_seeder_factory, master_threads, replica_threads):
     master = df_local_factory.create(proactor_threads=master_threads,
                                      port=BASE_PORT,
-                                     #  vmodule="journal_slice=2,dflycmd=2,main_service=1",
+                                     dbfilename=f"dump_{master_threads}_{replica_threads}",
                                      logtostderr=True)
     replica = df_local_factory.create(
         port=BASE_PORT+1, proactor_threads=replica_threads)
@@ -1161,14 +1163,23 @@ async def test_take_over_seeder(df_local_factory, df_seeder_factory, master_thre
         await wait_available_async(c_replica)
 
         async def seed():
-            try:
-                await seeder.run(target_ops=3000)
-            except (redis.exceptions.ConnectionError, ConnectionRefusedError, Exception, SystemExit):
-                pass
+            await seeder.run(target_ops=3000)
 
         fill_task = asyncio.create_task(seed())
 
+        # Give the seeder a bit of time.
+        await asyncio.sleep(1)
         await c_replica.execute_command(f"REPLTAKEOVER 5")
+        seeder.stop()
 
         assert await c_replica.execute_command("role") == [b'master', []]
-        await fill_task
+
+        # Need to wait a bit to give time to write the shutdown snapshot
+        await asyncio.sleep(1)
+        assert master.proc.poll() == 0, "Master process did not exit correctly."
+
+        master.start()
+        await wait_available_async(c_master)
+
+        capture = await seeder.capture()
+        assert await seeder.compare(capture, port=replica.port)
