@@ -14,13 +14,13 @@ namespace dfly::search {
 // A list of sorted unique integers with reduced memory usage.
 // Only differences between successive elements are stored
 // in a variable length encoding.
-class CompressedList {
+class CompressedSortedSet {
  public:
   using IntType = DocId;
 
   // Const access iterator that decodes the compressed list on traversal
   struct ConstIterator {
-    friend class CompressedList;
+    friend class CompressedSortedSet;
 
     // To make it work with std container contructors
     using iterator_category = std::forward_iterator_tag;
@@ -32,12 +32,12 @@ class CompressedList {
     IntType operator*() const;
     ConstIterator& operator++();
 
-    friend class CompressedList;
+    friend class CompressedSortedSet;
     friend bool operator==(const ConstIterator& l, const ConstIterator& r);
     friend bool operator!=(const ConstIterator& l, const ConstIterator& r);
 
    private:
-    explicit ConstIterator(const CompressedList& list);
+    explicit ConstIterator(const CompressedSortedSet& list);
     ConstIterator() = default;
 
     void ReadNext();  // Decode next value to stash
@@ -55,7 +55,7 @@ class CompressedList {
     using pointer = IntType*;
     using reference = IntType&;
 
-    explicit SortedBackInserter(CompressedList* list);
+    explicit SortedBackInserter(CompressedSortedSet* list);
 
     SortedBackInserter& operator*() {
       return *this;
@@ -68,7 +68,7 @@ class CompressedList {
 
    private:
     IntType last_;
-    CompressedList* list_;
+    CompressedSortedSet* list_;
   };
 
   friend struct Iterator;

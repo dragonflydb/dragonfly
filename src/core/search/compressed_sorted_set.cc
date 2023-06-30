@@ -11,34 +11,36 @@ using namespace std;
 
 namespace {
 
-const int kMaxBufferSize = sizeof(CompressedList::IntType) * 2;
+const int kMaxBufferSize = sizeof(CompressedSortedSet::IntType) * 2;
 
 }  // namespace
 
-CompressedList::ConstIterator::ConstIterator(const CompressedList& list)
+CompressedSortedSet::ConstIterator::ConstIterator(const CompressedSortedSet& list)
     : stash_{}, diffs_{list.diffs_} {
   ReadNext();
 }
 
-CompressedList::IntType CompressedList::ConstIterator::operator*() const {
+CompressedSortedSet::IntType CompressedSortedSet::ConstIterator::operator*() const {
   DCHECK(stash_);
   return *stash_;
 }
 
-CompressedList::ConstIterator& CompressedList::ConstIterator::operator++() {
+CompressedSortedSet::ConstIterator& CompressedSortedSet::ConstIterator::operator++() {
   ReadNext();
   return *this;
 }
 
-bool operator==(const CompressedList::ConstIterator& l, const CompressedList::ConstIterator& r) {
+bool operator==(const CompressedSortedSet::ConstIterator& l,
+                const CompressedSortedSet::ConstIterator& r) {
   return l.diffs_.data() == r.diffs_.data() && l.diffs_.size() == r.diffs_.size();
 }
 
-bool operator!=(const CompressedList::ConstIterator& l, const CompressedList::ConstIterator& r) {
+bool operator!=(const CompressedSortedSet::ConstIterator& l,
+                const CompressedSortedSet::ConstIterator& r) {
   return !(l == r);
 }
 
-void CompressedList::ConstIterator::ReadNext() {
+void CompressedSortedSet::ConstIterator::ReadNext() {
   if (diffs_.empty()) {
     stash_ = nullopt;
     last_read_ = {nullptr, 0};
@@ -47,26 +49,27 @@ void CompressedList::ConstIterator::ReadNext() {
   }
 
   IntType base = stash_.value_or(0);
-  auto [diff, read] = CompressedList::ReadVarLen(diffs_);
+  auto [diff, read] = CompressedSortedSet::ReadVarLen(diffs_);
 
   stash_ = base + diff;
   last_read_ = diffs_.subspan(0, read);
   diffs_.remove_prefix(read);
 }
 
-CompressedList::ConstIterator CompressedList::begin() const {
+CompressedSortedSet::ConstIterator CompressedSortedSet::begin() const {
   return ConstIterator{*this};
 }
 
-CompressedList::ConstIterator CompressedList::end() const {
+CompressedSortedSet::ConstIterator CompressedSortedSet::end() const {
   return ConstIterator{};
 }
 
-CompressedList::SortedBackInserter::SortedBackInserter(CompressedList* list)
+CompressedSortedSet::SortedBackInserter::SortedBackInserter(CompressedSortedSet* list)
     : last_{0}, list_{list} {
 }
 
-CompressedList::SortedBackInserter& CompressedList::SortedBackInserter::operator=(IntType value) {
+CompressedSortedSet::SortedBackInserter& CompressedSortedSet::SortedBackInserter::operator=(
+    IntType value) {
   DCHECK_LE(last_, value);
   if (value > last_) {
     list_->PushBackDiff(value - last_);
@@ -76,14 +79,14 @@ CompressedList::SortedBackInserter& CompressedList::SortedBackInserter::operator
 }
 
 // Simply encode difference and add to end of diffs array
-void CompressedList::PushBackDiff(IntType diff) {
+void CompressedSortedSet::PushBackDiff(IntType diff) {
   array<uint8_t, kMaxBufferSize> buf;
   auto diff_span = WriteVarLen(diff, absl::MakeSpan(buf));
   diffs_.insert(diffs_.end(), diff_span.begin(), diff_span.end());
 }
 
 // Do a linear scan by encoding all diffs to find value
-CompressedList::EntryLocation CompressedList::LowerBound(IntType value) const {
+CompressedSortedSet::EntryLocation CompressedSortedSet::LowerBound(IntType value) const {
   auto it = begin(), prev_it = end(), next_it = end();
   while (it != end()) {
     next_it = it;
@@ -100,7 +103,7 @@ CompressedList::EntryLocation CompressedList::LowerBound(IntType value) const {
 // needs to be inserted. Then it computes the differences dif1 = V - A and diff2 = B - V that need
 // to be stored to encode the triple A V B. Those are stored where diff0 = B - A was previously
 // stored, possibly extending the vector
-void CompressedList::Insert(IntType value) {
+void CompressedSortedSet::Insert(IntType value) {
   auto bound = LowerBound(value);
 
   // At least one element was read and it's equal to value: return to avoid duplicate
@@ -140,7 +143,7 @@ void CompressedList::Insert(IntType value) {
 // Remove has linear complexity. It tries to find the element V and its neighbors A and B,
 // which are encoded as diff1 = V - A and diff2 = B - V. Adjacently stored diff1 and diff2
 // need to be replaced with diff3 = diff1 + diff2s
-void CompressedList::Remove(IntType value) {
+void CompressedSortedSet::Remove(IntType value) {
   auto bound = LowerBound(value);
 
   // Nothing was read or the element was not found
@@ -178,15 +181,15 @@ void CompressedList::Remove(IntType value) {
   copy(diff3_buf.begin(), diff3_buf.end(), diffs_.begin() + diff_offset);
 }
 
-size_t CompressedList::Size() const {
+size_t CompressedSortedSet::Size() const {
   return size_;
 }
 
-size_t CompressedList::ByteSize() const {
+size_t CompressedSortedSet::ByteSize() const {
   return diffs_.size();
 }
 
-absl::Span<uint8_t> CompressedList::WriteVarLen(IntType value, absl::Span<uint8_t> buf) {
+absl::Span<uint8_t> CompressedSortedSet::WriteVarLen(IntType value, absl::Span<uint8_t> buf) {
   buf[0] = (value & 0b11111) << 3;
   value >>= 5;
 
@@ -200,7 +203,7 @@ absl::Span<uint8_t> CompressedList::WriteVarLen(IntType value, absl::Span<uint8_
   return buf.first(tail_size + 1);
 }
 
-std::pair<CompressedList::IntType, size_t> CompressedList::ReadVarLen(
+std::pair<CompressedSortedSet::IntType, size_t> CompressedSortedSet::ReadVarLen(
     absl::Span<const uint8_t> source) {
   IntType value = source[0] >> 3;
 
