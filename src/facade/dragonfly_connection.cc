@@ -8,6 +8,8 @@
 #include <absl/strings/match.h>
 #include <mimalloc.h>
 
+#include <algorithm>
+
 #include "absl/flags/internal/flag.h"
 #include "base/flags.h"
 #include "base/io_buf.h"
@@ -297,7 +299,15 @@ void Connection::UnregisterShutdownHook(ShutdownHandle id) {
 
 bool Connection::IsReplicaCommand(util::tls::TlsSocket::Buffer buff) const {
   string_view str{reinterpret_cast<const char*>(buff.data()), buff.size()};
-  return str.starts_with("PING") || str.starts_with("DFLY") || str.starts_with("REPLCONF");
+  auto starts_with = [](const string_view source, const string_view starter) {
+    if (source.size() < starter.size()) {
+      return false;
+    }
+    size_t pos = 0;
+    return std::all_of(source.begin(), source.begin() + starter.size(),
+                       [&pos, starter](const char c) mutable { return c == starter[pos++]; });
+  };
+  return starts_with(str, "PING") || starts_with(str, "DFLY") || starts_with(str, "REPLCONF");
 }
 
 void Connection::HandleRequests() {
