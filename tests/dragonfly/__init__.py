@@ -98,6 +98,13 @@ class DflyInstance:
             return self.params.existing_mc_port
         return int(self.args.get("mc_port", "11211"))
 
+    @property
+    def dfly_path(self):
+        dfly = "dragonfly"
+        if self.params.path.endswith("dragonfly"):
+            return self.params.path[:-len(dfly)]
+        raise Exception("Invalid dfly path")
+
     @staticmethod
     def format_args(args):
         out = []
