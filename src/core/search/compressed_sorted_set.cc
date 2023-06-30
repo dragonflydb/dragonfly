@@ -11,7 +11,7 @@ using namespace std;
 
 namespace {
 
-const int kMaxBufferSize = sizeof(CompressedSortedSet::IntType) * 2;
+using VarintBuffer = array<uint8_t, sizeof(CompressedSortedSet::IntType) * 2>;
 
 }  // namespace
 
@@ -80,7 +80,9 @@ CompressedSortedSet::SortedBackInserter& CompressedSortedSet::SortedBackInserter
 
 // Simply encode difference and add to end of diffs array
 void CompressedSortedSet::PushBackDiff(IntType diff) {
-  array<uint8_t, kMaxBufferSize> buf;
+  size_++;
+
+  VarintBuffer buf;
   auto diff_span = WriteVarLen(diff, absl::MakeSpan(buf));
   diffs_.insert(diffs_.end(), diff_span.begin(), diff_span.end());
 }
@@ -96,7 +98,9 @@ CompressedSortedSet::EntryLocation CompressedSortedSet::LowerBound(IntType value
     it = next_it;
   }
 
-  return EntryLocation{it.stash_.value_or(0), prev_it.stash_.value_or(0), it.last_read_};
+  return EntryLocation{.value = it.stash_.value_or(0),
+                       .prev_value = prev_it.stash_.value_or(0),
+                       .diff_span = it.last_read_};
 }
 
 // Insert has linear complexity. It tries to find between which two entries A and B the new value V
@@ -110,14 +114,13 @@ void CompressedSortedSet::Insert(IntType value) {
   if (bound.value == value && !bound.diff_span.empty())
     return;
 
-  // We're inserting below unconditionally
-  size_++;
-
   // Value is bigger than any other (or list is empty): append required diff at the end
   if (value > bound.value || bound.diff_span.empty()) {
     PushBackDiff(value - bound.value);
     return;
   }
+
+  size_++;
 
   // Now the list certainly contains the bound B > V and possibly A < V (or 0 by default),
   // so we need to encode both differences diff1 and diff2
@@ -125,7 +128,7 @@ void CompressedSortedSet::Insert(IntType value) {
   DCHECK_LE(bound.prev_value, value);
 
   // Compute and encode new diff1 and diff2 into buf1 and buf2 respectivaly
-  array<uint8_t, kMaxBufferSize> buf1, buf2;
+  VarintBuffer buf1, buf2;
   auto diff1_span = WriteVarLen(value - bound.prev_value, absl::MakeSpan(buf1));
   auto diff2_span = WriteVarLen(bound.value - value, absl::MakeSpan(buf2));
 
@@ -169,7 +172,7 @@ void CompressedSortedSet::Remove(IntType value) {
   IntType diff3 = (bound.value - bound.prev_value) + diff2;
 
   // Encode diff3
-  array<uint8_t, kMaxBufferSize> buf;
+  VarintBuffer buf;
   auto diff3_buf = WriteVarLen(diff3, absl::MakeSpan(buf));
 
   // Shrink vector before overwriting
@@ -189,8 +192,10 @@ size_t CompressedSortedSet::ByteSize() const {
   return diffs_.size();
 }
 
+// The leftmost three bits of the first byte store the number of additional bytes. All following
+// bits store the number itself.
 absl::Span<uint8_t> CompressedSortedSet::WriteVarLen(IntType value, absl::Span<uint8_t> buf) {
-  buf[0] = (value & 0b11111) << 3;
+  buf[0] = value & 0b1'11'11;
   value >>= 5;
 
   uint8_t tail_size = 0;
@@ -199,15 +204,16 @@ absl::Span<uint8_t> CompressedSortedSet::WriteVarLen(IntType value, absl::Span<u
     value >>= 8;
   }
 
-  buf[0] |= tail_size;
+  DCHECK_LE(tail_size, 4);
+  buf[0] |= (tail_size << 5);
   return buf.first(tail_size + 1);
 }
 
 std::pair<CompressedSortedSet::IntType, size_t> CompressedSortedSet::ReadVarLen(
     absl::Span<const uint8_t> source) {
-  IntType value = source[0] >> 3;
+  IntType value = source[0] & 0b1'11'11;
+  uint8_t tail_size = source[0] >> 5;
 
-  uint8_t tail_size = source[0] & 0b111;
   for (uint8_t i = 0; i < tail_size; i++)
     value |= static_cast<IntType>(source[i + 1]) << (5 + i * 8);
 

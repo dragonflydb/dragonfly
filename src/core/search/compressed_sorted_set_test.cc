@@ -13,13 +13,13 @@ namespace dfly::search {
 
 using namespace std;
 
-class CompressedListTest : public ::testing::Test {
+class CompressedSortedSetTest : public ::testing::Test {
  protected:
 };
 
 using IdVec = vector<uint32_t>;
 
-TEST_F(CompressedListTest, BasicInsert) {
+TEST_F(CompressedSortedSetTest, BasicInsert) {
   CompressedSortedSet list;
   IdVec list_copy;
 
@@ -76,7 +76,7 @@ TEST_F(CompressedListTest, BasicInsert) {
   EXPECT_EQ(list.ByteSize(), list.Size());
 }
 
-TEST_F(CompressedListTest, BasicInsertLargeValues) {
+TEST_F(CompressedSortedSetTest, BasicInsertLargeValues) {
   CompressedSortedSet list;
   IdVec list_copy;
 
@@ -107,7 +107,7 @@ TEST_F(CompressedListTest, BasicInsertLargeValues) {
   EXPECT_LE(list.ByteSize() * 2, list.Size() * sizeof(uint32_t));
 }
 
-TEST_F(CompressedListTest, SortedBackInserter) {
+TEST_F(CompressedSortedSetTest, SortedBackInserter) {
   CompressedSortedSet list;
 
   vector<uint32_t> v1 = {1, 3, 5};
@@ -118,7 +118,7 @@ TEST_F(CompressedListTest, SortedBackInserter) {
   EXPECT_EQ(IdVec(list.begin(), list.end()), IdVec({1, 2, 3, 4, 5, 6}));
 }
 
-TEST_F(CompressedListTest, BasicRemove) {
+TEST_F(CompressedSortedSetTest, BasicRemove) {
   CompressedSortedSet list;
 
   IdVec values = {1, 3, 4, 7, 8, 11, 15, 17, 20, 22, 27};
@@ -149,7 +149,7 @@ TEST_F(CompressedListTest, BasicRemove) {
   EXPECT_EQ(IdVec(list.begin(), list.end()), values);
 }
 
-TEST_F(CompressedListTest, BasicRemoveLargeValues) {
+TEST_F(CompressedSortedSetTest, BasicRemoveLargeValues) {
   CompressedSortedSet list;
 
   IdVec values = {1, 12, 123, 123'4, 123'45, 123'456, 1'234'567, 12'345'678};
@@ -178,12 +178,24 @@ TEST_F(CompressedListTest, BasicRemoveLargeValues) {
   EXPECT_EQ(IdVec(list.begin(), list.end()), values);
 }
 
-TEST_F(CompressedListTest, Debug) {
+TEST_F(CompressedSortedSetTest, InsertRemoveLargeValues) {
   CompressedSortedSet list;
 
-  list.Insert(100500100);
-  list.Insert(212312312);
+  for (int shift = 3; shift < 30; shift++) {
+    uint32_t value = 1u << shift;
 
-  EXPECT_EQ(IdVec(list.begin(), list.end()), IdVec({100500100, 212312312}));
+    IdVec values{value + 3, value, value - 5};
+    for (auto v : values)
+      list.Insert(v);
+
+    sort(values.begin(), values.end());
+    EXPECT_EQ(IdVec(list.begin(), list.end()), values);
+
+    for (auto v : values)
+      list.Remove(v);
+
+    EXPECT_EQ(IdVec(list.begin(), list.end()), IdVec({}));
+  }
 }
+
 }  // namespace dfly::search
