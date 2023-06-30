@@ -1,4 +1,4 @@
-#include "core/search/compressed_list.h"
+#include "core/search/compressed_sorted_set.h"
 
 #include <array>
 #include <bitset>

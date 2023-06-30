@@ -2,7 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
-#include "core/search/compressed_list.h"
+#include "core/search/compressed_sorted_set.h"
 
 #include <algorithm>
 
