@@ -620,9 +620,11 @@ void sigill_hdlr(int signo) {
 }
 
 void PrintBasicUsageInfo() {
+  auto ends_with_slash = [](const string_view v) { return v.back() == '/'; };
   std::cout << "* Logs will be written to the first available of the following paths:\n";
   for (const auto& dir : google::GetLoggingDirectories()) {
-    std::cout << dir << "dragonfly.*\n";
+    const string maybe_slash = ends_with_slash(dir) ? "" : "/";
+    std::cout << dir << maybe_slash << "dragonfly.*\n";
   }
   std::cout << "* For the available flags type dragonfly [--help | --helpfull]\n";
   std::cout << "* Documentation can be found at: https://www.dragonflydb.io/docs";
