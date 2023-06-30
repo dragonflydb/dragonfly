@@ -15,29 +15,30 @@ const int kMaxBufferSize = sizeof(CompressedList::IntType) * 2;
 
 }  // namespace
 
-CompressedList::Iterator::Iterator(const CompressedList& list) : stash_{}, diffs_{list.diffs_} {
+CompressedList::ConstIterator::ConstIterator(const CompressedList& list)
+    : stash_{}, diffs_{list.diffs_} {
   ReadNext();
 }
 
-CompressedList::IntType CompressedList::Iterator::operator*() const {
+CompressedList::IntType CompressedList::ConstIterator::operator*() const {
   DCHECK(stash_);
   return *stash_;
 }
 
-CompressedList::Iterator& CompressedList::Iterator::operator++() {
+CompressedList::ConstIterator& CompressedList::ConstIterator::operator++() {
   ReadNext();
   return *this;
 }
 
-bool operator==(const CompressedList::Iterator& l, const CompressedList::Iterator& r) {
+bool operator==(const CompressedList::ConstIterator& l, const CompressedList::ConstIterator& r) {
   return l.diffs_.data() == r.diffs_.data() && l.diffs_.size() == r.diffs_.size();
 }
 
-bool operator!=(const CompressedList::Iterator& l, const CompressedList::Iterator& r) {
+bool operator!=(const CompressedList::ConstIterator& l, const CompressedList::ConstIterator& r) {
   return !(l == r);
 }
 
-void CompressedList::Iterator::ReadNext() {
+void CompressedList::ConstIterator::ReadNext() {
   if (diffs_.empty()) {
     stash_ = nullopt;
     last_read_ = {nullptr, 0};
@@ -53,12 +54,12 @@ void CompressedList::Iterator::ReadNext() {
   diffs_.remove_prefix(read);
 }
 
-CompressedList::Iterator CompressedList::begin() const {
-  return Iterator{*this};
+CompressedList::ConstIterator CompressedList::begin() const {
+  return ConstIterator{*this};
 }
 
-CompressedList::Iterator CompressedList::end() const {
-  return Iterator{};
+CompressedList::ConstIterator CompressedList::end() const {
+  return ConstIterator{};
 }
 
 CompressedList::SortedBackInserter::SortedBackInserter(CompressedList* list)

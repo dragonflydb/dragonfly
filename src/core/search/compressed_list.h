@@ -19,7 +19,7 @@ class CompressedList {
   using IntType = DocId;
 
   // Const access iterator that decodes the compressed list on traversal
-  struct Iterator {
+  struct ConstIterator {
     friend class CompressedList;
 
     // To make it work with std container contructors
@@ -29,17 +29,17 @@ class CompressedList {
     using pointer = IntType*;
     using reference = IntType&;
 
-    Iterator(const CompressedList& list);
-    Iterator() = default;
-
     IntType operator*() const;
-    Iterator& operator++();
+    ConstIterator& operator++();
 
     friend class CompressedList;
-    friend bool operator==(const Iterator& l, const Iterator& r);
-    friend bool operator!=(const Iterator& l, const Iterator& r);
+    friend bool operator==(const ConstIterator& l, const ConstIterator& r);
+    friend bool operator!=(const ConstIterator& l, const ConstIterator& r);
 
    private:
+    explicit ConstIterator(const CompressedList& list);
+    ConstIterator() = default;
+
     void ReadNext();  // Decode next value to stash
 
     std::optional<IntType> stash_{};
@@ -55,7 +55,7 @@ class CompressedList {
     using pointer = IntType*;
     using reference = IntType&;
 
-    SortedBackInserter(CompressedList* list);
+    explicit SortedBackInserter(CompressedList* list);
 
     SortedBackInserter& operator*() {
       return *this;
@@ -75,8 +75,8 @@ class CompressedList {
   friend struct SortedBackInserter;
 
  public:
-  Iterator begin() const;
-  Iterator end() const;
+  ConstIterator begin() const;
+  ConstIterator end() const;
 
   void Insert(IntType value);  // Insert arbitrary element, needs to scan whole list
   void Remove(IntType value);  // Remove arbitrary element, needs to scan whole list
