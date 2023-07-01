@@ -58,15 +58,18 @@ class StoredCmd {
 struct ConnectionState {
   // MULTI-EXEC transaction related data.
   struct ExecInfo {
-    enum ExecState { EXEC_INACTIVE, EXEC_COLLECT, EXEC_ERROR };
+    enum ExecState { EXEC_INACTIVE, EXEC_COLLECT, EXEC_RUNNING, EXEC_ERROR };
 
     ExecInfo() = default;
     // ExecInfo is immovable due to being referenced from DbSlice.
     ExecInfo(ExecInfo&&) = delete;
 
-    // Return true if ExecInfo is active (after MULTI)
-    bool IsActive() {
-      return state != EXEC_INACTIVE;
+    bool IsCollecting() const {
+      return state == EXEC_COLLECT;
+    }
+
+    bool IsRunning() const {
+      return state == EXEC_RUNNING;
     }
 
     // Resets to blank state after EXEC or DISCARD

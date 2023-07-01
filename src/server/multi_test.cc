@@ -59,6 +59,8 @@ TEST_F(MultiTest, VerifyConstants) {
 }
 
 TEST_F(MultiTest, MultiAndEval) {
+  GTEST_SKIP() << "Eval is allowed in multi experimentally";
+
   ShardId sid1 = Shard(kKey1, num_threads_ - 1);
   ShardId sid2 = Shard(kKey2, num_threads_ - 1);
   ShardId sid3 = Shard(kKey3, num_threads_ - 1);

@@ -282,6 +282,10 @@ void ScriptMgr::UpdateScriptCaches(ScriptKey sha, ScriptParams params) const {
   });
 }
 
+bool ScriptMgr::AreGlobalByDefault() const {
+  return default_params_.undeclared_keys && default_params_.atomic;
+}
+
 GenericError ScriptMgr::ScriptParams::ApplyFlags(string_view config, ScriptParams* params) {
   auto parts = absl::StrSplit(config, absl::ByAnyChar(",; "), absl::SkipEmpty());
   for (auto flag : parts) {

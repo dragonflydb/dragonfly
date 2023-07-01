@@ -54,6 +54,9 @@ class ScriptMgr {
   // Returns a list of all scripts in the database with their sha and body.
   std::vector<std::pair<std::string, ScriptData>> GetAll() const;
 
+  // Returns if scripts run as global transactions by default
+  bool AreGlobalByDefault() const;
+
  private:
   void ExistsCmd(CmdArgList args, ConnectionContext* cntx) const;
   void LoadCmd(CmdArgList args, ConnectionContext* cntx);
