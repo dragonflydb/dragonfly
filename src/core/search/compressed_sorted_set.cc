@@ -3,6 +3,7 @@
 #include <array>
 #include <bitset>
 
+#include "base/flit.h"
 #include "base/logging.h"
 
 namespace dfly::search {
@@ -195,29 +196,18 @@ size_t CompressedSortedSet::ByteSize() const {
 // The leftmost three bits of the first byte store the number of additional bytes. All following
 // bits store the number itself.
 absl::Span<uint8_t> CompressedSortedSet::WriteVarLen(IntType value, absl::Span<uint8_t> buf) {
-  buf[0] = value & 0b1'11'11;
-  value >>= 5;
-
-  uint8_t tail_size = 0;
-  while (value > 0) {
-    buf[++tail_size] = value & 0xFF;
-    value >>= 8;
-  }
-
-  DCHECK_LE(tail_size, 4);
-  buf[0] |= (tail_size << 5);
-  return buf.first(tail_size + 1);
+  // TODO: fix flit encoding of large numbers
+  size_t written = base::flit::EncodeT(static_cast<uint64_t>(value), buf.data());
+  return buf.first(written);
 }
 
 std::pair<CompressedSortedSet::IntType, size_t> CompressedSortedSet::ReadVarLen(
     absl::Span<const uint8_t> source) {
-  IntType value = source[0] & 0b1'11'11;
-  uint8_t tail_size = source[0] >> 5;
+  uint64_t out;
+  size_t read = base::flit::ParseT(source.data(), &out);
 
-  for (uint8_t i = 0; i < tail_size; i++)
-    value |= static_cast<IntType>(source[i + 1]) << (5 + i * 8);
-
-  return {value, tail_size + 1};
+  CHECK_LE(out, numeric_limits<IntType>::max());
+  return {out, read};
 }
 
 }  // namespace dfly::search
