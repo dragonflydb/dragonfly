@@ -506,7 +506,10 @@ error_code GetCGroupPath(string* memory_path, string* cpu_path) {
       // in v1 the format is
       // N:s1:2 where N is an integer, s1, s2 strings with s1 maybe empty.
       vector<string_view> entry = absl::StrSplit(sv, ':');
-      CHECK_EQ(entry.size(), 3u);
+      if (entry.size() != 3u) {
+        LOG(ERROR) << "Unsupported group " << sv;
+        continue;
+      }
 
       // in v1 there are several 'canonical' cgroups
       // we are interested in the 'memory' and the 'cpu,cpuacct' ones
