@@ -7,7 +7,7 @@
 
 [![ci-tests](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml) [![Twitter URL](https://img.shields.io/twitter/follow/dragonflydbio?style=social)](https://twitter.com/dragonflydbio)
 
-Other languages:  [简体中文](README.zh-CN.md)
+Other languages:  [简体中文](README.zh-CN.md) [日本語](README.ja-JP.md)
 
 [Website](https://www.dragonflydb.io/) • [Docs](https://dragonflydb.io/docs) • [Quick Start](https://www.dragonflydb.io/docs/getting-started) • [Community Discord](https://discord.gg/HsPjXGVH85) • [GitHub Discussions](https://github.com/dragonflydb/dragonfly/discussions) | [GitHub Issues](https://github.com/dragonflydb/dragonfly/issues) | [Contributing](https://github.com/dragonflydb/dragonfly/blob/main/CONTRIBUTING.md)
 
