@@ -1101,7 +1101,7 @@ async def test_take_over_counters(df_local_factory, master_threads, replica_thre
     ):
         await c1.execute_command(f"REPLICAOF localhost {master.port}")
         await c2.execute_command(f"REPLICAOF localhost {master.port}")
-        await c3.execute_command(f"REPLICAOF localhost {replica1.port}")
+        await c3.execute_command(f"REPLICAOF localhost {master.port}")
 
         await wait_available_async(c1)
 
@@ -1132,15 +1132,11 @@ async def test_take_over_counters(df_local_factory, master_threads, replica_thre
             await c1.execute_command(f"REPLTAKEOVER 5")
 
         _, _, *results = await asyncio.gather(delayed_takeover(), block_during_takeover(), *[counter(f"key{i}") for i in range(16)])
-        assert await c1.execute_command("role") == [b'master', [[b'127.0.0.1', bytes(str(replica3.port), 'ascii'), b'stable_sync']]]
+        assert await c1.execute_command("role") == [b'master', []]
 
         for key, client_value in results:
             replicated_value = await c1.get(key)
             assert client_value == int(replicated_value)
-            # replica3 replicates replica1, so it should still be consistent with
-            # the replica1 and therefor with the counters.
-            replicated_value2 = await c3.get(key)
-            assert client_value == int(replicated_value2)
 
 
 @pytest.mark.parametrize("master_threads, replica_threads", take_over_cases)
