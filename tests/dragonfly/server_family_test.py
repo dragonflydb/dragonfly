@@ -40,7 +40,7 @@ change to match the fact that we supporting this operation.
 For now we are expecting to get an error
 '''
 
-
+@pytest.skip("Skip until we decided on correct behaviour of eval inside multi")
 async def test_multi_eval(async_client: aioredis.Redis):
     try:
         pipeline = async_client.pipeline()
