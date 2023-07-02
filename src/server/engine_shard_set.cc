@@ -295,8 +295,9 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 
   uint16_t trans_mask = trans ? trans->GetLocalMask(sid) : 0;
   if (trans_mask & Transaction::AWAKED_Q) {
-    DCHECK(continuation_trans_ == nullptr)
-        << continuation_trans_->DebugId() << " when polling " << trans->DebugId();
+    CHECK(continuation_trans_ == nullptr)
+        << continuation_trans_->DebugId() << " when polling " << trans->DebugId()
+        << "cont_mask: " << continuation_trans_->GetLocalMask(sid) << " vs " << trans_mask;
 
     bool keep = trans->RunInShard(this, false);
     if (keep) {
