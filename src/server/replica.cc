@@ -75,25 +75,9 @@ Replica::Replica(string host, uint16_t port, Service* se, std::string_view id)
     : ProtocolClient(std::move(host), port), service_(*se), id_{id} {
 }
 
-Replica::Replica(ServerContext server_context, const MasterContext& context, uint32_t dfly_flow_id,
-                 Service* service, std::shared_ptr<Replica::MultiShardExecution> shared_exe_data)
-    : ProtocolClient(std::move(server_context)), service_(*service), master_context_(context) {
-  master_context_.dfly_flow_id = dfly_flow_id;
-  multi_shard_exe_ = shared_exe_data;
-  use_multi_shard_exe_sync_ = GetFlag(FLAGS_enable_multi_shard_sync);
-  executor_ = std::make_unique<JournalExecutor>(service);
-}
-
 Replica::~Replica() {
-  if (sync_fb_.IsJoinable()) {
-    sync_fb_.Join();
-  }
-  if (acks_fb_.IsJoinable()) {
-    acks_fb_.Join();
-  }
-  if (execution_fb_.IsJoinable()) {
-    execution_fb_.Join();
-  }
+  sync_fb_.JoinIfNeeded();
+  acks_fb_.JoinIfNeeded();
 }
 
 static const char kConnErr[] = "could not connect to master: ";
@@ -147,13 +131,12 @@ void Replica::Stop() {
   state_mask_.store(0);  // Specifically ~R_ENABLED.
   cntx_.Cancel();        // Context is fully resposible for cleanup.
 
+  waker_.notifyAll();
+
   // Make sure the replica fully stopped and did all cleanup,
   // so we can freely release resources (connections).
-  waker_.notifyAll();
-  if (sync_fb_.IsJoinable())
-    sync_fb_.Join();
-  if (acks_fb_.IsJoinable())
-    acks_fb_.Join();
+  sync_fb_.JoinIfNeeded();
+  acks_fb_.JoinIfNeeded();
 }
 
 void Replica::Pause(bool pause) {
@@ -360,13 +343,12 @@ error_code Replica::InitiatePSync() {
 
   RETURN_ON_ERR(ParseReplicationHeader(&io_buf, &repl_header));
 
-  ProactorBase* sock_thread = Proactor();
   string* token = absl::get_if<string>(&repl_header.fullsync);
   size_t snapshot_size = SIZE_MAX;
   if (!token) {
     snapshot_size = absl::get<size_t>(repl_header.fullsync);
   }
-  last_io_time_ = sock_thread->GetMonotonicTimeNs();
+  UpdateIoTime();
 
   // we get token for diskless redis replication. For disk based replication
   // we get the snapshot size.
@@ -410,7 +392,7 @@ error_code Replica::InitiatePSync() {
 
     CHECK(ps.UnusedPrefix().empty());
     io_buf.ConsumeInput(io_buf.InputLen());
-    last_io_time_ = sock_thread->GetMonotonicTimeNs();
+    UpdateIoTime();
   }
 
   state_mask_.fetch_and(~R_SYNCING);
@@ -441,7 +423,8 @@ error_code Replica::InitiateDflySync() {
   // Initialize shard flows.
   shard_flows_.resize(num_df_flows_);
   for (unsigned i = 0; i < num_df_flows_; ++i) {
-    shard_flows_[i].reset(new Replica(server(), master_context_, i, &service_, multi_shard_exe_));
+    shard_flows_[i].reset(
+        new DflyShardReplica(server(), master_context_, i, &service_, multi_shard_exe_));
   }
 
   // Blocked on until all flows got full sync cut.
@@ -537,7 +520,8 @@ error_code Replica::ConsumeRedisStream() {
 
   LOG(INFO) << "Transitioned into stable sync";
 
-  acks_fb_ = MakeFiber(&Replica::StableSyncDflyAcksFb, this, &cntx_, false);
+  // acks_fb_.JoinIfNeeded();
+  // acks_fb_ = MakeFiber(&Replica::RedisStreamAcksFb, this);
   facade::CmdArgVec args_vector;
 
   while (!ec) {
@@ -556,6 +540,7 @@ error_code Replica::ConsumeRedisStream() {
       service_.DispatchCommand(arg_list, &conn_context);
     }
     repl_offs_ += *response;
+    waker_.notify();  // Notify to trigger ACKs.
   }
 
   VLOG(1) << "ConsumeRedisStream finished";
@@ -569,8 +554,7 @@ error_code Replica::ConsumeDflyStream() {
     lock_guard lk{flows_op_mu_};
     DefaultErrorHandler(ge);
     for (auto& flow : shard_flows_) {
-      flow->CloseSocket();
-      flow->waker_.notifyAll();
+      flow->Cancel();
     }
 
     // Iterate over map and cancel all blocking entities
@@ -612,15 +596,7 @@ error_code Replica::ConsumeDflyStream() {
 
 void Replica::JoinAllFlows() {
   for (auto& flow : shard_flows_) {
-    if (flow->sync_fb_.IsJoinable()) {
-      flow->sync_fb_.Join();
-    }
-    if (flow->acks_fb_.IsJoinable()) {
-      flow->acks_fb_.Join();
-    }
-    if (flow->execution_fb_.IsJoinable()) {
-      flow->execution_fb_.Join();
-    }
+    flow->JoinFlow();
   }
 }
 
@@ -644,16 +620,16 @@ error_code Replica::SendNextPhaseRequest(string_view kind) {
   return std::error_code{};
 }
 
-error_code Replica::StartFullSyncFlow(BlockingCounter sb, Context* cntx) {
+error_code DflyShardReplica::StartFullSyncFlow(BlockingCounter sb, Context* cntx) {
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
 
   RETURN_ON_ERR(ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, &cntx_));
 
   VLOG(1) << "Sending on flow " << master_context_.master_repl_id << " "
-          << master_context_.dfly_session_id << " " << master_context_.dfly_flow_id;
+          << master_context_.dfly_session_id << " " << flow_id_;
 
   auto cmd = StrCat("DFLY FLOW ", master_context_.master_repl_id, " ",
-                    master_context_.dfly_session_id, " ", master_context_.dfly_flow_id);
+                    master_context_.dfly_session_id, " ", flow_id_);
 
   ResetParser(/*server_mode=*/false);
   leftover_buf_.emplace(128);
@@ -666,30 +642,28 @@ error_code Replica::StartFullSyncFlow(BlockingCounter sb, Context* cntx) {
   RETURN_ON_BAD_RESPONSE(flow_directive == "FULL");
   eof_token = ToSV(LastResponseArgs()[1].GetBuf());
 
-  state_mask_.fetch_or(R_TCP_CONNECTED);
-
   // We can not discard io_buf because it may contain data
   // besides the response we parsed. Therefore we pass it further to ReplicateDFFb.
-  sync_fb_ = MakeFiber(&Replica::FullSyncDflyFb, this, std::move(eof_token), sb, cntx);
+  sync_fb_ = MakeFiber(&DflyShardReplica::FullSyncDflyFb, this, std::move(eof_token), sb, cntx);
 
   return error_code{};
 }
 
-error_code Replica::StartStableSyncFlow(Context* cntx) {
+error_code DflyShardReplica::StartStableSyncFlow(Context* cntx) {
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
 
   CHECK(Sock()->IsOpen());
-  sync_fb_ = MakeFiber(&Replica::StableSyncDflyReadFb, this, cntx);
+  sync_fb_ = MakeFiber(&DflyShardReplica::StableSyncDflyReadFb, this, cntx);
   if (use_multi_shard_exe_sync_) {
-    execution_fb_ = MakeFiber(&Replica::StableSyncDflyExecFb, this, cntx);
+    execution_fb_ = MakeFiber(&DflyShardReplica::StableSyncDflyExecFb, this, cntx);
   }
 
   return std::error_code{};
 }
 
-void Replica::FullSyncDflyFb(const string& eof_token, BlockingCounter bc, Context* cntx) {
+void DflyShardReplica::FullSyncDflyFb(const string& eof_token, BlockingCounter bc, Context* cntx) {
   DCHECK(leftover_buf_);
   io::PrefixSource ps{leftover_buf_->InputBuffer(), Sock()};
 
@@ -735,7 +709,7 @@ void Replica::FullSyncDflyFb(const string& eof_token, BlockingCounter bc, Contex
   VLOG(1) << "FullSyncDflyFb finished after reading " << loader.bytes_read() << " bytes";
 }
 
-void Replica::StableSyncDflyReadFb(Context* cntx) {
+void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
   // Check leftover from full sync.
   io::Bytes prefix{};
   if (leftover_buf_ && leftover_buf_->InputLen() > 0) {
@@ -748,7 +722,7 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
   TransactionReader tx_reader{};
 
   if (master_context_.version > DflyVersion::VER0) {
-    acks_fb_ = MakeFiber(&Replica::StableSyncDflyAcksFb, this, cntx, true);
+    acks_fb_ = MakeFiber(&DflyShardReplica::StableSyncDflyAcksFb, this, cntx);
   }
 
   while (!cntx->IsCancelled()) {
@@ -779,7 +753,30 @@ void Replica::StableSyncDflyReadFb(Context* cntx) {
   }
 }
 
-void Replica::StableSyncDflyAcksFb(Context* cntx, bool use_journal_count) {
+void Replica::RedisStreamAcksFb() {
+  constexpr size_t kAckRecordMaxInterval = 1024;
+  std::chrono::duration ack_time_max_interval =
+      1ms * absl::GetFlag(FLAGS_replication_acks_interval);
+  std::string ack_cmd;
+  auto next_ack_tp = std::chrono::steady_clock::now();
+
+  while (!cntx_.IsCancelled()) {
+    VLOG(1) << "Sending an ACK with offset=" << repl_offs_;
+    ack_cmd = absl::StrCat("REPLCONF ACK ", repl_offs_);
+    next_ack_tp = std::chrono::steady_clock::now() + ack_time_max_interval;
+    if (auto ec = SendCommand(ack_cmd); ec) {
+      cntx_.ReportError(ec);
+      break;
+    }
+    ack_offs_ = repl_offs_;
+
+    waker_.await_until(
+        [&]() { return repl_offs_ > ack_offs_ + kAckRecordMaxInterval || cntx_.IsCancelled(); },
+        next_ack_tp);
+  }
+}
+
+void DflyShardReplica::StableSyncDflyAcksFb(Context* cntx) {
   constexpr size_t kAckRecordMaxInterval = 1024;
   std::chrono::duration ack_time_max_interval =
       1ms * absl::GetFlag(FLAGS_replication_acks_interval);
@@ -790,10 +787,7 @@ void Replica::StableSyncDflyAcksFb(Context* cntx, bool use_journal_count) {
   while (!cntx->IsCancelled()) {
     // Handle ACKs with the master. PING opcodes from the master mean we should immediately
     // answer.
-    if (use_journal_count)
-      current_offset = journal_rec_executed_.load(std::memory_order_relaxed);
-    else
-      current_offset = repl_offs_;
+    current_offset = journal_rec_executed_.load(std::memory_order_relaxed);
     VLOG(1) << "Sending an ACK with offset=" << current_offset << " forced=" << force_ping_;
     ack_cmd = absl::StrCat("REPLCONF ACK ", current_offset);
     force_ping_ = false;
@@ -814,7 +808,20 @@ void Replica::StableSyncDflyAcksFb(Context* cntx, bool use_journal_count) {
   }
 }
 
-void Replica::ExecuteTxWithNoShardSync(TransactionData&& tx_data, Context* cntx) {
+DflyShardReplica::DflyShardReplica(ServerContext server_context, MasterContext master_context,
+                                   uint32_t flow_id, Service* service,
+                                   std::shared_ptr<MultiShardExecution> multi_shard_exe)
+    : ProtocolClient(server_context), service_(*service), master_context_(master_context),
+      multi_shard_exe_(multi_shard_exe), flow_id_(flow_id) {
+  use_multi_shard_exe_sync_ = GetFlag(FLAGS_enable_multi_shard_sync);
+  executor_ = std::make_unique<JournalExecutor>(service);
+}
+
+DflyShardReplica::~DflyShardReplica() {
+  JoinFlow();
+}
+
+void DflyShardReplica::ExecuteTxWithNoShardSync(TransactionData&& tx_data, Context* cntx) {
   if (cntx->IsCancelled()) {
     return;
   }
@@ -827,7 +834,7 @@ void Replica::ExecuteTxWithNoShardSync(TransactionData&& tx_data, Context* cntx)
   ExecuteTx(std::move(tx_data), was_insert, cntx);
 }
 
-bool Replica::InsertTxToSharedMap(const TransactionData& tx_data) {
+bool DflyShardReplica::InsertTxToSharedMap(const TransactionData& tx_data) {
   std::lock_guard lk{multi_shard_exe_->map_mu};
 
   auto [it, was_insert] =
@@ -839,7 +846,7 @@ bool Replica::InsertTxToSharedMap(const TransactionData& tx_data) {
   return was_insert;
 }
 
-void Replica::InsertTxDataToShardResource(TransactionData&& tx_data) {
+void DflyShardReplica::InsertTxDataToShardResource(TransactionData&& tx_data) {
   bool was_insert = false;
   if (tx_data.shard_cnt > 1) {
     was_insert = InsertTxToSharedMap(tx_data);
@@ -849,7 +856,7 @@ void Replica::InsertTxDataToShardResource(TransactionData&& tx_data) {
   trans_data_queue_.emplace(std::move(tx_data), was_insert);
 }
 
-void Replica::StableSyncDflyExecFb(Context* cntx) {
+void DflyShardReplica::StableSyncDflyExecFb(Context* cntx) {
   while (!cntx->IsCancelled()) {
     waker_.await([&]() { return (!trans_data_queue_.empty() || cntx->IsCancelled()); });
     if (cntx->IsCancelled()) {
@@ -863,7 +870,7 @@ void Replica::StableSyncDflyExecFb(Context* cntx) {
   }
 }
 
-void Replica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context* cntx) {
+void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context* cntx) {
   if (cntx->IsCancelled()) {
     return;
   }
@@ -1002,9 +1009,9 @@ Replica::Info Replica::GetInfo() const {
   CHECK(Sock());
 
   return Proactor()->AwaitBrief([this] {
-    auto last_io_time = last_io_time_;
+    auto last_io_time = LastIoTime();
     for (const auto& flow : shard_flows_) {  // Get last io time from all sub flows.
-      last_io_time = std::max(last_io_time, flow->last_io_time_);
+      last_io_time = std::max(last_io_time, flow->LastIoTime());
     }
 
     Info res;
@@ -1022,8 +1029,8 @@ std::vector<uint64_t> Replica::GetReplicaOffset() const {
   std::vector<uint64_t> flow_rec_count;
   flow_rec_count.resize(shard_flows_.size());
   for (const auto& flow : shard_flows_) {
-    uint32_t flow_id = flow->master_context_.dfly_flow_id;
-    uint64_t rec_count = flow->journal_rec_executed_.load(std::memory_order_relaxed);
+    uint32_t flow_id = flow->FlowId();
+    uint64_t rec_count = flow->JournalExecutedCount();
     DCHECK_LT(flow_id, shard_flows_.size());
     flow_rec_count[flow_id] = rec_count;
   }
@@ -1034,7 +1041,7 @@ std::string Replica::GetSyncId() const {
   return master_context_.dfly_session_id;
 }
 
-bool Replica::TransactionData::AddEntry(journal::ParsedEntry&& entry) {
+bool DflyShardReplica::TransactionData::AddEntry(journal::ParsedEntry&& entry) {
   ++journal_rec_count;
 
   switch (entry.opcode) {
@@ -1060,7 +1067,7 @@ bool Replica::TransactionData::AddEntry(journal::ParsedEntry&& entry) {
   return false;
 }
 
-bool Replica::TransactionData::IsGlobalCmd() const {
+bool DflyShardReplica::TransactionData::IsGlobalCmd() const {
   if (commands.size() > 1) {
     return false;
   }
@@ -1081,14 +1088,15 @@ bool Replica::TransactionData::IsGlobalCmd() const {
   return false;
 }
 
-Replica::TransactionData Replica::TransactionData::FromSingle(journal::ParsedEntry&& entry) {
+DflyShardReplica::TransactionData DflyShardReplica::TransactionData::FromSingle(
+    journal::ParsedEntry&& entry) {
   TransactionData data;
   bool res = data.AddEntry(std::move(entry));
   DCHECK(res);
   return data;
 }
 
-auto Replica::TransactionReader::NextTxData(JournalReader* reader, Context* cntx)
+auto DflyShardReplica::TransactionReader::NextTxData(JournalReader* reader, Context* cntx)
     -> optional<TransactionData> {
   io::Result<journal::ParsedEntry> res;
   while (true) {
@@ -1117,6 +1125,25 @@ auto Replica::TransactionReader::NextTxData(JournalReader* reader, Context* cntx
   }
 
   return std::nullopt;
+}
+
+uint32_t DflyShardReplica::FlowId() const {
+  return flow_id_;
+}
+
+uint64_t DflyShardReplica::JournalExecutedCount() const {
+  return journal_rec_executed_.load(std::memory_order_relaxed);
+}
+
+void DflyShardReplica::JoinFlow() {
+  sync_fb_.JoinIfNeeded();
+  acks_fb_.JoinIfNeeded();
+  execution_fb_.JoinIfNeeded();
+}
+
+void DflyShardReplica::Cancel() {
+  CloseSocket();
+  waker_.notifyAll();
 }
 
 }  // namespace dfly

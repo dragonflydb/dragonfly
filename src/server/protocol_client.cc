@@ -225,7 +225,7 @@ io::Result<size_t> ProtocolClient::ReadRespReply(base::IoBuf* buffer, bool copy_
 
       VLOG(2) << "Read master response of " << *size_res << " bytes";
 
-      last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
+      UpdateIoTime();
       buffer->CommitWrite(*size_res);
     }
 
@@ -304,7 +304,7 @@ error_code ProtocolClient::SendCommand(string_view command) {
   serializer_->SendCommand(command);
   error_code ec = serializer_->ec();
   if (!ec) {
-    last_io_time_ = sock_->proactor()->GetMonotonicTimeNs();
+    UpdateIoTime();
   }
   return ec;
 }
@@ -320,5 +320,14 @@ error_code ProtocolClient::SendCommandAndReadResponse(string_view command, base:
 void ProtocolClient::ResetParser(bool server_mode) {
   parser_.reset(new RedisParser(server_mode));
 }
+
+uint64_t ProtocolClient::LastIoTime() const {
+  return last_io_time_;
+}
+
+void ProtocolClient::UpdateIoTime() {
+  last_io_time_ = Proactor()->GetMonotonicTimeNs();
+}
+
 
 }  // namespace dfly

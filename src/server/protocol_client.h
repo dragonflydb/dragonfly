@@ -44,12 +44,15 @@ class ProtocolClient {
   }
   ~ProtocolClient();
 
+  void CloseSocket();  // Close replica sockets.
+
+  uint64_t LastIoTime() const;
+  void UpdateIoTime();
+
  protected:                            /* Main standalone mode functions */
   std::error_code ResolveMasterDns();  // Resolve master dns
   // Connect to master and authenticate if needed.
   std::error_code ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms, Context* cntx);
-
-  void CloseSocket();  // Close replica sockets.
 
   void DefaultErrorHandler(const GenericError& err);
 
@@ -101,7 +104,9 @@ class ProtocolClient {
 
   std::unique_ptr<util::LinuxSocketBase> sock_;
   Mutex sock_mu_;
+
  protected:
+  Context cntx_;  // context for tasks in replica.
 
   std::string last_cmd_;
   std::string last_resp_;
