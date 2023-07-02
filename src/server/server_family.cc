@@ -493,11 +493,11 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
 ServerFamily::~ServerFamily() {
 }
 
-void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_listener,
+void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners,
                         ClusterFamily* cluster_family) {
   CHECK(acceptor_ == nullptr);
   acceptor_ = acceptor;
-  main_listener_ = main_listener;
+  listeners_ = std::move(listeners);
   dfly_cmd_ = make_unique<DflyCmd>(this);
   cluster_family_ = cluster_family;
 
@@ -1346,7 +1346,10 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
       client_info.push_back(move(info));
     };
 
-    main_listener_->TraverseConnections(cb);
+    for (auto* listener : listeners_) {
+      listener->TraverseConnections(cb);
+    }
+
     string result = absl::StrJoin(move(client_info), "\n");
     result.append("\n");
     return (*cntx)->SendBulkString(result);

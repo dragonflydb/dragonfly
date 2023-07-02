@@ -138,7 +138,7 @@ void BaseFamilyTest::SetUp() {
 
   Service::InitOpts opts;
   opts.disable_time_update = true;
-  service_->Init(nullptr, nullptr, opts);
+  service_->Init(nullptr, {}, opts);
 
   TEST_current_time_ms = absl::GetCurrentTimeNanos() / 1000000;
   auto cb = [&](EngineShard* s) { s->db_slice().UpdateExpireBase(TEST_current_time_ms - 1000, 0); };
