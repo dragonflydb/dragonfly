@@ -26,6 +26,7 @@ enum class OpStatus : uint16_t {
   STREAM_ID_SMALL,
   ENTRIES_ADDED_SMALL,
   INVALID_NUMERIC_RESULT,
+  CANCELLED,
 };
 
 const char* DebugString(OpStatus op);

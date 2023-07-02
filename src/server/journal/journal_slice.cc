@@ -114,6 +114,25 @@ error_code JournalSlice::Close() {
 
 void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
   DCHECK(ring_buffer_);
+
+  if (entry.opcode != Op::NOOP) {
+    // TODO: This is preparation for AOC style journaling, currently unused.
+    RingItem item;
+    item.lsn = lsn_;
+    lsn_++;
+    item.opcode = entry.opcode;
+    item.txid = entry.txid;
+    VLOG(1) << "Writing item [" << item.lsn << "]: " << entry.ToString();
+    ring_buffer_->EmplaceOrOverride(move(item));
+
+    if (shard_file_) {
+      string line = absl::StrCat(item.lsn, " ", entry.txid, " ", entry.opcode, "\n");
+      error_code ec = shard_file_->Write(io::Buffer(line), file_offset_, 0);
+      CHECK_EC(ec);
+      file_offset_ += line.size();
+    }
+  }
+
   {
     std::shared_lock lk(cb_mu_);
     DVLOG(2) << "AddLogRecord: run callbacks for " << entry.ToString()
@@ -123,26 +142,6 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
       k_v.second(entry, await);
     }
   }
-
-  if (entry.opcode == Op::NOOP)
-    return;
-
-  // TODO: This is preparation for AOC style journaling, currently unused.
-  RingItem item;
-  item.lsn = lsn_;
-  item.opcode = entry.opcode;
-  item.txid = entry.txid;
-  VLOG(1) << "Writing item [" << item.lsn << "]: " << entry.ToString();
-  ring_buffer_->EmplaceOrOverride(move(item));
-
-  if (shard_file_) {
-    string line = absl::StrCat(lsn_, " ", entry.txid, " ", entry.opcode, "\n");
-    error_code ec = shard_file_->Write(io::Buffer(line), file_offset_, 0);
-    CHECK_EC(ec);
-    file_offset_ += line.size();
-  }
-
-  ++lsn_;
 }
 
 uint32_t JournalSlice::RegisterOnChange(ChangeCallback cb) {

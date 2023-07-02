@@ -695,9 +695,23 @@ bool Service::VerifyCommand(const CommandId* cid, CmdArgList args, ConnectionCon
 
   bool is_trans_cmd = CO::IsTransKind(cid->name());
   bool under_script = bool(dfly_cntx->conn_state.script_info);
-  bool blocked_by_loading = !dfly_cntx->journal_emulated && etl.gstate() == GlobalState::LOADING &&
-                            (cid->opt_mask() & CO::LOADING) == 0;
-  if (blocked_by_loading || etl.gstate() == GlobalState::SHUTTING_DOWN) {
+  bool allowed_by_state = true;
+  switch (etl.gstate()) {
+    case GlobalState::LOADING:
+      allowed_by_state = dfly_cntx->journal_emulated || (cid->opt_mask() & CO::LOADING);
+      break;
+    case GlobalState::SHUTTING_DOWN:
+      allowed_by_state = false;
+      break;
+    case GlobalState::TAKEN_OVER:
+      allowed_by_state = cid->name() == "REPLCONF" || cid->name() == "SAVE";
+      break;
+    default:
+      break;
+  }
+  if (!allowed_by_state) {
+    VLOG(1) << "Command " << cid->name() << " not executed because global state is "
+            << GlobalStateName(etl.gstate());
     string err = StrCat("Can not execute during ", GlobalStateName(etl.gstate()));
     (*dfly_cntx)->SendError(err);
     return false;

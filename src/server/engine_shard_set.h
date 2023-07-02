@@ -331,6 +331,10 @@ void EngineShardSet::RunBriefInParallel(U&& func, P&& pred) const {
 
 template <typename U> void EngineShardSet::RunBlockingInParallel(U&& func) {
   BlockingCounter bc{size()};
+  static_assert(std::is_invocable_v<U, EngineShard*>,
+                "Argument must be invocable EngineShard* as argument.");
+  static_assert(std::is_void_v<std::invoke_result_t<U, EngineShard*>>,
+                "Callable must not have a return value!");
 
   for (uint32_t i = 0; i < size(); ++i) {
     util::ProactorBase* dest = pp_->at(i);
