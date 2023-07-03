@@ -310,7 +310,8 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 
     if (continuation_trans_->IsArmedInShard(sid)) {
       bool to_keep = continuation_trans_->RunInShard(this, false);
-      DVLOG(1) << "RunContTrans: " << continuation_trans_->DebugId() << " keep: " << to_keep;
+      DVLOG(1) << "RunContTrans: " << (continuation_trans_ ? continuation_trans_->DebugId() : "")
+               << " keep: " << to_keep;
       if (!to_keep) {
         continuation_trans_ = nullptr;
       }
