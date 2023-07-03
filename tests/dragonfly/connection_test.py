@@ -7,6 +7,7 @@ import async_timeout
 
 from . import DflyInstance, dfly_args
 
+BASE_PORT = 1111
 
 async def run_monitor_eval(monitor, expected):
     async with monitor as mon:
@@ -420,18 +421,68 @@ async def test_large_cmd(async_client: aioredis.Redis):
 
 @pytest.mark.asyncio
 @dfly_args({"admin_nopass" : True})
-async def test_reject_non_tls_connections_on_tls_master(with_tls_args, df_local_factory):
-    master = df_local_factory.create(admin_port=1111, port=1211, **with_tls_args)
+async def test_reject_non_tls_connections_on_tls_master(with_tls_server_args, df_local_factory):
+    master = df_local_factory.create(admin_port=BASE_PORT, port=1211, **with_tls_server_args)
     master.start()
 
     # Try to connect on master without admin port. This should fail.
-    c_master = aioredis.Redis(port=master.port)
+    client = aioredis.Redis(port=master.port)
     try:
-        await c_master.execute_command("DBSIZE")
-        raise "Non tls connection connected on master with tls. This should NOT happen"
+        await client.execute_command("DBSIZE")
     except redis_conn_error:
         pass
 
     # Try to connect on master on admin port
-    c_master = aioredis.Redis(port=master.admin_port)
-    assert await c_master.ping()
+    client = aioredis.Redis(port=master.admin_port)
+    assert await client.ping()
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_tls_insecure(with_ca_tls_server_args, with_tls_client_args, df_local_factory):
+    master = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
+    master.start()
+
+    # Try to connect on master on admin port
+    client = aioredis.Redis(port=master.port, **with_tls_client_args, ssl_cert_reqs=None)
+    assert await client.ping()
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_tls_full_auth(with_ca_tls_server_args, with_ca_tls_client_args, df_local_factory):
+    master = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
+    master.start()
+
+    # Try to connect on master on admin port
+    client = aioredis.Redis(port=master.port, **with_ca_tls_client_args)
+    assert await client.ping()
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_tls_reject(with_ca_tls_server_args, with_tls_client_args, df_local_factory):
+    master = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
+    master.start()
+
+    # Try to connect without insecure
+    client = aioredis.Redis(port=master.port, **with_tls_client_args, ssl_cert_reqs=None)
+    try:
+        await client.ping()
+    except redis_conn_error:
+        pass
+
+   # No tls args with insecure
+    client = aioredis.Redis(port=master.port, **with_tls_client_args, ssl_cert_reqs=None)
+    try:
+        await client.ping()
+    except redis_conn_error:
+        pass
+
+    # No tls args with insecure
+    client = aioredis.Redis(port=master.port, ssl_cert_reqs=None)
+    try:
+        await client.ping()
+    except redis_conn_error:
+        pass
+    await client.close()

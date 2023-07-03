@@ -232,7 +232,8 @@ def memcached_connection(df_server: DflyInstance):
 def gen_tls_cert(df_factory: DflyInstanceFactory):
     tls_server_key_file_name = "df-key.pem"
     tls_server_cert_file_name = "df-cert.pem"
-    dfly_path = df_factory.dfly_path
+    dfly_path = df_factory.dfly_path + "/"
+    print(dfly_path)
     # We first need to generate the tls certificates to be used by the server
 
     # Step 1
@@ -257,14 +258,54 @@ def gen_tls_cert(df_factory: DflyInstanceFactory):
     tls_server_cert = dfly_path + tls_server_cert_file_name
     step3 = fr'openssl x509 -req -in {tls_server_req} -days 1 -CA {ca_cert} -CAkey {ca_key} -CAcreateserial -out {tls_server_cert}'
     subprocess.run(step3, shell=True)
-    return tls_server_key_file_name, tls_server_cert_file_name
+
+    # Step 4
+    # Generate client certificates
+    tls_client_key_file_name = "client-key.pem"
+    tls_client_key = dfly_path + tls_client_key_file_name
+
+    tls_client_req = dfly_path + "client-req.pem"
+    step4 = rf'openssl req -newkey rsa:4096 -nodes -keyout {tls_client_key} -out {tls_client_req} -subj "/C=It/ST=RM/L=Rome/O=KK/OU=Comp/CN=Gr/emailAddress=random@gmail.com"'
+    subprocess.run(step4, shell=True)
+
+    tls_client_cert_file_name = "client-cert.pem"
+    tls_client_cert = dfly_path + tls_client_cert_file_name
+    step5 = fr'openssl x509 -req -in {tls_client_req} -days 1 -CA {ca_cert} -CAkey {ca_key} -CAcreateserial -out {tls_client_cert}'
+
+    subprocess.run(step5, shell=True)
+
+    return [tls_server_key, tls_server_cert, ca_cert, tls_client_key, tls_client_cert]
 
 
 @pytest.fixture(scope="session")
-def with_tls_args(df_factory: DflyInstanceFactory, gen_tls_cert):
-    tls_server_key_file_name, tls_server_cert_file_name = gen_tls_cert
+def base_tls_server_args(df_factory: DflyInstanceFactory, gen_tls_cert):
     args = {"tls": "",
-            "tls_key_file": df_factory.dfly_path + tls_server_key_file_name,
-            "tls_cert_file": df_factory.dfly_path + tls_server_cert_file_name,
-            "no_tls_on_admin_port": "true"}
+            "tls_key_file": gen_tls_cert[0],
+            "tls_cert_file": gen_tls_cert[1]}
     return args
+
+
+@pytest.fixture(scope="session")
+def with_tls_server_args(df_factory: DflyInstanceFactory, base_tls_server_args, gen_tls_cert):
+    base_tls_server_args["no_tls_on_admin_port"] = 'true'
+    return base_tls_server_args
+
+
+@pytest.fixture(scope="session")
+def with_ca_tls_server_args(df_factory: DflyInstanceFactory, base_tls_server_args, gen_tls_cert):
+    base_tls_server_args["tls_ca_cert_file"] = gen_tls_cert[2]
+    return base_tls_server_args
+
+
+@pytest.fixture(scope="session")
+def with_tls_client_args(df_factory: DflyInstanceFactory, gen_tls_cert):
+    args = {"ssl": True,
+            "ssl_keyfile": gen_tls_cert[3],
+            "ssl_certfile": gen_tls_cert[4]}
+    return args
+
+
+@pytest.fixture(scope="session")
+def with_ca_tls_client_args(df_factory: DflyInstanceFactory, with_tls_client_args, gen_tls_cert):
+    with_tls_client_args["ssl_ca_certs"] = gen_tls_cert[2]
+    return with_tls_client_args

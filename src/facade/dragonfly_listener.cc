@@ -25,6 +25,8 @@ ABSL_FLAG(bool, conn_use_incoming_cpu, false,
 
 ABSL_FLAG(string, tls_cert_file, "", "cert file for tls connections");
 ABSL_FLAG(string, tls_key_file, "", "key file for tls connections");
+ABSL_FLAG(string, tls_ca_cert_file, "", "ca signed certificate to validate tls connections");
+ABSL_FLAG(string, tls_ca_cert_dir, "", "ca signed certificates directory");
 
 #if 0
 enum TlsClientAuth {
@@ -58,6 +60,7 @@ namespace {
 static SSL_CTX* CreateSslCntx() {
   SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
   const auto& tls_key_file = GetFlag(FLAGS_tls_key_file);
+  unsigned mask = SSL_VERIFY_NONE;
   if (tls_key_file.empty()) {
     // To connect - use openssl s_client -cipher with either:
     // "AECDH:@SECLEVEL=0" or "ADH:@SECLEVEL=0" setting.
@@ -77,19 +80,26 @@ static SSL_CTX* CreateSslCntx() {
     if (!tls_cert_file.empty()) {
       // TO connect with redis-cli you need both tls-key-file and tls-cert-file
       // loaded. Use `redis-cli --tls -p 6380 --insecure  PING` to test
-
       CHECK_EQ(1, SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()));
     }
+
+    const auto tls_ca_cert_file = GetFlag(FLAGS_tls_ca_cert_file);
+    const auto tls_ca_cert_dir = GetFlag(FLAGS_tls_ca_cert_dir);
+    mask = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
+    if (!tls_ca_cert_file.empty() || !tls_ca_cert_dir.empty()) {
+      const auto* file = tls_ca_cert_file.empty() ? nullptr : tls_ca_cert_file.data();
+      const auto* dir = tls_ca_cert_dir.empty() ? nullptr : tls_ca_cert_dir.data();
+      CHECK_EQ(1, SSL_CTX_load_verify_locations(ctx, file, dir));
+    } else {
+      CHECK_EQ(1, SSL_CTX_set_default_verify_paths(ctx));
+    }
+
     CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
   }
   SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
 
   SSL_CTX_set_options(ctx, SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS);
 
-  unsigned mask = SSL_VERIFY_NONE;
-
-  // if (tls_auth_clients_opt)
-  // mask |= SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
   SSL_CTX_set_verify(ctx, mask, NULL);
 
   CHECK_EQ(1, SSL_CTX_set_dh_auto(ctx, 1));
