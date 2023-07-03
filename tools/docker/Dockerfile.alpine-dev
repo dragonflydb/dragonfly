@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 FROM gcr.io/cadvisor/cadvisor:v0.46.0 as libpfm_donor
 
-FROM alpine:3.17.0 as builder
+FROM alpine:3 as builder
 
 # "openssl-libs-static" fixes "Could NOT find OpenSSL, try to set the path to OpenSSL root folder in the"
 RUN apk add autoconf-archive automake bash bison boost-dev cmake coreutils \
@@ -23,7 +23,7 @@ RUN make HELIO_RELEASE=y release
 
 RUN build-opt/dragonfly --version
 
-FROM alpine:3.17.0
+FROM alpine:3
 
 RUN apk --no-cache add libgcc libstdc++ libunwind boost1.80-fiber \
     zstd-dev su-exec netcat-openbsd openssl libxml2
