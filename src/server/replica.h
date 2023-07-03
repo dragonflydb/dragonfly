@@ -54,6 +54,7 @@ struct MasterContext {
   DflyVersion version = DflyVersion::VER0;
 };
 
+// This class manages replication from both Dragonfly and Redis masters.
 class Replica : ProtocolClient {
  private:
   // The flow is : R_ENABLED -> R_TCP_CONNECTED -> (R_SYNCING) -> R_SYNC_OK.
@@ -173,6 +174,8 @@ class Replica : ProtocolClient {
   std::string id_;
 };
 
+// This class implements a single shard replication flow from a Dragonfly master instance.
+// Multiple DflyShardReplica objects are managed by a Replica object.
 class DflyShardReplica : public ProtocolClient {
  public:
   DflyShardReplica(ServerContext server_context, MasterContext master_context, uint32_t flow_id,

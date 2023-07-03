@@ -28,6 +28,8 @@ class ConnectionContext;
 class JournalExecutor;
 struct JournalReader;
 
+// A helper class for implementing a Redis client that talks to a redis server.
+// This class should be inherited from.
 class ProtocolClient {
  public:
   ProtocolClient(std::string master_host, uint16_t port);
@@ -46,6 +48,9 @@ class ProtocolClient {
 
     std::string Description() const;
   };
+
+  // Constructing using a fully initialized ServerContext allows to skip
+  // the DNS resolution step.
   explicit ProtocolClient(ServerContext context) : server_context_(std::move(context)) {
   }
 
