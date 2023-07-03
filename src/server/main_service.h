@@ -22,7 +22,6 @@ class Interpreter;
 class ObjectExplorer;  // for Interpreter
 using facade::MemcacheParser;
 class Service : public facade::ServiceInterface {
-
  public:
   using error_code = std::error_code;
   struct InitOpts {

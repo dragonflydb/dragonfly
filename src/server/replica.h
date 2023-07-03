@@ -30,7 +30,7 @@ class JournalExecutor;
 struct JournalReader;
 class DflyShardReplica;
 
-// Coorindator for multi shard execution.
+// Coordinator for multi shard execution.
 struct MultiShardExecution {
   Mutex map_mu;
 
@@ -173,13 +173,14 @@ class Replica : ProtocolClient {
   std::string id_;
 };
 
-struct DflyShardReplica : public ProtocolClient {
+class DflyShardReplica : public ProtocolClient {
+ public:
   DflyShardReplica(ServerContext server_context, MasterContext master_context, uint32_t flow_id,
                    Service* service, std::shared_ptr<MultiShardExecution> multi_shard_exe);
   ~DflyShardReplica();
 
   // This class holds the commands of transaction in single shard.
-  // Once all commands were received, the command can be executed.
+  // Once all commands were received, the transaction can be executed.
   struct TransactionData {
     // Update the data from ParsedEntry and return true if all shard transaction commands were
     // received.

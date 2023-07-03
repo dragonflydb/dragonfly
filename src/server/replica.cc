@@ -348,7 +348,7 @@ error_code Replica::InitiatePSync() {
   if (!token) {
     snapshot_size = absl::get<size_t>(repl_header.fullsync);
   }
-  UpdateIoTime();
+  TouchIoTime();
 
   // we get token for diskless redis replication. For disk based replication
   // we get the snapshot size.
@@ -392,7 +392,7 @@ error_code Replica::InitiatePSync() {
 
     CHECK(ps.UnusedPrefix().empty());
     io_buf.ConsumeInput(io_buf.InputLen());
-    UpdateIoTime();
+    TouchIoTime();
   }
 
   state_mask_.fetch_and(~R_SYNCING);
@@ -441,7 +441,7 @@ error_code Replica::InitiateDflySync() {
     // Unblock all sockets.
     DefaultErrorHandler(ge);
     for (auto& flow : shard_flows_)
-      flow->CloseSocket();
+      flow->Cancel();
   };
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 

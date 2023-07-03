@@ -29,6 +29,15 @@ class JournalExecutor;
 struct JournalReader;
 
 class ProtocolClient {
+ public:
+  ProtocolClient(std::string master_host, uint16_t port);
+  ~ProtocolClient();
+
+  void CloseSocket();  // Close replica sockets.
+
+  uint64_t LastIoTime() const;
+  void TouchIoTime();
+
  protected:
   struct ServerContext {
     std::string host;
@@ -37,19 +46,9 @@ class ProtocolClient {
 
     std::string Description() const;
   };
-
- public:
-  ProtocolClient(std::string master_host, uint16_t port);
   explicit ProtocolClient(ServerContext context) : server_context_(std::move(context)) {
   }
-  ~ProtocolClient();
 
-  void CloseSocket();  // Close replica sockets.
-
-  uint64_t LastIoTime() const;
-  void UpdateIoTime();
-
- protected:                            /* Main standalone mode functions */
   std::error_code ResolveMasterDns();  // Resolve master dns
   // Connect to master and authenticate if needed.
   std::error_code ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms, Context* cntx);
