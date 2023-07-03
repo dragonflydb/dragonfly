@@ -235,12 +235,8 @@ std::error_code Replica::TakeOver(std::string_view timeout) {
   sock_->proactor()->Await(
       [this, &ec, timeout] { ec = SendNextPhaseRequest(absl::StrCat("TAKEOVER ", timeout)); });
 
-  if (ec) {
-    // TODO: Handle timeout more gracefully.
-    return cntx_.ReportError(ec);
-  }
-  // If we successfully taken over, return and let server_family stop us.
-  return {};
+  // If we successfully taken over, return and let server_family stop the replication.
+  return ec;
 }
 
 void Replica::MainReplicationFb() {
