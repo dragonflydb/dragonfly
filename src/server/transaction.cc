@@ -455,6 +455,10 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
   DCHECK(IsGlobal() || (sd.local_mask & KEYLOCK_ACQUIRED) || (multi_ && multi_->mode == GLOBAL));
 
+  if (txq_ooo) {
+    DCHECK(sd.local_mask & OUT_OF_ORDER);
+  }
+
   /*************************************************************************/
   // Actually running the callback.
   // If you change the logic here, also please change the logic
@@ -530,7 +534,6 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
     // 1: to go over potential wakened keys, verify them and activate watch queues.
     // 2: if this transaction was notified and finished running - to remove it from the head
     //    of the queue and notify the next one.
-    // RunStep is also called for global transactions because of commands like MOVE.
     if (auto* bcontroller = shard->blocking_controller(); bcontroller) {
       if (awaked_prerun || was_suspended) {
         bcontroller->FinalizeWatched(largs, this);
@@ -1227,6 +1230,7 @@ void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, E
   }
 
   auto& sd = shard_data_[SidToId(shard->shard_id())];
+  sd.local_mask |= UNLOCK_MULTI;
 
   // It does not have to be that all shards in multi transaction execute this tx.
   // Hence it could stay in the tx queue. We perform the necessary cleanup and remove it from
