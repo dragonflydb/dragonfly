@@ -493,11 +493,11 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
 ServerFamily::~ServerFamily() {
 }
 
-void ServerFamily::Init(util::AcceptServer* acceptor, util::ListenerInterface* main_listener,
+void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners,
                         ClusterFamily* cluster_family) {
   CHECK(acceptor_ == nullptr);
   acceptor_ = acceptor;
-  main_listener_ = main_listener;
+  listeners_ = std::move(listeners);
   dfly_cmd_ = make_unique<DflyCmd>(this);
   cluster_family_ = cluster_family;
 
@@ -1054,12 +1054,13 @@ GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transa
 
   // Manage global state.
   GlobalState new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::SAVING);
-  if (new_state != GlobalState::SAVING) {
+  if (new_state != GlobalState::SAVING && new_state != GlobalState::TAKEN_OVER) {
     return {make_error_code(errc::operation_in_progress),
             StrCat(GlobalStateName(new_state), " - can not save database")};
   }
-  absl::Cleanup rev_state = [this] {
-    service_.SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
+  absl::Cleanup rev_state = [this, new_state] {
+    if (new_state == GlobalState::SAVING)
+      service_.SwitchState(GlobalState::SAVING, GlobalState::ACTIVE);
   };
 
   absl::Time start = absl::Now();
@@ -1259,6 +1260,19 @@ void ServerFamily::BreakOnShutdown() {
   dfly_cmd_->BreakOnShutdown();
 }
 
+bool ServerFamily::AwaitDispatches(absl::Duration timeout,
+                                   const std::function<bool(util::Connection*)>& filter) {
+  auto start = absl::Now();
+  for (auto* listener : listeners_) {
+    absl::Duration remaining_time = timeout - (absl::Now() - start);
+    if (remaining_time < absl::Nanoseconds(0) ||
+        !listener->AwaitDispatches(remaining_time, filter)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 string GetPassword() {
   string flag = GetFlag(FLAGS_requirepass);
   if (!flag.empty()) {
@@ -1346,7 +1360,10 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
       client_info.push_back(move(info));
     };
 
-    main_listener_->TraverseConnections(cb);
+    for (auto* listener : listeners_) {
+      listener->TraverseConnections(cb);
+    }
+
     string result = absl::StrJoin(move(client_info), "\n");
     result.append("\n");
     return (*cntx)->SendBulkString(result);
@@ -1930,6 +1947,41 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
+  VLOG(1) << "Starting take over";
+  VLOG(1) << "Acquire replica lock";
+  unique_lock lk(replicaof_mu_);
+
+  float_t timeout_sec;
+  if (!absl::SimpleAtof(ArgS(args, 0), &timeout_sec)) {
+    return (*cntx)->SendError(kInvalidIntErr);
+  }
+  if (timeout_sec < 0) {
+    return (*cntx)->SendError("timeout is negative");
+  }
+
+  if (ServerState::tlocal()->is_master)
+    return (*cntx)->SendError("Already a master instance");
+  auto repl_ptr = replica_;
+  CHECK(repl_ptr);
+
+  auto info = replica_->GetInfo();
+  if (!info.full_sync_done) {
+    return (*cntx)->SendError("Full sync not done");
+  }
+
+  std::error_code ec = replica_->TakeOver(ArgS(args, 0));
+  if (ec)
+    return (*cntx)->SendError("Couldn't execute takeover");
+
+  LOG(INFO) << "Takeover successful, promoting this instance to master.";
+  service_.proactor_pool().AwaitFiberOnAll(
+      [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = true; });
+  replica_->Stop();
+  replica_.reset();
+  return (*cntx)->SendOk();
+}
+
 void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() % 2 == 1)
     goto err;
@@ -2080,7 +2132,7 @@ void ServerFamily::Latency(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendError(kSyntaxErr);
 }
 
-void ServerFamily::_Shutdown(CmdArgList args, ConnectionContext* cntx) {
+void ServerFamily::ShutdownCmd(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 1) {
     (*cntx)->SendError(kSyntaxErr);
     return;
@@ -2142,9 +2194,11 @@ void ServerFamily::Register(CommandRegistry* registry) {
             << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING | CO::FAST, -2, 0, 0, 0}.HFUNC(Latency)
             << CI{"MEMORY", kMemOpts, -2, 0, 0, 0}.HFUNC(Memory)
             << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, 0}.HFUNC(Save)
-            << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.HFUNC(_Shutdown)
+            << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -1, 0, 0, 0}.HFUNC(
+                   ShutdownCmd)
             << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
             << CI{"REPLICAOF", kReplicaOpts, 3, 0, 0, 0}.HFUNC(ReplicaOf)
+            << CI{"REPLTAKEOVER", CO::ADMIN | CO::GLOBAL_TRANS, 2, 0, 0, 0}.HFUNC(ReplTakeOver)
             << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, 0}.HFUNC(ReplConf)
             << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, 0}.HFUNC(Role)
             << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, 0}.SetHandler(SlowLog)

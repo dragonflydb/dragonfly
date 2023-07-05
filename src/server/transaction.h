@@ -129,11 +129,12 @@ class Transaction {
   enum LocalMask : uint16_t {
     ACTIVE = 1,  // Set on all active shards.
     // UNUSED = 1 << 1,
-    OUT_OF_ORDER = 1 << 2,      // Whether its running out of order
+    OUT_OF_ORDER = 1 << 2,      // Whether it can run as out of order
     KEYLOCK_ACQUIRED = 1 << 3,  // Whether its key locks are acquired
     SUSPENDED_Q = 1 << 4,       // Whether is suspened (by WatchInShard())
     AWAKED_Q = 1 << 5,          // Whether it was awakened (by NotifySuspended())
     EXPIRED_Q = 1 << 6,         // Whether it timed out and should be dropped
+    UNLOCK_MULTI = 1 << 7,      // Whether this shard executed UnlockMultiShardCb
   };
 
  public:
@@ -342,7 +343,7 @@ class Transaction {
     uint32_t pq_pos = TxQueue::kEnd;
 
     // Accessed within shard thread.
-    // Bitmask of LocalState enums.
+    // Bitmask of LocalMask enums.
     uint16_t local_mask = 0;
 
     // Index of key relative to args in shard that the shard was woken up after blocking wait.

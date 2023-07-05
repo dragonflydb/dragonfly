@@ -455,6 +455,10 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
   DCHECK(IsGlobal() || (sd.local_mask & KEYLOCK_ACQUIRED) || (multi_ && multi_->mode == GLOBAL));
 
+  if (txq_ooo) {
+    DCHECK(sd.local_mask & OUT_OF_ORDER);
+  }
+
   /*************************************************************************/
   // Actually running the callback.
   // If you change the logic here, also please change the logic
@@ -507,6 +511,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
     if (IsGlobal()) {
       DCHECK(!awaked_prerun && !became_suspended);  // Global transactions can not be blocking.
+      VLOG(2) << "Releasing shard lock";
       shard->shard_lock()->Release(Mode());
     } else {  // not global.
       largs = GetLockArgs(idx);
@@ -529,7 +534,6 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
     // 1: to go over potential wakened keys, verify them and activate watch queues.
     // 2: if this transaction was notified and finished running - to remove it from the head
     //    of the queue and notify the next one.
-    // RunStep is also called for global transactions because of commands like MOVE.
     if (auto* bcontroller = shard->blocking_controller(); bcontroller) {
       if (awaked_prerun || was_suspended) {
         bcontroller->FinalizeWatched(largs, this);
@@ -572,6 +576,7 @@ void Transaction::ScheduleInternal() {
     // Lock shards
     auto cb = [mode](EngineShard* shard) { shard->shard_lock()->Acquire(mode); };
     shard_set->RunBriefInParallel(std::move(cb));
+    VLOG(1) << "Global shard lock acquired";
   } else {
     num_shards = unique_shard_cnt_;
     DCHECK_GT(num_shards, 0u);
@@ -893,8 +898,8 @@ void Transaction::RunQuickie(EngineShard* shard) {
   auto& sd = shard_data_[SidToId(unique_shard_id_)];
   DCHECK_EQ(0, sd.local_mask & (KEYLOCK_ACQUIRED | OUT_OF_ORDER));
 
-  DVLOG(1) << "RunQuickSingle " << DebugId() << " " << shard->shard_id() << " " << args_[0];
-  DCHECK(cb_ptr_) << DebugId() << " " << shard->shard_id() << " " << args_[0];
+  DVLOG(1) << "RunQuickSingle " << DebugId() << " " << shard->shard_id();
+  DCHECK(cb_ptr_) << DebugId() << " " << shard->shard_id();
 
   // Calling the callback in somewhat safe way
   try {
@@ -1225,6 +1230,7 @@ void Transaction::UnlockMultiShardCb(const std::vector<KeyList>& sharded_keys, E
   }
 
   auto& sd = shard_data_[SidToId(shard->shard_id())];
+  sd.local_mask |= UNLOCK_MULTI;
 
   // It does not have to be that all shards in multi transaction execute this tx.
   // Hence it could stay in the tx queue. We perform the necessary cleanup and remove it from

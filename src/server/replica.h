@@ -115,6 +115,8 @@ class Replica {
 
   void Pause(bool pause);
 
+  std::error_code TakeOver(std::string_view timeout);
+
   std::string_view MasterId() const {
     return master_context_.master_repl_id;
   }
@@ -141,8 +143,8 @@ class Replica {
   void JoinAllFlows();                // Join all flows if possible.
   void SetShardStates(bool replica);  // Call SetReplica(replica) on all shards.
 
-  // Send DFLY SYNC or DFLY STARTSTABLE if stable is true.
-  std::error_code SendNextPhaseRequest(bool stable);
+  // Send DFLY ${kind} to the master instance.
+  std::error_code SendNextPhaseRequest(std::string_view kind);
 
   void DefaultErrorHandler(const GenericError& err);
 

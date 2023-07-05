@@ -14,10 +14,12 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
+#include "facade/dragonfly_listener.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
 #include "server/journal/streamer.h"
+#include "server/main_service.h"
 #include "server/rdb_save.h"
 #include "server/script_mgr.h"
 #include "server/server_family.h"
@@ -65,15 +67,27 @@ std::string_view SyncStateName(DflyCmd::SyncState sync_state) {
 }
 
 struct TransactionGuard {
-  constexpr static auto kEmptyCb = [](Transaction* t, EngineShard* shard) { return OpStatus::OK; };
+  static OpStatus ExitGuardCb(Transaction* t, EngineShard* shard) {
+    shard->db_slice().SetExpireAllowed(true);
+    return OpStatus::OK;
+  };
 
-  TransactionGuard(Transaction* t) : t(t) {
+  explicit TransactionGuard(Transaction* t, bool disable_expirations = false) : t(t) {
     t->Schedule();
-    t->Execute(kEmptyCb, false);
+    t->Execute(
+        [disable_expirations](Transaction* t, EngineShard* shard) {
+          if (disable_expirations) {
+            shard->db_slice().SetExpireAllowed(!disable_expirations);
+          }
+          return OpStatus::OK;
+        },
+        false);
+    VLOG(1) << "Transaction guard engaged";
   }
 
   ~TransactionGuard() {
-    t->Execute(kEmptyCb, true);
+    VLOG(1) << "Releasing transaction guard";
+    t->Execute(ExitGuardCb, true);
   }
 
   Transaction* t;
@@ -108,6 +122,10 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
 
   if (sub_cmd == "STARTSTABLE" && args.size() == 2) {
     return StartStable(args, cntx);
+  }
+
+  if (sub_cmd == "TAKEOVER" && args.size() == 3) {
+    return TakeOver(args, cntx);
   }
 
   if (sub_cmd == "EXPIRE") {
@@ -316,7 +334,6 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
 
       StopFullSyncInThread(flow, shard);
       status = StartStableSyncInThread(flow, &replica_ptr->cntx, shard);
-      return OpStatus::OK;
     };
     shard_set->RunBlockingInParallel(std::move(cb));
 
@@ -329,6 +346,80 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
 
   replica_ptr->state.store(SyncState::STABLE_SYNC, memory_order_relaxed);
   return rb->SendOk();
+}
+
+void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
+  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  string_view sync_id_str = ArgS(args, 2);
+  float timeout;
+  if (!absl::SimpleAtof(ArgS(args, 1), &timeout)) {
+    return (*cntx)->SendError(kInvalidIntErr);
+  }
+  if (timeout < 0) {
+    return (*cntx)->SendError("timeout is negative");
+  }
+
+  VLOG(1) << "Got DFLY TAKEOVER " << sync_id_str;
+
+  auto [sync_id, replica_ptr] = GetReplicaInfoOrReply(sync_id_str, rb);
+  if (!sync_id)
+    return;
+
+  unique_lock lk(replica_ptr->mu);
+  if (!CheckReplicaStateOrReply(*replica_ptr, SyncState::STABLE_SYNC, rb))
+    return;
+
+  LOG(INFO) << "Takeover initiated, locking down the database.";
+
+  sf_->service().SwitchState(GlobalState::ACTIVE, GlobalState::TAKEN_OVER);
+
+  absl::Duration timeout_dur = absl::Seconds(timeout);
+  absl::Time start = absl::Now();
+  AggregateStatus status;
+
+  // TODO: We should cancel blocking commands before awaiting all
+  // dispatches to finish.
+  if (!sf_->AwaitDispatches(timeout_dur, [self = cntx->owner()](util::Connection* conn) {
+        // The only command that is currently dispatching should be the takeover command -
+        // so we wait until this is true.
+        return conn != self;
+      })) {
+    LOG(WARNING) << "Couldn't wait for commands to finish dispatching. " << timeout_dur;
+    status = OpStatus::TIMED_OUT;
+  }
+
+  TransactionGuard tg{cntx->transaction, /*disable_expirations=*/true};
+
+  if (*status == OpStatus::OK) {
+    auto cb = [&cntx = replica_ptr->cntx, replica_ptr = replica_ptr, timeout_dur, start,
+               &status](EngineShard* shard) {
+      FlowInfo* flow = &replica_ptr->flows[shard->shard_id()];
+
+      shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, {}, true);
+      while (flow->last_acked_lsn < shard->journal()->GetLsn()) {
+        if (absl::Now() - start > timeout_dur) {
+          LOG(WARNING) << "Couldn't synchronize with replica for takeover in time.";
+          status = OpStatus::TIMED_OUT;
+          return;
+        }
+        if (cntx.IsCancelled()) {
+          status = OpStatus::CANCELLED;
+          return;
+        }
+        ThisFiber::SleepFor(1ms);
+      }
+    };
+    shard_set->RunBlockingInParallel(std::move(cb));
+  }
+
+  if (*status != OpStatus::OK) {
+    sf_->service().SwitchState(GlobalState::TAKEN_OVER, GlobalState::ACTIVE);
+    return rb->SendError("Takeover failed!");
+  }
+  (*cntx)->SendOk();
+
+  VLOG(1) << "Takeover accepted, shutting down.";
+  return sf_->ShutdownCmd({}, cntx);
 }
 
 void DflyCmd::Expire(CmdArgList args, ConnectionContext* cntx) {

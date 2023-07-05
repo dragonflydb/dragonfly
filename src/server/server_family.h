@@ -8,6 +8,7 @@
 #include <string>
 
 #include "facade/conn_context.h"
+#include "facade/dragonfly_listener.h"
 #include "facade/redis_parser.h"
 #include "server/channel_store.h"
 #include "server/engine_shard_set.h"
@@ -88,10 +89,12 @@ class ServerFamily {
   explicit ServerFamily(Service* service);
   ~ServerFamily();
 
-  void Init(util::AcceptServer* acceptor, util::ListenerInterface* main_listener,
+  void Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners,
             ClusterFamily* cluster_family);
   void Register(CommandRegistry* registry);
   void Shutdown();
+
+  void ShutdownCmd(CmdArgList args, ConnectionContext* cntx);
 
   Service& service() {
     return service_;
@@ -153,6 +156,9 @@ class ServerFamily {
 
   void BreakOnShutdown();
 
+  bool AwaitDispatches(absl::Duration timeout,
+                       const std::function<bool(util::Connection*)>& filter);
+
  private:
   uint32_t shard_count() const {
     return shard_set->size();
@@ -173,13 +179,12 @@ class ServerFamily {
   void Latency(CmdArgList args, ConnectionContext* cntx);
   void Psync(CmdArgList args, ConnectionContext* cntx);
   void ReplicaOf(CmdArgList args, ConnectionContext* cntx);
+  void ReplTakeOver(CmdArgList args, ConnectionContext* cntx);
   void ReplConf(CmdArgList args, ConnectionContext* cntx);
   void Role(CmdArgList args, ConnectionContext* cntx);
   void Save(CmdArgList args, ConnectionContext* cntx);
   void Script(CmdArgList args, ConnectionContext* cntx);
   void Sync(CmdArgList args, ConnectionContext* cntx);
-
-  void _Shutdown(CmdArgList args, ConnectionContext* cntx);
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
 
@@ -195,7 +200,7 @@ class ServerFamily {
   Service& service_;
 
   util::AcceptServer* acceptor_ = nullptr;
-  util::ListenerInterface* main_listener_ = nullptr;
+  std::vector<facade::Listener*> listeners_;
   util::ProactorBase* pb_task_ = nullptr;
 
   mutable Mutex replicaof_mu_, save_mu_;

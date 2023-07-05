@@ -937,7 +937,6 @@ async def assert_lag_condition(inst, client, condition):
         assert False, "Lag has never satisfied condition!"
 
 
-
 @dfly_args({"proactor_threads": 2})
 @pytest.mark.asyncio
 async def test_replication_info(df_local_factory, df_seeder_factory, n_keys=2000):
@@ -1069,3 +1068,152 @@ async def test_readonly_script(df_local_factory):
         assert False
     except aioredis.ResponseError as roe:
         assert 'READONLY ' in str(roe)
+
+
+take_over_cases = [
+    [2, 2],
+    [2, 4],
+    [4, 2],
+    [8, 8],
+]
+
+
+@pytest.mark.parametrize("master_threads, replica_threads", take_over_cases)
+@pytest.mark.asyncio
+async def test_take_over_counters(df_local_factory, master_threads, replica_threads):
+    master = df_local_factory.create(proactor_threads=master_threads,
+                                     port=BASE_PORT,
+                                     #  vmodule="journal_slice=2,dflycmd=2,main_service=1",
+                                     logtostderr=True)
+    replica1 = df_local_factory.create(
+        port=BASE_PORT+1, proactor_threads=replica_threads)
+    replica2 = df_local_factory.create(
+        port=BASE_PORT+2, proactor_threads=replica_threads)
+    replica3 = df_local_factory.create(
+        port=BASE_PORT+3, proactor_threads=replica_threads)
+    df_local_factory.start_all([master, replica1, replica2, replica3])
+    async with (
+        master.client() as c_master,
+        replica1.client() as c1,
+        master.client() as c_blocking,
+        replica2.client() as c2,
+        replica3.client() as c3,
+    ):
+        await c1.execute_command(f"REPLICAOF localhost {master.port}")
+        await c2.execute_command(f"REPLICAOF localhost {master.port}")
+        await c3.execute_command(f"REPLICAOF localhost {master.port}")
+
+        await wait_available_async(c1)
+
+        async def counter(key):
+            value = 0
+            await c_master.execute_command(f"SET {key} 0")
+            start = time.time()
+            while time.time() - start < 20:
+                try:
+                    value = await c_master.execute_command(f"INCR {key}")
+                except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError) as e:
+                    break
+            else:
+                assert False, "The incrementing loop should be exited with a connection error"
+            return key, value
+
+        async def block_during_takeover():
+            "Add a blocking command during takeover to make sure it doesn't block it."
+            # TODO: We need to make takeover interrupt blocking commands.
+            return
+            try:
+                await c_blocking.execute_command("BLPOP BLOCKING_KEY1 BLOCKING_KEY2 10")
+            except redis.exceptions.ConnectionError:
+                pass
+
+        async def delayed_takeover():
+            await asyncio.sleep(1)
+            await c1.execute_command(f"REPLTAKEOVER 5")
+
+        _, _, *results = await asyncio.gather(delayed_takeover(), block_during_takeover(), *[counter(f"key{i}") for i in range(16)])
+        assert await c1.execute_command("role") == [b'master', []]
+
+        for key, client_value in results:
+            replicated_value = await c1.get(key)
+            assert client_value == int(replicated_value)
+
+
+@pytest.mark.parametrize("master_threads, replica_threads", take_over_cases)
+@pytest.mark.asyncio
+async def test_take_over_seeder(df_local_factory, df_seeder_factory, master_threads, replica_threads):
+    master = df_local_factory.create(proactor_threads=master_threads,
+                                     port=BASE_PORT,
+                                     dbfilename=f"dump_{master_threads}_{replica_threads}",
+                                     logtostderr=True)
+    replica = df_local_factory.create(
+        port=BASE_PORT+1, proactor_threads=replica_threads)
+    df_local_factory.start_all([master, replica])
+
+    seeder = df_seeder_factory.create(port=master.port, keys=1000, dbcount=5, stop_on_failure=False)
+    async with (
+        master.client() as c_master,
+        replica.client() as c_replica,
+    ):
+        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+        await wait_available_async(c_replica)
+
+        async def seed():
+            await seeder.run(target_ops=3000)
+
+        fill_task = asyncio.create_task(seed())
+
+        # Give the seeder a bit of time.
+        await asyncio.sleep(1)
+        await c_replica.execute_command(f"REPLTAKEOVER 5")
+        seeder.stop()
+
+        assert await c_replica.execute_command("role") == [b'master', []]
+
+        # Need to wait a bit to give time to write the shutdown snapshot
+        await asyncio.sleep(1)
+        assert master.proc.poll() == 0, "Master process did not exit correctly."
+
+        master.start()
+        await wait_available_async(c_master)
+
+        capture = await seeder.capture()
+        assert await seeder.compare(capture, port=replica.port)
+
+
+@pytest.mark.asyncio
+async def test_take_over_timeout(df_local_factory, df_seeder_factory):
+    master = df_local_factory.create(proactor_threads=2,
+                                     port=BASE_PORT,
+                                     logtostderr=True)
+    replica = df_local_factory.create(
+        port=BASE_PORT+1, proactor_threads=2)
+    df_local_factory.start_all([master, replica])
+
+    seeder = df_seeder_factory.create(
+        port=master.port, keys=1000, dbcount=5, stop_on_failure=False)
+    async with (
+        master.client() as c_master,
+        replica.client() as c_replica,
+    ):
+        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+        await wait_available_async(c_replica)
+
+        async def seed():
+            await seeder.run(target_ops=3000)
+
+        fill_task = asyncio.create_task(seed())
+
+        # Give the seeder a bit of time.
+        await asyncio.sleep(1)
+        try:
+            await c_replica.execute_command(f"REPLTAKEOVER 0.0001")
+        except redis.exceptions.ResponseError as e:
+            assert str(e) == "Couldn't execute takeover"
+        else:
+            assert False, "Takeover should not succeed."
+        seeder.stop()
+        await fill_task
+
+        assert await c_master.execute_command("role") == [b'master', [[b'127.0.0.1', bytes(str(replica.port), 'ascii'), b'stable_sync']]]
+        assert await c_replica.execute_command("role") == [b'replica', b'localhost', bytes(str(master.port), 'ascii'), b'stable_sync']

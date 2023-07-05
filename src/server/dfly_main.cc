@@ -314,12 +314,14 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   auto tcp_disabled = GetFlag(FLAGS_port) == 0u;
   Listener* main_listener = nullptr;
 
-  if (!tcp_disabled)
+  std::vector<facade::Listener*> listeners;
+  if (!tcp_disabled) {
     main_listener = new Listener{Protocol::REDIS, &service};
+    listeners.push_back(main_listener);
+  }
 
   Service::InitOpts opts;
   opts.disable_time_update = false;
-  service.Init(acceptor, main_listener, opts);
   const auto& bind = GetFlag(FLAGS_bind);
   const char* bind_addr = bind.empty() ? nullptr : bind.c_str();
   auto port = GetFlag(FLAGS_port);
@@ -357,6 +359,7 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
       delete uds_listener;
     } else {
       LOG(INFO) << "Listening on unix socket " << unix_sock;
+      listeners.push_back(uds_listener);
       unlink_uds = true;
     }
   } else if (tcp_disabled) {
@@ -381,8 +384,11 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
       delete admin_listener;
     } else {
       LOG(INFO) << "Listening on " << printable_addr;
+      listeners.push_back(admin_listener);
     }
   }
+
+  service.Init(acceptor, listeners, opts);
 
   if (!tcp_disabled) {
     error_code ec = acceptor->AddListener(bind_addr, port, main_listener);
@@ -506,7 +512,10 @@ error_code GetCGroupPath(string* memory_path, string* cpu_path) {
       // in v1 the format is
       // N:s1:2 where N is an integer, s1, s2 strings with s1 maybe empty.
       vector<string_view> entry = absl::StrSplit(sv, ':');
-      CHECK_EQ(entry.size(), 3u);
+      if (entry.size() != 3u) {
+        LOG(ERROR) << "Unsupported group " << sv;
+        continue;
+      }
 
       // in v1 there are several 'canonical' cgroups
       // we are interested in the 'memory' and the 'cpu,cpuacct' ones

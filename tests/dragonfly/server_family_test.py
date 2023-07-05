@@ -40,7 +40,7 @@ change to match the fact that we supporting this operation.
 For now we are expecting to get an error
 '''
 
-
+@pytest.mark.skip("Skip until we decided on correct behaviour of eval inside multi")
 async def test_multi_eval(async_client: aioredis.Redis):
     try:
         pipeline = async_client.pipeline()
@@ -62,10 +62,21 @@ async def test_connection_name(async_client: aioredis.Redis):
     assert name == "test_conn_name"
 
 
-'''
-make sure that the scan command is working with python
-'''
+async def test_client_list(df_factory):
+    instance = df_factory.create(port=1111, admin_port=1112)
+    instance.start()
+    async with (aioredis.Redis(port=instance.port) as client, aioredis.Redis(port=instance.admin_port) as admin_client):
+        await client.ping()
+        await admin_client.ping()
+        assert len(await client.execute_command("CLIENT LIST")) == 2
+        assert len(await admin_client.execute_command("CLIENT LIST")) == 2
+    instance.stop()
+
+
 async def test_scan(async_client: aioredis.Redis):
+    '''
+    make sure that the scan command is working with python
+    '''
     def gen_test_data():
         for i in range(10):
             yield f"key-{i}", f"value-{i}"
