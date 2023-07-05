@@ -428,12 +428,12 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
   do {
     auto buf = io_buf_.AppendBuffer();
     DCHECK(!buf.empty());
-    ::io::Result<size_t> recv_sz;
-    recv_sz = peer->Recv(buf);
-    io_buf_.CommitWrite(*recv_sz);
+
+    ::io::Result<size_t> recv_sz = peer->Recv(buf);
     if (!recv_sz) {
       return make_unexpected(recv_sz.error());
     }
+    io_buf_.CommitWrite(*recv_sz);
     string_view ib = ToSV(io_buf_.InputBuffer().subspan(last_len));
     size_t pos = ib.find('\n');
     if (pos != string_view::npos) {
