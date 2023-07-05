@@ -377,8 +377,8 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   absl::Time start = absl::Now();
   AggregateStatus status;
 
-  // TODO: We should cancel blocking commands before awaiting all
-  // dispatches to finish.
+  // We need to await for all dispatches to finish: Otherwise a transaction might be scheduled
+  // after this function exits but before the actual shutdown.
   sf_->CancelBlockingCommands();
   if (!sf_->AwaitDispatches(timeout_dur, [self = cntx->owner()](util::Connection* conn) {
         // The only command that is currently dispatching should be the takeover command -
@@ -388,7 +388,10 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
     LOG(WARNING) << "Couldn't wait for commands to finish dispatching. " << timeout_dur;
     status = OpStatus::TIMED_OUT;
   }
+  VLOG(1) << "AwaitDispatches done";
 
+  // We have this guard to disable expirations: We don't want any writes to the journal after
+  // we send the `PING`, and expirations could ruin that.
   TransactionGuard tg{cntx->transaction, /*disable_expirations=*/true};
 
   if (*status == OpStatus::OK) {
