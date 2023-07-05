@@ -1265,8 +1265,7 @@ void ServerFamily::CancelBlockingCommands() {
     facade::ConnectionContext* fc = static_cast<facade::Connection*>(conn)->cntx();
     if (fc) {
       ConnectionContext* cntx = static_cast<ConnectionContext*>(fc);
-      if (cntx->transaction)
-        cntx->transaction->CancelBlocking();
+      cntx->CancelBlocking();
     }
   };
   for (auto* listener : listeners_) {
