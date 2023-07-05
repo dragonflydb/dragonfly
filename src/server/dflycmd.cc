@@ -392,6 +392,8 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
 
   // We have this guard to disable expirations: We don't want any writes to the journal after
   // we send the `PING`, and expirations could ruin that.
+  // TODO: Decouple disabling expirations from TransactionGuard because we don't
+  // really need TransactionGuard here.
   TransactionGuard tg{cntx->transaction, /*disable_expirations=*/true};
 
   if (*status == OpStatus::OK) {
