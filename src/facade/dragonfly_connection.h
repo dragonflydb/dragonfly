@@ -163,6 +163,8 @@ class Connection : public util::Connection {
     return name_;
   }
 
+  ConnectionContext* cntx();
+
  protected:
   void OnShutdown() override;
   void OnPreMigrateThread() override;

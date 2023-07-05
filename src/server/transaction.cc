@@ -1389,7 +1389,7 @@ void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt
   journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_cnt, {}, false);
 }
 
-void Transaction::BreakOnShutdown() {
+void Transaction::CancelBlocking() {
   if (coordinator_state_ & COORD_BLOCKED) {
     coordinator_state_ |= COORD_CANCELLED;
     blocking_ec_.notify();
