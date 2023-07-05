@@ -309,7 +309,7 @@ void Replica::MainReplicationFb() {
     else
       ec = ConsumeRedisStream();
 
-    LOG(WARNING) << "Error full sync with " << master_context_.Description() << " " << ec << " "
+    LOG(WARNING) << "Error stable sync with " << master_context_.Description() << " " << ec << " "
                  << ec.message();
     state_mask_.fetch_and(R_ENABLED);
   }
