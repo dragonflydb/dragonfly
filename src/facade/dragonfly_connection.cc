@@ -41,7 +41,7 @@ ABSL_FLAG(std::string, admin_bind, "",
 ABSL_FLAG(std::uint64_t, request_cache_limit, 1ULL << 26,  // 64MB
           "Amount of memory to use for request cache in bytes - per IO thread.");
 
-ABSL_FLAG(bool, no_tls_on_replica, false,
+ABSL_FLAG(bool, no_tls_on_admin_port, false,
           "Enable one way TLS for master only, that is, replica does not use TLS to"
           "connect with master");
 
@@ -297,19 +297,6 @@ void Connection::UnregisterShutdownHook(ShutdownHandle id) {
   }
 }
 
-bool Connection::IsReplicaCommand(util::tls::TlsSocket::Buffer buff) const {
-  string_view str{reinterpret_cast<const char*>(buff.data()), buff.size()};
-  auto starts_with = [](const string_view source, const string_view starter) {
-    if (source.size() < starter.size()) {
-      return false;
-    }
-    size_t pos = 0;
-    return std::all_of(source.begin(), source.begin() + starter.size(),
-                       [&pos, starter](const char c) mutable { return c == starter[pos++]; });
-  };
-  return starts_with(str, "PING") || starts_with(str, "DFLY") || starts_with(str, "REPLCONF");
-}
-
 void Connection::HandleRequests() {
   ThisFiber::SetName("DflyConnection");
 
@@ -321,45 +308,29 @@ void Connection::HandleRequests() {
   }
 
   auto remote_ep = lsb->RemoteEndpoint();
-  tls::TlsSocket::Buffer maybe_leftover_bytes;
+
   FiberSocketBase* peer = socket_.get();
 #ifdef DFLY_USE_SSL
   unique_ptr<tls::TlsSocket> tls_sock;
   if (ctx_) {
-    tls_sock.reset(new tls::TlsSocket(socket_.get()));
-    tls_sock->CacheOnce();
-    tls_sock->InitSSL(ctx_);
-    FiberSocketBase::AcceptResult aresult = tls_sock->Accept();
+    const bool no_tls_on_admin_port = absl::GetFlag(FLAGS_no_tls_on_admin_port);
+    if (!no_tls_on_admin_port || (no_tls_on_admin_port && !IsAdmin())) {
+      tls_sock.reset(new tls::TlsSocket(socket_.get()));
+      tls_sock->InitSSL(ctx_);
+      FiberSocketBase::AcceptResult aresult = tls_sock->Accept();
 
-    const bool has_tls_on_replica = !absl::GetFlag(FLAGS_no_tls_on_replica);
-    // Tls handshake failed and replica is not a non-tls connection.
-    if (!aresult && has_tls_on_replica) {
-      LOG(WARNING) << "Error handshaking " << aresult.error().message();
-      return;
-    }
-    // Tls handshake succeeded, all good, tls connection.
-    if (aresult) {
-      peer = tls_sock.get();
-      VLOG(1) << "TLS handshake succeeded";
-    } else {
-      // Tls handshake failed but connection might be coming from a replica that
-      // does not use tls. Downgrade the connection, and see if the request is
-      // coming from a replica.
-      // If not, reject it later down the execution path.
-      peer = socket_.get();
-      maybe_leftover_bytes = tls_sock->GetCachedBuffer();
-      if (!IsReplicaCommand(maybe_leftover_bytes)) {
+      if (!aresult) {
         LOG(WARNING) << "Error handshaking " << aresult.error().message();
         return;
       }
-      VLOG(1) << "TLS handshake failed, trying non tls connection. Only for replicas";
+      VLOG(1) << "TLS handshake succeeded";
     }
   }
 #endif
 
   io::Result<bool> http_res{false};
 
-  http_res = CheckForHttpProto(peer, maybe_leftover_bytes);
+  http_res = CheckForHttpProto(peer);
 
   if (http_res) {
     if (*http_res) {
@@ -446,8 +417,7 @@ bool Connection::IsAdmin() const {
   return lsb->LocalEndpoint().port() == admin_port;
 }
 
-io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer,
-                                               util::tls::TlsSocket::Buffer maybe_leftover_bytes) {
+io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
   bool primary_port_enabled = absl::GetFlag(FLAGS_primary_port_http_enabled);
   bool admin = IsAdmin();
   if (!primary_port_enabled && !admin) {
@@ -455,19 +425,12 @@ io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer,
   }
 
   size_t last_len = 0;
-  bool init_flag = !maybe_leftover_bytes.empty();
   do {
     auto buf = io_buf_.AppendBuffer();
     DCHECK(!buf.empty());
     ::io::Result<size_t> recv_sz;
-    if (init_flag) {
-      copy(maybe_leftover_bytes.begin(), maybe_leftover_bytes.end(), buf.begin());
-      init_flag = false;
-      io_buf_.CommitWrite(maybe_leftover_bytes.size());
-    } else {
-      recv_sz = peer->Recv(buf);
-      io_buf_.CommitWrite(*recv_sz);
-    }
+    recv_sz = peer->Recv(buf);
+    io_buf_.CommitWrite(*recv_sz);
     if (!recv_sz) {
       return make_unexpected(recv_sz.error());
     }

@@ -189,8 +189,7 @@ class Connection : public util::Connection {
                                                      SinkReplyBuilder* orig_builder);
 
   // Returns true if HTTP header is detected.
-  io::Result<bool> CheckForHttpProto(util::FiberSocketBase* peer,
-                                     util::tls::TlsSocket::Buffer maybe_leftover_bytes);
+  io::Result<bool> CheckForHttpProto(util::FiberSocketBase* peer);
 
   // Dispatch last command parsed by ParseRedis
   void DispatchCommand(uint32_t consumed, mi_heap_t* heap);
@@ -256,8 +255,6 @@ class Connection : public util::Connection {
   // Aggregated while handling pipelines,
   // graudally released while handling regular commands.
   static thread_local std::vector<PipelineMessagePtr> pipeline_req_pool_;
-
-  bool IsReplicaCommand(util::tls::TlsSocket::Buffer b) const;
 };
 
 void RespToArgList(const RespVec& src, CmdArgVec* dest);
