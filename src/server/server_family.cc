@@ -1260,6 +1260,19 @@ void ServerFamily::BreakOnShutdown() {
   dfly_cmd_->BreakOnShutdown();
 }
 
+void ServerFamily::CancelBlockingCommands() {
+  auto cb = [](unsigned thread_index, util::Connection* conn) {
+    facade::ConnectionContext* fc = static_cast<facade::Connection*>(conn)->cntx();
+    if (fc) {
+      ConnectionContext* cntx = static_cast<ConnectionContext*>(fc);
+      cntx->CancelBlocking();
+    }
+  };
+  for (auto* listener : listeners_) {
+    listener->TraverseConnections(cb);
+  }
+}
+
 bool ServerFamily::AwaitDispatches(absl::Duration timeout,
                                    const std::function<bool(util::Connection*)>& filter) {
   auto start = absl::Now();

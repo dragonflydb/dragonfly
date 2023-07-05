@@ -183,8 +183,9 @@ class Transaction {
   // blocking queue.
   bool NotifySuspended(TxId committed_ts, ShardId sid, std::string_view key);
 
-  // Cancel all blocking watches on shutdown. Set COORD_CANCELLED.
-  void BreakOnShutdown();
+  // Cancel all blocking watches. Set COORD_CANCELLED.
+  // Must be called from coordinator thread.
+  void CancelBlocking();
 
   // In some cases for non auto-journaling commands we want to enable the auto journal flow.
   void RenableAutoJournal() {

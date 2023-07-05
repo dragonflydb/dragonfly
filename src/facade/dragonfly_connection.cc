@@ -917,4 +917,8 @@ std::string Connection::RemoteEndpointAddress() const {
   return re.address().to_string();
 }
 
+ConnectionContext* Connection::cntx() {
+  return cc_.get();
+}
+
 }  // namespace facade

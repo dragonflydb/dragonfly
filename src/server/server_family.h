@@ -156,6 +156,8 @@ class ServerFamily {
 
   void BreakOnShutdown();
 
+  void CancelBlockingCommands();
+
   bool AwaitDispatches(absl::Duration timeout,
                        const std::function<bool(util::Connection*)>& filter);
 

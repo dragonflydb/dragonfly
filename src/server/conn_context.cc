@@ -9,6 +9,7 @@
 #include "server/engine_shard_set.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
+#include "server/transaction.h"
 #include "src/facade/dragonfly_connection.h"
 
 namespace dfly {
@@ -91,6 +92,12 @@ void ConnectionContext::ChangeMonitor(bool start) {
   shard_set->pool()->Await(
       [start](auto*) { ServerState::tlocal()->Monitors().NotifyChangeCount(start); });
   EnableMonitoring(start);
+}
+
+void ConnectionContext::CancelBlocking() {
+  if (transaction) {
+    transaction->CancelBlocking();
+  }
 }
 
 vector<unsigned> ChangeSubscriptions(bool pattern, CmdArgList args, bool to_add, bool to_reply,
