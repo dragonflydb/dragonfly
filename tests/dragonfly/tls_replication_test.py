@@ -6,6 +6,9 @@ from . import DflyInstanceFactory, dfly_args
 import logging
 import time
 import subprocess
+#from replication_test import check_all_replicas_finished
+#import replication_test
+from dragonfly.replication_test import check_all_replicas_finished
 
 BASE_PORT = 1111
 ADMIN_PORT = 1211
@@ -80,8 +83,7 @@ async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_
     # require --insecure flag, therefore for now we can't use `wait_available`
     time.sleep(10)
 
-    # 3. Try to connect with redis cli on master. This should fail since redis-cli does
-    # not use tls key and certificate
+    # 3. Try to connect on master. This should fail.
     c_master = aioredis.Redis(port=master.port)
     try:
         await c_master.execute_command("DBSIZE")
@@ -89,14 +91,19 @@ async def test_replication_all(df_local_factory, df_seeder_factory, t_master, t_
     except redis.ConnectionError:
         pass
 
-    # 4. Spin up a replica and initiate a REPLICAOF
+    # 4. Try with admin port.
+    c_master = aioredis.Redis(port=ADMIN_PORT)
+    db_size = await c_master.execute_command("DBSIZE")
+    assert 100 == db_size
+
+    # 5. Spin up a replica and initiate a REPLICAOF
     replica = df_local_factory.create(port=BASE_PORT + 1, proactor_threads=t_replica,)
     replica.start()
     c_replica = aioredis.Redis(port=replica.port)
     res = await c_replica.execute_command("REPLICAOF localhost " + str(ADMIN_PORT))
     assert b"OK" == res
-    time.sleep(10)
+    await check_all_replicas_finished([c_replica], c_master)
 
-    # 5. Verify that replica dbsize == debug populate key size -- replication works
+    # 6. Verify that replica dbsize == debug populate key size -- replication works
     db_size = await c_replica.execute_command("DBSIZE")
     assert 100 == db_size
