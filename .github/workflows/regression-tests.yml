@@ -49,7 +49,7 @@ jobs:
           export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
           export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
-          pytest --json-report --json-report-file=report.json -svr dragonfly --ignore=dragonfly/replication_test.py --ignore=dragonfly/tls_replication_test.py
+          pytest --json-report --json-report-file=report.json -svr dragonfly --ignore=dragonfly/replication_test.py
 
       - name: Run PyTests replication test
         if: ${{ matrix.runner  == 'ubuntu-latest' }}
@@ -60,15 +60,6 @@ jobs:
 
           pytest --json-report --json-report-file=rep1_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=true
           pytest --json-report --json-report-file=rep2_report.json -sv dragonfly/replication_test.py --df alsologtostderr --df enable_multi_shard_sync=false
-
-      - name: Run PyTests replication test with tls
-        if: ${{ matrix.runner  == 'ubuntu-latest' }}
-        timeout-minutes: 20
-        run: |
-          cd ${GITHUB_WORKSPACE}/tests
-          export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
-
-          pytest --json-report --json-report-file=rep1_report.json -sv dragonfly/tls_replication_test.py --df alsologtostderr
 
       - name: Send notification on failure
         if: failure()

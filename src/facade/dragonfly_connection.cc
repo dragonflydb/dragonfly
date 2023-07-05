@@ -8,17 +8,12 @@
 #include <absl/strings/match.h>
 #include <mimalloc.h>
 
-#include <algorithm>
-
-#include "absl/flags/internal/flag.h"
 #include "base/flags.h"
-#include "base/io_buf.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
 #include "facade/memcache_parser.h"
 #include "facade/redis_parser.h"
 #include "facade/service_interface.h"
-#include "util/tls/tls_engine.h"
 
 #ifdef DFLY_USE_SSL
 #include "util/tls/tls_socket.h"
@@ -41,9 +36,7 @@ ABSL_FLAG(std::string, admin_bind, "",
 ABSL_FLAG(std::uint64_t, request_cache_limit, 1ULL << 26,  // 64MB
           "Amount of memory to use for request cache in bytes - per IO thread.");
 
-ABSL_FLAG(bool, no_tls_on_admin_port, false,
-          "Enable one way TLS for master only, that is, replica does not use TLS to"
-          "connect with master");
+ABSL_FLAG(bool, no_tls_on_admin_port, false, "Allow non-tls connections on admin port");
 
 using namespace util;
 using namespace std;
