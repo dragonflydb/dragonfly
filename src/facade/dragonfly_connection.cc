@@ -316,6 +316,7 @@ void Connection::HandleRequests() {
         LOG(WARNING) << "Error handshaking " << aresult.error().message();
         return;
       }
+      peer = tls_sock.get();
       VLOG(1) << "TLS handshake succeeded";
     }
   }

@@ -19,7 +19,6 @@
 #include "core/fibers.h"
 #include "facade/facade_types.h"
 #include "facade/resp_expr.h"
-#include "util/tls/tls_socket.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
 typedef struct mi_heap_s mi_heap_t;
