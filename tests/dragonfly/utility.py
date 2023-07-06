@@ -556,3 +556,7 @@ class DflySeederFactory:
 
     def create(self, **kwargs):
         return DflySeeder(log_file=self.log_file, **kwargs)
+
+
+async def disconnect_clients(*clients):
+    await asyncio.gather(*(c.connection_pool.disconnect() for c in clients))
