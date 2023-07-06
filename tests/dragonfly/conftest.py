@@ -228,16 +228,10 @@ def memcached_connection(df_server: DflyInstance):
     return pymemcache.Client(f"localhost:{df_server.mc_port}")
 
 
-@pytest.fixture(scope="function")
-def tls_server_key_file_name():
-    return "df-key.pem"
-
-@pytest.fixture(scope="function")
-def tls_server_cert_file_name():
-    return "df-cert.pem"
-
-@pytest.fixture(scope="function")
-def gen_tls_cert(df_factory: DflyInstanceFactory, tls_server_key_file_name, tls_server_cert_file_name):
+@pytest.fixture(scope="session")
+def gen_tls_cert(df_factory: DflyInstanceFactory):
+    tls_server_key_file_name = "df-key.pem"
+    tls_server_cert_file_name = "df-cert.pem"
     dfly_path = df_factory.dfly_path
     # We first need to generate the tls certificates to be used by the server
 
@@ -263,3 +257,14 @@ def gen_tls_cert(df_factory: DflyInstanceFactory, tls_server_key_file_name, tls_
     tls_server_cert = dfly_path + tls_server_cert_file_name
     step3 = fr'openssl x509 -req -in {tls_server_req} -days 1 -CA {ca_cert} -CAkey {ca_key} -CAcreateserial -out {tls_server_cert}'
     subprocess.run(step3, shell=True)
+    return tls_server_key_file_name, tls_server_cert_file_name
+
+
+@pytest.fixture(scope="session")
+def with_tls_args(df_factory: DflyInstanceFactory, gen_tls_cert):
+    tls_server_key_file_name, tls_server_cert_file_name = gen_tls_cert
+    args = {"tls": "",
+            "tls_key_file": df_factory.dfly_path + tls_server_key_file_name,
+            "tls_cert_file": df_factory.dfly_path + tls_server_cert_file_name,
+            "no_tls_on_admin_port": "true"}
+    return args

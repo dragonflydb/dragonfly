@@ -307,7 +307,7 @@ void Connection::HandleRequests() {
   unique_ptr<tls::TlsSocket> tls_sock;
   if (ctx_) {
     const bool no_tls_on_admin_port = absl::GetFlag(FLAGS_no_tls_on_admin_port);
-    if (!no_tls_on_admin_port || (no_tls_on_admin_port && !IsAdmin())) {
+    if (!(IsAdmin() && no_tls_on_admin_port)) {
       tls_sock.reset(new tls::TlsSocket(socket_.get()));
       tls_sock->InitSSL(ctx_);
       FiberSocketBase::AcceptResult aresult = tls_sock->Accept();

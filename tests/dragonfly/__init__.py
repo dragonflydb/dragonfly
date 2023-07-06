@@ -2,6 +2,7 @@ import pytest
 import time
 import subprocess
 import aiohttp
+import os
 from prometheus_client.parser import text_string_to_metric_families
 from redis.asyncio import Redis as RedisClient
 
@@ -161,10 +162,7 @@ class DflyInstanceFactory:
 
     @property
     def dfly_path(self):
-        dfly = "dragonfly"
-        if self.params.path.endswith("dragonfly"):
-            return self.params.path[:-len(dfly)]
-        raise Exception("Invalid dfly path")
+        return str(os.path.dirname(self.params.path))
 
 
 def dfly_args(*args):
