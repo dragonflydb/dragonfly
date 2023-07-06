@@ -424,16 +424,14 @@ async def test_reject_non_tls_connections_on_tls_master(with_tls_server_args, df
     master = df_local_factory.create(admin_port=1111, port=1211, **with_tls_server_args)
     master.start()
 
-    # Try to connect on master without admin port. This should fail.
     client = aioredis.Redis(port=master.port)
     try:
         await client.execute_command("DBSIZE")
     except redis_conn_error:
         pass
 
-    # Try to connect on master on admin port
     client = aioredis.Redis(port=master.admin_port)
-    assert await client.ping()
+    assert await client.dbsize() == 0
     await client.close()
 
 
@@ -442,9 +440,8 @@ async def test_tls_insecure(with_ca_tls_server_args, with_tls_client_args, df_lo
     master = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
     master.start()
 
-    # Try to connect on master on admin port
     client = aioredis.Redis(port=master.port, **with_tls_client_args, ssl_cert_reqs=None)
-    assert await client.ping()
+    assert await client.dbsize() == 0
     await client.close()
 
 
@@ -453,9 +450,8 @@ async def test_tls_full_auth(with_ca_tls_server_args, with_ca_tls_client_args, d
     master = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
     master.start()
 
-    # Try to connect on master on admin port
     client = aioredis.Redis(port=master.port, **with_ca_tls_client_args)
-    assert await client.ping()
+    assert await client.dbsize() == 0
     await client.close()
 
 
@@ -464,24 +460,21 @@ async def test_tls_reject(with_ca_tls_server_args, with_tls_client_args, df_loca
     master = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
     master.start()
 
-    # Try to connect without insecure
     client = aioredis.Redis(port=master.port, **with_tls_client_args, ssl_cert_reqs=None)
     try:
         await client.ping()
     except redis_conn_error:
         pass
 
-   # No tls args with insecure
-    client = aioredis.Redis(port=master.port, **with_tls_client_args, ssl_cert_reqs=None)
+    client = aioredis.Redis(port=master.port, **with_tls_client_args)
     try:
-        await client.ping()
+        assert await client.dbsize() != 0
     except redis_conn_error:
         pass
 
-    # No tls args with insecure
     client = aioredis.Redis(port=master.port, ssl_cert_reqs=None)
     try:
-        await client.ping()
+        assert await client.dbsize() != 0
     except redis_conn_error:
         pass
     await client.close()

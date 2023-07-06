@@ -85,13 +85,11 @@ static SSL_CTX* CreateSslCntx() {
 
     const auto tls_ca_cert_file = GetFlag(FLAGS_tls_ca_cert_file);
     const auto tls_ca_cert_dir = GetFlag(FLAGS_tls_ca_cert_dir);
-    mask = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
     if (!tls_ca_cert_file.empty() || !tls_ca_cert_dir.empty()) {
       const auto* file = tls_ca_cert_file.empty() ? nullptr : tls_ca_cert_file.data();
       const auto* dir = tls_ca_cert_dir.empty() ? nullptr : tls_ca_cert_dir.data();
       CHECK_EQ(1, SSL_CTX_load_verify_locations(ctx, file, dir));
-    } else {
-      CHECK_EQ(1, SSL_CTX_set_default_verify_paths(ctx));
+      mask = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
     }
 
     CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
