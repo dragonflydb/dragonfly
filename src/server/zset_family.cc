@@ -956,7 +956,7 @@ OpResult<void> FillAggType(string_view agg, SetOpArgs* op_args) {
 
 // Parse functions return the number of arguments read from CmdArgList
 OpResult<unsigned> ParseAggregate(CmdArgList args, bool store, SetOpArgs* op_args) {
-  if (args.size() < 1) {
+  if (args.size() <= 1) {
     return OpStatus::SYNTAX_ERR;
   }
 
