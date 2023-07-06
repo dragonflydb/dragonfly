@@ -277,15 +277,7 @@ def gen_tls_cert(df_factory: DflyInstanceFactory):
 
 
 @pytest.fixture(scope="session")
-def base_tls_server_args(df_factory: DflyInstanceFactory, gen_tls_cert):
-    args = {"tls": "",
-            "tls_key_file": gen_tls_cert[0],
-            "tls_cert_file": gen_tls_cert[1]}
-    return args
-
-
-@pytest.fixture(scope="session")
-def with_tls_server_args(df_factory: DflyInstanceFactory, base_tls_server_args, gen_tls_cert):
+def with_tls_server_args(df_factory: DflyInstanceFactory, gen_tls_cert):
     args = {"tls": "",
             "tls_key_file": gen_tls_cert[0],
             "tls_cert_file": gen_tls_cert[1],
@@ -294,7 +286,7 @@ def with_tls_server_args(df_factory: DflyInstanceFactory, base_tls_server_args, 
 
 
 @pytest.fixture(scope="session")
-def with_ca_tls_server_args(df_factory: DflyInstanceFactory, base_tls_server_args, gen_tls_cert):
+def with_ca_tls_server_args(df_factory: DflyInstanceFactory, gen_tls_cert):
     args = {"tls": "",
             "tls_key_file": gen_tls_cert[0],
             "tls_cert_file": gen_tls_cert[1],
@@ -310,7 +302,7 @@ def with_tls_client_args(df_factory: DflyInstanceFactory, gen_tls_cert):
 
 
 @pytest.fixture(scope="session")
-def with_ca_tls_client_args(df_factory: DflyInstanceFactory, with_tls_client_args, gen_tls_cert):
+def with_ca_tls_client_args(df_factory: DflyInstanceFactory, gen_tls_cert):
     args = {"ssl": True,
             "ssl_keyfile": gen_tls_cert[3],
             "ssl_certfile": gen_tls_cert[4],
