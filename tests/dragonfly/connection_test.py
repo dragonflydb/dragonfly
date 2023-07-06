@@ -2,6 +2,7 @@ import random
 import pytest
 import asyncio
 from redis import asyncio as aioredis
+from redis.exceptions import ConnectionError
 import async_timeout
 
 from . import DflyInstance, dfly_args
@@ -415,3 +416,23 @@ async def test_large_cmd(async_client: aioredis.Redis):
 
     res = await async_client.mget([f"key{i}" for i in range(MAX_ARR_SIZE)])
     assert len(res) == MAX_ARR_SIZE
+
+
+@pytest.mark.asyncio
+@dfly_args({"admin_nopass" : True})
+async def test_reject_non_tls_connections_on_tls_master(gen_tls_cert, tls_server_key_file_name, tls_server_cert_file_name, df_local_factory, df_seeder_factory):
+    gen_tls_cert
+    with_tls_args = {"tls": "",
+                    "tls_key_file": df_local_factory.dfly_path + tls_server_key_file_name,
+                    "tls_cert_file": df_local_factory.dfly_path + tls_server_cert_file_name,
+                    "no_tls_on_admin_port": "true"}
+    master = df_local_factory.create(admin_port=1111, port=1211, **with_tls_args)
+    master.start()
+
+    # Try to connect on master without admin port. This should fail.
+    c_master = aioredis.Redis(port=master.port)
+    try:
+        await c_master.execute_command("DBSIZE")
+        raise "Non tls connection connected on master with tls. This should NOT happen"
+    except redis.exceptions.ConnectionError:
+         pass

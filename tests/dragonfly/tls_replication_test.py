@@ -35,26 +35,14 @@ async def test_no_tls_on_admin_port(gen_tls_cert, tls_server_key_file_name, tls_
     db_size = await c_master.execute_command("DBSIZE")
     assert 100 == db_size
 
-    # 2. Try to connect on master without admin port. This should fail.
-    c_master_no_admin = aioredis.Redis(port=master.port)
-    try:
-        await c_master_no_admin.execute_command("DBSIZE")
-        raise "Non tls connection connected on master with tls. This should NOT happen"
-    except redis.ConnectionError:
-        pass
-
-    # 3. Spin up a replica and initiate a REPLICAOF
+    # 2. Spin up a replica and initiate a REPLICAOF
     replica = df_local_factory.create(admin_port=ADMIN_PORT + 1, **with_tls_args, port=BASE_PORT + 1, proactor_threads=t_replica)
     replica.start()
     c_replica = aioredis.Redis(port=replica.admin_port)
     res = await c_replica.execute_command("REPLICAOF localhost " + str(master.admin_port))
     assert b"OK" == res
-    time.sleep(10)
     await check_all_replicas_finished([c_replica], c_master)
 
-    # 4. Verify that replica dbsize == debug populate key size -- replication works
+    # 3. Verify that replica dbsize == debug populate key size -- replication works
     db_size = await c_replica.execute_command("DBSIZE")
     assert 100 == db_size
-
-    master.stop()
-    replica.stop()
