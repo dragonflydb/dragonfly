@@ -939,7 +939,7 @@ async def assert_lag_condition(inst, client, condition):
         assert False, "Lag has never satisfied condition!"
 
 
-@pytest.mark.skip("fails locally"")
+@pytest.mark.skip("fails locally")
 @dfly_args({"proactor_threads": 2})
 @pytest.mark.asyncio
 async def test_replication_info(df_local_factory, df_seeder_factory, n_keys=2000):
