@@ -419,19 +419,18 @@ async def test_large_cmd(async_client: aioredis.Redis):
 
 
 @pytest.mark.asyncio
-@dfly_args({"admin_nopass" : True})
 async def test_reject_non_tls_connections_on_tls_master(with_tls_args, df_local_factory):
     master = df_local_factory.create(admin_port=1111, port=1211, **with_tls_args)
     master.start()
 
     # Try to connect on master without admin port. This should fail.
-    c_master = aioredis.Redis(port=master.port)
+    client = aioredis.Redis(port=master.port)
     try:
-        await c_master.execute_command("DBSIZE")
+        await client.execute_command("DBSIZE")
         raise "Non tls connection connected on master with tls. This should NOT happen"
     except redis_conn_error:
         pass
 
     # Try to connect on master on admin port
-    c_master = aioredis.Redis(port=master.admin_port)
-    assert await c_master.ping()
+    client = aioredis.Redis(port=master.admin_port)
+    assert await client.ping()

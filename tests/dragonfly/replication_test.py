@@ -1225,7 +1225,6 @@ replication_cases = [(8, 8)]
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replica", replication_cases)
-@dfly_args({"admin_nopass" : True})
 async def test_no_tls_on_admin_port(df_local_factory, df_seeder_factory, t_master, t_replica, with_tls_args):
     # 1. Spin up dragonfly without tls, debug populate
     master = df_local_factory.create(admin_port=ADMIN_PORT, **with_tls_args, port=BASE_PORT, proactor_threads=t_master)
