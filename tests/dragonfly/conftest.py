@@ -233,7 +233,6 @@ def gen_tls_cert(df_factory: DflyInstanceFactory):
     tls_server_key_file_name = "df-key.pem"
     tls_server_cert_file_name = "df-cert.pem"
     dfly_path = df_factory.dfly_path + "/"
-    print(dfly_path)
     # We first need to generate the tls certificates to be used by the server
 
     # Step 1

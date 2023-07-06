@@ -420,9 +420,8 @@ async def test_large_cmd(async_client: aioredis.Redis):
 
 
 @pytest.mark.asyncio
-@dfly_args({"admin_nopass" : True})
 async def test_reject_non_tls_connections_on_tls_master(with_tls_server_args, df_local_factory):
-    master = df_local_factory.create(admin_port=BASE_PORT, port=1211, **with_tls_server_args)
+    master = df_local_factory.create(admin_port=1111, port=1211, **with_tls_server_args)
     master.start()
 
     # Try to connect on master without admin port. This should fail.
