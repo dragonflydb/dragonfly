@@ -36,6 +36,8 @@ ABSL_FLAG(std::string, admin_bind, "",
 ABSL_FLAG(std::uint64_t, request_cache_limit, 1ULL << 26,  // 64MB
           "Amount of memory to use for request cache in bytes - per IO thread.");
 
+ABSL_FLAG(bool, no_tls_on_admin_port, false, "Allow non-tls connections on admin port");
+
 using namespace util;
 using namespace std;
 using nonstd::make_unexpected;
@@ -300,22 +302,24 @@ void Connection::HandleRequests() {
 
   auto remote_ep = lsb->RemoteEndpoint();
 
+  FiberSocketBase* peer = socket_.get();
 #ifdef DFLY_USE_SSL
   unique_ptr<tls::TlsSocket> tls_sock;
   if (ctx_) {
-    tls_sock.reset(new tls::TlsSocket(socket_.get()));
-    tls_sock->InitSSL(ctx_);
+    const bool no_tls_on_admin_port = absl::GetFlag(FLAGS_no_tls_on_admin_port);
+    if (!(IsAdmin() && no_tls_on_admin_port)) {
+      tls_sock.reset(new tls::TlsSocket(socket_.get()));
+      tls_sock->InitSSL(ctx_);
+      FiberSocketBase::AcceptResult aresult = tls_sock->Accept();
 
-    FiberSocketBase::AcceptResult aresult = tls_sock->Accept();
-    if (!aresult) {
-      LOG(WARNING) << "Error handshaking " << aresult.error().message();
-      return;
+      if (!aresult) {
+        LOG(WARNING) << "Error handshaking " << aresult.error().message();
+        return;
+      }
+      peer = tls_sock.get();
+      VLOG(1) << "TLS handshake succeeded";
     }
-    VLOG(1) << "TLS handshake succeeded";
   }
-  FiberSocketBase* peer = tls_sock ? (FiberSocketBase*)tls_sock.get() : socket_.get();
-#else
-  FiberSocketBase* peer = socket_.get();
 #endif
 
   io::Result<bool> http_res{false};
@@ -335,7 +339,6 @@ void Connection::HandleRequests() {
       http_conn.ReleaseSocket();
     } else {
       cc_.reset(service_->CreateContext(peer, this));
-
       auto* us = static_cast<LinuxSocketBase*>(socket_.get());
       if (breaker_cb_) {
         break_poll_id_ =
