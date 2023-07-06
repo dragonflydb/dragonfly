@@ -28,6 +28,10 @@ extern "C" {
 #include "server/rdb_load.h"
 #include "strings/human_readable.h"
 
+#ifdef DFLY_USE_SSL
+#include "util/tls/tls_socket.h"
+#endif
+
 ABSL_FLAG(int, replication_acks_interval, 3000, "Interval between acks in milliseconds.");
 ABSL_FLAG(bool, enable_multi_shard_sync, false,
           "Execute multi shards commands on replica syncrhonized");
@@ -37,6 +41,7 @@ ABSL_FLAG(int, master_connect_timeout_ms, 20000,
 ABSL_FLAG(int, master_reconnect_timeout_ms, 1000,
           "Timeout for re-establishing connection to a replication master");
 ABSL_DECLARE_FLAG(uint32_t, port);
+ABSL_FLAG(bool, tls_replication, false, "Enable TLS on replication");
 
 #define RETURN_ON_BAD_RESPONSE(x)                                                               \
   do {                                                                                          \
@@ -130,8 +135,8 @@ std::string Replica::MasterContext::Description() const {
   return absl::StrCat(host, ":", port);
 }
 
-Replica::Replica(string host, uint16_t port, Service* se, std::string_view id)
-    : service_(*se), id_{id} {
+Replica::Replica(string host, uint16_t port, Service* se, std::string_view id, SSL_CTX* ssl)
+    : service_(*se), id_{id}, ssl_ctx_(ssl) {
   master_context_.host = std::move(host);
   master_context_.port = port;
 }
@@ -344,10 +349,18 @@ error_code Replica::ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms)
     // The context closes sock_. So if the context error handler has already
     // run we must not create a new socket. sock_mu_ syncs between the two
     // functions.
-    if (!cntx_.IsCancelled())
-      sock_.reset(mythread->CreateSocket());
-    else
+    if (!cntx_.IsCancelled()) {
+      const bool tls_replication = absl::GetFlag(FLAGS_tls_replication);
+      if (ssl_ctx_ && tls_replication) {
+        unique_ptr<tls::TlsSocket> tls_sock(new tls::TlsSocket(mythread->CreateSocket()));
+        tls_sock->InitSSL(ssl_ctx_);
+        sock_.reset(tls_sock.release());
+      } else {
+        sock_.reset(mythread->CreateSocket());
+      }
+    } else {
       return cntx_.GetError();
+    }
   }
 
   // We set this timeout because this call blocks other REPLICAOF commands. We don't need it for the

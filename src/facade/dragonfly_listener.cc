@@ -91,6 +91,9 @@ static SSL_CTX* CreateSslCntx() {
       CHECK_EQ(1, SSL_CTX_load_verify_locations(ctx, file, dir));
       mask = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
     }
+    //    } else {
+    //      CHECK_EQ(1, SSL_CTX_set_default_verify_paths(ctx));
+    //    }
 
     CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
   }
@@ -328,6 +331,10 @@ ProactorBase* Listener::PickConnectionProactor(LinuxSocketBase* sock) {
   }
 
   return pp->at(res_id);
+}
+
+SSL_CTX* Listener::GetSSLCtx() {
+  return ctx_;
 }
 
 }  // namespace facade

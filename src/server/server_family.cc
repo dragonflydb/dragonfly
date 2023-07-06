@@ -1913,7 +1913,8 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  auto new_replica = make_shared<Replica>(string(host), port, &service_, master_id());
+  auto* ssl_ctx = listeners_.front()->GetSSLCtx();
+  auto new_replica = make_shared<Replica>(string(host), port, &service_, master_id(), ssl_ctx);
 
   if (replica_) {
     replica_->Stop();  // NOTE: consider introducing update API flow.

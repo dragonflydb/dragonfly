@@ -29,6 +29,8 @@ class Listener : public util::ListenerInterface {
   bool AwaitDispatches(absl::Duration timeout,
                        const std::function<bool(util::Connection*)>& filter);
 
+  SSL_CTX* GetSSLCtx();
+
  private:
   util::Connection* NewConnection(ProactorBase* proactor) final;
   ProactorBase* PickConnectionProactor(util::LinuxSocketBase* sock) final;

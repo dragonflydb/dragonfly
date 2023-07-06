@@ -17,6 +17,8 @@
 #include "server/version.h"
 #include "util/fiber_socket_base.h"
 
+typedef struct ssl_ctx_st SSL_CTX;
+
 namespace facade {
 class ReqSerializer;
 };  // namespace facade
@@ -103,7 +105,7 @@ class Replica {
   };
 
  public:
-  Replica(std::string master_host, uint16_t port, Service* se, std::string_view id);
+  Replica(std::string master_host, uint16_t port, Service* se, std::string_view id, SSL_CTX* ssl);
   ~Replica();
 
   // Spawns a fiber that runs until link with master is broken or the replication is stopped.
@@ -240,7 +242,7 @@ class Replica {
  private:
   Service& service_;
   MasterContext master_context_;
-  std::unique_ptr<util::LinuxSocketBase> sock_;
+  std::unique_ptr<util::FiberSocketBase> sock_;
   Mutex sock_mu_;
 
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;
@@ -291,6 +293,7 @@ class Replica {
 
   bool is_paused_ = false;
   std::string id_;
+  SSL_CTX* ssl_ctx_;
 };
 
 }  // namespace dfly
