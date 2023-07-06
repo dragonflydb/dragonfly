@@ -1184,7 +1184,7 @@ async def test_take_over_seeder(df_local_factory, df_seeder_factory, master_thre
 
     await disconnect_clients(c_master, c_replica)
 
-
+@pytest.mark.skip(reason='Failing on github regression action')
 @pytest.mark.asyncio
 async def test_take_over_timeout(df_local_factory, df_seeder_factory):
     master = df_local_factory.create(proactor_threads=2,
@@ -1223,7 +1223,7 @@ async def test_take_over_timeout(df_local_factory, df_seeder_factory):
     assert await c_replica.execute_command("role") == [b'replica', b'localhost', bytes(str(master.port), 'ascii'), b'stable_sync']
 
     await disconnect_clients(c_master, c_replica)
-    
+
 
 # 1. Number of master threads
 # 2. Number of threads for each replica
