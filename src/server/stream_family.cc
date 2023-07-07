@@ -79,6 +79,18 @@ struct GroupInfo {
   streamID last_id;
 };
 
+struct StreamInfo {
+  size_t length;
+  size_t radix_tree_keys;
+  size_t radix_tree_nodes;
+  size_t groups;
+  streamID last_generated_id;
+  streamID max_deleted_entry_id;
+  size_t entries_added;
+  Record first_entry;
+  Record last_entry;
+};
+
 struct RangeOpts {
   ParsedStreamId start;
   ParsedStreamId end;
@@ -844,6 +856,58 @@ OpResult<vector<GroupInfo>> OpListGroups(const DbContext& db_cntx, string_view k
   return result;
 }
 
+Record testfunction(stream* s, streamID sstart, streamID send, int reverse) {
+  streamIterator si;
+  int64_t numfields;
+  streamID id;
+
+  streamIteratorStart(&si, s, &sstart, &send, reverse);
+  streamIteratorGetID(&si, &id, &numfields);
+  Record rec;
+  rec.id = id;
+  rec.kv_arr.reserve(numfields);
+
+  while (numfields--) {
+    unsigned char *key, *value;
+    int64_t key_len, value_len;
+    streamIteratorGetField(&si, &key, &value, &key_len, &value_len);
+    string skey(reinterpret_cast<char*>(key), key_len);
+    string sval(reinterpret_cast<char*>(value), value_len);
+
+    rec.kv_arr.emplace_back(move(skey), move(sval));
+  }
+
+  streamIteratorStop(&si);
+
+  return rec;
+}
+
+OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, EngineShard* shard) {
+  auto& db_slice = shard->db_slice();
+  OpResult<PrimeIterator> res_it = db_slice.Find(db_cntx, key, OBJ_STREAM);
+  if (!res_it)
+    return res_it.status();
+
+  vector<StreamInfo> result;
+  CompactObj& cobj = (*res_it)->second;
+  stream* s = (stream*)cobj.RObjPtr();
+
+  StreamInfo sinfo;
+  sinfo.length = s->length;
+
+  sinfo.radix_tree_keys = raxSize(s->rax_tree);
+  sinfo.radix_tree_nodes = s->rax_tree->numnodes;
+  sinfo.last_generated_id = s->last_id;
+  sinfo.max_deleted_entry_id = s->max_deleted_entry_id;
+  sinfo.entries_added = s->entries_added;
+  sinfo.groups = s->cgroups ? raxSize(s->cgroups) : 0;
+
+  sinfo.first_entry = testfunction(s, s->first_id, s->last_id, 0);
+  sinfo.last_entry = testfunction(s, s->first_id, s->last_id, 1);
+
+  return sinfo;
+}
+
 constexpr uint8_t kCreateOptMkstream = 1 << 0;
 
 struct CreateOpts {
@@ -1476,6 +1540,62 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
         return;
       }
       return (*cntx)->SendError(result.status());
+    } else if (sub_cmd == "STREAM") {
+      auto cb = [&]() {
+        EngineShard* shard = EngineShard::tlocal();
+        DbContext db_context{.db_index = cntx->db_index(), .time_now_ms = GetCurrentTimeMs()};
+        return OpStreams(db_context, key, shard);
+      };
+
+      OpResult<StreamInfo> sinfo = shard_set->Await(sid, std::move(cb));
+      if (sinfo) {
+        string last_generated_id = StreamIdRepr(sinfo->last_generated_id);
+        string max_deleted_entry_id = StreamIdRepr(sinfo->max_deleted_entry_id);
+
+        (*cntx)->StartCollection(9, RedisReplyBuilder::MAP);
+
+        (*cntx)->SendBulkString("length");
+        (*cntx)->SendLong(sinfo->length);
+
+        (*cntx)->SendBulkString("radix-tree-keys");
+        (*cntx)->SendLong(sinfo->length);
+
+        (*cntx)->SendBulkString("radix-tree-nodes");
+        (*cntx)->SendLong(sinfo->radix_tree_nodes);
+
+        (*cntx)->SendBulkString("last-generated-id");
+        (*cntx)->SendBulkString(last_generated_id);
+
+        (*cntx)->SendBulkString("max-deleted-entry-id");
+        (*cntx)->SendBulkString(max_deleted_entry_id);
+
+        (*cntx)->SendBulkString("entries-added");
+        (*cntx)->SendLong(sinfo->entries_added);
+
+        (*cntx)->SendBulkString("groups");
+        (*cntx)->SendLong(sinfo->groups);
+
+        (*cntx)->SendBulkString("first-entry");
+        (*cntx)->StartArray(2);
+        (*cntx)->SendBulkString(StreamIdRepr(sinfo->first_entry.id));
+        (*cntx)->StartArray(sinfo->first_entry.kv_arr.size() * 2);
+        for (const auto& k_v : sinfo->first_entry.kv_arr) {
+          (*cntx)->SendBulkString(k_v.first);
+          (*cntx)->SendBulkString(k_v.second);
+        }
+
+        (*cntx)->SendBulkString("last-entry");
+        (*cntx)->StartArray(2);
+        (*cntx)->SendBulkString(StreamIdRepr(sinfo->last_entry.id));
+        (*cntx)->StartArray(sinfo->last_entry.kv_arr.size() * 2);
+        for (const auto& k_v : sinfo->last_entry.kv_arr) {
+          (*cntx)->SendBulkString(k_v.first);
+          (*cntx)->SendBulkString(k_v.second);
+        }
+
+        return;
+      }
+      // return (*cntx)->SendError(result.status());
     }
   }
   return (*cntx)->SendError(UnknownSubCmd(sub_cmd, "XINFO"));
