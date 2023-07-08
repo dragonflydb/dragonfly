@@ -4,14 +4,12 @@
 
 #include <jsoncons/json.hpp>
 #include <jsoncons_ext/jsonpath/jsonpath.hpp>
+#include <memory_resource>
 
 #include "base/gtest.h"
 #include "base/logging.h"
 
-#include <memory_resource>
-
 namespace dfly {
-using namespace std;
 using namespace jsoncons;
 using namespace jsoncons::literals;
 
@@ -22,7 +20,7 @@ class JsonTest : public ::testing::Test {
 };
 
 TEST_F(JsonTest, Basic) {
-  string data = R"(
+  std::string data = R"(
     {
        "application": "hiking",
        "reputons": [
@@ -71,7 +69,7 @@ TEST_F(JsonTest, Errors) {
   json_decoder<json> decoder;
   basic_json_parser<char> parser(basic_json_decode_options<char>{}, cb);
 
-  string_view input{"\000bla"};
+  std::string_view input{"\000bla"};
   parser.update(input.data(), input.size());
   parser.parse_some(decoder);
   parser.finish_parse(decoder);
@@ -103,29 +101,16 @@ TEST_F(JsonTest, Delete) {
   EXPECT_EQ(R"({"c":{"a":1, "b":2}, "d":{"b":2, "c":3}, "e": [1,2]})"_json, j1);
 }
 
-struct pmr_sorted_policy : public sorted_policy {
-  template<class T, class Allocator>
-  using vector = std::pmr::vector<T>;
-
-  template <class KeyT,class Json>
-  using sorted_json_object = sorted_json_object<KeyT,Json,vector>;
-
-  template <class Json>
-  using array = json_array<Json,vector>;
-
-  template <class CharT, class CharTraits, class Allocator>
-  using string = std::pmr::basic_string<CharT>;
-};
-
-TEST_F(JsonTest, CustomMemoryAllocator) {
-  using custom_json = basic_json<char, pmr_sorted_policy, std::pmr::polymorphic_allocator<char>>;
-  std::pmr::polymorphic_allocator<char> pa{std::pmr::new_delete_resource()};
+TEST_F(JsonTest, JsonWithPolymorhicAllocator) {
+  char buffer[1024] = {};
+  std::pmr::monotonic_buffer_resource pool{std::data(buffer), std::size(buffer)};
+  std::pmr::polymorphic_allocator<char> alloc(&pool);
 
   std::string input = R"(
 { "store": {
     "book": [
       { "category": "Roman",
-        "author": " Felix Lobrecht",
+        "author": "Felix Lobrecht",
         "title": "Sonne und Beton",
         "price": 12.99
       },
@@ -139,6 +124,13 @@ TEST_F(JsonTest, CustomMemoryAllocator) {
 }
 )";
 
-  custom_json j;
+  auto j1 = pmr::json::parse(combine_allocators(alloc), input, json_options{});
+  EXPECT_EQ("Roman", j1["store"]["book"][0]["category"].as_string());
+  EXPECT_EQ("Felix Lobrecht", j1["store"]["book"][0]["author"].as_string());
+  EXPECT_EQ(12.99, j1["store"]["book"][0]["price"].as_double());
+
+  EXPECT_EQ("Roman", j1["store"]["book"][1]["category"].as_string());
+  EXPECT_EQ("Im Westen nichts Neues", j1["store"]["book"][1]["title"].as_string());
+  EXPECT_EQ(10.00, j1["store"]["book"][1]["price"].as_double());
 }
 }  // namespace dfly

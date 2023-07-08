@@ -462,7 +462,7 @@ OpResult<vector<OptSizeT>> OpObjLen(const OpArgs& op_args, string_view key,
   vector<OptSizeT> vec;
   auto cb = [&vec](const string_view& path, const JsonType& val) {
     if (val.is_object()) {
-      vec.emplace_back(val.object_value().size());
+      vec.emplace_back(val.size());
     } else {
       vec.emplace_back(nullopt);
     }
@@ -483,7 +483,7 @@ OpResult<vector<OptSizeT>> OpArrLen(const OpArgs& op_args, string_view key,
   vector<OptSizeT> vec;
   auto cb = [&vec](const string_view& path, const JsonType& val) {
     if (val.is_array()) {
-      vec.emplace_back(val.array_value().size());
+      vec.emplace_back(val.size());
     } else {
       vec.emplace_back(nullopt);
     }

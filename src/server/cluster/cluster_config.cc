@@ -149,7 +149,7 @@ optional<vector<ClusterConfig::SlotRange>> GetClusterSlotRanges(const JsonType& 
 
   vector<ClusterConfig::SlotRange> ranges;
 
-  for (const auto& range : slots.array_value()) {
+  for (const auto& range : slots.array_range()) {
     if (!range.is_object()) {
       LOG(WARNING) << kInvalidConfigPrefix << "slot_ranges element is not an object " << range;
       return nullopt;
@@ -212,7 +212,7 @@ optional<ClusterConfig::ClusterShards> BuildClusterConfigFromJson(const JsonType
     return nullopt;
   }
 
-  for (const auto& element : json.array_value()) {
+  for (const auto& element : json.array_range()) {
     ClusterConfig::ClusterShard shard;
 
     if (!element.is_object()) {
@@ -238,7 +238,7 @@ optional<ClusterConfig::ClusterShards> BuildClusterConfigFromJson(const JsonType
       return nullopt;
     }
 
-    for (const auto& replica : replicas.array_value()) {
+    for (const auto& replica : replicas.array_range()) {
       auto node = ParseClusterNode(replica);
       if (!node.has_value()) {
         return nullopt;
