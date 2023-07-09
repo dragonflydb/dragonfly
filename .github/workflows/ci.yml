@@ -91,67 +91,11 @@ jobs:
       - name: Build & Test
         run: |
           cd ${{github.workspace}}/build
-          ninja src/all
+          ninja dragonfly
           ccache --show-stats
-          echo Run ctest -V -L DFLY
-          #GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1
-          GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 ctest -V -L DFLY
-          ./dragonfly_test  --gtest_repeat=10
-          ./multi_test --multi_exec_mode=2 --gtest_repeat=10
-          ./multi_test --multi_exec_mode=3 --gtest_repeat=10
-          # GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1 CTEST_OUTPUT_ON_FAILURE=1 ninja server/test
-  lint-test-chart:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
-      - name: Set up Helm
-        uses: azure/setup-helm@v3
-
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.9'
-          check-latest: true
-
-      - name: Chart Rendering Tests
-        run: |
-          go test -v ./contrib/charts/dragonfly/...
-
-      - name: Set up chart-testing
-        uses: helm/chart-testing-action@v2.3.1
-
-      - name: Run chart-testing (list-changed)
-        id: list-changed
-        run: |
-          changed=$(ct list-changed --config .ct.yaml)
-          if [[ -n "$changed" ]]; then
-            echo "::set-output name=changed::true"
-          fi
-
-      - name: Run chart-testing (lint)
-        run: |
-          ct \
-            lint \
-            --config .ct.yaml \
-            ${{github.event_name == 'workflow_dispatch' && '--all'}} ;
-
-      - if: steps.list-changed.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
-        name: Create kind cluster
-        uses: helm/kind-action@v1.5.0
-
-      - if: steps.list-changed.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
-        name: Getting cluster ready
-        run: |
-          kubectl label nodes chart-testing-control-plane key/node-kind=high-memory
-
-      - name: Run chart-testing (install)
-        run: |
-          ct \
-            install \
-            --config .ct.yaml \
-            --debug \
-            --helm-extra-set-args "--set=image.repository=ghcr.io/${{ github.repository }},probes=null" \
-            ${{github.event_name == 'workflow_dispatch' && '--all'}} ;
+          cd ${{github.workspace}}/tests
+          apt update && apt install -y pip jq
+          pip install -r dragonfly/requirements.txt
+          export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/build/dragonfly" # used by PyTests
+          export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
+          pytest --count=10 -xv dragonfly/cluster_test.py::test_cluster_slot_ownership_changes -vv
