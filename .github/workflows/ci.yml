@@ -94,4 +94,4 @@ jobs:
           pip install -r dragonfly/requirements.txt
           export DRAGONFLY_PATH="${{github.workspace}}/build/dragonfly" # used by PyTests
           export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
-          pytest --count=10 -xv dragonfly/cluster_test.py::test_cluster_slot_ownership_changes -vv
+          pytest --count=1000 -xv dragonfly/cluster_test.py::test_cluster_slot_ownership_changes -vv
