@@ -520,8 +520,6 @@ error_code Replica::ConsumeRedisStream() {
 
   LOG(INFO) << "Transitioned into stable sync";
 
-  // acks_fb_.JoinIfNeeded();
-  // acks_fb_ = MakeFiber(&Replica::RedisStreamAcksFb, this);
   facade::CmdArgVec args_vector;
 
   while (!ec) {
