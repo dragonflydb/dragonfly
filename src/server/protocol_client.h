@@ -33,7 +33,7 @@ struct JournalReader;
 class ProtocolClient {
  public:
   ProtocolClient(std::string master_host, uint16_t port);
-  ~ProtocolClient();
+  virtual ~ProtocolClient();
 
   void CloseSocket();  // Close replica sockets.
 
