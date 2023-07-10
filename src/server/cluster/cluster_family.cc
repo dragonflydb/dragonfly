@@ -534,6 +534,8 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
     LOG(INFO) << "Owned slots before: " << absl::StrJoin(before, ",");
     LOG(INFO) << "Owned slots after: " << absl::StrJoin(after, ",");
     LOG(INFO) << "Is tl null? " << (tl_cluster_config == nullptr);
+    LOG(INFO) << "My ID: " << server_family_->master_id();
+    LOG(INFO) << "New config: " << json->to_string();
     DeleteSlots(deleted_slots);
     WriteFlushSlotsToJournal(deleted_slots);
   }
