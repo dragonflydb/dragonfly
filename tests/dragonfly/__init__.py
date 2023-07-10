@@ -162,7 +162,8 @@ class DflyInstanceFactory:
 
     @property
     def dfly_path(self):
-        return str(os.path.dirname(self.params.path))
+         path = os.path.dirname(self.params.path)
+         return str(os.path.join(path, ''))
 
 
 def dfly_args(*args):

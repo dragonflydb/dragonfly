@@ -1445,10 +1445,12 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
     if (!absl::SimpleAtoi(num, &num_custom_keys) || num_custom_keys < 0)
       return OpStatus::INVALID_INT;
 
-    // TODO Fix this for Z family functions.
-    // Examples that crash: ZUNION 0 myset
     if (name == "ZDIFF" && num_custom_keys == 0) {
       return OpStatus::INVALID_INT;
+    }
+
+    if (name == "ZUNION" && num_custom_keys == 0) {
+      return OpStatus::SYNTAX_ERR;
     }
 
     if (args.size() < size_t(num_custom_keys) + num_keys_index + 1)

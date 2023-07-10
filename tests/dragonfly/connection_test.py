@@ -420,59 +420,59 @@ async def test_large_cmd(async_client: aioredis.Redis):
 
 
 @pytest.mark.asyncio
-async def test_reject_non_tls_connections_on_tls_master(with_tls_server_args, df_local_factory):
-    master = df_local_factory.create(admin_port=1111, port=1211, **with_tls_server_args)
-    master.start()
+async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_local_factory):
+    server = df_local_factory.create(no_tls_on_admin_port="true", admin_port=1111, port=1211, **with_tls_server_args)
+    server.start()
 
-    client = aioredis.Redis(port=master.port)
+    client = aioredis.Redis(port=server.port)
     try:
         await client.execute_command("DBSIZE")
     except redis_conn_error:
         pass
 
-    client = aioredis.Redis(port=master.admin_port)
+    client = aioredis.Redis(port=server.admin_port)
     assert await client.dbsize() == 0
     await client.close()
 
 
 @pytest.mark.asyncio
 async def test_tls_insecure(with_ca_tls_server_args, with_tls_client_args, df_local_factory):
-    master = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
-    master.start()
+    server = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
+    server.start()
 
-    client = aioredis.Redis(port=master.port, **with_tls_client_args, ssl_cert_reqs=None)
+    client = aioredis.Redis(port=server.port, **with_tls_client_args, ssl_cert_reqs=None)
     assert await client.dbsize() == 0
     await client.close()
 
 
 @pytest.mark.asyncio
 async def test_tls_full_auth(with_ca_tls_server_args, with_ca_tls_client_args, df_local_factory):
-    master = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
-    master.start()
+    server = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
+    server.start()
 
-    client = aioredis.Redis(port=master.port, **with_ca_tls_client_args)
+    client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
     assert await client.dbsize() == 0
     await client.close()
 
 
 @pytest.mark.asyncio
 async def test_tls_reject(with_ca_tls_server_args, with_tls_client_args, df_local_factory):
-    master = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
-    master.start()
+    server = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
+    server.start()
 
-    client = aioredis.Redis(port=master.port, **with_tls_client_args, ssl_cert_reqs=None)
+    client = aioredis.Redis(port=server.port, **with_tls_client_args, ssl_cert_reqs=None)
     try:
         await client.ping()
     except redis_conn_error:
         pass
 
-    client = aioredis.Redis(port=master.port, **with_tls_client_args)
+    client = aioredis.Redis(port=server.port, **with_tls_client_args)
     try:
         assert await client.dbsize() != 0
     except redis_conn_error:
         pass
 
-    client = aioredis.Redis(port=master.port, ssl_cert_reqs=None)
+    client = aioredis.Redis(port=server.port, ssl_cert_reqs=None)
     try:
         assert await client.dbsize() != 0
     except redis_conn_error:
