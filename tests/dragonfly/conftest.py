@@ -19,7 +19,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from . import DflyInstance, DflyInstanceFactory, DflyParams, PortPicker, dfly_args
-from .utility import DflySeederFactory
+from .utility import DflySeederFactory, gen_cert
 
 logging.getLogger('asyncio').setLevel(logging.WARNING)
 
@@ -247,52 +247,19 @@ def gen_ca_cert(df_factory: DflyInstanceFactory):
 
 
 @pytest.fixture(scope="session")
-def gen_server_cert(df_factory: DflyInstanceFactory, gen_ca_cert):
-    # Generate Dragonfly's private key and certificate signing request (CSR)
+def with_tls_server_args(df_factory: DflyInstanceFactory, gen_ca_cert):
     dfly_path = df_factory.dfly_path
     tls_server_key_file_name = "df-key.pem"
-    tls_server_cert_file_name = "df-cert.pem"
     tls_server_key = dfly_path + tls_server_key_file_name
     tls_server_req = dfly_path + "df-req.pem"
-    step1 = rf'openssl req -newkey rsa:4096 -nodes -keyout {tls_server_key} -out {tls_server_req} -subj "/C=GR/ST=SKG/L=Thessaloniki/O=KK/OU=Comp/CN=Gr/emailAddress=does_not_exist@gmail.com"'
-    subprocess.run(step1, shell=True)
-
-    # Use CA's private key to sign dragonfly's CSR and get back the signed certificate
-    ca_key = gen_ca_cert["ca_key"]
-    ca_cert = gen_ca_cert["ca_cert"]
+    tls_server_cert_file_name = "df-cert.pem"
     tls_server_cert = dfly_path + tls_server_cert_file_name
-    step2 = fr'openssl x509 -req -in {tls_server_req} -days 1 -CA {ca_cert} -CAkey {ca_key} -CAcreateserial -out {tls_server_cert}'
-    subprocess.run(step2, shell=True)
 
-    return {"server_key": tls_server_key, "server_cert": tls_server_cert}
+    gen_cert(gen_ca_cert, tls_server_req, tls_server_key, tls_server_cert)
 
-
-@pytest.fixture(scope="session")
-def gen_client_cert(df_factory: DflyInstanceFactory, gen_ca_cert):
-    # Generate client certificates
-    tls_client_key_file_name = "client-key.pem"
-    dfly_path = df_factory.dfly_path
-    tls_client_key = dfly_path + tls_client_key_file_name
-
-    tls_client_req = dfly_path + "client-req.pem"
-    step1 = rf'openssl req -newkey rsa:4096 -nodes -keyout {tls_client_key} -out {tls_client_req} -subj "/C=It/ST=RM/L=Rome/O=KK/OU=Comp/CN=Gr/emailAddress=random@gmail.com"'
-    subprocess.run(step1, shell=True)
-
-    ca_key = gen_ca_cert["ca_key"]
-    ca_cert = gen_ca_cert["ca_cert"]
-    tls_client_cert_file_name = "client-cert.pem"
-    tls_client_cert = dfly_path + tls_client_cert_file_name
-    step2 = fr'openssl x509 -req -in {tls_client_req} -days 1 -CA {ca_cert} -CAkey {ca_key} -CAcreateserial -out {tls_client_cert}'
-    subprocess.run(step2, shell=True)
-
-    return {"client_key": tls_client_key, "client_cert": tls_client_cert}
-
-
-@pytest.fixture(scope="session")
-def with_tls_server_args(gen_server_cert):
     args = {"tls": "",
-            "tls_key_file": gen_server_cert["server_key"],
-            "tls_cert_file": gen_server_cert["server_cert"]}
+            "tls_key_file": tls_server_key,
+            "tls_cert_file": tls_server_cert}
     return args
 
 
@@ -304,10 +271,19 @@ def with_ca_tls_server_args(with_tls_server_args, gen_ca_cert):
 
 
 @pytest.fixture(scope="session")
-def with_tls_client_args(gen_client_cert):
+def with_tls_client_args(df_factory: DflyInstanceFactory, gen_ca_cert):
+    tls_client_key_file_name = "client-key.pem"
+    dfly_path = df_factory.dfly_path
+    tls_client_key = dfly_path + tls_client_key_file_name
+    tls_client_req = dfly_path + "client-req.pem"
+    tls_client_cert_file_name = "client-cert.pem"
+    tls_client_cert = dfly_path + tls_client_cert_file_name
+
+    gen_cert(gen_ca_cert, tls_client_req, tls_client_key, tls_client_cert)
+
     args = {"ssl": True,
-            "ssl_keyfile": gen_client_cert["client_key"],
-            "ssl_certfile": gen_client_cert["client_cert"]}
+            "ssl_keyfile": tls_client_key,
+            "ssl_certfile": tls_client_cert}
     return args
 
 

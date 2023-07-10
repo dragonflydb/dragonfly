@@ -9,6 +9,7 @@ import itertools
 import time
 import difflib
 import json
+import subprocess
 from enum import Enum
 
 
@@ -560,3 +561,15 @@ class DflySeederFactory:
 
 async def disconnect_clients(*clients):
     await asyncio.gather(*(c.connection_pool.disconnect() for c in clients))
+
+
+def gen_cert(ca, req, key, cert):
+    # Generate Dragonfly's private key and certificate signing request (CSR)
+    step1 = rf'openssl req -newkey rsa:4096 -nodes -keyout {key} -out {req} -subj "/C=GR/ST=SKG/L=Thessaloniki/O=KK/OU=Comp/CN=Gr/emailAddress=does_not_exist@gmail.com"'
+    subprocess.run(step1, shell=True)
+
+    # Use CA's private key to sign dragonfly's CSR and get back the signed certificate
+    ca_key = ca["ca_key"]
+    ca_cert = ca["ca_cert"]
+    step2 = fr'openssl x509 -req -in {req} -days 1 -CA {ca_cert} -CAkey {ca_key} -CAcreateserial -out {cert}'
+    subprocess.run(step2, shell=True)
