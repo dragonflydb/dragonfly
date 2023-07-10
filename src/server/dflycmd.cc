@@ -359,7 +359,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendError("timeout is negative");
   }
 
-  VLOG(1) << "Got DFLY TAKEOVER " << sync_id_str;
+  VLOG(1) << "Got DFLY TAKEOVER " << sync_id_str << " time out:" << timeout;
 
   auto [sync_id, replica_ptr] = GetReplicaInfoOrReply(sync_id_str, rb);
   if (!sync_id)
@@ -412,6 +412,8 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
           status = OpStatus::CANCELLED;
           return;
         }
+        VLOG(1) << "Replica lsn:" << flow->last_acked_lsn
+                << " master lsn:" << shard->journal()->GetLsn();
         ThisFiber::SleepFor(1ms);
       }
     };
