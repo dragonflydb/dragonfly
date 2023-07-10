@@ -187,7 +187,7 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
           "slot_ranges": [
             {{
               "start": 0,
-              "end": 5259
+              "end": LAST_SLOT_CUTOFF
             }}
           ],
           "master": {{
@@ -200,7 +200,7 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
         {{
           "slot_ranges": [
             {{
-              "start": 5260,
+              "start": NEXT_SLOT_CUTOFF,
               "end": 16383
             }}
           ],
@@ -214,7 +214,7 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
       ]
     """
 
-    await push_config(config, c_nodes_admin)
+    await push_config(config.replace('LAST_SLOT_CUTOFF', '5259').replace('NEXT_SLOT_CUTOFF', '5260'), c_nodes_admin)
 
     # Slot for "KEY1" is 5259
 
@@ -243,8 +243,7 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
 
     print("Moving ownership over 5259 ('KEY1') to other node")
 
-    config = config.replace('5259', '5258').replace('5260', '5259')
-    await push_config(config, c_nodes_admin)
+    await push_config(config.replace('LAST_SLOT_CUTOFF', '5258').replace('NEXT_SLOT_CUTOFF', '5259'), c_nodes_admin)
 
     # node0 should have removed "KEY1" as it no longer owns it
     assert await c_nodes[0].execute_command("DBSIZE") == 1
@@ -332,7 +331,7 @@ async def test_cluster_replica_sets_non_owned_keys(df_local_factory):
     await push_config(config, [c_master_admin, c_replica_admin])
 
     # Setup replication and make sure that it works properly.
-    await c_master.set("key", "value");
+    await c_master.set("key", "value")
     await c_replica.execute_command("REPLICAOF", "localhost", master.port)
     await check_all_replicas_finished([c_replica], c_master)
     assert (await c_replica.get("key")).decode() == "value"
@@ -382,7 +381,7 @@ async def test_cluster_replica_sets_non_owned_keys(df_local_factory):
     assert await c_replica.execute_command("dbsize") == 1
 
     # Set another key on the master, which it owns but the replica does not own.
-    await c_master.set("key2", "value");
+    await c_master.set("key2", "value")
     await check_all_replicas_finished([c_replica], c_master)
 
     # See that the key exists in both replica and master
@@ -443,7 +442,7 @@ async def test_cluster_flush_slots_after_config_change(df_local_factory):
     """
     await push_config(config, [c_master_admin, c_replica_admin])
 
-    await c_master.execute_command("debug", "populate", "100000");
+    await c_master.execute_command("debug", "populate", "100000")
     assert await c_master.execute_command("dbsize") == 100_000
 
     # Setup replication and make sure that it works properly.
