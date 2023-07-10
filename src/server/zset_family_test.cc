@@ -291,6 +291,9 @@ TEST_F(ZSetFamilyTest, ZUnionError) {
   resp = Run({"zunion", "0"});
   EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
 
+  resp = Run({"zunion", "0", "myset"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
   resp = Run({"zunion", "3", "z1", "z2", "z3", "weights", "1", "1", "k"});
   EXPECT_THAT(resp, ErrArg("weight value is not a float"));
 
@@ -359,6 +362,9 @@ TEST_F(ZSetFamilyTest, ZUnionStore) {
 
   resp = Run({"zunionstore", "key", "0"});
   EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  resp = Run({"zunionstore", "key", "0", "aggregate"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
 
   resp = Run({"zunionstore", "key", "0", "aggregate", "sum"});
   EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
