@@ -166,7 +166,7 @@ Add a key to node0, then move the slot ownership to node1 and see that they both
 intended.
 Also add keys to each of them that are *not* moved, and see that they are unaffected by the move.
 """
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "alsologtostderr": "true"})
 async def test_cluster_slot_ownership_changes(df_local_factory):
     # Start and configure cluster with 2 nodes
     nodes = [
