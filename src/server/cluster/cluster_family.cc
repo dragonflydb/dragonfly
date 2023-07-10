@@ -530,6 +530,10 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
     auto deleted_slots = GetDeletedSlots(is_first_config, before, after);
     LOG(INFO) << "Deleting slots due to new cluster config: " << absl::StrJoin(deleted_slots, ",");
     LOG(INFO) << "TO BE CLEAR - SIZE IS " << deleted_slots.size();
+    LOG(INFO) << "Is first config? " << is_first_config;
+    LOG(INFO) << "Owned slots before: " << absl::StrJoin(before, ",");
+    LOG(INFO) << "Owned slots after: " << absl::StrJoin(after, ",");
+    LOG(INFO) << "Is tl null? " << (tl_cluster_config == nullptr);
     DeleteSlots(deleted_slots);
     WriteFlushSlotsToJournal(deleted_slots);
   }
