@@ -4,6 +4,8 @@
 
 #include "server/cluster/cluster_family.h"
 
+#include <absl/strings/str_join.h>
+
 #include <jsoncons/json.hpp>
 #include <memory>
 #include <mutex>
@@ -526,6 +528,8 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   if (ServerState::tlocal()->is_master) {
     auto deleted_slots = GetDeletedSlots(is_first_config, before, after);
+    LOG(INFO) << "Deleting slots due to new cluster config: " << absl::StrJoin(deleted_slots, ",");
+    LOG(INFO) << "TO BE CLEAR - SIZE IS " << deleted_slots.size();
     DeleteSlots(deleted_slots);
     WriteFlushSlotsToJournal(deleted_slots);
   }
