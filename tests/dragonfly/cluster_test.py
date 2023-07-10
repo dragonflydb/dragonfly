@@ -245,6 +245,7 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
 
     config = config.replace('5259', '5258').replace('5260', '5259')
     await push_config(config, c_nodes_admin)
+    await asyncio.sleep(0.5)
 
     # node0 should have removed "KEY1" as it no longer owns it
     assert await c_nodes[0].execute_command("DBSIZE") == 1
