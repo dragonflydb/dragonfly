@@ -251,6 +251,8 @@ async def test_cluster_slot_ownership_changes(df_local_factory):
     # node0 should still own "KEY0" though
     assert (await c_nodes[0].get("KEY0")).decode() == "value"
     # node1 should still have "KEY2"
+    assert (await c_nodes[1].get("KEY2")).decode() == "value"
+    # node1 should own *only* "KEY2"
     assert await c_nodes[1].execute_command("DBSIZE") == 1
 
     # Now node0 should reply with MOVED for "KEY1"
