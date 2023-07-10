@@ -19,7 +19,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from . import DflyInstance, DflyInstanceFactory, DflyParams, PortPicker, dfly_args
-from .utility import DflySeederFactory, gen_cert
+from .utility import DflySeederFactory, gen_certificate
 
 logging.getLogger('asyncio').setLevel(logging.WARNING)
 
@@ -251,7 +251,7 @@ def with_tls_server_args(tmp_dir, gen_ca_cert):
     tls_server_req = os.path.join(tmp_dir, "df-req.pem")
     tls_server_cert = os.path.join(tmp_dir, "df-cert.pem")
 
-    gen_cert(gen_ca_cert, tls_server_req, tls_server_key, tls_server_cert)
+    gen_certificate(gen_ca_cert["ca_key"], gen_ca_cert["ca_cert"], tls_server_req, tls_server_key, tls_server_cert)
 
     args = {"tls": "",
             "tls_key_file": tls_server_key,
@@ -272,7 +272,7 @@ def with_tls_client_args(tmp_dir, gen_ca_cert):
     tls_client_req = os.path.join(tmp_dir, "client-req.pem")
     tls_client_cert = os.path.join(tmp_dir, "client-cert.pem")
 
-    gen_cert(gen_ca_cert, tls_client_req, tls_client_key, tls_client_cert)
+    gen_certificate(gen_ca_cert["ca_key"], gen_ca_cert["ca_cert"], tls_client_req, tls_client_key, tls_client_cert)
 
     args = {"ssl": True,
             "ssl_keyfile": tls_client_key,
