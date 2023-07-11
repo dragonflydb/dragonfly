@@ -160,10 +160,6 @@ class DflyInstanceFactory:
     def __str__(self):
         return f"Factory({self.args})"
 
-    @property
-    def dfly_path(self):
-        return str(os.path.dirname(self.params.path))
-
 
 def dfly_args(*args):
     """ Used to define a singular set of arguments for dragonfly test """

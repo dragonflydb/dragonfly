@@ -1223,7 +1223,7 @@ async def test_take_over_timeout(df_local_factory, df_seeder_factory):
     assert await c_replica.execute_command("role") == [b'replica', b'localhost', bytes(str(master.port), 'ascii'), b'stable_sync']
 
     await disconnect_clients(c_master, c_replica)
-    
+
 
 # 1. Number of master threads
 # 2. Number of threads for each replica
@@ -1231,9 +1231,9 @@ replication_cases = [(8, 8)]
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replica", replication_cases)
-async def test_no_tls_on_admin_port(df_local_factory, df_seeder_factory, t_master, t_replica, with_tls_args):
+async def test_no_tls_on_admin_port(df_local_factory, df_seeder_factory, t_master, t_replica, with_tls_server_args):
     # 1. Spin up dragonfly without tls, debug populate
-    master = df_local_factory.create(admin_port=ADMIN_PORT, **with_tls_args, port=BASE_PORT, proactor_threads=t_master)
+    master = df_local_factory.create(no_tls_on_admin_port="true", admin_port=ADMIN_PORT, **with_tls_server_args, port=BASE_PORT, proactor_threads=t_master)
     master.start()
     c_master = aioredis.Redis(port=master.admin_port)
     await c_master.execute_command("DEBUG POPULATE 100")
@@ -1241,7 +1241,7 @@ async def test_no_tls_on_admin_port(df_local_factory, df_seeder_factory, t_maste
     assert 100 == db_size
 
     # 2. Spin up a replica and initiate a REPLICAOF
-    replica = df_local_factory.create(admin_port=ADMIN_PORT + 1, **with_tls_args, port=BASE_PORT + 1, proactor_threads=t_replica)
+    replica = df_local_factory.create(no_tls_on_admin_port="true", admin_port=ADMIN_PORT + 1, **with_tls_server_args, port=BASE_PORT + 1, proactor_threads=t_replica)
     replica.start()
     c_replica = aioredis.Redis(port=replica.admin_port)
     res = await c_replica.execute_command("REPLICAOF localhost " + str(master.admin_port))
@@ -1251,3 +1251,5 @@ async def test_no_tls_on_admin_port(df_local_factory, df_seeder_factory, t_maste
     # 3. Verify that replica dbsize == debug populate key size -- replication works
     db_size = await c_replica.execute_command("DBSIZE")
     assert 100 == db_size
+    await c_replica.close()
+    await c_master.close()
