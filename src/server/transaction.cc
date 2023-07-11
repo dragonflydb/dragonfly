@@ -1414,7 +1414,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
 
     string_view name{cid->name()};
 
-    if (name == "XREAD") {
+    if (name == "XREAD" || name == "XREADGROUP") {
       for (size_t i = 0; i < args.size(); ++i) {
         string_view arg = ArgS(args, i);
         if (absl::EqualsIgnoreCase(arg, "STREAMS")) {
@@ -1445,10 +1445,12 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
     if (!absl::SimpleAtoi(num, &num_custom_keys) || num_custom_keys < 0)
       return OpStatus::INVALID_INT;
 
-    // TODO Fix this for Z family functions.
-    // Examples that crash: ZUNION 0 myset
     if (name == "ZDIFF" && num_custom_keys == 0) {
       return OpStatus::INVALID_INT;
+    }
+
+    if (name == "ZUNION" && num_custom_keys == 0) {
+      return OpStatus::SYNTAX_ERR;
     }
 
     if (args.size() < size_t(num_custom_keys) + num_keys_index + 1)

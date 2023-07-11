@@ -159,6 +159,86 @@ TEST_F(StreamFamilyTest, XRead) {
   EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
 }
 
+TEST_F(StreamFamilyTest, XReadGroup) {
+  Run({"xadd", "foo", "1-*", "k1", "v1"});
+  Run({"xadd", "foo", "1-*", "k2", "v2"});
+  Run({"xadd", "foo", "1-*", "k3", "v3"});
+  Run({"xadd", "bar", "1-*", "k4", "v4"});
+
+  Run({"xadd", "mystream", "k1", "v1"});
+  Run({"xadd", "mystream", "k2", "v2"});
+  Run({"xadd", "mystream", "k3", "v3"});
+
+  Run({"xgroup", "create", "foo", "group", "0"});
+  Run({"xgroup", "create", "bar", "group", "0"});
+
+  // consumer PEL is empty, so resp should have empty list
+  auto resp = Run({"xreadgroup", "group", "group", "alice", "streams", "foo", "0"});
+  EXPECT_THAT(resp, ArrLen(0));
+
+  // should return unread entries with key "foo"
+  resp = Run({"xreadgroup", "group", "group", "alice", "streams", "foo", ">"});
+  // only "foo" key entries are read
+  EXPECT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[1], ArrLen(3));
+
+  Run({"xadd", "foo", "1-*", "k5", "v5"});
+  resp = Run({"xreadgroup", "group", "group", "alice", "streams", "bar", "foo", ">", ">"});
+  EXPECT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("bar", ArrLen(1)));
+  EXPECT_THAT(resp.GetVec()[0].GetVec()[1].GetVec()[0].GetVec(), ElementsAre("1-0", ArrLen(2)));
+  EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("foo", ArrLen(1)));
+  EXPECT_THAT(resp.GetVec()[1].GetVec()[1].GetVec()[0].GetVec(), ElementsAre("1-3", ArrLen(2)));
+
+  // now we can specify id for "foo" and it fetches from alice's consumer PEL
+  resp = Run({"xreadgroup", "group", "group", "alice", "streams", "foo", "0"});
+  EXPECT_THAT(resp.GetVec()[1], ArrLen(4));
+
+  // now ">" gives nil
+  resp = Run({"xreadgroup", "group", "group", "alice", "streams", "foo", ">"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+
+  // count limits the fetched entries
+  resp = Run(
+      {"xreadgroup", "group", "group", "alice", "count", "2", "streams", "foo", "bar", "0", "0"});
+  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(2)));
+  EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("bar", ArrLen(1)));
+
+  // bob will not get entries of alice
+  resp = Run({"xreadgroup", "group", "group", "bob", "streams", "foo", "0"});
+  EXPECT_THAT(resp, ArrLen(0));
+
+  resp = Run({"xinfo", "groups", "foo"});
+  // 2 consumers created
+  EXPECT_THAT(resp.GetVec()[3], IntArg(2));
+  // check last_delivery_id
+  EXPECT_THAT(resp.GetVec()[7], "1-3");
+
+  // Noack
+  Run({"xadd", "foo", "1-*", "k6", "v6"});
+  resp = Run({"xreadgroup", "group", "group", "bob", "noack", "streams", "foo", ">"});
+  // check basic results
+  EXPECT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("foo", ArrLen(1)));
+  // Entry is not inserted in Bob's consumer PEL.
+  resp = Run({"xreadgroup", "group", "group", "bob", "streams", "foo", "0"});
+  EXPECT_THAT(resp, ArrLen(0));
+
+  // No Group
+  resp = Run({"xreadgroup", "group", "nogroup", "alice", "streams", "foo", "0"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+
+  // '>' gives the null array result if group doesn't exist
+  resp = Run({"xreadgroup", "group", "group", "alice", "streams", "mystream", ">"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+
+  Run({"xadd", "foo", "1-*", "k7", "v7"});
+  resp = Run({"xreadgroup", "group", "group", "alice", "streams", "mystream", "foo", ">", ">"});
+  // Only entries of 'foo' is read
+  EXPECT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("foo", ArrLen(1)));
+}
+
 TEST_F(StreamFamilyTest, XReadBlock) {
   Run({"xadd", "foo", "1-*", "k1", "v1"});
   Run({"xadd", "foo", "1-*", "k2", "v2"});
@@ -182,6 +262,51 @@ TEST_F(StreamFamilyTest, XReadBlock) {
   });
   auto fb1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
     resp1 = Run({"xread", "block", "0", "streams", "foo", "bar", "$", "$"});
+  });
+  ThisFiber::SleepFor(50us);
+
+  resp = pp_->at(1)->Await([&] { return Run("xadd", {"xadd", "foo", "1-*", "k5", "v5"}); });
+
+  fb0.Join();
+  fb1.Join();
+
+  // Both xread calls should have been unblocked.
+  //
+  // Note when the response has length 1, Run returns the first element.
+  EXPECT_THAT(resp0.GetVec(), ElementsAre("foo", ArrLen(1)));
+  EXPECT_THAT(resp1.GetVec(), ElementsAre("foo", ArrLen(1)));
+}
+
+TEST_F(StreamFamilyTest, XReadGroupBlock) {
+  Run({"xadd", "foo", "1-*", "k1", "v1"});
+  Run({"xadd", "foo", "1-*", "k2", "v2"});
+  Run({"xadd", "foo", "1-*", "k3", "v3"});
+  Run({"xadd", "bar", "1-*", "k4", "v4"});
+
+  Run({"xgroup", "create", "foo", "group", "0"});
+  Run({"xgroup", "create", "bar", "group", "0"});
+
+  // Receive all records from both streams.
+  auto resp = Run(
+      {"xreadgroup", "group", "group", "alice", "block", "100", "streams", "foo", "bar", ">", ">"});
+  EXPECT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(3)));
+  EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("bar", ArrLen(1)));
+
+  // Timeout
+  resp = Run(
+      {"xreadgroup", "group", "group", "alice", "block", "1", "streams", "foo", "bar", ">", ">"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+
+  // Run XREADGROUP BLOCK from 2 fibers.
+  RespExpr resp0, resp1;
+  auto fb0 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    resp0 = Run(
+        {"xreadgroup", "group", "group", "alice", "block", "0", "streams", "foo", "bar", ">", ">"});
+  });
+  auto fb1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    resp1 = Run(
+        {"xreadgroup", "group", "group", "alice", "block", "0", "streams", "foo", "bar", ">", ">"});
   });
   ThisFiber::SleepFor(50us);
 
@@ -226,6 +351,38 @@ TEST_F(StreamFamilyTest, XReadInvalidArgs) {
   Run({"set", "foo", "v"});
   resp = Run({"xread", "streams", "foo", "0"});
   EXPECT_THAT(resp, ErrArg("key holding the wrong kind of value"));
+}
+
+TEST_F(StreamFamilyTest, XReadGroupInvalidArgs) {
+  Run({"xgroup", "create", "group", "foo", "0", "mkstream"});
+  // Invalid COUNT value.
+  auto resp =
+      Run({"xreadgroup", "group", "group", "alice", "count", "invalid", "streams", "foo", "0"});
+  EXPECT_THAT(resp, ErrArg("not an integer or out of range"));
+
+  // Invalid "stream" instead of GROUP.
+  resp = Run({"xreadgroup", "stream", "group", "alice", "count", "1", "streams", "foo", "0"});
+  EXPECT_THAT(resp, ErrArg("Missing 'GROUP' in 'XREADGROUP' command"));
+
+  // Missing streams.
+  resp = Run({"xreadgroup", "group", "group", "alice", "streams"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments for 'xreadgroup' command"));
+
+  // Missing consumer.
+  resp = Run({"xreadgroup", "group", "group", "streams", "foo", "0"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // Missing block value.
+  resp = Run({"xreadgroup", "group", "group", "alice", "block", "streams", "foo", "0"});
+  EXPECT_THAT(resp, ErrArg("not an integer or out of range"));
+
+  // Invalid block value.
+  resp = Run({"xreadgroup", "group", "group", "alice", "block", "invalid", "streams", "foo", "0"});
+  EXPECT_THAT(resp, ErrArg("not an integer or out of range"));
+
+  // Unbalanced list of streams.
+  resp = Run({"xreadgroup", "group", "group", "alice", "streams", "s1", "s2", "s3", "0", "0"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
 }
 
 TEST_F(StreamFamilyTest, Issue854) {
