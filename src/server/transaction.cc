@@ -1414,7 +1414,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
 
     string_view name{cid->name()};
 
-    if (name == "XREAD") {
+    if (name == "XREAD" || name == "XREADGROUP") {
       for (size_t i = 0; i < args.size(); ++i) {
         string_view arg = ArgS(args, i);
         if (absl::EqualsIgnoreCase(arg, "STREAMS")) {
