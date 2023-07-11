@@ -1142,10 +1142,11 @@ async def test_take_over_counters(df_local_factory, master_threads, replica_thre
 
 @pytest.mark.parametrize("master_threads, replica_threads", take_over_cases)
 @pytest.mark.asyncio
-async def test_take_over_seeder(df_local_factory, df_seeder_factory, master_threads, replica_threads):
+async def test_take_over_seeder(request, df_local_factory, df_seeder_factory, master_threads, replica_threads):
+    tmp_file_name = ''.join(random.choices(string.ascii_letters, k=10))
     master = df_local_factory.create(proactor_threads=master_threads,
                                      port=BASE_PORT,
-                                     dbfilename=f"dump_{master_threads}_{replica_threads}",
+                                     dbfilename=f"dump_{tmp_file_name}",
                                      logtostderr=True)
     replica = df_local_factory.create(
         port=BASE_PORT+1, proactor_threads=replica_threads)
@@ -1203,15 +1204,12 @@ async def test_take_over_timeout(df_local_factory, df_seeder_factory):
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
 
-    async def seed():
-        await seeder.run(target_ops=3000)
-
-    fill_task = asyncio.create_task(seed())
+    fill_task = asyncio.create_task(seeder.run(target_ops=3000))
 
     # Give the seeder a bit of time.
     await asyncio.sleep(1)
     try:
-        await c_replica.execute_command(f"REPLTAKEOVER 0.0001")
+        await c_replica.execute_command(f"REPLTAKEOVER 0.00001")
     except redis.exceptions.ResponseError as e:
         assert str(e) == "Couldn't execute takeover"
     else:
@@ -1229,11 +1227,14 @@ async def test_take_over_timeout(df_local_factory, df_seeder_factory):
 # 2. Number of threads for each replica
 replication_cases = [(8, 8)]
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replica", replication_cases)
 async def test_no_tls_on_admin_port(df_local_factory, df_seeder_factory, t_master, t_replica, with_tls_server_args):
     # 1. Spin up dragonfly without tls, debug populate
-    master = df_local_factory.create(no_tls_on_admin_port="true", admin_port=ADMIN_PORT, **with_tls_server_args, port=BASE_PORT, proactor_threads=t_master)
+
+    master = df_local_factory.create(
+        no_tls_on_admin_port="true", admin_port=ADMIN_PORT, **with_tls_server_args, port=BASE_PORT, proactor_threads=t_master)
     master.start()
     c_master = aioredis.Redis(port=master.admin_port)
     await c_master.execute_command("DEBUG POPULATE 100")
@@ -1241,7 +1242,9 @@ async def test_no_tls_on_admin_port(df_local_factory, df_seeder_factory, t_maste
     assert 100 == db_size
 
     # 2. Spin up a replica and initiate a REPLICAOF
-    replica = df_local_factory.create(no_tls_on_admin_port="true", admin_port=ADMIN_PORT + 1, **with_tls_server_args, port=BASE_PORT + 1, proactor_threads=t_replica)
+
+    replica = df_local_factory.create(
+        no_tls_on_admin_port="true", admin_port=ADMIN_PORT + 1, **with_tls_server_args, port=BASE_PORT + 1, proactor_threads=t_replica)
     replica.start()
     c_replica = aioredis.Redis(port=replica.admin_port)
     res = await c_replica.execute_command("REPLICAOF localhost " + str(master.admin_port))
