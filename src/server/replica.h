@@ -105,7 +105,7 @@ class Replica {
   };
 
  public:
-  Replica(std::string master_host, uint16_t port, Service* se, std::string_view id, SSL_CTX* ssl);
+  Replica(std::string master_host, uint16_t port, Service* se, std::string_view id);
   ~Replica();
 
   // Spawns a fiber that runs until link with master is broken or the replication is stopped.
@@ -243,6 +243,7 @@ class Replica {
   Service& service_;
   MasterContext master_context_;
   std::unique_ptr<util::FiberSocketBase> sock_;
+  std::unique_ptr<util::FiberSocketBase> maybe_parent_;
   Mutex sock_mu_;
 
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;

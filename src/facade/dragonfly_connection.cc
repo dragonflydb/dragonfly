@@ -338,6 +338,7 @@ void Connection::HandleRequests() {
       }
       http_conn.ReleaseSocket();
     } else {
+      parent_ = peer;
       cc_.reset(service_->CreateContext(peer, this));
       auto* us = static_cast<LinuxSocketBase*>(socket_.get());
       if (breaker_cb_) {
