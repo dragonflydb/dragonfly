@@ -9,7 +9,7 @@ from . import dfly_args
 BASIC_ARGS = {"dir": "{DRAGONFLY_TMP}/"}
 
 
-@pytest.mark.skip(reason='Currently we can not guarantee that on shutdown if command is executed and value is written we response before breaking the connction')
+@pytest.mark.skip(reason='Currently we can not guarantee that on shutdown if command is executed and value is written we response before breaking the connection')
 @dfly_args({"proactor_threads": "4"})
 class TestDflyAutoLoadSnapshot():
     """
