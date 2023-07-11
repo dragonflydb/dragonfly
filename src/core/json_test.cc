@@ -1,15 +1,15 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2023, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
 #include <jsoncons/json.hpp>
 #include <jsoncons_ext/jsonpath/jsonpath.hpp>
+#include <memory_resource>
 
 #include "base/gtest.h"
 #include "base/logging.h"
 
 namespace dfly {
-using namespace std;
 using namespace jsoncons;
 using namespace jsoncons::literals;
 
@@ -20,7 +20,7 @@ class JsonTest : public ::testing::Test {
 };
 
 TEST_F(JsonTest, Basic) {
-  string data = R"(
+  std::string data = R"(
     {
        "application": "hiking",
        "reputons": [
@@ -69,7 +69,7 @@ TEST_F(JsonTest, Errors) {
   json_decoder<json> decoder;
   basic_json_parser<char> parser(basic_json_decode_options<char>{}, cb);
 
-  string_view input{"\000bla"};
+  std::string_view input{"\000bla"};
   parser.update(input.data(), input.size());
   parser.parse_some(decoder);
   parser.finish_parse(decoder);
@@ -101,19 +101,36 @@ TEST_F(JsonTest, Delete) {
   EXPECT_EQ(R"({"c":{"a":1, "b":2}, "d":{"b":2, "c":3}, "e": [1,2]})"_json, j1);
 }
 
-TEST_F(JsonTest, DeleteExt) {
-  jsonpath::detail::static_resources<json, const json&> resources;
-  jsonpath::jsonpath_expression<json>::evaluator_t eval;
-  jsonpath::jsonpath_expression<json>::json_selector_t sel = eval.compile(resources, "$.d.*");
-  json j1 = R"({"c":{"a":1, "b":2}, "d":{"a":1, "b":2, "c":3}, "e": [1,2]})"_json;
+TEST_F(JsonTest, JsonWithPolymorhicAllocator) {
+  char buffer[1024] = {};
+  std::pmr::monotonic_buffer_resource pool{std::data(buffer), std::size(buffer)};
+  std::pmr::polymorphic_allocator<char> alloc(&pool);
 
-  jsoncons::jsonpath::detail::dynamic_resources<json, const json&> dyn_res;
-
-  auto f = [](const jsonpath::json_location<char>& path, const json& val) {
-    LOG(INFO) << path.to_string();
-  };
-
-  sel.evaluate(dyn_res, j1, dyn_res.root_path_node(), j1, f, jsonpath::result_options::path);
+  std::string input = R"(
+{ "store": {
+    "book": [
+      { "category": "Roman",
+        "author": "Felix Lobrecht",
+        "title": "Sonne und Beton",
+        "price": 12.99
+      },
+      { "category": "Roman",
+        "author": "Thomas F. Schneider",
+        "title": "Im Westen nichts Neues",
+        "price": 10.00
+      }
+    ]
+  }
 }
+)";
 
+  auto j1 = pmr::json::parse(combine_allocators(alloc), input, json_options{});
+  EXPECT_EQ("Roman", j1["store"]["book"][0]["category"].as_string());
+  EXPECT_EQ("Felix Lobrecht", j1["store"]["book"][0]["author"].as_string());
+  EXPECT_EQ(12.99, j1["store"]["book"][0]["price"].as_double());
+
+  EXPECT_EQ("Roman", j1["store"]["book"][1]["category"].as_string());
+  EXPECT_EQ("Im Westen nichts Neues", j1["store"]["book"][1]["title"].as_string());
+  EXPECT_EQ(10.00, j1["store"]["book"][1]["price"].as_double());
+}
 }  // namespace dfly
