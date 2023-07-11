@@ -199,20 +199,14 @@ void SendMonitor(const std::string& msg) {
   }
 }
 
-void DispatchMonitorIfNeeded(bool admin_cmd, ConnectionContext* cntx, CmdArgList args) {
-  // We are not sending any admin command in the monitor, and we do not want to
-  // do any processing if we don't have any waiting connections with monitor
-  // enabled on them - see https://redis.io/commands/monitor/
-  const auto& my_monitors = ServerState::tlocal()->Monitors();
-  if (!(my_monitors.Empty() || admin_cmd)) {
-    //  We have connections waiting to get the info on the last command, send it to them
-    auto monitor_msg = MakeMonitorMessage(cntx->conn_state, cntx->owner(), args);
+void DispatchMonitor(ConnectionContext* cntx, CmdArgList args) {
+  //  We have connections waiting to get the info on the last command, send it to them
+  string monitor_msg = MakeMonitorMessage(cntx->conn_state, cntx->owner(), args);
 
-    VLOG(1) << "sending command '" << monitor_msg << "' to the clients that registered on it";
+  VLOG(1) << "sending command '" << monitor_msg << "' to the clients that registered on it";
 
-    shard_set->pool()->DispatchBrief(
-        [msg = std::move(monitor_msg)](unsigned idx, util::ProactorBase*) { SendMonitor(msg); });
-  }
+  shard_set->pool()->DispatchBrief(
+      [msg = std::move(monitor_msg)](unsigned idx, util::ProactorBase*) { SendMonitor(msg); });
 }
 
 class InterpreterReplier : public RedisReplyBuilder {
@@ -833,9 +827,16 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     return (*cntx)->SendSimpleString("QUEUED");
   }
 
+  // We are not sending any admin command in the monitor, and we do not want to
+  // do any processing if we don't have any waiting connections with monitor
+  // enabled on them - see https://redis.io/commands/monitor/
+  const MonitorsRepo& monitors = etl.Monitors();
+  if (!monitors.Empty() && (cid->opt_mask() & CO::ADMIN) == 0) {
+    DispatchMonitor(dfly_cntx, args);
+  }
+
   uint64_t start_usec = ProactorBase::GetMonotonicTimeNs(), end_usec;
 
-  DispatchMonitorIfNeeded(cid->opt_mask() & CO::ADMIN, dfly_cntx, args);
   // Create command transaction
   intrusive_ptr<Transaction> dist_trans;
 
