@@ -639,8 +639,8 @@ bool Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
 
 // Return OK if all keys are allowed to be accessed: either declared in EVAL or
 // transaction is running in global or non-atomic mode.
-OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const CommandId* cid,
-                           CmdArgList args, Transaction* trans) {
+OpStatus CheckKeysDeclaredOrLock(ConnectionState::ScriptInfo* eval_info, const CommandId* cid,
+                                 CmdArgList args, Transaction* trans) {
   Transaction::MultiMode multi_mode = trans->GetMultiMode();
 
   // We either scheduled on all shards or re-schedule for each operation,
@@ -655,14 +655,42 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
   const auto& key_index = *key_index_res;
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
     string_view key = ArgS(args, i);
-    if (!eval_info.keys.contains(key)) {
-      VLOG(1) << "Key " << key << " is not declared for command " << cid->name();
-      return OpStatus::KEY_NOTFOUND;
+    if (!eval_info->keys.contains(key)) {
+      if (eval_info->undeclared_keys.contains(key)) {
+        LOG(ERROR) << "XXX key " << key << " is already undeclared and locked";
+        continue;
+      }
+      ShardId sid = Shard(key, shard_set->size());
+
+      KeyLockArgs lock_args;
+      lock_args.db_index = trans->GetDbIndex();
+      lock_args.args = {key};
+
+      bool success = false;
+      shard_set->Await(sid, [&]() {
+        auto& db_slice = EngineShard::tlocal()->db_slice();
+        success = db_slice.Acquire(IntentLock::Mode::EXCLUSIVE, lock_args);
+      });
+      if (!success) {
+        LOG(ERROR) << "XXX Unable to lock " << key;
+        VLOG(1) << "Key " << key << " is not declared for command " << cid->name();
+        return OpStatus::KEY_NOTFOUND;
+      }
+
+      LOG(ERROR) << "XXX Locked " << key << " successfully!";
+      eval_info->undeclared_keys.insert(string(key));
+      // XXX TODO add shard if not included in script transaction???
     }
   }
 
-  if (key_index.bonus && !eval_info.keys.contains(ArgS(args, *key_index.bonus)))
-    return OpStatus::KEY_NOTFOUND;
+  if (key_index.bonus) {
+    string_view key = ArgS(args, *key_index.bonus);
+    if (!eval_info->keys.contains(key)) {
+      LOG(ERROR) << "XXX Did not implement try-lock for BONUS key " << key;
+      VLOG(1) << "BONUS key " << key << " is not declared for command " << cid->name();
+      return OpStatus::KEY_NOTFOUND;
+    }
+  }
 
   return OpStatus::OK;
 }
@@ -688,7 +716,7 @@ bool Service::VerifyCommand(const CommandId* cid, CmdArgList args, ConnectionCon
   }
 
   bool is_trans_cmd = CO::IsTransKind(cid->name());
-  bool under_script = bool(dfly_cntx->conn_state.script_info);
+  bool under_script = dfly_cntx->conn_state.script_info != nullptr;
   bool allowed_by_state = true;
   switch (etl.gstate()) {
     case GlobalState::LOADING:
@@ -772,8 +800,8 @@ bool Service::VerifyCommand(const CommandId* cid, CmdArgList args, ConnectionCon
   }
 
   if (under_script && cid->IsTransactional()) {
-    OpStatus status = CheckKeysDeclared(*dfly_cntx->conn_state.script_info, cid, args.subspan(1),
-                                        dfly_cntx->transaction);
+    OpStatus status = CheckKeysDeclaredOrLock(dfly_cntx->conn_state.script_info.get(), cid,
+                                              args.subspan(1), dfly_cntx->transaction);
 
     if (status == OpStatus::KEY_NOTFOUND) {
       (*dfly_cntx)->SendError("script tried accessing undeclared key");
@@ -877,10 +905,12 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   // itself. EXEC does not use DispatchCommand for dispatching.
   bool collect_stats =
       dfly_cntx->transaction && (!dfly_cntx->transaction->IsMulti() || dispatching_in_multi);
+  LOG(ERROR) << "XXX invoking cmd " << args;
   if (!InvokeCmd(args.subspan(1), cid, dfly_cntx, collect_stats)) {
     dfly_cntx->reply_builder()->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
   }
+  LOG(ERROR) << "XXX done invoking cmd " << args;
 
   end_usec = ProactorBase::GetMonotonicTimeNs();
   request_latency_usec.IncBy(cid->name(), (end_usec - start_usec) / 1000);
@@ -1356,6 +1386,34 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter,
 
   Interpreter::RunResult result = interpreter->RunFunction(eval_args.sha, &error);
   absl::Cleanup clean = [interpreter]() { interpreter->ResetStack(); };
+  absl::Cleanup release_keys = [keys = std::move(cntx->conn_state.script_info->undeclared_keys)]() {
+    vector<vector<string>> sharded_keys(shard_set->size());
+    for (auto& key : keys) {
+      ShardId sid = Shard(key, shard_set->size());
+      // XXX TODO do not copy the keys, we can move them if we're a bit more clever
+      sharded_keys[sid].push_back(key);
+    }
+    for (size_t i = 0; i < sharded_keys.size(); ++i) {
+      vector<string> shard_keys = std::move(sharded_keys[i]);
+      if (shard_keys.empty()) {
+        continue;
+      }
+
+      shard_set->Add(i, [keys = std::move(shard_keys)]() {
+        for (const string& key : keys) {
+          LOG(ERROR) << "XXX releasing key " << key;
+        }
+        vector<string_view> keys_view(keys.size());
+        std::copy(keys.begin(), keys.end(), keys_view.begin());
+        KeyLockArgs lock_args;
+        lock_args.db_index = 0;  // XXX TODO USE RIGHT DB!
+        lock_args.args = keys_view;
+
+        auto& db_slice = EngineShard::tlocal()->db_slice();
+        db_slice.Release(IntentLock::Mode::EXCLUSIVE, lock_args);
+      });
+    }
+  };
 
   if (auto err = FlushEvalAsyncCmds(cntx, true); err) {
     auto err_ref = CapturingReplyBuilder::GetError(*err);

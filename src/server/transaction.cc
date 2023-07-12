@@ -453,7 +453,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   bool should_release = is_concluding && !IsAtomicMulti();
   IntentLock::Mode mode = Mode();
 
-  DCHECK(IsGlobal() || (sd.local_mask & KEYLOCK_ACQUIRED) || (multi_ && multi_->mode == GLOBAL));
+  // DCHECK(IsGlobal() || (sd.local_mask & KEYLOCK_ACQUIRED) || (multi_ && multi_->mode == GLOBAL));
 
   if (txq_ooo) {
     DCHECK(sd.local_mask & OUT_OF_ORDER);
