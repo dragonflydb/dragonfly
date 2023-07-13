@@ -1537,12 +1537,14 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
   CmdArgVec arg_vec, tmp_keys;
 
-  // We ignore transaction mode in case it's filled only with EVAL-like commands.
-  // This is done to support OptimalBits/bull js framework
-  // that for some reason uses MULTI to send multiple jobs via EVAL(SHA) commands,
-  // instead of using pipeline mode.
-  // TODO: to check with BullMQ developers if this is a bug or a feature.
-  if (state == ExecEvalState::ALL) {
+  // Check if script most LIKELY has global eval transactions
+  bool global_script = script_mgr()->AreGlobalByDefault();
+
+  // We ignore transaction mode in case it's filled only with EVAL-like commands,
+  // and scripts are not runing in global trasaction
+  // This disables the atomicity of running multiple lua scripts inside multi exec.
+  if (state == ExecEvalState::ALL && !global_script) {
+    VLOG(1) << "Exec eval ignore trasaction";
     string cmd_name;
     auto body = move(exec_info.body);
     exec_info.Clear();
@@ -1565,9 +1567,6 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
     return;
   }
-
-  // Check if script most LIKELY has global eval transactions
-  bool global_script = (state == ExecEvalState::SOME) && script_mgr()->AreGlobalByDefault();
 
   bool scheduled =
       StartMultiExec(cntx->db_index(), cntx->transaction, &exec_info, &tmp_keys, global_script);

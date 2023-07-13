@@ -59,30 +59,17 @@ TEST_F(MultiTest, VerifyConstants) {
 }
 
 TEST_F(MultiTest, MultiAndEval) {
-  GTEST_SKIP() << "Eval is allowed in multi experimentally";
+  absl::SetFlag(&FLAGS_default_lua_flags, "allow-undeclared-keys");
+  RespExpr resp;
 
-  ShardId sid1 = Shard(kKey1, num_threads_ - 1);
-  ShardId sid2 = Shard(kKey2, num_threads_ - 1);
-  ShardId sid3 = Shard(kKey3, num_threads_ - 1);
-  ShardId sid4 = Shard(kKey4, num_threads_ - 1);
-  EXPECT_EQ(0, sid1);
-  EXPECT_EQ(2, sid2);
-  EXPECT_EQ(1, sid3);
-  EXPECT_EQ(0, sid4);
-
-  RespExpr resp = Run({"multi"});
-  ASSERT_EQ(resp, "OK");
-
-  resp = Run({"get", kKey1});
-  ASSERT_EQ(resp, "QUEUED");
-
-  resp = Run({"get", kKey4});
-  ASSERT_EQ(resp, "QUEUED");
-  resp = Run({"eval", "return redis.call('exists', KEYS[2])", "2", "a", "b"});
-  ASSERT_EQ(resp, "QUEUED");
-
-  resp = Run({"exec"});
-  ASSERT_THAT(resp, ErrArg("ERR Dragonfly does not allow execution of a server-side Lua"));
+  // Run the fiber at creation.
+  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] { resp = Run({"brpop", "x", "1"}); });
+  Run({"mutli"});
+  Run({"eval", "return redis.call('lpush', 'x', 'y')", "0"});
+  Run({"eval", "return redis.call('lpop', 'x')", "0"});
+  Run({"exec"});
+  fb0.Join();
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
 }
 
 TEST_F(MultiTest, MultiAndFlush) {
