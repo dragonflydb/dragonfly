@@ -96,30 +96,6 @@ class ZSetFamily {
   static void ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx);
   static bool ParseRangeByScoreParams(CmdArgList args, RangeParams* params);
   static void ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cntx);
-  static OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t* cursor,
-                                    const ScanOpts& scan_op);
-
-  static OpResult<unsigned> OpRem(const OpArgs& op_args, std::string_view key, ArgSlice members);
-  static OpResult<double> OpScore(const OpArgs& op_args, std::string_view key,
-                                  std::string_view member);
-  using MScoreResponse = std::vector<std::optional<double>>;
-  static OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, std::string_view key,
-                                           ArgSlice members);
-  static OpResult<ScoredArray> OpPopCount(const ZRangeSpec& range_spec, const OpArgs& op_args,
-                                          std::string_view key);
-  static OpResult<ScoredArray> OpRange(const ZRangeSpec& range_spec, const OpArgs& op_args,
-                                       std::string_view key);
-  static OpResult<unsigned> OpRemRange(const OpArgs& op_args, std::string_view key,
-                                       const ZRangeSpec& spec);
-
-  static OpResult<unsigned> OpRank(const OpArgs& op_args, std::string_view key,
-                                   std::string_view member, bool reverse);
-
-  static OpResult<unsigned> OpCount(const OpArgs& op_args, std::string_view key,
-                                    const ScoreInterval& interval);
-
-  static OpResult<unsigned> OpLexCount(const OpArgs& op_args, std::string_view key,
-                                       const LexInterval& interval);
 };
 
 }  // namespace dfly

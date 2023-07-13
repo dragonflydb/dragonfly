@@ -28,6 +28,9 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
  * THE POSSIBILITY OF SUCH DAMAGE.
  */
+
+#include <string.h>
+
 #include "geohash.h"
 
 /**
@@ -215,7 +218,9 @@ int geohashDecodeAreaToLongLat(const GeoHashArea *area, double *xy) {
 }
 
 int geohashDecodeToLongLatType(const GeoHashBits hash, double *xy) {
-    GeoHashArea area = {{0}};
+    GeoHashArea area;
+    memset(&area, 0, sizeof(area));
+
     if (!xy || !geohashDecodeType(hash, &area))
         return 0;
     return geohashDecodeAreaToLongLat(&area, xy);
