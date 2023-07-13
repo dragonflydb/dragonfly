@@ -72,12 +72,32 @@ struct AddTrimOpts {
   bool no_mkstream = false;
 };
 
+struct NACKInfo {
+  streamID pel_id;
+  string consumer_name;
+  size_t delivery_time;
+  size_t delivery_count;
+};
+
+struct ConsumerInfo {
+  string name;
+  string seen_time;
+  size_t pel_count;
+  vector<NACKInfo> pending;
+};
+
 struct GroupInfo {
   string name;
   size_t consumer_size;
   size_t pending_size;
   streamID last_id;
+  size_t pel_count;
+  size_t entries_read;
+  vector<NACKInfo> streamNACKVec;
+  ConsumerInfo consumerInfo;
 };
+
+using GroupInfoVec = vector<GroupInfo>;
 
 struct StreamInfo {
   size_t length;
@@ -89,6 +109,7 @@ struct StreamInfo {
   size_t entries_added;
   Record first_entry;
   Record last_entry;
+  GroupInfoVec cgroups;
 };
 
 struct RangeOpts {
@@ -882,6 +903,71 @@ Record testfunction(stream* s, streamID sstart, streamID send, int reverse) {
   return rec;
 }
 
+void getConsumerGroupLag(stream* s, streamCG* cg, GroupInfo* ginfo) {
+  // TODO : implement this
+}
+
+void getGroupPEL(stream* s, streamCG* cg, GroupInfo* ginfo, long long count) {
+  vector<NACKInfo> nack_info_vec;
+  long long arraylen_cg_pel = 0;
+  raxIterator ri_cg_pel;
+  raxStart(&ri_cg_pel, cg->pel);
+  raxSeek(&ri_cg_pel, "^", NULL, 0);
+  while (raxNext(&ri_cg_pel) && (!count || arraylen_cg_pel < count)) {
+    streamNACK* nack = static_cast<streamNACK*>(ri_cg_pel.data);
+    NACKInfo nack_info;
+
+    streamID id;
+    streamDecodeID(ri_cg_pel.key, &id);
+    nack_info.pel_id = id;
+    nack_info.consumer_name = nack->consumer->name;
+    nack_info.delivery_time = nack->delivery_time;
+    nack_info.delivery_count = nack->delivery_count;
+
+    nack_info_vec.push_back(nack_info);
+    arraylen_cg_pel++;
+  }
+  raxStop(&ri_cg_pel);
+  ginfo->streamNACKVec = nack_info_vec;
+}
+
+void getConsumers(stream* s, streamCG* cg, GroupInfo* ginfo, long long count) {
+  vector<ConsumerInfo> consumer_info_vec;
+  raxIterator ri_consumers;
+  raxStart(&ri_consumers, cg->consumers);
+  raxSeek(&ri_consumers, "^", NULL, 0);
+  while (raxNext(&ri_consumers)) {
+    ConsumerInfo consumer_info;
+    streamConsumer* consumer = static_cast<streamConsumer*>(ri_consumers.data);
+
+    consumer_info.name = consumer->name;
+    consumer_info.seen_time = consumer->seen_time;
+    consumer_info.pel_count = raxSize(consumer->pel);
+
+    /* Consumer PEL */
+    long long arraylen_cpel = 0;
+    raxIterator ri_cpel;
+    raxStart(&ri_cpel, consumer->pel);
+    raxSeek(&ri_cpel, "^", NULL, 0);
+    vector<NACKInfo> consumer_pel_vec;
+    while (raxNext(&ri_cpel) && (!count || arraylen_cpel < count)) {
+      NACKInfo nack_info;
+      streamNACK* nack = static_cast<streamNACK*>(ri_cpel.data);
+
+      streamID id;
+      streamDecodeID(ri_cpel.key, &id);
+      nack_info.pel_id = id;
+      nack_info.delivery_time = nack->delivery_time;
+      nack_info.delivery_count = nack->delivery_count;
+
+      consumer_pel_vec.push_back(nack_info);
+      arraylen_cpel++;
+    }
+    raxStop(&ri_cpel);
+  }
+  raxStop(&ri_consumers);
+}
+
 OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, EngineShard* shard) {
   auto& db_slice = shard->db_slice();
   OpResult<PrimeIterator> res_it = db_slice.Find(db_cntx, key, OBJ_STREAM);
@@ -901,6 +987,31 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
   sinfo.max_deleted_entry_id = s->max_deleted_entry_id;
   sinfo.entries_added = s->entries_added;
   sinfo.groups = s->cgroups ? raxSize(s->cgroups) : 0;
+
+  if (s->cgroups) {
+    GroupInfoVec group_info_vec;
+
+    raxIterator ri_cgroups;
+    raxStart(&ri_cgroups, s->cgroups);
+    raxSeek(&ri_cgroups, "^", NULL, 0);
+    while (raxNext(&ri_cgroups)) {
+      streamCG* cg = (streamCG*)ri_cgroups.data;
+      GroupInfo ginfo;
+      ginfo.name.assign(reinterpret_cast<char*>(ri_cgroups.key), ri_cgroups.key_len);
+      ginfo.last_id = cg->last_id;
+      ginfo.entries_read = cg->entries_read;
+      ginfo.consumer_size = raxSize(cg->consumers);
+      ginfo.pending_size = raxSize(cg->pel);
+      getConsumerGroupLag(s, cg, &ginfo);
+      ginfo.pel_count = raxSize(cg->pel);
+      getGroupPEL();
+
+      group_info_vec.push_back(ginfo);
+    }
+    raxStop(&ri_cgroups);
+
+    sinfo.cgroups = group_info_vec;
+  }
 
   sinfo.first_entry = testfunction(s, s->first_id, s->last_id, 0);
   sinfo.last_entry = testfunction(s, s->first_id, s->last_id, 1);
