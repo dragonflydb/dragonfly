@@ -216,6 +216,10 @@ io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter
   Interpreter::FuncSha1(body, sha_buf);
   string_view sha{sha_buf, std::strlen(sha_buf)};
 
+  if (interpreter->Exists(sha)) {
+    return string{sha};
+  }
+
   string_view orig_body = body;
 
   auto params_opt = DeduceParams(&body);
