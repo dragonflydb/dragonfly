@@ -24,3 +24,9 @@ repos:
     hooks:
       - id: clang-format
         name: Clang formatting
+
+  - repo: https://github.com/pocc/pre-commit-hooks
+    rev: v1.3.5
+    hooks:
+      - id: include-what-you-use
+        name: Include What You Use

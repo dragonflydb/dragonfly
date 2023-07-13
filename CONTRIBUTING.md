@@ -110,6 +110,13 @@ style guide which can be found [here](https://github.com/google/styleguide/blob/
 
 Any exception to the rules specified on the style guide will be documented here.
 
+## Include What You Use
+
+We use the [iwyu](https://github.com/include-what-you-use/include-what-you-use) tool to enforce
+including dependencies directly rather than relying on transient inclusions.
+
+It is expected that the tool is installed externally as described in the [build steps](./docs/build-from-source.md#step-1---install-dependencies)
+
 ## License terms for contributions
 
 Please see our [CLA agreement](./CLA.txt)
