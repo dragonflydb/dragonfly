@@ -463,8 +463,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
   // of the flows also contain them.
   SaveMode save_mode =
       shard->shard_id() == 0 ? SaveMode::SINGLE_SHARD_WITH_SUMMARY : SaveMode::SINGLE_SHARD;
-  // flow->saver.reset(new RdbSaver(flow->conn->socket(), save_mode, false));
-  flow->saver.reset(new RdbSaver(flow->conn->parent_, save_mode, false));
+  flow->saver.reset(new RdbSaver(flow->conn->socket(), save_mode, false));
 
   flow->cleanup = [flow]() {
     flow->saver->Cancel();
@@ -502,8 +501,7 @@ OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineS
 
   if (shard != nullptr) {
     flow->streamer.reset(new JournalStreamer(sf_->journal(), cntx));
-    // flow->streamer->Start(flow->conn->socket());
-    flow->streamer->Start(flow->conn->parent_);
+    flow->streamer->Start(flow->conn->socket());
   }
 
   // Register cleanup.
@@ -545,8 +543,7 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
     return;
   }
 
-  ec = flow->conn->parent_->Write(io::Buffer(flow->eof_token));
-  // ec = flow->conn->socket()->Write(io::Buffer(flow->eof_token));
+  ec = flow->conn->socket()->Write(io::Buffer(flow->eof_token));
   if (ec) {
     cntx->ReportError(ec);
     return;

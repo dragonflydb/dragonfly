@@ -7,6 +7,7 @@
 #include <absl/base/internal/spinlock.h>
 
 #include "facade/facade_types.h"
+#include "util/fiber_socket_base.h"
 #include "util/fibers/proactor_base.h"
 #include "util/http/http_handler.h"
 #include "util/listener_interface.h"
@@ -33,7 +34,7 @@ class Listener : public util::ListenerInterface {
 
  private:
   util::Connection* NewConnection(ProactorBase* proactor) final;
-  ProactorBase* PickConnectionProactor(util::LinuxSocketBase* sock) final;
+  ProactorBase* PickConnectionProactor(util::FiberSocketBase* sock) final;
 
   void OnConnectionStart(util::Connection* conn) final;
   void OnConnectionClose(util::Connection* conn) final;

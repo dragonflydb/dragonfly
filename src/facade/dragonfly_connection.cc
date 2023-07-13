@@ -258,8 +258,7 @@ void Connection::OnShutdown() {
 void Connection::OnPreMigrateThread() {
   // If we migrating to another io_uring we should cancel any pending requests we have.
   if (break_poll_id_ != UINT32_MAX) {
-    auto* ls = static_cast<LinuxSocketBase*>(socket_.get());
-    ls->CancelPoll(break_poll_id_);
+    socket_->CancelPoll(break_poll_id_);
     break_poll_id_ = UINT32_MAX;
   }
 }
@@ -269,9 +268,8 @@ void Connection::OnPostMigrateThread() {
   if (breaker_cb_) {
     DCHECK_EQ(UINT32_MAX, break_poll_id_);
 
-    auto* ls = static_cast<LinuxSocketBase*>(socket_.get());
     break_poll_id_ =
-        ls->PollEvent(POLLERR | POLLHUP, [this](int32_t mask) { this->OnBreakCb(mask); });
+        socket_->PollEvent(POLLERR | POLLHUP, [this](int32_t mask) { this->OnBreakCb(mask); });
   }
 }
 
@@ -293,30 +291,28 @@ void Connection::UnregisterShutdownHook(ShutdownHandle id) {
 void Connection::HandleRequests() {
   ThisFiber::SetName("DflyConnection");
 
-  LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
-
   if (absl::GetFlag(FLAGS_tcp_nodelay)) {
     int val = 1;
-    CHECK_EQ(0, setsockopt(lsb->native_handle(), IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val)));
+    CHECK_EQ(0, setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val)));
   }
 
-  auto remote_ep = lsb->RemoteEndpoint();
+  auto remote_ep = socket_->RemoteEndpoint();
 
   FiberSocketBase* peer = socket_.get();
 #ifdef DFLY_USE_SSL
-  unique_ptr<tls::TlsSocket> tls_sock;
   if (ctx_) {
     const bool no_tls_on_admin_port = absl::GetFlag(FLAGS_no_tls_on_admin_port);
     if (!(IsAdmin() && no_tls_on_admin_port)) {
-      tls_sock.reset(new tls::TlsSocket(socket_.get()));
+      unique_ptr<tls::TlsSocket> tls_sock = make_unique<tls::TlsSocket>(std::move(socket_));
       tls_sock->InitSSL(ctx_);
       FiberSocketBase::AcceptResult aresult = tls_sock->Accept();
+      SetSocket(tls_sock.release());
 
       if (!aresult) {
         LOG(WARNING) << "Error handshaking " << aresult.error().message();
         return;
       }
-      peer = tls_sock.get();
+      peer = socket_.get();
       VLOG(1) << "TLS handshake succeeded";
     }
   }
@@ -338,18 +334,16 @@ void Connection::HandleRequests() {
       }
       http_conn.ReleaseSocket();
     } else {
-      parent_ = peer;
       cc_.reset(service_->CreateContext(peer, this));
-      auto* us = static_cast<LinuxSocketBase*>(socket_.get());
       if (breaker_cb_) {
         break_poll_id_ =
-            us->PollEvent(POLLERR | POLLHUP, [this](int32_t mask) { this->OnBreakCb(mask); });
+            socket_->PollEvent(POLLERR | POLLHUP, [this](int32_t mask) { this->OnBreakCb(mask); });
       }
 
       ConnectionFlow(peer);
 
       if (break_poll_id_ != UINT32_MAX) {
-        us->CancelPoll(break_poll_id_);
+        socket_->CancelPoll(break_poll_id_);
       }
 
       cc_.reset();
@@ -364,22 +358,19 @@ void Connection::RegisterBreakHook(BreakerCb breaker_cb) {
 }
 
 std::string Connection::LocalBindAddress() const {
-  LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
-  auto le = lsb->LocalEndpoint();
+  auto le = socket_->LocalEndpoint();
   return le.address().to_string();
 }
 
 string Connection::GetClientInfo(unsigned thread_id) const {
-  LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
-
   string res;
-  auto le = lsb->LocalEndpoint();
-  auto re = lsb->RemoteEndpoint();
+  auto le = socket_->LocalEndpoint();
+  auto re = socket_->RemoteEndpoint();
   time_t now = time(nullptr);
 
   int cpu = 0;
   socklen_t len = sizeof(cpu);
-  getsockopt(lsb->native_handle(), SOL_SOCKET, SO_INCOMING_CPU, &cpu, &len);
+  getsockopt(socket_->native_handle(), SOL_SOCKET, SO_INCOMING_CPU, &cpu, &len);
   int my_cpu_id = sched_getcpu();
 
   static constexpr string_view PHASE_NAMES[] = {"readsock", "process"};
@@ -387,7 +378,7 @@ string Connection::GetClientInfo(unsigned thread_id) const {
 
   absl::StrAppend(&res, "id=", id_, " addr=", re.address().to_string(), ":", re.port());
   absl::StrAppend(&res, " laddr=", le.address().to_string(), ":", le.port());
-  absl::StrAppend(&res, " fd=", lsb->native_handle(), " name=", name_);
+  absl::StrAppend(&res, " fd=", socket_->native_handle(), " name=", name_);
   absl::StrAppend(&res, " tid=", thread_id, " irqmatch=", int(cpu == my_cpu_id));
   absl::StrAppend(&res, " age=", now - creation_time_, " idle=", now - last_interaction_);
   absl::StrAppend(&res, " phase=", PHASE_NAMES[phase_]);
@@ -407,9 +398,8 @@ uint32_t Connection::GetClientId() const {
 }
 
 bool Connection::IsAdmin() const {
-  auto* lsb = static_cast<LinuxSocketBase*>(socket_.get());
   uint16_t admin_port = absl::GetFlag(FLAGS_admin_port);
-  return lsb->LocalEndpoint().port() == admin_port;
+  return socket_->LocalEndpoint().port() == admin_port;
 }
 
 io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
@@ -904,18 +894,16 @@ void Connection::EnsureAsyncMemoryBudget() {
 }
 
 std::string Connection::RemoteEndpointStr() const {
-  LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
-  bool unix_socket = lsb->IsUDS();
+  const bool unix_socket = socket_->IsUDS();
   std::string connection_str = unix_socket ? "unix:" : std::string{};
 
-  auto re = lsb->RemoteEndpoint();
+  auto re = socket_->RemoteEndpoint();
   absl::StrAppend(&connection_str, re.address().to_string(), ":", re.port());
   return connection_str;
 }
 
 std::string Connection::RemoteEndpointAddress() const {
-  LinuxSocketBase* lsb = static_cast<LinuxSocketBase*>(socket_.get());
-  auto re = lsb->RemoteEndpoint();
+  auto re = socket_->RemoteEndpoint();
   return re.address().to_string();
 }
 

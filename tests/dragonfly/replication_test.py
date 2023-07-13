@@ -1254,3 +1254,29 @@ async def test_no_tls_on_admin_port(df_local_factory, df_seeder_factory, t_maste
     assert 100 == db_size
     await c_replica.close()
     await c_master.close()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("t_master, t_replica", replication_cases)
+async def test_tls_replication(df_local_factory, df_seeder_factory, t_master, t_replica, with_ca_tls_server_args, with_ca_tls_client_args):
+    # 1. Spin up dragonfly tls enabled, debug populate
+    master = df_local_factory.create(
+        tls_replication="true", **with_ca_tls_server_args, port=BASE_PORT, proactor_threads=t_master)
+    master.start()
+    c_master = aioredis.Redis(port=master.port, **with_ca_tls_client_args)
+    await c_master.execute_command("DEBUG POPULATE 100")
+    db_size = await c_master.execute_command("DBSIZE")
+    assert 100 == db_size
+
+    # 2. Spin up a replica and initiate a REPLICAOF
+    replica = df_local_factory.create(tls_replication="true", **with_ca_tls_server_args, port=BASE_PORT + 1, proactor_threads=t_replica)
+    replica.start()
+    c_replica = aioredis.Redis(port=replica.port, **with_ca_tls_client_args)
+    res = await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
+    assert b"OK" == res
+    await check_all_replicas_finished([c_replica], c_master)
+
+    # 3. Verify that replica dbsize == debug populate key size -- replication works
+    db_size = await c_replica.execute_command("DBSIZE")
+    assert 100 == db_size
+    await c_replica.close()
+    await c_master.close()

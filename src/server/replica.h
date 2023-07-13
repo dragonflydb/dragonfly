@@ -243,7 +243,6 @@ class Replica {
   Service& service_;
   MasterContext master_context_;
   std::unique_ptr<util::FiberSocketBase> sock_;
-  std::unique_ptr<util::FiberSocketBase> maybe_parent_;
   Mutex sock_mu_;
 
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;

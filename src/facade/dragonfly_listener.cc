@@ -275,7 +275,7 @@ void Listener::OnConnectionClose(util::Connection* conn) {
 }
 
 // We can limit number of threads handling dragonfly connections.
-ProactorBase* Listener::PickConnectionProactor(LinuxSocketBase* sock) {
+ProactorBase* Listener::PickConnectionProactor(util::FiberSocketBase* sock) {
   util::ProactorPool* pp = pool();
 
   uint32_t res_id = kuint32max;

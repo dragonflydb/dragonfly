@@ -140,47 +140,31 @@ vector<vector<unsigned>> Partition(unsigned num_flows) {
 std::string Replica::MasterContext::Description() const {
   return absl::StrCat(host, ":", port);
 }
-// To connect: openssl s_client  -cipher "ADH:@SECLEVEL=0" -state -crlf  -connect 127.0.0.1:6380
 static SSL_CTX* CreateSslCntx() {
+#ifdef DFLY_USE_SSL
+  const bool is_tls_replication_enabled = absl::GetFlag(FLAGS_tls_replication);
+  if (!is_tls_replication_enabled) {
+    return nullptr;
+  }
   SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
   const auto& tls_key_file = GetFlag(FLAGS_tls_key_file);
-  unsigned mask = SSL_VERIFY_NONE;
-  if (tls_key_file.empty()) {
-    // To connect - use openssl s_client -cipher with either:
-    // "AECDH:@SECLEVEL=0" or "ADH:@SECLEVEL=0" setting.
-    CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "aNULL"));
+  unsigned mask = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
 
-    // To allow anonymous ciphers.
-    SSL_CTX_set_security_level(ctx, 0);
+  CHECK_EQ(1, SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM));
+  const auto& tls_cert_file = GetFlag(FLAGS_tls_cert_file);
+  CHECK_EQ(true, !tls_cert_file.empty());
 
-    // you can still connect with redis-cli with :
-    // redis-cli --tls --insecure --tls-ciphers "ADH:@SECLEVEL=0"
-    LOG(WARNING) << "tls-key-file not set, no keys are loaded and anonymous ciphers are enabled. "
-                 << "Do not use in production!";
-  } else {  // tls_key_file is set.
-    CHECK_EQ(1, SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM));
-    const auto& tls_cert_file = GetFlag(FLAGS_tls_cert_file);
+  CHECK_EQ(1, SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()));
 
-    if (!tls_cert_file.empty()) {
-      // TO connect with redis-cli you need both tls-key-file and tls-cert-file
-      // loaded. Use `redis-cli --tls -p 6380 --insecure  PING` to test
-      CHECK_EQ(1, SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()));
-    }
+  const auto& tls_ca_cert_file = GetFlag(FLAGS_tls_ca_cert_file);
+  const auto& tls_ca_cert_dir = GetFlag(FLAGS_tls_ca_cert_dir);
+  CHECK_EQ(true, (!tls_ca_cert_file.empty() || !tls_ca_cert_dir.empty()));
 
-    const auto tls_ca_cert_file = GetFlag(FLAGS_tls_ca_cert_file);
-    const auto tls_ca_cert_dir = GetFlag(FLAGS_tls_ca_cert_dir);
-    if (!tls_ca_cert_file.empty() || !tls_ca_cert_dir.empty()) {
-      const auto* file = tls_ca_cert_file.empty() ? nullptr : tls_ca_cert_file.data();
-      const auto* dir = tls_ca_cert_dir.empty() ? nullptr : tls_ca_cert_dir.data();
-      CHECK_EQ(1, SSL_CTX_load_verify_locations(ctx, file, dir));
-      mask = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
-    }
-    //    } else {
-    //      CHECK_EQ(1, SSL_CTX_set_default_verify_paths(ctx));
-    //    }
+  const auto* file = tls_ca_cert_file.empty() ? nullptr : tls_ca_cert_file.data();
+  const auto* dir = tls_ca_cert_dir.empty() ? nullptr : tls_ca_cert_dir.data();
+  CHECK_EQ(1, SSL_CTX_load_verify_locations(ctx, file, dir));
 
-    CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
-  }
+  CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
   SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
 
   SSL_CTX_set_options(ctx, SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS);
@@ -188,15 +172,16 @@ static SSL_CTX* CreateSslCntx() {
   SSL_CTX_set_verify(ctx, mask, NULL);
 
   CHECK_EQ(1, SSL_CTX_set_dh_auto(ctx, 1));
-
   return ctx;
+#else
+  return nullptr;
+#endif
 }
 
 Replica::Replica(string host, uint16_t port, Service* se, std::string_view id)
     : service_(*se), id_{id} {
   master_context_.host = std::move(host);
   master_context_.port = port;
-  OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, NULL);
   ssl_ctx_ = CreateSslCntx();
 }
 
@@ -207,7 +192,6 @@ Replica::Replica(const MasterContext& context, uint32_t dfly_flow_id, Service* s
   multi_shard_exe_ = shared_exe_data;
   use_multi_shard_exe_sync_ = GetFlag(FLAGS_enable_multi_shard_sync);
   executor_.reset(new JournalExecutor(service));
-  OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, NULL);
   ssl_ctx_ = CreateSslCntx();
 }
 
@@ -227,12 +211,9 @@ Replica::~Replica() {
     LOG_IF(ERROR, ec) << "Error closing replica socket " << ec;
   }
 
-  if (maybe_parent_) {
-    auto ec = maybe_parent_->Close();
-    LOG_IF(ERROR, ec) << "Error closing replica socket " << ec;
+  if (ssl_ctx_) {
+    SSL_CTX_free(ssl_ctx_);
   }
-
-  SSL_CTX_free(ssl_ctx_);
 }
 
 static const char kConnErr[] = "could not connect to master: ";
@@ -418,16 +399,10 @@ error_code Replica::ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms)
     // run we must not create a new socket. sock_mu_ syncs between the two
     // functions.
     if (!cntx_.IsCancelled()) {
-      const bool tls_replication = absl::GetFlag(FLAGS_tls_replication);
-      if (ssl_ctx_ && tls_replication) {
-        maybe_parent_.reset(mythread->CreateSocket());
-        auto ec = maybe_parent_->Connect(master_context_.endpoint);
-        if (ec) {
-          LOG(ERROR) << "Error calling connect " << ec << "/" << ec.message();
-          maybe_parent_.reset();
-          return cntx_.GetError();
-        }
-        unique_ptr<tls::TlsSocket> tls_sock(new tls::TlsSocket(maybe_parent_.get()));
+      if (ssl_ctx_) {
+        unique_ptr<FiberSocketBase> sock;
+        sock.reset(mythread->CreateSocket());
+        unique_ptr<tls::TlsSocket> tls_sock(new tls::TlsSocket(std::move(sock)));
         tls_sock->InitSSL(ssl_ctx_);
         sock_.reset(tls_sock.release());
       } else {
