@@ -85,8 +85,7 @@ class ProtocolClient {
   // Send command, update last_io_time, return error.
   std::error_code SendCommand(std::string_view command);
   // Send command, read response into resp_args_.
-  std::error_code SendCommandAndReadResponse(std::string_view command,
-                                             base::IoBuf* buffer = nullptr);
+  std::error_code SendCommandAndReadResponse(std::string_view command);
 
   const ServerContext& server() const {
     return server_context_;

@@ -628,7 +628,11 @@ error_code DflyShardReplica::StartFullSyncFlow(BlockingCounter sb, Context* cntx
 
   ResetParser(/*server_mode=*/false);
   leftover_buf_.emplace(128);
-  RETURN_ON_ERR(SendCommandAndReadResponse(cmd, &*leftover_buf_));
+  RETURN_ON_ERR(SendCommand(cmd));
+  auto read_resp = ReadRespReply(&*leftover_buf_);
+  if (!read_resp.has_value()) {
+    return read_resp.error();
+  }
 
   PC_RETURN_ON_BAD_RESPONSE(CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING}));
 
@@ -636,6 +640,8 @@ error_code DflyShardReplica::StartFullSyncFlow(BlockingCounter sb, Context* cntx
   string eof_token;
   PC_RETURN_ON_BAD_RESPONSE(flow_directive == "FULL");
   eof_token = ToSV(LastResponseArgs()[1].GetBuf());
+
+  leftover_buf_->ConsumeInput(read_resp->left_in_buffer);
 
   // We can not discard io_buf because it may contain data
   // besides the response we parsed. Therefore we pass it further to ReplicateDFFb.

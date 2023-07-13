@@ -148,7 +148,6 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
   {
     uint32_t timeout = sock_->timeout();
     sock_->set_timeout(connect_timeout_ms.count());
-    LOG(WARNING) << server_context_.Description();
     RETURN_ON_ERR(sock_->Connect(server_context_.endpoint));
     sock_->set_timeout(timeout);
   }
@@ -228,11 +227,6 @@ io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(base::IoBu
       last_resp_ +=
           std::string_view(reinterpret_cast<char*>(buffer->InputBuffer().data()), consumed);
 
-    VLOG(2) << "Read "
-            << absl::CHexEscape(
-                   std::string_view(reinterpret_cast<char*>(buffer->InputBuffer().data()),
-                                    std::min(buffer->InputBuffer().size(), 100ul)));
-
     if (result == RedisParser::OK) {
       return ReadRespRes{processed_bytes, consumed};  // success path
     }
@@ -309,11 +303,11 @@ error_code ProtocolClient::SendCommand(string_view command) {
   return ec;
 }
 
-error_code ProtocolClient::SendCommandAndReadResponse(string_view command, base::IoBuf* buffer) {
+error_code ProtocolClient::SendCommandAndReadResponse(string_view command) {
   last_cmd_ = command;
   if (auto ec = SendCommand(command); ec)
     return ec;
-  auto response_res = ReadRespReply(buffer);
+  auto response_res = ReadRespReply();
   return response_res.has_value() ? error_code{} : response_res.error();
 }
 
