@@ -60,11 +60,19 @@ class ProtocolClient {
 
   void DefaultErrorHandler(const GenericError& err);
 
+  struct ReadRespRes {
+    uint32_t total_read;
+    uint32_t left_in_buffer;
+  };
+
   // This function uses parser_ and cmd_args_ in order to consume a single response
   // from the sock_. The output will reside in resp_args_.
   // For error reporting purposes, the parsed command would be in last_resp_ if copy_msg is true.
-  // If io_buf is not given, a temporary buffer will be used.
-  io::Result<size_t> ReadRespReply(base::IoBuf* buffer = nullptr, bool copy_msg = true);
+  // If io_buf is not given, a internal temporary buffer will be used.
+  // It is the responsibility of the caller to call buffer->ConsumeInput(rv.left_in_buffer) when it
+  // is done with the result of the call; Calling ConsumeInput may invalidate the data in the result
+  // if the buffer relocates.
+  io::Result<ReadRespRes> ReadRespReply(base::IoBuf* buffer = nullptr, bool copy_msg = true);
 
   std::error_code ReadLine(base::IoBuf* io_buf, std::string_view* line);
 
@@ -119,3 +127,14 @@ class ProtocolClient {
 };
 
 }  // namespace dfly
+
+/**
+ * A convenience macro to use with ProtocolClient instances for protocol input validation.
+ */
+#define PC_RETURN_ON_BAD_RESPONSE(x)                                                            \
+  do {                                                                                          \
+    if (!(x)) {                                                                                 \
+      LOG(ERROR) << "Bad response to \"" << last_cmd_ << "\": \"" << absl::CEscape(last_resp_); \
+      return std::make_error_code(errc::bad_message);                                           \
+    }                                                                                           \
+  } while (false)

@@ -39,14 +39,6 @@ ABSL_FLAG(int, master_reconnect_timeout_ms, 1000,
           "Timeout for re-establishing connection to a replication master");
 ABSL_DECLARE_FLAG(uint32_t, port);
 
-#define RETURN_ON_BAD_RESPONSE(x)                                                               \
-  do {                                                                                          \
-    if (!(x)) {                                                                                 \
-      LOG(ERROR) << "Bad response to \"" << last_cmd_ << "\": \"" << absl::CEscape(last_resp_); \
-      return std::make_error_code(errc::bad_message);                                           \
-    }                                                                                           \
-  } while (false)
-
 namespace dfly {
 
 using namespace std;
@@ -244,30 +236,30 @@ error_code Replica::Greet() {
   VLOG(1) << "greeting message handling";
   // Corresponds to server.repl_state == REPL_STATE_CONNECTING state in redis
   RETURN_ON_ERR(SendCommandAndReadResponse("PING"));  // optional.
-  RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("PONG"));
+  PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("PONG"));
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_HANDSHAKE condition in replication.c
   auto port = absl::GetFlag(FLAGS_port);
   RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("REPLCONF listening-port ", port)));
-  RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
+  PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_CAPA
   RETURN_ON_ERR(SendCommandAndReadResponse("REPLCONF capa eof capa psync2"));
-  RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
+  PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
 
   // Announce that we are the dragonfly client.
   // Note that we currently do not support dragonfly->redis replication.
   RETURN_ON_ERR(SendCommandAndReadResponse("REPLCONF capa dragonfly"));
-  RETURN_ON_BAD_RESPONSE(CheckRespFirstTypes({RespExpr::STRING}));
+  PC_RETURN_ON_BAD_RESPONSE(CheckRespFirstTypes({RespExpr::STRING}));
 
   if (LastResponseArgs().size() == 1) {  // Redis
-    RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
+    PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
   } else if (LastResponseArgs().size() >= 3) {  // it's dragonfly master.
-    RETURN_ON_BAD_RESPONSE(!HandleCapaDflyResp());
+    PC_RETURN_ON_BAD_RESPONSE(!HandleCapaDflyResp());
     if (auto ec = ConfigureDflyMaster(); ec)
       return ec;
   } else {
-    RETURN_ON_BAD_RESPONSE(false);
+    PC_RETURN_ON_BAD_RESPONSE(false);
   }
 
   state_mask_.fetch_or(R_GREETED);
@@ -294,7 +286,7 @@ std::error_code Replica::HandleCapaDflyResp() {
   num_df_flows_ = param_num_flows;
 
   if (LastResponseArgs().size() >= 4) {
-    RETURN_ON_BAD_RESPONSE(LastResponseArgs()[3].type == RespExpr::INT64);
+    PC_RETURN_ON_BAD_RESPONSE(LastResponseArgs()[3].type == RespExpr::INT64);
     master_context_.version = DflyVersion(get<int64_t>(LastResponseArgs()[3].u));
   }
   VLOG(1) << "Master id: " << master_context_.master_repl_id
@@ -317,7 +309,7 @@ std::error_code Replica::ConfigureDflyMaster() {
   if (master_context_.version > DflyVersion::VER0) {
     RETURN_ON_ERR(
         SendCommandAndReadResponse(StrCat("REPLCONF CLIENT-VERSION ", DflyVersion::CURRENT_VER)));
-    RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
+    PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
   }
 
   return error_code{};
@@ -511,38 +503,43 @@ error_code Replica::ConsumeRedisStream() {
 
   VLOG(1) << "Before reading repl-log";
 
-  // Redis sends eiher pings every "repl_ping_slave_period" time inside replicationCron().
+  // Redis sends either pings every "repl_ping_slave_period" time inside replicationCron().
   // or, alternatively, write commands stream coming from propagate() function.
   // Replica connection must send "REPLCONF ACK xxx" in order to make sure that master replication
-  // buffer gets disposed of already processed commands.
+  // buffer gets disposed of already processed commands, this is done in a separate fiber.
   error_code ec;
-  string ack_cmd;
-
   LOG(INFO) << "Transitioned into stable sync";
-
   facade::CmdArgVec args_vector;
 
-  while (!ec) {
-    auto response = ReadRespReply(&io_buf);
+  acks_fb_ = MakeFiber(&Replica::RedisStreamAcksFb, this);
+
+  while (true) {
+    auto response = ReadRespReply(&io_buf, /*copy_msg=*/false);
     if (!response.has_value()) {
-      ec = response.error();
-      break;
+      VLOG(1) << "ConsumeRedisStream finished";
+      acks_fb_.JoinIfNeeded();
+      return response.error();
     }
 
     if (!LastResponseArgs().empty()) {
-      VLOG(2) << "Got command " << ToSV(LastResponseArgs()[0].GetBuf())
-              << "\n consumed: " << *response;
+      VLOG(2) << "Got command " << absl::CHexEscape(ToSV(LastResponseArgs()[0].GetBuf()))
+              << "\n consumed: " << response->total_read;
+
+      if (LastResponseArgs()[0].GetBuf()[0] == '\r') {
+        for (const auto& arg : LastResponseArgs()) {
+          LOG(INFO) << absl::CHexEscape(ToSV(arg.GetBuf()));
+        }
+      }
 
       facade::RespToArgList(LastResponseArgs(), &args_vector);
       CmdArgList arg_list{args_vector.data(), args_vector.size()};
       service_.DispatchCommand(arg_list, &conn_context);
     }
-    repl_offs_ += *response;
+
+    io_buf.ConsumeInput(response->left_in_buffer);
+    repl_offs_ += response->total_read;
     waker_.notify();  // Notify to trigger ACKs.
   }
-
-  VLOG(1) << "ConsumeRedisStream finished";
-  return ec;
 }
 
 error_code Replica::ConsumeDflyStream() {
@@ -613,7 +610,7 @@ error_code Replica::SendNextPhaseRequest(string_view kind) {
   VLOG(1) << "Sending: " << request;
   RETURN_ON_ERR(SendCommandAndReadResponse(request));
 
-  RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
+  PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
 
   return std::error_code{};
 }
@@ -633,11 +630,11 @@ error_code DflyShardReplica::StartFullSyncFlow(BlockingCounter sb, Context* cntx
   leftover_buf_.emplace(128);
   RETURN_ON_ERR(SendCommandAndReadResponse(cmd, &*leftover_buf_));
 
-  RETURN_ON_BAD_RESPONSE(CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING}));
+  PC_RETURN_ON_BAD_RESPONSE(CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING}));
 
   string_view flow_directive = ToSV(LastResponseArgs()[0].GetBuf());
   string eof_token;
-  RETURN_ON_BAD_RESPONSE(flow_directive == "FULL");
+  PC_RETURN_ON_BAD_RESPONSE(flow_directive == "FULL");
   eof_token = ToSV(LastResponseArgs()[1].GetBuf());
 
   // We can not discard io_buf because it may contain data

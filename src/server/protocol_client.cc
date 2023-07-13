@@ -28,14 +28,6 @@ extern "C" {
 
 ABSL_FLAG(std::string, masterauth, "", "password for authentication with master");
 
-#define RETURN_ON_BAD_RESPONSE(x)                                                               \
-  do {                                                                                          \
-    if (!(x)) {                                                                                 \
-      LOG(ERROR) << "Bad response to \"" << last_cmd_ << "\": \"" << absl::CEscape(last_resp_); \
-      return std::make_error_code(errc::bad_message);                                           \
-    }                                                                                           \
-  } while (false)
-
 namespace dfly {
 
 using namespace std;
@@ -179,7 +171,7 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
   if (!masterauth.empty()) {
     ResetParser(false);
     RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("AUTH ", masterauth)));
-    RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
+    PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
   }
   return error_code{};
 }
@@ -200,7 +192,8 @@ void ProtocolClient::DefaultErrorHandler(const GenericError& err) {
   CloseSocket();
 }
 
-io::Result<size_t> ProtocolClient::ReadRespReply(base::IoBuf* buffer, bool copy_msg) {
+io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(base::IoBuf* buffer,
+                                                                      bool copy_msg) {
   DCHECK(parser_);
 
   error_code ec;
@@ -210,7 +203,7 @@ io::Result<size_t> ProtocolClient::ReadRespReply(base::IoBuf* buffer, bool copy_
   }
   last_resp_ = "";
 
-  size_t processed_bytes = 0;
+  uint32_t processed_bytes = 0;
 
   RedisParser::Result result = RedisParser::OK;
   while (!ec) {
@@ -230,14 +223,21 @@ io::Result<size_t> ProtocolClient::ReadRespReply(base::IoBuf* buffer, bool copy_
     }
 
     result = parser_->Parse(buffer->InputBuffer(), &consumed, &resp_args_);
-    if (copy_msg)
-      last_resp_ += std::string_view((char*)buffer->InputBuffer().data(), consumed);
-    buffer->ConsumeInput(consumed);
     processed_bytes += consumed;
+    if (copy_msg)
+      last_resp_ +=
+          std::string_view(reinterpret_cast<char*>(buffer->InputBuffer().data()), consumed);
 
-    if (result == RedisParser::OK && !resp_args_.empty()) {
-      return processed_bytes;  // success path
+    VLOG(2) << "Read "
+            << absl::CHexEscape(
+                   std::string_view(reinterpret_cast<char*>(buffer->InputBuffer().data()),
+                                    std::min(buffer->InputBuffer().size(), 100ul)));
+
+    if (result == RedisParser::OK) {
+      return ReadRespRes{processed_bytes, consumed};  // success path
     }
+
+    buffer->ConsumeInput(consumed);
 
     if (result != RedisParser::INPUT_PENDING) {
       LOG(ERROR) << "Invalid parser status " << result << " for response " << last_resp_;
