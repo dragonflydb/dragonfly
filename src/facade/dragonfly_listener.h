@@ -6,6 +6,11 @@
 
 #include <absl/base/internal/spinlock.h>
 
+#include <memory>
+#include <system_error>
+#include <utility>
+#include <vector>
+
 #include "facade/facade_types.h"
 #include "util/fibers/proactor_base.h"
 #include "util/http/http_handler.h"

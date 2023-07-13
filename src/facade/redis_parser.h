@@ -5,6 +5,10 @@
 
 #include <absl/container/inlined_vector.h>
 
+#include <memory>
+#include <utility>
+#include <vector>
+
 #include "facade/resp_expr.h"
 
 namespace facade {

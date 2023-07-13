@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <string>
+
 #include "facade/facade_types.h"
 #include "facade/memcache_parser.h"
 #include "util/fiber_socket_base.h"

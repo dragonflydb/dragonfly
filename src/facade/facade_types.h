@@ -8,6 +8,7 @@
 #include <absl/types/span.h>
 
 #include <string>
+#include <string_view>
 
 namespace facade {
 
