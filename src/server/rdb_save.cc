@@ -7,25 +7,49 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
+#include <bits/types/struct_iovec.h>
 #include <lz4frame.h>
+#include <mimalloc.h>
+#include <string.h>
+#include <time.h>
 #include <zstd.h>
 
-#include <jsoncons/json.hpp>
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <initializer_list>
+#include <jsoncons/basic_json.hpp>
+#include <ostream>
 #include <queue>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 extern "C" {
+#include "absl/container/flat_hash_map.h"
+#include "absl/flags/flag.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
+#include "base/expected.hpp"
+#include "core/external_alloc.h"
+#include "glog/logging.h"
+#include "redis/dict.h"
 #include "redis/intset.h"
 #include "redis/listpack.h"
+#include "redis/object.h"
+#include "redis/quicklist.h"
+#include "redis/rax.h"
 #include "redis/rdb.h"
+#include "redis/sds.h"
 #include "redis/stream.h"
 #include "redis/util.h"
 #include "redis/ziplist.h"
 #include "redis/zmalloc.h"
 #include "redis/zset.h"
+#include "server/journal/serializer.h"
 }
 
-#include "base/flags.h"
-#include "base/logging.h"
 #include "core/json_object.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
@@ -34,7 +58,12 @@ extern "C" {
 #include "server/rdb_extensions.h"
 #include "server/serializer_commons.h"
 #include "server/snapshot.h"
-#include "util/fibers/simple_channel.h"
+
+namespace dfly {
+namespace journal {
+struct Entry;
+}  // namespace journal
+}  // namespace dfly
 
 ABSL_FLAG(int, compression_mode, 3,
           "set 0 for no compression,"

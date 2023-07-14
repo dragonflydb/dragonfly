@@ -26,12 +26,11 @@
 */
 
 
-#include <assert.h>
 #include <ctype.h>
 #include <limits.h>
 #include <stddef.h>
 #include <string.h>
-
+#include <luaconf.h>
 
 #include "lua.h"
 #include "lauxlib.h"

@@ -4,14 +4,47 @@
 
 #include "server/hset_family.h"
 
+#include <bits/utility.h>
+#include <limits.h>
+#include <stddef.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <ext/alloc_traits.h>
+#include <memory>
+#include <new>
+#include <optional>
+#include <ostream>
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+#include <variant>
+#include <vector>
+
 extern "C" {
+#include "absl/container/flat_hash_map.h"
+#include "absl/meta/type_traits.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/str_cat.h"
+#include "absl/types/span.h"
+#include "core/compact_object.h"
+#include "core/dash.h"
+#include "core/dash_internal.h"
+#include "facade/conn_context.h"
+#include "facade/reply_builder.h"
+#include "glog/logging.h"
 #include "redis/listpack.h"
 #include "redis/object.h"
 #include "redis/redis_aux.h"
+#include "redis/sds.h"
 #include "redis/util.h"
+#include "server/db_slice.h"
+#include "server/table.h"
 }
 
-#include "base/logging.h"
 #include "core/string_map.h"
 #include "facade/error.h"
 #include "server/command_registry.h"

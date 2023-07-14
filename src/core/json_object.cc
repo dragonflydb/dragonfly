@@ -3,13 +3,27 @@
 //
 
 #include "core/json_object.h"
-extern "C" {
-#include "redis/object.h"
-#include "redis/zmalloc.h"
-}
-#include <jsoncons/json.hpp>
 
-#include "base/logging.h"
+#include <algorithm>
+#include <functional>
+#include <jsoncons/basic_json.hpp>
+#include <jsoncons/json_array.hpp>
+#include <jsoncons/json_decoder.hpp>
+#include <jsoncons/json_error.hpp>
+#include <jsoncons/json_object.hpp>
+#include <jsoncons/json_options.hpp>
+#include <jsoncons/json_parser.hpp>
+#include <ostream>
+#include <string>
+#include <system_error>
+
+#include "glog/logging.h"
+
+namespace jsoncons {
+class ser_context;
+}  // namespace jsoncons
+
+extern "C" {}
 
 namespace dfly {
 

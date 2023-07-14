@@ -6,22 +6,38 @@
 
 #include <absl/container/fixed_array.h>
 #include <mimalloc.h>
+#include <stdint.h>
 #include <sys/socket.h>
+#include <time.h>
 
+#include <atomic>
 #include <deque>
+#include <functional>
 #include <memory>
+#include <string>
 #include <string_view>
-#include <utility>
+#include <system_error>
 #include <variant>
+#include <vector>
 
 #include "base/io_buf.h"
 #include "util/connection.h"
 #include "util/http/http_handler.h"
-
 //
+#include "absl/container/inlined_vector.h"
 #include "core/fibers.h"
 #include "facade/facade_types.h"
 #include "facade/resp_expr.h"
+#include "io/io.h"
+#include "util/fibers/synchronization.h"
+
+namespace util {
+class FiberSocketBase;
+class HttpListenerBase;
+namespace fb2 {
+class ProactorBase;
+}  // namespace fb2
+}  // namespace util
 
 typedef struct ssl_ctx_st SSL_CTX;
 typedef struct mi_heap_s mi_heap_t;

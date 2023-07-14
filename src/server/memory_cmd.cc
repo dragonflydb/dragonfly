@@ -7,9 +7,25 @@
 #include <absl/strings/str_cat.h>
 #include <mimalloc.h>
 
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <utility>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/hash/hash.h"
+#include "absl/strings/numbers.h"
+#include "absl/time/clock.h"
+#include "absl/types/span.h"
+#include "facade/conn_context.h"
 #include "facade/error.h"
+#include "facade/reply_builder.h"
+#include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/server_state.h"
+#include "util/proactor_pool.h"
 
 using namespace std;
 using namespace facade;

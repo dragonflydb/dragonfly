@@ -4,21 +4,46 @@
 #pragma once
 
 #include <absl/container/inlined_vector.h>
+#include <bits/chrono.h>
+#include <stdint.h>
+#include <time.h>
 
+#include <atomic>
+#include <boost/asio/ip/tcp.hpp>
 #include <boost/fiber/barrier.hpp>
+#include <initializer_list>
+#include <memory>
+#include <optional>
 #include <queue>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <unordered_map>
+#include <utility>
 #include <variant>
+#include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/hash/hash.h"
 #include "base/io_buf.h"
+#include "core/fibers.h"
 #include "facade/facade_types.h"
 #include "facade/redis_parser.h"
+#include "facade/resp_expr.h"
 #include "server/common.h"
 #include "server/journal/types.h"
 #include "server/version.h"
 #include "util/fiber_socket_base.h"
+#include "util/fibers/fiber2.h"
+#include "util/fibers/synchronization.h"
+
+namespace util {
+class LinuxSocketBase;
+}  // namespace util
 
 namespace facade {
 class ReqSerializer;
+class RedisParser;
 };  // namespace facade
 
 namespace dfly {

@@ -2,9 +2,8 @@
 // See LICENSE for licensing terms.
 //
 
-// clang-format off
-#include <mimalloc.h>
 #include <mimalloc-types.h>
+#include <stdint.h>
 
 // clang-format on
 

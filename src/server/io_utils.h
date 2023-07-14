@@ -2,12 +2,21 @@
 // See LICENSE for licensing terms.
 //
 
+#include <stddef.h>
+#include <stdint.h>
+
+#include <system_error>
+
 #include "base/io_buf.h"
 #include "core/fibers.h"
 #include "io/io.h"
 #include "server/common.h"
+#include "util/fibers/synchronization.h"
+
+struct iovec;
 
 namespace dfly {
+struct Cancellation;
 
 // Base for constructing buffered byte streams with backpressure
 // for single producer and consumer on the same thread.

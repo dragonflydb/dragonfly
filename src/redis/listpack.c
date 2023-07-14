@@ -35,7 +35,6 @@
 
 #include <stdint.h>
 #include <limits.h>
-#include <sys/types.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -1538,6 +1537,7 @@ void lpRepr(unsigned char *lp) {
 #ifdef REDIS_TEST
 
 #include <sys/time.h>
+
 #include "adlist.h"
 #include "sds.h"
 #include "testhelp.h"

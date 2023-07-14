@@ -4,8 +4,12 @@
 #include "core/segment_allocator.h"
 
 #include <mimalloc-types.h>
+#include <stdint.h>
 
-#include "base/logging.h"
+#include <ostream>
+
+#include "absl/hash/hash.h"
+#include "glog/logging.h"
 
 constexpr size_t kSegmentSize = MI_SEGMENT_SIZE;
 

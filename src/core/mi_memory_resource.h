@@ -6,11 +6,15 @@
 
 #include <mimalloc.h>
 
+#include <cstddef>
+
 #ifdef __clang__
 #include <experimental/memory_resource>
+
 namespace PMR_NS = std::experimental::pmr;
 #else
 #include <memory_resource>
+
 namespace PMR_NS = std::pmr;
 #endif
 

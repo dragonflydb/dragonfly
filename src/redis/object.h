@@ -2,10 +2,14 @@
 #define __REDIS_OBJECT_H
 
 #include <stddef.h>
+#include <limits.h>
+#include <stdint.h>
+#include <time.h>
 
 #include "dict.h"
 #include "sds.h"
 #include "quicklist.h"
+#include "redis/util.h"
 
 /* The actual Redis Object */
 #define OBJ_STRING 0U    /* String object. */

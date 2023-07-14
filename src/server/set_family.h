@@ -4,9 +4,15 @@
 
 #pragma once
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include "facade/op_status.h"
 #include "server/common.h"
 
+namespace facade {
+template <typename V> class OpResult;
+}  // namespace facade
 
 typedef struct intset intset;
 typedef struct redisObject robj;

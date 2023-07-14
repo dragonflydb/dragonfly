@@ -24,6 +24,7 @@
 
 #include <stdlib.h>
 #include <stdarg.h>
+#include <string.h>
 
 /* Size: Total bytes allocated to *buf
  * Length: String length, excluding optional NULL terminator.

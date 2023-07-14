@@ -4,14 +4,26 @@
 
 #pragma once
 
+#include <stdint.h>
+
+#include <cstddef>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/meta/type_traits.h"
 #include "base/histogram.h"
 #include "core/interpreter.h"
+#include "facade/facade_types.h"
 #include "server/common.h"
 #include "server/script_mgr.h"
 #include "util/sliding_counter.h"
+
+namespace dfly {
+class ChannelStore;
+}  // namespace dfly
 
 typedef struct mi_heap_s mi_heap_t;
 

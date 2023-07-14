@@ -4,7 +4,15 @@
 
 #include "core/simple_lru_counter.h"
 
-#include "base/logging.h"
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <utility>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/meta/type_traits.h"
+#include "glog/logging.h"
 
 namespace dfly {
 

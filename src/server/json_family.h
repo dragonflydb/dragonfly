@@ -4,13 +4,20 @@
 
 #pragma once
 
+#include "facade/facade_types.h"
+#include "facade/op_status.h"
 #include "server/common.h"
 #include "server/engine_shard_set.h"
+
+namespace facade {
+class RedisReplyBuilder;
+}  // namespace facade
 
 namespace dfly {
 
 class ConnectionContext;
 class CommandRegistry;
+
 using facade::OpResult;
 using facade::OpStatus;
 using facade::RedisReplyBuilder;

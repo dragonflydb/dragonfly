@@ -7,6 +7,11 @@
 #include <absl/strings/ascii.h>
 #include <absl/strings/numbers.h>
 
+#include <algorithm>
+#include <fstream>
+
+#include "absl/base/macros.h"
+#include "absl/meta/type_traits.h"
 #include "base/stl_util.h"
 
 namespace facade {

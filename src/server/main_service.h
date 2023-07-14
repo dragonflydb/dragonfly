@@ -4,22 +4,49 @@
 
 #pragma once
 
+#include <stdint.h>
+
+#include <optional>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <vector>
+
+#include "absl/container/flat_hash_map.h"
 #include "base/varz_value.h"
+#include "core/fibers.h"
 #include "core/interpreter.h"
+#include "facade/conn_context.h"
+#include "facade/facade_types.h"
+#include "facade/memcache_parser.h"
+#include "facade/reply_capture.h"
 #include "facade/service_interface.h"
 #include "server/cluster/cluster_family.h"
 #include "server/command_registry.h"
+#include "server/common.h"
 #include "server/engine_shard_set.h"
 #include "server/server_family.h"
+#include "util/fibers/synchronization.h"
+
+namespace facade {
+class Connection;
+class Listener;
+}  // namespace facade
 
 namespace util {
 class AcceptServer;
+class FiberSocketBase;
+class HttpListenerBase;
+class ProactorPool;
 }  // namespace util
 
 namespace dfly {
 
 class Interpreter;
 class ObjectExplorer;  // for Interpreter
+class ConnectionContext;
+class ScriptMgr;
+
 using facade::MemcacheParser;
 
 class Service : public facade::ServiceInterface {

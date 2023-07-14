@@ -4,7 +4,11 @@
 
 #include "core/extent_tree.h"
 
-#include "base/logging.h"
+#include <cstddef>
+
+#include "absl/container/btree_map.h"
+#include "absl/container/btree_set.h"
+#include "glog/logging.h"
 
 namespace dfly {
 

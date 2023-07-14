@@ -4,11 +4,16 @@
 
 #pragma once
 
+#include <stddef.h>
+
 #include <cstdint>
+#include <experimental/memory_resource>
 #include <functional>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "core/dense_set.h"
 

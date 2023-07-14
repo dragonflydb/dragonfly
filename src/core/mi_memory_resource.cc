@@ -3,7 +3,10 @@
 //
 #include "core/mi_memory_resource.h"
 
-#include "base/logging.h"
+#include <new>
+#include <ostream>
+
+#include "glog/logging.h"
 
 namespace dfly {
 
@@ -14,7 +17,6 @@ void* MiMemoryResource::do_allocate(std::size_t size, std::size_t align) {
 
   if (!res)
     throw std::bad_alloc{};
-
 
   // It seems that mimalloc has a bug with larger allocations that causes
   // mi_heap_contains_block to lie. See https://github.com/microsoft/mimalloc/issues/587

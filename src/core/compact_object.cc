@@ -7,10 +7,19 @@
 // #define XXH_INLINE_ALL
 #include <xxhash.h>
 
+#include <jsoncons/basic_json.hpp>
+
 extern "C" {
+#include "absl/flags/flag.h"
+#include "absl/strings/string_view.h"
+#include "base/pmr/pod_array.h"
+#include "glog/logging.h"
+#include "redis/dict.h"
 #include "redis/intset.h"
 #include "redis/listpack.h"
 #include "redis/object.h"
+#include "redis/quicklist.h"
+#include "redis/sds.h"
 #include "redis/stream.h"
 #include "redis/util.h"
 #include "redis/zmalloc.h"  // for non-string objects.
@@ -18,11 +27,10 @@ extern "C" {
 }
 #include <absl/strings/str_cat.h>
 
-#include <jsoncons/json.hpp>
+#include <cstdint>
+#include <new>
+#include <ostream>
 
-#include "base/flags.h"
-#include "base/logging.h"
-#include "base/pod_array.h"
 #include "core/detail/bitpacking.h"
 #include "core/string_map.h"
 #include "core/string_set.h"

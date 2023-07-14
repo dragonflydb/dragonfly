@@ -5,12 +5,14 @@
 #include "core/small_string.h"
 
 #include <mimalloc.h>
+#include <string.h>
 #include <xxhash.h>
 
 #include <memory>
+#include <ostream>
 
-#include "base/logging.h"
 #include "core/segment_allocator.h"
+#include "glog/logging.h"
 
 extern "C" bool mi_heap_page_is_underutilized(mi_heap_t* heap, void* p, float ratio);
 

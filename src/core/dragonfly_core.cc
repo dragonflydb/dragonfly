@@ -2,10 +2,11 @@
 // See LICENSE for licensing terms.
 //
 
-#include <absl/base/macros.h>
+#include <stdint.h>
 
-#include "base/logging.h"
+#include "absl/base/optimization.h"
 #include "core/intent_lock.h"
+#include "glog/logging.h"
 
 namespace dfly {
 

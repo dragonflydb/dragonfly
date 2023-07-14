@@ -6,17 +6,18 @@
 
 #include <absl/numeric/bits.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <stack>
+#include <iterator>
+#include <memory>
+#include <ostream>
 #include <type_traits>
 #include <vector>
 
 #include "glog/logging.h"
 
-extern "C" {
-#include "redis/zmalloc.h"
-}
+extern "C" {}
 
 namespace dfly {
 using namespace std;

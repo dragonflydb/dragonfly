@@ -4,11 +4,23 @@
 
 #pragma once
 
+#include <stdint.h>
+
+#include "core/fibers.h"
+#include "server/common.h"
 #include "server/io_utils.h"
 #include "server/journal/journal.h"
 #include "server/journal/serializer.h"
+#include "util/fibers/fiber2.h"
+
+namespace io {
+class Sink;
+}  // namespace io
 
 namespace dfly {
+namespace journal {
+class Journal;
+}  // namespace journal
 
 // Buffered single-shard journal streamer that listens for journal changes with a
 // journal listener and writes them to a destination sink in a separate fiber.

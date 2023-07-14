@@ -8,22 +8,37 @@
 #include <absl/container/flat_hash_set.h>
 #include <absl/container/inlined_vector.h>
 #include <absl/functional/function_ref.h>
+#include <bits/chrono.h>
+#include <stddef.h>
 
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 #include <vector>
 
+#include "absl/types/span.h"
+#include "core/fibers.h"
 #include "core/intent_lock.h"
 #include "core/tx_queue.h"
+#include "facade/facade_types.h"
 #include "facade/op_status.h"
 #include "server/common.h"
 #include "server/journal/types.h"
 #include "server/table.h"
+#include "util/fibers/synchronization.h"
 
 namespace dfly {
 
 class EngineShard;
 class BlockingController;
+class CommandId;
 
 using facade::OpResult;
 using facade::OpStatus;

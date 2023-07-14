@@ -4,26 +4,62 @@
 
 #include "server/json_family.h"
 
-extern "C" {
-#include "redis/object.h"
-}
+extern "C" {}
 
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
+#include <stdint.h>
 
-#include <jsoncons/json.hpp>
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstdlib>
+#include <exception>
+#include <ext/alloc_traits.h>
+#include <functional>
+#include <initializer_list>
+#include <iterator>
+#include <jsoncons/basic_json.hpp>
+#include <jsoncons/json_array.hpp>
+#include <jsoncons/json_object.hpp>
+#include <jsoncons/json_type.hpp>
+#include <jsoncons/tag_type.hpp>
 #include <jsoncons_ext/jsonpatch/jsonpatch.hpp>
-#include <jsoncons_ext/jsonpath/jsonpath.hpp>
+#include <jsoncons_ext/jsonpath/expression.hpp>
+#include <jsoncons_ext/jsonpath/json_location.hpp>
+#include <jsoncons_ext/jsonpath/jsonpath_expression.hpp>
+#include <jsoncons_ext/jsonpath/jsonpath_selector.hpp>
 #include <jsoncons_ext/jsonpointer/jsonpointer.hpp>
+#include <map>
+#include <memory>
+#include <optional>
+#include <regex>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
-#include "base/logging.h"
+#include "absl/strings/numbers.h"
+#include "absl/types/span.h"
+#include "core/compact_object.h"
+#include "core/dash.h"
+#include "core/dash_internal.h"
 #include "core/json_object.h"
+#include "facade/conn_context.h"
+#include "facade/error.h"
+#include "facade/reply_builder.h"
+#include "glog/logging.h"
 #include "server/command_registry.h"
+#include "server/conn_context.h"
+#include "server/db_slice.h"
+#include "server/engine_shard_set.h"
 #include "server/error.h"
-#include "server/journal/journal.h"
 #include "server/search/doc_index.h"
-#include "server/tiered_storage.h"
+#include "server/table.h"
 #include "server/transaction.h"
 
 namespace dfly {

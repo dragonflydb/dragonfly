@@ -4,9 +4,24 @@
 
 #include "server/search/doc_index.h"
 
-#include <memory>
+#include <string.h>
 
-#include "base/logging.h"
+#include <algorithm>
+#include <ext/alloc_traits.h>
+#include <memory>
+#include <ostream>
+#include <utility>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/meta/type_traits.h"
+#include "core/compact_object.h"
+#include "core/dash.h"
+#include "core/dash_internal.h"
+#include "core/json_object.h"
+#include "facade/op_status.h"
+#include "glog/logging.h"
+#include "server/common.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/search/doc_accessors.h"
 

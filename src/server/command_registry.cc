@@ -5,13 +5,19 @@
 #include "server/command_registry.h"
 
 #include <absl/strings/str_split.h>
+#include <stdlib.h>
 
+#include <algorithm>
+#include <ostream>
+#include <vector>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/flags/flag.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/str_cat.h"
-#include "base/bits.h"
-#include "base/flags.h"
-#include "base/logging.h"
-#include "facade/error.h"
-#include "server/conn_context.h"
+#include "absl/strings/string_view.h"
+#include "facade/facade_types.h"
+#include "glog/logging.h"
 
 using namespace std;
 ABSL_FLAG(vector<string>, rename_command, {},

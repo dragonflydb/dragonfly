@@ -4,12 +4,25 @@
 
 #pragma once
 
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <vector>
+
+#include "absl/container/flat_hash_set.h"
+#include "absl/types/span.h"
 #include "base/logging.h"
 #include "core/fibers.h"
+#include "facade/facade_types.h"
+#include "facade/op_status.h"
 #include "facade/reply_capture.h"
+#include "server/common.h"
 #include "server/conn_context.h"
+#include "server/transaction.h"
 
 namespace dfly {
+class CommandId;
+class ConnectionContext;
+class EngineShard;
+class StoredCmd;
 
 // MultiCommandSquasher allows executing a series of commands under a multi transaction
 // and squashing multiple consecutive single-shard commands into one hop whenever it's possible,

@@ -4,6 +4,17 @@
 
 #include "server/journal/streamer.h"
 
+#include <boost/context/detail/exception.hpp>
+#include <system_error>
+
+#include "server/journal/journal.h"
+#include "server/journal/types.h"
+#include "util/fibers/detail/wait_queue.h"
+
+namespace io {
+class Sink;
+}  // namespace io
+
 namespace dfly {
 using namespace util;
 

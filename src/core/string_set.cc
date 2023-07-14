@@ -4,15 +4,18 @@
 
 #include "core/string_set.h"
 
+#include <string.h>
+
+#include <iosfwd>
+
 #include "core/compact_object.h"
 #include "core/sds_utils.h"
+#include "glog/logging.h"
 
 extern "C" {
 #include "redis/sds.h"
 #include "redis/zmalloc.h"
 }
-
-#include "base/logging.h"
 
 using namespace std;
 

@@ -6,12 +6,33 @@
 
 #include <absl/container/fixed_array.h>
 #include <absl/container/flat_hash_set.h>
+#include <stddef.h>
 
+#include <atomic>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "absl/types/span.h"
 #include "core/fibers.h"
 #include "facade/conn_context.h"
+#include "facade/facade_types.h"
+#include "facade/reply_builder.h"
 #include "facade/reply_capture.h"
 #include "server/common.h"
 #include "server/version.h"
+#include "util/fibers/synchronization.h"
+
+namespace facade {
+class Connection;
+}  // namespace facade
+namespace io {
+class Sink;
+}  // namespace io
 
 namespace dfly {
 
@@ -19,6 +40,8 @@ class EngineShardSet;
 class ConnectionContext;
 class ChannelStore;
 struct FlowInfo;
+class CommandId;
+class Transaction;
 
 // Stores command id and arguments for delayed invocation.
 // Used for storing MULTI/EXEC commands.
@@ -175,7 +198,7 @@ class ConnectionContext : public facade::ConnectionContext {
   void UnsubscribeAll(bool to_reply);
   void PUnsubscribeAll(bool to_reply);
   void ChangeMonitor(bool start);  // either start or stop monitor on a given connection
-  void CancelBlocking(); // Cancel an ongoing blocking transaction if there is one.
+  void CancelBlocking();           // Cancel an ongoing blocking transaction if there is one.
 
   // Whether this connection is a connection from a replica to its master.
   // This flag is true only on replica side, where we need to setup a special ConnectionContext

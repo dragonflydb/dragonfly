@@ -3,17 +3,31 @@
 //
 #pragma once
 
+#include "absl/strings/str_cat.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
+#include "facade/op_status.h"
+#include "server/common.h"
 #include "server/table.h"
 
 extern "C" {
 #include "redis/listpack.h"
 #include "redis/object.h"
 #include "redis/quicklist.h"
+
+namespace dfly {
+class EngineShard;
+class Transaction;
+}  // namespace dfly
 }
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include <functional>
+#include <optional>
+#include <string>
+#include <string_view>
 
 namespace dfly {
 

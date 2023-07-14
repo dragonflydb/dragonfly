@@ -33,10 +33,12 @@
 
 #include <math.h>
 #include <string.h>
+#include <endian.h>
 
 #include "redis/object.h"
 #include "redis/redis_aux.h"
 #include "redis/util.h"
+#include "redis/sds.h"
 
 #define min(a, b) ((a) < (b) ? (a) : (b))
 

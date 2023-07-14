@@ -39,11 +39,8 @@
       the function in the new form (returning an uint64_t) using just the
       relevant test vector.
  */
-#include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <string.h>
-#include <ctype.h>
 
 /* Fast tolower() alike function that does not care about locale
  * but just returns a-z instead of A-Z. */

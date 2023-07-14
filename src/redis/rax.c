@@ -36,9 +36,8 @@
 #include <stdio.h>
 #include <errno.h>
 #include <math.h>
-#include "rax.h"
 
-#include "endianconv.h"
+#include "rax.h"
 
 #ifndef RAX_MALLOC_INCLUDE
 #define RAX_MALLOC_INCLUDE "rax_malloc.h"

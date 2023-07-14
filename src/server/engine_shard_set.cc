@@ -4,19 +4,38 @@
 
 #include "server/engine_shard_set.h"
 
+#include <sys/types.h>
+
+#include <boost/context/detail/exception.hpp>
+#include <cstdint>
+#include <cstdlib>
+#include <functional>
+#include <new>
+#include <ostream>
+#include <string>
+#include <system_error>
+
 extern "C" {
-#include "redis/object.h"
+#include "absl/flags/flag.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/variant.h"
+#include "core/compact_object.h"
+#include "core/dash.h"
+#include "core/dash_internal.h"
+#include "core/small_string.h"
+#include "glog/logging.h"
+#include "glog/vlog_is_on.h"
 #include "redis/zmalloc.h"
+#include "server/table.h"
+#include "util/fibers/detail/result_mover.h"
 }
 
-#include "base/flags.h"
-#include "base/logging.h"
 #include "server/blocking_controller.h"
 #include "server/search/doc_index.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
-#include "util/varz.h"
 
 using namespace std;
 

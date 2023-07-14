@@ -4,11 +4,14 @@
 
 #pragma once
 
+#include "facade/facade_types.h"
+#include "server/common.h"
 #include "server/conn_context.h"
 
 namespace dfly {
 
 class ServerFamily;
+class ConnectionContext;
 
 class MemoryCmd {
  public:

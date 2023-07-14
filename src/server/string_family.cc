@@ -5,29 +5,55 @@
 #include "server/string_family.h"
 
 extern "C" {
+#include "absl/strings/numbers.h"
+#include "absl/strings/str_cat.h"
+#include "absl/types/span.h"
+#include "core/compact_object.h"
+#include "core/dash.h"
+#include "core/dash_internal.h"
+#include "core/expire_period.h"
+#include "facade/conn_context.h"
+#include "facade/error.h"
+#include "facade/reply_builder.h"
+#include "glog/logging.h"
+#include "glog/vlog_is_on.h"
 #include "redis/object.h"
+#include "server/db_slice.h"
 }
 
 #include <absl/container/inlined_vector.h>
+#include <bits/chrono.h>
+#include <bits/utility.h>
 #include <double-conversion/string-to-double.h>
+#include <double-conversion/utils.h>
+#include <limits.h>
+#include <string.h>
 
 #include <algorithm>
 #include <array>
-#include <chrono>
+#include <atomic>
+#include <cmath>
 #include <cstdint>
+#include <ext/alloc_traits.h>
+#include <memory>
+#include <new>
+#include <ostream>
+#include <system_error>
 #include <tuple>
+#include <type_traits>
+#include <utility>
 
-#include "base/logging.h"
-#include "redis/util.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
-#include "server/io_mgr.h"
-#include "server/journal/journal.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 #include "util/varz.h"
+
+namespace util {
+class ProactorPool;
+}  // namespace util
 
 namespace dfly {
 

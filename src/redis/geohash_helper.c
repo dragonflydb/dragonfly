@@ -37,7 +37,10 @@
 #define __USE_XOPEN
 
 #include "geohash_helper.h"
+
 #include <math.h>
+
+#include "redis/geohash.h"
 
 #define D_R (M_PI / 180.0)
 #define R_MAJOR 6378137.0

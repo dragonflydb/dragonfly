@@ -1,14 +1,16 @@
 #include "server/serializer_commons.h"
 
 extern "C" {
+#include "absl/base/internal/endian.h"
+#include "absl/types/span.h"
+#include "glog/logging.h"
 #include "redis/rdb.h"
 }
 
-#include <absl/base/internal/endian.h>
-
+#include <cstdint>
+#include <iosfwd>
 #include <system_error>
-
-#include "base/logging.h"
+#include <type_traits>
 
 using namespace std;
 

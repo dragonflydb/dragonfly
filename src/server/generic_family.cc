@@ -4,14 +4,49 @@
 
 #include "server/generic_family.h"
 
+#include <bits/types/struct_iovec.h>
+#include <limits.h>
+#include <string.h>
+#include <sys/types.h>
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstdint>
+#include <iterator>
+#include <memory>
+#include <optional>
+#include <ostream>
+#include <string>
+#include <system_error>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+#include <variant>
+#include <vector>
+
 extern "C" {
+#include "absl/flags/flag.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "absl/time/clock.h"
+#include "absl/types/span.h"
+#include "core/compact_object.h"
+#include "core/dash.h"
+#include "core/dash_internal.h"
+#include "facade/conn_context.h"
+#include "facade/error.h"
+#include "facade/reply_builder.h"
+#include "glog/logging.h"
+#include "io/io.h"
 #include "redis/crc64.h"
 #include "redis/object.h"
-#include "redis/util.h"
+#include "server/cluster/cluster_config.h"
+#include "server/db_slice.h"
+#include "server/table.h"
 }
 
-#include "base/flags.h"
-#include "base/logging.h"
 #include "redis/rdb.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
@@ -19,12 +54,10 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
-#include "server/journal/journal.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
 #include "server/transaction.h"
-#include "util/varz.h"
 
 ABSL_FLAG(uint32_t, dbnum, 16, "Number of databases");
 ABSL_FLAG(uint32_t, keys_output_limit, 8192, "Maximum number of keys output by keys command");

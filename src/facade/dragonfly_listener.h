@@ -4,17 +4,26 @@
 
 #pragma once
 
-#include <absl/base/internal/spinlock.h>
+#include <stdint.h>
 
+#include <atomic>
+#include <functional>
 #include <memory>
 #include <system_error>
-#include <utility>
 #include <vector>
 
+#include "absl/base/internal/spinlock.h"
+#include "absl/time/time.h"
 #include "facade/facade_types.h"
+#include "util/connection.h"
 #include "util/fibers/proactor_base.h"
 #include "util/http/http_handler.h"
 #include "util/listener_interface.h"
+
+namespace util {
+class HttpListenerBase;
+class LinuxSocketBase;
+}  // namespace util
 
 typedef struct ssl_ctx_st SSL_CTX;
 

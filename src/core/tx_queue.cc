@@ -3,12 +3,13 @@
 //
 #include "core/tx_queue.h"
 
-#include "base/logging.h"
+#include <ostream>
+
+#include "glog/logging.h"
 
 namespace dfly {
 
-TxQueue::TxQueue(std::function<uint64_t(const Transaction*)> sf)
-    : score_fun_(sf), vec_(32) {
+TxQueue::TxQueue(std::function<uint64_t(const Transaction*)> sf) : score_fun_(sf), vec_(32) {
   for (size_t i = 0; i < vec_.size(); ++i) {
     vec_[i].next = i + 1;
   }

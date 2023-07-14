@@ -4,10 +4,18 @@
 
 #pragma once
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include <optional>
 #include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
+#include <variant>
 
 #include "base/io_buf.h"
+#include "facade/facade_types.h"
 #include "io/io.h"
 #include "server/common.h"
 #include "server/journal/types.h"

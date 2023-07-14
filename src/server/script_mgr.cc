@@ -5,22 +5,40 @@
 #include "server/script_mgr.h"
 
 #include <absl/cleanup/cleanup.h>
-#include <absl/strings/ascii.h>
-#include <absl/strings/match.h>
-#include <absl/strings/numbers.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
+#include <bits/utility.h>
 
+#include <algorithm>
+#include <boost/context/detail/exception.hpp>
+#include <cstdint>
+#include <cstring>
+#include <iosfwd>
+#include <mutex>
 #include <regex>
 #include <string>
+#include <type_traits>
 
-#include "base/flags.h"
-#include "base/logging.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/flags/flag.h"
+#include "absl/hash/hash.h"
+#include "absl/meta/type_traits.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
+#include "base/expected.hpp"
+#include "base/histogram.h"
 #include "core/interpreter.h"
+#include "facade/conn_context.h"
 #include "facade/error.h"
+#include "facade/op_status.h"
+#include "facade/reply_builder.h"
+#include "glog/logging.h"
+#include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
+#include "util/fibers/detail/wait_queue.h"
+#include "util/proactor_pool.h"
 
 ABSL_FLAG(std::string, default_lua_flags, "",
           "Configure default flags for running Lua scripts: \n - Use 'allow-undeclared-keys' to "

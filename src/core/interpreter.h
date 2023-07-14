@@ -4,12 +4,18 @@
 
 #pragma once
 
+#include <stdint.h>
+
 #include <functional>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "core/core_types.h"
 #include "core/fibers.h"
+#include "util/fibers/synchronization.h"
 
 typedef struct lua_State lua_State;
 

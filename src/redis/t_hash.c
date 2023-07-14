@@ -28,6 +28,7 @@
  */
 
 #include <string.h>
+#include <limits.h>
 
 // ROMAN - taken from redis 7.0 branch.
 
@@ -36,6 +37,8 @@
 #include "redis_aux.h"
 #include "util.h"
 #include "zmalloc.h"
+#include "redis/dict.h"
+#include "redis/sds.h"
 
 /*-----------------------------------------------------------------------------
  * Hash type API

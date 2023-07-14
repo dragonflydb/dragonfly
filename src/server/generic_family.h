@@ -4,10 +4,20 @@
 
 #pragma once
 
+#include <stdint.h>
+
+#include <string_view>
+
+#include "absl/flags/declare.h"
 #include "base/flags.h"
+#include "facade/facade_types.h"
 #include "facade/op_status.h"
 #include "server/common.h"
 #include "server/table.h"
+
+namespace dfly {
+class Transaction;
+}  // namespace dfly
 
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 

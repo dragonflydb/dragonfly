@@ -4,7 +4,17 @@
 
 #pragma once
 
+#include <stdint.h>
+
+#include <atomic>
+#include <string_view>
+#include <system_error>
+
+#include "absl/types/span.h"
+#include "core/fibers.h"
+#include "server/common.h"
 #include "server/journal/types.h"
+#include "util/fibers/synchronization.h"
 #include "util/proactor_pool.h"
 
 namespace dfly {

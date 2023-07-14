@@ -4,14 +4,31 @@
 
 #pragma once
 
+#include <stdint.h>
+
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "facade/facade_types.h"
+#include "facade/op_status.h"
 #include "server/common.h"
 #include "server/engine_shard_set.h"
+#include "server/table.h"
 #include "util/proactor_pool.h"
+
+namespace util {
+class ProactorPool;
+}  // namespace util
 
 namespace dfly {
 
 class ConnectionContext;
 class CommandRegistry;
+class EngineShard;
+class Transaction;
+
 using facade::OpResult;
 using facade::OpStatus;
 

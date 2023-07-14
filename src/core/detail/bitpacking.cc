@@ -4,10 +4,16 @@
 
 #include "src/core/detail/bitpacking.h"
 
-#include <absl/base/internal/endian.h>
+#include <emmintrin.h>
+#include <string.h>
+#include <tmmintrin.h>
 
-#include "base/logging.h"
+#include <tuple>
+#include <utility>
+
+#include "absl/base/internal/endian.h"
 #include "core/sse_port.h"
+#include "glog/logging.h"
 
 using namespace std;
 

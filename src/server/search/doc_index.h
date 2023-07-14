@@ -5,17 +5,23 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
+#include "core/search/base.h"
 #include "core/search/search.h"
 #include "server/common.h"
 #include "server/table.h"
 
 namespace dfly {
+struct DbContext;
+struct OpArgs;
 
 using SearchDocData = absl::flat_hash_map<std::string /*field*/, std::string /*value*/>;
 

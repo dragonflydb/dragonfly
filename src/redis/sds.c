@@ -31,11 +31,11 @@
  */
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include <assert.h>
 #include <limits.h>
+
 #include "sds.h"
 #include "sdsalloc.h"
 
@@ -1299,6 +1299,7 @@ error:
 #ifdef REDIS_TEST
 #include <stdio.h>
 #include <limits.h>
+
 #include "testhelp.h"
 
 #define UNUSED(x) (void)(x)

@@ -1,16 +1,27 @@
 #include "server/channel_store.h"
 
+#include <bits/utility.h>
+
+#include <algorithm>
+#include <cstddef>
+#include <initializer_list>
+#include <memory>
+#include <type_traits>
+
 // Copyright 2023, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
-#include <shared_mutex>
-
 extern "C" {
+#include "absl/container/flat_hash_map.h"
+#include "absl/meta/type_traits.h"
+#include "glog/logging.h"
 #include "redis/util.h"
+#include "server/conn_context.h"
+#include "util/fibers/proactor_base.h"
+#include "util/proactor_pool.h"
 }
 
-#include "base/logging.h"
 #include "server/engine_shard_set.h"
 #include "server/server_state.h"
 

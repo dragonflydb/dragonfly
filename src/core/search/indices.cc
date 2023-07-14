@@ -10,9 +10,12 @@
 #include <absl/strings/str_split.h>
 
 #include <algorithm>
+#include <iosfwd>
 #include <regex>
 
-#include "base/logging.h"
+#include "absl/container/btree_set.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/strings/string_view.h"
 
 namespace dfly::search {
 

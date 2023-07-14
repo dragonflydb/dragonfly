@@ -29,14 +29,16 @@
  */
 
 #include <string.h>
+#include <stdint.h>
 
 #include "geo.h"
 #include "geohash_helper.h"
 #include "listpack.h"
-#include "pqsort.h"
 #include "object.h"
 #include "zmalloc.h"
 #include "zset.h"
+#include "redis/geohash.h"
+#include "redis/sds.h"
 
 
 // D - noop

@@ -4,21 +4,49 @@
 #include "server/list_family.h"
 
 extern "C" {
+#include "absl/flags/flag.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
+#include "core/compact_object.h"
+#include "core/dash.h"
+#include "core/dash_internal.h"
+#include "facade/conn_context.h"
+#include "facade/error.h"
+#include "facade/op_status.h"
+#include "facade/reply_builder.h"
+#include "glog/logging.h"
 #include "redis/object.h"
+#include "redis/quicklist.h"
 #include "redis/sds.h"
+#include "server/db_slice.h"
+#include "server/table.h"
 }
 
 #include <absl/strings/numbers.h>
+#include <bits/chrono.h>
+#include <string.h>
 
-#include "base/flags.h"
-#include "base/logging.h"
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <ext/alloc_traits.h>
+#include <memory>
+#include <new>
+#include <optional>
+#include <ostream>
+#include <string>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
-#include "server/server_state.h"
 #include "server/transaction.h"
 
 /**

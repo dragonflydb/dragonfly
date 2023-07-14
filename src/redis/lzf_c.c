@@ -34,6 +34,8 @@
  * either the BSD or the GPL.
  */
 
+#include <stddef.h>
+
 #include "lzfP.h"
 
 #define HSIZE (1 << (HLOG))

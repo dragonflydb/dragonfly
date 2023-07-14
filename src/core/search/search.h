@@ -5,12 +5,15 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <stddef.h>
 
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #include "core/search/base.h"
 

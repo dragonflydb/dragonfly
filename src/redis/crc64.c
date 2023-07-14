@@ -27,7 +27,11 @@
  * POSSIBILITY OF SUCH DAMAGE. */
 
 #include "crc64.h"
+
+#include <stddef.h>
+
 #include "crcspeed.h"
+
 static uint64_t crc64_table[8][256] = {{0}};
 
 #define POLY UINT64_C(0xad93d23594c935a9)

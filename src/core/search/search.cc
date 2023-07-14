@@ -4,15 +4,23 @@
 
 #include "core/search/search.h"
 
-#include <absl/strings/numbers.h>
+#include <bits/utility.h>
 
+#include <algorithm>
+#include <iterator>
+#include <ostream>
+#include <type_traits>
+#include <utility>
 #include <variant>
 
-#include "base/logging.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/types/span.h"
 #include "core/search/ast_expr.h"
 #include "core/search/indices.h"
+#include "core/search/parser.hh"
 #include "core/search/query_driver.h"
 #include "core/search/vector.h"
+#include "glog/logging.h"
 
 using namespace std;
 

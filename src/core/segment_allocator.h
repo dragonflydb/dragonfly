@@ -5,6 +5,15 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <mimalloc.h>
+#include <stddef.h>
+
+#include <algorithm>
+#include <cstdint>
+#include <new>
+#include <utility>
+#include <vector>
+
+#include "absl/meta/type_traits.h"
 
 /***
  * This class is tightly coupled with mimalloc segment allocation logic and is designed to provide

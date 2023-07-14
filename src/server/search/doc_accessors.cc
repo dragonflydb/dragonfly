@@ -7,16 +7,28 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
 
-#include <jsoncons/json.hpp>
+#include <iosfwd>
+#include <jsoncons/basic_json.hpp>
+#include <jsoncons/json_object.hpp>
+#include <optional>
+#include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "core/compact_object.h"
 #include "core/json_object.h"
 #include "core/search/search.h"
 #include "core/string_map.h"
+#include "glog/logging.h"
+#include "redis/sds.h"
 #include "server/container_utils.h"
 
 extern "C" {
 #include "redis/listpack.h"
 #include "redis/object.h"
+
+namespace dfly {
+struct DbContext;
+}  // namespace dfly
 };
 
 namespace dfly {

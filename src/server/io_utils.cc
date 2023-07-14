@@ -4,8 +4,12 @@
 
 #include "server/io_utils.h"
 
-#include "base/flags.h"
-#include "server/error.h"
+#include <cstddef>
+#include <utility>
+
+#include "server/common.h"
+
+struct iovec;
 
 using namespace std;
 

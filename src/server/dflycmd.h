@@ -7,12 +7,26 @@
 #include <absl/container/btree_map.h>
 
 #include <atomic>
+#include <cstdint>
+#include <functional>
+#include <map>
 #include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
+#include "core/fibers.h"
+#include "facade/facade_types.h"
+#include "facade/op_status.h"
+#include "server/common.h"
 #include "server/conn_context.h"
+#include "util/fibers/fiber2.h"
+#include "util/fibers/synchronization.h"
 
 namespace facade {
 class RedisReplyBuilder;
+class Connection;
 }  // namespace facade
 
 namespace util {
@@ -26,6 +40,8 @@ class ServerFamily;
 class RdbSaver;
 class JournalStreamer;
 struct ReplicaRoleInfo;
+class ConnectionContext;
+class EngineShard;
 
 // Stores information related to a single flow.
 struct FlowInfo {

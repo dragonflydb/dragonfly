@@ -5,8 +5,15 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <stdint.h>
+
+#include <array>
+#include <memory>
+#include <string>
+#include <string_view>
 
 #include "core/json_object.h"
+#include "core/search/base.h"
 #include "core/search/search.h"
 #include "server/common.h"
 #include "server/search/doc_index.h"
@@ -15,6 +22,10 @@
 namespace dfly {
 
 class StringMap;
+namespace search {
+struct Schema;
+}  // namespace search
+struct DbContext;
 
 // Document accessors allow different types (json/hset) to be hidden
 // behind a document interface for quering fields and serializing.

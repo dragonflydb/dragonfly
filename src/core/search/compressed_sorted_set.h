@@ -2,9 +2,11 @@
 
 #include <absl/types/span.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <iterator>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "core/search/base.h"

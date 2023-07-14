@@ -2,6 +2,17 @@
 
 #include <absl/container/inlined_vector.h>
 
+#include <algorithm>
+#include <boost/smart_ptr/detail/operator_bool.hpp>
+#include <iosfwd>
+#include <memory>
+#include <optional>
+#include <utility>
+#include <variant>
+
+#include "absl/hash/hash.h"
+#include "facade/reply_builder.h"
+#include "glog/logging.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"

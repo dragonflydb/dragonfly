@@ -3,10 +3,27 @@
 //
 #pragma once
 
+#include <stddef.h>
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstdint>
+#include <functional>
+#include <jsoncons/basic_json.hpp>
 #include <jsoncons/json.hpp>
+#include <jsoncons/json_object.hpp>
+#include <memory>
+#include <optional>
+#include <string>
 #include <system_error>
+#include <utility>
+#include <variant>
+#include <vector>
 
 extern "C" {
+#include "absl/time/time.h"
+#include "base/pmr/pod_array.h"
 #include "redis/object.h"
 }
 
@@ -24,7 +41,6 @@ class EngineShardSet;
 class ScriptMgr;
 class CompactObj;
 class Service;
-
 class DecompressImpl;
 
 class RdbLoaderBase {
@@ -33,6 +49,7 @@ class RdbLoaderBase {
   ~RdbLoaderBase();
 
   struct LoadTrace;
+
   using MutableBytes = ::io::MutableBytes;
 
   struct LzfString {

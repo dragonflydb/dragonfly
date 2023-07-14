@@ -4,12 +4,20 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <vector>
 
 #include "core/external_alloc.h"
 #include "core/fibers.h"
 #include "server/common.h"
 #include "server/io_mgr.h"
 #include "server/table.h"
+#include "util/fibers/synchronization.h"
 
 namespace dfly {
 
@@ -64,6 +72,7 @@ class TieredStorage {
   EventCount active_req_sem_;
 
   struct PerDb;
+
   std::vector<PerDb*> db_arr_;
 
   absl::flat_hash_map<uint32_t, uint8_t> page_refcnt_;

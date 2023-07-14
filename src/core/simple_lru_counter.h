@@ -4,6 +4,13 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include "base/string_view_sso.h"
 

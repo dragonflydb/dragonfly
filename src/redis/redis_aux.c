@@ -5,8 +5,9 @@
 
 #include "crc64.h"
 #include "endianconv.h"
-#include "object.h"
 #include "zmalloc.h"
+#include "redis/dict.h"
+#include "redis/sds.h"
 
 Server server;
 

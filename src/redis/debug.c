@@ -31,8 +31,6 @@
 
 #include <stdarg.h>
 #include <stdio.h>
-#include <syslog.h>
-#include <assert.h>
 
 #include "util.h"
 

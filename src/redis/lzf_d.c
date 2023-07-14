@@ -34,12 +34,15 @@
  * either the BSD or the GPL.
  */
 
+#include <string.h>
+
 #include "lzfP.h"
 
 #if AVOID_ERRNO
 # define SET_ERRNO(n)
 #else
 # include <errno.h>
+
 # define SET_ERRNO(n) errno = (n)
 #endif
 

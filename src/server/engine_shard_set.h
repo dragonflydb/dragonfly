@@ -5,17 +5,37 @@
 #pragma once
 
 extern "C" {
+#include "absl/time/clock.h"
+#include "core/intent_lock.h"
 #include "redis/sds.h"
+#include "server/common.h"
+#include "util/fibers/fiber2.h"
+#include "util/fibers/fiberqueue_threadpool.h"
+#include "util/fibers/proactor_base.h"
+#include "util/fibers/synchronization.h"
 }
 
 #include <absl/container/btree_map.h>
 #include <absl/container/flat_hash_map.h>
+#include <assert.h>
+#include <bits/chrono.h>
+#include <mimalloc.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <xxhash.h>
+
+#include <algorithm>
+#include <atomic>
+#include <experimental/memory_resource>
+#include <memory>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 #include "base/string_view_sso.h"
 #include "util/proactor_pool.h"
 #include "util/sliding_counter.h"
-
 //
 #include "core/external_alloc.h"
 #include "core/fibers.h"
@@ -23,6 +43,10 @@ extern "C" {
 #include "core/tx_queue.h"
 #include "server/cluster/cluster_config.h"
 #include "server/db_slice.h"
+
+namespace dfly {
+class Transaction;
+}  // namespace dfly
 
 namespace dfly {
 

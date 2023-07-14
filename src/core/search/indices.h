@@ -5,10 +5,15 @@
 #include <absl/container/btree_set.h>
 #include <absl/container/flat_hash_map.h>
 
+#include <cstdint>
 #include <map>
 #include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
+#include "absl/hash/hash.h"
 #include "core/search/base.h"
 
 namespace dfly::search {

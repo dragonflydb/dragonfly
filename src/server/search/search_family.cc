@@ -4,21 +4,33 @@
 
 #include "server/search/search_family.h"
 
-#include <absl/strings/ascii.h>
+#include <bits/utility.h>
 
+#include <algorithm>
 #include <atomic>
-#include <jsoncons/json.hpp>
-#include <variant>
+#include <cstddef>
+#include <ext/alloc_traits.h>
+#include <memory>
+#include <optional>
+#include <set>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
-#include "base/logging.h"
-#include "core/json_object.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/strings/numbers.h"
+#include "absl/types/span.h"
+#include "core/search/base.h"
 #include "core/search/search.h"
+#include "facade/conn_context.h"
 #include "facade/error.h"
+#include "facade/op_status.h"
 #include "facade/reply_builder.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
-#include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/search/doc_index.h"
 #include "server/transaction.h"

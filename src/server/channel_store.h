@@ -4,14 +4,23 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <stddef.h>
+#include <stdint.h>
 
+#include <atomic>
+#include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
+#include "core/fibers.h"
 #include "server/conn_context.h"
+#include "util/fibers/synchronization.h"
 
 namespace dfly {
 
 class ChannelStoreUpdater;
+class ConnectionContext;
 
 // ChannelStore manages PUB/SUB subscriptions.
 //

@@ -6,7 +6,11 @@
 
 #include <absl/types/span.h>
 
+#include <vector>
+
 #include "facade/reply_capture.h"
+#include "server/common.h"
+#include "server/conn_context.h"
 #include "server/journal/types.h"
 
 namespace dfly {

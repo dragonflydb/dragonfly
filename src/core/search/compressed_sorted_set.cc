@@ -1,10 +1,12 @@
 #include "core/search/compressed_sorted_set.h"
 
+#include <algorithm>
 #include <array>
-#include <bitset>
+#include <limits>
 
+#include "absl/types/span.h"
 #include "base/flit.h"
-#include "base/logging.h"
+#include "glog/logging.h"
 
 namespace dfly::search {
 

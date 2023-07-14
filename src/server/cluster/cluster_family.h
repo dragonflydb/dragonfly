@@ -7,6 +7,7 @@
 #include <string>
 
 #include "facade/conn_context.h"
+#include "facade/facade_types.h"
 #include "server/cluster/cluster_config.h"
 #include "server/common.h"
 

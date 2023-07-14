@@ -6,9 +6,14 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/types/span.h>
+#include <stdint.h>
 
 #include <functional>
+#include <string>
+#include <string_view>
+#include <utility>
 
+#include "absl/meta/type_traits.h"
 #include "base/function2.hpp"
 #include "facade/command_id.h"
 

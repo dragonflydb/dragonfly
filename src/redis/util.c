@@ -40,6 +40,7 @@
 #include <stdint.h>
 #include <errno.h>
 #include <time.h>
+#include <strings.h>
 
 #include "util.h"
 

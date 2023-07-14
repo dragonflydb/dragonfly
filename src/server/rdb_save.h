@@ -4,13 +4,21 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <stdint.h>
+#include <sys/types.h>
 
 extern "C" {
+#include "base/pmr/pod_array.h"
+#include "core/compact_object.h"
 #include "redis/lzfP.h"
 #include "redis/object.h"
 }
 
+#include <memory>
 #include <optional>
+#include <string>
+#include <string_view>
+#include <system_error>
 
 #include "base/io_buf.h"
 #include "base/pod_array.h"
@@ -19,6 +27,13 @@ extern "C" {
 #include "server/journal/serializer.h"
 #include "server/journal/types.h"
 #include "server/table.h"
+
+namespace dfly {
+namespace journal {
+struct Entry;
+}  // namespace journal
+}  // namespace dfly
+struct iovec;
 
 typedef struct rax rax;
 typedef struct streamCG streamCG;

@@ -6,19 +6,63 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/random/random.h>
 #include <absl/strings/str_cat.h>
+#include <bits/chrono.h>
+#include <time.h>
 
+#include <algorithm>
+#include <atomic>
+#include <boost/context/detail/exception.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <cstdint>
+#include <ext/alloc_traits.h>
 #include <filesystem>
+#include <memory>
+#include <mutex>
+#include <ostream>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <variant>
+#include <vector>
 
-#include "base/flags.h"
-#include "base/logging.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/flags/declare.h"
+#include "absl/flags/flag.h"
+#include "absl/strings/numbers.h"
+#include "absl/types/span.h"
+#include "core/dash.h"
+#include "core/dash_internal.h"
+#include "core/expire_period.h"
+#include "core/fibers.h"
+#include "core/intent_lock.h"
+#include "core/tx_queue.h"
+#include "facade/conn_context.h"
+#include "facade/error.h"
+#include "facade/op_status.h"
+#include "facade/reply_builder.h"
+#include "glog/logging.h"
+#include "redis/object.h"
 #include "server/blocking_controller.h"
+#include "server/conn_context.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/main_service.h"
-#include "server/rdb_load.h"
+#include "server/server_family.h"
 #include "server/server_state.h"
 #include "server/string_family.h"
+#include "server/table.h"
 #include "server/transaction.h"
+#include "util/fibers/detail/wait_queue.h"
+#include "util/fibers/fiber2.h"
+#include "util/fibers/future.h"
+#include "util/fibers/synchronization.h"
+#include "util/proactor_pool.h"
+
+namespace dfly {
+class CommandId;
+}  // namespace dfly
 
 using namespace std;
 

@@ -3,7 +3,10 @@
 //
 #pragma once
 
+#include <stddef.h>
+
 #include <cstdint>
+#include <string>
 #include <string_view>
 
 #include "core/core_types.h"

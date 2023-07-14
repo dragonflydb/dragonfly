@@ -4,12 +4,15 @@
 
 #include "core/search/ast_expr.h"
 
-#include <absl/strings/numbers.h>
-
 #include <algorithm>
+#include <initializer_list>
+#include <map>
+#include <ostream>
 #include <regex>
+#include <sstream>
+#include <utility>
 
-#include "base/logging.h"
+#include "glog/logging.h"
 
 using namespace std;
 

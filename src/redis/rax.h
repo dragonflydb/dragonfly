@@ -32,6 +32,7 @@
 #define RAX_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 /* Representation of a radix tree as implemented in this file, that contains
  * the strings "foo", "foobar" and "footer" after the insertion of each

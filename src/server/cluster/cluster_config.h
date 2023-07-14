@@ -6,13 +6,17 @@
 
 #include <absl/base/thread_annotations.h>
 #include <absl/container/flat_hash_set.h>
+#include <stdint.h>
 
+#include <algorithm>
 #include <array>
 #include <bitset>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <vector>
 
+#include "absl/hash/hash.h"
 #include "core/json_object.h"
 #include "src/core/fibers.h"
 

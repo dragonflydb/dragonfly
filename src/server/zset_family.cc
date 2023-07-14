@@ -4,14 +4,41 @@
 
 #include "server/zset_family.h"
 
+#include <stddef.h>
+#include <stdint.h>
+
+#include <cmath>
+#include <ext/alloc_traits.h>
+#include <iterator>
+#include <memory>
+#include <new>
+#include <ostream>
+#include <type_traits>
+
 extern "C" {
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/inlined_vector.h"
+#include "absl/meta/type_traits.h"
+#include "absl/strings/ascii.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/str_cat.h"
+#include "absl/types/span.h"
+#include "base/integral_types.h"
+#include "core/compact_object.h"
+#include "core/dash.h"
+#include "core/dash_internal.h"
+#include "facade/conn_context.h"
+#include "facade/reply_builder.h"
+#include "glog/logging.h"
+#include "redis/dict.h"
 #include "redis/listpack.h"
 #include "redis/object.h"
-#include "redis/util.h"
+#include "redis/sds.h"
 #include "redis/zset.h"
+#include "server/db_slice.h"
+#include "server/table.h"
 }
 
-#include "base/logging.h"
 #include "base/stl_util.h"
 #include "facade/error.h"
 #include "server/blocking_controller.h"

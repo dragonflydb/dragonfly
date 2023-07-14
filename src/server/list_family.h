@@ -4,8 +4,13 @@
 
 #pragma once
 
+#include "facade/facade_types.h"
 #include "facade/op_status.h"
 #include "server/common.h"
+
+namespace facade {
+template <typename V> class OpResult;
+}  // namespace facade
 
 namespace dfly {
 

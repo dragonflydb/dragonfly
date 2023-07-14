@@ -4,20 +4,50 @@
 
 #pragma once
 
+#include <time.h>
+
+#include <atomic>
+#include <cstdint>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
 
+#include "absl/base/thread_annotations.h"
+#include "absl/time/time.h"
+#include "core/fibers.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
+#include "facade/facade_types.h"
 #include "facade/redis_parser.h"
+#include "io/io.h"
 #include "server/channel_store.h"
+#include "server/common.h"
+#include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/replica.h"
+#include "util/fibers/fiber2.h"
+#include "util/fibers/future.h"
+#include "util/fibers/proactor_base.h"
+#include "util/fibers/synchronization.h"
+
+namespace facade {
+class ConnectionContext;
+class Listener;
+}  // namespace facade
 
 namespace util {
 class AcceptServer;
 class ListenerInterface;
 class HttpListenerBase;
+class Connection;
+namespace fb2 {
+class FiberQueueThreadPool;
+}  // namespace fb2
 
 namespace cloud {
 class AWS;
@@ -26,6 +56,7 @@ class AWS;
 }  // namespace util
 
 namespace dfly {
+class Transaction;
 
 std::string GetPassword();
 

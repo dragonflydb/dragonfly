@@ -5,17 +5,26 @@
 #pragma once
 
 #include <absl/base/internal/endian.h>
+#include <stdint.h>
+#include <string.h>
 
 #ifdef __clang__
 #include <experimental/memory_resource>
+
 namespace PMR_NS = std::experimental::pmr;
 #else
 #include <memory_resource>
+
 namespace PMR_NS = std::pmr;
 #endif
 
 #include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
+#include "absl/base/internal/endian.h"
 #include "core/json_object.h"
 #include "core/small_string.h"
 

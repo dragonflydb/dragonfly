@@ -4,12 +4,34 @@
 
 #pragma once
 
+#include <limits.h>
+#include <stdint.h>
+#include <sys/types.h>
+
+#include <boost/smart_ptr/detail/operator_bool.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <ext/alloc_traits.h>
+#include <functional>
+#include <memory>
+#include <string_view>
+#include <tuple>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "absl/container/flat_hash_set.h"
+#include "core/dash.h"
+#include "core/dash_internal.h"
+#include "core/expire_period.h"
+#include "core/intent_lock.h"
 #include "facade/op_status.h"
+#include "server/cluster/cluster_config.h"
 #include "server/common.h"
 #include "server/conn_context.h"
 #include "server/table.h"
 
 namespace dfly {
+class EngineShard;
 
 using facade::OpResult;
 

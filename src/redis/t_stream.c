@@ -29,11 +29,17 @@
 
 #include <errno.h>
 #include <string.h>
+#include <stdint.h>
 
 #include "endianconv.h"
 #include "stream.h"
 #include "redis_aux.h"
 #include "zmalloc.h"
+#include "redis/listpack.h"
+#include "redis/object.h"
+#include "redis/rax.h"
+#include "redis/sds.h"
+#include "redis/util.h"
 
 #define ROMAN_ENABLE 0
 

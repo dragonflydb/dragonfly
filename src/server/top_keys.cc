@@ -6,9 +6,14 @@
 
 #include <xxhash.h>
 
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+
+#include "absl/container/flat_hash_map.h"
 #include "absl/numeric/bits.h"
 #include "absl/random/distributions.h"
-#include "base/logging.h"
+#include "glog/logging.h"
 
 namespace dfly {
 

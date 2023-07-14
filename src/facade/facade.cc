@@ -5,11 +5,33 @@
 #include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
 
-#include "base/logging.h"
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <ostream>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "absl/base/optimization.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/numeric/bits.h"
+#include "absl/strings/ascii.h"
+#include "absl/types/span.h"
 #include "facade/command_id.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
+#include "facade/facade_types.h"
+#include "facade/reply_builder.h"
+#include "facade/resp_expr.h"
+#include "glog/logging.h"
+
+namespace io {
+class Sink;
+}  // namespace io
 
 namespace facade {
 

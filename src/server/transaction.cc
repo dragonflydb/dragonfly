@@ -6,13 +6,30 @@
 
 #include <absl/strings/match.h>
 
-#include "base/logging.h"
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <condition_variable>
+#include <exception>
+#include <ext/alloc_traits.h>
+#include <new>
+#include <ostream>
+#include <type_traits>
+#include <variant>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/container/inlined_vector.h"
+#include "absl/functional/function_ref.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/str_cat.h"
+#include "absl/types/variant.h"
+#include "glog/logging.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
 #include "server/server_state.h"
+#include "util/fibers/detail/wait_queue.h"
 
 namespace dfly {
 

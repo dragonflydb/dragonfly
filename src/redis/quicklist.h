@@ -29,6 +29,7 @@
  */
 
 #include <stdint.h> // for UINTPTR_MAX
+#include <stddef.h>
 
 #ifndef __QUICKLIST_H__
 #define __QUICKLIST_H__

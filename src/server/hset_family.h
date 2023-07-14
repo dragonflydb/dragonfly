@@ -4,8 +4,11 @@
 
 #pragma once
 
+#include <stdint.h>
+
 #include <optional>
 
+#include "facade/facade_types.h"
 #include "facade/op_status.h"
 #include "server/common.h"
 

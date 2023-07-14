@@ -5,20 +5,73 @@
 #include "server/main_service.h"
 
 extern "C" {
+#include "absl/container/flat_hash_set.h"
+#include "absl/container/inlined_vector.h"
+#include "absl/flags/flag.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "absl/time/clock.h"
+#include "absl/types/span.h"
+#include "base/expected.hpp"
+#include "core/core_types.h"
+#include "core/external_alloc.h"
+#include "core/intent_lock.h"
+#include "core/tx_queue.h"
+#include "facade/op_status.h"
+#include "facade/reply_builder.h"
+#include "glog/logging.h"
+#include "glog/vlog_is_on.h"
 #include "redis/redis_aux.h"
+#include "server/channel_store.h"
+#include "server/cluster/cluster_config.h"
+#include "server/db_slice.h"
+#include "server/table.h"
+#include "server/top_keys.h"
+#include "util/fiber_socket_base.h"
+#include "util/fibers/detail/wait_queue.h"
+#include "util/fibers/fiber2.h"
+#include "util/fibers/proactor_base.h"
+#include "util/http/http_handler.h"
+#include "util/http/http_server_utils.h"
+#include "util/proactor_pool.h"
 }
 
 #include <absl/cleanup/cleanup.h>
-#include <absl/functional/bind_front.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/match.h>
-#include <absl/strings/str_format.h>
-#include <xxhash.h>
+#include <bits/chrono.h>
+#include <ctype.h>
+#include <features.h>
+#include <string.h>
+#include <sys/time.h>
+#include <unistd.h>
 
-#include <filesystem>
+#include <algorithm>
+#include <atomic>
+#include <boost/beast/core/impl/buffers_cat.hpp>
+#include <boost/beast/core/impl/buffers_prefix.hpp>
+#include <boost/beast/core/impl/buffers_suffix.hpp>
+#include <boost/beast/http/field.hpp>
+#include <boost/beast/http/impl/message.hpp>
+#include <boost/beast/http/status.hpp>
+#include <boost/beast/http/string_body.hpp>
+#include <boost/context/detail/exception.hpp>
+#include <boost/intrusive/detail/list_iterator.hpp>
+#include <boost/intrusive/detail/tree_iterator.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <boost/utility/string_view.hpp>
+#include <cstdint>
+#include <exception>
+#include <ext/alloc_traits.h>
+#include <memory>
+#include <mutex>
+#include <numeric>
+#include <ostream>
+#include <type_traits>
+#include <utility>
+#include <variant>
 
-#include "base/flags.h"
-#include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "facade/reply_capture.h"
@@ -44,6 +97,10 @@ extern "C" {
 #include "util/html/sorted_table.h"
 #include "util/varz.h"
 
+namespace facade {
+class Listener;
+}  // namespace facade
+
 using namespace std;
 using dfly::operator""_KB;
 
@@ -68,6 +125,7 @@ namespace dfly {
 
 #if __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
 #include <sys/syscall.h>
+
 #define gettid() syscall(SYS_gettid)
 #endif
 

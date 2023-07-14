@@ -4,10 +4,18 @@
 
 #pragma once
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include <functional>
+#include <memory>
 #include <string>
+#include <string_view>
+#include <system_error>
 
 #include "core/uring.h"
+#include "io/io.h"
+#include "util/uring/uring_file.h"
 
 namespace dfly {
 

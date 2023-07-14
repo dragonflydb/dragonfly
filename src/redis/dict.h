@@ -36,10 +36,13 @@
 #ifndef __DICT_H
 #define __DICT_H
 
-#include "mt19937-64.h"  // ROMAN: needed by dictGetFairRandomKey
 #include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
+
+#include "mt19937-64.h"  // ROMAN: needed by dictGetFairRandomKey
+
+struct dict;
 
 #define DICT_OK 0
 #define DICT_ERR 1

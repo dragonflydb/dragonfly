@@ -5,13 +5,32 @@
 #include "server/tiered_storage.h"
 
 extern "C" {
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/flags/flag.h"
+#include "absl/hash/hash.h"
+#include "absl/meta/type_traits.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "core/compact_object.h"
+#include "core/dash.h"
+#include "core/dash_internal.h"
+#include "glog/logging.h"
+#include "io/io.h"
 #include "redis/object.h"
+#include "util/fibers/proactor_base.h"
 }
 
 #include <mimalloc.h>
+#include <sys/types.h>
 
-#include "base/flags.h"
-#include "base/logging.h"
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <ostream>
+#include <type_traits>
+#include <utility>
+
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 

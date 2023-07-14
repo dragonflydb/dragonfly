@@ -7,6 +7,12 @@
 #include <absl/container/btree_map.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
+#include <stddef.h>
+
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include "base/string_view_sso.h"
 #include "server/common.h"
@@ -14,6 +20,7 @@
 namespace dfly {
 
 class Transaction;
+class EngineShard;
 
 class BlockingController {
  public:

@@ -7,14 +7,25 @@
 #include <absl/container/flat_hash_map.h>
 
 #include <array>
+#include <memory>
 #include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
+#include "core/fibers.h"
+#include "facade/facade_types.h"
+#include "io/io.h"
+#include "server/common.h"
 #include "server/conn_context.h"
+#include "util/fibers/synchronization.h"
 
 namespace dfly {
 
 class EngineShardSet;
 class Interpreter;
+class ConnectionContext;
 
 // This class has a state through the lifetime of a server because it manipulates scripts
 class ScriptMgr {

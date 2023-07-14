@@ -4,7 +4,9 @@
 #pragma once
 
 #include <absl/container/inlined_vector.h>
+#include <stddef.h>
 
+#include <cstdint>
 #include <memory>
 #include <utility>
 #include <vector>

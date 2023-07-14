@@ -4,25 +4,52 @@
 
 #include "server/cluster/cluster_family.h"
 
-#include <jsoncons/json.hpp>
+#include <stdlib.h>
+
+#include <algorithm>
+#include <boost/context/detail/exception.hpp>
+#include <cstdint>
+#include <ext/alloc_traits.h>
+#include <jsoncons/basic_json.hpp>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <ostream>
 #include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
-#include "base/flags.h"
-#include "base/logging.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/flags/declare.h"
+#include "absl/flags/flag.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
+#include "core/fibers.h"
 #include "core/json_object.h"
+#include "facade/conn_context.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
+#include "facade/reply_builder.h"
+#include "glog/logging.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
+#include "server/db_slice.h"
 #include "server/dflycmd.h"
+#include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
+#include "server/journal/types.h"
 #include "server/main_service.h"
 #include "server/replica.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
+#include "server/table.h"
+#include "util/fibers/proactor_base.h"
+#include "util/fibers/synchronization.h"
+#include "util/proactor_pool.h"
 
 ABSL_FLAG(std::string, cluster_mode, "",
           "Cluster mode supported."

@@ -3,11 +3,32 @@
 //
 #include "server/replica.h"
 
+#include "absl/container/inlined_vector.h"
+#include "absl/flags/declare.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/string_view.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
+#include "absl/types/span.h"
+#include "absl/types/variant.h"
+#include "base/expected.hpp"
+#include "base/integral_types.h"
+#include "core/external_alloc.h"
+#include "facade/conn_context.h"
+#include "facade/reply_builder.h"
+#include "glog/logging.h"
+#include "io/io.h"
+#include "redis/redis_aux.h"
+#include "server/conn_context.h"
+#include "server/engine_shard_set.h"
+#include "util/fiber_socket_base.h"
+#include "util/fibers/detail/wait_queue.h"
+#include "util/fibers/proactor_base.h"
+#include "util/proactor_pool.h"
 
-extern "C" {
-#include "redis/rdb.h"
-}
+extern "C" {}
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/flags/flag.h>
@@ -15,10 +36,23 @@ extern "C" {
 #include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <string.h>
+#include <sys/socket.h>
 
+#include <algorithm>
+#include <boost/asio/detail/type_traits.hpp>
+#include <boost/asio/ip/address.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/context/detail/exception.hpp>
+#include <cstdint>
+#include <ext/alloc_traits.h>
+#include <mutex>
+#include <ostream>
+#include <type_traits>
 
-#include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/redis_parser.h"
 #include "server/error.h"

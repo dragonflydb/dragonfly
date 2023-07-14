@@ -4,20 +4,37 @@
 
 #include "server/snapshot.h"
 
-extern "C" {
-#include "redis/object.h"
-}
+extern "C" {}
 
 #include <absl/functional/bind_front.h>
-#include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
+#include <bits/chrono.h>
+#include <time.h>
 
-#include "base/logging.h"
+#include <boost/context/detail/exception.hpp>
+#include <boost/smart_ptr/detail/operator_bool.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <cstdint>
+#include <ostream>
+#include <string_view>
+#include <system_error>
+#include <type_traits>
+#include <utility>
+#include <variant>
+
+#include "absl/container/flat_hash_map.h"
+#include "core/dash.h"
+#include "core/dash_internal.h"
+#include "glog/logging.h"
+#include "io/file.h"
+#include "io/io.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
-#include "server/rdb_extensions.h"
+#include "server/journal/types.h"
 #include "server/rdb_save.h"
+#include "util/fibers/detail/wait_queue.h"
+#include "util/fibers/proactor_base.h"
 
 namespace dfly {
 

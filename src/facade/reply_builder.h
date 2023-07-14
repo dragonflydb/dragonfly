@@ -4,12 +4,25 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <stddef.h>
 
+#include <cstdint>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <system_error>
+#include <utility>
+#include <variant>
+#include <vector>
 
+#include "absl/types/span.h"
 #include "facade/op_status.h"
 #include "io/io.h"
+
+namespace io {
+class Sink;
+}  // namespace io
+struct iovec;
 
 namespace facade {
 

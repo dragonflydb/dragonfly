@@ -4,7 +4,12 @@
 
 #pragma once
 
+#include <stddef.h>
+#include <stdint.h>
+
+#include <experimental/memory_resource>
 #include <string_view>
+#include <vector>
 
 #include "core/dense_set.h"
 

@@ -5,8 +5,9 @@
 #include "core/search/vector.h"
 
 #include <cmath>
+#include <cstddef>
 
-#include "base/logging.h"
+#include "glog/logging.h"
 
 namespace dfly::search {
 

@@ -31,6 +31,8 @@
 #ifndef _ZIPLIST_H
 #define _ZIPLIST_H
 
+#include <stddef.h>
+
 #define ZIPLIST_HEAD 0
 #define ZIPLIST_TAIL 1
 

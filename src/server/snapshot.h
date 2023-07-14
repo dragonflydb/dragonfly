@@ -4,14 +4,25 @@
 
 #pragma once
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include <atomic>
 #include <bitset>
+#include <memory>
+#include <optional>
+#include <string>
 
+#include "base/mpmc_bounded_queue.h"
 #include "base/pod_array.h"
+#include "core/fibers.h"
 #include "io/file.h"
+#include "server/common.h"
 #include "server/db_slice.h"
 #include "server/rdb_save.h"
 #include "server/table.h"
+#include "util/fibers/fiber2.h"
+#include "util/fibers/simple_channel.h"
 
 namespace dfly {
 

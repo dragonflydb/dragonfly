@@ -2,6 +2,8 @@
 // See LICENSE for licensing terms.
 //
 
+#include <stdint.h>
+
 #include <system_error>
 
 #include "base/expected.hpp"

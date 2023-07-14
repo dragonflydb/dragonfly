@@ -9,6 +9,7 @@
 #include <string>
 
 #include "base/mutex.h"
+#include "facade/facade_types.h"
 #include "server/common.h"
 
 namespace dfly {

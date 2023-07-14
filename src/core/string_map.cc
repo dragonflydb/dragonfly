@@ -4,10 +4,13 @@
 
 #include "core/string_map.h"
 
-#include "base/endian.h"
-#include "base/logging.h"
+#include <string.h>
+
+#include <fstream>
+
 #include "core/compact_object.h"
 #include "core/sds_utils.h"
+#include "glog/logging.h"
 
 extern "C" {
 #include "redis/zmalloc.h"

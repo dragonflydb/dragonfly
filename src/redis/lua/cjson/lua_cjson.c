@@ -42,6 +42,8 @@
 #include <limits.h>
 #include <lua.h>
 #include <lauxlib.h>
+#include <stdio.h>
+#include <strings.h>
 
 #include "strbuf.h"
 #include "fpconv.h"

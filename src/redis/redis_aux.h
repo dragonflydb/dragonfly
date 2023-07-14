@@ -1,6 +1,9 @@
 #ifndef __REDIS_AUX_H
 #define __REDIS_AUX_H
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include "dict.h"
 #include "sds.h"
 

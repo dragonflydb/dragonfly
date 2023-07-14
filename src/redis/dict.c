@@ -37,7 +37,6 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
-#include <stdarg.h>
 #include <limits.h>
 #include <sys/time.h>
 

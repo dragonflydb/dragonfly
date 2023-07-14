@@ -4,12 +4,18 @@
 
 #pragma once
 
+#include <iosfwd>
 #include <memory>
+#include <optional>
 #include <stack>
+#include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 #include <vector>
 
+#include "absl/types/span.h"
+#include "facade/op_status.h"
 #include "facade/reply_builder.h"
 
 namespace facade {

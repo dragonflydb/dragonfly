@@ -5,6 +5,8 @@
 #pragma once
 
 #include <memory>
+#include <string>
+#include <utility>
 
 #include "core/search/ast_expr.h"
 #include "core/search/base.h"

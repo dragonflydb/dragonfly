@@ -6,6 +6,7 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/random/random.h>
+#include <stdint.h>
 
 #include <string>
 #include <string_view>

@@ -10,19 +10,62 @@
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_replace.h>
 #include <absl/strings/strip.h>
+#include <bits/chrono.h>
+#include <bits/types/struct_rusage.h>
+#include <fcntl.h>
+#include <math.h>
+#include <stdlib.h>
 #include <sys/resource.h>
+#include <unistd.h>
 
 #include <algorithm>
-#include <chrono>
+#include <boost/beast/core/impl/buffers_cat.hpp>
+#include <boost/beast/core/impl/buffers_prefix.hpp>
+#include <boost/beast/core/impl/buffers_suffix.hpp>
+#include <boost/beast/http/impl/message.hpp>
+#include <boost/beast/http/message.hpp>
+#include <boost/beast/http/status.hpp>
+#include <boost/context/detail/exception.hpp>
+#include <boost/intrusive/detail/list_iterator.hpp>
+#include <boost/intrusive/detail/tree_iterator.hpp>
+#include <boost/smart_ptr/detail/operator_bool.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <boost/utility/string_view.hpp>
+#include <ctime>
+#include <ext/alloc_traits.h>
 #include <filesystem>
+#include <mutex>
 #include <optional>
+#include <sstream>
+#include <type_traits>
 
 extern "C" {
+#include "absl/container/flat_hash_map.h"
+#include "absl/flags/declare.h"
+#include "absl/flags/flag.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "absl/time/clock.h"
+#include "absl/types/span.h"
+#include "base/expected.hpp"
+#include "core/uring.h"
+#include "facade/conn_context.h"
+#include "facade/dragonfly_listener.h"
+#include "facade/error.h"
+#include "facade/op_status.h"
+#include "facade/reply_builder.h"
+#include "glog/logging.h"
+#include "io/file.h"
 #include "redis/redis_aux.h"
+#include "server/cluster/cluster_family.h"
+#include "util/fibers/detail/result_mover.h"
+#include "util/fibers/fiberqueue_threadpool.h"
+#include "util/http/http_handler.h"
+#include "util/http/http_server_utils.h"
+#include "util/proactor_pool.h"
 }
 
-#include "base/flags.h"
-#include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "io/file_util.h"
 #include "io/proc_reader.h"
@@ -49,6 +92,12 @@ extern "C" {
 #include "util/cloud/s3.h"
 #include "util/fibers/fiber_file.h"
 #include "util/uring/uring_file.h"
+
+namespace util {
+class Connection;
+}  // namespace util
+struct iovec;
+struct timeval;
 
 using namespace std;
 

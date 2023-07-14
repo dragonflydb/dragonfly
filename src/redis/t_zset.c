@@ -67,6 +67,7 @@
 #include "zmalloc.h"
 #include "zset.h"
 #include "util.h"
+#include "redis/dict.h"
 
 /*-----------------------------------------------------------------------------
  * Skiplist implementation of the low level API

@@ -4,13 +4,28 @@
 
 #include "server/blocking_controller.h"
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <stdint.h>
+
+#include <algorithm>
+#include <deque>
+#include <ostream>
+#include <utility>
 
 extern "C" {
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/hash/hash.h"
+#include "absl/meta/type_traits.h"
+#include "absl/types/span.h"
+#include "base/string_view_sso.h"
+#include "core/compact_object.h"
+#include "core/dash_internal.h"
+#include "glog/logging.h"
 #include "redis/object.h"
+#include "server/db_slice.h"
+#include "server/table.h"
 }
 
-#include "base/logging.h"
 #include "server/engine_shard_set.h"
 #include "server/transaction.h"
 

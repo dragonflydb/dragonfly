@@ -2,30 +2,76 @@
 // Copyright 2023, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
-
-#ifdef NDEBUG
-#include <mimalloc-new-delete.h>
-#endif
-
 #include <absl/flags/usage.h>
 #include <absl/flags/usage_config.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
 #include <absl/strings/strip.h>
+#include <bits/chrono.h>
+#include <errno.h>
 #include <liburing.h>
+#include <liburing/io_uring.h>
+#include <math.h>
 #include <mimalloc.h>
 #include <openssl/err.h>
+#include <openssl/opensslv.h>
 #include <signal.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
+#include <algorithm>
+#include <atomic>
+#include <boost/beast/core/detail/buffers_range_adaptor.hpp>
+#include <boost/beast/core/impl/buffers_cat.hpp>
+#include <boost/beast/core/impl/buffers_prefix.hpp>
+#include <boost/beast/core/impl/buffers_suffix.hpp>
+#include <boost/beast/core/string_type.hpp>
+#include <boost/beast/http/field.hpp>
+#include <boost/beast/http/impl/basic_parser.hpp>
+#include <boost/beast/http/impl/fields.hpp>
+#include <boost/beast/http/impl/message.hpp>
+#include <boost/beast/http/impl/serializer.hpp>
+#include <boost/beast/http/message.hpp>
+#include <boost/beast/http/status.hpp>
+#include <boost/beast/http/string_body.hpp>
+#include <boost/beast/http/verb.hpp>
+#include <boost/context/detail/exception.hpp>
+#include <boost/intrusive/detail/list_iterator.hpp>
+#include <boost/intrusive/detail/tree_iterator.hpp>
+#include <boost/utility/string_view.hpp>
+#include <cstdint>
+#include <functional>
 #include <iostream>
+#include <limits>
+#include <memory>
+#include <optional>
 #include <regex>
+#include <stdexcept>
+#include <string>
+#include <system_error>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
+#include "absl/flags/declare.h"
+#include "absl/flags/flag.h"
+#include "absl/strings/ascii.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/string_view.h"
+#include "base/expected.hpp"
 #include "base/init.h"
 #include "base/proc_util.h"  // for GetKernelVersion
+#include "core/external_alloc.h"
+#include "core/fibers.h"
 #include "facade/dragonfly_listener.h"
+#include "facade/facade_types.h"
+#include "glog/logging.h"
 #include "io/file.h"
 #include "io/file_util.h"
+#include "io/io.h"
 #include "io/proc_reader.h"
 #include "server/common.h"
 #include "server/generic_family.h"
@@ -33,9 +79,13 @@
 #include "server/version.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
+#include "util/fibers/detail/result_mover.h"
+#include "util/fibers/fiber2.h"
 #include "util/fibers/pool.h"
+#include "util/fibers/proactor_base.h"
+#include "util/fibers/synchronization.h"
 #include "util/http/http_client.h"
-#include "util/varz.h"
+#include "util/proactor_pool.h"
 
 #define STRING_PP_NX(A) #A
 #define STRING_MAKE_PP(A) STRING_PP_NX(A)

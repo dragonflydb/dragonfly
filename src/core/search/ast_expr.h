@@ -4,11 +4,15 @@
 
 #pragma once
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include <algorithm>
 #include <iostream>
 #include <memory>
 #include <ostream>
 #include <regex>
+#include <string>
 #include <variant>
 #include <vector>
 

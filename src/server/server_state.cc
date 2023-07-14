@@ -6,13 +6,19 @@
 
 #include <mimalloc.h>
 
+#include <algorithm>
+#include <cstdint>
+#include <ostream>
+
 extern "C" {
+#include "absl/flags/flag.h"
+#include "absl/hash/hash.h"
+#include "absl/strings/string_view.h"
+#include "glog/logging.h"
 #include "redis/zmalloc.h"
+#include "util/fibers/proactor_base.h"
 }
 
-#include "base/flags.h"
-#include "base/logging.h"
-#include "facade/conn_context.h"
 #include "server/journal/journal.h"
 
 ABSL_FLAG(uint32_t, interpreter_per_thread, 10, "Lua interpreters per thread");

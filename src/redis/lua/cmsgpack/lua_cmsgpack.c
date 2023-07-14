@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <string.h>
 #include <assert.h>
+#include <limits.h>
+#include <luaconf.h>
 
 #include "lua.h"
 #include "lauxlib.h"

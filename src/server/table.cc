@@ -4,8 +4,16 @@
 
 #include "server/table.h"
 
-#include "base/flags.h"
-#include "base/logging.h"
+#include <stddef.h>
+
+#include <ostream>
+
+#include "absl/container/flat_hash_map.h"
+#include "absl/flags/flag.h"
+#include "absl/meta/type_traits.h"
+#include "absl/strings/string_view.h"
+#include "glog/logging.h"
+#include "server/cluster/cluster_config.h"
 
 ABSL_FLAG(bool, enable_top_keys_tracking, false,
           "Enables / disables tracking of hot keys debugging feature");

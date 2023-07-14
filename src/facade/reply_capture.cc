@@ -3,7 +3,10 @@
 //
 #include "facade/reply_capture.h"
 
-#include "base/logging.h"
+#include <ext/alloc_traits.h>
+#include <type_traits>
+
+#include "glog/logging.h"
 #include "reply_capture.h"
 
 #define SKIP_LESS(needed)     \

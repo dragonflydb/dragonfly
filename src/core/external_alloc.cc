@@ -6,10 +6,16 @@
 
 #include <mimalloc.h>
 
+#include <algorithm>
 #include <bitset>
 #include <cstring>
+#include <new>
+#include <optional>
+#include <ostream>
+#include <utility>
 
-#include "base/logging.h"
+#include "absl/base/macros.h"
+#include "glog/logging.h"
 
 namespace dfly {
 using namespace std;

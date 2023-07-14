@@ -4,13 +4,21 @@
 
 #pragma once
 
+#include <stdint.h>
+
+#include <optional>
+#include <string_view>
+
+#include "facade/facade_types.h"
 #include "server/cluster/cluster_config.h"
+#include "server/common.h"
 #include "server/conn_context.h"
 
 namespace dfly {
 
 class EngineShardSet;
 class ServerFamily;
+class ConnectionContext;
 
 class DebugCmd {
  private:

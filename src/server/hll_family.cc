@@ -4,16 +4,38 @@
 
 #include "server/hll_family.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <ext/alloc_traits.h>
+#include <new>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
 extern "C" {
+#include "absl/types/span.h"
+#include "core/compact_object.h"
+#include "core/dash.h"
+#include "core/dash_internal.h"
+#include "facade/conn_context.h"
+#include "facade/facade_types.h"
+#include "facade/op_status.h"
+#include "facade/reply_builder.h"
+#include "glog/logging.h"
 #include "redis/hyperloglog.h"
+#include "redis/object.h"
+#include "server/common.h"
+#include "server/db_slice.h"
+#include "server/table.h"
 }
 
-#include "base/logging.h"
-#include "base/stl_util.h"
 #include "facade/error.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
-#include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/transaction.h"
 

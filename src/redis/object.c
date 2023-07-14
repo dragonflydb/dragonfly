@@ -28,10 +28,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <math.h>
-#include <ctype.h>
 #include <string.h>
-#include <stdlib.h>
 #include <time.h>
 
 #include "intset.h"
@@ -43,6 +40,8 @@
 #include "quicklist.h"
 #include "util.h"
 #include "zmalloc.h"
+#include "redis/dict.h"
+#include "redis/sds.h"
 
 #ifdef __CYGWIN__
 #define strtold(a,b) ((long double)strtod((a),(b)))

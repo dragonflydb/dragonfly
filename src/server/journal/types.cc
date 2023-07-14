@@ -4,6 +4,13 @@
 
 #include "server/journal/types.h"
 
+#include <stddef.h>
+
+#include <type_traits>
+#include <vector>
+
+#include "absl/strings/str_cat.h"
+
 namespace dfly::journal {
 
 std::string Entry::ToString() const {

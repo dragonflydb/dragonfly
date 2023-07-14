@@ -4,13 +4,36 @@
 
 #include "server/db_slice.h"
 
+#include <bits/utility.h>
+#include <mimalloc.h>
+
+#include <algorithm>
+#include <atomic>
+#include <boost/context/detail/exception.hpp>
+#include <boost/smart_ptr/intrusive_ref_counter.hpp>
+#include <cstdint>
+#include <new>
+#include <ostream>
+#include <string>
+#include <type_traits>
+
 extern "C" {
+#include "absl/base/macros.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/meta/type_traits.h"
+#include "absl/types/span.h"
+#include "core/compact_object.h"
+#include "core/fibers.h"
+#include "core/json_object.h"
+#include "glog/logging.h"
 #include "redis/object.h"
+#include "server/detail/table.h"
+#include "server/top_keys.h"
+#include "util/fibers/detail/wait_queue.h"
+#include "util/fibers/fiber2.h"
 }
 
-#include "base/logging.h"
 #include "server/engine_shard_set.h"
-#include "server/journal/journal.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
 

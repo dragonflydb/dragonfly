@@ -4,6 +4,8 @@
 
 #include "core/sds_utils.h"
 
+#include <stddef.h>
+
 extern "C" {
 #include "redis/sds.h"
 #include "redis/zmalloc.h"

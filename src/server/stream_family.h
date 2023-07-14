@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "facade/facade_types.h"
 #include "server/common.h"
 
 namespace dfly {

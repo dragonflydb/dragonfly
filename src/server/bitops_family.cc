@@ -4,13 +4,43 @@
 
 #include "server/bitops_family.h"
 
+#include <algorithm>
+#include <array>
 #include <bitset>
+#include <cstddef>
+#include <cstdint>
+#include <ext/alloc_traits.h>
+#include <iterator>
+#include <limits>
+#include <memory>
+#include <new>
+#include <numeric>
+#include <ostream>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 extern "C" {
+#include "absl/numeric/bits.h"
+#include "absl/strings/numbers.h"
+#include "absl/types/span.h"
+#include "core/compact_object.h"
+#include "core/dash.h"
+#include "core/dash_internal.h"
+#include "facade/conn_context.h"
+#include "facade/error.h"
+#include "facade/facade_types.h"
+#include "facade/op_status.h"
+#include "facade/reply_builder.h"
+#include "glog/logging.h"
 #include "redis/object.h"
+#include "server/db_slice.h"
+#include "server/table.h"
 }
 
-#include "base/logging.h"
 #include "server/command_registry.h"
 #include "server/common.h"
 #include "server/conn_context.h"
@@ -18,7 +48,6 @@ extern "C" {
 #include "server/error.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
-#include "util/varz.h"
 
 namespace dfly {
 using namespace facade;

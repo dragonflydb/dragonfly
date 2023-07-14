@@ -6,8 +6,11 @@
 
 #include <absl/container/btree_map.h>
 #include <absl/container/btree_set.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #include <optional>
+#include <utility>
 
 namespace dfly {
 

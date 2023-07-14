@@ -6,27 +6,58 @@
 
 extern "C" {
 
+#include "absl/flags/declare.h"
+#include "absl/flags/flag.h"
+#include "absl/strings/numbers.h"
+#include "absl/time/clock.h"
+#include "absl/types/span.h"
+#include "base/expected.hpp"
+#include "core/compact_object.h"
+#include "core/external_alloc.h"
+#include "core/fibers.h"
+#include "facade/facade_types.h"
+#include "glog/logging.h"
+#include "redis/dict.h"
 #include "redis/intset.h"
 #include "redis/listpack.h"
 #include "redis/lzfP.h" /* LZF compression library */
+#include "redis/object.h"
+#include "redis/quicklist.h"
+#include "redis/rax.h"
 #include "redis/rdb.h"
+#include "redis/redis_aux.h"
+#include "redis/sds.h"
 #include "redis/stream.h"
 #include "redis/util.h"
 #include "redis/ziplist.h"
 #include "redis/zmalloc.h"
 #include "redis/zset.h"
+#include "server/db_slice.h"
+#include "server/journal/types.h"
+#include "server/table.h"
+#include "util/fibers/detail/wait_queue.h"
+#include "util/fibers/fiber2.h"
+#include "util/fibers/synchronization.h"
 }
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <lz4frame.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
 #include <zstd.h>
 
-#include <jsoncons/json.hpp>
+#include <cmath>
+#include <ext/alloc_traits.h>
+#include <jsoncons/json_array.hpp>
+#include <limits>
+#include <ostream>
+#include <string_view>
+#include <type_traits>
 
 #include "base/endian.h"
-#include "base/flags.h"
-#include "base/logging.h"
 #include "core/json_object.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
@@ -42,6 +73,10 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/set_family.h"
 #include "strings/human_readable.h"
+
+namespace dfly {
+class Interpreter;
+}  // namespace dfly
 
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
