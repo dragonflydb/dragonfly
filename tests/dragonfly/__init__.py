@@ -34,7 +34,7 @@ class DflyInstance:
         self.args = args
         self.params = params
         self.proc = None
-        self._client : Optional[RedisClient] = None
+        self._client: Optional[RedisClient] = None
 
     def client(self) -> RedisClient:
         return RedisClient(port=self.port)
@@ -70,8 +70,7 @@ class DflyInstance:
             return
         base_args = [f"--{v}" for v in self.params.args]
         all_args = self.format_args(self.args) + base_args
-        print(
-            f"Starting instance on {self.port} with arguments {all_args} from {self.params.path}")
+        print(f"Starting instance on {self.port} with arguments {all_args} from {self.params.path}")
 
         run_cmd = [self.params.path, *all_args]
         if self.params.gdb:
@@ -82,8 +81,7 @@ class DflyInstance:
         if not self.params.existing_port:
             return_code = self.proc.poll()
             if return_code is not None:
-                raise Exception(
-                    f"Failed to start instance, return code {return_code}")
+                raise Exception(f"Failed to start instance, return code {return_code}")
 
     def __getitem__(self, k):
         return self.args.get(k)
@@ -93,11 +91,13 @@ class DflyInstance:
         if self.params.existing_port:
             return self.params.existing_port
         return int(self.args.get("port", "6379"))
+
     @property
     def admin_port(self) -> int:
         if self.params.existing_admin_port:
             return self.params.existing_admin_port
         return int(self.args.get("admin_port", "16379"))
+
     @property
     def mc_port(self) -> int:
         if self.params.existing_mc_port:
@@ -107,7 +107,7 @@ class DflyInstance:
     @staticmethod
     def format_args(args):
         out = []
-        for (k, v) in args.items():
+        for k, v in args.items():
             out.append(f"--{k}")
             if v is not None:
                 out.append(str(v))
@@ -118,7 +118,10 @@ class DflyInstance:
         resp = await session.get(f"http://localhost:{self.port}/metrics")
         data = await resp.text()
         await session.close()
-        return {metric_family.name : metric_family for metric_family in text_string_to_metric_families(data)}
+        return {
+            metric_family.name: metric_family
+            for metric_family in text_string_to_metric_families(data)
+        }
 
 
 class DflyInstanceFactory:
@@ -142,7 +145,7 @@ class DflyInstanceFactory:
         return instance
 
     def start_all(self, instances):
-        """ Start multiple instances in parallel """
+        """Start multiple instances in parallel"""
         for instance in instances:
             instance._start()
 
@@ -162,17 +165,17 @@ class DflyInstanceFactory:
 
 
 def dfly_args(*args):
-    """ Used to define a singular set of arguments for dragonfly test """
+    """Used to define a singular set of arguments for dragonfly test"""
     return pytest.mark.parametrize("df_factory", args, indirect=True)
 
 
 def dfly_multi_test_args(*args):
-    """ Used to define multiple sets of arguments to test multiple dragonfly configurations """
+    """Used to define multiple sets of arguments to test multiple dragonfly configurations"""
     return pytest.mark.parametrize("df_factory", args, indirect=True)
 
 
-class PortPicker():
-    """ A simple port manager to allocate available ports for tests """
+class PortPicker:
+    """A simple port manager to allocate available ports for tests"""
 
     def __init__(self):
         self.next_port = 5555
@@ -185,5 +188,6 @@ class PortPicker():
 
     def is_port_available(self, port):
         import socket
+
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            return s.connect_ex(('localhost', port)) != 0
+            return s.connect_ex(("localhost", port)) != 0

@@ -12,13 +12,17 @@ class RedisServer:
         self.proc = None
 
     def start(self):
-        self.proc = subprocess.Popen(["redis-server-6.2.11",
-                                      f"--port {self.port}",
-                                      "--save ''",
-                                      "--appendonly no",
-                                      "--protected-mode no",
-                                      "--repl-diskless-sync yes",
-                                      "--repl-diskless-sync-delay 0"])
+        self.proc = subprocess.Popen(
+            [
+                "redis-server-6.2.11",
+                f"--port {self.port}",
+                "--save ''",
+                "--appendonly no",
+                "--protected-mode no",
+                "--repl-diskless-sync yes",
+                "--repl-diskless-sync-delay 0",
+            ]
+        )
         print(self.proc.args)
 
     def stop(self):
@@ -27,6 +31,7 @@ class RedisServer:
             self.proc.wait(timeout=10)
         except Exception as e:
             pass
+
 
 # Checks that master redis and dragonfly replica are synced by writing a random key to master
 # and waiting for it to exist in replica. Foreach db in 0..dbcount-1.
@@ -58,7 +63,7 @@ async def await_synced_all(c_master, c_replicas):
 
 async def check_data(seeder, replicas, c_replicas):
     capture = await seeder.capture()
-    for (replica, c_replica) in zip(replicas, c_replicas):
+    for replica, c_replica in zip(replicas, c_replicas):
         await wait_available_async(c_replica)
         assert await seeder.compare(capture, port=replica.port)
 
@@ -84,7 +89,9 @@ full_sync_replication_specs = [
 
 
 @pytest.mark.parametrize("t_replicas, seeder_config", full_sync_replication_specs)
-async def test_replication_full_sync(df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config, port_picker):
+async def test_replication_full_sync(
+    df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config, port_picker
+):
     master = redis_server
     c_master = aioredis.Redis(port=master.port)
     assert await c_master.ping()
@@ -93,7 +100,8 @@ async def test_replication_full_sync(df_local_factory, df_seeder_factory, redis_
     await seeder.run(target_deviation=0.1)
 
     replica = df_local_factory.create(
-        port=port_picker.get_available_port(), proactor_threads=t_replicas[0])
+        port=port_picker.get_available_port(), proactor_threads=t_replicas[0]
+    )
     replica.start()
     c_replica = aioredis.Redis(port=replica.port)
     assert await c_replica.ping()
@@ -105,6 +113,7 @@ async def test_replication_full_sync(df_local_factory, df_seeder_factory, redis_
     capture = await seeder.capture()
     assert await seeder.compare(capture, port=replica.port)
 
+
 stable_sync_replication_specs = [
     ([1], dict(keys=100, dbcount=1, unsupported_types=[ValueType.JSON])),
     ([1], dict(keys=10_000, dbcount=2, unsupported_types=[ValueType.JSON])),
@@ -115,13 +124,16 @@ stable_sync_replication_specs = [
 
 
 @pytest.mark.parametrize("t_replicas, seeder_config", stable_sync_replication_specs)
-async def test_replication_stable_sync(df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config, port_picker):
+async def test_replication_stable_sync(
+    df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config, port_picker
+):
     master = redis_server
     c_master = aioredis.Redis(port=master.port)
     assert await c_master.ping()
 
     replica = df_local_factory.create(
-        port=port_picker.get_available_port(), proactor_threads=t_replicas[0])
+        port=port_picker.get_available_port(), proactor_threads=t_replicas[0]
+    )
     replica.start()
     c_replica = aioredis.Redis(port=replica.port)
     assert await c_replica.ping()
@@ -150,7 +162,9 @@ replication_specs = [
 
 
 @pytest.mark.parametrize("t_replicas, seeder_config", replication_specs)
-async def test_redis_replication_all(df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config, port_picker):
+async def test_redis_replication_all(
+    df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config, port_picker
+):
     master = redis_server
     c_master = aioredis.Redis(port=master.port)
     assert await c_master.ping()
@@ -178,11 +192,11 @@ async def test_redis_replication_all(df_local_factory, df_seeder_factory, redis_
         await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
         await wait_available_async(c_replica)
 
-    await asyncio.gather(*(asyncio.create_task(run_replication(c))
-                           for c in c_replicas))
+    await asyncio.gather(*(asyncio.create_task(run_replication(c)) for c in c_replicas))
 
     # Wait for streaming to finish
-    assert not stream_task.done(
+    assert (
+        not stream_task.done()
     ), "Weak testcase. Increase number of streamed iterations to surpass full sync"
     seeder.stop()
     await stream_task
@@ -206,7 +220,15 @@ master_disconnect_cases = [
 
 
 @pytest.mark.parametrize("t_replicas, t_disconnect, seeder_config", master_disconnect_cases)
-async def test_disconnect_master(df_local_factory, df_seeder_factory, redis_server, t_replicas, t_disconnect, seeder_config, port_picker):
+async def test_disconnect_master(
+    df_local_factory,
+    df_seeder_factory,
+    redis_server,
+    t_replicas,
+    t_disconnect,
+    seeder_config,
+    port_picker,
+):
     master = redis_server
     c_master = aioredis.Redis(port=master.port)
     assert await c_master.ping()
@@ -234,11 +256,11 @@ async def test_disconnect_master(df_local_factory, df_seeder_factory, redis_serv
         await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
         await wait_available_async(c_replica)
 
-    await asyncio.gather(*(asyncio.create_task(run_replication(c))
-                           for c in c_replicas))
+    await asyncio.gather(*(asyncio.create_task(run_replication(c)) for c in c_replicas))
 
     # Wait for streaming to finish
-    assert not stream_task.done(
+    assert (
+        not stream_task.done()
     ), "Weak testcase. Increase number of streamed iterations to surpass full sync"
     seeder.stop()
     await stream_task

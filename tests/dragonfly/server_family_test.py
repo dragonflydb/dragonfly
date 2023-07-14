@@ -5,7 +5,7 @@ from .utility import *
 
 def test_quit(connection):
     connection.send_command("QUIT")
-    assert connection.read_response() == b'OK'
+    assert connection.read_response() == b"OK"
 
     with pytest.raises(redis.exceptions.ConnectionError) as e:
         connection.read_response()
@@ -16,7 +16,7 @@ def test_quit_after_sub(connection):
     connection.read_response()
 
     connection.send_command("QUIT")
-    assert connection.read_response() == b'OK'
+    assert connection.read_response() == b"OK"
 
     with pytest.raises(redis.exceptions.ConnectionError) as e:
         connection.read_response()
@@ -30,7 +30,7 @@ async def test_multi_exec(async_client: aioredis.Redis):
     assert val == [True, "bar"]
 
 
-'''
+"""
 see https://github.com/dragonflydb/dragonfly/issues/457
 For now we would not allow for eval command inside multi
 As this would create to level transactions (in effect recursive call
@@ -38,7 +38,8 @@ to Schedule function).
 When this issue is fully fixed, this test would failed, and then it should
 change to match the fact that we supporting this operation.
 For now we are expecting to get an error
-'''
+"""
+
 
 @pytest.mark.skip("Skip until we decided on correct behaviour of eval inside multi")
 async def test_multi_eval(async_client: aioredis.Redis):
@@ -76,10 +77,12 @@ async def test_client_list(df_factory):
     instance.stop()
     await disconnect_clients(client, admin_client)
 
+
 async def test_scan(async_client: aioredis.Redis):
-    '''
+    """
     make sure that the scan command is working with python
-    '''
+    """
+
     def gen_test_data():
         for i in range(10):
             yield f"key-{i}", f"value-{i}"

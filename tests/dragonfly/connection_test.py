@@ -9,6 +9,7 @@ from . import DflyInstance, dfly_args
 
 BASE_PORT = 1111
 
+
 async def run_monitor_eval(monitor, expected):
     async with monitor as mon:
         count = 0
@@ -29,33 +30,32 @@ async def run_monitor_eval(monitor, expected):
                 return False
     return True
 
-'''
+
+"""
 Test issue https://github.com/dragonflydb/dragonfly/issues/756
 Monitor command do not return when we have lua script issue
-'''
+"""
 
 
 @pytest.mark.asyncio
 async def test_monitor_command_lua(async_pool):
-    expected = ["EVAL return redis",
-                "EVAL return redis", "SET foo2"]
+    expected = ["EVAL return redis", "EVAL return redis", "SET foo2"]
 
     conn = aioredis.Redis(connection_pool=async_pool)
     monitor = conn.monitor()
 
     cmd1 = aioredis.Redis(connection_pool=async_pool)
-    future = asyncio.create_task(run_monitor_eval(
-        monitor=monitor, expected=expected))
+    future = asyncio.create_task(run_monitor_eval(monitor=monitor, expected=expected))
     await asyncio.sleep(0.1)
 
     try:
         res = await cmd1.eval(r'return redis.call("GET", "bar")', 0)
-        assert False    # this will return an error
+        assert False  # this will return an error
     except Exception as e:
         assert "script tried accessing undeclared key" in str(e)
 
     try:
-        res = await cmd1.eval(r'return redis.call("SET", KEYS[1], ARGV[1])', 1, 'foo2', 'bar2')
+        res = await cmd1.eval(r'return redis.call("SET", KEYS[1], ARGV[1])', 1, "foo2", "bar2")
     except Exception as e:
         print(f"EVAL error: {e}")
         assert False
@@ -66,12 +66,12 @@ async def test_monitor_command_lua(async_pool):
     assert status
 
 
-'''
+"""
 Test the monitor command.
 Open connection which is used for monitoring
 Then send on other connection commands to dragonfly instance
 Make sure that we are getting the commands in the monitor context
-'''
+"""
 
 
 @pytest.mark.asyncio
@@ -101,9 +101,11 @@ async def process_cmd(monitor, key, value):
                 if "select" not in response["command"].lower():
                     success = verify_response(response, key, value)
                     if not success:
-                        print(
-                            f"failed to verify message {response} for {key}/{value}")
-                        return False, f"failed on the verification of the message {response} at {key}: {value}"
+                        print(f"failed to verify message {response} for {key}/{value}")
+                        return (
+                            False,
+                            f"failed on the verification of the message {response} at {key}: {value}",
+                        )
                     else:
                         return True, None
         except asyncio.TimeoutError:
@@ -146,11 +148,11 @@ async def run_monitor(messages: dict, pool: aioredis.ConnectionPool):
         return False, f"monitor result: {status}: {message}, set command success {success}"
 
 
-'''
+"""
 Run test in pipeline mode.
 This is mostly how this is done with python - its more like a transaction that
 the connections is running all commands in its context
-'''
+"""
 
 
 @pytest.mark.asyncio
@@ -194,12 +196,12 @@ async def run_pipeline_mode(async_client: aioredis.Redis, messages):
         return True, "all command processed successfully"
 
 
-'''
+"""
 Test the pipeline command
 Open connection to the subscriber and publish on the other end messages
 Make sure that we are able to send all of them and that we are getting the
 expected results on the subscriber side
-'''
+"""
 
 
 @pytest.mark.asyncio
@@ -232,7 +234,10 @@ async def run_pubsub(async_client, messages, channel_name):
     if status and success:
         return True, "successfully completed all"
     else:
-        return False, f"subscriber result: {status}: {message},  publisher publish: success {success}"
+        return (
+            False,
+            f"subscriber result: {status}: {message},  publisher publish: success {success}",
+        )
 
 
 async def run_multi_pubsub(async_client, messages, channel_name):
@@ -241,7 +246,8 @@ async def run_multi_pubsub(async_client, messages, channel_name):
         await s.subscribe(channel_name)
 
     tasks = [
-        asyncio.create_task(reader(s, messages, random.randint(0, len(messages)))) for s in subs]
+        asyncio.create_task(reader(s, messages, random.randint(0, len(messages)))) for s in subs
+    ]
 
     success = True
 
@@ -260,18 +266,18 @@ async def run_multi_pubsub(async_client, messages, channel_name):
     if success:
         for status, message in results:
             if not status:
-                return False,  f"failed to process {message}"
+                return False, f"failed to process {message}"
         return True, "success"
     else:
         return False, "failed to publish"
 
 
-'''
+"""
 Test with multiple subscribers for a channel
 We want to stress this to see if we have any issue
 with the pub sub code since we are "sharing" the message
 across multiple connections internally
-'''
+"""
 
 
 @pytest.mark.asyncio
@@ -279,6 +285,7 @@ async def test_multi_pubsub(async_client):
     def generate(max):
         for i in range(max):
             yield f"this is message number {i} from the publisher on the channel"
+
     messages = [a for a in generate(500)]
     state, message = await run_multi_pubsub(async_client, messages, "my-channel")
 
@@ -288,8 +295,13 @@ async def test_multi_pubsub(async_client):
 @pytest.mark.asyncio
 async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_connections=100):
     # TODO: I am not how to customize the max connections for the pool.
-    async_pool = aioredis.ConnectionPool(host="localhost", port=df_server.port,
-                                         db=0, decode_responses=True, max_connections=max_connections)
+    async_pool = aioredis.ConnectionPool(
+        host="localhost",
+        port=df_server.port,
+        db=0,
+        decode_responses=True,
+        max_connections=max_connections,
+    )
 
     async def publish_worker():
         client = aioredis.Redis(connection_pool=async_pool)
@@ -322,12 +334,12 @@ async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_co
 
 
 async def test_big_command(df_server, size=8 * 1024):
-    reader, writer = await asyncio.open_connection('127.0.0.1', df_server.port)
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
 
     writer.write(f"SET a {'v'*size}\n".encode())
     await writer.drain()
 
-    assert 'OK' in (await reader.readline()).decode()
+    assert "OK" in (await reader.readline()).decode()
 
     writer.close()
     await writer.wait_closed()
@@ -335,9 +347,8 @@ async def test_big_command(df_server, size=8 * 1024):
 
 async def test_subscribe_pipelined(async_client: aioredis.Redis):
     pipe = async_client.pipeline(transaction=False)
-    pipe.execute_command('subscribe channel').execute_command(
-        'subscribe channel')
-    await pipe.echo('bye bye').execute()
+    pipe.execute_command("subscribe channel").execute_command("subscribe channel")
+    await pipe.echo("bye bye").execute()
 
 
 async def test_subscribe_in_pipeline(async_client: aioredis.Redis):
@@ -349,8 +360,8 @@ async def test_subscribe_in_pipeline(async_client: aioredis.Redis):
     pipe.echo("three")
     res = await pipe.execute()
 
-    assert res == ['one', ['subscribe', 'ch1', 1],
-                   'two', ['subscribe', 'ch2', 2], 'three']
+    assert res == ["one", ["subscribe", "ch1", 1], "two", ["subscribe", "ch2", 2], "three"]
+
 
 """
 This test makes sure that Dragonfly can receive blocks of pipelined commands even
@@ -376,9 +387,13 @@ MGET m4 m5 m6
 MGET m7 m8 m9\n
 """
 
-PACKET3 = """
+PACKET3 = (
+    """
 PING
-""" * 500 + "ECHO DONE\n"
+"""
+    * 500
+    + "ECHO DONE\n"
+)
 
 
 async def test_parser_while_script_running(async_client: aioredis.Redis, df_server: DflyInstance):
@@ -386,7 +401,7 @@ async def test_parser_while_script_running(async_client: aioredis.Redis, df_serv
 
     # Use a raw tcp connection for strict control of sent commands
     # Below we send commands while the previous ones didn't finish
-    reader, writer = await asyncio.open_connection('localhost', df_server.port)
+    reader, writer = await asyncio.open_connection("localhost", df_server.port)
 
     # Send first pipeline packet, last commands is a long executing script
     writer.write(PACKET1.format(sha=sha).encode())
@@ -409,7 +424,9 @@ async def test_parser_while_script_running(async_client: aioredis.Redis, df_serv
 @dfly_args({"proactor_threads": 1})
 async def test_large_cmd(async_client: aioredis.Redis):
     MAX_ARR_SIZE = 65535
-    res = await async_client.hset('foo', mapping={f"key{i}": f"val{i}" for i in range(MAX_ARR_SIZE // 2)})
+    res = await async_client.hset(
+        "foo", mapping={f"key{i}": f"val{i}" for i in range(MAX_ARR_SIZE // 2)}
+    )
     assert res == MAX_ARR_SIZE // 2
 
     res = await async_client.mset({f"key{i}": f"val{i}" for i in range(MAX_ARR_SIZE // 2)})
@@ -421,7 +438,9 @@ async def test_large_cmd(async_client: aioredis.Redis):
 
 @pytest.mark.asyncio
 async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_local_factory):
-    server = df_local_factory.create(no_tls_on_admin_port="true", admin_port=1111, port=1211, **with_tls_server_args)
+    server = df_local_factory.create(
+        no_tls_on_admin_port="true", admin_port=1111, port=1211, **with_tls_server_args
+    )
     server.start()
 
     client = aioredis.Redis(port=server.port)
