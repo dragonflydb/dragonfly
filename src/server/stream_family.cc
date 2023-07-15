@@ -1655,11 +1655,37 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
       }
       return (*cntx)->SendError(result.status());
     } else if (sub_cmd == "STREAM") {
+      int full;
+      long count;
       auto cb = [&]() {
         EngineShard* shard = EngineShard::tlocal();
         DbContext db_context{.db_index = cntx->db_index(), .time_now_ms = GetCurrentTimeMs()};
         return OpStreams(db_context, key, shard);
       };
+
+      if (args.size() == 4) {
+        return (*cntx)->SendError(
+            "unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP.");
+      }
+
+      if (args.size() >= 3) {
+        full = 1;
+        string_view full_arg = ArgS(args, 2);
+        if (args.size() == 3) {
+          count = 10;  // default count for xinfo streams
+        } else {
+          string_view count_arg = ArgS(args, 3);
+          string_view count_value_arg = ArgS(args, 4);
+          if (full_arg != "full" || count_arg != "count") {
+            return (*cntx)->SendError(
+                "unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP.");
+          }
+
+          if (!absl::SimpleAtoi(count_value_arg, &count)) {
+            return (*cntx)->SendError(kInvalidIntErr);
+          }
+        }
+      }
 
       OpResult<StreamInfo> sinfo = shard_set->Await(sid, std::move(cb));
       if (sinfo) {
