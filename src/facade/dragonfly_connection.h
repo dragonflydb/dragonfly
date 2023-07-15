@@ -9,6 +9,9 @@
 #include <sys/socket.h>
 
 #include <deque>
+#include <memory>
+#include <string_view>
+#include <utility>
 #include <variant>
 
 #include "base/io_buf.h"
@@ -156,7 +159,7 @@ class Connection : public util::Connection {
   }
 
   void SetName(std::string name) {
-    name_ = name;
+    name_ = std::move(name);
   }
 
   std::string_view GetName() const {

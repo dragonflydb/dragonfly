@@ -6,6 +6,10 @@
 
 #include <gmock/gmock.h>
 
+#include <ostream>
+#include <string>
+#include <string_view>
+
 #include "facade/resp_expr.h"
 
 namespace facade {

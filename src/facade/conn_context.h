@@ -6,6 +6,8 @@
 
 #include <absl/container/flat_hash_set.h>
 
+#include <memory>
+
 #include "facade/facade_types.h"
 #include "facade/reply_builder.h"
 
