@@ -93,8 +93,8 @@ struct GroupInfo {
   streamID last_id;
   size_t pel_count;
   size_t entries_read;
-  vector<NACKInfo> streamNACKVec;
-  ConsumerInfo consumerInfo;
+  vector<NACKInfo> stream_nack_vec;
+  vector<ConsumerInfo> consumer_info_vec;
 };
 
 using GroupInfoVec = vector<GroupInfo>;
@@ -928,7 +928,7 @@ void getGroupPEL(stream* s, streamCG* cg, GroupInfo* ginfo, long long count) {
     arraylen_cg_pel++;
   }
   raxStop(&ri_cg_pel);
-  ginfo->streamNACKVec = nack_info_vec;
+  ginfo->stream_nack_vec = nack_info_vec;
 }
 
 void getConsumers(stream* s, streamCG* cg, GroupInfo* ginfo, long long count) {
@@ -963,9 +963,11 @@ void getConsumers(stream* s, streamCG* cg, GroupInfo* ginfo, long long count) {
       consumer_pel_vec.push_back(nack_info);
       arraylen_cpel++;
     }
+    consumer_info_vec.push_back(consumer_info);
     raxStop(&ri_cpel);
   }
   raxStop(&ri_consumers);
+  ginfo->consumer_info_vec = consumer_info_vec;
 }
 
 OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, EngineShard* shard) {
@@ -1004,7 +1006,8 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
       ginfo.pending_size = raxSize(cg->pel);
       getConsumerGroupLag(s, cg, &ginfo);
       ginfo.pel_count = raxSize(cg->pel);
-      getGroupPEL();
+      getGroupPEL(s, cg, &ginfo, 1);   // TODO : fix count
+      getConsumers(s, cg, &ginfo, 1);  // TODO : fix count
 
       group_info_vec.push_back(ginfo);
     }
@@ -1663,7 +1666,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
         string last_generated_id = StreamIdRepr(sinfo->last_generated_id);
         string max_deleted_entry_id = StreamIdRepr(sinfo->max_deleted_entry_id);
 
-        (*cntx)->StartCollection(9, RedisReplyBuilder::MAP);
+        (*cntx)->StartCollection(10, RedisReplyBuilder::MAP);
 
         (*cntx)->SendBulkString("length");
         (*cntx)->SendLong(sinfo->length);
@@ -1704,6 +1707,57 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
           (*cntx)->SendBulkString(k_v.second);
         }
 
+        (*cntx)->SendBulkString("groups");
+        (*cntx)->StartArray(sinfo->cgroups.size());
+        for (const auto& ginfo : sinfo->cgroups) {
+          (*cntx)->StartCollection(7, RedisReplyBuilder::MAP);
+
+          (*cntx)->SendBulkString("name");
+          (*cntx)->SendBulkString(ginfo.name);
+
+          (*cntx)->SendBulkString("last-delivered-id");
+          (*cntx)->SendBulkString(StreamIdRepr(ginfo.last_id));
+
+          (*cntx)->SendBulkString("entries-read");
+          (*cntx)->SendLong(ginfo.entries_read);
+
+          (*cntx)->SendBulkString("lag");
+          (*cntx)->SendLong(1);  // TODO : fix
+
+          (*cntx)->SendBulkString("pel-count");
+          (*cntx)->SendLong(ginfo.pel_count);
+
+          (*cntx)->SendBulkString("pending");
+          (*cntx)->SendLong(
+              ginfo.pending_size);  // TODO : fix this, has to be array of pending events.
+
+          (*cntx)->SendBulkString("consumers");
+          (*cntx)->StartArray(ginfo.consumer_info_vec.size());
+          for (const auto& consumer_info : ginfo.consumer_info_vec) {
+            (*cntx)->StartCollection(4, RedisReplyBuilder::MAP);
+
+            (*cntx)->SendBulkString("name");
+            (*cntx)->SendBulkString(consumer_info.name);
+
+            (*cntx)->SendBulkString("seen-time");
+            (*cntx)->SendBulkString(consumer_info.seen_time);
+
+            (*cntx)->SendBulkString("pel-count");
+            (*cntx)->SendLong(consumer_info.pel_count);
+
+            (*cntx)->SendBulkString("pending");
+            if (consumer_info.pending.size() == 0) {
+              (*cntx)->SendEmptyArray();
+            }
+            for (const auto& pending : consumer_info.pending) {
+              (*cntx)->StartArray(3);
+
+              (*cntx)->SendBulkString(StreamIdRepr(pending.pel_id));
+              (*cntx)->SendLong(pending.delivery_time);
+              (*cntx)->SendLong(pending.delivery_count);
+            }
+          }
+        }
         return;
       }
       // return (*cntx)->SendError(result.status());
