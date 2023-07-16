@@ -99,17 +99,6 @@ int decodeGeohash(double bits, double *xy) {
 }
 
 
-/* Input Argument Helper */
-/* Decode lat/long from a zset member's score.
- * Returns C_OK on successful decoding, otherwise C_ERR is returned. */
-int longLatFromMember(robj *zobj, robj *member, double *xy) {
-    double score = 0;
-
-    if (zsetScore(zobj, member->ptr, &score) == C_ERR) return C_ERR;
-    if (!decodeGeohash(score, xy)) return C_ERR;
-    return C_OK;
-}
-
 /* Helper function for geoGetPointsInRange(): given a sorted set score
  * representing a point, and a GeoShape, checks if the point is within the search area.
  *
@@ -140,6 +129,8 @@ int geoWithinShape(GeoShape *shape, double score, double *xy, double *distance) 
     }
     return C_OK;
 }
+
+#if 0
 
 /* Query a Redis sorted set to extract all the elements between 'min' and
  * 'max', appending them into the array of geoPoint structures 'geoArray'.
@@ -317,7 +308,6 @@ int membersOfAllNeighbors(robj *zobj, const GeoHashRadius *n, GeoShape *shape, g
     return count;
 }
 
-#if 0
 /* Sort comparators for qsort() */
 static int sort_gp_asc(const void *a, const void *b) {
     const struct geoPoint *gpa = a, *gpb = b;

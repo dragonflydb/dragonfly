@@ -4,6 +4,7 @@
 #include "server/container_utils.h"
 
 #include "base/logging.h"
+#include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
 #include "server/engine_shard_set.h"
@@ -139,29 +140,10 @@ bool IterateSortedSet(const detail::RobjWrapper* robj_wrapper, const IterateSort
     return success;
   } else {
     CHECK_EQ(robj_wrapper->encoding(), OBJ_ENCODING_SKIPLIST);
-    zset* zs = static_cast<zset*>(robj_wrapper->inner_obj());
-    zskiplist* zsl = zs->zsl;
-    zskiplistNode* ln;
-
-    /* Check if starting point is trivial, before doing log(N) lookup. */
-    if (reverse) {
-      ln = zsl->tail;
-      unsigned long llen = robj_wrapper->Size();
-      if (start > 0)
-        ln = zslGetElementByRank(zsl, llen - start);
-    } else {
-      ln = zsl->header->level[0].forward;
-      if (start > 0)
-        ln = zslGetElementByRank(zsl, start + 1);
-    }
-
-    bool success = true;
-    while (success && rangelen--) {
-      DCHECK(ln != NULL);
-      success = func(ContainerEntry{ln->ele, sdslen(ln->ele)}, ln->score);
-      ln = reverse ? ln->backward : ln->level[0].forward;
-    }
-    return success;
+    detail::SortedMap* smap = (detail::SortedMap*)robj_wrapper->inner_obj();
+    return smap->Iterate(start, rangelen, reverse, [&](sds ele, double score) {
+      return func(ContainerEntry{ele, sdslen(ele)}, score);
+    });
   }
   return false;
 }
