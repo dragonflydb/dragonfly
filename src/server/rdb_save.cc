@@ -321,7 +321,7 @@ error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
   }
 
   if (obj_type == OBJ_ZSET) {
-    return SaveZSetObject(pv.AsRObj());
+    return SaveZSetObject(pv);
   }
 
   if (obj_type == OBJ_STREAM) {
@@ -441,10 +441,11 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
   return error_code{};
 }
 
-error_code RdbSerializer::SaveZSetObject(const robj* obj) {
-  DCHECK_EQ(OBJ_ZSET, obj->type);
-  if (obj->encoding == OBJ_ENCODING_SKIPLIST) {
-    zset* zs = (zset*)obj->ptr;
+error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
+  DCHECK_EQ(OBJ_ZSET, pv.ObjType());
+  const detail::RobjWrapper* robj_wrapper = pv.GetRobjWrapper();
+  if (pv.Encoding() == OBJ_ENCODING_SKIPLIST) {
+    zset* zs = (zset*)robj_wrapper->inner_obj();
     zskiplist* zsl = zs->zsl;
 
     RETURN_ON_ERR(SaveLen(zsl->length));
@@ -462,8 +463,8 @@ error_code RdbSerializer::SaveZSetObject(const robj* obj) {
       zn = zn->backward;
     }
   } else {
-    CHECK_EQ(obj->encoding, unsigned(OBJ_ENCODING_LISTPACK)) << "Unknown zset encoding";
-    uint8_t* lp = (uint8_t*)obj->ptr;
+    CHECK_EQ(pv.Encoding(), unsigned(OBJ_ENCODING_LISTPACK)) << "Unknown zset encoding";
+    uint8_t* lp = (uint8_t*)robj_wrapper->inner_obj();
     RETURN_ON_ERR(SaveListPackAsZiplist(lp));
   }
 

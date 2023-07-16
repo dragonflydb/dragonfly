@@ -923,7 +923,8 @@ template <typename F> bool Iterate(const PrimeValue& pv, F&& func) {
       return container_utils::IterateSet(pv, cb);
     case OBJ_ZSET:
       return container_utils::IterateSortedSet(
-          pv.AsRObj(), [&cb](container_utils::ContainerEntry ce, double) { return cb(ce); });
+          pv.GetRobjWrapper(),
+          [&cb](container_utils::ContainerEntry ce, double) { return cb(ce); });
     default:
       return false;
   }

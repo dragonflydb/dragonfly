@@ -58,11 +58,18 @@ class RobjWrapper {
     return inner_obj_;
   }
 
+  void set_inner_obj(void* ptr) {
+    inner_obj_ = ptr;
+  }
+
   std::string_view AsView() const {
     return std::string_view{reinterpret_cast<char*>(inner_obj_), sz_};
   }
 
   bool DefragIfNeeded(float ratio);
+
+  // as defined in zset.h
+  int ZsetAdd(double score, char* ele, int in_flags, int* out_flags, double* newscore);
 
  private:
   bool Reallocate(MemoryResource* mr);
@@ -94,7 +101,13 @@ class CompactObj {
   CompactObj(const CompactObj&) = delete;
 
   // 0-16 is reserved for inline lengths of string type.
-  enum TagEnum { INT_TAG = 17, SMALL_TAG = 18, ROBJ_TAG = 19, EXTERNAL_TAG = 20, JSON_TAG = 21 };
+  enum TagEnum {
+    INT_TAG = 17,
+    SMALL_TAG = 18,
+    ROBJ_TAG = 19,
+    EXTERNAL_TAG = 20,
+    JSON_TAG = 21,
+  };
 
   enum MaskBit {
     REF_BIT = 1,
@@ -245,7 +258,7 @@ class CompactObj {
 
   robj* AsRObj() const;
 
-  // takes ownership over obj.
+  // takes ownership over obj_inner.
   // type should not be OBJ_STRING.
   void InitRobj(unsigned type, unsigned encoding, void* obj_inner);
 
@@ -256,6 +269,15 @@ class CompactObj {
   // For STR object.
   void SetInt(int64_t val);
   std::optional<int64_t> TryGetInt() const;
+
+  // We temporary expose this function to avoid passing around robj objects.
+  detail::RobjWrapper* GetRobjWrapper() {
+    return &u_.r_obj;
+  }
+
+  const detail::RobjWrapper* GetRobjWrapper() const {
+    return &u_.r_obj;
+  }
 
   // For STR object.
   void SetString(std::string_view str);

@@ -69,6 +69,76 @@ inline void YieldIfNeeded(size_t i) {
   }
 }
 
+// taken from zset.c
+unsigned char* zzlInsertAt(unsigned char* zl, unsigned char* eptr, sds ele, double score) {
+  unsigned char* sptr;
+  char scorebuf[128];
+  int scorelen;
+
+  scorelen = d2string(scorebuf, sizeof(scorebuf), score);
+  if (eptr == NULL) {
+    zl = lpAppend(zl, (unsigned char*)ele, sdslen(ele));
+    zl = lpAppend(zl, (unsigned char*)scorebuf, scorelen);
+  } else {
+    /* Insert member before the element 'eptr'. */
+    zl = lpInsertString(zl, (unsigned char*)ele, sdslen(ele), eptr, LP_BEFORE, &sptr);
+
+    /* Insert score after the member. */
+    zl = lpInsertString(zl, (unsigned char*)scorebuf, scorelen, sptr, LP_AFTER, NULL);
+  }
+  return zl;
+}
+
+// taken from zset.c
+uint8_t* ToListPack(const zskiplist* zsl) {
+  uint8_t* lp = lpNew(0);
+
+  /* Approach similar to zslFree(), since we want to free the skiplist at
+   * the same time as creating the listpack. */
+  zskiplistNode* node = zsl->header->level[0].forward;
+
+  while (node) {
+    lp = zzlInsertAt(lp, NULL, node->ele, node->score);
+    node = node->level[0].forward;
+  }
+
+  return lp;
+}
+
+// taken from zsetConvert
+zset* FromListPack(const uint8_t* lp) {
+  uint8_t* zl = (uint8_t*)lp;
+  unsigned char *eptr, *sptr;
+  unsigned char* vstr;
+  unsigned int vlen;
+  long long vlong;
+  sds ele;
+
+  eptr = lpSeek(zl, 0);
+  if (eptr != NULL) {
+    sptr = lpNext(zl, eptr);
+    CHECK(sptr != NULL);
+  }
+
+  zset* zs = zsetCreate();
+
+  while (eptr != NULL) {
+    double score = zzlGetScore(sptr);
+    vstr = lpGetValue(eptr, &vlen, &vlong);
+    if (vstr == NULL)
+      ele = sdsfromlonglong(vlong);
+    else
+      ele = sdsnewlen((char*)vstr, vlen);
+
+    zskiplistNode* node = zslInsert(zs->zsl, score, ele);
+    CHECK_EQ(DICT_OK, dictAdd(zs->dict, ele, &node->score));
+
+    zzlNext(zl, &eptr, &sptr);
+  }
+
+  return zs;
+}
+
 class error_category : public std::error_category {
  public:
   const char* name() const noexcept final {
@@ -693,10 +763,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
-  robj* res = createZsetObject();
-  zset* zs = (zset*)res->ptr;
-
-  auto cleanup = absl::Cleanup([&] { decrRefCount(res); });
+  zset* zs = zsetCreate();
+  auto cleanup = absl::Cleanup([&] { zsetFree(zs); });
 
   size_t zsetlen = ltrace->blob_count();
   if (zsetlen > DICT_HT_INITIAL_SIZE && dictTryExpand(zs->dict, zsetlen) != DICT_OK) {
@@ -734,15 +802,18 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
   if (ec_)
     return;
 
-  /* Convert *after* loading, since sorted sets are not stored ordered. */
-  if (zsetLength(res) <= server.zset_max_listpack_entries &&
+  unsigned enc = OBJ_ENCODING_SKIPLIST;
+  void* inner = zs;
+
+  if (zs->zsl->length <= server.zset_max_listpack_entries &&
       maxelelen <= server.zset_max_listpack_value && lpSafeToAdd(NULL, totelelen)) {
-    zsetConvert(res, OBJ_ENCODING_LISTPACK);
+    enc = OBJ_ENCODING_LISTPACK;
+    inner = ToListPack(zs->zsl);
+  } else {
+    std::move(cleanup).Cancel();
   }
 
-  std::move(cleanup).Cancel();
-
-  pv_->ImportRObj(res);
+  pv_->InitRobj(OBJ_ZSET, enc, inner);
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
@@ -866,7 +937,6 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     return;
   }
 
-  robj* res = nullptr;
   if (rdb_type_ == RDB_TYPE_SET_INTSET) {
     if (!intsetValidateIntegrity((const uint8_t*)blob.data(), blob.size(), 0)) {
       LOG(ERROR) << "Intset integrity check failed.";
@@ -877,6 +947,8 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     const intset* is = (const intset*)blob.data();
 
     unsigned len = intsetLen(is);
+    robj* res = nullptr;
+
     if (len > SetFamily::MaxIntsetEntries()) {
       res = createSetObject();
       if (!SetFamily::ConvertToStrSet(is, len, res)) {
@@ -891,6 +963,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       res = createObject(OBJ_SET, mine);
       res->encoding = OBJ_ENCODING_INTSET;
     }
+    pv_->ImportRObj(res);
   } else if (rdb_type_ == RDB_TYPE_HASH_ZIPLIST) {
     unsigned char* lp = lpNew(blob.size());
     if (!ziplistPairsConvertAndValidateIntegrity((const uint8_t*)blob.data(), blob.size(), &lp)) {
@@ -930,18 +1003,20 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       return;
     }
 
-    res = createObject(OBJ_ZSET, lp);
-    res->encoding = OBJ_ENCODING_LISTPACK;
-
-    if (lpBytes(lp) > server.zset_max_listpack_entries)
-      zsetConvert(res, OBJ_ENCODING_SKIPLIST);
-    else
-      res->ptr = lpShrinkToFit(lp);
+    unsigned encoding = OBJ_ENCODING_LISTPACK;
+    void* inner;
+    if (lpBytes(lp) > server.zset_max_listpack_entries) {
+      inner = FromListPack(lp);
+      zfree(lp);
+      encoding = OBJ_ENCODING_SKIPLIST;
+    } else {
+      inner = lpShrinkToFit(lp);
+    }
+    pv_->InitRobj(OBJ_ZSET, encoding, inner);
+    return;
   } else {
     LOG(FATAL) << "Unsupported rdb type " << rdb_type_;
   }
-
-  pv_->ImportRObj(res);
 }
 
 sds RdbLoaderBase::OpaqueObjLoader::ToSds(const RdbVariant& obj) {

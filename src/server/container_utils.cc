@@ -90,16 +90,16 @@ bool IterateSet(const PrimeValue& pv, const IterateFunc& func) {
   return success;
 }
 
-bool IterateSortedSet(robj* zobj, const IterateSortedFunc& func, int32_t start, int32_t end,
-                      bool reverse, bool use_score) {
-  unsigned long llen = zsetLength(zobj);
+bool IterateSortedSet(const detail::RobjWrapper* robj_wrapper, const IterateSortedFunc& func,
+                      int32_t start, int32_t end, bool reverse, bool use_score) {
+  unsigned long llen = robj_wrapper->Size();
   if (end < 0 || unsigned(end) >= llen)
     end = llen - 1;
 
   unsigned rangelen = unsigned(end - start) + 1;
 
-  if (zobj->encoding == OBJ_ENCODING_LISTPACK) {
-    uint8_t* zl = static_cast<uint8_t*>(zobj->ptr);
+  if (robj_wrapper->encoding() == OBJ_ENCODING_LISTPACK) {
+    uint8_t* zl = static_cast<uint8_t*>(robj_wrapper->inner_obj());
     uint8_t *eptr, *sptr;
     uint8_t* vstr;
     unsigned int vlen;
@@ -138,15 +138,15 @@ bool IterateSortedSet(robj* zobj, const IterateSortedFunc& func, int32_t start, 
     }
     return success;
   } else {
-    CHECK_EQ(zobj->encoding, OBJ_ENCODING_SKIPLIST);
-    zset* zs = static_cast<zset*>(zobj->ptr);
+    CHECK_EQ(robj_wrapper->encoding(), OBJ_ENCODING_SKIPLIST);
+    zset* zs = static_cast<zset*>(robj_wrapper->inner_obj());
     zskiplist* zsl = zs->zsl;
     zskiplistNode* ln;
 
     /* Check if starting point is trivial, before doing log(N) lookup. */
     if (reverse) {
       ln = zsl->tail;
-      unsigned long llen = zsetLength(zobj);
+      unsigned long llen = robj_wrapper->Size();
       if (start > 0)
         ln = zslGetElementByRank(zsl, llen - start);
     } else {
