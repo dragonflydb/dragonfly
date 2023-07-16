@@ -1762,14 +1762,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
     auto unknown_cmd = service_.UknownCmdMap();
 
-    auto append_sorted = [&append](string_view prefix, const auto& map) {
-      vector<pair<string_view, uint64_t>> display;
-      display.reserve(map.size());
-
-      for (const auto& k_v : map) {
-        display.push_back(k_v);
-      };
-
+    auto append_sorted = [&append](string_view prefix, auto display) {
       sort(display.begin(), display.end());
 
       for (const auto& k_v : display) {
@@ -1777,8 +1770,19 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       }
     };
 
-    append_sorted("unknown_", unknown_cmd);
-    append_sorted("cmd_", m.conn_stats.cmd_count_map);
+    vector<pair<string_view, string>> commands;
+
+    for (const auto& [name, calls] : m.conn_stats.cmd_count_map) {
+      const auto sum = m.conn_stats.cmd_sum_map[name];
+      commands.push_back(
+          {name, absl::StrJoin({absl::StrCat("calls=", calls), absl::StrCat("usec=", sum),
+                                absl::StrCat("usec_per_call=", sum / calls)},
+                               ",")});
+    }
+
+    append_sorted("cmdstat_", move(commands));
+    append_sorted("unknown_",
+                  vector<pair<string_view, uint64_t>>(unknown_cmd.cbegin(), unknown_cmd.cend()));
   }
 
   if (should_enter("ERRORSTATS", true)) {
