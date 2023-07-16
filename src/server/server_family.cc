@@ -872,6 +872,22 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                       &db_key_expire_metrics);
   }
 
+  // Command stats
+  {
+    const auto& map = m.conn_stats.cmd_count_map;
+    vector<pair<string_view, uint64_t>> commands{map.cbegin(), map.cend()};
+    sort(commands.begin(), commands.end());
+
+    string command_metrics;
+
+    AppendMetricHeader("commands", "Metrics for all commands ran", MetricType::COUNTER,
+                       &command_metrics);
+    for (const auto& [name, calls] : commands)
+      AppendMetricValue(StrCat("cmd_", name), calls, {}, {}, &command_metrics);
+
+    absl::StrAppend(&resp->body(), command_metrics);
+  }
+
   if (!m.replication_metrics.empty()) {
     string replication_lag_metrics;
     AppendMetricHeader("connected_replica_lag_records", "Lag in records of a connected replica.",
