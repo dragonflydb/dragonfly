@@ -835,6 +835,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     DispatchMonitor(dfly_cntx, args);
   }
 
+  auto before = absl::GetCurrentTimeNanos();
   uint64_t start_usec = ProactorBase::GetMonotonicTimeNs(), end_usec;
 
   // Create command transaction
@@ -885,8 +886,8 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   end_usec = ProactorBase::GetMonotonicTimeNs();  // misleading name, this is actually ns
   //  etl.connection_stats.cmd_sum_map[cid->name()] += std::chrono::duration<double,
   //  std::micro>(after - before).count();
-  etl.connection_stats.cmd_sum_map[cid->name()] +=
-      static_cast<double>(end_usec - start_usec) / 1000.0;
+  auto after = absl::GetCurrentTimeNanos();
+  etl.connection_stats.cmd_sum_map[cid->name()] += static_cast<double>(after - before) / 1000.0;
   //  cs.cmd_avg_map[cid->name()] = ((double)cs.cmd_sum_map[cid->name()]) /
   //  cs.cmd_count_map[cid->name()];
   request_latency_usec.IncBy(cid->name(), (end_usec - start_usec) / 1000);
