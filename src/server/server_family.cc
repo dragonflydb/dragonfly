@@ -804,6 +804,18 @@ void AppendMetricWithoutLabels(string_view name, string_view help, const absl::A
   AppendMetricValue(name, value, {}, {}, dest);
 }
 
+// 'tuple'-like structure with named fields for command statistics.
+struct CommandStat {
+  CommandStat(uint64_t calls, uint64_t sum) : calls(calls), sum(sum) {
+    avg = sum / calls;
+  }
+  ~CommandStat() = default;
+
+  uint64_t calls;
+  double sum;
+  double avg;
+};
+
 void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   // Server metrics
   AppendMetricHeader("version", "", MetricType::GAUGE, &resp->body());
@@ -874,17 +886,25 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
 
   // Command stats
   {
-    const auto& map = m.conn_stats.cmd_count_map;
-    vector<pair<string_view, uint64_t>> commands{map.cbegin(), map.cend()};
-    sort(commands.begin(), commands.end());
+    const auto& cs = m.conn_stats;
+    vector<pair<string_view, CommandStat>> commands{};
+
+    for (const auto& [name, calls] : cs.cmd_count_map) {
+      commands.push_back({name, CommandStat(calls, cs.cmd_sum_map.at(name))});
+    }
+
+    sort(commands.begin(), commands.end(),
+         [](const auto& a, const auto& b) { return a.first < b.first; });
 
     string command_metrics;
 
     AppendMetricHeader("commands", "Metrics for all commands ran", MetricType::COUNTER,
                        &command_metrics);
-    for (const auto& [name, calls] : commands)
-      AppendMetricValue(StrCat("cmd_", name), calls, {}, {}, &command_metrics);
-
+    for (const auto& [name, stat] : commands) {
+      AppendMetricValue(StrCat("cmd_", name, "_calls"), stat.calls, {}, {}, &command_metrics);
+      AppendMetricValue(StrCat("cmd_", name, "_sum_usec"), stat.sum, {}, {}, &command_metrics);
+      AppendMetricValue(StrCat("cmd_", name, "_avg_usec"), stat.avg, {}, {}, &command_metrics);
+    }
     absl::StrAppend(&resp->body(), command_metrics);
   }
 

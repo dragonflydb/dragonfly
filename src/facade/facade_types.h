@@ -34,7 +34,9 @@ struct CmdArgListFormatter {
 
 struct ConnectionStats {
   absl::flat_hash_map<std::string, uint64_t> err_count_map;
-  absl::flat_hash_map<std::string, uint64_t> cmd_count_map;
+  absl::flat_hash_map<std::string, uint64_t> cmd_count_map;  // number of calls per command
+  absl::flat_hash_map<std::string, double>
+      cmd_sum_map;  // sum of execution time (in sec) per command
 
   size_t read_buf_capacity = 0;
   size_t pipeline_cache_capacity = 0;
