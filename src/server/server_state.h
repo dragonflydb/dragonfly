@@ -203,6 +203,10 @@ class ServerState {  // public struct - to allow initialization.
 
   facade::ConnectionStats connection_stats;
 
+  absl::flat_hash_map<std::string, uint64_t> cmd_calls_map;  // number of calls per command
+  absl::flat_hash_map<std::string, double>
+      cmd_sum_map;  // sum of execution time (in sec) per command
+
  private:
   int64_t live_transactions_ = 0;
   mi_heap_t* data_heap_;

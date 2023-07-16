@@ -886,11 +886,11 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
 
   // Command stats
   {
-    const auto& cs = m.conn_stats;
+    const auto& state = *ServerState::tlocal();
     vector<pair<string_view, CommandStat>> commands{};
 
-    for (const auto& [name, calls] : cs.cmd_count_map) {
-      commands.push_back({name, CommandStat(calls, cs.cmd_sum_map.at(name))});
+    for (const auto& [name, calls] : state.cmd_calls_map) {
+      commands.push_back({name, CommandStat(calls, state.cmd_sum_map.at(name))});
     }
 
     sort(commands.begin(), commands.end(),
@@ -1444,11 +1444,14 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
     return (*cntx)->SendStringArr(res, RedisReplyBuilder::MAP);
   } else if (sub_cmd == "RESETSTAT") {
     shard_set->pool()->Await([](auto*) {
-      auto* stats = ServerState::tl_connection_stats();
-      stats->cmd_count_map.clear();
-      stats->err_count_map.clear();
-      stats->command_cnt = 0;
-      stats->async_writes_cnt = 0;
+      auto& sstate = *ServerState::tlocal();
+      sstate.cmd_calls_map.clear();
+      sstate.cmd_sum_map.clear();
+
+      auto& stats = sstate.connection_stats;
+      stats.err_count_map.clear();
+      stats.command_cnt = 0;
+      stats.async_writes_cnt = 0;
     });
     return (*cntx)->SendOk();
   } else {
@@ -1771,9 +1774,10 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     };
 
     vector<pair<string_view, string>> commands;
+    auto& sstate = *ServerState::tlocal();
 
-    for (const auto& [name, calls] : m.conn_stats.cmd_count_map) {
-      const auto sum = m.conn_stats.cmd_sum_map[name];
+    for (const auto& [name, calls] : sstate.cmd_calls_map) {
+      const auto sum = sstate.cmd_sum_map[name];
       commands.push_back(
           {name, absl::StrJoin({absl::StrCat("calls=", calls), absl::StrCat("usec=", sum),
                                 absl::StrCat("usec_per_call=", sum / calls)},
