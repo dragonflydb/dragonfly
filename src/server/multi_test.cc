@@ -64,7 +64,7 @@ TEST_F(MultiTest, MultiAndEval) {
 
   // Run the fiber at creation.
   auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] { resp = Run({"brpop", "x", "1"}); });
-  Run({"mutli"});
+  Run({"multi"});
   Run({"eval", "return redis.call('lpush', 'x', 'y')", "0"});
   Run({"eval", "return redis.call('lpop', 'x')", "0"});
   Run({"exec"});
