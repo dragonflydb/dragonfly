@@ -637,4 +637,12 @@ TEST_F(ZSetFamilyTest, ZDiff) {
   EXPECT_THAT(resp.GetVec(), ElementsAre("two", "2", "three", "3", "four", "4"));
 }
 
+TEST_F(ZSetFamilyTest, GeoAdd) {
+  EXPECT_EQ(1, CheckedInt({"geoadd", "Sicily", "13.361389", "38.115556", "Palermo"}));
+  EXPECT_EQ(1, CheckedInt({"geoadd", "Sicily", "15.087269", "37.502669", "Catania"}));
+  EXPECT_EQ(0, CheckedInt({"geoadd", "Sicily", "15.087269", "37.502669", "Catania"}));
+  auto resp = Run({"geohash", "Sicily", "Palermo", "Catania"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("sqc8b49rny0", "sqdtr74hyu0")));
+}
+
 }  // namespace dfly

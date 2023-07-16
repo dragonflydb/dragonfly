@@ -96,6 +96,9 @@ class ZSetFamily {
   static void ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx);
   static bool ParseRangeByScoreParams(CmdArgList args, RangeParams* params);
   static void ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cntx);
+
+  static void GeoAdd(CmdArgList args, ConnectionContext* cntx);
+  static void GeoHash(CmdArgList args, ConnectionContext* cntx);
 };
 
 }  // namespace dfly
