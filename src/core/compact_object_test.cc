@@ -377,8 +377,7 @@ TEST_F(CompactObjectTest, ZSet) {
       "minstring";
   EXPECT_EQ(9, sdslen(kMinStrData + 1));
 
-  robj* src = createZsetListpackObject();
-  cobj_.ImportRObj(src);
+  cobj_.InitRobj(OBJ_ZSET, OBJ_ENCODING_LISTPACK, lpNew(0));
 
   EXPECT_EQ(OBJ_ZSET, cobj_.ObjType());
   EXPECT_EQ(OBJ_ENCODING_LISTPACK, cobj_.Encoding());

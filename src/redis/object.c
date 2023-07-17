@@ -269,24 +269,6 @@ robj *createHashObject(void) {
     return o;
 }
 
-robj *createZsetObject(void) {
-    zset *zs = zmalloc(sizeof(*zs));
-    robj *o;
-
-    zs->dict = dictCreate(&zsetDictType);
-    zs->zsl = zslCreate();
-    o = createObject(OBJ_ZSET,zs);
-    o->encoding = OBJ_ENCODING_SKIPLIST;
-    return o;
-}
-
-robj *createZsetListpackObject(void) {
-    unsigned char *lp = lpNew(0);
-    robj *o = createObject(OBJ_ZSET,lp);
-    o->encoding = OBJ_ENCODING_LISTPACK;
-    return o;
-}
-
 robj *createStreamObject(void) {
     stream *s = streamNew();
     robj *o = createObject(OBJ_STREAM,s);

@@ -137,9 +137,7 @@ inline void FreeObjZset(unsigned encoding, void* ptr) {
   switch (encoding) {
     case OBJ_ENCODING_SKIPLIST:
       zs = (zset*)ptr;
-      dictRelease(zs->dict);
-      zslFree(zs->zsl);
-      zfree(zs);
+      zsetFree(zs);
       break;
     case OBJ_ENCODING_LISTPACK:
       zfree(ptr);
@@ -361,6 +359,19 @@ bool RobjWrapper::DefragIfNeeded(float ratio) {
   return false;
 }
 
+int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, double* newscore) {
+  robj self{.type = type_,
+            .encoding = encoding_,
+            .lru = 0,
+            .refcount = OBJ_STATIC_REFCOUNT,
+            .ptr = inner_obj_};
+
+  int res = zsetAdd(&self, score, ele, in_flags, out_flags, newscore);
+  inner_obj_ = self.ptr;
+  encoding_ = self.encoding;
+  return res;
+}
+
 bool RobjWrapper::Reallocate(MemoryResource* mr) {
   void* old_ptr = inner_obj_;
   inner_obj_ = mr->allocate(sz_, kAlignSize);
@@ -531,6 +542,7 @@ unsigned CompactObj::Encoding() const {
 void CompactObj::ImportRObj(robj* o) {
   CHECK(1 == o->refcount || o->refcount == OBJ_STATIC_REFCOUNT);
   CHECK_NE(o->encoding, OBJ_ENCODING_EMBSTR);  // need regular one
+  CHECK_NE(o->type, OBJ_ZSET);
 
   SetMeta(ROBJ_TAG);
 
@@ -563,7 +575,7 @@ robj* CompactObj::AsRObj() const {
   unsigned enc = u_.r_obj.encoding();
   res->type = u_.r_obj.type();
 
-  if (res->type == OBJ_SET || res->type == OBJ_HASH) {
+  if (res->type == OBJ_SET || res->type == OBJ_HASH || res->type == OBJ_ZSET) {
     LOG(DFATAL) << "Should not call AsRObj for type " << res->type;
   }
 
@@ -585,7 +597,8 @@ void CompactObj::SyncRObj() {
 
   DCHECK_EQ(ROBJ_TAG, taglen_);
   DCHECK_EQ(u_.r_obj.type(), obj->type);
-  CHECK_NE(OBJ_SET, obj->type) << "sets should be handled without robj";
+  DCHECK_NE(OBJ_SET, obj->type) << "sets should be handled without robj";
+  CHECK_NE(OBJ_ZSET, obj->type) << "zsets should be handled without robj";
 
   unsigned enc = obj->encoding;
   u_.r_obj.Init(obj->type, enc, obj->ptr);
