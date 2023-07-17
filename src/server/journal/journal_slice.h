@@ -8,7 +8,6 @@
 #include <string_view>
 
 #include "base/ring_buffer.h"
-#include "core/uring.h"
 #include "server/common.h"
 #include "server/journal/types.h"
 
@@ -23,9 +22,11 @@ class JournalSlice {
 
   void Init(unsigned index);
 
+#if 0
   std::error_code Open(std::string_view dir);
 
   std::error_code Close();
+#endif
 
   // This is always the LSN of the *next* journal entry.
   LSN cur_lsn() const {
@@ -36,9 +37,9 @@ class JournalSlice {
     return status_ec_;
   }
 
-  // Whether the file-based journaling is open.
+  // Whether the journaling is open.
   bool IsOpen() const {
-    return bool(shard_file_);
+    return slice_index_ != UINT32_MAX;
   }
 
   void AddLogRecord(const Entry& entry, bool await);
@@ -53,9 +54,9 @@ class JournalSlice {
  private:
   struct RingItem;
 
-  std::string shard_path_;
-  std::unique_ptr<LinuxFile> shard_file_;
-  std::optional<base::RingBuffer<RingItem>> ring_buffer_;
+  // std::string shard_path_;
+  // std::unique_ptr<LinuxFile> shard_file_;
+  // std::optional<base::RingBuffer<RingItem>> ring_buffer_;
 
   mutable util::SharedMutex cb_mu_;
   std::vector<std::pair<uint32_t, ChangeCallback>> change_cb_arr_ ABSL_GUARDED_BY(cb_mu_);

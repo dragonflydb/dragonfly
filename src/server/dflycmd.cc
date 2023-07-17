@@ -104,9 +104,9 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
 
-  if (sub_cmd == "JOURNAL" && args.size() >= 2) {
+  /*if (sub_cmd == "JOURNAL" && args.size() >= 2) {
     return Journal(args, cntx);
-  }
+  }*/
 
   if (sub_cmd == "THREAD") {
     return Thread(args, cntx);
@@ -139,6 +139,7 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
   rb->SendError(kSyntaxErr);
 }
 
+#if 0
 void DflyCmd::Journal(CmdArgList args, ConnectionContext* cntx) {
   DCHECK_GE(args.size(), 2u);
   ToUpper(&args[1]);
@@ -200,6 +201,8 @@ void DflyCmd::Journal(CmdArgList args, ConnectionContext* cntx) {
   string reply = UnknownSubCmd(sub_cmd, "DFLY");
   return rb->SendError(reply, kSyntaxErrType);
 }
+
+#endif
 
 void DflyCmd::Thread(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
@@ -472,8 +475,9 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
     flow->saver.reset();
   };
 
+  sf_->journal()->StartInThread();
+
   // Shard can be null for io thread.
-  CHECK(!sf_->journal()->OpenInThread(false, ""sv));  // can only happen in persistent mode.
   if (shard != nullptr) {
     flow->saver->StartSnapshotInShard(true, cntx->GetCancellation(), shard);
   }
