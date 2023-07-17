@@ -19,6 +19,7 @@ add_library(dragonfly_lib channel_store.cc command_registry.cc
             generic_family.cc hset_family.cc json_family.cc
             search/search_family.cc search/doc_index.cc search/doc_accessors.cc
             list_family.cc main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc
+            protocol_client.cc
             snapshot.cc script_mgr.cc server_family.cc malloc_stats.cc
             set_family.cc stream_family.cc string_family.cc
             zset_family.cc version.cc bitops_family.cc container_utils.cc io_utils.cc
