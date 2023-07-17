@@ -203,9 +203,9 @@ class ServerState {  // public struct - to allow initialization.
 
   facade::ConnectionStats connection_stats;
 
-  absl::flat_hash_map<std::string, uint64_t> cmd_calls_map;  // number of calls per command
-  absl::flat_hash_map<std::string, double>
-      cmd_sum_map;  // sum of execution time (in sec) per command
+  absl::flat_hash_map<const char*, std::pair<uint64_t, uint64_t>> cmd_stats_map;
+  // command statistics. the pair holds {cmd_calls, cmd_sum}.
+  // IMPORTANT: assumes command names are constant literals. (the pointer is being hashed)
 
  private:
   int64_t live_transactions_ = 0;

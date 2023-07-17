@@ -63,6 +63,8 @@ struct Metrics {
   uint32_t delete_ttl_per_sec = 0;
 
   facade::ConnectionStats conn_stats;
+  absl::flat_hash_map<const char*, std::pair<uint64_t, uint64_t>>
+      cmd_stats_map;  // command statistics; see ServerState
 
   std::vector<ReplicaRoleInfo> replication_metrics;
 };

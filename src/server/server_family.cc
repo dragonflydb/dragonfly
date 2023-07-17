@@ -804,18 +804,6 @@ void AppendMetricWithoutLabels(string_view name, string_view help, const absl::A
   AppendMetricValue(name, value, {}, {}, dest);
 }
 
-// 'tuple'-like structure with named fields for command statistics.
-struct CommandStat {
-  CommandStat(uint64_t calls, uint64_t sum) : calls(calls), sum(sum) {
-    avg = sum / calls;
-  }
-  ~CommandStat() = default;
-
-  uint64_t calls;
-  double sum;
-  double avg;
-};
-
 void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   // Server metrics
   AppendMetricHeader("version", "", MetricType::GAUGE, &resp->body());
@@ -886,24 +874,22 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
 
   // Command stats
   {
-    const auto& state = *ServerState::tlocal();
-    vector<pair<string_view, CommandStat>> commands{};
-
-    for (const auto& [name, calls] : state.cmd_calls_map) {
-      commands.push_back({name, CommandStat(calls, state.cmd_sum_map.at(name))});
-    }
+    vector<pair<const char*, pair<uint64_t, uint64_t>>> commands(m.cmd_stats_map.cbegin(),
+                                                                 m.cmd_stats_map.cend());
 
     sort(commands.begin(), commands.end(),
-         [](const auto& a, const auto& b) { return a.first < b.first; });
+         [](const auto& s1, const auto& s2) { return std::strcmp(s1.first, s2.first) < 0; });
 
     string command_metrics;
 
     AppendMetricHeader("commands", "Metrics for all commands ran", MetricType::COUNTER,
                        &command_metrics);
     for (const auto& [name, stat] : commands) {
-      AppendMetricValue(StrCat("cmd_", name, "_calls"), stat.calls, {}, {}, &command_metrics);
-      AppendMetricValue(StrCat("cmd_", name, "_sum_usec"), stat.sum, {}, {}, &command_metrics);
-      AppendMetricValue(StrCat("cmd_", name, "_avg_usec"), stat.avg, {}, {}, &command_metrics);
+      const auto calls = stat.first, sum = stat.second;
+      AppendMetricValue(StrCat("cmd_", name, "_calls"), calls, {}, {}, &command_metrics);
+      AppendMetricValue(StrCat("cmd_", name, "_sum_usec"), sum, {}, {}, &command_metrics);
+      AppendMetricValue(StrCat("cmd_", name, "_avg_usec"), static_cast<double>(sum) / calls, {}, {},
+                        &command_metrics);
     }
     absl::StrAppend(&resp->body(), command_metrics);
   }
@@ -1445,8 +1431,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
   } else if (sub_cmd == "RESETSTAT") {
     shard_set->pool()->Await([](auto*) {
       auto& sstate = *ServerState::tlocal();
-      sstate.cmd_calls_map.clear();
-      sstate.cmd_sum_map.clear();
+      sstate.cmd_stats_map.clear();
 
       auto& stats = sstate.connection_stats;
       stats.err_count_map.clear();
@@ -1533,6 +1518,11 @@ Metrics ServerFamily::GetMetrics() const {
     result.conn_stats += ss->connection_stats;
     result.qps += uint64_t(ss->MovingSum6());
     result.ooo_tx_transaction_cnt += ss->stats.ooo_tx_cnt;
+    for (const auto& [k, v] : ss->cmd_stats_map) {
+      auto& ent = result.cmd_stats_map[k];
+      ent.first += v.first;
+      ent.second += v.second;
+    }
 
     if (shard) {
       MergeInto(shard->db_slice().GetStats(), &result);
@@ -1774,13 +1764,12 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     };
 
     vector<pair<string_view, string>> commands;
-    auto& sstate = *ServerState::tlocal();
 
-    for (const auto& [name, calls] : sstate.cmd_calls_map) {
-      const auto sum = sstate.cmd_sum_map[name];
+    for (const auto& [name, stats] : m.cmd_stats_map) {
+      const auto calls = stats.first, sum = stats.second;
       commands.push_back(
           {name, absl::StrJoin({absl::StrCat("calls=", calls), absl::StrCat("usec=", sum),
-                                absl::StrCat("usec_per_call=", sum / calls)},
+                                absl::StrCat("usec_per_call=", static_cast<double>(sum) / calls)},
                                ",")});
     }
 
