@@ -1281,7 +1281,8 @@ bool StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptParams param
   Transaction::MultiMode multi_mode = DetermineMultiMode(params);
 
   // Check if eval is already part of a running multi transaction
-  if (trans->GetMultiMode() != Transaction::NOT_DETERMINED) {
+  if ((trans->GetMultiMode() != Transaction::NOT_DETERMINED) &&
+      trans->GetMultiMode() != Transaction::NON_ATOMIC) {
     DCHECK_LE(trans->GetMultiMode(), multi_mode);  // Check the transaction covers our requirements
     return false;
   }
@@ -1539,33 +1540,14 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
   // Check if script most LIKELY has global eval transactions
   bool global_script = script_mgr()->AreGlobalByDefault();
+  int multi_mode = absl::GetFlag(FLAGS_multi_exec_mode);
 
-  // We ignore transaction mode in case it's filled only with EVAL-like commands,
-  // and scripts are not runing in global trasaction
-  // This disables the atomicity of running multiple lua scripts inside multi exec.
-  if (state == ExecEvalState::ALL && !global_script) {
-    VLOG(1) << "Exec eval ignore trasaction";
-    string cmd_name;
-    auto body = move(exec_info.body);
-    exec_info.Clear();
-    Transaction* trans = cntx->transaction;
-    cntx->transaction = nullptr;
-
-    SinkReplyBuilder::ReplyAggregator agg(rb);
-    rb->StartArray(body.size());
-    for (auto& scmd : body) {
-      arg_vec.resize(scmd.NumArgs() + 1);
-      // We need to copy command name to the first argument.
-      cmd_name = scmd.Cid()->name();
-      arg_vec.front() = MutableSlice{cmd_name.data(), cmd_name.size()};
-      auto args = absl::MakeSpan(arg_vec);
-      scmd.Fill(args.subspan(1));
-
-      DispatchCommand(args, cntx);
+  if (state != ExecEvalState::NONE) {
+    // Allow multi eval only when scripts run global and multi runs in global or lock ahead
+    if (!global_script || (multi_mode == Transaction::NON_ATOMIC)) {
+      return rb->SendError(
+          "Dragonfly does not allow execution of a server-side Lua in Multi transaction");
     }
-    cntx->transaction = trans;
-
-    return;
   }
 
   bool scheduled =
