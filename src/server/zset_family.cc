@@ -42,6 +42,9 @@ constexpr string_view kGeoAlphabet = "0123456789bcdefghjkmnpqrstuvwxyz"sv;
 constexpr unsigned kMaxListPackValue = 64;
 using MScoreResponse = std::vector<std::optional<double>>;
 
+using ScoredMember = std::pair<std::string, double>;
+using ScoredArray = std::vector<ScoredMember>;
+
 inline zrangespec GetZrangeSpec(bool reverse, const ZSetFamily::ScoreInterval& si) {
   auto interval = si;
   if (reverse)
@@ -135,6 +138,17 @@ struct ZParams {
   bool ch = false;     // Corresponds to CH option.
   bool override = false;
 };
+
+void OutputScoredArrayResult(const OpResult<ScoredArray>& result,
+                             const ZSetFamily::RangeParams& params, ConnectionContext* cntx) {
+  if (result.status() == OpStatus::WRONG_TYPE) {
+    return (*cntx)->SendError(kWrongTypeErr);
+  }
+
+  LOG_IF(WARNING, !result && result.status() != OpStatus::KEY_NOTFOUND)
+      << "Unexpected status " << result.status();
+  (*cntx)->SendScoredArray(result.value(), params.with_scores);
+}
 
 OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args, string_view key,
                                    size_t member_len) {
@@ -236,7 +250,7 @@ class IntervalVisitor {
 
   void operator()(ZSetFamily::TopNScored sc);
 
-  ZSetFamily::ScoredArray PopResult() {
+  ScoredArray PopResult() {
     return std::move(result_);
   }
 
@@ -286,7 +300,7 @@ class IntervalVisitor {
   ZSetFamily::RangeParams params_;
   detail::RobjWrapper* robj_wrapper_;
 
-  ZSetFamily::ScoredArray result_;
+  ScoredArray result_;
   unsigned removed_ = 0;
 };
 
@@ -741,7 +755,7 @@ ScoredMap FromObject(CompactObj& co, double weight) {
   IntervalVisitor vis(Action::RANGE, params, &co);
   vis(ZSetFamily::IndexInterval(0, -1));
 
-  ZSetFamily::ScoredArray arr = vis.PopResult();
+  ScoredArray arr = vis.PopResult();
   ScoredMap res;
   res.reserve(arr.size());
 
@@ -993,6 +1007,7 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
   OpStatus op_status = OpStatus::OK;
   AddResult aresult;
   detail::RobjWrapper* robj_wrapper = res_it.value()->second.GetRobjWrapper();
+
   for (size_t j = 0; j < members.size(); j++) {
     const auto& m = members[j];
     tmp_str = sdscpylen(tmp_str, m.second.data(), m.second.size());
@@ -1217,8 +1232,7 @@ bool ParseLimit(string_view offset_str, string_view limit_str, ZSetFamily::Range
   return true;
 }
 
-ZSetFamily::ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key,
-                                bool is_max) {
+ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bool is_max) {
   auto& db_slice = shard->db_slice();
   auto it_res = db_slice.Find(t->GetDbContext(), key, OBJ_ZSET);
   CHECK(it_res) << t->DebugId() << " " << key;  // must exist and must be ok.
@@ -1269,7 +1283,7 @@ void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
   VLOG(1) << "BZPop timeout(" << timeout << ")";
 
   Transaction* transaction = cntx->transaction;
-  OpResult<ZSetFamily::ScoredArray> popped_array;
+  OpResult<ScoredArray> popped_array;
   cntx->conn_state.is_blocking = true;
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
       transaction, OBJ_ZSET,
@@ -1325,7 +1339,7 @@ vector<ScoredMap> OpFetch(EngineShard* shard, Transaction* t) {
 }
 
 auto OpPopCount(const ZSetFamily::ZRangeSpec& range_spec, const OpArgs& op_args, string_view key)
-    -> OpResult<ZSetFamily::ScoredArray> {
+    -> OpResult<ScoredArray> {
   auto& db_slice = op_args.shard->db_slice();
   OpResult<PrimeIterator> res_it = db_slice.Find(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
@@ -1349,7 +1363,7 @@ auto OpPopCount(const ZSetFamily::ZRangeSpec& range_spec, const OpArgs& op_args,
 }
 
 auto OpRange(const ZSetFamily::ZRangeSpec& range_spec, const OpArgs& op_args, string_view key)
-    -> OpResult<ZSetFamily::ScoredArray> {
+    -> OpResult<ScoredArray> {
   OpResult<PrimeIterator> res_it = op_args.shard->db_slice().Find(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
@@ -1391,8 +1405,37 @@ OpResult<unsigned> OpRank(const OpArgs& op_args, string_view key, string_view me
   if (!res_it)
     return res_it.status();
 
-  op_args.shard->tmp_str1 = sdscpylen(op_args.shard->tmp_str1, member.data(), member.size());
   detail::RobjWrapper* robj_wrapper = res_it.value()->second.GetRobjWrapper();
+  if (robj_wrapper->encoding() == OBJ_ENCODING_LISTPACK) {
+    unsigned char* zl = (uint8_t*)robj_wrapper->inner_obj();
+    unsigned char *eptr, *sptr;
+
+    eptr = lpSeek(zl, 0);
+    DCHECK(eptr != NULL);
+    sptr = lpNext(zl, eptr);
+    DCHECK(sptr != NULL);
+
+    unsigned rank = 1;
+    if (member.empty())
+      member = ""sv;
+
+    while (eptr != NULL) {
+      if (lpCompare(eptr, (const uint8_t*)member.data(), member.size()))
+        break;
+      rank++;
+      zzlNext(zl, &eptr, &sptr);
+    }
+
+    if (eptr == NULL)
+      return OpStatus::KEY_NOTFOUND;
+
+    if (reverse) {
+      return lpLength(zl) / 2 - rank;
+    }
+    return rank - 1;
+  }
+  DCHECK_EQ(robj_wrapper->encoding(), OBJ_ENCODING_SKIPLIST);
+
   robj self{
       .type = OBJ_ZSET,
       .encoding = robj_wrapper->encoding(),
@@ -1401,9 +1444,11 @@ OpResult<unsigned> OpRank(const OpArgs& op_args, string_view key, string_view me
       .ptr = robj_wrapper->inner_obj(),
   };
 
+  op_args.shard->tmp_str1 = sdscpylen(op_args.shard->tmp_str1, member.data(), member.size());
   long res = zsetRank(&self, op_args.shard->tmp_str1, reverse);
   if (res < 0)
     return OpStatus::KEY_NOTFOUND;
+
   return res;
 }
 
@@ -1620,7 +1665,7 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
     IntervalVisitor iv{Action::RANGE, params, &pv};
 
     iv(ZSetFamily::IndexInterval{0, kuint32max});
-    ZSetFamily::ScoredArray arr = iv.PopResult();
+    ScoredArray arr = iv.PopResult();
 
     for (size_t i = 0; i < arr.size(); ++i) {
       if (!scan_op.Matches(arr[i].first)) {
@@ -2332,17 +2377,6 @@ void ZSetFamily::ZRangeByScoreInternal(CmdArgList args, bool reverse, Connection
     return (*cntx)->SendError(kSyntaxErr);
   }
   ZRangeGeneric(args, range_params, cntx);
-}
-
-void ZSetFamily::OutputScoredArrayResult(const OpResult<ScoredArray>& result,
-                                         const RangeParams& params, ConnectionContext* cntx) {
-  if (result.status() == OpStatus::WRONG_TYPE) {
-    return (*cntx)->SendError(kWrongTypeErr);
-  }
-
-  LOG_IF(WARNING, !result && result.status() != OpStatus::KEY_NOTFOUND)
-      << "Unexpected status " << result.status();
-  (*cntx)->SendScoredArray(result.value(), params.with_scores);
 }
 
 void ZSetFamily::ZRemRangeGeneric(string_view key, const ZRangeSpec& range_spec,

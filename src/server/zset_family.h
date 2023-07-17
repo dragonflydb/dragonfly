@@ -49,9 +49,6 @@ class ZSetFamily {
     RangeParams params;
   };
 
-  using ScoredMember = std::pair<std::string, double>;
-  using ScoredArray = std::vector<ScoredMember>;
-
  private:
   template <typename T> using OpResult = facade::OpResult<T>;
 
@@ -88,8 +85,6 @@ class ZSetFamily {
   static void ZUnionStore(CmdArgList args, ConnectionContext* cntx);
 
   static void ZRangeByScoreInternal(CmdArgList args, bool reverse, ConnectionContext* cntx);
-  static void OutputScoredArrayResult(const OpResult<ScoredArray>& arr, const RangeParams& params,
-                                      ConnectionContext* cntx);
   static void ZRemRangeGeneric(std::string_view key, const ZRangeSpec& range_spec,
                                ConnectionContext* cntx);
   static void ZRangeGeneric(CmdArgList args, RangeParams range_params, ConnectionContext* cntx);
