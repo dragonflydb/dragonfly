@@ -1,0 +1,12 @@
+[tool.black]
+line-length = 100
+include = '\.py$'
+extend-exclude = '''
+/(
+    | .git
+    | .__pycache__
+    | build-dbg
+    | build-opt
+    | helio
+)/
+'''

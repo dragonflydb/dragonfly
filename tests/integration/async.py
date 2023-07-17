@@ -13,11 +13,13 @@ from loguru import logger as log
 import sys
 import random
 
-connection_pool = aioredis.ConnectionPool(host="localhost", port=6379,
-                                          db=1, decode_responses=True, max_connections=16)
+connection_pool = aioredis.ConnectionPool(
+    host="localhost", port=6379, db=1, decode_responses=True, max_connections=16
+)
 
 
 key_index = 1
+
 
 async def post_to_redis(sem, db_name, index):
     global key_index
@@ -26,10 +28,10 @@ async def post_to_redis(sem, db_name, index):
         try:
             redis_client = aioredis.Redis(connection_pool=connection_pool)
             async with redis_client.pipeline(transaction=True) as pipe:
-                for i in range(1, 15):                    
+                for i in range(1, 15):
                     pipe.hsetnx(name=f"key_{key_index}", key="name", value="bla")
                     key_index += 1
-                #log.info(f"after first half {key_index}")
+                # log.info(f"after first half {key_index}")
                 for i in range(1, 15):
                     pipe.hsetnx(name=f"bla_{key_index}", key="name2", value="bla")
                     key_index += 1
@@ -40,8 +42,8 @@ async def post_to_redis(sem, db_name, index):
         finally:
             # log.info(f"before close {index}")
             await redis_client.close()
-            #log.info(f"after close {index} {len(results)}")
- 
+            # log.info(f"after close {index} {len(results)}")
+
 
 async def do_concurrent(db_name):
     tasks = []
@@ -49,10 +51,10 @@ async def do_concurrent(db_name):
     for i in range(1, 3000):
         tasks.append(post_to_redis(sem, db_name, i))
     res = await asyncio.gather(*tasks)
-   
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     log.remove()
-    log.add(sys.stdout, enqueue=True, level='INFO')
+    log.add(sys.stdout, enqueue=True, level="INFO")
     loop = asyncio.get_event_loop()
     loop.run_until_complete(do_concurrent("my_db"))

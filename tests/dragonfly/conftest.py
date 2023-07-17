@@ -21,7 +21,7 @@ from tempfile import TemporaryDirectory
 from . import DflyInstance, DflyInstanceFactory, DflyParams, PortPicker, dfly_args
 from .utility import DflySeederFactory, gen_certificate
 
-logging.getLogger('asyncio').setLevel(logging.WARNING)
+logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 DATABASE_INDEX = 1
 
@@ -55,7 +55,6 @@ def df_seeder_factory(request) -> DflySeederFactory:
     if seed is None:
         seed = random.randrange(sys.maxsize)
 
-
     random.seed(int(seed))
     print(f"--- Random seed: {seed}, check: {random.randrange(100)} ---")
 
@@ -68,8 +67,7 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
     Create an instance factory with supplied params.
     """
     scripts_dir = os.path.dirname(os.path.abspath(__file__))
-    path = os.environ.get("DRAGONFLY_PATH", os.path.join(
-        scripts_dir, '../../build-dbg/dragonfly'))
+    path = os.environ.get("DRAGONFLY_PATH", os.path.join(scripts_dir, "../../build-dbg/dragonfly"))
 
     args = request.param if request.param else {}
     existing = request.config.getoption("--existing-port")
@@ -83,7 +81,7 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
         existing_port=int(existing) if existing else None,
         existing_admin_port=int(existing_admin) if existing_admin else None,
         existing_mc_port=int(existing_mc) if existing_mc else None,
-        env=test_env
+        env=test_env,
     )
 
     factory = DflyInstanceFactory(params, args)
@@ -121,15 +119,15 @@ def df_server(df_factory: DflyInstanceFactory) -> DflyInstance:
 
     # TODO: Investigate spurious open connection with cluster client
     # if not instance['cluster_mode']:
-        # TODO: Investigate adding fine grain control over the pool by
-        # by adding a cache ontop of the clients connection pool and then evict
-        # properly with client.connection_pool.disconnect() avoiding non synced
-        # side effects
-        # assert clients_left == []
+    # TODO: Investigate adding fine grain control over the pool by
+    # by adding a cache ontop of the clients connection pool and then evict
+    # properly with client.connection_pool.disconnect() avoiding non synced
+    # side effects
+    # assert clients_left == []
     # else:
     #    print("Cluster clients left: ", len(clients_left))
 
-    if instance['cluster_mode']:
+    if instance["cluster_mode"]:
         print("Cluster clients left: ", len(clients_left))
 
 
@@ -160,8 +158,7 @@ def cluster_client(df_server):
     """
     Return a cluster client to the default instance with all entries flushed.
     """
-    client = redis.RedisCluster(decode_responses=True, host="localhost",
-                                port=df_server.port)
+    client = redis.RedisCluster(decode_responses=True, host="localhost", port=df_server.port)
     client.client_setname("default-cluster-fixture")
     client.flushall()
 
@@ -171,10 +168,16 @@ def cluster_client(df_server):
 
 @pytest_asyncio.fixture(scope="function")
 async def async_pool(df_server: DflyInstance):
-    pool = aioredis.ConnectionPool(host="localhost", port=df_server.port,
-                                   db=DATABASE_INDEX, decode_responses=True, max_connections=32)
+    pool = aioredis.ConnectionPool(
+        host="localhost",
+        port=df_server.port,
+        db=DATABASE_INDEX,
+        decode_responses=True,
+        max_connections=32,
+    )
     yield pool
     await pool.disconnect(inuse_connections=True)
+
 
 @pytest_asyncio.fixture(scope="function")
 async def async_client(async_pool):
@@ -197,25 +200,35 @@ def pytest_addoption(parser):
         --existing-admin-port - to provide an admin port to an existing process instead of starting a new instance
         --rand-seed - to set the global random seed
     """
+    parser.addoption("--gdb", action="store_true", default=False, help="Run instances in gdb")
+    parser.addoption("--df", action="append", default=[], help="Add arguments to dragonfly")
     parser.addoption(
-        '--gdb', action='store_true', default=False, help='Run instances in gdb'
+        "--log-seeder", action="store", default=None, help="Store last generator commands in file"
     )
     parser.addoption(
-        '--df', action='append', default=[], help='Add arguments to dragonfly'
+        "--rand-seed",
+        action="store",
+        default=None,
+        help="Set seed for global random. Makes seeder predictable",
     )
     parser.addoption(
-        '--log-seeder', action='store', default=None, help='Store last generator commands in file'
+        "--existing-port",
+        action="store",
+        default=None,
+        help="Provide a port to the existing process for the test",
     )
     parser.addoption(
-        '--rand-seed', action='store', default=None, help='Set seed for global random. Makes seeder predictable'
+        "--existing-admin-port",
+        action="store",
+        default=None,
+        help="Provide an admin port to the existing process for the test",
     )
-    parser.addoption(
-        '--existing-port', action='store', default=None, help='Provide a port to the existing process for the test')
-    parser.addoption(
-        '--existing-admin-port', action='store', default=None, help='Provide an admin port to the existing process for the test')
 
     parser.addoption(
-        '--existing-mc-port', action='store', default=None, help='Provide a port to the existing memcached process for the test'
+        "--existing-mc-port",
+        action="store",
+        default=None,
+        help="Provide a port to the existing memcached process for the test",
     )
 
 
@@ -251,11 +264,15 @@ def with_tls_server_args(tmp_dir, gen_ca_cert):
     tls_server_req = os.path.join(tmp_dir, "df-req.pem")
     tls_server_cert = os.path.join(tmp_dir, "df-cert.pem")
 
-    gen_certificate(gen_ca_cert["ca_key"], gen_ca_cert["ca_cert"], tls_server_req, tls_server_key, tls_server_cert)
+    gen_certificate(
+        gen_ca_cert["ca_key"],
+        gen_ca_cert["ca_cert"],
+        tls_server_req,
+        tls_server_key,
+        tls_server_cert,
+    )
 
-    args = {"tls": "",
-            "tls_key_file": tls_server_key,
-            "tls_cert_file": tls_server_cert}
+    args = {"tls": "", "tls_key_file": tls_server_key, "tls_cert_file": tls_server_cert}
     return args
 
 
@@ -272,11 +289,15 @@ def with_tls_client_args(tmp_dir, gen_ca_cert):
     tls_client_req = os.path.join(tmp_dir, "client-req.pem")
     tls_client_cert = os.path.join(tmp_dir, "client-cert.pem")
 
-    gen_certificate(gen_ca_cert["ca_key"], gen_ca_cert["ca_cert"], tls_client_req, tls_client_key, tls_client_cert)
+    gen_certificate(
+        gen_ca_cert["ca_key"],
+        gen_ca_cert["ca_cert"],
+        tls_client_req,
+        tls_client_key,
+        tls_client_cert,
+    )
 
-    args = {"ssl": True,
-            "ssl_keyfile": tls_client_key,
-            "ssl_certfile": tls_client_cert}
+    args = {"ssl": True, "ssl_keyfile": tls_client_key, "ssl_certfile": tls_client_cert}
     return args
 
 

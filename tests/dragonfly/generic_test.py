@@ -8,22 +8,24 @@ from . import dfly_multi_test_args, dfly_args
 from .utility import batch_fill_data, gen_test_data
 
 
-@dfly_multi_test_args({'keys_output_limit': 512}, {'keys_output_limit': 1024})
+@dfly_multi_test_args({"keys_output_limit": 512}, {"keys_output_limit": 1024})
 class TestKeys:
     async def test_max_keys(self, async_client: aioredis.Redis, df_server):
-        max_keys = df_server['keys_output_limit']
+        max_keys = df_server["keys_output_limit"]
         pipe = async_client.pipeline()
         batch_fill_data(pipe, gen_test_data(max_keys * 3))
         await pipe.execute()
         keys = await async_client.keys()
-        assert len(keys) in range(max_keys, max_keys+512)
+        assert len(keys) in range(max_keys, max_keys + 512)
+
 
 @pytest.fixture(scope="function")
 def export_dfly_password() -> str:
-    pwd = 'flypwd'
-    os.environ['DFLY_PASSWORD'] = pwd
+    pwd = "flypwd"
+    os.environ["DFLY_PASSWORD"] = pwd
     yield pwd
-    del os.environ['DFLY_PASSWORD']
+    del os.environ["DFLY_PASSWORD"]
+
 
 async def test_password(df_local_factory, export_dfly_password):
     dfly = df_local_factory.create()
@@ -38,7 +40,7 @@ async def test_password(df_local_factory, export_dfly_password):
     dfly.stop()
 
     # --requirepass should take precedence over environment variable
-    requirepass = 'requirepass'
+    requirepass = "requirepass"
     dfly = df_local_factory.create(requirepass=requirepass)
     dfly.start()
 
@@ -61,6 +63,7 @@ for i = 0, ARGV[1] do
 end
 """
 
+
 @dfly_args({"proactor_threads": 1})
 async def test_txq_ooo(async_client: aioredis.Redis, df_server):
     async def task1(k, h):
@@ -77,4 +80,6 @@ async def test_txq_ooo(async_client: aioredis.Redis, df_server):
                 pipe.blpop(k, 0.001)
             await pipe.execute()
 
-    await asyncio.gather(task1('i1', 2), task1('i2', 3), task2('l1', 2), task2('l1', 2), task2('l1', 5))
+    await asyncio.gather(
+        task1("i1", 2), task1("i2", 3), task2("l1", 2), task2("l1", 2), task2("l1", 5)
+    )
