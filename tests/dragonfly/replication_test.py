@@ -23,30 +23,57 @@ Test full replication pipeline. Test full sync with streaming changes and stable
 # 1. Number of master threads
 # 2. Number of threads for each replica
 # 3. Seeder config
+# 4. Admin port
 replication_cases = [
-    (8, [8], dict(keys=10_000, dbcount=4)),
-    (6, [6, 6, 6], dict(keys=4_000, dbcount=4)),
-    (8, [2, 2, 2, 2], dict(keys=4_000, dbcount=4)),
-    (4, [8, 8], dict(keys=4_000, dbcount=4)),
-    (4, [1] * 8, dict(keys=500, dbcount=2)),
-    (1, [1], dict(keys=100, dbcount=2)),
+    (8, [8], dict(keys=10_000, dbcount=4), False),
+    (6, [6, 6, 6], dict(keys=4_000, dbcount=4), False),
+    (8, [2, 2, 2, 2], dict(keys=4_000, dbcount=4), False),
+    (4, [8, 8], dict(keys=4_000, dbcount=4), False),
+    (4, [1] * 8, dict(keys=500, dbcount=2), False),
+    (1, [1], dict(keys=100, dbcount=2), False),
+    (8, [8], dict(keys=10_000, dbcount=4), True),
+    (6, [6, 6, 6], dict(keys=4_000, dbcount=4), True),
+    (8, [2, 2, 2, 2], dict(keys=4_000, dbcount=4), True),
+    (4, [8, 8], dict(keys=4_000, dbcount=4), True),
+    (4, [1] * 8, dict(keys=500, dbcount=2), True),
+    (1, [1], dict(keys=100, dbcount=2), True),
 ]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("t_master, t_replicas, seeder_config", replication_cases)
+@pytest.mark.parametrize("t_master, t_replicas, seeder_config, from_admin_port", replication_cases)
 async def test_replication_all(
-    df_local_factory, df_seeder_factory, t_master, t_replicas, seeder_config
+    df_local_factory, df_seeder_factory, t_master, t_replicas, seeder_config, from_admin_port
 ):
-    master = df_local_factory.create(port=BASE_PORT, proactor_threads=t_master)
-    replicas = [
-        df_local_factory.create(port=BASE_PORT + i + 1, proactor_threads=t)
-        for i, t in enumerate(t_replicas)
-    ]
+    master = (
+        df_local_factory.create(port=BASE_PORT, proactor_threads=t_master)
+        if not from_admin_port
+        else df_local_factory.create(
+            port=BASE_PORT, admin_port=ADMIN_PORT, proactor_threads=t_master
+        )
+    )
+    replicas = (
+        [
+            df_local_factory.create(port=BASE_PORT + i + 1, proactor_threads=t)
+            for i, t in enumerate(t_replicas)
+        ]
+        if not from_admin_port
+        else [
+            df_local_factory.create(
+                port=BASE_PORT + i + 1, admin_port=ADMIN_PORT + i + 1, proactor_threads=t
+            )
+            for i, t in enumerate(t_replicas)
+        ]
+    )
 
     # Start master
     master.start()
-    c_master = aioredis.Redis(port=master.port)
+    master_port = master.port if not from_admin_port else master.admin_port
+    c_master = (
+        aioredis.Redis(port=master.port)
+        if not from_admin_port
+        else aioredis.Redis(port=master_port)
+    )
 
     # Fill master with test data
     seeder = df_seeder_factory.create(port=master.port, **seeder_config)
@@ -55,7 +82,11 @@ async def test_replication_all(
     # Start replicas
     df_local_factory.start_all(replicas)
 
-    c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
+    c_replicas = (
+        [aioredis.Redis(port=replica.port) for replica in replicas]
+        if not from_admin_port
+        else [aioredis.Redis(port=replica.admin_port) for replica in replicas]
+    )
 
     # Start data stream
     stream_task = asyncio.create_task(seeder.run(target_ops=3000))
@@ -63,7 +94,7 @@ async def test_replication_all(
 
     # Start replication
     async def run_replication(c_replica):
-        await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
+        await c_replica.execute_command("REPLICAOF localhost " + str(master_port))
 
     await asyncio.gather(*(asyncio.create_task(run_replication(c)) for c in c_replicas))
 
