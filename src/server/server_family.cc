@@ -819,6 +819,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("blocked_clients", "", m.conn_stats.num_blocked_clients,
                             MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("role", "", m.is_master ? "master" : "replica", MetricType::GAUGE,
+                            &resp->body());
 
   // Memory metrics
   auto sdata_res = io::ReadStatusInfo();
