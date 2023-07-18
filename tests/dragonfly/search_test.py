@@ -14,29 +14,46 @@ from redis.commands.search.field import TextField, NumericField, TagField, Vecto
 from redis.commands.search.indexDefinition import IndexDefinition, IndexType
 
 TEST_DATA = [
-    {"title": "First article", "content": "Long description",
-        "views": 100, "topic": "world, science"},
-
-    {"title": "Second article", "content": "Small text",
-        "views": 200, "topic": "national, policits"},
-
-    {"title": "Third piece", "content": "Brief description",
-        "views": 300, "topic": "health, lifestyle"},
-
-    {"title": "Last piece", "content": "Interesting text",
-        "views": 400, "topic": "world, business"},
+    {
+        "title": "First article",
+        "content": "Long description",
+        "views": 100,
+        "topic": "world, science",
+    },
+    {
+        "title": "Second article",
+        "content": "Small text",
+        "views": 200,
+        "topic": "national, policits",
+    },
+    {
+        "title": "Third piece",
+        "content": "Brief description",
+        "views": 300,
+        "topic": "health, lifestyle",
+    },
+    {
+        "title": "Last piece",
+        "content": "Interesting text",
+        "views": 400,
+        "topic": "world, business",
+    },
 ]
 
-BASIC_TEST_SCHEMA = [TextField("title"), TextField(
-    "content"), NumericField("views"), TagField("topic")]
+BASIC_TEST_SCHEMA = [
+    TextField("title"),
+    TextField("content"),
+    NumericField("views"),
+    TagField("topic"),
+]
 
 
 async def index_test_data(async_client: aioredis.Redis, itype: IndexType, prefix=""):
     for i, e in enumerate(TEST_DATA):
         if itype == IndexType.HASH:
-            await async_client.hset(prefix+str(i), mapping=e)
+            await async_client.hset(prefix + str(i), mapping=e)
         else:
-            await async_client.json().set(prefix+str(i), "$", e)
+            await async_client.json().set(prefix + str(i), "$", e)
 
 
 def doc_to_str(doc):
@@ -44,10 +61,10 @@ def doc_to_str(doc):
         doc = doc.__dict__
 
     doc = dict(doc)  # copy to remove fields
-    doc.pop('id', None)
-    doc.pop('payload', None)
+    doc.pop("id", None)
+    doc.pop("payload", None)
 
-    return '//'.join(sorted(doc))
+    return "//".join(sorted(doc))
 
 
 def contains_test_data(res, td_indices):
@@ -66,7 +83,7 @@ def contains_test_data(res, td_indices):
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.parametrize("index_type", [IndexType.HASH, IndexType.JSON])
 async def test_basic(async_client: aioredis.Redis, index_type):
-    i1 = async_client.ft("i1-"+str(index_type))
+    i1 = async_client.ft("i1-" + str(index_type))
 
     await index_test_data(async_client, index_type)
     await i1.create_index(BASIC_TEST_SCHEMA, definition=IndexDefinition(index_type=index_type))
@@ -105,21 +122,27 @@ async def test_basic(async_client: aioredis.Redis, index_type):
 async def knn_query(idx, query, vector):
     params = {"vec": np.array(vector, dtype=np.float32).tobytes()}
     result = await idx.search(query, params)
-    return {doc['id'] for doc in result.docs}
+    return {doc["id"] for doc in result.docs}
 
 
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.parametrize("index_type", [IndexType.HASH, IndexType.JSON])
 async def test_knn(async_client: aioredis.Redis, index_type):
-    i2 = async_client.ft("i2-"+str(index_type))
+    i2 = async_client.ft("i2-" + str(index_type))
 
-    vector_field = VectorField("pos", "FLAT", {
-        "TYPE": "FLOAT32",
-        "DIM": 1,
-        "DISTANCE_METRIC": "L2",
-    })
+    vector_field = VectorField(
+        "pos",
+        "FLAT",
+        {
+            "TYPE": "FLOAT32",
+            "DIM": 1,
+            "DISTANCE_METRIC": "L2",
+        },
+    )
 
-    await i2.create_index([TagField("even"), vector_field], definition=IndexDefinition(index_type=index_type))
+    await i2.create_index(
+        [TagField("even"), vector_field], definition=IndexDefinition(index_type=index_type)
+    )
 
     pipe = async_client.pipeline()
     for i in range(100):
@@ -131,13 +154,18 @@ async def test_knn(async_client: aioredis.Redis, index_type):
             pipe.json().set(f"k{i}", "$", {"even": even, "pos": [float(i)]})
     await pipe.execute()
 
-    assert await knn_query(i2, "* => [KNN 3 @pos VEC]", [50.0]) == {'k49', 'k50', 'k51'}
+    assert await knn_query(i2, "* => [KNN 3 @pos VEC]", [50.0]) == {"k49", "k50", "k51"}
 
-    assert await knn_query(i2, "@even:{yes} => [KNN 3 @pos VEC]", [20.0]) == {'k18', 'k20', 'k22'}
+    assert await knn_query(i2, "@even:{yes} => [KNN 3 @pos VEC]", [20.0]) == {"k18", "k20", "k22"}
 
-    assert await knn_query(i2, "@even:{no} => [KNN 4 @pos VEC]", [30.0]) == {'k27', 'k29', 'k31', 'k33'}
+    assert await knn_query(i2, "@even:{no} => [KNN 4 @pos VEC]", [30.0]) == {
+        "k27",
+        "k29",
+        "k31",
+        "k33",
+    }
 
-    assert await knn_query(i2, "@even:{yes} => [KNN 3 @pos VEC]", [10.0] == {'k8', 'k10', 'k12'})
+    assert await knn_query(i2, "@even:{yes} => [KNN 3 @pos VEC]", [10.0] == {"k8", "k10", "k12"})
 
 
 NUM_DIMS = 10
@@ -147,21 +175,24 @@ NUM_POINTS = 100
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.parametrize("index_type", [IndexType.HASH, IndexType.JSON])
 async def test_multidim_knn(async_client: aioredis.Redis, index_type):
-    vector_field = VectorField("pos", "FLAT", {
-        "TYPE": "FLOAT32",
-        "DIM": NUM_DIMS,
-        "DISTANCE_METRIC": "L2",
-    })
+    vector_field = VectorField(
+        "pos",
+        "FLAT",
+        {
+            "TYPE": "FLOAT32",
+            "DIM": NUM_DIMS,
+            "DISTANCE_METRIC": "L2",
+        },
+    )
 
-    i3 = async_client.ft("i3-"+str(index_type))
+    i3 = async_client.ft("i3-" + str(index_type))
     await i3.create_index([vector_field], definition=IndexDefinition(index_type=index_type))
 
     def rand_point():
         return np.random.uniform(0, 10, NUM_DIMS).astype(np.float32)
 
     # Generate points and send to DF
-    points = [rand_point()
-              for _ in range(NUM_POINTS)]
+    points = [rand_point() for _ in range(NUM_POINTS)]
     points = list(enumerate(points))
 
     pipe = async_client.pipeline(transaction=False)
@@ -175,10 +206,12 @@ async def test_multidim_knn(async_client: aioredis.Redis, index_type):
     # Run 10 random queries
     for _ in range(10):
         center = rand_point()
-        limit = random.randint(1, NUM_POINTS/10)
+        limit = random.randint(1, NUM_POINTS / 10)
 
-        expected_ids = [f"k{i}" for i, point in sorted(
-            points, key=lambda p: np.linalg.norm(center - p[1]))[:limit]]
+        expected_ids = [
+            f"k{i}"
+            for i, point in sorted(points, key=lambda p: np.linalg.norm(center - p[1]))[:limit]
+        ]
 
         got_ids = await knn_query(i3, f"* => [KNN {limit} @pos VEC]", center)
 

@@ -4,6 +4,7 @@
 #include "server/container_utils.h"
 
 #include "base/logging.h"
+#include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
 #include "server/engine_shard_set.h"
@@ -90,16 +91,16 @@ bool IterateSet(const PrimeValue& pv, const IterateFunc& func) {
   return success;
 }
 
-bool IterateSortedSet(robj* zobj, const IterateSortedFunc& func, int32_t start, int32_t end,
-                      bool reverse, bool use_score) {
-  unsigned long llen = zsetLength(zobj);
+bool IterateSortedSet(const detail::RobjWrapper* robj_wrapper, const IterateSortedFunc& func,
+                      int32_t start, int32_t end, bool reverse, bool use_score) {
+  unsigned long llen = robj_wrapper->Size();
   if (end < 0 || unsigned(end) >= llen)
     end = llen - 1;
 
   unsigned rangelen = unsigned(end - start) + 1;
 
-  if (zobj->encoding == OBJ_ENCODING_LISTPACK) {
-    uint8_t* zl = static_cast<uint8_t*>(zobj->ptr);
+  if (robj_wrapper->encoding() == OBJ_ENCODING_LISTPACK) {
+    uint8_t* zl = static_cast<uint8_t*>(robj_wrapper->inner_obj());
     uint8_t *eptr, *sptr;
     uint8_t* vstr;
     unsigned int vlen;
@@ -138,30 +139,11 @@ bool IterateSortedSet(robj* zobj, const IterateSortedFunc& func, int32_t start, 
     }
     return success;
   } else {
-    CHECK_EQ(zobj->encoding, OBJ_ENCODING_SKIPLIST);
-    zset* zs = static_cast<zset*>(zobj->ptr);
-    zskiplist* zsl = zs->zsl;
-    zskiplistNode* ln;
-
-    /* Check if starting point is trivial, before doing log(N) lookup. */
-    if (reverse) {
-      ln = zsl->tail;
-      unsigned long llen = zsetLength(zobj);
-      if (start > 0)
-        ln = zslGetElementByRank(zsl, llen - start);
-    } else {
-      ln = zsl->header->level[0].forward;
-      if (start > 0)
-        ln = zslGetElementByRank(zsl, start + 1);
-    }
-
-    bool success = true;
-    while (success && rangelen--) {
-      DCHECK(ln != NULL);
-      success = func(ContainerEntry{ln->ele, sdslen(ln->ele)}, ln->score);
-      ln = reverse ? ln->backward : ln->level[0].forward;
-    }
-    return success;
+    CHECK_EQ(robj_wrapper->encoding(), OBJ_ENCODING_SKIPLIST);
+    detail::SortedMap* smap = (detail::SortedMap*)robj_wrapper->inner_obj();
+    return smap->Iterate(start, rangelen, reverse, [&](sds ele, double score) {
+      return func(ContainerEntry{ele, sdslen(ele)}, score);
+    });
   }
   return false;
 }

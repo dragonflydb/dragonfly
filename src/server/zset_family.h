@@ -49,9 +49,6 @@ class ZSetFamily {
     RangeParams params;
   };
 
-  using ScoredMember = std::pair<std::string, double>;
-  using ScoredArray = std::vector<ScoredMember>;
-
  private:
   template <typename T> using OpResult = facade::OpResult<T>;
 
@@ -88,38 +85,15 @@ class ZSetFamily {
   static void ZUnionStore(CmdArgList args, ConnectionContext* cntx);
 
   static void ZRangeByScoreInternal(CmdArgList args, bool reverse, ConnectionContext* cntx);
-  static void OutputScoredArrayResult(const OpResult<ScoredArray>& arr, const RangeParams& params,
-                                      ConnectionContext* cntx);
   static void ZRemRangeGeneric(std::string_view key, const ZRangeSpec& range_spec,
                                ConnectionContext* cntx);
   static void ZRangeGeneric(CmdArgList args, RangeParams range_params, ConnectionContext* cntx);
   static void ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx);
   static bool ParseRangeByScoreParams(CmdArgList args, RangeParams* params);
   static void ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cntx);
-  static OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t* cursor,
-                                    const ScanOpts& scan_op);
 
-  static OpResult<unsigned> OpRem(const OpArgs& op_args, std::string_view key, ArgSlice members);
-  static OpResult<double> OpScore(const OpArgs& op_args, std::string_view key,
-                                  std::string_view member);
-  using MScoreResponse = std::vector<std::optional<double>>;
-  static OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, std::string_view key,
-                                           ArgSlice members);
-  static OpResult<ScoredArray> OpPopCount(const ZRangeSpec& range_spec, const OpArgs& op_args,
-                                          std::string_view key);
-  static OpResult<ScoredArray> OpRange(const ZRangeSpec& range_spec, const OpArgs& op_args,
-                                       std::string_view key);
-  static OpResult<unsigned> OpRemRange(const OpArgs& op_args, std::string_view key,
-                                       const ZRangeSpec& spec);
-
-  static OpResult<unsigned> OpRank(const OpArgs& op_args, std::string_view key,
-                                   std::string_view member, bool reverse);
-
-  static OpResult<unsigned> OpCount(const OpArgs& op_args, std::string_view key,
-                                    const ScoreInterval& interval);
-
-  static OpResult<unsigned> OpLexCount(const OpArgs& op_args, std::string_view key,
-                                       const LexInterval& interval);
+  static void GeoAdd(CmdArgList args, ConnectionContext* cntx);
+  static void GeoHash(CmdArgList args, ConnectionContext* cntx);
 };
 
 }  // namespace dfly

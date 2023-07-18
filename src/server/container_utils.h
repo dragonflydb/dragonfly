@@ -69,8 +69,9 @@ bool IterateSet(const PrimeValue& pv, const IterateFunc& func);
 // Iterate over all values and call func(val). Iteration stops as soon
 // as func return false. Returns true if it successfully processed all elements
 // without stopping.
-bool IterateSortedSet(robj* zobj, const IterateSortedFunc& func, int32_t start = 0,
-                      int32_t end = -1, bool reverse = false, bool use_score = false);
+bool IterateSortedSet(const detail::RobjWrapper* robj_wrapper, const IterateSortedFunc& func,
+                      int32_t start = 0, int32_t end = -1, bool reverse = false,
+                      bool use_score = false);
 
 // Get StringMap pointer from primetable value. Sets expire time from db_context
 StringMap* GetStringMap(const PrimeValue& pv, const DbContext& db_context);

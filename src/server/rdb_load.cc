@@ -28,6 +28,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/json_object.h"
+#include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
 #include "server/engine_shard_set.h"
@@ -693,13 +694,12 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
-  robj* res = createZsetObject();
-  zset* zs = (zset*)res->ptr;
-
-  auto cleanup = absl::Cleanup([&] { decrRefCount(res); });
-
   size_t zsetlen = ltrace->blob_count();
-  if (zsetlen > DICT_HT_INITIAL_SIZE && dictTryExpand(zs->dict, zsetlen) != DICT_OK) {
+  detail::SortedMap* zs = new detail::SortedMap;
+  unsigned encoding = OBJ_ENCODING_SKIPLIST;
+  auto cleanup = absl::MakeCleanup([&] { delete zs; });
+
+  if (zsetlen > DICT_HT_INITIAL_SIZE && !zs->Reserve(zsetlen)) {
     LOG(ERROR) << "OOM in dictTryExpand " << zsetlen;
     ec_ = RdbError(errc::out_of_memory);
     return;
@@ -719,9 +719,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
       maxelelen = sdslen(sdsele);
     totelelen += sdslen(sdsele);
 
-    zskiplistNode* znode = zslInsert(zs->zsl, score, sdsele);
-    int ret = dictAdd(zs->dict, sdsele, &znode->score);
-    if (ret != DICT_OK) {
+    if (!zs->Insert(score, sdsele)) {
       LOG(ERROR) << "Duplicate zset fields detected";
       sdsfree(sdsele);
       ec_ = RdbError(errc::rdb_file_corrupted);
@@ -734,15 +732,17 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
   if (ec_)
     return;
 
-  /* Convert *after* loading, since sorted sets are not stored ordered. */
-  if (zsetLength(res) <= server.zset_max_listpack_entries &&
+  void* inner = zs;
+  if (zs->Size() <= server.zset_max_listpack_entries &&
       maxelelen <= server.zset_max_listpack_value && lpSafeToAdd(NULL, totelelen)) {
-    zsetConvert(res, OBJ_ENCODING_LISTPACK);
+    encoding = OBJ_ENCODING_LISTPACK;
+    inner = zs->ToListPack();
+    delete zs;
   }
 
   std::move(cleanup).Cancel();
 
-  pv_->ImportRObj(res);
+  pv_->InitRobj(OBJ_ZSET, encoding, inner);
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
@@ -866,7 +866,6 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     return;
   }
 
-  robj* res = nullptr;
   if (rdb_type_ == RDB_TYPE_SET_INTSET) {
     if (!intsetValidateIntegrity((const uint8_t*)blob.data(), blob.size(), 0)) {
       LOG(ERROR) << "Intset integrity check failed.";
@@ -877,6 +876,8 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     const intset* is = (const intset*)blob.data();
 
     unsigned len = intsetLen(is);
+    robj* res = nullptr;
+
     if (len > SetFamily::MaxIntsetEntries()) {
       res = createSetObject();
       if (!SetFamily::ConvertToStrSet(is, len, res)) {
@@ -891,6 +892,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       res = createObject(OBJ_SET, mine);
       res->encoding = OBJ_ENCODING_INTSET;
     }
+    pv_->ImportRObj(res);
   } else if (rdb_type_ == RDB_TYPE_HASH_ZIPLIST) {
     unsigned char* lp = lpNew(blob.size());
     if (!ziplistPairsConvertAndValidateIntegrity((const uint8_t*)blob.data(), blob.size(), &lp)) {
@@ -930,18 +932,21 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       return;
     }
 
-    res = createObject(OBJ_ZSET, lp);
-    res->encoding = OBJ_ENCODING_LISTPACK;
-
-    if (lpBytes(lp) > server.zset_max_listpack_entries)
-      zsetConvert(res, OBJ_ENCODING_SKIPLIST);
-    else
-      res->ptr = lpShrinkToFit(lp);
+    unsigned encoding = OBJ_ENCODING_LISTPACK;
+    void* inner;
+    if (lpBytes(lp) > server.zset_max_listpack_entries) {
+      inner = detail::SortedMap::FromListPack(lp).release();
+      lpFree(lp);
+      encoding = OBJ_ENCODING_SKIPLIST;
+    } else {
+      lp = lpShrinkToFit(lp);
+      inner = lp;
+    }
+    pv_->InitRobj(OBJ_ZSET, encoding, inner);
+    return;
   } else {
     LOG(FATAL) << "Unsupported rdb type " << rdb_type_;
   }
-
-  pv_->ImportRObj(res);
 }
 
 sds RdbLoaderBase::OpaqueObjLoader::ToSds(const RdbVariant& obj) {

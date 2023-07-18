@@ -133,7 +133,7 @@ class DflyCmd {
  private:
   // JOURNAL [START/STOP]
   // Start or stop journaling.
-  void Journal(CmdArgList args, ConnectionContext* cntx);
+  // void Journal(CmdArgList args, ConnectionContext* cntx);
 
   // THREAD [to_thread]
   // Return connection thread index or migrate to another thread.

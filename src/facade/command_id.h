@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <string_view>
+
 #include "facade/facade_types.h"
 
 namespace facade {

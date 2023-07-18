@@ -1,6 +1,7 @@
 add_library(dfly_core compact_object.cc dragonfly_core.cc extent_tree.cc
     external_alloc.cc interpreter.cc json_object.cc mi_memory_resource.cc sds_utils.cc
-    segment_allocator.cc simple_lru_counter.cc small_string.cc tx_queue.cc dense_set.cc
+    segment_allocator.cc simple_lru_counter.cc small_string.cc sorted_map.cc
+    tx_queue.cc dense_set.cc
     string_set.cc string_map.cc detail/bitpacking.cc)
 
 cxx_link(dfly_core base query_parser absl::flat_hash_map absl::str_format redis_lib TRDP::lua lua_modules
@@ -19,5 +20,6 @@ cxx_test(json_test dfly_core TRDP::jsoncons LABELS DFLY)
 cxx_test(simple_lru_counter_test dfly_core LABELS DFLY)
 cxx_test(string_set_test dfly_core LABELS DFLY)
 cxx_test(string_map_test dfly_core LABELS DFLY)
+cxx_test(sorted_map_test dfly_core LABELS DFLY)
 
 add_subdirectory(search)
