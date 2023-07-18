@@ -817,6 +817,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("blocked_clients", "", m.conn_stats.num_blocked_clients,
                             MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("role", "", m.is_master ? "master" : "replica", MetricType::GAUGE,
+                            &resp->body());
 
   // Memory metrics
   auto sdata_res = io::ReadStatusInfo();
@@ -1513,8 +1515,11 @@ Metrics ServerFamily::GetMetrics() const {
   result.traverse_ttl_per_sec /= 6;
   result.delete_ttl_per_sec /= 6;
 
-  if (ServerState::tlocal() && ServerState::tlocal()->is_master)
+  result.is_master = false;
+  if (ServerState::tlocal() && ServerState::tlocal()->is_master) {
+    result.is_master = true;
     result.replication_metrics = dfly_cmd_->GetReplicasRoleInfo();
+  }
 
   return result;
 }
