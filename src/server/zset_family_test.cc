@@ -355,6 +355,14 @@ TEST_F(ZSetFamilyTest, ZUnion) {
 
   resp = Run({"zunion", "1", "z1", "weights", "2", "aggregate", "max", "withscores"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "2", "b", "6"));
+
+  for (unsigned i = 0; i < 256; ++i) {
+    Run({"zadd", "large1", "1000", absl::StrCat("aaaaaaaaaa", i)});
+    Run({"zadd", "large2", "1000", absl::StrCat("bbbbbbbbbb", i)});
+    Run({"zadd", "large2", "1000", absl::StrCat("aaaaaaaaaa", i)});
+  }
+  resp = Run({"zunion", "2", "large2", "large1"});
+  EXPECT_THAT(resp, ArrLen(512));
 }
 
 TEST_F(ZSetFamilyTest, ZUnionStore) {

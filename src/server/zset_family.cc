@@ -16,6 +16,7 @@ extern "C" {
 
 #include "base/logging.h"
 #include "base/stl_util.h"
+#include "core/sorted_map.h"
 #include "facade/error.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
@@ -101,12 +102,9 @@ int ZsetDel(detail::RobjWrapper* robj_wrapper, sds ele) {
       return 1;
     }
   } else if (robj_wrapper->encoding() == OBJ_ENCODING_SKIPLIST) {
-    zset* zs = (zset*)robj_wrapper->inner_obj();
-    if (zsetRemoveFromSkiplist(zs, ele)) {
-      if (htNeedsResize(zs->dict))
-        dictResize(zs->dict);
+    detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper->inner_obj();
+    if (zs->Delete(ele))
       return 1;
-    }
   }
   return 0; /* No such element found. */
 }
@@ -121,12 +119,8 @@ std::optional<double> GetZsetScore(detail::RobjWrapper* robj_wrapper, sds member
   }
 
   if (robj_wrapper->encoding() == OBJ_ENCODING_SKIPLIST) {
-    zset* zs = (zset*)robj_wrapper->inner_obj();
-    dictEntry* de = dictFind(zs->dict, member);
-    if (de == NULL)
-      return std::nullopt;
-
-    return *(double*)dictGetVal(de);
+    detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper->inner_obj();
+    return zs->GetScore(member);
   }
 
   LOG(FATAL) << "Unknown sorted set encoding";
@@ -170,7 +164,7 @@ OpResult<PrimeIterator> FindZEntry(const ZParams& zparams, const OpArgs& op_args
 
   if (add_res.second || zparams.override) {
     if (member_len > kMaxListPackValue) {
-      zset* zs = zsetCreate();
+      detail::SortedMap* zs = new detail::SortedMap();
       pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_SKIPLIST, zs);
     } else {
       unsigned char* lp = lpNew(0);
@@ -284,10 +278,6 @@ class IntervalVisitor {
     } else {
       zzlNext(zl, eptr, sptr);
     }
-  }
-
-  zskiplistNode* Next(zskiplistNode* ln) const {
-    return params_.reverse ? ln->backward : ln->level[0].forward;
   }
 
   bool IsUnder(double score, const zrangespec& spec) const {
@@ -419,8 +409,8 @@ void IntervalVisitor::ActionRem(unsigned start, unsigned end) {
     robj_wrapper_->set_inner_obj(zl);
   } else {
     CHECK_EQ(OBJ_ENCODING_SKIPLIST, robj_wrapper_->encoding());
-    zset* zs = (zset*)robj_wrapper_->inner_obj();
-    removed_ = zslDeleteRangeByRank(zs->zsl, start + 1, end + 1, zs->dict);
+    detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper_->inner_obj();
+    removed_ = zs->DeleteRangeByRank(start, end);
   }
 }
 
@@ -433,8 +423,8 @@ void IntervalVisitor::ActionRem(const zrangespec& range) {
     removed_ = deleted;
   } else {
     CHECK_EQ(OBJ_ENCODING_SKIPLIST, robj_wrapper_->encoding());
-    zset* zs = (zset*)robj_wrapper_->inner_obj();
-    removed_ = zslDeleteRangeByScore(zs->zsl, &range, zs->dict);
+    detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper_->inner_obj();
+    removed_ = zs->DeleteRangeByScore(range);
   }
 }
 
@@ -447,8 +437,8 @@ void IntervalVisitor::ActionRem(const zlexrangespec& range) {
     removed_ = deleted;
   } else {
     CHECK_EQ(OBJ_ENCODING_SKIPLIST, robj_wrapper_->encoding());
-    zset* zs = (zset*)robj_wrapper_->inner_obj();
-    removed_ = zslDeleteRangeByLex(zs->zsl, &range, zs->dict);
+    detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper_->inner_obj();
+    removed_ = zs->DeleteRangeByLex(range);
   }
 }
 
@@ -506,35 +496,12 @@ void IntervalVisitor::ExtractListPack(const zrangespec& range) {
 }
 
 void IntervalVisitor::ExtractSkipList(const zrangespec& range) {
-  zset* zs = (zset*)robj_wrapper_->inner_obj();
-  zskiplist* zsl = zs->zsl;
-  zskiplistNode* ln;
+  detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper_->inner_obj();
+
   unsigned offset = params_.offset;
   unsigned limit = params_.limit;
 
-  /* If reversed, get the last node in range as starting point. */
-  if (params_.reverse) {
-    ln = zslLastInRange(zsl, &range);
-  } else {
-    ln = zslFirstInRange(zsl, &range);
-  }
-
-  /* If there is an offset, just traverse the number of elements without
-   * checking the score because that is done in the next loop. */
-  while (ln && offset--) {
-    ln = Next(ln);
-  }
-
-  while (ln && limit--) {
-    /* Abort when the node is no longer in range. */
-    if (!IsUnder(ln->score, range))
-      break;
-
-    result_.emplace_back(string{ln->ele, sdslen(ln->ele)}, ln->score);
-
-    /* Move to next node */
-    ln = Next(ln);
-  }
+  result_ = zs->GetRange(range, offset, limit, params_.reverse);
 }
 
 void IntervalVisitor::ExtractListPack(const zlexrangespec& range) {
@@ -586,40 +553,10 @@ void IntervalVisitor::ExtractListPack(const zlexrangespec& range) {
 }
 
 void IntervalVisitor::ExtractSkipList(const zlexrangespec& range) {
-  zset* zs = (zset*)robj_wrapper_->inner_obj();
-  zskiplist* zsl = zs->zsl;
-  zskiplistNode* ln;
+  detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper_->inner_obj();
   unsigned offset = params_.offset;
   unsigned limit = params_.limit;
-
-  /* If reversed, get the last node in range as starting point. */
-  if (params_.reverse) {
-    ln = zslLastInLexRange(zsl, &range);
-  } else {
-    ln = zslFirstInLexRange(zsl, &range);
-  }
-
-  /* If there is an offset, just traverse the number of elements without
-   * checking the score because that is done in the next loop. */
-  while (ln && offset--) {
-    ln = Next(ln);
-  }
-
-  while (ln && limit--) {
-    /* Abort when the node is no longer in range. */
-    if (params_.reverse) {
-      if (!zslLexValueGteMin(ln->ele, &range))
-        break;
-    } else {
-      if (!zslLexValueLteMax(ln->ele, &range))
-        break;
-    }
-
-    result_.emplace_back(string{ln->ele, sdslen(ln->ele)}, ln->score);
-
-    /* Move to next node */
-    ln = Next(ln);
-  }
+  result_ = zs->GetLexRange(range, offset, limit, params_.reverse);
 }
 
 void IntervalVisitor::PopListPack(ZSetFamily::TopNScored sc) {
@@ -662,25 +599,10 @@ void IntervalVisitor::PopListPack(ZSetFamily::TopNScored sc) {
 }
 
 void IntervalVisitor::PopSkipList(ZSetFamily::TopNScored sc) {
-  zset* zs = (zset*)robj_wrapper_->inner_obj();
-  zskiplist* zsl = zs->zsl;
-  zskiplistNode* ln;
+  detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper_->inner_obj();
 
   /* We start from the header, or the tail if reversed. */
-  if (params_.reverse) {
-    ln = zsl->tail;
-  } else {
-    ln = zsl->header->level[0].forward;
-  }
-
-  while (ln && sc--) {
-    result_.emplace_back(string{ln->ele, sdslen(ln->ele)}, ln->score);
-
-    /* we can delete the element now */
-    ZsetDel(robj_wrapper_, ln->ele);
-
-    ln = Next(ln);
-  }
+  result_ = zs->PopTopScores(sc, params_.reverse);
 }
 
 void IntervalVisitor::AddResult(const uint8_t* vstr, unsigned vlen, long long vlong, double score) {
@@ -1435,21 +1357,14 @@ OpResult<unsigned> OpRank(const OpArgs& op_args, string_view key, string_view me
     return rank - 1;
   }
   DCHECK_EQ(robj_wrapper->encoding(), OBJ_ENCODING_SKIPLIST);
-
-  robj self{
-      .type = OBJ_ZSET,
-      .encoding = robj_wrapper->encoding(),
-      .lru = 0,
-      .refcount = OBJ_STATIC_REFCOUNT,
-      .ptr = robj_wrapper->inner_obj(),
-  };
-
+  detail::SortedMap* ss = (detail::SortedMap*)robj_wrapper->inner_obj();
   op_args.shard->tmp_str1 = sdscpylen(op_args.shard->tmp_str1, member.data(), member.size());
-  long res = zsetRank(&self, op_args.shard->tmp_str1, reverse);
-  if (res < 0)
+
+  std::optional<unsigned> rank = ss->GetRank(op_args.shard->tmp_str1, reverse);
+  if (!rank)
     return OpStatus::KEY_NOTFOUND;
 
-  return res;
+  return *rank;
 }
 
 OpResult<unsigned> OpCount(const OpArgs& op_args, std::string_view key,
@@ -1495,29 +1410,8 @@ OpResult<unsigned> OpCount(const OpArgs& op_args, std::string_view key,
     }
   } else {
     CHECK_EQ(unsigned(OBJ_ENCODING_SKIPLIST), robj_wrapper->encoding());
-    zset* zs = (zset*)robj_wrapper->inner_obj();
-    zskiplist* zsl = zs->zsl;
-    zskiplistNode* zn;
-    unsigned long rank;
-
-    /* Find first element in range */
-    zn = zslFirstInRange(zsl, &range);
-
-    /* Use rank of first element, if any, to determine preliminary count */
-    if (zn == NULL)
-      return 0;
-
-    rank = zslGetRank(zsl, zn->score, zn->ele);
-    count = (zsl->length - (rank - 1));
-
-    /* Find last element in range */
-    zn = zslLastInRange(zsl, &range);
-
-    /* Use rank of last element, if any, to determine the actual count */
-    if (zn != NULL) {
-      rank = zslGetRank(zsl, zn->score, zn->ele);
-      count -= (zsl->length - rank);
-    }
+    detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper->inner_obj();
+    count = zs->Count(range);
   }
 
   return count;
@@ -1559,28 +1453,8 @@ OpResult<unsigned> OpLexCount(const OpArgs& op_args, string_view key,
     }
   } else {
     DCHECK_EQ(OBJ_ENCODING_SKIPLIST, robj_wrapper->encoding());
-    zset* zs = (zset*)robj_wrapper->inner_obj();
-    zskiplist* zsl = zs->zsl;
-    zskiplistNode* zn;
-    unsigned long rank;
-
-    /* Find first element in range */
-    zn = zslFirstInLexRange(zsl, &range);
-
-    /* Use rank of first element, if any, to determine preliminary count */
-    if (zn != NULL) {
-      rank = zslGetRank(zsl, zn->score, zn->ele);
-      count = (zsl->length - (rank - 1));
-
-      /* Find last element in range */
-      zn = zslLastInLexRange(zsl, &range);
-
-      /* Use rank of last element, if any, to determine the actual count */
-      if (zn != NULL) {
-        rank = zslGetRank(zsl, zn->score, zn->ele);
-        count -= (zsl->length - rank);
-      }
-    }
+    detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper->inner_obj();
+    count = zs->LexCount(range);
   }
 
   zslFreeLexRange(&range);
@@ -1679,9 +1553,9 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
   } else {
     CHECK_EQ(unsigned(OBJ_ENCODING_SKIPLIST), pv.Encoding());
     uint32_t count = scan_op.limit;
-    zset* zs = (zset*)pv.RObjPtr();
+    detail::SortedMap* zs = (detail::SortedMap*)pv.RObjPtr();
 
-    dict* ht = zs->dict;
+    dict* ht = zs->GetDict();
     long maxiterations = count * 10;
 
     struct ScanArgs {
