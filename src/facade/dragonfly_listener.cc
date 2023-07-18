@@ -56,23 +56,14 @@ using absl::GetFlag;
 namespace {
 
 #ifdef DFLY_USE_SSL
-// To connect: openssl s_client  -cipher "ADH:@SECLEVEL=0" -state -crlf  -connect 127.0.0.1:6380
-static SSL_CTX* CreateSslServerCntx() {
+SSL_CTX* CreateSslServerCntx() {
   SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
   const auto& tls_key_file = GetFlag(FLAGS_tls_key_file);
   unsigned mask = SSL_VERIFY_NONE;
   if (tls_key_file.empty()) {
-    // To connect - use openssl s_client -cipher with either:
-    // "AECDH:@SECLEVEL=0" or "ADH:@SECLEVEL=0" setting.
-    CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "aNULL"));
-
-    // To allow anonymous ciphers.
-    SSL_CTX_set_security_level(ctx, 0);
-
-    // you can still connect with redis-cli with :
-    // redis-cli --tls --insecure --tls-ciphers "ADH:@SECLEVEL=0"
-    LOG(WARNING) << "tls-key-file not set, no keys are loaded and anonymous ciphers are enabled. "
-                 << "Do not use in production!";
+    LOG(ERROR)
+        << "To use TLS, a server certificate must be provided with the --tls_cert_file flag!";
+    exit(-1);
   } else {  // tls_key_file is set.
     CHECK_EQ(1, SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM));
     const auto& tls_cert_file = GetFlag(FLAGS_tls_cert_file);
