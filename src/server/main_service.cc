@@ -1543,6 +1543,8 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
   if (state != ExecEvalState::NONE) {
     // Allow multi eval only when scripts run global and multi runs in global or lock ahead
+    // We adjust the atomicity level of multi transaction inside StartMultiExec i.e if multi mode is
+    // lock ahead and we run global script in the transaction then multi mode will be global.
     if (!global_script || (multi_mode == Transaction::NON_ATOMIC)) {
       return rb->SendError(
           "Dragonfly does not allow execution of a server-side Lua in Multi transaction");
