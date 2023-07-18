@@ -808,6 +808,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   // Server metrics
   AppendMetricHeader("version", "", MetricType::GAUGE, &resp->body());
   AppendMetricValue("version", 1, {"version"}, {GetVersion()}, &resp->body());
+  AppendMetricHeader("role", "", MetricType::GAUGE, &resp->body());
+  AppendMetricValue("role", 1, {"role"}, {m.is_master ? "master" : "replica"}, &resp->body());
   AppendMetricWithoutLabels("uptime_in_seconds", "", m.uptime, MetricType::GAUGE, &resp->body());
 
   // Clients metrics
@@ -817,8 +819,6 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("blocked_clients", "", m.conn_stats.num_blocked_clients,
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("role", "", m.is_master ? "master" : "replica", MetricType::GAUGE,
-                            &resp->body());
 
   // Memory metrics
   auto sdata_res = io::ReadStatusInfo();
