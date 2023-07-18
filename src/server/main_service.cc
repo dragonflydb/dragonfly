@@ -1281,8 +1281,7 @@ bool StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptParams param
   Transaction::MultiMode multi_mode = DetermineMultiMode(params);
 
   // Check if eval is already part of a running multi transaction
-  if ((trans->GetMultiMode() != Transaction::NOT_DETERMINED) &&
-      trans->GetMultiMode() != Transaction::NON_ATOMIC) {
+  if (trans->GetMultiMode() != Transaction::NOT_DETERMINED) {
     DCHECK_LE(trans->GetMultiMode(), multi_mode);  // Check the transaction covers our requirements
     return false;
   }
