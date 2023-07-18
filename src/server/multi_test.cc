@@ -2,6 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/flags/reflection.h>
 #include <absl/strings/str_cat.h>
 #include <gmock/gmock.h>
 
@@ -50,21 +51,6 @@ class MultiTest : public BaseFamilyTest {
   MultiTest() : BaseFamilyTest() {
     num_threads_ = kPoolThreadCount;
   }
-
-  void SetUp() override {
-    original_multi_exec_mode_ = absl::GetFlag(FLAGS_multi_exec_mode);
-    original_multi_exec_squash_ = absl::GetFlag(FLAGS_multi_exec_squash);
-    BaseFamilyTest::SetUp();
-  }
-
-  void TearDown() override {
-    // Restore the original value of the flag after the test
-    absl::SetFlag(&FLAGS_multi_exec_squash, original_multi_exec_mode_);
-    absl::SetFlag(&FLAGS_multi_exec_mode, original_multi_exec_squash_);
-    BaseFamilyTest::TearDown();
-  }
-  uint32_t original_multi_exec_mode_;
-  bool original_multi_exec_squash_;
 };
 
 // Check constants are valid.
@@ -594,6 +580,7 @@ TEST_F(MultiTest, MultiCauseUnblocking) {
 }
 
 TEST_F(MultiTest, ExecGlobalFallback) {
+  absl::FlagSaver fs;
   // Check global command MOVE falls back to global mode from lock ahead.
   absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::LOCK_AHEAD);
   Run({"multi"});
@@ -713,6 +700,7 @@ TEST_F(MultiTest, ContendedList) {
 // Test that squashing makes single-key ops atomic withing a non-atomic tx
 // because it runs them within one hop.
 TEST_F(MultiTest, TestSquashing) {
+  absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_multi_exec_squash, true);
   absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::LOCK_AHEAD);
 
@@ -743,24 +731,11 @@ class MultiEvalTest : public BaseFamilyTest {
  protected:
   MultiEvalTest() : BaseFamilyTest() {
     num_threads_ = kPoolThreadCount;
-  }
-
-  void SetUp() override {
-    // Store the original value of the flag
-    original_default_lua_flags_ = absl::GetFlag(FLAGS_default_lua_flags);
-
-    // Set the desired value for the flag
+    fs_.reset(new absl::FlagSaver);
     absl::SetFlag(&FLAGS_default_lua_flags, "allow-undeclared-keys");
-    BaseFamilyTest::SetUp();
   }
 
-  void TearDown() override {
-    // Restore the original value of the flag after the test
-    absl::SetFlag(&FLAGS_default_lua_flags, original_default_lua_flags_);
-    BaseFamilyTest::TearDown();
-  }
-
-  string original_default_lua_flags_;
+  std::unique_ptr<absl::FlagSaver> fs_;
 };
 
 TEST_F(MultiEvalTest, MultiAllEval) {
