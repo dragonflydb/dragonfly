@@ -57,7 +57,7 @@ namespace {
 
 #ifdef DFLY_USE_SSL
 // To connect: openssl s_client  -cipher "ADH:@SECLEVEL=0" -state -crlf  -connect 127.0.0.1:6380
-static SSL_CTX* CreateSslCntx() {
+static SSL_CTX* CreateSslServerCntx() {
   SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
   const auto& tls_key_file = GetFlag(FLAGS_tls_key_file);
   unsigned mask = SSL_VERIFY_NONE;
@@ -139,7 +139,7 @@ Listener::Listener(Protocol protocol, ServiceInterface* si) : service_(si), prot
 #ifdef DFLY_USE_SSL
   if (GetFlag(FLAGS_tls)) {
     OPENSSL_init_ssl(OPENSSL_INIT_SSL_DEFAULT, NULL);
-    ctx_ = CreateSslCntx();
+    ctx_ = CreateSslServerCntx();
   }
 #endif
 
@@ -328,10 +328,6 @@ ProactorBase* Listener::PickConnectionProactor(util::FiberSocketBase* sock) {
   }
 
   return pp->at(res_id);
-}
-
-SSL_CTX* Listener::GetSSLCtx() {
-  return ctx_;
 }
 
 }  // namespace facade

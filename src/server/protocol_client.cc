@@ -50,8 +50,8 @@ using absl::StrCat;
 
 namespace {
 
-static ProtocolClient::SSL_CTX* CreateSslClientCntx() {
 #ifdef DFLY_USE_SSL
+static ProtocolClient::SSL_CTX* CreateSslClientCntx() {
   const bool is_tls_replication_enabled = absl::GetFlag(FLAGS_tls_replication);
   if (!is_tls_replication_enabled) {
     return nullptr;
@@ -83,10 +83,8 @@ static ProtocolClient::SSL_CTX* CreateSslClientCntx() {
 
   CHECK_EQ(1, SSL_CTX_set_dh_auto(ctx, 1));
   return ctx;
-#else
-  return nullptr;
-#endif
 }
+#endif
 
 int ResolveDns(std::string_view host, char* dest) {
   struct addrinfo hints, *servinfo;
@@ -153,10 +151,14 @@ std::string ProtocolClient::ServerContext::Description() const {
 ProtocolClient::ProtocolClient(string host, uint16_t port) {
   server_context_.host = std::move(host);
   server_context_.port = port;
+#ifdef DFLY_USE_SSL
   ssl_ctx_ = CreateSslClientCntx();
+#endif
 }
 ProtocolClient::ProtocolClient(ServerContext context) : server_context_(std::move(context)) {
+#ifdef DFLY_USE_SSL
   ssl_ctx_ = CreateSslClientCntx();
+#endif
 }
 
 ProtocolClient::~ProtocolClient() {
@@ -164,9 +166,11 @@ ProtocolClient::~ProtocolClient() {
     auto ec = sock_->Close();
     LOG_IF(ERROR, ec) << "Error closing socket " << ec;
   }
+#ifdef DFLY_USE_SSL
   if (ssl_ctx_) {
     SSL_CTX_free(ssl_ctx_);
   }
+#endif
 }
 
 error_code ProtocolClient::ResolveMasterDns() {
@@ -193,9 +197,7 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
     // functions.
     if (!cntx->IsCancelled()) {
       if (ssl_ctx_) {
-        unique_ptr<FiberSocketBase> sock;
-        sock.reset(mythread->CreateSocket());
-        unique_ptr<tls::TlsSocket> tls_sock(new tls::TlsSocket(std::move(sock)));
+        auto tls_sock = std::make_unique<tls::TlsSocket>(mythread->CreateSocket());
         tls_sock->InitSSL(ssl_ctx_);
         sock_.reset(tls_sock.release());
       } else {

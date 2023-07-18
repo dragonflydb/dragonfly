@@ -168,8 +168,6 @@ class Connection : public util::Connection {
 
   ConnectionContext* cntx();
 
-  util::FiberSocketBase* parent_;
-
  protected:
   void OnShutdown() override;
   void OnPreMigrateThread() override;
