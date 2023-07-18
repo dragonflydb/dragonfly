@@ -36,7 +36,9 @@ struct JournalReader;
 // This class should be inherited from.
 class ProtocolClient {
  public:
+#ifdef DFLY_USE_SSL
   using SSL_CTX = struct ssl_ctx_st;
+#endif
 
   ProtocolClient(std::string master_host, uint16_t port);
   virtual ~ProtocolClient();
@@ -128,7 +130,13 @@ class ProtocolClient {
   std::string last_resp_;
 
   uint64_t last_io_time_ = 0;  // in ns, monotonic clock.
+#ifdef DFLY_USE_SSL
+  void ValidateFlags() const;
+
+  void MaybeInitSslCtx();
+
   SSL_CTX* ssl_ctx_;
+#endif
 };
 
 }  // namespace dfly

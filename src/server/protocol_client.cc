@@ -52,23 +52,17 @@ namespace {
 
 #ifdef DFLY_USE_SSL
 static ProtocolClient::SSL_CTX* CreateSslClientCntx() {
-  const bool is_tls_replication_enabled = absl::GetFlag(FLAGS_tls_replication);
-  if (!is_tls_replication_enabled) {
-    return nullptr;
-  }
   ProtocolClient::SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
   const auto& tls_key_file = GetFlag(FLAGS_tls_key_file);
   unsigned mask = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
 
   CHECK_EQ(1, SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM));
   const auto& tls_cert_file = GetFlag(FLAGS_tls_cert_file);
-  CHECK_EQ(true, !tls_cert_file.empty());
 
   CHECK_EQ(1, SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()));
 
   const auto& tls_ca_cert_file = GetFlag(FLAGS_tls_ca_cert_file);
   const auto& tls_ca_cert_dir = GetFlag(FLAGS_tls_ca_cert_dir);
-  CHECK_EQ(true, (!tls_ca_cert_file.empty() || !tls_ca_cert_dir.empty()));
 
   const auto* file = tls_ca_cert_file.empty() ? nullptr : tls_ca_cert_file.data();
   const auto* dir = tls_ca_cert_dir.empty() ? nullptr : tls_ca_cert_dir.data();
@@ -148,16 +142,36 @@ std::string ProtocolClient::ServerContext::Description() const {
   return absl::StrCat(host, ":", port);
 }
 
+void ProtocolClient::ValidateFlags() const {
+  if (absl::GetFlag(FLAGS_tls_cert_file).empty()) {
+    LOG(ERROR) << "tls_cert_file flag should be set";
+    exit(1);
+  }
+
+  if (absl::GetFlag(FLAGS_tls_ca_cert_file).empty() &&
+      absl::GetFlag(FLAGS_tls_ca_cert_dir).empty()) {
+    LOG(ERROR) << "Either or both tls_ca_cert_file or tls_ca_cert_dir flags must be set";
+    exit(1);
+  }
+}
+
+void ProtocolClient::MaybeInitSslCtx() {
+  if (absl::GetFlag(FLAGS_tls_replication)) {
+    ValidateFlags();
+    ssl_ctx_ = CreateSslClientCntx();
+  }
+}
+
 ProtocolClient::ProtocolClient(string host, uint16_t port) {
   server_context_.host = std::move(host);
   server_context_.port = port;
 #ifdef DFLY_USE_SSL
-  ssl_ctx_ = CreateSslClientCntx();
+  MaybeInitSslCtx();
 #endif
 }
 ProtocolClient::ProtocolClient(ServerContext context) : server_context_(std::move(context)) {
 #ifdef DFLY_USE_SSL
-  ssl_ctx_ = CreateSslClientCntx();
+  MaybeInitSslCtx();
 #endif
 }
 

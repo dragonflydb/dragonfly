@@ -1293,19 +1293,30 @@ async def test_no_tls_on_admin_port(
     await c_master.close()
 
 
+# 1. Number of master threads
+# 2. Number of threads for each replica
+# 3. Admin port
+replication_cases = [(8, 8, False), (8, 8, True)]
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("t_master, t_replica", replication_cases)
+@pytest.mark.parametrize("t_master, t_replica, test_admin_port", replication_cases)
 async def test_tls_replication(
     df_local_factory,
     df_seeder_factory,
     t_master,
     t_replica,
+    test_admin_port,
     with_ca_tls_server_args,
     with_ca_tls_client_args,
 ):
     # 1. Spin up dragonfly tls enabled, debug populate
     master = df_local_factory.create(
-        tls_replication="true", **with_ca_tls_server_args, port=BASE_PORT, proactor_threads=t_master
+        tls_replication="true",
+        **with_ca_tls_server_args,
+        port=BASE_PORT,
+        admin_port=ADMIN_PORT,
+        proactor_threads=t_master,
     )
     master.start()
     c_master = aioredis.Redis(port=master.port, **with_ca_tls_client_args)
@@ -1322,7 +1333,8 @@ async def test_tls_replication(
     )
     replica.start()
     c_replica = aioredis.Redis(port=replica.port, **with_ca_tls_client_args)
-    res = await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
+    port = master.port if not test_admin_port else master.admin_port
+    res = await c_replica.execute_command("REPLICAOF localhost " + str(port))
     assert b"OK" == res
     await check_all_replicas_finished([c_replica], c_master)
 

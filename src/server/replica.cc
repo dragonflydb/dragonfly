@@ -39,8 +39,6 @@ ABSL_FLAG(int, master_reconnect_timeout_ms, 1000,
           "Timeout for re-establishing connection to a replication master");
 ABSL_DECLARE_FLAG(uint32_t, port);
 
-using namespace std;
-
 namespace dfly {
 
 using namespace std;
