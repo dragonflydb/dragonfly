@@ -653,4 +653,17 @@ TEST_F(ZSetFamilyTest, GeoAdd) {
   EXPECT_THAT(resp, RespArray(ElementsAre("sqc8b49rny0", "sqdtr74hyu0")));
 }
 
+TEST_F(ZSetFamilyTest, GeoPos) {
+  EXPECT_EQ(1, CheckedInt({"geoadd", "Sicily", "13.361389", "38.115556", "Palermo"}));
+  auto resp = Run({"geopos", "Sicily", "Palermo", "NonExisting"});
+  EXPECT_THAT(
+      resp, RespArray(ElementsAre(RespArray(ElementsAre("13.361389338970184", "38.1155563954963")),
+                                  ArgType(RespExpr::NIL))));
+}
+
+TEST_F(ZSetFamilyTest, GeoPosWrongType) {
+  Run({"set", "x", "value"});
+  EXPECT_THAT(Run({"geopos", "x", "Sicily", "Palermo"}), ErrArg("WRONGTYPE"));
+}
+
 }  // namespace dfly
