@@ -61,6 +61,7 @@ extern char** environ;
 using namespace std;
 
 ABSL_DECLARE_FLAG(uint32_t, port);
+ABSL_DECLARE_FLAG(bool, random_port);
 ABSL_DECLARE_FLAG(uint32_t, memcached_port);
 ABSL_DECLARE_FLAG(uint16_t, admin_port);
 ABSL_DECLARE_FLAG(std::string, admin_bind);
@@ -354,7 +355,12 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   opts.disable_time_update = false;
   const auto& bind = GetFlag(FLAGS_bind);
   const char* bind_addr = bind.empty() ? nullptr : bind.c_str();
-  auto port = GetFlag(FLAGS_port);
+
+  if (GetFlag(FLAGS_random_port)) {
+    absl::SetFlag(&FLAGS_port, 0);
+  }
+
+  uint32_t port = GetFlag(FLAGS_port);
   auto mc_port = GetFlag(FLAGS_memcached_port);
   string unix_sock = GetFlag(FLAGS_unixsocket);
   bool unlink_uds = false;
@@ -427,6 +433,10 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     if (ec) {
       LOG(ERROR) << "Could not open port " << port << ", error: " << ec.message();
       exit(1);
+    }
+
+    if (port == 0) {
+      absl::SetFlag(&FLAGS_port, main_listener->socket()->LocalEndpoint().port());
     }
   }
 
