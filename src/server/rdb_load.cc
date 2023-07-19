@@ -1160,20 +1160,14 @@ auto RdbLoaderBase::FetchLzfStringObject() -> io::Result<string> {
 }
 
 auto RdbLoaderBase::FetchIntegerObject(int enctype) -> io::Result<string> {
-  long long val;
+  io::Result<long long> val = ReadIntObj(enctype);
 
-  if (enctype == RDB_ENC_INT8) {
-    SET_OR_UNEXPECT(FetchInt<int8_t>(), val);
-  } else if (enctype == RDB_ENC_INT16) {
-    SET_OR_UNEXPECT(FetchInt<uint16_t>(), val);
-  } else if (enctype == RDB_ENC_INT32) {
-    SET_OR_UNEXPECT(FetchInt<uint32_t>(), val);
-  } else {
-    return Unexpected(errc::invalid_encoding);
+  if (!val.has_value()) {
+    return val.get_unexpected();
   }
 
   char buf[32];
-  absl::numbers_internal::FastIntToBuffer(val, buf);
+  absl::numbers_internal::FastIntToBuffer(*val, buf);
 
   return string(buf);
 }
@@ -1318,9 +1312,9 @@ io::Result<long long> RdbLoaderBase::ReadIntObj(int enctype) {
   if (enctype == RDB_ENC_INT8) {
     SET_OR_UNEXPECT(FetchInt<int8_t>(), val);
   } else if (enctype == RDB_ENC_INT16) {
-    SET_OR_UNEXPECT(FetchInt<uint16_t>(), val);
+    SET_OR_UNEXPECT(FetchInt<int16_t>(), val);
   } else if (enctype == RDB_ENC_INT32) {
-    SET_OR_UNEXPECT(FetchInt<uint32_t>(), val);
+    SET_OR_UNEXPECT(FetchInt<int32_t>(), val);
   } else {
     return Unexpected(errc::invalid_encoding);
   }
