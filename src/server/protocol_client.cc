@@ -142,7 +142,7 @@ std::string ProtocolClient::ServerContext::Description() const {
   return absl::StrCat(host, ":", port);
 }
 
-void ProtocolClient::ValidateFlags() const {
+void ProtocolClient::ValidateTlsFlags() const {
   if (absl::GetFlag(FLAGS_tls_cert_file).empty()) {
     LOG(ERROR) << "tls_cert_file flag should be set";
     exit(1);
@@ -157,7 +157,7 @@ void ProtocolClient::ValidateFlags() const {
 
 void ProtocolClient::MaybeInitSslCtx() {
   if (absl::GetFlag(FLAGS_tls_replication)) {
-    ValidateFlags();
+    ValidateTlsFlags();
     ssl_ctx_ = CreateSslClientCntx();
   }
 }

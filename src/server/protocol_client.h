@@ -131,11 +131,11 @@ class ProtocolClient {
 
   uint64_t last_io_time_ = 0;  // in ns, monotonic clock.
 #ifdef DFLY_USE_SSL
-  void ValidateFlags() const;
+  void ValidateTlsFlags() const;
 
   void MaybeInitSslCtx();
 
-  SSL_CTX* ssl_ctx_;
+  SSL_CTX* ssl_ctx_{nullptr};
 #endif
 };
 
