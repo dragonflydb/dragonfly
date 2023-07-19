@@ -6,16 +6,9 @@
 
 #include <absl/base/internal/endian.h>
 
-#ifdef __clang__
-#include <experimental/memory_resource>
-namespace PMR_NS = std::experimental::pmr;
-#else
-#include <memory_resource>
-namespace PMR_NS = std::pmr;
-#endif
-
 #include <optional>
 
+#include "base/pmr/memory_resource.h"
 #include "core/json_object.h"
 #include "core/small_string.h"
 
