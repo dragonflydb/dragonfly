@@ -815,7 +815,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   // Clients metrics
   AppendMetricWithoutLabels("connected_clients", "", m.conn_stats.num_conns, MetricType::GAUGE,
                             &resp->body());
-  AppendMetricWithoutLabels("client_read_buf_capacity", "", m.conn_stats.read_buf_capacity,
+  AppendMetricWithoutLabels("client_read_buffer_bytes", "", m.conn_stats.read_buf_capacity,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("blocked_clients", "", m.conn_stats.num_blocked_clients,
                             MetricType::GAUGE, &resp->body());
@@ -1560,7 +1560,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     ADD_HEADER("# Server");
 
     append("redis_version", kRedisVersion);
-    append("dfly_version", GetVersion());
+    append("dragonfly_version", GetVersion());
     append("redis_mode", "standalone");
     append("arch_bits", 64);
     append("multiplexing_api", multiplex_api);
@@ -1581,7 +1581,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (should_enter("CLIENTS")) {
     ADD_HEADER("# Clients");
     append("connected_clients", m.conn_stats.num_conns);
-    append("client_read_buf_capacity", m.conn_stats.read_buf_capacity);
+    append("client_read_buffer_bytes", m.conn_stats.read_buf_capacity);
     append("blocked_clients", m.conn_stats.num_blocked_clients);
   }
 
@@ -1865,7 +1865,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendBulkString("redis");
   (*cntx)->SendBulkString("version");
   (*cntx)->SendBulkString(kRedisVersion);
-  (*cntx)->SendBulkString("dfly_version");
+  (*cntx)->SendBulkString("dragonfly_version");
   (*cntx)->SendBulkString(GetVersion());
   (*cntx)->SendBulkString("proto");
   (*cntx)->SendLong(proto_version);
