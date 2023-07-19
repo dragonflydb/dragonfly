@@ -250,14 +250,14 @@ TEST_F(DflyEngineTest, Hello) {
   ASSERT_THAT(resp, ArrLen(14));
 
   EXPECT_THAT(resp.GetVec(),
-              ElementsAre("server", "redis", "version", "6.2.11", "dfly_version",
+              ElementsAre("server", "redis", "version", "6.2.11", "dragonfly_version",
                           ArgType(RespExpr::STRING), "proto", IntArg(2), "id",
                           ArgType(RespExpr::INT64), "mode", "standalone", "role", "master"));
 
   resp = Run({"hello", "3"});
   ASSERT_THAT(resp, ArrLen(14));
   EXPECT_THAT(resp.GetVec(),
-              ElementsAre("server", "redis", "version", "6.2.11", "dfly_version",
+              ElementsAre("server", "redis", "version", "6.2.11", "dragonfly_version",
                           ArgType(RespExpr::STRING), "proto", IntArg(3), "id",
                           ArgType(RespExpr::INT64), "mode", "standalone", "role", "master"));
 
