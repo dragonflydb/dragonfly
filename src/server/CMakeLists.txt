@@ -15,7 +15,7 @@ add_library(dfly_transaction db_slice.cc malloc_stats.cc engine_shard_set.cc blo
 cxx_link(dfly_transaction dfly_core strings_lib)
 
 add_library(dragonfly_lib channel_store.cc command_registry.cc
-            config_flags.cc conn_context.cc debugcmd.cc dflycmd.cc
+            config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc
             generic_family.cc hset_family.cc json_family.cc
             search/search_family.cc search/doc_index.cc search/doc_accessors.cc
             list_family.cc main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc

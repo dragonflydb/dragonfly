@@ -41,11 +41,19 @@ extern "C" {
 #include "server/transaction.h"
 #include "server/version.h"
 #include "server/zset_family.h"
+#include "strings/human_readable.h"
 #include "util/html/sorted_table.h"
 #include "util/varz.h"
 
 using namespace std;
 using dfly::operator""_KB;
+
+struct MaxMemoryFlag {
+  uint64_t value = 0;
+};
+
+static bool AbslParseFlag(std::string_view in, MaxMemoryFlag* flag, std::string* err);
+static std::string AbslUnparseFlag(const MaxMemoryFlag& flag);
 
 ABSL_FLAG(uint32_t, port, 6379, "Redis port");
 ABSL_FLAG(uint32_t, memcached_port, 0, "Memcached port");
@@ -63,6 +71,26 @@ ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4_KB, "Max buffer for squashed com
 ABSL_FLAG(bool, admin_nopass, false,
           "If set, would enable open admin access to console on the assigned port, without auth "
           "token needed.");
+
+ABSL_FLAG(MaxMemoryFlag, maxmemory, MaxMemoryFlag{},
+          "Limit on maximum-memory that is used by the database. "
+          "0 - means the program will automatically determine its maximum memory usage. "
+          "default: 0");
+
+bool AbslParseFlag(std::string_view in, MaxMemoryFlag* flag, std::string* err) {
+  int64_t val;
+  if (dfly::ParseHumanReadableBytes(in, &val) && val >= 0) {
+    flag->value = val;
+    return true;
+  }
+
+  *err = "Use human-readable format, eg.: 500MB, 1G, 1TB";
+  return false;
+}
+
+std::string AbslUnparseFlag(const MaxMemoryFlag& flag) {
+  return strings::HumanReadableNumBytes(flag.value);
+}
 
 namespace dfly {
 
@@ -537,6 +565,15 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
                    const InitOpts& opts) {
   InitRedisTables();
 
+  config_registry.Register("maxmemory", [](const absl::CommandLineFlag& flag) {
+    auto res = flag.TryGet<MaxMemoryFlag>();
+    if (!res)
+      return false;
+
+    max_memory_limit = res->value;
+    return true;
+  });
+
   pp_.Await([](uint32_t index, ProactorBase* pb) { ServerState::Init(index); });
 
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
@@ -567,6 +604,8 @@ void Service::Shutdown() {
     ServerState::tlocal()->EnterLameDuck();
     facade::Connection::ShutdownThreadLocal();
   });
+
+  config_registry.Reset();
 
   // to shutdown all the runtime components that depend on EngineShard.
   server_family_.Shutdown();
@@ -1953,6 +1992,14 @@ void Service::RegisterCommands() {
       }
     });
   }
+}
+
+void SetMaxMemoryFlag(uint64_t value) {
+  absl::SetFlag(&FLAGS_maxmemory, {value});
+}
+
+uint64_t GetMaxMemoryFlag() {
+  return absl::GetFlag(FLAGS_maxmemory).value;
 }
 
 }  // namespace dfly
