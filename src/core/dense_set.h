@@ -8,13 +8,7 @@
 #include <functional>
 #include <type_traits>
 
-#ifdef __clang__
-#include <experimental/memory_resource>
-namespace PMR_NS = std::experimental::pmr;
-#else
-#include <memory_resource>
-namespace PMR_NS = std::pmr;
-#endif
+#include "base/pmr/memory_resource.h"
 
 namespace dfly {
 

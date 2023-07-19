@@ -17,6 +17,10 @@
 #include "server/version.h"
 #include "util/fiber_socket_base.h"
 
+#ifdef DFLY_USE_SSL
+#include <openssl/ssl.h>
+#endif
+
 namespace facade {
 class ReqSerializer;
 };  // namespace facade
@@ -32,6 +36,10 @@ struct JournalReader;
 // This class should be inherited from.
 class ProtocolClient {
  public:
+#ifdef DFLY_USE_SSL
+  using SSL_CTX = struct ssl_ctx_st;
+#endif
+
   ProtocolClient(std::string master_host, uint16_t port);
   virtual ~ProtocolClient();
 
@@ -51,8 +59,7 @@ class ProtocolClient {
 
   // Constructing using a fully initialized ServerContext allows to skip
   // the DNS resolution step.
-  explicit ProtocolClient(ServerContext context) : server_context_(std::move(context)) {
-  }
+  explicit ProtocolClient(ServerContext context);
 
   std::error_code ResolveMasterDns();  // Resolve master dns
   // Connect to master and authenticate if needed.
@@ -101,7 +108,7 @@ class ProtocolClient {
     return sock_->proactor();
   }
 
-  util::LinuxSocketBase* Sock() const {
+  util::FiberSocketBase* Sock() const {
     return sock_.get();
   }
 
@@ -113,7 +120,7 @@ class ProtocolClient {
   facade::RespVec resp_args_;
   base::IoBuf resp_buf_;
 
-  std::unique_ptr<util::LinuxSocketBase> sock_;
+  std::unique_ptr<util::FiberSocketBase> sock_;
   Mutex sock_mu_;
 
  protected:
@@ -123,6 +130,13 @@ class ProtocolClient {
   std::string last_resp_;
 
   uint64_t last_io_time_ = 0;  // in ns, monotonic clock.
+#ifdef DFLY_USE_SSL
+  void ValidateTlsFlags() const;
+
+  void MaybeInitSslCtx();
+
+  SSL_CTX* ssl_ctx_{nullptr};
+#endif
 };
 
 }  // namespace dfly

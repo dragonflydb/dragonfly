@@ -31,6 +31,11 @@ add_library(dragonfly_lib channel_store.cc command_registry.cc
 cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib aws_lib strings_lib html_lib
          http_client_lib absl::random_random TRDP::jsoncons zstd TRDP::lz4)
 
+if (DF_USE_SSL)
+  set(TLS_LIB tls_lib)
+  target_compile_definitions(dragonfly_lib PRIVATE DFLY_USE_SSL)
+endif()
+
 add_library(dfly_test_lib test_utils.cc)
 cxx_link(dfly_test_lib dragonfly_lib facade_test gtest_main_ext)
 
