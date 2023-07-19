@@ -10,7 +10,6 @@ from . import DflyInstanceFactory, dfly_args
 import pymemcache
 import logging
 
-BASE_PORT = 1111
 ADMIN_PORT = 1211
 
 DISCONNECT_CRASH_FULL_SYNC = 0
@@ -43,13 +42,9 @@ replication_cases = [
 async def test_replication_all(
     df_local_factory, df_seeder_factory, t_master, t_replicas, seeder_config, from_admin_port
 ):
-    master = df_local_factory.create(
-        port=BASE_PORT, admin_port=ADMIN_PORT, proactor_threads=t_master
-    )
+    master = df_local_factory.create(admin_port=ADMIN_PORT, proactor_threads=t_master)
     replicas = [
-        df_local_factory.create(
-            port=BASE_PORT + i + 1, admin_port=ADMIN_PORT + i + 1, proactor_threads=t
-        )
+        df_local_factory.create(admin_port=ADMIN_PORT + i + 1, proactor_threads=t)
         for i, t in enumerate(t_replicas)
     ]
 
@@ -167,9 +162,9 @@ async def test_disconnect_replica(
     t_disonnect,
     n_keys,
 ):
-    master = df_local_factory.create(port=BASE_PORT, proactor_threads=t_master)
+    master = df_local_factory.create(proactor_threads=t_master)
     replicas = [
-        (df_local_factory.create(port=BASE_PORT + i + 1, proactor_threads=t), crash_fs)
+        (df_local_factory.create(proactor_threads=t), crash_fs)
         for i, (t, crash_fs) in enumerate(
             chain(
                 zip(t_crash_fs, repeat(DISCONNECT_CRASH_FULL_SYNC)),
@@ -300,10 +295,7 @@ async def test_disconnect_master(
     df_local_factory, df_seeder_factory, t_master, t_replicas, n_random_crashes, n_keys
 ):
     master = df_local_factory.create(port=1111, proactor_threads=t_master)
-    replicas = [
-        df_local_factory.create(port=BASE_PORT + i + 1, proactor_threads=t)
-        for i, t in enumerate(t_replicas)
-    ]
+    replicas = [df_local_factory.create(proactor_threads=t) for i, t in enumerate(t_replicas)]
 
     df_local_factory.start_all(replicas)
     c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
@@ -372,14 +364,11 @@ rotating_master_cases = [(4, [4, 4, 4, 4], dict(keys=2_000, dbcount=4))]
 async def test_rotating_masters(
     df_local_factory, df_seeder_factory, t_replica, t_masters, seeder_config
 ):
-    replica = df_local_factory.create(port=BASE_PORT, proactor_threads=t_replica)
-    masters = [
-        df_local_factory.create(port=BASE_PORT + i + 1, proactor_threads=t)
-        for i, t in enumerate(t_masters)
-    ]
-    seeders = [df_seeder_factory.create(port=m.port, **seeder_config) for m in masters]
-
+    replica = df_local_factory.create(proactor_threads=t_replica)
+    masters = [df_local_factory.create(proactor_threads=t) for i, t in enumerate(t_masters)]
     df_local_factory.start_all([replica] + masters)
+
+    seeders = [df_seeder_factory.create(port=m.port, **seeder_config) for m in masters]
 
     c_replica = aioredis.Redis(port=replica.port)
 
@@ -420,11 +409,11 @@ async def test_cancel_replication_immediately(df_local_factory, df_seeder_factor
     """
     COMMANDS_TO_ISSUE = 40
 
-    replica = df_local_factory.create(port=BASE_PORT)
-    masters = [df_local_factory.create(port=BASE_PORT + i + 1) for i in range(4)]
-    seeders = [df_seeder_factory.create(port=m.port) for m in masters]
-
+    replica = df_local_factory.create()
+    masters = [df_local_factory.create() for i in range(4)]
     df_local_factory.start_all([replica] + masters)
+
+    seeders = [df_seeder_factory.create(port=m.port) for m in masters]
     c_replica = aioredis.Redis(port=replica.port)
     await asyncio.gather(*(seeder.run(target_deviation=0.1) for seeder in seeders))
 
@@ -465,8 +454,8 @@ Check replica keys at the end.
 
 @pytest.mark.asyncio
 async def test_flushall(df_local_factory):
-    master = df_local_factory.create(port=BASE_PORT, proactor_threads=4)
-    replica = df_local_factory.create(port=BASE_PORT + 1, proactor_threads=2)
+    master = df_local_factory.create(proactor_threads=4)
+    replica = df_local_factory.create(proactor_threads=2)
 
     master.start()
     replica.start()
@@ -519,8 +508,8 @@ async def test_rewrites(df_local_factory):
     CLOSE_TIMESTAMP = int(time.time()) + 100
     CLOSE_TIMESTAMP_MS = CLOSE_TIMESTAMP * 1000
 
-    master = df_local_factory.create(port=BASE_PORT)
-    replica = df_local_factory.create(port=BASE_PORT + 1)
+    master = df_local_factory.create()
+    replica = df_local_factory.create()
 
     master.start()
     replica.start()
@@ -693,8 +682,8 @@ Test automatic replication of expiry.
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.asyncio
 async def test_expiry(df_local_factory, n_keys=1000):
-    master = df_local_factory.create(port=BASE_PORT)
-    replica = df_local_factory.create(port=BASE_PORT + 1, logtostdout=True)
+    master = df_local_factory.create()
+    replica = df_local_factory.create(logtostdout=True)
 
     df_local_factory.start_all([master, replica])
 
@@ -802,11 +791,8 @@ return 'OK'
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replicas, num_ops, num_keys, num_par, flags", script_cases)
 async def test_scripts(df_local_factory, t_master, t_replicas, num_ops, num_keys, num_par, flags):
-    master = df_local_factory.create(port=BASE_PORT, proactor_threads=t_master)
-    replicas = [
-        df_local_factory.create(port=BASE_PORT + i + 1, proactor_threads=t)
-        for i, t in enumerate(t_replicas)
-    ]
+    master = df_local_factory.create(proactor_threads=t_master)
+    replicas = [df_local_factory.create(proactor_threads=t) for i, t in enumerate(t_replicas)]
 
     df_local_factory.start_all([master] + replicas)
 
@@ -840,9 +826,9 @@ async def test_scripts(df_local_factory, t_master, t_replicas, num_ops, num_keys
 async def test_auth_master(df_local_factory, n_keys=20):
     masterpass = "requirepass"
     replicapass = "replicapass"
-    master = df_local_factory.create(port=BASE_PORT, requirepass=masterpass)
+    master = df_local_factory.create(requirepass=masterpass)
     replica = df_local_factory.create(
-        port=BASE_PORT + 1, logtostdout=True, masterauth=masterpass, requirepass=replicapass
+        logtostdout=True, masterauth=masterpass, requirepass=replicapass
     )
 
     df_local_factory.start_all([master, replica])
@@ -872,8 +858,8 @@ SCRIPT_TEMPLATE = "return {}"
 
 @dfly_args({"proactor_threads": 2})
 async def test_script_transfer(df_local_factory):
-    master = df_local_factory.create(port=BASE_PORT)
-    replica = df_local_factory.create(port=BASE_PORT + 1)
+    master = df_local_factory.create()
+    replica = df_local_factory.create()
 
     df_local_factory.start_all([master, replica])
 
@@ -906,8 +892,8 @@ async def test_script_transfer(df_local_factory):
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.asyncio
 async def test_role_command(df_local_factory, n_keys=20):
-    master = df_local_factory.create(port=BASE_PORT)
-    replica = df_local_factory.create(port=BASE_PORT + 1, logtostdout=True)
+    master = df_local_factory.create()
+    replica = df_local_factory.create(logtostdout=True)
 
     df_local_factory.start_all([master, replica])
 
@@ -979,10 +965,8 @@ async def assert_lag_condition(inst, client, condition):
 @dfly_args({"proactor_threads": 2})
 @pytest.mark.asyncio
 async def test_replication_info(df_local_factory, df_seeder_factory, n_keys=2000):
-    master = df_local_factory.create(port=BASE_PORT)
-    replica = df_local_factory.create(
-        port=BASE_PORT + 1, logtostdout=True, replication_acks_interval=100
-    )
+    master = df_local_factory.create()
+    replica = df_local_factory.create(logtostdout=True, replication_acks_interval=100)
     df_local_factory.start_all([master, replica])
     c_master = aioredis.Redis(port=master.port)
     c_replica = aioredis.Redis(port=replica.port)
@@ -1014,8 +998,8 @@ More details in https://github.com/dragonflydb/dragonfly/issues/1231
 @pytest.mark.asyncio
 @pytest.mark.slow
 async def test_flushall_in_full_sync(df_local_factory, df_seeder_factory):
-    master = df_local_factory.create(port=BASE_PORT, proactor_threads=4, logtostdout=True)
-    replica = df_local_factory.create(port=BASE_PORT + 1, proactor_threads=2, logtostdout=True)
+    master = df_local_factory.create(proactor_threads=4, logtostdout=True)
+    replica = df_local_factory.create(proactor_threads=2, logtostdout=True)
 
     # Start master
     master.start()
@@ -1083,8 +1067,8 @@ redis.call('SET', 'A', 'ErrroR')
 
 @pytest.mark.asyncio
 async def test_readonly_script(df_local_factory):
-    master = df_local_factory.create(port=BASE_PORT, proactor_threads=2, logtostdout=True)
-    replica = df_local_factory.create(port=BASE_PORT + 1, proactor_threads=2, logtostdout=True)
+    master = df_local_factory.create(proactor_threads=2, logtostdout=True)
+    replica = df_local_factory.create(proactor_threads=2, logtostdout=True)
 
     df_local_factory.start_all([master, replica])
 
@@ -1118,13 +1102,12 @@ take_over_cases = [
 async def test_take_over_counters(df_local_factory, master_threads, replica_threads):
     master = df_local_factory.create(
         proactor_threads=master_threads,
-        port=BASE_PORT,
         #  vmodule="journal_slice=2,dflycmd=2,main_service=1",
         logtostderr=True,
     )
-    replica1 = df_local_factory.create(port=BASE_PORT + 1, proactor_threads=replica_threads)
-    replica2 = df_local_factory.create(port=BASE_PORT + 2, proactor_threads=replica_threads)
-    replica3 = df_local_factory.create(port=BASE_PORT + 3, proactor_threads=replica_threads)
+    replica1 = df_local_factory.create(proactor_threads=replica_threads)
+    replica2 = df_local_factory.create(proactor_threads=replica_threads)
+    replica3 = df_local_factory.create(proactor_threads=replica_threads)
     df_local_factory.start_all([master, replica1, replica2, replica3])
     c_master = master.client()
     c1 = replica1.client()
@@ -1183,16 +1166,14 @@ async def test_take_over_seeder(
     tmp_file_name = "".join(random.choices(string.ascii_letters, k=10))
     master = df_local_factory.create(
         proactor_threads=master_threads,
-        port=BASE_PORT,
         dbfilename=f"dump_{tmp_file_name}",
         logtostderr=True,
     )
-    replica = df_local_factory.create(port=BASE_PORT + 1, proactor_threads=replica_threads)
+    replica = df_local_factory.create(proactor_threads=replica_threads)
     df_local_factory.start_all([master, replica])
 
     seeder = df_seeder_factory.create(port=master.port, keys=1000, dbcount=5, stop_on_failure=False)
 
-    c_master = master.client()
     c_replica = replica.client()
 
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
@@ -1215,9 +1196,10 @@ async def test_take_over_seeder(
     assert master.proc.poll() == 0, "Master process did not exit correctly."
 
     master.start()
+    c_master = master.client()
     await wait_available_async(c_master)
 
-    capture = await seeder.capture()
+    capture = await seeder.capture(port=master.port)
     assert await seeder.compare(capture, port=replica.port)
 
     await disconnect_clients(c_master, c_replica)
@@ -1225,14 +1207,16 @@ async def test_take_over_seeder(
 
 @pytest.mark.asyncio
 async def test_take_over_timeout(df_local_factory, df_seeder_factory):
-    master = df_local_factory.create(proactor_threads=2, port=BASE_PORT, logtostderr=True)
-    replica = df_local_factory.create(port=BASE_PORT + 1, proactor_threads=2)
+    master = df_local_factory.create(proactor_threads=2, logtostderr=True)
+    replica = df_local_factory.create(proactor_threads=2)
     df_local_factory.start_all([master, replica])
 
     seeder = df_seeder_factory.create(port=master.port, keys=1000, dbcount=5, stop_on_failure=False)
 
     c_master = master.client()
     c_replica = replica.client()
+
+    print("PORTS ARE:  ", master.port, replica.port)
 
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
@@ -1279,7 +1263,6 @@ async def test_no_tls_on_admin_port(
         no_tls_on_admin_port="true",
         admin_port=ADMIN_PORT,
         **with_tls_server_args,
-        port=BASE_PORT,
         requirepass="XXX",
         proactor_threads=t_master,
     )
@@ -1294,7 +1277,6 @@ async def test_no_tls_on_admin_port(
         no_tls_on_admin_port="true",
         admin_port=ADMIN_PORT + 1,
         **with_tls_server_args,
-        port=BASE_PORT + 1,
         proactor_threads=t_replica,
         requirepass="XXX",
         masterauth="XXX",
