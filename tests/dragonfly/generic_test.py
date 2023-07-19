@@ -33,10 +33,10 @@ async def test_password(df_local_factory, export_dfly_password):
 
     # Expect password form environment variable
     with pytest.raises(redis.exceptions.AuthenticationError):
-        client = aioredis.Redis()
+        async with aioredis.Redis(port=dfly.port) as client:
+            await client.ping()
+    async with aioredis.Redis(password=export_dfly_password, port=dfly.port) as client:
         await client.ping()
-    client = aioredis.Redis(password=export_dfly_password)
-    await client.ping()
     dfly.stop()
 
     # --requirepass should take precedence over environment variable
@@ -46,10 +46,10 @@ async def test_password(df_local_factory, export_dfly_password):
 
     # Expect password form flag
     with pytest.raises(redis.exceptions.AuthenticationError):
-        client = aioredis.Redis(password=export_dfly_password)
+        async with aioredis.Redis(port=dfly.port, password=export_dfly_password) as client:
+            await client.ping()
+    async with aioredis.Redis(password=requirepass, port=dfly.port) as client:
         await client.ping()
-    client = aioredis.Redis(password=requirepass)
-    await client.ping()
     dfly.stop()
 
 

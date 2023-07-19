@@ -108,9 +108,6 @@ def df_server(df_factory: DflyInstanceFactory) -> DflyInstance:
     yield instance
     clients_left = None
     try:
-        print("WHATS THE PORT")
-        print(instance.port)
-        print("THATS THE PORT")
         client = redis.Redis(port=instance.port)
         client.client_setname("mgr")
         sleep(0.1)
