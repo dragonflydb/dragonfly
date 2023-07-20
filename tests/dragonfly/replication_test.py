@@ -1344,9 +1344,6 @@ async def test_tls_replication(
 
     # 4. Kill master, spin it up and see if replica reconnects
     master.stop(kill=True)
-    # We need to await, because kill sends a SIGTERM which can then be ignored or blocked
-    # By waiting 1 sec it gives enough time for the signal to be handled by the process
-    await asyncio.sleep(10)
     master.start()
     c_master = aioredis.Redis(port=master.port, **with_ca_tls_client_args)
     # Master doesn't load the snapshot, therefore dbsize should be 0

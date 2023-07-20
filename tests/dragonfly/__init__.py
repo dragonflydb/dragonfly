@@ -60,6 +60,12 @@ class DflyInstance:
             else:
                 proc.terminate()
             proc.communicate(timeout=15)
+            # We need to wait, because kill sends a SIGTERM which can then be ignored or blocked
+            # By waiting 15 sec it gives enough time for the signal to be handled by the process
+            # Moreover, proc.communicate calls wait() internally, but completely ignores
+            # the value returned which suggests that there is a bug with the python implementation
+            # If this fails, it will throw an exception
+            proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
             print("Unable to terminate DragonflyDB gracefully, it was killed")
             proc.kill()
