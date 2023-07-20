@@ -755,8 +755,7 @@ TEST_F(MultiEvalTest, MultiAllEval) {
   RespExpr exec_resp = Run({"exec"});
   fb0.Join();
 
-  ASSERT_THAT(exec_resp, ArrLen(2));
-  ASSERT_THAT(exec_resp.GetVec(), ElementsAre(IntArg(1), "y"));
+  EXPECT_THAT(exec_resp.GetVec(), ElementsAre(IntArg(1), "y"));
 
   EXPECT_THAT(brpop_resp, ArgType(RespExpr::NIL_ARRAY));
 }
@@ -778,8 +777,7 @@ TEST_F(MultiEvalTest, MultiSomeEval) {
   RespExpr exec_resp = Run({"exec"});
   fb0.Join();
 
-  ASSERT_THAT(exec_resp, ArrLen(2));
-  ASSERT_THAT(exec_resp.GetVec(), ElementsAre(IntArg(1), "y"));
+  EXPECT_THAT(exec_resp.GetVec(), ElementsAre(IntArg(1), "y"));
 
   EXPECT_THAT(brpop_resp, ArgType(RespExpr::NIL_ARRAY));
 }
