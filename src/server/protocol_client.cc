@@ -15,6 +15,7 @@ extern "C" {
 #include <absl/strings/strip.h>
 
 #include <boost/asio/ip/tcp.hpp>
+#include <string>
 
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
@@ -26,7 +27,17 @@ extern "C" {
 #include "server/rdb_load.h"
 #include "strings/human_readable.h"
 
+#ifdef DFLY_USE_SSL
+#include "util/tls/tls_socket.h"
+#endif
+
 ABSL_FLAG(std::string, masterauth, "", "password for authentication with master");
+ABSL_FLAG(bool, tls_replication, false, "Enable TLS on replication");
+
+ABSL_DECLARE_FLAG(std::string, tls_cert_file);
+ABSL_DECLARE_FLAG(std::string, tls_key_file);
+ABSL_DECLARE_FLAG(std::string, tls_ca_cert_file);
+ABSL_DECLARE_FLAG(std::string, tls_ca_cert_dir);
 
 namespace dfly {
 
@@ -38,6 +49,36 @@ using absl::GetFlag;
 using absl::StrCat;
 
 namespace {
+
+#ifdef DFLY_USE_SSL
+static ProtocolClient::SSL_CTX* CreateSslClientCntx() {
+  ProtocolClient::SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+  const auto& tls_key_file = GetFlag(FLAGS_tls_key_file);
+  unsigned mask = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
+
+  CHECK_EQ(1, SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM));
+  const auto& tls_cert_file = GetFlag(FLAGS_tls_cert_file);
+
+  CHECK_EQ(1, SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()));
+
+  const auto& tls_ca_cert_file = GetFlag(FLAGS_tls_ca_cert_file);
+  const auto& tls_ca_cert_dir = GetFlag(FLAGS_tls_ca_cert_dir);
+
+  const auto* file = tls_ca_cert_file.empty() ? nullptr : tls_ca_cert_file.data();
+  const auto* dir = tls_ca_cert_dir.empty() ? nullptr : tls_ca_cert_dir.data();
+  CHECK_EQ(1, SSL_CTX_load_verify_locations(ctx, file, dir));
+
+  CHECK_EQ(1, SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
+  SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+
+  SSL_CTX_set_options(ctx, SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS);
+
+  SSL_CTX_set_verify(ctx, mask, NULL);
+
+  CHECK_EQ(1, SSL_CTX_set_dh_auto(ctx, 1));
+  return ctx;
+}
+#endif
 
 int ResolveDns(std::string_view host, char* dest) {
   struct addrinfo hints, *servinfo;
@@ -101,9 +142,37 @@ std::string ProtocolClient::ServerContext::Description() const {
   return absl::StrCat(host, ":", port);
 }
 
+void ProtocolClient::ValidateTlsFlags() const {
+  if (absl::GetFlag(FLAGS_tls_cert_file).empty()) {
+    LOG(ERROR) << "tls_cert_file flag should be set";
+    exit(1);
+  }
+
+  if (absl::GetFlag(FLAGS_tls_ca_cert_file).empty() &&
+      absl::GetFlag(FLAGS_tls_ca_cert_dir).empty()) {
+    LOG(ERROR) << "Either or both tls_ca_cert_file or tls_ca_cert_dir flags must be set";
+    exit(1);
+  }
+}
+
+void ProtocolClient::MaybeInitSslCtx() {
+  if (absl::GetFlag(FLAGS_tls_replication)) {
+    ValidateTlsFlags();
+    ssl_ctx_ = CreateSslClientCntx();
+  }
+}
+
 ProtocolClient::ProtocolClient(string host, uint16_t port) {
   server_context_.host = std::move(host);
   server_context_.port = port;
+#ifdef DFLY_USE_SSL
+  MaybeInitSslCtx();
+#endif
+}
+ProtocolClient::ProtocolClient(ServerContext context) : server_context_(std::move(context)) {
+#ifdef DFLY_USE_SSL
+  MaybeInitSslCtx();
+#endif
 }
 
 ProtocolClient::~ProtocolClient() {
@@ -111,6 +180,11 @@ ProtocolClient::~ProtocolClient() {
     auto ec = sock_->Close();
     LOG_IF(ERROR, ec) << "Error closing socket " << ec;
   }
+#ifdef DFLY_USE_SSL
+  if (ssl_ctx_) {
+    SSL_CTX_free(ssl_ctx_);
+  }
+#endif
 }
 
 error_code ProtocolClient::ResolveMasterDns() {
@@ -136,7 +210,13 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
     // run we must not create a new socket. sock_mu_ syncs between the two
     // functions.
     if (!cntx->IsCancelled()) {
-      sock_.reset(mythread->CreateSocket());
+      if (ssl_ctx_) {
+        auto tls_sock = std::make_unique<tls::TlsSocket>(mythread->CreateSocket());
+        tls_sock->InitSSL(ssl_ctx_);
+        sock_.reset(tls_sock.release());
+      } else {
+        sock_.reset(mythread->CreateSocket());
+      }
       serializer_.reset(new ReqSerializer(sock_.get()));
     } else {
       return cntx->GetError();
