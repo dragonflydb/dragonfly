@@ -1393,7 +1393,18 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
   string_view sub_cmd = ArgS(args, 0);
 
   if (sub_cmd == "SET") {
-    return (*cntx)->SendOk();
+    if (args.size() < 3) {
+      return (*cntx)->SendError(WrongNumArgsError("config|set"));
+    }
+
+    ToLower(&args[1]);
+    string_view config_name = ArgS(args, 1);
+    bool success = config_registry.Set(config_name, ArgS(args, 2));
+    if (success) {
+      return (*cntx)->SendOk();
+    } else {
+      return (*cntx)->SendError(ConfigSetFailed(config_name), kSyntaxErrType);
+    }
   } else if (sub_cmd == "GET" && args.size() == 2) {
     // Send empty response, like Redis does, unless the param is supported
     std::vector<std::string> res;

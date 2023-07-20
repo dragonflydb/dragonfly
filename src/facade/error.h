@@ -11,6 +11,7 @@
 namespace facade {
 
 std::string WrongNumArgsError(std::string_view cmd);
+std::string ConfigSetFailed(std::string_view config_name);
 std::string InvalidExpireTime(std::string_view cmd);
 std::string UnknownSubCmd(std::string_view subcmd, std::string_view cmd);
 

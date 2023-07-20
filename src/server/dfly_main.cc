@@ -46,31 +46,6 @@
 
 using namespace std;
 
-struct MaxMemoryFlag {
-  MaxMemoryFlag() = default;
-  MaxMemoryFlag(const MaxMemoryFlag&) = default;
-  MaxMemoryFlag& operator=(const MaxMemoryFlag&) = default;
-  MaxMemoryFlag(uint64_t v) : value(v) {
-  }  // NOLINT
-
-  uint64_t value;
-};
-
-bool AbslParseFlag(absl::string_view in, MaxMemoryFlag* flag, std::string* err) {
-  int64_t val;
-  if (dfly::ParseHumanReadableBytes(in, &val) && val >= 0) {
-    flag->value = val;
-    return true;
-  }
-
-  *err = "Use human-readable format, eg.: 1G, 1GB, 10GB";
-  return false;
-}
-
-std::string AbslUnparseFlag(const MaxMemoryFlag& flag) {
-  return strings::HumanReadableNumBytes(flag.value);
-}
-
 ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(uint32_t, memcached_port);
 ABSL_DECLARE_FLAG(uint16_t, admin_port);
@@ -87,10 +62,6 @@ ABSL_FLAG(string, unixsocketperm, "", "Set permissions for unixsocket, in octal 
 ABSL_FLAG(bool, force_epoll, false,
           "If true - uses linux epoll engine underneath."
           "Can fit for kernels older than 5.10.");
-ABSL_FLAG(MaxMemoryFlag, maxmemory, MaxMemoryFlag(0),
-          "Limit on maximum-memory that is used by the database. "
-          "0 - means the program will automatically determine its maximum memory usage. "
-          "default: 0");
 
 ABSL_FLAG(bool, version_check, true,
           "If true, Will monitor for new releases on Dragonfly servers once a day.");
@@ -302,7 +273,7 @@ string NormalizePaths(std::string_view path) {
 }
 
 bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
-  auto maxmemory = GetFlag(FLAGS_maxmemory).value;
+  uint64_t maxmemory = GetMaxMemoryFlag();
   if (maxmemory > 0 && maxmemory < pool->size() * 256_MB) {
     LOG(ERROR) << "There are " << pool->size() << " threads, so "
                << HumanReadableNumBytes(pool->size() * 256_MB) << " are required. Exiting...";
@@ -691,24 +662,25 @@ Usage: dragonfly [FLAGS]
   if (memory.swap_total != 0)
     LOG(WARNING) << "SWAP is enabled. Consider disabling it when running Dragonfly.";
 
-  if (GetFlag(FLAGS_maxmemory).value == 0) {
+  dfly::max_memory_limit = dfly::GetMaxMemoryFlag();
+
+  if (dfly::max_memory_limit == 0) {
     LOG(INFO) << "maxmemory has not been specified. Deciding myself....";
 
     size_t available = memory.mem_avail;
     size_t maxmemory = size_t(0.8 * available);
     LOG(INFO) << "Found " << HumanReadableNumBytes(available)
               << " available memory. Setting maxmemory to " << HumanReadableNumBytes(maxmemory);
-    absl::SetFlag(&FLAGS_maxmemory, MaxMemoryFlag(maxmemory));
+
+    SetMaxMemoryFlag(maxmemory);
+    dfly::max_memory_limit = maxmemory;
   } else {
-    size_t limit = GetFlag(FLAGS_maxmemory).value;
-    string hr_limit = HumanReadableNumBytes(limit);
-    if (limit > memory.mem_avail)
+    string hr_limit = HumanReadableNumBytes(dfly::max_memory_limit);
+    if (dfly::max_memory_limit > memory.mem_avail)
       LOG(WARNING) << "Got memory limit " << hr_limit << ", however only "
                    << HumanReadableNumBytes(memory.mem_avail) << " was found.";
     LOG(INFO) << "Max memory limit is: " << hr_limit;
   }
-
-  dfly::max_memory_limit = GetFlag(FLAGS_maxmemory).value;
 
   mi_option_enable(mi_option_show_errors);
   mi_option_set(mi_option_max_warnings, 0);
