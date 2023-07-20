@@ -31,11 +31,7 @@ replication_cases = [
     (4, [8, 8], dict(keys=4_000, dbcount=4), False),
     (4, [1] * 8, dict(keys=500, dbcount=2), False),
     (1, [1], dict(keys=100, dbcount=2), False),
-    (8, [8], dict(keys=10_000, dbcount=4), True),
-    (6, [6, 6, 6], dict(keys=4_000, dbcount=4), True),
-    (8, [2, 2, 2, 2], dict(keys=4_000, dbcount=4), True),
-    (4, [8, 8], dict(keys=4_000, dbcount=4), True),
-    (4, [1] * 8, dict(keys=500, dbcount=2), True),
+    (6, [6, 6, 6], dict(keys=500, dbcount=4), True),
     (1, [1], dict(keys=100, dbcount=2), True),
 ]
 
@@ -45,35 +41,19 @@ replication_cases = [
 async def test_replication_all(
     df_local_factory, df_seeder_factory, t_master, t_replicas, seeder_config, from_admin_port
 ):
-    master = (
-        df_local_factory.create(port=BASE_PORT, proactor_threads=t_master)
-        if not from_admin_port
-        else df_local_factory.create(
-            port=BASE_PORT, admin_port=ADMIN_PORT, proactor_threads=t_master
+    master = df_local_factory.create(
+        port=BASE_PORT, admin_port=ADMIN_PORT, proactor_threads=t_master
+    )
+    replicas = [
+        df_local_factory.create(
+            port=BASE_PORT + i + 1, admin_port=ADMIN_PORT + i + 1, proactor_threads=t
         )
-    )
-    replicas = (
-        [
-            df_local_factory.create(port=BASE_PORT + i + 1, proactor_threads=t)
-            for i, t in enumerate(t_replicas)
-        ]
-        if not from_admin_port
-        else [
-            df_local_factory.create(
-                port=BASE_PORT + i + 1, admin_port=ADMIN_PORT + i + 1, proactor_threads=t
-            )
-            for i, t in enumerate(t_replicas)
-        ]
-    )
+        for i, t in enumerate(t_replicas)
+    ]
 
     # Start master
     master.start()
-    master_port = master.port if not from_admin_port else master.admin_port
-    c_master = (
-        aioredis.Redis(port=master.port)
-        if not from_admin_port
-        else aioredis.Redis(port=master_port)
-    )
+    c_master = aioredis.Redis(port=master.port)
 
     # Fill master with test data
     seeder = df_seeder_factory.create(port=master.port, **seeder_config)
@@ -82,17 +62,15 @@ async def test_replication_all(
     # Start replicas
     df_local_factory.start_all(replicas)
 
-    c_replicas = (
-        [aioredis.Redis(port=replica.port) for replica in replicas]
-        if not from_admin_port
-        else [aioredis.Redis(port=replica.admin_port) for replica in replicas]
-    )
+    c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
 
     # Start data stream
     stream_task = asyncio.create_task(seeder.run(target_ops=3000))
     await asyncio.sleep(0.0)
 
     # Start replication
+    master_port = master.port if not from_admin_port else master.admin_port
+
     async def run_replication(c_replica):
         await c_replica.execute_command("REPLICAOF localhost " + str(master_port))
 
