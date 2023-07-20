@@ -731,11 +731,10 @@ class MultiEvalTest : public BaseFamilyTest {
  protected:
   MultiEvalTest() : BaseFamilyTest() {
     num_threads_ = kPoolThreadCount;
-    fs_.reset(new absl::FlagSaver);
     absl::SetFlag(&FLAGS_default_lua_flags, "allow-undeclared-keys");
   }
 
-  std::unique_ptr<absl::FlagSaver> fs_;
+  absl::FlagSaver fs_;
 };
 
 TEST_F(MultiEvalTest, MultiAllEval) {
