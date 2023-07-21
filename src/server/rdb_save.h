@@ -175,6 +175,7 @@ class RdbSerializer {
   std::error_code SaveLongLongAsString(int64_t value);
   std::error_code SaveBinaryDouble(double val);
   std::error_code SaveListPackAsZiplist(uint8_t* lp);
+  std::error_code SaveListPack(uint8_t* lp);
   std::error_code SaveStreamPEL(rax* pel, bool nacks);
   std::error_code SaveStreamConsumers(streamCG* cg);
   // If membuf data is compressable use compression impl to compress the data and write it to membuf

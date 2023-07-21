@@ -198,6 +198,82 @@ int ziplistPairsConvertAndValidateIntegrity(const uint8_t* zl, size_t size, unsi
   return ret;
 }
 
+/* callback for ListPackValidateIntegrity.
+ * The ListPack element pointed by 'lp' will be converted and stored into a set */
+int ListPackEntryConvertAndValidate() {
+  // TODO implement this
+  return 0;
+}
+
+/* Validate the integrity of the data structure while converting it to a
+ * set and storing it at 'sp'.
+ * The function is safe to call on non-validated ziplists, it returns 0
+ * when encounter an integrity validation issue. */
+int ListPackConvertAndValidateIntegrity(const uint8_t* zl, size_t size, unsigned char** sp) {
+  // TODO implement this
+  return 0;
+}
+
+/* callback for to check the listpack doesn't have duplicate records */
+static int _lpEntryValidation(unsigned char* p, unsigned int head_count, void* userdata) {
+  struct cb_args {
+    int pairs;
+    long count;
+    dict* fields;
+  }* data = (cb_args*)userdata;
+
+  if (data->fields == NULL) {
+    data->fields = dictCreate(&hashDictType);
+    dictExpand(data->fields, data->pairs ? head_count / 2 : head_count);
+  }
+
+  /* If we're checking pairs, then even records are field names. Otherwise
+   * we're checking all elements. Add to dict and check that's not a dup */
+  if (!data->pairs || ((data->count) & 1) == 0) {
+    unsigned char* str;
+    int64_t slen;
+    unsigned char buf[LP_INTBUF_SIZE];
+
+    str = lpGet(p, &slen, buf);
+    sds field = sdsnewlen(str, slen);
+    if (dictAdd(data->fields, field, NULL) != DICT_OK) {
+      /* Duplicate, return an error */
+      sdsfree(field);
+      return 0;
+    }
+  }
+
+  (data->count)++;
+  return 1;
+}
+
+/* Validate the integrity of the listpack structure.
+ * when `deep` is 0, only the integrity of the header is validated.
+ * when `deep` is 1, we scan all the entries one by one.
+ * when `pairs` is 0, all elements need to be unique (it's a set)
+ * when `pairs` is 1, odd elements need to be unique (it's a key-value map) */
+int lpValidateIntegrityAndDups(unsigned char* lp, size_t size, int deep, int pairs) {
+  if (!deep)
+    return lpValidateIntegrity(lp, size, 0, NULL, NULL);
+
+  /* Keep track of the field names to locate duplicate ones */
+  struct {
+    int pairs;
+    long count;
+    dict* fields; /* Initialisation at the first callback. */
+  } data = {pairs, 0, NULL};
+
+  int ret = lpValidateIntegrity(lp, size, 1, _lpEntryValidation, &data);
+
+  /* make sure we have an even number of records. */
+  if (pairs && data.count & 1)
+    ret = 0;
+
+  if (data.fields)
+    dictRelease(data.fields);
+  return ret;
+}
+
 bool resizeStringSet(robj* set, size_t size, bool use_set2) {
   if (use_set2) {
     ((dfly::StringSet*)set->ptr)->Reserve(size);
@@ -433,9 +509,13 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const LzfString& lzfstr) {
 void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr) {
   switch (rdb_type_) {
     case RDB_TYPE_SET:
+    case RDB_TYPE_SET_INTSET:
+    case RDB_TYPE_SET_LISTPACK:
       CreateSet(ptr.get());
       break;
     case RDB_TYPE_HASH:
+    case RDB_TYPE_HASH_LISTPACK:
+    case RDB_TYPE_HASH_ZIPLIST:
       CreateHMap(ptr.get());
       break;
     case RDB_TYPE_LIST_QUICKLIST:
@@ -893,13 +973,31 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       res->encoding = OBJ_ENCODING_INTSET;
     }
     pv_->ImportRObj(res);
-  } else if (rdb_type_ == RDB_TYPE_HASH_ZIPLIST) {
+  } else if (rdb_type_ == RDB_TYPE_SET_LISTPACK) {
+    if (!lpValidateIntegrityAndDups((uint8_t*)blob.data(), blob.size(), 0, 1)) {
+      LOG(ERROR) << "ListPack integrity check failed.";
+      ec_ = RdbError(errc::rdb_file_corrupted);
+      return;
+    }
     unsigned char* lp = lpNew(blob.size());
-    if (!ziplistPairsConvertAndValidateIntegrity((const uint8_t*)blob.data(), blob.size(), &lp)) {
+
+  } else if (rdb_type_ == RDB_TYPE_HASH_ZIPLIST || rdb_type_ == RDB_TYPE_HASH_LISTPACK) {
+    unsigned char* lp = lpNew(blob.size());
+    if (rdb_type_ == RDB_TYPE_HASH_ZIPLIST &&
+        !ziplistPairsConvertAndValidateIntegrity((const uint8_t*)blob.data(), blob.size(), &lp)) {
       LOG(ERROR) << "Zset ziplist integrity check failed.";
       zfree(lp);
       ec_ = RdbError(errc::rdb_file_corrupted);
       return;
+    }
+    if (rdb_type_ == RDB_TYPE_HASH_LISTPACK &&
+        !lpValidateIntegrityAndDups((uint8_t*)blob.data(), blob.size(), 0, 1)) {
+      LOG(ERROR) << "ListPack integrity check failed.";
+      lpFree(lp);
+      ec_ = RdbError(errc::rdb_file_corrupted);
+      return;
+    } else {
+      // TODO populate the list pack pointed by lp
     }
 
     if (lpLength(lp) == 0) {
@@ -1240,7 +1338,8 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       iores = ReadIntSet();
       break;
     case RDB_TYPE_HASH_ZIPLIST:
-      iores = ReadHZiplist();
+    case RDB_TYPE_HASH_LISTPACK:
+      iores = ReadHListGeneric(rdbtype);
       break;
     case RDB_TYPE_HASH:
       iores = ReadHMap();
@@ -1394,7 +1493,7 @@ auto RdbLoaderBase::ReadIntSet() -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(obj), RDB_TYPE_SET_INTSET};
 }
 
-auto RdbLoaderBase::ReadHZiplist() -> io::Result<OpaqueObj> {
+auto RdbLoaderBase::ReadHListGeneric(int rdbtype) -> io::Result<OpaqueObj> {
   RdbVariant str_obj;
   error_code ec = ReadStringObj(&str_obj);
   if (ec)
@@ -1404,7 +1503,7 @@ auto RdbLoaderBase::ReadHZiplist() -> io::Result<OpaqueObj> {
     return Unexpected(errc::rdb_file_corrupted);
   }
 
-  return OpaqueObj{std::move(str_obj), RDB_TYPE_HASH_ZIPLIST};
+  return OpaqueObj{std::move(str_obj), rdbtype};
 }
 
 auto RdbLoaderBase::ReadHMap() -> io::Result<OpaqueObj> {

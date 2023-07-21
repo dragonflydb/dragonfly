@@ -129,7 +129,7 @@ uint8_t RdbObjectType(unsigned type, unsigned compact_enc) {
       break;
     case OBJ_HASH:
       if (compact_enc == kEncodingListPack)
-        return RDB_TYPE_HASH_ZIPLIST;
+        return RDB_TYPE_HASH_LISTPACK;
       else if (compact_enc == kEncodingStrMap2)
         return RDB_TYPE_HASH;
       break;
@@ -436,7 +436,7 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
     CHECK_EQ(kEncodingListPack, pv.Encoding());
 
     uint8_t* lp = (uint8_t*)pv.RObjPtr();
-    RETURN_ON_ERR(SaveListPackAsZiplist(lp));
+    RETURN_ON_ERR(SaveListPack(lp));
   }
 
   return error_code{};
@@ -604,6 +604,11 @@ error_code RdbSerializer::SaveListPackAsZiplist(uint8_t* lp) {
   zfree(zl);
 
   return ec;
+}
+
+error_code RdbSerializer::SaveListPack(uint8_t* lp) {
+  const size_t len = lpBytes(lp);
+  return SaveString(lp, len);
 }
 
 error_code RdbSerializer::SaveStreamPEL(rax* pel, bool nacks) {
