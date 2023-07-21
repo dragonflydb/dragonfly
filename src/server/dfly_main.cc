@@ -206,7 +206,7 @@ void VersionMonitor::RunTask(SSL_CTX* ssl_ctx) {
         GetRemoteVersion(my_pb, ssl_ctx, host_name, port, resource, version_header);
     if (remote_version) {
       const std::string rv = remote_version.value();
-      if (rv != current_version) {
+      if (rv > current_version) {
         LOG_FIRST_N(INFO, 1) << "Your current version '" << current_version
                              << "' is not the latest version. A newer version '" << rv
                              << "' is now available. Please consider an update.";
