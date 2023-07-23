@@ -83,9 +83,7 @@ class CommandId : public facade::CommandId {
     return *this;
   }
 
-  void Invoke(CmdArgList args, ConnectionContext* cntx) const {
-    handler_(std::move(args), cntx);
-  }
+  void Invoke(CmdArgList args, ConnectionContext* cntx) const;
 
   // Returns true if validation succeeded.
   bool Validate(CmdArgList args, ConnectionContext* cntx) const {
