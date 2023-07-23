@@ -85,7 +85,7 @@ void CapturingReplyBuilder::SendCommonString(CommonStrings string) {
 
 #define X(t)             \
   case CommonStrings::t: \
-    return Capture(SimpleString(#t##s));
+    return Capture(SimpleString{#t##s});
 
   SKIP_LESS(ReplyMode::FULL);
   switch (string) {
