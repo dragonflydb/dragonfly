@@ -55,8 +55,8 @@ static_assert(!IsEvalKind(""));
 
 class CommandId : public facade::CommandId {
  public:
-  // NOTICE: name must be a literal string, otherwise metrics break! (see cmd_stat_map in
-  // ServerState)
+  // NOTICE: name must be a literal string, otherwise metrics break! (see cmd_stats_map in
+  // server_state.h)
   CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key, int8_t last_key,
             int8_t step);
 

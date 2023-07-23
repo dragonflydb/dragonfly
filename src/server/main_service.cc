@@ -873,7 +873,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     DispatchMonitor(dfly_cntx, args);
   }
 
-  uint64_t start_usec = ProactorBase::GetMonotonicTimeNs(), end_usec;
+  uint64_t start_ns = ProactorBase::GetMonotonicTimeNs(), end_ns;
 
   // Create command transaction
   intrusive_ptr<Transaction> dist_trans;
@@ -920,8 +920,8 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->reply_builder()->CloseConnection();
   }
 
-  end_usec = ProactorBase::GetMonotonicTimeNs();  // misleading name, this is actually ns
-  request_latency_usec.IncBy(cid->name(), (end_usec - start_usec) / 1000);
+  end_ns = ProactorBase::GetMonotonicTimeNs();
+  request_latency_usec.IncBy(cid->name(), (end_ns - start_ns) / 1000);
 
   if (!dispatching_in_multi) {
     dfly_cntx->transaction = nullptr;
