@@ -52,12 +52,10 @@ bool CommandId::IsTransactional() const {
 
 void CommandId::Invoke(CmdArgList args, ConnectionContext* cntx) const {
   uint64_t before = absl::GetCurrentTimeNanos();
-  const char* const cid =
-      cntx->cid->name().data();  // this is OK as we assume the name is a literal
   handler_(std::move(args), cntx);
   uint64_t after = absl::GetCurrentTimeNanos();
 
-  auto& ent = ServerState::tlocal()->cmd_stats_map[cid];
+  auto& ent = ServerState::tlocal()->cmd_stats_map[cntx->cid->name().data()];
   ++ent.first;
   ent.second += (after - before) / 1000;
 }

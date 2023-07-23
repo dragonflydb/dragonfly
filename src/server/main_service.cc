@@ -1533,6 +1533,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   }
 
   ExecEvalState state = DetermineEvalPresense(exec_info.body);
+  const CommandId* const exec_cid = cntx->cid;
 
   CmdArgVec arg_vec, tmp_keys;
 
@@ -1561,6 +1562,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
       DispatchCommand(args, cntx);
     }
     cntx->transaction = trans;
+    cntx->cid = exec_cid;
 
     return;
   }
@@ -1617,6 +1619,8 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     VLOG(1) << "Exec unlocking " << exec_info.body.size() << " commands";
     cntx->transaction->UnlockMulti();
   }
+
+  cntx->cid = exec_cid;
 
   VLOG(1) << "Exec completed";
 }
