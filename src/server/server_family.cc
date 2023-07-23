@@ -24,6 +24,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
+#include "facade/reply_builder.h"
 #include "io/file_util.h"
 #include "io/proc_reader.h"
 #include "server/command_registry.h"
@@ -1872,7 +1873,8 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendBulkString((*ServerState::tlocal()).is_master ? "master" : "slave");
 }
 
-void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
+void ServerFamily::ReplicaOfGeneric(CmdArgList args, ConnectionContext* cntx,
+                                    bool flush_transactions) {
   std::string_view host = ArgS(args, 0);
   std::string_view port_s = ArgS(args, 1);
   auto& pool = service_.proactor_pool();
@@ -1930,15 +1932,17 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  // Flushing all the data after we marked this instance as replica.
-  Transaction* transaction = cntx->transaction;
-  transaction->Schedule();
+  if (flush_transactions) {
+    // Flushing all the data after we marked this instance as replica.
+    Transaction* transaction = cntx->transaction;
+    transaction->Schedule();
 
-  auto cb = [](Transaction* t, EngineShard* shard) {
-    shard->db_slice().FlushDb(DbSlice::kDbAll);
-    return OpStatus::OK;
-  };
-  transaction->Execute(std::move(cb), true);
+    auto cb = [](Transaction* t, EngineShard* shard) {
+      shard->db_slice().FlushDb(DbSlice::kDbAll);
+      return OpStatus::OK;
+    };
+    transaction->Execute(std::move(cb), true);
+  }
 
   // Replica sends response in either case. No need to send response in this function.
   // It's a bit confusing but simpler.
@@ -1957,6 +1961,36 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
     bool is_master = !replica_;
     pool.AwaitFiberOnAll(
         [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = is_master; });
+  }
+}
+
+void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
+  ReplicaOfGeneric(args, cntx, true);
+}
+
+void ServerFamily::Replicate(string ip_s, string port_s, bool* success) {
+  io::StringSink sink;
+  ConnectionContext ctxt{&sink, nullptr};
+
+  vector<MutableSlice> vargs{
+      {ip_s.data(), ip_s.size()},
+      {port_s.data(), port_s.size()},
+  };
+
+  CmdArgList args{vargs.data(), vargs.size()};
+
+  // we don't flush transacitons as the context is null
+  // (and also because there are none to flush)
+  ReplicaOfGeneric(args, &ctxt, false);
+
+  // Check whether replication succeeded
+  const string& st = sink.str();
+  if (st.starts_with(facade::constants::kSimplePref)) {
+    LOG(INFO) << "Replication success!";
+    *success = true;
+  } else {
+    LOG(ERROR) << "Replication failure!";
+    *success = false;
   }
 }
 

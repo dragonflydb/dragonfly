@@ -19,14 +19,12 @@ namespace facade {
 
 namespace {
 
+using namespace constants;
+
 inline iovec constexpr IoVec(std::string_view s) {
   iovec r{const_cast<char*>(s.data()), s.size()};
   return r;
 }
-
-constexpr char kCRLF[] = "\r\n";
-constexpr char kErrPref[] = "-ERR ";
-constexpr char kSimplePref[] = "+";
 
 constexpr unsigned kConvFlags =
     DoubleToStringConverter::UNIQUE_ZERO | DoubleToStringConverter::EMIT_POSITIVE_EXPONENT_SIGN;

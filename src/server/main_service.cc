@@ -64,6 +64,16 @@ ABSL_FLAG(bool, admin_nopass, false,
           "If set, would enable open admin access to console on the assigned port, without auth "
           "token needed.");
 
+ABSL_FLAG(string, replicaof, "",
+          "Empty by default. If not empty - specifies an IP and a port which "
+          "point to a running Dragonfly instance. The current Dragonfly "
+          "instance will replicate that machine. "
+          "Format should be <IPv4>:<PORT> or [<IPv6>]:<PORT>.");
+
+ABSL_FLAG(bool, continue_on_replication_fail, false,
+          "If set to true, failing to start replication using the "
+          "'--replicaof' flag would not exit Dragonfly. Disabled by default.");
+
 namespace dfly {
 
 #if __GLIBC__ == 2 && __GLIBC_MINOR__ < 30
@@ -552,6 +562,42 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   StringFamily::Init(&pp_);
   GenericFamily::Init(&pp_);
   server_family_.Init(acceptor, std::move(listeners), &cluster_family_);
+
+  if (string flag = GetFlag(FLAGS_replicaof); !flag.empty()) {
+    string ip, port;
+    {
+      auto pos = flag.find_last_of(':');
+      CHECK(pos != string::npos) << "Invalid format for --replicaof: missing ':'.";
+
+      string ip1 = flag.substr(0, pos);
+      port = flag.substr(pos + 1);
+
+      CHECK(!ip1.empty() && !port.empty())
+          << "Invalid format for --replicaof: IP or port are empty.";
+
+      // For IPv6
+      CHECK(!((ip1.front() == '[') ^ (ip1.back() == ']')))
+          << "Invalid format for --replicaof: unclosed brackets.";
+
+      if (ip1.front() == '[') {
+        ip = ip1.substr(1, ip1.length() - 2);
+        LOG(INFO) << "Received IPv6: " << ip;
+      } else {
+        ip = move(ip1);
+        LOG(INFO) << "Received IPv4: " << ip;
+      }
+    }
+
+    LOG(INFO) << "Replicating instance at " << ip << ":" << port;
+
+    bool success = false;
+    pp_[0].Await([this, ip = move(ip), port = move(port), &success]() {
+      this->server_family_.Replicate(ip, port, &success);
+    });
+
+    if (!success && !GetFlag(FLAGS_continue_on_replication_fail))
+      exit(EXIT_FAILURE);
+  }
 
   ChannelStore* cs = new ChannelStore{};
   pp_.Await(
