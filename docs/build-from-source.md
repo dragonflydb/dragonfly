@@ -26,6 +26,14 @@ sudo yum install automake boost-devel g++ git cmake libtool ninja-build libzstd-
      openssl-devel libunwind-devel autoconf-archive patch bison libxml2-devel
 ```
 
+On openSUSE:
+
+```bash
+sudo zypper install automake boost-devel gcc-c++ git cmake libtool ninja libzstd-devel  \
+     openssl-devel libunwind-devel autoconf-archive patch bison libxml2-devel \
+     libboost_context-devel libboost_system-devel libboost_fiber-devel
+```
+
 ## Step 2 - clone the project
 
 ```bash
