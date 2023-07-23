@@ -60,7 +60,7 @@ ABSL_FLAG(uint32_t, memcached_port, 0, "Memcached port");
 
 ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose automatically");
 
-ABSL_FLAG(uint32_t, multi_exec_mode, 1,
+ABSL_FLAG(uint32_t, multi_exec_mode, 2,
           "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for non atomic");
 
 ABSL_FLAG(bool, multi_exec_squash, true,
@@ -1576,37 +1576,19 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
   CmdArgVec arg_vec, tmp_keys;
 
-  // We ignore transaction mode in case it's filled only with EVAL-like commands.
-  // This is done to support OptimalBits/bull js framework
-  // that for some reason uses MULTI to send multiple jobs via EVAL(SHA) commands,
-  // instead of using pipeline mode.
-  // TODO: to check with BullMQ developers if this is a bug or a feature.
-  if (state == ExecEvalState::ALL) {
-    string cmd_name;
-    auto body = move(exec_info.body);
-    exec_info.Clear();
-    Transaction* trans = cntx->transaction;
-    cntx->transaction = nullptr;
-
-    SinkReplyBuilder::ReplyAggregator agg(rb);
-    rb->StartArray(body.size());
-    for (auto& scmd : body) {
-      arg_vec.resize(scmd.NumArgs() + 1);
-      // We need to copy command name to the first argument.
-      cmd_name = scmd.Cid()->name();
-      arg_vec.front() = MutableSlice{cmd_name.data(), cmd_name.size()};
-      auto args = absl::MakeSpan(arg_vec);
-      scmd.Fill(args.subspan(1));
-
-      DispatchCommand(args, cntx);
-    }
-    cntx->transaction = trans;
-
-    return;
-  }
-
   // Check if script most LIKELY has global eval transactions
-  bool global_script = (state == ExecEvalState::SOME) && script_mgr()->AreGlobalByDefault();
+  bool global_script = script_mgr()->AreGlobalByDefault();
+  int multi_mode = absl::GetFlag(FLAGS_multi_exec_mode);
+
+  if (state != ExecEvalState::NONE) {
+    // Allow multi eval only when scripts run global and multi runs in global or lock ahead
+    // We adjust the atomicity level of multi transaction inside StartMultiExec i.e if multi mode is
+    // lock ahead and we run global script in the transaction then multi mode will be global.
+    if (!global_script || (multi_mode == Transaction::NON_ATOMIC)) {
+      return rb->SendError(
+          "Dragonfly does not allow execution of a server-side Lua in Multi transaction");
+    }
+  }
 
   bool scheduled =
       StartMultiExec(cntx->db_index(), cntx->transaction, &exec_info, &tmp_keys, global_script);
