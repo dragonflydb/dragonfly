@@ -6,16 +6,9 @@
 
 #include <absl/base/internal/endian.h>
 
-#ifdef __clang__
-#include <experimental/memory_resource>
-namespace PMR_NS = std::experimental::pmr;
-#else
-#include <memory_resource>
-namespace PMR_NS = std::pmr;
-#endif
-
 #include <optional>
 
+#include "base/pmr/memory_resource.h"
 #include "core/json_object.h"
 #include "core/small_string.h"
 
@@ -47,6 +40,10 @@ class RobjWrapper {
 
   void SetString(std::string_view s, MemoryResource* mr);
   void Init(unsigned type, unsigned encoding, void* inner);
+
+  // Equivalent to zsetAdd
+  int AddZsetMember(std::string_view member, double score, int in_flags, int* out_flags,
+                    double* newscore);
 
   unsigned type() const {
     return type_;
@@ -440,5 +437,3 @@ class CompactObjectView {
 };
 
 }  // namespace dfly
-
-#undef PMR_NS

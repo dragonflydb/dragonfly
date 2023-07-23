@@ -97,7 +97,7 @@ jobs:
           #GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1
           GLOG_logtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 ctest -V -L DFLY
           ./dragonfly_test  --gtest_repeat=10
-          ./multi_test --multi_exec_mode=2 --gtest_repeat=10
+          ./multi_test --multi_exec_mode=1 --gtest_repeat=10
           ./multi_test --multi_exec_mode=3 --gtest_repeat=10
           # GLOG_logtostderr=1 GLOG_vmodule=transaction=1,engine_shard_set=1 CTEST_OUTPUT_ON_FAILURE=1 ninja server/test
   lint-test-chart:

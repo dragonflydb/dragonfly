@@ -27,6 +27,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/json_object.h"
+#include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
 #include "server/engine_shard_set.h"
@@ -445,10 +446,10 @@ error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
   DCHECK_EQ(OBJ_ZSET, pv.ObjType());
   const detail::RobjWrapper* robj_wrapper = pv.GetRobjWrapper();
   if (pv.Encoding() == OBJ_ENCODING_SKIPLIST) {
-    zset* zs = (zset*)robj_wrapper->inner_obj();
-    zskiplist* zsl = zs->zsl;
+    detail::SortedMap* zs = (detail::SortedMap*)robj_wrapper->inner_obj();
 
-    RETURN_ON_ERR(SaveLen(zsl->length));
+    RETURN_ON_ERR(SaveLen(zs->Size()));
+    std::error_code ec;
 
     /* We save the skiplist elements from the greatest to the smallest
      * (that's trivial since the elements are already ordered in the
@@ -456,12 +457,15 @@ error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
      * element will always be the smaller, so adding to the skiplist
      * will always immediately stop at the head, making the insertion
      * O(1) instead of O(log(N)). */
-    zskiplistNode* zn = zsl->tail;
-    while (zn != NULL) {
-      RETURN_ON_ERR(SaveString(string_view{zn->ele, sdslen(zn->ele)}));
-      RETURN_ON_ERR(SaveBinaryDouble(zn->score));
-      zn = zn->backward;
-    }
+    zs->Iterate(0, zs->Size(), true, [&](sds ele, double score) {
+      ec = SaveString(string_view{ele, sdslen(ele)});
+      if (ec)
+        return false;
+      ec = SaveBinaryDouble(score);
+      if (ec)
+        return false;
+      return true;
+    });
   } else {
     CHECK_EQ(pv.Encoding(), unsigned(OBJ_ENCODING_LISTPACK)) << "Unknown zset encoding";
     uint8_t* lp = (uint8_t*)robj_wrapper->inner_obj();

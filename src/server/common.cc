@@ -102,6 +102,9 @@ bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes) {
   char* end;
   double d = strtod(cstr, &end);
 
+  if (end == cstr)  // did not succeed to advance
+    return false;
+
   int64 scale = 1;
   switch (*end) {
     // Considers just the first character after the number

@@ -3,16 +3,9 @@
 //
 #pragma once
 
-#ifdef __clang__
-#include <experimental/memory_resource>
-namespace PMR_NS = std::experimental::pmr;
-#else
-#include <memory_resource>
-namespace PMR_NS = std::pmr;
-#endif
-
 #include <vector>
 
+#include "base/pmr/memory_resource.h"
 #include "core/dash_internal.h"
 
 namespace dfly {

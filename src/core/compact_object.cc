@@ -25,6 +25,7 @@ extern "C" {
 #include "base/logging.h"
 #include "base/pod_array.h"
 #include "core/detail/bitpacking.h"
+#include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
 
@@ -44,14 +45,6 @@ constexpr size_t kAlignSize = 8u;
 size_t QlMAllocSize(quicklist* ql) {
   size_t res = ql->len * sizeof(quicklistNode) + znallocx(sizeof(quicklist));
   return res + ql->count * 16;  // we account for each member 16 bytes.
-}
-
-// Approximated dictionary size.
-size_t DictMallocSize(dict* d) {
-  size_t res = zmalloc_usable_size(d->ht_table[0]) + zmalloc_usable_size(d->ht_table[1]) +
-               znallocx(sizeof(dict));
-
-  return res + dictSize(d) * 16;  // approximation.
 }
 
 inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
@@ -107,8 +100,8 @@ size_t MallocUsedZSet(unsigned encoding, void* ptr) {
     case OBJ_ENCODING_LISTPACK:
       return lpBytes(reinterpret_cast<uint8_t*>(ptr));
     case OBJ_ENCODING_SKIPLIST: {
-      zset* zs = (zset*)ptr;
-      return DictMallocSize(zs->dict);
+      detail::SortedMap* ss = (detail::SortedMap*)ptr;
+      return ss->MallocSize();  // DictMallocSize(zs->dict);
     }
   }
   LOG(DFATAL) << "Unknown set encoding type " << encoding;
@@ -134,11 +127,10 @@ inline void FreeObjHash(unsigned encoding, void* ptr) {
 }
 
 inline void FreeObjZset(unsigned encoding, void* ptr) {
-  zset* zs = (zset*)ptr;
+  detail::SortedMap* zs = (detail::SortedMap*)ptr;
   switch (encoding) {
     case OBJ_ENCODING_SKIPLIST:
-      zs = (zset*)ptr;
-      zsetFree(zs);
+      delete zs;
       break;
     case OBJ_ENCODING_LISTPACK:
       zfree(ptr);
@@ -238,8 +230,8 @@ size_t RobjWrapper::Size() const {
     case OBJ_ZSET: {
       switch (encoding_) {
         case OBJ_ENCODING_SKIPLIST: {
-          zset* zs = (zset*)inner_obj_;
-          return zs->zsl->length;
+          SortedMap* ss = (SortedMap*)inner_obj_;
+          return ss->Size();
         }
         case OBJ_ENCODING_LISTPACK:
           return lpLength((uint8_t*)inner_obj_) / 2;
@@ -427,13 +419,9 @@ int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, do
        * becomes too long *before* executing zzlInsert. */
       if (zl_len + 1 > server.zset_max_listpack_entries ||
           sdslen(ele) > server.zset_max_listpack_value || !lpSafeToAdd(lp, sdslen(ele))) {
-        robj self{.type = type_,
-                  .encoding = encoding_,
-                  .lru = 0,
-                  .refcount = OBJ_STATIC_REFCOUNT,
-                  .ptr = inner_obj_};
-        zsetConvert(&self, OBJ_ENCODING_SKIPLIST);
-        inner_obj_ = self.ptr;
+        unique_ptr<SortedMap> ss = SortedMap::FromListPack(lp);
+        lpFree(lp);
+        inner_obj_ = ss.release();
         encoding_ = OBJ_ENCODING_SKIPLIST;
       } else {
         inner_obj_ = zzlInsert(lp, ele, score);
@@ -449,18 +437,8 @@ int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, do
   }
 
   CHECK_EQ(encoding_, OBJ_ENCODING_SKIPLIST);
-
-  // TODO: to factor out OBJ_ENCODING_SKIPLIST functionality into a separate class.
-  robj self{.type = type_,
-            .encoding = encoding_,
-            .lru = 0,
-            .refcount = OBJ_STATIC_REFCOUNT,
-            .ptr = inner_obj_};
-
-  int res = zsetAdd(&self, score, ele, in_flags, out_flags, newscore);
-  inner_obj_ = self.ptr;
-  encoding_ = self.encoding;
-  return res;
+  SortedMap* ss = (SortedMap*)inner_obj_;
+  return ss->Add(score, ele, in_flags, out_flags, newscore);
 }
 
 bool RobjWrapper::Reallocate(MemoryResource* mr) {

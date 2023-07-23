@@ -9,6 +9,7 @@
 #include "facade/service_interface.h"
 #include "server/cluster/cluster_family.h"
 #include "server/command_registry.h"
+#include "server/config_registry.h"
 #include "server/engine_shard_set.h"
 #include "server/server_family.h"
 
@@ -19,7 +20,6 @@ class AcceptServer;
 namespace dfly {
 
 class Interpreter;
-class ObjectExplorer;  // for Interpreter
 using facade::MemcacheParser;
 
 class Service : public facade::ServiceInterface {
@@ -151,5 +151,8 @@ class Service : public facade::ServiceInterface {
   mutable Mutex mu_;
   GlobalState global_state_ = GlobalState::ACTIVE;  // protected by mu_;
 };
+
+uint64_t GetMaxMemoryFlag();
+void SetMaxMemoryFlag(uint64_t value);
 
 }  // namespace dfly
