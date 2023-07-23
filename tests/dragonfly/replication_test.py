@@ -309,10 +309,10 @@ async def test_disconnect_master(
     async def start_master():
         await asyncio.sleep(0.2)
         master.start()
-        c_master = aioredis.Redis(port=master.port)
-        assert await c_master.ping()
-        seeder.reset()
-        await seeder.run(target_deviation=0.1)
+        async with aioredis.Redis(port=master.port) as c_master:
+            assert await c_master.ping()
+            seeder.reset()
+            await seeder.run(target_deviation=0.1)
 
     await start_master()
 
@@ -714,14 +714,14 @@ async def test_expiry(df_local_factory, n_keys=1000):
     # send more traffic for differnt dbs while keys are expired
     for i in range(8):
         is_multi = i % 2
-        c_master_db = aioredis.Redis(port=master.port, db=i)
-        pipe = c_master_db.pipeline(transaction=is_multi)
-        # Set simple keys n_keys..n_keys*2 on master
-        start_key = n_keys * (i + 1)
-        end_key = start_key + n_keys
-        batch_fill_data(client=pipe, gen=gen_test_data(end_key, start_key), batch_size=20)
+        async with aioredis.Redis(port=master.port, db=i) as c_master_db:
+            pipe = c_master_db.pipeline(transaction=is_multi)
+            # Set simple keys n_keys..n_keys*2 on master
+            start_key = n_keys * (i + 1)
+            end_key = start_key + n_keys
+            batch_fill_data(client=pipe, gen=gen_test_data(end_key, start_key), batch_size=20)
 
-        await pipe.execute()
+            await pipe.execute()
 
     # Wait for master to expire keys
     await asyncio.sleep(3.0)
