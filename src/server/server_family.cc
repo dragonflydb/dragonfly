@@ -36,6 +36,7 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/main_service.h"
 #include "server/memory_cmd.h"
+#include "server/protocol_client.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
 #include "server/script_mgr.h"
@@ -68,6 +69,9 @@ ABSL_FLAG(int, epoll_file_threads, 0,
 ABSL_DECLARE_FLAG(uint32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(uint32_t, hz);
+ABSL_DECLARE_FLAG(bool, tls);
+ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
+ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
 
 namespace dfly {
 
@@ -419,6 +423,28 @@ void SlowLog(CmdArgList args, ConnectionContext* cntx) {
   (*cntx)->SendError(UnknownSubCmd(sub_cmd, "SLOWLOG"), kSyntaxErrType);
 }
 
+void ValidateServerTlsFlags() {
+  if (!absl::GetFlag(FLAGS_tls)) {
+    return;
+  }
+
+  bool has_auth = false;
+
+  if (!dfly::GetPassword().empty()) {
+    has_auth = true;
+  }
+
+  if (!(absl::GetFlag(FLAGS_tls_ca_cert_file).empty() &&
+        absl::GetFlag(FLAGS_tls_ca_cert_dir).empty())) {
+    has_auth = true;
+  }
+
+  if (!has_auth) {
+    LOG(ERROR) << "TLS configured but no authentication method is used!";
+    exit(1);
+  }
+}
+
 }  // namespace
 
 std::optional<SnapshotSpec> ParseSaveSchedule(string_view time) {
@@ -488,6 +514,9 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
     LOG(ERROR) << ec.Format();
     exit(1);
   }
+
+  ValidateServerTlsFlags();
+  ValidateClientTlsFlags();
 }
 
 ServerFamily::~ServerFamily() {
