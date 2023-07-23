@@ -81,9 +81,11 @@ void CapturingReplyBuilder::SendDouble(double val) {
 }
 
 void CapturingReplyBuilder::SendCommonString(CommonStrings string) {
+  using namespace std::string_literals;
+
 #define X(t)             \
   case CommonStrings::t: \
-    return Capture(SimpleString(#t));
+    return Capture(SimpleString(#t##s));
 
   SKIP_LESS(ReplyMode::FULL);
   switch (string) {
